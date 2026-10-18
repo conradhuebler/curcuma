@@ -139,6 +139,11 @@ private:
     /*! \brief Append the current geometry to the extrapolation record. */
     void recordExtrapolation(double indicator) const;
 
+    /*! \brief Warn once per process when gradients are taken from an energy-only model.
+     *  Claude Generated (October 2026). */
+    void warnEnergyRoleOnce() const;
+    int m_user_verbosity = 1; ///< logger level at construction, i.e. the caller's own
+
     std::unique_ptr<ComputationalMethod> m_base;
     curcuma::ml::DeltaMLModel m_model;
 

@@ -39,7 +39,30 @@ namespace ml {
 // ACSFConfig
 // =================================================================================
 
-ACSFConfig ACSFConfig::defaultFor(const std::vector<int>& species_list)
+bool ACSFSettings::parseZetaList(const std::string& text, std::vector<double>& out)
+{
+    // Claude Generated (October 2026)
+    out.clear();
+    std::stringstream ss(text);
+    std::string item;
+    while (std::getline(ss, item, ',')) {
+        const auto b = item.find_first_not_of(" \t");
+        if (b == std::string::npos)
+            continue;
+        try {
+            std::size_t used = 0;
+            const double v = std::stod(item.substr(b), &used);
+            if (!(v > 0.0) || item.find_first_not_of(" \t", b + used) != std::string::npos)
+                return false;
+            out.push_back(v);
+        } catch (const std::exception&) {
+            return false;
+        }
+    }
+    return !out.empty();
+}
+
+ACSFConfig ACSFConfig::defaultFor(const std::vector<int>& species_list, const ACSFSettings& settings)
 {
     ACSFConfig cfg;
 
@@ -47,25 +70,27 @@ ACSFConfig ACSFConfig::defaultFor(const std::vector<int>& species_list)
     std::sort(cfg.species.begin(), cfg.species.end());
     cfg.species.erase(std::unique(cfg.species.begin(), cfg.species.end()), cfg.species.end());
 
-    // Radial: eight Gaussian shells spanning the bonded region up to the cutoff tail.
-    // A shifted grid (fixed width, varying centre) is better conditioned than the
+    // Radial: by default six Gaussian shells (eight before October 2026) spanning the bonded region up to the cutoff
+    // tail. A shifted grid (fixed width, varying centre) is better conditioned than the
     // alternative of a fixed centre with varying width, because the resulting features
     // are far less correlated.
     cfg.radial_rs.clear();
-    const int n_shell = 8;
-    const double r_first = 0.9;
-    const double r_last = 5.2;
-    for (int i = 0; i < n_shell; ++i)
+    const int n_shell = settings.n_shell;
+    const double r_first = settings.r_first;
+    const double r_last = settings.r_last;
+    if (n_shell == 1)
+        cfg.radial_rs.push_back(r_first);
+    for (int i = 0; n_shell > 1 && i < n_shell; ++i)
         cfg.radial_rs.push_back(r_first + (r_last - r_first) * i / static_cast<double>(n_shell - 1));
-    cfg.radial_eta = 8.0;
+    cfg.radial_eta = settings.radial_eta;
 
-    // Angular: three sharpness levels times two orientations.
-    cfg.angular_zeta = { 1.0, 4.0, 16.0 };
+    // Angular: by default three sharpness levels times two orientations.
+    cfg.angular_zeta = settings.angular_zeta;
     cfg.angular_lambda = { 1, -1 };
-    cfg.angular_eta = 0.05;
+    cfg.angular_eta = settings.angular_eta;
 
-    cfg.rcut_radial = 6.0;
-    cfg.rcut_angular = 4.0;
+    cfg.rcut_radial = settings.rcut_radial;
+    cfg.rcut_angular = settings.rcut_angular;
 
     return cfg;
 }
@@ -106,6 +131,9 @@ ACSFConfig ACSFConfig::fromJson(const json& j)
     ACSFConfig cfg;
     cfg.rcut_radial = j.value("rcut_radial", 6.0);
     cfg.rcut_angular = j.value("rcut_angular", 4.0);
+    // Fallback only for a file without the key: every model written so far stores radial_eta.
+    // 8.0 is the pre-October-2026 value, deliberately not the new default 4.0, so an old
+    // block that lacked it would still read back with the width it was fitted with.
     cfg.radial_eta = j.value("radial_eta", 8.0);
     cfg.angular_eta = j.value("angular_eta", 0.05);
     if (j.contains("radial_rs"))
@@ -136,6 +164,12 @@ bool ACSFConfig::validate(std::string& error) const
     for (double rs : radial_rs) {
         if (rs < 0.0 || rs > rcut_radial) {
             msg << "radial shift outside [0, rcut_radial]; ";
+            break;
+        }
+    }
+    for (double zeta : angular_zeta) {
+        if (!(zeta > 0.0)) {
+            msg << "angular zeta must be positive; ";
             break;
         }
     }

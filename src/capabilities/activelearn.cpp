@@ -211,6 +211,40 @@ void ActiveLearn::LoadControlJson()
     m_al_onthefly = Json2KeyWord<bool>(m_defaults, "al_onthefly");
     m_al_onthefly_threshold = Json2KeyWord<double>(m_defaults, "al_onthefly_threshold");
     m_center_sweep = parseIntList(Json2KeyWord<std::string>(m_defaults, "center_sweep"));
+    m_dataset_path = Json2KeyWord<std::string>(m_defaults, "dataset");
+
+    // Energy-only second model (Claude Generated, October 2026).
+    m_energy_model = Json2KeyWord<bool>(m_defaults, "energy_model");
+    m_energy_model_n_centers = Json2KeyWord<int>(m_defaults, "energy_model_n_centers");
+    m_energy_model_lambda = Json2KeyWord<double>(m_defaults, "energy_model_lambda");
+    m_energy_model_kernel_sigma = Json2KeyWord<double>(m_defaults, "energy_model_kernel_sigma");
+
+    // Descriptor grid (Claude Generated, October 2026). Defaults equal the built-in grid.
+    m_acsf.n_shell = Json2KeyWord<int>(m_defaults, "acsf_n_shell");
+    m_acsf.r_first = Json2KeyWord<double>(m_defaults, "acsf_r_first");
+    m_acsf.r_last = Json2KeyWord<double>(m_defaults, "acsf_r_last");
+    m_acsf.radial_eta = Json2KeyWord<double>(m_defaults, "acsf_radial_eta");
+    m_acsf.rcut_radial = Json2KeyWord<double>(m_defaults, "acsf_rcut_radial");
+    m_acsf.rcut_angular = Json2KeyWord<double>(m_defaults, "acsf_rcut_angular");
+    m_acsf.angular_eta = Json2KeyWord<double>(m_defaults, "acsf_angular_eta");
+    // A single value ("-acsf_zeta 4") may arrive as a JSON number rather than a string.
+    const json zeta_raw = Json2KeyWord<json>(m_defaults, "acsf_zeta");
+    std::string zeta_text;
+    if (zeta_raw.is_string())
+        zeta_text = zeta_raw.get<std::string>();
+    else if (zeta_raw.is_array())
+        for (const auto& z : zeta_raw)
+            zeta_text += (zeta_text.empty() ? "" : ",") + z.dump();
+    else
+        zeta_text = zeta_raw.dump();
+    m_acsf_valid = curcuma::ml::ACSFSettings::parseZetaList(zeta_text, m_acsf.angular_zeta);
+    if (!m_acsf_valid)
+        CurcumaLogger::error_fmt(
+            "activelearn: acsf_zeta '{}' is not a comma list of positive numbers", zeta_text);
+    if (m_acsf.n_shell < 1) {
+        CurcumaLogger::error_fmt("activelearn: acsf_n_shell must be >= 1 (got {})", m_acsf.n_shell);
+        m_acsf_valid = false;
+    }
 
     // The base method is the global -method setting; that keeps the CLI consistent with
     // every other capability.
@@ -365,8 +399,7 @@ void ActiveLearn::logErrors(const std::string& label, const DeltaMLErrors& e) co
         e.spearman, e.base_spearman);
 }
 
-bool ActiveLearn::fitAndReport(const MLDataset& train, const MLDataset& test, int n_centers,
-    DeltaMLModel& model, bool log_details)
+DeltaMLTrainingOptions ActiveLearn::trainingOptions(int n_centers) const
 {
     DeltaMLTrainingOptions opt;
     opt.n_centers = n_centers;
@@ -378,10 +411,34 @@ bool ActiveLearn::fitAndReport(const MLDataset& train, const MLDataset& test, in
     opt.use_forces = m_use_forces;
     opt.seed = m_seed;
     opt.verbosity = m_verbosity;
+    opt.acsf = m_acsf; // same descriptor grid for every fit, in every mode and cycle
     // The global -gpu setting drives the fit as well, not just the energy methods.
     if (m_controller.contains("gpu") && m_controller["gpu"].is_string())
         opt.gpu = m_controller["gpu"].get<std::string>();
+    return opt;
+}
 
+std::string ActiveLearn::energyModelPath(const std::string& main_model_path)
+{
+    // <x>.json -> <x>.energy.json, so the default <basename>.deltaml.json gives
+    // <basename>.deltaml.energy.json in the same directory.
+    const std::string ext = ".json";
+    if (main_model_path.size() > ext.size()
+        && main_model_path.compare(main_model_path.size() - ext.size(), ext.size(), ext) == 0)
+        return main_model_path.substr(0, main_model_path.size() - ext.size()) + ".energy.json";
+    return main_model_path + ".energy.json";
+}
+
+bool ActiveLearn::fitAndReport(const MLDataset& train, const MLDataset& test, int n_centers,
+    DeltaMLModel& model, bool log_details)
+{
+    return fitAndReport(train, test, trainingOptions(n_centers), model, log_details, "", true);
+}
+
+bool ActiveLearn::fitAndReport(const MLDataset& train, const MLDataset& test,
+    const DeltaMLTrainingOptions& opt, DeltaMLModel& model, bool log_details,
+    const std::string& label, bool log_heldout)
+{
     // Fitting a model is as much a use of these methods as evaluating one.
     CitationRegistry::cite("deltaml");
     CitationRegistry::cite("acsf", "deltaml");
@@ -394,11 +451,13 @@ bool ActiveLearn::fitAndReport(const MLDataset& train, const MLDataset& test, in
     model.setBaseMethod(m_base_method);
     model.setReferenceMethod(m_ref_method);
     model.setAnchor(m_anchor.Atoms(), m_anchor.getGeometry(), m_anchor_bonds);
+    model.setRole(opt.use_forces ? "joint" : "energy");
 
+    const std::string suffix = label.empty() ? std::string() : " (" + label + ")";
     if (log_details) {
         CurcumaLogger::result_fmt(
-            "activelearn: fitted {} centres from {} environments, {} features, sigma = {:.4f}",
-            report.n_centers, report.n_environments, report.n_features, report.kernel_sigma);
+            "activelearn{}: fitted {} centres from {} environments, {} features, sigma = {:.4f}",
+            suffix, report.n_centers, report.n_environments, report.n_features, report.kernel_sigma);
         CurcumaLogger::result_fmt("activelearn: {} energy rows, {} gradient rows, solved in {:.1f} s",
             report.n_energy_rows, report.n_force_rows, report.train_seconds);
         if (report.jitter_used > 0.0)
@@ -406,11 +465,11 @@ bool ActiveLearn::fitAndReport(const MLDataset& train, const MLDataset& test, in
                 "activelearn: the normal equations needed a jitter of {:.1e} to factorise; "
                 "consider a larger lambda or fewer centres",
                 report.jitter_used);
-        logErrors("training set", report.train_errors);
+        logErrors("training set" + suffix, report.train_errors);
     }
 
-    if (!test.empty())
-        logErrors(log_details ? "held-out set" : fmt::format("M = {}", report.n_centers),
+    if (log_heldout && !test.empty())
+        logErrors(log_details ? "held-out set" + suffix : fmt::format("M = {}", report.n_centers),
             model.evaluate(test));
 
     return true;
@@ -423,10 +482,37 @@ void ActiveLearn::runTrain()
         return;
 
     MLDataset data;
-    if (!labelStructures(molecules, data))
-        return;
+    if (!m_dataset_path.empty()) {
+        // Reuse labels from an earlier run (Claude Generated, October 2026). The input
+        // structures only provide the basename and the anchor; they are not labelled.
+        const auto t0 = std::chrono::high_resolution_clock::now();
+        if (!std::filesystem::exists(m_dataset_path)) {
+            CurcumaLogger::error_fmt("activelearn: dataset file '{}' does not exist", m_dataset_path);
+            return;
+        }
+        if (!data.load(m_dataset_path))
+            return;
+        if (data.empty()) {
+            CurcumaLogger::error_fmt("activelearn: dataset file '{}' contains no structures",
+                m_dataset_path);
+            return;
+        }
+        if (data[0].AtomCount() != m_anchor.AtomCount() || data[0].elements != m_anchor.Atoms())
+            CurcumaLogger::warn_fmt(
+                "activelearn: dataset structures ({} atoms) do not match the input molecule "
+                "({} atoms); the stored anchor in the model comes from the input",
+                data[0].AtomCount(), m_anchor.AtomCount());
+        const double seconds = std::chrono::duration<double>(
+            std::chrono::high_resolution_clock::now() - t0).count();
+        CurcumaLogger::result_fmt(
+            "activelearn: {} labelled structures read from {} in {:.2f} s (no new labels)",
+            data.size(), m_dataset_path, seconds);
+    } else {
+        if (!labelStructures(molecules, data))
+            return;
+    }
 
-    if (m_write_dataset) {
+    if (m_write_dataset && m_dataset_path.empty()) {
         const std::string ds = outputPath(Basename() + ".deltaml.dataset.json");
         data.save(ds);
         data.writeXYZ(outputPath(Basename() + ".deltaml.dataset.xyz"));
@@ -454,8 +540,13 @@ void ActiveLearn::runTrain()
         }
     }
 
+    // Main (joint energy + gradient) model. With the energy model enabled its held-out block
+    // is printed after the energy model's, so it stays the last block in the log; scripts and
+    // the CLI tests read the main model's numbers from the last "gradient RMSE" line.
+    const std::string main_label = m_energy_model ? "joint model" : "";
     DeltaMLModel model;
-    if (!fitAndReport(train, test, m_n_centers, model, true))
+    if (!fitAndReport(train, test, trainingOptions(m_n_centers), model, true, main_label,
+            !m_energy_model))
         return;
 
     std::string path = m_model_path;
@@ -464,6 +555,41 @@ void ActiveLearn::runTrain()
     path = outputPath(path);
     if (model.save(path))
         CurcumaLogger::success_fmt("activelearn: model written to {}", path);
+
+    // Energy-only second model (Claude Generated, October 2026). Same data, split and
+    // descriptor; only the gradient rows are dropped and M / lambda / sigma have their own
+    // settings. Motivation (90-atom conformer set, GFN-FF -> GFN2, 5 split seeds): the joint
+    // fit trades energy accuracy for forces and ends above the base method in relative
+    // energy MAE, the energy-only fit ends below it.
+    if (m_energy_model) {
+        DeltaMLTrainingOptions eopt = trainingOptions(
+            m_energy_model_n_centers > 0 ? m_energy_model_n_centers : m_n_centers);
+        eopt.use_forces = false;
+        eopt.lambda = m_energy_model_lambda;
+        eopt.kernel_sigma = m_energy_model_kernel_sigma;
+
+        DeltaMLModel emodel;
+        if (fitAndReport(train, test, eopt, emodel, true, "energy model", false)) {
+            const std::string epath = energyModelPath(path);
+            if (emodel.save(epath))
+                CurcumaLogger::success_fmt("activelearn: energy model written to {}", epath);
+
+            if (!test.empty()) {
+                CurcumaLogger::result("activelearn: held-out comparison of the two models");
+                logErrors("held-out set (energy model: energies only, for -sp energies)",
+                    emodel.evaluate(test));
+                logErrors("held-out set (joint model: energies + gradients, for -opt/-md)",
+                    model.evaluate(test));
+            }
+            CurcumaLogger::result_fmt(
+                "activelearn: relative energies with  -method deltaml:{}  (forces no better than the base)",
+                epath);
+        } else {
+            CurcumaLogger::warn("activelearn: energy-only fit failed; only the main model was written");
+            if (!test.empty())
+                logErrors("held-out set (joint model)", model.evaluate(test));
+        }
+    }
 
     CurcumaLogger::result_fmt("activelearn: use it with  -method deltaml:{}", path);
 }
@@ -651,7 +777,7 @@ std::vector<Molecule> ActiveLearn::selectCandidates(const std::vector<Molecule>&
     const std::vector<int> species = m_anchor.Atoms();
     curcuma::ml::ACSFConfig cfg = have_model
         ? model.descriptorConfig()
-        : curcuma::ml::ACSFConfig::defaultFor(species);
+        : curcuma::ml::ACSFConfig::defaultFor(species, m_acsf);
     const curcuma::ml::ACSFDescriptor desc(cfg);
 
     Matrix fingerprints(static_cast<int>(pool.size()), cfg.featureCount());
@@ -840,6 +966,13 @@ void ActiveLearn::start()
         CurcumaLogger::error("activelearn: no input structure file given");
         return;
     }
+    if (!m_acsf_valid) {
+        CurcumaLogger::error("activelearn: invalid descriptor settings (acsf_*), see above");
+        return;
+    }
+    if (!m_dataset_path.empty() && m_mode != "train")
+        CurcumaLogger::warn_fmt("activelearn: -dataset is only used in 'train' mode; ignored in '{}'",
+            m_mode);
 
     if (m_mode == "train") {
         runTrain();
@@ -865,8 +998,15 @@ void ActiveLearn::printHelp() const
     std::cout << "Examples:\n";
     std::cout << "  curcuma -activelearn conf.xyz -method gfnff -ref_method gfn2 -threads 8\n";
     std::cout << "  curcuma -activelearn conf.xyz -center_sweep 200,500,1000,2000\n";
+    std::cout << "  curcuma -activelearn conf.xyz -activelearn.dataset conf.deltaml.dataset.json \\\n";
+    std::cout << "          -activelearn.acsf_n_shell 12 -activelearn.acsf_zeta 1,2,4,8,16\n";
     std::cout << "  curcuma -activelearn mol.xyz -al_mode learn -al_cycles 6 -threads 8\n";
-    std::cout << "  curcuma -opt mol.xyz -method deltaml:conf.deltaml.json\n\n";
+    std::cout << "  curcuma -opt mol.xyz -method deltaml:conf.deltaml.json\n";
+    std::cout << "  curcuma -sp  mol.xyz -method deltaml:conf.deltaml.energy.json\n\n";
+    std::cout << "'train' writes two models: <basename>.deltaml.json (energies + gradients, for\n";
+    std::cout << "-opt/-md) and <basename>.deltaml.energy.json (energies only, for -sp; its\n";
+    std::cout << "forces are no better than the base method). -activelearn.energy_model false\n";
+    std::cout << "skips the second one.\n\n";
     std::cout << "The reference must carry the same dispersion treatment as the base method,\n";
     std::cout << "otherwise the long-range dispersion term ends up in the learned difference\n";
     std::cout << "where a local descriptor cannot represent it.\n\n";

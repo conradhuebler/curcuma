@@ -160,7 +160,7 @@ bool DeltaMLModel::train(
     }
 
     // --- descriptor -------------------------------------------------------------
-    m_acsf = ACSFConfig::defaultFor(data.species());
+    m_acsf = ACSFConfig::defaultFor(data.species(), opt.acsf);
     std::string cfg_error;
     if (!m_acsf.validate(cfg_error)) {
         CurcumaLogger::error_fmt("DeltaMLModel: invalid descriptor config: {}", cfg_error);
@@ -790,6 +790,7 @@ json DeltaMLModel::toJson() const
     j["version"] = 1;
     j["base_method"] = m_base_method;
     j["reference_method"] = m_ref_method;
+    j["role"] = m_role;
     j["descriptor"] = m_acsf.toJson();
     j["kernel"] = { { "type", "gaussian" }, { "sigma", m_sigma } };
 
@@ -853,7 +854,9 @@ bool DeltaMLModel::fromJson(const json& j)
 
     m_base_method = j.value("base_method", std::string("gfnff"));
     m_ref_method = j.value("reference_method", std::string());
-    m_acsf = ACSFConfig::fromJson(j.value("descriptor", json::object()));
+    // Models written before October 2026 carry no role; they were all joint fits.
+    m_role = j.value("role", std::string("joint"));
+    m_acsf =ACSFConfig::fromJson(j.value("descriptor", json::object()));
     m_sigma = j.contains("kernel") ? j["kernel"].value("sigma", 1.0) : 1.0;
 
     const int M = j.value("n_centers", 0);

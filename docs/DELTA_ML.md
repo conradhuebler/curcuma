@@ -1,4 +1,4 @@
-# Delta-ML: cheap method, reference-level ranking
+# Delta-ML: cheap method with a learned correction
 
 **Status**: 🤖 AI-generated, ⚙️ machine-tested. Human production testing pending.
 
@@ -162,13 +162,90 @@ arguments prints the summary; the full list comes from the parameter registry.
 | `-ref_method` | `gfn2` | the level being learned; must match the base method's dispersion treatment |
 | `-n_centers` | 1000 | kernel centres M; the accuracy/cost lever |
 | `-kernel_sigma` | 0 (auto) | Gaussian width; strong lever, too narrow cannot interpolate, too wide oversmooths |
-| `-activelearn.lambda` | 1e-4 | regulariser relative to the data term; raise to 1e-2 if NVE drifts. The flat `-lambda` does not route -- use the dotted form |
+| `-activelearn.lambda` | 1e-6 | regulariser relative to the data term; raise to 1e-2 if NVE drifts. The flat `-lambda` does not route -- use the dotted form |
 | `-jitter_relative` | 1e-8 | conditioning ridge on the normal equations; see below |
 | `-use_forces` | true | train on gradients as well as energies |
 | `-test_fraction` | 0.2 | held-out share, split randomly because neighbouring frames are correlated |
 | `-center_sweep` | -- | comma-separated M values to fit and compare in one run |
+| `-activelearn.dataset` | -- | train on a stored `<basename>.deltaml.dataset.json` instead of labelling again (`train` mode); the input file still names the outputs and supplies the anchor |
+| `-activelearn.acsf_n_shell` | 6 (8 before Oct 2026) | radial shells, equidistant from `acsf_r_first` (0.9) to `acsf_r_last` (5.2 A); changes the feature count |
+| `-activelearn.acsf_radial_eta` | 4.0 (8.0 before Oct 2026) | radial Gaussian width parameter [1/A^2] |
+| `-activelearn.acsf_rcut_radial` / `acsf_rcut_angular` | 6.0 / 4.0 | cutoffs [A] |
+| `-activelearn.acsf_angular_eta` | 0.05 | angular radial damping [1/A^2] |
+| `-activelearn.acsf_zeta` | `1,4,16` | angular exponents, each with lambda = +1 and -1 |
+| `-activelearn.energy_model` | true | also fit an energy-only model (`use_forces` false, same data, split and descriptor) and write `<basename>.deltaml.energy.json` with `"role": "energy"`; `train` mode only (also with `-activelearn.dataset`), not in `learn` mode or the centre sweep |
+| `-activelearn.energy_model_n_centers` | 0 | centres of the energy model; 0 = `n_centers` |
+| `-activelearn.energy_model_lambda` | 1e-4 | regulariser of the energy model (see "Held-out accuracy") |
+| `-activelearn.energy_model_kernel_sigma` | 0 (auto) | kernel width of the energy model; 0 = median heuristic |
+
+The `acsf_*` values apply to every fit of a run (all cycles in `learn` mode, the centre sweep)
+and are stored in the model's `descriptor` block, which `-method deltaml:` reads back. A
+model written with the pre-October-2026 grid (8 shells, eta 8) therefore keeps it: the old
+`conf.deltaml.json` of the 90-atom set gave the same correction (-102.9052269203 Eh) before and
+after the default change. Hyperparameter study without new reference
+calculations: `curcuma -activelearn conf.xyz -activelearn.dataset conf.deltaml.dataset.json
+-activelearn.acsf_n_shell 12 -no_bmt`. Use the dotted form; a flat flag that does not route is
+ignored silently.
+
+## Held-out accuracy (October 2026)
+
+353 conformers of the 90-atom C/H/N molecule below, base GFN-FF, reference GFN2, 282 training /
+71 held-out structures (`-test_fraction 0.2`), several split seeds (`-activelearn.seed`), fitted
+from the stored dataset. Relative energy MAE in kcal/mol, gradient RMSE in Eh/A, mean +- standard
+deviation over the seeds. The seeds share the same 353 conformers, so the intervals are rather
+too narrow than too wide.
+
+| fit | rel. energy MAE | paired vs base | gradient RMSE | n |
+|---|---|---|---|---|
+| base GFN-FF | 0.894 +- 0.050 | -- | 18.0e-3 | 5 |
+| joint, old grid (M 1000, lambda 1e-6, 8 shells, eta 8) | 1.154 +- 0.054 | **+0.260 +- 0.059** | 4.50e-3 | 5 |
+| joint, 6 shells, eta 4 (new default) | paired -0.215 +- 0.100 vs old grid, 10/10 better | +0.110 +- 0.095 | about as old grid | 10 |
+| joint, M 4000, lambda 1e-7, 6 shells, eta 4, rcut 7, zeta 1,2,4,8,16 | 0.833 (old grid 1.139) | +0.019 +- 0.076 | 3.05e-3 (4.41e-3) | 10 |
+| energy only, lambda 1e-6 | 0.698 +- 0.094 | -0.196 +- 0.119 | 18e-3 | 5 |
+| energy only, lambda 1e-4 (energy-model default) | 0.623 +- 0.028 | -0.191 +- 0.050, 10/10 better | ~ base | 10 |
+
+Read plainly:
+
+- **The joint model is not better than GFN-FF in relative energies on unseen conformers**, with
+  the old grid it is worse. Its gain is in the forces: gradient RMSE about 4x lower.
+- **Energy and force trade against each other** (`lambda`, `sigma_energy`/`sigma_force`,
+  `use_forces`). The energy-only fit has the smallest relative energy error and forces no better
+  than the base method.
+- The best joint combination measured (row 4) brings the energy to the base level and the
+  gradient to 3.05e-3, but the fit takes 95 s instead of 10.7 s, and it is not better than the base
+  in energy. Each ACSF parameter alone moved the energy MAE by at most 0.16 kcal/mol.
+- **The energy model lowers the relative energy error but does not improve the ranking**:
+  Spearman 0.467 against about 0.50 for the base (lambda 1e-4, paired -0.031 +- 0.099, 5 of 10
+  seeds better, n=10). For the energy model, the centre count and the ACSF parameters were
+  within the seed noise; lambda <= 1e-8 or a kernel width <= 0.75x the median made it clearly
+  worse; 3x the median width alone was as good (0.622), combined with lambda 1e-4 and an ACSF
+  variant worse (0.746 +- 0.061, n=10).
+- One molecule only. The earlier single-split numbers below (M = 2000) and an older note of
+  "relative energy MAE 0.647 -> 0.167, Spearman 0.41 -> 0.89" were not reproduced held-out.
+
+## Two models: which one for what
+
+`-activelearn` in `train` mode writes both: `<basename>.deltaml.json` (`"role": "joint"`,
+energies + gradients) and `<basename>.deltaml.energy.json` (`"role": "energy"`). The log prints
+the held-out block of each, the joint model's last. Model files without `role` read as joint.
+
+- **Optimisation and dynamics** (`-opt`, `-md`): the joint model. Using the energy model there
+  works but prints a one-time warning: its forces are no more accurate than the base method's.
+- **Relative energies of given structures** (`-sp`, also on a multi-XYZ file, which `-sp`
+  evaluates frame by frame): the energy model. Smaller relative energy error, rank correlation not
+  better than GFN-FF (n=10 seeds).
+- **ConfSearch**: the documented switches are `-method`, `-md_method` and `-opt_method`
+  ([CONFSEARCH_DUAL_METHOD.md](CONFSEARCH_DUAL_METHOD.md)); `-opt_method` does both the per-cycle
+  re-optimisation and the final ranking, there is no separate ranking-only method. So
+  `-opt_method deltaml:<main>.deltaml.json` optimises and ranks on the joint model; to rank with
+  the energy model, re-evaluate the final ensemble afterwards with
+  `curcuma -sp <final ensemble>.xyz -method deltaml:<basename>.deltaml.energy.json`. Not tested
+  end to end.
 
 ## Measured on a real system
+
+Single split, M = 2000, old ACSF grid (8 shells, eta 8). The energy gain in this table is not
+confirmed by the multi-seed held-out measurement above.
 
 353 conformers of a 90-atom C/H/N molecule (`test_cases/confs/conf.xyz` -- these are GFN2
 minima, so "distance from the reference minimum" is directly measurable), base GFN-FF,
@@ -373,7 +450,7 @@ method's strengths:
 |---|---|---|
 | metadynamics sampling | forces | strong: 4.6x better gradients, NVE stable |
 | optimising the bias structures | minimum positions | weak and system dependent, went the wrong way on one of two systems |
-| ranking in ConfScan | relative energies | 13 % better, Spearman 0.52 -- not enough to rerank on |
+| ranking in ConfScan | relative energies | joint model not better than GFN-FF held-out; energy model smaller error, Spearman not better (see "Held-out accuracy") |
 
 There is also a structural tension: metadynamics exists to drive the system into regions it
 has not visited, which is exactly where a kernel model knows nothing and its correction
@@ -455,5 +532,6 @@ and any DFT reference. Treat results as provisional until tested on real problem
 - Model files store all centre descriptors as JSON and grow with M (a few MB at M = 1000)
 - Active learning runs but its benefit is unproven; the offline path is the validated one
 - Geometric improvement is system dependent (3.2x on one system, 1.05x on another)
+- Joint model: relative energies not better than the base held-out (one molecule, n=5-10 seeds); energy model: smaller error, ranking not better
 - MD on the corrected surface needs `lambda` around 1e-2, which costs most of the accuracy
 - No GPU path for the kernel or descriptor evaluation yet

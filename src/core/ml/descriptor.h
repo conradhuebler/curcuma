@@ -51,6 +51,32 @@ struct AtomJacobian {
 };
 
 /**
+ * @brief User-facing knobs from which ACSFConfig::defaultFor builds a descriptor.
+ *
+ * Defaults (October 2026): six radial shells 0.9..5.2 Angstrom, eta_r 4, cutoffs 6/4 Angstrom,
+ * eta_a 0.05, zeta {1,4,16}, lambda +-1. Until October 2026 the default grid had eight shells
+ * with eta_r 8; on a 90-atom conformer set the 6/4 grid gave a held-out relative energy MAE
+ * 0.215 +- 0.100 kcal/mol lower (10 split seeds, see docs/DELTA_ML.md). Models written with
+ * the old grid keep it: the model file stores the full descriptor block, not these settings.
+ * Radial shifts form an equidistant grid R_p = r_first + (r_last - r_first) p/(n_shell - 1).
+ *
+ * Claude Generated (October 2026): exposed for hyperparameter studies.
+ */
+struct ACSFSettings {
+    int n_shell = 6;                ///< number of radial shells (was 8 before Oct 2026)
+    double r_first = 0.9;           ///< first radial shift [Angstrom]
+    double r_last = 5.2;            ///< last radial shift [Angstrom]
+    double radial_eta = 4.0;        ///< radial width [1/Angstrom^2] (was 8.0 before Oct 2026)
+    double rcut_radial = 6.0;       ///< radial cutoff [Angstrom]
+    double rcut_angular = 4.0;      ///< angular cutoff [Angstrom]
+    double angular_eta = 0.05;      ///< angular damping [1/Angstrom^2]
+    std::vector<double> angular_zeta = { 1.0, 4.0, 16.0 }; ///< angular sharpness exponents
+
+    /*! \brief Parse a comma list such as "1,4,16"; returns false on a malformed or non-positive entry. */
+    static bool parseZetaList(const std::string& text, std::vector<double>& out);
+};
+
+/**
  * @brief Parameters of the ACSF descriptor (Behler & Parrinello).
  *
  * Radial part (Behler G2), for centre i and neighbour element s:
@@ -81,8 +107,10 @@ struct ACSFConfig {
 
     std::vector<int> species; ///< sorted, unique atomic numbers the descriptor knows about
 
-    /*! \brief Sensible starting point for organic molecules. */
-    static ACSFConfig defaultFor(const std::vector<int>& species_list);
+    /*! \brief Sensible starting point for organic molecules; `settings` overrides the grid
+     *  (default-constructed settings give the current default grid, see ACSFSettings). */
+    static ACSFConfig defaultFor(
+        const std::vector<int>& species_list, const ACSFSettings& settings = ACSFSettings{});
 
     int radialCount() const { return static_cast<int>(radial_rs.size()); }
     int angularCount() const

@@ -147,6 +147,71 @@ PARAM(al_onthefly_threshold, Double, 0.9,
 PARAM(al_initial, Int, 15,
     "Structures labelled in cycle 0, before any model exists.", "ActiveLearning", {})
 
+PARAM(dataset, String, "",
+    "Labelled dataset (JSON as written by -activelearn, <basename>.deltaml.dataset.json) to "
+    "train on in 'train' mode instead of labelling the input structures again. The input file "
+    "is still required (basename of the outputs, anchor structure) but is not labelled. Use it "
+    "for hyperparameter studies: a refit then costs seconds instead of reference calculations.",
+    "Basic", {})
+
+PARAM(acsf_n_shell, Int, 6,
+    "Number of radial ACSF shells (Gaussian centres on an equidistant grid from acsf_r_first "
+    "to acsf_r_last). Sets the radial feature count per element; more shells resolve distances "
+    "more finely at proportionally higher descriptor cost. Default 6 since October 2026 (was 8): "
+    "together with acsf_radial_eta 4 it lowered the held-out relative energy MAE by "
+    "0.215 +- 0.100 kcal/mol on a 90-atom conformer set (10 split seeds). Models store their "
+    "own grid, so older model files are unaffected.",
+    "Descriptor", {})
+PARAM(acsf_r_first, Double, 0.9,
+    "Centre of the first radial shell [Angstrom].", "Descriptor", {})
+PARAM(acsf_r_last, Double, 5.2,
+    "Centre of the last radial shell [Angstrom]; must not exceed acsf_rcut_radial.",
+    "Descriptor", {})
+PARAM(acsf_radial_eta, Double, 4.0,
+    "Width parameter eta of the radial Gaussians exp(-eta (R - R_s)^2) [1/Angstrom^2]. Larger "
+    "values give narrower shells; with too few shells for the width, gaps in the grid appear. "
+    "Default 4.0 since October 2026 (was 8.0), see acsf_n_shell.",
+    "Descriptor", {})
+PARAM(acsf_rcut_radial, Double, 6.0,
+    "Cutoff radius of the radial functions [Angstrom].", "Descriptor", {})
+PARAM(acsf_rcut_angular, Double, 4.0,
+    "Cutoff radius of the angular functions [Angstrom]; the angular cost grows with the square "
+    "of the neighbour count inside it.",
+    "Descriptor", {})
+PARAM(acsf_angular_eta, Double, 0.05,
+    "Radial damping eta of the angular functions [1/Angstrom^2].", "Descriptor", {})
+PARAM(acsf_zeta, String, "1,4,16",
+    "Comma-separated angular sharpness exponents zeta, each used with lambda = +1 and -1. "
+    "Example: '1,2,4,8,16'. Each entry adds two angular features per element pair.",
+    "Descriptor", {})
+
+// Energy model (Claude Generated, October 2026). Defaults from the October 2026 campaign
+// (docs/DELTA_ML.md, "Held-out accuracy"); to change one, edit it here and in the matching
+// member initialiser of ActiveLearn (m_energy_model*), nothing else reads them.
+PARAM(energy_model, Bool, true,
+    "After the main (joint energy+gradient) fit, also fit an energy-only model "
+    "(use_forces = false, same data, split and descriptor) and write it as "
+    "<basename>.deltaml.energy.json next to the main model, with \"role\": \"energy\". Measured "
+    "on a 90-atom conformer set (GFN-FF -> GFN2, 5 split seeds): the joint model's held-out "
+    "relative energy MAE is worse than the base method's (+0.26 kcal/mol) while its gradient "
+    "is 4x better; the energy-only fit (lambda 1e-4) has a smaller relative energy error than "
+    "the base (-0.19 +- 0.05 kcal/mol, 10 seeds) but a rank correlation no better than GFN-FF, "
+    "and forces no better than the base. Use the energy model for relative energies (-sp, "
+    "ConfScan energies), the main model for -opt/-md. Only in al_mode train (also with -dataset); not in learn mode "
+    "and not in the center_sweep.",
+    "Energy model", {})
+PARAM(energy_model_n_centers, Int, 0,
+    "Kernel centres of the energy-only model; 0 uses n_centers.",
+    "Energy model", {})
+PARAM(energy_model_lambda, Double, 1e-4,
+    "Regulariser of the energy-only model, same meaning as lambda. 1e-4 measured best on a "
+    "90-atom conformer set (held-out relative energy MAE 0.623 +- 0.028 kcal/mol against "
+    "0.695 +- 0.052 at 1e-6, 10 split seeds); 1e-8 and below is clearly worse.",
+    "Energy model", {})
+PARAM(energy_model_kernel_sigma, Double, 0.0,
+    "Kernel width of the energy-only model (0 = median heuristic), same meaning as kernel_sigma.",
+    "Energy model", {})
+
 PARAM(center_sweep, String, "",
     "Comma-separated list of M values to fit and report in one run, e.g. '200,500,1000,2000'. "
     "Produces the accuracy-over-cost curve that decides how sparse the model can be.",
@@ -222,9 +287,25 @@ private:
         const curcuma::ml::DeltaMLModel& model, bool have_model, int wanted,
         double& max_uncertainty);
 
-    /*! \brief Fit one model and log its held-out performance. */
+    /*! \brief Training options of the main (joint) fit with M = n_centers centres. */
+    curcuma::ml::DeltaMLTrainingOptions trainingOptions(int n_centers) const;
+
+    /*! \brief Fit one model with the main-fit options and log its held-out performance. */
     bool fitAndReport(const curcuma::ml::MLDataset& train, const curcuma::ml::MLDataset& test,
         int n_centers, curcuma::ml::DeltaMLModel& model, bool log_details);
+
+    /**
+     * @brief Fit one model with explicit options.
+     * @param label  name of the model in the log ("joint model", "energy model")
+     * @param log_heldout false: skip the held-out block (the caller prints it later)
+     * Claude Generated (October 2026)
+     */
+    bool fitAndReport(const curcuma::ml::MLDataset& train, const curcuma::ml::MLDataset& test,
+        const curcuma::ml::DeltaMLTrainingOptions& opt, curcuma::ml::DeltaMLModel& model,
+        bool log_details, const std::string& label, bool log_heldout);
+
+    /*! \brief Path of the energy-only model next to the main model path. */
+    static std::string energyModelPath(const std::string& main_model_path);
 
     void logErrors(const std::string& label, const curcuma::ml::DeltaMLErrors& e) const;
 
@@ -247,13 +328,23 @@ private:
     double m_test_fraction = 0.2;
     int m_n_centers = 1000;
     double m_kernel_sigma = 0.0;
-    double m_lambda = 1e-8;
+    double m_lambda = 1e-6;
     double m_jitter_relative = 1e-8;
     double m_sigma_energy = 1e-4;
     double m_sigma_force = 1e-3;
     bool m_use_forces = true;
     unsigned m_seed = 42;
     bool m_write_dataset = true;
+    std::string m_dataset_path;             ///< labelled dataset to train on instead of labelling
+    curcuma::ml::ACSFSettings m_acsf;       ///< descriptor grid for every fit and selection
+    bool m_acsf_valid = true;               ///< false if acsf_zeta did not parse
+
+    // Energy-only second model (Claude Generated, October 2026). Runtime values come from the
+    // PARAM block above; keep these initialisers equal to it when the defaults are updated.
+    bool m_energy_model = true;
+    int m_energy_model_n_centers = 0;       ///< 0 = m_n_centers
+    double m_energy_model_lambda = 1e-4;
+    double m_energy_model_kernel_sigma = 0.0; ///< 0 = median heuristic
 
     int m_al_cycles = 5;
     std::string m_al_md_method;

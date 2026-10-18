@@ -186,6 +186,23 @@ curcuma -opt water.xyz -method gfnff -bak water.opt.xyz
 On Linux, Ctrl-C makes curcuma create an empty file `stop`. ConfScan and MD check for it,
 write a restart file and finish. A second Ctrl-C while `stop` exists ends the program at once.
 
+### Delta-ML: cheap method with a learned correction
+
+Learns the energy difference between a cheap base method and an expensive reference, so conformer search and
+pre-optimisation run at base-method cost. Conformers at fixed topology only, not reactions.
+
+```sh
+curcuma -activelearn conf.xyz -method gfnff -ref_method gfn2 -threads 8   # fit
+curcuma -opt mol.xyz -method deltaml:conf.deltaml.json                    # use
+curcuma -sp  mol.xyz -method deltaml:conf.deltaml.energy.json             # energy model
+```
+
+Measured held out on one 90-atom molecule: the forces improve about 4x, the relative energies of the main model are
+not better than GFN-FF; the energy-only second model written by the same fit (`.deltaml.energy.json`, for `-sp`,
+not for `-opt`/`-md`) lowers the energy error, without a better ranking.
+
+AI-generated, machine-tested; human production testing pending. See [docs/DELTA_ML.md](docs/DELTA_ML.md).
+
 ### More
 
 [docs/](docs/) holds one document per feature: the SCF modes ([docs/SCF_MODES.md](docs/SCF_MODES.md)),

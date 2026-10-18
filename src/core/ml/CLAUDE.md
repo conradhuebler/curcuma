@@ -2,7 +2,7 @@
 
 Learns the energy difference between a cheap base method and an expensive reference:
 `E_ref ~ E_base + Delta(R)`. Used to run conformer search and pre-optimisation at
-GFN-FF cost with reference-level ranking. See [docs/DELTA_ML.md](../../../docs/DELTA_ML.md).
+GFN-FF cost with reference-level forces (measured 4x on held-out conformers); the relative energy error is reduced only with the separate energy model, ranking is not shown to improve. See [docs/DELTA_ML.md](../../../docs/DELTA_ML.md).
 
 ## Files
 
@@ -25,12 +25,17 @@ GFN-FF cost with reference-level ranking. See [docs/DELTA_ML.md](../../../docs/D
   zero gradient and therefore never perturbs forces
 - **C1 cutoff function** is mandatory, not cosmetic: a kink in the descriptor becomes a
   force discontinuity and shows up as NVE energy drift
+- **ACSF grid is configurable** via `ACSFSettings` (`DeltaMLTrainingOptions::acsf`, CLI
+  `-activelearn.acsf_*`); default 6 shells, eta_r 4 since Oct 2026 (was 8 / 8), keep `ACSFSettings` and the PARAMs equal
+- **Model files carry their own descriptor block**: an old model reloads with its old grid, unaffected by default changes
+- **`role`** in the model file: `joint` (energies + gradients) or `energy` (`use_forces` false); missing = `joint`;
+  `DeltaMLMethod` warns once per process when gradients are taken from an `energy` model
 - **Graceful extrapolation**: far from training data the Gaussian kernel decays, so both
   Delta and its gradient vanish and the model falls back to the pure base method
 
 ## Verification status (AI-generated, machine-tested)
 
-Automated: `ctest -R deltaml` (20 unit checks + 13 CLI assertions).
+Automated: `ctest -R deltaml` (unit test `test_deltaml` + CLI tests 01-03; 03 is the FD gate of the energy model).
 
 - Descriptor Jacobian vs. finite differences: h^2 convergence to the roundoff floor
   (1.5e-5 at h=1e-3 down to 6e-10 at h=1e-6); translation invariance 2e-16, rotation 1e-15
@@ -39,8 +44,13 @@ Automated: `ctest -R deltaml` (20 unit checks + 13 CLI assertions).
 - JSON round-trip reproduces energies and gradients exactly
 - Energy-only fit interpolates its training energies to 1.5e-4 kcal/mol, which separates a
   regression defect from a mere energy/gradient weighting trade-off
-- Real system (353 conformers, 90 atoms, C/H/N, GFN-FF -> GFN2): relative energy MAE
-  0.647 -> 0.167 kcal/mol, gradient RMSE 5.04e-3 -> 0.90e-3 Eh/A, Spearman 0.41 -> 0.89
+- Real system (353 conformers, 90 atoms, C/H/N, GFN-FF -> GFN2), held out (71 structures, split seeds):
+  old grid (8 shells, eta 8, M 1000, lambda 1e-6): rel. energy MAE 1.154 +- 0.054 vs base 0.894 +- 0.050
+  kcal/mol (n=5, paired +0.260 +- 0.059, i.e. worse than the base), gradient RMSE 4.50e-3 vs 18.0e-3 Eh/A
+- New grid (6 shells, eta 4): energy paired -0.215 +- 0.100 vs old grid (n=10, 10/10 better), still
+  +0.110 +- 0.095 above the base; energy-only fit (`energy` model, lambda 1e-4): 0.623 +- 0.028, base -0.191 +- 0.050 (n=10)
+- NOT REPRODUCED: an earlier line here ("relative energy MAE 0.647 -> 0.167, Spearman 0.41 -> 0.89");
+  its protocol is unknown and the held-out numbers above do not confirm it
 - **Not tested**: other molecule classes, charged or open-shell systems, transition metals,
   transferability across molecules, long-time MD stability, any DFT reference.
   Human production testing pending.
@@ -52,5 +62,6 @@ Automated: `ctest -R deltaml` (20 unit checks + 13 CLI assertions).
 - `sigma_energy` / `sigma_force` set a genuine trade-off, not a formality: on a small rough
   set the 3N gradient rows outvote the single energy row and energies get traded away
   (measured: sigma_energy 1e-4 -> 3.01 kcal/mol at gradient 0.0185, 1e-6 -> 0.0039 at 0.0351)
+- Energy model: smaller relative energy error, rank correlation not better than GFN-FF (Spearman 0.467 vs ~0.50, n=10 seeds)
 - Training cost grows as M^2; centres are capped at 12000 with an explicit error
 - GPU port of the kernel and descriptor evaluation not started

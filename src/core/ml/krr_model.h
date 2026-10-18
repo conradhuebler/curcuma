@@ -77,6 +77,8 @@ struct DeltaMLTrainingOptions {
      * it is. Falls back silently to the CPU when the plugin or the device is unavailable.
      */
     std::string gpu;
+    /*! \brief Descriptor grid; default-constructed = built-in configuration (Claude Generated, Oct 2026). */
+    ACSFSettings acsf;
 };
 
 /*! \brief Error metrics of a model on a structure set. */
@@ -197,6 +199,18 @@ public:
     const std::string& referenceMethod() const { return m_ref_method; }
 
     /**
+     * @brief What the model was fitted for: "joint" (energies and gradients) or "energy"
+     *        (energies only, use_forces = false).
+     *
+     * An energy-only fit has a smaller relative energy error but its forces are no better than those of
+     * the base method, so consumers that need gradients warn on it. Stored as "role" in the
+     * model file; a file without the field (all models before October 2026) reads as "joint".
+     * Claude Generated (October 2026).
+     */
+    void setRole(const std::string& r) { m_role = r; }
+    const std::string& role() const { return m_role; }
+
+    /**
      * @brief Anchor state: the bond graph every consumer must reuse.
      *
      * Only the graph is pinned. Everything geometry dependent -- coordination numbers, the
@@ -255,6 +269,7 @@ private:
 
     std::string m_base_method;
     std::string m_ref_method;
+    std::string m_role = "joint"; ///< "joint" or "energy", see role()
 
     std::vector<int> m_anchor_elements;
     Geometry m_anchor_geometry;

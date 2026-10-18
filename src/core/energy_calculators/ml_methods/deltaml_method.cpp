@@ -27,6 +27,7 @@
 #include "src/core/units.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <fstream>
 #include <iomanip>
@@ -81,6 +82,7 @@ DeltaMLMethod::DeltaMLMethod(const json& config)
     : m_config(config)
 {
     m_parameters = config;
+    m_user_verbosity = CurcumaLogger::get_verbosity(); // see warnEnergyRoleOnce()
 
     // The method string may carry the model path. That form exists because several
     // capabilities rebuild their sub-configuration from a handful of keys and would
@@ -149,6 +151,7 @@ DeltaMLMethod::DeltaMLMethod(const json& config)
         CurcumaLogger::param("deltaml_base", m_base_method);
         CurcumaLogger::param("deltaml_reference", m_model.referenceMethod());
         CurcumaLogger::param("deltaml_centers", std::to_string(m_model.centerCount()));
+        CurcumaLogger::param("deltaml_role", m_model.role());
     }
 }
 
@@ -246,6 +249,7 @@ double DeltaMLMethod::calculateEnergy(bool gradient)
 
     if (gradient) {
         m_gradient = m_base->getGradient();
+        warnEnergyRoleOnce();
     } else {
         m_gradient = Matrix::Zero(static_cast<int>(m_elements.size()), 3);
     }
@@ -261,7 +265,8 @@ double DeltaMLMethod::calculateEnergy(bool gradient)
             // since Known Issue #28. An earlier version of this file assumed the base returned
             // Eh/Bohr and scaled the learned force by BOHR_TO_ANGSTROM; after the merge with
             // master that made the correction 0.529 times too small (found by comparing the
-            // assembled gradient with central differences of the -sp energy).
+            // assembled gradient with central differences of the -sp energy). An error like
+            // this is invisible in every energy, so keep the finite-difference gate.
             m_gradient += dgrad;
         } else {
             m_last_correction = m_model.predictEnergy(m_elements, m_geometry, &indicator);
@@ -310,6 +315,40 @@ double DeltaMLMethod::calculateEnergy(bool gradient)
     }
 
     return m_last_energy;
+}
+
+void DeltaMLMethod::warnEnergyRoleOnce() const
+{
+    // Claude Generated (October 2026). An energy-only model (role "energy", fitted with
+    // use_forces = false) has a smaller relative energy error than the joint model but its
+    // forces are measured no better than those of the base method (held-out gradient RMSE 18e-3 against
+    // 18e-3 Eh/A on a 90-atom conformer set). Optimisation or dynamics on it would silently
+    // give up the force gain of the joint model, so say so -- once per process, since
+    // optimisers, MD and ConfSearch create many instances. No abort: the gradient is exact for
+    // the surface the model defines, it is only not closer to the reference.
+    //
+    // Optimiser and MD loops silence the global logger while they evaluate (OptimizerDriver
+    // drops it to 0 below verbosity 2), so a plain warn() there is swallowed. The level seen
+    // when this method was constructed is the caller's own; if that one admits warnings, the
+    // single line is printed through a thread-local override. A caller that was already
+    // silent at construction (batch workers, -verbosity 0) stays silent.
+    static std::atomic<bool> printed { false };
+    if (m_model.role() != "energy" || printed.load())
+        return;
+    if (std::max(CurcumaLogger::get_verbosity(), m_user_verbosity) < 1)
+        return;
+    if (printed.exchange(true))
+        return;
+    const int saved_thread_level = CurcumaLogger::thread_verbosity();
+    if (CurcumaLogger::get_verbosity() < 1)
+        CurcumaLogger::set_thread_verbosity(1);
+    CurcumaLogger::warn_fmt(
+        "deltaml: model '{}' is an energy-only model (role 'energy'). Its forces are not "
+        "more accurate than those of the base method '{}'. For -opt/-md use the joint model "
+        "(<basename>.deltaml.json); this model is meant for relative energies (-sp, ConfScan "
+        "energies).",
+        m_model_path, m_base_method);
+    CurcumaLogger::set_thread_verbosity(saved_thread_level);
 }
 
 void DeltaMLMethod::recordExtrapolation(double indicator) const
