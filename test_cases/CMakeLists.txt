@@ -604,6 +604,12 @@ target_compile_definitions(test_scalar_constraint PRIVATE CURCUMA_SOURCE_DIR="${
 add_test(NAME test_scalar_constraint COMMAND test_scalar_constraint)
 set_tests_properties(test_scalar_constraint PROPERTIES TIMEOUT 300 LABELS "pathcv;unit")
 
+# Claude Generated 2026: SimpleMD umbrella_q restraint (gradient vs FD, parser)
+add_executable(test_umbrella_q test_umbrella_q.cpp)
+target_link_libraries(test_umbrella_q curcuma_cap curcuma_core)
+add_test(NAME test_simplemd_umbrella_q COMMAND test_umbrella_q)
+set_tests_properties(test_simplemd_umbrella_q PROPERTIES TIMEOUT 60 LABELS "pathcv;unit")
+
 # Claude Generated 2026: pure string/path helpers (Kabsch, reparametrisation, double-well FTS)
 add_executable(test_string_path test_string_path.cpp)
 target_link_libraries(test_string_path curcuma_core)

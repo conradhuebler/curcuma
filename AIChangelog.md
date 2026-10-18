@@ -16,6 +16,7 @@ below. If it needs measurements or a derivation, write them into the matching `d
 
 ## Jul - Sep 2026 (and some late June), 108 entries, full text in AIChangelog_2026-late.md
 
+- SimpleMD `umbrella_q` (Oct 18, 2026): harmonic umbrella on q = d(i,j) - d(i,k) via `setExtraPotential`, per-step `<base>.umbrella_q.csv`; reference for NEB-MD path-CV free energies; off by default - [docs/UMBRELLA_Q.md](docs/UMBRELLA_Q.md)
 - NEB-MD free energies (Oct 2-13, 2026): string -> path-CV pipeline, basin barrier, absolute TST rate; five bugs that invalidated all earlier numbers fixed; ethane only, GFN-FF - [docs/NEB_MD.md](docs/NEB_MD.md)
 - NEB-MD string stage (Oct 6, 2026): force-based convergence criterion, start-path preparation, parallel images, trust radius, abort on dead images; `string_gain` unstable on helicene, keep off - [docs/NEB_MD.md](docs/NEB_MD.md)
 - SimpleMD scalar SHAKE/RATTLE constraint with fixed direction at step start (Oct 2, 2026): C-H drift 6e-4 -> 2e-5 Eh/ps; `trueGradient()` without external force; `m_dof` minus one per constraint - `test_scalar_constraint`

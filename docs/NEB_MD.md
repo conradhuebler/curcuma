@@ -477,6 +477,13 @@ in 3 of 5 seeds at 0.7-1.9 ps; the 272 stage-2 windows did not crash. The linear
   A -> I (reference -22.21): -18.67 / -20.12; A -> B (must be 0): +2.42 / +1.22; antisymmetry 2.63 / 1.26. Wall dependence (seed 1): I -> TS 21.3 / 29.9 / 25.9 / 22.2 and A -> I -15.6 / -23.0 / -18.7 / -18.0 for z_wall 0 / 0.1 / 0.25 / 0.5,
   non-monotonic; z_wall 0.1 comes closest (I -> TS 29.93, A -> I -23.03, A -> B +0.74) but is one run and was not the pre-registered choice, so it is not a result. The methyl foreign state was not re-examined.
   Open: whether the steps are a spacing issue (windows are equidistant in heavy-atom arclength) or a real free-energy barrier in a coordinate other than s.
+- **Independent reference for the ester: 1-D umbrella sampling in q = d(C_c-O_a) - d(C_c-O_b)** (`-simplemd.umbrella_q "1,4,9,q0,100"`, see docs/UMBRELLA_Q.md; Oct 18, 2026): 51 windows (spacing 0.16 A, 0.08 for |q0| <= 0.8), 22 ps each,
+  2000 samples after 2 ps, plus an independent replicate with 63 windows (n=2 runs per window; pooled), own WHAM (toy double well: barrier error 0.00). Wall time 3-4 min per run. G(q) is mirror-symmetric to 0.19 kcal/mol for G < 20
+  (1.07 for G < 35, in the open A region); intermediate at q = 0.01, maxima at q = -1.69 and +1.63. **dG(I -> TS) = 28.28 +- 0.3** (28.05 / 28.41 in the two runs; plain G(q*) - G(q_min) 29.16), against the classical harmonic 29.66 and
+  **NEB-MD 24.0-24.7 (all-atom CV, n=6) / 25.9, 26.3 (heavy-atom CV, n=2)**: the path CV underestimates I -> TS by 3.6-4.3 (all-atom) and 2.0-2.4 (heavy-atom) kcal/mol. dG(A -> TS) 4.61 +- 1.0 and dG(A -> I) -23.68 +- 0.4 (NEB-MD
+  4.65 +- 0.6 and about -20; classical 7.45 and -22.21), but the A basin is not closed in q (the profile still falls at |q| = 3.4), so these two depend on the integration limit and are not like-for-like; dG(A -> A') = 0.93 +- 0.4
+  (must be 0: the A basins are not equilibrated to better than 1-2 kcal/mol in 22 ps). No bistability: d(C_c-O_a) < 2.0 A in 100 % of frames for q0 = -2.4 ... 0; O_b enters within 2.5 A between q0 = -1.44 (2-6 %) and -1.28 (83-86 %);
+  the barrier top is at q ~ -1.4 to -1.3. The 1-D PMF barrier is not a TST rate. Not checked: slow degrees of freedom orthogonal to q (no autocorrelation analysis), other kappa/dt, the FP32 fallback messages in window q0 = -1.60.
 - Not checked: more than 136 windows, other z_wall, the seed-3 outlier of the 34-window runs, free-ion reference, window trajectories.
 
 ## Known open issues

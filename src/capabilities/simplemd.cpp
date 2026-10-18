@@ -438,6 +438,10 @@ void SimpleMD::LoadControlJson()
         m_cg_timestep_factor = cg_timestep_factor_config;
     }
 
+    // Claude Generated 2026: umbrella restraint on q = d(i,j) - d(i,k), parsed in Initialise()
+    m_umbrella_q_spec = m_config.get<std::string>("umbrella_q");
+    m_umbrella_q_frequency = std::max(1, m_config.get<int>("umbrella_q_frequency"));
+
     // WP-S2 (May 2026): per-step diagnostics JSONL dump
     m_md_diagnostics = m_config.get<bool>("md_diagnostics");
     // WP-P1 (May 2026): per-phase wall-clock timing in the JSONL records
@@ -1025,6 +1029,24 @@ bool SimpleMD::Initialise()
                 m_bias_structure_count = index;
             }
         }
+    }
+
+    // Claude Generated 2026: umbrella restraint on a distance difference (umbrella_q)
+    if (!m_umbrella_q_spec.empty()) {
+        std::string err;
+        if (!parseUmbrellaQ(m_umbrella_q_spec, m_natoms, m_umbrella_q, err)) {
+            CurcumaLogger::error("umbrella_q '" + m_umbrella_q_spec + "': " + err);
+            return false;
+        }
+        if (m_extra_potential) {
+            CurcumaLogger::error("umbrella_q: the extra potential is already in use (umbrella_q is for plain -md only)");
+            return false;
+        }
+        const UmbrellaQ u = m_umbrella_q;
+        m_extra_potential = [u](const Geometry& R, Geometry& g) { return umbrellaQEnergy(u, R, g); };
+        m_umbrella_q_on = true;
+        CurcumaLogger::result_fmt("umbrella_q: q = d({},{}) - d({},{}), q0 = {:.4f} A, kappa = {:.6f} Eh/A^2",
+            u.i + 1, u.j + 1, u.i + 1, u.k + 1, u.q0, u.kappa);
     }
 
     m_initialised = true;
@@ -1973,10 +1995,18 @@ void SimpleMD::prepareRun()
     }
 
     m_Epot = Energy();
+    if (m_umbrella_q_on) { // Claude Generated 2026: the first half-kick sees the restraint too
+        ApplyExtraPotential();
+        m_umbrella_q_file.close();
+        m_umbrella_q_file.open(outputPath(Basename() + ".umbrella_q.csv"));
+        m_umbrella_q_file << "step,time_fs,q_A,d_ij_A,d_ik_A,W_Eh,Epot_Eh,Ekin_Eh\n";
+    }
     EKin();
     m_Etot = m_Epot + m_Ekin;
     AverageQuantities();
     m_step = 0;
+    if (m_umbrella_q_on)
+        WriteUmbrellaQ(0, m_currentStep);
 
     // Claude Generated (2026): start the global ramp from the initial setpoint and resolve the
     // thermal regions (atom indices + default complement). A fresh prepareRun() clears any prior
@@ -2568,6 +2598,10 @@ bool SimpleMD::step()
     }
     //////////// Dipole
 
+    // Claude Generated 2026: positions, Epot, Ekin here belong to the end of step m_step + 1
+    if (m_umbrella_q_on && (m_step + 1) % m_umbrella_q_frequency == 0)
+        WriteUmbrellaQ(m_step + 1, m_currentStep + m_dT);
+
     if (m_step % m_dump == 0) {
         if (bool write = WriteGeometry()) {
             // K6 (Oct 2026, Claude Generated): m_run_states is read only by the -rescue branch
@@ -2906,6 +2940,82 @@ void SimpleMD::ApplyExtraPotential()
     } else {
         m_extra_gradient.resize(0, 3);
     }
+}
+
+/* Claude Generated 2026: umbrella restraint on a distance difference (docs/UMBRELLA_Q.md).
+ *   q = |R_i - R_j| - |R_i - R_k|,   W = kappa/2 (q - q0)^2
+ *   dW/dR_i = kappa (q - q0) [ (R_i - R_j)/d_ij - (R_i - R_k)/d_ik ]
+ *   dW/dR_j = -kappa (q - q0) (R_i - R_j)/d_ij,   dW/dR_k = +kappa (q - q0) (R_i - R_k)/d_ik
+ * Units: R in Angstrom, kappa in Eh/A^2, W in Eh, gradient in Eh/A (SimpleMD internal units). */
+double SimpleMD::umbrellaQEnergy(const UmbrellaQ& u, const Geometry& R, Geometry& grad, double* q, double* dij, double* dik)
+{
+    const Eigen::RowVector3d rij = R.row(u.i) - R.row(u.j), rik = R.row(u.i) - R.row(u.k);
+    const double d1 = rij.norm(), d2 = rik.norm(), dq = (d1 - d2) - u.q0;
+    grad = Geometry::Zero(R.rows(), 3);
+    grad.row(u.i) = u.kappa * dq * (rij / d1 - rik / d2);
+    grad.row(u.j) = -u.kappa * dq * rij / d1;
+    grad.row(u.k) = u.kappa * dq * rik / d2;
+    if (q) *q = d1 - d2;
+    if (dij) *dij = d1;
+    if (dik) *dik = d2;
+    return 0.5 * u.kappa * dq * dq;
+}
+
+bool SimpleMD::parseUmbrellaQ(const std::string& spec, int natoms, UmbrellaQ& out, std::string& error)
+{
+    std::vector<std::string> f;
+    std::stringstream ss(spec);
+    for (std::string t; std::getline(ss, t, ',');)
+        f.push_back(t);
+    if (f.size() != 5) {
+        error = "expected 5 comma-separated fields i,j,k,q0,kappa, got " + std::to_string(f.size());
+        return false;
+    }
+    int idx[3];
+    double q0 = 0.0, kappa = 0.0;
+    try {
+        for (int n = 0; n < 3; ++n) {
+            std::size_t pos = 0;
+            idx[n] = std::stoi(f[n], &pos);
+            if (f[n].find_first_not_of(" ", pos) != std::string::npos) throw std::invalid_argument(f[n]);
+        }
+        std::size_t p1 = 0, p2 = 0;
+        q0 = std::stod(f[3], &p1);
+        kappa = std::stod(f[4], &p2);
+        if (f[3].find_first_not_of(" ", p1) != std::string::npos || f[4].find_first_not_of(" ", p2) != std::string::npos)
+            throw std::invalid_argument("trailing text");
+    } catch (const std::exception&) {
+        error = "non-numeric field";
+        return false;
+    }
+    for (int n = 0; n < 3; ++n)
+        if (idx[n] < 1 || idx[n] > natoms) {
+            error = "atom index " + std::to_string(idx[n]) + " out of range 1.." + std::to_string(natoms);
+            return false;
+        }
+    if (idx[0] == idx[1] || idx[0] == idx[2] || idx[1] == idx[2]) {
+        error = "atom indices must be distinct";
+        return false;
+    }
+    if (!(kappa > 0.0) || !std::isfinite(q0) || !std::isfinite(kappa)) {
+        error = "kappa must be > 0 (kcal/mol/A^2)";
+        return false;
+    }
+    out.i = idx[0] - 1;
+    out.j = idx[1] - 1;
+    out.k = idx[2] - 1;
+    out.q0 = q0;
+    out.kappa = CurcumaUnit::Energy::kcalmol_to_hartree(kappa); // kcal/mol/A^2 -> Eh/A^2
+    return true;
+}
+
+void SimpleMD::WriteUmbrellaQ(int step, double time_fs)
+{
+    Geometry g;
+    double q = 0.0, dij = 0.0, dik = 0.0;
+    const double W = umbrellaQEnergy(m_umbrella_q, m_eigen_geometry, g, &q, &dij, &dik);
+    m_umbrella_q_file << fmt::format("{},{:.4f},{:.8f},{:.8f},{:.8f},{:.10e},{:.10f},{:.10f}\n",
+        step, time_fs, q, dij, dik, W, m_Epot, m_Ekin);
 }
 
 void SimpleMD::applyExternalForces(const Geometry& forces)

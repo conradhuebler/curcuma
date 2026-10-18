@@ -22,6 +22,8 @@
 
 #include <chrono>
 #include <deque>
+#include <fstream>
+#include <stdexcept>
 #include <ctime>
 #include <functional>
 #include <random>
@@ -353,7 +355,23 @@ public:
      *  gradient IS contained in trueGradient(). Empty function = off (no extra evaluation).
      *  Set after prepareRun(): the first half-kick of the first step does not contain it. */
     using ExtraPotential = std::function<double(const Geometry& R, Geometry& grad)>;
-    void setExtraPotential(ExtraPotential fn) { m_extra_potential = std::move(fn); }
+    void setExtraPotential(ExtraPotential fn)
+    {
+        if (m_umbrella_q_on) // Claude Generated 2026: only one extra potential, see umbrella_q
+            throw std::runtime_error("SimpleMD: umbrella_q already uses the extra potential (plain -md only)");
+        m_extra_potential = std::move(fn);
+    }
+    /** Claude Generated 2026: umbrella restraint on q = d(i,j) - d(i,k), see docs/UMBRELLA_Q.md.
+     *  Atoms 0-based, q0 in Angstrom, kappa in Eh/A^2. */
+    struct UmbrellaQ {
+        int i = -1, j = -1, k = -1;
+        double q0 = 0.0, kappa = 0.0;
+    };
+    /** Parse "i,j,k,q0,kappa" (atoms 1-based, kappa in kcal/mol/A^2); false + error text on bad input. */
+    static bool parseUmbrellaQ(const std::string& spec, int natoms, UmbrellaQ& out, std::string& error);
+    /** W = kappa/2 (q - q0)^2 in Eh; grad = dW/dR in Eh/A (natoms x 3). Optional q, d_ij, d_ik in A. */
+    static double umbrellaQEnergy(const UmbrellaQ& u, const Geometry& R, Geometry& grad,
+        double* q = nullptr, double* dij = nullptr, double* dik = nullptr);
     /** W at the current positions (Eh), 0 when no extra potential is set. */
     double extraPotentialEnergy() const { return m_extra_energy; }
     /** Claude Generated 2026: dW/dR (Eh/Angstrom) of the extra potential, from the same integrator
@@ -712,6 +730,14 @@ private:
     bool m_rattle_12 = false;
     bool m_rattle_13 = false;
 
+    // Claude Generated 2026: umbrella restraint on a distance difference (umbrella_q)
+    std::string m_umbrella_q_spec;
+    UmbrellaQ m_umbrella_q;
+    bool m_umbrella_q_on = false;
+    int m_umbrella_q_frequency = 20;
+    std::ofstream m_umbrella_q_file;
+    void WriteUmbrellaQ(int step, double time_fs);
+
     // WP-S2 (May 2026): per-step diagnostics JSONL dump
     bool m_md_diagnostics = false;
     std::unique_ptr<MDDiagnosticsWriter> m_diag_writer;
@@ -885,6 +911,8 @@ private:
     PARAM(md_diagnostics, Bool, false, "Write per-step diagnostics to <basename>.diag.jsonl (energy decomposition, charges, CN, gradient norms, HB/XB counts). Frequency follows dump_frequency. One JSON object per line.", "Output", {})
     // --- WP-P1 Timing Instrumentation (May 2026) ---
     PARAM(md_diagnostics_timing, Bool, false, "Add a timing_ms block to each <basename>.diag.jsonl record (per-phase wall-clock: CN/EEQ/dcn/D4-weights/FF/integrator/HBXB/I-O). GPU runs add a gpu sub-block with per-kernel-category times. Requires md_diagnostics=true. ~1-2 us per hook.", "Output", {})
+    PARAM(umbrella_q, String, "", "Umbrella restraint on a distance difference, 'i,j,k,q0,kappa': q = d(i,j) - d(i,k) (atoms 1-based), W = kappa/2 (q - q0)^2 with q0 in Angstrom and kappa in kcal/mol/A^2. Empty = off. Plain -md only (not with NEB-MD). Writes <basename>.umbrella_q.csv. See docs/UMBRELLA_Q.md.", "System", {})
+    PARAM(umbrella_q_frequency, Int, 20, "Write a line to <basename>.umbrella_q.csv every N steps (only with umbrella_q).", "System", {})
 
     // --- ConfSearch robustness gates (Jun 2026, Claude Generated) ---
     PARAM(topo_check, Bool, false, "Abort the MD run when the molecule fragments (number of connected components grows above the start value). Off by default so reactive paths are still sampled.", "ConfSearch", {})
