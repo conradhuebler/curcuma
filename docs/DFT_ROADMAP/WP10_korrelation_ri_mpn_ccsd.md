@@ -753,8 +753,112 @@ Lokalisierung): kanonisches RI-MP2 ORCA vs curcuma 2e-9 (C12H26), 8.5e-8 ((H2O)1
 - **Nicht getestet:** andere Elemente als H, C, O; andere Basen (TZVP, diffuse:
   groessere Domaenen); geladene Systeme; kleine HOMO-LUMO-Luecken jenseits Pentacen; 3D-kompakte Systeme > 60 Atome;
   Thread-Reproduzierbarkeit bei Standardschwellen nur Butan (ctest); Laufzeiten auf anderer Hardware.
-- **Nicht implementiert gegenueber DLPNO-MP2 (ORCA):** PNO-Domaenen (TCutDO), lokale Fit-Domaenen, integraldirekte
-  3-Index-Integrale, Vorselektion ueber semikanonische Paarenergien (nur Abstand), offene Schalen, Gradient, SCS, Device-Pfad.
+- **Nicht implementiert gegenueber DLPNO-MP2 (ORCA):** PNO-Domaenen (TCutDO), Vorselektion ueber semikanonische
+  Paarenergien (nur Abstand), offene Schalen, Gradient, SCS, Device-Pfad. Lokale Fit-Domaenen und integraldirekte
+  3-Index-Integrale: seit 18.10.2026 (`-qm.lmp2_fit local`, naechster Abschnitt).
+
+### Lokales Fitting und integraldirekte 3-Index-Integrale (`-qm.lmp2_fit local`, 18.10.2026)
+
+**Stand: 🤖 AI-generated, ⚙️ machine-tested; menschlicher Produktionstest steht aus.** Ziel: kein globaler
+3-Index-Tensor (Speicher ~N^3, B-Transformation ~N^4) mehr im LMP2. Code: `qm_lmp2.cpp` Abschnitt 3b
+(`localThreeIndex`, `FitFactor`), `qmri::ThreeIndexDirect` in `qm_ri.{h,cpp}` (Abschnitt 4b: dieselben Helfer
+`makePair`/`pairBlock`/`transformAxis3`/OutMaps und derselbe Schwarz-Ausdruck wie `RIJK::setup`, das selbst unveraendert ist).
+
+- **Verfahren:** Fit-Domaene F_i = Hilfsfunktionen auf allen Atomen im Abstand <= `lmp2_fit_radius` (Bohr) von einem
+  BP-Atom des Orbitals i. Pro Orbital werden die rohen Integrale X_i(P, r) = (P|i r) fuer P in G_i = Vereinigung der
+  F_j aller behaltenen Partner j und r = PAOs der erweiterten Domaene integraldirekt erzeugt: je Hilfsschale c auf
+  Atom K fuer alle Orbitale mit K in G_i die Bloecke (c|AB) ueber die AO-Traeger der Orbitale (|L| > `lmp2_ao_cut`)
+  und ihrer PAOs, dann L^T (eine GEMM fuer alle diese Orbitale) und C_PAO; keine (P|mn) werden gespeichert.
+  Paarintegrale: `lmp2_fit_domain orbital` (Standard) robust nach Dunlap mit den Orbitaldomaenen,
+  (ia|jb) = d_ia^T (P|jb)_{F_i} + (ia|Q)_{F_j} d_jb - d_ia^T J_{F_i F_j} d_jb, d_i = J_{F_i}^-1 X_i(F_i); umgesetzt als
+  d_i^T Z_j(F_i) + X_i(F_j)^T d_j mit Z_j = X_j - J(G_j, F_j) d_j (einmal pro Orbital). `pair`: symmetrischer Fit in
+  F_ij = F_i u F_j (Cholesky je verschiedener Domaene). Metrik: Cholesky des Coulomb-normierten Teilblocks
+  (eigen mit `-qm.ri_metric eigen` oder wenn Cholesky scheitert). Die 2-Index-Metrik wird voll gespeichert (naux^2).
+- **Abweichung von der Vorgabe:** Standard ist die robuste Orbitaldomaene statt F_ij: gleicher Fehler ab 6 Bohr (Tabelle),
+  eine Faktorisierung pro Orbital statt pro Paardomaene, Paarschritt 1.5x (C30-C80) bis 2.7x (PEO8) schneller. Die
+  Integralmenge haengt an G_i (Partnerdomaenen), nicht an F_i, und ist fuer beide Varianten gleich.
+- **SCF:** das lokale LMP2 ruft `QMEngine::correlationRI` nicht auf; als Referenz geht jede SCF (exakt
+  integraldirekt `-qm.ri off`, auch `-gpu cuda -qm.gpu_direct on`, oder RI-JK).
+
+**(1) Exaktheit** (unendlicher Fit-Radius 1e6, `lmp2_ao_cut 0`, vollstaendige Raeume, alle Paare, T_CutPNO 0, alle
+F_ik) gegen curcumas RI-MP2 (gleiche Hilfsbasis): Butan fc (pair und orbital) und Wasserdimer (Boys; RI-JK-SCF)
+<= 1e-13, Essigsaeuredimer fc 6e-14, Benzol fc mit JFIT 2.6e-12 Eh; die Integralzahl ist dort gleich der von
+`RIJK::setup` (Butan 235880 Bloecke).
+
+**(2) Fehler des lokalen Fittings allein** (alles andere auf Standard; E(lokal) - E(global) in Eh/Atom, RI-JK-SCF,
+def2-SVP, fc, je ein Lauf; globale Referenz = die Laeufe der Tabelle oben, mit dem aktuellen Binary fuer C20 bitgleich
+reproduziert). `lmp2_ao_cut 0` (reiner Fit-Fehler), `orbital`; `pair` stimmt ab R = 6 Bohr auf 2 Stellen ueberein
+(R = 4: bis 14 % anders):
+
+| System | R = 4 | R = 6 | R = 8 | R = 10 | R = 12 |
+|---|---|---|---|---|---|
+| (H2O)4 | 4.3e-7 | 7.7e-8 | -1.7e-8 | 2.9e-9 | 1.8e-9 |
+| (H2O)8 | 4.9e-7 | 1.4e-7 | 2.3e-8 | 4.9e-9 | 3.0e-9 |
+| (H2O)12 | 8.4e-7 | 2.3e-7 | 3.2e-8 | 1.0e-8 | 2.8e-9 |
+| (H2O)16 | 8.0e-7 | 2.2e-7 | 4.0e-8 | 1.2e-8 | 4.5e-9 |
+| (H2O)20 | 7.4e-7 | 1.9e-7 | 3.4e-8 | 1.5e-8 | 7.1e-9 |
+| Benzol | 6.7e-6 | 3.9e-7 | 0 | 0 | 0 |
+| Naphthalin | 8.1e-6 | 1.3e-6 | 2.1e-7 | 1.5e-8 | 0 |
+| Anthracen | 9.2e-6 | 1.7e-6 | 3.9e-7 | 1.4e-7 | 5.0e-8 |
+| Tetracen | 9.5e-6 | 1.9e-6 | 4.8e-7 | 2.0e-7 | 8.8e-8 |
+| Pentacen | 9.9e-6 | 2.0e-6 | 5.3e-7 | 2.3e-7 | 1.1e-7 |
+| C8H18 | 7.3e-6 | 7.4e-7 | 2.5e-7 | 8.3e-8 | 4.0e-8 |
+| C12H26 | 7.8e-6 | 8.7e-7 | 3.3e-7 | 1.3e-7 | 7.0e-8 |
+| C20H42 | 8.3e-6 | 9.6e-7 | 4.0e-7 | 1.7e-7 | 9.4e-8 |
+| C30H62 | 8.5e-6 | 1.0e-6 | 4.3e-7 | 1.8e-7 | 1.1e-7 |
+| C40H82 | 8.6e-6 | 1.0e-6 | 4.4e-7 | 1.9e-7 | 1.1e-7 |
+| PEO8 (C16H34O9, `test_cases/structures/medium/peo8-chain.h-capped`, `lmp2_ao_cut` 1e-6) | - | - | 9.9e-7 | 3.1e-7 | 8.1e-8 |
+
+- "0" = Fit-Domaene umfasst schon alle Hilfsfunktionen. Ziel <= 1e-6 Eh/Atom: **R = 8 Bohr (Standard) haelt es in allen
+  Systemen, PEO8 nur knapp (9.9e-7)**; R = 6 verfehlt es bei Acenen (bis 2e-6) und knapp bei langen Alkanen. Der Fehler
+  ist positiv (Korrelation fehlt) und pro Atom in Alkanen ab C30 konstant (Groessenkonsistenz des Fehlers).
+- `lmp2_ao_cut` (bei R = 8, `pair`; Fehler gegen global): 1e-7 und 1e-6 gleich dem reinen Fit-Fehler (<= 1e-9 Eh/Atom
+  Unterschied), 1e-5 aendert ihn um bis -2e-7 (Alkane, teils Kompensation), 1e-4 gibt -3e-5..-5e-5 (unbrauchbar).
+  Die Laufzeit haengt kaum am Schnitt (C30: 2.80 / 2.75 s fuer 1e-6 / 1e-5), weil die Schalenvereinigung ueber alle
+  Orbitale mit K in G_i die Arbeit bestimmt. Standard 1e-6.
+
+**(3) Zeit und Speicher** (24 Threads, Maschine sonst ruhig, je ein Lauf; "lokal" = Standard-Lokalfit, orbital, R = 8,
+ao_cut 1e-6; "Integrale" = integraldirekte Erzeugung von X_i inkl. beider Transformationen bzw. global die
+B-Halbtransformation; Spitzen-RSS des Prozesses aus /proc VmHWM, schliesst die SCF ein):
+
+| System | Basis / aux | SCF | SCF s | LMP2 global s | LMP2 lokal s | Integrale global (B) / lokal s | Paarschritt lokal s | Spitzen-RSS global / lokal GB |
+|---|---|---|---|---|---|---|---|---|
+| C20H42 | 490 / 2256 | RI-JK | 9.3 | 2.09 | 2.62 | 0.24 / 0.95 | 1.17 | 3.5 / 3.8 |
+| C30H62 | 730 / 3366 | RI-JK | 43 | 5.82 | 5.88 | 1.41 / 2.83 | 2.10 | 9.1 / 9.2 |
+| C40H82 | 970 / 4476 | RI-JK | 150 | 12.45 | 10.32 | 3.97 / 5.43 | 3.06 | 19.9 / 19.1 |
+| C60H122 | 1450 / 6696 | GPU direkt (lokal), RI-JK (global, alte Messung) | 472 / 701 | 36.4 | 21.24 | 17 / 11.65 | 5.12 | ~56 GB Tensor / 5.6 |
+| C80H162 | 1930 / 8916 | GPU direkt (lokal), RI-JK (global, alte Messung) | 1521 / 2715 | 92.9 | 38.53 | 52.3 / 18.10 | 7.66 | ~133 GB Tensor / 7.1 |
+| C80H162, lokal mit RI-JK-SCF (8 Threads, nur Fehler) | 1930 / 8916 | RI-JK | 2991 | - | - | - | - | 132.7 (SCF-Tensor) |
+
+- Global C60/C80: Zeiten aus der Tabelle oben (gleiches Binary bis auf die Zeitmessung des Paarschritts; die LMP2-Gesamtzeit
+  ist davon nicht betroffen). C20-C40 global mit dem aktuellen Binary neu gemessen. "GPU direkt" = exakte integraldirekte
+  SCF auf der RTX 5090 (`-qm.ri off -gpu cuda -qm.gpu_direct on -qm.gpu_scf on`, SCF-Code unveraendert); sie braucht kein
+  RI und haelt den Prozess bei 5.6 / 7.1 GB, ist aber nicht billiger: C40 194 s (RI-JK CPU 150 s), C60 472 s, C80 1521 s
+  (42 s pro J/K-Aufbau, ~N^2.7).
+- **Skalierungsexponenten** (log-log-Steigung zwischen zwei Messpunkten ueber die Zahl der Basisfunktionen, keine
+  Ausgleichsrechnung): lokale Integrale C40->C80 1.74, C60->C80 1.54 (globale B-Transformation C40->C80 3.7); lokaler
+  Paarschritt C40->C80 1.32, C60->C80 1.40; LMP2 lokal gesamt C60->C80 2.1, davon die Lokalisierung (unveraendert,
+  1.6 -> 7.8 s) der am schnellsten wachsende Teil; LMP2 ohne Lokalisierung C60->C80 1.58. Linear ist die Integralstufe
+  damit noch nicht: G_i (Vereinigung der Partner-Fitdomaenen, ~23 Bohr um das Orbital) und die AO-Traeger saettigen
+  erst ab etwa C60 (mittlere X-Zeilen 1636 / 1889 / 1974 fuer C20 / C40 / C60).
+- Fit-Fehler bei C80 (RI-JK-SCF, lokal gegen global, alles andere Standard): 4.6e-7 Eh/Atom (C40: 4.4e-7).
+- Speicher LMP2 selbst (Ausgabe "memory"): lokal C80 6.9 GB (X_i, d_i, Z_i, Metrik 0.6 GB, PNO-Daten), global 9.3 GB
+  B-Faktoren zusaetzlich zum 133-GB-Tensor.
+
+**Groesstes gerechnetes System:** C80H162 (242 Atome, 1930 Basisfunktionen, 8916 Hilfsfunktionen) mit GPU-SCF: SCF
+1521 s, LMP2 38.5 s, Prozess-Spitze 7.1 GB. **C120H242 (362 Atome) nicht fertig:** die exakte GPU-direkt-SCF lief 3.9 h
+ohne Ergebnis und wurde abgebrochen (Ursache nicht untersucht; erwartet waren ~1.2 h aus der C40-C80-Steigung); RI-JK
+ist dort aus Speichergruenden (Tensor ~450 GB) nicht moeglich. C160 deshalb nicht versucht. Die SCF, nicht LMP2, ist die
+Grenze.
+
+- **Getestet:** H, C, O; def2-SVP, JKFIT (JFIT nur Exaktheit); Systeme der Tabelle (2) plus PEO8; RI-JK- und exakte
+  (GPU-direkt) SCF; 1 und 4 Threads (ctest, bitgleich auf 12 Stellen); ctest `qm_lmp2_*` (24 Tests).
+- **Nicht getestet:** andere Elemente als H, C, O; andere Basen; geladene und 3D-kompakte Systeme > 60 Atome; der
+  Fit-Fehler ueber C40 nur fuer C80 (RI-JK-SCF) gegen global; das Thread-Verhalten nur im ctest (1 vs 4 Threads); die
+  `pair`-Variante ueber C80 hinaus.
+- **Nicht implementiert:** lineare Skalierung der 2-Index-Metrik (voll naux^2 gespeichert, Aufbau N^2; C160 ~2.6 GB),
+  Lokalisierung (Jacobi-Sweeps ~N^3) und Paar-Vorauswahl (o^2 Abstandstest) bleiben wie vorher; keine PNO-Domaenen
+  fuer den Fit (ORCA fittet im PNO-Raum mit Paardomaenen); keine Device-Variante der 3-Index-Erzeugung.
 
 **Abgrenzung:** kein Nachbau von DLPNO-CCSD(T) (zu gross, viele Naeherungsschichten), sondern ein lokales MP2 nach
 dem Muster Pulay-Saebo-LMP2 + PNO. Die ueberlappenden Domaenen sind genau die Schwarz-artigen Teilgebiete aus WP14,

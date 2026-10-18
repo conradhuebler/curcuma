@@ -4,7 +4,8 @@
 Claude Generated (Oct 2026). Two modes:
 
   --exact      complete pair spaces (-qm.lmp2_domain_radius 1e6, -qm.lmp2_pair_cut 1e6, -qm.lmp2_pno_cut 0,
-               -qm.lmp2_fock_cut 0, tight convergence) with -qm.lmp2_check true: the iterated LMP2 correlation
+               -qm.lmp2_fock_cut 0, tight convergence; local fit with -qm.lmp2_fit_radius 1e6 -qm.lmp2_ao_cut 0)
+               with -qm.lmp2_check true: the iterated LMP2 correlation
                energy must equal curcuma's canonical RI-MP2 with the same auxiliary basis within --tol (1e-9 Eh).
                This verifies the localisation, the PAO spaces, the RI factors and the residual equations.
   --case NAME  default thresholds; E_corr(LMP2) is compared with reference.json (produced by
@@ -33,6 +34,7 @@ ap.add_argument("--tol", type=float, default=1e-9)
 a = ap.parse_args()
 
 EXACT = ["-qm.lmp2_domain_radius", "1e6", "-qm.lmp2_pair_cut", "1e6", "-qm.lmp2_pno_cut", "0",
+         "-qm.lmp2_fit_radius", "1e6", "-qm.lmp2_ao_cut", "0",  # local fit (default): global fit; inert for -qm.lmp2_fit global
          "-qm.lmp2_fock_cut", "0", "-qm.lmp2_threshold", "1e-12", "-qm.lmp2_residual_threshold", "1e-10",
          "-qm.lmp2_check", "true"]
 

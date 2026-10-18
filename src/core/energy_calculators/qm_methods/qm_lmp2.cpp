@@ -39,6 +39,19 @@
 #include <numeric>
 #include <vector>
 
+qmint::LMP2Options::LMP2Options() = default;
+qmint::LMP2Options::LMP2Options(const LMP2Options&) = default;
+qmint::LMP2Options::LMP2Options(LMP2Options&&) noexcept = default;
+qmint::LMP2Options& qmint::LMP2Options::operator=(const LMP2Options&) = default;
+qmint::LMP2Options& qmint::LMP2Options::operator=(LMP2Options&&) noexcept = default;
+qmint::LMP2Options::~LMP2Options() = default;
+qmint::LMP2Result::LMP2Result() = default;
+qmint::LMP2Result::LMP2Result(const LMP2Result&) = default;
+qmint::LMP2Result::LMP2Result(LMP2Result&&) noexcept = default;
+qmint::LMP2Result& qmint::LMP2Result::operator=(const LMP2Result&) = default;
+qmint::LMP2Result& qmint::LMP2Result::operator=(LMP2Result&&) noexcept = default;
+qmint::LMP2Result::~LMP2Result() = default;
+
 namespace {
 
 using MatX = Eigen::MatrixXd;  // column-major, local work matrices
@@ -399,6 +412,234 @@ private:
     std::vector<VecX> m_x, m_e;
 };
 
+// =====================================================================================================
+// 3b. Local fitting with integral-direct 3-index integrals (Claude Generated, Oct 2026)
+// =====================================================================================================
+//
+// Instead of the stored global tensor, every orbital i keeps the RAW half-transformed integrals
+//   X_i(P, r) = (P | i r) = sum_mn L_mi Cpao_nr (P|mn),   P in G_i,  r in ext(i),
+// where G_i = union of the fit domains F_j of all kept partners j of i (incl. i itself) and ext(i) are the PAOs of
+// the extended domain (as for the global B factors). They are computed aux shell by aux shell without storing
+// (P|mn): for aux shell c on atom K, every orbital i with K in G_i gets its rows of X_i from
+//   T_p(m, n) = (p|mn)  ->  Y = L^T T  ->  X_i(p, :) = Y_i(p, :) Cpao(:, ext(i)),
+// with m restricted to the AO support of the orbitals (|L_mi| > ao_cut) and n to the support of their PAOs
+// (|Cpao_nr| > ao_cut); dropped coefficients are set to zero, so ao_cut = 0 is the exact half transformation.
+// Then the pair integrals are fitted locally:
+//   pair    : (ia|jb) = sum_{P,Q in F_ij} (ia|P) [J_F^-1]_PQ (Q|jb),  F_ij = F_i u F_j, J_F = metric block
+//             (symmetric fit within one domain; with F = all functions this is the global fit),
+//   orbital : robust fit (Dunlap) with the orbital domains, d_ia = J_Fi^-1 (P|ia)_{P in F_i}:
+//             (ia|jb) = d_ia^T (P|jb)_{F_i} + (ia|Q)_{F_j} d_jb - d_ia^T J_{Fi,Fj} d_jb
+//             (error second order in the fitting errors of ia and jb; F = all gives the global fit again).
+// B. I. Dunlap, J. Mol. Struct. THEOCHEM 529, 37 (2000) (robust fitting); H.-J. Werner, F. R. Manby, P. J. Knowles,
+// J. Chem. Phys. 118, 8149 (2003) (local fit domains in LMP2); both recalled, not looked up.
+
+/// Factor of one fit domain: B = F X fitted (cholesky: F = L^-1 of the Coulomb-normalised metric block; eigen:
+/// F = w^-1/2 U^T with eigenvalues below the cutoff dropped, as RIJK). Rows of X must already carry the
+/// normalisation dn (X_n = dn X). Claude Generated (Oct 2026).
+struct FitFactor {
+    bool chol = true;
+    MatX L;  ///< cholesky: lower factor
+    MatX U;  ///< eigen: kept eigenvectors
+    VecX w;  ///< eigen: kept eigenvalues
+    /// X := F X (rows = domain size before, F rows after)
+    void fit(MatX& X) const
+    {
+        if (chol)
+            L.triangularView<Eigen::Lower>().solveInPlace(X);
+        else
+            X = (w.cwiseSqrt().cwiseInverse().asDiagonal() * (U.transpose() * X)).eval();
+    }
+    /// X := Jn^-1 X (normalised metric of the domain)
+    void solve(MatX& X) const
+    {
+        if (chol) {
+            L.triangularView<Eigen::Lower>().solveInPlace(X);
+            L.transpose().triangularView<Eigen::Upper>().solveInPlace(X);
+        } else {
+            X = (U * (w.cwiseInverse().asDiagonal() * (U.transpose() * X))).eval();
+        }
+    }
+};
+
+/// Normalised metric block Jn(F) = dn J dn over the global aux indices fidx, factorised. Cholesky unless the
+/// engine asks for eigen or the Cholesky fails (then eigen with the cutoff, as RIJK::setup).
+bool makeFitFactor(const Matrix& J, const VecX& dn, const std::vector<int>& fidx, bool want_eigen, double cutoff, FitFactor& f)
+{
+    const int m = (int)fidx.size();
+    MatX Jn(m, m);
+    for (int q = 0; q < m; ++q)
+        for (int r = 0; r < m; ++r) Jn(r, q) = J(fidx[r], fidx[q]) * dn(fidx[r]) * dn(fidx[q]);
+    if (!want_eigen) {
+        Eigen::LLT<MatX> llt(Jn);
+        if (llt.info() == Eigen::Success) {
+            f.chol = true;
+            f.L = llt.matrixL();
+            return true;
+        }
+    }
+    Eigen::SelfAdjointEigenSolver<MatX> es(Jn);
+    if (es.info() != Eigen::Success) return false;
+    int keep = 0;
+    for (int k = 0; k < m; ++k)
+        if (es.eigenvalues()(k) > cutoff) ++keep;
+    f.chol = false;
+    f.U.resize(m, keep);
+    f.w.resize(keep);
+    for (int k = 0, c = 0; k < m; ++k)
+        if (es.eigenvalues()(k) > cutoff) {
+            f.U.col(c) = es.eigenvectors().col(k);
+            f.w(c++) = es.eigenvalues()(k);
+        }
+    return true;
+}
+
+/// @brief Integral-direct raw factors X_i(P, r) = (P|i r) for P in G_i (atoms g_atoms[i], rows atom by atom in
+/// ascending atom order, x_atom_row[i][A] = first row of atom A or -1) and r in ext_ao[i] (columns in that order).
+/// See the block comment above. Returns the number of computed (aux shell | shell pair) blocks.
+/// Claude Generated (Oct 2026).
+long localThreeIndex(const qmri::ThreeIndexDirect& eri, const MatX& L, const MatX& Cpao, double ao_cut,
+                     const std::vector<std::vector<int>>& ext_ao, const std::vector<std::vector<int>>& g_atoms,
+                     const std::vector<int>& aux_atom_first, const std::vector<std::vector<int>>& x_atom_row, int natm,
+                     int threads, std::vector<Matrix>& X, double t_split[3])
+{
+    const int n = (int)L.rows(), o = (int)L.cols(), ns = eri.nShells();
+    std::vector<int> ao_shell(n, -1);
+    for (int A = 0; A < ns; ++A)
+        for (int k = 0; k < eri.shellWidth(A); ++k) ao_shell[eri.shellFirst(A) + k] = A;
+    // truncated coefficients (exact zeros for |C| <= ao_cut)
+    MatX Lt = L, Ct = Cpao;
+    for (Eigen::Index k = 0; k < Lt.size(); ++k)
+        if (std::abs(Lt.data()[k]) <= ao_cut) Lt.data()[k] = 0.0;
+    for (Eigen::Index k = 0; k < Ct.size(); ++k)
+        if (std::abs(Ct.data()[k]) <= ao_cut) Ct.data()[k] = 0.0;
+    // shell supports: of each orbital (m side) and of the PAOs of its extended domain (n side)
+    std::vector<std::vector<int>> lsh(o), nsh(o), nsao(o);
+    std::vector<MatX> CP(o);  // CP[i] = Ct(nsao[i], ext_ao[i])
+#pragma omp parallel for schedule(dynamic) num_threads(threads)
+    for (int i = 0; i < o; ++i) {
+        std::vector<char> ml(ns, 0), mn(ns, 0);
+        for (int mu = 0; mu < n; ++mu)
+            if (Lt(mu, i) != 0.0) ml[ao_shell[mu]] = 1;
+        for (int r : ext_ao[i])
+            for (int nu = 0; nu < n; ++nu)
+                if (Ct(nu, r) != 0.0) mn[ao_shell[nu]] = 1;
+        for (int A = 0; A < ns; ++A) {
+            if (ml[A]) lsh[i].push_back(A);
+            if (mn[A]) {
+                nsh[i].push_back(A);
+                for (int k = 0; k < eri.shellWidth(A); ++k) nsao[i].push_back(eri.shellFirst(A) + k);
+            }
+        }
+        const auto& e = ext_ao[i];
+        CP[i].resize(nsao[i].size(), e.size());
+        for (size_t c = 0; c < e.size(); ++c)
+            for (size_t r = 0; r < nsao[i].size(); ++r) CP[i](r, c) = Ct(nsao[i][r], e[c]);
+    }
+    // orbitals whose G_i contains atom K
+    std::vector<std::vector<int>> orbs_of_atom(natm);
+    for (int i = 0; i < o; ++i)
+        for (int A : g_atoms[i]) orbs_of_atom[A].push_back(i);
+    const int nc = eri.nAuxShells();
+    long nblocks = 0;
+    double t_int = 0.0, t_y = 0.0, t_x = 0.0;
+#pragma omp parallel num_threads(threads) reduction(+ : nblocks, t_int, t_y, t_x)
+    {
+        std::vector<char> inM(ns, 0), inU(ns, 0);
+        std::vector<int> mrow(ns, -1), ucol(ns, -1);
+        std::vector<double> blk;
+        std::vector<std::pair<int, int>> mirror;
+#pragma omp for schedule(dynamic, 1)
+        for (int c = 0; c < nc; ++c) {
+            const int K = eri.auxAtom(c);
+            const std::vector<int>& I = orbs_of_atom[K];
+            if (I.empty()) continue;
+            const int wc = eri.auxWidth(c);
+            std::vector<int> Msh, Ush;
+            for (int i : I) {
+                for (int A : lsh[i]) inM[A] = 1;
+                for (int B : nsh[i]) inU[B] = 1;
+            }
+            int nM = 0, nU = 0;
+            for (int A = 0; A < ns; ++A) {
+                if (inM[A]) {
+                    Msh.push_back(A);
+                    mrow[A] = nM;
+                    nM += eri.shellWidth(A);
+                }
+                if (inU[A]) {
+                    Ush.push_back(A);
+                    ucol[A] = nU;
+                    nU += eri.shellWidth(A);
+                }
+            }
+            // T(m, p * nU + u) = (p|m u), m in the orbital supports, u in the PAO supports
+            const auto t0 = std::chrono::steady_clock::now();
+            MatX T = MatX::Zero(nM, (Eigen::Index)wc * nU);
+            mirror.clear();
+            for (int A : Msh) {
+                const int wA = eri.shellWidth(A);
+                for (int B : eri.neighbours(A)) {
+                    if (!inU[B]) continue;
+                    if (A > B && inM[B] && inU[A]) {  // (B, A) is computed as well: copy it below
+                        mirror.push_back({ A, B });
+                        continue;
+                    }
+                    if (!eri.block(c, A, B, blk)) continue;
+                    ++nblocks;
+                    const int wB = eri.shellWidth(B);
+                    for (int a = 0; a < wA; ++a)
+                        for (int b = 0; b < wB; ++b) {
+                            const double* v = &blk[((size_t)a * wB + b) * wc];
+                            for (int p = 0; p < wc; ++p) T(mrow[A] + a, (Eigen::Index)p * nU + ucol[B] + b) = v[p];
+                        }
+                }
+            }
+            for (const auto& [A, B] : mirror) {
+                const int wA = eri.shellWidth(A), wB = eri.shellWidth(B);
+                for (int p = 0; p < wc; ++p)
+                    for (int a = 0; a < wA; ++a)
+                        for (int b = 0; b < wB; ++b)
+                            T(mrow[A] + a, (Eigen::Index)p * nU + ucol[B] + b) = T(mrow[B] + b, (Eigen::Index)p * nU + ucol[A] + a);
+            }
+            t_int += msSince(t0);
+            // Y = L_M^T T: (|I| x wc nU)
+            const auto t1 = std::chrono::steady_clock::now();
+            MatX LM(nM, (Eigen::Index)I.size());
+            for (int A : Msh)
+                for (int a = 0; a < eri.shellWidth(A); ++a)
+                    for (size_t ii = 0; ii < I.size(); ++ii) LM(mrow[A] + a, ii) = Lt(eri.shellFirst(A) + a, I[ii]);
+            const MatX Y = LM.transpose() * T;
+            t_y += msSince(t1);
+            const auto t2 = std::chrono::steady_clock::now();
+            for (size_t ii = 0; ii < I.size(); ++ii) {
+                const int i = I[ii];
+                const int row0 = x_atom_row[i][K] + (eri.auxFirst(c) - aux_atom_first[K]);
+                const auto& nl = nsao[i];
+                MatX Yi(wc, (Eigen::Index)nl.size());
+                for (size_t k = 0; k < nl.size(); ++k) {
+                    const int mu = nl[k], A = ao_shell[mu];
+                    const Eigen::Index u = ucol[A] + (mu - eri.shellFirst(A));
+                    for (int p = 0; p < wc; ++p) Yi(p, k) = Y(ii, (Eigen::Index)p * nU + u);
+                }
+                X[i].middleRows(row0, wc).noalias() = Yi * CP[i];
+            }
+            t_x += msSince(t2);
+            for (int A : Msh) {
+                inM[A] = 0;
+                mrow[A] = -1;
+            }
+            for (int A : Ush) {
+                inU[A] = 0;
+                ucol[A] = -1;
+            }
+        }
+    }
+    t_split[0] = t_int;
+    t_split[1] = t_y;
+    t_split[2] = t_x;
+    return nblocks;
+}
+
 }  // namespace
 
 // =====================================================================================================
@@ -425,6 +666,20 @@ bool QMEngine::computeLMP2(const qmint::LMP2Options& opt, qmint::LMP2Result& res
         CurcumaLogger::error("LMP2: unknown -qm.lmp2_distant_pairs '" + opt.distant_pairs + "' (use dipole | drop)");
         return false;
     }
+    if (opt.fit != "global" && opt.fit != "local") {
+        CurcumaLogger::error("LMP2: unknown -qm.lmp2_fit '" + opt.fit + "' (use global | local)");
+        return false;
+    }
+    if (opt.fit_domain != "pair" && opt.fit_domain != "orbital") {
+        CurcumaLogger::error("LMP2: unknown -qm.lmp2_fit_domain '" + opt.fit_domain + "' (use pair | orbital)");
+        return false;
+    }
+    if (opt.fit == "local" && (!(opt.fit_radius > 0.0) || !(opt.ao_cut >= 0.0))) {
+        CurcumaLogger::error("LMP2: -qm.lmp2_fit_radius must be > 0 and -qm.lmp2_ao_cut >= 0");
+        return false;
+    }
+    const bool local_fit = opt.fit == "local";
+    const bool robust_fit = local_fit && opt.fit_domain == "orbital";
     const int n = m_nbf, natm = m_atomcount;
     const int n_occ = m_num_electrons / 2;
     int n_frozen = 0;
@@ -549,10 +804,11 @@ bool QMEngine::computeLMP2(const qmint::LMP2Options& opt, qmint::LMP2Result& res
 
     // ---- 2. domains (bp_domain + extend_domain) and pairs ----
     const auto t_pairs = std::chrono::steady_clock::now();
-    std::vector<std::vector<int>> dom(o);
+    std::vector<std::vector<int>> dom(o), bpdom(o);
 #pragma omp parallel for schedule(dynamic) num_threads(threads)
     for (int i = 0; i < o; ++i) {
         std::vector<int> bp = bpDomain(L.col(i), S, atom_aos, opt.bp_threshold);
+        bpdom[i] = bp;
         std::vector<int> ext;
         for (int A = 0; A < natm; ++A) {
             bool in = false;
@@ -614,61 +870,175 @@ bool QMEngine::computeLMP2(const qmint::LMP2Options& opt, qmint::LMP2Result& res
     for (int i = 0; i < o; ++i) ext_off[i + 1] = ext_off[i] + ext_ao[i].size();
     const size_t ncol = ext_off[o];
 
-    // ---- 3. RI tensor and the half-transformed factors B_{i,r}^P ----
+    const double t_domains_ms = msSince(t_pairs);  // domains, pairs, PAOs
+
+    // ---- 3. 3-index factors ----
+    // global: fitted B_{i,r}^P from the stored RI tensor (QMEngine::correlationRI);
+    // local : raw X_i(P, r) = (P|i r), P in G_i, integral-direct (localThreeIndex), fitted per pair in step 4.
     std::string ri_src, why;
-    double setup_ms = 0.0;
-    std::shared_ptr<qmri::RIJK> ri = correlationRI(file, ri_src, setup_ms, why);
-    if (!ri) {
-        CurcumaLogger::error("LMP2: density fitting setup with " + file + " not possible: " + why);
-        return false;
-    }
-    res.t_ri_setup_ms = setup_ms;
-    const int nrows = (int)ri->tensor().rows();
-    const double b_mb = (double)ncol * nrows * 8.0 / 1.0e6;
-    if (2.0 * b_mb > opt.max_memory_mb) {
-        CurcumaLogger::error(fmt::format("LMP2: the factors B_(i,r)^P need 2 x {:.1f} MB ({} columns over the extended domains x {} "
-                                         "auxiliary functions, plus one copy during the fit), above -qm.lmp2_max_memory_mb {:g}",
-                                         b_mb, ncol, nrows, opt.max_memory_mb));
-        return false;
-    }
-    const auto t_tr = std::chrono::steady_clock::now();
-    std::vector<MatX> Bf(o);  // Bf[i]: naux x |ext_ao[i]|, column r = B_{i, ext_ao[i][r]}^P
-    {
-        Matrix Xr(nrows, (Eigen::Index)ncol);  // (Q|i r), row Q
-        const MatX Lt = L.transpose();
-#pragma omp parallel num_threads(threads)
+    double b_mb = 0.0;
+    int naux = 0;
+    std::vector<MatX> Bf;                       // global: Bf[i] naux x |ext_ao[i]|, column r = B_{i, ext_ao[i][r]}^P
+    std::vector<Matrix> Xl;                     // local: X_i, rows G_i (atom by atom), columns ext_ao[i]
+    std::vector<std::vector<int>> f_atoms(o);   // local: fit domain F_i (atoms)
+    std::vector<std::vector<int>> x_atom_row;   // local: first row of atom A in X_i (-1: absent)
+    std::vector<std::vector<int>> g_atoms(o);   // local: atoms of the rows of X_i (G_i = union of partner F_j)
+    std::vector<int> aux_atom_first(natm + 1, 0);
+    Matrix Jraw;  // local: raw Coulomb metric (naux x naux)
+    VecX dn;      // local: 1/sqrt((P|P))
+    if (!local_fit) {
+        double setup_ms = 0.0;
+        std::shared_ptr<qmri::RIJK> ri = correlationRI(file, ri_src, setup_ms, why);
+        if (!ri) {
+            CurcumaLogger::error("LMP2: density fitting setup with " + file + " not possible: " + why);
+            return false;
+        }
+        res.t_ri_setup_ms = setup_ms;
+        const int nrows = (int)ri->tensor().rows();
+        b_mb = (double)ncol * nrows * 8.0 / 1.0e6;
+        if (2.0 * b_mb > opt.max_memory_mb) {
+            CurcumaLogger::error(fmt::format("LMP2: the factors B_(i,r)^P need 2 x {:.1f} MB ({} columns over the extended domains x {} "
+                                             "auxiliary functions, plus one copy during the fit), above -qm.lmp2_max_memory_mb {:g}",
+                                             b_mb, ncol, nrows, opt.max_memory_mb));
+            return false;
+        }
+        const auto t_tr = std::chrono::steady_clock::now();
+        Bf.resize(o);
         {
-            MatX TQ(n, n), Y(o, n), Zq(o, n);
+            Matrix Xr(nrows, (Eigen::Index)ncol);  // (Q|i r), row Q
+            const MatX Lt = L.transpose();
+#pragma omp parallel num_threads(threads)
+            {
+                MatX TQ(n, n), Y(o, n), Zq(o, n);
 #pragma omp for schedule(dynamic, 1)
-            for (int Q = 0; Q < nrows; ++Q) {
-                ri->unpackRow(Q, TQ.data());  // symmetric: row- and column-major identical
-                Y.noalias() = Lt * TQ;
-                Zq.noalias() = Y * Cpao;  // (Q| i r) with PAO r
-                double* row = Xr.data() + (size_t)Q * ncol;
-                for (int i = 0; i < o; ++i) {
-                    double* dst = row + ext_off[i];
-                    const auto& e = ext_ao[i];
-                    for (size_t r = 0; r < e.size(); ++r) dst[r] = Zq(i, e[r]);
+                for (int Q = 0; Q < nrows; ++Q) {
+                    ri->unpackRow(Q, TQ.data());  // symmetric: row- and column-major identical
+                    Y.noalias() = Lt * TQ;
+                    Zq.noalias() = Y * Cpao;  // (Q| i r) with PAO r
+                    double* row = Xr.data() + (size_t)Q * ncol;
+                    for (int i = 0; i < o; ++i) {
+                        double* dst = row + ext_off[i];
+                        const auto& e = ext_ao[i];
+                        for (size_t r = 0; r < e.size(); ++r) dst[r] = Zq(i, e[r]);
+                    }
                 }
             }
-        }
-        ri->fitRows(Xr);  // metric factor (no-op when the SCF tensor already is B)
-        ri.reset();       // an own RI setup is released here (the SCF one stays with the engine)
-        const int naux = (int)Xr.rows();
-        res.n_aux = naux;
+            ri->fitRows(Xr);  // metric factor (no-op when the SCF tensor already is B)
+            ri.reset();       // an own RI setup is released here (the SCF one stays with the engine)
+            naux = (int)Xr.rows();
 #pragma omp parallel for schedule(dynamic) num_threads(threads)
-        for (int i = 0; i < o; ++i) Bf[i] = Xr.block(0, (Eigen::Index)ext_off[i], naux, (Eigen::Index)ext_ao[i].size());
+            for (int i = 0; i < o; ++i) Bf[i] = Xr.block(0, (Eigen::Index)ext_off[i], naux, (Eigen::Index)ext_ao[i].size());
+        }
+        res.n_aux = naux;
+        res.t_transform_ms = msSince(t_tr);
+        if (CurcumaLogger::get_verbosity() >= 3)
+            CurcumaLogger::info(fmt::format("LMP2: {}; B factors {:.0f} MB ({} columns)", ri_src, b_mb, ncol));
+    } else {
+        // local fit: auxiliary shells, integral-direct engine, metric (no 3-index tensor anywhere)
+        const auto t_setup = std::chrono::steady_clock::now();
+        qmri::ThreeIndexDirect eri;
+        try {
+            const qmri::AuxBasisMap aux = qmri::parseTurbomoleBasis(file);
+            Matrix pos(natm, 3);
+            for (int a = 0; a < natm; ++a)
+                for (int k = 0; k < 3; ++k) pos(a, k) = xyz(a, k);
+            const std::vector<qmri::Shell> sh = qmri::auxiliaryShells(aux, m_atoms, pos);
+            if (!eri.setup(m_gto_basis, m_Q.size() != 0 ? &m_Q : nullptr, sh, !m_cartesian_d, m_eri_screening, threads, why)) {
+                CurcumaLogger::error("LMP2: integral-direct 3-index setup failed: " + why);
+                return false;
+            }
+            Jraw = qmri::coulombMetric(sh, !m_cartesian_d, threads);
+        } catch (const std::exception& e) {
+            CurcumaLogger::error(std::string("LMP2: local fit setup with ") + file + ": " + e.what());
+            return false;
+        }
+        if (eri.n() != n) {
+            CurcumaLogger::error(fmt::format("LMP2: integral-direct basis has {} functions, the engine {}", eri.n(), n));
+            return false;
+        }
+        naux = eri.naux();
+        res.n_aux = naux;
+        dn.resize(naux);
+        for (int P = 0; P < naux; ++P) {
+            if (!(Jraw(P, P) > 0.0)) {
+                CurcumaLogger::error(fmt::format("LMP2: auxiliary function {} has (P|P) = {:.3e}", P, Jraw(P, P)));
+                return false;
+            }
+            dn(P) = 1.0 / std::sqrt(Jraw(P, P));
+        }
+        // auxiliary functions of one atom are contiguous (auxiliaryShells): first function per atom
+        std::vector<int> cnt(natm, 0);
+        for (int c = 0; c < eri.nAuxShells(); ++c) cnt[eri.auxAtom(c)] += eri.auxWidth(c);
+        for (int A = 0; A < natm; ++A) aux_atom_first[A + 1] = aux_atom_first[A] + cnt[A];
+        for (int c = 0; c < eri.nAuxShells(); ++c) {
+            const int A = eri.auxAtom(c);
+            if (eri.auxFirst(c) < aux_atom_first[A] || eri.auxFirst(c) + eri.auxWidth(c) > aux_atom_first[A + 1]) {
+                CurcumaLogger::error("LMP2: auxiliary functions of an atom are not contiguous");
+                return false;
+            }
+        }
+        // fit domains F_i: atoms within fit_radius of a Boughton-Pulay atom of i; G_i: union of F_j over kept partners
+        for (int i = 0; i < o; ++i)
+            for (int A = 0; A < natm; ++A)
+                for (int B : bpdom[i])
+                    if (A == B || (xyz.row(A) - xyz.row(B)).norm() <= opt.fit_radius) {
+                        f_atoms[i].push_back(A);
+                        break;
+                    }
+        x_atom_row.assign(o, std::vector<int>(natm, -1));
+        double x_mb = 0.0, cp_mb = 0.0, d_mb = 0.0, rows_sum = 0.0, f_sum = 0.0;
+        std::vector<int> x_rows(o, 0);
+        for (int i = 0; i < o; ++i) {
+            std::vector<char> in(natm, 0);
+            for (int j = 0; j < o; ++j)
+                if (pair_index[(size_t)i * o + j] >= 0)
+                    for (int A : f_atoms[j]) in[A] = 1;
+            for (int A = 0; A < natm; ++A)
+                if (in[A]) {
+                    g_atoms[i].push_back(A);
+                    x_atom_row[i][A] = x_rows[i];
+                    x_rows[i] += cnt[A];
+                }
+            int fi = 0;
+            for (int A : f_atoms[i]) fi += cnt[A];
+            x_mb += (double)x_rows[i] * ext_ao[i].size() * 8.0 / 1e6;
+            cp_mb += (double)n * ext_ao[i].size() * 8.0 / 1e6;  // upper bound of the PAO blocks (support <= n)
+            if (robust_fit) d_mb += (double)(fi + x_rows[i]) * ext_ao[i].size() * 8.0 / 1e6;  // d_i and Z_i
+            rows_sum += x_rows[i];
+            f_sum += fi;
+        }
+        res.mean_x_rows = rows_sum / o;
+        if (robust_fit) res.mean_fit_aux = f_sum / o;
+        const double metric_mb = (double)naux * naux * 8.0 / 1e6;
+        res.factors_mb = x_mb + d_mb + metric_mb;
+        if (x_mb + cp_mb + d_mb + metric_mb > opt.max_memory_mb) {
+            CurcumaLogger::error(fmt::format("LMP2 (local fit): the 3-index factors (P|i r) need {:.1f} MB, the PAO blocks up to {:.1f} MB, "
+                                             "the fit coefficients {:.1f} MB and the metric {:.1f} MB, above -qm.lmp2_max_memory_mb {:g}",
+                                             x_mb, cp_mb, d_mb, metric_mb, opt.max_memory_mb));
+            return false;
+        }
+        res.t_ri_setup_ms = msSince(t_setup);
+        const auto t_tr = std::chrono::steady_clock::now();
+        Xl.resize(o);
+        for (int i = 0; i < o; ++i) Xl[i] = Matrix::Zero(x_rows[i], (Eigen::Index)ext_ao[i].size());
+        double tsplit[3] = { 0.0, 0.0, 0.0 };
+        res.n_int_blocks =
+            localThreeIndex(eri, L, Cpao, opt.ao_cut, ext_ao, g_atoms, aux_atom_first, x_atom_row, natm, threads, Xl, tsplit);
+        res.t_transform_ms = msSince(t_tr);
+        ri_src = fmt::format("local fit ({} domains, radius {:g} Bohr, ao_cut {:g}), integral-direct 3-index integrals ({} shell pairs, "
+                             "{} blocks; thread-summed ms: integrals {:.0f}, L transformation {:.0f}, PAO transformation {:.0f}), X rows mean {:.0f} of {}",
+                             opt.fit_domain, opt.fit_radius, opt.ao_cut, eri.nPairs(), res.n_int_blocks, tsplit[0], tsplit[1],
+                             tsplit[2], res.mean_x_rows, naux);
+        if (CurcumaLogger::get_verbosity() >= 3)
+            CurcumaLogger::info(fmt::format("LMP2: {}; factors {:.0f} MB, metric {:.0f} MB", ri_src, x_mb + d_mb, metric_mb));
     }
-    res.t_transform_ms = msSince(t_tr);
-    const int naux = res.n_aux;
-    if (CurcumaLogger::get_verbosity() >= 3)
-        CurcumaLogger::info(fmt::format("LMP2: {}; B factors {:.0f} MB ({} columns)", ri_src, b_mb, ncol));
+    res.fit_label = local_fit ? "local-" + opt.fit_domain : "global";
 
     // ---- 4. pair spaces, K in the PAO space, PNOs (lmp2_common.pair_space, pair_ints, make_pnos) ----
     std::vector<PairData> P(npairs);
     std::vector<char> pair_ok(npairs, 1);
-#pragma omp parallel for schedule(dynamic, 1) num_threads(threads)
-    for (int p = 0; p < npairs; ++p) {
+    // pair space of a kept pair (PAOs of [i] u [j], pseudo-canonical)
+    auto pairSpace = [&](int p, PaoSpace& sp) {
         const int i = kept[p].first, j = kept[p].second;
         PairData& pd = P[p];
         pd.i = i;
@@ -679,21 +1049,14 @@ bool QMEngine::computeLMP2(const qmint::LMP2Options& opt, qmint::LMP2Result& res
         atoms.erase(std::unique(atoms.begin(), atoms.end()), atoms.end());
         for (int A : atoms) pd.idx.insert(pd.idx.end(), atom_aos[A].begin(), atom_aos[A].end());
         std::sort(pd.idx.begin(), pd.idx.end());
-        PaoSpace sp;
-        if (!paoSpace(pd.idx, Spao, Fpao, sp)) {
-            pair_ok[p] = 0;
-            continue;
-        }
-        const int mao = (int)pd.idx.size(), m = (int)sp.eps.size();
-        pd.m_pao = m;
-        // B_ia^P = sum_r Xc_ra B_{i,r}^P over the pair's PAOs
-        auto half = [&](int k) {
-            MatX G(naux, mao);
-            for (int r = 0; r < mao; ++r) G.col(r) = Bf[k].col(ext_pos[k][pd.idx[r]]);
-            return MatX(G * sp.Xc);
-        };
-        const MatX Bi = half(i);
-        const MatX K = (i == j) ? MatX(Bi.transpose() * Bi) : MatX(Bi.transpose() * half(j));
+        if (!paoSpace(pd.idx, Spao, Fpao, sp)) return false;
+        pd.m_pao = (int)sp.eps.size();
+        return true;
+    };
+    // semicanonical amplitudes, pair density, PNOs from K = (ia|jb) in the pseudo-canonical pair space
+    auto finishPair = [&](int p, const PaoSpace& sp, const MatX& K) {
+        PairData& pd = P[p];
+        const int i = pd.i, j = pd.j, m = (int)sp.eps.size();
         const double Fii = Focc(i, i), Fjj = Focc(j, j);
         MatX den(m, m);
         for (int b = 0; b < m; ++b)
@@ -723,13 +1086,203 @@ bool QMEngine::computeLMP2(const qmint::LMP2Options& opt, qmint::LMP2Result& res
             for (int a = 0; a < npno; ++a) pd.den(a, b) = pd.eps(a) + pd.eps(b) - Fii - Fjj;
         pd.e_sc_pno = npno ? pairEnergy(-pd.K.cwiseQuotient(pd.den), pd.K, i == j) : 0.0;
         pd.c = sp.Xc * QW;
+    };
+    // local fit: global aux indices of an atom set, and rows `atoms` of X_k over the pair space (scaled by dn if asked)
+    auto auxIndices = [&](const std::vector<int>& atoms) {
+        std::vector<int> f;
+        for (int A : atoms)
+            for (int q = aux_atom_first[A]; q < aux_atom_first[A + 1]; ++q) f.push_back(q);
+        return f;
+    };
+    auto localRows = [&](const std::vector<Matrix>& Xs, int k, const std::vector<int>& atoms, const PairData& pd, const PaoSpace& sp,
+                         bool scale) {
+        const int mao = (int)pd.idx.size();
+        int f = 0;
+        for (int A : atoms) f += aux_atom_first[A + 1] - aux_atom_first[A];
+        std::vector<int> cols(mao);
+        for (int r = 0; r < mao; ++r) cols[r] = ext_pos[k][pd.idx[r]];
+        MatX G(f, mao);
+        int row = 0;
+        for (int A : atoms) {
+            const int x0 = x_atom_row[k][A], na = aux_atom_first[A + 1] - aux_atom_first[A];
+            for (int t = 0; t < na; ++t, ++row) {
+                const double* src = Xs[k].data() + (size_t)(x0 + t) * Xs[k].cols();
+                const double s = scale ? dn(aux_atom_first[A] + t) : 1.0;
+                for (int r = 0; r < mao; ++r) G(row, r) = s * src[cols[r]];
+            }
+        }
+        return MatX(G * sp.Xc);
+    };
+    const bool want_eigen = m_ri_metric == "eigen";
+    std::vector<char> fit_ok(std::max(1, npairs), 1);
+    const auto t_pairstep = std::chrono::steady_clock::now();
+    if (!local_fit) {
+#pragma omp parallel for schedule(dynamic, 1) num_threads(threads)
+        for (int p = 0; p < npairs; ++p) {
+            PaoSpace sp;
+            if (!pairSpace(p, sp)) {
+                pair_ok[p] = 0;
+                continue;
+            }
+            const PairData& pd = P[p];
+            const int i = pd.i, j = pd.j, mao = (int)pd.idx.size();
+            // B_ia^P = sum_r Xc_ra B_{i,r}^P over the pair's PAOs
+            auto half = [&](int k) {
+                MatX G(naux, mao);
+                for (int r = 0; r < mao; ++r) G.col(r) = Bf[k].col(ext_pos[k][pd.idx[r]]);
+                return MatX(G * sp.Xc);
+            };
+            const MatX Bi = half(i);
+            const MatX K = (i == j) ? MatX(Bi.transpose() * Bi) : MatX(Bi.transpose() * half(j));
+            finishPair(p, sp, K);
+        }
+    } else if (!robust_fit) {
+        // pair fit domains F_ij = F_i u F_j; pairs with the same domain share one metric factor
+        std::map<std::vector<int>, std::vector<int>> by_domain;
+        for (int p = 0; p < npairs; ++p) {
+            const int i = kept[p].first, j = kept[p].second;
+            std::vector<int> key = f_atoms[i];
+            key.insert(key.end(), f_atoms[j].begin(), f_atoms[j].end());
+            std::sort(key.begin(), key.end());
+            key.erase(std::unique(key.begin(), key.end()), key.end());
+            by_domain[key].push_back(p);
+        }
+        std::vector<std::pair<std::vector<int>, std::vector<int>>> groups(by_domain.begin(), by_domain.end());
+        std::map<std::vector<int>, std::vector<int>>().swap(by_domain);
+        res.n_fit_factors = (long)groups.size();
+        double fsum = 0.0, fit_ms = 0.0;
+        // chunks of groups: factors of one chunk in parallel, then all pairs of the chunk in parallel (memory: at
+        // most `chunk` factors at a time; a single large domain still threads over its pairs)
+        const int ngroups = (int)groups.size(), chunk = std::max(1, 4 * threads);
+        for (int g0 = 0; g0 < ngroups; g0 += chunk) {
+            const int g1 = std::min(ngroups, g0 + chunk);
+            std::vector<FitFactor> ff(g1 - g0);
+            std::vector<std::vector<int>> fidx(g1 - g0);
+            std::vector<char> gok(g1 - g0, 1);
+#pragma omp parallel for schedule(dynamic, 1) num_threads(threads) reduction(+ : fit_ms)
+            for (int g = g0; g < g1; ++g) {
+                const auto t0 = std::chrono::steady_clock::now();
+                fidx[g - g0] = auxIndices(groups[g].first);
+                gok[g - g0] = makeFitFactor(Jraw, dn, fidx[g - g0], want_eigen, m_ri_metric_cutoff, ff[g - g0]) ? 1 : 0;
+                fit_ms += msSince(t0);
+            }
+            std::vector<std::pair<int, int>> work;  // (pair, group - g0)
+            for (int g = g0; g < g1; ++g)
+                for (int p : groups[g].second) work.push_back({ p, g - g0 });
+#pragma omp parallel for schedule(dynamic, 1) num_threads(threads) reduction(+ : fsum, fit_ms)
+            for (int w = 0; w < (int)work.size(); ++w) {
+                const int p = work[w].first, gl = work[w].second;
+                const std::vector<int>& atoms = groups[g0 + gl].first;
+                fsum += (double)fidx[gl].size();
+                if (!gok[gl]) {
+                    fit_ok[p] = 0;
+                    continue;
+                }
+                PaoSpace sp;
+                if (!pairSpace(p, sp)) {
+                    pair_ok[p] = 0;
+                    continue;
+                }
+                const PairData& pd = P[p];
+                const auto t1 = std::chrono::steady_clock::now();
+                MatX Bi = localRows(Xl, pd.i, atoms, pd, sp, true);
+                ff[gl].fit(Bi);
+                MatX K;
+                if (pd.i == pd.j) {
+                    K = Bi.transpose() * Bi;
+                } else {
+                    MatX Bj = localRows(Xl, pd.j, atoms, pd, sp, true);
+                    ff[gl].fit(Bj);
+                    K = Bi.transpose() * Bj;
+                }
+                fit_ms += msSince(t1);
+                finishPair(p, sp, K);
+            }
+        }
+        res.mean_fit_aux = npairs ? fsum / npairs : 0.0;
+        res.t_fit_ms = fit_ms;  // summed over threads
+    } else {
+        // robust fit with orbital domains, once per orbital over all columns of X_i:
+        //   d_i = J_Fi^-1 X_i(F_i),   Z_i = X_i - J(G_i, F_i) d_i   (rows G_i, the residual of the fit of (P|i r))
+        // so that per pair (ia|jb) = d_i^T Z_j(F_i) + X_i(F_j)^T d_j, which is the robust expression
+        //   d_i^T X_j(F_i) + X_i(F_j)^T d_j - d_i^T J(F_i, F_j) d_j   (F_i is part of G_j for every partner).
+        std::vector<MatX> Dl(o);
+        std::vector<Matrix> Zl(o);
+        std::vector<std::vector<int>> fidx(o);
+        std::vector<char> ook(o, 1);
+        res.n_fit_factors = o;
+        double fit_ms = 0.0;
+#pragma omp parallel for schedule(dynamic, 1) num_threads(threads) reduction(+ : fit_ms)
+        for (int i = 0; i < o; ++i) {
+            const auto t0 = std::chrono::steady_clock::now();
+            fidx[i] = auxIndices(f_atoms[i]);
+            FitFactor ff;
+            if (!makeFitFactor(Jraw, dn, fidx[i], want_eigen, m_ri_metric_cutoff, ff)) {
+                ook[i] = 0;
+                continue;
+            }
+            const Eigen::Index nc = Xl[i].cols();
+            MatX Y((Eigen::Index)fidx[i].size(), nc);
+            int row = 0;
+            for (int A : f_atoms[i]) {
+                const int x0 = x_atom_row[i][A], na = aux_atom_first[A + 1] - aux_atom_first[A];
+                for (int t = 0; t < na; ++t, ++row) Y.row(row) = dn(aux_atom_first[A] + t) * Xl[i].row(x0 + t);
+            }
+            ff.solve(Y);  // Jn^-1 dn X
+            for (Eigen::Index r = 0; r < Y.rows(); ++r) Y.row(r) *= dn(fidx[i][r]);  // d = dn Jn^-1 dn X = J^-1 X
+            // Z_i = X_i - J(G_i, F_i) d_i
+            std::vector<int> gidx = auxIndices(g_atoms[i]);
+            MatX Jg((Eigen::Index)gidx.size(), (Eigen::Index)fidx[i].size());
+            for (size_t q = 0; q < fidx[i].size(); ++q)
+                for (size_t r = 0; r < gidx.size(); ++r) Jg(r, q) = Jraw(gidx[r], fidx[i][q]);
+            Zl[i] = Xl[i];
+            Zl[i].noalias() -= Jg * Y;
+            Dl[i].swap(Y);
+            fit_ms += msSince(t0);
+        }
+        for (int i = 0; i < o; ++i)
+            if (!ook[i]) {
+                CurcumaLogger::error("LMP2: factorisation of an orbital fit domain metric failed");
+                return false;
+            }
+#pragma omp parallel for schedule(dynamic, 1) num_threads(threads) reduction(+ : fit_ms)
+        for (int p = 0; p < npairs; ++p) {
+            PaoSpace sp;
+            if (!pairSpace(p, sp)) {
+                pair_ok[p] = 0;
+                continue;
+            }
+            const PairData& pd = P[p];
+            const int i = pd.i, j = pd.j, mao = (int)pd.idx.size();
+            const auto t0 = std::chrono::steady_clock::now();
+            auto coef = [&](int k) {  // d_k over the pair space: |F_k| x m
+                MatX G(Dl[k].rows(), mao);
+                for (int r = 0; r < mao; ++r) G.col(r) = Dl[k].col(ext_pos[k][pd.idx[r]]);
+                return MatX(G * sp.Xc);
+            };
+            const MatX Di = coef(i);
+            const MatX Zj_Fi = localRows(Zl, j, f_atoms[i], pd, sp, false);  // (P|jb) - (P|fitted jb), P in F_i
+            const MatX Xi_Fj = localRows(Xl, i, f_atoms[j], pd, sp, false);  // (ia|Q), Q in F_j
+            MatX K = Di.transpose() * Zj_Fi;
+            if (i == j)
+                K += Xi_Fj.transpose() * Di;
+            else
+                K += Xi_Fj.transpose() * coef(j);
+            if (i == j) K = (0.5 * (K + K.transpose())).eval();
+            fit_ms += msSince(t0);
+            finishPair(p, sp, K);
+        }
+        res.t_fit_ms = fit_ms;  // summed over threads
     }
     for (int p = 0; p < npairs; ++p)
-        if (!pair_ok[p]) {
-            CurcumaLogger::error("LMP2: eigensolver failed in a pair space");
+        if (!pair_ok[p] || !fit_ok[p]) {
+            CurcumaLogger::error(!pair_ok[p] ? "LMP2: eigensolver failed in a pair space"
+                                             : "LMP2: factorisation of a pair fit domain metric failed");
             return false;
         }
     std::vector<MatX>().swap(Bf);
+    std::vector<Matrix>().swap(Xl);
+    Matrix().swap(Jraw);
     long amp = 0, pno_sum = 0, pao_sum = 0;
     double pno_mb = 0.0;
     for (const auto& pd : P) {
@@ -745,7 +1298,7 @@ bool QMEngine::computeLMP2(const qmint::LMP2Options& opt, qmint::LMP2Result& res
     res.mean_pao = npairs ? (double)pao_sum / npairs : 0.0;
     res.amp_fraction = (double)amp / ((double)o * (o + 1) / 2 * (double)v * v);
     // pair step = domains/PAOs + pair spaces/PNOs, without the RI setup and the B transformation in between
-    res.t_pairs_ms = msSince(t_pairs) - res.t_transform_ms - res.t_ri_setup_ms;
+    res.t_pairs_ms = t_domains_ms + msSince(t_pairstep);
 
     // ---- 5. distant pairs: dipole estimate over the PAO spaces of [i] and [j] ----
     const auto t_dist = std::chrono::steady_clock::now();
@@ -830,7 +1383,7 @@ bool QMEngine::computeLMP2(const qmint::LMP2Options& opt, qmint::LMP2Result& res
         ncpl += (long)slot_q[p].size();
     }
     res.n_couplings = ncpl;
-    res.memory_mb = b_mb + pno_mb + ov_mb;
+    res.memory_mb = (local_fit ? res.factors_mb : b_mb) + pno_mb + ov_mb;
     if (pno_mb + ov_mb > opt.max_memory_mb) {
         CurcumaLogger::error(fmt::format("LMP2: PNO data ({:.0f} MB) and pair overlaps ({:.0f} MB, {} couplings) exceed "
                                          "-qm.lmp2_max_memory_mb {:g}",

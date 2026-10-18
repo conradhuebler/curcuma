@@ -11,7 +11,7 @@
     "true"
    ],
    "natoms": 14,
-   "e_corr_lmp2": -0.588758215104,
+   "e_corr_lmp2": -0.588757740694,
    "e_corr_rimp2": -0.588831811601
   },
   "butane_boys_fc": {
@@ -23,7 +23,7 @@
     "boys"
    ],
    "natoms": 14,
-   "e_corr_lmp2": -0.588754941507,
+   "e_corr_lmp2": -0.58875446732,
    "e_corr_rimp2": -0.588831811601
   },
   "benzene_fc": {
@@ -33,7 +33,7 @@
     "true"
    ],
    "natoms": 12,
-   "e_corr_lmp2": -0.780498052531,
+   "e_corr_lmp2": -0.78049805302,
    "e_corr_rimp2": -0.780687914228
   },
   "acetic_acid_dimer_fc": {
@@ -45,7 +45,73 @@
     "8"
    ],
    "natoms": 16,
+   "e_corr_lmp2": -1.283144123343,
+   "e_corr_rimp2": -1.283712321993
+  },
+  "global_butane_fc": {
+   "xyz": "test_cases/structures/medium/butane.anti.xyz",
+   "flags": [
+    "-qm.frozen_core",
+    "true",
+    "-qm.lmp2_fit",
+    "global"
+   ],
+   "natoms": 14,
+   "e_corr_lmp2": -0.588758215104,
+   "e_corr_rimp2": -0.588831811601
+  },
+  "global_acetic_acid_dimer_fc": {
+   "xyz": "test_cases/structures/clusters/acetic-acid-dimer.cyclic-hb.xyz",
+   "flags": [
+    "-qm.frozen_core",
+    "true",
+    "-qm.lmp2_pair_cut",
+    "8",
+    "-qm.lmp2_fit",
+    "global"
+   ],
+   "natoms": 16,
    "e_corr_lmp2": -1.283146757427,
+   "e_corr_rimp2": -1.283712321993
+  },
+  "local_pair_r4_acetic_acid_dimer_fc": {
+   "xyz": "test_cases/structures/clusters/acetic-acid-dimer.cyclic-hb.xyz",
+   "flags": [
+    "-qm.frozen_core",
+    "true",
+    "-qm.lmp2_pair_cut",
+    "8",
+    "-qm.lmp2_fit",
+    "local",
+    "-qm.lmp2_fit_domain",
+    "pair",
+    "-qm.lmp2_fit_radius",
+    "4",
+    "-qm.lmp2_ao_cut",
+    "1e-6"
+   ],
+   "natoms": 16,
+   "e_corr_lmp2": -1.283091707137,
+   "e_corr_rimp2": -1.283712321993
+  },
+  "local_orbital_r4_acetic_acid_dimer_fc": {
+   "xyz": "test_cases/structures/clusters/acetic-acid-dimer.cyclic-hb.xyz",
+   "flags": [
+    "-qm.frozen_core",
+    "true",
+    "-qm.lmp2_pair_cut",
+    "8",
+    "-qm.lmp2_fit",
+    "local",
+    "-qm.lmp2_fit_domain",
+    "orbital",
+    "-qm.lmp2_fit_radius",
+    "4",
+    "-qm.lmp2_ao_cut",
+    "1e-6"
+   ],
+   "natoms": 16,
+   "e_corr_lmp2": -1.28309119674,
    "e_corr_rimp2": -1.283712321993
   }
  }

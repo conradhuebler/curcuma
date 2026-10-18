@@ -247,6 +247,51 @@ private:
     void applyFitTranspose(Matrix& X) const;
 };
 
+// ---------------------------------------------------------------------------
+// Integral-direct 3-index integrals (Claude Generated, Oct 2026, WP15 local fitting)
+// ---------------------------------------------------------------------------
+
+/// @brief Raw 3-index integrals (P|mn) block by block, without storing a tensor (local MP2 with local fit domains,
+/// qm_lmp2.cpp). One block = one auxiliary shell c and two orbital shells A, B, in the ACTIVE orbital basis
+/// (cartesian -> spherical via Q exactly as RIJK::setup) and the active auxiliary basis (harmonicTransform for
+/// L >= 2 when spherical). Same kernel (pairBlock), same transforms and the same screening expression as
+/// RIJK::setup: a block is zero when sqrt((AB|AB)) sqrt((c|c)) < screening. Orbital shell pairs whose Gaussian
+/// product prefactor exp(-ab/(a+b) R_AB^2) is below 1e-22 for every primitive pair are not built at all (their
+/// Schwarz factor is far below any screening threshold), so setup memory and time grow with the number of
+/// overlapping shell pairs (linear for large molecules), not with n^2.
+class ThreeIndexDirect {
+public:
+    ThreeIndexDirect();
+    ~ThreeIndexDirect();
+    /// @param basis flat cartesian orbital basis (Bohr), @param Q cartesian -> active transform (nullptr/empty =
+    /// cartesian), @param aux auxiliary shells (auxiliaryShells). Returns false with a reason in `why`.
+    bool setup(const std::vector<GTO::Orbital>& basis, const Matrix* Q, const std::vector<Shell>& aux, bool spherical_aux,
+               double screening, int threads, std::string& why);
+    int n() const;                  ///< active orbital functions
+    int naux() const;               ///< active auxiliary functions
+    int nShells() const;            ///< orbital shells
+    int shellFirst(int A) const;    ///< first active function of orbital shell A
+    int shellWidth(int A) const;    ///< active functions of orbital shell A
+    int shellAtom(int A) const;
+    int nAuxShells() const;
+    int auxFirst(int c) const;      ///< first active auxiliary function of aux shell c (functions of one atom are contiguous)
+    int auxWidth(int c) const;
+    int auxAtom(int c) const;
+    double auxSchwarz(int c) const;
+    /// Schwarz factor sqrt(max |(AB|AB)|) of the orbital shell pair (either order), 0 if the pair was not built.
+    double pairSchwarz(int A, int B) const;
+    long nPairs() const;            ///< orbital shell pairs A <= B that were built
+    /// All shells B (either order, incl. A itself) that form a built pair with A, ascending.
+    const std::vector<int>& neighbours(int A) const;
+    /// (P|mn), P in aux shell c, m in shell A, n in shell B (active functions), out[(a * wB + b) * wc + p].
+    /// Returns false (out untouched) when the block is screened or the pair was not built.
+    bool block(int c, int A, int B, std::vector<double>& out) const;
+
+private:
+    struct Impl;
+    std::shared_ptr<Impl> m_impl;
+};
+
 }  // namespace qmri
 
 namespace qmint {

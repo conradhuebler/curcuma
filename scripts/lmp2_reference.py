@@ -3,7 +3,8 @@
 
 Claude Generated (Oct 2026, WP15). The local PNO-RI-MP2 (method lmp2) has no external program that reproduces it
 to 1e-8 (other localisation, domains and PNO details in ORCA DLPNO-MP2 or the Python prototype), so the reference
-is curcuma itself at default thresholds: a regression reference, not a validation. Each case runs
+is curcuma itself at default thresholds (since Oct 18 2026 the local fit; the global fit and small fit radii as
+extra cases): a regression reference, not a validation. Each case runs
 `curcuma -sp <xyz> -method lmp2 -qm.lmp2_check true` and stores E_corr(LMP2) and the canonical RI-MP2 correlation
 energy of the same run (RI-MP2 itself is validated against PySCF in ctest -L qm_mp2). Tolerance 1e-7 Eh (the
 iteration stops at |dE| < 1e-9, max|R| < 1e-7; the value is independent of the thread count by construction,
@@ -27,6 +28,17 @@ CASES = {
     "benzene_fc": ("test_cases/structures/small/benzene.ideal-d6h.xyz", ["-qm.frozen_core", "true"]),
     "acetic_acid_dimer_fc": ("test_cases/structures/clusters/acetic-acid-dimer.cyclic-hb.xyz",
                              ["-qm.frozen_core", "true", "-qm.lmp2_pair_cut", "8"]),
+    # global fit from the stored RI tensor (the default before Oct 18 2026)
+    "global_butane_fc": ("test_cases/structures/medium/butane.anti.xyz", ["-qm.frozen_core", "true", "-qm.lmp2_fit", "global"]),
+    "global_acetic_acid_dimer_fc": ("test_cases/structures/clusters/acetic-acid-dimer.cyclic-hb.xyz",
+                                    ["-qm.frozen_core", "true", "-qm.lmp2_pair_cut", "8", "-qm.lmp2_fit", "global"]),
+    # local fit with integral-direct 3-index integrals at radius 4 Bohr (truncation active), Oct 2026
+    "local_pair_r4_acetic_acid_dimer_fc": ("test_cases/structures/clusters/acetic-acid-dimer.cyclic-hb.xyz",
+                                           ["-qm.frozen_core", "true", "-qm.lmp2_pair_cut", "8", "-qm.lmp2_fit", "local",
+                                            "-qm.lmp2_fit_domain", "pair", "-qm.lmp2_fit_radius", "4", "-qm.lmp2_ao_cut", "1e-6"]),
+    "local_orbital_r4_acetic_acid_dimer_fc": ("test_cases/structures/clusters/acetic-acid-dimer.cyclic-hb.xyz",
+                                              ["-qm.frozen_core", "true", "-qm.lmp2_pair_cut", "8", "-qm.lmp2_fit", "local",
+                                               "-qm.lmp2_fit_domain", "orbital", "-qm.lmp2_fit_radius", "4", "-qm.lmp2_ao_cut", "1e-6"]),
 }
 TOL = 1e-7
 

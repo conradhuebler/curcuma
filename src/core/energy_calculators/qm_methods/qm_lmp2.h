@@ -24,6 +24,10 @@
  *     orthonormalised (eigenvalues of the PAO overlap below 1e-6 removed), pseudo-canonical.
  *  5. RI integrals K_ij^ab = (ia|jb) = sum_P B_ia^P B_jb^P from B_{i,r}^P (local i, PAO r), the half-transformed
  *     fitted 3-index tensor (same aux basis as RI-MP2, -qm.ri_mp2_aux).
+ *     -qm.lmp2_fit local (Oct 2026): no stored tensor; raw (P|i r) integral-direct for P in the union of the fit
+ *     domains of i's partners, then a local fit per pair: robust with orbital domains F_i, F_j (default) or symmetric
+ *     with F_ij = F_i u F_j (qm_lmp2.cpp section 3b; Dunlap 2000, Werner/Manby/Knowles 2003). F_i = aux functions
+ *     on atoms within lmp2_fit_radius of i's Boughton-Pulay atoms; infinite radius + lmp2_ao_cut 0 = global fit.
  *  6. PNOs: semicanonical amplitudes T = -K / (e_a + e_b - F_ii - F_jj) in the pair space, pair density
  *     D = T~^T T + T~ T^T with T~ = (4T - 2T^T) / (1 + delta_ij); eigenvectors with occupation < T_CutPNO are
  *     dropped. Semicanonical truncation correction dE_PNO = e_ij^sc(PAO space) - e_ij^sc(PNO space) per pair.
@@ -101,6 +105,18 @@ BEGIN_PARAMETER_DEFINITION(qm)
     PARAM(lmp2_max_memory_mb, Double, 32000.0,
           "LMP2: memory limit (MB) for the half-transformed 3-index factors B_{i,r}^P (two copies during the fit), the PNO data and the pair overlaps. Above it LMP2 stops with an error naming the size. The RI tensor itself is limited by -qm.ri_max_memory_mb.",
           "Correlation", {})
+    PARAM(lmp2_fit, String, "local",
+          "LMP2: density fitting of the pair integrals (ia|jb). local (default since Oct 2026): integral-direct 3-index integrals (no stored tensor) and local fit domains (see lmp2_fit_domain, lmp2_fit_radius, lmp2_ao_cut; added error <= 1e-6 Eh/atom at 8 Bohr in the WP15 tests). global: one fit over all auxiliary functions from the stored 3-index tensor (QMEngine::correlationRI, memory ~N^3, the WP15 behaviour before Oct 18 2026).",
+          "Correlation", {})
+    PARAM(lmp2_fit_domain, String, "orbital",
+          "LMP2 with lmp2_fit local: orbital = robust (Dunlap) fit with the orbital domains F_i and F_j, (ia|jb) ~ d_ia (P|jb) + (ia|Q) d_jb - d_ia J d_jb, one Cholesky per orbital (default; same error as pair from 6 Bohr on in the WP15 tests, cheaper); pair = fit (ia|jb) with the Coulomb metric of F_ij = F_i u F_j (Cholesky per distinct domain).",
+          "Correlation", {})
+    PARAM(lmp2_fit_radius, Double, 8.0,
+          "LMP2 with lmp2_fit local: fit domain F_i = auxiliary functions on every atom within this distance (Bohr) of an atom of the Boughton-Pulay domain of orbital i. A very large value (1e6) gives the global fit.",
+          "Correlation", {})
+    PARAM(lmp2_ao_cut, Double, 1.0e-6,
+          "LMP2 with lmp2_fit local: coefficients of the localised orbitals and of the PAOs with |C| at or below this are dropped in the integral-direct half transformation (AO sparsity); 0 = keep all (then the local path with an infinite fit radius equals the global fit).",
+          "Correlation", {})
 END_PARAMETER_DEFINITION
 
 namespace qmint {
@@ -122,6 +138,17 @@ struct LMP2Options {
     int max_iter = 50;
     int diis = 8;
     double max_memory_mb = 32000.0;
+    std::string fit = "local";         ///< local | global
+    std::string fit_domain = "orbital";  ///< orbital | pair (local fit only)
+    double fit_radius = 8.0;           ///< Bohr (local fit only)
+    double ao_cut = 1.0e-6;            ///< |C| threshold of the integral-direct transformation (local fit only)
+    // Special members out of line: the implicit inline ones trip -Winline.
+    LMP2Options();
+    LMP2Options(const LMP2Options&);
+    LMP2Options(LMP2Options&&) noexcept;
+    LMP2Options& operator=(const LMP2Options&);
+    LMP2Options& operator=(LMP2Options&&) noexcept;
+    ~LMP2Options();
 };
 
 /// Result of one local MP2 evaluation (Hartree, milliseconds). Claude Generated (Oct 2026).
@@ -145,9 +172,24 @@ struct LMP2Result {
     double memory_mb = 0.0;     ///< B factors (one copy) + PNO data + overlaps
     // timings
     // t_pairs_ms: domains, PAOs, pair spaces and PNOs (RI setup and B transformation excluded)
+    // t_fit_ms (local fit only): fit of the pair integrals (Cholesky factors, solves), part of t_pairs_ms
     double t_ri_setup_ms = 0.0, t_localize_ms = 0.0, t_transform_ms = 0.0, t_pairs_ms = 0.0, t_overlap_ms = 0.0,
-           t_iter_ms = 0.0, t_distant_ms = 0.0;
+           t_iter_ms = 0.0, t_distant_ms = 0.0, t_fit_ms = 0.0;
+    // local fit only (Claude Generated, Oct 2026)
+    std::string fit_label = "global";
+    double mean_fit_aux = 0.0;    ///< mean auxiliary functions per fit domain (F_ij for pair, F_i for orbital)
+    double mean_x_rows = 0.0;     ///< mean auxiliary rows of the stored per-orbital integrals (P|i r)
+    long n_fit_factors = 0;       ///< metric factorisations (distinct fit domains)
+    long n_int_blocks = 0;        ///< (aux shell | shell pair) integral blocks computed (after screening)
+    double factors_mb = 0.0;      ///< per-orbital integrals (+ orbital fit coefficients) + metric
     std::string info;
+    // Special members out of line: the implicit inline ones trip -Winline.
+    LMP2Result();
+    LMP2Result(const LMP2Result&);
+    LMP2Result(LMP2Result&&) noexcept;
+    LMP2Result& operator=(const LMP2Result&);
+    LMP2Result& operator=(LMP2Result&&) noexcept;
+    ~LMP2Result();
 };
 
 }  // namespace qmint

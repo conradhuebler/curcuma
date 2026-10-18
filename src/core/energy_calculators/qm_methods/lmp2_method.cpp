@@ -75,6 +75,10 @@ LMP2Method::LMP2Method(const json& config)
     o.max_iter = (int)readNumber(ec, "lmp2_max_iter", o.max_iter);
     o.diis = (int)readNumber(ec, "lmp2_diis", o.diis);
     o.max_memory_mb = readNumber(ec, "lmp2_max_memory_mb", o.max_memory_mb);
+    o.fit = readString(ec, "lmp2_fit", o.fit, true);
+    o.fit_domain = readString(ec, "lmp2_fit_domain", o.fit_domain, true);
+    o.fit_radius = readNumber(ec, "lmp2_fit_radius", o.fit_radius);
+    o.ao_cut = readNumber(ec, "lmp2_ao_cut", o.ao_cut);
     m_check = readBool(ec, "lmp2_check", false);
 }
 
@@ -153,6 +157,14 @@ double LMP2Method::calculateEnergy(bool gradient)
                                           "Fock cut {:g}",
                                           m_options.localizer, m_options.bp_threshold, m_options.domain_radius, m_options.pno_cut,
                                           m_options.pair_cut, m_options.distant_pairs, m_options.fock_cut));
+        if (m_options.fit == "local")
+            CurcumaLogger::result(fmt::format("  fit: local, {} domains, radius {:g} Bohr, ao_cut {:g} (integral-direct 3-index integrals, "
+                                              "no stored RI tensor); mean fit domain {:.0f} aux functions, {} metric factorisations, "
+                                              "mean X rows {:.0f}",
+                                              m_options.fit_domain, m_options.fit_radius, m_options.ao_cut, r.mean_fit_aux,
+                                              r.n_fit_factors, r.mean_x_rows));
+        else
+            CurcumaLogger::result("  fit: global (stored RI tensor)");
         CurcumaLogger::result(fmt::format("  pairs kept {} of {} (distant {})", r.n_pairs_kept, r.n_pairs_total, r.n_pairs_distant));
         CurcumaLogger::result(fmt::format("  PNOs per kept pair: mean {:.2f}, max {} (PAO pair space mean {:.1f}; domain atoms mean {:.2f})",
                                           r.mean_pno, r.max_pno, r.mean_pao, r.mean_domain_atoms));
@@ -172,10 +184,13 @@ double LMP2Method::calculateEnergy(bool gradient)
                                               d / std::max(1, r.n_atoms), 100.0 * r.e_corr() / ref));
         }
         if (v >= 2) {
-            CurcumaLogger::info(fmt::format("LMP2 timing: SCF {:.1f} ms, LMP2 {:.1f} ms (RI setup {:.1f}, localisation {:.1f}, B "
-                                            "transformation {:.1f}, pairs/PNOs {:.1f}, distant {:.1f}, overlaps {:.1f}, "
+            CurcumaLogger::info(fmt::format("LMP2 timing: SCF {:.1f} ms, LMP2 {:.1f} ms (RI setup {:.1f}, localisation {:.1f}, {} "
+                                            "{:.1f}, pairs/PNOs {:.1f}{}, distant {:.1f}, overlaps {:.1f}, "
                                             "iterations {:.1f}){}; memory {:.0f} MB ({})",
-                                            t_scf, t_lmp2, r.t_ri_setup_ms, r.t_localize_ms, r.t_transform_ms, r.t_pairs_ms,
+                                            t_scf, t_lmp2, r.t_ri_setup_ms, r.t_localize_ms,
+                                            m_options.fit == "local" ? "integral-direct (P|i r)" : "B transformation", r.t_transform_ms,
+                                            r.t_pairs_ms,
+                                            m_options.fit == "local" ? fmt::format(" (fit, thread-summed {:.1f})", r.t_fit_ms) : std::string(),
                                             r.t_distant_ms, r.t_overlap_ms, r.t_iter_ms,
                                             m_check ? fmt::format(", RI-MP2 check {:.1f} ms", t_check) : std::string(),
                                             r.memory_mb, r.info));

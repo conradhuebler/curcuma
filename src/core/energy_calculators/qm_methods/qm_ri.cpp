@@ -1097,6 +1097,129 @@ void RIJK::build(const Matrix& P, Matrix& J, Matrix* K, const Eigen::MatrixXd* V
 }
 
 // =================================================================================
+// 4b. Integral-direct 3-index blocks (Claude Generated, Oct 2026, WP15 local fitting)
+// =================================================================================
+// The same helpers as RIJK::setup (makePair, unitShell, schwarzOf, pairBlock, transformAxis3, the OutMaps),
+// called block by block; RIJK itself is not touched. Shell pairs are kept per first shell A in a sorted list of
+// partners B >= A, so a lookup is a binary search.
+
+struct ThreeIndexDirect::Impl {
+    std::vector<Shell> osh, aux, units;
+    OutMap oo, ao;
+    std::vector<std::vector<int>> partner;  ///< partner[A] = sorted B >= A with a built pair
+    std::vector<std::vector<int>> neigh;    ///< neigh[A] = sorted B (either order) with a built pair
+    std::vector<std::vector<Pair>> pairs;   ///< pairs[A][k] = pair (A, partner[A][k])
+    std::vector<Pair> apairs;
+    double screening = 1e-12;
+    long npairs = 0;
+    const Pair* find(int A, int B) const
+    {
+        const std::vector<int>& p = partner[A];
+        auto it = std::lower_bound(p.begin(), p.end(), B);
+        if (it == p.end() || *it != B) return nullptr;
+        return &pairs[A][it - p.begin()];
+    }
+};
+
+ThreeIndexDirect::ThreeIndexDirect() = default;
+ThreeIndexDirect::~ThreeIndexDirect() = default;
+
+bool ThreeIndexDirect::setup(const std::vector<GTO::Orbital>& basis, const Matrix* Q, const std::vector<Shell>& aux,
+                             bool spherical_aux, double screening, int threads, std::string& why)
+{
+    auto d = std::make_shared<Impl>();
+    d->osh = orbitalShells(basis);
+    d->oo = orbitalOutMap(d->osh, (int)basis.size(), Q);
+    d->aux = aux;
+    d->ao = auxOutMap(d->aux, spherical_aux);
+    d->screening = screening;
+    const int ns = (int)d->osh.size(), na = (int)d->aux.size();
+    if (ns == 0 || na == 0) {
+        why = "empty orbital or auxiliary basis";
+        return false;
+    }
+    d->units.reserve(na);  // apairs point into units: no reallocation after this
+    for (const Shell& s : d->aux) d->units.push_back(unitShell(s));
+    d->apairs.reserve(na);
+    for (int c = 0; c < na; ++c) d->apairs.push_back(makePair(d->aux[c], d->units[c]));
+    for (Pair& p : d->apairs) p.schwarz = schwarzOf(p);
+    d->partner.assign(ns, {});
+    d->pairs.resize(ns);
+    constexpr double kPrefactorCut = 1.0e-22;  // exp(-ab/(a+b) R^2) below this for every primitive pair: not built
+#pragma omp parallel for schedule(dynamic) num_threads(std::max(1, threads))
+    for (int A = 0; A < ns; ++A) {
+        const Shell& sA = d->osh[A];
+        for (int B = A; B < ns; ++B) {
+            const Shell& sB = d->osh[B];
+            const double R2 = (sA.x - sB.x) * (sA.x - sB.x) + (sA.y - sB.y) * (sA.y - sB.y) + (sA.z - sB.z) * (sA.z - sB.z);
+            double kmax = 0.0;
+            for (double a : sA.exps)
+                for (double b : sB.exps) kmax = std::max(kmax, std::exp(-a * b / (a + b) * R2));
+            if (kmax < kPrefactorCut) continue;
+            d->partner[A].push_back(B);
+            d->pairs[A].push_back(makePair(sA, sB));
+            d->pairs[A].back().schwarz = schwarzOf(d->pairs[A].back());
+        }
+    }
+    d->neigh.assign(ns, {});
+    for (int A = 0; A < ns; ++A) {
+        d->npairs += (long)d->partner[A].size();
+        for (int B : d->partner[A]) {
+            d->neigh[A].push_back(B);
+            if (B != A) d->neigh[B].push_back(A);
+        }
+    }
+    for (auto& v : d->neigh) std::sort(v.begin(), v.end());
+    m_impl = d;
+    return true;
+}
+
+int ThreeIndexDirect::n() const { return m_impl->oo.n; }
+int ThreeIndexDirect::naux() const { return m_impl->ao.n; }
+int ThreeIndexDirect::nShells() const { return (int)m_impl->osh.size(); }
+int ThreeIndexDirect::shellFirst(int A) const { return m_impl->oo.first[A]; }
+int ThreeIndexDirect::shellWidth(int A) const { return m_impl->oo.width[A]; }
+int ThreeIndexDirect::shellAtom(int A) const { return m_impl->osh[A].atom; }
+int ThreeIndexDirect::nAuxShells() const { return (int)m_impl->aux.size(); }
+int ThreeIndexDirect::auxFirst(int c) const { return m_impl->ao.first[c]; }
+int ThreeIndexDirect::auxWidth(int c) const { return m_impl->ao.width[c]; }
+int ThreeIndexDirect::auxAtom(int c) const { return m_impl->aux[c].atom; }
+double ThreeIndexDirect::auxSchwarz(int c) const { return m_impl->apairs[c].schwarz; }
+long ThreeIndexDirect::nPairs() const { return m_impl->npairs; }
+const std::vector<int>& ThreeIndexDirect::neighbours(int A) const { return m_impl->neigh[A]; }
+
+double ThreeIndexDirect::pairSchwarz(int A, int B) const
+{
+    const Pair* p = m_impl->find(std::min(A, B), std::max(A, B));
+    return p ? p->schwarz : 0.0;
+}
+
+bool ThreeIndexDirect::block(int c, int A, int B, std::vector<double>& out) const
+{
+    const Impl& d = *m_impl;
+    const int A0 = std::min(A, B), B0 = std::max(A, B);
+    const Pair* pr = d.find(A0, B0);
+    if (!pr || pr->schwarz * d.apairs[c].schwarz < d.screening) return false;
+    thread_local std::vector<double> buf, tmp;
+    pairBlock(*pr, d.apairs[c], buf);
+    int dims[3] = { (int)d.osh[A0].lmn.size(), (int)d.osh[B0].lmn.size(), (int)d.aux[c].lmn.size() };
+    if (d.oo.T[A0].size()) transformAxis3(buf, tmp, dims, 0, d.oo.T[A0]);
+    if (d.oo.T[B0].size()) transformAxis3(buf, tmp, dims, 1, d.oo.T[B0]);
+    if (d.ao.T[c].size()) transformAxis3(buf, tmp, dims, 2, d.ao.T[c]);
+    if (A == A0) {
+        out.swap(buf);
+        return true;
+    }
+    // requested (A, B) with A > B: out[(a * wB + b) * wc + p] = buf[(b * wA + a) * wc + p] with wA = dims[1]
+    const int wB = dims[0], wA = dims[1], wc = dims[2];
+    out.resize((size_t)wA * wB * wc);
+    for (int a = 0; a < wA; ++a)
+        for (int b = 0; b < wB; ++b)
+            std::memcpy(&out[((size_t)a * wB + b) * wc], &buf[((size_t)b * wA + a) * wc], sizeof(double) * wc);
+    return true;
+}
+
+// =================================================================================
 // 6. Analytic nuclear gradient of the RI energy (Claude Generated, Oct 2026)
 // =================================================================================
 //
