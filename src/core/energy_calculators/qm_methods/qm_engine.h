@@ -47,6 +47,8 @@ namespace qmint {
 class QMGpuRI;  // qm_gpu_ri_backend.h
 struct MP2Options;  // WP11, qm_mp2.h
 struct MP2Result;
+struct CCSDOptions;  // WP13, qm_ccsd.h
+struct CCSDResult;
 }
 
 /**
@@ -249,6 +251,10 @@ public:
     /// gradientBohr()/gradientParts() ({1e, 2e, E_nn}, Eh/Bohr). False on error (reason in gradientError()).
     /// Implemented in qm_mp2_grad.cpp.
     bool computeMP2Gradient(const qmint::MP2Options& opt, double c_os, double c_ss, qmint::MP2Result& res);
+    /// WP13 (Claude Generated, Oct 2026): canonical closed-shell CCSD on the converged exact-integral RHF of the
+    /// last Calculation() (CPU, full MO integrals incl. v^4, no RI, no gradient). Implemented in qm_ccsd.cpp.
+    /// False on error (unconverged amplitudes, memory limit, -qm.ri active).
+    bool computeCCSD(const qmint::CCSDOptions& opt, qmint::CCSDResult& res);
 
 private:
     // Method identity

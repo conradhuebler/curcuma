@@ -4,8 +4,8 @@
   WP11 Schritt 2 (RI-MP2 mit def2-universal-JKFIT/-JFIT als Korrelations-Hilfsbasis, CPU + CUDA) sind
   implementiert, 🤖 AI-generated, ⚙️ machine-tested (Okt 2026, Abschnitte WP10, WP11 und RI-MP2 unten), ebenso der
   analytische Gradient fuer RI-J/RI-JK-HF (Abschnitt "WP10 -- Gradient") und der analytische Gradient des kanonischen
-  MP2/SCS/SOS (CPU, 2e-Ableitungsteil auch CUDA; Abschnitt "WP11 -- MP2-Gradient"); RI-MP2 mit def2-SVP/C, der
-  RI-MP2-Gradient und WP13 sind Plan; fuer WP15 (und die Metrikfrage aus WP14) liegt eine Python-Machbarkeitsmessung
+  MP2/SCS/SOS (CPU, 2e-Ableitungsteil auch CUDA; Abschnitt "WP11 -- MP2-Gradient"); RI-MP2 mit def2-SVP/C und der
+  RI-MP2-Gradient sind Plan; WP13 (kanonisches RCCSD, CPU) ist implementiert (Abschnitt WP13); fuer WP15 (und die Metrikfrage aus WP14) liegt eine Python-Machbarkeitsmessung
   vor (Abschnitt WP15), kein Engine-Code.
 - **Abhaengigkeit:** WP3 (RHF, ERI-Engine, `QMEngine`), fuer die GPU-Teile die Stufen Q-G1/Q-G2 aus
   [../QM_GPU_ROADMAP.md](../QM_GPU_ROADMAP.md).
@@ -573,20 +573,74 @@ steht in der Git-Historie dieser Datei.
 
 ## WP13 -- Closed-shell CCSD (RCCSD)
 
-**Stand 18.10.2026: Python-Prototyp, kein C++** (🤖 AI-generated, ⚙️ machine-tested;
-[../LOCAL_CCSD_PROTOTYPE_2026-10.md](../LOCAL_CCSD_PROTOTYPE_2026-10.md), Skripte `scripts/local_ccsd/`): RCCSD gegen PySCF
-<= 2.6e-11 Eh, ORCA 6.1 <= 7.9e-10 Eh (6 Molekuele, def2-SVP, frozen core), als Referenz fuer eine C++-Portierung nutzbar;
-dazu CCSD in ueberlappenden Paardomaenen (PAO/PNO): Truncationsfehler wie LMP2, Schwarz-Vorkonditionierer ohne Gewinn.
+**Stand 18.10.2026: kanonisches RCCSD in der Engine (CPU), Methode `ccsd`** (🤖 AI-generated, ⚙️ machine-tested;
+menschlicher Produktionstest steht aus). Code: `qm_methods/qm_ccsd.{h,cpp}` (Integrale, Residuum, Loeser,
+`QMEngine::computeCCSD`), `ccsd_method.{h,cpp}` (Wrapper), Tests `test_cases/qm_ccsd/` (`ctest -L qm_ccsd`), Referenz
+`scripts/ccsd_reference.py`. Vorlage war der Python-Prototyp `scripts/local_ccsd/ccsd_canonical.py`
+([../LOCAL_CCSD_PROTOTYPE_2026-10.md](../LOCAL_CCSD_PROTOTYPE_2026-10.md)); jede Kontraktion traegt im C++ denselben
+Index-String wie dort.
 
-- Spinadaptierte Amplitudengleichungen (T1, T2), kanonische RHF-Referenz, DIIS auf den Amplituden,
-  MO-Integrale aus WP11. Speicher O(v^4) fuer das `(ab|cd)`-Integral im Standardschema; Skalierung O(o^2 v^4).
-- **Validierung:** gegen PySCF `cc.CCSD` und ORCA `CCSD` (`! CCSD def2-SVP`, eingefrorener Rumpf wie in
-  der Referenz), Energien auf 1e-8 Eh; Konvergenzverhalten (Iterationszahl) als zweite Kontrolle.
-- **(T)-Korrektur:** nicht angefragt; wird als sinnvolle Folgearbeit gefuehrt (CCSD(T) ist der Standard und die
-  vorhandene Benchmark-Referenz DLPNO-CCSD(T) im Vault zielt darauf).
-- **Nicht im Umfang:** DLPNO/Domaenen-Truncation, offene Schalen (UHF/ROHF-CC), Gradient und EOM.
-- **Skalierung:** praktisch bis etwa 200 Basisfunktionen (Benzol/def2-SVP: 114 Funktionen, v ~ 93) im
-  Speicher; die (ab|cd)-Schleife ist der GPU-Kandidat.
+- **Verfahren:** spinadaptierte Amplitudengleichungen nach Hirata et al., JCP 120, 2581 (2004), Gl. 35-45 (Form von
+  PySCF `rintermediates.py`), als Residuum R = N - e t; Jacobi-Schritt + Pulay-DIIS (8 Vektoren), Start t1 = 0,
+  t2 = MP2, also Iteration 0 = MP2-Energie. Kanonische Fock-Bloecke aus den Orbitalenergien (f_ov = 0).
+  Ladder als eine (o^2 x v^2)(v^2 x v^2)-GEMM, t1-Anteil der Ladder als o^3 v^3-Term (kein zweites v^4-Feld).
+- **Integrale:** volle Vierfach-Transformation des AO-Tensors (Quelle wie MP2: gespeicherter SCF-Tensor, Download vom
+  Device oder Neuaufbau bis `-qm.mp2_max_memory_mb`) in den aktiven MO-Raum, dann Bloecke oooo, ovoo, ovov, oovv, ovvo,
+  ovvv, vvvv. Speicher n^3 m + n^2 m^2 waehrend der Transformation, danach v^4 + o v^3 + Amplituden; Schaetzung gegen
+  `-qm.cc_max_memory_mb` (32000) vor dem Start, darueber Fehler mit der benoetigten Groesse.
+- **Kontraktionen:** `qmint::ccsdContract("kcld,ilcd->ki", ...)`: Permutation (nur wenn noetig, gekachelt) + eine
+  BLAS-GEMM mit Transpositions-Flags; OpenMP ueber einen Block je Thread (MKL sequentiell, siehe "BLAS (Korrektur)").
+- **Schalter** (Modul `qm`): `-qm.cc_max_iter` (100), `-qm.cc_threshold` (1e-10, |dE|), `-qm.cc_residual_threshold`
+  (1e-8, max|R|), `-qm.cc_diis` (8), `-qm.cc_max_memory_mb`; `-qm.frozen_core` wie bei MP2. Nicht konvergiert = Fehler.
+- **Ausgabe:** E(HF), E(MP2 corr) (Iteration 0), E(CCSD corr), Iterationen mit letztem dE und max|R|, T1-Diagnostik
+  (sqrt(sum t_ia^2 / 2o), dieselbe Konvention wie PySCF und ORCA, an H2O geprueft), Gesamtenergie.
+- **Fehler statt Ergebnis:** Gradient (`-opt`, `-gradient`: "ccsd has no analytic gradient"), `-qm.ri j|jk` (ein
+  RI-HF-Referenzzustand mit exakten CC-Integralen waere eine Mischmethode), ungerade Elektronenzahl, Speicherlimit.
+  `-gpu cuda`: keine Device-Implementierung, gezaehlter Fallback `qm_ccsd` (SCF kann auf dem Device laufen).
+
+**Validierung** (def2-SVP, `-qm.scf_threshold 1e-10`, je ein Lauf; PySCF 2.14 RHF conv_tol 1e-12 + `cc.CCSD`
+conv_tol 1e-12; ORCA 6.1 `! RHF CCSD def2-SVP ExtremeSCF [No]FrozenCore`, `%mdci STol 1e-10`, Werte aus
+`job.property.txt`). curcuma - Referenz fuer E_corr(CCSD), Eh:
+
+| Molekuel | n | o / v (voll) | E_corr voll | - PySCF | - ORCA | E_corr fc | - PySCF | - ORCA | it |
+|---|---|---|---|---|---|---|---|---|---|
+| H2O | 24 | 5 / 19 | -0.209360921262 | 2.2e-10 | 5.0e-10 | -0.207022884026 | 2.0e-10 | 4.8e-10 | 12 |
+| NH3 | 29 | 5 / 24 | -0.209721196637 | -3.3e-10 | 3.2e-11 | -0.207197008337 | -3.5e-10 | 3.0e-11 | 16 |
+| CH4 | 34 | 5 / 29 | -0.187388088172 | -2.4e-11 | 1.8e-10 | -0.184068822300 | -2.4e-11 | 2.2e-10 | 13 |
+| Formaldehyd | 38 | 8 / 30 | -0.336554568128 | 4.4e-11 | 7.9e-10 | -0.331728862546 | 4.3e-11 | 8.2e-10 | 16 |
+| Ethan | 58 | 9 / 49 | -0.344209177048 | 2.7e-11 | 3.7e-10 | -0.338032497971 | 2.7e-11 | 4.4e-10 | 15 |
+| Wasserdimer | 48 | 10 / 38 | -0.427867429254 | -2.7e-11 | 5.9e-10 | -0.423398893268 | -8.8e-11 | 5.5e-10 | 16 / 15 |
+| Benzol | 114 | 21 / 93 | -0.836086277674 | 5.5e-11 | 1.3e-09 | -0.819682777012 | 5.6e-11 | 1.5e-09 | 15 |
+
+- Maximal 3.5e-10 Eh gegen PySCF, 1.5e-9 Eh gegen ORCA (Ziel 1e-8); E(HF) gegen PySCF <= 7.3e-12 Eh, Iteration 0
+  gegen PySCF-MP2 <= 2.1e-10 Eh; T1-Diagnostik gegen PySCF <= 5e-9 (Druckgenauigkeit 1e-8). Der Rest gegen PySCF
+  (2-3e-10 bei H2O/NH3) folgt aus `-qm.cc_threshold 1e-10` (Prototyp mit 1e-11: 8e-12); der Rest gegen ORCA folgt
+  ORCAs RHF (E(HF) curcuma - ORCA bis 1.2e-9).
+- Weitere Tests: integral-direktes SCF (Tensor fuer CCSD neu aufgebaut), 1 Thread, die drei Fehlerpfade. ORCA lief nur
+  hier, nicht auf einer zweiten Maschine (Betreibervorgabe offen).
+- **Zeiten** (CPU, `-qm.threads 16`, CCSD-Teil ohne SCF, Transformation / Iterationen; je ein Lauf, **unter Last**: ein
+  paralleler Job belegte etwa 16 der 24 Kerne, die Zahlen sind daher obere Schranken und die Thread-Skalierung ist
+  nicht aussagekraeftig):
+
+  | System (n, o, v) | voll | fc |
+  |---|---|---|
+  | H2O (24, 5, 19) | 5 / 23 ms | 4 / 13 ms |
+  | NH3 (29, 5, 24) | 10 / 48 ms | 7 / 29 ms |
+  | CH4 (34, 5, 29) | 16 / 75 ms | 16 / 46 ms |
+  | Formaldehyd (38, 8, 30) | 24 / 271 ms | 21 / 140 ms |
+  | Wasserdimer (48, 10, 38) | 65 / 939 ms | 61 / 569 ms |
+  | Ethan (58, 9, 49) | 131 / 1387 ms | 107 / 814 ms |
+  | Benzol (114, 21, 93) | 1.6 / 40.6 s | 1.3 / 22.3 s |
+
+  Benzol fc mit 1 / 4 / 16 Threads: Iterationen 42.3 / 24.8 / 22.3 s (unter derselben Last). Schaetzung (nicht
+  gemessen): die Iteration hat bei Benzol fc ~1e11 Flops; ein unbelasteter Lauf mit 16 Threads sollte deutlich unter
+  der Messung liegen. Speicher Benzol voll geschaetzt 3.6 GB.
+- **Nicht getestet:** offene Schale (nicht implementiert), Elemente ausser H, C, N, O, andere Basen als def2-SVP,
+  kartesisch 6d, Systeme ueber 114 Basisfunktionen, geladene Molekuele, Thread-Skalierung auf freier Maschine,
+  schlecht konvergierende Faelle (grosse T1, fast entartete HOMO/LUMO).
+- **Nicht implementiert gegenueber PySCF/ORCA:** (T), Gradient, Dichten/Eigenschaften, RI- oder Cholesky-Integrale,
+  AO-getriebene Ladder (kein v^4 im Speicher), Device-Pfad, Symmetrie, offene Schalen, EOM, lokale Varianten.
+- **Folgearbeit:** (T)-Korrektur (Standard, Ziel der DLPNO-CCSD(T)-Referenz im Vault); Ladder auf dem Device.
 
 ## WP15 -- Lokales MP2 mit PNO-Truncation in ueberlappenden Domaenen (Idee des Betreibers, Okt 2026)
 

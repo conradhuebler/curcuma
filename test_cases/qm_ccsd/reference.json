@@ -1,0 +1,244 @@
+{
+ "_about": "PySCF canonical RCCSD/def2-SVP references for ctest -L qm_ccsd (scripts/ccsd_reference.py)",
+ "_sources": {
+  "pyscf": "2.14.0",
+  "basis": "def2-svp (PySCF library), spherical",
+  "scf": "RHF conv_tol 1e-12, conv_tol_grad 1e-8",
+  "ccsd": "cc.CCSD(mf), conv_tol 1e-12, conv_tol_normt 1e-10, frozen=None and frozen=n_core",
+  "orca": "ORCA 6.1.0, ! RHF CCSD def2-SVP ExtremeSCF [No]FrozenCore, %mdci STol 1e-10 (second reference, not used by the ctest)"
+ },
+ "_units": "Hartree",
+ "cases": {
+  "H2O": {
+   "xyz": "qm_1e/H2O.xyz",
+   "nbf": 24,
+   "hf": -75.95751379841977,
+   "full": {
+    "frozen": 0,
+    "e_ccsd": -0.20936092148285762,
+    "e_mp2": -0.19998428404630098,
+    "t1_diagnostic": 0.004599880151578275,
+    "pyscf_iterations": 39,
+    "pyscf_seconds": 52.89
+   },
+   "fc": {
+    "frozen": 1,
+    "e_ccsd": -0.20702288422084386,
+    "e_mp2": -0.1973855431295785,
+    "t1_diagnostic": 0.005145870280364589,
+    "pyscf_iterations": 39,
+    "pyscf_seconds": 49.03
+   },
+   "orca": {
+    "full": {
+     "hf": -75.95751379903591,
+     "e_ccsd": -0.20936092175726126,
+     "t1_diagnostic": 0.00459988
+    },
+    "fc": {
+     "hf": -75.95751379903592,
+     "e_ccsd": -0.20702288450818584,
+     "t1_diagnostic": 0.00514587
+    }
+   }
+  },
+  "NH3": {
+   "xyz": "qm_1e/NH3.xyz",
+   "nbf": 29,
+   "hf": -56.14009755321331,
+   "full": {
+    "frozen": 0,
+    "e_ccsd": -0.20972119630637218,
+    "e_mp2": -0.1936363034686947,
+    "t1_diagnostic": 0.006267673215318738,
+    "pyscf_iterations": 45,
+    "pyscf_seconds": 56.57
+   },
+   "fc": {
+    "frozen": 1,
+    "e_ccsd": -0.20719700798461613,
+    "e_mp2": -0.19087204551104203,
+    "t1_diagnostic": 0.00703961617767113,
+    "pyscf_iterations": 45,
+    "pyscf_seconds": 58.81
+   },
+   "orca": {
+    "full": {
+     "hf": -56.14009755196378,
+     "e_ccsd": -0.20972119666869404,
+     "t1_diagnostic": 0.006267673
+    },
+    "fc": {
+     "hf": -56.14009755196378,
+     "e_ccsd": -0.20719700836731747,
+     "t1_diagnostic": 0.007039616
+    }
+   }
+  },
+  "CH4": {
+   "xyz": "qm_1e/CH4.xyz",
+   "nbf": 34,
+   "hf": -40.16917038820069,
+   "full": {
+    "frozen": 0,
+    "e_ccsd": -0.18738808814842958,
+    "e_mp2": -0.16473494354437138,
+    "t1_diagnostic": 0.004975328162832706,
+    "pyscf_iterations": 37,
+    "pyscf_seconds": 52.41
+   },
+   "fc": {
+    "frozen": 1,
+    "e_ccsd": -0.18406882227616905,
+    "e_mp2": -0.16123893639946454,
+    "t1_diagnostic": 0.005457473192323178,
+    "pyscf_iterations": 36,
+    "pyscf_seconds": 44.54
+   },
+   "orca": {
+    "full": {
+     "hf": -40.16917038818458,
+     "e_ccsd": -0.18738808834812715,
+     "t1_diagnostic": 0.004975328
+    },
+    "fc": {
+     "hf": -40.16917038818458,
+     "e_ccsd": -0.1840688225170428,
+     "t1_diagnostic": 0.005457473
+    }
+   }
+  },
+  "formaldehyde": {
+   "xyz": "qm_hf3c/formaldehyde.xyz",
+   "nbf": 38,
+   "hf": -113.77845052788389,
+   "full": {
+    "frozen": 0,
+    "e_ccsd": -0.33655456817197305,
+    "e_mp2": -0.3214541494596235,
+    "t1_diagnostic": 0.01399607876125008,
+    "pyscf_iterations": 47,
+    "pyscf_seconds": 72.09
+   },
+   "fc": {
+    "frozen": 2,
+    "e_ccsd": -0.3317288625891667,
+    "e_mp2": -0.31621813678929145,
+    "t1_diagnostic": 0.016122974939473733,
+    "pyscf_iterations": 47,
+    "pyscf_seconds": 67.49
+   },
+   "orca": {
+    "full": {
+     "hf": -113.77845052710967,
+     "e_ccsd": -0.33655456891891417,
+     "t1_diagnostic": 0.013996079
+    },
+    "fc": {
+     "hf": -113.77845052710967,
+     "e_ccsd": -0.3317288633695286,
+     "t1_diagnostic": 0.016122975
+    }
+   }
+  },
+  "ethane": {
+   "xyz": "structures/small/ethane.xyz",
+   "nbf": 58,
+   "hf": -79.17493999286461,
+   "full": {
+    "frozen": 0,
+    "e_ccsd": -0.344209177074722,
+    "e_mp2": -0.30845189924808836,
+    "t1_diagnostic": 0.005110832128715963,
+    "pyscf_iterations": 44,
+    "pyscf_seconds": 72.12
+   },
+   "fc": {
+    "frozen": 2,
+    "e_ccsd": -0.3380324979979361,
+    "e_mp2": -0.3019100501399127,
+    "t1_diagnostic": 0.005705838613528137,
+    "pyscf_iterations": 44,
+    "pyscf_seconds": 66.58
+   },
+   "orca": {
+    "full": {
+     "hf": -79.17493999285841,
+     "e_ccsd": -0.34420917742053053,
+     "t1_diagnostic": 0.005110832
+    },
+    "fc": {
+     "hf": -79.17493999285841,
+     "e_ccsd": -0.338032498415477,
+     "t1_diagnostic": 0.005705839
+    }
+   }
+  },
+  "water_dimer": {
+   "xyz": "qm_hf3c/water_dimer.xyz",
+   "nbf": 48,
+   "hf": -151.9311251230306,
+   "full": {
+    "frozen": 0,
+    "e_ccsd": -0.42786742922653676,
+    "e_mp2": -0.4099720685987176,
+    "t1_diagnostic": 0.005944610351976951,
+    "pyscf_iterations": 56,
+    "pyscf_seconds": 91.38
+   },
+   "fc": {
+    "frozen": 2,
+    "e_ccsd": -0.42339889318039653,
+    "e_mp2": -0.4049866382765419,
+    "t1_diagnostic": 0.006656877550117754,
+    "pyscf_iterations": 56,
+    "pyscf_seconds": 83.34
+   },
+   "orca": {
+    "full": {
+     "hf": -151.93112512236706,
+     "e_ccsd": -0.4278674298399121,
+     "t1_diagnostic": 0.005944611
+    },
+    "fc": {
+     "hf": -151.93112512236704,
+     "e_ccsd": -0.4233988938171189,
+     "t1_diagnostic": 0.006656878
+    }
+   }
+  },
+  "benzene": {
+   "xyz": "qm_hf3c/benzene.xyz",
+   "nbf": 114,
+   "hf": -230.53597728780386,
+   "full": {
+    "frozen": 0,
+    "e_ccsd": -0.8360862777288947,
+    "e_mp2": -0.7970301245409854,
+    "t1_diagnostic": 0.008738249183275894,
+    "pyscf_iterations": 53,
+    "pyscf_seconds": 503.66
+   },
+   "fc": {
+    "frozen": 6,
+    "e_ccsd": -0.8196827770678904,
+    "e_mp2": -0.7794624728459281,
+    "t1_diagnostic": 0.010293286291716365,
+    "pyscf_iterations": 53,
+    "pyscf_seconds": 192.06
+   },
+   "orca": {
+    "full": {
+     "hf": -230.5359772873379,
+     "e_ccsd": -0.8360862789492136,
+     "t1_diagnostic": 0.008738249
+    },
+    "fc": {
+     "hf": -230.5359772873379,
+     "e_ccsd": -0.8196827784676499,
+     "t1_diagnostic": 0.010293286
+    }
+   }
+  }
+ }
+}

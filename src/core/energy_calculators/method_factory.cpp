@@ -29,6 +29,7 @@
 #include "qm_methods/qm_method.h"    // Claude Generated: native QM engine (hf/lda/pbe/b3lyp)
 #include "qm_methods/hf3c_method.h"  // Claude Generated: native HF-3c composite (Sep 2026)
 #include "qm_methods/mp2_method.h"   // Claude Generated: native canonical MP2 (WP11, Oct 2026)
+#include "qm_methods/ccsd_method.h"  // Claude Generated: native canonical RCCSD (WP13, Oct 2026)
 #include "qm_methods/dispersion_method.h"
 #include "qm_methods/eht_method.h"
 #include "qm_methods/external_gfnff_method.h"
@@ -541,6 +542,13 @@ const std::vector<MethodDescriptor>& MethodFactory::methodTable()
           [](const std::string& m, const json& c) -> std::unique_ptr<ComputationalMethod> {
               CurcumaLogger::success("Method '" + m + "' resolved to native RI-MP2");
               return std::make_unique<MP2Method>(m, c); } },
+        // Claude Generated (Oct 2026, WP13): canonical closed-shell CCSD on the native RHF; energy only.
+        { {"ccsd"}, "Quantum Methods (native)",
+          "Native canonical RCCSD on the native RHF (exact integrals, no RI; H-Ne, closed shell, energy only; -qm.frozen_core, -qm.cc_*)",
+          always, {{"Native", always}},
+          [](const std::string&, const json& c) -> std::unique_ptr<ComputationalMethod> {
+              CurcumaLogger::success("Method 'ccsd' resolved to native canonical RCCSD");
+              return std::make_unique<CCSDMethod>(c); } },
         // ---- native force fields ----
         { {"gfnff", "gfnff-fast"}, "Force Fields (native)", "GFN-FF, native (gfnff-fast: frozen charges/CN; -gpu cuda|rocm)",
           always, {{"Native", always},
