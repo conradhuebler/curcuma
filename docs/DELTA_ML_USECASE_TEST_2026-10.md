@@ -4,6 +4,12 @@ Status: 🤖 AI-generated scripts, ⚙️ machine-tested. One molecule. Not huma
 (Sonnet), the label/deployment analysis below by the orchestrator. Scripts: `scripts/deltaml_usecase/`
 (absolute paths to the original working directory are hard-coded; adapt `common.py`).
 
+**Superseded in part (2026-10-19):** Tests 1 and 2 below used datasets written by the internal labelling of `-activelearn`,
+which had two defects (gradient labels 1.89 times too large; base energy different from a fresh single point). Their
+conclusion that Delta-ML does not improve ranking or pre-optimisation is withdrawn; the repeated measurement with consistent
+labels is in [DELTA_ML_USECASE_TEST2_2026-10.md](DELTA_ML_USECASE_TEST2_2026-10.md). Test 0, Test 3 (cost) and the section on the
+label/deployment mismatch remain valid.
+
 ## Question
 
 Does Delta-ML (GFN-FF base, GFN2 reference) improve conformer ranking and pre-optimisation compared with GFN-FF alone,
@@ -76,7 +82,7 @@ GFN-FF 0.32 +- 0.05, model A 3.56 +- 0.08 (11x GFN-FF, 3.9 % of GFN2), model B 8
 Model A does not scale with the thread count (1 thread 3.61 ms). Fit time A 12 s, B 145 s, energy model 1.5 s and 9.5 s.
 Delta-ML therefore costs 11 to 25 times GFN-FF, not "GFN-FF cost".
 
-## Conclusion
+## Conclusion (withdrawn, see the second round)
 
 For this molecule, with these models, Delta-ML does not improve conformer ranking or pre-optimisation relative to GFN-FF:
 the joint models are worse in ranking and produce spurious minima, the energy model is level with the base in the

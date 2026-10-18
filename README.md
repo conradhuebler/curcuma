@@ -189,10 +189,14 @@ write a restart file and finish. A second Ctrl-C while `stop` exists ends the pr
 ### Delta-ML: cheap method with a learned correction
 
 Learns the energy difference between a cheap base method and an expensive reference. The aim is conformer search
-and pre-optimisation near reference quality; **on the one molecule tested this is not achieved** (the joint model ranks
-conformers worse than GFN-FF and optimises into spurious minima, cost 11 to 25 times GFN-FF; the forces are about 4x
-better, see [docs/DELTA_ML_USECASE_TEST_2026-10.md](docs/DELTA_ML_USECASE_TEST_2026-10.md)). Conformers at fixed topology
-only, not reactions.
+and pre-optimisation near reference quality. On two molecules (one 90-atom molecule and a trisaccharide) the correction
+orders conformers better than GFN-FF alone when it is trained on labels from fresh single points (Spearman gain +0.06 to
++0.29, paired in 10 of 10 folds; also for blocked folds and as a tendency for GFN-FF minima, where pair accuracy rises and
+the Spearman interval mostly includes 0). Not shown: that it finds the lowest conformer more often, any result on other
+molecules, a DFT reference. It costs 11 to 25 times GFN-FF per step. **The internal labelling of `-activelearn` still has a
+base-energy offset (under repair); the gradient-label unit error is fixed. Results obtained with the internal labelling before
+this fix are void** (see [docs/DELTA_ML_USECASE_TEST2_2026-10.md](docs/DELTA_ML_USECASE_TEST2_2026-10.md)). Conformers at fixed
+topology only, not reactions.
 
 ```sh
 curcuma -activelearn conf.xyz -method gfnff -ref_method gfn2 -threads 8   # fit
@@ -200,9 +204,7 @@ curcuma -opt mol.xyz -method deltaml:conf.deltaml.json                    # use
 curcuma -sp  mol.xyz -method deltaml:conf.deltaml.energy.json             # energy model
 ```
 
-Measured held out on one 90-atom molecule: the forces improve about 4x, the relative energies of the main model are
-not better than GFN-FF; the energy-only second model written by the same fit (`.deltaml.energy.json`, for `-sp`,
-not for `-opt`/`-md`) lowers the energy error, without a better ranking.
+The fit writes a second, energy-only model (`.deltaml.energy.json`, for `-sp`, not for `-opt`/`-md`).
 
 AI-generated, machine-tested; human production testing pending. See [docs/DELTA_ML.md](docs/DELTA_ML.md).
 
