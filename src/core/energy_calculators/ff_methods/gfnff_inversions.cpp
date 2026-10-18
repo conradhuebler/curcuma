@@ -767,7 +767,22 @@ std::vector<Inversion> GFNFF::generateInversionsNative() const
         if (nb_count != 3) continue;
 
         int Z_i = m_atoms[i];
-        bool has_pi = (topo_info.pi_fragments[i] > 0);
+        // piadr as the out-of-plane loop sees it (gfnff_ini.f90:1844) is the POST-Hückel
+        // array — `piadr = itmp` at :1016 replaced it long before. Claude Generated
+        // (Sep 2026, GMTKN55 MB16-43/12): this file kept reading the pre-Hückel candidate
+        // list, which the Known Issue #21(h) sweep corrected in the torsion and angle code
+        // but not here. The two differ exactly for an atom that is a pi CANDIDATE whose
+        // system the Hückel never solves — a one-atom system, skipped by `npi < 2`.
+        // MB16-43/12 has such a nitrogen: pre-Hückel it is its own pi system, post-Hückel
+        // it is not a pi atom at all. The reference therefore gives it the SATURATED-N
+        // inversion (omega0 = 80 deg, fc = sum of 0.60*sqrt(repz) over its neighbours =
+        // 2.678, i.e. the ammonia inversion barrier) while curcuma took the planar-pi
+        // branch (omega0 = 0, fc ~ 0). The term COUNT is the same either way, which is why
+        // this never surfaced as a missing term — 12.5 kcal/mol on that structure.
+        const std::vector<int>& inv_piadr =
+            (static_cast<int>(topo_info.pi_atoms_final.size()) == m_atomcount)
+                ? topo_info.pi_atoms_final : topo_info.pi_fragments;
+        bool has_pi = (inv_piadr[i] > 0);
         bool is_saturated_N = (!has_pi && Z_i == 7);
 
         if (!has_pi && !is_saturated_N) continue;

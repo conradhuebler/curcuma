@@ -1,6 +1,6 @@
 /*
  * <Extended Hückel Theory Implementation in Curcuma>
- * Copyright (C) 2023 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2023 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -19,6 +19,7 @@
  * Slater-type orbitals and the Wolfsberg-Helmholz approximation.
  */
 
+#include "src/core/units.h"
 #include "eht.h"
 
 #include "interface/abstract_interface.h"
@@ -267,9 +268,9 @@ Matrix EHT::MakeOverlap(Basisset& basisset)
 
     // Aktualisiere die Atompositionen in allen Orbitalen
     for (int i = 0; i < basisset.size(); ++i) {
-        basisset[i].x = m_geometry(basisset[i].atom, 0) / 0.529177;
-        basisset[i].y = m_geometry(basisset[i].atom, 1) / 0.529177;
-        basisset[i].z = m_geometry(basisset[i].atom, 2) / 0.529177;
+        basisset[i].x = m_geometry(basisset[i].atom, 0) / CurcumaUnit::Length::bohr_radius_or_legacy(0.529177);
+        basisset[i].y = m_geometry(basisset[i].atom, 1) / CurcumaUnit::Length::bohr_radius_or_legacy(0.529177);
+        basisset[i].z = m_geometry(basisset[i].atom, 2) / CurcumaUnit::Length::bohr_radius_or_legacy(0.529177);
     }
 
     // Berechne die Überlappungsmatrix direkt
@@ -495,7 +496,7 @@ void EHT::printOrbitalAnalysisVerbose() const
 
         CurcumaLogger::param("HOMO", fmt::format("{:.4f} eV", homo_energy));
         CurcumaLogger::param("LUMO", fmt::format("{:.4f} eV", lumo_energy));
-        CurcumaLogger::param("HOMO-LUMO_gap", fmt::format("{:.4f} eV ({:.2f} Eh)", gap, gap / 27.211));
+        CurcumaLogger::param("HOMO-LUMO_gap", fmt::format("{:.4f} eV ({:.2f} Eh)", gap, gap / CurcumaUnit::Energy::HARTREE_TO_EV));
     }
 
     // Orbital energy extremes

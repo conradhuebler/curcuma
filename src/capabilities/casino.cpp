@@ -134,7 +134,7 @@ bool Casino::Initialise()
     }
 
     // Initialize energy calculator
-    std::string method = m_config.value("method", "uff");
+    std::string method = m_config.value("method", "gfnff");
     m_energy_calculator = new EnergyCalculator(method, m_config);
     m_energy_calculator->setMolecule(m_molecule.getMolInfo());
 

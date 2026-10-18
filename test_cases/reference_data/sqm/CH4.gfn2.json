@@ -1,6 +1,6 @@
 {
   "molecule": "CH4",
-  "geometry_file": "test_cases/molecules/larger/CH4.xyz",
+  "geometry_file": "test_cases/structures/small/methane.xyz",
   "charge": 0,
   "spin_unpaired": 0,
   "method": "gfn2",

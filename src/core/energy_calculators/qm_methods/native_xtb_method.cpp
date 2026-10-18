@@ -55,6 +55,11 @@ json NativeXtbMethod::getDefaultConfig(MethodType method)
         { "scf_damping", 0.4 },          // Density damping factor
         { "scf_mode", "broyden" },       // broyden(default) | diis | plain | level-shift
         { "scf_guess", "eeq" },          // Initial charge guess: eeq(default) | h0
+        { "sto6g_legacy_4sp", false },   // false(default) = tblite's STO-6G 4s/4p tables;
+                                         // true = xtb's older ones (K, Ca, Ge-Kr only).
+                                         // The two references disagree here and nowhere
+                                         // else; tblite's fit the exact Slater function
+                                         // better. See STO_CGTO.hpp.
         { "eigensolver", "mkl" },        // Eigensolve backend: mkl(default, dsyevd) | native/dnc
                                          // (self-contained Householder+QL, no LAPACK; WP4)
                                          // eeq seeds shell charges from a single-shot dftd4 EEQ
@@ -126,6 +131,16 @@ std::string NativeXtbMethod::eigensolverString() const
     return m_parameters.value("eigensolver", std::string("mkl"));
 }
 
+std::string NativeXtbMethod::scfPrecondString() const
+{
+    if (m_parameters.contains("xtb") && m_parameters["xtb"].is_object()
+        && m_parameters["xtb"].contains("scf_precond") && m_parameters["xtb"]["scf_precond"].is_string())
+        return m_parameters["xtb"]["scf_precond"].get<std::string>();
+    if (m_parameters.contains("scf_precond") && m_parameters["scf_precond"].is_string())
+        return m_parameters["scf_precond"].get<std::string>();
+    return "none";
+}
+
 double NativeXtbMethod::electronicTemperature() const
 {
     if (m_parameters.contains("xtb") && m_parameters["xtb"].is_object()
@@ -182,7 +197,19 @@ bool NativeXtbMethod::setMolecule(const Mol& mol)
                         ? "mkl|native|lobpcg" : "mkl|native|lobpcg");
                 return false;
             }
-            m_c1_driver = std::make_unique<curcuma::xtb::FragmentScfDriver>(m_method, m_parameters);
+            // -scf_precond acts on the dense CPU Broyden loop only; the large-system drivers own
+            // their XTB objects, so strip the switch from their config (Claude Generated, Oct 2026).
+            json driver_cfg = m_parameters;
+            const std::string precond = scfPrecondString();
+            if (!precond.empty() && precond != "none") {
+                CurcumaLogger::warn(fmt::format("scf_precond '{}' ignored: -large_system_mode '{}' is active "
+                                                "(dense CPU SCF only); scalar Broyden seed is used",
+                                                precond, mode_str));
+                if (driver_cfg.contains("xtb") && driver_cfg["xtb"].is_object())
+                    driver_cfg["xtb"]["scf_precond"] = "none";
+                driver_cfg["scf_precond"] = "none";
+            }
+            m_c1_driver = std::make_unique<curcuma::xtb::FragmentScfDriver>(m_method, driver_cfg);
             m_c1_driver->setIntraThreads(m_thread_count);
             if (!m_c1_driver->setMolecule(mol)) {
                 handleError("large_system driver molecule initialization");

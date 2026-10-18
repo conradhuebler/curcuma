@@ -1,0 +1,3 @@
+# Structures from test_cases/structures (id, optionally 'as <file name>'); see structures/README.md
+cl2-anion as cl2m_ea25.xyz
+hydronium-water2 as h3op_h2o2.xyz

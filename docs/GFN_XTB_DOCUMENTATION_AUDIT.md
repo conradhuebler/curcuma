@@ -289,7 +289,7 @@ Fast jedes Dokument enthält die gleichen TBLite-Referenzen:
 | `src/helpers/xtb_helper.cpp` | Wird es noch gebaut/genutzt? |
 | `src/helpers/gfnff_term_validator.cpp` | Wird es noch gebaut/genutzt? |
 | `test_cases/GFNFF_TESTING.md` | Ist es aktueller als `GFNFF_STATUS.md`? |
-| `test_cases/GFNFF_TEST_RESULTS_2026-01-12.txt` | Hat es Ersatz durch CTest? |
+| `docs/archive/GFNFF_TEST_RESULTS_2026-01-12.txt` | Hat es Ersatz durch CTest? |
 
 ---
 
@@ -323,7 +323,7 @@ docs/
 | Datei | Grund |
 |---|---|
 | `test_cases/GFNFF_TESTING.md` | Konnte nicht gelesen werden |
-| `test_cases/GFNFF_TEST_RESULTS_2026-01-12.txt` | Konnte nicht gelesen werden |
+| `docs/archive/GFNFF_TEST_RESULTS_2026-01-12.txt` | Konnte nicht gelesen werden |
 | `docs/theory/PHASE1.3_FORMULA_FIXES.md` | Vermutlich historisch, nicht gelesen |
 | `docs/theory/PHASE2_TOPOLOGY_DETECTION.md` | Vermutlich historisch, nicht gelesen |
 | `docs/theory/PHASE3_EEQ_CHARGES.md` | Vermutlich historisch, nicht gelesen |

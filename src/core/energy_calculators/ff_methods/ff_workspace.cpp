@@ -73,12 +73,14 @@ void FFWorkspace::setInteractionLists(GFNFFParameterSet&& params)
 
     // Method type and distance unit factor
     m_method_type = params.method_type;
-    m_au = (m_method_type != FFMethodType::GFN_FF) ? 1.889726125 : 1.0;
+    m_au = (m_method_type != FFMethodType::GFN_FF) ? CurcumaUnit::Length::angstrom_to_bohr_or_legacy(1.889726125) : 1.0;
 
     m_dispersion_enabled = params.dispersion_enabled;
     m_hbond_enabled = params.hbond_enabled;
     m_repulsion_enabled = params.repulsion_enabled;
     m_coulomb_enabled = params.coulomb_enabled;
+    m_coulomb_implicit = params.coulomb_implicit;
+    m_coulomb_implicit_rcut = params.coulomb_implicit_rcut;
 
     // Build bonded pairs cache for fast repulsion lookup
     m_bonded_pairs.clear();
@@ -87,9 +89,23 @@ void FFWorkspace::setInteractionLists(GFNFFParameterSet&& params)
         m_bonded_pairs.insert({bond.j, bond.i});
     }
 
-    // Extract per-atom Coulomb self-energy parameters from pairs (for TERM 2+3 in postProcess)
-    // Same logic as ForceField::setGFNFFParameters lines 418-444
-    if (!m_coulombs.empty() && m_natoms > 0) {
+    // Per-atom Coulomb self-energy parameters (for TERM 2+3 in postProcess).
+    // Claude Generated (Sep 2026): prefer the dedicated per-atom fields
+    // (GFNFF::generateCoulombSelfEnergyNative()), which are populated regardless
+    // of pair count. Falling back to scanning m_coulombs (the previous, buggy
+    // behaviour) only when a producer of GFNFFParameterSet doesn't fill the new
+    // fields (e.g. UFF/QMDFF, which share this struct but have no EEQ self-energy)
+    // — that fallback is empty for an isolated atom (0 pairs for N=1), which was
+    // exactly the bug: native GFN-FF returned 0.0 Eh for any single charged atom
+    // because the pair-derived vectors stayed empty and postProcess()'s
+    // `m_coul_gam.size() == m_natoms` guard silently skipped the self-energy.
+    if (params.coul_self_gam.size() == m_natoms && m_natoms > 0) {
+        m_coul_chi_base = std::move(params.coul_self_chi_base);
+        m_coul_gam = std::move(params.coul_self_gam);
+        m_coul_alp = std::move(params.coul_self_alp);
+        m_coul_cnf = std::move(params.coul_self_cnf);
+        m_coul_chi_static = std::move(params.coul_self_chi_static);
+    } else if (!m_coulombs.empty() && m_natoms > 0) {
         m_coul_chi_base = Vector::Zero(m_natoms);
         m_coul_gam = Vector::Zero(m_natoms);
         m_coul_alp = Vector::Zero(m_natoms);
@@ -143,6 +159,25 @@ void FFWorkspace::partition()
         pr.bonded_reps = linearRange(m_bonded_reps.size(), t, T);
         pr.nonbonded_reps = linearRange(m_nonbonded_reps.size(), t, T);
         pr.coulombs = linearRange(m_coulombs.size(), t, T);
+        // Implicit Coulomb: split the OUTER atom index so that every thread gets roughly the
+        // same number of (i<j) pairs - atom i carries natoms-1-i of them, so equal atom counts
+        // would leave thread 0 with most of the work. Claude Generated (Sep 2026).
+        if (m_coulomb_implicit && m_natoms > 1) {
+            const double total = 0.5 * static_cast<double>(m_natoms) * (m_natoms - 1);
+            auto atom_at = [&](int k) {                 // first atom whose prefix >= k/T of total
+                if (k <= 0) return 0;
+                if (k >= T) return m_natoms;
+                const double want = total * k / T;
+                // pairs(i) = i*natoms - i*(i+1)/2 solved for i
+                const double n = m_natoms;
+                const double disc = (n - 0.5) * (n - 0.5) - 2.0 * want;
+                const int i = static_cast<int>(std::ceil((n - 0.5) - std::sqrt(std::max(0.0, disc))));
+                return std::min(m_natoms, std::max(0, i));
+            };
+            pr.coulomb_atoms = { atom_at(t), atom_at(t + 1) };
+        } else {
+            pr.coulomb_atoms = { 0, 0 };
+        }
         pr.hbonds = linearRange(m_hbonds.size(), t, T);
         pr.xbonds = linearRange(m_xbonds.size(), t, T);
         pr.atm_triples = linearRange(m_atm_triples.size(), t, T);
@@ -169,6 +204,13 @@ void FFWorkspace::setCNDerivatives(const Vector& cn, const Vector& cnf,
     m_dcn = dcn;
 }
 
+// Claude Generated (Aug 2026): react topology mode — full list swap on a live workspace.
+void FFWorkspace::rebuildInteractionLists(GFNFFParameterSet&& params)
+{
+    setInteractionLists(std::move(params));
+    partition();
+}
+
 void FFWorkspace::updateHBonds(const std::vector<GFNFFHydrogenBond>& hbonds)
 {
     m_hbonds = hbonds;
@@ -187,6 +229,47 @@ void FFWorkspace::updateXBonds(const std::vector<GFNFFHalogenBond>& xbonds)
     for (int t = 0; t < T; ++t) {
         m_partitions[t].xbonds = linearRange(m_xbonds.size(), t, T);
     }
+}
+
+void FFWorkspace::updateRepulsion(const std::vector<GFNFFRepulsion>& bonded_reps,
+                                   const std::vector<GFNFFRepulsion>& nonbonded_reps)
+{
+    m_bonded_reps = bonded_reps;
+    m_nonbonded_reps = nonbonded_reps;
+    // Re-partition repulsion ranges only (same pattern as updateHBonds/updateXBonds)
+    int T = m_num_threads;
+    for (int t = 0; t < T; ++t) {
+        m_partitions[t].bonded_reps = linearRange(m_bonded_reps.size(), t, T);
+        m_partitions[t].nonbonded_reps = linearRange(m_nonbonded_reps.size(), t, T);
+    }
+}
+
+void FFWorkspace::updateD4Dispersions(std::vector<GFNFFDispersion>&& pairs)
+{
+    // Claude Generated (Sep 2026): same swap + re-partition pattern as updateRepulsion().
+    m_d4_dispersions = std::move(pairs);
+    int T = m_num_threads;
+    for (int t = 0; t < T; ++t)
+        m_partitions[t].d4_dispersions = linearRange(m_d4_dispersions.size(), t, T);
+}
+
+void FFWorkspace::updateCoulombPairs(std::vector<GFNFFCoulomb>&& pairs)
+{
+    // Claude Generated (Sep 2026): same swap + re-partition pattern as updateRepulsion().
+    // The per-atom self-energy parameters (m_coul_*) are topology-only and stay untouched.
+    m_coulombs = std::move(pairs);
+    int T = m_num_threads;
+    for (int t = 0; t < T; ++t)
+        m_partitions[t].coulombs = linearRange(m_coulombs.size(), t, T);
+}
+
+void FFWorkspace::updateBondHBData(const std::vector<int>& nr_hb, std::vector<BondHBEntry>&& data)
+{
+    // Claude Generated (Sep 2026): see the declaration. nr_hb is indexed like m_bonds.
+    const size_t nb = std::min(nr_hb.size(), m_bonds.size());
+    for (size_t b = 0; b < nb; ++b)
+        m_bonds[b].nr_hb = nr_hb[b];
+    m_bond_hb_data = std::move(data);
 }
 
 void FFWorkspace::setCoulombSelfEnergyParams(const Vector& chi_base, const Vector& gam,
@@ -214,6 +297,8 @@ double FFWorkspace::calculate(bool gradient)
             executeUFF(t);
         else if (m_method_type == FFMethodType::QMDFF)
             executeQMDFF(t);
+        else if (m_method_type == FFMethodType::CG)
+            executeCG(t);
         else
             executeGFNFF(t);
     };

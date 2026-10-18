@@ -1,7 +1,7 @@
 {
   "molecule": {
     "name": "water",
-    "geometry_file": "../test_cases/molecules/trimers/water.xyz",
+    "geometry_file": "../test_cases/structures/small/water.xyz",
     "atoms": [
       {
         "element": "O",

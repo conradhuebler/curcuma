@@ -63,7 +63,8 @@ The per-iteration MKL eigensolve is capped at `min(intra_threads, 8)`. The D&C
 `dsyevd` is memory-bandwidth-bound and **regresses** past ~8 threads (complex/231:
 215 ms @8 vs 290 ms @16 on a 16-core Ryzen), while the hand-threaded
 Fock/gradient/setup regions still use the full `-threads N`. Override with
-`CURCUMA_EIG_MAX_THREADS`. Runs at ≤8 threads are byte-unchanged; at
+`-eigensolver_max_threads N` (the environment variable `CURCUMA_EIG_MAX_THREADS`
+still works and still wins). Runs at ≤8 threads are byte-unchanged; at
 `-threads 16` vs gxtb cold-start the ratio went gfn1 1.18→0.86×, gfn2 1.75→1.54×.
 
 ## Performance (complex, 231 atoms, nao=558, single-point E+grad)

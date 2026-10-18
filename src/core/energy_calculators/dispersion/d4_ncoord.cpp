@@ -11,6 +11,7 @@
  */
 
 #include "d4_ncoord.h"
+#include "src/core/math_compat.h"
 
 #include <cmath>
 
@@ -89,7 +90,7 @@ constexpr int MAX_Z = 118;
 // erf counting function: 0.5·(1 + erf(−k·(rr−1)))
 inline double erf_count(double k, double rr)
 {
-    return 0.5 * (1.0 + std::erf(-k * (rr - 1.0)));
+    return 0.5 * (1.0 + curcuma_erf(-k * (rr - 1.0)));
 }
 
 // d(erf_count)/d(rr) = −k/sqrt(π)·exp(−(k·(rr−1))²)

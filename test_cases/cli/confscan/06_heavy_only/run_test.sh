@@ -21,15 +21,16 @@ EXP_SUMMARY="14 4 0 114"   # accepted reorder reuse skipped (differs from 01's "
 
 run_test() {
     cd "$TEST_DIR"
-    # NOTE: run single-threaded. Heavy-atom RMSD (-rmsd.protons false) with threads>1
-    # can intermittently stall under CPU load (a pre-existing concurrency issue in the
-    # reorder path, see docs/CONFSCAN_TESTS.md / AIChangelog). threads=1 is deterministic
-    # and still validates the heavy-only filtering result.
+    # NOTE: runs multi-threaded on purpose. Heavy-atom RMSD (-rmsd.protons false) with
+    # threads>1 used to stall intermittently (lost wakeup in CxxThreadPool, fixed
+    # 2026-08-03 - see AIChangelog); this test is one of the two that exposed it, so it
+    # doubles as the regression guard. Measured 5x at threads=4: identical fingerprint
+    # every run, identical to the threads=1 result.
     set +e
     $CURCUMA -confscan conformers.xyz \
         -rmsd.method subspace \
         -rmsd.protons false \
-        -confscan.threads 1 \
+        -confscan.threads 4 \
         -confscan.restart false \
         > stdout.log 2> stderr.log
     local exit_code=$?

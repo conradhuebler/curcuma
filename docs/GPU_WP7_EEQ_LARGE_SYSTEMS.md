@@ -319,7 +319,7 @@ PARAM(eeq_batched_warn_threshold, Double, 15.0,
 ## Dispatch-Logik (gfnff_gpu_method.cpp)
 
 ```cpp
-// Strategie-Auswahl im EEQ-Solve-Block:
+// Strategie-Auswahl im EEQ-Solve-Block (Entwurf Juni 2026; heute: EEQSolver::resolveMethod, auto = ppcg ab eeq_ppcg_min_atoms = 500, siehe EEQ_SOLVER_CONTROL.md):
 std::string strategy = m_eeq_solver_strategy;
 
 // Auto-Auswahl falls nicht explizit gesetzt
@@ -455,6 +455,8 @@ wurde der **per-Fragment Block-Jacobi** der CPU (`EEQSolver::buildBlockJacobi`):
 
 ### 2. Kontaktbewusste Auswahl (CPU): exakt statt Batched bei Kontakt
 
+> Stand Okt 2026: `eeq_batched_min_distance`, `eeq_contact_prefer_exact` und `m_contact_min_dist` (samt O(N^2)-Kontaktscan) sind entfernt; `auto` waehlt nie `batched`, die Naeherung wird ueber `eeq_batched_max_error_eh` bewertet. Der Absatz ist der Stand vom Juni 2026. Betrieb: [EEQ_SOLVER_CONTROL.md](EEQ_SOLVER_CONTROL.md).
+
 Der CPU-Dispatcher wählte Batched (Strategie B, **lässt cross-fragment Coulomb still
 weg**) allein anhand der Fragmentdichte (`nfrag/N`), unabhängig davon, ob Fragmente
 in Kontakt sind. Neu: `m_contact_min_dist` (minimaler Inter-Fragment-Atomabstand,
@@ -487,5 +489,5 @@ PCG-Präkonditionierer; keine Dispatch-Änderung nötig.
 |-------|-----------|
 | `gfnff_kernels.cu/.cuh` | `k_eeq_block_jacobi_apply`, `k_eeq_symmetrize_blocks` |
 | `eeq_solver_gpu.cu` | `buildBlockJacobiFactors()`, `applyPrecondPCG()`, `m_pcg_block_jacobi_valid`, PCG-Verdrahtung |
-| `eeq_solver.h` | PARAM `eeq_contact_prefer_exact`, Member `m_contact_min_dist` |
+| `eeq_solver.h` | PARAM `eeq_contact_prefer_exact`, Member `m_contact_min_dist` (Parameter seit 2026-10 entfernt, siehe EEQ_SOLVER_CONTROL.md) |
 | `eeq_solver.cpp` | Kontaktmetrik in `calculateFinalCharges`, kontaktbewusste Batched-Auswahl in `dispatchSolve` |

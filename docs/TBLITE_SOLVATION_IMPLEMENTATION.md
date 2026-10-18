@@ -656,7 +656,6 @@ std::map<std::string, double> surface_tensions = {
 
 **Helper/Testing**:
 - `/home/user/curcuma/src/helpers/tblite_helper.cpp` (test program)
-- `/home/user/curcuma/test_cases/examples/solvation_example.sh` (usage examples)
 
 **Secondary Source** (Ulysses):
 - `/home/user/curcuma/src/core/energy_calculators/qm_methods/ulyssesinterface.h/cpp`
@@ -674,7 +673,7 @@ TBLite Integration:
 Documentation:
 ├── User Guide: docs/SOLVATION.md
 ├── Algorithm Details: docs/NATIVE_QM_IMPLEMENTATION_STATUS.md
-├── Examples: test_cases/examples/solvation_example.sh
+├── Examples: (none)
 └── CLI Tests: test_cases/cli/*/run_test.sh
 ```
 

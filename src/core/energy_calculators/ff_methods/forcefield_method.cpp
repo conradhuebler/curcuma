@@ -18,6 +18,7 @@
  */
 
 #include "forcefield_method.h"
+#include <fstream>
 #include "src/core/citation_registry.h"
 #include "src/tools/general.h"
 #include "src/core/curcuma_logger.h"
@@ -129,10 +130,30 @@ json ForceFieldMethod::generateForceFieldController() const {
     // Method-specific parameters
     if (m_method_name == "uff-d3") {
         controller["d3_correction"] = true;
-    } else if (m_method_name == "gfnff") {
-        controller["gfnff_mode"] = "native";
     }
-    
+    // Coarse-grained input (Sep 2026): cg_default / cg_per_atom / pair_interactions / bonds
+    // either inline in the method config or from a JSON file (-load_ff_json FILE).
+    auto scoped = [&](const char* key) -> json {
+        if (m_parameters.contains(key)) return m_parameters[key];
+        if (m_parameters.contains("forcefield") && m_parameters["forcefield"].is_object()
+            && m_parameters["forcefield"].contains(key))
+            return m_parameters["forcefield"][key];
+        return json();
+    };
+    const json ff_file = scoped("load_ff_json");
+    if (ff_file.is_string() && ff_file.get<std::string>() != "none" && !ff_file.get<std::string>().empty()) {
+        std::ifstream in(ff_file.get<std::string>());
+        if (!in)
+            throw std::runtime_error("ForceFieldMethod: cannot read -load_ff_json file '" + ff_file.get<std::string>() + "'");
+        json extra = json::parse(in);
+        for (auto& [k, v] : extra.items())
+            if (k != "method") controller[k] = v;
+    }
+    for (const char* key : {"cg_default", "cg_per_atom", "pair_interactions"}) {
+        const json v = scoped(key);
+        if (!v.is_null()) controller[key] = v;
+    }
+
     return controller;
 }
 
@@ -422,7 +443,9 @@ void ForceFieldMethod::setParameterFile(const std::string& filename) {
 // =================================================================================
 
 std::vector<std::string> ForceFieldMethod::getSupportedMethods() {
-    return {"uff", "uff-d3", "d3", "qmdff", "gfnff"};
+    // Claude Generated (Sep 2026): gfnff has its own engine (GFNFF), "d3" is rejected by
+    // MethodFactory; ForceField evaluates only these three through FFWorkspace.
+    return {"uff", "uff-d3", "qmdff", "cg", "cg-lj"};
 }
 
 bool ForceFieldMethod::isMethodSupported(const std::string& method_name) {
@@ -474,13 +497,8 @@ json ForceFieldMethod::getDefaultConfigForMethod(const std::string& method_name)
     // Method-specific defaults
     if (method_name == "uff-d3") {
         config["d3_correction"] = true;
-    } else if (method_name == "gfnff") {
-        config["gfnff_mode"] = "native";
-        config["parameter_caching"] = true;
     } else if (method_name == "qmdff") {
         config["qmdff_version"] = "latest";
-    } else if (method_name == "d3") {
-        config["d3_preset"] = "pbe0";  // Default preset for D3-only method
     }
 
     return config;
@@ -495,6 +513,17 @@ std::string ForceFieldMethod::normalizeMethodName(const std::string& method_name
 bool ForceFieldMethod::generateParametersIfNeeded(const Mol& mol) {
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info("Checking if ForceField parameters need to be generated");
+    }
+    // Coarse-grained (Sep 2026): no UFF typing/generator, the pair list comes straight from
+    // cg_default / cg_per_atom / pair_interactions in the controller (-load_ff_json FILE).
+    if (m_method_name == "cg" || m_method_name == "cg-lj") {
+        try {
+            m_forcefield->setParameter(generateForceFieldController());
+        } catch (const std::exception& e) {
+            handleForceFieldError(fmt::format("CG parameter generation: {}", e.what()));
+            return false;
+        }
+        return true;
     }
 
     // Check if parameters are already set
@@ -674,17 +703,19 @@ json ForceFieldMethod::getEnergyDecomposition() const {
         return energy_json;
     }
 
-    // Get all energy components from ForceField
+    // Get all energy components from ForceField. UFF/QMDFF have no Coulomb, H-/X-bond
+    // or three-body dispersion terms; the keys are kept (as 0.0) for consumers that read
+    // the same layout from GFN-FF (curcumaopt, simplemd).
     energy_json["Bond"] = m_forcefield->BondEnergy();
     energy_json["Angle"] = m_forcefield->AngleEnergy();
     energy_json["Torsion"] = m_forcefield->DihedralEnergy();
     energy_json["Inversion"] = m_forcefield->InversionEnergy();
     energy_json["Dispersion"] = m_forcefield->DispersionEnergy();
-    energy_json["Coulomb"] = m_forcefield->CoulombEnergy();
-    energy_json["HBond"] = m_forcefield->HydrogenBondEnergy();
-    energy_json["XBond"] = m_forcefield->HalogenBondEnergy();
-    energy_json["ATM"] = m_forcefield->ATMEnergy();
-    energy_json["BATM"] = m_forcefield->BatmEnergy();
+    energy_json["Coulomb"] = 0.0;
+    energy_json["HBond"] = 0.0;
+    energy_json["XBond"] = 0.0;
+    energy_json["ATM"] = 0.0;
+    energy_json["BATM"] = 0.0;
 
     return energy_json;
 }
@@ -725,27 +756,3 @@ double ForceFieldMethod::getDispersionEnergy() const {
     return m_forcefield->DispersionEnergy();
 }
 
-double ForceFieldMethod::getCoulombEnergy() const {
-    if (!m_forcefield) return 0.0;
-    return m_forcefield->CoulombEnergy();
-}
-
-double ForceFieldMethod::getHBondEnergy() const {
-    if (!m_forcefield) return 0.0;
-    return m_forcefield->HydrogenBondEnergy();
-}
-
-double ForceFieldMethod::getXBondEnergy() const {
-    if (!m_forcefield) return 0.0;
-    return m_forcefield->HalogenBondEnergy();
-}
-
-double ForceFieldMethod::getATMEnergy() const {
-    if (!m_forcefield) return 0.0;
-    return m_forcefield->ATMEnergy();
-}
-
-double ForceFieldMethod::getBatmEnergy() const {
-    if (!m_forcefield) return 0.0;
-    return m_forcefield->BatmEnergy();
-}

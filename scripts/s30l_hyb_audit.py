@@ -23,7 +23,18 @@ from collections import Counter
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUN = os.path.join(ROOT, "test_cases", "s30l_test_set", "_run")
 CURCUMA = os.path.join(ROOT, "release", "curcuma")
-XTB = os.path.expanduser("~/Downloads/xtb-6.6.1/bin/xtb")
+
+
+def find_xtb():
+    for cand in (os.environ.get("XTB_BIN"), shutil.which("xtb"),
+                 os.path.expanduser("~/Downloads/xtb-dist/bin/xtb"),
+                 os.path.expanduser("~/Downloads/xtb-6.6.1/bin/xtb")):
+        if cand and os.path.exists(cand):
+            return cand
+    return None
+
+
+XTB = find_xtb()
 
 ZSYM = {1: "H", 6: "C", 7: "N", 8: "O", 9: "F", 16: "S", 17: "Cl", 35: "Br", 53: "I"}
 
@@ -70,6 +81,8 @@ def xtb_hyb(xyz):
 
 
 def main():
+    if not XTB:
+        raise SystemExit("xtb binary not found - set XTB_BIN or install xtb on PATH")
     args = [int(x) for x in sys.argv[1:]] or list(range(1, 31))
     mismatches = []  # (sys, part, atom0, Z, hyb_cur, hyb_xtb, pi_cur, pi_xtb)
     for s in args:

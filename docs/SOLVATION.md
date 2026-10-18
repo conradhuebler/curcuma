@@ -6,7 +6,10 @@ Implicit solvation support for GFN and MNDO methods via TBLite and Ulysses inter
 
 Curcuma supports implicit solvation models for quantum chemistry calculations:
 
-- **TBLite Interface**: CPCM, GB (Generalized Born), ALPB for GFN methods
+- **TBLite Interface**: CPCM, GB (Generalized Born), ALPB for GFN methods. ⚠️ **Pending**:
+  this path needs `USE_TBLITE=ON`; the reference dev build (`release/`) has TBLite off, so
+  the TBLite Interface solvation models (CPCM in particular — not yet native, see below)
+  are currently unverified in that build. Native ALPB/GBSA below are unaffected.
 - **Ulysses Interface**: GBSA (Generalized Born) for GFN and MNDO methods
 - **Native GFN1/GFN2**: ⚠️ self-consistent **ALPB** and **GBSA** (June 2026) —
   AI-implemented, machine-tested vs tblite (≤1e-8 Eh on the validation set), human

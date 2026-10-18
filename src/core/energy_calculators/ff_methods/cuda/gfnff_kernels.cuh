@@ -111,6 +111,70 @@ __global__ GFNFF_KERNEL_BOUNDS void k_coulomb(
     double*                    energy
 );
 
+/// Implicit all-pairs Coulomb (Claude Generated, Sep 2026): one thread per atom i, gathering
+/// over every j != i instead of reading a stored pair list. gamma_ij = 1/sqrt(alp_i + alp_j)
+/// exactly as GFNFF::generateCoulombPairsNative builds it; each thread adds only its own atom's
+/// force and half of every pair energy. Removes the N^2/2 host pair list (7320 atoms: 24.5 M
+/// pairs, 2.7 GB, ~1.5 s to build/upload/scan) and the per-pair atomic gradient adds.
+__global__ GFNFF_KERNEL_BOUNDS void k_coulomb_implicit(
+    int natoms,
+    const double* __restrict__ alp,      ///< [N] charge-corrected alpeeq
+    double                     r_cut,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const double* __restrict__ charges,  ///< [N] EEQ charges per atom
+    double*                    grad,
+    double*                    energy
+);
+
+/// grad[0..3N) += sum_k parts[k*3N + ...], energy += sum_k part_E[k] (multi-GPU Coulomb reduce).
+/// Claude Generated (Sep 2026).
+__global__ void k_add_coulomb_parts(int n3, int nparts, const double* __restrict__ parts,
+                                    const double* __restrict__ part_E,
+                                    double* grad, double* energy);
+
+/// Tile size of k_coulomb_tiles (atoms per tile, power of two).
+constexpr int GFNFF_COUL_TILE = 128;
+
+/**
+ * @brief Far-field threshold of the erf-damped Coulomb pair, (gamma_ij r)^2 >= 36.
+ *
+ * Claude Generated (Oct 2026). Exact up to rounding, NOT a cutoff: for gamma_ij r >= 6, tested as
+ * r^2 >= 36 (alp_i + alp_j) without sqrt or division, erf(gamma_ij r) is exactly 1.0 in FP64 (CUDA
+ * erf returns 1.0 from x = 5.9007 on, erfc(6) = 2.2e-17 < half an ulp of 1) and the Gaussian
+ * exp(-(gamma_ij r)^2) <= 2.3e-16. The pair is then q_i q_j / r, and its matrix element 1 / r, without
+ * evaluating erf or exp. Used by k_coulomb, k_coulomb_implicit, k_coulomb_tiles and the EEQ matrix
+ * builds (k_eeq_build_matrix, k_eeq_build_augmented, k_eeq_build_fragment_matrices). The matrix
+ * builds use 1.0 / r (bit-identical to erf()/r). k_coulomb_tiles and k_coulomb_implicit use rsqrt
+ * (1 ulp) when r_cut is infinite (the default), and sqrt plus division inside a finite cutoff;
+ * k_coulomb (stored pair list with per-pair cutoff) always uses sqrt plus division.
+ */
+constexpr double GFNFF_COUL_FARFIELD_X2 = 36.0;
+
+/**
+ * @brief Implicit all-pairs Coulomb (erf-damped), each pair i<j evaluated ONCE.
+ *
+ * Claude Generated (Sep 2026). Same physics as k_coulomb_implicit, which evaluates every pair
+ * twice (once per atom). One block handles one tile pair (bi, bj), bi <= bj, of
+ * GFNFF_COUL_TILE atoms each; tiles[2*t], tiles[2*t+1] list them. The j tile is staged in shared
+ * memory, j-gradients are accumulated in shared memory and added once per atom per tile. A
+ * contiguous range of the tile list can run on another device (multi-GPU split), writing into
+ * that device's own gradient/energy buffers.
+ */
+__global__ void k_coulomb_tiles(
+    int natoms,
+    const int* __restrict__    tiles,    ///< [2*ntiles] (bi, bj), bi <= bj
+    const double* __restrict__ alp,
+    double                     r_cut,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const double* __restrict__ charges,
+    double*                    grad,
+    double*                    energy
+);
+
 // ============================================================================
 // Bonded kernels: 1 thread = 1 interaction
 // ============================================================================
@@ -501,8 +565,11 @@ __global__ GFNFF_KERNEL_BOUNDS void k_dc6dcn_per_pair(
     const double* __restrict__ dgw,            ///< [N * MAX_REF] weight derivatives
     const double* __restrict__ c6_flat,        ///< [MAX_ELEM² * MAX_REF²] C6 reference table
     double*       __restrict__ dc6dcn_ij,      ///< [n] output: dC6(i,j)/dCN(i)
-    double*       __restrict__ dc6dcn_ji       ///< [n] output: dC6(i,j)/dCN(j)
+    double*       __restrict__ dc6dcn_ji,      ///< [n] output: dC6(i,j)/dCN(j)
+    double*       __restrict__ c6_out          ///< [n] output: C6(i,j) at the current CN, or nullptr
     // refn read from d_refn_const (constant memory, uploaded via upload_refn_const)
+    // Claude Generated (Sep 2026): c6_out = sum gw_i gw_j C6ref — the per-step C6 refresh
+    // (GFNFF::refreshDispersionC6()); nullptr keeps the stored C6 (dispersion_c6_update=false).
 );
 
 // ============================================================================
@@ -577,7 +644,7 @@ void upload_refn_const(const int* data, int n);
 // ============================================================================
 // GPU CN pair list generation (Apr 2026)
 // Two-pass kernels: count valid pairs, then write (i, j, rcov_sum).
-// Replaces CPU generateCNPairList() O(N^2) loop.
+// Replaces the former host O(N^2) CN pair loop.
 // ============================================================================
 
 __global__ GFNFF_KERNEL_BOUNDS void k_generate_cn_pairs_count(
@@ -587,6 +654,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_generate_cn_pairs_count(
     const double* __restrict__ cz,
     const int*    __restrict__ atom_types,
     double        cutoff_factor,
+    double        extra_bohr,
     int*          d_count);
 
 __global__ GFNFF_KERNEL_BOUNDS void k_generate_cn_pairs_write(
@@ -596,6 +664,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_generate_cn_pairs_write(
     const double* __restrict__ cz,
     const int*    __restrict__ atom_types,
     double        cutoff_factor,
+    double        extra_bohr,
     int*          d_counter,
     int*          idx_i,
     int*          idx_j,
@@ -793,6 +862,50 @@ __global__ void k_eeq_block_jacobi_apply(
     const int*    __restrict__ frag_atom_map, ///< [N] sorted-position → global atom index
     const double* __restrict__ d_r,           ///< [N] residual (global order)
     double*       __restrict__ d_z);          ///< [N] preconditioned residual (global order)
+
+// ── WP7-E: GPU projected PCG (Sep 2026) ──────────────────────────────────────
+// Single-solve port of the CPU EEQSolver::solveWithProjectedPCG: the PCG runs
+// directly in the constraint tangent space (Σ_{i∈frag} v_i = 0), avoiding the
+// (nfrag+1)-separate-solves + CPU-Schur-reduction pattern of WP7-C above.
+
+/// Sum a vector by fragment: frag_sum[f] = Σ_{i∈frag_f} v[i]. Caller must zero frag_sum first.
+__global__ void k_frag_sum(
+    int N,
+    const double* __restrict__ v,
+    const int*    __restrict__ atom_frag,
+    double*       __restrict__ frag_sum);
+
+/// Scatter a per-fragment delta back onto every atom of that fragment: v[i] += frag_delta[atom_frag[i]].
+__global__ void k_frag_scatter_add(
+    int N,
+    double*       __restrict__ v,
+    const int*    __restrict__ atom_frag,
+    const double* __restrict__ frag_delta);
+
+/// Projection delta (subtract the per-fragment mean): frag_delta[f] = -frag_sum[f] * inv_frag_atoms[f].
+__global__ void k_frag_project_delta(
+    int nfrag,
+    const double* __restrict__ frag_sum,
+    const double* __restrict__ inv_frag_atoms,
+    double*       __restrict__ frag_delta);
+
+/// Feasibility-shift delta: frag_delta[f] = (rhs_constraints[f] - frag_sum[f]) * inv_frag_atoms[f].
+__global__ void k_frag_feasibility_delta(
+    int nfrag,
+    const double* __restrict__ frag_sum,
+    const double* __restrict__ rhs_constraints,
+    const double* __restrict__ inv_frag_atoms,
+    double*       __restrict__ frag_delta);
+
+/// M-weighted preconditioner correction (in-place): z[i] -= Minv[i]*frag_sum[frag[i]]/frag_sM[frag[i]],
+/// so that C·z = 0 (mirrors CPU EEQSolver::solveWithProjectedPCG's precondition() lambda).
+__global__ void k_frag_precond_correct(
+    int N,
+    const double* __restrict__ Minv,
+    const int*    __restrict__ atom_frag,
+    const double* __restrict__ frag_sum,
+    const double* __restrict__ frag_sM,
+    double*       __restrict__ z);
 
 // ============================================================================
 // WP2: GPU-side EEQ RHS construction

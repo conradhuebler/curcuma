@@ -2,6 +2,10 @@ package.json
 package-lock.json
 node_modules/
 
+# Python
+__pycache__/
+*.pyc
+
 # C++ objects and libs
 *.slo
 *.lo
@@ -54,6 +58,7 @@ CMakeLists.txt.user*
 
 # Build directories
 build/
+build_asan/
 debug/
 release/
 bin/
@@ -82,14 +87,14 @@ settings.ini
 # Test artifacts (CLI and unit tests) - Claude Generated October 2025
 # Build directory isolation: test outputs should be in build/test_cases/
 # Exceptions for legitimate test fixtures
-!test_cases/optimisation/makrocyclic/input.opt.xyz
-!test_cases/optimisation/makrocyclic/input.trj.xyz
 
 # Test output files (generated during test runs)
 test_cases/**/*.trj.xyz
 test_cases/**/*.opt.xyz
 test_cases/**/*.param.json
 test_cases/**/curcuma_*.json
+curcuma_citations.bib
+gfnff_diag_charges.json
 test_cases/**/*.log
 test_cases/**/*.dat
 !test_cases/**/baseline.dat
@@ -97,6 +102,15 @@ test_cases/**/*.dat
 
 # MOR41 validation: track the driver data, ignore generated run artifacts
 test_cases/MOR41-testset/_run/
+
+# Grimme-group benchmark test-set data fetched on demand (scripts/fetch_testset.py,
+# docs/TESTSET_RETRIEVAL.md) - raw structures are not committed, only the small
+# hand-curated driver/reference files (reactions.dat, reference_s30l, ...).
+test_cases/MOR41-testset/*/
+test_cases/s30l_test_set/*/
+test_cases/s30lci_test_set/*/
+test_cases/GMTKN55-testset/
+test_cases/**/PROVENANCE.txt
 
 # GFN-FF / MD topology dumps (generated during runs) - Claude Generated May 2026
 *.topo.json
@@ -113,6 +127,18 @@ test_cases/molecules/**/*.rejected.xyz
 test_cases/molecules/**/*.reorder.*.xyz
 test_cases/molecules/**/*.reuse.xyz
 test_cases/molecules/**/*.thresh.xyz
+
+# ConfSearch run artifacts (MD/opt trajectories, restart checkpoints) - Claude Generated Jul 2026
+test_cases/**/.snapshots/
+test_cases/**/*_step_*.json
+test_cases/**/*.final.json
+test_cases/**/*.bias.xyz
+test_cases/**/*.bias.opt.accepted.xyz
+test_cases/**/*.cumulative.xyz
+test_cases/**/*.cumulative.opt.accepted.xyz
+test_cases/**/*.input.xyz
+test_cases/**/*_md_params.json
+test_cases/**/*.confsearch.restart.json
 
 # Root-level output files (optimization and trajectory outputs)
 *.opt.xyz
@@ -151,7 +177,6 @@ node_modules
 gfnff_topo
 gfnff_charges
 gfnff_adjacency
-gfnff_validate.py
 gfnff_validation_results.json
 gfnff_comparison_results.csv
 *.engrad
@@ -220,3 +245,17 @@ external/plumed2/
 external/ulysses-main/
 external/ulysses.zip
 src/version.h
+
+# Multi-GPU benchmark scratch runs (outputs, binaries)
+scripts/gpu_bench/run/
+
+# scripts/tuning_sweep.py scratch directory (default workdir)
+tuning_sweep_run/
+
+# caches written next to structure library files
+test_cases/structures/**/*.topo.json
+test_cases/structures/**/*.param.json
+
+# structure library files are tracked whatever their name (for example *.opt.xyz, *build-*)
+!test_cases/structures/**/*.xyz
+!test_cases/structures/**/*.vtf

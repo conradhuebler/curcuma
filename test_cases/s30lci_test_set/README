@@ -1,0 +1,17 @@
+
+This archive contains the coordinates for the S30L-CI test set. 
+They are provided in the following way:
+
+The complexes are numbered according to the provided figure s30l-ci.png.
+Each folder contains three subfolders, A for the host, B for the guest 
+and AB for the complex. 
+The coordinates are provided in the Turbomole format in atomic units.
+In case of the complex, the coordinates are sorted in a way that 
+host atoms appear first and guest atoms appear second (in the same
+order as in the A and B files).
+
+If a charge is present, a .CHRG file in contained in the respective 
+folder.
+
+The reference association energies are provided in the file 
+references_s30ci. 

@@ -1,6 +1,6 @@
 /*
  * <Some globale definition for chemical structures.>
- * Copyright (C) 2019 - 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2019 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include "src/core/units.h"
 #include <algorithm>
 #include <iostream>
 #include <map>
@@ -42,7 +43,7 @@
 using json = nlohmann::json;
 
 const double pi = 3.14159265359;
-const double au = 0.52917721092; // Angstrom
+const double au = CurcumaUnit::Length::bohr_radius_or_legacy(0.52917721092); // Angstrom per Bohr; CODATA 2018 unless USE_LEGACY_UNIT_CONSTANTS (was CODATA 2010)
 const double amu2au = 1822.8884850;
 const double kb_Eh = 3.166811e-6; // Hartree
 const double kb_SI = 1.380649e-23; // SI
@@ -192,9 +193,12 @@ inline T Json2KeyWord(const json& controller, std::string name)
     T temp;
     bool found = false;
     transform(name.begin(), name.end(), name.begin(), ::tolower);
+    // Claude Generated (Jun 2026): canonicalize hyphens to underscores for key matching
+    name.erase(std::remove(name.begin(), name.end(), '-'), name.end());
     for (auto& el : controller.items()) {
         std::string key = el.key();
         transform(key.begin(), key.end(), key.begin(), ::tolower);
+        key.erase(std::remove(key.begin(), key.end(), '-'), key.end());
         if (key.compare(name) == 0) {
             temp = el.value();
             found = true;
@@ -213,9 +217,11 @@ inline json MergeJson(const json& reference, const json& patch)
         bool found = false;
         std::string outer = object.key();
         transform(outer.begin(), outer.end(), outer.begin(), ::tolower);
+        outer.erase(std::remove(outer.begin(), outer.end(), '-'), outer.end());
         for (const auto& local : reference.items()) {
             std::string inner = local.key();
             transform(inner.begin(), inner.end(), inner.begin(), ::tolower);
+            inner.erase(std::remove(inner.begin(), inner.end(), '-'), inner.end());
             if (outer.compare(inner) == 0) {
                 result[local.key()] = object.value();
                 found = true;

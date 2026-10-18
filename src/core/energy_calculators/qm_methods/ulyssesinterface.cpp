@@ -1,6 +1,6 @@
 /*
  * < C++ Ulysses Interface >
- * Copyright (C) 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2025 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -17,6 +17,7 @@
  *
  */
 
+#include "src/core/units.h"
 #include <string>
 #include <vector>
 
@@ -171,7 +172,7 @@ double UlyssesInterface::Calculation(bool gradient)
 
                 CurcumaLogger::param("HOMO", fmt::format("{:.4f} Eh", homo));
                 CurcumaLogger::param("LUMO", fmt::format("{:.4f} Eh", lumo));
-                CurcumaLogger::param("HOMO-LUMO_gap", fmt::format("{:.4f} Eh ({:.2f} eV)", gap, gap * 27.211));
+                CurcumaLogger::param("HOMO-LUMO_gap", fmt::format("{:.4f} Eh ({:.2f} eV)", gap, gap * CurcumaUnit::Energy::HARTREE_TO_EV));
             }
         }
 

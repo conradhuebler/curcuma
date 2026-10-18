@@ -1,6 +1,6 @@
 /*
  * <Molecular data structures and computational chemistry methods>
- * Copyright (C) 2019 - 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2019 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *               2024 Gerd Gehrisch
  *
  * This program is free software: you can redistribute it and/or modify
@@ -289,13 +289,43 @@ void Molecule::Initialise(const int* attyp, const double* coord, const int natom
     }
 }
 
-void Molecule::ApplyReorderRule(const std::vector<int>& rule)
+/* Claude Generated (Aug 2026): the loop used to be bounded by rule.size() with no
+   precondition check, so a rule that did not cover the whole molecule silently rewrote it
+   with rule.size() atoms - ConfScan's heavy-atom mode (rule sized to the heavy subset,
+   indices pointing into the compacted heavy list) produced truncated AND scrambled
+   structures, and its plain-RMSD rejection path (empty rule) produced 0-atom structures.
+   The rule is now validated as a complete permutation; anything else is a no-op. */
+bool Molecule::ApplyReorderRule(const std::vector<int>& rule)
 {
+    const std::size_t n = AtomCount();
+    if (rule.size() != n || n == 0)
+        return false;
+
+    std::vector<bool> seen(n, false);
+    for (int i : rule) {
+        if (i < 0 || static_cast<std::size_t>(i) >= n || seen[i])
+            return false;
+        seen[i] = true;
+    }
+
     Molecule mol;
     for (auto& i : rule)
         mol.addPair(Atom(i));
     m_geometry = mol.m_geometry;
     m_atoms = mol.m_atoms;
+    invalidateCaches();
+    return true;
+}
+
+Molecule Molecule::ProtonDepletedCopy() const
+{
+    Molecule depleted;
+    for (std::size_t i = 0; i < AtomCount(); ++i) {
+        std::pair<int, Position> atom = Atom(i);
+        if (atom.first != 1)
+            depleted.addPair(atom);
+    }
+    return depleted;
 }
 
 // Claude Generated: Temporary fallback to std::cout to fix SegFault
@@ -390,14 +420,35 @@ bool Molecule::addPair(const std::pair<int, Position>& atom)
     m_atoms.push_back(atom.first);
     m_mass += Elements::AtomicMass[atom.first];
 
-    for (std::size_t i = 0; i < AtomCount(); ++i)
-        for (std::size_t j = i + 1; j < AtomCount(); ++j)
-            if (CalculateDistance(i, j) < 1e-6)
-                exist = false;
+    // Claude Generated (Sep 2026): compare only the NEW atom against the existing
+    // ones. The old check re-tested every pair on every call, so building a molecule
+    // atom by atom was O(N^3): 16 s for 3400 atoms. The pairs among the existing
+    // atoms were already tested when they were added, and the one caller that reads
+    // the result (rmsd.cpp) asks exactly this: does the new atom sit on another one.
+    const std::size_t added = AtomCount() - 1;
+    for (std::size_t i = 0; i < added; ++i)
+        if (CalculateDistance(i, added) < 1e-6)
+            exist = false;
 
     invalidateCaches();
 
     return exist;
+}
+
+double Molecule::Density(double volume) const
+{
+    if (volume <= 0.0)
+        return 0.0;
+
+    double mass = 0.0;
+    for (int atom_type : m_atoms) {
+        double atomic_mass = Elements::AtomicMass[atom_type];
+        if (atomic_mass < 1e-6)
+            atomic_mass = 1.0;   // same defensive rule as CalculateMass()
+        mass += atomic_mass;
+    }
+    constexpr double kAmuPerCubicAngstromToGramPerCubicCentimetre = 1.66053906660;
+    return mass / volume * kAmuPerCubicAngstromToGramPerCubicCentimetre;
 }
 
 double Molecule::CalculateMass()

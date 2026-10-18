@@ -19,14 +19,18 @@
  */
 
 #include <Eigen/Dense>
+#include <algorithm>
 #include <iomanip>
+#include <memory>
 #include <sstream>
 
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
 #include "src/core/curcuma_logger.h"
 #include "src/core/energycalculator.h"
+#include "src/core/energy_calculators/method_factory.h"
 #include "src/core/intra_parallel_context.h"
+#include "src/core/gpu_device_pool.h"
 
 #include "hessian.h"
 
@@ -39,7 +43,7 @@ HessianThread::HessianThread(const json& controller, int i, int j, int xi, int x
     , m_fullnumerical(fullnumerical)
 {
     setAutoDelete(true);
-    m_method = m_controller.value("method", std::string("uff"));
+    m_method = m_controller.value("method", std::string("gfnff"));
     if (i == j && xi == i && xj == i && i == 0)
         m_schema = [this]() {
             this->Threaded();
@@ -83,6 +87,8 @@ int HessianThread::execute()
     // concurrently across these workers; suppress intra-molecule threading so the
     // cores stay with the coarse parallelism (no N x N oversubscription). Claude Generated.
     curcuma::SuppressIntraParallel intra_guard;
+    // Multi-GPU batch (Sep 2026): borrow a device slot for this task; no-op without a GPU pool.
+    curcuma::GpuDeviceLease gpu_lease;
     m_schema();
     return 0;
 }
@@ -216,6 +222,14 @@ void HessianThread::Threaded()
 Hessian::Hessian(const std::string& method, const json& controller, bool silent)
     : Hessian(method, ConfigManager("hessian", controller), silent)
 {
+    // Claude Generated (Sep 2026, docs/MULTI_GPU_GAPS.md H-2): ConfigManager keeps only scalar
+    // top-level keys, so method sub-scopes (xtb, gfnff, eeq_solver, ...) handed in by
+    // executeHessian were dropped before the displacement workers built their EnergyCalculators
+    // (-scf_threshold changed the frequencies by exactly 0). Re-attach them.
+    for (const std::string& scope : MethodFactory::methodParameterScopes()) {
+        if (controller.contains(scope) && controller[scope].is_object())
+            m_controller[scope] = controller[scope];
+    }
 }
 
 Hessian::Hessian(const json& controller, bool silent)
@@ -231,7 +245,10 @@ Hessian::Hessian(const std::string& method, const ConfigManager& config, bool si
     m_threads = m_controller.value("threads", m_threads);
     m_method = method;
     m_scale_functions = [](double eigenvalue_sqrt) -> double {
-        return eigenvalue_sqrt * CurcumaUnit::Energy::HARTREE_TO_WAVENUMBER / std::sqrt(CurcumaUnit::Constants::AMU_TO_AU) + 47.349;
+        // No additive offset. The historic "+ 47.349 cm-1" was an empirical patch that
+        // compensated the missing Eh/Ang^2 -> Eh/Bohr^2 conversion in ConvertHessian();
+        // with that conversion in place the formula is exact. Claude Generated (Sep 2026).
+        return eigenvalue_sqrt * CurcumaUnit::Energy::HARTREE_TO_WAVENUMBER / std::sqrt(CurcumaUnit::Constants::AMU_TO_AU);
     };
 }
 
@@ -242,7 +259,10 @@ Hessian::Hessian(const ConfigManager& config, bool silent)
     m_controller = MergeJson(m_defaults, config.exportConfig());
     m_threads = m_controller.value("threads", m_threads);
     m_scale_functions = [](double eigenvalue_sqrt) -> double {
-        return eigenvalue_sqrt * CurcumaUnit::Energy::HARTREE_TO_WAVENUMBER / std::sqrt(CurcumaUnit::Constants::AMU_TO_AU) + 47.349;
+        // No additive offset. The historic "+ 47.349 cm-1" was an empirical patch that
+        // compensated the missing Eh/Ang^2 -> Eh/Bohr^2 conversion in ConvertHessian();
+        // with that conversion in place the formula is exact. Claude Generated (Sep 2026).
+        return eigenvalue_sqrt * CurcumaUnit::Energy::HARTREE_TO_WAVENUMBER / std::sqrt(CurcumaUnit::Constants::AMU_TO_AU);
     };
 }
 Hessian::~Hessian()
@@ -270,7 +290,7 @@ void Hessian::LoadControlJson()
     m_finite_diff_step = m_controller.value("finite_diff_step", 5e-3);
     m_verbosity = m_controller.value("verbosity", 1);
     m_hess = m_controller.value("hess", 1);
-    m_method = m_controller.value("method", std::string("uff"));
+    m_method = m_controller.value("method", std::string("gfnff"));
     m_threads = m_controller.value("threads", 1);
 
     // Ensure method and threads are in m_controller for downstream code (HessianThread, etc.)
@@ -334,6 +354,37 @@ void Hessian::LoadHessian(const std::string& file)
 
 void Hessian::start()
 {
+    // Claude Generated (Oct 2026): with -scf_precond (native xTB) the preconditioner M is built once at the
+    // reference geometry by this calculator, before the workers start; the workers' XTB objects take it over
+    // (XTB::adoptSharedPreconditioner, process-wide, alive while this object lives) instead of each building
+    // its own M at its first displaced geometry. Without -scf_precond nothing happens here.
+    std::unique_ptr<EnergyCalculator> precond_owner;
+    if (m_hess_calc) {
+        auto precond_of = [](const json& j) -> std::string {
+            if (j.contains("xtb") && j["xtb"].is_object() && j["xtb"].contains("scf_precond") && j["xtb"]["scf_precond"].is_string())
+                return j["xtb"]["scf_precond"].get<std::string>();
+            if (j.contains("scf_precond") && j["scf_precond"].is_string())
+                return j["scf_precond"].get<std::string>();
+            return "none";
+        };
+        // GPU runs: no extra calculator (it would hold a device context during the whole Hessian); the workers then
+        // build their own M as before.
+        // Only the native xTB methods have the preconditioner (MethodFactory maps exactly "gfn1"/"gfn2" to NativeXtbMethod).
+        std::string method_lc = m_method;
+        std::transform(method_lc.begin(), method_lc.end(), method_lc.begin(), ::tolower);
+        const bool native_xtb = (method_lc == "gfn1" || method_lc == "gfn2");
+        if (native_xtb && precond_of(m_controller) != "none" && !curcuma::GpuDevicePool::instance().active()) {
+            // Mark the reference calculator and the workers (all built from m_controller) for sharing M; internal key.
+            if (!m_controller.contains("xtb") || !m_controller["xtb"].is_object()) m_controller["xtb"] = json::object();
+            m_controller["xtb"]["_scf_precond_share"] = true;
+            precond_owner = std::make_unique<EnergyCalculator>(m_method, m_controller);
+            precond_owner->setVerbosity(0);
+            precond_owner->setParameter(m_parameter);
+            precond_owner->setMolecule(m_molecule.getMolInfo());
+            precond_owner->CalculateEnergy(false);
+            CurcumaLogger::set_verbosity(m_verbosity);
+        }
+    }
     if (m_hess_calc) {
 
         if (m_hess == 1) {
@@ -347,6 +398,12 @@ void Hessian::start()
         LoadMolecule(m_read_xyz);
         LoadHessian(m_read_file);
     }
+    // Claude Generated (Sep 2026): the displacement workers build their own EnergyCalculators,
+    // whose save/restore of the process-wide logger level interleaves when several run at once
+    // (CLAUDE.md Known Issue #3) and can leave it at 0 - the frequencies were then computed but
+    // never printed with -threads > 1. Re-assert the level at the pool boundary, as the MD/opt
+    // pool helpers do.
+    CurcumaLogger::set_verbosity(m_verbosity);
 
     m_frequencies = ConvertHessian(m_hessian);
 
@@ -430,6 +487,32 @@ Matrix Hessian::ProjectHessian(const Matrix& hessian)
 Vector Hessian::ConvertHessian(Matrix& hessian)
 {
     Vector vector;
+
+    // Unit conversion Eh/Ang^2 -> Eh/Bohr^2 (Claude Generated, Sep 2026).
+    // The finite-difference Hessian is built as (G(x+d) - G(x-d)) / 2d from
+    // EnergyCalculator::Gradient() (Eh/Angstrom, see gfnff_method.cpp/xtb_native.cpp)
+    // with the molecule's Cartesian coordinates, which are Angstrom — so it comes out
+    // in Eh/Ang^2. The frequency formula below expects atomic units, hence the au^2
+    // factor: d^2E/dBohr^2 = d^2E/dAng^2 * (Ang/Bohr)^2.
+    //
+    // Without it every frequency was too high, and the "+ 47.349 cm-1" offset in
+    // m_scale_functions papered over part of that. Measured on H2O against xtb 6.7.1
+    // before the fixes: gfn1 2863.8/6690.5/6890.8 and gfn2 3023.4/6635.5/6636.8, i.e.
+    // a factor 1/au = 1.8897 too high; gfnff 2290.7/5044.2/5047.9, a factor
+    // sqrt(1/au) = 1.3747 — GFN-FF also returned its gradient in Eh/Bohr back then,
+    // so one of the two Angstrom/Bohr factors cancelled for it and one did not.
+    //
+    // With both corrected, curcuma reproduces xtb 6.7.1 on H2O to <= 0.13 percent:
+    //   gfn1  1490.4/3515.4/3621.4  vs xtb 1490.57/3515.28/3626.07
+    //   gfn2  1574.9/3486.3/3487.0  vs xtb 1574.99/3486.05/3491.64
+    //   gfnff 1631.9/3635.0/3637.6  vs xtb 1632.01/3634.77/3637.31
+    // Guarded by the ctest `gradient_unit_contract` (test_cases/scripts/check_gradient_units.py).
+    //
+    // A Hessian READ from file (ReadHessian) is divided by au^2 on input, so this
+    // factor cancels there and such a file is taken as Eh/Bohr^2 — the usual
+    // convention for an ORCA/Turbomole $hessian block. That path is not covered by a
+    // test here.
+    hessian *= CurcumaUnit::Legacy::au * CurcumaUnit::Legacy::au;
 
     // Apply mass-weighting: H'_ij = H_ij / sqrt(m_i * m_j)
     for (int i = 0; i < m_molecule.AtomCount() * 3; i++) {
@@ -551,8 +634,15 @@ void Hessian::CalculateHessianThreaded()
     if (m_method.compare("gfnff") == 0) {
         m_threads = 1;
         CurcumaLogger::warn("GFN-FF enforces single thread approach for numerical stability");
+    } else if (curcuma::GpuDevicePool::instance().active()) {
+        // Claude Generated (Sep 2026, docs/MULTI_GPU_GAPS.md G2-16): one displacement worker per
+        // GPU slot at least (each worker leases its device, HessianThread::execute); the default
+        // -threads 1 used to leave every GPU but device 0 idle.
+        m_threads = std::min(std::max(m_threads, curcuma::GpuDevicePool::instance().capacity()),
+                             static_cast<int>(m_molecule.AtomCount()));
     }
     std::vector<std::vector<int>> threads(m_threads);
+    pool->setActiveThreadCount(m_threads);   // m_threads may have changed above (atom count, GFN-FF, GPU slots)
 
     for (int i = 0; i < m_molecule.AtomCount(); ++i) {
         atoms.push_back(i);

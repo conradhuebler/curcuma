@@ -15,13 +15,25 @@ Claude Generated (Jul 2026, F3 diagnosis).
 """
 import os
 import re
+import shutil
 import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUN = os.path.join(ROOT, "test_cases", "s30l_test_set", "_run")
 CURCUMA = os.path.join(ROOT, "release", "curcuma")
-XTB = os.path.expanduser("~/Downloads/xtb-6.6.1/bin/xtb")
+
+
+def find_xtb():
+    for cand in (os.environ.get("XTB_BIN"), shutil.which("xtb"),
+                 os.path.expanduser("~/Downloads/xtb-dist/bin/xtb"),
+                 os.path.expanduser("~/Downloads/xtb-6.6.1/bin/xtb")):
+        if cand and os.path.exists(cand):
+            return cand
+    return None
+
+
+XTB = find_xtb()
 
 
 def curcuma_bonds(xyz, charge):
@@ -197,6 +209,8 @@ def compare_xyz(xyz, charge, label):
 
 
 def main():
+    if not XTB:
+        raise SystemExit("xtb binary not found - set XTB_BIN or install xtb on PATH")
     args = sys.argv[1:]
     # Arbitrary structure: --xyz PATH [CHARGE]   (used for MOR41, e.g. ED07)
     if args and args[0] == "--xyz":

@@ -4,6 +4,22 @@
 **Implementation**: AI-generated, machine-tested — **human production testing pending**
 **Location**: `src/core/energy_calculators/ff_methods/`
 
+## xtb library regression gate (Oct 11, 2026) 🤖⚙️
+
+- ctest `xtb_library_energies` (label `gfnff;sqm`, CPU, 4 threads): gfnff and gfn2 single points vs the stored xtb 6.7.1 energies in `test_cases/reference_data/xtb_library_energies.json`; no xtb run at test time.
+- GFN-FF: 1e-5 Eh vs xtb; known deviations (|d| > 1e-5, 8 structures, e.g. macrocycle-bgal, jl22-bgal) only must reproduce the stored difference to 1e-5 Eh. Charged structures use the `frag_charge_model reference` baseline.
+- GFN2: 1e-4 Eh vs xtb for natoms <= 500 (measured max 5.2e-5); peo201-chain (1410 atoms, D4 ATM split) only with `--include-large`.
+- Limit: for known-deviation structures the check compares differences derived from the same JSON, so an error in the stored `gfnff_xtb` alone is not detected (negative probe: `gfnff_curcuma` +1e-3 fails, `gfnff_xtb` +1e-3 passes).
+
+## React topology mode (Aug 2026) 🤖⚙️
+
+Dynamic bond topology for MD: `-gfnff.topology_mode react` re-detects bonds with a
+hysteresis scan (optimistic formation 1.6 / conservative retention 2.6) and rebuilds
+all bonded terms, the repulsion partition and the EEQ fragment constraints at change
+events. Energy jumps at events are logged as `dE_jump`; NVT-only. Machine-tested
+(rebuild == fresh-init bit-identity, H-recombination MD, no-event regression);
+not human production tested. See [GFNFF_REACT_TOPOLOGY.md](GFNFF_REACT_TOPOLOGY.md).
+
 ## Latest: Aromatic ring torsions fixed (Jun 20, 2026) ✅
 
 Native gave aromatic/conjugated **ring** torsions the *acyclic* rule (n=3, φ0=180°, half
@@ -33,7 +49,7 @@ neutral S30L interaction energies the per-structure offset cancels (host in both
 |------|--------|-------|
 | Energy (all terms) | ✅ Validated | 20 molecules, sub-mEh vs. Fortran |
 | Analytical gradients (CPU) | ✅ Validated | Numerical gradient check, all terms |
-| Analytical gradients (GPU) | ✅ Validated | 18/19 GPU tests pass; polymer energy tolerance 8.9 µEh |
+| Analytical gradients (GPU) | ✅ Validated | ROCm-CPU polymer (1410 atoms) energy diff 0.33 µEh (re-verified Sep 2026, was 8.9 µEh/1280-atom polymer, CUDA-era, no longer reproduces; CUDA unavailable to re-check directly) |
 | Geometry optimization | ⚠️ Untested by humans | CI only; convergence on real systems unknown |
 | Molecular dynamics | ⚠️ Untested by humans | Gradients enabled; long-run stability unknown |
 | Solvation (ALPB/GBSA) | ⚠️ Runs, unvalidated energy | `-gfnff.solvent water [-gfnff.solvent_model gbsa]` works (WP5, routing fixed June 2026); energy changes sensibly but no external reference exists (tblite has no GFN-FF ALPB). Gradient: frozen-charge approx — tight for non-polar (~1e-4 Eh/Bohr), ~2.4e-2 for polar+solvent. Self-consistent EEQ coupling not done. See [SQM_SOLVATION_WP.md](SQM_SOLVATION_WP.md) WP5 |
@@ -94,7 +110,9 @@ Affects only systems with N>200 (the truncation gating). Small molecules unchang
 
 ## Latest: ATM Gradient Separation + Precision Limits Documented (Mar 12, 2026) ✅
 
-**ATM three-body gradient** separated from `GradientDispersion()` into its own `GradientATM()` component. Matches Fortran structure where ATM is outside `g_disp` (gfnff_gdisp0.f90:308-400). Zero functional impact (ATM energy ≈ 5e-8 Eh).
+**ATM three-body gradient** separated from `GradientDispersion()` into its own `GradientATM()` component. Zero functional impact (ATM energy ≈ 5e-8 Eh).
+
+> **Correction (Sep 25, 2026)**: this entry said the separation "matches Fortran structure where ATM is outside `g_disp` (gfnff_gdisp0.f90:308-400)". Those lines are the pairwise `d3_gradient`; the GFN-FF reference has **no** non-bonded three-body dispersion at all. curcuma's bonded-triple ATM term was its own addition and is now **off by default** (`-gfnff.dispersion_atm true` restores it) — see [REV_GFNFF_TODO.md](REV_GFNFF_TODO.md) #13.
 
 **Dispersion GradComp** failures on large molecules (triose 2.1e-4, complex 4.1e-4, polymer 4.9e-4) confirmed as **parametric precision limits**, not code bugs. Error scales ~√N (random CN/C6 parameter accumulation across O(N²) pairs), not ~N (which would indicate a missing systematic term). All GradComp tests pass for small molecules. Scientifically irrelevant for MD/optimization.
 
@@ -290,6 +308,78 @@ The foundation that enabled rapid angle error debugging:
 
 ## Known Limitations (Documented Architectural Differences)
 
+### GEODEP angle rule creates artefact minima at N-H centers — guarded (Aug 2026, `nh_linear_fix`, default ON)
+
+> Origin: this guard was developed and validated on the `confsearch` branch (commit
+> `51830efa`) and ported here in Sep 2026. It has since been **refined here** (see
+> "Refinement" below), so the two branches are no longer identical — **this** is the newer
+> version, take it on merge.
+
+**Inherited method defect** (xtb 6.7.1 reproduces it, so not a port bug): the reference
+hybridisation fallback "input angle > 160 deg → sp, θ0 = 180" (`gen%linthr`,
+`gfnff_ini.f90`) declares any near-linear input angle linear-by-design. A thermally
+stretched =N-H (measured: guanidine imine at 179 deg in a hot MD snapshot, WEKLQ) is
+re-perceived as sp, its distortion becomes its own equilibrium, and the structure
+optimises INTO the artefact, appearing ~160 kJ/mol too deep (curcuma −18.859 vs −18.768 Eh;
+xtb −276 kJ/mol; GFN2 puts the same geometry +115 kJ/mol above the conformer record). In a
+conformer search whose snapshot optimisations each derive their own topology, one such
+event founds a self-reinforcing family (75 % of a pool within three temperature stages);
+the species check compares bonds only and passes the hybridisation flip.
+
+Curcuma's default (`-gfnff.nh_linear_fix true`) skips the angle-only sp promotion for a
+2-coordinate nitrogen carrying a hydrogen whose heavy partner is branched.
+`-gfnff.nh_linear_fix false` restores bit-faithful reference behaviour for validation
+against xtb/pprcht (verified: reproduces −18.85926294 Eh on the artefact structure).
+
+**Refinement (Sep 2026) — the original guard was too broad.** `confsearch` assumed every
+genuine sp N-H is already caught by the structural rules that run before the angle
+fallback (H-N=C isocyanide-like, terminal R-N=N, metal nitriles, azide chains). A GMTKN55
+sweep disproved that: exactly **2 of 2462** structures were changed by the bare guard, and
+both were genuine sp centres it wrongly demoted — `DIPCS10/n2h2_2+` (linear HN=NH²⁺,
+**+165.5 kcal/mol**) and `NBPRC/nh-bh` (linear HN=BH, **+78.4**). Neither is reached by the
+structural rules: their partner is an N resp. B, not a 1-coordinate C or N.
+
+The discriminator is the nitrogen's heavy partner. A genuinely sp nitrogen sits in a
+**linear chain**, so that partner is itself 2-coordinate; the artefact's =N-H hangs off a
+3-coordinate sp² carbon. The guard therefore fires only when the heavy partner has ≥3
+neighbours. After the refinement `DIPCS10` is at MAD 0.000 (max 0.0) and `NBPRC` at MAD
+0.108 (max 2.2), while the artefact stays guarded and normal geometries stay bit-identical
+(all 95 MOR41 and all 90 S30L-CI structures unchanged; gfnff ctest 55/56, the one failure
+pre-existing).
+
+Minimal reproduction (measured Sep 2026 when porting the guard to `feature/gfn-cleanup`;
+formamidine HN=CH-NH2, only the imine C-N-H angle varied):
+
+| imine C-N-H | `nh_linear_fix true` (default) | `false` | xtb 6.7.1 |
+|---|---|---|---|
+| 179° (stretched) | −1.15574423 | −1.28386692 | −1.28386690 |
+| 119° (normal) | −1.17801951 | −1.17801951 | −1.17801951 |
+
+The artefact is worth **0.128 Eh ≈ 336 kJ/mol** of spurious depth, and it makes the
+*distorted* geometry deeper than the relaxed one (−1.2839 vs −1.1780) — which is exactly
+why an optimisation walks into it. At a normal angle the guard is inert and the energy is
+bit-faithful to the reference. Also verified inert across all 95 MOR41 and all 90 S30L-CI
+structures (bit-identical with and without the guard).
+
+**Cross-check against higher levels on the same two geometries.** ΔE(179° − 119°), i.e. how
+much higher the stretched N-H geometry should sit:
+
+| method | kcal/mol | kJ/mol |
+|---|---:|---:|
+| r²SCAN-3c (ORCA 6, def2-mTZVPP) | **+24.1** | +101.0 |
+| GFN2 (curcuma, == xtb to 1e-8) | **+24.0** | +100.4 |
+| GFN-FF, `nh_linear_fix true` (default) | +14.0 | +58.5 |
+| GFN-FF, `nh_linear_fix false` (= xtb/pprcht) | **−66.4** | −277.9 |
+
+GFN2 reproduces r²SCAN-3c to 0.1 kcal/mol here, so the sign is not in doubt: the stretched
+geometry is ~24 kcal/mol **above** the relaxed one. The reference GFN-FF behaviour inverts
+that sign and is ~90 kcal/mol off; the guard leaves a 10 kcal/mol underestimate, which is
+ordinary force-field error. This is the independent justification for `nh_linear_fix`
+defaulting to ON rather than to bit-faithfulness. Caveat: single points on a constructed
+formamidine geometry (only the angle varies, nothing is relaxed), so the 0.1 kcal/mol
+GFN2/r²SCAN-3c agreement is partly coincidence — the sign and order of magnitude are the
+load-bearing part.
+
 ### Bond Energy Size-Dependent Error (Feb 14, 2026) - INVESTIGATED
 
 **Issue**: Bond energy error scales with system size (~7 µEh/bond for complex)
@@ -305,13 +395,12 @@ The foundation that enabled rapid angle error debugging:
 
 **Status**: ACCEPTED - Inherent to two-phase EEQ solver. Fix requires single-phase solver (see EEQ Solver Refactoring below).
 
-### Dispersion GradComp Precision Limit (Mar 12, 2026) - ACCEPTED
+### Dispersion GradComp Precision Limit (Mar 12, 2026) - RESOLVED (re-verified Sep 2026)
 
-**Issue**: Dispersion GradComp fails on large molecules (triose 2.1e-4, complex 4.1e-4, polymer 4.9e-4 vs tol 1e-4)
-- **Root Cause**: Each of ~N²/2 dispersion pairs has a small C6/CN parameter difference from Fortran. These accumulate randomly → ~√N scaling. NOT a missing gradient term (~N would indicate that).
-- **Evidence**: Error scales √N; Fortran `d3_gradient()` = pairwise C6/BJ + CN chain-rule (no ATM/BATM); BATM correctly separated. Charge injection shows ChgAttr < 0.001 mEh.
-- **Impact**: Negligible for MD/optimization — force errors are sub-µEh per atom
-- **Status**: ACCEPTED - Precision limit inherent to CN/C6 parameter differences
+**Original issue**: Dispersion GradComp fails on large molecules (triose 2.1e-4, complex 4.1e-4, polymer 4.9e-4 vs tol 1e-4), attributed to √N accumulation of small per-pair C6/CN parameter differences.
+
+**Re-verified Sep 2026** (`test_gfnff_validation` on the current committed references, `ctest -R gfnff_val_{polymer,complex,triose}`): dispersion GradComp max_err is now **7.5e-9 (triose), 8.9e-9 (complex), 9.9e-9 (polymer)** — five orders of magnitude under the old values and the 1e-4 tolerance, and every other component (Bond/Angle/Torsion/Repulsion/Coulomb/HBond) passes with similar margin. The √N precision limit described above no longer reproduces; likely fixed incidentally by later D3/D4 precision work (e.g. the C6/CN reference-table and CN-cutoff fixes in KNOWN_ISSUES_ARCHIVE.md Known Issues #5) without this doc being updated at the time.
+- **Status**: RESOLVED - no longer a caveat for large-system dispersion gradients.
 
 ### Coulomb Precision Limit on Complex (Mar 12, 2026) - ACCEPTED
 
@@ -359,6 +448,15 @@ Remaining dispersion GradComp deviation is a separate precision limit (see above
 **Fixed bugs**:
 1. **Phase 2 cnmax cap**: Removed incorrect `min(cn, 4.4)` cap on fractional CN in Phase 2. Fortran goed_gfnff uses `sqrt(cn(i))` directly without cnmax limit.
 2. **Phase 2 metal chi-shift**: mchishift now only applied in Phase 1 (matching Fortran gfnff_ini.f90:417 vs 715).
+
+## CPU far-field shortcut of the Coulomb term (Oct 10, 2026)
+
+Claude Generated, machine-tested only (human production testing pending). For `gamma_ij*r >= 6.5` (`gamma_ij = 1/sqrt(alpha_i+alpha_j)`) `erf` is exactly 1.0 in FP64 and `exp(-42.25) = 4.4e-19` lies below one ulp of the force, so `FFWorkspace::calcCoulomb` (implicit and stored pair loop) uses `q_i q_j/r` and `-q_i q_j/r^3`, and the EEQ matrix (`calculateFinalCharges` both loops, `buildCorrectedEEQMatrix`) uses `1/r`, without `erf`/`exp`. Test `r^2 >= 42.25 (alpha_i+alpha_j)` before any sqrt. Switch: `-gfnff.farfield_shortcut false` (gfnff scope, forwarded to `eeq_solver`) restores the full evaluation.
+
+- Pair share: polymer_2x 99.9 % far field (measured by the Sonnet agent); peo201-chain (1410 atoms) 980058 of 993345 pairs (98.7 %), caffeine 117 of 276 (counted with a temporary counter, removed).
+- Bit identity (energy 15 digits + gradient dump, md5, `-threads 1/16/2`, shortcut build vs the build before): polymer_2x 1 and 16 threads, peo201-water500, urea400-water1000, peo201-chain, caffeine (16 threads): 5 of 5 identical; 31 GMTKN55 structures (every 80th plus charged ones: 8 charged with `reference` model, 3 open shell): 31 of 31; 15 MOR41 (every 6th): 15 of 15. MD 50 fs polymer_2x, 16 threads: diagnostics energies, charges, gradient norms identical in all 50 steps.
+- Time, polymer_2x MD 20 fs (median of the per-step values, n=3 alternating, load 2.5-3.3): `step_total` 525 -> 467 ms at 16 threads, 1745 -> 871 ms at 1 thread; `eeq_solve` 247 -> 237 and 584 -> 386 ms.
+- Not covered: Phase 1 EEQ matrix (topological distances, `alpha` instead of `alpha_corrected`, not touched), periodic systems, other methods (gfn1/gfn2 do not use this path), GPU (always shortcut). Test: `test_cases/cli/gfnff/09_farfield_shortcut`.
 
 ## Next Refinement Steps
 

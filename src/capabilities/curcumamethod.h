@@ -21,6 +21,7 @@
 
 #include "src/tools/general.h"
 
+#include <atomic>
 #include <string>
 #include <vector>
 
@@ -32,13 +33,30 @@ struct RestartValidationResult {
     std::string error_message;
 };
 
+/// A stop request that survives being copied without carrying the request over.
+///
+/// Claude Generated 2026 - CurcumaMethod subclasses are assigned in places
+/// (simplemd.cpp assigns a whole RMSDDriver into m_shared_pool_driver), and a bare
+/// std::atomic member deletes the implicit assignment of every one of them. This
+/// wrapper keeps them assignable and states the semantics: a copy is a fresh run,
+/// so it starts unstopped.
+struct StopFlag {
+    std::atomic<bool> value { false };
+
+    StopFlag() = default;
+    StopFlag(const StopFlag&) { }
+    StopFlag& operator=(const StopFlag&) { return *this; }
+    StopFlag(StopFlag&&) noexcept { }
+    StopFlag& operator=(StopFlag&&) noexcept { return *this; }
+};
+
 class CurcumaMethod {
 public:
     CurcumaMethod(const json& defaults, const json& controller, bool silent); // Legacy constructor
     CurcumaMethod(const json& defaults, const json& controller, int verbosity); // New verbosity constructor - Claude Generated
     CurcumaMethod()
     {
-        m_saved_global_verbosity = CurcumaLogger::get_verbosity(); // restored in dtor (scoped verbosity)
+        m_saved_thread_verbosity = CurcumaLogger::thread_verbosity(); // restored in dtor (per-thread, scoped)
         m_help = true;
         m_verbosity = 1; // Default: Normal Print
     }
@@ -62,6 +80,22 @@ public:
     void UpdateController(const json& controller);
 
     virtual void start() = 0; // TODO make pure virtual and move all main action here
+
+    /// Machine-readable outcome of this run.
+    ///
+    /// Claude Generated 2026 - Results were assembled in main.cpp, so anything that
+    /// was not the CLI had to re-derive them or scrape the files the CLI wrote. A
+    /// caller embedding curcuma gets nothing at all: in-process there is no file to
+    /// read back.
+    ///
+    /// PURE by contract: it returns what was computed and never touches the
+    /// filesystem. Writing artefacts stays with the caller, because a GUI running a
+    /// dozen analyses must not have a dozen files appear in the user's project as a
+    /// side effect of asking for a number.
+    ///
+    /// The default is an empty object -- a driver that has not been given one yet
+    /// says so, rather than pretending to have answered.
+    virtual json Results() const { return json::object(); }
     virtual void printHelp() const { std::cout << "No help available for this method." << std::endl; };
 
     bool CheckStop() const;
@@ -70,6 +104,27 @@ public:
     std::string Filename() const { return m_filename; }
     std::string OutputDir() const { return m_output_dir; }
     std::string BMTDir() const { return m_bmt_dir; }
+
+    // Claude Generated 2026 - Two pieces of per-run control an embedded caller needs.
+    //
+    /// Ask this run to stop. Thread-safe, and unlike the "stop" file it addresses
+    /// ONE run: that file sits in the working directory, so it aborts every
+    /// concurrent method at once and a forgotten one kills the next run at step 0.
+    void requestStop() { m_stop_requested.value.store(true); }
+    bool stopRequested() const { return m_stop_requested.value.load(); }
+
+    /// Pin the output directory and keep createBMTDir() from replacing it.
+    ///
+    /// Without this an embedded caller gets a Basename.Keyword.TIMESTAMP folder in
+    /// the user's working directory for every single run -- a GUI doing a dozen
+    /// analyses leaves a dozen of them behind. Pass a temporary directory, or an
+    /// empty string to opt out of any output directory at all.
+    void pinOutputDir(const std::string& directory)
+    {
+        m_output_dir = directory;
+        m_output_dir_pinned = true;
+    }
+    bool outputDirPinned() const { return m_output_dir_pinned; }
     void setOutputDir(const std::string& dir);
     std::string outputPath(const std::string& filename) const;
     void ensureOutputDir() const;
@@ -84,7 +139,7 @@ public:
 
 protected:
     void checkHelp();
-    void TriggerWriteRestart();
+    nlohmann::json TriggerWriteRestart();   ///< writes curcuma_restart.json, returns the plain state (K6, Oct 2026)
 
     StringList RestartFiles() const;
 
@@ -120,7 +175,9 @@ protected:
     // level), restored in the dtor — so a sub-method (SimpleMD/ConfScan/...) created by a parent
     // (e.g. ConfSearch) restores the parent's level when it is destroyed, instead of leaving the
     // global CurcumaLogger verbosity clamped to its own. -1 = nothing to restore.
-    int m_saved_global_verbosity = -1;
+    /// The thread's verbosity override as it was on entry; -1 means there was
+    /// none, and restoring -1 clears the override again. Claude Generated 2026.
+    int m_saved_thread_verbosity = -1;
 
 private:
     /* Lets have this for all modules */
@@ -143,5 +200,7 @@ private:
     std::string m_filename;
     std::string m_output_dir;
     std::string m_bmt_dir;                    // Claude Generated 2026: BMT directory path
+    bool m_output_dir_pinned = false;         // Claude Generated 2026: pinOutputDir()
+    StopFlag m_stop_requested;                // Claude Generated 2026: requestStop()
     std::vector<std::string> m_bak_files;    // Claude Generated 2026: Files to copy back to CWD
 };

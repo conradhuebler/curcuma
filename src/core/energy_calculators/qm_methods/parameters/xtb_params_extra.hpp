@@ -20,12 +20,13 @@
 #ifndef CURCUMA_XTB_PARAMS_EXTRA_H_
 #define CURCUMA_XTB_PARAMS_EXTRA_H_
 
+#include "src/core/units.h"
 #include <cmath>
 #include <vector>
 
 namespace curcuma::xtb {
 
-inline constexpr double AA_TO_AU = 1.0 / 0.529177210903;
+inline constexpr double AA_TO_AU = CurcumaUnit::Length::ANGSTROM_TO_BOHR;
 
 // ---- Pauling electronegativities (dimensionless, elements 1..86) ----------
 // paulingen.f90 lines 40-57. Elements 87+ are dummy 1.50.

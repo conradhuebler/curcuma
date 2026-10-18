@@ -27,7 +27,7 @@ Wenn künftig ein neuer Cutoff dazukommt, sollte er sich an die unten beschriebe
 | 13 | `xb.r_cut` | `gfnff_parameters.h:186` / set in gfnff_method.cpp:7587 | XB-Pair-Energie | 20.0 (zugewiesen) | Struct + zugewiesen | ✅ Used | ✅ Read | linear | ✅ konsistent |
 | 14 | `rep.r_cut` (bonded) | `gfnff_parameters.h:125` | Repulsion (bonded) | 20.0 (zugewiesen) | Struct + zugewiesen | ✅ Used | ✅ Read | linear | ✅ konsistent |
 | 15 | `rep.r_cut` (non-bonded) | `gfnff_parameters.h:125` | Repulsion (non-bonded) | 20.0 (zugewiesen) | Struct + zugewiesen | ✅ Used | ✅ Read | linear | ✅ konsistent |
-| 16 | `eeq_pcg_nfrag_threshold` | `eeq_solver.h:956` | EEQ-Solver-Schwelle (nfrag) | 4 | PARAM | ✅ | ⚠️ N/A | int | ✅ funktional |
+| 16 | `eeq_pcg_nfrag_threshold` (removed 2026-10, see EEQ_SOLVER_CONTROL.md) | `eeq_solver.h:956` | EEQ-Solver-Schwelle (nfrag) | 4 | PARAM | ✅ | ⚠️ N/A | int | ✅ funktional |
 | 17 | `pcg_large_threshold` | `eeq_solver.h:954` | EEQ-Solver-Schwelle (N) | 500 | PARAM | ✅ | ⚠️ N/A | int | ✅ funktional |
 | 18 | `convergence_threshold` (EEQ) | `eeq_solver.h:928` | EEQ PCG-Konvergenz | 1e-6 | PARAM | ✅ | ✅ | rel. | ✅ funktional |
 | 19 | `hb_cell_list_min_atoms` | `gfnff.h:233` | HB/XB Cell-List Aktivierung | 800 | PARAM | ✅ | ⚠️ N/A | int (atom-count) | ✅ funktional |

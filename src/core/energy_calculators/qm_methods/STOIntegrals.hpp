@@ -1,5 +1,6 @@
 #pragma once
 
+#include "src/core/units.h"
 #include "LofthusOverlap.hpp"
 
 #include <cmath>
@@ -194,7 +195,7 @@ static inline double calculateSSOverlap(double zeta1, double zeta2, double R_ang
     // where p = (ζ₁+ζ₂)/2, R in Bohr, N = [4ζ₁ζ₂/(ζ₁+ζ₂)²]^(3/2)
     // Reference: Mulliken et al., J. Chem. Phys. 17, 1248 (1949)
 
-    constexpr double bohr = 0.52917721092;  // Angstrom per Bohr
+    constexpr double bohr = CurcumaUnit::Length::bohr_radius_or_legacy(0.52917721092);  // Angstrom per Bohr
     double R = R_angstrom / bohr;  // Convert to Bohr
 
     // Average exponent p = (ζ₁+ζ₂)/2 — NOT reduced mass ζ₁ζ₂/(ζ₁+ζ₂)
@@ -281,7 +282,7 @@ static inline double calculateSPOverlap(double zeta1, double zeta2, double R_ang
     if (R_angstrom < 1e-10)
         return 0.0;
 
-    constexpr double bohr = 0.52917721092;
+    constexpr double bohr = CurcumaUnit::Length::bohr_radius_or_legacy(0.52917721092);
     double R = R_angstrom / bohr;
 
     double p = (zeta1 + zeta2) / 2.0;
@@ -330,7 +331,7 @@ static inline double calculatePPOverlap(double zeta1, double zeta2, double R_ang
     if (R_angstrom < 1e-10)
         return same_axis ? 1.0 : 0.0;
 
-    constexpr double bohr = 0.52917721092;
+    constexpr double bohr = CurcumaUnit::Length::bohr_radius_or_legacy(0.52917721092);
     double R = R_angstrom / bohr;
 
     double p = (zeta1 + zeta2) / 2.0;
@@ -693,7 +694,7 @@ static inline double calculateOverlap(const Orbital& orb1, const Orbital& orb2, 
     // IMPORTANT: argB = 0.5*R*(ζ_bra - ζ_ket) is asymmetric, so orbital ordering
     // must match Lofthus convention: bra=orb1 (left), ket=orb2 (right).
     // Ref: E. Lofthus, Mol. Phys. 5, 105 (1962); Pople & Beveridge, "Approx. MO Theory" (1970)
-    constexpr double bohr = 0.52917721092;
+    constexpr double bohr = CurcumaUnit::Length::bohr_radius_or_legacy(0.52917721092);
     double R_bohr = R / bohr;
 
     // Determine orbital category pair (without swapping — order matters for Lofthus)
@@ -801,7 +802,7 @@ static inline double calculateOverlapDerivative(const Orbital& orb1, const Orbit
     // dS/dR_angstrom = dS/dR_bohr * dR_bohr/dR_ang = dS/dR_bohr / bohr
     if (R < 1e-10) return 0.0;
 
-    constexpr double bohr = 0.52917721092;
+    constexpr double bohr = CurcumaUnit::Length::bohr_radius_or_legacy(0.52917721092);
     double R_bohr = R / bohr;
 
     double zeta1 = orb1.zeta;

@@ -257,11 +257,12 @@ double DeltaMLMethod::calculateEnergy(bool gradient)
             Matrix dgrad;
             m_last_correction
                 = m_model.predictEnergyAndGradient(m_elements, m_geometry, dgrad, &indicator);
-            // The model differentiates with respect to Angstrom, the base method reports
-            // Eh/Bohr. Adding the two without this factor inflates the learned force by
-            // 1/0.5292 = 1.89 -- an error invisible in the energy, and one that quietly
-            // corrupts every optimisation and trajectory.
-            m_gradient += dgrad * CurcumaUnit::Length::BOHR_TO_ANGSTROM;
+            // Model and base method both report Eh/Angstrom: getGradient() has that contract
+            // since Known Issue #28. An earlier version of this file assumed the base returned
+            // Eh/Bohr and scaled the learned force by BOHR_TO_ANGSTROM; after the merge with
+            // master that made the correction 0.529 times too small (found by comparing the
+            // assembled gradient with central differences of the -sp energy).
+            m_gradient += dgrad;
         } else {
             m_last_correction = m_model.predictEnergy(m_elements, m_geometry, &indicator);
         }

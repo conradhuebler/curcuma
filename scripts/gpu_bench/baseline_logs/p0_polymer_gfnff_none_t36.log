@@ -1,0 +1,246 @@
+**************************************************************
+*         Curcuma - Simple Molecular Modelling tool!         *
+*                                                            *
+*                Curcuma - Version:  0.0.263                 *
+*                                                            *
+*            Written by Conrad Hübler TU Freiberg            *
+*                                                            *
+*            Visit the website for initial usage             *
+*          https://github.com/conradhuebler/curcuma          *
+*                                                            *
+*          This program comes without any warranty           *
+*               It might even be total useless               *
+*                                                            *
+*          If you obtain some usefull results with           *
+*                    curcuma, please cite                    *
+*           http://doi.org/10.5281/zenodo.4302722            *
+*                                                            *
+*                 Git Commit Hash: c4cde7f2                  *
+*                                                            *
+**************************************************************
+
+Curcuma was started as:
+[1m[38;2;144;238;144m/home/conrad/src/curcuma/release/curcuma [0m[1m[38;2;144;238;144m-sp [0m[1m[38;2;144;238;144mpolymer.xyz [0m[1m[38;2;144;238;144m-method [0m[1m[38;2;144;238;144mgfnff [0m[1m[38;2;144;238;144m-gpu [0m[1m[38;2;144;238;144mnone [0m[1m[38;2;144;238;144m-threads [0m[1m[38;2;144;238;144m36 [0m[1m[38;2;144;238;144m-no_bmt [0m[1m[38;2;144;238;144m-verbosity [0m[1m[38;2;144;238;144m2 [0m
+
+Started computation at Thu Sep 17 13:14:49 2026
+
+[EEQ] Phase 2: preparing corrections (dxi, dgam, pi/amide detection)...
+        Initializing EnergyCalculator (ConfigManager)
+[38;2;100;149;237m[PARAM] method: gfnff
+[0m[38;2;100;149;237m[PARAM] geometry_file: polymer.xyz
+[0m[38;2;100;149;237m[PARAM] multiplicity: 1
+[0m        Creating computational method
+[38;2;100;149;237m[PARAM] requested_method: gfnff
+[0m        Calling MethodFactory::create...
+        MethodFactory::create called
+[38;2;100;149;237m[PARAM] requested_method: gfnff
+[0m[38;2;100;149;237m[PARAM] normalized_method: gfnff
+[0m        GFN-FF: using CPU implementation
+        EEQ solver config: solve_method=cholesky, ppcg auto at nfrag>=1 & N>=500, tol=1e-12, max_iter=500
+        EEQSolver initialized with parameters:
+[38;2;100;149;237m[PARAM] max_iterations: 50
+[0m[38;2;100;149;237m[PARAM] convergence_threshold: 1.00e-06
+[0m[38;2;100;149;237m[PARAM] verbosity: 2
+[0m[38;2;100;149;237m[PARAM] calculate_cn: true
+[0m[38;2;100;149;237m[PARAM] allow_unconverged_charges: true
+[0m[38;2;100;149;237m[PARAM] solve_method: cholesky
+[0m[38;2;050;205;050m[OK]    EnergyCalculator initialized successfully
+[0m[38;2;100;149;237m[PARAM] actual_method: gfnff
+[0m        Setting molecule in EnergyCalculator
+[38;2;100;149;237m[PARAM] atoms: 1410
+[0m[38;2;100;149;237m[PARAM] charge: 0
+[0m[38;2;100;149;237m[PARAM] spin: 0
+[0m        GFN-FF cutoff configuration:
+[38;2;100;149;237m[PARAM]   cn_cutoff_bohr: 10.00 Bohr  (per-step CN neighbor list)
+[0m[38;2;100;149;237m[PARAM]   cn_accuracy: 1.00  (used when cn_cutoff_bohr=0)
+[0m[38;2;100;149;237m[PARAM]   cn_deriv_cutoff: 40.00 Bohr  (hardcoded, topology-init + per-step CN derivatives)
+[0m[38;2;100;149;237m[PARAM]   eeq_distance_cutoff: 0.00 Bohr  (0 = full Coulomb (matches Fortran goed_gfnff))
+[0m[38;2;100;149;237m[PARAM]   coulomb_pair_r_cut: 100.00 Bohr  (per-pair, hardcoded; effective no-cutoff for typical chemistry)
+[0m[38;2;100;149;237m[PARAM]   dispersion_r_cut: D3: 38.73 Bohr (sqrt(dispthr=1500))  |  D4: 50.0 Bohr (pair eval) / 60.0 Bohr (pair generation)
+[0m[38;2;100;149;237m[PARAM]   hb_r_cut / xb_r_cut / rep_r_cut: 50.0 / 20.0 / 20.0 Bohr  (Struct defaults, set per pair)
+[0m        GFNFF: Full topology recalculation (large geometry change or first call)
+        Phase 2.1: Computing distance matrices
+        Calculating bond list for 1410 atoms
+[38;2;050;205;050m[OK]    Detected 1409 bonds
+[0m        Detected 1 molecular fragments
+        Using proper two-phase EEQ system
+        [EEQ] dispatchSolve: Using SchurCholesky solver (N=1410)
+        [EEQ] projected PCG converged in 32 iterations (|Pr|=4.13e-11, nfrag=1)
+        Phase 1 EEQ: Topology charges calculated
+[38;2;255;255;255m[RESULT]Atom 0 qa = -0.431502
+[0m[38;2;255;255;255m[RESULT]Atom 1 qa = 0.070445
+[0m[38;2;255;255;255m[RESULT]Atom 2 qa = 0.060344
+[0m[38;2;255;255;255m[RESULT]Atom 3 qa = -0.338380
+[0m[38;2;255;255;255m[RESULT]Atom 4 qa = 0.061567
+[0m        calculateDxi: Electronegativity corrections calculated (Fortran-matching)
+[38;2;255;255;255m[RESULT]  topo_info.dxi[0] (Z=8) = -0.005000
+[0m[38;2;255;255;255m[RESULT]  topo_info.dxi[3] (Z=8) = 0.000000
+[0m[38;2;255;255;255m[RESULT]  topo_info.dxi[6] (Z=8) = 0.000000
+[0m[38;2;255;255;255m[RESULT]  topo_info.dxi[9] (Z=8) = 0.000000
+[0m        [EEQ] dispatchSolve: Using SchurCholesky solver (N=1410)
+        [EEQ] projected PCG converged in 62 iterations (|Pr|=4.24e-11, nfrag=1)
+        [EEQ] Phase 2 timing: corrections+matrix 9.5 ms, solve 2.8 ms (N=1410, nfrag=1)
+        EEQ PCG: 2/2 converged (94 iters total)
+[38;2;050;205;050m[OK]    Two-phase EEQ charge calculation completed successfully
+[0m        Using full iterative Hückel calculation for π-bond orders
+[38;2;050;205;050m[OK]    Full Hückel: 0/1409 non-zero π-bond orders
+[0m[38;2;050;205;050m[OK]    Generated 12042 batm triples for 1410 atoms
+[0m        GFN-FF q-loop: running pass 2 with the charge-shrunk radii
+        Phase 2.1: Computing distance matrices
+        Calculating bond list for 1410 atoms
+[38;2;050;205;050m[OK]    Detected 1409 bonds
+[0m        Detected 1 molecular fragments
+        Using p[EEQ] Phase 2: preparing corrections (dxi, dgam, pi/amide detection)...
+roper two-phase EEQ system
+        [EEQ] dispatchSolve: Using SchurCholesky solver (N=1410)
+        [EEQ] projected PCG converged in 34 iterations (|Pr|=3.68e-11, nfrag=1)
+        Phase 1 EEQ: Topology charges calculated
+[38;2;255;255;255m[RESULT]Atom 0 qa = -0.431502
+[0m[38;2;255;255;255m[RESULT]Atom 1 qa = 0.070445
+[0m[38;2;255;255;255m[RESULT]Atom 2 qa = 0.060344
+[0m[38;2;255;255;255m[RESULT]Atom 3 qa = -0.338380
+[0m[38;2;255;255;255m[RESULT]Atom 4 qa = 0.061567
+[0m        calculateDxi: Electronegativity corrections calculated (Fortran-matching)
+[38;2;255;255;255m[RESULT]  topo_info.dxi[0] (Z=8) = -0.005000
+[0m[38;2;255;255;255m[RESULT]  topo_info.dxi[3] (Z=8) = 0.000000
+[0m[38;2;255;255;255m[RESULT]  topo_info.dxi[6] (Z=8) = 0.000000
+[0m[38;2;255;255;255m[RESULT]  topo_info.dxi[9] (Z=8) = 0.000000
+[0m        [EEQ] dispatchSolve: Using SchurCholesky solver (N=1410)
+        [EEQ] projected PCG converged in 62 iterations (|Pr|=4.25e-11, nfrag=1)
+        [EEQ] Phase 2 timing: corrections+matrix 10.1 ms, solve 5.0 ms (N=1410, nfrag=1)
+        EEQ PCG: 2/2 converged (96 iters total)
+[38;2;050;205;050m[OK]    Two-phase EEQ charge calculation completed successfully
+[0m        Using full iterative Hückel calculation for π-bond orders
+[38;2;050;205;050m[OK]    Full Hückel: 0/1409 non-zero π-bond orders
+[0m[38;2;050;205;050m[OK]    Generated 12042 batm triples for 1410 atoms
+[0m[38;2;255;255;255m[RESULT]GFN-FF torsions: 3015 primary (n=2,3), 601 extra sp3-sp3 (n=1)
+[0m          Periodicity distribution: n=1 (0), n=2 (0), n=3 (3015)
+[38;2;255;255;255m[RESULT]GFN-FF torsion generation: 21 ms
+[0m        GFN-FF inversions: 0 terms generated
+[38;2;255;255;255m[RESULT]GFN-FF inversion generation: 0 ms
+[0m[38;2;050;205;050m[OK]    D4: Loaded reference CN data from Fortran dftd3param.f90
+[0m[38;2;050;205;050m[OK]    D4: Complete data loaded (alphaiw + corrections)
+[0m        === D4 C6 Reference Matrix Pre-computation (PHASE 1 OPTIMIZED) ===
+[38;2;050;205;050m[OK]    D4: Pre-computed 119 C6 reference values in 0.28 ms
+[0m          Cache size: 682276 entries (flat array, 5.2 MB)
+        Found 2 HB hydrogens
+        Detected 383 hydrogen bonds
+        Detected 0 halogen bonds
+[38;2;255;255;255m[RESULT]
+[0m[38;2;255;255;255m[RESULT]GFN-FF Parameter Generation [N=1410 atoms, 36 threads, backend=CxxThreadPool]
+[0m[38;2;255;255;255m[RESULT]  ─────────────────────────────────────────────────────────────────
+[0m[38;2;255;255;255m[RESULT]  Topology:
+[0m[38;2;255;255;255m[RESULT]  Distance matrix                      5.13 ms
+[0m[38;2;255;255;255m[RESULT]  CN + hybridization + rings          73.41 ms
+[0m[38;2;255;255;255m[RESULT]  EEQ Phase 1 (topo charges)          22.41 ms
+[0m[38;2;255;255;255m[RESULT]  EEQ Phase 1 corrections              0.54 ms
+[0m[38;2;255;255;255m[RESULT]  EEQ Phase 2 (refinement)            19.32 ms
+[0m[38;2;255;255;255m[RESULT]  Pi charges: ipis EEQ (0 pi-sys)      0.01 ms
+[0m[38;2;255;255;255m[RESULT]  Pi-bond orders (FT-HMO)              1.05 ms
+[0m[38;2;255;255;255m[RESULT]  Bond-type classification             0.06 ms
+[0m[38;2;255;255;255m[RESULT]  Topo distances + BATM list          11.91 ms
+[0m[38;2;255;255;255m[RESULT]  Topology total                     133.94 ms
+[0m[38;2;255;255;255m[RESULT]  Parameter generation:
+[0m[38;2;255;255;255m[RESULT]  Bonds                                1.97 ms
+[0m[38;2;255;255;255m[RESULT]  Angles                              18.42 ms
+[0m[38;2;255;255;255m[RESULT]  Torsions                            21.49 ms
+[0m[38;2;255;255;255m[RESULT]  Inversions                           0.00 ms
+[0m[38;2;255;255;255m[RESULT]  sTorsions                            0.00 ms
+[0m[38;2;255;255;255m[RESULT]  Coulomb pairs                       19.19 ms
+[0m[38;2;255;255;255m[RESULT]  Repulsion pairs                     10.24 ms
+[0m[38;2;255;255;255m[RESULT]  Dispersion pairs                   112.86 ms
+[0m[38;2;255;255;255m[RESULT]  BATM triples                         0.09 ms
+[0m[38;2;255;255;255m[RESULT]  HB/XB detection                      7.13 ms
+[0m[38;2;255;255;255m[RESULT]  Bond-HB cross-reference              0.05 ms
+[0m[38;2;255;255;255m[RESULT]  ═════════════════════════════════════════════════════════════════
+[0m[38;2;255;255;255m[RESULT]  Total parameter generation         668.00 ms
+[0m[38;2;255;255;255m[RESULT]
+[0m[38;2;050;205;050m[OK]    Topology cache saved to polymer.topo.json
+[0m[38;2;050;205;050m[OK]    Molecule set: 1410 atoms, method: gfnff
+[0m        Starting energy calculation
+[38;2;100;149;237m[PARAM] gradient: false
+[0m[38;2;100;149;237m[PARAM] method: gfnff
+[0m        GFN-FF: Skipping redundant Phase-2 EEQ (geometry unchanged)
+[38;2;255;255;255m[RESULT]
+[RESULT] GFN-FF (CPU) Timing Breakdown:
+[0m[38;2;255;255;255m[RESULT]  Phase                          Time (ms)   %Calc
+[0m[38;2;255;255;255m[RESULT]  -----------------------------------------------------------
+[0m[38;2;255;255;255m[RESULT]  prepareCNAndEEQ                       3.6   33.1%
+[0m[38;2;255;255;255m[RESULT]    - CN calculation                    3.5
+[0m[38;2;255;255;255m[RESULT]    - EEQ topology prep                 0.1
+[0m[38;2;255;255;255m[RESULT]  Force Field Energy                    4.1   38.2%
+[0m[38;2;255;255;255m[RESULT]  Overhead (other)                      3.1   28.6%
+[0m[38;2;255;255;255m[RESULT]  -----------------------------------------------------------
+[0m[38;2;255;255;255m[RESULT]  Calculation Total                    10.7  100.0%
+[0m[38;2;255;255;255m[RESULT]  Sequential fraction: 33.2% of calculation — overlap potential: ~33.2%
+[0m[38;2;255;255;255m[RESULT]
+[0m[38;2;255;255;255m[RESULT]GFN-FF Energy Calculation [CPU]  wall=10.73 ms
+[0m[38;2;255;255;255m[RESULT]GFN-FF Energy Decomposition [CPU]
+[0m[38;2;255;255;255m[RESULT]  Component                   Energy (Eh)    CPU ms    GPU ms
+[0m[38;2;255;255;255m[RESULT]  ─────────────────────────────────────────────────────────────────
+[0m[38;2;255;255;255m[RESULT]  Bonded:
+[0m[38;2;255;255;255m[RESULT]  Bond                    -204.1051478121      0.63        --
+[0m[38;2;255;255;255m[RESULT]  Angle                     +0.3745509066      2.58        --
+[0m[38;2;255;255;255m[RESULT]  Dihedral                  +0.6910518169      1.78        --
+[0m[38;2;255;255;255m[RESULT]  Inversion                 +0.0000000000      0.01        --
+[0m[38;2;255;255;255m[RESULT]  sTors                     +0.0000000000        --        --
+[0m[38;2;255;255;255m[RESULT]  Non-bonded:
+[0m[38;2;255;255;255m[RESULT]  Dispersion                -1.8093220456     36.57        --
+[0m[38;2;255;255;255m[RESULT]  Repulsion (bonded)        +3.5239196018      0.14        --
+[0m[38;2;255;255;255m[RESULT]  Repulsion (nonbond)       +6.5527948309     18.50        --
+[0m[38;2;255;255;255m[RESULT]  Electrostatics:
+[0m[38;2;255;255;255m[RESULT]  Coulomb                   -8.2864651771     70.14        --
+[0m[38;2;255;255;255m[RESULT]  Non-covalent:
+[0m[38;2;255;255;255m[RESULT]  H-bonds                   -0.0007698322      0.24        --
+[0m[38;2;255;255;255m[RESULT]    case 1 (unbound):      318 pairs      -0.0000091900 Eh
+[0m[38;2;255;255;255m[RESULT]    case 2 (bound):         65 pairs      -0.0007606422 Eh
+[0m[38;2;255;255;255m[RESULT]    case 3 (carbonyl):       0 pairs      +0.0000000000 Eh
+[0m[38;2;255;255;255m[RESULT]    case 4 (sp2-N):          0 pairs      +0.0000000000 Eh
+[0m[38;2;255;255;255m[RESULT]  X-bonds                   +0.0000000000      0.01        --
+[0m[38;2;255;255;255m[RESULT]  ATM (3-body)              +0.0000075183      0.52        --
+[0m[38;2;255;255;255m[RESULT]  BATM                      -0.4582039937      1.74        --
+[0m[38;2;255;255;255m[RESULT]  ═════════════════════════════════════════════════════════════════
+[0m[38;2;255;255;255m[RESULT]  Total                   -203.5175841862
+[0m[38;2;255;255;255m[RESULT]  Phase summary:
+[0m[38;2;255;255;255m[RESULT]  CN + EEQ                          wall=   3.55    cpu=  3.55    gpu=    --
+[0m[38;2;255;255;255m[RESULT]  HB/XB re-detection                wall=   0.01    cpu=  0.01    gpu=    --
+[0m[38;2;255;255;255m[RESULT]  Thread pool (N=36)                wall=   4.10    cpu=132.85    gpu=    --
+[0m[38;2;255;255;255m[RESULT]    parallel efficiency: 89.9%  (cpu-sum / (N * wall))
+[0m[38;2;255;255;255m[RESULT]  ═════════════════════════════════════════════════════════════════
+[0m[38;2;255;255;255m[RESULT]  One-time setup                    topo=  133.9 ms  param=  668.0 ms
+[0m[38;2;255;255;255m[RESULT]  Total energy call                 wall=  10.73 ms
+[0m[38;2;255;255;255m[RESULT]
+[0m[38;2;100;149;237m[ENERGY]gfnff Final Energy: -203.51758419 Eh
+[0m
+Charge 0 Spin 0
+Single Point Energy = -203.51758419 Eh
+
+
+Finished after 0 seconds!
+Finished computation at Thu Sep 17 13:14:49 2026
+
+
+[38;2;000;128;000m===============================================================
+[0m[38;2;000;128;000m  Please cite the following references for methods used in this run:
+[0m[38;2;000;128;000m===============================================================
+[0m[38;2;000;128;000m  [CITE]  Curcuma — Molecular Modelling Toolkit
+[0m[38;2;000;128;000m          Hübler, C. Curcuma (DOI: 10.5281/zenodo.4302722)
+[0m[38;2;000;128;000m  [CITE]  GFN-FF Force Field (Spicher & Grimme 2020)
+[0m[38;2;000;128;000m          Spicher, S.; Grimme, S. Angew. Chem. Int. Ed. 2020, 59, 15665–15673 (DOI: 10.1002/anie.202004239)
+[0m[38;2;000;128;000m  [CITE]    -> DFT-D4 Dispersion Correction (Caldeweyher et al. 2017, 2019, 2020)
+[0m[38;2;000;128;000m          Caldeweyher, E.; Bannwarth, C.; Grimme, S. J. Chem. Phys. 2017, 147, 034112 (DOI: 10.1063/1.4993215)
+[0m[38;2;000;128;000m          Caldeweyher, E. et al. J. Chem. Phys. 2019, 150, 154122 (DOI: 10.1063/1.5090222)
+[0m[38;2;000;128;000m          Caldeweyher, E. et al. Phys. Chem. Chem. Phys. 2020, 22, 8499-8512 (DOI: 10.1039/D0CP00502A)
+[0m[38;2;000;128;000m  [CITE]    ->   -> Casimir-Polder Integration (Casimir & Polder 1948)
+[0m[38;2;000;128;000m          Casimir, H. B. G.; Polder, D. Phys. Rev. 1948, 73, 360–372 (DOI: 10.1103/PhysRev.73.360)
+[0m[38;2;000;128;000m  [CITE]    -> Electronegativity Equalization Method (Mortier, Ghosh, Shankar 1986)
+[0m[38;2;000;128;000m          Mortier, W. J.; Ghosh, S. K.; Shankar, S. J. Am. Chem. Soc. 1986, 108, 5708–5711 (DOI: 10.1021/ja00279a008)
+[0m[38;2;000;128;000m  [CITE]    -> Covalent Radii (Pyykko & Atsumi 2009)
+[0m[38;2;000;128;000m          Pyykko, P.; Atsumi, M. Chem. Eur. J. 2009, 15, 186-197 (DOI: 10.1002/chem.200800987)
+[0m[38;2;000;128;000m  [CITE]    -> Electronegativity Equalization Principle (Sanderson 1976)
+[0m[38;2;000;128;000m          Sanderson, R. T. Chemical Bonds and Bond Energy, Academic Press, 1976
+[0m[38;2;000;128;000m  [CITE]    -> Chemical Hardness Parameters (Ghosh & Islam 2009)
+[0m[38;2;000;128;000m          Ghosh, D. C.; Islam, N. Int. J. Quantum Chem. 2009, 109, 1435–1454 (DOI: 10.1002/qua.22202)
+[0m[38;2;000;128;000m===============================================================
+[0m        BibTeX written to: curcuma_citations.bib
+WALL 1.11 s MAXRSS 0.41 GB GPU_PEAK_MiB {0: 12629, 1: 9385, 2: 9761, 3: 10363} RC 0

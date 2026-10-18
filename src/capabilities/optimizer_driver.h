@@ -1,6 +1,7 @@
 /*
  * <Optimizer Driver Base Class - Template Method Pattern>
- * Copyright (C) 2025 Claude AI - Generated Code
+ * Copyright (C) 2025 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Claude Generated code (AI contribution; copyright remains with the project owner).
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -52,6 +53,8 @@ public:
     int threads = 1;
     bool single_step_mode = false;
     double max_energy_rise = 100.0; // kJ/mol - maximum allowed energy increase
+    int stall_steps = 20;           // consecutive non-moving steps before "no progress"; 0 = off
+    double stall_rmsd = 1e-6;       // Å - per-step RMSD that counts as "not moving"
 
     // Output control
     bool write_trajectory = true;
@@ -102,6 +105,16 @@ protected:
     std::vector<Molecule> m_trajectory; // Optimization trajectory
     std::vector<double> m_energy_trajectory; // Energy at each step
     Vector m_current_gradient; // Current gradient
+
+    // Claude Generated (Sep 2026): result of the last evaluateEnergyAndGradient(). The driver
+    // evaluates the start geometry in InitializeOptimization() and the optimiser (LBFGSpp) then
+    // asks for f(x0) again; for native GFN2 that second call still ran a warm SCF with at least
+    // one FP64 iteration (polymer_2x on 4 GPUs: ~73 s per optimisation). A bit-identical geometry
+    // on the same calculator now returns the stored energy and gradient.
+    Vector m_eval_cache_coords;
+    Vector m_eval_cache_gradient;
+    double m_eval_cache_energy = 0.0;
+    bool m_eval_cache_valid = false;
     double m_current_energy = 0.0; // Current energy
     double m_initial_energy = 0.0; // Starting energy
 

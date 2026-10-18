@@ -29,8 +29,8 @@
 
 #include "src/core/global.h"
 #include "src/core/solvation/implicit_solvation.h"
-#include "qm_driver.h"
-#include "STOIntegrals.hpp"
+#include "interface/abstract_interface.h"
+#include "json.hpp"
 
 #include <Eigen/Dense>
 #include <array>
@@ -58,6 +58,7 @@ class CxxThreadPool;
 
 #include "diis_accelerator.h"
 #include "broyden_mixer.h"
+#include "xtb_precond.h"
 
 namespace curcuma::xtb {
 
@@ -353,6 +354,33 @@ struct Wavefunction {
  *  Any method returning false makes the caller fall back to the CPU path for the
  *  whole calculation, so an unavailable / failing device never corrupts results.
  * ------------------------------------------------------------------------- */
+/**
+ * @brief Flat copy of the -scf_precond frag block matrix M for a device upload
+ *        (Claude Generated, Oct 2026; SchwarzPreconditioner::flatten, xtb_precond.h).
+ *
+ * M v = fallback .* v + sum_b R_b^T B_b R_b v on the packed SCC vector [q_sh | dp | qp] of
+ * length N in the DEVICE packing (moments atom-major: dp at nsh + 3*atom + k, qp at
+ * nsh + 3*nat + 6*atom + k; the host packSCC is component-major). Block b covers idx[idx_off[b] .. idx_off[b+1]) with its row-major matrix at
+ * B[b_off[b]]; fallback holds alpha (scf_damping) on indices outside every block, 0 inside.
+ */
+struct GpuPrecondFlat {
+    int N = 0;
+    int max_dim = 0;               ///< largest block
+    std::vector<int> idx_off;      ///< nblocks + 1
+    std::vector<int> idx;
+    std::vector<int> b_off;        ///< nblocks + 1
+    std::vector<double> B;
+    std::vector<double> fallback;  ///< N
+    int nblocks() const { return idx_off.empty() ? 0 : static_cast<int>(idx_off.size()) - 1; }
+    GpuPrecondFlat();    // out of line (xtb_precond.cpp) so that -Winline stays quiet
+    ~GpuPrecondFlat();
+};
+
+/// Guard callback of the device Broyden (Claude Generated, Oct 2026): called once per update
+/// while M is active with the update index n (0-based in this SCF) and ||F_n||_2; sets
+/// *store_best when x_n/F_n are to be kept as the "best" pair; returns true to drop M.
+using GpuBroydenGuardFn = std::function<bool(int n, double fnorm, bool* store_best)>;
+
 struct GpuScfBackend {
     virtual ~GpuScfBackend() = default;
     virtual bool begin(const Matrix& H0, const Matrix& S,
@@ -404,6 +432,11 @@ struct GpuScfBackend {
     virtual bool downloadOverlap(Eigen::MatrixXd& S_out)   { (void)S_out;  return false; }
     virtual bool downloadH0(Eigen::MatrixXd& H0_out)       { (void)H0_out; return false; }
     virtual bool downloadCholesky(Eigen::MatrixXd& L_out)  { (void)L_out;  return false; }
+    /// Claude Generated (Sep 29, 2026): the same S / H0 written column-major straight into
+    /// caller storage of nao*nao doubles, so the host needs no temporary and no extra copy
+    /// (polymer_2x: 2.4 s of host copies). Default false: the caller uses the functions above.
+    virtual bool downloadOverlapInto(double* S_colmajor) { (void)S_colmajor; return false; }
+    virtual bool downloadH0Into(double* H0_colmajor)     { (void)H0_colmajor; return false; }
 
     /* ----- Device nuclear gradient (Stage 4) ---------------------------- *
      * The electronic + repulsion + Coulomb gradient (sections 1/2/3 of
@@ -508,6 +541,29 @@ struct GpuScfBackend {
     { (void)q_sh0; (void)dp_at0; (void)qp_at0; (void)q_at0; (void)n0_sh; (void)n0_at;
       (void)Tele; (void)n_elec; (void)nocc_pairs; (void)alpha; (void)max_hist; (void)w0;
       return false; }
+    /// Per-phase device timings (CURCUMA_GPU_PROFILE), "" when unsupported/disabled.
+    /// Claude Generated (Sep 2026).
+    virtual std::string profileReport() const { return {}; }
+
+    /* ----- Broyden seed preconditioner in the resident loop (Oct 2026) ---- *
+     * -scf_precond frag on the device (Claude Generated, docs/SCF_PRECOND.md): the device
+     * Broyden of the fully resident loop replaces alpha*F by M*F (linear step and seed) and
+     * alpha*dF by M*dF (update vectors u), like BroydenMixer::setStepHook on the host. Call
+     * residentSetPreconditioner after beginResidentLoop (which clears it); data == nullptr
+     * reactivates the upload already resident under @p tag. The guard runs on ||F||_2 of each
+     * update (one scalar to the host); on a hit M is dropped as in BroydenMixer::dropStepHook
+     * (keep: history rewritten to the scalar form, otherwise reset), and with @p best the next
+     * step starts from the stored device copies x_best + alpha*F_best. Default: unsupported. */
+    virtual bool supportsResidentPreconditioner() const { return false; }
+    /// Tag of the M upload resident on the device (0 = none).
+    virtual unsigned long long residentPreconditionerTag() const { return 0; }
+    /// True if a multi-GPU split (eigensolver or density over several devices) would engage
+    /// for a basis of @p nao functions; the device preconditioner is then not used.
+    virtual bool multiGpuScfSplit(int nao) const { (void)nao; return false; }
+    virtual bool residentSetPreconditioner(const GpuPrecondFlat* data, unsigned long long tag,
+                                           GpuBroydenGuardFn guard, bool keep, bool best)
+    { (void)data; (void)tag; (void)guard; (void)keep; (void)best; return false; }
+
     virtual bool residentScfStep(bool fp32, double& dq, double& e_band, double& e_coulomb,
                                  double& e_third, double& e_multipole)
     { (void)fp32; (void)dq; (void)e_band; (void)e_coulomb; (void)e_third; (void)e_multipole;
@@ -579,6 +635,18 @@ struct GpuScfBackend {
                                 const double* qkernel, const double* gamma3)
     { (void)nat; (void)nsh; (void)amat_sd; (void)amat_dd; (void)amat_sq;
       (void)dkernel; (void)qkernel; (void)gamma3; return false; }
+    /// Device potential without the stored multipole interaction matrices (the backend
+    /// rebuilds them from geometry + damping radii). Claude Generated (Sep 2026).
+    /// Why the last begin*/step call returned false, when the backend can say. Empty
+    /// otherwise. Claude Generated (Sep 2026).
+    virtual std::string lastError() const { return {}; }
+    virtual bool supportsOnTheFlyMultipole() const { return false; }
+    virtual bool beginPotentialOnTheFly(int nat, int nsh, const double* xyz_bohr,
+                                        const double* mrad, double dmp3, double dmp5,
+                                        const double* dkernel, const double* qkernel,
+                                        const double* gamma3)
+    { (void)nat; (void)nsh; (void)xyz_bohr; (void)mrad; (void)dmp3; (void)dmp5;
+      (void)dkernel; (void)qkernel; (void)gamma3; return false; }
     /// q_sh (nsh), dp_at (3×nat), qp_at (6×nat) are the mixed SCC input; W/dWq
     /// (each nat·7) the host-built D4 reference weights at those charges. Builds
     /// the potential + Fock on the device and writes the eigenvalues to eps.
@@ -627,12 +695,12 @@ inline int solventModelCode(const std::string& s)
     return -1;
 }
 
-class XTB : public QMDriver {
+class XTB : public QMInterface {
 public:
     explicit XTB(MethodType method);
     ~XTB() override;
 
-    // QMDriver API
+    // QMInterface API
     using QMInterface::InitialiseMolecule;   // unhide base-class overloads (Mol& / Mol*)
     bool   InitialiseMolecule() override;
     double Calculation(bool gradient = false) override;
@@ -670,6 +738,9 @@ public:
                                 std::vector<int>& nref) const;            // xtb_native.cpp
     Vector  getOrbitalEnergies() const { return m_wfn.eps; }
     Matrix  getMOCoefficients() const { return m_wfn.C; }
+    Matrix  MolecularOrbitals() const { return m_mo; }
+    Vector  Energies() const { return m_energies; }
+    int     NumElectrons() const { return m_num_electrons; }
     Matrix  getDensity() const { return m_wfn.P; }
     // Converged per-iteration SCC energy components (Eh), cached from the last
     // SCF iteration. Reference for the device SCC-energy reductions (Stage 6,
@@ -741,6 +812,26 @@ public:
                              Eigen::MatrixXd& ddp_at,
                              Eigen::MatrixXd& dqp_at) const; // xtb_scf.cpp
 
+    /**
+     * @brief Jacobian J = G'(x*) - I of the SCC fixed-point map by linear response, without a new
+     *        eigensolve per column (Claude Generated, Oct 2026; xtb_response.cpp).
+     *
+     * GFN1 or GFN2, closed shell. x = [q_sh | dp | qp] for GFN2, [q_sh] for GFN1 (packSCC layout in Calculation()). One eigensolve at v(x*),
+     * then for every column k: dv = dv/dx_k (central difference of the potential alone), dF in the
+     * MO basis, dP_pq = w_pq dF_pq with w_pq = (f_p - f_q)/(eps_p - eps_q) (Fermi derivative for
+     * degenerate pairs, chemical-potential shift for a fixed electron count), Mulliken/multipole
+     * projection of dP. Changes m_wfn and m_pot (the caller restores them). Row-major dim x dim,
+     * row = output component, same convention as numericalScfJacobian.
+     * @return false with @p err set if a precondition fails.
+     */
+    bool computeScfJacobianResponse(const Vector& x_star, PrecondMatrix& J, std::string& err);
+    /// SCC vector x (q_sh, then GFN2 dp and qp component-wise over atoms, as packSCC in Calculation()) into m_wfn;
+    /// q_at is rederived from q_sh (Claude Generated, Oct 2026).
+    void unpackSccVector(const Vector& x);
+    /// In-SCF potential of the SCC vector x (Coulomb, third order, GFN2 multipoles and D4, solvation),
+    /// the potential part of the fixed-point map; sets m_wfn charges to x (Claude Generated, Oct 2026).
+    Potential scfPotentialAt(const Vector& x);
+
     // Convergence
     bool isConverged() const { return m_scf_converged; }
     int  scfIterations() const { return m_scf_iterations; }
@@ -782,6 +873,14 @@ public:
     void setDiisSubspace(int n)           { if (n >= 2) m_diis_subspace = n; }
     void setLevelShift(double b)          { m_level_shift = b; }
     void setScfGuess(const std::string& g){ m_scf_guess = g; }
+    void setScfAllowUnconverged(bool b){ m_scf_allow_unconverged = b; }
+    // Opt-in: build the 4s/4p shells from xtb's older STO-6G tables instead of
+    // tblite's (K, Ca, Ge-Kr only). See STO_CGTO.hpp pAlpha6_legacy_4s.
+    void setSto6gLegacy4sp(bool b)        { m_sto6g_legacy_4sp = b; }
+    // D4 three-body (ATM) real-space cutoff in Bohr. tblite uses 25.0 (the default,
+    // since tblite is curcuma's reference for GFN1/GFN2), xtb passes 40.0. Set 40.0
+    // to reproduce the xtb binary on molecules extending past ~25 Bohr.
+    void setD4AtmCutoff(double c)         { m_d4_atm_cutoff = c; }
     ScfMode scfMode() const               { return m_scf_mode; }
 
     // Electronic temperature in Kelvin (0 → integer occupation, no Fermi smearing).
@@ -850,6 +949,25 @@ public:
     void setMixedPrecision(bool b)      { m_scf_mixed_precision = b; }
     void setFp32Threshold(double t)     { if (t > 0.0) m_scf_fp32_threshold = t; }
     void setGpuPartialDiag(bool b)      { m_gpu_partial_diag = b; }
+    // Performance knobs, all with their measured defaults (see the PARAM help in
+    // native_xtb_method.h). Claude Generated (Sep 2026).
+    void setEigensolverMaxThreads(int n)    { m_eig_max_threads = std::max(0, n); }
+    void setScfReduce(const std::string& r) { m_scf_reduce = r; }
+    void setScfReduceThreads(int n)         { m_scf_reduce_threads = std::max(1, n); }
+    void setFp32StallPatience(int n)        { m_fp32_stall_patience = std::max(0, n); }
+    void setFp32FalseFixpointFactor(double f) { m_fp32_false_fixpoint = f; }
+    void setGpuMultipoleOtf(const std::string& m) { m_gpu_mp_otf = m; }
+    // Broyden seed preconditioner (Claude Generated, Oct 2026; xtb_precond.h, docs/SCF_PRECOND.md).
+    void setScfPrecond(const std::string& s)      { m_scf_precond = s; }
+    void setScfPrecondGuard(const std::string& s) { m_scf_precond_guard = s; }
+    void setScfPrecondRebuildRms(double r)        { m_scf_precond_rebuild_rms = (r > 0.0) ? r : 0.0; }
+    void setScfPrecondMaxFragmentAtoms(int n);    // 0 = no limit, negative: warning, default 100 (xtb_precond.cpp)
+    void setScfPrecondSegmentAtoms(int n)         { m_scf_precond_segment_atoms = (n > 0) ? n : 0; }    // 0 = no segmentation
+    void setScfPrecondJacobian(const std::string& s) { m_scf_precond_jacobian = s; }   // fd | response
+    void setScfPrecondSegmentRadius(double r);    // Angstrom; <= 0: warning, value kept (xtb_precond.cpp)
+    // Internal (no CLI parameter): take part in the process-wide sharing of M (adoptSharedPreconditioner).
+    // Set only by the Hessian for its worker calculators and the reference calculator (Claude Generated, Oct 2026).
+    void setScfPrecondShare(bool b)               { m_scf_precond_share = b; }
 
     // Warm-start: reuse converged charges from the previous geometry step.
     // Activated by MD/opt capabilities; also settable via -warm_start false.
@@ -971,6 +1089,13 @@ private:
     // (already filled by GpuScfBackend::downloadMultipoleInts); only the CN-damping
     // radii + atom-pair interaction matrices are computed. Claude Generated (Stage 3m).
     void setupMultipole(bool integrals_on_device = false);   // xtb_multipole.cpp (GFN2)
+    /// Build the host dense dipole/quadrupole AO integrals if their build was deferred
+    /// because a large system runs the fully device-resident GPU SCF (Claude Generated,
+    /// Sep 2026). Every host path that reads m_dp_int/m_qp_int calls this first.
+    void ensureHostMultipoleIntegrals();
+    /// Download the converged density P and MO coefficients C from the device if a large
+    /// GPU single point skipped that (Claude Generated, Sep 2026).
+    void ensureHostWavefunction();
     Vector computeCoordinationNumbers() const;           // xtb_native.cpp
     void buildReferenceOccupations();                    // xtb_native.cpp
 
@@ -998,6 +1123,29 @@ private:
     void addSolvationPotential(Potential& pot) const;
     double energySolvation() const;
 
+    // SCF Jacobian debug dump (Claude Generated, Oct 2026; xtb_precond.cpp). Active only with the
+    // environment variable CURCUMA_SCF_JAC=<dir>; see the definition for the file format.
+    void writeScfJacobianDump(const std::string& dir, const Vector& x_star, const Vector& g_loop,
+                              double e_scc, const std::function<Vector(const Vector&)>& evalG);
+
+    // SCF preconditioner matrix for the Broyden step hook (Claude Generated, Oct 2026;
+    // xtb_precond.cpp). Active only with CURCUMA_SCF_PRECOND_FILE=<file>.
+    bool loadScfPrecondMatrix(const std::string& path, int dim, std::string& err);
+
+    // Broyden seed preconditioner (Claude Generated, Oct 2026; xtb_precond.cpp): picks the step
+    // hook (file > -scf_precond frag > none) and the guard for one SCF; builds or reuses the
+    // fragment M. Returns false only for an unusable CURCUMA_SCF_PRECOND_FILE.
+    bool selectScfPreconditioner(bool broyden_mode, bool cpu_loop, bool device_loop,
+                                 const std::string& no_device_reason, int dim,
+                                 std::function<Vector(const Vector&)>& hook,
+                                 ScfPrecondGuard& guard, std::string& err);
+    bool buildFragmentPreconditioner(std::string& err);
+    // Process-wide sharing of M between XTB objects of the same molecule (Claude Generated, Oct 2026;
+    // xtb_precond.cpp): Hessian workers take over the M of the first builder instead of building their own.
+    bool adoptSharedPreconditioner();
+    void publishSharedPreconditioner();
+    std::string scfPrecondShareKey() const;
+
     // GFN2 multipole interactions (damped).
     void addMultipolePotential(Potential& pot) const;                    // xtb_multipole.cpp
     void addMultipolePotential(Potential& pot,                           // parametrized
@@ -1008,6 +1156,14 @@ private:
     // Electronic free-energy (Mermin/Fermi entropy) term g = -T*S from the
     // fractional occupations m_wfn.focc (xtb fermismear, scc_core.f90). Claude Generated.
     double electronicFreeEnergy() const;                                 // xtb_scf.cpp
+
+    // Alpha/beta electron counts (tblite get_alpha_beta_occupation). Equal to
+    // nocc/2 each in the closed-shell case, in which none of the open-shell code runs.
+    double m_nalpha = 0.0;
+    double m_nbeta = 0.0;
+    // Electronic entropy accumulated by the two-channel occupation; consumed by
+    // electronicFreeEnergy(). Only meaningful while openShell() is true.
+    mutable double m_ts_uhf = 0.0;
 
     // Assemble full Fock matrix: F = H0 + isotropic potential + multipole.
     // Isotropic: F_μν = H0_μν - 0.5·S_μν·(v_ao(μ) + v_ao(ν))
@@ -1032,6 +1188,24 @@ private:
     //     m_electronic_temp, or integer closed-shell at T=0). Mirrors solveEigen.
     //   updatePopulationsFromPopAo: shell/atom Mulliken charges from precomputed
     //     AO populations pop_ao(μ)=Σ_ν P_μν·S_μν (GFN1: no multipole moments).
+    /**
+     * @brief Fermi occupations of ONE spin channel, max 1.0 per orbital.
+     *
+     * Verbatim port of tblite's get_fermi_filling / get_aufbau_filling /
+     * get_fermi_filling_ (src/tblite/wavefunction/fermi.f90): aufbau to obtain the
+     * channel's HOMO index, then a Newton iteration on the Fermi level that targets
+     * exactly that integer electron count. `entropy` returns this channel's
+     * sum(f ln f + (1-f) ln(1-f)) * kT, i.e. tblite's get_electronic_entropy.
+     * Claude Generated (Sep 2026, open-shell support).
+     */
+    static void fermiFillingChannel(const Vector& eps, double nel, double kT,
+                                    Eigen::VectorXd& occ_ch, double& entropy);
+
+    /// Number of unpaired electrons (tblite nuhf). m_spin carries multiplicity - 1.
+    double nUhf() const { return (m_spin > 0.0) ? m_spin : 0.0; }
+    /// True when the SCF must run the two-channel (open-shell) occupation.
+    bool openShell() const { return nUhf() > 0.0; }
+
     void occupationsFromEps(const Vector& eps,
                             Eigen::VectorXd& occ, int& ncol) const;      // xtb_scf.cpp
     void updatePopulationsFromPopAo(const Eigen::VectorXd& pop_ao);      // xtb_scf.cpp
@@ -1049,6 +1223,15 @@ private:
     // correct Coulomb shift. Returns false if EEQ is unavailable (caller then
     // falls back to the bare-H0 guess).
     bool seedEEQGuess(Vector& q_sh_out);                                 // xtb_native.cpp
+
+    // Fragment initial guess (Claude Generated, Sep 2026, operator's idea): split the system
+    // into covalently bonded fragments (Molecule::GetFragments, same partition as
+    // large_system_mode=fragments), converge each fragment's SCF on its own, and scatter the
+    // fragment SCC states (q_sh, GFN2 dp_at/qp_at) onto the global indices. Aimed at large
+    // many-molecule clusters, where the first full Fock from EEQ or bare-H0 charges moves
+    // electrons between distant molecules by several e and the SCF runs away. Returns false
+    // for a single fragment or on any failure (caller falls back to the EEQ guess).
+    bool seedFragmentGuess(Vector& q_sh_out, Matrix& dp_out, Matrix& qp_out);  // xtb_native.cpp
 
     // Multi-step SCC extrapolation helpers (Claude Generated). xtb_native.cpp.
     // packSccState  : flatten the current m_wfn SCC vector — GFN1 [q_sh],
@@ -1069,7 +1252,10 @@ private:
 
     // Repulsion + (GFN1) halogen-bond energies.
     double calcRepulsionEnergy() const;                                  // xtb_native.cpp
-    double calcHalogenBondEnergy() const;                                // xtb_native.cpp
+    double calcHalogenBondEnergy() const;                                // xtb_h0.cpp
+    // Analytic gradient of the GFN1 halogen-bond correction; adds into `gradient`
+    // (nat×3, Eh/Bohr). No-op for GFN2. Claude Generated.
+    void   addHalogenBondGradient(Matrix& gradient) const;               // xtb_h0.cpp
 
     // GFN2 D4 dispersion (optional — requires USE_D4 at compile time).
     // need_gradient gates the (expensive) GFN1 D3 finite-difference geometry
@@ -1106,13 +1292,27 @@ private:
     void parallelStripes(int n_threads,
                          const std::function<void(int, int)>& worker) const; // xtb_native.cpp
 
-    /* ----- legacy QMDriver hooks (still routed through MakeOverlap/H) */
-    Matrix MakeOverlap(std::vector<STO::Orbital>& basisset) override;
-    Matrix MakeH(const Matrix& S,
-                 const std::vector<STO::Orbital>& basisset) override;
+    /// A <- L^-1 A L^-T with the cached Cholesky factor; picks dsygst or two triangular solves
+    /// by thread count (see xtb_scf.cpp for the measurements). Claude Generated (Sep 2026).
+    void reduceToStandardForm(Eigen::MatrixXd& A, int n, int threads, bool& ok) const;
+    /// BLAS/LAPACK threads in force right now (what MklThreadScope set).
+    static int blasThreadsNow();
 
 private:
     MethodType m_method;
+
+    // Converged MO coefficients / orbital energies / occupied-orbital count,
+    // mirrored from m_wfn after every Calculation() for the wrapper accessors
+    // MolecularOrbitals()/Energies()/NumElectrons() (formerly inherited from
+    // the QMDriver base, which this class no longer derives from).
+    Matrix m_mo;
+    Vector m_energies;
+    int    m_num_electrons = 0;
+
+    // LAPACK dsyevd/ssyevd scratch, reused across SCF iterations (xtb_scf.cpp).
+    std::vector<double> m_lapack_work;
+    std::vector<float>  m_lapack_work_f;
+    std::vector<int>    m_lapack_iwork;
 
     BasisMap     m_basis;
     H0Data       m_h0;
@@ -1147,6 +1347,8 @@ private:
     std::vector<double> m_mp_dkernel;
     std::vector<double> m_mp_qkernel;
     bool m_mp_initialized = false;
+    bool m_mp_ints_deferred = false;   // host m_dp_int/m_qp_int not built yet (GPU large system)
+    bool m_wfn_on_device = false;      // converged P/C not downloaded yet (GPU large system)
 
     // B0 (Jul 2026): setupMultipole() sub-phase timings (ms), for the verbosity-3
     // setup report. The single "multipole setup" bucket could not be attributed.
@@ -1217,6 +1419,12 @@ private:
     // solveEigen() and printed at verbosity >= 3. Reset in Calculation().
     // Claude Generated 2026-06 (SCF profiling).
     mutable double m_t_xfx = 0.0;   // X·F·X transform (two GEMMs)
+    // Claude Generated (Sep 2026): the reduce timer above covers a row-major -> column-major
+    // copy of F plus the LAPACK call; they are timed separately here because the copy turned out
+    // to be a large share. m_blas_threads records what the BLAS actually had during the solve.
+    mutable double m_t_xfx_copy = 0.0;
+    mutable int    m_blas_threads = 0;
+    mutable int    m_eig_calls_native = 0, m_eig_calls_fp32 = 0, m_eig_calls_lapack = 0;
     mutable double m_t_diag = 0.0;  // dsyevd standard eigensolve
     mutable double m_t_back = 0.0;  // back-transform C = X·C~ (one GEMM)
     mutable double m_t_dens = 0.0;  // density P = C·occ·Cᵀ
@@ -1228,7 +1436,29 @@ private:
     int         m_diis_start    = 5;     // damped warmup iterations before DIIS
     int         m_diis_subspace = 6;     // DIIS history depth (Fock matrices kept)
     double      m_level_shift   = 0.2;   // virtual-orbital shift magnitude (Eh), LevelShift mode
-    std::string m_scf_guess     = "eeq"; // initial charge guess: "eeq" (default, dftd4 EEQ) | "h0" (bare)
+    std::string m_scf_guess     = "eeq"; // initial charge guess: "eeq" (default, dftd4 EEQ) | "h0" (bare) | "fragments" (converged fragments)
+    bool        m_scf_allow_unconverged = false; // Sep 2026: unconverged SCF = hard error unless set
+    // xtb and tblite disagree on the STO-6G 4s/4p expansion; curcuma follows
+    // tblite (the better fit to the exact Slater function). Set true to
+    // reproduce the xtb binary bit-for-bit on K, Ca and Ge-Kr. STO_CGTO.hpp.
+    bool        m_sto6g_legacy_4sp = false;
+    // D4 ATM cutoff (Bohr). 25.0 = tblite (default), 40.0 = xtb. Carries the ENTIRE
+    // GFN2 energy deviation against xtb on molecules extending past ~25 Bohr, and
+    // ~45 % of the gfn2 runtime on a 231-atom system. Claude Generated (Sep 2026).
+    double      m_d4_atm_cutoff = 25.0;
+    // Runaway-solution recovery (Claude Generated, Sep 2026). The GFN third-order term
+    // scales as q^3 and is unbounded below, so an SCF started far from the ground state
+    // can converge to a spurious stationary point with absurd charges. Observed on
+    // GMTKN55 W4-11/so3 with gfn1: the single-shot EEQ guess put iteration 0 at
+    // -32.7 Eh (SO2, the closest analogue, starts at -11.7), and the SCF settled at
+    // -108.066 Eh against xtb's -17.649, with a third-order term of -134.6 Eh. Starting
+    // from the bare-H0 guess instead reproduces xtb to 1e-8. The reference's own default
+    // guess is "sad" (q = charge/nat, i.e. zero for a neutral molecule; tblite
+    // app/cli.f90:585), which is what H0 amounts to here. Rather than change curcuma's
+    // faster EEQ default for everyone, the converged charges are checked and the whole
+    // calculation is redone from H0 when they are physically impossible.
+    bool m_force_h0_guess = false;   ///< set by the retry; suppresses the EEQ guess
+    bool m_in_scf_retry   = false;   ///< guards against recursing more than once
     std::string m_eigensolver   = "mkl"; // eigensolve backend: "mkl" (dsyevd) | "native"/"dnc"
     // FP32 early-iteration eigensolve (MKL path), ON by default since Jul 2026.
     // The eigensolve is ~58% of native-GFN runtime after the shell-pair-blocked
@@ -1239,6 +1469,14 @@ private:
     bool        m_scf_mixed_precision = true;
     double      m_scf_fp32_threshold  = 1.0e-3;  // switch FP32→FP64 once max|dq| < this
     bool        m_gpu_partial_diag    = false;   // opt-in GPU partial diagonalisation (AP1; net-neutral, see PARAM)
+    // Tunables that were environment variables / hard-coded heuristics until Sep 2026.
+    // Defaults reproduce the previous behaviour exactly. Claude Generated.
+    int         m_eig_max_threads     = 0;       // 0 = follow -threads (CURCUMA_EIG_MAX_THREADS overrides)
+    std::string m_scf_reduce          = "auto";  // auto | sygst | trsm
+    int         m_scf_reduce_threads  = 8;       // 'auto' takes trsm from this thread count up
+    int         m_fp32_stall_patience = 3;       // FP32 iterations without progress before FP64 (0 = off)
+    double      m_fp32_false_fixpoint = 10.0;    // FP64/FP32 residual ratio that unmasks a false fixed point (0 = off)
+    std::string m_gpu_mp_otf          = "auto";  // GFN2 GPU multipole matrices: auto | on | off
     // Optional GPU eigensolver; default unset → CPU path unchanged. Claude Generated.
     ExternalEigensolver m_external_eigensolver;
     bool        m_eig_fp32 = false;              // per-iteration flag set by the SCF loop
@@ -1350,6 +1588,38 @@ private:
     DIISAccelerator m_diis;
     BroydenMixer    m_broyden;
 
+    // SCF preconditioner matrix M from CURCUMA_SCF_PRECOND_FILE (Claude Generated, Oct 2026,
+    // debug/experiment path). Read once per XTB object; re-read when path or mtime change.
+    std::shared_ptr<const PrecondMatrix> m_scf_precond_M;
+    std::string  m_scf_precond_path;
+    long long    m_scf_precond_mtime = 0;
+
+    // -scf_precond frag (Claude Generated, Oct 2026; xtb_precond.cpp). The block preconditioner is
+    // built at the first SCF that uses it and kept with the geometry it was built at; rebuilt for
+    // a new molecule or when the RMS displacement exceeds m_scf_precond_rebuild_rms (0 = never).
+    std::string  m_scf_precond = "none";            // none | frag
+    std::string  m_scf_precond_guard = "g2:4:best"; // ScfPrecondGuard spec, "off" = no guard
+    double       m_scf_precond_rebuild_rms = 0.0;   // Angstrom
+    int          m_scf_precond_max_frag_atoms = 100;   // molecules above this keep the scalar seed (0 = no limit)
+    int          m_scf_precond_segment_atoms = 0;      // >0: segment larger molecules (RAS), heavy atoms per segment
+    std::string  m_scf_precond_jacobian = "fd";      // cluster Jacobian: fd (central differences) | response
+    double       m_scf_precond_segment_radius = 2.0;   // RAS domain radius around a segment (Angstrom)
+    bool         m_scf_precond_warned = false;      // "ignored" warning given once per object
+    bool         m_scf_precond_input_warned = false;   // invalid setter input warned once per object
+    bool         m_scf_precond_share = false;       // share M process-wide (Hessian workers only)
+    std::string  m_scf_precond_guard_checked;       // guard spec already parsed (warn once per spec)
+    std::shared_ptr<const SchwarzPreconditioner> m_scf_precond_frag;
+    // Device copy (Claude Generated, Oct 2026): M of m_scf_precond_dev_src is uploaded to the
+    // resident CUDA loop under m_scf_precond_dev_tag (process-unique, 0 = none) and re-uploaded
+    // only when the device holds another tag.
+    std::shared_ptr<const SchwarzPreconditioner> m_scf_precond_dev_src;
+    unsigned long long m_scf_precond_dev_tag = 0;
+    Matrix           m_scf_precond_geom;            // geometry (Angstrom) M was built at
+    std::vector<int> m_scf_precond_atoms;           // atomic numbers M was built for
+    // Fragment objects only: compute the SCC Jacobian after convergence into m_scf_jac_result.
+    bool          m_scf_jac_capture = false;
+    PrecondMatrix m_scf_jac_result;
+
     // Intra-molecule parallelism (Claude Generated). m_intra_threads is the budget
     // granted by the wrapper (global -threads); m_pool is the persistent worker pool,
     // created lazily by ensurePool() only for a single large molecule and reused
@@ -1381,21 +1651,42 @@ inline void applyXtbScfConfig(XTB& xtb, const json& cfg)
 
     lookup("scf_mode",     [&](const json& v){ if (v.is_string()) xtb.setScfMode(v.get<std::string>()); });
     lookup("scf_guess",    [&](const json& v){ if (v.is_string()) xtb.setScfGuess(v.get<std::string>()); });
+    lookup("scf_allow_unconverged", [&](const json& v){ if (v.is_boolean()) xtb.setScfAllowUnconverged(v.get<bool>()); else if (v.is_number()) xtb.setScfAllowUnconverged(v.get<double>() != 0.0); });
+    lookup("sto6g_legacy_4sp", [&](const json& v){ if (v.is_boolean()) xtb.setSto6gLegacy4sp(v.get<bool>()); });
+    lookup("d4_atm_cutoff", [&](const json& v){ if (v.is_number()) xtb.setD4AtmCutoff(v.get<double>()); });
     lookup("eigensolver",  [&](const json& v){ if (v.is_string()) xtb.setEigensolver(v.get<std::string>()); });
     lookup("scf_damping",  [&](const json& v){ if (v.is_number()) xtb.setScfDamping(v.get<double>()); });
     lookup("scf_threshold",[&](const json& v){ if (v.is_number()) xtb.setScfThreshold(v.get<double>()); });
-    lookup("diis_start",   [&](const json& v){ if (v.is_number_integer()) xtb.setDiisStart(v.get<int>()); });
-    lookup("diis_subspace",[&](const json& v){ if (v.is_number_integer()) xtb.setDiisSubspace(v.get<int>()); });
+    lookup("diis_start",   [&](const json& v){ if (v.is_number()) xtb.setDiisStart(static_cast<int>(std::lround(v.get<double>()))); });   // CLI numbers arrive as double
+    lookup("diis_subspace",[&](const json& v){ if (v.is_number()) xtb.setDiisSubspace(static_cast<int>(std::lround(v.get<double>()))); });
     lookup("level_shift",  [&](const json& v){ if (v.is_number()) xtb.setLevelShift(v.get<double>()); });
     lookup("warm_start",   [&](const json& v){ if (v.is_boolean()) xtb.setWarmStart(v.get<bool>()); });
     lookup("keep_diis",    [&](const json& v){ if (v.is_boolean()) xtb.setKeepDiis(v.get<bool>()); });
     lookup("scf_mixed_precision", [&](const json& v){ if (v.is_boolean()) xtb.setMixedPrecision(v.get<bool>()); });
     lookup("scf_fp32_threshold",  [&](const json& v){ if (v.is_number()) xtb.setFp32Threshold(v.get<double>()); });
     lookup("scf_gpu_partial_diag",[&](const json& v){ if (v.is_boolean()) xtb.setGpuPartialDiag(v.get<bool>()); });
+    // Performance knobs (Claude Generated, Sep 2026). Defaults are the measured ones;
+    // these exist so a machine can be tuned without a rebuild (scripts/tuning_sweep.py).
+    lookup("eigensolver_max_threads", [&](const json& v){ if (v.is_number()) xtb.setEigensolverMaxThreads(static_cast<int>(v.get<double>())); });
+    lookup("scf_reduce",              [&](const json& v){ if (v.is_string()) xtb.setScfReduce(v.get<std::string>()); });
+    lookup("scf_reduce_threads",      [&](const json& v){ if (v.is_number()) xtb.setScfReduceThreads(static_cast<int>(v.get<double>())); });
+    lookup("scf_fp32_stall_patience", [&](const json& v){ if (v.is_number()) xtb.setFp32StallPatience(static_cast<int>(v.get<double>())); });
+    lookup("scf_fp32_false_fixpoint_factor", [&](const json& v){ if (v.is_number()) xtb.setFp32FalseFixpointFactor(v.get<double>()); });
+    lookup("gpu_multipole_otf",       [&](const json& v){ if (v.is_string()) xtb.setGpuMultipoleOtf(v.get<std::string>()); });
+    // Broyden seed preconditioner (Claude Generated, Oct 2026, docs/SCF_PRECOND.md).
+    lookup("scf_precond",             [&](const json& v){ if (v.is_string()) xtb.setScfPrecond(v.get<std::string>()); });
+    lookup("scf_precond_guard",       [&](const json& v){ if (v.is_string()) xtb.setScfPrecondGuard(v.get<std::string>()); });
+    lookup("scf_precond_rebuild_rms", [&](const json& v){ if (v.is_number()) xtb.setScfPrecondRebuildRms(v.get<double>()); });
+    lookup("scf_precond_max_fragment_atoms", [&](const json& v){ if (v.is_number()) xtb.setScfPrecondMaxFragmentAtoms(static_cast<int>(std::lround(v.get<double>()))); });   // CLI numbers arrive as double
+    lookup("scf_precond_segment_atoms",  [&](const json& v){ if (v.is_number()) xtb.setScfPrecondSegmentAtoms(static_cast<int>(std::lround(v.get<double>()))); });   // CLI numbers arrive as double
+    // Internal key set by the Hessian (not a registered parameter): share M between its worker calculators.
+    lookup("_scf_precond_share",         [&](const json& v){ if (v.is_boolean()) xtb.setScfPrecondShare(v.get<bool>()); });
+    lookup("scf_precond_jacobian",       [&](const json& v){ if (v.is_string()) xtb.setScfPrecondJacobian(v.get<std::string>()); });
+    lookup("scf_precond_segment_radius", [&](const json& v){ if (v.is_number()) xtb.setScfPrecondSegmentRadius(v.get<double>()); });
     lookup("scf_extrapolation",      [&](const json& v){ if (v.is_string())          xtb.setScfExtrapolation(v.get<std::string>()); });
-    lookup("scf_extrapolation_order",[&](const json& v){ if (v.is_number_integer())  xtb.setScfExtrapolationOrder(v.get<int>()); });
+    lookup("scf_extrapolation_order",[&](const json& v){ if (v.is_number())  xtb.setScfExtrapolationOrder(static_cast<int>(std::lround(v.get<double>()))); });
     lookup("scf_extrapolation_apply",[&](const json& v){ if (v.is_string())          xtb.setScfExtrapolationApply(v.get<std::string>()); });
-    lookup("scf_xlbomd_correctors",  [&](const json& v){ if (v.is_number_integer())  xtb.setScfXlbomdCorrectors(v.get<int>()); });
+    lookup("scf_xlbomd_correctors",  [&](const json& v){ if (v.is_number())  xtb.setScfXlbomdCorrectors(static_cast<int>(std::lround(v.get<double>()))); });
     lookup("electronic_temperature", [&](const json& v){ if (v.is_number()) xtb.setElectronicTemperature(v.get<double>()); });
     // Implicit solvation (Claude Generated, June 2026). solvent_model is a
     // descriptive name ("none"/"cpcm"/"gbsa"/"alpb"); legacy numeric codes (0..3) are

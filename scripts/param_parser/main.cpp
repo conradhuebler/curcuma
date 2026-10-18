@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -16,7 +17,60 @@ struct Parameter {
     std::string helpText;
     std::string category;
     std::string aliases;
+    std::string annotation;  // Claude Generated 2026 - optional 7th argument
 };
+
+// Claude Generated 2026 - What a module IS, from MODULE_INFO.
+struct Module {
+    std::string name;
+    std::string description;
+    std::string category;
+    std::string commands;  // raw brace contents, parsed like aliases
+};
+
+/// Split a brace list of quoted strings ({"a", "b"}) into its entries.
+std::vector<std::string> split_quoted_list(const std::string& raw)
+{
+    std::vector<std::string> out;
+    std::string current;
+    bool in_quotes = false;
+    for (char c : raw) {
+        if (c == '"') {
+            in_quotes = !in_quotes;
+        } else if (c == ',' && !in_quotes) {
+            if (!current.empty())
+                out.push_back(current);
+            current.clear();
+        } else if (in_quotes) {
+            current += c;
+        }
+    }
+    if (!current.empty())
+        out.push_back(current);
+    return out;
+}
+
+/// Parse "tier=primary; enum=a|b; unit=K" into its pairs. Keys without a value
+/// (e.g. "deprecated") map to an empty string.
+std::map<std::string, std::string> parse_annotation(const std::string& text)
+{
+    std::map<std::string, std::string> out;
+    std::stringstream ss(text);
+    std::string item;
+    while (std::getline(ss, item, ';')) {
+        const size_t begin = item.find_first_not_of(" \t");
+        if (begin == std::string::npos)
+            continue;
+        const size_t end = item.find_last_not_of(" \t");
+        item = item.substr(begin, end - begin + 1);
+        const size_t eq = item.find('=');
+        if (eq == std::string::npos)
+            out[item] = "";
+        else
+            out[item.substr(0, eq)] = item.substr(eq + 1);
+    }
+    return out;
+}
 
 // Function to trim leading/trailing whitespace and quotes
 std::string trim(const std::string& str)
@@ -30,8 +84,115 @@ std::string trim(const std::string& str)
     return str.substr(strBegin, strRange);
 }
 
+// Claude Generated (Sep 2026): tokenizer for PARAM(...) macros, see main() step 2.
+struct ParsedMacro {
+    std::vector<std::string> args;   ///< top-level arguments, raw text
+};
+
+/// Find every PARAM( ... ) in a block of C++ text, skipping strings, char literals and comments.
+static void extract_param_macros(const std::string& t, std::vector<ParsedMacro>& out, std::vector<size_t>& starts)
+{
+    enum State { Code, Str, Chr, LineComment, BlockComment };
+    State st = Code;
+    const size_t n = t.size();
+    for (size_t i = 0; i < n; ++i) {
+        const char c = t[i];
+        if (st == LineComment) { if (c == '\n') st = Code; continue; }
+        if (st == BlockComment) { if (c == '*' && i + 1 < n && t[i + 1] == '/') { st = Code; ++i; } continue; }
+        if (st == Str) { if (c == '\\') ++i; else if (c == '"') st = Code; continue; }
+        if (st == Chr) { if (c == '\\') ++i; else if (c == '\'') st = Code; continue; }
+        if (c == '/' && i + 1 < n && t[i + 1] == '/') { st = LineComment; ++i; continue; }
+        if (c == '/' && i + 1 < n && t[i + 1] == '*') { st = BlockComment; ++i; continue; }
+        if (c == '"') { st = Str; continue; }
+        if (c == '\'') { st = Chr; continue; }
+        // identifier PARAM at a word boundary, followed by optional whitespace and '('
+        if (c != 'P' || t.compare(i, 5, "PARAM") != 0) continue;
+        if (i > 0 && (std::isalnum(static_cast<unsigned char>(t[i - 1])) || t[i - 1] == '_')) continue;
+        size_t k = i + 5;
+        if (k < n && (std::isalnum(static_cast<unsigned char>(t[k])) || t[k] == '_')) continue;
+        while (k < n && std::isspace(static_cast<unsigned char>(t[k]))) ++k;
+        if (k >= n || t[k] != '(') continue;
+        // Collect the arguments up to the matching ')'.
+        ParsedMacro m;
+        std::string cur;
+        int depth = 0;           // nesting of (), {}, [] inside the macro
+        State s2 = Code;
+        size_t e = k + 1;
+        bool closed = false;
+        for (; e < n; ++e) {
+            const char d = t[e];
+            if (s2 == LineComment) { if (d == '\n') s2 = Code; continue; }
+            if (s2 == BlockComment) { if (d == '*' && e + 1 < n && t[e + 1] == '/') { s2 = Code; ++e; } continue; }
+            if (s2 == Str || s2 == Chr) {
+                cur += d;
+                if (d == '\\' && e + 1 < n) { cur += t[++e]; continue; }
+                if ((s2 == Str && d == '"') || (s2 == Chr && d == '\'')) s2 = Code;
+                continue;
+            }
+            if (d == '/' && e + 1 < n && t[e + 1] == '/') { s2 = LineComment; ++e; continue; }
+            if (d == '/' && e + 1 < n && t[e + 1] == '*') { s2 = BlockComment; ++e; continue; }
+            if (d == '"') { s2 = Str; cur += d; continue; }
+            if (d == '\'') { s2 = Chr; cur += d; continue; }
+            if (d == '(' || d == '{' || d == '[') ++depth;
+            if (d == ')' && depth == 0) { m.args.push_back(cur); closed = true; break; }
+            if (d == ')' || d == '}' || d == ']') --depth;
+            if (d == ',' && depth == 0) { m.args.push_back(cur); cur.clear(); continue; }
+            cur += d;
+        }
+        starts.push_back(i);
+        if (!closed) m.args.clear();   // unterminated: reported as malformed
+        out.push_back(m);
+        i = closed ? e : n;
+    }
+}
+
+/// Join the string literal(s) of one argument ("a" "b" -> a b, escapes kept verbatim).
+/// Returns false when the argument contains anything but string literals and whitespace.
+static bool join_string_literals(const std::string& a, std::string& out)
+{
+    out.clear();
+    bool any = false;
+    for (size_t i = 0; i < a.size(); ++i) {
+        const char c = a[i];
+        if (std::isspace(static_cast<unsigned char>(c))) continue;
+        if (c != '"') return false;
+        any = true;
+        for (++i; i < a.size() && a[i] != '"'; ++i) {
+            if (a[i] == '\\' && i + 1 < a.size()) out += a[i++];
+            out += a[i];
+        }
+        if (i >= a.size()) return false;
+    }
+    return any;
+}
+
+/// Turn the six macro arguments into a Parameter, with the same field conventions as the old
+/// regex parser (trimmed name/type/default/category; help = literal content; aliases = raw text
+/// between the braces, untrimmed).
+static bool macro_to_parameter(const ParsedMacro& m, const std::string& module, Parameter& p)
+{
+    // Claude Generated 2026: the optional 7th argument is the annotation string ("min=1").
+    if (m.args.size() != 6 && m.args.size() != 7) return false;
+    std::string help, cat;
+    if (!join_string_literals(m.args[3], help) || !join_string_literals(m.args[4], cat)) return false;
+    const std::string& al = m.args[5];
+    const size_t ob = al.find('{'), cb = al.rfind('}');
+    if (ob == std::string::npos || cb == std::string::npos || cb < ob) return false;
+    p.module = module;
+    p.name = trim(m.args[0]);
+    p.type = trim(m.args[1]);
+    p.defaultValue = trim(m.args[2]);
+    p.helpText = trim(help);
+    p.category = trim(cat);
+    p.aliases = al.substr(ob + 1, cb - ob - 1);
+    p.annotation.clear();
+    if (m.args.size() == 7 && !join_string_literals(m.args[6], p.annotation)) return false;
+    return !p.name.empty() && !p.type.empty();
+}
+
 // Function to generate the C++ header file content - Claude Generated (fixed)
-std::string generate_header_content(const std::vector<Parameter>& params)
+std::string generate_header_content(const std::vector<Parameter>& params,
+                                    const std::vector<Module>& modules)
 {
     std::stringstream ss;
     ss << "// THIS FILE IS AUTO-GENERATED BY curcuma_param_parser. DO NOT EDIT MANUALLY.\n\n";
@@ -42,85 +203,83 @@ std::string generate_header_content(const std::vector<Parameter>& params)
     ss << "inline void initialize_generated_registry() {\n";
     ss << "    auto& registry = ParameterRegistry::getInstance();\n\n";
 
-    for (const auto& p : params) {
-        ss << "    registry.addDefinition(\"" << p.module << "\", {\n";
-        ss << "        \"" << p.name << "\",\n";
-        ss << "        \"" << p.module << "\",\n";
-        ss << "        ParamType::" << p.type << ",\n";
+    // Claude Generated 2026 - Module metadata first, so a consumer can ask what a
+    // module is before asking what it contains.
+    for (const auto& m : modules) {
+        ss << "    {\n";
+        ss << "        ModuleDefinition m;\n";
+        ss << "        m.name = \"" << m.name << "\";\n";
+        ss << "        m.description = \"" << m.description << "\";\n";
+        ss << "        m.category = \"" << m.category << "\";\n";
+        for (const auto& command : split_quoted_list(m.commands))
+            ss << "        m.commands.push_back(\"" << command << "\");\n";
+        ss << "        registry.addModule(std::move(m));\n";
+        ss << "    }\n";
+    }
+    if (!modules.empty())
+        ss << "\n";
 
-        // Type-appropriate default value formatting - Claude Generated
-        if (p.type == "String") {
-            ss << "        std::string(\"" << p.defaultValue << "\"),\n";
-        } else if (p.type == "Bool") {
-            ss << "        " << p.defaultValue << ",\n";
+    for (const auto& p : params) {
+        // Claude Generated 2026 - A named block rather than a positional aggregate:
+        // the definition grew optional fields, and adding them positionally would
+        // mean emitting every one of them for every parameter just to reach the
+        // last.
+        ss << "    {\n";
+        ss << "        ParameterDefinition d;\n";
+        ss << "        d.name = \"" << p.name << "\";\n";
+        ss << "        d.module = \"" << p.module << "\";\n";
+        ss << "        d.type = ParamType::" << p.type << ";\n";
+
+        if (p.type == "String" || p.type == "Selection" || p.type == "Path"
+            || p.type == "StringList" || p.type == "Json") {
+            ss << "        d.defaultValue = std::string(\"" << p.defaultValue << "\");\n";
         } else {
-            // Int or Double - no quotes needed
-            ss << "        " << p.defaultValue << ",\n";
+            ss << "        d.defaultValue = " << p.defaultValue << ";\n";
         }
 
-        ss << "        \"" << p.helpText << "\",\n";
-        ss << "        \"" << p.category << "\",\n";
+        ss << "        d.helpText = \"" << p.helpText << "\";\n";
+        ss << "        d.category = \"" << p.category << "\";\n";
+        for (const auto& alias : split_quoted_list(p.aliases))
+            ss << "        d.aliases.push_back(\"" << alias << "\");\n";
 
-        // Handle aliases - Claude Generated (Fixed October 2025 - support multiple aliases)
-        if (p.aliases.empty()) {
-            ss << "        {}\n";
-        } else {
-            // DON'T trim quotes here - we need them for parsing!
-            // Only trim whitespace
-            std::string aliases_str = p.aliases;
-            // Remove leading/trailing whitespace only (not quotes)
-            size_t start = aliases_str.find_first_not_of(" \t");
-            size_t end = aliases_str.find_last_not_of(" \t");
-            if (start == std::string::npos) {
-                ss << "        {}\n";
-            } else {
-                aliases_str = aliases_str.substr(start, end - start + 1);
-
-                // Parse multiple comma-separated alias strings
-                std::vector<std::string> alias_list;
-                std::string current_alias;
-                bool in_quotes = false;
-
-                for (char c : aliases_str) {
-                    if (c == '"') {
-                        in_quotes = !in_quotes;
-                        // Don't add quotes to the alias string itself
-                    } else if (c == ',' && !in_quotes) {
-                        // End of one alias, start of next
-                        std::string trimmed_alias = trim(current_alias);
-                        if (!trimmed_alias.empty()) {
-                            alias_list.push_back(trimmed_alias);
-                        }
-                        current_alias.clear();
-                    } else if (in_quotes || (c != ' ' && c != '\t')) {
-                        // Add character if inside quotes OR if it's not whitespace outside quotes
-                        current_alias += c;
+        if (!p.annotation.empty()) {
+            const auto fields = parse_annotation(p.annotation);
+            for (const auto& field : fields) {
+                const std::string& key = field.first;
+                const std::string& value = field.second;
+                if (key == "tier") {
+                    const std::string tier = value == "primary" ? "Primary"
+                        : value == "expert"                     ? "Expert"
+                                                                : "Advanced";
+                    ss << "        d.tier = ParamTier::" << tier << ";\n";
+                } else if (key == "enum") {
+                    std::stringstream values(value);
+                    std::string one;
+                    while (std::getline(values, one, '|')) {
+                        if (!one.empty())
+                            ss << "        d.allowed.push_back(\"" << one << "\");\n";
                     }
-                }
-
-                // Add last alias
-                std::string trimmed_alias = trim(current_alias);
-                if (!trimmed_alias.empty()) {
-                    alias_list.push_back(trimmed_alias);
-                }
-
-                // Generate initializer list
-                if (alias_list.empty()) {
-                    ss << "        {}\n";
+                } else if (key == "unit") {
+                    ss << "        d.unit = \"" << value << "\";\n";
+                } else if (key == "min") {
+                    ss << "        d.hasMinimum = true; d.minimum = " << value << ";\n";
+                } else if (key == "max") {
+                    ss << "        d.hasMaximum = true; d.maximum = " << value << ";\n";
+                } else if (key == "requires") {
+                    ss << "        d.relevantWhen = \"" << value << "\";\n";
+                } else if (key == "deprecated") {
+                    ss << "        d.deprecated = true;\n";
+                } else if (key == "replaced_by") {
+                    ss << "        d.replacedBy = \"" << value << "\";\n";
                 } else {
-                    ss << "        {";
-                    for (size_t i = 0; i < alias_list.size(); ++i) {
-                        ss << "\"" << alias_list[i] << "\"";
-                        if (i + 1 < alias_list.size()) {
-                            ss << ", ";
-                        }
-                    }
-                    ss << "}\n";
+                    std::cerr << "Warning: unknown annotation key \"" << key
+                              << "\" on " << p.module << "." << p.name << "\n";
                 }
             }
         }
 
-        ss << "    });\n";
+        ss << "        registry.addDefinition(\"" << p.module << "\", std::move(d));\n";
+        ss << "    }\n";
     }
 
     ss << "}\n";
@@ -154,14 +313,20 @@ int main(int argc, char* argv[])
     }
 
     // 2. Parse all input files
+    //
+    // Claude Generated (Sep 2026, docs/MULTI_GPU_GAPS.md X-1): the PARAM macros are found by a
+    // small tokenizer instead of a line-accumulating regex. The regex failed on multi-line PARAMs
+    // whose help text is several adjacent string literals ("a" "b") or contains ')' - and a
+    // failed match left the rest of that PARAM in the buffer, so the following PARAMs of the block
+    // were dropped too (26 names in eeq_solver.h and gfnff.h, silently absent from -help,
+    // flat-flag routing and -export_run). The tokenizer tracks strings, character literals and
+    // comments, takes the macro up to its matching ')', splits the six top-level arguments and
+    // joins adjacent string literals. A PARAM inside a comment is not a definition.
     std::vector<Parameter> all_params;
+    std::vector<Module> all_modules;
     std::regex begin_regex(R"(BEGIN_PARAMETER_DEFINITION\s*\(\s*(\w+)\s*\))");
     std::regex end_regex(R"(END_PARAMETER_DEFINITION)");
-    // Fixed regex: \"s* → \"\s* (typo fix), added multiline support
-    std::regex param_regex(R"(PARAM\s*\(\s*(\w+)\s*,\s*(\w+)\s*,\s*(.*?)\s*,\s*\"(.*?)\"\s*,\s*\"(.*?)\"\s*,\s*\{(.*?)\}\s*\))", std::regex::ECMAScript);
-
-    bool in_param_block = false;
-    std::string current_module;
+    int malformed = 0;
 
     for (const auto& filepath : input_files) {
         // Claude Generated (October 2025): Skip parameter_macros.h - it contains macro definitions only, not parameter declarations
@@ -175,71 +340,58 @@ int main(int argc, char* argv[])
             continue;
         }
 
-        // Read entire file content for multi-line PARAM support - Claude Generated
-        std::string file_content((std::istreambuf_iterator<char>(file)),
-            std::istreambuf_iterator<char>());
-        file.close();
-
+        // Collect the text of every BEGIN_PARAMETER_DEFINITION ... END_PARAMETER_DEFINITION block,
+        // with the line number of each block line for the diagnostics.
         std::string line;
-        std::istringstream stream(file_content);
         int line_number = 0;
-        std::string accumulated_line;
-
-        while (std::getline(stream, line)) {
-            line_number++;
-            std::smatch match;
-
-            // Check for BEGIN block
-            if (std::regex_search(line, match, begin_regex)) {
-                in_param_block = true;
-                current_module = match[1];
-                accumulated_line.clear();
-                continue;
-            }
-
-            // Check for END block
-            if (std::regex_search(line, match, end_regex)) {
-                in_param_block = false;
-                current_module = "";
-                accumulated_line.clear();
-                continue;
-            }
-
-            if (in_param_block) {
-                // Accumulate lines for multi-line PARAM definitions
-                accumulated_line += " " + line;
-
-                // Try to match complete PARAM definition
-                if (std::regex_search(accumulated_line, match, param_regex) && match.size() == 7) {
-                    all_params.push_back({
-                        current_module,
-                        trim(match[1]), // name
-                        trim(match[2]), // type
-                        trim(match[3]), // defaultValue
-                        trim(match[4]), // helpText
-                        trim(match[5]), // category
-                        std::string(match[6]) // aliases - DON'T trim! We need quotes for parsing
-                    });
-                    accumulated_line.clear();
-                } else if (accumulated_line.rfind("PARAM") != accumulated_line.find("PARAM")) {
-                    // A second PARAM started while the first was still incomplete, so the
-                    // first one really is malformed. Resync on the new definition instead
-                    // of dropping everything that follows.
-                    //
-                    // Claude Generated (July 2026): the previous test fired as soon as any
-                    // ')' appeared in the accumulated text, which a help string containing
-                    // parentheses satisfies on its very first line. That silently discarded
-                    // the parameter and every later one in the same block.
-                    std::cerr << "Warning: Malformed PARAM in " << filepath
-                              << " before line " << line_number << "\n";
-                    accumulated_line = accumulated_line.substr(accumulated_line.rfind("PARAM"));
+        bool in_block = false;
+        std::string module, block;
+        std::vector<int> block_line_of_char;
+        auto flush_block = [&]() {
+            std::vector<ParsedMacro> macros;
+            std::vector<size_t> starts;
+            extract_param_macros(block, macros, starts);
+            for (size_t k = 0; k < macros.size(); ++k) {
+                const int at = starts[k] < block_line_of_char.size() ? block_line_of_char[starts[k]] : line_number;
+                Parameter prm;
+                if (!macro_to_parameter(macros[k], module, prm)) {
+                    std::cerr << "Warning: Malformed PARAM in " << filepath << " around line " << at << "\n";
+                    ++malformed;
+                    continue;
                 }
+                all_params.push_back(prm);
+            }
+            block.clear();
+            block_line_of_char.clear();
+        };
+        while (std::getline(file, line)) {
+            ++line_number;
+            std::smatch match;
+            if (!in_block && std::regex_search(line, match, begin_regex)) {
+                in_block = true;
+                module = match[1];
+                continue;
+            }
+            if (in_block && std::regex_search(line, match, end_regex)) {
+                flush_block();
+                in_block = false;
+                module.clear();
+                continue;
+            }
+            if (in_block) {
+                block += line;
+                block += '\n';
+                block_line_of_char.resize(block.size(), line_number);
             }
         }
+        if (in_block)
+            flush_block();
     }
+    if (malformed > 0)
+        std::cerr << "Warning: " << malformed << " malformed PARAM definition(s) were skipped\n";
 
     // 3. Generate the header file content
-    std::string header_content = generate_header_content(all_params);
+    std::string header_content = generate_header_content(all_params, all_modules);
 
     // 4. Write the output file
     std::ofstream out(output_file);
@@ -250,7 +402,7 @@ int main(int argc, char* argv[])
     out << header_content;
     out.close();
 
-    std::cout << "Successfully generated " << output_file << " with " << all_params.size() << " parameter definitions." << std::endl;
+    std::cout << "Successfully generated " << output_file << " with " << all_params.size() << " parameter definitions and " << all_modules.size() << " module descriptions." << std::endl;
 
     return 0;
 }

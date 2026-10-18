@@ -166,14 +166,57 @@ XYZCommentParser::FormatType XYZCommentParser::detectFormat(const std::string& c
 
 bool XYZCommentParser::parseCurcumaNative(const std::vector<std::string>& tokens, Molecule& mol)
 {
-    // Legacy behavior: Try two different energy positions
+    // Claude Generated (Jul 2026): locate the fields by their labels instead of by fixed token
+    // index. Molecule::Header() writes "<name> ** Energy = E Eh ** Charge = C ** Spin = S ** ..."
+    // and the name is emitted verbatim, so a name containing a space (ConfSearch names its bias
+    // structures "bias_7 t=1200") shifted every index: both legacy index sets then failed stod()
+    // and energy AND charge were silently lost. Spin was written but never read back at all.
+    // The legacy fixed-index path is kept as a fallback for any comment this scan does not match.
+    auto valueAfter = [&tokens](const std::string& label, double& out) -> bool {
+        for (size_t i = 0; i + 2 < tokens.size(); ++i) {
+            if (tokens[i] == label && tokens[i + 1] == "=") {
+                try {
+                    out = std::stod(tokens[i + 2]);
+                    return true;
+                } catch (const std::exception&) {
+                    return false;
+                }
+            }
+        }
+        return false;
+    };
+
+    double value = 0.0;
+    bool parsed_any = false;
+    if (valueAfter("Energy", value)) {
+        mol.setEnergy(value);
+        parsed_any = true;
+    }
+    if (valueAfter("Charge", value)) {
+        mol.setCharge(static_cast<int>(value));
+        parsed_any = true;
+    }
+    if (valueAfter("Spin", value)) {
+        mol.setSpin(static_cast<int>(value));
+        parsed_any = true;
+    }
+    if (parsed_any)
+        return true;
+
+    // Legacy behavior: Try two different energy positions.
+    // Bounds-checked -- detectFormat() only guarantees >= 8 tokens, so tokens[8]/[9] were an
+    // out-of-range read on a minimal 8-token comment.
     try {
-        mol.setEnergy(std::stod(tokens[4]));
-        mol.setCharge(std::stod(tokens[9]));
+        if (tokens.size() > 9) {
+            mol.setEnergy(std::stod(tokens[4]));
+            mol.setCharge(std::stod(tokens[9]));
+        }
     } catch (const std::invalid_argument& what) {
         try {
-            mol.setEnergy(std::stod(tokens[3]));
-            mol.setCharge(std::stod(tokens[8]));
+            if (tokens.size() > 8) {
+                mol.setEnergy(std::stod(tokens[3]));
+                mol.setCharge(std::stod(tokens[8]));
+            }
         } catch (const std::invalid_argument& what) {
             // Ignore parsing errors, keep existing values
         }

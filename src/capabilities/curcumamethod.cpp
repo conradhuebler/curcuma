@@ -45,17 +45,18 @@ CurcumaMethod::CurcumaMethod(const json& defaults, const json& controller, bool 
     , m_controller(controller)
     , m_silent(silent)
 {
-    // Capture the parent's global verbosity before we overwrite it; the dtor restores it.
-    m_saved_global_verbosity = CurcumaLogger::get_verbosity();
+    // Capture this THREAD's verbosity override before we overwrite it; the dtor
+    // restores it. Per-thread, because two methods can run at once.
+    m_saved_thread_verbosity = CurcumaLogger::thread_verbosity();
     // Legacy constructor - convert boolean silent to verbosity levels
     if (controller.count("verbose") > 0) {
         m_silent = false;
         m_verbose = true;
         m_verbosity = 3; // Verbose = Informative Print
-        CurcumaLogger::set_verbosity(m_verbosity); // Claude Generated - Sync to logger
+        CurcumaLogger::set_thread_verbosity(m_verbosity); // Claude Generated - per-thread
     } else {
         m_verbosity = silent ? 0 : 1; // Silent or Normal Print
-        CurcumaLogger::set_verbosity(m_verbosity); // Claude Generated - Sync to logger
+        CurcumaLogger::set_thread_verbosity(m_verbosity); // Claude Generated - per-thread
     }
 
     // Check for explicit verbosity level in CLI arguments - Claude Generated
@@ -67,7 +68,7 @@ CurcumaMethod::CurcumaMethod(const json& defaults, const json& controller, bool 
             // Update legacy flags for backwards compatibility
             m_silent = (m_verbosity == 0);
             m_verbose = (m_verbosity >= 3);
-            CurcumaLogger::set_verbosity(m_verbosity); // Claude Generated - Sync to logger
+            CurcumaLogger::set_thread_verbosity(m_verbosity); // Claude Generated - per-thread
         } catch (const std::exception& e) {
             // Invalid verbosity value, keep current setting
         }
@@ -98,12 +99,13 @@ CurcumaMethod::CurcumaMethod(const json& defaults, const json& controller, int v
     , m_controller(controller)
     , m_verbosity(verbosity)
 {
-    // Capture the parent's global verbosity before we overwrite it; the dtor restores it.
-    m_saved_global_verbosity = CurcumaLogger::get_verbosity();
+    // Capture this THREAD's verbosity override before we overwrite it; the dtor
+    // restores it. Per-thread, because two methods can run at once.
+    m_saved_thread_verbosity = CurcumaLogger::thread_verbosity();
     // Set legacy flags for backwards compatibility
     m_silent = (verbosity == 0);
     m_verbose = (verbosity >= 3);
-    CurcumaLogger::set_verbosity(m_verbosity); // Claude Generated - Sync to logger
+    CurcumaLogger::set_thread_verbosity(m_verbosity); // Claude Generated - per-thread
 
     // Check for verbosity override in controller
     if (controller.count("verbosity") > 0) {
@@ -113,7 +115,7 @@ CurcumaMethod::CurcumaMethod(const json& defaults, const json& controller, int v
             m_verbosity = std::max(0, std::min(4, m_verbosity));
             m_silent = (m_verbosity == 0);
             m_verbose = (m_verbosity >= 3);
-            CurcumaLogger::set_verbosity(m_verbosity); // Claude Generated - Sync to logger
+            CurcumaLogger::set_thread_verbosity(m_verbosity); // Claude Generated - per-thread
         } catch (const std::exception& e) {
             // Invalid verbosity value, keep parameter setting
         }
@@ -141,21 +143,26 @@ CurcumaMethod::CurcumaMethod(const json& defaults, const json& controller, int v
 CurcumaMethod::~CurcumaMethod()
 {
     CurcumaLogger::printCitations();
-    // Restore the parent's global verbosity (see m_saved_global_verbosity). This is what makes the
-    // global level scoped: a sub-method created by a parent leaves the parent's level intact on
-    // destruction, so callers no longer need to re-assert their verbosity after each sub-call.
-    if (m_saved_global_verbosity >= 0)
-        CurcumaLogger::set_verbosity(m_saved_global_verbosity);
+    // Restore this thread's previous override (see m_saved_thread_verbosity).
+    // Passing -1 clears it, which is the right thing when there was none: a
+    // sub-method leaves its caller's level intact, and a method on another thread
+    // is not touched at all.
+    CurcumaLogger::set_thread_verbosity(m_saved_thread_verbosity);
 }
 
 // Claude Generated 2025: Enhanced restart writing with automatic checksum and version
-void CurcumaMethod::TriggerWriteRestart()
+// K6 (Oct 2026): returns the plain WriteRestartInformation() state (before the metadata is added),
+// so a caller that needs the same state again (SimpleMD -rescue) does not build it a second time.
+// Null when WriteRestartInformation() threw.
+nlohmann::json CurcumaMethod::TriggerWriteRestart()
 {
     ensureOutputDir();
     std::ofstream restart_file(outputPath("curcuma_restart.json"));
     nlohmann::json restart;
+    nlohmann::json plain_state;
     try {
         nlohmann::json state = WriteRestartInformation();
+        plain_state = state;
 
         // Add metadata
         state["format_version"] = "1.0";
@@ -186,6 +193,7 @@ void CurcumaMethod::TriggerWriteRestart()
         restart_file << restart << std::endl;
     } catch (nlohmann::json::type_error& e) {
     }
+    return plain_state;
 }
 
 StringList CurcumaMethod::RestartFiles() const
@@ -262,6 +270,12 @@ void CurcumaMethod::checkHelp()
 
 bool CurcumaMethod::CheckStop() const
 {
+    // Claude Generated 2026 - The per-run request first. The file below stays for
+    // the CLI, where it is the only way in, but it is process-wide: it stops every
+    // concurrent run, and a leftover one aborts the next at step 0.
+    if (m_stop_requested.value.load())
+        return true;
+
 #ifdef C17
 #ifndef _WIN32
     return std::filesystem::exists("stop");
@@ -436,6 +450,11 @@ RestartValidationResult CurcumaMethod::validateRestartData(
 // Claude Generated 2026: Create BMT output directory (Basename.Keyword.Timestamp)
 void CurcumaMethod::createBMTDir(const std::string& cli_keyword)
 {
+    // Claude Generated 2026 - An embedded caller that pinned a directory keeps it.
+    // Creating a timestamped folder in the user's project for every run is fine on
+    // the CLI, where the run IS the session, and not fine inside a GUI.
+    if (m_output_dir_pinned)
+        return;
     m_bmt_dir = BMTUtils::createBMTDir(Basename(), cli_keyword);
     setOutputDir(m_bmt_dir);
     BMTUtils::writeMetadata(m_bmt_dir, Basename(), cli_keyword, Filename());

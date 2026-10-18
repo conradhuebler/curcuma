@@ -1,6 +1,6 @@
 {
   "molecule": "CH3OH",
-  "geometry_file": "test_cases/molecules/larger/CH3OH.xyz",
+  "geometry_file": "test_cases/structures/small/methanol.xyz",
   "charge": 0,
   "spin_unpaired": 0,
   "method": "gfn2",

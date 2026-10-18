@@ -33,11 +33,12 @@
 
 /* Claude Generated 2025: Casino Parameter Registry - replaces static CasinoJson */
 BEGIN_PARAMETER_DEFINITION(casino)
+MODULE_INFO("Monte Carlo sampling of conformational space.", "Dynamics", {"casino"})
     // Basic simulation parameters
     PARAM(steps, Int, 10000, "Number of Monte Carlo steps", "Basic", {})
     PARAM(temperature, Double, 300.0, "Temperature in Kelvin", "Basic", {})
     PARAM(step_size, Double, 0.1, "Maximum displacement per move (Angstrom)", "Basic", {})
-    PARAM(method, String, "uff", "Computational method for energy/gradient", "Basic", {})
+    PARAM(method, String, "gfnff", "Computational method for energy/gradient. Default gfnff: the fast general-purpose choice (native GFN-FF, no external dependency). Use gfn2 when accuracy matters more than speed.", "Basic", {})
     PARAM(seed, Int, 42, "Random seed for reproducibility", "Basic", {})
 
     // Output options
@@ -46,8 +47,10 @@ BEGIN_PARAMETER_DEFINITION(casino)
     PARAM(energy_frequency, Int, 10, "Energy output frequency", "Output", {})
 
     // Move configuration
-    PARAM(move_type, String, "mixed", "Move type: translation|rotation|orientational|mixed (pivot: not yet implemented)", "Algorithm", {})
-    PARAM(move_strategy, String, "single_atom", "Move strategy: all_atoms|single_atom|cg_aware|chain_segment|mixed_strategy", "Algorithm", {})
+    PARAM(move_type, String, "mixed", "Move type: translation|rotation|orientational|mixed (pivot: not yet implemented)", "Algorithm", {},
+        "enum=translation|rotation|orientational|mixed")
+    PARAM(move_strategy, String, "single_atom", "Move strategy: all_atoms|single_atom|cg_aware|chain_segment|mixed_strategy", "Algorithm", {},
+        "enum=all_atoms|single_atom|cg_aware|chain_segment|mixed_strategy")
 
     // Adaptive sampling
     PARAM(acceptance_target, Double, 0.5, "Target acceptance ratio", "Algorithm", {})

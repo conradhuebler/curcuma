@@ -63,11 +63,57 @@ public:
             }
         }
 
-        // Number of cells in each dimension (at least 1)
-        m_inv_cell_size = 1.0 / cutoff;
-        m_ncells_x = std::max(1, static_cast<int>(std::ceil((m_max[0] - m_min[0]) * m_inv_cell_size)));
-        m_ncells_y = std::max(1, static_cast<int>(std::ceil((m_max[1] - m_min[1]) * m_inv_cell_size)));
-        m_ncells_z = std::max(1, static_cast<int>(std::ceil((m_max[2] - m_min[2]) * m_inv_cell_size)));
+        // Number of cells in each dimension (at least 1).
+        //
+        // Claude Generated (Sep 2026): the extent is data, and on a diverging trajectory it
+        // grows without bound. The cell count is its cube, so the resize below asks for an
+        // impossible allocation and the process dies - observed as a crash inside
+        // SpatialCellList::build(), reached from GFNFF::detectHydrogenBondsNative(), when a
+        // 7320-atom GFN-FF MD ran at too large a step. Reproduced standalone: with the
+        // previous code an extent of 2e4 A in all three directions already aborts (6.4e10
+        // cells requested), 2e3 A still works. A crash is the worst outcome, because the run
+        // is lost together with its last snapshot, where the ordinary instability handling
+        // would have reported and stopped cleanly.
+        //
+        // (A non-finite extent was the first suspicion - static_cast<int> of NaN is undefined
+        // - but it turned out to be harmless by accident: the cast yields a negative value and
+        // std::max(1, ...) collapses the grid to a single cell. It is guarded anyway, since
+        // relying on that is relying on undefined behaviour.)
+        //
+        // Enlarging the cells is always SAFE for correctness - forEachNeighbor scans the
+        // 3x3x3 block and filters on the true squared distance, so bigger cells only cost
+        // time, while smaller ones would miss pairs. So when the requested grid does not fit
+        // the budget, coarsen until it does; in the worst case that is one cell, i.e. the
+        // O(N^2) fallback.
+        const double extent_x = m_max[0] - m_min[0];
+        const double extent_y = m_max[1] - m_min[1];
+        const double extent_z = m_max[2] - m_min[2];
+        constexpr double kMaxCells = 2.0e6;
+
+        if (!std::isfinite(extent_x) || !std::isfinite(extent_y) || !std::isfinite(extent_z)) {
+            m_inv_cell_size = 0.0;
+            m_ncells_x = m_ncells_y = m_ncells_z = 1;
+            m_cells.assign(1, {});
+            m_cells[0].reserve(static_cast<size_t>(m_natoms));
+            for (int i = 0; i < m_natoms; ++i)
+                m_cells[0].push_back(i);
+            return;
+        }
+
+        double cell_size = cutoff;
+        double nx = 1.0, ny = 1.0, nz = 1.0;
+        for (;;) {
+            nx = std::max(1.0, std::ceil(extent_x / cell_size));
+            ny = std::max(1.0, std::ceil(extent_y / cell_size));
+            nz = std::max(1.0, std::ceil(extent_z / cell_size));
+            if (nx * ny * nz <= kMaxCells)
+                break;
+            cell_size *= 2.0;
+        }
+        m_inv_cell_size = 1.0 / cell_size;
+        m_ncells_x = static_cast<int>(nx);
+        m_ncells_y = static_cast<int>(ny);
+        m_ncells_z = static_cast<int>(nz);
 
         m_cells.resize(static_cast<size_t>(m_ncells_x) * m_ncells_y * m_ncells_z);
 
@@ -94,48 +140,78 @@ public:
     template <typename Func>
     void forEachPair(Func&& callback) const
     {
-        if (m_natoms == 0)
+        for (int i = 0; i < m_natoms; ++i)
+            forEachPairOfAtom(i, callback);
+    }
+
+    /*! @brief The pairs forEachPair() visits for one first atom @p i, in the same order.
+     *
+     *  Claude Generated (Oct 2026): forEachPair() is the loop over i of this function, so a
+     *  caller can split the atoms into ranges, work on the ranges in parallel and concatenate
+     *  their results in range order to get exactly the serial sequence of pairs.
+     *  @param callback  Invoked as callback(i, j, r2); every pair has i < j.
+     */
+    template <typename Func>
+    void forEachPairOfAtom(int i, Func&& callback) const
+    {
+        if (m_natoms == 0 || i < 0 || i >= m_natoms)
             return;
 
         const double cutoff_sq = m_cutoff * m_cutoff;
+        int cix, ciy, ciz;
+        atomCellCoords(i, cix, ciy, ciz);
 
-        for (int i = 0; i < m_natoms; ++i) {
-            int cix, ciy, ciz;
-            atomCellCoords(i, cix, ciy, ciz);
-
-            for (int dz = -1; dz <= 1; ++dz) {
-                int nz = ciz + dz;
-                if (nz < 0 || nz >= m_ncells_z)
+        for (int dz = -1; dz <= 1; ++dz) {
+            int nz = ciz + dz;
+            if (nz < 0 || nz >= m_ncells_z)
+                continue;
+            for (int dy = -1; dy <= 1; ++dy) {
+                int ny = ciy + dy;
+                if (ny < 0 || ny >= m_ncells_y)
                     continue;
-                for (int dy = -1; dy <= 1; ++dy) {
-                    int ny = ciy + dy;
-                    if (ny < 0 || ny >= m_ncells_y)
+                for (int dx = -1; dx <= 1; ++dx) {
+                    int nx = cix + dx;
+                    if (nx < 0 || nx >= m_ncells_x)
                         continue;
-                    for (int dx = -1; dx <= 1; ++dx) {
-                        int nx = cix + dx;
-                        if (nx < 0 || nx >= m_ncells_x)
-                            continue;
-                        int nci = cellIndex(nx, ny, nz);
+                    int nci = cellIndex(nx, ny, nz);
 
-                        // Eliminate duplicate pairs: only visit cells with
-                        // flat index >= current cell index.  When the cell
-                        // is the same, enforce j > i.
-                        if (nci < cellIndex(cix, ciy, ciz))
-                            continue;
+                    // Eliminate duplicate pairs: only visit cells with
+                    // flat index >= current cell index.  When the cell
+                    // is the same, enforce j > i.
+                    if (nci < cellIndex(cix, ciy, ciz))
+                        continue;
 
-                        const auto& cell = m_cells[nci];
-                        for (int j : cell) {
-                            if (nci == cellIndex(cix, ciy, ciz) && j <= i)
-                                continue;
-                            double r2 = (m_coords.row(i) - m_coords.row(j)).squaredNorm();
-                            if (r2 <= cutoff_sq) {
-                                callback(i, j, r2);
-                            }
+                    const auto& cell = m_cells[nci];
+                    for (int j : cell) {
+                        if (nci == cellIndex(cix, ciy, ciz) && j <= i)
+                            continue;
+                        double r2 = (m_coords.row(i) - m_coords.row(j)).squaredNorm();
+                        if (r2 <= cutoff_sq) {
+                            callback(i, j, r2);
                         }
                     }
                 }
             }
         }
+    }
+
+    /*! @brief Copy of this list that keeps only the atoms with keep[atom] != 0.
+     *
+     *  Claude Generated (Oct 2026): same grid (same bounding box, cell size and cell
+     *  numbering), every cell holds the kept atoms in their original order. Every query on the
+     *  copy therefore visits the kept atoms in the order the full list visits them and skips
+     *  the others, without computing their distances.
+     */
+    SpatialCellList subset(const std::vector<char>& keep) const
+    {
+        SpatialCellList out = *this;
+        for (auto& cell : out.m_cells) {
+            size_t w = 0;
+            for (int a : cell)
+                if (a >= 0 && a < static_cast<int>(keep.size()) && keep[a]) cell[w++] = a;
+            cell.resize(w);
+        }
+        return out;
     }
 
     /*! @brief Iterate over neighbors of atom @p i within a (possibly smaller) cutoff.
@@ -193,24 +269,31 @@ private:
         return cx + m_ncells_x * (cy + m_ncells_y * cz);
     }
 
+    /*! @brief Claude Generated (Sep 2026): coordinate -> cell index along one axis, without
+     *  undefined behaviour. The cast is only reached for a value that is already known to be
+     *  inside [0, n-1]; the `!(t >= 0.0)` form catches NaN as well as negatives. */
+    inline int axisCell(double x, double lo, int n) const
+    {
+        const double t = (x - lo) * m_inv_cell_size;
+        if (!(t >= 0.0))
+            return 0;
+        const double f = std::floor(t);
+        if (f >= static_cast<double>(n - 1))
+            return n - 1;
+        return static_cast<int>(f);
+    }
+
     inline int atomCellIndex(int atom) const
     {
-        int cx = static_cast<int>((m_coords(atom, 0) - m_min[0]) * m_inv_cell_size);
-        int cy = static_cast<int>((m_coords(atom, 1) - m_min[1]) * m_inv_cell_size);
-        int cz = static_cast<int>((m_coords(atom, 2) - m_min[2]) * m_inv_cell_size);
-        cx = std::clamp(cx, 0, m_ncells_x - 1);
-        cy = std::clamp(cy, 0, m_ncells_y - 1);
-        cz = std::clamp(cz, 0, m_ncells_z - 1);
-        return cellIndex(cx, cy, cz);
+        return cellIndex(axisCell(m_coords(atom, 0), m_min[0], m_ncells_x),
+                         axisCell(m_coords(atom, 1), m_min[1], m_ncells_y),
+                         axisCell(m_coords(atom, 2), m_min[2], m_ncells_z));
     }
 
     inline void atomCellCoords(int atom, int& cx, int& cy, int& cz) const
     {
-        cx = static_cast<int>((m_coords(atom, 0) - m_min[0]) * m_inv_cell_size);
-        cy = static_cast<int>((m_coords(atom, 1) - m_min[1]) * m_inv_cell_size);
-        cz = static_cast<int>((m_coords(atom, 2) - m_min[2]) * m_inv_cell_size);
-        cx = std::clamp(cx, 0, m_ncells_x - 1);
-        cy = std::clamp(cy, 0, m_ncells_y - 1);
-        cz = std::clamp(cz, 0, m_ncells_z - 1);
+        cx = axisCell(m_coords(atom, 0), m_min[0], m_ncells_x);
+        cy = axisCell(m_coords(atom, 1), m_min[1], m_ncells_y);
+        cz = axisCell(m_coords(atom, 2), m_min[2], m_ncells_z);
     }
 };

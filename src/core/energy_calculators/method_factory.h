@@ -40,6 +40,22 @@ using json = nlohmann::json;
  * 
  * Claude Generated: Big-Bang refactoring of EnergyCalculator method dispatch
  */
+/**
+ * @brief One row of the method table (Claude Generated, Sep 2026).
+ *
+ * Adding a computational method = adding one row to MethodFactory::methodTable()
+ * (plus the ComputationalMethod subclass and its PARAM block). The factory, the
+ * `--methods` listing, getMethodInfo() and the availability checks all read this table.
+ */
+struct MethodDescriptor {
+    std::vector<std::string> names;                       ///< primary name + aliases (lower-case)
+    std::string family;                                   ///< listing group, e.g. "Native QM"
+    std::string description;                              ///< one line for `curcuma --methods`
+    std::function<bool()> available;                      ///< compiled in / reachable at runtime
+    std::vector<std::pair<std::string, std::function<bool()>>> providers; ///< priority order
+    std::function<std::unique_ptr<ComputationalMethod>(const std::string& name, const json& config)> create;
+};
+
 class MethodFactory {
 public:
     /**
@@ -78,6 +94,24 @@ public:
      */
     static void printAvailableMethods();
     
+    /// The method table (see MethodDescriptor). One row per method family.
+    static const std::vector<MethodDescriptor>& methodTable();
+    /// Row for a lower-case method name (alias-aware), nullptr if unknown.
+    static const MethodDescriptor* findMethod(const std::string& lower_name);
+    /// JSON sub-scope names carrying method-specific parameters (controller["gfnff"], ...):
+    /// the single source of truth for EnergyCalculator / opt / MD / ConfSearch forwarding.
+    static const std::vector<std::string>& methodParameterScopes();
+
+    // Provider availability (compile flags + runtime probes); public so table rows can use them.
+    static bool hasOrca();
+    static bool hasTBLite();
+    static bool hasXTB();
+    static bool hasUlysses();
+    static bool hasGFNFF();
+    static bool hasD3();
+    static bool hasD4();
+    static std::unique_ptr<ComputationalMethod> createXTBExplicit(const std::string& method, const json& config);
+
 private:
     // =================================================================================
     // Priority-based Method Resolution (from original SwitchMethod logic)
@@ -117,7 +151,6 @@ private:
     /**
      * @brief Create explicit XTB method (xtb-gfn1, xtb-gfn2, gfnff)
      */
-    static std::unique_ptr<ComputationalMethod> createXTBExplicit(const std::string& method, const json& config);
     
     /**
      * @brief Create DFT-D3 dispersion correction
@@ -131,18 +164,11 @@ private:
 
     // ORCA external method (runtime check, no compilation flag)
     static std::unique_ptr<ComputationalMethod> createOrca(const std::string& method, const json& config);
-    static bool hasOrca();
 
     // =================================================================================
     // Compilation Flag Checks (from original isCompiled logic)
     // =================================================================================
 
-    static bool hasTBLite();
-    static bool hasXTB();
-    static bool hasUlysses();
-    static bool hasGFNFF();
-    static bool hasD3();
-    static bool hasD4();
     static bool checkCompilationFlag(const std::string& flag);  // native-gfnff addition
     
     static bool isUlyssesMethod(const std::string& method);

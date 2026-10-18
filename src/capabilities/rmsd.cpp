@@ -16,6 +16,7 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
  */
+#include <numeric>
 #include "rmsd/rmsd_functions.h"
 #include "src/core/global.h" // For CurcumaLogger - Claude Generated
 #include "src/core/citation_registry.h"
@@ -192,7 +193,11 @@ void RMSDDriver::LoadFragmentAndThreadingParameters()
     m_molaligntol = m_config.get<int>("molalign_tolerance");
 
     m_force_reorder = m_config.get<bool>("force_reorder");
-    m_protons = m_config.get<bool>("protons");
+    /* Claude Generated (Aug 2026): 'heavy' is the inverse of 'protons' and used to be a
+       plain alias, which made '-heavy' request protons=true - a no-op. Combining them
+       keeps every default and every '-protons false' invocation working, while '-heavy'
+       now means what the help text says. */
+    m_protons = m_config.get<bool>("protons") && !m_config.get<bool>("heavy");
     // Legacy silent parameter removed - using verbosity system instead - Claude Generated
     m_intermedia_storage = m_config.get<double>("storage");
     m_dynamic_center = m_config.get<bool>("dynamic_center");
@@ -244,6 +249,30 @@ static const std::map<std::string, AlignmentMethod> method_map = {
     {"dtemplate", AlignmentMethod::DISTANCE_TEMPLATE},
     {"predefined", AlignmentMethod::PREDEFINED_ORDER}
 };
+
+// Claude Generated (Sep 2026): expose method_map lookups so callers outside RMSDDriver
+// (ConfScan's config summary in particular) can validate a method name up front instead
+// of only discovering the fallback deep inside LoadAlignmentMethodParameters().
+bool RMSDDriver::IsValidAlignmentMethodName(const std::string& name)
+{
+    return method_map.find(name) != method_map.end();
+}
+
+std::string RMSDDriver::ValidAlignmentMethodNames()
+{
+    std::string result;
+    for (const auto& entry : method_map) {
+        if (!result.empty())
+            result += ", ";
+        result += entry.first;
+    }
+    return result;
+}
+
+std::string RMSDDriver::DefaultAlignmentMethodName()
+{
+    return "subspace";
+}
 
 // Claude Generated - Extract alignment method selection and configuration
 void RMSDDriver::LoadAlignmentMethodParameters()
@@ -677,6 +706,27 @@ double RMSDDriver::BestFitRMSD()
     return rmsd;
 }
 
+double RMSDDriver::BestFitRMSDCentered()
+{
+    // Claude Generated (Jul 2026): fast path for the RMSD-MTD screen. Both m_reference and m_target
+    // must already hold geometric-centered coordinates. We skip the two CenterMolecule passes of
+    // BestFitRMSD (the walker is centered once per MD step; hills are pre-centered), compute the
+    // Kabsch rotation, apply it to the target, and store the aligned geometries so Gradient() --
+    // which reads (m_reference - m_target) -- stays correct. The reference is left untouched so it
+    // remains the centered walker across all hills in the step.
+    const Geometry reference = m_reference.getGeometry();
+    const Geometry target = m_target.getGeometry();
+    Eigen::Matrix3d R = RMSDFunctions::BestFitRotation(reference, target, 1);
+    const auto t = RMSDFunctions::applyRotation(target, R);
+    m_reference_aligned.setGeometry(reference);
+    m_target_aligned.setGeometry(t);
+    m_target.setGeometry(t);
+    double rmsd = RMSDFunctions::getRMSD(reference, t);
+    m_rmsd = rmsd;
+    m_rotation = R;
+    return rmsd;
+}
+
 double RMSDDriver::PartialRMSD(const Molecule& ref, const Molecule& tar)
 {
     double rmsd = 0;
@@ -777,6 +827,12 @@ void RMSDDriver::reset()
     m_prepared_cost_matrices.clear();
     m_intermediate_cost_matrices.clear();
     m_intermedia_rules.clear();
+    /* Claude Generated (Aug 2026): the incremental-alignment loop
+       (rmsd_strategies.cpp) uses m_reorder_reference_geometry.rows() as its entry
+       condition. InitialisePair() re-seeds it only when m_initial is empty, so a driver
+       reused for many pairs (ConfScan) kept the previous pair's row count on the
+       -initial / initial_fragment path and could skip the loop entirely. */
+    m_reorder_reference_geometry = Geometry();
     m_rmsd = 0.0;
 }
 
@@ -794,6 +850,7 @@ void RMSDDriver::clear()
     m_reorder_rules.clear();
     m_reorder_reference.clear();
     m_reorder_target.clear();
+    m_reorder_reference_geometry = Geometry(); // see reset() - stale row count skips the incremental loop
     m_rotation = Eigen::Matrix3d::Identity();
     m_rmsd = 0.0;
 }
@@ -856,21 +913,10 @@ void RMSDDriver::ProtonDepleted()
     if (m_verbosity >= 2)
         CurcumaLogger::info("Will perform calculation on proton depleted structure");
 
-    Molecule reference;
-    for (std::size_t i = 0; i < m_reference.AtomCount(); ++i) {
-        std::pair<int, Position> atom = m_reference.Atom(i);
-        if (atom.first != 1)
-            reference.addPair(atom);
-    }
-
-    Molecule target;
-    for (std::size_t i = 0; i < m_target.AtomCount(); ++i) {
-        std::pair<int, Position> atom = m_target.Atom(i);
-        if (atom.first != 1)
-            target.addPair(atom);
-    }
-    m_reference = reference;
-    m_target = target;
+    // Claude Generated (Aug 2026): shared with ConfScan's heavy-atom path via
+    // Molecule::ProtonDepletedCopy(), so both produce identical heavy-atom indexing.
+    m_reference = m_reference.ProtonDepletedCopy();
+    m_target = m_target.ProtonDepletedCopy();
     m_init_count = m_heavy_init;
 }
 
@@ -989,6 +1035,9 @@ std::pair<Molecule, LimitedStorage> RMSDDriver::InitialisePair()
 
 void RMSDDriver::ReorderMolecule()
 {
+    // Claude Generated (Oct 2026): every atom permutation (also inside ConfScan) cites the filter protocol paper
+    CitationRegistry::cite("confscan");
+
     auto R = GetOperateVectors(m_reference, m_target);
     Eigen::Matrix3d rotation = R.first;
 
@@ -1172,285 +1221,7 @@ void RMSDDriver::InsertRotation(std::pair<double, Matrix>& rotation)
 }
 
 /*
-std::pair<std::vector<int>, std::vector<int>> RMSDDriver::PrepareHeavyTemplate()
-{
-    Molecule reference;
-    std::vector<int> reference_indicies, target_indicies;
-    for (std::size_t i = 0; i < m_reference.AtomCount(); ++i) {
-        std::pair<int, Position> atom = m_reference.Atom(i);
-        if (atom.first != 1) {
-            reference.addPair(atom);
-            reference_indicies.push_back(i);
-        }
-    }
-
-    Molecule target;
-    for (std::size_t i = 0; i < m_target.AtomCount(); ++i) {
-        std::pair<int, Position> atom = m_target.Atom(i);
-        if (atom.first != 1) {
-            target.addPair(atom);
-            target_indicies.push_back(i);
-        }
-    }
-
-    Molecule cached_reference_mol = m_reference;
-    Molecule cached_target_mol = m_target;
-
-    m_reference = reference;
-    m_target = target;
-
-    m_init_count = m_heavy_init;
-
-    auto strategy = AlignmentStrategyFactory::createStrategy(1);
-    if (strategy) strategy->align(this, CreateAlignmentConfig());
-    std::vector<std::vector<int>> transformed_rules;
-    for (int i = 0; i < m_stored_rules.size(); ++i) {
-        std::vector<int> tmp;
-        for (auto index : m_stored_rules[i])
-            tmp.push_back(target_indicies[index]);
-        transformed_rules.push_back(tmp);
-    }
-    m_stored_rules = transformed_rules;
-    std::vector<int> target_indices = m_reorder_rules;
-
-    m_reference = cached_reference_mol;
-    m_target = cached_target_mol;
-
-    return std::pair<std::vector<int>, std::vector<int>>(reference_indicies, target_indices);
-}
 */
-std::pair<std::vector<int>, std::vector<int>> RMSDDriver::PrepareAtomTemplate(int templateatom)
-{
-    Molecule reference;
-    std::vector<int> reference_indicies, target_indicies;
-    for (std::size_t i = 0; i < m_reference.AtomCount(); ++i) {
-        std::pair<int, Position> atom = m_reference.Atom(i);
-        if (atom.first == templateatom) {
-            reference.addPair(atom);
-            reference_indicies.push_back(i);
-        }
-    }
-
-    Molecule target;
-    for (std::size_t i = 0; i < m_target.AtomCount(); ++i) {
-        std::pair<int, Position> atom = m_target.Atom(i);
-        if (atom.first == templateatom) {
-            target.addPair(atom);
-            target_indicies.push_back(i);
-        }
-    }
-    if (target.AtomCount() == 0 || reference.AtomCount() == 0) {
-        CurcumaLogger::error("Template list is empty, try different elements please");
-        exit(0);
-    }
-    Molecule cached_reference_mol = m_reference;
-    Molecule cached_target_mol = m_target;
-
-    m_reference = reference;
-    m_target = target;
-
-    m_init_count = m_heavy_init;
-
-    auto strategy = AlignmentStrategyFactory::createStrategy(1);
-    if (strategy)
-        strategy->align(this, CreateAlignmentConfig());
-    m_reference = cached_reference_mol;
-    m_target = cached_target_mol;
-    for (int i = 0; i < m_stored_rules.size(); ++i) {
-        std::vector<int> tmp;
-        for (auto index : m_stored_rules[i])
-            tmp.push_back(target_indicies[index]);
-
-        auto OperateVectors = GetOperateVectors(reference_indicies, tmp);
-        auto result = MakeCostMatrix(OperateVectors.first);
-        // result.first = m_prepared_cost_matrices.size();
-
-        InsertRotation(result);
-    }
-
-    for (const auto& indices : m_intermedia_rules) {
-        auto result = MakeCostMatrix(reference_indicies, indices);
-        // result.first = m_prepared_cost_matrices.size();
-        InsertRotation(result);
-    }
-
-    return std::pair<std::vector<int>, std::vector<int>>(reference_indicies, reference_indicies);
-}
-
-std::pair<std::vector<int>, std::vector<int>> RMSDDriver::PrepareAtomTemplate(const std::vector<int>& templateatom)
-{
-    Molecule reference;
-    std::vector<int> reference_indicies, target_indicies;
-    for (std::size_t i = 0; i < m_reference.AtomCount(); ++i) {
-        std::pair<int, Position> atom = m_reference.Atom(i);
-        if (std::find(templateatom.begin(), templateatom.end(), atom.first) != templateatom.end()) {
-            reference.addPair(atom);
-            reference_indicies.push_back(i);
-        }
-    }
-
-    Molecule target;
-    for (std::size_t i = 0; i < m_target.AtomCount(); ++i) {
-        std::pair<int, Position> atom = m_target.Atom(i);
-        if (std::find(templateatom.begin(), templateatom.end(), atom.first) != templateatom.end()) {
-            target.addPair(atom);
-            target_indicies.push_back(i);
-        }
-    }
-
-    Molecule cached_reference_mol = m_reference;
-    Molecule cached_target_mol = m_target;
-
-    m_reference = reference;
-    m_target = target;
-
-    m_init_count = m_heavy_init;
-
-    auto strategy = AlignmentStrategyFactory::createStrategy(1);
-    if (strategy)
-        strategy->align(this, CreateAlignmentConfig());
-
-    m_reference = cached_reference_mol;
-    m_target = cached_target_mol;
-
-    std::vector<std::vector<int>> transformed_rules;
-    for (int i = 0; i < m_stored_rules.size(); ++i) {
-        std::vector<int> tmp;
-        for (auto index : m_stored_rules[i])
-            tmp.push_back(target_indicies[index]);
-        transformed_rules.push_back(tmp);
-        m_intermedia_rules.push_back(tmp);
-        auto OperateVectors = GetOperateVectors(reference_indicies, tmp);
-        auto result = MakeCostMatrix(OperateVectors.first);
-        // result.first = m_prepared_cost_matrices.size() + 1;
-
-        InsertRotation(result);
-    }
-
-    for (const auto& indices : m_intermedia_rules) {
-        auto result = MakeCostMatrix(reference_indicies, indices);
-        // result.first = m_prepared_cost_matrices.size();
-        InsertRotation(result);
-    }
-    m_stored_rules = transformed_rules;
-    std::vector<int> target_indices = m_reorder_rules;
-
-    return std::pair<std::vector<int>, std::vector<int>>(reference_indicies, target_indices);
-}
-
-std::pair<std::vector<int>, std::vector<int>> RMSDDriver::PrepareDistanceTemplate() // const std::vector<int>& templateatom)
-{
-    if (m_verbosity >= 2)
-        CurcumaLogger::info("Starting template preparation");
-    RunTimer time;
-    std::map<double, std::pair<int, int>> m_distance_reference, m_distance_target;
-
-    Position ref_centroid = m_reference.Centroid(true);
-    Position tar_centroid = m_target.Centroid(true);
-
-    Geometry reference_geometry = GeometryTools::TranslateMolecule(m_reference, m_reference.Centroid(true), Position{ 0, 0, 0 });
-    Geometry target_geometry = GeometryTools::TranslateMolecule(m_target, m_target.Centroid(true), Position{ 0, 0, 0 });
-
-    std::map<double, int> distance_reference, distance_target;
-    Molecule reference;
-    std::vector<int> reference_indicies, target_indicies;
-    for (std::size_t i = 0; i < m_reference.AtomCount() && i < m_target.AtomCount(); ++i) {
-
-        double distance = (m_reference.Atom(i).second - ref_centroid).norm();
-        distance_reference[distance] = i;
-
-        distance = (m_target.Atom(i).second - tar_centroid).norm();
-        distance_target[distance] = i;
-
-        for (int j = i + 1; j < m_reference.AtomCount() && j < m_target.AtomCount(); ++j) {
-            double distance1 = (m_reference.Atom(i).second - m_reference.Atom(j).second).norm();
-            m_distance_reference[distance1] = std::pair<int, int>(i, j);
-
-            double distance2 = (m_target.Atom(i).second - m_target.Atom(j).second).norm();
-            m_distance_target[distance2] = std::pair<int, int>(i, j);
-        }
-    }
-
-    Molecule target;
-    int i = 0;
-
-    auto ref_end = m_distance_reference.cend();
-    auto tar_end = m_distance_target.cend();
-
-    // Claude Generated: cap to available atoms and guard against iterator underflow
-    // (see DistanceTemplateStrategy::align — this is an unused legacy duplicate).
-    const std::size_t limit = std::min<std::size_t>(m_limit,
-        std::min(m_reference.AtomCount(), m_target.AtomCount()));
-
-    while (reference_indicies.size() < limit
-        && ref_end != m_distance_reference.cbegin()
-        && tar_end != m_distance_target.cbegin()) {
-        ref_end--;
-        tar_end--;
-        std::pair<int, Position> atom_r1 = m_reference.Atom(ref_end->second.first);
-        std::pair<int, Position> atom_r2 = m_reference.Atom(ref_end->second.second);
-
-        std::pair<int, Position> atom_t1 = m_target.Atom(tar_end->second.first);
-        std::pair<int, Position> atom_t2 = m_target.Atom(tar_end->second.second);
-
-        if (atom_r1.first == atom_t1.first && std::find(reference_indicies.begin(), reference_indicies.end(), ref_end->second.first) == reference_indicies.end() && std::find(target_indicies.begin(), target_indicies.end(), tar_end->second.first) == target_indicies.end()) {
-            {
-                reference.addPair(atom_r1);
-                reference_indicies.push_back(ref_end->second.first);
-
-                target.addPair(atom_t1);
-                target_indicies.push_back(tar_end->second.first);
-            }
-        }
-        if (atom_r2.first == atom_t2.first && std::find(reference_indicies.begin(), reference_indicies.end(), ref_end->second.second) == reference_indicies.end() && std::find(target_indicies.begin(), target_indicies.end(), tar_end->second.second) == target_indicies.end()) {
-            {
-                reference.addPair(atom_r2);
-                reference_indicies.push_back(ref_end->second.second);
-
-                target.addPair(atom_t2);
-                target_indicies.push_back(tar_end->second.second);
-            }
-        }
-        ++i;
-    }
-
-    Molecule cached_reference_mol = m_reference;
-    Molecule cached_target_mol = m_target;
-
-    m_reference = reference;
-    m_target = target;
-
-    m_init_count = m_heavy_init;
-
-    auto strategy = AlignmentStrategyFactory::createStrategy(1);
-    if (strategy)
-        strategy->align(this, CreateAlignmentConfig());
-
-    m_reference = cached_reference_mol;
-    m_target = cached_target_mol;
-    for (const auto& indices : m_intermedia_rules) {
-        auto result = MakeCostMatrix(reference_indicies, indices);
-        InsertRotation(result);
-    }
-    m_intermedia_rules.clear();
-
-    std::map<double, std::vector<int>> order_rules;
-    std::vector<std::vector<int>> transformed_rules;
-    for (int i = 0; i < m_stored_rules.size(); ++i) {
-        std::vector<int> tmp;
-        for (auto index : m_stored_rules[i])
-            tmp.push_back(target_indicies[index]);
-
-        auto OperateVectors = GetOperateVectors(reference_indicies, tmp);
-        auto result = MakeCostMatrix(OperateVectors.first);
-        InsertRotation(result);
-    }
-
-    m_stored_rules.clear();
-    std::vector<int> target_indices = m_reorder_rules;
-    return std::pair<std::vector<int>, std::vector<int>>(reference_indicies, target_indices);
-}
-
 std::pair<double, Matrix> RMSDDriver::MakeCostMatrix(const std::vector<int>& permuation)
 {
     std::vector<int> first(permuation.size(), 0);
@@ -1648,69 +1419,6 @@ std::pair<Matrix, Position> RMSDDriver::GetOperateVectors(const Molecule& refere
     return std::pair<Matrix, Position>(R, translate);
 }
 
-bool RMSDDriver::MolAlignLib()
-{
-    std::string ref_tmp = outputPath("molaign_ref.xyz");
-    std::string tar_tmp = outputPath("molalign_tar.xyz");
-    m_reference.writeXYZFile(ref_tmp);
-    m_target.writeXYZFile(tar_tmp);
-
-    FILE* FileOpen;
-    std::string command = m_molalign + m_molalignarg + " " + ref_tmp + "   " + tar_tmp + " 2>&1";
-    if (m_verbosity >= 3)
-        CurcumaLogger::info_fmt("MolAlign command: {}", command);
-#ifdef _WIN32
-    FileOpen = _popen(command.c_str(), "r");
-#else
-    FileOpen = popen(command.c_str(), "r");
-#endif
-    bool ok = true;
-    bool rndm = false;
-    bool error = false;
-    char line[130];
-
-    while (fgets(line, sizeof line, FileOpen)) {
-        //  ok = std::string(line).find("RMSD") != std::string::npos;
-        rndm = std::string(line).find("random") != std::string::npos;
-        error = std::string(line).find("Error") != std::string::npos;
-#ifdef CURCUMA_DEBUG
-        if (m_verbosity >= 3)
-            CurcumaLogger::debug(2, fmt::format("MolAlign output: {}", std::string(line).substr(0, std::string(line).find('\n'))));
-#endif
-    }
-#ifdef _WIN32
-    _pclose(FileOpen);
-#else
-    pclose(FileOpen);
-#endif
-
-    std::string aligned_tmp = outputPath("aligned.xyz");
-    if (std::filesystem::exists(aligned_tmp) && !rndm) {
-        CurcumaLogger::citation("molalign");
-        FileIterator file(aligned_tmp, true);
-        m_reference_centered = file.Next();
-        m_target_reordered = file.Next();
-        m_target_aligned = m_target_reordered;
-        m_target = m_target_reordered;
-        m_rmsd = CalculateRMSD();
-        std::filesystem::remove(aligned_tmp);
-    } else {
-        if (!rndm && !error) {
-            CurcumaLogger::error("Molalign was not found. Consider getting it from https://github.com/qcuaeh/molalignlib or use -molalignbin /yourpath/molalign");
-            return false;
-        }
-    }
-    if (rndm) {
-        CurcumaLogger::error("molalign has trouble with random numbers, no permutation will be performed");
-        return false;
-    }
-    if (error) {
-        CurcumaLogger::error("molalign has trouble with finding the solution, try to increase tolerance via -molaligntol XX");
-        return false;
-    }
-    return true;
-}
-
 Geometry RMSDDriver::Gradient() const
 {
     // Claude Generated (Jun 2026): weighted gradient d(rmsd_w)/dx_i = w_i*(ref_i-tar_i)/(rmsd_w*Σw)
@@ -1726,4 +1434,31 @@ Geometry RMSDDriver::Gradient() const
         return g / (RMSD() * (wsum > 0 ? wsum : 1.0));
     }
     return (m_reference.getGeometry() - m_target.getGeometry()) / (RMSD() * m_target.getGeometry().rows());
+}
+
+// Claude Generated 2026 - The document main.cpp used to assemble, now where the
+// data is. Deliberately the exact same set of keys, so the .rmsd.json the CLI
+// writes is unchanged: the caller adds only what it alone knows, the file names.
+// Pure -- writes nothing.
+json RMSDDriver::Results() const
+{
+    json result;
+    result["rmsd"] = m_rmsd;
+    result["rmsd_raw"] = RMSDRaw();
+
+    // Identity when no reordering ran, so a consumer always gets a usable mapping
+    // rather than having to special-case an empty one. The atom count is the
+    // driver's knowledge, which is why the fill belongs here and not in the caller.
+    std::vector<int> permutation = ReorderRules();
+    if (permutation.empty()) {
+        permutation.resize(ReferenceAligned().AtomCount());
+        std::iota(permutation.begin(), permutation.end(), 0);
+    }
+    result["permutation"] = permutation;
+
+    result["reference_xyz"] = ReferenceAligned().XYZString();
+    // The geometry whose deviation equals RMSD(): reordered and aligned, or the
+    // plain best fit when no reorder ran.
+    result["reorder_xyz"] = TargetForRMSD().XYZString();
+    return result;
 }
