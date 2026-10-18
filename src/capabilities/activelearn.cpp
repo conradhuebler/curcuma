@@ -120,16 +120,19 @@ public:
 
                 base.setMolecule(pinned);
                 s.energy_base = base.CalculateEnergy(true);
-                // EnergyCalculator hands out Eh/Bohr; the descriptor and therefore the whole
-                // model work in Eh/Angstrom. Converting here keeps one unit convention for
-                // everything the model ever sees.
-                s.gradient_base = base.Gradient() * CurcumaUnit::Length::ANGSTROM_TO_BOHR;
+                // EnergyCalculator::Gradient() is Eh/Angstrom (getGradient() contract, Known
+                // Issue #28), which is also what the descriptor and the whole model work in.
+                // An earlier version assumed Eh/Bohr and multiplied by ANGSTROM_TO_BOHR; after the
+                // merge with master that made every gradient label 1.89 times too large
+                // (dataset gradient_base vs `-sp -dump_gradient`: ratio 1.8906, n=1 structure),
+                // so the energy rows and the gradient rows of the fit contradicted each other.
+                s.gradient_base = base.Gradient();
 
                 // The reference has no frozen topology of its own, so it only needs the
                 // geometry; re-setting it per structure keeps both sides symmetric.
                 ref.setMolecule(pinned);
                 s.energy_ref = ref.CalculateEnergy(true);
-                s.gradient_ref = ref.Gradient() * CurcumaUnit::Length::ANGSTROM_TO_BOHR;
+                s.gradient_ref = ref.Gradient();
                 s.has_gradients = true;
 
                 m_results.push_back(s);
