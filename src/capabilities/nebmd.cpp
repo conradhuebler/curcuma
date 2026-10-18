@@ -152,6 +152,7 @@ void NebMD::LoadControlJson()
     // Claude Generated 2026: extension as a fraction of the CV path length; when > 0 it takes
     // precedence over cv_extend (frames), the frame count is derived in buildCvPath.
     m_cv_extend_length = std::max(m_config.get<double>("cv_extend_length"), 0.0);
+    m_cv_atoms_spec = m_config.get<std::string>("cv_atoms", "all"); // parsed in Initialise (needs the atoms)
     if (m_cv_extend_length > 0.0 && m_cv_extend > 0)
         CurcumaLogger::warn(fmt::format("NEB-MD: both cv_extend ({}) and cv_extend_length ({}) are set - "
                                         "cv_extend_length takes precedence, cv_extend is ignored.",
@@ -253,6 +254,20 @@ bool NebMD::Initialise()
         return false;
     }
 
+    // Claude Generated 2026: atom subset of the path CV (cv_atoms); empty = all atoms.
+    {
+        std::string err;
+        if (!PathCV::parseAtomSelection(m_cv_atoms_spec, m_start, m_cv_atoms, err)) {
+            CurcumaLogger::error("NEB-MD: " + err);
+            return false;
+        }
+        const int nat = static_cast<int>(m_start.AtomCount());
+        m_cv_w = PathCV::selectionWeights(m_cv_atoms, nat);
+        m_cv_w_align = PathCV::selectionWeights(m_cv_atoms, nat, 1e-6); // see buildCvPath
+        CurcumaLogger::result_fmt("NEB-MD: path CV atoms (cv_atoms) = {}: {} of {} atoms", m_cv_atoms_spec,
+                                  m_cv_atoms.empty() ? nat : static_cast<int>(m_cv_atoms.size()), nat);
+    }
+
     m_images.assign(m_nimages, nullptr);
     m_image_done.assign(m_nimages, false);
     m_image_geoms.assign(m_nimages, Geometry());
@@ -268,6 +283,7 @@ void NebMD::resetPmfAccumulators(int nat)
     m_fe_count.assign(m_fe_bins, 0);
     m_fe_force.assign(m_fe_bins, 0.0);
     m_fe_div.assign(m_fe_bins, 0.0);
+    m_fe_wall.assign(m_fe_bins, 0.0);
     m_fe_ssum.assign(m_fe_bins, 0.0);
     m_fe_wsum.assign(m_fe_bins, 0.0);
     m_win_s_sum.assign(m_nimages, 0.0);
@@ -280,6 +296,7 @@ void NebMD::resetPmfAccumulators(int nat)
     m_win_w.assign(m_nimages, 0.0);
     m_win_wf.assign(m_nimages, 0.0);
     m_win_wd.assign(m_nimages, 0.0);
+    m_win_wwall.assign(m_nimages, 0.0);
     m_prev_s.assign(m_nimages, -1.0);
     m_img_max_jump.assign(m_nimages, 0.0);
     m_img_max_jump_step.assign(m_nimages, -1);
@@ -757,7 +774,13 @@ bool NebMD::buildCvPath(bool place_windows)
     const std::vector<Geometry>& P = m_image_geoms;
     const int Np = static_cast<int>(P.size());
 
-    std::vector<Geometry> base = curcuma::string_path::alignConsecutive(P, {});
+    // cv_atoms: arclength (re-sampling, L) in the selected-atom metric m_cv_w (0/1, empty = all).
+    // The Kabsch fits (consecutive alignment, extension) use m_cv_w_align = 1 on the selected
+    // atoms and 1e-6 on the others: the selected atoms decide the fit, the others only fix a
+    // rotation the selection leaves free. Measured on the SN2 path (Cl-C-Cl, exactly collinear):
+    // with pure 0/1 weights the H atoms jumped by up to 2.1 A between consecutive frames and the
+    // extension frames lay up to 8165 kcal/mol above the endpoint; with the tie-break as with 'all'.
+    std::vector<Geometry> base = curcuma::string_path::alignConsecutive(P, m_cv_w_align);
     if (m_cv_frames > 0) {
         // Part B: re-sample at equal arclength onto cv_frames frames (before the extension).
         int nf = m_cv_frames;
@@ -765,7 +788,7 @@ bool NebMD::buildCvPath(bool place_windows)
             CurcumaLogger::warn(fmt::format("NEB-MD: cv_frames = {} is too few for a path CV; using 3.", nf));
             nf = 3;
         }
-        base = curcuma::string_path::resamplePath(base, nf, {});
+        base = curcuma::string_path::resamplePath(base, nf, m_cv_w);
     }
     if (m_cv_extend_length > 0.0) {
         // Claude Generated 2026: extension given as a LENGTH (fraction of the arclength L of the
@@ -774,7 +797,7 @@ bool NebMD::buildCvPath(bool place_windows)
         const int F = static_cast<int>(base.size());
         double L = 0.0; // plain (already consecutively aligned) RMSD arclength, as PathCV sees it
         for (int k = 1; k < F; ++k)
-            L += curcuma::string_path::weightedRmsd(base[k], base[k - 1], {}, false);
+            L += curcuma::string_path::weightedRmsd(base[k], base[k - 1], m_cv_w, false);
         m_cv_extend = curcuma::string_path::extensionFrames(m_cv_extend_length, F);
         const double d = F > 1 ? L / static_cast<double>(F - 1) : 0.0;
         CurcumaLogger::result_fmt("NEB-MD cv_extend: {:.4g} of the path length = {} frames "
@@ -785,7 +808,7 @@ bool NebMD::buildCvPath(bool place_windows)
     }
     std::vector<Geometry> cv = base;
     if (m_cv_extend > 0) {
-        cv = curcuma::string_path::extendPath(base, m_cv_extend, {});
+        cv = curcuma::string_path::extendPath(base, m_cv_extend, m_cv_w_align);
         checkExtensionEnergies(base, cv);
     }
     m_cv_path = cv;
@@ -793,7 +816,7 @@ bool NebMD::buildCvPath(bool place_windows)
     m_cv_lo = (m_cv_extend > 0) ? 1 : 0;
     m_cv_hi = M - 1 - m_cv_lo;
 
-    const PathCV pcv(m_cv_path, m_start);
+    const PathCV pcv(m_cv_path, m_start, -1.0, m_cv_atoms);
     std::vector<double> sc(M, 0.0);
     for (int k = 0; k < M; ++k)
         sc[k] = pcv.s(cv[k]);
@@ -1259,6 +1282,7 @@ bool NebMD::stepBand()
                 L.count.assign(m_fe_bins, 0);
                 L.force.assign(m_fe_bins, 0.0);
                 L.div.assign(m_fe_bins, 0.0);
+                L.wall.assign(m_fe_bins, 0.0);
                 L.ssum.assign(m_fe_bins, 0.0);
                 L.wsum.assign(m_fe_bins, 0.0);
                 L.rejected_bin.assign(m_fe_bins, 0);
@@ -1286,6 +1310,7 @@ bool NebMD::stepBand()
                 m_fe_count[b] += loc[k].count[b];
                 m_fe_force[b] += loc[k].force[b];
                 m_fe_div[b] += loc[k].div[b];
+                m_fe_wall[b] += loc[k].wall[b];
                 m_fe_ssum[b] += loc[k].ssum[b];
                 m_fe_wsum[b] += loc[k].wsum[b];
             }
@@ -1299,6 +1324,7 @@ bool NebMD::stepBand()
             m_win_w[i] += loc[k].win_w;
             m_win_wf[i] += loc[k].win_wf;
             m_win_wd[i] += loc[k].win_wd;
+            m_win_wwall[i] += loc[k].win_wwall;
             m_fe_rejected += loc[k].rejected;
             m_win_rejected[i] += loc[k].rejected;
             for (int b = 0; b < m_fe_bins && b < static_cast<int>(loc[k].rejected_bin.size()); ++b)
@@ -1582,7 +1608,7 @@ void NebMD::setupUmbrella()
     // Claude Generated 2026: the CV is built on cvFrames() - the image frames by default, the
     // re-sampled / extended frames when cv_frames / cv_extend are set (buildCvPath).
     const std::vector<Geometry>& cvp = cvFrames();
-    m_path_cv = std::make_unique<PathCV>(cvp, m_start);
+    m_path_cv = std::make_unique<PathCV>(cvp, m_start, -1.0, m_cv_atoms);
     m_umbrella_s0.assign(m_nimages, 0.0);
     // Claude Generated 2026: the window centres must be the s values the reference frames
     // ACTUALLY have, not i/(N-1).
@@ -1676,14 +1702,21 @@ void NebMD::setupUmbrella()
     // amplitude is measured during the run and the ratio is reported at the end.
     {
         // Spacing and Z floor refer to the CV frames (identical to the image frames by default).
+        // With cv_atoms the spacing runs over the selected atoms (the metric of the CV).
         const int nat = static_cast<int>(cvp[0].rows());
         const int ncv = static_cast<int>(cvp.size());
         double dsum = 0.0;
         for (int i = 1; i < ncv; ++i) {
             double d2 = 0.0;
-            for (int a = 0; a < nat; ++a)
-                d2 += (cvp[i].row(a) - cvp[i - 1].row(a)).squaredNorm();
-            dsum += std::sqrt(d2 / nat);
+            if (m_cv_atoms.empty()) {
+                for (int a = 0; a < nat; ++a)
+                    d2 += (cvp[i].row(a) - cvp[i - 1].row(a)).squaredNorm();
+                dsum += std::sqrt(d2 / nat);
+            } else {
+                for (int a : m_cv_atoms)
+                    d2 += (cvp[i].row(a) - cvp[i - 1].row(a)).squaredNorm();
+                dsum += std::sqrt(d2 / static_cast<double>(m_cv_atoms.size()));
+            }
         }
         m_path_spacing = dsum / std::max(ncv - 1, 1);
         CurcumaLogger::result_fmt("NEB-MD: reference path spacing {:.4f} A per image "
@@ -2480,7 +2513,7 @@ void NebMD::histogramTrajectory(const std::string& traj) const
     const PathCV* cv = m_path_cv.get();
     const std::vector<Geometry>& cvp = cvFrames(); // Claude Generated 2026: same CV as stage 2
     if (!cv) {
-        local = std::make_unique<PathCV>(cvp, m_start);
+        local = std::make_unique<PathCV>(cvp, m_start, -1.0, m_cv_atoms);
         cv = local.get();
     }
     const int nat = static_cast<int>(m_start.AtomCount());
@@ -2781,6 +2814,8 @@ void NebMD::histogramTrajectory(const std::string& traj) const
         if (!m_cv_path.empty() && m_cv_extend_length > 0.0) // Claude Generated 2026 (only in length mode)
             f << fmt::format("# cv_extend_length {:.6g} of the path length = {} frames per end\n",
                              m_cv_extend_length, m_cv_extend);
+        if (!m_cv_atoms.empty()) // Claude Generated 2026 (only with a selection: default header unchanged)
+            f << fmt::format("# cv_atoms {} ({} atoms)\n", m_cv_atoms_spec, m_cv_atoms.size());
         if (!m_cv_path.empty() && m_cv_orig_s.size() == 4)
             f << fmt::format("# cv path: {} frames (cv_frames {}, cv_extend {}), lambda {:.6g}; original path frames "
                              "on this CV: s(first) {:.6f}, s(second) {:.6f}, s(second-to-last) {:.6f}, s(last) {:.6f}\n",
@@ -2940,6 +2975,13 @@ void NebMD::accumulateMeanForce(int i, SimpleMD* img, FeLocal& out, std::mt19937
     double bdotg = 0.0;
     for (int a = 0; a < nat; ++a)
         bdotg += ds.row(a).dot(g.row(a)) / (std::max(m_masses[a], 1e-12) * Z);
+    // Claude Generated 2026: the wall part b.grad W on its own (same integrator step as g), so
+    // fe.csv can split the mean force into <b.grad E> + <b.grad W> - kT <div b>.
+    const Geometry& gw = img->extraPotentialGradient();
+    double bdotgw = 0.0;
+    if (gw.rows() == nat)
+        for (int a = 0; a < nat; ++a)
+            bdotgw += ds.row(a).dot(gw.row(a)) / (std::max(m_masses[a], 1e-12) * Z);
 
     // <div b>: needs second derivatives of s. They are obtained from finite differences
     // of the ANALYTIC gradient along random directions (Hutchinson):
@@ -2989,6 +3031,7 @@ void NebMD::accumulateMeanForce(int i, SimpleMD* img, FeLocal& out, std::mt19937
     out.wsum[bin] += w;
     out.force[bin] += w * bdotg;
     out.div[bin] += w * divb;
+    out.wall[bin] += w * bdotgw;
     out.ssum[bin] += s;
 
     {
@@ -3012,6 +3055,7 @@ void NebMD::accumulateMeanForce(int i, SimpleMD* img, FeLocal& out, std::mt19937
         out.win_w += w;
         out.win_wf += w * bdotg;
         out.win_wd += w * divb;
+        out.win_wwall += w * bdotgw;
     }
 }
 
@@ -3043,6 +3087,7 @@ void NebMD::writeMeanForceProfile() const
     // ---------- estimator (I): conditional mean force ----------
     std::vector<double> sI, dgI;
     std::vector<long> nI, rejI; // samples and Z-floor rejections per support point (Claude Generated 2026)
+    std::vector<fe_profile::MeanForceSplit> splitI; // <b.grad E>, -kT<div b>, <b.grad W> (Claude Generated 2026)
     if (m_constrain) {
         // Constrained scheme: one support point per window, at the constrained value of s.
         // Binning would be meaningless here - s never moves, so a window fills exactly one
@@ -3059,6 +3104,8 @@ void NebMD::writeMeanForceProfile() const
             dgI.push_back(p.first.second);
             nI.push_back(m_win_count[p.second]);
             rejI.push_back(p.second < static_cast<int>(m_win_rejected.size()) ? m_win_rejected[p.second] : 0);
+            const int i = p.second;
+            splitI.push_back(fe_profile::splitMeanForce(m_win_wf[i], m_win_wwall[i], m_win_wd[i], m_win_w[i], kT));
         }
         if (pts.size() < 3)
             CurcumaLogger::warn("Fewer than three constrained windows contributed; a profile "
@@ -3074,6 +3121,7 @@ void NebMD::writeMeanForceProfile() const
             dgI.push_back(m_fe_force[b] / wn - kT * m_fe_div[b] / wn);
             nI.push_back(m_fe_count[b]);
             rejI.push_back(b < static_cast<int>(m_fe_rejected_bin.size()) ? m_fe_rejected_bin[b] : 0);
+            splitI.push_back(fe_profile::splitMeanForce(m_fe_force[b], m_fe_wall[b], m_fe_div[b], wn, kT));
         }
     }
     auto integrate = [](const std::vector<double>& x, const std::vector<double>& y) {
@@ -3340,6 +3388,8 @@ void NebMD::writeMeanForceProfile() const
         if (!m_cv_path.empty() && m_cv_extend_length > 0.0) // Claude Generated 2026 (only in length mode)
             f << fmt::format("# cv_extend_length {:.6g} of the path length = {} frames per end\n",
                              m_cv_extend_length, m_cv_extend);
+        if (!m_cv_atoms.empty()) // Claude Generated 2026 (only with a selection: default header unchanged)
+            f << fmt::format("# cv_atoms {} ({} atoms)\n", m_cv_atoms_spec, m_cv_atoms.size());
         if (!m_cv_path.empty() && m_cv_orig_s.size() == 4)
             f << fmt::format("# cv path: {} frames (cv_frames {}, cv_extend {}), lambda {:.6g}; original path frames "
                              "on this CV: s(first) {:.6f}, s(second) {:.6f}, s(second-to-last) {:.6f}, s(last) {:.6f}\n",
@@ -3348,18 +3398,21 @@ void NebMD::writeMeanForceProfile() const
         if (m_z_wall > 0.0) // Claude Generated 2026: only with a wall, so default output is unchanged
             f << fmt::format("# z wall {:.6g} A^2, k {:.6g} Eh/A^4: PMF of the z-restricted system, compare only "
                              "at equal z_wall\n", m_z_wall, m_z_wall_k);
-        f << "estimator,s,dGds_Eh,G_kcal,samples,rejected_frac\n";
+        // Claude Generated 2026: the last three columns split estimator I, dGds_Eh = gradE + metric + wall
+        // (printed with 13 significant digits; dGds_Eh keeps its 8 decimals). Not defined for II: nan.
+        f << "estimator,s,dGds_Eh,G_kcal,samples,rejected_frac,dGds_gradE_Eh,dGds_metric_Eh,dGds_wall_Eh\n";
         auto frac = [](long n, long r) { return (n + r) > 0 ? static_cast<double>(r) / static_cast<double>(n + r) : 0.0; };
         for (size_t k = 0; k < sI.size(); ++k)
             f << "I," << fmt::format("{:.6f}", sI[k]) << "," << fmt::format("{:.8f}", dgI[k]) << ","
               << fmt::format("{:.4f}", GI[k] * kcal) << "," << nI[k] << ","
-              << fmt::format("{:.6f}", frac(nI[k], rejI[k])) << "\n";
+              << fmt::format("{:.6f}", frac(nI[k], rejI[k])) << ","
+              << fmt::format("{:.12e},{:.12e},{:.12e}", splitI[k].grad_e, splitI[k].metric, splitI[k].wall) << "\n";
         for (size_t k = 0; k < sII_s.size(); ++k) {
             const int i = winIdx[order[k]];
             const long r = i < static_cast<int>(m_win_rejected.size()) ? m_win_rejected[i] : 0;
             f << "II," << fmt::format("{:.6f}", sII_s[k]) << "," << fmt::format("{:.8f}", dgII_s[k])
               << "," << fmt::format("{:.4f}", GII[k] * kcal) << "," << m_win_count[i] << ","
-              << fmt::format("{:.6f}", frac(m_win_count[i], r)) << "\n";
+              << fmt::format("{:.6f}", frac(m_win_count[i], r)) << ",nan,nan,nan\n";
         }
     }
 

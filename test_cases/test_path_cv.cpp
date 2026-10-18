@@ -10,9 +10,11 @@
  * used to bias a simulation.
  */
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <random>
+#include <string>
 #include <vector>
 
 #include "generated/parameter_registry.h"
@@ -243,6 +245,157 @@ int main()
         const double k0 = PathCV::zWallDefaultK(kT, zw0);
         check(std::abs(0.5 * k0 * (0.2 * zw0) * (0.2 * zw0) - 3.0 * kT) < 1e-15,
               "zWallDefaultK: W(1.2 z_wall) = 3 kT");
+    }
+
+    // (f) atom subset (cv_atoms), Claude Generated 2026. A random 10-atom molecule
+    // (C O C N H H H C H H), a random smooth 8-frame path, a test point displaced off the path
+    // and rotated. Checks: (i) s, z do not change when unselected atoms move; (ii) analytic
+    // lab-frame ds/dR, dz/dR vs central FD (Angstrom displacements), rel < 1e-6; (iii) the
+    // gradient rows of unselected atoms are exactly 0; (iv) the full explicit list equals the
+    // 'all' code path; (v) s, z equal an independent subset-only reference (a PathCV built on
+    // the selected rows alone); parser checks.
+    {
+        const int Z[10] = { 6, 8, 6, 7, 1, 1, 1, 6, 1, 1 };
+        std::mt19937 gen(1234);
+        std::normal_distribution<double> nd(0.0, 1.0);
+        Molecule m10;
+        Geometry X0(10, 3);
+        for (int a = 0; a < 10; ++a) {
+            Position q;
+            q << 1.2 * nd(gen), 1.2 * nd(gen), 1.2 * nd(gen);
+            X0.row(a) = q.transpose();
+            m10.addPair({ Z[a], q });
+        }
+        Geometry D1(10, 3), D2(10, 3);
+        for (int a = 0; a < 10; ++a)
+            for (int c = 0; c < 3; ++c) {
+                D1(a, c) = 0.5 * nd(gen);
+                D2(a, c) = 0.3 * nd(gen);
+            }
+        std::vector<Geometry> p10;
+        for (int i = 0; i < 8; ++i) {
+            const double f = i / 7.0;
+            p10.push_back(X0 + f * D1 + std::sin(M_PI * f) * D2);
+        }
+        const double th = 35.0 * M_PI / 180.0;
+        Eigen::Matrix3d Ry;
+        Ry << std::cos(th), 0, std::sin(th), 0, 1, 0, -std::sin(th), 0, std::cos(th);
+        Geometry Rt = 0.5 * (p10[3] + p10[4]);
+        for (int a = 0; a < 10; ++a)
+            for (int c = 0; c < 3; ++c)
+                Rt(a, c) += 0.08 * nd(gen);
+        Rt = (Rt * Ry.transpose()).eval();
+        Rt.rowwise() += Eigen::RowVector3d(0.4, -0.3, 0.2);
+
+        // parser
+        std::vector<int> heavy, list, tmp;
+        std::string err;
+        check(PathCV::parseAtomSelection("heavy", m10, heavy, err)
+                  && heavy == std::vector<int>({ 0, 1, 2, 3, 7 }),
+              "cv_atoms 'heavy' = atoms with Z > 1 (0-based 0,1,2,3,7)");
+        check(PathCV::parseAtomSelection("1-6,9", m10, list, err)
+                  && list == std::vector<int>({ 0, 1, 2, 3, 4, 5, 8 }),
+              "cv_atoms '1-6,9' = 0-based 0..5,8");
+        check(PathCV::parseAtomSelection("all", m10, tmp, err) && tmp.empty(), "cv_atoms 'all' = empty selection");
+        check(PathCV::parseAtomSelection(" 9, 2 ,4-5 ", m10, tmp, err) && tmp == std::vector<int>({ 1, 3, 4, 8 }),
+              "cv_atoms list with blanks, unsorted, is sorted");
+        for (const std::string bad : { "0", "11", "1-3,3", "1,2", "x", "3-1", "1-", "2-11", "1,,3" }) {
+            const bool ok = PathCV::parseAtomSelection(bad, m10, tmp, err);
+            std::cout << "   '" << bad << "' -> " << (ok ? "accepted" : err) << std::endl;
+            check(!ok && !err.empty(), "cv_atoms '" + bad + "' is rejected with a message");
+        }
+        {
+            Molecule eth; // C2H6: 'heavy' = 2 atoms -> rejected
+            Position q = Position::Zero();
+            for (int a = 0; a < 8; ++a) {
+                q(0) = a;
+                eth.addPair({ a < 2 ? 6 : 1, q });
+            }
+            check(!PathCV::parseAtomSelection("heavy", eth, tmp, err), "cv_atoms 'heavy' on ethane (2 atoms) is rejected");
+        }
+
+        const PathCV cvall(p10, m10);
+        std::vector<int> full(10);
+        for (int a = 0; a < 10; ++a)
+            full[a] = a;
+        const PathCV cvfull(p10, m10, -1.0, full);
+        {
+            double s1, z1, s2, z2;
+            Geometry ds1, dz1, ds2, dz2;
+            cvall.evaluate(Rt, &s1, &z1, &ds1, &dz1);
+            cvfull.evaluate(Rt, &s2, &z2, &ds2, &dz2);
+            const double dmax = std::max({ std::abs(s1 - s2), std::abs(z1 - z2), (ds1 - ds2).cwiseAbs().maxCoeff(),
+                                           (dz1 - dz2).cwiseAbs().maxCoeff(), std::abs(cvall.lambda() - cvfull.lambda()) });
+            std::cout << "   all vs full explicit list: max |diff| = " << dmax << std::endl;
+            check(dmax < 1e-12, "(iv) full explicit list reproduces the 'all' code path");
+        }
+
+        for (const auto* sel : { &heavy, &list }) {
+            const std::string tag = (sel == &heavy) ? "heavy" : "1-6,9";
+            const PathCV cv(p10, m10, -1.0, *sel);
+            double s0 = 0, z0 = 0;
+            Geometry ds, dz;
+            cv.evaluate(Rt, &s0, &z0, &ds, &dz);
+
+            // (v) independent reference: PathCV built on the selected rows only
+            std::vector<Geometry> psub;
+            Molecule msub;
+            for (const auto& g : p10) {
+                Geometry h(static_cast<int>(sel->size()), 3);
+                for (size_t k = 0; k < sel->size(); ++k)
+                    h.row(static_cast<int>(k)) = g.row((*sel)[k]);
+                psub.push_back(h);
+            }
+            Geometry Rsub(static_cast<int>(sel->size()), 3);
+            for (size_t k = 0; k < sel->size(); ++k) {
+                Rsub.row(static_cast<int>(k)) = Rt.row((*sel)[k]);
+                const Position q = Rt.row((*sel)[k]).transpose();
+                msub.addPair({ Z[(*sel)[k]], q });
+            }
+            const PathCV cvsub(psub, msub);
+            double ss = 0, zs = 0;
+            cvsub.evaluate(Rsub, &ss, &zs, nullptr, nullptr);
+            check(std::abs(ss - s0) < 1e-12 && std::abs(zs - z0) < 1e-12 && std::abs(cv.lambda() - cvsub.lambda()) < 1e-9,
+                  "(v) " + tag + ": s, z, lambda equal a CV built on the selected atoms alone");
+
+            // (i) invariance under moving unselected atoms
+            Geometry Rmov = Rt;
+            for (int a = 0; a < 10; ++a)
+                if (std::find(sel->begin(), sel->end(), a) == sel->end())
+                    for (int c = 0; c < 3; ++c)
+                        Rmov(a, c) += 0.7 * nd(gen);
+            double sm = 0, zm = 0;
+            cv.evaluate(Rmov, &sm, &zm, nullptr, nullptr);
+            check(sm == s0 && zm == z0, "(i) " + tag + ": s, z unchanged when unselected atoms move");
+
+            // (ii) FD, (iii) zero rows
+            const double h = 1e-5;
+            double es = 0, ez = 0, ns = 0, nz = 0;
+            bool zero_rows = true;
+            for (int a = 0; a < 10; ++a) {
+                const bool selected = std::find(sel->begin(), sel->end(), a) != sel->end();
+                if (!selected && (ds.row(a).norm() != 0.0 || dz.row(a).norm() != 0.0))
+                    zero_rows = false;
+                for (int c = 0; c < 3; ++c) {
+                    Geometry Rp = Rt, Rm = Rt;
+                    Rp(a, c) += h;
+                    Rm(a, c) -= h;
+                    double sp, zp, sq, zq;
+                    cv.evaluate(Rp, &sp, &zp, nullptr, nullptr);
+                    cv.evaluate(Rm, &sq, &zq, nullptr, nullptr);
+                    const double fs = (sp - sq) / (2 * h), fz = (zp - zq) / (2 * h);
+                    es += (fs - ds(a, c)) * (fs - ds(a, c));
+                    ez += (fz - dz(a, c)) * (fz - dz(a, c));
+                    ns += fs * fs;
+                    nz += fz * fz;
+                }
+            }
+            const double rs = std::sqrt(es / std::max(ns, 1e-30)), rz = std::sqrt(ez / std::max(nz, 1e-30));
+            std::cout << "   " << tag << " (" << sel->size() << " atoms): s = " << s0 << ", z = " << z0
+                      << ", lambda = " << cv.lambda() << ", FD rel err ds = " << rs << ", dz = " << rz << std::endl;
+            check(rs < 1e-6 && rz < 1e-6 && ns > 0.0 && nz > 0.0, "(ii) " + tag + ": ds/dR, dz/dR vs FD rel < 1e-6");
+            check(zero_rows, "(iii) " + tag + ": gradient rows of unselected atoms exactly 0");
+        }
     }
 
     std::cout << (failures == 0 ? "ALL TESTS PASSED" : "SOME TESTS FAILED") << std::endl;

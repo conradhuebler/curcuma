@@ -313,7 +313,7 @@ private:
      *
      * Otherwise (scheme 'independent' and cv_histogram only; ignored elsewhere):
      *  1. P = path frames (path_file / interpolation / NEB result), consecutively Kabsch-aligned
-     *     (string_path::alignConsecutive, uniform weights - PathCV is unweighted).
+     *     (string_path::alignConsecutive, weights m_cv_w: uniform, or 0/1 on the cv_atoms selection).
      *  2. cv_frames > 0: P is re-sampled at equal arclength onto cv_frames frames
      *     (string_path::resamplePath; interpolates or decimates, endpoints kept).
      *  3. cv_extend = m > 0: m frames are added beyond each end by straight continuation of the
@@ -323,6 +323,7 @@ private:
      *     cv_extend_length = f > 0 (takes precedence over cv_extend): m is derived from a LENGTH,
      *     m = string_path::extensionFrames(f, F) = ceil(f (F-1)) + 1 (F = frames after step 2), so
      *     the windows reach >= f L beyond each end independent of cv_frames (Claude Generated 2026).
+     *     Steps 1-3 measure RMSD and arclength over the cv_atoms selection, the metric of the CV.
      *  4. The PathCV (lambda from the plain spacings) is built on the resulting frames C_0..C_{M-1}.
      *     Window range: CV frames lo..hi with lo = 1 if m > 0 else 0, hi = M-1-lo, i.e. only the
      *     OUTERMOST extension frame per side is excluded (it is the plateau of s).
@@ -343,6 +344,10 @@ private:
     int m_cv_extend = 0;                         // extra CV frames per path end (0 = off); effective value
                                                  // derived from cv_extend_length in buildCvPath when that is > 0
     double m_cv_extend_length = 0.0;             // extension per end as fraction of the CV path length (0 = off)
+    std::string m_cv_atoms_spec = "all";         // cv_atoms as given (Claude Generated 2026)
+    std::vector<int> m_cv_atoms;                 // atoms of the path CV RMSD, 0-based (empty = all)
+    std::vector<double> m_cv_w;                  // the same as 0/1 weights for string_path (empty = all)
+    std::vector<double> m_cv_w_align;            // alignment weights: 1 selected, 1e-6 others (empty = all)
     std::vector<Geometry> m_cv_path;             // CV frames (empty = image frames, default)
     int m_cv_lo = 0, m_cv_hi = -1;               // window range on the CV frames (hi < 0: last frame)
     std::vector<double> m_cv_orig_s;             // s of original path frames 0, 1, N-2, N-1 on the CV
@@ -367,6 +372,7 @@ private:
     std::vector<long> m_fe_count;            // samples per bin
     std::vector<double> m_fe_force;          // sum of b.grad E            [Eh]
     std::vector<double> m_fe_div;            // sum of div b               [dimensionless]
+    std::vector<double> m_fe_wall;           // sum of b.grad W (z wall part of m_fe_force) [Eh]
     std::vector<double> m_fe_ssum;           // sum of s (refined bin centre)
     std::vector<double> m_fe_wsum;           // sum of the ensemble weight (Z^-1/2 when constrained)
     std::vector<double> m_win_s_sum;         // per window: sum of s
@@ -383,6 +389,7 @@ private:
      * form of a blue-moon calculation: one mean force per constrained value of the
      * coordinate, integrated over the grid of those values. */
     std::vector<double> m_win_w, m_win_wf, m_win_wd;
+    std::vector<double> m_win_wwall;         // Z^-1/2 weighted sum of b.grad W (Claude Generated 2026)
     std::mt19937 m_rng{ 20260801u };         // fixed seed: reproducible probes
     /* Per-image state for the parallel window loop. Claude Generated 2026.
      *
@@ -400,10 +407,12 @@ private:
     struct FeLocal {
         std::vector<long> count;
         std::vector<double> force, div, ssum, wsum;
+        std::vector<double> wall;                    // b.grad W part of force (Claude Generated 2026)
         double win_s = 0.0, win_s2 = 0.0, win_z = 0.0;
         double win_z_max = -1e300, win_wall = 0.0;  // z wall diagnostics (Claude Generated 2026)
         long win_zwall_n = 0;
         double win_w = 0.0, win_wf = 0.0, win_wd = 0.0; // Z^-1/2 weighted sums
+        double win_wwall = 0.0;                      // ... of b.grad W (Claude Generated 2026)
         long win_n = 0, rejected = 0, nonfinite = 0;
         std::vector<long> rejected_bin;              // Z-floor rejections per s bin (Claude Generated 2026)
     };
@@ -561,6 +570,7 @@ private:
     PARAM(cv_hist_zmax, Double, 0.0, "z filter for cv_histogram in Angstrom^2: frames with z above this value are discarded. 0 = automatic: the filter acts on the excess z - z_path(s), z_path linearly interpolated between the z values of the reference frames (z is offset below zero ON the path and the offset depends on s). The log10(excess) histogram is searched for a second, separated population (frames far from the path, e.g. another basin with permuted atom labels); if one is found the threshold is placed in the density valley between the on-path mode and that population, otherwise only outliers with excess > 10 x median excess are discarded (no filter when the median excess <= 0). Assumes the on-path frames are the majority. Threshold, rejected fraction and rejected fraction of the interior frames are reported in the console and the ref.csv header.", "FreeEnergy", {})
     PARAM(cv_frames, Int, 0, "Number of frames of the path collective variable, decoupled from the number of windows. 0 = the CV is built on the path frames as given (one window per frame, the former behaviour). > 0: the path (path_file, the stage-1 string, or the interpolated/NEB path) is consecutively Kabsch-aligned and re-sampled at equal arclength onto cv_frames frames (linear interpolation; more frames than the path interpolates, fewer decimates; endpoints kept). lambda of the CV follows from the new spacing, so the CV no longer changes with nimages. The window count stays nimages (or the frame count of path_file): the window setpoints are equidistant in s between the first and the last window-capable CV frame, the start geometry of a window is the point of the CV polyline at that s, and s0 is then re-evaluated on that geometry. Applies to scheme 'independent' and to cv_histogram (same construction there); ignored by the other schemes.", "PathCV", {})
     PARAM(cv_extend, Int, 0, "Number of additional CV frames beyond EACH end of the path (0 = off). The end segment is continued straight: F_-j = R_0 + j (R_0 - R_1'), F_N-1+j = R_N-1 + j (R_N-1 - R_N-2') for j = 1..cv_extend, with R_1' (R_N-2') Kabsch-aligned onto its neighbour, i.e. every extension step has the length of the last path segment. Motivation: with fixed endpoints the windows only span s(frame 1)..s(frame N-2), and the endpoints are plateaus of s (grad s -> 0), so the basin bottoms are never sampled. With cv_extend > 0 only the outermost extension frame per side is kept as plateau; windows may lie on all other CV frames, and the former endpoints (minima) become ordinary, integrated windows (fixed_endpoints is switched off). Without cv_frames there is one window per CV frame except the outermost per side. The single-point energy of every extension frame is compared with the endpoint; a lower energy means the path does not end in a basin there and is warned about (no abort). The basin free energies of the profile, G_A = -kT ln int_A exp(-G/kT) ds, are integrals over s, so their absolute value depends on how s is parametrised (cv_frames, cv_extend, lambda): compare basin barriers only between runs with the same CV definition. Applies to scheme 'independent' and to cv_histogram; ignored by the other schemes.", "PathCV", {})
+    PARAM(cv_atoms, String, "all", "Atoms the path CV s,z is defined on (stage 2 / scheme 'independent', z wall, cv_trace, cv_histogram). 'all' (default) = every atom, the original CV. 'heavy' = all atoms with Z > 1. Otherwise a 1-based list with ranges, e.g. '1-6,9'. RMSD d_i, centroid and Kabsch rotation run over the selected atoms only (mean square over them); the CV gradient of the other atoms is exactly zero, but all atoms stay dynamic. The CV frames (cv_frames re-sampling, cv_extend/cv_extend_length) are aligned and spaced in the same selected-atom RMSD, and lambda follows from those spacings. At least 3 atoms are required (fewer cannot fix the rotation about their axis). Stage 1 (the string with its Kabsch restraint) is not affected. Why: with all atoms counted equally, thermal motion of light peripheral atoms (methyl H) inflates z, and the displacement of one heavy atom is diluted by the average over all atoms.", "PathCV", {})
     PARAM(cv_extend_length, Double, 0.0, "Extension of the path CV beyond EACH end given as a LENGTH: the fraction of the total arclength L of the CV path (after the cv_frames re-sampling) that the windows reach beyond the original endpoint. 0 = off (then cv_extend, in frames, applies unchanged). > 0 takes precedence over cv_extend (a warning is printed when both are set). Why: cv_extend counts FRAMES, and a frame covers a length that depends on cv_frames (more CV frames = shorter spacing), so a fixed cv_extend shrinks the sampled basin when cv_frames grows. Rule: with F CV frames and mean spacing d = L/(F-1) (RMSD arclength of the consecutively aligned path, the metric of the extension and of the path CV), the number of extension frames per end is m = ceil(cv_extend_length * L / d) + 1 = ceil(cv_extend_length * (F-1)) + 1; the +1 is the outermost extension frame, which remains the plateau of s and gets no window. The windows then cover at least cv_extend_length * L beyond each endpoint. The resulting m is logged ('cv_extend: <fraction> of the path length = m frames') and used exactly like cv_extend = m (straight continuation of the end segment, energy check of the extension frames, fixed_endpoints switched off). Without cv_frames the end segment may differ from the mean spacing d, so the covered length is only approximately cv_extend_length * L. Typical: 0.05-0.1. Applies to scheme 'independent' and to cv_histogram (same CV construction); ignored by the other schemes.", "PathCV", {})
     PARAM(pipeline, Bool, false, "Two-stage chain in one call: stage 1 = scheme 'string' (length string_max_time) produces <base>.neb.string.xyz; stage 2 reads it as path_file and runs scheme 'independent' with umbrella + constrain (conditional mean force along the frozen path CV, length simplemd.max_time). Both stages write into the same BMT directory; stage-2 files carry the basename <base>.stage2. In stage 2 the path is used as written: optimize, idpp and repair_overlaps are switched off there. -nebmd.constrain false keeps a restraint instead of the constraint in stage 2.", "Pipeline", {})
     PARAM(fe_bins, Int, 100, "Number of bins over s in [0,1] for the conditional mean-force profile. A bias that depends only on s is constant on the surface s=const, so conditional averages are unbiased and samples from ALL windows may be pooled into the same bins.", "FreeEnergy", {})

@@ -356,6 +356,10 @@ public:
     void setExtraPotential(ExtraPotential fn) { m_extra_potential = std::move(fn); }
     /** W at the current positions (Eh), 0 when no extra potential is set. */
     double extraPotentialEnergy() const { return m_extra_energy; }
+    /** Claude Generated 2026: dW/dR (Eh/Angstrom) of the extra potential, from the same integrator
+     *  step as trueGradient(), so trueGradient() - extraPotentialGradient() = d(E + walls)/dR.
+     *  Empty (0 rows) when no extra potential is set or it has not been evaluated yet. */
+    const Geometry& extraPotentialGradient() const { return m_extra_gradient; }
     /** Claude Generated 2026: number of degrees of freedom used for T and the thermostat. */
     int degreesOfFreedom() const { return m_dof; }
 
@@ -510,6 +514,7 @@ private:
     ScalarConstraint m_scalar_constraint;    // optional CV constraint (Claude Generated 2026)
     ExtraPotential m_extra_potential;        // optional extra potential, see setExtraPotential()
     double m_extra_energy = 0.0;             // its value at the current positions [Eh]
+    Geometry m_extra_gradient;               // its gradient dW/dR at the current positions [Eh/A]
     void ApplyExtraPotential();              // adds dW/dR to m_eigen_gradient (Claude Generated 2026)
     double m_scalar_target = 0.0, m_scalar_tol = 1e-8;
     int m_scalar_iters = 0;

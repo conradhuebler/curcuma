@@ -44,10 +44,22 @@
  * lambda should be chosen so that the exponentials of NEIGHBOURING frames overlap;
  * the usual rule of thumb is lambda ~ 1 / <d_i,i+1>^2 (the mean squared spacing of
  * the reference frames). computeLambdaFromPath() implements that.
+ *
+ * Atom subset (Claude Generated 2026, -nebmd.cv_atoms): optionally d_i is the RMSD over a
+ * SUBSET A of the atoms only (e.g. the heavy atoms), with centroid and Kabsch rotation
+ * taken over A as well:
+ *
+ *     d_i^2 = 1/|A| sum_{a in A} |Rot (p_a - <p>_A) - (q_ia - <q_i>_A)|^2
+ *
+ * Atoms outside A do not enter s or z, so their gradient is exactly zero; they stay
+ * dynamic. Why: with all atoms counted equally, thermal motion of light peripheral atoms
+ * (methyl H) adds to z, and a large displacement of one heavy atom is diluted by the
+ * average over all atoms. An empty selection means all atoms (the original code path).
  */
 
 #pragma once
 
+#include <string>
 #include <vector>
 
 #include "src/capabilities/rmsd.h"
@@ -56,8 +68,11 @@
 
 class PathCV {
 public:
-    /*! \brief Build the CV from a frozen reference path (>= 2 frames). */
-    PathCV(const std::vector<Geometry>& path, const Molecule& templ, double lambda = -1.0);
+    /*! \brief Build the CV from a frozen reference path (>= 2 frames).
+     *  \param atoms 0-based indices of the atoms the RMSD runs over (empty = all atoms).
+     *  lambda <= 0: computeLambdaFromPath(path, atoms). */
+    PathCV(const std::vector<Geometry>& path, const Molecule& templ, double lambda = -1.0,
+           const std::vector<int>& atoms = {});
 
     /*! \brief Progress along the path, s in [0,1]. */
     double s(const Geometry& R) const;
@@ -93,17 +108,41 @@ public:
      *  delta = 0.2 z_wall, i.e. k = 2 n_kT kT / (0.2 z_wall)^2 (n_kT = 3). */
     static double zWallDefaultK(double kT, double z_wall);
 
-    /*! \brief Rule-of-thumb lambda from the mean squared spacing of the frames. */
-    static double computeLambdaFromPath(const std::vector<Geometry>& path);
+    /*! \brief Rule-of-thumb lambda from the mean squared spacing of the frames: plain (not
+     *  best-fit) differences, mean square over `atoms` (empty = all atoms). */
+    static double computeLambdaFromPath(const std::vector<Geometry>& path,
+                                        const std::vector<int>& atoms = {});
+
+    /*! \brief Parse a cv_atoms specification, Claude Generated 2026.
+     *
+     *  "all" -> empty vector (all atoms); "heavy" -> atoms with Z > 1; otherwise a list of
+     *  1-based indices and ranges, e.g. "1-6,9". Result: sorted 0-based indices. Returns
+     *  false with a message in `error` on an index out of range, a duplicate, a malformed
+     *  token or fewer than 3 selected atoms (a CV on 2 atoms cannot see rotations about
+     *  their axis, the Kabsch fit is then not unique). */
+    static bool parseAtomSelection(const std::string& spec, const Molecule& mol,
+                                   std::vector<int>& atoms, std::string& error);
+
+    /*! \brief Per-atom weights of a selection, the form the string_path helpers take (Claude
+     *  Generated 2026): 1 on the selected atoms, `other` on the rest (empty for an empty
+     *  selection). other = 0: the selected-atom metric. other = 1e-6 (alignment only): the
+     *  selected atoms decide the fit, the others only fix a rotation the selection leaves free
+     *  (a collinear selection such as Cl-C-Cl cannot fix the rotation about its axis). */
+    static std::vector<double> selectionWeights(const std::vector<int>& atoms, int natoms, double other = 0.0);
 
     double lambda() const { return m_lambda; }
     int frames() const { return static_cast<int>(m_path.size()); }
+    const std::vector<int>& atoms() const { return m_atoms; }
 
 private:
     /*! \brief Best-fit RMSD of R to reference frame i, optionally with its gradient. */
     double rmsdTo(int i, const Geometry& R, Geometry* grad) const;
+    /*! \brief Rows of g that belong to the selection (g itself for an empty selection). */
+    Geometry selectRows(const Geometry& g) const;
 
     std::vector<Geometry> m_path;
+    std::vector<Geometry> m_path_sel; ///< reference frames restricted to the selected atoms
+    std::vector<int> m_atoms;         ///< selected atoms, 0-based (empty = all)
     Molecule m_template;   ///< supplies the atom labels for the RMSD driver
     double m_lambda = 1.0;
 };

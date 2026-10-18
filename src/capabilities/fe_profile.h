@@ -41,6 +41,29 @@ struct SplineProfile {
     std::string warning;         ///< non-empty if the fallback was used
 };
 
+/*! \brief Decomposition of the conditional mean force at one support point (Claude Generated 2026).
+ *
+ * With a z wall W the sampled potential is E + W and the estimator (I) is
+ *     dG/ds = <b.grad(E + W)> - kT <div b> = grad_e + metric + wall,
+ *     grad_e = <b.grad E>, metric = -kT <div b>, wall = <b.grad W>.
+ * Inputs are the weighted sums over the samples of one support point: sum_wf = sum w b.grad(E+W),
+ * sum_wwall = sum w b.grad W, sum_wd = sum w div b, sum_w = sum w (w = Z^-1/2 constrained, 1 restrained).
+ */
+struct MeanForceSplit {
+    double grad_e = 0.0; ///< <b.grad E>, E = physical potential only [Eh per unit s]
+    double metric = 0.0; ///< -kT <div b>                             [Eh per unit s]
+    double wall = 0.0;   ///< <b.grad W>, W = z wall                    [Eh per unit s]
+};
+
+inline MeanForceSplit splitMeanForce(double sum_wf, double sum_wwall, double sum_wd, double sum_w, double kT)
+{
+    MeanForceSplit r;
+    r.grad_e = (sum_wf - sum_wwall) / sum_w;
+    r.metric = -kT * sum_wd / sum_w;
+    r.wall = sum_wwall / sum_w;
+    return r;
+}
+
 /*! \brief Trapezoid integral of y over x at the support points (cumulative, starts at 0). */
 inline std::vector<double> integrateTrapezoid(const std::vector<double>& x, const std::vector<double>& y)
 {

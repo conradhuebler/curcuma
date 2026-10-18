@@ -47,7 +47,7 @@ validate_results() {
         fail "stage 2 did not report reading the stage-1 path with 6 images"
     fi
     # AP4 (Claude Generated 2026): per-point rejection fraction and the interior s range
-    if grep -q "^estimator,s,dGds_Eh,G_kcal,samples,rejected_frac$" "$bmt/start.stage2.neb.fe.csv" 2>/dev/null; then
+    if grep -q "^estimator,s,dGds_Eh,G_kcal,samples,rejected_frac,dGds_gradE_Eh,dGds_metric_Eh,dGds_wall_Eh$" "$bmt/start.stage2.neb.fe.csv" 2>/dev/null; then
         pass "fe.csv has the rejected_frac column"
     else
         fail "fe.csv header without rejected_frac"

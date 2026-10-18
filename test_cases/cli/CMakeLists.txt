@@ -254,6 +254,9 @@ set_tests_properties(cli_nebmd_06_extended_cv PROPERTIES TIMEOUT 300 LABELS "neb
 # does not start stage 2
 add_cli_test(nebmd 07_string_dead_abort)
 set_tests_properties(cli_nebmd_07_string_dead_abort PROPERTIES TIMEOUT 60 LABELS "nebmd;gfnff")
+# Claude Generated 2026: fe.csv split of the constrained mean force (gradE + metric + wall = dGds)
+add_cli_test(nebmd 08_fe_split)
+set_tests_properties(cli_nebmd_08_fe_split PROPERTIES TIMEOUT 300 LABELS "nebmd;gfnff")
 
 # =============================================================================
 # CG (Coarse Graining) Tests — disabled: -vtf command not implemented in main.cpp

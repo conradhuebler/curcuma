@@ -2900,8 +2900,12 @@ void SimpleMD::ApplyExtraPotential()
         return;
     Geometry g;
     m_extra_energy = m_extra_potential(m_eigen_geometry, g);
-    if (g.rows() == m_eigen_gradient.rows() && g.cols() == m_eigen_gradient.cols())
+    if (g.rows() == m_eigen_gradient.rows() && g.cols() == m_eigen_gradient.cols()) {
         m_eigen_gradient += g;
+        m_extra_gradient = g; // same step as m_gradient_true, see extraPotentialGradient()
+    } else {
+        m_extra_gradient.resize(0, 3);
+    }
 }
 
 void SimpleMD::applyExternalForces(const Geometry& forces)

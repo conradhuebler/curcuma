@@ -125,6 +125,7 @@ still run and can change the path that was read. Set `-nebmd.idpp false` (and
 | `cv_frames` | 0 | frames | CV frames, decoupled from the windows; 0 = CV on the path frames |
 | `cv_extend` | 0 | frames | straight extension of the CV beyond each end |
 | `cv_extend_length` | 0.0 | fraction of arclength | extension as a length; overrides `cv_extend`; typical 0.05-0.1 |
+| `cv_atoms` | all | - | atoms of the path CV: `all`, `heavy` (Z > 1) or a 1-based list `1-6,9`. RMSD, centroid, Kabsch, s, z, z wall, cv_trace, cv_histogram, CV-frame alignment/re-sampling/extension and lambda use only these atoms (CV gradient of the others exactly 0, all atoms stay dynamic); window s0 equidistant in the selected-atom arclength. Stage 1 (string, Kabsch restraint) is unchanged. >= 3 atoms required: a CV on 2 (collinear) atoms cannot see rotations about their axis, so ethane `heavy` is rejected. A collinear selection with >= 3 atoms (SN2 Cl-C-Cl) passes: the CV-frame Kabsch fits weight the other atoms by 1e-6, which fixes the rotation about the axis (without it the H atoms of the SN2 CV frames jumped by 2.1 A, extension frames +8165 kcal/mol); a nearly but not exactly collinear selection is not tested. With `cv_frames 0` the path frames are used as given (no re-alignment on the selection) |
 | `umbrella` | false | - | sample on the path CV s; switched on by `scheme independent` |
 | `constrain` | false | - | hold s by SHAKE/RATTLE instead of a restraint (pipeline: true) |
 | `z_wall` | 0.0 | A^2 | flat-bottom wall on z in stage-2 windows, W = k/2 (z - z_wall)^2 for z > z_wall; 0 = off |
@@ -152,7 +153,9 @@ is an error, because the band arclength it used is not a function of R.
   arclength, perp_max, below_tol, scale, n_dead, delta_perp_max, f_rms_max, f_se_max, f_sig_max,
   z_max, gain_max, prep_shift; forces in Eh/A, SE `nan` if undefined) - stage 1.
 - `<base>.neb.fe.csv` - mean-force profile; header lines with basin barrier, reaction dG,
-  TST rate, Eyring dG and `<Z^1/2>` detail; rows `estimator,s,dGds_Eh,G_kcal,samples,rejected_frac`.
+  TST rate, Eyring dG and `<Z^1/2>` detail; rows `estimator,s,dGds_Eh,G_kcal,samples,rejected_frac,`
+  `dGds_gradE_Eh,dGds_metric_Eh,dGds_wall_Eh`: the last three split estimator I, dGds_Eh = <b.grad E> - kT<div b> + <b.grad W>
+  (same weights; W = z wall, 0 without one; sum equal up to the 8-decimal rounding of dGds_Eh); `nan` for estimator II.
 - `<base>.neb.ref.csv` - `cv_histogram` result G_ref(s) with 5-block standard error, z-filter
   statistics, basin barrier and TST rate of the free trajectory.
 - `<base>.neb.wham.csv` (written whenever umbrella is on; meaningful only in restraint mode), `<base>.neb.opt.xyz` (CI-NEB), `<base>.neb.init.xyz`,
@@ -351,7 +354,7 @@ stage 2 basin barrier 30.96 / 28.01, Eyring 33.27 / 30.31 (OptTS dE 31.88, RRHO 
   geometry; not proven (n=1; slow perpendicular modes can still be unconverged in the mean force).
 - `div_probes` 1 / 8 / 32 (seed 2, same trajectory, 22 ps): basin reaction dG 2.217 / 2.221 / 2.223, largest change of G 0.010
   kcal/mol. The Hutchinson noise of -kT<div b> is not the source. A bias of the finite-difference `eps`, the Z weighting and the
-  constrained-ensemble correction are not excluded. `fe.csv` does not split dG/ds into b.gradE and -kT<div b>.
+  constrained-ensemble correction are not excluded. (since Oct 18, 2026 `fe.csv` carries the columns `dGds_gradE_Eh`, `dGds_metric_Eh`, `dGds_wall_Eh`; the runs in this paragraph predate them).
 - **Ethane with deliberately asymmetric paths** (stage 2 only on fixed paths, GFN-FF, 12 windows, n=3 seeds per path, reaction dG must be 0):
   V0 (symmetric string) -0.017 +- 0.006; V1 (rotation phi = 120 t^2) -0.017 +- 0.012; V1 reversed +0.033 +- 0.012; V2 (one-sided
   0.15 A distortion of the front carbon, path discontinuous between frames 5 and 6) -0.023 +- 0.015; V3 (substitute construction:
@@ -423,6 +426,58 @@ imaginary mode -430.9 cm-1); binding of the complex 10.05; reaction dG = 0 and f
   is 0.27 and 0.38 (mean 0.23, standard error 0.10): a small positive offset cannot be excluded, n=3.
 - An asymmetric path cannot be built through `path_file`: curcuma resamples the file to equal RMSD arclength (mirror RMSD 0.1345 A before, 0.0004 A after resampling).
 - `-nebmd` now applies `-charge` and `-spin` to both endpoints (before: the calculators were built at charge 0; an anionic test ran as neutral).
+
+**Identity transesterification MeO(-) + HCOOCH3** (GFN2, charge -1, 13 atoms, 300 K, 22 ps windows; AI-generated run, machine-tested only; criteria pre-registered,
+**most not met**). GFN2 PES (n=1 structure each): complex A (O_a H-bonded to a methyl H, binding -19.1) -> TS_add dE +4.83 (imaginary mode -164.6 cm-1, no proton transfer) ->
+tetrahedral intermediate, a MINIMUM (Cs, C_c-O 1.495/1.494 A, 0 imaginary of 33, -26.09 vs A, 30.9 below its exit TS) -> TS_elim (mirror image). So the tetrahedral species is
+an intermediate here, not a transition state; the depth may be overestimated by GFN2 (not checked). Classical harmonic dG(300 K) from A: TS 7.45, intermediate -22.21 (quantum
+RRHO 7.78, -20.58); A has a soft -6 cm-1 mode (floored at 20 cm-1). Plain GFN2 MD of the complex crashed ('Simulation got unstable', native SCF non-convergence in the warm start)
+in 3 of 5 seeds at 0.7-1.9 ps; the 272 stage-2 windows did not crash. The linear path has a 20 kcal/mol interpolation hump (unusable); a relaxed-scan path was used.
+- Node G(s) (kcal/mol, A = 0), 34 windows seeds 1 / 2 / 3, z_wall 0.5: left max 2.81 / 3.13 / 5.20, intermediate -20.52 / -21.05 / -14.43, right max 0.50 / -1.83 / 7.22, end -3.20 / -5.78 / +4.03
+  (end must be 0; seed 3 is an unexplained outlier); 68 windows seeds 1 / 2: left max 4.17 / 4.72, intermediate -20.13 / -19.48, right max 2.69 / 3.52, end -1.96 / -0.98.
+  z_wall 0 (34 windows, seed 1): windows leave the path (mean z ~1 A^2), intermediate only -2.3, end +6.7.
+- Criteria: reaction dG within +-1: not met (34) / 1 of 2 (68); mirror symmetry of G(s) < 1: not met (max 1.7 on the mean profile); left max within 3 of 7.45: not met (borderline at 68: miss 3.0);
+  intermediate within 3 of -22.21: met only at 68 (-19.8, quantum reference -20.58); seed sd < 1: not met at 34 (up to 5.1), 0.4-0.7 at 68 (n=2); 34 vs 68 within 1: not met; no crashes: met.
+  **The method is not validated on this system.**
+- Headline basin barrier / Eyring / k_TST are ambiguous with two equal maxima: s* fell on the left maximum in 4 of 6 runs and on the right in 2, so forward and reverse report different barriers.
+- The wall is strongly active (24 % of samples beyond z_wall on average, up to 97 % in single windows): the PMF is the z-restricted one. At 68 windows dG/ds still jumps by > 0.3 Eh per unit s between
+  neighbours in 5-6 places (peak |dG/ds| 0.85): the force steps are not resolved; WHAM gaps 27 at 34 windows, 0 at 68.
+- Convergence arms (Oct 18, 2026, n=2 seeds each, 68 windows 22 ps z_wall 0.5 as baseline): 136 windows: end -0.18 (sd 0.45), antisymmetry of the seed mean 0.65, sd <= 0.73 (criteria a, b, d met);
+  100 ps windows: intermediate -20.28 (sd 0.05), antisymmetry 0.72, but end/Rmax sd 1.40 / 1.12 and one lost window in two runs (SCF non-convergence in the start-up phase); z_wall 1.0:
+  intermediate -12.77 (sd 1.77, seeds -14.0 / -11.5), end +0.90 (sd 4.32). The left maximum stays 3.2-3.8 below 7.45 in all arms.
+- **Theory review of the ester data** (Oct 18, 2026, from fe.csv / cvtrace of the existing runs; AI-generated analysis, partly derived, not separately measured):
+  (1) The node comparison G(left max) - G(first node) with 7.45 was invalid: the first node is not the basin free energy (G_A - G(first node) = 1.23 +- 0.05, n=9 runs), and the basin barrier
+  is CV-scale dependent. Scale-free quantities, 6 runs (z_wall 0.5, 68/136 windows, 22/100 ps), mean +- sd: dG_TST(A -> TS_L) 4.65 +- 0.61, dG_TST(I -> TS_L) 24.71 +- 0.34, dG_TST(I -> TS_R) 24.00 +- 0.58,
+  basin dG(A -> I) -20.06 +- 0.39, dG(A -> B) -0.76 +- 0.95 (must be 0). Classical harmonic reference recomputed with the soft-mode floor 6 / 10 / 20 / 50 / 100 cm-1: A -> TS 8.15 / 7.86 / 7.45 / 6.79 / 5.93,
+  A -> I -21.51 ... -23.59, I -> TS 29.66 (floor independent, lowest modes 68 / 86 cm-1). The A reference is defined only to ~1.5 kcal/mol; the reliable result is **I -> TS: NEB-MD gives 24.0-24.7 against 29.66, i.e. 5 kcal/mol too low**
+  (n=6, sd 0.3-0.6; the wall is passive there). The earlier statement 'left max within 3 of 7.45, miss 3.0' referred to the wrong quantity. The quantum RRHO reference (7.78, -20.58) is the wrong comparison for classical MD.
+  (2) The PMF depends on z_wall because the wall defines the basins: complex A has no potential-limited z (z spread uniformly 0..0.6 at wall 0.5, rising to 1.2 at wall 1.0; mean 0.9-1.5 without wall), the MeO(-) swinging
+  (30 / 45 / 60 deg = z 0.17 / 0.38 / 0.68) is the main source, not methyl rotation; at the intermediate, windows are bimodal at wall 1.0 (compact z < 0.05 versus 0.6-1.1; a methyl rotated by 120 deg = z 0.72, forbidden at wall 0.5 and
+  free at 1.0): seed disagreement = different numbers of windows in the foreign (permuted-H) state. No z_wall both encloses A and excludes the foreign states.
+  (3) The force step at s = 0.32 / 0.68 coincides with the transition 'window inside the tube' -> 'window at the wall' (windows 40 / 41 / 42 alternate: bistability, start dependence); it does not shrink from 68 to 136 windows
+  (0.55 -> 0.45). It is a kink of the ensemble, not an unresolved slope as in retro-Diels-Alder. The path itself has kinks of 30-48 deg between scan nodes 45-50 where the O_a...H bridge opens. b.grad W enters the mean force but is not separated in fe.csv.
+  (4) Proposed evaluation for profiles with several maxima (not implemented): all inner maxima s*_k, states X_k between neighbouring maxima, G_k = -kT ln int_{X_k} exp(-G/kT) ds, rates
+  k_{k->k+1} = 1/2 sqrt(2kT/pi) <Z^1/2>(s*_k) exp(-G(s*_k)/kT) / int_{X_k} exp(-G/kT) ds, effective exchange k_eff = k_{A->I} k_{I->B} / (k_{I->A} + k_{I->B}); fe.csv carries b.grad E, -kT<div b>, b.grad W as separate columns since Oct 18, 2026.
+  (5) Working hypothesis (not tested): the RMSD path CV works when, in every window, s = const within the thermally accessible z contains only one path-near structure family (unimodal z, passive wall < 5 % beyond, no alternating windows). Ethane, SN2 fulfil it; retro-DA fails (unbound product), helicene
+  (slow perpendicular modes, path asymmetry) and the ester (A without z limit, intermediate with a foreign state at z 0.72) fail. Discriminating experiments: window trajectories (-nebmd.window_trajectory true, 68 windows, 22 ps, ~80 min, 7 cores);
+  string relaxed inside the tube (100 ps, z_wall 0.5) followed by stage 2; an independent 2-D PMF in d(C_c-O_a), d(C_c-O_b) by umbrella sampling in SimpleMD (prediction I -> TS 29.7 +- 1).
+- **Window trajectories of the ester** (Oct 18, 2026, 68 windows, 22 ps, seed 1, `-nebmd.window_trajectory true -simplemd.dump_frequency 22`; one run per wall value, no error bars; the headline G(s) is
+  reproduced to rounding): the windows are **bistable**. Windows 20 and 21 (s 0.313 / 0.327) sit in different structural families: window 20 has d(C_c-O_a) 3.55 A, open O_a...H bridge (2.4-2.6 A), MeO swing 49 deg;
+  window 21 is bonded (d(C_c-O_a) 1.65-1.87 A, swing 123-126 deg); the fraction of frames with d(C_c-O_a) < 2.5 A is exactly 0.00 and 1.00 in both halves of each window, in both runs: no interconversion in 22 ps,
+  while the path nodes are smooth (2.72 -> 2.61 A). The mean-force step (-0.046 -> -0.552 Eh per unit s) is in the gradE component (~90-100 %), not in the metric (< 0.02) or wall term (< 0.05).
+  Right side: d(C_c-O_b) jumps 1.87 -> 3.42 A (wall 0.5) and 1.64 -> 3.68 A (wall 1.0) between windows 46 and 47; at wall 1.0 window 49 flips back to the bonded family. So the surface s = const contains
+  several structural families (bonded / separated); the PMF G(s) is not an equilibrium PMF there. Intermediate windows 31-37 (d(C_c-O) 1.49-1.52 A, swing 113-114 deg, sd 3-4 deg) contain a second state with a methyl group
+  rotated away from the node (mean |rotation| 76-99 deg at wall 0.5, 108-118 deg at wall 1.0; the 60 deg threshold also counts large librations), z about 0.45 (wall 0.5) / 0.8 (wall 1.0) against 0.03-0.11 in the node state;
+  both states occur within one window (e.g. window 31, wall 0.5: foreign fraction 0.67 in the first half, 0.15 in the second). The MeO-swing alternative is refuted for these windows; z correlates with a methyl dihedral
+  (r 0.4-0.65) and not with Epot (|r| < 0.2). The runs took ~11 min each at 12 threads (not 80). Not checked: other seeds, transition rates, windows outside 17-23, 31-37, 44-50.
+- **Heavy-atom CV for the ester** (`-nebmd.cv_atoms heavy`, 6 of 13 atoms; Oct 18, 2026; 68 windows, 22 ps, window trajectories; primary z_wall 0.25 pre-registered, n=2 seeds, other walls n=1):
+  **0 of 8 pre-registered criteria met.** The exact 0.00 / 1.00 split of the bonded fraction is gone (window 22: 0.54 / 0.75; d(C_c-O_a) falls through 3.06, 2.80, 2.50, 2.02, 1.86 A over windows 20-24), but family jumps
+  remain at windows 21/22 and 45/46 (bonded fraction 0.02 -> 0.54 and 0.95 -> 0.01), the mean force still steps by 0.2-0.5 Eh per unit s between neighbours (largest 0.41 / 0.35), and the wall is active everywhere
+  (up to 90-93 % of samples beyond z_wall in single windows; without a wall z reaches 0.59 on average in the worst window). I -> TS (reference 29.66): 25.85 / 26.27 (seeds 1 / 2, z_wall 0.25);
+  A -> I (reference -22.21): -18.67 / -20.12; A -> B (must be 0): +2.42 / +1.22; antisymmetry 2.63 / 1.26. Wall dependence (seed 1): I -> TS 21.3 / 29.9 / 25.9 / 22.2 and A -> I -15.6 / -23.0 / -18.7 / -18.0 for z_wall 0 / 0.1 / 0.25 / 0.5,
+  non-monotonic; z_wall 0.1 comes closest (I -> TS 29.93, A -> I -23.03, A -> B +0.74) but is one run and was not the pre-registered choice, so it is not a result. The methyl foreign state was not re-examined.
+  Open: whether the steps are a spacing issue (windows are equidistant in heavy-atom arclength) or a real free-energy barrier in a coordinate other than s.
+- Not checked: more than 136 windows, other z_wall, the seed-3 outlier of the 34-window runs, free-ion reference, window trajectories.
 
 ## Known open issues
 

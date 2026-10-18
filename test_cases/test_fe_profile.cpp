@@ -19,6 +19,8 @@
  *     (+- 1e-3); c = 1.5 -> fwd - rev = reaction (+- 1e-6); n >= 10 -> within 0.05 kcal/mol of the
  *     same basin integrals on the exact G (2e6+1 points). basinCoverage: [0,1] covered, flanks
  *     [0.3,0.7] not covered; maximum at the edge -> invalid.
+ * (6) splitMeanForce: gradE + metric + wall = total dG/ds to 1e-12 Eh (both estimator-I forms);
+ *     passive wall -> wall part exactly 0.
  * Optional arguments: stage-2 *.neb.fe.csv files; the estimator-I rows are integrated and
  * both barrier definitions printed (offline cross-check, not part of the ctest run).
  */
@@ -201,6 +203,32 @@ int main(int argc, char** argv)
         // edge maximum -> invalid
         const auto e = curcuma::fe_profile::basinBarrier({ 0.0, 0.5, 1.0 }, { 0.0, 1.0, 2.0 }, 0.6);
         check(!e.valid && !e.warning.empty(), "maximum at the edge -> invalid with warning");
+    }
+
+    // (6) Claude Generated 2026: splitMeanForce (fe.csv columns dGds_gradE/metric/wall). The three
+    //     parts must add up to the total exactly as NebMD forms it, in both estimator-I paths:
+    //     constrained (wf - kT wd) / w and binned wf/w - kT wd/w, to 1e-12 Eh, for a passive wall
+    //     (sum_wwall = 0 -> wall column 0, gradE = wf/w) and an active wall of either sign.
+    {
+        std::cout << "(6) mean-force split gradE + metric + wall = total" << std::endl;
+        const double kT = 9.500366e-4; // 300 K in Eh
+        const double cases[][4] = { // sum_wf, sum_wwall, sum_wd, sum_w (weighted sums of one support point)
+            { 0.0, 0.0, 0.0, 1.0 }, { 12.345678901, 0.0, -3.21, 517.25 }, { -4.2e2, 3.7e1, 1.9e3, 2.4e4 },
+            { 7.77e-3, -1.5e-3, 4.4e2, 3.3e-1 }, { 1.0e5, 9.99e4, -2.0e5, 7.0e3 }
+        };
+        double worst = 0.0;
+        bool wall_zero_ok = true;
+        for (const auto& c : cases) {
+            const auto sp = curcuma::fe_profile::splitMeanForce(c[0], c[1], c[2], c[3], kT);
+            const double sum = sp.grad_e + sp.metric + sp.wall;
+            worst = std::max(worst, std::abs(sum - (c[0] - kT * c[2]) / c[3]));
+            worst = std::max(worst, std::abs(sum - (c[0] / c[3] - kT * c[2] / c[3])));
+            if (c[1] == 0.0 && (sp.wall != 0.0 || sp.grad_e != c[0] / c[3]))
+                wall_zero_ok = false;
+        }
+        std::printf("    max |gradE + metric + wall - total| = %.3e Eh\n", worst);
+        check(worst <= 1e-12, "gradE + metric + wall = dG/ds (both estimator-I forms) to 1e-12 Eh");
+        check(wall_zero_ok, "passive wall: wall column exactly 0, gradE = <b.grad(E+W)>");
     }
 
     for (int i = 1; i < argc; ++i)

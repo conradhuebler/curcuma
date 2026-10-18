@@ -21,38 +21,152 @@
 
 #include "src/capabilities/path_cv.h"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
+#include <stdexcept>
+#include <string>
 
 #include "src/core/curcuma_logger.h"
 #include "src/core/parameter_registry.h"
 
-PathCV::PathCV(const std::vector<Geometry>& path, const Molecule& templ, double lambda)
+PathCV::PathCV(const std::vector<Geometry>& path, const Molecule& templ, double lambda,
+               const std::vector<int>& atoms)
     : m_path(path)
+    , m_atoms(atoms)
     , m_template(templ)
 {
     if (m_path.size() < 2)
         CurcumaLogger::error("PathCV: need at least two reference frames.");
-    m_lambda = (lambda > 0.0) ? lambda : computeLambdaFromPath(m_path);
+    // Claude Generated 2026: the reference frames restricted to the selected atoms, built once.
+    m_path_sel.reserve(m_path.size());
+    for (const auto& g : m_path)
+        m_path_sel.push_back(selectRows(g));
+    m_lambda = (lambda > 0.0) ? lambda : computeLambdaFromPath(m_path, m_atoms);
 }
 
-double PathCV::computeLambdaFromPath(const std::vector<Geometry>& path)
+Geometry PathCV::selectRows(const Geometry& g) const
+{
+    // Claude Generated 2026
+    if (m_atoms.empty())
+        return g;
+    Geometry out(static_cast<int>(m_atoms.size()), 3);
+    for (size_t k = 0; k < m_atoms.size(); ++k)
+        out.row(static_cast<int>(k)) = g.row(m_atoms[k]);
+    return out;
+}
+
+double PathCV::computeLambdaFromPath(const std::vector<Geometry>& path, const std::vector<int>& atoms)
 {
     // lambda ~ 1/<d^2> with d the RMSD spacing of neighbouring frames, so that the
     // Gaussians of adjacent frames overlap appreciably. Using the plain (non-best-fit)
-    // spacing here is sufficient for the scale estimate.
+    // spacing here is sufficient for the scale estimate. With an atom selection the mean
+    // square runs over the selected atoms only (the metric of the CV itself).
     if (path.size() < 2)
         return 1.0;
     const int nat = static_cast<int>(path[0].rows());
     double sum = 0.0;
     int cnt = 0;
     for (size_t i = 1; i < path.size(); ++i) {
-        const double d2 = (path[i] - path[i - 1]).squaredNorm() / std::max(nat, 1);
+        double d2 = 0.0;
+        if (atoms.empty()) {
+            d2 = (path[i] - path[i - 1]).squaredNorm() / std::max(nat, 1);
+        } else {
+            for (int a : atoms)
+                d2 += (path[i].row(a) - path[i - 1].row(a)).squaredNorm();
+            d2 /= static_cast<double>(atoms.size());
+        }
         sum += d2;
         ++cnt;
     }
     const double mean_d2 = (cnt > 0) ? sum / cnt : 1.0;
     return (mean_d2 > 1e-12) ? 1.0 / mean_d2 : 1.0;
+}
+
+bool PathCV::parseAtomSelection(const std::string& spec, const Molecule& mol, std::vector<int>& atoms,
+                                std::string& error)
+{
+    // Claude Generated 2026: "all" | "heavy" | 1-based list with ranges ("1-6,9").
+    atoms.clear();
+    error.clear();
+    const int nat = static_cast<int>(mol.AtomCount());
+    auto trim = [](std::string t) {
+        const auto b = t.find_first_not_of(" \t");
+        const auto e = t.find_last_not_of(" \t");
+        return b == std::string::npos ? std::string() : t.substr(b, e - b + 1);
+    };
+    const std::string s = trim(spec);
+    if (s.empty() || s == "all")
+        return true;
+    if (s == "heavy") {
+        for (int a = 0; a < nat; ++a)
+            if (mol.Atom(a).first > 1)
+                atoms.push_back(a);
+    } else {
+        std::vector<char> used(static_cast<size_t>(std::max(nat, 0)), 0);
+        size_t pos = 0;
+        while (pos <= s.size()) {
+            const size_t comma = s.find(',', pos);
+            const std::string tok = trim(s.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos));
+            pos = (comma == std::string::npos) ? s.size() + 1 : comma + 1;
+            int lo = 0, hi = 0;
+            const size_t dash = tok.find('-');
+            try {
+                size_t used_chars = 0;
+                if (dash == std::string::npos) {
+                    lo = hi = std::stoi(tok, &used_chars);
+                    if (used_chars != tok.size())
+                        throw std::invalid_argument(tok);
+                } else {
+                    const std::string a = trim(tok.substr(0, dash)), b = trim(tok.substr(dash + 1));
+                    lo = std::stoi(a, &used_chars);
+                    if (used_chars != a.size())
+                        throw std::invalid_argument(tok);
+                    hi = std::stoi(b, &used_chars);
+                    if (used_chars != b.size())
+                        throw std::invalid_argument(tok);
+                }
+            } catch (const std::exception&) {
+                error = "cv_atoms: cannot read '" + tok + "' (expected all, heavy or a 1-based list like 1-6,9)";
+                return false;
+            }
+            if (lo > hi) {
+                error = "cv_atoms: range '" + tok + "' is descending";
+                return false;
+            }
+            if (lo < 1 || hi > nat) {
+                error = "cv_atoms: index in '" + tok + "' outside 1.." + std::to_string(nat);
+                return false;
+            }
+            for (int k = lo; k <= hi; ++k) {
+                if (used[static_cast<size_t>(k - 1)]) {
+                    error = "cv_atoms: atom " + std::to_string(k) + " is selected twice";
+                    return false;
+                }
+                used[static_cast<size_t>(k - 1)] = 1;
+                atoms.push_back(k - 1);
+            }
+        }
+        std::sort(atoms.begin(), atoms.end());
+    }
+    if (atoms.size() < 3) {
+        error = "cv_atoms '" + s + "' selects " + std::to_string(atoms.size())
+            + " atom(s); the path CV needs at least 3 (fewer cannot fix the rotation about their axis)";
+        atoms.clear();
+        return false;
+    }
+    return true;
+}
+
+std::vector<double> PathCV::selectionWeights(const std::vector<int>& atoms, int natoms, double other)
+{
+    // Claude Generated 2026
+    if (atoms.empty())
+        return {};
+    std::vector<double> w(static_cast<size_t>(natoms), other);
+    for (int a : atoms)
+        w[static_cast<size_t>(a)] = 1.0;
+    return w;
 }
 
 double PathCV::rmsdTo(int i, const Geometry& R, Geometry* grad) const
@@ -72,11 +186,19 @@ double PathCV::rmsdTo(int i, const Geometry& R, Geometry* grad) const
     //
     // The returned gradient keeps the sign convention of the old GradientTimesRMSD():
     // it is MINUS d*dd/dR, and the caller folds that sign into its chain rule.
-    const Geometry& Q = m_path[i];
-    const int N = static_cast<int>(R.rows());
-    const Eigen::RowVector3d cp = R.colwise().mean();
+    //
+    // Atom selection A (Claude Generated 2026): p_a, q_a, the centroids and N run over A only
+    // (N = |A|); the gradient rows of atoms outside A are exactly zero. Empty A = all atoms.
+    const bool all = m_atoms.empty();
+    Geometry Rsel;
+    if (!all)
+        Rsel = selectRows(R);
+    const Geometry& Rs = all ? R : Rsel;
+    const Geometry& Q = all ? m_path[i] : m_path_sel[i];
+    const int N = static_cast<int>(Rs.rows());
+    const Eigen::RowVector3d cp = Rs.colwise().mean();
     const Eigen::RowVector3d cq = Q.colwise().mean();
-    const Eigen::MatrixXd P = R.rowwise() - cp;
+    const Eigen::MatrixXd P = Rs.rowwise() - cp;
     const Eigen::MatrixXd Qc = Q.rowwise() - cq;
     const Eigen::Matrix3d H = P.transpose() * Qc;
     Eigen::JacobiSVD<Eigen::Matrix3d> svd(H, Eigen::ComputeFullU | Eigen::ComputeFullV);
@@ -87,8 +209,16 @@ double PathCV::rmsdTo(int i, const Geometry& R, Geometry* grad) const
     // rows: aligned_a = Rot * p_a  ->  P * Rot^T
     const Eigen::MatrixXd res = P * Rot.transpose() - Qc;
     const double d = std::sqrt(res.squaredNorm() / std::max(N, 1));
-    if (grad)
-        *grad = -(res * Rot) / static_cast<double>(std::max(N, 1)); // rows: Rot^T res_a
+    if (grad) {
+        if (all) {
+            *grad = -(res * Rot) / static_cast<double>(std::max(N, 1)); // rows: Rot^T res_a
+        } else {
+            const Geometry gsel = -(res * Rot) / static_cast<double>(std::max(N, 1));
+            *grad = Geometry::Zero(R.rows(), 3);
+            for (size_t k = 0; k < m_atoms.size(); ++k)
+                grad->row(m_atoms[k]) = gsel.row(static_cast<int>(k));
+        }
+    }
     return d;
 }
 
