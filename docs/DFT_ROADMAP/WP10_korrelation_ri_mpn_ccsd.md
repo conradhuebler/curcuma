@@ -6,7 +6,7 @@
   analytische Gradient fuer RI-J/RI-JK-HF (Abschnitt "WP10 -- Gradient") und der analytische Gradient des kanonischen
   MP2/SCS/SOS (CPU, 2e-Ableitungsteil auch CUDA; Abschnitt "WP11 -- MP2-Gradient"); RI-MP2 mit def2-SVP/C und der
   RI-MP2-Gradient sind Plan; WP13 (kanonisches RCCSD, CPU) ist implementiert (Abschnitt WP13); fuer WP15 (und die Metrikfrage aus WP14) liegt eine Python-Machbarkeitsmessung
-  vor (Abschnitt WP15), kein Engine-Code.
+  vor, und das lokale PNO-RI-MP2 ist als Methode `lmp2` implementiert (Abschnitt WP15, nur Energie, CPU).
 - **Abhaengigkeit:** WP3 (RHF, ERI-Engine, `QMEngine`), fuer die GPU-Teile die Stufen Q-G1/Q-G2 aus
   [../QM_GPU_ROADMAP.md](../QM_GPU_ROADMAP.md).
 - **Referenzen auf dieser Maschine:** PySCF (venv `~/.venvs/qmref`), ORCA 6.1 (`~/Downloads/orca_6_1_0_...`).
@@ -644,7 +644,7 @@ conv_tol 1e-12; ORCA 6.1 `! RHF CCSD def2-SVP ExtremeSCF [No]FrozenCore`, `%mdci
 
 ## WP15 -- Lokales MP2 mit PNO-Truncation in ueberlappenden Domaenen (Idee des Betreibers, Okt 2026)
 
-**Stand 17.10.2026: Python-Prototyp gemessen, kein C++ in der Engine** (🤖 AI-generated, ⚙️ machine-tested;
+**Stand 18.10.2026: Python-Prototyp gemessen (17.10.), C++-Methode `lmp2` in der Engine (Abschnitt "Engine-Implementierung" unten)** (🤖 AI-generated, ⚙️ machine-tested;
 [../LOCAL_MP2_FEASIBILITY_2026-10.md](../LOCAL_MP2_FEASIBILITY_2026-10.md), Skripte `scripts/local_mp2/`). Alkane bis
 C20H42, (H2O)4-16, Benzol bis Pentacen, def2-SVP, RI mit JKFIT, Referenz volles RI-MP2:
 - Paarenergien fallen mit R^-6 (Acene R^-5.7), Zahl signifikanter Paare und PNO-Gesamtzahl linear; BP(0.02)-Domaenen
@@ -652,6 +652,109 @@ C20H42, (H2O)4-16, Benzol bis Pentacen, def2-SVP, RI mit JKFIT, Referenz volles 
   NormalPNO 2-3e-5 Eh/Atom.
 - Schwarz-Vorkonditionierer (Stufe 5): halbiert die Iterationen (7-9 -> 3-5), kostet aber das 3-30fache; kein Gewinn.
 - Empfehlung des Dokuments: C++-LMP2 erst, wenn MP2 fuer > 100 Atome Ziel ist und die SCF dort skaliert.
+
+### Engine-Implementierung: Methode `lmp2` (18.10.2026)
+
+**Stand: lokales PNO-RI-MP2 in C++, closed shell, nur Energie. 🤖 AI-generated, ⚙️ machine-tested; menschlicher
+Produktionstest steht aus.** Code: `qm_lmp2.{h,cpp}` (Verfahren, Gleichungen, Literatur im Kopf), `lmp2_method.{h,cpp}`,
+`QMEngine::correlationRI` (aus `qm_rimp2.cpp` herausgezogen, RI-MP2 und LMP2 teilen den RI-Tensor). Tests
+`test_cases/qm_lmp2/` (`ctest -L qm_lmp2`), Referenzskript `scripts/lmp2_reference.py`.
+
+- **Aufruf:** `-method lmp2` (Alias `local-ri-mp2`), beliebige SCF (exakt oder `-qm.ri j|jk`), `-qm.frozen_core`,
+  Hilfsbasis `-qm.ri_mp2_aux` (Standard def2-universal-JKFIT, wie RI-MP2). Schalter (Registry, Modul `qm`):
+  `lmp2_localizer pm|boys`, `lmp2_bp_threshold` 0.02, `lmp2_domain_radius` 7 Bohr, `lmp2_pno_cut` 1e-8,
+  `lmp2_pno_correction` true, `lmp2_pair_cut` 15 Bohr, `lmp2_distant_pairs dipole|drop`, `lmp2_fock_cut` 1e-5,
+  `lmp2_threshold` 1e-9, `lmp2_residual_threshold` 1e-7, `lmp2_max_iter`, `lmp2_diis`, `lmp2_max_memory_mb`,
+  `lmp2_check` (rechnet zusaetzlich kanonisches RI-MP2 mit derselben Hilfsbasis und druckt die Differenz).
+- **Verfahren wie der Prototyp** (`lmp2_common.py`): PM (Mulliken-Populationen, Jacobi-Sweeps ab Cholesky-Orbitalen,
+  disjunkte Paare je Runde, daher threadzahlunabhaengig) oder Boys; BP(0.02) + Radius; PAO-Paarraeume (Eigenwertschnitt
+  1e-6); `B_{i,r}^P` (lokales i, PAO r) per Halbtransformation des RI-Tensors (`fitRows` wie RI-MP2), nur fuer die PAOs
+  der erweiterten Domaene von i; K_ij in der PAO-Basis, PNOs aus semikanonischer Paardichte; Residual mit
+  PNO-Ueberlappungen, diagonaler Vorkonditionierer + DIIS; kein o^2 v^2-Tensor.
+- **Korrekturen:** (a) wie der Prototyp die semikanonische PNO-Abschneidekorrektur je Paar; (b) **neu gegenueber dem
+  Prototyp** (dort wurden alle Paare gehalten): Paare mit Schwerpunktabstand > `lmp2_pair_cut` bekommen die
+  Dipol-Dipol-Abschaetzung (Pinski 2015) ueber die PAO-Raeume von [i] und [j], Austausch vernachlaessigt.
+- **Abweichung von der Vorgabe:** PM mit Mulliken- statt Meta-Loewdin-Populationen (PySCF-Standard im Prototyp);
+  Folge: andere LMOs, Wasserfehler 1.5x hoeher als im Prototyp (unten).
+- **DIIS-Falle (gefunden und behoben):** die unskalierte DIIS-Matrix (Fehlerprodukte ~1e-20 neben dem Rand -1) liess
+  die Iteration bei max|R| ~1e-9 stehen; Fehlerblock jetzt auf seine groesste Diagonale normiert (14-16 statt > 50 Iterationen).
+
+**Exaktheit (alle Paare, vollstaendige PAO-Raeume, T_CutPNO 0, alle F_ik):** LMP2 = curcumas RI-MP2 (gleiche Hilfsbasis)
+auf <= 2e-12 Eh: Butan fc/voll, Wasserdimer (Boys), Benzol fc (PM und Boys), Wasserdimer mit RI-JK-SCF und mit JFIT,
+Essigsaeuredimer fc mit 1 Thread. Damit sind Lokalisierung, PAO-Raeume, B-Faktoren und Residual geprueft.
+
+**Standardschwellen gegen kanonisches RI-MP2** (curcuma, gleiche Hilfsbasis, RI-JK-SCF, def2-SVP, fc; Fehler =
+E(LMP2) - E(RI-MP2) in Eh/Atom; "alle Paare" = `-qm.lmp2_pair_cut 1e6 -qm.lmp2_fock_cut 0`, das Setting des Prototyps
+Q3 "BP(0.02)+r7, 1e-8"; je ein Lauf):
+
+| System | Atome | Standard | alle Paare | Prototyp | PNOs/Paar | Paare gehalten |
+|---|---|---|---|---|---|---|
+| C4H10 | 14 | 5.96e-6 | 5.96e-6 | - | 42.5 | 91/91 |
+| C8H18 | 26 | 1.21e-5 | 1.18e-5 | 1.2e-5 | 35.2 | 306/325 |
+| C12H26 | 38 | 1.65e-5 | 1.59e-5 | 1.6e-5 | 33.0 | 538/703 |
+| C16H34 | 50 | 1.90e-5 | 1.81e-5 | 1.8e-5 | 32.1 | 770/1225 |
+| C20H42 | 62 | 2.05e-5 | 1.95e-5 | 1.9e-5 | 31.7 | 1002/1891 |
+| C30H62 | 92 | 2.26e-5 | 2.15e-5 | - | 31.1 | 1582/4186 |
+| C40H82 | 122 | 2.36e-5 | 2.24e-5 | - | 30.8 | 2162/7381 |
+| Benzol | 12 | 1.57e-5 | 1.57e-5 | - | 46.3 | 120/120 |
+| Naphthalin | 18 | 2.11e-5 | 2.11e-5 | 2.1e-5 | 46.9 | 300/300 |
+| Anthracen | 24 | 2.59e-5 | 2.58e-5 | 2.4e-5 | 43.9 | 553/561 |
+| Tetracen | 30 | 5.26e-5 | 2.90e-5 | 2.9e-5 | 43.1 | 812/903 |
+| Pentacen | 36 | 8.60e-5 | 3.15e-5 | 3.1e-5 | 42.9 | 1069/1326 |
+| (H2O)4 | 12 | 4.51e-6 | 4.51e-6 | - | 15.4 | 136/136 |
+| (H2O)8 | 24 | 3.68e-6 | 3.68e-6 | 2.5e-6 | 11.1 | 527/528 |
+| (H2O)12 | 36 | 4.83e-6 | 4.78e-6 | 2.9e-6 | 9.8 | 1035/1176 |
+| (H2O)16 | 48 | 5.03e-6 | 4.97e-6 | 3.1e-6 | 8.9 | 1556/2080 |
+| (H2O)20 | 60 | 5.78e-6 | 5.69e-6 | - | 8.4 | 2028/3240 |
+
+- Alkane und Acene treffen den Prototyp (<= 8 %), Wasser liegt 1.5x darueber (Mulliken-PM, s.o.). Fehler/Atom der
+  Alkane waechst noch langsam (C40 2.4e-5), wie im Prototyp.
+- `lmp2_fock_cut` 1e-5 aendert nichts (<= 4e-10 Eh bei C20H42, (H2O)20, Pentacen gegen 0).
+- Paarschnitt 15 Bohr: bei Alkanen und Wasser +0.1e-5 bzw. +0.1e-6 Eh/Atom; die Dipolabschaetzung gewinnt 61-63 % der
+  fehlenden Paarenergie zurueck (C20, C40), bei Wasser mehr als die Differenz (Fehler 5.8e-6 statt 6.5e-6 mit `drop`).
+  **Acene: 15 Bohr reicht nicht** (Pentacen 8.6e-5, Dipol holt 6 % der fehlenden 2e-3 Eh; die pi-Paare bei 15 Bohr sind
+  nicht dipolartig); `-qm.lmp2_pair_cut 20` gibt 3.9e-5, `25` = alle Paare (3.15e-5). Fuer pi-Systeme 25 Bohr setzen.
+
+**Zeit** (24 Threads, Korrelationsteil ohne SCF; RI-MP2 = `lmp2_check` im selben Prozess, gleicher RI-Tensor; je ein
+Lauf, Maschine sonst ruhig):
+
+| System | Basis | SCF (RI-JK) s | LMP2 s | RI-MP2 s | LMP2-Speicher MB |
+|---|---|---|---|---|---|
+| C8H18 | 202 | 0.40 | 0.25 | 0.05 | 193 |
+| C12H26 | 298 | 1.5 | 0.66 | 0.36 | 399 |
+| C16H34 | 394 | 4.1 | 1.24 | 2.3 | 640 |
+| C20H42 | 490 | 9.3 | 2.07 | 13.2 | 917 |
+| C30H62 | 730 | 42 | 5.8 | 153 | 1765 |
+| C40H82 | 970 | 150 | 12.4 | 696 | 2834 |
+| C60H122 | 1450 | 701 | 36.4 | nicht gerechnet | 5638 |
+| C80H162 | 1930 | 2715 | 92.9 | nicht gerechnet | 9329 |
+| Pentacen | 378 | 5.0 | 3.9 | 2.3 | 1190 |
+| (H2O)12 | 288 | 1.6 | 0.58 | 0.51 | 219 |
+| (H2O)20 | 480 | 11.4 | 2.0 | 18.0 | 674 |
+
+- **Break-even** gegen curcumas RI-MP2: Alkane zwischen C12 und C16 (300-400 Basisfunktionen), Wasser bei (H2O)12,
+  Acene bis Pentacen nicht erreicht. Die SCF dominiert jede Rechnung (C60: 701 s SCF, 36 s LMP2; C80: 2715 s / 93 s).
+- Groesstes gerechnetes System: C80H162 (242 Atome, 1930 Funktionen, 8916 Hilfsfunktionen; 4482 von 29161 Paaren
+  iteriert, 30.5 PNOs/Paar, 11 Iterationen; RI-JK-Tensor ~133 GB). Kanonisches RI-MP2 wurde ab C60 nicht gerechnet
+  (C40 schon 696 s, Skalierung N^5). E_corr(C60) bzw. E_corr(C80) weichen von der linearen Extrapolation aus C20-C40
+  bzw. C30-C60 um 9e-9 bzw. 3e-9 Eh ab (Groessenkonsistenz, kein Referenzwert); der Fehler gegen RI-MP2 ist dort unbekannt.
+- **Grenzen:** die SCF bzw. der gespeicherte RI-JK-Tensor (naux x n(n+1)/2: C60 56 GB, C100 ~260 GB > RAM) begrenzt,
+  nicht LMP2. Im LMP2 waechst der Paarschritt (K_ij in der PAO-Basis ueber alle naux Hilfsfunktionen) wie N^2 und die
+  B-Halbtransformation wie N^4 (Paarschritt C40/C60/C80: 6.6/15/28 s, B: 4.0/17/52 s); lineare Skalierung braeuchte lokale Fit-Domaenen (WP14-Ergebnis:
+  robust lokal, R >= 8-10 Bohr) und eine integraldirekte 3-Index-Erzeugung.
+
+**ORCA 6.1 DLPNO-MP2** (NormalPNO, `RIJK def2/JK`, `%basis AuxC "def2/JK"`, fc; nur Plausibilitaet, andere Domaenen und
+Lokalisierung): kanonisches RI-MP2 ORCA vs curcuma 2e-9 (C12H26), 8.5e-8 ((H2O)16), 2.5e-7 Eh (Anthracen; SCF-Schwelle
+1e-8 in curcuma); Fehler/Atom curcuma LMP2 / ORCA DLPNO: C12H26 1.65e-5 / 2.55e-5, (H2O)16 5.0e-6 / 1.39e-5, Anthracen
+2.59e-5 / 3.27e-5; PNOs/Paar 33.0 / 26.3, 8.9 / 9.3, 43.9 / 49.3.
+
+- **Getestet:** H, C, O; def2-SVP; Alkane C4-C80 (Fehler nur bis C40), Acene 1-5 Ringe, (H2O)4-20, Wasser-/Essigsaeuredimer; fc und voll;
+  exakte und RI-JK-SCF; JKFIT und JFIT; 1 und 24 Threads (Exaktheitstest).
+- **Nicht getestet:** andere Elemente als H, C, O; andere Basen (TZVP, diffuse:
+  groessere Domaenen); geladene Systeme; kleine HOMO-LUMO-Luecken jenseits Pentacen; 3D-kompakte Systeme > 60 Atome;
+  Thread-Reproduzierbarkeit bei Standardschwellen nur Butan (ctest); Laufzeiten auf anderer Hardware.
+- **Nicht implementiert gegenueber DLPNO-MP2 (ORCA):** PNO-Domaenen (TCutDO), lokale Fit-Domaenen, integraldirekte
+  3-Index-Integrale, Vorselektion ueber semikanonische Paarenergien (nur Abstand), offene Schalen, Gradient, SCS, Device-Pfad.
 
 **Abgrenzung:** kein Nachbau von DLPNO-CCSD(T) (zu gross, viele Naeherungsschichten), sondern ein lokales MP2 nach
 dem Muster Pulay-Saebo-LMP2 + PNO. Die ueberlappenden Domaenen sind genau die Schwarz-artigen Teilgebiete aus WP14,

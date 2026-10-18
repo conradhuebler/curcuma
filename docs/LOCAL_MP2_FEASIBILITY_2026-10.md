@@ -1,5 +1,8 @@
 # Local MP2 with PNOs (WP15) and Schwarz domains (WP14): Python feasibility study, Oct 2026
 
+Follow-up (Oct 18, 2026): the engine now has this design as method `lmp2` (C++), measured against curcuma's RI-MP2 in
+[DFT_ROADMAP/WP10_korrelation_ri_mpn_ccsd.md](DFT_ROADMAP/WP10_korrelation_ri_mpn_ccsd.md), section WP15 "Engine-Implementierung".
+
 Status: 🤖 AI-generated, ⚙️ machine-tested (prototype in Python/PySCF, nothing in the curcuma engine). Every number
 below is one run (n=1) on one machine (24 threads, 256 GB) unless stated otherwise. Human review pending.
 Plan this answers: [DFT_ROADMAP/WP10_korrelation_ri_mpn_ccsd.md](DFT_ROADMAP/WP10_korrelation_ri_mpn_ccsd.md),

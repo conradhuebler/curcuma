@@ -657,6 +657,7 @@ add_subdirectory(qm_ri)
 # Native canonical MP2 (WP11) vs PySCF, CPU and -gpu cuda. Oct 2026.
 add_subdirectory(qm_mp2)
 add_subdirectory(qm_ccsd)  # Claude Generated (Oct 2026, WP13): canonical RCCSD vs PySCF
+add_subdirectory(qm_lmp2)  # Claude Generated (Oct 2026, WP15): local PNO-RI-MP2 (exactness + regression)
 
 # Claude Generated (Sep 2026): interface-level gradient + frequency contract.
 # Guards two things nothing else covered:

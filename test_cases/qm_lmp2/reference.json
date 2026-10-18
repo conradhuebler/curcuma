@@ -1,0 +1,52 @@
+{
+ "_about": "Regression reference of the native local PNO-RI-MP2 (method lmp2), produced by scripts/lmp2_reference.py with curcuma itself; e_corr_rimp2 = canonical RI-MP2 of the same run (same aux basis). Not an external validation.",
+ "_settings": "def2-SVP spherical, -qm.scf_threshold 1e-10, aux def2-universal-JKFIT, default -qm.lmp2_* unless listed in flags",
+ "_units": "Hartree",
+ "tolerance": 1e-07,
+ "cases": {
+  "butane_fc": {
+   "xyz": "test_cases/structures/medium/butane.anti.xyz",
+   "flags": [
+    "-qm.frozen_core",
+    "true"
+   ],
+   "natoms": 14,
+   "e_corr_lmp2": -0.588758215104,
+   "e_corr_rimp2": -0.588831811601
+  },
+  "butane_boys_fc": {
+   "xyz": "test_cases/structures/medium/butane.anti.xyz",
+   "flags": [
+    "-qm.frozen_core",
+    "true",
+    "-qm.lmp2_localizer",
+    "boys"
+   ],
+   "natoms": 14,
+   "e_corr_lmp2": -0.588754941507,
+   "e_corr_rimp2": -0.588831811601
+  },
+  "benzene_fc": {
+   "xyz": "test_cases/structures/small/benzene.ideal-d6h.xyz",
+   "flags": [
+    "-qm.frozen_core",
+    "true"
+   ],
+   "natoms": 12,
+   "e_corr_lmp2": -0.780498052531,
+   "e_corr_rimp2": -0.780687914228
+  },
+  "acetic_acid_dimer_fc": {
+   "xyz": "test_cases/structures/clusters/acetic-acid-dimer.cyclic-hb.xyz",
+   "flags": [
+    "-qm.frozen_core",
+    "true",
+    "-qm.lmp2_pair_cut",
+    "8"
+   ],
+   "natoms": 16,
+   "e_corr_lmp2": -1.283146757427,
+   "e_corr_rimp2": -1.283712321993
+  }
+ }
+}

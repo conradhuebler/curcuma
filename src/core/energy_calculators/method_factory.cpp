@@ -30,6 +30,7 @@
 #include "qm_methods/hf3c_method.h"  // Claude Generated: native HF-3c composite (Sep 2026)
 #include "qm_methods/mp2_method.h"   // Claude Generated: native canonical MP2 (WP11, Oct 2026)
 #include "qm_methods/ccsd_method.h"  // Claude Generated: native canonical RCCSD (WP13, Oct 2026)
+#include "qm_methods/lmp2_method.h"  // Claude Generated: native local PNO-RI-MP2 (WP15, Oct 2026)
 #include "qm_methods/dispersion_method.h"
 #include "qm_methods/eht_method.h"
 #include "qm_methods/external_gfnff_method.h"
@@ -549,6 +550,13 @@ const std::vector<MethodDescriptor>& MethodFactory::methodTable()
           [](const std::string&, const json& c) -> std::unique_ptr<ComputationalMethod> {
               CurcumaLogger::success("Method 'ccsd' resolved to native canonical RCCSD");
               return std::make_unique<CCSDMethod>(c); } },
+        // Claude Generated (Oct 2026, WP15): local PNO-based RI-MP2 on the native RHF; energy only.
+        { {"lmp2", "local-ri-mp2"}, "Quantum Methods (native)",
+          "Native local PNO-RI-MP2 (Pipek-Mezey/Boys LMOs, BP+radius PAO domains, T_CutPNO; aux -qm.ri_mp2_aux; H-Ne, closed shell, energy only; -qm.lmp2_*)",
+          always, {{"Native", always}},
+          [](const std::string&, const json& c) -> std::unique_ptr<ComputationalMethod> {
+              CurcumaLogger::success("Method 'lmp2' resolved to native local PNO-RI-MP2");
+              return std::make_unique<LMP2Method>(c); } },
         // ---- native force fields ----
         { {"gfnff", "gfnff-fast"}, "Force Fields (native)", "GFN-FF, native (gfnff-fast: frozen charges/CN; -gpu cuda|rocm)",
           always, {{"Native", always},

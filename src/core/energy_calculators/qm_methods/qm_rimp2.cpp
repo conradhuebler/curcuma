@@ -172,6 +172,46 @@ void riMp2EnergyHost(const double* B, int o, int v, int naux, const double* eo, 
 }  // namespace qmint
 
 // =================================================================================
+// QMEngine::correlationRI (shared by RI-MP2 and LMP2)
+// =================================================================================
+
+// Claude Generated (Oct 2026): moved out of computeRIMP2 so that LMP2 (qm_lmp2.cpp) uses the same tensor.
+std::shared_ptr<qmri::RIJK> QMEngine::correlationRI(const std::string& file, std::string& src, double& setup_ms,
+                                                    std::string& why)
+{
+    setup_ms = 0.0;
+    if (riActive() && m_ri && m_ri_file == file) {
+        src = "RI tensor of the SCF reused (-qm.ri " + m_ri_mode + ")";
+        return m_ri;
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    std::shared_ptr<qmri::RIJK> ri;
+    try {
+        const qmri::AuxBasisMap aux = qmri::parseTurbomoleBasis(file);
+        Matrix pos = Matrix::Zero(m_atomcount, 3);
+        for (int i = 0; i < m_atomcount; ++i)
+            for (int k = 0; k < 3; ++k) pos(i, k) = CurcumaUnit::Length::angstrom_to_bohr(m_geometry(i, k));
+        const std::vector<qmri::Shell> sh = qmri::auxiliaryShells(aux, m_atoms, pos);
+        qmri::RIOptions ro;
+        ro.mode = "j";  // raw (Q|mn) + metric factor; the factor goes onto the transformed columns (fitRows)
+        ro.metric = m_ri_metric;
+        ro.metric_cutoff = m_ri_metric_cutoff;
+        ro.screening = m_eri_screening;
+        ro.max_memory_mb = m_ri_max_memory_mb;
+        ro.spherical_aux = !m_cartesian_d;
+        ro.threads = m_threads;
+        auto r = std::make_shared<qmri::RIJK>();
+        if (r->setup(m_gto_basis, m_Q.size() != 0 ? &m_Q : nullptr, sh, ro, why)) ri = r;
+    } catch (const std::exception& e) {
+        why = e.what();
+    }
+    if (!ri) return nullptr;
+    setup_ms = msSince(t0);
+    src = "own RI setup: " + ri->stats();
+    return ri;
+}
+
+// =================================================================================
 // QMEngine::computeRIMP2
 // =================================================================================
 
@@ -220,40 +260,14 @@ bool QMEngine::computeRIMP2(const qmint::MP2Options& opt, qmint::MP2Result& res)
     res.aux_name = auxLabel(file);
     if (o == 0 || v == 0) return true;  // nothing to correlate
 
-    std::shared_ptr<qmri::RIJK> ri;
-    std::string ri_src;
-    if (riActive() && m_ri && m_ri_file == file) {
-        ri = m_ri;
-        ri_src = "RI tensor of the SCF reused (-qm.ri " + m_ri_mode + ")";
-    } else {
-        const auto t0 = std::chrono::steady_clock::now();
-        std::string why;
-        try {
-            const qmri::AuxBasisMap aux = qmri::parseTurbomoleBasis(file);
-            Matrix pos = Matrix::Zero(m_atomcount, 3);
-            for (int i = 0; i < m_atomcount; ++i)
-                for (int k = 0; k < 3; ++k) pos(i, k) = CurcumaUnit::Length::angstrom_to_bohr(m_geometry(i, k));
-            const std::vector<qmri::Shell> sh = qmri::auxiliaryShells(aux, m_atoms, pos);
-            qmri::RIOptions ro;
-            ro.mode = "j";  // raw (Q|mn) + metric factor; the factor goes onto the o*v columns below
-            ro.metric = m_ri_metric;
-            ro.metric_cutoff = m_ri_metric_cutoff;
-            ro.screening = m_eri_screening;
-            ro.max_memory_mb = m_ri_max_memory_mb;
-            ro.spherical_aux = !m_cartesian_d;
-            ro.threads = m_threads;
-            auto r = std::make_shared<qmri::RIJK>();
-            if (r->setup(m_gto_basis, m_Q.size() != 0 ? &m_Q : nullptr, sh, ro, why)) ri = r;
-        } catch (const std::exception& e) {
-            why = e.what();
-        }
-        if (!ri) {
-            CurcumaLogger::error("RI-MP2: density fitting setup with " + file + " not possible: " + why);
-            return false;
-        }
-        res.t_ri_setup_ms = msSince(t0);
-        ri_src = "own RI setup: " + ri->stats();
+    std::string ri_src, why;
+    double setup_ms = 0.0;
+    const std::shared_ptr<qmri::RIJK> ri = correlationRI(file, ri_src, setup_ms, why);
+    if (!ri) {
+        CurcumaLogger::error("RI-MP2: density fitting setup with " + file + " not possible: " + why);
+        return false;
     }
+    res.t_ri_setup_ms = setup_ms;
 
     // ---- 2. B[i][a][P] ----
     const int nrows = (int)ri->tensor().rows();

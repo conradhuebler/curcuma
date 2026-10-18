@@ -49,6 +49,8 @@ struct MP2Options;  // WP11, qm_mp2.h
 struct MP2Result;
 struct CCSDOptions;  // WP13, qm_ccsd.h
 struct CCSDResult;
+struct LMP2Options;  // WP15, qm_lmp2.h
+struct LMP2Result;
 }
 
 /**
@@ -255,6 +257,9 @@ public:
     /// last Calculation() (CPU, full MO integrals incl. v^4, no RI, no gradient). Implemented in qm_ccsd.cpp.
     /// False on error (unconverged amplitudes, memory limit, -qm.ri active).
     bool computeCCSD(const qmint::CCSDOptions& opt, qmint::CCSDResult& res);
+    /// WP15 (Claude Generated, Oct 2026): local PNO-based RI-MP2 (closed shell, energy only) on the converged RHF of
+    /// the last Calculation() (any SCF, exact or RI). Implemented in qm_lmp2.cpp. False on error.
+    bool computeLMP2(const qmint::LMP2Options& opt, qmint::LMP2Result& res);
 
 private:
     // Method identity
@@ -399,6 +404,11 @@ private:
     /// else from the engine's exact J/K builder (stored tensor, device, or integral-direct).
     Matrix mp2G4(const Matrix& X_mo, const qmint::ERITensor* eri = nullptr) const;
     mutable bool m_gpu_mp2_grad_failed = false;  ///< device MP2 2e derivative failed once: CPU from then on
+    /// RI tensor for a correlation method (RI-MP2, LMP2; Claude Generated, Oct 2026): the SCF's own tensor when -qm.ri
+    /// ran with the same auxiliary file, else a separate mode-j setup (raw (Q|mn) + metric factor). nullptr + `why` on
+    /// failure; `src` says which; setup time goes to `setup_ms`. Implemented in qm_rimp2.cpp.
+    std::shared_ptr<qmri::RIJK> correlationRI(const std::string& file, std::string& src, double& setup_ms,
+                                              std::string& why);
 public:
     /// True when -qm.ri j|jk is active for this engine (method variant, see qm_ri.h).
     bool riActive() const;
