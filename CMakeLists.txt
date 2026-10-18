@@ -1531,6 +1531,11 @@ target_link_libraries(curcuma fmt::fmt-header-only)
 
 target_link_libraries(curcuma curcuma_core)
 
+# Claude Generated (Oct 2026): energy-only ablation, local persistent-homology features vs ACSF
+# (src/helpers/ml_barcode_ablation.cpp). Experiment helper, not registered in ctest.
+add_executable(ml_barcode_ablation src/helpers/ml_barcode_ablation.cpp)
+target_link_libraries(ml_barcode_ablation curcuma_cap curcuma_core curcuma_cap)
+
 # Claude Generated (May 2026, ICX + USE_GFNFF OpenMP fix): when both Intel ICX (libiomp5)
 # and gfortran-built gfnff-lib (libgomp DT_NEEDED) end up in the same binary, the two
 # OpenMP runtimes corrupt each other's heap. We hit double-free in __kmp_invoke_microtask
