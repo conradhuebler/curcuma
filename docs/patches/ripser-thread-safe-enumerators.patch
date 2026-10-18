@@ -1,0 +1,67 @@
+From c8a1cff070e762a10dfa67f36f0d28d9d7c70c16 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Conrad=20H=C3=BCbler?= <Conrad.Huebler@gmx.net>
+Date: Sun, 18 Oct 2026 22:23:22 +0200
+Subject: [PATCH] Make the simplex enumerators thread-safe
+
+get_zero_pivot_facet, get_zero_pivot_cofacet, init_coboundary_and_get_pivot
+and add_simplex_coboundary kept their enumerators in function-local statics.
+A static holds a reference to the ripser object of the first call and is
+shared by every thread: concurrent calls abort (assertions in
+binomial_coeff_table and compressed_distance_matrix::operator()), and using
+several ripser objects one after another only works while the dead object's
+address happens to be reused.
+
+Drop the static. Each call now builds its enumerator (one small vector).
+Measured on 31770 molecular patches (H0 and H1, 5 A neighbourhoods of 353
+conformers of a 90-atom molecule): serial 3.71 s -> 3.80 s, 24 threads 0.20 s;
+barcodes identical to the serial reference in 5 of 5 runs at 16 threads, the
+unpatched header aborts in 3 of 3.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ ripser.h | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/ripser.h b/ripser.h
+index e38946c..34f4ac8 100644
+--- a/ripser.h
++++ b/ripser.h
+@@ -518,7 +518,7 @@ public:
+ 	};
+ 
+ 	diameter_entry_t get_zero_pivot_facet(const diameter_entry_t simplex, const index_t dim) {
+-		static simplex_boundary_enumerator facets(0, *this);
++		simplex_boundary_enumerator facets(0, *this);
+ 		facets.set_simplex(simplex, dim);
+ 		while (facets.has_next()) {
+ 			diameter_entry_t facet = facets.next();
+@@ -528,7 +528,7 @@ public:
+ 	}
+ 
+ 	diameter_entry_t get_zero_pivot_cofacet(const diameter_entry_t simplex, const index_t dim) {
+-		static simplex_coboundary_enumerator cofacets(*this);
++		simplex_coboundary_enumerator cofacets(*this);
+ 		cofacets.set_simplex(simplex, dim);
+ 		while (cofacets.has_next()) {
+ 			diameter_entry_t cofacet = cofacets.next();
+@@ -680,7 +680,7 @@ public:
+ 	diameter_entry_t init_coboundary_and_get_pivot(const diameter_entry_t simplex,
+ 	                                               Column& working_coboundary, const index_t& dim,
+ 	                                               entry_hash_map& pivot_column_index) {
+-		static simplex_coboundary_enumerator cofacets(*this);
++		simplex_coboundary_enumerator cofacets(*this);
+ 		bool check_for_emergent_pair = true;
+ 		cofacet_entries.clear();
+ 		cofacets.set_simplex(simplex, dim);
+@@ -703,7 +703,7 @@ public:
+ 	template <typename Column>
+ 	void add_simplex_coboundary(const diameter_entry_t simplex, const index_t& dim,
+ 	                            Column& working_reduction_column, Column& working_coboundary) {
+-		static simplex_coboundary_enumerator cofacets(*this);
++		simplex_coboundary_enumerator cofacets(*this);
+ 		working_reduction_column.push(simplex);
+ 		cofacets.set_simplex(simplex, dim);
+ 		while (cofacets.has_next()) {
+-- 
+2.55.0
+

@@ -51,7 +51,7 @@ Stand.
 - **Ladungsplatzierung** (Known Issue #31) nicht getestet für periodische Systeme, GPU-Laufzeit, viele Fragmente in Kontakt und lange MD mit
   `frag_charge_s_max` > 1.
 - **LBFGSpp prüft die Krümmung nicht** (geprüft 2026-10-18, n=1): `BFGSMat::add_correction` überspringt das Update bei `s'y <= 0` nicht; auf einer rauen Delta-ML-Fläche (alte Defaults, 120 Zentren) bricht der Optimierer `auto` mit Exit 1 ab. Beobachtet an `cli_deltaml_01` mit dem alten ACSF-Gitter, mit den neuen Defaults (6 Schalen, eta 4) konvergiert er. Details: `AIChangelog.md` (Delta-ML), Vault `Projekte/curcuma Delta-ML`.
-- **Ripser (Header ripser.h im Fork) ist nicht thread-sicher** (gdb, 2026-10-18): vier funktionslokale `static`-Enumeratoren (Zeilen 520, 530, 683, 706) binden das erste Ripser-Objekt; `PersistentDiagram::runRipser()` serialisiert mit Mutex und festem Objektplatz, ohne Zeitgewinn. Fix im Fork `conradhuebler/ripser` (das Schlüsselwort static streichen), danach Mutex entfernen.
+- **Ripser (Header ripser.h im Fork) ist nicht thread-sicher** (gdb, 2026-10-18): vier funktionslokale `static`-Enumeratoren (Zeilen 521, 531, 683, 706) binden das erste Ripser-Objekt; `PersistentDiagram::runRipser()` serialisiert mit Mutex ohne Zeitgewinn. Patch fertig und getestet: [docs/patches/ripser-thread-safe-enumerators.patch](docs/patches/ripser-thread-safe-enumerators.patch) (5/5 Läufe identisch, 31770 Patches 3,80 s seriell, 0,20 s mit 24 Threads); offen: im Fork `conradhuebler/ripser` einspielen, `GIT_TAG` in `CMakeLists.txt` anheben, Mutex in `runRipser()` entfernen.
 
 ## 2. Leistung
 
