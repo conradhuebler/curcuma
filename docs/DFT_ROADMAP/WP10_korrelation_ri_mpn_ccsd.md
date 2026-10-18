@@ -573,6 +573,11 @@ steht in der Git-Historie dieser Datei.
 
 ## WP13 -- Closed-shell CCSD (RCCSD)
 
+**Stand 18.10.2026: Python-Prototyp, kein C++** (🤖 AI-generated, ⚙️ machine-tested;
+[../LOCAL_CCSD_PROTOTYPE_2026-10.md](../LOCAL_CCSD_PROTOTYPE_2026-10.md), Skripte `scripts/local_ccsd/`): RCCSD gegen PySCF
+<= 2.6e-11 Eh, ORCA 6.1 <= 7.9e-10 Eh (6 Molekuele, def2-SVP, frozen core), als Referenz fuer eine C++-Portierung nutzbar;
+dazu CCSD in ueberlappenden Paardomaenen (PAO/PNO): Truncationsfehler wie LMP2, Schwarz-Vorkonditionierer ohne Gewinn.
+
 - Spinadaptierte Amplitudengleichungen (T1, T2), kanonische RHF-Referenz, DIIS auf den Amplituden,
   MO-Integrale aus WP11. Speicher O(v^4) fuer das `(ab|cd)`-Integral im Standardschema; Skalierung O(o^2 v^4).
 - **Validierung:** gegen PySCF `cc.CCSD` und ORCA `CCSD` (`! CCSD def2-SVP`, eingefrorener Rumpf wie in
