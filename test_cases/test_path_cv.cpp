@@ -398,6 +398,185 @@ int main()
         }
     }
 
+    // Distance-space metric (cv_metric distances), Claude Generated 2026. A random 8-atom molecule
+    // (C O C N H H C H), a smooth 10-frame path with a dominant linear part, CV pairs = heavy-atom
+    // pairs whose distance spans > 0.2 A. Blocks:
+    //   (dist-d) s strictly monotone over the path frames (so s(i) lies between s(i-1) and s(i+1))
+    //   (dist-e) analytic ds/dR, dz/dR vs central FD (1e-4 A) at an off-path random point, rel < 1e-6,
+    //            for the transforms d and inv
+    //   (dist-f) s, z invariant under a random rotation + translation (< 1e-12); gradient covariant
+    //   (dist-g) pair-list parser (valid/invalid) and the 'auto' rule on a path with known spans
+    {
+        const int Z[8] = { 6, 8, 6, 7, 1, 1, 6, 1 };
+        std::mt19937 gen(2718);
+        std::normal_distribution<double> nd(0.0, 1.0);
+        Molecule m8;
+        Geometry X0(8, 3), D1(8, 3), D2(8, 3);
+        for (int a = 0; a < 8; ++a) {
+            Position q;
+            q << 1.3 * nd(gen), 1.3 * nd(gen), 1.3 * nd(gen);
+            X0.row(a) = q.transpose();
+            m8.addPair({ Z[a], q });
+            for (int c = 0; c < 3; ++c) {
+                D1(a, c) = 0.9 * nd(gen);
+                D2(a, c) = 0.15 * nd(gen);
+            }
+        }
+        std::vector<Geometry> p8;
+        for (int i = 0; i < 10; ++i) {
+            const double f = i / 9.0;
+            p8.push_back(X0 + f * D1 + std::sin(M_PI * f) * D2);
+        }
+        const std::vector<int> heavy8 = { 0, 1, 2, 3, 6 };
+        std::vector<double> spans;
+        const auto pairs = PathCV::selectPairsBySpan(p8, heavy8, 0.2, &spans);
+        std::cout << "   distance metric: " << pairs.size() << " heavy-atom pairs with span > 0.2 A" << std::endl;
+        check(pairs.size() >= 2, "(dist) at least 2 auto pairs on the random path");
+
+        for (auto tr : { PathCV::PairTransform::Distance, PathCV::PairTransform::Inverse }) {
+            const std::string tag = (tr == PathCV::PairTransform::Inverse) ? "inv" : "d";
+            const PathCV cvd(p8, m8, -1.0, {}, PathCV::Metric::Distances, pairs, tr);
+            // lambda = 1/<d_k,k+1^2>
+            double m2 = 0.0;
+            for (int k = 1; k < 10; ++k)
+                m2 += PathCV::pairSpacing2(p8[k], p8[k - 1], pairs, tr);
+            m2 /= 9.0;
+            check(std::abs(cvd.lambda() * m2 - 1.0) < 1e-12, "(dist) " + tag + ": lambda = 1/<d_k,k+1^2>");
+
+            // (dist-d)
+            bool mono = true;
+            std::vector<double> sv(10);
+            for (int i = 0; i < 10; ++i)
+                sv[i] = cvd.s(p8[i]);
+            for (int i = 1; i < 10; ++i)
+                if (!(sv[i] > sv[i - 1]))
+                    mono = false;
+            bool between = true;
+            for (int i = 1; i < 9; ++i)
+                if (!(sv[i] > sv[i - 1] && sv[i] < sv[i + 1]))
+                    between = false;
+            std::cout << "   " << tag << ": s(frames) = " << sv.front() << " .. " << sv.back() << ", lambda = " << cvd.lambda()
+                      << std::endl;
+            check(mono && between, "(dist-d) " + tag + ": s strictly monotone, s(i) between s(i-1) and s(i+1)");
+            // nearest frame and z consistency
+            {
+                double z1 = 0, z2 = 0;
+                cvd.evaluate(p8[4], nullptr, &z1, nullptr, nullptr);
+                const int nn = cvd.nearestFrame(p8[4], &z2);
+                check(nn == 4 && z1 == z2, "(dist) " + tag + ": nearestFrame(frame 4) = 4, z identical to evaluate()");
+            }
+
+            // (dist-e) FD at an off-path random point
+            Geometry Rt = 0.5 * (p8[4] + p8[5]);
+            for (int a = 0; a < 8; ++a)
+                for (int c = 0; c < 3; ++c)
+                    Rt(a, c) += 0.1 * nd(gen);
+            double s0 = 0, z0 = 0;
+            Geometry ds, dz;
+            cvd.evaluate(Rt, &s0, &z0, &ds, &dz);
+            const double h = 1e-4;
+            double es = 0, ez = 0, ns = 0, nz = 0;
+            for (int a = 0; a < 8; ++a)
+                for (int c = 0; c < 3; ++c) {
+                    Geometry Rp = Rt, Rm = Rt;
+                    Rp(a, c) += h;
+                    Rm(a, c) -= h;
+                    double sp, zp, sq, zq;
+                    cvd.evaluate(Rp, &sp, &zp, nullptr, nullptr);
+                    cvd.evaluate(Rm, &sq, &zq, nullptr, nullptr);
+                    const double fs = (sp - sq) / (2 * h), fz = (zp - zq) / (2 * h);
+                    es += (fs - ds(a, c)) * (fs - ds(a, c));
+                    ez += (fz - dz(a, c)) * (fz - dz(a, c));
+                    ns += fs * fs;
+                    nz += fz * fz;
+                }
+            const double rs = std::sqrt(es / std::max(ns, 1e-30)), rz = std::sqrt(ez / std::max(nz, 1e-30));
+            std::cout << "   " << tag << ": off-path s = " << s0 << ", z = " << z0 << " " << cvd.zUnit()
+                      << ", FD rel err ds = " << rs << ", dz = " << rz << std::endl;
+            check(rs < 1e-6 && rz < 1e-6 && ns > 0.0 && nz > 0.0, "(dist-e) " + tag + ": ds/dR, dz/dR vs FD rel < 1e-6");
+            // rows of atoms in no pair are exactly zero (atom 7 is H, never in a heavy pair)
+            check(ds.row(7).norm() == 0.0 && dz.row(7).norm() == 0.0, "(dist-e) " + tag + ": gradient of an atom in no pair is 0");
+
+            // (dist-f) rigid motion
+            Eigen::Matrix3d A;
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c)
+                    A(r, c) = nd(gen);
+            Eigen::HouseholderQR<Eigen::Matrix3d> qr(A);
+            Eigen::Matrix3d Q = qr.householderQ();
+            if (Q.determinant() < 0)
+                Q.col(0) *= -1.0;
+            Geometry Rr = (Rt * Q.transpose()).eval();
+            Rr.rowwise() += Eigen::RowVector3d(1.7, -0.4, 2.2);
+            double s1 = 0, z1 = 0;
+            Geometry ds1, dz1;
+            cvd.evaluate(Rr, &s1, &z1, &ds1, &dz1);
+            const double gerr = std::max((ds1 - ds * Q.transpose()).cwiseAbs().maxCoeff(),
+                                         (dz1 - dz * Q.transpose()).cwiseAbs().maxCoeff());
+            std::cout << "   " << tag << ": rigid motion |ds| = " << std::abs(s1 - s0) << ", |dz| = " << std::abs(z1 - z0)
+                      << ", gradient covariance err = " << gerr << std::endl;
+            check(std::abs(s1 - s0) < 1e-12 && std::abs(z1 - z0) < 1e-12, "(dist-f) " + tag + ": s, z invariant under rotation + translation");
+            check(gerr < 1e-10, "(dist-f) " + tag + ": gradient rotates covariantly (grad(QR) = grad(R) Q^T)");
+        }
+
+        // resampling at equal distance-space arclength: chord spacing nearly uniform
+        {
+            const auto rs = PathCV::resampleByPairs(p8, 15, pairs, PathCV::PairTransform::Distance);
+            double dmin = 1e300, dmax = 0;
+            for (int k = 1; k < 15; ++k) {
+                const double d = std::sqrt(PathCV::pairSpacing2(rs[k], rs[k - 1], pairs, PathCV::PairTransform::Distance));
+                dmin = std::min(dmin, d);
+                dmax = std::max(dmax, d);
+            }
+            std::cout << "   resampleByPairs 10 -> 15 frames: spacing min " << dmin << " max " << dmax << std::endl;
+            check(rs.size() == 15 && (rs.front() - p8.front()).norm() == 0.0 && (rs.back() - p8.back()).norm() == 0.0
+                      && dmax / dmin < 1.02,
+                  "(dist) resampleByPairs: endpoints kept, distance-space spacing uniform within 2 %");
+        }
+
+        // (dist-g) parser
+        std::vector<PathCV::AtomPair> pl;
+        std::string err;
+        check(PathCV::parsePairList("1-4,1-9,4-9", 10, pl, err)
+                  && pl == std::vector<PathCV::AtomPair>({ { 0, 3 }, { 0, 8 }, { 3, 8 } }),
+              "(dist-g) cv_pairs '1-4,1-9,4-9' = pairs (0,3),(0,8),(3,8) (a pair, not a range)");
+        check(PathCV::parsePairList(" 4-1 , 2 - 3 ", 10, pl, err) && pl == std::vector<PathCV::AtomPair>({ { 0, 3 }, { 1, 2 } }),
+              "(dist-g) blanks and reversed order are normalised");
+        for (const std::string bad : { "1-4,4-1", "1-4,1-4", "1-1,2-3", "1-11,2-3", "0-2,2-3", "1-4", "", "1-4,x",
+                                       "1-4,1", "1-4,1-2-3", "1-4,,2-3", "a-b,1-2", "1-4,2-" }) {
+            const bool ok = PathCV::parsePairList(bad, 10, pl, err);
+            std::cout << "   '" << bad << "' -> " << (ok ? "accepted" : err) << std::endl;
+            check(!ok && !err.empty() && pl.empty(), "(dist-g) cv_pairs '" + bad + "' is rejected with a message");
+        }
+        // 'auto' on a path with known spans: C0 fixed, C1 (1,0,0)->(2,0,0), C2 (0,3,0)->(0,3.8,0),
+        // H3 (0,0,1)->(0,0,3). Spans (all monotone): 0-1 1.0, 0-2 0.8, 1-2 sqrt(4+14.44)-sqrt(10) = 1.1325,
+        // 0-3 2.0 (H).
+        {
+            std::vector<Geometry> pk;
+            for (int i = 0; i < 5; ++i) {
+                const double t = i / 4.0;
+                Geometry g = Geometry::Zero(4, 3);
+                g(1, 0) = 1.0 + t;
+                g(2, 1) = 3.0 + 0.8 * t;
+                g(3, 2) = 1.0 + 2.0 * t;
+                pk.push_back(g);
+            }
+            std::vector<double> sp;
+            const auto h05 = PathCV::selectPairsBySpan(pk, { 0, 1, 2 }, 0.5, &sp);
+            const double s12 = std::sqrt(4.0 + 3.8 * 3.8) - std::sqrt(10.0);
+            check(h05 == std::vector<PathCV::AtomPair>({ { 0, 1 }, { 0, 2 }, { 1, 2 } }) && sp.size() == 3
+                      && std::abs(sp[0] - 1.0) < 1e-12 && std::abs(sp[1] - 0.8) < 1e-12 && std::abs(sp[2] - s12) < 1e-12,
+                  "(dist-g) auto, heavy atoms, threshold 0.5: pairs 1-2, 1-3, 2-3 with spans 1.0, 0.8, 1.1325");
+            const auto h09 = PathCV::selectPairsBySpan(pk, { 0, 1, 2 }, 0.9, &sp);
+            check(h09 == std::vector<PathCV::AtomPair>({ { 0, 1 }, { 1, 2 } }), "(dist-g) auto, threshold 0.9: pairs 1-2, 2-3");
+            const auto all15 = PathCV::selectPairsBySpan(pk, { 0, 1, 2, 3 }, 1.5, &sp);
+            check(all15.size() >= 1 && all15.front() == PathCV::AtomPair(0, 3),
+                  "(dist-g) auto with H candidates, threshold 1.5: H pair 1-4 (span 2.0) selected");
+            const auto none = PathCV::selectPairsBySpan(pk, { 0, 1, 2 }, 1.2, &sp);
+            check(none.empty(), "(dist-g) auto, threshold 1.2: no heavy pair (caller reports < 2 pairs as an error)");
+        }
+    }
+
     std::cout << (failures == 0 ? "ALL TESTS PASSED" : "SOME TESTS FAILED") << std::endl;
     return failures == 0 ? 0 : 1;
 }

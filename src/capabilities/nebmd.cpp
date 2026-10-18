@@ -153,6 +153,14 @@ void NebMD::LoadControlJson()
     // precedence over cv_extend (frames), the frame count is derived in buildCvPath.
     m_cv_extend_length = std::max(m_config.get<double>("cv_extend_length"), 0.0);
     m_cv_atoms_spec = m_config.get<std::string>("cv_atoms", "all"); // parsed in Initialise (needs the atoms)
+    // Claude Generated 2026: distance-space path CV (validated in Initialise).
+    m_cv_metric_name = m_config.get<std::string>("cv_metric", "rmsd");
+    m_cv_pairs_spec = m_config.get<std::string>("cv_pairs", "auto");
+    m_cv_pair_threshold = m_config.get<double>("cv_pair_threshold", 0.5);
+    {
+        const std::string t = m_config.get<std::string>("cv_pair_transform", "d");
+        m_cv_transform = (t == "inv") ? PathCV::PairTransform::Inverse : PathCV::PairTransform::Distance;
+    }
     if (m_cv_extend_length > 0.0 && m_cv_extend > 0)
         CurcumaLogger::warn(fmt::format("NEB-MD: both cv_extend ({}) and cv_extend_length ({}) are set - "
                                         "cv_extend_length takes precedence, cv_extend is ignored.",
@@ -266,6 +274,47 @@ bool NebMD::Initialise()
         m_cv_w_align = PathCV::selectionWeights(m_cv_atoms, nat, 1e-6); // see buildCvPath
         CurcumaLogger::result_fmt("NEB-MD: path CV atoms (cv_atoms) = {}: {} of {} atoms", m_cv_atoms_spec,
                                   m_cv_atoms.empty() ? nat : static_cast<int>(m_cv_atoms.size()), nat);
+
+        // Claude Generated 2026: metric of the path CV (rmsd | distances) and its pair list.
+        const std::string tr = m_config.get<std::string>("cv_pair_transform", "d");
+        if (m_cv_metric_name != "rmsd" && m_cv_metric_name != "distances") {
+            CurcumaLogger::error("NEB-MD: cv_metric '" + m_cv_metric_name + "' is unknown (rmsd | distances)");
+            return false;
+        }
+        if (tr != "d" && tr != "inv") {
+            CurcumaLogger::error("NEB-MD: cv_pair_transform '" + tr + "' is unknown (d | inv)");
+            return false;
+        }
+        m_cv_metric = (m_cv_metric_name == "distances") ? PathCV::Metric::Distances : PathCV::Metric::Rmsd;
+        m_cv_pairs.clear();
+        m_cv_pairs_resolved = false;
+        if (m_cv_metric == PathCV::Metric::Distances) {
+            // cv_atoms only restricts the 'auto' candidates here: arclength and alignment of the
+            // CV frames run over all atoms (the distance metric itself needs no fit).
+            m_cv_w.clear();
+            m_cv_w_align.clear();
+            std::string spec = m_cv_pairs_spec;
+            spec.erase(0, spec.find_first_not_of(" \t"));
+            spec.erase(spec.find_last_not_of(" \t") + 1);
+            if (spec != "auto") {
+                if (!PathCV::parsePairList(spec, nat, m_cv_pairs, err)) {
+                    CurcumaLogger::error("NEB-MD: " + err);
+                    return false;
+                }
+                m_cv_pairs_resolved = true;
+                if (!m_cv_atoms.empty())
+                    CurcumaLogger::info("NEB-MD: explicit cv_pairs override cv_atoms.");
+            }
+            if (m_cv_pair_threshold < 0.0) {
+                CurcumaLogger::error("NEB-MD: cv_pair_threshold must be >= 0");
+                return false;
+            }
+            CurcumaLogger::result_fmt("NEB-MD: path CV metric = distances (x = {}, z in {}), cv_pairs = {}",
+                                      m_cv_transform == PathCV::PairTransform::Inverse ? "1/d" : "d",
+                                      m_cv_transform == PathCV::PairTransform::Inverse ? "A^-2" : "A^2", spec);
+        } else {
+            CurcumaLogger::result("NEB-MD: path CV metric = rmsd (z in A^2)");
+        }
     }
 
     m_images.assign(m_nimages, nullptr);
@@ -748,6 +797,205 @@ void NebMD::checkExtensionEnergies(const std::vector<Geometry>& base,
                             "minima, or use a smaller cv_extend).");
 }
 
+std::unique_ptr<PathCV> NebMD::makePathCV(const std::vector<Geometry>& frames) const
+{
+    // Claude Generated 2026: the one place that turns the CV settings into a PathCV.
+    if (m_cv_metric == PathCV::Metric::Distances)
+        return std::make_unique<PathCV>(frames, m_start, -1.0, std::vector<int>{}, PathCV::Metric::Distances,
+                                        m_cv_pairs, m_cv_transform);
+    return std::make_unique<PathCV>(frames, m_start, -1.0, m_cv_atoms);
+}
+
+double NebMD::cvSpacing(const Geometry& A, const Geometry& B) const
+{
+    // Claude Generated 2026: plain (not best-fit) spacing of two frames in the CV metric.
+    if (m_cv_metric == PathCV::Metric::Distances)
+        return std::sqrt(PathCV::pairSpacing2(A, B, m_cv_pairs, m_cv_transform));
+    return curcuma::string_path::weightedRmsd(A, B, m_cv_w, false);
+}
+
+std::string NebMD::cvPairsText() const
+{
+    // Claude Generated 2026
+    std::string t = fmt::format("x = {}, {} pairs:", m_cv_transform == PathCV::PairTransform::Inverse ? "1/d" : "d",
+                                m_cv_pairs.size());
+    for (const auto& p : m_cv_pairs)
+        t += fmt::format(" {}-{}", p.first + 1, p.second + 1);
+    return t;
+}
+
+bool NebMD::resolveCvPairs(const std::vector<Geometry>& frames)
+{
+    // Claude Generated 2026: (1) the pairs of the distance metric for cv_pairs 'auto', (2) the
+    // pairs of the window diagnostics (J): the CV pairs for the distance metric, the heavy-atom
+    // 'auto' pairs for the rmsd metric (no error if there are fewer than 2: J is then n/a).
+    const int nat = static_cast<int>(m_start.AtomCount());
+    std::vector<int> pool, heavy;
+    if (m_cv_atoms.empty())
+        for (int a = 0; a < nat; ++a)
+            pool.push_back(a);
+    else
+        pool = m_cv_atoms;
+    for (int a : pool)
+        if (m_start.Atom(a).first > 1)
+            heavy.push_back(a);
+    auto listText = [](const std::vector<PathCV::AtomPair>& pairs, const std::vector<double>& spans) {
+        std::string t;
+        for (size_t p = 0; p < pairs.size(); ++p)
+            t += fmt::format("{}{}-{} ({:.2f})", p == 0 ? "" : ", ", pairs[p].first + 1, pairs[p].second + 1,
+                             p < spans.size() ? spans[p] : 0.0);
+        return t;
+    };
+    std::vector<double> spans;
+    if (m_cv_metric == PathCV::Metric::Distances) {
+        if (!m_cv_pairs_resolved) {
+            const std::vector<int>& cand = m_cv_atoms.empty() ? heavy : m_cv_atoms;
+            m_cv_pairs = PathCV::selectPairsBySpan(frames, cand, m_cv_pair_threshold, &spans);
+            if (m_cv_pairs.size() < 2) {
+                CurcumaLogger::error(fmt::format(
+                    "NEB-MD: cv_pairs auto found {} pair(s) whose distance spans more than cv_pair_threshold = {} A "
+                    "over the CV frames ({} candidate atoms, {}); the distance-space CV needs at least 2. Lower "
+                    "cv_pair_threshold, widen cv_atoms or give cv_pairs explicitly.",
+                    m_cv_pairs.size(), m_cv_pair_threshold, cand.size(),
+                    m_cv_atoms.empty() ? "heavy atoms" : "cv_atoms"));
+                return false;
+            }
+            m_cv_pairs_resolved = true;
+            CurcumaLogger::result_fmt("NEB-MD: cv_pairs auto ({} candidate atoms, span > {} A over {} CV frames): {} pairs, "
+                                      "i-j (span A): {}", cand.size(), m_cv_pair_threshold, frames.size(),
+                                      m_cv_pairs.size(), listText(m_cv_pairs, spans));
+        } else {
+            for (const auto& p : m_cv_pairs) {
+                double dmin = 1e300, dmax = -1e300;
+                for (const auto& g : frames) {
+                    const double d = (g.row(p.first) - g.row(p.second)).norm();
+                    dmin = std::min(dmin, d);
+                    dmax = std::max(dmax, d);
+                }
+                spans.push_back(dmax - dmin);
+            }
+            CurcumaLogger::result_fmt("NEB-MD: cv_pairs explicit: {} pairs, i-j (span A over {} CV frames): {}",
+                                      m_cv_pairs.size(), frames.size(), listText(m_cv_pairs, spans));
+        }
+        m_diag_pairs = m_cv_pairs;
+        m_diag_transform = m_cv_transform;
+    } else {
+        m_diag_pairs = PathCV::selectPairsBySpan(frames, heavy, m_cv_pair_threshold, &spans);
+        m_diag_transform = PathCV::PairTransform::Distance;
+        if (m_diag_pairs.size() >= 2)
+            CurcumaLogger::info(fmt::format("NEB-MD: window diagnostics: {} heavy-atom pairs (span > {} A): {}",
+                                            m_diag_pairs.size(), m_cv_pair_threshold, listText(m_diag_pairs, spans)));
+        else
+            CurcumaLogger::info("NEB-MD: window diagnostics: fewer than 2 heavy-atom pairs change along the path; "
+                                "the neighbour-jump index J is not available.");
+    }
+    return true;
+}
+
+void NebMD::accumulateWindowDiagnostics(int i, const Geometry& R)
+{
+    // Claude Generated 2026: called every kDiagInterval production steps from the parallel window
+    // loop; touches only the entries of window i (pre-sized in setupUmbrella), so it is race-free.
+    // No RNG, no change of positions: the dynamics is unaffected.
+    if (!m_path_cv || i < 0 || i >= static_cast<int>(m_diag_n.size()))
+        return;
+    double z = 0.0;
+    const int nn = m_path_cv->nearestFrame(R, &z);
+    if (!std::isfinite(z))
+        return;
+    m_diag_z[i].push_back(z);
+    m_diag_nn_sum[i] += nn;
+    m_diag_nn2_sum[i] += static_cast<double>(nn) * nn;
+    if (m_diag_pairs.size() >= 2)
+        m_diag_x_sum[i] += PathCV::pairValues(R, m_diag_pairs, m_diag_transform);
+    ++m_diag_n[i];
+}
+
+void NebMD::writeWindowDiagnostics() const
+{
+    // Claude Generated 2026: <base>.neb.windows.csv, one row per window.
+    //   z_mean, z_p90, frac_beyond_wall: from z sampled every kDiagInterval steps (frac = nan without wall)
+    //   nn_mean, nn_sd: index of the nearest CV frame (argmin_i d_i), 0-based on the CV frames
+    //   J (row i, pair i,i+1): max_p |<x_p>_i - <x_p>_i+1| / max_k max_p |x_p,k+1 - x_p,k|
+    // J > 3: the time-averaged pair coordinates of neighbouring windows differ by more than three
+    // of the largest single CV-frame steps - the windows sample different structural families.
+    CurcumaLogger::set_verbosity(m_band_verbosity);
+    const int nw = static_cast<int>(m_diag_n.size());
+    if (nw == 0)
+        return;
+    const bool have_j = m_diag_pairs.size() >= 2 && m_diag_x_step > 0.0;
+    std::vector<double> J(nw, std::numeric_limits<double>::quiet_NaN());
+    if (have_j)
+        for (int i = 0; i + 1 < nw; ++i) {
+            if (m_diag_n[i] < 1 || m_diag_n[i + 1] < 1)
+                continue;
+            const Vector a = m_diag_x_sum[i] / static_cast<double>(m_diag_n[i]);
+            const Vector b = m_diag_x_sum[i + 1] / static_cast<double>(m_diag_n[i + 1]);
+            J[i] = (a - b).cwiseAbs().maxCoeff() / m_diag_x_step;
+        }
+    const std::string path = outputPath(Basename() + ".neb.windows.csv");
+    std::ofstream f(path);
+    if (!f) {
+        CurcumaLogger::warn("NEB-MD: cannot write " + path);
+        return;
+    }
+    const std::string xunit = m_diag_transform == PathCV::PairTransform::Inverse ? "1/A" : "A";
+    f << "# window diagnostics (every " << kDiagInterval << " production steps); cv_metric "
+      << (m_cv_metric == PathCV::Metric::Distances ? "distances" : "rmsd") << ", z in "
+      << (m_path_cv ? m_path_cv->zUnit() : std::string("A^2")) << ", nn = nearest CV frame (0-based, "
+      << (m_path_cv ? m_path_cv->frames() : 0) << " frames)\n";
+    if (have_j) {
+        f << "# J pairs (" << (m_cv_metric == PathCV::Metric::Distances ? "CV pairs" : "heavy-atom auto pairs")
+          << ", x = " << (m_diag_transform == PathCV::PairTransform::Inverse ? "1/d" : "d") << "):";
+        for (const auto& p : m_diag_pairs)
+            f << " " << p.first + 1 << "-" << p.second + 1;
+        f << fmt::format("; reference step max_k max_p |x_p,k+1 - x_p,k| = {:.6f} {}\n", m_diag_x_step, xunit);
+    } else {
+        f << "# J not available (fewer than 2 diagnostic pairs)\n";
+    }
+    f << "window,s0,z_mean,z_p90,frac_beyond_wall,nn_mean,nn_sd,J\n";
+    const auto nan = std::numeric_limits<double>::quiet_NaN();
+    double jmax = -1.0;
+    int jmax_i = -1;
+    for (int i = 0; i < nw; ++i) {
+        const long n = m_diag_n[i];
+        double zm = nan, zp = nan, fr = nan, nm = nan, nsd = nan;
+        if (n > 0) {
+            std::vector<double> zs = m_diag_z[i];
+            std::sort(zs.begin(), zs.end());
+            double zsum = 0.0;
+            long nb = 0;
+            for (double z : zs) {
+                zsum += z;
+                if (m_z_wall > 0.0 && z > m_z_wall)
+                    ++nb;
+            }
+            zm = zsum / static_cast<double>(zs.size());
+            const size_t r = static_cast<size_t>(std::ceil(0.9 * static_cast<double>(zs.size())));
+            zp = zs[std::min(std::max<size_t>(r, 1), zs.size()) - 1]; // nearest-rank p90
+            if (m_z_wall > 0.0)
+                fr = static_cast<double>(nb) / static_cast<double>(zs.size());
+            nm = m_diag_nn_sum[i] / static_cast<double>(n);
+            nsd = std::sqrt(std::max(m_diag_nn2_sum[i] / static_cast<double>(n) - nm * nm, 0.0));
+        }
+        const double s0 = i < static_cast<int>(m_umbrella_s0.size()) ? m_umbrella_s0[i] : nan;
+        f << fmt::format("{},{:.6f},{:.6f},{:.6f},{:.6f},{:.4f},{:.4f},{:.4f}\n", i, s0, zm, zp, fr, nm, nsd, J[i]);
+        if (std::isfinite(J[i]) && J[i] > jmax) {
+            jmax = J[i];
+            jmax_i = i;
+        }
+        if (std::isfinite(J[i]) && J[i] > 3.0)
+            CurcumaLogger::warn(fmt::format("NEB-MD: structural family changes between window {} and {} (J = {:.2f} > 3: "
+                                            "<x_p> jumps by {:.3f} {} vs a CV-frame step of {:.3f} {}).",
+                                            i, i + 1, J[i], J[i] * m_diag_x_step, xunit, m_diag_x_step, xunit));
+    }
+    if (jmax_i >= 0)
+        CurcumaLogger::result_fmt("NEB-MD: window diagnostics written to {} (largest J = {:.2f} between windows {} and {})",
+                                  path, jmax, jmax_i, jmax_i + 1);
+    else
+        CurcumaLogger::result_fmt("NEB-MD: window diagnostics written to {} (J not available)", path);
+}
+
 bool NebMD::buildCvPath(bool place_windows)
 {
     // Claude Generated 2026: CV frames and window placement (see the block comment in nebmd.h).
@@ -755,9 +1003,14 @@ bool NebMD::buildCvPath(bool place_windows)
     m_cv_orig_s.clear();
     m_cv_lo = 0;
     m_cv_hi = -1;
+    // Claude Generated 2026: the CV pairs ('auto') and the diagnostic pairs are resolved on the
+    // frames the CV is built on; only runs that build a path CV need them.
+    const bool need_pairs = m_umbrella || !m_cv_histogram.empty();
     if (m_cv_frames <= 0 && m_cv_extend <= 0 && m_cv_extend_length <= 0.0)
-        return true; // default: CV on the image frames, nothing changes
+        return need_pairs ? resolveCvPairs(m_image_geoms) : true; // default: CV on the image frames
     if (place_windows && !m_independent) {
+        if (need_pairs && !resolveCvPairs(m_image_geoms))
+            return false;
         if (m_string)
             CurcumaLogger::info("NEB-MD: cv_frames/cv_extend do not act on the string stage; they apply to "
                                 "the path CV of scheme 'independent' (pipeline stage 2).");
@@ -788,7 +1041,17 @@ bool NebMD::buildCvPath(bool place_windows)
             CurcumaLogger::warn(fmt::format("NEB-MD: cv_frames = {} is too few for a path CV; using 3.", nf));
             nf = 3;
         }
-        base = curcuma::string_path::resamplePath(base, nf, m_cv_w);
+        const std::vector<Geometry> rs = curcuma::string_path::resamplePath(base, nf, m_cv_w);
+        // Claude Generated 2026: 'auto' pairs from the RMSD-re-sampled frames (spec of cv_pairs),
+        // then, for the distance metric, the final re-sampling at equal distance-space arclength.
+        if (!resolveCvPairs(rs))
+            return false;
+        if (m_cv_metric == PathCV::Metric::Distances)
+            base = PathCV::resampleByPairs(base, nf, m_cv_pairs, m_cv_transform);
+        else
+            base = rs;
+    } else if (!resolveCvPairs(base)) {
+        return false;
     }
     if (m_cv_extend_length > 0.0) {
         // Claude Generated 2026: extension given as a LENGTH (fraction of the arclength L of the
@@ -797,13 +1060,16 @@ bool NebMD::buildCvPath(bool place_windows)
         const int F = static_cast<int>(base.size());
         double L = 0.0; // plain (already consecutively aligned) RMSD arclength, as PathCV sees it
         for (int k = 1; k < F; ++k)
-            L += curcuma::string_path::weightedRmsd(base[k], base[k - 1], m_cv_w, false);
+            L += (m_cv_metric == PathCV::Metric::Distances)
+                ? cvSpacing(base[k], base[k - 1]) // distance-space arclength (Claude Generated 2026)
+                : curcuma::string_path::weightedRmsd(base[k], base[k - 1], m_cv_w, false);
         m_cv_extend = curcuma::string_path::extensionFrames(m_cv_extend_length, F);
         const double d = F > 1 ? L / static_cast<double>(F - 1) : 0.0;
         CurcumaLogger::result_fmt("NEB-MD cv_extend: {:.4g} of the path length = {} frames "
-                                  "(path L = {:.4f} A RMSD arclength, {} CV frames, spacing d = {:.4f} A; "
-                                  "windows reach {:.4f} A = {:.4f} L beyond each end)",
-                                  m_cv_extend_length, m_cv_extend, L, F, d,
+                                  "(path L = {:.4f} {} arclength, {} CV frames, spacing d = {:.4f}; "
+                                  "windows reach {:.4f} = {:.4f} L beyond each end)",
+                                  m_cv_extend_length, m_cv_extend, L,
+                                  m_cv_metric == PathCV::Metric::Distances ? "distance-space" : "A RMSD", F, d,
                                   (m_cv_extend - 1) * d, L > 0.0 ? (m_cv_extend - 1) * d / L : 0.0);
     }
     std::vector<Geometry> cv = base;
@@ -816,7 +1082,8 @@ bool NebMD::buildCvPath(bool place_windows)
     m_cv_lo = (m_cv_extend > 0) ? 1 : 0;
     m_cv_hi = M - 1 - m_cv_lo;
 
-    const PathCV pcv(m_cv_path, m_start, -1.0, m_cv_atoms);
+    const std::unique_ptr<PathCV> pcvp = makePathCV(m_cv_path); // Claude Generated 2026: active metric
+    const PathCV& pcv = *pcvp;
     std::vector<double> sc(M, 0.0);
     for (int k = 0; k < M; ++k)
         sc[k] = pcv.s(cv[k]);
@@ -830,6 +1097,23 @@ bool NebMD::buildCvPath(bool place_windows)
                               "s(CV frame {}) = {:.4f}",
                               M, Np, m_cv_frames, m_cv_extend, pcv.lambda(), sc.front(), sc[m_cv_lo],
                               sc[m_cv_hi], M - 1, sc.back());
+    if (m_cv_metric == PathCV::Metric::Distances) {
+        // Claude Generated 2026: spacing and length of the CV frames in the distance metric.
+        double L = 0.0, dmin = 1e300, dmax = 0.0;
+        for (int k = m_cv_lo + 1; k <= m_cv_hi; ++k) {
+            const double d = cvSpacing(cv[k], cv[k - 1]);
+            L += d;
+            dmin = std::min(dmin, d);
+            dmax = std::max(dmax, d);
+        }
+        const double dm = L / std::max(m_cv_hi - m_cv_lo, 1);
+        CurcumaLogger::result_fmt("NEB-MD: distance-space CV ({} pairs): spacing mean {:.4f} (min {:.4f}, max {:.4f}) {}, "
+                                  "path length L = {:.4f} {} over the window range, lambda*d^2 = {:.3f}",
+                                  m_cv_pairs.size(), dm, dmin, dmax,
+                                  m_cv_transform == PathCV::PairTransform::Inverse ? "1/A" : "A", L,
+                                  m_cv_transform == PathCV::PairTransform::Inverse ? "1/A" : "A",
+                                  pcv.lambda() * dm * dm);
+    }
     CurcumaLogger::result_fmt("NEB-MD: original path frames on this CV: s(first) = {:.4f}, s(second) = {:.4f}, "
                               "s(second-to-last) = {:.4f}, s(last) = {:.4f}",
                               m_cv_orig_s[0], m_cv_orig_s[1], m_cv_orig_s[2], m_cv_orig_s[3]);
@@ -1301,6 +1585,9 @@ bool NebMD::stepBand()
                 ++m_hist[i][b];
             if (m_independent)
                 accumulateMeanForce(i, m_images[i], loc[k], m_probe_rng[i]);
+            // Claude Generated 2026: window diagnostics (log/CSV only, no effect on the dynamics)
+            if (m_independent && m_step % kDiagInterval == 0)
+                accumulateWindowDiagnostics(i, m_images[i]->positions());
         }
 
         // Serial merge.
@@ -1608,7 +1895,7 @@ void NebMD::setupUmbrella()
     // Claude Generated 2026: the CV is built on cvFrames() - the image frames by default, the
     // re-sampled / extended frames when cv_frames / cv_extend are set (buildCvPath).
     const std::vector<Geometry>& cvp = cvFrames();
-    m_path_cv = std::make_unique<PathCV>(cvp, m_start, -1.0, m_cv_atoms);
+    m_path_cv = makePathCV(cvp); // Claude Generated 2026: rmsd or distance metric
     m_umbrella_s0.assign(m_nimages, 0.0);
     // Claude Generated 2026: the window centres must be the s values the reference frames
     // ACTUALLY have, not i/(N-1).
@@ -1684,14 +1971,29 @@ void NebMD::setupUmbrella()
                 return cv->zWallEnergy(R, zw, kw, &grad);
             });
         }
-        CurcumaLogger::result_fmt("NEB-MD: z wall at z = {:.4f} A^2, k = {:.4f} Eh/A^4 (W = {:.2f} kT at "
+        const bool inv = m_path_cv->zUnit() == "A^-2"; // Claude Generated 2026: unit of z
+        CurcumaLogger::result_fmt("NEB-MD: z wall at z = {:.4f} {}, k = {:.4f} {} (W = {:.2f} kT at "
                                   "z = 1.2 z_wall); the PMF is that of the z-restricted system",
-                                  m_z_wall, m_z_wall_k,
+                                  m_z_wall, m_path_cv->zUnit(), m_z_wall_k, inv ? "Eh A^4" : "Eh/A^4",
                                   0.5 * m_z_wall_k * 0.04 * m_z_wall * m_z_wall / thermalEnergy());
     }
     m_hist.assign(m_nimages, std::vector<int>(m_umbrella_bins, 0));
     m_umbrella_ssum.assign(m_nimages, 0.0);
     m_umbrella_n.assign(m_nimages, 0);
+    // Claude Generated 2026: window diagnostics (windows.csv). Reference step of J = the largest
+    // change of one diagnostic pair coordinate between consecutive CV frames.
+    m_diag_z.assign(m_nimages, std::vector<double>());
+    m_diag_nn_sum.assign(m_nimages, 0.0);
+    m_diag_nn2_sum.assign(m_nimages, 0.0);
+    m_diag_n.assign(m_nimages, 0);
+    m_diag_x_sum.assign(m_nimages, Vector::Zero(static_cast<int>(m_diag_pairs.size())));
+    m_diag_x_step = 0.0;
+    if (m_diag_pairs.size() >= 2)
+        for (size_t k = 1; k < cvp.size(); ++k) {
+            const Vector dx = PathCV::pairValues(cvp[k], m_diag_pairs, m_diag_transform)
+                - PathCV::pairValues(cvp[k - 1], m_diag_pairs, m_diag_transform);
+            m_diag_x_step = std::max(m_diag_x_step, dx.cwiseAbs().maxCoeff());
+        }
     CurcumaLogger::result_fmt("NEB-MD: umbrella sampling on the path CV (lambda = {:.3f}, k = {:.1f}, "
                               "{} windows)", m_path_cv->lambda(), m_umbrella_k, m_nimages);
 
@@ -1708,7 +2010,9 @@ void NebMD::setupUmbrella()
         double dsum = 0.0;
         for (int i = 1; i < ncv; ++i) {
             double d2 = 0.0;
-            if (m_cv_atoms.empty()) {
+            if (m_cv_metric == PathCV::Metric::Distances) { // Claude Generated 2026
+                dsum += cvSpacing(cvp[i], cvp[i - 1]);
+            } else if (m_cv_atoms.empty()) {
                 for (int a = 0; a < nat; ++a)
                     d2 += (cvp[i].row(a) - cvp[i - 1].row(a)).squaredNorm();
                 dsum += std::sqrt(d2 / nat);
@@ -1719,9 +2023,11 @@ void NebMD::setupUmbrella()
             }
         }
         m_path_spacing = dsum / std::max(ncv - 1, 1);
-        CurcumaLogger::result_fmt("NEB-MD: reference path spacing {:.4f} A per image "
-                                  "(total {:.3f} A, lambda*d^2 = {:.2f})",
-                                  m_path_spacing, dsum, m_path_cv->lambda() * m_path_spacing * m_path_spacing);
+        const char* unit = (m_cv_metric == PathCV::Metric::Distances && m_cv_transform == PathCV::PairTransform::Inverse)
+            ? "1/A" : "A";
+        CurcumaLogger::result_fmt("NEB-MD: reference path spacing {:.4f} {} per image "
+                                  "(total {:.3f} {}, lambda*d^2 = {:.2f})",
+                                  m_path_spacing, unit, dsum, unit, m_path_cv->lambda() * m_path_spacing * m_path_spacing);
 
         // Floor for |grad s|^2/m below which a sample is unusable. Evaluated at the
         // MIDPOINTS between reference frames: s has a plateau at each frame, so the
@@ -2092,6 +2398,8 @@ void NebMD::writeWHAM() const
         out << "# WHAM free-energy profile on the path collective variable (Branduardi s)\n";
         out << "# umbrella_k=" << m_umbrella_k << " lambda=" << m_path_cv->lambda()
             << " windows=" << m_nimages << "\n";
+        if (m_cv_metric == PathCV::Metric::Distances) // Claude Generated 2026 (default header unchanged)
+            out << "# cv_metric distances, " << cvPairsText() << "\n";
         out << "s,G_kcal,counts\n";
         for (int b = 0; b < B; ++b) {
             long c = 0;
@@ -2513,7 +2821,7 @@ void NebMD::histogramTrajectory(const std::string& traj) const
     const PathCV* cv = m_path_cv.get();
     const std::vector<Geometry>& cvp = cvFrames(); // Claude Generated 2026: same CV as stage 2
     if (!cv) {
-        local = std::make_unique<PathCV>(cvp, m_start, -1.0, m_cv_atoms);
+        local = makePathCV(cvp); // Claude Generated 2026: rmsd or distance metric
         cv = local.get();
     }
     const int nat = static_cast<int>(m_start.AtomCount());
@@ -2816,6 +3124,8 @@ void NebMD::histogramTrajectory(const std::string& traj) const
                              m_cv_extend_length, m_cv_extend);
         if (!m_cv_atoms.empty()) // Claude Generated 2026 (only with a selection: default header unchanged)
             f << fmt::format("# cv_atoms {} ({} atoms)\n", m_cv_atoms_spec, m_cv_atoms.size());
+        if (m_cv_metric == PathCV::Metric::Distances) // Claude Generated 2026 (default header unchanged)
+            f << "# cv_metric distances, " << cvPairsText() << "\n";
         if (!m_cv_path.empty() && m_cv_orig_s.size() == 4)
             f << fmt::format("# cv path: {} frames (cv_frames {}, cv_extend {}), lambda {:.6g}; original path frames "
                              "on this CV: s(first) {:.6f}, s(second) {:.6f}, s(second-to-last) {:.6f}, s(last) {:.6f}\n",
@@ -3396,8 +3706,11 @@ void NebMD::writeMeanForceProfile() const
                              m_cv_path.size(), m_cv_frames, m_cv_extend, m_path_cv ? m_path_cv->lambda() : 0.0,
                              m_cv_orig_s[0], m_cv_orig_s[1], m_cv_orig_s[2], m_cv_orig_s[3]);
         if (m_z_wall > 0.0) // Claude Generated 2026: only with a wall, so default output is unchanged
-            f << fmt::format("# z wall {:.6g} A^2, k {:.6g} Eh/A^4: PMF of the z-restricted system, compare only "
-                             "at equal z_wall\n", m_z_wall, m_z_wall_k);
+            f << fmt::format("# z wall {:.6g} {}, k {:.6g} {}: PMF of the z-restricted system, compare only "
+                             "at equal z_wall\n", m_z_wall, m_path_cv ? m_path_cv->zUnit() : std::string("A^2"), m_z_wall_k,
+                             (m_path_cv && m_path_cv->zUnit() == "A^-2") ? "Eh A^4" : "Eh/A^4");
+        if (m_cv_metric == PathCV::Metric::Distances) // Claude Generated 2026 (only for distances: default header unchanged)
+            f << "# cv_metric distances, " << cvPairsText() << "\n";
         // Claude Generated 2026: the last three columns split estimator I, dGds_Eh = gradE + metric + wall
         // (printed with 13 significant digits; dGds_Eh keeps its 8 decimals). Not defined for II: nan.
         f << "estimator,s,dGds_Eh,G_kcal,samples,rejected_frac,dGds_gradE_Eh,dGds_metric_Eh,dGds_wall_Eh\n";
@@ -3432,9 +3745,9 @@ void NebMD::writeMeanForceProfile() const
         const double n = static_cast<double>(m_win_count[i]);
         if (n < 1.0)
             continue;
-        CurcumaLogger::result_fmt("  window {:2d}: s0 {:.4f}  <z> {:.4f}  max z {:.4f} A^2  z > z_wall {:.4f}  <W> {:.3e} Eh",
+        CurcumaLogger::result_fmt("  window {:2d}: s0 {:.4f}  <z> {:.4f}  max z {:.4f} {}  z > z_wall {:.4f}  <W> {:.3e} Eh",
                                   i, m_umbrella_s0[i], m_win_z_sum[i] / n, m_win_z_max[i],
-                                  m_win_zwall_n[i] / n, m_win_wall_sum[i] / n);
+                                  m_path_cv ? m_path_cv->zUnit() : std::string("A^2"), m_win_zwall_n[i] / n, m_win_wall_sum[i] / n);
     }
     double amp = 0.0;
     int ampn = 0;
@@ -3717,8 +4030,10 @@ void NebMD::start()
     }
     if (m_umbrella)
         writeWHAM();
-    if (m_independent)
+    if (m_independent) {
         writeMeanForceProfile();
+        writeWindowDiagnostics(); // Claude Generated 2026
+    }
 
     // Final summary: per-image energy.
     {

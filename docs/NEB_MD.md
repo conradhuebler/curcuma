@@ -126,9 +126,13 @@ still run and can change the path that was read. Set `-nebmd.idpp false` (and
 | `cv_extend` | 0 | frames | straight extension of the CV beyond each end |
 | `cv_extend_length` | 0.0 | fraction of arclength | extension as a length; overrides `cv_extend`; typical 0.05-0.1 |
 | `cv_atoms` | all | - | atoms of the path CV: `all`, `heavy` (Z > 1) or a 1-based list `1-6,9`. RMSD, centroid, Kabsch, s, z, z wall, cv_trace, cv_histogram, CV-frame alignment/re-sampling/extension and lambda use only these atoms (CV gradient of the others exactly 0, all atoms stay dynamic); window s0 equidistant in the selected-atom arclength. Stage 1 (string, Kabsch restraint) is unchanged. >= 3 atoms required: a CV on 2 (collinear) atoms cannot see rotations about their axis, so ethane `heavy` is rejected. A collinear selection with >= 3 atoms (SN2 Cl-C-Cl) passes: the CV-frame Kabsch fits weight the other atoms by 1e-6, which fixes the rotation about the axis (without it the H atoms of the SN2 CV frames jumped by 2.1 A, extension frames +8165 kcal/mol); a nearly but not exactly collinear selection is not tested. With `cv_frames 0` the path frames are used as given (no re-alignment on the selection) |
+| `cv_metric` | rmsd | - | metric of d_i: `rmsd` (best-fit RMSD, default) or `distances` (atom-pair coordinates, see "Distance-space path CV") |
+| `cv_pairs` | auto | - | pairs of `distances`: `auto` (pairs of `cv_atoms`, with `all` the heavy atoms, whose distance spans > `cv_pair_threshold` over the CV frames) or a 1-based pair list `1-4,1-9,4-9` (`1-4` = the pair (1,4)); >= 2 pairs; an explicit list overrides `cv_atoms` |
+| `cv_pair_threshold` | 0.5 | A | span (max - min) a pair needs for `auto`; also selects the heavy-atom pairs of the J diagnostic in the rmsd metric |
+| `cv_pair_transform` | d | - | x = d (z in A^2) or `inv`, x = 1/d (z in A^-2) |
 | `umbrella` | false | - | sample on the path CV s; switched on by `scheme independent` |
 | `constrain` | false | - | hold s by SHAKE/RATTLE instead of a restraint (pipeline: true) |
-| `z_wall` | 0.0 | A^2 | flat-bottom wall on z in stage-2 windows, W = k/2 (z - z_wall)^2 for z > z_wall; 0 = off |
+| `z_wall` | 0.0 | A^2 (A^-2 with `inv`) | flat-bottom wall on z in stage-2 windows, W = k/2 (z - z_wall)^2 for z > z_wall; 0 = off |
 | `z_wall_k` | 0.0 | Eh/A^4 | wall stiffness; 0 = automatic 150 kT/z_wall^2 (W = 3 kT at z = 1.2 z_wall) |
 | `window_trajectory` | false | - | write `<base>.image_NN.trj.xyz` every `simplemd.dump_frequency` steps (with `-no_bmt` in `<base>.image_NN.snapshots/`) |
 | `pmf_equilibration` | 200 | MD steps | steps discarded before mean-force averaging |
@@ -140,6 +144,19 @@ still run and can change the path that was read. Set `-nebmd.idpp false` (and
 | `optimize` | false | - | CI-NEB before the MD |
 | `opt_fmax` | 0.02 | Eh/A | CI-NEB force threshold |
 | `max_temperature` | 0.0 | K | window declared dead above this T; 0 = 10 x setpoint |
+
+## Distance-space path CV (`cv_metric distances`, Oct 2026)
+
+> AI-generated, machine-tested (unit test, ethane and ester smoke runs). Human production testing pending.
+
+- d_i^2 = 1/P sum_p (x_p(R) - x_p(C_i))^2 with x_p = |R_a - R_b| (or 1/|R_a - R_b|) over P atom pairs; s and z follow from d_i as for the RMSD. No Kabsch fit: rotation-, translation- and mirror-invariant; atoms in no pair (methyl H, a rotating fragment) do not move s or z.
+- Gradient (same convention as the RMSD branch, `PathCV::distTo`): d_i dd_i/dR_a = 1/P sum_p (x_p - x_p,i) dx_p/dR_a, dx/dR_a = (R_a - R_b)/d, or -(R_a - R_b)/d^3 for `inv`; SHAKE/RATTLE, z wall, mean force, div b, cv_trace and cv_histogram are metric-agnostic.
+- Units: z, z_wall in A^2 (`d`) or A^-2 (`inv`); lambda = 1/<d_k,k+1^2> over consecutive CV frames in the same metric.
+- CV frames: with `cv_frames` the path is re-sampled at equal **distance-space** arclength (each Cartesian segment integrated in 16 sub-steps, linear Cartesian interpolation), so lambda d^2 = 1 holds in the active metric; `auto` pairs are selected beforehand on the RMSD-re-sampled frames. Extension stays a straight Cartesian continuation; windows stay equidistant in s.
+- When to use: the RMSD CV worked where the reactive atoms carry > 90 % of the path metric (ethane 100 %, SN2 98 %) and failed below (retro-Diels-Alder 41 %, helicene 34 %, ester 25 %): inert motions moved s as much as the reaction (n = 5 systems, correlative).
+- `cv_pairs auto` takes every heavy-atom pair (or every `cv_atoms` pair) whose distance changes by more than 0.5 A along the CV frames; the list and spans are logged. Fewer than 2 pairs is an error.
+- Limit: distances are mirror-invariant, so an enantiomerisation (helicene P -> M) is invisible in distance space; it needs a signed coordinate (dihedral).
+- Diagnostics (both metrics, no effect on the dynamics): `<base>.neb.windows.csv` with `window,s0,z_mean,z_p90,frac_beyond_wall,nn_mean,nn_sd,J` from every 10th production step (nn = nearest CV frame; frac `nan` without wall). J(i) = max_p |<x_p>_i - <x_p>_i+1| / max_k max_p |x_p,k+1 - x_p,k| (CV pairs, or heavy-atom `auto` pairs in the rmsd metric; `nan` with fewer than 2 pairs); J > 3 is warned as a change of structural family between neighbouring windows.
 
 **Tube PMF** (`z_wall`): the wall is part of the sampled potential (inside the integrator, its gradient enters `<b . grad(E+W)>`), so G(s) is the PMF of the z-restricted system and depends on z_wall; compare G, barriers and rates only between runs with equal z_wall.
 
@@ -161,6 +178,7 @@ is an error, because the band arclength it used is not a function of R.
 - `<base>.neb.wham.csv` (written whenever umbrella is on; meaningful only in restraint mode), `<base>.neb.opt.xyz` (CI-NEB), `<base>.neb.init.xyz`,
   `<base>.neb.path.xyz`, `<base>.neb.final.xyz`, `<base>.neb.energy.csv`,
   `<base>.neb.cvtrace.csv` (`-nebmd.cv_trace`; with `z_wall` > 0 an extra last column `W_wall` in Eh); the per-window log lists <z>, max z, fraction z > z_wall and <W>.
+- `<base>.neb.windows.csv` (scheme independent) - per-window z statistics, nearest CV frame and neighbour-jump index J (see "Distance-space path CV").
 
 ## String stage: force criterion, gain, start-path preparation (Oct 2026)
 
@@ -484,6 +502,19 @@ in 3 of 5 seeds at 0.7-1.9 ps; the 272 stage-2 windows did not crash. The linear
   4.65 +- 0.6 and about -20; classical 7.45 and -22.21), but the A basin is not closed in q (the profile still falls at |q| = 3.4), so these two depend on the integration limit and are not like-for-like; dG(A -> A') = 0.93 +- 0.4
   (must be 0: the A basins are not equilibrated to better than 1-2 kcal/mol in 22 ps). No bistability: d(C_c-O_a) < 2.0 A in 100 % of frames for q0 = -2.4 ... 0; O_b enters within 2.5 A between q0 = -1.44 (2-6 %) and -1.28 (83-86 %);
   the barrier top is at q ~ -1.4 to -1.3. The 1-D PMF barrier is not a TST rate. Not checked: slow degrees of freedom orthogonal to q (no autocorrelation analysis), other kappa/dt, the FP32 fallback messages in window q0 = -1.60.
+- **RMSD path CV over the 3 reactive atoms only** (`-nebmd.cv_atoms "1,4,9"` = C_c, O_a, O_b; Oct 19, 2026; 68 windows, 22 ps, seed 1, n=1 per setting; well-conditioned: L 2.511 A, spacing 0.109 A): z_wall 0 / 0.1:
+  dG_TST(I -> TS_L / TS_R) 28.9 / 28.4 and 27.9 / 28.7 (Eyring-corrected; uncorrected 27.1 / 26.6 and 26.1 / 26.9), dG(A -> I) -22.6 / -21.5, dG(A -> B) -1.50 / -0.09, antisymmetry 1.64 / 1.09, largest dG/ds jump 0.292 Eh per unit s
+  (windows 33-34), no window with a bonded fraction strictly between 0.05 and 0.95; the bonded-fraction test still flags jumps between windows 24/25 and 42/43 (a hard 2.5 A cutoff falls between two sharply localised windows:
+  d(C_c-O_a) 2.51 -> 2.40 A; a cutoff artifact of the test, not a mixed window). Reference: umbrella I -> TS 28.28 +- 0.3, classical harmonic 29.66; all-atom RMSD CV 24.0-24.7. So I -> TS is within the noise of the umbrella reference when
+  the reactive atoms dominate the path metric (here 100 %); the heavy-atom RMSD CV gave 25.9 / 26.3. n=1; seed variation, other cutoffs and block convergence not checked.
+- **Distance-space path CV for the ester** (`-nebmd.cv_metric distances -nebmd.cv_pairs auto`, 11 heavy-atom pairs, 68 windows, 22 ps, window trajectories; pre-registered protocol; n=2 seeds per wall value; Oct 19, 2026):
+  dG_TST(I -> TS) (Eyring-corrected mean of TS_L and TS_R) **28.46 / 28.09 (z_wall 0, seeds 1 / 2; mean 28.28) and 28.52 / 28.14 (z_wall 0.25; mean 28.33)** against the independent umbrella 28.28 +- 0.3
+  (classical harmonic 29.66; all-atom RMSD CV 24.0-24.7; heavy-atom RMSD CV 25.9 / 26.3); seed sd 0.26 / 0.27; A -> I -22.77 / -22.37 and -22.85 / -22.04 (classical -22.21 +- 1.5); dG(A -> A') 1.45 / 0.55 and 1.15 / 1.14 (umbrella 0.93 +- 0.4, must be 0);
+  node G(s): left max 5.1-5.9 at s 0.33, intermediate -22.5 to -23.4 at s 0.49-0.50, right max 5.3-5.8 at s 0.67-0.68; largest dG/ds jump 0.19 Eh per unit s (windows 31-32) < 0.3; wall passive (mean 0.1 %, max 2.6 % in windows 25-45);
+  antisymmetry of the seed mean 1.13 (wall 0) / 1.27 (wall 0.25); typical on-path z median 0.025 (z_mean < 0.1 in 25 of 31 windows), tail up to 0.43 (windows 16-23) and 0.48 (44-50) without wall.
+  Criteria: I -> TS (3), seed sd (5), wall passive (6), dG/ds jump (7) met; neighbour-jump test (1) NOT met as written (bonded fraction ramps 0.02, 0.30, 0.85, 1.00 over windows 22-25 and the mirror, a smooth TS crossing with J < 2, no
+  family jump; windows 23/24/43/44 are mixed), dG(A -> A') (4) not met (1.0-1.15; the reference itself is 0.93 +- 0.4: A is not equilibrated better than ~1 in 22 ps), antisymmetry (8) not met (the umbrella reference has 1.07 for G < 35);
+  J diagnostic (2): with z_wall 0 it still flags windows 16-22 and 46-50 (pair 4-10, O_a...C_b, bistable, sd 0.6-0.8 A) and is silent with z_wall 0.25 (max J 1.93 / 2.02). n=2; no block errors; Eyring correction not independently checked.
 - Not checked: more than 136 windows, other z_wall, the seed-3 outlier of the 34-window runs, free-ion reference, window trajectories.
 
 ## Known open issues
