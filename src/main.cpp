@@ -2392,6 +2392,18 @@ int executeNebMD(const json& controller, int argc, char** argv) {
         return 1;
     }
 
+    // Claude Generated (Oct 2026): apply total charge/spin from the CLI (-charge, -spin) to both
+    // endpoints. Without this every NEB-MD calculator was built at charge 0 (an anionic SN2 test
+    // evaluated the endpoints as neutral); same convention as -sp/-opt.
+    if (controller.contains("charge")) {
+        start.setCharge(controller["charge"].get<int>());
+        end.setCharge(controller["charge"].get<int>());
+    }
+    if (controller.contains("spin")) {
+        start.setSpin(controller["spin"].get<int>());
+        end.setSpin(controller["spin"].get<int>());
+    }
+
     json ctrl = controller;
     ctrl["geometry_file"] = std::string(argv[2]);
 

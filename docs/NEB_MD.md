@@ -401,7 +401,28 @@ stage 2 basin barrier 30.96 / 28.01, Eyring 33.27 / 30.31 (OptTS dE 31.88, RRHO 
   step is not fully resolved and the 34-window number may still move. `-nebmd.nimages` is ignored with `path_file` (the window count is the number of frames
   of the path file). Windows 5-11 still press against the z wall (up to 27 % of samples beyond z_wall). Ethane (broad barrier, 12 windows) was not affected.
   The agreement 67.0 vs 67.68 is one run per setting; it is not a validation.
+  More windows (Oct 17, 2026, same path and CV for 34 / 50 / 68; z_wall 0.5; 22 ps): Eyring dG_TST 67.29 (sd 0.24, seeds 1-3) at 34, 65.60 (n=1) at 50,
+  66.33 (n=1) at 68 windows; 64.68 (n=2) for a 40-window file, which curcuma resamples to equal RMSD arclength (window s0 are always equally
+  spaced; lambda 785 instead of 777), so it differs in CV as well and sits 2.6 below the 34-window mean, more than the seed spread. For >= 34 windows
+  dG_TST lies in 64.7-67.3 (reference 67.68), non-monotonic in the window count: **not converged to better than ~2-3 kcal/mol**; the
+  dG/ds step sits at s = 0.38-0.40 and only the 68-window run has a window inside it (0.382, +0.87). Basin reaction dG 49.6 / 52.9 / 55.2 and the reverse
+  barrier 16.3 / 11.6 / 10.0 at 34 / 50 / 68 windows are still moving (product side). WHAM gaps: 27 (34), 15 (40), 0 (50, 68). Not
+  checked: seeds at 50/68, lambda/CV sensitivity, max z against the wall, window overlap.
 - The "GFN2 saddle path" quoted in the string section (mirror asymmetry 0.29) is not in `test_cases/helicene/`.
+
+**Identity SN2, Cl(-) + CH3Cl** (GFN2, charge -1, 300 K, stage 2 on a mirror-symmetric 12-frame path, 22 ps windows, z_wall 0.5 A^2, cv_trace; AI-generated run,
+machine-tested only): references from the same method: dE_TS 10.60, classical harmonic dG_TS(300 K) 12.02, quantum RRHO 11.78 kcal/mol (TS D3h, C-Cl 2.211 A,
+imaginary mode -430.9 cm-1); binding of the complex 10.05; reaction dG = 0 and forward = reverse by symmetry.
+- 34 windows, seeds 1 / 2 / 3: Eyring fwd 11.44 / 11.36 / 11.47 (mean 11.42, sd 0.06), rev 11.40 / 11.09 / 11.09 (11.19, sd 0.18), spline barrier 11.89 / 11.80 / 11.88,
+  basin reaction dG +0.04 / +0.27 / +0.38 (mean 0.23, sd 0.17, n=3), spline +0.20 +- 0.20. Resolution (seed 1): 12 / 23 / 34 / 50 windows Eyring fwd 11.48 / 11.33 / 11.44 / 11.48,
+  rev 12.20 / 11.29 / 11.40 / 11.21; reaction dG -0.72 / +0.04 / +0.04 / +0.28. Relaxed string (100 ps stage 1, not converged: f_sig 3.9e-3 vs ftol 5e-4): Eyring 11.72 / 11.82.
+- All pre-registered criteria met (reaction dG within +-0.8, fwd/rev within 1, dG_TST within 3 of 12.02, seed sd < 1, mean z < z_wall, 34 vs 50 windows within 1); the peak is
+  broad (FWHM ~65 % of the path) and the dG/ds profile smooth and antisymmetric about s = 0.5 (largest step between neighbouring windows 0.035 Eh per unit s). 12 windows
+  already give 11.5 / 12.2.
+- With the wall off (seed 1) the result is the same (11.39 / 11.40); mean z reached 0.55 in one window, so on this system the wall is not needed. The basin reaction dG of seeds 2 and 3
+  is 0.27 and 0.38 (mean 0.23, standard error 0.10): a small positive offset cannot be excluded, n=3.
+- An asymmetric path cannot be built through `path_file`: curcuma resamples the file to equal RMSD arclength (mirror RMSD 0.1345 A before, 0.0004 A after resampling).
+- `-nebmd` now applies `-charge` and `-spin` to both endpoints (before: the calculators were built at charge 0; an anionic test ran as neutral).
 
 ## Known open issues
 
