@@ -351,6 +351,25 @@ int main(int argc, char* argv[])
             std::vector<ParsedMacro> macros;
             std::vector<size_t> starts;
             extract_param_macros(block, macros, starts);
+            // Claude Generated 2026 - module metadata (MODULE_INFO). It sits in the same block as the
+            // PARAMs; the merge of the multi-line PARAM tokenizer dropped this step, which left every
+            // module without description and CLI verbs. [^"]* spans line breaks, unlike '.'.
+            static const std::regex module_info_regex(
+                R"(MODULE_INFO\s*\(\s*((?:\"[^\"]*\"\s*)+),\s*\"([^\"]*)\"\s*,\s*\{([^}]*)\}\s*\))",
+                std::regex::ECMAScript);
+            std::smatch info;
+            if (std::regex_search(block, info, module_info_regex) && info.size() == 4) {
+                // The description may be several adjacent literals ("a " "b"); join them.
+                std::string description;
+                bool in_quotes = false;
+                for (char c : info[1].str()) {
+                    if (c == '"')
+                        in_quotes = !in_quotes;
+                    else if (in_quotes)
+                        description += c;
+                }
+                all_modules.push_back({ module, trim(description), trim(info[2]), std::string(info[3]) });
+            }
             for (size_t k = 0; k < macros.size(); ++k) {
                 const int at = starts[k] < block_line_of_char.size() ? block_line_of_char[starts[k]] : line_number;
                 Parameter prm;
