@@ -56,9 +56,9 @@ ml_barcode_ablation conf.deltaml.dataset.json --threads 24 --json result.json
 
 ## Side findings
 
-- `external/ripser/ripser.h` has four function-local `static` enumerators bound to the first ripser object;
-  concurrent calls crash (SIGSEGV, gdb), serial calls work only by stack-address luck. `PersistentDiagram` now
-  serialises the Ripser call with a mutex and a fixed construction address (`runRipser()`), which is safe but
-  gives no speed-up. A real fix removes the `static` in the Ripser fork.
+- `external/ripser/ripser.h` had four function-local `static` enumerators bound to the first ripser object;
+  concurrent calls crashed (SIGSEGV, gdb), serial calls worked only by stack-address luck. Fixed in the Ripser
+  fork (commit 5512434, statics removed; serial cost +2.4 %); `PersistentDiagram` calls Ripser directly again.
+  Feature time of the ablation 3.03 s (serialised) -> 0.48 s (24 threads, 31770 patches).
 - Fable's design review (lead: smooth Hodge-Laplace spectra instead of barcodes if topology is wanted at all)
   was not pursued: it estimated a 15 to 25 % chance of a robust gain, and the measurement above is negative.

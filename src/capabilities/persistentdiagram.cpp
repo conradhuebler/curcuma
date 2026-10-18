@@ -22,46 +22,13 @@
 #include "json.hpp"
 
 #include <iomanip>
-#include <mutex>
-#include <new>
 #include <numeric>
-#include <unordered_map>
 
 #include "persistentdiagram.h"
 #include "src/tools/general.h"
 #include "src/core/parameter_registry.h"
 
 using json = nlohmann::json;
-
-namespace {
-/*! Claude Generated (Oct 2026): thread-safe wrapper around ripser<>::compute_barcodes().
- *
- * external/ripser/ripser.h keeps function-local statics (`static simplex_coboundary_enumerator cofacets(*this)`
- * in get_zero_pivot_cofacet, init_coboundary_and_get_pivot, add_simplex_coboundary and
- * `static simplex_boundary_enumerator facets` in get_zero_pivot_facet). They are bound to the ripser object of
- * the FIRST call (reference member `parent`) and shared by all threads. Consequences:
- *  - two concurrent computations race on the same enumerator (and read the other thread's matrix);
- *  - even serially, a later call only works because the next ripser object happens to sit at the same stack address.
- * The header is external (FetchContent) and must not be edited, so the computation is serialised with a mutex
- * and the ripser object is always constructed at the same fixed address (placement new), which keeps the
- * stale `parent` reference of the statics valid. Result is identical to the previous serial behaviour.
- * Real parallelism needs the four `static` enumerators in ripser.h turned into locals (upstream fix).
- */
-std::unordered_map<int, dpairs> runRipser(compressed_lower_distance_matrix&& dist, index_t dim_max,
-    value_t threshold, float ratio, coefficient_t modulus)
-{
-    using Ripser = ripser<compressed_lower_distance_matrix>;
-    static std::mutex mutex;
-    alignas(Ripser) static unsigned char storage[sizeof(Ripser)];
-    std::lock_guard<std::mutex> lock(mutex);
-    Ripser* r = new (storage) Ripser(std::move(dist), dim_max, threshold, ratio, modulus);
-    struct Destroy {
-        Ripser* p;
-        ~Destroy() { p->~Ripser(); }
-    } guard{ r };
-    return r->compute_barcodes();
-}
-}
 
 PersistentDiagram::PersistentDiagram(const json& config, bool silent)
     : PersistentDiagram(ConfigManager("ripser", config), silent)
@@ -122,7 +89,9 @@ dpairs PersistentDiagram::generatePairs()
         }
     }
 
-    auto result = runRipser(std::move(dist), m_dimension, enclosing_radius, m_ratio, modulus);
+    auto result = ripser<compressed_lower_distance_matrix>(std::move(dist), m_dimension, enclosing_radius,
+        m_ratio, modulus)
+                      .compute_barcodes();
 
     dpairs final;
     for (const auto& a : result)
@@ -151,7 +120,9 @@ std::map<int, dpairs> PersistentDiagram::generateBarcodes()
         enclosing_radius = std::min(enclosing_radius, r_i);
     }
 
-    auto result = runRipser(std::move(dist), m_dimension, enclosing_radius, m_ratio, modulus);
+    auto result = ripser<compressed_lower_distance_matrix>(std::move(dist), m_dimension, enclosing_radius,
+        m_ratio, modulus)
+                      .compute_barcodes();
     for (const auto& a : result)
         barcodes[a.first] = a.second;
     return barcodes;
@@ -182,7 +153,9 @@ triples PersistentDiagram::generateTriples()
         }
     }
 
-    auto result = runRipser(std::move(dist), m_dimension, enclosing_radius, m_ratio, modulus);
+    auto result = ripser<compressed_lower_distance_matrix>(std::move(dist), m_dimension, enclosing_radius,
+        m_ratio, modulus)
+                      .compute_barcodes();
 
     triples final;
     for (const auto& a : result)

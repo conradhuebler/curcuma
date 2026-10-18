@@ -2,7 +2,7 @@
 // Build against a ripser.h (header-only): g++ -O2 -std=c++17 -pthread -I<dir with ripser.h> ripser_thread_stress.cpp -o stress
 // Run: ./stress conf.xyz <nstruct> <threads> > barcodes.txt   (multi-XYZ input; one patch per atom, radius 5 A, H0+H1)
 // Compare the barcodes of a 1-thread run with a many-thread run (cmp); the unpatched header aborts with threads > 1.
-// Used for docs/patches/ripser-thread-safe-enumerators.patch.
+// Written for the Ripser fork commit 5512434 (conradhuebler/ripser, function-local statics removed).
 #include <array>
 #include <algorithm>
 #include <cmath>
