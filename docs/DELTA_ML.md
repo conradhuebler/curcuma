@@ -524,8 +524,10 @@ order (formerly thread-chunk order, so a given `-activelearn.seed` now selects a
 train/test split than before). Result: all 401 frames of both use-case sets (66 and 90 atoms, GFN2
 reference) equal `-sp -dump_gradient` exactly (max deviation 0 for all four labels) and `-threads 1`
 and `-threads 4` write byte-identical datasets. Regression test: `cli_deltaml_04_label_consistency`.
-A general fix belongs in `GFNFF::InitialiseMolecule` (reset the external distance pointer); any
-other caller that re-initialises one GFNFF object for a new geometry is still affected.
+The GFN-FF defect itself is fixed in `GFNFF::InitialiseMolecule` (the external distance pointer is
+reset, as in a fresh object); regression test `test_gfnff_reinit` (a re-used calculator equals a fresh
+one, energies and gradients, 8 frames of `helicene-frames17`: worst deviation 1.35e-4 Eh and 3.9e-4 Eh/A
+before, 0 after). The per-structure calculators in `LabelThread` stay, they cost nothing measurable.
 
 ## A numerical trap worth knowing about
 
