@@ -4107,7 +4107,7 @@ Vector EEQSolver::calculateFinalCharges(
             // partition wrote A(j,i) column-wise over the whole matrix. Threads take contiguous
             // ranges of the tile list. Element values depend neither on order nor on thread:
             // the matrix is bitwise identical (checked by a full-matrix hash, docs/EEQ_SOLVER_CONTROL.md).
-            constexpr int TILE = 64;
+            static constexpr int TILE = 64;  // static: the [&] lambda below must not capture it, or MSVC (C2131) no longer treats it as a constant in `buf[TILE * TILE]`
             const int nb = (natoms + TILE - 1) / TILE;
             const long long ntiles = static_cast<long long>(nb) * (nb + 1) / 2;
             double* const A_data = A.data();                       // RowMajor: A(i,j) = A_data[i*ld + j]
