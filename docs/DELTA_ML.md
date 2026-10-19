@@ -300,6 +300,11 @@ orders of magnitude for DFT.
 
 ## With a DFT reference the case is different
 
+> **Re-measured Oct 2026** with repaired labels ([DELTA_ML_THIRD_MOLECULE_DFT_2026-10.md](DELTA_ML_THIRD_MOLECULE_DFT_2026-10.md)):
+> the forces transfer (2.0x to 2.8x better than GFN-FF against the DFT gradient, caffeine and peo8), the 2.3x energy figure below is
+> **not reproduced for the joint model** (default joint model worse than GFN-FF with 120 caffeine frames, 1.2x with 400); the energy-only model
+> reaches 1.4x to 2.1x. The table below was measured with defective labels.
+
 Everything above uses GFN2 as the reference, where the cost ratio to GFN-FF is only 88x.
 That is the wrong regime to judge the method in. Repeated with ORCA r2SCAN-3c on caffeine
 (24 atoms, 96 frames from a 300 K GFN-FF trajectory, M = 400, lambda = 1e-6):
