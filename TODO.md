@@ -50,6 +50,7 @@ Stand.
 - **Windows**: `-DUSE_PORTABLE_MATH=ON` nicht auf einer echten Windows-Maschine bestätigt ([docs/PORTABLE_ERF.md](docs/PORTABLE_ERF.md)).
 - **Ladungsplatzierung** (Known Issue #31) nicht getestet für periodische Systeme, GPU-Laufzeit, viele Fragmente in Kontakt und lange MD mit
   `frag_charge_s_max` > 1.
+- **`-opt` auf einer Mehrfach-Datei weicht vom Einzelergebnis ab** (gemessen 2026-10-19, n=17 Helicen-Frames, CPU, 1 Thread): optimierte Strukturen aus einem Lauf mit der ganzen Datei unterscheiden sich von je einem eigenen Lauf pro Frame bis 3,7e-3 A (vor `#39`-Korrektur bis 2,6e-2 A); der Rest ist eine weitere Historienabhängigkeit des wiederverwendeten GFN-FF-Rechners, nicht untersucht (Verdacht: eingefrorene Größen aus dem ersten Aufbau, Known Issue #33). Details: `docs/KNOWN_ISSUES_ARCHIVE.md` #39.
 
 ## 2. Leistung
 
