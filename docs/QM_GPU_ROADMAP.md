@@ -165,14 +165,17 @@ iterations, C80 27 iterations. Changes:
 | C40H82 (970) | 23, 152 s, 185 s (load 20 at start) | 13, 23.8 s, 31.6 s | 305 M | 0 |
 | C60H122 (1450) | 18, 328 s, 406 s | 13, 53.6 s, 72.0 s | 704 M | 0 |
 | C80H162 (1930) | 27, 1172 s, 1381 s | 13, 95.5 s, 129.6 s | 1.27 G | 0 |
-| C120H242 (2890) | did not finish (3.9 h, earlier session) | 13, 216 s, 306 s | not printed | no reference |
+| C120H242 (2890) | SCF diverges/oscillates, did not converge (killed after 20 iterations, ~1 h; earlier session 3.9 h) | 13, 216 s, 306 s | not printed | no reference |
 
 Single runs, machine load 1-5 (another agent active). Wall-time exponents over n: old C40->C80 2.9 (C60->C80 4.3), new
 2.05 (C80->C120 2.13); the J/K quartet count grows as n^2 (exact Coulomb, no multipole far field). C80 new: 10.0 G
 quartets in 93.7 s of builds (107 quartets/us, old 24/us), final build 13 s, setup ~20 s (1e integrals with 1 thread;
 `-qm.threads 24` cuts it). Step by step on C20 (SCF loop): 22.5 s -> 14.8 (enumeration + Hermite kernel) -> 7.4 (atom
-guess, 13 iterations) -> 6.4 (early screening) -> 5.9 s (primitive density screen); C40: 45.5 -> 30.1 -> 23.8 s. The old
-C120 rerun with a 1.5 h cap is in the next paragraph. Energies: E_elec of benzene, naphthalene, anthracene (ideal acenes),
+guess, 13 iterations) -> 6.4 (early screening) -> 5.9 s (primitive density screen); C40: 45.5 -> 30.1 -> 23.8 s. Old code on
+C120 (rerun this session): ||dP|| 4e2 to 6e3 over 20 iterations with no downward trend (iteration 5: 2.3e3, 13: 6.3e3,
+20: 1.7e3), ~170 s per Fock build of which ~120 s rectangle launch (the first build, 0.4 G quartets, took 128 s);
+killed after ~1 h. The cause of the earlier 3.9 h run is therefore the oscillating SCF from the old guess times the
+slow builds. Energies: E_elec of benzene, naphthalene, anthracene (ideal acenes),
 C8H18, C20-C80 equal the old code to all 10 printed decimals on the GPU-direct path and the CPU-direct path (CPU: 2.2-2.6x
 faster from the guess alone); `ctest -L "qm_gpu|qm_2e|qm_1e|qm_hf3c|qm_grad|qm_mp2|qm_ri|qm_lmp2|qm_ccsd"` 259/259 (the two
 `qm_opt_hf3c_*` with the venv python). Not tested: other elements than H, C, O at this size, 3D-compact systems (more

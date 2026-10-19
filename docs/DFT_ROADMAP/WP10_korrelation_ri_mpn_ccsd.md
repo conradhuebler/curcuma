@@ -855,7 +855,8 @@ Grenze.
 `-qm.scf_guess atom`, lockere Schwelle in der Anfangsphase, dichtegewichtetes Primitiv-Screening; alles energieneutral auf
 10 Stellen) C40 31.6 s, C60 72 s, C80 130 s (vorher 1381 s) und C120H242 (2890 Funktionen) 306 s, je 13 Iterationen,
 Wandzeit ~n^2.1. Messungen und Grenzen: [QM_GPU_ROADMAP.md, Abschnitt 2 "Large systems"](../QM_GPU_ROADMAP.md). LMP2 auf
-C120 wurde in dieser Sitzung nicht gerechnet.
+C120 wurde in dieser Sitzung nicht gerechnet. Der alte Code oszilliert auf C120 (||dP|| 4e2..6e3 ueber 20 Iterationen, ~170 s pro Fock-Aufbau,
+nach ~1 h abgebrochen): Ursache der fruehere 3.9-h-Rechnung war die alte Startdichte zusammen mit den langsamen Aufbauten.
 
 - **Getestet:** H, C, O; def2-SVP, JKFIT (JFIT nur Exaktheit); Systeme der Tabelle (2) plus PEO8; RI-JK- und exakte
   (GPU-direkt) SCF; 1 und 4 Threads (ctest, bitgleich auf 12 Stellen); ctest `qm_lmp2_*` (24 Tests).
