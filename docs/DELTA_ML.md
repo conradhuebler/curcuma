@@ -161,7 +161,7 @@ arguments prints the summary; the full list comes from the parameter registry.
 
 > The defaults of `lambda`, `kernel_sigma`, `sigma_*`, `energy_model_lambda` and the ACSF grid were
 > chosen from scans on the defective labels described under "Held-out accuracy"; they are to be
-> re-measured ([DELTA_ML_USECASE_TEST2_2026-10.md](DELTA_ML_USECASE_TEST2_2026-10.md)).
+> re-measured ([DELTA_ML_USECASE_TEST2_2026-10.md and, for forces, trade-off and parameters, DELTA_ML_RETEST_2026-10.md](DELTA_ML_USECASE_TEST2_2026-10.md)).
 
 | Parameter | Default | Effect |
 |---|---|---|

@@ -52,6 +52,8 @@ Stand.
   `frag_charge_s_max` > 1.
 - **LBFGSpp prüft die Krümmung nicht** (geprüft 2026-10-18, n=1): `BFGSMat::add_correction` überspringt das Update bei `s'y <= 0` nicht; auf einer rauen Delta-ML-Fläche (alte Defaults, 120 Zentren) bricht der Optimierer `auto` mit Exit 1 ab. Beobachtet an `cli_deltaml_01` mit dem alten ACSF-Gitter, mit den neuen Defaults (6 Schalen, eta 4) konvergiert er. Details: `AIChangelog.md` (Delta-ML), Vault `Projekte/curcuma Delta-ML`.
 - **`-opt.optimizer lbfgs` macht bei großem Startgradienten einen Nullschritt** (n=160 Läufe, 2026-10-19): ab etwa 0,3 Eh/Bohr Exit 1, 0 Iterationen, kein Fehlertext, auch für GFN2 und GFN-FF allein (400-K-MD-Frames); der Standardoptimierer läuft durch. Ursache nicht untersucht.
+- **`-md.seed` wirkt nicht auf die Anfangsgeschwindigkeiten** (bitgleiche Läufe für Seeds 21 bis 26 und 11, 2026-10-19): `InitVelocities` benutzt eine ungesäte statische `default_random_engine`; unabhängige MD-Läufe aus einer Startstruktur sind so nicht möglich. Ursache gelesen, nicht behoben.
+- **Delta-ML: Modellenergie am eigenen Optimum zu niedrig** (n=20 je Molekül, 2026-10-19): bei `lambda 1e-6` und 4000 Zentren liegt sie um bis zu 34 kcal/mol unter GFN2 (19/19 auf dem Trisaccharid), `lambda 1e-3` beseitigt das und verschiebt die Energie um 7 bis 16 kcal/mol nach oben; `uncertainty_abort` hilft nicht. Details: `docs/DELTA_ML_RETEST_2026-10.md`.
 
 ## 2. Leistung
 
