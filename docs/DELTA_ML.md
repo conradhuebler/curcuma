@@ -159,6 +159,10 @@ suspicious predictions; useless as an accuracy guarantee.
 Module `activelearn` (fitting) and `deltaml` (evaluation). `curcuma -activelearn` without
 arguments prints the summary; the full list comes from the parameter registry.
 
+> The defaults of `lambda`, `kernel_sigma`, `sigma_*`, `energy_model_lambda` and the ACSF grid were
+> chosen from scans on the defective labels described under "Held-out accuracy"; they are to be
+> re-measured ([DELTA_ML_USECASE_TEST2_2026-10.md](DELTA_ML_USECASE_TEST2_2026-10.md)).
+
 | Parameter | Default | Effect |
 |---|---|---|
 | `-ref_method` | `gfn2` | the level being learned; must match the base method's dispersion treatment |
@@ -190,6 +194,13 @@ calculations: `curcuma -activelearn conf.xyz -activelearn.dataset conf.deltaml.d
 ignored silently.
 
 ## Held-out accuracy (October 2026)
+
+> **Measured with defective labels; to be re-measured.** Every number in this section (and the
+> hyperparameter scans, "forces 4x better" and the energy/force trade-off elsewhere in this file)
+> was fitted on datasets whose gradient labels were 1.89 times too large (fixed in bc7742e6) and
+> whose stored base energies were not the GFN-FF energies of the structures (fixed Oct 2026, see
+> "Open: the anchor freezes more than it should"). Kept for the record; current measurements:
+> [DELTA_ML_USECASE_TEST2_2026-10.md](DELTA_ML_USECASE_TEST2_2026-10.md).
 
 353 conformers of the 90-atom C/H/N molecule below, base GFN-FF, reference GFN2, 282 training /
 71 held-out structures (`-test_fraction 0.2`), several split seeds (`-activelearn.seed`), fitted
@@ -496,6 +507,25 @@ on top of the fresh energy by `-sp`; the true GFN2 minimum has GFN-FF rank 7 wit
 energy. The labelling and the single-point path must use the same base energy before the held-out numbers can be
 transferred to deployment (details and the effect on the ranking test:
 [DELTA_ML_USECASE_TEST_2026-10.md](DELTA_ML_USECASE_TEST_2026-10.md)).
+
+**Cause and fix (Oct 2026):** not the anchor. `-activelearn` reused one `EnergyCalculator` per
+thread and called `setMolecule()` for each structure. A re-initialised `GFNFF` keeps
+`EEQSolver::m_external_srab` pointing at the distance array of the *previous* structure, so the
+Phase-2 EEQ solve during topology setup uses stale distances, and `Calculation()` then skips its
+own Phase-2 solve because the geometry has not changed since setup. Only the Coulomb term moved
+(charges off by up to 0.07 e); clearing that pointer in a test build, or a new calculator per
+structure, removed the deviation (40 trisaccharide frames: -4.26 +- 1.87 kcal/mol to 1e-14 Eh),
+while dropping the bond pinning or `cache_topology false` changed nothing. Labelling now builds
+fresh base and reference calculators per structure (as `-sp` and `DeltaMLMethod` do), keeps the
+anchor bonds (which `DeltaMLMethod` applies identically: deployed base energy = stored label to
+the 1e-10 print precision, 7 structures), forces one thread per calculator also in the `global`
+scope (`-threads 4` used to give every GFN-FF instance 4 threads) and writes the dataset in input
+order (formerly thread-chunk order, so a given `-activelearn.seed` now selects a different
+train/test split than before). Result: all 401 frames of both use-case sets (66 and 90 atoms, GFN2
+reference) equal `-sp -dump_gradient` exactly (max deviation 0 for all four labels) and `-threads 1`
+and `-threads 4` write byte-identical datasets. Regression test: `cli_deltaml_04_label_consistency`.
+A general fix belongs in `GFNFF::InitialiseMolecule` (reset the external distance pointer); any
+other caller that re-initialises one GFNFF object for a new geometry is still affected.
 
 ## A numerical trap worth knowing about
 

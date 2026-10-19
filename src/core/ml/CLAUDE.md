@@ -35,7 +35,7 @@ measured on one molecule: forces 4x better on held-out conformers, but ranking a
 
 ## Verification status (AI-generated, machine-tested)
 
-Automated: `ctest -R deltaml` (unit test `test_deltaml` + CLI tests 01-03; 03 is the FD gate of the energy model).
+Automated: `ctest -R deltaml` (unit test `test_deltaml` + CLI tests 01-04; 03 is the FD gate of the energy model, 04 checks labels against fresh `-sp`).
 
 - Descriptor Jacobian vs. finite differences: h^2 convergence to the roundoff floor
   (1.5e-5 at h=1e-3 down to 6e-10 at h=1e-6); translation invariance 2e-16, rotation 1e-15
@@ -44,6 +44,10 @@ Automated: `ctest -R deltaml` (unit test `test_deltaml` + CLI tests 01-03; 03 is
   (paired Spearman -0.146 +- 0.095 and -0.099 +- 0.112, n=10 folds) and pre-optimisation (GFN2 energy at the result +59 and +75 kcal/mol, n=20);
   cost 11x and 25x GFN-FF; the stored base energy differs from fresh GFN-FF by 1.2 +- 0.7 kcal/mol (n=353), so numbers from
   `-activelearn` and from `-sp` are not in the same frame
+- Labels (fixed Oct 2026): fresh calculators per structure, anchor bonds as in `DeltaMLMethod`, dataset in input order;
+  stored energy/gradient labels equal `-sp -dump_gradient` exactly on 2 x 401 frames, `-threads 1` == `-threads 4` byte for byte.
+  Cause of the old offset: a reused GFNFF keeps stale EEQ distances (docs/DELTA_ML.md, "Open: the anchor freezes more than it should").
+  Datasets labelled before this fix, and every number measured on them, carry the offset; the seed now gives a different split
 - Energy from the gradient path and the plain path agree bit-for-bit
 - JSON round-trip reproduces energies and gradients exactly
 - Energy-only fit interpolates its training energies to 1.5e-4 kcal/mol, which separates a

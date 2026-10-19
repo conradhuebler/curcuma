@@ -24,6 +24,7 @@
 #include "src/core/curcuma_logger.h"
 #include "src/core/energycalculator.h"
 #include "src/core/fileiterator.h"
+#include "src/core/intra_parallel_context.h"
 #include "src/core/parameter_registry.h"
 #include "src/core/units.h"
 
@@ -39,6 +40,7 @@
 #include <fstream>
 #include <limits>
 #include <sstream>
+#include <stdexcept>
 
 using curcuma::ml::DeltaMLErrors;
 using curcuma::ml::DeltaMLModel;
@@ -52,19 +54,20 @@ namespace {
 /**
  * @brief Computes base and reference energy plus gradient for a batch of structures.
  *
- * Each thread owns its own pair of calculators. Both are initialised from the anchor
- * geometry and then moved to the actual structure, so a method that freezes its topology
- * at setup produces the same bond list in every thread. Without this the learned
- * difference absorbs setup noise instead of physics.
+ * Every structure gets freshly constructed calculators, exactly as `-sp` and the deployed
+ * model (DeltaMLMethod::initialiseBase, MethodFactory::create per setMolecule) do. Only the
+ * anchor bond graph is carried over, via Mol::m_bonds, which DeltaMLMethod applies in the
+ * same way; so training and deployment see the same base energy for the same geometry.
+ *
+ * Results are kept with their input index, so the caller can restore the input order.
  */
 class LabelThread : public CxxThread {
 public:
     LabelThread(const std::string& base_method, const std::string& ref_method, const json& controller,
-        const Molecule& anchor, const std::vector<std::pair<int, int>>& anchor_bonds)
+        const std::vector<std::pair<int, int>>& anchor_bonds)
         : m_base_method(base_method)
         , m_ref_method(ref_method)
         , m_controller(controller)
-        , m_anchor(anchor)
         , m_anchor_bonds(anchor_bonds)
     {
         setAutoDelete(false);
@@ -81,10 +84,29 @@ public:
         if (m_molecules.empty())
             return 0;
 
+        // Molecule-level batch worker: every method it calls stays serial (same guard as the
+        // -sp/-opt batch workers), so a label does not depend on how many workers run.
+        curcuma::SuppressIntraParallel intra_guard;
+
         json cfg = m_controller;
         cfg["threads"] = 1;
         // Thousands of per-structure SCF banners would bury the actual result.
         cfg["verbosity"] = 0;
+        // ConfigManager resolves controller["global"] BEFORE flat top-level keys, and the CLI
+        // puts "-threads N" there too, so the line above alone left every GFN-FF instance of a
+        // -threads 4 run on 4 threads of its own (labels then differed from -threads 1 by
+        // 1.8e-14 Eh, Oct 2026). Override both places.
+        if (cfg.contains("global") && cfg["global"].is_object()) {
+            cfg["global"]["threads"] = 1;
+            if (cfg["global"].contains("verbosity"))
+                cfg["global"]["verbosity"] = 0;
+        }
+        // Claude Generated (Oct 2026): a topology file cache (<basename>.topo.json) would hand
+        // every structure the topology of whichever geometry wrote it first. The label must
+        // come from the structure's own geometry (plus the pinned graph), as in `-sp`.
+        json gfnff_scope = cfg.value("gfnff", json::object());
+        gfnff_scope["cache_topology"] = false;
+        cfg["gfnff"] = gfnff_scope;
 
         // External programs that write scratch files under a fixed name cannot share a
         // working directory. ORCA in particular uses one 'orca_calc' basename, so parallel
@@ -97,14 +119,6 @@ public:
         cfg["orca"] = orca;
 
         try {
-            // Each structure gets its own set-up, with only the bond graph carried over --
-            // the same treatment the trained model applies later. Initialising once at the
-            // anchor and merely moving the coordinates pins the force-field parameters to
-            // the anchor geometry, which makes energy and gradient disagree; labels built
-            // that way would teach the model a surface nobody can reproduce.
-            EnergyCalculator base(m_base_method, cfg);
-            EnergyCalculator ref(m_ref_method, cfg);
-
             for (std::size_t k = 0; k < m_molecules.size(); ++k) {
                 const Molecule& mol = m_molecules[k];
 
@@ -118,8 +132,22 @@ public:
                 if (!m_anchor_bonds.empty())
                     pinned.m_bonds = m_anchor_bonds;
 
+                // Claude Generated (Oct 2026): new calculators per structure. One calculator per
+                // thread, re-set with setMolecule() for each structure, stored base energies that
+                // differed from `-sp` by -5.1 +- 2.0 kcal/mol (trisaccharide MD set, n=401) and were
+                // exact only for the first structure of each thread. Cause: a re-initialised GFNFF
+                // keeps EEQSolver::m_external_srab pointing at the distance array of the previous
+                // structure, so the Phase-2 EEQ solve during topology setup uses stale distances,
+                // and Calculation() skips its own Phase-2 solve because the geometry "has not
+                // changed" since setup (docs/DELTA_ML.md, "Open: the anchor freezes more than it
+                // should"). The reference is treated the same way, so a warm start can never make
+                // a label depend on the order or the thread chunking.
+                EnergyCalculator base(m_base_method, cfg);
                 base.setMolecule(pinned);
                 s.energy_base = base.CalculateEnergy(true);
+                if (base.Error())
+                    throw std::runtime_error("base method failed on structure "
+                        + std::to_string(m_indices[k] + 1) + ": " + base.ErrorMessage());
                 // EnergyCalculator::Gradient() is Eh/Angstrom (getGradient() contract, Known
                 // Issue #28), which is also what the descriptor and the whole model work in.
                 // An earlier version assumed Eh/Bohr and multiplied by ANGSTROM_TO_BOHR; after the
@@ -128,14 +156,16 @@ public:
                 // so the energy rows and the gradient rows of the fit contradicted each other.
                 s.gradient_base = base.Gradient();
 
-                // The reference has no frozen topology of its own, so it only needs the
-                // geometry; re-setting it per structure keeps both sides symmetric.
+                EnergyCalculator ref(m_ref_method, cfg);
                 ref.setMolecule(pinned);
                 s.energy_ref = ref.CalculateEnergy(true);
+                if (ref.Error())
+                    throw std::runtime_error("reference method failed on structure "
+                        + std::to_string(m_indices[k] + 1) + ": " + ref.ErrorMessage());
                 s.gradient_ref = ref.Gradient();
                 s.has_gradients = true;
 
-                m_results.push_back(s);
+                m_results.emplace_back(m_indices[k], s);
             }
         } catch (const std::exception& e) {
             m_error = e.what();
@@ -144,18 +174,18 @@ public:
         return 0;
     }
 
-    const std::vector<MLStructure>& results() const { return m_results; }
+    /// Labelled structures with their index in the input list.
+    const std::vector<std::pair<std::size_t, MLStructure>>& results() const { return m_results; }
     const std::string& error() const { return m_error; }
 
 private:
     std::string m_base_method;
     std::string m_ref_method;
     json m_controller;
-    Molecule m_anchor;
     std::vector<std::pair<int, int>> m_anchor_bonds;
     std::vector<Molecule> m_molecules;
     std::vector<std::size_t> m_indices;
-    std::vector<MLStructure> m_results;
+    std::vector<std::pair<std::size_t, MLStructure>> m_results;
     std::string m_error;
 };
 
@@ -324,14 +354,14 @@ bool ActiveLearn::labelStructures(const std::vector<Molecule>& molecules, MLData
     CurcumaLogger::result_fmt("activelearn: labelling {} structures  base = {}  reference = {}",
         molecules.size(), m_base_method, m_ref_method);
 
-    // One thread per chunk rather than per structure: constructing the calculators
-    // (topology setup, parameter generation) costs far more than a single point.
+    // One worker per thread, each with a round-robin share of the structures. Every structure
+    // still gets its own calculators (see LabelThread); the chunking only saves pool overhead.
     const int n_threads = std::max(1, m_threads);
     std::vector<LabelThread*> threads;
     threads.reserve(n_threads);
     for (int t = 0; t < n_threads; ++t) {
         LabelThread* lt
-            = new LabelThread(m_base_method, m_ref_method, m_controller, m_anchor, m_anchor_bonds);
+            = new LabelThread(m_base_method, m_ref_method, m_controller, m_anchor_bonds);
         lt->setThreadId(t);
         threads.push_back(lt);
     }
@@ -351,15 +381,24 @@ bool ActiveLearn::labelStructures(const std::vector<Molecule>& molecules, MLData
     pool->StartAndWait();
     CurcumaLogger::set_verbosity(saved_verbosity);
 
+    // Structures were dealt out round-robin (structure i to thread i % n_threads), so the
+    // per-thread result lists interleave. Restore the input order: the k-th dataset entry is
+    // the k-th input structure, independent of -threads (Claude Generated, Oct 2026).
     bool ok = true;
+    std::vector<std::pair<std::size_t, const MLStructure*>> labelled;
+    labelled.reserve(molecules.size());
     for (auto* t : threads) {
         if (!t->error().empty()) {
             CurcumaLogger::error_fmt("activelearn: labelling failed: {}", t->error());
             ok = false;
         }
-        for (const auto& s : t->results())
-            data.add(s);
+        for (const auto& r : t->results())
+            labelled.emplace_back(r.first, &r.second);
     }
+    std::sort(labelled.begin(), labelled.end(),
+        [](const auto& a, const auto& b) { return a.first < b.first; });
+    for (const auto& r : labelled)
+        data.add(*r.second);
 
     // The pool destructor still inspects every thread it holds, so it has to go first;
     // deleting the threads before it is a use-after-free.

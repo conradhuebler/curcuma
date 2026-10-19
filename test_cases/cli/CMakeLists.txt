@@ -345,6 +345,9 @@ set_tests_properties(cli_deltaml_02_trajectory_workflow PROPERTIES TIMEOUT 300)
 # Reads the 9-atom fixture of 01_train_and_predict from its sibling build directory.
 add_cli_test(deltaml 03_energy_model)
 set_tests_properties(cli_deltaml_03_energy_model PROPERTIES TIMEOUT 300)
+# Claude Generated (Oct 2026): stored labels equal fresh -sp single points, input order, -threads 1 == 4.
+add_cli_test(deltaml 04_label_consistency)
+set_tests_properties(cli_deltaml_04_label_consistency PROPERTIES TIMEOUT 300)
 
 message(STATUS "Added CLI test scenarios with build directory isolation")
 message(STATUS "  - Tests execute from: ${CMAKE_CURRENT_BINARY_DIR}/category/test_name")
