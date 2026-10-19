@@ -72,17 +72,23 @@ struct DevTables {
     const double* Pmax;            // shell-block maxima of |P| (nshell x nshell)
     double *J, *K;                 // unsymmetrised accumulators Jt, Kt
     unsigned long long* counter;   // quartets computed in this build
+    int prim_density;              // 1: primitive screen relative to the quartet's density factor (prim_thr / pq)
 };
 
 /// Where the quartets of one launch come from.
 /// Q-G2: q0 into the stored quartet list (d.q_bra/d.q_ket).
-/// Q-G3: the rectangle bra-pair-class x ket-pair-class; qi -> (rb[qi / nk], rk[qi % nk]),
-///       only canonical i <= j is computed.
+/// Q-G3 (ragged rows, Oct 2026): launch element q0 + qi lies in row r (last r with row_off[r] <= q);
+///       bra pair i = row_bra[r], ket pair j = kets[row_ket0[r] + q - row_off[r]]. The host builds the
+///       rows per Fock build from the pair lists of each class sorted by Schwarz factor (largest first),
+///       keeping per bra only the ket prefix that can pass Q_i Q_j max|P| >= thr, so every launched
+///       element is a canonical quartet that may survive the density-weighted screen.
 struct QSrc {
     long long q0;
-    const int* rb;
-    const int* rk;
-    long long nk;
+    const long long* row_off;
+    const int* row_bra;
+    const int* row_ket0;
+    const int* kets;
+    int nrow;
 };
 
 // Boys function F_0..F_maxN, the same arithmetic as boysArrayInto (qm_integrals.cpp).
@@ -120,25 +126,36 @@ __device__ inline void set8(double* out, size_t n, int a, int b, int c, int e, d
     out[((size_t)e * n + c) * n2 + (size_t)b * n + a] = v;
 }
 
-/// Shell quartet of launch element qi: pair indices (i, j). Q-G3 additionally drops the
-/// non-canonical half of the rectangle (i > j) and applies the density-weighted screen of
-/// qmint::DirectJK::build -- the same expression in the same order, so both decide alike:
-///   skip if Q_ij(bra) * Q_ij(ket) * max(Pmax over AB, CD, AC, AD, BC, BD) < thr.
+/// Shell quartet of launch element qi: pair indices (i, j) and the primitive-quartet threshold.
+/// Q-G3 applies the density-weighted screen of qmint::DirectJK::build -- the same expression in
+/// the same order, so both decide alike (the bra/ket orientation of a quartet may differ from the
+/// CPU loop; the screen is symmetric in i, j):
+///   skip if Q_i * Q_j * max(Pmax over AB, CD, AC, AD, BC, BD) < thr.
+/// With prim_density the primitive threshold is prim_thr / pq (contribution bound of a primitive
+/// quartet to J/K), as DirectJK with prim_density_screen.
 template <bool DIRECT>
-__device__ inline bool quartetOf(const DevTables& d, const QSrc& s, long long qi, int& i, int& j)
+__device__ inline bool quartetOf(const DevTables& d, const QSrc& s, long long qi, int& i, int& j, double& pthr)
 {
+    pthr = d.prim_thr;
     if constexpr (!DIRECT) {
         i = d.q_bra[s.q0 + qi];
         j = d.q_ket[s.q0 + qi];
         return true;
     } else {
-        i = s.rb[qi / s.nk];
-        j = s.rk[qi % s.nk];
-        if (i > j) return false;
+        const long long q = s.q0 + qi;
+        int lo = 0, hi = s.nrow - 1;  // last row with row_off <= q
+        while (lo < hi) {
+            const int mid = (lo + hi + 1) >> 1;
+            if (s.row_off[mid] <= q) lo = mid;
+            else hi = mid - 1;
+        }
+        i = s.row_bra[lo];
+        j = s.kets[s.row_ket0[lo] + (int)(q - s.row_off[lo])];
         const int A = d.pr_A[i], B = d.pr_B[i], C = d.pr_A[j], D = d.pr_B[j];
         const int ns = d.nshell;
         const double pq = fmax(fmax(fmax(d.Pmax[A * ns + B], d.Pmax[C * ns + D]), fmax(d.Pmax[A * ns + C], d.Pmax[A * ns + D])),
                                fmax(d.Pmax[B * ns + C], d.Pmax[B * ns + D]));
+        if (d.prim_density && pq > 0.0) pthr = d.prim_thr / pq;
         return !(d.pr_schwarz[i] * d.pr_schwarz[j] * pq < d.thr);
     }
 }
@@ -223,7 +240,8 @@ __global__ void eriClassKernel(DevTables d, QSrc src, int LA, int LB, int LC, in
     __shared__ double sF[16], sBp[16], sW[3], sPref;
 
     int i, j;
-    if (!quartetOf<DIRECT>(d, src, (long long)blockIdx.x, i, j)) return;  // uniform per block
+    double pthr;
+    if (!quartetOf<DIRECT>(d, src, (long long)blockIdx.x, i, j, pthr)) return;  // uniform per block
     if constexpr (DIRECT) {
         if (threadIdx.x == 0) atomicAdd(d.counter, 1ull);
     }
@@ -249,10 +267,10 @@ __global__ void eriClassKernel(DevTables d, QSrc src, int LA, int LB, int LC, in
     for (int ib = 0; ib < nbp; ++ib) {
         const int pb = pb0 + ib;
         const double sb = d.pp_schwarz[pb];
-        if (sb * ket_max < d.prim_thr) break;  // same primitive screen as shellQuartet
+        if (sb * ket_max < pthr) break;  // same primitive screen as shellQuartet
         for (int ik = 0; ik < nkp; ++ik) {
             const int pk = pk0 + ik;
-            if (sb * d.pp_schwarz[pk] < d.prim_thr) break;
+            if (sb * d.pp_schwarz[pk] < pthr) break;
             __syncthreads();  // previous component loop is done with R
             if (tid == 0) {
                 const double p = d.pp_p[pb], qq = d.pp_p[pk];
@@ -525,7 +543,8 @@ __global__ void __launch_bounds__(64) eriThreadKernel(DevTables d, QSrc src, lon
     const long long qi = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (qi >= nq) return;
     int i, j;
-    if (!quartetOf<DIRECT>(d, src, qi, i, j)) return;
+    double pthr;
+    if (!quartetOf<DIRECT>(d, src, qi, i, j, pthr)) return;
     if constexpr (DIRECT) countQuartet(d.counter);
     constexpr int nA = ncomp(LA), nB = ncomp(LB), nC = ncomp(LC), nD = ncomp(LD);
     constexpr int L = LA + LB + LC + LD;
@@ -551,14 +570,14 @@ __global__ void __launch_bounds__(64) eriThreadKernel(DevTables d, QSrc src, lon
     for (int ib = 0; ib < nbp; ++ib) {
         const int pb = pb0 + ib;
         const double sb = d.pp_schwarz[pb];
-        if (sb * ket_max < d.prim_thr) break;
+        if (sb * ket_max < pthr) break;
         const double p = d.pp_p[pb];
         const double Px = d.pp_P[3 * pb], Py = d.pp_P[3 * pb + 1], Pz = d.pp_P[3 * pb + 2];
         const double* Eab = d.E + d.pp_E_off[pb];
         const int ia = d.pp_ia[pb], ibb = d.pp_ib[pb];
         for (int ik = 0; ik < nkp; ++ik) {
             const int pk = pk0 + ik;
-            if (sb * d.pp_schwarz[pk] < d.prim_thr) break;
+            if (sb * d.pp_schwarz[pk] < pthr) break;
             const double qq = d.pp_p[pk];
             const double rho = p * qq / (p + qq);
             const double Wx = Px - d.pp_P[3 * pk], Wy = Py - d.pp_P[3 * pk + 1], Wz = Pz - d.pp_P[3 * pk + 2];
@@ -743,17 +762,12 @@ int launchBlockClass(int LA, int LB, int LC, int LD, const DevTables& d, QSrc sr
     const size_t shm = (size_t)(2 * s3 + 2 * ncart) * sizeof(double);
     int bs = 32;
     while (bs < ncart && bs < 128) bs *= 2;
-    // grid.x limit 2^31-1: chunk the class if ever needed. Q-G3: the rectangle index is
-    // blockIdx.x, so a chunk holds whole bra rows and shifts the bra list.
-    long long chunk = 2000000000LL;
-    if constexpr (DIRECT) chunk = (chunk / src.nk) * src.nk;
+    // grid.x limit 2^31-1: chunk the class if ever needed (both modes address quartets by q0 + blockIdx.x).
+    const long long chunk = 2000000000LL;
     for (long long off = 0; off < nq; off += chunk) {
         const long long cnt = (nq - off < chunk) ? nq - off : chunk;
         QSrc s = src;
-        if constexpr (DIRECT)
-            s.rb = src.rb + off / src.nk;
-        else
-            s.q0 = src.q0 + off;
+        s.q0 = src.q0 + off;
         eriClassKernel<DIRECT><<<(unsigned)cnt, bs, shm, st>>>(d, s, LA, LB, LC, LD, out);
     }
     return bs;

@@ -180,6 +180,12 @@ QMEngine::QMEngine(QMFunctional functional, const json& config)
         m_scf_mode = config["scf_mode"].get<std::string>();
     if (config.contains("scf_guess") && config["scf_guess"].is_string())
         m_scf_guess = config["scf_guess"].get<std::string>();
+    if (config.contains("scf_early_screening") && config["scf_early_screening"].is_number())
+        m_scf_early_screening = config["scf_early_screening"].get<double>();
+    if (config.contains("scf_early_switch") && config["scf_early_switch"].is_number())
+        m_scf_early_switch = config["scf_early_switch"].get<double>();
+    if (config.contains("eri_prim_density") && config["eri_prim_density"].is_boolean())
+        m_eri_prim_density = config["eri_prim_density"].get<bool>();
     if (config.contains("scf_direct")) {
         // Accept a CLI boolean too (-qm.scf_direct true/false).
         if (config["scf_direct"].is_boolean())

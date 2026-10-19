@@ -45,6 +45,7 @@
 #include "src/core/energy_calculators/gpu_plugin.h"
 #include "src/core/gpu_fallback.h"
 #include "src/core/curcuma_logger.h"
+#include "src/core/units.h"
 
 #include "native_eigensolver.h"
 
@@ -55,6 +56,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <string>
 
 namespace {
@@ -268,8 +270,20 @@ struct DirectFockCadence {
     bool incremental_off = false;   // stall seen: full builds for the rest of this SCF
     double best_dP = std::numeric_limits<double>::infinity();
     int stall = 0;
+    // Claude Generated (Oct 2026): early phase with a looser screening threshold (-qm.scf_early_screening).
+    // It ends once ||dP|| < -qm.scf_early_switch; the next build is then a full one with eri_screening, so
+    // nothing accumulated under the loose threshold survives into the converged Fock matrix.
+    bool early = false;
 
-    explicit DirectFockCadence(bool d) : direct(d) {}
+    explicit DirectFockCadence(bool d, bool early_phase = false) : direct(d), early(d && early_phase) {}
+    /// Feed ||P_new - P||_F; true when the early (loose-screening) phase just ended.
+    bool endEarly(double delta_P, double switch_dP)
+    {
+        if (!early || delta_P >= switch_dP) return false;
+        early = false;
+        have_ref = false;  // next build: full, with the final threshold
+        return true;
+    }
     bool nextFull() const { return !direct || !have_ref || incremental_off || since_full >= kDirectRebuild; }
     void built(bool full)
     {
@@ -304,11 +318,22 @@ void reportIncrementalStall(int iter, double best_dP, double screening)
             best_dP, screening, iter + 2));
 }
 
+// One line at verbosity >= 2 when the early (loose-screening) phase ends (diagnostic only).
+void reportEarlyEnd(int iter, double delta_P)
+{
+    if (CurcumaLogger::get_verbosity() >= 2)
+        CurcumaLogger::info(fmt::format(
+            "QM: integral-direct SCF: ||dP|| = {:.2e}, early screening phase ends; full J/K build with eri_screening "
+            "from iteration {} on",
+            delta_P, iter + 2));
+}
+
 // Host storage of the DIIS/ADIIS history (the device loop keeps the same data in QMGpuSCF).
 struct HostDiisStore {
     std::vector<Matrix> F, P, e;  // indexed by slot
 
     explicit HostDiisStore(int slots) : F(slots), P(slots), e(slots) {}
+    ~HostDiisStore();  // out of line: -Winline in the grown runSCF (Oct 2026)
 
     /// Store F (built from P) in `slot`, form its orthonormal-basis error and return max|e|.
     double push(int slot, const Matrix& Fi, const Matrix& Pi, const Matrix& S, const Matrix& X)
@@ -348,6 +373,8 @@ struct HostDiisStore {
         return out;
     }
 };
+
+HostDiisStore::~HostDiisStore() = default;
 
 }  // namespace
 
@@ -453,9 +480,10 @@ bool QMEngine::runSCF()
     // When ||dP|| stalls at the incremental screening noise, full builds only
     // (DirectFockCadence).
     Matrix J_acc, K_acc, P_ref;
-    DirectFockCadence cadence(direct);
+    DirectFockCadence cadence(direct, useEarlyScreening());
     auto fockFromDensity = [&](const Matrix& P) -> Matrix {
         const bool full = cadence.nextFull();
+        m_direct_thr_now = cadence.early ? m_scf_early_screening : -1.0;
         if (full) {
             buildJK(P, J_acc, K_acc);
         } else {
@@ -539,13 +567,15 @@ bool QMEngine::runSCF()
                                  fmt::format("dP = {:.3e}, E_elec = {:.10f} Eh", delta_P, e_tmp));
         }
 
-        if (delta_P < m_scf_threshold) {
+        if (delta_P < m_scf_threshold && !cadence.early) {
             m_density = density_new;
+            m_direct_thr_now = -1.0;
             finishConvergedSCF(C, eps, n_occ, iter + 1, delta_P, direct,
                                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_scf0).count(),
                                t_fock_ms, t_eig_ms, std::string());
             return true;
         }
+        if (cadence.endEarly(delta_P, m_scf_early_switch)) reportEarlyEnd(iter, delta_P);
         if (cadence.observe(delta_P)) {
             reportIncrementalStall(iter, cadence.best_dP, m_eri_screening);
             diis.dropIncrementalEntries();  // keep only Fock matrices from full builds
@@ -557,6 +587,7 @@ bool QMEngine::runSCF()
     }
 
     // Ran out of iterations: keep the last density/Fock for diagnostics.
+    m_direct_thr_now = -1.0;
     m_fock = buildFock(m_density);
     m_e_elec = 0.5 * m_density.cwiseProduct(m_H + m_fock).sum();
     return false;
@@ -667,13 +698,22 @@ int QMEngine::runSCFDevice(int n_occ, bool direct, bool use_diis, double damping
     double t_fock_ms = 0.0, t_eig_ms = 0.0;
     m_scf_converged = false;
     m_scf_iterations = 0;
-    DirectFockCadence cadence(direct);
+    DirectFockCadence cadence(direct, useEarlyScreening());
+    // screening of the device direct builder (early phase / eri_screening, primitive mode)
+    auto setJKScreening = [&](bool early) {
+        if (direct && !jk->setScreening(early ? m_scf_early_screening : m_eri_screening, m_eri_prim_density)) {
+            cadence.early = false;  // builder without the hook: final threshold throughout
+            return false;
+        }
+        return true;
+    };
 
     for (int iter = 0; iter < m_scf_max_iter; ++iter) {
         m_scf_iterations = iter + 1;
 
         // Fock (host: fockFromDensity)
         const bool full = cadence.nextFull();
+        setJKScreening(cadence.early);
         const auto t_f0 = std::chrono::steady_clock::now();
         if (!dev.buildFock(jk, full)) return fail("Fock build");
         cadence.built(full);
@@ -720,11 +760,14 @@ int QMEngine::runSCFDevice(int n_occ, bool direct, bool use_diis, double damping
 
         if (CurcumaLogger::get_verbosity() >= 3)
             CurcumaLogger::param(fmt::format("SCF iter {}", iter + 1),
-                                 fmt::format("dP = {:.3e}, E_elec = {:.10f} Eh (device; Fock {:.2f} ms, DIIS {:.2f} ms, "
+                                 fmt::format("dP = {:.3e}, E_elec = {:.10f} Eh (device; Fock {:.2f} ms ({}{}), DIIS {:.2f} ms, "
                                              "eigensolve + density {:.2f} ms)",
-                                             delta_P, e_elec, fock_ms, diis_ms, eig_ms));
+                                             delta_P, e_elec, fock_ms, full ? "full" : "incremental",
+                                             direct ? fmt::format(", {} quartets", jk->lastQuartets()) : std::string(),
+                                             diis_ms, eig_ms));
 
-        if (delta_P < m_scf_threshold) {
+        if (delta_P < m_scf_threshold && !cadence.early) {
+            setJKScreening(false);
             Matrix P(n, n), C(n, n);
             Vector eps(n);
             if (!dev.downloadDensity(true, P.data()) || !dev.downloadOrbitals(C.data(), eps.data()))
@@ -736,6 +779,7 @@ int QMEngine::runSCFDevice(int n_occ, bool direct, bool use_diis, double damping
                                fmt::format("{} on {} (state setup {:.1f} ms)", dev.stats(), dev.name(), setup_ms));
             return 1;
         }
+        if (cadence.endEarly(delta_P, m_scf_early_switch)) reportEarlyEnd(iter, delta_P);
         if (cadence.observe(delta_P)) {
             reportIncrementalStall(iter, cadence.best_dP, m_eri_screening);
             diis.dropIncrementalEntries();  // keep only Fock matrices from full builds
@@ -744,6 +788,8 @@ int QMEngine::runSCFDevice(int n_occ, bool direct, bool use_diis, double damping
     }
 
     // Ran out of iterations: as the host loop, last density/Fock for diagnostics.
+    setJKScreening(false);
+    m_direct_thr_now = -1.0;
     Matrix P(n, n);
     if (!dev.downloadDensity(false, P.data())) return fail("density download");
     m_density = P;
@@ -829,6 +875,94 @@ Matrix QMEngine::buildAtomicGuess() const
     return P;
 }
 
+// Claude Generated (Oct 2026): "atom" guess -- superposition of atomic RHF densities.
+// The "sad" guess above fills each atom's electrons into the eigenvectors of its block of the
+// MOLECULAR core Hamiltonian (no electron repulsion, attraction of all nuclei), which for long
+// chains starts the SCF far from the solution (C40H82: E_elec(iter 1) 9 % above the converged value,
+// ||dP|| above 50 for the first 9 iterations). Here every element gets one small SCF of the free atom
+// in its own basis (core Hamiltonian of its own nucleus only, exact J/K of the atomic basis):
+//   F = H_atom + J(P) - 1/2 K(P),  F C = S C eps,  P = sum_k n_k C_k C_k^T,
+// with spherically averaged fractional occupations: orbitals with the same eigenvalue (within
+// 1e-5 Eh) form one group and share the electrons left for that group equally (e.g. C: 1s^2 2s^2
+// 2p^(2/3,2/3,2/3)), which keeps the density spherical. This is the usual SAD of molecular codes
+// (e.g. Van Lenthe et al., J. Comput. Chem. 27, 926 (2006); PySCF init_guess "atom"). Only the start
+// density changes; the SCF fixed point is the same.
+Matrix QMEngine::buildAtomicHFGuess() const
+{
+    const int n = m_nbf;
+    const std::vector<int> ao_atom = activeAtomIndex();
+    const int ncart = static_cast<int>(m_gto_basis.size());
+    Matrix P = Matrix::Zero(n, n);
+    double occupied = 0.0;
+    std::map<int, Eigen::MatrixXd> cache;  // element -> atomic density in the atom's active basis
+
+    for (int a = 0; a < m_atomcount; ++a) {
+        std::vector<int> idx, cidx;
+        for (int i = 0; i < n; ++i)
+            if (ao_atom[i] == a) idx.push_back(i);
+        for (int i = 0; i < ncart; ++i)
+            if (m_gto_basis[i].atom == a) cidx.push_back(i);
+        const int m = static_cast<int>(idx.size());
+        if (m == 0) continue;
+        const int Z = m_atoms[a];
+        auto it = cache.find(Z);
+        if (it == cache.end() || it->second.rows() != m) {
+            std::vector<GTO::Orbital> sub;
+            for (int i : cidx) sub.push_back(m_gto_basis[i]);
+            Matrix pos(1, 3);
+            for (int k = 0; k < 3; ++k) pos(0, k) = CurcumaUnit::Length::angstrom_to_bohr(m_geometry(a, k));
+            const std::vector<int> zv{ Z };
+            Matrix Sa = qmint::buildOverlap(sub);
+            Matrix Ha = qmint::buildKinetic(sub) + qmint::buildNuclearAttraction(sub, zv, pos);
+            Matrix Qa;
+            if (m_Q.size() != 0) {
+                Qa = Matrix::Zero((int)cidx.size(), m);
+                for (int r = 0; r < (int)cidx.size(); ++r)
+                    for (int c = 0; c < m; ++c) Qa(r, c) = m_Q(cidx[r], idx[c]);
+                Sa = qmint::applySphericalTransform(Sa, Qa);
+                Ha = qmint::applySphericalTransform(Ha, Qa);
+            }
+            if (Sa.rows() != m) return buildAtomicGuess();  // basis bookkeeping mismatch: old guess
+            const qmint::ERITensor eri = qmint::buildERI(sub, 1, 0.0, m_Q.size() != 0 ? &Qa : nullptr);
+            const Eigen::MatrixXd Scol(Sa);
+            Eigen::MatrixXd Pa = Eigen::MatrixXd::Zero(m, m);
+            Eigen::MatrixXd Pold = Pa;
+            for (int it2 = 0; it2 < 200; ++it2) {
+                const Matrix Pr(Pa);
+                const Matrix Fa = Ha + qmint::buildCoulomb(eri, Pr, 1) - 0.5 * qmint::buildExchange(eri, Pr, 1);
+                Eigen::GeneralizedSelfAdjointEigenSolver<Eigen::MatrixXd> ges(Eigen::MatrixXd(Fa), Scol);
+                if (ges.info() != Eigen::Success) break;
+                const Eigen::VectorXd e = ges.eigenvalues();
+                const Eigen::MatrixXd C = ges.eigenvectors();
+                Eigen::MatrixXd Pn = Eigen::MatrixXd::Zero(m, m);
+                double left = static_cast<double>(Z);
+                for (int k = 0; k < m && left > 1.0e-12;) {
+                    int g = 1;
+                    while (k + g < m && std::abs(e(k + g) - e(k)) < 1.0e-5) ++g;
+                    const double per = std::min(2.0, left / g);
+                    for (int q = k; q < k + g; ++q) Pn += per * C.col(q) * C.col(q).transpose();
+                    left -= per * g;
+                    k += g;
+                }
+                // damped update (fractional occupations can oscillate between groups)
+                Pa = it2 == 0 ? Pn : 0.5 * (Pn + Pa);
+                if (it2 > 0 && (Pa - Pold).norm() < 1.0e-9) break;
+                Pold = Pa;
+            }
+            cache[Z] = Pa;
+            it = cache.find(Z);
+        }
+        const Eigen::MatrixXd& Pa = it->second;
+        for (int p = 0; p < m; ++p)
+            for (int q = 0; q < m; ++q) P(idx[p], idx[q]) = Pa(p, q);
+        occupied += static_cast<double>(Z);
+    }
+    const double nelec = static_cast<double>(m_num_electrons);
+    if (occupied > 1.0e-12 && std::abs(occupied - nelec) > 1.0e-12)
+        P *= nelec / occupied;
+    return P;
+}
+
 // Claude Generated (Sep 2026): warm start for the next geometry of the same molecule.
 // The basis functions moved with the atoms, so the old occupied orbitals C are no
 // longer orthonormal in the new metric S. Symmetric (Loewdin) re-orthonormalisation
@@ -863,9 +997,11 @@ Matrix QMEngine::buildInitialGuess() const
     }
     if (m_scf_guess == "h0")
         return Matrix::Zero(m_nbf, m_nbf);   // bare core: first Fock = H
+    if (m_scf_guess == "atom")
+        return buildAtomicHFGuess();
     if (m_scf_guess != "sad" && CurcumaLogger::get_verbosity() >= 1)
         CurcumaLogger::warn(fmt::format(
-            "QM: unknown -qm.scf_guess '{}' (use sad|h0); using sad", m_scf_guess));
+            "QM: unknown -qm.scf_guess '{}' (use sad|atom|h0); using sad", m_scf_guess));
     return buildAtomicGuess();
 }
 
@@ -878,6 +1014,13 @@ Matrix QMEngine::buildFock(const Matrix& P) const
     Matrix J, K;
     buildJK(P, J, K);
     return m_H + J - 0.5 * K;
+}
+
+// Claude Generated (Oct 2026): the early loose-screening phase applies to a cold-started
+// integral-direct SCF only (a warm start begins below any sensible switch threshold).
+bool QMEngine::useEarlyScreening() const
+{
+    return m_scf_early_screening > 0.0 && m_scf_early_screening > m_eri_screening && !m_last_warm_start;
 }
 
 // Claude Generated (Sep 2026): -qm.scf_direct on|off|auto. auto keeps the stored
@@ -1115,7 +1258,7 @@ void QMEngine::checkGpuDirectJK(const Matrix& P, const Matrix& J, const Matrix& 
     const auto t0 = std::chrono::steady_clock::now();
     const qmint::DirectJK cpu(m_gto_basis, m_eri_screening, m_Q.size() != 0 ? &m_Q : nullptr);
     Matrix Jc, Kc;
-    const long cpu_q = cpu.build(P, Jc, Kc, m_threads);
+    const long cpu_q = cpu.build(P, Jc, Kc, m_threads, m_direct_thr_now, m_eri_prim_density);
     const double cpu_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     std::string line = fmt::format(
         "QM GPU JK check: n={} quartets_dev={} quartets_cpu={} max|J|={:.3e} max|K|={:.3e} "
@@ -1165,7 +1308,10 @@ void QMEngine::buildJKExact(const Matrix& P, Matrix& J, Matrix& K) const
             return;
         }
     }
-    if (gpuDirectAllowed() && ensureGpuDirect() && gpuDirectBuild(P, J, K)) return;
+    if (gpuDirectAllowed() && ensureGpuDirect()) {
+        m_gpu_djk->setScreening(m_direct_thr_now >= 0.0 ? m_direct_thr_now : m_eri_screening, m_eri_prim_density);
+        if (gpuDirectBuild(P, J, K)) return;
+    }
     if (!m_direct.ready()) {
         m_direct = qmint::DirectJK(m_gto_basis, m_eri_screening, m_Q.size() != 0 ? &m_Q : nullptr);
         if (CurcumaLogger::get_verbosity() >= 2)
@@ -1173,7 +1319,7 @@ void QMEngine::buildJKExact(const Matrix& P, Matrix& J, Matrix& K) const
                 "QM: integral-direct J/K ({} basis functions; stored tensor would need {:.1f} MB)",
                 m_direct.n(), std::pow((double)m_direct.n(), 4) * 8.0 / 1.0e6));
     }
-    m_direct_quartets += m_direct.build(P, J, K, m_threads);
+    m_direct_quartets += m_direct.build(P, J, K, m_threads, m_direct_thr_now, m_eri_prim_density);
 }
 
 // =================================================================================

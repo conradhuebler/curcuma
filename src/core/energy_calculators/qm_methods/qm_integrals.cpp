@@ -560,23 +560,78 @@ static double primitiveNuclearAttraction(int la, int ma, int na, int lb, int mb,
     return val;
 }
 
-static double contractedNuclearPair(const GTO::Orbital& a, const GTO::Orbital& b,
-                                    double Cx, double Cy, double Cz)
+// V_ij summed over all centres, in the order of the former loop (centres outer, primitive pairs
+// inner, -Z * contracted sum per centre), so the result is bit-identical to
+//   sum_C -Z_C sum_prim c_a c_b primitiveNuclearAttraction(..., C)  (the former per-centre loop).
+// The Gaussian product and the three Hermite tables of a primitive pair do not depend on the centre;
+// they are built once per primitive pair here instead of once per (primitive pair, centre), and R/F
+// reuse thread-local buffers (Claude Generated, Oct 2026: the former per-call allocations dominated the
+// O(n^2 natoms) build, 19 s single-threaded at 970 functions / 122 atoms).
+static double nuclearPairAllCentres(const GTO::Orbital& a, const GTO::Orbital& b, const std::vector<int>& atomZ,
+                                    const Matrix& pos)
 {
-    int l1, m1, n1, l2, m2, n2;
-    GTO::orbitalTypeToComponents(a.type, l1, m1, n1);
-    GTO::orbitalTypeToComponents(b.type, l2, m2, n2);
-    double sum = 0.0;
-    for (size_t ia = 0; ia < a.exponents.size(); ++ia) {
+    int la, ma, na, lb, mb, nb;
+    GTO::orbitalTypeToComponents(a.type, la, ma, na);
+    GTO::orbitalTypeToComponents(b.type, lb, mb, nb);
+    const int tmax = la + lb, umax = ma + mb, vmax = na + nb, Nmax = tmax + umax + vmax;
+    struct PrimData {
+        double coef, gamma, Px, Py, Pz;
+        std::vector<double> et, eu, ev;  // E^{la lb}_t, E^{ma mb}_u, E^{na nb}_v
+    };
+    thread_local std::vector<PrimData> prims;
+    thread_local std::vector<double> R, F;
+    prims.clear();
+    for (size_t ia = 0; ia < a.exponents.size(); ++ia)
         for (size_t ib = 0; ib < b.exponents.size(); ++ib) {
-            sum += a.coefficients[ia] * b.coefficients[ib] *
-                   primitiveNuclearAttraction(l1, m1, n1, l2, m2, n2,
-                                             a.exponents[ia], b.exponents[ib],
-                                             a.x, a.y, a.z, b.x, b.y, b.z,
-                                             Cx, Cy, Cz);
+            PrimData pd;
+            pd.coef = a.coefficients[ia] * b.coefficients[ib];
+            const double K = gaussianProductK(a.exponents[ia], b.exponents[ib], a.x, a.y, a.z, b.x, b.y, b.z, pd.gamma,
+                                              pd.Px, pd.Py, pd.Pz);
+            if (K != 0.0) {
+                const auto Ex = hermiteCoeffs(la, lb, pd.Px - a.x, pd.Px - b.x, pd.gamma, K);
+                const auto Eu = hermiteCoeffs(ma, mb, pd.Py - a.y, pd.Py - b.y, pd.gamma, 1.0);
+                const auto Ev = hermiteCoeffs(na, nb, pd.Pz - a.z, pd.Pz - b.z, pd.gamma, 1.0);
+                for (int t = 0; t <= tmax; ++t) pd.et.push_back(Ex[t][la][lb]);
+                for (int u = 0; u <= umax; ++u) pd.eu.push_back(Eu[u][ma][mb]);
+                for (int v = 0; v <= vmax; ++v) pd.ev.push_back(Ev[v][na][nb]);
+            }
+            prims.push_back(std::move(pd));  // K == 0: empty tables, contributes coef * 0.0
         }
+    R.resize((size_t)(tmax + 1) * (umax + 1) * (vmax + 1) * (Nmax + 1));
+    const int strideN = (umax + 1) * (vmax + 1) * (Nmax + 1);
+    const int strideU = (vmax + 1) * (Nmax + 1);
+    const int strideV = (Nmax + 1);
+    double total = 0.0;
+    for (int C = 0; C < (int)atomZ.size(); ++C) {
+        const double Z = atomZ[C];
+        if (Z == 0.0) continue;
+        const double Cx = pos(C, 0), Cy = pos(C, 1), Cz = pos(C, 2);
+        double sum = 0.0;
+        for (const PrimData& pd : prims) {
+            double val = 0.0;
+            if (!pd.et.empty()) {
+                const double T = pd.gamma * ((pd.Px - Cx) * (pd.Px - Cx) + (pd.Py - Cy) * (pd.Py - Cy) + (pd.Pz - Cz) * (pd.Pz - Cz));
+                boysArrayInto(Nmax, T, F);
+                buildRblock(tmax, umax, vmax, Nmax, pd.Px - Cx, pd.Py - Cy, pd.Pz - Cz, pd.gamma, F, R);
+                for (int t = 0; t <= tmax; ++t) {
+                    const double et = pd.et[t];
+                    if (et == 0.0) continue;
+                    for (int u = 0; u <= umax; ++u) {
+                        const double eu = pd.eu[u];
+                        if (eu == 0.0) continue;
+                        for (int v = 0; v <= vmax; ++v) {
+                            const double ev = pd.ev[v];
+                            if (ev == 0.0) continue;
+                            val += et * eu * ev * R[t * strideN + u * strideU + v * strideV + 0];
+                        }
+                    }
+                }
+            }
+            sum += pd.coef * val;
+        }
+        total += -Z * sum;
     }
-    return sum;
+    return total;
 }
 
 Matrix buildNuclearAttraction(const std::vector<GTO::Orbital>& basis,
@@ -585,19 +640,13 @@ Matrix buildNuclearAttraction(const std::vector<GTO::Orbital>& basis,
 {
     const int n = (int)basis.size();
     Matrix V = Matrix::Zero(n, n);
-    const int natoms = (int)atomZ.size();
     // Rows in parallel, centres C innermost (Claude Generated, Oct 2026; was serial with C outermost and
     // ~3.5 s at 560 cartesian functions). Each element still sums its centres in ascending order starting
     // from 0, so V is bit-identical to the serial loop for any thread count.
 #pragma omp parallel for schedule(dynamic)
     for (int i = 0; i < n; ++i) {
         for (int j = i; j < n; ++j) {
-            double sum = 0.0;
-            for (int C = 0; C < natoms; ++C) {
-                const double Z = atomZ[C];
-                if (Z == 0.0) continue;
-                sum += -Z * contractedNuclearPair(basis[i], basis[j], atomPosBohr(C, 0), atomPosBohr(C, 1), atomPosBohr(C, 2));
-            }
+            const double sum = nuclearPairAllCentres(basis[i], basis[j], atomZ, atomPosBohr);
             V(i, j) = sum;
             V(j, i) = sum;
         }
@@ -1703,7 +1752,7 @@ DirectJK::DirectJK(const std::vector<GTO::Orbital>& basis, double screening, con
 
 int DirectJK::n() const { return m_impl ? m_impl->out.n : 0; }
 
-long DirectJK::build(const Matrix& P, Matrix& J, Matrix& K, int threads) const
+long DirectJK::build(const Matrix& P, Matrix& J, Matrix& K, int threads, double thr_override, bool prim_density) const
 {
     const int n = this->n();
     J = Matrix::Zero(n, n);
@@ -1722,8 +1771,8 @@ long DirectJK::build(const Matrix& P, Matrix& J, Matrix& K, int threads) const
             Pmax(A, B) = Pmax(B, A) = m;
         }
     const double Pall = Pmax.maxCoeff();
-    const double thr = m_screening;
-    const double prim_thr = m_screening * 1.0e-3;  // primitive quartets, as in buildERI
+    const double thr = thr_override >= 0.0 ? thr_override : m_screening;
+    const double prim_thr = thr * 1.0e-3;  // primitive quartets, as in buildERI
     long computed = 0;
 
 #ifdef _OPENMP
@@ -1745,7 +1794,8 @@ long DirectJK::build(const Matrix& P, Matrix& J, Matrix& K, int threads) const
                 const double pq = std::max({ Pmax(A, B), Pmax(C, D), Pmax(A, C), Pmax(A, D), Pmax(B, C), Pmax(B, D) });
                 if (bra.schwarz * ket.schwarz * pq < thr) continue;
                 int d[4];
-                activeQuartet(I.sh, o, bra, ket, buf, R, tmp, d, prim_thr);
+                // same expression as the device kernels (quartetOf in cuda/qm_gpu_eri_kernels.cuh)
+                activeQuartet(I.sh, o, bra, ket, buf, R, tmp, d, (prim_density && pq > 0.0) ? prim_thr / pq : prim_thr);
                 ++computed;
                 const double deg = (A != B ? 2.0 : 1.0) * (C != D ? 2.0 : 1.0) * (i != j ? 2.0 : 1.0);
                 const double scale = deg / 8.0;

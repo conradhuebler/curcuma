@@ -149,9 +149,19 @@ BEGIN_PARAMETER_DEFINITION(qm)
     PARAM(diis_subspace, Int, 8,
           "Number of Fock/error pairs kept for DIIS/ADIIS.",
           "SCF", {})
-    PARAM(scf_guess, String, "sad",
-          "SCF initial guess: sad (superposition of atomic densities) | h0 (bare core Hamiltonian, i.e. zero density).",
+    PARAM(scf_guess, String, "atom",
+          "SCF initial guess: sad (superposition of atomic densities from each atom's block of the molecular core Hamiltonian; the default until Oct 2026) | atom (superposition of spherically averaged, fractionally occupied atomic RHF densities, one atomic SCF per element in its own basis) | h0 (bare core Hamiltonian, i.e. zero density).",
           "SCF", {})
+    // Claude Generated (Oct 2026): large-system integral-direct SCF (docs/QM_GPU_ROADMAP.md section 2)
+    PARAM(scf_early_screening, Double, 1.0e-10,
+          "Integral-direct SCF only: screening threshold of the J/K builds at the start of the SCF (e.g. 1e-10), replaced by eri_screening, with a full J/K build, once ||dP|| < scf_early_switch; convergence is only accepted with eri_screening, and the final J/K build always uses it. Not used for warm starts. 0 = off (eri_screening throughout).",
+          "SCF", {})
+    PARAM(scf_early_switch, Double, 1.0e-3,
+          "scf_early_screening: ||dP||_F below which the SCF switches to eri_screening.",
+          "SCF", {})
+    PARAM(eri_prim_density, Bool, true,
+          "Integral-direct J/K (CPU and device): screen primitive quartets against (eri_screening * 1e-3) / pq, pq = max |P| (|dP| in incremental builds) over the six shell blocks of the quartet, i.e. by their bound on the J/K contribution, instead of against eri_screening * 1e-3 alone.",
+          "Performance", {})
     PARAM(scf_warm_start, Bool, true,
           "Start the SCF of a new geometry (opt/scan/MD step) from the previous converged occupied orbitals, re-orthonormalised in the new overlap metric, instead of from scf_guess. Same molecule only; the first geometry always uses scf_guess.",
           "SCF", {})
@@ -302,7 +312,11 @@ private:
     int m_scf_max_iter = 100;
     double m_scf_threshold = 1.0e-6;
     std::string m_scf_mode = "diis";         // diis | adiis | plain
-    std::string m_scf_guess = "sad";         // sad | h0
+    std::string m_scf_guess = "atom";        // sad | atom | h0
+    double m_scf_early_screening = 1.0e-10;      // > 0: J/K screening threshold of the early direct SCF
+    double m_scf_early_switch = 1.0e-3;      // ||dP|| that ends the early phase
+    bool m_eri_prim_density = true;         // density-weighted primitive screening (direct J/K)
+    mutable double m_direct_thr_now = -1.0;  // screening of the next direct build (< 0: eri_screening)
     // Warm start (Sep 2026): occupied MOs of the last converged SCF and the atoms
     // they belong to; used as the guess for the next geometry of the same molecule.
     bool m_scf_warm_start = true;
@@ -482,6 +496,10 @@ private:
     // summed density starts the SCF far closer to the physical solution than the
     // bare core guess, which is what keeps the HF SCF off secondary solutions.
     Matrix buildAtomicGuess() const;
+    // "atom" guess (Claude Generated, Oct 2026): superposition of spherically averaged,
+    // fractionally occupied atomic RHF densities (one small SCF per element in its own basis).
+    Matrix buildAtomicHFGuess() const;
+    bool useEarlyScreening() const;           // -qm.scf_early_screening applies to this SCF
     // Density the SCF starts from, selected by m_scf_guess.
     Matrix buildInitialGuess() const;
 

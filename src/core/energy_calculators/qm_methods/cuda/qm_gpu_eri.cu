@@ -128,7 +128,7 @@ extern "C" void* curcuma_cuda_create_qm_eri_jk(const qmint::QMGpuEriTables* t, i
         const int LA = t->class_L[4 * c], LB = t->class_L[4 * c + 1], LC = t->class_L[4 * c + 2], LD = t->class_L[4 * c + 3];
         const int ncart = ncompOf(LA) * ncompOf(LB) * ncompOf(LC) * ncompOf(LD);
         cudaStream_t st = prof ? streams[0] : streams[c % kStreams];
-        const QSrc src{ q0, nullptr, nullptr, 0 };
+        const QSrc src{ q0, nullptr, nullptr, nullptr, nullptr, 0 };
         const bool threaded = thread_ok && launchThreadClass<false>(LA, LB, LC, LD, d, src, nq, dE, st, spherical);
         if (threaded)
             ++nthread_classes;

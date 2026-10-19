@@ -291,7 +291,11 @@ public:
     bool ready() const { return m_impl != nullptr; }
     int n() const;
     /// J(P) and K(P); returns the number of shell quartets actually computed.
-    long build(const Matrix& P, Matrix& J, Matrix& K, int threads = 1) const;
+    /// thr >= 0 replaces the screening threshold of this build (primitive threshold thr * 1e-3);
+    /// prim_density: primitive quartets screened against prim_thr / pq (pq = the quartet's density
+    /// factor), i.e. by their bound on the J/K contribution (Claude Generated, Oct 2026).
+    long build(const Matrix& P, Matrix& J, Matrix& K, int threads = 1, double thr = -1.0,
+               bool prim_density = false) const;
 
 private:
     struct Impl;

@@ -44,6 +44,10 @@ public:
     /// (n^4 doubles, ERITensor layout, on the device this builder runs on), nullptr if the
     /// builder holds none (integral-direct) or the backend does not expose it. Read-only.
     virtual const double* deviceERI() const { return nullptr; }
+    /// Integral-direct builders (Claude Generated, Oct 2026): density-weighted screening threshold
+    /// of the following builds (primitive threshold thr * 1e-3) and whether the primitive screen is
+    /// relative to the quartet's density factor (as qmint::DirectJK::build). False = not supported.
+    virtual bool setScreening(double /*thr*/, bool /*prim_density*/) { return false; }
 };
 
 /// Flat, pointer-only description of everything the device ERI kernel needs (Q-G2).

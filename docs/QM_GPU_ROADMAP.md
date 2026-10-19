@@ -135,6 +135,52 @@ E_elec unchanged to 10 decimals in every run; default threshold 1e-6 unchanged (
 iterations, diis/adiis, rule does not fire). Not tested: plain mode, systems larger than pyrene, warm-started
 geometry sequences, other GPUs than the RTX 5090. The gap to the stored tensor remains (naphthalene 25 vs 23).
 
+**Large systems, n ~ 500-2900 (Oct 19, 2026; AI-generated, machine-tested, RTX 5090 only).** Profile of the exact
+GPU-direct SCF (`-qm.ri off -gpu cuda -qm.gpu_direct on -qm.gpu_scf on`, all-anti alkanes from
+`scripts/local_mp2/lmp2_common.py alkane(n)`, HF/def2-SVP, `-qm.threads 1`): the J/K builds were 99 % of the SCF loop
+(eigensolve n=1930: 98 ms per iteration, DIIS 42 ms); per build two costs grew faster than the quartet count: (a) the
+launch of the full pairs(X) x pairs(Y) rectangle per class, O(npair^2) threads (C80H162: 467k shell pairs, the first
+build with 182 M quartets took 29.9 s, a full one with 1.28 G quartets 48 s); (b) the block kernel of the classes with
+more than 27 cartesian components (d shells, (pp|pp)): 13 % of the quartets but 83 % of the kernel time (C20H42,
+`CURCUMA_QM_GPU_DIRECT_PROFILE=1`, 1-18 quartets/us against 160-860 for the thread kernel). On top, the old "sad" guess
+(each atom's block of the molecular core Hamiltonian) started far off: ||dP|| above 50 for 9 (C40) to 14 (C80)
+iterations, C80 27 iterations. Changes:
+
+- quartet enumeration (`cuda/qm_gpu_direct.cu`): pairs of each class sorted by Schwarz factor; per build the host walks
+  the bra list and keeps per bra the ket prefix with Q_i Q_j max|P| >= thr ("ragged rows", 25 ms per C80 build); only
+  class pairs X <= Y are launched; the exact screen per quartet is unchanged, so quartet counts equal the CPU `DirectJK`.
+- two-step McMurchie-Davidson kernel for the large classes (`eriHermiteKernel`): ket Hermite sums once per ket
+  component pair and bra Hermite index, then the bra sums; 1.4x on those classes. Tried and dropped: one warp per
+  quartet (no gain) and warps over primitive quartets with shared atomics (slower).
+- `-qm.scf_guess atom` (new default): superposition of spherically averaged, fractionally occupied atomic RHF densities.
+- `-qm.scf_early_screening 1e-10` (new default, direct SCF, cold start only): looser screening until ||dP|| <
+  `-qm.scf_early_switch` (1e-3), then a full build with `eri_screening`; convergence only with `eri_screening`.
+- `-qm.eri_prim_density true` (new default): primitive quartets screened against (eri_screening 1e-3)/pq (CPU and device).
+- setup: nuclear-attraction matrix builds the Hermite tables once per primitive pair instead of per (pair, nucleus);
+  bit-identical, C40 setup with 1 thread 24.4 -> 8.5 s.
+
+| system (n) | old: iter, SCF loop, wall | new: iter, SCF loop, wall | quartets per full build | E_elec new - old |
+|---|---|---|---|---|
+| C20H42 (490) | 18, 22.5 s, 27 s | 13, 5.9 s, 7.9 s | 70 M | 0 (10 dp) |
+| C40H82 (970) | 23, 152 s, 185 s (load 20 at start) | 13, 23.8 s, 31.6 s | 305 M | 0 |
+| C60H122 (1450) | 18, 328 s, 406 s | 13, 53.6 s, 72.0 s | 704 M | 0 |
+| C80H162 (1930) | 27, 1172 s, 1381 s | 13, 95.5 s, 129.6 s | 1.27 G | 0 |
+| C120H242 (2890) | did not finish (3.9 h, earlier session) | 13, 216 s, 306 s | not printed | no reference |
+
+Single runs, machine load 1-5 (another agent active). Wall-time exponents over n: old C40->C80 2.9 (C60->C80 4.3), new
+2.05 (C80->C120 2.13); the J/K quartet count grows as n^2 (exact Coulomb, no multipole far field). C80 new: 10.0 G
+quartets in 93.7 s of builds (107 quartets/us, old 24/us), final build 13 s, setup ~20 s (1e integrals with 1 thread;
+`-qm.threads 24` cuts it). Step by step on C20 (SCF loop): 22.5 s -> 14.8 (enumeration + Hermite kernel) -> 7.4 (atom
+guess, 13 iterations) -> 6.4 (early screening) -> 5.9 s (primitive density screen); C40: 45.5 -> 30.1 -> 23.8 s. The old
+C120 rerun with a 1.5 h cap is in the next paragraph. Energies: E_elec of benzene, naphthalene, anthracene (ideal acenes),
+C8H18, C20-C80 equal the old code to all 10 printed decimals on the GPU-direct path and the CPU-direct path (CPU: 2.2-2.6x
+faster from the guess alone); `ctest -L "qm_gpu|qm_2e|qm_1e|qm_hf3c|qm_grad|qm_mp2|qm_ri|qm_lmp2|qm_ccsd"` 259/259 (the two
+`qm_opt_hf3c_*` with the venv python). Not tested: other elements than H, C, O at this size, 3D-compact systems (more
+quartets per pair), other GPUs (a data-centre FP64 card shifts the balance), basis sets other than def2-SVP/MINIX,
+warm-started geometry sequences of large systems, `-qm.scf_threshold` below 1e-6 at this size, ROCm/Vulkan (no entry
+point). Not implemented: multipole far field for J (the n^2 wall), FP32 for small quartets (Q-G5), a faster kernel for
+the large classes (still ~80 % of the build time).
+
 ## 3. Proposed GPU stages (mirroring the xTB stages)
 
 Each stage keeps the rules that made the xTB port trustworthy: runtime `dlopen` plugin
@@ -278,8 +324,8 @@ fallback), systems beyond 274 functions, other basis sets than def2-SVP and MINI
 gradient (2e part stays on the CPU), an sm_120-native build. Not reproducible bit for bit: the
 atomics make the last bits of J/K schedule-dependent; the computed quartet count of the incremental
 builds differed by 13 of 352461446 between two pyrene runs (the CPU direct path differs too between 4
-and 24 threads: 352461552 vs 352462036). Not implemented: compaction of the screened quartets (every
-rectangle element is launched), device-side symmetrisation, the resident SCF (Q-G4, added later, below), FP32 (Q-G5); the
+and 24 threads: 352461552 vs 352462036). Not implemented at the time: compaction of the screened quartets (every
+rectangle element is launched; replaced by sorted ragged rows on Oct 19 2026, section 2), device-side symmetrisation, the resident SCF (Q-G4, added later, below), FP32 (Q-G5); the
 `auto` choice between stored and direct looks only at memory, not at speed.
 
 **Q-G4 (Oct 2026, 🤖 AI-generated, ⚙️ machine-tested; RTX 5090 only)**: device-resident RHF SCF loop

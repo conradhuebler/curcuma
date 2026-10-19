@@ -35,6 +35,9 @@ def run(gpu, check, extra):
     env = dict(os.environ)
     if check:
         env["CURCUMA_QM_GPU_JK_CHECK"] = "1"
+        # the check compares the FIRST build with the stored tensor at eri_screening; the loose
+        # early-SCF screening (-qm.scf_early_screening, default 1e-10 since Oct 2026) is switched off
+        cmd += ["-qm.scf_early_screening", "0"]
     out = subprocess.run(cmd, capture_output=True, text=True, timeout=3000, env=env)
     txt = re.sub(r"\x1b\[[0-9;]*m", "", out.stdout + out.stderr)
     m = re.search(r"E_elec\s*[:=]?\s*(-?\d+\.\d+) Eh", txt)
