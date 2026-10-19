@@ -887,6 +887,13 @@ bool GFNFF::InitialiseMolecule()
     // if it falls back to placeholder charges.
     m_eeq_solve_failed = false;
     if (m_eeq_solver) m_eeq_solver->clearSolveStatus();
+    // Claude Generated (Oct 2026): a re-initialised object still holds the pointer to its
+    // distance buffer (m_shared_srab) from the previous geometry. The phase-2 EEQ solve of the
+    // topology set-up below would read those stale distances (Coulomb term off by -3.7 to
+    // -5.5 kcal/mol on a trisaccharide conformer set, charges up to 0.07 e) and Calculation()
+    // then skips its own phase 2 because the geometry has not changed since the set-up. A fresh
+    // object starts with a null pointer and recomputes the distances locally; do the same here.
+    if (m_eeq_solver) m_eeq_solver->setExternalDistances(nullptr, nullptr);
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("=== GFNFF::InitialiseMolecule() START ===");

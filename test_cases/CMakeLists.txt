@@ -291,6 +291,19 @@ add_test(NAME test_eeq_extrapolation
                  ${CMAKE_CURRENT_BINARY_DIR}/molecules/larger/complex.xyz 12)
 set_tests_properties(test_eeq_extrapolation PROPERTIES TIMEOUT 180 LABELS "eeq_extrapolation")
 
+# Claude Generated (Oct 2026): a re-initialised GFN-FF calculator must equal a fresh one
+# (stale EEQ phase-2 distances after InitialiseMolecule, found while labelling Delta-ML data).
+curcuma_structure_path(helicene-frames17 _gfnff_reinit_set)
+add_executable(test_gfnff_reinit
+        unit/test_gfnff_reinit.cpp)
+target_link_libraries(test_gfnff_reinit curcuma_core)
+if(USE_PCH)
+        target_precompile_headers(test_gfnff_reinit REUSE_FROM curcuma_core)
+endif()
+add_test(NAME test_gfnff_reinit
+         COMMAND test_gfnff_reinit ${_gfnff_reinit_set} 8)
+set_tests_properties(test_gfnff_reinit PROPERTIES TIMEOUT 120 LABELS "gfnff;unit")
+
 add_test(NAME test_fast_exp
          COMMAND test_fast_exp)
 

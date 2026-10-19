@@ -62,6 +62,7 @@ in the open-items table below; **info** = no defect.
 | 36 | GFN-FF | run-to-run determinism | partial |
 | 37 | GFN-FF GPU | gaps from the multi-GPU analysis | fixed (CUDA) / open (ROCm) |
 | 38 | GFN-FF | D4 C6 summation order depended on verbosity | fixed |
+| 39 | GFN-FF | re-initialised object used the EEQ distances of the previous geometry | fixed |
 
 ## Open items
 
@@ -428,3 +429,8 @@ CPU GFN-FF is now bit-reproducible at a fixed thread count — the D4 pair list 
 ## #38 GFN-FF D4: the C6 summation order depended on the verbosity level — FIXED (Sep 30, 2026, ported from revgfnff, AI/machine-tested)
 
 `D4ParameterGenerator::getChargeWeightedC6` took its half-contraction fast path only at verbosity < 3 and the flat double loop otherwise (so a debug print could fire); the two orders differ by 1 ulp in C6, invisible in a single point but amplified by react-mode MD until a 2000 K ethane cell gave 90 rebuilds / +471 kJ/mol at `-verbosity 1-3` and 136 / +0.6 at `-verbosity 4`. Fast path is now unconditional, the debug fall-through opens on `CURCUMA_C6DEBUG`; default-verbosity results unchanged. Rule: no numerical path may be selected by the print level. Full `ctest` unchanged (same 3 pre-existing failures).
+
+## #39 GFN-FF: a re-initialised object used the EEQ distances of the previous geometry — FIXED (Oct 19, 2026, AI/machine-tested, found while labelling Delta-ML data)
+
+`GFNFF::InitialiseMolecule()` on an object that had already computed an energy kept `EEQSolver::m_external_srab` pointing at the distance buffer (`m_shared_srab`) of the previous geometry. The phase-2 EEQ solve of the topology set-up read those stale distances, and `Calculation()` then skipped its own phase 2 because the geometry had not changed since the set-up. Only the Coulomb term moved: -3.7 to -5.5 kcal/mol on a 66-atom trisaccharide conformer set (charges up to 0.07 e), first structure exact, the rest off; a new `EnergyCalculator` per structure or resetting the pointer gives 1e-14 Eh. Bond pinning, the topology file cache and the EEQ cache were ruled out by experiment. Fix: `setExternalDistances(nullptr, nullptr)` at the start of `InitialiseMolecule()`, as in a fresh object. Test `test_gfnff_reinit` (8 frames of `helicene-frames17`): worst deviation re-used vs fresh 1.35e-4 Eh and 3.9e-4 Eh/A before, 0 after. Measured effect on the CLI (helicene-frames17, 17 frames, CPU, 1 thread, `release` build of this branch): `-sp` on the multi-structure file was not affected (identical energies before and after); `-opt` on the multi-structure file was: 16 of 17 optimised structures differ between the binaries before and after the fix by up to 2.6e-2 A, and compared with optimising every frame in its own process the batch result deviates by up to 2.6e-2 A before and 3.7e-3 A after the fix (the remainder is another history dependence of a re-used calculator, not investigated). Fresh single `-sp`, `-opt` and short `-md` runs (3 structures) are bit-identical before and after. Not checked: ConfScan, Hessian, MD restarts, GPU.
+
