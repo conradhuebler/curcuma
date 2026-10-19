@@ -541,6 +541,7 @@ bool QMEngine::computeMP2Gradient(const qmint::MP2Options& opt, double c_os, dou
         r -= alpha * Ap;
         ++it;
         rmax = r.cwiseAbs().maxCoeff();
+        CurcumaLogger::result(fmt::format("MP2 Z-vector iteration {:3d}  max|R| = {:.2e}", it, rmax));
         if (rmax <= ztol) break;
         const Matrix s = r.cwiseQuotient(diag);
         const double rz_new = r.cwiseProduct(s).sum();

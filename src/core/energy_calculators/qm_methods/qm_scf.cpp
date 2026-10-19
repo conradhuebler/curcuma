@@ -561,10 +561,9 @@ bool QMEngine::runSCF()
                 eps.size() > 1 ? eps(1) : 0.0, density_new.norm()));
         }
 
-        if (CurcumaLogger::get_verbosity() >= 3) {
+        if (CurcumaLogger::get_verbosity() >= 1) {  // one line per iteration from level 1 on (was level 3)
             double e_tmp = 0.5 * (density_new.cwiseProduct(m_H + fock).sum());
-            CurcumaLogger::param(fmt::format("SCF iter {}", iter + 1),
-                                 fmt::format("dP = {:.3e}, E_elec = {:.10f} Eh", delta_P, e_tmp));
+            CurcumaLogger::result(fmt::format("SCF iter {:3d}: dP = {:.3e}, E_elec = {:.10f} Eh", iter + 1, delta_P, e_tmp));
         }
 
         if (delta_P < m_scf_threshold && !cadence.early) {
@@ -758,6 +757,9 @@ int QMEngine::runSCFDevice(int n_occ, bool direct, bool use_diis, double damping
         const double eig_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_e0).count();
         t_eig_ms += eig_ms;
 
+        if (CurcumaLogger::get_verbosity() == 1 || CurcumaLogger::get_verbosity() == 2)
+            CurcumaLogger::result(fmt::format("SCF iter {:3d}: dP = {:.3e}, E_elec = {:.10f} Eh (device, Fock {:.0f} ms {})",
+                                              iter + 1, delta_P, e_elec, fock_ms, full ? "full" : "incremental"));
         if (CurcumaLogger::get_verbosity() >= 3)
             CurcumaLogger::param(fmt::format("SCF iter {}", iter + 1),
                                  fmt::format("dP = {:.3e}, E_elec = {:.10f} Eh (device; Fock {:.2f} ms ({}{}), DIIS {:.2f} ms, "

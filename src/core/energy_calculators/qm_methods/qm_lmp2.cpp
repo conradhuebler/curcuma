@@ -1726,8 +1726,8 @@ bool QMEngine::computeLMP2(const qmint::LMP2Options& opt, qmint::LMP2Result& res
         }
         res.last_de = e - e_old;
         res.max_residual = rmax;
-        if (CurcumaLogger::get_verbosity() >= 3)
-            CurcumaLogger::info(fmt::format("LMP2 it {:3d}  E = {:.12f}  dE = {:.2e}  max|R| = {:.2e}", it, e, e - e_old, rmax));
+        if (CurcumaLogger::get_verbosity() >= 1)  // iterative progress from level 1 on (was 3)
+            CurcumaLogger::result(fmt::format("LMP2 it {:3d}  E = {:.12f}  dE = {:.2e}  max|R| = {:.2e}", it, e, e - e_old, rmax));
         e_old = e;
         if (std::abs(res.last_de) < opt.e_threshold && rmax < opt.r_threshold) {
             converged = true;

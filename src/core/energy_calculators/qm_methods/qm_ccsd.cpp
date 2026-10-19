@@ -656,9 +656,9 @@ void ccsdSolve(const CCSDIntegrals& I, const CCSDOptions& opt, int threads, CCSD
     AmplitudeDIIS diis(opt.diis);
     CCTensor R1, R2;
     std::vector<double> xn(n1 + n2), dn(n1 + n2);
-    const bool print = CurcumaLogger::get_verbosity() >= 3;
+    const bool print = CurcumaLogger::get_verbosity() >= 1;  // iterative progress from level 1 on (was 3)
     if (print)
-        CurcumaLogger::info(fmt::format("CCSD iteration   0  E = {:.12f} (MP2 amplitudes)", e));
+        CurcumaLogger::result(fmt::format("CCSD iteration   0  E = {:.12f} (MP2 amplitudes)", e));
     res.converged = false;
     int it = 0;
     for (it = 1; it <= opt.max_iter; ++it) {
@@ -688,7 +688,7 @@ void ccsdSolve(const CCSDIntegrals& I, const CCSDOptions& opt, int threads, CCSD
         res.max_residual = rmax;
         res.last_de = e - e_old;
         if (print)
-            CurcumaLogger::info(fmt::format("CCSD iteration {:3d}  E = {:.12f}  dE = {:.2e}  max|R| = {:.2e}  {:.1f} ms",
+            CurcumaLogger::result(fmt::format("CCSD iteration {:3d}  E = {:.12f}  dE = {:.2e}  max|R| = {:.2e}  {:.1f} ms",
                                             it, e, e - e_old, rmax, msSince(t0)));
         if (!std::isfinite(e)) break;
         if (std::abs(e - e_old) < opt.e_threshold && rmax < opt.r_threshold) {
