@@ -359,6 +359,8 @@ public:
     {
         if (m_umbrella_q_on) // Claude Generated 2026: only one extra potential, see umbrella_q
             throw std::runtime_error("SimpleMD: umbrella_q already uses the extra potential (plain -md only)");
+        if (m_umbrella_cv_on) // Claude Generated 2026: same for umbrella_cv
+            throw std::runtime_error("SimpleMD: umbrella_cv already uses the extra potential (plain -md only)");
         m_extra_potential = std::move(fn);
     }
     /** Claude Generated 2026: umbrella restraint on q = d(i,j) - d(i,k), see docs/UMBRELLA_Q.md.
@@ -372,6 +374,25 @@ public:
     /** W = kappa/2 (q - q0)^2 in Eh; grad = dW/dR in Eh/A (natoms x 3). Optional q, d_ij, d_ik in A. */
     static double umbrellaQEnergy(const UmbrellaQ& u, const Geometry& R, Geometry& grad,
         double* q = nullptr, double* dij = nullptr, double* dik = nullptr);
+    /** Claude Generated 2026: general umbrella restraint (umbrella_cv), see docs/UMBRELLA_Q.md.
+     *  Diff: q = d(i,j) - d(i,k) (k unused as 4th atom), Sum: q = d(i,j) + d(k,l) (q0 in A, kappa in Eh/A^2),
+     *  Dihedral: signed IUPAC phi(i,j,k,l) (q0 in rad, kappa in Eh/rad^2). Atoms 0-based. */
+    struct UmbrellaCV {
+        enum Type { Diff, Sum, Dihedral } type = Sum;
+        int i = -1, j = -1, k = -1, l = -1;
+        double q0 = 0.0, kappa = 0.0;
+    };
+    /** Parse "diff,i,j,k,q0,kappa" | "sum,i,j,k,l,q0,kappa" | "dihedral,i,j,k,l,phi0,kappa"
+     *  (atoms 1-based; q0 in A, phi0 in degrees; kappa in kcal/mol/A^2 or kcal/mol/rad^2). */
+    static bool parseUmbrellaCV(const std::string& spec, int natoms, UmbrellaCV& out, std::string& error);
+    /** W = kappa/2 (q - q0)^2 in Eh (dihedral: q - q0 wrapped to [-pi, pi]); grad = dW/dR in Eh/A.
+     *  Optional outputs: cv (A or rad), a1/a2 = d_ij/d_ik (diff), d_ij/d_kl (sum), dphi in rad (a1, dihedral).
+     *  Throws std::runtime_error for a dihedral with a (near) linear bond angle (|sin| < 1e-6). */
+    static double umbrellaCVEnergy(const UmbrellaCV& u, const Geometry& R, Geometry& grad,
+        double* cv = nullptr, double* a1 = nullptr, double* a2 = nullptr);
+    /** Signed dihedral phi(i,j,k,l) in rad, IUPAC/Klyne-Prelog sign (trans 180, gauche +-60, cis 0),
+     *  same convention as gfnff_geometry.h calculateDihedralAngle; optional dphi/dR rows (4 x 3, 1/A). */
+    static double dihedralAngle(const Geometry& R, int i, int j, int k, int l, Eigen::Matrix<double, 4, 3>* dphi = nullptr);
     /** W at the current positions (Eh), 0 when no extra potential is set. */
     double extraPotentialEnergy() const { return m_extra_energy; }
     /** Claude Generated 2026: dW/dR (Eh/Angstrom) of the extra potential, from the same integrator
@@ -737,6 +758,13 @@ private:
     int m_umbrella_q_frequency = 20;
     std::ofstream m_umbrella_q_file;
     void WriteUmbrellaQ(int step, double time_fs);
+    // Claude Generated 2026: general umbrella restraint (umbrella_cv: diff | sum | dihedral)
+    std::string m_umbrella_cv_spec;
+    UmbrellaCV m_umbrella_cv;
+    bool m_umbrella_cv_on = false;
+    int m_umbrella_cv_frequency = 20;
+    std::ofstream m_umbrella_cv_file;
+    void WriteUmbrellaCV(int step, double time_fs);
 
     // WP-S2 (May 2026): per-step diagnostics JSONL dump
     bool m_md_diagnostics = false;
@@ -913,6 +941,8 @@ private:
     PARAM(md_diagnostics_timing, Bool, false, "Add a timing_ms block to each <basename>.diag.jsonl record (per-phase wall-clock: CN/EEQ/dcn/D4-weights/FF/integrator/HBXB/I-O). GPU runs add a gpu sub-block with per-kernel-category times. Requires md_diagnostics=true. ~1-2 us per hook.", "Output", {})
     PARAM(umbrella_q, String, "", "Umbrella restraint on a distance difference, 'i,j,k,q0,kappa': q = d(i,j) - d(i,k) (atoms 1-based), W = kappa/2 (q - q0)^2 with q0 in Angstrom and kappa in kcal/mol/A^2. Empty = off. Plain -md only (not with NEB-MD). Writes <basename>.umbrella_q.csv. See docs/UMBRELLA_Q.md.", "System", {})
     PARAM(umbrella_q_frequency, Int, 20, "Write a line to <basename>.umbrella_q.csv every N steps (only with umbrella_q).", "System", {})
+    PARAM(umbrella_cv, String, "", "Umbrella restraint on a collective variable, W = kappa/2 (q - q0)^2, atoms 1-based: 'sum,i,j,k,l,q0,kappa' (q = d(i,j) + d(k,l), q0 in Angstrom, kappa in kcal/mol/A^2), 'dihedral,i,j,k,l,phi0,kappa' (signed IUPAC dihedral, trans 180, gauche +-60; phi0 in degrees, kappa in kcal/mol/rad^2, periodic), 'diff,i,j,k,q0,kappa' (same as umbrella_q). Empty = off. Excludes umbrella_q and NEB-MD. Writes <basename>.umbrella_cv.csv. See docs/UMBRELLA_Q.md.", "System", {})
+    PARAM(umbrella_cv_frequency, Int, 20, "Write a line to <basename>.umbrella_cv.csv every N steps (only with umbrella_cv).", "System", {})
 
     // --- ConfSearch robustness gates (Jun 2026, Claude Generated) ---
     PARAM(topo_check, Bool, false, "Abort the MD run when the molecule fragments (number of connected components grows above the start value). Off by default so reactive paths are still sampled.", "ConfSearch", {})

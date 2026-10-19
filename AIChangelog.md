@@ -16,6 +16,7 @@ below. If it needs measurements or a derivation, write them into the matching `d
 
 ## Jul - Sep 2026 (and some late June), 108 entries, full text in AIChangelog_2026-late.md
 
+- SimpleMD `umbrella_cv` (Oct 20, 2026): umbrella on d(i,j)+d(k,l) or a signed IUPAC dihedral (periodic), `diff` = umbrella_q; `<base>.umbrella_cv.csv`; off by default, umbrella_q bit-identical - [docs/UMBRELLA_Q.md](docs/UMBRELLA_Q.md)
 - NEB-MD distance-space path CV (Oct 19, 2026): `-nebmd.cv_metric distances`, `cv_pairs auto|1-4,...`, `cv_pair_transform d|inv`; per-window diagnostics `<base>.neb.windows.csv` with neighbour-jump index J; rmsd default bit-identical - [docs/NEB_MD.md](docs/NEB_MD.md)
 - SimpleMD `umbrella_q` (Oct 18, 2026): harmonic umbrella on q = d(i,j) - d(i,k) via `setExtraPotential`, per-step `<base>.umbrella_q.csv`; reference for NEB-MD path-CV free energies; off by default - [docs/UMBRELLA_Q.md](docs/UMBRELLA_Q.md)
 - NEB-MD free energies (Oct 2-13, 2026): string -> path-CV pipeline, basin barrier, absolute TST rate; five bugs that invalidated all earlier numbers fixed; ethane only, GFN-FF - [docs/NEB_MD.md](docs/NEB_MD.md)

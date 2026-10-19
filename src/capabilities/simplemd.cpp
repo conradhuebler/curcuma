@@ -441,6 +441,8 @@ void SimpleMD::LoadControlJson()
     // Claude Generated 2026: umbrella restraint on q = d(i,j) - d(i,k), parsed in Initialise()
     m_umbrella_q_spec = m_config.get<std::string>("umbrella_q");
     m_umbrella_q_frequency = std::max(1, m_config.get<int>("umbrella_q_frequency"));
+    m_umbrella_cv_spec = m_config.get<std::string>("umbrella_cv"); // Claude Generated 2026
+    m_umbrella_cv_frequency = std::max(1, m_config.get<int>("umbrella_cv_frequency"));
 
     // WP-S2 (May 2026): per-step diagnostics JSONL dump
     m_md_diagnostics = m_config.get<bool>("md_diagnostics");
@@ -1047,6 +1049,36 @@ bool SimpleMD::Initialise()
         m_umbrella_q_on = true;
         CurcumaLogger::result_fmt("umbrella_q: q = d({},{}) - d({},{}), q0 = {:.4f} A, kappa = {:.6f} Eh/A^2",
             u.i + 1, u.j + 1, u.i + 1, u.k + 1, u.q0, u.kappa);
+    }
+
+    // Claude Generated 2026: general umbrella restraint (umbrella_cv: diff | sum | dihedral)
+    if (!m_umbrella_cv_spec.empty()) {
+        if (m_umbrella_q_on) {
+            CurcumaLogger::error("umbrella_cv and umbrella_q are mutually exclusive (one restraint per run)");
+            return false;
+        }
+        std::string err;
+        if (!parseUmbrellaCV(m_umbrella_cv_spec, m_natoms, m_umbrella_cv, err)) {
+            CurcumaLogger::error("umbrella_cv '" + m_umbrella_cv_spec + "': " + err);
+            return false;
+        }
+        if (m_extra_potential) {
+            CurcumaLogger::error("umbrella_cv: the extra potential is already in use (umbrella_cv is for plain -md only)");
+            return false;
+        }
+        const UmbrellaCV u = m_umbrella_cv;
+        m_extra_potential = [u](const Geometry& R, Geometry& g) { return umbrellaCVEnergy(u, R, g); };
+        m_umbrella_cv_on = true;
+        const double deg = 180.0 / CurcumaUnit::Constants::PI;
+        if (u.type == UmbrellaCV::Dihedral)
+            CurcumaLogger::result_fmt("umbrella_cv: phi({},{},{},{}), phi0 = {:.3f} deg, kappa = {:.6f} Eh/rad^2",
+                u.i + 1, u.j + 1, u.k + 1, u.l + 1, u.q0 * deg, u.kappa);
+        else if (u.type == UmbrellaCV::Sum)
+            CurcumaLogger::result_fmt("umbrella_cv: q = d({},{}) + d({},{}), q0 = {:.4f} A, kappa = {:.6f} Eh/A^2",
+                u.i + 1, u.j + 1, u.k + 1, u.l + 1, u.q0, u.kappa);
+        else
+            CurcumaLogger::result_fmt("umbrella_cv: q = d({},{}) - d({},{}), q0 = {:.4f} A, kappa = {:.6f} Eh/A^2",
+                u.i + 1, u.j + 1, u.i + 1, u.k + 1, u.q0, u.kappa);
     }
 
     m_initialised = true;
@@ -2001,12 +2033,25 @@ void SimpleMD::prepareRun()
         m_umbrella_q_file.open(outputPath(Basename() + ".umbrella_q.csv"));
         m_umbrella_q_file << "step,time_fs,q_A,d_ij_A,d_ik_A,W_Eh,Epot_Eh,Ekin_Eh\n";
     }
+    if (m_umbrella_cv_on) { // Claude Generated 2026: as umbrella_q
+        ApplyExtraPotential();
+        m_umbrella_cv_file.close();
+        m_umbrella_cv_file.open(outputPath(Basename() + ".umbrella_cv.csv"));
+        if (m_umbrella_cv.type == UmbrellaCV::Dihedral)
+            m_umbrella_cv_file << "step,time_fs,cv_deg,dphi_deg,W_Eh,Epot_Eh,Ekin_Eh\n";
+        else if (m_umbrella_cv.type == UmbrellaCV::Sum)
+            m_umbrella_cv_file << "step,time_fs,cv_A,d_ij_A,d_kl_A,W_Eh,Epot_Eh,Ekin_Eh\n";
+        else
+            m_umbrella_cv_file << "step,time_fs,cv_A,d_ij_A,d_ik_A,W_Eh,Epot_Eh,Ekin_Eh\n";
+    }
     EKin();
     m_Etot = m_Epot + m_Ekin;
     AverageQuantities();
     m_step = 0;
     if (m_umbrella_q_on)
         WriteUmbrellaQ(0, m_currentStep);
+    if (m_umbrella_cv_on)
+        WriteUmbrellaCV(0, m_currentStep);
 
     // Claude Generated (2026): start the global ramp from the initial setpoint and resolve the
     // thermal regions (atom indices + default complement). A fresh prepareRun() clears any prior
@@ -2601,6 +2646,8 @@ bool SimpleMD::step()
     // Claude Generated 2026: positions, Epot, Ekin here belong to the end of step m_step + 1
     if (m_umbrella_q_on && (m_step + 1) % m_umbrella_q_frequency == 0)
         WriteUmbrellaQ(m_step + 1, m_currentStep + m_dT);
+    if (m_umbrella_cv_on && (m_step + 1) % m_umbrella_cv_frequency == 0)
+        WriteUmbrellaCV(m_step + 1, m_currentStep + m_dT);
 
     if (m_step % m_dump == 0) {
         if (bool write = WriteGeometry()) {
@@ -3016,6 +3063,181 @@ void SimpleMD::WriteUmbrellaQ(int step, double time_fs)
     const double W = umbrellaQEnergy(m_umbrella_q, m_eigen_geometry, g, &q, &dij, &dik);
     m_umbrella_q_file << fmt::format("{},{:.4f},{:.8f},{:.8f},{:.8f},{:.10e},{:.10f},{:.10f}\n",
         step, time_fs, q, dij, dik, W, m_Epot, m_Ekin);
+}
+
+/* Claude Generated 2026: signed dihedral phi(i,j,k,l), IUPAC / Klyne-Prelog sign convention:
+ * looking along j -> k, phi > 0 when the front bond j-i turns clockwise (< 180 deg) onto the back
+ * bond k-l; cis 0, gauche +-60, trans 180. Identical to gfnff_geometry.h calculateDihedralAngle
+ * (checked in test_umbrella_q). Molecule::CalculateDihedral is NOT this convention (0..2pi, and it
+ * clamps the unnormalised normal dot product), do not compare against it.  With F = R_i - R_j, G = R_j - R_k, H = R_l - R_k, A = F x G, B = H x G:
+ *   cos phi = A.B / (|A||B|),   sin phi = (B x A).G / (|A||B||G|),   phi = atan2(sin, cos)
+ * Gradient (Blondel & Karplus, J. Comput. Chem. 17, 1132 (1996); Bekker et al.):
+ *   dphi/dR_i = -|G|/|A|^2 A
+ *   dphi/dR_j = +|G|/|A|^2 A + (F.G)/(|A|^2|G|) A - (H.G)/(|B|^2|G|) B
+ *   dphi/dR_k = +(H.G)/(|B|^2|G|) B - (F.G)/(|A|^2|G|) A - |G|/|B|^2 B
+ *   dphi/dR_l = +|G|/|B|^2 B
+ * |A| = |F||G| sin(angle ijk) and |B| = |H||G| sin(angle jkl): a linear bond angle makes phi
+ * undefined, so |sin| < 1e-6 throws instead of dividing by zero. */
+double SimpleMD::dihedralAngle(const Geometry& R, int i, int j, int k, int l, Eigen::Matrix<double, 4, 3>* dphi)
+{
+    const Eigen::Vector3d F = (R.row(i) - R.row(j)).transpose();
+    const Eigen::Vector3d G = (R.row(j) - R.row(k)).transpose();
+    const Eigen::Vector3d H = (R.row(l) - R.row(k)).transpose();
+    const Eigen::Vector3d A = F.cross(G), B = H.cross(G);
+    const double nA = A.norm(), nB = B.norm(), nG = G.norm();
+    if (nG == 0.0 || nA < 1e-6 * F.norm() * nG || nB < 1e-6 * H.norm() * nG)
+        throw std::runtime_error(fmt::format("umbrella_cv dihedral {}-{}-{}-{}: bond angle {}-{}-{} or {}-{}-{} is linear "
+                                             "(|sin| < 1e-6), the dihedral is undefined",
+            i + 1, j + 1, k + 1, l + 1, i + 1, j + 1, k + 1, j + 1, k + 1, l + 1));
+    const double phi = std::atan2(B.cross(A).dot(G) / (nA * nB * nG), A.dot(B) / (nA * nB));
+    if (dphi) {
+        const double fg = F.dot(G), hg = H.dot(G), a2 = nA * nA, b2 = nB * nB;
+        dphi->row(0) = -nG / a2 * A;
+        dphi->row(1) = nG / a2 * A + fg / (a2 * nG) * A - hg / (b2 * nG) * B;
+        dphi->row(2) = hg / (b2 * nG) * B - fg / (a2 * nG) * A - nG / b2 * B;
+        dphi->row(3) = nG / b2 * B;
+    }
+    return phi;
+}
+
+/* Claude Generated 2026: general umbrella restraint (docs/UMBRELLA_Q.md), W = kappa/2 (q - q0)^2.
+ *   diff:     q = d_ij - d_ik                 -> umbrellaQEnergy (same code as umbrella_q)
+ *   sum:      q = d_ij + d_kl,  dW/dR_i = kappa (q - q0) (R_i - R_j)/d_ij = -dW/dR_j,
+ *                               dW/dR_k = kappa (q - q0) (R_k - R_l)/d_kl = -dW/dR_l
+ *   dihedral: dq = phi - phi0 wrapped to [-pi, pi] (periodic), dW/dR = kappa dq dphi/dR
+ * Units: R in Angstrom, kappa in Eh/A^2 (diff, sum) or Eh/rad^2 (dihedral), gradient in Eh/A.
+ * When i == k or j == l in a sum, the row contributions add up (+=). */
+double SimpleMD::umbrellaCVEnergy(const UmbrellaCV& u, const Geometry& R, Geometry& grad, double* cv, double* a1, double* a2)
+{
+    if (u.type == UmbrellaCV::Diff) {
+        UmbrellaQ q;
+        q.i = u.i;
+        q.j = u.j;
+        q.k = u.k;
+        q.q0 = u.q0;
+        q.kappa = u.kappa;
+        return umbrellaQEnergy(q, R, grad, cv, a1, a2);
+    }
+    grad = Geometry::Zero(R.rows(), 3);
+    if (u.type == UmbrellaCV::Sum) {
+        const Eigen::RowVector3d rij = R.row(u.i) - R.row(u.j), rkl = R.row(u.k) - R.row(u.l);
+        const double d1 = rij.norm(), d2 = rkl.norm(), dq = (d1 + d2) - u.q0;
+        grad.row(u.i) += u.kappa * dq * rij / d1;
+        grad.row(u.j) -= u.kappa * dq * rij / d1;
+        grad.row(u.k) += u.kappa * dq * rkl / d2;
+        grad.row(u.l) -= u.kappa * dq * rkl / d2;
+        if (cv) *cv = d1 + d2;
+        if (a1) *a1 = d1;
+        if (a2) *a2 = d2;
+        return 0.5 * u.kappa * dq * dq;
+    }
+    const double pi = CurcumaUnit::Constants::PI;
+    Eigen::Matrix<double, 4, 3> dphi;
+    const double phi = dihedralAngle(R, u.i, u.j, u.k, u.l, &dphi);
+    const double dq = std::remainder(phi - u.q0, 2.0 * pi); // wrapped to [-pi, pi]
+    grad.row(u.i) = u.kappa * dq * dphi.row(0);
+    grad.row(u.j) = u.kappa * dq * dphi.row(1);
+    grad.row(u.k) = u.kappa * dq * dphi.row(2);
+    grad.row(u.l) = u.kappa * dq * dphi.row(3);
+    if (cv) *cv = phi;
+    if (a1) *a1 = dq;
+    if (a2) *a2 = 0.0;
+    return 0.5 * u.kappa * dq * dq;
+}
+
+bool SimpleMD::parseUmbrellaCV(const std::string& spec, int natoms, UmbrellaCV& out, std::string& error)
+{
+    const std::size_t comma = spec.find(',');
+    std::string type = spec.substr(0, comma);
+    type.erase(0, type.find_first_not_of(' '));
+    type.erase(type.find_last_not_of(' ') + 1);
+    const std::string rest = comma == std::string::npos ? "" : spec.substr(comma + 1);
+    if (type == "diff") { // synonym of umbrella_q
+        UmbrellaQ q;
+        if (!parseUmbrellaQ(rest, natoms, q, error))
+            return false;
+        out = UmbrellaCV();
+        out.type = UmbrellaCV::Diff;
+        out.i = q.i;
+        out.j = q.j;
+        out.k = q.k;
+        out.q0 = q.q0;
+        out.kappa = q.kappa;
+        return true;
+    }
+    if (type != "sum" && type != "dihedral") {
+        error = "unknown type '" + type + "' (expected diff, sum or dihedral)";
+        return false;
+    }
+    std::vector<std::string> f;
+    std::stringstream ss(rest);
+    for (std::string t; std::getline(ss, t, ',');)
+        f.push_back(t);
+    if (comma == std::string::npos || f.size() != 6) {
+        error = "expected " + type + ",i,j,k,l," + (type == "sum" ? "q0" : "phi0") + ",kappa (7 fields)";
+        return false;
+    }
+    int idx[4];
+    double v[2];
+    try {
+        for (int n = 0; n < 4; ++n) {
+            std::size_t pos = 0;
+            idx[n] = std::stoi(f[n], &pos);
+            if (f[n].find_first_not_of(" ", pos) != std::string::npos) throw std::invalid_argument(f[n]);
+        }
+        for (int n = 0; n < 2; ++n) {
+            std::size_t pos = 0;
+            v[n] = std::stod(f[4 + n], &pos);
+            if (f[4 + n].find_first_not_of(" ", pos) != std::string::npos) throw std::invalid_argument(f[4 + n]);
+        }
+    } catch (const std::exception&) {
+        error = "non-numeric field";
+        return false;
+    }
+    for (int n = 0; n < 4; ++n)
+        if (idx[n] < 1 || idx[n] > natoms) {
+            error = "atom index " + std::to_string(idx[n]) + " out of range 1.." + std::to_string(natoms);
+            return false;
+        }
+    if (type == "sum" && (idx[0] == idx[1] || idx[2] == idx[3])) {
+        error = "sum needs i != j and k != l";
+        return false;
+    }
+    if (type == "dihedral")
+        for (int a = 0; a < 4; ++a)
+            for (int b = a + 1; b < 4; ++b)
+                if (idx[a] == idx[b]) {
+                    error = "dihedral atom indices must be distinct";
+                    return false;
+                }
+    if (!(v[1] > 0.0) || !std::isfinite(v[0]) || !std::isfinite(v[1])) {
+        error = std::string("kappa must be > 0 (kcal/mol/") + (type == "sum" ? "A^2)" : "rad^2)");
+        return false;
+    }
+    out = UmbrellaCV();
+    out.type = type == "sum" ? UmbrellaCV::Sum : UmbrellaCV::Dihedral;
+    out.i = idx[0] - 1;
+    out.j = idx[1] - 1;
+    out.k = idx[2] - 1;
+    out.l = idx[3] - 1;
+    // q0: Angstrom (sum) or degrees -> rad (dihedral); kappa: kcal/mol per A^2 or rad^2 -> Eh
+    out.q0 = type == "sum" ? v[0] : v[0] * CurcumaUnit::Constants::PI / 180.0;
+    out.kappa = CurcumaUnit::Energy::kcalmol_to_hartree(v[1]);
+    return true;
+}
+
+void SimpleMD::WriteUmbrellaCV(int step, double time_fs)
+{
+    Geometry g;
+    double cv = 0.0, a1 = 0.0, a2 = 0.0;
+    const double W = umbrellaCVEnergy(m_umbrella_cv, m_eigen_geometry, g, &cv, &a1, &a2);
+    if (m_umbrella_cv.type == UmbrellaCV::Dihedral) {
+        const double deg = 180.0 / CurcumaUnit::Constants::PI;
+        m_umbrella_cv_file << fmt::format("{},{:.4f},{:.6f},{:.6f},{:.10e},{:.10f},{:.10f}\n",
+            step, time_fs, cv * deg, a1 * deg, W, m_Epot, m_Ekin);
+    } else
+        m_umbrella_cv_file << fmt::format("{},{:.4f},{:.8f},{:.8f},{:.8f},{:.10e},{:.10f},{:.10f}\n",
+            step, time_fs, cv, a1, a2, W, m_Epot, m_Ekin);
 }
 
 void SimpleMD::applyExternalForces(const Geometry& forces)

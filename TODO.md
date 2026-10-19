@@ -44,6 +44,8 @@ Stand.
 - **Fensteraufloesung ueber steilen Barrieren**: NEB-MD integriert dG/ds mit Trapez/Spline ueber `nimages` Fenster; Retro-DA GFN2: 12/23/34 Fenster geben dG_TST 91.5/71.8/67.0
   (n=1). Noetig: Warnung bei grossem Sprung von dG/ds zwischen Nachbarfenstern, adaptive Verdichtung am Maximum, `nimages` mit `path_file` nicht ignorieren. [docs/NEB_MD.md](docs/NEB_MD.md).
 - **Restraint-Modus-Tube** (`umbrella_kz`) laeuft ueber `applyExternalForces` (einen Schritt verzoegert, nicht in `trueGradient()`), ueberschneidet sich mit `z_wall`.
+- **`Molecule::CalculateDihedral` falsch** (`src/core/molecule.cpp` ~551, benutzt von `-dihedral` in `src/main.cpp` ~523): das Skalarprodukt der unnormierten Flaechennormalen wird vor der Division durch die Betraege auf [-1,1] begrenzt
+  (Agent-Nachrechnung: 116.4 Grad fuer eine +60-Grad-Geometrie), Ausgabe 0..2pi statt IUPAC. Korrekt ist `GFNFF_Geometry::calculateDihedralAngle`. Nicht repariert, nicht gegengeprueft ausser der Rechnung des Agenten.
 - **MD-Startgeschwindigkeiten und Andersen**: ein prozessweit geteilter statischer Generator, Seeds mehrerer SimpleMD-Instanzen nicht unabhängig reproduzierbar
   (NEB-MD-Fenster). Vault: Projekte-Notiz `curcuma NEB-MD Pfad-Sampling`.
 

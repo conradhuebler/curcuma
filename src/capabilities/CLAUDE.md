@@ -11,7 +11,7 @@ Hessian, docking. Energies and gradients always come from `EnergyCalculator`. Do
 - `lbfgspp_optimizer.*`, `ancopt_optimizer.*`, `native_optimizer_adapters.*`: concrete drivers; native algorithms in [optimisation/](optimisation/CLAUDE.md)
 - `rmsd.*` (`RMSDDriver`, strategies in [rmsd/](rmsd/CLAUDE.md)), `confscan.*`, `confsearch.*`, `shared_bias_pool.*`, `simplemd.*`, `analysis*`, `handlers/`, `trajectory*`
 - `nebmd.*`, `string_path.*`, `path_cv.*`, `fe_profile.h`, `wham.h`, `z_filter.h`: NEB-MD (CI-NEB, string stage, constrained path-CV mean force, TST rate; AI-generated, machine-tested, ethane/GFN-FF only), [../../docs/NEB_MD.md](../../docs/NEB_MD.md)
-- SimpleMD `umbrella_q`: harmonic umbrella on a distance difference d(i,j)-d(i,k) via `setExtraPotential`, plain `-md` only, [../../docs/UMBRELLA_Q.md](../../docs/UMBRELLA_Q.md)
+- SimpleMD `umbrella_q`/`umbrella_cv`: harmonic umbrella on d(i,j)-d(i,k), d(i,j)+d(k,l) or a signed dihedral via `setExtraPotential`, plain `-md` only, [../../docs/UMBRELLA_Q.md](../../docs/UMBRELLA_Q.md)
 - Others: `hessian`, `docking`, `nebdocking`, `qmdfffit`, `persistentdiagram`, `tda_engine`, `pairmapper`, `casino`, `polymerbuild`, `confstat`, `rmsdtraj`
 - `optimiser/`: LevMar headers (docking, NEB, qmdfffit), `OptimiseDipoleScaling.h` (main.cpp); `c_code/`: C Hungarian solver used by `rmsd`
 - Removed 2026-10-01 as dead (no callers): the legacy `CurcumaOpt` implementation, `native_lbfgs_optimizer.*`, `optimisation/modern_optimizer_simple.*`, munkress_2.h and four unused `optimiser/*.h` headers; `curcumaopt.h` stays because its PARAM block defines the `opt` module
