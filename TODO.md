@@ -51,7 +51,6 @@ Stand.
 - **Ladungsplatzierung** (Known Issue #31) nicht getestet für periodische Systeme, GPU-Laufzeit, viele Fragmente in Kontakt und lange MD mit
   `frag_charge_s_max` > 1.
 - **LBFGSpp prüft die Krümmung nicht** (geprüft 2026-10-18, n=1): `BFGSMat::add_correction` überspringt das Update bei `s'y <= 0` nicht; auf einer rauen Delta-ML-Fläche (alte Defaults, 120 Zentren) bricht der Optimierer `auto` mit Exit 1 ab. Beobachtet an `cli_deltaml_01` mit dem alten ACSF-Gitter, mit den neuen Defaults (6 Schalen, eta 4) konvergiert er. Details: `AIChangelog.md` (Delta-ML), Vault `Projekte/curcuma Delta-ML`.
-- **Delta-ML: interne Etikettierung von `-activelearn`** (2026-10-19): Gradienten-Etiketten waren um 1,89 zu groß (behoben, `bc7742e6`); die gespeicherte `energy_base` weicht von `-sp -method gfnff` um -1,13 bis -5,07 kcal/mol ab, Datasets in Thread-Chunk- statt Eingabereihenfolge (Reparatur und Regressionstest `cli_deltaml_04` in Arbeit). Alle Messungen mit der internen Etikettierung sind ungültig; extern frisch etikettierte Messungen: `docs/DELTA_ML_USECASE_TEST2_2026-10.md`.
 - **`-opt.optimizer lbfgs` macht bei großem Startgradienten einen Nullschritt** (n=160 Läufe, 2026-10-19): ab etwa 0,3 Eh/Bohr Exit 1, 0 Iterationen, kein Fehlertext, auch für GFN2 und GFN-FF allein (400-K-MD-Frames); der Standardoptimierer läuft durch. Ursache nicht untersucht.
 
 ## 2. Leistung
