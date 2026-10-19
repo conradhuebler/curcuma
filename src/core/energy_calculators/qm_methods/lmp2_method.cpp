@@ -18,6 +18,7 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 
 namespace {
@@ -63,6 +64,8 @@ LMP2Method::LMP2Method(const json& config)
     o.frozen_core = readBool(ec, "frozen_core", false);
     o.ri_aux = readString(ec, "ri_mp2_aux", o.ri_aux, false);
     o.localizer = readString(ec, "lmp2_localizer", o.localizer, true);
+    o.localizer_algo = readString(ec, "lmp2_localizer_algo", o.localizer_algo, true);
+    o.localizer_screen = readNumber(ec, "lmp2_localizer_screen", o.localizer_screen);
     o.bp_threshold = readNumber(ec, "lmp2_bp_threshold", o.bp_threshold);
     o.domain_radius = readNumber(ec, "lmp2_domain_radius", o.domain_radius);
     o.pno_cut = readNumber(ec, "lmp2_pno_cut", o.pno_cut);
@@ -130,6 +133,49 @@ double LMP2Method::calculateEnergy(bool gradient)
     const qmint::LMP2Result& r = m_result;
     m_e_total = m_e_hf + r.e_corr();
 
+    // Diagnostic (env CURCUMA_LMP2_LOC_COMPARE): run LMP2 again on the same SCF with the other localisation algorithm
+    // (fast <-> classic) and, if the value is a comma-separated list of numbers, with the fast route at each of these
+    // lmp2_localizer_screen values in [0, 1); prints E_corr and the functional of every run. Claude Generated (Oct 2026).
+    std::vector<std::string> loc_compare;
+    if (const char* env = std::getenv("CURCUMA_LMP2_LOC_COMPARE")) {
+        auto line = [&](const std::string& tag, const qmint::LMP2Result& r2) {
+            return fmt::format("LMP2 localiser comparison: {:<22} E_corr {:.12f} F {:.12f} sweeps {:3d} t_loc {:9.1f} ms  dE_corr {:10.3e} "
+                               "dF {:10.3e}",
+                               tag, r2.e_corr(), r2.localization_functional, r2.localization_sweeps, r2.t_localize_ms,
+                               r2.e_corr() - m_result.e_corr(), r2.localization_functional - m_result.localization_functional);
+        };
+        loc_compare.push_back(line(fmt::format("{} screen {:g} (run)", m_options.localizer_algo, m_options.localizer_screen), m_result));
+        std::vector<qmint::LMP2Options> runs;
+        qmint::LMP2Options o2 = m_options;
+        o2.localizer_algo = m_options.localizer_algo == "fast" ? "classic" : "fast";
+        runs.push_back(o2);
+        std::string list(env);
+        size_t pos = 0;
+        while (pos < list.size()) {
+            const size_t comma = list.find(',', pos);
+            const std::string item = list.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+            pos = comma == std::string::npos ? list.size() : comma + 1;
+            try {
+                size_t used = 0;
+                const double sc = std::stod(item, &used);
+                if (used == item.size() && sc >= 0.0 && sc < 1.0) {  // "1" alone = only the other route
+                    qmint::LMP2Options o3 = m_options;
+                    o3.localizer_algo = "fast";
+                    o3.localizer_screen = sc;
+                    runs.push_back(o3);
+                }
+            } catch (...) {
+            }
+        }
+        for (const auto& oo : runs) {
+            qmint::LMP2Result r2;
+            if (m_engine->computeLMP2(oo, r2))
+                loc_compare.push_back(line(fmt::format("{} screen {:g}", oo.localizer_algo, oo.localizer_screen), r2));
+            else
+                loc_compare.push_back("LMP2 localiser comparison: run failed");
+        }
+    }
+
     double t_check = 0.0;
     if (m_check) {
         qmint::MP2Options mo;
@@ -195,6 +241,11 @@ double LMP2Method::calculateEnergy(bool gradient)
                                             m_check ? fmt::format(", RI-MP2 check {:.1f} ms", t_check) : std::string(),
                                             r.memory_mb, r.info));
         }
+        if (v >= 2)
+            CurcumaLogger::info(fmt::format("LMP2 localisation ({}, {}): functional {:.12f}, {} sweeps; ms: {}", m_options.localizer,
+                                            m_options.localizer_algo, r.localization_functional, r.localization_sweeps,
+                                            r.localization_info));
+        for (const auto& lc : loc_compare) CurcumaLogger::result(lc);
         CurcumaLogger::result(fmt::format("  E(lmp2)        = {:.12f} Eh", m_e_total));
         CurcumaLogger::energy_abs(m_e_total, "total lmp2 energy");
     }

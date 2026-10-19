@@ -860,6 +860,51 @@ Grenze.
   Lokalisierung (Jacobi-Sweeps ~N^3) und Paar-Vorauswahl (o^2 Abstandstest) bleiben wie vorher; keine PNO-Domaenen
   fuer den Fit (ORCA fittet im PNO-Raum mit Paardomaenen); keine Device-Variante der 3-Index-Erzeugung.
 
+### Skalierung der Lokalisierung (`-qm.lmp2_localizer_algo fast|classic`, 19.10.2026)
+
+**Stand: 🤖 AI-generated, ⚙️ machine-tested; menschlicher Produktionstest steht aus.** Code: `qm_lmp2.cpp` Abschnitt 2
+(`pmLocalizeFast`, `productParallel`), Schalter `lmp2_localizer_algo` (Standard `fast`, `classic` = alter Weg) und
+`lmp2_localizer_screen` (1e-8). Zeitaufteilung bei `-verbosity 2` in der Zeile "LMP2 localisation".
+
+- **Profil vorher** (C40H82, n = 970, 24 Threads, ms): sphaerische Transformation der Dipolmatrizen (dichtes Q^T M Q,
+  n^3) 214, PM-Sweeps 120, Schwerpunkte (o Matrix-Vektor-Produkte mit n x n, n^2 o) 54, Populationsmatrizen 28,
+  Dipolintegrale 23, Cholesky-Start 17, U 13. Die Sweeps drehen natm Matrizen o x o (O(natm o^3) je Sweep, 111 MB bei
+  C80, Zeilenzugriffe mit Stride); die Zahl der Sweeps waechst nicht (Alkane 6, Wasser 5, Acene 6-27).
+- **Aenderungen:** (a) PM-Sweeps ohne Populationsmatrizen: Q^A_st je Paar aus den Spalten s, t von L und SL = S L, nach
+  einer Drehung nur die zwei Orbitale neu bewertet; gleiche Zielfunktion, gleiche Paarformel, gleicher Round-Robin-Plan,
+  gleiches Konvergenzkriterium; O(o^2 n) je Sweep, parallel ueber die disjunkten Paare einer Runde (threadzahlunabhaengig);
+  (b) Abschirmung: Atomtraeger je Orbital (Norm der Koeffizienten > screen), Paar nur ueber gemeinsame Atome und nur,
+  wenn die Schranke des Drehwinkels > screen ist; (c) sparse sphaerische Transformation; (d) Schwerpunkte und
+  Dipol-Abschaetzung (distant) aus einem threadparallelen Produkt Dip L (die BLAS ist sequentiell), das die
+  distant-Rechnung wiederverwendet. Boys bleibt auf dem Matrixweg (3 Matrizen; eine paarparallele Variante war bis
+  Pentacen langsamer und wurde verworfen).
+- **Ergebnisgleichheit** (gleiche SCF, beide Wege im selben Prozess, `CURCUMA_LMP2_LOC_COMPARE`): |dE_corr| <= 2.2e-14 Eh,
+  |dF| <= 7.1e-13 auf C8, C20, C40, C60, C80, Acenen 1-5, (H2O)4-20; Boys (Benzol, C20, Pentacen) <= 1.4e-14 Eh. Mit
+  screen 1e-6 statt 1e-8: dE bis 3.3e-11 Eh und F um bis 1.7e-10 kleiner (C80), daher Standard 1e-8.
+- **Zeit Lokalisierung** (ms, 24 Threads, je ein Lauf; vorher = Binary vor der Aenderung, C60/C80 aus den Laeufen vom
+  18.10.; C40, Pentacen und (H2O)20 vorher bei Last ~24 durch einen fremden Job, nachher Last < 1 bzw. C80 Last ~17):
+
+| System | n | o | vorher | classic (neue Infrastruktur) | fast | Sweeps | Anteil an LMP2 (fast) |
+|---|---|---|---|---|---|---|---|
+| C20H42 | 490 | 61 | 73 | 41 | 25 | 6 | 0.9 % |
+| C40H82 | 970 | 121 | 468 | 210 | 96 | 6 | 0.9 % |
+| C60H122 | 1450 | 181 | 1618 | 657 | 213 | 6 | 0.9 % |
+| C80H162 | 1930 | 241 | 7763 | 5593 | 386 | 6 | 1.2 % |
+| Pentacen | 378 | 51 | 87 | 67 | 31 | 19 | 0.6 % |
+| (H2O)20 | 480 | 80 | 81 | 51 | 28 | 5 | 0.7 % |
+
+- **Exponenten** (gegen n): vorher C40 -> C80 4.1, C60 -> C80 5.5; fast C40 -> C80 2.0 (Sweeps 1.6, Dipolintegrale 1.5,
+  Cholesky-Start 3.0). Bei C80: Dipolintegrale 117, Cholesky-Start 141, Sweeps 102, Schwerpunkte 12, U 14 ms.
+- **Abschirmung greift erst ab C60:** Traeger bei 1e-8 umfassen bei C40 113 von 122 Atomen, bei C80 146 von 242; 66 % der
+  Paare werden bei C80 noch ausgewertet. Die Sweeps sind daher bis C80 praktisch O(o^2 n), nicht linear.
+- **Rest-N^3:** Cholesky-Start (D = C C^T und L^T S L, je ein sequentieller BLAS-Aufruf, n^2 o) ist bei C80 der groesste
+  Teil (37 %); nicht geaendert, weil eine andere Rundung die Pivotwahl bei gleichwertigen Atomen aendern kann.
+- **Naechstgroesste Teile von LMP2 bei C80** (GPU-SCF, ms): integraldirektes (P|i r) 18963, Paare/PNOs 7872,
+  Iterationen 1923, Ueberlappungen 873, distant 58 (vorher 245); nicht angefasst.
+- **Nicht getestet:** Systeme > C80, kompakte 3D-Systeme > 60 Atome, andere Elemente und Basen, Wirkung der Abschirmung
+  dort, wo sie viele Paare ueberspringt (erst jenseits C80 zu erwarten); Thread-Unabhaengigkeit von `fast` nur durch
+  Konstruktion und ctest (1 Thread Essigsaeuredimer/Butan), nicht systematisch.
+
 **Abgrenzung:** kein Nachbau von DLPNO-CCSD(T) (zu gross, viele Naeherungsschichten), sondern ein lokales MP2 nach
 dem Muster Pulay-Saebo-LMP2 + PNO. Die ueberlappenden Domaenen sind genau die Schwarz-artigen Teilgebiete aus WP14,
 aber auf der Ebene des **Wellenfunktionsraums**, nicht der Metrikinversion -- dort liegt der Skalierungshebel.

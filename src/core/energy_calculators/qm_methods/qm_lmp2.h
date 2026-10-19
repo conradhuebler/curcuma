@@ -66,6 +66,12 @@ BEGIN_PARAMETER_DEFINITION(qm)
     PARAM(lmp2_localizer, String, "pm",
           "LMP2: localisation of the active occupied orbitals: pm (Pipek-Mezey, Mulliken populations) | boys (Foster-Boys; smaller long-range error for pi systems in the feasibility study).",
           "Correlation", {})
+    PARAM(lmp2_localizer_algo, String, "fast",
+          "LMP2: algorithm of the localisation sweeps (same objective, pair formula, schedule and convergence test): fast (default since Oct 19 2026; Pipek-Mezey pair quantities formed on the fly from the orbital columns, O(o^2 n) per sweep, with support screening, see lmp2_localizer_screen) | classic (Pipek-Mezey by rotating one o x o population matrix per atom, O(natm o^3) per sweep; the route before Oct 19 2026). Boys uses the matrix route in both.",
+          "Correlation", {})
+    PARAM(lmp2_localizer_screen, Double, 1.0e-8,
+          "LMP2 with lmp2_localizer_algo fast and pm: an atom belongs to the support of an orbital if the norm of the orbital's (or S times the orbital's) coefficients on its basis functions exceeds this; Jacobi pairs are evaluated over the atoms common to both supports and skipped if there is none. 0 = every pair over all atoms (classic arithmetic in O(o^2 n) per sweep).",
+          "Correlation", {})
     PARAM(lmp2_bp_threshold, Double, 0.02,
           "LMP2: Boughton-Pulay completeness threshold of the orbital domains: atoms are added by decreasing Mulliken population until the least-squares fit of the orbital with their AOs misses less than this fraction.",
           "Correlation", {})
@@ -126,6 +132,8 @@ struct LMP2Options {
     bool frozen_core = false;
     std::string ri_aux = "def2-universal-JKFIT";  ///< correlation fitting basis (-qm.ri_mp2_aux)
     std::string localizer = "pm";                 ///< pm | boys
+    std::string localizer_algo = "fast";          ///< fast | classic (Jacobi sweep implementation)
+    double localizer_screen = 1.0e-8;             ///< support threshold of the fast PM sweeps (0 = no screening)
     double bp_threshold = 0.02;
     double domain_radius = 7.0;   ///< Bohr
     double pno_cut = 1.0e-8;      ///< <= 0: keep all PNOs
@@ -167,6 +175,8 @@ struct LMP2Result {
     double amp_fraction = 0.0;  ///< sum_kept npno^2 / (o(o+1)/2 v^2)
     long n_couplings = 0;       ///< stored pair-pair overlaps in the residual
     int localization_sweeps = 0;
+    double localization_functional = 0.0;  ///< localisation functional at convergence (PM: sum of squared populations)
+    std::string localization_info;         ///< sub-timings (ms) and counters of the localisation step
     int iterations = 0;
     double last_de = 0.0, max_residual = 0.0;
     double memory_mb = 0.0;     ///< B factors (one copy) + PNO data + overlaps

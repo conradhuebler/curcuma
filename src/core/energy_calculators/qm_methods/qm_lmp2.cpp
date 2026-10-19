@@ -31,10 +31,12 @@
 #include <fmt/format.h>
 
 #include <Eigen/Dense>
+#include <Eigen/Sparse>
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <iterator>
 #include <map>
 #include <numeric>
 #include <vector>
@@ -278,6 +280,207 @@ int jacobiLocalize(MatX& L, std::vector<MatX>& M, int threads, double tol, int m
         if (std::abs(functional - f0) < tol * std::max(1.0, std::abs(functional))) return sweep;
     }
     return -max_sweeps;
+}
+
+constexpr double kLocTol = 1e-11;   // relative change of the functional per sweep (both routes)
+constexpr int kLocMaxSweeps = 500;
+
+/// @brief C = A B with the columns of B split over OpenMP threads; each block is one sequential BLAS call (the
+/// linked MKL is sequential, see qmint::gemmABt in qm_mp2.h). Claude Generated (Oct 2026).
+MatX productParallel(const MatX& A, const MatX& B, int threads)
+{
+    MatX C(A.rows(), B.cols());
+    const int nc = (int)B.cols();
+    const int nb = std::max(1, std::min(threads, nc));
+    const int chunk = (nc + nb - 1) / std::max(1, nb);
+#pragma omp parallel for schedule(static) num_threads(nb)
+    for (int b = 0; b < nb; ++b) {
+        const int c0 = b * chunk, w = std::min(chunk, nc - c0);
+        if (w > 0) C.middleCols(c0, w).noalias() = A * B.middleCols(c0, w);
+    }
+    return C;
+}
+
+/// @brief C = A^T B, columns of B split over threads (as productParallel). Claude Generated (Oct 2026).
+MatX productParallelAtB(const MatX& A, const MatX& B, int threads)
+{
+    MatX C(A.cols(), B.cols());
+    const int nc = (int)B.cols();
+    const int nb = std::max(1, std::min(threads, nc));
+    const int chunk = (nc + nb - 1) / std::max(1, nb);
+#pragma omp parallel for schedule(static) num_threads(nb)
+    for (int b = 0; b < nb; ++b) {
+        const int c0 = b * chunk, w = std::min(chunk, nc - c0);
+        if (w > 0) C.middleCols(c0, w).noalias() = A.transpose() * B.middleCols(c0, w);
+    }
+    return C;
+}
+
+/// The circle-method round-robin schedule of jacobiLocalize (same order), used by pmLocalizeFast: round r of a sweep pairs (ring[k],
+/// ring[np-1-k]); np = o rounded up to even (one dummy player). Claude Generated (Oct 2026).
+struct RoundRobin {
+    int np;
+    std::vector<int> ring;
+    explicit RoundRobin(int o) : np(o + (o % 2)), ring(np) { std::iota(ring.begin(), ring.end(), 0); }
+    void pairs(std::vector<int>& ps, std::vector<int>& pt) const
+    {
+        for (int k = 0; k < np / 2; ++k) {
+            ps[k] = std::min(ring[k], ring[np - 1 - k]);
+            pt[k] = std::max(ring[k], ring[np - 1 - k]);
+        }
+    }
+    void advance()
+    {
+        const int last = ring[np - 1];
+        for (int k = np - 1; k > 1; --k) ring[k] = ring[k - 1];
+        ring[1] = last;
+    }
+};
+
+/// Counters of pmLocalizeFast (over all sweeps). Claude Generated (Oct 2026).
+struct PMSweepStats {
+    long pairs_total = 0, pairs_evaluated = 0, pairs_rotated = 0;  ///< evaluated = Q^A_st formed
+    double mean_support = 0.0;  ///< atoms per orbital support at the end
+};
+
+/// @brief Pipek-Mezey Jacobi sweeps without the natm population matrices (-qm.lmp2_localizer_algo fast).
+/// Same objective F = sum_A sum_s (Q^A_ss)^2, pair formula, round-robin schedule and convergence test as
+/// jacobiLocalize, but per pair (s,t) Q^A_st is formed from the columns s, t of L and SL = S L,
+///   Q^A_st = 1/2 sum_{mu in A} (L_mu,s (SL)_mu,t + L_mu,t (SL)_mu,s),
+/// and the populations P_As = Q^A_ss with sig_s = sum_A P_As^2 are refreshed for the two rotated orbitals only.
+/// Cost per sweep O(o^2 n) unscreened instead of O(natm o^3) (rotating natm o x o matrices), parallel over the
+/// disjoint pairs of a round (thread-count independent).
+/// Screening (screen > 0), w_As = max(||L_{A,s}||, ||(SL)_{A,s}||):
+///  (1) atom A is in the support of s if w_As > screen; a pair is evaluated over the atoms common to both supports and
+///      skipped if there is none: outside them |Q^A_st| <= w_As w_At <= ~screen (Cauchy-Schwarz), and the
+///      (P_As - P_At)^2 terms outside are taken exactly from sig_s, sig_t;
+///  (2) before Q^A_st is formed, the rotation angle is bounded from the stored w and P alone:
+///      |B| <= Bmax = sum_A w_As w_At (|P_As| + |P_At|),  A <= Aub = -(sig_s + sig_t)/4 + sum_A (w_As w_At)^2
+///      + 1/2 sum_A |P_As P_At|, and |gamma| <= Bmax / (4 |Aub|) if Aub < 0; the pair is skipped if this bound is
+///      <= screen (a rotation by at most screen radians).
+/// The O(n) work (Q^A_st, rotation, refresh) then falls on the pairs that rotate; the support walk is O(o^2 k).
+/// screen = 0 keeps every pair over all atoms (the classic arithmetic in O(o^2 n)). F is always the exact sum over
+/// all atoms.
+/// Returns the number of sweeps (negative = not converged). Claude Generated (Oct 2026).
+int pmLocalizeFast(MatX& L, const MatX& S, const std::vector<std::vector<int>>& atom_aos, int threads, double tol,
+                   int max_sweeps, double screen, double& functional, PMSweepStats& st)
+{
+    const int n = (int)L.rows(), o = (int)L.cols(), natm = (int)atom_aos.size();
+    MatX SL = productParallel(S, L, threads);
+    MatX pop(natm, o), W(natm, o);  // populations P_As and w_As = max(||L_{A,s}||, ||(SL)_{A,s}||)
+    std::vector<double> sig(o, 0.0);
+    std::vector<std::vector<int>> supp(o);
+    const double screen2 = screen * screen;
+    auto refresh = [&](int s) {
+        double sg = 0.0;
+        supp[s].clear();
+        const double* l = L.col(s).data();
+        const double* q = SL.col(s).data();
+        for (int A = 0; A < natm; ++A) {
+            double p = 0.0, a2 = 0.0, b2 = 0.0;
+            for (int mu : atom_aos[A]) {
+                p += l[mu] * q[mu];
+                a2 += l[mu] * l[mu];
+                b2 += q[mu] * q[mu];
+            }
+            pop(A, s) = p;
+            W(A, s) = std::sqrt(std::max(a2, b2));
+            sg += p * p;
+            if (!(screen > 0.0) || std::max(a2, b2) > screen2) supp[s].push_back(A);
+        }
+        sig[s] = sg;
+    };
+    auto total = [&]() {
+        double f = 0.0;
+        for (int s = 0; s < o; ++s) f += sig[s];
+        return f;
+    };
+#pragma omp parallel for schedule(static) num_threads(threads)
+    for (int s = 0; s < o; ++s) refresh(s);
+    functional = total();
+    auto finish = [&](int ret) {
+        double sup = 0.0;
+        for (int s = 0; s < o; ++s) sup += supp[s].size();
+        st.mean_support = o ? sup / o : 0.0;
+        return ret;
+    };
+    if (o < 2) return finish(0);
+    RoundRobin rr(o);
+    const int npair = rr.np / 2;
+    std::vector<int> ps(npair), pt(npair);
+    for (int sweep = 1; sweep <= max_sweeps; ++sweep) {
+        const double f0 = functional;
+        long n_eval = 0, n_rot = 0;
+        for (int round = 0; round < rr.np - 1; ++round) {
+            rr.pairs(ps, pt);
+#pragma omp parallel for schedule(dynamic, 4) num_threads(threads) reduction(+ : n_eval, n_rot)
+            for (int k = 0; k < npair; ++k) {
+                const int s = ps[k], t = pt[k];
+                if (t >= o) continue;
+                const double* ls = L.col(s).data();
+                const double* lt = L.col(t).data();
+                const double* qs = SL.col(s).data();
+                const double* qt = SL.col(t).data();
+                const std::vector<int>& us = supp[s];
+                const std::vector<int>& ut = supp[t];
+                std::vector<int> common;  // atoms in both supports
+                common.reserve(std::min(us.size(), ut.size()));
+                std::set_intersection(us.begin(), us.end(), ut.begin(), ut.end(), std::back_inserter(common));
+                if (common.empty()) continue;
+                if (screen > 0.0) {  // (2) bound on the rotation angle from w and P
+                    double bmax = 0.0, s2 = 0.0, cc = 0.0;
+                    for (int At : common) {
+                        const double ww = W(At, s) * W(At, t), pa = pop(At, s), pb = pop(At, t);
+                        bmax += ww * (std::abs(pa) + std::abs(pb));
+                        s2 += ww * ww;
+                        cc += std::abs(pa * pb);
+                    }
+                    const double aub = -0.25 * (sig[s] + sig[t]) + s2 + 0.5 * cc;
+                    if (aub < 0.0 && bmax <= 4.0 * std::abs(aub) * screen) continue;
+                }
+                double A = 0.0, B = 0.0, ps2 = 0.0, pt2 = 0.0;
+                for (int At : common) {
+                    double qst = 0.0;
+                    for (int mu : atom_aos[At]) qst += ls[mu] * qt[mu] + lt[mu] * qs[mu];
+                    qst *= 0.5;
+                    const double pa = pop(At, s), pb = pop(At, t), d = pa - pb;
+                    A += qst * qst - 0.25 * d * d;
+                    B += qst * d;
+                    ps2 += pa * pa;
+                    pt2 += pb * pb;
+                }
+                ++n_eval;
+                A -= 0.25 * ((sig[s] - ps2) + (sig[t] - pt2));  // (P_As - P_At)^2 on the remaining atoms
+                const double r = std::sqrt(A * A + B * B);
+                if (r < 1e-14) continue;
+                const double g = 0.25 * std::atan2(B, -A);
+                const double c = std::cos(g), si = std::sin(g);
+                if (si == 0.0) continue;
+                ++n_rot;
+                double* Ls = L.col(s).data();
+                double* Lt = L.col(t).data();
+                double* Qs = SL.col(s).data();
+                double* Qt = SL.col(t).data();
+                for (int mu = 0; mu < n; ++mu) {
+                    const double a1 = Ls[mu], b1 = Lt[mu];
+                    Ls[mu] = c * a1 + si * b1;
+                    Lt[mu] = -si * a1 + c * b1;
+                    const double a2 = Qs[mu], b2 = Qt[mu];
+                    Qs[mu] = c * a2 + si * b2;
+                    Qt[mu] = -si * a2 + c * b2;
+                }
+                refresh(s);
+                refresh(t);
+            }
+            rr.advance();
+        }
+        st.pairs_total += (long)o * (o - 1) / 2;
+        st.pairs_evaluated += n_eval;
+        st.pairs_rotated += n_rot;
+        functional = total();
+        if (std::abs(functional - f0) < tol * std::max(1.0, std::abs(functional))) return finish(sweep);
+    }
+    return finish(-max_sweeps);
 }
 
 // =====================================================================================================
@@ -662,6 +865,15 @@ bool QMEngine::computeLMP2(const qmint::LMP2Options& opt, qmint::LMP2Result& res
         CurcumaLogger::error("LMP2: unknown -qm.lmp2_localizer '" + opt.localizer + "' (use pm | boys)");
         return false;
     }
+    if (opt.localizer_algo != "fast" && opt.localizer_algo != "classic") {
+        CurcumaLogger::error("LMP2: unknown -qm.lmp2_localizer_algo '" + opt.localizer_algo + "' (use fast | classic)");
+        return false;
+    }
+    if (!(opt.localizer_screen >= 0.0)) {
+        CurcumaLogger::error("LMP2: -qm.lmp2_localizer_screen must be >= 0");
+        return false;
+    }
+    const bool fast_loc = opt.localizer_algo == "fast";
     if (opt.distant_pairs != "dipole" && opt.distant_pairs != "drop") {
         CurcumaLogger::error("LMP2: unknown -qm.lmp2_distant_pairs '" + opt.distant_pairs + "' (use dipole | drop)");
         return false;
@@ -732,52 +944,90 @@ bool QMEngine::computeLMP2(const qmint::LMP2Options& opt, qmint::LMP2Result& res
         for (int k = 0; k < 3; ++k) xyz(a, k) = CurcumaUnit::Length::angstrom_to_bohr(m_geometry(a, k));
 
     // ---- 1. localisation (lmp2_common.localise) ----
+    // Sub-timings go to res.localization_info (printed at verbosity 2). Claude Generated (Oct 2026).
     const auto t_loc = std::chrono::steady_clock::now();
+    auto t_sub = t_loc;
+    std::string loc_info;
+    auto lap = [&](const char* name) {
+        loc_info += fmt::format("{}{} {:.1f}", loc_info.empty() ? "" : ", ", name, msSince(t_sub));
+        t_sub = std::chrono::steady_clock::now();
+    };
     std::vector<MatX> Dip(3);  // active-basis dipole matrices (Bohr)
     {
         Matrix Sc, Xc, Yc, Zc;
         cartesianDipoleIntegrals(m_gto_basis, Sc, Xc, Yc, Zc);
-        const Matrix Sa = qmint::applySphericalTransform(Sc, m_Q);
-        const double dS = (Sa - m_S).cwiseAbs().maxCoeff();
+        // cartesian -> spherical with the sparse transform (Q^T M Q as dense GEMMs was ~n^3, 0.2 s at n = 970)
+        Eigen::SparseMatrix<double> Qs;
+        const bool sph = m_Q.size() > 0;
+        if (sph) Qs = MatX(m_Q).sparseView();
+        auto toActive = [&](const Matrix& Mc) -> MatX {
+            if (!sph) return toEigen(Mc);
+            const MatX MQ = toEigen(Mc) * Qs;
+            return MatX(Qs.transpose() * MQ);
+        };
+        const double dS = (toActive(Sc) - toEigen(m_S)).cwiseAbs().maxCoeff();
         if (dS > 1e-8) {  // self-check of the integral code against the engine's overlap
             CurcumaLogger::error(fmt::format("LMP2: dipole integral self-check failed (overlap differs by {:.1e})", dS));
             return false;
         }
-        Dip[0] = toEigen(qmint::applySphericalTransform(Xc, m_Q));
-        Dip[1] = toEigen(qmint::applySphericalTransform(Yc, m_Q));
-        Dip[2] = toEigen(qmint::applySphericalTransform(Zc, m_Q));
+        Dip[0] = toActive(Xc);
+        Dip[1] = toActive(Yc);
+        Dip[2] = toActive(Zc);
     }
+    lap("dipole integrals");
     MatX L;
     if (!choleskyOrbitals(Cval, S, L)) {
         CurcumaLogger::error("LMP2: Cholesky start orbitals failed (occupied space rank-deficient?)");
         return false;
     }
+    lap("Cholesky start");
     {
-        std::vector<MatX> M;
-        if (opt.localizer == "boys") {
-            for (int c = 0; c < 3; ++c) M.push_back(L.transpose() * Dip[c] * L);
-        } else {
-            const MatX SL = S * L;
-            M.resize(natm);
-#pragma omp parallel for schedule(dynamic) num_threads(threads)
-            for (int A = 0; A < natm; ++A) {
-                MatX q = MatX::Zero(o, o);
-                for (int mu : atom_aos[A]) q += L.row(mu).transpose() * SL.row(mu);
-                M[A] = 0.5 * (q + q.transpose());
-            }
-        }
         double f = 0.0;
-        const int sweeps = jacobiLocalize(L, M, threads, 1e-11, 500, f);
+        int sweeps = 0;
+        if (fast_loc && opt.localizer == "pm") {
+            PMSweepStats st;
+            sweeps = pmLocalizeFast(L, S, atom_aos, threads, kLocTol, kLocMaxSweeps, opt.localizer_screen, f, st);
+            lap("PM sweeps");
+            loc_info += fmt::format(" (pairs evaluated {:.1f} %, rotated {:.1f} %, mean support {:.1f} of {} atoms)",
+                                    st.pairs_total ? 100.0 * st.pairs_evaluated / st.pairs_total : 0.0,
+                                    st.pairs_total ? 100.0 * st.pairs_rotated / st.pairs_total : 0.0, st.mean_support, natm);
+        } else {
+            std::vector<MatX> M;
+            if (opt.localizer == "boys") {
+                for (int c = 0; c < 3; ++c) {
+                    const MatX DL = productParallel(Dip[c], L, threads);
+                    M.push_back(L.transpose() * DL);
+                }
+            } else {
+                const MatX SL = S * L;
+                M.resize(natm);
+#pragma omp parallel for schedule(dynamic) num_threads(threads)
+                for (int A = 0; A < natm; ++A) {
+                    MatX q = MatX::Zero(o, o);
+                    for (int mu : atom_aos[A]) q += L.row(mu).transpose() * SL.row(mu);
+                    M[A] = 0.5 * (q + q.transpose());
+                }
+            }
+            lap("matrices");
+            // Boys (3 matrices, O(o^3) per sweep) keeps the matrix route in both algorithms: a pair-parallel variant
+            // was slower up to pentacene (parallel-region overhead per round)
+            sweeps = jacobiLocalize(L, M, threads, kLocTol, kLocMaxSweeps, f);
+            lap("sweeps");
+        }
         res.localization_sweeps = sweeps;
+        res.localization_functional = f;
         if (sweeps < 0 && CurcumaLogger::get_verbosity() >= 1)
             CurcumaLogger::warn(fmt::format("LMP2: localisation not converged after {} sweeps (functional {:.10f}); the "
                                             "energy with truncation depends slightly on the orbitals",
                                             -sweeps, f));
     }
-    // deterministic order (centroid x, y, z rounded to 1e-6 Bohr) and sign (largest coefficient positive)
+    // deterministic order (centroid x, y, z rounded to 1e-6 Bohr) and sign (largest coefficient positive);
+    // DipL[c] = Dip[c] L is kept (columns reordered with L) for the distant-pair estimate below
+    std::vector<MatX> DipL(3);
+    for (int c = 0; c < 3; ++c) DipL[c] = productParallel(Dip[c], L, threads);
     MatX cen(o, 3);
     for (int i = 0; i < o; ++i)
-        for (int c = 0; c < 3; ++c) cen(i, c) = L.col(i).dot(Dip[c] * L.col(i));
+        for (int c = 0; c < 3; ++c) cen(i, c) = L.col(i).dot(DipL[c].col(i));
     {
         std::vector<int> order(o);
         std::iota(order.begin(), order.end(), 0);
@@ -788,19 +1038,28 @@ bool QMEngine::computeLMP2(const qmint::LMP2Options& opt, qmint::LMP2Result& res
             return false;
         });
         MatX L2(n, o), cen2(o, 3);
+        std::vector<MatX> DipL2(3, MatX(n, o));
         for (int k = 0; k < o; ++k) {
             L2.col(k) = L.col(order[k]);
             cen2.row(k) = cen.row(order[k]);
+            for (int c = 0; c < 3; ++c) DipL2[c].col(k) = DipL[c].col(order[k]);
             Eigen::Index imax;
             L2.col(k).cwiseAbs().maxCoeff(&imax);
-            if (L2(imax, k) < 0) L2.col(k) *= -1.0;
+            if (L2(imax, k) < 0) {
+                L2.col(k) *= -1.0;
+                for (int c = 0; c < 3; ++c) DipL2[c].col(k) *= -1.0;
+            }
         }
         L.swap(L2);
         cen.swap(cen2);
+        DipL.swap(DipL2);
     }
-    const MatX U = Cval.transpose() * S * L;  // L = Cval U
+    lap("centroids");
+    const MatX U = Cval.transpose() * productParallel(S, L, threads);  // L = Cval U
     const MatX Focc = U.transpose() * eps.segment(n_frozen, o).asDiagonal() * U;
+    lap("U");
     res.t_localize_ms = msSince(t_loc);
+    res.localization_info = loc_info;
 
     // ---- 2. domains (bp_domain + extend_domain) and pairs ----
     const auto t_pairs = std::chrono::steady_clock::now();
@@ -1308,7 +1567,7 @@ bool QMEngine::computeLMP2(const qmint::LMP2Options& opt, qmint::LMP2Result& res
         std::vector<VecX> oe(o);
         std::vector<MatX> mu(o);  // 3 x m_i: <i|r|a> over the pseudo-canonical PAO space of [i]
         std::vector<MatX> W(3);   // PAO^T r L: n x o
-        for (int c = 0; c < 3; ++c) W[c] = Cpao.transpose() * (Dip[c] * L);
+        for (int c = 0; c < 3; ++c) W[c] = productParallelAtB(Cpao, DipL[c], threads);
         std::vector<char> ok(o, 1);
 #pragma omp parallel for schedule(dynamic) num_threads(threads)
         for (int i = 0; i < o; ++i) {
