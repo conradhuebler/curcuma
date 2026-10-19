@@ -1132,6 +1132,8 @@ if(USE_CUDA)
         src/core/energy_calculators/qm_methods/cuda/qm_gpu_ri.cu
         # Claude Generated (Oct 2026): RI-JK metric solve B = L^-1 T (cublasDtrsm, streamed chunks)
         src/core/energy_calculators/qm_methods/cuda/qm_gpu_ri_fit.cu
+        # Claude Generated (Oct 2026): resource-saving RI (streamed / FP32 tensor, batched exchange solve)
+        src/core/energy_calculators/qm_methods/cuda/qm_gpu_ri_lowmem.cu
         # Claude Generated (Oct 2026): native QM canonical MP2 on the device (WP11), cuBLAS only
         src/core/energy_calculators/qm_methods/cuda/qm_gpu_mp2.cu
         # Claude Generated (Oct 2026): native QM RI-MP2 pair energies on the device, cuBLAS only

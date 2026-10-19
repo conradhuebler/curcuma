@@ -333,6 +333,49 @@ bool qmRiLowerSolve(const std::string& backend, double* T, int N, long ncol, con
     return ok != 0;
 }
 
+// Claude Generated (Oct 2026, WP10 low memory): resident or streamed RI tensor, FP64 or FP32.
+std::unique_ptr<qmint::QMGpuRILowMem> createQmRILowMem(const std::string& backend, const void* T, bool fp32, int nfit, int n,
+                                                       int device, int stream, double max_device_mb, double chunk_mb,
+                                                       int host_threads, std::string& why)
+{
+    void* handle = pluginHandle(backend, /*quiet=*/true);
+    if (!handle) {
+        why = "plugin libcurcuma_" + backend + ".so not loadable";
+        return nullptr;
+    }
+    using create_fn = void* (*)(const void*, int, int, int, int, int, double, double, int, char*, int);
+    create_fn fn = resolveSymbol<create_fn>(handle, "curcuma_" + backend + "_create_qm_ri_lowmem");
+    if (!fn) {
+        why = "plugin has no entry point curcuma_" + backend + "_create_qm_ri_lowmem";
+        return nullptr;
+    }
+    char buf[512] = { 0 };
+    void* p = fn(T, fp32 ? 1 : 0, nfit, n, device, stream, max_device_mb, chunk_mb, host_threads, buf, (int)sizeof buf);
+    if (!p) why = buf;
+    return std::unique_ptr<qmint::QMGpuRILowMem>(static_cast<qmint::QMGpuRILowMem*>(p));
+}
+
+// Claude Generated (Oct 2026, WP10 low memory): batched RI-JK exchange X = L^-1 Y, K += sign X X^T on the device.
+std::unique_ptr<qmint::QMGpuRIYSolver> createQmRIYSolver(const std::string& backend, const double* L, int naux, int n, int device,
+                                                         double max_device_mb, int host_threads, std::string& why)
+{
+    void* handle = pluginHandle(backend, /*quiet=*/true);
+    if (!handle) {
+        why = "plugin libcurcuma_" + backend + ".so not loadable";
+        return nullptr;
+    }
+    using create_fn = void* (*)(const double*, int, int, int, double, int, char*, int);
+    create_fn fn = resolveSymbol<create_fn>(handle, "curcuma_" + backend + "_create_qm_ri_ysolver");
+    if (!fn) {
+        why = "plugin has no entry point curcuma_" + backend + "_create_qm_ri_ysolver";
+        return nullptr;
+    }
+    char buf[512] = { 0 };
+    void* p = fn(L, naux, n, device, max_device_mb, host_threads, buf, (int)sizeof buf);
+    if (!p) why = buf;
+    return std::unique_ptr<qmint::QMGpuRIYSolver>(static_cast<qmint::QMGpuRIYSolver*>(p));
+}
+
 // Claude Generated (Oct 2026, WP11): canonical MP2 energy on the device.
 bool qmMp2Energy(const std::string& backend, const qmint::QMGpuMP2Input& in, qmint::QMGpuMP2Output& out,
                  std::string& why)

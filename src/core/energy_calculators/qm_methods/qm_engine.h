@@ -123,7 +123,7 @@ BEGIN_PARAMETER_DEFINITION(qm)
           "ri_metric eigen: eigenvalue cutoff of the Coulomb-normalised metric ((P|P) = 1).",
           "DensityFitting", {})
     PARAM(ri_max_memory_mb, Double, 16000.0,
-          "Host memory limit for the stored 3-index tensor (naux x n(n+1)/2 x 8 bytes, packed lower triangle, MB). Above it the SCF stops with an error (no silent switch to the exact path).",
+          "Host memory limit (MB) for the RI quantities: the stored 3-index tensor (naux x n(n+1)/2 x 8 bytes, packed lower triangle; 4 bytes with ri_mixed_precision) or, in ri_storage batched, the half-transformed integrals and the batch buffer. Above it ri_storage auto switches to batched, stored stops with an error (never a silent switch to the exact path).",
           "DensityFitting", {})
     PARAM(gpu_ri, String, "auto",
           "With -gpu cuda|auto and -qm.ri j|jk: the RI contractions (J from the 3-index tensor, K as GEMM + SYRK, cuBLAS FP64) on the device; integrals and metric stay on the host. auto | on | off. Any device error falls back to the CPU and is counted as qm_ri.",
@@ -133,6 +133,28 @@ BEGIN_PARAMETER_DEFINITION(qm)
           "DensityFitting", {})
     PARAM(gpu_ri_grad, String, "auto",
           "With -gpu cuda|auto and -qm.ri j|jk: the 3-index part of the RI gradient (derivative integrals (mn|P)^x contracted with the 3-index density) on the device; densities, metric part and the RI-J exact exchange gradient stay on the host. auto | on | off. Any device error falls back to the CPU and is counted as qm_ri_grad.",
+          "DensityFitting", {})
+    // Resource-saving RI-JK (Claude Generated, Oct 2026; docs WP10 "RI-JK ressourcensparend")
+    PARAM(ri_storage, String, "auto",
+          "How the RI J/K builds get the 3-index quantities: stored (fitted tensor B = L^-1 (P|mn) kept in memory, naux x n(n+1)/2; error above ri_max_memory_mb) | batched (no tensor: the raw 3-index integrals are recomputed in auxiliary-shell batches in every J/K build; J from g = T w, c = J^-1 g in two passes, K exactly from the half-transformed integrals Y^P = T^P C_occ, X = L^-1 Y, K = sum X X^T; memory naux n n_occ, split into occupied batches with more integral passes when that exceeds ri_max_memory_mb; same energies up to rounding, slower) | auto (stored when the tensor fits ri_max_memory_mb, else batched). The RI gradient needs a stored FP64 tensor and builds one when the SCF ran batched or in FP32 (error if it does not fit).",
+          "DensityFitting", {})
+    PARAM(ri_batch_mb, Double, 0.0,
+          "ri_storage batched: size (MB) of the buffer for one batch of recomputed 3-index rows (0 = auto: an eighth of ri_max_memory_mb, at most 256 MB). Smaller = more, shorter batches; the result does not depend on it.",
+          "DensityFitting", {})
+    PARAM(gpu_ri_stream, String, "auto",
+          "With -gpu and -qm.gpu_ri: when the stored RI tensor does not fit into device memory, keep it in (pinned) host memory and stream row chunks to the device in every J/K build, copies overlapped with the cuBLAS contractions on two streams. auto (stream only when the tensor does not fit the device) | on (always stream, also when it would fit; for testing) | off (no streaming: a tensor that does not fit falls back to the CPU contractions, counted as qm_ri).",
+          "DensityFitting", {})
+    PARAM(gpu_ri_chunk_mb, Double, 0.0,
+          "gpu_ri_stream: size (MB) of one streamed tensor chunk (two are in flight; 0 = auto, 512 MB or less if the device is short of memory).",
+          "DensityFitting", {})
+    PARAM(ri_mixed_precision, String, "false",
+          "RI-JK mixed precision (semantics of the GFN2 -scf_mixed_precision: FP32 far from convergence, FP64 near it): true = the stored tensor B is kept in FP32 (half the memory, host and device; on the device FP32 GEMM/SYRK with FP64 accumulation of the chunk results) for the early SCF iterations; once the density change ||dP|| drops below ri_fp32_switch or stalls, the same FP32 tensor is used with FP64 arithmetic plus the correction (exact - FP32-tensor) J/K from an exact FP64 build in ri_storage batched mode (recomputed integrals), refreshed when the corrected SCF converges; convergence is only accepted on an exact build and the final J/K build is exact, so the convergence test and the final energy are FP64. Memory: FP32 tensor plus the batched buffers. false (default) = FP64 throughout. auto = true only when the FP64 tensor does not fit (host limit, or the device with -gpu) but the FP32 tensor does.",
+          "DensityFitting", {})
+    PARAM(ri_fp32_switch, Double, 1.0e-3,
+          "ri_mixed_precision: ||dP||_F below which the SCF leaves the FP32 builds for exact FP64 builds (also after three FP32 iterations without progress). Must stay above scf_threshold.",
+          "DensityFitting", {})
+    PARAM(ri_fit_radius, Double, 0.0,
+          "RI-JK local fitting (an APPROXIMATION with a measured error, docs WP10): 0 = exact global fit (default) | R > 0 = each occupied (Cholesky-localised) orbital fits its exchange densities only with the auxiliary functions on atoms within R Bohr of its centre (robust Dunlap fit, as the LMP2 local fit); J keeps the global fit. Changes energies by the fit-domain error; an RI gradient with R > 0 is an error.",
           "DensityFitting", {})
     PARAM(scf_max_iterations, Int, 100,
           "Maximum number of SCF iterations.",
@@ -406,6 +428,31 @@ private:
     mutable bool m_gpu_ri_grad_failed = false;
     std::string m_gpu_ri_fit = "off";         ///< -qm.gpu_ri_fit: RI-JK metric solve on the device (Claude Generated, Oct 2026)
     mutable bool m_gpu_ri_fit_failed = false;
+    // Resource-saving RI-JK (Claude Generated, Oct 2026): storage, streaming, mixed precision, local fit.
+    std::string m_ri_storage = "auto";        ///< stored | batched | auto
+    double m_ri_batch_mb = 0.0;
+    std::string m_gpu_ri_stream = "auto";     ///< auto | on | off
+    double m_gpu_ri_chunk_mb = 0.0;
+    std::string m_ri_mixed_precision = "false";  ///< true | false | auto
+    double m_ri_fp32_switch = 1.0e-3;
+    double m_ri_fit_radius = 0.0;             ///< 0 = exact global fit
+    /// Mixed-precision stage: 0 off, 1 FP32 GEMM/SYRK on the FP32 tensor, 2 FP64 arithmetic on the FP32 tensor plus the
+    /// correction dJ/dK = exact - FP32-tensor build, refreshed by exact (batched) builds.
+    mutable int m_ri_mp_stage = 0;
+    mutable bool m_ri_mp_refresh = false;     ///< next RI build: exact + new correction
+    mutable bool m_ri_mp_last_exact = false;  ///< the last RI build was exact (FP64, batched)
+    mutable Matrix m_ri_mp_dJ, m_ri_mp_dK;
+    mutable long m_ri_mp_exact_builds = 0;
+    mutable double m_ri_fp32_best = 0.0;      ///< smallest ||dP|| seen in the current stage
+    mutable int m_ri_fp32_stall = 0;          ///< iterations since the last progress
+    mutable long m_ri_fp32_builds = 0;
+    /// Mixed precision: true while the last J/K build was not exact FP64 (the SCF must not accept convergence).
+    bool riLowPrecision() const;
+    /// Mixed precision: feed ||dP|| of this iteration; true when the SCF just left the FP32-arithmetic stage (the caller
+    /// drops the DIIS entries built in FP32). In stage 2 it schedules an exact build when ||dP|| is below scf_threshold.
+    bool riEndLowPrecision(double delta_P) const;
+    /// Mixed precision: the next J/K build (the final one of a converged SCF) must be exact.
+    void riRequestExactBuild() const;
     bool m_gradient_failed = false;
     std::string m_gradient_error;
     /// WP11: the active-basis AO tensor on the host for MP2 (stored SCF tensor, download of the device

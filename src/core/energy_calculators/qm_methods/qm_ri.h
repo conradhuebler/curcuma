@@ -147,6 +147,18 @@ struct RIOptions {
     /// Returns 1 = done, 0 = failed with T untouched (host solve follows), -1 = failed with T partly
     /// overwritten (setup then fails with `why` starting "device metric solve"). Claude Generated (Oct 2026).
     std::function<int(const Eigen::MatrixXd& L, Matrix& T, std::string& why)> device_lower_solve;
+    // Resource-saving storage (Claude Generated, Oct 2026; docs WP10 "RI-JK ressourcensparend").
+    /// stored: tensor kept (error above max_memory_mb) | batched: no tensor, 3-index integrals recomputed per build
+    /// | auto: stored if it fits max_memory_mb, else batched. Default stored (RI-MP2 / gradient setups need the tensor).
+    std::string storage = "stored";
+    /// mode jk: keep B in FP32 (half the memory; setup in column chunks, no FP64 peak). The FP64 builds of the final
+    /// SCF iterations use FP64 arithmetic on it plus exact batched corrections (buildExact()).
+    bool fp32 = false;
+    double batch_mb = 0.0;  ///< batched: buffer for one batch of recomputed rows (0 = min(256, max_memory_mb / 8))
+    /// Local fit (mode jk, an APPROXIMATION): > 0 = the exchange densities of each (pivoted-Cholesky, localised) occupied
+    /// orbital k are fitted only with the auxiliary functions on atoms within fit_radius (Bohr) of its core atoms; J keeps
+    /// the global fit. Implies batched storage. 0 = exact global fit.
+    double fit_radius = 0.0;
 };
 
 /// @brief Setup (3-index tensor, metric factor) once per geometry, then J/K builds per SCF iteration.
@@ -192,8 +204,35 @@ public:
     /// factor so that X^T X is the fitted integral: mode j (raw tensor) cholesky X := L^-1 X, eigen
     /// X := w^-1/2 U^T X (nfit rows); mode jk: unchanged (the tensor is already B = L^-1 T).
     void fitRows(Matrix& X) const;
-    double tensorMB() const { return (double)m_T.rows() * m_T.cols() * 8.0 / 1.0e6; }
+    double tensorMB() const { return (double)m_T.rows() * m_T.cols() * 8.0 / 1.0e6 + (double)m_T32.size() * 4.0 / 1.0e6; }
     std::string stats() const { return m_stats; }
+
+    // --- Resource-saving storage (Claude Generated, Oct 2026; docs WP10 "RI-JK ressourcensparend") ---
+    /// Storage in use: "stored", "stored FP32" or "batched".
+    std::string storageUsed() const;
+    /// No stored tensor: every build recomputes the 3-index integrals (J in two passes, K from Y = T V, X = L^-1 Y).
+    bool batched() const { return m_batched; }
+    /// The fitted tensor is held in FP32 (tensor32(), mode jk, ri_mixed_precision).
+    bool fp32() const { return !m_T32.empty(); }
+    /// tensor() holds the fitted FP64 tensor (RI-MP2 reuse, RI gradient, FP64 device upload need it).
+    bool storedFP64() const { return !m_batched && m_T32.empty() && m_T.size() > 0; }
+    /// FP32 copy of the fitted tensor (same packed row layout as tensor()), empty unless fp32().
+    const std::vector<float>& tensor32() const { return m_T32; }
+    /// FP32 tensor: true = FP32 GEMM/SYRK (first phase), false = rows widened to FP64, FP64 arithmetic (second phase).
+    void setFP32Arithmetic(bool on) const { m_fp32_arith = on; }
+    /// Exact FP64 build without the stored tensor (recomputed integrals, as ri_storage batched); needs fp32() or batched().
+    void buildExact(const Matrix& P, Matrix& J, Matrix& K, const Eigen::MatrixXd* Vocc = nullptr) const { buildBatched(P, J, &K, Vocc); }
+    bool fp32Arithmetic() const { return m_fp32_arith; }
+    /// Batched builds since the last call: count, passes and the split of the time (diagnostic, "" if none).
+    std::string takeBuildStats() const;
+    /// Lower Cholesky factor of the Coulomb-normalised metric (empty for the eigen metric).
+    const Eigen::MatrixXd& metricCholesky() const { return m_gL; }
+    /// Batched exchange on the device (QMEngine sets it with -gpu): adds sign sum_P (L^-1 Y)^P (L^-1 Y)^P^T into K
+    /// (full n x n). Y: row-major naux x (n rb), row P = column-major n x rb block. false = device error (the CPU
+    /// then does that batch and the hook is dropped).
+    using DeviceExchange = std::function<bool(const Matrix& Y, int rb, double sign, Eigen::MatrixXd& K)>;
+    void setDeviceExchange(DeviceExchange f) const { m_dev_exchange = std::move(f); }
+    bool hasDeviceExchange() const { return (bool)m_dev_exchange; }
     /// Time spent in factorDensity() since the last takeFactorMs() (diagnostic).
     double takeFactorMs() const
     {
@@ -245,6 +284,45 @@ private:
     std::vector<double> m_asch;       ///< Schwarz factors of the auxiliary shells
     /// X (nfit rows) := F^T X (naux rows), F the metric factor with B = F T_n (F = L^-1 or w^-1/2 U^T).
     void applyFitTranspose(Matrix& X) const;
+
+    // Resource-saving storage (Claude Generated, Oct 2026)
+    struct Direct;                                  ///< shells, pairs and out-maps kept for recomputing rows
+    std::shared_ptr<Direct> m_dd;
+    bool m_batched = false;
+    std::vector<float> m_T32;                       ///< fp32: nfit x npair() row-major
+    std::vector<std::pair<int, int>> m_aux_batches; ///< batched: aux shell ranges [c0, c1) of one row batch
+    long m_batch_rows = 0;                          ///< rows of the largest batch (buffer size)
+    double m_fixed_mb = 0.0;                        ///< batched: memory besides Y (metric factor, buffers, per-thread K)
+    mutable DeviceExchange m_dev_exchange;
+    mutable long m_bt_builds = 0, m_bt_passes = 0, m_bt_ybatches = 0;
+    mutable double m_bt_int_ms = 0, m_bt_y_ms = 0, m_bt_solve_ms = 0, m_bt_syrk_ms = 0, m_bt_j_ms = 0, m_bt_dev_ms = 0;
+    mutable long m_fp_builds = 0;
+    mutable bool m_fp32_arith = true;
+    mutable double m_fp_ms = 0;
+    /// Raw (unnormalised) rows (P|mn) for aux shells [c0, c1) and the orbital shell pairs `pairs` (indices into the
+    /// Direct pair list) into out (row P - first row of c0, column pairIndex - col0, leading dimension ld); out zeroed by
+    /// the caller. Same kernel, transforms and screen as the stored setup, so the values are bitwise the same.
+    void fillRows(const std::vector<int>* pairs, int c0, int c1, double* out, Eigen::Index ld, Eigen::Index col0, long& blocks,
+                  long& skipped) const;
+    /// c = J_n^-1 g with the kept metric factor (Cholesky or eigen).
+    Eigen::VectorXd metricSolve(const Eigen::VectorXd& g) const;
+    void buildBatched(const Matrix& P, Matrix& J, Matrix* K, const Eigen::MatrixXd* Vocc) const;
+    void buildFP32(const Matrix& P, Matrix& J, Matrix* K, const Eigen::MatrixXd* Vocc) const;
+    // Local fit (Claude Generated, Oct 2026)
+    Eigen::MatrixXd m_Jn;                            ///< local fit: Coulomb-normalised metric (domain blocks)
+    std::vector<int> m_ao_atom;                      ///< atom of each active orbital function
+    std::vector<int> m_auxfn_atom;                   ///< atom of each active auxiliary function
+    Eigen::MatrixXd m_atom_xyz;                      ///< natoms x 3 (Bohr), from the shell centres
+    mutable std::map<std::vector<int>, std::shared_ptr<Eigen::MatrixXd>> m_dom_cache;  ///< atom set -> L of J_F
+    mutable std::vector<int> m_loc_piv;              ///< pivot order of the last local build
+    mutable std::vector<std::vector<int>> m_loc_dom; ///< domains (atom sets) of the last local build
+    mutable bool m_loc_frozen = false;               ///< pivots and domains fixed (smooth Fock matrix from then on)
+    mutable int m_loc_unchanged = 0;                 ///< consecutive builds with the same pivots and domains
+    mutable long m_loc_builds = 0, m_loc_global = 0, m_loc_orbitals = 0, m_loc_aux_sum = 0, m_loc_new_domains = 0;
+    mutable double m_loc_factor_ms = 0, m_loc_y_ms = 0, m_loc_solve_ms = 0;
+    /// Batched build with the local exchange fit (fit_radius > 0); false = not applicable for this density (indefinite
+    /// P), the caller then runs the global batched build.
+    bool buildBatchedLocal(const Matrix& P, Matrix& J, Matrix& K, const Eigen::MatrixXd* Vocc) const;
 };
 
 // ---------------------------------------------------------------------------

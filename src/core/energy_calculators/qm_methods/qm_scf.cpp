@@ -520,7 +520,8 @@ bool QMEngine::runSCF()
         // history can support it; use the extrapolated Fock for the diagonalization.
         Matrix fock_use = fock;
         if (use_diis && iter >= m_diis_start) {
-            const int slot = diis.push(cadence.since_full == 0);
+            // FP32 RI builds (mixed precision) count as non-full: dropped when the SCF switches to FP64
+            const int slot = diis.push(cadence.since_full == 0 && !riLowPrecision());
             diis.setLastError(store.push(slot, fock, m_density, m_S, m_X));
             Eigen::MatrixXd G, M;
             Eigen::VectorXd a;
@@ -566,7 +567,9 @@ bool QMEngine::runSCF()
             CurcumaLogger::result(fmt::format("SCF iter {:3d}: dP = {:.3e}, E_elec = {:.10f} Eh", iter + 1, delta_P, e_tmp));
         }
 
-        if (delta_P < m_scf_threshold && !cadence.early) {
+        // Never converged on an FP32 RI build (mixed precision): the FP32 noise floor is not the FP64 fixed point
+        if (delta_P < m_scf_threshold && !cadence.early && !riLowPrecision()) {
+            riRequestExactBuild();  // mixed-precision RI: the final J/K build is exact FP64
             m_density = density_new;
             m_direct_thr_now = -1.0;
             finishConvergedSCF(C, eps, n_occ, iter + 1, delta_P, direct,
@@ -575,6 +578,7 @@ bool QMEngine::runSCF()
             return true;
         }
         if (cadence.endEarly(delta_P, m_scf_early_switch)) reportEarlyEnd(iter, delta_P);
+        if (riEndLowPrecision(delta_P)) diis.dropIncrementalEntries();  // FP32 -> exact FP64 RI builds (host loop only: RI never runs the device loop)
         if (cadence.observe(delta_P)) {
             reportIncrementalStall(iter, cadence.best_dP, m_eri_screening);
             diis.dropIncrementalEntries();  // keep only Fock matrices from full builds

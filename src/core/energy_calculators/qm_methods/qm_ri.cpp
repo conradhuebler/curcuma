@@ -712,6 +712,73 @@ void packContractionWeights(const Matrix& P, std::vector<double>& w)
     }
 }
 
+// Shells, pairs and out-maps of one geometry, kept by RIJK when rows have to be recomputed (batched storage, FP32
+// setup in column chunks, the FP64 phase after mixed precision). The Pair objects point into osh / units, so the
+// vectors are filled once (reserved) and never reallocated. Claude Generated (Oct 2026).
+struct RIJK::Direct {
+    std::vector<Shell> osh, units;
+    OutMap oo, ao;
+    std::vector<Pair> opairs;                 ///< canonical orbital shell pairs A <= B not screened for every aux shell
+    std::vector<std::pair<int, int>> oidx;    ///< (A, B) of opairs
+    std::vector<Pair> apairs;                 ///< (aux shell, unit s) pairs
+};
+
+void RIJK::fillRows(const std::vector<int>* pairs, int c0, int c1, double* out, Eigen::Index ld, Eigen::Index col0, long& blocks,
+                    long& skipped) const
+{
+    const Direct& d = *m_dd;
+    const int threads = std::max(1, m_opt.threads);
+    const int nk = pairs ? (int)pairs->size() : (int)d.opairs.size();
+    const int row0 = d.ao.first[c0];
+    const double scr = m_opt.screening;
+    long bl = 0, sk = 0;
+#pragma omp parallel for schedule(dynamic) num_threads(threads) reduction(+ : bl, sk)
+    for (int kk = 0; kk < nk; ++kk) {
+        const int k = pairs ? (*pairs)[kk] : kk;
+        const int A = d.oidx[k].first, B = d.oidx[k].second;
+        thread_local std::vector<double> buf, tmp;
+        for (int c = c0; c < c1; ++c) {
+            if (d.opairs[k].schwarz * d.apairs[c].schwarz < scr) {
+                ++sk;
+                continue;
+            }
+            ++bl;
+            pairBlock(d.opairs[k], d.apairs[c], buf);
+            int dm[3] = { (int)d.osh[A].lmn.size(), (int)d.osh[B].lmn.size(), (int)m_aux[c].lmn.size() };
+            if (d.oo.T[A].size()) transformAxis3(buf, tmp, dm, 0, d.oo.T[A]);
+            if (d.oo.T[B].size()) transformAxis3(buf, tmp, dm, 1, d.oo.T[B]);
+            if (d.ao.T[c].size()) transformAxis3(buf, tmp, dm, 2, d.ao.T[c]);
+            for (int a = 0; a < dm[0]; ++a)
+                for (int b = 0; b < dm[1]; ++b) {
+                    const int m = d.oo.first[A] + a, nn = d.oo.first[B] + b;
+                    if (A == B && m < nn) continue;
+                    const double* v = &buf[((size_t)a * dm[1] + b) * dm[2]];
+                    const Eigen::Index col = pairIndex(m, nn) - col0;
+                    double* o = out + (size_t)(d.ao.first[c] - row0) * ld + col;
+                    for (int p = 0; p < dm[2]; ++p) o[(size_t)p * ld] = v[p];
+                }
+        }
+    }
+    blocks += bl;
+    skipped += sk;
+}
+
+Eigen::VectorXd RIJK::metricSolve(const Eigen::VectorXd& g) const
+{
+    if (m_gL.size()) {
+        Eigen::VectorXd y = m_gL.triangularView<Eigen::Lower>().solve(g);
+        return m_gL.transpose().triangularView<Eigen::Upper>().solve(y);
+    }
+    if (m_gU.size()) return m_gU * (m_gw.cwiseInverse().asDiagonal() * (m_gU.transpose() * g));
+    throw std::logic_error("RIJK::metricSolve: no metric factor");
+}
+
+std::string RIJK::storageUsed() const
+{
+    if (m_batched) return "batched";
+    return m_T32.empty() ? "stored" : "stored FP32";
+}
+
 bool RIJK::setup(const std::vector<GTO::Orbital>& basis, const Matrix* Q, const std::vector<Shell>& aux,
                  const RIOptions& opt, std::string& why)
 {
@@ -720,20 +787,61 @@ bool RIJK::setup(const std::vector<GTO::Orbital>& basis, const Matrix* Q, const 
     m_gL.resize(0, 0);
     m_gU.resize(0, 0);
     m_gw.resize(0);
+    m_T.resize(0, 0);
+    std::vector<float>().swap(m_T32);
+    m_batched = false;
+    m_dd.reset();
+    m_aux_batches.clear();
     curcuma::ScopedBlasThreads blas_guard(std::max(1, opt.threads));
     const auto t0 = std::chrono::steady_clock::now();
-    const std::vector<Shell> osh = orbitalShells(basis);
-    const OutMap oo = orbitalOutMap(osh, (int)basis.size(), Q);
-    const OutMap ao = auxOutMap(aux, opt.spherical_aux);
+    auto dd = std::make_shared<Direct>();
+    dd->osh = orbitalShells(basis);
+    dd->oo = orbitalOutMap(dd->osh, (int)basis.size(), Q);
+    dd->ao = auxOutMap(aux, opt.spherical_aux);
+    const std::vector<Shell>& osh = dd->osh;
+    const OutMap& oo = dd->oo;
+    const OutMap& ao = dd->ao;
     m_n = oo.n;
     m_naux = ao.n;
     const int n = m_n, N = m_naux;
     const Eigen::Index np = npair();  // packed columns n(n+1)/2 (Oct 2026; before n^2)
-    const double need_mb = (double)N * np * 8.0 / 1.0e6 * (opt.metric == "eigen" && opt.mode == "jk" ? 2.0 : 1.0);
-    if (need_mb > opt.max_memory_mb) {
-        why = fmt::format("3-index tensor needs {:.0f} MB (naux {} x n(n+1)/2 {}, packed), above -qm.ri_max_memory_mb {:g}", need_mb, N,
-                          (long)np, opt.max_memory_mb);
+    const int threads = std::max(1, opt.threads);
+    const int naux_sh = (int)aux.size();
+
+    // Storage (Claude Generated, Oct 2026): stored FP64 as before; FP32 (mode jk, ri_mixed_precision); batched (no
+    // tensor). auto takes stored when it fits the limit, else batched.
+    const bool jk = opt.mode == "jk";
+    const bool eig = opt.metric == "eigen";
+    const std::string storage = lower(opt.storage);
+    if (storage != "stored" && storage != "batched" && storage != "auto") {
+        why = "unknown -qm.ri_storage '" + opt.storage + "' (use stored|batched|auto)";
         return false;
+    }
+    const double need_mb = (double)N * np * 8.0 / 1.0e6 * (eig && jk ? 2.0 : 1.0);
+    // FP32 setup in column chunks: FP32 tensor + one FP64 chunk (two with eigen)
+    const Eigen::Index chunk_cols = std::max<Eigen::Index>(1, (Eigen::Index)(256.0e6 / (8.0 * std::max(1, N))));
+    const double need32_mb = (double)N * np * 4.0 / 1.0e6 + (double)N * std::min(np, chunk_cols) * 8.0 / 1.0e6 * (eig ? 2.0 : 1.0);
+    bool batched = storage == "batched" || (opt.fit_radius > 0.0 && jk), fp32 = false;  // local fit: always batched
+    if (!batched) {
+        if (opt.fp32 && jk) {
+            if (need32_mb <= opt.max_memory_mb)
+                fp32 = true;
+            else if (storage == "auto")
+                batched = true;
+            else {
+                why = fmt::format("FP32 3-index tensor needs {:.0f} MB (naux {} x n(n+1)/2 {}, packed), above -qm.ri_max_memory_mb {:g}",
+                                  need32_mb, N, (long)np, opt.max_memory_mb);
+                return false;
+            }
+        } else if (need_mb > opt.max_memory_mb) {
+            if (storage == "auto")
+                batched = true;
+            else {
+                why = fmt::format("3-index tensor needs {:.0f} MB (naux {} x n(n+1)/2 {}, packed), above -qm.ri_max_memory_mb {:g}", need_mb,
+                                  N, (long)np, opt.max_memory_mb);
+                return false;
+            }
+        }
     }
 
     // Pairs and Schwarz factors
@@ -744,14 +852,12 @@ bool RIJK::setup(const std::vector<GTO::Orbital>& basis, const Matrix* Q, const 
             opairs.push_back(makePair(osh[A], osh[B]));
             oidx.push_back({ A, B });
         }
-    std::vector<Shell> units;
-    units.reserve(aux.size());
-    for (const Shell& s : aux) units.push_back(unitShell(s));
-    std::vector<Pair> apairs;
+    dd->units.reserve(aux.size());
+    for (const Shell& s : aux) dd->units.push_back(unitShell(s));
+    std::vector<Pair>& apairs = dd->apairs;
     apairs.reserve(aux.size());
-    for (size_t c = 0; c < aux.size(); ++c) apairs.push_back(makePair(aux[c], units[c]));
-    const int threads = std::max(1, opt.threads);
-    const int npairs = (int)opairs.size(), naux_sh = (int)aux.size();
+    for (size_t c = 0; c < aux.size(); ++c) apairs.push_back(makePair(m_aux[c], dd->units[c]));  // m_aux: kept with the object
+    const int npairs = (int)opairs.size();
 #pragma omp parallel for schedule(dynamic) num_threads(threads)
     for (int k = 0; k < npairs; ++k) opairs[k].schwarz = schwarzOf(opairs[k]);
     for (Pair& p : apairs) p.schwarz = schwarzOf(p);
@@ -759,54 +865,34 @@ bool RIJK::setup(const std::vector<GTO::Orbital>& basis, const Matrix* Q, const 
     for (int k = 0; k < npairs; ++k) m_osch[k] = opairs[k].schwarz;
     m_asch.resize(naux_sh);
     for (int c = 0; c < naux_sh; ++c) m_asch[c] = apairs[c].schwarz;
+    // Keep only the pairs that survive the screen for at least one aux shell (the others are skipped for every c,
+    // so the tensor does not change); their count goes into the skipped blocks of the statistics.
+    double amax = 0.0;
+    for (const Pair& p : apairs) amax = std::max(amax, p.schwarz);
+    long pre_skipped = 0;
+    {
+        int kept = 0;
+        for (int k = 0; k < npairs; ++k)
+            if (opairs[k].schwarz * amax >= opt.screening) ++kept;
+        dd->opairs.reserve(kept);
+        dd->oidx.reserve(kept);
+        for (int k = 0; k < npairs; ++k) {
+            if (opairs[k].schwarz * amax >= opt.screening) {
+                dd->opairs.push_back(std::move(opairs[k]));
+                dd->oidx.push_back(oidx[k]);
+            } else
+                pre_skipped += naux_sh;
+        }
+        std::vector<Pair>().swap(opairs);
+    }
+    m_dd = dd;
     const double t_schwarz = msSince(t0);
 
-    // 3-index tensor T(P, pairIndex(m, nn)) = (P|m nn) in the active orbital basis, lower triangle only. In a
-    // diagonal shell block (A == B) both (a,b) and (b,a) are computed; the one with m >= nn is kept, which is
-    // the value the full n^2 layout kept for both entries (last write in loop order), so the packed tensor
-    // holds the same numbers.
-    const auto t1 = std::chrono::steady_clock::now();
-    Matrix T3 = Matrix::Zero(N, np);
-    long blocks = 0, skipped = 0;
-#pragma omp parallel for schedule(dynamic) num_threads(threads) reduction(+ : blocks, skipped)
-    for (int k = 0; k < npairs; ++k) {
-        const int A = oidx[k].first, B = oidx[k].second;
-        std::vector<double> buf, tmp;
-        for (int c = 0; c < naux_sh; ++c) {
-            if (opairs[k].schwarz * apairs[c].schwarz < opt.screening) {
-                ++skipped;
-                continue;
-            }
-            ++blocks;
-            pairBlock(opairs[k], apairs[c], buf);
-            int d[3] = { (int)osh[A].lmn.size(), (int)osh[B].lmn.size(), (int)aux[c].lmn.size() };
-            if (oo.T[A].size()) transformAxis3(buf, tmp, d, 0, oo.T[A]);
-            if (oo.T[B].size()) transformAxis3(buf, tmp, d, 1, oo.T[B]);
-            if (ao.T[c].size()) transformAxis3(buf, tmp, d, 2, ao.T[c]);
-            for (int a = 0; a < d[0]; ++a)
-                for (int b = 0; b < d[1]; ++b) {
-                    const int m = oo.first[A] + a, nn = oo.first[B] + b;
-                    if (A == B && m < nn) continue;
-                    const double* v = &buf[((size_t)a * d[1] + b) * d[2]];
-                    const Eigen::Index col = pairIndex(m, nn);
-                    for (int p = 0; p < d[2]; ++p) T3(ao.first[c] + p, col) = v[p];
-                }
-        }
-    }
-    const double t_3c = msSince(t1);
-
-    // Metric
+    // Metric (raw) and the Coulomb normalisation: every aux function scaled to (P|P) = 1. The fit is invariant to
+    // it; it only puts the metric eigenvalues on a common scale for the eigen cutoff and the report.
     const auto t2 = std::chrono::steady_clock::now();
     Matrix Jraw = coulombMetric(aux, opt.spherical_aux, threads);
     const double t_2c = msSince(t2);
-    if (const char* dump = std::getenv("CURCUMA_QM_RI_DUMP"); dump && dump[0] != '\0') {
-        m_raw_metric = Jraw;
-        m_raw_T3.resize(N, (Eigen::Index)n * n);  // full n^2 columns for the dump (diagnostic)
-        for (int P = 0; P < N; ++P) unpackSymmetric(T3.data() + (size_t)P * np, n, m_raw_T3.data() + (size_t)P * n * n);
-    }
-
-    // Coulomb normalisation: every aux function scaled to (P|P) = 1. The fit is invariant to it;
-    // it only puts the metric eigenvalues on a common scale for the eigen cutoff and the report.
     Eigen::VectorXd dn(N);
     for (int P = 0; P < N; ++P) {
         if (!(Jraw(P, P) > 0.0)) {
@@ -816,8 +902,47 @@ bool RIJK::setup(const std::vector<GTO::Orbital>& basis, const Matrix* Q, const 
         dn(P) = 1.0 / std::sqrt(Jraw(P, P));
     }
     m_dn = dn;
+
+    // 3-index tensor T(P, pairIndex(m, nn)) = (P|m nn) in the active orbital basis, lower triangle only. In a
+    // diagonal shell block (A == B) both (a,b) and (b,a) are computed; the one with m >= nn is kept, which is
+    // the value the full n^2 layout kept for both entries (last write in loop order), so the packed tensor
+    // holds the same numbers. Stored storage only; batched / FP32 compute the rows later (fillRows).
+    const auto t1 = std::chrono::steady_clock::now();
+    Matrix T3;
+    long blocks = 0, skipped = pre_skipped;
+    if (!batched && !fp32) {
+        T3 = Matrix::Zero(N, np);
+        fillRows(nullptr, 0, naux_sh, T3.data(), np, 0, blocks, skipped);
+    }
+    double t_3c = msSince(t1);
+    if (!batched && !fp32) {
+        if (const char* dump = std::getenv("CURCUMA_QM_RI_DUMP"); dump && dump[0] != '\0') {
+            m_raw_metric = Jraw;
+            m_raw_T3.resize(N, (Eigen::Index)n * n);  // full n^2 columns for the dump (diagnostic)
+            for (int P = 0; P < N; ++P) unpackSymmetric(T3.data() + (size_t)P * np, n, m_raw_T3.data() + (size_t)P * n * n);
+        }
+        for (int P = 0; P < N; ++P) T3.row(P) *= dn(P);
+    }
     Eigen::MatrixXd Jn = dn.asDiagonal() * Eigen::MatrixXd(Jraw) * dn.asDiagonal();
-    for (int P = 0; P < N; ++P) T3.row(P) *= dn(P);
+    Matrix().swap(Jraw);
+    m_Jn.resize(0, 0);
+    m_dom_cache.clear();
+    if (opt.fit_radius > 0.0 && jk) {
+        // local fit: metric blocks of the domains, function -> atom maps, atom positions (from the shell centres)
+        m_Jn = Jn;
+        int natoms = 0;
+        for (const Shell& s : aux) natoms = std::max(natoms, s.atom + 1);
+        for (const Shell& s : osh) natoms = std::max(natoms, s.atom + 1);
+        m_atom_xyz = Eigen::MatrixXd::Zero(natoms, 3);
+        for (const Shell& s : aux) m_atom_xyz.row(s.atom) << s.x, s.y, s.z;
+        for (const Shell& s : osh) m_atom_xyz.row(s.atom) << s.x, s.y, s.z;
+        m_ao_atom.assign(n, 0);
+        for (size_t s = 0; s < osh.size(); ++s)
+            for (int j = 0; j < oo.width[s]; ++j) m_ao_atom[oo.first[s] + j] = osh[s].atom;
+        m_auxfn_atom.assign(N, 0);
+        for (int c = 0; c < naux_sh; ++c)
+            for (int j = 0; j < ao.width[c]; ++j) m_auxfn_atom[ao.first[c] + j] = aux[c].atom;
+    }
 
     const auto t3 = std::chrono::steady_clock::now();
     std::string metric = opt.metric;
@@ -830,6 +955,7 @@ bool RIJK::setup(const std::vector<GTO::Orbital>& basis, const Matrix* Q, const 
     std::string solve_where = "host";
     int dropped = 0;
     m_metric_used = metric;
+    Eigen::MatrixXd Ffit;  // eigen + (batched or FP32): w^-1/2 U^T
     if (metric == "cholesky") {
         Eigen::LLT<Eigen::MatrixXd> llt(Jn);
         if (llt.info() != Eigen::Success) {
@@ -839,7 +965,7 @@ bool RIJK::setup(const std::vector<GTO::Orbital>& basis, const Matrix* Q, const 
             m_L = llt.matrixL();
             m_gL = m_L;  // gradient: F^T = L^-T in both modes
             t_chol = msSince(t3);
-            if (opt.mode == "jk") {
+            if (opt.mode == "jk" && !batched && !fp32) {
                 // B = L^-1 T (triangular solve, no explicit inverse): on the device if the caller asks for it
                 // and it works, else on the host. Both are the same solve; only the summation order differs.
                 int dev = 0;
@@ -853,8 +979,8 @@ bool RIJK::setup(const std::vector<GTO::Orbital>& basis, const Matrix* Q, const 
                     solve_where = dev == 1 ? "device" : "host (device failed: " + dwhy + ")";
                 }
                 if (dev != 1) lowerSolveRows(m_L, T3, threads);
-                m_L.resize(0, 0);
             }
+            if (opt.mode == "jk") m_L.resize(0, 0);
             m_T.swap(T3);
             m_nfit = N;
         }
@@ -884,15 +1010,112 @@ bool RIJK::setup(const std::vector<GTO::Orbital>& basis, const Matrix* Q, const 
         if (opt.mode == "jk") {
             // B = w^-1/2 U^T T  (J^-1 ~ U w^-1 U^T = (w^-1/2 U^T)^T (w^-1/2 U^T))
             const Eigen::MatrixXd F = wk.cwiseSqrt().cwiseInverse().asDiagonal() * U.transpose();
-            leftMultiplyRows(F, T3, m_T, threads);
-            Matrix().swap(T3);
+            if (!batched && !fp32) {
+                leftMultiplyRows(F, T3, m_T, threads);
+                Matrix().swap(T3);
+            } else
+                Ffit = F;
         } else {
             m_U = U;
             m_w = wk;
             m_T.swap(T3);
         }
     }
-    const double t_fac = msSince(t3);
+    double t_fac = msSince(t3);
+
+    // Batched rows (also prepared for FP32, whose final SCF iterations run batched): aux shell batches of at most
+    // batch_mb, and the memory check of the batched builds (Claude Generated, Oct 2026).
+    std::string storage_info = "stored";
+    if (batched || fp32) {
+        const double cap_mb = opt.batch_mb > 0.0 ? opt.batch_mb : std::min(256.0, opt.max_memory_mb / 8.0);
+        const double row_mb = (double)np * 8.0 / 1.0e6;
+        long rows = 0, maxrows = 0;
+        int c0 = 0;
+        for (int c = 0; c < naux_sh; ++c) {
+            const int w = ao.width[c];
+            if (c > c0 && (rows + w) * row_mb > cap_mb) {
+                m_aux_batches.push_back({ c0, c });
+                maxrows = std::max(maxrows, rows);
+                c0 = c;
+                rows = 0;
+            }
+            rows += w;
+        }
+        m_aux_batches.push_back({ c0, naux_sh });
+        m_batch_rows = std::max(maxrows, rows);
+        // metric factor (N^2) + row batch + per-thread K (n^2) + per-thread packed J for FP32 builds
+        m_fixed_mb = ((double)N * N + (double)m_batch_rows * np + (double)threads * n * n) * 8.0 / 1.0e6;
+        const double ycol_mb = (double)N * n * 8.0 / 1.0e6 * (Ffit.size() ? 2.0 : 1.0);  // Y per orbital column (eigen: + X)
+        double held_mb = fp32 ? need32_mb : 0.0;  // the FP32 tensor stays next to the batched buffers
+        if (fp32 && storage == "auto" && m_fixed_mb + ycol_mb + held_mb > opt.max_memory_mb) {
+            fp32 = false;  // FP32 tensor plus the buffers of its exact builds do not fit: batched FP64 instead
+            batched = true;
+            held_mb = 0.0;
+        }
+        if (jk && m_fixed_mb + ycol_mb + held_mb > opt.max_memory_mb) {
+            why = fmt::format("batched RI-JK needs at least {:.0f} MB (metric factor, a {}-row batch of 3-index integrals, per-thread K, "
+                              "one orbital column of Y = {:.0f} MB{}), above -qm.ri_max_memory_mb {:g}",
+                              m_fixed_mb + ycol_mb + held_mb, m_batch_rows, ycol_mb,
+                              fp32 ? fmt::format(", FP32 tensor {:.0f} MB", need32_mb) : std::string(), opt.max_memory_mb);
+            return false;
+        }
+        storage_info = fmt::format("batched ({} batches of <= {} rows, {:.0f} MB each{})", m_aux_batches.size(), m_batch_rows,
+                                   m_batch_rows * row_mb,
+                                   opt.fit_radius > 0.0 && jk ? fmt::format("; local exchange fit R = {:g} Bohr", opt.fit_radius) : std::string());
+        m_batched = batched;
+    }
+
+    // FP32 tensor (mode jk): column chunks of whole orbital rows m (shells B), each computed in FP64, normalised,
+    // fitted (L^-1 or w^-1/2 U^T, columns are independent) and rounded to FP32. Peak = FP32 tensor + one chunk.
+    if (fp32) {
+        const auto tf = std::chrono::steady_clock::now();
+        const int ns = (int)osh.size();
+        for (int s = 0; s + 1 < ns; ++s)
+            if (oo.first[s + 1] != oo.first[s] + oo.width[s]) {
+                why = "FP32 RI setup needs contiguous orbital shells";
+                return false;
+            }
+        std::vector<std::vector<int>> byB(ns);
+        for (int k = 0; k < (int)dd->oidx.size(); ++k) byB[dd->oidx[k].second].push_back(k);
+        m_T32.assign((size_t)m_nfit * np, 0.0f);
+        Matrix C, Cf;
+        double t_int = 0.0;
+        for (int s0 = 0; s0 < ns;) {
+            int s1 = s0;
+            Eigen::Index f0 = oo.first[s0], cols = 0;
+            std::vector<int> plist;
+            do {
+                plist.insert(plist.end(), byB[s1].begin(), byB[s1].end());
+                ++s1;
+                const Eigen::Index f1 = oo.first[s1 - 1] + oo.width[s1 - 1];
+                cols = f1 * (f1 + 1) / 2 - f0 * (f0 + 1) / 2;
+            } while (s1 < ns && cols < chunk_cols);
+            const Eigen::Index col0 = f0 * (f0 + 1) / 2;
+            C = Matrix::Zero(N, cols);
+            const auto ti = std::chrono::steady_clock::now();
+            fillRows(&plist, 0, naux_sh, C.data(), cols, col0, blocks, skipped);
+            t_int += msSince(ti);
+            for (int P = 0; P < N; ++P) C.row(P) *= dn(P);
+            const Matrix* src = &C;
+            if (m_gL.size()) {
+                lowerSolveRows(m_gL, C, threads);
+            } else {
+                leftMultiplyRows(Ffit, C, Cf, threads);
+                src = &Cf;
+            }
+#pragma omp parallel for schedule(static) num_threads(threads)
+            for (int Qr = 0; Qr < m_nfit; ++Qr) {
+                const double* a = src->data() + (size_t)Qr * cols;
+                float* b = m_T32.data() + (size_t)Qr * np + col0;
+                for (Eigen::Index j = 0; j < cols; ++j) b[j] = (float)a[j];
+            }
+            s0 = s1;
+        }
+        t_3c = t_int;
+        t_fac += msSince(tf) - t_int;
+        storage_info = fmt::format("stored FP32 ({:.1f} MB; exact FP64 corrections {})", (double)m_T32.size() * 4.0 / 1.0e6, storage_info);
+    }
+    if (!batched && !fp32) m_dd.reset();  // stored: the pair tables are not needed after the setup
     if (CurcumaLogger::get_verbosity() >= 3 && std::isnan(wmin)) {
         // report the conditioning (diagnostic only; the numerical path does not depend on it)
         Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(Jn, Eigen::EigenvaluesOnly);
@@ -905,9 +1128,9 @@ bool RIJK::setup(const std::vector<GTO::Orbital>& basis, const Matrix* Q, const 
                       dropped ? fmt::format(", {} dropped below {:.1e}", dropped, opt.metric_cutoff) : std::string());
     m_stats = fmt::format(
         "naux {} (fit rows {}), n {}, tensor {:.1f} MB; metric {} ({}); setup: Schwarz {:.1f} ms, 3-index {:.1f} ms ({} of {} shell "
-        "blocks), metric {:.1f} ms, factor/B {:.1f} ms{}",
+        "blocks), metric {:.1f} ms, factor/B {:.1f} ms{}; storage {}",
         N, m_nfit, n, tensorMB(), m_metric_used, cond, t_schwarz, t_3c, blocks, blocks + skipped, t_2c, t_fac,
-        t_chol > 0.0 ? fmt::format(" (Cholesky {:.1f} ms, solve {})", t_chol, solve_where) : std::string());
+        t_chol > 0.0 ? fmt::format(" (Cholesky {:.1f} ms, solve {})", t_chol, solve_where) : std::string(), storage_info);
     return true;
 }
 
@@ -925,6 +1148,7 @@ Eigen::VectorXd RIJK::fitCoefficients(const Eigen::VectorXd& g) const
 // n^2 columns, here applied to the (usually much shorter) transformed rows.
 void RIJK::fitRows(Matrix& X) const
 {
+    if (!storedFP64()) throw std::logic_error("RIJK::fitRows: needs the stored FP64 tensor (ri_storage " + storageUsed() + ")");
     if (m_opt.mode == "jk") return;  // tensor already fitted
     const int threads = std::max(1, m_opt.threads);
     if (m_L.size()) {
@@ -941,6 +1165,14 @@ void RIJK::fitRows(Matrix& X) const
 
 Matrix RIJK::coulomb(const Matrix& P) const
 {
+    if (m_batched || !m_T32.empty()) {  // Claude Generated (Oct 2026): no FP64 tensor in memory
+        Matrix J;
+        if (m_batched)
+            buildBatched(P, J, nullptr, nullptr);
+        else
+            buildFP32(P, J, nullptr, nullptr);
+        return J;
+    }
     const int n = m_n, threads = std::max(1, m_opt.threads);
     std::vector<double> Pw;  // packed contraction weights (P_mm, P_mk + P_km)
     packContractionWeights(P, Pw);
@@ -1002,6 +1234,14 @@ void RIJK::build(const Matrix& P, Matrix& J, Matrix* K, const Eigen::MatrixXd* V
         return;
     }
     if (m_opt.mode != "jk") throw std::logic_error("RIJK::build: exchange needs mode jk");
+    if (m_batched) {  // Claude Generated (Oct 2026): recomputed integrals, K from Y = T V
+        buildBatched(P, J, K, Vocc);
+        return;
+    }
+    if (!m_T32.empty()) {  // Claude Generated (Oct 2026): FP32 tensor, FP32 GEMM/SYRK, FP64 accumulation
+        buildFP32(P, J, K, Vocc);
+        return;
+    }
     const int n = m_n, threads = std::max(1, m_opt.threads);
     // Density factor P = V S V^T: the occupied orbitals (V = sqrt(2) C_occ, all signs +, given by the caller
     // when P = 2 C_occ C_occ^T exactly) or the eigen-factorisation of P (n^3 on the host).
@@ -1094,6 +1334,635 @@ void RIJK::build(const Matrix& P, Matrix& J, Matrix* K, const Eigen::MatrixXd* V
     unpackSymmetric(Js.data(), n, Jf.data());
     J = Jf;
     *K = Kf;
+}
+
+// ---------------------------------------------------------------------------------
+// 4a. Resource-saving J/K builds (Claude Generated, Oct 2026; docs WP10 "RI-JK ressourcensparend")
+// ---------------------------------------------------------------------------------
+//
+// BATCHED (no stored tensor). With T_n the Coulomb-normalised raw rows (P|mn), J_n = L L^T and P = V S V^T:
+//   g_P = T_n,P . w(P),   c = J_n^-1 g,   J_mn = sum_P c_P T_n,P,mn                 (= sum_Q B^Q (B^Q . P))
+//   Y^P = T_n^P V (n x r),   X = L^-1 Y (auxiliary index),   K = sum_Q sum_k s_k X^Q_k X^Q_k^T  (= sum_Q B^Q P B^Q)
+// The rows are recomputed in aux-shell batches (fillRows, bitwise the stored setup's values). Pass 0 forms g and
+// Y for orbital batch 0, pass 1 forms J (c is known after pass 0) and Y for orbital batch 1, and so on: max(2,
+// #orbital batches) passes. The orbital batch width rb follows -qm.ri_max_memory_mb (Y is naux n rb doubles), each
+// batch carries one sign. B is never formed: a forward substitution over row batches would need all earlier rows
+// of B (L is a full triangle), so batching B itself saves nothing; the occupied half-transform does.
+// FP32 (mixed precision): the stored B in FP32, per row X^q = B^q V in FP32 (ssymm), J and g accumulated in FP64,
+// per batch K_b = sum X X^T in FP32 (ssyrk) added into an FP64 K, so the FP32 rounding does not grow with naux.
+
+std::string RIJK::takeBuildStats() const
+{
+    std::string s;
+    if (m_bt_builds > 0)
+        s = fmt::format("batched builds {}: passes {}, orbital batches {}; 3-index {:.0f} ms, Y {:.0f} ms, L^-1 Y {:.0f} ms, SYRK {:.0f} ms, "
+                        "J {:.0f} ms{}",
+                        m_bt_builds, m_bt_passes, m_bt_ybatches, m_bt_int_ms, m_bt_y_ms, m_bt_solve_ms, m_bt_syrk_ms, m_bt_j_ms,
+                        m_bt_dev_ms > 0 ? fmt::format(", device solve+SYRK {:.0f} ms", m_bt_dev_ms) : std::string());
+    if (m_fp_builds > 0)
+        s += fmt::format("{}FP32 builds {} in {:.0f} ms", s.empty() ? "" : "; ", m_fp_builds, m_fp_ms);
+    if (m_loc_builds > 0)
+        s += fmt::format("; local fit R = {:g} Bohr: {} builds ({} with the global fit), mean domain {:.0f} of {} aux functions, {} new "
+                         "domain factors; pivoted Cholesky + domains {:.0f} ms, Y {:.0f} ms, local solves + SYRK {:.0f} ms",
+                         m_opt.fit_radius, m_loc_builds, m_loc_global, m_loc_orbitals ? (double)m_loc_aux_sum / m_loc_orbitals : 0.0, m_naux,
+                         m_loc_new_domains, m_loc_factor_ms, m_loc_y_ms, m_loc_solve_ms);
+    m_loc_builds = m_loc_global = m_loc_orbitals = m_loc_aux_sum = m_loc_new_domains = 0;
+    m_loc_factor_ms = m_loc_y_ms = m_loc_solve_ms = 0.0;
+    m_bt_builds = m_bt_passes = m_bt_ybatches = 0;
+    m_bt_int_ms = m_bt_y_ms = m_bt_solve_ms = m_bt_syrk_ms = m_bt_j_ms = m_bt_dev_ms = 0.0;
+    m_fp_builds = 0;
+    m_fp_ms = 0.0;
+    return s;
+}
+
+void RIJK::buildBatched(const Matrix& P, Matrix& J, Matrix* K, const Eigen::MatrixXd* Vocc) const
+{
+    using clk = std::chrono::steady_clock;
+    const Direct& d = *m_dd;
+    const int n = m_n, N = m_naux, threads = std::max(1, m_opt.threads);
+    const int naux_sh = (int)m_aux.size();
+    const Eigen::Index np = npair();
+    if (K && m_opt.fit_radius > 0.0 && buildBatchedLocal(P, J, *K, Vocc)) {
+        ++m_bt_builds;
+        return;
+    }
+    if (K && m_opt.fit_radius > 0.0) ++m_loc_global;  // indefinite P or a domain metric not positive definite: global fit
+    curcuma::ScopedBlasThreads blas_guard(1);  // our own OpenMP over single-threaded BLAS calls (as build())
+    std::vector<double> Pw;
+    packContractionWeights(P, Pw);
+
+    // Density factor (as build()): sqrt(2) C_occ from the caller or the eigen-factorisation of P
+    Eigen::MatrixXd Vown;
+    const Eigen::MatrixXd* Vp = nullptr;
+    int npos = 0;
+    if (K) {
+        if (Vocc && Vocc->rows() == n && Vocc->cols() > 0) {
+            Vp = Vocc;
+            npos = (int)Vocc->cols();
+        } else {
+            const auto tf = clk::now();
+            factorDensity(P, Vown, npos);
+            m_factor_ms += msSince(tf);
+            Vp = &Vown;
+        }
+    }
+    const int r = Vp ? (int)Vp->cols() : 0;
+    const bool chol = m_gL.size() != 0;
+    Eigen::MatrixXd F;  // eigen metric: X = F Y, F = w^-1/2 U^T
+    if (K && !chol) F = m_gw.cwiseSqrt().cwiseInverse().asDiagonal() * m_gU.transpose();
+    // Orbital batches with one sign each; width from the memory limit (Y: naux n rb, eigen also X: nfit n rb)
+    struct OrbBatch {
+        int k0, cnt;
+        double sign;
+    };
+    std::vector<OrbBatch> obs;
+    if (K && r > 0) {
+        const double ycol_mb = (double)N * n * 8.0 / 1.0e6 * (chol ? 1.0 : 2.0);
+        // the FP32 tensor (mixed precision) stays in memory next to Y
+        const double held_mb = (double)m_T32.size() * 4.0 / 1.0e6;
+        const int rb = std::clamp((int)std::floor((m_opt.max_memory_mb - m_fixed_mb - held_mb) / ycol_mb), 1, r);
+        for (int k0 = 0; k0 < npos; k0 += rb) obs.push_back({ k0, std::min(rb, npos - k0), 1.0 });
+        for (int k0 = npos; k0 < r; k0 += rb) obs.push_back({ k0, std::min(rb, r - k0), -1.0 });
+    }
+    const int nob = (int)obs.size();
+    const int npass = std::max(2, nob);
+
+    Eigen::VectorXd g = Eigen::VectorXd::Zero(N), c;
+    std::vector<double> Jp((size_t)np, 0.0);
+    Matrix Tb((Eigen::Index)m_batch_rows, np);
+    Matrix Y, X;
+    std::vector<Eigen::MatrixXd> Kt(K ? threads : 0);
+    for (auto& k : Kt) k = Eigen::MatrixXd::Zero(n, n);
+    Eigen::MatrixXd Kdev;  // device-accumulated part (full)
+    long blocks = 0, skipped = 0;
+    for (int pass = 0; pass < npass; ++pass) {
+        const OrbBatch* ob = pass < nob ? &obs[pass] : nullptr;
+        const bool doG = pass == 0, doJ = pass == 1;
+        if (!doG && !doJ && !ob) continue;
+        ++m_bt_passes;
+        Eigen::MatrixXd Vb;
+        if (ob) {
+            Vb = Vp->middleCols(ob->k0, ob->cnt);
+            Y.resize(N, (Eigen::Index)n * ob->cnt);
+            ++m_bt_ybatches;
+        }
+        for (const auto& cb : m_aux_batches) {
+            const int row0 = d.ao.first[cb.first];
+            const int rows = (cb.second < naux_sh ? d.ao.first[cb.second] : N) - row0;
+            const auto ti = clk::now();
+            Tb.topRows(rows).setZero();
+            fillRows(nullptr, cb.first, cb.second, Tb.data(), np, 0, blocks, skipped);
+            for (int q = 0; q < rows; ++q) Tb.row(q) *= m_dn(row0 + q);
+            m_bt_int_ms += msSince(ti);
+            if (doG) {
+#pragma omp parallel for schedule(static) num_threads(threads)
+                for (int q = 0; q < rows; ++q) {
+                    const double* t = Tb.data() + (size_t)q * np;
+                    double s = 0.0;
+                    for (Eigen::Index k = 0; k < np; ++k) s += t[k] * Pw[k];
+                    g(row0 + q) = s;
+                }
+            }
+            if (doJ) {
+                const auto tj = clk::now();
+                const Eigen::Index chunk = 1024, nchunks = (np + chunk - 1) / chunk;
+#pragma omp parallel for schedule(static) num_threads(threads)
+                for (Eigen::Index b = 0; b < nchunks; ++b) {
+                    const Eigen::Index c0 = b * chunk, w = std::min(chunk, np - c0);
+                    double* out = Jp.data() + c0;
+                    for (int q = 0; q < rows; ++q) {
+                        const double cq = c(row0 + q);
+                        const double* t = Tb.data() + (size_t)q * np + c0;
+                        for (Eigen::Index k = 0; k < w; ++k) out[k] += cq * t[k];
+                    }
+                }
+                m_bt_j_ms += msSince(tj);
+            }
+            if (ob) {
+                const auto ty = clk::now();
+#pragma omp parallel num_threads(threads)
+                {
+                    Eigen::MatrixXd Fu = Eigen::MatrixXd::Zero(n, n);  // only the upper triangle is written/read
+#pragma omp for schedule(static)
+                    for (int q = 0; q < rows; ++q) {
+                        const double* tq = Tb.data() + (size_t)q * np;
+                        for (int m = 0; m < n; ++m)
+                            std::memcpy(Fu.data() + (size_t)m * n, tq + (size_t)m * (m + 1) / 2, sizeof(double) * (size_t)(m + 1));
+                        Eigen::Map<Eigen::MatrixXd> Yq(Y.data() + (size_t)(row0 + q) * n * ob->cnt, n, ob->cnt);
+                        Yq.noalias() = Fu.selfadjointView<Eigen::Upper>() * Vb;
+                    }
+                }
+                m_bt_y_ms += msSince(ty);
+            }
+        }
+        if (doG) c = metricSolve(g);
+        if (!ob) continue;
+        // X = L^-1 Y (or F Y) and the rank updates; the device hook does both for the Cholesky metric
+        if (chol && m_dev_exchange) {
+            const auto td = clk::now();
+            if (Kdev.size() == 0) Kdev = Eigen::MatrixXd::Zero(n, n);
+            if (m_dev_exchange(Y, ob->cnt, ob->sign, Kdev)) {
+                m_bt_dev_ms += msSince(td);
+                continue;
+            }
+            m_dev_exchange = nullptr;  // device error: this batch and the rest on the CPU (the caller counted it)
+            Kdev.setZero();            // a failed call may have added part of the batch
+            // earlier batches done on the device are lost: redo the build on the CPU
+            Kdev.resize(0, 0);
+            buildBatched(P, J, K, Vocc);
+            return;
+        }
+        const auto ts = clk::now();
+        const Matrix* Xs = &Y;
+        if (chol)
+            lowerSolveRows(m_gL, Y, threads);
+        else {
+            leftMultiplyRows(F, Y, X, threads);
+            Xs = &X;
+        }
+        m_bt_solve_ms += msSince(ts);
+        const auto tk = clk::now();
+        const int cnt = ob->cnt, rowsX = (int)Xs->rows();
+        const int nq = std::clamp(512 / std::max(1, cnt) + 1, 1, 64);
+        const int nbatch = (rowsX + nq - 1) / nq;
+#pragma omp parallel num_threads(threads)
+        {
+#ifdef _OPENMP
+            const int tid = omp_get_thread_num();
+#else
+            const int tid = 0;
+#endif
+#pragma omp for schedule(static)
+            for (int b = 0; b < nbatch; ++b) {
+                const int Q0 = b * nq, qn = std::min(nq, rowsX - Q0);
+                Eigen::Map<const Eigen::MatrixXd> Xb(Xs->data() + (size_t)Q0 * n * cnt, n, (Eigen::Index)qn * cnt);
+                Kt[tid].selfadjointView<Eigen::Lower>().rankUpdate(Xb, ob->sign);
+            }
+        }
+        m_bt_syrk_ms += msSince(tk);
+    }
+    J.resize(n, n);
+    unpackSymmetric(Jp.data(), n, J.data());
+    if (K) {
+        Eigen::MatrixXd Ks = Eigen::MatrixXd::Zero(n, n);
+        for (int t = 0; t < (int)Kt.size(); ++t)
+            for (int q = 0; q < n; ++q)
+                for (int m = q; m < n; ++m) Ks(m, q) += Kt[t](m, q);
+        if (Kdev.size())
+            for (int q = 0; q < n; ++q)
+                for (int m = q; m < n; ++m) Ks(m, q) += Kdev(m, q);
+        K->resize(n, n);
+        for (int q = 0; q < n; ++q)
+            for (int m = q; m < n; ++m) {
+                (*K)(m, q) = Ks(m, q);
+                (*K)(q, m) = Ks(m, q);
+            }
+    }
+    ++m_bt_builds;
+}
+
+void RIJK::buildFP32(const Matrix& P, Matrix& J, Matrix* K, const Eigen::MatrixXd* Vocc) const
+{
+    const auto t0 = std::chrono::steady_clock::now();
+    const int n = m_n, threads = std::max(1, m_opt.threads);
+    const Eigen::Index np = npair();
+    curcuma::ScopedBlasThreads blas_guard(1);
+    Eigen::MatrixXd Vown;
+    const Eigen::MatrixXd* Vp = Vocc;
+    int npos = 0;
+    if (!K) {
+        // Coulomb only: g_Q = B_Q . w, J = sum_Q g_Q B_Q (FP64 accumulation of FP32 rows)
+        std::vector<double> Pw;
+        packContractionWeights(P, Pw);
+        Eigen::VectorXd g(m_nfit);
+#pragma omp parallel for schedule(static) num_threads(threads)
+        for (int Q = 0; Q < m_nfit; ++Q) {
+            const float* t = m_T32.data() + (size_t)Q * np;
+            double s = 0.0;
+            for (Eigen::Index k = 0; k < np; ++k) s += (double)t[k] * Pw[k];
+            g(Q) = s;
+        }
+        std::vector<double> Jp((size_t)np, 0.0);
+        const Eigen::Index chunk = 1024, nchunks = (np + chunk - 1) / chunk;
+#pragma omp parallel for schedule(static) num_threads(threads)
+        for (Eigen::Index b = 0; b < nchunks; ++b) {
+            const Eigen::Index c0 = b * chunk, w = std::min(chunk, np - c0);
+            double* out = Jp.data() + c0;
+            for (int Q = 0; Q < m_nfit; ++Q) {
+                const double gq = g(Q);
+                const float* t = m_T32.data() + (size_t)Q * np + c0;
+                for (Eigen::Index k = 0; k < w; ++k) out[k] += gq * (double)t[k];
+            }
+        }
+        J.resize(n, n);
+        unpackSymmetric(Jp.data(), n, J.data());
+        ++m_fp_builds;
+        m_fp_ms += msSince(t0);
+        return;
+    }
+    if (Vp && Vp->rows() == n && Vp->cols() > 0) {
+        npos = (int)Vp->cols();
+    } else {
+        const auto tf = std::chrono::steady_clock::now();
+        factorDensity(P, Vown, npos);
+        m_factor_ms += msSince(tf);
+        Vp = &Vown;
+    }
+    const Eigen::MatrixXf Vf = Vp->cast<float>();
+    const Eigen::MatrixXd& Vd = *Vp;
+    const int r = (int)Vf.cols(), nneg = r - npos;
+    const int nq = std::clamp(512 / std::max(1, r) + 1, 1, 64);
+    const int nbatch = (m_nfit + nq - 1) / nq;
+    std::vector<Eigen::MatrixXd> Kt(threads);
+    std::vector<std::vector<double>> Jt(threads);
+#pragma omp parallel num_threads(threads)
+    {
+#ifdef _OPENMP
+        const int tid = omp_get_thread_num();
+#else
+        const int tid = 0;
+#endif
+        Eigen::MatrixXd& Kl = Kt[tid];
+        std::vector<double>& Jl = Jt[tid];
+        Kl = Eigen::MatrixXd::Zero(n, n);
+        Jl.assign((size_t)np, 0.0);
+        Eigen::MatrixXf Y, Ff, Kb;
+        Eigen::MatrixXd Yd, Fd;
+        if (m_fp32_arith) {
+            Ff = Eigen::MatrixXf::Zero(n, n);
+            Kb.resize(n, n);
+        } else
+            Fd = Eigen::MatrixXd::Zero(n, n);
+#pragma omp for schedule(static)
+        for (int b = 0; b < nbatch; ++b) {
+            if (!m_fp32_arith) {
+                // FP32 storage, FP64 arithmetic (second phase): the rows widened to FP64, then exactly the stored build
+                const int Q0 = b * nq, cnt = std::min(nq, m_nfit - Q0);
+                Yd.resize((Eigen::Index)cnt * n, r);
+                for (int q = 0; q < cnt; ++q) {
+                    const float* tq = m_T32.data() + (size_t)(Q0 + q) * np;
+                    for (int m = 0; m < n; ++m) {
+                        const float* src = tq + (size_t)m * (m + 1) / 2;
+                        double* dst = Fd.data() + (size_t)m * n;
+                        for (int k = 0; k <= m; ++k) dst[k] = (double)src[k];
+                    }
+                    Yd.middleRows((Eigen::Index)q * n, n).noalias() = Fd.selfadjointView<Eigen::Upper>() * Vd;
+                    double gq = 0.0;
+                    for (int k = 0; k < r; ++k) {
+                        const double d = Vd.col(k).dot(Yd.col(k).segment((Eigen::Index)q * n, n));
+                        gq += k < npos ? d : -d;
+                    }
+                    double* jl = Jl.data();
+                    for (Eigen::Index p = 0; p < np; ++p) jl[p] += gq * (double)tq[p];
+                }
+                if (npos > 0) {
+                    Eigen::Map<const Eigen::MatrixXd> Yp(Yd.data(), n, (Eigen::Index)cnt * npos);
+                    Kl.selfadjointView<Eigen::Lower>().rankUpdate(Yp, 1.0);
+                }
+                if (nneg > 0) {
+                    Eigen::Map<const Eigen::MatrixXd> Yn(Yd.data() + (size_t)cnt * n * npos, n, (Eigen::Index)cnt * nneg);
+                    Kl.selfadjointView<Eigen::Lower>().rankUpdate(Yn, -1.0);
+                }
+                continue;
+            }
+            const int Q0 = b * nq, cnt = std::min(nq, m_nfit - Q0);
+            Y.resize((Eigen::Index)cnt * n, r);
+            for (int q = 0; q < cnt; ++q) {
+                const float* tq = m_T32.data() + (size_t)(Q0 + q) * np;
+                for (int m = 0; m < n; ++m) std::memcpy(Ff.data() + (size_t)m * n, tq + (size_t)m * (m + 1) / 2, sizeof(float) * (size_t)(m + 1));
+                Y.middleRows((Eigen::Index)q * n, n).noalias() = Ff.selfadjointView<Eigen::Upper>() * Vf;
+                // g_q = Tr(B^q P) = sum_k s_k v_k . X^q_k, accumulated in FP64
+                double gq = 0.0;
+                for (int k = 0; k < r; ++k) {
+                    const float* y = Y.data() + (size_t)k * Y.rows() + (size_t)q * n;
+                    const double* v = Vd.data() + (size_t)k * n;
+                    double dsum = 0.0;
+                    for (int m = 0; m < n; ++m) dsum += v[m] * (double)y[m];
+                    gq += k < npos ? dsum : -dsum;
+                }
+                double* jl = Jl.data();
+                for (Eigen::Index p = 0; p < np; ++p) jl[p] += gq * (double)tq[p];
+            }
+            // K_b in FP32 (ssyrk), added into the FP64 K of this thread
+            Kb.triangularView<Eigen::Lower>().setZero();
+            if (npos > 0) {
+                Eigen::Map<const Eigen::MatrixXf> Yp(Y.data(), n, (Eigen::Index)cnt * npos);
+                Kb.selfadjointView<Eigen::Lower>().rankUpdate(Yp, 1.0f);
+            }
+            if (nneg > 0) {
+                Eigen::Map<const Eigen::MatrixXf> Yn(Y.data() + (size_t)cnt * n * npos, n, (Eigen::Index)cnt * nneg);
+                Kb.selfadjointView<Eigen::Lower>().rankUpdate(Yn, -1.0f);
+            }
+            for (int q = 0; q < n; ++q)
+                for (int m = q; m < n; ++m) Kl(m, q) += (double)Kb(m, q);
+        }
+    }
+    Eigen::MatrixXd Ks = Eigen::MatrixXd::Zero(n, n);
+    std::vector<double> Js((size_t)np, 0.0);
+    for (int t = 0; t < threads; ++t) {
+        if (Kt[t].size())
+            for (int q = 0; q < n; ++q)
+                for (int m = q; m < n; ++m) Ks(m, q) += Kt[t](m, q);
+        if (!Jt[t].empty())
+            for (Eigen::Index p = 0; p < np; ++p) Js[p] += Jt[t][p];
+    }
+    J.resize(n, n);
+    unpackSymmetric(Js.data(), n, J.data());
+    K->resize(n, n);
+    for (int q = 0; q < n; ++q)
+        for (int m = q; m < n; ++m) {
+            (*K)(m, q) = Ks(m, q);
+            (*K)(q, m) = Ks(m, q);
+        }
+    ++m_fp_builds;
+    m_fp_ms += msSince(t0);
+}
+
+// ---------------------------------------------------------------------------------
+// 4a'. Local exchange fit (Claude Generated, Oct 2026; -qm.ri_fit_radius > 0, an APPROXIMATION)
+// ---------------------------------------------------------------------------------
+//
+// P = L L^T with L the pivoted Cholesky factor of P (columns l_k localised around their pivot function for an
+// insulator; exact factorisation, no orbital localisation iterations). K = sum_k (B l_k)(B l_k)^T is the global fit;
+// the local fit replaces, per column k, the global auxiliary space by the domain F_k (auxiliary functions on atoms
+// within R of the core atoms of l_k: the pivot atom plus the atoms with the largest sum_{m on A} l_mk^2 until they hold
+// 99.9 % of sum_m l_mk^2):
+//   Y_k(:, P) = T_n^P l_k (P in F_k),   K_k = Y_k J_F^-1 Y_k^T = X_k X_k^T,  X_k = Y_k L_F^-T,   J_F = L_F L_F^T.
+// For one density the robust (Dunlap) and the symmetric local fit coincide (both sides use F_k), so the error per
+// column is the Coulomb norm of the fitting residual of the densities chi_m l_k outside F_k; R -> infinity gives the
+// global fit (tested). Domains follow the pivots, so the Fock matrix is only piecewise smooth in P (a pivot change
+// changes a domain); J keeps the global fit (passes as in buildBatched). The metric factor of each distinct domain is
+// cached for the geometry.
+
+bool RIJK::buildBatchedLocal(const Matrix& P, Matrix& J, Matrix& K, const Eigen::MatrixXd* Vocc) const
+{
+    constexpr double kCoreFraction = 0.999;  // share of sum_m l_mk^2 on the core atoms of column k
+    (void)Vocc;
+    using clk = std::chrono::steady_clock;
+    const Direct& d = *m_dd;
+    const int n = m_n, N = m_naux, threads = std::max(1, m_opt.threads);
+    const int naux_sh = (int)m_aux.size();
+    const Eigen::Index np = npair();
+    const int natoms = (int)m_atom_xyz.rows();
+    curcuma::ScopedBlasThreads blas_guard(1);
+
+    // 1. pivoted Cholesky of P (positive semidefinite for every density runSCF builds; an indefinite P falls back)
+    const auto tf = clk::now();
+    Eigen::MatrixXd Pd(P);
+    Eigen::VectorXd dg = Pd.diagonal();
+    const double dmax = dg.maxCoeff();
+    if (!(dmax > 0.0)) return false;
+    const double tol = 1.0e-12 * dmax;
+    Eigen::MatrixXd Lc(n, n);
+    std::vector<int> piv;
+    int r = 0;
+    const bool frozen = m_loc_frozen && (int)m_loc_piv.size() <= n;
+    for (; r < n; ++r) {
+        Eigen::Index p = 0;
+        double dp = 0.0;
+        if (frozen) {
+            // fixed pivot order (Cholesky of P in a fixed permutation: smooth in P); stop where the old rank ended
+            if (r >= (int)m_loc_piv.size()) break;
+            p = m_loc_piv[r];
+            dp = dg(p);
+            if (dp <= tol) {  // rank changed: re-pivot from scratch
+                m_loc_frozen = false;
+                m_loc_unchanged = 0;
+                return buildBatchedLocal(P, J, K, Vocc);
+            }
+        } else {
+            dp = dg.maxCoeff(&p);
+            if (dp <= tol) break;
+        }
+        Eigen::VectorXd col = Pd.col(p);
+        if (r > 0) col.noalias() -= Lc.leftCols(r) * Lc.row(p).leftCols(r).transpose();
+        col /= std::sqrt(dp);
+        Lc.col(r) = col;
+        dg -= col.cwiseAbs2();
+        dg(p) = 0.0;
+        piv.push_back((int)p);
+    }
+    if (dg.minCoeff() < -1.0e-8 * dmax) return false;  // indefinite
+    if (frozen && dg.maxCoeff() > 1.0e-10 * dmax) {  // the frozen rank misses part of P: re-pivot
+        m_loc_frozen = false;
+        m_loc_unchanged = 0;
+        return buildBatchedLocal(P, J, K, Vocc);
+    }
+    // 2. core atoms and domains (atom sets), grouped. Domains follow the pivots until two consecutive builds have the
+    // same pivots and domains (or after 10 builds); from then on both stay fixed for this geometry, so the Fock matrix
+    // is a smooth function of P (with moving domains the SCF did not converge at R = 4 Bohr for benzene).
+    std::vector<std::vector<int>> dom(r);
+    for (int k = 0; k < r && frozen; ++k) dom[k] = m_loc_dom[k];
+    for (int k = 0; k < r && !frozen; ++k) {
+        std::vector<double> w(natoms, 0.0);
+        double tot = 0.0;
+        for (int m = 0; m < n; ++m) {
+            const double v = Lc(m, k) * Lc(m, k);
+            w[m_ao_atom[m]] += v;
+            tot += v;
+        }
+        // core: the pivot atom plus the atoms with the largest weights until they hold kCoreFraction of sum_m l_mk^2
+        std::vector<int> order(natoms);
+        for (int A = 0; A < natoms; ++A) order[A] = A;
+        std::sort(order.begin(), order.end(), [&](int a, int b) { return w[a] > w[b] || (w[a] == w[b] && a < b); });
+        std::vector<int> core{ m_ao_atom[piv[k]] };
+        double acc = w[core[0]];
+        for (int A : order) {
+            if (acc >= kCoreFraction * tot) break;
+            if (A == core[0]) continue;
+            core.push_back(A);
+            acc += w[A];
+        }
+        for (int B = 0; B < natoms; ++B)
+            for (int A : core)
+                if ((m_atom_xyz.row(A) - m_atom_xyz.row(B)).norm() <= m_opt.fit_radius) {
+                    dom[k].push_back(B);
+                    break;
+                }
+    }
+    if (!frozen) {
+        m_loc_unchanged = (piv == m_loc_piv && dom == m_loc_dom) ? m_loc_unchanged + 1 : 0;
+        m_loc_piv = piv;
+        m_loc_dom = dom;
+        if (m_loc_unchanged >= 1 || m_loc_builds + 1 >= 10) m_loc_frozen = true;
+    }
+    // aux functions per atom (contiguous), domain function lists and offsets
+    std::vector<int> afirst(natoms, -1), acount(natoms, 0);
+    for (int Pi = 0; Pi < N; ++Pi) {
+        const int A = m_auxfn_atom[Pi];
+        if (afirst[A] < 0) afirst[A] = Pi;
+        ++acount[A];
+    }
+    std::vector<int> fk(r, 0);
+    std::vector<std::vector<int>> off(r);  // off[k][atom] = first local column of that atom in F_k, -1 if absent
+    std::vector<std::shared_ptr<Eigen::MatrixXd>> LF(r);
+    std::vector<std::vector<std::pair<int, int>>> byAtom(natoms);  // atom -> (orbital k, local offset)
+    long new_dom = 0;
+    for (int k = 0; k < r; ++k) {
+        off[k].assign(natoms, -1);
+        for (int B : dom[k]) {
+            if (acount[B] == 0) continue;
+            off[k][B] = fk[k];
+            byAtom[B].push_back({ k, fk[k] });
+            fk[k] += acount[B];
+        }
+        auto it = m_dom_cache.find(dom[k]);
+        if (it == m_dom_cache.end()) {
+            std::vector<int> fn;
+            for (int B : dom[k])
+                for (int j = 0; j < acount[B]; ++j) fn.push_back(afirst[B] + j);
+            Eigen::MatrixXd JF((Eigen::Index)fn.size(), (Eigen::Index)fn.size());
+            for (size_t a = 0; a < fn.size(); ++a)
+                for (size_t b = 0; b < fn.size(); ++b) JF(a, b) = m_Jn(fn[a], fn[b]);
+            Eigen::LLT<Eigen::MatrixXd> llt(JF);
+            if (llt.info() != Eigen::Success) return false;
+            it = m_dom_cache.emplace(dom[k], std::make_shared<Eigen::MatrixXd>(llt.matrixL())).first;
+            ++new_dom;
+        }
+        LF[k] = it->second;
+    }
+    m_loc_factor_ms += msSince(tf);
+    m_loc_new_domains += new_dom;
+    // 3. passes: 0 = g and Y_k, 1 = J
+    std::vector<Eigen::MatrixXd> Y(r);
+    for (int k = 0; k < r; ++k) Y[k].resize(n, fk[k]);
+    Eigen::VectorXd g = Eigen::VectorXd::Zero(N), c;
+    std::vector<double> Jp((size_t)np, 0.0);
+    Matrix Tb((Eigen::Index)m_batch_rows, np);
+    std::vector<double> Pw;
+    packContractionWeights(P, Pw);
+    long blocks = 0, skipped = 0;
+    for (int pass = 0; pass < 2; ++pass) {
+        ++m_bt_passes;
+        for (const auto& cb : m_aux_batches) {
+            const int row0 = d.ao.first[cb.first];
+            const int rows = (cb.second < naux_sh ? d.ao.first[cb.second] : N) - row0;
+            const auto ti = clk::now();
+            Tb.topRows(rows).setZero();
+            fillRows(nullptr, cb.first, cb.second, Tb.data(), np, 0, blocks, skipped);
+            for (int q = 0; q < rows; ++q) Tb.row(q) *= m_dn(row0 + q);
+            m_bt_int_ms += msSince(ti);
+            if (pass == 0) {
+                const auto ty = clk::now();
+#pragma omp parallel num_threads(threads)
+                {
+                    Eigen::MatrixXd Fu = Eigen::MatrixXd::Zero(n, n), Vb, Yb;
+#pragma omp for schedule(dynamic)
+                    for (int q = 0; q < rows; ++q) {
+                        const int Pi = row0 + q, A = m_auxfn_atom[Pi];
+                        const double* tq = Tb.data() + (size_t)q * np;
+                        double s = 0.0;
+                        for (Eigen::Index k = 0; k < np; ++k) s += tq[k] * Pw[k];
+                        g(Pi) = s;
+                        const auto& ks = byAtom[A];
+                        if (ks.empty()) continue;
+                        for (int m = 0; m < n; ++m)
+                            std::memcpy(Fu.data() + (size_t)m * n, tq + (size_t)m * (m + 1) / 2, sizeof(double) * (size_t)(m + 1));
+                        Vb.resize(n, (Eigen::Index)ks.size());
+                        for (size_t j = 0; j < ks.size(); ++j) Vb.col(j) = Lc.col(ks[j].first);
+                        Yb.noalias() = Fu.selfadjointView<Eigen::Upper>() * Vb;
+                        const int jP = Pi - afirst[A];
+                        for (size_t j = 0; j < ks.size(); ++j) Y[ks[j].first].col(ks[j].second + jP) = Yb.col(j);
+                    }
+                }
+                m_loc_y_ms += msSince(ty);
+            } else {
+                const auto tj = clk::now();
+                const Eigen::Index chunk = 1024, nchunks = (np + chunk - 1) / chunk;
+#pragma omp parallel for schedule(static) num_threads(threads)
+                for (Eigen::Index b = 0; b < nchunks; ++b) {
+                    const Eigen::Index c0 = b * chunk, w = std::min(chunk, np - c0);
+                    double* out = Jp.data() + c0;
+                    for (int q = 0; q < rows; ++q) {
+                        const double cq = c(row0 + q);
+                        const double* t = Tb.data() + (size_t)q * np + c0;
+                        for (Eigen::Index kk = 0; kk < w; ++kk) out[kk] += cq * t[kk];
+                    }
+                }
+                m_bt_j_ms += msSince(tj);
+            }
+        }
+        if (pass == 0) {
+            c = metricSolve(g);
+            // per column k: X_k = Y_k L_F^-T, K += X_k X_k^T
+            const auto ts = clk::now();
+            std::vector<Eigen::MatrixXd> Kt(threads, Eigen::MatrixXd());
+#pragma omp parallel num_threads(threads)
+            {
+#ifdef _OPENMP
+                const int tid = omp_get_thread_num();
+#else
+                const int tid = 0;
+#endif
+                Kt[tid] = Eigen::MatrixXd::Zero(n, n);
+#pragma omp for schedule(dynamic)
+                for (int k = 0; k < r; ++k) {
+                    if (fk[k] == 0) continue;
+                    LF[k]->transpose().triangularView<Eigen::Upper>().solveInPlace<Eigen::OnTheRight>(Y[k]);
+                    Kt[tid].selfadjointView<Eigen::Lower>().rankUpdate(Y[k], 1.0);
+                    Eigen::MatrixXd().swap(Y[k]);
+                }
+            }
+            Eigen::MatrixXd Ks = Eigen::MatrixXd::Zero(n, n);
+            for (int t = 0; t < threads; ++t)
+                if (Kt[t].size())
+                    for (int q = 0; q < n; ++q)
+                        for (int m = q; m < n; ++m) Ks(m, q) += Kt[t](m, q);
+            K.resize(n, n);
+            for (int q = 0; q < n; ++q)
+                for (int m = q; m < n; ++m) {
+                    K(m, q) = Ks(m, q);
+                    K(q, m) = Ks(m, q);
+                }
+            m_loc_solve_ms += msSince(ts);
+        }
+    }
+    J.resize(n, n);
+    unpackSymmetric(Jp.data(), n, J.data());
+    ++m_loc_builds;
+    m_loc_orbitals += r;
+    for (int k = 0; k < r; ++k) m_loc_aux_sum += fk[k];
+    return true;
 }
 
 // =================================================================================
@@ -1965,6 +2834,23 @@ void QMEngine::readRIConfig(const json& config)
         m_ri_metric_cutoff = config["ri_metric_cutoff"].get<double>();
     if (config.contains("ri_max_memory_mb") && config["ri_max_memory_mb"].is_number())
         m_ri_max_memory_mb = config["ri_max_memory_mb"].get<double>();
+    // Resource-saving RI-JK (Claude Generated, Oct 2026)
+    m_ri_storage = lowerStr(optString(config, "ri_storage", m_ri_storage));
+    m_gpu_ri_stream = lowerStr(optString(config, "gpu_ri_stream", m_gpu_ri_stream));
+    m_ri_mixed_precision = lowerStr(optString(config, "ri_mixed_precision", m_ri_mixed_precision));
+    if (m_ri_mixed_precision == "on") m_ri_mixed_precision = "true";
+    if (m_ri_mixed_precision == "off") m_ri_mixed_precision = "false";
+    if (m_ri_mixed_precision != "true" && m_ri_mixed_precision != "false" && m_ri_mixed_precision != "auto") {
+        CurcumaLogger::warn(fmt::format("QM: unknown -qm.ri_mixed_precision '{}' (use true|false|auto); using false", m_ri_mixed_precision));
+        m_ri_mixed_precision = "false";
+    }
+    auto num = [&](const char* key, double& v) {
+        if (config.contains(key) && config[key].is_number()) v = config[key].get<double>();
+    };
+    num("ri_batch_mb", m_ri_batch_mb);
+    num("gpu_ri_chunk_mb", m_gpu_ri_chunk_mb);
+    num("ri_fp32_switch", m_ri_fp32_switch);
+    num("ri_fit_radius", m_ri_fit_radius);
 }
 
 void QMEngine::resetRI()
@@ -1975,6 +2861,10 @@ void QMEngine::resetRI()
     m_gpu_ri_checked = false;
     m_ri_occ_factor.resize(0, 0);
     m_ri_occ_density.resize(0, 0);
+    m_ri_mp_stage = 0;
+    m_ri_mp_refresh = m_ri_mp_last_exact = false;
+    m_ri_mp_dJ.resize(0, 0);
+    m_ri_mp_dK.resize(0, 0);
 }
 
 // The orbital factor stored by runSCF if P is exactly the density it belongs to (bitwise; a damped or
@@ -1986,15 +2876,100 @@ const Eigen::MatrixXd* QMEngine::riOccFactor(const Matrix& P) const
     return &m_ri_occ_factor;
 }
 
+namespace {
+// Auxiliary shells of the molecule for an auxiliary basis file (geometry in Angstrom). Claude Generated (Oct 2026).
+std::vector<qmri::Shell> riAuxShells(const std::string& file, const std::vector<int>& atoms, const Matrix& geomAngstrom)
+{
+    const qmri::AuxBasisMap aux = qmri::parseTurbomoleBasis(file);
+    Matrix pos = Matrix::Zero((Eigen::Index)atoms.size(), 3);
+    for (int i = 0; i < (int)atoms.size(); ++i)
+        for (int k = 0; k < 3; ++k) pos(i, k) = CurcumaUnit::Length::angstrom_to_bohr(geomAngstrom(i, k));
+    return qmri::auxiliaryShells(aux, atoms, pos);
+}
+
+// Number of active auxiliary functions (spherical: 2L+1 for L >= 2).
+long riAuxCount(const std::vector<qmri::Shell>& sh, bool spherical)
+{
+    long N = 0;
+    for (const auto& s : sh) N += (spherical && s.L >= 2) ? 2 * s.L + 1 : (long)s.lmn.size();
+    return N;
+}
+
+// Batched RI-JK exchange on the device (-gpu, batched storage, Cholesky metric): the hook creates the solver on its
+// first call; any failure is a counted fallback "qm_ri" and the CPU takes over. Claude Generated (Oct 2026).
+void installDeviceExchange(const std::shared_ptr<qmri::RIJK>& ri, const std::string& backend, int device, double max_dev_mb, int threads)
+{
+    if (!ri || !(ri->batched() || ri->fp32()) || ri->metricCholesky().size() == 0 || ri->mode() != "jk") return;
+    auto solver = std::make_shared<std::shared_ptr<qmint::QMGpuRIYSolver>>();
+    auto dead = std::make_shared<bool>(false);
+    qmri::RIJK* raw = ri.get();
+    ri->setDeviceExchange([raw, solver, dead, backend, device, max_dev_mb, threads](const Matrix& Y, int rb, double sign, Eigen::MatrixXd& K) {
+        if (*dead) return false;
+        if (!*solver) {
+            std::string why;
+            const Eigen::MatrixXd& L = raw->metricCholesky();
+            auto s = gpu_plugin::createQmRIYSolver(backend, L.data(), (int)L.rows(), raw->n(), device, max_dev_mb, threads, why);
+            if (!s) {
+                *dead = true;
+                curcuma::reportGpuFallback("qm_ri", "device batched RI exchange not possible: " + why);
+                return false;
+            }
+            *solver = std::shared_ptr<qmint::QMGpuRIYSolver>(std::move(s));
+            if (CurcumaLogger::get_verbosity() >= 2) CurcumaLogger::info("QM: batched RI exchange (L^-1 Y, SYRK) on " + (*solver)->name());
+        }
+        std::vector<double> Kr((size_t)K.rows() * K.cols(), 0.0);
+        if (!(*solver)->exchange(Y.data(), rb, sign, Kr.data())) {
+            *dead = true;
+            curcuma::reportGpuFallback("qm_ri", "device batched RI exchange failed");
+            return false;
+        }
+        K += Eigen::Map<const Eigen::MatrixXd>(Kr.data(), K.rows(), K.cols());  // symmetric: row/column major alike
+        return true;
+    });
+}
+}  // namespace
+
 // Claude Generated (Oct 2026): two-electron part of the RI gradient (qmri::RIJK gradientDensities, threeIndexGradient[Device], metricGradient; derivation
 // in section 6 above); mode j adds the exact exchange gradient (same canonical-quartet kernel as the
 // exact path, exchange density only). Pc: cartesian density for the exact part.
-// On failure `info` holds the reason.
+// On failure `info` holds the reason. The gradient needs the stored FP64 tensor: after a batched or FP32 SCF a
+// separate stored setup is made for it (same aux basis and options; error if it does not fit, Oct 2026).
 bool QMEngine::riGradientTwoElectron(const Matrix& Pc, Matrix& g2, std::string& info) const
 {
     if (!ensureRI()) {
         info = "RI gradient: density fitting setup failed (-qm.ri " + m_ri_mode + ")";
         return false;
+    }
+    if (m_ri_fit_radius > 0.0 && m_ri_mode == "jk") {
+        info = "RI gradient not implemented for the local fit (-qm.ri_fit_radius > 0): the SCF energy is not the global-fit RI energy";
+        return false;
+    }
+    std::shared_ptr<qmri::RIJK> ri = m_ri;
+    std::string rebuilt;
+    if (!m_ri->storedFP64()) {
+        const auto tr = std::chrono::steady_clock::now();
+        std::string why;
+        try {
+            qmri::RIOptions opt;
+            opt.mode = m_ri_mode;
+            opt.metric = m_ri_metric;
+            opt.metric_cutoff = m_ri_metric_cutoff;
+            opt.screening = m_eri_screening;
+            opt.max_memory_mb = m_ri_max_memory_mb;
+            opt.spherical_aux = !m_cartesian_d;
+            opt.threads = m_threads;
+            opt.storage = "stored";
+            auto r = std::make_shared<qmri::RIJK>();
+            if (r->setup(m_gto_basis, m_Q.size() != 0 ? &m_Q : nullptr, riAuxShells(m_ri_file, m_atoms, m_geometry), opt, why)) ri = r;
+        } catch (const std::exception& e) {
+            why = e.what();
+        }
+        if (ri == m_ri) {
+            info = "RI gradient not possible: the SCF ran with ri_storage " + m_ri->storageUsed() +
+                   " and the gradient needs the stored FP64 tensor: " + why;
+            return false;
+        }
+        rebuilt = fmt::format(", stored FP64 tensor rebuilt for the gradient in {:.1f} ms", msGlue(tr));
     }
     const auto t0 = std::chrono::steady_clock::now();
     std::string why;
@@ -2002,7 +2977,7 @@ bool QMEngine::riGradientTwoElectron(const Matrix& Pc, Matrix& g2, std::string& 
     Matrix G;
     Eigen::MatrixXd M2;
     const Matrix* Q = m_Q.size() != 0 ? &m_Q : nullptr;
-    if (!m_ri->gradientDensities(m_density, c, G, M2, why)) {
+    if (!ri->gradientDensities(m_density, c, G, M2, why)) {
         info = "RI gradient not possible: " + why;
         return false;
     }
@@ -2014,25 +2989,25 @@ bool QMEngine::riGradientTwoElectron(const Matrix& Pc, Matrix& g2, std::string& 
     const std::string be = gpuGradBackend(m_gpu_ri_grad, "gpu_ri_grad", "qm_ri_grad", m_gpu_ri_grad_failed);
     if (!be.empty()) {
         std::string dwhy;
-        on_device = m_ri->threeIndexGradientDevice(m_gto_basis, Q, c, m_density, G, m_atomcount, be, m_gpu_device, g3, dev_info, dwhy);
+        on_device = ri->threeIndexGradientDevice(m_gto_basis, Q, c, m_density, G, m_atomcount, be, m_gpu_device, g3, dev_info, dwhy);
         if (!on_device) {
             m_gpu_ri_grad_failed = true;
             curcuma::reportGpuFallback("qm_ri_grad", "device RI gradient not possible: " + dwhy);
         }
     }
-    if (!on_device) g3 = m_ri->threeIndexGradient(m_gto_basis, Q, c, m_density, G, m_atomcount);
+    if (!on_device) g3 = ri->threeIndexGradient(m_gto_basis, Q, c, m_density, G, m_atomcount);
     const double t_3c = msGlue(t1);
     if (on_device) {
         if (const char* chk = std::getenv("CURCUMA_QM_GPU_RI_GRAD_CHECK"); chk && chk[0] == '1') {
             const auto c0 = std::chrono::steady_clock::now();
-            const Matrix gc = m_ri->threeIndexGradient(m_gto_basis, Q, c, m_density, G, m_atomcount);
+            const Matrix gc = ri->threeIndexGradient(m_gto_basis, Q, c, m_density, G, m_atomcount);
             CurcumaLogger::result(fmt::format("QM GPU RI grad check: natoms={} max|dev-cpu|={:.3e} max|cpu|={:.3e} dev_ms={:.1f} cpu_ms={:.1f}",
                                               m_atomcount, (g3 - gc).cwiseAbs().maxCoeff(), gc.cwiseAbs().maxCoeff(), t_3c, msGlue(c0)));
         }
     }
     Matrix().swap(G);
     const auto t2 = std::chrono::steady_clock::now();
-    Matrix g = g3 - m_ri->metricGradient(M2, m_atomcount);
+    Matrix g = g3 - ri->metricGradient(M2, m_atomcount);
     const double t_2c = msGlue(t2), t_dens = std::chrono::duration<double, std::milli>(t1 - t0).count();
     const double t_ri = msGlue(t0);
     double t_k = 0.0;
@@ -2042,26 +3017,82 @@ bool QMEngine::riGradientTwoElectron(const Matrix& Pc, Matrix& g2, std::string& 
         t_k = msGlue(tk);
     }
     g2 = g;
-    info = fmt::format("RI-{}: densities {:.1f} ms, 3-index {:.1f} ms {}, metric {:.1f} ms (total {:.1f} ms){}",
+    info = fmt::format("RI-{}: densities {:.1f} ms, 3-index {:.1f} ms {}, metric {:.1f} ms (total {:.1f} ms){}{}",
                        m_ri_mode == "j" ? "J" : "JK", t_dens, t_3c, on_device ? "(" + dev_info + ")" : std::string("(CPU)"), t_2c, t_ri,
-                       m_ri_mode == "j" ? fmt::format(", exact exchange {:.1f} ms", t_k) : std::string());
+                       m_ri_mode == "j" ? fmt::format(", exact exchange {:.1f} ms", t_k) : std::string(), rebuilt);
     return true;
 }
 
 // One line per SCF at verbosity 2: number and time of the RI J/K builds (diagnostic).
 void QMEngine::riReport() const
 {
-    if (m_ri && CurcumaLogger::get_verbosity() >= 2 && m_ri_builds > 0)
-        CurcumaLogger::info(fmt::format("QM: RI-{} J/K builds: {} in {:.1f} ms ({:.2f} ms each; density factorisation {:.1f} ms; {})",
+    if (m_ri && CurcumaLogger::get_verbosity() >= 2 && m_ri_builds > 0) {
+        std::string dev = "CPU";
+        if (m_gpu_ri_dev) {
+            dev = "contractions on " + m_gpu_ri_dev->name();
+            if (auto* lm = dynamic_cast<qmint::QMGpuRILowMem*>(m_gpu_ri_dev.get())) dev += " (" + lm->stats() + ")";
+        }
+        CurcumaLogger::info(fmt::format("QM: RI-{} J/K builds: {} in {:.1f} ms ({:.2f} ms each; density factorisation {:.1f} ms; {}; storage {})",
                                         m_ri_mode == "j" ? "J" : "JK", m_ri_builds, m_ri_build_ms, m_ri_build_ms / m_ri_builds,
-                                        m_ri_factor_ms + m_ri->takeFactorMs(),
-                                        m_gpu_ri_dev ? "contractions on " + m_gpu_ri_dev->name() : std::string("CPU")));
+                                        m_ri_factor_ms + m_ri->takeFactorMs(), dev, m_ri->storageUsed()));
+        if (m_ri_mp_exact_builds > 0)
+            CurcumaLogger::info(fmt::format("QM: RI mixed precision: {} iterations on the FP32 tensor, {} exact FP64 builds (corrections)", m_ri_fp32_builds,
+                                            m_ri_mp_exact_builds));
+        const std::string bs = m_ri->takeBuildStats();
+        if (!bs.empty()) CurcumaLogger::info("QM: RI " + bs);
+    }
     m_ri_build_ms = 0.0;
     m_ri_factor_ms = 0.0;
     m_ri_builds = 0;
 }
 
 bool QMEngine::riActive() const { return m_ri_mode == "j" || m_ri_mode == "jk"; }
+
+// Mixed precision (Claude Generated, Oct 2026). Stage 1: FP32 tensor, FP32 GEMM/SYRK (fast, noisy: ||dP|| stalls near
+// 1e-5 for benzene). Stage 2: the same FP32 tensor with FP64 arithmetic (a smooth map) plus the correction
+// dJ = J_exact(P_ref) - J_32(P_ref), dK likewise, from one exact batched FP64 build at P_ref. The correction depends on
+// P only through the rounding of B (relative 6e-8), so F_32(P) + dF(P_ref) differs from F_exact(P) by ~6e-8 |F(P - P_ref)|.
+// Convergence is accepted only on an exact build: when stage 2 reaches ||dP|| < scf_threshold the next build is exact
+// (refreshing the correction), and the final build of finishConvergedSCF is exact as well. runSCF never accepts an
+// iteration whose Fock matrix did not come from an exact FP64 build.
+bool QMEngine::riLowPrecision() const { return m_ri && m_ri_mp_stage > 0 && !m_ri_mp_last_exact; }
+
+void QMEngine::riRequestExactBuild() const
+{
+    if (m_ri_mp_stage > 0) m_ri_mp_refresh = true;
+}
+
+bool QMEngine::riEndLowPrecision(double delta_P) const
+{
+    if (!m_ri || m_ri_mp_stage == 0) return false;
+    ++m_ri_fp32_builds;
+    if (m_ri_fp32_best <= 0.0 || delta_P < 0.5 * m_ri_fp32_best) {
+        m_ri_fp32_best = delta_P;
+        m_ri_fp32_stall = 0;
+    } else
+        ++m_ri_fp32_stall;
+    const bool stalled = m_ri_fp32_stall >= 3;
+    if (m_ri_mp_stage == 1) {
+        if (!(delta_P < m_ri_fp32_switch || delta_P < m_scf_threshold || stalled)) return false;
+        m_ri_mp_stage = 2;
+        m_ri_mp_refresh = true;
+        m_ri->setFP32Arithmetic(false);
+        if (auto* lm = dynamic_cast<qmint::QMGpuRILowMem*>(m_gpu_ri_dev.get())) lm->setFP64Arithmetic(true);
+        if (CurcumaLogger::get_verbosity() >= 2)
+            CurcumaLogger::info(fmt::format("QM: RI mixed precision: ||dP|| = {:.3e} after {} FP32 iterations{}; FP64 arithmetic on the FP32 tensor "
+                                            "plus exact (batched) corrections from now on",
+                                            delta_P, m_ri_fp32_builds, stalled ? " (stalled)" : ""));
+        m_ri_fp32_best = 0.0;
+        m_ri_fp32_stall = 0;
+        return true;
+    }
+    // stage 2: verify a converged corrected map with an exact build (and refresh after a stall)
+    if ((delta_P < m_scf_threshold && !m_ri_mp_last_exact) || stalled) {
+        m_ri_mp_refresh = true;
+        m_ri_fp32_stall = 0;
+    }
+    return false;
+}
 
 bool QMEngine::ensureRI() const
 {
@@ -2071,11 +3102,7 @@ bool QMEngine::ensureRI() const
     std::string why;
     try {
         const std::string file = qmri::resolveAuxBasisFile(m_ri_aux, m_ri_mode);
-        const qmri::AuxBasisMap aux = qmri::parseTurbomoleBasis(file);
-        Matrix pos = Matrix::Zero(m_atomcount, 3);
-        for (int i = 0; i < m_atomcount; ++i)
-            for (int k = 0; k < 3; ++k) pos(i, k) = CurcumaUnit::Length::angstrom_to_bohr(m_geometry(i, k));
-        const std::vector<qmri::Shell> sh = qmri::auxiliaryShells(aux, m_atoms, pos);
+        const std::vector<qmri::Shell> sh = riAuxShells(file, m_atoms, m_geometry);
         qmri::RIOptions opt;
         opt.mode = m_ri_mode;
         opt.metric = m_ri_metric;
@@ -2084,6 +3111,22 @@ bool QMEngine::ensureRI() const
         opt.max_memory_mb = m_ri_max_memory_mb;
         opt.spherical_aux = !m_cartesian_d;
         opt.threads = m_threads;
+        opt.storage = m_ri_storage;
+        opt.batch_mb = m_ri_batch_mb;
+        opt.fit_radius = m_ri_fit_radius;
+        if (m_ri_fit_radius > 0.0 && m_ri_mode == "jk" && m_ri_mixed_precision == "true")
+            CurcumaLogger::warn("QM: -qm.ri_fit_radius > 0 runs batched FP64 builds; -qm.ri_mixed_precision is ignored");
+        // -qm.ri_mixed_precision (Claude Generated, Oct 2026): true = FP32 tensor; auto = FP32 only when the FP64
+        // tensor does not fit (host limit, or -qm.gpu_max_memory_mb with -gpu) but the FP32 one does.
+        bool fp32 = m_ri_mode == "jk" && m_ri_mixed_precision == "true" && !(m_ri_fit_radius > 0.0);
+        if (m_ri_mode == "jk" && m_ri_mixed_precision == "auto" && !(m_ri_fit_radius > 0.0)) {
+            const double np = (double)m_nbf * (m_nbf + 1) / 2.0, N = (double)riAuxCount(sh, !m_cartesian_d);
+            const double mb64 = N * np * 8.0 / 1.0e6, mb32 = mb64 / 2.0;
+            const bool dev_cap = gpuRequested() && m_gpu_max_memory_mb > 0.0;
+            fp32 = (mb64 > m_ri_max_memory_mb && mb32 <= m_ri_max_memory_mb) ||
+                   (dev_cap && mb64 > m_gpu_max_memory_mb && mb32 <= m_gpu_max_memory_mb && mb32 <= m_ri_max_memory_mb);
+        }
+        opt.fp32 = fp32;
         // -qm.gpu_ri_fit (Claude Generated, Oct 2026): the B = L^-1 T solve on the device when the RI
         // contractions will run there too. Failure before any write: host solve; after a partial write:
         // setup repeated without the device. Both counted as qm_ri_fit.
@@ -2129,6 +3172,19 @@ bool QMEngine::ensureRI() const
         m_ri_failed = true;
         CurcumaLogger::error("QM: density fitting (-qm.ri " + m_ri_mode + ") not possible: " + why);
         return false;
+    }
+    m_ri_mp_stage = m_ri->fp32() ? 1 : 0;
+    m_ri_mp_refresh = m_ri_mp_last_exact = false;
+    m_ri_mp_exact_builds = 0;
+    m_ri_fp32_best = 0.0;
+    m_ri_fp32_stall = 0;
+    m_ri_fp32_builds = 0;
+    if ((m_ri->batched() || m_ri->fp32()) && gpuRequested() && m_gpu_ri != "off" && m_gpu_ri != "false" && !m_gpu_ri_failed) {
+        const std::string backend = (m_gpu == "auto") ? gpu_plugin::firstAvailable() : m_gpu;
+        if (backend == "none" || !gpu_plugin::available(backend))
+            curcuma::reportGpuFallback("qm_ri", "no GPU plugin for -gpu " + m_gpu);
+        else
+            installDeviceExchange(m_ri, backend, m_gpu_device, m_gpu_max_memory_mb, m_threads);
     }
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info(fmt::format("QM: RI-{} with {} ({:.1f} ms total)", m_ri_mode == "j" ? "J" : "JK", m_ri_file, msGlue(t0)));
@@ -2179,17 +3235,40 @@ void QMEngine::buildJK(const Matrix& P, Matrix& J, Matrix& K) const
         if (!gpuRIBuild(P, J, nullptr)) J = m_ri->coulomb(P);
     } else {
         const Eigen::MatrixXd* Vocc = riOccFactor(P);
-        if (!gpuRIBuild(P, J, &K, Vocc)) m_ri->build(P, J, &K, Vocc);
+        m_ri_mp_last_exact = false;
+        if (m_ri_mp_stage == 2 && m_ri_mp_refresh) {
+            // mixed precision: exact FP64 build (batched) and the new correction exact - FP32-tensor build at this P
+            Matrix J32, K32;
+            if (!gpuRIBuild(P, J32, &K32, Vocc)) m_ri->build(P, J32, &K32, Vocc);
+            m_ri->buildExact(P, J, K, Vocc);
+            m_ri_mp_dJ = J - J32;
+            m_ri_mp_dK = K - K32;
+            m_ri_mp_refresh = false;
+            m_ri_mp_last_exact = true;
+            ++m_ri_mp_exact_builds;
+            if (CurcumaLogger::get_verbosity() >= 3)
+                CurcumaLogger::info(fmt::format("QM: RI mixed precision: exact build {}, max|dJ| {:.3e}, max|dK| {:.3e}", m_ri_mp_exact_builds,
+                                                m_ri_mp_dJ.cwiseAbs().maxCoeff(), m_ri_mp_dK.cwiseAbs().maxCoeff()));
+        } else {
+            if (!gpuRIBuild(P, J, &K, Vocc)) m_ri->build(P, J, &K, Vocc);
+            if (m_ri_mp_stage == 2 && m_ri_mp_dJ.size()) {
+                J += m_ri_mp_dJ;
+                K += m_ri_mp_dK;
+            }
+        }
     }
     m_ri_build_ms += msGlue(t0);
     ++m_ri_builds;
 }
 
 // -qm.gpu_ri auto|on|off: the RI contractions (J from the tensor, K as batched GEMM + SYRK) on the device.
-// Any device error: counted fallback "qm_ri", CPU from then on.
+// Any device error: counted fallback "qm_ri", CPU from then on. Since Oct 2026 the tensor may also be FP32
+// (ri_mixed_precision) or streamed from host memory (-qm.gpu_ri_stream, qm_gpu_ri_lowmem.cu); batched storage
+// has no tensor, there the device only takes the exchange solve (installDeviceExchange).
 bool QMEngine::gpuRIBuild(const Matrix& P, Matrix& J, Matrix* K, const Eigen::MatrixXd* Vocc) const
 {
     if (m_gpu_ri_failed || m_gpu_ri == "off" || m_gpu_ri == "false" || !gpuRequested()) return false;
+    if (m_ri->batched()) return false;
     if (m_gpu_ri != "auto" && m_gpu_ri != "on" && m_gpu_ri != "true") {
         static bool warned = false;
         if (!warned) {
@@ -2208,20 +3287,76 @@ bool QMEngine::gpuRIBuild(const Matrix& P, Matrix& J, Matrix* K, const Eigen::Ma
         if (backend == "none" || !gpu_plugin::available(backend)) return fail("no GPU plugin for -gpu " + m_gpu);
         std::string why;
         const auto t0 = std::chrono::steady_clock::now();
-        const Matrix& T = m_ri->tensor();
-        m_gpu_ri_dev = gpu_plugin::createQmRI(backend, T.data(), (int)T.rows(), m_ri->n(), m_gpu_device, why);
+        const int stream = (m_gpu_ri_stream == "on" || m_gpu_ri_stream == "true") ? 1
+            : (m_gpu_ri_stream == "off" || m_gpu_ri_stream == "false")            ? 2
+                                                                                    : 0;
+        const bool fp32 = m_ri->fp32();
+        const bool capped = m_gpu_max_memory_mb > 0.0 && m_ri->tensorMB() > m_gpu_max_memory_mb;
+        const int rows = fp32 ? m_ri->nfit() : (int)m_ri->tensor().rows();
+        const void* T = fp32 ? (const void*)m_ri->tensor32().data() : (const void*)m_ri->tensor().data();
+        if (fp32 || stream == 1 || (capped && stream == 0)) {
+            m_gpu_ri_dev = gpu_plugin::createQmRILowMem(backend, T, fp32, rows, m_ri->n(), m_gpu_device, stream, m_gpu_max_memory_mb,
+                                                        m_gpu_ri_chunk_mb, m_threads, why);
+        } else if (capped && stream == 2) {
+            why = fmt::format("RI tensor {:.1f} MB above -qm.gpu_max_memory_mb {:g} and -qm.gpu_ri_stream off", m_ri->tensorMB(),
+                              m_gpu_max_memory_mb);
+        } else {
+            m_gpu_ri_dev = gpu_plugin::createQmRI(backend, m_ri->tensor().data(), rows, m_ri->n(), m_gpu_device, why);
+            if (!m_gpu_ri_dev && stream == 0 && why.find("does not fit") != std::string::npos) {
+                std::string why2;
+                m_gpu_ri_dev = gpu_plugin::createQmRILowMem(backend, T, false, rows, m_ri->n(), m_gpu_device, 1, m_gpu_max_memory_mb,
+                                                            m_gpu_ri_chunk_mb, m_threads, why2);
+                if (!m_gpu_ri_dev) why += "; streaming not possible: " + why2;
+            }
+        }
         if (!m_gpu_ri_dev) return fail("device RI setup not possible: " + why);
-        if (CurcumaLogger::get_verbosity() >= 2)
-            CurcumaLogger::info(fmt::format("QM: RI contractions on {} ({:.1f} MB tensor uploaded in {:.1f} ms)", m_gpu_ri_dev->name(),
-                                            m_ri->tensorMB(), msGlue(t0)));
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            auto* lm = dynamic_cast<qmint::QMGpuRILowMem*>(m_gpu_ri_dev.get());
+            CurcumaLogger::info(fmt::format("QM: RI contractions on {} ({:.1f} MB {}tensor {} in {:.1f} ms)", m_gpu_ri_dev->name(),
+                                            m_ri->tensorMB(), fp32 ? "FP32 " : "",
+                                            lm && lm->streamed() ? "kept in pinned host memory, streamed per build" : "uploaded",
+                                            msGlue(t0)));
+        }
     }
     const int n = m_ri->n();
+    auto* lowmem = dynamic_cast<qmint::QMGpuRILowMem*>(m_gpu_ri_dev.get());
+    if (lowmem && K) {
+        // one pass over the (streamed or FP32) tensor for g, J and K (mode jk: c = g)
+        Eigen::MatrixXd Vown;
+        const Eigen::MatrixXd* Vp = Vocc;
+        int npos = Vocc ? (int)Vocc->cols() : 0;
+        if (!Vp) {
+            const auto tf = std::chrono::steady_clock::now();
+            qmri::RIJK::factorDensity(P, Vown, npos);
+            m_ri_factor_ms += msGlue(tf);
+            Vp = &Vown;
+        }
+        std::vector<double> Pw, Jp((size_t)m_ri->npair()), g((size_t)m_ri->nfit());
+        qmri::packContractionWeights(P, Pw);
+        Matrix Kd = Matrix::Zero(n, n);
+        if (!lowmem->buildJK(Pw.data(), Vp->data(), (int)Vp->cols(), npos, g.data(), Jp.data(), Kd.data()))
+            return fail("device streamed/FP32 RI J/K build failed");
+        J = Matrix::Zero(n, n);
+        qmri::unpackSymmetric(Jp.data(), n, J.data());
+        *K = Kd;
+        if (!m_gpu_ri_checked) {
+            m_gpu_ri_checked = true;
+            if (const char* chk = std::getenv("CURCUMA_QM_GPU_RI_CHECK"); chk && chk[0] == '1') {
+                Matrix Jc, Kc;
+                m_ri->build(P, Jc, &Kc);
+                CurcumaLogger::result(fmt::format("QM GPU RI check: n={} naux={} max|dJ|={:.3e} max|dK|={:.3e} max|J|={:.3e} max|K|={:.3e}", n,
+                                                  m_ri->nfit(), (J - Jc).cwiseAbs().maxCoeff(), (Kd - Kc).cwiseAbs().maxCoeff(),
+                                                  Jc.cwiseAbs().maxCoeff(), Kc.cwiseAbs().maxCoeff()));
+            }
+        }
+        return true;
+    }
     J = Matrix::Zero(n, n);
     // Coulomb on the packed tensor: g = T . w (w = packed contraction weights of P) on the device; mode j needs
     // c = J^-1 g on the host (N^2), then J_p = T^T c, unpacked on the host
     std::vector<double> Pw, Jp((size_t)m_ri->npair());
     qmri::packContractionWeights(P, Pw);
-    std::vector<double> g((size_t)m_ri->tensor().rows());  // mode j: naux rows (see RIJK::coulomb)
+    std::vector<double> g((size_t)(m_ri->fp32() ? m_ri->nfit() : m_ri->tensor().rows()));  // mode j: naux rows (see RIJK::coulomb)
     if (!m_gpu_ri_dev->contract(Pw.data(), g.data())) return fail("device g = T w(P) failed");
     Eigen::VectorXd c = m_ri->fitCoefficients(Eigen::Map<const Eigen::VectorXd>(g.data(), (Eigen::Index)g.size()));
     if (!m_gpu_ri_dev->coulomb(c.data(), Jp.data())) return fail("device J = T^T c failed");

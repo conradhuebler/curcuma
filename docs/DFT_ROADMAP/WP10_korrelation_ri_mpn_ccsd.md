@@ -32,7 +32,8 @@ Metrik, Fit, Parser, Engine-Anbindung), `cuda/qm_gpu_ri.cu` + `qm_gpu_ri_backend
 - **Schalter** (Parameter-Registry, Modul `qm`): `-qm.ri off|j|jk` (Standard off; der exakte Pfad bleibt die Referenz
   aller bestehenden Tests), `-qm.ri_aux auto|def2/J|def2/JK|<Datei>` (auto: j -> def2-universal-JFIT, jk ->
   def2-universal-JKFIT), `-qm.ri_metric cholesky|eigen`, `-qm.ri_metric_cutoff` (1e-10), `-qm.ri_max_memory_mb`
-  (16000), `-qm.gpu_ri auto|on|off`, `-qm.gpu_ri_fit off|on` (Metrik-Loesung auf dem Device, Abschnitt "Skalierung RI-JK").
+  (16000), `-qm.gpu_ri auto|on|off`, `-qm.gpu_ri_fit off|on` (Metrik-Loesung auf dem Device, Abschnitt "Skalierung RI-JK");
+  `-qm.ri_storage`, `-qm.gpu_ri_stream`, `-qm.ri_mixed_precision`, `-qm.ri_fit_radius` (Abschnitt "RI-JK ressourcensparend").
 - **Verfahren:** RI-J: `c = J^-1 g`, `g_P = (P|ls) D_ls`, `J_mn = (mn|P) c_P`; Austausch exakt (gespeicherter Tensor
   oder integral-direkt wie ohne RI, entspricht ORCA `RIJONX`). RI-JK (Weigend 2002): `B = L^-1 (P|mn)` mit
   `J = L L^T`, `K_mn = sum_Q (B^Q D B^Q)_mn` ueber `D = V S V^T` (Eigenvektoren von D, mit sqrt|lambda| skaliert),
@@ -58,8 +59,8 @@ Metrik, Fit, Parser, Engine-Anbindung), `cuda/qm_gpu_ri.cu` + `qm_gpu_ri_backend
   **def2-SVP/C (RI-C) fehlt**: RI-MP2 benutzt deshalb def2-universal-JKFIT (Standard) oder -JFIT als
   Korrelations-Hilfsbasis (Betreiberentscheidung Okt 2026; Abschnitt RI-MP2 unten).
 - **Nicht implementiert:** RI-C mit def2-SVP/C, hf-3c mit RI (ignoriert mit Warnung: HF-3c ist mit exakten Integralen in MINIX
-  definiert, `qm_ri_hf3c_ignored`), offene Schalen, Elemente ab Na, integral-direktes RI, lokales Fitten,
-  device-residenter SCF-Loop mit RI (RI laeuft im Host-Loop).
+  definiert, `qm_ri_hf3c_ignored`), offene Schalen, Elemente ab Na, device-residenter SCF-Loop mit RI (RI laeuft im Host-Loop). Integral-direktes RI
+  (batched) und lokaler Austausch-Fit seit Okt 2026, Abschnitt "RI-JK ressourcensparend".
 
 **Validierung (alle Zahlen gemessen, HF/def2-SVP, `-qm.scf_threshold 1e-10`):**
 
@@ -247,6 +248,139 @@ C40H82 = 1 Lauf; "vorher" = Binary von Commit 777d9708; GPU mit `-gpu cuda -qm.g
 - **Nicht getestet:** keine Messung von RI-Gradient/RI-MP2-Zeiten, `-qm.ri_metric
   eigen` nur ueber `ctest -L qm_ri`, ROCm/Vulkan (keine Implementierung), andere GPUs/CPUs, Device-Speichergrenze
   nicht ausgereizt (kein System zwischen n = 970 und ~1190 gerechnet).
+
+### RI-JK ressourcensparend (Okt 2026)
+
+**🤖 AI-generated, ⚙️ machine-tested; menschlicher Produktionstest steht aus.** Code: `qm_ri.cpp` Abschnitte 4a
+(batched, FP32), 4a' (lokaler Fit), 5 (Engine-Anbindung), `cuda/qm_gpu_ri_lowmem.cu` + `qm_gpu_ri_lowmem_backend.h`
+(Streaming, FP32 auf dem Device, batched Austausch auf dem Device), `qm_scf.cpp` (Konvergenztest bei gemischter
+Genauigkeit). Tests `test_cases/qm_ri/` (`qm_ri_batched_*`, `qm_ri_auto_batched_*`, `qm_ri_mixed_*`, `qm_ri_local_*`,
+`qm_ri_grad_batched_*`, `qm_gpu_ri_stream_*`, `qm_gpu_ri_mixed_*`, `qm_gpu_ri_batched_*`).
+
+**Entwurf (vor der Umsetzung festgelegt), was exakt ist und was nicht:**
+- B = L^-1 T mit vollem unteren Cholesky-Faktor L: jede Zeile von B haengt von allen Zeilen von T ab. Eine
+  Vorwaertssubstitution ueber Hilfsfunktions-Batches braucht alle frueheren B-Zeilen; **reines Batching von B gibt
+  keinen O(Batch)-Speicher**. Verworfen.
+- Exakt und ohne B: **J** aus g_P = T_P . w(P), c = J^-1 g, J_mn = sum_P c_P T_P,mn (zwei Durchlaeufe ueber neu
+  gerechnete T-Batches). **K** ueber halbtransformierte Integrale: Y^P = T^P V (V = sqrt(2) C_occ bzw. Dichtefaktor),
+  X = L^-1 Y auf dem Hilfsindex, K = sum_Q X^Q X^Q^T. Dieselbe Groesse wie sum_Q (B^Q V)(B^Q V)^T, nur andere
+  Summationsreihenfolge. Speicher naux n r statt naux n(n+1)/2 (Faktor ~n/(2 n_occ): Heptacen 2.6, C40H82 3.0); die
+  Orbitalspalten sind unabhaengig, also teilt der Modus Y in Orbital-Batches auf, wenn es nicht unter das Limit passt
+  (max(2, Batches) Integral-Durchlaeufe je Aufbau). Kosten: 2 Integral-Durchlaeufe + Y + Dreiecksloesung
+  (naux^2 n r) je Aufbau.
+
+**Schalter** (Modul `qm`, alle mit Hilfetext in der Registry):
+- `-qm.ri_storage stored|batched|auto` (Standard auto): stored wie bisher; auto nimmt stored, wenn der Tensor unter
+  `-qm.ri_max_memory_mb` passt (dann bitgleich zum bisherigen Verhalten), sonst batched statt des bisherigen Abbruchs.
+  `-qm.ri_batch_mb` (0 = min(256 MB, Limit/8)) Groesse eines Zeilen-Batches.
+- `-qm.gpu_ri_stream auto|on|off` (Standard auto), `-qm.gpu_ri_chunk_mb`: passt der Tensor nicht auf die Karte (oder
+  `-qm.gpu_max_memory_mb`), bleibt er im Host-RAM (cudaHostRegister) und wird je Aufbau in Zeilen-Chunks gestreamt
+  (ein Kopier- und ein Rechen-Stream, zwei Puffer, Ereignisse ordnen die Wiederverwendung); mode jk in EINEM
+  Durchlauf (g, J, K je Chunk). Vorher fiel ein zu grosser Tensor gezaehlt auf die CPU.
+- `-qm.ri_mixed_precision true|false|auto` (Standard false), `-qm.ri_fp32_switch` (1e-3): Semantik wie GFN2
+  `-scf_mixed_precision`. B als FP32 (Setup spaltenweise, kein FP64-Spitzenwert). Stufe 1: FP32-GEMM/SYRK (CPU Eigen
+  float, Device SGEMM/SSYRK), Teilsummen je Batch in FP64 addiert, g und J in FP64. Stufe 2 (ab dP < Schalter oder
+  drei Iterationen ohne Halbierung): derselbe FP32-Tensor mit FP64-Arithmetik plus Korrektur dJ/dK = exakt -
+  FP32-Tensor aus einem exakten batched FP64-Aufbau. Konvergenz wird nur auf einem exakten Aufbau akzeptiert (erreicht
+  die korrigierte SCF dP < Schwelle, ist der naechste Aufbau exakt), der Schlussaufbau ist exakt. auto = FP32 nur,
+  wenn der FP64-Tensor nicht ins Limit passt (Host, oder `-qm.gpu_max_memory_mb`), der FP32-Tensor samt Puffern aber
+  schon.
+- `-qm.ri_fit_radius <Bohr>` (0 = aus): lokaler Austausch-Fit, **eine Naeherung** (unten).
+
+**Warum Stufe 2 und nicht sofort exakt** (gemessen, Benzol): FP32-Arithmetik hat einen Rauschboden bei
+||dP|| ~ 2-4e-5; der Rundungsfehler des FP32-Tensors verschiebt den Fixpunkt um ~1e-6 Eh und die Dichte um ~1e-4
+(Frobenius). Direkt auf exakte batched Aufbauten zu wechseln brauchte 12 teure Aufbauten (Benzol); mit der Korrektur
+sind es 3 (Wechsel, Pruefung bei Konvergenz, Schlussaufbau). Die Korrektur haengt von P nur ueber die Rundung von B ab
+(relativ 6e-8). DIIS-Eintraege aus Stufe 1 werden beim Wechsel verworfen (mit ihnen 6 Iterationen mehr).
+
+**Energien** (`-qm.scf_threshold` Standard, E_elec auf 10 Stellen, Einzelmessungen):
+- stored (Standard) gegen das Binary vom Ausgangscommit d38a9daa (gleicher Compiler, gleiche MKL): alle "SCF iter"-
+  Zeilen von Benzol, Naphthalin, Anthracen, Pentacen, C20H42, Heptacen identisch (md5), CPU und GPU; Rohtensor
+  `CURCUMA_QM_RI_DUMP` (H2O) md5-gleich.
+- batched, gemischt (CPU und GPU, resident und gestreamt), gestreamt FP64: E_elec gleich stored auf 10 Stellen fuer alle
+  sechs Systeme; Ausnahme C20H42 auf der GPU 1e-10 (die bekannte GPU/CPU-Differenz). ctest bei
+  `-qm.scf_threshold 1e-10`: batched (auch geteilt in viele Batches, eigen-Metrik, RI-J), gemischt, lokal mit
+  R = 1e6: |dE| = 0 auf 10 Stellen gegen stored, <= 1e-10 gegen PySCF.
+- RI-Gradient nach batched SCF (eigener gespeicherter Tensor): Benzol 2.6e-11 Eh/Bohr gegen PySCF.
+
+**Zeiten und Speicher, mittelgrosse Systeme** (s Wand / ms je J/K-Aufbau / max RSS MB, je eine Messung, 16 Threads,
+Core Ultra 9 285K, RTX 5090, Standard-SCF-Schwelle, `-qm.ri jk`; Iterationen in Klammern, wenn sie von stored
+abweichen; GPU mit `-gpu cuda -qm.gpu_ri true -qm.gpu_scf true`):
+
+| System (n, naux) | stored CPU | batched CPU | gemischt CPU | stored GPU | gestreamt GPU (`on`) | gemischt GPU | batched GPU |
+|---|---|---|---|---|---|---|---|
+| Benzol (114, 558) | 0.11 / 1.6 / 149 | 0.49 / 38 / 200 | 0.23 / 9.4 / 183 (13) | 0.46 / 16 | 0.56 / 17 | 0.58 / 22 (13) | 0.82 / 51 |
+| Naphthalin (180, 894) | 0.31 / 6.9 / 252 | 2.3 / 155 / 347 | 0.79 / 33 / 356 (16) | 0.67 / 19 | 0.79 / 22 | 1.15 / 41 (17) | 2.7 / 171 |
+| Anthracen (246, 1230) | 0.83 / 22 / 461 | 6.3 / 378 / 635 | 1.9 / 79 / 677 (17) | 1.11 / 29 | 1.29 / 34 | 2.2 / 82 (17) | 6.7 / 391 |
+| Pentacen (378, 1902) | 3.6 / 126 / 1429 | 22.0 / 1257 / 1281 | 7.5 / 289 / 1479 (19) | 3.5 / 106 | 3.7 / 113 | 6.4 / 219 (20) | 22.4 / 1269 |
+| C20H42 (490, 2256) | 6.8 / 299 / 2515 | 28.9 / 1987 / 2098 | 12.0 / 598 / 2356 (14) | 5.2 / 176 | 5.4 / 177 | 9.8 / 422 (15) | 27.4 / 1870 |
+| Heptacen (510, 2574) | 11.2 / 415 / 3020 | 55.6 / 3007 / 2421 | 20.4 / 729 / 2963 (21) | 8.2 / 244 | 8.5 / 247 | 14.5 / 463 (21) | 51.8 / 2786 |
+
+- batched: 3-index-Integrale sind der groesste Posten (Heptacen 2.0 von 3.0 s je Aufbau, zwei Durchlaeufe; der
+  Integralkern ist die lesbare McMurchie-Davidson-Form, nicht die getunte des exakten Pfads). Unter dem 16-GB-Limit
+  passt Y hier in einen Orbital-Batch, deshalb spart batched bei diesen Groessen nur 0-20 % RSS; der Gewinn ist, dass
+  es ueberhaupt unter jedem Limit laeuft (Y teilt sich auf).
+- gemischt CPU: die FP32-Tensor-Aufbaeute kosten im Mittel 320 ms (Heptacen, beide Stufen) gegen 415 ms FP64, C60H122
+  17 s gegen 24.7 s (Faktor 1.3-1.45, nicht 2; Ursache nicht untersucht, ein Teil sind die Kopien der gepackten Zeilen und die FP64-Akkumulation von g und J); dazu
+  3 exakte batched Aufbauten. Unter diesen Groessen ist gemischt deshalb langsamer als stored und spart RSS nur, wenn
+  das Limit Y klein haelt; Energie gleich stored auf 10 Stellen (alle sechs Systeme, CPU und GPU).
+- gestreamt: bis 7 % langsamer als resident (Heptacen 247 gegen 244 ms); gemischt GPU: Device-J/K in FP32 98 ms je
+  Durchlauf (Heptacen), die Wand bestimmen die 3 exakten Aufbauten auf der CPU (Integrale).
+
+**Grosse Systeme: C60H122** (n = 1450, naux = 6696, FP64-Tensor 56.4 GB; vorher mit Standardlimit ein Abbruch und auf der
+Karte nicht moeglich; E_elec stored CPU = -8176.9793892180):
+
+| Lauf | Wand s | ms je J/K | Iter. | max RSS | Device-Peak | E_elec - stored |
+|---|---|---|---|---|---|---|
+| CPU Standard (auto -> batched, 16000 MB) | 1096 | 76006 | 13 | 17.0 GB | - | +1e-10 |
+| CPU stored, `-qm.ri_max_memory_mb 60000` | 462 | 24716 | 13 | 57.3 GB | - | 0 |
+| CPU gemischt, 32000 MB | 839 | 44210 (FP32-Aufbauten 17 s) | 15 | 33.1 GB | - | +1e-10 |
+| CPU lokal R = 8 Bohr (Standardlimit) | 522 | 32538 | 14 | 20.7 GB | - | +1.38e-4 (7.6e-7/Atom) |
+| GPU Standard (batched + Device-Austausch) | 872 | 59979 | 13 | 17.7 GB | 5.6 GB | -1e-10 |
+| GPU gestreamt FP64, 60000 MB | 234 | 8092 | 13 | 57.2 GB | 3.3 GB | 0 |
+| GPU gemischt (FP32 resident 28.2 GB), 32000 MB | 586 | 26776 | 16 | 33.4 GB | 32.1 GB | 0 |
+
+- Gestreamt: 789 GB in 14 Durchlaeufen hochgeladen, 112 s Device-Zeit; die Karte ist FP64-rechenbegrenzt (K ~1e13 Flops
+  je Aufbau), die Kopie verdeckt. Setup 85 s (Loesung B = L^-1 T auf dem Host 70 s).
+- Gemischt GPU: vor der Speicherkorrektur (Y-Budget ohne den FP32-Tensor) 405 s bei 48.9 GB RSS ueber dem Limit; jetzt
+  586 s bei 33.4 GB (mehr Orbital-Batches in den 3 exakten Aufbauten, 21 statt 6 Integral-Durchlaeufe).
+- Das Limit `-qm.ri_max_memory_mb` deckt die RI-Felder; RSS liegt ~1 GB darueber (Fock, Dichte, MO, Eigenloeser).
+  Lokal: Y_k haelt sich nicht an das Limit (1450 x 1444 x 241 x 8 B ~ 4 GB, nicht geprueft).
+
+**Lokaler Fit (`-qm.ri_fit_radius`, Naeherung)**: Fehler E(R) - E(global) in Eh / Eh je Atom (mittlere Domaene in
+Hilfsfunktionen), Standardschwelle; der Fehler ist immer positiv (K_lokal <= K_global, Schur-Komplement):
+
+| System (Atome, naux) | R = 4 | 6 | 8 | 10 | 12 |
+|---|---|---|---|---|---|
+| C10H22 (32, 1146) | 2.6e-4 / 8.1e-6 (682) | 3.6e-5 / 1.1e-6 (862) | 5.5e-6 / 1.7e-7 (949) | 7.8e-7 / 2.5e-8 (1022) | 2.1e-7 / 6.5e-9 (1047) |
+| Anthracen (24, 1230) | 1.2e-4 / 4.9e-6 (953) | 1.2e-5 / 4.9e-7 (1081) | 1.0e-6 / 4.4e-8 (1154) | 1.6e-7 / 6.7e-9 (1191) | 3.1e-9 / 1.3e-10 (1213) |
+| (H2O)20 (60, 2260) | 2.2e-3 / 3.6e-5 (274) | 3.5e-4 / 5.8e-6 (420) | 5.0e-5 / 8.4e-7 (668) | 6.9e-6 / 1.1e-7 (950) | 2.0e-6 / 3.4e-8 (1217) |
+| C20H42 (62, 2256) | 5.5e-4 / 8.8e-6 (836) | 1.2e-4 / 1.9e-6 (1090) | 3.6e-5 / 5.9e-7 (1236) | 1.4e-5 / 2.2e-7 (1381) | 5.0e-6 / 8.1e-8 (1455) |
+| Pentacen (36, 1902) | 6.3e-4 / 1.8e-5 (1261) | 1.4e-4 / 3.8e-6 (1471) | 1.9e-5 / 5.4e-7 (1608) | 2.3e-6 / 6.5e-8 (1696) | 2.5e-7 / 7.0e-9 (1756) |
+| C30H62 (92, 3366) | 8.2e-4 / 8.9e-6 (895) | 1.8e-4 / 2.0e-6 (1169) | 6.1e-5 / 6.6e-7 (1337) | 2.2e-5 / 2.4e-7 (1510) | 7.7e-6 / 8.4e-8 (1603) |
+
+- Verfahren: P = L L^T (pivotisierter Cholesky, keine Lokalisierungsiterationen), Domaene je Spalte = Hilfsfunktionen auf
+  Atomen innerhalb R der Kernatome (Pivot-Atom plus die Atome mit den groessten sum l_mk^2 bis 99.9 %); fuer eine Dichte
+  sind robuster (Dunlap) und symmetrischer lokaler Fit gleich. Domaenen bleiben nach zwei gleichen Aufbauten fest (mit
+  wandernden Domaenen konvergierte Benzol bei R = 4 nicht in 100 Iterationen); die Energie haengt daher etwas vom
+  SCF-Pfad ab. Eine erste Variante (Kernatome mit >= 2 % Anteil) hatte 5-30x groessere Fehler (Pentacen R = 12:
+  3.2e-4 Eh/Atom), verworfen. R = 1e6 gibt den globalen Fit (ctest `qm_ri_local_exact_benzene_jk`).
+- Nutzen nur im batched-Betrieb: Y_k braucht sum_k n |F_k| statt naux n n_occ (C60H122 R = 8: Domaene 22 % von naux) und
+  die lokalen Loesungen sind billiger; C60H122 32.5 statt 76 s je Aufbau. Die Integrale laufen weiter voll. J bleibt
+  global. RI-Gradient mit R > 0: Fehler (`qm_ri_local_gradient_error`).
+
+**C80H162** (n = 1930, naux = 8916, FP64-Tensor 132.9 GB): `-gpu cuda -qm.ri_max_memory_mb 140000`, Tensor gepinnt im
+Host-RAM, je Aufbau gestreamt: 694 s Wand (Setup 237 s, davon Loesung B = L^-1 T auf dem Host 208 s), 13 Iterationen,
+27.0 s je J/K-Aufbau (1861 GB hochgeladen, 375 s Device-Zeit), max RSS 133.2 GB, Device-Peak 3.5 GB,
+E_elec = -11508.2009585823 (keine Vergleichsrechnung; kein Rueckfall). Vorher war die Device-Grenze n ~1190 und ohne
+Erhoehung des Limits ein Abbruch. Andere Modi fuer C80H162 nicht gerechnet (batched CPU geschaetzt ~3x C60H122 je Aufbau).
+
+**Nicht getestet / nicht implementiert:** ROCm/Vulkan (kein Eintrag, gezaehlter Rueckfall); batched mit
+`-qm.ri_metric eigen` nur Formaldehyd; Streaming bei mode j nur ein Handlauf (Benzol, E_elec gleich stored auf 10 Stellen);
+gemischte Genauigkeit mit eigen-Metrik (Device-Austausch dann CPU); RI-MP2/LMP2 nach batched SCF rechnen ihre eigene
+gespeicherte Einrichtung (nur Code-Pfad, kein Test); Gradient mit lokalem Fit (Fehler); batched/lokal auf dem Device
+nur die Austausch-Loesung (Integrale, Y, J auf der CPU); Wiederholungsmessungen (alle Zeiten Einzelmessungen auf einer
+Maschine mit Desktop-Last ~1-2).
 
 ## WP10 -- Gradient (RI-J, RI-JK)
 

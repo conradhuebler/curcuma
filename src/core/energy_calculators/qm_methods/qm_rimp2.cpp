@@ -180,7 +180,7 @@ std::shared_ptr<qmri::RIJK> QMEngine::correlationRI(const std::string& file, std
                                                     std::string& why)
 {
     setup_ms = 0.0;
-    if (riActive() && m_ri && m_ri_file == file) {
+    if (riActive() && m_ri && m_ri_file == file && m_ri->storedFP64()) {  // batched / FP32 SCF: own stored setup below
         src = "RI tensor of the SCF reused (-qm.ri " + m_ri_mode + ")";
         return m_ri;
     }
@@ -194,6 +194,7 @@ std::shared_ptr<qmri::RIJK> QMEngine::correlationRI(const std::string& file, std
         const std::vector<qmri::Shell> sh = qmri::auxiliaryShells(aux, m_atoms, pos);
         qmri::RIOptions ro;
         ro.mode = "j";  // raw (Q|mn) + metric factor; the factor goes onto the transformed columns (fitRows)
+        ro.storage = "stored";  // RI-MP2 / LMP2 read tensor() (Oct 2026)
         ro.metric = m_ri_metric;
         ro.metric_cutoff = m_ri_metric_cutoff;
         ro.screening = m_eri_screening;

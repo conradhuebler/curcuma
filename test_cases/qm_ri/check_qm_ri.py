@@ -14,9 +14,14 @@ Modes (--check):
   gradient_error  a gradient that cannot be formed (3-index densities above -qm.ri_max_memory_mb) must fail loud
                   (non-zero exit, clear message), never return a number. (Before Oct 2026 every RI gradient
                   request was this error; the analytic RI gradient replaced it.)
+  local_gradient_error  -gradient with -qm.ri_fit_radius 6 must fail loud (local fit has no gradient).
   hf3c            -method hf-3c ignores -qm.ri (warning) and returns the exact-integral energy.
   gpu_grad        -gpu cuda -gradient with CURCUMA_QM_GPU_RI_GRAD_CHECK=1: device 3-index RI gradient vs the CPU one
                   (<= 1e-10 Eh/Bohr), full gradient vs PySCF (--tol-grad), no fallback. Exit 77 without plugin/device.
+  storage         resource-saving RI (Oct 2026): the variant (--extra, e.g. -qm.ri_storage batched, -qm.ri_mixed_precision
+                  true, -qm.gpu_ri_stream on) against the default stored run of the same binary: |dE| <= --tol (pass 1e-9),
+                  E vs PySCF <= 1e-8, every --expect text in the variant's output; --gpu: -gpu cuda, no fallback, exit 77
+                  without plugin/device.
   gpu             -gpu cuda with CURCUMA_QM_GPU_RI_CHECK=1: device J/K of the first build vs the CPU contraction
                   (<= 1e-10), energy vs PySCF, no fallback. Exit 77 (ctest SKIP) without plugin/device.
 Plain python3 (no numpy): parses E_elec and E_nn (verbosity 2, 10 decimals).
@@ -35,6 +40,8 @@ ap.add_argument("--tol-orca", type=float, default=1e-7)
 ap.add_argument("--extra", default="", help="extra curcuma flags (one string, use --extra=...)")
 ap.add_argument("--dump", default="", help="dump_qm_gradient binary (--check fd)")
 ap.add_argument("--tol-grad", type=float, default=5e-10)
+ap.add_argument("--expect", default="", help="--check storage: text that must appear in the variant's output (one or more, '|'-separated)")
+ap.add_argument("--gpu", action="store_true", help="--check storage: the variant runs with -gpu cuda (exit 77 without device)")
 a = ap.parse_args()
 
 ref = json.load(open(a.ref))[a.mol]
@@ -161,6 +168,13 @@ if a.check == "gradient_error":
     print(f"exit code {rc}, message {'found' if msg else 'missing'}")
     sys.exit(0 if (rc != 0 and msg) else 1)
 
+if a.check == "local_gradient_error":
+    # -qm.ri_fit_radius > 0 (local exchange fit, Oct 2026): the gradient is not implemented and must fail loud
+    rc, txt = run(["-method", "hf", "-qm.ri", "jk", "-gradient", "-qm.ri_fit_radius", "6", "-verbosity", "1"])
+    msg = "RI gradient not implemented for the local fit" in txt
+    print(f"exit code {rc}, message {'found' if msg else 'missing'}")
+    sys.exit(0 if (rc != 0 and msg) else 1)
+
 if a.check == "hf3c":
     rc1, t1 = run(["-method", "hf-3c", "-qm.ri", a.ri, "-verbosity", "1"])
     rc0, t0 = run(["-method", "hf-3c", "-verbosity", "1"])
@@ -216,6 +230,36 @@ if a.check == "gpu":
     d = e - ref["pyscf"][a.ri]
     ok = dJ <= 1e-10 and dK <= 1e-10 and abs(d) <= a.tol
     print(f"{a.mol} ri={a.ri} device vs CPU: max|dJ|={dJ:.2e} max|dK|={dK:.2e}; E={e:.10f} diff PySCF={d:+.2e}  "
+          f"{'ok' if ok else 'FAIL'}")
+    sys.exit(0 if ok else 1)
+
+if a.check == "storage":
+    # reference: default (stored, FP64, CPU) run without the variant flags
+    cmd0 = [a.curcuma, "-sp", xyz, "-no_bmt"] + hf + ["-qm.ri", a.ri, "-qm.threads", "4"]
+    out0 = subprocess.run(cmd0, capture_output=True, text=True, timeout=3000)
+    t0 = re.sub(r"\x1b\[[0-9;]*m", "", out0.stdout + out0.stderr)
+    if out0.returncode != 0:
+        print(t0[-3000:])
+        sys.exit("reference run failed")
+    var = hf + ["-qm.ri", a.ri, "-qm.threads", "4"] + (["-gpu", "cuda"] if a.gpu else [])
+    rc, txt = run(var)
+    if a.gpu and ("no GPU plugin" in txt or "not loadable" in txt or "cudaSetDevice failed" in txt):
+        print("no usable CUDA device/plugin: skipped")
+        sys.exit(77)
+    if rc != 0:
+        print(txt[-3000:])
+        sys.exit(f"variant run exited with {rc}")
+    missing = [x for x in a.expect.split("|") if x and x not in txt]
+    if missing:
+        print(txt[-4000:])
+        sys.exit(f"expected text missing in the variant output: {missing}")
+    if a.gpu and "GPU fallbacks during this run" in txt:
+        print(txt[-3000:])
+        sys.exit("the run reported a GPU fallback")
+    e0, e = energy(t0), energy(txt)
+    d, dp = e - e0, e - ref["pyscf"][a.ri]
+    ok = abs(d) <= a.tol and abs(dp) <= 1e-8
+    print(f"{a.mol} ri={a.ri} [{a.extra}] E={e:.10f} stored={e0:.10f} diff={d:+.2e} (tol {a.tol:.0e}), PySCF diff={dp:+.2e}  "
           f"{'ok' if ok else 'FAIL'}")
     sys.exit(0 if ok else 1)
 

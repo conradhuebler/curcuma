@@ -59,6 +59,43 @@ if(Python3_Interpreter_FOUND)
     endforeach()
     set_tests_properties(qm_ri_grad_formaldehyde_jk_eigen qm_ri_grad_fd_H2O_jk qm_ri_grad_fd_NH3_j qm_ri_opt_H2O_jk
         qm_ri_opt_formaldehyde_jk PROPERTIES TIMEOUT 1500 LABELS "qm_ri")
+    # Resource-saving RI (Claude Generated, Oct 2026; docs WP10 "RI-JK ressourcensparend"): every variant against the
+    # default stored run of the same binary (|dE| <= 1e-9 at scf_threshold 1e-10) and PySCF (1e-8)
+    add_test(NAME qm_ri_batched_benzene_jk COMMAND ${_RI_CHECK} --mol benzene --ri jk --check storage --tol 1e-9
+        "--extra=-qm.ri_storage batched" "--expect=storage batched")
+    # tiny limits: 4 MB rows per batch, Y split into many orbital batches (more integral passes)
+    add_test(NAME qm_ri_batched_split_benzene_jk COMMAND ${_RI_CHECK} --mol benzene --ri jk --check storage --tol 1e-9
+        "--extra=-qm.ri_storage batched -qm.ri_batch_mb 4 -qm.ri_max_memory_mb 10" "--expect=storage batched|orbital batches")
+    # auto switches to batched when the stored tensor (0.27 MB for H2O) does not fit
+    add_test(NAME qm_ri_auto_batched_H2O_jk COMMAND ${_RI_CHECK} --mol H2O --ri jk --check storage --tol 1e-9
+        "--extra=-qm.ri_max_memory_mb 0.25" "--expect=storage batched")
+    add_test(NAME qm_ri_batched_NH3_j COMMAND ${_RI_CHECK} --mol NH3 --ri j --check storage --tol 1e-9
+        "--extra=-qm.ri_storage batched" "--expect=storage batched")
+    add_test(NAME qm_ri_batched_formaldehyde_jk_eigen COMMAND ${_RI_CHECK} --mol formaldehyde --ri jk --check storage --tol 1e-9
+        "--extra=-qm.ri_storage batched -qm.ri_metric eigen" "--expect=storage batched")
+    # mixed precision on the CPU: FP32 tensor, then exact FP64 batched iterations
+    add_test(NAME qm_ri_mixed_benzene_jk COMMAND ${_RI_CHECK} --mol benzene --ri jk --check storage --tol 1e-9
+        "--extra=-qm.ri_mixed_precision true" "--expect=stored FP32|exact FP64 builds")
+    # gradient after a batched SCF: own stored tensor, same PySCF gradient
+    add_test(NAME qm_ri_grad_batched_benzene_jk COMMAND ${_RI_CHECK} --mol benzene --ri jk --check gradient
+        "--extra=-qm.threads 4 -qm.ri_storage batched")
+    # local exchange fit (-qm.ri_fit_radius): a huge radius is the global fit; a gradient request is an error
+    add_test(NAME qm_ri_local_exact_benzene_jk COMMAND ${_RI_CHECK} --mol benzene --ri jk --check storage --tol 1e-9
+        "--extra=-qm.ri_fit_radius 1e6" "--expect=local exchange fit R = 1e+06 Bohr|local fit R = 1e+06 Bohr")
+    add_test(NAME qm_ri_local_gradient_error COMMAND ${_RI_CHECK} --mol H2O --ri jk --check local_gradient_error)
+    set_tests_properties(qm_ri_local_exact_benzene_jk qm_ri_local_gradient_error PROPERTIES TIMEOUT 900 LABELS "qm_ri")
+    set_tests_properties(qm_ri_batched_benzene_jk qm_ri_batched_split_benzene_jk qm_ri_auto_batched_H2O_jk qm_ri_batched_NH3_j
+        qm_ri_batched_formaldehyde_jk_eigen qm_ri_mixed_benzene_jk qm_ri_grad_batched_benzene_jk PROPERTIES TIMEOUT 900 LABELS "qm_ri")
+    add_test(NAME qm_gpu_ri_stream_benzene_jk COMMAND ${_RI_CHECK} --mol benzene --ri jk --check gpu
+        "--extra=-qm.gpu_ri_stream on -qm.gpu_ri_chunk_mb 4")
+    add_test(NAME qm_gpu_ri_mixed_benzene_jk COMMAND ${_RI_CHECK} --mol benzene --ri jk --check storage --tol 1e-9 --gpu
+        "--extra=-qm.ri_mixed_precision true" "--expect=FP32 tensor|exact FP64 builds|batched RI exchange")
+    add_test(NAME qm_gpu_ri_mixed_stream_benzene_jk COMMAND ${_RI_CHECK} --mol benzene --ri jk --check storage --tol 1e-9 --gpu
+        "--extra=-qm.ri_mixed_precision true -qm.gpu_ri_stream on -qm.gpu_ri_chunk_mb 4" "--expect=streamed|exact FP64 builds")
+    add_test(NAME qm_gpu_ri_batched_benzene_jk COMMAND ${_RI_CHECK} --mol benzene --ri jk --check storage --tol 1e-9 --gpu
+        "--extra=-qm.ri_storage batched" "--expect=storage batched|batched RI exchange")
+    set_tests_properties(qm_gpu_ri_stream_benzene_jk qm_gpu_ri_mixed_benzene_jk qm_gpu_ri_mixed_stream_benzene_jk qm_gpu_ri_batched_benzene_jk
+        PROPERTIES TIMEOUT 900 LABELS "qm_ri;qm_gpu;gpu" SKIP_RETURN_CODE 77)
     add_test(NAME qm_gpu_ri_benzene_jk COMMAND ${_RI_CHECK} --mol benzene --ri jk --check gpu)
     set_tests_properties(qm_gpu_ri_benzene_jk PROPERTIES TIMEOUT 600 LABELS "qm_ri;qm_gpu;gpu" SKIP_RETURN_CODE 77)
     # RI-JK metric solve on the device (-qm.gpu_ri_fit, Claude Generated, Oct 2026)

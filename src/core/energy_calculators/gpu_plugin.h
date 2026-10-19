@@ -39,6 +39,7 @@
 #include "qm_methods/qm_gpu_mp2_grad_backend.h"  // qmint::QMGpuMP2Grad2e (MP2 gradient)
 #include "qm_methods/qm_gpu_grad1e_backend.h"  // qmint::QMGpuGrad1e (Q-G8)
 #include "qm_methods/qm_gpu_ri_backend.h"  // qmint::QMGpuRI (WP10)
+#include "qm_methods/qm_gpu_ri_lowmem_backend.h"  // qmint::QMGpuRILowMem, QMGpuRIYSolver (WP10 low memory)
 #include "qm_methods/qm_gpu_mp2_backend.h"  // qmint::QMGpuMP2Input/Output (WP11)
 #include "qm_methods/qm_gpu_rimp2_backend.h"  // qmint::QMGpuRIMP2Input/Output (RI-MP2)
 #include "qm_methods/qm_gpu_ri_grad_backend.h"  // qmint::QMGpuRIGradInput/Output (RI gradient)
@@ -139,6 +140,25 @@ std::unique_ptr<qmint::QMGpuRI> createQmRI(const std::string& backend, const dou
  */
 bool qmRiLowerSolve(const std::string& backend, double* T, int N, long ncol, const double* L, int device, int host_threads,
                     bool& touched, std::string& why);
+
+/**
+ * Resource-saving RI contractions (WP10, Oct 2026): the fitted tensor T (nfit x n(n+1)/2 packed rows, host array of
+ * double, or float when fp32) resident on the device or streamed from host memory per build. stream: 0 = auto
+ * (resident when it fits, else streamed), 1 = always streamed, 2 = resident only (nullptr when it does not fit).
+ * max_device_mb > 0 caps the device memory considered free (testing); chunk_mb > 0 sets the streamed chunk size.
+ * Entry point curcuma_<backend>_create_qm_ri_lowmem. Claude Generated (Oct 2026).
+ */
+std::unique_ptr<qmint::QMGpuRILowMem> createQmRILowMem(const std::string& backend, const void* T, bool fp32, int nfit, int n,
+                                                       int device, int stream, double max_device_mb, double chunk_mb,
+                                                       int host_threads, std::string& why);
+
+/**
+ * Batched RI-JK exchange on the device (WP10, Oct 2026): keeps L (naux x naux, column-major lower Cholesky factor)
+ * on the device, then per call X = L^-1 Y and K += sign X X^T on streamed column chunks of Y (qm_gpu_ri_lowmem_backend.h).
+ * Entry point curcuma_<backend>_create_qm_ri_ysolver. Claude Generated (Oct 2026).
+ */
+std::unique_ptr<qmint::QMGpuRIYSolver> createQmRIYSolver(const std::string& backend, const double* L, int naux, int n, int device,
+                                                         double max_device_mb, int host_threads, std::string& why);
 
 /**
  * Native-QM canonical MP2 on the device (WP11): four-index transformation with DGEMM and the
