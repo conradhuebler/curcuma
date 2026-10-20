@@ -28,6 +28,7 @@
 // on the thread schedule (not run-to-run bit-identical).
 
 #include "qm_gpu_eri_kernels.cuh"
+#include "qm_gpu_direct_md.cuh"
 
 #include <cuda_runtime.h>
 
@@ -312,6 +313,19 @@ public:
         m_profile = penv && penv[0] == '1';
         const char* benv = std::getenv("CURCUMA_QM_GPU_DIRECT_BLOCK_KERNEL");  // diagnostic: old block kernel
         m_block_only = benv && benv[0] == '1';
+        // Oct 20 2026: thread-per-quartet McMurchie-Davidson kernels with Hermite tables for every
+        // class (qm_gpu_direct_md.cu; faster than both older kernels on every class, C20H42 RTX 5090).
+        // Diagnostics: CURCUMA_QM_GPU_DIRECT_MD=0 restores eriThreadKernel + eriHermiteKernel,
+        // =large keeps eriThreadKernel for the classes with <= 27 cartesian components.
+        const char* menv = std::getenv("CURCUMA_QM_GPU_DIRECT_MD");
+        m_md_all = !(menv && std::strcmp(menv, "large") == 0);
+        if (!(menv && menv[0] == '0') && !m_block_only) {
+            size_t mb = 0;
+            m_md_ok = qmgpu::mdInit(t, m_d, m_md, m_owned, m_md_why, mb);
+            m_md_bytes = mb;
+        } else {
+            m_md_why = "disabled";
+        }
         const size_t n2 = (size_t)m_n * m_n;
         bool ok = upload(const_cast<double**>(&m_d.pr_schwarz), t->pr_schwarz, (size_t)t->npair, m_owned)
             && upload(&m_sorted_dev, m_sorted.data(), (size_t)t->npair, m_owned)
@@ -489,8 +503,11 @@ public:
                 cudaEventCreate(&pe1);
                 cudaEventRecord(pe0, st);
             }
-            const bool threaded = m_thread_ok && launchThreadClass<true>(LA, LB, LC, LD, m_d, src, L.nq, nullptr, st, m_spherical);
-            if (!threaded) {
+            const bool small = ncomp(LA) * ncomp(LB) * ncomp(LC) * ncomp(LD) <= kThreadKernelMaxNC;
+            bool md = false;
+            if (m_md_ok && (!small || m_md_all || !m_thread_ok)) md = qmgpu::mdLaunch(LA, LB, LC, LD, m_d, m_md, src, L.nq, st);
+            const bool threaded = !md && m_thread_ok && launchThreadClass<true>(LA, LB, LC, LD, m_d, src, L.nq, nullptr, st, m_spherical);
+            if (!threaded && !md) {
                 if (m_block_only)
                     launchBlockClass<true>(LA, LB, LC, LD, m_d, src, L.nq, nullptr, st);
                 else
@@ -508,7 +525,7 @@ public:
                 e.ms += ms;
                 e.launched += L.nq;
                 e.computed += (long long)(c1 - c0);
-                e.threaded = threaded;
+                e.kind = md ? 3 : threaded ? 1 : (m_block_only ? 2 : 0);
                 cudaEventDestroy(pe0);
                 cudaEventDestroy(pe1);
             }
@@ -532,14 +549,17 @@ public:
                       "launched %lld quartets, device memory %.1f MB",
                       m_builds, m_kernel_ms, m_total_ms, m_rows_ms, m_launched, m_bytes / 1.0e6);
         std::string out = buf;
+        out += m_md_ok ? ", large classes: md kernels (Hermite tables " + std::to_string(m_md_bytes / 1000000) + " MB)"
+                       : ", large classes: hermite block kernel (md: " + m_md_why + ")";
         if (m_profile) {  // CURCUMA_QM_GPU_DIRECT_PROFILE=1: per pair class (serialised launches)
             static const char* lab = "spd";
+            static const char* kinds[4] = { "hermite", "thread", "block", "md" };
             for (int k = 0; k < 81; ++k) {
                 const ProfileEntry& e = m_prof[k];
                 if (e.launched == 0) continue;
                 const int X = k / 9, Y = k % 9;
                 std::snprintf(buf, sizeof buf, "\n  class (%c%c|%c%c) %s: %.1f ms, launched %lld, computed %lld, %.1f computed/us",
-                              lab[X / 3], lab[X % 3], lab[Y / 3], lab[Y % 3], e.threaded ? "thread" : (m_block_only ? "block" : "hermite"), e.ms,
+                              lab[X / 3], lab[X % 3], lab[Y / 3], lab[Y % 3], kinds[e.kind], e.ms,
                               e.launched, e.computed, e.ms > 0 ? e.computed / (1000.0 * e.ms) : 0.0);
                 out += buf;
             }
@@ -573,7 +593,11 @@ private:
     long long m_launched = 0;
     bool m_profile = false;
     bool m_block_only = false;
-    struct ProfileEntry { double ms = 0.0; long long launched = 0, computed = 0; bool threaded = false; };
+    qmgpu::MdTables m_md{};
+    bool m_md_ok = false, m_md_all = false;
+    std::string m_md_why;
+    size_t m_md_bytes = 0;
+    struct ProfileEntry { double ms = 0.0; long long launched = 0, computed = 0; int kind = 0; };
     ProfileEntry m_prof[81];
     int* m_width = nullptr;
     int* m_first = nullptr;

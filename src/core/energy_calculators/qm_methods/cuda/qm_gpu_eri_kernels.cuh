@@ -45,10 +45,10 @@
 #include <string>
 #include <vector>
 
-namespace {
-
-constexpr double kPI = 3.14159265358979323846264338327950288;
-constexpr int kNTaylor = 7;  // must match BoysTable::NTAYLOR (checked at creation)
+// DevTables and QSrc live in a named namespace (Oct 20 2026) so that further translation units
+// (qm_gpu_direct_md.cu, qm_gpu_direct_fp32.cu) can take them across the TU boundary; everything
+// else below stays internal to each TU.
+namespace qmgpu {
 
 struct DevTables {
     int n_out;
@@ -90,6 +90,16 @@ struct QSrc {
     const int* kets;
     int nrow;
 };
+
+} // namespace qmgpu
+
+namespace {
+
+using qmgpu::DevTables;
+using qmgpu::QSrc;
+
+constexpr double kPI = 3.14159265358979323846264338327950288;
+constexpr int kNTaylor = 7;  // must match BoysTable::NTAYLOR (checked at creation)
 
 // Boys function F_0..F_maxN, the same arithmetic as boysArrayInto (qm_integrals.cpp).
 __device__ void boysDev(int maxN, double T, double* F, const DevTables& d)

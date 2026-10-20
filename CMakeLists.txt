@@ -1120,6 +1120,8 @@ if(USE_CUDA)
         # Claude Generated (Oct 2026): native QM integral-direct J/K on the device (Q-G3);
         # own TU so it compiles in parallel with qm_gpu_eri.cu (shared qm_gpu_eri_kernels.cuh)
         src/core/energy_calculators/qm_methods/cuda/qm_gpu_direct.cu
+        # Claude Generated (Oct 2026): thread-per-quartet kernels of the large classes (own TU, parallel compile)
+        src/core/energy_calculators/qm_methods/cuda/qm_gpu_direct_md.cu
         # Claude Generated (Oct 2026): native QM device-resident SCF loop (Q-G4), cuBLAS/cuSOLVER only
         src/core/energy_calculators/qm_methods/cuda/qm_gpu_scf.cu
         # Claude Generated (Oct 2026): native QM two-electron gradient on the device (Q-G7)

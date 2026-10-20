@@ -182,7 +182,49 @@ faster from the guess alone); `ctest -L "qm_gpu|qm_2e|qm_1e|qm_hf3c|qm_grad|qm_m
 quartets per pair), other GPUs (a data-centre FP64 card shifts the balance), basis sets other than def2-SVP/MINIX,
 warm-started geometry sequences of large systems, `-qm.scf_threshold` below 1e-6 at this size, ROCm/Vulkan (no entry
 point). Not implemented: multipole far field for J (the n^2 wall), FP32 for small quartets (Q-G5), a faster kernel for
-the large classes (still ~80 % of the build time).
+the large classes (still ~80 % of the build time). (The kernel followed on Oct 20, below.)
+
+**Thread-per-quartet McMurchie-Davidson kernels for every class (Oct 20, 2026; AI-generated, machine-tested, RTX 5090
+only).** Profile of the Oct 19 code (C20H42, `CURCUMA_QM_GPU_DIRECT_PROFILE=1`): the block kernels of the classes with
+more than 27 cartesian components ran at 2-24 quartets/us because one block per quartet synchronised several times per
+primitive quartet (Boys by one thread, R level by level, ket sums, bra sums) with integer index decoding and global
+loads in the dependency chain; the classes themselves need little FP64 work per quartet. New
+`cuda/qm_gpu_direct_md.cu` (instances) and `cuda/qm_gpu_direct_md_impl.cuh` (templates): one thread per quartet (or a
+compile-time slice of the ket components, chosen per class from the register state; the slice is `blockIdx.y`, so it
+is uniform per block), no barrier; per primitive pair a setup table F of the Hermite expansion of every active
+component pair with contraction coefficients and the 6d->5d transform folded in; per bra primitive the ket sums are
+contracted over the ket primitives, then one bra sum; Hermite indices whose E coefficient vanishes for the component
+pair are dropped at compile time (compile-time loops; a `#pragma unroll` form needed ~25 min of nvcc for 8 classes, the
+compile-time form 4 min for all 45). Same screening and quartet counts, FP64 atomics as before. The MD kernels are
+also faster than the old thread kernel on every small class (1.1-1.6x), so they run for all classes; the old kernels
+remain for cartesian d shells (`-qm.cartesian_d`) and as diagnostics (`CURCUMA_QM_GPU_DIRECT_MD=0` old kernels,
+`=large` old thread kernel for the small classes). Block size 32 (C40 SCF loop 5.79 s; 128: 5.88-6.21 s).
+
+Per class, C20H42 (quartets/us, serialised profile launches, all-FP64 SCF, old = `CURCUMA_QM_GPU_DIRECT_MD=0`):
+(pp|pp) 12.2 -> 101, (ps|dp) 13.7 -> 115, (pp|ds) 18.7 -> 113, (ps|pd) 10.5 -> 77, (sp|dp) 15.9 -> 129, (pp|dp) 8.5 ->
+72, (pp|pd) 6.5 -> 50, (ss|dd) 17.4 -> 153, (ds|dp) 10.9 -> 88, (pp|dd) 4.3 -> 18, (pd|pd) 3.8 -> 12, (dd|dd) 1.9 ->
+3.8 (the 28 large classes 2.0-8.8x); small classes 1.1-1.6x ((ss|ss) 875 -> 998, (ss|pp) 360 -> 444, (ps|pp) 187 ->
+269). Kernel time of one SCF 6551 -> 1782 ms, of which the large classes 5293 -> 788 ms (81 % -> 44 %). The classes
+with a split over 15-25 lanes ((pd|pd), (dd|dd), (dp|dp), (pd|dp)) gain least: every lane recomputes Boys and R.
+Whole SCF (HF/def2-SVP, `-gpu cuda -qm.gpu_direct on -qm.gpu_scf on -qm.ri off`, `-qm.gpu_eri_precision fp64`; old =
+same binary with `CURCUMA_QM_GPU_DIRECT_MD=0`, which is the Oct 19 kernel set; single runs, load ~1-2):
+
+| system (n) | old: SCF loop, wall, quartets/us | new: SCF loop, wall, quartets/us | iterations | E_elec |
+|---|---|---|---|---|
+| benzene (114) | 289 ms, 0.8 s, 33 | 149 ms, 0.7 s, 75 | 10 | equal (10 dp) |
+| naphthalene (180) | 1238 ms, 1.8 s, 39 | 379 ms, 0.9 s, 145 | 13 | equal |
+| anthracene (246) | 3087 ms, 3.9 s, 41 | 806 ms, 1.5 s, 169 | 15 | equal |
+| C20H42 (490) | 5.90 s, 7.9 s, 89 | 1.64 s, 3.1 s, 345 | 13 | equal |
+| C40H82 (970) | 23.8 s, 31.6 s, 92 | 5.79 s, 11.5 s, 401 | 13 | equal |
+| C60H122 (1450) | 53.6 s, 72.0 s, 93 | 12.4 s, 25.3 s, 429 | 13 | equal |
+| C80H162 (1930) | 95.5 s, 130.1 s, 94 | 21.5 s, 45.8 s, 446 | 13 | equal |
+| C120H242 (2890) | 216.3 s, 304.8 s, 94 | 51.1 s, 116.1 s, 434 | 13 | equal |
+
+quartets/us = shell quartets computed in the SCF / sum of the build kernel times (all builds incl. the final one). The
+wall time of the large alkanes is now about half setup (one-electron integrals and tables with the default thread
+count; not touched here). Device memory of the F tables: 1 MB (benzene), 19 MB (C20), 139 MB (C80), 221 MB (C120). Tests: `ctest -L "qm_gpu|qm_2e|qm_grad"` 94/94 (the two
+`qm_opt_hf3c_*` with the venv python). Not tested: other GPUs (block size and mode thresholds were chosen on the RTX
+5090), elements beyond H/C/O at this size, 3D-compact systems, other basis sets than def2-SVP/MINIX with d shells.
 
 ## 3. Proposed GPU stages (mirroring the xTB stages)
 
