@@ -51,6 +51,7 @@
 #include "src/capabilities/trajectory_statistics.h"
 #include "src/capabilities/trajectoryanalysis.h"
 #include "src/capabilities/polymerbuild.h"
+#include "src/capabilities/ionize.h"
 #include "src/tools/trajectory_writer.h"
 
 #include "src/tools/general.h"
@@ -2357,6 +2358,20 @@ int executePolymerBuild(const json& controller, int argc, char** argv)
     return 0;
 }
 
+// Counter-ion placement: -ionize system.xyz -charge N  (Claude Generated 2026)
+int executeIonize(const json& controller, int argc, char** argv)
+{
+    if (argc < 3) {
+        std::cerr << "Please use curcuma for counter-ions as follows:\ncurcuma -ionize solvated.xyz -charge 15 [-anion Cl] [-cation Na] [-solvent H2O]" << std::endl;
+        return 1;
+    }
+    curcuma::Ionize ionizer(controller, false);
+    initializeBMT(&ionizer, argv[2], "ionize", controller);
+    ionizer.start();
+    ionizer.processBakFiles();
+    return ionizer.error().empty() ? 0 : 1;
+}
+
 // ============================================================================
 // Interaction (association) energy capability: -interaction  — Claude Generated 2026
 // ----------------------------------------------------------------------------
@@ -2606,6 +2621,8 @@ const std::map<std::string, CapabilityInfo> CAPABILITY_REGISTRY = {
               {"XYZ", "MOL2", "SDF"}, executeDocking}},
     {"polymerbuild", {"Iterative polymer assembly from fragments", "assembly",
                   {"XYZ"}, executePolymerBuild}},
+    {"ionize", {"Neutralise a solvated system by replacing solvent with counter-ions", "assembly",
+                  {"XYZ"}, executeIonize}},
     {"md", {"Molecular dynamics simulation", "dynamics",
             {"XYZ", "VTF", "MOL2", "SDF"}, executeSimpleMD}},
     {"casino", {"Casino Monte Carlo simulation with enhanced sampling", "dynamics",

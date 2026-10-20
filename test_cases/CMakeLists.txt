@@ -590,6 +590,13 @@ target_link_libraries(test_measurement curcuma_cap curcuma_core)
 add_test(NAME measurement_capability COMMAND test_measurement)
 set_tests_properties(measurement_capability PROPERTIES TIMEOUT 120)
 
+# Counter-ion placement. Claude Generated 2026 - checked against properties of the
+# constructed box (counts, minimum distances, whole solvent molecules), not a previous run.
+add_executable(test_ionize test_ionize.cpp)
+target_link_libraries(test_ionize curcuma_cap curcuma_core)
+add_test(NAME ionize_capability COMMAND test_ionize)
+set_tests_properties(ionize_capability PROPERTIES TIMEOUT 120)
+
 add_executable(test_lobpcg unit/test_lobpcg.cpp)
 target_link_libraries(test_lobpcg curcuma_core)
 if(USE_PCH)
