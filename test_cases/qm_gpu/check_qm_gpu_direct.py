@@ -40,7 +40,10 @@ def run(gpu, check, extra):
         cmd += ["-qm.scf_early_screening", "0"]
     out = subprocess.run(cmd, capture_output=True, text=True, timeout=3000, env=env)
     txt = re.sub(r"\x1b\[[0-9;]*m", "", out.stdout + out.stderr)
-    m = re.search(r"E_elec\s*[:=]?\s*(-?\d+\.\d+) Eh", txt)
+    # the final result line "E_elec: ... Eh"; the per-iteration lines ("E_elec = ... Eh", printed from
+    # verbosity 1 since Oct 2026) must not match (Claude Generated fix, Oct 20 2026)
+    found = list(re.finditer(r"E_elec:\s*(-?\d+\.\d+) Eh", txt))
+    m = found[-1] if found else None
     if not m:
         print(txt[-3000:])
         sys.exit("no E_elec found for gpu=" + gpu)

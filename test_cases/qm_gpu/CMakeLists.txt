@@ -94,6 +94,13 @@ if(Python3_Interpreter_FOUND)
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/check_qm_gpu_scf.py
             --curcuma $<TARGET_FILE:curcuma> --xyz ${CMAKE_CURRENT_SOURCE_DIR}/../qm_hf3c/benzene.xyz
             "--extra=-qm.gpu_direct on" "--cpu-extra=-qm.scf_direct on")
+    # Q-G5 (Claude Generated, Oct 2026): FP32 integrals in the early phase (-qm.gpu_eri_precision mixed);
+    # final energy from FP64 builds must equal the CPU direct SCF within 1e-9 Eh
+    add_test(NAME qm_gpu_scf_benzene_fp32
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/check_qm_gpu_scf.py
+            --curcuma $<TARGET_FILE:curcuma> --xyz ${CMAKE_CURRENT_SOURCE_DIR}/../qm_hf3c/benzene.xyz
+            "--extra=-qm.gpu_direct on -qm.gpu_eri_precision mixed" "--cpu-extra=-qm.scf_direct on"
+            "--expect=FP32 phase ends")
     add_test(NAME qm_gpu_scf_H2O_cartesian
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/check_qm_gpu_scf.py
             --curcuma $<TARGET_FILE:curcuma> --xyz ${CMAKE_CURRENT_SOURCE_DIR}/../qm_grad/H2O_distorted.xyz
@@ -110,7 +117,7 @@ if(Python3_Interpreter_FOUND)
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/check_qm_gpu_scf.py
             --curcuma $<TARGET_FILE:curcuma> --xyz ${CMAKE_CURRENT_SOURCE_DIR}/../qm_grad/H2O_distorted.xyz
             "--extra=-qm.scf_mode plain" "--cpu-extra=-qm.scf_mode plain")
-    set_tests_properties(qm_gpu_scf_benzene_direct qm_gpu_scf_H2O_cartesian qm_gpu_scf_H2O_hf3c
+    set_tests_properties(qm_gpu_scf_benzene_direct qm_gpu_scf_benzene_fp32 qm_gpu_scf_H2O_cartesian qm_gpu_scf_H2O_hf3c
         qm_gpu_scf_formaldehyde_adiis qm_gpu_scf_H2O_plain
         PROPERTIES TIMEOUT 1500 LABELS "qm_gpu;gpu" SKIP_RETURN_CODE 77)
     # Q-G7 (Claude Generated, Oct 2026): two-electron gradient on the device vs the CPU 2e gradient from

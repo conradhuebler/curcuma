@@ -1122,6 +1122,8 @@ if(USE_CUDA)
         src/core/energy_calculators/qm_methods/cuda/qm_gpu_direct.cu
         # Claude Generated (Oct 2026): thread-per-quartet kernels of the large classes (own TU, parallel compile)
         src/core/energy_calculators/qm_methods/cuda/qm_gpu_direct_md.cu
+        # Claude Generated (Oct 2026, Q-G5): FP32 instances of those kernels (early SCF phase, -qm.gpu_eri_precision)
+        src/core/energy_calculators/qm_methods/cuda/qm_gpu_direct_fp32.cu
         # Claude Generated (Oct 2026): native QM device-resident SCF loop (Q-G4), cuBLAS/cuSOLVER only
         src/core/energy_calculators/qm_methods/cuda/qm_gpu_scf.cu
         # Claude Generated (Oct 2026): native QM two-electron gradient on the device (Q-G7)

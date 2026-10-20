@@ -48,6 +48,13 @@ public:
     /// of the following builds (primitive threshold thr * 1e-3) and whether the primitive screen is
     /// relative to the quartet's density factor (as qmint::DirectJK::build). False = not supported.
     virtual bool setScreening(double /*thr*/, bool /*prim_density*/) { return false; }
+    /// Integral-direct builders (Q-G5, Claude Generated Oct 2026): FP32 integrals for the following
+    /// builds (early SCF phase of -qm.gpu_eri_precision mixed); FP64 accumulation of J/K. False =
+    /// not supported (the builder stays FP64). The SCF accepts convergence only on FP64 builds.
+    virtual bool setFP32(bool /*on*/) { return false; }
+    /// FP32:FP64 throughput ratio of the device (e.g. 64 on a GeForce RTX 5090, 2 on an HPC card);
+    /// 0 = unknown. Used by -qm.gpu_eri_precision auto.
+    virtual int fp32Ratio() const { return 0; }
 };
 
 /// Flat, pointer-only description of everything the device ERI kernel needs (Q-G2).

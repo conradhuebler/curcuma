@@ -8,7 +8,8 @@ Claude Generated (Oct 2026). Three runs of the same single point:
 Passes when E_elec (10 decimals) of the device loop agrees with both within --tol-e (default
 1e-9 Eh) and the device loop needs the same number of SCF iterations as the host loop.
 --extra selects the J/K path, e.g. "-qm.gpu_direct on" (device integral-direct, incremental
-Fock builds). Exit 77 (ctest SKIP) when no CUDA plugin / device is usable.
+Fock builds). --expect TEXT: both -gpu cuda runs must print TEXT (e.g. that the FP32 phase of
+-qm.gpu_eri_precision mixed ran). Exit 77 (ctest SKIP) when no CUDA plugin / device is usable.
 """
 import argparse, re, subprocess, sys
 
@@ -20,6 +21,7 @@ ap.add_argument("--basis", default="def2-SVP")
 ap.add_argument("--tol-e", type=float, default=1e-9)
 ap.add_argument("--extra", default="", help="extra flags for both -gpu cuda runs (one string, use --extra=...)")
 ap.add_argument("--cpu-extra", default="", help="extra flags for the CPU reference run only")
+ap.add_argument("--expect", default="", help="text both -gpu cuda runs must print (Claude Generated, Oct 2026)")
 a = ap.parse_args()
 
 
@@ -28,7 +30,10 @@ def run(gpu, extra):
            "-gpu", gpu, "-qm.threads", "4", "-verbosity", "2", "-no_bmt"] + extra.split()
     out = subprocess.run(cmd, capture_output=True, text=True, timeout=3000)
     txt = re.sub(r"\x1b\[[0-9;]*m", "", out.stdout + out.stderr)
-    m = re.search(r"E_elec\s*[:=]?\s*(-?\d+\.\d+) Eh", txt)
+    # the final result line "E_elec: ... Eh"; the per-iteration lines ("E_elec = ... Eh", printed from
+    # verbosity 1 since Oct 2026) must not match (Claude Generated fix, Oct 20 2026)
+    found = list(re.finditer(r"E_elec:\s*(-?\d+\.\d+) Eh", txt))
+    m = found[-1] if found else None
     it = re.search(r"SCF converged in (\d+) iterations", txt)
     if not m or not it:
         print(txt[-3000:])
@@ -52,6 +57,8 @@ for line in txt.splitlines():
 e_host, it_host, txt_h = run("cuda", a.extra + " -qm.gpu_scf off")
 if "device-resident loop" in txt_h:
     sys.exit("-qm.gpu_scf off still ran the device loop")
+if a.expect and (a.expect not in txt or a.expect not in txt_h):
+    sys.exit(f"expected '{a.expect}' in both -gpu cuda runs")
 e_cpu, it_cpu, _ = run("none", a.cpu_extra)
 d_host, d_cpu = abs(e_dev - e_host), abs(e_dev - e_cpu)
 ok = d_host <= a.tol_e and d_cpu <= a.tol_e and it_dev == it_host

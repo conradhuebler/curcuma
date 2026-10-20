@@ -52,6 +52,7 @@
 #include <Eigen/Dense>
 #include <fmt/format.h>
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -274,8 +275,33 @@ struct DirectFockCadence {
     // It ends once ||dP|| < -qm.scf_early_switch; the next build is then a full one with eri_screening, so
     // nothing accumulated under the loose threshold survives into the converged Fock matrix.
     bool early = false;
+    // Claude Generated (Oct 2026, Q-G5): FP32 phase of the device direct builder (-qm.gpu_eri_precision).
+    // It ends once ||dP|| < -qm.gpu_fp32_switch or after kFP32NoProgress iterations without a new
+    // smallest ||dP|| (FP32 noise floor); the next build is then a full FP64 one, so no FP32 J/K
+    // contribution survives, and convergence is only accepted with fp32 == false.
+    bool fp32 = false;
+    int fp32_builds = 0;
+    double fp32_best = std::numeric_limits<double>::infinity();
+    int fp32_noprog = 0;
+    static constexpr int kFP32NoProgress = 3;
 
-    explicit DirectFockCadence(bool d, bool early_phase = false) : direct(d), early(d && early_phase) {}
+    explicit DirectFockCadence(bool d, bool early_phase = false, bool fp32_phase = false)
+        : direct(d), early(d && early_phase), fp32(d && fp32_phase) {}
+    /// Feed ||P_new - P||_F; true when the FP32 phase just ended.
+    bool endFP32(double delta_P, double switch_dP)
+    {
+        if (!fp32) return false;
+        if (delta_P < fp32_best) {
+            fp32_best = delta_P;
+            fp32_noprog = 0;
+        } else {
+            ++fp32_noprog;
+        }
+        if (delta_P >= switch_dP && fp32_noprog < kFP32NoProgress) return false;
+        fp32 = false;
+        have_ref = false;  // next build: full, FP64
+        return true;
+    }
     /// Feed ||P_new - P||_F; true when the early (loose-screening) phase just ended.
     bool endEarly(double delta_P, double switch_dP)
     {
@@ -316,6 +342,16 @@ void reportIncrementalStall(int iter, double best_dP, double screening)
             "QM: integral-direct SCF: incremental J/K builds stalled near ||dP|| = {:.2e} (screening noise of "
             "eri_screening {:.1e}); full J/K builds from iteration {} on",
             best_dP, screening, iter + 2));
+}
+
+// One line at verbosity >= 2 when the FP32 phase ends (diagnostic only). Claude Generated (Oct 2026).
+void reportFP32End(int iter, double delta_P, int builds)
+{
+    if (CurcumaLogger::get_verbosity() >= 2)
+        CurcumaLogger::info(fmt::format(
+            "QM: integral-direct SCF: ||dP|| = {:.2e}, FP32 phase ends after {} FP32 J/K builds; full FP64 J/K build "
+            "from iteration {} on",
+            delta_P, builds, iter + 2));
 }
 
 // One line at verbosity >= 2 when the early (loose-screening) phase ends (diagnostic only).
@@ -480,10 +516,12 @@ bool QMEngine::runSCF()
     // When ||dP|| stalls at the incremental screening noise, full builds only
     // (DirectFockCadence).
     Matrix J_acc, K_acc, P_ref;
-    DirectFockCadence cadence(direct, useEarlyScreening());
+    DirectFockCadence cadence(direct, useEarlyScreening(), useGpuFP32Phase(direct));
     auto fockFromDensity = [&](const Matrix& P) -> Matrix {
         const bool full = cadence.nextFull();
         m_direct_thr_now = cadence.early ? m_scf_early_screening : -1.0;
+        m_direct_fp32_now = cadence.fp32;
+        if (cadence.fp32) ++cadence.fp32_builds;
         if (full) {
             buildJK(P, J_acc, K_acc);
         } else {
@@ -520,8 +558,9 @@ bool QMEngine::runSCF()
         // history can support it; use the extrapolated Fock for the diagonalization.
         Matrix fock_use = fock;
         if (use_diis && iter >= m_diis_start) {
-            // FP32 RI builds (mixed precision) count as non-full: dropped when the SCF switches to FP64
-            const int slot = diis.push(cadence.since_full == 0 && !riLowPrecision());
+            // FP32 RI builds (mixed precision) and FP32 direct builds (Q-G5) count as non-full: dropped
+            // when the SCF switches to FP64
+            const int slot = diis.push(cadence.since_full == 0 && !riLowPrecision() && !cadence.fp32);
             diis.setLastError(store.push(slot, fock, m_density, m_S, m_X));
             Eigen::MatrixXd G, M;
             Eigen::VectorXd a;
@@ -568,16 +607,21 @@ bool QMEngine::runSCF()
         }
 
         // Never converged on an FP32 RI build (mixed precision): the FP32 noise floor is not the FP64 fixed point
-        if (delta_P < m_scf_threshold && !cadence.early && !riLowPrecision()) {
+        if (delta_P < m_scf_threshold && !cadence.early && !cadence.fp32 && !riLowPrecision()) {
             riRequestExactBuild();  // mixed-precision RI: the final J/K build is exact FP64
             m_density = density_new;
             m_direct_thr_now = -1.0;
+            m_direct_fp32_now = false;
             finishConvergedSCF(C, eps, n_occ, iter + 1, delta_P, direct,
                                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_scf0).count(),
                                t_fock_ms, t_eig_ms, std::string());
             return true;
         }
         if (cadence.endEarly(delta_P, m_scf_early_switch)) reportEarlyEnd(iter, delta_P);
+        if (cadence.endFP32(delta_P, gpuFP32Switch())) {
+            reportFP32End(iter, delta_P, cadence.fp32_builds);
+            diis.dropIncrementalEntries();  // Fock matrices of FP32 builds leave the subspace
+        }
         if (riEndLowPrecision(delta_P)) diis.dropIncrementalEntries();  // FP32 -> exact FP64 RI builds (host loop only: RI never runs the device loop)
         if (cadence.observe(delta_P)) {
             reportIncrementalStall(iter, cadence.best_dP, m_eri_screening);
@@ -591,6 +635,7 @@ bool QMEngine::runSCF()
 
     // Ran out of iterations: keep the last density/Fock for diagnostics.
     m_direct_thr_now = -1.0;
+    m_direct_fp32_now = false;
     m_fock = buildFock(m_density);
     m_e_elec = 0.5 * m_density.cwiseProduct(m_H + m_fock).sum();
     return false;
@@ -701,9 +746,11 @@ int QMEngine::runSCFDevice(int n_occ, bool direct, bool use_diis, double damping
     double t_fock_ms = 0.0, t_eig_ms = 0.0;
     m_scf_converged = false;
     m_scf_iterations = 0;
-    DirectFockCadence cadence(direct, useEarlyScreening());
-    // screening of the device direct builder (early phase / eri_screening, primitive mode)
+    DirectFockCadence cadence(direct, useEarlyScreening(), useGpuFP32Phase(direct));
+    // screening of the device direct builder (early phase / eri_screening, primitive mode) and the
+    // integral precision (Q-G5: FP32 phase / FP64)
     auto setJKScreening = [&](bool early) {
+        if (direct && !jk->setFP32(cadence.fp32)) cadence.fp32 = false;  // builder without FP32: FP64 throughout
         if (direct && !jk->setScreening(early ? m_scf_early_screening : m_eri_screening, m_eri_prim_density)) {
             cadence.early = false;  // builder without the hook: final threshold throughout
             return false;
@@ -717,6 +764,8 @@ int QMEngine::runSCFDevice(int n_occ, bool direct, bool use_diis, double damping
         // Fock (host: fockFromDensity)
         const bool full = cadence.nextFull();
         setJKScreening(cadence.early);
+        const bool fp32_build = cadence.fp32;
+        if (fp32_build) ++cadence.fp32_builds;
         const auto t_f0 = std::chrono::steady_clock::now();
         if (!dev.buildFock(jk, full)) return fail("Fock build");
         cadence.built(full);
@@ -727,7 +776,7 @@ int QMEngine::runSCFDevice(int n_occ, bool direct, bool use_diis, double damping
         // DIIS / ADIIS: history on the device, subspace solve here
         const auto t_d0 = std::chrono::steady_clock::now();
         if (use_diis && iter >= m_diis_start) {
-            const int slot = diis.push(cadence.since_full == 0);
+            const int slot = diis.push(cadence.since_full == 0 && !fp32_build);  // FP32 entries leave at the switch
             double err = 0.0;
             if (!dev.diisPush(slot, err)) return fail("DIIS error vector");
             diis.setLastError(err);
@@ -762,8 +811,9 @@ int QMEngine::runSCFDevice(int n_occ, bool direct, bool use_diis, double damping
         t_eig_ms += eig_ms;
 
         if (CurcumaLogger::get_verbosity() == 1 || CurcumaLogger::get_verbosity() == 2)
-            CurcumaLogger::result(fmt::format("SCF iter {:3d}: dP = {:.3e}, E_elec = {:.10f} Eh (device, Fock {:.0f} ms {})",
-                                              iter + 1, delta_P, e_elec, fock_ms, full ? "full" : "incremental"));
+            CurcumaLogger::result(fmt::format("SCF iter {:3d}: dP = {:.3e}, E_elec = {:.10f} Eh (device, Fock {:.0f} ms {}{})",
+                                              iter + 1, delta_P, e_elec, fock_ms, full ? "full" : "incremental",
+                                              fp32_build ? ", FP32" : ""));
         if (CurcumaLogger::get_verbosity() >= 3)
             CurcumaLogger::param(fmt::format("SCF iter {}", iter + 1),
                                  fmt::format("dP = {:.3e}, E_elec = {:.10f} Eh (device; Fock {:.2f} ms ({}{}), DIIS {:.2f} ms, "
@@ -772,7 +822,8 @@ int QMEngine::runSCFDevice(int n_occ, bool direct, bool use_diis, double damping
                                              direct ? fmt::format(", {} quartets", jk->lastQuartets()) : std::string(),
                                              diis_ms, eig_ms));
 
-        if (delta_P < m_scf_threshold && !cadence.early) {
+        if (delta_P < m_scf_threshold && !cadence.early && !cadence.fp32) {
+            cadence.fp32 = false;
             setJKScreening(false);
             Matrix P(n, n), C(n, n);
             Vector eps(n);
@@ -786,6 +837,10 @@ int QMEngine::runSCFDevice(int n_occ, bool direct, bool use_diis, double damping
             return 1;
         }
         if (cadence.endEarly(delta_P, m_scf_early_switch)) reportEarlyEnd(iter, delta_P);
+        if (cadence.endFP32(delta_P, gpuFP32Switch())) {
+            reportFP32End(iter, delta_P, cadence.fp32_builds);
+            diis.dropIncrementalEntries();  // Fock matrices of FP32 builds leave the subspace
+        }
         if (cadence.observe(delta_P)) {
             reportIncrementalStall(iter, cadence.best_dP, m_eri_screening);
             diis.dropIncrementalEntries();  // keep only Fock matrices from full builds
@@ -794,6 +849,7 @@ int QMEngine::runSCFDevice(int n_occ, bool direct, bool use_diis, double damping
     }
 
     // Ran out of iterations: as the host loop, last density/Fock for diagnostics.
+    cadence.fp32 = false;
     setJKScreening(false);
     m_direct_thr_now = -1.0;
     Matrix P(n, n);
@@ -1027,6 +1083,52 @@ Matrix QMEngine::buildFock(const Matrix& P) const
 bool QMEngine::useEarlyScreening() const
 {
     return m_scf_early_screening > 0.0 && m_scf_early_screening > m_eri_screening && !m_last_warm_start;
+}
+
+// Claude Generated (Oct 2026, Q-G5): -qm.gpu_eri_precision fp64|fp32|mixed|auto. True when this SCF
+// starts with FP32 device direct builds: cold start, exact J/K integral-direct on the device, a
+// builder with FP32 kernels, and for auto a device whose FP64 rate is <= 1/16 of FP32.
+bool QMEngine::useGpuFP32Phase(bool direct) const
+{
+    std::string mode = m_gpu_eri_precision;
+    std::transform(mode.begin(), mode.end(), mode.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+    if (mode != "fp64" && mode != "fp32" && mode != "mixed" && mode != "auto") {
+        static bool warned = false;
+        if (!warned && CurcumaLogger::get_verbosity() >= 1) {
+            warned = true;
+            CurcumaLogger::warn(fmt::format("QM: unknown -qm.gpu_eri_precision '{}' (use fp64|fp32|mixed|auto); using auto",
+                                            m_gpu_eri_precision));
+        }
+        mode = "auto";
+    }
+    if (mode == "fp64" || !direct || m_last_warm_start || riActive()) return false;
+    const bool explicit_fp32 = mode != "auto";
+    auto unavailable = [&](const std::string& why) {
+        static bool warned = false;
+        if (explicit_fp32 && !warned && CurcumaLogger::get_verbosity() >= 1) {
+            warned = true;
+            CurcumaLogger::warn("QM: -qm.gpu_eri_precision " + mode + " not available (" + why + "); FP64 J/K builds");
+        }
+        return false;
+    };
+    if (!gpuDirectAllowed() || !ensureGpuDirect()) return unavailable("needs the device integral-direct J/K");
+    // auto: FP64-poor device and not a small basis (benzene, 114 functions, was 16 % slower with the
+    // FP32 phase: one extra iteration outweighs the cheaper builds; naphthalene, 180, 10 % faster)
+    constexpr int kFP32AutoMinNbf = 150;
+    if (mode == "auto" && (m_gpu_djk->fp32Ratio() < 16 || m_nbf < kFP32AutoMinNbf)) return false;
+    if (!m_gpu_djk->setFP32(true)) return unavailable("no FP32 kernels for this basis on " + m_gpu_djk->name());
+    m_gpu_djk->setFP32(false);
+    if (CurcumaLogger::get_verbosity() >= 2)
+        CurcumaLogger::info(fmt::format("QM: FP32 integrals until ||dP|| < {:.1e} (-qm.gpu_eri_precision {}, FP32:FP64 rate {} on {})",
+                                        gpuFP32Switch(), mode, m_gpu_djk->fp32Ratio(), m_gpu_djk->name()));
+    return true;
+}
+
+double QMEngine::gpuFP32Switch() const
+{
+    std::string mode = m_gpu_eri_precision;
+    std::transform(mode.begin(), mode.end(), mode.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+    return mode == "fp32" ? std::min(m_gpu_fp32_switch, 1.0e-5) : m_gpu_fp32_switch;
 }
 
 // Claude Generated (Sep 2026): -qm.scf_direct on|off|auto. auto keeps the stored
@@ -1316,6 +1418,7 @@ void QMEngine::buildJKExact(const Matrix& P, Matrix& J, Matrix& K) const
     }
     if (gpuDirectAllowed() && ensureGpuDirect()) {
         m_gpu_djk->setScreening(m_direct_thr_now >= 0.0 ? m_direct_thr_now : m_eri_screening, m_eri_prim_density);
+        m_gpu_djk->setFP32(m_direct_fp32_now);  // Q-G5: FP32 only inside the FP32 phase of the host loop
         if (gpuDirectBuild(P, J, K)) return;
     }
     if (!m_direct.ready()) {

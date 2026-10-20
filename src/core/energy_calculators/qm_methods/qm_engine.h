@@ -181,6 +181,13 @@ BEGIN_PARAMETER_DEFINITION(qm)
     PARAM(scf_early_switch, Double, 1.0e-3,
           "scf_early_screening: ||dP||_F below which the SCF switches to eri_screening.",
           "SCF", {})
+    // Claude Generated (Oct 2026, Q-G5): FP32 integrals in the early phase of the device integral-direct SCF
+    PARAM(gpu_eri_precision, String, "auto",
+          "Device integral-direct SCF (-gpu cuda, -qm.gpu_direct): precision of the J/K integrals. fp64 = FP64 throughout | mixed = FP32 integrals (FP64 accumulation of J/K) while ||dP||_F >= gpu_fp32_switch, then a full FP64 rebuild and FP64 to convergence (semantics of the GFN2 -scf_mixed_precision) | fp32 = as mixed but the FP32 phase runs down to ||dP|| < 1e-5 (testing) | auto (default) = mixed on devices whose FP64 throughput is at most 1/16 of FP32 (GeForce/consumer cards) for at least 150 basis functions, fp64 otherwise. Convergence is only accepted on FP64 builds and the final J/K build is FP64; cold starts only (no warm start); needs the spherical/s,p device kernels (else FP64).",
+          "Performance", {})
+    PARAM(gpu_fp32_switch, Double, 1.0e-3,
+          "gpu_eri_precision mixed: ||dP||_F below which the SCF leaves the FP32 builds (also after three FP32 iterations without a new smallest ||dP||). Must stay above scf_threshold.",
+          "Performance", {})
     PARAM(eri_prim_density, Bool, true,
           "Integral-direct J/K (CPU and device): screen primitive quartets against (eri_screening * 1e-3) / pq, pq = max |P| (|dP| in incremental builds) over the six shell blocks of the quartet, i.e. by their bound on the J/K contribution, instead of against eri_screening * 1e-3 alone.",
           "Performance", {})
@@ -339,6 +346,10 @@ private:
     double m_scf_early_switch = 1.0e-3;      // ||dP|| that ends the early phase
     bool m_eri_prim_density = true;         // density-weighted primitive screening (direct J/K)
     mutable double m_direct_thr_now = -1.0;  // screening of the next direct build (< 0: eri_screening)
+    // Q-G5 (Oct 2026): FP32 integrals in the early device-direct SCF (-qm.gpu_eri_precision)
+    std::string m_gpu_eri_precision = "auto";  // fp64 | fp32 | mixed | auto
+    double m_gpu_fp32_switch = 1.0e-3;         // ||dP|| that ends the FP32 phase
+    mutable bool m_direct_fp32_now = false;    // next device direct build in FP32 (host loop)
     // Warm start (Sep 2026): occupied MOs of the last converged SCF and the atoms
     // they belong to; used as the guess for the next geometry of the same molecule.
     bool m_scf_warm_start = true;
@@ -546,7 +557,9 @@ private:
     // "atom" guess (Claude Generated, Oct 2026): superposition of spherically averaged,
     // fractionally occupied atomic RHF densities (one small SCF per element in its own basis).
     Matrix buildAtomicHFGuess() const;
-    bool useEarlyScreening() const;           // -qm.scf_early_screening applies to this SCF
+    bool useEarlyScreening() const;
+    bool useGpuFP32Phase(bool direct) const;  // -qm.gpu_eri_precision: start this SCF with FP32 builds
+    double gpuFP32Switch() const;             // ||dP|| that ends the FP32 phase           // -qm.scf_early_screening applies to this SCF
     // Density the SCF starts from, selected by m_scf_guess.
     Matrix buildInitialGuess() const;
 

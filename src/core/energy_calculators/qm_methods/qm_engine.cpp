@@ -184,6 +184,10 @@ QMEngine::QMEngine(QMFunctional functional, const json& config)
         m_scf_early_screening = config["scf_early_screening"].get<double>();
     if (config.contains("scf_early_switch") && config["scf_early_switch"].is_number())
         m_scf_early_switch = config["scf_early_switch"].get<double>();
+    if (config.contains("gpu_eri_precision") && config["gpu_eri_precision"].is_string())
+        m_gpu_eri_precision = config["gpu_eri_precision"].get<std::string>();
+    if (config.contains("gpu_fp32_switch") && config["gpu_fp32_switch"].is_number())
+        m_gpu_fp32_switch = config["gpu_fp32_switch"].get<double>();
     if (config.contains("eri_prim_density") && config["eri_prim_density"].is_boolean())
         m_eri_prim_density = config["eri_prim_density"].get<bool>();
     if (config.contains("scf_direct")) {

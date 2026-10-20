@@ -182,7 +182,7 @@ faster from the guess alone); `ctest -L "qm_gpu|qm_2e|qm_1e|qm_hf3c|qm_grad|qm_m
 quartets per pair), other GPUs (a data-centre FP64 card shifts the balance), basis sets other than def2-SVP/MINIX,
 warm-started geometry sequences of large systems, `-qm.scf_threshold` below 1e-6 at this size, ROCm/Vulkan (no entry
 point). Not implemented: multipole far field for J (the n^2 wall), FP32 for small quartets (Q-G5), a faster kernel for
-the large classes (still ~80 % of the build time). (The kernel followed on Oct 20, below.)
+the large classes (still ~80 % of the build time). (The last two followed on Oct 20, below.)
 
 **Thread-per-quartet McMurchie-Davidson kernels for every class (Oct 20, 2026; AI-generated, machine-tested, RTX 5090
 only).** Profile of the Oct 19 code (C20H42, `CURCUMA_QM_GPU_DIRECT_PROFILE=1`): the block kernels of the classes with
@@ -198,7 +198,8 @@ pair are dropped at compile time (compile-time loops; a `#pragma unroll` form ne
 compile-time form 4 min for all 45). Same screening and quartet counts, FP64 atomics as before. The MD kernels are
 also faster than the old thread kernel on every small class (1.1-1.6x), so they run for all classes; the old kernels
 remain for cartesian d shells (`-qm.cartesian_d`) and as diagnostics (`CURCUMA_QM_GPU_DIRECT_MD=0` old kernels,
-`=large` old thread kernel for the small classes). Block size 32 (C40 SCF loop 5.79 s; 128: 5.88-6.21 s).
+`=large` old thread kernel for the small classes). Block size 32 (C40 SCF loop with the FP32 phase: 32: 4.54 s, 64: 4.59 s, 128: 4.88 s, 256: 4.84 s; FP64 only: 32:
+5.79 s, 128: 5.88-6.21 s).
 
 Per class, C20H42 (quartets/us, serialised profile launches, all-FP64 SCF, old = `CURCUMA_QM_GPU_DIRECT_MD=0`):
 (pp|pp) 12.2 -> 101, (ps|dp) 13.7 -> 115, (pp|ds) 18.7 -> 113, (ps|pd) 10.5 -> 77, (sp|dp) 15.9 -> 129, (pp|dp) 8.5 ->
@@ -226,6 +227,44 @@ count; not touched here). Device memory of the F tables: 1 MB (benzene), 19 MB (
 `qm_opt_hf3c_*` with the venv python). Not tested: other GPUs (block size and mode thresholds were chosen on the RTX
 5090), elements beyond H/C/O at this size, 3D-compact systems, other basis sets than def2-SVP/MINIX with d shells.
 
+**FP32 integrals in the early SCF phase, Q-G5 (Oct 20, 2026; AI-generated, machine-tested, RTX 5090 only).**
+`-qm.gpu_eri_precision fp64|fp32|mixed|auto` (default auto = mixed on a device with FP64 at most 1/16 of FP32, from 150
+basis functions; else fp64) and `-qm.gpu_fp32_switch` (1e-3). `cuda/qm_gpu_direct_fp32.cu` instantiates the MD kernels
+with `float`: R, Boys (FP32 copy of the same grid/Taylor table, `__expf`), Hermite tables F, density, contraction and
+digest sums in FP32; the product-centre difference P - Q is formed in FP64 before the cast (long chains: coordinates up
+to ~300 Bohr); Schwarz/density screening unchanged (FP64), atomics into J/K FP64. `DirectFockCadence` (host and device
+loop) leaves the FP32 phase when ||dP|| < `gpu_fp32_switch` or after 3 FP32 iterations without a new smallest ||dP||,
+with a full FP64 rebuild, drops the DIIS entries of the FP32 builds, and accepts convergence only with the FP32 phase
+over; the final J/K build is FP64. Cold starts only. FP32 error per class (`CURCUMA_QM_GPU_FP32_CHECK=1`, C20H42, 8
+FP32 builds of the SCF): max|J_FP32 - J_FP64| / max|J| 3e-8 to 1.7e-7, for K 5e-8 to 4.6e-7 ((ss|dp)), absolute at most
+4.6e-6 ((ss|ss) J); no class stood out. The FP32 Boys Taylor offset i*dT - T uses a split dT (the plain i*0.05f - T is
+off by up to ~2e-6 near T = 36); this did not change the measured maxima. FP32 vs FP64 rate per class (C20, profile): 1.4-1.6x for the low-L classes ((ss|ss),
+(ss|pp), (ss|ds), (ss|dp), (ss|dd)), 2-5x for the rest ((sd|pd) 5.1x, (pp|pd) 4.4x, (pp|pp) 3.4x): the kernels are not
+FP64-bound alone (screening, FP64 atomics, table loads), so the 64x hardware ratio does not show.
+
+| system (n) | fp64: SCF loop, iter | mixed: SCF loop, iter | FP32 builds / all | first FP32 builds fp64 -> fp32 | E_elec mixed - fp64 |
+|---|---|---|---|---|---|
+| benzene (114) | 149 ms, 10 | 173 ms, 11 (auto: not used) | 7/12 | - | 0 (10 dp) |
+| naphthalene (180) | 379 ms, 13 | 343 ms, 15 | 9/16 | - | 0 |
+| anthracene (246) | 806 ms, 15 | 618 ms, 16 | 9/17 | 467 -> 143 ms (3.3x) | 0 |
+| C20H42 (490) | 1.64 s, 13 | 1.26 s, 14 | 8/15 | 961 -> 369 ms (2.6x) | 0 |
+| C40H82 (970) | 5.79 s, 13 | 4.54 s, 14 | 8/15 | 3.43 -> 1.58 s (2.2x) | 0 |
+| C60H122 (1450) | 12.4 s, 13 | 10.1 s, 14 | 8/15 | - | 0 |
+| C80H162 (1930) | 21.5 s, 13 | 17.8 s, 14 | 8/15 | 12.5 -> 6.7 s (1.9x) | -1e-10 |
+| C120H242 (2890) | 51.1 s, 13 | 43.3 s, 15 (rerun after the Boys-offset fix: 41.4 s, 14) | 8/16 | 29.2 -> 15.8 s (1.85x) | -2e-10 |
+
+Single runs (the rerun of naphthalene..C80 after the Boys-offset fix reproduced the table within 1 %), load ~1. Against
+the Oct 19 baseline (all FP64, old kernels) the C120H242 SCF loop goes 216 -> 41-43 s, the wall time 305 -> 107-112 s. The gain of the FP32 phase is 10-23 % of the SCF loop: after the switch the SCF still needs a
+full FP64 build and 5-6 FP64 iterations (the DIIS restart costs 1-2 iterations), and the FP32 speedup falls with chain
+length because the low-L classes dominate. Measured and rejected: keeping the FP32 Fock matrices in the DIIS history
+(anthracene/C20/C40: 1-2 iterations more than dropping them), later switches 3e-4..3e-5 and `fp32` (FP32 down to 1e-5):
+equal or 1-3 iterations more, no gain. Benzene: one extra iteration outweighs the cheaper builds, hence the 150-function
+floor of auto. Test: `qm_gpu_scf_benzene_fp32` (mixed forced, device loop = host loop = CPU direct within 1e-9 Eh).
+Not tested: other GPUs (in particular whether auto picks fp64 on an HPC card), heavier elements (larger exponents:
+(-2 rho)^L in FP32 is the range risk), tighter `-qm.scf_threshold`, warm starts (FP32 not used there). Not implemented:
+FP32 for the incremental builds of the converging phase (their error would scale with ||dP||; not done because the
+convergence rule here requires FP64 builds in that phase), warp-level reduction of the J_ab atomics.
+
 ## 3. Proposed GPU stages (mirroring the xTB stages)
 
 Each stage keeps the rules that made the xTB port trustworthy: runtime `dlopen` plugin
@@ -239,7 +278,7 @@ anything is enabled by default.
 | Q-G2 | **done Oct 2026** (see below): device ERI kernel, one work item per shell quartet, fed by the flat `ShellPair`/`PrimPair` tables of section 1 | Stage 3 (integrals on device) |
 | Q-G3 | **done Oct 2026** (see below): integral-direct J/K on the device (section 2), density-weighted screening, FP64 accumulation | `-gpu_multipole_otf`, screened integrals |
 | Q-G4 | **done Oct 2026** (see below): device-resident SCF loop: Fock -> Löwdin-reduced eigensolve (`cusolverDnDsyevd`) -> density -> DIIS; host polls O(1) scalars per iteration | Stage 6 (fully resident loop) |
-| Q-G5 | mixed precision far from convergence (FP32 ERI/J/K with FP64 correction on dP), never accepting convergence on an FP32 step. **Done for RI-JK only (Oct 19 2026)**: `-qm.ri_mixed_precision` (FP32 tensor, SGEMM/SSYRK, then FP64 arithmetic plus exact batched corrections), and the RI tensor streamed from host memory (`-qm.gpu_ri_stream`); exact path still FP64, see [WP10 "RI-JK ressourcensparend"](DFT_ROADMAP/WP10_korrelation_ri_mpn_ccsd.md) | X-AP3 (FP32 eigensolve early in the SCF) |
+| Q-G5 | mixed precision far from convergence (FP32 ERI/J/K with FP64 correction on dP), never accepting convergence on an FP32 step. **Done for RI-JK only (Oct 19 2026)**: `-qm.ri_mixed_precision` (FP32 tensor, SGEMM/SSYRK, then FP64 arithmetic plus exact batched corrections), and the RI tensor streamed from host memory (`-qm.gpu_ri_stream`); exact path still FP64, see [WP10 "RI-JK ressourcensparend"](DFT_ROADMAP/WP10_korrelation_ri_mpn_ccsd.md). **Exact device-direct path (Oct 20 2026)**: `-qm.gpu_eri_precision` (FP32 integrals until ||dP|| < `-qm.gpu_fp32_switch`, then FP64; default auto on FP64-poor cards), section 2 | X-AP3 (FP32 eigensolve early in the SCF) |
 | Q-G6 | multi-GPU: distribute shell-quartet batches over the device pool | [MULTI_GPU.md](MULTI_GPU.md) |
 | Q-G7 | **done Oct 2026** (see below): two-electron part of the analytic RHF gradient on the device, integral-direct | Stage 3 kernels reused for the gradient |
 | Q-G8 | **done Oct 2026** (see below): one-electron part of the analytic RHF gradient on the device, from the Q-G7 tables | Stage 3 kernels reused for the gradient |

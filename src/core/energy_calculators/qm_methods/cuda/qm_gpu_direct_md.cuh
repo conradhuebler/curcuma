@@ -44,4 +44,15 @@ bool mdInit(const qmint::QMGpuEriTables* t, const DevTables& d, MdTables& m, std
 bool mdLaunch(int LA, int LB, int LC, int LD, const DevTables& d, const MdTables& m, const QSrc& src, long long nq,
               cudaStream_t st);
 
+/// FP32 phase (qm_gpu_direct_fp32.cu, Claude Generated Oct 20 2026): FP32 copies of F and of the
+/// Boys table (once), a device buffer for the FP32 density; false + reason on a device error.
+bool md32Init(const DevTables& d, MdTables& m, std::vector<void*>& owned, std::string& why, size_t& bytes);
+
+/// FP32 copy of the density (n x n) into m.P32 on stream st.
+void md32Density(const double* P, const MdTables& m, size_t n2, cudaStream_t st);
+
+/// FP32 instance of mdLaunch (same classes, same screening; FP64 atomics into Jt, Kt).
+bool mdLaunch32(int LA, int LB, int LC, int LD, const DevTables& d, const MdTables& m, const QSrc& src, long long nq,
+                cudaStream_t st);
+
 } // namespace qmgpu

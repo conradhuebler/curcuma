@@ -136,8 +136,11 @@ __device__ __forceinline__ void sfor(F&& f)
 }
 
 /// FP32 Boys function F_0..F_MAXN: same grid, Taylor table and recursions as boysDev, in FP32.
+/// The Taylor offset i*dT - T uses dT = dT_hi + dT_lo and one fma (0.05 is not a float: the plain
+/// i * 0.05f - T is off by up to ~2e-6 at the end of the grid). Claude Generated (Oct 20 2026).
 template <int MAXN>
-__device__ __forceinline__ void boysF32(float T, float* F, const float* __restrict__ tab, int ntab, float dT, float Tmax)
+__device__ __forceinline__ void boysF32(float T, float* F, const float* __restrict__ tab, int ntab, float dT_hi,
+                                        float dT_lo, float Tmax)
 {
     if (T >= Tmax) {
         const float eT = __expf(-T);
@@ -146,8 +149,8 @@ __device__ __forceinline__ void boysF32(float T, float* F, const float* __restri
         for (int n = 0; n < MAXN; ++n) F[n + 1] = ((2.0f * n + 1.0f) * F[n] - eT) / (2.0f * T);
         return;
     }
-    const int i = (int)(T / dT + 0.5f);
-    const float dd = i * dT - T;
+    const int i = (int)(T / dT_hi + 0.5f);
+    const float dd = fmaf((float)i, dT_hi, -T) + (float)i * dT_lo;
     const float* fi = tab + (size_t)i * (ntab + 1) + MAXN;
     const float inv[kNTaylor] = { 1.0f, 1.0f, 1.0f / 2, 1.0f / 3, 1.0f / 4, 1.0f / 5, 1.0f / 6 };
     float acc = fi[kNTaylor - 1];
@@ -210,7 +213,8 @@ __device__ __forceinline__ void mdBody(const DevTables& d, const MdTables& m, in
                 Wz = (float)(Pz - d.pp_P[3 * pk + 2]);
                 const float pf = (float)p, qf = (float)qq;
                 rho = pf * qf / (pf + qf);
-                boysF32<L>(rho * (Wx * Wx + Wy * Wy + Wz * Wz), Fb, m.boys_f32, d.boys_ntab, (float)d.boys_dT, (float)d.boys_Tmax);
+                boysF32<L>(rho * (Wx * Wx + Wy * Wy + Wz * Wz), Fb, m.boys_f32, d.boys_ntab, (float)d.boys_dT,
+                           (float)(d.boys_dT - (double)(float)d.boys_dT), (float)d.boys_Tmax);
                 pref = (float)d.pref / (pf * qf * sqrtf(pf + qf));
             } else {
                 rho = p * qq / (p + qq);

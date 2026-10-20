@@ -73,6 +73,23 @@ __global__ void symmetriseKernel(const double* __restrict__ Jt, const double* __
     K[k] = 0.5 * (Kt[k] + Kt[kt]);
 }
 
+/// FP32-check diagnostic (CURCUMA_QM_GPU_FP32_CHECK=1): out[0] = max|a|, out[1] = max|a - b| as the
+/// bit patterns of non-negative doubles (atomicMax orders them like the values). Claude Generated (Oct 2026).
+__global__ void accumulateKernel(double* __restrict__ a, const double* __restrict__ b, long long n)
+{
+    const long long k = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (k < n) a[k] += b[k];
+}
+
+__global__ void maxAbsDiffKernel(const double* __restrict__ a, const double* __restrict__ b, long long n,
+                                 unsigned long long* __restrict__ out)
+{
+    const long long k = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= n) return;
+    atomicMax(out, (unsigned long long)__double_as_longlong(fabs(a[k])));
+    atomicMax(out + 1, (unsigned long long)__double_as_longlong(fabs(a[k] - b[k])));
+}
+
 /// Two-step McMurchie-Davidson variant of eriClassKernel for the large classes of the
 /// integral-direct build (Claude Generated, Oct 19 2026). Profile (C20H42, RTX 5090): the classes
 /// with more than 27 cartesian components (d shells, (pp|pp)) were ~13 % of the quartets but ~83 %
@@ -345,6 +362,9 @@ public:
         cudaEventCreate(&m_e1);
         cudaDeviceProp prop{};
         cudaGetDeviceProperties(&prop, device >= 0 ? device : 0);
+        cudaDeviceGetAttribute(&m_fp32_ratio, cudaDevAttrSingleToDoublePrecisionPerfRatio, device >= 0 ? device : 0);
+        const char* cenv = std::getenv("CURCUMA_QM_GPU_FP32_CHECK");  // diagnostic: FP32 vs FP64 per class
+        m_fp32_check = cenv && cenv[0] == '1';
         m_name = std::string("cuda:") + prop.name;
         m_bytes = 0;
         return cudaGetLastError() == cudaSuccess;
@@ -373,6 +393,7 @@ public:
             }
         m_last_quartets = (long long)cnt;
         ++m_builds;
+        if (m_fp32) ++m_fp32_builds;
         m_kernel_ms += kms;
         m_total_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         return true;
@@ -395,10 +416,28 @@ public:
             return false;
         m_last_quartets = (long long)cnt;
         ++m_builds;
+        if (m_fp32) ++m_fp32_builds;
         m_kernel_ms += kms;
         m_total_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         return true;
     }
+
+    /// Q-G5 (Claude Generated, Oct 20 2026): FP32 integrals for the following builds. Needs the md
+    /// kernels (spherical/s,p basis); the FP32 tables are built on the first request.
+    bool setFP32(bool on) override
+    {
+        if (!on) { m_fp32 = false; return true; }
+        if (!m_md_ok) return false;
+        if (!m_md32_tried) {
+            m_md32_tried = true;
+            size_t b = 0;
+            m_md32_ok = qmgpu::md32Init(m_d, m_md, m_owned, m_md32_why, b);
+            m_md32_bytes = b;
+        }
+        m_fp32 = m_md32_ok;
+        return m_md32_ok;
+    }
+    int fp32Ratio() const override { return m_fp32_ratio; }
 
     /// Q-G3 screening threshold of the following builds (host SCF: looser early phase); the
     /// primitive threshold follows as thr * 1e-3, as buildEriGpuTables. Claude Generated (Oct 2026).
@@ -485,6 +524,7 @@ public:
         m_rows_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - th0).count();
         m_launched += launched;
 
+        if (m_fp32) qmgpu::md32Density(m_P, m_md, n2, 0);  // FP32 density for the digest
         cudaEventRecord(m_e1);  // later launches on the streams wait for Pmax, the memsets and the rows
         for (auto& s : m_streams) cudaStreamWaitEvent(s, m_e1, 0);
 
@@ -505,7 +545,13 @@ public:
             }
             const bool small = ncomp(LA) * ncomp(LB) * ncomp(LC) * ncomp(LD) <= kThreadKernelMaxNC;
             bool md = false;
-            if (m_md_ok && (!small || m_md_all || !m_thread_ok)) md = qmgpu::mdLaunch(LA, LB, LC, LD, m_d, m_md, src, L.nq, st);
+            if (m_fp32 && m_fp32_check) {
+                if (pe0) { cudaEventDestroy(pe0); cudaEventDestroy(pe1); }
+                if (!checkFP32Class(L.X, L.Y, src, L.nq)) return false;
+                continue;
+            }
+            if (m_fp32) md = qmgpu::mdLaunch32(LA, LB, LC, LD, m_d, m_md, src, L.nq, st);
+            if (!md && m_md_ok && (!small || m_md_all || !m_thread_ok)) md = qmgpu::mdLaunch(LA, LB, LC, LD, m_d, m_md, src, L.nq, st);
             const bool threaded = !md && m_thread_ok && launchThreadClass<true>(LA, LB, LC, LD, m_d, src, L.nq, nullptr, st, m_spherical);
             if (!threaded && !md) {
                 if (m_block_only)
@@ -521,11 +567,11 @@ public:
                 cudaEventElapsedTime(&ms, pe0, pe1);
                 unsigned long long c1 = 0;
                 cudaMemcpy(&c1, m_counter, sizeof c1, cudaMemcpyDeviceToHost);
-                ProfileEntry& e = m_prof[L.X * 9 + L.Y];
+                ProfileEntry& e = m_prof[L.X * 9 + L.Y + (m_fp32 ? 81 : 0)];
                 e.ms += ms;
                 e.launched += L.nq;
                 e.computed += (long long)(c1 - c0);
-                e.kind = md ? 3 : threaded ? 1 : (m_block_only ? 2 : 0);
+                e.kind = (md && m_fp32) ? 4 : md ? 3 : threaded ? 1 : (m_block_only ? 2 : 0);
                 cudaEventDestroy(pe0);
                 cudaEventDestroy(pe1);
             }
@@ -549,18 +595,36 @@ public:
                       "launched %lld quartets, device memory %.1f MB",
                       m_builds, m_kernel_ms, m_total_ms, m_rows_ms, m_launched, m_bytes / 1.0e6);
         std::string out = buf;
+        if (m_fp32_builds > 0 || m_md32_tried) {
+            std::snprintf(buf, sizeof buf, ", %d FP32 builds%s", m_fp32_builds,
+                          m_md32_ok ? "" : (" (FP32 unavailable: " + m_md32_why + ")").c_str());
+            out += buf;
+        }
         out += m_md_ok ? ", large classes: md kernels (Hermite tables " + std::to_string(m_md_bytes / 1000000) + " MB)"
                        : ", large classes: hermite block kernel (md: " + m_md_why + ")";
         if (m_profile) {  // CURCUMA_QM_GPU_DIRECT_PROFILE=1: per pair class (serialised launches)
             static const char* lab = "spd";
-            static const char* kinds[4] = { "hermite", "thread", "block", "md" };
-            for (int k = 0; k < 81; ++k) {
+            static const char* kinds[5] = { "hermite", "thread", "block", "md", "md-fp32" };
+            for (int k = 0; k < 162; ++k) {
                 const ProfileEntry& e = m_prof[k];
                 if (e.launched == 0) continue;
-                const int X = k / 9, Y = k % 9;
+                const int X = (k % 81) / 9, Y = k % 9;
                 std::snprintf(buf, sizeof buf, "\n  class (%c%c|%c%c) %s: %.1f ms, launched %lld, computed %lld, %.1f computed/us",
                               lab[X / 3], lab[X % 3], lab[Y / 3], lab[Y % 3], kinds[e.kind], e.ms,
                               e.launched, e.computed, e.ms > 0 ? e.computed / (1000.0 * e.ms) : 0.0);
+                out += buf;
+            }
+        }
+        if (m_fp32_check) {  // CURCUMA_QM_GPU_FP32_CHECK=1: FP32 - FP64 per class (max over builds)
+            static const char* lab = "spd";
+            for (int k = 0; k < 81; ++k) {
+                const CheckEntry& e = m_check[k];
+                if (e.builds == 0) continue;
+                const int X = k / 9, Y = k % 9;
+                std::snprintf(buf, sizeof buf,
+                              "\n  FP32 check (%c%c|%c%c): %d builds, max|J| %.3e max|dJ| %.3e (rel %.1e), max|K| %.3e max|dK| %.3e (rel %.1e)",
+                              lab[X / 3], lab[X % 3], lab[Y / 3], lab[Y % 3], e.builds, e.j, e.dj, e.j > 0 ? e.dj / e.j : 0.0,
+                              e.k, e.dk, e.k > 0 ? e.dk / e.k : 0.0);
                 out += buf;
             }
         }
@@ -568,6 +632,42 @@ public:
     }
 
 private:
+    /// CURCUMA_QM_GPU_FP32_CHECK=1: class (X|Y) once in FP64 and once in FP32 into scratch J/K, the
+    /// largest element and the largest difference recorded, the FP32 result added to the build
+    /// (so the SCF path is the one of an unchecked FP32 build). Serial, diagnostic only.
+    bool checkFP32Class(int X, int Y, const QSrc& src, long long nq)
+    {
+        const size_t n2 = (size_t)m_n * m_n;
+        if (!m_chk_buf) {
+            if (!alloc(&m_chk_buf, 4 * n2) || !alloc(&m_chk_cnt, 1) || !alloc(&m_chk_max, 4)) return false;
+        }
+        double *J64 = m_chk_buf, *K64 = J64 + n2, *J32 = K64 + n2, *K32 = J32 + n2;
+        cudaDeviceSynchronize();
+        cudaMemset(m_chk_buf, 0, 4 * n2 * sizeof(double));
+        cudaMemset(m_chk_max, 0, 4 * sizeof(unsigned long long));
+        const int LA = X / 3, LB = X % 3, LC = Y / 3, LD = Y % 3;
+        DevTables d64 = m_d;
+        d64.J = J64; d64.K = K64; d64.counter = m_chk_cnt;
+        DevTables d32 = m_d;
+        d32.J = J32; d32.K = K32;
+        if (!qmgpu::mdLaunch(LA, LB, LC, LD, d64, m_md, src, nq, 0) || !qmgpu::mdLaunch32(LA, LB, LC, LD, d32, m_md, src, nq, 0))
+            return false;
+        const unsigned nb = (unsigned)((n2 + 255) / 256);
+        maxAbsDiffKernel<<<nb, 256>>>(J64, J32, (long long)n2, m_chk_max);
+        maxAbsDiffKernel<<<nb, 256>>>(K64, K32, (long long)n2, m_chk_max + 2);
+        accumulateKernel<<<nb, 256>>>(m_J, J32, (long long)n2);
+        accumulateKernel<<<nb, 256>>>(m_K, K32, (long long)n2);
+        unsigned long long mx[4];
+        if (cudaMemcpy(mx, m_chk_max, sizeof mx, cudaMemcpyDeviceToHost) != cudaSuccess) return false;
+        double v[4];
+        std::memcpy(v, mx, sizeof v);
+        CheckEntry& e = m_check[X * 9 + Y];
+        ++e.builds;
+        e.j = std::max(e.j, v[0]); e.dj = std::max(e.dj, v[1]);
+        e.k = std::max(e.k, v[2]); e.dk = std::max(e.dk, v[3]);
+        return cudaGetLastError() == cudaSuccess;
+    }
+
     template <typename T>
     bool alloc(T** p, size_t count)
     {
@@ -598,7 +698,16 @@ private:
     std::string m_md_why;
     size_t m_md_bytes = 0;
     struct ProfileEntry { double ms = 0.0; long long launched = 0, computed = 0; int kind = 0; };
-    ProfileEntry m_prof[81];
+    ProfileEntry m_prof[162];  // 81 FP64 + 81 FP32 class pairs
+    // Q-G5 FP32 phase
+    bool m_fp32 = false, m_md32_ok = false, m_md32_tried = false, m_fp32_check = false;
+    int m_fp32_ratio = 0, m_fp32_builds = 0;
+    std::string m_md32_why;
+    size_t m_md32_bytes = 0;
+    struct CheckEntry { int builds = 0; double j = 0, dj = 0, k = 0, dk = 0; };
+    CheckEntry m_check[81];
+    double* m_chk_buf = nullptr;
+    unsigned long long *m_chk_cnt = nullptr, *m_chk_max = nullptr;
     int* m_width = nullptr;
     int* m_first = nullptr;
     double *m_P = nullptr, *m_J = nullptr, *m_K = nullptr, *m_Pmax = nullptr;
