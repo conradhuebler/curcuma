@@ -53,7 +53,7 @@ re-measure them.
 **Capabilities** (each prints its options with `curcuma -<capability>` without arguments): single point
 `-sp`, optimisation `-opt`, Hessian and frequencies `-hessian`, molecular dynamics `-md` (thermostats,
 RATTLE, temperature ramps, PLUMED metadynamics), conformer search `-confsearch` and filtering `-confscan`,
-RMSD with atom reordering `-rmsd`, docking `-dock`, interaction energies `-interaction`, counter-ion placement `-ionize`, implicit solvation
+RMSD with atom reordering `-rmsd`, docking `-dock`, interaction energies `-interaction`, counter-ion placement `-ionize`, streaming trajectory properties `-trajprops`, implicit solvation
 (ALPB/GBSA for native GFN1/GFN2, ALPB for GFN-FF), trajectory and structure analysis `-analysis`.
 
 ## Download and requirements

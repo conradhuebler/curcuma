@@ -513,6 +513,7 @@ set(curcuma_core_SRC
         src/capabilities/external_potentials.cpp
         src/capabilities/measurement.cpp
         src/capabilities/ionize.cpp
+        src/capabilities/trajprops.cpp
         src/tools/cif.cpp
         src/capabilities/simplemd.cpp
         src/capabilities/md_diagnostics.cpp
@@ -632,6 +633,7 @@ set(curcuma_cap_SRC
         src/capabilities/external_potentials.cpp
         src/capabilities/measurement.cpp
         src/capabilities/ionize.cpp
+        src/capabilities/trajprops.cpp
         src/tools/cif.cpp
         src/capabilities/simplemd.cpp
         src/capabilities/md_diagnostics.cpp

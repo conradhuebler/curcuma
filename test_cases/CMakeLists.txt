@@ -597,6 +597,12 @@ target_link_libraries(test_ionize curcuma_cap curcuma_core)
 add_test(NAME ionize_capability COMMAND test_ionize)
 set_tests_properties(ionize_capability PROPERTIES TIMEOUT 120)
 
+# Streaming trajectory properties. Claude Generated 2026 - geometry worked out by hand.
+add_executable(test_trajprops test_trajprops.cpp)
+target_link_libraries(test_trajprops curcuma_cap curcuma_core)
+add_test(NAME trajprops_capability COMMAND test_trajprops)
+set_tests_properties(trajprops_capability PROPERTIES TIMEOUT 120)
+
 add_executable(test_lobpcg unit/test_lobpcg.cpp)
 target_link_libraries(test_lobpcg curcuma_core)
 if(USE_PCH)

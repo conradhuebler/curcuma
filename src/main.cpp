@@ -52,6 +52,7 @@
 #include "src/capabilities/trajectoryanalysis.h"
 #include "src/capabilities/polymerbuild.h"
 #include "src/capabilities/ionize.h"
+#include "src/capabilities/trajprops.h"
 #include "src/tools/trajectory_writer.h"
 
 #include "src/tools/general.h"
@@ -2372,6 +2373,20 @@ int executeIonize(const json& controller, int argc, char** argv)
     return ionizer.error().empty() ? 0 : 1;
 }
 
+// Streaming trajectory properties: -trajprops traj.xyz -selection "F1" -last_fraction 0.3333  (Claude Generated 2026)
+int executeTrajProps(const json& controller, int argc, char** argv)
+{
+    if (argc < 3) {
+        std::cerr << "Please use curcuma for trajectory properties as follows:\ncurcuma -trajprops traj.xyz [-quantity gyration] [-selection F1] [-last_fraction 0.3333]" << std::endl;
+        return 1;
+    }
+    curcuma::TrajectoryProperties props(controller, false);
+    initializeBMT(&props, argv[2], "trajprops", controller);
+    props.start();
+    props.processBakFiles();
+    return props.error().empty() ? 0 : 1;
+}
+
 // ============================================================================
 // Interaction (association) energy capability: -interaction  — Claude Generated 2026
 // ----------------------------------------------------------------------------
@@ -2621,6 +2636,8 @@ const std::map<std::string, CapabilityInfo> CAPABILITY_REGISTRY = {
               {"XYZ", "MOL2", "SDF"}, executeDocking}},
     {"polymerbuild", {"Iterative polymer assembly from fragments", "assembly",
                   {"XYZ"}, executePolymerBuild}},
+    {"trajprops", {"Streaming properties of a long trajectory (gyration radius)", "analysis",
+                  {"XYZ", "VTF"}, executeTrajProps}},
     {"ionize", {"Neutralise a solvated system by replacing solvent with counter-ions", "assembly",
                   {"XYZ"}, executeIonize}},
     {"md", {"Molecular dynamics simulation", "dynamics",
