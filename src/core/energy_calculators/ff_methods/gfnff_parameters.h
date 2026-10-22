@@ -215,6 +215,21 @@ struct GFNFFHydrogenBond {
 };
 
 /**
+ * @brief Energy of one hydrogen-bond triple A-H...B, in Eh. Claude Generated (Oct 2026).
+ *
+ * The same value the workspace adds to the hydrogen-bond energy; indices are 0-based atom
+ * numbers of the triple in the list of GFNFF::getLastHBonds(). A triple outside its cut-off
+ * contributes 0. See FFWorkspace::hydrogenBondEnergies().
+ */
+struct GFNFFHBondEnergy {
+    int donor = 0;
+    int hydrogen = 0;
+    int acceptor = 0;
+    int case_type = 1;
+    double energy = 0.0;
+};
+
+/**
  * @brief GFN-FF Halogen Bond (XB) three-body term
  *
  * Reference: gfnff_engrad.F90 - rbxgfnff_eg()

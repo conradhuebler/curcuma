@@ -3925,6 +3925,8 @@ bool GFNFF::initializeForceField()
         // two full copies cost ~3 s / 1.2 GB on a 3000-atom water box (B3, Sep 2026).
         m_cached_parameter_set = makeParameterSetCache(ff_params);
         m_workspace->setInteractionLists(std::move(ff_params));
+        if (m_record_hb_energies)
+            m_workspace->setRecordHBondEnergies(true);
 
         if (num_threads > 1 && threadPool()) {
             m_workspace->setPool(threadPool());

@@ -57,6 +57,8 @@ void FFWorkspace::setInteractionLists(GFNFFParameterSet&& params)
     m_coulombs = std::move(params.coulombs);
 
     m_hbonds = std::move(params.hbonds);
+    if (m_record_hb_energies)
+        m_hb_triple_energy.assign(m_hbonds.size(), 0.0);
     m_xbonds = std::move(params.xbonds);
     m_atm_triples = std::move(params.atm_triples);
     m_batm_triples = std::move(params.batm_triples);
@@ -211,9 +213,30 @@ void FFWorkspace::rebuildInteractionLists(GFNFFParameterSet&& params)
     partition();
 }
 
+void FFWorkspace::setRecordHBondEnergies(bool on)
+{
+    m_record_hb_energies = on;
+    m_hb_triple_energy.clear();
+    if (on)
+        m_hb_triple_energy.assign(m_hbonds.size(), 0.0);
+}
+
+std::vector<GFNFFHBondEnergy> FFWorkspace::hydrogenBondEnergies() const
+{
+    std::vector<GFNFFHBondEnergy> out;
+    if (!m_record_hb_energies || m_hb_triple_energy.size() != m_hbonds.size())
+        return out;
+    out.reserve(m_hbonds.size());
+    for (std::size_t i = 0; i < m_hbonds.size(); ++i)
+        out.push_back({ m_hbonds[i].i, m_hbonds[i].j, m_hbonds[i].k, m_hbonds[i].case_type, m_hb_triple_energy[i] });
+    return out;
+}
+
 void FFWorkspace::updateHBonds(const std::vector<GFNFFHydrogenBond>& hbonds)
 {
     m_hbonds = hbonds;
+    if (m_record_hb_energies)
+        m_hb_triple_energy.assign(m_hbonds.size(), 0.0);
     // Re-partition HB ranges only
     int T = m_num_threads;
     for (int t = 0; t < T; ++t) {

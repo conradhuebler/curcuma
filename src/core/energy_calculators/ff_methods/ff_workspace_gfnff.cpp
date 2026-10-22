@@ -1027,6 +1027,10 @@ void FFWorkspace::calcHydrogenBonds(int p)
 
     for (int idx = begin; idx < end; ++idx) {
         const auto& hb = m_hbonds[idx];
+        // Partitions own disjoint index ranges, so writing slot idx needs no lock.
+        const bool record = m_record_hb_energies && idx < static_cast<int>(m_hb_triple_energy.size());
+        if (record)
+            m_hb_triple_energy[idx] = 0.0;
 
         Eigen::Vector3d pos_A = m_geometry.row(hb.i).transpose();
         Eigen::Vector3d pos_H = m_geometry.row(hb.j).transpose();
@@ -1226,6 +1230,8 @@ void FFWorkspace::calcHydrogenBonds(int p)
             E_HB = -bas * aci * rdamp * qhoutl;
         }
         acc.energy.hbond += E_HB;
+        if (record)
+            m_hb_triple_energy[idx] = E_HB;
 
         static const bool hb_dump = (std::getenv("CURCUMA_HB_DUMP") != nullptr);  // once, not per triple
         if (hb_dump && std::abs(E_HB) > 1e-13) {

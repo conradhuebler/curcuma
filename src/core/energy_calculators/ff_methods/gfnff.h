@@ -1290,6 +1290,30 @@ public:
     };
     const Vector& getLastCNF() const { return m_last_cnf; }
     FFWorkspace* getWorkspace() const { return m_workspace.get(); }
+
+    /**
+     * @brief Record the energy of every hydrogen-bond triple at each CPU evaluation.
+     *
+     * Claude Generated (Oct 2026). Takes effect from the next calculation. The values are the
+     * terms that make up the hydrogen-bond energy (Eh), so a count of triples below an energy
+     * limit is possible without recomputing anything. CPU workspace only: when a GPU method owns
+     * the hydrogen-bond list (setSkipHostHBWorkspace) nothing is recorded.
+     */
+    void setRecordHBondEnergies(bool on)
+    {
+        m_record_hb_energies = on;
+        if (m_workspace)
+            m_workspace->setRecordHBondEnergies(on);
+    }
+
+    /// Per-triple energies of the last evaluation, in the order of getLastHBonds(); empty when not
+    /// recording, not yet evaluated, or the list is not the CPU workspace's.
+    std::vector<GFNFFHBondEnergy> hydrogenBondEnergies() const
+    {
+        if (!m_workspace || m_skip_host_hb_workspace)
+            return {};
+        return m_workspace->hydrogenBondEnergies();
+    }
     /// GPU wrappers: keep the FULL parameter set for consumeCachedParameterSet() (default: bonded terms only).
     void setKeepFullParameterSet(bool keep) { m_keep_full_parameter_set = keep; }
     /// Shared CxxThreadPool (null before initializeForceField()).
@@ -2668,6 +2692,7 @@ private:
     json m_parameters; ///< GFN-FF parameters
     int m_threads = 1; ///< Claude Generated (WP1, May 2026): cached thread count, kept in sync with m_parameters["threads"]
     std::unique_ptr<CxxThreadPool> m_pool; ///< Shared worker pool (topology setup, EEQ, workspace kernels)
+    bool m_record_hb_energies = false;   ///< setRecordHBondEnergies(); applied when the workspace is created
     std::unique_ptr<FFWorkspace> m_workspace; ///< Claude Generated (Mar 2026): Unified workspace (replaces ForceField path)
 
     GeoGradMatrix m_geometry_bohr; ///< Geometry in Bohr (GFN-FF parameters are in Bohr) — WP-G: RowMajor

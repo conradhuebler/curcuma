@@ -603,6 +603,12 @@ target_link_libraries(test_trajprops curcuma_cap curcuma_core)
 add_test(NAME trajprops_capability COMMAND test_trajprops)
 set_tests_properties(trajprops_capability PROPERTIES TIMEOUT 120)
 
+# Per-triple GFN-FF hydrogen-bond energies. Claude Generated 2026 - identities that hold by construction.
+add_executable(test_hbond_energies test_hbond_energies.cpp)
+target_link_libraries(test_hbond_energies curcuma_core)
+add_test(NAME hbond_energies COMMAND test_hbond_energies)
+set_tests_properties(hbond_energies PROPERTIES TIMEOUT 120)
+
 add_executable(test_lobpcg unit/test_lobpcg.cpp)
 target_link_libraries(test_lobpcg curcuma_core)
 if(USE_PCH)

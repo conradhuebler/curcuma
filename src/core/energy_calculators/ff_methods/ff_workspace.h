@@ -420,6 +420,16 @@ public:
         return n;
     }
     int getHBondCount() const { return static_cast<int>(m_hbonds.size()); }
+
+    /// Record the energy of every hydrogen-bond triple at each evaluation (CPU path only).
+    /// Off by default: it costs one double per triple and a write per triple and step.
+    /// Claude Generated (Oct 2026).
+    void setRecordHBondEnergies(bool on);
+    bool recordsHBondEnergies() const { return m_record_hb_energies; }
+
+    /// Energy of each triple of the list from the last evaluation, in list order. Empty unless
+    /// recording was on before that evaluation and the list has not changed since.
+    std::vector<GFNFFHBondEnergy> hydrogenBondEnergies() const;
     int getXBondCount() const { return static_cast<int>(m_xbonds.size()); }
 
 private:
@@ -466,6 +476,8 @@ private:
     std::vector<GFNFFRepulsion> m_bonded_reps, m_nonbonded_reps;
     std::vector<GFNFFCoulomb> m_coulombs;
     std::vector<GFNFFHydrogenBond> m_hbonds;
+    bool m_record_hb_energies = false;
+    std::vector<double> m_hb_triple_energy;   ///< per triple of m_hbonds, Eh; filled by calcHydrogenBonds when recording
     std::vector<GFNFFHalogenBond> m_xbonds;
     std::vector<ATMTriple> m_atm_triples;
     std::vector<GFNFFBatmTriple> m_batm_triples;
