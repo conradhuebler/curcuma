@@ -1582,8 +1582,15 @@ int PolymerBuild::verifyAndFixTopology(
     }
 
     // Get actual topology
-    Matrix actual = mol.hasPersistentTopology() ? mol.getTopologyMatrix() : Matrix::Zero(n, n);
-    if (!mol.hasPersistentTopology()) {
+    Matrix actual = Matrix::Zero(n, n);
+    int known_atoms = n;  // atoms covered by the stored topology; later atoms are new (appended fragment)
+    if (mol.hasPersistentTopology()) {
+        // The stored matrix can be smaller than the molecule right after connectFragment (atoms appended
+        // after it was set). Copy the overlap; reading actual(i,j) beyond it was out-of-bounds (Oct 2026).
+        const Matrix stored = mol.getTopologyMatrix();
+        known_atoms = std::min<int>(n, static_cast<int>(std::min(stored.rows(), stored.cols())));
+        actual.topLeftCorner(known_atoms, known_atoms) = stored.topLeftCorner(known_atoms, known_atoms);
+    } else {
         auto [_, topo] = mol.DistanceMatrix();
         actual = topo;
     }
@@ -1608,8 +1615,18 @@ int PolymerBuild::verifyAndFixTopology(
         }
     }
 
+    // Differences confined to atoms beyond the stored topology are the new fragment: expected, not a defect
+    bool only_new_atoms = (known_atoms < n) && (extra == 0);
+    for (const auto& [i, j] : missing_bonds)
+        if (j < known_atoms) only_new_atoms = false;
+
     // Log diagnostics
-    if (missing > 0 || extra > 0) {
+    if (only_new_atoms) {
+        if (CurcumaLogger::get_verbosity() >= 2)
+            CurcumaLogger::info(fmt::format(
+                "verifyAndFixTopology{}: {} bonds of the {} appended atoms added to the stored topology",
+                context_label.empty() ? "" : " [" + context_label + "]", missing, n - known_atoms));
+    } else if (missing > 0 || extra > 0) {
         CurcumaLogger::warn(fmt::format(
             "verifyAndFixTopology{}: {} missing bonds, {} extra bonds",
             context_label.empty() ? "" : " [" + context_label + "]",
