@@ -25,17 +25,37 @@ curcuma -trajprops traj.xyz -selection "1:780" -stride 10 -mass_weighted false
 - Coordinates are used as stored. A chain wrapped around a periodic boundary gives a wrong R_g, and an XYZ
   file carries no cell to unwrap with.
 
+## Quantity `hbonds`
+
+Geometric hydrogen bonds D-H...A. A hydrogen belongs to the nearest donor atom (element in `hb_elements`,
+default N,O) within `hb_bond_length` (1.3 A). The bond counts when D...A <= `hb_distance` (3.5 A) and the
+angle D-H...A >= `hb_angle` (150 deg). All three limits and the elements are parameters.
+
+- `selection` (group A) and `selection_b` (group B): bonds between the groups, counted per direction
+  (`a_donates`, `b_donates`); `selection_b` empty counts bonds inside A; both empty, inside the whole system.
+  Each (hydrogen, acceptor) pair counts once. A leading `!` selects the complement: `-selection F1
+  -selection_b "!F1"` is chain against everything else.
+- Output: `<basename>_hbonds.csv` (frame, total, a_donates, b_donates) and `Results()` with the statistics of
+  the total per frame plus mean, standard deviation and block error of each direction, and the criteria used.
+- Neighbour search by a cell list; no periodic images, so no bond across a box boundary is found.
+- A geminal contact inside a molecule (D...A within a few bonds) is counted when it meets the criteria; the
+  angle limit removes most of them.
+
 ## Status
 
 🤖 AI-generated, ⚙️ machine-tested.
 
-Checked: `test_trajprops` (21 checks against hand-worked geometry: equal and unequal masses, a square,
+Checked: `test_trajprops` (36 checks against hand-worked geometry: equal and unequal masses, a square,
 subsets, frame ranges, statistics of 1..10, a ten-frame file with a selection, a selection matching
-nothing). A generated 28,000-atom, 100-frame XYZ (71 MB) runs in 3.8 s at 33 MB peak memory; the R_g of a
-rigid translation stays constant.
+nothing; water dimers linear, bent and stretched against the distance and angle limits, group directions,
+element restriction, the complement selection, a three-frame hbonds run). A generated 28,000-atom, 100-frame XYZ (71 MB) runs in 3.8 s at 33 MB peak memory; the R_g of a
+rigid translation stays constant; hbonds over 30 frames of that file take 7 s at 33 MB (random
+coordinates, the count itself means nothing).
 
-Not checked: real MD trajectories, VTF input, files with a changing atom count, timing and memory beyond
+Not checked: hydrogen-bond counts on real water or on a polymer in water, comparison with another program's count, real MD trajectories, VTF input, files with a changing atom count, timing and memory beyond
 that size, comparison with another program's R_g. Human production testing pending.
 
-Planned in the same capability (not implemented): `rdf`, `hbonds`, `sasa` (water-accessible surface,
-Shrake-Rupley); work package item D in qurcuma `docs/WP-min2015-reproduction.md`.
+Planned in the same capability (not implemented): `rdf`, `sasa` (water-accessible surface,
+Shrake-Rupley); an `energy` criterion for `hbonds` from the GFN-FF hydrogen-bond terms (needs the per-triple
+energies of `FFWorkspace::calcHydrogenBonds`, which are only summed today, CPU only) and logging of the
+count during an MD run. Work package item D in qurcuma `docs/WP-min2015-reproduction.md`.

@@ -16,6 +16,8 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
+#include <unordered_map>
 
 namespace curcuma {
 
@@ -109,6 +111,128 @@ SeriesStatistics seriesStatistics(const std::vector<double>& values, int blocks)
     return s;
 }
 
+std::vector<int> resolveSelection(Molecule molecule, const std::string& selection)
+{
+    std::vector<int> atoms;
+    if (selection.empty())
+        return atoms;
+    const bool complement = selection.front() == '!';
+    molecule.GetFragments();   // FragString2Indicies reads this cache; without it every "Fn" matches nothing
+    const std::vector<int> picked = molecule.FragString2Indicies(complement ? selection.substr(1) : selection);
+    if (!complement)
+        return picked;
+    std::vector<bool> in(molecule.AtomCount(), false);
+    for (int i : picked)
+        if (i >= 0 && i < static_cast<int>(in.size()))
+            in[i] = true;
+    for (int i = 0; i < static_cast<int>(in.size()); ++i)
+        if (!in[i])
+            atoms.push_back(i);
+    return atoms;
+}
+
+HBondCount countHydrogenBonds(const Molecule& molecule, const std::vector<int>& groupA,
+    const std::vector<int>& groupB, const HBondCriteria& criteria)
+{
+    HBondCount count;
+    const std::vector<int> numbers = molecule.Atoms();
+    const int n = static_cast<int>(numbers.size());
+    const Geometry geometry = molecule.getGeometry();
+    const auto position = [&](int i) { return Eigen::Vector3d(geometry(i, 0), geometry(i, 1), geometry(i, 2)); };
+
+    // 0: in neither group, bit 1: in A, bit 2: in B. With one group, A is all atoms when empty.
+    std::vector<unsigned char> group(n, 0);
+    if (groupA.empty()) {
+        std::fill(group.begin(), group.end(), 1);
+    } else {
+        for (int i : groupA)
+            if (i >= 0 && i < n)
+                group[i] |= 1;
+    }
+    const bool twoGroups = !groupB.empty();
+    for (int i : groupB)
+        if (i >= 0 && i < n)
+            group[i] |= 2;
+
+    const auto capable = [&](int z) {
+        return std::find(criteria.elements.begin(), criteria.elements.end(), z) != criteria.elements.end();
+    };
+
+    // Cell list of the donor/acceptor-capable heavy atoms. One grid serves both searches:
+    // the cell edge is the larger of the two cut-offs.
+    const double cell = std::max(criteria.distance, criteria.bondLength);
+    // Exact cell key (21 bits per axis): a hash with collisions would scan one cell twice and double-count.
+    const auto key = [&](const Eigen::Vector3d& p, int dx, int dy, int dz) {
+        const auto axis = [&](double v, int d) {
+            return static_cast<unsigned long long>(static_cast<long long>(std::floor(v / cell)) + d + (1LL << 20)) & 0x1FFFFFULL;
+        };
+        return static_cast<long long>((axis(p.x(), dx) << 42) | (axis(p.y(), dy) << 21) | axis(p.z(), dz));
+    };
+    std::unordered_map<long long, std::vector<int>> grid;
+    for (int i = 0; i < n; ++i)
+        if (capable(numbers[i]))
+            grid[key(position(i), 0, 0, 0)].push_back(i);
+
+    const double cosLimit = std::cos(criteria.angle * M_PI / 180.0);
+    for (int h = 0; h < n; ++h) {
+        if (numbers[h] != 1)
+            continue;
+        const Eigen::Vector3d ph = position(h);
+
+        // The donor: nearest capable atom within bondLength.
+        int donor = -1;
+        double nearest = criteria.bondLength;
+        for (int dx = -1; dx <= 1; ++dx)
+            for (int dy = -1; dy <= 1; ++dy)
+                for (int dz = -1; dz <= 1; ++dz) {
+                    const auto it = grid.find(key(ph, dx, dy, dz));
+                    if (it == grid.end())
+                        continue;
+                    for (int d : it->second) {
+                        const double r = (position(d) - ph).norm();
+                        if (r <= nearest) {
+                            nearest = r;
+                            donor = d;
+                        }
+                    }
+                }
+        if (donor < 0 || group[donor] == 0)
+            continue;
+        const Eigen::Vector3d pd = position(donor);
+
+        // Acceptors around the donor.
+        for (int dx = -1; dx <= 1; ++dx)
+            for (int dy = -1; dy <= 1; ++dy)
+                for (int dz = -1; dz <= 1; ++dz) {
+                    const auto it = grid.find(key(pd, dx, dy, dz));
+                    if (it == grid.end())
+                        continue;
+                    for (int a : it->second) {
+                        if (a == donor)
+                            continue;
+                        const Eigen::Vector3d pa = position(a);
+                        if ((pa - pd).norm() > criteria.distance)
+                            continue;
+                        const Eigen::Vector3d hd = pd - ph, ha = pa - ph;
+                        const double cosine = hd.dot(ha) / (hd.norm() * ha.norm());
+                        if (cosine > cosLimit)   // angle smaller than the limit
+                            continue;
+                        // Direction bookkeeping.
+                        if (!twoGroups) {
+                            if ((group[donor] & 1) && (group[a] & 1))
+                                ++count.aDonates;
+                        } else {
+                            if ((group[donor] & 1) && (group[a] & 2))
+                                ++count.aDonates;
+                            else if ((group[donor] & 2) && (group[a] & 1))
+                                ++count.bDonates;
+                        }
+                    }
+                }
+    }
+    return count;
+}
+
 TrajectoryProperties::TrajectoryProperties(const json& controller, bool silent)
     : CurcumaMethod(ParameterRegistry::getInstance().getDefaultJson("trajprops"), controller, silent)
 {
@@ -120,20 +244,49 @@ void TrajectoryProperties::start()
     m_results = json();
     m_error.clear();
 
-    const std::string quantity = Json2KeyWord<std::string>(m_defaults, "quantity");
-    if (quantity != "gyration") {
-        m_error = "unknown quantity \"" + quantity + "\" (gyration)";
+    const auto fail = [this](const std::string& message) {
+        m_error = message;
         CurcumaLogger::error(m_error);
+    };
+
+    const std::string quantity = Json2KeyWord<std::string>(m_defaults, "quantity");
+    if (quantity != "gyration" && quantity != "hbonds") {
+        fail("unknown quantity \"" + quantity + "\" (gyration, hbonds)");
         return;
     }
     if (Filename().empty() || !std::filesystem::exists(Filename())) {
-        m_error = "no such file: " + Filename();
-        CurcumaLogger::error(m_error);
+        fail("no such file: " + Filename());
         return;
     }
 
     const std::string selection = Json2KeyWord<std::string>(m_defaults, "selection");
+    const std::string selectionB = Json2KeyWord<std::string>(m_defaults, "selection_b");
     const bool massWeighted = Json2KeyWord<bool>(m_defaults, "mass_weighted");
+
+    HBondCriteria criteria;
+    if (quantity == "hbonds") {
+        criteria.distance = Json2KeyWord<double>(m_defaults, "hb_distance");
+        criteria.angle = Json2KeyWord<double>(m_defaults, "hb_angle");
+        criteria.bondLength = Json2KeyWord<double>(m_defaults, "hb_bond_length");
+        criteria.elements.clear();
+        std::stringstream list(Json2KeyWord<std::string>(m_defaults, "hb_elements"));
+        std::string symbol;
+        while (std::getline(list, symbol, ',')) {
+            int z = 0;
+            for (std::size_t e = 1; e < Elements::ElementAbbr.size(); ++e)
+                if (Elements::ElementAbbr[e] == symbol)
+                    z = static_cast<int>(e);
+            if (z == 0) {
+                fail("hb_elements: unknown element \"" + symbol + "\"");
+                return;
+            }
+            criteria.elements.push_back(z);
+        }
+        if (criteria.elements.empty()) {
+            fail("hb_elements is empty");
+            return;
+        }
+    }
 
     FileIterator iterator(Filename(), true);
     const int total = iterator.MaxMolecules();
@@ -141,13 +294,13 @@ void TrajectoryProperties::start()
         Json2KeyWord<int>(m_defaults, "last_frame"), Json2KeyWord<double>(m_defaults, "last_fraction"),
         Json2KeyWord<int>(m_defaults, "stride"));
     if (wanted.empty()) {
-        m_error = "no frame in the requested range (the file has " + std::to_string(total) + ")";
-        CurcumaLogger::error(m_error);
+        fail("no frame in the requested range (the file has " + std::to_string(total) + ")");
         return;
     }
 
-    std::vector<int> atoms;
-    std::vector<double> values;
+    std::vector<int> atoms, atomsB;
+    std::vector<double> values;              // gyration, or hbonds total
+    std::vector<double> donatedA, donatedB;  // hbonds only
     std::vector<int> used;
     std::size_t next = 0;
     int frame = 0;
@@ -158,43 +311,59 @@ void TrajectoryProperties::start()
             continue;
         }
         Molecule molecule = iterator.Next();
-        if (next == 0 && !selection.empty()) {
-            Molecule copy = molecule;
-            copy.GetFragments();
-            atoms = copy.FragString2Indicies(selection);
-            if (atoms.empty()) {
-                m_error = "selection \"" + selection + "\" matched no atoms";
-                CurcumaLogger::error(m_error);
+        if (next == 0) {
+            atoms = resolveSelection(molecule, selection);
+            if (!selection.empty() && atoms.empty()) {
+                fail("selection \"" + selection + "\" matched no atoms");
+                return;
+            }
+            atomsB = resolveSelection(molecule, selectionB);
+            if (!selectionB.empty() && atomsB.empty()) {
+                fail("selection_b \"" + selectionB + "\" matched no atoms");
                 return;
             }
         }
-        for (int i : atoms) {
-            if (i < 0 || i >= static_cast<int>(molecule.AtomCount())) {
-                m_error = "frame " + std::to_string(frame) + " has fewer atoms than the selection needs";
-                CurcumaLogger::error(m_error);
-                return;
+        for (const std::vector<int>* group : { &atoms, &atomsB }) {
+            for (int i : *group) {
+                if (i < 0 || i >= static_cast<int>(molecule.AtomCount())) {
+                    fail("frame " + std::to_string(frame) + " has fewer atoms than the selection needs");
+                    return;
+                }
             }
         }
-        values.push_back(gyrationRadius(molecule, atoms, massWeighted));
+        if (quantity == "gyration") {
+            values.push_back(gyrationRadius(molecule, atoms, massWeighted));
+        } else {
+            const HBondCount c = countHydrogenBonds(molecule, atoms, atomsB, criteria);
+            values.push_back(c.total());
+            donatedA.push_back(c.aDonates);
+            donatedB.push_back(c.bDonates);
+        }
         used.push_back(frame);
         ++next;
         ++frame;
     }
 
-    const SeriesStatistics s = seriesStatistics(values, Json2KeyWord<int>(m_defaults, "blocks"));
+    const int blocks = Json2KeyWord<int>(m_defaults, "blocks");
+    const SeriesStatistics s = seriesStatistics(values, blocks);
     std::string name = Json2KeyWord<std::string>(m_defaults, "output");
     if (name.empty())
         name = (Basename().empty() ? std::string("trajectory") : Basename()) + "_" + quantity + ".csv";
     {
         std::ofstream csv(outputPath(name));
-        csv << "frame," << quantity << "_angstrom\n";
-        for (std::size_t i = 0; i < values.size(); ++i)
-            csv << used[i] << "," << values[i] << "\n";
+        if (quantity == "gyration")
+            csv << "frame,gyration_angstrom\n";
+        else
+            csv << "frame,hbonds_total,a_donates,b_donates\n";
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            csv << used[i] << "," << values[i];
+            if (quantity == "hbonds")
+                csv << "," << donatedA[i] << "," << donatedB[i];
+            csv << "\n";
+        }
     }
 
     m_results["quantity"] = quantity;
-    m_results["unit"] = "Angstrom";
-    m_results["mass_weighted"] = massWeighted;
     m_results["atoms"] = atoms.empty() ? -1 : static_cast<int>(atoms.size());   // -1: all atoms
     m_results["frames_in_file"] = total;
     m_results["frames_used"] = s.n;
@@ -208,8 +377,21 @@ void TrajectoryProperties::start()
     m_results["blocks"] = s.blocks;
     m_results["block_error"] = s.blockError;
     m_results["series_file"] = outputPath(name);
+    if (quantity == "gyration") {
+        m_results["unit"] = "Angstrom";
+        m_results["mass_weighted"] = massWeighted;
+    } else {
+        m_results["unit"] = "hydrogen bonds per frame";
+        m_results["atoms_b"] = atomsB.empty() ? -1 : static_cast<int>(atomsB.size());
+        m_results["criteria"] = { { "distance", criteria.distance }, { "angle", criteria.angle },
+            { "bond_length", criteria.bondLength } };
+        const SeriesStatistics a = seriesStatistics(donatedA, blocks);
+        const SeriesStatistics b = seriesStatistics(donatedB, blocks);
+        m_results["a_donates"] = { { "mean", a.mean }, { "stddev", a.stddev }, { "block_error", a.blockError } };
+        m_results["b_donates"] = { { "mean", b.mean }, { "stddev", b.stddev }, { "block_error", b.blockError } };
+    }
 
-    CurcumaLogger::success(quantity + ": mean " + std::to_string(s.mean) + " A over " + std::to_string(s.n)
+    CurcumaLogger::success(quantity + ": mean " + std::to_string(s.mean) + " over " + std::to_string(s.n)
         + " frames (block error " + std::to_string(s.blockError) + ", " + std::to_string(s.blocks) + " blocks): "
         + outputPath(name));
 }

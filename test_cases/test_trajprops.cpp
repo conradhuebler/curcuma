@@ -88,6 +88,48 @@ int main()
     const curcuma::SeriesStatistics one = curcuma::seriesStatistics({ 3.0 }, 5);
     check(one.n == 1 && one.stddev == 0.0 && one.blockError == 0.0, "one value: no spread, no block error");
 
+
+    // --- hydrogen bonds ---------------------------------------------------------------
+    // Water dimer along x. O1 at the origin donates H1 to O2; the other three hydrogens point away.
+    // Linear: D-H...A = 180 deg, O...O = 2.8 A. Bent: H1 at 60 deg from the O-O axis, 100.3 deg at H.
+    const auto dimer = [](double ooDistance, bool bent) {
+        curcuma::Molecule m;
+        m.addPair({ 8, Position(0, 0, 0) });
+        m.addPair({ 1, bent ? Position(0.48, 0.831384, 0) : Position(0.96, 0, 0) });
+        m.addPair({ 1, Position(-0.24, 0.93, 0) });
+        m.addPair({ 8, Position(ooDistance, 0, 0) });
+        m.addPair({ 1, Position(ooDistance + 0.24, 0.93, 0) });
+        m.addPair({ 1, Position(ooDistance + 0.24, -0.93, 0) });
+        return m;
+    };
+    const std::vector<int> waterA { 0, 1, 2 }, waterB { 3, 4, 5 };
+    curcuma::HBondCriteria standard;
+    const curcuma::HBondCount linear = curcuma::countHydrogenBonds(dimer(2.8, false), waterA, waterB, standard);
+    check(linear.aDonates == 1 && linear.bDonates == 0, "linear dimer: one bond, donated by the first water");
+    const curcuma::HBondCount reversed = curcuma::countHydrogenBonds(dimer(2.8, false), waterB, waterA, standard);
+    check(reversed.aDonates == 0 && reversed.bDonates == 1, "groups swapped: the donor is now in group B");
+    check(curcuma::countHydrogenBonds(dimer(2.8, false), {}, {}, standard).total() == 1, "one group (all atoms): one bond inside it");
+    check(curcuma::countHydrogenBonds(dimer(2.8, true), waterA, waterB, standard).total() == 0, "bent to 100 deg: no bond at the 150 deg limit");
+    curcuma::HBondCriteria loose = standard;
+    loose.angle = 90.0;
+    check(curcuma::countHydrogenBonds(dimer(2.8, true), waterA, waterB, loose).total() == 1, "bent to 100 deg: a bond with the limit at 90 deg");
+    check(curcuma::countHydrogenBonds(dimer(3.6, false), waterA, waterB, standard).total() == 0, "O...O 3.6 A: none at the 3.5 A limit");
+    curcuma::HBondCriteria wide = standard;
+    wide.distance = 4.0;
+    check(curcuma::countHydrogenBonds(dimer(3.6, false), waterA, waterB, wide).total() == 1, "O...O 3.6 A: a bond with the limit at 4.0 A");
+    curcuma::HBondCriteria nitrogen = standard;
+    nitrogen.elements = { 7 };
+    check(curcuma::countHydrogenBonds(dimer(2.8, false), waterA, waterB, nitrogen).total() == 0, "only N as donor and acceptor: none in a water dimer");
+    check(curcuma::countHydrogenBonds(dimer(2.8, false), waterA, { 3 }, standard).total() == 1
+            && curcuma::countHydrogenBonds(dimer(2.8, false), waterA, { 4, 5 }, standard).total() == 0,
+        "group B restricted to the acceptor oxygen: found; to its hydrogens only: not");
+
+    // Selection with a complement: two waters 6 A apart are two fragments.
+    curcuma::Molecule far = dimer(6.0, false);
+    check(curcuma::resolveSelection(far, "F1").size() == 3, "F1 is the first water");
+    const std::vector<int> rest = curcuma::resolveSelection(far, "!F1");
+    check(rest.size() == 3 && rest[0] == 3 && rest[2] == 5, "!F1 is everything but the first water");
+
     // --- the capability on a file -------------------------------------------------------
     const std::filesystem::path dir = std::filesystem::temp_directory_path() / "curcuma_test_trajprops";
     std::filesystem::create_directories(dir);
@@ -116,6 +158,41 @@ int main()
         check(r["atoms"] == 2, "selection \"1:2\" gives two atoms");
         check(std::filesystem::exists(r["series_file"].get<std::string>()), "per-frame CSV written");
     }
+
+    // hbonds over a three-frame file: linear, bent, linear
+    {
+        std::ofstream xyz("dimer.xyz");
+        const bool pattern[3] = { false, true, false };
+        for (int k = 0; k < 3; ++k) {
+            const curcuma::Molecule m = dimer(2.8, pattern[k]);
+            xyz << "6\nframe " << k << "\n";
+            for (int i = 0; i < 6; ++i) {
+                const auto a = m.Atom(i);
+                xyz << (a.first == 8 ? "O " : "H ") << a.second.x() << " " << a.second.y() << " " << a.second.z() << "\n";
+            }
+        }
+    }
+    json hbController = json::object();
+    hbController["trajprops"] = { { "quantity", "hbonds" }, { "selection", "1:3" }, { "selection_b", "4:6" } };
+    curcuma::TrajectoryProperties hbProps(hbController, true);
+    hbProps.setFile("dimer.xyz");
+    hbProps.start();
+    const json hb = hbProps.Results();
+    check(hbProps.error().empty(), "hbonds capability runs: " + hbProps.error());
+    if (hbProps.error().empty()) {
+        check(hb["frames_used"] == 3 && near(hb["mean"].get<double>(), 2.0 / 3.0) && near(hb["max"].get<double>(), 1.0)
+                && near(hb["min"].get<double>(), 0.0),
+            "linear, bent, linear: mean 2/3, min 0, max 1");
+        check(near(hb["a_donates"]["mean"].get<double>(), 2.0 / 3.0) && near(hb["b_donates"]["mean"].get<double>(), 0.0),
+            "all bonds are donated by group A");
+    }
+    json hbLoose = json::object();
+    hbLoose["trajprops"] = { { "quantity", "hbonds" }, { "selection", "1:3" }, { "selection_b", "4:6" }, { "hb_angle", 90.0 } };
+    curcuma::TrajectoryProperties looseProps(hbLoose, true);
+    looseProps.setFile("dimer.xyz");
+    looseProps.start();
+    check(looseProps.error().empty() && near(looseProps.Results()["mean"].get<double>(), 1.0), "angle limit 90 deg: the bent frame counts, mean 1");
+
     json bad = json::object();
     bad["trajprops"] = { { "selection", "9999" } };
     curcuma::TrajectoryProperties badProps(bad, true);
