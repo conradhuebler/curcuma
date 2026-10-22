@@ -1,6 +1,7 @@
 #include "polymerbuild.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/energycalculator.h"
+#include "src/core/fileiterator.h"
 #include "src/core/pseudoff.h"
 #include "src/tools/geometry.h"
 #include "optimizer_factory.h"
@@ -3178,6 +3179,11 @@ SubchainResult PolymerBuild::buildSubchain(
 /// Claude Generated: Assemble polymer — dispatches between sequential and divide-and-conquer
 void PolymerBuild::assemblePolymer(const std::vector<SequenceEntry>& sequence)
 {
+    m_formal_charge = 0;
+    for (const auto& entry : sequence)
+        m_formal_charge += fragmentCharge(entry.fragment_name);
+    if (m_formal_charge != 0)
+        CurcumaLogger::warn(fmt::format("Formal charge {} from the fragments goes into the result; every optimisation step of the build runs with charge 0, and GFN-FF spreads a net charge over the connected chain (docs/POLYMERBUILD_CHARGE.md)", m_formal_charge));
     int scs = m_config.get<int>("subchain_size", 0);
 
     if (scs >= 2 && scs < (int)sequence.size()) {
@@ -3390,7 +3396,7 @@ void PolymerBuild::assemblePolymer(const std::vector<SequenceEntry>& sequence)
             CurcumaLogger::error("Polymer assembly FAILED (" + m_error + "), structure written to " + polymer.Name() + "_broken.xyz (no _final.xyz)");
             return;
         }
-        polymer.writeXYZFile(outputPath(polymer.Name() + "_final.xyz"));
+        finishOutput(polymer);
         CurcumaLogger::success(fmt::format(
             "D&C polymer assembly completed: {}_final.xyz ({} atoms)",
             polymer.Name(), polymer.AtomCount()));
@@ -3415,9 +3421,61 @@ void PolymerBuild::assemblePolymer(const std::vector<SequenceEntry>& sequence)
             CurcumaLogger::error("Polymer assembly FAILED (" + m_error + "), structure written to " + polymer.Name() + "_broken.xyz (no _final.xyz)");
             return;
         }
-        polymer.writeXYZFile(outputPath(polymer.Name() + "_final.xyz"));
+        finishOutput(polymer);
         CurcumaLogger::success("Polymer assembly completed: " + polymer.Name() + "_final.xyz");
     }
+}
+
+/// Claude Generated (Oct 2026): formal charge of a fragment, read from "** Charge = N **" in its XYZ comment line
+int PolymerBuild::fragmentCharge(const std::string& name)
+{
+    auto it = m_fragment_charge.find(name);
+    if (it != m_fragment_charge.end())
+        return it->second;
+    int charge = 0;
+    auto file = m_fragments.find(name);
+    if (file != m_fragments.end()) {
+        // FileIterator parses the XYZ comment line (the Molecule(file) constructor does not)
+        FileIterator reader(file->second);
+        if (!reader.AtEnd())
+            charge = reader.Next().Charge();
+    }
+    m_fragment_charge[name] = charge;
+    return charge;
+}
+
+/**
+ * Claude Generated (Oct 2026): write polymer_A_final.xyz with the formal charge (sum of the fragment charges) in its
+ * header and, with -charge_model gfnff|gfn1|gfn2, the atomic partial charges of that model next to it.
+ * The optimisation steps of the build itself still run with charge 0 (docs/POLYMERBUILD_CHARGE.md).
+ */
+void PolymerBuild::finishOutput(Molecule& polymer)
+{
+    polymer.setCharge(m_formal_charge);
+    polymer.writeXYZFile(outputPath(polymer.Name() + "_final.xyz"));
+
+    const std::string model = m_config.get<std::string>("charge_model", "none");
+    if (model == "none" || model.empty())
+        return;
+    json controller;
+    controller["verbosity"] = 0;
+    controller["threads"] = m_threads;
+    EnergyCalculator energy_calc(model, controller);
+    energy_calc.setMolecule(polymer.getMolInfo());
+    energy_calc.CalculateEnergy(false);
+    const Vector charges = energy_calc.Charges();
+    if (energy_calc.Error() || charges.size() != polymer.AtomCount()) {
+        m_error = "partial charges with model " + model + " failed";
+        CurcumaLogger::error("Partial charges (" + model + ") failed: " + energy_calc.ErrorMessage());
+        return;
+    }
+    const std::string file = outputPath(polymer.Name() + "_final.charges");
+    std::ofstream out(file);
+    out << "# atomic partial charges [e], model " << model << ", formal charge " << m_formal_charge << ", sum "
+        << fmt::format("{:.6f}", charges.sum()) << "; atom index (from 0), element, charge\n";
+    for (int i = 0; i < charges.size(); ++i)
+        out << fmt::format("{} {} {:.8f}\n", i, Elements::ElementAbbr[polymer.Atom(i).first], charges(i));
+    CurcumaLogger::success(fmt::format("Partial charges ({}) written to {}", model, file));
 }
 
 void PolymerBuild::applyCapping(Molecule& mol)

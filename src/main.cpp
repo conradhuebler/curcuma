@@ -1865,6 +1865,12 @@ int executeSinglePoint(const json& controller, int argc, char** argv) {
     };
     read_dump_path(controller);                                    // top-level (dotted -opt.dump_gradient)
     if (controller.contains("opt")) read_dump_path(controller["opt"]); // sp routes flat flags into "opt"
+    // Claude Generated (Oct 2026): -dump_atomic_charges <path> writes the atomic partial charges of the method
+    // (EEQ for gfnff, Mulliken for gfn1/gfn2; one value per atom in e) for comparing charge models.
+    std::string dump_atomic_charges_path;
+    for (const json* j : { &controller, controller.contains("opt") ? &controller["opt"] : nullptr })
+        if (j && j->is_object() && j->contains("dump_atomic_charges") && (*j)["dump_atomic_charges"].is_string())
+            dump_atomic_charges_path = (*j)["dump_atomic_charges"].get<std::string>();
     const bool want_gradient = read_bool(controller, "gradient")
         || (controller.contains("opt") && read_bool(controller["opt"], "gradient"))
         || !dump_gradient_path.empty();
@@ -1935,6 +1941,21 @@ int executeSinglePoint(const json& controller, int argc, char** argv) {
             } else {
                 CurcumaLogger::error("Could not open -dump_gradient file: " + dump_gradient_path);
             }
+        }
+    }
+
+    if (!dump_atomic_charges_path.empty()) {
+        const Vector charges = energy_calc.Charges();
+        std::ofstream cf(dump_atomic_charges_path);
+        if (cf && charges.size() == molecule.AtomCount()) {
+            cf << "# atomic partial charges [e], method " << method << ", one atom per row, total "
+               << fmt::format("{:.6f}", charges.sum()) << "\n";
+            for (int i = 0; i < charges.size(); ++i)
+                cf << fmt::format("{:.10f}\n", charges(i));
+        } else {
+            CurcumaLogger::error(fmt::format("Could not write -dump_atomic_charges {} ({} charges for {} atoms)",
+                dump_atomic_charges_path, static_cast<int>(charges.size()), molecule.AtomCount()));
+            return 1;
         }
     }
 

@@ -477,6 +477,10 @@ private:
 
     ConfigManager m_config;
     bool m_silent;
+    int m_formal_charge = 0; // sum of the fragment charges of the sequence
+    std::map<std::string, int> m_fragment_charge;
+    int fragmentCharge(const std::string& name);
+    void finishOutput(Molecule& polymer);
     std::string m_error; // set by every failure path of start(); cleared at its beginning
     std::map<std::string, std::string> m_fragments;
     std::map<std::string, FragmentTopologyTemplate> m_fragment_templates;  ///< Claude Generated: Cached topology templates by fragment name
@@ -492,6 +496,7 @@ private:
     PARAM(cap, String, "H", "Capping element for all chain ends (H, F, Cl, none) — overridden per end by cap_start/cap_end", "Assembly", { "c" })
     PARAM(cap_start, String, "", "Override cap for the chain start (defaults to cap)", "Assembly", {})
     PARAM(cap_end, String, "", "Override cap for the chain end (defaults to cap)", "Assembly", {})
+    PARAM(charge_model, String, "none", "Write atomic partial charges next to the result with this model (none, gfnff, gfn1, gfn2); the formal charge is the sum of the fragment charges (Charge = N in the XYZ comment)", "Output", {})
     PARAM(cap_intermediate, String, "H", "Element substituted for Xx during intermediate FF optimization (default H; use I or F for stronger LJ repulsion at chain ends)", "Refinement", { "ci" })
 
     // Optimization options

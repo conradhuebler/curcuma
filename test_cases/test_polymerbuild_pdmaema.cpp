@@ -69,6 +69,8 @@ static void checkChain(const std::string& sequence, int units, int protonated, i
     controller["fragments"] = { { "A", std::string(CURCUMA_SOURCE_DIR) + "/src/molecules/pdmaema.xyz" },
         { "B", std::string(CURCUMA_SOURCE_DIR) + "/src/molecules/pdmaema_h.xyz" } };
     controller["sequence"] = sequence;
+    if (protonated > 0 && subchain == 0)
+        controller["charge_model"] = "gfn2"; // partial charges next to the result, checked below
     if (subchain > 0)
         controller["subchain_size"] = subchain; // divide-and-conquer assembly: sub-chains built, cloned, joined
     controller["verbosity"] = 0;
@@ -84,11 +86,12 @@ static void checkChain(const std::string& sequence, int units, int protonated, i
     check(!found.empty(), "polymer_A_final.xyz written");
 
     std::vector<Atom> atoms;
+    std::string header;
     if (!found.empty()) {
         std::ifstream in(found);
         std::string line;
         std::getline(in, line);
-        std::getline(in, line);
+        std::getline(in, header);
         while (std::getline(in, line)) {
             std::stringstream ss(line);
             Atom a;
@@ -276,6 +279,71 @@ static void checkChain(const std::string& sequence, int units, int protonated, i
     if (backbone.count > 0)
         std::printf("  INFO  backbone C-CH2-C angle (%d): %.1f to %.1f deg, mean %.1f (not tested against a reference)\n",
             backbone.count, backbone.lo, backbone.hi, backbone.sum / backbone.count);
+
+    // Formal charge: the sum of the fragment charges (+1 per protonated unit B) is written into the header, and with
+    // charge_model gfn2 the partial charges sum to it and sit on the protonated side chains (not on the neutral ones).
+    {
+        const size_t at = header.find("Charge = ");
+        const int headerCharge = at == std::string::npos ? -999 : std::atoi(header.c_str() + at + 9);
+        check(headerCharge == protonated, "formal charge in the header " + std::to_string(headerCharge) + ", expected " + std::to_string(protonated));
+    }
+    if (protonated > 0 && subchain == 0) {
+        std::vector<double> q;
+        std::ifstream cin_(std::filesystem::path(found).parent_path() / "polymer_A_final.charges");
+        std::string cline;
+        while (std::getline(cin_, cline)) {
+            if (cline.empty() || cline[0] == '#')
+                continue;
+            std::stringstream ss(cline);
+            int index;
+            std::string element;
+            double value;
+            if (ss >> index >> element >> value)
+                q.push_back(value);
+        }
+        check(static_cast<int>(q.size()) == n, "one partial charge per atom (" + std::to_string(q.size()) + " for " + std::to_string(n) + " atoms)");
+        if (static_cast<int>(q.size()) == n) {
+            double sum = 0;
+            for (double v : q)
+                sum += v;
+            check(std::abs(sum - protonated) < 1e-3, "partial charges sum to the formal charge (" + std::to_string(sum) + ")");
+            // side chain of each ester carbon: everything behind the bond to the quaternary carbon
+            double protonatedSum = 0, neutralSum = 0;
+            int nProtonated = 0, nNeutral = 0;
+            for (int c = 0; c < n; ++c) {
+                if (!isCarbonyl(c))
+                    continue;
+                int quat = -1;
+                for (int j : neighbours[c])
+                    if (atoms[j].element == "C")
+                        quat = j;
+                std::vector<int> group { c };
+                std::vector<bool> seen(n, false);
+                seen[c] = true;
+                for (size_t k = 0; k < group.size(); ++k)
+                    for (int m : neighbours[group[k]])
+                        if (!seen[m] && !(group[k] == c && m == quat)) {
+                            seen[m] = true;
+                            group.push_back(m);
+                        }
+                double groupSum = 0;
+                bool isProtonated = false;
+                for (int i : group) {
+                    groupSum += q[i];
+                    if (atoms[i].element == "N" && neighbours[i].size() == 4)
+                        isProtonated = true;
+                }
+                (isProtonated ? protonatedSum : neutralSum) += groupSum;
+                ++(isProtonated ? nProtonated : nNeutral);
+            }
+            check(nProtonated == protonated && nNeutral == units - protonated, "side chains found: " + std::to_string(nProtonated) + " protonated, " + std::to_string(nNeutral) + " neutral");
+            if (nProtonated > 0 && nNeutral > 0) {
+                // GFN2 gives about +0.84 e and -0.04 e here; EEQ (GFN-FF) would give 0.19 and 0.15 (docs/POLYMERBUILD_CHARGE.md)
+                std::printf("  INFO  side chain charge: protonated %.3f e, neutral %.3f e (mean per chain)\n", protonatedSum / nProtonated, neutralSum / nNeutral);
+                check(protonatedSum / nProtonated > 0.5 && neutralSum / nNeutral < 0.3, "GFN2 charge sits on the protonated side chains");
+            }
+        }
+    }
 
     std::filesystem::current_path(previous);
     std::filesystem::remove_all(dir);
