@@ -11,6 +11,10 @@ Stand.
 
 ## 1. Korrektheit (offen)
 
+- **Zwei `SimpleMD`-Läufe im selben Prozess starten mit verschiedenen Anfangsgeschwindigkeiten** (gleicher `-seed 1`, NVE, 18 Atome, 2026-10-22, n=1 Paar): der zweite Lauf weicht ab, getrennte Prozesse sind identisch.
+  Vermutlich ein statischer Zufallsgenerator; nicht untersucht. `test_cases/test_md_hbond_log.cpp` startet deshalb einen Prozess je Lauf. Betrifft jeden, der mehrere MD in einem Prozess einbettet.
+- **`polymerbuild`: Zwischenschritt meldet "verifyAndFixTopology ... missing/extra bonds"** (2026-10-22, `(A)4` mit `src/molecules/pdmaema.xyz`: 22 bis 25 fehlende, 84 bis 102 überzählige Bindungen bei den Verbindungsschritten); das Endergebnis ist topologisch ein Baum. Ursache nicht untersucht; Test deckt nur `(A)4`.
+
 - **Literaturverweise der Trajektorien- und Ionen-Methoden pruefen** (Oktober 2026): die Quellen fuer Blockfehler, H-Brueckenkriterium, g(r), Shrake-Rupley, Sondenradius, Bondi-Radien, Fibonacci-Punkte und `-ionize`
   stehen in `docs/TRAJPROPS.md`, `src/core/citation_database.cpp` und `src/capabilities/trajprops.h`; sie stammen aus dem Gedaechtnis der KI und sind NICHT gegen die Arbeiten geprueft. Ebenso offen: welchen Radiensatz Min 2015 fuer die WASA verwendet.
 
