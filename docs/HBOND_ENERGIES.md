@@ -96,6 +96,14 @@ the reference run, also with limit 0; six rows for 60 steps every 10th; total = 
 never counts fewer bonds than limit -5 on the same trajectory; with `uff` the log is refused and the run goes on.
 On the CLI a run of the same dimers gave three bonds at limit -5 with a triple-energy sum of about -35 kJ/mol.
 
+Reference comparison (`scripts/md_reference_compare.py`): the reference binary is curcuma master at the commit this work
+started from (8edb8d15, built from a `git archive` of it with the same CMake options); the new binary has all
+branches of this work (per-triple recording, GPU code, `trajprops`, the log). Three stacked water dimers, 100 fs NVE,
+and a 653-atom lattice of waters, 50 fs with CSVR, each with one thread and a fixed seed: the reference agrees with
+itself, the new binary without options equals the reference, and with `-hb_log_frequency 10` it equals the reference
+as well (trajectory md5, comment lines compared without the version string). Both binaries are CPU builds
+(`-DUSE_CUDA=OFF -DUSE_ROCM=OFF`): the GPU code was compared only in what it compiles to, not in a run.
+
 Not checked: a solvated polymer, runs of days, restart/rescue (the log file is opened afresh at each start),
 `topology react`, the GPU path, a restart appending to the old log. Two `SimpleMD` runs inside one process do not
 start from the same random state (the second run's initial velocities differ, with the same seed), which is why
