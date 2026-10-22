@@ -14,7 +14,6 @@ Stand.
 - **Zwei `SimpleMD`-Läufe im selben Prozess starten mit verschiedenen Anfangsgeschwindigkeiten** (gleicher `-seed 1`, NVE, 18 Atome, 2026-10-22, n=1 Paar): der zweite Lauf weicht ab, getrennte Prozesse sind identisch.
   Vermutlich ein statischer Zufallsgenerator; nicht untersucht. `test_cases/test_md_hbond_log.cpp` startet deshalb einen Prozess je Lauf. Betrifft jeden, der mehrere MD in einem Prozess einbettet.
 
-- **`polymerbuild`: Prozess-Exitcode 0 bei zerbrochener Kette** (2026-10-23, `-lm_multistart 0` mit `(AB)5`): `start()` ist `void`, der Fehler steht nur als `[ERROR]` im Log und in `polymer_A_broken.xyz`. Aufrufer koennen ihn nicht abfragen.
 - **`polymerbuild`: Ladung geht verloren** (2026-10-23): `pdmaema_h.xyz` ist nominell +1, jede Optimierung und der Kopf von `polymer_A_final.xyz` setzen Charge = 0. Fuer MD mit `(AB)n` muss die Ladung (n) und die Gegenionen von Hand gesetzt werden.
 
 - **Literaturverweise der Trajektorien- und Ionen-Methoden pruefen** (Oktober 2026): die Quellen fuer Blockfehler, H-Brueckenkriterium, g(r), Shrake-Rupley, Sondenradius, Bondi-Radien, Fibonacci-Punkte und `-ionize`

@@ -322,6 +322,7 @@ PolymerBuild::PolymerBuild(const json& controller, bool silent)
             }
         } catch (...) {
              if (fragments_str != "{}")
+                m_error = "cannot parse the fragments JSON map";
                 CurcumaLogger::error("Failed to parse fragments JSON map: " + fragments_str);
         }
     }
@@ -333,6 +334,7 @@ void PolymerBuild::start()
 {
     std::string sequence_str = m_config.get<std::string>("sequence", "");
     if (sequence_str.empty()) {
+        m_error = "No polymer sequence provided";
         CurcumaLogger::error("No polymer sequence provided. Use -sequence \"(A)10-B\"");
         return;
     }
@@ -342,6 +344,7 @@ void PolymerBuild::start()
 
     std::vector<SequenceEntry> sequence = parseSequence(sequence_str);
     if (sequence.empty()) {
+        m_error = "Parsed sequence is empty or invalid";
         CurcumaLogger::error("Parsed sequence is empty or invalid");
         return;
     }
@@ -2405,6 +2408,7 @@ SubchainResult PolymerBuild::buildSubchain(
         const auto& entry = fragment_entries[i];
         std::string next_name = entry.fragment_name;
         if (m_fragments.find(next_name) == m_fragments.end()) {
+            m_error = "fragment not found: " + next_name;
             CurcumaLogger::error("Fragment not found in map: " + next_name);
             continue;
         }
@@ -3233,6 +3237,7 @@ void PolymerBuild::assemblePolymer(const std::vector<SequenceEntry>& sequence)
 
         // Abort if the first sub-chain failed to build (e.g. missing fragment file) — Claude Generated 2026
         if (subchains.empty() || subchains[0].molecule.AtomCount() == 0) {
+            m_error = "first sub-chain is empty";
             CurcumaLogger::error("Polymer assembly failed: first sub-chain is empty (check fragment files/sequence)");
             return;
         }
@@ -3378,9 +3383,11 @@ void PolymerBuild::assemblePolymer(const std::vector<SequenceEntry>& sequence)
         polymer.setName("polymer_A");
         const int broken_bonds = countBrokenBonds(polymer, interface_bonds, true);
         applyCapping(polymer);
-        if (broken_bonds > 0) {
+        if (broken_bonds > 0 || !m_error.empty()) {
             polymer.writeXYZFile(outputPath(polymer.Name() + "_broken.xyz"));
-            CurcumaLogger::error("Polymer assembly FAILED: chain is broken, structure written to " + polymer.Name() + "_broken.xyz (no _final.xyz)");
+            if (broken_bonds > 0)
+                m_error = "chain is broken (" + std::to_string(broken_bonds) + " bonds too long)";
+            CurcumaLogger::error("Polymer assembly FAILED (" + m_error + "), structure written to " + polymer.Name() + "_broken.xyz (no _final.xyz)");
             return;
         }
         polymer.writeXYZFile(outputPath(polymer.Name() + "_final.xyz"));
@@ -3394,15 +3401,18 @@ void PolymerBuild::assemblePolymer(const std::vector<SequenceEntry>& sequence)
         Molecule polymer = result.molecule;
         // Abort on empty result (e.g. missing first fragment) — Claude Generated 2026
         if (polymer.AtomCount() == 0) {
+            m_error = "result is empty";
             CurcumaLogger::error("Polymer assembly failed: result is empty (check fragment files/sequence)");
             return;
         }
         polymer.setName("polymer_A");
         const int broken_bonds = countBrokenBonds(polymer, result.interface_bonds, true);
         applyCapping(polymer);
-        if (broken_bonds > 0) {
+        if (broken_bonds > 0 || !m_error.empty()) {
             polymer.writeXYZFile(outputPath(polymer.Name() + "_broken.xyz"));
-            CurcumaLogger::error("Polymer assembly FAILED: chain is broken, structure written to " + polymer.Name() + "_broken.xyz (no _final.xyz)");
+            if (broken_bonds > 0)
+                m_error = "chain is broken (" + std::to_string(broken_bonds) + " bonds too long)";
+            CurcumaLogger::error("Polymer assembly FAILED (" + m_error + "), structure written to " + polymer.Name() + "_broken.xyz (no _final.xyz)");
             return;
         }
         polymer.writeXYZFile(outputPath(polymer.Name() + "_final.xyz"));

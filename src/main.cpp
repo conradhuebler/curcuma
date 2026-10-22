@@ -2356,6 +2356,10 @@ int executePolymerBuild(const json& controller, int argc, char** argv)
     initializeBMT(&builder, "polymer", "polymerbuild", controller);
     builder.start();
     builder.processBakFiles();
+    if (!builder.error().empty()) {
+        std::cerr << "polymerbuild failed: " << builder.error() << std::endl;
+        return 1;
+    }
     return 0;
 }
 

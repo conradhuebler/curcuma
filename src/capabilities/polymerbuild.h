@@ -90,6 +90,9 @@ public:
      */
     void start() override;
 
+    /// Claude Generated (Oct 2026): empty if the last start() produced a polymer, else the reason (main.cpp turns it into exit status 1)
+    std::string error() const { return m_error; }
+
     /**
      * @brief Print help for polymer build options
      */
@@ -474,6 +477,7 @@ private:
 
     ConfigManager m_config;
     bool m_silent;
+    std::string m_error; // set by every failure path of start(); cleared at its beginning
     std::map<std::string, std::string> m_fragments;
     std::map<std::string, FragmentTopologyTemplate> m_fragment_templates;  ///< Claude Generated: Cached topology templates by fragment name
     mutable std::map<std::string, Vector> m_fragment_cn_templates;         ///< Claude Generated 2026: Cached GFN-FF CN per fragment (Xx→H)
