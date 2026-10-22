@@ -65,3 +65,38 @@ Not checked: that the 4-thread run really split the triples over several partiti
 re-detection during an MD run, react topology mode, systems with the case 2 to 4 triples (amides, phenols),
 anything on GPU hardware (values, ROCm permutation, graph capture with recording, multi-GPU). Human production
 testing pending.
+
+## Logging during MD (`hb_log_frequency`)
+
+Opt-in. `-hb_log_frequency N` (default 0 = off) writes every N steps one row to `<basename>.hbonds.csv`:
+`step, time_fs, hbonds_total, a_donates, b_donates, energy_sum_kj_mol`. A triple counts when its energy is below
+`-hb_log_energy_limit` (kJ/mol, negative = attractive, default 0 = every attractive triple). `-hb_log_selection`
+and `-hb_log_selection_b` (selection grammar, `!F1` = all but the first fragment) choose the groups exactly as in
+`-trajprops` ([TRAJPROPS.md](TRAJPROPS.md)); empty counts every triple.
+
+```
+curcuma -md system.xyz -method gfnff -hb_log_frequency 100 -hb_log_energy_limit -8 -hb_log_selection F1 -hb_log_selection_b '!F1'
+```
+
+- Off means off: the only code on the step path is a pointer test. With it on, the force field records the triple
+  energies (one write per triple and step) and nothing else changes; the trajectory is identical to the run
+  without the option (`test_md_hbond_log`, separate processes, NVE and a fixed seed).
+- GFN-FF only. With another method, or a selection that matches nothing, the run says so and continues without
+  the log; it does not stop.
+- The row reflects the force evaluation of the step it is written in. The logging code is one function
+  (`SimpleMD::LogHydrogenBonds`) over `curcuma::classifyHBondEnergies()`, the same counting as `-trajprops`.
+- GPU runs: the energies are downloaded from the device at each logged step (see the GPU section); not run on
+  hardware.
+- The limit has no standard value. Choose it from the histogram of `-trajprops -hb_criterion energy` for a
+  trajectory of the same system.
+
+Checked (`test_md_hbond_log`, 16 checks, three stacked water dimers, 60 fs): with the option off no log file; the
+settings reach `SimpleMD`; two runs without the option agree (the control); with the log on the trajectory equals
+the reference run, also with limit 0; six rows for 60 steps every 10th; total = a_donates + b_donates; limit 0
+never counts fewer bonds than limit -5 on the same trajectory; with `uff` the log is refused and the run goes on.
+On the CLI a run of the same dimers gave three bonds at limit -5 with a triple-energy sum of about -35 kJ/mol.
+
+Not checked: a solvated polymer, runs of days, restart/rescue (the log file is opened afresh at each start),
+`topology react`, the GPU path, a restart appending to the old log. Two `SimpleMD` runs inside one process do not
+start from the same random state (the second run's initial velocities differ, with the same seed), which is why
+the test starts one process per run; that is independent of this option and not investigated.

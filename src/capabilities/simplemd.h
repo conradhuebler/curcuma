@@ -37,6 +37,8 @@
 #endif
 
 #include "src/capabilities/md_diagnostics.h"
+
+class GFNFF;   // Claude Generated (Oct 2026): hydrogen-bond log, defined in gfnff.h
 #include "src/capabilities/rmsd.h"
 #include "src/capabilities/rmsdtraj.h"
 
@@ -744,6 +746,16 @@ private:
     bool m_md_diagnostics = false;
     std::unique_ptr<MDDiagnosticsWriter> m_diag_writer;
 
+    // Claude Generated (Oct 2026): hydrogen-bond log (hb_log_frequency > 0 only)
+    int m_hb_log_frequency = 0;
+    double m_hb_log_limit_kj = 0.0;
+    std::vector<int> m_hb_log_a, m_hb_log_b;
+    std::ofstream m_hb_log_file;
+    GFNFF* m_hb_log_gfnff = nullptr;
+    bool m_hb_log_warned_empty = false;
+    void SetupHydrogenBondLog();
+    void LogHydrogenBonds();
+
     // WP-P1 (May 2026): per-phase wall-clock breakdown for diagnostics
     bool m_md_diagnostics_timing = false;
     double m_last_ff_ms = 0.0;     ///< wall-clock of last m_interface->CalculateEnergy()
@@ -927,6 +939,11 @@ private:
     PARAM(md_diagnostics, Bool, false, "Write per-step diagnostics to <basename>.diag.jsonl (energy decomposition, charges, CN, gradient norms, HB/XB counts). Frequency follows dump_frequency. One JSON object per line.", "Output", {})
     // --- WP-P1 Timing Instrumentation (May 2026) ---
     PARAM(md_diagnostics_timing, Bool, false, "Add a timing_ms block to each <basename>.diag.jsonl record (per-phase wall-clock: CN/EEQ/dcn/D4-weights/FF/integrator/HBXB/I-O). GPU runs add a gpu sub-block with per-kernel-category times. Requires md_diagnostics=true. ~1-2 us per hook.", "Output", {})
+    // Claude Generated (Oct 2026): opt-in hydrogen-bond log by GFN-FF triple energy. Off (0) = nothing runs.
+    PARAM(hb_log_frequency, Int, 0, "Log the hydrogen bonds every N steps to <basename>.hbonds.csv: number of GFN-FF triples (A-H...B) with an energy below hb_log_energy_limit, per direction, and the sum of the triple energies. GFN-FF only; 0 = off (the run is then exactly as without this option). Recording the triple energies costs one write per triple and step.", "Output", {}, "min=0")
+    PARAM(hb_log_energy_limit, Double, 0.0, "hb_log_frequency: a triple counts when its energy is below this (kJ/mol, negative = attractive; 0 counts every attractive triple). Calibrate with `-trajprops -hb_criterion energy` and its histogram.", "Output", {})
+    PARAM(hb_log_selection, Selection, "", "hb_log_frequency: first atom group (selection grammar, a leading ! means all atoms except the rest); empty = all atoms.", "Output", {})
+    PARAM(hb_log_selection_b, Selection, "", "hb_log_frequency: second group; bonds between the two groups are counted per direction, empty counts bonds inside the first group.", "Output", {})
 
     // --- ConfSearch robustness gates (Jun 2026, Claude Generated) ---
     PARAM(topo_check, Bool, false, "Abort the MD run when the molecule fragments (number of connected components grows above the start value). Off by default so reactive paths are still sampled.", "ConfSearch", {})

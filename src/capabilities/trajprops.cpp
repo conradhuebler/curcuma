@@ -236,6 +236,53 @@ HBondCount countHydrogenBonds(const Molecule& molecule, const std::vector<int>& 
     return count;
 }
 
+HBondEnergyCount classifyHBondEnergies(const std::vector<GFNFFHBondEnergy>& triples, int atomCount,
+    const std::vector<int>& groupA, const std::vector<int>& groupB, double limitKJ)
+{
+    HBondEnergyCount result;
+    const int n = atomCount;
+    std::vector<unsigned char> group(n, 0);
+    if (groupA.empty()) {
+        std::fill(group.begin(), group.end(), 1);
+    } else {
+        for (int i : groupA)
+            if (i >= 0 && i < n)
+                group[i] |= 1;
+    }
+    const bool twoGroups = !groupB.empty();
+    for (int i : groupB)
+        if (i >= 0 && i < n)
+            group[i] |= 2;
+
+    for (const GFNFFHBondEnergy& t : triples) {
+        if (t.donor < 0 || t.donor >= n || t.acceptor < 0 || t.acceptor >= n)
+            continue;
+        const bool donorA = group[t.donor] & 1, donorB = group[t.donor] & 2;
+        const bool acceptorA = group[t.acceptor] & 1, acceptorB = group[t.acceptor] & 2;
+        bool aDonates = false, bDonates = false;
+        if (!twoGroups) {
+            aDonates = donorA && acceptorA;
+        } else {
+            aDonates = donorA && acceptorB;
+            bDonates = !aDonates && donorB && acceptorA;
+        }
+        if (!aDonates && !bDonates)
+            continue;
+        const double kj = CurcumaUnit::Energy::hartree_to_kjmol(t.energy);
+        result.energySumKJ += kj;
+        if (kj != 0.0)
+            result.energiesKJ.push_back(kj);
+        if (kj < limitKJ) {
+            if (aDonates)
+                ++result.count.aDonates;
+            else
+                ++result.count.bDonates;
+        }
+    }
+    result.ok = true;
+    return result;
+}
+
 HBondEnergyCount countHydrogenBondsByEnergy(const Molecule& molecule, const std::vector<int>& groupA,
     const std::vector<int>& groupB, const HBondEnergyOptions& options)
 {
@@ -256,46 +303,7 @@ HBondEnergyCount countHydrogenBondsByEnergy(const Molecule& molecule, const std:
         return result;
     }
     const std::vector<GFNFFHBondEnergy> triples = gfnff->hydrogenBondEnergies();
-
-    const int n = static_cast<int>(molecule.AtomCount());
-    std::vector<unsigned char> group(n, 0);
-    if (groupA.empty()) {
-        std::fill(group.begin(), group.end(), 1);
-    } else {
-        for (int i : groupA)
-            if (i >= 0 && i < n)
-                group[i] |= 1;
-    }
-    const bool twoGroups = !groupB.empty();
-    for (int i : groupB)
-        if (i >= 0 && i < n)
-            group[i] |= 2;
-
-    for (const GFNFFHBondEnergy& t : triples) {
-        const bool donorA = group[t.donor] & 1, donorB = group[t.donor] & 2;
-        const bool acceptorA = group[t.acceptor] & 1, acceptorB = group[t.acceptor] & 2;
-        bool aDonates = false, bDonates = false;
-        if (!twoGroups) {
-            aDonates = donorA && acceptorA;
-        } else {
-            aDonates = donorA && acceptorB;
-            bDonates = !aDonates && donorB && acceptorA;
-        }
-        if (!aDonates && !bDonates)
-            continue;
-        const double kj = CurcumaUnit::Energy::hartree_to_kjmol(t.energy);
-        result.energySumKJ += kj;
-        if (kj != 0.0)
-            result.energiesKJ.push_back(kj);
-        if (kj < options.limitKJ) {
-            if (aDonates)
-                ++result.count.aDonates;
-            else
-                ++result.count.bDonates;
-        }
-    }
-    result.ok = true;
-    return result;
+    return classifyHBondEnergies(triples, static_cast<int>(molecule.AtomCount()), groupA, groupB, options.limitKJ);
 }
 
 TrajectoryProperties::TrajectoryProperties(const json& controller, bool silent)

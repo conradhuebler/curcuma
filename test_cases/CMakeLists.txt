@@ -608,6 +608,12 @@ add_executable(test_hbond_energies test_hbond_energies.cpp)
 target_link_libraries(test_hbond_energies curcuma_core)
 add_test(NAME hbond_energies COMMAND test_hbond_energies)
 set_tests_properties(hbond_energies PROPERTIES TIMEOUT 120)
+
+# Opt-in hydrogen-bond log of SimpleMD. Claude Generated 2026 - reference run vs run with the log on.
+add_executable(test_md_hbond_log test_md_hbond_log.cpp)
+target_link_libraries(test_md_hbond_log curcuma_cap curcuma_core)
+add_test(NAME md_hbond_log COMMAND test_md_hbond_log)
+set_tests_properties(md_hbond_log PROPERTIES TIMEOUT 300)
 # Claude Generated (Oct 2026): the same per-triple energies from the CUDA/ROCm device workspace against the CPU.
 # Exits 0 with a SKIP line when the backend sees no device.
 if(USE_CUDA OR USE_ROCM)

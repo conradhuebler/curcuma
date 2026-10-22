@@ -31,6 +31,7 @@
 
 #include "curcumamethod.h"
 
+#include "src/core/energy_calculators/ff_methods/gfnff_parameters.h"
 #include "src/core/molecule.h"
 #include "src/core/parameter_macros.h"
 
@@ -75,6 +76,12 @@ struct HBondEnergyCount {
     double energySumKJ = 0.0;             ///< sum of the energies of all triples in the groups, kJ/mol
     std::vector<double> energiesKJ;       ///< energy of every triple in the groups that is not zero, kJ/mol
 };
+
+/// The counting step of the energy criterion alone, for triples that are already known (a trajectory frame
+/// evaluated here, or a running MD). @p atomCount is the number of atoms the indices refer to; groups as in
+/// countHydrogenBonds(); a triple counts when its energy is below @p limitKJ (kJ/mol).
+HBondEnergyCount classifyHBondEnergies(const std::vector<GFNFFHBondEnergy>& triples, int atomCount,
+    const std::vector<int>& groupA, const std::vector<int>& groupB, double limitKJ);
 
 /// Hydrogen bonds by the GFN-FF triple energies (needs one GFN-FF evaluation of the frame, which sets up
 /// topology and charges from scratch: far more expensive than the geometric count). Groups as in

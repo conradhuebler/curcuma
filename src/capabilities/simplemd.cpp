@@ -39,6 +39,8 @@
 #include "src/capabilities/optimizer_factory.h"
 #include "src/capabilities/rmsd.h"
 #include "src/capabilities/rmsdtraj.h"
+#include "src/capabilities/trajprops.h"        // Claude Generated (Oct 2026): hydrogen-bond classification
+#include "src/core/energy_calculators/ff_methods/gfnff.h"
 #include "src/capabilities/shared_bias_pool.h"  // Claude Generated (Apr 2026)
 #include "src/capabilities/rmsd_mtd_core.h"      // Claude Generated (Jul 2026): strided-scheme decision helpers
 
@@ -444,6 +446,10 @@ void SimpleMD::LoadControlJson()
     m_md_diagnostics = m_config.get<bool>("md_diagnostics");
     // WP-P1 (May 2026): per-phase wall-clock timing in the JSONL records
     m_md_diagnostics_timing = m_config.get<bool>("md_diagnostics_timing");
+
+    // Claude Generated (Oct 2026): hydrogen-bond log, off unless asked for
+    m_hb_log_frequency = m_config.get<int>("hb_log_frequency");
+    m_hb_log_limit_kj = m_config.get<double>("hb_log_energy_limit");
 
     // Claude Generated 2025: RATTLE Parameters
     m_rm_COM = m_config.get<double>("remove_com_motion");
@@ -2067,6 +2073,9 @@ void SimpleMD::prepareRun()
         }
     }
 
+    if (m_hb_log_frequency > 0)
+        SetupHydrogenBondLog();
+
     // WP-P1 (May 2026): force per-phase timing collection when diagnostics-timing is on
     if (m_md_diagnostics && m_md_diagnostics_timing && m_interface) {
         m_interface->setForcePhaseTiming(true);
@@ -2698,6 +2707,10 @@ bool SimpleMD::step()
         file2.close();
     }
     //////////// Dipole
+
+    // Claude Generated (Oct 2026): hydrogen-bond log (opt-in; the test is one integer compare when off)
+    if (m_hb_log_gfnff && m_step % m_hb_log_frequency == 0)
+        LogHydrogenBonds();
 
     if (m_step % m_dump == 0) {
         if (bool write = WriteGeometry()) {
@@ -5155,4 +5168,48 @@ json SimpleMD::Results() const
         result["density"] = m_molecule.Density(volume); // g/cm^3
     }
     return result;
+}
+
+/* Claude Generated (Oct 2026) - Hydrogen-bond log by GFN-FF triple energy.
+ *
+ * Opt-in (hb_log_frequency > 0). The triples are the A-H...B candidates GFN-FF evaluates anyway;
+ * their single energies are recorded by the force field (GFNFF::setRecordHBondEnergies) and counted
+ * here when below hb_log_energy_limit. Recording does not change the dynamics (the same terms are
+ * summed as before). Only GFN-FF has such triples; with another method the log is refused. */
+void SimpleMD::SetupHydrogenBondLog()
+{
+    GFNFF* gfnff = (m_interface && m_interface->Interface()) ? m_interface->Interface()->gfnffInstance() : nullptr;
+    if (!gfnff) {
+        CurcumaLogger::error("hb_log_frequency needs the gfnff method (hydrogen-bond triples); the hydrogen-bond log is off");
+        return;
+    }
+    m_hb_log_a = curcuma::resolveSelection(m_molecule, m_config.get<std::string>("hb_log_selection"));
+    m_hb_log_b = curcuma::resolveSelection(m_molecule, m_config.get<std::string>("hb_log_selection_b"));
+    if ((!m_config.get<std::string>("hb_log_selection").empty() && m_hb_log_a.empty())
+        || (!m_config.get<std::string>("hb_log_selection_b").empty() && m_hb_log_b.empty())) {
+        CurcumaLogger::error("hb_log_selection / hb_log_selection_b matched no atoms; the hydrogen-bond log is off");
+        return;
+    }
+    m_hb_log_file.open(outputPath(Basename() + ".hbonds.csv"));
+    if (!m_hb_log_file.is_open()) {
+        CurcumaLogger::error("cannot write " + outputPath(Basename() + ".hbonds.csv") + "; the hydrogen-bond log is off");
+        return;
+    }
+    m_hb_log_file << "step,time_fs,hbonds_total,a_donates,b_donates,energy_sum_kj_mol\n";
+    gfnff->setRecordHBondEnergies(true);
+    m_hb_log_gfnff = gfnff;
+}
+
+void SimpleMD::LogHydrogenBonds()
+{
+    const std::vector<GFNFFHBondEnergy> triples = m_hb_log_gfnff->hydrogenBondEnergies();
+    if (triples.empty() && !m_hb_log_warned_empty) {
+        CurcumaLogger::warn("hydrogen-bond log: no GFN-FF triples recorded (no candidates, or the force field does not record them)");
+        m_hb_log_warned_empty = true;
+    }
+    const curcuma::HBondEnergyCount c = curcuma::classifyHBondEnergies(
+        triples, static_cast<int>(m_natoms), m_hb_log_a, m_hb_log_b, m_hb_log_limit_kj);
+    m_hb_log_file << m_step << "," << m_currentStep << "," << c.count.total() << "," << c.count.aDonates << ","
+                  << c.count.bDonates << "," << c.energySumKJ << "\n";
+    m_hb_log_file.flush();
 }
