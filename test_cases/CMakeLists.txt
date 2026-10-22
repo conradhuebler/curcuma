@@ -384,6 +384,13 @@ target_link_libraries(test_polymerbuild_pdmaema curcuma_cap curcuma_core)
 target_compile_definitions(test_polymerbuild_pdmaema PRIVATE CURCUMA_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 add_test(NAME polymerbuild_pdmaema COMMAND test_polymerbuild_pdmaema)
 set_tests_properties(polymerbuild_pdmaema PROPERTIES TIMEOUT 600)
+# 30-mer: about 6 minutes (Oct 2026, one run), so it is not part of the default ctest run.
+# Enable with -DCURCUMA_LONG_TESTS=ON, run with ctest -L long.
+option(CURCUMA_LONG_TESTS "Register tests that run for minutes (label 'long')" OFF)
+if(CURCUMA_LONG_TESTS)
+    add_test(NAME polymerbuild_pdmaema_30 COMMAND test_polymerbuild_pdmaema 30)
+    set_tests_properties(polymerbuild_pdmaema_30 PROPERTIES TIMEOUT 1800 LABELS long)
+endif()
 
 # Claude Generated (April 2026): CPU GFN-FF analytical vs numerical gradient test
 # Tests gradient correctness for all built-in molecules (H2O, CH4, CH3OH, CH3OCH3).

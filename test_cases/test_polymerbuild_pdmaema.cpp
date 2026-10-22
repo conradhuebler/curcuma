@@ -11,7 +11,9 @@
  *  - the bond graph is a tree: atoms-1 bonds (the C=O bonds are single pairs in a distance graph);
  *  - the backbone alternates quaternary carbon and CH2: n carbons carrying the ester, each with a methyl
  *    (n+1 CH3 on quaternary carbons in all: n side methyls and the chain-end CH3), joined by n-1 CH2 groups;
- *  - C-H 1.05 to 1.15 A, C-C 1.45 to 1.60 A, no atom pair closer than 1.0 A (with H) or 1.1 A (heavy).
+ *  - C-H 1.05 to 1.15 A, C-C 1.45 to 1.60 A, no atom pair closer than 1.0 A (with H) or 1.1 A (heavy);
+ *  - bond lengths per type (C-H, C-C, C-N, C-O) in chemical windows; angles per centre (C with 4 or 3 neighbours, N, O)
+ *    in windows, mean of the tetrahedral carbons 109.5 +- 3 deg; the backbone C-CH2-C angle is printed, not judged.
  */
 
 #include "src/capabilities/polymerbuild.h"
@@ -22,6 +24,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -179,13 +182,110 @@ static void checkChain(int units)
     check(methylOnQuaternary == units + 1, "one side methyl per unit and the chain-end CH3 hang on the quaternary carbons (got " + std::to_string(methylOnQuaternary) + ")");
     check(joiningCH2 == units - 1, "CH2 groups join the units (got " + std::to_string(joiningCH2) + ")");
 
+    // Bond-length windows per bond type (generous chemical windows, not fitted to a run): a broken or
+    // stretched junction falls outside, a normal GFN-FF geometry inside.
+    struct Window { double lo, hi; };
+    const std::map<std::string, Window> bondWindow {
+        { "C-H", { 1.06, 1.13 } }, { "C-C", { 1.48, 1.60 } }, { "C-N", { 1.43, 1.52 } }, { "C-O", { 1.18, 1.45 } }
+    };
+    std::map<std::string, std::pair<double, double>> bondSeen;
+    std::map<std::string, int> bondCount;
+    for (int i = 0; i < n; ++i)
+        for (int j : neighbours[i]) {
+            if (j < i)
+                continue;
+            std::string a = atoms[i].element, b = atoms[j].element;
+            if (a > b)
+                std::swap(a, b);
+            const std::string type = a + "-" + b;
+            const double d = distance(atoms[i], atoms[j]);
+            auto it = bondSeen.find(type);
+            if (it == bondSeen.end())
+                bondSeen[type] = { d, d };
+            else {
+                it->second.first = std::min(it->second.first, d);
+                it->second.second = std::max(it->second.second, d);
+            }
+            ++bondCount[type];
+        }
+    for (const auto& [type, range] : bondSeen) {
+        auto w = bondWindow.find(type);
+        if (w == bondWindow.end())
+            check(false, "unexpected bond type " + type + " (" + std::to_string(bondCount[type]) + " bonds)");
+        else
+            check(range.first >= w->second.lo && range.second <= w->second.hi,
+                type + " (" + std::to_string(bondCount[type]) + " bonds) " + std::to_string(range.first) + " to "
+                    + std::to_string(range.second) + " A, window " + std::to_string(w->second.lo) + " to "
+                    + std::to_string(w->second.hi));
+    }
+
+    // Angle distribution by centre: element and number of neighbours (4 = tetrahedral, 3 = planar ester C or amine N).
+    // The window rejects distorted junctions; the mean of the tetrahedral centres must sit near 109.5 degrees.
+    struct AngleStat { double lo = 999, hi = 0, sum = 0; int count = 0; };
+    std::map<std::string, AngleStat> angleStat;
+    AngleStat backbone; // C-CH2-C between two quaternary carbons, reported on its own
+    auto angleAt = [&](int c, int a, int b) {
+        const double ux = atoms[a].x - atoms[c].x, uy = atoms[a].y - atoms[c].y, uz = atoms[a].z - atoms[c].z;
+        const double vx = atoms[b].x - atoms[c].x, vy = atoms[b].y - atoms[c].y, vz = atoms[b].z - atoms[c].z;
+        const double cosine = (ux * vx + uy * vy + uz * vz) / (std::sqrt(ux * ux + uy * uy + uz * uz) * std::sqrt(vx * vx + vy * vy + vz * vz));
+        return std::acos(std::max(-1.0, std::min(1.0, cosine))) * 180.0 / 3.14159265358979323846;
+    };
+    for (int c = 0; c < n; ++c) {
+        const auto& nb = neighbours[c];
+        const std::string centre = atoms[c].element + std::to_string(nb.size());
+        const bool isBackbone = atoms[c].element == "C" && nb.size() == 4 && hydrogens(c) == 2
+            && std::count_if(nb.begin(), nb.end(), [&](int j) { return std::find(quaternary.begin(), quaternary.end(), j) != quaternary.end(); }) == 2;
+        for (size_t x = 0; x < nb.size(); ++x)
+            for (size_t y = x + 1; y < nb.size(); ++y) {
+                const double t = angleAt(c, nb[x], nb[y]);
+                AngleStat& st = angleStat[centre];
+                st.lo = std::min(st.lo, t);
+                st.hi = std::max(st.hi, t);
+                st.sum += t;
+                ++st.count;
+                if (isBackbone && std::find(quaternary.begin(), quaternary.end(), nb[x]) != quaternary.end()
+                    && std::find(quaternary.begin(), quaternary.end(), nb[y]) != quaternary.end()) {
+                    backbone.lo = std::min(backbone.lo, t);
+                    backbone.hi = std::max(backbone.hi, t);
+                    backbone.sum += t;
+                    ++backbone.count;
+                }
+            }
+    }
+    const std::map<std::string, Window> angleWindow {
+        { "C4", { 100.0, 128.0 } }, { "C3", { 108.0, 130.0 } }, { "N3", { 105.0, 120.0 } }, { "O2", { 105.0, 120.0 } }
+    };
+    for (const auto& [centre, st] : angleStat) {
+        auto w = angleWindow.find(centre);
+        if (w == angleWindow.end()) {
+            check(false, "unexpected centre " + centre);
+            continue;
+        }
+        char text[200];
+        std::snprintf(text, sizeof text, "angles at %s: %d angles, %.1f to %.1f deg (mean %.1f), window %.0f to %.0f",
+            centre.c_str(), st.count, st.lo, st.hi, st.sum / st.count, w->second.lo, w->second.hi);
+        check(st.lo >= w->second.lo && st.hi <= w->second.hi, text);
+    }
+    if (angleStat.count("C4"))
+        check(std::abs(angleStat["C4"].sum / angleStat["C4"].count - 109.5) < 3.0, "mean angle at tetrahedral carbon within 3 deg of 109.5");
+    if (backbone.count > 0)
+        std::printf("  INFO  backbone C-CH2-C angle (%d): %.1f to %.1f deg, mean %.1f (not tested against a reference)\n",
+            backbone.count, backbone.lo, backbone.hi, backbone.sum / backbone.count);
+
     std::filesystem::current_path(previous);
     std::filesystem::remove_all(dir);
 }
 
-int main()
+int main(int argc, char** argv)
 {
-    for (int units : { 4, 10 })
+    // Chain lengths from the command line (the long test passes 30); default 4 and 10.
+    std::vector<int> lengths { 4, 10 };
+    if (argc > 1) {
+        lengths.clear();
+        for (int k = 1; k < argc; ++k)
+            lengths.push_back(std::max(2, std::atoi(argv[k])));
+    }
+    for (int units : lengths)
         checkChain(units);
     std::printf("%s\n", g_failed ? "FAILED" : "all passed");
     return g_failed ? 1 : 0;
