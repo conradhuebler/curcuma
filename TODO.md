@@ -11,6 +11,9 @@ Stand.
 
 ## 1. Korrektheit (offen)
 
+- **Literaturverweise der Trajektorien- und Ionen-Methoden pruefen** (Oktober 2026): die Quellen fuer Blockfehler, H-Brueckenkriterium, g(r), Shrake-Rupley, Sondenradius, Bondi-Radien, Fibonacci-Punkte und `-ionize`
+  stehen in `docs/TRAJPROPS.md`, `src/core/citation_database.cpp` und `src/capabilities/trajprops.h`; sie stammen aus dem Gedaechtnis der KI und sind NICHT gegen die Arbeiten geprueft. Ebenso offen: welchen Radiensatz Min 2015 fuer die WASA verwendet.
+
 - **Flat-Flag ohne Modulpräfix erreicht den nativen xTB nicht** (bestätigt 2026-10-11, n=1): `-diis_start 1` landet laut `-export_run` in `/opt` und `/sp`, nicht in `/xtb`; der Name ist in
   `curcumaopt.h`, `lbfgs.h` und `native_xtb_method.h` registriert, bei `-verbosity 2` kommt keine Warnung. `-xtb.diis_start 1` wirkt (seit `1bb4781b`). Ursache im Routing nicht untersucht;
   gleiches Muster für andere mehrfach registrierte Namen möglich. Vault: Labor `curcuma GFN2-SCF-Vorkonditionierung`, Schritt 19.

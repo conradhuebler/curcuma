@@ -862,6 +862,146 @@ const std::unordered_map<std::string, CitationData>& database()
             "}"
         }},
 
+        // === Trajectory properties (Claude Generated, Oct 2026) ===
+        // TODO(verify references): the entries below (flyvbjerg1989 ... min2015pdmaema) were written down by the AI
+        // from memory and have NOT been checked against the papers; check authors, volume, pages and DOI.
+        { "flyvbjerg1989", {
+            "Block averaging (Flyvbjerg and Petersen 1989)",
+            "Flyvbjerg, H.; Petersen, H. G., J. Chem. Phys. 1989, 91, 461-466 (DOI: 10.1063/1.457480)",
+            "flyvbjerg1989error",
+            "@article{flyvbjerg1989error,\n"
+            "  author = {Flyvbjerg, H. and Petersen, H. G.},\n"
+            "  title = {Error estimates on averages of correlated data},\n"
+            "  journal = {J. Chem. Phys.},\n"
+            "  year = {1989},\n"
+            "  volume = {91},\n"
+            "  pages = {461--466},\n"
+            "  doi = {10.1063/1.457480}\n"
+            "}"
+        }},
+        { "luzar1996", {
+            "Geometric hydrogen-bond criterion (Luzar and Chandler 1996)",
+            "Luzar, A.; Chandler, D., Nature 1996, 379, 55-57 (DOI: 10.1038/379055a0)",
+            "luzar1996hydrogen",
+            "@article{luzar1996hydrogen,\n"
+            "  author = {Luzar, Alenka and Chandler, David},\n"
+            "  title = {Hydrogen-bond kinetics in liquid water},\n"
+            "  journal = {Nature},\n"
+            "  year = {1996},\n"
+            "  volume = {379},\n"
+            "  pages = {55--57},\n"
+            "  doi = {10.1038/379055a0}\n"
+            "}"
+        }},
+        { "kumar2007hbond", {
+            "Hydrogen-bond definitions compared (Kumar, Schmidt and Skinner 2007)",
+            "Kumar, R.; Schmidt, J. R.; Skinner, J. L., J. Chem. Phys. 2007, 126, 204107 (DOI: 10.1063/1.2742385)",
+            "kumar2007hydrogen",
+            "@article{kumar2007hydrogen,\n"
+            "  author = {Kumar, R. and Schmidt, J. R. and Skinner, J. L.},\n"
+            "  title = {Hydrogen bonding definitions and dynamics in liquid water},\n"
+            "  journal = {J. Chem. Phys.},\n"
+            "  year = {2007},\n"
+            "  volume = {126},\n"
+            "  pages = {204107},\n"
+            "  doi = {10.1063/1.2742385}\n"
+            "}"
+        }},
+        { "allen_tildesley", {
+            "Radial distribution function (Allen and Tildesley)",
+            "Allen, M. P.; Tildesley, D. J., Computer Simulation of Liquids, 2nd ed., Oxford University Press, 2017",
+            "allen2017computer",
+            "@book{allen2017computer,\n"
+            "  author = {Allen, M. P. and Tildesley, D. J.},\n"
+            "  title = {Computer Simulation of Liquids},\n"
+            "  edition = {2},\n"
+            "  publisher = {Oxford University Press},\n"
+            "  year = {2017}\n"
+            "}"
+        }},
+        { "shrake1973", {
+            "Solvent-accessible surface by test points (Shrake and Rupley 1973)",
+            "Shrake, A.; Rupley, J. A., J. Mol. Biol. 1973, 79, 351-371 (DOI: 10.1016/0022-2836(73)90011-9)",
+            "shrake1973environment",
+            "@article{shrake1973environment,\n"
+            "  author = {Shrake, A. and Rupley, J. A.},\n"
+            "  title = {Environment and exposure to solvent of protein atoms. Lysozyme and insulin},\n"
+            "  journal = {J. Mol. Biol.},\n"
+            "  year = {1973},\n"
+            "  volume = {79},\n"
+            "  pages = {351--371},\n"
+            "  doi = {10.1016/0022-2836(73)90011-9}\n"
+            "}"
+        }},
+        { "lee1971", {
+            "Accessible surface and probe radius (Lee and Richards 1971)",
+            "Lee, B.; Richards, F. M., J. Mol. Biol. 1971, 55, 379-400 (DOI: 10.1016/0022-2836(71)90324-X)",
+            "lee1971interpretation",
+            "@article{lee1971interpretation,\n"
+            "  author = {Lee, B. and Richards, F. M.},\n"
+            "  title = {The interpretation of protein structures: Estimation of static accessibility},\n"
+            "  journal = {J. Mol. Biol.},\n"
+            "  year = {1971},\n"
+            "  volume = {55},\n"
+            "  pages = {379--400},\n"
+            "  doi = {10.1016/0022-2836(71)90324-X}\n"
+            "}"
+        }},
+        { "bondi1964", {
+            "van der Waals radii (Bondi 1964)",
+            "Bondi, A., J. Phys. Chem. 1964, 68, 441-451 (DOI: 10.1021/j100785a001)",
+            "bondi1964van",
+            "@article{bondi1964van,\n"
+            "  author = {Bondi, A.},\n"
+            "  title = {van der Waals Volumes and Radii},\n"
+            "  journal = {J. Phys. Chem.},\n"
+            "  year = {1964},\n"
+            "  volume = {68},\n"
+            "  pages = {441--451},\n"
+            "  doi = {10.1021/j100785a001}\n"
+            "}"
+        }},
+        { "gonzalez2010fibonacci", {
+            "Fibonacci lattice on the sphere (Gonzalez 2010)",
+            "Gonzalez, A., Math. Geosci. 2010, 42, 49-64 (DOI: 10.1007/s11004-009-9257-x)",
+            "gonzalez2010measurement",
+            "@article{gonzalez2010measurement,\n"
+            "  author = {Gonz{\\'a}lez, {\\'A}lvaro},\n"
+            "  title = {Measurement of areas on a sphere using Fibonacci and latitude-longitude lattices},\n"
+            "  journal = {Math. Geosci.},\n"
+            "  year = {2010},\n"
+            "  volume = {42},\n"
+            "  pages = {49--64},\n"
+            "  doi = {10.1007/s11004-009-9257-x}\n"
+            "}"
+        }},
+        { "gromacs2015", {
+            "Counter-ion placement by solvent replacement (GROMACS genion, Abraham et al. 2015)",
+            "Abraham, M. J. et al., SoftwareX 2015, 1-2, 19-25 (DOI: 10.1016/j.softx.2015.06.001)",
+            "abraham2015gromacs",
+            "@article{abraham2015gromacs,\n"
+            "  author = {Abraham, M. J. and others},\n"
+            "  title = {GROMACS: High performance molecular simulations through multi-level parallelism from laptops to supercomputers},\n"
+            "  journal = {SoftwareX},\n"
+            "  year = {2015},\n"
+            "  volume = {1--2},\n"
+            "  pages = {19--25},\n"
+            "  doi = {10.1016/j.softx.2015.06.001}\n"
+            "}"
+        }},
+        { "min2015pdmaema", {
+            "Reference setup: PDMAEMA coil-to-globule simulation (Min et al. 2015)",
+            "Min, S. et al., Soft Matter 2015 (DOI: 10.1039/c4sm02242d)",
+            "min2015atomistic",
+            "@article{min2015atomistic,\n"
+            "  author = {Min, S. and others},\n"
+            "  title = {Atomistic simulation for coil-to-globule transition of poly(2-dimethylaminoethyl methacrylate)},\n"
+            "  journal = {Soft Matter},\n"
+            "  year = {2015},\n"
+            "  doi = {10.1039/c4sm02242d}\n"
+            "}"
+        }},
+
         // === Topological data analysis ===
         { "ripser", {
             "Topological Data Analysis / Ripser (Townsend et al. 2020)",

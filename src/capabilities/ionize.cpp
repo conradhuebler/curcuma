@@ -7,6 +7,7 @@
 
 #include "ionize.h"
 
+#include "src/core/citation_registry.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/elements.h"
 #include "src/core/parameter_registry.h"
@@ -248,6 +249,9 @@ void Ionize::start()
     m_results["atoms"] = static_cast<int>(m_result.molecule.AtomCount());
     m_results["replaced_atoms"] = m_result.replaced_atoms;
 
+    // Replacing solvent molecules by ions follows the approach of GROMACS genion (reference in the citation
+    // database; TODO: check it against the paper).
+    CitationRegistry::cite("gromacs2015");
     CurcumaLogger::success(std::to_string(m_result.ions_added) + " " + m_result.ion
         + " ion(s) replace solvent molecules; total charge " + std::to_string(m_result.final_charge)
         + ", " + std::to_string(m_result.molecule.AtomCount()) + " atoms: " + outputPath(name));

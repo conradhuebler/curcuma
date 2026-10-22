@@ -16,9 +16,25 @@
  *    when the D...A distance is at most hb_distance and the angle D-H...A at least
  *    hb_angle. Between two groups (`selection`, `selection_b`) both directions are
  *    counted separately; with one group, bonds inside it.
+ *  - `rdf`: radial distribution function g(r) between two atom groups with running
+ *    coordination number n(r), optional element filters, minimum image convention in an
+ *    orthorhombic cell given by the user (an XYZ file carries none).
+ *  - `sasa`: solvent-accessible surface area of an atom group by the Shrake-Rupley
+ *    test-point method with a probe sphere (default 1.4 A, a water molecule).
  * The coordinates are used as stored: a chain that was wrapped around a periodic
  * boundary gives a wrong R_g, no hydrogen bond is found across a boundary, and an
  * XYZ trajectory carries no cell to unwrap with.
+ *
+ * LITERATURE (TODO: written by the AI from memory, not yet checked against the papers by the
+ * operator; also in docs/TRAJPROPS.md, the citation database and TODO.md):
+ *  - block error: Flyvbjerg, Petersen, J. Chem. Phys. 91, 461 (1989)
+ *  - geometric hydrogen bond: cf. Luzar, Chandler, Nature 379, 55 (1996); Kumar, Schmidt,
+ *    Skinner, J. Chem. Phys. 126, 204107 (2007)
+ *  - g(r), n(r): Allen, Tildesley, Computer Simulation of Liquids (2nd ed., 2017)
+ *  - Shrake-Rupley: J. Mol. Biol. 79, 351 (1973); probe sphere: Lee, Richards, J. Mol. Biol.
+ *    55, 379 (1971); radii: Bondi, J. Phys. Chem. 68, 441 (1964); test points on a sphere:
+ *    Gonzalez, Math. Geosci. 42, 49 (2010)
+ *  - the setup this serves: Min et al., Soft Matter (2015), doi 10.1039/c4sm02242d
  *
  * The statistics report the plain standard deviation over frames and a block
  * standard error of the mean. Consecutive frames of an MD run are correlated, so
@@ -35,6 +51,7 @@
 #include "src/core/molecule.h"
 #include "src/core/parameter_macros.h"
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -90,6 +107,55 @@ HBondEnergyCount classifyHBondEnergies(const std::vector<GFNFFHBondEnergy>& trip
 HBondEnergyCount countHydrogenBondsByEnergy(const Molecule& molecule, const std::vector<int>& groupA,
     const std::vector<int>& groupB, const HBondEnergyOptions& options);
 
+/// Element symbols "N,O" -> atomic numbers. False with @p error set for an unknown symbol.
+bool parseElementList(const std::string& list, std::vector<int>& numbers, std::string* error);
+
+/// Keep the atoms of @p atoms whose element is in @p elements (all atoms of the molecule when @p atoms is empty;
+/// no filtering when @p elements is empty).
+std::vector<int> filterByElement(const Molecule& molecule, const std::vector<int>& atoms, const std::vector<int>& elements);
+
+// --- radial distribution function -------------------------------------------------------------------
+struct RdfOptions {
+    double rMax = 10.0;                 ///< Angstrom
+    double binWidth = 0.05;             ///< Angstrom
+    bool periodic = false;
+    double cell[3] = { 0.0, 0.0, 0.0 }; ///< orthorhombic edges (Angstrom), minimum image when periodic
+};
+
+/// Add the ordered pairs (i in A, j in B, i != j) of one frame to @p histogram (bins of binWidth up to rMax).
+/// Groups must be identical or disjoint (checked by the caller).
+void accumulateRdf(const Molecule& molecule, const std::vector<int>& groupA, const std::vector<int>& groupB,
+    const RdfOptions& options, std::vector<double>& histogram);
+
+struct RdfResult {
+    std::vector<double> r;              ///< bin centres
+    std::vector<double> g;              ///< g(r)
+    std::vector<double> gError;         ///< standard error from the blocks, 0 with fewer than 2 blocks
+    std::vector<double> coordination;   ///< n(r): neighbours of B per atom of A inside the bin's upper edge
+};
+
+/// g(r) and n(r) from per-block histograms of ordered pairs. @p framesPerBlock[b] frames went into block b;
+/// @p identicalGroups: A and B are the same atoms (the density uses N_B - 1); @p volume in A^3.
+RdfResult normalizeRdf(const std::vector<std::vector<double>>& blockHistograms, const std::vector<int>& framesPerBlock,
+    int atomsA, int atomsB, bool identicalGroups, double volume, double binWidth);
+
+// --- solvent-accessible surface area ----------------------------------------------------------------
+/// van der Waals radius in Angstrom (Bondi 1964) for the elements H, C, N, O, F, P, S, Cl, Br, I; 0 for any other.
+double bondiRadius(int atomicNumber);
+
+struct SasaOptions {
+    double probe = 1.4;                 ///< probe sphere radius, Angstrom (1.4: a water molecule)
+    int points = 960;                   ///< test points per atom
+    std::vector<std::pair<int, double>> radii;   ///< per-element radius overrides (atomic number, Angstrom)
+};
+
+/// Solvent-accessible surface area (A^2) of @p surface, with @p occluders covering it (the atoms of @p surface
+/// themselves are always occluders). Shrake-Rupley: an atom's area is 4 pi (r+probe)^2 times the fraction of
+/// its test points outside every other atom's (r+probe) sphere. Fails (negative result, @p error set) for an
+/// element without a radius.
+double solventAccessibleSurface(const Molecule& molecule, const std::vector<int>& surface,
+    const std::vector<int>& occluders, const SasaOptions& options, std::string* error);
+
 /// Atoms of @p selection resolved against @p molecule. A leading '!' means every atom NOT in the
 /// rest of the selection ("!F1": all but the first fragment). Empty selection: all atoms.
 std::vector<int> resolveSelection(Molecule molecule, const std::string& selection);
@@ -130,6 +196,15 @@ private:
     void ReadControlFile() override {}
     void LoadControlJson() override {}
 
+    /// Quantities with their own loop; start() dispatches to them after the common checks.
+    void startRdf();
+    void startSasa();
+    /// Read the trajectory once, frame by frame; @p visit gets the molecule, its frame number and the
+    /// 0-based count of frames used, and returns false to stop (after setting m_error). False if stopped.
+    bool streamFrames(const std::vector<int>& wanted, const std::function<bool(Molecule&, int, int)>& visit);
+    /// Frames to use from the parameters, or empty with m_error set.
+    std::vector<int> framesFromParameters(int* totalInFile);
+
     json m_results;
     std::string m_error;
 };
@@ -142,7 +217,7 @@ MODULE_INFO("Streaming properties of a long trajectory, one frame in memory at a
     "Analysis", { "trajectory", "gyration" })
 
 PARAM(quantity, String, "gyration", "What to compute per frame.", "Basic", {},
-    "tier=primary; enum=gyration|hbonds")
+    "tier=primary; enum=gyration|hbonds|rdf|sasa")
 PARAM(selection, Selection, "", "Atoms the quantity is computed for (selection grammar, resolved once on the "
                                 "first frame used; a leading ! means all atoms except the rest, e.g. !F1); "
                                 "empty means all atoms.", "Basic", {}, "tier=primary")
@@ -170,6 +245,16 @@ PARAM(hb_hist_max, Double, 20.0, "hbonds, criterion energy: lower edge of the hi
     "Hydrogen bonds", {}, "min=0")
 PARAM(charge, Int, 0, "hbonds, criterion energy: total charge of the system for GFN-FF.", "Hydrogen bonds", {})
 PARAM(threads, Int, 1, "hbonds, criterion energy: threads of the GFN-FF evaluation.", "Hydrogen bonds", {}, "min=1")
+PARAM(rdf_elements_a, String, "", "rdf: keep only these elements of the first group (symbols, comma separated); empty = all.", "RDF", {})
+PARAM(rdf_elements_b, String, "", "rdf: keep only these elements of the second group; empty = all.", "RDF", {})
+PARAM(rdf_r_max, Double, 10.0, "rdf: largest distance (Angstrom); with a cell at most half its shortest edge.", "RDF", {}, "min=0")
+PARAM(rdf_bin_width, Double, 0.05, "rdf: bin width (Angstrom).", "RDF", {}, "min=0")
+PARAM(cell, String, "", "rdf: orthorhombic cell \"Lx,Ly,Lz\" in Angstrom (minimum image convention and the volume for g(r)). An XYZ file has none.", "RDF", {})
+PARAM(rdf_volume, Double, 0.0, "rdf without a cell: volume (A^3) for the density of the second group; the distances are then not wrapped.", "RDF", {}, "min=0")
+PARAM(sasa_probe, Double, 1.4, "sasa: probe sphere radius (Angstrom); 1.4 is a water molecule.", "SASA", {}, "min=0")
+PARAM(sasa_points, Int, 960, "sasa: test points per atom.", "SASA", {}, "min=10")
+PARAM(sasa_radii, String, "", "sasa: radius overrides, e.g. \"Cl:1.75,O:1.6\" (Angstrom); the default set is Bondi (H, C, N, O, F, P, S, Cl, Br, I).", "SASA", {})
+PARAM(sasa_occluders, String, "group", "sasa: what covers the surface atoms: group (the selected atoms only, the solute in a probe's view) or all (every atom, e.g. the solvent too).", "SASA", {}, "enum=group|all")
 PARAM(blocks, Int, 5, "Number of blocks for the block standard error.", "Statistics", {}, "min=1")
 PARAM(output, String, "", "Per-frame CSV; empty gives <basename>_<quantity>.csv.", "Output", {})
 END_PARAMETER_DEFINITION
