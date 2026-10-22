@@ -501,6 +501,7 @@ private:
     // LM placement hardening — Claude Generated 2026
     PARAM(lm_k_bond, Double, 100000.0, "Bond-length constraint weight for fragment placement LM", "Refinement", {})
     PARAM(lm_bond_tolerance, Double, 0.1, "Warn if LM bond length exceeds target by more than this (Å)", "Refinement", {})
+    PARAM(lm_multistart, Int, 8, "Extra LM starts (fragment spun about the new bond) if the placement stays overstretched after the retry (0=off)", "Refinement", {})
     PARAM(lm_retry_on_stretch, Bool, true, "Retry LM with alternative initial guess when bond is overstretched", "Refinement", {})
     PARAM(lm_contract_bond, Bool, false, "Contract overstretched LM bond by sliding fragment along anchor axis before assembly", "Refinement", {})
 

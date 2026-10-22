@@ -388,8 +388,10 @@ set_tests_properties(polymerbuild_pdmaema PROPERTIES TIMEOUT 600)
 # Enable with -DCURCUMA_LONG_TESTS=ON, run with ctest -L long.
 option(CURCUMA_LONG_TESTS "Register tests that run for minutes (label 'long')" OFF)
 if(CURCUMA_LONG_TESTS)
-    add_test(NAME polymerbuild_pdmaema_30 COMMAND test_polymerbuild_pdmaema 30)
+    add_test(NAME polymerbuild_pdmaema_30 COMMAND test_polymerbuild_pdmaema A30)
     set_tests_properties(polymerbuild_pdmaema_30 PROPERTIES TIMEOUT 1800 LABELS long)
+    add_test(NAME polymerbuild_pdmaema_ab15 COMMAND test_polymerbuild_pdmaema AB15)
+    set_tests_properties(polymerbuild_pdmaema_ab15 PROPERTIES TIMEOUT 3600 LABELS long)
 endif()
 
 # Claude Generated (April 2026): CPU GFN-FF analytical vs numerical gradient test

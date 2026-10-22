@@ -3,7 +3,7 @@
  *
  * Claude Generated 2026 - PDMAEMA built by polymerbuild from src/molecules/pdmaema.xyz.
  *
- * What must hold for a 4-mer and a 10-mer built with the real optimisation (nothing here is a number from an earlier run):
+ * What must hold for a 4-mer, a 10-mer and an alternating (AB)3 with protonated B built with the real optimisation (nothing here is a number from an earlier run):
  *  - composition: n repeat units C8H15NO2 plus two chain-end hydrogens, 26n+2 atoms (4-mer: C32H62N4O8, 106 atoms);
  *  - every atom is bonded (distance criterion): the chain-end caps are hydrogens ON a carbon, not hydrogens
  *    floating a few Angstrom away (the defect this test was written for: an open Xx became an H for the
@@ -56,18 +56,21 @@ static double distance(const Atom& a, const Atom& b)
 }
 
 /// One chain of `units` repeat units: every expected count follows from the repeat unit C8H15NO2 plus two chain-end H.
-static void checkChain(int units)
+static void checkChain(const std::string& sequence, int units, int protonated, int subchain)
 {
-    std::printf("polymerbuild PDMAEMA (A)%d\n", units);
-    const std::filesystem::path dir = std::filesystem::temp_directory_path() / ("curcuma_test_polymerbuild_pdmaema_" + std::to_string(units));
+    std::printf("polymerbuild PDMAEMA %s%s\n", sequence.c_str(), subchain > 0 ? (" subchain_size " + std::to_string(subchain)).c_str() : "");
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / ("curcuma_test_polymerbuild_pdmaema_" + std::to_string(units) + "_" + std::to_string(protonated) + "_" + std::to_string(subchain));
     std::filesystem::remove_all(dir);
     std::filesystem::create_directories(dir);
     const std::filesystem::path previous = std::filesystem::current_path();
     std::filesystem::current_path(dir);
 
     json controller;
-    controller["fragments"] = { { "A", std::string(CURCUMA_SOURCE_DIR) + "/src/molecules/pdmaema.xyz" } };
-    controller["sequence"] = "(A)" + std::to_string(units);
+    controller["fragments"] = { { "A", std::string(CURCUMA_SOURCE_DIR) + "/src/molecules/pdmaema.xyz" },
+        { "B", std::string(CURCUMA_SOURCE_DIR) + "/src/molecules/pdmaema_h.xyz" } };
+    controller["sequence"] = sequence;
+    if (subchain > 0)
+        controller["subchain_size"] = subchain; // divide-and-conquer assembly: sub-chains built, cloned, joined
     controller["verbosity"] = 0;
     {
         PolymerBuild builder(controller, true);
@@ -97,8 +100,10 @@ static void checkChain(int units)
     std::map<std::string, int> composition;
     for (const Atom& a : atoms)
         ++composition[a.element];
-    check(n == 26 * units + 2 && composition["C"] == 8 * units && composition["H"] == 15 * units + 2 && composition["N"] == units && composition["O"] == 2 * units,
-        "composition of " + std::to_string(units) + " repeat units plus two chain-end H, " + std::to_string(26 * units + 2) + " atoms (got " + std::to_string(n) + " atoms)");
+    // Unit B is unit A plus one H on the nitrogen (C8H16NO2).
+    const int expectedAtoms = 26 * units + protonated + 2;
+    check(n == expectedAtoms && composition["C"] == 8 * units && composition["H"] == 15 * units + protonated + 2 && composition["N"] == units && composition["O"] == 2 * units,
+        "composition of " + std::to_string(units) + " repeat units (" + std::to_string(protonated) + " protonated) plus two chain-end H, " + std::to_string(expectedAtoms) + " atoms (got " + std::to_string(n) + " atoms)");
 
     const std::map<std::string, double> radius { { "H", 0.31 }, { "C", 0.76 }, { "N", 0.71 }, { "O", 0.66 } };
     std::vector<std::vector<int>> neighbours(n);
@@ -186,7 +191,7 @@ static void checkChain(int units)
     // stretched junction falls outside, a normal GFN-FF geometry inside.
     struct Window { double lo, hi; };
     const std::map<std::string, Window> bondWindow {
-        { "C-H", { 1.06, 1.13 } }, { "C-C", { 1.48, 1.60 } }, { "C-N", { 1.43, 1.52 } }, { "C-O", { 1.18, 1.45 } }
+        { "C-H", { 1.06, 1.13 } }, { "H-N", { 0.98, 1.08 } }, { "C-C", { 1.48, 1.60 } }, { "C-N", { 1.43, 1.52 } }, { "C-O", { 1.18, 1.45 } }
     };
     std::map<std::string, std::pair<double, double>> bondSeen;
     std::map<std::string, int> bondCount;
@@ -253,7 +258,7 @@ static void checkChain(int units)
             }
     }
     const std::map<std::string, Window> angleWindow {
-        { "C4", { 100.0, 128.0 } }, { "C3", { 108.0, 130.0 } }, { "N3", { 105.0, 120.0 } }, { "O2", { 105.0, 120.0 } }
+        { "C4", { 100.0, 128.0 } }, { "C3", { 108.0, 130.0 } }, { "N3", { 105.0, 120.0 } }, { "N4", { 100.0, 120.0 } }, { "O2", { 105.0, 120.0 } }
     };
     for (const auto& [centre, st] : angleStat) {
         auto w = angleWindow.find(centre);
@@ -278,15 +283,27 @@ static void checkChain(int units)
 
 int main(int argc, char** argv)
 {
-    // Chain lengths from the command line (the long test passes 30); default 4 and 10.
-    std::vector<int> lengths { 4, 10 };
-    if (argc > 1) {
-        lengths.clear();
-        for (int k = 1; k < argc; ++k)
-            lengths.push_back(std::max(2, std::atoi(argv[k])));
+    // Chains from the command line: "A30" = (A)30, "AB5" = (AB)5 (B is the protonated unit), ":4" appended = sub-chains of
+    // 4 units. Default: (A)4, (A)10, (AB)3, (AB)5 in sub-chains of 4.
+    // (AB)3 is a regression case: the placement of the fifth unit (A after ABAB) used to stay at 2.5 A and tear the chain.
+    std::vector<std::string> specs { "A4", "A10", "AB3", "AB5:4" };
+    if (argc > 1)
+        specs.assign(argv + 1, argv + argc);
+    for (std::string spec : specs) {
+        int subchain = 0;
+        const size_t colon = spec.find(':');
+        if (colon != std::string::npos) {
+            subchain = std::max(2, std::atoi(spec.c_str() + colon + 1));
+            spec.erase(colon);
+        }
+        if (spec.rfind("AB", 0) == 0) {
+            const int pairs = std::max(1, std::atoi(spec.c_str() + 2));
+            checkChain("(AB)" + std::to_string(pairs), 2 * pairs, pairs, subchain);
+        } else {
+            const int units = std::max(2, std::atoi(spec.c_str() + 1));
+            checkChain("(A)" + std::to_string(units), units, 0, subchain);
+        }
     }
-    for (int units : lengths)
-        checkChain(units);
     std::printf("%s\n", g_failed ? "FAILED" : "all passed");
     return g_failed ? 1 : 0;
 }

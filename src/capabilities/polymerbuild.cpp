@@ -256,6 +256,46 @@ static void appendCapBonds(const Molecule& polymer, std::vector<std::pair<int, i
     }
 }
 
+/**
+ * Claude Generated (Oct 2026): chain integrity. Counts bonds longer than 1.3 times the sum of the covalent radii among
+ * the interface bonds and the stored topology (heavy-atom bonds of every monomer). A placement or an optimisation that
+ * tore a bond used to leave it in the result with only a warning in the log and exit status 0; (AB)5 PDMAEMA came out
+ * with a backbone C-C of 5.1 A.
+ */
+static int countBrokenBonds(const Molecule& polymer, const std::vector<std::pair<int, int>>& interface_bonds, bool report)
+{
+    const int n = polymer.AtomCount();
+    const Geometry geometry = polymer.getGeometry();
+    std::set<std::pair<int, int>> bonds;
+    for (const auto& [a, b] : interface_bonds)
+        bonds.insert({ std::min(a, b), std::max(a, b) });
+    if (polymer.hasPersistentTopology()) {
+        const Matrix topo = polymer.getTopologyMatrix();
+        if (topo.rows() == n && topo.cols() == n)
+            for (int i = 0; i < n; ++i)
+                for (int j = i + 1; j < n; ++j)
+                    if (topo(i, j) > 0.5)
+                        bonds.insert({ i, j });
+    }
+    int broken = 0;
+    for (const auto& [a, b] : bonds) {
+        if (a < 0 || b >= n)
+            continue;
+        const int ea = polymer.Atom(a).first, eb = polymer.Atom(b).first;
+        if (ea == 0 || eb == 0)
+            continue;  // open Xx connection points are not bonded atoms
+        const double d = (geometry.row(a) - geometry.row(b)).norm();
+        const double limit = 1.3 * (Elements::CovalentRadius[ea] + Elements::CovalentRadius[eb]);
+        if (d > limit) {
+            ++broken;
+            if (report && broken <= 10)
+                CurcumaLogger::error(fmt::format("Broken chain: bond {}({}) - {}({}) is {:.3f} A long (limit {:.3f} A)",
+                    a, Elements::ElementAbbr[ea], b, Elements::ElementAbbr[eb], d, limit));
+        }
+    }
+    return broken;
+}
+
 PolymerBuild::PolymerBuild(const json& controller, bool silent)
     : m_config("polymerbuild", controller)
     , m_silent(silent)
@@ -951,6 +991,59 @@ ConnectionResult PolymerBuild::connectMolecule(
         } else {
             CurcumaLogger::warn("LM retry did not improve bond length - keeping original");
         }
+    }
+
+    // Claude Generated (Oct 2026): multi-start. The placement is a rigid-body search; when the growing chain end is
+    // shielded by earlier units (e.g. ABAB + A in PDMAEMA/protonated PDMAEMA) one start can stay at 2.5-3.4 A for
+    // good and the chain came out broken. Spin the fragment about the new bond axis and repeat the LM from there.
+    const int n_starts = m_config.get<int>("lm_multistart", 8);
+    if (actual_bond_length > bond_length + bond_tolerance && n_starts > 0) {
+        const double length_before = actual_bond_length;
+        int used_start = 0;
+        for (int k = 1; k <= n_starts; ++k) {
+            const double theta = 2.0 * M_PI * k / (n_starts + 1);
+            const Eigen::Matrix3d Rk = Eigen::AngleAxisd(theta, Eigen::Vector3d(v_out)).toRotationMatrix() * R;
+            const double ryk = -std::asin(std::clamp(Rk(2, 0), -1.0, 1.0));
+            double rxk, rzk;
+            if (std::abs(std::cos(ryk)) > 1e-6) {
+                rxk = std::atan2(Rk(2, 1), Rk(2, 2));
+                rzk = std::atan2(Rk(1, 0), Rk(0, 0));
+            } else {
+                rxk = std::atan2(-Rk(1, 2), Rk(1, 1));
+                rzk = 0.0;
+            }
+            const Position rot_k{ rxk * 180.0 / M_PI, ryk * 180.0 / M_PI, rzk * 180.0 / M_PI };
+            const Position trans_k = target_anchor_pos - Rk * (anchor_atom_orig - fragment_centroid);
+
+            auto [t_k, r_k] = optimizeFragmentPlacement(
+                polymer_lm, fragment_lm, anchor_poly, polymer_active_idx_lm, next_active_idx_lm,
+                bond_length, trans_k, rot_k, step_number + 2000 + k, -1, -1);
+
+            Geometry g_k = fragment_lm.getGeometry();
+            for (int i = 0; i < g_k.rows(); ++i) {
+                Position pk = g_k.row(i).transpose();
+                pk -= fragment_centroid;
+                pk = PolymerPlacementFunctor(6, 1).rotatePoint(pk, r_k);
+                pk += t_k;
+                g_k.row(i) = pk.transpose();
+            }
+            const double length_k = (g_k.row(next_active_idx_lm).transpose() - anchor_poly).norm();
+            if (length_k < actual_bond_length) {
+                opt_translation = t_k;
+                opt_rotation = r_k;
+                frag_geom = g_k;
+                actual_bond_length = length_k;
+                used_start = k;
+            }
+            if (actual_bond_length <= bond_length + bond_tolerance)
+                break;
+        }
+        if (used_start > 0)
+            CurcumaLogger::info(fmt::format("LM multi-start {} of {}: bond length {:.3f} A (was {:.3f} A)",
+                used_start, n_starts, actual_bond_length, length_before));
+        if (actual_bond_length > bond_length + bond_tolerance)
+            CurcumaLogger::warn(fmt::format("LM multi-start ({} starts) left the bond at {:.3f} A (target {:.3f} A)",
+                n_starts, actual_bond_length, bond_length));
     }
 
     // Optional post-LM bond contraction: slide fragment along anchor axis to exact target
@@ -3283,7 +3376,13 @@ void PolymerBuild::assemblePolymer(const std::vector<SequenceEntry>& sequence)
 
         // Phase 3: Capping + final output
         polymer.setName("polymer_A");
+        const int broken_bonds = countBrokenBonds(polymer, interface_bonds, true);
         applyCapping(polymer);
+        if (broken_bonds > 0) {
+            polymer.writeXYZFile(outputPath(polymer.Name() + "_broken.xyz"));
+            CurcumaLogger::error("Polymer assembly FAILED: chain is broken, structure written to " + polymer.Name() + "_broken.xyz (no _final.xyz)");
+            return;
+        }
         polymer.writeXYZFile(outputPath(polymer.Name() + "_final.xyz"));
         CurcumaLogger::success(fmt::format(
             "D&C polymer assembly completed: {}_final.xyz ({} atoms)",
@@ -3299,7 +3398,13 @@ void PolymerBuild::assemblePolymer(const std::vector<SequenceEntry>& sequence)
             return;
         }
         polymer.setName("polymer_A");
+        const int broken_bonds = countBrokenBonds(polymer, result.interface_bonds, true);
         applyCapping(polymer);
+        if (broken_bonds > 0) {
+            polymer.writeXYZFile(outputPath(polymer.Name() + "_broken.xyz"));
+            CurcumaLogger::error("Polymer assembly FAILED: chain is broken, structure written to " + polymer.Name() + "_broken.xyz (no _final.xyz)");
+            return;
+        }
         polymer.writeXYZFile(outputPath(polymer.Name() + "_final.xyz"));
         CurcumaLogger::success("Polymer assembly completed: " + polymer.Name() + "_final.xyz");
     }
