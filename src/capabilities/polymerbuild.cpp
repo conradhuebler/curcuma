@@ -9,6 +9,7 @@
 #include "src/core/elements.h"
 #include "src/core/energy_calculators/ff_methods/cn_calculator.h"
 
+#include <algorithm>
 #include <regex>
 #include <iostream>
 #include <sstream>
@@ -218,6 +219,42 @@ struct PolymerPlacementFunctor {
 // ============================================================================
 // PolymerBuild Implementation
 // ============================================================================
+
+/**
+ * Claude Generated (Oct 2026) - Bonds between an open Xx connection point and the atom it hangs on.
+ *
+ * The persistent topology stores heavy-atom bonds only (see the fragment template: "skip Xx-Xx and
+ * heavy-Xx bonds"). For an optimisation or MD the Xx that is still open is replaced by cap_intermediate
+ * (H) and the bond list is passed to the force field from that topology, so this H had no bond: it
+ * drifted from its carbon (1.07 A in the fragment -> about 2.9 A), and the chain-end caps came out
+ * unbound in the final structure. The Xx sits at bonding distance when this is called (it is a fragment
+ * atom that has only been moved with its monomer), so its parent is the nearest non-Xx atom within 1.6 A.
+ */
+static void appendCapBonds(const Molecule& polymer, std::vector<std::pair<int, int>>& bonds)
+{
+    const int n = polymer.AtomCount();
+    const Geometry geometry = polymer.getGeometry();
+    for (int k = 0; k < n; ++k) {
+        if (polymer.Atom(k).first != 0)
+            continue;
+        int parent = -1;
+        double nearest = 1.6;
+        for (int j = 0; j < n; ++j) {
+            if (j == k || polymer.Atom(j).first == 0)
+                continue;
+            const double d = (geometry.row(k) - geometry.row(j)).norm();
+            if (d < nearest) {
+                nearest = d;
+                parent = j;
+            }
+        }
+        if (parent < 0)
+            continue;
+        const std::pair<int, int> bond { std::min(k, parent), std::max(k, parent) };
+        if (std::find(bonds.begin(), bonds.end(), bond) == bonds.end())
+            bonds.push_back(bond);
+    }
+}
 
 PolymerBuild::PolymerBuild(const json& controller, bool silent)
     : m_config("polymerbuild", controller)
@@ -2539,6 +2576,7 @@ SubchainResult PolymerBuild::buildSubchain(
                 if (polymer.hasPersistentTopology()) {
                     const Matrix topo = polymer.getTopologyMatrix();
                     m_opt.m_bonds.clear();
+                    appendCapBonds(polymer, m_opt.m_bonds);
                     int n = topo.rows();
                     int topo_bond_count = 0;
                     for (int ii = 0; ii < n; ++ii)
@@ -2761,6 +2799,7 @@ SubchainResult PolymerBuild::buildSubchain(
                             if (polymer.hasPersistentTopology()) {
                                 const Matrix& topo = polymer.getTopologyMatrix();
                                 m_opt.m_bonds.clear();
+                                appendCapBonds(polymer, m_opt.m_bonds);
                                 int n = topo.rows();
                                 for (int ii2 = 0; ii2 < n; ++ii2)
                                     for (int jj2 = ii2 + 1; jj2 < n; ++jj2)
@@ -2868,6 +2907,7 @@ SubchainResult PolymerBuild::buildSubchain(
                         if (polymer.hasPersistentTopology()) {
                             const Matrix& t = polymer.getTopologyMatrix();
                             md_info.m_bonds.clear();
+                            appendCapBonds(polymer, md_info.m_bonds);
                             int n_md = polymer.AtomCount();
                             for (int ii2 = 0; ii2 < n_md; ++ii2)
                                 for (int jj2 = ii2 + 1; jj2 < n_md; ++jj2)
@@ -2948,6 +2988,7 @@ SubchainResult PolymerBuild::buildSubchain(
             if (polymer.hasPersistentTopology()) {
                 const Matrix& t = polymer.getTopologyMatrix();
                 md_info.m_bonds.clear();
+                appendCapBonds(polymer, md_info.m_bonds);
                 int nn = t.rows();
                 for (int ii2 = 0; ii2 < nn; ++ii2)
                     for (int jj2 = ii2 + 1; jj2 < nn; ++jj2)
@@ -3173,6 +3214,7 @@ void PolymerBuild::assemblePolymer(const std::vector<SequenceEntry>& sequence)
             if (polymer.hasPersistentTopology()) {
                 const Matrix topo = polymer.getTopologyMatrix();
                 m_opt.m_bonds.clear();
+                appendCapBonds(polymer, m_opt.m_bonds);
                 int n = topo.rows();
                 for (int ii = 0; ii < n; ++ii)
                     for (int jj = ii + 1; jj < n; ++jj)

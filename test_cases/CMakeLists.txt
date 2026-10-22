@@ -378,6 +378,13 @@ add_test(NAME test_polymerbuild_structure
          WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 set_tests_properties(test_polymerbuild_structure PROPERTIES TIMEOUT 120)
 
+# PDMAEMA 4-mer built with the real optimisation: composition, bonded caps, backbone. Claude Generated 2026.
+add_executable(test_polymerbuild_pdmaema test_polymerbuild_pdmaema.cpp)
+target_link_libraries(test_polymerbuild_pdmaema curcuma_cap curcuma_core)
+target_compile_definitions(test_polymerbuild_pdmaema PRIVATE CURCUMA_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+add_test(NAME polymerbuild_pdmaema COMMAND test_polymerbuild_pdmaema)
+set_tests_properties(polymerbuild_pdmaema PROPERTIES TIMEOUT 600)
+
 # Claude Generated (April 2026): CPU GFN-FF analytical vs numerical gradient test
 # Tests gradient correctness for all built-in molecules (H2O, CH4, CH3OH, CH3OCH3).
 # gfnff_numgrad_builtin compares the analytical Gradient() against the FULL finite
