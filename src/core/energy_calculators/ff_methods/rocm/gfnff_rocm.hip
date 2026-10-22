@@ -2570,7 +2570,8 @@ __global__ void k_hbonds(
     const double* __restrict__ Qs_A,
     const double* __restrict__ Qs_B,
     double*                    grad,
-    double*                    energy)
+    double*                    energy,
+    double*       __restrict__ e_triple)
 {
     // Claude Generated (Oct 2026): slot mode (slot_g != nullptr). Instead of FP64 atomicAdd into grad (a CAS
     // loop on gfx1200; the triples of one H/A sit next to each other, so the lanes of a wavefront collide),
@@ -3148,6 +3149,12 @@ __global__ void k_hbonds(
             slot_g[3*s] = 0.0; slot_g[3*s + 1] = 0.0; slot_g[3*s + 2] = 0.0;
         }
     }
+
+    // Claude Generated (Oct 2026): per-triple energy on request (FFWorkspaceHip::setRecordHBondEnergies),
+    // device order. local_E is E_HB of this triple, 0 outside r_cut or the out-of-line exponent limit -
+    // the same value the CPU workspace records. Written after the term, so the sum is untouched.
+    if (e_triple)
+        e_triple[tid] = local_E;
     } // tid < n
 
     blockReduceAddEnergy(local_E, energy);
@@ -5303,6 +5310,12 @@ struct FFWorkspaceHipImpl {
     ATMSoA         atm;             ///< Axilrod-Teller-Muto 3-body dispersion
     XBondSoA       xbonds;          ///< Halogen bonds
     HBondSoA       hbonds;          ///< Hydrogen bonds
+    /// Claude Generated (Oct 2026): [>= hbonds.n] energy of each HB triple in device order, written by
+    /// k_hbonds only while setRecordHBondEnergies(true); allocated on first use, never otherwise.
+    CudaBuffer<double> hb_triple_energy;
+    /// Claude Generated (Oct 2026): device triple m is list entry hb_perm[m] (hbCasePermutation); empty =
+    /// identity (CURCUMA_ROCM_HB_GATHER=0). Kept for downloadHBondEnergies(), which returns list order.
+    std::vector<int> hb_perm;
 
     // Claude Generated (Oct 2026): atomic-free gather tables (FP64 atomicAdd is a CAS loop on gfx1200).
     using PairGatherCSR = HipPairGatherCSR;
@@ -5816,10 +5829,12 @@ FFWorkspaceHip::FFWorkspaceHip(const GFNFFParameterSet& params,
     m_last_xbonds = params.xbonds;   // init CPU mirror for debug comparison
     if (m_impl->hb_gather_enabled) {
         // Claude Generated (Oct 2026): triples grouped by case type, slot tables in the same order
-        const std::vector<int> perm = hbCasePermutation(params.hbonds);
+        std::vector<int> perm = hbCasePermutation(params.hbonds);
         fillHBondSoA(m_impl->hbonds, params.hbonds, perm.data(), atom_types, stream, &m_impl->hb_slots, natoms);
+        m_impl->hb_perm = std::move(perm);   // Oct 2026: device -> list order for downloadHBondEnergies()
     } else {
         m_impl->hbonds.upload(params.hbonds, atom_types, stream);
+        m_impl->hb_perm.clear();
     }
     updateHBChargeScaling(*m_impl);   // Claude Generated (Oct 2026)
     if (CurcumaLogger::get_verbosity() >= 3)   // Oct 2026: debug mirror only where it is read (see updateHBonds)
@@ -6305,6 +6320,67 @@ static bool sameXBondInput(const std::vector<GFNFFHalogenBond>& a, const std::ve
     return true;
 }
 
+/// Claude Generated (Oct 2026): device array k_hbonds writes the per-triple energies to, or nullptr when
+/// recording is off or the array does not cover the current list (then the kernel records nothing).
+static double* hbTripleEnergyTarget(FFWorkspaceHipImpl& impl, bool record)
+{
+    return (record && impl.hbonds.n > 0 && impl.hb_triple_energy.n >= impl.hbonds.n)
+        ? impl.hb_triple_energy.ptr : nullptr;
+}
+
+/// Claude Generated (Oct 2026): grow the per-triple energy array to the current list. A new device
+/// pointer is baked into a captured Phase-1 graph, so the graph is dropped when the array moves.
+static void ensureHBTripleEnergyBuffer(FFWorkspaceHipImpl& impl, FFWorkspaceHip& ws)
+{
+    const double* before = impl.hb_triple_energy.ptr;
+    impl.hb_triple_energy.ensure(impl.hbonds.n);
+    if (impl.hb_triple_energy.ptr != before)
+        ws.invalidateGraph();
+}
+
+void FFWorkspaceHip::setRecordHBondEnergies(bool on)
+{
+    if (on == m_record_hb_energies)
+        return;
+    m_record_hb_energies = on;
+    m_hb_energy_valid = false;
+    if (on)
+        ensureHBTripleEnergyBuffer(*m_impl, *this);
+    // The kernel argument changes (nullptr <-> array): a captured graph would keep the old one.
+    invalidateGraph();
+}
+
+bool FFWorkspaceHip::downloadHBondEnergies(std::vector<GFNFFHBondEnergy>& out)
+{
+    out.clear();
+    auto& impl = *m_impl;
+    const int n = impl.hbonds.n;
+    if (!m_hb_energy_valid || n <= 0 || impl.hb_triple_energy.n < n)
+        return false;
+    const bool permuted = !impl.hb_perm.empty();
+    if (permuted && static_cast<int>(impl.hb_perm.size()) != n)
+        return false;
+    // k_hbonds runs on a worker stream; wait for the device before reading its arrays.
+    std::vector<double> e(n);
+    std::vector<int> a(n), h(n), b(n), ct(n);
+    hipError_t err = hipDeviceSynchronize();
+    if (err == hipSuccess) err = hipMemcpy(e.data(), impl.hb_triple_energy.ptr, n * sizeof(double), hipMemcpyDeviceToHost);
+    if (err == hipSuccess) err = hipMemcpy(a.data(), impl.hbonds.idx_i.ptr, n * sizeof(int), hipMemcpyDeviceToHost);
+    if (err == hipSuccess) err = hipMemcpy(h.data(), impl.hbonds.idx_j.ptr, n * sizeof(int), hipMemcpyDeviceToHost);
+    if (err == hipSuccess) err = hipMemcpy(b.data(), impl.hbonds.idx_k.ptr, n * sizeof(int), hipMemcpyDeviceToHost);
+    if (err == hipSuccess) err = hipMemcpy(ct.data(), impl.hbonds.case_type.ptr, n * sizeof(int), hipMemcpyDeviceToHost);
+    if (err != hipSuccess) {
+        CurcumaLogger::warn(std::string("FFWorkspaceHip: download of the hydrogen-bond triple energies failed: ")
+                            + hipGetErrorString(err));
+        return false;
+    }
+    // Device triple m is list entry hb_perm[m] (triples grouped by case type); back to list order.
+    out.resize(n);
+    for (int m = 0; m < n; ++m)
+        out[permuted ? impl.hb_perm[m] : m] = { a[m], h[m], b[m], ct[m], e[m] };
+    return true;
+}
+
 void FFWorkspaceHip::updateHBonds(const std::vector<GFNFFHydrogenBond>& hbonds,
                                     const std::vector<int>& atom_types)
 {
@@ -6320,12 +6396,18 @@ void FFWorkspaceHip::updateHBonds(const std::vector<GFNFFHydrogenBond>& hbonds,
     if (m_impl->hb_gather_enabled) {
         // Claude Generated (Oct 2026): triples grouped by case type, slot tables in the same order; packed by
         // the -threads host threads (m_host_threads, set through setStagedListUpload() by the wrapper)
-        const std::vector<int> perm = hbCasePermutation(hbonds);
+        std::vector<int> perm = hbCasePermutation(hbonds);
         fillHBondSoA(m_impl->hbonds, hbonds, perm.data(), atom_types, m_impl->stream, &m_impl->hb_slots, m_natoms,
                      m_host_threads);
+        m_impl->hb_perm = std::move(perm);   // Oct 2026: device -> list order for downloadHBondEnergies()
     } else {
         m_impl->hbonds.upload(hbonds, atom_types, m_impl->stream);
+        m_impl->hb_perm.clear();
     }
+    // Claude Generated (Oct 2026): per-triple energies belong to the old list until the next launch.
+    m_hb_energy_valid = false;
+    if (m_record_hb_energies)
+        ensureHBTripleEnergyBuffer(*m_impl, *this);
     updateHBChargeScaling(*m_impl);   // Claude Generated (Oct 2026)
     // Host copy of the list, read only by the wrapper's CPU-vs-GPU list comparison at verbosity >= 3.
     // Claude Generated (Oct 2026): not kept below that level (13-30 ms per refresh at 582k H bonds).
@@ -6930,6 +7012,9 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
     auto& impl = *m_impl;
     const int N = m_natoms;
     hipStream_t stream = impl.stream;
+    // Claude Generated (Oct 2026): this launch (or graph replay; a toggle or reallocation invalidates the
+    // graph) writes the per-triple HB energies of the current list when recording is on.
+    m_hb_energy_valid = m_hbond_enabled && hbTripleEnergyTarget(impl, m_record_hb_energies) != nullptr;
     impl.disp_launched_early = false;   // Oct 2026: set again by launchDispersionGradientEarly() this step
     g_rocm_small_eeq_stream = impl.single_stream ? stream : nullptr;   // Oct 2026, see its declaration
     g_rocm_small_eeq_aux = impl.single_stream ? impl.stream_threebody : nullptr;
@@ -7374,7 +7459,8 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
             (impl.hb_slots.nq == impl.hbonds.n) ? impl.hb_slots.Qs_A.ptr : nullptr,
             (impl.hb_slots.nq == impl.hbonds.n) ? impl.hb_slots.Qs_B.ptr : nullptr,
             impl.d_grad.ptr,
-            &impl.d_energies.ptr[impl.E_HBOND]);
+            &impl.d_energies.ptr[impl.E_HBOND],
+            hbTripleEnergyTarget(impl, m_record_hb_energies));   // Oct 2026: nullptr unless recording
         if (hb_slots) {
             k_slot_gather<<<std::max(1, N), 64, 0, sC>>>(
                 impl.hb_slots.N, impl.hb_slots.atom_off.ptr, impl.hb_slots.atom_slots.ptr,

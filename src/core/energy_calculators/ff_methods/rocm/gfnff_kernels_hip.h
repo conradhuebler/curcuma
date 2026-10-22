@@ -387,7 +387,8 @@ __global__ GFNFF_KERNEL_BOUNDS void k_hbonds(
     const double* __restrict__ Qs_A,      ///< [n] same for -q_A
     const double* __restrict__ Qs_B,      ///< [n] same for -q_B
     double*                    grad,
-    double*                    energy
+    double*                    energy,
+    double*       __restrict__ e_triple   ///< [n] per-triple energy in device order, nullptr = off (Oct 2026)
 );
 
 /// Claude Generated (Oct 2026): non-bonded repulsion as a per-atom gather over a directed-edge CSR

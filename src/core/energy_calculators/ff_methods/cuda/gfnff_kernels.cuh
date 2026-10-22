@@ -410,6 +410,8 @@ __global__ void k_gather_hb_charges(
 
 /// Hydrogen bonds (3-body A-H...B): multi-case with neighbor damping
 /// Reference: ff_workspace_gfnff.cpp:calcHydrogenBonds, Fortran abhgfnff_eg*
+/// e_triple (Claude Generated, Oct 2026): [n] energy of each triple (0 outside its cut-off), the value
+/// the block reduction adds to `energy`; nullptr = not recorded, no extra memory access.
 __global__ GFNFF_KERNEL_BOUNDS void k_hbonds(
     int n,
     const int*    __restrict__ idx_i,     ///< donor A
@@ -438,7 +440,8 @@ __global__ GFNFF_KERNEL_BOUNDS void k_hbonds(
     const double* __restrict__ cy,
     const double* __restrict__ cz,
     double*                    grad,
-    double*                    energy
+    double*                    energy,
+    double*       __restrict__ e_triple   ///< [n] per-triple energy, nullptr = off
 );
 
 // ============================================================================

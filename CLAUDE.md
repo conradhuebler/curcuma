@@ -163,7 +163,7 @@ numbers: [docs/KNOWN_ISSUES_ARCHIVE.md](docs/KNOWN_ISSUES_ARCHIVE.md).
 - **MD**: SimpleMD, temperature ramps/regions ([TEMPERATURE_RAMP.md](docs/TEMPERATURE_RAMP.md)), step-rejecting integrator `-adaptive_step` (off by default), PLUMED `-mtd`. **MD times recorded before `ef462fcf` (Sep 2026) must be multiplied by 1.9516.** Large-system MD: [MD_LARGE_SYSTEMS.md](docs/MD_LARGE_SYSTEMS.md).
 - **Counter-ions**: `-ionize` replaces solvent molecules by monovalent ions to a target charge (🤖, ⚙️ constructed water box only): [IONIZE.md](docs/IONIZE.md).
 - **Trajectory properties**: `-trajprops` streams a long trajectory frame by frame (R_g with block error so far; 🤖, ⚙️): [TRAJPROPS.md](docs/TRAJPROPS.md).
-- **GFN-FF hydrogen-bond energies per triple**: `GFNFF::setRecordHBondEnergies` / `hydrogenBondEnergies()`, CPU workspace only (🤖, ⚙️): [HBOND_ENERGIES.md](docs/HBOND_ENERGIES.md).
+- **GFN-FF hydrogen-bond energies per triple**: `GFNFF::setRecordHBondEnergies` / `hydrogenBondEnergies()`, CPU workspace (🤖, ⚙️) and CUDA/ROCm device workspace (🤖, compiled, never run on a GPU): [HBOND_ENERGIES.md](docs/HBOND_ENERGIES.md).
 - **Other**: `-interaction` (E(AB)-E(A)-E(B), S30L modes), NEB, trajectory analysis (parallel, TrajectoryWriter), scattering, Hessian, persistent diagram, orbitals.
 - **Output**: default BMT directory (Basename.Method.Timestamp), `-bak` copies files back, `-no_bmt` writes to CWD (see `src/tools/CLAUDE.md`).
 - **Core**: MNDO integrals ([MNDO_INTEGRALS.md](docs/MNDO_INTEGRALS.md)); one force-field engine `FFWorkspace` (legacy `ForceField`/`ForceFieldThread` GFN-FF path removed Sep 2026, [CLEANUP_2026_09.md](docs/CLEANUP_2026_09.md)).

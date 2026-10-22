@@ -623,6 +623,9 @@ struct FFWorkspaceGPUImpl {
     ATMSoA         atm;             ///< Axilrod-Teller-Muto 3-body dispersion
     XBondSoA       xbonds;          ///< Halogen bonds
     HBondSoA       hbonds;          ///< Hydrogen bonds
+    /// Claude Generated (Oct 2026): [>= hbonds.n] energy of each HB triple, written by k_hbonds only while
+    /// setRecordHBondEnergies(true); allocated on first use, never otherwise.
+    CudaBuffer<double> hb_triple_energy;
 
     // Dynamic buffers (reset + upload each calculation step)
     CoordSoA    coords;      ///< Current geometry SoA (x[N], y[N], z[N]) — Phase 10, March 2026
@@ -1738,6 +1741,64 @@ void FFWorkspaceGPU::setCoulombSelfEnergyParams(const Vector& chi_base, const Ve
     }
 }
 
+/// Claude Generated (Oct 2026): device array k_hbonds writes the per-triple energies to, or nullptr when
+/// recording is off or the array does not cover the current list (then the kernel records nothing).
+static double* hbTripleEnergyTarget(FFWorkspaceGPUImpl& impl, bool record)
+{
+    return (record && impl.hbonds.n > 0 && impl.hb_triple_energy.n >= impl.hbonds.n)
+        ? impl.hb_triple_energy.ptr : nullptr;
+}
+
+/// Claude Generated (Oct 2026): grow the per-triple energy array to the current list. A new device
+/// pointer is baked into a captured Phase-1 graph, so the graph is dropped when the array moves.
+static void ensureHBTripleEnergyBuffer(FFWorkspaceGPUImpl& impl, FFWorkspaceGPU& ws)
+{
+    const double* before = impl.hb_triple_energy.ptr;
+    impl.hb_triple_energy.ensure(impl.hbonds.n);
+    if (impl.hb_triple_energy.ptr != before)
+        ws.invalidateGraph();
+}
+
+void FFWorkspaceGPU::setRecordHBondEnergies(bool on)
+{
+    if (on == m_record_hb_energies)
+        return;
+    m_record_hb_energies = on;
+    m_hb_energy_valid = false;
+    if (on)
+        ensureHBTripleEnergyBuffer(*m_impl, *this);
+    // The kernel argument changes (nullptr <-> array): a captured graph would keep the old one.
+    invalidateGraph();
+}
+
+bool FFWorkspaceGPU::downloadHBondEnergies(std::vector<GFNFFHBondEnergy>& out)
+{
+    out.clear();
+    auto& impl = *m_impl;
+    const int n = impl.hbonds.n;
+    if (!m_hb_energy_valid || n <= 0 || impl.hb_triple_energy.n < n)
+        return false;
+    // k_hbonds runs on a worker stream; wait for the device before reading its arrays.
+    std::vector<double> e(n);
+    std::vector<int> a(n), h(n), b(n), ct(n);
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err == cudaSuccess) err = cudaMemcpy(e.data(), impl.hb_triple_energy.ptr, n * sizeof(double), cudaMemcpyDeviceToHost);
+    if (err == cudaSuccess) err = cudaMemcpy(a.data(), impl.hbonds.idx_i.ptr, n * sizeof(int), cudaMemcpyDeviceToHost);
+    if (err == cudaSuccess) err = cudaMemcpy(h.data(), impl.hbonds.idx_j.ptr, n * sizeof(int), cudaMemcpyDeviceToHost);
+    if (err == cudaSuccess) err = cudaMemcpy(b.data(), impl.hbonds.idx_k.ptr, n * sizeof(int), cudaMemcpyDeviceToHost);
+    if (err == cudaSuccess) err = cudaMemcpy(ct.data(), impl.hbonds.case_type.ptr, n * sizeof(int), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) {
+        CurcumaLogger::warn(std::string("FFWorkspaceGPU: download of the hydrogen-bond triple energies failed: ")
+                            + cudaGetErrorString(err));
+        return false;
+    }
+    // Device order is the order of the uploaded list (HBondSoA::upload keeps it).
+    out.resize(n);
+    for (int m = 0; m < n; ++m)
+        out[m] = { a[m], h[m], b[m], ct[m], e[m] };
+    return true;
+}
+
 void FFWorkspaceGPU::updateHBonds(const std::vector<GFNFFHydrogenBond>& hbonds,
                                     const std::vector<int>& atom_types)
 {
@@ -1745,6 +1806,10 @@ void FFWorkspaceGPU::updateHBonds(const std::vector<GFNFFHydrogenBond>& hbonds,
     // Claude Generated (March 2026): Needed because updateHBXBIfNeeded() may find
     // additional HBonds on re-detection that weren't in the initial parameter set.
     m_impl->hbonds.upload(hbonds, atom_types, m_impl->stream);
+    // Claude Generated (Oct 2026): per-triple energies belong to the old list until the next launch.
+    m_hb_energy_valid = false;
+    if (m_record_hb_energies)
+        ensureHBTripleEnergyBuffer(*m_impl, *this);
     // Store for CPU vs GPU comparison debugging. Oct 2026: only where that comparison runs
     // (verbosity >= 3 in the GPU wrapper); the deep copy was ~1 ms per MD re-detection.
     if (CurcumaLogger::get_verbosity() >= 3)
@@ -2320,6 +2385,9 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     auto& impl = *m_impl;
     const int N = m_natoms;
     cudaStream_t stream = impl.stream;
+    // Claude Generated (Oct 2026): this launch (or graph replay; a toggle or reallocation invalidates the
+    // graph) writes the per-triple HB energies of the current list when recording is on.
+    m_hb_energy_valid = m_hbond_enabled && hbTripleEnergyTarget(impl, m_record_hb_energies) != nullptr;
 
     // =========================================================================
     // Phase 8: CUDA Graph fast path (Claude Generated March 2026)
@@ -2727,7 +2795,8 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
             impl.coords.d_y.ptr,
             impl.coords.d_z.ptr,
             impl.d_grad.ptr,
-            &impl.d_energies.ptr[impl.E_HBOND]);
+            &impl.d_energies.ptr[impl.E_HBOND],
+            hbTripleEnergyTarget(impl, m_record_hb_energies));   // Oct 2026: nullptr unless recording
     }
     // Per-kernel snapshot: after all stream C kernels (Claude Generated April 2026)
     if (gradient && impl.d_grad_after_sC.ptr) {

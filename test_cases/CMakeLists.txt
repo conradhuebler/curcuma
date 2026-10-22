@@ -608,6 +608,22 @@ add_executable(test_hbond_energies test_hbond_energies.cpp)
 target_link_libraries(test_hbond_energies curcuma_core)
 add_test(NAME hbond_energies COMMAND test_hbond_energies)
 set_tests_properties(hbond_energies PROPERTIES TIMEOUT 120)
+# Claude Generated (Oct 2026): the same per-triple energies from the CUDA/ROCm device workspace against the CPU.
+# Exits 0 with a SKIP line when the backend sees no device.
+if(USE_CUDA OR USE_ROCM)
+    add_executable(test_hbond_energies_gpu unit/test_hbond_energies_gpu.cpp)
+    target_link_libraries(test_hbond_energies_gpu curcuma_core test_molecule_registry)
+    # The GPU plugin is looked up next to the executable (gpu_plugin.cpp, /proc/self/exe).
+    set_target_properties(test_hbond_energies_gpu PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+    if(USE_CUDA)
+        add_test(NAME hbond_energies_cuda COMMAND test_hbond_energies_gpu cuda)
+        set_tests_properties(hbond_energies_cuda PROPERTIES TIMEOUT 120 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu")
+    endif()
+    if(USE_ROCM)
+        add_test(NAME hbond_energies_rocm COMMAND test_hbond_energies_gpu rocm)
+        set_tests_properties(hbond_energies_rocm PROPERTIES TIMEOUT 120 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;rocm")
+    endif()
+endif()
 
 add_executable(test_lobpcg unit/test_lobpcg.cpp)
 target_link_libraries(test_lobpcg curcuma_core)

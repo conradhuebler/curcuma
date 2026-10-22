@@ -2083,7 +2083,8 @@ __global__ void k_hbonds(
     const double* __restrict__ cy,
     const double* __restrict__ cz,
     double*                    grad,
-    double*                    energy)
+    double*                    energy,
+    double*       __restrict__ e_triple)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     double local_E = 0.0;
@@ -2589,6 +2590,12 @@ __global__ void k_hbonds(
 
     } // expo <= 15.0
     } // r_AB in range
+
+    // Claude Generated (Oct 2026): per-triple energy on request (FFWorkspaceGPU::setRecordHBondEnergies).
+    // local_E is E_HB of this triple, 0 when it is outside r_cut or the out-of-line exponent limit -
+    // the same value the CPU workspace records. Written after the term, so the sum is untouched.
+    if (e_triple)
+        e_triple[tid] = local_E;
     } // tid < n
 
     blockReduceAddEnergy(local_E, energy);

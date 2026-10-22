@@ -520,6 +520,11 @@ GFNFFGpuMethodImpl<Backend>::GFNFFGpuMethodImpl(const std::string& method_name,
 template <class Backend>
 GFNFFGpuMethodImpl<Backend>::~GFNFFGpuMethodImpl()
 {
+    // Claude Generated (Oct 2026): the HB energy source captures this object; unregister it first, so a
+    // GFNFF that outlives the wrapper (CURCUMA_GFNFF_GPU_LEAK) never calls into a destroyed one.
+    if (m_gfnff)
+        m_gfnff->setHBondEnergySource({}, {});
+
     // Destroy GPU workspace first (holds CUDA resources) - on the device that owns them.
     bindDevice();
     m_gpu_workspace.reset();
@@ -711,6 +716,25 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
         // G3a (Apr 2026): Optional fixed GPU kernel block size (0 = adaptive default)
         if (gfnff_cfg.contains("gpu_block_size"))
             m_gpu_workspace->setBlockSize(gfnff_cfg.value("gpu_block_size", 0));
+
+        // Claude Generated (Oct 2026): per-triple hydrogen-bond energies. The device evaluates the term, so
+        // GFNFF::setRecordHBondEnergies()/hydrogenBondEnergies() go to this workspace; a caller reaches them
+        // through gfnffInstance() as on the CPU. The device copy is downloaded only when asked for.
+        m_gfnff->setHBondEnergySource(
+            [this](bool on) {
+                if (m_gpu_workspace) {
+                    bindDevice();
+                    m_gpu_workspace->setRecordHBondEnergies(on);
+                }
+            },
+            [this]() {
+                std::vector<GFNFFHBondEnergy> out;
+                if (m_gpu_workspace) {
+                    bindDevice();
+                    m_gpu_workspace->downloadHBondEnergies(out);
+                }
+                return out;
+            });
 
         // Task #10 (Jun 2026): CN-derivative pair-list regen + cutoff knobs.
         // Prefer the nested gfnff-scoped value, fall back to top-level m_parameters.
