@@ -3,14 +3,14 @@
  *
  * Claude Generated 2026 - PDMAEMA built by polymerbuild from src/molecules/pdmaema.xyz.
  *
- * What must hold for a 4-mer built with the real optimisation (nothing here is a number from an earlier run):
- *  - composition: four repeat units C8H15NO2 plus two chain-end hydrogens = C32H62N4O8, 106 atoms;
+ * What must hold for a 4-mer and a 10-mer built with the real optimisation (nothing here is a number from an earlier run):
+ *  - composition: n repeat units C8H15NO2 plus two chain-end hydrogens, 26n+2 atoms (4-mer: C32H62N4O8, 106 atoms);
  *  - every atom is bonded (distance criterion): the chain-end caps are hydrogens ON a carbon, not hydrogens
  *    floating a few Angstrom away (the defect this test was written for: an open Xx became an H for the
  *    optimisation without a bond to its carbon and drifted away);
- *  - the bond graph is a tree: 105 bonds for 106 atoms (the C=O bonds are single pairs in a distance graph);
- *  - the backbone alternates quaternary carbon and CH2: four carbons carrying the ester, each with a methyl
- *    (five CH3 on quaternary carbons in all: four side methyls and the chain-end CH3), joined by three CH2 groups;
+ *  - the bond graph is a tree: atoms-1 bonds (the C=O bonds are single pairs in a distance graph);
+ *  - the backbone alternates quaternary carbon and CH2: n carbons carrying the ester, each with a methyl
+ *    (n+1 CH3 on quaternary carbons in all: n side methyls and the chain-end CH3), joined by n-1 CH2 groups;
  *  - C-H 1.05 to 1.15 A, C-C 1.45 to 1.60 A, no atom pair closer than 1.0 A (with H) or 1.1 A (heavy).
  */
 
@@ -52,10 +52,11 @@ static double distance(const Atom& a, const Atom& b)
     return std::sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) + (a.z - b.z) * (a.z - b.z));
 }
 
-int main()
+/// One chain of `units` repeat units: every expected count follows from the repeat unit C8H15NO2 plus two chain-end H.
+static void checkChain(int units)
 {
-    std::printf("polymerbuild PDMAEMA\n");
-    const std::filesystem::path dir = std::filesystem::temp_directory_path() / "curcuma_test_polymerbuild_pdmaema";
+    std::printf("polymerbuild PDMAEMA (A)%d\n", units);
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / ("curcuma_test_polymerbuild_pdmaema_" + std::to_string(units));
     std::filesystem::remove_all(dir);
     std::filesystem::create_directories(dir);
     const std::filesystem::path previous = std::filesystem::current_path();
@@ -63,7 +64,7 @@ int main()
 
     json controller;
     controller["fragments"] = { { "A", std::string(CURCUMA_SOURCE_DIR) + "/src/molecules/pdmaema.xyz" } };
-    controller["sequence"] = "(A)4";
+    controller["sequence"] = "(A)" + std::to_string(units);
     controller["verbosity"] = 0;
     {
         PolymerBuild builder(controller, true);
@@ -93,8 +94,8 @@ int main()
     std::map<std::string, int> composition;
     for (const Atom& a : atoms)
         ++composition[a.element];
-    check(n == 106 && composition["C"] == 32 && composition["H"] == 62 && composition["N"] == 4 && composition["O"] == 8,
-        "composition C32H62N4O8, 106 atoms (got " + std::to_string(n) + " atoms)");
+    check(n == 26 * units + 2 && composition["C"] == 8 * units && composition["H"] == 15 * units + 2 && composition["N"] == units && composition["O"] == 2 * units,
+        "composition of " + std::to_string(units) + " repeat units plus two chain-end H, " + std::to_string(26 * units + 2) + " atoms (got " + std::to_string(n) + " atoms)");
 
     const std::map<std::string, double> radius { { "H", 0.31 }, { "C", 0.76 }, { "N", 0.71 }, { "O", 0.66 } };
     std::vector<std::vector<int>> neighbours(n);
@@ -173,13 +174,19 @@ int main()
             attached += std::find(quaternary.begin(), quaternary.end(), j) != quaternary.end();
         joiningCH2 += attached == 2;
     }
-    check(quaternary.size() == 4, "four carbons carry the ester (got " + std::to_string(quaternary.size()) + ")");
-    // Four side methyls, plus the CH3 at the chain end (the last CH2 with its cap H), which also hangs on a quaternary carbon.
-    check(methylOnQuaternary == 5, "four side methyls and the chain-end CH3 hang on the quaternary carbons (got " + std::to_string(methylOnQuaternary) + ")");
-    check(joiningCH2 == 3, "three CH2 groups join the four units (got " + std::to_string(joiningCH2) + ")");
+    check(static_cast<int>(quaternary.size()) == units, "one ester-bearing carbon per unit (got " + std::to_string(quaternary.size()) + ")");
+    // n side methyls, plus the CH3 at the chain end (the last CH2 with its cap H), which also hangs on a quaternary carbon.
+    check(methylOnQuaternary == units + 1, "one side methyl per unit and the chain-end CH3 hang on the quaternary carbons (got " + std::to_string(methylOnQuaternary) + ")");
+    check(joiningCH2 == units - 1, "CH2 groups join the units (got " + std::to_string(joiningCH2) + ")");
 
     std::filesystem::current_path(previous);
     std::filesystem::remove_all(dir);
+}
+
+int main()
+{
+    for (int units : { 4, 10 })
+        checkChain(units);
     std::printf("%s\n", g_failed ? "FAILED" : "all passed");
     return g_failed ? 1 : 0;
 }

@@ -2594,6 +2594,7 @@ SubchainResult PolymerBuild::buildSubchain(
                     const Matrix topo = polymer.getTopologyMatrix();
                     m_opt.m_bonds.clear();
                     appendCapBonds(polymer, m_opt.m_bonds);
+                    const std::vector<std::pair<int, int>> cap_bonds = m_opt.m_bonds;  // expected extras of the check below
                     int n = topo.rows();
                     int topo_bond_count = 0;
                     for (int ii = 0; ii < n; ++ii)
@@ -2611,6 +2612,12 @@ SubchainResult PolymerBuild::buildSubchain(
                             for (int jj = 0; jj < n; ++jj)
                                 if (ii != jj && topo(ii, jj) > 0.5)
                                     ++topo_bonds_per_atom[ii];
+
+                        // The open-Xx cap bonds are passed on purpose (appendCapBonds), not part of the topology
+                        for (const auto& b : cap_bonds) {
+                            ++topo_bonds_per_atom[b.first];
+                            ++topo_bonds_per_atom[b.second];
+                        }
 
                         // Count bonds per atom in passed list
                         std::vector<int> passed_bonds_per_atom(n, 0);
