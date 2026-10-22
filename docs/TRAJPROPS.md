@@ -37,6 +37,19 @@ angle D-H...A >= `hb_angle` (150 deg). All three limits and the elements are par
   -selection_b "!F1"` is chain against everything else.
 - Output: `<basename>_hbonds.csv` (frame, total, a_donates, b_donates) and `Results()` with the statistics of
   the total per frame plus mean, standard deviation and block error of each direction, and the criteria used.
+- `hb_criterion energy` counts GFN-FF hydrogen-bond triples (A-H...B) whose energy is below `hb_energy_limit`
+  (kJ/mol, negative = attractive; 0 counts every attractive triple) instead of applying distance and angle.
+  The triple energies come from `GFNFF::hydrogenBondEnergies()` ([HBOND_ENERGIES.md](HBOND_ENERGIES.md)); the
+  groups, directions and statistics are as above. `charge` is the total charge of the system (GFN-FF needs it for
+  the EEQ charges), `threads` the threads of the GFN-FF evaluation.
+- Extra output in energy mode: column `energy_sum_kj_mol` (sum of the energies of all triples in the groups) in the
+  per-frame CSV, `<basename>_hbonds_energy_histogram.csv` (triples per frame in `hb_hist_bins` bins over
+  `[-hb_hist_max, 0]` kJ/mol) and in `Results()` the statistics of the sum plus the counts per frame of triples
+  above zero and below the histogram range. The histogram is the tool for choosing the limit: compare the
+  resulting count with the geometric count on the same trajectory.
+- Cost: every frame is a full GFN-FF set-up and evaluation (topology, EEQ charges), far more than the geometric
+  count. One frame of a lattice of waters took 0.4 s and 0.3 GB at 1536 atoms and 2.4 s and 2.1 GB peak at 5184
+  atoms (4 threads); 28,000 atoms were not tried, and the memory use grows steeply with size. Use `stride`.
 - Neighbour search by a cell list; no periodic images, so no bond across a box boundary is found.
 - A geminal contact inside a molecule (D...A within a few bonds) is counted when it meets the criteria; the
   angle limit removes most of them.
@@ -45,17 +58,15 @@ angle D-H...A >= `hb_angle` (150 deg). All three limits and the elements are par
 
 🤖 AI-generated, ⚙️ machine-tested.
 
-Checked: `test_trajprops` (36 checks against hand-worked geometry: equal and unequal masses, a square,
+Checked: `test_trajprops` (49 checks against hand-worked geometry: equal and unequal masses, a square,
 subsets, frame ranges, statistics of 1..10, a ten-frame file with a selection, a selection matching
 nothing; water dimers linear, bent and stretched against the distance and angle limits, group directions,
-element restriction, the complement selection, a three-frame hbonds run). A generated 28,000-atom, 100-frame XYZ (71 MB) runs in 3.8 s at 33 MB peak memory; the R_g of a
+element restriction, the complement selection, a three-frame hbonds run; the energy criterion on a bonded and a stretched water dimer, group directions, limits, a three-frame run with histogram). A generated 28,000-atom, 100-frame XYZ (71 MB) runs in 3.8 s at 33 MB peak memory; the R_g of a
 rigid translation stays constant; hbonds over 30 frames of that file take 7 s at 33 MB (random
 coordinates, the count itself means nothing).
 
-Not checked: hydrogen-bond counts on real water or on a polymer in water, comparison with another program's count, real MD trajectories, VTF input, files with a changing atom count, timing and memory beyond
+Not checked: whether the energy and the geometric criterion agree on real water (no calibration done), the energy criterion on a solvated polymer, a non-zero `charge` run, hydrogen-bond counts on real water or on a polymer in water, comparison with another program's count, real MD trajectories, VTF input, files with a changing atom count, timing and memory beyond
 that size, comparison with another program's R_g. Human production testing pending.
 
-Planned in the same capability (not implemented): `rdf`, `sasa` (water-accessible surface,
-Shrake-Rupley); an `energy` criterion for `hbonds` from the GFN-FF hydrogen-bond terms (needs the per-triple
-energies of `FFWorkspace::calcHydrogenBonds`, which are only summed today, CPU only) and logging of the
-count during an MD run. Work package item D in qurcuma `docs/WP-min2015-reproduction.md`.
+Planned in the same capability (not implemented): `rdf`, `sasa` (water-accessible surface, Shrake-Rupley), and
+logging the energy-based count during an MD run. Work package item D in qurcuma `docs/WP-min2015-reproduction.md`.

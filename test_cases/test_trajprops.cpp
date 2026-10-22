@@ -124,6 +124,38 @@ int main()
             && curcuma::countHydrogenBonds(dimer(2.8, false), waterA, { 4, 5 }, standard).total() == 0,
         "group B restricted to the acceptor oxygen: found; to its hydrogens only: not");
 
+
+    // --- hydrogen bonds by GFN-FF triple energy ---------------------------------------
+    // Water dimer as in test_hbond_energies: O1 donates to O2. The strongest triple of the bonded dimer is
+    // about -12 kJ/mol; "clearly attractive" is taken as below -5 kJ/mol, and the dimer stretched to 6 A as above it.
+    const auto gfnffDimer = [](double oo) {
+        curcuma::Molecule m;
+        m.addPair({ 8, Position(0.0, 0.0, 0.0) });
+        m.addPair({ 1, Position(0.9572, 0.0, 0.0) });
+        m.addPair({ 1, Position(-0.2400, 0.9266, 0.0) });
+        m.addPair({ 8, Position(oo, 0.0, 0.0) });
+        m.addPair({ 1, Position(oo + 0.24, 0.93, 0.0) });
+        m.addPair({ 1, Position(oo + 0.24, -0.93, 0.0) });
+        return m;
+    };
+    curcuma::HBondEnergyOptions byEnergy;
+    byEnergy.limitKJ = -5.0;
+    const curcuma::HBondEnergyCount bonded = curcuma::countHydrogenBondsByEnergy(gfnffDimer(2.9), waterA, waterB, byEnergy);
+    check(bonded.ok, "energy criterion runs: " + bonded.error);
+    check(bonded.count.aDonates == 1 && bonded.count.bDonates == 0, "bonded dimer, limit -5 kJ/mol: one bond, donated by the first water");
+    check(bonded.energySumKJ < -5.0 && !bonded.energiesKJ.empty(), "its triple energy is below -5 kJ/mol");
+    curcuma::HBondEnergyOptions strict = byEnergy;
+    strict.limitKJ = bonded.energySumKJ - 1.0;
+    check(curcuma::countHydrogenBondsByEnergy(gfnffDimer(2.9), waterA, waterB, strict).count.total() == 0,
+        "a limit 1 kJ/mol below the triple energy counts nothing");
+    curcuma::HBondEnergyOptions all = byEnergy;
+    all.limitKJ = 0.0;
+    check(curcuma::countHydrogenBondsByEnergy(gfnffDimer(2.9), waterA, waterB, all).count.total() >= 1, "limit 0 counts every attractive triple");
+    const curcuma::HBondEnergyCount swapped = curcuma::countHydrogenBondsByEnergy(gfnffDimer(2.9), waterB, waterA, byEnergy);
+    check(swapped.count.aDonates == 0 && swapped.count.bDonates == 1, "groups swapped: the donor is in group B");
+    const curcuma::HBondEnergyCount stretched = curcuma::countHydrogenBondsByEnergy(gfnffDimer(6.0), waterA, waterB, byEnergy);
+    check(stretched.ok && stretched.count.total() == 0, "stretched to 6 A: no triple below -5 kJ/mol");
+
     // Selection with a complement: two waters 6 A apart are two fragments.
     curcuma::Molecule far = dimer(6.0, false);
     check(curcuma::resolveSelection(far, "F1").size() == 3, "F1 is the first water");
@@ -192,6 +224,48 @@ int main()
     looseProps.setFile("dimer.xyz");
     looseProps.start();
     check(looseProps.error().empty() && near(looseProps.Results()["mean"].get<double>(), 1.0), "angle limit 90 deg: the bent frame counts, mean 1");
+
+    // energy criterion over a three-frame file: bonded, stretched, bonded
+    {
+        std::ofstream xyz("gfnffdimer.xyz");
+        const double oo[3] = { 2.9, 6.0, 2.9 };
+        for (int k = 0; k < 3; ++k) {
+            const curcuma::Molecule m = gfnffDimer(oo[k]);
+            xyz << "6\nframe " << k << "\n";
+            for (int i = 0; i < 6; ++i) {
+                const auto a = m.Atom(i);
+                xyz << (a.first == 8 ? "O " : "H ") << a.second.x() << " " << a.second.y() << " " << a.second.z() << "\n";
+            }
+        }
+    }
+    json enController = json::object();
+    enController["trajprops"] = { { "quantity", "hbonds" }, { "hb_criterion", "energy" }, { "hb_energy_limit", -5.0 },
+        { "selection", "1:3" }, { "selection_b", "4:6" }, { "hb_hist_bins", 10 }, { "hb_hist_max", 20.0 } };
+    curcuma::TrajectoryProperties enProps(enController, true);
+    enProps.setFile("gfnffdimer.xyz");
+    enProps.start();
+    const json en = enProps.Results();
+    check(enProps.error().empty(), "energy-criterion capability runs: " + enProps.error());
+    if (enProps.error().empty()) {
+        check(en["frames_used"] == 3 && near(en["mean"].get<double>(), 2.0 / 3.0) && near(en["max"].get<double>(), 1.0)
+                && near(en["min"].get<double>(), 0.0),
+            "bonded, stretched, bonded: mean 2/3, min 0, max 1");
+        check(en["energy_sum_kj_mol"]["mean"].get<double>() < 0.0, "the mean triple-energy sum is attractive");
+        check(std::filesystem::exists(en["histogram_file"].get<std::string>()), "histogram file written");
+        std::ifstream histogram(en["histogram_file"].get<std::string>());
+        std::string line;
+        std::getline(histogram, line);   // header
+        double total = 0.0;
+        int rows = 0;
+        while (std::getline(histogram, line)) {
+            ++rows;
+            total += std::stod(line.substr(line.rfind(',') + 1));
+        }
+        check(rows == 10, "ten histogram rows");
+        // Triples per frame: the two bonded frames contribute their nonzero triples inside [-20, 0], the stretched one is
+        // below the printed precision of nothing; so the total is at least 2/3 of one triple per frame.
+        check(total >= 2.0 / 3.0 - 1e-9, "the histogram holds at least the bonded triple (2 of 3 frames)");
+    }
 
     json bad = json::object();
     bad["trajprops"] = { { "selection", "9999" } };

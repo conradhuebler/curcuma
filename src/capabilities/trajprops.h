@@ -61,6 +61,28 @@ struct HBondCount {
 HBondCount countHydrogenBonds(const Molecule& molecule, const std::vector<int>& groupA,
     const std::vector<int>& groupB, const HBondCriteria& criteria);
 
+/// Energy criterion: a hydrogen-bond triple of GFN-FF counts when its energy is below a limit.
+struct HBondEnergyOptions {
+    double limitKJ = 0.0;   ///< kJ/mol; triples with energy < limit count (0: every attractive triple)
+    int charge = 0;         ///< total charge of the system (GFN-FF needs it for the EEQ charges)
+    int threads = 1;
+};
+
+struct HBondEnergyCount {
+    bool ok = false;
+    std::string error;
+    HBondCount count;                     ///< triples below the limit, per direction (as countHydrogenBonds)
+    double energySumKJ = 0.0;             ///< sum of the energies of all triples in the groups, kJ/mol
+    std::vector<double> energiesKJ;       ///< energy of every triple in the groups that is not zero, kJ/mol
+};
+
+/// Hydrogen bonds by the GFN-FF triple energies (needs one GFN-FF evaluation of the frame, which sets up
+/// topology and charges from scratch: far more expensive than the geometric count). Groups as in
+/// countHydrogenBonds(). The triple list of GFN-FF is a candidate list; only triples whose energy is below
+/// the limit count.
+HBondEnergyCount countHydrogenBondsByEnergy(const Molecule& molecule, const std::vector<int>& groupA,
+    const std::vector<int>& groupB, const HBondEnergyOptions& options);
+
 /// Atoms of @p selection resolved against @p molecule. A leading '!' means every atom NOT in the
 /// rest of the selection ("!F1": all but the first fragment). Empty selection: all atoms.
 std::vector<int> resolveSelection(Molecule molecule, const std::string& selection);
@@ -131,6 +153,16 @@ PARAM(hb_bond_length, Double, 1.3, "hbonds: a hydrogen within this distance of a
     "Hydrogen bonds", {}, "min=0")
 PARAM(hb_elements, String, "N,O", "hbonds: element symbols of donor and acceptor atoms, comma separated.",
     "Hydrogen bonds", {})
+PARAM(hb_criterion, String, "geometric", "hbonds: geometric (distance and angle) or energy (GFN-FF triple energy below "
+    "hb_energy_limit; one GFN-FF evaluation per frame, use stride).", "Hydrogen bonds", {}, "enum=geometric|energy")
+PARAM(hb_energy_limit, Double, 0.0, "hbonds, criterion energy: a triple counts when its energy is below this (kJ/mol, "
+    "negative = attractive). 0 counts every attractive triple; calibrate with the histogram.", "Hydrogen bonds", {})
+PARAM(hb_hist_bins, Int, 40, "hbonds, criterion energy: bins of the triple-energy histogram over [-hb_hist_max, 0].",
+    "Hydrogen bonds", {}, "min=1")
+PARAM(hb_hist_max, Double, 20.0, "hbonds, criterion energy: lower edge of the histogram (kJ/mol, positive number).",
+    "Hydrogen bonds", {}, "min=0")
+PARAM(charge, Int, 0, "hbonds, criterion energy: total charge of the system for GFN-FF.", "Hydrogen bonds", {})
+PARAM(threads, Int, 1, "hbonds, criterion energy: threads of the GFN-FF evaluation.", "Hydrogen bonds", {}, "min=1")
 PARAM(blocks, Int, 5, "Number of blocks for the block standard error.", "Statistics", {}, "min=1")
 PARAM(output, String, "", "Per-frame CSV; empty gives <basename>_<quantity>.csv.", "Output", {})
 END_PARAMETER_DEFINITION

@@ -8,6 +8,9 @@
 #include "trajprops.h"
 
 #include "src/core/curcuma_logger.h"
+#include "src/core/energycalculator.h"
+#include "src/core/energy_calculators/ff_methods/gfnff.h"
+#include "src/core/units.h"
 #include "src/core/elements.h"
 #include "src/core/fileiterator.h"
 #include "src/core/parameter_registry.h"
@@ -233,6 +236,68 @@ HBondCount countHydrogenBonds(const Molecule& molecule, const std::vector<int>& 
     return count;
 }
 
+HBondEnergyCount countHydrogenBondsByEnergy(const Molecule& molecule, const std::vector<int>& groupA,
+    const std::vector<int>& groupB, const HBondEnergyOptions& options)
+{
+    HBondEnergyCount result;
+    Molecule copy = molecule;
+    copy.setCharge(options.charge);
+    json config = { { "verbosity", 0 }, { "threads", options.threads }, { "gfnff", json::object() } };
+    EnergyCalculator calculator("gfnff", config);
+    calculator.setMolecule(copy.getMolInfo());
+    GFNFF* gfnff = calculator.Interface() ? calculator.Interface()->gfnffInstance() : nullptr;
+    if (!gfnff) {
+        result.error = "GFN-FF is not available for the energy criterion";
+        return result;
+    }
+    gfnff->setRecordHBondEnergies(true);
+    if (!std::isfinite(calculator.CalculateEnergy(false))) {
+        result.error = "GFN-FF evaluation failed";
+        return result;
+    }
+    const std::vector<GFNFFHBondEnergy> triples = gfnff->hydrogenBondEnergies();
+
+    const int n = static_cast<int>(molecule.AtomCount());
+    std::vector<unsigned char> group(n, 0);
+    if (groupA.empty()) {
+        std::fill(group.begin(), group.end(), 1);
+    } else {
+        for (int i : groupA)
+            if (i >= 0 && i < n)
+                group[i] |= 1;
+    }
+    const bool twoGroups = !groupB.empty();
+    for (int i : groupB)
+        if (i >= 0 && i < n)
+            group[i] |= 2;
+
+    for (const GFNFFHBondEnergy& t : triples) {
+        const bool donorA = group[t.donor] & 1, donorB = group[t.donor] & 2;
+        const bool acceptorA = group[t.acceptor] & 1, acceptorB = group[t.acceptor] & 2;
+        bool aDonates = false, bDonates = false;
+        if (!twoGroups) {
+            aDonates = donorA && acceptorA;
+        } else {
+            aDonates = donorA && acceptorB;
+            bDonates = !aDonates && donorB && acceptorA;
+        }
+        if (!aDonates && !bDonates)
+            continue;
+        const double kj = CurcumaUnit::Energy::hartree_to_kjmol(t.energy);
+        result.energySumKJ += kj;
+        if (kj != 0.0)
+            result.energiesKJ.push_back(kj);
+        if (kj < options.limitKJ) {
+            if (aDonates)
+                ++result.count.aDonates;
+            else
+                ++result.count.bDonates;
+        }
+    }
+    result.ok = true;
+    return result;
+}
+
 TrajectoryProperties::TrajectoryProperties(const json& controller, bool silent)
     : CurcumaMethod(ParameterRegistry::getInstance().getDefaultJson("trajprops"), controller, silent)
 {
@@ -288,6 +353,22 @@ void TrajectoryProperties::start()
         }
     }
 
+    const std::string criterion = Json2KeyWord<std::string>(m_defaults, "hb_criterion");
+    const bool byEnergy = quantity == "hbonds" && criterion == "energy";
+    if (quantity == "hbonds" && criterion != "geometric" && criterion != "energy") {
+        fail("hb_criterion must be geometric or energy, not \"" + criterion + "\"");
+        return;
+    }
+    HBondEnergyOptions energyOptions;
+    energyOptions.limitKJ = Json2KeyWord<double>(m_defaults, "hb_energy_limit");
+    energyOptions.charge = Json2KeyWord<int>(m_defaults, "charge");
+    energyOptions.threads = Json2KeyWord<int>(m_defaults, "threads");
+    const int histBins = std::max(1, Json2KeyWord<int>(m_defaults, "hb_hist_bins"));
+    const double histMax = Json2KeyWord<double>(m_defaults, "hb_hist_max");
+    std::vector<long long> histogram(histBins, 0);
+    long long belowRange = 0, aboveZero = 0;
+    std::vector<double> energySums;
+
     FileIterator iterator(Filename(), true);
     const int total = iterator.MaxMolecules();
     const std::vector<int> wanted = resolveFrames(total, Json2KeyWord<int>(m_defaults, "first_frame"),
@@ -333,6 +414,26 @@ void TrajectoryProperties::start()
         }
         if (quantity == "gyration") {
             values.push_back(gyrationRadius(molecule, atoms, massWeighted));
+        } else if (byEnergy) {
+            const HBondEnergyCount c = countHydrogenBondsByEnergy(molecule, atoms, atomsB, energyOptions);
+            if (!c.ok) {
+                fail("frame " + std::to_string(frame) + ": " + c.error);
+                return;
+            }
+            values.push_back(c.count.total());
+            donatedA.push_back(c.count.aDonates);
+            donatedB.push_back(c.count.bDonates);
+            energySums.push_back(c.energySumKJ);
+            for (double kj : c.energiesKJ) {
+                if (kj > 0.0) {
+                    ++aboveZero;
+                } else if (kj < -histMax) {
+                    ++belowRange;
+                } else {
+                    const int bin = std::min(histBins - 1, static_cast<int>((kj + histMax) / histMax * histBins));
+                    ++histogram[bin];
+                }
+            }
         } else {
             const HBondCount c = countHydrogenBonds(molecule, atoms, atomsB, criteria);
             values.push_back(c.total());
@@ -354,13 +455,25 @@ void TrajectoryProperties::start()
         if (quantity == "gyration")
             csv << "frame,gyration_angstrom\n";
         else
-            csv << "frame,hbonds_total,a_donates,b_donates\n";
+            csv << "frame,hbonds_total,a_donates,b_donates" << (byEnergy ? ",energy_sum_kj_mol" : "") << "\n";
         for (std::size_t i = 0; i < values.size(); ++i) {
             csv << used[i] << "," << values[i];
             if (quantity == "hbonds")
                 csv << "," << donatedA[i] << "," << donatedB[i];
+            if (byEnergy)
+                csv << "," << energySums[i];
             csv << "\n";
         }
+    }
+    std::string histogramName;
+    if (byEnergy) {
+        // Triples per frame in each energy bin (counts summed over the frames, divided by the frame count).
+        histogramName = (Basename().empty() ? std::string("trajectory") : Basename()) + "_hbonds_energy_histogram.csv";
+        std::ofstream csv(outputPath(histogramName));
+        csv << "bin_low_kj_mol,bin_high_kj_mol,triples_per_frame\n";
+        for (int b = 0; b < histBins; ++b)
+            csv << (-histMax + histMax * b / histBins) << "," << (-histMax + histMax * (b + 1) / histBins) << ","
+                << static_cast<double>(histogram[b]) / static_cast<double>(values.size()) << "\n";
     }
 
     m_results["quantity"] = quantity;
@@ -383,8 +496,19 @@ void TrajectoryProperties::start()
     } else {
         m_results["unit"] = "hydrogen bonds per frame";
         m_results["atoms_b"] = atomsB.empty() ? -1 : static_cast<int>(atomsB.size());
-        m_results["criteria"] = { { "distance", criteria.distance }, { "angle", criteria.angle },
-            { "bond_length", criteria.bondLength } };
+        m_results["criterion"] = criterion;
+        if (byEnergy) {
+            m_results["energy_limit_kj_mol"] = energyOptions.limitKJ;
+            m_results["charge"] = energyOptions.charge;
+            const SeriesStatistics es = seriesStatistics(energySums, blocks);
+            m_results["energy_sum_kj_mol"] = { { "mean", es.mean }, { "stddev", es.stddev }, { "block_error", es.blockError } };
+            m_results["histogram_file"] = outputPath(histogramName);
+            m_results["triples_above_zero_per_frame"] = static_cast<double>(aboveZero) / static_cast<double>(values.size());
+            m_results["triples_below_histogram_range_per_frame"] = static_cast<double>(belowRange) / static_cast<double>(values.size());
+        } else {
+            m_results["criteria"] = { { "distance", criteria.distance }, { "angle", criteria.angle },
+                { "bond_length", criteria.bondLength } };
+        }
         const SeriesStatistics a = seriesStatistics(donatedA, blocks);
         const SeriesStatistics b = seriesStatistics(donatedB, blocks);
         m_results["a_donates"] = { { "mean", a.mean }, { "stddev", a.stddev }, { "block_error", a.blockError } };
