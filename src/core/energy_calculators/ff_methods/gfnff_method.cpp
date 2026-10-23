@@ -659,7 +659,7 @@ GFNFF::GFNFF(const json& parameters)
     // Claude Generated (Oct 2026): user EEQ charge groups. The cached topology holds Phase-1 charges that depend
     // on the constraints, so the cache is bypassed (read and write) while groups are given.
     loadUserChargeGroups();
-    if (!m_user_groups.empty())
+    if (!m_user_groups.empty() || m_auto_charge_groups)
         m_cache_topology = false;
 
     // Initialize EEQ solver (Dec 2025 - Phase 3)
@@ -3639,6 +3639,12 @@ void GFNFF::loadUserChargeGroups()
     const std::string file = m_parameters.value("charge_groups", std::string());
     if (file.empty())
         return;
+    if (file == "auto") {
+        // groups are perceived from the topology (Phase 10, buildAutoChargeGroups); the fallback 2 is the default
+        m_auto_charge_groups = true;
+        m_charge_group_radius = std::max(0, m_parameters.value("charge_group_radius", 2));
+        return;
+    }
     try {
         std::ifstream in(file);
         if (!in.good()) {
@@ -3703,6 +3709,158 @@ void GFNFF::applyUserChargeGroups(int nfrag_topological) const
     if (CurcumaLogger::get_verbosity() >= 1)
         CurcumaLogger::info(fmt::format("GFNFF charge_groups: {} groups + {} (rest charge {:.3f}), EEQ constraint rows {}",
             m_user_groups.size(), rest ? "remaining atoms" : "no remainder", rest ? rest_charge : 0.0, nfrag));
+}
+
+/**
+ * @brief Nominal sigma valence of a partner atom for condition (c) of the onium perception
+ *
+ * Claude Generated (Oct 2026). Same table as rev-gfnff's GFNFF::revValence (curcuma_branches/curcuma, Oct 2026):
+ * H, halogens 1; O 2; N, B, Al 3; C, Si 4; He/Ne/Ar 0; every other element 6 (hypervalent main group and
+ * metals: never counted as over-coordinated, so S and P partners do not block).
+ */
+static int oniumPartnerValence(int Z)
+{
+    switch (Z) {
+    case 1: case 9: case 17: case 35: case 53: return 1;
+    case 2: case 10: case 18: return 0;
+    case 5: case 13: case 7: return 3;
+    case 6: case 14: return 4;
+    case 8: return 2;
+    default: return 6;
+    }
+}
+
+/**
+ * @brief Perceive onium centres (NR4+, R3O+) for -gfnff.charge_groups auto
+ *
+ * Claude Generated (Oct 2026). Origin: the onium rule of rev-gfnff stage 3a(ii)
+ * (FFWorkspace::prepareConservingShare, -gfnff.rev_share_onium_rule, Oct 17, 2026; evaluation of 38 onium
+ * structures in GMTKN55/MOR41/S30L-CI in test_cases/revgfnff_share_onium/REPORT_onium.md of that branch).
+ * A centre is an N with exactly 4 or an O with exactly 3 partners in the full neighbour list nb_full (the list the
+ * fragment search uses), accepted when
+ *   (a) the system is closed shell: spin 0 and (sum Z - charge) even;
+ *   (b) no partner is a metal (PeriodicTable::getMetalType > 0);
+ *   (c) no partner has more partners than its nominal valence (oniumPartnerValence; a bridging H blocks);
+ *   (d) the fragment is a cation: qfrag >= +1. The fragment charge is fixed before any EEQ solve; the Phase-1
+ *       topology charges, which the rev rule reads, depend on the groups made here and would be circular.
+ * This mode works only for one fragment (nfrag == 1), so qfrag[0] = m_charge and (d) is m_charge >= 1. The rev rule's
+ * second branch of (d), an odd electron count of the component (cation of a neutral ion pair), cannot occur:
+ * the component is the whole molecule and (a) makes its electron count even.
+ * @return centres, 0-based, ascending (independent of the atom order as a set)
+ */
+std::vector<int> GFNFF::perceiveOniumCentres(const TopologyInfo& topo_info, int nfrag_topological) const
+{
+    std::vector<int> centres;
+    const int n = m_atomcount;
+    if (nfrag_topological != 1 || static_cast<int>(topo_info.nb_full.size()) != n)
+        return centres;
+    long electrons = -static_cast<long>(m_charge);
+    for (int i = 0; i < n; ++i)
+        electrons += m_atoms[i];
+    if (m_spin != 0 || (electrons % 2) != 0) // (a)
+        return centres;
+    if (m_charge < 1) // (d), qfrag[0] == m_charge for one fragment
+        return centres;
+    for (int i = 0; i < n; ++i) {
+        const int Z = m_atoms[i];
+        const int nb = static_cast<int>(topo_info.nb_full[i].size());
+        if (!((Z == 7 && nb == 4) || (Z == 8 && nb == 3)))
+            continue;
+        bool blocked = false;
+        for (int j : topo_info.nb_full[i]) {
+            const int Zj = m_atoms[j];
+            if (PeriodicTable::getMetalType(Zj) > 0                                              // (b)
+                || static_cast<int>(topo_info.nb_full[j].size()) > oniumPartnerValence(Zj)) {    // (c)
+                blocked = true;
+                break;
+            }
+        }
+        if (!blocked)
+            centres.push_back(i);
+    }
+    return centres;
+}
+
+/**
+ * @brief -gfnff.charge_groups auto: one +1 group per onium centre, then the same override as a group file
+ *
+ * Claude Generated (Oct 2026). Group = every atom within m_charge_group_radius bonds of the centre (breadth-first
+ * search on nb_full). The whole mode is rejected with a warning, and the run continues without groups, when two
+ * groups share an atom or when there are more centres than the molecule charge (a second, invisible charge
+ * carrier). All decisions use sets of atoms, never the atom order (Known Issue #34).
+ */
+void GFNFF::buildAutoChargeGroups(const TopologyInfo& topo_info, int nfrag_topological) const
+{
+    m_auto_groups_done = true;
+    m_user_groups.clear();
+    if (nfrag_topological != 1) {
+        CurcumaLogger::warn(fmt::format("GFNFF charge_groups auto ignored: the molecule has {} fragments, groups are supported inside one connected molecule only", nfrag_topological));
+        return;
+    }
+    const std::vector<int> centres = perceiveOniumCentres(topo_info, nfrag_topological);
+    int n_n = 0, n_o = 0;
+    for (int c : centres)
+        (m_atoms[c] == 7 ? n_n : n_o)++;
+    if (centres.empty()) {
+        if (CurcumaLogger::get_verbosity() >= 1)
+            CurcumaLogger::result(fmt::format("GFNFF charge_groups auto: 0 onium centres (charge {}, spin {}), no groups", m_charge, m_spin));
+        return;
+    }
+    if (static_cast<int>(centres.size()) > m_charge) {
+        CurcumaLogger::warn(fmt::format("GFNFF charge_groups auto ignored: {} onium centres but molecule charge {} (another charge carrier is not visible), no groups",
+            centres.size(), m_charge));
+        return;
+    }
+    const int n = m_atomcount;
+    std::vector<int> owner(n, -1);
+    std::vector<UserChargeGroup> groups;
+    for (size_t g = 0; g < centres.size(); ++g) {
+        std::vector<int> dist(n, -1);
+        std::queue<int> q;
+        dist[centres[g]] = 0;
+        q.push(centres[g]);
+        UserChargeGroup group;
+        group.charge = 1.0;
+        while (!q.empty()) {
+            const int a = q.front();
+            q.pop();
+            group.atoms.push_back(a);
+            if (dist[a] >= m_charge_group_radius)
+                continue;
+            for (int b : topo_info.nb_full[a])
+                if (dist[b] < 0) {
+                    dist[b] = dist[a] + 1;
+                    q.push(b);
+                }
+        }
+        std::sort(group.atoms.begin(), group.atoms.end());
+        for (int a : group.atoms) {
+            if (owner[a] >= 0) {
+                CurcumaLogger::warn(fmt::format("GFNFF charge_groups auto ignored: atom {} lies within {} bonds of the onium centres {} and {}, no groups",
+                    a, m_charge_group_radius, centres[owner[a]], centres[g]));
+                return;
+            }
+            owner[a] = static_cast<int>(g);
+        }
+        groups.push_back(std::move(group));
+    }
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        std::string sizes;
+        for (const auto& group : groups)
+            sizes += fmt::format(" {}", group.atoms.size());
+        CurcumaLogger::result(fmt::format("GFNFF charge_groups auto: {} onium centres (N {}, O {}), radius {}, group sizes{}",
+            centres.size(), n_n, n_o, m_charge_group_radius, sizes));
+    }
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        for (size_t g = 0; g < groups.size(); ++g) {
+            std::string atoms;
+            for (int a : groups[g].atoms)
+                atoms += fmt::format(" {}", a);
+            CurcumaLogger::info(fmt::format("GFNFF charge_groups auto group {}: centre {} atoms{}", g + 1, centres[g], atoms));
+        }
+    }
+    m_user_groups = std::move(groups);
+    applyUserChargeGroups(nfrag_topological);
 }
 
 bool GFNFF::importTopology(const json& topo_json)
@@ -10438,11 +10596,15 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     // 100 kcal/mol on that structure; the same mechanism drove the AHB21/BH76/G21EA/SIE4x4
     // family. See the rev-gfnff TODO for the physics side of this - the reference is not
     // right either, it is simply self-consistent.
-    if (!m_user_groups.empty() && !m_frag_override.active) {
+    if ((!m_user_groups.empty() || (m_auto_charge_groups && !m_auto_groups_done)) && !m_frag_override.active) {
         // Claude Generated (Oct 2026): -gfnff.charge_groups. Only inside one connected molecule; the groups
         // become the EEQ constraint groups through the same override the frag_charge_model variants use.
+        // auto: the groups are perceived here, once (pass 2 of the q-loop and later builds keep the result).
         const auto frag_probe = detectMolecularFragments(topo_info.nb_full);
-        applyUserChargeGroups(frag_probe.first);
+        if (m_auto_charge_groups && m_user_groups.empty())
+            buildAutoChargeGroups(topo_info, frag_probe.first);
+        else
+            applyUserChargeGroups(frag_probe.first);
     }
     if (m_frag_override.active
         && static_cast<int>(m_frag_override.fraglist.size()) == m_atomcount) {

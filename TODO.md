@@ -18,6 +18,12 @@ Stand.
 
 - **`-gfnff.charge_groups` auf der GPU und fuer mehrere Fragmente** (2026-10-23): GPU-Methode faellt auf die CPU zurueck (Aenderung in `gfnff_gpu_method_impl.h` nicht uebersetzt); Gruppen nur in einem zusammenhaengenden Molekuel.
 
+- **`-gfnff.charge_groups auto`: offene Grenzen** (2026-10-23): nur Kationen (Anionen, Carbenium fehlen); nur ein Fragment (Ionenpaare, S30L-CI 24/27/28 nicht erfasst); Gruppe einmal je Instanz, kein Neu-Gruppieren bei Bindungsbruch (unstetig, nicht gelaufen); GPU nicht gelaufen. Gruppenausdehnung (Radius 2, 14 Atome) offen (Schritt 3, Potentialmass). [docs/POLYMERBUILD_CHARGE.md](docs/POLYMERBUILD_CHARGE.md)
+
+- **`-gfnff.charge_groups auto` auf hypervalenten P/S-Geruesten** (2026-10-23, n=3): PArel h4p2o71/h4p2o72/s4o41 werden erkannt (Bedingung (c) blockt P/S nicht), Energie +53 bis +178 kcal/mol; freie Gruppensumme bis -0,90 e wird auf +1 gezwungen. Ob P/S-Partner blocken sollen, ist zu entscheiden.
+
+- **Topologie-Cache `<basename>.topo.json` traegt die Molekuelladung nicht** (2026-10-23, n=1): eine bei Ladung 2 geschriebene Datei wird bei Ladung 0 wiederverwendet (gleiche Energie -14,11678988 Eh, (AB)2). Cache-Schluessel um Ladung/Spin ergaenzen; nicht untersucht, ob die Ladung beim Laden doch gelesen wird.
+
 - **`cli_simplemd_14_gfnff_react_h_recombination` schlaegt fehl** (2026-10-23, n=1 Binary mit und ohne Ladungsgruppen-Aenderung): "no bond formation events", MD laeuft 0,2 s ohne Fehler. Ursache nicht untersucht.
 
 - **`polymerbuild`: Optimierungsschritte laufen mit Ladung 0, ohne Ladungsgruppen** (2026-10-23): die Formalladung steht nur im Ergebnis. `-gfnff.charge_groups` existiert, wird beim Bauen aber nicht benutzt (Gruppen der wachsenden Kette je Schritt noetig). [docs/POLYMERBUILD_CHARGE.md](docs/POLYMERBUILD_CHARGE.md)

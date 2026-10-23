@@ -105,6 +105,51 @@ atoms of the group, i.e. exactly such a shift, with the size solved for the targ
 shift does not replace it. A soft version (penalty `k (sum q - Q_g)^2`, no exact integer) would change the EEQ matrix
 itself and with it every solver path and the gradient; not tried.
 
+## Perceived groups: `-gfnff.charge_groups auto` (Oct 2026)
+
+Status: AI-generated, machine-tested (test `gfnff_charge_groups`, sweep below); no human review, group size not decided.
+Instead of a file, `auto` makes the groups from the topology (`GFNFF::perceiveOniumCentres`, `buildAutoChargeGroups`,
+`gfnff_method.cpp`). A centre is an N with exactly 4 or an O with exactly 3 partners in the full neighbour list
+`nb_full` (the list the fragment search uses), accepted when
+- (a) closed shell: `-spin 0` and (sum Z - charge) even;
+- (b) no partner is a metal (`PeriodicTable::getMetalType > 0`);
+- (c) no partner has more partners than its nominal valence: H, F, Cl, Br, I 1; O 2; N, B, Al 3; C, Si 4; He, Ne, Ar 0;
+  every other element 6, i.e. never blocks (same table as rev-gfnff's `revValence`; so S and P partners do not block);
+- (d) the fragment is a cation, read from the fragment charge, not from the Phase-1 charges (those depend on the groups).
+  The mode needs one fragment, so this is `charge >= 1`; the odd-electron branch of the rev-gfnff rule cannot occur there.
+
+Origin: the onium rule of rev-gfnff (`-gfnff.rev_share_onium_rule`, Oct 17, 2026, not in this branch). Each centre gets a
+group of every atom within `charge_group_radius` bonds (default 2, breadth-first search on `nb_full`) with charge +1; then
+the file path (`applyUserChargeGroups`) takes over. Rejected with a warning, run continues without groups: more than one
+fragment; two groups share an atom; more centres than the molecule charge. No centre: one result line, no effect. The
+decisions use atom sets, not the atom order. Output: one line at verbosity >= 1 (number of centres, group sizes), the
+atom list of each group at verbosity >= 2. Without the parameter the code is not entered.
+
+Checks (`check_charge_groups.py`, (AB)2 at +2, n=1 chain): two groups of 14 atoms (N, N-H, three alpha-C, eight H,
+beta-C), sums 1.00000000 (8 decimals printed); one random permutation of the atoms gives the same groups, and the energy moves by -6.76e-5 Eh
+with groups and -6.49e-5 Eh without (GFN-FF itself depends on the numbering, Known Issue #34); charge 0 and the open-shell
+charge 1 find no centre; charge 1 with two centres (one C-H proton removed) and H3O+(H2O)2 (three fragments) are rejected,
+energy equal to the ungrouped one; gradient against a central finite difference max 1.3e-5 Eh/A (9 components; 1.2e-5
+with the file groups). Default unchanged: printed single-point energy of the reference binary and the new one identical (8 decimals)
+for all 2647 structures of GMTKN55, MOR41 and S30L-CI.
+
+Sweep with `auto` over the same 2647 structures (327 charged; MOR41 and S30L-CI read from the `curcuma_branches/curcuma`
+working tree): 28 structures with groups, no overlap or count rejection, 440 rejected for several fragments. Against the
+38 onium structures of the rev-gfnff evaluation: 19 found (the 12 IL16 cations `*A`, PA26 cysp/ethanolp, PArel sugar0/2/3/4,
+RSE43 E22); 19 missed, all because they hold several fragments (12 IL16 ion pairs, WATER27 H3OpH2O6OHm, six S30L-CI 24/27/28),
+which the mode excludes by design. 9 more hits: PA26 h2op/nh3p and WATER27 H3Op (group = whole molecule, energy unchanged),
+PA26 glyp, PArel aminocoohbz1 (ammonium) and ISOL24 i23e (R2NH2+), and three on a hypervalent frame that condition (c) does
+not block: PArel h4p2o71 (P-OH2+), h4p2o72 (P-O(H)-P, the free group sum -0.90 e is forced to +1) and s4o41 (S-O(H)-S).
+Energy change from the groups: 0 (whole molecule) to +36 kcal/mol for the organic oniums (IL16 cations +12 to +25), +53
+to +178 kcal/mol for the three P/S cases. Within a benchmark reaction the cation gets groups but its ion pair (several
+fragments) or neutral partner does not, so reaction energies move by the same amount; the mode is not meant for such sets.
+
+Limits: cations only (no anions, no carbenium); one connected molecule; group charge fixed +1; the group is perceived once
+per GFNFF instance (nothing resets it: a later molecule on the same instance or a bond change in MD would keep the old
+groups, not run; a regrouping would be a discontinuous step); GPU falls back to the CPU after a successful perception (not compiled or run here); the
+topology cache is bypassed. The cache `<basename>.topo.json` carries no molecule charge: a file written at charge 2 is
+reused at charge 0 (seen in this work, the test runs with `-gfnff.cache_topology false`).
+
 ## Not done
 
 - Charge in the optimisation steps of the build (would need the partial charge of each growing chain at every step and every join).

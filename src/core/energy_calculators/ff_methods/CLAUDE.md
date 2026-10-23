@@ -34,6 +34,7 @@ Each item was a real defect; evidence in [docs/KNOWN_ISSUES_ARCHIVE.md](../../..
 - **Energy-only calls on a reused instance** must see the current CN and D4 C6 (#32). Pair lists that depend on geometry (non-bonded repulsion, D4 pairs, HB/XB, explicit Coulomb) must be refreshed during MD (#33).
 - **Defaults live in code, not only in PARAMs**: `GFNFF::GFNFF(const json&)` reads `m_parameters.value(key, FALLBACK)`; change the fallback as well as the PARAM (#31).
 - **Charge groups** (`-gfnff.charge_groups FILE`): extra EEQ constraint rows inside one connected molecule via `setFragmentOverride`; CPU only, bypasses the topology cache ([docs/POLYMERBUILD_CHARGE.md](../../../../docs/POLYMERBUILD_CHARGE.md)).
+- **`-gfnff.charge_groups auto`**: `perceiveOniumCentres` (NR4+/R3O+, one fragment, charge >= 1) makes +1 groups within `charge_group_radius` bonds, then the file path; perceived once per instance, off by default (🤖, ⚙️).
 - **Topology cache** (`<basename>.topo.json`): delete it before re-measuring after any topology or charge change.
 - **No numerical path may depend on the verbosity level** (#38) or on thread arrival order (#36).
 - **Element-indexed tables**: check the length against the highest Z used (#22).
