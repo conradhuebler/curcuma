@@ -87,6 +87,32 @@ i.e. radius two bonds (gfn2: 1.01 e within 14 atoms, 0.94 e for the 13-atom vari
 for every group (ester O -0.41 e against -0.25 e in gfn2), which no group choice repairs. Mulliken charges are model dependent
 (N: gfn1 -0.12 e, gfn2 +0.06 e); group sums are the more robust quantity.
 
+## Accuracy test of `auto` against reference energies (Oct 2026): no improvement
+
+Single-point energies with and without `-gfnff.charge_groups auto` (bitwise equal for 2623 of 2647 structures, 24 differ) fed into the
+GMTKN55 reaction machinery of the rev-gfnff work (1505 reactions, WTMAD-2 control 92.595 = 92.59 reference value). Criteria written down before
+looking (error per reaction in kcal/mol, d = |err_auto| - |err_ref|, "worse" if mean(d) > 2 SE). 30 reactions contain an onium structure
+(MOR41 0/41, S30L-CI 0/30 affected). One run per structure.
+
+| subset | n | MAD default | MAD auto | verdict |
+|---|---|---|---|---|
+| IL16 | 12 | 65.6 | 66.0 | no sig. difference (5 better, 7 worse) |
+| PA26 | 5 | 995.6 | 1006.8 | auto worse (default error is about -1000: bare proton not described, weak statement) |
+| PArel | 6 | 16.2 | 42.6 | no sig. difference (1 better, 5 worse) |
+| ISOL24 | 1 | 4.5 | 40.6 | n<5 |
+| all affected | 30 | 200.5 | 209.0 | no sig. difference (6 better, 16 worse, 8 equal) |
+
+WTMAD-2 92.595 -> 93.986 (category largereactions 113.45 -> 121.99). 16 reactions grow by more than 5 kcal/mol, none improves
+significantly in any subset. Without the three P/S structures (h4p2o71, h4p2o72, s4o41): WTMAD-2 92.803, still worse.
+Radius: R=1 WTMAD-2 93.130 (worse), R=2 93.986, R=3 92.836 (IL16 unchanged 12/12, i.e. the group is then the whole cation: least harm because it
+does nothing there, not an improvement).
+
+Reading (interpretation, not measured): the constraint raised the energy in 24 of 28 centre structures (+2 to +178 kcal/mol). GFN-FF was fitted with
+free EEQ charges, so forcing localisation moves away from the fit unless the rest is refitted. In IL16, ISOL24 and PArel only the onium species
+gets a group, not the ion-pair complex (2 fragments) or the partner isomer, so the reaction energy shifts by the full amount. Consequence: `auto`
+does not improve energies; it is an opt-in tool for the charge pattern, not for GMTKN55-type energetics. A change that would pay off belongs to a refit
+or a new charge model (`revgfnff`). Not tested: geometries, MD, polymers, multi-fragment systems (440 structures ignored), open shells (all 28 centre structures closed shell).
+
 ## Tried and dropped: a dxi shift on the ammonium nitrogen (Oct 2026)
 
 Idea: instead of constraint rows, lower the EEQ electronegativity of every nitrogen with four neighbours (extra `dxi`), so
