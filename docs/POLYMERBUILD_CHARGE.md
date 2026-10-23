@@ -66,6 +66,27 @@ with groups, 1.1e-5 without, largest component 0.47 Eh/A. `-opt` converged (754 
 +0.0022 Eh with groups, +0.0031 Eh without (n=1 each). Test `gfnff_charge_groups` (script `check_charge_groups.py`).
 `cli_simplemd_14_gfnff_react_h_recombination` fails with and without this change (checked by stashing it, n=1).
 
+## Where the +1 sits: profile by bond distance ((AB)5, +5, mean over 5 protonated N, n=1 chain)
+
+`scripts/polymer_charge_profile.py`. In gfn2 the N itself carries +0.06 e; the head-group hydrogens carry +1.14 e
+(N-H +0.23, eight alpha-H +0.11 each), the heavy atoms (N, three alpha-C, beta-C) -0.13 e. Cumulative charge within d bonds
+of the N+ (atoms: 1, 5, 14, 17, 18, 20):
+
+| model | d<=1 | d<=2 | d<=3 | d<=4 | d<=5 |
+|---|---|---|---|---|---|
+| gfn2 | 0.03 | 1.01 | 0.91 | 1.26 | 0.84 |
+| gfn1 | 0.22 | 1.09 | 0.82 | 1.38 | 0.84 |
+| gfnff, no groups | -0.21 | 0.58 | 0.35 | 0.70 | 0.17 |
+| gfnff, group of the 5 atoms within one bond, +1 | +1.00 | 0.60 | 0.35 | 0.70 | 0.18 |
+| gfnff, group of 13 atoms (N, N-H, three alpha-C, their H), +1 | -0.14 | 1.01 | 0.68 | 1.03 | 0.47 |
+| gfnff, group = monomer unit (27 atoms), +1 | -0.21 | 0.71 | 0.54 | 0.93 | 0.45 |
+
+A group made of the direct neighbours cannot carry the +1: the QM charge of those five atoms is 0.03 to 0.22 e, and the
+constraint leaves the N at -0.23 e and the shell within two bonds unchanged (0.60 e). The group has to reach the hydrogens,
+i.e. radius two bonds (gfn2: 1.01 e within 14 atoms, 0.94 e for the 13-atom variant). Beyond d=3 GFN-FF stays 0.2 to 0.4 e off
+for every group (ester O -0.41 e against -0.25 e in gfn2), which no group choice repairs. Mulliken charges are model dependent
+(N: gfn1 -0.12 e, gfn2 +0.06 e); group sums are the more robust quantity.
+
 ## Tried and dropped: a dxi shift on the ammonium nitrogen (Oct 2026)
 
 Idea: instead of constraint rows, lower the EEQ electronegativity of every nitrogen with four neighbours (extra `dxi`), so
