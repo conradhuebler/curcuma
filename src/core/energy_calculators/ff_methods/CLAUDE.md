@@ -33,6 +33,7 @@ Each item was a real defect; evidence in [docs/KNOWN_ISSUES_ARCHIVE.md](../../..
 - **Port fidelity first**: the Fortran sources (`external/gfnff`, pprcht) decide; every deliberate deviation is an opt-in or opt-out switch. Several reference arrays have two variants (pre- and post-Hueckel pi membership, `imetal` versus the raw metal flag, `bpair` from `nbondmat` versus a BFS distance): use the one the reference uses (#15, #21, #23, #24, #25).
 - **Energy-only calls on a reused instance** must see the current CN and D4 C6 (#32). Pair lists that depend on geometry (non-bonded repulsion, D4 pairs, HB/XB, explicit Coulomb) must be refreshed during MD (#33).
 - **Defaults live in code, not only in PARAMs**: `GFNFF::GFNFF(const json&)` reads `m_parameters.value(key, FALLBACK)`; change the fallback as well as the PARAM (#31).
+- **Charge groups** (`-gfnff.charge_groups FILE`): extra EEQ constraint rows inside one connected molecule via `setFragmentOverride`; CPU only, bypasses the topology cache ([docs/POLYMERBUILD_CHARGE.md](../../../../docs/POLYMERBUILD_CHARGE.md)).
 - **Topology cache** (`<basename>.topo.json`): delete it before re-measuring after any topology or charge change.
 - **No numerical path may depend on the verbosity level** (#38) or on thread arrival order (#36).
 - **Element-indexed tables**: check the length against the highest Z used (#22).

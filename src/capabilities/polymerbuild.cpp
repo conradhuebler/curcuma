@@ -3396,7 +3396,7 @@ void PolymerBuild::assemblePolymer(const std::vector<SequenceEntry>& sequence)
             CurcumaLogger::error("Polymer assembly FAILED (" + m_error + "), structure written to " + polymer.Name() + "_broken.xyz (no _final.xyz)");
             return;
         }
-        finishOutput(polymer);
+        finishOutput(polymer, atom_monomer_id, sequence);
         CurcumaLogger::success(fmt::format(
             "D&C polymer assembly completed: {}_final.xyz ({} atoms)",
             polymer.Name(), polymer.AtomCount()));
@@ -3421,7 +3421,7 @@ void PolymerBuild::assemblePolymer(const std::vector<SequenceEntry>& sequence)
             CurcumaLogger::error("Polymer assembly FAILED (" + m_error + "), structure written to " + polymer.Name() + "_broken.xyz (no _final.xyz)");
             return;
         }
-        finishOutput(polymer);
+        finishOutput(polymer, result.atom_monomer_id, sequence);
         CurcumaLogger::success("Polymer assembly completed: " + polymer.Name() + "_final.xyz");
     }
 }
@@ -3449,10 +3449,35 @@ int PolymerBuild::fragmentCharge(const std::string& name)
  * header and, with -charge_model gfnff|gfn1|gfn2, the atomic partial charges of that model next to it.
  * The optimisation steps of the build itself still run with charge 0 (docs/POLYMERBUILD_CHARGE.md).
  */
-void PolymerBuild::finishOutput(Molecule& polymer)
+void PolymerBuild::finishOutput(Molecule& polymer, const std::vector<int>& atom_monomer_id, const std::vector<SequenceEntry>& sequence)
 {
     polymer.setCharge(m_formal_charge);
     polymer.writeXYZFile(outputPath(polymer.Name() + "_final.xyz"));
+
+    // EEQ charge groups: every monomer with a non-zero fragment charge is one group (-gfnff.charge_groups FILE).
+    // Without them GFN-FF spreads the net charge over the whole connected chain (docs/POLYMERBUILD_CHARGE.md).
+    if (m_formal_charge != 0 && static_cast<int>(atom_monomer_id.size()) == polymer.AtomCount()) {
+        json groups = json::array();
+        for (size_t m = 0; m < sequence.size(); ++m) {
+            const int charge = fragmentCharge(sequence[m].fragment_name);
+            if (charge == 0)
+                continue;
+            json atoms = json::array();
+            for (int i = 0; i < polymer.AtomCount(); ++i)
+                if (atom_monomer_id[i] == static_cast<int>(m))
+                    atoms.push_back(i);
+            if (!atoms.empty())
+                groups.push_back({ { "atoms", atoms }, { "charge", static_cast<double>(charge) } });
+        }
+        if (!groups.empty()) {
+            const std::string groups_file = outputPath(polymer.Name() + "_final.groups.json");
+            std::ofstream gout(groups_file);
+            gout << json({ { "groups", groups } }).dump(1) << "\n";
+            CurcumaLogger::success(fmt::format("{} charge groups written to {} (use -gfnff.charge_groups {})", groups.size(), groups_file, groups_file));
+        }
+    } else if (m_formal_charge != 0) {
+        CurcumaLogger::warn("Charge groups not written: atom-to-monomer map does not match the atom count");
+    }
 
     const std::string model = m_config.get<std::string>("charge_model", "none");
     if (model == "none" || model.empty())

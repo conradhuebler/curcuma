@@ -15,7 +15,12 @@ Stand.
   Vermutlich ein statischer Zufallsgenerator; nicht untersucht. `test_cases/test_md_hbond_log.cpp` startet deshalb einen Prozess je Lauf. Betrifft jeden, der mehrere MD in einem Prozess einbettet.
 
 
-- **`polymerbuild`: Optimierungsschritte laufen mit Ladung 0** (2026-10-23): die Formalladung steht nur im Ergebnis. Gemessen: GFN-FF verteilt sie ueber die ganze Kette (0,19 e statt 0,84 e auf der NH+-Seitenkette); `GFNFF::setCharges()` ohne CLI-Zugang. Siehe `docs/POLYMERBUILD_CHARGE.md`.
+
+- **`-gfnff.charge_groups` auf der GPU und fuer mehrere Fragmente** (2026-10-23): GPU-Methode faellt auf die CPU zurueck (Aenderung in `gfnff_gpu_method_impl.h` nicht uebersetzt); Gruppen nur in einem zusammenhaengenden Molekuel.
+
+- **`cli_simplemd_14_gfnff_react_h_recombination` schlaegt fehl** (2026-10-23, n=1 Binary mit und ohne Ladungsgruppen-Aenderung): "no bond formation events", MD laeuft 0,2 s ohne Fehler. Ursache nicht untersucht.
+
+- **`polymerbuild`: Optimierungsschritte laufen mit Ladung 0, ohne Ladungsgruppen** (2026-10-23): die Formalladung steht nur im Ergebnis. `-gfnff.charge_groups` existiert, wird beim Bauen aber nicht benutzt (Gruppen der wachsenden Kette je Schritt noetig). [docs/POLYMERBUILD_CHARGE.md](docs/POLYMERBUILD_CHARGE.md)
 
 - **Literaturverweise der Trajektorien- und Ionen-Methoden pruefen** (Oktober 2026): die Quellen fuer Blockfehler, H-Brueckenkriterium, g(r), Shrake-Rupley, Sondenradius, Bondi-Radien, Fibonacci-Punkte und `-ionize`
   stehen in `docs/TRAJPROPS.md`, `src/core/citation_database.cpp` und `src/capabilities/trajprops.h`; sie stammen aus dem Gedaechtnis der KI und sind NICHT gegen die Arbeiten geprueft. Ebenso offen: welchen Radiensatz Min 2015 fuer die WASA verwendet.

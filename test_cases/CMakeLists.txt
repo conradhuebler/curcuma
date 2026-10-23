@@ -765,4 +765,12 @@ if(Python3_Interpreter_FOUND)
                      --structures ${CMAKE_CURRENT_SOURCE_DIR}/structures)
     set_tests_properties(xtb_library_energies
         PROPERTIES TIMEOUT 900 LABELS "gfnff;sqm;xtb_reference")
+
+    # Claude Generated (Oct 2026): EEQ charge groups inside one connected molecule (-gfnff.charge_groups),
+    # PDMAEMA (AB)2 built by polymerbuild; docs/POLYMERBUILD_CHARGE.md.
+    add_test(NAME gfnff_charge_groups
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_charge_groups.py
+                     $<TARGET_FILE:curcuma> ${CMAKE_SOURCE_DIR})
+    set_tests_properties(gfnff_charge_groups PROPERTIES TIMEOUT 600 LABELS "gfnff;charge")
 endif()

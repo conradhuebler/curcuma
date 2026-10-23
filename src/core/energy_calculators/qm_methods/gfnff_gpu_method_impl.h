@@ -607,6 +607,9 @@ bool GFNFFGpuMethodImpl<Backend>::setMolecule(const Mol& mol)
     // asks EnergyCalculator for the CPU method (requestsCpuFallback()); -gfnff.frag_charge_model reference
     // keeps the GPU and makes the CPU use the same rule.
     m_cpu_fallback_requested = (m_eeq_nfrag > 1 && mol.m_charge != 0 && m_gfnff->fragEnsembleRequested());
+    // user EEQ charge groups (-gfnff.charge_groups) are implemented and checked on the CPU method only
+    if (m_gfnff->hasUserChargeGroups())
+        m_cpu_fallback_requested = true;
 
     CitationRegistry::cite("gfnff");
     CitationRegistry::cite("d4", "gfnff");

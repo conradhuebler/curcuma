@@ -296,6 +296,7 @@ PARAM(skip_phase2, Bool, false, "Skip Phase 2 EEQ refinement and use Phase 1 top
 // take it on merge. The PARAM text below is still byte-identical to confsearch's.
 PARAM(nh_linear_fix, Bool, true, "Do not let the angle-only GEODEP rule (input angle > 160 deg -> sp) promote a 2-coordinate nitrogen that carries a hydrogen to sp hybridisation. Why: the reference rule (gfnff_ini.f90, gen%linthr) declares ANY near-linear input angle linear-by-design, so a thermally stretched =N-H (measured: a guanidine imine N-H at 179 deg in a hot MD snapshot) is re-perceived as sp, gets theta0=180, and the distortion becomes its own equilibrium -- the structure optimises INTO the artefact and appears ~160 kJ/mol too deep (xtb 6.7.1 reproduces this with -276 kJ/mol, so it is an inherited method defect, not a port bug). In a conformer search, where every snapshot optimisation derives its own topology, one such event founds a self-reinforcing family (measured: 75 percent of a WEKLQ pool within three temperature stages). The genuine sp cases of an N-H nitrogen (H-N=C isocyanide-like, R-N=N terminal, metal nitriles, azides) are all caught by the STRUCTURAL rules that run before the angle fallback and are unaffected by this guard. Set false for bit-faithful reference (xtb/pprcht) behaviour, e.g. for validation against the Fortran implementations.", "Advanced", {})
 PARAM(frag_charge_autodetect, Bool, false, "For a CHARGED molecule that falls into exactly TWO fragments, try both placements of the net charge and keep the one with the lower EEQ electrostatic energy. Off by default because that is NOT what the reference does: its auto-detection block (gfnff_ini.f90, nfrag==2 branch) is gated on sum(qfrag(2:nfrag)) > 999 while qfrag is pre-initialised to [charge, 0, ...], so the block is dead code in both pprcht and xtb and the effective rule is 'whole charge on fragment 0'. Enabling the trial changes which fragment carries the charge and can be very wrong: GMTKN55 AHB21/21 (formate ... HF) then puts the -1 on the two-atom HF fragment, giving its hydrogen a charge of -0.52 and shifting the Coulomb term by 237 kcal/mol. Enable only to reproduce curcuma's pre-Sep-2026 behaviour or to experiment with the placement rule.", "Advanced", {})
+PARAM(charge_groups, String, "", "Charge groups inside ONE connected molecule: path of a JSON file {\"groups\": [{\"atoms\": [0, 1, ...], \"charge\": 1.0}, ...]} (0-based atom indices). Each group gets its own EEQ constraint sum(q_i) = charge, the atoms outside all groups form one more group with the remaining charge (total charge minus the group charges). Lets a polyelectrolyte keep its charge on the ammonium groups instead of spreading it over the chain. Off by default (reference behaviour). CPU only; topology cache and GPU method are bypassed.", "Charge", {})
 PARAM(frag_charge_model, String, "ensemble", "How the net charge of a CHARGED molecule that GFN-FF perceives as several fragments is placed. reference = the pprcht/xtb rule: the whole charge on fragment 0, i.e. on the fragment that contains atom 1, one integer placement, identical to every release so far. ensemble = chemistry-aware and continuous: every integer placement of the charge over the fragments is a complete GFN-FF evaluation with parameters consistent with that placement, placements are chosen by electron-count parity - fewest odd-electron fragments - then weighted by their free Phase-1 EEQ charge, and chemically identical placements by their energy with temperature frag_charge_tau, and fragments that are close to their pass-1 bond threshold are blended continuously with a merged corner that treats them as one EEQ group - weight 1-lambda, lambda = smootherstep of r/r_thr between 1 and frag_charge_s_max - so the energy is continuous where the fragment count changes. Engaged only for charged systems with two or more fragments; CPU; not in react topology mode. See docs/FRAG_CHARGE_MODEL.md.", "Advanced", {})
 PARAM(frag_charge_s_max, Double, 1.0, "frag_charge_model ensemble: end of the contact window in units of the pass-1 bond threshold r_thr of each atom pair. Between s = r/r_thr = 1, where pass 1 splits the pair, and s_max two fragments are partly merged; beyond s_max they are fully separated and only integer placements remain. 1.0 switches the window off: only the placement rule acts, and the energy keeps the reference rule's step at the split.", "Advanced", {})
 PARAM(frag_charge_tau, Double, 1.0, "frag_charge_model ensemble: temperature in kcal/mol of the Boltzmann average over integer charge placements. Small = the lowest-energy placement wins; placements closer than a few tau are averaged, which keeps the energy and gradient smooth at degeneracies such as a symmetric X...X- pair.", "Advanced", {})
@@ -774,6 +775,9 @@ public:
      * Must be called before InitialiseMolecule(). Claude Generated (Sep 2026).
      */
     void setFragmentOverride(const std::vector<int>& fraglist, int nfrag, const std::vector<double>& qfrag);
+
+    /// Claude Generated (Oct 2026): -gfnff.charge_groups was given (EEQ constraint groups inside one fragment)
+    bool hasUserChargeGroups() const { return !m_user_groups.empty(); }
 
     /// frag_charge_model ensemble: number of charge variants evaluated in the last call (0 = inactive)
     int fragEnsembleVariantCount() const { return m_frag_last_nvariants; }
@@ -2991,8 +2995,17 @@ private:
         std::vector<int> fraglist;   // 1-based group id per atom
         std::vector<double> qfrag;   // integer charge per group
     };
-    FragOverride m_frag_override;
-    bool m_frag_is_variant = false;      ///< this instance is a variant (never nests)
+    mutable FragOverride m_frag_override;      // mutable: set from the const topology build for user charge groups
+
+    /// Claude Generated (Oct 2026): user-defined EEQ charge groups (-gfnff.charge_groups), 0-based atoms + group charge
+    struct UserChargeGroup {
+        std::vector<int> atoms;
+        double charge = 0.0;
+    };
+    mutable std::vector<UserChargeGroup> m_user_groups;
+    void loadUserChargeGroups();      ///< parse the JSON file named by charge_groups (constructor)
+    void applyUserChargeGroups(int nfrag_topological) const; ///< turn the groups into m_frag_override (Phase 10 of the topology)
+    mutable bool m_frag_is_variant = false;      ///< this instance is a variant (never nests)
     mutable int m_frag_split_pass = 0;   ///< q-loop pass that split the fragments (1 or 2), set by calculateTopologyInfo
     bool m_frag_ensemble = false;        ///< frag_charge_model == ensemble
     double m_frag_s_max = 1.1;

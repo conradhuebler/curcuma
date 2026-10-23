@@ -480,7 +480,7 @@ private:
     int m_formal_charge = 0; // sum of the fragment charges of the sequence
     std::map<std::string, int> m_fragment_charge;
     int fragmentCharge(const std::string& name);
-    void finishOutput(Molecule& polymer);
+    void finishOutput(Molecule& polymer, const std::vector<int>& atom_monomer_id, const std::vector<SequenceEntry>& sequence);
     std::string m_error; // set by every failure path of start(); cleared at its beginning
     std::map<std::string, std::string> m_fragments;
     std::map<std::string, FragmentTopologyTemplate> m_fragment_templates;  ///< Claude Generated: Cached topology templates by fragment name

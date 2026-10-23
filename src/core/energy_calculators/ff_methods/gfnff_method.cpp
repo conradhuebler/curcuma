@@ -656,6 +656,12 @@ GFNFF::GFNFF(const json& parameters)
         }
     }
 
+    // Claude Generated (Oct 2026): user EEQ charge groups. The cached topology holds Phase-1 charges that depend
+    // on the constraints, so the cache is bypassed (read and write) while groups are given.
+    loadUserChargeGroups();
+    if (!m_user_groups.empty())
+        m_cache_topology = false;
+
     // Initialize EEQ solver (Dec 2025 - Phase 3)
     // CRITICAL FIX (Dec 25, 2025): Pass global CurcumaLogger verbosity to EEQSolver
     json eeq_params = m_parameters;
@@ -3619,6 +3625,84 @@ json GFNFF::exportTopology() const
     topo_json["timestamp"] = std::chrono::system_clock::now().time_since_epoch().count();
 
     return topo_json;
+}
+
+/**
+ * Claude Generated (Oct 2026): read -gfnff.charge_groups. File format {"groups": [{"atoms": [0-based...], "charge": q}]}.
+ * EEQ background: the charges minimise E(q) = sum_i chi_i q_i + 1/2 sum_ij q_i q_j A_ij under linear constraints
+ * C q = Q with one row per group (membership matrix C, group charges Q), solved with Lagrange multipliers in the
+ * augmented matrix. The reference uses one row per covalently connected fragment; here the rows are user groups.
+ */
+void GFNFF::loadUserChargeGroups()
+{
+    m_user_groups.clear();
+    const std::string file = m_parameters.value("charge_groups", std::string());
+    if (file.empty())
+        return;
+    try {
+        std::ifstream in(file);
+        if (!in.good()) {
+            CurcumaLogger::error("GFNFF charge_groups: cannot open " + file);
+            return;
+        }
+        json j;
+        in >> j;
+        for (const auto& g : j.at("groups")) {
+            UserChargeGroup group;
+            group.atoms = g.at("atoms").get<std::vector<int>>();
+            group.charge = g.at("charge").get<double>();
+            if (!group.atoms.empty())
+                m_user_groups.push_back(std::move(group));
+        }
+    } catch (const std::exception& e) {
+        CurcumaLogger::error(std::string("GFNFF charge_groups: cannot parse ") + file + ": " + e.what());
+        m_user_groups.clear();
+    }
+}
+
+void GFNFF::applyUserChargeGroups(int nfrag_topological) const
+{
+    auto reject = [&](const std::string& why) {
+        CurcumaLogger::error("GFNFF charge_groups ignored: " + why);
+        m_user_groups.clear();
+    };
+    if (nfrag_topological != 1)
+        return reject(fmt::format("the molecule has {} fragments, groups are supported inside one connected molecule only", nfrag_topological));
+    const int n = m_atomcount;
+    std::vector<int> fraglist(n, 0); // 1-based group id, 0 = not yet assigned
+    std::vector<double> qfrag;
+    double assigned = 0.0;
+    for (size_t g = 0; g < m_user_groups.size(); ++g) {
+        for (int a : m_user_groups[g].atoms) {
+            if (a < 0 || a >= n)
+                return reject(fmt::format("atom index {} out of range (0..{})", a, n - 1));
+            if (fraglist[a] != 0)
+                return reject(fmt::format("atom {} is in two groups", a));
+            fraglist[a] = static_cast<int>(g) + 1;
+        }
+        qfrag.push_back(m_user_groups[g].charge);
+        assigned += m_user_groups[g].charge;
+    }
+    int nfrag = static_cast<int>(m_user_groups.size());
+    const bool rest = std::any_of(fraglist.begin(), fraglist.end(), [](int f) { return f == 0; });
+    const double rest_charge = static_cast<double>(m_charge) - assigned;
+    if (rest) {
+        ++nfrag;
+        for (int& f : fraglist)
+            if (f == 0)
+                f = nfrag;
+        qfrag.push_back(rest_charge);
+    } else if (std::abs(rest_charge) > 1e-6) {
+        return reject(fmt::format("the groups cover all atoms but their charges sum to {:.4f}, molecule charge is {}", assigned, m_charge));
+    }
+    m_frag_override.active = true; // same override the frag_charge_model variants use (setFragmentOverride)
+    m_frag_override.fraglist = fraglist;
+    m_frag_override.nfrag = nfrag;
+    m_frag_override.qfrag = qfrag;
+    m_frag_is_variant = true;       // no ensemble blending on top of user groups
+    if (CurcumaLogger::get_verbosity() >= 1)
+        CurcumaLogger::info(fmt::format("GFNFF charge_groups: {} groups + {} (rest charge {:.3f}), EEQ constraint rows {}",
+            m_user_groups.size(), rest ? "remaining atoms" : "no remainder", rest ? rest_charge : 0.0, nfrag));
 }
 
 bool GFNFF::importTopology(const json& topo_json)
@@ -10354,6 +10438,12 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     // 100 kcal/mol on that structure; the same mechanism drove the AHB21/BH76/G21EA/SIE4x4
     // family. See the rev-gfnff TODO for the physics side of this - the reference is not
     // right either, it is simply self-consistent.
+    if (!m_user_groups.empty() && !m_frag_override.active) {
+        // Claude Generated (Oct 2026): -gfnff.charge_groups. Only inside one connected molecule; the groups
+        // become the EEQ constraint groups through the same override the frag_charge_model variants use.
+        const auto frag_probe = detectMolecularFragments(topo_info.nb_full);
+        applyUserChargeGroups(frag_probe.first);
+    }
     if (m_frag_override.active
         && static_cast<int>(m_frag_override.fraglist.size()) == m_atomcount) {
         // frag_charge_model ensemble variant (Sep 2026): grouping and integer group charges are
