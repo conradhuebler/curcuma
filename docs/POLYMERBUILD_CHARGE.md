@@ -66,6 +66,24 @@ with groups, 1.1e-5 without, largest component 0.47 Eh/A. `-opt` converged (754 
 +0.0022 Eh with groups, +0.0031 Eh without (n=1 each). Test `gfnff_charge_groups` (script `check_charge_groups.py`).
 `cli_simplemd_14_gfnff_react_h_recombination` fails with and without this change (checked by stashing it, n=1).
 
+## Tried and dropped: a dxi shift on the ammonium nitrogen (Oct 2026)
+
+Idea: instead of constraint rows, lower the EEQ electronegativity of every nitrogen with four neighbours (extra `dxi`), so
+the positive charge localises there without forcing an integer. Implemented as an opt-in term in `EEQSolver::calculateDxi`,
+scanned on (AB)5 at +5 (one run per value), then removed again:
+
+| dxi on N+ (Eh) | 0 | 0.05 | 0.1 | 0.2 | 0.3 | 0.5 |
+|---|---|---|---|---|---|---|
+| charge per protonated unit (e) | 0.505 | 0.507 | 0.509 | 0.512 | 0.515 | 0.518 |
+| per-atom RMSD to gfn2 (e) | 0.062 | 0.055 | 0.068 | 0.127 | 0.191 | 0.277 |
+
+A shift of 0.5 Eh on N moves the unit charge by 0.013 e and makes the per-atom charges worse: N and its bonded neighbours
+are strongly coupled in EEQ, so a single-atom shift only moves charge inside the blob. At 0.8 Eh the unit sums scatter
+(0.04 to 1.6 e). The lever is the group as a whole: the Lagrange multiplier of a group constraint is a uniform potential on all
+atoms of the group, i.e. exactly such a shift, with the size solved for the target charge. A fixed empirical per-atom
+shift does not replace it. A soft version (penalty `k (sum q - Q_g)^2`, no exact integer) would change the EEQ matrix
+itself and with it every solver path and the gradient; not tried.
+
 ## Not done
 
 - Charge in the optimisation steps of the build (would need the partial charge of each growing chain at every step and every join).
