@@ -353,6 +353,8 @@ before committing, or enable the hook with `git config core.hooksPath scripts/gi
 - **Branch names**: `feature/<topic>` for new capabilities, `fix/<topic>` for bug fixes; `<topic>` is 2-4 lowercase ASCII words in kebab-case naming the subject, no dates or issue numbers (e.g. `feature/gfnff-solvation`, `fix/bmt-dir-collision`)
 - **Why the scheme matters**: `.github/workflows/ccpp.yml` builds `feature/**` and `fix/**` automatically and publishes each as its own `ci-<branch>` prerelease — a branch outside the scheme has to be added to the workflow by hand
 
+- **`devel/methods` is the integration branch for method work (gfn1/gfn2/gfnff, CUDA/ROCm)**: finished `feature/*` and `fix/*` branches go there first, never straight to `master`. The operator syncs and tests it on the different machines (CUDA, ROCm); only then does `devel/methods` merge into `master`. Not covered by the CI branch list (`ccpp.yml` has no `devel/**`); AI sessions neither push nor merge it into `master` unasked.
+
 ## Standards
 
 ### Universal Logging System (`src/core/curcuma_logger.h/.cpp`)
