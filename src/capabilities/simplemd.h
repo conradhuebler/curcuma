@@ -752,6 +752,11 @@ private:
 
     int m_mtd_dT = -1;
     int m_seed = -1;
+    /// Claude Generated (Oct 2026): `-md.seed N` (N > 0) also seeds the initial velocities through this
+    /// engine. Without it InitVelocities() keeps its fixed legacy sequence (static default engine), so
+    /// existing runs and golden values do not change; before this the seed never reached the velocities.
+    int m_velocity_seed = 0;
+    std::default_random_engine m_velocity_rng;
     int m_time_step = 0;
     int m_dof = 0;
     int m_mtd_time = 0, m_loop_time = 0;
@@ -812,7 +817,7 @@ private:
         "tier=primary")
     PARAM(spin, Int, 0, "Total spin multiplicity of the system (0=singlet, 1=doublet).", "Basic", {"Spin"},
         "tier=primary")
-    PARAM(seed, Int, -1, "Random seed (-1: time, 0: auto).", "Basic", {})
+    PARAM(seed, Int, -1, "Random seed (-1: time, 0: auto). A positive value also seeds the initial velocities, so runs from one start differ only by the seed; without it the velocities follow a fixed sequence.", "Basic", {})
     PARAM(threads, Int, 1, "Number of parallel threads.", "Basic", {},
         "min=1")
 

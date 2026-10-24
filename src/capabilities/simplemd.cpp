@@ -312,6 +312,9 @@ void SimpleMD::LoadControlJson()
     m_print = m_config.get<int>("print_frequency");
     m_max_top_diff = m_config.get<int>("MaxTopoDiff", 15);  // Not in PARAM block, using default
     m_seed = m_config.get<int>("seed");
+    m_velocity_seed = (m_seed > 0) ? m_seed : 0; // 0: legacy fixed sequence
+    if (m_velocity_seed > 0)
+        m_velocity_rng.seed(static_cast<std::default_random_engine::result_type>(m_velocity_seed));
     m_threads = m_config.get<int>("threads");
 
     // Claude Generated 2025: System Control & Output Parameters
@@ -1175,7 +1178,11 @@ void SimpleMD::InitConstrainedBonds()
 
 void SimpleMD::InitVelocities(double scaling)
 {
-    static std::default_random_engine generator;
+    // Claude Generated (Oct 2026): with an explicit `-md.seed N` (N > 0) the velocities come from the
+    // seeded member engine (successive calls continue its stream); otherwise the legacy static engine
+    // keeps the old fixed sequence, so default runs are bit-identical to earlier versions.
+    static std::default_random_engine legacy_generator;
+    std::default_random_engine& generator = (m_velocity_seed > 0) ? m_velocity_rng : legacy_generator;
     for (size_t i = 0; i < m_natoms; ++i) {
         // Claude Generated (Jun 2026): sample from m_T_init (initial
         // temperature) rather than m_T0 (thermostat target) so callers can
