@@ -13,8 +13,11 @@ The gain is statistical. `Var(Delta)` is far smaller than `Var(E_ref)` and `Delt
 smoother function of geometry, so a few hundred reference points suffice where direct
 learning would need tens of thousands. The intended purpose is conformer work: run conformer
 search and pre-optimisation at GFN-FF cost while ranking conformers at the reference level.
-**This purpose is not met on the one molecule tested** (ranking and pre-optimisation no better than
-GFN-FF, cost 11 to 25x GFN-FF): see [DELTA_ML_USECASE_TEST_2026-10.md](DELTA_ML_USECASE_TEST_2026-10.md).
+**Status Oct 2026 (repaired labels, four molecules):** conformers are ordered better than by GFN-FF and forces are 1.7x to 4.2x better, but
+pre-optimisation before GFN2 does not beat a GFN-FF pre-optimisation and the lowest conformer is not found more reliably; the useful niche is
+sampling (NVE stable, GFN2-like temperature, 3 to 5 per cent of the GFN2 cost per step). See
+[DELTA_ML_RETEST_2026-10.md](DELTA_ML_RETEST_2026-10.md), [DELTA_ML_THIRD_MOLECULE_DFT_2026-10.md](DELTA_ML_THIRD_MOLECULE_DFT_2026-10.md) and
+[DELTA_ML_PIPELINE_2026-10.md](DELTA_ML_PIPELINE_2026-10.md); the first round [DELTA_ML_USECASE_TEST_2026-10.md](DELTA_ML_USECASE_TEST_2026-10.md) is withdrawn.
 
 ## When this applies, and when it does not
 
