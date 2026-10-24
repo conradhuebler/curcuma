@@ -52,5 +52,7 @@ B2 2/4 and 3/4 of the seeds), and the sampling at 500 K does not find more or lo
 lowest minima). The claim "Delta-ML MD samples closer to GFN2 than GFN-FF" holds for the energy level only. Cost per ps: B2 11 per cent and A 6.5 per cent of a GFN2 step on peo8
 (M1 6 and 4 per cent), measured under load; the labelling of the 351 frames is not included.
 
+Follow-up: [DELTA_ML_TRAINING_DATA_2026-10.md](DELTA_ML_TRAINING_DATA_2026-10.md) (not the training temperature or the origin of the frames; energy holes in regions visited by the model MD, active learning reduces them).
+
 Not tested: longer runs (the end-to-end distance of GFN2 varies by about 0.5 A between seeds, 40 ps may not be equilibrated), several start structures, models trained on
 data at the sampling temperature, enhanced sampling (metadynamics), charged and open-shell systems, GPU.

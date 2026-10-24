@@ -54,6 +54,7 @@ Stand.
 - **`-opt.optimizer lbfgs` macht bei großem Startgradienten einen Nullschritt** (n=160 Läufe, 2026-10-19): ab etwa 0,3 Eh/Bohr Exit 1, 0 Iterationen, kein Fehlertext, auch für GFN2 und GFN-FF allein (400-K-MD-Frames); der Standardoptimierer läuft durch. Ursache nicht untersucht.
 - **`-md.seed` wirkt nicht auf die Anfangsgeschwindigkeiten** (bitgleiche Läufe für Seeds 21 bis 26 und 11, 2026-10-19): `InitVelocities` benutzt eine ungesäte statische `default_random_engine`; unabhängige MD-Läufe aus einer Startstruktur sind so nicht möglich. Ursache gelesen, nicht behoben.
 - **Delta-ML: Modellenergie am eigenen Optimum zu niedrig** (n=20 je Molekül, 2026-10-19): bei `lambda 1e-6` und 4000 Zentren liegt sie um bis zu 34 kcal/mol unter GFN2 (19/19 auf dem Trisaccharid), `lambda 1e-3` beseitigt das und verschiebt die Energie um 7 bis 16 kcal/mol nach oben; `uncertainty_abort` hilft nicht. Details: `docs/DELTA_ML_RETEST_2026-10.md`.
+- **Delta-ML aktives Lernen: nicht reproduzierbar, Konvergenzmaß unzureichend** (n=5 Läufe, 2026-10-24): `-activelearn.seed 1` fixiert die Sampling-MD nicht (gleiche Parameter, verschiedene Unsicherheitsfolgen); der Unsicherheitsindikator ist nicht monoton und meldet bei 0,5 „konvergiert", obwohl die Torsionsverteilung nicht stimmt; im Log fehlt ein Held-out-Fehler (nur „training set"-MAE). Details: `docs/DELTA_ML_TRAINING_DATA_2026-10.md`.
 
 ## 2. Leistung
 
