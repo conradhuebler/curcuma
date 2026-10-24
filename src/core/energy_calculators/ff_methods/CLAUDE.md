@@ -35,6 +35,7 @@ Each item was a real defect; evidence in [docs/KNOWN_ISSUES_ARCHIVE.md](../../..
 - **Defaults live in code, not only in PARAMs**: `GFNFF::GFNFF(const json&)` reads `m_parameters.value(key, FALLBACK)`; change the fallback as well as the PARAM (#31).
 - **Charge groups** (`-gfnff.charge_groups FILE`): extra EEQ constraint rows inside one connected molecule via `setFragmentOverride`; CPU only, bypasses the topology cache ([docs/POLYMERBUILD_CHARGE.md](../../../../docs/POLYMERBUILD_CHARGE.md)).
 - **`-gfnff.charge_groups auto`**: `perceiveOniumCentres` (NR4+/R3O+, one fragment, charge >= 1) makes +1 groups within `charge_group_radius` bonds, then the file path; perceived once per instance, off by default (🤖, ⚙️).
+- **`-gfnff.charge_groups ionpairs`** (experimental): neutral systems; onium fragments +1, odd-electron fragments -1 (parity), groups read from the final topology and applied from pass 1 (`buildIonPairChargeGroups`, end of `calculateTopologyInfo`); not for shared-proton reactions ([docs/FRAG_CHARGE_MODEL.md](../../../../docs/FRAG_CHARGE_MODEL.md)).
 - **Topology cache** (`<basename>.topo.json`): delete it before re-measuring after any topology or charge change.
 - **No numerical path may depend on the verbosity level** (#38) or on thread arrival order (#36).
 - **Element-indexed tables**: check the length against the highest Z used (#22).

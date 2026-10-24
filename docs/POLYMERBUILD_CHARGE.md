@@ -43,7 +43,8 @@ A chain is one fragment, so the net charge is spread by electronegativity. With 
 row `sum(q_i) = Q_g`; the atoms outside all groups form one more group with the remaining charge. File:
 `{"groups": [{"atoms": [0-based indices], "charge": 1.0}, ...]}`. It reuses the override of the `frag_charge_model`
 variants (`GFNFF::setFragmentOverride`), so Phase 1 and Phase 2 and the gradient use the same constraint matrix.
-Only inside one connected molecule; groups that overlap, fall outside the molecule or leave an inconsistent total are
+Inside one connected molecule, or with several fragments when every group is a union of whole fragments (else rejected; used by
+`ionpairs`, [FRAG_CHARGE_MODEL.md](FRAG_CHARGE_MODEL.md)); groups that overlap, fall outside the molecule or leave an inconsistent total are
 rejected with an error and the run continues without groups. Topology cache is bypassed, the GPU method falls back to the CPU
 (`requestsCpuFallback`; the GPU edit is not compiled in the CPU build).
 
@@ -113,24 +114,6 @@ gets a group, not the ion-pair complex (2 fragments) or the partner isomer, so t
 does not improve energies; it is an opt-in tool for the charge pattern, not for GMTKN55-type energetics. A change that would pay off belongs to a refit
 or a new charge model (`revgfnff`). Not tested: geometries, MD, polymers, multi-fragment systems (440 structures ignored), open shells (all 28 centre structures closed shell).
 
-## Tried and dropped: a dxi shift on the ammonium nitrogen (Oct 2026)
-
-Idea: instead of constraint rows, lower the EEQ electronegativity of every nitrogen with four neighbours (extra `dxi`), so
-the positive charge localises there without forcing an integer. Implemented as an opt-in term in `EEQSolver::calculateDxi`,
-scanned on (AB)5 at +5 (one run per value), then removed again:
-
-| dxi on N+ (Eh) | 0 | 0.05 | 0.1 | 0.2 | 0.3 | 0.5 |
-|---|---|---|---|---|---|---|
-| charge per protonated unit (e) | 0.505 | 0.507 | 0.509 | 0.512 | 0.515 | 0.518 |
-| per-atom RMSD to gfn2 (e) | 0.062 | 0.055 | 0.068 | 0.127 | 0.191 | 0.277 |
-
-A shift of 0.5 Eh on N moves the unit charge by 0.013 e and makes the per-atom charges worse: N and its bonded neighbours
-are strongly coupled in EEQ, so a single-atom shift only moves charge inside the blob. At 0.8 Eh the unit sums scatter
-(0.04 to 1.6 e). The lever is the group as a whole: the Lagrange multiplier of a group constraint is a uniform potential on all
-atoms of the group, i.e. exactly such a shift, with the size solved for the target charge. A fixed empirical per-atom
-shift does not replace it. A soft version (penalty `k (sum q - Q_g)^2`, no exact integer) would change the EEQ matrix
-itself and with it every solver path and the gradient; not tried.
-
 ## Perceived groups: `-gfnff.charge_groups auto` (Oct 2026)
 
 Status: AI-generated, machine-tested (test `gfnff_charge_groups`, sweep below); no human review, group size not decided.
@@ -176,8 +159,16 @@ groups, not run; a regrouping would be a discontinuous step); GPU falls back to 
 topology cache is bypassed. The cache `<basename>.topo.json` carries no molecule charge: a file written at charge 2 is
 reused at charge 0 (seen in this work, the test runs with `-gfnff.cache_topology false`).
 
+## Tried and removed (Oct 2026): EEQ shifts on onium groups, blended ion-pair charges
+
+A dxi shift on ammonium N, dxi/dgam/width shifts on the onium groups (also fitted against r2SCAN-3c Hirshfeld shell sums) and a
+blend of the formal and the reference charge state for ion pairs missed their pre-registered criteria (shifts: charge pattern or
+WTMAD-2 worse, 93.0-93.6 against 92.595; blend: see [FRAG_CHARGE_MODEL.md](FRAG_CHARGE_MODEL.md)) and are not in the code. Record:
+vault `Labor/curcuma Ladungsgruppen im EEQ`; diffs `_artefacts/2026-10-23_..._ammonium-dxi-nachgebaut.patch`, `..._onium-shifts.patch`,
+`..._onium-addon-fit.patch`, `2026-10-24_..._ionpairs-refined-gesamtdiff.patch`. Lesson: a shift on a whole constraint group is a gauge.
+
 ## Not done
 
 - Charge in the optimisation steps of the build (would need the partial charge of each growing chain at every step and every join).
-- Groups in the optimisation steps of the build (they would need the groups of each growing chain), several fragments, GPU.
+- Groups in the optimisation steps of the build (they would need the groups of each growing chain), GPU.
 - Other charge models than the three above, other polyelectrolytes, solvated chains.

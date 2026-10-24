@@ -16,7 +16,7 @@ Stand.
 
 
 
-- **`-gfnff.charge_groups` auf der GPU und fuer mehrere Fragmente** (2026-10-23): GPU-Methode faellt auf die CPU zurueck (Aenderung in `gfnff_gpu_method_impl.h` nicht uebersetzt); Gruppen nur in einem zusammenhaengenden Molekuel.
+- **`-gfnff.charge_groups` auf der GPU** (2026-10-23): GPU-Methode faellt auf die CPU zurueck (Aenderung in `gfnff_gpu_method_impl.h` nicht uebersetzt, nicht gelaufen); mehrere Fragmente nur, wenn jede Gruppe eine Vereinigung ganzer Fragmente ist (2026-10-24).
 
 - **`-gfnff.charge_groups auto`: offene Grenzen** (2026-10-23): nur Kationen (Anionen, Carbenium fehlen); nur ein Fragment (Ionenpaare, S30L-CI 24/27/28 nicht erfasst); Gruppe einmal je Instanz, kein Neu-Gruppieren bei Bindungsbruch (unstetig, nicht gelaufen); GPU nicht gelaufen. Gruppenausdehnung (Radius 2, 14 Atome) offen (Schritt 3, Potentialmass). [docs/POLYMERBUILD_CHARGE.md](docs/POLYMERBUILD_CHARGE.md)
 
@@ -70,6 +70,15 @@ Stand.
 - **Windows**: `-DUSE_PORTABLE_MATH=ON` nicht auf einer echten Windows-Maschine bestätigt ([docs/PORTABLE_ERF.md](docs/PORTABLE_ERF.md)).
 - **Ladungsplatzierung** (Known Issue #31) nicht getestet für periodische Systeme, GPU-Laufzeit, viele Fragmente in Kontakt und lange MD mit
   `frag_charge_s_max` > 1.
+- **`charge_groups ionpairs`** (experimentell, Paritätsregel, 2026-10-24): setzt Formalladungen auch in Protonentransfer-TS und Komplexen mit geteiltem
+  Proton (WTMAD-2 +0,47; WCPT18/PX13 bis +143 kcal/mol; Kontrollen 6/10 +39 bis +196). Offen: Wahrnehmung Guanidinium/Amidinium, Phosphonium,
+  Sulfonium, protonierte Carbonyle, Dianionen; Gruppen je Instanz eingefroren (MD/react nicht geprüft). [docs/FRAG_CHARGE_MODEL.md](docs/FRAG_CHARGE_MODEL.md)
+- **Kontinuierliches Ladungsmodell für Ionenpaare** (rev-gfnff, SQE/ACKS2-artig): kein geprüftes GFN-FF-Maß trennt Ammoniumhalogenid-Paare von
+  Protonentransfer-TS. Falsifikator-Paket im Vault; dessen `species/*.xyz` passen bei 85/124 Spezies nicht zu den ORCA-Energien (vor Nutzung ersetzen).
+- **Fragmentreihenfolge im Mehrfragment-EEQ**: IL16/144 (neutrales Ionenpaar) ändert beim Vertauschen der Fragmentreihenfolge die Energie um
+  -2,4e-4 Eh und Ladungen um 7,8e-3 e, ohne Schalter, auf allen Lösern; mit `ionpairs` -4,1e-4 Eh; 230/187/008: 0 (n=1 je, 2026-10-24, nicht eingegrenzt).
+- **`frag_charge_model ensemble`, Gradient**: PDMAEMA (AB)3 (+3, gestört) plus Cl- 3,2 A vor einem N-H (+2, zwei Fragmente): Gradient gegen
+  zentrale Finite Differenz auf dem Cl 3,9e-3 Eh/A daneben, auch ohne jeden Schalter; mit `reference` 1,0e-5 (n=1 Struktur, 2026-10-23, nicht eingegrenzt).
 
 ## 2. Leistung
 
