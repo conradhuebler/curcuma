@@ -15,7 +15,7 @@ learning would need tens of thousands. The intended purpose is conformer work: r
 search and pre-optimisation at GFN-FF cost while ranking conformers at the reference level.
 **Status Oct 2026 (repaired labels, four molecules):** conformers are ordered better than by GFN-FF and forces are 1.7x to 4.2x better, but
 pre-optimisation before GFN2 does not beat a GFN-FF pre-optimisation and the lowest conformer is not found more reliably; the useful niche is
-sampling (NVE stable, GFN2-like temperature, 3 to 5 per cent of the GFN2 cost per step). See
+sampling at the GFN2 energy level (NVE stable, GFN2-like temperature, 4 to 11 per cent of the GFN2 cost per step), but the torsion populations of the MD are not closer to GFN2 than those of GFN-FF ([DELTA_ML_SAMPLING_2026-10.md](DELTA_ML_SAMPLING_2026-10.md)). See
 [DELTA_ML_RETEST_2026-10.md](DELTA_ML_RETEST_2026-10.md), [DELTA_ML_THIRD_MOLECULE_DFT_2026-10.md](DELTA_ML_THIRD_MOLECULE_DFT_2026-10.md) and
 [DELTA_ML_PIPELINE_2026-10.md](DELTA_ML_PIPELINE_2026-10.md); the first round [DELTA_ML_USECASE_TEST_2026-10.md](DELTA_ML_USECASE_TEST_2026-10.md) is withdrawn.
 

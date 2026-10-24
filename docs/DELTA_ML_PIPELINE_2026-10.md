@@ -57,7 +57,7 @@ distribution, A is only slightly better than GFN-FF on M1 and about equal on peo
 
 ## Conclusion
 
-On the three molecules the useful niche is **sampling**, not pre-optimisation: the corrected surface is stable in NVE, behaves thermally like GFN2 and costs a few per cent of
+On the three molecules the corrected surface is better suited to **sampling** than to pre-optimisation (but see [DELTA_ML_SAMPLING_2026-10.md](DELTA_ML_SAMPLING_2026-10.md): the MD reaches the GFN2 energy level, not the GFN2 torsion populations): the corrected surface is stable in NVE, behaves thermally like GFN2 and costs a few per cent of
 GFN2 per step (a million GFN2 steps of M1 would take about 44 h, 8 ms steps of B2 about 2 h, plus 76 s of fit and the labelling of about 350 frames). As a
 pre-optimiser before GFN2 it does not beat GFN-FF. Not tested: independent MD seeds, long runs beyond 10 ps, enhanced sampling (metadynamics), ConfSearch
 integration, charged and open-shell systems, GPU, a DFT reference in MD. One trajectory per case; the optimisation test frames sit next to training frames.

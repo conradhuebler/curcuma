@@ -193,8 +193,9 @@ and pre-optimisation near reference quality. On two molecules (one 90-atom molec
 orders conformers better than GFN-FF alone when it is trained on labels from fresh single points (Spearman gain +0.06 to
 +0.29, paired in 10 of 10 folds; also for blocked folds and as a tendency for GFN-FF minima, where pair accuracy rises and
 the Spearman interval mostly includes 0). Not shown: that it finds the lowest conformer more often. As a pre-optimisation before GFN2 it does not pay (the cheap GFN-FF pre-optimisation is as fast or faster in total time on two of three molecules);
-the useful niche is sampling: NVE molecular dynamics conserves energy as well as GFN-FF, heats like GFN2 and costs 3 to 5 per cent of GFN2 per step
-([docs/DELTA_ML_PIPELINE_2026-10.md](docs/DELTA_ML_PIPELINE_2026-10.md)). It costs 11 to 25 times GFN-FF per step. **The internal labelling of `-activelearn` still has a
+NVE molecular dynamics on the corrected surface conserves energy as well as GFN-FF and heats like GFN2
+([docs/DELTA_ML_PIPELINE_2026-10.md](docs/DELTA_ML_PIPELINE_2026-10.md)), and its frames lie at the GFN2 energy level, but the torsion populations are not closer to GFN2 than those of GFN-FF and
+the 500 K sampling finds no more minima per wall time ([docs/DELTA_ML_SAMPLING_2026-10.md](docs/DELTA_ML_SAMPLING_2026-10.md)); a few to ten per cent of a GFN2 step. It costs 11 to 25 times GFN-FF per step. **The internal labelling of `-activelearn` still has a
 base-energy offset and the gradient-label unit error are repaired (bc7742e6, 373b1c13, 43786e04). Results obtained with the internal labelling before
 these fixes are void** (see [docs/DELTA_ML_USECASE_TEST2_2026-10.md](docs/DELTA_ML_USECASE_TEST2_2026-10.md); re-measurement with repaired labels: held-out forces 1.7x to 4.2x better than GFN-FF, better order of conformers also for minima from unseen basins, the model energy at its own optimum unreliable: [docs/DELTA_ML_RETEST_2026-10.md](docs/DELTA_ML_RETEST_2026-10.md); third molecule and DFT reference: forces transfer (2x to 2.8x against the DFT gradient), energies only with the energy model or about 400 training frames: [docs/DELTA_ML_THIRD_MOLECULE_DFT_2026-10.md](docs/DELTA_ML_THIRD_MOLECULE_DFT_2026-10.md)). Conformers at fixed
 topology only, not reactions.
