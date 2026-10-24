@@ -9,6 +9,11 @@ Uses only the curcuma binary. Builds the chain (polymerbuild also writes the gro
      beta-C), each inside its protonated unit, sums exactly 1; the same groups and charges for a permuted atom order;
      neutral molecule / charge 1 with two centres: no groups, energy equal to the ungrouped one; gradient against a
      central finite difference.
+  5. EXPERIMENTAL charge_groups ionpairs (parity rule) on NH4+ Cl-, NH4+ CH3O- and pyridinium Cl- built at run time
+     from library structures: fragment sums +1/-1 (and +-0.9), the energy equals that of the same groups given as a
+     file, permuted atom order, gradient against a central finite difference (12 components, 6 per fragment), no effect
+     for one fragment / a charged system / an ambiguous anion count, parity keeps a neutral NH3 neutral,
+     ionpair_aromatic only with the switch and not for neutral pyridine.
 Usage: check_charge_groups.py CURCUMA_BINARY SOURCE_DIR
 """
 import json, os, re, subprocess, sys, tempfile
@@ -44,7 +49,7 @@ def write(path, X):
         for i in range(n):
             f.write("%s %.10f %.10f %.10f\n" % (el[i], *X[i]))
 
-def sp(path, groups_file=None, dump=None, grad=None, charge=2, verbosity=0):
+def sp(path, groups_file=None, dump=None, grad=None, charge=2, verbosity=0, extra=()):
     # the topology cache <basename>.topo.json does not carry the molecule charge: a file written at charge 2 is
     # reused at charge 0 (measured: identical energy). Every run here therefore builds its topology afresh.
     cmd = [curcuma, "-sp", path, "-method", "gfnff", "-charge", str(charge), "-verbosity", str(verbosity), "-no_bmt",
@@ -55,6 +60,7 @@ def sp(path, groups_file=None, dump=None, grad=None, charge=2, verbosity=0):
         cmd += ["-dump_atomic_charges", dump]
     if grad:
         cmd += ["-dump_gradient", grad]
+    cmd += list(extra)
     out = subprocess.run(cmd, capture_output=True, text=True)
     m = re.search(r"Single Point Energy = (-?\d+\.\d+)", out.stdout)
     return (float(m.group(1)) if m else None), out.stdout + out.stderr
@@ -189,6 +195,130 @@ for i in (ag[0][0], ag[1][-1], outside_auto[0]):
         worst = max(worst, abs(fd - G[i, k]))
         scale = max(scale, abs(G[i, k]))
 check(worst < 5e-5, "auto: gradient against finite difference: max |diff| %.2e Eh/A (largest gradient component %.3f)" % (worst, scale))
+
+# ---- (v) EXPERIMENTAL -gfnff.charge_groups ionpairs: formal charges on the whole fragments of a neutral ion pair ----
+# The ion pairs are built here at run time from library structures (no new structure file): NH4+ Cl- from the ideal
+# C3v ammonia (fourth H on the C3 axis at 1.012 A, Cl 3.3 A below N, nearest H...Cl 3.07 A), NH4+ CH3O- from the same
+# NH4 and the methanol without its hydroxyl H, and pyridinium chloride from the pyridine of fi-pyridine (F and I
+# removed, H on N at 1.01 A, Cl 3.0 A beyond that H). Not optimised: test geometries, not physical ones.
+# The rule: cation = fragment with an onium centre (+q), anions = fragments without a centre with an odd neutral
+# electron count (-q each, exactly as many as centres), even-count fragments neutral; one EEQ group per fragment.
+def lib(id_):
+    return subprocess.run([sys.executable, src + "/scripts/structlib.py", "path", id_], capture_output=True, text=True).stdout.strip()
+
+def read_xyz(path):
+    L = open(path).read().split("\n")
+    m = int(L[0])
+    return [l.split()[0] for l in L[2:2 + m]], np.array([[float(v) for v in l.split()[1:4]] for l in L[2:2 + m]])
+
+def write_mol(path, els, XX):
+    with open(path, "w") as f:
+        f.write(f"{len(els)}\nx\n")
+        for e_, x_ in zip(els, XX):
+            f.write("%s %.10f %.10f %.10f\n" % (e_, *x_))
+
+def ip_line(text):
+    m = re.search(r"GFNFF charge_groups ionpairs: ([^\n]*)", re.sub(r"\x1b\[[0-9;]*m", "", text))
+    return m.group(1) if m else ""
+
+IP = ["-gfnff.charge_groups", "ionpairs"]
+el_nh3, X_nh3 = read_xyz(lib("ammonia.ideal-c3v"))
+el_ip = el_nh3 + ["H", "Cl"]
+X_ip = np.vstack([X_nh3, [[0.0, 0.0, 1.012], [0.0, 0.0, -3.3]]])
+write_mol("nh4cl.xyz", el_ip, X_ip)
+e_ip, t_ip = sp("nh4cl.xyz", None, "q_ip.txt", charge=0, verbosity=1, extra=IP)
+e_ip0, _ = sp("nh4cl.xyz", None, "q_ip0.txt", charge=0)
+q_ip, q_ip0 = np.loadtxt("q_ip.txt"), np.loadtxt("q_ip0.txt")
+check("1:5/+1.00" in ip_line(t_ip) and "2:1/-1.00" in ip_line(t_ip), "ionpairs, NH4+ Cl-: two fragments, +1 on NH4, -1 on Cl (%s)" % ip_line(t_ip)[:160])
+check("NOT for reactions with a shared proton" in t_ip, "ionpairs: the run states that the rule is not meant for shared-proton reactions")
+check(abs(q_ip[:5].sum() - 1.0) < 1e-6 and abs(q_ip[5] + 1.0) < 1e-6 and abs(q_ip0[:5].sum()) < 1e-6,
+      "ionpairs, NH4+ Cl-: fragment sums %.8f / %.8f (default %.2e / %.2e)" % (q_ip[:5].sum(), q_ip[5], q_ip0[:5].sum(), q_ip0[5]))
+check(e_ip is not None and e_ip0 is not None and abs(e_ip - e_ip0) > 1e-3, "ionpairs changes the energy (%.6f against %.6f Eh)" % (e_ip, e_ip0))
+# the same groups written as a file (one group per fragment) give the identical energy: one mechanism
+json.dump({"groups": [{"atoms": [0, 1, 2, 3, 4], "charge": 1.0}, {"atoms": [5], "charge": -1.0}]}, open("nh4cl.groups.json", "w"))
+e_ipf, _ = sp("nh4cl.xyz", "nh4cl.groups.json", charge=0)
+check(e_ipf == e_ip, "ionpairs == the same fragment groups from a file (%.8f / %.8f Eh)" % (e_ip, e_ipf))
+e_ip9, t_ip9 = sp("nh4cl.xyz", None, "q_ip9.txt", charge=0, verbosity=1, extra=IP + ["-gfnff.ionpair_charge", "0.9"])
+q_ip9 = np.loadtxt("q_ip9.txt")
+check(abs(q_ip9[:5].sum() - 0.9) < 1e-6 and abs(q_ip9[5] + 0.9) < 1e-6, "ionpair_charge 0.9: fragment sums %.8f / %.8f" % (q_ip9[:5].sum(), q_ip9[5]))
+# permutation: same roles (mapped back) and no order dependence of its own (Known Issue #34)
+perm_ip = np.array([5, 2, 0, 4, 1, 3])  # new atom k is old atom perm_ip[k]
+write_mol("nh4cl_p.xyz", [el_ip[p] for p in perm_ip], X_ip[perm_ip])
+e_ipp, t_ipp = sp("nh4cl_p.xyz", None, "q_ipp.txt", charge=0, verbosity=1, extra=IP)
+e_ipp0, _ = sp("nh4cl_p.xyz", None, None, charge=0)
+q_ipp = np.loadtxt("q_ipp.txt")
+check("1:1/-1.00" in ip_line(t_ipp) and "2:5/+1.00" in ip_line(t_ipp) and np.abs(q_ipp - q_ip[perm_ip]).max() < 2e-4,
+      "ionpairs, permuted atom order: Cl first, the same fragment charges (max |dq| %.1e e)" % np.abs(q_ipp - q_ip[perm_ip]).max())
+check(abs((e_ipp - e_ip) - (e_ipp0 - e_ip0)) < 1e-5, "ionpairs, permuted: dE %.2e Eh with the rule, %.2e Eh without" % (e_ipp - e_ip, e_ipp0 - e_ip0))
+# gradient against a central finite difference: NH4+ CH3O- (methoxide: 17 electrons when neutral, odd), perturbed;
+# N and one H of the cation, O and C of the anion: 6 components per fragment
+el_me, X_me = read_xyz(lib("methanol"))
+iO = el_me.index("O")
+iHO = min((i for i, e_ in enumerate(el_me) if e_ == "H"), key=lambda i: np.linalg.norm(X_me[i] - X_me[iO]))
+keep_me = [i for i in range(len(el_me)) if i != iHO]
+el_mo, X_mo = [el_me[i] for i in keep_me], X_me[keep_me]
+X_mo = X_mo - X_mo[el_mo.index("O")] + np.array([0.0, 0.0, 1.012 + 3.0])  # O 3.0 A beyond the axial H of NH4
+el_am = el_ip[:5] + el_mo
+X_am = np.vstack([X_ip[:5], X_mo]) + np.random.RandomState(3).normal(0, 0.06, (5 + len(el_mo), 3))
+write_mol("nh4_meo.xyz", el_am, X_am)
+e_am, t_am = sp("nh4_meo.xyz", None, "q_am.txt", "am.grad", charge=0, verbosity=1, extra=IP)
+q_am = np.loadtxt("q_am.txt")
+check("1:5/+1.00" in ip_line(t_am) and "2:5/-1.00" in ip_line(t_am) and abs(q_am[:5].sum() - 1.0) < 1e-6,
+      "ionpairs, NH4+ CH3O-: +1 / -1 (%s)" % ip_line(t_am)[:120])
+G = np.loadtxt("am.grad", comments="#")
+iC = 5 + el_mo.index("C")
+iOm = 5 + el_mo.index("O")
+worst, scale, ncomp = 0.0, 0.0, 0
+for i in (0, 4, iOm, iC):
+    for k in range(3):
+        Xp_, Xm_ = X_am.copy(), X_am.copy()
+        Xp_[i, k] += h
+        Xm_[i, k] -= h
+        write_mol("p.xyz", el_am, Xp_)
+        write_mol("m.xyz", el_am, Xm_)
+        fd = (sp("p.xyz", None, charge=0, extra=IP)[0] - sp("m.xyz", None, charge=0, extra=IP)[0]) / (2 * h)
+        worst = max(worst, abs(fd - G[i, k]))
+        scale = max(scale, abs(G[i, k]))
+        ncomp += 1
+check(worst < 5e-5, "ionpairs, NH4+ CH3O-: gradient against finite difference, %d components: max |diff| %.2e Eh/A (largest component %.3f)" % (ncomp, worst, scale))
+# no effect: one fragment (NH4+ alone), a charged system (NH4+ + NH3 at +1), ambiguous (NH4+ + 3 Cl at charge 0: 3 odd
+# candidates for 1 centre); parity: NH4+ Cl- + NH3 fires with the NH3 neutral (even electron count)
+write_mol("nh4.xyz", el_ip[:5], X_ip[:5])
+e1, t1 = sp("nh4.xyz", None, charge=1, verbosity=1, extra=IP)
+e1d, _ = sp("nh4.xyz", None, charge=1)
+check("fragment(s)" in ip_line(t1) and "no effect" in ip_line(t1) and e1 == e1d, "ionpairs, NH4+ alone (one fragment): no effect, energy identical")
+X_far = X_nh3 + np.array([8.0, 0.0, 0.0])
+write_mol("nh4_nh3.xyz", el_ip[:5] + el_nh3, np.vstack([X_ip[:5], X_far]))
+e2, t2 = sp("nh4_nh3.xyz", None, charge=1, verbosity=1, extra=IP)
+e2d, _ = sp("nh4_nh3.xyz", None, charge=1)
+check("charge 1" in ip_line(t2) and "no effect" in ip_line(t2) and e2 == e2d, "ionpairs, NH4+ + NH3 at +1 (charged): no effect, energy identical")
+write_mol("nh4cl3.xyz", el_ip + ["Cl", "Cl"], np.vstack([X_ip, [[8.0, 0.0, 0.0], [-8.0, 0.0, 0.0]]]))
+e3, t3 = sp("nh4cl3.xyz", None, charge=0, verbosity=1, extra=IP)
+e3d, _ = sp("nh4cl3.xyz", None, charge=0)
+check("ambiguous" in ip_line(t3) and e3 == e3d, "ionpairs, NH4+ + 3 Cl at charge 0 (3 candidates for 1 centre): ambiguous, energy identical")
+write_mol("nh4cl_nh3.xyz", el_ip + el_nh3, np.vstack([X_ip, X_far]))
+e4, t4 = sp("nh4cl_nh3.xyz", None, "q_3.txt", charge=0, verbosity=1, extra=IP)
+q_3 = np.loadtxt("q_3.txt")
+check("3:4/+0.00" in ip_line(t4) and abs(q_3[:5].sum() - 1.0) < 1e-6 and abs(q_3[5] + 1.0) < 1e-6 and abs(q_3[6:].sum()) < 1e-6,
+      "ionpairs, NH4+ Cl- + NH3: parity keeps the NH3 neutral, sums %.6f / %.6f / %.6f" % (q_3[:5].sum(), q_3[5], q_3[6:].sum()))
+# ionpair_aromatic: pyridinium chloride fires only with the switch; neutral pyridine + HCl never
+el_fp, X_fp = read_xyz(lib("fi-pyridine"))
+keep_fp = [i for i, e_ in enumerate(el_fp) if e_ not in ("F", "I")]
+el_py, X_py = [el_fp[i] for i in keep_fp], X_fp[keep_fp]
+iN = el_py.index("N")
+write_mol("pyhcl.xyz", el_py + ["H", "Cl"], np.vstack([X_py, X_py[iN] + [0, 0, 1.01], X_py[iN] + [0, 0, 4.01]]))
+eA_, tA_ = sp("pyhcl.xyz", None, charge=0, verbosity=1, extra=IP)
+eB_, tB_ = sp("pyhcl.xyz", None, "q_py.txt", charge=0, verbosity=1, extra=IP + ["-gfnff.ionpair_aromatic", "true"])
+e0_, _ = sp("pyhcl.xyz", None, charge=0)
+q_py = np.loadtxt("q_py.txt")
+check("no cation fragment" in ip_line(tA_) and eA_ == e0_, "ionpairs without ionpair_aromatic, pyridinium Cl-: no centre, energy identical")
+check("aromatic rings 1" in ip_line(tB_) and abs(q_py[:-1].sum() - 1.0) < 1e-6 and abs(q_py[-1] + 1.0) < 1e-6,
+      "ionpair_aromatic, pyridinium Cl-: one ring, fragment sums %.8f / %.8f" % (q_py[:-1].sum(), q_py[-1]))
+el_hcl, X_hcl = read_xyz(lib("hydrogen-chloride"))
+write_mol("py_hcl.xyz", el_py + el_hcl, np.vstack([X_py, X_hcl + X_py[iN] + [0, 0, 4.0]]))
+eC_, tC_ = sp("py_hcl.xyz", None, charge=0, verbosity=1, extra=IP + ["-gfnff.ionpair_aromatic", "true"])
+eC0, _ = sp("py_hcl.xyz", None, charge=0)
+check("aromatic rings 0" in ip_line(tC_) and eC_ == eC0, "ionpair_aromatic, neutral pyridine + HCl (6 pi electrons): no centre, energy identical")
 
 print("FAILED" if failed else "all passed")
 sys.exit(1 if failed else 0)
