@@ -798,6 +798,8 @@ struct FFWorkspaceGPUImpl {
     CudaBuffer<double> d_dc6dcn_block_max; ///< [max_blocks] per-block max for reduction
     CudaBuffer<int>    d_dc6dcn_skip;      ///< [1] skip flag (0 = recompute, 1 = skip)
     int*               h_dc6dcn_skip = nullptr; ///< Pinned host buffer for async D2H
+    int*               h_fix_bad = nullptr;     ///< pinned read-back of d_gfnff_fix_bad (parity item 12)
+    long               fix_bad_steps = 0;       ///< steps with a non-finite / out-of-range fixed-point contribution
 
     // Per-term energy accumulators — consolidated into single contiguous buffer
     // Claude Generated (March 2026): Reduces 14 individual cudaMemcpy to 1
@@ -1430,6 +1432,12 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
     m_impl->d_dc6dcn_block_max.alloc(32);
     m_impl->d_dc6dcn_skip.alloc(1);
     cudaHostAlloc(&m_impl->h_dc6dcn_skip, sizeof(int), cudaHostAllocDefault);
+    if (cudaHostAlloc(&m_impl->h_fix_bad, sizeof(int), cudaHostAllocDefault) == cudaSuccess) {
+        *m_impl->h_fix_bad = 0;
+        gfnffFixBadReset();
+    } else {
+        m_impl->h_fix_bad = nullptr;
+    }
     // Upload atom types once (static during simulation)
     std::vector<int> h_atom_types = atom_types;  // copy
     m_impl->d_atom_types.upload(h_atom_types, stream);
@@ -1593,6 +1601,7 @@ FFWorkspaceGPU::~FFWorkspaceGPU()
     if (m_h_dlogdcn)    cudaFreeHost(m_h_dlogdcn);
     if (m_h_energies)   cudaFreeHost(m_h_energies);
     if (m_impl && m_impl->h_dc6dcn_skip) cudaFreeHost(m_impl->h_dc6dcn_skip);
+    if (m_impl && m_impl->h_fix_bad) cudaFreeHost(m_impl->h_fix_bad);
 }
 
 // ============================================================================
@@ -3794,6 +3803,8 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     k_fix_to_double<<<1, FFWorkspaceGPUImpl::N_ENERGY_SLOTS, 0, stream>>>(
         FFWorkspaceGPUImpl::N_ENERGY_SLOTS - 1, impl.d_energies.ptr + 1, 1.0 / GFNFF_FIX_ENERGY);
     checkCuda(cudaGetLastError(), "postprocess final check");
+    if (impl.h_fix_bad)   // range / finiteness flag of the accumulation, read after the final sync (parity item 12)
+        gfnffFixBadReadAsync(impl.h_fix_bad, stream);
 
     // Async energy download (pinned m_h_energies buffer)
     checkCuda(cudaMemcpyAsync(m_h_energies, impl.d_energies.ptr,
@@ -3922,6 +3933,20 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     // h_dc6dcn_skip was written by k_check_dc6dcn_skip_final → cudaMemcpyAsync on the
     // same stream; now that the stream is synchronized, the host buffer is valid.
     m_dc6dcn_skip_pending = (impl.h_dc6dcn_skip != nullptr && *impl.h_dc6dcn_skip != 0);
+
+    // A non-finite or out-of-range contribution cannot be represented in the fixed-point accumulators; the FP64 path
+    // would return NaN or a huge value there, so the step returns NaN (energy and gradient) instead of a wrapped
+    // number. The flag is sticky on the device and reset here. (Only this workspace's device; the kernels of the
+    // multi-GPU helper devices keep their own flag, which is not read.)
+    bool fix_bad = false;
+    if (impl.h_fix_bad && *impl.h_fix_bad != 0) {
+        fix_bad = true;
+        *impl.h_fix_bad = 0;
+        gfnffFixBadReset();
+        if (impl.fix_bad_steps++ == 0)
+            CurcumaLogger::warn("CUDA GFN-FF: a force, energy or CN contribution was not finite or outside the "
+                                "fixed-point range; the step returns NaN");
+    }
 
     // Extract per-term energies from pinned buffer
     const double e_disp      = m_h_energies[impl.E_DISP];
@@ -4079,6 +4104,10 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
         CurcumaLogger::info("=== GPU ENERGY END ===");
     }
 
+    if (fix_bad) {
+        if (gradient) m_result_gradient.setConstant(std::numeric_limits<double>::quiet_NaN());
+        return std::numeric_limits<double>::quiet_NaN();
+    }
     return m_result_energy.total() + m_e0;
 }
 

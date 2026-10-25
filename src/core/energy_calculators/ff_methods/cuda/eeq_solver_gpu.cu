@@ -64,6 +64,27 @@ struct EEQSolverGPUImpl {
     cudaEvent_t  ev_input_ready    = nullptr;  ///< K3 (Oct 2026): workspace event, not owned; replaces the barrier
     bool         stream_high_priority = false; ///< K2/K3 (Oct 2026): stream created with the greatest priority
 
+    /// Claude Generated (Oct 2026, CUDA/ROCm parity item 10): orders `stream` after the work the FFWorkspaceGPU
+    /// streams did for this step (coordinates, corrected alpha/gam, RHS). All curcuma streams are blocking
+    /// streams: they are ordered against the legacy default stream but not against each other. A device-RHS
+    /// solve that launches its matrix build as the first operation on `stream` therefore needs this wait; the
+    /// paths that start with a blocking cudaMemcpy get it implicitly. Measured before this call was added to
+    /// the lu and batched paths: water dimer MD with a second GPU job on the same card gave 29 and 22 different
+    /// trajectories in 40 runs for `lu` and `batched`, 1 for the others.
+    /// `allow_input_event`: use the workspace's input-ready event (K3) instead of the legacy barrier, only valid
+    /// for the paths that need nothing the event does not cover (the projected PCG).
+    void orderAfterWorkspace(bool allow_input_event)
+    {
+        if (allow_input_event && ev_input_ready) {
+            cudaStreamWaitEvent(stream, ev_input_ready, 0);
+            return;
+        }
+        if (!ev_legacy_barrier)
+            cudaEventCreateWithFlags(&ev_legacy_barrier, cudaEventDisableTiming);
+        cudaEventRecord(ev_legacy_barrier, cudaStreamLegacy);
+        cudaStreamWaitEvent(stream, ev_legacy_barrier, 0);
+    }
+
     // Claude Generated (Sep 2026, F-3): multi-GPU split of the WP7-E projected PCG. Each helper
     // device owns a column block [c0, c1) of the symmetric EEQ matrix; this device owns [0, c1_own).
     struct SplitPart {
@@ -849,6 +870,8 @@ bool EEQSolverGPU::solveWithDeviceRHS(
     const int N = natoms;
     const int nrhs = nfrag + 1;
 
+    m_impl->orderAfterWorkspace(false);   // parity item 10: cx/cy/cz, alpha, gam, rhs come from the workspace streams
+
     const bool do_refactor = force_refactor
                           || !m_impl->m_has_cached_factor
                           || (N != m_last_N);
@@ -1135,6 +1158,8 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUSchur(
 
     const int N = natoms;
     const int nrhs = nfrag + 1;  // col0: b_atoms, col1: fragment indicator
+
+    m_impl->orderAfterWorkspace(false);   // parity item 10
 
     const bool do_refactor = force_refactor
                           || !m_impl->m_has_cached_factor
@@ -1497,6 +1522,7 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUSchurGeneral(
 
     const int N    = natoms;
     const int nrhs = nfrag + 1;
+    impl.orderAfterWorkspace(false);   // parity item 10
 
     const bool do_refactor = force_refactor
                           || !impl.m_has_cached_factor
@@ -1926,6 +1952,7 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUPCG(
 
     const int N    = natoms;
     const int nrhs = nfrag + 1;
+    impl.orderAfterWorkspace(false);   // parity item 10
 
     const bool do_refactor = force_refactor
                           || !impl.m_pcg_M_inv_valid
@@ -3039,14 +3066,7 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUProjectedPCG(
     // K3 (Oct 2026, Claude Generated): with an input-ready event from the workspace, wait only for
     // the main-stream point after k_build_eeq_rhs; dc6dcn and the Phase-1 worker streams run in
     // parallel to the matrix build. Without it, the legacy barrier as before.
-    if (impl.ev_input_ready) {
-        cudaStreamWaitEvent(impl.stream, impl.ev_input_ready, 0);
-    } else {
-        if (!impl.ev_legacy_barrier)
-            cudaEventCreateWithFlags(&impl.ev_legacy_barrier, cudaEventDisableTiming);
-        cudaEventRecord(impl.ev_legacy_barrier, cudaStreamLegacy);
-        cudaStreamWaitEvent(impl.stream, impl.ev_legacy_barrier, 0);
-    }
+    impl.orderAfterWorkspace(true);
 
     const bool do_refactor = force_refactor
                           || !impl.m_pcg_M_inv_valid
@@ -3545,6 +3565,8 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUSchurBatched(
 
     const bool do_refactor = force_refactor || !impl.m_frag_refactored;
 
+    impl.orderAfterWorkspace(false);   // parity item 10: no blocking copy before the first kernel on this stream
+
     // --- 1. Build per-fragment Coulomb blocks (if refactorizing) ---
     if (do_refactor && total_pairs > 0) {
         // WP7-D: the batched path overwrites d_A_blocks with Cholesky factors, so any
@@ -3746,6 +3768,8 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUAugmentedLU(
     }
     const int M = static_cast<int>(M_ll);
 
+    impl.orderAfterWorkspace(false);   // parity item 10
+
     impl.d_aug_A.ensure(M * M);
     impl.d_aug_rhs.ensure(M);
     impl.d_aug_piv.ensure(M);
@@ -3829,6 +3853,8 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUSchurLDLT(
     const int N = natoms;
     const int nrhs = nfrag + 1;
     if (static_cast<long long>(N) * N > static_cast<long long>(std::numeric_limits<int>::max())) return false;
+
+    impl.orderAfterWorkspace(false);   // parity item 10
 
     // d_A is shared with the Cholesky/LU paths: their cached factor is gone after this call.
     impl.m_has_cached_factor  = false;

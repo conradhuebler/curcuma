@@ -590,6 +590,12 @@ struct XtbGpuContext::Impl {
         pseudo_consecutive = pseudo_consecutive64 = 0;
     }
     bool pseudoDiagStep(int n);
+    /// Claude Generated (Oct 2026, CUDA/ROCm parity item 1): probe of the new Cholesky factor in dL against dS,
+    /// | L (L^T v) - S v |_2 <= 1e-10 | S v |_2 for a fixed vector v. 1 = ok, 0 = failed, -1 = device error.
+    int  probeCholeskyFactor(int n);
+    CudaBuffer<double> dLProbeV, dLProbeW, dLProbeU;   ///< probe vectors v, L L^T v, S v
+    int  lprobe_fail_left = -2;                        ///< CURCUMA_GPU_FAIL_LPROBE=k: corrupt the factor k times (-2: not read yet)
+    long lprobe_recomputes = 0;                        ///< factors recomputed after a failed probe
     int  pseudoDiagStep64(int n);
     template <typename R>
     int pseudoRotateOrthonormalise(int n, int no, const R* F, const R* L, R* C, R* Tb, R* Gov, R* M,
@@ -1357,20 +1363,45 @@ __global__ void k_multipole_ints(
     qp_int[5*nn + mn] = 1.5 * qzz - tr;
 }
 
+// Cholesky-factor probe helpers (Claude Generated, Oct 2026): fixed probe vector and the fault injection.
+__global__ void k_lprobe_vec(int n, double* __restrict__ v)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) v[i] = sin(0.7 * static_cast<double>(i) + 0.3);
+}
+__global__ void k_lprobe_corrupt(double* __restrict__ L)
+{
+    if (blockIdx.x == 0 && threadIdx.x == 0) L[0] *= 1.001;   // fault injection: a silently wrong factor
+}
+
 // Order-independent gradient accumulation (Claude Generated, Oct 2026; docs/GPU_REPRODUCIBILITY.md): the contribution
 // is rounded to a multiple of 2^-52 and added as a 64-bit integer into the 8 bytes of the double buffer (integer
 // addition is associative, FP64 atomicAdd is not); k_grad_fix_to_double converts dGrad/dEdcn in place at the end of
 // computeGradient. Range +-2048 Eh/Bohr per component. The buffers are zeroed first (0 bits == 0.0).
 constexpr double GRAD_FIX = 4503599627370496.0;   // 2^52
+/// Claude Generated (Oct 2026, CUDA/ROCm parity item 12): set (sticky) when a contribution was not finite or outside the
+/// accumulator range; XtbGpuContext::computeGradient reads and resets it after the synchronised accumulation and fails the
+/// device gradient (the caller falls back to the host gradient, as for any device error). Before, NaN became
+/// llrint(NaN) = LLONG_MIN, a silent wrong number, and an infinite force looped for ever in the chunk loop.
+__device__ int g_gfix_bad;
 __device__ __forceinline__ void gfix_add(double* addr, double v)
 {
     unsigned long long* a = reinterpret_cast<unsigned long long*>(addr);
-    while (fabs(v) >= 64.0) {
-        const double chunk = copysign(64.0, v);
-        atomicAdd(a, static_cast<unsigned long long>(llrint(chunk * GRAD_FIX)));
-        v -= chunk;
+    const double av = fabs(v);
+    if (!(av * GRAD_FIX < 9.2e18)) {                   // beyond the int64 range (or NaN/Inf): the sum is wrong anyway
+        atomicOr(&g_gfix_bad, 1);
+        if (!(av < 5.7e17)) return;                    // not finite or beyond 2^59: add nothing usable
     }
-    atomicAdd(a, static_cast<unsigned long long>(llrint(v * GRAD_FIX)));
+    if (av < 64.0) {                                   // the common case: one rounded value
+        atomicAdd(a, static_cast<unsigned long long>(llrint(v * GRAD_FIX)));
+        return;
+    }
+    // |v| >= 64: the former loop added copysign(64, v) n times and then the remainder; the n chunks are folded into
+    // one integer (same accumulator bits modulo 2^64, one atomic, bounded cost).
+    const double n = trunc(av * (1.0 / 64.0));
+    const double r = v - copysign(n * 64.0, v);
+    const unsigned long long chunk = static_cast<unsigned long long>(llrint(copysign(64.0, v) * GRAD_FIX));
+    atomicAdd(a, static_cast<unsigned long long>(n) * chunk + static_cast<unsigned long long>(llrint(r * GRAD_FIX)));
 }
 __global__ void k_grad_fix_to_double(int n, double* __restrict__ buf)
 {
@@ -2601,20 +2632,27 @@ __global__ void k_d4_build_refw(int nat, int max_ref, const double* __restrict__
         expw[ir] = ew; expd[ir] = ed;
         norm += ew; dnorm += ed;
     }
-    const double ninv = (norm > 0.0) ? 1.0 / norm : 0.0;
+    // Claude Generated (Oct 2026, CUDA/ROCm parity; mirrors D4ParameterGenerator::buildAtomRefW):
+    // (1) When the CN lies so far beyond every reference that every Gaussian underflows (norm = 0, CN > ~15 for C in
+    //     compressed geometries) dftd4 puts the whole weight on the reference with the largest covalent CN; gwk = 0
+    //     zeroed C6 for the atom (energy jump, 0/0 in the ATM chain rule).
+    // (2) d(gwk)/dCN = expd*ninv - gwk*(dnorm*ninv). The dftd4 order ninv*(expd - expw*dnorm*ninv) forms expw*dnorm
+    //     first, which underflows to 0 while ninv is huge: dgwk became -2 wf (CN - refcn) although gwk is constant there.
+    double maxcn = 0.0;
+    for (int ir = 0; ir < nr; ++ir) maxcn = fmax(maxcn, refcovcn[base + ir]);
+    const double ninv = 1.0 / norm;
+    const double dnorm_n = dnorm * ninv;
     const double qmod = q[a] + zef;
     for (int ir = 0; ir < nr; ++ir) {
-        double gwk = expw[ir] * ninv;
-        if (!isfinite(gwk)) gwk = 0.0;
+        double gwk  = expw[ir] * ninv;
+        double dgwk = expd[ir] * ninv - gwk * dnorm_n;
+        if (!isfinite(gwk))  gwk  = (refcovcn[base + ir] == maxcn) ? 1.0 : 0.0;
+        if (!isfinite(dgwk)) dgwk = 0.0;
         const double qref = refq[base + ir] + zef;
         const double zt = d4_zeta_dev(ga, gia, qref, qmod);
         W[base + ir]   = gwk * zt;
         dWq[base + ir] = gwk * d4_dzeta_dev(ga, gia, qref, qmod);
-        if (dWc) {
-            double dgwk = ninv * (expd[ir] - expw[ir] * dnorm * ninv);
-            if (!isfinite(dgwk)) dgwk = 0.0;
-            dWc[base + ir] = dgwk * zt;
-        }
+        if (dWc) dWc[base + ir] = dgwk * zt;
     }
 }
 
@@ -3847,6 +3885,32 @@ int XtbGpuContext::Impl::pseudoRotateOrthonormalise(int n, int no, const R* F, c
     if (pb::trsm(I.cublas, n, &one, M, C) != CUBLAS_STATUS_SUCCESS) return -1;
     mark("orth trsm C R^-1");
     return 1;
+}
+
+int XtbGpuContext::Impl::probeCholeskyFactor(int n)
+{
+    // v, w = L^T v, w = L w, u = S v; |w - u|_2 against |u|_2. dS is the full symmetric overlap (dense storage).
+    try { dLProbeV.ensure(n); dLProbeW.ensure(n); dLProbeU.ensure(n); } catch (...) { return -1; }
+    k_lprobe_vec<<<(n + 255) / 256, 256, 0, stream>>>(n, dLProbeV.ptr);
+    if (cudaGetLastError() != cudaSuccess) return -1;
+    const double one = 1.0, zero = 0.0;
+    if (cudaMemcpyAsync(dLProbeW.ptr, dLProbeV.ptr, sizeof(double) * n, cudaMemcpyDeviceToDevice, stream) != cudaSuccess)
+        return -1;
+    if (cublasDtrmv(cublas, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT, n, dL.ptr, n, dLProbeW.ptr, 1)
+            != CUBLAS_STATUS_SUCCESS
+        || cublasDtrmv(cublas, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_N, CUBLAS_DIAG_NON_UNIT, n, dL.ptr, n, dLProbeW.ptr, 1)
+            != CUBLAS_STATUS_SUCCESS
+        || cublasDgemv(cublas, CUBLAS_OP_N, n, n, &one, dS.ptr, n, dLProbeV.ptr, 1, &zero, dLProbeU.ptr, 1)
+            != CUBLAS_STATUS_SUCCESS)
+        return -1;
+    const double mone = -1.0;
+    double un = 0.0, rn = 0.0;
+    if (cublasDnrm2(cublas, n, dLProbeU.ptr, 1, &un) != CUBLAS_STATUS_SUCCESS
+        || cublasDaxpy(cublas, n, &mone, dLProbeU.ptr, 1, dLProbeW.ptr, 1) != CUBLAS_STATUS_SUCCESS
+        || cublasDnrm2(cublas, n, dLProbeW.ptr, 1, &rn) != CUBLAS_STATUS_SUCCESS)
+        return -1;
+    if (cudaStreamSynchronize(stream) != cudaSuccess) return -1;
+    return (std::isfinite(rn) && std::isfinite(un) && rn <= 1e-10 * un) ? 1 : 0;
 }
 
 bool XtbGpuContext::Impl::pseudoDiagStep(int n)
@@ -5273,14 +5337,38 @@ bool XtbGpuContext::computeIntegrals(const double* xyz_bohr)
         info = 0;
         I.profMark("integrals: Cholesky of S (multi-GPU)");
     } else {
-        if (cusolverDnDpotrf(I.cusolver, CUBLAS_FILL_MODE_LOWER, nao,
-                             I.dL.ptr, nao, I.dPotrfWork.ptr,
-                             I.potrf_lwork, I.dInfo.ptr) != CUSOLVER_STATUS_SUCCESS)
-            return false;
-        if (cudaMemcpyAsync(&info, I.dInfo.ptr, sizeof(int),
-                            cudaMemcpyDeviceToHost, stream) != cudaSuccess)
-            return false;
-        if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
+        // Claude Generated (Oct 2026, parity item 1): every new factor is probed (dense storage; the sparse S has no
+        // dense copy to probe against) and recomputed up to twice when the probe fails; then the call fails and the
+        // caller falls back to the host. CURCUMA_GPU_FAIL_LPROBE=k corrupts the first k factors (fault injection).
+        if (I.lprobe_fail_left == -2) {
+            const char* e = std::getenv("CURCUMA_GPU_FAIL_LPROBE");
+            I.lprobe_fail_left = (e && *e) ? std::atoi(e) : 0;
+        }
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            if (attempt > 0 && !use_sparse
+                && cudaMemcpyAsync(I.dL.ptr, I.dS.ptr, sizeof(double) * nn, cudaMemcpyDeviceToDevice, stream) != cudaSuccess)
+                return false;
+            if (cusolverDnDpotrf(I.cusolver, CUBLAS_FILL_MODE_LOWER, nao,
+                                 I.dL.ptr, nao, I.dPotrfWork.ptr,
+                                 I.potrf_lwork, I.dInfo.ptr) != CUSOLVER_STATUS_SUCCESS)
+                return false;
+            if (cudaMemcpyAsync(&info, I.dInfo.ptr, sizeof(int),
+                                cudaMemcpyDeviceToHost, stream) != cudaSuccess)
+                return false;
+            if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
+            if (info != 0 || use_sparse) break;               // not positive definite is the caller's business
+            if (I.lprobe_fail_left > 0) {
+                --I.lprobe_fail_left;
+                k_lprobe_corrupt<<<1, 1, 0, stream>>>(I.dL.ptr);
+            }
+            const int pr = I.probeCholeskyFactor(nao);
+            if (pr < 0) return false;
+            if (pr == 1) break;
+            ++I.lprobe_recomputes;
+            std::fprintf(stderr, "[WARN] CUDA xTB: Cholesky factor of S failed its probe (|L L^T v - S v| > 1e-10 |S v|), %s\n",
+                         attempt < 2 ? "recomputing" : "giving up (host fallback)");
+            if (attempt == 2) return false;
+        }
         I.profMark("integrals: Cholesky of S");
     }
     ++I.l_generation;
@@ -7967,7 +8055,21 @@ bool XtbGpuContext::computeGradient(const double* P, const double* C, const doub
     m_impl->dEdcn.download(dEdcn_out, nat, stream);
     const bool ok_sync = cudaStreamSynchronize(stream) == cudaSuccess;
     m_impl->profMark("grad: download + sync");
-    return ok_sync;
+    if (!ok_sync) return false;
+    int fix_bad = 0;                                   // range / finiteness flag of the fixed-point accumulation
+    if (cudaMemcpyFromSymbol(&fix_bad, g_gfix_bad, sizeof(int)) != cudaSuccess) return false;
+    if (fix_bad != 0) {
+        const int zero = 0;
+        cudaMemcpyToSymbol(g_gfix_bad, &zero, sizeof(int));
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            std::fprintf(stderr, "[WARN] CUDA xTB gradient: a contribution was not finite or outside the fixed-point "
+                                 "range (+-2048 Eh/Bohr); the device gradient is rejected\n");
+        }
+        return false;
+    }
+    return true;
 }
 
 bool XtbGpuContext::setResidentOpenShell(double n_alpha, double n_beta)
