@@ -1,0 +1,12 @@
+# extra (non-default) RI-JK runs with the stored/streamed tensor, 24 threads
+curcuma hf cpu_rijk_stored alkane40 24
+curcuma hf cpu_rijk_stored alkane80 24
+curcuma hf gpu_rijk_stored alkane40 24
+curcuma hf gpu_rijk_stored alkane80 24
+# larger CCSD case for the 24-thread series (curcuma finished (H2O)10 in < 7 min)
+curcuma ccsd cpu water12 24
+orca ccsd nori water12 24
+pyscf ccsd exact water12 24
+# canonical RI-MP2 reference for LMP2 (RI-MP2 needs the stored tensor: 16.9 GB at C40H82 > default 16 GB limit)
+curcuma rimp2 gpu_bigri alkane40 24
+curcuma rimp2 gpu_bigri alkane80 24

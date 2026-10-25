@@ -14,6 +14,8 @@
 - Reihenfolge und Abhaengigkeiten: WP11 (kanonisches MP2, O(N^5)) zuerst, dann WP10 (RI) und RI-MP2, danach
   WP13 (RCCSD); WP12 (MP3-MP5) ist **gestrichen** (Betreiber, Okt 2026: gemeint war MP2). WP14 ist die Auswertung
   der Schwarz-Frage.
+- **Laufzeitvergleich mit ORCA 6.1 und PySCF 2.14** (HF, RI-JK, RI-MP2, LMP2/DLPNO-MP2, CCSD; 1 und 24 Threads,
+  GPU; Okt 2026, 🤖 AI-generated, ⚙️ machine-tested, eine Maschine): [../QM_TIMING_ORCA_PYSCF_2026-10.md](../QM_TIMING_ORCA_PYSCF_2026-10.md).
 
 ## Warum diese Reihenfolge
 
