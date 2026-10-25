@@ -43,7 +43,8 @@ A chain is one fragment, so the net charge is spread by electronegativity. With 
 row `sum(q_i) = Q_g`; the atoms outside all groups form one more group with the remaining charge. File:
 `{"groups": [{"atoms": [0-based indices], "charge": 1.0}, ...]}`. It reuses the override of the `frag_charge_model`
 variants (`GFNFF::setFragmentOverride`), so Phase 1 and Phase 2 and the gradient use the same constraint matrix.
-Inside one connected molecule, or with several fragments when every group is a union of whole fragments (else rejected; used by
+Inside one connected molecule, or with several fragments when every group is a union of whole fragments (else rejected; for groups
+inside a fragment next to other fragments see "Solvated polymer" below; used by
 `ionpairs`, [FRAG_CHARGE_MODEL.md](FRAG_CHARGE_MODEL.md)); groups that overlap, fall outside the molecule or leave an inconsistent total are
 rejected with an error and the run continues without groups. Topology cache is bypassed, the GPU method falls back to the CPU
 (`requestsCpuFallback`; the GPU edit is not compiled in the CPU build).
@@ -167,8 +168,45 @@ WTMAD-2 worse, 93.0-93.6 against 92.595; blend: see [FRAG_CHARGE_MODEL.md](FRAG_
 vault `Labor/curcuma Ladungsgruppen im EEQ`; diffs `_artefacts/2026-10-23_..._ammonium-dxi-nachgebaut.patch`, `..._onium-shifts.patch`,
 `..._onium-addon-fit.patch`, `2026-10-24_..._ionpairs-refined-gesamtdiff.patch`. Lesson: a shift on a whole constraint group is a gauge.
 
+## Solvated polymer: `"rest": "per_fragment"` (Oct 2026)
+
+Status: AI-generated, machine-tested (test `gfnff_charge_groups`, n=1 system); no human review.
+A chain in water with counter-ions is one fragment (the chain, split into unit groups) plus many fragments (waters, Cl-). The
+default `"rest": "single"` (unchanged) puts all unassigned atoms into ONE group, so charge could flow between waters, and it
+rejects groups that cut a fragment. With the top-level key `"rest": "per_fragment"`:
+- every topological fragment is either covered completely by groups (several groups may split it) or not at all; a partly
+  covered fragment is rejected with a message (no guessing);
+- every uncovered fragment becomes its own EEQ constraint row with charge 0; a charged fragment (Cl-) must be a group in the file;
+- the group charges must sum to the total charge (1e-6); indices 0-based, each atom in at most one group;
+- any violation: error line `GFNFF charge_groups ignored: ...`, the run continues without groups (reference rule).
+
+```
+{"rest": "per_fragment", "groups": [{"atoms": [27, 28, ...], "charge": 1.0}, ..., {"atoms": [180], "charge": -1.0}]}
+```
+
+`scripts/charge_groups_for_solvated.py SYSTEM.xyz --polymer-groups polymer_A_final.groups.json --polymer-offset N0 --anion Cl
+--charge 0 --out groups.json` writes the unit groups (shifted by N0), the chain atoms outside every unit group as one more group
+(`--polymer-rest-charge`, default 0; the polymerbuild file lists only the charged units, and a partly covered chain is rejected),
+and every isolated anion (no neighbour within 1.2 x the sum of covalent radii) with `--anion-charge` (-1). Its fragments come
+from covalent radii, not from the GFN-FF topology; where the two disagree curcuma rejects the file.
+
+Checks ((AB)2 + 24 water + 2 Cl-, 182 atoms, 27 fragments, total charge 0, built at run time with `-ionize`, n=1 system):
+unit sums 1.00000000, Cl- -1.000000, every water |sum| <= 1e-10 e; without groups every fragment of a neutral system is 0 in
+GFN-FF (units +0.006/-0.027, Cl- 0.000); gradient against a central finite difference max 5.9e-6 Eh/A (12 components, perturbed
+0.06 A); rejections (partly covered chain, partly covered water, wrong sum, atom in two groups, unknown `rest`) leave the energy
+of the ungrouped run; one atom permutation: same group sums (3e-10 e), dE 1.73e-4 Eh with groups, 1.68e-4 Eh without (Known
+Issue #34). Many rows: 524 atoms / 143 rows and 1904 atoms / 603 rows give the same energy (8 decimals) with `auto` (ppcg),
+`cholesky` and `ppcg` (1904 atoms: 0.4 s / 1.2 s per single point, -threads 1). The grouped energy is 0.51 Eh above the ungrouped
+one on the 182-atom system (constraints raise the EEQ energy, see the accuracy test above).
+
+Limits: the groups are fixed per GFNFF instance at the first topology (code reading, not run in MD): a later change of the
+fragmentation (proton transfer, Cl- binding an H) keeps the original rows, no message, no re-check; with the default
+`topology_mode constant` the topology is frozen as well. No periodic system tested. GPU: the GPU method falls back to the CPU
+(as for every group file, not run). A Cl- whose GFN-FF coordination number is exactly 0 (nearest H at 3.2 A: CN 0; at 2.2 A: CN > 0, both measured) gets a
+wrong gradient from the reference CN chain rule (TODO.md, "Coulomb-CN-Kettenregel"); in the check above the Cl- have neighbours.
+
 ## Not done
 
 - Charge in the optimisation steps of the build (would need the partial charge of each growing chain at every step and every join).
 - Groups in the optimisation steps of the build (they would need the groups of each growing chain), GPU.
-- Other charge models than the three above, other polyelectrolytes, solvated chains.
+- Other charge models than the three above, other polyelectrolytes; solvated chains only as above (no MD campaign).

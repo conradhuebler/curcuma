@@ -16,7 +16,7 @@ Stand.
 
 
 
-- **`-gfnff.charge_groups` auf der GPU** (2026-10-23): GPU-Methode faellt auf die CPU zurueck (Aenderung in `gfnff_gpu_method_impl.h` nicht uebersetzt, nicht gelaufen); mehrere Fragmente nur, wenn jede Gruppe eine Vereinigung ganzer Fragmente ist (2026-10-24).
+- **`-gfnff.charge_groups` auf der GPU** (2026-10-23): GPU-Methode faellt auf die CPU zurueck (Aenderung in `gfnff_gpu_method_impl.h` nicht uebersetzt, nicht gelaufen); mehrere Fragmente nur, wenn jede Gruppe eine Vereinigung ganzer Fragmente ist (2026-10-24) oder mit `"rest": "per_fragment"` (2026-10-25).
 
 - **`-gfnff.charge_groups auto`: offene Grenzen** (2026-10-23): nur Kationen (Anionen, Carbenium fehlen); nur ein Fragment (Ionenpaare, S30L-CI 24/27/28 nicht erfasst); Gruppe einmal je Instanz, kein Neu-Gruppieren bei Bindungsbruch (unstetig, nicht gelaufen); GPU nicht gelaufen. Gruppenausdehnung (Radius 2, 14 Atome) offen (Schritt 3, Potentialmass). [docs/POLYMERBUILD_CHARGE.md](docs/POLYMERBUILD_CHARGE.md)
 
@@ -77,8 +77,14 @@ Stand.
   Protonentransfer-TS. Falsifikator-Paket im Vault; dessen `species/*.xyz` passen bei 85/124 Spezies nicht zu den ORCA-Energien (vor Nutzung ersetzen).
 - **Fragmentreihenfolge im Mehrfragment-EEQ**: IL16/144 (neutrales Ionenpaar) ändert beim Vertauschen der Fragmentreihenfolge die Energie um
   -2,4e-4 Eh und Ladungen um 7,8e-3 e, ohne Schalter, auf allen Lösern; mit `ionpairs` -4,1e-4 Eh; 230/187/008: 0 (n=1 je, 2026-10-24, nicht eingegrenzt).
-- **`frag_charge_model ensemble`, Gradient**: PDMAEMA (AB)3 (+3, gestört) plus Cl- 3,2 A vor einem N-H (+2, zwei Fragmente): Gradient gegen
-  zentrale Finite Differenz auf dem Cl 3,9e-3 Eh/A daneben, auch ohne jeden Schalter; mit `reference` 1,0e-5 (n=1 Struktur, 2026-10-23, nicht eingegrenzt).
+- **Coulomb-CN-Kettenregel bei CN = 0** (2026-10-25, eingegrenzt, nicht korrigiert): `ff_workspace.cpp` TERM 1b `qtmp = q*cnf/(2 sqrt(cn)+1e-16)`
+  (= pprcht `gfnff_engrad.F90:369`): geladenes Atom mit CN exakt 0 (`0.5*(1+erf)` = 0, `dcn` nicht) gibt Scheinkraft; Cl-...H2O (H-Cl 3,2 A) FD 2,8e-2 Eh/A
+  (pprcht gleich), (AB)3+Cl- 3,9e-3, linear in q(Cl), auch mit Dateigruppen. Vorschlag `qtmp = 0` bei `cn == 0` (nur Gradient, Schalter): Betreiberentscheidung.
+- **`frag_charge_model ensemble` bei Polymer^n+ + Cl-** (2026-10-25, n=1 je): Einheit nur +1, daher Q = +1 aus (AB)2 (+2) und Cl- als Polymer 0 / Cl +1
+  (Paritätsregel), (AB)3+Cl-: Polymer +1 / Cl +1. NVE 1 ps, 50 K: Etot-Sprünge bis -0,093 Eh (4 > 1e-3), der erste bei H(N)...Cl 1,65 A;
+  `reference` und Dateigruppen 1e-5 bzw. 2e-7 Eh/ps. Ursache des Sprungs in der MD nicht eingegrenzt. [docs/FRAG_CHARGE_MODEL.md](docs/FRAG_CHARGE_MODEL.md)
+- **`charge_groups` `"rest": "per_fragment"`** (2026-10-25): Gruppen je Instanz eingefroren, geänderte Fragmentierung in der MD wird nicht erkannt
+  (nur Codelesen); Fragmente von `scripts/charge_groups_for_solvated.py` aus Kovalenzradien, nicht aus der GFN-FF-Topologie; periodisch, GPU, MD nicht gelaufen.
 
 ## 2. Leistung
 
