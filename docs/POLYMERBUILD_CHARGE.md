@@ -258,6 +258,45 @@ Without groups the Cl stay neutral and lose water (1-6 within 3.5 A, nearest H u
 from the end (thermostat off via the restart file, COM removal left on): Etot + wall -1.5e-3 Eh with and without groups.
 Not checked: equilibration, density, longer runs, Cl- binding to N-H (the groups would not follow it), periodic systems, GPU.
 
+## Cl- at the N-H: contact pair and short distances (Oct 2026, n=1 per setting)
+
+Status: AI-generated runs, criteria written down before any result; no human review. V0 = default, V2 = group file (solute +1,
+Cl- -1, `rest per_fragment`) + `cn_zero_guard`; CPU, `-gfnff.cache_topology false`.
+
+Rigid scan (B1 unit + Cl- + 4 H2O, 42 atoms, xtb GFN2 opt: H...Cl 1.87 A; Cl moved along N->H from 3.2 to 1.2 A, 21 points,
+all other atoms fixed; ORCA 6.1 r2SCAN-3c TightSCF + Hirshfeld, GFN2 for context). Energies relative to 3.2 A, kcal/mol:
+- Printed fragment count (pass 1) 6 -> 5 between 1.7 and 1.6 A for V0 and V2; the group file is accepted at all 21 points
+  (solute + Cl is then one fragment split by two groups), no rejection, no NaN; Cl never at CN = 0 (guard changes nothing).
+- Steps are bond detections, not charges (`CURCUMA_BONDDUMP`, term split): V0 +34.2 at 1.7 -> 1.6 (H-Cl bond in both
+  q-loop passes; bond term +57.8, Coulomb -14.5). V2 +49.7 at 1.8 -> 1.7 (bond +63.6): pass 2 shrinks the radii with the
+  group charges, q(Cl) = -1 enlarges the Cl radius, so the H-Cl bond appears 0.1 A earlier, while the pass-1 fragment count
+  still reads 6; V2 also -21.2 at 1.3 -> 1.2 (pass 2 adds an N-Cl bond at 2.29 A). ORCA and GFN2 have no step (smooth).
+- Deviation from ORCA (curve minus ORCA curve), MAE: 3.1-1.9 A (n=13) V0 17.35, V2 1.12, GFN2 1.92; 1.8-1.2 A (n=7) V0
+  30.89, V2 29.01, GFN2 16.34. Minimum: ORCA 2.0 A (-27.9), V2 2.1 (-25.8), GFN2 1.9 (-33.8), V0 2.5 (-2.5).
+- Charge sums solute / Cl / waters at 3.2, 1.9, 1.4 A: Hirshfeld +0.70/-0.69/-0.01, +0.52/-0.35/-0.17, +0.37/-0.19/-0.18;
+  GFN2 Mulliken +0.98/-0.99/+0.01, +0.88/-0.82/-0.06, +0.73/-0.65/-0.08; V2 +1/-1/0 everywhere; V0 0/0/0 down to 1.7 A,
+  then +0.38 ... +0.47 / -0.38 ... -0.47 (charge flows inside the merged fragment). ORCA SCF converged at all points
+  (13-15 cycles); geometry rigid, so no proton can move; Mayer B(H-Cl) > B(N-H) only at 1.3 and 1.2 A.
+
+NVE MD of B1 (66 atoms, contact start H...Cl 1.98 A, 5 ps, dt 0.5 fs, 250 K start, no wall, 1 thread): `topology_mode auto`
+rebuilt the topology 666-711 times and gave trajectories bit-identical to `constant` (no bond change occurred). Drift
+-2.9e-7 (V0) / +7.7e-7 (V2) Eh/ps, no Etot jump > 1e-3 Eh, no NaN. V0: the neutral Cl leaves the cluster (18 A at 5 ps).
+V2: H...Cl 1.98-2.85 A, mean 2.31 (5 fs frames); 14 fragments and no rejection in 50/50 frames; sums exact. xtb GFN2 MD
+(context): with SHAKE 1.75-2.07, mean 1.91 A; without SHAKE (0.5 fs) mean 1.82 A, 11 % of frames below 1.65 A, N-H up to
+1.36 A, proton never closer to Cl than to N (100 frames). GFN-FF with groups keeps the Cl- about 0.4-0.5 A further out.
+
+Droplet (2 ps end frame of the probe run, one Cl- set to 1.9 A on an N-H, 2 waters removed, 2666 atoms, new group file;
+2 ps, 300 K CSVR, 8 threads): groups constant / auto / no groups: 66 / 108 / 48 ms per step (machine shared), H...Cl mean
+2.40 / 2.40 / 2.66 A, never below 1.65 A; 804 fragments at start and end, no rejection, no NaN; end frame with groups: units
++1.00000000 x5, Cl- -1.00000000 x5, waters |sum| <= 1e-10. auto and constant agree to 6 decimals up to 0.75 ps and diverge
+from 0.8 ps (2e-6 Eh, then chaotic); a rerun of constant reproduces itself through 0.95 ps, so the rebuilds cause it (not
+root-caused).
+
+Meaning: the frozen groups were not tested by a change of fragmentation during MD (no run came below 1.9 A). In a fresh
+topology at 1.6-1.7 A the bond detection gives a 34-50 kcal/mol step with or without groups; `auto` would rebuild the
+topology there without rebuilding the bonded terms and, with groups, keep the original constraint rows without a check
+(code reading, not run).
+
 ## Recommended run recipe
 
 Build the chain with `-polymerbuild` (writes `polymer_A_final.groups.json`), solvate it (water first, then
