@@ -610,6 +610,9 @@ bool GFNFFGpuMethodImpl<Backend>::setMolecule(const Mol& mol)
     // user EEQ charge groups (-gfnff.charge_groups) are implemented and checked on the CPU method only
     if (m_gfnff->hasUserChargeGroups())
         m_cpu_fallback_requested = true;
+    // -gfnff.cn_zero_guard: the device kernels (k_subtract_qtmp) keep the reference TERM 1b formula
+    if (m_gfnff->cnZeroGuardRequested())
+        m_cpu_fallback_requested = true;
 
     CitationRegistry::cite("gfnff");
     CitationRegistry::cite("d4", "gfnff");

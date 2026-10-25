@@ -308,6 +308,8 @@ public:
     void setPool(CxxThreadPool* pool) { m_pool = pool; }
     /// Claude Generated (Oct 2026): exact far-field shortcut of the Coulomb pair loop (see calcCoulomb).
     void setFarfieldShortcut(bool v) { m_farfield_shortcut = v; }
+    /// Claude Generated (Oct 2026): TERM 1b chain-rule term set to 0 at CN_i <= 0 (gfnff.cn_zero_guard, see postProcess).
+    void setCnZeroGuard(bool v) { m_cn_zero_guard = v; }
     int numThreads() const { return m_num_threads; }
 
     // Term enable flags (match ForceField flags)
@@ -455,6 +457,8 @@ private:
     double m_coulomb_implicit_rcut = std::numeric_limits<double>::infinity();  // no cutoff, as the reference (Sep 2026)
     /// Claude Generated (Oct 2026): skip erf/exp for gamma_ij*r >= 6.5 (erf = 1 exactly in FP64), see calcCoulomb.
     bool   m_farfield_shortcut = true;
+    /// Claude Generated (Oct 2026): opt-in, default false = reference formula (gfnff.cn_zero_guard).
+    bool   m_cn_zero_guard = false;
 
     // Term-enable flags
     bool m_dispersion_enabled = true;

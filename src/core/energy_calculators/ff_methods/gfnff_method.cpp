@@ -4473,6 +4473,7 @@ bool GFNFF::initializeForceField()
         m_workspace = std::make_unique<FFWorkspace>(num_threads);
         m_workspace->setAtomTypes(m_atoms);
         m_workspace->setFarfieldShortcut(m_parameters.value("farfield_shortcut", true));  // Oct 2026; fallback = PARAM default
+        m_workspace->setCnZeroGuard(m_parameters.value("cn_zero_guard", false));          // Oct 2026; fallback = PARAM default (reference)
 
         // Keep a copy for external consumers (full pair lists only when a GPU wrapper asked
         // for them, bonded terms otherwise), then MOVE the set into the workspace. The former

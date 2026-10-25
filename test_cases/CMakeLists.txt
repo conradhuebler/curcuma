@@ -773,4 +773,12 @@ if(Python3_Interpreter_FOUND)
                      ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_charge_groups.py
                      $<TARGET_FILE:curcuma> ${CMAKE_SOURCE_DIR})
     set_tests_properties(gfnff_charge_groups PROPERTIES TIMEOUT 600 LABELS "gfnff;charge")
+
+    # Claude Generated (Oct 2026): opt-in -gfnff.cn_zero_guard (Coulomb TERM 1b at CN = 0, isolated Cl-);
+    # energy unchanged, FD gradient check; docs/KNOWN_ISSUES_ARCHIVE.md.
+    add_test(NAME gfnff_cn_zero_guard
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_cn_zero_guard.py
+                     $<TARGET_FILE:curcuma> ${CMAKE_SOURCE_DIR})
+    set_tests_properties(gfnff_cn_zero_guard PROPERTIES TIMEOUT 300 LABELS "gfnff")
 endif()
