@@ -202,8 +202,14 @@ one on the 182-atom system (constraints raise the EEQ energy, see the accuracy t
 Limits: the groups are fixed per GFNFF instance at the first topology (code reading, not run in MD): a later change of the
 fragmentation (proton transfer, Cl- binding an H) keeps the original rows, no message, no re-check; with the default
 `topology_mode constant` the topology is frozen as well. No periodic system tested. GPU: the GPU method falls back to the CPU
-(as for every group file, not run). A Cl- whose GFN-FF coordination number is exactly 0 (nearest H at 3.2 A: CN 0; at 2.2 A: CN > 0, both measured) gets a
-wrong gradient from the reference CN chain rule (TODO.md, "Coulomb-CN-Kettenregel"); in the check above the Cl- have neighbours.
+(as for every group file, not run).
+
+Isolated ion: a Cl- whose GFN-FF coordination number is exactly 0 (nearest H at 3.2 A: CN 0; at 2.2 A: CN > 0, both measured)
+gets a spurious force from the reference CN chain rule (Known Issue #39 in [KNOWN_ISSUES_ARCHIVE.md](KNOWN_ISSUES_ARCHIVE.md)),
+largest with an H at about 3.1-3.4 A. In the 182-atom check above the Cl- have neighbours; a Cl- with a first hydration shell
+(H at about 2.2 A) is at CN > 0 and the switch changes nothing (measured on Cl- ... H2O and (AB)2 + Cl- + 10 H2O only). For a Cl- that can be without neighbours (gas-phase complex, few waters, ion leaving a chain) set
+`-gfnff.cn_zero_guard true`: gradient only, energy unchanged; the GPU method then falls back to the CPU method (not run on a
+GPU). (AB)3 + Cl- with groups +3/-1: FD error 3.86e-3 -> 1.9e-6 Eh/A; NVE Cl- + 2 H2O: Etot max-min 3.1e-3 -> 2.6e-5 Eh (n=1 each).
 
 ## Not done
 

@@ -4,6 +4,10 @@
 **Implementation**: AI-generated, machine-tested — **human production testing pending**
 **Location**: `src/core/energy_calculators/ff_methods/`
 
+## Isolated ion gradient, `-gfnff.cn_zero_guard` (Oct 25, 2026) 🤖⚙️
+
+- Opt-in (default = reference): Coulomb TERM 1b chain-rule term 0 at CN = 0; removes a spurious force on an isolated ion (Cl- ... H2O, H-Cl 3.2 A: FD 6.6e-4 -> 1.5e-5 Eh/A), energy unchanged, GPU falls back to CPU. Known Issue #39 in [KNOWN_ISSUES_ARCHIVE.md](KNOWN_ISSUES_ARCHIVE.md).
+
 ## xtb library regression gate (Oct 11, 2026) 🤖⚙️
 
 - ctest `xtb_library_energies` (label `gfnff;sqm`, CPU, 4 threads): gfnff and gfn2 single points vs the stored xtb 6.7.1 energies in `test_cases/reference_data/xtb_library_energies.json`; no xtb run at test time.

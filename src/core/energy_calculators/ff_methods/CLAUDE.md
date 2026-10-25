@@ -37,6 +37,7 @@ Each item was a real defect; evidence in [docs/KNOWN_ISSUES_ARCHIVE.md](../../..
 - **`"rest": "per_fragment"`** in a group file: groups may split a fragment, each uncovered fragment is its own neutral row, sum must equal the charge (`completeChargeGroupsPerFragment`).
 - **`-gfnff.charge_groups auto`**: `perceiveOniumCentres` (NR4+/R3O+, one fragment, charge >= 1) makes +1 groups within `charge_group_radius` bonds, then the file path; perceived once per instance, off by default (🤖, ⚙️).
 - **`-gfnff.charge_groups ionpairs`** (experimental): neutral systems; onium fragments +1, odd-electron fragments -1 (parity), groups read from the final topology and applied from pass 1 (`buildIonPairChargeGroups`, end of `calculateTopologyInfo`); not for shared-proton reactions ([docs/FRAG_CHARGE_MODEL.md](../../../../docs/FRAG_CHARGE_MODEL.md)).
+- **`-gfnff.cn_zero_guard`** (opt-in): TERM 1b in `FFWorkspace::postProcess` is 0 at CN == 0 (isolated ion); gradient only, GPU falls back to CPU (Known Issue #39).
 - **Topology cache** (`<basename>.topo.json`): delete it before re-measuring after any topology or charge change.
 - **No numerical path may depend on the verbosity level** (#38) or on thread arrival order (#36).
 - **Element-indexed tables**: check the length against the highest Z used (#22).
