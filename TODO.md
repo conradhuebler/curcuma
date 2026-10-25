@@ -105,9 +105,8 @@ Stand.
 - **`-scf_precond frag` auf der GPU, offen** (2026-10-11): umgesetzt nur für die vollresidente CUDA-Schleife ([docs/SCF_PRECOND.md](docs/SCF_PRECOND.md), Abschnitt GPU). Mit Warnung ignoriert: ROCm, Vulkan, hostgetriebene CUDA-Schleife
   (Mischer auf dem Host, der CPU-Hook wäre dort direkt nutzbar), Mehr-GPU-SCF-Aufteilung (Eigenlöser/Dichte; ungetestet, nur ein Gerät hier).
   Ohne Wächter divergiert der unrelaxierte 599-Atom-Cluster mit Mischpräzision (151 Iterationen, harter Fehler, n=3).
-- **Native QM `-gpu cuda` mit `gpu_direct auto`**: `QMEngine::ensureGpuJK` baut die Q-G2-Tabellen (`buildEriGpuTables`), bevor es prüft, ob der n^4-Tensor
-  auf die Karte passt; kostet C40H82 ~8 s, C80H162 ~160 s je Lauf (HF, RI-MP2, LMP2). Umgehung `-qm.gpu_direct on`. Weitere Engpässe (RI-JK über 16 GB
-  `batched`, RI-MP2 bricht ab C40H82 am Standardlimit ab; CPU-HF seit 25.10. bei 1 Thread 1,1x ORCA, Rest = Iterationszahl): [docs/QM_TIMING_ORCA_PYSCF_2026-10.md](docs/QM_TIMING_ORCA_PYSCF_2026-10.md).
+- **Native QM, offene Engpässe der Zeitstudie** (2026-10-25): RI-JK über 16 GB Tensor `batched` (langsamer als ORCA/PySCF), RI-MP2 bricht ab C40H82 am Standardlimit
+  `ri_max_memory_mb` ab; CPU-HF bei 1 Thread 1,1x ORCA (Rest = Iterationszahl beim dP-Test 1e-7): [docs/QM_TIMING_ORCA_PYSCF_2026-10.md](docs/QM_TIMING_ORCA_PYSCF_2026-10.md).
 
 ## 3. Tests und Validierung
 

@@ -79,6 +79,9 @@ matrices, compile-time class sizes) and a Schwarz-sorted quartet loop: one direc
 thread, CPU HF C80H162 712 -> 231 s on 24 threads; energies unchanged to 10 decimals
 ([NATIVE_QM_IMPLEMENTATION.md](NATIVE_QM_IMPLEMENTATION.md#cpu-eri-kernel-hermite-matrix-mcmurchie-davidson-oct-2026),
 [QM_TIMING_ORCA_PYSCF_2026-10.md](QM_TIMING_ORCA_PYSCF_2026-10.md)).
+Same day: with `-gpu cuda` and `-qm.gpu_direct auto`, `ensureGpuJK` decides from the card's total memory
+whether the Q-G2 tensor can fit before building `buildEriGpuTables` (was: tables first, ~8 s at C40H82 and
+~160 s at C80H162 for nothing); HF C80H162 197 -> 30 s with the default flags.
 
 **Incremental-build floor (Oct 16, 2026; AI-generated, machine-tested).** An incremental build on
 dP is screened with the same absolute threshold as a full one (`Q_ab Q_cd max|dP| < eri_screening`),

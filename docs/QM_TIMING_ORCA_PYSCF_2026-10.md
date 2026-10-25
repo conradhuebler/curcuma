@@ -372,3 +372,22 @@ runs): anthracene 1T 37.9 s at the default 1e-6 (15 iterations) and 33.0 s at 1e
 
 Not measured: ORCA and PySCF again on the same day, repetitions (n = 1; the 24-thread runs vary by about
 5-10 % between repeats here), the RI-MP2/LMP2 columns (their SCF part uses the same J/K code), other CPUs.
+
+### GPU default path fixed (Oct 25, 2026)
+
+The trap described under "GPU auto path trap" is fixed: `QMEngine::ensureGpuJK` now compares the stored
+tensor (n^4 * 8 B plus the plugin's margin of 3 n^2 matrices and 256 MB) with the card's total memory before
+it builds any host table; only tensors below that size still build the tables, and the plugin then checks
+the free memory as before. Measured with `-gpu cuda` and otherwise the HF flags of this study (24 threads,
+n = 1; GPU idle, 538 MB used by the desktop):
+
+| system | before (s) | after (s) | `-qm.gpu_direct on` (s) | E_elec |
+|---|---|---|---|---|
+| C40H82 HF | 15.1 | 7.5 | 7.5 | identical to 10 decimals |
+| C80H162 HF | 197.3 | 29.6 | 38.3 (20 iterations: device J/K summation order differs run to run and the incremental-stall switch fired, see Caveats) | identical |
+| C40H82 LMP2 | 25.4 | 17.3 | - | total energy identical (8 decimals) |
+| anthracene HF (tensor fits) | 1.85 | 1.73 | - | identical; stored device tensor as before |
+
+Not measured: the same with another process holding most of the card (tensor below the total but above the
+free memory still builds the tables first, as before), other GPUs, RI-MP2 at C40H82 and above (stops at the
+RI memory limit anyway).

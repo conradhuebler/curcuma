@@ -1217,10 +1217,25 @@ bool QMEngine::ensureGpuJK() const
         std::string why;
         bool ok = true;
         const double tensor_mb = std::pow((double)m_nbf, 4) * 8.0 / 1.0e6;
+        // Fit check BEFORE the host tables (Claude Generated, Oct 2026): the tables of the stored
+        // device tensor include the O(npair^2) quartet list (~8 s at 970 and ~160 s at 1930 basis
+        // functions) and were built even when the n^4 tensor was larger than the whole card. The
+        // card's total memory is a static device property (no context); the plugin's own margin
+        // (3 n^2 matrices + 256 MB) is added. Below the total, the free memory is still checked by
+        // the plugin after the tables exist, as before.
+        const json info = gpu_plugin::deviceInfo(backend, m_gpu_device >= 0 ? m_gpu_device : 0);
+        const double card_mb = info.contains("memory_total_bytes") && info["memory_total_bytes"].is_number()
+            ? info["memory_total_bytes"].get<double>() / 1.0e6
+            : 0.0;
+        const double need_mb = tensor_mb + 3.0 * (double)m_nbf * m_nbf * 8.0 / 1.0e6 + 256.0 * 1.048576;
         if (m_gpu_max_memory_mb > 0.0 && tensor_mb > m_gpu_max_memory_mb) {
             // -qm.gpu_max_memory_mb: decided on the host, no tables built
             ok = false;
             why = fmt::format("ERI tensor {:.1f} MB above -qm.gpu_max_memory_mb {:.1f}", tensor_mb, m_gpu_max_memory_mb);
+        } else if (card_mb > 0.0 && need_mb > card_mb) {
+            ok = false;
+            why = fmt::format("ERI tensor {:.1f} MB does not fit the device memory {:.1f} MB (decided before building "
+                              "the host tables)", tensor_mb, card_mb);
         } else {
             ok = qmint::buildEriGpuTables(m_gto_basis, m_eri_screening, m_Q.size() != 0 ? &m_Q : nullptr, tables, why);
             tables.device_mem_limit_mb = m_gpu_max_memory_mb;
