@@ -13,7 +13,7 @@ GFN1/GFN2 (`GpuScfBackend`, `xtb_native.h:384`). ROCm overrides only `supportsGr
 
 | Path | CUDA | ROCm |
 |---|---|---|
-| `supportsResidentLoop` (+ `Gfn1`, `ResidentPreconditioner`, open shell `k_occupations_uhf`) | yes | GFN2 closed shell since Oct 24, 2026 (WP2, `-xtb.rocm_resident_loop`), GFN1 closed shell since Oct 24, 2026 (WP3, same switch, `supportsResidentLoopGfn1`), open shell GFN1/GFN2 since Oct 24, 2026 (WP4, `setResidentOpenShell`, `k_res_occupations_uhf`, `-xtb.rocm_resident_open_shell`), Broyden seed preconditioner GFN1/GFN2 since Oct 24, 2026 (WP5, `supportsResidentPreconditioner`, `-xtb.rocm_resident_precond`) |
+| `supportsResidentLoop` (+ `Gfn1`, `ResidentPreconditioner` for GFN2 only, open shell `k_occupations_uhf`) | yes (the Broyden seed preconditioner `-scf_precond frag` only for GFN2: `supportsResidentPreconditionerGfn1` is overridden by ROCm alone, see C1) | GFN2 closed shell since Oct 24, 2026 (WP2, `-xtb.rocm_resident_loop`), GFN1 closed shell since Oct 24, 2026 (WP3, same switch, `supportsResidentLoopGfn1`), open shell GFN1/GFN2 since Oct 24, 2026 (WP4, `setResidentOpenShell`, `k_res_occupations_uhf`, `-xtb.rocm_resident_open_shell`), Broyden seed preconditioner GFN1/GFN2 since Oct 24, 2026 (WP5, `supportsResidentPreconditioner`, `-xtb.rocm_resident_precond`) |
 | `supportsDevicePotential` (Coulomb, third order, D4 potential built on the device) | yes | yes since Oct 24, 2026 (WP1, `-xtb.rocm_device_potential`) |
 | `supportsOnTheFlyMultipole`, `supportsStoredMultipoleOnDevice`, multipole matrices built on the device (`k_mp_build_amat`) | yes | stored matrices built on the device since Oct 24, 2026 (WP1, `k_mp_build_amat15`); host copies skipped on the resident loop since Oct 25, 2026 (WP8b, `-xtb.rocm_defer_host_integrals`, `deferHostCopies`); on-the-fly variant since Oct 25, 2026 (WP11, `-xtb.rocm_otf_multipole`, `k_mp_potential_otf`, `k_mp_energy_otf`): with `-gpu_multipole_otf auto` only above the ROCm 4 GB limit (about 5770 atoms, `preferStoredMultipole`; CUDA switches at 1 GB), bit-identical to the stored kernels |
 | `supportsDeviceSolvation` | yes | yes since Oct 24, 2026 (WP6, `-xtb.rocm_device_solvation`); ROCm also takes GFN1 + solvent on the resident loop (`supportsDeviceSolvationGfn1`, CM5 shift), CUDA keeps GFN1 + solvent on its host-driven loop |
@@ -56,6 +56,15 @@ Neither backend: GFN-FF implicit solvent on the device (CPU fallback on both), G
 Not a gap, different algorithm for the same function: device HB detection (ROCm per-row sort `k_hb_*_rows` against CUDA
 `k_hb_detect`), device D4 pair list (`k_disp_rows_*` against CUDA pair build). A comparison of speed and determinism on
 both is worth doing, there is nothing to port.
+
+## C. Found on the re-check of Oct 25, 2026 (code reading of `supports*`, the GFN-FF traits and the PARAM switches; AI)
+
+| # | Path | State |
+|---|---|---|
+| C1 | `-scf_precond frag` for GFN1 on the resident device loop (`supportsResidentPreconditionerGfn1`, SCC vector = q_sh) | ROCm yes; CUDA warns once and ignores the switch (`xtb_precond.cpp:516`), GFN1 runs the preconditioner on the CPU loop only. Opt-in feature, off by default. Not implemented on CUDA. |
+| C2 | Density P = C diag(occ) C^T by `dsyrk` on the occupied columns (`-xtb.rocm_density_syrk`, ROCm opt-in, default off) | CUDA computes the density by GEMM; a `syrk` variant (half the flops) was not tried. Not measured. |
+
+Re-checked and equal: all GFN-FF backend traits except `has_multi_gpu_split` (ROCm false, item A) and `has_device_schur` (ROCm false by design, the device Schur step has its own switch `rocm_device_schur`); the GFN1/GFN2 `supports*` set apart from the rows listed in A and B.
 
 ## Resolution of the `devel/methods` merge that touches this
 
