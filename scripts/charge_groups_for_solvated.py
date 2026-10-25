@@ -115,6 +115,11 @@ def main():
     with open(a.out, "w") as f:
         json.dump({"rest": "per_fragment", "groups": groups}, f, indent=1)
     print(f"written {a.out}: {len(groups)} groups, sum {total:+.6f}")
+    # Claude Generated (Oct 2026): recommended flags (docs/POLYMERBUILD_CHARGE.md, "Recommended run recipe").
+    # cache_topology false and topology_mode constant are what curcuma uses with a group file anyway (a group file
+    # bypasses the topology cache; constant is the default); they are written out so the run does not depend on that.
+    print(f"recommended: -method gfnff -charge {a.charge:g} -gfnff.charge_groups {a.out} -gfnff.cn_zero_guard true "
+          f"-gfnff.cache_topology false -gfnff.topology_mode constant")
 
 
 if __name__ == "__main__":
