@@ -47,6 +47,7 @@ MP2Method::MP2Method(const std::string& variant, const json& config)
 {
     const json ec = QMMethod::engineConfig(config);  // registry qm defaults < top level < dft < qm
     m_engine = std::make_unique<QMEngine>(QMFunctional::HF, ec);
+    m_engine->setTightOrbitals(true);  // correlation energy is first order in the orbital error (Oct 25 2026)
     m_options.frozen_core = readBool(ec, "frozen_core", false);
     if (ec.contains("mp2_max_memory_mb") && ec["mp2_max_memory_mb"].is_number())
         m_options.max_memory_mb = ec["mp2_max_memory_mb"].get<double>();

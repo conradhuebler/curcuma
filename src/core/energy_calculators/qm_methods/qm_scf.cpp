@@ -407,13 +407,19 @@ struct HostDiisStore {
     /// Store F (built from P) in `slot`, form its orthonormal-basis error and return max|e|.
     double push(int slot, const Matrix& Fi, const Matrix& Pi, const Matrix& S, const Matrix& X, int threads)
     {
-        const Eigen::MatrixXd Fc(Fi), Pc(Pi), Sc(S), Xc(X);
-        const Eigen::MatrixXd FPS = gemmThreaded(gemmThreaded(Fc, false, Pc, threads), false, Sc, threads);
-        const Eigen::MatrixXd comm = FPS - FPS.transpose();
-        e[slot] = gemmThreaded(gemmThreaded(Xc, true, comm, threads), false, Xc, threads);
+        e[slot] = orbitalGradient(Fi, Pi, S, X, threads);
         F[slot] = Fi;
         P[slot] = Pi;
         return e[slot].cwiseAbs().maxCoeff();
+    }
+    /// Orbital gradient (= DIIS error) of the closed-shell SCF in the Lowdin-orthonormal basis,
+    /// e = X^T (F P S - S P F) X; zero exactly at a stationary density (Pulay 1982).
+    static Matrix orbitalGradient(const Matrix& Fi, const Matrix& Pi, const Matrix& S, const Matrix& X, int threads)
+    {
+        const Eigen::MatrixXd Fc(Fi), Pc(Pi), Sc(S), Xc(X);
+        const Eigen::MatrixXd FPS = gemmThreaded(gemmThreaded(Fc, false, Pc, threads), false, Sc, threads);
+        const Eigen::MatrixXd comm = FPS - FPS.transpose();
+        return Matrix(gemmThreaded(gemmThreaded(Xc, true, comm, threads), false, Xc, threads));
     }
     Eigen::MatrixXd gram(const std::vector<int>& sl) const
     {
@@ -446,6 +452,53 @@ struct HostDiisStore {
 };
 
 HostDiisStore::~HostDiisStore() = default;
+
+// Claude Generated (Oct 25 2026): SCF convergence test shared by the host and the device loop
+// (-qm.scf_convergence auto|density). Per iteration n the loop feeds
+//   E_n  = 1/2 Tr(P_n (H + F(P_n)))     energy of the density whose Fock matrix was just built,
+//   g_n  = ||X^T (F_n P_n S - S P_n F_n) X||_F   orbital gradient of that density,
+//   dP_n = ||P_(n+1) - P_n||_F           density change of the step just taken.
+// auto: converged when |E_n - E_(n-1)| < thr_E, g_n < thr_G and dP_n < thr_dP (all three, as ORCA's
+// TolE/TolErr/TolRMSP family and PySCF's conv_tol/conv_tol_grad); the loop then finishes with P_(n+1),
+// one step beyond the tested density. The HF energy is stationary, its error is second order in g;
+// gradients and correlation energies are first order, hence the tight thr_G for them (QMEngine
+// m_scf_tight_now). density: dP_n < thr_dP only (the rule before Oct 25 2026).
+// Rationale and measurements: docs/QM_SCF_CONVERGENCE_2026-10.md.
+struct ScfConvergence {
+    bool density_only = false;
+    double thr_dP = 1e-6, thr_E = 1e-9, thr_G = 1e-5;
+    bool have_prev = false;
+    double e_prev = 0.0;
+    double dE = std::numeric_limits<double>::infinity();
+    double grad = std::numeric_limits<double>::infinity();
+
+    /// Feed E_n and g_n of this iteration's Fock build.
+    void observe(double e_n, double g_n)
+    {
+        dE = have_prev ? e_n - e_prev : std::numeric_limits<double>::infinity();
+        e_prev = e_n;
+        have_prev = true;
+        grad = g_n;
+    }
+    /// The energy of the previous build is not comparable (precision or screening phase change).
+    void resetEnergy() { have_prev = false; }
+    bool converged(double delta_P) const
+    {
+        if (!(delta_P < thr_dP)) return false;
+        if (density_only) return true;
+        return std::abs(dE) < thr_E && grad < thr_G;
+    }
+};
+
+ScfConvergence makeConvergence(bool density_only, double thr_dP, double thr_E, double thr_G)
+{
+    ScfConvergence c;
+    c.density_only = density_only;
+    c.thr_dP = thr_dP;
+    c.thr_E = thr_E;
+    c.thr_G = thr_G;
+    return c;
+}
 
 }  // namespace
 
@@ -537,6 +590,8 @@ bool QMEngine::runSCF()
 
     QMScfAccelerator diis(m_diis_subspace, m_scf_mode == "adiis");
     HostDiisStore store(diis.capacity());
+    ScfConvergence conv = makeConvergence(m_scf_convergence == "density", m_scf_threshold, m_scf_energy_threshold,
+                                          m_scf_tight_now ? m_scf_gradient_threshold_tight : m_scf_gradient_threshold);
     const auto t_scf0 = std::chrono::steady_clock::now();
     double t_fock_ms = 0.0, t_eig_ms = 0.0;
 
@@ -592,17 +647,23 @@ bool QMEngine::runSCF()
         // DIIS: push the commutator error e = F P S - S P F every iter once the
         // history can support it; use the extrapolated Fock for the diagonalization.
         Matrix fock_use = fock;
+        double grad_norm = 0.0;  // ||e||_F of this Fock build (convergence test)
         if (use_diis && iter >= m_diis_start) {
             // FP32 RI builds (mixed precision) and FP32 direct builds (Q-G5) count as non-full: dropped
             // when the SCF switches to FP64
             const int slot = diis.push(cadence.since_full == 0 && !riLowPrecision() && !cadence.fp32);
             diis.setLastError(store.push(slot, fock, m_density, m_S, m_X, m_threads));
+            grad_norm = store.e[slot].norm();
             Eigen::MatrixXd G, M;
             Eigen::VectorXd a;
             if (diis.needsDiis()) G = store.gram(diis.slots());
             if (diis.needsAdiis()) store.adiisData(diis.slots(), a, M);
             fock_use = store.combine(diis.slots(), diis.coefficients(G, a, M));
+        } else if (!conv.density_only) {
+            grad_norm = HostDiisStore::orbitalGradient(fock, m_density, m_S, m_X, m_threads).norm();
         }
+        // energy of the density this Fock matrix was built from (variational, unlike Tr(P_new (H + F)))
+        conv.observe(0.5 * m_density.cwiseProduct(m_H + fock).sum(), grad_norm);
 
         // Solve F C = S C eps (Lowdin-reduced standard problem).
         Matrix C;
@@ -636,13 +697,15 @@ bool QMEngine::runSCF()
                 eps.size() > 1 ? eps(1) : 0.0, density_new.norm()));
         }
 
-        if (CurcumaLogger::get_verbosity() >= 1) {  // one line per iteration from level 1 on (was level 3)
-            double e_tmp = 0.5 * (density_new.cwiseProduct(m_H + fock).sum());
-            CurcumaLogger::result(fmt::format("SCF iter {:3d}: dP = {:.3e}, E_elec = {:.10f} Eh", iter + 1, delta_P, e_tmp));
-        }
+        if (CurcumaLogger::get_verbosity() >= 1)  // one line per iteration from level 1 on (was level 3)
+            CurcumaLogger::result(fmt::format("SCF iter {:3d}: E_elec = {:.10f} Eh, dE = {:.2e}, |g| = {:.2e}, dP = {:.3e}",
+                                              iter + 1, conv.e_prev, conv.have_prev && iter > 0 ? conv.dE : 0.0,
+                                              conv.grad, delta_P));
 
         // Never converged on an FP32 RI build (mixed precision): the FP32 noise floor is not the FP64 fixed point
-        if (delta_P < m_scf_threshold && !cadence.early && !cadence.fp32 && !riLowPrecision()) {
+        if (conv.converged(delta_P) && !cadence.early && !cadence.fp32 && !riLowPrecision()) {
+            m_scf_last_dE = conv.dE;
+            m_scf_last_grad = conv.grad;
             riRequestExactBuild();  // mixed-precision RI: the final J/K build is exact FP64
             m_density = density_new;
             m_direct_thr_now = -1.0;
@@ -652,12 +715,19 @@ bool QMEngine::runSCF()
                                t_fock_ms, t_eig_ms, std::string());
             return true;
         }
-        if (cadence.endEarly(delta_P, m_scf_early_switch)) reportEarlyEnd(iter, delta_P);
+        if (cadence.endEarly(delta_P, m_scf_early_switch)) {
+            reportEarlyEnd(iter, delta_P);
+            conv.resetEnergy();  // next energy from a build with another screening threshold
+        }
         if (cadence.endFP32(delta_P, gpuFP32Switch())) {
             reportFP32End(iter, delta_P, cadence.fp32_builds);
             diis.dropIncrementalEntries();  // Fock matrices of FP32 builds leave the subspace
+            conv.resetEnergy();
         }
-        if (riEndLowPrecision(delta_P)) diis.dropIncrementalEntries();  // FP32 -> exact FP64 RI builds (host loop only: RI never runs the device loop)
+        if (riEndLowPrecision(delta_P)) {  // FP32 -> exact FP64 RI builds (host loop only: RI never runs the device loop)
+            diis.dropIncrementalEntries();
+            conv.resetEnergy();
+        }
         if (cadence.observe(delta_P)) {
             reportIncrementalStall(iter, cadence.best_dP, m_eri_screening);
             diis.dropIncrementalEntries();  // keep only Fock matrices from full builds
@@ -687,6 +757,7 @@ void QMEngine::finishConvergedSCF(const Matrix& C, const Vector& eps, int n_occ,
     buildJK(m_density, J, K);
     m_fock = m_H + J - 0.5 * K;
     m_scf_converged = true;
+    m_scf_tight_done = m_scf_tight_now;
 
     // Final energy + components from the converged density and Fock.
     m_et = m_density.cwiseProduct(m_T).sum();
@@ -711,8 +782,13 @@ void QMEngine::finishConvergedSCF(const Matrix& C, const Vector& eps, int n_occ,
 
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::success(fmt::format(
-            "QM HF SCF converged in {} iterations (dP = {:.3e}, start: {}{})",
-            iterations, delta_P, m_last_warm_start ? "previous geometry" : m_scf_guess,
+            "QM HF SCF converged in {} iterations (dP = {:.3e}{}, start: {}{})",
+            iterations, delta_P,
+            m_scf_convergence == "density"
+                ? std::string()
+                : fmt::format(", dE = {:.1e}, |g| = {:.1e} < {:.0e}", m_scf_last_dE, m_scf_last_grad,
+                              m_scf_tight_now ? m_scf_gradient_threshold_tight : m_scf_gradient_threshold),
+            m_scf_continue ? "tightened from the converged density" : (m_last_warm_start ? "previous geometry" : m_scf_guess),
             device_stats.empty() ? std::string() : ", device-resident loop"));
         CurcumaLogger::info(fmt::format("QM: SCF loop {:.1f} ms, of which Fock (J/K) builds {:.1f} ms, eigensolve{} {:.1f} ms{}",
             loop_ms, fock_ms, device_stats.empty() ? "" : " + density", eig_ms,
@@ -782,6 +858,8 @@ int QMEngine::runSCFDevice(int n_occ, bool direct, bool use_diis, double damping
     m_scf_converged = false;
     m_scf_iterations = 0;
     DirectFockCadence cadence(direct, useEarlyScreening(), useGpuFP32Phase(direct));
+    ScfConvergence conv = makeConvergence(m_scf_convergence == "density", m_scf_threshold, m_scf_energy_threshold,
+                                          m_scf_tight_now ? m_scf_gradient_threshold_tight : m_scf_gradient_threshold);
     // screening of the device direct builder (early phase / eri_screening, primitive mode) and the
     // integral precision (Q-G5: FP32 phase / FP64)
     auto setJKScreening = [&](bool early) {
@@ -810,8 +888,10 @@ int QMEngine::runSCFDevice(int n_occ, bool direct, bool use_diis, double damping
 
         // DIIS / ADIIS: history on the device, subspace solve here
         const auto t_d0 = std::chrono::steady_clock::now();
+        int diis_slot = -1;  // slot holding this build's error vector (convergence test), -1 = none
         if (use_diis && iter >= m_diis_start) {
             const int slot = diis.push(cadence.since_full == 0 && !fp32_build);  // FP32 entries leave at the switch
+            diis_slot = slot;
             double err = 0.0;
             if (!dev.diisPush(slot, err)) return fail("DIIS error vector");
             diis.setLastError(err);
@@ -835,6 +915,12 @@ int QMEngine::runSCFDevice(int n_occ, bool direct, bool use_diis, double damping
         } else if (!dev.selectFock(nullptr, nullptr, 0)) {
             return fail("Fock selection");
         }
+        // convergence scalars of this build (host loop: conv.observe), Claude Generated (Oct 25 2026)
+        if (!conv.density_only) {
+            double e_n = 0.0, g_n = 0.0;
+            if (!dev.scfMeasures(diis_slot, e_n, g_n)) return fail("SCF energy / orbital gradient");
+            conv.observe(e_n, g_n);
+        }
 
         const double diis_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_d0).count();
 
@@ -845,19 +931,25 @@ int QMEngine::runSCFDevice(int n_occ, bool direct, bool use_diis, double damping
         const double eig_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_e0).count();
         t_eig_ms += eig_ms;
 
+        // printed energy: E(P_n) of this build (auto), as the host loop; density mode keeps Tr(P_new (H + F)) / 2
+        const double e_print = conv.density_only ? e_elec : conv.e_prev;
+        const std::string conv_txt = conv.density_only ? std::string()
+                                                       : fmt::format(", dE = {:.2e}, |g| = {:.2e}", iter > 0 ? conv.dE : 0.0, conv.grad);
         if (CurcumaLogger::get_verbosity() == 1 || CurcumaLogger::get_verbosity() == 2)
-            CurcumaLogger::result(fmt::format("SCF iter {:3d}: dP = {:.3e}, E_elec = {:.10f} Eh (device, Fock {:.0f} ms {}{})",
-                                              iter + 1, delta_P, e_elec, fock_ms, full ? "full" : "incremental",
+            CurcumaLogger::result(fmt::format("SCF iter {:3d}: E_elec = {:.10f} Eh{}, dP = {:.3e} (device, Fock {:.0f} ms {}{})",
+                                              iter + 1, e_print, conv_txt, delta_P, fock_ms, full ? "full" : "incremental",
                                               fp32_build ? ", FP32" : ""));
         if (CurcumaLogger::get_verbosity() >= 3)
             CurcumaLogger::param(fmt::format("SCF iter {}", iter + 1),
-                                 fmt::format("dP = {:.3e}, E_elec = {:.10f} Eh (device; Fock {:.2f} ms ({}{}), DIIS {:.2f} ms, "
+                                 fmt::format("E_elec = {:.10f} Eh{}, dP = {:.3e} (device; Fock {:.2f} ms ({}{}), DIIS {:.2f} ms, "
                                              "eigensolve + density {:.2f} ms)",
-                                             delta_P, e_elec, fock_ms, full ? "full" : "incremental",
+                                             e_print, conv_txt, delta_P, fock_ms, full ? "full" : "incremental",
                                              direct ? fmt::format(", {} quartets", jk->lastQuartets()) : std::string(),
                                              diis_ms, eig_ms));
 
-        if (delta_P < m_scf_threshold && !cadence.early && !cadence.fp32) {
+        if (conv.converged(delta_P) && !cadence.early && !cadence.fp32) {
+            m_scf_last_dE = conv.dE;
+            m_scf_last_grad = conv.grad;
             cadence.fp32 = false;
             setJKScreening(false);
             Matrix P(n, n), C(n, n);
@@ -871,10 +963,14 @@ int QMEngine::runSCFDevice(int n_occ, bool direct, bool use_diis, double damping
                                fmt::format("{} on {} (state setup {:.1f} ms)", dev.stats(), dev.name(), setup_ms));
             return 1;
         }
-        if (cadence.endEarly(delta_P, m_scf_early_switch)) reportEarlyEnd(iter, delta_P);
+        if (cadence.endEarly(delta_P, m_scf_early_switch)) {
+            reportEarlyEnd(iter, delta_P);
+            conv.resetEnergy();
+        }
         if (cadence.endFP32(delta_P, gpuFP32Switch())) {
             reportFP32End(iter, delta_P, cadence.fp32_builds);
             diis.dropIncrementalEntries();  // Fock matrices of FP32 builds leave the subspace
+            conv.resetEnergy();
         }
         if (cadence.observe(delta_P)) {
             reportIncrementalStall(iter, cadence.best_dP, m_eri_screening);
@@ -1087,6 +1183,10 @@ Matrix QMEngine::buildWarmStartGuess() const
 Matrix QMEngine::buildInitialGuess() const
 {
     m_last_warm_start = false;
+    if (m_scf_continue && m_density.rows() == m_nbf && m_density.cols() == m_nbf) {
+        m_last_warm_start = true;  // tightening a converged SCF of this geometry: its density (Oct 25 2026)
+        return m_density;
+    }
     const Matrix warm = buildWarmStartGuess();
     if (warm.size() != 0) {
         m_last_warm_start = true;

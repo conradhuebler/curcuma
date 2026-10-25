@@ -391,3 +391,28 @@ n = 1; GPU idle, 538 MB used by the desktop):
 Not measured: the same with another process holding most of the card (tensor below the total but above the
 free memory still builds the tables first, as before), other GPUs, RI-MP2 at C40H82 and above (stops at the
 RI memory limit anyway).
+
+## After the SCF convergence change (Oct 25, 2026)
+
+> 🤖 AI-generated, ⚙️ machine-tested, n = 1, same machine; ORCA/PySCF not rerun (their numbers are those above).
+
+The RHF now stops on energy change + orbital gradient + a loose density test (`-qm.scf_convergence auto`, default;
+details and the accuracy checks: [QM_SCF_CONVERGENCE_2026-10.md](QM_SCF_CONVERGENCE_2026-10.md)). "Old" is the
+binary of the previous section with this study's `-qm.scf_threshold 1e-7`, "new" the new build without SCF flags
+(note: `scripts/qm_timing/qm_timing.py` still passes `-qm.scf_threshold 1e-7`, which keeps the old tight density
+test because all conditions must hold; drop it to measure the new default).
+
+| system | threads | old: iterations / wall (s) | new: iterations / wall (s) | ORCA nori (s) | new / ORCA | PySCF exact (s) | new / PySCF |
+|---|---|---|---|---|---|---|---|
+| anthracene | 1 | 19 / 48.2 | 12 / 33.2 | 42.7 | 0.78 | 20.3 | 1.64 |
+| C20H42 | 1 | 16 / 129.3 | 11 / 107.3 | 113 | 0.95 | 237 | 0.45 |
+| C40H82 | 1 | 16 / 548.2 | 11 / 472.3 | 488 | 0.97 | 894 | 0.53 |
+| anthracene | 24 | 19 / 2.9 | 12 / 2.1 | 12.7 | 0.17 | 19.5 | 0.11 |
+| C20H42 | 24 | 16 / 8.2 | 11 / 7.0 | 24.8 | 0.28 | 118 | 0.06 |
+| C40H82 | 24 | 16 / 38.4 | 11 / 36.2 | 101 | 0.36 | 96.4 | 0.38 |
+| C20H42 GPU (device loop) | 24 | 16 / 2.4 | 12 / 2.0 | - | - | - | - |
+| C80H162 GPU (device loop) | 24 | 17 / 30.0 | 12 / 25.4 | 471 | 0.05 | 268 | 0.09 |
+
+E_elec identical to the 10 printed decimals in every row except C20H42 1 thread (1e-10). The 1-thread target
+(below ORCA) is now reached for the CPU exact HF; the wall time falls less than the iteration count (6-31 % vs
+30-37 %) because the dropped iterations are the cheap incremental ones.

@@ -50,6 +50,17 @@ public:
     /// Diagonalise the selected Fock matrix, P_new = 2 C_occ C_occ^T; returns ||P_new - P||_F
     /// and E_elec = 1/2 Tr(P_new (H + F)) with the (non-extrapolated) F of buildFock().
     virtual bool solveAndDensity(double& delta_P, double& e_elec) = 0;
+    /// Convergence scalars of the current build (Claude Generated, Oct 25 2026): E = 1/2 Tr(P (H + F))
+    /// with the P and the (non-extrapolated) F of buildFock(), and ||e||_F of the orbital gradient
+    /// e = X^T (F P S - S P F) X, read from DIIS slot `slot` (filled by diisPush) or, for slot < 0,
+    /// formed in scratch memory. Same quantities as the host loop's conv.observe().
+    virtual bool scfMeasures(int slot, double& e_elec, double& err_norm)
+    {
+        (void)slot;
+        (void)e_elec;
+        (void)err_norm;
+        return false;
+    }
     /// P := damping P + (1 - damping) P_new.
     virtual bool acceptDensity(double damping) = 0;
     /// P_new (newest = true) or the current P, n x n row-major.

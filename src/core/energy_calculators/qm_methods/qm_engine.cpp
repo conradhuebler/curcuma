@@ -170,6 +170,18 @@ QMEngine::QMEngine(QMFunctional functional, const json& config)
         m_scf_max_iter = static_cast<int>(std::lround(config["scf_max_iterations"].get<double>()));
     if (config.contains("scf_threshold") && config["scf_threshold"].is_number())
         m_scf_threshold = config["scf_threshold"].get<double>();
+    if (config.contains("scf_convergence") && config["scf_convergence"].is_string())
+        m_scf_convergence = config["scf_convergence"].get<std::string>();
+    if (config.contains("scf_energy_threshold") && config["scf_energy_threshold"].is_number())
+        m_scf_energy_threshold = config["scf_energy_threshold"].get<double>();
+    if (config.contains("scf_gradient_threshold") && config["scf_gradient_threshold"].is_number())
+        m_scf_gradient_threshold = config["scf_gradient_threshold"].get<double>();
+    if (config.contains("scf_gradient_threshold_tight") && config["scf_gradient_threshold_tight"].is_number())
+        m_scf_gradient_threshold_tight = config["scf_gradient_threshold_tight"].get<double>();
+    if (m_scf_convergence != "auto" && m_scf_convergence != "density") {
+        CurcumaLogger::warn(fmt::format("QM: unknown -qm.scf_convergence '{}' (use auto|density); using auto", m_scf_convergence));
+        m_scf_convergence = "auto";
+    }
     if (config.contains("scf_warm_start") && config["scf_warm_start"].is_boolean())
         m_scf_warm_start = config["scf_warm_start"].get<bool>();
     if (config.contains("diis_start") && config["diis_start"].is_number())
@@ -336,8 +348,17 @@ double QMEngine::Calculation(bool gradient)
     }
 
     // --- HF: real closed-shell SCF (WP3) ---
-    if (!m_scf_ready) {
+    // Claude Generated (Oct 25 2026): an analytic gradient (or a correlated method, setTightOrbitals) needs the
+    // tight orbital-gradient threshold; an energy-only SCF of this geometry is then continued from its density.
+    const bool want_tight = gradient || m_scf_tight_orbitals;
+    const bool continue_tight = m_scf_ready && m_scf_converged && want_tight && !m_scf_tight_done
+        && m_scf_convergence == "auto";
+    if (!m_scf_ready || continue_tight) {
+        m_scf_tight_now = want_tight;
+        m_scf_continue = continue_tight;
+        m_scf_tight_done = false;
         const bool ok = runSCF();
+        m_scf_continue = false;
         m_scf_ready = true;
         if (!ok && !riSetupFailed()) {  // WP10: a failed RI setup has reported its own error
             CurcumaLogger::error(fmt::format(

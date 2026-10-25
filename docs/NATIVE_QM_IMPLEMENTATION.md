@@ -344,6 +344,14 @@ CPUs than the Core Ultra 9 285K, Clang/MSVC builds (the unroll/always_inline mac
 attributes). The gradient kernels (`quartetGradient`) are unchanged. Timings against ORCA/PySCF:
 [QM_TIMING_ORCA_PYSCF_2026-10.md](QM_TIMING_ORCA_PYSCF_2026-10.md), section "After the CPU kernel work".
 
+## SCF convergence test (Oct 25, 2026)
+
+Default `-qm.scf_convergence auto`: energy change < `scf_energy_threshold` (1e-8 Eh) AND orbital gradient
+||X^T (F P S - S P F) X||_F < `scf_gradient_threshold` (1e-5; `scf_gradient_threshold_tight` 3e-7 when an analytic
+gradient or a correlation method follows) AND ||dP||_F < `scf_threshold` (now 1e-4; it was 1e-6 and the only test).
+`-qm.scf_convergence density -qm.scf_threshold 1e-6` restores the old rule. 30-37 % fewer iterations, HF energies
+unchanged to 1e-10 Eh; measurements and caveats: [QM_SCF_CONVERGENCE_2026-10.md](QM_SCF_CONVERGENCE_2026-10.md).
+
 ## Attribution and Provenance
 
 **Origin**: xcDFT -- TCCM winter school 2019: DFT (Fortran, RKS, LDA+HF, Euler-Maclaurin x

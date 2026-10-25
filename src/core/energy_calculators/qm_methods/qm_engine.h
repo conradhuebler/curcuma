@@ -159,8 +159,21 @@ BEGIN_PARAMETER_DEFINITION(qm)
     PARAM(scf_max_iterations, Int, 100,
           "Maximum number of SCF iterations.",
           "SCF", {})
-    PARAM(scf_threshold, Double, 1.0e-6,
-          "SCF energy/charge convergence threshold (Hartree).",
+    PARAM(scf_threshold, Double, 1.0e-4,
+          "SCF density criterion: Frobenius norm of the density change ||P_new - P||_F per iteration. With scf_convergence auto it is one of three conditions that must all hold (a set tight value, e.g. 1e-10, therefore still forces a tight SCF); with scf_convergence density it is the only one. Default until Oct 25 2026: 1e-6 as the only criterion.",
+          "SCF", {})
+    // Claude Generated (Oct 25 2026): ORCA/PySCF-like convergence test (energy change + orbital gradient)
+    PARAM(scf_convergence, String, "auto",
+          "SCF convergence test: auto (default since Oct 25 2026) = all of |E_n - E_(n-1)| < scf_energy_threshold (E_n = 1/2 Tr(P_n (H + F(P_n))), the energy of the density whose Fock matrix was just built), orbital gradient ||X^T (F P S - S P F) X||_F < scf_gradient_threshold (scf_gradient_threshold_tight when an analytic gradient or a correlated method (mp2, ri-mp2, lmp2, ccsd) follows, since those depend linearly on the orbital error) and ||dP||_F < scf_threshold | density = ||dP||_F < scf_threshold only (the rule until Oct 2026; add -qm.scf_threshold 1e-6 for the old default).",
+          "SCF", {})
+    PARAM(scf_energy_threshold, Double, 1.0e-8,
+          "scf_convergence auto: largest change of the SCF energy between two iterations (Eh).",
+          "SCF", {})
+    PARAM(scf_gradient_threshold, Double, 1.0e-5,
+          "scf_convergence auto: largest Frobenius norm of the orbital gradient (commutator F P S - S P F in the Lowdin-orthonormal basis, Eh) for energy-only HF runs. The HF energy error is second order in it.",
+          "SCF", {})
+    PARAM(scf_gradient_threshold_tight, Double, 3.0e-7,
+          "scf_convergence auto: the same norm for runs whose result is first order in the orbital error: analytic nuclear gradients (-opt, -md, -gradient, hf-3c gradients) and the correlation methods mp2/ri-mp2/lmp2/ccsd. An energy-only SCF of the same geometry is continued from its density when such a result is requested later.",
           "SCF", {})
     PARAM(scf_mode, String, "diis",
           "SCF convergence driver: diis (Pulay DIIS, orthonormal-basis commutator) | adiis (ADIIS far from convergence, blended into DIIS; Hu/Yang 2010, Garza/Scuseria 2012) | plain (density damping only).",
@@ -228,6 +241,9 @@ public:
     void resetForNewMolecule();
     /// True if the last SCF started from the previous geometry's orbitals.
     bool lastScfWarmStarted() const { return m_last_warm_start; }
+    /// Correlated methods (Claude Generated, Oct 25 2026): every SCF of this engine converges with
+    /// -qm.scf_gradient_threshold_tight (MP2/CCSD energies are first order in the orbital error).
+    void setTightOrbitals(bool on) { m_scf_tight_orbitals = on; }
 
     /// Analytic nuclear gradient exists for the closed-shell HF level (WP8, Sep 2026).
     bool hasGradient() const override { return m_functional == QMFunctional::HF; }
@@ -339,7 +355,17 @@ private:
     mutable bool m_scf_ready = false;        // runSCF already done for this geometry
     double m_eri_screening = 1.0e-12;        // Schwarz threshold for the ERI build
     int m_scf_max_iter = 100;
-    double m_scf_threshold = 1.0e-6;
+    double m_scf_threshold = 1.0e-4;          // ||dP||_F (auto: one of three conditions; density: the only one)
+    // Convergence test (Claude Generated, Oct 25 2026; -qm.scf_convergence auto|density)
+    std::string m_scf_convergence = "auto";
+    double m_scf_energy_threshold = 1.0e-8;
+    double m_scf_gradient_threshold = 1.0e-5;
+    double m_scf_gradient_threshold_tight = 3.0e-7;
+    bool m_scf_tight_orbitals = false;       // set by correlated wrappers: every SCF uses the tight gradient threshold
+    mutable bool m_scf_tight_now = false;     // the running SCF uses the tight threshold
+    mutable bool m_scf_tight_done = false;    // the last converged SCF of this geometry met the tight threshold
+    mutable bool m_scf_continue = false;      // next SCF starts from m_density (tightening a converged SCF)
+    mutable double m_scf_last_dE = 0.0, m_scf_last_grad = 0.0;  // of the converged iteration (report)
     std::string m_scf_mode = "diis";         // diis | adiis | plain
     std::string m_scf_guess = "atom";        // sad | atom | h0
     double m_scf_early_screening = 1.0e-10;      // > 0: J/K screening threshold of the early direct SCF

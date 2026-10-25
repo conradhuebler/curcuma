@@ -60,6 +60,7 @@ LMP2Method::LMP2Method(const json& config)
 {
     const json ec = QMMethod::engineConfig(config);  // registry qm defaults < top level < dft < qm
     m_engine = std::make_unique<QMEngine>(QMFunctional::HF, ec);
+    m_engine->setTightOrbitals(true);  // correlation energy is first order in the orbital error (Oct 25 2026)
     qmint::LMP2Options& o = m_options;
     o.frozen_core = readBool(ec, "frozen_core", false);
     o.ri_aux = readString(ec, "ri_mp2_aux", o.ri_aux, false);

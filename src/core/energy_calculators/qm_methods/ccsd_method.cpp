@@ -48,6 +48,7 @@ CCSDMethod::CCSDMethod(const json& config)
 {
     const json ec = QMMethod::engineConfig(config);  // registry qm defaults < top level < dft < qm
     m_engine = std::make_unique<QMEngine>(QMFunctional::HF, ec);
+    m_engine->setTightOrbitals(true);  // correlation energy is first order in the orbital error (Oct 25 2026)
     m_options.frozen_core = readBool(ec, "frozen_core", false);
     m_options.max_iter = (int)readNumber(ec, "cc_max_iter", m_options.max_iter);
     m_options.e_threshold = readNumber(ec, "cc_threshold", m_options.e_threshold);

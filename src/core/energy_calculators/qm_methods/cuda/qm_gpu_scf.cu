@@ -410,6 +410,32 @@ public:
         return true;
     }
 
+    // Claude Generated (Oct 25 2026): E(P) = 1/2 Tr(P (H + F)) and ||e||_F for the convergence test.
+    bool scfMeasures(int slot, double& e_elec, double& err_norm) override
+    {
+        const int n = m_n;
+        const size_t nn = (size_t)n * n;
+        const double* Es = nullptr;
+        if (slot >= 0) {
+            if (slot >= m_nslots) return false;
+            Es = m_histE + slot * nn;
+        } else {
+            // no DIIS entry for this build: e = X^T (F P S - S P F) X in T2 (as diisPush)
+            if (!gemm(CUBLAS_OP_N, CUBLAS_OP_N, m_F, m_P, m_T1) || !gemm(CUBLAS_OP_N, CUBLAS_OP_N, m_T1, m_S, m_T2))
+                return false;
+            antisymKernel<<<grid1(nn), 256>>>(m_T2, m_T1, n);
+            if (!gemm(CUBLAS_OP_T, CUBLAS_OP_N, m_X, m_T1, m_T2) || !gemm(CUBLAS_OP_N, CUBLAS_OP_N, m_T2, m_X, m_T1))
+                return false;
+            Es = m_T1;
+        }
+        std::vector<PairSpec> specs = { { m_P, nullptr, m_HF, nullptr }, { Es, nullptr, Es, nullptr } };
+        std::vector<double> out;
+        if (!reducePairs(specs, out, m_t_diis)) return false;
+        e_elec = 0.5 * out[0];
+        err_norm = std::sqrt(out[1]);
+        return true;
+    }
+
     bool acceptDensity(double damping) override
     {
         const size_t nn = (size_t)m_n * m_n;
