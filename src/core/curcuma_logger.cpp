@@ -57,6 +57,13 @@ int CurcumaLogger::thread_verbosity()
     return t_verbosity_override;
 }
 
+void CurcumaLogger::set_verbosity(int level)
+{
+    m_verbosity = level;
+    if (t_verbosity_override >= 0)
+        t_verbosity_override = level;
+}
+
 int CurcumaLogger::effective_verbosity()
 {
     return t_verbosity_override >= 0 ? t_verbosity_override : m_verbosity;

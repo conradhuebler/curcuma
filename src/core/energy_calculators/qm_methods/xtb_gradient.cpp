@@ -50,6 +50,7 @@ namespace curcuma::xtb {
  * ========================================================================== */
 void XTB::calculateGradient()
 {
+    ensureHostIntegrals(__func__);   // Claude Generated (Oct 2026): host copies of S/H0/L/gamma are lazy
     const int nat = m_atomcount;
     const int nsh = m_basis.nsh;
     const int nao = m_basis.nao;
@@ -845,30 +846,31 @@ bool XTB::calculateGradientGpu()
     const int nat = m_atomcount;
     const int nao = m_basis.nao;
 
-    // Converged AO potential (v_sh + v_at expanded to AO resolution).
-    Vector v_ao = Vector::Zero(nao);
-    for (int ao = 0; ao < nao; ++ao)
-        v_ao(ao) = m_pot.v_sh(m_basis.ao2sh[ao]) + m_pot.v_at(m_basis.ao2at[ao]);
+    // Converged AO potential (v_sh + v_at expanded to AO resolution). With m_dev_potentials the device holds it
+    // (and v_dp / v_qp) from convergedPotentials(); nothing is built or uploaded here.
+    Vector v_ao;
+    if (!m_dev_potentials) {
+        v_ao = Vector::Zero(nao);
+        for (int ao = 0; ao < nao; ++ao)
+            v_ao(ao) = m_pot.v_sh(m_basis.ao2sh[ao]) + m_pot.v_at(m_basis.ao2at[ao]);
+    }
 
-    // Energy-weighted density W = sum_i f_i eps_i C_i C_i^T with the per-MO occupations f_i
-    // (0..2) that built the density, as in calculateGradient (xtb_gradient.cpp, focc branch).
-    // Every device backend forms W as C diag(2 eps_k) C^T over its first `ncol` columns, i.e. it
-    // assumes f = 2 for those columns. Passing eps_w(k) = 0.5 f_k eps_k with ncol = last column
-    // with f > 1e-12 makes the device W equal to the occupation-weighted one, so an open-shell
-    // SOMO (f = 1) and Fermi-smeared fractional occupations are weighted correctly. For integer
-    // occupations {2,...,2,0,...} eps_w == eps bit for bit (0.5*2.0 == 1.0) and ncol equals the
-    // former round(nocc/2), so closed-shell results are unchanged. Without focc (should not
-    // happen on the resident path, xtb_native.cpp rebuilds it from eps) the old integer
-    // closed-shell weighting is kept. Claude Generated (Oct 2026).
     int nocc_orbs = static_cast<int>(std::round(m_wfn.nocc / 2.0));
-    Vector eps_w = m_wfn.eps;
+    // Oct 16, 2026 (Known Issue #40): the device builds W = sum_k 2 eps_k C_k C_k^T over the first nocc_orbs
+    // orbitals, i.e. integer closed-shell occupations. With the Fermi smearing of electronic_temperature > 0
+    // the occupations are fractional (small HOMO-LUMO gap: PCl3_TS, (NH3)2 2+, strained C60 isomers: GPU
+    // gradient up to 0.033 Eh/A off) and for an open shell they are the sum of the two spin fillings. The
+    // host gradient uses W = sum_k f_k eps_k C_k C_k^T (f = focc, see calculateGradient); hand the device the
+    // same weights through the existing interface: eps_eff = f eps / 2 over the leading ncol orbitals.
+    Vector eps_eff = m_wfn.eps;
     if (m_wfn.focc.size() == nao && m_wfn.eps.size() == nao) {
         int ncol = 0;
         for (int i = 0; i < nao; ++i)
             if (m_wfn.focc(i) > 1.0e-12) ncol = i + 1;
-        for (int i = 0; i < nao; ++i)
-            eps_w(i) = (i < ncol) ? (0.5 * m_wfn.focc(i)) * m_wfn.eps(i) : 0.0;
-        nocc_orbs = ncol;
+        if (ncol > 0) {
+            nocc_orbs = ncol;
+            eps_eff = 0.5 * m_wfn.focc.cwiseProduct(m_wfn.eps);
+        }
     }
 
     // GFN2 multipole potentials for the device multipole-integral Pulay term.
@@ -884,8 +886,11 @@ bool XTB::calculateGradientGpu()
     const Eigen::MatrixXd C_empty;
     Matrix grad_dev;   // nat×3, Eh/Bohr (sections 1/2/3 incl. GFN2 multipole Pulay)
     Vector dEdcn;      // nat
-    if (!m_gpu_scf->gradient(P_empty, C_empty, eps_w, nocc_orbs, v_ao, m_wfn.q_sh,
-                             v_dp, v_qp, grad_dev, dEdcn, /*pc_resident=*/true))
+    const bool grad_ok = m_dev_potentials
+        ? m_gpu_scf->gradientResident(eps_eff, nocc_orbs, grad_dev, dEdcn)
+        : m_gpu_scf->gradient(P_empty, C_empty, eps_eff, nocc_orbs, v_ao, m_wfn.q_sh,
+                              v_dp, v_qp, grad_dev, dEdcn, /*pc_resident=*/true);
+    if (!grad_ok)
         return false;
     if (grad_dev.rows() != nat || grad_dev.cols() != 3 || dEdcn.size() != nat)
         return false;
@@ -909,6 +914,37 @@ bool XTB::calculateGradientGpu()
         && m_disp_gradient.rows() == nat && m_disp_gradient.cols() == 3) {
         m_gradient += m_disp_gradient;
         if (m_disp_dEdcn.size() == nat) dEdcn += m_disp_dEdcn;
+    }
+
+    // Claude Generated (Oct 2026): sections 5 and 4 below on the device (one call: direct multipole gradient +
+    // dE/dr_mp -> dE/dCN + CN chain rule). CURCUMA_GRAD_TAIL_DEVICE=0 keeps the host loops; they are also the
+    // fallback when the backend has no such call.
+    {
+        const char* env_off = std::getenv("CURCUMA_GRAD_TAIL_DEVICE");
+        if (!(env_off && env_off[0] == '0')) {
+            const bool gfn2 = (m_method == MethodType::GFN2);
+            const bool with_mp = gfn2 && m_mp_initialized && !m_mp_grad_off;
+            std::vector<double> rcov_au(nat), rad(with_mp ? nat : 0), vcn(with_mp ? nat : 0), gtail(3 * nat, 0.0);
+            for (int i = 0; i < nat; ++i) {
+                rcov_au[i] = covalent_rad_d3_au(m_atoms[i]);
+                if (with_mp) { rad[i] = gfn2_params::p_rad[m_atoms[i] - 1]; vcn[i] = gfn2_params::p_vcn[m_atoms[i] - 1]; }
+            }
+            bool ok_mp_inputs = true;
+            if (with_mp)
+                ok_mp_inputs = m_wfn.q_at.size() == nat && m_wfn.dp_at.cols() == nat && m_wfn.qp_at.cols() == nat
+                    && static_cast<int>(m_mp_mrad.size()) == nat && m_coordination_numbers.size() == nat;
+            if (ok_mp_inputs && m_gpu_scf->gradientTailDevice(
+                    nat, gfn2, with_mp, xyz.data(), dEdcn.data(), rcov_au.data(),
+                    with_mp ? m_wfn.q_at.data() : nullptr, with_mp ? m_wfn.dp_at.data() : nullptr,
+                    with_mp ? m_wfn.qp_at.data() : nullptr, with_mp ? m_mp_mrad.data() : nullptr,
+                    with_mp ? m_coordination_numbers.data() : nullptr, with_mp ? rad.data() : nullptr,
+                    with_mp ? vcn.data() : nullptr, gfn2_params::mp_dmp3, gfn2_params::mp_dmp5,
+                    gfn2_params::mp_shift, gfn2_params::mp_kexp, gfn2_params::mp_rmax, gtail.data())) {
+                for (int i = 0; i < nat; ++i)
+                    for (int k = 0; k < 3; ++k) m_gradient(i, k) += gtail[3 * i + k];
+                return true;
+            }
+        }
     }
 
     // 5. GFN2 direct multipole interaction gradient (host; O(nat²) over the

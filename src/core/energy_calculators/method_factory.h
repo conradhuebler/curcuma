@@ -101,6 +101,15 @@ public:
     /// JSON sub-scope names carrying method-specific parameters (controller["gfnff"], ...):
     /// the single source of truth for EnergyCalculator / opt / MD / ConfSearch forwarding.
     static const std::vector<std::string>& methodParameterScopes();
+    /**
+     * @brief JSON parameter scope that carries the parameters of a method ("xtb", "tblite", "ulysses", ...).
+     * Claude Generated (Oct 16, 2026). Used by the CLI to route a flat flag that several modules register
+     * (e.g. -electronic_temperature: tblite, ulysses, xtb) to the module of the selected -method instead of
+     * leaving it in the command module, where no method reads it.
+     * gfn1/gfn2 (native), xtb-* (external XTB) -> "xtb"; tblite-*, ipea1 -> "tblite"; the Ulysses methods
+     * -> "ulysses"; eht -> "eht"; "" when the method has no scope of its own.
+     */
+    static std::string parameterScopeForMethod(const std::string& method_name);
 
     // Provider availability (compile flags + runtime probes); public so table rows can use them.
     static bool hasOrca();

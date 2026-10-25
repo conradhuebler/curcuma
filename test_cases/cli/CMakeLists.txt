@@ -308,10 +308,15 @@ add_cli_test(sqm 09_ngfn2_baseline_singlepoint)    # native ngfn2 broken-state s
 add_cli_test(sqm 10_gfn2_optimization_smoke)       # gfn2 -opt anchor (gradient = zero pre-AP-4)
 add_cli_test(sqm 11_gfn2_provider_check)           # routing anchor — updated for AP 3 (native backend)
 add_cli_test(sqm 12_gfn2_scf_precond)              # -scf_precond frag: same energy, fewer SCF iterations, ignored for ions (Oct 2026)
+add_cli_test(sqm 15_flat_flag_routing)             # flat -electronic_temperature routed to the module of -method (Oct 2026)
 # -scf_precond frag on the device-resident CUDA loop (Oct 2026); exit 77 (skip) without a usable CUDA device.
 if(USE_CUDA)
     add_cli_test(sqm 13_gfn2_scf_precond_cuda)
     set_tests_properties(cli_sqm_13_gfn2_scf_precond_cuda
+        PROPERTIES TIMEOUT 300 RESOURCE_LOCK "gpu" LABELS "sqm;gpu;cli" SKIP_RETURN_CODE 77)
+    # Open-shell GFN1/GFN2 on the CUDA path against the CPU, energy and gradient (Known Issue #39, Oct 2026).
+    add_cli_test(sqm 14_open_shell_cuda)
+    set_tests_properties(cli_sqm_14_open_shell_cuda
         PROPERTIES TIMEOUT 300 RESOURCE_LOCK "gpu" LABELS "sqm;gpu;cli" SKIP_RETURN_CODE 77)
 endif()
 

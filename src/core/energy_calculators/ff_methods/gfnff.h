@@ -373,6 +373,10 @@ PARAM(coulomb_implicit, Bool, true, "CPU: evaluate the N^2/2 Coulomb pairs on th
 PARAM(farfield_shortcut, Bool, true, "CPU exact far-field shortcut: for gamma_ij*r >= 6.5 (gamma_ij = 1/sqrt(alpha_i+alpha_j)) erf(gamma_ij*r) is exactly 1.0 in FP64 and exp(-(gamma_ij*r)^2) <= 4.4e-19 is below one ulp of the force, so the Coulomb pair energy/force (FFWorkspace::calcCoulomb) and the EEQ matrix element erf(gamma r)/r (final charges, corrected EEQ matrix) are evaluated as q_i q_j/r, -q_i q_j/r^3 and 1/r without erf/exp. Bit-identical to the full evaluation in the cases checked (set false to compare). Forwarded to eeq_solver.farfield_shortcut. The CUDA kernels always use the shortcut, with the threshold 6.0 instead of 6.5 (gamma_ij*r); ROCm and Vulkan have none.", "Performance", {})
 PARAM(gpu_coulomb_implicit, Bool, true, "GPU only: the device enumerates all Coulomb atom pairs itself (per-atom gather, gamma_ij from per-atom alpeeq) instead of reading an N^2/2 pair list built on the host. Saves the host list (24.5 M pairs / 2.7 GB and ~1.5 s at 7320 atoms). Not used with eeq_distance_cutoff > 0. Set false for the stored pair list.", "Performance", {})
 PARAM(gpu_disp_pairs_on_device, Bool, true, "WP-A GPU only: build the D4 dispersion pair list on the device via a two-pass enumeration plus per-pair C6 contraction, replacing the host O(N^2) GenerateDispersionPairsNative loop and the per-build H2D upload. Default ON for CUDA and ROCm since Oct 14, 2026 (pairs in the host order); false keeps the host build. Bit-identical to the host list up to the FP order of the device Gaussian weights. Measured Sep 2026 on polymer_2x (7320 atoms): pair build 630 -> 32 ms, SP wall 6.8 -> 5.6 s, energy identical; see docs/GPU_TUNING.md.", "Performance", {})
+PARAM(gpu_rep_pairs_on_device, Bool, true, "GPU only (CUDA and ROCm): rebuild the non-bonded repulsion pair list on the device (two-pass enumeration with the per-pair alpha and repab) when the Verlet skin rule fires, instead of the host generateRepulsionPairsNative() plus upload (26 + 6 ms per rebuild on polymer_2x with 16 threads, every ~8 MD steps). Default ON since Oct 2026; false keeps the host build. ROCm (Oct 2026, WP9): ordered build with the gather CSR on the device, false keeps the staged host build. Only active for systems with a distance-filtered list (nb_cell_list_min_atoms).", "Performance", {})
+PARAM(rocm_dc6dcn_tables, Bool, false, "ROCm GFN-FF only (WP9, Oct 2026): per-pair C6 and dC6/dCN from per-atom partner tables (k_d4_partner_tables, k_dc6dcn_per_pair_tab, the CUDA tabulation) instead of the factorised u/v vectors; turns the fused dispersion gather off. Default off: slower than the fused gather at 6200 atoms (47.7 vs 43.0 ms per MD step). CURCUMA_DC6DCN_TABLES=0|1 overrides it.", "Performance", {})
+PARAM(rocm_device_schur, Bool, true, "ROCm GFN-FF only (WP9, Oct 2026): Schur step of the dense EEQ solve (cholesky route, any fragment count) on the device: the constraint sums are reduced and the charges formed on the device, only nfrag + nfrag^2 numbers go to the host. Default on since its acceptance (WP9). false: the dense solution is downloaded and the wrapper does the Schur step on the host.", "Performance", {})
+PARAM(rocm_fixed_point, Bool, true, "ROCm GFN-FF only (WP10, Oct 2026): order-independent accumulation of forces, dE/dCN, energies and CN sums as 64-bit fixed-point integers (scales 2^-52, 2^-48, 2^-56, as the CUDA kernels), so repeated runs give bitwise identical results. false: FP64 atomicAdd, whose result depends on thread arrival order in the last bits.", "Performance", {})
 PARAM(eeq_rocm_cpu_fragment_threshold, Int, 16, "ROCm GFN-FF only: fragment count at or above which the dense device Cholesky is not used. By default the device projected PCG runs there when the EEQ solver resolves to ppcg (CPU EEQ only if it stalls); giving this key explicitly forces the exact CPU EEQ (PCG block-Jacobi warm start) from that fragment count on, which keeps ROCm charges identical to the CPU path. Set 0 to always use the device solve.", "Performance", {})
 // Implicit solvation (WP5, Claude Generated June 2026). Registering these here is
 // what makes -gfnff.solvent reach GFNFF::InitialiseMolecule (the value was silently
@@ -394,6 +398,8 @@ PARAM(solvent_model, String, "alpb",
 PARAM(gpu_split_devices, String, "auto", "Multi-GPU split of ONE molecule (CUDA): the implicit Coulomb tiles and the projected-PCG EEQ (matrix column blocks + matvec) are spread over these devices. auto = the -gpu_devices pool, else every visible device, unless the run is a leased batch worker or pinned with an explicit -gpu_device; a comma list (e.g. 0,1); none = off.", "Performance", {})
 PARAM(gpu_split_min_atoms, Int, 1000, "Use the multi-GPU split only from this many atoms on. Measured Sep 2026 (4x A4500, MD step): 1410 atoms 16.0 -> 12.0 ms, 7320 atoms 139 -> 76 ms; below 1000 atoms not measured.", "Performance", {})
 PARAM(gpu_split_eeq_min_atoms, Int, 4000, "Use the multi-GPU split for the EEQ (matrix column blocks + PCG matvec) only from this many atoms on; the per-iteration peer latency outweighs it below. Measured Sep 2026 (4x A4500): 1410 atoms EEQ 8.1 -> 8.2 ms (no gain), 7320 atoms 77 -> 35 ms.", "Performance", {})
+PARAM(gpu_eeq_mixed_precision, Bool, true, "CUDA multi-GPU EEQ split only: the PCG iterations multiply with an FP32 copy of the matrix; each round stops at gpu_eeq_mixed_rho times its starting residual, then the true residual is formed with the FP64 matvec and the CG restarts from it, until the FP64 residual meets the same tolerance as the pure FP64 solve. Default ON since Oct 2026. polymer_2x MD, 4 A4500: EEQ phase median 9.5 -> 8.7 ms, step median 13.3 -> 12.5 ms, charges within the solver tolerance (energies equal to 1e-10 over 300 steps). false = FP64 matvec; CURCUMA_EEQ_MIXED=0 does the same.", "Performance", {})
+PARAM(gpu_eeq_mixed_rho, Double, 1e-5, "Round reduction of the mixed-precision EEQ solve (gpu_eeq_mixed_precision). Measured on polymer_2x (4 A4500): 1e-3: 4 rounds, 18.1 iterations; 1e-4: 4, 17.6; 1e-5: 3, 17.4 (fastest); 1e-6: 3, 17.5; 1e-7: 3, 18.4. Larger values need more FP64 restarts.", "Performance", {})
 PARAM(topology_mode, String, "constant", "Topology mode: constant (default since Sep 29, 2026) = topology and bond list frozen after init, as in the Fortran reference (gfnff_hbset reads only the setup topology); auto = full topology recalculation whenever an atom moved more than 0.5 Bohr (measured: identical results, ~1.6 s per recalculation at 7320 atoms), react = bond topology is re-detected with hysteresis during MD and all bonded terms are rebuilt at change events. default is accepted as an alias for constant.", "Basic", {})
 PARAM(react_bond_form_factor, Double, 1.6, "React mode: a non-bonded pair becomes a bond when r < factor * covalent-radius sum * element fat scaling. Optimistic on purpose: the Gaussian bond well is weak at this distance and formation is expected mid-collision. Must stay below react_bond_break_factor and below typical hydrogen-bond contact distances.", "Reactive", {})
 PARAM(react_bond_break_factor, Double, 2.6, "React mode: an existing bond is removed when r > factor * covalent-radius sum * element fat scaling. Conservative on purpose: the bond is kept until its Gaussian well has largely decayed, so removal causes only a small energy jump. The wide gap to react_bond_form_factor is the hysteresis that prevents flicker.", "Reactive", {})
@@ -1060,6 +1066,36 @@ public:
 
     /// True if updateNonbondedRepulsionIfNeeded() rebuilt the lists since last check
     bool consumeNonbondedRepulsionUpdate() { bool r = m_nb_rep_updated; m_nb_rep_updated = false; return r; }
+
+    /**
+     * @brief Per-atom and per-pair tables from which a device rebuilds the non-bonded repulsion list.
+     *
+     * Claude Generated (Oct 2026): the pair term of generateRepulsionPairsNative() is
+     * alpha = sqrt(dum_i * dum_j) * ff, repab = repz_i * repz_j * REPSCALN, r_cut = 20 Bohr, with
+     * dum_i = repan[Z_i] * (1 + q_i * QREPSCAL) * (1 + NREPSCAL / (1 + cn_i^2)) per atom and ff a
+     * function of the element pair (H-H: HHFAC, times HH13REP / HH14REP for topological distance
+     * 2 / 3). Everything except the distance test depends on the topology only, so these tables
+     * stay valid until the next topology rebuild.
+     */
+    struct RepulsionDeviceInputs {
+        std::vector<int> valid;             ///< [N] 1 if the element has repulsion parameters
+        std::vector<int> metal;             ///< [N] 1 if PeriodicTable::getMetalType(Z) > 0
+        std::vector<double> dum;            ///< [N] per-atom alpha factor
+        std::vector<double> repz;           ///< [N] effective nuclear charge factor
+        std::vector<long long> bond_keys;   ///< sorted i * N + j of bond-list entries with i < j (excluded pairs)
+        std::vector<long long> hh_keys;     ///< sorted i * N + j (i < j) of H-H pairs at topological distance 2 or 3
+        std::vector<int> hh_dist;           ///< distance (2 or 3) belonging to hh_keys
+        double repscaln = 0.0, hhfac = 0.0, hh13 = 0.0, hh14 = 0.0;
+        double build_radius_bohr = 0.0;     ///< 20 Bohr kernel cutoff + Verlet skin
+        double r_cut_bohr = 20.0;           ///< value stored as GFNFFRepulsion::r_cut
+    };
+
+    /// Fills the tables above; false if the topology cannot be mapped (the caller keeps the host build).
+    bool repulsionDeviceInputs(RepulsionDeviceInputs& out) const;
+
+    /// Claude Generated (Oct 2026): the GPU wrapper rebuilds the non-bonded repulsion list on the device;
+    /// updateNonbondedRepulsionIfNeeded() then only decides WHEN (skin rule, counters) and flags the update.
+    void setSkipHostRepulsionPairs(bool v) { m_skip_host_rep_pairs = v; }
 
     /// Last rebuilt bonded/non-bonded repulsion pair lists (for GPU SoA re-upload)
     const std::vector<GFNFFRepulsion>& getLastBondedRepulsions() const { return m_last_bonded_reps; }
@@ -2888,6 +2924,7 @@ private:
     mutable std::vector<std::vector<GFNFFRepulsion>> m_rep_part_cache;
     bool m_skip_host_rep_workspace = false;  ///< Oct 2026: GPU wrapper owns the repulsion lists (setSkipHostRepulsionWorkspaceUpdate)
     bool m_skip_host_hb_workspace = false;  ///< Oct 2026: GPU wrapper owns the HB/XB lists (setSkipHostHBWorkspaceUpdate)
+    bool m_skip_host_rep_pairs = false;   ///< Oct 2026: the GPU wrapper builds the non-bonded repulsion list
     bool m_skip_host_disp_pairs = false;  ///< WP-A: GPU builds D4 pairs; skip host O(N^2) loop
     bool m_implicit_coulomb_pairs = false; ///< GPU enumerates Coulomb pairs; skip host list
     bool m_print_timing = true;     ///< Print init timing summary at verbosity >= 1

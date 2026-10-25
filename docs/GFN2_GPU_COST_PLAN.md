@@ -152,7 +152,24 @@ Estimates are back-of-envelope; each stage gets its own before/after measurement
 of FP32 on the A4500 and near 1:1 on an H200, so stage 3's balance differs there (not measurable
 here).
 
-## CPU (measured Sep 30, 2026, not implemented)
+## CPU (implemented Oct 15, 2026, opt-in `-scf_pseudo_diag_cpu`)
+
+`XTB::pseudoDiagStepCpu()` (`xtb_scf.cpp`): the same step as on the GPU, in FP64 with OpenBLAS GEMMs, Eigen's
+triangular products and Cholesky. Gates: closed shell, even electron count, `nao >= scf_pseudo_diag_cpu_min_nao`
+(1500), previous max|dq| between 10 x `scf_threshold` and `scf_pseudo_diag_max_dq` (0.05), at most
+`scf_pseudo_diag_max_steps` (8) in a row, gap > 30 kT, all angles < 0.1. The last iterations are full solves
+(convergence is never accepted on a pseudo step), so the gradient comes from exact eigenpairs.
+
+Measured (polymer, nao 3222, 16 threads, median of 3): GFN2 SCF 15.26 -> 13.86 s (-9 %), GFN1 20.33 -> 16.42 s
+(-19 %), energy identical to 1e-8, gradient 2.6e-8 (GFN2) and 4.2e-7 (GFN1) different. A pseudo step costs ~0.7 s
+(F*C dgemm 0.28, Cholesky 0.10, trmm 0.085, trsm 0.075, syrk 0.055, rotation 0.05, G_ov 0.04): about the cost of an
+FP32 step that the CPU SCF already takes in its early iterations (`scf_mixed_precision` is on), so only the FP64
+iterations are saved. The estimate below (20-25 %) was too high for that reason. 67 structures of
+`test_cases/structures` with the gate at 0: energy identical, gradient <= 3.4e-6 at the default threshold 1e-5;
+GFN1 molecules with 5 SCF iterations took one iteration more (hence the 1500 gate). AI-generated, machine-tested
+only; MOR41/GMTKN55 not re-run (not fetched on this machine).
+
+Earlier estimate (Sep 30, 2026, isolated kernels):
 
 OpenBLAS, polymer n = 3222, 8 threads, isolated kernels on random matrices: dgemm 0.097 s, sgemm
 0.050 s, G_ov dgemm 0.026, dsyrk 0.057, dtrmm 0.052, dtrsm 0.082, dpotrf 0.059, dsyevd 1.35,

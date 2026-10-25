@@ -61,6 +61,13 @@ private:
     void reportSolverFallbacks(bool final_report = false);
     unsigned m_reported_fallbacks = 0;   ///< SolverFallbackEvent bits already printed
     bool m_reported_mp_fallback = false; ///< -xtb.rocm_device_multipole fallback printed (Claude Generated, Oct 2026)
+    bool m_reported_pot_fallback = false; ///< -xtb.rocm_device_potential fallback printed (Claude Generated, Oct 2026)
+    bool m_reported_res_fallback = false; ///< -xtb.rocm_resident_loop fallback printed (Claude Generated, Oct 2026)
+    bool m_reported_solv_fallback = false; ///< -xtb.rocm_device_solvation fallback printed (WP6, Claude Generated, Oct 2026)
+    bool m_reported_pseudo_fallback = false; ///< -scf_pseudo_diag path turned off, printed (WP7, Claude Generated, Oct 2026)
+    bool m_pseudo_diag = false;              ///< -scf_pseudo_diag active on ROCm (WP7): counts printed at verbosity 2
+    bool m_reported_ps_fallback[3] = {false, false, false}; ///< WP8a post-SCF D4 / D3 / CN fallback printed (Claude Generated, Oct 2026)
+    bool m_reported_gr_fallback[3] = {false, false, false}; ///< WP8b gradient potentials / tail / lazy copies fallback printed (Claude Generated, Oct 2026)
 };
 
 #endif // USE_ROCM

@@ -134,6 +134,12 @@ __global__ void k_add_coulomb_parts(int n3, int nparts, const double* __restrict
                                     const double* __restrict__ part_E,
                                     double* grad, double* energy);
 
+/// grad += sum_k gparts[k*3N..], dEdcn += sum_k dparts[k*N..], energy += sum_k part_E[k]
+/// (multi-GPU dispersion reduce). Claude Generated (Oct 2026).
+__global__ void k_add_disp_parts(int N, int nparts, const double* __restrict__ gparts,
+                                 const double* __restrict__ dparts, const double* __restrict__ part_E,
+                                 double* grad, double* dEdcn, double* energy);
+
 /// Tile size of k_coulomb_tiles (atoms per tile, power of two).
 constexpr int GFNFF_COUL_TILE = 128;
 
@@ -641,6 +647,14 @@ void upload_covalent_radii(const double* radii, int n);
 void upload_refcn_const(const double* data, int n);
 void upload_refn_const(const int* data, int n);
 
+/// Exclusive prefix sum of n ints on the device (Claude Generated, Oct 2026).
+void exclusive_scan_int(const int* in, int* out, int n, cudaStream_t stream);
+
+/// Inclusive prefix sum of the per-pair work estimate of the dispersion list (multi-GPU split),
+/// out[n] on the current device; needs upload_refn_const() on this device. Claude Generated (Oct 2026).
+void disp_pair_cost_scan(int n, const int* idx_i, const int* idx_j, const int* atom_types,
+                         long long* out, cudaStream_t stream);
+
 // ============================================================================
 // GPU CN pair list generation (Apr 2026)
 // Two-pass kernels: count valid pairs, then write (i, j, rcov_sum).
@@ -655,7 +669,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_generate_cn_pairs_count(
     const int*    __restrict__ atom_types,
     double        cutoff_factor,
     double        extra_bohr,
-    int*          d_count);
+    int*          d_count);   ///< [N] per-row counts (zeroed before)
 
 __global__ GFNFF_KERNEL_BOUNDS void k_generate_cn_pairs_write(
     int N,
@@ -708,7 +722,8 @@ __global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_build(
     const double* __restrict__ zeta_c,      ///< [86] zeta c per element
     double        a1,
     double        a2,
-    int*          d_counter,
+    const int*    __restrict__ row_off,   ///< [N] exclusive scan of the per-row counts of pass 1
+    int*          d_counter,              ///< [N] per-row fill counters (zeroed)
     int*          out_i,
     int*          out_j,
     double*       out_C6,
@@ -718,6 +733,45 @@ __global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_build(
     double*       out_rcut
     // refn read from d_refn_const (constant memory)
 );
+
+/// Tabulated replacement of k_dc6dcn_per_pair (Claude Generated, Oct 2026): builds the per-atom partner tables A, W
+/// ([N * nt * D4_MAX_REF] each) from gw, then the pair kernel. nt = number of distinct elements, type_z[t] their
+/// atomic numbers, atype_idx[a] the type index of atom a. Same outputs as k_dc6dcn_per_pair.
+void launch_dc6dcn_tabulated(cudaStream_t s, int N, int nt, int n_pairs, const int* idx_i, const int* idx_j,
+                             const int* atom_types, const int* atype_idx, const int* type_z,
+                             const double* gw, const double* dgw, const double* c6_flat, double* A, double* W,
+                             double* dc6ij, double* dc6ji, double* c6_out, int block);
+
+// ============================================================================
+// Non-bonded repulsion pair list on the device (Claude Generated, Oct 2026)
+// Two-pass (count per row i, build) like the D4 list. Pair term and exclusions as in
+// GFNFF::generateRepulsionPairsNative() / make_nb_rep(): alpha = sqrt(dum_i dum_j) * ff,
+// repab = repz_i repz_j * repscaln. Pairs between the kernel cutoff and the Verlet build radius
+// are stored; the repulsion kernel skips them through r_cut.
+// ============================================================================
+struct RepDevTables {
+    const int*       valid;       ///< [N]
+    const int*       metal;       ///< [N]
+    const double*    dum;         ///< [N]
+    const double*    repz;        ///< [N]
+    const long long* bond_keys;   ///< sorted, n_bond_keys entries
+    int              n_bond_keys;
+    const long long* hh_keys;     ///< sorted, n_hh_keys entries
+    const int*       hh_dist;     ///< 2 or 3 per hh key
+    int              n_hh_keys;
+    double           repscaln, hhfac, hh13, hh14;
+    double           r_cut;
+};
+
+__global__ GFNFF_KERNEL_BOUNDS void k_rep_pairs_count(
+    int N, const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+    double cutoff_sq, RepDevTables t, int* d_count);
+
+__global__ GFNFF_KERNEL_BOUNDS void k_rep_pairs_build(
+    int N, const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+    const int* __restrict__ atom_types, double cutoff_sq, RepDevTables t,
+    const int* __restrict__ row_off, int* d_counter,
+    int* out_i, int* out_j, double* out_alpha, double* out_repab, double* out_rcut);
 
 // ============================================================================
 // GPU HB CN per-bond computation (Apr 2026)
@@ -750,6 +804,25 @@ __global__ GFNFF_KERNEL_BOUNDS void k_hb_cn_map_to_bonds(
 // Replaces CPU Schur loop after Cholesky solve in gfnff_gpu_method.cpp.
 // For nfrag == 1 only (common case). nfrag > 1 falls back to CPU path.
 // ============================================================================
+
+// Fixed-point scales of the order-independent accumulators (gfnff_kernels.cu, fix_add): CN-like quantities are
+// small (< 64) and get 2^-56, forces and their chain-rule inputs 2^-52 (range +-2048 Eh/Bohr).
+constexpr double GFNFF_FIX_CN = 72057594037927936.0;          // 2^56
+// Energy slots: 2^48 (resolution 3.6e-15 Eh per thread/atom contribution, range +-32768 Eh per term); the dispersion
+// slot sums one rounded value per pair and uses 2^52 (range +-2048 Eh).
+constexpr double GFNFF_FIX_ENERGY = 281474976710656.0;        // 2^48
+constexpr double GFNFF_FIX_ENERGY_DISP = 4503599627370496.0;  // 2^52
+constexpr double GFNFF_FIX_FORCE = 4503599627370496.0;        // 2^52
+__global__ void k_fix_to_double(int n, double* __restrict__ buf, double inv_scale);
+__global__ void k_fix_copy(int n, const double* __restrict__ src, double* __restrict__ dst, double inv_scale);
+__global__ void k_eeq_reduce_sums_det(int N, const double* __restrict__ d_rhs, double* __restrict__ d_sums);
+__global__ void k_frag_sum_csr(int nfrag, const double* __restrict__ v, const int* __restrict__ off,
+                               const int* __restrict__ idx, double* __restrict__ out);
+__global__ void k_frag_sum_warp(int nfrag, const double* __restrict__ v, const int* __restrict__ off,
+                                const int* __restrict__ idx, double* __restrict__ out);
+__global__ void k_eeq_reduce_fragment_sums_csr(int N, int nfrag, const double* __restrict__ d_rhs,
+                                               const int* __restrict__ off, const int* __restrict__ idx,
+                                               double* __restrict__ d_Cz1, double* __restrict__ d_S);
 
 /// Block-reduce S = sum(Z2_col0) and Cz1 = sum(z1) on GPU.
 /// Launch with 1 block. Shared mem: 2 * blockSize * sizeof(double).

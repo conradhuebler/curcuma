@@ -232,6 +232,15 @@ struct EEQSolverHipImpl {
     long                m_small_lds_limit = -1;
     double*             h_small_q = nullptr;     ///< pinned [N] charges of the last small-system solve
     int                 h_small_q_n = 0;
+
+    // WP9-C (Claude Generated, Oct 2026): Schur step of the dense EEQ on the device (-gfnff.rocm_device_schur).
+    bool                m_device_schur = false;        ///< switch, copied from RocmGfnffOptions at construction
+    bool                m_device_schur_failed = false; ///< a failure turned the path off for the rest of the run
+    bool                m_device_schur_reported = false; ///< verbosity-2 path line printed once
+    long                m_device_schur_calls = 0;      ///< solves that took the device Schur step
+    CudaBuffer<double>  d_schur_sums;                  ///< [nf + nf*nf] Cz1 then S (row-major)
+    CudaBuffer<double>  d_schur_lambda;                ///< [nf] Lagrange multipliers
+    hipEvent_t          ev_order = nullptr;            ///< orders the dense solve after the workspace work
 };
 
 /// Claude Generated (Oct 2026): host copy of the charges of the last small-system solve on this host
@@ -433,6 +442,10 @@ EEQSolverHip::EEQSolverHip(int max_natoms)
     : m_max_natoms(max_natoms)
 {
     m_impl = std::make_unique<EEQSolverHipImpl>();
+    {   // WP9-C (Claude Generated, Oct 2026): method options published by GFNFFHipComputationalMethod
+        const RocmGfnffOptions* opt = rocmGfnffOptionsSlot();
+        m_impl->m_device_schur = opt ? opt->device_schur : RocmGfnffOptions{}.device_schur;
+    }
     if (rocblas_create_handle(&m_impl->handle) != rocblas_status_success)
         throw std::runtime_error("EEQSolverHip: rocblas_create_handle failed");
     if (hipStreamCreate(&m_impl->stream) != hipSuccess)
@@ -459,12 +472,17 @@ EEQSolverHip::EEQSolverHip(int max_natoms)
 
 EEQSolverHip::~EEQSolverHip()
 {
+    if (m_impl && m_impl->m_device_schur_calls > 0 && CurcumaLogger::get_verbosity() >= 2)
+        CurcumaLogger::info(fmt::format("EEQ ROCm: {} dense solves with the Schur step on the device",
+                                        m_impl->m_device_schur_calls));
     if (m_impl) {
+        if (g_rocm_eeq_host_copy.host == m_impl->h_result) g_rocm_eeq_host_copy = RocmEEQHostCopy{};
         if (m_impl->h_result) hipHostFree(m_impl->h_result);
         if (m_impl->h_info)   hipHostFree(m_impl->h_info);
         if (m_impl->h_ppcg_back) hipHostFree(m_impl->h_ppcg_back);
         if (m_impl->h_small_q) (void)hipHostFree(m_impl->h_small_q);
         if (g_rocm_eeq_host_copy.host == m_impl->h_small_q) g_rocm_eeq_host_copy = RocmEEQHostCopy{};
+        if (m_impl->ev_order) (void)hipEventDestroy(m_impl->ev_order);
         if (m_impl->handle)   rocblas_destroy_handle(m_impl->handle);
         if (m_impl->stream)   hipStreamDestroy(m_impl->stream);
     }
@@ -543,18 +561,35 @@ static void mixedSolveRefineHip(EEQSolverHipImpl& impl, int N, int nrhs)
                    hipMemcpyDeviceToDevice, impl.stream);
 }
 
-// Shared core: build A from device alpha/gam, Cholesky (LU fallback), build RHS, solve,
-// download z1/Z2. rhs0_host XOR rhs0_dev provides column 0 (atom electronegativity RHS).
-static bool eeqBuildFactorSolve(
+// Shared core: build A from device alpha/gam, Cholesky (LU fallback), build RHS, solve; the solution
+// z1 | Z2 stays in d_rhs (column-major, N x (nfrag+1)). rhs0_host XOR rhs0_dev provides column 0.
+// Claude Generated (Oct 2026, WP9-C): split off eeqBuildFactorSolve() unchanged, so the device Schur
+// step (eeqDenseSchurHip) can use the solution without the download.
+static bool eeqBuildFactorSolveDevice(
     EEQSolverHipImpl& impl, int& last_N, int N, int nfrag,
     const double* cx, const double* cy, const double* cz,
     const double* d_alpha, const double* d_gam,
     const double* rhs0_host, const double* rhs0_dev,
     const std::vector<int>& fraglist,
-    double* out_z1, double* out_Z2,
     double cutoff_sq, bool force_refactor)
 {
     const int nrhs = nfrag + 1;
+    // Claude Generated (Oct 2026, found in WP9): the matrix build below runs on the solver's own (blocking)
+    // stream and reads the coordinates the workspace uploads asynchronously on its streams; blocking streams
+    // are not ordered against each other, only against the null stream. Without this wait the build could read
+    // the coordinates of the previous step (MD water dimer, CURCUMA_ROCM_EEQ_SMALL=0: 1 of 5 runs differed
+    // by 1e-4 Eh from the first step on). Ordered as the small-system solve: behind an event on the workspace
+    // main stream in the single-stream mode, else behind an event on the null stream (waits for all blocking streams).
+    {
+        if (!impl.ev_order && hipEventCreateWithFlags(&impl.ev_order, hipEventDisableTiming) != hipSuccess) {
+            impl.ev_order = nullptr;
+            return false;
+        }
+        hipStream_t src = g_rocm_small_eeq_stream ? g_rocm_small_eeq_stream : hipStream_t(nullptr);
+        if (hipEventRecord(impl.ev_order, src) != hipSuccess
+            || hipStreamWaitEvent(impl.stream, impl.ev_order, 0) != hipSuccess)
+            return false;
+    }
     const bool do_refactor = force_refactor || !impl.m_has_cached_factor || (N != last_N);
     g_rocm_eeq_host_copy = RocmEEQHostCopy{};   // d_rhs is rewritten below
 
@@ -654,7 +689,23 @@ static bool eeqBuildFactorSolve(
                                impl.d_A.ptr, N, impl.d_rhs.ptr, N);
         if (st != rocblas_status_success) return false;
     }
+    return true;
+}
 
+// Shared core plus the download of z1/Z2 (the host Schur step of the wrapper).
+static bool eeqBuildFactorSolve(
+    EEQSolverHipImpl& impl, int& last_N, int N, int nfrag,
+    const double* cx, const double* cy, const double* cz,
+    const double* d_alpha, const double* d_gam,
+    const double* rhs0_host, const double* rhs0_dev,
+    const std::vector<int>& fraglist,
+    double* out_z1, double* out_Z2,
+    double cutoff_sq, bool force_refactor)
+{
+    if (!eeqBuildFactorSolveDevice(impl, last_N, N, nfrag, cx, cy, cz, d_alpha, d_gam, rhs0_host, rhs0_dev,
+                                   fraglist, cutoff_sq, force_refactor))
+        return false;
+    const int rhs_size = N * (nfrag + 1);
     ensureHResultHip(impl, rhs_size);
     if (hipMemcpyAsync(impl.h_result, impl.d_rhs.ptr, rhs_size * sizeof(double),
                        hipMemcpyDeviceToHost, impl.stream) != hipSuccess) return false;
@@ -1004,30 +1055,197 @@ static bool eeqSmallSolveHip(EEQSolverHipImpl& impl, int N, int nf,
     return true;
 }
 
-/// WP5-A (one fragment): small systems only, see eeqSmallSolveHip(); false otherwise (dense path).
+// =============================================================================================
+// WP9-C (Claude Generated, Oct 2026): Schur step of the dense EEQ on the device, port of the CUDA WP5-A /
+// WP7-A tails (cuda/eeq_solver_gpu.cu: k_eeq_reduce_sums_det, k_eeq_reduce_fragment_sums_csr,
+// k_eeq_schur_nfrag1, k_eeq_schur_general, finishGeneralSchur). After the dense solve A [z1 | Z2] = [b | C^T]
+// (eeqBuildFactorSolveDevice, unchanged) the constraint system S lambda = C z1 - Q, S = C Z2 (nfrag x nfrag)
+// is reduced on the device, solved on the host and q = z1 - Z2 lambda is formed on the device. Only nfrag +
+// nfrag^2 doubles go down instead of N (nfrag + 1). Same arithmetic as the host Schur step of the wrapper
+// (gfnff_gpu_method_impl.h): sums in ascending atom order (one thread per sum, nfrag == 1 over all atoms),
+// the same Gaussian elimination, q with separately rounded multiply and subtract (no FMA, as the host
+// build without -march=native). Switch -gfnff.rocm_device_schur; CURCUMA_ROCM_FAIL_SCHUR=1 injects a failure.
+// =============================================================================================
+
+/// nfrag == 1: sums[0] = sum_i z1[i], sums[1] = sum_i Z2[i], each by one thread in ascending i (the host order).
+__global__ void k_eeq_schur_sums1_hip(int N, const double* __restrict__ rhs, double* __restrict__ sums)
+{
+    const int c = threadIdx.x;
+    if (c > 1) return;
+    const double* v = rhs + static_cast<size_t>(c) * N;
+    double acc = 0.0;
+    for (int i = 0; i < N; ++i) acc += v[i];
+    sums[c] = acc;
+}
+
+/// nfrag > 1: one thread per (fragment f, column c), atoms of f in ascending order (d_frag_atom_map is stable):
+/// c == 0 -> Cz1[f] = sums[f], c = g + 1 -> S[f][g] = sums[nfrag + f * nfrag + g].
+__global__ void k_eeq_schur_sums_hip(int N, int nfrag, const double* __restrict__ rhs,
+                                     const int* __restrict__ off, const int* __restrict__ map,
+                                     double* __restrict__ sums)
+{
+    const long long t = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const long long ncol = static_cast<long long>(nfrag) + 1;
+    if (t >= static_cast<long long>(nfrag) * ncol) return;
+    const int f = static_cast<int>(t / ncol), c = static_cast<int>(t % ncol);
+    const double* v = rhs + static_cast<size_t>(c) * N;
+    double acc = 0.0;
+    for (int p = off[f]; p < off[f + 1]; ++p) acc += v[map[p]];
+    if (c == 0) sums[f] = acc;
+    else        sums[nfrag + static_cast<size_t>(f) * nfrag + (c - 1)] = acc;
+}
+
+/// q[i] = z1[i] - sum_g Z2[i, g] lambda[g], written over z1 (column 0 of rhs); no contraction to FMA.
+__global__ void k_eeq_schur_apply_hip(int N, int nfrag, double* __restrict__ rhs, const double* __restrict__ lambda)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    double q = rhs[i];
+    for (int g = 0; g < nfrag; ++g)
+        q = __dsub_rn(q, __dmul_rn(rhs[static_cast<size_t>(g + 1) * N + i], lambda[g]));
+    rhs[i] = q;
+}
+
+/// Host solve of the constraint system, the arithmetic of the wrapper's host Schur step: nfrag == 1 is
+/// lambda = (Cz1 - Q) / S, otherwise Gaussian elimination with partial pivoting and back substitution.
+static void eeqSchurLambdaHost(int nf, const double* sums, const std::vector<double>& qfrag, std::vector<double>& lam)
+{
+    lam.assign(nf, 0.0);
+    if (nf == 1) {
+        const double q0 = qfrag.empty() ? 0.0 : qfrag[0];
+        lam[0] = (sums[0] - q0) / sums[1];
+        return;
+    }
+    std::vector<double> Sw(sums + nf, sums + nf + static_cast<size_t>(nf) * nf), rhsw(nf);
+    for (int f = 0; f < nf; ++f)
+        rhsw[f] = sums[f] - ((f < static_cast<int>(qfrag.size())) ? qfrag[f] : 0.0);
+    for (int col = 0; col < nf; ++col) {
+        int pivot = col;
+        double maxv = std::abs(Sw[col * nf + col]);
+        for (int row = col + 1; row < nf; ++row) {
+            const double v = std::abs(Sw[row * nf + col]);
+            if (v > maxv) { maxv = v; pivot = row; }
+        }
+        if (pivot != col) {
+            for (int k = 0; k < nf; ++k) std::swap(Sw[col * nf + k], Sw[pivot * nf + k]);
+            std::swap(rhsw[col], rhsw[pivot]);
+        }
+        const double inv_d = (std::abs(Sw[col * nf + col]) > 1e-15) ? 1.0 / Sw[col * nf + col] : 0.0;
+        for (int row = col + 1; row < nf; ++row) {
+            const double fac = Sw[row * nf + col] * inv_d;
+            for (int k = col + 1; k < nf; ++k) Sw[row * nf + k] -= fac * Sw[col * nf + k];
+            rhsw[row] -= fac * rhsw[col];
+            Sw[row * nf + col] = 0.0;
+        }
+    }
+    for (int i = nf - 1; i >= 0; --i) {
+        lam[i] = rhsw[i];
+        for (int j = i + 1; j < nf; ++j) lam[i] -= Sw[i * nf + j] * lam[j];
+        const double diag = Sw[i * nf + i];
+        lam[i] = (std::abs(diag) > 1e-15) ? lam[i] / diag : 0.0;
+    }
+}
+
+/**
+ * @brief Dense EEQ solve with the Schur step on the device (WP9-C); charges in d_rhs[0..N-1].
+ *
+ * Claude Generated (Oct 2026). Returns false when the switch is off, after an earlier failure, or on a
+ * failure (counted as a GPU fallback once, then off for the rest of the run); the wrapper then takes the
+ * dense solve with its host Schur step (solveWithDeviceRHS). A non-SPD matrix takes the LU path inside
+ * eeqBuildFactorSolveDevice, as on the host-Schur route. The charges are also copied to h_result
+ * (g_rocm_eeq_host_copy), so the wrapper's download is a memcpy.
+ */
+static bool eeqDenseSchurHip(EEQSolverHipImpl& impl, int& last_N, int N, int nfrag,
+                             const double* cx, const double* cy, const double* cz,
+                             const double* d_alpha, const double* d_gam, const double* d_rhs_atoms,
+                             const std::vector<int>& fraglist, const std::vector<double>& qfrag,
+                             double cutoff_sq, bool force_refactor)
+{
+    if (!impl.m_device_schur || impl.m_device_schur_failed || nfrag < 1 || N < 1 || !d_rhs_atoms) return false;
+    static const bool fail_inject = [] {
+        const char* e = std::getenv("CURCUMA_ROCM_FAIL_SCHUR");
+        return e && *e && std::string(e) != "0";
+    }();
+    auto fail = [&impl](const char* why) {
+        impl.m_device_schur_failed = true;
+        CurcumaLogger::warn(fmt::format("EEQ ROCm: device Schur step failed ({}); host Schur step from now on", why));
+        curcuma::reportGpuFallback("GFN-FF EEQ: ROCm device Schur failed, host Schur step", why);
+        return false;
+    };
+    if (fail_inject) return fail("fault injection CURCUMA_ROCM_FAIL_SCHUR");
+    if (nfrag > 1 && (!impl.m_ppcg_topo_valid || impl.m_nfrag_topo != nfrag || impl.d_frag_atom_map.n < N))
+        return fail("fragment topology not uploaded");
+    if (!eeqBuildFactorSolveDevice(impl, last_N, N, nfrag, cx, cy, cz, d_alpha, d_gam, nullptr, d_rhs_atoms,
+                                   fraglist, cutoff_sq, force_refactor))
+        return fail("dense factor or solve");
+    const int nsum = nfrag + nfrag * nfrag;
+    impl.d_schur_sums.ensure(nsum);
+    impl.d_schur_lambda.ensure(nfrag);
+    if (nfrag == 1) {
+        k_eeq_schur_sums1_hip<<<1, 64, 0, impl.stream>>>(N, impl.d_rhs.ptr, impl.d_schur_sums.ptr);
+    } else {
+        const long long nt = static_cast<long long>(nfrag) * (nfrag + 1);
+        k_eeq_schur_sums_hip<<<static_cast<int>((nt + 127) / 128), 128, 0, impl.stream>>>(
+            N, nfrag, impl.d_rhs.ptr, impl.d_frag_atom_offsets.ptr, impl.d_frag_atom_map.ptr, impl.d_schur_sums.ptr);
+    }
+    if (hipGetLastError() != hipSuccess) return fail("sum kernel launch");
+    ensureHResultHip(impl, std::max(nsum, N));
+    if (hipMemcpyAsync(impl.h_result, impl.d_schur_sums.ptr, nsum * sizeof(double), hipMemcpyDeviceToHost,
+                       impl.stream) != hipSuccess || hipStreamSynchronize(impl.stream) != hipSuccess)
+        return fail("sum download");
+    std::vector<double> lam;
+    eeqSchurLambdaHost(nfrag, impl.h_result, qfrag, lam);
+    if (hipMemcpyAsync(impl.d_schur_lambda.ptr, lam.data(), nfrag * sizeof(double), hipMemcpyHostToDevice,
+                       impl.stream) != hipSuccess)
+        return fail("lambda upload");
+    k_eeq_schur_apply_hip<<<(N + 255) / 256, 256, 0, impl.stream>>>(N, nfrag, impl.d_rhs.ptr, impl.d_schur_lambda.ptr);
+    if (hipGetLastError() != hipSuccess) return fail("apply kernel launch");
+    if (hipMemcpyAsync(impl.h_result, impl.d_rhs.ptr, N * sizeof(double), hipMemcpyDeviceToHost,
+                       impl.stream) != hipSuccess || hipStreamSynchronize(impl.stream) != hipSuccess)
+        return fail("charge download");
+    g_rocm_eeq_host_copy = RocmEEQHostCopy{impl.d_rhs.ptr, impl.h_result, N};
+    ++impl.m_device_schur_calls;
+    if (!impl.m_device_schur_reported && CurcumaLogger::get_verbosity() >= 2) {
+        impl.m_device_schur_reported = true;
+        CurcumaLogger::info(fmt::format("EEQ ROCm: dense Cholesky with the Schur step on the device (N={}, nfrag={})",
+                                        N, nfrag));
+    }
+    return true;
+}
+
+/// WP5-A (one fragment): small systems by eeqSmallSolveHip(), else the dense solve with the device Schur
+/// step (WP9-C, when switched on); false otherwise (dense path with the host Schur step).
 bool EEQSolverHip::solveWithDeviceRHSAndGPUSchur(int natoms, int nfrag,
                                                  const double* cx, const double* cy, const double* cz,
                                                  const double* d_alpha_corrected, const double* d_gam_corrected,
                                                  const double* d_rhs_atoms,
-                                                 const std::vector<int>& /*fraglist*/, double rhs_c0,
+                                                 const std::vector<int>& fraglist, double rhs_c0,
                                                  double cutoff_sq, bool force_refactor)
 {
     if (nfrag != 1) return false;
-    return eeqSmallSolveHip(*m_impl, natoms, 1, cx, cy, cz, d_alpha_corrected, d_gam_corrected, d_rhs_atoms,
-                            std::vector<double>{rhs_c0}, cutoff_sq, force_refactor);
+    const std::vector<double> q0{rhs_c0};
+    if (eeqSmallSolveHip(*m_impl, natoms, 1, cx, cy, cz, d_alpha_corrected, d_gam_corrected, d_rhs_atoms,
+                         q0, cutoff_sq, force_refactor))
+        return true;
+    return eeqDenseSchurHip(*m_impl, m_last_N, natoms, 1, cx, cy, cz, d_alpha_corrected, d_gam_corrected,
+                            d_rhs_atoms, fraglist, q0, cutoff_sq, force_refactor);
 }
 
-/// WP7-A (a few fragments): small systems only, see eeqSmallSolveHip(); false otherwise (dense path).
+/// WP7-A (several fragments): small systems by eeqSmallSolveHip(), else the dense solve with the device
+/// Schur step (WP9-C, when switched on); false otherwise (dense path with the host Schur step).
 bool EEQSolverHip::solveWithDeviceRHSAndGPUSchurGeneral(int natoms, int nfrag,
                                                         const double* cx, const double* cy, const double* cz,
                                                         const double* d_alpha_corrected, const double* d_gam_corrected,
                                                         const double* d_rhs_atoms,
-                                                        const std::vector<int>& /*fraglist*/,
+                                                        const std::vector<int>& fraglist,
                                                         const std::vector<double>& rhs_constraints,
                                                         double cutoff_sq, bool force_refactor)
 {
-    return eeqSmallSolveHip(*m_impl, natoms, nfrag, cx, cy, cz, d_alpha_corrected, d_gam_corrected, d_rhs_atoms,
-                            rhs_constraints, cutoff_sq, force_refactor);
+    if (eeqSmallSolveHip(*m_impl, natoms, nfrag, cx, cy, cz, d_alpha_corrected, d_gam_corrected, d_rhs_atoms,
+                         rhs_constraints, cutoff_sq, force_refactor))
+        return true;
+    return eeqDenseSchurHip(*m_impl, m_last_N, natoms, nfrag, cx, cy, cz, d_alpha_corrected, d_gam_corrected,
+                            d_rhs_atoms, fraglist, rhs_constraints, cutoff_sq, force_refactor);
 }
 
 bool EEQSolverHip::solveWithDeviceRHSAndGPUPCG(int, int, const double*, const double*, const double*,

@@ -130,6 +130,11 @@ std::vector<double> computeD4CovalentCN(const std::vector<int>& atoms,
     return cn;
 }
 
+D4CovalentCNTables d4CovalentCNTables()
+{
+    return D4CovalentCNTables{ rad, en, kn, k4, k5, k6 };
+}
+
 void addD4CovalentCNGradient(const std::vector<int>& atoms,
                              const Matrix& geom_bohr,
                              const Vector& dEdcn,

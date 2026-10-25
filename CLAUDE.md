@@ -353,6 +353,8 @@ before committing, or enable the hook with `git config core.hooksPath scripts/gi
 - **Branch names**: `feature/<topic>` for new capabilities, `fix/<topic>` for bug fixes; `<topic>` is 2-4 lowercase ASCII words in kebab-case naming the subject, no dates or issue numbers (e.g. `feature/gfnff-solvation`, `fix/bmt-dir-collision`)
 - **Why the scheme matters**: `.github/workflows/ccpp.yml` builds `feature/**` and `fix/**` automatically and publishes each as its own `ci-<branch>` prerelease — a branch outside the scheme has to be added to the workflow by hand
 
+- **`devel/methods` is the integration branch for method work (gfn1/gfn2/gfnff, CUDA/ROCm)**: finished `feature/*` and `fix/*` branches go there first, never straight to `master`. The operator syncs and tests it on the different machines (CUDA, ROCm); only then does `devel/methods` merge into `master`. Not covered by the CI branch list (`ccpp.yml` has no `devel/**`); AI sessions neither push nor merge it into `master` unasked.
+
 ## Standards
 
 ### Universal Logging System (`src/core/curcuma_logger.h/.cpp`)
@@ -393,7 +395,7 @@ before committing, or enable the hook with `git config core.hooksPath scripts/gi
 - **CLI Arguments**: Automatically split into controller subdocuments via `CLI2Json()`
 - **Structure**: `controller[keyword][parameter]` - e.g. `controller["opt"]["verbosity"]`, `controller["hessian"]["MaxIter"]`
 - **Global Parameters**: `verbosity`, `threads`, `method`, `gpu` are additionally duplicated at top-level
-- **Flat-flag auto-routing (2026)**: Any registered PARAM is reachable by its flat name (`-cn_cutoff_bohr 5.5` routes to `controller["gfnff"]["cn_cutoff_bohr"]` because the registry records ownership). Same-name in the active command's module wins; truly ambiguous names (multiple owners, none matching) warn and stay in the command module. Dotted form `-<module>.<param>` always works for disambiguation. Unregistered/legacy flags stay in the command module (unchanged).
+- **Flat-flag auto-routing (2026)**: Any registered PARAM is reachable by its flat name (`-cn_cutoff_bohr 5.5` routes to `controller["gfnff"]["cn_cutoff_bohr"]` because the registry records ownership). Same-name in the active command's module wins; several owners and none matching the command: routed to the module of the selected `-method` if it owns the name (`MethodFactory::parameterScopeForMethod`, test `cli_sqm_15`), else warn and stay. Dotted form `-<module>.<param>` always works for disambiguation. Unregistered/legacy flags stay in the command module (unchanged).
 - **JSON round-trip (2026)**: `-export_run file.json` writes the resolved controller plus `_command`, `_input`, and full registry defaults for every touched module. `-import_config file.json` performs a recursive deep merge (CLI wins at every depth). Invoking `curcuma -import_config run.json` reads `_command`/`_input` from the JSON, so the file alone is enough to replay a run. See [docs/CLI_ROUND_TRIP.md](docs/CLI_ROUND_TRIP.md).
 
 ## Validation Method and Traps
@@ -420,7 +422,7 @@ and `AIChangelog.md`, not into this file; only open items and traps stay here.
 
 - GFN-FF energy depends on atom numbering in pprcht and curcuma (911/2557 GMTKN55+MOR41 structures; REV_GFNFF_TODO #12) (#34)
 - ROCm: `-scf_mixed_precision false` ignored (G2-13), wave32 assumption (F-17) (#37)
-- Bit-identical results only at a fixed CPU thread count; GPU not run-to-run reproducible (#36)
+- Bit-identical results only at a fixed CPU thread count; the CUDA GFN1/GFN2 SCF and GFN-FF charge/force path are bitwise reproducible since Oct 17, 2026, the ROCm ones (gfx1200 only, `-gfnff.rocm_fixed_point`, `-xtb.rocm_fixed_point`) since Oct 25, 2026 (the multi-GPU EEQ split equals the single-GPU result only to 1e-12, independent of the GPU count; [GPU_REPRODUCIBILITY.md](docs/GPU_REPRODUCIBILITY.md), #36)
 - `shouldUpdateHBXB()` RMSD trigger off by `sqrt(natoms)` (ported from the reference, left); D4 ATM C6 frozen at setup (#33)
 - `DC13/c20bowl` Coulomb -6.29 kcal/mol, not root-caused (#14); gfn1/gfn2 gradients vs xtb at exactly coincident coordinates (#28)
 - Charge placement (#31) untested for periodic systems, GPU runtime, many fragments; `-DUSE_PORTABLE_MATH` unconfirmed on Windows (#7)

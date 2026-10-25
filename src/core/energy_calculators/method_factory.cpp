@@ -568,6 +568,19 @@ const std::vector<std::string>& MethodFactory::methodParameterScopes()
     return scopes;
 }
 
+std::string MethodFactory::parameterScopeForMethod(const std::string& method_name)
+{
+    std::string m = method_name;
+    std::transform(m.begin(), m.end(), m.begin(), ::tolower);
+    auto in = [&m](const std::vector<std::string>& v) { return std::find(v.begin(), v.end(), m) != v.end(); };
+    if (m.rfind("tblite-", 0) == 0 || in(m_tblite_methods)) return "tblite";
+    if (in(m_ulysses_methods)) return "ulysses";
+    // Native gfn1/gfn2 (and their ngfn aliases) read the "xtb" scope, like the external XTB methods.
+    if (m == "gfn1" || m == "gfn2" || m == "ngfn1" || m == "ngfn2" || m.rfind("xtb-gfn", 0) == 0) return "xtb";
+    if (m == "eht") return "eht";
+    return "";
+}
+
 std::unique_ptr<ComputationalMethod> MethodFactory::create(const std::string& method_name, const json& config) {
     std::string method = method_name;
     std::transform(method.begin(), method.end(), method.begin(), ::tolower);

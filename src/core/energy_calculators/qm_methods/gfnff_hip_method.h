@@ -79,6 +79,10 @@ struct GFNFFRocmBackend {
     /// device build with the gather CSR on the device, FFWorkspaceHip::generateDispersionPairListOnGPU);
     /// -gfnff.gpu_disp_pairs_on_device false restores the host build.
     static constexpr bool default_disp_pairs_on_device = true;
+    /// WP9-A (Claude Generated, Oct 2026): -gfnff.gpu_rep_pairs_on_device reaches the ROCm workspace
+    /// (FFWorkspaceHip::generateNonbondedRepulsionOnGPU, ordered row build with the gather CSR on the device);
+    /// false keeps the staged host build (FFWorkspaceHip::updateRepulsion).
+    static constexpr bool has_device_repulsion_build = true;
 
     /// Deliverable 3 (Jun 2026): from 16 fragments on, the dense device Cholesky (O(N^3) plus a
     /// host Schur step over nfrag+1 columns) is not used. Oct 2026: there the device projected PCG
@@ -118,8 +122,56 @@ extern template class GFNFFGpuMethodImpl<GFNFFRocmBackend>;
 // devirtualise calls through a GFNFFHipComputationalMethod* into direct references to the
 // (extern-template) base members, which callers outside this plugin cannot resolve.
 class GFNFFHipComputationalMethod : public GFNFFGpuMethodImpl<GFNFFRocmBackend> {
+    using Base = GFNFFGpuMethodImpl<GFNFFRocmBackend>;
+
 public:
-    using GFNFFGpuMethodImpl<GFNFFRocmBackend>::GFNFFGpuMethodImpl;
+    /// Claude Generated (Oct 2026, WP9): reads the ROCm-only switches (RocmGfnffOptions) from the config.
+    GFNFFHipComputationalMethod(const std::string& method_name, const json& config)
+        : Base(method_name, config)
+        , m_rocm_options(readRocmOptions(config))
+    {
+    }
+
+    /// The device classes are created inside these two calls; the options are published around them.
+    bool setMolecule(const Mol& mol) override
+    {
+        RocmOptionsScope scope(m_rocm_options);
+        return Base::setMolecule(mol);
+    }
+    double calculateEnergy(bool gradient = false) override
+    {
+        RocmOptionsScope scope(m_rocm_options);
+        return Base::calculateEnergy(gradient);
+    }
+    void setParameters(const json& params) override
+    {
+        Base::setParameters(params);
+        m_rocm_options = readRocmOptions(params);
+    }
+
+    /// Claude Generated (Oct 2026, WP9): gfnff scope first, then the top level (as the wrapper's cfg_get_bool).
+    static RocmGfnffOptions readRocmOptions(const json& config)
+    {
+        RocmGfnffOptions o;
+        const json* g = (config.contains("gfnff") && config["gfnff"].is_object()) ? &config["gfnff"] : nullptr;
+        auto get = [&](const char* k, bool d) {
+            if (g && g->contains(k)) return g->value(k, d);
+            return config.value(k, d);
+        };
+        o.dc6dcn_tables = get("rocm_dc6dcn_tables", o.dc6dcn_tables);
+        o.device_schur  = get("rocm_device_schur", o.device_schur);
+        o.fixed_point   = get("rocm_fixed_point", o.fixed_point);
+        return o;
+    }
+
+private:
+    /// Sets rocmGfnffOptionsSlot() for the lifetime of the scope and restores the previous value.
+    struct RocmOptionsScope {
+        const RocmGfnffOptions* prev;
+        explicit RocmOptionsScope(const RocmGfnffOptions& o) : prev(rocmGfnffOptionsSlot()) { rocmGfnffOptionsSlot() = &o; }
+        ~RocmOptionsScope() { rocmGfnffOptionsSlot() = prev; }
+    };
+    RocmGfnffOptions m_rocm_options;
 };
 
 #endif // USE_ROCM

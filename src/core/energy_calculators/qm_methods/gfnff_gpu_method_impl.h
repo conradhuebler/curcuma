@@ -85,6 +85,13 @@ struct gfnffBackendEEQChargeDownload : std::false_type {};
 template <class B>
 struct gfnffBackendEEQChargeDownload<B, std::void_t<decltype(&B::downloadEEQCharges)>> : std::true_type {};
 
+/// Claude Generated (Oct 2026): true iff the backend traits declare `has_device_repulsion_build = true` (CUDA).
+template <class B, class = void>
+struct gfnffBackendRepulsionBuild : std::false_type {};
+template <class B>
+struct gfnffBackendRepulsionBuild<B, std::void_t<decltype(B::has_device_repulsion_build)>>
+    : std::bool_constant<B::has_device_repulsion_build> {};
+
 template <class Backend>
 class GFNFFGpuMethodImpl : public ComputationalMethod {
 public:
@@ -414,6 +421,7 @@ private:
     bool m_disp_pairs_requested = false;  ///< the D4 pair list is built on the device (setting, backend default, ROCm env)
     bool m_hb_detect_on_device = false;   ///< Oct 2026: H-bond triples enumerated on the device (gpu_hb_detect_on_device)
     bool m_hb_detect_verify = false;      ///< compare the device list with the host detection at every refresh
+    bool m_rep_pairs_on_device = false;   ///< Oct 2026: non-bonded repulsion list rebuilt on the device (gpu_rep_pairs_on_device)
 };
 
 // ---------------------------------------------------------------------------
@@ -610,6 +618,20 @@ bool GFNFFGpuMethodImpl<Backend>::setMolecule(const Mol& mol)
     // Upload parameters to GPU + create CPU residual
     if (!initGPUWorkspace()) {
         return false;
+    }
+
+    // Oct 2026: from here on the non-bonded repulsion list is rebuilt on the device (default on for CUDA,
+    // `-gfnff.gpu_rep_pairs_on_device false` keeps the host build). Set after the setup build on purpose.
+    if constexpr (gfnffBackendRepulsionBuild<Backend>::value) {
+        bool rep_dev = true;
+        if (m_parameters.contains("gpu_rep_pairs_on_device")) rep_dev = m_parameters.value("gpu_rep_pairs_on_device", rep_dev);
+        if (m_parameters.contains("gfnff") && m_parameters["gfnff"].is_object())
+            rep_dev = m_parameters["gfnff"].value("gpu_rep_pairs_on_device", rep_dev);
+        typename GFNFF::RepulsionDeviceInputs probe;
+        if (rep_dev && m_gfnff->repulsionDeviceInputs(probe)) {
+            m_rep_pairs_on_device = true;
+            m_gfnff->setSkipHostRepulsionPairs(true);
+        }
     }
     auto t_init_end = std::chrono::high_resolution_clock::now();
 
@@ -886,6 +908,8 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
             }
             if (devs.size() > 1) {
                 m_gpu_workspace->setCoulombSplitDevices(devs, min_atoms);
+                m_eeq_gpu->setSplitMixedPrecision(cfg_get_bool("gpu_eeq_mixed_precision", true),
+                                                  cfg_get_dbl("gpu_eeq_mixed_rho", 1e-5));
                 m_eeq_gpu->setSplitDevices(devs, std::max(min_atoms, cfg_get_int("gpu_split_eeq_min_atoms", 4000)));
                 m_split_configured = true;
             }
@@ -972,6 +996,16 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
     }
 
     auto t0 = std::chrono::high_resolution_clock::now();
+    // CURCUMA_GFNFF_STEPPHASE=1: GAP lines name the host sections that no phase timer covers (> 0.5 ms)
+    static const bool gap_log = [] { const char* e = std::getenv("CURCUMA_GFNFF_STEPPHASE"); return e && *e && std::string(e) != "0"; }();
+    auto gap_t = t0;
+    auto gap_lap = [&](const char* what) {
+        if (!gap_log) return;
+        const auto now = std::chrono::high_resolution_clock::now();
+        const double ms = std::chrono::duration<double, std::milli>(now - gap_t).count();
+        if (ms > 0.5) fmt::print(stderr, "GAP {} {:.2f}\n", what, ms);
+        gap_t = now;
+    };
 
     // Claude Generated (May 2026): Enable per-stream kernel timing at verbosity >= 2.
     // This disables CUDA Graph replay so events get recorded each step.
@@ -1037,6 +1071,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
         m_cn_pairs_generated = false;
         m_eeq_has_ref_geom = false;
     }
+    gap_lap("after_setgeometry_react");
 
     // K1 (Oct 2026, Claude Generated): true when the CN pair list is a Verlet list with its own
     // reference geometry (see initGPUWorkspace() for the threshold derivation).
@@ -1057,6 +1092,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
                 m_cn_pairs_generated = false;
         }
     }
+    gap_lap("after_checkDisplacement");
 
     // K1 (Oct 2026, Claude Generated): rebuild an existing CN pair list BEFORE computeCN when an
     // atom moved more than m_cn_pair_max_disp since its build, so this step's CN and chain rule
@@ -1068,6 +1104,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
             m_gpu_workspace->generateCNPairListOnGPU();
         }
     }
+    gap_lap("after_K1_cnlist_rebuild");
 
     // --- Step 1: GPU CN computation (G-P1: truly async, no sync here) ---
     // k_cn_compute + k_dlogdcn + 3 async D2H launches on main stream.
@@ -1114,6 +1151,15 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
 
     // --- Step 2c: Dynamic HB/XB re-detection (must happen before kernel launch) ---
     auto t_hbxb_start = std::chrono::high_resolution_clock::now();
+    // CURCUMA_GFNFF_STEPPHASE=1: sub-timers of a fired refresh (stderr), Claude Generated (Oct 2026)
+    static const bool hb_phase_log = [] { const char* e = std::getenv("CURCUMA_GFNFF_STEPPHASE"); return e && *e && std::string(e) != "0"; }();
+    auto hb_t = std::chrono::steady_clock::now();
+    auto hb_lap = [&](const char* what) {
+        if (!hb_phase_log) return;
+        const auto now = std::chrono::steady_clock::now();
+        fmt::print(stderr, "HBXBSUB {} {:.2f}\n", what, std::chrono::duration<double, std::milli>(now - hb_t).count());
+        hb_t = now;
+    };
     bool hbxb_updated = false;
     bool hb_on_device = false;                       // the H-bond list of this refresh was built on the device
     std::vector<int> dev_hb_i, dev_hb_j, dev_hb_k;   // its (A, H, B) triples on the host
@@ -1141,12 +1187,14 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
     m_last_gpu_prep_timing.hb_detect = std::chrono::duration<double, std::milli>(t_hb_det_end - t_hbxb_start).count();
     m_last_gpu_prep_timing.hb_rebuild = 0.0;
     m_last_gpu_prep_timing.hb_upload = 0.0;
+    if (hbxb_updated) hb_lap("detect");
     if (hbxb_updated) {
         if (!hb_on_device)
             m_gpu_workspace->updateHBonds(m_gfnff->getLastHBonds(), m_atom_types);
         m_gpu_workspace->updateXBonds(m_gfnff->getLastXBonds(), m_atom_types);
         const auto t_hb_up1 = std::chrono::high_resolution_clock::now();
         m_last_gpu_prep_timing.hb_upload = std::chrono::duration<double, std::milli>(t_hb_up1 - t_hb_det_end).count();
+        hb_lap("upload_hb_xb");
 
         // Claude Generated (Apr 2026): Propagate HB re-detection to bond metadata and alpha pairs.
         // Without this, the bond SoA's nr_hb/hb_H_atom and the HB alpha pair list become stale,
@@ -1159,14 +1207,17 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
                 : m_gfnff->rebuildBondHBData(m_gfnff->getLastHBonds(), m_gpu_params->bonds);
             const auto t_hb_rb1 = std::chrono::high_resolution_clock::now();
             m_last_gpu_prep_timing.hb_rebuild = std::chrono::duration<double, std::milli>(t_hb_rb1 - t_hb_rb0).count();
+            hb_lap("rebuildBondHBData");
 
             // Update HB alpha (H,B) pair list on GPU
             m_gpu_workspace->updateHBAlphaPairs(hb_update.bond_hb_data, m_atom_types);
+            hb_lap("updateHBAlphaPairs");
 
             // Update per-bond nr_hb and hb_H_atom metadata on GPU
             m_gpu_workspace->updateBondHBMetadata(hb_update.bond_nr_hb, hb_update.bond_hb_H_atom);
             m_last_gpu_prep_timing.hb_upload += std::chrono::duration<double, std::milli>(
                 std::chrono::high_resolution_clock::now() - t_hb_rb1).count();
+            hb_lap("updateBondHBMetadata");
 
             // Update leaked params' bond_hb_data for HB CN computation (Step 2b)
             m_gpu_params->bond_hb_data = std::move(hb_update.bond_hb_data);
@@ -1185,6 +1236,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
         m_gpu_workspace->invalidateGraph();
     }
     auto t_hbxb_end = std::chrono::high_resolution_clock::now();
+    gap_t = t_hbxb_end;
 
     // --- Step 2d: Periodic non-bonded repulsion pair-list refresh ---
     // Claude Generated (Sep 2026): the repulsion pair list is otherwise built ONCE from a
@@ -1194,6 +1246,23 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
     const auto t_rep_start = std::chrono::high_resolution_clock::now();
     m_gfnff->updateNonbondedRepulsionIfNeeded(nullptr);
     m_last_gpu_prep_timing.rep_upload = 0.0;
+    gap_lap("repulsion_host_build");
+    if constexpr (gfnffBackendRepulsionBuild<Backend>::value) {
+        if (m_rep_pairs_on_device && m_gfnff->consumeNonbondedRepulsionUpdate()) {
+            // The skin rule fired on the host; the list is rebuilt from the device coordinates. The
+            // tables depend on the topology only and are cheap to collect, so no cache to invalidate.
+            typename GFNFF::RepulsionDeviceInputs rep_in;
+            if (m_gfnff->repulsionDeviceInputs(rep_in)) {
+                m_gpu_workspace->generateNonbondedRepulsionOnGPU(rep_in);   // device coordinates set at the start of the call
+                m_gpu_workspace->invalidateGraph();
+            } else {
+                m_has_error = true;
+                m_error_message = "GFN-FF GPU: repulsion tables unavailable after the device build was enabled";
+                CurcumaLogger::error(m_error_message);
+                return 0.0;
+            }
+        }
+    }
     if (m_gfnff->consumeNonbondedRepulsionUpdate()) {
         const auto t_rep_up = std::chrono::high_resolution_clock::now();
         m_gpu_workspace->updateRepulsion(m_gfnff->getLastBondedRepulsions(),
@@ -1204,6 +1273,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
         // Repulsion SoA n-values changed → captured graph is stale (same reasoning as HB/XB).
         m_gpu_workspace->invalidateGraph();
     }
+    gap_lap("repulsion_upload");
 
     // --- Step 2e: D4 dispersion pair-list skin check + explicit Coulomb list refresh ---
     // Claude Generated (Sep 2026): same one-shot-list bug as the repulsion list above; see
@@ -1213,10 +1283,13 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
     // the captured CUDA graph is stale and must be invalidated, exactly like HB/XB/repulsion.
     const auto t_disp_start = std::chrono::high_resolution_clock::now();
     m_last_gpu_prep_timing.rep_update = std::chrono::duration<double, std::milli>(t_disp_start - t_rep_start).count();
+    gap_lap("before_dispersion_update");
     m_gfnff->updateDispersionPairsIfNeeded(nullptr);
+    gap_lap("dispersion_host_generator");
     if (m_gfnff->consumeDispersionPairsUpdate()) {
         if (m_disp_pairs_on_device) {
             buildDispersionPairsOnDevice();   // host generator refreshed CN + weights; device builds pairs
+            gap_lap("dispersion_device_build");
         } else if (m_gfnff->getWorkspace()) {
             m_gpu_workspace->updateDispersion(m_gfnff->getWorkspace()->d4Dispersions());
         }
@@ -1224,6 +1297,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
     }
     const auto t_coul_start = std::chrono::high_resolution_clock::now();
     m_last_gpu_prep_timing.disp_update = std::chrono::duration<double, std::milli>(t_coul_start - t_disp_start).count();
+    gap_lap("dispersion_update");
     m_gfnff->updateCoulombPairsIfNeeded(nullptr);
     if (m_gfnff->consumeCoulombPairsUpdate() && m_gfnff->getWorkspace()) {
         m_gpu_workspace->updateCoulombPairs(m_gfnff->getWorkspace()->coulombPairs());
@@ -1268,6 +1342,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
         }
     }
 
+    gap_lap("coulomb_update_and_checks");
     auto t_prep_end = std::chrono::high_resolution_clock::now();
 
     // === OVERLAP: Launch charge-independent GPU kernels ===
@@ -2119,6 +2194,21 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
 
     ++m_calc_count;
 
+    // Claude Generated (Oct 2026): CURCUMA_GFNFF_STEPPHASE=1 prints one line per calculator call
+    // (ms): cn, dlogdcn, hb_cn, hbxb (fired flag), launch, eeq_solve, coulomb+postprocess, total.
+    {
+        static const bool phase_log = [] {
+            const char* e = std::getenv("CURCUMA_GFNFF_STEPPHASE");
+            return e && *e && std::string(e) != "0";
+        }();
+        if (phase_log) {
+            const auto& T = m_last_gpu_prep_timing;
+            fmt::print(stderr, "STEPPHASE {} grad={} cn={:.2f} dlogdcn={:.2f} hb_cn={:.2f} hbxb={:.2f}{} launch={:.2f} eeq={:.2f} coul={:.2f} total={:.2f}\n",
+                       m_calc_count, gradient ? 1 : 0, T.cn, T.dlogdcn, T.hb_cn, T.hbxb, hbxb_updated ? "[F]" : "",
+                       T.launch, T.eeq_solve, T.coulomb_postprocess, T.total);
+        }
+    }
+
     if (CurcumaLogger::get_verbosity() >= 2) {
         // Claude Generated (Apr 2026): Granular GPU timing + wallclock-normalized breakdown
         // Fix (May 2026): t_hbxb now measures actual updateHBXBIfNeeded duration (was ≈0).
@@ -2646,10 +2736,10 @@ void GFNFFGpuMethodImpl<Backend>::buildDispersionPairsOnDevice()
     // WP-A (Jun 2026) device build, moved here unchanged from initGPUWorkspace() (Sep 2026).
     D4ParameterGenerator* d4 = m_gfnff->getD4Generator();
     if (!d4) return;
-    // Claude Generated (Oct 2026): the setup call (initGPUWorkspace()) runs before the first
-    // setGeometry() of calculateEnergy(), so the device coordinates were unset and the 60 Bohr
-    // cutoff kept every pair (urea400-water1000: N(N-1)/2 = 19.2 M instead of the host's list).
-    // The same stream orders this upload before the count/build kernels.
+    // Oct 2026: the setup-time call comes from initGPUWorkspace() before the first setGeometry(): the device
+    // coordinates were zero, every pair counted as "within 60 Bohr" and the list held all N(N-1)/2 pairs
+    // (polymer_2x: 26.8 instead of 9.4 M; energies unaffected since k_dispersion skips pairs beyond r_cut,
+    // but dc6dcn and dispersion ran 1.9x / 1.6x slower until the first rebuild). Upload the geometry first.
     m_gpu_workspace->setGeometry(m_gfnff->getGeometryBohr());
     const int Nd = static_cast<int>(m_atom_types.size());
     // Host Gaussian weights (same as getChargeWeightedC6 uses) -> flat [N*MAX_REF].

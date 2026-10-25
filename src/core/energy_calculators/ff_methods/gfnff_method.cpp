@@ -1967,8 +1967,17 @@ void GFNFF::updateHBXBIfNeeded(FFWorkspace* extra_ws)
     int old_xb_count = m_hb_reference ? m_hb_reference->nxb_count : 0;
     int old_disp_count = m_workspace ? m_workspace->dispersionPairCount() : 0;
 
+    static const bool hb_sub_log = [] { const char* e = std::getenv("CURCUMA_GFNFF_STEPPHASE"); return e && *e && std::string(e) != "0"; }();
+    auto hbs_t = std::chrono::steady_clock::now();
+    auto hbs_lap = [&](const char* what) {
+        if (!hb_sub_log) return;
+        const auto now = std::chrono::steady_clock::now();
+        fmt::print(stderr, "HBXBDET {} {:.2f}\n", what, std::chrono::duration<double, std::milli>(now - hbs_t).count());
+        hbs_t = now;
+    };
     // Get current topology with updated geometry
     const TopologyInfo& topo = getCachedTopology();
+    hbs_lap("getCachedTopology");
 
     // Re-detect HB/XB pairs with Phase-1 charges (topology_charges)
     // Claude Generated (Oct 2026): the entries of the previous list are reused as the slots of the
@@ -1977,8 +1986,11 @@ void GFNFF::updateHBXBIfNeeded(FFWorkspace* extra_ws)
     // fresh memory and destroying the old list afterwards on this thread (urea400-water1000).
     std::vector<GFNFFHydrogenBond> hb_storage;
     hb_storage.swap(m_last_hbonds);
+    hbs_lap("swap");
     auto new_hbonds_native = detectHydrogenBondsNative(topo.topology_charges, &hb_storage);
+    hbs_lap("detectHB");
     auto new_xbonds_native = detectHalogenBondsNative(topo.topology_charges);
+    hbs_lap("detectXB");
 
     // Update internal workspace (not when a GPU method owns the lists, setSkipHostHBWorkspaceUpdate)
     if (m_workspace && !m_skip_host_hb_workspace) {
@@ -2005,6 +2017,7 @@ void GFNFF::updateHBXBIfNeeded(FFWorkspace* extra_ws)
         }
     }
 
+    hbs_lap("workspace_updates");
     // Store re-detected lists for external consumers (e.g. GPU SoA re-upload)
     m_last_hbonds = std::move(new_hbonds_native);
     m_last_xbonds = std::move(new_xbonds_native);
@@ -2220,6 +2233,13 @@ void GFNFF::updateNonbondedRepulsionIfNeeded(FFWorkspace* extra_ws)
         return;
     m_rep_list_ref_geometry = m_geometry_bohr;
     ++m_rep_rebuild_count;
+
+    if (m_skip_host_rep_pairs) {
+        // Oct 2026 (Claude Generated): only the decision is made here; the wrapper rebuilds the list on
+        // the device from repulsionDeviceInputs() and the current coordinates.
+        m_nb_rep_updated = true;
+        return;
+    }
 
     auto start_time = std::chrono::high_resolution_clock::now();
 
@@ -9109,6 +9129,14 @@ double GFNFF::estimateXBStrength(int A, int X, int B,
 std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& charges,
                                                                 std::vector<GFNFFHydrogenBond>* storage) const
 {
+    static const bool dhb_log = [] { const char* e = std::getenv("CURCUMA_GFNFF_STEPPHASE"); return e && *e && std::string(e) != "0"; }();
+    auto dhb_t = std::chrono::steady_clock::now();
+    auto dhb_lap = [&](const char* what) {
+        if (!dhb_log) return;
+        const auto now = std::chrono::steady_clock::now();
+        fmt::print(stderr, "DHB {} {:.2f}\n", what, std::chrono::duration<double, std::milli>(now - dhb_t).count());
+        dhb_t = now;
+    };
     // Claude Generated (March 2026): Native struct version of detectHydrogenBonds
     auto start_time = std::chrono::high_resolution_clock::now();
 
@@ -9228,6 +9256,7 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
     }
 
     CurcumaLogger::info(fmt::format("Found {} HB hydrogens", hb_hydrogens.size()));
+    dhb_lap("step0_and_hydrogens");
 
     // Step 2 & 3: Identify potential acceptor-donor pairs (A-B) and actual HB contacts
     // Claude Generated (Feb 25, 2026): Rewritten to match Fortran gfnff_ini2.f90:700-748
@@ -9359,6 +9388,7 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
         }
     }
 
+    dhb_lap("ab_pairs");
     // Lambda to create HB native entry for nhb2 (Case 2, 3, or 4). Returns true iff an entry
     // was actually appended (false on the pre-existing is_bonded skip or the new lever-1
     // strength skip) so callers can keep the verbosity-3 nhb2_count diagnostic accurate.
@@ -9646,6 +9676,7 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
             }
         };
 
+        dhb_lap("pre_loop_setup");
         CxxThreadPool* opt_pool = threadPool();
         const int opt_par_threshold = m_parameters.value("hb_parallel_min_pairs", 500);
         const bool opt_parallel = (opt_pool != nullptr && opt_par_threshold >= 0
@@ -9887,6 +9918,7 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
         }
     }
     }  // end Lever 1 branch: if (have_cell_list) { optimized } else { legacy full scan }
+    dhb_lap("hb_loop_total");
 
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info(fmt::format("Detected {} hydrogen bonds", hbonds.size()));
@@ -11987,6 +12019,56 @@ std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::gener
     (void)duration;
 
     return {std::move(bonded_reps), std::move(nonbonded_reps)};
+}
+
+bool GFNFF::repulsionDeviceInputs(RepulsionDeviceInputs& out) const
+{
+    // Claude Generated (Oct 2026): same per-atom arithmetic and the same pair exclusions as
+    // make_nb_rep() in generateRepulsionPairsNative(); see the struct doc in gfnff.h.
+    using namespace GFNFFParameters;
+    const int N = m_atomcount;
+    const TopologyInfo& topo = getCachedTopology();
+    const bool hh_use_bpair = m_parameters.value("hh_repulsion_bpair", true);
+    const SparseTopoTable& hh_table = hh_use_bpair ? topo.bpair : topo.topo_distances;
+    if (hh_table.n != N || hh_table.default_value == 2 || hh_table.default_value == 3)
+        return false;
+
+    out = RepulsionDeviceInputs{};
+    out.valid.assign(N, 0);
+    out.metal.assign(N, 0);
+    out.dum.assign(N, 0.0);
+    out.repz.assign(N, 1.0);
+    for (int i = 0; i < N; ++i) {
+        const int zi = m_atoms[i] - 1;
+        out.valid[i] = (zi >= 0 && zi < static_cast<int>(repan_angewChem2020.size())) ? 1 : 0;
+        out.metal[i] = PeriodicTable::getMetalType(m_atoms[i]) > 0 ? 1 : 0;
+        if (!out.valid[i]) continue;
+        out.repz[i] = (zi < static_cast<int>(repz.size())) ? repz[zi] : 1.0;
+        const double qa = (i < topo.topology_charges.size()) ? topo.topology_charges[i] : 0.0;
+        const double cn = (i < topo.neighbor_counts.size()) ? topo.neighbor_counts[i] : 0.0;
+        const double fn = 1.0 + NREPSCAL / (1.0 + cn * cn);
+        out.dum[i] = repan_angewChem2020[zi] * (1.0 + qa * QREPSCAL) * fn;
+    }
+    // The host skips a pair only if (i, j) with i < j is a bond-list entry in that order.
+    for (const auto& b : getCachedBondList())
+        if (b.first >= 0 && b.second < N && b.first < b.second)
+            out.bond_keys.push_back(static_cast<long long>(b.first) * N + b.second);
+    std::sort(out.bond_keys.begin(), out.bond_keys.end());
+    for (int i = 0; i < N; ++i) {
+        if (m_atoms[i] != 1) continue;
+        for (const auto& e : hh_table.row(i))
+            if (e.first > i && e.first < N && m_atoms[e.first] == 1 && (e.second == 2 || e.second == 3)) {
+                out.hh_keys.push_back(static_cast<long long>(i) * N + e.first);
+                out.hh_dist.push_back(e.second);
+            }
+    }
+    // rows are sorted by j, atoms are visited by i: the keys are already sorted
+    out.repscaln = REPSCALN;
+    out.hhfac = HHFAC;
+    out.hh13 = HH13REP;
+    out.hh14 = HH14REP;
+    out.build_radius_bohr = 20.0 + nonbondedSkinBohr();
+    return true;
 }
 
 std::tuple<std::vector<GFNFFDispersion>, std::vector<ATMTriple>, std::string> GFNFF::generateDispersionPairsNative() const

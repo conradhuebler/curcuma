@@ -65,10 +65,94 @@ void installHipSignalHandlers() {
 // Device geometry helpers
 // ============================================================================
 
-/// Add vector contribution to gradient (atomicAdd on x,y,z)
+// ============================================================================
+// Order-independent (fixed-point) accumulation, WP10 (Claude Generated, Oct 2026; port of cuda/gfnff_kernels.cu
+// fix_add, docs/GPU_REPRODUCIBILITY.md). FP64 atomicAdd depends on the arrival order of the threads, so two
+// runs differ in the last bits. Integer addition is associative: with d_gfnff_fix != 0 a contribution is
+// rounded to a multiple of 2^-52 (forces, dE/dCN, zz_hb; energy slot 0 = dispersion), 2^-48 (other energy
+// slots) or 2^-56 (CN sums), added as a 64-bit integer into the same 8 bytes of the double buffer, and the
+// buffer is converted in place by k_fix_to_double once the accumulation is over. Same scales as CUDA.
+// d_gfnff_fix == 0 keeps the FP64 atomicAdd path unchanged (switch -gfnff.rocm_fixed_point).
+// Range (as CUDA): +-2048 per gradient/dE/dCN component and for the dispersion energy, +-32768 Eh per other
+// energy slot, +-128 for CN sums; a final sum beyond that wraps silently.
+// ============================================================================
+constexpr double GFNFF_FIX_CN          = 72057594037927936.0;   // 2^56
+constexpr double GFNFF_FIX_ENERGY      = 281474976710656.0;     // 2^48
+constexpr double GFNFF_FIX_ENERGY_DISP = 4503599627370496.0;    // 2^52
+constexpr double GFNFF_FIX_FORCE       = 4503599627370496.0;    // 2^52
+
+/// 1: accumulators of the GFN-FF step are fixed-point integers (set by setGfnffFixModeHip, host side).
+__constant__ int d_gfnff_fix;
+
+/// Set (sticky) when a contribution was not finite or alone outside the accumulator range; read by the host after
+/// the step (FFWorkspaceHip::launchChargeDependentAndFinish), which then returns NaN as the FP64 path would.
+__device__ int d_gfnff_fix_bad;
+
+/// The CUDA version adds |v| >= 64 in chunks of 64 with one atomic each (unbounded for a huge or infinite v).
+/// Here the n chunks are folded into one integer, n * llrint(64 scale) + llrint(r scale), r = v - n * 64 (exact for
+/// |v| < 2^59): modulo 2^64 the same accumulator bits as the chunk loop, with one atomic and a bounded cost.
+__device__ __forceinline__ void fix_add_u64(unsigned long long* a, double v, double scale)
+{
+    const double av = fabs(v);
+    if (!(av * scale < 9.2e18)) {                     // beyond int64 range (or NaN/Inf): the sum is wrong anyway
+        if (!(av < 5.7e17)) {                         // 2^59 > |v| or not finite: mark, add nothing usable
+            atomicOr(&d_gfnff_fix_bad, 1);
+            return;
+        }
+        atomicOr(&d_gfnff_fix_bad, 1);
+    }
+    if (av < 64.0) {                                  // the common case: one rounded value
+        atomicAdd(a, static_cast<unsigned long long>(llrint(v * scale)));
+        return;
+    }
+    const double n = trunc(av * (1.0 / 64.0));        // number of 64-chunks of the CUDA loop
+    const double r = v - copysign(n * 64.0, v);       // exact: the loop's remainder
+    const unsigned long long chunk = static_cast<unsigned long long>(llrint(copysign(64.0, v) * scale));
+    const unsigned long long sum = static_cast<unsigned long long>(n) * chunk
+                                 + static_cast<unsigned long long>(llrint(r * scale));
+    atomicAdd(a, sum);
+}
+
+__device__ __forceinline__ void fix_add(double* addr, double v, double scale)
+{
+    fix_add_u64(reinterpret_cast<unsigned long long*>(addr), v, scale);
+}
+
+/// Claude Generated (Oct 2026, WP10): one accumulation into a step accumulator: fixed point with the given
+/// scale when d_gfnff_fix is set, otherwise the FP64 atomicAdd of the original kernels.
+__device__ __forceinline__ void acc_add(double* addr, double v, double scale)
+{
+    if (d_gfnff_fix) fix_add(addr, v, scale);
+    else             atomicAdd(addr, v);
+}
+
+/// Copy of a fixed-point accumulator as doubles (the accumulator itself stays untouched; diagnostic snapshots).
+__global__ void k_fix_copy(int n, const double* __restrict__ src, double* __restrict__ dst, double inv_scale)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    dst[i] = static_cast<double>(reinterpret_cast<const long long*>(src)[i]) * inv_scale;
+}
+
+/// In-place conversion of a fixed-point accumulator (see fix_add) into doubles.
+__global__ void k_fix_to_double(int n, double* __restrict__ buf, double inv_scale)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const long long x = reinterpret_cast<long long*>(buf)[i];
+    buf[i] = static_cast<double>(x) * inv_scale;
+}
+
+/// Add vector contribution to gradient (FP64 atomicAdd on x,y,z, or fixed point with d_gfnff_fix)
 __device__ __forceinline__ void add_grad(double* __restrict__ grad, int atom,
                                           double fx, double fy, double fz)
 {
+    if (d_gfnff_fix) {
+        fix_add(&grad[3*atom],   fx, GFNFF_FIX_FORCE);
+        fix_add(&grad[3*atom+1], fy, GFNFF_FIX_FORCE);
+        fix_add(&grad[3*atom+2], fz, GFNFF_FIX_FORCE);
+        return;
+    }
     atomicAdd(&grad[3*atom],   fx);
     atomicAdd(&grad[3*atom+1], fy);
     atomicAdd(&grad[3*atom+2], fz);
@@ -107,7 +191,48 @@ __device__ __forceinline__ double warpReduceSum(double val)
 // before this point). Threads with no work contribute local_E = 0.0.
 // ============================================================================
 
-__device__ __forceinline__ void blockReduceAddEnergy(double local_E, double* energy)
+/// Claude Generated (Oct 2026, WP10): integer twin of blockReduceAddEnergy (port of CUDA blockReduceAddEnergyFix).
+/// Thread values are fixed-point integers, so warp, block and atomic sums are associative. Wave32 as below.
+__device__ __forceinline__ void blockReduceAddEnergyFix(long long local_E, double* energy)
+{
+    long long warp_sum = local_E;
+    for (int off = 16; off > 0; off >>= 1) warp_sum += __shfl_down_sync(0xFFFFFFFFFFFFFFFFull, warp_sum, off);
+
+    __shared__ long long warp_sums_fx[32];
+    int lane = threadIdx.x & 31;
+    int warp_id = threadIdx.x >> 5;
+
+    if (lane == 0)
+        warp_sums_fx[warp_id] = warp_sum;
+    __syncthreads();
+
+    int num_warps = (blockDim.x + 31) >> 5;
+    if (warp_id == 0) {
+        long long sum = (lane < num_warps) ? warp_sums_fx[lane] : 0ll;
+        for (int off = 16; off > 0; off >>= 1) sum += __shfl_down_sync(0xFFFFFFFFFFFFFFFFull, sum, off);
+        if (lane == 0)
+            atomicAdd(reinterpret_cast<unsigned long long*>(energy), static_cast<unsigned long long>(sum));
+    }
+}
+
+__device__ __forceinline__ void blockReduceAddEnergyFP(double local_E, double* energy);
+
+/// Block energy reduction into one slot; with d_gfnff_fix every thread value is rounded to a multiple of
+/// 1/fix_scale first (GFNFF_FIX_ENERGY, dispersion kernels GFNFF_FIX_ENERGY_DISP, as CUDA).
+__device__ __forceinline__ void blockReduceAddEnergy(double local_E, double* energy, double fix_scale = GFNFF_FIX_ENERGY)
+{
+    if (d_gfnff_fix) {
+        if (!(fabs(local_E) * fix_scale < 9.2e18)) {   // not finite or beyond the int64 range: mark, contribute 0
+            atomicOr(&d_gfnff_fix_bad, 1);
+            local_E = 0.0;
+        }
+        blockReduceAddEnergyFix(static_cast<long long>(llrint(local_E * fix_scale)), energy);
+    } else {
+        blockReduceAddEnergyFP(local_E, energy);
+    }
+}
+
+__device__ __forceinline__ void blockReduceAddEnergyFP(double local_E, double* energy)
 {
     // Step 1: Warp-level reduction using shuffle intrinsics
     double warp_sum = warpReduceSum(local_E);
@@ -303,13 +428,13 @@ __global__ void k_dispersion(
 
             if (dc6dcn_ij && dEdcn) {
                 double disp_value = disp_sum * zetac6[tid];
-                atomicAdd(&dEdcn[i], -dc6dcn_ij[tid] * disp_value);
-                atomicAdd(&dEdcn[j], -dc6dcn_ji[tid] * disp_value);
+                acc_add(&dEdcn[i], -dc6dcn_ij[tid] * disp_value, GFNFF_FIX_FORCE);
+                acc_add(&dEdcn[j], -dc6dcn_ji[tid] * disp_value, GFNFF_FIX_FORCE);
             }
         }
     }
 
-    blockReduceAddEnergy(local_E, energy);
+    blockReduceAddEnergy(local_E, energy, GFNFF_FIX_ENERGY_DISP);   // one pair per thread: rounded per pair
 }
 
 // Claude Generated (June 2026): per-atom GATHER variant of k_dispersion for ROCm/RDNA. In
@@ -408,10 +533,10 @@ __global__ void k_dispersion_gather(
     }
     if (lane == 0 && a < N) {
         add_grad(grad, a, sgx[0], sgy[0], sgz[0]);
-        if (dc6dcn_ij != nullptr && dEdcn != nullptr) atomicAdd(&dEdcn[a], sdc[0]);
+        if (dc6dcn_ij != nullptr && dEdcn != nullptr) acc_add(&dEdcn[a], sdc[0], GFNFF_FIX_FORCE);
     }
 
-    blockReduceAddEnergy(local_E, energy);
+    blockReduceAddEnergy(local_E, energy, GFNFF_FIX_ENERGY_DISP);
 }
 
 // Claude Generated (Oct 2026): k_dispersion_gather with C6 and dC6/dCN computed in the edge loop from the
@@ -512,10 +637,10 @@ __global__ void k_dispersion_gather_uv(
     }
     if (lane == 0 && a < N) {
         add_grad(grad, a, sgx[0], sgy[0], sgz[0]);
-        if (dEdcn != nullptr) atomicAdd(&dEdcn[a], sdc[0]);
+        if (dEdcn != nullptr) acc_add(&dEdcn[a], sdc[0], GFNFF_FIX_FORCE);
     }
 
-    blockReduceAddEnergy(local_E, energy);
+    blockReduceAddEnergy(local_E, energy, GFNFF_FIX_ENERGY_DISP);
 }
 
 // ============================================================================
@@ -959,8 +1084,53 @@ void k_coulomb_tiles_hip(
     if (active) { xi = cx[i]; yi = cy[i]; zi = cz[i]; qi = charges[i]; ai = alpha[i]; }
     const double inv_sqrt_pi = 0.5641895835477563;
     double gx = 0.0, gy = 0.0, gz = 0.0, local_E = 0.0;
+    const bool fixmode = (d_gfnff_fix != 0);   // 0.0 and integer 0 have the same bits: the zeroing above serves both
+    // WP10 (Claude Generated, Oct 2026): with TI == TJ the rotated walk maps the TI threads one-to-one onto the TJ
+    // slots at a fixed k, so with one barrier per k every slot receives its partner forces in k order without
+    // atomics (deterministic FP sums; 6200 atoms: cheaper than three fixed-point shared atomics per pair). The
+    // per-pair arithmetic is a verbatim copy of the loop below. Smaller j tiles (TJ < TI) keep shared atomics.
+    const bool lockstep = fixmode && (TI == TJ);
 
-    if (active) {
+    if (lockstep) {
+        for (int k = 0; k < TJ; ++k) {
+            const int jj = (t + k) & (TJ - 1);
+            const int j  = bj * TJ + jj;
+            double fx = 0.0, fy = 0.0, fz = 0.0;
+            bool hit = false;
+            if (active && j < N && j > i) {
+                double dx = xi - sx[jj];
+                double dy = yi - sy[jj];
+                double dz = zi - sz[jj];
+                applyMIC(dx, dy, dz);
+                double r2  = dx*dx + dy*dy + dz*dz;
+                double rij = sqrt(r2);
+                const double qj = sq[jj];
+                if ((rij <= r_cut && rij >= 1e-10) && !isnan(qj)) {
+                    const double asum = ai + sa[jj];
+                    double erf_v, dEdr;
+                    if (r2 >= 36.0 * asum) {
+                        erf_v = 1.0;
+                        dEdr  = qi * qj * (-1.0 / (rij * rij));
+                    } else {
+                        double g       = 1.0 / sqrt(asum);
+                        double gamma_r = g * rij;
+                        erf_v = erf(gamma_r);
+                        double exp_v = exp(-gamma_r * gamma_r);
+                        double derf  = g * exp_v * (2.0 * inv_sqrt_pi);
+                        dEdr = qi * qj * (derf / rij - erf_v / (rij * rij));
+                    }
+                    local_E += qi * qj * erf_v / rij;
+                    const double fac = dEdr / rij;
+                    fx = fac*dx; fy = fac*dy; fz = fac*dz;
+                    gx += fx; gy += fy; gz += fz;
+                    hit = true;
+                }
+            }
+            if (hit) { sgx[jj] -= fx; sgy[jj] -= fy; sgz[jj] -= fz; }   // slot jj belongs to this thread at this k
+            __syncthreads();
+        }
+        if (active) add_grad(grad, i, gx, gy, gz);
+    } else if (active) {
         for (int k = 0; k < TJ; ++k) {
             const int jj = (t + k) & (TJ - 1);
             const int j  = bj * TJ + jj;
@@ -991,9 +1161,15 @@ void k_coulomb_tiles_hip(
             const double fac = dEdr / rij;   // force on i = fac*(ri - rj), on j the negative
             const double fx = fac*dx, fy = fac*dy, fz = fac*dz;
             gx += fx; gy += fy; gz += fz;
-            atomicAdd(&sgx[jj], -fx);
-            atomicAdd(&sgy[jj], -fy);
-            atomicAdd(&sgz[jj], -fz);
+            if (fixmode) {   // WP10: fixed-point partner gradients in shared memory (order-independent, as CUDA)
+                fix_add_u64(reinterpret_cast<unsigned long long*>(&sgx[jj]), -fx, GFNFF_FIX_FORCE);
+                fix_add_u64(reinterpret_cast<unsigned long long*>(&sgy[jj]), -fy, GFNFF_FIX_FORCE);
+                fix_add_u64(reinterpret_cast<unsigned long long*>(&sgz[jj]), -fz, GFNFF_FIX_FORCE);
+            } else {
+                atomicAdd(&sgx[jj], -fx);
+                atomicAdd(&sgy[jj], -fy);
+                atomicAdd(&sgz[jj], -fz);
+            }
         }
         if (gx != 0.0 || gy != 0.0 || gz != 0.0 || TI == TJ)   // TI == TJ: former behaviour (always add)
             add_grad(grad, i, gx, gy, gz);
@@ -1001,8 +1177,19 @@ void k_coulomb_tiles_hip(
     __syncthreads();
     if (t < TJ) {
         const int jl = bj * TJ + t;
-        if (jl < N && (sgx[t] != 0.0 || sgy[t] != 0.0 || sgz[t] != 0.0))
+        if (fixmode && !lockstep) {
+            // integer partner sums go to the integer global accumulator unchanged (exact, no second rounding)
+            const unsigned long long* ux = reinterpret_cast<const unsigned long long*>(&sgx[t]);
+            const unsigned long long* uy = reinterpret_cast<const unsigned long long*>(&sgy[t]);
+            const unsigned long long* uz = reinterpret_cast<const unsigned long long*>(&sgz[t]);
+            if (jl < N && (*ux != 0ull || *uy != 0ull || *uz != 0ull)) {
+                atomicAdd(reinterpret_cast<unsigned long long*>(&grad[3*jl]),   *ux);
+                atomicAdd(reinterpret_cast<unsigned long long*>(&grad[3*jl+1]), *uy);
+                atomicAdd(reinterpret_cast<unsigned long long*>(&grad[3*jl+2]), *uz);
+            }
+        } else if (jl < N && (sgx[t] != 0.0 || sgy[t] != 0.0 || sgz[t] != 0.0)) {
             add_grad(grad, jl, sgx[t], sgy[t], sgz[t]);
+        }
     }
 
     blockReduceAddEnergy(local_E, energy);
@@ -1135,8 +1322,8 @@ __global__ void k_bonds(
 
             if (dEdcn && cn && r0_base_i[tid] > 0.0) {
                 double yy = -dEdr;
-                atomicAdd(&dEdcn[i], yy * ff[tid] * cnfak_i[tid]);
-                atomicAdd(&dEdcn[j], yy * ff[tid] * cnfak_j[tid]);
+                acc_add(&dEdcn[i], yy * ff[tid] * cnfak_i[tid], GFNFF_FIX_FORCE);
+                acc_add(&dEdcn[j], yy * ff[tid] * cnfak_j[tid], GFNFF_FIX_FORCE);
             }
 
             if (zz_hb && nr_hb[tid] >= 1 && hb_H_atom) {
@@ -1144,7 +1331,7 @@ __global__ void k_bonds(
                 double zz = t1 * alpha_orig * dr * dr * E;
                 int H = hb_H_atom[tid];
                 if (H >= 0) {
-                    atomicAdd(&zz_hb[H], zz);
+                    acc_add(&zz_hb[H], zz, GFNFF_FIX_FORCE);
                 }
             }
         }
@@ -3193,7 +3380,7 @@ __global__ void k_coulomb_self(
     double E_en   = -q * chi;
     double E_self = 0.5 * q * q * (gam[i] + sqrt_2_over_pi / sqrt(alp[i]));
 
-    atomicAdd(energy, E_en + E_self);
+    acc_add(energy, E_en + E_self, GFNFF_FIX_ENERGY);
 }
 
 // ============================================================================
@@ -3681,6 +3868,77 @@ __global__ void k_dc6dcn_per_pair_uv(
     if (c6_out) c6_out[tid] = c6;
 }
 
+// ---------------------------------------------------------------------------
+// WP9-B (Claude Generated, Oct 2026): tabulated dc6dcn, port of the CUDA k_d4_partner_tables /
+// k_dc6dcn_per_pair_tab (cuda/gfnff_kernels.cu). Per atom a and partner element type t, from gw only:
+//   A[a][t][r'] = sum_r gw_a[r] C6ref(Z_a, Z_t; r, r'),   W[a][t][r'] = sum_r gw_a[r] C6ref(Z_t, Z_a; r', r)
+// and per pair C6 = sum gw_j A[i][t_j], dC6/dCN(j) = sum dgw_j A[i][t_j], dC6/dCN(i) = sum dgw_i W[j][t_i].
+// Against k_disp_uv / k_dc6dcn_per_pair_uv: C6 and dC6/dCN(j) are the same sums (A == v), dC6/dCN(i)
+// contracts the other index first (differs by rounding). The compact types are ROCm's ctype_elem /
+// atom_ctype (0-based element per type) instead of CUDA's type_z / atype_idx.
+// ---------------------------------------------------------------------------
+__global__ void k_d4_partner_tables(int N, int nt, const int* __restrict__ ctype_elem, const int* __restrict__ atom_types,
+                                    const double* __restrict__ gw, const double* __restrict__ c6_flat,
+                                    double* __restrict__ A, double* __restrict__ W)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= N * nt) return;
+    const int a = tid / nt, t = tid % nt;
+    const int za = atom_types[a] - 1, zt = ctype_elem[t];
+    double* outA = A + (static_cast<size_t>(a) * nt + t) * D4_MAX_REF;
+    double* outW = W + (static_cast<size_t>(a) * nt + t) * D4_MAX_REF;
+    if (za < 0 || za >= D4_MAX_ELEM || zt < 0 || zt >= D4_MAX_ELEM) {
+        for (int r = 0; r < D4_MAX_REF; ++r) { outA[r] = 0.0; outW[r] = 0.0; }
+        return;
+    }
+    int nra = d_refn_const[za]; if (nra > D4_MAX_REF) nra = D4_MAX_REF;
+    int nrt = d_refn_const[zt]; if (nrt > D4_MAX_REF) nrt = D4_MAX_REF;
+    const size_t base_at = (static_cast<size_t>(za) * D4_MAX_ELEM + zt) * D4_MAX_REF * D4_MAX_REF;
+    const size_t base_ta = (static_cast<size_t>(zt) * D4_MAX_ELEM + za) * D4_MAX_REF * D4_MAX_REF;
+    for (int rp = 0; rp < D4_MAX_REF; ++rp) {
+        double sa = 0.0, sw = 0.0;
+        if (rp < nrt) {
+            for (int r = 0; r < nra; ++r) {
+                const double g = gw[a * D4_MAX_REF + r];
+                const double c_at = c6_flat[base_at + r * D4_MAX_REF + rp];
+                if (fabs(c_at) >= 1e-20) sa += g * c_at;
+                const double c_ta = c6_flat[base_ta + rp * D4_MAX_REF + r];
+                if (fabs(c_ta) >= 1e-20) sw += g * c_ta;
+            }
+        }
+        outA[rp] = sa;
+        outW[rp] = sw;
+    }
+}
+
+/// Claude Generated (Oct 2026, WP9-B): per-pair half of the tabulated dc6dcn (see the block above).
+/// @param c6_out [n] C6(i,j) at the current CN, or nullptr (C6 kept)
+__global__ void k_dc6dcn_per_pair_tab(int n_pairs, const int* __restrict__ idx_i, const int* __restrict__ idx_j,
+                                      const int* __restrict__ atom_types, const int* __restrict__ atom_ctype, int nt,
+                                      const double* __restrict__ gw, const double* __restrict__ dgw,
+                                      const double* __restrict__ A, const double* __restrict__ W,
+                                      double* __restrict__ dc6dcn_ij, double* __restrict__ dc6dcn_ji,
+                                      double* __restrict__ c6_out)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= n_pairs) return;
+    const int ai = idx_i[tid], aj = idx_j[tid];
+    int nri = d_refn_const[atom_types[ai] - 1]; if (nri > D4_MAX_REF) nri = D4_MAX_REF;
+    int nrj = d_refn_const[atom_types[aj] - 1]; if (nrj > D4_MAX_REF) nrj = D4_MAX_REF;
+    const double* Aij = A + (static_cast<size_t>(ai) * nt + atom_ctype[aj]) * D4_MAX_REF;
+    const double* Wji = W + (static_cast<size_t>(aj) * nt + atom_ctype[ai]) * D4_MAX_REF;
+    double c6 = 0.0, dji = 0.0, dij = 0.0;
+    for (int rj = 0; rj < nrj; ++rj) {
+        c6  += gw[aj * D4_MAX_REF + rj] * Aij[rj];
+        dji += dgw[aj * D4_MAX_REF + rj] * Aij[rj];
+    }
+    for (int ri = 0; ri < nri; ++ri)
+        dij += dgw[ai * D4_MAX_REF + ri] * Wji[ri];
+    dc6dcn_ij[tid] = dij;
+    dc6dcn_ji[tid] = dji;
+    if (c6_out) c6_out[tid] = c6;
+}
+
 // ============================================================================
 // WP-A (Jun 2026): on-device D4 dispersion pair-list build (HIP port of
 // cuda/gfnff_kernels.cu k_disp_pairs_count / k_disp_pairs_build). Reference target
@@ -4013,6 +4271,165 @@ __global__ __launch_bounds__(DISP_ROW_BLOCK) void k_disp_csr_lower(
         }
         csr_pairidx[s + t] = l;                       // idx_j[l] == a by construction
     }
+}
+
+// ============================================================================
+// WP9-A (Claude Generated, Oct 2026): device rebuild of the non-bonded repulsion list, the ordered
+// row scheme of the D4 list above applied to the pair predicate of GFNFF::make_nb_rep() (CUDA:
+// k_rep_pairs_count / k_rep_pairs_build, arrival order). Pairs (i < j) come out in ascending i*N+j,
+// and the gather CSR row of atom a lists all its partners ascending, which is what
+// buildRepulsionGatherCSR() makes of that list. Tables: GFNFF::RepulsionDeviceInputs.
+// ============================================================================
+
+/// Device copies of GFNFF::RepulsionDeviceInputs (pointers into the workspace buffers).
+struct RepDevTablesHip {
+    const int* valid = nullptr;
+    const int* metal = nullptr;
+    const double* dum = nullptr;
+    const double* repz = nullptr;
+    const long long* bond_keys = nullptr;
+    int n_bond_keys = 0;
+    const long long* hh_keys = nullptr;
+    const int* hh_dist = nullptr;
+    int n_hh_keys = 0;
+    double repscaln = 0.0, hhfac = 0.0, hh13 = 0.0, hh14 = 0.0, r_cut = 20.0;
+};
+
+/// Index of key in the sorted array keys[0, n), or -1.
+__device__ inline int repKeyFindHip(const long long* __restrict__ keys, int n, long long key)
+{
+    int lo = 0, hi = n - 1;
+    while (lo <= hi) {
+        const int mid = lo + ((hi - lo) >> 1);
+        const long long v = keys[mid];
+        if (v == key) return mid;
+        if (v < key) lo = mid + 1; else hi = mid - 1;
+    }
+    return -1;
+}
+
+/// Pair (i < j) is in the non-bonded list: valid elements, r^2 <= cutoff^2, not an (i, j) bond-list entry.
+__device__ inline bool repPairInListHip(int N, int i, int j, const double* __restrict__ cx,
+                                        const double* __restrict__ cy, const double* __restrict__ cz,
+                                        double cutoff_sq, const RepDevTablesHip& t)
+{
+    if (!t.valid[i] || !t.valid[j]) return false;
+    const double dx = cx[i] - cx[j], dy = cy[i] - cy[j], dz = cz[i] - cz[j];
+    if (dx * dx + dy * dy + dz * dz > cutoff_sq) return false;
+    return repKeyFindHip(t.bond_keys, t.n_bond_keys, static_cast<long long>(i) * N + j) < 0;
+}
+
+/// Claude Generated (Oct 2026): per-atom partner counts below (lo) and above (hi) the atom index.
+__global__ __launch_bounds__(DISP_ROW_BLOCK) void k_rep_rows_count(
+    int N, const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+    double cutoff_sq, RepDevTablesHip t, int* __restrict__ lo, int* __restrict__ hi)
+{
+    __shared__ int s_lo[DISP_ROW_BLOCK];
+    __shared__ int s_hi[DISP_ROW_BLOCK];
+    const int a = blockIdx.x;
+    if (a >= N) return;
+    int nlo = 0, nhi = 0;
+    for (int p = threadIdx.x; p < N; p += blockDim.x) {
+        if (p == a) continue;
+        const int i = p < a ? p : a;
+        const int j = p < a ? a : p;
+        if (repPairInListHip(N, i, j, cx, cy, cz, cutoff_sq, t)) {
+            if (p < a) ++nlo; else ++nhi;
+        }
+    }
+    s_lo[threadIdx.x] = nlo;
+    s_hi[threadIdx.x] = nhi;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (static_cast<int>(threadIdx.x) < s) {
+            s_lo[threadIdx.x] += s_lo[threadIdx.x + s];
+            s_hi[threadIdx.x] += s_hi[threadIdx.x + s];
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) { lo[a] = s_lo[0]; hi[a] = s_hi[0]; }
+}
+
+/// Claude Generated (Oct 2026): pair indices (a, p > a) in ascending p at rowoff[a]; with csr_partner set
+/// also the gather CSR row of a (all partners ascending; pairidx of the p < a half: k_disp_csr_lower).
+__global__ __launch_bounds__(DISP_ROW_BLOCK) void k_rep_rows_build(
+    int N, const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+    double cutoff_sq, RepDevTablesHip t,
+    const int* __restrict__ lo, const int* __restrict__ rowoff, const int* __restrict__ csr_off,
+    int* __restrict__ out_i, int* __restrict__ out_j, int* __restrict__ csr_partner, int* __restrict__ csr_pairidx)
+{
+    __shared__ int s_scan[DISP_ROW_BLOCK / 32];   // per-wavefront counts of the current tile (warpSize 32 or 64)
+    const int a = blockIdx.x;
+    if (a >= N) return;
+    const int tt = threadIdx.x;
+    const int row_pair = rowoff[a];
+    const int n_lo = lo[a];
+    const int row_csr = csr_partner ? csr_off[a] : 0;
+    int base = 0;
+    for (int p0 = 0; p0 < N; p0 += DISP_ROW_BLOCK) {
+        const int p = p0 + tt;
+        bool in = false;
+        if (p < N && p != a) {
+            const int i = p < a ? p : a;
+            const int j = p < a ? a : p;
+            in = repPairInListHip(N, i, j, cx, cy, cz, cutoff_sq, t);
+        }
+        const int lane = tt % warpSize;
+        const int wave = tt / warpSize;
+        const int nwave = DISP_ROW_BLOCK / warpSize;
+        const unsigned long long mask = __ballot(in ? 1 : 0);
+        const int in_wave = __popcll(mask & ((1ull << lane) - 1ull));
+        if (lane == 0) s_scan[wave] = __popcll(mask);
+        __syncthreads();
+        int before = 0, tile_total = 0;
+        for (int w = 0; w < nwave; ++w) {
+            if (w < wave) before += s_scan[w];
+            tile_total += s_scan[w];
+        }
+        if (in) {
+            const int rank = base + before + in_wave;
+            if (csr_partner) csr_partner[row_csr + rank] = p;
+            if (p > a) {
+                const int k = row_pair + rank - n_lo;
+                out_i[k] = a;
+                out_j[k] = p;
+                if (csr_partner) csr_pairidx[row_csr + rank] = k;
+            }
+        }
+        base += tile_total;
+        __syncthreads();
+    }
+}
+
+/// Claude Generated (Oct 2026): alpha, repab, r_cut of every pair, same expressions and branch order as
+/// make_nb_rep() (alpha = sqrt(dum_i dum_j) ff, repab = repz_i repz_j REPSCALN).
+__global__ GFNFF_KERNEL_BOUNDS void k_rep_pairs_static(
+    int n, int N, const int* __restrict__ idx_i, const int* __restrict__ idx_j,
+    const int* __restrict__ atom_types, RepDevTablesHip t,
+    double* __restrict__ out_alpha, double* __restrict__ out_repab, double* __restrict__ out_rcut)
+{
+    const int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= n) return;
+    const int i = idx_i[k], j = idx_j[k];
+    const int zi = atom_types[i], zj = atom_types[j];
+    double ff = 1.0;
+    if (zi == 1 && zj == 1) {
+        ff = t.hhfac;
+        const int h = repKeyFindHip(t.hh_keys, t.n_hh_keys, static_cast<long long>(i) * N + j);
+        if (h >= 0) {
+            if (t.hh_dist[h] == 2) ff *= t.hh13;
+            else if (t.hh_dist[h] == 3) ff *= t.hh14;
+        }
+    } else if ((zi == 1 && t.metal[j]) || (zj == 1 && t.metal[i])) {
+        ff = 0.85;
+    } else if ((zi == 1 && zj == 6) || (zj == 1 && zi == 6)) {
+        ff = 0.91;
+    } else if ((zi == 1 && zj == 8) || (zj == 1 && zi == 8)) {
+        ff = 1.04;
+    }
+    out_alpha[k] = sqrt(t.dum[i] * t.dum[j]) * ff;
+    out_repab[k] = t.repz[i] * t.repz[j] * t.repscaln;
+    out_rcut[k]  = t.r_cut;
 }
 
 // ============================================================================
@@ -4702,8 +5119,8 @@ __global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_cn_compute_pairs(
     double contrib = 0.5 * (1.0 + erf(arg));
 
     // Symmetric: both atoms i and j receive the contribution
-    atomicAdd(&cn_raw[i], contrib);
-    atomicAdd(&cn_raw[j], contrib);
+    acc_add(&cn_raw[i], contrib, GFNFF_FIX_CN);   // WP10: order-independent with d_gfnff_fix (the CN decides the charges)
+    acc_add(&cn_raw[j], contrib, GFNFF_FIX_CN);
 }
 
 __global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_logcn(
@@ -4753,7 +5170,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_hb_cn_per_atom(
     double arg = -kn * (r - rcovij) / rcovij;
     double contrib = 0.5 * (1.0 + erf(arg));
 
-    atomicAdd(&hb_cn_per_atom[H], contrib);
+    acc_add(&hb_cn_per_atom[H], contrib, GFNFF_FIX_CN);
 }
 
 __global__ GFNFF_KERNEL_BOUNDS void k_hb_cn_map_to_bonds(
@@ -5167,6 +5584,8 @@ __global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_eeq_gather_rhs_fragments(
 
 #include <cstdlib>  // std::getenv (CURCUMA_GFNFF_GPU_FREEZE_HBQ opt-out)
 #include <thread>
+#include <mutex>   // WP10: setGfnffFixModeHip
+#include <limits>  // WP10: quiet_NaN
 
 #include "src/core/curcuma_logger.h"
 
@@ -5176,6 +5595,16 @@ __global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_eeq_gather_rhs_fragments(
 #include <cstring>
 #include <stdexcept>
 #include <vector>
+#include <algorithm>
+#include <cstdio>
+#include "src/core/gpu_fallback.h"   // WP9: counted fallbacks of the device repulsion rebuild
+
+/// Claude Generated (Oct 2026, WP9): thread-local slot of the ROCm GFN-FF switches (ff_workspace_hip.h).
+const RocmGfnffOptions*& rocmGfnffOptionsSlot()
+{
+    static thread_local const RocmGfnffOptions* slot = nullptr;
+    return slot;
+}
 
 // Matrix, Vector, SpMatrix are defined in global.h (via ff_workspace_gpu.h -> ff_workspace.h)
 // global.h: Matrix = Eigen::Matrix<double, Dynamic, Dynamic, RowMajor>
@@ -5269,6 +5698,41 @@ static inline int gridFor(int n, int block = 256) {
 static void checkCuda(hipError_t err, const char* msg) {
     if (err != hipSuccess)
         throw std::runtime_error(std::string(msg) + ": " + hipGetErrorString(err));
+}
+
+/// Claude Generated (Oct 2026, WP10): set the device switch d_gfnff_fix (fixed-point step accumulators) on the
+/// current device. The value is per process and device, so it is uploaded only when it changes (normally once,
+/// in the workspace constructor); a change waits for the device to be idle so no running step sees a mixed
+/// mode. Called again before every step entry point, outside graph capture, for processes with several
+/// workspaces of different settings.
+static void setGfnffFixModeHip(bool on)
+{
+    static std::mutex mtx;
+    static int uploaded_dev = -1, uploaded_val = -1;
+    std::lock_guard<std::mutex> lock(mtx);
+    int dev = 0;
+    checkCuda(hipGetDevice(&dev), "hipGetDevice (fixed-point switch)");
+    const int v = on ? 1 : 0;
+    if (dev == uploaded_dev && v == uploaded_val) return;
+    checkCuda(hipDeviceSynchronize(), "device sync before fixed-point switch");
+    checkCuda(hipMemcpyToSymbol(HIP_SYMBOL(d_gfnff_fix), &v, sizeof(int)), "upload d_gfnff_fix");
+    uploaded_dev = dev;
+    uploaded_val = v;
+}
+
+/// Claude Generated (Oct 2026, WP10): in-place fixed-point -> double conversion of n doubles on a stream.
+static void fixToDoubleHip(double* buf, int n, double scale, hipStream_t s)
+{
+    if (!buf || n <= 0) return;
+    k_fix_to_double<<<(n + 255) / 256, 256, 0, s>>>(n, buf, 1.0 / scale);
+}
+
+/// Claude Generated (Oct 2026, WP10): snapshot copy of a step accumulator: the doubles themselves, or the
+/// converted copy of a fixed-point accumulator (the accumulator keeps its integers).
+static void snapshotAccHip(bool fixed, double* dst, const double* src, int n, hipStream_t s)
+{
+    if (fixed) k_fix_copy<<<(n + 255) / 256, 256, 0, s>>>(n, src, dst, 1.0 / GFNFF_FIX_FORCE);
+    else       (void)hipMemcpyAsync(dst, src, n * sizeof(double), hipMemcpyDeviceToDevice, s);
 }
 
 // Claude Generated (Oct 2026): atomic-free gather tables of the ROCm backend (FP64 atomicAdd is a CAS loop on gfx1200).
@@ -6112,7 +6576,20 @@ struct FFWorkspaceHipImpl {
     HipHBDetectDev hbdet;            ///< Claude Generated (Oct 2026): device-side H-bond detection buffers
     HipRepStage    rep_stage;        ///< Claude Generated (Oct 2026): pinned stage of the repulsion list refresh
     bool rep_gather_enabled = true;  ///< CURCUMA_ROCM_REP_GATHER=0 restores the pair kernel k_repulsion (non-bonded list)
+    // WP9-A (Claude Generated, Oct 2026): tables and scratch of the device repulsion rebuild
+    // (generateNonbondedRepulsionOnGPU); topology-constant, uploaded at every rebuild (small).
+    CudaBuffer<int>       rep_valid, rep_metal, rep_hh_dist, rep_lo, rep_hi, rep_rowoff;
+    CudaBuffer<double>    rep_dum, rep_repz;
+    CudaBuffer<long long> rep_bond_keys, rep_hh_keys;
+    long rep_device_builds = 0;      ///< device rebuilds done (verbosity-2 summary at destruction)
+    long rep_host_fallbacks = 0;     ///< device rebuilds that failed and were replaced by the host build
+    bool rep_device_off = false;     ///< set after a failure: later rebuilds take the host build directly
     bool hb_gather_enabled  = true;  ///< CURCUMA_ROCM_HB_GATHER=0 restores k_hbonds with atomicAdd
+    /// WP10 (Claude Generated, Oct 2026): fixed-point step accumulators (-gfnff.rocm_fixed_point, see fix_add);
+    /// d_grad, d_dEdcn, d_energies, d_zz_hb, d_cn_raw and d_hb_cn_per_atom hold integers until k_fix_to_double.
+    bool fixed_point = false;
+    int* h_fix_bad = nullptr;        ///< pinned read-back of d_gfnff_fix_bad (fixed_point only)
+    long fix_bad_steps = 0;          ///< steps whose fixed-point accumulation saw a non-finite / out-of-range value
 
     // Dynamic buffers (reset + upload each calculation step)
     CoordSoA    coords;      ///< Current geometry SoA (x[N], y[N], z[N]) — Phase 10, March 2026
@@ -6230,6 +6707,10 @@ struct FFWorkspaceHipImpl {
     bool disp_pair_c6_current = true;  ///< disp.C6 / dc6dcn_* hold the values of the last d_disp_uv
     bool c6_table_symmetric   = false; ///< C6ref(Zi,Zj,ri,rj) == C6ref(Zj,Zi,rj,ri) bitwise (fused gather allowed)
     bool disp_fused_enabled   = true;  ///< CURCUMA_ROCM_DISP_FUSED=0 switches the fused gather off
+    // WP9-B (Claude Generated, Oct 2026): tabulated dc6dcn (-gfnff.rocm_dc6dcn_tables, CURCUMA_DC6DCN_TABLES
+    // overrides): per-pair C6/dc6dcn from k_d4_partner_tables + k_dc6dcn_per_pair_tab; the fused gather is off.
+    bool dc6_tab_enabled      = false;
+    CudaBuffer<double> d_tabA, d_tabW;          ///< [N * disp_ntypes * D4_MAX_REF] each
 
     // WP-A (Jun 2026): on-device D4 dispersion pair-list build buffers
     CudaBuffer<double> d_sqrtzr4r2;        ///< [118] sqrt(Z·r4/r2) per element
@@ -6728,6 +7209,19 @@ FFWorkspaceHip::FFWorkspaceHip(const GFNFFParameterSet& params,
         m_impl->rep_gather_enabled = !(env_rep && std::string(env_rep) == "0");
         m_impl->hb_gather_enabled  = !(env_hb  && std::string(env_hb)  == "0");
     }
+    {   // WP10 (Claude Generated, Oct 2026): fixed-point step accumulators, -gfnff.rocm_fixed_point (method options)
+        const RocmGfnffOptions* opt = rocmGfnffOptionsSlot();
+        m_impl->fixed_point = opt ? opt->fixed_point : RocmGfnffOptions{}.fixed_point;
+        setGfnffFixModeHip(m_impl->fixed_point);
+        if (m_impl->fixed_point) {
+            checkCuda(hipHostMalloc(reinterpret_cast<void**>(&m_impl->h_fix_bad), sizeof(int)), "pinned alloc h_fix_bad");
+            *m_impl->h_fix_bad = 0;
+        }
+        if (CurcumaLogger::get_verbosity() >= 2)
+            CurcumaLogger::info(fmt::format("ROCm GFN-FF accumulation: {}", m_impl->fixed_point
+                ? "fixed point (order-independent, -gfnff.rocm_fixed_point true)"
+                : "FP64 atomics (-gfnff.rocm_fixed_point false)"));
+    }
     if (m_impl->rep_gather_enabled)
         buildRepulsionGatherCSR(params.nonbonded_repulsions, natoms, m_impl->nb_rep_csr);
     m_impl->coulomb.upload(params.coulombs, natoms, stream);
@@ -6836,6 +7330,35 @@ FFWorkspaceHip::FFWorkspaceHip(const GFNFFParameterSet& params,
         m_impl->d_ctype_elem.upload(ctype_elem, stream);
         m_impl->d_atom_ctype.upload(atom_ctype, stream);
         m_impl->d_disp_uv.alloc(natoms * m_impl->disp_ntypes * 2 * D4_MAX_REF);
+        // WP9-B (Claude Generated, Oct 2026): tabulated dc6dcn. Switch from the method options, the CUDA
+        // environment name CURCUMA_DC6DCN_TABLES (0/1) overrides it; CURCUMA_ROCM_FAIL_DC6TAB=1 makes the table
+        // allocation fail (fault injection). A failed allocation keeps the k_disp_uv path, counted as a fallback.
+        {
+            const RocmGfnffOptions* opt = rocmGfnffOptionsSlot();
+            bool tab = opt ? opt->dc6dcn_tables : RocmGfnffOptions{}.dc6dcn_tables;
+            const char* e = std::getenv("CURCUMA_DC6DCN_TABLES");
+            if (e && *e) tab = std::string(e) != "0";
+            if (tab) {
+                try {
+                    const char* f = std::getenv("CURCUMA_ROCM_FAIL_DC6TAB");
+                    if (f && *f && std::string(f) != "0")
+                        throw std::runtime_error("fault injection CURCUMA_ROCM_FAIL_DC6TAB");
+                    const int sz = natoms * m_impl->disp_ntypes * D4_MAX_REF;
+                    m_impl->d_tabA.alloc(sz);
+                    m_impl->d_tabW.alloc(sz);
+                    m_impl->dc6_tab_enabled = true;
+                } catch (const std::exception& ex) {
+                    m_impl->d_tabA.free();
+                    m_impl->d_tabW.free();
+                    CurcumaLogger::warn(fmt::format("ROCm: tabulated dc6dcn unavailable ({}); k_disp_uv path kept", ex.what()));
+                    curcuma::reportGpuFallback("GFN-FF dc6dcn: tables unavailable, factorised uv path", ex.what());
+                }
+            }
+            if (CurcumaLogger::get_verbosity() >= 2)
+                CurcumaLogger::info(fmt::format("ROCm dc6dcn: {}", m_impl->dc6_tab_enabled
+                    ? "tabulated (k_d4_partner_tables + k_dc6dcn_per_pair_tab, fused gather off)"
+                    : "factorised uv (k_disp_uv + per-pair or fused gather)"));
+        }
     }
 
     // --- HB alpha chain-rule: allocate zz buffer + build (H,B) pair list ---
@@ -6939,6 +7462,10 @@ FFWorkspaceHip::~FFWorkspaceHip()
         g_rocm_small_eeq_aux = nullptr;
         g_rocm_small_eeq_event = nullptr;
     }
+    if (m_impl && (m_impl->rep_device_builds > 0 || m_impl->rep_host_fallbacks > 0)
+        && CurcumaLogger::get_verbosity() >= 2)
+        CurcumaLogger::info(fmt::format("ROCm non-bonded repulsion list: {} device rebuilds, {} host fallbacks",
+                                        m_impl->rep_device_builds, m_impl->rep_host_fallbacks));
     if (m_impl) {
         // Synchronize all streams before destroying
         if (m_impl->stream)          hipStreamSynchronize(m_impl->stream);
@@ -6989,6 +7516,7 @@ FFWorkspaceHip::~FFWorkspaceHip()
     if (m_h_energies)   hipHostFree(m_h_energies);
     if (m_impl && m_impl->h_dc6dcn_skip) hipHostFree(m_impl->h_dc6dcn_skip);
     if (m_impl && m_impl->h_disp_flags) (void)hipHostFree(m_impl->h_disp_flags);
+    if (m_impl && m_impl->h_fix_bad) (void)hipHostFree(m_impl->h_fix_bad);   // WP10
 }
 
 // ============================================================================
@@ -7147,6 +7675,7 @@ void FFWorkspaceHip::computeBondHBCN()
     auto& impl = *m_impl;
     const int N = m_natoms;
     if (N <= 0 || impl.hb_alpha.n == 0) return;
+    setGfnffFixModeHip(impl.fixed_point);   // WP10
 
     // Allocate/zero per-H accumulator
     if (!impl.d_hb_cn_per_atom.ptr || impl.d_hb_cn_per_atom.n < N)
@@ -7164,6 +7693,8 @@ void FFWorkspaceHip::computeBondHBCN()
         impl.d_hb_cn_per_atom.ptr,
         27.5,   // kn
         900.0); // thr_sq
+    if (impl.fixed_point)   // WP10: integer sums -> doubles before the map reads them
+        fixToDoubleHip(impl.d_hb_cn_per_atom.ptr, N, GFNFF_FIX_CN, impl.stream);
 
     // Pass 2: map per-H CN to per-bond CN
     auto cfg2 = getLaunchConfig(impl.bonds.n, m_block_size);
@@ -7545,6 +8076,8 @@ void FFWorkspaceHip::updateXBonds(const std::vector<GFNFFHalogenBond>& xbonds,
     m_impl->prev_xb_valid = true;
 }
 
+static void dumpRepulsionListHip(const char* source, std::vector<GFNFFRepulsion> v);   // below (WP9-A)
+
 void FFWorkspaceHip::updateRepulsion(const std::vector<GFNFFRepulsion>& bonded_reps,
                                        const std::vector<GFNFFRepulsion>& nonbonded_reps)
 {
@@ -7552,6 +8085,7 @@ void FFWorkspaceHip::updateRepulsion(const std::vector<GFNFFRepulsion>& bonded_r
     // for the ROCm plugin. See GFNFF::updateNonbondedRepulsionIfNeeded().
     // Claude Generated (Oct 2026): -gfnff.gpu_staged_list_upload (default true) takes the pinned staged path with the
     // -threads host threads, same device bytes; false, or no pinned memory, keeps the serial path below.
+    dumpRepulsionListHip("host", nonbonded_reps);   // Claude Generated (Oct 2026): CURCUMA_ROCM_REP_DUMP only
     if (m_staged_list_upload
         && stagedRepulsionUploadHip(*m_impl, bonded_reps, nonbonded_reps, m_impl->rep_gather_enabled, m_natoms,
                                     m_host_threads))
@@ -7560,6 +8094,210 @@ void FFWorkspaceHip::updateRepulsion(const std::vector<GFNFFRepulsion>& bonded_r
     m_impl->nonbonded_rep.upload(nonbonded_reps, m_impl->stream);
     if (m_impl->rep_gather_enabled)
         buildRepulsionGatherCSR(nonbonded_reps, m_natoms, m_impl->nb_rep_csr);   // Claude Generated (Oct 2026)
+}
+
+/// Claude Generated (Oct 2026, WP9-A): test dump of a non-bonded repulsion list, sorted by (i, j), to the file
+/// named by CURCUMA_ROCM_REP_DUMP (appended, one block per refresh: "# refresh <n> <source> <pairs>", then
+/// "i j alpha repab r_cut" with 17 digits). Lets the device list be compared with the host list of the same geometry.
+static void dumpRepulsionListHip(const char* source, std::vector<GFNFFRepulsion> v)
+{
+    static const char* path = std::getenv("CURCUMA_ROCM_REP_DUMP");
+    if (!path || !*path) return;
+    static long refresh = 0;
+    std::sort(v.begin(), v.end(), [](const GFNFFRepulsion& a, const GFNFFRepulsion& b) {
+        return a.i != b.i ? a.i < b.i : a.j < b.j;
+    });
+    FILE* f = std::fopen(path, "a");
+    if (!f) return;
+    std::fprintf(f, "# refresh %ld %s %zu\n", ++refresh, source, v.size());
+    for (const auto& r : v)
+        std::fprintf(f, "%d %d %.17g %.17g %.17g\n", r.i, r.j, r.alpha, r.repab, r.r_cut);
+    std::fclose(f);
+}
+
+/// Claude Generated (Oct 2026, WP9-A): host build of the non-bonded list from the device tables and the host
+/// coordinate mirror, pairs in ascending (i, j): the fallback of a failed device rebuild. Same predicate and
+/// pair expressions as k_rep_rows_* / k_rep_pairs_static.
+static std::vector<GFNFFRepulsion> repulsionHostBuildFromTables(const GFNFF::RepulsionDeviceInputs& in, int N,
+                                                                const double* x, const double* y, const double* z,
+                                                                const std::vector<int>& Z)
+{
+    std::vector<GFNFFRepulsion> out;
+    const double cut_sq = in.build_radius_bohr * in.build_radius_bohr;
+    auto find = [](const std::vector<long long>& k, long long key) -> long {
+        auto it = std::lower_bound(k.begin(), k.end(), key);
+        return (it != k.end() && *it == key) ? static_cast<long>(it - k.begin()) : -1;
+    };
+    for (int i = 0; i < N; ++i) {
+        if (!in.valid[i]) continue;
+        for (int j = i + 1; j < N; ++j) {
+            if (!in.valid[j]) continue;
+            const double dx = x[i] - x[j], dy = y[i] - y[j], dz = z[i] - z[j];
+            if (dx * dx + dy * dy + dz * dz > cut_sq) continue;
+            const long long key = static_cast<long long>(i) * N + j;
+            if (find(in.bond_keys, key) >= 0) continue;
+            double ff = 1.0;
+            if (Z[i] == 1 && Z[j] == 1) {
+                ff = in.hhfac;
+                const long h = find(in.hh_keys, key);
+                if (h >= 0) {
+                    if (in.hh_dist[h] == 2) ff *= in.hh13;
+                    else if (in.hh_dist[h] == 3) ff *= in.hh14;
+                }
+            } else if ((Z[i] == 1 && in.metal[j]) || (Z[j] == 1 && in.metal[i])) {
+                ff = 0.85;
+            } else if ((Z[i] == 1 && Z[j] == 6) || (Z[j] == 1 && Z[i] == 6)) {
+                ff = 0.91;
+            } else if ((Z[i] == 1 && Z[j] == 8) || (Z[j] == 1 && Z[i] == 8)) {
+                ff = 1.04;
+            }
+            GFNFFRepulsion r;
+            r.i = i;
+            r.j = j;
+            r.alpha = std::sqrt(in.dum[i] * in.dum[j]) * ff;
+            r.repab = in.repz[i] * in.repz[j] * in.repscaln;
+            r.r_cut = in.r_cut_bohr;
+            out.push_back(r);
+        }
+    }
+    return out;
+}
+
+/**
+ * @brief WP9-A: rebuild the non-bonded repulsion list on the device from the current device coordinates.
+ *
+ * Claude Generated (Oct 2026). Port of FFWorkspaceGPU::generateNonbondedRepulsionOnGPU with the ordered
+ * row build of the ROCm D4 list (k_rep_rows_count, two row-offset scans on the host, k_rep_rows_build,
+ * k_rep_pairs_static, k_disp_csr_lower for the lower CSR half): pairs in ascending (i, j) and the gather CSR
+ * built on the device (no host list, no index download). The bonded list is not touched (topology only).
+ * A failure (or CURCUMA_ROCM_FAIL_REPDEV=1) builds the list on the host from the same tables and the host
+ * coordinate mirror, uploads it as updateRepulsion() does, counts a GPU fallback and keeps the host build
+ * for the rest of the run. Selected by -gfnff.gpu_rep_pairs_on_device (wrapper, trait has_device_repulsion_build).
+ */
+void FFWorkspaceHip::generateNonbondedRepulsionOnGPU(const GFNFF::RepulsionDeviceInputs& in)
+{
+    auto& impl = *m_impl;
+    const int N = m_natoms;
+    if (N <= 1) return;
+    static const bool fail_inject = [] {
+        const char* e = std::getenv("CURCUMA_ROCM_FAIL_REPDEV");
+        return e && *e && std::string(e) != "0";
+    }();
+    static const bool dump = [] { const char* e = std::getenv("CURCUMA_ROCM_REP_DUMP"); return e && *e; }();
+    const bool gather = impl.rep_gather_enabled;
+    bool ok = !impl.rep_device_off;
+    int n = 0;
+    try {
+        if (ok && fail_inject) throw std::runtime_error("fault injection CURCUMA_ROCM_FAIL_REPDEV");
+        if (ok) {
+            impl.rep_valid.upload(in.valid);
+            impl.rep_metal.upload(in.metal);
+            impl.rep_dum.upload(in.dum);
+            impl.rep_repz.upload(in.repz);
+            if (!in.bond_keys.empty()) impl.rep_bond_keys.upload(in.bond_keys);
+            if (!in.hh_keys.empty()) { impl.rep_hh_keys.upload(in.hh_keys); impl.rep_hh_dist.upload(in.hh_dist); }
+            RepDevTablesHip t;
+            t.valid = impl.rep_valid.ptr;  t.metal = impl.rep_metal.ptr;
+            t.dum = impl.rep_dum.ptr;      t.repz = impl.rep_repz.ptr;
+            t.bond_keys = impl.rep_bond_keys.ptr;  t.n_bond_keys = static_cast<int>(in.bond_keys.size());
+            t.hh_keys = impl.rep_hh_keys.ptr;      t.hh_dist = impl.rep_hh_dist.ptr;
+            t.n_hh_keys = static_cast<int>(in.hh_keys.size());
+            t.repscaln = in.repscaln;  t.hhfac = in.hhfac;  t.hh13 = in.hh13;  t.hh14 = in.hh14;
+            t.r_cut = in.r_cut_bohr;
+            const double cut_sq = in.build_radius_bohr * in.build_radius_bohr;
+
+            impl.rep_lo.ensure(N);
+            impl.rep_hi.ensure(N);
+            impl.rep_rowoff.ensure(N + 1);
+            k_rep_rows_count<<<N, DISP_ROW_BLOCK, 0, impl.stream>>>(
+                N, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr, cut_sq, t,
+                impl.rep_lo.ptr, impl.rep_hi.ptr);
+            checkCuda(hipGetLastError(), "k_rep_rows_count launch");
+            std::vector<int> h_lo(N), h_hi(N);
+            impl.rep_lo.download(h_lo.data(), N, impl.stream);
+            impl.rep_hi.download(h_hi.data(), N, impl.stream);
+            checkCuda(hipStreamSynchronize(impl.stream), "k_rep_rows_count sync");
+            std::vector<int> rowoff(N + 1, 0), off(N + 1, 0);
+            for (int a = 0; a < N; ++a) {
+                rowoff[a + 1] = rowoff[a] + h_hi[a];
+                off[a + 1]    = off[a] + h_lo[a] + h_hi[a];
+            }
+            n = rowoff[N];
+            if (off[N] != 2 * n)
+                throw std::runtime_error(fmt::format("CSR size {} != 2 x {} pairs", off[N], n));
+
+            auto& nb = impl.nonbonded_rep;
+            if (nb.idx_i.n < n) {   // grow with headroom; the SoA keeps its capacity across rebuilds
+                const int cap = n + n / 8 + 16;
+                nb.idx_i.alloc(cap); nb.idx_j.alloc(cap); nb.alpha.alloc(cap); nb.repab.alloc(cap); nb.r_cut.alloc(cap);
+            }
+            nb.n = n;
+            if (gather) {
+                auto& c = impl.nb_rep_csr;
+                c.N = N;
+                c.off.upload(off);
+                if (c.partner.n < 2 * n) { const int cap = 2 * n + n / 4 + 16; c.partner.alloc(cap); c.pairidx.alloc(cap); }
+            }
+            if (n > 0) {
+                impl.rep_rowoff.upload(rowoff);
+                k_rep_rows_build<<<N, DISP_ROW_BLOCK, 0, impl.stream>>>(
+                    N, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr, cut_sq, t,
+                    impl.rep_lo.ptr, impl.rep_rowoff.ptr, gather ? impl.nb_rep_csr.off.ptr : nullptr,
+                    nb.idx_i.ptr, nb.idx_j.ptr,
+                    gather ? impl.nb_rep_csr.partner.ptr : nullptr, gather ? impl.nb_rep_csr.pairidx.ptr : nullptr);
+                checkCuda(hipGetLastError(), "k_rep_rows_build launch");
+                LaunchConfig cfg = getLaunchConfig(n, m_block_size);
+                k_rep_pairs_static<<<cfg.gridSize, cfg.blockSize, 0, impl.stream>>>(
+                    n, N, nb.idx_i.ptr, nb.idx_j.ptr, impl.d_atom_types.ptr, t,
+                    nb.alpha.ptr, nb.repab.ptr, nb.r_cut.ptr);
+                checkCuda(hipGetLastError(), "k_rep_pairs_static launch");
+                if (gather) {
+                    k_disp_csr_lower<<<N, DISP_ROW_BLOCK, 0, impl.stream>>>(
+                        N, impl.rep_lo.ptr, impl.rep_rowoff.ptr, impl.nb_rep_csr.off.ptr,
+                        nb.idx_j.ptr, impl.nb_rep_csr.partner.ptr, impl.nb_rep_csr.pairidx.ptr);
+                    checkCuda(hipGetLastError(), "k_disp_csr_lower (repulsion) launch");
+                }
+            }
+            // The repulsion kernels run on another stream: finish the build here.
+            checkCuda(hipStreamSynchronize(impl.stream), "k_rep_rows_build sync");
+            ++impl.rep_device_builds;
+            if (dump) {
+                std::vector<GFNFFRepulsion> v(n);
+                std::vector<int> hi(n), hj(n);
+                std::vector<double> ha(n), hr(n), hc(n);
+                nb.idx_i.download(hi.data(), n, impl.stream);
+                nb.idx_j.download(hj.data(), n, impl.stream);
+                nb.alpha.download(ha.data(), n, impl.stream);
+                nb.repab.download(hr.data(), n, impl.stream);
+                nb.r_cut.download(hc.data(), n, impl.stream);
+                checkCuda(hipStreamSynchronize(impl.stream), "repulsion dump sync");
+                for (int k = 0; k < n; ++k) v[k] = GFNFFRepulsion{hi[k], hj[k], ha[k], hr[k], hc[k]};
+                dumpRepulsionListHip("device", std::move(v));
+            }
+            if (CurcumaLogger::get_verbosity() >= 3)
+                CurcumaLogger::info(fmt::format("  ROCm non-bonded repulsion list: {} pairs built on the device{}",
+                                                n, gather ? ", gather CSR on the device" : ""));
+            return;
+        }
+    } catch (const std::exception& e) {
+        (void)hipGetLastError();   // clear a sticky launch error before the host path
+        impl.rep_device_off = true;
+        CurcumaLogger::warn(fmt::format("ROCm: device repulsion list rebuild failed ({}); host build from now on", e.what()));
+        curcuma::reportGpuFallback("GFN-FF repulsion list: device rebuild failed, host build", e.what());
+    }
+    // Host build from the same tables (also every later rebuild once the device path failed).
+    if (!impl.h_geom_ok) {
+        CurcumaLogger::error("ROCm: repulsion list host build without host coordinates; list kept");
+        return;
+    }
+    std::vector<int> Z(N);
+    impl.d_atom_types.download(Z.data(), N, impl.stream);
+    checkCuda(hipStreamSynchronize(impl.stream), "atom types download");
+    std::vector<GFNFFRepulsion> v = repulsionHostBuildFromTables(in, N, m_h_x, m_h_y, m_h_z, Z);
+    ++impl.rep_host_fallbacks;
+    impl.nonbonded_rep.upload(v, impl.stream);
+    if (gather) buildRepulsionGatherCSR(v, N, impl.nb_rep_csr);
+    if (dump) dumpRepulsionListHip("host-fallback", v);
 }
 
 void FFWorkspaceHip::updateDispersion(const std::vector<GFNFFDispersion>& pairs)
@@ -7851,6 +8589,21 @@ static void launchDispC6PerPair(FFWorkspaceHipImpl& impl, int natoms, bool c6_up
 {
     const int nd = impl.disp.n;
     if (nd == 0 || natoms <= 0 || impl.disp_ntypes <= 0) return;
+    if (with_uv && impl.dc6_tab_enabled) {
+        // WP9-B (Claude Generated, Oct 2026): tabulated dc6dcn; d_disp_uv is not written on this path.
+        LaunchConfig cfg_t = getLaunchConfig(natoms * impl.disp_ntypes, block_size);
+        k_d4_partner_tables<<<cfg_t.gridSize, cfg_t.blockSize, 0, stream>>>(
+            natoms, impl.disp_ntypes, impl.d_ctype_elem.ptr, impl.d_atom_types.ptr,
+            impl.d_gw.ptr, impl.d_c6_flat.ptr, impl.d_tabA.ptr, impl.d_tabW.ptr);
+        impl.disp_uv_valid = false;
+        impl.disp_pair_c6_current = true;
+        LaunchConfig cfg_p = getLaunchConfig(nd, block_size);
+        k_dc6dcn_per_pair_tab<<<cfg_p.gridSize, cfg_p.blockSize, 0, stream>>>(
+            nd, impl.disp.idx_i.ptr, impl.disp.idx_j.ptr, impl.d_atom_types.ptr, impl.d_atom_ctype.ptr,
+            impl.disp_ntypes, impl.d_gw.ptr, impl.d_dgw.ptr, impl.d_tabA.ptr, impl.d_tabW.ptr,
+            impl.disp.dc6dcn_ij.ptr, impl.disp.dc6dcn_ji.ptr, c6_update ? impl.disp.C6.ptr : nullptr);
+        return;
+    }
     if (with_uv) {
         LaunchConfig cfg_uv = getLaunchConfig(natoms * impl.disp_ntypes, block_size);
         k_disp_uv<<<cfg_uv.gridSize, cfg_uv.blockSize, 0, stream>>>(
@@ -8176,6 +8929,7 @@ void FFWorkspaceHip::computeGaussianWeightsOnGPU(bool use_cn_final)
     // k_dispersion_gather_uv forms C6 and dC6/dCN per edge; the per-pair arrays are then stale and are
     // filled before the next energy-only k_dispersion (prepareAndLaunchChargeIndependent).
     const bool fused = !use_cn_final && m_disp_c6_update && impl.c6_table_symmetric && impl.disp_fused_enabled
+                       && !impl.dc6_tab_enabled
                        && impl.disp.csr_N == N;
     if (fused) {
         LaunchConfig cfg_uv = getLaunchConfig(N * impl.disp_ntypes, m_block_size);
@@ -8212,6 +8966,7 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
     const int N = m_natoms;
     hipStream_t stream = impl.stream;
     impl.disp_launched_early = false;   // Oct 2026: set again by launchDispersionGradientEarly() this step
+    setGfnffFixModeHip(impl.fixed_point);   // WP10: before any capture or launch of this step
     g_rocm_small_eeq_stream = impl.single_stream ? stream : nullptr;   // Oct 2026, see its declaration
     g_rocm_small_eeq_aux = impl.single_stream ? impl.stream_threebody : nullptr;
     g_rocm_small_eeq_event = impl.single_stream ? impl.event_eeq_order : nullptr;
@@ -8415,8 +9170,7 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
     // NOTE: k_coulomb is NOT launched here — it needs EEQ charges
     // Per-kernel snapshot: after stream A repulsion (Claude Generated April 2026)
     if (gradient && impl.d_grad_after_sA.ptr) {
-        hipMemcpyAsync(impl.d_grad_after_sA.ptr, impl.d_grad.ptr,
-                        3*N*sizeof(double), hipMemcpyDeviceToDevice, sA);
+        snapshotAccHip(impl.fixed_point, impl.d_grad_after_sA.ptr, impl.d_grad.ptr, 3*N, sA);
     }
     if (m_record_kernel_timings) hipEventRecord(impl.timing_sA_end, sA);
     hipEventRecord(impl.event_pairwise, sA);
@@ -8453,8 +9207,7 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
     }
     // Per-kernel snapshot: after k_bonds (Claude Generated April 2026)
     if (gradient && impl.d_grad_after_bonds.ptr) {
-        hipMemcpyAsync(impl.d_grad_after_bonds.ptr, impl.d_grad.ptr,
-                        3*N*sizeof(double), hipMemcpyDeviceToDevice, sB);
+        snapshotAccHip(impl.fixed_point, impl.d_grad_after_bonds.ptr, impl.d_grad.ptr, 3*N, sB);
     }
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
@@ -8473,8 +9226,7 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
     }
     // Per-kernel snapshot: after k_angles (Claude Generated April 2026)
     if (gradient && impl.d_grad_after_angles.ptr) {
-        hipMemcpyAsync(impl.d_grad_after_angles.ptr, impl.d_grad.ptr,
-                        3*N*sizeof(double), hipMemcpyDeviceToDevice, sB);
+        snapshotAccHip(impl.fixed_point, impl.d_grad_after_angles.ptr, impl.d_grad.ptr, 3*N, sB);
     }
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
@@ -8529,6 +9281,8 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
             &impl.d_energies.ptr[impl.E_STORS]);
     }
     if (gradient && impl.hb_alpha.n > 0 && impl.d_zz_hb.ptr) {
+        if (impl.fixed_point)   // WP10: k_bonds is the only producer (same stream): integers -> doubles
+            fixToDoubleHip(impl.d_zz_hb.ptr, N, GFNFF_FIX_FORCE, sB);
         constexpr double hb_kn = 27.5;
         LaunchConfig cfg = getLaunchConfig(impl.hb_alpha.n, m_block_size);
         k_hb_alpha_chainrule<<<cfg.gridSize, cfg.blockSize, 0, sB>>>(
@@ -8545,8 +9299,7 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
     }
     // Per-kernel snapshot: after all stream B kernels (Claude Generated April 2026)
     if (gradient && impl.d_grad_after_sB.ptr) {
-        hipMemcpyAsync(impl.d_grad_after_sB.ptr, impl.d_grad.ptr,
-                        3*N*sizeof(double), hipMemcpyDeviceToDevice, sB);
+        snapshotAccHip(impl.fixed_point, impl.d_grad_after_sB.ptr, impl.d_grad.ptr, 3*N, sB);
     }
     if (m_record_kernel_timings) hipEventRecord(impl.timing_sB_end, sB);
     hipEventRecord(impl.event_bonded, sB);
@@ -8664,8 +9417,7 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
     }
     // Per-kernel snapshot: after all stream C kernels (Claude Generated April 2026)
     if (gradient && impl.d_grad_after_sC.ptr) {
-        hipMemcpyAsync(impl.d_grad_after_sC.ptr, impl.d_grad.ptr,
-                        3*N*sizeof(double), hipMemcpyDeviceToDevice, sC);
+        snapshotAccHip(impl.fixed_point, impl.d_grad_after_sC.ptr, impl.d_grad.ptr, 3*N, sC);
     }
     if (m_record_kernel_timings) hipEventRecord(impl.timing_sC_end, sC);
     hipEventRecord(impl.event_threebody, sC);
@@ -8921,6 +9673,15 @@ double FFWorkspaceHip::launchChargeDependentAndFinish(bool gradient)
     // =========================================================================
 
     const bool need_snapshots = (m_verbosity >= 3);
+    // WP10: with fixed_point, d_dEdcn / d_grad / d_energies are integer accumulators (as CUDA): dEdcn is converted
+    // once every producer is done (before its first double consumer), d_grad after the CN chain rule (the last
+    // accumulation), the energy slots before the download.
+    bool dEdcn_converted = !impl.fixed_point;
+    auto convert_dEdcn = [&] {
+        if (dEdcn_converted) return;
+        fixToDoubleHip(impl.d_dEdcn.ptr, N, GFNFF_FIX_FORCE, stream);
+        dEdcn_converted = true;
+    };
     if (m_coulomb_enabled && impl.coul_self_on_gpu) {
         // Wait for pairwise+bonded streams (dEdcn dependency for qtmp subtraction).
         // event_p2_pairwise: Phase-2-dedicated — always wait (records k_coulomb completion).
@@ -8931,6 +9692,7 @@ double FFWorkspaceHip::launchChargeDependentAndFinish(bool gradient)
                 hipStreamWaitEvent(stream, impl.event_bonded, 0);
         }
 
+        convert_dEdcn();
         // d_dEdcn_snapshot must always be populated — dEdcnTotal() is public API
         // used by external code (tests, chain-rule validation) regardless of verbosity.
         if (m_coulomb_enabled && impl.coul_self_on_gpu && impl.d_dEdcn_snapshot.ptr) {
@@ -8940,8 +9702,7 @@ double FFWorkspaceHip::launchChargeDependentAndFinish(bool gradient)
 
         if (need_snapshots) {
             // Grad snapshot is only for diagnostics at verbosity >= 3
-            hipMemcpyAsync(impl.d_grad_snapshot.ptr, impl.d_grad.ptr,
-                            3*N*sizeof(double), hipMemcpyDeviceToDevice, stream);
+            snapshotAccHip(impl.fixed_point, impl.d_grad_snapshot.ptr, impl.d_grad.ptr, 3*N, stream);
         }
 
         // WP5-B: do_subtract only needs the GPU CNF buffer + EEQ charges — no CPU vector.
@@ -8976,9 +9737,9 @@ double FFWorkspaceHip::launchChargeDependentAndFinish(bool gradient)
             }
         }
 
+        convert_dEdcn();
         if (need_snapshots) {
-            hipMemcpyAsync(impl.d_grad_snapshot.ptr, impl.d_grad.ptr,
-                            3*N*sizeof(double), hipMemcpyDeviceToDevice, stream);
+            snapshotAccHip(impl.fixed_point, impl.d_grad_snapshot.ptr, impl.d_grad.ptr, 3*N, stream);
         }
 
         LaunchConfig cfg_cn = getLaunchConfig(impl.n_cn_pairs, m_block_size);
@@ -9013,6 +9774,17 @@ double FFWorkspaceHip::launchChargeDependentAndFinish(bool gradient)
         }
     }
 
+    if (impl.fixed_point) {
+        convert_dEdcn();   // no-op unless neither the Coulomb postprocess nor the chain rule ran
+        if (gradient)      // last accumulation is done: fixed point -> double before the download
+            fixToDoubleHip(impl.d_grad.ptr, 3 * N, GFNFF_FIX_FORCE, stream);
+        static_assert(FFWorkspaceHipImpl::E_DISP == 0, "slot 0 is the dispersion slot (own fixed-point scale)");
+        fixToDoubleHip(impl.d_energies.ptr, 1, GFNFF_FIX_ENERGY_DISP, stream);
+        fixToDoubleHip(impl.d_energies.ptr + 1, FFWorkspaceHipImpl::N_ENERGY_SLOTS - 1, GFNFF_FIX_ENERGY, stream);
+        if (impl.h_fix_bad)   // range / finiteness flag of the accumulation, read after the final sync
+            checkCuda(hipMemcpyFromSymbolAsync(impl.h_fix_bad, HIP_SYMBOL(d_gfnff_fix_bad), sizeof(int), 0,
+                                               hipMemcpyDeviceToHost, stream), "fixed-point flag read-back");
+    }
     checkCuda(hipGetLastError(), "postprocess final check");
 
     // Async energy download (pinned m_h_energies buffer)
@@ -9142,6 +9914,20 @@ double FFWorkspaceHip::launchChargeDependentAndFinish(bool gradient)
     // h_dc6dcn_skip was written by k_check_dc6dcn_skip_final → hipMemcpyAsync on the
     // same stream; now that the stream is synchronized, the host buffer is valid.
     m_dc6dcn_skip_pending = !impl.lean_step && (impl.h_dc6dcn_skip != nullptr && *impl.h_dc6dcn_skip != 0);
+
+    // WP10: a non-finite or out-of-range contribution cannot be represented in the fixed-point accumulators; the
+    // FP64 path would return NaN or a huge value there, so the step returns NaN (energy and gradient) instead of a
+    // wrapped number. The flag is sticky on the device and reset here.
+    bool fix_bad = false;
+    if (impl.fixed_point && impl.h_fix_bad && *impl.h_fix_bad != 0) {
+        fix_bad = true;
+        *impl.h_fix_bad = 0;
+        const int zero = 0;
+        checkCuda(hipMemcpyToSymbol(HIP_SYMBOL(d_gfnff_fix_bad), &zero, sizeof(int)), "reset fixed-point flag");
+        if (impl.fix_bad_steps++ == 0)
+            CurcumaLogger::warn("ROCm GFN-FF: a force, energy or CN contribution was not finite or outside the "
+                                "fixed-point range (-gfnff.rocm_fixed_point); the step returns NaN");
+    }
 
     // Extract per-term energies from pinned buffer
     const double e_disp      = m_h_energies[impl.E_DISP];
@@ -9299,6 +10085,10 @@ double FFWorkspaceHip::launchChargeDependentAndFinish(bool gradient)
         CurcumaLogger::info("=== GPU ENERGY END ===");
     }
 
+    if (fix_bad) {
+        if (gradient) m_result_gradient.setConstant(std::numeric_limits<double>::quiet_NaN());
+        return std::numeric_limits<double>::quiet_NaN();
+    }
     return m_result_energy.total() + m_e0;
 }
 
@@ -9368,6 +10158,7 @@ void FFWorkspaceHip::computeCN(const std::vector<int>& atom_types)
     // mirroring the CUDA file - Claude Generated; uncompiled here (no ROCm SDK).
     const double threshold_sq = 900.0;
 
+    setGfnffFixModeHip(impl.fixed_point);   // WP10
     // Ensure CN buffers are allocated
     if (impl.d_cn_raw.n < N) impl.d_cn_raw.alloc(N);
     if (impl.d_cn_final.n < N) impl.d_cn_final.alloc(N);
@@ -9395,6 +10186,8 @@ void FFWorkspaceHip::computeCN(const std::vector<int>& atom_types)
             impl.coords.d_z.ptr,
             impl.d_cn_raw.ptr,
             kn);
+        if (impl.fixed_point)   // WP10: integer CN sums -> doubles before the log squashing
+            fixToDoubleHip(impl.d_cn_raw.ptr, N, GFNFF_FIX_CN, impl.stream);
 
         // Log squashing: cn_final[i] = log(1+exp(cnmax)) - log(1+exp(cnmax-cn_raw[i]))
         // BOUNDS_LIGHT kernel — cap block at 256.

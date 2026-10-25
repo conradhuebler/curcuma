@@ -205,6 +205,7 @@ int XTB::blasThreadsNow()
 
 void XTB::reduceToStandardForm(Eigen::MatrixXd& A, int n, int threads, bool& ok) const
 {
+    ensureHostIntegrals(__func__);   // Claude Generated (Oct 2026): host copies of S/H0/L/gamma are lazy
     ok = true;
     // -scf_reduce auto|sygst|trsm, -scf_reduce_threads N (Claude Generated, Sep 2026).
     // 'auto' with the default threshold of 8 is what this function did before.
@@ -242,6 +243,7 @@ void XTB::reduceToStandardForm(Eigen::MatrixXd& A, int n, int threads, bool& ok)
  * ------------------------------------------------------------------ */
 void XTB::buildOrthonormalizer()
 {
+    ensureHostIntegrals(__func__);   // Claude Generated (Oct 2026): host copies of S/H0/L/gamma are lazy
     const int nao = m_basis.nao;
     if (nao == 0 || m_S.rows() != nao) { m_X.resize(0, 0); return; }
 
@@ -272,8 +274,85 @@ void XTB::buildOrthonormalizer()
 #endif
 }
 
+/* ------------------------------------------------------------------ *
+ *  CPU pseudo-diagonalisation (Claude Generated, Oct 2026)           *
+ *                                                                    *
+ *  Between two SCF iterations the Fock matrix changes little, so the *
+ *  previous eigenvectors C (AO basis, C^T S C = I, occupied block   *
+ *  first) are already close. One first-order Jacobi rotation between *
+ *  the occupied (o) and virtual (v) blocks removes their coupling    *
+ *      G = C^T F C,  theta_ai = G_ai / (G_ii - G_aa),                *
+ *      C_v <- C_v - C_o theta^T,  C_o <- C_o + C_v(old) theta        *
+ *  (Stewart, Csaszar, Pulay, J. Comput. Chem. 3 (1982) 227), and a   *
+ *  Cholesky re-orthonormalisation in the S metric restores           *
+ *  C^T S C = I:  B = L^T C,  B^T B = R^T R,  C <- C R^-1  (S = L L^T,*
+ *  L = m_X). The Cholesky order keeps the occupied span. Only GEMMs  *
+ *  and one Cholesky - no tridiagonalisation. The orbital energies    *
+ *  are the Rayleigh quotients of the rotated-from vectors; the       *
+ *  occupied block comes first, the virtual block is not sorted (the  *
+ *  occupation code only needs the occupied columns to lead).         *
+ *  Same algorithm as XtbGpuContext::Impl::pseudoRotateOrthonormalise *
+ *  (cuda/xtb_gpu_context.cu), here in FP64 on the host.              *
+ *  Returns false (m_wfn untouched) when a step is unsafe: open shell,*
+ *  odd electron count, small gap, large rotation, failed Cholesky.   *
+ *  NOT exact eigenvectors: the SCF loop never accepts convergence on *
+ *  such a step and runs full solves for the last iterations.         *
+ * ------------------------------------------------------------------ */
+bool XTB::pseudoDiagStepCpu(const Matrix& F)
+{
+    ensureHostIntegrals(__func__);   // Claude Generated (Oct 2026): host copies of S/H0/L/gamma are lazy
+    const int n = m_basis.nao;
+    if (n < m_pseudo_min_nao || openShell() || m_X.rows() != n || m_wfn.C.rows() != n || m_wfn.C.cols() != n) return false;
+    const long nel = std::lround(m_wfn.nocc);
+    if (nel % 2 != 0) return false;
+    const int no = static_cast<int>(nel / 2), nv = n - no;
+    if (no <= 0 || nv <= 0) return false;
+
+    Eigen::MatrixXd C = m_wfn.C;                       // column-major working copy
+    // F is symmetric, so the row-major storage of F read as column-major is F itself (no copy).
+    const Eigen::Map<const Eigen::MatrixXd> Fm(F.data(), n, n);
+    // 1. T = F C, g = diag(C^T F C), G_ov = C_v^T (F C_o).
+    const Eigen::MatrixXd T = Fm * C;
+    Eigen::VectorXd g(n);
+    for (int p = 0; p < n; ++p) g(p) = C.col(p).dot(T.col(p));
+    Eigen::MatrixXd theta = C.rightCols(nv).transpose() * T.leftCols(no);   // nv x no
+
+    // 2. Is one rotation safe? The occupied/virtual gap must be large against kT and every angle small.
+    const double homo = g.head(no).maxCoeff();
+    const double lumo = g.tail(nv).minCoeff();
+    const double kT = m_electronic_temp * 3.166808e-6;
+    if (!(lumo - homo > std::max(30.0 * kT, 1.0e-3))) return false;
+    double max_theta = 0.0;
+    for (int i = 0; i < no; ++i)
+        for (int a = 0; a < nv; ++a) {
+            const double th = theta(a, i) / (g(i) - g(no + a));
+            theta(a, i) = th;
+            max_theta = std::max(max_theta, std::fabs(th));
+        }
+    if (!(max_theta < 0.1)) return false;
+
+    // 3. Rotate: C_v -= C_o theta^T (old C_o), then C_o += C_v(old) theta.
+    const Eigen::MatrixXd Cv_old = C.rightCols(nv);
+    C.rightCols(nv).noalias() -= C.leftCols(no) * theta.transpose();
+    C.leftCols(no).noalias() += Cv_old * theta;
+
+    // 4. S-orthonormalise: B = L^T C, M = B^T B = R^T R (R upper), C <- C R^-1.
+    const Eigen::MatrixXd B = m_X.triangularView<Eigen::Lower>().transpose() * C;
+    Eigen::MatrixXd M = Eigen::MatrixXd::Zero(n, n);
+    M.selfadjointView<Eigen::Upper>().rankUpdate(B.transpose());
+    Eigen::LLT<Eigen::MatrixXd, Eigen::Upper> llt(M);
+    if (llt.info() != Eigen::Success) return false;
+    const Eigen::MatrixXd R = llt.matrixU();
+    R.triangularView<Eigen::Upper>().solveInPlace<Eigen::OnTheRight>(C);
+
+    m_wfn.C   = C;                                     // column-major -> row-major copy
+    m_wfn.eps = g;
+    return true;
+}
+
 bool XTB::solveEigen(const Matrix& F, const Matrix& S)
 {
+    ensureHostIntegrals(__func__);   // Claude Generated (Oct 2026): host copies of S/H0/L/gamma are lazy
     const int nao = m_basis.nao;
     m_wfn.W_valid = false;            // only the purification path supplies W directly
 
@@ -363,7 +442,18 @@ bool XTB::solveEigen(const Matrix& F, const Matrix& S)
             external_done = m_external_eigensolver(F, m_X, m_wfn.C, m_wfn.eps);
             if (external_done) m_t_diag += ms(tge0, clk::now());
         }
-        if (!external_done) {
+        // Oct 2026: opt-in pseudo-diagonalisation step instead of the eigensolve (see pseudoDiagStepCpu()).
+        bool pseudo_done = false;
+        m_pseudo_used = false;
+        if (!external_done && m_pseudo_cpu && m_eig_pseudo && m_pseudo_c_valid
+            && m_pseudo_consecutive < m_pseudo_max_steps
+            && m_eigensolver != "native" && m_eigensolver != "dnc" && m_eigensolver != "lobpcg") {
+            const auto tp0 = clk::now();
+            pseudo_done = pseudoDiagStepCpu(F);
+            if (pseudo_done) { ++m_pseudo_taken; ++m_pseudo_consecutive; m_pseudo_used = true; m_t_diag += ms(tp0, clk::now()); }
+            else ++m_pseudo_rejected;
+        }
+        if (!external_done && !pseudo_done) {
 #ifdef CURCUMA_XTB_HAVE_LAPACK_SYEVD
         // m_X holds the lower Cholesky factor L of S (S = L·Lᵀ). Reduce F to the
         // standard problem  Ftil = L⁻¹·F·L⁻ᵀ  (dsygst, itype=1, lower), solve it
@@ -567,6 +657,8 @@ bool XTB::solveEigen(const Matrix& F, const Matrix& S)
         m_wfn.C   = solver.eigenvectors();
     }
 
+    m_pseudo_c_valid = true;                    // m_wfn.C now holds this SCF's eigenvectors
+    if (!m_pseudo_used) m_pseudo_consecutive = 0;
     const auto t_dens0 = std::chrono::steady_clock::now();
     if (openShell()) {
         // Open shell: one set of orbitals, two Fermi fillings, summed occupations —
@@ -984,6 +1076,7 @@ void XTB::updatePopulationsFromPopAo(const Eigen::VectorXd& pop_ao)
  * ------------------------------------------------------------------ */
 Matrix XTB::buildFockFromPotential(const Potential& dpot) const
 {
+    ensureHostIntegrals(__func__);   // Claude Generated (Oct 2026): host copies of S/H0/L/gamma are lazy
     const int nao = m_basis.nao;
     const int nat = m_atomcount;
     Eigen::VectorXd v_ao;
@@ -1031,6 +1124,7 @@ void XTB::mullikenFromDensity(const Matrix& dP,
                                Eigen::MatrixXd& ddp_at,
                                Eigen::MatrixXd& dqp_at) const
 {
+    ensureHostIntegrals(__func__);   // Claude Generated (Oct 2026): host copies of S/H0/L/gamma are lazy
     const int nao = m_basis.nao;
     const int nsh = m_basis.nsh;
     const int nat = m_atomcount;

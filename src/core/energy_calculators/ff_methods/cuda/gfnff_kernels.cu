@@ -17,6 +17,8 @@
  * Coordinate layout: SoA — separate cx[N], cy[N], cz[N] arrays (Phase 10, March 2026)
  */
 
+#include <thrust/execution_policy.h>
+#include <thrust/scan.h>
 #include "gfnff_kernels.cuh"
 #include <cuda_runtime.h>
 #include <math.h>
@@ -26,13 +28,55 @@
 // Device geometry helpers
 // ============================================================================
 
+// ============================================================================
+// Order-independent accumulation (Claude Generated, Oct 2026; docs/GPU_REPRODUCIBILITY.md)
+// FP64 atomicAdd depends on the arrival order of the threads, so two runs differ in the last bits and
+// the difference is amplified by the dynamics. Integer addition is associative: the contribution is
+// rounded to a multiple of 2^-FIX_BITS, added to the same 8 bytes as a 64-bit integer (two's
+// complement wraps harmlessly, only the final sum has to fit) and converted back in place by
+// k_fix_to_double once the accumulation is over. The buffer must be zeroed first (0 bits = 0 and 0.0).
+// ============================================================================
+__device__ __forceinline__ void fix_add_u64(unsigned long long* a, double v, double scale)
+{
+    while (fabs(v) >= 64.0) {                          // keep the scaled value inside long long
+        const double chunk = copysign(64.0, v);
+        atomicAdd(a, static_cast<unsigned long long>(llrint(chunk * scale)));
+        v -= chunk;
+    }
+    atomicAdd(a, static_cast<unsigned long long>(llrint(v * scale)));
+}
+
+__device__ __forceinline__ void fix_add(double* addr, double v, double scale)
+{
+    fix_add_u64(reinterpret_cast<unsigned long long*>(addr), v, scale);
+}
+
+/// Copy of a fixed-point accumulator as doubles (the accumulator itself stays untouched; diagnostic snapshots).
+__global__ void k_fix_copy(int n, const double* __restrict__ src, double* __restrict__ dst, double inv_scale)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    dst[i] = static_cast<double>(reinterpret_cast<const long long*>(src)[i]) * inv_scale;
+}
+
+/// In-place conversion of a fixed-point accumulator (see fix_add) into doubles.
+__global__ void k_fix_to_double(int n, double* __restrict__ buf, double inv_scale)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const long long x = reinterpret_cast<long long*>(buf)[i];
+    buf[i] = static_cast<double>(x) * inv_scale;
+}
+
 /// Add vector contribution to gradient (atomicAdd on x,y,z)
 __device__ __forceinline__ void add_grad(double* __restrict__ grad, int atom,
                                           double fx, double fy, double fz)
 {
-    atomicAdd(&grad[3*atom],   fx);
-    atomicAdd(&grad[3*atom+1], fy);
-    atomicAdd(&grad[3*atom+2], fz);
+    // Fixed-point (order-independent) accumulation: grad is an integer accumulator until
+    // k_fix_to_double converts it at the end of the step (FFWorkspaceGPU::calculate*, docs/GPU_REPRODUCIBILITY.md).
+    fix_add(&grad[3*atom],   fx, GFNFF_FIX_FORCE);
+    fix_add(&grad[3*atom+1], fy, GFNFF_FIX_FORCE);
+    fix_add(&grad[3*atom+2], fz, GFNFF_FIX_FORCE);
 }
 
 
@@ -64,29 +108,34 @@ __device__ __forceinline__ double warpReduceSum(double val)
 // before this point). Threads with no work contribute local_E = 0.0.
 // ============================================================================
 
-__device__ __forceinline__ void blockReduceAddEnergy(double local_E, double* energy)
+// Integer version (Oct 2026): thread values are fixed-point integers (multiples of 2^-48 Eh, dispersion 2^-52), so the warp, block and
+// atomic sums are associative and do not depend on which pair or atom a thread got - the energy is the same bit for
+// bit however an atomically built list was ordered. The slot is converted by k_fix_to_double at the end of the step.
+__device__ __forceinline__ void blockReduceAddEnergyFix(long long local_E, double* energy)
 {
-    // Step 1: Warp-level reduction using shuffle intrinsics
-    double warp_sum = warpReduceSum(local_E);
+    long long warp_sum = local_E;
+    for (int off = 16; off > 0; off >>= 1) warp_sum += __shfl_down_sync(0xffffffffu, warp_sum, off);
 
-    // Step 2: First lane of each warp writes to shared memory
-    // Max 32 warps per block (supports up to 1024 threads)
-    __shared__ double warp_sums[32];
-    int lane = threadIdx.x & 31;       // threadIdx.x % 32
-    int warp_id = threadIdx.x >> 5;    // threadIdx.x / 32
+    __shared__ long long warp_sums_fx[32];
+    int lane = threadIdx.x & 31;
+    int warp_id = threadIdx.x >> 5;
 
     if (lane == 0)
-        warp_sums[warp_id] = warp_sum;
+        warp_sums_fx[warp_id] = warp_sum;
     __syncthreads();
 
-    // Step 3: First warp reduces all warp sums
-    int num_warps = (blockDim.x + 31) >> 5;  // ceil(blockDim.x / 32)
+    int num_warps = (blockDim.x + 31) >> 5;
     if (warp_id == 0) {
-        double sum = (lane < num_warps) ? warp_sums[lane] : 0.0;
-        sum = warpReduceSum(sum);
+        long long sum = (lane < num_warps) ? warp_sums_fx[lane] : 0ll;
+        for (int off = 16; off > 0; off >>= 1) sum += __shfl_down_sync(0xffffffffu, sum, off);
         if (lane == 0)
-            atomicAdd(energy, sum);
+            atomicAdd(reinterpret_cast<unsigned long long*>(energy), static_cast<unsigned long long>(sum));
     }
+}
+
+__device__ __forceinline__ void blockReduceAddEnergy(double local_E, double* energy)
+{
+    blockReduceAddEnergyFix(static_cast<long long>(llrint(local_E * GFNFF_FIX_ENERGY)), energy);
 }
 
 // ============================================================================
@@ -177,7 +226,7 @@ __global__ void k_dispersion(
     double*                    grad,
     double*                    energy)
 {
-    double local_E = 0.0;
+    long long local_Efx = 0;
 
     // K2 (Oct 2026): grid-stride loop. With the full grid (gridDim*blockDim >= n) every thread
     // handles at most one pair, exactly as before; a capped grid (background launch) loops.
@@ -202,7 +251,7 @@ __global__ void k_dispersion(
             double t8   = 1.0 / (r8 + r0_8);
 
             double disp_sum = t6 + 2.0 * r4r2ij[tid] * t8;
-            local_E += -C6[tid] * disp_sum * zetac6[tid];   // 0.0 + x == x: unchanged for one pair
+            local_Efx += static_cast<long long>(llrint(-C6[tid] * disp_sum * zetac6[tid] * GFNFF_FIX_ENERGY_DISP));   // per pair: list order does not matter
 
             // Gradient: dE/dr via chain rule
             double d6   = -6.0 * r4 * t6 * t6;
@@ -215,13 +264,13 @@ __global__ void k_dispersion(
 
             if (dc6dcn_ij && dEdcn) {
                 double disp_value = disp_sum * zetac6[tid];
-                atomicAdd(&dEdcn[i], -dc6dcn_ij[tid] * disp_value);
-                atomicAdd(&dEdcn[j], -dc6dcn_ji[tid] * disp_value);
+                fix_add(&dEdcn[i], -dc6dcn_ij[tid] * disp_value, GFNFF_FIX_FORCE);
+                fix_add(&dEdcn[j], -dc6dcn_ji[tid] * disp_value, GFNFF_FIX_FORCE);
             }
         }
     }
 
-    blockReduceAddEnergy(local_E, energy);
+    blockReduceAddEnergyFix(local_Efx, energy);
 }
 
 // ============================================================================
@@ -488,7 +537,7 @@ __global__ void k_coulomb_tiles(
 {
     constexpr int T = GFNFF_COUL_TILE;
     __shared__ double sx[T], sy[T], sz[T], sq[T], sa[T];
-    __shared__ double sgx[T], sgy[T], sgz[T];
+    __shared__ unsigned long long sgx[T], sgy[T], sgz[T];   // fixed-point partner gradients (order-independent)
 
     const int bi = tiles[2 * blockIdx.x];
     const int bj = tiles[2 * blockIdx.x + 1];
@@ -502,7 +551,7 @@ __global__ void k_coulomb_tiles(
     } else {
         sx[t] = sy[t] = sz[t] = 0.0; sq[t] = nan(""); sa[t] = 1.0;
     }
-    sgx[t] = 0.0; sgy[t] = 0.0; sgz[t] = 0.0;
+    sgx[t] = 0ull; sgy[t] = 0ull; sgz[t] = 0ull;
     __syncthreads();
 
     double local_E = 0.0;
@@ -542,9 +591,9 @@ __global__ void k_coulomb_tiles(
                 fac = -e * ri * ri;
                 const double fx = fac * dx, fy = fac * dy, fz = fac * dz;
                 gx += fx; gy += fy; gz += fz;
-                atomicAdd(&sgx[jj], -fx);
-                atomicAdd(&sgy[jj], -fy);
-                atomicAdd(&sgz[jj], -fz);
+                fix_add_u64(&sgx[jj], -fx, GFNFF_FIX_FORCE);
+                fix_add_u64(&sgy[jj], -fy, GFNFF_FIX_FORCE);
+                fix_add_u64(&sgz[jj], -fz, GFNFF_FIX_FORCE);
                 continue;
             }
             const double rij = sqrt(r2);
@@ -564,15 +613,19 @@ __global__ void k_coulomb_tiles(
             }
             const double fx = fac * dx, fy = fac * dy, fz = fac * dz;
             gx += fx; gy += fy; gz += fz;
-            atomicAdd(&sgx[jj], -fx);
-            atomicAdd(&sgy[jj], -fy);
-            atomicAdd(&sgz[jj], -fz);
+            fix_add_u64(&sgx[jj], -fx, GFNFF_FIX_FORCE);
+            fix_add_u64(&sgy[jj], -fy, GFNFF_FIX_FORCE);
+            fix_add_u64(&sgz[jj], -fz, GFNFF_FIX_FORCE);
         }
         add_grad(grad, i, gx, gy, gz);
     }
     __syncthreads();
-    if (jl < natoms && (sgx[t] != 0.0 || sgy[t] != 0.0 || sgz[t] != 0.0))
-        add_grad(grad, jl, sgx[t], sgy[t], sgz[t]);
+    if (jl < natoms && (sgx[t] != 0ull || sgy[t] != 0ull || sgz[t] != 0ull)) {
+        const double inv = 1.0 / GFNFF_FIX_FORCE;   // exact: the value is a multiple of 2^-52 and is re-added unchanged
+        add_grad(grad, jl, static_cast<double>(static_cast<long long>(sgx[t])) * inv,
+                 static_cast<double>(static_cast<long long>(sgy[t])) * inv,
+                 static_cast<double>(static_cast<long long>(sgz[t])) * inv);
+    }
 
     blockReduceAddEnergy(local_E, energy);
 }
@@ -583,14 +636,37 @@ __global__ void k_add_coulomb_parts(int n3, int nparts, const double* __restrict
 {
     const int k = blockIdx.x * blockDim.x + threadIdx.x;
     if (k < n3) {
-        double s = 0.0;
-        for (int p = 0; p < nparts; ++p) s += parts[static_cast<size_t>(p) * n3 + k];
-        atomicAdd(&grad[k], s);   // other streams add to d_grad concurrently
+        // the helper devices' partial gradients are fixed-point accumulators (see fix_add): integer sum
+        unsigned long long s = 0ull;
+        for (int p = 0; p < nparts; ++p) s += reinterpret_cast<const unsigned long long*>(parts)[static_cast<size_t>(p) * n3 + k];
+        atomicAdd(reinterpret_cast<unsigned long long*>(&grad[k]), s);   // other streams add to d_grad concurrently
     }
     if (k == 0) {
-        double e = 0.0;
-        for (int p = 0; p < nparts; ++p) e += part_E[p];
-        atomicAdd(energy, e);
+        unsigned long long e = 0ull;   // helper energies are fixed-point accumulators (blockReduceAddEnergy): integer sum
+        for (int p = 0; p < nparts; ++p) e += reinterpret_cast<const unsigned long long*>(part_E)[p];
+        atomicAdd(reinterpret_cast<unsigned long long*>(energy), e);
+    }
+}
+
+__global__ void k_add_disp_parts(int N, int nparts, const double* __restrict__ gparts,
+                                 const double* __restrict__ dparts, const double* __restrict__ part_E,
+                                 double* grad, double* dEdcn, double* energy)
+{
+    const int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k < 3 * N) {
+        unsigned long long s = 0ull;   // fixed-point partial gradients: integer sum
+        for (int p = 0; p < nparts; ++p) s += reinterpret_cast<const unsigned long long*>(gparts)[static_cast<size_t>(p) * 3 * N + k];
+        atomicAdd(reinterpret_cast<unsigned long long*>(&grad[k]), s);   // other streams add to d_grad concurrently
+    }
+    if (k < N) {
+        unsigned long long s = 0ull;
+        for (int p = 0; p < nparts; ++p) s += reinterpret_cast<const unsigned long long*>(dparts)[static_cast<size_t>(p) * N + k];
+        atomicAdd(reinterpret_cast<unsigned long long*>(&dEdcn[k]), s);
+    }
+    if (k == 0) {
+        unsigned long long e = 0ull;   // helper energies are fixed-point accumulators (blockReduceAddEnergy): integer sum
+        for (int p = 0; p < nparts; ++p) e += reinterpret_cast<const unsigned long long*>(part_E)[p];
+        atomicAdd(reinterpret_cast<unsigned long long*>(energy), e);
     }
 }
 
@@ -672,8 +748,8 @@ __global__ void k_bonds(
 
             if (dEdcn && cn && r0_base_i[tid] > 0.0) {
                 double yy = -dEdr;
-                atomicAdd(&dEdcn[i], yy * ff[tid] * cnfak_i[tid]);
-                atomicAdd(&dEdcn[j], yy * ff[tid] * cnfak_j[tid]);
+                fix_add(&dEdcn[i], yy * ff[tid] * cnfak_i[tid], GFNFF_FIX_FORCE);
+                fix_add(&dEdcn[j], yy * ff[tid] * cnfak_j[tid], GFNFF_FIX_FORCE);
             }
 
             if (zz_hb && nr_hb[tid] >= 1 && hb_H_atom) {
@@ -681,7 +757,7 @@ __global__ void k_bonds(
                 double zz = t1 * alpha_orig * dr * dr * E;
                 int H = hb_H_atom[tid];
                 if (H >= 0) {
-                    atomicAdd(&zz_hb[H], zz);
+                    fix_add(&zz_hb[H], zz, GFNFF_FIX_FORCE);
                 }
             }
         }
@@ -2634,7 +2710,7 @@ __global__ void k_coulomb_self(
     double E_en   = -q * chi;
     double E_self = 0.5 * q * q * (gam[i] + sqrt_2_over_pi / sqrt(alp[i]));
 
-    atomicAdd(energy, E_en + E_self);
+    fix_add(energy, E_en + E_self, GFNFF_FIX_ENERGY);
 }
 
 // ============================================================================
@@ -3078,6 +3154,108 @@ __global__ void k_dc6dcn_per_pair(
     if (c6_out) c6_out[tid] = c6;
 }
 
+// ---------------------------------------------------------------------------
+// Tabulated dc6dcn (Claude Generated, Oct 2026)
+// k_dc6dcn_per_pair contracts the reference table for every pair: 3 sums over nref(i) x nref(j) terms.
+// Both factors of that contraction depend on one atom and the partner ELEMENT only, so they are
+// tabulated once per atom and element type:
+//   A[a][t][r'] = sum_r gw_a[r] * C6ref(Z_a, Z_t; r, r')      (partner reference r' of element t)
+//   W[a][t][r'] = sum_r gw_a[r] * C6ref(Z_t, Z_a; r', r)
+// and the pair needs nref terms only:
+//   C6(i,j)      = sum_rj gw_j[rj]  A[i][t_j][rj]
+//   dC6/dCN(j)   = sum_rj dgw_j[rj] A[i][t_j][rj]
+//   dC6/dCN(i)   = sum_ri dgw_i[ri] W[j][t_i][ri]
+// identical to the double loop up to the order of summation (|C6ref| < 1e-20 skipped as there).
+// ---------------------------------------------------------------------------
+__global__ void k_d4_partner_tables(int N, int nt, const int* __restrict__ type_z, const int* __restrict__ atom_types,
+                                    const double* __restrict__ gw, const double* __restrict__ c6_flat,
+                                    double* __restrict__ A, double* __restrict__ W)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= N * nt) return;
+    const int a = tid / nt, t = tid % nt;
+    const int za = atom_types[a] - 1, zt = type_z[t] - 1;
+    const int nra = d_refn_const[za], nrt = d_refn_const[zt];
+    const size_t base_at = (static_cast<size_t>(za) * D4_MAX_ELEM + zt) * D4_MAX_REF * D4_MAX_REF;
+    const size_t base_ta = (static_cast<size_t>(zt) * D4_MAX_ELEM + za) * D4_MAX_REF * D4_MAX_REF;
+    for (int rp = 0; rp < D4_MAX_REF; ++rp) {
+        double sa = 0.0, sw = 0.0;
+        if (rp < nrt) {
+            for (int r = 0; r < nra; ++r) {
+                const double g = gw[a * D4_MAX_REF + r];
+                const double c_at = c6_flat[base_at + r * D4_MAX_REF + rp];
+                if (fabs(c_at) >= 1e-20) sa += g * c_at;
+                const double c_ta = c6_flat[base_ta + rp * D4_MAX_REF + r];
+                if (fabs(c_ta) >= 1e-20) sw += g * c_ta;
+            }
+        }
+        A[(static_cast<size_t>(a) * nt + t) * D4_MAX_REF + rp] = sa;
+        W[(static_cast<size_t>(a) * nt + t) * D4_MAX_REF + rp] = sw;
+    }
+}
+
+__global__ void k_dc6dcn_per_pair_tab(int n_pairs, const int* __restrict__ idx_i, const int* __restrict__ idx_j,
+                                      const int* __restrict__ atom_types, const int* __restrict__ atype_idx, int nt,
+                                      const double* __restrict__ gw, const double* __restrict__ dgw,
+                                      const double* __restrict__ A, const double* __restrict__ W,
+                                      double* __restrict__ dc6dcn_ij, double* __restrict__ dc6dcn_ji,
+                                      double* __restrict__ c6_out)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= n_pairs) return;
+    const int ai = idx_i[tid], aj = idx_j[tid];
+    const int nri = d_refn_const[atom_types[ai] - 1], nrj = d_refn_const[atom_types[aj] - 1];
+    const double* Aij = A + (static_cast<size_t>(ai) * nt + atype_idx[aj]) * D4_MAX_REF;
+    const double* Wji = W + (static_cast<size_t>(aj) * nt + atype_idx[ai]) * D4_MAX_REF;
+    double c6 = 0.0, dji = 0.0, dij = 0.0;
+    for (int rj = 0; rj < nrj; ++rj) {
+        c6  += gw[aj * D4_MAX_REF + rj] * Aij[rj];
+        dji += dgw[aj * D4_MAX_REF + rj] * Aij[rj];
+    }
+    for (int ri = 0; ri < nri; ++ri)
+        dij += dgw[ai * D4_MAX_REF + ri] * Wji[ri];
+    dc6dcn_ij[tid] = dij;
+    dc6dcn_ji[tid] = dji;
+    if (c6_out) c6_out[tid] = c6;
+}
+
+void launch_dc6dcn_tabulated(cudaStream_t s, int N, int nt, int n_pairs, const int* idx_i, const int* idx_j,
+                             const int* atom_types, const int* atype_idx, const int* type_z,
+                             const double* gw, const double* dgw, const double* c6_flat, double* A, double* W,
+                             double* dc6ij, double* dc6ji, double* c6_out, int block)
+{
+    k_d4_partner_tables<<<(N * nt + 127) / 128, 128, 0, s>>>(N, nt, type_z, atom_types, gw, c6_flat, A, W);
+    if (n_pairs <= 0) return;
+    k_dc6dcn_per_pair_tab<<<(n_pairs + block - 1) / block, block, 0, s>>>(
+        n_pairs, idx_i, idx_j, atom_types, atype_idx, nt, gw, dgw, A, W, dc6ij, dc6ji, c6_out);
+}
+
+// Claude Generated (Oct 2026): cost of one dispersion pair for the multi-GPU split. k_dc6dcn_per_pair
+// loops over nref(i) x nref(j) reference pairs (1..49), k_dispersion costs about the same as an average
+// dc6dcn pair, so cost = nref_i * nref_j + 10. Inclusive prefix sum over the pair list.
+__global__ void k_disp_pair_cost(int n, const int* __restrict__ idx_i, const int* __restrict__ idx_j,
+                                 const int* __restrict__ atom_types, long long* __restrict__ out)
+{
+    const int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= n) return;
+    out[t] = static_cast<long long>(d_refn_const[atom_types[idx_i[t]] - 1])
+           * d_refn_const[atom_types[idx_j[t]] - 1] + 10;
+}
+
+void disp_pair_cost_scan(int n, const int* idx_i, const int* idx_j, const int* atom_types,
+                         long long* out, cudaStream_t stream)
+{
+    if (n <= 0) return;
+    k_disp_pair_cost<<<(n + 255) / 256, 256, 0, stream>>>(n, idx_i, idx_j, atom_types, out);
+    thrust::inclusive_scan(thrust::cuda::par.on(stream), out, out + n, out);
+}
+
+void exclusive_scan_int(const int* in, int* out, int n, cudaStream_t stream)
+{
+    if (n <= 0) return;
+    thrust::exclusive_scan(thrust::cuda::par.on(stream), in, in + n, out);
+}
+
 // ============================================================================
 // Utility: zero device array
 // ============================================================================
@@ -3221,8 +3399,8 @@ __global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_cn_compute_pairs(
     double contrib = 0.5 * (1.0 + erf(arg));
 
     // Symmetric: both atoms i and j receive the contribution
-    atomicAdd(&cn_raw[i], contrib);
-    atomicAdd(&cn_raw[j], contrib);
+    fix_add(&cn_raw[i], contrib, GFNFF_FIX_CN);   // order-independent: the CN decides the charges
+    fix_add(&cn_raw[j], contrib, GFNFF_FIX_CN);
 }
 
 __global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_logcn(
@@ -3291,7 +3469,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_count(
     double r2 = dx * dx + dy * dy + dz * dz;
     if (r2 > cutoff_sq) return;
 
-    atomicAdd(d_count, 1);
+    atomicAdd(&d_count[i], 1);   // per-row count (Oct 2026): rows are placed in order by the build pass
 }
 
 __global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_build(
@@ -3309,6 +3487,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_build(
     const double* __restrict__ zeta_c,
     double        a1,
     double        a2,
+    const int*    __restrict__ row_off,
     int*          d_counter,
     int*          out_i,
     int*          out_j,
@@ -3366,7 +3545,10 @@ __global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_build(
     double zsi = (zi >= 1 && zi <= 86) ? zetaChargeScaleDev(zeta_zeff[zi - 1], zeta_c[zi - 1], qi) : 1.0;
     double zsj = (zj >= 1 && zj <= 86) ? zetaChargeScaleDev(zeta_zeff[zj - 1], zeta_c[zj - 1], qj) : 1.0;
 
-    int slot = atomicAdd(d_counter, 1);
+    // Oct 2026: grouped by row i (row_off from an exclusive scan of the row counts), so that the list is
+    // ordered like the host list; an arrival-ordered atomic slot scattered the pairs and made
+    // k_dc6dcn_per_pair 1.9x and k_dispersion 1.6x slower (non-coalesced gw/coordinate loads).
+    int slot = row_off[i] + atomicAdd(&d_counter[i], 1);
     out_i[slot]    = i;
     out_j[slot]    = j;
     out_C6[slot]   = c6;
@@ -3374,6 +3556,78 @@ __global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_build(
     out_r0sq[slot] = r0_sq;
     out_zeta[slot] = zsi * zsj;
     out_rcut[slot] = 50.0;  // D4 pair-energy cutoff (struct default, matches host)
+}
+
+// ---------------------------------------------------------------------------
+// Non-bonded repulsion pair list on the device (Claude Generated, Oct 2026)
+// ---------------------------------------------------------------------------
+__device__ inline int repKeyFind(const long long* keys, int n, long long key)
+{
+    int lo = 0, hi = n - 1;
+    while (lo <= hi) {
+        const int mid = (lo + hi) >> 1;
+        const long long v = keys[mid];
+        if (v == key) return mid;
+        if (v < key) lo = mid + 1; else hi = mid - 1;
+    }
+    return -1;
+}
+
+/// Pair survives the distance test, has valid elements and is not an excluded bond (i < j).
+__device__ inline bool repPairWanted(int N, int i, int j, const double* cx, const double* cy, const double* cz,
+                                     double cutoff_sq, const RepDevTables& t)
+{
+    if (!t.valid[i] || !t.valid[j]) return false;
+    const double dx = cx[i] - cx[j], dy = cy[i] - cy[j], dz = cz[i] - cz[j];
+    if (dx * dx + dy * dy + dz * dz > cutoff_sq) return false;
+    return repKeyFind(t.bond_keys, t.n_bond_keys, static_cast<long long>(i) * N + j) < 0;
+}
+
+__global__ GFNFF_KERNEL_BOUNDS void k_rep_pairs_count(
+    int N, const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+    double cutoff_sq, RepDevTables t, int* d_count)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= N * (N - 1) / 2) return;
+    int i, j;
+    dispPairFromTid(tid, N, i, j);
+    if (j >= N) return;
+    if (repPairWanted(N, i, j, cx, cy, cz, cutoff_sq, t)) atomicAdd(&d_count[i], 1);
+}
+
+__global__ GFNFF_KERNEL_BOUNDS void k_rep_pairs_build(
+    int N, const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+    const int* __restrict__ atom_types, double cutoff_sq, RepDevTables t,
+    const int* __restrict__ row_off, int* d_counter,
+    int* out_i, int* out_j, double* out_alpha, double* out_repab, double* out_rcut)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= N * (N - 1) / 2) return;
+    int i, j;
+    dispPairFromTid(tid, N, i, j);
+    if (j >= N) return;
+    if (!repPairWanted(N, i, j, cx, cy, cz, cutoff_sq, t)) return;
+
+    // element-pair factor, same branch order as make_nb_rep()
+    const int zi = atom_types[i], zj = atom_types[j];
+    double ff = 1.0;
+    if (zi == 1 && zj == 1) {
+        ff = t.hhfac;
+        const int k = repKeyFind(t.hh_keys, t.n_hh_keys, static_cast<long long>(i) * N + j);
+        if (k >= 0) ff *= (t.hh_dist[k] == 2) ? t.hh13 : t.hh14;
+    } else if ((zi == 1 && t.metal[j]) || (zj == 1 && t.metal[i])) {
+        ff = 0.85;
+    } else if ((zi == 1 && zj == 6) || (zj == 1 && zi == 6)) {
+        ff = 0.91;
+    } else if ((zi == 1 && zj == 8) || (zj == 1 && zi == 8)) {
+        ff = 1.04;
+    }
+    const int slot = row_off[i] + atomicAdd(&d_counter[i], 1);
+    out_i[slot] = i;
+    out_j[slot] = j;
+    out_alpha[slot] = sqrt(t.dum[i] * t.dum[j]) * ff;
+    out_repab[slot] = t.repz[i] * t.repz[j] * t.repscaln;
+    out_rcut[slot] = t.r_cut;
 }
 
 // ============================================================================
@@ -3411,7 +3665,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_hb_cn_per_atom(
     double arg = -kn * (r - rcovij) / rcovij;
     double contrib = 0.5 * (1.0 + erf(arg));
 
-    atomicAdd(&hb_cn_per_atom[H], contrib);
+    fix_add(&hb_cn_per_atom[H], contrib, GFNFF_FIX_CN);
 }
 
 __global__ GFNFF_KERNEL_BOUNDS void k_hb_cn_map_to_bonds(
@@ -3477,6 +3731,75 @@ __global__ void k_eeq_reduce_sums(
         atomicAdd(&d_sums[0], s_z1[0]);   // Cz1
         atomicAdd(&d_sums[1], s_Z2[0]);   // S
     }
+}
+
+// Single-block twin of k_eeq_reduce_sums (Oct 2026): every thread sums a fixed strided slice, a fixed tree adds the
+// slices - the same two sums in the same order in every run (the block-wise atomicAdd added in arrival order).
+__global__ void k_eeq_reduce_sums_det(int N, const double* __restrict__ d_rhs, double* __restrict__ d_sums)
+{
+    extern __shared__ double sdata[];
+    double* s_z1 = sdata;
+    double* s_Z2 = sdata + blockDim.x;
+    const int tid = threadIdx.x;
+    double a = 0.0, b = 0.0;
+    for (int i = tid; i < N; i += blockDim.x) { a += d_rhs[i]; b += d_rhs[N + i]; }
+    s_z1[tid] = a; s_Z2[tid] = b;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) { s_z1[tid] += s_z1[tid + s]; s_Z2[tid] += s_Z2[tid + s]; }
+        __syncthreads();
+    }
+    if (tid == 0) { d_sums[0] = s_z1[0]; d_sums[1] = s_Z2[0]; }
+}
+
+// Fragment sums over a CSR list of the atoms of each fragment (ascending atom index): one block per fragment,
+// fixed strided slices and a fixed tree -> deterministic (k_frag_sum added in arrival order).
+__global__ void k_frag_sum_csr(int nfrag, const double* __restrict__ v, const int* __restrict__ off,
+                               const int* __restrict__ idx, double* __restrict__ out)
+{
+    extern __shared__ double sh[];
+    const int f = blockIdx.x;
+    if (f >= nfrag) return;
+    const int tid = threadIdx.x;
+    double a = 0.0;
+    for (int p = off[f] + tid; p < off[f + 1]; p += blockDim.x) a += v[idx[p]];
+    sh[tid] = a;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) sh[tid] += sh[tid + s];
+        __syncthreads();
+    }
+    if (tid == 0) out[f] = sh[0];
+}
+
+// Warp per fragment (Oct 2026): for many small fragments (water boxes: 1500 blocks of 256 threads with 8 barriers each
+// cost 21 us per call, twice per PCG iteration). Lane l sums atoms l, l+32, ... of the fragment in ascending order,
+// a fixed shuffle tree adds the 32 partials: the same result in every run, independent of the launch shape.
+__global__ void k_frag_sum_warp(int nfrag, const double* __restrict__ v, const int* __restrict__ off,
+                                const int* __restrict__ idx, double* __restrict__ out)
+{
+    const int lane = threadIdx.x & 31;
+    const int f = blockIdx.x * (blockDim.x >> 5) + (threadIdx.x >> 5);
+    if (f >= nfrag) return;
+    double a = 0.0;
+    for (int p = off[f] + lane; p < off[f + 1]; p += 32) a += v[idx[p]];
+    for (int o = 16; o > 0; o >>= 1) a += __shfl_down_sync(0xffffffffu, a, o);
+    if (lane == 0) out[f] = a;
+}
+
+// Deterministic twin of k_eeq_reduce_fragment_sums: one thread per (fragment, column), atoms in ascending order.
+// Column 0 -> Cz1[f], column g + 1 -> S[f * nfrag + g].
+__global__ void k_eeq_reduce_fragment_sums_csr(int N, int nfrag, const double* __restrict__ d_rhs,
+                                               const int* __restrict__ off, const int* __restrict__ idx,
+                                               double* __restrict__ d_Cz1, double* __restrict__ d_S)
+{
+    const long long t = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const long long ncol = static_cast<long long>(nfrag) + 1;
+    if (t >= static_cast<long long>(nfrag) * ncol) return;
+    const int f = static_cast<int>(t / ncol), c = static_cast<int>(t % ncol);
+    double acc = 0.0;
+    for (int p = off[f]; p < off[f + 1]; ++p) acc += d_rhs[static_cast<size_t>(c) * N + idx[p]];
+    if (c == 0) d_Cz1[f] = acc; else d_S[static_cast<size_t>(f) * nfrag + (c - 1)] = acc;
 }
 
 __global__ void k_eeq_schur_nfrag1(

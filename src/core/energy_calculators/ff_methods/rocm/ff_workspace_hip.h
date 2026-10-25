@@ -21,3 +21,22 @@
 #define FFWorkspaceGPUImpl FFWorkspaceHipImpl
 
 #include "../cuda/ff_workspace_gpu.h"
+
+/**
+ * @brief ROCm-only GFN-FF switches of WP9 (Parameter Registry, gfnff scope).
+ *
+ * Claude Generated (Oct 2026). The shared wrapper template does not know them, so the ROCm
+ * method class (GFNFFHipComputationalMethod) reads them from its configuration and publishes
+ * them through rocmGfnffOptionsSlot() while setMolecule() and calculateEnergy() run; the
+ * FFWorkspaceHip and EEQSolverHip constructors (called from there) copy them. The member
+ * defaults are the fallback defaults and must equal the PARAM defaults in gfnff.h.
+ */
+struct RocmGfnffOptions {
+    bool dc6dcn_tables = false;   ///< -gfnff.rocm_dc6dcn_tables: tabulated dc6dcn (k_d4_partner_tables)
+    bool device_schur  = true;    ///< -gfnff.rocm_device_schur: Schur step of the dense EEQ on the device
+    bool fixed_point   = true;    ///< -gfnff.rocm_fixed_point: order-independent fixed-point accumulation (WP10)
+};
+
+/// Claude Generated (Oct 2026): thread-local slot of the options above (nullptr: member defaults).
+/// Defined in rocm/gfnff_rocm.hip.
+const RocmGfnffOptions*& rocmGfnffOptionsSlot();
