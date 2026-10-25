@@ -14,8 +14,12 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <climits>
+#include <cstdint>
+#include <cstdlib>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 namespace qmint {
@@ -890,6 +894,110 @@ static void buildR0Simplex(int L, double Wx, double Wy, double Wz, double rho,
     if (cur != &R0) R0.swap(*cur);
 }
 
+// Raw-pointer twins of boysArrayInto and buildR0Simplex for the Hermite-matrix ERI kernel
+// (Claude Generated, Oct 2026): the same operations in the same order (bitwise the same
+// values), without the std::vector bookkeeping that cost ~30 % of a low-L quartet.
+// F must hold maxN+1 values; maxN above the table falls back to the reference.
+static void boysRaw(int maxN, double T, double* F)
+{
+    if (maxN > BoysTable::NMAX || T < 0.0) {
+        std::vector<double> Fv;
+        boysFunctionReference(maxN, T, Fv);
+        for (int n = 0; n <= maxN; ++n) F[n] = Fv[n];
+        return;
+    }
+    if (T >= BoysTable::Tmax) {
+        F[0] = 0.5 * std::sqrt(PI / T);
+        if (maxN > 0) {
+            const double eT = std::exp(-T);
+            for (int n = 0; n < maxN; ++n) F[n + 1] = ((2.0 * n + 1.0) * F[n] - eT) / (2.0 * T);
+        }
+        return;
+    }
+    const BoysTable& tab = boysTable();
+    const int i = (int)(T / BoysTable::dT + 0.5);
+    const double d = i * BoysTable::dT - T;
+    const double* fi = &tab.f[(size_t)i * (BoysTable::NTAB + 1) + maxN];
+    constexpr double inv[BoysTable::NTAYLOR] = { 1.0, 1.0, 1.0 / 2, 1.0 / 3, 1.0 / 4, 1.0 / 5, 1.0 / 6 };
+    double acc = fi[BoysTable::NTAYLOR - 1];
+    for (int k = BoysTable::NTAYLOR - 2; k >= 0; --k) acc = fi[k] + d * inv[k + 1] * acc;
+    F[maxN] = acc;
+    if (maxN > 0) {
+        const double eT = std::exp(-T), T2 = 2.0 * T;
+        for (int n = maxN - 1; n >= 0; --n) F[n] = (T2 * F[n + 1] + eT) / (2.0 * n + 1.0);
+    }
+}
+
+/// boysRaw with the divisions replaced by multiplications with reciprocals (Claude
+/// Generated, Oct 2026): 1/dT, 1/(2n+1) from a table, one 1/(2T); equal to boysRaw up to
+/// rounding (a few ulp). Used by the templated ERI kernel, where the Boys function of
+/// the low classes (ss|ss), (ss|sp) is a large share of the time.
+static void boysFast(int maxN, double T, double* F)
+{
+    static constexpr double inv_odd[18] = { 1.0,        1.0 / 3,  1.0 / 5,  1.0 / 7,  1.0 / 9,  1.0 / 11,
+                                            1.0 / 13,  1.0 / 15, 1.0 / 17, 1.0 / 19, 1.0 / 21, 1.0 / 23,
+                                            1.0 / 25,  1.0 / 27, 1.0 / 29, 1.0 / 31, 1.0 / 33, 1.0 / 35 };
+    if (maxN > 17 || maxN > BoysTable::NMAX || T < 0.0) {
+        boysRaw(maxN, T, F);
+        return;
+    }
+    if (T >= BoysTable::Tmax) {
+        const double iT = 1.0 / T;
+        F[0] = 0.5 * std::sqrt(PI * iT);
+        if (maxN > 0) {
+            const double eT = std::exp(-T), h = 0.5 * iT;
+            for (int n = 0; n < maxN; ++n) F[n + 1] = ((2.0 * n + 1.0) * F[n] - eT) * h;
+        }
+        return;
+    }
+    const BoysTable& tab = boysTable();
+    const int i = (int)(T * (1.0 / BoysTable::dT) + 0.5);
+    const double d = i * BoysTable::dT - T;
+    const double* fi = &tab.f[(size_t)i * (BoysTable::NTAB + 1) + maxN];
+    constexpr double inv[BoysTable::NTAYLOR] = { 1.0, 1.0, 1.0 / 2, 1.0 / 3, 1.0 / 4, 1.0 / 5, 1.0 / 6 };
+    double acc = fi[BoysTable::NTAYLOR - 1];
+    for (int k = BoysTable::NTAYLOR - 2; k >= 0; --k) acc = fi[k] + d * inv[k + 1] * acc;
+    F[maxN] = acc;
+    if (maxN > 0) {
+        const double eT = std::exp(-T), T2 = 2.0 * T;
+        for (int n = maxN - 1; n >= 0; --n) F[n] = (T2 * F[n + 1] + eT) * inv_odd[n];
+    }
+}
+
+/// R^0_tuv on the simplex t+u+v <= L into R0 (box layout (t*(L+1)+u)*(L+1)+v), scratch lvl
+/// of the same size; recursion of buildR0Simplex (z before y before x), level by level.
+static void buildR0Raw(int L, double Wx, double Wy, double Wz, double rho, const double* F, double* R0,
+                              double* lvl)
+{
+    const int s = L + 1;
+    const double b = -2.0 * rho;
+    double bpow[64];
+    bpow[0] = 1.0;
+    for (int n = 1; n <= L; ++n) bpow[n] = bpow[n - 1] * b;
+    // level n is written into R0 when (L - n) is even: level 0 ends in R0
+    double* c = (L % 2 == 0) ? R0 : lvl;  // level L
+    double* x = (L % 2 == 0) ? lvl : R0;
+    c[0] = bpow[L] * F[L];
+    for (int n = L - 1; n >= 0; --n) {
+        const int top = L - n;
+        x[0] = bpow[n] * F[n];
+        for (int t = 0; t <= top; ++t)
+            for (int u = 0; u <= top - t; ++u) {
+                const int base = (t * s + u) * s;
+                const int vmax = top - t - u;
+                if (t + u > 0) {
+                    if (u > 0)
+                        x[base] = (u >= 2 ? (u - 1) * c[base - 2 * s] : 0.0) + Wy * c[base - s];
+                    else
+                        x[base] = (t >= 2 ? (t - 1) * c[base - 2 * s * s] : 0.0) + Wx * c[base - s * s];
+                }
+                if (vmax >= 1) x[base + 1] = 0.0 + Wz * c[base];
+                for (int v = 2; v <= vmax; ++v) x[base + v] = (v - 1) * c[base + v - 2] + Wz * c[base + v - 1];
+            }
+        std::swap(c, x);
+    }
+}
+
 // Primitive (ga b gb | gc gd) for cartesian angular momenta (la,ma,na) on A,
 // (lb,mb,nb) on B, (lc,mc,nc) on C, (ld,md,nd) on D. Exponents alpha..delta,
 // centres A..D in Bohr. Returns the chemists' integral (ab|cd).
@@ -1405,16 +1513,27 @@ void activeQuartet(const std::vector<EriShell>& sh, const ShellOutput& o, const 
 /// Shell pairs A <= B with their primitive-pair tables and Schwarz factors
 /// sqrt(max |(ab|ab)|) from the diagonal quartets -- per shell pair and, for the
 /// primitive screening, per primitive pair (then sorted, largest first).
-std::vector<ShellPair> makeScreeningPairs(const std::vector<EriShell>& sh)
+std::vector<ShellPair> makeScreeningPairs(const std::vector<EriShell>& sh, int threads = 1)
 {
     const int ns = (int)sh.size();
     std::vector<ShellPair> pairs;
     pairs.reserve((size_t)ns * (ns + 1) / 2);
     for (int A = 0; A < ns; ++A)
-        for (int B = A; B < ns; ++B)
-            pairs.push_back(makeShellPair(sh, A, B));
-    std::vector<double> buf, R;
-    for (ShellPair& sp : pairs) {
+        for (int B = A; B < ns; ++B) {
+            pairs.emplace_back();
+            pairs.back().A = A;
+            pairs.back().B = B;
+        }
+    // Every pair is independent (its own primitive tables and diagonal quartets), so the
+    // loop threads without changing any value (Claude Generated, Oct 2026: OpenMP).
+    const int np = (int)pairs.size();
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 64) num_threads(threads > 0 ? threads : 1)
+#endif
+    for (int ip = 0; ip < np; ++ip) {
+        std::vector<double> buf, R;
+        ShellPair& sp = pairs[ip];
+        sp = makeShellPair(sh, sp.A, sp.B);
         shellQuartet(sh, sp, sp, buf, R);
         const int nA = (int)sh[sp.A].lmn.size(), nB = (int)sh[sp.B].lmn.size();
         double mx = 0.0;
@@ -1438,7 +1557,444 @@ std::vector<ShellPair> makeScreeningPairs(const std::vector<EriShell>& sh)
         std::stable_sort(sp.prims.begin(), sp.prims.end(),
                          [](const PrimPair& x, const PrimPair& y) { return x.schwarz > y.schwarz; });
     }
+    (void)threads;
     return pairs;
+}
+
+// ---------------------------------------------------------------------------
+// Hermite-matrix form of the McMurchie-Davidson quartet (Claude Generated, Oct 2026)
+//
+// shellQuartet above contracts the Hermite tables one cartesian direction at a time
+// and transforms d shells to the spherical basis afterwards (transformAxis). That is
+// the readable reference, but its per-primitive work is short loops with variable
+// bounds, and it was 90 % of an integral-direct SCF. The same equation (Helgaker
+// 9.9.33)
+//
+//   (ab|cd) = sum_{h in simplex(LAB)} sum_{k in simplex(LCD)} E^ab_h (-1)^|k| E^cd_k R_{h+k}
+//
+// is evaluated here as two small matrix products over precomputed per-primitive-pair
+// matrices, the same idea as the device MD kernels (cuda/qm_gpu_direct_md_impl.cuh):
+//
+//   E^ab[ab'][h] = sum_{a,b} T_A[a][a'] T_B[b][b'] c_a c_b E^x_t E^y_u E^z_v ,  h = (t,u,v)
+//
+// with the contraction coefficients and the cartesian -> spherical transform T folded
+// in, built ONCE per primitive pair (makeMDPair). Per primitive quartet the Boys
+// values carry the prefactor 2 pi^(5/2) / (p q sqrt(p+q)), so R is already scaled, and
+//
+//   ket step  G[cd'][h] += sum_k (-1)^|k| E^cd[cd'][k] R_{h+k}     (per primitive quartet)
+//   bra step  out[ab'][cd'] += sum_h E^ab[ab'][h] G[cd'][h]       (per bra primitive pair)
+//
+// R lives in the (L+1)^3 box of buildR0Simplex, whose index is linear in (t,u,v), so
+// R_{h+k} = R[off(h) + off(k)]: one gather per k, then a vectorisable axpy over h.
+// Same primitive screening (sorted primitive Schwarz factors, prim_thr) and the same
+// sums as shellQuartet + transformAxis, only regrouped: values agree to rounding.
+// ---------------------------------------------------------------------------
+
+/// Hermite index triples (t,u,v) with t+u+v <= L, in loop order t, u, v (cached).
+const std::vector<std::array<int, 3>>& hermiteSimplex(int L)
+{
+    static const std::vector<std::vector<std::array<int, 3>>> table = [] {
+        std::vector<std::vector<std::array<int, 3>>> tab(17);
+        for (int l = 0; l <= 16; ++l)
+            for (int t = 0; t <= l; ++t)
+                for (int u = 0; u <= l - t; ++u)
+                    for (int v = 0; v <= l - t - u; ++v) tab[l].push_back({ t, u, v });
+        return tab;
+    }();
+    return table[L];
+}
+
+/// One shell pair in the Hermite-matrix form: per primitive pair (same order as
+/// ShellPair::prims, i.e. sorted by the primitive Schwarz factor) the composite
+/// exponent, centre, Schwarz factor and the matrix E[ab'][h] (active basis).
+struct MDPair {
+    int LAB = 0;    ///< LA + LB
+    int nh = 0;     ///< Hermite simplex size (LAB+1)(LAB+2)(LAB+3)/6
+    int nout = 0;   ///< output components wA * wB in the active basis
+    bool tabled = false;
+    std::vector<double> p, ip, Px, Py, Pz, schwarz;  ///< ip = 1/p
+    std::vector<double> E;  ///< [prim][ab'][h]
+    ~MDPair();  // out of line: the implicit inline one trips -Winline
+};
+MDPair::~MDPair() = default;
+
+MDPair makeMDPair(const std::vector<EriShell>& sh, const ShellOutput& o, const ShellPair& sp)
+{
+    MDPair m;
+    const EriShell& A = sh[sp.A];
+    const EriShell& B = sh[sp.B];
+    const int nA = (int)A.lmn.size(), nB = (int)B.lmn.size();
+    const int wA = o.width[sp.A], wB = o.width[sp.B];
+    m.LAB = A.L + B.L;
+    const auto& hs = hermiteSimplex(m.LAB);
+    m.nh = (int)hs.size();
+    m.nout = wA * wB;
+    m.tabled = true;
+    const int sT = (A.L + 1) * (B.L + 1), sI = B.L + 1;  // Hermite table strides [t][i][j]
+    const bool idA = !o.spherical || o.identity[sp.A];
+    const bool idB = !o.spherical || o.identity[sp.B];
+    std::vector<double> Ec((size_t)nA * nB * m.nh), Eb((size_t)wA * nB * m.nh);
+    m.E.reserve(sp.prims.size() * (size_t)m.nout * m.nh);
+    for (const PrimPair& pp : sp.prims) {
+        m.p.push_back(pp.p);
+        m.ip.push_back(1.0 / pp.p);
+        m.Px.push_back(pp.Px);
+        m.Py.push_back(pp.Py);
+        m.Pz.push_back(pp.Pz);
+        m.schwarz.push_back(pp.schwarz);
+        // cartesian E[a][b][h] with the contraction coefficients
+        for (int a = 0; a < nA; ++a) {
+            const auto& la = A.lmn[a];
+            for (int b = 0; b < nB; ++b) {
+                const auto& lb = B.lmn[b];
+                const double cab = A.coef[a][pp.ia] * B.coef[b][pp.ib];
+                double* e = &Ec[((size_t)a * nB + b) * m.nh];
+                for (int h = 0; h < m.nh; ++h) {
+                    const int t = hs[h][0], u = hs[h][1], v = hs[h][2];
+                    e[h] = (t > la[0] + lb[0] || u > la[1] + lb[1] || v > la[2] + lb[2])
+                        ? 0.0
+                        : cab * pp.Ex[t * sT + la[0] * sI + lb[0]] * pp.Ey[u * sT + la[1] * sI + lb[1]]
+                            * pp.Ez[v * sT + la[2] * sI + lb[2]];
+                }
+            }
+        }
+        // transform index a, then b (identity for s/p and cartesian output)
+        for (int a2 = 0; a2 < wA; ++a2)
+            for (int b = 0; b < nB; ++b) {
+                double* y = &Eb[((size_t)a2 * nB + b) * m.nh];
+                for (int h = 0; h < m.nh; ++h) y[h] = 0.0;
+                for (int a = 0; a < nA; ++a) {
+                    const double t = idA ? (a == a2 ? 1.0 : 0.0) : o.T[sp.A](a, a2);
+                    if (t == 0.0) continue;
+                    const double* x = &Ec[((size_t)a * nB + b) * m.nh];
+                    for (int h = 0; h < m.nh; ++h) y[h] += t * x[h];
+                }
+            }
+        const size_t base = m.E.size();
+        m.E.resize(base + (size_t)m.nout * m.nh, 0.0);
+        for (int a2 = 0; a2 < wA; ++a2)
+            for (int b2 = 0; b2 < wB; ++b2) {
+                double* y = &m.E[base + ((size_t)a2 * wB + b2) * m.nh];
+                for (int b = 0; b < nB; ++b) {
+                    const double t = idB ? (b == b2 ? 1.0 : 0.0) : o.T[sp.B](b, b2);
+                    if (t == 0.0) continue;
+                    const double* x = &Eb[((size_t)a2 * nB + b) * m.nh];
+                    for (int h = 0; h < m.nh; ++h) y[h] += t * x[h];
+                }
+            }
+    }
+    return m;
+}
+
+/// Per-thread scratch of mdQuartet (no allocation in the quartet loop).
+struct MDScratch {
+    std::vector<double> F, R, tmpR, G, r, tmp;
+    std::vector<int> offa, offc;
+    std::vector<double> sgnc;
+    ~MDScratch();
+};
+MDScratch::~MDScratch() = default;
+
+/// Contracted (ab|cd) of one shell quartet in the active basis, written to
+/// out[ab' * ket.nout + cd'] (ab' = a' wB + b'). See the block comment above.
+void mdQuartet(const MDPair& bra, const MDPair& ket, double prim_thr, double* out, MDScratch& w)
+{
+    const int Lt = bra.LAB + ket.LAB;
+    const int s = Lt + 1;
+    const int nha = bra.nh, nhc = ket.nh, nab = bra.nout, ncd = ket.nout;
+    const auto& ha = hermiteSimplex(bra.LAB);
+    const auto& hc = hermiteSimplex(ket.LAB);
+    w.offa.resize(nha);
+    w.offc.resize(nhc);
+    w.sgnc.resize(nhc);
+    for (int h = 0; h < nha; ++h) w.offa[h] = (ha[h][0] * s + ha[h][1]) * s + ha[h][2];
+    for (int k = 0; k < nhc; ++k) {
+        w.offc[k] = (hc[k][0] * s + hc[k][1]) * s + hc[k][2];
+        w.sgnc[k] = ((hc[k][0] + hc[k][1] + hc[k][2]) & 1) ? -1.0 : 1.0;  // (-1)^(tau+nu+phi)
+    }
+    w.G.resize((size_t)ncd * nha);
+    w.r.resize(nha);
+    w.F.resize(Lt + 1);
+    w.R.resize((size_t)s * s * s);
+    w.tmpR.resize((size_t)s * s * s);
+    for (int x = 0; x < nab * ncd; ++x) out[x] = 0.0;
+    const int* offa = w.offa.data();
+    double* G = w.G.data();
+    double* r = w.r.data();
+    static const double pref0 = 2.0 * std::pow(PI, 2.5);
+
+    const int npb = (int)bra.p.size(), npk = (int)ket.p.size();
+    const double ket_max = npk ? ket.schwarz[0] : 0.0;
+    for (int ib = 0; ib < npb; ++ib) {
+        if (bra.schwarz[ib] * ket_max < prim_thr) break;
+        std::fill(w.G.begin(), w.G.end(), 0.0);
+        const double p = bra.p[ib];
+        for (int ik = 0; ik < npk; ++ik) {
+            if (bra.schwarz[ib] * ket.schwarz[ik] < prim_thr) break;
+            const double q = ket.p[ik];
+            const double rho = p * q / (p + q);
+            const double Wx = bra.Px[ib] - ket.Px[ik], Wy = bra.Py[ib] - ket.Py[ik], Wz = bra.Pz[ib] - ket.Pz[ik];
+            double* F = w.F.data();
+            boysRaw(Lt, rho * (Wx * Wx + Wy * Wy + Wz * Wz), F);
+            const double pref = pref0 / (p * q * std::sqrt(p + q));
+            for (int n = 0; n <= Lt; ++n) F[n] *= pref;  // R is linear in F: R carries the prefactor
+            buildR0Raw(Lt, Wx, Wy, Wz, rho, F, w.R.data(), w.tmpR.data());
+            const double* R = w.R.data();
+            const double* Ek = &ket.E[(size_t)ik * ncd * nhc];
+            // ket step: G[cd][h] += sum_k (-1)^|k| E^cd[cd][k] R[off(h) + off(k)]
+            for (int k = 0; k < nhc; ++k) {
+                const double* Rk = R + w.offc[k];
+                const double sg = w.sgnc[k];
+                for (int h = 0; h < nha; ++h) r[h] = sg * Rk[offa[h]];
+                for (int cd = 0; cd < ncd; ++cd) {
+                    const double e = Ek[(size_t)cd * nhc + k];
+                    if (e == 0.0) continue;
+                    double* g = G + (size_t)cd * nha;
+                    for (int h = 0; h < nha; ++h) g[h] += e * r[h];
+                }
+            }
+        }
+        // bra step: out[ab][cd] += sum_h E^ab[ab][h] G[cd][h]
+        const double* Eb = &bra.E[(size_t)ib * nab * nha];
+        for (int ab = 0; ab < nab; ++ab) {
+            const double* e = Eb + (size_t)ab * nha;
+            double* o = out + (size_t)ab * ncd;
+            for (int cd = 0; cd < ncd; ++cd) {
+                const double* g = G + (size_t)cd * nha;
+                // four partial sums: independent chains the compiler can vectorise
+                double a0 = 0.0, a1 = 0.0, a2 = 0.0, a3 = 0.0;
+                int h = 0;
+                for (; h + 3 < nha; h += 4) {
+                    a0 += e[h] * g[h];
+                    a1 += e[h + 1] * g[h + 1];
+                    a2 += e[h + 2] * g[h + 2];
+                    a3 += e[h + 3] * g[h + 3];
+                }
+                for (; h < nha; ++h) a0 += e[h] * g[h];
+                o[cd] += (a0 + a1) + (a2 + a3);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Compile-time sizes for the common classes (Claude Generated, Oct 2026)
+//
+// mdQuartet above is the readable form. For the classes of s/p/d bases (LAB, LCD <= 4)
+// the same code is instantiated with LAB and LCD as template parameters: the Hermite
+// simplex sizes, the R box offsets and the loop trip counts become constants, so the
+// short inner loops (1, 4, 10, 20 or 35 Hermite terms) are unrolled and vectorised.
+// The arithmetic and its order are those of mdQuartet; mdQuartetDispatch picks the
+// instantiation and falls back to mdQuartet for anything larger.
+// ---------------------------------------------------------------------------
+
+/// Hermite simplex t+u+v <= L in the loop order of hermiteSimplex: offsets in a box of
+/// side S and the ket sign (-1)^(t+u+v).
+#if defined(__GNUC__) && !defined(__clang__)
+#define QM_UNROLL _Pragma("GCC unroll 16")
+#elif defined(__clang__)
+#define QM_UNROLL _Pragma("unroll")
+#else
+#define QM_UNROLL
+#endif
+// The R recursion is called once per primitive quartet; the compiler's unit-growth limit
+// otherwise keeps it out of line (a call per primitive quartet).
+#if defined(__GNUC__) || defined(__clang__)
+#define QM_ALWAYS_INLINE __attribute__((always_inline)) inline
+#else
+#define QM_ALWAYS_INLINE inline
+#endif
+
+template <int L, int S>
+struct HermiteBox {
+    static constexpr int n = (L + 1) * (L + 2) * (L + 3) / 6;
+    std::array<int, n> off{};
+    std::array<double, n> sgn{};
+    constexpr HermiteBox()
+    {
+        int k = 0;
+        for (int t = 0; t <= L; ++t)
+            for (int u = 0; u <= L - t; ++u)
+                for (int v = 0; v <= L - t - u; ++v) {
+                    off[k] = (t * S + u) * S + v;
+                    sgn[k] = ((t + u + v) & 1) ? -1.0 : 1.0;
+                    ++k;
+                }
+    }
+};
+
+/// buildR0Raw with L known at compile time (same recursion, same order).
+template <int L>
+QM_ALWAYS_INLINE void buildR0T(double Wx, double Wy, double Wz, double rho, const double* F, double* R0, double* lvl)
+{
+    constexpr int s = L + 1;
+    const double b = -2.0 * rho;
+    double bpow[L + 1];
+    bpow[0] = 1.0;
+    for (int n = 1; n <= L; ++n) bpow[n] = bpow[n - 1] * b;
+    double* c = (L % 2 == 0) ? R0 : lvl;
+    double* x = (L % 2 == 0) ? lvl : R0;
+    c[0] = bpow[L] * F[L];
+    // All trip counts are compile-time constants once the outer loops are unrolled; the
+    // pragmas ask GCC for the complete unroll (the recursion is ~L^4/24 FMAs, the loop
+    // control otherwise costs more than the arithmetic).
+    QM_UNROLL
+    for (int n = L - 1; n >= 0; --n) {
+        const int top = L - n;
+        x[0] = bpow[n] * F[n];
+        QM_UNROLL
+        for (int t = 0; t <= top; ++t) {
+            QM_UNROLL
+            for (int u = 0; u <= top - t; ++u) {
+                const int base = (t * s + u) * s;
+                const int vmax = top - t - u;
+                if (t + u > 0) {
+                    if (u > 0)
+                        x[base] = (u >= 2 ? (u - 1) * c[base - 2 * s] : 0.0) + Wy * c[base - s];
+                    else
+                        x[base] = (t >= 2 ? (t - 1) * c[base - 2 * s * s] : 0.0) + Wx * c[base - s * s];
+                }
+                if (vmax >= 1) x[base + 1] = 0.0 + Wz * c[base];
+                QM_UNROLL
+                for (int v = 2; v <= vmax; ++v) x[base + v] = (v - 1) * c[base + v - 2] + Wz * c[base + v - 1];
+            }
+        }
+        std::swap(c, x);
+    }
+}
+
+template <int LAB, int LCD>
+void mdQuartetT(const MDPair& bra, const MDPair& ket, double prim_thr, double* out, MDScratch& w)
+{
+    constexpr int Lt = LAB + LCD, s = Lt + 1;
+    static constexpr HermiteBox<LAB, s> HA{};
+    static constexpr HermiteBox<LCD, s> HC{};
+    constexpr int nha = HermiteBox<LAB, s>::n, nhc = HermiteBox<LCD, s>::n;
+    const int nab = bra.nout, ncd = ket.nout;
+    w.G.resize((size_t)ncd * nha);
+    double* G = w.G.data();
+    double F[Lt + 1];
+    double R[s * s * s], Rl[s * s * s];
+    for (int x = 0; x < nab * ncd; ++x) out[x] = 0.0;
+    static const double pref0 = 2.0 * std::pow(PI, 2.5);
+
+    const int npb = (int)bra.p.size(), npk = (int)ket.p.size();
+    const double ket_max = npk ? ket.schwarz[0] : 0.0;
+    for (int ib = 0; ib < npb; ++ib) {
+        if (bra.schwarz[ib] * ket_max < prim_thr) break;
+        std::fill(G, G + (size_t)ncd * nha, 0.0);
+        const double p = bra.p[ib], ipb = bra.ip[ib];
+        for (int ik = 0; ik < npk; ++ik) {
+            if (bra.schwarz[ib] * ket.schwarz[ik] < prim_thr) break;
+            const double q = ket.p[ik];
+            const double inv = 1.0 / (p + q);
+            const double rho = p * q * inv;
+            const double Wx = bra.Px[ib] - ket.Px[ik], Wy = bra.Py[ib] - ket.Py[ik], Wz = bra.Pz[ib] - ket.Pz[ik];
+            boysFast(Lt, rho * (Wx * Wx + Wy * Wy + Wz * Wz), F);
+            const double pref = pref0 * ipb * ket.ip[ik] * std::sqrt(inv);  // 2 pi^(5/2) / (p q sqrt(p+q))
+            for (int n = 0; n <= Lt; ++n) F[n] *= pref;
+            buildR0T<Lt>(Wx, Wy, Wz, rho, F, R, Rl);
+            const double* Ek = &ket.E[(size_t)ik * ncd * nhc];
+            QM_UNROLL
+            for (int k = 0; k < nhc; ++k) {
+                const double* Rk = R + HC.off[k];
+                double r[nha];
+                QM_UNROLL
+                for (int h = 0; h < nha; ++h) r[h] = HC.sgn[k] * Rk[HA.off[h]];
+                for (int cd = 0; cd < ncd; ++cd) {
+                    const double e = Ek[(size_t)cd * nhc + k];
+                    if (e == 0.0) continue;
+                    double* g = G + (size_t)cd * nha;
+                    for (int h = 0; h < nha; ++h) g[h] += e * r[h];
+                }
+            }
+        }
+        const double* Eb = &bra.E[(size_t)ib * nab * nha];
+        for (int ab = 0; ab < nab; ++ab) {
+            const double* e = Eb + (size_t)ab * nha;
+            double* o = out + (size_t)ab * ncd;
+            for (int cd = 0; cd < ncd; ++cd) {
+                const double* g = G + (size_t)cd * nha;
+                double a0 = 0.0, a1 = 0.0, a2 = 0.0, a3 = 0.0;
+                int h = 0;
+                for (; h + 3 < nha; h += 4) {
+                    a0 += e[h] * g[h];
+                    a1 += e[h + 1] * g[h + 1];
+                    a2 += e[h + 2] * g[h + 2];
+                    a3 += e[h + 3] * g[h + 3];
+                }
+                for (; h < nha; ++h) a0 += e[h] * g[h];
+                o[cd] += (a0 + a1) + (a2 + a3);
+            }
+        }
+    }
+}
+
+/// mdQuartetT for LAB, LCD <= 4 (s, p, d shells), mdQuartet otherwise.
+void mdQuartetDispatch(const MDPair& bra, const MDPair& ket, double prim_thr, double* out, MDScratch& w)
+{
+    using Fn = void (*)(const MDPair&, const MDPair&, double, double*, MDScratch&);
+    static const Fn table[5][5] = {
+        { mdQuartetT<0, 0>, mdQuartetT<0, 1>, mdQuartetT<0, 2>, mdQuartetT<0, 3>, mdQuartetT<0, 4> },
+        { mdQuartetT<1, 0>, mdQuartetT<1, 1>, mdQuartetT<1, 2>, mdQuartetT<1, 3>, mdQuartetT<1, 4> },
+        { mdQuartetT<2, 0>, mdQuartetT<2, 1>, mdQuartetT<2, 2>, mdQuartetT<2, 3>, mdQuartetT<2, 4> },
+        { mdQuartetT<3, 0>, mdQuartetT<3, 1>, mdQuartetT<3, 2>, mdQuartetT<3, 3>, mdQuartetT<3, 4> },
+        { mdQuartetT<4, 0>, mdQuartetT<4, 1>, mdQuartetT<4, 2>, mdQuartetT<4, 3>, mdQuartetT<4, 4> },
+    };
+    if (bra.LAB <= 4 && ket.LAB <= 4)
+        table[bra.LAB][ket.LAB](bra, ket, prim_thr, out, w);
+    else
+        mdQuartet(bra, ket, prim_thr, out, w);
+}
+
+/// activeQuartet on the Hermite-matrix kernel: same output (buf, dims d) and the same
+/// side choice (the pair with more output components on the bra side).
+void activeQuartetMD(const ShellOutput& o, const ShellPair& braS, const ShellPair& ketS, const MDPair& bra,
+                     const MDPair& ket, std::vector<double>& buf, MDScratch& w, int d[4], double prim_thr)
+{
+    d[0] = o.width[braS.A];
+    d[1] = o.width[braS.B];
+    d[2] = o.width[ketS.A];
+    d[3] = o.width[ketS.B];
+    const size_t nab = bra.nout, ncd = ket.nout;
+    buf.resize(nab * ncd);
+    if (ncd > nab) {
+        w.tmp.resize(nab * ncd);
+        mdQuartetDispatch(ket, bra, prim_thr, w.tmp.data(), w);
+        for (size_t x = 0; x < nab; ++x)
+            for (size_t y = 0; y < ncd; ++y) buf[x * ncd + y] = w.tmp[y * nab + x];
+    } else {
+        mdQuartetDispatch(bra, ket, prim_thr, buf.data(), w);
+    }
+}
+
+/// MD tables for every shell pair whose Schwarz factor can still pass `screening`
+/// (Q_AB * max Q * pq >= screening needs Q_AB >= screening / (max Q * pq)); the
+/// margin 1e-6 covers any |P| up to 1e6. Pairs without tables take the reference
+/// path (activeQuartet), so the result never depends on this cut.
+std::vector<MDPair> makeMDPairs(const std::vector<EriShell>& sh, const ShellOutput& o,
+                                const std::vector<ShellPair>& pairs, double screening, int threads)
+{
+    // CURCUMA_QM_ERI_REFERENCE=1: no tables, every quartet through the reference kernel
+    // (shellQuartet + transformAxis), for comparing the two kernels (diagnostic only).
+    static const bool reference = [] {
+        const char* e = std::getenv("CURCUMA_QM_ERI_REFERENCE");
+        return e != nullptr && e[0] != '\0' && e[0] != '0';
+    }();
+    if (reference) return std::vector<MDPair>(pairs.size());
+    double qmax = 0.0;
+    for (const ShellPair& sp : pairs) qmax = std::max(qmax, sp.schwarz);
+    std::vector<MDPair> md(pairs.size());
+    const int np = (int)pairs.size();
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 64) num_threads(threads > 0 ? threads : 1)
+#endif
+    for (int i = 0; i < np; ++i) {
+        if (screening > 0.0 && pairs[i].schwarz * qmax < screening * 1.0e-6) continue;
+        md[i] = makeMDPair(sh, o, pairs[i]);
+    }
+    (void)threads;
+    return md;
 }
 
 }  // namespace
@@ -1451,7 +2007,8 @@ ERITensor buildERI(const std::vector<GTO::Orbital>& basis, int threads, double s
     ERITensor eri(o.n);
     if (o.n == 0) return eri;
 
-    const std::vector<ShellPair> pairs = makeScreeningPairs(sh);
+    const std::vector<ShellPair> pairs = makeScreeningPairs(sh, threads);
+    const std::vector<MDPair> md = makeMDPairs(sh, o, pairs, screening, threads);
     const int np = (int)pairs.size();
     // Primitive quartets 1000x below the shell-quartet threshold are skipped too;
     // screening = 0 keeps every quartet (exact).
@@ -1465,6 +2022,7 @@ ERITensor buildERI(const std::vector<GTO::Orbital>& basis, int threads, double s
 #endif
     {
         std::vector<double> buf, R, tmp;
+        MDScratch mw;
 #ifdef _OPENMP
 #pragma omp for schedule(dynamic, 1)
 #endif
@@ -1474,7 +2032,10 @@ ERITensor buildERI(const std::vector<GTO::Orbital>& basis, int threads, double s
                 const ShellPair& ket = pairs[j];
                 if (bra.schwarz * ket.schwarz < screening) continue;
                 int d[4];
-                activeQuartet(sh, o, bra, ket, buf, R, tmp, d, prim_thr);
+                if (md[i].tabled && md[j].tabled)
+                    activeQuartetMD(o, bra, ket, md[i], md[j], buf, mw, d, prim_thr);
+                else
+                    activeQuartet(sh, o, bra, ket, buf, R, tmp, d, prim_thr);
                 const int oA = o.first[bra.A], oB = o.first[bra.B], oC = o.first[ket.A], oD = o.first[ket.B];
                 for (int a = 0; a < d[0]; ++a)
                     for (int b = 0; b < d[1]; ++b)
@@ -1731,11 +2292,46 @@ QMGpuEriTables EriGpuTables::view() const
 // out as the SCF converges.
 // ---------------------------------------------------------------------------
 
+namespace {
+/// Index of the lowest set bit of a non-zero word.
+inline int lowestBit(uint64_t x)
+{
+#if defined(__GNUC__) || defined(__clang__)
+    return __builtin_ctzll(x);
+#else
+    int k = 0;
+    while (!(x & 1)) { x >>= 1; ++k; }
+    return k;
+#endif
+}
+}  // namespace
+
 struct DirectJK::Impl {
     std::vector<EriShell> sh;
     ShellOutput out;
-    std::vector<ShellPair> pairs;
-    double max_schwarz = 0.0;
+    double screening = 0.0;
+    // Pair tables, built once by the first build() with its thread count (Oct 2026; the
+    // constructor has no thread count, and at 2000 basis functions the tables take seconds).
+    mutable std::once_flag once;
+    mutable std::vector<ShellPair> pairs;
+    mutable std::vector<MDPair> md;  ///< Hermite-matrix tables (mdQuartet), same order as pairs
+    mutable std::vector<int> order;  ///< pair indices by decreasing Schwarz factor (quartet enumeration)
+    mutable std::vector<int> pos;    ///< inverse of order: sorted position of each pair
+    mutable double max_schwarz = 0.0;
+    void setup(int threads) const
+    {
+        std::call_once(once, [&] {
+            pairs = makeScreeningPairs(sh, threads);
+            for (const ShellPair& sp : pairs) max_schwarz = std::max(max_schwarz, sp.schwarz);
+            md = makeMDPairs(sh, out, pairs, screening, threads);
+            order.resize(pairs.size());
+            for (size_t i = 0; i < order.size(); ++i) order[i] = (int)i;
+            std::stable_sort(order.begin(), order.end(),
+                             [&](int x, int y) { return pairs[x].schwarz > pairs[y].schwarz; });
+            pos.resize(order.size());
+            for (size_t k = 0; k < order.size(); ++k) pos[order[k]] = (int)k;
+        });
+    }
 };
 
 DirectJK::DirectJK(const std::vector<GTO::Orbital>& basis, double screening, const Matrix* Q)
@@ -1744,9 +2340,7 @@ DirectJK::DirectJK(const std::vector<GTO::Orbital>& basis, double screening, con
     auto impl = std::make_shared<Impl>();
     impl->sh = groupShells(basis);
     impl->out = makeShellOutput(impl->sh, (int)basis.size(), Q);
-    impl->pairs = makeScreeningPairs(impl->sh);
-    for (const ShellPair& sp : impl->pairs)
-        impl->max_schwarz = std::max(impl->max_schwarz, sp.schwarz);
+    impl->screening = screening;
     m_impl = impl;
 }
 
@@ -1759,6 +2353,7 @@ long DirectJK::build(const Matrix& P, Matrix& J, Matrix& K, int threads, double 
     K = Matrix::Zero(n, n);
     if (!m_impl || n == 0) return 0;
     const Impl& I = *m_impl;
+    I.setup(threads);
     const int ns = (int)I.sh.size();
     const int np = (int)I.pairs.size();
     const ShellOutput& o = I.out;
@@ -1781,6 +2376,17 @@ long DirectJK::build(const Matrix& P, Matrix& J, Matrix& K, int threads, double 
     {
         Matrix Jt = Matrix::Zero(n, n), Kt = Matrix::Zero(n, n);
         std::vector<double> buf, R, tmp;
+        MDScratch mw;
+        // Canonical quartets {i, j} found over the pairs sorted by Schwarz factor
+        // (Claude Generated, Oct 2026): for bra pair i at sorted position a, the kets are the
+        // positions b <= a (Q_b >= Q_a), and since Q_a Q_b pq <= Q_a Q_b max|P| the scan stops
+        // at the first b with Q_a Q_b max|P| < thr. The old i <= j double loop tested all
+        // npair^2/2 pairs (1e11 tests per build at 2000 basis functions). The kets found are
+        // then processed in pair-index order (shells close together in J/K, cache locality),
+        // and the bra rows in pair-index order too; the quartets computed and the
+        // per-quartet screen are the same as before, only their order differs.
+        std::vector<int> kets;
+        std::vector<uint64_t> kbits((size_t)np / 64 + 1, 0);
 #ifdef _OPENMP
 #pragma omp for schedule(dynamic, 1)
 #endif
@@ -1788,14 +2394,38 @@ long DirectJK::build(const Matrix& P, Matrix& J, Matrix& K, int threads, double 
             const ShellPair& bra = I.pairs[i];
             if (bra.schwarz * I.max_schwarz * Pall < thr) continue;
             const int A = bra.A, B = bra.B;
-            for (int j = i; j < np; ++j) {
+            const int a = I.pos[i];
+            // ket indices into a bitmap and read back in increasing order: O(row + npair/64),
+            // cheaper than sorting long rows
+            int wlo = INT32_MAX, whi = -1;
+            for (int b = 0; b <= a; ++b) {
+                const int j = I.order[b];
+                if (bra.schwarz * I.pairs[j].schwarz * Pall < thr) break;
+                kbits[j >> 6] |= (uint64_t)1 << (j & 63);
+                wlo = std::min(wlo, j >> 6);
+                whi = std::max(whi, j >> 6);
+            }
+            kets.clear();
+            for (int w = wlo; w <= whi; ++w) {
+                uint64_t word = kbits[w];
+                kbits[w] = 0;
+                while (word) {
+                    kets.push_back((w << 6) + lowestBit(word));
+                    word &= word - 1;
+                }
+            }
+            for (const int j : kets) {
                 const ShellPair& ket = I.pairs[j];
                 const int C = ket.A, D = ket.B;
                 const double pq = std::max({ Pmax(A, B), Pmax(C, D), Pmax(A, C), Pmax(A, D), Pmax(B, C), Pmax(B, D) });
                 if (bra.schwarz * ket.schwarz * pq < thr) continue;
                 int d[4];
                 // same expression as the device kernels (quartetOf in cuda/qm_gpu_eri_kernels.cuh)
-                activeQuartet(I.sh, o, bra, ket, buf, R, tmp, d, (prim_density && pq > 0.0) ? prim_thr / pq : prim_thr);
+                const double pthr = (prim_density && pq > 0.0) ? prim_thr / pq : prim_thr;
+                if (I.md[i].tabled && I.md[j].tabled)
+                    activeQuartetMD(o, bra, ket, I.md[i], I.md[j], buf, mw, d, pthr);
+                else
+                    activeQuartet(I.sh, o, bra, ket, buf, R, tmp, d, pthr);
                 ++computed;
                 const double deg = (A != B ? 2.0 : 1.0) * (C != D ? 2.0 : 1.0) * (i != j ? 2.0 : 1.0);
                 const double scale = deg / 8.0;

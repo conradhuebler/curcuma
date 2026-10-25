@@ -326,3 +326,49 @@ Further checks (single runs):
 - The skip-by-prediction rule is approximate (e.g. ORCA 1T C80H162 HF predicted 2723 s and was skipped, curcuma 1T
   C40H82 HF predicted 2704 s); those cells are estimates of "over the cap", not measurements.
 - RI-JK and RI-MP2 use def2/JK as correlation aux basis in all programs; standard def2-SVP/C would give other timings.
+
+## After the CPU kernel work (Oct 25, 2026)
+
+> 🤖 AI-generated, ⚙️ machine-tested. Same machine, same geometries and the same curcuma flags as above
+> (`-qm.scf_threshold 1e-7 -verbosity 2 -no_bmt`, 1 thread pinned with `taskset -c 2`), n = 1, measured with a
+> small wrapper (`~/.cache/qmopt/run.sh`, not the queue runner, so `results.jsonl` holds only the old numbers).
+> ORCA and PySCF were not rerun; their columns are the numbers of the tables above. The numbers above this
+> section are kept unchanged.
+
+What changed (details: [NATIVE_QM_IMPLEMENTATION.md](NATIVE_QM_IMPLEMENTATION.md#cpu-eri-kernel-hermite-matrix-mcmurchie-davidson-oct-2026)):
+Hermite-matrix McMurchie-Davidson kernel with per-primitive-pair matrices (contraction and 6d->5d folded in)
+and compile-time class sizes; integral-direct quartet loop over the Schwarz-sorted pair list with a break
+(was all npair^2/2 pair tests per build); pair tables built with the SCF's thread count; threaded n^3
+products in the SCF loop (density as one GEMM instead of n_occ rank-1 updates). Screening, convergence
+test, DIIS and the number of SCF iterations are unchanged; E_elec is identical to the 10 printed decimals in
+every case below.
+
+| system | nbf | threads | curcuma before (s) | curcuma after (s) | speed-up | ORCA nori (s) | after / ORCA | PySCF exact (s) | after / PySCF |
+|---|---|---|---|---|---|---|---|---|---|
+| benzene | 114 | 1 | 3.7 | 2.2 | 1.7 | 3.4 | 0.65 | 1.3 | 1.7 |
+| anthracene | 246 | 1 | 219 | 47.6 | 4.6 | 42.7 | 1.11 | 20.3 | 2.3 |
+| C20H42 | 490 | 1 | 490 | 127.9 | 3.8 | 113 | 1.13 | 237 | 0.54 |
+| C40H82 | 970 | 1 | pred (> 1800) | 546.8 | - | 488 | 1.12 | 894 | 0.61 |
+| anthracene | 246 | 24 | 14.7 | 2.8 | 5.2 | 12.7 | 0.22 | 19.5 | 0.14 |
+| C20H42 | 490 | 24 | 34.7 | 8.2 | 4.2 | 24.8 | 0.33 | 118 | 0.07 |
+| C40H82 | 970 | 24 | 153 | 39.3 | 3.9 | 101 | 0.39 | 96.4 | 0.41 |
+| C80H162 | 1930 | 24 | 712 | 212.6 | 3.3 | 471 | 0.45 | 268 | 0.79 |
+
+Time split after the change (SCF loop / J/K builds / eigensolve, s): anthracene 1T 43.8 / 43.6 / 0.12;
+C20H42 1T 113.5 / 112.6 / 0.59; C40H82 1T 482 / 476 / 3.6; C80H162 24T 184.8 / 165.4 / 16.4 (before 635 / 548 /
+25, of which 62 s other loop work, now 3 s).
+
+**Target not reached at 1 thread**: curcuma is 1.11-1.13x the ORCA wall time (was 4.3-5.1x). Per J/K build it
+is now faster than ORCA (C20H42: 127.9 s / 17 builds = 7.5 s vs 113 s / 11 iterations = 10.3 s; ORCA's
+per-iteration figure includes its own overhead), so the remaining gap is the iteration count: 19 (anthracene)
+and 16 (alkanes) iterations plus the final full build against ORCA's 11. That count comes from the
+convergence test, not from DIIS: `-qm.scf_threshold 1e-7` on ||dP||_F (RMS of dP ~ 2e-10 at 490 functions)
+is far tighter than ORCA's TightSCF (stopped on the energy, RMS dP ~ 1e-7). Full builds in every iteration
+(no incremental noise) converge in the same 15-16 iterations on C20H42; `diis_subspace` 5/12/16,
+`diis_start 3` and no early-screening phase changed the count by at most one. With looser thresholds (not
+the setting of this study, measured only to show the effect; E_elec identical to 10 decimals in all four
+runs): anthracene 1T 37.9 s at the default 1e-6 (15 iterations) and 33.0 s at 1e-5 (12); C20H42 24T 7.4 s
+(13) and 6.8 s (11).
+
+Not measured: ORCA and PySCF again on the same day, repetitions (n = 1; the 24-thread runs vary by about
+5-10 % between repeats here), the RI-MP2/LMP2 columns (their SCF part uses the same J/K code), other CPUs.

@@ -10,6 +10,7 @@
 #include "src/core/curcuma_logger.h"
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <map>
 using clk = std::chrono::steady_clock;
@@ -31,13 +32,25 @@ int main(int argc,char**argv){
   if(argc>=4 && std::string(argv[3])=="direct"){
     Matrix Q=qmint::buildSphericalTransform(B,qmint::buildOverlap(B));
     Matrix J0,K0;
-    for(double scr: {0.0,1e-12}){
-      const qmint::DirectJK dj(B,scr,Q.size()?&Q:nullptr); const int nb=dj.n();
+    // Optional (Oct 2026): BENCH_SCREENING="1e-12" and BENCH_THREADS="1" restrict the runs;
+    // a 4th argument names a file: J/K of the last run written if absent, else compared.
+    std::vector<double> scrs{0.0,1e-12}; std::vector<int> ths{1,4};
+    if(const char* e=std::getenv("BENCH_SCREENING")) scrs={std::atof(e)};
+    if(const char* e=std::getenv("BENCH_THREADS")) ths={std::atoi(e)};
+    Matrix Jl,Kl;
+    for(double scr: scrs){
+      auto ts=clk::now(); const qmint::DirectJK dj(B,scr,Q.size()?&Q:nullptr); const int nb=dj.n();
+      printf("DirectJK setup %.1f ms\n",ms(ts));
       Matrix P(nb,nb); for(int i=0;i<nb;++i)for(int j=0;j<=i;++j)P(i,j)=P(j,i)=std::cos(0.37*i+1.3*j);
-      for(int th: {1,4}){ Matrix J,K; auto t0=clk::now(); dj.build(P,J,K,th); double tm=ms(t0);
+      for(int th: ths){ Matrix J,K; auto t0=clk::now(); dj.build(P,J,K,th); double tm=ms(t0);
         if(J0.size()==0){J0=J;K0=K;}
-        printf("direct J/K screening %.0e (%d threads) %.1f ms  sum(J)=%.12e sum(K)=%.12e  max|dJ|,|dK| vs unscreened %.1e %.1e\n",
+        Jl=J; Kl=K;
+        printf("direct J/K screening %.0e (%d threads) %.1f ms  sum(J)=%.12e sum(K)=%.12e  max|dJ|,|dK| vs first run %.1e %.1e\n",
                scr,th,tm,J.sum(),K.sum(),(J-J0).cwiseAbs().maxCoeff(),(K-K0).cwiseAbs().maxCoeff()); } }
+    if(argc>=5){ std::ifstream in(argv[4],std::ios::binary); const size_t N=(size_t)Jl.size();
+      if(!in){ std::ofstream o(argv[4],std::ios::binary); o.write((const char*)Jl.data(),N*8); o.write((const char*)Kl.data(),N*8); printf("J/K written to %s\n",argv[4]); }
+      else { Matrix Jr(Jl.rows(),Jl.cols()),Kr(Kl.rows(),Kl.cols()); in.read((char*)Jr.data(),N*8); in.read((char*)Kr.data(),N*8);
+        printf("vs %s: max|dJ| %.2e max|dK| %.2e (max|J| %.2e)\n",argv[4],(Jl-Jr).cwiseAbs().maxCoeff(),(Kl-Kr).cwiseAbs().maxCoeff(),Jr.cwiseAbs().maxCoeff()); } }
     return 0; }
   // old: one contracted integral per canonical AO quartet
   auto t=clk::now(); qmint::ERITensor old(run_old?nc:0);

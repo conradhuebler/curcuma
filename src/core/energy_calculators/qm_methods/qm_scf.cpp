@@ -61,6 +61,39 @@
 #include <string>
 
 namespace {
+
+/// C = op(A) * B with the columns of B (and C) split into one block per OpenMP thread, each
+/// block one sequential BLAS call through Eigen (the release build links the sequential MKL,
+/// so a plain product runs on one core). Same arithmetic per column; blocks only change
+/// which call computes a column. Used for the n^3 products of the SCF loop (DIIS error,
+/// X^T F X, density), which took seconds per iteration at ~2000 basis functions.
+/// Claude Generated (Oct 2026).
+Eigen::MatrixXd gemmThreaded(const Eigen::MatrixXd& A, bool transA, const Eigen::MatrixXd& B, int threads)
+{
+    const int m = static_cast<int>(transA ? A.cols() : A.rows());
+    const int n = static_cast<int>(B.cols());
+    Eigen::MatrixXd C(m, n);
+    const int nb = std::max(1, std::min(threads, n / 64));
+    if (nb <= 1) {
+        if (transA)
+            C.noalias() = A.transpose() * B;
+        else
+            C.noalias() = A * B;
+        return C;
+    }
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) num_threads(nb)
+#endif
+    for (int t = 0; t < nb; ++t) {
+        const int c0 = static_cast<int>((long)n * t / nb), c1 = static_cast<int>((long)n * (t + 1) / nb);
+        if (c1 <= c0) continue;
+        if (transA)
+            C.middleCols(c0, c1 - c0).noalias() = A.transpose() * B.middleCols(c0, c1 - c0);
+        else
+            C.middleCols(c0, c1 - c0).noalias() = A * B.middleCols(c0, c1 - c0);
+    }
+    return C;
+}
 // Symmetric Loewdin orthonormalizer X = S^{-1/2} via S = U diag(w) U^T,
 // X = U diag(1/sqrt(w)) U^T. Returns true on success; leaves X empty on a
 // singular / indefinite S (caller reports the error).
@@ -372,10 +405,12 @@ struct HostDiisStore {
     ~HostDiisStore();  // out of line: -Winline in the grown runSCF (Oct 2026)
 
     /// Store F (built from P) in `slot`, form its orthonormal-basis error and return max|e|.
-    double push(int slot, const Matrix& Fi, const Matrix& Pi, const Matrix& S, const Matrix& X)
+    double push(int slot, const Matrix& Fi, const Matrix& Pi, const Matrix& S, const Matrix& X, int threads)
     {
-        const Matrix FPS = Fi * Pi * S;
-        e[slot] = X.transpose() * (FPS - FPS.transpose()) * X;
+        const Eigen::MatrixXd Fc(Fi), Pc(Pi), Sc(S), Xc(X);
+        const Eigen::MatrixXd FPS = gemmThreaded(gemmThreaded(Fc, false, Pc, threads), false, Sc, threads);
+        const Eigen::MatrixXd comm = FPS - FPS.transpose();
+        e[slot] = gemmThreaded(gemmThreaded(Xc, true, comm, threads), false, Xc, threads);
         F[slot] = Fi;
         P[slot] = Pi;
         return e[slot].cwiseAbs().maxCoeff();
@@ -561,7 +596,7 @@ bool QMEngine::runSCF()
             // FP32 RI builds (mixed precision) and FP32 direct builds (Q-G5) count as non-full: dropped
             // when the SCF switches to FP64
             const int slot = diis.push(cadence.since_full == 0 && !riLowPrecision() && !cadence.fp32);
-            diis.setLastError(store.push(slot, fock, m_density, m_S, m_X));
+            diis.setLastError(store.push(slot, fock, m_density, m_S, m_X, m_threads));
             Eigen::MatrixXd G, M;
             Eigen::VectorXd a;
             if (diis.needsDiis()) G = store.gram(diis.slots());
@@ -1439,13 +1474,14 @@ void QMEngine::buildJKExact(const Matrix& P, Matrix& J, Matrix& K) const
 bool QMEngine::solveFock(const Matrix& F, Matrix& C, Vector& eps) const
 {
     const Eigen::MatrixXd Fcol(F);          // RowMajor -> ColMajor copy
-    const Eigen::MatrixXd Fp = m_X.transpose() * Fcol * m_X;
+    const Eigen::MatrixXd Xc(m_X);
+    const Eigen::MatrixXd Fp = gemmThreaded(gemmThreaded(Xc, true, Fcol, m_threads), false, Xc, m_threads);
     Eigen::VectorXd ev;
     Eigen::MatrixXd evecs;
     if (!curcuma::eigsolver::solveSymmetric(Fp, ev, evecs, m_threads))
         return false;
     eps = ev;                                // ascending orbital energies
-    C = m_X * evecs;                          // back to the AO basis
+    C = gemmThreaded(Xc, false, evecs, m_threads);  // back to the AO basis
     return true;
 }
 
@@ -1455,11 +1491,12 @@ bool QMEngine::solveFock(const Matrix& F, Matrix& C, Vector& eps) const
 
 Matrix QMEngine::buildDensity(const Matrix& C, int n_occ) const
 {
-    const int n = static_cast<int>(C.rows());
-    Matrix P = Matrix::Zero(n, n);
-    for (int i = 0; i < n_occ; ++i)
-        P += 2.0 * (C.col(i) * C.col(i).transpose());
-    return P;
+    // P = 2 C_occ C_occ^T as one (threaded) matrix product; the former sum of n_occ rank-1
+    // updates streamed the whole n x n matrix n_occ times (~1 s per call at 2000 functions).
+    const Eigen::MatrixXd Co(C.leftCols(n_occ));
+    const Eigen::MatrixXd CoT = Co.transpose();
+    const Eigen::MatrixXd P = gemmThreaded(CoT, true, CoT, m_threads);
+    return P + P.transpose();  // = 2 C_occ C_occ^T, exactly symmetric (blocks may round differently)
 }
 
 // =================================================================================

@@ -312,6 +312,38 @@ old molecule's integrals (HF-3c water on an object last used for BH: -17.44 inst
 -75.50 Eh); `resetForNewMolecule()` now runs first. Both covered by `qm_update_geometry`.
 
 
+## CPU ERI kernel: Hermite-matrix McMurchie-Davidson (Oct 2026)
+
+> 🤖 AI-generated, ⚙️ machine-tested. Human production test pending.
+
+`qm_integrals.cpp`, `mdQuartet`/`mdQuartetT` (used by `DirectJK::build` and `buildERI`): the same
+McMurchie-Davidson sum as the reference kernel `shellQuartet` (Helgaker 9.9.33), regrouped as two small
+matrix products. Per primitive pair a matrix E[ab'][h] (h = Hermite triple t+u+v <= LA+LB) is built once,
+with the contraction coefficients and the 6d->5d transform folded in (as the device MD kernels); per
+primitive quartet the Boys values carry 2 pi^(5/2)/(p q sqrt(p+q)), R^0 is built on the simplex, and
+G[cd'][h] += sum_k (-1)^|k| E^cd[cd'][k] R[h+k] (ket step), out += E^ab G (bra step, per bra primitive).
+The classes up to (dd|dd) are instantiated with LA+LB and LC+LD as template parameters (constant trip
+counts); larger L uses the generic `mdQuartet`. Screening, Schwarz factors and pair tables are unchanged
+(the GPU tables still come from `buildEriGpuTables`).
+
+Also changed: the integral-direct quartet loop finds the kets of a bra pair over the Schwarz-sorted pair
+list and stops at the first Q_a Q_b max|P| < thr (was: all npair^2/2 pair tests per build), then processes
+them in pair-index order; pair tables built by the first build with its thread count; the SCF loop's n^3
+products (DIIS error, X^T F X, density as one GEMM instead of n_occ rank-1 updates) split over threads.
+`CURCUMA_QM_ERI_REFERENCE=1` runs every quartet through the old kernel (comparison only).
+
+| check | result |
+|---|---|
+| J/K, naphthalene/def2-SVP, one full direct build vs old kernel | max deviation 1e-13 (max J 14) |
+| E_elec vs release binary before the change (hf: benzene stored+direct, anthracene, C20H42, C40H82, C80H162; hf-3c: benzene, BF3, formaldehyde, HCN, LiF, He-CH4) | identical to the 10 printed decimals |
+| `ctest -L qm` | 274/276; the two `qm_opt_hf3c_*` need numpy (pass with the venv python) |
+| one direct build, 1 thread (bench_qm_integrals, cos-density) | naphthalene 7.0 -> 1.5 s, anthracene 18.2 -> 7.6 s (measured before the template and loop steps) |
+
+Not tested: f shells (not supported by the basis loader), cartesian d beyond the existing ctests, other
+CPUs than the Core Ultra 9 285K, Clang/MSVC builds (the unroll/always_inline macros are GCC/Clang
+attributes). The gradient kernels (`quartetGradient`) are unchanged. Timings against ORCA/PySCF:
+[QM_TIMING_ORCA_PYSCF_2026-10.md](QM_TIMING_ORCA_PYSCF_2026-10.md), section "After the CPU kernel work".
+
 ## Attribution and Provenance
 
 **Origin**: xcDFT -- TCCM winter school 2019: DFT (Fortran, RKS, LDA+HF, Euler-Maclaurin x
@@ -490,7 +522,7 @@ testing against an external 2e reference (ORCA/xcDFT/libint) is pending.
 |------|------|
 | `src/core/energy_calculators/qm_methods/qm_engine.h/.cpp` | `QMFunctional` enum, `qm` PARAM block, `QMEngine : public QMDriver` (basis, 1e integrals, lazy ERI, geometry updates) |
 | `src/core/energy_calculators/qm_methods/qm_scf.cpp` | closed-shell RHF SCF (SAD/H0 guess, DIIS), Fock build, active-basis ERI |
-| `src/core/energy_calculators/qm_methods/qm_integrals.hpp/.cpp` | 1e kernels, shell-quartet-blocked MD ERI (Schwarz, OpenMP, on-the-fly 5d), J/K, spherical transforms (`namespace qmint`) |
+| `src/core/energy_calculators/qm_methods/qm_integrals.hpp/.cpp` | 1e kernels, shell-quartet-blocked MD ERI (reference `shellQuartet`, Hermite-matrix `mdQuartetT` used by the SCF; Schwarz, OpenMP, on-the-fly 5d), J/K, spherical transforms (`namespace qmint`) |
 | `src/core/energy_calculators/qm_methods/qm_method.h/.cpp` | `QMMethod : public ComputationalMethod` wrapper, `engineConfig()` scope merge |
 | `src/core/energy_calculators/qm_methods/hf3c_method.h/.cpp` | `HF3CMethod`: HF/MINIX + D3(BJ) + gCP + SRB |
 | `src/core/energy_calculators/qm_methods/gcp.h/.cpp` | gCP + SRB energy and gradient (simple-dftd3 port, H-Ne) |

@@ -74,6 +74,11 @@ the device.
 Since then the kernel itself is ~3x faster (tabulated Boys function, ket-primitive-first
 contraction, primitive screening, larger pair on the bra side): benzene direct 28.4 -> 8.6 s,
 naphthalene 195 -> 58 s; details in [NATIVE_QM_IMPLEMENTATION.md](NATIVE_QM_IMPLEMENTATION.md).
+Oct 25, 2026: Hermite-matrix CPU kernel (`mdQuartetT`, contraction and 5d folded into per-primitive-pair
+matrices, compile-time class sizes) and a Schwarz-sorted quartet loop: one direct build 4-5x faster on one
+thread, CPU HF C80H162 712 -> 231 s on 24 threads; energies unchanged to 10 decimals
+([NATIVE_QM_IMPLEMENTATION.md](NATIVE_QM_IMPLEMENTATION.md#cpu-eri-kernel-hermite-matrix-mcmurchie-davidson-oct-2026),
+[QM_TIMING_ORCA_PYSCF_2026-10.md](QM_TIMING_ORCA_PYSCF_2026-10.md)).
 
 **Incremental-build floor (Oct 16, 2026; AI-generated, machine-tested).** An incremental build on
 dP is screened with the same absolute threshold as a full one (`Q_ab Q_cd max|dP| < eri_screening`),
