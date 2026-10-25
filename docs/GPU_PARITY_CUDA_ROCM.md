@@ -68,6 +68,6 @@ CUDA check of that merge (Oct 25, 2026, RTX A4500 x 4, `fix/cuda-parity-gaps` on
 `release/` exit 0; `ctest -R "cuda|gpu"` 206 of 206; open-shell gradient (the `calculateGradientGpu` occupations) GPU against CPU on
 water dimer cation, acetic acid dimer cation and triplet, caffeine cation, gfn1 and gfn2 (8 cases, n = 1 each): max |dg| 1.1e-5 Eh/A,
 |dE| <= 1.1e-10 Eh. The device HB upload (`stagedHBondUpload`) is exercised by every GFN-FF GPU test and MD above; no run saw a difference
-to the CPU method. Not run: the full 524-test `ctest`, MOR41/GMTKN55 regression sets on the merged binary (95 MOR41 structures were run
+to the CPU method. Broader open-shell check (Oct 25, 2026): every 6th of the 320 GMTKN55 structures with UHF > 0 (54: 46 doublets, 8 triplets, 12 subsets), gfn1 and gfn2, GPU against CPU (`-threads 4`), energy and gradient: max |dE| 2.7e-11 Eh, max |dg| 2.8e-6 Eh/A (median 4e-7), no failed run, n = 1 per structure and method; charged and heavy-element open shells beyond that sample not run. Not run: the full 524-test `ctest`, MOR41/GMTKN55 regression sets on the merged binary (95 MOR41 structures were run
 for the factor probe only, without comparing energies).
 
