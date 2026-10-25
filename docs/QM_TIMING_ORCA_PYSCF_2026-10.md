@@ -15,6 +15,10 @@ python3 scripts/qm_timing/report.py          # the tables below
 
 ## Short answer
 
+> Re-measured on Oct 25, 2026 after the CPU kernel, GPU default path, SCF convergence and RI memory changes, with
+> ORCA and PySCF run again the same day: section [Re-measurement after the optimisation work](#re-measurement-after-the-optimisation-work-oct-25-2026).
+> The bullets below are the first study.
+
 - **HF on the GPU** (`-gpu cuda -qm.gpu_direct on -qm.gpu_scf on`, exact integrals): 8-14x faster than ORCA with 24
   MPI processes and 7-50x faster than PySCF with 24 threads from anthracene to C80H162 (1930 basis functions: 38 s vs
   471 s ORCA, 268 s PySCF, 712 s curcuma CPU).
@@ -453,3 +457,160 @@ Not tested: behaviour when MemAvailable is small or changes during the run (the 
 other processes can still take the memory afterwards), machines without `/proc/meminfo` (fallback 16000 MB), RI-MP2
 at C80H162 (tensor 133 GB + 2 x 28 GB would fit the auto limit here, ~1000 s energy step estimated, not run), the
 device RI-MP2 batch size (its GEMM at C40H82 is not faster than the CPU now), other CPUs.
+
+## Re-measurement after the optimisation work (Oct 25, 2026)
+
+> 🤖 AI-generated, ⚙️ machine-tested. Same machine, same geometries, same basis/aux/frozen-core rules and the same cap
+> as the first study; one run per number (n = 1), hybrid P/E-core CPU, 24-thread placement left to the OS. ORCA and
+> PySCF were **run again on the same day, interleaved per molecule with curcuma** (14:49-21:25), not taken from the
+> tables above. All numbers above this section are kept unchanged.
+
+**What was run.** `release/curcuma` built from the tree of commit `23008f79` (no source file newer than the binary or
+the CUDA plugin), with its **own defaults** for the SCF (`QMTIME_CURCUMA_SCF=default`: no `-qm.scf_threshold`, so
+`-qm.scf_convergence auto`; HF-only runs stop at orbital gradient 1e-5, correlated runs at 3e-7, see
+[QM_SCF_CONVERGENCE_2026-10.md](QM_SCF_CONVERGENCE_2026-10.md)) and the RI memory default (auto from MemAvailable).
+Kept from the first study: `-qm.frozen_core true`, the CC thresholds, `-qm.{mp2,cc,lmp2}_max_memory_mb 150000`. ORCA
+6.1.0 `TightSCF` as before; PySCF 2.14 `conv_tol 1e-9`. The old flag set stays the runner default
+(`QMTIME_CURCUMA_SCF=legacy`) so the first study can be repeated.
+
+```bash
+QMTIME_WORK=~/.cache/qmtime/r2 QMTIME_CURCUMA_SCF=default scripts/qm_timing/run_all.sh \
+  scripts/qm_timing/cases_remeasure_1t.txt scripts/qm_timing/cases_remeasure_hf24.txt scripts/qm_timing/cases_remeasure_corr24.txt
+QMTIME_WORK=~/.cache/qmtime/r2_nospin QMTIME_PYSCF_BLAS=omp_nospin scripts/qm_timing/run_all.sh scripts/qm_timing/cases_remeasure_pyscf.txt
+python3 scripts/qm_timing/report.py --remeasure ~/.cache/qmtime/results.jsonl ~/.cache/qmtime/r2/results.jsonl ~/.cache/qmtime/r2_nospin/results.jsonl
+```
+
+**PySCF thread setting (fixed).** PySCF's C kernels use OpenMP (its bundled libgomp), numpy's scipy-openblas is a
+separate pthread pool. With both at 24 (first study) the two pools spin at the same time: up to 71 runnable threads on
+24 cores (C20H42 exact HF: 30.1 s). `OPENBLAS_NUM_THREADS=1` removes that (max 28, 25.5 s) but serialises numpy.dot,
+which carries PySCF's DF-K (RI-JK C40H82 233 s, median 2 runnable threads). Used for the PySCF columns below:
+`OMP_NUM_THREADS=OPENBLAS_NUM_THREADS=MKL_NUM_THREADS=24` plus `OPENBLAS_THREAD_TIMEOUT=4` (idle BLAS workers sleep;
+runner default `QMTIME_PYSCF_BLAS=omp_nospin`): median 25 runnable threads in every PySCF job, short peaks to 42-46 in
+the DF runs only; exact HF and CCSD are equal (within 5 %) in both settings, DF HF is 2x faster. PySCF DF-MP2 C40H82
+needs `QMTIME_PYSCF_MAX_MEMORY=200000` (MemoryError at the default `max_memory` 64000 MB; ORCA had 24 x 4000 MB).
+
+**Load.** GPU idle before every batch (538 MB used by the desktop, no ollama process, 35-38 °C). 1-thread jobs: load
+average before the job median 1.07 (idle baseline ~1; the first three jobs 18-22, tail of the PySCF thread test
+before the queue, on idle cores); runnable threads during the job max 7. 24-thread jobs: load average before median 17
+(tail of the previous job, jobs run back to back); runnable threads during the job median 26, max 33 (ORCA, curcuma)
+and 46 (PySCF DF, see above).
+
+### Headline table (wall time of the whole run, s)
+
+"curcuma old" = first study (`-qm.scf_threshold 1e-7`, older binary), "curcuma new" = this run; ORCA/PySCF "new" =
+this run, the first-study value in parentheses. `it` = SCF iterations (curcuma counts the final full build separately,
+not included). Ratios below 1 = curcuma faster. GPU rows: `gpu` = `-gpu cuda` only, `gpu_direct` = plus
+`-qm.gpu_direct on -qm.gpu_scf on`; ORCA/PySCF columns there repeat the CPU runs (24 processes/threads).
+
+| case | system | T | curcuma old | curcuma new | it old/new | ORCA new (old) | it ORCA | PySCF new (old) | it PySCF | new/ORCA | new/PySCF | old/ORCA old |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| HF exact | benzene | 1 | 3.7 | 2.0 | 11/9 | 3.5 (3.4) | 10 | 1.3 (1.3) | 8 | 0.58 | 1.59 | 1.09 |
+| HF exact | anthracene | 1 | 219 | 33.4 | 19/12 | 38.3 (42.7) | 13 | 20.4 (20.3) | 10 | 0.87 | 1.63 | 5.14 |
+| HF exact | C20H42 | 1 | 490 | 107 | 16/11 | 113 (113) | 11 | 238 (237) | 9 | 0.95 | 0.45 | 4.35 |
+| HF exact | C40H82 | 1 | pred | 470 | -/11 | 487 (488) | 11 | 895 (894) | 9 | 0.97 | 0.53 | - |
+| HF exact | benzene | 24 | 0.9 | 0.8 | 11/9 | 9.2 (9.6) | 10 | 0.4 (4.5) | 8 | 0.08 | 1.88 | 0.09 |
+| HF exact | anthracene | 24 | 14.7 | 2.0 | 19/12 | 12.7 (12.7) | 13 | 1.9 (19.5) | 10 | 0.16 | 1.08 | 1.15 |
+| HF exact | C20H42 | 24 | 34.7 | 6.9 | 16/11 | 24.4 (24.8) | 11 | 25.6 (118) | 9 | 0.28 | 0.27 | 1.40 |
+| HF exact | C40H82 | 24 | 153 | 36.2 | 16/11 | 101 (101) | 11 | 60.9 (96.4) | 9 | 0.36 | 0.59 | 1.52 |
+| HF exact | C80H162 | 24 | 712 | 181 | 16/11 | 470 (471) | 11 | 259 (268) | 9 | 0.38 | 0.70 | 1.51 |
+| HF exact GPU | anthracene | 24 | - | 1.7 | -/12 | 12.7 | 13 | 1.9 | 10 | 0.14 | 0.92 | - |
+| HF exact GPU | C20H42 | 24 | - | 2.1 | -/12 | 24.4 | 11 | 25.6 | 9 | 0.09 | 0.08 | - |
+| HF exact GPU | C40H82 | 24 | - | 6.5 | -/12 | 101 | 11 | 60.9 | 9 | 0.06 | 0.11 | - |
+| HF exact GPU | C80H162 | 24 | - | 26.1 | -/12 | 470 | 11 | 259 | 9 | 0.06 | 0.10 | - |
+| HF exact GPU direct | C80H162 | 24 | 38.4 | 25.5 | 20/12 | 470 | 11 | 259 | 9 | 0.05 | 0.10 | 0.08 |
+| RI-JK HF | C20H42 | 1 | 50.4 | 43.8 | 14/11 | 186 (186) | 14 | 71.8 (71.8) | 9 | 0.24 | 0.61 | 0.27 |
+| RI-JK HF | C20H42 | 24 | 7.0 | 5.6 | 14/11 | 47.3 (47.5) | 14 | 9.4 (23.9) | 9 | 0.12 | 0.60 | 0.15 |
+| RI-JK HF | C40H82 | 24 | 238 | 72.9 | 15/11 | 337 (337) | 14 | 113 (135) | 9 | 0.22 | 0.64 | 0.71 |
+| RI-JK HF | C60H122 | 24 | - | 384 | -/11 | 1351 | 14 | 562 | 9 | 0.28 | 0.68 | - |
+| RI-JK HF GPU | C40H82 | 24 | 212 | 40.2 | 15/11 | 337 | 14 | 113 | 9 | 0.12 | 0.35 | 0.63 |
+| RI-JK HF GPU | C60H122 | 24 | - | 174 | -/11 | 1351 | 14 | 562 | 9 | 0.13 | 0.31 | - |
+| RI-MP2 | C20H42 | 1 | 542 | 147 | 16/13 | 144 (143) | 11 | 287 (287) | 9 | 1.02 | 0.51 | 3.79 |
+| RI-MP2 | C20H42 | 24 | 48.7 | 11.6 | 16/13 | 34.3 (34.7) | 11 | 30.4 (39.9) | 9 | 0.34 | 0.38 | 1.40 |
+| RI-MP2 | C40H82 | 24 | - | 104 | -/14 | 248 | 11 | 182 | 9 | 0.42 | 0.57 | - |
+| RI-MP2 GPU | C20H42 | 24 | 6.1 | 5.3 | 16/14 | 34.3 | 11 | 30.4 | 9 | 0.15 | 0.17 | 0.18 |
+| RI-MP2 GPU | C40H82 | 24 | fail | 67.9 | -/14 | 248 | 11 | 182 | 9 | 0.27 | 0.37 | - |
+| LMP2 / DLPNO NormalPNO | C20H42 | 1 | 512 | 143 | 16/13 | 165 (165) | 11 | - | - | 0.87 | - | 3.10 |
+| LMP2 / DLPNO NormalPNO | C20H42 | 24 | 37.0 | 10.3 | 16/13 | 36.6 (36.7) | 11 | - | - | 0.28 | - | 1.01 |
+| LMP2 / DLPNO NormalPNO | C40H82 | 24 | 162 | 50.5 | 16/14 | 156 (157) | 11 | - | - | 0.32 | - | 1.03 |
+| LMP2 / DLPNO NormalPNO | C80H162 | 24 | 745 | 233 | 16/14 | 789 (813) | 11 | - | - | 0.30 | - | 0.92 |
+| LMP2 GPU / DLPNO NormalPNO | C40H82 | 24 | 24.8 | 17.0 | 17/14 | 156 | 11 | - | - | 0.11 | - | 0.16 |
+| LMP2 GPU / DLPNO NormalPNO | C80H162 | 24 | 216 | 59.7 | 17/15 | 789 | 11 | - | - | 0.08 | - | 0.27 |
+| CCSD | (H2O)6 | 1 | 139 | 137 | 15/14 | 160 (159) | 12 | 146 (146) | 10 | 0.86 | 0.94 | 0.87 |
+| CCSD | (H2O)6 | 24 | 29.7 | 29.5 | 15/14 | 58.0 (58.8) | 12 | 31.6 (34.1) | 10 | 0.51 | 0.93 | 0.51 |
+| CCSD | (H2O)10 | 24 | 411 | 407 | 16/15 | 555 (571) | 12 | 464 (470) | 10 | 0.73 | 0.88 | 0.72 |
+| CCSD | (H2O)12 | 24 | 1088 | 1068 | 16/15 | 1530 (1560) | 12 | 1273 (1288) | 10 | 0.70 | 0.84 | 0.70 |
+
+Further rows (same run): HF GPU `gpu_direct` anthracene/C20H42/C40H82 1.1/2.0/6.4 s (old 1.5/2.3/7.5), RI-JK GPU
+C20H42 4.4 s (old 5.1), LMP2 GPU C20H42 4.9 s (old 5.8); ORCA DLPNO-MP2 TightPNO C20H42 39.3 s, C40H82 163 s (old 39.6,
+164; C80H162 not run). PySCF with the `single` BLAS setting: in `~/.cache/qmtime/r2/results.jsonl` (DF HF C20/C40/C60
+17.4/233/1144 s, all others within 5 % of the table).
+
+**Failures and skips.** RI-MP2 C80H162 (canonical reference for LMP2):
+- default settings, CPU and GPU: stops after the SCF with "needs 160572 MB ... above the RI limit auto = 100731 MB
+  (MemAvailable 118507 MB ...)". At the RI setup the same run printed auto = 209778 MB (MemAvailable 246797 MB): the
+  peak check in `qm_rimp2.cpp` calls `riMemoryLimitMB()` again **after** the 133 GB tensor is allocated, so the tensor
+  is counted twice. The run would fit (160 GB < 210 GB); defect, TODO.md section 1.
+- `-qm.ri_max_memory_mb 200000` (variants `cpu_bigri`, `gpu_bigri`): both killed at the 1800 s cap (SCF part ~175 s
+  CPU, ~25 s GPU from the LMP2 runs; the killed runs' output was still buffered, so no time split). Does not fit the
+  cap on this machine; ORCA RI-MP2 C80H162 skipped by prediction (3886 s), PySCF not run. **No canonical RI-MP2 at
+  C80H162 again.**
+- PySCF DF-MP2 C40H82 at the default `max_memory`: MemoryError (above).
+
+### Energies (this run; deviation from PySCF of the same method, Eh)
+
+| method | system | PySCF (Eh) | curcuma cpu | curcuma gpu | ORCA |
+|---|---|---|---|---|---|
+| HF exact | benzene | -230.535543184 | +4.2e-09 | +4.2e-09 | -2.8e-09 |
+| HF exact | anthracene | -535.588817608 | -2.3e-09 | -2.3e-09 | -4.9e-09 |
+| HF exact | C20H42 | -781.279455414 | +3.7e-09 | +3.7e-09 | +1.9e-08 |
+| HF exact | C40H82 | -1561.395846654 | +4.3e-09 | +4.3e-09 | +4.8e-08 |
+| HF exact | C80H162 | -3121.628628495 | -5.0e-09 | -5.0e-09 | +9.6e-08 |
+| HF RI-JK | C20H42 | -781.279229453 | +3.3e-09 | +3.3e-09 | -1.2e-09 |
+| HF RI-JK | C40H82 | -1561.395379332 | +1.9e-09 | +1.9e-09 | -2.8e-09 |
+| HF RI-JK | C60H122 | -2341.511528900 | -3.7e-10 | -3.7e-10 | -4.6e-09 |
+| RI-MP2 E_corr | C20H42 | -2.876453391 | +2.3e-08 | +2.0e-08 | -5.6e-08 |
+| RI-MP2 E_corr | C40H82 | -5.737360459 | +3.6e-08 | +3.3e-08 | -9.7e-08 |
+| CCSD E_corr | (H2O)6 | -1.282669245 | -9.6e-09 | - | -3.5e-08 |
+| CCSD E_corr | (H2O)10 | -2.131788158 | +2.6e-09 | - | -3.7e-08 |
+| CCSD E_corr | (H2O)12 | -2.563137377 | +1.6e-09 | - | -3.9e-08 |
+
+curcuma with the new SCF default against its first-study runs (`-qm.scf_threshold 1e-7`), same job: HF energies
+identical to the 8 printed decimals (benzene to C80H162, exact, RI-JK, GPU), E_HF of the correlated runs within 1.5e-11
+Eh, E_corr within 1.6e-9 Eh (RI-MP2, LMP2, CCSD). The RI-MP2 deviations from PySCF (2-4e-8 Eh) were the same before.
+
+LMP2 / DLPNO-MP2 minus canonical RI-MP2 (curcuma, same aux basis): unchanged from the first study to 3 digits:
+C20H42 curcuma +1.30e-3 Eh, NormalPNO +2.11e-3, TightPNO +1.05e-3 (20.9 / 34.0 / 16.9 µEh/atom); C40H82 +2.94e-3,
++4.96e-3, +2.55e-3 (24.1 / 40.7 / 20.9 µEh/atom). C80H162 without reference: curcuma -11.45295670 Eh, NormalPNO
+-11.44850524 Eh.
+
+### Assessment
+
+**Where curcuma is now faster** (this machine, these settings):
+- Exact HF, 24 threads: 0.28-0.38x the ORCA time and 0.27-0.70x PySCF from C20H42 to C80H162 (was 1.4-1.5x ORCA).
+  GPU: 0.05-0.09x ORCA and 0.08-0.11x PySCF from C20H42 on (anthracene 0.14x / 0.92x).
+- Exact HF, 1 thread: 0.87-0.97x ORCA from anthracene to C40H82 (was 4.4-5.1x) and 0.45-0.53x PySCF from C20H42 on.
+- RI-JK HF: the fastest of the three at every size measured, 1 and 24 threads: CPU 0.12-0.28x ORCA, 0.60-0.68x
+  PySCF; GPU 0.31-0.47x PySCF. C40H82/C60H122 no longer fall into the batched path (auto memory limit).
+- RI-MP2 with 24 threads: 0.34-0.42x ORCA, 0.38-0.57x PySCF; C40H82 runs by default. GPU 0.15-0.27x ORCA.
+- LMP2 vs DLPNO-MP2 NormalPNO: 0.28-0.32x with 24 threads (was 0.92-1.03x), GPU 0.08-0.13x; 1 thread 0.87x.
+- CCSD (no code change since the first study, numbers reproduce within 2 %): 0.51-0.73x ORCA, 0.84-0.93x PySCF at 24
+  threads; 1 thread 0.86x ORCA, 0.94x PySCF.
+
+**Where curcuma is equal or slower, and why**
+- **Small molecules against PySCF**: benzene/anthracene HF 1.6x PySCF on 1 thread, 1.1-1.9x on 24 threads. PySCF keeps
+  the ERIs in core there and runs 8-10 iterations against curcuma's 9-12; curcuma stores the tensor only for benzene.
+- **1-thread RI-MP2 C20H42 = ORCA (1.02x)**: the SCF is 103 s of 147 s; before a correlation step the SCF stops on
+  the tight orbital gradient 3e-7 (13 iterations vs ORCA's 11, whose TightSCF stops on the energy). The RI-MP2 energy
+  step itself is 19 s (1 thread). The same holds for LMP2 (SCF 117 s of 143 s at 1 thread; 199 s of 233 s at C80H162,
+  24 threads, LMP2 step 31 s).
+- **Iteration counts**: HF-only runs now take 11 iterations for the alkanes (ORCA 11, PySCF 9), 12 for anthracene
+  (ORCA 13, PySCF 10); correlated runs 13-15 (tight gradient). Plus curcuma's final full build.
+- **RI-MP2 C80H162**: refused by the default memory check (double-counted tensor, defect) and over 30 min with the
+  limit raised; ORCA and PySCF were not run there either.
+- PySCF's large-system timings depend strongly on the thread setting (DF 2x); with the setting used the PySCF numbers
+  are its better of the two measured. The first study's PySCF 24-thread exact HF C20H42 (118 s) is not reproduced by
+  the old setting today (30.1 s in the thread test); the cause of that first-study value is unknown.
+
+**Day-to-day variation**: ORCA reproduced its first-study times within 3 % except anthracene 1 thread (38.3 vs 42.7 s,
+-10 %) and DLPNO C80H162 (789 vs 813 s); PySCF 1-thread times within 1 %. Not measured: repetitions (n = 1), other CPUs,
+curcuma with the legacy flag set on the same day (the "old" curcuma column is from the first study's day).

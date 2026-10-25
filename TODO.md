@@ -51,6 +51,10 @@ Stand.
 - **Ladungsplatzierung** (Known Issue #31) nicht getestet für periodische Systeme, GPU-Laufzeit, viele Fragmente in Kontakt und lange MD mit
   `frag_charge_s_max` > 1.
 
+- **RI-MP2: Speicherprüfung zählt den 3-Index-Tensor doppelt** (2026-10-25, n=1): `qm_rimp2.cpp` ruft `riMemoryLimitMB()` (auto = MemAvailable) erst nach der Tensor-Allokation erneut auf; C80H162 bricht ab
+  ("needs 160572 MB ... auto = 100731 MB", beim RI-Setup 209778 MB), obwohl es passt. Grenze aus dem Setup übernehmen oder den belegten Tensor abziehen.
+  [docs/QM_TIMING_ORCA_PYSCF_2026-10.md](docs/QM_TIMING_ORCA_PYSCF_2026-10.md), Abschnitt "Re-measurement".
+
 ## 2. Leistung
 
 - **GFN2 auf der GPU, Eigenlöser = 73 % des Laufs** (polymer_2x, 1x A4500). Offen:

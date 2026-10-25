@@ -1,0 +1,16 @@
+# Re-measurement (Oct 25, 2026): PySCF 24 threads again with QMTIME_PYSCF_BLAS=omp_nospin (parallel numpy BLAS,
+# no spinning), because the 'single' setting serialises numpy.dot (DF-K: C40H82 233 s vs 135 s in the first study).
+# Run with QMTIME_WORK=~/.cache/qmtime/r2_nospin; rimp2 alkane40 needs QMTIME_PYSCF_MAX_MEMORY=200000.
+pyscf hf exact benzene 24
+pyscf hf exact anthracene 24
+pyscf hf exact alkane20 24
+pyscf hf exact alkane40 24
+pyscf hf exact alkane80 24
+pyscf hf df alkane20 24
+pyscf hf df alkane40 24
+pyscf hf df alkane60 24
+pyscf rimp2 exact alkane20 24
+pyscf rimp2 exact alkane40 24
+pyscf ccsd exact water6 24
+pyscf ccsd exact water10 24
+pyscf ccsd exact water12 24

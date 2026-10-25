@@ -16,11 +16,17 @@ after each job.
 
 PROGRAM/METHOD/VARIANT combinations (see CMD_* below):
   curcuma hf    cpu | cpu_rijk | gpu_direct | gpu_rijk | cpu_rijk_stored | gpu_rijk_stored
-  curcuma rimp2 cpu | gpu | gpu_bigri ;  lmp2 cpu | gpu ;  ccsd cpu
+  curcuma rimp2 cpu | gpu | gpu_bigri | cpu_bigri ;  lmp2 cpu | gpu ;  ccsd cpu
   orca    hf    nori | rijk ;  rimp2 nori ; lmp2 normalpno | tightpno ; ccsd nori ; dlpno_ccsd normalpno
   pyscf   hf    exact | df ;  rimp2 exact ;  ccsd exact
 MOL: a name understood by geometries.py (alkaneN, benzene, anthracene, waterN).
-Environment: CURCUMA (binary), ORCA (binary), PYSCF_PY (venv python), QMTIME_WORK, QMTIME_CAP (s, default 1800), QMTIME_PIN_CPU (core for 1-thread runs, default 2).
+Environment: CURCUMA (binary), ORCA (binary), PYSCF_PY (venv python), QMTIME_WORK, QMTIME_CAP (s, default 1800), QMTIME_PIN_CPU (core for 1-thread runs, default 2),
+  QMTIME_CURCUMA_SCF = legacy (default; -qm.scf_threshold 1e-7, the setting of the first study, which also keeps the
+  tight density test under the newer `-qm.scf_convergence auto`) | default (no SCF flag: curcuma's own convergence
+  default, used for the re-measurement), QMTIME_PYSCF_BLAS = omp_nospin (default; OMP_NUM_THREADS and
+  OPENBLAS/MKL_NUM_THREADS = threads, OPENBLAS_THREAD_TIMEOUT=4 so idle BLAS workers sleep instead of spinning) |
+  single (OPENBLAS/MKL_NUM_THREADS = 1: one pool, but numpy-BLAS-bound steps such as DF-K run serial) |
+  omp (first study: both = threads, the two pools spin at once, up to ~70 runnable threads on 24 cores).
 """
 import json
 import os
@@ -48,7 +54,14 @@ sys.path.insert(0, HERE)
 import geometries  # noqa: E402
 
 # ---------------------------------------------------------------- command builders
-CUR_COMMON = ["-qm.scf_threshold", "1e-7", "-qm.frozen_core", "true", "-verbosity", "2", "-no_bmt",
+CUR_SCF_MODE = os.environ.get("QMTIME_CURCUMA_SCF", "legacy")
+if CUR_SCF_MODE not in ("legacy", "default"):
+    sys.exit("QMTIME_CURCUMA_SCF must be legacy or default")
+PYSCF_BLAS = os.environ.get("QMTIME_PYSCF_BLAS", "omp_nospin")
+if PYSCF_BLAS not in ("single", "omp", "omp_nospin"):
+    sys.exit("QMTIME_PYSCF_BLAS must be single, omp or omp_nospin")
+CUR_SCF = ["-qm.scf_threshold", "1e-7"] if CUR_SCF_MODE == "legacy" else []
+CUR_COMMON = CUR_SCF + ["-qm.frozen_core", "true", "-verbosity", "2", "-no_bmt",
               "-qm.mp2_max_memory_mb", "150000", "-qm.cc_max_memory_mb", "150000",
               "-qm.lmp2_max_memory_mb", "150000"]
 CUR_METHOD = {"hf": "hf", "rimp2": "ri-mp2", "lmp2": "lmp2", "ccsd": "ccsd"}
@@ -62,6 +75,8 @@ CUR_VARIANT = {
     # instead of the default batched recomputation above 16 GB
     "cpu_rijk_stored": ["-qm.ri", "jk", "-qm.ri_max_memory_mb", "200000"],
     "gpu_bigri": ["-gpu", "cuda", "-qm.ri_max_memory_mb", "200000"],  # RI-MP2 needs the stored tensor
+    # RI-MP2 C80H162: the auto limit is re-read after the 133 GB tensor exists and then refuses the run (Oct 25 2026)
+    "cpu_bigri": ["-qm.ri_max_memory_mb", "200000"],
     "gpu_rijk_stored": ["-gpu", "cuda", "-qm.ri", "jk", "-qm.ri_max_memory_mb", "200000"],  # correlation methods: exact SCF (and RI-MP2) on the device where implemented
 }
 CUR_CC = ["-qm.cc_threshold", "1e-8", "-qm.cc_residual_threshold", "1e-7"]
@@ -104,8 +119,16 @@ def cmd_orca(method, variant, xyz, threads, jobdir):
 
 
 def cmd_pyscf(method, variant, xyz, threads, jobdir):
-    env = {"OMP_NUM_THREADS": str(threads), "OPENBLAS_NUM_THREADS": str(threads),
+    # PySCF's C kernels run under OpenMP (OMP_NUM_THREADS); numpy's OpenBLAS is a separate pthread pool. With both
+    # set to the thread count (first study, QMTIME_PYSCF_BLAS=omp) the two pools spin at the same time (up to ~70
+    # runnable threads on 24 cores); 'single' keeps one pool of `threads` workers.
+    # 'omp_nospin' keeps numpy's BLAS parallel (PySCF's DF-K and MP2 contractions run through numpy.dot) but lets
+    # the idle OpenBLAS workers sleep after 2^4 cycles instead of spinning (OPENBLAS_THREAD_TIMEOUT).
+    blas = "1" if PYSCF_BLAS == "single" else str(threads)
+    env = {"OMP_NUM_THREADS": str(threads), "OPENBLAS_NUM_THREADS": blas, "MKL_NUM_THREADS": blas,
            "PYSCF_TMPDIR": jobdir, "TMPDIR": jobdir}
+    if PYSCF_BLAS == "omp_nospin":
+        env["OPENBLAS_THREAD_TIMEOUT"] = "4"
     return [PYSCF_PY, os.path.join(HERE, "pyscf_job.py"), xyz, method, variant, str(threads)], env
 
 
@@ -183,6 +206,12 @@ def mem_available_gb():
     return 999.0
 
 
+def procs_running():
+    """Instantaneous number of runnable threads on the machine (/proc/loadavg field 4)."""
+    with open("/proc/loadavg") as f:
+        return int(f.read().split()[3].split("/")[0])
+
+
 def run_job(program, method, variant, mol, threads):
     geo = os.path.join(WORK, "geo")
     os.makedirs(geo, exist_ok=True)
@@ -204,6 +233,7 @@ def run_job(program, method, variant, mol, threads):
     reason = None
     peak_scratch = 0
     min_mem = 999.0
+    running = []
     t0 = time.perf_counter()
     with open(log, "w") as lf:
         lf.write("# " + " ".join(cmd) + "\n")
@@ -221,6 +251,7 @@ def run_job(program, method, variant, mol, threads):
             peak_scratch = max(peak_scratch, sc)
             ma = mem_available_gb()
             min_mem = min(min_mem, ma)
+            running.append(procs_running())
             free = shutil.disk_usage(os.path.expanduser("~")).free / 1e9
             if el > CAP:
                 reason = "timeout"
@@ -240,7 +271,13 @@ def run_job(program, method, variant, mol, threads):
     res = {"program": program, "method": method, "variant": variant, "mol": mol, "threads": threads,
            "wall": round(wall, 2), "rc": p.returncode, "killed": reason, "load_before": load0[0],
            "load_after": load1[0], "peak_scratch_gb": round(peak_scratch / 1e9, 2),
-           "min_mem_available_gb": round(min_mem, 1), "log": log, "date": time.strftime("%Y-%m-%d %H:%M:%S")}
+           "min_mem_available_gb": round(min_mem, 1), "log": log, "date": time.strftime("%Y-%m-%d %H:%M:%S"),
+           "running_max": max(running) if running else None,
+           "running_median": sorted(running)[len(running) // 2] if running else None}
+    if program == "curcuma":
+        res["curcuma_scf"] = CUR_SCF_MODE
+    if program == "pyscf":
+        res["pyscf_blas"] = PYSCF_BLAS
     try:
         res.update(PARSERS[program](txt))
     except Exception as e:  # parsing must never lose the timing

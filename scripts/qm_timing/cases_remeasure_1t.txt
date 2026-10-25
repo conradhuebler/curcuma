@@ -1,0 +1,31 @@
+# Re-measurement (Oct 25, 2026): curcuma with QMTIME_CURCUMA_SCF=default, ORCA and PySCF fresh on the same day.
+# Programs interleaved per molecule so the three codes run close in time; each series stays in ascending size.
+# Batch 1: 1 thread (pinned, QMTIME_PIN_CPU)
+# HF exact, 1 thread up to C40H82
+curcuma hf cpu benzene 1
+orca hf nori benzene 1
+pyscf hf exact benzene 1
+curcuma hf cpu anthracene 1
+orca hf nori anthracene 1
+pyscf hf exact anthracene 1
+curcuma hf cpu alkane20 1
+orca hf nori alkane20 1
+pyscf hf exact alkane20 1
+curcuma hf cpu alkane40 1
+orca hf nori alkane40 1
+pyscf hf exact alkane40 1
+# RI-JK HF, 1 thread
+curcuma hf cpu_rijk alkane20 1
+orca hf rijk alkane20 1
+pyscf hf df alkane20 1
+# RI-MP2, 1 thread
+curcuma rimp2 cpu alkane20 1
+orca rimp2 nori alkane20 1
+pyscf rimp2 exact alkane20 1
+# LMP2 / DLPNO-MP2, 1 thread
+curcuma lmp2 cpu alkane20 1
+orca lmp2 normalpno alkane20 1
+# CCSD, 1 thread
+curcuma ccsd cpu water6 1
+orca ccsd nori water6 1
+pyscf ccsd exact water6 1

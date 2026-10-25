@@ -10,10 +10,12 @@ sub-timings. Thread count comes from OMP_NUM_THREADS (set by qm_timing.py) and l
     METHOD rimp2 VARIANT exact (exact RHF, then DF-MP2 with def2-universal-jkfit, frozen core)
     METHOD ccsd  VARIANT exact (exact RHF, then canonical RCCSD, frozen core)
 
+Memory: max_memory 64000 MB, QMTIME_PYSCF_MAX_MEMORY overrides it.
 Convergence: RHF conv_tol 1e-9 (energy), conv_tol_grad 1e-5; CCSD conv_tol 1e-8,
 conv_tol_normt 1e-6. Basis def2-SVP (spherical, PySCF library = curcuma's def2-SVP.dat).
 """
 import json
+import os
 import sys
 import time
 
@@ -29,8 +31,9 @@ def main():
     xyz, method, variant, threads = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
     lib.num_threads(threads)
     t0 = time.perf_counter()
-    mol = gto.M(atom=xyz, basis="def2-svp", cart=False, verbose=4, max_memory=64000)
-    out = {"nbf": mol.nao_nr(), "natoms": mol.natm, "threads": lib.num_threads()}
+    max_mem = int(os.environ.get("QMTIME_PYSCF_MAX_MEMORY", "64000"))  # MB; DF-MP2 C40H82 needs more than 64000
+    mol = gto.M(atom=xyz, basis="def2-svp", cart=False, verbose=4, max_memory=max_mem)
+    out = {"nbf": mol.nao_nr(), "natoms": mol.natm, "threads": lib.num_threads(), "max_memory": max_mem}
     if method == "hf" and variant == "df":
         mf = scf.RHF(mol).density_fit(auxbasis="def2-universal-jkfit")
     else:

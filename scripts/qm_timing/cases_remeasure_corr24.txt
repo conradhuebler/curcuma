@@ -1,0 +1,36 @@
+# Re-measurement (Oct 25, 2026), batch 3: 24 threads, correlated methods (QMTIME_CURCUMA_SCF=default)
+# RI-MP2 (C80H162: canonical reference for LMP2; ORCA/PySCF run unless predicted over the cap)
+curcuma rimp2 cpu alkane20 24
+curcuma rimp2 gpu alkane20 24
+orca rimp2 nori alkane20 24
+pyscf rimp2 exact alkane20 24
+curcuma rimp2 cpu alkane40 24
+curcuma rimp2 gpu alkane40 24
+orca rimp2 nori alkane40 24
+pyscf rimp2 exact alkane40 24
+curcuma rimp2 cpu alkane80 24
+curcuma rimp2 gpu alkane80 24
+orca rimp2 nori alkane80 24
+pyscf rimp2 exact alkane80 24
+# LMP2 vs DLPNO-MP2 (TightPNO up to C40H82)
+curcuma lmp2 cpu alkane20 24
+curcuma lmp2 gpu alkane20 24
+orca lmp2 normalpno alkane20 24
+orca lmp2 tightpno alkane20 24
+curcuma lmp2 cpu alkane40 24
+curcuma lmp2 gpu alkane40 24
+orca lmp2 normalpno alkane40 24
+orca lmp2 tightpno alkane40 24
+curcuma lmp2 cpu alkane80 24
+curcuma lmp2 gpu alkane80 24
+orca lmp2 normalpno alkane80 24
+# CCSD
+curcuma ccsd cpu water6 24
+orca ccsd nori water6 24
+pyscf ccsd exact water6 24
+curcuma ccsd cpu water10 24
+orca ccsd nori water10 24
+pyscf ccsd exact water10 24
+curcuma ccsd cpu water12 24
+orca ccsd nori water12 24
+pyscf ccsd exact water12 24

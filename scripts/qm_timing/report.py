@@ -2,6 +2,8 @@
 """Markdown tables for docs/QM_TIMING_ORCA_PYSCF_2026-10.md from results.jsonl (Claude Generated, Oct 2026).
 
   report.py [results.jsonl]      (default ~/.cache/qmtime/results.jsonl)
+  report.py --remeasure OLD NEW [OVERRIDE ...]  tables of the re-measurement: OLD = results.jsonl of the first study, NEW = the
+                                 re-measurement (curcuma, ORCA and PySCF fresh); old/new walls, iterations, ratios
 
 Wall times in s (whole program run). Energy deviations in Eh relative to the reference column.
 'cap' = killed at the wall-time cap, 'pred' = skipped because the previous size predicted more
@@ -11,12 +13,20 @@ import json
 import os
 import sys
 
-PATH = sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser("~/.cache/qmtime/results.jsonl")
-R = {}
-for ln in open(PATH):
-    if ln.strip():
-        r = json.loads(ln)
-        R[(r["program"], r["method"], r["variant"], r["mol"], r["threads"])] = r
+
+
+def load(path):
+    out = {}
+    for ln in open(path):
+        if ln.strip():
+            r = json.loads(ln)
+            out[(r["program"], r["method"], r["variant"], r["mol"], r["threads"])] = r
+    return out
+
+
+REMEASURE = len(sys.argv) > 1 and sys.argv[1] == "--remeasure"
+PATH = sys.argv[1] if len(sys.argv) > 1 and not REMEASURE else os.path.expanduser("~/.cache/qmtime/results.jsonl")
+R = load(PATH) if not REMEASURE else {}
 
 MOLS = {
     "hf": ["benzene", "anthracene", "alkane20", "alkane40", "alkane80"],
@@ -160,6 +170,115 @@ def loads():
     ls = [r.get("load_before") for r in R.values() if r.get("load_before") is not None]
     return f"load average (1 min) before each job: min {min(ls):.2f}, median {sorted(ls)[len(ls)//2]:.2f}, max {max(ls):.2f} over {len(ls)} jobs" if ls else ""
 
+
+def remeasure(old_path, new_path, override_paths=()):
+    """Re-measurement tables (Claude Generated, Oct 2026): first-study curcuma vs fresh curcuma/ORCA/PySCF.
+    Jobs in the override files (e.g. the PySCF re-run with another thread setting) replace those of NEW."""
+    O, N = load(old_path), load(new_path)
+    for p in override_paths:
+        N.update(load(p))
+
+    def w(D, k):
+        r = D.get(k)
+        if r is None:
+            return None, "-"
+        return (r["wall"] if r.get("ok") else None), cell(r)
+
+    def it(D, k):
+        r = D.get(k)
+        return str(r.get("scf_iter")) if r and r.get("ok") and r.get("scf_iter") else "-"
+
+    def ratio(a, b):
+        return f"{a / b:.2f}" if a and b else "-"
+
+    # (label, method, curcuma variant, orca variant, pyscf variant, molecules, threads)
+    rows = [("HF exact", "hf", "cpu", "nori", "exact", ["benzene", "anthracene", "alkane20", "alkane40"], 1),
+            ("HF exact", "hf", "cpu", "nori", "exact", ["benzene", "anthracene", "alkane20", "alkane40", "alkane80"], 24),
+            ("HF exact GPU", "hf", "gpu", "nori", "exact", ["anthracene", "alkane20", "alkane40", "alkane80"], 24),
+            ("HF exact GPU direct", "hf", "gpu_direct", "nori", "exact", ["anthracene", "alkane20", "alkane40", "alkane80"], 24),
+            ("RI-JK HF", "hf", "cpu_rijk", "rijk", "df", ["alkane20"], 1),
+            ("RI-JK HF", "hf", "cpu_rijk", "rijk", "df", ["alkane20", "alkane40", "alkane60"], 24),
+            ("RI-JK HF GPU", "hf", "gpu_rijk", "rijk", "df", ["alkane20", "alkane40", "alkane60"], 24),
+            ("RI-MP2", "rimp2", "cpu", "nori", "exact", ["alkane20"], 1),
+            ("RI-MP2", "rimp2", "cpu", "nori", "exact", ["alkane20", "alkane40", "alkane80"], 24),
+            ("RI-MP2 GPU", "rimp2", "gpu", "nori", "exact", ["alkane20", "alkane40", "alkane80"], 24),
+            ("LMP2 / DLPNO NormalPNO", "lmp2", "cpu", "normalpno", None, ["alkane20"], 1),
+            ("LMP2 / DLPNO NormalPNO", "lmp2", "cpu", "normalpno", None, ["alkane20", "alkane40", "alkane80"], 24),
+            ("LMP2 GPU / DLPNO NormalPNO", "lmp2", "gpu", "normalpno", None, ["alkane20", "alkane40", "alkane80"], 24),
+            ("CCSD", "ccsd", "cpu", "nori", "exact", ["water6"], 1),
+            ("CCSD", "ccsd", "cpu", "nori", "exact", ["water6", "water10", "water12"], 24)]
+    hdr = ["case", "system", "T", "curcuma old (s)", "curcuma new (s)", "it old/new", "ORCA new (s) (old)", "it ORCA",
+           "PySCF new (s) (old)", "it PySCF", "new/ORCA", "new/PySCF", "old/ORCA old"]
+    print("| " + " | ".join(hdr) + " |\n|" + "---|" * len(hdr))
+    for lab_, me, cv, ov, pv, mols, t in rows:
+        for mol in mols:
+            kc = ("curcuma", me, cv, mol, t)
+            ko = ("orca", me, ov, mol, t)
+            kp = ("pyscf", me, pv, mol, t) if pv else None
+            if kc not in N and ko not in N:
+                continue
+            co, co_s = w(O, kc)
+            cn, cn_s = w(N, kc)
+            oo, oo_s = w(O, ko)
+            on, on_s = w(N, ko)
+            po, po_s = w(O, kp) if kp else (None, "-")
+            pn, pn_s = w(N, kp) if kp else (None, "-")
+            print("| " + " | ".join([lab_, lab(mol), str(t), co_s, cn_s, f"{it(O, kc)}/{it(N, kc)}", f"{on_s} ({oo_s})",
+                                       it(N, ko), f"{pn_s} ({po_s})" if kp else "-", it(N, kp) if kp else "-",
+                                       ratio(cn, on), ratio(cn, pn), ratio(co, oo)]) + " |")
+    # energies of the fresh runs: HF vs PySCF exact / DF, correlation vs PySCF, LMP2 vs canonical RI-MP2
+    print("\nEnergies (fresh runs; deviation from the PySCF value of the same method, Eh):\n")
+    print("| method | system | PySCF (Eh) | curcuma cpu | curcuma gpu | ORCA |\n|---|---|---|---|---|---|")
+    spec = [("hf", "e_hf", "exact", ("cpu", "gpu"), "nori", MOLS["hf"]),
+            ("hf", "e_hf", "df", ("cpu_rijk", "gpu_rijk"), "rijk", ["alkane20", "alkane40", "alkane60"]),
+            ("rimp2", "e_corr", "exact", ("cpu", "gpu"), "nori", ["alkane20", "alkane40", "alkane80"]),
+            ("ccsd", "e_corr", "exact", ("cpu", None), "nori", ["water6", "water10", "water12"])]
+
+    def val(D, p, me, v, mol, key):
+        for t in (24, 1):
+            r = D.get((p, me, v, mol, t))
+            if r and r.get("ok") and r.get(key) is not None:
+                return r[key]
+        return None
+    for me, key, pv, (c1, c2), ov, mols in spec:
+        for mol in mols:
+            e0 = val(N, "pyscf", me, pv, mol, key)
+            vals = [val(N, "curcuma", me, c1, mol, key), val(N, "curcuma", me, c2, mol, key) if c2 else None,
+                    val(N, "orca", me, ov, mol, key)]
+            if e0 is None and all(v is None for v in vals):
+                continue
+            name = {"hf": "HF " + ("exact" if pv == "exact" else "RI-JK"), "rimp2": "RI-MP2 E_corr", "ccsd": "CCSD E_corr"}[me]
+            print("| " + " | ".join([name, lab(mol), f"{e0:.9f}" if e0 is not None else "-"] +
+                                    [(f"{v - e0:+.1e}" if e0 is not None else f"{v:.9f} (abs)") if v is not None else "-"
+                                     for v in vals]) + " |")
+    print("\nLMP2 / DLPNO-MP2 minus canonical RI-MP2 (curcuma RI-MP2 cpu or gpu, same aux basis), Eh and uEh/atom:\n")
+    print("| system | RI-MP2 E_corr (Eh) | curcuma lmp2 | ORCA NormalPNO | ORCA TightPNO | per atom (uEh) |\n|---|---|---|---|---|---|")
+    for mol in MOLS["lmp2"]:
+        ref = val(N, "curcuma", "rimp2", "cpu", mol, "e_corr") or val(N, "curcuma", "rimp2", "gpu", mol, "e_corr")
+        es = [val(N, "curcuma", "lmp2", "cpu", mol, "e_corr") or val(N, "curcuma", "lmp2", "gpu", mol, "e_corr"),
+              val(N, "orca", "lmp2", "normalpno", mol, "e_corr"), val(N, "orca", "lmp2", "tightpno", mol, "e_corr")]
+        nat = 3 * int(mol[6:]) + 2
+        print("| " + " | ".join([lab(mol), f"{ref:.8f}" if ref else "-"] +
+                                [(f"{e - ref:+.2e}" if ref else f"{e:.8f} (abs)") if e is not None else "-" for e in es] +
+                                [" / ".join(f"{(e - ref) / nat * 1e6:+.1f}" if (e is not None and ref) else "-" for e in es)]) + " |")
+    rs = [r for r in N.values() if r.get("wall") is not None]
+    for t in (1, 24):
+        lb = sorted(r["load_before"] for r in rs if r["threads"] == t and r.get("load_before") is not None)
+        rm = sorted(r["running_max"] for r in rs if r["threads"] == t and r.get("running_max") is not None)
+        if lb:
+            print(f"\n{t} thread(s): load average (1 min) before the job min {lb[0]:.2f} / median {lb[len(lb)//2]:.2f} / max {lb[-1]:.2f}"
+                  + (f"; runnable threads during the job (max per job) min {rm[0]} / median {rm[len(rm)//2]} / max {rm[-1]}" if rm else "")
+                  + f" ({len(lb)} jobs)")
+    for p in ("pyscf", "orca", "curcuma"):
+        rm = [(r["running_max"], r["mol"], r["method"], r["variant"]) for r in rs
+              if r["program"] == p and r["threads"] == 24 and r.get("running_max") is not None]
+        if rm:
+            print(f"{p} 24T: runnable threads max over its jobs {max(rm)}")
+
+
+if __name__ == "__main__" and REMEASURE:
+    remeasure(sys.argv[2], sys.argv[3], sys.argv[4:])
+    sys.exit(0)
 
 if __name__ == "__main__":
     print("## HF wall time (s)\n")

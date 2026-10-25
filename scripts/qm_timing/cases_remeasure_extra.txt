@@ -1,0 +1,4 @@
+# Re-measurement (Oct 25, 2026), extra runs after the queue:
+# canonical RI-MP2 C80H162 with -qm.ri_max_memory_mb 200000 (the default refuses it, see the doc), LMP2 reference
+curcuma rimp2 cpu_bigri alkane80 24
+curcuma rimp2 gpu_bigri alkane80 24

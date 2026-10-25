@@ -1,0 +1,40 @@
+# Re-measurement (Oct 25, 2026), batch 2: 24 threads, HF exact and RI-JK (QMTIME_CURCUMA_SCF=default)
+# HF exact
+curcuma hf cpu benzene 24
+curcuma hf gpu benzene 24
+curcuma hf gpu_direct benzene 24
+orca hf nori benzene 24
+pyscf hf exact benzene 24
+curcuma hf cpu anthracene 24
+curcuma hf gpu anthracene 24
+curcuma hf gpu_direct anthracene 24
+orca hf nori anthracene 24
+pyscf hf exact anthracene 24
+curcuma hf cpu alkane20 24
+curcuma hf gpu alkane20 24
+curcuma hf gpu_direct alkane20 24
+orca hf nori alkane20 24
+pyscf hf exact alkane20 24
+curcuma hf cpu alkane40 24
+curcuma hf gpu alkane40 24
+curcuma hf gpu_direct alkane40 24
+orca hf nori alkane40 24
+pyscf hf exact alkane40 24
+curcuma hf cpu alkane80 24
+curcuma hf gpu alkane80 24
+curcuma hf gpu_direct alkane80 24
+orca hf nori alkane80 24
+pyscf hf exact alkane80 24
+# RI-JK HF (default RI memory limit = auto)
+curcuma hf cpu_rijk alkane20 24
+curcuma hf gpu_rijk alkane20 24
+orca hf rijk alkane20 24
+pyscf hf df alkane20 24
+curcuma hf cpu_rijk alkane40 24
+curcuma hf gpu_rijk alkane40 24
+orca hf rijk alkane40 24
+pyscf hf df alkane40 24
+curcuma hf cpu_rijk alkane60 24
+curcuma hf gpu_rijk alkane60 24
+orca hf rijk alkane60 24
+pyscf hf df alkane60 24

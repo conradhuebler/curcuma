@@ -15,7 +15,8 @@
   WP13 (RCCSD); WP12 (MP3-MP5) ist **gestrichen** (Betreiber, Okt 2026: gemeint war MP2). WP14 ist die Auswertung
   der Schwarz-Frage.
 - **Laufzeitvergleich mit ORCA 6.1 und PySCF 2.14** (HF, RI-JK, RI-MP2, LMP2/DLPNO-MP2, CCSD; 1 und 24 Threads,
-  GPU; Okt 2026, 🤖 AI-generated, ⚙️ machine-tested, eine Maschine): [../QM_TIMING_ORCA_PYSCF_2026-10.md](../QM_TIMING_ORCA_PYSCF_2026-10.md).
+  GPU; Okt 2026, 🤖 AI-generated, ⚙️ machine-tested, eine Maschine): [../QM_TIMING_ORCA_PYSCF_2026-10.md](../QM_TIMING_ORCA_PYSCF_2026-10.md);
+  Nachmessung mit den aktuellen Voreinstellungen (25. Okt 2026, ORCA/PySCF am selben Tag neu) im Abschnitt "Re-measurement after the optimisation work".
 
 ## Warum diese Reihenfolge
 
