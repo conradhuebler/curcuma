@@ -207,12 +207,68 @@ fragmentation (proton transfer, Cl- binding an H) keeps the original rows, no me
 Isolated ion: a Cl- whose GFN-FF coordination number is exactly 0 (nearest H at 3.2 A: CN 0; at 2.2 A: CN > 0, both measured)
 gets a spurious force from the reference CN chain rule (Known Issue #39 in [KNOWN_ISSUES_ARCHIVE.md](KNOWN_ISSUES_ARCHIVE.md)),
 largest with an H at about 3.1-3.4 A. In the 182-atom check above the Cl- have neighbours; a Cl- with a first hydration shell
-(H at about 2.2 A) is at CN > 0 and the switch changes nothing (measured on Cl- ... H2O and (AB)2 + Cl- + 10 H2O only). For a Cl- that can be without neighbours (gas-phase complex, few waters, ion leaving a chain) set
+(H at about 2.2 A) is at CN > 0 and the switch changes nothing (measured on Cl- ... H2O, (AB)2 + Cl- + 10 H2O and the 24 cluster snapshots below only). For a Cl- that can be without neighbours (gas-phase complex, few waters, ion leaving a chain) set
 `-gfnff.cn_zero_guard true`: gradient only, energy unchanged; the GPU method then falls back to the CPU method (not run on a
 GPU). (AB)3 + Cl- with groups +3/-1: FD error 3.86e-3 -> 1.9e-6 Eh/A; NVE Cl- + 2 H2O: Etot max-min 3.1e-3 -> 2.6e-5 Eh (n=1 each).
+
+## Validation on a microsolvated unit (Oct 2026)
+
+Status: AI-generated, machine-tested; criteria written down before any result; no human review. Models built at run time
+(no structure file): B1 = `pdmaema_h.xyz` (Xx -> H, xtb 6.7.1 GFN2 opt, +1) + Cl- + 12 H2O (66 atoms); BA2 = polymerbuild
+`AB` (xtb opt, +1) + Cl- + 15 H2O (101 atoms); total charge 0. Geometries: xtb GFN2 MD, 250 K, spherical wall, 1 fs, two
+starts per model (Cl- at N-H, Cl- 6 A away); frames at t = 3..10 ps (B1, 1 ps apart) and 3, 5, 7, 9 ps (BA2) of each start:
+n = 16 (B1: 8 contact pairs, 8 solvent-separated) and n = 8 (BA2: none in contact, H(N)...Cl 3.4-6.9 A). Reference ORCA 6.1
+r2SCAN-3c TightSCF EnGrad + Hirshfeld, vacuum (24 jobs, 5212 s summed). Variants (curcuma -sp, -threads 1): V0 default,
+V1 `frag_charge_model reference`, V2 group file from `charge_groups_for_solvated.py` (B1: solute +1; BA2: unit +1, rest 0;
+Cl- -1), V2g = V2 + `cn_zero_guard`, V3 `charge_groups ionpairs`, V4 gfn2 (context). Force RMSE over all Cartesian
+components (kcal/mol/A), relative energy E_i - mean(E) (kcal/mol), mean +- SE over snapshots:
+
+| | B1 forces | B1 rel. E MAE | BA2 forces | BA2 rel. E MAE |
+|---|---|---|---|---|
+| V0 = V1 | 7.47 +- 0.31 | 8.76 +- 1.13 | 8.47 +- 0.43 | 10.41 +- 2.20 |
+| V2 = V2g | 7.33 +- 0.26 | 6.34 +- 1.21 | 8.36 +- 0.36 | 5.52 +- 0.91 |
+| V3 | = V2 | = V2 | 8.42 +- 0.37 | 4.73 +- 0.84 |
+| V4 gfn2 | 5.30 +- 0.04 | 3.18 +- 0.45 | 5.16 +- 0.05 | 4.65 +- 1.17 |
+
+Criteria (paired d = V2 - V0 per snapshot, verdict at 2 SE):
+- KA1 forces: no significant difference (B1 -0.14 +- 0.08, 11 of 16 better; BA2 -0.11 +- 0.08, 3 of 8 better). Descriptive:
+  Cl- plus atoms within 2 bonds of N+ better in both (-0.32 +- 0.13, -0.34 +- 0.12), water atoms not.
+- KA2 relative energies: V2 better (B1 -2.42 +- 1.13, 12 of 16; BA2 -4.90 +- 1.59, 7 of 8). ORCA spread 16.5 / 21.4 kcal/mol.
+- KA3 `cn_zero_guard` changes nothing at CN > 0: gradients bit-identical 24/24 (nearest neighbour of Cl- 1.87-2.16 A).
+- KA4 V3 = V2: met for B1 (16/16, 8 decimals); NOT met for BA2 (0/8): ionpairs makes one +1 row for the whole dimer, the file
+  of V2 two rows (unit +1, rest 0). A whole-fragment file reproduces V3 bit for bit (8/8; check added after the result).
+- V0 = V1 bit for bit: a neutral system keeps every fragment at 0, so Cl- is a neutral atom (q = 0.000) in V0.
+
+Charge sums (mean [min, max]), B1 / BA2: Hirshfeld solute +0.54 [0.47, 0.63] / +0.59, Cl -0.37 [-0.45, -0.27] / -0.40,
+waters -0.17 / -0.19; gfn2 Mulliken +0.88 / +0.89, -0.86 / -0.89, -0.02 / 0.00. The formal +1/-1/0 is 0.41-0.47 e (solute),
+0.60-0.63 e (Cl) and 0.17-0.19 e (waters) from Hirshfeld (which underestimates magnitudes); from gfn2 0.11-0.14 e (solute, Cl).
+Limits: one unit chemistry, two cluster sizes, 2 trajectories per model (snapshots of one trajectory correlated), GFN2
+dynamics as sample source, r2SCAN-3c only, gas-phase clusters; GFN-FF force errors stay 38-64 % above gfn2 with either charge model.
+
+## Probe run in a droplet (Oct 2026, n=1 per setting)
+
+(AB)5 (+5, 267 atoms) + 805 library waters on a 3.1 A lattice inside 19.4 A, waters within 2.5 A of the chain dropped,
+`-ionize -charge 5` (defaults) -> 800 H2O + 5 Cl-, 2672 atoms, not equilibrated; `-opt` 200 steps (not converged,
+-302.85 -> -316.95 Eh); MD 2 ps, dt 0.5 fs, 300 K, CSVR 10 fs, `-md.wall_type spheric -md.wall_radius 20.9` (build radius
++ 1.5 A), group file + `cn_zero_guard`, CPU. 45.7 ms per step at 16 threads, 47.2 at 8, 45.1 without groups (16 threads;
+machine shared, load about 7); single point 0.65 s with groups, 0.39 s without (16 threads; 2.0 / 1.2 s at 1 thread); peak
+RSS 1.2 GB. No NaN, T 301 K over the second ps, 806 fragments at start and end, end frame with the same file: units
++1.000000 x5, Cl- -1.000000 x5, waters |sum| <= 1e-10. Cl- kept 6-7 waters within 3.5 A, no Cl-...H-N contact in 2 ps.
+Without groups the Cl stay neutral and lose water (1-6 within 3.5 A, nearest H up to 3.1 A, i.e. near CN = 0). NVE 0.5 ps
+from the end (thermostat off via the restart file, COM removal left on): Etot + wall -1.5e-3 Eh with and without groups.
+Not checked: equilibration, density, longer runs, Cl- binding to N-H (the groups would not follow it), periodic systems, GPU.
+
+## Recommended run recipe
+
+Build the chain with `-polymerbuild` (writes `polymer_A_final.groups.json`), solvate it (water first, then
+`-ionize -charge <chain charge>`), write the groups with `scripts/charge_groups_for_solvated.py SYSTEM.xyz --polymer-groups
+polymer_A_final.groups.json --polymer-offset 0 --anion Cl --charge 0 --out groups.json` (it prints the line below), then run
+`-method gfnff -charge 0 -gfnff.charge_groups groups.json -gfnff.cn_zero_guard true -gfnff.cache_topology false
+-gfnff.topology_mode constant`. A group file bypasses the topology cache and `constant` is the default, so the last two
+flags only make that explicit. The groups are fixed at the first topology: rebuild the file when a Cl- binds or a proton moves.
 
 ## Not done
 
 - Charge in the optimisation steps of the build (would need the partial charge of each growing chain at every step and every join).
 - Groups in the optimisation steps of the build (they would need the groups of each growing chain), GPU.
-- Other charge models than the three above, other polyelectrolytes; solvated chains only as above (no MD campaign).
+- Other charge models than the three above, other polyelectrolytes; solvated chains only as above (one 2 ps probe run, no MD campaign).

@@ -84,7 +84,8 @@ Stand.
   (Paritätsregel), (AB)3+Cl-: Polymer +1 / Cl +1. NVE 1 ps, 50 K: Etot-Sprünge bis -0,093 Eh (4 > 1e-3), der erste bei H(N)...Cl 1,65 A;
   `reference` und Dateigruppen 1e-5 bzw. 2e-7 Eh/ps. Ursache des Sprungs in der MD nicht eingegrenzt. [docs/FRAG_CHARGE_MODEL.md](docs/FRAG_CHARGE_MODEL.md)
 - **`charge_groups` `"rest": "per_fragment"`** (2026-10-25): Gruppen je Instanz eingefroren, geänderte Fragmentierung in der MD wird nicht erkannt
-  (nur Codelesen); Fragmente von `scripts/charge_groups_for_solvated.py` aus Kovalenzradien, nicht aus der GFN-FF-Topologie; periodisch, GPU, MD nicht gelaufen.
+  (nur Codelesen; im 2-ps-Tropfenlauf trat keine auf); Fragmente des Skripts aus Kovalenzradien, nicht aus der GFN-FF-Topologie; periodisch, GPU, equilibrierte MD offen.
+  Validierung nur PDMAEMA-Einheit/Dimer in Wasserclustern (n=16/8): Kraefte nicht signifikant besser, Relativenergien besser. [docs/POLYMERBUILD_CHARGE.md](docs/POLYMERBUILD_CHARGE.md)
 
 ## 2. Leistung
 
