@@ -62,7 +62,7 @@ atoms left on the scalar seed and the memory of M; with segmentation also the nu
 
 ## When it is ignored (one warning, scalar seed)
 
-GFN1 on GPU paths other than the ROCm resident loop; GPU SCF paths other than the fully device-resident CUDA and ROCm loops (host-driven device loops: Vulkan,
+GFN1 on GPU paths other than the CUDA and ROCm resident loops; GPU SCF paths other than the fully device-resident CUDA and ROCm loops (host-driven device loops: Vulkan,
 CUDA without the resident loop, ROCm with `-xtb.rocm_resident_loop false` or `-xtb.rocm_resident_precond false`); a multi-GPU SCF split (eigensolver or density over several devices at this basis
 size); `-large_system_mode` other than `none`; `-scf_mode` other than `broyden`; total
 charge != 0; open shell or odd electron count; no fragment qualifies for a block. Per fragment, single
@@ -142,6 +142,7 @@ none and frag):
 - Component test `sqm_cuda_broyden`: device Broyden with M vs host `BroydenMixer` with the step hook, with guard
   variants reset/keep/best, agree to 3e-15.
 - ROCm (Oct 24, 2026; AI-generated, machine-tested on one gfx1200): the resident GFN1 and GFN2 loop applies the same M and guard (`-xtb.rocm_resident_precond`, default true; indices in the host `packSCC` order); iterations equal to the CPU loop in 15 of 16 test pairs (PR07 GFN2: 8 against 10), guard hits at the same iteration; numbers in [ROCM_RESIDENT_LOOP_WP.md](ROCM_RESIDENT_LOOP_WP.md) (WP5).
+- CUDA GFN1 (Oct 25, 2026; AI-generated, machine-tested on one RTX A4500): the resident GFN1 loop takes M and the guard like GFN2 (`supportsResidentPreconditionerGfn1` in `xtb_gpu_method.cpp`; the device Broyden of the GFN1 loop has dimension nsh, M is layout-neutral). Closed-shell neutral clusters, `-gpu cuda -gpu_devices 0`, energies equal to the run without the switch and to the CPU run at 8 digits in 5 of 5 systems; SCF iterations plain / frag on the GPU: urea3-water8 (48 atoms) 11 / 8, water8 6 / 4, acetic acid dimer 12 / 7, urea-water 197 atoms 14 / 10, peo201-water500 (2910 atoms) 11 / 11 (CPU frag 7, 3, 6, 8, 10). Test `cli_sqm_13` checks GFN1 (device M, energy, 8 < 11 iterations). Not run: GFN1 with the guard firing, systems with charged fragments, multi-GPU SCF split.
 
 ## Tested and rejected (Oct 2026, all n=1)
 

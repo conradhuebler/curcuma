@@ -67,6 +67,7 @@ struct XtbGpuContext::Impl {
     int                resident_n = 0;
     CudaBuffer<double> dH0, dS, dL;      // geometry-constant (uploaded once)
     CudaBuffer<double> dC, dP, dCw;      // eigenvectors / density / scaled cols
+    CudaBuffer<double> dCs;              // sqrt(occ)-scaled columns of the opt-in syrk density (CURCUMA_GPU_DENSITY_SYRK)
     CudaBuffer<double> dEps, dVao, dOcc, dPop;  // length-n working vectors
     CudaBuffer<double> dWork;            // cuSOLVER dsyevd workspace
     CudaBuffer<int>    dInfo;            // cuSOLVER devInfo
@@ -593,6 +594,10 @@ struct XtbGpuContext::Impl {
     /// Claude Generated (Oct 2026, CUDA/ROCm parity item 1): probe of the new Cholesky factor in dL against dS,
     /// | L (L^T v) - S v |_2 <= 1e-10 | S v |_2 for a fixed vector v. 1 = ok, 0 = failed, -1 = device error.
     int  probeCholeskyFactor(int n);
+    /// Claude Generated (Oct 2026, parity item C2): dense density P = Cs Cs^T with Cs(:,k) = sqrt(occ_k) C(:,k) by dsyrk on the
+    /// occupied columns (half the flops of the GEMM), lower triangle mirrored. Opt-in: CURCUMA_GPU_DENSITY_SYRK=1.
+    bool densitySyrk(int n, int ncol);
+    static bool densitySyrkWanted() { static const bool on = [] { const char* e = std::getenv("CURCUMA_GPU_DENSITY_SYRK"); return e && *e && *e != '0'; }(); return on; }
     CudaBuffer<double> dLProbeV, dLProbeW, dLProbeU;   ///< probe vectors v, L L^T v, S v
     int  lprobe_fail_left = -2;                        ///< CURCUMA_GPU_FAIL_LPROBE=k: corrupt the factor k times (-2: not read yet)
     long lprobe_recomputes = 0;                        ///< factors recomputed after a failed probe
@@ -1058,7 +1063,7 @@ struct XtbGpuContext::Impl {
     /// rest of the process (the CPU fallback then runs with a clean device).
     void releaseLarge()
     {
-        for (CudaBuffer<double>* b : { &dH0, &dS, &dL, &dC, &dP, &dCw, &dWork, &dDpInt, &dQpInt,
+        for (CudaBuffer<double>* b : { &dH0, &dS, &dL, &dC, &dP, &dCw, &dCs, &dWork, &dDpInt, &dQpInt,
                                        &dSdR, &dPotrfWork, &dW, &dGamma, &dMpAmatSD, &dMpAmatDD,
                                        &dMpAmatSQ, &dSolvB, &dEeqM, &dEeqWork })
             b->free();
@@ -1853,6 +1858,24 @@ __global__ void k_scale_cols(double* Cw, const double* C, const double* occ,
         const size_t idx = static_cast<size_t>(i) + static_cast<size_t>(k) * n;
         Cw[idx] = C[idx] * occ[k];
     }
+}
+
+// Claude Generated (Oct 2026, C2): Cs(:,k) = sqrt(occ[k])·C(:,k) for the syrk density (occupations are >= 0).
+__global__ void k_scale_cols_sqrt(double* Cs, const double* C, const double* occ, int n, int ncol)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int k = blockIdx.y * blockDim.y + threadIdx.y;
+    if (i < n && k < ncol) {
+        const size_t idx = static_cast<size_t>(i) + static_cast<size_t>(k) * n;
+        Cs[idx] = C[idx] * sqrt(fmax(occ[k], 0.0));
+    }
+}
+// Copy the lower triangle of the column-major n x n matrix P onto its upper triangle.
+__global__ void k_mirror_lower(double* P, int n)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;   // row
+    const int j = blockIdx.y * blockDim.y + threadIdx.y;   // column
+    if (i < n && j < n && i < j) P[static_cast<size_t>(i) + static_cast<size_t>(j) * n] = P[static_cast<size_t>(j) + static_cast<size_t>(i) * n];
 }
 
 // Mulliken AO populations pop(μ) = Σ_ν P(μ,ν)·S(μ,ν)  (S symmetric → = Σ P_μν S_νμ).
@@ -3887,6 +3910,23 @@ int XtbGpuContext::Impl::pseudoRotateOrthonormalise(int n, int no, const R* F, c
     return 1;
 }
 
+static inline dim3 grid_for_square(int n) { return dim3((n + 15) / 16, (n + 15) / 16); }
+
+bool XtbGpuContext::Impl::densitySyrk(int n, int ncol)
+{
+    try { dCs.ensure(n * ncol); } catch (...) { return false; }
+    const dim3 block(16, 16);
+    const dim3 grid((n + block.x - 1) / block.x, (ncol + block.y - 1) / block.y);
+    k_scale_cols_sqrt<<<grid, block, 0, stream>>>(dCs.ptr, dC.ptr, dOcc.ptr, n, ncol);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    const double one = 1.0, zero = 0.0;
+    if (cublasDsyrk(cublas, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_N, n, ncol, &one, dCs.ptr, n, &zero, dP.ptr, n)
+        != CUBLAS_STATUS_SUCCESS)
+        return false;
+    k_mirror_lower<<<grid_for_square(n), dim3(16, 16), 0, stream>>>(dP.ptr, n);
+    return cudaGetLastError() == cudaSuccess;
+}
+
 int XtbGpuContext::Impl::probeCholeskyFactor(int n)
 {
     // v, w = L^T v, w = L w, u = S v; |w - u|_2 against |u|_2. dS is the full symmetric overlap (dense storage).
@@ -4315,7 +4355,9 @@ bool XtbGpuContext::residentDensity(const double* occ, int ncol, int n,
         if (cudaGetLastError() != cudaSuccess)
             return false;
         // P = Cw[:, :ncol] · C[:, :ncol]ᵀ  ⇒  P_ij = Σ_k occ_k C_ik C_jk.
-        if (cublasDgemm(m_impl->cublas, CUBLAS_OP_N, CUBLAS_OP_T, n, n, ncol,
+        if (Impl::densitySyrkWanted()) {
+            if (!m_impl->densitySyrk(n, ncol)) return false;
+        } else if (cublasDgemm(m_impl->cublas, CUBLAS_OP_N, CUBLAS_OP_T, n, n, ncol,
                         &one, m_impl->dCw.ptr, n, m_impl->dC.ptr, n,
                         &zero, m_impl->dP.ptr, n) != CUBLAS_STATUS_SUCCESS)
             return false;
@@ -4551,7 +4593,9 @@ bool XtbGpuContext::residentDensityResident(int n, int ncol, double* band_out)
         }
         I.p_dense_valid = false;
     } else if (ncol > 0) {
-        if (cublasDgemm(I.cublas, CUBLAS_OP_N, CUBLAS_OP_T, n, n, ncol,
+        if (Impl::densitySyrkWanted()) {
+            if (!I.densitySyrk(n, ncol)) return false;
+        } else if (cublasDgemm(I.cublas, CUBLAS_OP_N, CUBLAS_OP_T, n, n, ncol,
                         &one, I.dCw.ptr, n, I.dC.ptr, n,
                         &zero, I.dP.ptr, n) != CUBLAS_STATUS_SUCCESS)
             return false;
