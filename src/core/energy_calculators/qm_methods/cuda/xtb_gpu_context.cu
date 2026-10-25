@@ -2632,20 +2632,27 @@ __global__ void k_d4_build_refw(int nat, int max_ref, const double* __restrict__
         expw[ir] = ew; expd[ir] = ed;
         norm += ew; dnorm += ed;
     }
-    const double ninv = (norm > 0.0) ? 1.0 / norm : 0.0;
+    // Claude Generated (Oct 2026, CUDA/ROCm parity; mirrors D4ParameterGenerator::buildAtomRefW):
+    // (1) When the CN lies so far beyond every reference that every Gaussian underflows (norm = 0, CN > ~15 for C in
+    //     compressed geometries) dftd4 puts the whole weight on the reference with the largest covalent CN; gwk = 0
+    //     zeroed C6 for the atom (energy jump, 0/0 in the ATM chain rule).
+    // (2) d(gwk)/dCN = expd*ninv - gwk*(dnorm*ninv). The dftd4 order ninv*(expd - expw*dnorm*ninv) forms expw*dnorm
+    //     first, which underflows to 0 while ninv is huge: dgwk became -2 wf (CN - refcn) although gwk is constant there.
+    double maxcn = 0.0;
+    for (int ir = 0; ir < nr; ++ir) maxcn = fmax(maxcn, refcovcn[base + ir]);
+    const double ninv = 1.0 / norm;
+    const double dnorm_n = dnorm * ninv;
     const double qmod = q[a] + zef;
     for (int ir = 0; ir < nr; ++ir) {
-        double gwk = expw[ir] * ninv;
-        if (!isfinite(gwk)) gwk = 0.0;
+        double gwk  = expw[ir] * ninv;
+        double dgwk = expd[ir] * ninv - gwk * dnorm_n;
+        if (!isfinite(gwk))  gwk  = (refcovcn[base + ir] == maxcn) ? 1.0 : 0.0;
+        if (!isfinite(dgwk)) dgwk = 0.0;
         const double qref = refq[base + ir] + zef;
         const double zt = d4_zeta_dev(ga, gia, qref, qmod);
         W[base + ir]   = gwk * zt;
         dWq[base + ir] = gwk * d4_dzeta_dev(ga, gia, qref, qmod);
-        if (dWc) {
-            double dgwk = ninv * (expd[ir] - expw[ir] * dnorm * ninv);
-            if (!isfinite(dgwk)) dgwk = 0.0;
-            dWc[base + ir] = dgwk * zt;
-        }
+        if (dWc) dWc[base + ir] = dgwk * zt;
     }
 }
 
