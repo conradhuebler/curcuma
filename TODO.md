@@ -105,8 +105,6 @@ Stand.
 - **`-scf_precond frag` auf der GPU, offen** (2026-10-11): umgesetzt nur für die vollresidente CUDA-Schleife ([docs/SCF_PRECOND.md](docs/SCF_PRECOND.md), Abschnitt GPU). Mit Warnung ignoriert: ROCm, Vulkan, hostgetriebene CUDA-Schleife
   (Mischer auf dem Host, der CPU-Hook wäre dort direkt nutzbar), Mehr-GPU-SCF-Aufteilung (Eigenlöser/Dichte; ungetestet, nur ein Gerät hier).
   Ohne Wächter divergiert der unrelaxierte 599-Atom-Cluster mit Mischpräzision (151 Iterationen, harter Fehler, n=3).
-- **Native QM, offene Engpässe der Zeitstudie** (2026-10-25): RI-JK über 16 GB Tensor `batched` (langsamer als ORCA/PySCF), RI-MP2 bricht ab C40H82 am Standardlimit
-  `ri_max_memory_mb` ab; RI-MP2-Energieschritt skaliert 3,4x von 1 auf 24 Threads: [docs/QM_TIMING_ORCA_PYSCF_2026-10.md](docs/QM_TIMING_ORCA_PYSCF_2026-10.md).
 
 ## 3. Tests und Validierung
 

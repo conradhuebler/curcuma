@@ -416,3 +416,40 @@ test because all conditions must hold; drop it to measure the new default).
 E_elec identical to the 10 printed decimals in every row except C20H42 1 thread (1e-10). The 1-thread target
 (below ORCA) is now reached for the CPU exact HF; the wall time falls less than the iteration count (6-31 % vs
 30-37 %) because the dropped iterations are the cheap incremental ones.
+
+## RI resource defaults and RI-MP2 energy step (Oct 25, 2026)
+
+> 🤖 AI-generated, ⚙️ machine-tested, n = 1, same machine (251 GB RAM, MemAvailable ~249 GB during the runs, RTX 5090
+> idle); "before" = the build with the new SCF test but the old RI code, "after" = this change; both without
+> resource flags, 24 threads unless noted; ORCA/PySCF not rerun.
+
+What changed: `-qm.ri_max_memory_mb` default 16000 -> 0 = auto (MemAvailable from `/proc/meminfo` at the RI setup minus
+max(8000 MB, 15 %), here ~211 GB; `QMEngine::riMemoryLimitMB`), used by RI-JK (`ri_storage auto` picks stored when the
+tensor fits), RI-MP2 and the LMP2 global fit; RI-MP2 checks its peak (tensor + both (ia|P) copies; an own RI setup is
+freed before B) and names the flag in the error; the CPU RI-MP2 transformation and pair energies use sequential-MKL
+GEMMs under OpenMP (pairs: one GEMM per i and block of j) instead of the own register-blocked kernel. Device side
+unchanged: the RI-JK tensor stays on the card when it fits (C40H82, 16.9 GB) and is streamed from pinned host memory
+when not (C60H122, 56 GB; `-qm.gpu_ri_stream auto`).
+
+| case | before: wall (s) | after: wall (s) | speed-up | note |
+|---|---|---|---|---|
+| RI-MP2 C20H42 CPU, MP2 energy step | 13.1 | 1.69 | 7.7 | E_corr identical (12 decimals) |
+| RI-MP2 C20H42 CPU, whole run | 22.2 | 11.1 | 2.0 | |
+| RI-MP2 C20H42 CPU 1 thread, energy step / whole run | 44.9 / 176.5 | 19.6 / 149.4 | 2.3 / 1.18 | energy step 1 -> 24 threads: 3.4x before, 11.6x after |
+| RI-MP2 C20H42 GPU, whole run | 6.0 | 6.0 | 1.0 | device energy path unchanged |
+| RI-MP2 C40H82 CPU | stops (16863 MB tensor > 16000) | 100.0 (energy step 51.9 s; (ia|P) transformation 6.2 s, was 15.8 s in the 200000 MB GPU run) | - | E_corr -5.737360424 |
+| RI-MP2 C40H82 GPU | stops; 77.4 with `-qm.ri_max_memory_mb 200000` | 68.3 | - | device GEMM 49.7 s (batches of <= 3 occupied orbitals) |
+| RI-JK HF C40H82 CPU | 177.3 (batched) | 73.8 (stored) | 2.4 | = the old `-qm.ri_max_memory_mb 200000` run (73.8 s) |
+| RI-JK HF C40H82 GPU | 158.8 (batched) | 41.2 (tensor on the card) | 3.9 | |
+| RI-JK HF C60H122 CPU (56 GB tensor) | 836.1 (batched) | 384.9 (stored, 55 GB RSS) | 2.2 | |
+| RI-JK HF C60H122 GPU | 709.8 (batched) | 173.9 (streamed) | 4.1 | |
+
+E_elec identical to 10 decimals before/after in every RI-JK row; RI-MP2 E_corr before/after identical to 12 decimals
+on C20H42 (also with `-qm.scf_threshold 1e-10`: -2.876453369505 both) and benzene, LMP2 C20H42 within 1e-12 (local
+fit) / 2.4e-11 (global fit), CCSD (H2O)4 identical (all with `-qm.scf_threshold 1e-10`, reference = the "before"
+binary). The C40H82 CPU RI-MP2 energy step runs at ~830 GFLOPS (24 threads), as fast as the RTX 5090 path (FP64 1/64).
+
+Not tested: behaviour when MemAvailable is small or changes during the run (the limit is read once per RI setup;
+other processes can still take the memory afterwards), machines without `/proc/meminfo` (fallback 16000 MB), RI-MP2
+at C80H162 (tensor 133 GB + 2 x 28 GB would fit the auto limit here, ~1000 s energy step estimated, not run), the
+device RI-MP2 batch size (its GEMM at C40H82 is not faster than the CPU now), other CPUs.

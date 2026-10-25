@@ -2853,6 +2853,40 @@ void QMEngine::readRIConfig(const json& config)
     num("ri_fit_radius", m_ri_fit_radius);
 }
 
+namespace {
+/// MemAvailable of /proc/meminfo in MB, or -1 when it cannot be read (non-Linux). Claude Generated (Oct 25 2026).
+double hostMemAvailableMB()
+{
+    std::ifstream in("/proc/meminfo");
+    std::string key;
+    double kb = 0.0;
+    std::string unit;
+    while (in >> key >> kb >> unit)
+        if (key == "MemAvailable:") return kb / 1024.0;
+    return -1.0;
+}
+}  // namespace
+
+// Claude Generated (Oct 25 2026): -qm.ri_max_memory_mb 0 (default) = what the machine can hold now, read when the RI
+// setup runs: MemAvailable minus max(8000 MB, 15 %) as margin for the rest of the process and the system. Replaces the
+// fixed 16000 MB that sent C40H82 RI-JK into batched recomputation and stopped RI-MP2 (docs/QM_TIMING_ORCA_PYSCF_2026-10.md).
+double QMEngine::riMemoryLimitMB() const
+{
+    if (m_ri_max_memory_mb > 0.0) return m_ri_max_memory_mb;
+    const double avail = hostMemAvailableMB();
+    if (avail <= 0.0) return 16000.0;
+    return std::max(1000.0, avail - std::max(8000.0, 0.15 * avail));
+}
+
+std::string QMEngine::riMemoryLimitInfo() const
+{
+    if (m_ri_max_memory_mb > 0.0) return fmt::format("-qm.ri_max_memory_mb {:g}", m_ri_max_memory_mb);
+    const double avail = hostMemAvailableMB();
+    if (avail <= 0.0) return "-qm.ri_max_memory_mb auto = 16000 MB (/proc/meminfo not readable)";
+    return fmt::format("-qm.ri_max_memory_mb auto = {:.0f} MB (MemAvailable {:.0f} MB minus the margin max(8000 MB, 15 %))",
+                       riMemoryLimitMB(), avail);
+}
+
 void QMEngine::resetRI()
 {
     m_ri.reset();
@@ -2955,7 +2989,7 @@ bool QMEngine::riGradientTwoElectron(const Matrix& Pc, Matrix& g2, std::string& 
             opt.metric = m_ri_metric;
             opt.metric_cutoff = m_ri_metric_cutoff;
             opt.screening = m_eri_screening;
-            opt.max_memory_mb = m_ri_max_memory_mb;
+            opt.max_memory_mb = riMemoryLimitMB();
             opt.spherical_aux = !m_cartesian_d;
             opt.threads = m_threads;
             opt.storage = "stored";
@@ -3108,7 +3142,9 @@ bool QMEngine::ensureRI() const
         opt.metric = m_ri_metric;
         opt.metric_cutoff = m_ri_metric_cutoff;
         opt.screening = m_eri_screening;
-        opt.max_memory_mb = m_ri_max_memory_mb;
+        const double ri_limit = riMemoryLimitMB();  // -qm.ri_max_memory_mb, 0 = auto from MemAvailable (Oct 25 2026)
+        opt.max_memory_mb = ri_limit;
+        if (CurcumaLogger::get_verbosity() >= 2) CurcumaLogger::info("QM: RI host memory limit " + riMemoryLimitInfo());
         opt.spherical_aux = !m_cartesian_d;
         opt.threads = m_threads;
         opt.storage = m_ri_storage;
@@ -3123,8 +3159,8 @@ bool QMEngine::ensureRI() const
             const double np = (double)m_nbf * (m_nbf + 1) / 2.0, N = (double)riAuxCount(sh, !m_cartesian_d);
             const double mb64 = N * np * 8.0 / 1.0e6, mb32 = mb64 / 2.0;
             const bool dev_cap = gpuRequested() && m_gpu_max_memory_mb > 0.0;
-            fp32 = (mb64 > m_ri_max_memory_mb && mb32 <= m_ri_max_memory_mb) ||
-                   (dev_cap && mb64 > m_gpu_max_memory_mb && mb32 <= m_gpu_max_memory_mb && mb32 <= m_ri_max_memory_mb);
+            fp32 = (mb64 > ri_limit && mb32 <= ri_limit) ||
+                   (dev_cap && mb64 > m_gpu_max_memory_mb && mb32 <= m_gpu_max_memory_mb && mb32 <= ri_limit);
         }
         opt.fp32 = fp32;
         // -qm.gpu_ri_fit (Claude Generated, Oct 2026): the B = L^-1 T solve on the device when the RI
@@ -3170,7 +3206,7 @@ bool QMEngine::ensureRI() const
     }
     if (!m_ri) {
         m_ri_failed = true;
-        CurcumaLogger::error("QM: density fitting (-qm.ri " + m_ri_mode + ") not possible: " + why);
+        CurcumaLogger::error("QM: density fitting (-qm.ri " + m_ri_mode + ") not possible: " + why + " [limit: " + riMemoryLimitInfo() + "]");
         return false;
     }
     m_ri_mp_stage = m_ri->fp32() ? 1 : 0;

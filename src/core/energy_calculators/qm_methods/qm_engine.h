@@ -122,8 +122,8 @@ BEGIN_PARAMETER_DEFINITION(qm)
     PARAM(ri_metric_cutoff, Double, 1.0e-10,
           "ri_metric eigen: eigenvalue cutoff of the Coulomb-normalised metric ((P|P) = 1).",
           "DensityFitting", {})
-    PARAM(ri_max_memory_mb, Double, 16000.0,
-          "Host memory limit (MB) for the RI quantities: the stored 3-index tensor (naux x n(n+1)/2 x 8 bytes, packed lower triangle; 4 bytes with ri_mixed_precision) or, in ri_storage batched, the half-transformed integrals and the batch buffer. Above it ri_storage auto switches to batched, stored stops with an error (never a silent switch to the exact path).",
+    PARAM(ri_max_memory_mb, Double, 0.0,
+          "Host memory limit (MB) for the RI quantities: the stored 3-index tensor (naux x n(n+1)/2 x 8 bytes, packed lower triangle; 4 bytes with ri_mixed_precision) or, in ri_storage batched, the half-transformed integrals and the batch buffer; for RI-MP2 also the (ia|P) factors. 0 = auto (default since Oct 25 2026; was a fixed 16000): MemAvailable from /proc/meminfo when the RI setup runs, minus max(8000 MB, 15 %); 16000 where /proc/meminfo is not readable. Above the limit ri_storage auto switches to batched, stored and RI-MP2 stop with an error naming the size (never a silent switch to the exact path).",
           "DensityFitting", {})
     PARAM(gpu_ri, String, "auto",
           "With -gpu cuda|auto and -qm.ri j|jk: the RI contractions (J from the 3-index tensor, K as GEMM + SYRK, cuBLAS FP64) on the device; integrals and metric stay on the host. auto | on | off. Any device error falls back to the CPU and is counted as qm_ri.",
@@ -437,7 +437,11 @@ private:
     std::string m_ri_aux = "auto";
     std::string m_ri_metric = "cholesky";    // cholesky | eigen
     double m_ri_metric_cutoff = 1.0e-10;
-    double m_ri_max_memory_mb = 16000.0;
+    double m_ri_max_memory_mb = 0.0;          ///< 0 = auto (riMemoryLimitMB)
+    /// Effective RI host memory limit in MB (Claude Generated, Oct 25 2026): -qm.ri_max_memory_mb when > 0, else
+    /// MemAvailable minus max(8000 MB, 15 %). riMemoryLimitInfo() names the source for messages.
+    double riMemoryLimitMB() const;
+    std::string riMemoryLimitInfo() const;
     std::string m_gpu_ri = "auto";
     mutable std::string m_ri_file;
     mutable std::shared_ptr<qmri::RIJK> m_ri;

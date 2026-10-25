@@ -14,9 +14,9 @@
  *   1. RI tensor: the SCF's own one when -qm.ri j|jk ran with the same auxiliary file, else a
  *      separate qmri::RIJK setup in mode j (raw (Q|mn) + metric factor, no n^2-column forward
  *      substitution) with -qm.ri_mp2_aux.
- *   2. (Q|ia) = Co^T T^Q Cv per auxiliary row (two gemmABt calls, OpenMP over Q), then the metric
+ *   2. (Q|ia) = Co^T T^Q Cv per auxiliary row (two BLAS GEMMs, OpenMP over Q), then the metric
  *      factor on the o*v columns (RIJK::fitRows), then the transpose to B[i][a][P].
- *   3. Pair energies: CPU qmint::riMp2EnergyHost (pairs i >= j, one v x v GEMM each) or the device
+ *   3. Pair energies: CPU qmint::riMp2EnergyHost (one BLAS GEMM per i and block of j <= i) or the device
  *      (cuda/qm_gpu_rimp2.cu, batches over i, cuBLAS DGEMM), CPU fallback counted as qm_ri_mp2.
  *
  * Auxiliary basis caveat: curcuma ships no def2-SVP/C file; the default correlation fitting basis
@@ -118,6 +118,11 @@ void gemmABt(const double* A, int m, const double* B, int n, int k, double* C)
 
 // Claude Generated (Oct 2026, RI-MP2). Pair (i,j), i >= j: K_ab = (ia|jb) = sum_P B_ia^P B_jb^P,
 // (ib|ja) = K_ba. The (j,i) pair gives K^T with the same denominators, hence the factor 2 for i != j.
+// Oct 25 2026: the pair integrals come from one BLAS GEMM per task (i, block of j) instead of the own register-blocked
+// kernel per pair: B[j][a][P] is contiguous over consecutive j, so K = B_i (v x naux) * B_(j0..j1)^T is one
+// v x (nj v) x naux product (sequential MKL per OpenMP thread). The own kernel was memory-bound and scaled 3.4x
+// from 1 to 24 threads (C20H42 energy step 44 s -> 13 s, docs/QM_TIMING_ORCA_PYSCF_2026-10.md). Per-pair sums and
+// their fixed-order total are unchanged, so the result does not depend on the thread count or the blocking.
 void riMp2EnergyHost(const double* B, int o, int v, int naux, const double* eo, const double* ev, int threads,
                      MP2Result& res)
 {
@@ -125,41 +130,50 @@ void riMp2EnergyHost(const double* B, int o, int v, int naux, const double* eo, 
     if (o <= 0 || v <= 0) return;
     threads = std::max(1, threads);
     const int npairs = o * (o + 1) / 2;
-    std::vector<int> pi(npairs), pj(npairs);
-    for (int i = 0, p = 0; i < o; ++i)
-        for (int j = 0; j <= i; ++j, ++p) {
-            pi[p] = i;
-            pj[p] = j;
-        }
+    using RowMat = Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+    // block of j per task: about 1024 columns of K (v x 1024 doubles per thread), at least one j
+    const int nj = std::max(1, std::min(o, 1024 / std::max(1, v)));
+    struct Task {
+        int i, j0, j1;  // j in [j0, j1)
+    };
+    std::vector<Task> tasks;
+    for (int i = 0; i < o; ++i)
+        for (int j0 = 0; j0 <= i; j0 += nj) tasks.push_back({ i, j0, std::min(i + 1, j0 + nj) });
     std::vector<double> pos(npairs, 0.0), pss(npairs, 0.0);
     const auto t0 = std::chrono::steady_clock::now();
 #ifdef _OPENMP
 #pragma omp parallel num_threads(threads)
 #endif
     {
-        std::vector<double> K((size_t)v * v);
+        RowMat K(v, (Eigen::Index)nj * v);
 #ifdef _OPENMP
 #pragma omp for schedule(dynamic, 1)
 #endif
-        for (int p = 0; p < npairs; ++p) {
-            const int i = pi[p], j = pj[p];
-            gemmABt(B + (size_t)i * v * naux, v, B + (size_t)j * v * naux, v, naux, K.data());
-            const double eij = eo[i] + eo[j];
-            double os = 0.0, ss = 0.0;
-            for (int a = 0; a < v; ++a) {
-                const double eija = eij - ev[a];
-                const double* row = K.data() + (size_t)a * v;
-                for (int b = 0; b < v; ++b) {
-                    const double t = row[b];
-                    const double tx = K[(size_t)b * v + a];
-                    const double inv_d = 1.0 / (eija - ev[b]);
-                    os += t * t * inv_d;
-                    ss += t * (t - tx) * inv_d;
+        for (int t = 0; t < (int)tasks.size(); ++t) {
+            const int i = tasks[t].i, j0 = tasks[t].j0, nb = tasks[t].j1 - tasks[t].j0;
+            const Eigen::Map<const RowMat> Bi(B + (size_t)i * v * naux, v, naux);
+            const Eigen::Map<const RowMat> Bj(B + (size_t)j0 * v * naux, (Eigen::Index)nb * v, naux);
+            K.leftCols((Eigen::Index)nb * v).noalias() = Bi * Bj.transpose();  // K(a, jj v + b) = (ia|jb)
+            for (int jj = 0; jj < nb; ++jj) {
+                const int j = j0 + jj;
+                const double eij = eo[i] + eo[j];
+                const size_t c0 = (size_t)jj * v;
+                double os = 0.0, ss = 0.0;
+                for (int a = 0; a < v; ++a) {
+                    const double eija = eij - ev[a];
+                    for (int b = 0; b < v; ++b) {
+                        const double tv = K(a, c0 + b);
+                        const double tx = K(b, c0 + a);
+                        const double inv_d = 1.0 / (eija - ev[b]);
+                        os += tv * tv * inv_d;
+                        ss += tv * (tv - tx) * inv_d;
+                    }
                 }
+                const double f = (i == j) ? 1.0 : 2.0;
+                const int p = i * (i + 1) / 2 + j;
+                pos[p] = f * os;
+                pss[p] = f * ss;
             }
-            const double f = (i == j) ? 1.0 : 2.0;
-            pos[p] = f * os;
-            pss[p] = f * ss;
         }
     }
     for (int p = 0; p < npairs; ++p) {  // fixed order: independent of the thread count
@@ -198,7 +212,8 @@ std::shared_ptr<qmri::RIJK> QMEngine::correlationRI(const std::string& file, std
         ro.metric = m_ri_metric;
         ro.metric_cutoff = m_ri_metric_cutoff;
         ro.screening = m_eri_screening;
-        ro.max_memory_mb = m_ri_max_memory_mb;
+        ro.max_memory_mb = riMemoryLimitMB();  // 0 = auto from MemAvailable (Oct 25 2026)
+        if (CurcumaLogger::get_verbosity() >= 2) CurcumaLogger::info("QM: correlation RI host memory limit " + riMemoryLimitInfo());
         ro.spherical_aux = !m_cartesian_d;
         ro.threads = m_threads;
         auto r = std::make_shared<qmri::RIJK>();
@@ -206,7 +221,10 @@ std::shared_ptr<qmri::RIJK> QMEngine::correlationRI(const std::string& file, std
     } catch (const std::exception& e) {
         why = e.what();
     }
-    if (!ri) return nullptr;
+    if (!ri) {
+        why += " [limit: " + riMemoryLimitInfo() + "]";
+        return nullptr;
+    }
     setup_ms = msSince(t0);
     src = "own RI setup: " + ri->stats();
     return ri;
@@ -263,7 +281,7 @@ bool QMEngine::computeRIMP2(const qmint::MP2Options& opt, qmint::MP2Result& res)
 
     std::string ri_src, why;
     double setup_ms = 0.0;
-    const std::shared_ptr<qmri::RIJK> ri = correlationRI(file, ri_src, setup_ms, why);
+    std::shared_ptr<qmri::RIJK> ri = correlationRI(file, ri_src, setup_ms, why);
     if (!ri) {
         CurcumaLogger::error("RI-MP2: density fitting setup with " + file + " not possible: " + why);
         return false;
@@ -274,10 +292,18 @@ bool QMEngine::computeRIMP2(const qmint::MP2Options& opt, qmint::MP2Result& res)
     const int nrows = (int)ri->tensor().rows();
     const size_t ov = (size_t)o * v;
     const double b_mb = (double)ov * nrows * 8.0 / 1.0e6;
-    if (2.0 * b_mb > m_ri_max_memory_mb) {
-        CurcumaLogger::error(fmt::format("RI-MP2: the (ia|P) tensor needs 2 x {:.0f} MB (o v naux = {} x {} x {}, plus one "
-                                         "transposed copy), above -qm.ri_max_memory_mb {:g}",
-                                         b_mb, o, v, nrows, m_ri_max_memory_mb));
+    // Peak host memory (Claude Generated, Oct 25 2026): (Q|ia) X and its transpose B exist together; an own RI setup is
+    // released after the fit, before B is allocated, the SCF's tensor stays. So peak = X + max(tensor, B) or
+    // tensor + X + B; checked against the same limit as the RI setup (was 2 B against a fixed 16000 MB).
+    const bool own_setup = (ri != m_ri);
+    const double t_mb = ri->tensorMB();
+    const double peak_mb = own_setup ? b_mb + std::max(t_mb, b_mb) : t_mb + 2.0 * b_mb;
+    const double limit_mb = riMemoryLimitMB();
+    if (peak_mb > limit_mb) {
+        CurcumaLogger::error(fmt::format("RI-MP2: needs {:.0f} MB of host memory (3-index tensor {:.0f} MB, (ia|P) factors 2 x {:.0f} MB, "
+                                         "o v naux = {} x {} x {}), above the RI limit: {}. Raise -qm.ri_max_memory_mb (MB) if the "
+                                         "machine has the memory, or use -method lmp2 (local fit, no stored tensor)",
+                                         peak_mb, t_mb, b_mb, o, v, nrows, riMemoryLimitInfo()));
         return false;
     }
     const auto t1 = std::chrono::steady_clock::now();
@@ -286,7 +312,7 @@ bool QMEngine::computeRIMP2(const qmint::MP2Options& opt, qmint::MP2Result& res)
     {
         const Matrix Co = m_mo.block(0, n_frozen, n, o);
         const Matrix Cv = m_mo.block(0, n_occ, n, v);
-        const Matrix CoT = Co.transpose(), CvT = Cv.transpose();  // row-major o x n, v x n
+        const Matrix CoT = Co.transpose();  // row-major o x n
 #ifdef _OPENMP
 #pragma omp parallel num_threads(threads)
 #endif
@@ -297,14 +323,16 @@ bool QMEngine::computeRIMP2(const qmint::MP2Options& opt, qmint::MP2Result& res)
 #endif
             for (int Q = 0; Q < nrows; ++Q) {
                 ri->unpackRow(Q, TQ.data());  // the tensor stores the packed lower triangle per row (qm_ri.h)
-                // T^Q is symmetric: (Co^T T^Q)[i][m] = sum_k CoT[i][k] T^Q[m][k]
-                qmint::gemmABt(CoT.data(), o, TQ.data(), n, n, Y.data());
-                // (Q|ia) = sum_m Y[i][m] Cv[m][a] = sum_m Y[i][m] CvT[a][m]
-                qmint::gemmABt(Y.data(), o, CvT.data(), v, n, X.data() + (size_t)Q * ov);
+                // Oct 25 2026: two sequential-BLAS GEMMs per row (was qmint::gemmABt, 120 GFLOPS on 24 threads at C40H82)
+                const Eigen::Map<const Matrix> Tq(TQ.data(), n, n);
+                Eigen::Map<Matrix> Yq(Y.data(), o, n);
+                Yq.noalias() = CoT * Tq;  // (Co^T T^Q), T^Q symmetric
+                Eigen::Map<Matrix>(X.data() + (size_t)Q * ov, o, v).noalias() = Yq * Cv;  // (Q|ia), row Q = [i][a]
             }
         }
     }
     ri->fitRows(X);  // metric factor (no-op when the SCF tensor already is B)
+    if (own_setup) ri.reset();  // tensor no longer needed: free it before B (peak memory, see above)
     const int naux = (int)X.rows();
     std::vector<double> B(ov * naux);
     {
