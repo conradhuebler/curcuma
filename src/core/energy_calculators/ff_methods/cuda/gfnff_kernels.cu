@@ -36,14 +36,42 @@
 // complement wraps harmlessly, only the final sum has to fit) and converted back in place by
 // k_fix_to_double once the accumulation is over. The buffer must be zeroed first (0 bits = 0 and 0.0).
 // ============================================================================
+/// Claude Generated (Oct 2026, CUDA/ROCm parity item 12): set (sticky) when a contribution was not finite or alone
+/// outside the accumulator range; read by the host after the step (FFWorkspaceGPU, gfnffFixBadReadAsync), which then
+/// returns NaN as the FP64 path would. Before, a NaN/Inf contribution became llrint(NaN) = LLONG_MIN (a silent wrong
+/// number) and an Inf force looped for ever in the chunk loop.
+__device__ int d_gfnff_fix_bad;
+
+/// llrint(x * scale) with the range check of the ROCm port: outside the int64 range (or not finite) the flag is set
+/// and 0 is returned. Identical to llrint for every value that fits.
+__device__ __forceinline__ long long fix_round(double x, double scale)
+{
+    const double y = x * scale;
+    if (!(fabs(y) < 9.2e18)) {
+        atomicOr(&d_gfnff_fix_bad, 1);
+        return 0ll;
+    }
+    return llrint(y);
+}
+
 __device__ __forceinline__ void fix_add_u64(unsigned long long* a, double v, double scale)
 {
-    while (fabs(v) >= 64.0) {                          // keep the scaled value inside long long
-        const double chunk = copysign(64.0, v);
-        atomicAdd(a, static_cast<unsigned long long>(llrint(chunk * scale)));
-        v -= chunk;
+    const double av = fabs(v);
+    if (!(av * scale < 9.2e18)) {                      // beyond the int64 range (or NaN/Inf): the sum is wrong anyway
+        atomicOr(&d_gfnff_fix_bad, 1);
+        if (!(av < 5.7e17)) return;                    // not finite or beyond 2^59: add nothing usable
     }
-    atomicAdd(a, static_cast<unsigned long long>(llrint(v * scale)));
+    if (av < 64.0) {                                   // the common case: one rounded value
+        atomicAdd(a, static_cast<unsigned long long>(llrint(v * scale)));
+        return;
+    }
+    // |v| >= 64: the former loop added copysign(64, v) n times and then the remainder. The n chunks are folded into one
+    // integer, n * llrint(64 scale) + llrint(r scale) with r = v - n * 64 (exact): modulo 2^64 the same accumulator
+    // bits as the loop, with one atomic and a bounded cost (the loop was unbounded for a huge v).
+    const double n = trunc(av * (1.0 / 64.0));
+    const double r = v - copysign(n * 64.0, v);
+    const unsigned long long chunk = static_cast<unsigned long long>(llrint(copysign(64.0, v) * scale));
+    atomicAdd(a, static_cast<unsigned long long>(n) * chunk + static_cast<unsigned long long>(llrint(r * scale)));
 }
 
 __device__ __forceinline__ void fix_add(double* addr, double v, double scale)
@@ -135,7 +163,7 @@ __device__ __forceinline__ void blockReduceAddEnergyFix(long long local_E, doubl
 
 __device__ __forceinline__ void blockReduceAddEnergy(double local_E, double* energy)
 {
-    blockReduceAddEnergyFix(static_cast<long long>(llrint(local_E * GFNFF_FIX_ENERGY)), energy);
+    blockReduceAddEnergyFix(fix_round(local_E, GFNFF_FIX_ENERGY), energy);
 }
 
 // ============================================================================
@@ -251,7 +279,7 @@ __global__ void k_dispersion(
             double t8   = 1.0 / (r8 + r0_8);
 
             double disp_sum = t6 + 2.0 * r4r2ij[tid] * t8;
-            local_Efx += static_cast<long long>(llrint(-C6[tid] * disp_sum * zetac6[tid] * GFNFF_FIX_ENERGY_DISP));   // per pair: list order does not matter
+            local_Efx += fix_round(-C6[tid] * disp_sum * zetac6[tid], GFNFF_FIX_ENERGY_DISP);   // per pair: list order does not matter
 
             // Gradient: dE/dr via chain rule
             double d6   = -6.0 * r4 * t6 * t6;
@@ -4507,3 +4535,16 @@ __global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_hb_fill_neighbors(
             if (nbr_idx[p] != B) nbC_flat[w++] = nbr_idx[p];
     }
 }
+
+// Claude Generated (Oct 2026): host access to d_gfnff_fix_bad, which lives in this translation unit only.
+void gfnffFixBadReadAsync(int* h_pinned, cudaStream_t stream)
+{
+    cudaMemcpyFromSymbolAsync(h_pinned, d_gfnff_fix_bad, sizeof(int), 0, cudaMemcpyDeviceToHost, stream);
+}
+
+void gfnffFixBadReset()
+{
+    const int zero = 0;
+    cudaMemcpyToSymbol(d_gfnff_fix_bad, &zero, sizeof(int));
+}
+

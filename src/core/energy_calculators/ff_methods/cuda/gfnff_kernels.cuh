@@ -1192,4 +1192,9 @@ __global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_hb_fill_neighbors(
     const int* __restrict__ nbC_offset,
     int* nbB_flat, int* nbC_flat);
 
+// Claude Generated (Oct 2026): fixed-point range / finiteness flag of the order-independent accumulators
+// (d_gfnff_fix_bad, gfnff_kernels.cu). Read-back queued on `stream` into a pinned int; reset after a bad step.
+void gfnffFixBadReadAsync(int* h_pinned, cudaStream_t stream);
+void gfnffFixBadReset();
+
 #endif // USE_CUDA

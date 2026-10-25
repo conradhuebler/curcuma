@@ -1362,15 +1362,29 @@ __global__ void k_multipole_ints(
 // addition is associative, FP64 atomicAdd is not); k_grad_fix_to_double converts dGrad/dEdcn in place at the end of
 // computeGradient. Range +-2048 Eh/Bohr per component. The buffers are zeroed first (0 bits == 0.0).
 constexpr double GRAD_FIX = 4503599627370496.0;   // 2^52
+/// Claude Generated (Oct 2026, CUDA/ROCm parity item 12): set (sticky) when a contribution was not finite or outside the
+/// accumulator range; XtbGpuContext::computeGradient reads and resets it after the synchronised accumulation and fails the
+/// device gradient (the caller falls back to the host gradient, as for any device error). Before, NaN became
+/// llrint(NaN) = LLONG_MIN, a silent wrong number, and an infinite force looped for ever in the chunk loop.
+__device__ int g_gfix_bad;
 __device__ __forceinline__ void gfix_add(double* addr, double v)
 {
     unsigned long long* a = reinterpret_cast<unsigned long long*>(addr);
-    while (fabs(v) >= 64.0) {
-        const double chunk = copysign(64.0, v);
-        atomicAdd(a, static_cast<unsigned long long>(llrint(chunk * GRAD_FIX)));
-        v -= chunk;
+    const double av = fabs(v);
+    if (!(av * GRAD_FIX < 9.2e18)) {                   // beyond the int64 range (or NaN/Inf): the sum is wrong anyway
+        atomicOr(&g_gfix_bad, 1);
+        if (!(av < 5.7e17)) return;                    // not finite or beyond 2^59: add nothing usable
     }
-    atomicAdd(a, static_cast<unsigned long long>(llrint(v * GRAD_FIX)));
+    if (av < 64.0) {                                   // the common case: one rounded value
+        atomicAdd(a, static_cast<unsigned long long>(llrint(v * GRAD_FIX)));
+        return;
+    }
+    // |v| >= 64: the former loop added copysign(64, v) n times and then the remainder; the n chunks are folded into
+    // one integer (same accumulator bits modulo 2^64, one atomic, bounded cost).
+    const double n = trunc(av * (1.0 / 64.0));
+    const double r = v - copysign(n * 64.0, v);
+    const unsigned long long chunk = static_cast<unsigned long long>(llrint(copysign(64.0, v) * GRAD_FIX));
+    atomicAdd(a, static_cast<unsigned long long>(n) * chunk + static_cast<unsigned long long>(llrint(r * GRAD_FIX)));
 }
 __global__ void k_grad_fix_to_double(int n, double* __restrict__ buf)
 {
@@ -7967,7 +7981,21 @@ bool XtbGpuContext::computeGradient(const double* P, const double* C, const doub
     m_impl->dEdcn.download(dEdcn_out, nat, stream);
     const bool ok_sync = cudaStreamSynchronize(stream) == cudaSuccess;
     m_impl->profMark("grad: download + sync");
-    return ok_sync;
+    if (!ok_sync) return false;
+    int fix_bad = 0;                                   // range / finiteness flag of the fixed-point accumulation
+    if (cudaMemcpyFromSymbol(&fix_bad, g_gfix_bad, sizeof(int)) != cudaSuccess) return false;
+    if (fix_bad != 0) {
+        const int zero = 0;
+        cudaMemcpyToSymbol(g_gfix_bad, &zero, sizeof(int));
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            std::fprintf(stderr, "[WARN] CUDA xTB gradient: a contribution was not finite or outside the fixed-point "
+                                 "range (+-2048 Eh/Bohr); the device gradient is rejected\n");
+        }
+        return false;
+    }
+    return true;
 }
 
 bool XtbGpuContext::setResidentOpenShell(double n_alpha, double n_beta)
