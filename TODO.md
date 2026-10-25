@@ -86,6 +86,9 @@ Stand.
 - **`charge_groups` `"rest": "per_fragment"`** (2026-10-25): Gruppen je Instanz eingefroren, geänderte Fragmentierung in der MD wird nicht erkannt
   (nur Codelesen; in keinem Lauf aufgetreten, Kontaktpaar-MD kam nicht unter 1,9 A, 2026-10-25); Fragmente des Skripts aus Kovalenzradien, nicht aus der GFN-FF-Topologie; periodisch, GPU, equilibrierte MD offen.
   Validierung nur PDMAEMA-Einheit/Dimer in Wasserclustern (n=16/8): Kraefte nicht signifikant besser, Relativenergien besser. [docs/POLYMERBUILD_CHARGE.md](docs/POLYMERBUILD_CHARGE.md)
+- **100-ps-Probelauf (AB)5 im Wassertropfen** (2026-10-25, n=1 je T, 303/338 K): Läufe gestartet, Auswertung (Stabilität, dann Rg, H-Brücken, g(r)) offen;
+  Läufe liegen im Sitzungs-Scratchpad (nicht dauerhaft). `-md.seed` wirkt auch nicht auf das CSVR-Rauschen (`SimpleMD::CSVR`, statischer Standardgenerator; Codelesen).
+  Etot-Sprungkriterium unter CSVR nicht anwendbar (Badaustausch), Erhaltungsgröße je Ausgabezeile fehlt. [docs/POLYMERBUILD_CHARGE.md](docs/POLYMERBUILD_CHARGE.md)
 - **H...Cl-Bindungserkennung als Energiestufe** (2026-10-25, starrer Scan n=1): frische GFN-FF-Topologie gibt +34 kcal/mol bei 1,7->1,6 A (ohne Gruppen),
   +50 bei 1,8->1,7 A mit Gruppen (Pass-2-Radien mit q(Cl) = -1), dazu -21 bei 1,2 A (N-Cl); ORCA/GFN2 glatt. In MD nicht erreicht; `auto` baut dort die
   Topologie ohne Bindungsterme neu, Gruppen bleiben ungeprueft (Codelesen). Entscheidung offen. [docs/POLYMERBUILD_CHARGE.md](docs/POLYMERBUILD_CHARGE.md)

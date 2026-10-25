@@ -297,6 +297,26 @@ topology at 1.6-1.7 A the bond detection gives a 34-50 kcal/mol step with or wit
 topology there without rebuilding the bonded terms and, with groups, keep the original constraint rows without a check
 (code reading, not run).
 
+## 100 ps probe run: setup (Oct 2026)
+
+Status: AI-generated setup, runs started, no results here (evaluation is a later task); first step towards Min et al. 2015
+(Soft Matter, doi 10.1039/c4sm02242d), NOT a replica of it. Scripts and runs in a session scratchpad (not kept).
+- System: (AB)5 as built (+5, 267 atoms) + 938 library waters on a 3.1 A lattice (seed 7, waters within 2.5 A of the chain
+  dropped), `-ionize -charge 5` -> 933 H2O + 5 Cl-, 3071 atoms. Radius rule: smallest R_build (0.1 A steps) with >= 6 A from
+  every chain atom to R_build and to R_eff, the radius of the same content at bulk density (30.0 A^3 per water, chain at an
+  assumed 1.32 g/cm3): chain r_max 13.2 A, R_build 20.2 A (6 A to R_build alone: 19.3 A, 787 waters).
+- Wall `-md.wall_type spheric -md.wall_radius 21.7` (R_build + 1.5 A). Group file and flags as in the recipe below.
+- Stages per T in {303, 338} K: (a) `-opt` 1000 + 273 steps (shared, not converged), (b) heating 50 K -> T over 10 ps
+  (`-md.temperature 50 -md.temp_ramp true -md.temp_schedule "T:steps:20000"`), (c) 20 ps and (d) 100 ps at T, each a restart
+  of the previous `drop.final.json` with `MaxTime`/`T` set in the file (a restart overrides `-md.max_time`, `-md.temperature`,
+  `-md.thermostat`, `-md.time_step`). dt 0.5 fs, CSVR 10 fs, dump every 200 steps, restart file every 10000 steps, 8 threads each.
+- Health checks after every stage (NaN, T within 5 %, waters outside the wall, Cl- evaporation, fragment count, group sums,
+  Etot+Wall jumps); under CSVR Etot is not conserved, so the jump limit is 1.0 Eh, not 0.05 Eh.
+- `-md.seed` has no effect in this branch (default-seeded static generators in `InitVelocities` and `CSVR`): both
+  temperatures start from the same velocity pattern and noise sequence.
+- Limits: 10 units (not 30), droplet with a wall (no bulk water, no PBC), no NPT, 100 ps (not 30 ns), one run per T (n=1),
+  formal charges +1/-1/0 with the H...Cl step at 1.7-1.8 A (see above), GFN-FF water not validated, groups fixed per instance.
+
 ## Recommended run recipe
 
 Build the chain with `-polymerbuild` (writes `polymer_A_final.groups.json`), solvate it (water first, then
