@@ -637,7 +637,7 @@ add_subdirectory(cli)
 # for native GFN1/GFN2 validation (see scripts/extract_xtb_params.py + xtb_native.*)
 add_subdirectory(sqm_reference)
 
-# Claude Generated (Oct 2026): property tests generated from the structure library (test_cases/structures/test_policy.json):
+# Claude Generated (Oct 2026): property tests generated from the structure library (test_cases/struct_test_policy.json):
 # translation/rotation/permutation invariance, sum of forces and torque, finite-difference gradient, repeat and thread
 # independence, CPU against CUDA. The selection is made by scripts/gen_struct_tests.py at configure time.
 find_package(Python3 COMPONENTS Interpreter QUIET)
@@ -650,7 +650,7 @@ if(Python3_Interpreter_FOUND)
     if(_struct_gen_rc EQUAL 0)
         include("${CMAKE_CURRENT_BINARY_DIR}/generated_struct_tests.cmake")
         set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-            "${CURCUMA_STRUCTURES_DIR}/manifest.json" "${CURCUMA_STRUCTURES_DIR}/test_policy.json"
+            "${CURCUMA_STRUCTURES_DIR}/manifest.json" "${CMAKE_CURRENT_SOURCE_DIR}/struct_test_policy.json"
             "${CURCUMA_STRUCT_REPO}/scripts/gen_struct_tests.py")
     else()
         message(WARNING "structure property tests not generated: ${_struct_gen_err}")

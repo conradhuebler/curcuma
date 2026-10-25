@@ -1,7 +1,7 @@
 # Generated structure property tests
 
 AI-generated (Oct 2026), machine-tested only. Property tests that need no stored reference value, generated from the
-structure library (`test_cases/structures/manifest.json`) and a policy (`test_cases/structures/test_policy.json`).
+structure library (`test_cases/structures/manifest.json`) and a policy (`test_cases/struct_test_policy.json`).
 
 ## What runs
 

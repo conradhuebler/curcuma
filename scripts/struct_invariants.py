@@ -5,7 +5,7 @@ without a stored reference value.
 
 Usage:
     struct_invariants.py --curcuma BIN --structure ID --method gfn2 [--charge Q] [--spin S] [--tests a,b,...]
-                         [--gpu cuda] [--tol-file test_cases/structures/test_policy.json] [--verbose]
+                         [--gpu cuda] [--tol-file test_cases/struct_test_policy.json] [--verbose]
 
 Tests (names as in `--tests`):
   translate   energy and gradient unchanged by a rigid translation
@@ -128,7 +128,7 @@ def main():
     ap.add_argument("--spin", type=int, default=0)
     ap.add_argument("--tests", default=DEFAULT_TESTS)
     ap.add_argument("--gpu", default="")
-    ap.add_argument("--policy", default=os.path.join(REPO, "test_cases", "structures", "test_policy.json"))
+    ap.add_argument("--policy", default=os.path.join(REPO, "test_cases", "struct_test_policy.json"))
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
