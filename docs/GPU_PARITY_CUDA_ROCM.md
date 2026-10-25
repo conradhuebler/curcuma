@@ -63,3 +63,11 @@ Duplicate implementations of the same function came from the two branches: `stag
 `devel/methods` version computes the offsets serially) and the open-shell gradient occupations in
 `calculateGradientGpu` (`devel/methods` kept; same weights `eps_eff = f eps / 2`). Both were merged without a CUDA
 compile; they need a CUDA build and the CUDA tests before the result is trusted.
+
+CUDA check of that merge (Oct 25, 2026, RTX A4500 x 4, `fix/cuda-parity-gaps` on `devel/methods`, AI, machine-tested): `make` in
+`release/` exit 0; `ctest -R "cuda|gpu"` 206 of 206; open-shell gradient (the `calculateGradientGpu` occupations) GPU against CPU on
+water dimer cation, acetic acid dimer cation and triplet, caffeine cation, gfn1 and gfn2 (8 cases, n = 1 each): max |dg| 1.1e-5 Eh/A,
+|dE| <= 1.1e-10 Eh. The device HB upload (`stagedHBondUpload`) is exercised by every GFN-FF GPU test and MD above; no run saw a difference
+to the CPU method. Not run: the full 524-test `ctest`, MOR41/GMTKN55 regression sets on the merged binary (95 MOR41 structures were run
+for the factor probe only, without comparing energies).
+
