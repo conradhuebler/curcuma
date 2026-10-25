@@ -94,6 +94,11 @@ struct DeltaMLErrors {
     // relative energy.
     double energy_mae_centered = 0.0; ///< [Eh]
 
+    // Claude Generated (Oct 2026): signed errors (model minus reference). The minimum is the
+    // deepest "energy hole" of the set, which a mean error averages away.
+    double energy_mean_signed = 0.0; ///< [Eh]
+    double energy_min_signed = 0.0;  ///< [Eh]
+
     double force_rmse = 0.0; ///< [Eh/Angstrom], 0 if the set carries no gradients
     double spearman = 0.0;   ///< rank correlation of predicted vs reference energies
 

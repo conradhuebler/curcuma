@@ -313,8 +313,12 @@ void SimpleMD::LoadControlJson()
     m_max_top_diff = m_config.get<int>("MaxTopoDiff", 15);  // Not in PARAM block, using default
     m_seed = m_config.get<int>("seed");
     m_velocity_seed = (m_seed > 0) ? m_seed : 0; // 0: legacy fixed sequence
-    if (m_velocity_seed > 0)
+    if (m_velocity_seed > 0) {
         m_velocity_rng.seed(static_cast<std::default_random_engine::result_type>(m_velocity_seed));
+        // Claude Generated (Oct 2026): own stream for the thermostat, decorrelated from the velocities.
+        std::seed_seq thermostat_seq{ static_cast<unsigned>(m_velocity_seed), 0x7468u };
+        m_thermostat_rng.seed(thermostat_seq);
+    }
     m_threads = m_config.get<int>("threads");
 
     // Claude Generated 2025: System Control & Output Parameters
@@ -2518,7 +2522,9 @@ void SimpleMD::ApplyThermostatRegion(const std::vector<int>& atoms, double T0, i
             return;
         const double Ekin_target = 0.5 * kb_Eh * T0 * dof;
         const double c = std::exp(-(m_dT / 2.0 * m_respa) / m_coupling);
-        static std::mt19937 gen{ std::random_device{}() };
+        static std::mt19937 legacy_gen{ std::random_device{}() };
+        // Claude Generated (Oct 2026): a seeded run draws from its own engine (m_thermostat_rng).
+        std::mt19937& gen = (m_velocity_seed > 0) ? m_thermostat_rng : legacy_gen;
         std::normal_distribution<double> dnorm{ 0.0, 1.0 };
         std::chi_squared_distribution<double> dchi{ static_cast<double>(dof) };
         const double R = dnorm(gen);
@@ -2533,17 +2539,24 @@ void SimpleMD::ApplyThermostatRegion(const std::vector<int>& atoms, double T0, i
             m_eigen_velocities.data()[3 * i + 2] *= alpha;
         }
     } else if (type == ThermostatType::Andersen) {
-        static std::default_random_engine generator;
+        static std::default_random_engine legacy_generator;
         const double probability = m_andersen * m_dT;
         std::uniform_real_distribution<double> uniform_dist(0.0, 1.0);
-        for (int i : atoms) {
-            if (uniform_dist(generator) < probability) {
-                std::normal_distribution<double> distribution(0.0, std::sqrt(kb_Eh * T0 * m_eigen_inv_masses.data()[3 * i]));
-                m_eigen_velocities.data()[3 * i + 0] = (m_eigen_velocities.data()[3 * i + 0] + distribution(generator)) / 2.0;
-                m_eigen_velocities.data()[3 * i + 1] = (m_eigen_velocities.data()[3 * i + 1] + distribution(generator)) / 2.0;
-                m_eigen_velocities.data()[3 * i + 2] = (m_eigen_velocities.data()[3 * i + 2] + distribution(generator)) / 2.0;
+        // Claude Generated (Oct 2026): a seeded run draws from its own engine (m_thermostat_rng).
+        const auto collide = [&](auto& generator) {
+            for (int i : atoms) {
+                if (uniform_dist(generator) < probability) {
+                    std::normal_distribution<double> distribution(0.0, std::sqrt(kb_Eh * T0 * m_eigen_inv_masses.data()[3 * i]));
+                    m_eigen_velocities.data()[3 * i + 0] = (m_eigen_velocities.data()[3 * i + 0] + distribution(generator)) / 2.0;
+                    m_eigen_velocities.data()[3 * i + 1] = (m_eigen_velocities.data()[3 * i + 1] + distribution(generator)) / 2.0;
+                    m_eigen_velocities.data()[3 * i + 2] = (m_eigen_velocities.data()[3 * i + 2] + distribution(generator)) / 2.0;
+                }
             }
-        }
+        };
+        if (m_velocity_seed > 0)
+            collide(m_thermostat_rng);
+        else
+            collide(legacy_generator);
     }
 }
 
@@ -5052,8 +5065,18 @@ void SimpleMD::CSVR()
         dchi = std::chi_squared_distribution<float>(static_cast<float>(m_dof));
         csvr_last_dof = m_dof;
     }
-    double R = d(gen);
-    double SNf = dchi(gen);
+    double R, SNf;
+    if (m_velocity_seed > 0) {
+        // Claude Generated (Oct 2026): seeded run -> per-instance engine and fresh distributions,
+        // so concurrent runs do not share a stream (see m_thermostat_rng).
+        std::normal_distribution<> dl{ 0, 1 };
+        std::chi_squared_distribution<float> dchil{ static_cast<float>(m_dof) };
+        R = dl(m_thermostat_rng);
+        SNf = dchil(m_thermostat_rng);
+    } else {
+        R = d(gen);
+        SNf = dchi(gen);
+    }
     double alpha2 = c + (1 - c) * (SNf + R * R) * Ekin_target / (m_dof * m_Ekin) + 2 * R * sqrt(c * (1 - c) * Ekin_target / (m_dof * m_Ekin));
     m_Ekin_exchange += m_Ekin * (alpha2 - 1);
     double alpha = sqrt(alpha2);
@@ -5069,18 +5092,25 @@ void SimpleMD::CSVR()
 
 void SimpleMD::Andersen()
 {
-    static std::default_random_engine generator;
+    static std::default_random_engine legacy_generator;
     double probability = m_andersen * m_dT;
     std::uniform_real_distribution<double> uniform_dist(0.0, 1.0);
-    for (size_t i = 0; i < m_natoms; ++i) {
-        if (uniform_dist(generator) < probability) {
-            std::normal_distribution<double> distribution(0.0, std::sqrt(kb_Eh * m_T0 * m_eigen_inv_masses.data()[3 * i]));
-            m_eigen_velocities.data()[3 * i + 0] = (m_eigen_velocities.data()[3 * i + 0] + distribution(generator)) / 2.0;
-            m_eigen_velocities.data()[3 * i + 1] = (m_eigen_velocities.data()[3 * i + 1] + distribution(generator)) / 2.0;
-            m_eigen_velocities.data()[3 * i + 2] = (m_eigen_velocities.data()[3 * i + 2] + distribution(generator)) / 2.0;
-            m_seed += 3;
+    // Claude Generated (Oct 2026): a seeded run draws from its own engine (m_thermostat_rng).
+    const auto collide = [&](auto& generator) {
+        for (size_t i = 0; i < m_natoms; ++i) {
+            if (uniform_dist(generator) < probability) {
+                std::normal_distribution<double> distribution(0.0, std::sqrt(kb_Eh * m_T0 * m_eigen_inv_masses.data()[3 * i]));
+                m_eigen_velocities.data()[3 * i + 0] = (m_eigen_velocities.data()[3 * i + 0] + distribution(generator)) / 2.0;
+                m_eigen_velocities.data()[3 * i + 1] = (m_eigen_velocities.data()[3 * i + 1] + distribution(generator)) / 2.0;
+                m_eigen_velocities.data()[3 * i + 2] = (m_eigen_velocities.data()[3 * i + 2] + distribution(generator)) / 2.0;
+                m_seed += 3;
+            }
         }
-    }
+    };
+    if (m_velocity_seed > 0)
+        collide(m_thermostat_rng);
+    else
+        collide(legacy_generator);
 }
 void SimpleMD::NoseHover()
 {

@@ -757,6 +757,11 @@ private:
     /// existing runs and golden values do not change; before this the seed never reached the velocities.
     int m_velocity_seed = 0;
     std::default_random_engine m_velocity_rng;
+    /// Claude Generated (Oct 2026): with a positive seed the stochastic thermostats (CSVR, Andersen,
+    /// global and regional) draw from this per-instance engine. The legacy engines are process-wide
+    /// statics, so concurrent MD runs (MDThread pools) consumed one shared stream in scheduling order
+    /// and two runs with the same seed diverged. Not stored in restart files.
+    std::mt19937 m_thermostat_rng;
     int m_time_step = 0;
     int m_dof = 0;
     int m_mtd_time = 0, m_loop_time = 0;

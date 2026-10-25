@@ -130,6 +130,47 @@ nominates its own labels, and the model is refitted before sampling continues. M
 a 9-atom test: with the threshold at 0.5 a cycle collected 4 frames instead of 44, three of
 which had tripped the threshold.
 
+**Reproducibility (fixed Oct 2026).** `-activelearn.seed` gives each sampling run the seed
+`seed + 1000 * cycle + run`, which reaches SimpleMD (initial velocities, `-md.seed` since
+f47e17d2). The CSVR and Andersen thermostats, however, drew from process-wide static engines;
+the concurrent runs of a cycle consumed that one stream in scheduling order, so two `-threads 4`
+runs with the same seed differed already in cycle 0 (9-atom test: 2/2 runs different; with
+`-simplemd.thermostat berendsen`, which draws nothing, 2/2 identical; with `-threads 1` identical).
+A positive seed now gives every SimpleMD its own thermostat engine (unseeded MD keeps the old
+streams, trajectory md5 unchanged); trajectory files are read in sorted order (directory order is
+unspecified). Same seed, input and binary: byte-identical curve and dataset at `-threads 1`, 4
+and 8 (9-atom test) and at 4 and 8 on peo8 (12 cycles, 3 runs; labels are thread-independent
+since Oct 2026). Seeded `-md` runs (seed > 0)
+no longer reproduce trajectories of f47e17d2 to a36d9b12, since their thermostat stream changed.
+
+**Prospective validation (Oct 2026).** Each cycle also labels `al_validation_frames` (10) frames
+drawn at random from its own sampling dynamics, never the selected candidates, and scores the
+model that drove these dynamics on them before the refit: relative energy MAE, mean signed error
+and deepest hole (most negative model minus reference energy, absolute, so a model offset
+counts) in kcal/mol, gradient RMSE. The frames then join the training data (cycle 0: training
+only). The training-set error in the log rises with more data and says nothing about holes;
+this error is measured where the dynamics on the learned surface goes. The curve file
+`<basename>.deltaml.learning_curve.dat` keeps its six columns and appends `val_n val_E_MAE_kcal
+val_mean_signed_kcal val_hole_kcal val_F_RMSE_Eh_A` (`0 nan nan nan nan` where none). The
+converging cycle writes no curve row (as before); its numbers are in the log. Cost on peo8 (58 atoms,
+GFN2, 12 cycles, threshold 0.3, 4 x 10 ps at 300 K, 15 candidates, 1 run each): 274 instead of 158
+labels (+10 per cycle), wall time 285 instead of 272 s (GFN2 labels are cheap here; with a DFT
+reference the label count dominates). Validation hole of the model entering the cycle: -51 (cycle 2),
+-10 to -14 (cycles 3 to 5), -1.9 to -8 kcal/mol (cycles 9 to 12); E_MAE 1.4 to 2.9 kcal/mol from
+cycle 6 on. The run did not converge at the defaults (1.0 / 2.0 kcal/mol).
+
+**Convergence (Oct 2026).** `al_criterion` `uncertainty` (indicator, the old rule), `validation`
+(MAE <= `al_target_energy`, no hole below `-al_target_hole`) or `both` (default), held in
+`al_patience` (2) consecutive cycles. The log names the criterion that stopped the run, or says
+"not converged". On convergence the validation frames stay in the dataset file, the model is not
+refitted. With `validation` or `both`, a cycle without any frame above the indicator threshold no
+longer ends the run while the validation fails: candidates are then picked among all frames
+(farthest point, validation frames excluded). Without that, peo8 stopped in cycle 10 at indicator
+0.26 with a validation hole of -7.9 kcal/mol. `uncertainty` with `al_validation_frames 0` (patience is ignored for it) is byte-identical to the
+code before this change (9-atom test, converging and non-converging run). Motivation: on peo8
+the indicator reported convergence at the default threshold (87 labels) with the torsion
+distribution still wrong (docs/DELTA_ML_TRAINING_DATA_2026-10.md).
+
 **The known weakness is structural.** Sampling happens on the surface being learned, so
 cycle 0 only visits what the base method considers relevant. If the reference surface has a
 minimum elsewhere, that region is never sampled and never learned, and the model confirms
@@ -186,6 +227,11 @@ arguments prints the summary; the full list comes from the parameter registry.
 | `-activelearn.energy_model_n_centers` | 0 | centres of the energy model; 0 = `n_centers` |
 | `-activelearn.energy_model_lambda` | 1e-4 | regulariser of the energy model (see "Held-out accuracy") |
 | `-activelearn.energy_model_kernel_sigma` | 0 (auto) | kernel width of the energy model; 0 = median heuristic |
+| `-activelearn.al_validation_frames` | 10 | `learn`: random frames of each cycle's dynamics, scored with the current model before the refit, then trained on; 0 = off |
+| `-activelearn.al_criterion` | `both` | `learn` stop rule: `uncertainty`, `validation` or `both` |
+| `-activelearn.al_target_energy` | 1.0 | validation: largest relative energy MAE [kcal/mol] |
+| `-activelearn.al_target_hole` | 2.0 | validation: no frame with model minus reference below `-al_target_hole` [kcal/mol] |
+| `-activelearn.al_patience` | 2 | consecutive cycles the criterion `validation` or `both` must hold; `uncertainty` always stops at the first |
 
 The `acsf_*` values apply to every fit of a run (all cycles in `learn` mode, the centre sweep)
 and are stored in the model's `descriptor` block, which `-method deltaml:` reads back. A

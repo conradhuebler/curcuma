@@ -35,7 +35,12 @@ measured on one molecule: forces 4x better on held-out conformers, but ranking a
 
 ## Verification status (AI-generated, machine-tested)
 
-Automated: `ctest -R deltaml` (unit test `test_deltaml` + CLI tests 01-04; 03 is the FD gate of the energy model, 04 checks labels against fresh `-sp`).
+Automated: `ctest -R deltaml` (unit test `test_deltaml` + CLI tests 01-05; 03 is the FD gate of the energy model, 04 checks labels against fresh `-sp`,
+05 the `learn` loop: same seed -> byte-identical curve/dataset, validation columns, `al_criterion`).
+
+- `learn` reproducible since Oct 2026 (per-instance thermostat engine in SimpleMD for seed > 0, sorted trajectory reading): byte-identical at -threads 1/4/8 on 9 atoms and 4/8 on peo8
+- `DeltaMLErrors::energy_mean_signed` / `energy_min_signed` (model minus reference): the latter is the "hole" of the `learn` validation (`al_validation_frames`, `al_criterion`, docs/DELTA_ML.md)
+- Not tested: validation frames with `al_onthefly`, criterion defaults on molecules other than peo8 and dimethyl ether; at defaults peo8 did not converge in 12 cycles
 
 - Descriptor Jacobian vs. finite differences: h^2 convergence to the roundoff floor
   (1.5e-5 at h=1e-3 down to 6e-10 at h=1e-6); translation invariance 2e-16, rotation 1e-15

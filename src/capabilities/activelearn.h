@@ -94,7 +94,9 @@ PARAM(use_forces, Bool, true,
     "Required for optimisation and dynamics on the corrected surface.",
     "Algorithm", {})
 PARAM(seed, Int, 42,
-    "Seed for the train/test split and sampling heuristics, fixed so runs are reproducible.",
+    "Seed for the train/test split, the sampling dynamics (initial velocities and thermostat "
+    "of every run) and the draw of the validation frames. Same seed, same input, same binary: "
+    "bit-identical 'learn' runs (checked at -threads 1, 4 and 8 on a 9-atom test).",
     "Algorithm", {})
 
 PARAM(al_cycles, Int, 5,
@@ -146,6 +148,36 @@ PARAM(al_onthefly_threshold, Double, 0.9,
     "ActiveLearning", {})
 PARAM(al_initial, Int, 15,
     "Structures labelled in cycle 0, before any model exists.", "ActiveLearning", {})
+// Prospective validation and convergence (Claude Generated, October 2026).
+PARAM(al_validation_frames, Int, 10,
+    "Frames drawn uniformly at random from each cycle's sampling dynamics (excluding the "
+    "selected candidates) and labelled in addition to them. The model entering the cycle is "
+    "evaluated on them BEFORE it is refitted: an unbiased error on exactly the regions the "
+    "dynamics on the learned surface visits, including energy holes the training error cannot "
+    "show. Afterwards they join the training data. Cycle 0 has no model, its frames only go "
+    "into training. 0 switches the validation off.",
+    "ActiveLearning", {})
+PARAM(al_criterion, String, "both",
+    "Convergence criterion: 'uncertainty' (no sampled structure above al_uncertainty, the "
+    "original rule), 'validation' (validation error within al_target_energy and no hole deeper "
+    "than al_target_hole) or 'both' (both at once). Must hold in al_patience consecutive cycles. "
+    "'validation' and 'both' need al_validation_frames > 0. Measured on peo8 (58 atoms): the "
+    "uncertainty rule alone stopped at 87 labels with the torsion distribution still wrong.",
+    "ActiveLearning", {})
+PARAM(al_target_energy, Double, 1.0,
+    "Validation criterion: largest allowed relative (centred) energy MAE of the model on the "
+    "cycle's validation frames [kcal/mol].",
+    "ActiveLearning", {})
+PARAM(al_target_hole, Double, 2.0,
+    "Validation criterion: deepest allowed energy hole [kcal/mol], i.e. no validation frame may "
+    "have model minus reference energy below -al_target_hole. Absolute energies, so a constant "
+    "offset of the model counts as well.",
+    "ActiveLearning", {})
+PARAM(al_patience, Int, 2,
+    "Consecutive cycles in which al_criterion must hold before the run stops (criteria "
+    "'validation' and 'both'). The plain 'uncertainty' criterion always stops at the first cycle "
+    "that meets it (the behaviour before October 2026).",
+    "ActiveLearning", {})
 
 PARAM(dataset, String, "",
     "Labelled dataset (JSON as written by -activelearn, <basename>.deltaml.dataset.json) to "
@@ -282,10 +314,25 @@ private:
      * candidates that exceed the uncertainty threshold.
      *
      * @param max_uncertainty out, largest indicator seen; the convergence signal
+     * @param picked_indices optional out, index of each pick in `candidates`
+     * @param ignore_threshold true: every candidate is eligible, not only those above
+     *        al_uncertainty (used when the indicator is satisfied but the validation is not)
      */
     std::vector<Molecule> selectCandidates(const std::vector<Molecule>& candidates,
         const curcuma::ml::DeltaMLModel& model, bool have_model, int wanted,
-        double& max_uncertainty);
+        double& max_uncertainty, std::vector<std::size_t>* picked_indices = nullptr,
+        bool ignore_threshold = false);
+
+    /**
+     * @brief Draw up to al_validation_frames frames uniformly at random, without replacement.
+     *
+     * Frames listed in `excluded` (the selected candidates) are skipped, so no structure is
+     * labelled twice. The draw is seeded from (seed, cycle) and therefore reproducible.
+     * Claude Generated (October 2026)
+     */
+    std::vector<Molecule> drawValidationFrames(const std::vector<Molecule>& frames,
+        const std::vector<std::size_t>& excluded, int cycle,
+        std::vector<std::size_t>* drawn = nullptr) const;
 
     /*! \brief Training options of the main (joint) fit with M = n_centers centres. */
     curcuma::ml::DeltaMLTrainingOptions trainingOptions(int n_centers) const;
@@ -357,6 +404,12 @@ private:
     int m_al_initial = 15;
     bool m_al_onthefly = false;
     double m_al_onthefly_threshold = 0.9;
+    // Prospective validation and convergence (Claude Generated, October 2026); values from the PARAM block.
+    int m_al_validation_frames = 10;
+    std::string m_al_criterion = "both";
+    double m_al_target_energy = 1.0; ///< kcal/mol
+    double m_al_target_hole = 2.0;   ///< kcal/mol
+    int m_al_patience = 2;
 
     /* Anchor structure and, more importantly, the bond graph taken from it. Only the graph
        is pinned for later structures; everything geometry dependent is recomputed where it

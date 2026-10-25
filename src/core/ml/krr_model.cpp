@@ -751,6 +751,10 @@ DeltaMLErrors DeltaMLModel::evaluate(const MLDataset& data) const
         mean_err += d;
     }
     mean_err /= n;
+    e.energy_mean_signed = mean_err;
+    e.energy_min_signed = pred[0] - ref[0];
+    for (std::size_t i = 1; i < pred.size(); ++i)
+        e.energy_min_signed = std::min(e.energy_min_signed, pred[i] - ref[i]);
     e.energy_mae = sae / n;
     e.energy_rmse = std::sqrt(sse / n);
 

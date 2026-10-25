@@ -35,10 +35,13 @@
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
 #include <algorithm>
+#include <cctype>
+#include <cmath>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <random>
 #include <sstream>
 #include <stdexcept>
 
@@ -243,6 +246,14 @@ void ActiveLearn::LoadControlJson()
     m_al_initial = Json2KeyWord<int>(m_defaults, "al_initial");
     m_al_onthefly = Json2KeyWord<bool>(m_defaults, "al_onthefly");
     m_al_onthefly_threshold = Json2KeyWord<double>(m_defaults, "al_onthefly_threshold");
+    // Prospective validation and convergence (Claude Generated, October 2026).
+    m_al_validation_frames = std::max(0, Json2KeyWord<int>(m_defaults, "al_validation_frames"));
+    m_al_criterion = Json2KeyWord<std::string>(m_defaults, "al_criterion");
+    std::transform(m_al_criterion.begin(), m_al_criterion.end(), m_al_criterion.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    m_al_target_energy = Json2KeyWord<double>(m_defaults, "al_target_energy");
+    m_al_target_hole = Json2KeyWord<double>(m_defaults, "al_target_hole");
+    m_al_patience = std::max(1, Json2KeyWord<int>(m_defaults, "al_patience"));
     m_center_sweep = parseIntList(Json2KeyWord<std::string>(m_defaults, "center_sweep"));
     m_dataset_path = Json2KeyWord<std::string>(m_defaults, "dataset");
 
@@ -758,18 +769,30 @@ std::vector<Molecule> ActiveLearn::sampleStructures(
     CurcumaLogger::set_verbosity(saved_verbosity);
 
     // Collect the trajectories, then remove the scratch the dynamics left behind.
+    // Claude Generated (Oct 2026): directory_iterator has no defined order, and the frame order
+    // feeds the selection (start point and ties of the farthest-point pick) and the draw of the
+    // validation frames. Read the runs and their files in sorted order, so a fixed seed gives a
+    // fixed candidate list.
     std::vector<std::filesystem::path> scratch;
     for (const auto& entry : std::filesystem::directory_iterator(std::filesystem::current_path())) {
         const std::string name = entry.path().filename().string();
         if (name.rfind(tag + ".t", 0) != 0)
             continue;
         scratch.push_back(entry.path());
-        if (!entry.is_directory())
+    }
+    std::sort(scratch.begin(), scratch.end());
+    for (const auto& dir : scratch) {
+        if (!std::filesystem::is_directory(dir))
             continue;
-        for (const auto& f : std::filesystem::directory_iterator(entry.path())) {
+        std::vector<std::string> trajectories;
+        for (const auto& f : std::filesystem::directory_iterator(dir)) {
             const std::string p = f.path().string();
             if (p.size() < 8 || p.substr(p.size() - 8) != ".trj.xyz")
                 continue;
+            trajectories.push_back(p);
+        }
+        std::sort(trajectories.begin(), trajectories.end());
+        for (const auto& p : trajectories) {
             FileIterator iter(p, true);
             while (!iter.AtEnd())
                 frames.push_back(iter.Next());
@@ -794,10 +817,13 @@ std::vector<Molecule> ActiveLearn::sampleStructures(
 }
 
 std::vector<Molecule> ActiveLearn::selectCandidates(const std::vector<Molecule>& candidates,
-    const DeltaMLModel& model, bool have_model, int wanted, double& max_uncertainty)
+    const DeltaMLModel& model, bool have_model, int wanted, double& max_uncertainty,
+    std::vector<std::size_t>* picked_indices, bool ignore_threshold)
 {
     max_uncertainty = 0.0;
     std::vector<Molecule> picked;
+    if (picked_indices)
+        picked_indices->clear();
     if (candidates.empty() || wanted <= 0)
         return picked;
 
@@ -808,7 +834,7 @@ std::vector<Molecule> ActiveLearn::selectCandidates(const std::vector<Molecule>&
         if (have_model)
             u = model.uncertainty(candidates[i].Atoms(), candidates[i].getGeometry());
         max_uncertainty = std::max(max_uncertainty, u);
-        if (!have_model || u > m_al_uncertainty)
+        if (!have_model || ignore_threshold || u > m_al_uncertainty)
             pool.push_back(i);
     }
     if (pool.empty())
@@ -850,6 +876,8 @@ std::vector<Molecule> ActiveLearn::selectCandidates(const std::vector<Molecule>&
     for (int p = 0; p < take; ++p) {
         taken[current] = 1;
         picked.push_back(candidates[pool[current]]);
+        if (picked_indices)
+            picked_indices->push_back(pool[current]);
         for (int k = 0; k < n; ++k) {
             if (taken[k])
                 continue;
@@ -870,6 +898,42 @@ std::vector<Molecule> ActiveLearn::selectCandidates(const std::vector<Molecule>&
     }
 
     return picked;
+}
+
+std::vector<Molecule> ActiveLearn::drawValidationFrames(const std::vector<Molecule>& frames,
+    const std::vector<std::size_t>& excluded, int cycle, std::vector<std::size_t>* drawn) const
+{
+    if (drawn)
+        drawn->clear();
+    std::vector<Molecule> out;
+    if (m_al_validation_frames <= 0 || frames.empty())
+        return out;
+    std::vector<char> skip(frames.size(), 0);
+    for (std::size_t i : excluded)
+        if (i < skip.size())
+            skip[i] = 1;
+    std::vector<std::size_t> free;
+    for (std::size_t i = 0; i < frames.size(); ++i)
+        if (!skip[i])
+            free.push_back(i);
+
+    // Partial Fisher-Yates shuffle with an engine of its own, seeded from (seed, cycle): the
+    // draw neither consumes nor perturbs any other random stream of the run.
+    std::seed_seq seq{ static_cast<unsigned>(m_seed), static_cast<unsigned>(cycle), 0x76616cu };
+    std::mt19937 rng(seq);
+    const std::size_t take = std::min(free.size(), static_cast<std::size_t>(m_al_validation_frames));
+    for (std::size_t k = 0; k < take; ++k) {
+        std::uniform_int_distribution<std::size_t> pick(k, free.size() - 1);
+        std::swap(free[k], free[pick(rng)]);
+    }
+    free.resize(take);
+    // Label in trajectory order, so the dataset order does not depend on the shuffle.
+    std::sort(free.begin(), free.end());
+    for (std::size_t i : free)
+        out.push_back(frames[i]);
+    if (drawn)
+        *drawn = free;
+    return out;
 }
 
 void ActiveLearn::runLearn()
@@ -893,7 +957,33 @@ void ActiveLearn::runLearn()
         m_model_path.empty() ? (Basename() + ".deltaml.json") : m_model_path);
     const std::string curve_path = outputPath(Basename() + ".deltaml.learning_curve.dat");
     std::ofstream curve(curve_path);
-    curve << "# cycle  n_train  E_MAE_kcal  F_RMSE_Eh_A  spearman  max_uncertainty\n";
+    // Columns 1-6 as before October 2026. The val_* columns (Claude Generated, October 2026) are
+    // the prospective validation of the model ENTERING the cycle, on frames of this cycle's
+    // sampling dynamics, measured before the refit; nan where there is none (cycle 0, or
+    // al_validation_frames 0). val_hole_kcal is the most negative model-minus-reference energy.
+    curve << "# cycle  n_train  E_MAE_kcal  F_RMSE_Eh_A  spearman  max_uncertainty"
+             "  val_n  val_E_MAE_kcal  val_mean_signed_kcal  val_hole_kcal  val_F_RMSE_Eh_A\n";
+
+    const double kcal = 627.5094740631;
+    const bool criterion_known = m_al_criterion == "uncertainty" || m_al_criterion == "validation"
+        || m_al_criterion == "both";
+    if (!criterion_known) {
+        CurcumaLogger::error_fmt(
+            "activelearn: unknown al_criterion '{}' (uncertainty | validation | both)", m_al_criterion);
+        return;
+    }
+    if (m_al_criterion != "uncertainty" && m_al_validation_frames <= 0)
+        CurcumaLogger::warn_fmt("activelearn: al_criterion '{}' needs al_validation_frames > 0; "
+                                "with 0 the run cannot converge and runs all {} cycles",
+            m_al_criterion, m_al_cycles);
+    CurcumaLogger::result_fmt(
+        "activelearn: convergence criterion '{}' in {} consecutive cycle(s); indicator <= {:.4f}, "
+        "validation ({} frames per cycle) E_MAE <= {:.3f} kcal/mol and no hole below -{:.3f} kcal/mol",
+        m_al_criterion, m_al_patience, m_al_uncertainty, m_al_validation_frames,
+        m_al_target_energy, m_al_target_hole);
+    int streak = 0;
+    bool converged = false;
+    bool stopped_early = false; ///< loop left before al_cycles for a reason other than convergence
 
     for (int cycle = 0; cycle < m_al_cycles; ++cycle) {
         CurcumaLogger::result_fmt("activelearn: --- cycle {} of {} ---", cycle + 1, m_al_cycles);
@@ -920,6 +1010,7 @@ void ActiveLearn::runLearn()
         const std::vector<Molecule> frames = sampleStructures(md_method, pool_seeds, cycle);
         if (frames.empty()) {
             CurcumaLogger::warn("activelearn: sampling produced no frames; stopping");
+            stopped_early = true;
             break;
         }
 
@@ -928,8 +1019,9 @@ void ActiveLearn::runLearn()
         // In on-the-fly mode the trajectories already nominated their candidates by stopping
         // on them; selection then only has to thin them down for diversity.
         const std::vector<Molecule>& pool = m_triggered.empty() ? frames : m_triggered;
-        const std::vector<Molecule> picked
-            = selectCandidates(pool, model, have_model, wanted, max_unc);
+        std::vector<std::size_t> picked_idx;
+        std::vector<Molecule> picked
+            = selectCandidates(pool, model, have_model, wanted, max_unc, &picked_idx);
 
         // Report the indicator together with the descriptor-space distance it corresponds
         // to, in units of the kernel width. The bounded indicator alone saturates near one
@@ -942,27 +1034,132 @@ void ActiveLearn::runLearn()
             "(nearest centre at {:.2f} sigma), {} selected for reference calculation",
             frames.size(), max_unc, d_over_sigma, picked.size());
 
-        if (have_model && max_unc <= m_al_uncertainty) {
-            CurcumaLogger::success_fmt(
-                "activelearn: converged -- no sampled structure exceeds the indicator "
-                "threshold {:.4f}. Note this certifies coverage of the sampled region, "
-                "not accuracy.",
-                m_al_uncertainty);
-            break;
+        // Prospective validation (Claude Generated, October 2026): frames drawn at random from
+        // this cycle's dynamics, labelled and scored with the model that drove the dynamics,
+        // before any refit. They come from the frame list, never from the candidates picked
+        // above, so no structure is labelled twice. Cycle 0 has no model: its frames are only
+        // added to the training data.
+        MLDataset validation;
+        std::vector<std::size_t> validation_idx; // indices in `frames`
+        bool validated = false;
+        DeltaMLErrors ve;
+        if (m_al_validation_frames > 0) {
+            const std::vector<std::size_t> excluded
+                = (&pool == &frames) ? picked_idx : std::vector<std::size_t>{};
+            const std::vector<Molecule> vframes
+                = drawValidationFrames(frames, excluded, cycle, &validation_idx);
+            if (!vframes.empty()) {
+                if (!labelStructures(vframes, validation)) {
+                    stopped_early = true;
+                    break;
+                }
+                if (have_model) {
+                    ve = model.evaluate(validation);
+                    validated = true;
+                    CurcumaLogger::result_fmt(
+                        "activelearn: validation on {} new frames (model of the previous cycle, before "
+                        "refit): E_MAE {:.4f} kcal/mol, mean signed {:+.4f} kcal/mol, deepest hole "
+                        "{:+.4f} kcal/mol, gradient RMSE {:.6f} Eh/A",
+                        ve.n_structures, ve.energy_mae_centered * kcal, ve.energy_mean_signed * kcal,
+                        ve.energy_min_signed * kcal, ve.force_rmse);
+                } else {
+                    CurcumaLogger::result_fmt("activelearn: {} validation frames labelled; no model "
+                                              "yet, they only enter the training data",
+                        validation.size());
+                }
+            }
+        }
+        const auto add_validation = [&]() {
+            for (std::size_t i = 0; i < validation.size(); ++i) {
+                MLStructure s = validation[i];
+                s.cycle = cycle;
+                data.add(s);
+            }
+        };
+
+        // Convergence: the chosen criterion in m_al_patience consecutive cycles.
+        if (have_model) {
+            const bool unc_ok = max_unc <= m_al_uncertainty;
+            const bool val_ok = validated && ve.energy_mae_centered * kcal <= m_al_target_energy
+                && ve.energy_min_signed * kcal >= -m_al_target_hole;
+            const bool met = (m_al_criterion == "uncertainty") ? unc_ok
+                : (m_al_criterion == "validation")             ? val_ok
+                                                               : (unc_ok && val_ok);
+            // The plain uncertainty criterion keeps its old meaning: stop at the first cycle in which
+            // it is met (patience applies to the criteria that use the validation frames).
+            const int patience_needed = (m_al_criterion == "uncertainty") ? 1 : m_al_patience;
+            streak = met ? streak + 1 : 0;
+            CurcumaLogger::result_fmt(
+                "activelearn: criterion '{}': uncertainty {}, validation {}; met in {} of {} "
+                "consecutive cycle(s)",
+                m_al_criterion, unc_ok ? "met" : "not met",
+                validated ? (val_ok ? "met" : "not met") : "n/a", streak, patience_needed);
+            if (streak >= patience_needed) {
+                // The validation labels are paid for: they stay in the dataset file, but the
+                // model is not refitted, so the written model is the one that was validated.
+                add_validation();
+                const std::string what = (m_al_criterion == "uncertainty")
+                    ? fmt::format("uncertainty (no sampled structure above the indicator threshold "
+                                  "{:.4f}; certifies coverage of the sampled region, not accuracy)",
+                          m_al_uncertainty)
+                    : (m_al_criterion == "validation")
+                    ? fmt::format("validation (E_MAE {:.4f} <= {:.4f} kcal/mol, deepest hole "
+                                  "{:+.4f} >= -{:.4f} kcal/mol)",
+                          ve.energy_mae_centered * kcal, m_al_target_energy,
+                          ve.energy_min_signed * kcal, m_al_target_hole)
+                    : fmt::format("both (indicator {:.4f} <= {:.4f}; validation E_MAE {:.4f} <= "
+                                  "{:.4f} kcal/mol, deepest hole {:+.4f} >= -{:.4f} kcal/mol)",
+                          max_unc, m_al_uncertainty, ve.energy_mae_centered * kcal,
+                          m_al_target_energy, ve.energy_min_signed * kcal, m_al_target_hole);
+                CurcumaLogger::success_fmt("activelearn: converged in cycle {} by criterion {}; "
+                                           "met in {} consecutive cycle(s)",
+                    cycle + 1, what, streak);
+                converged = true;
+                break;
+            }
+        }
+        // Claude Generated (Oct 2026): no frame above the indicator threshold, yet the run has
+        // not converged (a validation criterion still fails). Stopping here would end the run
+        // because the indicator is satisfied although the error is not (peo8: indicator 0.26,
+        // validation hole -7.9 kcal/mol). Pick among all frames instead, farthest point first.
+        if (picked.empty() && have_model && m_al_criterion != "uncertainty") {
+            // The validation frames are labelled already; leave them out so none is labelled twice.
+            std::vector<Molecule> rest;
+            if (&pool == &frames) {
+                std::vector<char> used(frames.size(), 0);
+                for (std::size_t i : validation_idx)
+                    used[i] = 1;
+                for (std::size_t i = 0; i < frames.size(); ++i)
+                    if (!used[i])
+                        rest.push_back(frames[i]);
+            } else {
+                rest = pool;
+            }
+            double unused = 0.0;
+            picked = selectCandidates(rest, model, have_model, wanted, unused, nullptr, true);
+            CurcumaLogger::warn_fmt(
+                "activelearn: no frame above the indicator threshold {:.4f}, but criterion '{}' "
+                "is not met; {} candidates selected among all frames instead",
+                m_al_uncertainty, m_al_criterion, picked.size());
         }
         if (picked.empty()) {
+            add_validation();
             CurcumaLogger::warn("activelearn: nothing selected; stopping");
+            stopped_early = true;
             break;
         }
 
         MLDataset fresh;
-        if (!labelStructures(picked, fresh))
+        if (!labelStructures(picked, fresh)) {
+            stopped_early = true;
             break;
+        }
         for (std::size_t i = 0; i < fresh.size(); ++i) {
             MLStructure s = fresh[i];
             s.cycle = cycle;
             data.add(s);
         }
+        add_validation();
 
         MLDataset train, test;
         data.split(m_test_fraction, m_seed, train, test);
@@ -972,17 +1169,33 @@ void ActiveLearn::runLearn()
         }
 
         DeltaMLModel candidate_model;
-        if (!fitAndReport(train, test, m_n_centers, candidate_model, true))
+        if (!fitAndReport(train, test, m_n_centers, candidate_model, true)) {
+            stopped_early = true;
             break;
+        }
         model = candidate_model;
         have_model = true;
         model.save(model_path);
 
         const DeltaMLErrors e = test.empty() ? DeltaMLErrors{} : model.evaluate(test);
         curve << cycle << "  " << data.size() << "  " << e.energy_mae_centered * 627.5094740631
-              << "  " << e.force_rmse << "  " << e.spearman << "  " << max_unc << "\n";
+              << "  " << e.force_rmse << "  " << e.spearman << "  " << max_unc;
+        if (validated)
+            curve << "  " << ve.n_structures << "  " << ve.energy_mae_centered * kcal << "  "
+                  << ve.energy_mean_signed * kcal << "  " << ve.energy_min_signed * kcal << "  "
+                  << ve.force_rmse;
+        else
+            curve << "  0  nan  nan  nan  nan";
+        curve << "\n";
         curve.flush();
     }
+    if (!converged && !stopped_early)
+        CurcumaLogger::warn_fmt("activelearn: not converged -- criterion '{}' was not met in {} "
+                                "consecutive cycle(s) within al_cycles = {}",
+            m_al_criterion, m_al_patience, m_al_cycles);
+    else if (!converged)
+        CurcumaLogger::warn_fmt("activelearn: not converged -- the run stopped early (see above) "
+                                "before criterion '{}' was met", m_al_criterion);
 
     if (!have_model) {
         CurcumaLogger::error("activelearn: no model was produced");
