@@ -509,6 +509,9 @@ public:
 
     // ---- Broyden seed preconditioner in the resident loop (Claude Generated, Oct 2026) ----
     bool supportsResidentPreconditioner() const override { return true; }
+    // Claude Generated (Oct 2026, parity item C1): the GFN1 resident loop mixes the shell charges alone through the same
+    // device Broyden (broydenBegin(nsh)), the blocks and indices of M are layout-neutral, so GFN1 takes M as well.
+    bool supportsResidentPreconditionerGfn1() const override { return true; }
     unsigned long long residentPreconditionerTag() const override
     {
         return m_ctx ? m_ctx->broydenPreconditionerTag() : 0;
