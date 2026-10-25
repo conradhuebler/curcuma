@@ -590,6 +590,12 @@ struct XtbGpuContext::Impl {
         pseudo_consecutive = pseudo_consecutive64 = 0;
     }
     bool pseudoDiagStep(int n);
+    /// Claude Generated (Oct 2026, CUDA/ROCm parity item 1): probe of the new Cholesky factor in dL against dS,
+    /// | L (L^T v) - S v |_2 <= 1e-10 | S v |_2 for a fixed vector v. 1 = ok, 0 = failed, -1 = device error.
+    int  probeCholeskyFactor(int n);
+    CudaBuffer<double> dLProbeV, dLProbeW, dLProbeU;   ///< probe vectors v, L L^T v, S v
+    int  lprobe_fail_left = -2;                        ///< CURCUMA_GPU_FAIL_LPROBE=k: corrupt the factor k times (-2: not read yet)
+    long lprobe_recomputes = 0;                        ///< factors recomputed after a failed probe
     int  pseudoDiagStep64(int n);
     template <typename R>
     int pseudoRotateOrthonormalise(int n, int no, const R* F, const R* L, R* C, R* Tb, R* Gov, R* M,
@@ -1355,6 +1361,17 @@ __global__ void k_multipole_ints(
     qp_int[3*nn + mn] = 1.5 * qxz;
     qp_int[4*nn + mn] = 1.5 * qyz;
     qp_int[5*nn + mn] = 1.5 * qzz - tr;
+}
+
+// Cholesky-factor probe helpers (Claude Generated, Oct 2026): fixed probe vector and the fault injection.
+__global__ void k_lprobe_vec(int n, double* __restrict__ v)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) v[i] = sin(0.7 * static_cast<double>(i) + 0.3);
+}
+__global__ void k_lprobe_corrupt(double* __restrict__ L)
+{
+    if (blockIdx.x == 0 && threadIdx.x == 0) L[0] *= 1.001;   // fault injection: a silently wrong factor
 }
 
 // Order-independent gradient accumulation (Claude Generated, Oct 2026; docs/GPU_REPRODUCIBILITY.md): the contribution
@@ -3863,6 +3880,32 @@ int XtbGpuContext::Impl::pseudoRotateOrthonormalise(int n, int no, const R* F, c
     return 1;
 }
 
+int XtbGpuContext::Impl::probeCholeskyFactor(int n)
+{
+    // v, w = L^T v, w = L w, u = S v; |w - u|_2 against |u|_2. dS is the full symmetric overlap (dense storage).
+    try { dLProbeV.ensure(n); dLProbeW.ensure(n); dLProbeU.ensure(n); } catch (...) { return -1; }
+    k_lprobe_vec<<<(n + 255) / 256, 256, 0, stream>>>(n, dLProbeV.ptr);
+    if (cudaGetLastError() != cudaSuccess) return -1;
+    const double one = 1.0, zero = 0.0;
+    if (cudaMemcpyAsync(dLProbeW.ptr, dLProbeV.ptr, sizeof(double) * n, cudaMemcpyDeviceToDevice, stream) != cudaSuccess)
+        return -1;
+    if (cublasDtrmv(cublas, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT, n, dL.ptr, n, dLProbeW.ptr, 1)
+            != CUBLAS_STATUS_SUCCESS
+        || cublasDtrmv(cublas, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_N, CUBLAS_DIAG_NON_UNIT, n, dL.ptr, n, dLProbeW.ptr, 1)
+            != CUBLAS_STATUS_SUCCESS
+        || cublasDgemv(cublas, CUBLAS_OP_N, n, n, &one, dS.ptr, n, dLProbeV.ptr, 1, &zero, dLProbeU.ptr, 1)
+            != CUBLAS_STATUS_SUCCESS)
+        return -1;
+    const double mone = -1.0;
+    double un = 0.0, rn = 0.0;
+    if (cublasDnrm2(cublas, n, dLProbeU.ptr, 1, &un) != CUBLAS_STATUS_SUCCESS
+        || cublasDaxpy(cublas, n, &mone, dLProbeU.ptr, 1, dLProbeW.ptr, 1) != CUBLAS_STATUS_SUCCESS
+        || cublasDnrm2(cublas, n, dLProbeW.ptr, 1, &rn) != CUBLAS_STATUS_SUCCESS)
+        return -1;
+    if (cudaStreamSynchronize(stream) != cudaSuccess) return -1;
+    return (std::isfinite(rn) && std::isfinite(un) && rn <= 1e-10 * un) ? 1 : 0;
+}
+
 bool XtbGpuContext::Impl::pseudoDiagStep(int n)
 {
     const int no = loop_nocc_pairs, nv = n - no;
@@ -5287,14 +5330,38 @@ bool XtbGpuContext::computeIntegrals(const double* xyz_bohr)
         info = 0;
         I.profMark("integrals: Cholesky of S (multi-GPU)");
     } else {
-        if (cusolverDnDpotrf(I.cusolver, CUBLAS_FILL_MODE_LOWER, nao,
-                             I.dL.ptr, nao, I.dPotrfWork.ptr,
-                             I.potrf_lwork, I.dInfo.ptr) != CUSOLVER_STATUS_SUCCESS)
-            return false;
-        if (cudaMemcpyAsync(&info, I.dInfo.ptr, sizeof(int),
-                            cudaMemcpyDeviceToHost, stream) != cudaSuccess)
-            return false;
-        if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
+        // Claude Generated (Oct 2026, parity item 1): every new factor is probed (dense storage; the sparse S has no
+        // dense copy to probe against) and recomputed up to twice when the probe fails; then the call fails and the
+        // caller falls back to the host. CURCUMA_GPU_FAIL_LPROBE=k corrupts the first k factors (fault injection).
+        if (I.lprobe_fail_left == -2) {
+            const char* e = std::getenv("CURCUMA_GPU_FAIL_LPROBE");
+            I.lprobe_fail_left = (e && *e) ? std::atoi(e) : 0;
+        }
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            if (attempt > 0 && !use_sparse
+                && cudaMemcpyAsync(I.dL.ptr, I.dS.ptr, sizeof(double) * nn, cudaMemcpyDeviceToDevice, stream) != cudaSuccess)
+                return false;
+            if (cusolverDnDpotrf(I.cusolver, CUBLAS_FILL_MODE_LOWER, nao,
+                                 I.dL.ptr, nao, I.dPotrfWork.ptr,
+                                 I.potrf_lwork, I.dInfo.ptr) != CUSOLVER_STATUS_SUCCESS)
+                return false;
+            if (cudaMemcpyAsync(&info, I.dInfo.ptr, sizeof(int),
+                                cudaMemcpyDeviceToHost, stream) != cudaSuccess)
+                return false;
+            if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
+            if (info != 0 || use_sparse) break;               // not positive definite is the caller's business
+            if (I.lprobe_fail_left > 0) {
+                --I.lprobe_fail_left;
+                k_lprobe_corrupt<<<1, 1, 0, stream>>>(I.dL.ptr);
+            }
+            const int pr = I.probeCholeskyFactor(nao);
+            if (pr < 0) return false;
+            if (pr == 1) break;
+            ++I.lprobe_recomputes;
+            std::fprintf(stderr, "[WARN] CUDA xTB: Cholesky factor of S failed its probe (|L L^T v - S v| > 1e-10 |S v|), %s\n",
+                         attempt < 2 ? "recomputing" : "giving up (host fallback)");
+            if (attempt == 2) return false;
+        }
         I.profMark("integrals: Cholesky of S");
     }
     ++I.l_generation;
