@@ -3662,6 +3662,14 @@ void GFNFF::loadUserChargeGroups()
         }
         json j;
         in >> j;
+        // Claude Generated (Oct 2026): optional top-level key "rest" (applyUserChargeGroups); "single" is the old behaviour
+        const std::string rest = j.value("rest", std::string("single"));
+        if (rest == "per_fragment")
+            m_user_groups_rest_per_fragment = true;
+        else if (rest != "single") {
+            CurcumaLogger::error("GFNFF charge_groups ignored: unknown value \"" + rest + "\" of the key rest in " + file + " (single | per_fragment)");
+            return;
+        }
         for (const auto& g : j.at("groups")) {
             UserChargeGroup group;
             group.atoms = g.at("atoms").get<std::vector<int>>();
@@ -3673,6 +3681,66 @@ void GFNFF::loadUserChargeGroups()
         CurcumaLogger::error(std::string("GFNFF charge_groups: cannot parse ") + file + ": " + e.what());
         m_user_groups.clear();
     }
+}
+
+/**
+ * @brief "rest": "per_fragment": groups inside fragments, every uncovered fragment its own neutral group
+ *
+ * Claude Generated (Oct 2026). For a solute that is ONE fragment split into several groups (polymer units) in a solvent of
+ * many fragments (water, counter-ions). Rules, each violation rejects the groups with a message (run continues without):
+ *   1. a topological fragment is either completely covered by groups (several groups may split it) or not at all;
+ *   2. every uncovered fragment becomes one more EEQ constraint row with charge 0 (no charge flows between solvent
+ *      molecules); a charged solvent fragment (Cl-) must be written into the file as a group;
+ *   3. the group charges sum to the molecule charge (1e-6);
+ *   4. atom indices 0-based, in range, each atom in at most one group (checked by the caller).
+ * Group order: the file groups, then the uncovered fragments by their smallest atom index; the decisions are properties of
+ * the atom sets, not of the numbering (Known Issue #34).
+ * @param fraglist 1-based file group per atom, 0 = not in a file group (filled by the caller)
+ * @return empty string on success, else the reason
+ */
+std::string GFNFF::completeChargeGroupsPerFragment(const std::vector<int>& topo_fraglist, std::vector<int>& fraglist,
+                                                    std::vector<double>& qfrag, int& n_rest) const
+{
+    const int n = m_atomcount;
+    n_rest = 0;
+    if (static_cast<int>(topo_fraglist.size()) != n)
+        return "the topological fragments are not known";
+    std::map<int, int> covered, size, first_atom; // per topological fragment id
+    for (int i = 0; i < n; ++i) {
+        const int f = topo_fraglist[i];
+        size[f]++;
+        if (fraglist[i] != 0)
+            covered[f]++;
+        if (first_atom.find(f) == first_atom.end())
+            first_atom[f] = i; // atoms ascending: smallest index of the fragment
+    }
+    for (const auto& kv : size) {
+        const int c = covered.count(kv.first) ? covered[kv.first] : 0;
+        if (c != 0 && c != kv.second)
+            return fmt::format("with rest per_fragment every fragment must be covered completely or not at all; the fragment of atom {} ({} atoms) has {} atoms in groups",
+                first_atom[kv.first], kv.second, c);
+    }
+    std::vector<std::pair<int, int>> uncovered; // (smallest atom, fragment id)
+    for (const auto& kv : size)
+        if (!covered.count(kv.first))
+            uncovered.emplace_back(first_atom[kv.first], kv.first);
+    std::sort(uncovered.begin(), uncovered.end());
+    std::map<int, int> rest_group;
+    for (const auto& u : uncovered) {
+        qfrag.push_back(0.0);
+        rest_group[u.second] = static_cast<int>(qfrag.size()); // 1-based group id
+    }
+    for (int i = 0; i < n; ++i)
+        if (fraglist[i] == 0)
+            fraglist[i] = rest_group.at(topo_fraglist[i]);
+    n_rest = static_cast<int>(uncovered.size());
+    double total = 0.0;
+    for (double q : qfrag)
+        total += q;
+    if (std::abs(total - static_cast<double>(m_charge)) > 1e-6)
+        return fmt::format("with rest per_fragment the group charges must sum to the molecule charge: sum {:.6f}, molecule charge {} (uncovered fragments count 0)",
+            total, m_charge);
+    return std::string();
 }
 
 void GFNFF::applyUserChargeGroups(int nfrag_topological, const std::vector<int>* topo_fraglist) const
@@ -3699,6 +3767,24 @@ void GFNFF::applyUserChargeGroups(int nfrag_topological, const std::vector<int>*
         }
         qfrag.push_back(m_user_groups[g].charge);
         assigned += m_user_groups[g].charge;
+    }
+    if (m_user_groups_rest_per_fragment) {
+        // Claude Generated (Oct 2026): "rest": "per_fragment" (completeChargeGroupsPerFragment); "single" continues below unchanged
+        if (topo_fraglist == nullptr)
+            return reject("rest per_fragment needs the topological fragments");
+        int n_rest = 0;
+        const std::string why = completeChargeGroupsPerFragment(*topo_fraglist, fraglist, qfrag, n_rest);
+        if (!why.empty())
+            return reject(why);
+        m_frag_override.active = true;
+        m_frag_override.fraglist = fraglist;
+        m_frag_override.nfrag = static_cast<int>(qfrag.size());
+        m_frag_override.qfrag = qfrag;
+        m_frag_is_variant = true; // no ensemble blending on top of user groups
+        if (CurcumaLogger::get_verbosity() >= 1)
+            CurcumaLogger::info(fmt::format("GFNFF charge_groups: {} groups + {} uncovered fragments (rest per_fragment, charge 0 each), {} topological fragments, EEQ constraint rows {}",
+                m_user_groups.size(), n_rest, nfrag_topological, qfrag.size()));
+        return;
     }
     int nfrag = static_cast<int>(m_user_groups.size());
     const bool rest = std::any_of(fraglist.begin(), fraglist.end(), [](int f) { return f == 0; });

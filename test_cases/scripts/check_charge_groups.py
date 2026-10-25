@@ -14,6 +14,10 @@ Uses only the curcuma binary. Builds the chain (polymerbuild also writes the gro
      file, permuted atom order, gradient against a central finite difference (12 components, 6 per fragment), no effect
      for one fragment / a charged system / an ambiguous anion count, parity keeps a neutral NH3 neutral,
      ionpair_aromatic only with the switch and not for neutral pyridine.
+  6. file key "rest": "per_fragment" on the (AB)2 chain in 24 waters with 2 Cl- (built at run time, -ionize,
+     scripts/charge_groups_for_solvated.py): unit sums +1, Cl- -1, every water 0; no groups: units not +1; gradient
+     against a central finite difference (12 components); rejections (partly covered fragment, wrong sum, atom in two
+     groups, unknown key value); permuted atom order; "rest": "single" equals the file without the key.
 Usage: check_charge_groups.py CURCUMA_BINARY SOURCE_DIR
 """
 import json, os, re, subprocess, sys, tempfile
@@ -319,6 +323,122 @@ write_mol("py_hcl.xyz", el_py + el_hcl, np.vstack([X_py, X_hcl + X_py[iN] + [0, 
 eC_, tC_ = sp("py_hcl.xyz", None, charge=0, verbosity=1, extra=IP + ["-gfnff.ionpair_aromatic", "true"])
 eC0, _ = sp("py_hcl.xyz", None, charge=0)
 check("aromatic rings 0" in ip_line(tC_) and eC_ == eC0, "ionpair_aromatic, neutral pyridine + HCl (6 pi electrons): no centre, energy identical")
+
+# ---- (vi) solvated chain: file key "rest": "per_fragment" (Claude Generated, Oct 2026) ----
+# Built at run time (no structure file): the (AB)2 chain of section 1 (+2), 26 copies of the library water (random
+# rotations, lattice points 2.9 A or more from the chain), then -ionize replaces 2 waters by Cl- (total charge 0), then
+# scripts/charge_groups_for_solvated.py writes the groups: the two unit groups, the rest of the chain (charge 0), each Cl-
+# (-1). GFN-FF makes every water its own group with charge 0.
+el_w, X_w = read_xyz(lib("water"))
+X_w = X_w - X_w[el_w.index("O")]
+rng = np.random.RandomState(11)
+def rotation():
+    qv = rng.normal(size=4)
+    qv /= np.linalg.norm(qv)
+    w_, x_, y_, z_ = qv
+    return np.array([[1 - 2 * (y_ * y_ + z_ * z_), 2 * (x_ * y_ - z_ * w_), 2 * (x_ * z_ + y_ * w_)],
+                     [2 * (x_ * y_ + z_ * w_), 1 - 2 * (x_ * x_ + z_ * z_), 2 * (y_ * z_ - x_ * w_)],
+                     [2 * (x_ * z_ - y_ * w_), 2 * (y_ * z_ + x_ * w_), 1 - 2 * (x_ * x_ + y_ * y_)]])
+el_s, X_s = list(el), X0.copy()
+lo, hi = X0.min(0) - 5.0, X0.max(0) + 5.0
+grid = np.mgrid[lo[0]:hi[0]:3.1, lo[1]:hi[1]:3.1, lo[2]:hi[2]:3.1].reshape(3, -1).T
+dg = np.linalg.norm(grid[:, None] - X0[None], axis=2).min(1)
+grid = grid[dg >= 2.9]
+grid = grid[np.argsort(np.linalg.norm(grid[:, None] - X0[None], axis=2).min(1), kind="stable")]
+for c in grid:
+    if len(el_s) == n + 3 * 26:
+        break
+    W3 = X_w @ rotation().T + c
+    if np.linalg.norm(W3[:, None] - X_s[None], axis=2).min() >= 2.2:
+        el_s += el_w
+        X_s = np.vstack([X_s, W3])
+write_mol("solv.xyz", el_s, X_s)
+subprocess.run([curcuma, "-ionize", "solv.xyz", "-charge", "2", "-min_solute_distance", "2.5", "-min_ion_distance", "5",
+                "-output", "solv_ion.xyz", "-no_bmt", "-verbosity", "0"], capture_output=True, text=True)
+check(os.path.exists("solv_ion.xyz"), "solvated chain: -ionize wrote solv_ion.xyz")
+el_i, X_i = read_xyz("solv_ion.xyz")
+n_i = len(el_i)
+i_cl = [i for i in range(n_i) if el_i[i] == "Cl"]
+n_wat = sum(1 for e_ in el_i if e_ == "O") - sum(1 for e_ in el if e_ == "O")
+check(len(i_cl) == 2 and n_wat >= 20 and n_i == n + 3 * n_wat + 2,
+      "solvated chain: %d atoms = chain %d + %d water + %d Cl-" % (n_i, n, n_wat, len(i_cl)))
+cg = subprocess.run([sys.executable, src + "/scripts/charge_groups_for_solvated.py", "solv_ion.xyz", "--polymer-groups",
+                     "polymer_A_final.groups.json", "--polymer-offset", "0", "--anion", "Cl", "--charge", "0", "--out", "solv.groups.json"],
+                    capture_output=True, text=True)
+check(cg.returncode == 0 and os.path.exists("solv.groups.json"), "charge_groups_for_solvated.py: %s" % cg.stdout.strip().split("\n")[-1])
+sg = json.load(open("solv.groups.json"))
+check(sg.get("rest") == "per_fragment" and len(sg["groups"]) == 5, "group file: rest per_fragment, 5 groups (2 units, chain rest, 2 Cl-)")
+cg_bad = subprocess.run([sys.executable, src + "/scripts/charge_groups_for_solvated.py", "solv_ion.xyz", "--polymer-groups",
+                         "polymer_A_final.groups.json", "--anion", "Cl", "--charge", "1", "--out", "x.json"], capture_output=True, text=True)
+check(cg_bad.returncode != 0 and not os.path.exists("x.json"), "charge_groups_for_solvated.py: wrong --charge is an error, nothing written")
+# (i) group sums: units +1 exactly, Cl- -1, every water 0
+e_s, t_s = sp("solv_ion.xyz", "solv.groups.json", "q_s.txt", charge=0, verbosity=1)
+q_s = np.loadtxt("q_s.txt")
+unit_sums = [q_s[g_["atoms"]].sum() for g_ in sg["groups"][:2]]
+wat_sums = [q_s[i:i + 3].sum() for i in range(n, n_i) if el_i[i] == "O"]
+check("ignored" not in t_s and all(abs(s - 1.0) < 1e-6 for s in unit_sums) and all(abs(q_s[i] + 1.0) < 1e-6 for i in i_cl)
+      and max(abs(s) for s in wat_sums) < 1e-6 and abs(q_s.sum()) < 1e-6,
+      "rest per_fragment: unit sums %s, Cl %s, %d waters max |sum| %.1e, total %.1e" % (
+          ", ".join("%.8f" % s for s in unit_sums), ", ".join("%.6f" % q_s[i] for i in i_cl), len(wat_sums), max(abs(s) for s in wat_sums), q_s.sum()))
+# (ii) without groups the units do not carry +1 (every fragment of a neutral system is 0 in GFN-FF, Cl- included)
+e_s0, _ = sp("solv_ion.xyz", None, "q_s0.txt", charge=0)
+q_s0 = np.loadtxt("q_s0.txt")
+check(e_s0 is not None and all(abs(q_s0[g_["atoms"]].sum() - 1.0) > 0.5 for g_ in sg["groups"][:2]),
+      "no groups: unit sums %s, Cl %s (E %.6f, with groups %.6f Eh)" % (", ".join("%.3f" % q_s0[g_["atoms"]].sum() for g_ in sg["groups"][:2]),
+                                                                        ", ".join("%.3f" % q_s0[i] for i in i_cl), e_s0, e_s))
+# (iii) gradient against a central finite difference, perturbed (sigma 0.06 A): 12 components, 4 in a unit group, 2 on a
+# Cl-, 4 on a water (O and H), 2 on the chain rest
+X_ip_s = X_i + np.random.RandomState(5).normal(0, 0.06, X_i.shape)
+write_mol("solv_p.xyz", el_i, X_ip_s)
+sp("solv_p.xyz", "solv.groups.json", None, "solv_p.grad", charge=0)
+G = np.loadtxt("solv_p.grad", comments="#")
+u0 = sg["groups"][0]["atoms"]
+o_w = next(i for i in range(n, n_i) if el_i[i] == "O")
+comps = [(u0[0], 0), (u0[0], 1), (u0[5], 0), (u0[5], 1), (i_cl[0], 0), (i_cl[0], 1), (o_w, 0), (o_w, 1), (o_w + 1, 0), (o_w + 1, 2),
+         (sg["groups"][2]["atoms"][0], 0), (sg["groups"][2]["atoms"][0], 1)]
+worst, scale = 0.0, 0.0
+for i, k in comps:
+    Xp_, Xm_ = X_ip_s.copy(), X_ip_s.copy()
+    Xp_[i, k] += h
+    Xm_[i, k] -= h
+    write_mol("p.xyz", el_i, Xp_)
+    write_mol("m.xyz", el_i, Xm_)
+    fd = (sp("p.xyz", "solv.groups.json", charge=0)[0] - sp("m.xyz", "solv.groups.json", charge=0)[0]) / (2 * h)
+    worst = max(worst, abs(fd - G[i, k]))
+    scale = max(scale, abs(G[i, k]))
+check(worst < 5e-5, "rest per_fragment: gradient against finite difference, %d components: max |diff| %.2e Eh/A (largest %.3f)" % (len(comps), worst, scale))
+# (iv) rejections: run continues without groups, energy equal to the ungrouped one
+def rejected(groups_json, tag):
+    json.dump(groups_json, open("rej.json", "w"))
+    e_r, t_r = sp("solv_ion.xyz", "rej.json", charge=0)
+    check("ignored" in t_r and e_r == e_s0, "rest per_fragment rejects %s, energy equals the ungrouped one" % tag)
+    return t_r
+t_part = rejected({"rest": "per_fragment", "groups": sg["groups"][:2] + sg["groups"][3:]}, "a partly covered chain (rest group left out)")
+check("covered completely or not at all" in t_part, "partly covered: message names the rule")
+rejected({"rest": "per_fragment", "groups": sg["groups"] + [{"atoms": [o_w], "charge": 0.0}]}, "a partly covered water (only its O)")
+t_sum = rejected({"rest": "per_fragment", "groups": sg["groups"][:4]}, "a wrong charge sum (one Cl- left out: +1)")
+check("sum to the molecule charge" in t_sum, "wrong sum: message names the rule")
+rejected({"rest": "per_fragment", "groups": sg["groups"] + [{"atoms": [i_cl[0]], "charge": 0.0}]}, "an atom in two groups")
+rejected({"rest": "every_atom", "groups": sg["groups"]}, "an unknown value of rest")
+# (v) permutation of the atom order: same group sums, energy change as without groups (Known Issue #34)
+perm_s = np.random.RandomState(9).permutation(n_i)   # new atom k is old atom perm_s[k]
+inv_s = np.argsort(perm_s)
+write_mol("solv_perm.xyz", [el_i[p] for p in perm_s], X_i[perm_s])
+json.dump({"rest": "per_fragment", "groups": [{"atoms": sorted(int(inv_s[a]) for a in g_["atoms"]), "charge": g_["charge"]} for g_ in sg["groups"]]},
+          open("solv_perm.groups.json", "w"))
+e_sp, _ = sp("solv_perm.xyz", "solv_perm.groups.json", "q_sp.txt", charge=0)
+e_sp0, _ = sp("solv_perm.xyz", None, None, charge=0)
+q_sp = np.loadtxt("q_sp.txt")[inv_s]   # back to the original numbering
+sums_p = [q_sp[g_["atoms"]].sum() for g_ in sg["groups"]] + [q_sp[i:i + 3].sum() for i in range(n, n_i) if el_i[i] == "O"]
+sums_o = [q_s[g_["atoms"]].sum() for g_ in sg["groups"]] + wat_sums
+check(max(abs(a - b) for a, b in zip(sums_p, sums_o)) < 1e-6,
+      "rest per_fragment, permuted atom order: group and water sums equal (max diff %.1e e)" % max(abs(a - b) for a, b in zip(sums_p, sums_o)))
+check(abs((e_sp - e_s) - (e_sp0 - e_s0)) < 1e-5,
+      "rest per_fragment, permuted: dE %.2e Eh with groups, %.2e Eh without (#34), max |dq| %.1e e" % (e_sp - e_s, e_sp0 - e_s0, np.abs(q_sp - q_s).max()))
+# (vi) "rest": "single" is the default: the same file with the key spelled out gives the identical energy (one-fragment chain)
+json.dump({"rest": "single", "groups": groups}, open("single.json", "w"))
+e_single, _ = sp("base.xyz", "single.json")
+check(e_single == e_grp, "rest single (explicit) == groups without the key (%.8f / %.8f Eh)" % (e_single, e_grp))
 
 print("FAILED" if failed else "all passed")
 sys.exit(1 if failed else 0)
