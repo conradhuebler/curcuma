@@ -89,9 +89,8 @@ Stand.
 - **100-ps-Probelauf (AB)5 im Wassertropfen** (2026-10-25, n=1 je T, 303/338 K): ausgewertet, offen: Kette wandert in beiden Läufen zur Tropfenoberfläche
   (COM-Versatz 1,1-1,4 -> 3,2-3,5 A, 35 A^2 unbedeckt in H2), 338 K Epot-Drift -1,25e-3 Eh/ps, Rg nicht stationär (tau 5-15 ps, 3-15 unabhängige Werte);
   `-md.seed` wirkt nicht (auch CSVR). Läufe unter `~/curcuma_runs/probe100/`. [docs/PDMAEMA_PROBE_100PS_2026-10.md](docs/PDMAEMA_PROBE_100PS_2026-10.md)
-- **SimpleMD: Spitzen-RSS wächst mit der Laufzeit** (2026-10-25, 3071 Atome, GFN-FF mit Gruppen, n=2 Läufe): 2,0 / 2,6 / 6,8-7,5 GB für 10 / 20 / 100 ps;
-  Ursache nicht untersucht (vor ns-Läufen prüfen). Dazu: `-trajprops hb_criterion energy` baut GFN-FF ohne `charge_groups`/`cn_zero_guard`
-  (`countHydrogenBondsByEnergy`), also nicht das Ladungsmodell des Laufs. [docs/PDMAEMA_PROBE_100PS_2026-10.md](docs/PDMAEMA_PROBE_100PS_2026-10.md)
+- **`-trajprops hb_criterion energy`** baut GFN-FF ohne `charge_groups`/`cn_zero_guard` (`countHydrogenBondsByEnergy`), also nicht das
+  Ladungsmodell des Laufs. [docs/PDMAEMA_PROBE_100PS_2026-10.md](docs/PDMAEMA_PROBE_100PS_2026-10.md)
 - **H...Cl-Bindungserkennung als Energiestufe** (2026-10-25, starrer Scan n=1): frische GFN-FF-Topologie gibt +34 kcal/mol bei 1,7->1,6 A (ohne Gruppen),
   +50 bei 1,8->1,7 A mit Gruppen (Pass-2-Radien mit q(Cl) = -1), dazu -21 bei 1,2 A (N-Cl); ORCA/GFN2 glatt. In MD nicht erreicht; `auto` baut dort die
   Topologie ohne Bindungsterme neu, Gruppen bleiben ungeprueft (Codelesen). Entscheidung offen. [docs/POLYMERBUILD_CHARGE.md](docs/POLYMERBUILD_CHARGE.md)
