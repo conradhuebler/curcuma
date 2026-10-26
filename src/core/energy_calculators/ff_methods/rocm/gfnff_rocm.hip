@@ -65,10 +65,94 @@ void installHipSignalHandlers() {
 // Device geometry helpers
 // ============================================================================
 
-/// Add vector contribution to gradient (atomicAdd on x,y,z)
+// ============================================================================
+// Order-independent (fixed-point) accumulation, WP10 (Claude Generated, Oct 2026; port of cuda/gfnff_kernels.cu
+// fix_add, docs/GPU_REPRODUCIBILITY.md). FP64 atomicAdd depends on the arrival order of the threads, so two
+// runs differ in the last bits. Integer addition is associative: with d_gfnff_fix != 0 a contribution is
+// rounded to a multiple of 2^-52 (forces, dE/dCN, zz_hb; energy slot 0 = dispersion), 2^-48 (other energy
+// slots) or 2^-56 (CN sums), added as a 64-bit integer into the same 8 bytes of the double buffer, and the
+// buffer is converted in place by k_fix_to_double once the accumulation is over. Same scales as CUDA.
+// d_gfnff_fix == 0 keeps the FP64 atomicAdd path unchanged (switch -gfnff.rocm_fixed_point).
+// Range (as CUDA): +-2048 per gradient/dE/dCN component and for the dispersion energy, +-32768 Eh per other
+// energy slot, +-128 for CN sums; a final sum beyond that wraps silently.
+// ============================================================================
+constexpr double GFNFF_FIX_CN          = 72057594037927936.0;   // 2^56
+constexpr double GFNFF_FIX_ENERGY      = 281474976710656.0;     // 2^48
+constexpr double GFNFF_FIX_ENERGY_DISP = 4503599627370496.0;    // 2^52
+constexpr double GFNFF_FIX_FORCE       = 4503599627370496.0;    // 2^52
+
+/// 1: accumulators of the GFN-FF step are fixed-point integers (set by setGfnffFixModeHip, host side).
+__constant__ int d_gfnff_fix;
+
+/// Set (sticky) when a contribution was not finite or alone outside the accumulator range; read by the host after
+/// the step (FFWorkspaceHip::launchChargeDependentAndFinish), which then returns NaN as the FP64 path would.
+__device__ int d_gfnff_fix_bad;
+
+/// The CUDA version adds |v| >= 64 in chunks of 64 with one atomic each (unbounded for a huge or infinite v).
+/// Here the n chunks are folded into one integer, n * llrint(64 scale) + llrint(r scale), r = v - n * 64 (exact for
+/// |v| < 2^59): modulo 2^64 the same accumulator bits as the chunk loop, with one atomic and a bounded cost.
+__device__ __forceinline__ void fix_add_u64(unsigned long long* a, double v, double scale)
+{
+    const double av = fabs(v);
+    if (!(av * scale < 9.2e18)) {                     // beyond int64 range (or NaN/Inf): the sum is wrong anyway
+        if (!(av < 5.7e17)) {                         // 2^59 > |v| or not finite: mark, add nothing usable
+            atomicOr(&d_gfnff_fix_bad, 1);
+            return;
+        }
+        atomicOr(&d_gfnff_fix_bad, 1);
+    }
+    if (av < 64.0) {                                  // the common case: one rounded value
+        atomicAdd(a, static_cast<unsigned long long>(llrint(v * scale)));
+        return;
+    }
+    const double n = trunc(av * (1.0 / 64.0));        // number of 64-chunks of the CUDA loop
+    const double r = v - copysign(n * 64.0, v);       // exact: the loop's remainder
+    const unsigned long long chunk = static_cast<unsigned long long>(llrint(copysign(64.0, v) * scale));
+    const unsigned long long sum = static_cast<unsigned long long>(n) * chunk
+                                 + static_cast<unsigned long long>(llrint(r * scale));
+    atomicAdd(a, sum);
+}
+
+__device__ __forceinline__ void fix_add(double* addr, double v, double scale)
+{
+    fix_add_u64(reinterpret_cast<unsigned long long*>(addr), v, scale);
+}
+
+/// Claude Generated (Oct 2026, WP10): one accumulation into a step accumulator: fixed point with the given
+/// scale when d_gfnff_fix is set, otherwise the FP64 atomicAdd of the original kernels.
+__device__ __forceinline__ void acc_add(double* addr, double v, double scale)
+{
+    if (d_gfnff_fix) fix_add(addr, v, scale);
+    else             atomicAdd(addr, v);
+}
+
+/// Copy of a fixed-point accumulator as doubles (the accumulator itself stays untouched; diagnostic snapshots).
+__global__ void k_fix_copy(int n, const double* __restrict__ src, double* __restrict__ dst, double inv_scale)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    dst[i] = static_cast<double>(reinterpret_cast<const long long*>(src)[i]) * inv_scale;
+}
+
+/// In-place conversion of a fixed-point accumulator (see fix_add) into doubles.
+__global__ void k_fix_to_double(int n, double* __restrict__ buf, double inv_scale)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const long long x = reinterpret_cast<long long*>(buf)[i];
+    buf[i] = static_cast<double>(x) * inv_scale;
+}
+
+/// Add vector contribution to gradient (FP64 atomicAdd on x,y,z, or fixed point with d_gfnff_fix)
 __device__ __forceinline__ void add_grad(double* __restrict__ grad, int atom,
                                           double fx, double fy, double fz)
 {
+    if (d_gfnff_fix) {
+        fix_add(&grad[3*atom],   fx, GFNFF_FIX_FORCE);
+        fix_add(&grad[3*atom+1], fy, GFNFF_FIX_FORCE);
+        fix_add(&grad[3*atom+2], fz, GFNFF_FIX_FORCE);
+        return;
+    }
     atomicAdd(&grad[3*atom],   fx);
     atomicAdd(&grad[3*atom+1], fy);
     atomicAdd(&grad[3*atom+2], fz);
@@ -107,7 +191,48 @@ __device__ __forceinline__ double warpReduceSum(double val)
 // before this point). Threads with no work contribute local_E = 0.0.
 // ============================================================================
 
-__device__ __forceinline__ void blockReduceAddEnergy(double local_E, double* energy)
+/// Claude Generated (Oct 2026, WP10): integer twin of blockReduceAddEnergy (port of CUDA blockReduceAddEnergyFix).
+/// Thread values are fixed-point integers, so warp, block and atomic sums are associative. Wave32 as below.
+__device__ __forceinline__ void blockReduceAddEnergyFix(long long local_E, double* energy)
+{
+    long long warp_sum = local_E;
+    for (int off = 16; off > 0; off >>= 1) warp_sum += __shfl_down_sync(0xFFFFFFFFFFFFFFFFull, warp_sum, off);
+
+    __shared__ long long warp_sums_fx[32];
+    int lane = threadIdx.x & 31;
+    int warp_id = threadIdx.x >> 5;
+
+    if (lane == 0)
+        warp_sums_fx[warp_id] = warp_sum;
+    __syncthreads();
+
+    int num_warps = (blockDim.x + 31) >> 5;
+    if (warp_id == 0) {
+        long long sum = (lane < num_warps) ? warp_sums_fx[lane] : 0ll;
+        for (int off = 16; off > 0; off >>= 1) sum += __shfl_down_sync(0xFFFFFFFFFFFFFFFFull, sum, off);
+        if (lane == 0)
+            atomicAdd(reinterpret_cast<unsigned long long*>(energy), static_cast<unsigned long long>(sum));
+    }
+}
+
+__device__ __forceinline__ void blockReduceAddEnergyFP(double local_E, double* energy);
+
+/// Block energy reduction into one slot; with d_gfnff_fix every thread value is rounded to a multiple of
+/// 1/fix_scale first (GFNFF_FIX_ENERGY, dispersion kernels GFNFF_FIX_ENERGY_DISP, as CUDA).
+__device__ __forceinline__ void blockReduceAddEnergy(double local_E, double* energy, double fix_scale = GFNFF_FIX_ENERGY)
+{
+    if (d_gfnff_fix) {
+        if (!(fabs(local_E) * fix_scale < 9.2e18)) {   // not finite or beyond the int64 range: mark, contribute 0
+            atomicOr(&d_gfnff_fix_bad, 1);
+            local_E = 0.0;
+        }
+        blockReduceAddEnergyFix(static_cast<long long>(llrint(local_E * fix_scale)), energy);
+    } else {
+        blockReduceAddEnergyFP(local_E, energy);
+    }
+}
+
+__device__ __forceinline__ void blockReduceAddEnergyFP(double local_E, double* energy)
 {
     // Step 1: Warp-level reduction using shuffle intrinsics
     double warp_sum = warpReduceSum(local_E);
@@ -303,13 +428,13 @@ __global__ void k_dispersion(
 
             if (dc6dcn_ij && dEdcn) {
                 double disp_value = disp_sum * zetac6[tid];
-                atomicAdd(&dEdcn[i], -dc6dcn_ij[tid] * disp_value);
-                atomicAdd(&dEdcn[j], -dc6dcn_ji[tid] * disp_value);
+                acc_add(&dEdcn[i], -dc6dcn_ij[tid] * disp_value, GFNFF_FIX_FORCE);
+                acc_add(&dEdcn[j], -dc6dcn_ji[tid] * disp_value, GFNFF_FIX_FORCE);
             }
         }
     }
 
-    blockReduceAddEnergy(local_E, energy);
+    blockReduceAddEnergy(local_E, energy, GFNFF_FIX_ENERGY_DISP);   // one pair per thread: rounded per pair
 }
 
 // Claude Generated (June 2026): per-atom GATHER variant of k_dispersion for ROCm/RDNA. In
@@ -408,10 +533,10 @@ __global__ void k_dispersion_gather(
     }
     if (lane == 0 && a < N) {
         add_grad(grad, a, sgx[0], sgy[0], sgz[0]);
-        if (dc6dcn_ij != nullptr && dEdcn != nullptr) atomicAdd(&dEdcn[a], sdc[0]);
+        if (dc6dcn_ij != nullptr && dEdcn != nullptr) acc_add(&dEdcn[a], sdc[0], GFNFF_FIX_FORCE);
     }
 
-    blockReduceAddEnergy(local_E, energy);
+    blockReduceAddEnergy(local_E, energy, GFNFF_FIX_ENERGY_DISP);
 }
 
 // Claude Generated (Oct 2026): k_dispersion_gather with C6 and dC6/dCN computed in the edge loop from the
@@ -512,10 +637,10 @@ __global__ void k_dispersion_gather_uv(
     }
     if (lane == 0 && a < N) {
         add_grad(grad, a, sgx[0], sgy[0], sgz[0]);
-        if (dEdcn != nullptr) atomicAdd(&dEdcn[a], sdc[0]);
+        if (dEdcn != nullptr) acc_add(&dEdcn[a], sdc[0], GFNFF_FIX_FORCE);
     }
 
-    blockReduceAddEnergy(local_E, energy);
+    blockReduceAddEnergy(local_E, energy, GFNFF_FIX_ENERGY_DISP);
 }
 
 // ============================================================================
@@ -959,8 +1084,53 @@ void k_coulomb_tiles_hip(
     if (active) { xi = cx[i]; yi = cy[i]; zi = cz[i]; qi = charges[i]; ai = alpha[i]; }
     const double inv_sqrt_pi = 0.5641895835477563;
     double gx = 0.0, gy = 0.0, gz = 0.0, local_E = 0.0;
+    const bool fixmode = (d_gfnff_fix != 0);   // 0.0 and integer 0 have the same bits: the zeroing above serves both
+    // WP10 (Claude Generated, Oct 2026): with TI == TJ the rotated walk maps the TI threads one-to-one onto the TJ
+    // slots at a fixed k, so with one barrier per k every slot receives its partner forces in k order without
+    // atomics (deterministic FP sums; 6200 atoms: cheaper than three fixed-point shared atomics per pair). The
+    // per-pair arithmetic is a verbatim copy of the loop below. Smaller j tiles (TJ < TI) keep shared atomics.
+    const bool lockstep = fixmode && (TI == TJ);
 
-    if (active) {
+    if (lockstep) {
+        for (int k = 0; k < TJ; ++k) {
+            const int jj = (t + k) & (TJ - 1);
+            const int j  = bj * TJ + jj;
+            double fx = 0.0, fy = 0.0, fz = 0.0;
+            bool hit = false;
+            if (active && j < N && j > i) {
+                double dx = xi - sx[jj];
+                double dy = yi - sy[jj];
+                double dz = zi - sz[jj];
+                applyMIC(dx, dy, dz);
+                double r2  = dx*dx + dy*dy + dz*dz;
+                double rij = sqrt(r2);
+                const double qj = sq[jj];
+                if ((rij <= r_cut && rij >= 1e-10) && !isnan(qj)) {
+                    const double asum = ai + sa[jj];
+                    double erf_v, dEdr;
+                    if (r2 >= 36.0 * asum) {
+                        erf_v = 1.0;
+                        dEdr  = qi * qj * (-1.0 / (rij * rij));
+                    } else {
+                        double g       = 1.0 / sqrt(asum);
+                        double gamma_r = g * rij;
+                        erf_v = erf(gamma_r);
+                        double exp_v = exp(-gamma_r * gamma_r);
+                        double derf  = g * exp_v * (2.0 * inv_sqrt_pi);
+                        dEdr = qi * qj * (derf / rij - erf_v / (rij * rij));
+                    }
+                    local_E += qi * qj * erf_v / rij;
+                    const double fac = dEdr / rij;
+                    fx = fac*dx; fy = fac*dy; fz = fac*dz;
+                    gx += fx; gy += fy; gz += fz;
+                    hit = true;
+                }
+            }
+            if (hit) { sgx[jj] -= fx; sgy[jj] -= fy; sgz[jj] -= fz; }   // slot jj belongs to this thread at this k
+            __syncthreads();
+        }
+        if (active) add_grad(grad, i, gx, gy, gz);
+    } else if (active) {
         for (int k = 0; k < TJ; ++k) {
             const int jj = (t + k) & (TJ - 1);
             const int j  = bj * TJ + jj;
@@ -991,9 +1161,15 @@ void k_coulomb_tiles_hip(
             const double fac = dEdr / rij;   // force on i = fac*(ri - rj), on j the negative
             const double fx = fac*dx, fy = fac*dy, fz = fac*dz;
             gx += fx; gy += fy; gz += fz;
-            atomicAdd(&sgx[jj], -fx);
-            atomicAdd(&sgy[jj], -fy);
-            atomicAdd(&sgz[jj], -fz);
+            if (fixmode) {   // WP10: fixed-point partner gradients in shared memory (order-independent, as CUDA)
+                fix_add_u64(reinterpret_cast<unsigned long long*>(&sgx[jj]), -fx, GFNFF_FIX_FORCE);
+                fix_add_u64(reinterpret_cast<unsigned long long*>(&sgy[jj]), -fy, GFNFF_FIX_FORCE);
+                fix_add_u64(reinterpret_cast<unsigned long long*>(&sgz[jj]), -fz, GFNFF_FIX_FORCE);
+            } else {
+                atomicAdd(&sgx[jj], -fx);
+                atomicAdd(&sgy[jj], -fy);
+                atomicAdd(&sgz[jj], -fz);
+            }
         }
         if (gx != 0.0 || gy != 0.0 || gz != 0.0 || TI == TJ)   // TI == TJ: former behaviour (always add)
             add_grad(grad, i, gx, gy, gz);
@@ -1001,8 +1177,19 @@ void k_coulomb_tiles_hip(
     __syncthreads();
     if (t < TJ) {
         const int jl = bj * TJ + t;
-        if (jl < N && (sgx[t] != 0.0 || sgy[t] != 0.0 || sgz[t] != 0.0))
+        if (fixmode && !lockstep) {
+            // integer partner sums go to the integer global accumulator unchanged (exact, no second rounding)
+            const unsigned long long* ux = reinterpret_cast<const unsigned long long*>(&sgx[t]);
+            const unsigned long long* uy = reinterpret_cast<const unsigned long long*>(&sgy[t]);
+            const unsigned long long* uz = reinterpret_cast<const unsigned long long*>(&sgz[t]);
+            if (jl < N && (*ux != 0ull || *uy != 0ull || *uz != 0ull)) {
+                atomicAdd(reinterpret_cast<unsigned long long*>(&grad[3*jl]),   *ux);
+                atomicAdd(reinterpret_cast<unsigned long long*>(&grad[3*jl+1]), *uy);
+                atomicAdd(reinterpret_cast<unsigned long long*>(&grad[3*jl+2]), *uz);
+            }
+        } else if (jl < N && (sgx[t] != 0.0 || sgy[t] != 0.0 || sgz[t] != 0.0)) {
             add_grad(grad, jl, sgx[t], sgy[t], sgz[t]);
+        }
     }
 
     blockReduceAddEnergy(local_E, energy);
@@ -1135,8 +1322,8 @@ __global__ void k_bonds(
 
             if (dEdcn && cn && r0_base_i[tid] > 0.0) {
                 double yy = -dEdr;
-                atomicAdd(&dEdcn[i], yy * ff[tid] * cnfak_i[tid]);
-                atomicAdd(&dEdcn[j], yy * ff[tid] * cnfak_j[tid]);
+                acc_add(&dEdcn[i], yy * ff[tid] * cnfak_i[tid], GFNFF_FIX_FORCE);
+                acc_add(&dEdcn[j], yy * ff[tid] * cnfak_j[tid], GFNFF_FIX_FORCE);
             }
 
             if (zz_hb && nr_hb[tid] >= 1 && hb_H_atom) {
@@ -1144,7 +1331,7 @@ __global__ void k_bonds(
                 double zz = t1 * alpha_orig * dr * dr * E;
                 int H = hb_H_atom[tid];
                 if (H >= 0) {
-                    atomicAdd(&zz_hb[H], zz);
+                    acc_add(&zz_hb[H], zz, GFNFF_FIX_FORCE);
                 }
             }
         }
@@ -3193,7 +3380,7 @@ __global__ void k_coulomb_self(
     double E_en   = -q * chi;
     double E_self = 0.5 * q * q * (gam[i] + sqrt_2_over_pi / sqrt(alp[i]));
 
-    atomicAdd(energy, E_en + E_self);
+    acc_add(energy, E_en + E_self, GFNFF_FIX_ENERGY);
 }
 
 // ============================================================================
@@ -3681,6 +3868,77 @@ __global__ void k_dc6dcn_per_pair_uv(
     if (c6_out) c6_out[tid] = c6;
 }
 
+// ---------------------------------------------------------------------------
+// WP9-B (Claude Generated, Oct 2026): tabulated dc6dcn, port of the CUDA k_d4_partner_tables /
+// k_dc6dcn_per_pair_tab (cuda/gfnff_kernels.cu). Per atom a and partner element type t, from gw only:
+//   A[a][t][r'] = sum_r gw_a[r] C6ref(Z_a, Z_t; r, r'),   W[a][t][r'] = sum_r gw_a[r] C6ref(Z_t, Z_a; r', r)
+// and per pair C6 = sum gw_j A[i][t_j], dC6/dCN(j) = sum dgw_j A[i][t_j], dC6/dCN(i) = sum dgw_i W[j][t_i].
+// Against k_disp_uv / k_dc6dcn_per_pair_uv: C6 and dC6/dCN(j) are the same sums (A == v), dC6/dCN(i)
+// contracts the other index first (differs by rounding). The compact types are ROCm's ctype_elem /
+// atom_ctype (0-based element per type) instead of CUDA's type_z / atype_idx.
+// ---------------------------------------------------------------------------
+__global__ void k_d4_partner_tables(int N, int nt, const int* __restrict__ ctype_elem, const int* __restrict__ atom_types,
+                                    const double* __restrict__ gw, const double* __restrict__ c6_flat,
+                                    double* __restrict__ A, double* __restrict__ W)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= N * nt) return;
+    const int a = tid / nt, t = tid % nt;
+    const int za = atom_types[a] - 1, zt = ctype_elem[t];
+    double* outA = A + (static_cast<size_t>(a) * nt + t) * D4_MAX_REF;
+    double* outW = W + (static_cast<size_t>(a) * nt + t) * D4_MAX_REF;
+    if (za < 0 || za >= D4_MAX_ELEM || zt < 0 || zt >= D4_MAX_ELEM) {
+        for (int r = 0; r < D4_MAX_REF; ++r) { outA[r] = 0.0; outW[r] = 0.0; }
+        return;
+    }
+    int nra = d_refn_const[za]; if (nra > D4_MAX_REF) nra = D4_MAX_REF;
+    int nrt = d_refn_const[zt]; if (nrt > D4_MAX_REF) nrt = D4_MAX_REF;
+    const size_t base_at = (static_cast<size_t>(za) * D4_MAX_ELEM + zt) * D4_MAX_REF * D4_MAX_REF;
+    const size_t base_ta = (static_cast<size_t>(zt) * D4_MAX_ELEM + za) * D4_MAX_REF * D4_MAX_REF;
+    for (int rp = 0; rp < D4_MAX_REF; ++rp) {
+        double sa = 0.0, sw = 0.0;
+        if (rp < nrt) {
+            for (int r = 0; r < nra; ++r) {
+                const double g = gw[a * D4_MAX_REF + r];
+                const double c_at = c6_flat[base_at + r * D4_MAX_REF + rp];
+                if (fabs(c_at) >= 1e-20) sa += g * c_at;
+                const double c_ta = c6_flat[base_ta + rp * D4_MAX_REF + r];
+                if (fabs(c_ta) >= 1e-20) sw += g * c_ta;
+            }
+        }
+        outA[rp] = sa;
+        outW[rp] = sw;
+    }
+}
+
+/// Claude Generated (Oct 2026, WP9-B): per-pair half of the tabulated dc6dcn (see the block above).
+/// @param c6_out [n] C6(i,j) at the current CN, or nullptr (C6 kept)
+__global__ void k_dc6dcn_per_pair_tab(int n_pairs, const int* __restrict__ idx_i, const int* __restrict__ idx_j,
+                                      const int* __restrict__ atom_types, const int* __restrict__ atom_ctype, int nt,
+                                      const double* __restrict__ gw, const double* __restrict__ dgw,
+                                      const double* __restrict__ A, const double* __restrict__ W,
+                                      double* __restrict__ dc6dcn_ij, double* __restrict__ dc6dcn_ji,
+                                      double* __restrict__ c6_out)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= n_pairs) return;
+    const int ai = idx_i[tid], aj = idx_j[tid];
+    int nri = d_refn_const[atom_types[ai] - 1]; if (nri > D4_MAX_REF) nri = D4_MAX_REF;
+    int nrj = d_refn_const[atom_types[aj] - 1]; if (nrj > D4_MAX_REF) nrj = D4_MAX_REF;
+    const double* Aij = A + (static_cast<size_t>(ai) * nt + atom_ctype[aj]) * D4_MAX_REF;
+    const double* Wji = W + (static_cast<size_t>(aj) * nt + atom_ctype[ai]) * D4_MAX_REF;
+    double c6 = 0.0, dji = 0.0, dij = 0.0;
+    for (int rj = 0; rj < nrj; ++rj) {
+        c6  += gw[aj * D4_MAX_REF + rj] * Aij[rj];
+        dji += dgw[aj * D4_MAX_REF + rj] * Aij[rj];
+    }
+    for (int ri = 0; ri < nri; ++ri)
+        dij += dgw[ai * D4_MAX_REF + ri] * Wji[ri];
+    dc6dcn_ij[tid] = dij;
+    dc6dcn_ji[tid] = dji;
+    if (c6_out) c6_out[tid] = c6;
+}
+
 // ============================================================================
 // WP-A (Jun 2026): on-device D4 dispersion pair-list build (HIP port of
 // cuda/gfnff_kernels.cu k_disp_pairs_count / k_disp_pairs_build). Reference target
@@ -3705,6 +3963,52 @@ __device__ inline void dispPairFromTid(int tid, int N, int& i, int& j)
     while (i > 0 && i * (2 * N - i - 1) / 2 > tid) --i;
     while (i + 1 < N && (i + 1) * (2 * N - (i + 1) - 1) / 2 <= tid) ++i;
     j = tid - i * (2 * N - i - 1) / 2 + i + 1;
+}
+
+/// Claude Generated (Oct 2026): per-pair static D4 data of the pair (i, j), shared by
+/// k_disp_pairs_build and k_disp_pairs_static (same expressions as before the split).
+__device__ inline void dispPairStaticData(
+    int i, int j, int zi, int zj,
+    const double* __restrict__ gw, const double* __restrict__ c6_flat,
+    const double* __restrict__ sqrtzr4r2, const double* __restrict__ topo_q,
+    const double* __restrict__ zeta_zeff, const double* __restrict__ zeta_c,
+    double a1, double a2,
+    double& c6_out, double& r4r2_out, double& r0sq_out, double& zeta_out)
+{
+    // C6 = Σ_{ri,rj} gw_i[ri]·gw_j[rj]·c6ref  (== getChargeWeightedC6, CN-only weighting)
+    int ei = zi - 1, ej = zj - 1;
+    int nri = d_refn_const[ei];
+    int nrj = d_refn_const[ej];
+    size_t c6_base = (size_t)ei * D4_MAX_ELEM * D4_MAX_REF * D4_MAX_REF
+                   + (size_t)ej * D4_MAX_REF * D4_MAX_REF;
+    int gi = i * D4_MAX_REF;
+    int gj = j * D4_MAX_REF;
+    double c6 = 0.0;
+    for (int ri = 0; ri < nri; ++ri) {
+        double wi = gw[gi + ri];
+        size_t b = c6_base + (size_t)ri * D4_MAX_REF;
+        for (int rj = 0; rj < nrj; ++rj) {
+            double c6ref = c6_flat[b + rj];
+            if (fabs(c6ref) < 1e-20) continue;
+            c6 += wi * gw[gj + rj] * c6ref;
+        }
+    }
+
+    double si = sqrtzr4r2[ei];
+    double sj = sqrtzr4r2[ej];
+    double r4r2ij = 3.0 * si * sj;
+    double t = a1 * sqrt(r4r2ij) + a2;
+    double r0_sq = t * t;
+
+    double qi = topo_q[i];
+    double qj = topo_q[j];
+    double zsi = (zi >= 1 && zi <= 86) ? zetaChargeScaleDev(zeta_zeff[zi - 1], zeta_c[zi - 1], qi) : 1.0;
+    double zsj = (zj >= 1 && zj <= 86) ? zetaChargeScaleDev(zeta_zeff[zj - 1], zeta_c[zj - 1], qj) : 1.0;
+
+    c6_out   = c6;
+    r4r2_out = r4r2ij;
+    r0sq_out = r0_sq;
+    zeta_out = zsi * zsj;
 }
 
 __global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_count(
@@ -3779,35 +4083,9 @@ __global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_build(
     double r2 = dx * dx + dy * dy + dz * dz;
     if (r2 > cutoff_sq) return;
 
-    // C6 = Σ_{ri,rj} gw_i[ri]·gw_j[rj]·c6ref  (== getChargeWeightedC6, CN-only weighting)
-    int ei = zi - 1, ej = zj - 1;
-    int nri = d_refn_const[ei];
-    int nrj = d_refn_const[ej];
-    size_t c6_base = (size_t)ei * D4_MAX_ELEM * D4_MAX_REF * D4_MAX_REF
-                   + (size_t)ej * D4_MAX_REF * D4_MAX_REF;
-    int gi = i * D4_MAX_REF;
-    int gj = j * D4_MAX_REF;
-    double c6 = 0.0;
-    for (int ri = 0; ri < nri; ++ri) {
-        double wi = gw[gi + ri];
-        size_t b = c6_base + (size_t)ri * D4_MAX_REF;
-        for (int rj = 0; rj < nrj; ++rj) {
-            double c6ref = c6_flat[b + rj];
-            if (fabs(c6ref) < 1e-20) continue;
-            c6 += wi * gw[gj + rj] * c6ref;
-        }
-    }
-
-    double si = sqrtzr4r2[ei];
-    double sj = sqrtzr4r2[ej];
-    double r4r2ij = 3.0 * si * sj;
-    double t = a1 * sqrt(r4r2ij) + a2;
-    double r0_sq = t * t;
-
-    double qi = topo_q[i];
-    double qj = topo_q[j];
-    double zsi = (zi >= 1 && zi <= 86) ? zetaChargeScaleDev(zeta_zeff[zi - 1], zeta_c[zi - 1], qi) : 1.0;
-    double zsj = (zj >= 1 && zj <= 86) ? zetaChargeScaleDev(zeta_zeff[zj - 1], zeta_c[zj - 1], qj) : 1.0;
+    double c6, r4r2ij, r0_sq, zeta;
+    dispPairStaticData(i, j, zi, zj, gw, c6_flat, sqrtzr4r2, topo_q, zeta_zeff, zeta_c, a1, a2,
+                       c6, r4r2ij, r0_sq, zeta);
 
     int slot = atomicAdd(d_counter, 1);
     out_i[slot]    = i;
@@ -3815,8 +4093,887 @@ __global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_build(
     out_C6[slot]   = c6;
     out_r4r2[slot] = r4r2ij;
     out_r0sq[slot] = r0_sq;
-    out_zeta[slot] = zsi * zsj;
+    out_zeta[slot] = zeta;
     out_rcut[slot] = 50.0;  // D4 pair-energy cutoff (struct default, matches host)
+}
+
+// ============================================================================
+// Claude Generated (Oct 2026): ordered device build of the D4 pair list and of its per-atom
+// gather CSR. k_disp_pairs_build above takes its output slot from a global atomic counter, so
+// the pair order depended on the arrival order of the wavefronts; the CSR then had to be built
+// on the host from a downloaded copy of the indices (13.7 M pairs at 6200 atoms: 137 ms of host
+// loops, 13-26 ms download, 10 ms upload per rebuild). Here one workgroup owns one atom row:
+//   k_disp_rows_count : lo[a] = #partners p < a, hi[a] = #partners p > a in the list
+//   (host)            : exclusive scans -> pair row offsets rowoff (over hi), csr_off (over lo+hi)
+//   k_disp_rows_build : partners in ascending order (wavefront ballot + per-tile prefix); pair
+//                       (a, p > a) goes to slot rowoff[a] + rank, i.e. the host order of
+//                       GenerateDispersionPairsNative (i ascending, j ascending = key i*N+j);
+//                       CSR row of a = all partners ascending, is_i = (p > a)
+//   k_disp_pairs_static: C6, r4r2ij, R0^2, zetac6, r_cut per pair (one thread per pair)
+//   k_disp_csr_lower  : csr_pairidx of the p < a half by binary search of a in the
+//                       (ascending) idx_j row of p
+// The CSR rows are those DispersionSoA::upload builds from the same pair list: there each row
+// receives its entries in pair order, which for a list sorted by i*N+j is ascending partner order.
+// ============================================================================
+
+/// Same predicate as k_disp_pairs_count / k_disp_pairs_build for the pair (i, j), i < j.
+__device__ inline bool dispPairInList(int i, int j,
+                                      const double* __restrict__ cx, const double* __restrict__ cy,
+                                      const double* __restrict__ cz, const int* __restrict__ atom_types,
+                                      double cutoff_sq)
+{
+    const int zi = atom_types[i];
+    const int zj = atom_types[j];
+    if (zi < 1 || zi > D4_MAX_ELEM || zj < 1 || zj > D4_MAX_ELEM) return false;
+    const double dx = cx[i] - cx[j];
+    const double dy = cy[i] - cy[j];
+    const double dz = cz[i] - cz[j];
+    const double r2 = dx * dx + dy * dy + dz * dz;
+    return !(r2 > cutoff_sq);
+}
+
+constexpr int DISP_ROW_BLOCK = 256;
+
+/// Claude Generated (Oct 2026): per-atom partner counts below (lo) and above (hi) the atom index.
+__global__ __launch_bounds__(DISP_ROW_BLOCK) void k_disp_rows_count(
+    int N,
+    const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+    const int* __restrict__ atom_types, double cutoff_sq,
+    int* __restrict__ lo, int* __restrict__ hi)
+{
+    __shared__ int s_lo[DISP_ROW_BLOCK];
+    __shared__ int s_hi[DISP_ROW_BLOCK];
+    const int a = blockIdx.x;
+    if (a >= N) return;
+    int nlo = 0, nhi = 0;
+    for (int p = threadIdx.x; p < N; p += blockDim.x) {
+        if (p == a) continue;
+        const int i = p < a ? p : a;
+        const int j = p < a ? a : p;
+        if (dispPairInList(i, j, cx, cy, cz, atom_types, cutoff_sq)) {
+            if (p < a) ++nlo; else ++nhi;
+        }
+    }
+    s_lo[threadIdx.x] = nlo;
+    s_hi[threadIdx.x] = nhi;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (static_cast<int>(threadIdx.x) < s) {
+            s_lo[threadIdx.x] += s_lo[threadIdx.x + s];
+            s_hi[threadIdx.x] += s_hi[threadIdx.x + s];
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) { lo[a] = s_lo[0]; hi[a] = s_hi[0]; }
+}
+
+/// Claude Generated (Oct 2026): writes the pair indices (a, p > a) in ascending p at rowoff[a] and
+/// the CSR row of atom a (all partners ascending). csr_pairidx of the p < a half: k_disp_csr_lower;
+/// per-pair static data: k_disp_pairs_static (one thread per pair: here most lanes of a tile have
+/// no pair, and the C6 contraction took 17-27 of 20-31 ms at 13.7 M pairs when done in this kernel).
+__global__ __launch_bounds__(DISP_ROW_BLOCK) void k_disp_rows_build(
+    int N,
+    const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+    const int* __restrict__ atom_types, double cutoff_sq,
+    const int* __restrict__ lo, const int* __restrict__ rowoff, const int* __restrict__ csr_off,
+    int* __restrict__ out_i, int* __restrict__ out_j,
+    int* __restrict__ csr_partner, int* __restrict__ csr_pairidx, int* __restrict__ csr_is_i)
+{
+    __shared__ int s_scan[DISP_ROW_BLOCK / 32];   // per-wavefront counts of the current tile
+    const int a = blockIdx.x;
+    if (a >= N) return;
+    const int t = threadIdx.x;
+    const int row_csr = csr_off[a];
+    const int row_pair = rowoff[a];
+    const int n_lo = lo[a];
+    int base = 0;   // partners of a found in the previous tiles
+    for (int p0 = 0; p0 < N; p0 += DISP_ROW_BLOCK) {
+        const int p = p0 + t;
+        bool in = false;
+        if (p < N && p != a) {
+            const int i = p < a ? p : a;
+            const int j = p < a ? a : p;
+            in = dispPairInList(i, j, cx, cy, cz, atom_types, cutoff_sq);
+        }
+        // tile prefix count of the flags: ballot + popcount within the wavefront, then the
+        // wavefront totals (warpSize 32 or 64, at most DISP_ROW_BLOCK / 32 of them)
+        const int lane = t % warpSize;
+        const int wave = t / warpSize;
+        const int nwave = DISP_ROW_BLOCK / warpSize;
+        const unsigned long long mask = __ballot(in ? 1 : 0);
+        const int in_wave = __popcll(mask & ((1ull << lane) - 1ull));
+        if (lane == 0) s_scan[wave] = __popcll(mask);
+        __syncthreads();
+        int before = 0, tile_total = 0;
+        for (int w = 0; w < nwave; ++w) {
+            if (w < wave) before += s_scan[w];
+            tile_total += s_scan[w];
+        }
+        if (in) {
+            const int rank = base + before + in_wave;       // rank of p among the partners of a
+            const int e = row_csr + rank;
+            csr_partner[e] = p;
+            csr_is_i[e]    = (p > a) ? 1 : 0;
+            if (p > a) {
+                const int k = row_pair + rank - n_lo;
+                out_i[k]    = a;
+                out_j[k]    = p;
+                csr_pairidx[e] = k;
+            }
+        }
+        base += tile_total;
+        __syncthreads();   // s_scan is rewritten by the next tile
+    }
+}
+
+/// Claude Generated (Oct 2026): per-pair static D4 data (C6 contraction, r4r2ij, R0^2, zetac6,
+/// r_cut) for the ordered list, one thread per pair.
+__global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_static(
+    int n, const int* __restrict__ idx_i, const int* __restrict__ idx_j,
+    const int* __restrict__ atom_types,
+    const double* __restrict__ gw, const double* __restrict__ c6_flat,
+    const double* __restrict__ sqrtzr4r2, const double* __restrict__ topo_q,
+    const double* __restrict__ zeta_zeff, const double* __restrict__ zeta_c,
+    double a1, double a2,
+    double* __restrict__ out_C6, double* __restrict__ out_r4r2, double* __restrict__ out_r0sq,
+    double* __restrict__ out_zeta, double* __restrict__ out_rcut)
+{
+    const int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= n) return;
+    const int i = idx_i[k];
+    const int j = idx_j[k];
+    double c6, r4r2ij, r0_sq, zeta;
+    dispPairStaticData(i, j, atom_types[i], atom_types[j], gw, c6_flat, sqrtzr4r2, topo_q,
+                       zeta_zeff, zeta_c, a1, a2, c6, r4r2ij, r0_sq, zeta);
+    out_C6[k]   = c6;
+    out_r4r2[k] = r4r2ij;
+    out_r0sq[k] = r0_sq;
+    out_zeta[k] = zeta;
+    out_rcut[k] = 50.0;  // D4 pair-energy cutoff (struct default, matches host)
+}
+
+/// Claude Generated (Oct 2026): pair index of the CSR entries (a, p < a): the pair (p, a) sits
+/// in the row of p, whose idx_j are ascending.
+__global__ __launch_bounds__(DISP_ROW_BLOCK) void k_disp_csr_lower(
+    int N, const int* __restrict__ lo, const int* __restrict__ rowoff, const int* __restrict__ csr_off,
+    const int* __restrict__ idx_j, const int* __restrict__ csr_partner, int* __restrict__ csr_pairidx)
+{
+    const int a = blockIdx.x;
+    if (a >= N) return;
+    const int s = csr_off[a];
+    const int n_lo = lo[a];
+    for (int t = threadIdx.x; t < n_lo; t += blockDim.x) {
+        const int p = csr_partner[s + t];
+        int l = rowoff[p], r = rowoff[p + 1];        // search a in idx_j[l, r)
+        while (l < r) {
+            const int m = l + ((r - l) >> 1);
+            if (idx_j[m] < a) l = m + 1; else r = m;
+        }
+        csr_pairidx[s + t] = l;                       // idx_j[l] == a by construction
+    }
+}
+
+// ============================================================================
+// WP9-A (Claude Generated, Oct 2026): device rebuild of the non-bonded repulsion list, the ordered
+// row scheme of the D4 list above applied to the pair predicate of GFNFF::make_nb_rep() (CUDA:
+// k_rep_pairs_count / k_rep_pairs_build, arrival order). Pairs (i < j) come out in ascending i*N+j,
+// and the gather CSR row of atom a lists all its partners ascending, which is what
+// buildRepulsionGatherCSR() makes of that list. Tables: GFNFF::RepulsionDeviceInputs.
+// ============================================================================
+
+/// Device copies of GFNFF::RepulsionDeviceInputs (pointers into the workspace buffers).
+struct RepDevTablesHip {
+    const int* valid = nullptr;
+    const int* metal = nullptr;
+    const double* dum = nullptr;
+    const double* repz = nullptr;
+    const long long* bond_keys = nullptr;
+    int n_bond_keys = 0;
+    const long long* hh_keys = nullptr;
+    const int* hh_dist = nullptr;
+    int n_hh_keys = 0;
+    double repscaln = 0.0, hhfac = 0.0, hh13 = 0.0, hh14 = 0.0, r_cut = 20.0;
+};
+
+/// Index of key in the sorted array keys[0, n), or -1.
+__device__ inline int repKeyFindHip(const long long* __restrict__ keys, int n, long long key)
+{
+    int lo = 0, hi = n - 1;
+    while (lo <= hi) {
+        const int mid = lo + ((hi - lo) >> 1);
+        const long long v = keys[mid];
+        if (v == key) return mid;
+        if (v < key) lo = mid + 1; else hi = mid - 1;
+    }
+    return -1;
+}
+
+/// Pair (i < j) is in the non-bonded list: valid elements, r^2 <= cutoff^2, not an (i, j) bond-list entry.
+__device__ inline bool repPairInListHip(int N, int i, int j, const double* __restrict__ cx,
+                                        const double* __restrict__ cy, const double* __restrict__ cz,
+                                        double cutoff_sq, const RepDevTablesHip& t)
+{
+    if (!t.valid[i] || !t.valid[j]) return false;
+    const double dx = cx[i] - cx[j], dy = cy[i] - cy[j], dz = cz[i] - cz[j];
+    if (dx * dx + dy * dy + dz * dz > cutoff_sq) return false;
+    return repKeyFindHip(t.bond_keys, t.n_bond_keys, static_cast<long long>(i) * N + j) < 0;
+}
+
+/// Claude Generated (Oct 2026): per-atom partner counts below (lo) and above (hi) the atom index.
+__global__ __launch_bounds__(DISP_ROW_BLOCK) void k_rep_rows_count(
+    int N, const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+    double cutoff_sq, RepDevTablesHip t, int* __restrict__ lo, int* __restrict__ hi)
+{
+    __shared__ int s_lo[DISP_ROW_BLOCK];
+    __shared__ int s_hi[DISP_ROW_BLOCK];
+    const int a = blockIdx.x;
+    if (a >= N) return;
+    int nlo = 0, nhi = 0;
+    for (int p = threadIdx.x; p < N; p += blockDim.x) {
+        if (p == a) continue;
+        const int i = p < a ? p : a;
+        const int j = p < a ? a : p;
+        if (repPairInListHip(N, i, j, cx, cy, cz, cutoff_sq, t)) {
+            if (p < a) ++nlo; else ++nhi;
+        }
+    }
+    s_lo[threadIdx.x] = nlo;
+    s_hi[threadIdx.x] = nhi;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (static_cast<int>(threadIdx.x) < s) {
+            s_lo[threadIdx.x] += s_lo[threadIdx.x + s];
+            s_hi[threadIdx.x] += s_hi[threadIdx.x + s];
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) { lo[a] = s_lo[0]; hi[a] = s_hi[0]; }
+}
+
+/// Claude Generated (Oct 2026): pair indices (a, p > a) in ascending p at rowoff[a]; with csr_partner set
+/// also the gather CSR row of a (all partners ascending; pairidx of the p < a half: k_disp_csr_lower).
+__global__ __launch_bounds__(DISP_ROW_BLOCK) void k_rep_rows_build(
+    int N, const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+    double cutoff_sq, RepDevTablesHip t,
+    const int* __restrict__ lo, const int* __restrict__ rowoff, const int* __restrict__ csr_off,
+    int* __restrict__ out_i, int* __restrict__ out_j, int* __restrict__ csr_partner, int* __restrict__ csr_pairidx)
+{
+    __shared__ int s_scan[DISP_ROW_BLOCK / 32];   // per-wavefront counts of the current tile (warpSize 32 or 64)
+    const int a = blockIdx.x;
+    if (a >= N) return;
+    const int tt = threadIdx.x;
+    const int row_pair = rowoff[a];
+    const int n_lo = lo[a];
+    const int row_csr = csr_partner ? csr_off[a] : 0;
+    int base = 0;
+    for (int p0 = 0; p0 < N; p0 += DISP_ROW_BLOCK) {
+        const int p = p0 + tt;
+        bool in = false;
+        if (p < N && p != a) {
+            const int i = p < a ? p : a;
+            const int j = p < a ? a : p;
+            in = repPairInListHip(N, i, j, cx, cy, cz, cutoff_sq, t);
+        }
+        const int lane = tt % warpSize;
+        const int wave = tt / warpSize;
+        const int nwave = DISP_ROW_BLOCK / warpSize;
+        const unsigned long long mask = __ballot(in ? 1 : 0);
+        const int in_wave = __popcll(mask & ((1ull << lane) - 1ull));
+        if (lane == 0) s_scan[wave] = __popcll(mask);
+        __syncthreads();
+        int before = 0, tile_total = 0;
+        for (int w = 0; w < nwave; ++w) {
+            if (w < wave) before += s_scan[w];
+            tile_total += s_scan[w];
+        }
+        if (in) {
+            const int rank = base + before + in_wave;
+            if (csr_partner) csr_partner[row_csr + rank] = p;
+            if (p > a) {
+                const int k = row_pair + rank - n_lo;
+                out_i[k] = a;
+                out_j[k] = p;
+                if (csr_partner) csr_pairidx[row_csr + rank] = k;
+            }
+        }
+        base += tile_total;
+        __syncthreads();
+    }
+}
+
+/// Claude Generated (Oct 2026): alpha, repab, r_cut of every pair, same expressions and branch order as
+/// make_nb_rep() (alpha = sqrt(dum_i dum_j) ff, repab = repz_i repz_j REPSCALN).
+__global__ GFNFF_KERNEL_BOUNDS void k_rep_pairs_static(
+    int n, int N, const int* __restrict__ idx_i, const int* __restrict__ idx_j,
+    const int* __restrict__ atom_types, RepDevTablesHip t,
+    double* __restrict__ out_alpha, double* __restrict__ out_repab, double* __restrict__ out_rcut)
+{
+    const int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= n) return;
+    const int i = idx_i[k], j = idx_j[k];
+    const int zi = atom_types[i], zj = atom_types[j];
+    double ff = 1.0;
+    if (zi == 1 && zj == 1) {
+        ff = t.hhfac;
+        const int h = repKeyFindHip(t.hh_keys, t.n_hh_keys, static_cast<long long>(i) * N + j);
+        if (h >= 0) {
+            if (t.hh_dist[h] == 2) ff *= t.hh13;
+            else if (t.hh_dist[h] == 3) ff *= t.hh14;
+        }
+    } else if ((zi == 1 && t.metal[j]) || (zj == 1 && t.metal[i])) {
+        ff = 0.85;
+    } else if ((zi == 1 && zj == 6) || (zj == 1 && zi == 6)) {
+        ff = 0.91;
+    } else if ((zi == 1 && zj == 8) || (zj == 1 && zi == 8)) {
+        ff = 1.04;
+    }
+    out_alpha[k] = sqrt(t.dum[i] * t.dum[j]) * ff;
+    out_repab[k] = t.repz[i] * t.repz[j] * t.repscaln;
+    out_rcut[k]  = t.r_cut;
+}
+
+// ============================================================================
+// Device-side H-bond detection (Claude Generated, Oct 2026): port of the CUDA kernels of
+// cuda/gfnff_kernels.cu (d_hb_* helpers and k_hb_to_float unchanged; AB pairs per row (k_hb_ab_rows), k_hb_detect with
+// row counting; ordering by rows instead of a sort of 64-bit keys, see FFWorkspaceHip::detectHBondsOnDevice()).
+// Host reference: GFNFF::detectHydrogenBondsNative(), cell-list branch (process_pair / make_nhb2 and
+// case1StrengthDecision / estimateHBStrengthCase1). Constants as in k_hbonds.
+// ============================================================================
+
+__device__ __forceinline__ bool d_hb_bonded(int a, int b, const int* __restrict__ off, const int* __restrict__ idx)
+{
+    for (int p = off[a]; p < off[a + 1]; ++p)
+        if (idx[p] == b) return true;
+    return false;
+}
+
+__device__ __forceinline__ double d_hb_dist2(const double* __restrict__ cx, const double* __restrict__ cy,
+                                              const double* __restrict__ cz, int a, int b)
+{
+    const double dx = cx[a] - cx[b], dy = cy[a] - cy[b], dz = cz[a] - cz[b];
+    return dx * dx + dy * dy + dz * dz;
+}
+
+/// |E_HB| of a case-1 triple, the formula of estimateHBStrengthCase1() (and of the energy kernel).
+__device__ double d_hb_case1_strength(const double* __restrict__ cx, const double* __restrict__ cy,
+                                       const double* __restrict__ cz, const int* __restrict__ Z,
+                                       const double* __restrict__ bas, const double* __restrict__ aci,
+                                       const double* __restrict__ q, int A, int H, int B, double thr)
+{
+    const double r_AH = sqrt(d_hb_dist2(cx, cy, cz, A, H));
+    const double r_HB = sqrt(d_hb_dist2(cx, cy, cz, H, B));
+    const double r_AB = sqrt(d_hb_dist2(cx, cy, cz, A, B));
+    const double r_vdw = d_cov_radii[Z[A] - 1] + d_cov_radii[Z[B] - 1];
+    // Upper bound first (case1StrengthDecision() of the host): no pow, rejects most candidates. Valid for
+    // non-negative basicities and acidities; returns 0 when the bound is below the threshold.
+    {
+        const double expo_b = (49.0 / r_vdw) * ((r_AH + r_HB) / r_AB - 1.0);
+        if (expo_b > 15.0) return 0.0;
+        const double bA = bas[A], bB = bas[B], aA = aci[A], aB = aci[B];
+        if (bA >= 0.0 && bB >= 0.0 && aA >= 0.0 && aB >= 0.0) {
+            const double t = r_AB * r_AB / 85.0;
+            const double t2 = t * t;
+            const double outl_bound = (expo_b > 0.0) ? 2.0 * exp(-expo_b) : 2.0;
+            const double bound = fmax(bA, bB) * fmax(aA, aB) / (1.0 + t2 * t2 * t2) / (r_AB * r_AB * r_AB) * outl_bound;
+            if (isfinite(bound) && bound < thr * (1.0 - 1e-6)) return 0.0;
+        }
+    }
+    const double r_AH_4 = r_AH * r_AH * r_AH * r_AH;
+    const double r_HB_4 = r_HB * r_HB * r_HB * r_HB;
+    const double denom_DA = 1.0 / (r_AH_4 + r_HB_4);
+    const double Q_H = d_charge_scaling(q[H], 15.0, 1.0);
+    const double Q_A = d_charge_scaling(-q[A], 15.0, 1.0);
+    const double Q_B = d_charge_scaling(-q[B], 15.0, 1.0);
+    const double b = (Q_A * bas[A] * r_AH_4 + Q_B * bas[B] * r_HB_4) * denom_DA;
+    const double a = (aci[B] * r_AH_4 + aci[A] * r_HB_4) * denom_DA;
+    const double ratio_s = 22.0 * r_vdw / (r_AB * r_AB);
+    const double damp_short = 1.0 / (1.0 + pow(ratio_s, 6.0));
+    const double damp_long = 1.0 / (1.0 + pow(r_AB * r_AB / 85.0, 6.0));
+    const double expo = (49.0 / r_vdw) * ((r_AH + r_HB) / r_AB - 1.0);
+    const double damp_outl = (expo > 15.0) ? 0.0 : 2.0 / (1.0 + exp(expo));
+    const double rdamp = damp_short * damp_long / (r_AB * r_AB * r_AB);
+    return fabs(b * a * rdamp * (Q_H * damp_outl));
+}
+
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_hb_to_float(
+    int N, const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+    float* fx, float* fy, float* fz)
+{
+    const int a = blockIdx.x * blockDim.x + threadIdx.x;
+    if (a >= N) return;
+    fx[a] = static_cast<float>(cx[a]); fy[a] = static_cast<float>(cy[a]); fz[a] = static_cast<float>(cz[a]);
+}
+
+/// Claude Generated (Oct 2026): float copies of the HB hydrogen positions in hyd_list order, packed (x, y, z, unused)
+/// for the case-1 loop of k_hb_detect_rows: one coalesced 16-byte load per candidate instead of the index load
+/// followed by three dependent gathers (k_hb_detect_rows 10.8 -> 8.8 ms at 6200 atoms on the RX 9060 XT).
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_hb_pack_hyd(int n_hyd, const int* __restrict__ hyd_list,
+                                                        const float* __restrict__ fx, const float* __restrict__ fy,
+                                                        const float* __restrict__ fz, float4* __restrict__ hpos)
+{
+    const int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= n_hyd) return;
+    const int H = hyd_list[k];
+    hpos[k] = make_float4(fx[H], fy[H], fz[H], 0.f);
+}
+
+/// FP32 evaluation of the case-1 strength of d_hb_case1_strength(): returns -1 (surely below thr), +1 (surely at
+/// or above thr) or 0 (within a 1 % band around thr or a borderline out-of-line exponent: the caller runs the
+/// double path). The float evaluation is good to about 1e-5 relative, the 1 % band covers it with a wide margin.
+__device__ __forceinline__ int d_hb_strength_decision_f(
+    const float* __restrict__ fx, const float* __restrict__ fy, const float* __restrict__ fz,
+    const int* __restrict__ Z, const double* __restrict__ bas, const double* __restrict__ aci,
+    const double* __restrict__ q, int A, int H, int B, float thr)
+{
+    const float ax = fx[H] - fx[A], ay = fy[H] - fy[A], az = fz[H] - fz[A];
+    const float hx = fx[B] - fx[H], hy = fy[B] - fy[H], hz = fz[B] - fz[H];
+    const float bx = fx[B] - fx[A], by = fy[B] - fy[A], bz = fz[B] - fz[A];
+    const float r_AH2 = ax * ax + ay * ay + az * az;
+    const float r_HB2 = hx * hx + hy * hy + hz * hz;
+    const float r_AB2 = bx * bx + by * by + bz * bz;
+    const float r_AH = sqrtf(r_AH2), r_HB = sqrtf(r_HB2), r_AB = sqrtf(r_AB2);
+    const float r_vdw = static_cast<float>(d_cov_radii[Z[A] - 1] + d_cov_radii[Z[B] - 1]);
+    const float expo = (49.f / r_vdw) * ((r_AH + r_HB) / r_AB - 1.f);
+    if (expo > 15.01f) return -1;              // damping is exactly 0 beyond 15
+    if (expo > 14.99f) return 0;               // borderline: the double path decides
+    const float bA = static_cast<float>(bas[A]), bB = static_cast<float>(bas[B]);
+    const float aA = static_cast<float>(aci[A]), aB = static_cast<float>(aci[B]);
+    const float r_AH4 = r_AH2 * r_AH2, r_HB4 = r_HB2 * r_HB2;
+    const float denom = 1.f / (r_AH4 + r_HB4);
+    auto cs = [](float qq) { const float e = expf(15.f * qq); return e / (e + 1.f); };
+    const float Q_H = cs(static_cast<float>(q[H]));
+    const float Q_A = cs(-static_cast<float>(q[A]));
+    const float Q_B = cs(-static_cast<float>(q[B]));
+    const float b = (Q_A * bA * r_AH4 + Q_B * bB * r_HB4) * denom;
+    const float a = (aB * r_AH4 + aA * r_HB4) * denom;
+    const float rs = 22.f * r_vdw / r_AB2;
+    const float rs2 = rs * rs;
+    const float damp_short = 1.f / (1.f + rs2 * rs2 * rs2);
+    const float t = r_AB2 / 85.f;
+    const float t2 = t * t;
+    const float damp_long = 1.f / (1.f + t2 * t2 * t2);
+    const float damp_outl = 2.f / (1.f + expf(expo));
+    const float est = fabsf(b * a * (damp_short * damp_long / (r_AB2 * r_AB)) * (Q_H * damp_outl));
+    if (!isfinite(est)) return 0;
+    if (est < 0.99f * thr) return -1;
+    if (est > 1.01f * thr) return 1;
+    return 0;
+}
+
+/// Claude Generated (Oct 2026): AB pairs of the H-bond detection, same predicate as the CUDA k_hb_ab_pairs, but one
+/// workgroup per atom i (partners j > i over the threads) instead of one thread per upper-triangle index: no
+/// double-precision sqrt for the index mapping and no work at all for atoms that cannot be donor or acceptor
+/// (one thread per pair: 2.9 ms, per row: 0.3 ms on the RX 9060 XT at 6200 atoms). Arrival order (atomic slot).
+__global__ __launch_bounds__(256) void k_hb_ab_rows(
+    int N, const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+    const double* __restrict__ bas, const double* __restrict__ aci, const char* __restrict__ ab_ok,
+    double thr1, int cap, int* d_counter, int* ab_i, int* ab_j)
+{
+    const int i = blockIdx.x;
+    if (i >= N || !ab_ok[i]) return;
+    const double bi = bas[i], ai = aci[i];
+    for (int j = i + 1 + static_cast<int>(threadIdx.x); j < N; j += blockDim.x) {
+        if (!ab_ok[j]) continue;
+        if (d_hb_dist2(cx, cy, cz, i, j) > thr1) continue;
+        const double s1 = bi * aci[j], s2 = bas[j] * ai;
+        if (s1 < 1e-6 && s2 < 1e-6) continue;
+        const int pos = atomicAdd(d_counter, 1);
+        if (pos < cap) { ab_i[pos] = i; ab_j[pos] = j; }
+    }
+}
+
+/// Claude Generated (Oct 2026): threads per AB pair (one workgroup per pair) in k_hb_detect_rows and capacity of its
+/// shared-memory candidate queue. The kernel synchronises with __syncthreads and shared-memory atomics only (no
+/// shuffle, ballot or other wavefront intrinsic), so it is correct for wave32 (gfx11xx, gfx12xx) and wave64 alike.
+constexpr int HB_DETECT_THREADS = 128;
+constexpr int HB_DETECT_QUEUE = 1024;
+constexpr int HB_DETECT_PER_THREAD = 4;   ///< hydrogens per thread and pre-filter round (queue holds two rounds)
+
+/// Claude Generated (Oct 2026): the H-bond triples of the CUDA k_hb_detect (cuda/gfnff_kernels.cu, same tests in the
+/// same order), one workgroup per AB pair. Thread 0 emits the nhb2 triples (cases 2-4). For case 1 the threads first
+/// apply the float pre-filter to the HB hydrogens and queue the survivors in shared memory (about 1 % of the
+/// hydrogens at 6200 atoms); the queue is then worked off by all threads (exact double tests, bonded tests, strength
+/// decision), so the slow path does not run on one lane while the others of its wavefront wait (8.8 -> 4.2 ms at
+/// 6200 atoms, 76k AB pairs x 3600 hydrogens, RX 9060 XT). Emission: the
+/// workgroup reserves its slots with one global atomic per queue round. Each triple goes to an unordered slot together
+/// with its row, row = (case - 1) * N + A (case_rows) or A, whose length is counted in row_count;
+/// FFWorkspaceHip::detectHBondsOnDevice() orders the rows afterwards. Counting continues past `cap` (the caller reruns).
+__global__ __launch_bounds__(HB_DETECT_THREADS) void k_hb_detect_rows(
+    int n_ab, const int* __restrict__ ab_i, const int* __restrict__ ab_j,
+    const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+    const float* __restrict__ fx, const float* __restrict__ fy, const float* __restrict__ fz, int N,
+    const int* __restrict__ Z, const double* __restrict__ bas, const double* __restrict__ aci,
+    const double* __restrict__ q,
+    const int* __restrict__ hyd_list, const float4* __restrict__ hpos, int n_hyd,
+    const int* __restrict__ bond_off, const int* __restrict__ bond_idx,
+    const int* __restrict__ hyd_off, const int* __restrict__ hyd_idx,
+    const int* __restrict__ nbr_off, const int* __restrict__ nbr_idx,
+    double thr2, double min_pair_energy, int case_rows,
+    int cap, int* d_counter, int* row_count,
+    int* e_A, int* e_H, int* e_B, int* e_ct, int* e_par)
+{
+    __shared__ int s_queue[HB_DETECT_QUEUE];
+    __shared__ int s_qn, s_emit, s_base;
+    const int pair = blockIdx.x;
+    if (pair >= n_ab) return;   // uniform per workgroup
+    const int tid = threadIdx.x;
+    const int i = ab_i[pair], j = ab_j[pair];
+    const double r_AB_sq = d_hb_dist2(cx, cy, cz, i, j);
+
+    auto store = [&](int pos, int A, int H, int B, int ct, int par) {
+        atomicAdd(row_count + (case_rows ? (ct - 1) * N + A : A), 1);
+        if (pos < cap) {
+            e_A[pos] = A; e_H[pos] = H; e_B[pos] = B; e_ct[pos] = ct; e_par[pos] = par;
+        }
+    };
+
+    // nhb2: hydrogen bonded to the donor (make_nhb2): case 2, 3 (carbonyl-like acceptor O) or 4 (two-coordinate N)
+    if (tid == 0) {
+        s_qn = 0; s_emit = 0;
+        if (!d_hb_bonded(i, j, bond_off, bond_idx)) {
+            auto emit_nhb2 = [&](int donor, int H, int acc) {
+                int ct = 2, par = -1;
+                const int deg = nbr_off[acc + 1] - nbr_off[acc];
+                if (Z[acc] == 8 && deg == 1) {
+                    const int parent = nbr_idx[nbr_off[acc]];
+                    if (Z[parent] == 6 || Z[parent] == 7) { ct = 3; par = parent; }
+                } else if (Z[acc] == 7 && deg == 2) {
+                    ct = 4;
+                }
+                store(atomicAdd(d_counter, 1), donor, H, acc, ct, par);
+            };
+            for (int p = hyd_off[i]; p < hyd_off[i + 1]; ++p) emit_nhb2(i, hyd_idx[p], j);
+            for (int p = hyd_off[j]; p < hyd_off[j + 1]; ++p) {
+                const int H = hyd_idx[p];
+                if (d_hb_bonded(i, H, bond_off, bond_idx)) continue;  // bonded to i takes precedence
+                emit_nhb2(j, H, i);
+            }
+        }
+    }
+    __syncthreads();
+
+    // case 1: hydrogen bonded to neither, sum-of-squared-distances criterion (gfnff_ini2.f90:742). Float pre-filter
+    // (relative margin 1e-4) into the queue, then the double test that decides as on the host.
+    const float fxi = fx[i], fyi = fy[i], fzi = fz[i], fxj = fx[j], fyj = fy[j], fzj = fz[j];
+    const float f_rab = static_cast<float>(r_AB_sq);
+    const float f_reject = static_cast<float>(thr2) * 1.0001f;
+    // exact case-1 test of queued hydrogen hq (true: emit (i, H, j))
+    auto exact = [&](int hq) -> bool {
+        const int H = hyd_list[hq];
+        if (H == i) return false;                              // forEachNeighbor excludes the query atom
+        const double r_iH_sq = d_hb_dist2(cx, cy, cz, i, H);
+        if (r_iH_sq > thr2) return false;                      // cell query radius sqrt(thr2)
+        const double r_jH_sq = d_hb_dist2(cx, cy, cz, j, H);
+        if (!(r_AB_sq + r_iH_sq + r_jH_sq < thr2)) return false;
+        if (d_hb_bonded(i, H, bond_off, bond_idx) || d_hb_bonded(j, H, bond_off, bond_idx)) return false;
+        if (min_pair_energy > 0.0) {
+            const int dec = d_hb_strength_decision_f(fx, fy, fz, Z, bas, aci, q, i, H, j, static_cast<float>(min_pair_energy));
+            if (dec < 0) return false;
+            if (dec == 0) {                                    // within the float margin: the exact (double) value decides
+                const double est = d_hb_case1_strength(cx, cy, cz, Z, bas, aci, q, i, H, j, min_pair_energy);
+                if (est < min_pair_energy) return false;       // NaN keeps the entry, as on the host
+            }
+        }
+        return true;
+    };
+    constexpr int round = HB_DETECT_THREADS * HB_DETECT_PER_THREAD;
+    for (int h0 = 0; h0 < n_hyd; h0 += round) {
+        for (int u = 0; u < HB_DETECT_PER_THREAD; ++u) {
+            const int hq = h0 + u * HB_DETECT_THREADS + tid;
+            if (hq >= n_hyd) break;
+            const float4 hp = hpos[hq];
+            const float ax = hp.x - fxi, ay = hp.y - fyi, az = hp.z - fzi;
+            const float f_ih = ax * ax + ay * ay + az * az;
+            const float bx = hp.x - fxj, by = hp.y - fyj, bz = hp.z - fzj;
+            if (!(f_ih > f_reject) && !(f_rab + f_ih + (bx * bx + by * by + bz * bz) > f_reject))
+                s_queue[atomicAdd(&s_qn, 1)] = hq;
+        }
+        __syncthreads();
+        const int qn = s_qn;   // uniform after the barrier
+        __syncthreads();       // every thread has read s_qn before the next round appends to it
+        if (qn + round <= HB_DETECT_QUEUE && h0 + round < n_hyd) continue;   // room for one more round
+        // work off the queue in rounds of HB_DETECT_THREADS; one global atomic per round reserves the slots
+        for (int r0 = 0; r0 < qn; r0 += HB_DETECT_THREADS) {
+            const int x = r0 + tid;
+            const int hq_x = (x < qn) ? s_queue[x] : -1;
+            const bool emit = (hq_x >= 0) && exact(hq_x);
+            const int local = emit ? atomicAdd(&s_emit, 1) : -1;
+            __syncthreads();
+            if (tid == 0) { s_base = (s_emit > 0) ? atomicAdd(d_counter, s_emit) : 0; }
+            __syncthreads();
+            if (emit) store(s_base + local, i, hyd_list[hq_x], j, 1, -1);
+            __syncthreads();
+            if (tid == 0) s_emit = 0;
+            __syncthreads();
+        }
+        if (tid == 0) s_qn = 0;
+        __syncthreads();
+    }
+}
+// ---------------------------------------------------------------------------
+// Claude Generated (Oct 2026): exclusive scan of an int array on the device (out has n + 1 entries, out[n] is the
+// total; *total_out receives it as well when given). Three launches: tiles of HB_SCAN_TILE elements, the tile sums
+// in one workgroup, the tile offsets added. Shared-memory scan with __syncthreads only (no wavefront intrinsic).
+// ---------------------------------------------------------------------------
+constexpr int HB_SCAN_THREADS = 256;
+constexpr int HB_SCAN_ITEMS = 4;
+constexpr int HB_SCAN_TILE = HB_SCAN_THREADS * HB_SCAN_ITEMS;
+
+/// Exclusive prefix of v over the workgroup (HB_SCAN_THREADS threads); *total receives the sum.
+__device__ inline int hbBlockExclusiveScan(int v, int* s, int* total)
+{
+    const int t = threadIdx.x;
+    s[t] = v;
+    __syncthreads();
+    for (int off = 1; off < HB_SCAN_THREADS; off <<= 1) {
+        const int x = (t >= off) ? s[t - off] : 0;
+        __syncthreads();
+        s[t] += x;
+        __syncthreads();
+    }
+    const int incl = s[t];
+    *total = s[HB_SCAN_THREADS - 1];
+    __syncthreads();   // s is reused by the caller
+    return incl - v;
+}
+
+__global__ __launch_bounds__(HB_SCAN_THREADS) void k_hb_scan_tiles(int n, const int* __restrict__ in,
+                                                                   int* __restrict__ out, int* __restrict__ tile_sums)
+{
+    __shared__ int s[HB_SCAN_THREADS];
+    const int base = blockIdx.x * HB_SCAN_TILE + threadIdx.x * HB_SCAN_ITEMS;
+    int v[HB_SCAN_ITEMS];
+    int sum = 0;
+    for (int k = 0; k < HB_SCAN_ITEMS; ++k) {
+        v[k] = (base + k < n) ? in[base + k] : 0;
+        sum += v[k];
+    }
+    int total = 0;
+    int run = hbBlockExclusiveScan(sum, s, &total);
+    for (int k = 0; k < HB_SCAN_ITEMS; ++k) {
+        if (base + k < n) out[base + k] = run;
+        run += v[k];
+    }
+    if (threadIdx.x == 0) tile_sums[blockIdx.x] = total;
+}
+
+__global__ __launch_bounds__(HB_SCAN_THREADS) void k_hb_scan_tile_sums(int ntiles, int* __restrict__ tile_sums,
+                                                                       int* __restrict__ out, int n,
+                                                                       int* __restrict__ total_out)
+{
+    __shared__ int s[HB_SCAN_THREADS];
+    int carry = 0;
+    for (int b0 = 0; b0 < ntiles; b0 += HB_SCAN_THREADS) {
+        const int b = b0 + static_cast<int>(threadIdx.x);
+        const int v = (b < ntiles) ? tile_sums[b] : 0;
+        int total = 0;
+        const int ex = hbBlockExclusiveScan(v, s, &total);
+        if (b < ntiles) tile_sums[b] = carry + ex;
+        carry += total;
+    }
+    if (threadIdx.x == 0) {
+        out[n] = carry;
+        if (total_out) *total_out = carry;
+    }
+}
+
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_hb_scan_add(int n, int* __restrict__ out, const int* __restrict__ tile_sums)
+{
+    const int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t < n) out[t] += tile_sums[t / HB_SCAN_TILE];
+}
+
+// ---------------------------------------------------------------------------
+// Claude Generated (Oct 2026): ordering of rows. The scatter puts each element into its row in arrival order;
+// k_hb_row_sort then sorts each row (one workgroup per row) by its key: (H, B) for the triples (key H*N+B), the
+// slot index for the per-atom slot lists. Keys within a row are unique, so the result does not depend on the
+// arrival order. Bitonic network in its "flip" form (every comparator puts the smaller key at the lower index), so a
+// row of length L that is not a power of two is sorted by skipping every comparator whose upper index is >= L
+// (those positions act as +infinity and never move). Rows up to the launch's shared capacity (the next power of two
+// of the longest row, at most HB_SORT_SHM entries) are sorted in shared memory,
+// longer ones in place in global memory with the keys recomputed from the values.
+// ---------------------------------------------------------------------------
+constexpr int HB_SORT_THREADS = 256;
+constexpr int HB_SORT_SHM = 4096;   ///< largest row sorted in shared memory (48 KB for the triples)
+
+/// Element e of a row: atomic slot within its row (arrival order).
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_hb_row_scatter(int n, const int* __restrict__ row_of_a,
+                                                           const int* __restrict__ row_of_ct, int N, int case_rows,
+                                                           const int* __restrict__ row_off, int* __restrict__ row_fill,
+                                                           int* __restrict__ out)
+{
+    const int e = blockIdx.x * blockDim.x + threadIdx.x;
+    if (e >= n) return;
+    // triples: row = (case - 1) * N + A (case_rows) or A; slots (row_of_ct == nullptr): row = atom
+    const int a = row_of_a[e];
+    if (a < 0 || a >= N) return;   // slots of atoms outside [0, N) are not gathered (buildHBSlotTables)
+    const int row = (row_of_ct && case_rows) ? (row_of_ct[e] - 1) * N + a : a;
+    out[row_off[row] + atomicAdd(row_fill + row, 1)] = e;
+}
+
+/// Key of value v: H*N+B of triple v (eH != nullptr) or v itself (slot index).
+__device__ __forceinline__ long long hbRowKey(int v, const int* __restrict__ eH, const int* __restrict__ eB, int N)
+{
+    return eH ? static_cast<long long>(eH[v]) * N + eB[v] : static_cast<long long>(v);
+}
+
+/// Sorts n_rows rows of vals (row r is vals[row_off[r] .. row_off[r+1])) ascending by hbRowKey.
+__global__ __launch_bounds__(HB_SORT_THREADS) void k_hb_row_sort(int n_rows, const int* __restrict__ row_off,
+                                                                 int* __restrict__ vals, const int* __restrict__ eH,
+                                                                 const int* __restrict__ eB, int N, int shm_cap)
+{
+    // dynamic shared memory of the launch: shm_cap keys (8 bytes) and values (4 bytes) for the triples (eH given),
+    // shm_cap values only for the slot lists (the value is the key)
+    extern __shared__ long long s_dyn[];
+    const int r = blockIdx.x;
+    if (r >= n_rows) return;
+    const int off = row_off[r];
+    const int L = row_off[r + 1] - off;
+    if (L <= 1) return;
+    int* v = vals + off;
+    const bool with_key = (eH != nullptr);
+    long long* s_key = s_dyn;
+    int* s_val = with_key ? reinterpret_cast<int*>(s_dyn + shm_cap) : reinterpret_cast<int*>(s_dyn);
+    int P = 1;
+    while (P < L) P <<= 1;
+    const bool shm = (L <= shm_cap);
+    if (shm) {
+        for (int x = threadIdx.x; x < L; x += blockDim.x) {
+            s_val[x] = v[x];
+            if (with_key) s_key[x] = hbRowKey(v[x], eH, eB, N);
+        }
+        __syncthreads();
+    }
+    auto cmpswap = [&](int a, int b) {
+        if (shm) {
+            if (with_key) {
+                if (s_key[a] > s_key[b]) {
+                    const long long tk = s_key[a]; s_key[a] = s_key[b]; s_key[b] = tk;
+                    const int tv = s_val[a]; s_val[a] = s_val[b]; s_val[b] = tv;
+                }
+            } else if (s_val[a] > s_val[b]) {
+                const int tv = s_val[a]; s_val[a] = s_val[b]; s_val[b] = tv;
+            }
+        } else if (hbRowKey(v[a], eH, eB, N) > hbRowKey(v[b], eH, eB, N)) {
+            const int tv = v[a]; v[a] = v[b]; v[b] = tv;
+        }
+    };
+    const int half_P = P >> 1;
+    for (int k = 2; k <= P; k <<= 1) {
+        const int hk = k >> 1;
+        for (int idx = threadIdx.x; idx < half_P; idx += blockDim.x) {   // flip: i with its mirror in the k-block
+            const int a = (idx / hk) * k + (idx % hk);
+            const int b = a ^ (k - 1);
+            if (b < L) cmpswap(a, b);
+        }
+        __syncthreads();
+        for (int d = k >> 2; d > 0; d >>= 1) {                           // half-cleaners
+            for (int idx = threadIdx.x; idx < half_P; idx += blockDim.x) {
+                const int a = (idx / d) * 2 * d + (idx % d);
+                const int b = a + d;
+                if (b < L) cmpswap(a, b);
+            }
+            __syncthreads();
+        }
+    }
+    if (shm)
+        for (int x = threadIdx.x; x < L; x += blockDim.x) v[x] = s_val[x];
+}
+
+/// Claude Generated (Oct 2026): *out = max over cnt[0..n) (one workgroup of HB_SORT_THREADS threads).
+__global__ __launch_bounds__(HB_SORT_THREADS) void k_hb_max(int n, const int* __restrict__ cnt, int* __restrict__ out)
+{
+    __shared__ int s[HB_SORT_THREADS];
+    int m = 0;
+    for (int x = threadIdx.x; x < n; x += blockDim.x) m = max(m, cnt[x]);
+    s[threadIdx.x] = m;
+    __syncthreads();
+    for (int h = HB_SORT_THREADS / 2; h > 0; h >>= 1) {
+        if (static_cast<int>(threadIdx.x) < h) s[threadIdx.x] = max(s[threadIdx.x], s[threadIdx.x + h]);
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) *out = s[0];
+}
+
+/// Claude Generated (Oct 2026): port of k_hb_fill_columns; triple t of the final order is element order[t] of the
+/// unordered emission. Also writes the gradient-slot count of each triple (k_hbonds slot mode, buildHBSlotTables).
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_hb_fill_columns_rows(
+    int n, const int* __restrict__ order,
+    const int* __restrict__ e_A, const int* __restrict__ e_H, const int* __restrict__ e_B,
+    const int* __restrict__ in_ct, const int* __restrict__ in_par, const int* __restrict__ Z,
+    const double* __restrict__ bas, const double* __restrict__ aci, const double* __restrict__ q,
+    const double* __restrict__ repz, const int* __restrict__ nbr_off, const int* __restrict__ nbr_idx,
+    int* idx_i, int* idx_j, int* idx_k, int* elem_A, int* elem_B,
+    double* q_H, double* q_A, double* q_B, double* bas_A, double* bas_B, double* aci_A, double* aci_B,
+    double* r_cut, int* case_type, int* acc_parent, double* repz_B, int* nbB_count, int* nbC_count,
+    int* slot_count)
+{
+    const int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= n) return;
+    const int src = order[t];
+    const int A = e_A[src], H = e_H[src], B = e_B[src];
+    const int ct = in_ct[src];
+    const int par = in_par[src];
+    idx_i[t] = A; idx_j[t] = H; idx_k[t] = B;
+    elem_A[t] = Z[A]; elem_B[t] = Z[B];
+    q_H[t] = q[H]; q_A[t] = q[A]; q_B[t] = q[B];
+    bas_A[t] = bas[A]; bas_B[t] = bas[B];
+    aci_A[t] = aci[A]; aci_B[t] = aci[B];
+    r_cut[t] = 50.0;
+    case_type[t] = ct;
+    acc_parent[t] = par;
+    const int zB = Z[B];
+    repz_B[t] = (zB >= 1 && zB <= 86) ? repz[zB - 1] : 1.0;
+    const int cB = (ct >= 2) ? (nbr_off[B + 1] - nbr_off[B]) : 0;
+    int cC = 0;
+    if (ct == 3) {
+        for (int p = nbr_off[par]; p < nbr_off[par + 1]; ++p)
+            if (nbr_idx[p] != B) ++cC;
+    }
+    nbB_count[t] = cB;
+    nbC_count[t] = cC;
+    if (slot_count)
+        slot_count[t] = 3 + (ct >= 2 ? cB : 0) + ((ct == 3 && par >= 0) ? 1 + cC : 0);
+}
+
+/// Claude Generated (Oct 2026): port of k_hb_fill_neighbors plus the owning atom of every gradient slot in the
+/// order of buildHBSlotTables (A, H, B, nb(B) for case >= 2, C and nb(C) for case 3 with a parent) and the
+/// per-atom slot counts (atom_cnt, atoms outside [0, N) not counted).
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_hb_fill_neighbors_slots(
+    int n, int N, const int* __restrict__ idx_i, const int* __restrict__ idx_j, const int* __restrict__ idx_k,
+    const int* __restrict__ case_type, const int* __restrict__ acc_parent,
+    const int* __restrict__ nbr_off, const int* __restrict__ nbr_idx,
+    const int* __restrict__ nbB_offset, const int* __restrict__ nbC_offset, int* nbB_flat, int* nbC_flat,
+    const int* __restrict__ slot_off, int* slot_atom, int* atom_cnt)
+{
+    const int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= n) return;
+    const int ct = case_type[t];
+    const int B = idx_k[t];
+    const int par = acc_parent[t];
+    if (ct >= 2) {
+        int w = nbB_offset[t];
+        for (int p = nbr_off[B]; p < nbr_off[B + 1]; ++p) nbB_flat[w++] = nbr_idx[p];
+        if (ct == 3) {
+            w = nbC_offset[t];
+            for (int p = nbr_off[par]; p < nbr_off[par + 1]; ++p)
+                if (nbr_idx[p] != B) nbC_flat[w++] = nbr_idx[p];
+        }
+    }
+    if (!slot_off) return;
+    int s = slot_off[t];
+    auto put = [&](int a) {
+        slot_atom[s++] = a;
+        if (a >= 0 && a < N) atomicAdd(atom_cnt + a, 1);
+    };
+    put(idx_i[t]); put(idx_j[t]); put(B);
+    if (ct >= 2)
+        for (int p = nbr_off[B]; p < nbr_off[B + 1]; ++p) put(nbr_idx[p]);
+    if (ct == 3 && par >= 0) {
+        put(par);
+        for (int p = nbr_off[par]; p < nbr_off[par + 1]; ++p)
+            if (nbr_idx[p] != B) put(nbr_idx[p]);
+    }
 }
 
 // ============================================================================
@@ -3962,8 +5119,8 @@ __global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_cn_compute_pairs(
     double contrib = 0.5 * (1.0 + erf(arg));
 
     // Symmetric: both atoms i and j receive the contribution
-    atomicAdd(&cn_raw[i], contrib);
-    atomicAdd(&cn_raw[j], contrib);
+    acc_add(&cn_raw[i], contrib, GFNFF_FIX_CN);   // WP10: order-independent with d_gfnff_fix (the CN decides the charges)
+    acc_add(&cn_raw[j], contrib, GFNFF_FIX_CN);
 }
 
 __global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_logcn(
@@ -4013,7 +5170,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_hb_cn_per_atom(
     double arg = -kn * (r - rcovij) / rcovij;
     double contrib = 0.5 * (1.0 + erf(arg));
 
-    atomicAdd(&hb_cn_per_atom[H], contrib);
+    acc_add(&hb_cn_per_atom[H], contrib, GFNFF_FIX_CN);
 }
 
 __global__ GFNFF_KERNEL_BOUNDS void k_hb_cn_map_to_bonds(
@@ -4426,7 +5583,9 @@ __global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_eeq_gather_rhs_fragments(
 #include "src/core/energy_calculators/ff_methods/gfnff_par.h"  // covalent_rad_d3
 
 #include <cstdlib>  // std::getenv (CURCUMA_GFNFF_GPU_FREEZE_HBQ opt-out)
-#include <thread>  // Claude Generated (Oct 2026): host threads of the HB list packing (hipHostParallelFor)
+#include <thread>
+#include <mutex>   // WP10: setGfnffFixModeHip
+#include <limits>  // WP10: quiet_NaN
 
 #include "src/core/curcuma_logger.h"
 
@@ -4436,6 +5595,16 @@ __global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_eeq_gather_rhs_fragments(
 #include <cstring>
 #include <stdexcept>
 #include <vector>
+#include <algorithm>
+#include <cstdio>
+#include "src/core/gpu_fallback.h"   // WP9: counted fallbacks of the device repulsion rebuild
+
+/// Claude Generated (Oct 2026, WP9): thread-local slot of the ROCm GFN-FF switches (ff_workspace_hip.h).
+const RocmGfnffOptions*& rocmGfnffOptionsSlot()
+{
+    static thread_local const RocmGfnffOptions* slot = nullptr;
+    return slot;
+}
 
 // Matrix, Vector, SpMatrix are defined in global.h (via ff_workspace_gpu.h -> ff_workspace.h)
 // global.h: Matrix = Eigen::Matrix<double, Dynamic, Dynamic, RowMajor>
@@ -4531,6 +5700,41 @@ static void checkCuda(hipError_t err, const char* msg) {
         throw std::runtime_error(std::string(msg) + ": " + hipGetErrorString(err));
 }
 
+/// Claude Generated (Oct 2026, WP10): set the device switch d_gfnff_fix (fixed-point step accumulators) on the
+/// current device. The value is per process and device, so it is uploaded only when it changes (normally once,
+/// in the workspace constructor); a change waits for the device to be idle so no running step sees a mixed
+/// mode. Called again before every step entry point, outside graph capture, for processes with several
+/// workspaces of different settings.
+static void setGfnffFixModeHip(bool on)
+{
+    static std::mutex mtx;
+    static int uploaded_dev = -1, uploaded_val = -1;
+    std::lock_guard<std::mutex> lock(mtx);
+    int dev = 0;
+    checkCuda(hipGetDevice(&dev), "hipGetDevice (fixed-point switch)");
+    const int v = on ? 1 : 0;
+    if (dev == uploaded_dev && v == uploaded_val) return;
+    checkCuda(hipDeviceSynchronize(), "device sync before fixed-point switch");
+    checkCuda(hipMemcpyToSymbol(HIP_SYMBOL(d_gfnff_fix), &v, sizeof(int)), "upload d_gfnff_fix");
+    uploaded_dev = dev;
+    uploaded_val = v;
+}
+
+/// Claude Generated (Oct 2026, WP10): in-place fixed-point -> double conversion of n doubles on a stream.
+static void fixToDoubleHip(double* buf, int n, double scale, hipStream_t s)
+{
+    if (!buf || n <= 0) return;
+    k_fix_to_double<<<(n + 255) / 256, 256, 0, s>>>(n, buf, 1.0 / scale);
+}
+
+/// Claude Generated (Oct 2026, WP10): snapshot copy of a step accumulator: the doubles themselves, or the
+/// converted copy of a fixed-point accumulator (the accumulator keeps its integers).
+static void snapshotAccHip(bool fixed, double* dst, const double* src, int n, hipStream_t s)
+{
+    if (fixed) k_fix_copy<<<(n + 255) / 256, 256, 0, s>>>(n, src, dst, 1.0 / GFNFF_FIX_FORCE);
+    else       (void)hipMemcpyAsync(dst, src, n * sizeof(double), hipMemcpyDeviceToDevice, s);
+}
+
 // Claude Generated (Oct 2026): atomic-free gather tables of the ROCm backend (FP64 atomicAdd is a CAS loop on gfx1200).
 /// Directed-edge CSR of the non-bonded repulsion list for k_repulsion_gather (rebuilt with the list).
 struct HipPairGatherCSR {
@@ -4539,6 +5743,40 @@ struct HipPairGatherCSR {
     CudaBuffer<int> pairidx;  ///< [2n] pair index into the RepulsionSoA arrays
     int N = 0;
 };
+/// Claude Generated (Oct 2026): buffers of the device-side H-bond detection (FFWorkspaceHip::detectHBondsOnDevice()).
+/// Buffers only grow (ensure); e_* and order are the candidate buffers of `cap` entries (24 bytes each).
+struct HipHBDetectDev {
+    CudaBuffer<double> bas, aci, q, repz;
+    CudaBuffer<char>   ab_ok;
+    CudaBuffer<int>    hyd_list, bond_off, bond_idx, hyd_off, hyd_idx, nbr_off, nbr_idx;
+    CudaBuffer<int>    counter, ab_counter, ab_i, ab_j;
+    CudaBuffer<float>  fx, fy, fz;
+    CudaBuffer<float4> hpos;                         ///< [n_hyd] packed HB hydrogen positions (k_hb_pack_hyd)
+    CudaBuffer<int>    e_A, e_H, e_B, e_ct, e_par;   ///< [cap] triples in arrival order
+    CudaBuffer<int>    order;                        ///< [cap] arrival index of triple t of the final order
+    CudaBuffer<int>    row_cnt, row_off, row_fill;   ///< rows (case, A) or A: counts, offsets [R+1], fill cursors
+    CudaBuffer<int>    slot_cnt, slot_atom, atom_cnt; ///< gradient slots per triple, owning atom per slot, per atom
+    CudaBuffer<int>    scan_tiles, totals;           ///< scan scratch; [5] totals (nb_B, nb_C, slots, longest rows)
+    int ab_cap = 0, cap = 0;
+    int*   pin = nullptr;                           ///< pinned host stage of the (A, H, B) download
+    size_t pin_n = 0;
+    HipHBDetectDev() = default;
+    HipHBDetectDev(const HipHBDetectDev&) = delete;
+    HipHBDetectDev& operator=(const HipHBDetectDev&) = delete;
+    ~HipHBDetectDev() { if (pin) (void)hipHostFree(pin); }
+    /// Pinned stage of at least m ints (grows with 1/8 headroom); nullptr if no pinned memory could be had.
+    int* pinned(size_t m)
+    {
+        if (m <= pin_n) return pin;
+        if (pin) (void)hipHostFree(pin);
+        pin = nullptr; pin_n = 0;
+        const size_t want = m + m / 8;
+        if (hipHostMalloc(reinterpret_cast<void**>(&pin), want * sizeof(int)) != hipSuccess) { pin = nullptr; return nullptr; }
+        pin_n = want;
+        return pin;
+    }
+};
+
 /// Claude Generated (Oct 2026): host arrays of one HB list upload (fillHBondSoA, buildHBSlotTables), kept between
 /// refreshes so that a refresh neither zero-fills nor page-faults ~100 MB of fresh memory at 582k triples. Every
 /// element that is uploaded is written in each fill.
@@ -4612,6 +5850,32 @@ static void stagedUploadHip(CudaBuffer<T>& buf, const std::vector<T>& v, hipStre
 {
     stagedUploadHip(buf, v.data(), static_cast<int>(v.size()), stream, A);
 }
+
+/// Claude Generated (Oct 2026): pinned host stage of the repulsion list refresh (stagedRepulsionUploadHip), kept
+/// between refreshes. Grows with 1/8 headroom (the non-bonded list changes by well under 1 % per refresh), so a
+/// refresh neither allocates nor page-faults host memory. cnt holds the per-thread atom degrees of the gather CSR.
+struct HipRepStage {
+    char*  pin = nullptr;
+    size_t cap = 0;
+    std::vector<int> cnt;
+    HipRepStage() = default;
+    HipRepStage(const HipRepStage&) = delete;
+    HipRepStage& operator=(const HipRepStage&) = delete;
+    ~HipRepStage() { if (pin) (void)hipHostFree(pin); }
+    /// Pinned block of at least bytes; nullptr if no pinned memory could be had. Callers synchronise the
+    /// stream that read the previous contents before calling.
+    char* get(size_t bytes)
+    {
+        if (bytes <= cap) return pin;
+        if (pin) (void)hipHostFree(pin);
+        pin = nullptr;
+        cap = 0;
+        const size_t want = bytes + bytes / 8;
+        if (hipHostMalloc(reinterpret_cast<void**>(&pin), want) != hipSuccess) { pin = nullptr; return nullptr; }
+        cap = want;
+        return pin;
+    }
+};
 
 /// Per-triple gradient slots of the H-bond list for k_hbonds slot mode + k_slot_gather (rebuilt with the list).
 struct HipHBSlotTables {
@@ -5309,8 +6573,23 @@ struct FFWorkspaceHipImpl {
     using HBSlotTables  = HipHBSlotTables;
     PairGatherCSR nb_rep_csr;
     HBSlotTables hb_slots;
+    HipHBDetectDev hbdet;            ///< Claude Generated (Oct 2026): device-side H-bond detection buffers
+    HipRepStage    rep_stage;        ///< Claude Generated (Oct 2026): pinned stage of the repulsion list refresh
     bool rep_gather_enabled = true;  ///< CURCUMA_ROCM_REP_GATHER=0 restores the pair kernel k_repulsion (non-bonded list)
+    // WP9-A (Claude Generated, Oct 2026): tables and scratch of the device repulsion rebuild
+    // (generateNonbondedRepulsionOnGPU); topology-constant, uploaded at every rebuild (small).
+    CudaBuffer<int>       rep_valid, rep_metal, rep_hh_dist, rep_lo, rep_hi, rep_rowoff;
+    CudaBuffer<double>    rep_dum, rep_repz;
+    CudaBuffer<long long> rep_bond_keys, rep_hh_keys;
+    long rep_device_builds = 0;      ///< device rebuilds done (verbosity-2 summary at destruction)
+    long rep_host_fallbacks = 0;     ///< device rebuilds that failed and were replaced by the host build
+    bool rep_device_off = false;     ///< set after a failure: later rebuilds take the host build directly
     bool hb_gather_enabled  = true;  ///< CURCUMA_ROCM_HB_GATHER=0 restores k_hbonds with atomicAdd
+    /// WP10 (Claude Generated, Oct 2026): fixed-point step accumulators (-gfnff.rocm_fixed_point, see fix_add);
+    /// d_grad, d_dEdcn, d_energies, d_zz_hb, d_cn_raw and d_hb_cn_per_atom hold integers until k_fix_to_double.
+    bool fixed_point = false;
+    int* h_fix_bad = nullptr;        ///< pinned read-back of d_gfnff_fix_bad (fixed_point only)
+    long fix_bad_steps = 0;          ///< steps whose fixed-point accumulation saw a non-finite / out-of-range value
 
     // Dynamic buffers (reset + upload each calculation step)
     CoordSoA    coords;      ///< Current geometry SoA (x[N], y[N], z[N]) — Phase 10, March 2026
@@ -5428,6 +6707,10 @@ struct FFWorkspaceHipImpl {
     bool disp_pair_c6_current = true;  ///< disp.C6 / dc6dcn_* hold the values of the last d_disp_uv
     bool c6_table_symmetric   = false; ///< C6ref(Zi,Zj,ri,rj) == C6ref(Zj,Zi,rj,ri) bitwise (fused gather allowed)
     bool disp_fused_enabled   = true;  ///< CURCUMA_ROCM_DISP_FUSED=0 switches the fused gather off
+    // WP9-B (Claude Generated, Oct 2026): tabulated dc6dcn (-gfnff.rocm_dc6dcn_tables, CURCUMA_DC6DCN_TABLES
+    // overrides): per-pair C6/dc6dcn from k_d4_partner_tables + k_dc6dcn_per_pair_tab; the fused gather is off.
+    bool dc6_tab_enabled      = false;
+    CudaBuffer<double> d_tabA, d_tabW;          ///< [N * disp_ntypes * D4_MAX_REF] each
 
     // WP-A (Jun 2026): on-device D4 dispersion pair-list build buffers
     CudaBuffer<double> d_sqrtzr4r2;        ///< [118] sqrt(Z·r4/r2) per element
@@ -5540,6 +6823,136 @@ static void buildRepulsionGatherCSR(const std::vector<GFNFFRepulsion>& v, int na
     }
     c.off.upload(off);
     if (tot > 0) { c.partner.upload(part); c.pairidx.upload(pidx); }
+}
+
+/// Claude Generated (Oct 2026): repulsion list refresh through the pinned stage impl.rep_stage; the device receives
+/// the same bytes as RepulsionSoA::upload() for both lists plus buildRepulsionGatherCSR() for the non-bonded one
+/// (when gather is true). The non-bonded list is packed by up to `threads` host threads over contiguous ranges of
+/// pairs; each range counts its own atom degrees, and its directed edges are placed after those of the lower ranges,
+/// so every CSR row keeps the ascending pair order of the serial build. Copies are hipMemcpyAsync on impl.stream (the
+/// SoA columns go out while the CSR is scattered); returns after the stream is synchronised, since the repulsion
+/// kernels run on another stream. Device buffers grow with 1/8 headroom. urea400-water1000 (1.47 M pairs): the
+/// serial path spent ~25 ms per refresh, mostly in fresh host vectors and the serial CSR build, ~2 ms in the copies.
+/// @return false if no pinned memory could be had (nothing was uploaded; the caller takes the serial path)
+static bool stagedRepulsionUploadHip(FFWorkspaceHipImpl& impl, const std::vector<GFNFFRepulsion>& bonded,
+                                     const std::vector<GFNFFRepulsion>& nonbonded, bool gather, int natoms,
+                                     int threads)
+{
+    auto al = [](size_t b) { return (b + 255) & ~static_cast<size_t>(255); };
+    auto soaBytes = [&al](size_t m) { return 3 * al(m * sizeof(double)) + 2 * al(m * sizeof(int)); };
+    const size_t nb = bonded.size(), nn = nonbonded.size();
+    const size_t bytes = soaBytes(nb) + soaBytes(nn)
+                       + (gather ? al((natoms + 1) * sizeof(int)) + 2 * al(2 * nn * sizeof(int)) : 0);
+    char* base = impl.rep_stage.get(bytes);
+    if (!base) return false;
+
+    struct Cols { double *alpha, *repab, *rcut; int *ii, *jj; };
+    size_t used = 0;
+    auto carve = [&](size_t b) { char* p = base + used; used += al(b); return p; };
+    auto cols = [&](size_t m) {
+        Cols c;
+        c.alpha = reinterpret_cast<double*>(carve(m * sizeof(double)));
+        c.repab = reinterpret_cast<double*>(carve(m * sizeof(double)));
+        c.rcut  = reinterpret_cast<double*>(carve(m * sizeof(double)));
+        c.ii    = reinterpret_cast<int*>(carve(m * sizeof(int)));
+        c.jj    = reinterpret_cast<int*>(carve(m * sizeof(int)));
+        return c;
+    };
+    const Cols cb = cols(nb), cn = cols(nn);
+    auto pack = [](const std::vector<GFNFFRepulsion>& v, const Cols& c, size_t a, size_t e) {
+        for (size_t k = a; k < e; ++k) {
+            c.alpha[k] = v[k].alpha;
+            c.repab[k] = v[k].repab;
+            c.rcut[k]  = v[k].r_cut;
+            c.ii[k]    = v[k].i;
+            c.jj[k]    = v[k].j;
+        }
+    };
+    auto ok = [natoms](int a) { return a >= 0 && a < natoms; };
+
+    // Ranges of the non-bonded list: identical in both passes (the CSR placement depends on them).
+    const int T = (nn < 32768) ? 1 : std::max(1, std::min(threads, static_cast<int>(nn / 16384)));
+    auto rangeOf = [nn, T](int t, size_t& a, size_t& e) { a = nn * t / T; e = nn * (t + 1) / T; };
+    auto runT = [T](auto&& fn) {
+        if (T == 1) { fn(0); return; }
+        std::vector<std::thread> pool;
+        pool.reserve(T - 1);
+        for (int t = 1; t < T; ++t) pool.emplace_back([&fn, t]() { fn(t); });
+        fn(0);
+        for (auto& th : pool) th.join();
+    };
+    std::vector<int>& cnt = impl.rep_stage.cnt;
+    if (gather) cnt.assign(static_cast<size_t>(T) * natoms, 0);
+
+    // Pass 1: SoA columns and, for the gather CSR, per-range atom degrees.
+    pack(bonded, cb, 0, nb);
+    runT([&](int t) {
+        size_t a, e;
+        rangeOf(t, a, e);
+        pack(nonbonded, cn, a, e);
+        if (!gather) return;
+        int* deg = cnt.data() + static_cast<size_t>(t) * natoms;
+        for (size_t k = a; k < e; ++k) {
+            const int i = cn.ii[k], j = cn.jj[k];
+            if (ok(i) && ok(j)) { ++deg[i]; ++deg[j]; }
+        }
+    });
+
+    hipStream_t s = impl.stream;
+    auto put = [s](auto& buf, const auto* src, size_t m) {
+        if (m == 0) return;
+        const int mi = static_cast<int>(m);
+        if (buf.n < mi) buf.alloc(mi + mi / 8 + 16);
+        checkCuda(hipMemcpyAsync(buf.ptr, src, m * sizeof(*src), hipMemcpyHostToDevice, s), "staged repulsion upload");
+    };
+    auto putSoA = [&put](RepulsionSoA& soa, const Cols& c, size_t m) {
+        soa.n = static_cast<int>(m);
+        put(soa.idx_i, c.ii, m);
+        put(soa.idx_j, c.jj, m);
+        put(soa.alpha, c.alpha, m);
+        put(soa.repab, c.repab, m);
+        put(soa.r_cut, c.rcut, m);
+    };
+    putSoA(impl.bonded_rep, cb, nb);
+    putSoA(impl.nonbonded_rep, cn, nn);
+
+    // Pass 2: gather CSR. Row offsets from the summed degrees, then the start of range t in row a is the row
+    // offset plus the degrees of the lower ranges in that row.
+    if (gather) {
+        int* off = reinterpret_cast<int*>(carve((natoms + 1) * sizeof(int)));
+        int* part = reinterpret_cast<int*>(carve(2 * nn * sizeof(int)));
+        int* pidx = reinterpret_cast<int*>(carve(2 * nn * sizeof(int)));
+        off[0] = 0;
+        for (int a = 0; a < natoms; ++a) {
+            int run = off[a];
+            for (int t = 0; t < T; ++t) {
+                int& c = cnt[static_cast<size_t>(t) * natoms + a];
+                const int d = c;
+                c = run;   // becomes the write cursor of range t in row a
+                run += d;
+            }
+            off[a + 1] = run;
+        }
+        const int tot = off[natoms];
+        runT([&](int t) {
+            size_t a, e;
+            rangeOf(t, a, e);
+            int* cur = cnt.data() + static_cast<size_t>(t) * natoms;
+            for (size_t k = a; k < e; ++k) {
+                const int i = cn.ii[k], j = cn.jj[k];
+                if (!ok(i) || !ok(j)) continue;
+                const int pi = cur[i]++; part[pi] = j; pidx[pi] = static_cast<int>(k);
+                const int pj = cur[j]++; part[pj] = i; pidx[pj] = static_cast<int>(k);
+            }
+        });
+        FFWorkspaceHipImpl::PairGatherCSR& c = impl.nb_rep_csr;
+        c.N = natoms;
+        put(c.off, off, static_cast<size_t>(natoms) + 1);
+        put(c.partner, part, static_cast<size_t>(tot));
+        put(c.pairidx, pidx, static_cast<size_t>(tot));
+    }
+    checkCuda(hipStreamSynchronize(s), "staged repulsion upload sync");
+    return true;
 }
 
 /// Claude Generated (Oct 2026): device order of the H-bond triples, grouped by case type (stable within a case).
@@ -5796,6 +7209,19 @@ FFWorkspaceHip::FFWorkspaceHip(const GFNFFParameterSet& params,
         m_impl->rep_gather_enabled = !(env_rep && std::string(env_rep) == "0");
         m_impl->hb_gather_enabled  = !(env_hb  && std::string(env_hb)  == "0");
     }
+    {   // WP10 (Claude Generated, Oct 2026): fixed-point step accumulators, -gfnff.rocm_fixed_point (method options)
+        const RocmGfnffOptions* opt = rocmGfnffOptionsSlot();
+        m_impl->fixed_point = opt ? opt->fixed_point : RocmGfnffOptions{}.fixed_point;
+        setGfnffFixModeHip(m_impl->fixed_point);
+        if (m_impl->fixed_point) {
+            checkCuda(hipHostMalloc(reinterpret_cast<void**>(&m_impl->h_fix_bad), sizeof(int)), "pinned alloc h_fix_bad");
+            *m_impl->h_fix_bad = 0;
+        }
+        if (CurcumaLogger::get_verbosity() >= 2)
+            CurcumaLogger::info(fmt::format("ROCm GFN-FF accumulation: {}", m_impl->fixed_point
+                ? "fixed point (order-independent, -gfnff.rocm_fixed_point true)"
+                : "FP64 atomics (-gfnff.rocm_fixed_point false)"));
+    }
     if (m_impl->rep_gather_enabled)
         buildRepulsionGatherCSR(params.nonbonded_repulsions, natoms, m_impl->nb_rep_csr);
     m_impl->coulomb.upload(params.coulombs, natoms, stream);
@@ -5904,6 +7330,35 @@ FFWorkspaceHip::FFWorkspaceHip(const GFNFFParameterSet& params,
         m_impl->d_ctype_elem.upload(ctype_elem, stream);
         m_impl->d_atom_ctype.upload(atom_ctype, stream);
         m_impl->d_disp_uv.alloc(natoms * m_impl->disp_ntypes * 2 * D4_MAX_REF);
+        // WP9-B (Claude Generated, Oct 2026): tabulated dc6dcn. Switch from the method options, the CUDA
+        // environment name CURCUMA_DC6DCN_TABLES (0/1) overrides it; CURCUMA_ROCM_FAIL_DC6TAB=1 makes the table
+        // allocation fail (fault injection). A failed allocation keeps the k_disp_uv path, counted as a fallback.
+        {
+            const RocmGfnffOptions* opt = rocmGfnffOptionsSlot();
+            bool tab = opt ? opt->dc6dcn_tables : RocmGfnffOptions{}.dc6dcn_tables;
+            const char* e = std::getenv("CURCUMA_DC6DCN_TABLES");
+            if (e && *e) tab = std::string(e) != "0";
+            if (tab) {
+                try {
+                    const char* f = std::getenv("CURCUMA_ROCM_FAIL_DC6TAB");
+                    if (f && *f && std::string(f) != "0")
+                        throw std::runtime_error("fault injection CURCUMA_ROCM_FAIL_DC6TAB");
+                    const int sz = natoms * m_impl->disp_ntypes * D4_MAX_REF;
+                    m_impl->d_tabA.alloc(sz);
+                    m_impl->d_tabW.alloc(sz);
+                    m_impl->dc6_tab_enabled = true;
+                } catch (const std::exception& ex) {
+                    m_impl->d_tabA.free();
+                    m_impl->d_tabW.free();
+                    CurcumaLogger::warn(fmt::format("ROCm: tabulated dc6dcn unavailable ({}); k_disp_uv path kept", ex.what()));
+                    curcuma::reportGpuFallback("GFN-FF dc6dcn: tables unavailable, factorised uv path", ex.what());
+                }
+            }
+            if (CurcumaLogger::get_verbosity() >= 2)
+                CurcumaLogger::info(fmt::format("ROCm dc6dcn: {}", m_impl->dc6_tab_enabled
+                    ? "tabulated (k_d4_partner_tables + k_dc6dcn_per_pair_tab, fused gather off)"
+                    : "factorised uv (k_disp_uv + per-pair or fused gather)"));
+        }
     }
 
     // --- HB alpha chain-rule: allocate zz buffer + build (H,B) pair list ---
@@ -6007,6 +7462,10 @@ FFWorkspaceHip::~FFWorkspaceHip()
         g_rocm_small_eeq_aux = nullptr;
         g_rocm_small_eeq_event = nullptr;
     }
+    if (m_impl && (m_impl->rep_device_builds > 0 || m_impl->rep_host_fallbacks > 0)
+        && CurcumaLogger::get_verbosity() >= 2)
+        CurcumaLogger::info(fmt::format("ROCm non-bonded repulsion list: {} device rebuilds, {} host fallbacks",
+                                        m_impl->rep_device_builds, m_impl->rep_host_fallbacks));
     if (m_impl) {
         // Synchronize all streams before destroying
         if (m_impl->stream)          hipStreamSynchronize(m_impl->stream);
@@ -6057,6 +7516,7 @@ FFWorkspaceHip::~FFWorkspaceHip()
     if (m_h_energies)   hipHostFree(m_h_energies);
     if (m_impl && m_impl->h_dc6dcn_skip) hipHostFree(m_impl->h_dc6dcn_skip);
     if (m_impl && m_impl->h_disp_flags) (void)hipHostFree(m_impl->h_disp_flags);
+    if (m_impl && m_impl->h_fix_bad) (void)hipHostFree(m_impl->h_fix_bad);   // WP10
 }
 
 // ============================================================================
@@ -6215,6 +7675,7 @@ void FFWorkspaceHip::computeBondHBCN()
     auto& impl = *m_impl;
     const int N = m_natoms;
     if (N <= 0 || impl.hb_alpha.n == 0) return;
+    setGfnffFixModeHip(impl.fixed_point);   // WP10
 
     // Allocate/zero per-H accumulator
     if (!impl.d_hb_cn_per_atom.ptr || impl.d_hb_cn_per_atom.n < N)
@@ -6232,6 +7693,8 @@ void FFWorkspaceHip::computeBondHBCN()
         impl.d_hb_cn_per_atom.ptr,
         27.5,   // kn
         900.0); // thr_sq
+    if (impl.fixed_point)   // WP10: integer sums -> doubles before the map reads them
+        fixToDoubleHip(impl.d_hb_cn_per_atom.ptr, N, GFNFF_FIX_CN, impl.stream);
 
     // Pass 2: map per-H CN to per-bond CN
     auto cfg2 = getLaunchConfig(impl.bonds.n, m_block_size);
@@ -6335,6 +7798,273 @@ void FFWorkspaceHip::updateHBonds(const std::vector<GFNFFHydrogenBond>& hbonds,
         std::vector<GFNFFHydrogenBond>().swap(m_last_hbonds);
 }
 
+/// Claude Generated (Oct 2026): grow a device buffer with 1/8 headroom (the H-bond list changes by about 1 % between
+/// refreshes; ensure() without headroom reallocated on every growth, about 1 ms each at 590k triples).
+template <typename T>
+static void hbEnsure(CudaBuffer<T>& b, int count)
+{
+    if (count > b.n) b.alloc(count + count / 8 + 16);
+}
+
+/// Claude Generated (Oct 2026): k_hb_row_sort with the shared memory of the longest row (next power of two of
+/// max_row, at most HB_SORT_SHM entries): 12 bytes per entry for the triples (eH given), 4 for the slot lists. Less
+/// shared memory than a fixed 4096-entry buffer lets more workgroups run per compute unit.
+static void hbLaunchRowSort(int n_rows, const int* row_off, int* vals, const int* eH, const int* eB, int N, int max_row,
+                            hipStream_t stream)
+{
+    if (n_rows <= 0 || max_row <= 1) return;
+    int cap = 1;
+    while (cap < max_row && cap < HB_SORT_SHM) cap <<= 1;
+    const size_t bytes = static_cast<size_t>(cap) * (eH ? sizeof(long long) + sizeof(int) : sizeof(int));
+    const int threads = std::min(HB_SORT_THREADS, std::max(64, cap / 2));
+    k_hb_row_sort<<<n_rows, threads, bytes, stream>>>(n_rows, row_off, vals, eH, eB, N, cap);
+    checkCuda(hipGetLastError(), "k_hb_row_sort launch");
+}
+
+/// Claude Generated (Oct 2026): exclusive scan of n ints on the device (k_hb_scan_*); out holds n + 1 entries,
+/// out[n] = total, also written to *total_out (device pointer) when given.
+static void hbDeviceExclusiveScan(const int* in, int* out, int n, CudaBuffer<int>& tiles, int* total_out,
+                                  hipStream_t stream)
+{
+    const int ntiles = std::max(1, (n + HB_SCAN_TILE - 1) / HB_SCAN_TILE);
+    tiles.ensure(ntiles);
+    k_hb_scan_tiles<<<ntiles, HB_SCAN_THREADS, 0, stream>>>(n, in, out, tiles.ptr);
+    k_hb_scan_tile_sums<<<1, HB_SCAN_THREADS, 0, stream>>>(ntiles, tiles.ptr, out, n, total_out);
+    if (n > 0) {
+        const LaunchConfig c = getLaunchConfigLight(n);
+        k_hb_scan_add<<<c.gridSize, c.blockSize, 0, stream>>>(n, out, tiles.ptr);
+    }
+    checkCuda(hipGetLastError(), "hb scan launch");
+}
+
+/// Claude Generated (Oct 2026): ROCm port of FFWorkspaceGPU::detectHBondsOnDevice() (cuda/ff_workspace_gpu.cu).
+/// Same tests as the CUDA kernels (here k_hb_ab_rows, k_hb_detect_rows); the order is built without a sort of 64-bit keys: each
+/// triple is counted into its row (case, A) while it is emitted, the rows get their offsets by a device scan, the
+/// triples are scattered into their rows and k_hb_row_sort orders each row by (H, B). The result is the list
+/// sorted by (A, H, B) (the CUDA order) and then grouped by case type, stably, i.e. exactly what fillHBondSoA()
+/// with hbCasePermutation() uploads from that list. With CURCUMA_ROCM_HB_GATHER=0 the rows are the A alone (no
+/// case grouping, no slot tables), as in updateHBonds(). The gradient-slot tables of the gather mode
+/// (buildHBSlotTables()) are built on the device as well: slot ranges by a scan, the per-atom slot lists by
+/// counting, scatter and a per-atom row sort of the slot indices (ascending, as on the host).
+int FFWorkspaceHip::detectHBondsOnDevice(const GFNFFHBDetectInputs& in, std::vector<int>& hb_i,
+                                         std::vector<int>& hb_j, std::vector<int>& hb_k,
+                                         std::vector<int>* hb_case, std::vector<int>* hb_parent)
+{
+    auto& impl = *m_impl;
+    HipHBDetectDev& D = impl.hbdet;
+    HBondSoA& soa = impl.hbonds;
+    HipHBSlotTables& T = impl.hb_slots;
+    const int N = m_natoms;
+    hipStream_t stream = impl.stream;
+    const bool gather = impl.hb_gather_enabled;   // case-grouped order and slot tables (fillHBondSoA with T)
+
+    // the device list replaces whatever updateHBonds() uploaded last
+    impl.prev_hb_valid = false;
+    std::vector<GFNFFHydrogenBond>().swap(impl.prev_hb_input);
+    std::vector<GFNFFHydrogenBond>().swap(m_last_hbonds);
+
+    // inputs (a few arrays of N and the CSR lists)
+    D.bas.upload(in.basicity.data(), N);
+    D.aci.upload(in.acidity.data(), N);
+    D.q.upload(in.charge.data(), N);
+    D.ab_ok.upload(in.ab_ok.data(), N);
+    D.hyd_list.upload(in.hb_hyd_list.data(), static_cast<int>(in.hb_hyd_list.size()));
+    D.bond_off.upload(in.bond_off.data(), N + 1);
+    D.bond_idx.upload(in.bond_idx.data(), static_cast<int>(in.bond_idx.size()));
+    D.hyd_off.upload(in.hyd_off.data(), N + 1);
+    D.hyd_idx.upload(in.hyd_idx.data(), static_cast<int>(in.hyd_idx.size()));
+    D.nbr_off.upload(in.nbr_off.data(), N + 1);
+    D.nbr_idx.upload(in.nbr_idx.data(), static_cast<int>(in.nbr_idx.size()));
+    if (!D.repz.ptr) {
+        std::vector<double> repz86(86, 1.0);
+        for (size_t z = 0; z < repz86.size() && z < GFNFFParameters::repz.size(); ++z) repz86[z] = GFNFFParameters::repz[z];
+        D.repz.upload(repz86.data(), 86);
+    }
+    D.counter.ensure(1);
+    D.ab_counter.ensure(1);
+    D.totals.ensure(5);
+
+    // pass 1: AB pairs (compacted, arrival order); pass 2: one workgroup per AB pair. Both
+    // count past the capacity on overflow; the pass is then rerun with a larger buffer.
+    D.fx.ensure(N); D.fy.ensure(N); D.fz.ensure(N);
+    {
+        const LaunchConfig c = getLaunchConfigLight(N, m_block_size);
+        k_hb_to_float<<<c.gridSize, c.blockSize, 0, stream>>>(N, impl.coords.d_x.ptr, impl.coords.d_y.ptr,
+            impl.coords.d_z.ptr, D.fx.ptr, D.fy.ptr, D.fz.ptr);
+        checkCuda(hipGetLastError(), "k_hb_to_float launch");
+        const int n_hyd = static_cast<int>(in.hb_hyd_list.size());
+        D.hpos.ensure(std::max(1, n_hyd));
+        if (n_hyd > 0) {
+            const LaunchConfig ch = getLaunchConfigLight(n_hyd, m_block_size);
+            k_hb_pack_hyd<<<ch.gridSize, ch.blockSize, 0, stream>>>(n_hyd, D.hyd_list.ptr, D.fx.ptr, D.fy.ptr, D.fz.ptr,
+                                                                    D.hpos.ptr);
+            checkCuda(hipGetLastError(), "k_hb_pack_hyd launch");
+        }
+    }
+    int n_ab = 0;
+    int ab_cap = std::max(D.ab_cap, 1 << 17);
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        D.ab_i.ensure(ab_cap); D.ab_j.ensure(ab_cap);
+        checkCuda(hipMemsetAsync(D.ab_counter.ptr, 0, sizeof(int), stream), "hb ab counter reset");
+        k_hb_ab_rows<<<std::max(1, N), 256, 0, stream>>>(
+            N, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr, D.bas.ptr, D.aci.ptr, D.ab_ok.ptr,
+            in.hbthr1, ab_cap, D.ab_counter.ptr, D.ab_i.ptr, D.ab_j.ptr);
+        checkCuda(hipGetLastError(), "k_hb_ab_rows launch");
+        D.ab_counter.download(&n_ab, 1, stream);
+        checkCuda(hipStreamSynchronize(stream), "hb ab count download");
+        if (n_ab <= ab_cap) break;
+        ab_cap = n_ab + n_ab / 4;
+    }
+    D.ab_cap = std::max(D.ab_cap, ab_cap);
+    if (n_ab > ab_cap) throw std::runtime_error("ROCm H-bond detection: AB pair count exceeds the buffer after reruns");
+
+    const int R = gather ? 4 * N : N;   // rows: (case - 1) * N + A, or A
+    D.row_cnt.ensure(R); D.row_off.ensure(R + 1); D.row_fill.ensure(std::max(R, N));
+    int cap = std::max(D.cap, 1 << 20);
+    int count = 0, max_row = 0;
+    for (int attempt = 0; attempt < 4 && n_ab > 0; ++attempt) {
+        D.e_A.ensure(cap); D.e_H.ensure(cap); D.e_B.ensure(cap); D.e_ct.ensure(cap); D.e_par.ensure(cap);
+        checkCuda(hipMemsetAsync(D.counter.ptr, 0, sizeof(int), stream), "hb counter reset");
+        checkCuda(hipMemsetAsync(D.row_cnt.ptr, 0, sizeof(int) * R, stream), "hb row count reset");
+        k_hb_detect_rows<<<n_ab, HB_DETECT_THREADS, 0, stream>>>(
+            n_ab, D.ab_i.ptr, D.ab_j.ptr, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+            D.fx.ptr, D.fy.ptr, D.fz.ptr, N, impl.d_atom_types.ptr, D.bas.ptr, D.aci.ptr, D.q.ptr,
+            D.hyd_list.ptr, D.hpos.ptr, static_cast<int>(in.hb_hyd_list.size()),
+            D.bond_off.ptr, D.bond_idx.ptr, D.hyd_off.ptr, D.hyd_idx.ptr, D.nbr_off.ptr, D.nbr_idx.ptr,
+            in.hbthr2, in.min_pair_energy, gather ? 1 : 0, cap, D.counter.ptr, D.row_cnt.ptr,
+            D.e_A.ptr, D.e_H.ptr, D.e_B.ptr, D.e_ct.ptr, D.e_par.ptr);
+        checkCuda(hipGetLastError(), "k_hb_detect_rows launch");
+        k_hb_max<<<1, HB_SORT_THREADS, 0, stream>>>(R, D.row_cnt.ptr, D.totals.ptr + 3);
+        D.counter.download(&count, 1, stream);
+        checkCuda(hipMemcpyAsync(&max_row, D.totals.ptr + 3, sizeof(int), hipMemcpyDeviceToHost, stream), "hb max row");
+        checkCuda(hipStreamSynchronize(stream), "hb count download");
+        if (count <= cap) break;
+        cap = count + count / 4;
+    }
+    D.cap = std::max(D.cap, cap);
+    if (count > cap) throw std::runtime_error("ROCm H-bond detection: entry count exceeds the buffer after reruns");
+
+    const int n = count;
+    soa.n = n;
+    hb_i.clear(); hb_j.clear(); hb_k.clear();
+    if (hb_case) hb_case->clear();
+    if (hb_parent) hb_parent->clear();
+    if (gather) { T.nslots = 0; T.N = N; }   // an empty list must not gather stale slots (fillHBondSoA)
+    if (n == 0) {
+        soa.total_nb_B = 0; soa.total_nb_C = 0;
+        updateHBChargeScaling(impl);
+        return 0;
+    }
+
+    // order: row offsets, arrival-order scatter into the rows, then each row sorted by (H, B)
+    hbDeviceExclusiveScan(D.row_cnt.ptr, D.row_off.ptr, R, D.scan_tiles, nullptr, stream);
+    checkCuda(hipMemsetAsync(D.row_fill.ptr, 0, sizeof(int) * R, stream), "hb row fill reset");
+    hbEnsure(D.order, n);
+    {
+        const LaunchConfig c = getLaunchConfigLight(n, m_block_size);
+        k_hb_row_scatter<<<c.gridSize, c.blockSize, 0, stream>>>(n, D.e_A.ptr, D.e_ct.ptr, N, gather ? 1 : 0,
+            D.row_off.ptr, D.row_fill.ptr, D.order.ptr);
+        hbLaunchRowSort(R, D.row_off.ptr, D.order.ptr, D.e_H.ptr, D.e_B.ptr, N, max_row, stream);
+        checkCuda(hipGetLastError(), "hb row order launch");
+    }
+
+    // SoA columns (the arrays of HBondSoA::upload), neighbour offsets and slot ranges by scans
+    CudaBuffer<int>* icols[] = { &soa.idx_i, &soa.idx_j, &soa.idx_k, &soa.elem_A, &soa.elem_B, &soa.case_type,
+                                 &soa.nb_B_count, &soa.acceptor_parent, &soa.nb_C_count };
+    CudaBuffer<double>* dcols[] = { &soa.q_H, &soa.q_A, &soa.q_B, &soa.basicity_A, &soa.basicity_B,
+                                    &soa.acidity_A, &soa.acidity_B, &soa.r_cut, &soa.repz_B };
+    for (auto* b : icols) hbEnsure(*b, n);
+    for (auto* b : dcols) hbEnsure(*b, n);
+    hbEnsure(soa.nb_B_offset, n + 1);
+    hbEnsure(soa.nb_C_offset, n + 1);
+    if (gather) { hbEnsure(D.slot_cnt, n); hbEnsure(T.slot_off, n + 1); }
+    const LaunchConfig cfg = getLaunchConfigLight(n, m_block_size);
+    k_hb_fill_columns_rows<<<cfg.gridSize, cfg.blockSize, 0, stream>>>(
+        n, D.order.ptr, D.e_A.ptr, D.e_H.ptr, D.e_B.ptr, D.e_ct.ptr, D.e_par.ptr, impl.d_atom_types.ptr,
+        D.bas.ptr, D.aci.ptr, D.q.ptr, D.repz.ptr, D.nbr_off.ptr, D.nbr_idx.ptr,
+        soa.idx_i.ptr, soa.idx_j.ptr, soa.idx_k.ptr, soa.elem_A.ptr, soa.elem_B.ptr,
+        soa.q_H.ptr, soa.q_A.ptr, soa.q_B.ptr, soa.basicity_A.ptr, soa.basicity_B.ptr,
+        soa.acidity_A.ptr, soa.acidity_B.ptr, soa.r_cut.ptr, soa.case_type.ptr, soa.acceptor_parent.ptr,
+        soa.repz_B.ptr, soa.nb_B_count.ptr, soa.nb_C_count.ptr, gather ? D.slot_cnt.ptr : nullptr);
+    checkCuda(hipGetLastError(), "k_hb_fill_columns_rows launch");
+    hbDeviceExclusiveScan(soa.nb_B_count.ptr, soa.nb_B_offset.ptr, n, D.scan_tiles, D.totals.ptr + 0, stream);
+    hbDeviceExclusiveScan(soa.nb_C_count.ptr, soa.nb_C_offset.ptr, n, D.scan_tiles, D.totals.ptr + 1, stream);
+    if (gather)
+        hbDeviceExclusiveScan(D.slot_cnt.ptr, T.slot_off.ptr, n, D.scan_tiles, D.totals.ptr + 2, stream);
+    int totals[3] = { 0, 0, 0 };
+    D.totals.download(totals, gather ? 3 : 2, stream);
+    checkCuda(hipStreamSynchronize(stream), "hb totals download");
+    soa.total_nb_B = totals[0];
+    soa.total_nb_C = totals[1];
+    const int nslots = gather ? totals[2] : 0;
+    if (soa.total_nb_B > 0) hbEnsure(soa.nb_B_flat, soa.total_nb_B);
+    if (soa.total_nb_C > 0) hbEnsure(soa.nb_C_flat, soa.total_nb_C);
+    if (gather) {
+        hbEnsure(D.slot_atom, nslots);
+        D.atom_cnt.ensure(N + 1);
+        checkCuda(hipMemsetAsync(D.atom_cnt.ptr, 0, sizeof(int) * N, stream), "hb atom count reset");
+    }
+    k_hb_fill_neighbors_slots<<<cfg.gridSize, cfg.blockSize, 0, stream>>>(
+        n, N, soa.idx_i.ptr, soa.idx_j.ptr, soa.idx_k.ptr, soa.case_type.ptr, soa.acceptor_parent.ptr,
+        D.nbr_off.ptr, D.nbr_idx.ptr, soa.nb_B_offset.ptr, soa.nb_C_offset.ptr, soa.nb_B_flat.ptr, soa.nb_C_flat.ptr,
+        gather ? T.slot_off.ptr : nullptr, D.slot_atom.ptr, D.atom_cnt.ptr);
+    checkCuda(hipGetLastError(), "k_hb_fill_neighbors_slots launch");
+
+    if (gather) {
+        // per-atom slot lists (buildHBSlotTables): counts -> offsets, scatter, slots ascending within each atom
+        T.atom_off.ensure(N + 1);
+        hbDeviceExclusiveScan(D.atom_cnt.ptr, T.atom_off.ptr, N, D.scan_tiles, nullptr, stream);
+        hbEnsure(T.atom_slots, std::max(1, nslots));
+        checkCuda(hipMemsetAsync(D.row_fill.ptr, 0, sizeof(int) * N, stream), "hb slot fill reset");
+        const LaunchConfig cs = getLaunchConfigLight(nslots, m_block_size);
+        k_hb_row_scatter<<<cs.gridSize, cs.blockSize, 0, stream>>>(nslots, D.slot_atom.ptr, nullptr, N, 0,
+            T.atom_off.ptr, D.row_fill.ptr, T.atom_slots.ptr);
+        k_hb_max<<<1, HB_SORT_THREADS, 0, stream>>>(N, D.atom_cnt.ptr, D.totals.ptr + 4);
+        int max_slots = 0;
+        checkCuda(hipMemcpyAsync(&max_slots, D.totals.ptr + 4, sizeof(int), hipMemcpyDeviceToHost, stream), "hb max slots");
+        checkCuda(hipStreamSynchronize(stream), "hb max slots sync");
+        hbLaunchRowSort(N, T.atom_off.ptr, T.atom_slots.ptr, nullptr, nullptr, N, max_slots, stream);
+        checkCuda(hipGetLastError(), "hb slot lists launch");
+        T.nslots = nslots;
+        T.N = N;
+        if (T.slot_g.n < 3 * nslots) T.slot_g.alloc(3 * (nslots + nslots / 8));   // headroom as buildHBSlotTables
+    }
+    updateHBChargeScaling(impl);
+
+    // (A, H, B) to the host through a pinned stage (pageable copies ran at about 4 GB/s: 1.6 ms at 590k triples)
+    int* pin = D.pinned(3 * static_cast<size_t>(n));
+    if (pin) {
+        const size_t bytes = sizeof(int) * static_cast<size_t>(n);
+        checkCuda(hipMemcpyAsync(pin, soa.idx_i.ptr, bytes, hipMemcpyDeviceToHost, stream), "hb triple download");
+        checkCuda(hipMemcpyAsync(pin + n, soa.idx_j.ptr, bytes, hipMemcpyDeviceToHost, stream), "hb triple download");
+        checkCuda(hipMemcpyAsync(pin + 2 * static_cast<size_t>(n), soa.idx_k.ptr, bytes, hipMemcpyDeviceToHost, stream),
+                  "hb triple download");
+    } else {
+        hb_i.resize(n); hb_j.resize(n); hb_k.resize(n);
+        soa.idx_i.download(hb_i.data(), n, stream);
+        soa.idx_j.download(hb_j.data(), n, stream);
+        soa.idx_k.download(hb_k.data(), n, stream);
+    }
+    if (hb_case) { hb_case->resize(n); soa.case_type.download(hb_case->data(), n, stream); }
+    if (hb_parent) { hb_parent->resize(n); soa.acceptor_parent.download(hb_parent->data(), n, stream); }
+    checkCuda(hipStreamSynchronize(stream), "hb triple download sync");
+    if (pin) {
+        hb_i.assign(pin, pin + n);
+        hb_j.assign(pin + n, pin + 2 * static_cast<size_t>(n));
+        hb_k.assign(pin + 2 * static_cast<size_t>(n), pin + 3 * static_cast<size_t>(n));
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        const double cand_mb = (5.0 * D.e_A.n + D.order.n) * sizeof(int) / 1048576.0;
+        const double row_mb = (3.0 * std::max(R, N) + 1.0) * sizeof(int) / 1048576.0;
+        const double slot_mb = (static_cast<double>(D.slot_atom.n) + D.slot_cnt.n) * sizeof(int) / 1048576.0;
+        CurcumaLogger::info(fmt::format("  [DEBUG] ROCm HB detection: {} AB pairs, {} triples, {} slots; device "
+                                        "buffers: candidates {:.1f} MB (cap {}), rows {:.2f} MB, slot scratch {:.1f} MB",
+                                        n_ab, n, nslots, cand_mb, D.cap, row_mb, slot_mb));
+    }
+    return n;
+}
+
 void FFWorkspaceHip::updateXBonds(const std::vector<GFNFFHalogenBond>& xbonds,
                                     const std::vector<int>& atom_types)
 {
@@ -6346,15 +8076,228 @@ void FFWorkspaceHip::updateXBonds(const std::vector<GFNFFHalogenBond>& xbonds,
     m_impl->prev_xb_valid = true;
 }
 
+static void dumpRepulsionListHip(const char* source, std::vector<GFNFFRepulsion> v);   // below (WP9-A)
+
 void FFWorkspaceHip::updateRepulsion(const std::vector<GFNFFRepulsion>& bonded_reps,
                                        const std::vector<GFNFFRepulsion>& nonbonded_reps)
 {
     // Claude Generated (Sep 2026): mirror of FFWorkspaceGPU::updateRepulsion (ff_workspace_gpu.cu)
     // for the ROCm plugin. See GFNFF::updateNonbondedRepulsionIfNeeded().
+    // Claude Generated (Oct 2026): -gfnff.gpu_staged_list_upload (default true) takes the pinned staged path with the
+    // -threads host threads, same device bytes; false, or no pinned memory, keeps the serial path below.
+    dumpRepulsionListHip("host", nonbonded_reps);   // Claude Generated (Oct 2026): CURCUMA_ROCM_REP_DUMP only
+    if (m_staged_list_upload
+        && stagedRepulsionUploadHip(*m_impl, bonded_reps, nonbonded_reps, m_impl->rep_gather_enabled, m_natoms,
+                                    m_host_threads))
+        return;
     m_impl->bonded_rep.upload(bonded_reps, m_impl->stream);
     m_impl->nonbonded_rep.upload(nonbonded_reps, m_impl->stream);
     if (m_impl->rep_gather_enabled)
         buildRepulsionGatherCSR(nonbonded_reps, m_natoms, m_impl->nb_rep_csr);   // Claude Generated (Oct 2026)
+}
+
+/// Claude Generated (Oct 2026, WP9-A): test dump of a non-bonded repulsion list, sorted by (i, j), to the file
+/// named by CURCUMA_ROCM_REP_DUMP (appended, one block per refresh: "# refresh <n> <source> <pairs>", then
+/// "i j alpha repab r_cut" with 17 digits). Lets the device list be compared with the host list of the same geometry.
+static void dumpRepulsionListHip(const char* source, std::vector<GFNFFRepulsion> v)
+{
+    static const char* path = std::getenv("CURCUMA_ROCM_REP_DUMP");
+    if (!path || !*path) return;
+    static long refresh = 0;
+    std::sort(v.begin(), v.end(), [](const GFNFFRepulsion& a, const GFNFFRepulsion& b) {
+        return a.i != b.i ? a.i < b.i : a.j < b.j;
+    });
+    FILE* f = std::fopen(path, "a");
+    if (!f) return;
+    std::fprintf(f, "# refresh %ld %s %zu\n", ++refresh, source, v.size());
+    for (const auto& r : v)
+        std::fprintf(f, "%d %d %.17g %.17g %.17g\n", r.i, r.j, r.alpha, r.repab, r.r_cut);
+    std::fclose(f);
+}
+
+/// Claude Generated (Oct 2026, WP9-A): host build of the non-bonded list from the device tables and the host
+/// coordinate mirror, pairs in ascending (i, j): the fallback of a failed device rebuild. Same predicate and
+/// pair expressions as k_rep_rows_* / k_rep_pairs_static.
+static std::vector<GFNFFRepulsion> repulsionHostBuildFromTables(const GFNFF::RepulsionDeviceInputs& in, int N,
+                                                                const double* x, const double* y, const double* z,
+                                                                const std::vector<int>& Z)
+{
+    std::vector<GFNFFRepulsion> out;
+    const double cut_sq = in.build_radius_bohr * in.build_radius_bohr;
+    auto find = [](const std::vector<long long>& k, long long key) -> long {
+        auto it = std::lower_bound(k.begin(), k.end(), key);
+        return (it != k.end() && *it == key) ? static_cast<long>(it - k.begin()) : -1;
+    };
+    for (int i = 0; i < N; ++i) {
+        if (!in.valid[i]) continue;
+        for (int j = i + 1; j < N; ++j) {
+            if (!in.valid[j]) continue;
+            const double dx = x[i] - x[j], dy = y[i] - y[j], dz = z[i] - z[j];
+            if (dx * dx + dy * dy + dz * dz > cut_sq) continue;
+            const long long key = static_cast<long long>(i) * N + j;
+            if (find(in.bond_keys, key) >= 0) continue;
+            double ff = 1.0;
+            if (Z[i] == 1 && Z[j] == 1) {
+                ff = in.hhfac;
+                const long h = find(in.hh_keys, key);
+                if (h >= 0) {
+                    if (in.hh_dist[h] == 2) ff *= in.hh13;
+                    else if (in.hh_dist[h] == 3) ff *= in.hh14;
+                }
+            } else if ((Z[i] == 1 && in.metal[j]) || (Z[j] == 1 && in.metal[i])) {
+                ff = 0.85;
+            } else if ((Z[i] == 1 && Z[j] == 6) || (Z[j] == 1 && Z[i] == 6)) {
+                ff = 0.91;
+            } else if ((Z[i] == 1 && Z[j] == 8) || (Z[j] == 1 && Z[i] == 8)) {
+                ff = 1.04;
+            }
+            GFNFFRepulsion r;
+            r.i = i;
+            r.j = j;
+            r.alpha = std::sqrt(in.dum[i] * in.dum[j]) * ff;
+            r.repab = in.repz[i] * in.repz[j] * in.repscaln;
+            r.r_cut = in.r_cut_bohr;
+            out.push_back(r);
+        }
+    }
+    return out;
+}
+
+/**
+ * @brief WP9-A: rebuild the non-bonded repulsion list on the device from the current device coordinates.
+ *
+ * Claude Generated (Oct 2026). Port of FFWorkspaceGPU::generateNonbondedRepulsionOnGPU with the ordered
+ * row build of the ROCm D4 list (k_rep_rows_count, two row-offset scans on the host, k_rep_rows_build,
+ * k_rep_pairs_static, k_disp_csr_lower for the lower CSR half): pairs in ascending (i, j) and the gather CSR
+ * built on the device (no host list, no index download). The bonded list is not touched (topology only).
+ * A failure (or CURCUMA_ROCM_FAIL_REPDEV=1) builds the list on the host from the same tables and the host
+ * coordinate mirror, uploads it as updateRepulsion() does, counts a GPU fallback and keeps the host build
+ * for the rest of the run. Selected by -gfnff.gpu_rep_pairs_on_device (wrapper, trait has_device_repulsion_build).
+ */
+void FFWorkspaceHip::generateNonbondedRepulsionOnGPU(const GFNFF::RepulsionDeviceInputs& in)
+{
+    auto& impl = *m_impl;
+    const int N = m_natoms;
+    if (N <= 1) return;
+    static const bool fail_inject = [] {
+        const char* e = std::getenv("CURCUMA_ROCM_FAIL_REPDEV");
+        return e && *e && std::string(e) != "0";
+    }();
+    static const bool dump = [] { const char* e = std::getenv("CURCUMA_ROCM_REP_DUMP"); return e && *e; }();
+    const bool gather = impl.rep_gather_enabled;
+    bool ok = !impl.rep_device_off;
+    int n = 0;
+    try {
+        if (ok && fail_inject) throw std::runtime_error("fault injection CURCUMA_ROCM_FAIL_REPDEV");
+        if (ok) {
+            impl.rep_valid.upload(in.valid);
+            impl.rep_metal.upload(in.metal);
+            impl.rep_dum.upload(in.dum);
+            impl.rep_repz.upload(in.repz);
+            if (!in.bond_keys.empty()) impl.rep_bond_keys.upload(in.bond_keys);
+            if (!in.hh_keys.empty()) { impl.rep_hh_keys.upload(in.hh_keys); impl.rep_hh_dist.upload(in.hh_dist); }
+            RepDevTablesHip t;
+            t.valid = impl.rep_valid.ptr;  t.metal = impl.rep_metal.ptr;
+            t.dum = impl.rep_dum.ptr;      t.repz = impl.rep_repz.ptr;
+            t.bond_keys = impl.rep_bond_keys.ptr;  t.n_bond_keys = static_cast<int>(in.bond_keys.size());
+            t.hh_keys = impl.rep_hh_keys.ptr;      t.hh_dist = impl.rep_hh_dist.ptr;
+            t.n_hh_keys = static_cast<int>(in.hh_keys.size());
+            t.repscaln = in.repscaln;  t.hhfac = in.hhfac;  t.hh13 = in.hh13;  t.hh14 = in.hh14;
+            t.r_cut = in.r_cut_bohr;
+            const double cut_sq = in.build_radius_bohr * in.build_radius_bohr;
+
+            impl.rep_lo.ensure(N);
+            impl.rep_hi.ensure(N);
+            impl.rep_rowoff.ensure(N + 1);
+            k_rep_rows_count<<<N, DISP_ROW_BLOCK, 0, impl.stream>>>(
+                N, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr, cut_sq, t,
+                impl.rep_lo.ptr, impl.rep_hi.ptr);
+            checkCuda(hipGetLastError(), "k_rep_rows_count launch");
+            std::vector<int> h_lo(N), h_hi(N);
+            impl.rep_lo.download(h_lo.data(), N, impl.stream);
+            impl.rep_hi.download(h_hi.data(), N, impl.stream);
+            checkCuda(hipStreamSynchronize(impl.stream), "k_rep_rows_count sync");
+            std::vector<int> rowoff(N + 1, 0), off(N + 1, 0);
+            for (int a = 0; a < N; ++a) {
+                rowoff[a + 1] = rowoff[a] + h_hi[a];
+                off[a + 1]    = off[a] + h_lo[a] + h_hi[a];
+            }
+            n = rowoff[N];
+            if (off[N] != 2 * n)
+                throw std::runtime_error(fmt::format("CSR size {} != 2 x {} pairs", off[N], n));
+
+            auto& nb = impl.nonbonded_rep;
+            if (nb.idx_i.n < n) {   // grow with headroom; the SoA keeps its capacity across rebuilds
+                const int cap = n + n / 8 + 16;
+                nb.idx_i.alloc(cap); nb.idx_j.alloc(cap); nb.alpha.alloc(cap); nb.repab.alloc(cap); nb.r_cut.alloc(cap);
+            }
+            nb.n = n;
+            if (gather) {
+                auto& c = impl.nb_rep_csr;
+                c.N = N;
+                c.off.upload(off);
+                if (c.partner.n < 2 * n) { const int cap = 2 * n + n / 4 + 16; c.partner.alloc(cap); c.pairidx.alloc(cap); }
+            }
+            if (n > 0) {
+                impl.rep_rowoff.upload(rowoff);
+                k_rep_rows_build<<<N, DISP_ROW_BLOCK, 0, impl.stream>>>(
+                    N, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr, cut_sq, t,
+                    impl.rep_lo.ptr, impl.rep_rowoff.ptr, gather ? impl.nb_rep_csr.off.ptr : nullptr,
+                    nb.idx_i.ptr, nb.idx_j.ptr,
+                    gather ? impl.nb_rep_csr.partner.ptr : nullptr, gather ? impl.nb_rep_csr.pairidx.ptr : nullptr);
+                checkCuda(hipGetLastError(), "k_rep_rows_build launch");
+                LaunchConfig cfg = getLaunchConfig(n, m_block_size);
+                k_rep_pairs_static<<<cfg.gridSize, cfg.blockSize, 0, impl.stream>>>(
+                    n, N, nb.idx_i.ptr, nb.idx_j.ptr, impl.d_atom_types.ptr, t,
+                    nb.alpha.ptr, nb.repab.ptr, nb.r_cut.ptr);
+                checkCuda(hipGetLastError(), "k_rep_pairs_static launch");
+                if (gather) {
+                    k_disp_csr_lower<<<N, DISP_ROW_BLOCK, 0, impl.stream>>>(
+                        N, impl.rep_lo.ptr, impl.rep_rowoff.ptr, impl.nb_rep_csr.off.ptr,
+                        nb.idx_j.ptr, impl.nb_rep_csr.partner.ptr, impl.nb_rep_csr.pairidx.ptr);
+                    checkCuda(hipGetLastError(), "k_disp_csr_lower (repulsion) launch");
+                }
+            }
+            // The repulsion kernels run on another stream: finish the build here.
+            checkCuda(hipStreamSynchronize(impl.stream), "k_rep_rows_build sync");
+            ++impl.rep_device_builds;
+            if (dump) {
+                std::vector<GFNFFRepulsion> v(n);
+                std::vector<int> hi(n), hj(n);
+                std::vector<double> ha(n), hr(n), hc(n);
+                nb.idx_i.download(hi.data(), n, impl.stream);
+                nb.idx_j.download(hj.data(), n, impl.stream);
+                nb.alpha.download(ha.data(), n, impl.stream);
+                nb.repab.download(hr.data(), n, impl.stream);
+                nb.r_cut.download(hc.data(), n, impl.stream);
+                checkCuda(hipStreamSynchronize(impl.stream), "repulsion dump sync");
+                for (int k = 0; k < n; ++k) v[k] = GFNFFRepulsion{hi[k], hj[k], ha[k], hr[k], hc[k]};
+                dumpRepulsionListHip("device", std::move(v));
+            }
+            if (CurcumaLogger::get_verbosity() >= 3)
+                CurcumaLogger::info(fmt::format("  ROCm non-bonded repulsion list: {} pairs built on the device{}",
+                                                n, gather ? ", gather CSR on the device" : ""));
+            return;
+        }
+    } catch (const std::exception& e) {
+        (void)hipGetLastError();   // clear a sticky launch error before the host path
+        impl.rep_device_off = true;
+        CurcumaLogger::warn(fmt::format("ROCm: device repulsion list rebuild failed ({}); host build from now on", e.what()));
+        curcuma::reportGpuFallback("GFN-FF repulsion list: device rebuild failed, host build", e.what());
+    }
+    // Host build from the same tables (also every later rebuild once the device path failed).
+    if (!impl.h_geom_ok) {
+        CurcumaLogger::error("ROCm: repulsion list host build without host coordinates; list kept");
+        return;
+    }
+    std::vector<int> Z(N);
+    impl.d_atom_types.download(Z.data(), N, impl.stream);
+    checkCuda(hipStreamSynchronize(impl.stream), "atom types download");
+    std::vector<GFNFFRepulsion> v = repulsionHostBuildFromTables(in, N, m_h_x, m_h_y, m_h_z, Z);
+    ++impl.rep_host_fallbacks;
+    impl.nonbonded_rep.upload(v, impl.stream);
+    if (gather) buildRepulsionGatherCSR(v, N, impl.nb_rep_csr);
+    if (dump) dumpRepulsionListHip("host-fallback", v);
 }
 
 void FFWorkspaceHip::updateDispersion(const std::vector<GFNFFDispersion>& pairs)
@@ -6646,6 +8589,21 @@ static void launchDispC6PerPair(FFWorkspaceHipImpl& impl, int natoms, bool c6_up
 {
     const int nd = impl.disp.n;
     if (nd == 0 || natoms <= 0 || impl.disp_ntypes <= 0) return;
+    if (with_uv && impl.dc6_tab_enabled) {
+        // WP9-B (Claude Generated, Oct 2026): tabulated dc6dcn; d_disp_uv is not written on this path.
+        LaunchConfig cfg_t = getLaunchConfig(natoms * impl.disp_ntypes, block_size);
+        k_d4_partner_tables<<<cfg_t.gridSize, cfg_t.blockSize, 0, stream>>>(
+            natoms, impl.disp_ntypes, impl.d_ctype_elem.ptr, impl.d_atom_types.ptr,
+            impl.d_gw.ptr, impl.d_c6_flat.ptr, impl.d_tabA.ptr, impl.d_tabW.ptr);
+        impl.disp_uv_valid = false;
+        impl.disp_pair_c6_current = true;
+        LaunchConfig cfg_p = getLaunchConfig(nd, block_size);
+        k_dc6dcn_per_pair_tab<<<cfg_p.gridSize, cfg_p.blockSize, 0, stream>>>(
+            nd, impl.disp.idx_i.ptr, impl.disp.idx_j.ptr, impl.d_atom_types.ptr, impl.d_atom_ctype.ptr,
+            impl.disp_ntypes, impl.d_gw.ptr, impl.d_dgw.ptr, impl.d_tabA.ptr, impl.d_tabW.ptr,
+            impl.disp.dc6dcn_ij.ptr, impl.disp.dc6dcn_ji.ptr, c6_update ? impl.disp.C6.ptr : nullptr);
+        return;
+    }
     if (with_uv) {
         LaunchConfig cfg_uv = getLaunchConfig(natoms * impl.disp_ntypes, block_size);
         k_disp_uv<<<cfg_uv.gridSize, cfg_uv.blockSize, 0, stream>>>(
@@ -6726,8 +8684,9 @@ void FFWorkspaceHip::uploadRefCN(const std::vector<std::vector<double>>& refcn)
 // WP-A (Jun 2026): on-device D4 dispersion pair-list build. HIP mirror of
 // FFWorkspaceGPU::generateDispersionPairListOnGPU (cuda/ff_workspace_gpu.cu).
 // Replaces the host O(N^2) GenerateDispersionPairsNative loop + the per-build H2D
-// upload of the pair SoA. ROCm-specific extra step: rebuild the per-atom CSR
-// adjacency (k_dispersion_gather) from the device-built pair list.
+// upload of the pair SoA. ROCm-specific extra step: the per-atom CSR adjacency
+// (k_dispersion_gather). Default (Oct 2026): ordered build k_disp_rows_* with the CSR on
+// the device; CURCUMA_GPU_DISP_SORT=0: atomic-slot build, CSR rebuilt on the host.
 // ============================================================================
 
 void FFWorkspaceHip::generateDispersionPairListOnGPU(
@@ -6765,6 +8724,81 @@ void FFWorkspaceHip::generateDispersionPairListOnGPU(
     }
 
     if (!impl.d_disp_pair_counter.ptr) impl.d_disp_pair_counter.alloc(1);
+
+    // Claude Generated (Oct 2026): ordered build (k_disp_rows_*): pairs in the host order i*N+j and
+    // the gather CSR built on the device, no index download. CURCUMA_GPU_DISP_SORT=0 keeps the
+    // arrival-order build below (atomic slot, host CSR rebuild), as on CUDA.
+    const char* env_sort = std::getenv("CURCUMA_GPU_DISP_SORT");
+    if (!(env_sort && env_sort[0] == '0')) {
+        const double cut_sq = cutoff_bohr * cutoff_bohr;
+        CudaBuffer<int> d_lo, d_hi, d_rowoff;
+        d_lo.alloc(N);
+        d_hi.alloc(N);
+        k_disp_rows_count<<<N, DISP_ROW_BLOCK, 0, impl.stream>>>(
+            N, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+            impl.d_atom_types.ptr, cut_sq, d_lo.ptr, d_hi.ptr);
+        std::vector<int> h_lo(N), h_hi(N);
+        d_lo.download(h_lo.data(), N, impl.stream);
+        d_hi.download(h_hi.data(), N, impl.stream);
+        checkCuda(hipStreamSynchronize(impl.stream), "k_disp_rows_count sync");
+        std::vector<int> rowoff(N + 1, 0), off(N + 1, 0);
+        for (int a = 0; a < N; ++a) {
+            rowoff[a + 1] = rowoff[a] + h_hi[a];
+            off[a + 1]    = off[a] + h_lo[a] + h_hi[a];
+        }
+        const int n = rowoff[N];
+        if (off[N] != 2 * n)
+            throw std::runtime_error(fmt::format("GPU D4 pair build: CSR size {} != 2 x {} pairs", off[N], n));
+
+        { impl.disp_uv_valid = false; impl.disp_pair_c6_current = true; }  // new pair list, d_disp_uv stale
+        impl.disp.n = n;
+        impl.disp.csr_N = N;
+        m_disp_idx_i_host.clear();   // no reader on this path (the host CSR rebuild below is skipped)
+        m_disp_idx_j_host.clear();
+        // capacity only: the kernels use impl.disp.n, so the buffers are not shrunk (no free + malloc per rebuild)
+        impl.disp.idx_i.ensure(n);
+        impl.disp.idx_j.ensure(n);
+        impl.disp.C6.ensure(n);
+        impl.disp.r4r2ij.ensure(n);
+        impl.disp.r0_sq.ensure(n);
+        impl.disp.zetac6.ensure(n);
+        impl.disp.r_cut.ensure(n);
+        impl.disp.dc6dcn_ij.ensure(n);
+        impl.disp.dc6dcn_ji.ensure(n);
+        impl.disp.csr_partner.ensure(2 * n);
+        impl.disp.csr_pairidx.ensure(2 * n);
+        impl.disp.csr_is_i.ensure(2 * n);
+        impl.disp.csr_off.upload(off, impl.stream);
+        if (n > 0) {
+            d_rowoff.upload(rowoff, impl.stream);
+            k_disp_rows_build<<<N, DISP_ROW_BLOCK, 0, impl.stream>>>(
+                N, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+                impl.d_atom_types.ptr, cut_sq,
+                d_lo.ptr, d_rowoff.ptr, impl.disp.csr_off.ptr,
+                impl.disp.idx_i.ptr, impl.disp.idx_j.ptr,
+                impl.disp.csr_partner.ptr, impl.disp.csr_pairidx.ptr, impl.disp.csr_is_i.ptr);
+            LaunchConfig cfg_st = getLaunchConfig(n, m_block_size);
+            k_disp_pairs_static<<<cfg_st.gridSize, cfg_st.blockSize, 0, impl.stream>>>(
+                n, impl.disp.idx_i.ptr, impl.disp.idx_j.ptr, impl.d_atom_types.ptr,
+                impl.d_gw.ptr, impl.d_c6_flat.ptr,
+                impl.d_sqrtzr4r2.ptr, impl.d_topo_q.ptr,
+                impl.d_zeta_zeff.ptr, impl.d_zeta_c.ptr,
+                a1, a2,
+                impl.disp.C6.ptr, impl.disp.r4r2ij.ptr, impl.disp.r0_sq.ptr,
+                impl.disp.zetac6.ptr, impl.disp.r_cut.ptr);
+            k_disp_csr_lower<<<N, DISP_ROW_BLOCK, 0, impl.stream>>>(
+                N, d_lo.ptr, d_rowoff.ptr, impl.disp.csr_off.ptr,
+                impl.disp.idx_j.ptr, impl.disp.csr_partner.ptr, impl.disp.csr_pairidx.ptr);
+            checkCuda(hipGetLastError(), "k_disp_rows_build launch");
+        }
+        // d_lo / d_rowoff are freed on return: finish the kernels first.
+        checkCuda(hipStreamSynchronize(impl.stream), "k_disp_rows_build sync");
+        impl.disp_built_on_gpu = true;
+        if (CurcumaLogger::get_verbosity() >= 2)
+            CurcumaLogger::info(fmt::format(
+                "  GPU D4 dispersion pair list: {} pairs built on GPU in host order, gather CSR on GPU", n));
+        return;
+    }
 
     const double cutoff_sq = cutoff_bohr * cutoff_bohr;
     const int n_total = N * (N - 1) / 2;
@@ -6895,6 +8929,7 @@ void FFWorkspaceHip::computeGaussianWeightsOnGPU(bool use_cn_final)
     // k_dispersion_gather_uv forms C6 and dC6/dCN per edge; the per-pair arrays are then stale and are
     // filled before the next energy-only k_dispersion (prepareAndLaunchChargeIndependent).
     const bool fused = !use_cn_final && m_disp_c6_update && impl.c6_table_symmetric && impl.disp_fused_enabled
+                       && !impl.dc6_tab_enabled
                        && impl.disp.csr_N == N;
     if (fused) {
         LaunchConfig cfg_uv = getLaunchConfig(N * impl.disp_ntypes, m_block_size);
@@ -6931,6 +8966,7 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
     const int N = m_natoms;
     hipStream_t stream = impl.stream;
     impl.disp_launched_early = false;   // Oct 2026: set again by launchDispersionGradientEarly() this step
+    setGfnffFixModeHip(impl.fixed_point);   // WP10: before any capture or launch of this step
     g_rocm_small_eeq_stream = impl.single_stream ? stream : nullptr;   // Oct 2026, see its declaration
     g_rocm_small_eeq_aux = impl.single_stream ? impl.stream_threebody : nullptr;
     g_rocm_small_eeq_event = impl.single_stream ? impl.event_eeq_order : nullptr;
@@ -7134,8 +9170,7 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
     // NOTE: k_coulomb is NOT launched here — it needs EEQ charges
     // Per-kernel snapshot: after stream A repulsion (Claude Generated April 2026)
     if (gradient && impl.d_grad_after_sA.ptr) {
-        hipMemcpyAsync(impl.d_grad_after_sA.ptr, impl.d_grad.ptr,
-                        3*N*sizeof(double), hipMemcpyDeviceToDevice, sA);
+        snapshotAccHip(impl.fixed_point, impl.d_grad_after_sA.ptr, impl.d_grad.ptr, 3*N, sA);
     }
     if (m_record_kernel_timings) hipEventRecord(impl.timing_sA_end, sA);
     hipEventRecord(impl.event_pairwise, sA);
@@ -7172,8 +9207,7 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
     }
     // Per-kernel snapshot: after k_bonds (Claude Generated April 2026)
     if (gradient && impl.d_grad_after_bonds.ptr) {
-        hipMemcpyAsync(impl.d_grad_after_bonds.ptr, impl.d_grad.ptr,
-                        3*N*sizeof(double), hipMemcpyDeviceToDevice, sB);
+        snapshotAccHip(impl.fixed_point, impl.d_grad_after_bonds.ptr, impl.d_grad.ptr, 3*N, sB);
     }
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
@@ -7192,8 +9226,7 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
     }
     // Per-kernel snapshot: after k_angles (Claude Generated April 2026)
     if (gradient && impl.d_grad_after_angles.ptr) {
-        hipMemcpyAsync(impl.d_grad_after_angles.ptr, impl.d_grad.ptr,
-                        3*N*sizeof(double), hipMemcpyDeviceToDevice, sB);
+        snapshotAccHip(impl.fixed_point, impl.d_grad_after_angles.ptr, impl.d_grad.ptr, 3*N, sB);
     }
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
@@ -7248,6 +9281,8 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
             &impl.d_energies.ptr[impl.E_STORS]);
     }
     if (gradient && impl.hb_alpha.n > 0 && impl.d_zz_hb.ptr) {
+        if (impl.fixed_point)   // WP10: k_bonds is the only producer (same stream): integers -> doubles
+            fixToDoubleHip(impl.d_zz_hb.ptr, N, GFNFF_FIX_FORCE, sB);
         constexpr double hb_kn = 27.5;
         LaunchConfig cfg = getLaunchConfig(impl.hb_alpha.n, m_block_size);
         k_hb_alpha_chainrule<<<cfg.gridSize, cfg.blockSize, 0, sB>>>(
@@ -7264,8 +9299,7 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
     }
     // Per-kernel snapshot: after all stream B kernels (Claude Generated April 2026)
     if (gradient && impl.d_grad_after_sB.ptr) {
-        hipMemcpyAsync(impl.d_grad_after_sB.ptr, impl.d_grad.ptr,
-                        3*N*sizeof(double), hipMemcpyDeviceToDevice, sB);
+        snapshotAccHip(impl.fixed_point, impl.d_grad_after_sB.ptr, impl.d_grad.ptr, 3*N, sB);
     }
     if (m_record_kernel_timings) hipEventRecord(impl.timing_sB_end, sB);
     hipEventRecord(impl.event_bonded, sB);
@@ -7383,8 +9417,7 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
     }
     // Per-kernel snapshot: after all stream C kernels (Claude Generated April 2026)
     if (gradient && impl.d_grad_after_sC.ptr) {
-        hipMemcpyAsync(impl.d_grad_after_sC.ptr, impl.d_grad.ptr,
-                        3*N*sizeof(double), hipMemcpyDeviceToDevice, sC);
+        snapshotAccHip(impl.fixed_point, impl.d_grad_after_sC.ptr, impl.d_grad.ptr, 3*N, sC);
     }
     if (m_record_kernel_timings) hipEventRecord(impl.timing_sC_end, sC);
     hipEventRecord(impl.event_threebody, sC);
@@ -7640,6 +9673,15 @@ double FFWorkspaceHip::launchChargeDependentAndFinish(bool gradient)
     // =========================================================================
 
     const bool need_snapshots = (m_verbosity >= 3);
+    // WP10: with fixed_point, d_dEdcn / d_grad / d_energies are integer accumulators (as CUDA): dEdcn is converted
+    // once every producer is done (before its first double consumer), d_grad after the CN chain rule (the last
+    // accumulation), the energy slots before the download.
+    bool dEdcn_converted = !impl.fixed_point;
+    auto convert_dEdcn = [&] {
+        if (dEdcn_converted) return;
+        fixToDoubleHip(impl.d_dEdcn.ptr, N, GFNFF_FIX_FORCE, stream);
+        dEdcn_converted = true;
+    };
     if (m_coulomb_enabled && impl.coul_self_on_gpu) {
         // Wait for pairwise+bonded streams (dEdcn dependency for qtmp subtraction).
         // event_p2_pairwise: Phase-2-dedicated — always wait (records k_coulomb completion).
@@ -7650,6 +9692,7 @@ double FFWorkspaceHip::launchChargeDependentAndFinish(bool gradient)
                 hipStreamWaitEvent(stream, impl.event_bonded, 0);
         }
 
+        convert_dEdcn();
         // d_dEdcn_snapshot must always be populated — dEdcnTotal() is public API
         // used by external code (tests, chain-rule validation) regardless of verbosity.
         if (m_coulomb_enabled && impl.coul_self_on_gpu && impl.d_dEdcn_snapshot.ptr) {
@@ -7659,8 +9702,7 @@ double FFWorkspaceHip::launchChargeDependentAndFinish(bool gradient)
 
         if (need_snapshots) {
             // Grad snapshot is only for diagnostics at verbosity >= 3
-            hipMemcpyAsync(impl.d_grad_snapshot.ptr, impl.d_grad.ptr,
-                            3*N*sizeof(double), hipMemcpyDeviceToDevice, stream);
+            snapshotAccHip(impl.fixed_point, impl.d_grad_snapshot.ptr, impl.d_grad.ptr, 3*N, stream);
         }
 
         // WP5-B: do_subtract only needs the GPU CNF buffer + EEQ charges — no CPU vector.
@@ -7695,9 +9737,9 @@ double FFWorkspaceHip::launchChargeDependentAndFinish(bool gradient)
             }
         }
 
+        convert_dEdcn();
         if (need_snapshots) {
-            hipMemcpyAsync(impl.d_grad_snapshot.ptr, impl.d_grad.ptr,
-                            3*N*sizeof(double), hipMemcpyDeviceToDevice, stream);
+            snapshotAccHip(impl.fixed_point, impl.d_grad_snapshot.ptr, impl.d_grad.ptr, 3*N, stream);
         }
 
         LaunchConfig cfg_cn = getLaunchConfig(impl.n_cn_pairs, m_block_size);
@@ -7732,6 +9774,17 @@ double FFWorkspaceHip::launchChargeDependentAndFinish(bool gradient)
         }
     }
 
+    if (impl.fixed_point) {
+        convert_dEdcn();   // no-op unless neither the Coulomb postprocess nor the chain rule ran
+        if (gradient)      // last accumulation is done: fixed point -> double before the download
+            fixToDoubleHip(impl.d_grad.ptr, 3 * N, GFNFF_FIX_FORCE, stream);
+        static_assert(FFWorkspaceHipImpl::E_DISP == 0, "slot 0 is the dispersion slot (own fixed-point scale)");
+        fixToDoubleHip(impl.d_energies.ptr, 1, GFNFF_FIX_ENERGY_DISP, stream);
+        fixToDoubleHip(impl.d_energies.ptr + 1, FFWorkspaceHipImpl::N_ENERGY_SLOTS - 1, GFNFF_FIX_ENERGY, stream);
+        if (impl.h_fix_bad)   // range / finiteness flag of the accumulation, read after the final sync
+            checkCuda(hipMemcpyFromSymbolAsync(impl.h_fix_bad, HIP_SYMBOL(d_gfnff_fix_bad), sizeof(int), 0,
+                                               hipMemcpyDeviceToHost, stream), "fixed-point flag read-back");
+    }
     checkCuda(hipGetLastError(), "postprocess final check");
 
     // Async energy download (pinned m_h_energies buffer)
@@ -7861,6 +9914,20 @@ double FFWorkspaceHip::launchChargeDependentAndFinish(bool gradient)
     // h_dc6dcn_skip was written by k_check_dc6dcn_skip_final → hipMemcpyAsync on the
     // same stream; now that the stream is synchronized, the host buffer is valid.
     m_dc6dcn_skip_pending = !impl.lean_step && (impl.h_dc6dcn_skip != nullptr && *impl.h_dc6dcn_skip != 0);
+
+    // WP10: a non-finite or out-of-range contribution cannot be represented in the fixed-point accumulators; the
+    // FP64 path would return NaN or a huge value there, so the step returns NaN (energy and gradient) instead of a
+    // wrapped number. The flag is sticky on the device and reset here.
+    bool fix_bad = false;
+    if (impl.fixed_point && impl.h_fix_bad && *impl.h_fix_bad != 0) {
+        fix_bad = true;
+        *impl.h_fix_bad = 0;
+        const int zero = 0;
+        checkCuda(hipMemcpyToSymbol(HIP_SYMBOL(d_gfnff_fix_bad), &zero, sizeof(int)), "reset fixed-point flag");
+        if (impl.fix_bad_steps++ == 0)
+            CurcumaLogger::warn("ROCm GFN-FF: a force, energy or CN contribution was not finite or outside the "
+                                "fixed-point range (-gfnff.rocm_fixed_point); the step returns NaN");
+    }
 
     // Extract per-term energies from pinned buffer
     const double e_disp      = m_h_energies[impl.E_DISP];
@@ -8018,6 +10085,10 @@ double FFWorkspaceHip::launchChargeDependentAndFinish(bool gradient)
         CurcumaLogger::info("=== GPU ENERGY END ===");
     }
 
+    if (fix_bad) {
+        if (gradient) m_result_gradient.setConstant(std::numeric_limits<double>::quiet_NaN());
+        return std::numeric_limits<double>::quiet_NaN();
+    }
     return m_result_energy.total() + m_e0;
 }
 
@@ -8087,6 +10158,7 @@ void FFWorkspaceHip::computeCN(const std::vector<int>& atom_types)
     // mirroring the CUDA file - Claude Generated; uncompiled here (no ROCm SDK).
     const double threshold_sq = 900.0;
 
+    setGfnffFixModeHip(impl.fixed_point);   // WP10
     // Ensure CN buffers are allocated
     if (impl.d_cn_raw.n < N) impl.d_cn_raw.alloc(N);
     if (impl.d_cn_final.n < N) impl.d_cn_final.alloc(N);
@@ -8114,6 +10186,8 @@ void FFWorkspaceHip::computeCN(const std::vector<int>& atom_types)
             impl.coords.d_z.ptr,
             impl.d_cn_raw.ptr,
             kn);
+        if (impl.fixed_point)   // WP10: integer CN sums -> doubles before the log squashing
+            fixToDoubleHip(impl.d_cn_raw.ptr, N, GFNFF_FIX_CN, impl.stream);
 
         // Log squashing: cn_final[i] = log(1+exp(cnmax)) - log(1+exp(cnmax-cn_raw[i]))
         // BOUNDS_LIGHT kernel — cap block at 256.

@@ -6,7 +6,10 @@
 # (a) default (no switch): energy equals the reference of the binary before the preconditioner existed
 # (b) -scf_precond frag: same energy as (a) within 1e-7 Eh and fewer SCF iterations
 # (c) error paths: a charged system and a cluster of isolated ions ignore the switch with a warning
-#     and give the same energy and iteration count as without it.
+#     and give the same energy and iteration count as without it. The isolated ions (4 ions, 5.5 A apart, near-degenerate
+#     frontier orbitals) sit at the stability limit of the SCF at 300 K: the run may converge or end with the clear
+#     "SCF NOT converged" error and exit 1, but the switch must not change which of the two happens, and an energy is
+#     printed only if the SCF converged (changed Oct 26, 2026; the former absolute reference depended on rounding).
 # (d) -scf_precond frag, 5 fs NVE MD on the unrelaxed 197-atom cluster (the guard fires there): runs without
 #     error, and the first MD energy (same geometry, same fixed point) equals the run without the switch within
 #     1e-7 Eh. No iteration condition: frag does not improve the cold start on this structure (measured n=1,
@@ -45,7 +48,9 @@ run() {   # run <log> <xyz> [args...]
 # Since the SimpleMD output rework (origin/master, Oct 2026) the MD prints no calculator lines ("Final Energy", "SCF precond: ...")
 # any more: the first MD energy is Epot of the table row at t = 0, the cluster SCFs of the preconditioner build show in SCFTRACE.
 md_first_epot() { sed 's/\x1b\[[0-9;]*m//g' "$1" | grep -E '^ +0\.000000 ' | head -1 | awk '{print $2}'; }
-count_scf_starts() { sed 's/\x1b\[[0-9;]*m//g' "$1" | grep -c '^SCFTRACE iter 0 '; }
+# SCFTRACE goes to stderr, the iteration table to stdout: a start can be glued behind an unterminated stdout line, so count
+# every occurrence, not only line starts (Oct 26, 2026: the line-start count missed one and gave 38 instead of 39 extra starts).
+count_scf_starts() { sed 's/\x1b\[[0-9;]*m//g' "$1" | grep -o 'SCFTRACE iter 0 ' | wc -l; }
 
 first_energy() { sed 's/\x1b\[[0-9;]*m//g' "$1" | grep -oP 'Final Energy: \K[-0-9.]+' | head -1; }
 
@@ -87,10 +92,20 @@ main() {
     assert_numeric_match "$REF_HYDRONIUM" "$(energy_of ion_frag.log)" "$ENERGY_TOLERANCE" "charged: energy unchanged"
     assert_equals "$(iters_of ion_none.log)" "$(iters_of ion_frag.log)" "charged: same SCF iterations as without the switch"
 
-    # (c2) isolated ions (single atoms): no block qualifies, switch ignored with a warning
-    run nacl_frag.log nacl.xyz -scf_precond frag
+    # (c2) isolated ions (single atoms): no block qualifies, switch ignored with a warning. The SCF of this structure is at
+    #      the stability limit (converges at 1000 K in 38 iterations, not at 300 K on all builds): same outcome with and
+    #      without the switch, never an energy without convergence.
+    $CURCUMA -sp nacl.xyz -method gfn2 -threads 1 -verbosity 1 -no_bmt > nacl_none.log 2>&1; local RC_NONE=$?
+    $CURCUMA -sp nacl.xyz -method gfn2 -threads 1 -verbosity 1 -no_bmt -scf_precond frag > nacl_frag.log 2>&1; local RC_FRAG=$?
     assert_string_in_file "no fragment qualifies" nacl_frag.log "isolated ions: warning printed"
-    assert_numeric_match "$REF_NACL" "$(energy_of nacl_frag.log)" "$ENERGY_TOLERANCE" "isolated ions: energy unchanged"
+    assert_equals "$RC_NONE" "$RC_FRAG" "isolated ions: same exit code with and without the switch"
+    if [ "$RC_FRAG" -eq 0 ]; then
+        assert_numeric_match "$(energy_of nacl_none.log)" "$(energy_of nacl_frag.log)" "$ENERGY_TOLERANCE" "isolated ions: converged, energy unchanged"
+        echo "   (isolated ions converged; reference of the former build: $REF_NACL Eh)"
+    else
+        assert_string_in_file "SCF NOT converged" nacl_frag.log "isolated ions: not converged -> clear error"
+        assert_equals "" "$(energy_of nacl_frag.log)" "isolated ions: no energy printed without convergence"
+    fi
 
     # (d) MD on a structure where the guard fires: no error, same first energy
     run_md md_none
@@ -142,6 +157,11 @@ main() {
         echo -e "${RED}FAIL${NC}: -xtb.diis_start 30 had no effect (iterations '$ND1', default '$ND0')"
         TESTS_FAILED=$((TESTS_FAILED + 1))
     fi
+    # The scf_ spelling (flat, reaches the SCF at -sp where the optimiser owns -diis_start) and the scf scope give the same iterations.
+    run diis_start30_flat.log ureawater.xyz -scf_mode diis -scf_diis_start 30
+    run diis_start30_scf.log ureawater.xyz -scf_mode diis -scf.diis_start 30
+    assert_equals "$ND1" "$(iters_of diis_start30_flat.log)" "-scf_diis_start 30 (flat) gives the iterations of -xtb.diis_start 30"
+    assert_equals "$ND1" "$(iters_of diis_start30_scf.log)" "-scf.diis_start 30 (alias) gives the iterations of -xtb.diis_start 30"
     # A longer SCF path ends at another point inside the convergence threshold (2e-6 Eh measured), hence 1e-5 here.
     assert_numeric_match "$(energy_of diis_default.log)" "$(energy_of diis_start30.log)" "0.00001" "diis_start moves the energy by less than the SCF threshold scale (1e-5 Eh)"
 

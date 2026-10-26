@@ -78,19 +78,29 @@ removes the sloshing, but is a different model.
 
 ## Controlling parameters
 
-All route through the `xtb` config scope (flat CLI flags auto-route there);
-defaults equal the historic native defaults, so unset = no change.
+The knobs several methods share live in registry module `scf` (`scf_parameters.h`; `-help_module scf`). Their registry
+default means "the method's own value"; the table lists what that is. `-xtb.<name>` still sets a value for gfn1/gfn2 only
+and wins over `-scf_threshold` / `-scf.scf_threshold` (precedence: method scope, then `scf`, then the method default).
 
-| Flag             | Default | Meaning |
-|------------------|---------|---------|
-| `-scf_mode`      | `broyden` | Strategy (see above). |
-| `-scf_guess`     | `eeq`   | Initial charge guess (see above). |
-| `-scf_damping`   | `0.4`   | Density mixing factor: `P = damp*P_new + (1-damp)*P_old`. Lower = stronger damping. |
-| `-scf_threshold` | `1e-5`  | Convergence threshold on max\|dq_shell\| (and dE). |
-| `-diis_start`    | `5`     | Damped warmup iterations before DIIS (diis/level-shift). |
-| `-diis_subspace` | `6`     | DIIS history depth (Fock matrices kept). |
-| `-level_shift`   | `0.2`   | Virtual-orbital shift magnitude (Eh) for `level-shift` mode. |
-| `-scf_allow_unconverged` | `false` | Accept an SCF that hit the iteration limit (150, fixed) instead of failing. |
+| Flag (module `scf`) | gfn1/gfn2 | pm3/am1/mndo/pm6 | Meaning |
+|---|---|---|---|
+| `-scf_threshold` | `1e-5` on max\|dq_shell\| (and dE) | `1e-6` on \|\|P_new - P\|\|_F | Convergence threshold. |
+| `-scf_max_iterations` (`-max_iterations`, `-SCFmaxiter`) | `150` | `100` | Iteration limit; tblite/xtb/Ulysses map it onto their `max_iterations` (default 100). |
+| `-scf_damping` | `0.4` | `0.6` | Fraction of the new charges (gfn) or density (NDDO) per step: `P = d*P_new + (1-d)*P_old`; tblite maps it onto `damping`. |
+| `-scf_allow_unconverged` | `false` | `false` | Accept an SCF that hit the iteration limit (warning + last energy) instead of failing. |
+| `-scf_mode` | `broyden` | `diis` | gfn: broyden, diis, plain, level-shift; NDDO: diis or plain (other names are an error). |
+| `-scf_diis_start` (`-diis_start`) | `5` | `3` | Damped iterations before DIIS (gfn: modes diis and level-shift). |
+| `-scf_diis_subspace` (`-diis_subspace`) | `6` | `8` | DIIS history depth. |
+
+Module `xtb` (gfn1/gfn2 only): `-scf_guess` (`eeq`), `-level_shift` (`0.2` Eh, `level-shift` mode), `-eigensolver`,
+`-electronic_temperature`, `-warm_start`, `-keep_diis`, mixed precision, GPU and `-scf_precond` knobs.
+
+With `-sp` and `-opt` the flat `-max_iterations` and `-diis_start` stay with the optimiser (module `opt` owns them, they do not reach the SCF);
+use `-scf_max_iterations` and `-scf_diis_start` (the `scf_` names exist for this reason, since Oct 26, 2026). `-scf.diis_start` and `-xtb.diis_start` still work.
+
+Default `-scf_threshold 1e-5` (recorded in the PARAM help until 2026-10-26): the energy is identical to the 1e-6 run
+(< 1e-8 Eh) at about 10-20 % fewer SCF iterations; the gradient with the `eeq` D4 response (the default when this was
+recorded) is insensitive to it. Tighten to 1e-6 for the `cpscf` D4 response or high-precision force work.
 
 ## Failure handling (Sep 27, 2026)
 
@@ -101,11 +111,15 @@ An SCF result is only returned when it is one. Three cases now end the calculati
   NaN vector made `maxCoeff()` report 0, so the SCF "converged" (DIIS on a 1846-atom water/urea
   cluster: +540710 Eh; now "diverged at iteration 6"). The same test sits in the GPU-resident loop,
   where no NaN case has been reproduced yet.
-- **Not converged within the iteration limit** (fixed at 150; the log counts 151 iterations) — as
+- **Not converged within the iteration limit** (`-scf_max_iterations`, default 150) — as
   in xtb and tblite. `-scf_allow_unconverged true` restores the old behaviour (warning + last
   energy) for anyone who knowingly accepts it.
 - **Implausible charges after the bare-H0 retry** — the runaway guard of KNOWN_ISSUES_ARCHIVE.md Known Issue #9
   used to return the retry's result even when it was just as impossible.
+
+Native NDDO (pm3/am1/mndo/pm6) applies the same rule: an SCF that does not converge within
+`-scf_max_iterations`, or a non-finite energy, is an error (also inside its numerical gradient);
+`-scf_allow_unconverged true` warns and keeps the last energy.
 
 The GPU-resident loop now names the failing stage (eigensolve, density, Broyden, ...) instead of
 reporting "failed at iteration N" without a reason. Not tested: the ROCm mirror (no SDK here) still

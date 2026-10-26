@@ -11,19 +11,18 @@
 #include "src/core/curcuma_logger.h"
 
 #include <algorithm>
+#include <cmath>
+#include <stdexcept>
+#include <fmt/format.h>
 
 NDDOMethod::NDDOMethod(NDDOMethodType type, const json& config)
     : m_nddo(nullptr)
     , m_calculation_done(false)
     , m_last_energy(0.0)
 {
-    json full_config = getDefaultConfig();
-    if (!config.empty()) {
-        full_config.merge_patch(config);
-    }
-
     m_nddo = std::make_unique<NDDO>(type);
     m_method_name = m_nddo->getMethodNameStr();
+    applyScfConfig(config);
 
     // Convert to lowercase for MethodFactory consistency
     std::transform(m_method_name.begin(), m_method_name.end(),
@@ -50,8 +49,13 @@ bool NDDOMethod::updateGeometry(const Matrix& geometry)
 
 double NDDOMethod::calculateEnergy(bool gradient)
 {
+    m_error_message.clear();
     m_last_energy = m_nddo->Calculation(gradient);
     m_calculation_done = true;
+    // Claude Generated (Oct 2026): an unconverged or non-finite SCF is reported as an error
+    // (EnergyCalculator then refuses the result), never as E = 0.
+    if (!m_nddo->scfError().empty())
+        m_error_message = m_nddo->scfError();
     return m_last_energy;
 }
 
@@ -77,12 +81,56 @@ json NDDOMethod::getEnergyDecomposition() const
     return m_nddo->getEnergyDecomposition();
 }
 
-json NDDOMethod::getDefaultConfig()
+/**
+ * @brief Hand the shared SCF settings (registry module "scf", scf_parameters.h) to NDDO.
+ * Claude Generated (Oct 2026). Reads config["scf"] (aliases resolved and "method default"
+ * markers dropped by MethodFactory::applySharedScfScope), then the same names at top level.
+ * Absent keys keep the NDDO defaults: 100 iterations, ||dP||_F < 1e-6, mixing 0.6, DIIS from
+ * iteration 3 over 8 Fock matrices. scf_mode broyden/level-shift exist only for gfn1/gfn2.
+ */
+void NDDOMethod::applyScfConfig(const json& config)
 {
-    return json{
-        { "scf_max_iterations", 100 },
-        { "scf_threshold", 1.0e-6 },
-        { "scf_damping", 0.4 },
-        { "threads", 1 }
+    // scf_diis_start / scf_diis_subspace carry the scf_ prefix because optimiser configs carry
+    // their own top-level diis_start, which must not reach the SCF.
+    auto find = [&](const char* key) -> const json* {
+        if (config.contains("scf") && config["scf"].is_object() && config["scf"].contains(key))
+            return &config["scf"][key];
+        const std::string k(key);
+        if (config.is_object() && config.contains(key))
+            return &config[key];
+        return nullptr;
     };
+    auto as_int = [](const json& v) { return static_cast<int>(std::lround(v.get<double>())); };   // CLI numbers arrive as double
+
+    if (const json* v = find("scf_max_iterations"); v && v->is_number() && as_int(*v) > 0)
+        m_nddo->setScfMaxIterations(as_int(*v));
+    if (const json* v = find("scf_threshold"); v && v->is_number() && v->get<double>() > 0.0)
+        m_nddo->setScfThreshold(v->get<double>());
+    if (const json* v = find("scf_damping"); v && v->is_number() && v->get<double>() > 0.0) {
+        const double d = v->get<double>();
+        if (d > 1.0)
+            throw std::invalid_argument(fmt::format("scf_damping {} is outside (0, 1] for {}", d, m_method_name));
+        m_nddo->setScfDamping(d);
+    }
+    if (const json* v = find("scf_diis_start"); v && v->is_number() && as_int(*v) >= 0)
+        m_nddo->setDiisStart(as_int(*v));
+    if (const json* v = find("scf_diis_subspace"); v && v->is_number() && as_int(*v) > 0)
+        m_nddo->setDiisSubspace(std::max(2, as_int(*v)));
+    if (const json* v = find("scf_allow_unconverged"); v) {
+        if (v->is_boolean())
+            m_nddo->setScfAllowUnconverged(v->get<bool>());
+        else if (v->is_number())
+            m_nddo->setScfAllowUnconverged(v->get<double>() != 0.0);
+    }
+    if (const json* v = find("scf_mode"); v && v->is_string()) {
+        std::string mode = v->get<std::string>();
+        std::transform(mode.begin(), mode.end(), mode.begin(), ::tolower);
+        if (mode == "diis" || mode == "pulay" || mode == "auto")
+            m_nddo->setScfUseDiis(true);
+        else if (mode == "plain" || mode == "damped")
+            m_nddo->setScfUseDiis(false);
+        else
+            throw std::invalid_argument(fmt::format("scf_mode '{}' is not available for {}; use diis or plain",
+                                                    v->get<std::string>(), m_method_name));
+    }
 }

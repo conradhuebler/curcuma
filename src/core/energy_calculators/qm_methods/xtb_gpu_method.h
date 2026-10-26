@@ -5,7 +5,7 @@
  * This program is free software under GPL-3.0.
  *
  * Claude Generated (2026-06): ComputationalMethod adapter for the GPU path of
- * native GFN1/GFN2. Selected by the factory when `-gpu cuda` (or `-gpu auto`)
+ * native GFN1/GFN2. Selected by the factory when `-gpu cuda`
  * is given and the build has USE_CUDA.
  *
  * Design: OWNS a NativeXtbMethod (the validated CPU pipeline: config, large-system
@@ -20,7 +20,7 @@
  *
  * Usage:
  *   ./curcuma -sp mol.xyz -method gfn2 -gpu cuda    # explicit GPU
- *   ./curcuma -sp mol.xyz -method gfn1 -gpu auto    # GPU if available
+ *   ./curcuma -sp mol.xyz -method gfn1 -gpu cuda    # GPU
  *   ./curcuma -sp mol.xyz -method gfn2              # CPU (default)
  */
 

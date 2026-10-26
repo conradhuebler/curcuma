@@ -67,9 +67,9 @@ Present on CUDA only (kernel names): EEQ iterative solvers (`k_ppcg_*`, `k_eeq_b
 Present on ROCm only: `k_coulomb_gather`, `k_coulomb_dense`, `k_dispersion_gather` (per-atom gather instead of atomics).
 
 Functional differences (details in `SQM_ROCM.md`, `GPU_TUNING.md`, `MULTI_GPU_GAPS.md`):
-- EEQ on ROCm: `-eeq_solver.solve_method` accepts only `auto` and `cholesky` (dense N x N). With 16 or more fragments the CPU solver runs (`-gfnff.eeq_rocm_cpu_fragment_threshold`). A device PCG/PPCG for ROCm does not exist.
+- EEQ on ROCm: `-eeq_solver.solve_method` accepts `auto`, `cholesky` and `ppcg` (Oct 2026; the Oct 13 text said only `auto`/`cholesky`, see `EEQSolver::gpuSupports`). The CPU solver runs only for 16 or more fragments with an explicitly set `-gfnff.eeq_rocm_cpu_fragment_threshold` or when the solver does not resolve to ppcg.
 - The four opt-in GFN-FF tuning switches of `GPU_TUNING.md` are ignored on ROCm.
-- xTB: no distributed eigensolver, so no split of one molecule over several GPUs (G2-1). GFN2 potential, the multipole SD/DD/SQ gradient, dispersion gradient and CN chain rule stay on the host.
+- xTB: no distributed eigensolver, so no split of one molecule over several GPUs (G2-1). GFN2 potential, the multipole SD/DD/SQ gradient and CN chain rule stay on the host; the GFN2 D4 pair gradient (`k_d4_grad`, `k_d4_atm`) runs on the device since Oct 2026, the GFN1 D3 gradient stays on the host (list: ROCM_HOST_PARTS_2026-10-17.md).
 - GFN2 SCF on ROCm is bound by the FP64 eigensolve; `-scf_mixed_precision false` is ignored (G2-13); warp reductions assume wave32 (F-17).
 
 ## Result 4: documented defect F-1 is fixed, docs are stale

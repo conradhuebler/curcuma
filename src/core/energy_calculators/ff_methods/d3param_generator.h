@@ -151,6 +151,26 @@ public:
                                 Matrix& gradient_out,
                                 Vector& dEdcn_out) const;
 
+    /**
+     * Element-pair tables for a device port of getEnergyAndGradient (Claude Generated, Oct 2026).
+     *
+     * The pair loop needs, per ordered pair of atom TYPES (distinct elements of the system): the 7x7 reference
+     * C6 block with the s-dftd3 index swap and clamp of interpolateC6 already applied (c6tab[(ti*nt+tj)*49+ra*7+rb],
+     * ra a reference of the first type, rb of the second), C8/C6 (getR6) per type pair, and per element the
+     * number of references and their reference CNs. Built in O(nt^2 * 49), no pair loop.
+     */
+    struct DeviceTables {
+        int nt = 0;
+        std::vector<int> type_z;        ///< [nt] atomic numbers, ascending
+        std::vector<int> atom_type;     ///< [N] index into type_z, -1 for an element without data
+        std::vector<double> c6tab;      ///< [nt*nt*49]
+        std::vector<double> r6tab;      ///< [nt*nt] C8/C6
+        std::vector<int> nref;          ///< [MAX_ELEM] references per element (index Z-1)
+        std::vector<double> refcn;      ///< [MAX_ELEM*7] reference CNs (index (Z-1)*7+ref)
+        double s6 = 1.0, s8 = 1.0, a1 = 0.4, a2 = 4.0;   ///< BJ damping of the active configuration
+    };
+    DeviceTables buildDeviceTables(const std::vector<int>& atoms) const;
+
     /** Access dc6/dcn matrix (computed on first call, cached). */
     const Eigen::MatrixXd& getDC6DCN() const;
 

@@ -60,13 +60,10 @@ std::unique_ptr<ComputationalMethod> createGfnff(const std::string& backend, con
  */
 void* resolveEntryPoint(const std::string& backend, const std::string& symbol);
 /// True if the plugin library libcurcuma_<backend>.so can be loaded (cached; a failed probe
-/// is not retried and, unlike the create* calls, is silent). Used for `-gpu auto` and
-/// for the "was this backend built?" checks — the core no longer needs USE_CUDA/USE_ROCM/
+/// is not retried and, unlike the create* calls, is silent). Used for
+/// the "was this backend built?" checks — the core no longer needs USE_CUDA/USE_ROCM/
 /// USE_VULKAN for dispatch (Claude Generated, Sep 2026).
 bool available(const std::string& backend);
-
-/// First loadable backend in the order cuda, rocm, vulkan; "none" if no plugin is present.
-std::string firstAvailable();
 
 /// The backend names the loader knows, in priority order.
 const std::vector<std::string>& knownBackends();
