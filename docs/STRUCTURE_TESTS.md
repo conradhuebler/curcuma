@@ -42,8 +42,8 @@ the result) or the method-wide `permute_energy` of gfnff (1e-4 Eh, Known Issue #
 ## Charge and spin
 
 The manifest has charge/spin for 23 of 80 structures. The generator uses a structure without them only if the policy lists it under
-`assumed_neutral_closed_shell` and the electron count is even. This list is an AI proposal: **the operator has to confirm it** and write charge/spin
-into the manifest. Other structures are skipped, the plan says why.
+`assumed_neutral_closed_shell` and the electron count is even. This list is an AI proposal that the operator accepted "for now" on Oct 26, 2026; charge/spin are still
+not written into the manifest. Other structures are skipped, the plan says why.
 
 ## Not covered
 
