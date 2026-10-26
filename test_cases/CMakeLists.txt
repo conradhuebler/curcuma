@@ -658,6 +658,27 @@ add_subdirectory(qm_ri)
 add_subdirectory(qm_mp2)
 add_subdirectory(qm_ccsd)  # Claude Generated (Oct 2026, WP13): canonical RCCSD vs PySCF
 add_subdirectory(qm_lmp2)  # Claude Generated (Oct 2026, WP15): local PNO-RI-MP2 (exactness + regression)
+# Claude Generated (Oct 2026): property tests generated from the structure library (test_cases/struct_test_policy.json):
+# translation/rotation/permutation invariance, sum of forces and torque, finite-difference gradient, repeat and thread
+# independence, CPU against CUDA. The selection is made by scripts/gen_struct_tests.py at configure time.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    set(CURCUMA_STRUCT_PYTHON "${Python3_EXECUTABLE}")
+    get_filename_component(CURCUMA_STRUCT_REPO "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
+    execute_process(COMMAND "${Python3_EXECUTABLE}" "${CURCUMA_STRUCT_REPO}/scripts/gen_struct_tests.py"
+                            --out "${CMAKE_CURRENT_BINARY_DIR}/generated_struct_tests.cmake" --cuda "${USE_CUDA}" --rocm "${USE_ROCM}"
+                    RESULT_VARIABLE _struct_gen_rc ERROR_VARIABLE _struct_gen_err)
+    if(_struct_gen_rc EQUAL 0)
+        include("${CMAKE_CURRENT_BINARY_DIR}/generated_struct_tests.cmake")
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+            "${CURCUMA_STRUCTURES_DIR}/manifest.json" "${CMAKE_CURRENT_SOURCE_DIR}/struct_test_policy.json"
+            "${CURCUMA_STRUCT_REPO}/scripts/gen_struct_tests.py")
+    else()
+        message(WARNING "structure property tests not generated: ${_struct_gen_err}")
+    endif()
+else()
+    message(STATUS "Python3 not found - structure property tests are not generated")
+endif()
 
 # Claude Generated (Sep 2026): interface-level gradient + frequency contract.
 # Guards two things nothing else covered:

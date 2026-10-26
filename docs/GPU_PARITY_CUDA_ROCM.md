@@ -1,0 +1,111 @@
+# CUDA / ROCm path parity (Oct 24, 2026)
+
+AI-generated from reading the code on `feature/rocm-step-pauses-mirror` merged with `origin/devel/methods` (merge not yet
+committed when written). No CUDA toolchain was available (`nvcc` missing), so nothing here about CUDA was compiled or
+run; ROCm statements were checked against the build on gfx1200. Rule: every path exists on both backends, or is listed
+here. Sources: `supports*` overrides (`xtb_gpu_method.cpp`, `xtb_hip_method.cpp`, `xtb_gpu_adapter.h`), the backend traits
+(`gfnff_gpu_method.h`, `gfnff_hip_method.h`), kernel names (`__global__`), environment switches.
+
+## A. CUDA has it, ROCm does not (to be ported on the ROCm machine)
+
+GFN1/GFN2 (`GpuScfBackend`, `xtb_native.h:384`). ROCm overrides only `supportsGradient`, `Multipole`, `DeviceDispersion`,
+`DeviceEeq`, `Dshell`, `DeviceMultipolePotential` (since Oct 24, 2026 also the rows marked WP1-WP6 below); CUDA additionally:
+
+| Path | CUDA | ROCm |
+|---|---|---|
+| `supportsResidentLoop` (+ `Gfn1`, `ResidentPreconditioner` and `ResidentPreconditionerGfn1` since Oct 25, 2026, open shell `k_occupations_uhf`) | yes | GFN2 closed shell since Oct 24, 2026 (WP2, `-xtb.rocm_resident_loop`), GFN1 closed shell since Oct 24, 2026 (WP3, same switch, `supportsResidentLoopGfn1`), open shell GFN1/GFN2 since Oct 24, 2026 (WP4, `setResidentOpenShell`, `k_res_occupations_uhf`, `-xtb.rocm_resident_open_shell`), Broyden seed preconditioner GFN1/GFN2 since Oct 24, 2026 (WP5, `supportsResidentPreconditioner`, `-xtb.rocm_resident_precond`) |
+| `supportsDevicePotential` (Coulomb, third order, D4 potential built on the device) | yes | yes since Oct 24, 2026 (WP1, `-xtb.rocm_device_potential`) |
+| `supportsOnTheFlyMultipole`, `supportsStoredMultipoleOnDevice`, multipole matrices built on the device (`k_mp_build_amat`) | yes | stored matrices built on the device since Oct 24, 2026 (WP1, `k_mp_build_amat15`); host copies skipped on the resident loop since Oct 25, 2026 (WP8b, `-xtb.rocm_defer_host_integrals`, `deferHostCopies`); on-the-fly variant since Oct 25, 2026 (WP11, `-xtb.rocm_otf_multipole`, `k_mp_potential_otf`, `k_mp_energy_otf`): with `-gpu_multipole_otf auto` only above the ROCm 4 GB limit (about 5770 atoms, `preferStoredMultipole`; CUDA switches at 1 GB), bit-identical to the stored kernels |
+| `supportsDeviceSolvation` | yes | yes since Oct 24, 2026 (WP6, `-xtb.rocm_device_solvation`); ROCm also takes GFN1 + solvent on the resident loop (`supportsDeviceSolvationGfn1`, CM5 shift), CUDA keeps GFN1 + solvent on its host-driven loop |
+| Occupations, Broyden step, pseudo-diagonalisation on the device (`k_occupations`, `k_broyden_*`, `k_pseudo_*`) | yes | occupations (closed and open shell), Broyden and GFN2 D4 reference weights on the device in the resident GFN1/GFN2 loop (WP2/WP3, `k_res_*`); pseudo-diagonalisation since Oct 24, 2026 (WP7, `k_pseudo_*`, generic `-scf_pseudo_diag`, ROCm default off) |
+| GFN2 D4 post-SCF and GFN1 D3(BJ) on the device (`d4PostScfDevice`, `d3DispersionDevice`), D4 reference weights and CN | yes | yes since Oct 24, 2026 (WP8a, `-xtb.rocm_d4_postscf_device`, `-xtb.rocm_d3_device`, `-xtb.rocm_cn_device`, also `d4CovalentCnDevice`, `downloadCn`); D4 only after the resident loop (its reference tables), weights with the host underflow rule, ATM block per atom with `pow` (CUDA: zero weights at underflow, cbrt, warp per atom) |
+| Gradient tail on the device (multipole interaction, Hamiltonian-CN chain rule: `k_grad_tail_*`), repulsion energy (`k_rep_energy`) | yes | yes since Oct 25, 2026 (WP8b, `-xtb.rocm_grad_tail_device`); the D4 covalent-CN fold since WP8a (`d4PostScfDevice`) |
+| Gradient potentials at the converged charges on the device (`convergedPotentials`, `gradientResident`), lazy host S/H0 copies (`downloadOverlapInto`/`downloadH0Into`) | yes | yes since Oct 25, 2026 (WP8b, `-xtb.rocm_grad_resident`, `-xtb.rocm_defer_host_integrals`); declines with a device solvent (the host gate never asks then) |
+| Bitwise reproducible SCF and gradient (fixed-order gathers, `gfix_add`) | yes | yes since Oct 25, 2026 (WP10): the SCF loop has no floating-point atomics, the gradient kernels and host-loop moments accumulate in fixed point (`xfix_add`, `-xtb.rocm_fixed_point`, default true); rocBLAS/rocSOLVER reductions not audited |
+| Multi-GPU eigensolver (cuSOLVERMg/Mp), sparse integrals | yes | no |
+
+GFN-FF (traits and kernels): `has_multi_gpu_split` (ROCm false) with its mixed-precision split EEQ. Since WP10 (Oct 25,
+2026) on ROCm too: fixed-point energy, force, dE/dCN and CN accumulation (`fix_add`, `k_fix_*`, same scales,
+`-gfnff.rocm_fixed_point`, default true; ROCm adds a range flag and a lock-step Coulomb tile walk). Since WP9 (Oct 25, 2026, see
+[ROCM_RESIDENT_LOOP_WP.md](ROCM_RESIDENT_LOOP_WP.md)) on ROCm too: device rebuild of the repulsion list
+(`has_device_repulsion_build`, ordered build with the gather CSR), tabulated `dc6dcn` (`k_dc6dcn_per_pair_tab`,
+`-gfnff.rocm_dc6dcn_tables`, default off: slower than the ROCm fused uv gather), the device Schur step of the dense EEQ
+(`-gfnff.rocm_device_schur`, in `solveWithDeviceRHSAndGPUSchur*`; the trait `has_device_schur` stays false on ROCm because
+it only adds the CUDA lu/ldlt/pcg/batched branches). Present on both: device ppcg, localinv build, CN pair skin, staged
+list upload, device HB detection, device D4 pair list.
+
+Neither backend: GFN-FF implicit solvent on the device (CPU fallback on both), GFN1/GFN2 bond orders.
+
+## B. ROCm has it, CUDA does not (to be done on the CUDA machine at the end)
+
+| # | ROCm path | CUDA state |
+|---|---|---|
+| 1 | Probe of the cached Cholesky factor, `|L L^T v - S v|` and `|L (Linv v) - v|` <= 1e-10, at most two recomputations, then `sygvd` and a one-time notice (`k_chk_ltv`, `k_chk_lv`, `k_chk_sv`, `xtb_hip_context.hip`) | L is formed once and applied by `trsm`; no factor check (the `dProbe*` buffers in `xtb_gpu_context.cu` belong to the distributed eigensolver check) | Done Oct 25, 2026 for the single-GPU dense Cholesky (`XtbGpuContext::Impl::probeCholeskyFactor`, `trmv` x 2 and `gemv`, `|L L^T v - S v|_2 <= 1e-10 |S v|_2`, at most two recomputations, then the call fails and the counted CPU fallback runs; `CURCUMA_GPU_FAIL_LPROBE=k` corrupts the first k factors). Checked: injection 1 -> one recompute, energy equal; injection 3 -> notice, counted fallback, energy equal to the CPU (acetic acid dimer, gfn1 and gfn2, 8 digits); no false alarm on 95 MOR41 structures (gfn2), nor on the acetic acid dimer compressed to 0.2 of its size (gfn1/gfn2); 206/206 `cuda|gpu` ctest; peo201-chain/water500 energies and wall times unchanged (n = 3). Not probed: sparse S (no dense copy), the multi-GPU path (has its own check since Oct 16). (AI, machine-tested) |
+| 2 | Explicit L^-1 once per geometry (`rocsolver_dtrtri`) with `trmm` per step (`-xtb.rocm_explicit_linv`) | none (no `dtrtri`); `trsm` only | Not ported (measured Oct 25, 2026): on the RTX A4500 two `cublasDtrmm` take 0.98-1.07 of two `cublasDtrsm` in FP64 (n = 1500, 3222, 6000) and 0.91-1.71 in FP32 (1-2 ms at n <= 3222, n = 1 each); the ROCm gain came from `rocblas_trsm` being slow, and ROCm switched the switch off again on Oct 17. A `dtrtri` per geometry would add cost for at most a few percent. Benchmark source: `scripts/gpu_bench/trsm_vs_trmm.cu`. |
+| 3 | Solver fallback bitmask `solverFallbackEvents` with fault injection `CURCUMA_ROCM_FAIL_LINV` | eigensolver-level only (`CURCUMA_GPU_EIG_CORRUPT`) | Not ported as a bitmask (Oct 25, 2026): the CUDA eigensolver has its own check and fault injection (`CURCUMA_GPU_EIG_CORRUPT`), every failed device step ends in the counted CPU fallback (`gpu_fallback.h`, `-gpu_strict true`), and the new factor probe prints once per failure and has `CURCUMA_GPU_FAIL_LPROBE`. A single mask adds no information over the counted fallbacks. |
+| 4 | Device multipole potential and energy for the host SCF loop (`-xtb.rocm_device_multipole`, `beginMultipolePotential`, `supportsDeviceMultipolePotential`, `CURCUMA_ROCM_FAIL_MP`) | not overridden; CUDA covers the multipole inside the resident loop, a CUDA host-driven loop (resident loop unavailable) keeps the host multipole | Not ported (Oct 25, 2026): the CUDA resident loop covers the multipole (stored and on the fly); the host-driven loop runs on CUDA only for GFN1 + solvent, where there is no multipole potential (GFN1 has none). Nothing to gain. |
+| 5 | Mixed-precision EEQ PCG matvec on a single GPU (`CURCUMA_ROCM_EEQ_FP32`, default on) | mixed precision only in the multi-GPU split (`gpu_eeq_mixed_precision`); single-GPU `runProjectedPCG` not checked | Not ported (measured Oct 25, 2026, one A4500, GFN-FF MD, mean of 36 projected-PCG solves, `CURCUMA_PPCG_GPU_TIMING=1`): CG 1.12 ms at 1410 atoms (step 3.8 ms), 2.51 ms at 2910 (step 9.0 ms), 9.69 ms at 7320 (matrix 3.33 ms, step about 30 ms). At 1410 and 2910 atoms the CG is launch-bound, an FP32 matvec saves nothing measurable; at 7320 atoms the FP64 matvec reads 429 MB (about 0.7 ms), FP32 would save at most about 4.7 ms of 30 (15 %, estimate, not run). The multi-GPU split code needs the full FP64 matrix for the local-inverse device build, so a one-card variant is more than switching the split on (`-gpu_split_devices 0` does not activate it). Open if single-card runs above 5000 atoms matter. |
+| 6 | Small-system device EEQ (`k_eeq_small_chol_schur_hip`, `CURCUMA_ROCM_EEQ_SMALL`) | not found in `eeq_solver_gpu.cu` | Not needed (Oct 25, 2026): below the break-even the GFN-FF EEQ runs on the CPU in parallel to the GPU kernels (`CPU EEQ (parallel to GPU)` in the verbosity-2 breakdown, 6 atoms), so a small device EEQ would not shorten the step. |
+| 7 | Small-system step: single stream below `kRocmSingleStreamMaxAtoms`, lean per-step bookkeeping, Coulomb tile shape by size (`CURCUMA_ROCM_SINGLE_STREAM`, `_LEAN_STEP`, `_COUL_TILE`; 66 atoms 1.53 -> 0.57 ms/step) | not found; CUDA break-even measured at about 66 atoms (AIChangelog Oct 17) | Measured, not ported (Oct 25, 2026, one A4500 against 16 CPU threads, GFN-FF MD, ms/step, warm-up discarded, n = 1 each): 6 atoms 0.25 against 0.15, 24 atoms 0.54 against 0.31, 66 atoms 1.04 against 0.99, 117 atoms 1.42 against 1.66, 197 atoms 2.94 against 3.84, 231 atoms 2.24 against 3.07, 1410 atoms 3.80 against 31.85, 2910 atoms 9.00 against 68.30. The gap below 66 atoms is a few tenths of a millisecond per step on both sides; a ROCm-style single-stream mode would move the break-even from about 66 to perhaps 20 atoms. |
+| 8 | Atomic-free gathers for the non-bonded repulsion, H bonds, Coulomb and a fused D4 dispersion gather (`k_repulsion_gather`, `k_dispersion_gather`, `k_coulomb_gather`, `CURCUMA_ROCM_{REP,HB}_GATHER`, `_DISP_FUSED`); the per-atom result goes through the fixed-point accumulator since WP10 | determinism by fixed-point atomics instead; no gather kernels | Not a CUDA gap: the ROCm gathers exist because FP64 `atomicAdd` is a compare-and-swap loop on gfx1200; CUDA has native atomics and the fixed-point accumulators of the reproducibility work (bitwise identical in every run above). |
+| 9 | `-gpu auto` takes the CPU for GFN-FF below 900 atoms (`energycalculator.cpp`, `-gfnff.gpu_auto_min_atoms`) | Decided Oct 26, 2026 (operator): `-gpu auto` and the ROCm threshold are removed on both backends. `-gpu auto` now warns, counts a GPU fallback (`-gpu_strict true` stops, exit 3) and runs on the CPU; test `cli_gpu_auto_removed`. The break-even measurements stay in [GPU_TUNING.md](GPU_TUNING.md) (CUDA about 66 atoms, ROCm about 900). |
+| 10 | GFN-FF dense EEQ: the matrix build on the solver stream waits for an event behind the workspace work (`ev_order` in `eeqBuildFactorSolveDevice`, WP9); before, 1 of 5 water-dimer MD runs read stale coordinates | Done Oct 25, 2026 (`EEQSolverGPUImpl::orderAfterWorkspace`, called at the top of every device-RHS solve): only the projected PCG waited, the other entries relied on a blocking copy before their first kernel. Water dimer MD (6 atoms, `-gpu_strict true`, a second GFN2 job on the same card, 40 runs per solver, physics columns of the MD table): before `lu` 30 and `batched` 22 distinct trajectories, `cholesky`/`ldlt`/`pcg`/`ppcg` 1; after 1 for all six. Without the second job the same test showed 1 of 20 deviating `batched` runs and none for the others. Check: `scripts/gpu_stream_race_check.sh`. Not tested: more than 6 atoms, multi-GPU split, ROCm-style `CURCUMA_ROCM_EEQ_SMALL=0` has no CUDA counterpart. (AI, machine-tested) |
+| 11 | `k_coulomb_tiles_hip` 128 x 128 with fixed point: lock-step j walk, one barrier per k, partner forces in k order without atomics (WP10) | shared fixed-point atomics |
+| 12 | GFN-FF and GFN1/GFN2 fixed-point accumulation (WP10): a non-finite or out-of-range contribution sets a device flag (`d_gfnff_fix_bad`, `xfix_bad`); GFN-FF returns NaN for the step, GFN1/GFN2 fails the device call; `fix_add` folds the chunk loop into one integer | Done Oct 25, 2026: `d_gfnff_fix_bad` (`gfnff_kernels.cu`, `fix_round` for the energy slots, read back by `gfnffFixBadReadAsync` in `FFWorkspaceGPU`, step returns NaN) and `g_gfix_bad` (`xtb_gpu_context.cu`, `computeGradient` returns false, host gradient follows); the chunk loop is folded as on ROCm. Checked: old loop against fold, accumulator bits identical for 76 000 to 108 000 in-range values per scale (2^48, 2^52, 2^56, `scripts/gpu_bench/fix_add_fold_check.cu`); NaN, +-Inf, 1e30 set the flag and add nothing, no hang; MD before/after bitwise identical (GFN-FF water dimer and peo201-chain 1410 atoms, GFN1/GFN2 water dimer and acetic acid dimer, physics columns); 206/206 `cuda|gpu` ctest; polymer_2x MD step 18.2-18.9 ms (before 18.3). Two oxygens 1e-4 A apart: before, energy -32766.74 Eh (slot saturation) and the MD went on; after, a warning and NaN. Not covered: the multi-GPU helper devices keep their own flag (not read), the cuBLAS/cuSOLVER reductions are not audited. (AI, machine-tested) |
+
+Not a gap, different algorithm for the same function: device HB detection (ROCm per-row sort `k_hb_*_rows` against CUDA
+`k_hb_detect`), device D4 pair list (`k_disp_rows_*` against CUDA pair build). A comparison of speed and determinism on
+both is worth doing, there is nothing to port.
+
+## C. Found on the re-check of Oct 25, 2026 (code reading of `supports*`, the GFN-FF traits and the PARAM switches; AI)
+
+| # | Path | State |
+|---|---|---|
+| C1 | `-scf_precond frag` for GFN1 on the resident device loop (`supportsResidentPreconditionerGfn1`, SCC vector = q_sh) | Done Oct 25, 2026 on CUDA: the backend now overrides it (the device Broyden of the GFN1 loop has dimension nsh and M is layout-neutral). Energies equal with and without the switch and to the CPU, iterations 11 -> 8, 6 -> 4, 12 -> 7, 14 -> 10 on four clusters, unchanged 11 at 2910 atoms; `cli_sqm_13` extended. Details: [SCF_PRECOND.md](SCF_PRECOND.md). (AI, machine-tested) |
+| C2 | Density P = C diag(occ) C^T by `dsyrk` on the occupied columns (`-xtb.rocm_density_syrk`, ROCm opt-in, default off) | Done as an opt-in on CUDA, Oct 25, 2026: `CURCUMA_GPU_DENSITY_SYRK=1`, dense integral storage only. GFN1 peo201-chain 7.74 -> 7.01 s (-9 %, n = 3), no change on the sparse path or on small systems; default off because the result differs from the GEMM in rounding. Numbers: [GPU_TUNING.md](GPU_TUNING.md). (AI, machine-tested) |
+
+Re-checked and equal: all GFN-FF backend traits except `has_multi_gpu_split` (ROCm false, item A) and `has_device_schur` (ROCm false by design, the device Schur step has its own switch `rocm_device_schur`); the GFN1/GFN2 `supports*` set apart from the rows listed in A and B.
+
+## To verify on the ROCm machine (prepared Oct 26, 2026, nothing of this has run on ROCm)
+
+Everything the CUDA machine changed since the ROCm merge `1f069cf8` is CUDA-only code (`cuda/*.cu`, `xtb_gpu_method.cpp`, CUDA test 13), plus shared
+test infrastructure (`test_cases/CMakeLists.txt`, `scripts/`, `test_cases/struct_test_policy.json`). No shared host code of the SCF or the force field changed.
+
+1. Build as before; run `cmake .` in the build directory (the structure tests are generated at configure time, `USE_ROCM` adds `structinv_rocm_*`).
+2. `ctest -L structinv -j8` (128 tests with one GPU backend on the CUDA machine, 73 s): 64 CPU tests (the CPU numbers of this machine, a second CPU and BLAS) and, with `USE_ROCM`, 64 `structinv_rocm_*` / `structcomp_rocm_*` tests
+   (CPU against `-gpu rocm`, energy 1e-8 Eh, gradient 1e-5 Eh/A as set on CUDA: **not measured on ROCm**). A failure there is a measurement, not
+   necessarily a bug: note the value from the output, decide, and write it into the `measured` block of `test_cases/struct_test_policy.json`
+   before changing a limit. The gfnff cases `ammonia.ideal-c3v` (Known Issue #42) and `hydrogen-cyanide` permute (#34) are the ones to watch.
+3. `ctest -j1` full: on the CUDA machine 519 of 521 pass; the two failures are `xtb_cpscf` and `cli_sqm_12_gfn2_scf_precond`, both documented
+   in `docs/BROKEN_TESTS_2026-10-14.md`. The CUDA-labelled tests are skipped or absent without CUDA.
+4. Stream-order race on ROCm (the CUDA `lu`/`batched` bug had a ROCm counterpart fixed in WP9): `GPU=rocm scripts/gpu_stream_race_check.sh BIN test_cases/structures/clusters/water-dimer.roo2.8.xyz 40 cholesky ppcg`,
+   ideally with a second GPU job on the same card; every line must show one hash.
+5. Open ROCm gaps from table A: Mehr-GPU-Eigenloeser, sparse integrals, GFN-FF multi-GPU split (all "no" on ROCm), pseudo-diagonalisation default off. (`-gpu auto` no longer exists since Oct 26, 2026.)
+6. Compressed geometries (D4 weight underflow, found on the host and on CUDA): `ctest -R structcomp` runs the finite-difference gradient on the CPU and, with `USE_ROCM`, CPU against `-gpu rocm` on the acetic acid dimer and 13 more structures scaled to 0.30 (`structcomp_*`, `structcomp_rocm_*`). On CUDA the old plugin failed this with 0.435 Eh/A, the current one passes at 7e-11. The ROCm D4 weight code was written to follow the host underflow rule (WP8a row in table A) and has not been compared on compressed geometries before.
+
+## CUDA check of the ROCm-side parameter changes (Oct 26, 2026, `a68f7199`; RTX A4500, AI, machine-tested)
+
+Checklist from the ROCm machine (shared knobs moved into module `scf`, `eeq_solver` merged into `gfnff`), run on CUDA:
+
+| # | check | result |
+|---|---|---|
+| 1 | `make GenerateParams` and `make` with CUDA | exit 0; the only warning of `GenerateParams` is a missing `external/ulysses-main/src` include directory |
+| 2 | `-scf_threshold 1e-9` is read by the CUDA loop | yes: GFN2 13 -> 20 iterations (urea3-water8, 48 atoms), 13 -> 22 (peo201-chain), GFN1 11 -> 18 both; CPU 11 -> 19 etc. Also read on CUDA: `-scf_damping` (13 -> 19 at 0.1), `-scf_mode plain/diis`, `-diis_subspace`. **Not read: flat `-diis_start N` with `-sp`/`-opt`**: the command module `opt` owns its own `diis_start` (geometry DIIS), the flat name stays there by the routing rule and the `scf` value stays -1. `-scf.diis_start` and `-xtb.diis_start` work (23 against 13 iterations). CPU behaves the same. Open: the name collides, a decision is needed (rename the SCF one, or route by context) |
+| 3 | `-scf_max_iterations 3` ends with an error on the CUDA loop | yes, GFN1 and GFN2: no energy, exit 1, `SCF NOT converged after 4 iterations` (limit 3: the known count off by one, TODO); with `-scf_allow_unconverged true` exit 0 and an energy. CPU identical |
+| 4 | EEQ spellings with `-gpu cuda` | `-eeq_solver.solve_method`, `-gfnff.solve`, `-gfnff.solve_method` and flat `-solve_method` all run the named solver on the device (peo201-chain MD, `cholesky` and `ldlt` verified in the verbosity-1 path line); unknown name = error with the valid list. **`-eeq_solver.skip_phase2` was not read by the GPU path** (confirmed): the wrapper read the gfnff scope only. Fixed in `gfnff_gpu_method_impl.h` (`eeq_value()`, also `allow_unconverged_charges`), test `cli_gfnff_10_gpu_eeq_scope_flags` (negative control with the old plugin fails two assertions). The wrapper is shared, so the fix applies to ROCm as well (not run there) |
+| 5 | help texts against CUDA behaviour | read in the code: `setFp32Threshold(1.0e-5)` without an explicit value and `setMixedPrecision(!fast_fp64)` (`xtb_gpu_method.cpp`); `deviceHasFastFp64()` decides by compute capability (6.0, 7.0, 8.0, 9.x, 10.x are full rate). RTX A4500 (8.6, not full rate): mixed precision on by default, `-scf_mixed_precision false` 4.7 -> 15.0 s on peo201-chain GFN2, `-scf_fp32_threshold 1e-3` 9.2 s, `1e-7` 5.6 s with 18 iterations, all with the same energy. **Not checked on a card with full-rate FP64** (none here) |
+
+## Resolution of the `devel/methods` merge that touches this
+
+Duplicate implementations of the same function came from the two branches: `stagedHBondUpload` (this branch kept; the
+`devel/methods` version computes the offsets serially) and the open-shell gradient occupations in
+`calculateGradientGpu` (`devel/methods` kept; same weights `eps_eff = f eps / 2`). Both were merged without a CUDA
+compile; they need a CUDA build and the CUDA tests before the result is trusted.
+
+CUDA check of that merge (Oct 25, 2026, RTX A4500 x 4, `fix/cuda-parity-gaps` on `devel/methods`, AI, machine-tested): `make` in
+`release/` exit 0; `ctest -R "cuda|gpu"` 206 of 206; open-shell gradient (the `calculateGradientGpu` occupations) GPU against CPU on
+water dimer cation, acetic acid dimer cation and triplet, caffeine cation, gfn1 and gfn2 (8 cases, n = 1 each): max |dg| 1.1e-5 Eh/A,
+|dE| <= 1.1e-10 Eh. The device HB upload (`stagedHBondUpload`) is exercised by every GFN-FF GPU test and MD above; no run saw a difference
+to the CPU method. Broader open-shell check (Oct 25, 2026): every 6th of the 320 GMTKN55 structures with UHF > 0 (54: 46 doublets, 8 triplets, 12 subsets), gfn1 and gfn2, GPU against CPU (`-threads 4`), energy and gradient: max |dE| 2.7e-11 Eh, max |dg| 2.8e-6 Eh/A (median 4e-7), no failed run, n = 1 per structure and method; charged and heavy-element open shells beyond that sample not run. Not run: the full 524-test `ctest`, MOR41/GMTKN55 regression sets on the merged binary (95 MOR41 structures were run
+for the factor probe only, without comparing energies).
+

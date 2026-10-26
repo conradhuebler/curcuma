@@ -78,6 +78,19 @@ public:
      * @param min_atoms       use the split only from this many atoms on
      */
     void setSplitDevices(const std::vector<int>& helper_devices, int min_atoms);
+    /**
+     * @brief Mixed precision for the matvec of the split projected PCG (Claude Generated, Oct 2026).
+     *
+     * Besides the FP64 column blocks every device keeps an FP32 copy; the PCG iterations multiply with the FP32
+     * copy and each round of iterations stops at rho times the residual it started from. Then the true residual
+     * b - A q is formed with the FP64 matvec and the Krylov space restarts from it (defect correction), until the
+     * FP64 residual meets the tolerance. The tolerance is the same as in the pure FP64 solve; only the cost of the
+     * iterations changes (half the matrix traffic). Call before the first solve.
+     *
+     * @param on  false = FP64 matvec only
+     * @param rho round reduction, e.g. 1e-5 (1e-3 and larger need more rounds; below ~1e-7 the FP32 error limits it)
+     */
+    void setSplitMixedPrecision(bool on, double rho = 1e-5);
     /// "" when off, else a one-line status (devices, columns, solves) or why it is not used.
     std::string splitStatus() const;
 

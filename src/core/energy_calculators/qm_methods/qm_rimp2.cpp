@@ -362,7 +362,7 @@ bool QMEngine::computeRIMP2(const qmint::MP2Options& opt, qmint::MP2Result& res)
         && CurcumaLogger::get_verbosity() >= 1)
         CurcumaLogger::warn(fmt::format("RI-MP2: unknown -qm.gpu_mp2 '{}' (use auto|on|off); using auto", mode));
     if (gpuRequested() && mode != "off" && mode != "false") {
-        const std::string backend = (m_gpu == "auto") ? gpu_plugin::firstAvailable() : m_gpu;
+        const std::string backend = m_gpu;
         if (backend == "none" || !gpu_plugin::available(backend)) {
             curcuma::reportGpuFallback("qm_ri_mp2", "no GPU plugin for -gpu " + m_gpu);
         } else {

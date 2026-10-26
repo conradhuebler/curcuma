@@ -3170,7 +3170,7 @@ bool QMEngine::ensureRI() const
         const bool ri_off = m_gpu_ri == "off" || m_gpu_ri == "false";
         std::string fit_backend;
         if (m_ri_mode == "jk" && !off && !ri_off && !m_gpu_ri_fit_failed && gpuRequested()) {
-            fit_backend = (m_gpu == "auto") ? gpu_plugin::firstAvailable() : m_gpu;
+            fit_backend = m_gpu;
             if (fit_backend == "none" || !gpu_plugin::available(fit_backend)) {
                 curcuma::reportGpuFallback("qm_ri_fit", "no GPU plugin for -gpu " + m_gpu);
                 fit_backend.clear();
@@ -3216,7 +3216,7 @@ bool QMEngine::ensureRI() const
     m_ri_fp32_stall = 0;
     m_ri_fp32_builds = 0;
     if ((m_ri->batched() || m_ri->fp32()) && gpuRequested() && m_gpu_ri != "off" && m_gpu_ri != "false" && !m_gpu_ri_failed) {
-        const std::string backend = (m_gpu == "auto") ? gpu_plugin::firstAvailable() : m_gpu;
+        const std::string backend = m_gpu;
         if (backend == "none" || !gpu_plugin::available(backend))
             curcuma::reportGpuFallback("qm_ri", "no GPU plugin for -gpu " + m_gpu);
         else
@@ -3319,7 +3319,7 @@ bool QMEngine::gpuRIBuild(const Matrix& P, Matrix& J, Matrix* K, const Eigen::Ma
         return false;
     };
     if (!m_gpu_ri_dev) {
-        const std::string backend = (m_gpu == "auto") ? gpu_plugin::firstAvailable() : m_gpu;
+        const std::string backend = m_gpu;
         if (backend == "none" || !gpu_plugin::available(backend)) return fail("no GPU plugin for -gpu " + m_gpu);
         std::string why;
         const auto t0 = std::chrono::steady_clock::now();

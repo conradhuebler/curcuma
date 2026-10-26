@@ -504,11 +504,4 @@ const std::vector<std::string>& knownBackends()
     return backends;
 }
 
-std::string firstAvailable()
-{
-    for (const auto& b : knownBackends())
-        if (available(b)) return b;
-    return "none";
-}
-
 } // namespace gpu_plugin

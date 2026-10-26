@@ -32,7 +32,7 @@ independently).
 
 ```
 ./curcuma -sp mol.xyz -method gfn2 -gpu rocm    # explicit ROCm
-./curcuma -sp mol.xyz -method gfn1 -gpu auto    # GPU if a backend is compiled
+./curcuma -sp mol.xyz -method gfn1 -gpu rocm    # GPU
 ./curcuma -sp mol.xyz -method gfn2              # CPU (default)
 ```
 

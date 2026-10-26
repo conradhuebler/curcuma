@@ -842,7 +842,7 @@ int QMEngine::runSCFDevice(int n_occ, bool direct, bool use_diis, double damping
     const auto t_setup0 = std::chrono::steady_clock::now();
     if (!m_gpu_scf_state || m_gpu_scf_state->n() != n) {
         m_gpu_scf_state.reset();
-        const std::string backend = (m_gpu == "auto") ? gpu_plugin::firstAvailable() : m_gpu;
+        const std::string backend = m_gpu;
         std::string why;
         m_gpu_scf_state = gpu_plugin::createQmScf(backend, n, m_gpu_device, why);
         if (!m_gpu_scf_state) return fail("state creation (" + why + ")");
@@ -1305,7 +1305,7 @@ bool QMEngine::ensureGpuJK() const
 {
     if (!gpuRequested()) return false;
     if (m_gpu_jk) return true;
-    const std::string backend = (m_gpu == "auto") ? gpu_plugin::firstAvailable() : m_gpu;
+    const std::string backend = m_gpu;
     if (backend == "none" || !gpu_plugin::available(backend)) {
         m_gpu_failed = true;
         curcuma::reportGpuFallback("qm_jk", "no GPU plugin for -gpu " + m_gpu);
@@ -1450,7 +1450,7 @@ bool QMEngine::ensureGpuDirect() const
 {
     if (m_gpu_djk) return true;
     if (!gpuDirectAllowed()) return false;
-    const std::string backend = (m_gpu == "auto") ? gpu_plugin::firstAvailable() : m_gpu;
+    const std::string backend = m_gpu;
     if (backend == "none" || !gpu_plugin::available(backend)) {
         m_gpu_direct_failed = true;
         curcuma::reportGpuFallback("qm_direct", "no GPU plugin for -gpu " + m_gpu);
@@ -1523,7 +1523,7 @@ void QMEngine::checkGpuDirectJK(const Matrix& P, const Matrix& J, const Matrix& 
         "dJ_cpu_direct={:.3e} dK_cpu_direct={:.3e} cpu_direct_ms={:.1f}",
         J.rows(), dev_q, cpu_q, J.cwiseAbs().maxCoeff(), K.cwiseAbs().maxCoeff(), maxdiff(J, Jc), maxdiff(K, Kc), cpu_ms);
     // (b) stored device tensor
-    const std::string backend = (m_gpu == "auto") ? gpu_plugin::firstAvailable() : m_gpu;
+    const std::string backend = m_gpu;
     qmint::EriGpuTables tables;
     std::string why;
     std::unique_ptr<qmint::QMGpuJK> stored;

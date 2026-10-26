@@ -62,8 +62,8 @@ atoms left on the scalar seed and the memory of M; with segmentation also the nu
 
 ## When it is ignored (one warning, scalar seed)
 
-GFN1 on any GPU path (GFN1 has no resident device loop; CPU loop only); GPU SCF paths other than the fully device-resident CUDA loop (host-driven device loops: ROCm, Vulkan,
-CUDA without the resident loop); a multi-GPU SCF split (eigensolver or density over several devices at this basis
+GFN1 on GPU paths other than the CUDA and ROCm resident loops; GPU SCF paths other than the fully device-resident CUDA and ROCm loops (host-driven device loops: Vulkan,
+CUDA without the resident loop, ROCm with `-xtb.rocm_resident_loop false` or `-xtb.rocm_resident_precond false`); a multi-GPU SCF split (eigensolver or density over several devices at this basis
 size); `-large_system_mode` other than `none`; `-scf_mode` other than `broyden`; total
 charge != 0; open shell or odd electron count; no fragment qualifies for a block. Per fragment, single
 atoms, fragments with an odd number of valence electrons and fragments with |sum of EEQ charges| > 0.5 e
@@ -141,6 +141,8 @@ none and frag):
   (-1037.75117514 Eh), later energies differ by up to 7e-7 Eh; total 4.45-4.65 s vs 3.98-4.08 s.
 - Component test `sqm_cuda_broyden`: device Broyden with M vs host `BroydenMixer` with the step hook, with guard
   variants reset/keep/best, agree to 3e-15.
+- ROCm (Oct 24, 2026; AI-generated, machine-tested on one gfx1200): the resident GFN1 and GFN2 loop applies the same M and guard (`-xtb.rocm_resident_precond`, default true; indices in the host `packSCC` order); iterations equal to the CPU loop in 15 of 16 test pairs (PR07 GFN2: 8 against 10), guard hits at the same iteration; numbers in [ROCM_RESIDENT_LOOP_WP.md](ROCM_RESIDENT_LOOP_WP.md) (WP5).
+- CUDA GFN1 (Oct 25, 2026; AI-generated, machine-tested on one RTX A4500): the resident GFN1 loop takes M and the guard like GFN2 (`supportsResidentPreconditionerGfn1` in `xtb_gpu_method.cpp`; the device Broyden of the GFN1 loop has dimension nsh, M is layout-neutral). Closed-shell neutral clusters, `-gpu cuda -gpu_devices 0`, energies equal to the run without the switch and to the CPU run at 8 digits in 5 of 5 systems; SCF iterations plain / frag on the GPU: urea3-water8 (48 atoms) 11 / 8, water8 6 / 4, acetic acid dimer 12 / 7, urea-water 197 atoms 14 / 10, peo201-water500 (2910 atoms) 11 / 11 (CPU frag 7, 3, 6, 8, 10). Test `cli_sqm_13` checks GFN1 (device M, energy, 8 < 11 iterations). Not run: GFN1 with the guard firing, systems with charged fragments, multi-GPU SCF split.
 
 ## Tested and rejected (Oct 2026, all n=1)
 
@@ -278,7 +280,7 @@ Hessian, ConfSearch) of the same molecule, not for single points; it is not the 
   off only in a long MD or Hessian run. Measured once (n=1, `-threads 8`, PEO 212 atoms as ONE fragment, `-scf_precond_max_fragment_atoms 300`):
   M built in 129.5 s (one fragment is built serially), SCF 12 -> 4 iterations (164 -> 55 ms), i.e. break-even after about 1200 SCFs. The
   block of a single-fragment system is the exact Jacobian of the whole system. The iteration gain for ordinary fragments was measured up to ~30 atoms.
-- Not implemented: GFN1 on the GPU; ROCm, Vulkan and the host-driven CUDA loop; multi-GPU SCF split; open shells; charged systems and ionic fragments (NaCl needs
+- Not implemented: GFN1 on CUDA; Vulkan and the host-driven CUDA and ROCm loops; multi-GPU SCF split; open shells; charged systems and ionic fragments (NaCl needs
   overlapping neighbourhoods of about R = 5 A for its soft dipole mode); overlapping Schwarz blocks between molecules (segmentation
   overlaps only inside one molecule).
 - The guard default is a rule from the prototype test set (24 scalar SCFs); on the unrelaxed 599-atom

@@ -274,6 +274,7 @@ Matrix XTB::solveZVector(const Matrix& rhs_ov) const
  * ------------------------------------------------------------------ */
 void XTB::computeMullikenChargeResponse(const Vector& dEdq, Matrix& grad_out) const
 {
+    ensureHostIntegrals(__func__);   // Claude Generated (Oct 2026): host copies of S/H0/L/gamma are lazy
     using namespace curcuma::xtb::gfn1_params;
     using namespace curcuma::xtb::gfn2_params;
 
@@ -720,6 +721,7 @@ Potential XTB::scfPotentialAt(const Vector& x)
  */
 bool XTB::computeScfJacobianResponse(const Vector& x_star, PrecondMatrix& J, std::string& err)
 {
+    ensureHostIntegrals(__func__);   // Claude Generated (Oct 2026): host copies of S/H0/L/gamma are lazy
     const int nao = m_basis.nao;
     const int nsh = m_basis.nsh;
     const int nat = m_atomcount;

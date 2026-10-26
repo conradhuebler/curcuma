@@ -126,8 +126,17 @@ QMEngine::QMEngine(QMFunctional functional, const json& config)
     // QMDriver's default of 4 threads whatever -qm.threads said (Sep 2026).
     if (config.contains("threads") && config["threads"].is_number())
         m_threads = std::max(1, static_cast<int>(std::lround(config["threads"].get<double>())));
-    if (config.contains("gpu") && config["gpu"].is_string())
+    if (config.contains("gpu") && config["gpu"].is_string()) {
         m_gpu = config["gpu"].get<std::string>();
+        std::transform(m_gpu.begin(), m_gpu.end(), m_gpu.begin(), ::tolower);
+        // -gpu auto was removed on master (Oct 26, 2026, operator decision): the backend is always named.
+        if (m_gpu == "auto") {
+            CurcumaLogger::warn("QM: -gpu auto was removed; name the backend (-gpu cuda|rocm|vulkan) or omit -gpu "
+                                "for the CPU. Using CPU.");
+            curcuma::reportGpuFallback("QM: -gpu auto was removed, calculation on the CPU", m_gpu);
+            m_gpu = "none";
+        }
+    }
     if (config.contains("gpu_eri") && config["gpu_eri"].is_boolean())
         m_gpu_eri = config["gpu_eri"].get<bool>();
     if (config.contains("gpu_direct")) {
@@ -637,7 +646,7 @@ std::string QMEngine::gpuGradBackend(const std::string& mode, const char* option
             CurcumaLogger::warn(fmt::format("QM: unknown -qm.{} '{}' (use auto|on|off); using auto", option, mode));
         }
     }
-    const std::string backend = (m_gpu == "auto") ? gpu_plugin::firstAvailable() : m_gpu;
+    const std::string backend = m_gpu;
     if (backend == "none" || !gpu_plugin::available(backend)) {
         failed = true;
         curcuma::reportGpuFallback(tag, "no GPU plugin for -gpu " + m_gpu);

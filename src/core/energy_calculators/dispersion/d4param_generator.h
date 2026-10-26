@@ -63,6 +63,9 @@ public:
     ~D4ParameterGenerator() = default;
 
     // Main parameter generation interface
+    /// Claude Generated (Oct 2026): use this covalent CN (one atom each) in the next GenerateParameters() instead of
+    /// the host O(N^2) loop; consumed once. Only honoured with setD4CovalentCN(true).
+    void setPrecomputedCovalentCN(std::vector<double> cn) { m_precomputed_cn = std::move(cn); }
     void GenerateParameters(const std::vector<int>& atoms, const Matrix& geometry_bohr);
     json getParameters() const { return m_parameters; }
 
@@ -340,6 +343,7 @@ private:
 
     // Claude Generated (2026): GFN2 uses the dftd4 EN-weighted covalent CN for
     // the C6 interpolation (see setD4CovalentCN / d4_ncoord.h).
+    std::vector<double> m_precomputed_cn;   ///< one-shot CN from the device (setPrecomputedCovalentCN)
     bool m_use_d4_covalent_cn = false;
 
     // Claude Generated: build the JSON d4_dispersion_pairs / ATM-triple lists.
