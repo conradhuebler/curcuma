@@ -11,7 +11,7 @@
  *
  * Usage:
  *   ./curcuma -sp mol.xyz -method gfnff -gpu rocm    # Explicit GPU
- *   ./curcuma -sp mol.xyz -method gfnff -gpu auto   # GPU if available
+ *   ./curcuma -sp mol.xyz -method gfnff -gpu rocm   # GPU
  *   ./curcuma -sp mol.xyz -method gfnff             # CPU (default)
  */
 

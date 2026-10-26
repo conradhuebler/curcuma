@@ -686,8 +686,7 @@ json CLI2Json(int argc, char** argv)
     // both at top level (controller[param]) and module level (controller[module][param])
     // ENHANCED: Added "method" to support global energy method specification
     // Claude Generated (March 2026): Added "gpu" for GPU acceleration control.
-    //   -gpu <backend>: none (default, CPU) | cuda | rocm | vulkan | auto.
-    //   "auto" picks the first compiled GPU backend (cuda > rocm > vulkan), else CPU.
+    //   -gpu <backend>: none (default, CPU) | cuda | rocm | vulkan. ("auto" was removed Oct 26, 2026: warning, CPU.)
     //   Applies to gfn1/gfn2 (USE_*_XTB builds) and gfnff (USE_* builds); an explicit
     //   backend not compiled in warns and falls back to CPU.
     // Claude Generated (Jul 2026): Added "charge","spin" — molecular charge/spin must reach

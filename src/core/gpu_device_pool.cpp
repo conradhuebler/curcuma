@@ -79,8 +79,6 @@ void GpuDevicePool::configure(const nlohmann::json& controller)
     std::transform(gpu.begin(), gpu.end(), gpu.begin(), ::tolower);
     if (gpu.empty() || gpu == "none" || gpu == "cpu")
         return;
-    if (gpu == "auto")
-        gpu = gpu_plugin::firstAvailable();
     if (gpu == "none" || !gpu_plugin::available(gpu))
         return;   // the method factory warns about the missing plugin
 

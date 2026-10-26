@@ -10,7 +10,7 @@ CLI flags are global keys (`-gpu_device 2`) unless written with a scope (`-gfnff
 
 | Option | Default | Effect |
 |---|---|---|
-| `-gpu cuda\|rocm\|vulkan\|auto\|none` | `none` | Backend. `auto` = first available plugin. |
+| `-gpu cuda\|rocm\|vulkan\|cpu` | `none` (CPU) | Backend. `auto` was removed Oct 26, 2026 (warning, counted fallback, CPU). |
 | `-gpu_device N` | -1 (runtime default, device 0) | Pins a single calculation to device N. Indices are after `CUDA_VISIBLE_DEVICES` / `ROCR_VISIBLE_DEVICES` (SLURM sets these). Invalid index: error + CPU fallback. |
 | `-gpu_devices 0,2` | all visible | Device pool for batch workers; since Sep 28, 2026 also the device set of a single calculation (it runs on the first listed device and splits only over the listed ones). |
 | `-gpu_workers_per_device N` | 1 | Batch workers sharing one device. |
@@ -230,7 +230,6 @@ Measurements and derivations: [GFNFF-PERFORMANCE-ROADMAP.md](GFNFF-PERFORMANCE-R
 
 | Option | Default | Effect |
 |---|---|---|
-| `-gfnff.gpu_auto_min_atoms N` | 900 | `-gpu auto` on ROCm uses the CPU for native GFN-FF systems with fewer than N atoms (set when the molecule is known, `EnergyCalculator::setMolecule`). Break-even measured on an RX 9060 XT against 10 CPU threads, MD step GPU/CPU: 24 atoms 1.08/0.08 ms, 114 atoms 2.05/0.45, 300 atoms 2.01/1.17, 600 atoms 2.69/1.77, 1002 atoms 3.39/4.14, 1410 atoms 6.76/10.8 (water subsets of peo201-water500 for 300-1002; single machine, CPU with 10 threads). An explicit `-gpu rocm` is never overridden; CUDA and the xTB methods are not affected (not measured). 0 = `auto` always takes the GPU. |
 | `-gfnff.gpu_cn_pair_skin_bohr S` | 1.0 | Verlet skin of the CN pair list: rebuilt on the device only when an atom moved further than the skin criterion, not every MD step; negative = old behaviour. Applies to CUDA and, since Oct 13, 2026, ROCm (CN pair kernels 12.1 -> 0.95 ms per step at 7320 atoms; 4 rebuilds in 51 steps). CUDA roadmap: 94 rebuilds in 1000 steps instead of 397 in 400, `ff_total` median 24.0 -> 19.3 ms. |
 | `-gfnff.gpu_eeq_overlap true\|false` | true | The device projected-PCG solver waits only for its inputs and runs on a high-priority stream parallel to dc6dcn and the charge-independent kernels. |
 | `-gfnff.gpu_dispersion_overlap true\|false` | true | The D4 dispersion gradient starts right after dc6dcn, parallel to the EEQ solve (changes only the summation order of atomic adds). Roadmap, both overlaps together: wall clock 34.1 -> 30.9 ms/step (n=3); without the solver priority no gain. |
@@ -406,11 +405,11 @@ for machines where the distributed eigensolve is the point of the build. Default
 
 - `CMAKE_CUDA_ARCHITECTURES` defaults to `75;80;86;89;90;100;120` with CUDA >= 13 (Turing to Blackwell, incl. H100/H200 sm_90). For fast local builds pass only your card, e.g. `-DCMAKE_CUDA_ARCHITECTURES=86`. A binary without the card's architecture falls back to JIT or fails the kernels.
 
-### CUDA break-even for GFN-FF, `-gpu auto` (measured Oct 17, 2026, AI-run)
+### CUDA break-even for GFN-FF (measured Oct 17, 2026, AI-run)
 
 RTX A4500 against 16 CPU threads (36 cores visible), `-md`, `-method gfnff`, 1 run per cell, ms per step from the
-difference of two runs of different length (start-up cancels). `-gpu auto` on CUDA has no atom threshold
-(`gpu_auto_min_atoms` acts on ROCm only).
+difference of two runs of different length (start-up cancels). `-gpu auto` and its ROCm atom threshold (`gfnff.gpu_auto_min_atoms`, 900) were
+removed on Oct 26, 2026; the numbers below stay as the break-even data (CUDA break-even about 66 atoms, ROCm about 900).
 
 | Atoms | CPU ms/step | GPU ms/step | GPU/CPU |
 |---|---|---|---|

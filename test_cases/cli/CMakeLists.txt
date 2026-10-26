@@ -147,16 +147,16 @@ if(USE_ROCM)
     add_cli_test(gfnff_gpu 05_rocm_charged_fragments)
     set_tests_properties(cli_gfnff_gpu_05_rocm_charged_fragments
         PROPERTIES TIMEOUT 120 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;rocm;cli")
-    # Claude Generated (Oct 2026): -gpu auto uses the CPU for a 24-atom GFN-FF system (gfnff.gpu_auto_min_atoms 900).
-    # Without a ROCm plugin or device the note cannot appear; the alternative message covers that case.
-    add_test(NAME cli_gfnff_gpu_03_auto_small_system_cpu
-             COMMAND $<TARGET_FILE:curcuma> -sp ${CMAKE_SOURCE_DIR}/test_cases/structures/medium/caffeine.xyz
-                     -method gfnff -gpu auto -no_bmt -verbosity 2
-             WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
-    set_tests_properties(cli_gfnff_gpu_03_auto_small_system_cpu
-        PROPERTIES TIMEOUT 120 LABELS "gfnff_gpu;gpu;rocm;cli"
-                   PASS_REGULAR_EXPRESSION "-gpu auto uses the CPU for 24 atoms|found no GPU plugin")
 endif()
+
+# Claude Generated (Oct 26, 2026): -gpu auto was removed (operator decision); it warns, counts a GPU fallback and runs on the CPU.
+# Needs no GPU, so it is registered in every build.
+add_test(NAME cli_gpu_auto_removed
+         COMMAND $<TARGET_FILE:curcuma> -sp ${CMAKE_SOURCE_DIR}/test_cases/structures/medium/caffeine.xyz
+                 -method gfnff -gpu auto -no_bmt -verbosity 1
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(cli_gpu_auto_removed PROPERTIES TIMEOUT 120 LABELS "gpu;cli"
+                     PASS_REGULAR_EXPRESSION "-gpu auto was removed")
 
 # =============================================================================
 # Vulkan native-xTB nuclear gradient (V-AP1) — only when USE_VULKAN=ON.
