@@ -207,4 +207,5 @@ Offen, Aufrufer vor dem Löschen erneut suchen:
 | Cholesky-Faktor-Cache in der MD nicht exakt | Cache standardmäßig aus (`eeq_refactor_eps_bohr` 0), Betreiber-Prüfung offen (Abschnitt 4) |
 - **Generierte Struktur-Tests ausbauen** (2026-10-25, [docs/STRUCTURE_TESTS.md](docs/STRUCTURE_TESTS.md)): (a) Ladung/Spin fuer 57 von 80 Strukturen im Manifest bestaetigen (Vorschlagsliste `assumed_neutral_closed_shell` in `struct_test_policy.json`); (b) Groessenkonsistenz bei Clustern, Strukturen ueber 12 Atome, geladene/offene Systeme; (c) alte Ausgabetext-Tests der `cli_*`-Gruppe einordnen und ersetzen.
 - **GFN-FF Inversionsterm: Knick bei C3v-Ammoniak** (Known Issue #42): Ursache und Referenzverhalten (pprcht, xtb) offen; Test `structinv_ammonia_ideal_c3v_gfnff` traegt eine Ausnahme.
+- **`-diis_start` doppelt belegt** (2026-10-26, [docs/GPU_PARITY_CUDA_ROCM.md](docs/GPU_PARITY_CUDA_ROCM.md), CUDA-Pruefung Punkt 2): das flache `-diis_start N` gehoert bei `-sp`/`-opt` dem Optimierer (Modul `opt`) und erreicht die SCF nicht; `-scf.diis_start` und `-xtb.diis_start` wirken. Entscheidung: SCF-Name aendern (zum Beispiel `scf_diis_start`) oder nach Kontext routen.
 

@@ -84,6 +84,18 @@ test infrastructure (`test_cases/CMakeLists.txt`, `scripts/`, `test_cases/struct
    takes ROCm at any size (CPU wins below about 1000 atoms).
 6. Compressed geometries (D4 weight underflow, found on the host and on CUDA): `ctest -R structcomp` runs the finite-difference gradient on the CPU and, with `USE_ROCM`, CPU against `-gpu rocm` on the acetic acid dimer and 13 more structures scaled to 0.30 (`structcomp_*`, `structcomp_rocm_*`). On CUDA the old plugin failed this with 0.435 Eh/A, the current one passes at 7e-11. The ROCm D4 weight code was written to follow the host underflow rule (WP8a row in table A) and has not been compared on compressed geometries before.
 
+## CUDA check of the ROCm-side parameter changes (Oct 26, 2026, `a68f7199`; RTX A4500, AI, machine-tested)
+
+Checklist from the ROCm machine (shared knobs moved into module `scf`, `eeq_solver` merged into `gfnff`), run on CUDA:
+
+| # | check | result |
+|---|---|---|
+| 1 | `make GenerateParams` and `make` with CUDA | exit 0; the only warning of `GenerateParams` is a missing `external/ulysses-main/src` include directory |
+| 2 | `-scf_threshold 1e-9` is read by the CUDA loop | yes: GFN2 13 -> 20 iterations (urea3-water8, 48 atoms), 13 -> 22 (peo201-chain), GFN1 11 -> 18 both; CPU 11 -> 19 etc. Also read on CUDA: `-scf_damping` (13 -> 19 at 0.1), `-scf_mode plain/diis`, `-diis_subspace`. **Not read: flat `-diis_start N` with `-sp`/`-opt`**: the command module `opt` owns its own `diis_start` (geometry DIIS), the flat name stays there by the routing rule and the `scf` value stays -1. `-scf.diis_start` and `-xtb.diis_start` work (23 against 13 iterations). CPU behaves the same. Open: the name collides, a decision is needed (rename the SCF one, or route by context) |
+| 3 | `-scf_max_iterations 3` ends with an error on the CUDA loop | yes, GFN1 and GFN2: no energy, exit 1, `SCF NOT converged after 4 iterations` (limit 3: the known count off by one, TODO); with `-scf_allow_unconverged true` exit 0 and an energy. CPU identical |
+| 4 | EEQ spellings with `-gpu cuda` | `-eeq_solver.solve_method`, `-gfnff.solve`, `-gfnff.solve_method` and flat `-solve_method` all run the named solver on the device (peo201-chain MD, `cholesky` and `ldlt` verified in the verbosity-1 path line); unknown name = error with the valid list. **`-eeq_solver.skip_phase2` was not read by the GPU path** (confirmed): the wrapper read the gfnff scope only. Fixed in `gfnff_gpu_method_impl.h` (`eeq_value()`, also `allow_unconverged_charges`), test `cli_gfnff_10_gpu_eeq_scope_flags` (negative control with the old plugin fails two assertions). The wrapper is shared, so the fix applies to ROCm as well (not run there) |
+| 5 | help texts against CUDA behaviour | read in the code: `setFp32Threshold(1.0e-5)` without an explicit value and `setMixedPrecision(!fast_fp64)` (`xtb_gpu_method.cpp`); `deviceHasFastFp64()` decides by compute capability (6.0, 7.0, 8.0, 9.x, 10.x are full rate). RTX A4500 (8.6, not full rate): mixed precision on by default, `-scf_mixed_precision false` 4.7 -> 15.0 s on peo201-chain GFN2, `-scf_fp32_threshold 1e-3` 9.2 s, `1e-7` 5.6 s with 18 iterations, all with the same energy. **Not checked on a card with full-rate FP64** (none here) |
+
 ## Resolution of the `devel/methods` merge that touches this
 
 Duplicate implementations of the same function came from the two branches: `stagedHBondUpload` (this branch kept; the

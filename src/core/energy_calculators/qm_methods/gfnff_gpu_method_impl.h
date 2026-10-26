@@ -448,8 +448,8 @@ GFNFFGpuMethodImpl<Backend>::GFNFFGpuMethodImpl(const std::string& method_name,
     // Claude Generated (April 2026): Read accuracy-related flags for GPU fallback behavior
     // config.value("gfnff", config) falls back to config itself so top-level CLI params work.
     json gfnff_cfg = config.value("gfnff", config);
-    m_allow_unconverged_charges = gfnff_cfg.value("allow_unconverged_charges", false);
-    m_skip_phase2 = gfnff_cfg.value("skip_phase2", false);
+    m_allow_unconverged_charges = gfnff_cfg.value("allow_unconverged_charges", false);   // re-read below with the eeq_solver scope first
+    m_skip_phase2 = gfnff_cfg.value("skip_phase2", false);                               // re-read below with the eeq_solver scope first
     // eeq_rmsd_threshold: per-atom RMSD (Bohr) below which the Cholesky factor is reused.
     // 0.0 (default) = always refactorize, matches reference CPU behavior exactly.
     // Suggested MD value: 0.05–0.10 Bohr (saves ~12 ms/step when geometry barely changes).
@@ -484,6 +484,11 @@ GFNFFGpuMethodImpl<Backend>::GFNFFGpuMethodImpl(const std::string& method_name,
         }
         return gfnff_cfg.value(key, dflt);
     };
+    // Claude Generated (Oct 26, 2026): -eeq_solver.skip_phase2 and -eeq_solver.allow_unconverged_charges steered the CPU
+    // EEQSolver but not this wrapper, which read the gfnff scope only (GPU MD of peo201-chain: -eeq_solver.skip_phase2 true
+    // changed the first CPU step and left the device EEQ on, -gfnff.skip_phase2 true bypassed it).
+    m_allow_unconverged_charges = eeq_value("allow_unconverged_charges", false);
+    m_skip_phase2 = eeq_value("skip_phase2", false);
     // Claude Generated (Sep 28, 2026, docs/MULTI_GPU_GAPS.md X-1): the solver keys below are
     // eeq_solver PARAMs since the parameter parser registers multi-line PARAMs, so a flat flag
     // (-pcg_tolerance 1e-12) is routed to the eeq_solver scope. Read that scope first, like the
