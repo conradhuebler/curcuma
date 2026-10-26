@@ -770,7 +770,6 @@ private:
     // Claude Generated (Jul 2026): RMSD-MTD screen accounting (Kabsch fits done vs skipped over the run).
     long long m_bias_hills_evaluated = 0, m_bias_hills_screened = 0;
 
-    std::vector<std::vector<double>> m_atom_temp;
     std::vector<double> m_zeta; // Thermostatische Variablen
     std::vector<double> m_xi; // Zeitderivate von zeta
     std::vector<double> m_Q; // Trägheiten der Thermostatkette

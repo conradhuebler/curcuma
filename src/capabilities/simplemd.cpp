@@ -785,7 +785,6 @@ bool SimpleMD::Initialise()
 
     //m_gradient = std::vector<double>(3 * m_natoms, 0);
     m_virial = std::vector<double>(3 * m_natoms, 0);
-    m_atom_temp = std::vector<std::vector<double>>(m_natoms);
     if(m_opt)
     {
         // Claude Generated (Apr 2026): Use unified optimizer instead of legacy CurcumaOpt
@@ -5060,8 +5059,6 @@ void SimpleMD::CSVR()
         m_eigen_velocities.data()[3 * i + 0] *= alpha;
         m_eigen_velocities.data()[3 * i + 1] *= alpha;
         m_eigen_velocities.data()[3 * i + 2] *= alpha;
-
-        m_atom_temp[i].push_back(m_eigen_masses.data()[3 * i] * (m_eigen_velocities.data()[3 * i + 0] * m_eigen_velocities.data()[3 * i + 0] + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1] + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]) / (kb_Eh * m_dof));
     }
     m_seed++;
 }
