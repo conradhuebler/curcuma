@@ -13,7 +13,8 @@
       "benzene",
       "hydrogen-chloride",
       "hydrogen-cyanide"
-    ]
+    ],
+    "status": "accepted by the operator 'for now' on Oct 26, 2026; still not written into the manifest (charge/spin of these ten stay unrecorded there)"
   },
   "families": {
     "invariants": {
