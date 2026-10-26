@@ -248,8 +248,8 @@ benzene HF-3c 110 -> 86, same final energies. **Wall time barely moves** (6.45 -
 42.9 -> 42.3 s on 4 threads): per step the ERI rebuild and the gradient dominate, not the SCF.
 **SCF-DIIS (Sep 2026)**: the QM SCF has its own accelerator (`QMScfAccelerator` in
 `qm_scf.cpp`; the shared `DIISAccelerator` stays as it is for native xTB). Pulay DIIS now
-starts at the second Fock matrix (`-qm.diis_start 1`, was 3), keeps 8 entries
-(`-qm.diis_subspace`), uses the commutator in the orthonormal basis `X^T(FPS-SPF)X`
+starts at the second Fock matrix (`-qm.scf_diis_start 1`, was 3; old spelling `-qm.diis_start`), keeps 8 entries
+(`-qm.scf_diis_subspace`), uses the commutator in the orthonormal basis `X^T(FPS-SPF)X`
 (Pulay 1982) and drops the oldest entries when the B matrix is near-singular. Over 33
 molecule/basis cases (H-Ne, def2-SVP and MINIX): 357 -> 325 SCF iterations at the default
 threshold, 503 -> 413 at 1e-9, every energy unchanged to 8 decimals. `-qm.scf_mode adiis`

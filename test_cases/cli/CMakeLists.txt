@@ -274,6 +274,7 @@ add_cli_test(analysis 02_scattering_options)
 add_cli_test(routing 01_flat_param_routing)
 add_cli_test(routing 02_roundtrip_replay)
 add_cli_test(routing 03_confsearch_param_routing)   # ConfSearch registry migration guard
+add_cli_test(routing 04_qm_scf_routing)             # shared scf / qm flags for native hf, hf-3c (Oct 2026)
 
 # =============================================================================
 # Error Handling Tests (6 scenarios) - Phase 1-2 Implementation

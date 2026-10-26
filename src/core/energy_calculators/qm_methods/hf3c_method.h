@@ -60,7 +60,8 @@ public:
     void setThreadCount(int threads) override { (void)threads; }
     void setParameters(const json& params) override { (void)params; }
     json getParameters() const override { return json{}; }
-    bool hasError() const override { return m_error; }
+    bool hasError() const override { return m_error || m_run_error; }
+    std::string getErrorMessage() const override { return m_run_message; }
 
     json getEnergyDecomposition() const override;
     bool saveToFile(const std::string& filename) const override { (void)filename; return false; }
@@ -72,6 +73,8 @@ private:
     Mol m_molecule;
     bool m_calculation_done = false;
     bool m_error = false;
+    bool m_run_error = false;        ///< last calculateEnergy failed (unconverged SCF, gradient), Oct 27 2026
+    std::string m_run_message;
 
     Matrix m_gradient_bohr;                 ///< total dE/dR, Eh/Bohr
     std::vector<Matrix> m_gradient_parts;   ///< {HF, D3, gCP+SRB}, Eh/Bohr (diagnostics)

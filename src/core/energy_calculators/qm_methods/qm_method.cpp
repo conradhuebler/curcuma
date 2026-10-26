@@ -10,8 +10,11 @@
 
 #include "qm_method.h"
 #include "src/core/curcuma_logger.h"
+#include "src/core/energy_calculators/method_factory.h"
 #include "src/core/parameter_registry.h"
 #include "src/core/units.h"
+
+#include <fmt/format.h>
 
 #include <algorithm>
 
@@ -24,12 +27,32 @@ json QMMethod::engineConfig(const json& config)
     // alone (as this wrapper once did) silently dropped every scoped flag.
     // Order: top level (flat/legacy fallback) < "dft" (the pre-Sep-2026 module
     // name, kept so old command lines and -import_config files still work) < "qm".
+    //
+    // Oct 27 2026 (master's standard for the shared SCF knobs, docs/SCF_MODES.md): the shared module "scf"
+    // (scf_parameters.h; -scf_threshold, -scf.scf_threshold, -scf_max_iterations, ...) sits between "dft" and
+    // "qm", as for gfn1/gfn2 (applyXtbScfConfig: method scope > scf > default). Keys of the qm and dft scopes
+    // are mapped onto their canonical qm names, so the old spellings -qm.diis_start / -qm.diis_subspace keep
+    // working; the top level is not alias-resolved (its diis_start / max_iterations are the optimiser's).
+    auto& reg = ParameterRegistry::getInstance();
+    auto merge_scope = [&](const json& scope) {
+        for (const auto& [key, value] : scope.items()) {
+            const std::string canon = reg.resolveAlias("qm", key);
+            full_config[canon.empty() ? key : canon] = value;
+        }
+    };
     if (!config.empty())
         full_config.merge_patch(config);
     if (config.contains("dft") && config["dft"].is_object())
-        full_config.merge_patch(config["dft"]);
+        merge_scope(config["dft"]);
+    if (config.contains("scf") && config["scf"].is_object()) {
+        json shared = config;  // aliases resolved and "method default" markers dropped (idempotent)
+        MethodFactory::applySharedScfScope(shared, "hf");
+        if (shared.contains("scf") && shared["scf"].is_object())
+            for (const auto& [key, value] : shared["scf"].items())
+                full_config[key] = value;  // the scf names are the qm names (scf_threshold, scf_mode, ...)
+    }
     if (config.contains("qm") && config["qm"].is_object())
-        full_config.merge_patch(config["qm"]);
+        merge_scope(config["qm"]);
     return full_config;
 }
 
@@ -77,6 +100,14 @@ double QMMethod::calculateEnergy(bool gradient)
         // Claude Generated (Oct 2026, WP10): no energy without the fit the user asked for.
         m_has_error = true;
         m_error_message = "density fitting (-qm.ri " + m_engine->riMode() + ") setup failed, see the error above";
+    } else if (m_engine->getFunctional() == QMFunctional::HF && !m_engine->scfConverged()
+               && !m_engine->scfAllowUnconverged()) {
+        // Claude Generated (Oct 27 2026): master's rule for every SCF method (docs/SCF_MODES.md "Failure handling"):
+        // an unconverged SCF is an error, not a result. Before, HF printed an error and returned the energy (exit 0).
+        m_has_error = true;
+        m_error_message = fmt::format("native HF SCF did not converge within {} iterations; "
+                                      "-scf_allow_unconverged true accepts the unconverged energy",
+                                      m_engine->scfMaxIter());
     } else if (gradient && m_engine->gradientFailed()) {
         // Claude Generated (Oct 2026): fail loud instead of handing back a zero gradient
         // (RI gradient not possible, e.g. memory limit for the 3-index densities).

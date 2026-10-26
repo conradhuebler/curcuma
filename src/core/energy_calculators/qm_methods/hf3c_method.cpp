@@ -70,6 +70,8 @@ bool HF3CMethod::updateGeometry(const Matrix& geometry)
 double HF3CMethod::calculateEnergy(bool gradient)
 {
     if (m_error) return 0.0;
+    m_run_error = false;
+    m_run_message.clear();
     const int n = static_cast<int>(m_molecule.m_atoms.size());
 
     // 1) Hartree-Fock in the MINIX basis (prints its own SCF status at verbosity >= 1);
@@ -118,6 +120,16 @@ double HF3CMethod::calculateEnergy(bool gradient)
         CurcumaLogger::energy_abs(m_e_total, "total HF-3c energy");
         if (!m_engine->scfConverged())
             CurcumaLogger::warn("hf-3c: HF SCF did not converge -- the energy is not meaningful");
+    }
+    // Claude Generated (Oct 27 2026): master's rule (docs/SCF_MODES.md "Failure handling"): an unconverged SCF is an
+    // error unless -scf_allow_unconverged true; a gradient of an unconverged SCF is always an error.
+    if (!m_engine->scfConverged() && !m_engine->scfAllowUnconverged()) {
+        m_run_error = true;
+        m_run_message = fmt::format("hf-3c: HF SCF did not converge within {} iterations; "
+                                    "-scf_allow_unconverged true accepts the unconverged energy", m_engine->scfMaxIter());
+    } else if (gradient && m_engine->gradientFailed()) {
+        m_run_error = true;
+        m_run_message = "hf-3c: " + m_engine->gradientError();
     }
     return m_e_total;
 }

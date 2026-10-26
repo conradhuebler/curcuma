@@ -75,9 +75,9 @@ At the new criterion (24 threads, iterations):
 | variant | anthracene | C20H42 |
 |---|---|---|
 | default (atom guess, DIIS 8, start 1, early screening) | 12 | 11 |
-| `-qm.diis_subspace` 6 / 12 / 16 | 12 / 12 / 12 | 11 / 11 / 11 |
+| `-qm.scf_diis_subspace` 6 / 12 / 16 | 12 / 12 / 12 | 11 / 11 / 11 |
 | `-qm.scf_mode adiis` | 12 | 11 |
-| `-qm.diis_start 2` | 12 | 11 |
+| `-qm.scf_diis_start 2` | 12 | 11 |
 | `-qm.scf_guess sad` | 16 | 15 |
 | `-qm.scf_guess h0` | 17 | 30 |
 | `-qm.scf_early_screening 0` | 12 (2.3 s vs 2.0 s) | 11 (9.1 s vs 7.0 s) |

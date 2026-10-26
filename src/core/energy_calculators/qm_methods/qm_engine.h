@@ -156,11 +156,14 @@ BEGIN_PARAMETER_DEFINITION(qm)
     PARAM(ri_fit_radius, Double, 0.0,
           "RI-JK local fitting (an APPROXIMATION with a measured error, docs WP10): 0 = exact global fit (default) | R > 0 = each occupied (Cholesky-localised) orbital fits its exchange densities only with the auxiliary functions on atoms within R Bohr of its centre (robust Dunlap fit, as the LMP2 local fit); J keeps the global fit. Changes energies by the fit-domain error; an RI gradient with R > 0 is an error.",
           "DensityFitting", {})
+    // Oct 27 2026: scf_max_iterations, scf_threshold, scf_mode, scf_diis_start, scf_diis_subspace, scf_damping and
+    // scf_allow_unconverged are also read from the shared module "scf" (scf_parameters.h; -scf_threshold,
+    // -scf.scf_threshold); precedence -qm.<name> > -scf.<name> > the defaults below (QMMethod::engineConfig).
     PARAM(scf_max_iterations, Int, 100,
-          "Maximum number of SCF iterations.",
+          "Maximum number of SCF iterations. Also set by the shared -scf_max_iterations / -scf.scf_max_iterations (aliases max_iterations, SCFmaxiter in the scf scope); -qm.scf_max_iterations wins.",
           "SCF", {})
     PARAM(scf_threshold, Double, 1.0e-4,
-          "SCF density criterion: Frobenius norm of the density change ||P_new - P||_F per iteration. With scf_convergence auto it is one of three conditions that must all hold (a set tight value, e.g. 1e-10, therefore still forces a tight SCF); with scf_convergence density it is the only one. Default until Oct 25 2026: 1e-6 as the only criterion.",
+          "SCF density criterion: Frobenius norm of the density change ||P_new - P||_F per iteration. With scf_convergence auto it is one of three conditions that must all hold (a set tight value, e.g. 1e-10, therefore still forces a tight SCF); with scf_convergence density it is the only one. The shared -scf_threshold / -scf.scf_threshold sets this ||dP||_F guard for native HF (gfn1/gfn2 use the same flag for max|dq|); -qm.scf_threshold wins. Default until Oct 25 2026: 1e-6 as the only criterion.",
           "SCF", {})
     // Claude Generated (Oct 25 2026): ORCA/PySCF-like convergence test (energy change + orbital gradient)
     PARAM(scf_convergence, String, "auto",
@@ -176,13 +179,20 @@ BEGIN_PARAMETER_DEFINITION(qm)
           "scf_convergence auto: the same norm for runs whose result is first order in the orbital error: analytic nuclear gradients (-opt, -md, -gradient, hf-3c gradients) and the correlation methods mp2/ri-mp2/lmp2/ccsd. An energy-only SCF of the same geometry is continued from its density when such a result is requested later.",
           "SCF", {})
     PARAM(scf_mode, String, "diis",
-          "SCF convergence driver: diis (Pulay DIIS, orthonormal-basis commutator) | adiis (ADIIS far from convergence, blended into DIIS; Hu/Yang 2010, Garza/Scuseria 2012) | plain (density damping only).",
+          "SCF convergence driver: diis (Pulay DIIS, orthonormal-basis commutator) | adiis (ADIIS far from convergence, blended into DIIS; Hu/Yang 2010, Garza/Scuseria 2012) | plain (density damping only, scf_damping). Any other name (broyden, level-shift: gfn1/gfn2 only) is an error. Also set by the shared -scf_mode (its 'auto' keeps diis).",
           "SCF", {})
-    PARAM(diis_start, Int, 1,
-          "SCF iteration (0-based) from which DIIS/ADIIS extrapolates; 1 = from the second Fock matrix on.",
+    // Oct 27 2026: renamed from diis_start / diis_subspace (kept as aliases) -- flat -diis_start belongs to the optimiser
+    PARAM(scf_diis_start, Int, 1,
+          "SCF iteration (0-based) from which DIIS/ADIIS extrapolates; 1 = from the second Fock matrix on. Was diis_start (alias); the flat -diis_start belongs to the geometry optimiser, use -scf_diis_start or -qm.scf_diis_start.",
+          "SCF", {"diis_start"})
+    PARAM(scf_diis_subspace, Int, 8,
+          "Number of Fock/error pairs kept for DIIS/ADIIS. Was diis_subspace (alias).",
+          "SCF", {"diis_subspace"})
+    PARAM(scf_damping, Double, 0.5,
+          "scf_mode plain only: fraction of the new density taken per step, P = d P_new + (1 - d) P_old, 0 < d <= 1 (the meaning of the shared -scf_damping). diis/adiis take the new density undamped.",
           "SCF", {})
-    PARAM(diis_subspace, Int, 8,
-          "Number of Fock/error pairs kept for DIIS/ADIIS.",
+    PARAM(scf_allow_unconverged, Bool, false,
+          "Accept an HF/HF-3c SCF that reaches scf_max_iterations without converging (warning + energy of the last density) instead of an error (the shared -scf_allow_unconverged). Analytic gradients and the correlated methods (mp2, ri-mp2, lmp2, ccsd) still need a converged SCF.",
           "SCF", {})
     PARAM(scf_guess, String, "atom",
           "SCF initial guess: sad (superposition of atomic densities from each atom's block of the molecular core Hamiltonian; the default until Oct 2026) | atom (superposition of spherically averaged, fractionally occupied atomic RHF densities, one atomic SCF per element in its own basis) | h0 (bare core Hamiltonian, i.e. zero density).",
@@ -291,6 +301,8 @@ public:
     const Matrix& fock() const { return m_fock; }
     double electronicEnergy() const { return m_e_elec; }
     int scfMaxIter() const { return m_scf_max_iter; }
+    /// -qm.scf_allow_unconverged / -scf_allow_unconverged (Oct 27 2026): an unconverged HF energy is accepted with a warning.
+    bool scfAllowUnconverged() const { return m_scf_allow_unconverged; }
     double scfThreshold() const { return m_scf_threshold; }
     // Energy components {ET, EV, EJ, Ex, E_elec} for the HF run (Hartree).
     std::vector<double> energyComponents() const;
@@ -385,8 +397,10 @@ private:
     Matrix buildWarmStartGuess() const;       // empty matrix if not applicable
     bool m_scf_converged = false;
     int m_scf_iterations = 0;
-    int m_diis_start = 1;                    // iteration from which DIIS extrapolates
-    int m_diis_subspace = 8;                 // DIIS history depth
+    int m_diis_start = 1;                    // iteration from which DIIS extrapolates (-qm.scf_diis_start)
+    int m_diis_subspace = 8;                 // DIIS history depth (-qm.scf_diis_subspace)
+    double m_scf_damping = 0.5;              // plain mode: fraction of the new density per step (-qm.scf_damping)
+    bool m_scf_allow_unconverged = false;    // accept an unconverged SCF with a warning (-qm.scf_allow_unconverged)
     // Integral-direct SCF (Sep 2026): shell-pair tables for recomputing J/K without
     // the stored tensor; rebuilt lazily per geometry (reset together with the ERI).
     std::string m_scf_direct = "auto";       // auto | on | off

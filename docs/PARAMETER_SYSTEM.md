@@ -311,6 +311,12 @@ owns it (`-opt` and `-sp`, module `opt`, own both), else to the scope of the sel
 reads it (`MethodFactory::readsSharedScfScope`). Knobs of one solver only (level shift, eigensolver, mixed precision, GPU,
 `scf_precond`, `electronic_temperature`) stay in module `xtb`.
 
+Native QM methods (`hf`, `hf-3c`, `lda`/`pbe`/`b3lyp`, `mp2`, RI/SCS/SOS variants, `ccsd`, `lmp2`) have the scope `qm`
+(`parameterScopeForMethod`, Oct 27, 2026): flat `-scf_threshold`, `-scf_mode`, `-scf_guess`, `-scf_diis_start` land in
+`controller["qm"]`, `-max_iterations` in `scf` (or with the optimiser at `-sp`/`-opt`). `QMMethod::engineConfig` merges
+registry `qm` defaults < top level < `dft` < `scf` < `qm` and maps aliases of the `qm`/`dft` scopes (`-qm.diis_start` ->
+`scf_diis_start`); the top level is not alias-resolved, its `diis_start` belongs to the optimiser.
+
 ## JSON Export/Import
 
 ### Export Default Configuration

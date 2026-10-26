@@ -32,6 +32,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -193,12 +194,39 @@ QMEngine::QMEngine(QMFunctional functional, const json& config)
     }
     if (config.contains("scf_warm_start") && config["scf_warm_start"].is_boolean())
         m_scf_warm_start = config["scf_warm_start"].get<bool>();
-    if (config.contains("diis_start") && config["diis_start"].is_number())
-        m_diis_start = std::max(0, static_cast<int>(std::lround(config["diis_start"].get<double>())));
-    if (config.contains("diis_subspace") && config["diis_subspace"].is_number())
-        m_diis_subspace = std::max(2, static_cast<int>(std::lround(config["diis_subspace"].get<double>())));
-    if (config.contains("scf_mode") && config["scf_mode"].is_string())
+    // Oct 27 2026: scf_diis_start / scf_diis_subspace (QMMethod::engineConfig maps the old spellings -qm.diis_start /
+    // -qm.diis_subspace onto them). A bare top-level "diis_start" is NOT read: it is the geometry optimiser's.
+    if (config.contains("scf_diis_start") && config["scf_diis_start"].is_number())
+        m_diis_start = std::max(0, static_cast<int>(std::lround(config["scf_diis_start"].get<double>())));
+    if (config.contains("scf_diis_subspace") && config["scf_diis_subspace"].is_number())
+        m_diis_subspace = std::max(2, static_cast<int>(std::lround(config["scf_diis_subspace"].get<double>())));
+    if (config.contains("scf_mode") && config["scf_mode"].is_string()) {
         m_scf_mode = config["scf_mode"].get<std::string>();
+        std::transform(m_scf_mode.begin(), m_scf_mode.end(), m_scf_mode.begin(), ::tolower);
+        if (m_scf_mode == "auto")
+            m_scf_mode = "diis";  // the shared scf module's "method default" marker
+        // Oct 27 2026: an SCF mode of another solver (broyden, level-shift: gfn1/gfn2) is an error, as for NDDO,
+        // instead of a warning at run time and silent DIIS.
+        if (m_scf_mode != "diis" && m_scf_mode != "adiis" && m_scf_mode != "plain")
+            throw std::invalid_argument(fmt::format(
+                "scf_mode '{}' is not available for native HF ({}); use diis, adiis or plain",
+                config["scf_mode"].get<std::string>(), functionalName(m_functional)));
+    }
+    if (config.contains("scf_damping") && config["scf_damping"].is_number()) {
+        const double d = config["scf_damping"].get<double>();
+        if (!(d > 0.0 && d <= 1.0))
+            throw std::invalid_argument(fmt::format("scf_damping {} is outside (0, 1] for native HF", d));
+        m_scf_damping = d;
+    }
+    if (config.contains("scf_allow_unconverged")) {
+        const json& v = config["scf_allow_unconverged"];
+        if (v.is_boolean())
+            m_scf_allow_unconverged = v.get<bool>();
+        else if (v.is_number())
+            m_scf_allow_unconverged = v.get<double>() != 0.0;
+        else if (v.is_string())
+            m_scf_allow_unconverged = (v.get<std::string>() == "true" || v.get<std::string>() == "1");
+    }
     if (config.contains("scf_guess") && config["scf_guess"].is_string())
         m_scf_guess = config["scf_guess"].get<std::string>();
     if (config.contains("scf_early_screening") && config["scf_early_screening"].is_number())
@@ -370,8 +398,15 @@ double QMEngine::Calculation(bool gradient)
         m_scf_continue = false;
         m_scf_ready = true;
         if (!ok && !riSetupFailed()) {  // WP10: a failed RI setup has reported its own error
-            CurcumaLogger::error(fmt::format(
-                "QM HF SCF did not converge in {} iterations", m_scf_max_iter));
+            // Oct 27 2026: master's rule (SCF_MODES.md "Failure handling"): the wrappers turn this into an error
+            // unless -scf_allow_unconverged true, which keeps the energy of the last density with a warning.
+            if (m_scf_allow_unconverged)
+                CurcumaLogger::warn(fmt::format(
+                    "QM HF SCF did not converge in {} iterations; energy of the last density accepted "
+                    "(-scf_allow_unconverged true)", m_scf_max_iter));
+            else
+                CurcumaLogger::error(fmt::format(
+                    "QM HF SCF did not converge in {} iterations", m_scf_max_iter));
         }
         if (riActive()) riReport();
     }
@@ -386,8 +421,10 @@ double QMEngine::Calculation(bool gradient)
         if (m_scf_converged)
             computeGradient();
         else {
+            // Oct 27 2026: a failed gradient, not a zero one (a zero gradient let -opt report convergence)
             m_gradient = Matrix::Zero(m_atomcount, 3);
-            CurcumaLogger::warn("QM: SCF not converged -- no gradient computed (zero returned)");
+            m_gradient_failed = true;
+            m_gradient_error = "QM: SCF not converged -- no analytic gradient";
         }
     }
 

@@ -5,8 +5,8 @@
  * This program is free software under GPL-3.0.
  *
  * Claude Generated: registry module "scf" holds the SCF knobs that several methods
- * honour (native gfn1/gfn2, native NDDO pm3/am1/mndo/pm6, the external tblite, xtb
- * and Ulysses wrappers). Each method keeps its own default, so every default here is
+ * honour (native gfn1/gfn2, native NDDO pm3/am1/mndo/pm6, native QM hf/hf-3c/mp2/ccsd/lmp2
+ * (module qm, Oct 27 2026), the external tblite, xtb and Ulysses wrappers). Each method keeps its own default, so every default here is
  * a "use the method's own value" marker (0, -1 or "auto"). Knobs that only one solver
  * has (level shift, eigensolver, mixed precision, GPU, preconditioner) stay in module xtb.
  *
@@ -21,11 +21,11 @@
 #include "src/core/parameter_macros.h"
 
 BEGIN_PARAMETER_DEFINITION(scf)
-    PARAM(scf_threshold, Double, 0.0, "SCF convergence threshold; 0 uses the method's own: 1e-5 on max|dq_shell| for gfn1/gfn2, 1e-6 on the density change ||dP||_F for pm3/am1/mndo/pm6.", "SCF", {})
-    PARAM(scf_max_iterations, Int, 0, "Most SCF iterations; 0 uses the method's own (gfn1/gfn2 150, pm3/am1/mndo/pm6 100, tblite/xtb/Ulysses their max_iterations). Raise it for slowly converging systems.", "SCF", {"max_iterations", "SCFmaxiter"})
-    PARAM(scf_damping, Double, 0.0, "Fraction of the new charges (gfn1/gfn2, tblite) or density (pm3/am1/mndo/pm6) taken per step; 0 uses the method's own (0.4, NDDO 0.6). Lower values are more robust and slower.", "SCF", {})
-    PARAM(scf_allow_unconverged, Bool, false, "Accept an SCF that reaches the iteration limit without converging (gfn1/gfn2, pm3/am1/mndo/pm6); by default this is an error. Non-finite energies are always an error.", "SCF", {})
-    PARAM(scf_mode, String, "auto", "SCF strategy; 'auto' is broyden for gfn1/gfn2 and diis for pm3/am1/mndo/pm6. gfn1/gfn2 also take diis, plain, level-shift; NDDO takes plain (damping only).", "SCF", {})
-    PARAM(scf_diis_start, Int, -1, "Damped iterations before Pulay DIIS starts; -1 uses the method's own (gfn1/gfn2 5, in scf_mode diis and level-shift; pm3/am1/mndo/pm6 3). The name carries the scf_ prefix because -diis_start belongs to the geometry optimiser (-sp, -opt).", "SCF", {"diis_start"})
-    PARAM(scf_diis_subspace, Int, 0, "Number of Fock matrices kept in the DIIS history; 0 uses the method's own (gfn1/gfn2 6, pm3/am1/mndo/pm6 8).", "SCF", {"diis_subspace"})
+    PARAM(scf_threshold, Double, 0.0, "SCF convergence threshold; 0 uses the method's own: 1e-5 on max|dq_shell| for gfn1/gfn2, 1e-6 on the density change ||dP||_F for pm3/am1/mndo/pm6; native HF (hf, hf-3c, mp2, ccsd, lmp2): 1e-4 on ||dP||_F, one of the three conditions of -qm.scf_convergence auto (with energy change and orbital gradient).", "SCF", {})
+    PARAM(scf_max_iterations, Int, 0, "Most SCF iterations; 0 uses the method's own (gfn1/gfn2 150, pm3/am1/mndo/pm6 100, native HF 100, tblite/xtb/Ulysses their max_iterations). Raise it for slowly converging systems.", "SCF", {"max_iterations", "SCFmaxiter"})
+    PARAM(scf_damping, Double, 0.0, "Fraction of the new charges (gfn1/gfn2, tblite) or density (pm3/am1/mndo/pm6; native HF in scf_mode plain only) taken per step; 0 uses the method's own (0.4, NDDO 0.6, HF 0.5). Lower values are more robust and slower.", "SCF", {})
+    PARAM(scf_allow_unconverged, Bool, false, "Accept an SCF that reaches the iteration limit without converging (gfn1/gfn2, pm3/am1/mndo/pm6, native hf/hf-3c energies); by default this is an error. Non-finite energies, HF gradients and the correlated methods on an unconverged SCF are always an error.", "SCF", {})
+    PARAM(scf_mode, String, "auto", "SCF strategy; 'auto' is broyden for gfn1/gfn2 and diis for pm3/am1/mndo/pm6 and native HF. gfn1/gfn2 also take diis, plain, level-shift; NDDO takes plain (damping only); native HF takes adiis and plain. Other names are an error for NDDO and HF.", "SCF", {})
+    PARAM(scf_diis_start, Int, -1, "Damped iterations before Pulay DIIS starts; -1 uses the method's own (gfn1/gfn2 5, in scf_mode diis and level-shift; pm3/am1/mndo/pm6 3; native HF 1 = 0-based first DIIS iteration). The name carries the scf_ prefix because -diis_start belongs to the geometry optimiser (-sp, -opt).", "SCF", {"diis_start"})
+    PARAM(scf_diis_subspace, Int, 0, "Number of Fock matrices kept in the DIIS history; 0 uses the method's own (gfn1/gfn2 6, pm3/am1/mndo/pm6 8, native HF 8).", "SCF", {"diis_subspace"})
 END_PARAMETER_DEFINITION

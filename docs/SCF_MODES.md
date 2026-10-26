@@ -81,16 +81,22 @@ removes the sloshing, but is a different model.
 The knobs several methods share live in registry module `scf` (`scf_parameters.h`; `-help_module scf`). Their registry
 default means "the method's own value"; the table lists what that is. `-xtb.<name>` still sets a value for gfn1/gfn2 only
 and wins over `-scf_threshold` / `-scf.scf_threshold` (precedence: method scope, then `scf`, then the method default).
+Native QM (`hf`, `hf-3c`, `lda`/`pbe`/`b3lyp`, `mp2` and its RI/SCS/SOS variants, `ccsd`, `lmp2`; since Oct 27, 2026) reads
+the same flags with `-qm.<name>` as its method scope: registry `qm` defaults < top level < `-dft.*` < `-scf.*` < `-qm.*`
+(`QMMethod::engineConfig`); flat flags of these methods are routed to `qm`.
 
-| Flag (module `scf`) | gfn1/gfn2 | pm3/am1/mndo/pm6 | Meaning |
-|---|---|---|---|
-| `-scf_threshold` | `1e-5` on max\|dq_shell\| (and dE) | `1e-6` on \|\|P_new - P\|\|_F | Convergence threshold. |
-| `-scf_max_iterations` (`-max_iterations`, `-SCFmaxiter`) | `150` | `100` | Iteration limit; tblite/xtb/Ulysses map it onto their `max_iterations` (default 100). |
-| `-scf_damping` | `0.4` | `0.6` | Fraction of the new charges (gfn) or density (NDDO) per step: `P = d*P_new + (1-d)*P_old`; tblite maps it onto `damping`. |
-| `-scf_allow_unconverged` | `false` | `false` | Accept an SCF that hit the iteration limit (warning + last energy) instead of failing. |
-| `-scf_mode` | `broyden` | `diis` | gfn: broyden, diis, plain, level-shift; NDDO: diis or plain (other names are an error). |
-| `-scf_diis_start` (`-diis_start`) | `5` | `3` | Damped iterations before DIIS (gfn: modes diis and level-shift). |
-| `-scf_diis_subspace` (`-diis_subspace`) | `6` | `8` | DIIS history depth. |
+| Flag (module `scf`) | gfn1/gfn2 | pm3/am1/mndo/pm6 | native HF (`-qm.*`) | Meaning |
+|---|---|---|---|---|
+| `-scf_threshold` | `1e-5` on max\|dq_shell\| (and dE) | `1e-6` on \|\|P_new - P\|\|_F | `1e-4` on \|\|P_new - P\|\|_F, one of three conditions of `-qm.scf_convergence auto` ([QM_SCF_CONVERGENCE_2026-10.md](QM_SCF_CONVERGENCE_2026-10.md)) | Convergence threshold. |
+| `-scf_max_iterations` (`-max_iterations`, `-SCFmaxiter`) | `150` | `100` | `100` | Iteration limit; tblite/xtb/Ulysses map it onto their `max_iterations` (default 100). |
+| `-scf_damping` | `0.4` | `0.6` | `0.5`, mode `plain` only | Fraction of the new charges (gfn) or density (NDDO, HF) per step: `P = d*P_new + (1-d)*P_old`; tblite maps it onto `damping`. |
+| `-scf_allow_unconverged` | `false` | `false` | `false` (hf, hf-3c energies; gradients and mp2/ccsd/lmp2 still fail) | Accept an SCF that hit the iteration limit (warning + last energy) instead of failing. |
+| `-scf_mode` | `broyden` | `diis` | `diis` | gfn: broyden, diis, plain, level-shift; NDDO: diis or plain; HF: diis, adiis, plain (other names are an error for NDDO and HF). |
+| `-scf_diis_start` (`-diis_start`) | `5` | `3` | `1` (0-based first DIIS iteration) | Damped iterations before DIIS (gfn: modes diis and level-shift). |
+| `-scf_diis_subspace` (`-diis_subspace`) | `6` | `8` | `8` | DIIS history depth. |
+
+HF-only SCF knobs stay in module `qm`: `-scf_guess` (`atom`), `-qm.scf_convergence`, `-qm.scf_energy_threshold`,
+`-qm.scf_gradient_threshold[_tight]`, `-qm.scf_warm_start`, early screening and FP32 phase (`-help_module qm`).
 
 Module `xtb` (gfn1/gfn2 only): `-scf_guess` (`eeq`), `-level_shift` (`0.2` Eh, `level-shift` mode), `-eigensolver`,
 `-electronic_temperature`, `-warm_start`, `-keep_diis`, mixed precision, GPU and `-scf_precond` knobs.
@@ -120,6 +126,8 @@ An SCF result is only returned when it is one. Three cases now end the calculati
 Native NDDO (pm3/am1/mndo/pm6) applies the same rule: an SCF that does not converge within
 `-scf_max_iterations`, or a non-finite energy, is an error (also inside its numerical gradient);
 `-scf_allow_unconverged true` warns and keeps the last energy.
+Native HF and HF-3c apply it since Oct 27, 2026 (before, they printed an error and returned the energy with exit 0);
+an analytic gradient or a correlation energy (mp2, ri-mp2, lmp2, ccsd) on an unconverged SCF stays an error.
 
 The GPU-resident loop now names the failing stage (eigensolve, density, Broyden, ...) instead of
 reporting "failed at iteration N" without a reason. Not tested: the ROCm mirror (no SDK here) still

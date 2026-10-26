@@ -565,10 +565,9 @@ bool QMEngine::runSCF()
     }
     m_direct_quartets = 0;
 
-    const bool use_diis = (m_scf_mode != "plain");   // diis | adiis
-    if (m_scf_mode != "plain" && m_scf_mode != "diis" && m_scf_mode != "adiis" && CurcumaLogger::get_verbosity() >= 1)
-        CurcumaLogger::warn(fmt::format("QM: unknown -qm.scf_mode '{}' (use diis|adiis|plain); using diis", m_scf_mode));
-    const double damping = use_diis ? 0.0 : 0.5;  // plain mode needs density damping
+    const bool use_diis = (m_scf_mode != "plain");   // diis | adiis (other names are rejected by the constructor)
+    // Fraction of the OLD density kept per step: plain mode 1 - scf_damping (default 0.5, the value before Oct 27 2026)
+    const double damping = use_diis ? 0.0 : 1.0 - m_scf_damping;
 
     // Initial guess (m_scf_guess): SAD (default) or the bare core Hamiltonian
     // (zero density -> first Fock = H).

@@ -638,6 +638,14 @@ bool isExternalXtbGfn(const std::string& m)
 {
     return m == "xtb-gfn1" || m == "xtb-gfn2";
 }
+// Native ab-initio rows (QMEngine): all read registry module "qm" and, since Oct 27 2026, the shared "scf" scope.
+bool isNativeQm(const std::string& m)
+{
+    static const std::vector<std::string> names = {
+        "hf", "lda", "pbe", "b3lyp", "hf-3c", "hf3c", "mp2", "scs-mp2", "sos-mp2",
+        "ri-mp2", "scs-ri-mp2", "sos-ri-mp2", "ccsd", "lmp2", "local-ri-mp2" };
+    return std::find(names.begin(), names.end(), m) != names.end();
+}
 }
 
 std::string MethodFactory::parameterScopeForMethod(const std::string& method_name)
@@ -653,6 +661,9 @@ std::string MethodFactory::parameterScopeForMethod(const std::string& method_nam
     // Native gfn1/gfn2 (and their ngfn aliases) read the "xtb" scope, like the external XTB methods.
     if (m == "gfn1" || m == "gfn2" || m == "ngfn1" || m == "ngfn2" || m.rfind("xtb-gfn", 0) == 0) return "xtb";
     if (m == "eht") return "eht";
+    // Oct 27 2026: native QM (hf, hf-3c, mp2, ccsd, lmp2, ...) reads module "qm", so -scf_threshold / -scf_guess
+    // land in -qm.* (one owner wins) instead of warning about several owners and staying in the command module.
+    if (isNativeQm(m)) return "qm";
     return "";
 }
 
@@ -661,7 +672,7 @@ bool MethodFactory::readsSharedScfScope(const std::string& method_name)
     std::string m = method_name;
     std::transform(m.begin(), m.end(), m.begin(), ::tolower);
     auto in = [&m](const std::vector<std::string>& v) { return std::find(v.begin(), v.end(), m) != v.end(); };
-    return m == "gfn1" || m == "gfn2" || m == "ngfn1" || m == "ngfn2" || isNativeNddo(m)
+    return m == "gfn1" || m == "gfn2" || m == "ngfn1" || m == "ngfn2" || isNativeNddo(m) || isNativeQm(m)
         || isExternalXtbGfn(m) || m.rfind("tblite-", 0) == 0 || in(m_tblite_methods) || in(m_ulysses_methods);
 }
 
