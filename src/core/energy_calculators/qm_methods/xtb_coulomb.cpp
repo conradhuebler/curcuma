@@ -45,11 +45,13 @@ void XTB::buildGammaMatrix()
  * ------------------------------------------------------------------ */
 void XTB::addCoulombShellPotential(Potential& pot, const Vector& q_sh) const
 {
+    ensureHostIntegrals(__func__);   // Claude Generated (Oct 2026): host copies of S/H0/L/gamma are lazy
     pot.v_sh += coulomb::potential_shell(m_gamma, q_sh);
 }
 
 void XTB::addCoulombShellPotential(Potential& pot) const
 {
+    ensureHostIntegrals(__func__);   // Claude Generated (Oct 2026): host copies of S/H0/L/gamma are lazy
     addCoulombShellPotential(pot, m_wfn.q_sh);
 }
 
@@ -58,6 +60,7 @@ void XTB::addCoulombShellPotential(Potential& pot) const
  * ------------------------------------------------------------------ */
 double XTB::energyCoulombShell() const
 {
+    ensureHostIntegrals(__func__);   // Claude Generated (Oct 2026): host copies of S/H0/L/gamma are lazy
     return coulomb::energy_iso(m_gamma, m_wfn.q_sh);
 }
 

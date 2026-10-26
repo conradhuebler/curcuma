@@ -12,6 +12,21 @@ ParameterRegistry& ParameterRegistry::getInstance()
     return instance;
 }
 
+// Claude Generated (Oct 2026): old module name -> module that now holds its PARAMs.
+// eeq_solver: the EEQ charge solver is used by GFN-FF only, so its PARAMs live in the gfnff
+// block (gfnff.h, category EEQ). The EEQSolver still reads the JSON scope "eeq_solver".
+namespace {
+const std::map<std::string, std::string> kMergedModules = {
+    { "eeq_solver", "gfnff" },
+};
+}
+
+std::string ParameterRegistry::canonicalModule(const std::string& module)
+{
+    const auto it = kMergedModules.find(module);
+    return it == kMergedModules.end() ? module : it->second;
+}
+
 void ParameterRegistry::addDefinition(const std::string& module, ParameterDefinition&& def)
 {
     std::string canonical_name = def.name;
@@ -43,8 +58,9 @@ void ParameterRegistry::addDefinition(const std::string& module, ParameterDefini
     }
 }
 
-const ParameterDefinition* ParameterRegistry::findDefinition(const std::string& module, const std::string& alias) const
+const ParameterDefinition* ParameterRegistry::findDefinition(const std::string& module_name, const std::string& alias) const
 {
+    const std::string module = canonicalModule(module_name);
     auto module_it = alias_to_name_map.find(module);
     if (module_it == alias_to_name_map.end()) {
         return nullptr;
@@ -79,8 +95,13 @@ std::vector<ParameterDefinition> ParameterRegistry::getForModule(const std::stri
 }
 
 // Claude Generated: Print help for a specific module
-void ParameterRegistry::printHelp(const std::string& module) const
+void ParameterRegistry::printHelp(const std::string& module_name) const
 {
+    const std::string module = canonicalModule(module_name);
+    if (module != module_name) {
+        std::cout << "Module " << module_name << " is part of module " << module
+                  << "; -" << module_name << ".<name> is still accepted. Showing " << module << "." << std::endl;
+    }
     auto it = registry.find(module);
     if (it == registry.end()) {
         std::cout << "No parameters registered for module: " << module << std::endl;
@@ -216,10 +237,11 @@ void ParameterRegistry::printAllModules() const
 }
 
 // Claude Generated: Generate default JSON for a module
-json ParameterRegistry::getDefaultJson(const std::string& module) const
+json ParameterRegistry::getDefaultJson(const std::string& module_name) const
 {
     json result = json::object();  // Initialize as empty object, not null — null causes type_error.306 when .value() is called on it
 
+    const std::string module = canonicalModule(module_name);
     auto it = registry.find(module);
     if (it == registry.end()) {
         return result;
@@ -388,8 +410,9 @@ std::vector<std::string> ParameterRegistry::findOwnerModules(const std::string& 
 }
 
 // Claude Generated: Resolve alias to canonical name (case-insensitive)
-std::string ParameterRegistry::resolveAlias(const std::string& module, const std::string& alias) const
+std::string ParameterRegistry::resolveAlias(const std::string& module_name, const std::string& alias) const
 {
+    const std::string module = canonicalModule(module_name);
     auto module_it = alias_to_name_map.find(module);
     if (module_it == alias_to_name_map.end()) {
         return ""; // Module not found

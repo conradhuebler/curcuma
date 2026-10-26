@@ -1,0 +1,102 @@
+{
+  "note": "Claude Generated (Oct 2026), AI-generated, machine-tested only. Policy of the generated structure tests (scripts/gen_struct_tests.py, scripts/struct_invariants.py). Tolerances are the measured worst case of the pilot run (12 structures x gfn1/gfn2/gfnff, CPU, see 'measured') times a margin of at least 20.",
+  "assumed_neutral_closed_shell": {
+    "note": "AI proposal pending operator confirmation: the manifest has no charge/spin for these structures. Neutral closed-shell is the standard valence reading of the formula (even electron count checked by the generator); confirm and write charge/spin into the manifest, then remove the id from this list.",
+    "ids": [
+      "water",
+      "methane",
+      "ammonia.ideal-c3v",
+      "ethene",
+      "methanol",
+      "ethane",
+      "dimethyl-ether",
+      "benzene",
+      "hydrogen-chloride",
+      "hydrogen-cyanide"
+    ],
+    "status": "accepted by the operator 'for now' on Oct 26, 2026; still not written into the manifest (charge/spin of these ten stay unrecorded there)"
+  },
+  "families": {
+    "invariants": {
+      "max_atoms": 12,
+      "classes": [
+        "small",
+        "medium",
+        "clusters"
+      ],
+      "methods": [
+        "gfn1",
+        "gfn2",
+        "gfnff"
+      ],
+      "tests": "translate,rotate,permute,sumforce,torque,fd,repeat,threads"
+    },
+    "compressed": {
+      "max_atoms": 16,
+      "classes": [
+        "small",
+        "medium",
+        "clusters"
+      ],
+      "methods": [
+        "gfn1",
+        "gfn2"
+      ],
+      "tests": "compressed",
+      "gpu_tests": "compressed_gpu",
+      "name_prefix": "structcomp"
+    }
+  },
+  "tolerances": {
+    "default": {
+      "energy": 1e-08,
+      "gradient": 1e-08,
+      "sumforce": 1e-10,
+      "torque": 1e-07,
+      "fd": 1e-06,
+      "repeat": 1e-12,
+      "threads": 1e-10,
+      "gpu_energy": 1e-08,
+      "gpu_gradient": 1e-05,
+      "fd_step": 0.005,
+      "compressed_scale": 0.3,
+      "fd_compressed": 1e-05,
+      "compressed_sumforce": 1e-08,
+      "compressed_gpu_gradient": 1e-06
+    },
+    "gfnff": {
+      "fd": 1e-05,
+      "permute_energy": 0.0001
+    }
+  },
+  "measured": {
+    "note": "worst case over the pilot (12 structures: water, methane, ammonia.ideal-c3v, ethene, methanol, ethane, dimethyl-ether, benzene, hydrogen-chloride, hydrogen-cyanide, dinitrogen, water-dimer.roo2.8), one run each, Oct 25 2026",
+    "energy_translate": 2.2e-10,
+    "energy_rotate": 7.8e-13,
+    "energy_permute_gfn": 1.4e-14,
+    "energy_permute_gfnff": 6.8e-05,
+    "gradient_translate": 5.1e-10,
+    "gradient_rotate": 3.8e-11,
+    "sumforce": 3.1e-16,
+    "torque": 4.8e-10,
+    "fd_gfn_richardson": 4.2e-08,
+    "fd_gfnff_richardson": 3.9e-07,
+    "repeat": 0.0,
+    "threads": 1.1e-15,
+    "compressed_note": "scale 0.30 about the centroid, 14 structures (<= 16 atoms) x gfn1/gfn2, one run each, Oct 26 2026",
+    "fd_compressed_gfn1": 2.3e-07,
+    "fd_compressed_gfn2": 3.4e-07,
+    "compressed_sumforce": 1.6e-13,
+    "compressed_gpu_cuda_energy_or_gradient": 1.4e-09,
+    "negative_control": "CUDA plugin from before the D4 weight fix: max|dg| 0.435 Eh/A on acetic-acid-dimer gfn2 at this scale (fails), after the fix 7e-11 (passes)"
+  },
+  "known_deviations": [
+    {
+      "structure": "ammonia.ideal-c3v",
+      "method": "gfnff",
+      "test": "fd",
+      "limit": 0.0002,
+      "why": "the GFN-FF inversion energy has a kink at exactly this C3v geometry (N shifted in x: slope 9e-5 -> 2e-6 Eh/A at 0, 2nd-difference ratio 74 against 1-2 for every other term, Oct 25 2026); analytic and finite-difference gradient differ by 6e-5 Eh/A there, whether the reference code has the same kink is not checked (no xtb/pprcht on this machine)"
+    }
+  ]
+}

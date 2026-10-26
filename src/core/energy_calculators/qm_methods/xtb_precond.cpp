@@ -460,7 +460,7 @@ std::vector<ScfPrecondSegment> segmentFragment(const std::vector<int>& atoms, co
  * behaviour) > scf_precond (none | frag). With scf_precond none and no file the
  * function returns immediately and touches nothing, so the default SCF path is unchanged.
  * Conditions under which 'frag' is ignored (one warning per XTB object): neither GFN1 nor GFN2
- * (GFN1: CPU loop only, its SCC vector is q_sh alone),
+ * (GFN1: CPU loop and the backends with supportsResidentPreconditionerGfn1, i.e. ROCm; its SCC vector is q_sh alone),
  * not the Broyden mode, neither the CPU loop nor a device loop that applies M itself
  * (@p device_loop, the fully device-resident CUDA loop; @p no_device_reason names why a GPU
  * path cannot), total charge != 0, open shell or odd electron count. With @p device_loop the
@@ -511,7 +511,9 @@ bool XTB::selectScfPreconditioner(bool broyden_mode, bool cpu_loop, bool device_
     if (m_method != MethodType::GFN2 && m_method != MethodType::GFN1) { warn_once("implemented for GFN1 and GFN2 only"); return true; }
     if (!broyden_mode) { warn_once("needs -scf_mode broyden"); return true; }
     if (!cpu_loop && !device_loop) { warn_once(no_device_reason); return true; }
-    if (!cpu_loop && m_method != MethodType::GFN2) { warn_once("the device preconditioner is implemented for GFN2 only (GFN1: CPU SCF loop)"); return true; }
+    // GFN1 device loop only where the backend says so (ROCm WP5, Claude Generated Oct 2026).
+    if (!cpu_loop && m_method != MethodType::GFN2
+        && !(m_gpu_scf && m_gpu_scf->supportsResidentPreconditionerGfn1())) { warn_once("the device preconditioner is implemented for GFN2 only (GFN1: CPU SCF loop)"); return true; }
     if (m_charge != 0) { warn_once(fmt::format("total charge {} (neutral systems only)", m_charge)); return true; }
     const long long nel = std::llround(m_wfn.nocc);
     if (openShell() || (nel % 2) != 0) {
@@ -1012,6 +1014,7 @@ bool XTB::buildFragmentPreconditioner(std::string& err)
 void XTB::writeScfJacobianDump(const std::string& dir, const Vector& x_star, const Vector& g_loop,
                                double e_scc, const std::function<Vector(const Vector&)>& evalG)
 {
+    ensureHostIntegrals(__func__);   // Claude Generated (Oct 2026): host copies of S/H0/L/gamma are lazy
     namespace fs = std::filesystem;
     using clk = std::chrono::steady_clock;
     std::error_code ec;
@@ -1109,6 +1112,7 @@ void XTB::writeScfJacobianDump(const std::string& dir, const Vector& x_star, con
     writeVec("eta_sh.bin", eta_sh);
     writeMat("gamma_sh.bin", m_gamma);
     writeVec("third_sh.bin", third_sh);
+    if (gfn2 && m_mp_initialized) ensureHostMultipoleMatrices();   // developer dump: needs the host copies
     const bool have_mp = gfn2 && m_mp_initialized && static_cast<int>(m_mp_dkernel.size()) == nat
                          && m_mp_amat_sd[0].rows() == nat;
     if (have_mp) {

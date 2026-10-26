@@ -6,7 +6,7 @@
 
 ## Isolated ion gradient, `-gfnff.cn_zero_guard` (Oct 25, 2026) 🤖⚙️
 
-- Opt-in (default = reference): Coulomb TERM 1b chain-rule term 0 at CN = 0; removes a spurious force on an isolated ion (Cl- ... H2O, H-Cl 3.2 A: FD 6.6e-4 -> 1.5e-5 Eh/A), energy unchanged, GPU falls back to CPU. Known Issue #39 in [KNOWN_ISSUES_ARCHIVE.md](KNOWN_ISSUES_ARCHIVE.md).
+- Opt-in (default = reference): Coulomb TERM 1b chain-rule term 0 at CN = 0; removes a spurious force on an isolated ion (Cl- ... H2O, H-Cl 3.2 A: FD 6.6e-4 -> 1.5e-5 Eh/A), energy unchanged, GPU falls back to CPU. Known Issue #43 in [KNOWN_ISSUES_ARCHIVE.md](KNOWN_ISSUES_ARCHIVE.md).
 
 ## xtb library regression gate (Oct 11, 2026) 🤖⚙️
 

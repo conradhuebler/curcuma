@@ -10,7 +10,7 @@
  *
  * Usage:
  *   ./curcuma -sp mol.xyz -method gfnff -gpu rocm
- *   ./curcuma -sp mol.xyz -method gfnff -gpu auto   # GPU if available
+ *   ./curcuma -sp mol.xyz -method gfnff -gpu rocm   # GPU
  */
 
 #ifdef USE_ROCM

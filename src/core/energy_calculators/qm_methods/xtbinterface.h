@@ -36,9 +36,11 @@
 // mixed precision, solvation, large-system modes, ...) is defined next to that
 // solver, in native_xtb_method.h - same registry module "xtb", so -xtb.<param>
 // and the flat-flag routing are unchanged. Claude Generated (Sep 2026).
+// The SCF iteration limit is scf_max_iterations in module "scf" (scf_parameters.h,
+// aliases max_iterations, SCFmaxiter); MethodFactory::applySharedScfScope copies it to
+// the "max_iterations" key XTBInterface reads (default 100). Claude Generated (Oct 2026).
 BEGIN_PARAMETER_DEFINITION(xtb)
     PARAM(accuracy, Int, 2, "Accuracy level for XTB calculations (0=crude, 1=sloppy, 2=normal, 3=tight, 4=vtight).", "SCF", {"xtb_ac"})
-    PARAM(max_iterations, Int, 100, "Maximum number of SCF iterations.", "SCF", {"SCFmaxiter"})
     PARAM(electronic_temperature, Double, 300.0, "Electronic temperature in Kelvin for Fermi smearing.", "SCF", {"Tele"})
     PARAM(spin, Double, 0.0, "Total spin of the system (0.0 = singlet).", "Molecular", {})
 END_PARAMETER_DEFINITION

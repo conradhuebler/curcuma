@@ -162,6 +162,9 @@ public:
         double cn_cutoff_bohr = 25.0
     );
 
+    /// Claude Generated (Oct 2026): the D3 covalent radii (Angstrom, index Z-1) for the device CN kernels.
+    static const std::vector<double>& covalentRadiiD3() { return COVALENT_RADII; }
+
 private:
     // Covalent radii from simple-dftd3 (Angstrom)
     // Data source: s-dftd3 atomic radii - 86 elements (H through Rn)

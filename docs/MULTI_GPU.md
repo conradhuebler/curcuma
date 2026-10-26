@@ -334,6 +334,34 @@ the size-guard work), so: one run on the largest structure you have.
 `-gpu_devices 0,1,2,3 -gpu_workers_per_device 1|2`. Independent of everything above and the
 easiest real-world win.
 
+**8. GFN-FF MD on the H200 node (added Oct 18, 2026).** The same questions for the force field, which
+is bound by the host and the many small kernels rather than by an eigensolver. Needs the build of item 0
+(`-DCMAKE_CUDA_ARCHITECTURES=90`); the multi-GPU eigensolver libraries are not used by GFN-FF.
+```bash
+python scripts/tuning_sweep.py scripts/gpu_bench/run/polymer_2x.xyz --method gfnff --gpu cuda --md \
+       --repeats 2 --json h200_gfnff_md.json -- -threads 16
+```
+(`--md` times milliseconds per MD step from runs of 100 and 600 steps, after one discarded warm-up run; every
+setting is checked against the baseline energy of the last step. Estimated 45 min on the A4500 box (about 90 runs of 30 s, not timed as a whole); `--md-steps 50,300`
+halves it. Pass `-threads N` after `--` to fix the host threads; without it the `threads` knob scans 4 to all cores.)
+Reference, 4x RTX A4500 (PCIe, no NVLink), polymer_2x (7320 atoms), 16 host threads, 2 repeats, Oct 18, 2026:
+`-gpu_split_devices none` 41.3 ms/step, `0,1` 25.2, `0,1,2` 20.2, `all` (4 GPUs) 18.6 to 19.1, `auto` 19.1.
+Before the sweep, one MD step profile for the record: `nsys profile -o gfnff_h200 curcuma -md polymer_2x.xyz
+-method gfnff -gpu cuda -T 300 -dt 1 -max_time 100 -print 100000 -threads 16 -no_bmt -verbosity 0`
+(per-device busy time and the PCG span, see GPU_TUNING.md "GFN-FF split path").
+
+What to look at, as hypotheses to confirm or refute (none of this is measured on an H200):
+- **FP64 rate.** The matrix build (`k_eeq_build_cols`, 1.3 ms per call on the A4500) and `k_coulomb_tiles` are FP64-bound there
+  (1/64 rate); the H200 runs FP64 at 1/2 of FP32. If so, `gpu_eeq_mixed_precision false` stops costing accuracy for nothing and
+  may even win: compare `true|false` and `gpu_eeq_mixed_rho`.
+- **Split ladder.** On PCIe one GPU takes 41 ms and four 19 ms. With NVLink the peer copies per matvec get cheaper; with a much faster single
+  card the split may stop paying (`none` against `all`), and `gpu_split_min_atoms` / `gpu_split_eeq_min_atoms` (1000 / 4000, measured on the A4500) move.
+- **Host stages.** HB/XB detection (20 ms per refresh at 8 threads, 10 ms at 32) and the integrator gap are host work; on a node with many
+  cores the `threads` knob decides how much of the step is left. Bring the `threads` rows back too.
+- **What it should reproduce.** The result of a setting is bitwise independent of load and of the number of split GPUs (Oct 17, 2026,
+  docs/GPU_REPRODUCIBILITY.md, A4500 only): the SUSPECT mark of the sweep should never fire for the split knobs; if it does on the H200, that is a finding.
+Not scanned on purpose: `hb_update_force_every` (changes the trajectory, decision pending, TODO.md).
+
 ## Operator runs on other hardware (Sep 17/18, 2026)
 
 - **2x H200 NVL, build without cuSOLVERMp/NCCL**: the eigensolve fell back to cusolverMg, which

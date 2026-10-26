@@ -80,7 +80,7 @@ What changed:
 - **Runtime dispatch** (`method_factory.cpp` `resolveGpuMode()`): `-gpu cuda|rocm|vulkan`
   probes `gpu_plugin::available(backend)` (a quiet `dlopen`); missing plugin → warning
   *"the plugin libcurcuma_<b>.so is not present … cmake -DUSE_<B>=ON"* and CPU fallback.
-  `-gpu auto` takes the first plugin present in the order cuda, rocm, vulkan. Unknown
+  `-gpu auto` was removed (Oct 26, 2026: it warns, counts a GPU fallback and uses the CPU); the backend is always named. Unknown
   values warn and use CPU. `curcuma -methods` lists the plugins found next to the binary.
 - **`EnergyCalculator::m_gpu_fallback`** (the "requested GPU but running on CPU" flag the
   capabilities print) uses the same runtime probe.
