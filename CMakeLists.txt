@@ -1254,7 +1254,7 @@ endif()
 # Build: cmake -DUSE_ROCM=ON -DCMAKE_PREFIX_PATH=/opt/rocm && make -j4
 # (USE_ROCM is the single switch - it builds both the native-xTB and GFN-FF GPU paths
 #  into ONE plugin, libcurcuma_rocm.so, mirroring CUDA. ROCM_GPU_ARCH is auto-detected
-#  from rocminfo; override only if wrong.)
+#  from rocminfo; override only if wrong, or give a list for a build without a GPU.)
 # The two HIP TUs (xTB context: device handshake + rocSOLVER eigensolver + resident-SCF
 # __global__ kernels; GFN-FF: single-TU port of the CUDA kernels) are compiled by hipcc
 # into plain relocatable objects via custom commands, then linked into the plugin as
@@ -1309,6 +1309,21 @@ if(USE_ROCM)
     endif()
 
 
+    # ROCM_GPU_ARCH may be a list (-DROCM_GPU_ARCH="gfx1100;gfx1150;gfx1200"): one code
+    # object per entry in the same binary, the runtime picks the one matching the card.
+    # The plugin checks the visible devices against this list at load time and falls back
+    # to the CPU when none matches (gpu_plugin_entry_rocm.cpp). Only RDNA (gfx10/11/12) was
+    # run; the kernels assume wave32, so other families are refused.
+    set(_rocm_offload_flags ${ROCM_GPU_ARCH})
+    foreach(_a IN LISTS ROCM_GPU_ARCH)
+        if(NOT _a MATCHES "^gfx1[012][0-9a-f][0-9a-f]?$")
+            message(FATAL_ERROR "ROCm: '${_a}' is not an RDNA architecture (gfx10xx/gfx11xx/gfx12xx). "
+                "The kernels assume wave32 and were only run on gfx1150 and gfx1200.")
+        endif()
+    endforeach()
+    list(TRANSFORM _rocm_offload_flags PREPEND "--offload-arch=")
+    string(REPLACE ";" "," _rocm_built_archs "${ROCM_GPU_ARCH}")
+
     # hipcc compile defines shared by both device TUs. Match the g++ build's Eigen
     # alignment (CURCUMA_EIGEN_ALIGN, set with the march/AVX switch above) so Eigen
     # objects crossing the hipcc TU <-> g++ boundary share one ABI. FMT_HEADER_ONLY:
@@ -1350,7 +1365,7 @@ if(USE_ROCM)
     set(_hip_ctx_obj ${CMAKE_CURRENT_BINARY_DIR}/xtb_hip_context.hip.o)
     add_custom_command(
         OUTPUT  ${_hip_ctx_obj}
-        COMMAND ${HIPCC_EXECUTABLE} -c -fPIC -O2 -std=c++17 --offload-arch=${ROCM_GPU_ARCH}
+        COMMAND ${HIPCC_EXECUTABLE} -c -fPIC -O2 -std=c++17 ${_rocm_offload_flags}
                 ${_hipcc_defs} ${_hipcc_incs}
                 ${_hip_ctx_src} -o ${_hip_ctx_obj}
         DEPENDS ${_hip_ctx_src} ${_hip_ctx_hdrs}
@@ -1377,7 +1392,7 @@ if(USE_ROCM)
     set(_hip_ff_obj ${CMAKE_CURRENT_BINARY_DIR}/gfnff_rocm.hip.o)
     add_custom_command(
         OUTPUT  ${_hip_ff_obj}
-        COMMAND ${HIPCC_EXECUTABLE} -c -fPIC -O2 -std=c++17 --offload-arch=${ROCM_GPU_ARCH}
+        COMMAND ${HIPCC_EXECUTABLE} -c -fPIC -O2 -std=c++17 ${_rocm_offload_flags}
                 ${_hipcc_defs} ${_hipcc_incs}
                 ${_hip_ff_src} -o ${_hip_ff_obj}
         DEPENDS ${_hip_ff_src} ${_hip_ff_hdrs}
@@ -1403,6 +1418,7 @@ if(USE_ROCM)
     # a single ABI across the dlopen boundary (see the CUDA plugin).
     target_compile_definitions(curcuma_rocm PRIVATE
         USE_ROCM __HIP_PLATFORM_AMD__ HAVE_ROCSOLVER HAVE_ROCBLAS
+        CURCUMA_ROCM_BUILT_ARCHS="${_rocm_built_archs}"
         $<TARGET_PROPERTY:curcuma_core,COMPILE_DEFINITIONS>)
     set_target_properties(curcuma_rocm PROPERTIES
         POSITION_INDEPENDENT_CODE ON

@@ -1,0 +1,143 @@
+# Release variants built for distribution: two Linux tarballs (built in AlmaLinux 8
+# containers), macOS (Apple Silicon) and Windows. Build and smoke test only, artifacts are
+# not published as a release. Start by hand (Actions > Run workflow) or by a push to
+# feature/ci-container-builds.
+#   linux-gpu : AVX512, CUDA + ROCm plugins, libraries bundled
+#   linux-cpu : AVX2, no AVX512, no GPU plugins
+# The GPU plugins share Eigen objects with the executable, so each CPU variant is a
+# complete build of its own.
+name: CiVariants
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "feature/ci-container-builds" ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-variants-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: gpu
+            image: rocm/dev-almalinux-8:7.2.1-complete
+          - variant: cpu
+            image: almalinux:8
+    steps:
+      - uses: actions/checkout@v4
+
+      # The ROCm image is large; the container is started by hand (not with `container:`)
+      # so the disk can be cleared first.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/local/share/boost
+          df -h /
+
+      - name: Build in container
+        run: |
+          mkdir -p out
+          docker run --rm -v "$PWD:/src" -v "$PWD/out:/out" ${{ matrix.image }} \
+            bash /src/scripts/ci/linux_container_build.sh ${{ matrix.variant }}
+
+      # Unpacked in a clean image without ROCm, CUDA or the build libraries: the tarball
+      # must carry everything it needs. The GPU plugins find no device and fall back.
+      - name: Smoke test in a clean system
+        run: |
+          mkdir -p smoke && tar -C smoke -xzf out/curcuma-linux-${{ matrix.variant }}.tar.gz
+          if [ "${{ matrix.variant }}" = gpu ] && ! grep -q avx512f /proc/cpuinfo; then
+            echo "Runner has no AVX512: the AVX512 build is not run."; exit 0
+          fi
+          docker run --rm -v "$PWD:/w" ubuntu:22.04 /w/smoke/curcuma-${{ matrix.variant }}/curcuma \
+            -sp /w/test_cases/structures/medium/butane.anti.xyz -method gfnff 2>&1 | tail -n 15
+          if [ "${{ matrix.variant }}" = gpu ]; then
+            docker run --rm -v "$PWD:/w" ubuntu:22.04 /w/smoke/curcuma-gpu/curcuma \
+              -sp /w/test_cases/structures/medium/butane.anti.xyz -method gfnff -gpu rocm 2>&1 | tail -n 15
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.variant }}
+          path: out/curcuma-linux-${{ matrix.variant }}.tar.gz
+          if-no-files-found: error
+
+  macos:
+    runs-on: macos-14
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: brew install cmake libomp openblas lapack
+
+      # -mcpu=apple-m1 runs on every Apple Silicon generation (M1 to M4).
+      - name: Build
+        run: |
+          mkdir build_mac && cd build_mac
+          cmake .. -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_FLAGS="-mcpu=apple-m1" -DCMAKE_C_FLAGS="-mcpu=apple-m1" \
+            -DCMAKE_PREFIX_PATH="$(brew --prefix libomp);$(brew --prefix openblas);$(brew --prefix lapack)" \
+            -DUSE_XTB=OFF -DUSE_TBLITE=OFF -DUSE_D3=OFF -DUSE_D4=ON -DUSE_Plumed=OFF > cmake.log 2>&1 \
+            || { tail -n 60 cmake.log; exit 1; }
+          make -j"$(sysctl -n hw.ncpu)" > make.log 2>&1 || { tail -n 80 make.log; exit 1; }
+
+      - name: Smoke test
+        run: ./build_mac/curcuma -sp test_cases/structures/medium/butane.anti.xyz -method gfnff 2>&1 | tail -n 15
+
+      # Homebrew libraries are bundled so the binary also runs without Homebrew.
+      - name: Package
+        run: |
+          mkdir -p pkg/curcuma-macos && cp build_mac/curcuma pkg/curcuma-macos/
+          for i in 1 2 3; do
+            for f in pkg/curcuma-macos/*; do
+              otool -L "$f" | awk 'NR>1{print $1}' | grep -E '^/(opt/homebrew|usr/local)' | while read -r lib; do
+                b=$(basename "$lib"); [ -e "pkg/curcuma-macos/$b" ] || cp -L "$lib" "pkg/curcuma-macos/$b"
+                chmod u+w "pkg/curcuma-macos/$b"
+                install_name_tool -change "$lib" "@loader_path/$b" "$f"
+              done
+            done
+          done
+          tar -C pkg -czf curcuma-macos-arm64.tar.gz curcuma-macos
+          ./pkg/curcuma-macos/curcuma -sp test_cases/structures/medium/butane.anti.xyz -method gfnff 2>&1 | tail -n 5
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: curcuma-macos-arm64.tar.gz
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MinGW
+        uses: e-t-l/setup-mingw@patch-1
+        with:
+          platform: x64
+
+      # AVX2 (Haswell and later). 32-byte stack alignment is a known weak point of
+      # MinGW-w64, so the smoke test below decides whether this variant is usable.
+      - name: Build
+        run: scripts/build_windows.bat
+        env:
+          CURCUMA_CMAKE_EXTRA: -DUSE_AVX2=ON
+
+      - name: Smoke test
+        shell: cmd
+        run: bin\curcuma.exe -sp test_cases\structures\medium\butane.anti.xyz -method gfnff
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: curcuma-windows.zip
+          if-no-files-found: error
