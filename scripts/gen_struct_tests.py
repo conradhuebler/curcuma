@@ -6,7 +6,7 @@ Reads test_cases/structures/manifest.json and test_cases/struct_test_policy.json
 with one add_test per pair. Called at configure time by test_cases/CMakeLists.txt; run it by hand with --plan to see what
 is selected and why a structure is left out.
 
-    gen_struct_tests.py --out FILE.cmake [--cuda ON|OFF]      write the CMake include file
+    gen_struct_tests.py --out FILE.cmake [--cuda ON|OFF] [--rocm ON|OFF]   write the CMake include file
     gen_struct_tests.py --plan                                 print the selection and the reasons for every skipped structure
 
 Charge and spin come from the manifest. When the manifest has none, the structure is used only if the policy lists it under
@@ -70,6 +70,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out")
     ap.add_argument("--cuda", default="OFF")
+    ap.add_argument("--rocm", default="OFF")
     ap.add_argument("--plan", action="store_true")
     args = ap.parse_args()
     manifest = json.load(open(os.path.join(LIB, "manifest.json")))
@@ -83,7 +84,8 @@ def main():
                 skipped.append((s["id"], note))
                 continue
             for m in fam["methods"]:
-                name = "structinv_%s_%s" % (s["id"].replace(".", "_").replace("-", "_"), m)
+                prefix = fam.get("name_prefix", "structinv")
+                name = "%s_%s_%s" % (prefix, s["id"].replace(".", "_").replace("-", "_"), m)
                 cmd = ('add_test(NAME %s COMMAND ${CURCUMA_STRUCT_PYTHON} ${CURCUMA_STRUCT_REPO}/scripts/struct_invariants.py '
                        '--curcuma $<TARGET_FILE:curcuma> --structure %s --method %s --charge %d --spin %d --tests %s)'
                        % (name, s["id"], m, q, sp, fam["tests"]))
@@ -91,12 +93,14 @@ def main():
                 out.append(cmd)
                 out.append('set_tests_properties(%s PROPERTIES TIMEOUT 300 LABELS "structinv;%s")' % (name, m))
                 n_tests += 1
-                if args.cuda.upper() in ("ON", "1", "TRUE") and fam.get("gpu", True):
-                    gname = name.replace("structinv_", "structinv_gpu_", 1)
-                    out.append(cmd.replace(name, gname, 1).replace("--tests %s" % fam["tests"], "--tests gpu --gpu cuda"))
-                    out.append('set_tests_properties(%s PROPERTIES TIMEOUT 300 RESOURCE_LOCK "gpu" LABELS "structinv;gpu;%s")'
-                               % (gname, m))
-                    n_tests += 1
+                for backend, flag in (("cuda", args.cuda), ("rocm", args.rocm)):
+                    if flag.upper() in ("ON", "1", "TRUE") and fam.get("gpu", True):
+                        gname = name.replace(prefix + "_", prefix + ("_gpu_" if backend == "cuda" else "_rocm_"), 1)
+                        out.append(cmd.replace(name, gname, 1).replace("--tests %s" % fam["tests"],
+                                                                      "--tests %s --gpu %s" % (fam.get("gpu_tests", "gpu"), backend)))
+                        out.append('set_tests_properties(%s PROPERTIES TIMEOUT 300 RESOURCE_LOCK "gpu" LABELS "structinv;gpu;%s;%s")'
+                                   % (gname, backend, m))
+                        n_tests += 1
     if args.plan:
         print("%d tests selected, %d structures skipped" % (n_tests, len(skipped)))
         for sid, why in skipped:

@@ -645,7 +645,7 @@ if(Python3_Interpreter_FOUND)
     set(CURCUMA_STRUCT_PYTHON "${Python3_EXECUTABLE}")
     get_filename_component(CURCUMA_STRUCT_REPO "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
     execute_process(COMMAND "${Python3_EXECUTABLE}" "${CURCUMA_STRUCT_REPO}/scripts/gen_struct_tests.py"
-                            --out "${CMAKE_CURRENT_BINARY_DIR}/generated_struct_tests.cmake" --cuda "${USE_CUDA}"
+                            --out "${CMAKE_CURRENT_BINARY_DIR}/generated_struct_tests.cmake" --cuda "${USE_CUDA}" --rocm "${USE_ROCM}"
                     RESULT_VARIABLE _struct_gen_rc ERROR_VARIABLE _struct_gen_err)
     if(_struct_gen_rc EQUAL 0)
         include("${CMAKE_CURRENT_BINARY_DIR}/generated_struct_tests.cmake")

@@ -66,6 +66,24 @@ both is worth doing, there is nothing to port.
 
 Re-checked and equal: all GFN-FF backend traits except `has_multi_gpu_split` (ROCm false, item A) and `has_device_schur` (ROCm false by design, the device Schur step has its own switch `rocm_device_schur`); the GFN1/GFN2 `supports*` set apart from the rows listed in A and B.
 
+## To verify on the ROCm machine (prepared Oct 26, 2026, nothing of this has run on ROCm)
+
+Everything the CUDA machine changed since the ROCm merge `1f069cf8` is CUDA-only code (`cuda/*.cu`, `xtb_gpu_method.cpp`, CUDA test 13), plus shared
+test infrastructure (`test_cases/CMakeLists.txt`, `scripts/`, `test_cases/struct_test_policy.json`). No shared host code of the SCF or the force field changed.
+
+1. Build as before; run `cmake .` in the build directory (the structure tests are generated at configure time, `USE_ROCM` adds `structinv_rocm_*`).
+2. `ctest -L structinv -j8` (128 tests with one GPU backend on the CUDA machine, 73 s): 64 CPU tests (the CPU numbers of this machine, a second CPU and BLAS) and, with `USE_ROCM`, 64 `structinv_rocm_*` / `structcomp_rocm_*` tests
+   (CPU against `-gpu rocm`, energy 1e-8 Eh, gradient 1e-5 Eh/A as set on CUDA: **not measured on ROCm**). A failure there is a measurement, not
+   necessarily a bug: note the value from the output, decide, and write it into the `measured` block of `test_cases/struct_test_policy.json`
+   before changing a limit. The gfnff cases `ammonia.ideal-c3v` (Known Issue #42) and `hydrogen-cyanide` permute (#34) are the ones to watch.
+3. `ctest -j1` full: on the CUDA machine 519 of 521 pass; the two failures are `xtb_cpscf` and `cli_sqm_12_gfn2_scf_precond`, both documented
+   in `docs/BROKEN_TESTS_2026-10-14.md`. The CUDA-labelled tests are skipped or absent without CUDA.
+4. Stream-order race on ROCm (the CUDA `lu`/`batched` bug had a ROCm counterpart fixed in WP9): `GPU=rocm scripts/gpu_stream_race_check.sh BIN test_cases/structures/clusters/water-dimer.roo2.8.xyz 40 cholesky ppcg`,
+   ideally with a second GPU job on the same card; every line must show one hash.
+5. Open ROCm gaps from table A: Mehr-GPU-Eigenloeser, sparse integrals, GFN-FF multi-GPU split (all "no" on ROCm), pseudo-diagonalisation default off, `-gpu auto`
+   takes ROCm at any size (CPU wins below about 1000 atoms).
+6. Compressed geometries (D4 weight underflow, found on the host and on CUDA): `ctest -R structcomp` runs the finite-difference gradient on the CPU and, with `USE_ROCM`, CPU against `-gpu rocm` on the acetic acid dimer and 13 more structures scaled to 0.30 (`structcomp_*`, `structcomp_rocm_*`). On CUDA the old plugin failed this with 0.435 Eh/A, the current one passes at 7e-11. The ROCm D4 weight code was written to follow the host underflow rule (WP8a row in table A) and has not been compared on compressed geometries before.
+
 ## Resolution of the `devel/methods` merge that touches this
 
 Duplicate implementations of the same function came from the two branches: `stagedHBondUpload` (this branch kept; the
