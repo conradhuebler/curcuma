@@ -72,7 +72,7 @@ Everything the CUDA machine changed since the ROCm merge `1f069cf8` is CUDA-only
 test infrastructure (`test_cases/CMakeLists.txt`, `scripts/`, `test_cases/struct_test_policy.json`). No shared host code of the SCF or the force field changed.
 
 1. Build as before; run `cmake .` in the build directory (the structure tests are generated at configure time, `USE_ROCM` adds `structinv_rocm_*`).
-2. `ctest -L structinv -j8`: 36 CPU tests (the CPU numbers of this machine, a second CPU and BLAS) and, with `USE_ROCM`, 36 `structinv_rocm_*` tests
+2. `ctest -L structinv -j8` (128 tests with one GPU backend on the CUDA machine, 73 s): 64 CPU tests (the CPU numbers of this machine, a second CPU and BLAS) and, with `USE_ROCM`, 64 `structinv_rocm_*` / `structcomp_rocm_*` tests
    (CPU against `-gpu rocm`, energy 1e-8 Eh, gradient 1e-5 Eh/A as set on CUDA: **not measured on ROCm**). A failure there is a measurement, not
    necessarily a bug: note the value from the output, decide, and write it into the `measured` block of `test_cases/struct_test_policy.json`
    before changing a limit. The gfnff cases `ammonia.ideal-c3v` (Known Issue #42) and `hydrogen-cyanide` permute (#34) are the ones to watch.
@@ -82,8 +82,7 @@ test infrastructure (`test_cases/CMakeLists.txt`, `scripts/`, `test_cases/struct
    ideally with a second GPU job on the same card; every line must show one hash.
 5. Open ROCm gaps from table A: Mehr-GPU-Eigenloeser, sparse integrals, GFN-FF multi-GPU split (all "no" on ROCm), pseudo-diagonalisation default off, `-gpu auto`
    takes ROCm at any size (CPU wins below about 1000 atoms).
-6. Ideas that follow from the CUDA work and are not done on ROCm: the ROCm `-xtb.rocm_fixed_point` flag for the multi-GPU helper devices does not exist (single device only);
-   the GFN1 `-scf_precond frag` and the factor probe exist on both; the D4 weight fallback exists on both (host and ROCm kernel, CUDA since Oct 25).
+6. Compressed geometries (D4 weight underflow, found on the host and on CUDA): `ctest -R structcomp` runs the finite-difference gradient on the CPU and, with `USE_ROCM`, CPU against `-gpu rocm` on the acetic acid dimer and 13 more structures scaled to 0.30 (`structcomp_*`, `structcomp_rocm_*`). On CUDA the old plugin failed this with 0.435 Eh/A, the current one passes at 7e-11. The ROCm D4 weight code was written to follow the host underflow rule (WP8a row in table A) and has not been compared on compressed geometries before.
 
 ## Resolution of the `devel/methods` merge that touches this
 
