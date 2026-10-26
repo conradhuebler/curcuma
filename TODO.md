@@ -28,6 +28,9 @@ Stand.
 
 - **`polymerbuild`: Optimierungsschritte laufen mit Ladung 0, ohne Ladungsgruppen** (2026-10-23): die Formalladung steht nur im Ergebnis. `-gfnff.charge_groups` existiert, wird beim Bauen aber nicht benutzt (Gruppen der wachsenden Kette je Schritt noetig). [docs/POLYMERBUILD_CHARGE.md](docs/POLYMERBUILD_CHARGE.md)
 
+- **`-opt` (LBFGS++) reisst bei 5747 Atomen eine C=O-Bindung ab** (2026-10-26, n=1 Struktur: Tropfen mit (AB)5 + 1825 H2O, Lauf L1; C=O 1,21 -> 2,05 A in Schritt 5, am Ende 3,08 A; mit `lbfgs_m 5` und Armijo-Liniensuche ebenfalls; nativer `lbfgs` bewegt sich nicht, `rfo` Segfault bei dieser Groesse). Anfangsgradient am O 0,010 Eh/A (groesster 0,057). Ein Replikat derselben Zusammensetzung und der erste Probelauf (3071 Atome) blieben heil. Umgehung: 100 Runden mit je 2 LBFGS++-Schritten, dann 1000 + 994. Ursache nicht untersucht (grosse Anfangsschritte der Liniensuche vermutet, nicht belegt). Startstruktur und Aufrufe in `~/curcuma_runs/probe_large/`.
+- **Rechenzeit je MD-Schritt waechst staerker als linear mit der Atomzahl** (2026-10-26, n=1 je Groesse, zwei Laeufe parallel mit je 8 Threads): 93 ms bei 3071 Atomen, 293 ms bei 5747 Atomen (3,2-fach bei 1,9-fachen Atomen); allein 198 ms. Ursache nicht untersucht (EEQ mit ~1836 Nebenbedingungszeilen? Speicherbandbreite?).
+
 - **Literaturverweise der Trajektorien- und Ionen-Methoden pruefen** (Oktober 2026): die Quellen fuer Blockfehler, H-Brueckenkriterium, g(r), Shrake-Rupley, Sondenradius, Bondi-Radien, Fibonacci-Punkte und `-ionize`
   stehen in `docs/TRAJPROPS.md`, `src/core/citation_database.cpp` und `src/capabilities/trajprops.h`; sie stammen aus dem Gedaechtnis der KI und sind NICHT gegen die Arbeiten geprueft. Ebenso offen: welchen Radiensatz Min 2015 fuer die WASA verwendet.
 
