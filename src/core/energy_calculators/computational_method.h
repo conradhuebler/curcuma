@@ -134,6 +134,9 @@ public:
      * gfnffInstance(): the plugins derive from an `extern template` base.
      */
     virtual bool requestsCpuFallback() const { return false; }
+    /// Reason shown with the counted GPU fallback when requestsCpuFallback() is true (empty: the default
+    /// charge-rule text). Claude Generated (Oct 2026).
+    virtual std::string cpuFallbackReason() const { return std::string(); }
     
     /**
      * @brief Copy gradient into pre-allocated target (avoids heap allocation).

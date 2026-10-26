@@ -112,6 +112,13 @@ public:
     // Drives flat-CLI auto-routing in main.cpp::CLI2Json.
     std::vector<std::string> findOwnerModules(const std::string& param_name) const;
 
+    /// Claude Generated (Oct 2026): a module whose PARAMs were moved into another module keeps
+    /// its name as a JSON scope and dotted CLI prefix (`-eeq_solver.solve_method` still lands in
+    /// controller["eeq_solver"]). Lookups by the old name (findDefinition, resolveAlias,
+    /// getDefaultJson, printHelp) are answered by the new module. Returns @p module unchanged
+    /// when it was not merged. Table: kMergedModules in parameter_registry.cpp.
+    static std::string canonicalModule(const std::string& module);
+
 private:
     ParameterRegistry() = default;
     std::map<std::string, std::vector<ParameterDefinition>> registry;

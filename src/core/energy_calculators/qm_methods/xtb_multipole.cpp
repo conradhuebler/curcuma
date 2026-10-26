@@ -58,7 +58,83 @@ void XTB::ensureHostMultipoleIntegrals()
     setupMultipole(false);   // full host build (integrals + radii + interaction matrices)
 }
 
-void XTB::setupMultipole(bool integrals_on_device)
+/* ------------------------------------------------------------------ *
+ *  Interaction matrices of the multipole electrostatics (step 5 of     *
+ *  setupMultipole), as a separate member so that they can be built on  *
+ *  demand: with the device-built matrices (CUDA resident loop) the     *
+ *  host copies are only needed by the host fallbacks. Claude Generated *
+ *  (Oct 2026).                                                         *
+ * ------------------------------------------------------------------ */
+void XTB::buildMultipoleInteractionMatrices() const
+{
+    const int nat = m_atomcount;
+    using namespace curcuma::xtb::gfn2_params;
+    std::vector<double> xyz_bohr(3 * nat);
+    for (int i = 0; i < nat; ++i) {
+        xyz_bohr[3 * i + 0] = m_geometry(i, 0) * AA_TO_AU;
+        xyz_bohr[3 * i + 1] = m_geometry(i, 1) * AA_TO_AU;
+        xyz_bohr[3 * i + 2] = m_geometry(i, 2) * AA_TO_AU;
+    }
+    for (int k = 0; k < 3; ++k) m_mp_amat_sd[k] = Eigen::MatrixXd::Zero(nat, nat);
+    for (int a = 0; a < 3; ++a)
+        for (int b = 0; b < 3; ++b) m_mp_amat_dd[a][b] = Eigen::MatrixXd::Zero(nat, nat);
+    for (int k = 0; k < 6; ++k) m_mp_amat_sq[k] = Eigen::MatrixXd::Zero(nat, nat);
+
+    // Parallel over the source atom i (Claude Generated): every amat_*(j, i) entry
+    // is written for column i only, so striping over i touches disjoint columns.
+    const int amat_threads = effectiveIntraThreads(nat);
+    parallelStripes(amat_threads, [&](int tid, int nth) {
+    for (int i = tid; i < nat; i += nth) {
+        for (int j = 0; j < nat; ++j) {
+            if (i == j) continue;
+            const double vx = xyz_bohr[3*i+0] - xyz_bohr[3*j+0];
+            const double vy = xyz_bohr[3*i+1] - xyz_bohr[3*j+1];
+            const double vz = xyz_bohr[3*i+2] - xyz_bohr[3*j+2];
+            const double r1  = std::sqrt(vx*vx + vy*vy + vz*vz);
+            const double g1  = 1.0 / r1;
+            const double g3  = g1 * g1 * g1;
+            const double g5  = g3 * g1 * g1;
+            const double rr  = 0.5 * (m_mp_mrad[j] + m_mp_mrad[i]) * g1;
+            const double fdmp3 = 1.0 / (1.0 + 6.0 * std::pow(rr, mp_dmp3));
+            const double fdmp5 = 1.0 / (1.0 + 6.0 * std::pow(rr, mp_dmp5));
+
+            // amat_sd (charge-dipole): row=target(j), col=source(i)
+            m_mp_amat_sd[0](j, i) += vx * g3 * fdmp3;
+            m_mp_amat_sd[1](j, i) += vy * g3 * fdmp3;
+            m_mp_amat_sd[2](j, i) += vz * g3 * fdmp3;
+
+            // amat_dd (dipole-dipole)
+            const double dd_iso  = g3 * fdmp5;
+            const double dd_anis = 3.0 * g5 * fdmp5;
+            for (int a = 0; a < 3; ++a) {
+                const double va = (a == 0) ? vx : ((a == 1) ? vy : vz);
+                for (int b = 0; b < 3; ++b) {
+                    const double vb = (b == 0) ? vx : ((b == 1) ? vy : vz);
+                    m_mp_amat_dd[a][b](j, i) +=
+                        ((a == b) ? dd_iso : 0.0) - va * vb * dd_anis;
+                }
+            }
+
+            // amat_sq (charge-quadrupole), packed (xx, xy, yy, xz, yz, zz)
+            m_mp_amat_sq[0](j, i) += vx * vx * g5 * fdmp5;
+            m_mp_amat_sq[1](j, i) += 2.0 * vx * vy * g5 * fdmp5;
+            m_mp_amat_sq[2](j, i) += vy * vy * g5 * fdmp5;
+            m_mp_amat_sq[3](j, i) += 2.0 * vx * vz * g5 * fdmp5;
+            m_mp_amat_sq[4](j, i) += 2.0 * vy * vz * g5 * fdmp5;
+            m_mp_amat_sq[5](j, i) += vz * vz * g5 * fdmp5;
+        }
+    }
+    });  // parallelStripes over i
+
+    m_mp_amat_deferred = false;
+}
+
+void XTB::ensureHostMultipoleMatrices() const
+{
+    if (m_mp_amat_deferred && m_mp_initialized) buildMultipoleInteractionMatrices();
+}
+
+void XTB::setupMultipole(bool integrals_on_device, bool defer_amat)
 {
     const int nat = m_atomcount;
     const int nao = m_basis.nao;
@@ -84,6 +160,7 @@ void XTB::setupMultipole(bool integrals_on_device)
     auto tmp_ao = tmp0, tmp_d = tmp0, tmp_shift = tmp0, tmp_cn = tmp0;
 
     if (!integrals_on_device) {
+    ensureHostIntegrals();   // origin shift below reads m_S
     // B1 (Jul 2026): as_cgto_shell() copies two std::vectors, and it used to be
     // called once per (mu,nu) AO pair -> ~nao^2 = 311k conversions (622k heap
     // allocations) on complex/231. The shells are geometry-independent, so build
@@ -243,56 +320,11 @@ void XTB::setupMultipole(bool integrals_on_device)
     tmp_cn = mp_clock::now();
 
     // ---- 5. Interaction matrices ----
-    for (int k = 0; k < 3; ++k) m_mp_amat_sd[k] = Eigen::MatrixXd::Zero(nat, nat);
-    for (int a = 0; a < 3; ++a)
-        for (int b = 0; b < 3; ++b) m_mp_amat_dd[a][b] = Eigen::MatrixXd::Zero(nat, nat);
-    for (int k = 0; k < 6; ++k) m_mp_amat_sq[k] = Eigen::MatrixXd::Zero(nat, nat);
-
-    // Parallel over the source atom i (Claude Generated): every amat_*(j, i) entry
-    // is written for column i only, so striping over i touches disjoint columns.
-    const int amat_threads = effectiveIntraThreads(nat);
-    parallelStripes(amat_threads, [&](int tid, int nth) {
-    for (int i = tid; i < nat; i += nth) {
-        for (int j = 0; j < nat; ++j) {
-            if (i == j) continue;
-            const double vx = xyz_bohr[3*i+0] - xyz_bohr[3*j+0];
-            const double vy = xyz_bohr[3*i+1] - xyz_bohr[3*j+1];
-            const double vz = xyz_bohr[3*i+2] - xyz_bohr[3*j+2];
-            const double r1  = std::sqrt(vx*vx + vy*vy + vz*vz);
-            const double g1  = 1.0 / r1;
-            const double g3  = g1 * g1 * g1;
-            const double g5  = g3 * g1 * g1;
-            const double rr  = 0.5 * (m_mp_mrad[j] + m_mp_mrad[i]) * g1;
-            const double fdmp3 = 1.0 / (1.0 + 6.0 * std::pow(rr, mp_dmp3));
-            const double fdmp5 = 1.0 / (1.0 + 6.0 * std::pow(rr, mp_dmp5));
-
-            // amat_sd (charge-dipole): row=target(j), col=source(i)
-            m_mp_amat_sd[0](j, i) += vx * g3 * fdmp3;
-            m_mp_amat_sd[1](j, i) += vy * g3 * fdmp3;
-            m_mp_amat_sd[2](j, i) += vz * g3 * fdmp3;
-
-            // amat_dd (dipole-dipole)
-            const double dd_iso  = g3 * fdmp5;
-            const double dd_anis = 3.0 * g5 * fdmp5;
-            for (int a = 0; a < 3; ++a) {
-                const double va = (a == 0) ? vx : ((a == 1) ? vy : vz);
-                for (int b = 0; b < 3; ++b) {
-                    const double vb = (b == 0) ? vx : ((b == 1) ? vy : vz);
-                    m_mp_amat_dd[a][b](j, i) +=
-                        ((a == b) ? dd_iso : 0.0) - va * vb * dd_anis;
-                }
-            }
-
-            // amat_sq (charge-quadrupole), packed (xx, xy, yy, xz, yz, zz)
-            m_mp_amat_sq[0](j, i) += vx * vx * g5 * fdmp5;
-            m_mp_amat_sq[1](j, i) += 2.0 * vx * vy * g5 * fdmp5;
-            m_mp_amat_sq[2](j, i) += vy * vy * g5 * fdmp5;
-            m_mp_amat_sq[3](j, i) += 2.0 * vx * vz * g5 * fdmp5;
-            m_mp_amat_sq[4](j, i) += 2.0 * vy * vz * g5 * fdmp5;
-            m_mp_amat_sq[5](j, i) += vz * vz * g5 * fdmp5;
-        }
+    if (defer_amat) {
+        m_mp_amat_deferred = true;   // the device builds them; the host fallbacks call ensureHostMultipoleMatrices()
+    } else {
+        buildMultipoleInteractionMatrices();
     }
-    });  // parallelStripes over i
 
     // B0: publish the sub-phase split for the verbosity-3 setup report.
     {
@@ -308,6 +340,7 @@ void XTB::setupMultipole(bool integrals_on_device)
     }
 
     m_mp_initialized = true;
+    ++m_mp_version;   // device copies of the matrices are stale (Claude Generated, Oct 2026)
 }
 
 /* ------------------------------------------------------------------ *
@@ -330,76 +363,80 @@ void XTB::addMultipolePotential(Potential& pot,
                                  const Eigen::MatrixXd& qp_at) const
 {
     if (!m_mp_initialized) return;
+    ensureHostMultipoleMatrices();
     const int nat = m_atomcount;
 
     // --- vdp(k, iat) = Σ_jat amat_sd[k](iat,jat)·q_at(jat)
     //                 + Σ_a   amat_dd[k][a](iat,jat)·dpat(a,jat)
     //                 + 2·dkernel·dpat(k,iat)
-    // Note (Claude Generated, Sep 2026): these per-atom loops read 18 separate nat x nat
-    // interaction matrices at the same (i,j), i.e. ~286 MB per call at nat = 1410, so they are
-    // memory bound and large for a big system - at nat = 231 they were ~1.4 ms/it and stayed
-    // serial, at nat = 1410 the whole potential build was 172 ms/it. Now threaded over the
-    // target atom i: every stripe writes only its own columns of v_dp / v_qp / v_at and reads
-    // shared data, so the result stays BIT-IDENTICAL to the serial loop (the inner j order is
-    // untouched). effectiveIntraThreads() keeps small systems and batch workers serial.
-    // Measured polymer (nat 1410, gfn2, -threads 16): potential build 172 -> 60 ms/it.
-    const int mp_threads = effectiveIntraThreads(nat);
-    pot.v_dp.resize(3, nat);
-    Eigen::MatrixXd& vdp = pot.v_dp;
-    parallelStripes(mp_threads, [&](int tid, int nth) {
-    for (int i = tid; i < nat; i += nth) {
-        double vd0 = 0.0, vd1 = 0.0, vd2 = 0.0;
-        for (int j = 0; j < nat; ++j) {
-            vd0 += m_mp_amat_sd[0](i, j) * q_at(j);
-            vd1 += m_mp_amat_sd[1](i, j) * q_at(j);
-            vd2 += m_mp_amat_sd[2](i, j) * q_at(j);
-            vd0 += m_mp_amat_dd[0][0](i, j) * dp_at(0, j)
-                 + m_mp_amat_dd[0][1](i, j) * dp_at(1, j)
-                 + m_mp_amat_dd[0][2](i, j) * dp_at(2, j);
-            vd1 += m_mp_amat_dd[1][0](i, j) * dp_at(0, j)
-                 + m_mp_amat_dd[1][1](i, j) * dp_at(1, j)
-                 + m_mp_amat_dd[1][2](i, j) * dp_at(2, j);
-            vd2 += m_mp_amat_dd[2][0](i, j) * dp_at(0, j)
-                 + m_mp_amat_dd[2][1](i, j) * dp_at(1, j)
-                 + m_mp_amat_dd[2][2](i, j) * dp_at(2, j);
-        }
-        vdp(0, i) = vd0 + 2.0 * m_mp_dkernel[i] * dp_at(0, i);
-        vdp(1, i) = vd1 + 2.0 * m_mp_dkernel[i] * dp_at(1, i);
-        vdp(2, i) = vd2 + 2.0 * m_mp_dkernel[i] * dp_at(2, i);
-    }
-    });
-
     // --- vqp(k, iat) = Σ_jat amat_sq[k](iat,jat)·q_at(jat)
     //                 + 2·qkernel·qpat(k,iat)·mpscale_q[k]
+    // --- vat_extra(iat) = Σ_jat Σ_k amat_sd[k](jat,iat)·dpat(k,jat)
+    //                    + Σ_jat Σ_k amat_sq[k](jat,iat)·qpat(k,jat)
+    //
+    // Claude Generated (Oct 2026): one fused pass over contiguous columns. The interaction
+    // matrices are column-major nat x nat; the former loops read amat(i, j) with j innermost,
+    // i.e. with a stride of nat doubles, in three separate sweeps over 18 matrices. setupMultipole()
+    // builds every pair (i, j) and (j, i) from the same difference vector with its sign flipped,
+    // so amat_sd is exactly antisymmetric, amat_dd and amat_sq are exactly symmetric, and
+    // amat_dd[a][b] == amat_dd[b][a] bit for bit (IEEE negation and commutative products are
+    // exact). Hence amat_sd[k](i,j) == -amat_sd[k](j,i), amat_dd[a][b](i,j) == amat_dd[a][b](j,i)
+    // and amat_sq[k](i,j) == amat_sq[k](j,i), and every term can be read from column i (contiguous
+    // in j). Each accumulator keeps its former summation order over j, but the results are not
+    // bit-identical to the strided loops: last-bit differences in v_qp only (v_dp, v_at stay bit
+    // identical). Cause (GCC 16, -O3 -mavx2 -mfma, 10 geometries): the former strided v_qp loop was
+    // auto-vectorized, so its products were rounded without FMA except a scalar FMA tail of nat%4
+    // iterations, and its kernel term was fma(round(2*qk*qp), mpscale, v); the contiguous loops
+    // contract every j and unroll k. With -ffp-contract=off old and new agree bit for bit. Converged energies of caffeine, water1002 and peo201 agree to 1e-10 Eh.
+    // Threaded over the target atom i as before (disjoint output columns).
+    const int mp_threads = effectiveIntraThreads(nat);
+    pot.v_dp.resize(3, nat);
     pot.v_qp.resize(6, nat);
+    pot.v_at.resize(nat);
+    pot.v_at.setZero();
+    Eigen::MatrixXd& vdp = pot.v_dp;
     Eigen::MatrixXd& vqp = pot.v_qp;
     static const double mpscale_q[6] = {1.0, 2.0, 1.0, 2.0, 2.0, 1.0};
     parallelStripes(mp_threads, [&](int tid, int nth) {
     for (int i = tid; i < nat; i += nth) {
-        for (int k = 0; k < 6; ++k) {
-            double v = 0.0;
-            for (int j = 0; j < nat; ++j)
-                v += m_mp_amat_sq[k](i, j) * q_at(j);
-            vqp(k, i) = v + 2.0 * m_mp_qkernel[i] * qp_at(k, i) * mpscale_q[k];
-        }
-    }
-    });
+        const Eigen::Index off = static_cast<Eigen::Index>(i) * nat;   // column i
+        const double* sd0 = m_mp_amat_sd[0].data() + off;   // = -amat_sd[0](i, j)
+        const double* sd1 = m_mp_amat_sd[1].data() + off;
+        const double* sd2 = m_mp_amat_sd[2].data() + off;
+        const double* d00 = m_mp_amat_dd[0][0].data() + off;
+        const double* d01 = m_mp_amat_dd[0][1].data() + off;   // also amat_dd[1][0]
+        const double* d02 = m_mp_amat_dd[0][2].data() + off;   // also amat_dd[2][0]
+        const double* d11 = m_mp_amat_dd[1][1].data() + off;
+        const double* d12 = m_mp_amat_dd[1][2].data() + off;   // also amat_dd[2][1]
+        const double* d22 = m_mp_amat_dd[2][2].data() + off;
+        const double* sq[6];
+        for (int k = 0; k < 6; ++k) sq[k] = m_mp_amat_sq[k].data() + off;
 
-    // --- vat_extra(iat) = Σ_jat Σ_k amat_sd[k](jat,iat)·dpat(k,jat)
-    //                    + Σ_jat Σ_k amat_sq[k](jat,iat)·qpat(k,jat)
-    pot.v_at.resize(nat);
-    pot.v_at.setZero();
-    parallelStripes(mp_threads, [&](int tid, int nth) {
-    for (int i = tid; i < nat; i += nth) {
+        double vd0 = 0.0, vd1 = 0.0, vd2 = 0.0;
+        double vq[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
         double acc = 0.0;
         for (int j = 0; j < nat; ++j) {
-            acc += m_mp_amat_sd[0](j, i) * dp_at(0, j)
-                 + m_mp_amat_sd[1](j, i) * dp_at(1, j)
-                 + m_mp_amat_sd[2](j, i) * dp_at(2, j);
+            const double qj = q_at(j);
+            const double p0 = dp_at(0, j), p1 = dp_at(1, j), p2 = dp_at(2, j);
+            // amat_sd[k](i,j) = -sd_k[j]; a + (-x)·y == a - x·y exactly.
+            vd0 -= sd0[j] * qj;
+            vd1 -= sd1[j] * qj;
+            vd2 -= sd2[j] * qj;
+            vd0 += d00[j] * p0 + d01[j] * p1 + d02[j] * p2;
+            vd1 += d01[j] * p0 + d11[j] * p1 + d12[j] * p2;
+            vd2 += d02[j] * p0 + d12[j] * p1 + d22[j] * p2;
             for (int k = 0; k < 6; ++k)
-                acc += m_mp_amat_sq[k](j, i) * qp_at(k, j);
+                vq[k] += sq[k][j] * qj;
+            acc += sd0[j] * p0 + sd1[j] * p1 + sd2[j] * p2;
+            for (int k = 0; k < 6; ++k)
+                acc += sq[k][j] * qp_at(k, j);
         }
-        pot.v_at(i) += acc;  // add to existing v_at (from third-order, etc.)
+        vdp(0, i) = vd0 + 2.0 * m_mp_dkernel[i] * dp_at(0, i);
+        vdp(1, i) = vd1 + 2.0 * m_mp_dkernel[i] * dp_at(1, i);
+        vdp(2, i) = vd2 + 2.0 * m_mp_dkernel[i] * dp_at(2, i);
+        for (int k = 0; k < 6; ++k)
+            vqp(k, i) = vq[k] + 2.0 * m_mp_qkernel[i] * qp_at(k, i) * mpscale_q[k];
+        pot.v_at(i) += acc;
     }
     });
 }
@@ -424,6 +461,7 @@ void XTB::addMultipolePotential(Potential& pot) const
 double XTB::energyMultipole() const
 {
     if (!m_mp_initialized) return 0.0;
+    ensureHostMultipoleMatrices();
     const int nat = m_atomcount;
     double e = 0.0;
 
@@ -436,23 +474,35 @@ double XTB::energyMultipole() const
     // Measured over polymer: the total energy agrees to 12 decimals and the gradient to 1e-14.
     const int e_threads = effectiveIntraThreads(nat);
     std::vector<double> e_part(e_threads > 1 ? e_threads : 0, 0.0);
+    // Claude Generated (Oct 2026): column-i reads via the exact (anti)symmetry of the
+    // interaction matrices (see addMultipolePotential), same summation order over j; last-bit
+    // differences from the former strided loop are possible (see addMultipolePotential).
     parallelStripes(e_threads, [&](int tid, int nth) {
     double e_loc = 0.0;
     for (int i = tid; i < nat; i += nth) {
         double& e = e_loc;
+        const Eigen::Index off = static_cast<Eigen::Index>(i) * nat;   // column i
+        const double* sd[3];
+        for (int k = 0; k < 3; ++k) sd[k] = m_mp_amat_sd[k].data() + off;   // = -amat_sd[k](i, j)
+        const double* dd[3][3];
+        for (int a = 0; a < 3; ++a)
+            for (int b = 0; b < 3; ++b)   // amat_dd[a][b] == amat_dd[b][a]: 6 distinct columns
+                dd[a][b] = m_mp_amat_dd[std::min(a, b)][std::max(a, b)].data() + off;
+        const double* sq[6];
+        for (int k = 0; k < 6; ++k) sq[k] = m_mp_amat_sq[k].data() + off;
         for (int j = 0; j < nat; ++j) {
-            // SD: dpat(k,i) · amat_sd[k](i,j) · qat(j)
+            // SD: dpat(k,i) · amat_sd[k](i,j) · qat(j); (x·(-s))·y == -((x·s)·y) exactly
             for (int k = 0; k < 3; ++k)
-                e += m_wfn.dp_at(k, i) * m_mp_amat_sd[k](i, j) * m_wfn.q_at(j);
+                e -= m_wfn.dp_at(k, i) * sd[k][j] * m_wfn.q_at(j);
 
             // DD: 0.5 · dpat(a,i) · amat_dd[a][b](i,j) · dpat(b,j)
             for (int a = 0; a < 3; ++a)
                 for (int b = 0; b < 3; ++b)
-                    e += 0.5 * m_wfn.dp_at(a, i) * m_mp_amat_dd[a][b](i, j) * m_wfn.dp_at(b, j);
+                    e += 0.5 * m_wfn.dp_at(a, i) * dd[a][b][j] * m_wfn.dp_at(b, j);
 
             // SQ: qpat(k,i) · amat_sq[k](i,j) · qat(j)
             for (int k = 0; k < 6; ++k)
-                e += m_wfn.qp_at(k, i) * m_mp_amat_sq[k](i, j) * m_wfn.q_at(j);
+                e += m_wfn.qp_at(k, i) * sq[k][j] * m_wfn.q_at(j);
         }
         // On-site dipole XC: dkernel · dpat(k,i)²
         for (int k = 0; k < 3; ++k)

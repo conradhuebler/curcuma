@@ -9,8 +9,8 @@
 
 `-method gfn1|gfn2 -gpu cuda` runs the native xTB tight-binding solver with its
 heavy linear algebra on an NVIDIA GPU (cuSOLVER / cuBLAS), mirroring the existing
-GFN-FF CUDA stack. `-gpu auto` uses the GPU when the build and a device are
-available, else falls back to the CPU. The CPU path (`XTB` class, all `xtb_*.cpp`)
+GFN-FF CUDA stack. `-gpu cuda` (or `rocm`, `vulkan`) uses the GPU when the plugin and a device are
+available, else falls back to the CPU with a warning (`-gpu auto` was removed Oct 26, 2026). The CPU path (`XTB` class, all `xtb_*.cpp`)
 is unchanged and `#ifdef`-free — the GPU variant is a sibling, selected by the
 factory, that **owns** a validated CPU `XTB` (host setup + properties) and a
 device context (`XtbGpuContext`, cuSOLVER/cuBLAS handles + one stream).

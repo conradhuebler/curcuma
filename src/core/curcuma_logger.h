@@ -92,7 +92,13 @@ public:
     static std::size_t active_sink_count();
 
     /// Process-wide default, as before. The CLI sets this once.
-    static void set_verbosity(int level) { m_verbosity = level; }
+    // Claude Generated (Oct 16, 2026): also updates this thread's override when one is active (defined in
+    // curcuma_logger.cpp). set_verbosity() used to change the global level only; since the per-thread override
+    // (d2cbb701, Sep 9) every set_verbosity() call made inside a CurcumaMethod scope on that thread was
+    // ineffective, because get_verbosity() reads the override first. About 80 call sites (silence a
+    // section, re-assert the level after setup, restore) assume the call takes effect on the calling thread;
+    // seven cli_confscan tests and cli_gfnff_06/07 failed on it. Threads without an override are unchanged.
+    static void set_verbosity(int level);
 
     // Claude Generated 2026 - Per-thread override.
     //

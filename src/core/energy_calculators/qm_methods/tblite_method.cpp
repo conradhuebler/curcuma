@@ -31,6 +31,20 @@ TBLiteMethod::TBLiteMethod(const std::string& method_name, const json& config)
         // Claude Generated: Create ConfigManager for TBLite interface (Phase 3B)
         ConfigManager tblite_config("tblite", config);
         m_tblite = std::make_unique<TBLiteInterface>(tblite_config);
+        // Oct 2026: MethodFactory::applySharedScfScope has copied -scf_max_iterations / -scf_damping
+        // into the tblite scope, so a key present there is a user value.
+        {
+            auto user_sets = [&](std::initializer_list<const char*> keys) {
+                if (!config.contains("tblite") || !config["tblite"].is_object())
+                    return false;
+                for (const char* k : keys)
+                    if (config["tblite"].contains(k))
+                        return true;
+                return false;
+            };
+            m_tblite->setUserScfSettings(user_sets({ "max_iterations", "SCFmaxiter" }),
+                                         user_sets({ "damping", "tb_damping" }));
+        }
 
         // CRITICAL: Set the specific method name in TBLiteInterface
         CurcumaLogger::info("Setting TBLite method to: " + method_name);

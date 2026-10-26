@@ -686,8 +686,7 @@ json CLI2Json(int argc, char** argv)
     // both at top level (controller[param]) and module level (controller[module][param])
     // ENHANCED: Added "method" to support global energy method specification
     // Claude Generated (March 2026): Added "gpu" for GPU acceleration control.
-    //   -gpu <backend>: none (default, CPU) | cuda | rocm | vulkan | auto.
-    //   "auto" picks the first compiled GPU backend (cuda > rocm > vulkan), else CPU.
+    //   -gpu <backend>: none (default, CPU) | cuda | rocm | vulkan. ("auto" was removed Oct 26, 2026: warning, CPU.)
     //   Applies to gfn1/gfn2 (USE_*_XTB builds) and gfnff (USE_* builds); an explicit
     //   backend not compiled in warns and falls back to CPU.
     // Claude Generated (Jul 2026): Added "charge","spin" — molecular charge/spin must reach
@@ -960,6 +959,28 @@ json CLI2Json(int argc, char** argv)
             }
             if (matches_current)
                 continue;
+
+            // Claude Generated (Oct 16, 2026): a name several modules register (-electronic_temperature:
+            // tblite, ulysses, xtb) is routed to the module of the selected -method when that module is
+            // one of the owners. Before, it stayed in the command module with a warning and no method
+            // ever read it (-electronic_temperature 40000 did not change a native gfn2 energy).
+            if (owners.size() > 1 && key.contains("method") && key["method"].is_string()) {
+                std::string method_scope = MethodFactory::parameterScopeForMethod(key["method"].get<std::string>());
+                // Oct 2026: a shared SCF knob (-max_iterations, -diis_start: module "scf" via aliases, and others)
+                // goes to "scf" when the method's own scope does not register it but the method reads "scf".
+                if (std::find(owners.begin(), owners.end(), method_scope) == owners.end()
+                    && std::find(owners.begin(), owners.end(), std::string("scf")) != owners.end()
+                    && MethodFactory::readsSharedScfScope(key["method"].get<std::string>()))
+                    method_scope = "scf";
+                if (!method_scope.empty()
+                    && std::find(owners.begin(), owners.end(), method_scope) != owners.end()) {
+                    CurcumaLogger::info("CLI flag -" + pname + " is registered in several modules; routed to -"
+                        + method_scope + "." + pname + " for the selected method \"" + key["method"].get<std::string>() + "\".");
+                    reroute_targets[method_scope][pname] = it.value();
+                    reroute_remove.push_back(pname);
+                    continue;
+                }
+            }
 
             if (owners.size() > 1) {
                 std::string candidates;

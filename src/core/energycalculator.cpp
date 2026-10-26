@@ -274,30 +274,6 @@ void EnergyCalculator::setMolecule(const Mol& mol) {
         return;
     }
     
-    // Claude Generated (Oct 2026): -gpu auto does not use a ROCm GPU for small native GFN-FF systems.
-    // Measured on an RX 9060 XT against 10 CPU threads (MD step, gfnff): 24 atoms 1.08 vs 0.08 ms,
-    // 114 atoms 2.05 vs 0.45 ms, 600 atoms 2.69 vs 1.77 ms, 1002 atoms 3.39 vs 4.14 ms (docs/
-    // ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md), i.e. the break-even is near 900 atoms. An explicit
-    // -gpu rocm is never overridden. CUDA is not touched (break-even not measured). The GPU workspace
-    // is created lazily at the first calculation, so replacing the method here costs nothing.
-    if (m_method && (m_method_name == "gfnff" || m_method_name == "gfnff-fast")) {
-        std::string gpu_req = m_controller.value("gpu", std::string("none"));
-        std::transform(gpu_req.begin(), gpu_req.end(), gpu_req.begin(), ::tolower);
-        int min_atoms = 900;
-        if (m_controller.contains("gfnff") && m_controller["gfnff"].is_object())
-            min_atoms = m_controller["gfnff"].value("gpu_auto_min_atoms", min_atoms);
-        if (gpu_req == "auto" && min_atoms > 0 && mol.m_number_atoms < min_atoms
-            && gpu_plugin::firstAvailable() == "rocm") {
-            json cpu_config = m_controller;
-            cpu_config["gpu"] = "none";
-            if (createMethod(m_method_name, cpu_config)) {
-                CurcumaLogger::info(fmt::format("GFN-FF: -gpu auto uses the CPU for {} atoms (< {}, ROCm break-even; "
-                                                "-gpu rocm forces the GPU, -gfnff.gpu_auto_min_atoms changes the limit)",
-                                                mol.m_number_atoms, min_atoms));
-            }
-        }
-    }
-
     try {
         m_mol = mol;
         m_atoms = mol.m_number_atoms;
@@ -324,17 +300,21 @@ void EnergyCalculator::setMolecule(const Mol& mol) {
         if (m_method->requestsCpuFallback()) {
             json cpu_config = m_controller;
             cpu_config["gpu"] = "none";
-            curcuma::reportGpuFallback("GFN-FF: charged system with several fragments needs frag_charge_model ensemble, "
-                                       "calculation on the CPU",
-                                       fmt::format("{} atoms, charge {}; -gfnff.frag_charge_model reference keeps the GPU",
-                                                   mol.m_number_atoms, mol.m_charge));
+            const std::string why = m_method->cpuFallbackReason();
+            curcuma::reportGpuFallback(!why.empty() ? why
+                                       : "GFN-FF: charged system with several fragments needs frag_charge_model ensemble, "
+                                         "calculation on the CPU",
+                                       !why.empty() ? fmt::format("{} atoms; -gfnff.solvent none keeps the GPU", mol.m_number_atoms)
+                                                    : fmt::format("{} atoms, charge {}; -gfnff.frag_charge_model reference keeps the GPU",
+                                                                  mol.m_number_atoms, mol.m_charge));
             if (!createMethod(m_method_name, cpu_config) || !m_method->setMolecule(mol)) {
                 CurcumaLogger::error("Failed to set molecule in the CPU method after the GPU fallback");
                 handleMethodError("setMolecule in CPU method after GPU fallback");
                 return;
             }
-            CurcumaLogger::info("GFN-FF: charged system with several fragments, GPU path does not apply frag_charge_model "
-                                "ensemble - CPU method used (-gfnff.frag_charge_model reference keeps the GPU)");
+            CurcumaLogger::info(!why.empty() ? why + " - CPU method used"
+                : std::string("GFN-FF: charged system with several fragments, GPU path does not apply frag_charge_model "
+                              "ensemble - CPU method used (-gfnff.frag_charge_model reference keeps the GPU)"));
         }
 
         m_initialized = true;

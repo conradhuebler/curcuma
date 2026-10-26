@@ -39,7 +39,9 @@ public:
     void setThreadCount(int threads) override { (void)threads; }
     void setParameters(const json& params) override { (void)params; }
     json getParameters() const override { return json{}; }
-    bool hasError() const override { return false; }
+    bool hasError() const override { return !m_error_message.empty(); }
+    void clearError() override { m_error_message.clear(); }
+    std::string getErrorMessage() const override { return m_error_message; }
 
     json getEnergyDecomposition() const;
     bool saveToFile(const std::string& filename) const override { return false; }
@@ -50,6 +52,7 @@ private:
     bool m_calculation_done;
     double m_last_energy;
     std::string m_method_name;
+    std::string m_error_message;
 
-    static json getDefaultConfig();
+    void applyScfConfig(const json& config);
 };

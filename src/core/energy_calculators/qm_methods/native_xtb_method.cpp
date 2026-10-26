@@ -44,9 +44,10 @@ json NativeXtbMethod::getDefaultConfig(MethodType method)
 {
     // SCF-convergence defaults are identical for GFN1 and GFN2; only the
     // dispersion correction (and the GFN2-only D4 charge source) differ.
+    // The SCF iteration limit is not set here: XTB keeps its own default (150), changed
+    // only by scf_max_iterations (module scf) or -xtb.max_iterations (applyXtbScfConfig).
     json cfg = {
-        { "scf_max_iterations", 100 },   // Maximum SCF iterations
-        { "scf_threshold", 1.0e-5 },     // Convergence threshold on max|dq_shell|.
+        { "scf_threshold", 1.0e-5 },    // Convergence threshold on max|dq_shell|.
                                          // Energy bit-identical to 1e-6 (<1e-8 Eh) but
                                          // converges ~10-20% fewer iterations. The default
                                          // eeq D4 gradient is insensitive; MD/opt or the

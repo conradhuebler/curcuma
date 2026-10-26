@@ -45,7 +45,7 @@ NDDO::NDDO(NDDOMethodType method_type)
     , m_energy_core_repulsion(0.0)
     , m_scf_max_iterations(100)
     , m_scf_threshold(1.0e-6)
-    , m_scf_damping(0.4)
+    , m_scf_mixing(0.6)   // P = 0.6*P_new + 0.4*P_old
     , m_scf_converged(false)
 {
     const char* name = NDDOParams::methodName(m_method_type);
@@ -211,21 +211,50 @@ double NDDO::Calculation(bool gradient)
 {
     const char* name = NDDOParams::methodName(m_method_type);
 
+    // The numerical gradient calls Calculation() again for every displacement; an error of
+    // any of these SCFs must survive until the outer call returns (Claude Generated, Oct 2026).
+    if (m_calc_depth == 0)
+        m_scf_error.clear();
+    struct DepthGuard {
+        int& d;
+        explicit DepthGuard(int& x) : d(x) { ++d; }
+        ~DepthGuard() { --d; }
+    } depth_guard(m_calc_depth);
+
     try {
         if (CurcumaLogger::get_verbosity() >= 1) {
             CurcumaLogger::info(fmt::format("Starting {} energy calculation", name));
         }
 
-        bool scf_success = runSCF();
-
-        if (!scf_success) {
-            CurcumaLogger::error(fmt::format("{} SCF did not converge", name));
+        if (!runSCF()) {
+            m_scf_error = fmt::format("{} SCF: eigenvalue solution failed", name);
             return 0.0;
+        }
+
+        // Claude Generated (Oct 2026): an unconverged SCF is an error, as for native gfn1/gfn2
+        // (xtb_native.cpp); it used to log and return E = 0.0 as if it were a result.
+        if (!m_scf_converged) {
+            if (!m_scf_allow_unconverged) {
+                if (m_scf_error.empty())
+                    m_scf_error = fmt::format("{} SCF did not converge within {} iterations (last ||dP||_F = {:.2e}, "
+                                              "threshold {:.2e}); -scf_allow_unconverged true accepts the unconverged energy",
+                                              name, m_scf_max_iterations, m_scf_last_dP, m_scf_threshold);
+                return 0.0;
+            }
+            if (CurcumaLogger::get_verbosity() >= 1)
+                CurcumaLogger::warn(fmt::format("{} SCF not converged after {} iterations (||dP||_F = {:.2e}); "
+                                                "the last energy is used (-scf_allow_unconverged true)",
+                                                name, m_scf_max_iterations, m_scf_last_dP));
         }
 
         m_energy_electronic = calculateElectronicEnergy();
         m_energy_core_repulsion = calculateCoreRepulsionEnergy();
         m_total_energy = m_energy_electronic + m_energy_core_repulsion;
+
+        if (!std::isfinite(m_total_energy)) {
+            m_scf_error = fmt::format("{} energy is not finite", name);
+            return 0.0;
+        }
 
         // DEBUG: Print converged density and Fock for small molecules
         if (CurcumaLogger::get_verbosity() >= 3 && m_nbasis <= 10) {
@@ -287,7 +316,7 @@ double NDDO::Calculation(bool gradient)
         return m_total_energy;
 
     } catch (const std::exception& e) {
-        CurcumaLogger::error(fmt::format("{} calculation failed: {}", name, e.what()));
+        m_scf_error = fmt::format("{} calculation failed: {}", name, e.what());
         return 0.0;
     }
 }
@@ -814,15 +843,22 @@ bool NDDO::runSCF()
     // Claude Generated: NDDO SCF with Pulay DIIS acceleration
     // Reference: P. Pulay, Chem. Phys. Lett. 73, 393 (1980)
     //
-    // DIIS error vector (ZDO/S=I basis): e = F*P - P*F
-    // Stores last diis_max Fock matrices and error vectors
-    // Starts DIIS after diis_start simple iterations
+    // DIIS error vector (ZDO/S=I basis): e = F*P - P*F.
+    // The history is seeded one iteration before DIIS starts; from iteration m_diis_start on
+    // the Fock matrix is extrapolated over the last m_diis_subspace entries (defaults 3 and 8).
+    // Convergence: ||P_new - P||_F < m_scf_threshold. Density update after each diagonalisation:
+    // P = m_scf_mixing * P_new + (1 - m_scf_mixing) * P_old.
+    //
+    // Returns false only when the eigensolver fails; convergence is reported in m_scf_converged.
+    // Oct 2026: limits, threshold, mixing and DIIS settings come from the shared "scf" scope.
     const char* name = NDDOParams::methodName(m_method_type);
     m_density = Matrix::Zero(m_nbasis, m_nbasis);
+    m_scf_converged = false;
+    m_scf_last_dP = 0.0;
 
-    constexpr int diis_max = 8;    // DIIS history depth
-    constexpr int diis_start = 3;  // iterations before DIIS kicks in
-
+    // Inline DIIS kept on purpose: DIISAccelerator (QR solve, coefficient-sum check) moved the
+    // converged energies by up to 1.8e-7 Eh (pm3/am1/mndo, 6 molecules), above the 1e-8 Eh
+    // agreement required for the Ulysses reference tests (Oct 2026).
     std::vector<Matrix> diis_fock;
     std::vector<Matrix> diis_error;
 
@@ -831,7 +867,7 @@ bool NDDO::runSCF()
 
         // DIIS: build error vector e = F*P - P*F, extrapolate Fock matrix
         Matrix fock_use = m_fock;
-        if (iter >= diis_start && !diis_fock.empty()) {
+        if (m_scf_use_diis && iter >= m_diis_start && !diis_fock.empty()) {
             // Error vector: commutator [F, P] in the ZDO (S=I) basis
             Matrix err = m_fock * m_density - m_density * m_fock;
 
@@ -839,7 +875,7 @@ bool NDDO::runSCF()
             diis_error.push_back(err);
 
             // Trim history
-            if ((int)diis_fock.size() > diis_max) {
+            if ((int)diis_fock.size() > m_diis_subspace) {
                 diis_fock.erase(diis_fock.begin());
                 diis_error.erase(diis_error.begin());
             }
@@ -859,7 +895,7 @@ bool NDDO::runSCF()
             Eigen::VectorXd rhs = Eigen::VectorXd::Zero(n + 1);
             rhs(n) = -1.0;
 
-            // Solve via Cholesky decomposition (B is symmetric)
+            // Solve via LDLT decomposition (B is symmetric)
             Eigen::VectorXd c = B.ldlt().solve(rhs);
 
             // Check solution validity
@@ -870,13 +906,11 @@ bool NDDO::runSCF()
                     fock_use += c(i) * diis_fock[i];
                 }
             }
-        } else {
-            // Pre-DIIS: store for history
-            if (iter == diis_start - 1) {
-                Matrix err = m_fock * m_density - m_density * m_fock;
-                diis_fock.push_back(m_fock);
-                diis_error.push_back(err);
-            }
+        } else if (m_scf_use_diis && iter == m_diis_start - 1) {
+            // Seed the history one iteration before DIIS starts
+            Matrix err = m_fock * m_density - m_density * m_fock;
+            diis_fock.push_back(m_fock);
+            diis_error.push_back(err);
         }
 
         // NDDO uses standard eigenvalue problem F*C = eps*C (ZDO: S = I)
@@ -891,6 +925,7 @@ bool NDDO::runSCF()
 
         Matrix density_new = buildDensityMatrix(m_mo, m_energies);
         double delta_P = (density_new - m_density).norm();
+        m_scf_last_dP = delta_P;
 
         if (CurcumaLogger::get_verbosity() >= 3) {
             double E_elec_iter = 0.0;
@@ -916,13 +951,12 @@ bool NDDO::runSCF()
             return true;
         }
 
-        // Simple damping for density update (pre-DIIS and as fallback)
-        m_density = m_scf_damping * m_density + (1.0 - m_scf_damping) * density_new;
+        // Damped density update (also during DIIS)
+        m_density = (1.0 - m_scf_mixing) * m_density + m_scf_mixing * density_new;
     }
 
-    CurcumaLogger::warn(fmt::format("{} SCF did not converge in {} iterations", name, m_scf_max_iterations));
     m_scf_converged = false;
-    return false;
+    return true;
 }
 
 // =================================================================================

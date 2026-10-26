@@ -296,7 +296,12 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
     auto t_cn_start = std::chrono::high_resolution_clock::now();
     if (m_use_d4_covalent_cn) {
         // GFN2: dftd4 EN-weighted covalent CN (no log-cap) for the C6 interpolation.
-        m_cn_values = curcuma::dispersion::computeD4CovalentCN(m_atoms, geometry_bohr);
+        if (m_precomputed_cn.size() == m_atoms.size()) {
+            m_cn_values = std::move(m_precomputed_cn);     // computed on the device by the caller (Oct 2026)
+            m_precomputed_cn.clear();
+        } else {
+            m_cn_values = curcuma::dispersion::computeD4CovalentCN(m_atoms, geometry_bohr);
+        }
     } else {
         m_cn_values = CNCalculator::calculateGFNFFCN(m_atoms, geometry_bohr);
     }
@@ -1567,12 +1572,26 @@ D4ParameterGenerator::buildAtomRefW(int Z, size_t atom_idx, double q,
         expw[ir] = ew; expd[ir] = ed;
         norm += ew; dnorm += ed;
     }
-    const double ninv = (norm > 0.0) ? 1.0 / norm : 0.0;
+    // dftd4 weight_references: norm = 1/sum. When the CN lies so far beyond every reference
+    // that every Gaussian underflows (sum = 0, e.g. CN > ~15 for C in compressed geometries),
+    // gwk is exceptional and dftd4 puts the whole weight on the reference with the largest
+    // (covalent) CN. Returning gwk = 0 instead zeroed C6 for that atom: the energy jumped and
+    // the ATM CN chain rule divided 0/0 (NaN gradient). Claude Generated (Oct 2026).
+    double maxcn = 0.0;
+    for (int ir = 0; ir < nref; ++ir) maxcn = std::max(maxcn, refcovcn[ir]);
+    const double ninv = 1.0 / norm;
 
+    // d(gwk)/dCN = (expd - gwk*dnorm)/norm. Claude Generated (Oct 2026): written as
+    // expd*ninv - gwk*(dnorm*ninv). The dftd4 order ninv*(expd - expw*dnorm*ninv) forms
+    // expw*dnorm first; for CN far above every reference (norm < ~1e-154) that product
+    // underflows to 0 while ninv is huge, so dgwk became -2*wf*(CN - refcn) (~ -80 for N
+    // at CN 10.5) although gwk is constant there: D4 gradient off by up to 2.4 Eh/Bohr on
+    // caffeine scaled by 0.45-0.55. Both factors stay finite here; the energy is unchanged.
+    const double dnorm_n = dnorm * ninv;
     for (int ir = 0; ir < nref; ++ir) {
         double gwk  = expw[ir] * ninv;
-        double dgwk = ninv * (expd[ir] - expw[ir] * dnorm * ninv);
-        if (!std::isfinite(gwk))  gwk  = 0.0;
+        double dgwk = expd[ir] * ninv - gwk * dnorm_n;
+        if (!std::isfinite(gwk))  gwk  = (refcovcn[ir] == maxcn) ? 1.0 : 0.0;
         if (!std::isfinite(dgwk)) dgwk = 0.0;
         const double qref = m_refq[elem][ir] + zeff;
         const double qmod = q + zeff;
