@@ -637,9 +637,9 @@ void MethodFactory::applySharedScfScope(json& config, const std::string& method_
             const double v = num ? value.get<double>() : 0.0;
             if ((canon == "scf_threshold" || canon == "scf_damping") && num && v <= 0.0)
                 continue;
-            if ((canon == "scf_max_iterations" || canon == "diis_subspace") && num && std::lround(v) <= 0)
+            if ((canon == "scf_max_iterations" || canon == "scf_diis_subspace") && num && std::lround(v) <= 0)
                 continue;
-            if (canon == "diis_start" && num && std::lround(v) < 0)
+            if (canon == "scf_diis_start" && num && std::lround(v) < 0)
                 continue;
             if (canon == "scf_mode" && value.is_string() && lower(value.get<std::string>()) == "auto")
                 continue;

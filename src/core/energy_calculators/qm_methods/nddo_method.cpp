@@ -90,13 +90,13 @@ json NDDOMethod::getEnergyDecomposition() const
  */
 void NDDOMethod::applyScfConfig(const json& config)
 {
-    // diis_start / diis_subspace are read from the scf scope only: optimiser configs carry
+    // scf_diis_start / scf_diis_subspace carry the scf_ prefix because optimiser configs carry
     // their own top-level diis_start, which must not reach the SCF.
     auto find = [&](const char* key) -> const json* {
         if (config.contains("scf") && config["scf"].is_object() && config["scf"].contains(key))
             return &config["scf"][key];
         const std::string k(key);
-        if (k.rfind("diis_", 0) != 0 && config.is_object() && config.contains(key))
+        if (config.is_object() && config.contains(key))
             return &config[key];
         return nullptr;
     };
@@ -112,9 +112,9 @@ void NDDOMethod::applyScfConfig(const json& config)
             throw std::invalid_argument(fmt::format("scf_damping {} is outside (0, 1] for {}", d, m_method_name));
         m_nddo->setScfDamping(d);
     }
-    if (const json* v = find("diis_start"); v && v->is_number() && as_int(*v) >= 0)
+    if (const json* v = find("scf_diis_start"); v && v->is_number() && as_int(*v) >= 0)
         m_nddo->setDiisStart(as_int(*v));
-    if (const json* v = find("diis_subspace"); v && v->is_number() && as_int(*v) > 0)
+    if (const json* v = find("scf_diis_subspace"); v && v->is_number() && as_int(*v) > 0)
         m_nddo->setDiisSubspace(std::max(2, as_int(*v)));
     if (const json* v = find("scf_allow_unconverged"); v) {
         if (v->is_boolean())
