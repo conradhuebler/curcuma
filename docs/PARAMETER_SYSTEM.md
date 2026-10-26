@@ -294,7 +294,7 @@ new module. The old name stays a JSON scope and dotted CLI prefix (`-eeq_solver.
 
 Module `scf` (`src/core/energy_calculators/qm_methods/scf_parameters.h`) holds the SCF knobs several methods read:
 `scf_threshold`, `scf_max_iterations` (aliases `max_iterations`, `SCFmaxiter`), `scf_damping`, `scf_allow_unconverged`,
-`scf_mode`, `diis_start`, `diis_subspace`. Their registry defaults (0, -1, `auto`) mean "the method's own value", so each
+`scf_mode`, `scf_diis_start` (alias `diis_start`), `scf_diis_subspace` (alias `diis_subspace`). Their registry defaults (0, -1, `auto`) mean "the method's own value", so each
 method keeps its default. `MethodFactory::applySharedScfScope()` runs on every method config: it rewrites aliases in
 `controller["scf"]` to canonical names, drops the default markers, and copies `scf_max_iterations`/`scf_damping` onto the
 external wrappers' own names (`tblite.max_iterations`, `tblite.damping`, `xtb.max_iterations`, `ulysses.max_iterations`).

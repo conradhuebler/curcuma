@@ -26,6 +26,6 @@ BEGIN_PARAMETER_DEFINITION(scf)
     PARAM(scf_damping, Double, 0.0, "Fraction of the new charges (gfn1/gfn2, tblite) or density (pm3/am1/mndo/pm6) taken per step; 0 uses the method's own (0.4, NDDO 0.6). Lower values are more robust and slower.", "SCF", {})
     PARAM(scf_allow_unconverged, Bool, false, "Accept an SCF that reaches the iteration limit without converging (gfn1/gfn2, pm3/am1/mndo/pm6); by default this is an error. Non-finite energies are always an error.", "SCF", {})
     PARAM(scf_mode, String, "auto", "SCF strategy; 'auto' is broyden for gfn1/gfn2 and diis for pm3/am1/mndo/pm6. gfn1/gfn2 also take diis, plain, level-shift; NDDO takes plain (damping only).", "SCF", {})
-    PARAM(diis_start, Int, -1, "Damped iterations before Pulay DIIS starts; -1 uses the method's own (gfn1/gfn2 5, in scf_mode diis and level-shift; pm3/am1/mndo/pm6 3).", "SCF", {})
-    PARAM(diis_subspace, Int, 0, "Number of Fock matrices kept in the DIIS history; 0 uses the method's own (gfn1/gfn2 6, pm3/am1/mndo/pm6 8).", "SCF", {})
+    PARAM(scf_diis_start, Int, -1, "Damped iterations before Pulay DIIS starts; -1 uses the method's own (gfn1/gfn2 5, in scf_mode diis and level-shift; pm3/am1/mndo/pm6 3). The name carries the scf_ prefix because -diis_start belongs to the geometry optimiser (-sp, -opt).", "SCF", {"diis_start"})
+    PARAM(scf_diis_subspace, Int, 0, "Number of Fock matrices kept in the DIIS history; 0 uses the method's own (gfn1/gfn2 6, pm3/am1/mndo/pm6 8).", "SCF", {"diis_subspace"})
 END_PARAMETER_DEFINITION

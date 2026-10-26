@@ -967,7 +967,7 @@ json CLI2Json(int argc, char** argv)
             // ever read it (-electronic_temperature 40000 did not change a native gfn2 energy).
             if (owners.size() > 1 && key.contains("method") && key["method"].is_string()) {
                 std::string method_scope = MethodFactory::parameterScopeForMethod(key["method"].get<std::string>());
-                // Oct 2026: a shared SCF knob (-max_iterations, -diis_start: module "scf" and others)
+                // Oct 2026: a shared SCF knob (-max_iterations, -diis_start: module "scf" via aliases, and others)
                 // goes to "scf" when the method's own scope does not register it but the method reads "scf".
                 if (std::find(owners.begin(), owners.end(), method_scope) == owners.end()
                     && std::find(owners.begin(), owners.end(), std::string("scf")) != owners.end()

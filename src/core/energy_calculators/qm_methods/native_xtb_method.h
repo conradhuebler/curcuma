@@ -37,7 +37,7 @@ BEGIN_PARAMETER_DEFINITION(xtb)
     PARAM(solvent_model, String, "none", "Native solvation model: 'alpb' or 'gbsa' (numeric codes 0-3 accepted); 'none' with a solvent set means ALPB. 'cpcm' has no native implementation and runs in the gas phase with a warning.", "Solvation", {})
     PARAM(solvent_epsilon, Double, -1.0, "Dielectric constant for CPCM; -1 takes it from the solvent name. No effect on the native solver, whose ALPB and GBSA take it from the solvent parameters.", "Solvation", {})
     // SCF knobs shared with other methods (scf_threshold, scf_max_iterations, scf_damping,
-    // scf_allow_unconverged, scf_mode, diis_start, diis_subspace) are in module "scf"
+    // scf_allow_unconverged, scf_mode, scf_diis_start, scf_diis_subspace) are in module "scf"
     // (scf_parameters.h); -xtb.<name> still overrides them for gfn1/gfn2. Claude Generated (Oct 2026).
     PARAM(scf_guess, String, "eeq", "Initial charges: 'eeq' (EEQ charges, fewer iterations on large or polar systems), 'h0' (bare Hamiltonian) or 'fragments' (converge each molecule alone first; for large neutral clusters of small molecules).", "SCF", {})
     PARAM(sto6g_legacy_4sp, Bool, false, "Use xtb's older STO-6G tables for the 4s/4p shells instead of tblite's. Affects K, Ca and Ge-Kr only; set true to reproduce the xtb binary on these elements.", "Reference", {})

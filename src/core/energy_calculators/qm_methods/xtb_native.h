@@ -1843,8 +1843,16 @@ inline void applyXtbScfConfig(XTB& xtb, const json& cfg)
     lookup("eigensolver",  [&](const json& v){ if (v.is_string()) xtb.setEigensolver(v.get<std::string>()); });
     lookup("scf_damping",  [&](const json& v){ if (v.is_number()) xtb.setScfDamping(v.get<double>()); });
     lookup("scf_threshold",[&](const json& v){ if (v.is_number()) xtb.setScfThreshold(v.get<double>()); });
-    lookup("diis_start",   [&](const json& v){ if (v.is_number()) xtb.setDiisStart(static_cast<int>(std::lround(v.get<double>()))); });   // CLI numbers arrive as double
-    lookup("diis_subspace",[&](const json& v){ if (v.is_number()) xtb.setDiisSubspace(static_cast<int>(std::lround(v.get<double>()))); });
+    // scf_diis_start / scf_diis_subspace (the scf_ prefix keeps them apart from the optimiser's -diis_start); the old
+    // spellings -xtb.diis_start / -xtb.diis_subspace stay valid in the xtb scope (Oct 26, 2026).
+    lookup("scf_diis_start",   [&](const json& v){ if (v.is_number()) xtb.setDiisStart(static_cast<int>(std::lround(v.get<double>()))); });   // CLI numbers arrive as double
+    lookup("scf_diis_subspace",[&](const json& v){ if (v.is_number()) xtb.setDiisSubspace(static_cast<int>(std::lround(v.get<double>()))); });
+    if (cfg.contains("xtb") && cfg["xtb"].is_object()) {
+        if (!cfg["xtb"].contains("scf_diis_start") && cfg["xtb"].contains("diis_start") && cfg["xtb"]["diis_start"].is_number())
+            xtb.setDiisStart(static_cast<int>(std::lround(cfg["xtb"]["diis_start"].get<double>())));
+        if (!cfg["xtb"].contains("scf_diis_subspace") && cfg["xtb"].contains("diis_subspace") && cfg["xtb"]["diis_subspace"].is_number())
+            xtb.setDiisSubspace(static_cast<int>(std::lround(cfg["xtb"]["diis_subspace"].get<double>())));
+    }
     lookup("level_shift",  [&](const json& v){ if (v.is_number()) xtb.setLevelShift(v.get<double>()); });
     lookup("warm_start",   [&](const json& v){ if (v.is_boolean()) xtb.setWarmStart(v.get<bool>()); });
     lookup("keep_diis",    [&](const json& v){ if (v.is_boolean()) xtb.setKeepDiis(v.get<bool>()); });

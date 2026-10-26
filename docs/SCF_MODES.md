@@ -89,14 +89,14 @@ and wins over `-scf_threshold` / `-scf.scf_threshold` (precedence: method scope,
 | `-scf_damping` | `0.4` | `0.6` | Fraction of the new charges (gfn) or density (NDDO) per step: `P = d*P_new + (1-d)*P_old`; tblite maps it onto `damping`. |
 | `-scf_allow_unconverged` | `false` | `false` | Accept an SCF that hit the iteration limit (warning + last energy) instead of failing. |
 | `-scf_mode` | `broyden` | `diis` | gfn: broyden, diis, plain, level-shift; NDDO: diis or plain (other names are an error). |
-| `-diis_start` | `5` | `3` | Damped iterations before DIIS (gfn: modes diis and level-shift). |
-| `-diis_subspace` | `6` | `8` | DIIS history depth. |
+| `-scf_diis_start` (`-diis_start`) | `5` | `3` | Damped iterations before DIIS (gfn: modes diis and level-shift). |
+| `-scf_diis_subspace` (`-diis_subspace`) | `6` | `8` | DIIS history depth. |
 
 Module `xtb` (gfn1/gfn2 only): `-scf_guess` (`eeq`), `-level_shift` (`0.2` Eh, `level-shift` mode), `-eigensolver`,
 `-electronic_temperature`, `-warm_start`, `-keep_diis`, mixed precision, GPU and `-scf_precond` knobs.
 
-With `-sp` and `-opt` the flat `-max_iterations` and `-diis_start` stay with the optimiser (module `opt` owns them);
-use `-scf_max_iterations` or `-scf.diis_start` there.
+With `-sp` and `-opt` the flat `-max_iterations` and `-diis_start` stay with the optimiser (module `opt` owns them, they do not reach the SCF);
+use `-scf_max_iterations` and `-scf_diis_start` (the `scf_` names exist for this reason, since Oct 26, 2026). `-scf.diis_start` and `-xtb.diis_start` still work.
 
 Default `-scf_threshold 1e-5` (recorded in the PARAM help until 2026-10-26): the energy is identical to the 1e-6 run
 (< 1e-8 Eh) at about 10-20 % fewer SCF iterations; the gradient with the `eeq` D4 response (the default when this was
