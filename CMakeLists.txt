@@ -1625,6 +1625,21 @@ add_test(
 # 1. Define the parser executable
 add_executable(curcuma_param_parser scripts/param_parser/main.cpp)
 
+# Claude Generated (Oct 26, 2026): the parser runs during the build (GenerateParams) on the machine that builds, so it must run on any
+# x86-64 CPU. It needs no vector code, but it inherits CMAKE_CXX_FLAGS (-march=native, -mavx2, -mavx512f ... above): an AVX512 build on a
+# CI runner without AVX512 would die with "illegal instruction" when the parser starts. Give this target the baseline instruction set;
+# target options come after CMAKE_CXX_FLAGS, so they win. Only flags the compiler knows are added (no effect on MSVC or ARM).
+if(NOT MSVC)
+    include(CheckCXXCompilerFlag)
+    foreach(_flag -march=x86-64 -mtune=generic -mno-avx512f -mno-avx512vl -mno-avx512dq -mno-avx512bw -mno-avx2 -mno-avx -mno-fma)
+        string(MAKE_C_IDENTIFIER "CURCUMA_PP_${_flag}" _var)
+        check_cxx_compiler_flag("${_flag}" ${_var})
+        if(${_var})
+            target_compile_options(curcuma_param_parser PRIVATE ${_flag})
+        endif()
+    endforeach()
+endif()
+
 # 2. Get all header files in the project
 file(GLOB_RECURSE ALL_PROJECT_HEADERS "src/*.h" "src/**/*.h")
 
