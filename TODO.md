@@ -201,3 +201,6 @@ Offen, Aufrufer vor dem Löschen erneut suchen:
 | Optimierer: Liniensuchfehlschlag als Konvergenz, Abbruch ohne Struktur, SCF-Unsinn als Ergebnis | behoben 2026-09-27 |
 | Hessian: SCF-Schwelle erreicht die Worker nicht | behoben 2026-09-29 |
 | Cholesky-Faktor-Cache in der MD nicht exakt | Cache standardmäßig aus (`eeq_refactor_eps_bohr` 0), Betreiber-Prüfung offen (Abschnitt 4) |
+- **Generierte Struktur-Tests ausbauen** (2026-10-25, [docs/STRUCTURE_TESTS.md](docs/STRUCTURE_TESTS.md)): (a) Ladung/Spin fuer 57 von 80 Strukturen im Manifest bestaetigen (Vorschlagsliste `assumed_neutral_closed_shell` in `struct_test_policy.json`); (b) Groessenkonsistenz bei Clustern, Strukturen ueber 12 Atome, geladene/offene Systeme; (c) alte Ausgabetext-Tests der `cli_*`-Gruppe einordnen und ersetzen.
+- **GFN-FF Inversionsterm: Knick bei C3v-Ammoniak** (Known Issue #42): Ursache und Referenzverhalten (pprcht, xtb) offen; Test `structinv_ammonia_ideal_c3v_gfnff` traegt eine Ausnahme.
+

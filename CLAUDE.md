@@ -301,6 +301,8 @@ ctest -R "cli_rmsd_01" --verbose
 
 **Test count**: `ctest -N` in `release/` lists 333 tests (Oct 1, 2026); run `ctest` for the current result. The per-category counts above are historical.
 
+**Generated structure tests** (`ctest -L structinv -j8`, 72 tests, 41 s): translation/rotation/permutation invariance, forces, finite-difference gradient, repeat, threads, CPU against CUDA, generated from `test_cases/structures` and `struct_test_policy.json`; a loosened limit needs a `known_deviations` entry with the reason: [docs/STRUCTURE_TESTS.md](docs/STRUCTURE_TESTS.md).
+
 ## Project Management
 
 - **Knowledge store (Obsidian vault)**: `~/Nextcloud/Obsidan/Wissen/`, German, operator-owned. Read its `00 Regeln.md` before writing anything into it.

@@ -209,6 +209,7 @@ the root [CLAUDE.md](CLAUDE.md) holds the project rules, the open items and the 
 
 ```sh
 cd build && ctest --output-on-failure    # test suite
+cd build && ctest -L structinv -j8        # generated property tests of the structure library (docs/STRUCTURE_TESTS.md)
 ```
 
 ## Please cite
