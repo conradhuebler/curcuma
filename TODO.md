@@ -11,9 +11,12 @@ Stand.
 
 ## 1. Korrektheit (offen)
 
-- **Flat-Flag ohne Modulpräfix erreicht den nativen xTB nicht** (bestätigt 2026-10-11, n=1): `-diis_start 1` landet laut `-export_run` in `/opt` und `/sp`, nicht in `/xtb`; der Name ist in
-  `curcumaopt.h`, `lbfgs.h` und `native_xtb_method.h` registriert, bei `-verbosity 2` kommt keine Warnung. `-xtb.diis_start 1` wirkt (seit `1bb4781b`). Ursache im Routing nicht untersucht;
-  gleiches Muster für andere mehrfach registrierte Namen möglich. Vault: Labor `curcuma GFN2-SCF-Vorkonditionierung`, Schritt 19.
+- **Flache SCF-Namen, die auch das Optimiermodul kennt** (2026-10-26, Ursache gefunden): `-diis_start`, `-max_iterations` gehören auch zu `opt`, das `-sp` und `-opt`
+  benutzen; das Befehlsmodul gewinnt, also erreichen sie den SCF nicht (keine Warnung). Wirksam: `-scf_max_iterations`, `-scf.diis_start`, `-xtb.diis_start`.
+  Offen: soll `-sp` die Optimiererparameter überhaupt besitzen? [docs/PARAMETER_SYSTEM.md](docs/PARAMETER_SYSTEM.md), "Shared module scf".
+- **SCF-Modul `scf` bei tblite/xtb/Ulysses nicht gelaufen** (2026-10-26): Abbildung auf `max_iterations`/`damping` nur per `-verbosity 3` gesehen, die
+  TBLite-Änderung (GFN2-Anhebung auf 150/0.6 nur ohne Nutzerwert) nur syntaxgeprüft; kein Provider in `release/`. `-hessian` endet mit 0, wenn ein
+  Verschiebungs-SCF scheitert (pm3, `-scf_max_iterations 3`), nicht untersucht. [docs/SCF_MODES.md](docs/SCF_MODES.md)
 - **Offene Schalen über die CLI: Aliase und ctest fehlen** (2026-10-11): `-multi`, `-multiplicity`, `-uhf`, `-xtb.spin` werden still ignoriert; Zeile 2 "Ladung Multiplizität" der ORCA-xyz wird nicht gelesen;
   ungerade Elektronenzahl ohne `-spin` besetzt fraktional (tblite), xtb nimmt ein Dublett (Entscheidung offen); es gibt keinen ctest für `-spin` (Known Issue #9). Flag mit Leerzeichen und Paritätswiderspruch
   sind seit 2026-10-11 Fehler bzw. Warnung (`CLI2Json`, `buildReferenceOccupations`). Vault: Labor `curcuma GFN2-SCF-Vorkonditionierung`, Schritt 13.
@@ -92,7 +95,7 @@ Stand.
   in einem Durchlauf (gemm statt 2 dgemv, 13 ms, Rundung nicht gesichert); Matrix wird jeden Schritt neu gebaut (48 ms). Nicht exakt: eps-Wiederverwendung der Matrix, Extrapolation, lockerere Toleranz.
 - **GFN-FF CPU `d4_gw`** (Stand 34 ms je Schritt bei 16 Threads, vorher 103; erledigt: `AIChangelog.md`, [docs/GFNFF-PERFORMANCE-ROADMAP.md](docs/GFNFF-PERFORMANCE-ROADMAP.md)):
   offen (D) C6 und dc6 in einem Durchlauf, (E) C6 erst in `calcD4Dispersion`. Nicht exakt: Paare bei kleiner CN-Änderung auslassen (#32).
-- **Genauigkeitsprofile `-accuracy loose|normal|high` (geplant, nicht begonnen, Betreiber 2026-10-10: jetzt nicht umsetzen)**: der Parameter `accuracy` (`gfnff.h:285`, `eeq_solver.h:1182`) wird nur
+- **Genauigkeitsprofile `-accuracy loose|normal|high` (geplant, nicht begonnen, Betreiber 2026-10-10: jetzt nicht umsetzen)**: der Parameter `accuracy` (`gfnff.h`, Modul `gfnff`) wird nur
   durchgereicht, nichts liest ihn. Plan: eine zentrale Auflösung wie bei der Solver-Wahl, `normal` = heutiges Referenzverhalten bitgleich, Einzelschalter überschreiben; zuerst ein Scan der Schalter
   (`eeq_ppcg_tol`, `cn_`/`hb_accuracy`, `eeq_distance_cutoff`, `coulomb_r_cut`, `dispersion_cutoff_bohr`) mit Fehler in E, F, NVE-Drift und Zeit, dann Fehlerbudget je Stufe; Abschneidegrenzen nur mit glatter Auslaufzone und konsistenter EEQ-Matrix. Offen: Stufennamen, Budget, `gfnff` oder `revgfnff`.
 - **GFN-FF Static-Mode-Initiative** (Mai 2026): die PARAMs `static_charges`/`static_cn` (WP-S1) sind im Code (`gfnff.h:323`), und der
@@ -187,6 +190,7 @@ Offen, Aufrufer vor dem Löschen erneut suchen:
 - dc6dcn-Skip-Pruefung (`FFWorkspaceGPU::shouldSkipDc6dcn()` in `cuda/ff_workspace_gpu.h`, hat keinen Aufrufer; ROCm fuehrt sie mit `CURCUMA_ROCM_LEAN_STEP=0` noch aus).
 - `main.cpp` führt `modern_optimizer` noch in der Liste der Scope-Module; das Modul existiert nicht mehr.
 - `src/helpers/`: `imagewrite.cpp`, `storage_bench.cpp`, `polymer_topo.cpp`, `gfnff_term_validator.cpp` ohne CMake-Target (eigenständige `main()`-Programme).
+- PARAM `gfnff.accuracy` (loose|normal|medium|high) bleibt: kein Leser bis jetzt, soll mit den Genauigkeitsprofilen (Eintrag oben) eine Bedeutung bekommen. Nicht entfernen; der Hilfetext sagt bis dahin "no effect".
 
 ## 8. Aus der alten Liste entfernt (überholt oder erledigt)
 

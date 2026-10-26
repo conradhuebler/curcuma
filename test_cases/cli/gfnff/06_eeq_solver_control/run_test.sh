@@ -82,6 +82,14 @@ rc, line, _, _ = sp(CH, ["-gfnff.solve", "lu"])
 check("-gfnff.solve alias", rc == 0 and line.startswith("lu [CPU]"), line)
 rc, line, _, _ = sp(CH, ["-gfnff.solve", "lu", S, "ppcg"])
 check("-eeq_solver.solve_method wins over -gfnff.solve", rc == 0 and line.startswith("ppcg [CPU]"), line)
+# The EEQ PARAMs belong to module gfnff (former module eeq_solver): the gfnff and flat spellings act as well.
+for spell in ("-gfnff.solve_method", "-solve_method"):
+    rc, line, _, _ = sp(CAF, [spell, "ppcg"])
+    check(f"{spell} ppcg", rc == 0 and line.startswith("ppcg [CPU]"), line)
+rc, line, _, _ = sp(CAF, ["-gfnff.solve_method", "lu", S, "ppcg"])
+check("-eeq_solver.solve_method wins over -gfnff.solve_method", rc == 0 and line.startswith("ppcg [CPU]"), line)
+rc, line, _, _ = sp(CH, ["-gfnff.eeq_ppcg_min_atoms", "5000"])
+check("-gfnff.eeq_ppcg_min_atoms moves the switch", rc == 0 and line.startswith("cholesky (auto) [CPU]"), line)
 
 rc, line, _, out = sp(CAF, [S, "choleski"])
 check("typo is an error", rc != 0 and "unknown EEQ solver 'choleski'" in out and "valid:" in out, f"rc={rc}")

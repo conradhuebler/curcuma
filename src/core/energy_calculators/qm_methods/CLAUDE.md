@@ -32,6 +32,7 @@ Methods are created by `MethodFactory` (`../method_factory.cpp`, table-driven, s
 
 - The gradient contract of every method is Eh/Angstrom; native xTB converts with `m_gradient /= au` (`xtb_native.cpp`) (Known Issue #28).
 - A NaN, unconverged or implausible SCF must be an error, never a result (`-scf_allow_unconverged true` opts out); the convergence test covers everything the mixer mixes, including the GFN2 multipole part (#9, #29).
+- Generic SCF knobs live in registry module `scf` (`scf_parameters.h`, defaults are "method default" markers); per-method defaults and precedence (`-xtb.*` > `scf` > default): [docs/SCF_MODES.md](../../../../docs/SCF_MODES.md). NDDO keeps its inline DIIS (DIISAccelerator moved energies by 1.8e-7 Eh).
 - The tblite reference is the target for gfn1/gfn2; the two documented places where xtb differs are opt-in switches (`-xtb.sto6g_legacy_4sp`, `-xtb.d4_atm_cutoff`) (#27, #30).
 - Element-indexed tables: transition-metal shells are ordered `[d,s,p]`, so parameters indexed by angular momentum must not be read by shell index (#5).
 - Silent mode (verbosity 0) must produce no output except errors; verbosity levels and logger functions: [docs/LOGGING_SYSTEM.md](../../../../docs/LOGGING_SYSTEM.md). No numerical path may depend on the print level.

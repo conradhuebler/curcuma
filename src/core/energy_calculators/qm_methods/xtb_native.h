@@ -1800,22 +1800,40 @@ private:
 /* ------------------------------------------------------------------------- *
  *  Apply SCF-convergence settings from a controller JSON to a native XTB.
  *
- *  Reads the "xtb" config scope first (where the registered flat CLI flags
- *  auto-route, e.g. -scf_mode / -scf_guess), then the top-level as a fallback.
- *  Keys absent from the config leave the native defaults untouched, and every
- *  registered default equals the native default, so a plain run is unchanged.
+ *  Reads the "xtb" config scope first (-xtb.<name>, flat flags of module xtb
+ *  such as -scf_guess), then the shared "scf" scope (-scf_threshold, -scf_mode,
+ *  ...), then the top-level as a fallback. Keys absent from the config leave the
+ *  native defaults untouched, so a plain run is unchanged.
  *  Shared by the GFN1 and GFN2 wrappers. Claude Generated.
  * ------------------------------------------------------------------------- */
 inline void applyXtbScfConfig(XTB& xtb, const json& cfg)
 {
-    // Look up `key` in cfg["xtb"] first, then cfg at top level; call `apply`
-    // with the value if found.
+    // Look up `key` in cfg["xtb"] first, then in the shared cfg["scf"] scope (Oct 2026,
+    // scf_parameters.h; MethodFactory::applySharedScfScope has already dropped its "method
+    // default" markers and resolved its aliases), then cfg at top level; call `apply` with
+    // the value if found.
     auto lookup = [&](const char* key, auto&& apply) {
         if (cfg.contains("xtb") && cfg["xtb"].is_object() && cfg["xtb"].contains(key))
             apply(cfg["xtb"][key]);
+        else if (cfg.contains("scf") && cfg["scf"].is_object() && cfg["scf"].contains(key))
+            apply(cfg["scf"][key]);
         else if (cfg.contains(key))
             apply(cfg[key]);
     };
+    // SCF iteration limit (Oct 2026): scf_max_iterations, or the old spellings max_iterations /
+    // SCFmaxiter in the xtb scope. Values <= 0 keep the native default (150).
+    {
+        const json* n = nullptr;
+        if (cfg.contains("xtb") && cfg["xtb"].is_object())
+            for (const char* k : { "scf_max_iterations", "max_iterations", "SCFmaxiter" })
+                if (!n && cfg["xtb"].contains(k)) n = &cfg["xtb"][k];
+        if (!n && cfg.contains("scf") && cfg["scf"].is_object() && cfg["scf"].contains("scf_max_iterations"))
+            n = &cfg["scf"]["scf_max_iterations"];
+        if (!n && cfg.contains("scf_max_iterations"))
+            n = &cfg["scf_max_iterations"];
+        if (n && n->is_number())
+            xtb.setScfMaxIter(static_cast<int>(std::lround(n->get<double>())));   // CLI numbers arrive as double
+    }
 
     lookup("scf_mode",     [&](const json& v){ if (v.is_string()) xtb.setScfMode(v.get<std::string>()); });
     lookup("scf_guess",    [&](const json& v){ if (v.is_string()) xtb.setScfGuess(v.get<std::string>()); });

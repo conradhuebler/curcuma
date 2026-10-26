@@ -21,6 +21,7 @@
 
 #include "method_factory.h"
 #include "src/core/curcuma_logger.h"
+#include "src/core/parameter_registry.h"
 #include "src/core/gpu_fallback.h"
 
 // Method implementations
@@ -378,7 +379,7 @@ bool MethodFactory::hasOrca() {
 namespace {
 
 // Claude Generated (Oct 2026): the one place that fixes which EEQ solver a native GFN-FF run uses.
-// Precedence: a non-auto eeq_solver.solve_method, then a non-auto gfnff-level `solve`, then auto
+// Precedence: a non-auto eeq_solver.solve_method, then a non-auto gfnff.solve_method, then a non-auto gfnff-level `solve`, then auto
 // (the registry default of solve_method is "auto", so an explicit `-gfnff.solve lu` must beat it;
 // if both are set to different non-auto names, eeq_solver.solve_method wins). The name is parsed
 // strictly (a typo is an error), a method the chosen device cannot run is an error (no silent
@@ -396,7 +397,11 @@ void fixEEQSolverChoice(json& cfg, const std::string& gpu)
     const json& ee_top = cfg.contains("eeq_solver") ? cfg["eeq_solver"] : empty;
     const json& ee_gf = gf.contains("eeq_solver") ? gf["eeq_solver"] : empty;
     std::string name = "auto";
+    // Oct 2026: solve_method is a gfnff PARAM now (module eeq_solver merged into gfnff), so the
+    // flat -solve_method and -gfnff.solve_method land in the gfnff scope; the old
+    // -eeq_solver.solve_method spelling still lands in the eeq_solver scope and wins.
     for (const std::string& cand : { str_at(cfg, "solve"), str_at(gf, "solve"),
+                                     str_at(cfg, "solve_method"), str_at(gf, "solve_method"),
                                      str_at(ee_top, "solve_method"), str_at(ee_gf, "solve_method") }) {
         if (!cand.empty() && cand != "auto")
             name = cand;                       // later (eeq_solver) entries win over the gfnff alias
@@ -563,9 +568,22 @@ const std::vector<std::string>& MethodFactory::methodParameterScopes()
     static const std::vector<std::string> scopes = {
         "gfnff", "eeq_solver", "gfnff_external", "forcefield", "uff", "qmdff",
         "xtb", "tblite", "ulysses", "eht", "orca",
-        "d3", "d4", "dftd3", "dftd4", "d3param", "d4param"
+        "d3", "d4", "dftd3", "dftd4", "d3param", "d4param",
+        "scf"   // shared SCF knobs (scf_parameters.h), Oct 2026
     };
     return scopes;
+}
+
+namespace {
+// Native NDDO rows of methodTable(); they precede the Ulysses row with the same names.
+bool isNativeNddo(const std::string& m)
+{
+    return m == "pm3" || m == "am1" || m == "mndo" || m == "pm6";
+}
+bool isExternalXtbGfn(const std::string& m)
+{
+    return m == "xtb-gfn1" || m == "xtb-gfn2";
+}
 }
 
 std::string MethodFactory::parameterScopeForMethod(const std::string& method_name)
@@ -573,6 +591,9 @@ std::string MethodFactory::parameterScopeForMethod(const std::string& method_nam
     std::string m = method_name;
     std::transform(m.begin(), m.end(), m.begin(), ::tolower);
     auto in = [&m](const std::vector<std::string>& v) { return std::find(v.begin(), v.end(), m) != v.end(); };
+    // Oct 2026: pm3/am1/mndo/pm6 resolve to the native NDDO rows, which read only the shared
+    // "scf" scope; before, they were routed to the Ulysses scope that no native code reads.
+    if (isNativeNddo(m)) return "scf";
     if (m.rfind("tblite-", 0) == 0 || in(m_tblite_methods)) return "tblite";
     if (in(m_ulysses_methods)) return "ulysses";
     // Native gfn1/gfn2 (and their ngfn aliases) read the "xtb" scope, like the external XTB methods.
@@ -581,13 +602,132 @@ std::string MethodFactory::parameterScopeForMethod(const std::string& method_nam
     return "";
 }
 
-std::unique_ptr<ComputationalMethod> MethodFactory::create(const std::string& method_name, const json& config) {
+bool MethodFactory::readsSharedScfScope(const std::string& method_name)
+{
+    std::string m = method_name;
+    std::transform(m.begin(), m.end(), m.begin(), ::tolower);
+    auto in = [&m](const std::vector<std::string>& v) { return std::find(v.begin(), v.end(), m) != v.end(); };
+    return m == "gfn1" || m == "gfn2" || m == "ngfn1" || m == "ngfn2" || isNativeNddo(m)
+        || isExternalXtbGfn(m) || m.rfind("tblite-", 0) == 0 || in(m_tblite_methods) || in(m_ulysses_methods);
+}
+
+void MethodFactory::applySharedScfScope(json& config, const std::string& method_name)
+{
+    if (!config.is_object())
+        return;
+    std::string m = method_name;
+    std::transform(m.begin(), m.end(), m.begin(), ::tolower);
+    auto& reg = ParameterRegistry::getInstance();
+    auto lower = [](std::string s) {
+        std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+        s.erase(std::remove(s.begin(), s.end(), '-'), s.end());
+        return s;
+    };
+
+    // (1) Canonical names in the scf scope; the "method default" markers are dropped.
+    json scf = json::object();
+    if (config.contains("scf") && config["scf"].is_object()) {
+        for (const auto& [key, value] : config["scf"].items()) {
+            const std::string canon = reg.resolveAlias("scf", key);
+            if (canon.empty()) {
+                CurcumaLogger::warn("Unknown SCF parameter -scf." + key + " ignored; see curcuma -help_module scf.");
+                continue;
+            }
+            const bool num = value.is_number();
+            const double v = num ? value.get<double>() : 0.0;
+            if ((canon == "scf_threshold" || canon == "scf_damping") && num && v <= 0.0)
+                continue;
+            if ((canon == "scf_max_iterations" || canon == "diis_subspace") && num && std::lround(v) <= 0)
+                continue;
+            if (canon == "diis_start" && num && std::lround(v) < 0)
+                continue;
+            if (canon == "scf_mode" && value.is_string() && lower(value.get<std::string>()) == "auto")
+                continue;
+            scf[canon] = value;
+        }
+        config["scf"] = scf;
+    }
+
+    // (2) External wrappers read their own names through ConfigManager(<module>).
+    // target[name] is set unless the target scope already sets it (any spelling).
+    auto scope_sets = [&](const std::string& module, const std::string& name,
+                          const std::vector<std::string>& spellings) {
+        if (!config.contains(module) || !config[module].is_object())
+            return false;
+        for (const auto& [key, value] : config[module].items()) {
+            (void)value;
+            if (reg.resolveAlias(module, key) == name)
+                return true;
+            for (const auto& s : spellings)
+                if (lower(key) == lower(s))
+                    return true;
+        }
+        return false;
+    };
+    auto copy_to = [&](const std::string& module, const std::string& name,
+                       const std::vector<std::string>& spellings, const json& value) {
+        if (scope_sets(module, name, spellings))
+            return;
+        if (!config.contains(module) || !config[module].is_object())
+            config[module] = json::object();
+        config[module][name] = value;
+        if (CurcumaLogger::get_verbosity() >= 3)
+            CurcumaLogger::param("scf -> " + module + "." + name, value.dump());
+    };
+    // First present spelling in a scope, or null.
+    auto value_in = [&](const std::string& module, const std::vector<std::string>& spellings) -> json {
+        if (!config.contains(module) || !config[module].is_object())
+            return json();
+        for (const auto& [key, value] : config[module].items())
+            for (const auto& s : spellings)
+                if (lower(key) == lower(s))
+                    return value;
+        return json();
+    };
+
+    auto in = [&m](const std::vector<std::string>& v) { return std::find(v.begin(), v.end(), m) != v.end(); };
+    const bool tblite_family = m.rfind("tblite-", 0) == 0 || in(m_tblite_methods);
+    const bool ulysses_family = in(m_ulysses_methods) && !isNativeNddo(m);
+    const std::vector<std::string> maxiter_spellings = { "max_iterations", "SCFmaxiter", "scf_max_iterations" };
+
+    // xtb-gfn1/2 runs on TBLite when it is built, else on the xtb binary; its flat flags land in
+    // the xtb scope (parameterScopeForMethod). Both providers get the values under their names.
+    if (isExternalXtbGfn(m)) {
+        const json xtb_maxiter = value_in("xtb", maxiter_spellings);
+        if (!xtb_maxiter.is_null()) {
+            copy_to("xtb", "max_iterations", { "max_iterations" }, xtb_maxiter);
+            copy_to("tblite", "max_iterations", maxiter_spellings, xtb_maxiter);
+        }
+        for (const std::string key : { "electronic_temperature", "spin" }) {
+            const json v = value_in("xtb", { key });
+            if (!v.is_null())
+                copy_to("tblite", key, { key }, v);
+        }
+    }
+    if (scf.contains("scf_max_iterations")) {
+        const json& n = scf["scf_max_iterations"];
+        if (tblite_family || isExternalXtbGfn(m))
+            copy_to("tblite", "max_iterations", maxiter_spellings, n);
+        if (isExternalXtbGfn(m))
+            copy_to("xtb", "max_iterations", maxiter_spellings, n);
+        if (ulysses_family)
+            copy_to("ulysses", "max_iterations", maxiter_spellings, n);
+    }
+    if (scf.contains("scf_damping") && (tblite_family || isExternalXtbGfn(m)))
+        copy_to("tblite", "damping", { "damping", "tb_damping" }, scf["scf_damping"]);
+}
+
+std::unique_ptr<ComputationalMethod> MethodFactory::create(const std::string& method_name, const json& config_in) {
     std::string method = method_name;
     std::transform(method.begin(), method.end(), method.begin(), ::tolower);
 
     CurcumaLogger::info("MethodFactory::create called");
     CurcumaLogger::param("requested_method", method_name);
     CurcumaLogger::param("normalized_method", method);
+
+    // Oct 2026: resolve the shared "scf" scope once for every method (scf_parameters.h).
+    json config = config_in;
+    applySharedScfScope(config, method);
 
     if (const MethodDescriptor* d = findMethod(method)) {
         if (!d->available()) {

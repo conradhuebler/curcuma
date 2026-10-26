@@ -219,3 +219,14 @@ damping warmup, larger damping, level shifting, or a better initial guess
 - Reference Fortran: `release_tblite/_deps/dftd4-src/src/dftd4/{model,reference,
   reference.inc}.f90` — `set_refalpha_gfn2_num`, `set_refq_gfn2_num`,
   `weight_references`, dispmat construction in `tblite/disp/d4.f90`.
+
+## Gradient q-response (`-xtb.d4_charge_source`, text moved from the PARAM help, 2026-10-26)
+
+| Value | What it does | Recorded cost / accuracy |
+|---|---|---|
+| `mulliken` (default) | dE_D4/dq folded into the gradient potential v_at, so charge-Pulay + W reproduce the Mulliken response variationally (as tblite) | exact |
+| `eeq` | single-shot dftd4 EEQ charges for the response | ~1 % gradient residual on transition-metal complexes |
+| `cpscf` | explicit Z-vector solve | exact, ~100x slower |
+
+The energy is Mulliken-self-consistent in all three cases; the switch changes only the gradient.
+

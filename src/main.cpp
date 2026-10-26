@@ -966,7 +966,13 @@ json CLI2Json(int argc, char** argv)
             // one of the owners. Before, it stayed in the command module with a warning and no method
             // ever read it (-electronic_temperature 40000 did not change a native gfn2 energy).
             if (owners.size() > 1 && key.contains("method") && key["method"].is_string()) {
-                const std::string method_scope = MethodFactory::parameterScopeForMethod(key["method"].get<std::string>());
+                std::string method_scope = MethodFactory::parameterScopeForMethod(key["method"].get<std::string>());
+                // Oct 2026: a shared SCF knob (-max_iterations, -diis_start: module "scf" and others)
+                // goes to "scf" when the method's own scope does not register it but the method reads "scf".
+                if (std::find(owners.begin(), owners.end(), method_scope) == owners.end()
+                    && std::find(owners.begin(), owners.end(), std::string("scf")) != owners.end()
+                    && MethodFactory::readsSharedScfScope(key["method"].get<std::string>()))
+                    method_scope = "scf";
                 if (!method_scope.empty()
                     && std::find(owners.begin(), owners.end(), method_scope) != owners.end()) {
                     CurcumaLogger::info("CLI flag -" + pname + " is registered in several modules; routed to -"
