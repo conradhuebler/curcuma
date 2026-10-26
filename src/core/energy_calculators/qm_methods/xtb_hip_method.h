@@ -6,7 +6,7 @@
  *
  * Claude Generated (2026-06): ComputationalMethod adapter for the ROCm path of
  * native GFN1/GFN2 — the AMD/HIP sibling of XtbGpuComputationalMethod (CUDA).
- * Selected by the factory when `-gpu rocm` (or `-gpu auto` on a ROCm-only build) is
+ * Selected by the factory when `-gpu rocm` is
  * given and the build has USE_ROCM.
  *
  * Design: OWNS a NativeXtbMethod (the validated CPU pipeline: config, large-system
@@ -19,7 +19,7 @@
  *
  * Usage:
  *   ./curcuma -sp mol.xyz -method gfn2 -gpu rocm   # explicit ROCm
- *   ./curcuma -sp mol.xyz -method gfn1 -gpu auto   # GPU if available
+ *   ./curcuma -sp mol.xyz -method gfn1 -gpu rocm   # GPU
  *   ./curcuma -sp mol.xyz -method gfn2             # CPU (default)
  */
 

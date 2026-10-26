@@ -391,7 +391,6 @@ PARAM(hh_repulsion_bpair, Bool, true, "Classify H...H 1,3/1,4 repulsion from the
 PARAM(amideh_acidity_order_bug, Bool, false, "Reproduce the reference atom-order bug in the amide-H donor acidity, which makes the H-bond depend on whether N precedes its H. true only to match reference totals.", "Reference", {})
 PARAM(dispersion_atm, Bool, false, "Add a D4 three-body (ATM) term over bonded triples. The reference dispersion is pairwise, so it is off.", "Reference", {})
 // ---- GPU ----
-PARAM(gpu_auto_min_atoms, Int, 900, "With -gpu auto on ROCm, systems below this many atoms run on the CPU, which is faster there. 0 always uses the GPU; -gpu rocm and CUDA are not affected.", "GPU", {})
 PARAM(gpu_block_size, Int, 0, "GPU kernel block size: 0 adaptive, else 32, 64, 128, 256 or 512.", "GPU", {})
 PARAM(gpu_cn_pair_regen, Bool, true, "GPU: rebuild the CN-derivative pair list when the topology displacement check fires. false builds it once.", "GPU", {})
 PARAM(gpu_cn_pair_regen_every, Int, 0, "GPU: also rebuild the CN-derivative pair list every N gradient steps; 0 = on the displacement check only.", "GPU", {})

@@ -178,16 +178,16 @@ static std::string resolveGpuMode(const json& config, const char* label) {
     std::transform(gpu_mode.begin(), gpu_mode.end(), gpu_mode.begin(), ::tolower);
     if (gpu_mode.empty() || gpu_mode == "none" || gpu_mode == "cpu")
         return "none";
-    if (gpu_mode == "auto") {
-        const std::string first = gpu_plugin::firstAvailable();
-        if (first == "none")
-            CurcumaLogger::info(std::string(label) + ": -gpu auto found no GPU plugin next to the executable; using CPU");
-        return first;
+    if (gpu_mode == "auto") {   // removed Oct 26, 2026 (operator decision): the backend is always named
+        CurcumaLogger::warn(std::string(label) + ": -gpu auto was removed; name the backend (-gpu cuda|rocm|vulkan) or omit -gpu "
+            "for the CPU. Using CPU.");
+        curcuma::reportGpuFallback(std::string(label) + ": -gpu auto was removed, calculation on the CPU", gpu_mode);
+        return "none";
     }
     const auto& known = gpu_plugin::knownBackends();
     if (std::find(known.begin(), known.end(), gpu_mode) == known.end()) {
         CurcumaLogger::warn(std::string(label) + ": unknown -gpu value '" + gpu_mode
-            + "' (use cuda|rocm|vulkan|auto|none). Using CPU.");
+            + "' (use cuda|rocm|vulkan|cpu). Using CPU.");
         curcuma::reportGpuFallback(std::string(label) + ": unknown -gpu value, calculation on the CPU", gpu_mode);
         return "none";
     }
