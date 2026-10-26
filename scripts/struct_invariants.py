@@ -17,6 +17,9 @@ Tests (names as in `--tests`):
   repeat      two identical CPU runs give the same energy and gradient
   threads     -threads 1 against -threads 4
   gpu         CPU against the GPU backend named by --gpu (skipped, exit 77, when it is not available)
+  compressed      the geometry scaled about its centroid (policy compressed_scale, CN far beyond every D4 reference): the
+                  finite-difference gradient test and the force sum again (Oct 2026: a D4 weight underflow gave wrong gradients here)
+  compressed_gpu  CPU against the GPU backend on the scaled geometry
 
 Units: curcuma's -dump_gradient is Eh/Angstrom (the getGradient() contract, root CLAUDE.md). Exit 0 = all selected tests
 passed, 1 = a test failed, 77 = nothing could be run (skip).
@@ -252,6 +255,60 @@ def main():
             report("threads", float("inf"), tol["threads"], "run failed")
         else:
             report("threads", max(abs(r[0] - e0), maxdiff(r[1], g0)), tol["threads"], "max(|dE|, |dg|) 1 vs 4 threads")
+
+    def scaled_atoms():
+        f = tol.get("compressed_scale", 0.35)
+        c = [sum(a[k + 1] for a in atoms) / n for k in range(3)]
+        return [[a[0]] + [c[k] + f * (a[k + 1] - c[k]) for k in range(3)] for a in atoms], f
+
+    if "compressed" in wanted or "compressed_gpu" in wanted:
+        sc, f = scaled_atoms()
+        base_c = R.calc(sc, tag="comp")
+        if base_c is None:
+            print("SKIP compressed %s %s: the run failed" % (args.structure, args.method))
+        else:
+            ec, gc = base_c
+            if "compressed" in wanted:
+                h = tol.get("fd_step", 0.005) / 5.0   # compressed bonds are stiffer
+                pick = sorted({0, n // 2, n - 1})
+                worst, bad = 0.0, False
+                for i in pick:
+                    for k in range(3):
+                        D = {}
+                        for step in (h, 2 * h):
+                            e = []
+                            for sgn in (+1, -1):
+                                a2 = [list(a) for a in sc]
+                                a2[i][k + 1] += sgn * step
+                                r = R.calc(a2, tag="fdc")
+                                if r is None:
+                                    bad = True
+                                    break
+                                e.append(r[0])
+                            if bad:
+                                break
+                            D[step] = (e[0] - e[1]) / (2 * step)
+                        if bad:
+                            break
+                        worst = max(worst, abs((4 * D[h] - D[2 * h]) / 3 - gc[i][k]))
+                    if bad:
+                        break
+                gmax = max(abs(x) for row in gc for x in row)
+                if bad:
+                    report("compressed", float("inf"), tol["fd_compressed"], "run failed")
+                else:
+                    report("compressed", worst, tol["fd_compressed"],
+                           "fd gradient at scale %.2f, max|g_fd - g| Eh/A (max|g| %.1e)" % (f, gmax))
+                report("compsum", max(abs(sum(g[k] for g in gc)) for k in range(3)), tol["compressed_sumforce"],
+                       "max|sum g| Eh/A at scale %.2f" % f)
+            if "compressed_gpu" in wanted and args.gpu:
+                r = R.calc(sc, gpu=args.gpu, tag="compgpu")
+                if r is None:
+                    print("SKIP compressed_gpu %s %s: -gpu %s not available or the run failed" % (args.structure, args.method, args.gpu))
+                else:
+                    report("compgpu", abs(r[0] - ec), tol["gpu_energy"], "|dE| Eh at scale %.2f, cpu vs %s" % (f, args.gpu))
+                    report("compgpu", maxdiff(r[1], gc), tol["compressed_gpu_gradient"],
+                           "max|dg| Eh/A at scale %.2f, cpu vs %s" % (f, args.gpu))
 
     if "gpu" in wanted and args.gpu:
         r = R.calc(atoms, gpu=args.gpu, tag="gpu")

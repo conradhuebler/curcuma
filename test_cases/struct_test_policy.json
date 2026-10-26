@@ -29,6 +29,21 @@
         "gfnff"
       ],
       "tests": "translate,rotate,permute,sumforce,torque,fd,repeat,threads"
+    },
+    "compressed": {
+      "max_atoms": 16,
+      "classes": [
+        "small",
+        "medium",
+        "clusters"
+      ],
+      "methods": [
+        "gfn1",
+        "gfn2"
+      ],
+      "tests": "compressed",
+      "gpu_tests": "compressed_gpu",
+      "name_prefix": "structcomp"
     }
   },
   "tolerances": {
@@ -42,7 +57,11 @@
       "threads": 1e-10,
       "gpu_energy": 1e-08,
       "gpu_gradient": 1e-05,
-      "fd_step": 0.005
+      "fd_step": 0.005,
+      "compressed_scale": 0.3,
+      "fd_compressed": 1e-05,
+      "compressed_sumforce": 1e-08,
+      "compressed_gpu_gradient": 1e-06
     },
     "gfnff": {
       "fd": 1e-05,
@@ -62,7 +81,13 @@
     "fd_gfn_richardson": 4.2e-08,
     "fd_gfnff_richardson": 3.9e-07,
     "repeat": 0.0,
-    "threads": 1.1e-15
+    "threads": 1.1e-15,
+    "compressed_note": "scale 0.30 about the centroid, 14 structures (<= 16 atoms) x gfn1/gfn2, one run each, Oct 26 2026",
+    "fd_compressed_gfn1": 2.3e-07,
+    "fd_compressed_gfn2": 3.4e-07,
+    "compressed_sumforce": 1.6e-13,
+    "compressed_gpu_cuda_energy_or_gradient": 1.4e-09,
+    "negative_control": "CUDA plugin from before the D4 weight fix: max|dg| 0.435 Eh/A on acetic-acid-dimer gfn2 at this scale (fails), after the fix 7e-11 (passes)"
   },
   "known_deviations": [
     {
