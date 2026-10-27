@@ -30,7 +30,7 @@ for v in "$ROCM_REPO_VERSION" latest; do
         | sudo tee /etc/apt/sources.list.d/rocm.list
     sudo apt-get update && break
 done
-sudo apt-get install -y --no-install-recommends hip-dev hipcc rocblas-dev rocsolver-dev rocminfo
+sudo apt-get install -y --no-install-recommends hip-dev hipcc rocm-llvm rocm-device-libs hip-runtime-amd rocblas-dev rocsolver-dev rocminfo
 report rocm
 
 export PATH=/usr/local/cuda-12.8/bin:/opt/rocm/bin:$PATH
