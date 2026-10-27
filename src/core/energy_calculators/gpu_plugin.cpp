@@ -32,8 +32,11 @@
 #include <unistd.h>
 #endif
 
+#include <cstdlib>
 #include <map>
 #include <mutex>
+#include <string>
+#include <vector>
 
 namespace gpu_plugin {
 namespace {
@@ -63,6 +66,7 @@ void* pluginHandle(const std::string& backend, bool quiet = false)
         return it->second == FAILED_SENTINEL ? nullptr : it->second;
 
     void* handle = nullptr;
+    std::string loadError;
 #ifdef _WIN32
     char buf[MAX_PATH];
     const DWORD n = ::GetModuleFileNameA(nullptr, buf, sizeof(buf));
@@ -80,6 +84,12 @@ void* pluginHandle(const std::string& backend, bool quiet = false)
                             + std::to_string(::GetLastError()) + "); falling back to CPU.");
     }
 #else
+    // Search order (Claude Generated, Oct 2026): $CURCUMA_PLUGIN_DIR, the executable's
+    // directory, the directory of the AppImage file ($APPIMAGE; inside an AppImage the
+    // executable sits in a read-only mount), $XDG_DATA_HOME/curcuma/plugins, then the loader path.
+    std::vector<std::string> dirs;
+    if (const char* d = std::getenv("CURCUMA_PLUGIN_DIR"))
+        if (*d) dirs.emplace_back(std::string(d) + "/");
     char buf[PATH_MAX];
     const ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
     if (n > 0) {
@@ -87,14 +97,49 @@ void* pluginHandle(const std::string& backend, bool quiet = false)
         std::string path(buf);
         const auto slash = path.find_last_of('/');
         if (slash != std::string::npos)
-            handle = ::dlopen((path.substr(0, slash + 1) + soname).c_str(),
-                              RTLD_NOW | RTLD_GLOBAL);
+            dirs.push_back(path.substr(0, slash + 1));
+    }
+    if (const char* a = std::getenv("APPIMAGE")) {
+        std::string path(a);
+        const auto slash = path.find_last_of('/');
+        if (slash != std::string::npos)
+            dirs.push_back(path.substr(0, slash + 1));
+    }
+    if (const char* x = std::getenv("XDG_DATA_HOME"); x && *x)
+        dirs.emplace_back(std::string(x) + "/curcuma/plugins/");
+    else if (const char* h = std::getenv("HOME"); h && *h)
+        dirs.emplace_back(std::string(h) + "/.local/share/curcuma/plugins/");
+    for (const auto& dir : dirs) {
+        handle = ::dlopen((dir + soname).c_str(), RTLD_NOW | RTLD_GLOBAL);
+        if (handle)
+            break;
+        // A file that exists but does not load is the useful error; remember the last one.
+        if (!::access((dir + soname).c_str(), R_OK)) {
+            const char* e = ::dlerror();
+            loadError = e ? e : "";
+        }
     }
     if (!handle)
         handle = ::dlopen(soname.c_str(), RTLD_NOW | RTLD_GLOBAL);
 
+    // The plugin shares Eigen objects with this executable, so both must use the same
+    // EIGEN_MAX_ALIGN_BYTES (32 for AVX2, 64 for AVX512). A plugin without the symbol is
+    // accepted (older build).
+    if (handle) {
+        using align_fn = int (*)();
+        auto fn = reinterpret_cast<align_fn>(::dlsym(handle, ("curcuma_" + backend + "_eigen_align").c_str()));
+        if (fn && fn() != EIGEN_MAX_ALIGN_BYTES) {
+            loadError = "built for Eigen alignment " + std::to_string(fn()) + ", this curcuma uses "
+                + std::to_string(EIGEN_MAX_ALIGN_BYTES) + " (plugin and executable need the same AVX variant)";
+            ::dlclose(handle);
+            handle = nullptr;
+        }
+    }
+
     if (!handle) {
         const char* err = ::dlerror();
+        if (!loadError.empty())
+            err = loadError.c_str();
         if (!quiet) CurcumaLogger::warn("GPU plugin '" + soname + "' could not be loaded ("
                             + (err ? err : "unknown") + "); falling back to CPU.");
     }

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build the Linux GPU variant (AVX512, CUDA + ROCm plugins) directly on an ubuntu-22.04
+# Build the Linux GPU variant (ISA=avx512 (default) or avx2; CUDA + ROCm plugins) directly on an ubuntu-22.04
 # runner, without a container, and pack it with package_linux.sh. Claude Generated.
 # Usage: linux_host_gpu_build.sh configure | make <target> | package  (one workflow step each,
 # so a lost runner shows which part was running).
@@ -9,6 +9,8 @@ SRC="$PWD"
 BUILD="$SRC/build_gpu"
 OUT="$SRC/out"
 ROCM_ARCHS="gfx1100;gfx1150;gfx1200"
+ISA="${ISA:-avx512}"
+case "$ISA" in avx512) ISA_FLAG=-DUSE_AVX512=ON;; avx2) ISA_FLAG=-DUSE_AVX2=ON;; *) echo "ISA must be avx512 or avx2"; exit 1;; esac
 ROCM_REPO_VERSION="${ROCM_REPO_VERSION:-7.2.1}"
 
 report() { echo "[$1] $(df -h / | awk 'NR==2{print "disk free: "$4}') $(free -m | awk 'NR==2{print "mem used MB: "$3}')"; }
@@ -50,7 +52,7 @@ report rocm
 
 mkdir -p "$BUILD"; cd "$BUILD"
 CXX=g++-12 CC=gcc-12 FC=gfortran-12 cmake "$SRC" -DCMAKE_BUILD_TYPE=Release \
-    -DUSE_AVX512=ON -DUSE_CUDA=ON -DUSE_ROCM=ON "-DROCM_GPU_ARCH=${ROCM_ARCHS}" \
+    $ISA_FLAG -DUSE_CUDA=ON -DUSE_ROCM=ON "-DROCM_GPU_ARCH=${ROCM_ARCHS}" \
     -DCMAKE_PREFIX_PATH=/opt/rocm -DCUDAToolkit_ROOT=/usr/local/cuda-12.8 \
     -DUSE_XTB=OFF -DUSE_TBLITE=OFF -DUSE_D3=OFF -DUSE_D4=OFF -DUSE_Plumed=OFF > cmake.log 2>&1 \
     || { tail -n 60 cmake.log; exit 1; }
@@ -70,8 +72,6 @@ package)
     # only through the library path.
     export LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64:/opt/rocm/lib:${LD_LIBRARY_PATH:-}
 mkdir -p "$OUT"
-bash "$SRC/scripts/ci/package_linux.sh" "$BUILD" "$OUT/curcuma-gpu"
-tar -C "$OUT" -czf "$OUT/curcuma-linux-gpu.tar.gz" curcuma-gpu
-ls -l "$OUT"
+bash "$SRC/scripts/ci/package_linux.sh" "$BUILD" "$OUT" "$ISA"
 ;;
 esac

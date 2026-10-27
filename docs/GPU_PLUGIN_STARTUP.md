@@ -98,3 +98,13 @@ What changed:
 Adding a fourth backend now means: one `gpu_plugin_entry_<b>.cpp` with the two C entry
 points, one `add_library(curcuma_<b> SHARED …)` block, and appending `"<b>"` to
 `gpu_plugin::knownBackends()`. Nothing else in the core changes.
+
+## Plugin search path and variant check (Oct 2026)
+
+> 🤖 AI-generated; compiled only in syntax checks of `gpu_plugin.cpp` and the ROCm entry file, never run (no plugin was loaded through the new path).
+
+Linux search order for `libcurcuma_<backend>.so` (`gpu_plugin.cpp`, `pluginHandle`): `$CURCUMA_PLUGIN_DIR`, the executable's directory, the directory of the AppImage file (`$APPIMAGE`), `$XDG_DATA_HOME/curcuma/plugins` (else `~/.local/share/curcuma/plugins`), then the loader's default path. Windows is unchanged (executable directory, then default path).
+
+Plugin and executable share Eigen objects, so both need the same `EIGEN_MAX_ALIGN_BYTES` (AVX2 32, AVX512 64). Each plugin exports `curcuma_<backend>_eigen_align()`; the loader refuses a plugin whose value differs and falls back to the CPU with a warning. A plugin without the symbol is accepted.
+
+CI (`ci-variants.yml`) packs the executable and each plugin as separate archives per variant (`curcuma-linux-<isa>`, `curcuma-plugin-cuda-<isa>`, `curcuma-plugin-rocm-<isa>`, all with top directory `curcuma-<isa>/`). Vulkan is not packaged.

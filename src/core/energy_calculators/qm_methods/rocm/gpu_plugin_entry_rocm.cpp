@@ -66,6 +66,10 @@ extern "C" {
 
 // ---- Multi-GPU device discovery (Claude Generated, Sep 2026; unverified - no ROCm SDK here) --
 // Indices are after ROCR_VISIBLE_DEVICES / HIP_VISIBLE_DEVICES.
+// Eigen alignment this plugin was compiled with; the loader compares it with the executable's
+// (Claude Generated, Oct 2026).
+int curcuma_rocm_eigen_align() { return EIGEN_MAX_ALIGN_BYTES; }
+
 int curcuma_rocm_device_count()
 {
     int n = 0;

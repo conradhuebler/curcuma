@@ -2,10 +2,14 @@
 # containers), macOS (Apple Silicon) and Windows. Build and smoke test only, artifacts are
 # not published as a release. Start by hand (Actions > Run workflow) or by a push to
 # feature/ci-container-builds.
-#   linux-gpu : AVX512, CUDA + ROCm plugins, libraries bundled
-#   linux-cpu : AVX2, no AVX512, no GPU plugins
-# The GPU plugins share Eigen objects with the executable, so each CPU variant is a
-# complete build of its own.
+#   linux-gpu (avx512, avx2): one build each, packed as three archives: the executable
+#       (curcuma-linux-<isa>), the CUDA plugin and the ROCm plugin (curcuma-plugin-*-<isa>).
+#       Unpack the plugin archives into the same directory as the executable archive, or
+#       point CURCUMA_PLUGIN_DIR (or the directory of the AppImage) at them.
+#   linux-cpu : AVX2, no AVX512, no GPU plugins, built on glibc 2.28
+# The GPU plugins share Eigen objects with the executable, so plugin and executable must come
+# from the same ISA build (the loader compares the Eigen alignment and refuses a mismatch).
+# Vulkan is not built.
 name: CiVariants
 
 on:
@@ -37,9 +41,25 @@ jobs:
       # Unpacked in a clean image: the tarball must carry everything it needs.
       - name: Smoke test in a clean system
         run: |
-          mkdir -p smoke && tar -C smoke -xzf out/curcuma-linux-cpu.tar.gz
-          docker run --rm -v "$PWD:/w" ubuntu:22.04 /w/smoke/curcuma-cpu/curcuma \
-            -sp /w/test_cases/structures/medium/butane.anti.xyz -method gfnff 2>&1 | tail -n 15
+          mkdir -p smoke && for a in out/*.tar.gz; do tar -C smoke -xzf "$a"; done
+          # Works without the CPU feature: only resolves the libraries, runs no curcuma code. The
+          # driver libraries (libcuda, libnvidia-*) come from the user's system.
+          docker run --rm -v "$PWD:/w" -e ISA ubuntu:22.04 bash -c '
+            cd /w/smoke/curcuma-$ISA; bad=0
+            for f in curcuma libcurcuma_*.so; do
+              miss=$(ldd "$f" | grep "not found" | grep -v "libcuda.so\|libnvidia" || true)
+              if [ -n "$miss" ]; then echo "MISSING for $f:"; echo "$miss"; bad=1; fi
+            done
+            exit $bad'
+          echo "ldd check passed"
+          flag=avx2; [ "$ISA" = avx512 ] && flag=avx512f
+          if ! grep -q "$flag" /proc/cpuinfo; then
+            echo "Runner has no $flag: the $ISA build is not run."; exit 0
+          fi
+          for g in "" "-gpu rocm" "-gpu cuda"; do
+            docker run --rm -v "$PWD:/w" ubuntu:22.04 /w/smoke/curcuma-$ISA/curcuma \
+              -sp /w/test_cases/structures/medium/butane.anti.xyz -method gfnff $g 2>&1 | tail -n 12
+          done
 
       - uses: actions/upload-artifact@v4
         with:
@@ -50,8 +70,15 @@ jobs:
   # Built directly on the runner: two container builds with the ROCm image lost the runner
   # (reason not visible in the log). Binaries need glibc 2.35 or newer.
   linux-gpu:
+    name: linux-gpu (${{ matrix.isa }})
     runs-on: ubuntu-22.04
     timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        isa: [avx512, avx2]
+    env:
+      ISA: ${{ matrix.isa }}
     steps:
       - uses: actions/checkout@v4
 
@@ -105,8 +132,8 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: linux-gpu
-          path: out/curcuma-linux-gpu.tar.gz
+          name: linux-${{ matrix.isa }}
+          path: out/*.tar.gz
           if-no-files-found: error
 
   macos:

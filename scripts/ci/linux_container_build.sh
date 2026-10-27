@@ -40,6 +40,5 @@ JOBS=$(awk -v n="$(nproc)" '/MemAvailable/{m=int($2/3000000); print (m<n?(m<1?1:
 make -j"$JOBS" > make.log 2>&1 || { grep -n -B3 -A6 -m6 -E " error|Error [0-9]|undefined reference|cannot find|fatal" make.log | cut -c1-300; exit 1; }
 tail -n 3 make.log
 
-bash "$SRC/scripts/ci/package_linux.sh" "$BUILD" "/out/curcuma-$VARIANT"
-tar -C /out -czf "/out/curcuma-linux-$VARIANT.tar.gz" "curcuma-$VARIANT"
+bash "$SRC/scripts/ci/package_linux.sh" "$BUILD" /out "$VARIANT"
 ls -l /out
