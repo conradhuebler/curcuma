@@ -42,3 +42,16 @@ set_tests_properties(qm_cite_jkfit PROPERTIES TIMEOUT 120 LABELS "qm_hf3c;qm_cit
 add_test(NAME qm_cite_hf3c COMMAND curcuma -sp ${_QM_CITE_XYZ} -method hf-3c -verbosity 1)
 set_tests_properties(qm_cite_hf3c PROPERTIES TIMEOUT 120 LABELS "qm_hf3c;qm_cite"
     PASS_REGULAR_EXPRESSION "Sure & Grimme 2013")
+# Method literature (Oct 2026): MP2/RI-MP2 variants, CCSD, local MP2, integral-direct SCF.
+foreach(_c "mp2;-method mp2;Moeller-Plesset perturbation theory \\(1934\\)"
+           "scsrimp2;-method scs-ri-mp2;Spin-component-scaled MP2 \\(Grimme 2003\\)"
+           "ccsd;-method ccsd;Purvis & Bartlett 1982"
+           "lmp2;-method lmp2;Pseudonatural orbitals \\(Edmiston & Krauss 1966\\)"
+           "direct;-method hf -qm.scf_direct on;Integral-direct SCF \\(Almloef")
+    list(GET _c 0 _n)
+    list(GET _c 1 _a)
+    list(GET _c 2 _re)
+    separate_arguments(_args UNIX_COMMAND "${_a}")
+    add_test(NAME qm_cite_${_n} COMMAND curcuma -sp ${_QM_CITE_XYZ} ${_args} -verbosity 1)
+    set_tests_properties(qm_cite_${_n} PROPERTIES TIMEOUT 300 LABELS "qm_hf3c;qm_cite" PASS_REGULAR_EXPRESSION "${_re}")
+endforeach()

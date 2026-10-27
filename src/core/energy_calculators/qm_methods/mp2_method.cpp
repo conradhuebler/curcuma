@@ -8,6 +8,7 @@
  */
 
 #include "mp2_method.h"
+#include "qm_citations.h"
 #include "qm_method.h"
 
 #include "src/core/curcuma_logger.h"
@@ -57,6 +58,7 @@ MP2Method::MP2Method(const std::string& variant, const json& config)
     // RI-MP2 variants (Claude Generated, Oct 2026): ri-mp2, scs-ri-mp2, sos-ri-mp2
     m_options.ri = m_variant.find("ri-mp2") != std::string::npos;
     m_options.ri_aux = lowerString(ec, "ri_mp2_aux", m_options.ri_aux);
+    qmcite::mp2(m_variant);
 }
 
 bool MP2Method::setMolecule(const Mol& mol)

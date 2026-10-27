@@ -81,6 +81,7 @@
 // qmint::gemmABt (the linked BLAS is single-threaded MKL on the development machine) threaded with OpenMP.
 // =================================================================================================
 
+#include "qm_citations.h"
 #include "qm_engine.h"
 #include "qm_mp2.h"
 
@@ -426,6 +427,7 @@ bool QMEngine::computeMP2Gradient(const qmint::MP2Options& opt, double c_os, dou
 {
     res = qmint::MP2Result();
     res.gradient = true;
+    qmcite::mp2("mp2", true);   // Z-vector method (Handy & Schaefer 1984)
     m_gradient_failed = false;
     m_gradient_error.clear();
     auto fail = [&](const std::string& msg) {

@@ -8,6 +8,7 @@
  */
 
 #include "ccsd_method.h"
+#include "qm_citations.h"
 #include "qm_method.h"
 
 #include "src/core/curcuma_logger.h"
@@ -56,6 +57,7 @@ CCSDMethod::CCSDMethod(const json& config)
     m_options.diis = (int)readNumber(ec, "cc_diis", m_options.diis);
     m_options.max_memory_mb = readNumber(ec, "cc_max_memory_mb", m_options.max_memory_mb);
     m_options.ao_max_memory_mb = readNumber(ec, "mp2_max_memory_mb", m_options.ao_max_memory_mb);
+    qmcite::ccsd();
 }
 
 bool CCSDMethod::setMolecule(const Mol& mol)

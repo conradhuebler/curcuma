@@ -366,8 +366,26 @@ basis file is resolved, `auxBasis` in `qmri::resolveAuxBasisFile`, `hf3c` in the
 | `def2-universal-JKFIT` (RI-JK, RI-MP2, LMP2) | Weigend 2008; RI-HF Weigend 2002; Basis Set Exchange |
 | `MINIX`, `hf-3c` | Sure & Grimme 2013; Kruse & Grimme 2012 (gCP); D3, Becke-Johnson damping |
 
-Attribution is by basis-set name: a user-supplied file with another name is not cited. Not cited yet: the method papers
-(HF, MP2, RI-MP2, CCSD, PNO/Pipek-Mezey for LMP2); tests `qm_cite_*` (AI-generated, machine-tested).
+Attribution is by basis-set name: a user-supplied file with another name is not cited.
+
+Method literature (same mechanism, registered when the method is created or the feature runs):
+
+| Used | Cited |
+|---|---|
+| any native QM run | Roothaan 1951, McMurchie-Davidson 1978, Pulay DIIS (existing key) |
+| integral-direct SCF | Almloef/Faegri/Korsell 1982, Haeser & Ahlrichs 1989 |
+| `-qm.scf_mode adiis` | Hu & Yang 2010 |
+| `mp2`, `scs-mp2`, `sos-mp2` | Moeller & Plesset 1934; Grimme 2003 (SCS); Jung et al. 2004 (SOS) |
+| MP2 gradient | Handy & Schaefer 1984 (Z-vector) |
+| `ri-mp2` variants | Feyereisen 1993; Vahtras 1993; Weigend & Haeser 1997 |
+| `ccsd` | Purvis & Bartlett 1982; Scuseria/Janssen/Schaefer 1988; Stanton et al. 1991 |
+| `lmp2` | Pulay 1983; Saebo & Pulay 1985; Boughton & Pulay 1993; Pipek-Mezey 1989 or Foster-Boys 1960; Edmiston & Krauss 1966; Meyer 1973; Neese/Hansen/Liakos 2009; Pinski et al. 2015 (DLPNO-MP2) |
+
+The references describe the methods the code follows, not a claim that the implementation reproduces every detail of the
+original papers (CCSD uses the PySCF/Hirata residual form; LMP2 follows `scripts/local_mp2/lmp2_common.py`). All DOIs were
+checked against Crossref on Oct 27, 2026 (three corrections: Z-vector, Edmiston-Krauss, Handy-Schaefer DOI). Tests
+`qm_cite_*` (AI-generated, machine-tested). Not cited: ORCA/PySCF as references (they are comparison tools, see the
+validation sections).
 
 ## Attribution and Provenance
 

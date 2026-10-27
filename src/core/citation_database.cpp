@@ -1105,6 +1105,367 @@ const std::unordered_map<std::string, CitationData>& database()
             "  doi = {10.1002/(SICI)1096-987X(199610)17:13<1571::AID-JCC9>3.0.CO;2-P}\n"
             "}"
         }},
+
+        // Native ab-initio QM: method literature (Oct 2026, Claude Generated; DOIs checked against Crossref).
+        { "roothaan", {
+            "Roothaan-Hall self-consistent-field equations (Roothaan 1951)",
+            "Roothaan, C. C. J. Rev. Mod. Phys. 1951, 23, 69-89 (DOI: 10.1103/RevModPhys.23.69)",
+            "roothaan1951",
+            "@article{roothaan1951,\n"
+            "  author = {Roothaan, C. C. J.},\n"
+            "  title = {New developments in molecular orbital theory},\n"
+            "  journal = {Rev. Mod. Phys.},\n"
+            "  year = {1951},\n"
+            "  volume = {23},\n"
+            "  pages = {69--89},\n"
+            "  doi = {10.1103/RevModPhys.23.69}\n"
+            "}"
+        }},
+
+        { "md_integrals", {
+            "McMurchie-Davidson scheme for Gaussian integrals (1978)",
+            "McMurchie, L. E.; Davidson, E. R. J. Comput. Phys. 1978, 26, 218-231 (DOI: 10.1016/0021-9991(78)90092-X)",
+            "mcmurchie1978integrals",
+            "@article{mcmurchie1978integrals,\n"
+            "  author = {McMurchie, Larry E. and Davidson, Ernest R.},\n"
+            "  title = {One- and two-electron integrals over {C}artesian {G}aussian functions},\n"
+            "  journal = {J. Comput. Phys.},\n"
+            "  year = {1978},\n"
+            "  volume = {26},\n"
+            "  pages = {218--231},\n"
+            "  doi = {10.1016/0021-9991(78)90092-X}\n"
+            "}"
+        }},
+
+        { "direct_scf", {
+            "Integral-direct SCF (Almloef, Faegri, Korsell 1982)",
+            "Almloef, J.; Faegri, K.; Korsell, K. J. Comput. Chem. 1982, 3, 385-399 (DOI: 10.1002/jcc.540030314)",
+            "almlof1982directscf",
+            "@article{almlof1982directscf,\n"
+            "  author = {Alml{\\\"o}f, Jan and Faegri, Knut and Korsell, Kenneth},\n"
+            "  title = {Principles for a direct {SCF} approach to {LCAO-MO} {ab-initio} calculations},\n"
+            "  journal = {J. Comput. Chem.},\n"
+            "  year = {1982},\n"
+            "  volume = {3},\n"
+            "  pages = {385--399},\n"
+            "  doi = {10.1002/jcc.540030314}\n"
+            "}"
+        }},
+
+        { "schwarz_screening", {
+            "Cauchy-Schwarz and density-weighted integral screening in direct SCF (Haeser & Ahlrichs 1989)",
+            "Haeser, M.; Ahlrichs, R. J. Comput. Chem. 1989, 10, 104-111 (DOI: 10.1002/jcc.540100111)",
+            "haser1989directscf",
+            "@article{haser1989directscf,\n"
+            "  author = {H{\\\"a}ser, Marco and Ahlrichs, Reinhart},\n"
+            "  title = {Improvements on the direct {SCF} method},\n"
+            "  journal = {J. Comput. Chem.},\n"
+            "  year = {1989},\n"
+            "  volume = {10},\n"
+            "  pages = {104--111},\n"
+            "  doi = {10.1002/jcc.540100111}\n"
+            "}"
+        }},
+
+        { "adiis", {
+            "ADIIS (augmented Roothaan-Hall energy function) SCF acceleration (Hu & Yang 2010)",
+            "Hu, X.; Yang, W. J. Chem. Phys. 2010, 132, 054109 (DOI: 10.1063/1.3304922)",
+            "hu2010adiis",
+            "@article{hu2010adiis,\n"
+            "  author = {Hu, Xiangqian and Yang, Weitao},\n"
+            "  title = {Accelerating self-consistent field convergence with the augmented {R}oothaan--{H}all energy function},\n"
+            "  journal = {J. Chem. Phys.},\n"
+            "  year = {2010},\n"
+            "  volume = {132},\n"
+            "  pages = {054109},\n"
+            "  doi = {10.1063/1.3304922}\n"
+            "}"
+        }},
+
+        { "mp2", {
+            "Second-order Moeller-Plesset perturbation theory (1934)",
+            "Moeller, C.; Plesset, M. S. Phys. Rev. 1934, 46, 618-622 (DOI: 10.1103/PhysRev.46.618)",
+            "moller1934mp2",
+            "@article{moller1934mp2,\n"
+            "  author = {M{\\\"o}ller, Chr. and Plesset, M. S.},\n"
+            "  title = {Note on an approximation treatment for many-electron systems},\n"
+            "  journal = {Phys. Rev.},\n"
+            "  year = {1934},\n"
+            "  volume = {46},\n"
+            "  pages = {618--622},\n"
+            "  doi = {10.1103/PhysRev.46.618}\n"
+            "}"
+        }},
+
+        { "scs_mp2", {
+            "Spin-component-scaled MP2 (Grimme 2003)",
+            "Grimme, S. J. Chem. Phys. 2003, 118, 9095-9102 (DOI: 10.1063/1.1569242)",
+            "grimme2003scsmp2",
+            "@article{grimme2003scsmp2,\n"
+            "  author = {Grimme, Stefan},\n"
+            "  title = {Improved second-order {M}{\\o}ller--{P}lesset perturbation theory by separate scaling of parallel- and antiparallel-spin pair correlation energies},\n"
+            "  journal = {J. Chem. Phys.},\n"
+            "  year = {2003},\n"
+            "  volume = {118},\n"
+            "  pages = {9095--9102},\n"
+            "  doi = {10.1063/1.1569242}\n"
+            "}"
+        }},
+
+        { "sos_mp2", {
+            "Scaled opposite-spin MP2 (Jung et al. 2004)",
+            "Jung, Y.; Lochan, R. C.; Dutoi, A. D.; Head-Gordon, M. J. Chem. Phys. 2004, 121, 9793-9802 (DOI: 10.1063/1.1809602)",
+            "jung2004sosmp2",
+            "@article{jung2004sosmp2,\n"
+            "  author = {Jung, Yousung and Lochan, Rohini C. and Dutoi, Anthony D. and Head-Gordon, Martin},\n"
+            "  title = {Scaled opposite-spin second order {M}{\\o}ller--{P}lesset correlation energy: An economical electronic structure method},\n"
+            "  journal = {J. Chem. Phys.},\n"
+            "  year = {2004},\n"
+            "  volume = {121},\n"
+            "  pages = {9793--9802},\n"
+            "  doi = {10.1063/1.1809602}\n"
+            "}"
+        }},
+
+        { "zvector", {
+            "Z-vector method for analytic derivatives of correlated wave functions (Handy & Schaefer 1984)",
+            "Handy, N. C.; Schaefer, H. F. J. Chem. Phys. 1984, 81, 5031-5033 (DOI: 10.1063/1.447489)",
+            "handy1984zvector",
+            "@article{handy1984zvector,\n"
+            "  author = {Handy, Nicholas C. and Schaefer, Henry F.},\n"
+            "  title = {On the evaluation of analytic energy derivatives for correlated wave functions},\n"
+            "  journal = {J. Chem. Phys.},\n"
+            "  year = {1984},\n"
+            "  volume = {81},\n"
+            "  pages = {5031--5033},\n"
+            "  doi = {10.1063/1.447489}\n"
+            "}"
+        }},
+
+        { "ri_mp2_feyereisen", {
+            "RI-MP2: resolution of the identity for MP2 (Feyereisen et al. 1993)",
+            "Feyereisen, M.; Fitzgerald, G.; Komornicki, A. Chem. Phys. Lett. 1993, 208, 359-363 (DOI: 10.1016/0009-2614(93)87156-W)",
+            "feyereisen1993rimp2",
+            "@article{feyereisen1993rimp2,\n"
+            "  author = {Feyereisen, Martin and Fitzgerald, George and Komornicki, Andrew},\n"
+            "  title = {Use of approximate integrals in ab initio theory. An application in {MP2} energy calculations},\n"
+            "  journal = {Chem. Phys. Lett.},\n"
+            "  year = {1993},\n"
+            "  volume = {208},\n"
+            "  pages = {359--363},\n"
+            "  doi = {10.1016/0009-2614(93)87156-W}\n"
+            "}"
+        }},
+
+        { "ri_vahtras", {
+            "Integral approximations for LCAO-SCF calculations (Vahtras et al. 1993)",
+            "Vahtras, O.; Almloef, J.; Feyereisen, M. W. Chem. Phys. Lett. 1993, 213, 514-518 (DOI: 10.1016/0009-2614(93)89151-7)",
+            "vahtras1993ri",
+            "@article{vahtras1993ri,\n"
+            "  author = {Vahtras, Olav and Alml{\\\"o}f, Jan and Feyereisen, M. W.},\n"
+            "  title = {Integral approximations for {LCAO-SCF} calculations},\n"
+            "  journal = {Chem. Phys. Lett.},\n"
+            "  year = {1993},\n"
+            "  volume = {213},\n"
+            "  pages = {514--518},\n"
+            "  doi = {10.1016/0009-2614(93)89151-7}\n"
+            "}"
+        }},
+
+        { "ri_mp2_weigend", {
+            "RI-MP2: first derivatives and global consistency (Weigend & Haeser 1997)",
+            "Weigend, F.; Haeser, M. Theor. Chem. Acc. 1997, 97, 331-340 (DOI: 10.1007/s002140050269)",
+            "weigend1997rimp2",
+            "@article{weigend1997rimp2,\n"
+            "  author = {Weigend, Florian and H{\\\"a}ser, Marco},\n"
+            "  title = {{RI-MP2}: first derivatives and global consistency},\n"
+            "  journal = {Theor. Chem. Acc.},\n"
+            "  year = {1997},\n"
+            "  volume = {97},\n"
+            "  pages = {331--340},\n"
+            "  doi = {10.1007/s002140050269}\n"
+            "}"
+        }},
+
+        { "ccsd_purvis", {
+            "Coupled-cluster singles and doubles model (Purvis & Bartlett 1982)",
+            "Purvis, G. D.; Bartlett, R. J. J. Chem. Phys. 1982, 76, 1910-1918 (DOI: 10.1063/1.443164)",
+            "purvis1982ccsd",
+            "@article{purvis1982ccsd,\n"
+            "  author = {Purvis, George D. and Bartlett, Rodney J.},\n"
+            "  title = {A full coupled-cluster singles and doubles model: The inclusion of disconnected triples},\n"
+            "  journal = {J. Chem. Phys.},\n"
+            "  year = {1982},\n"
+            "  volume = {76},\n"
+            "  pages = {1910--1918},\n"
+            "  doi = {10.1063/1.443164}\n"
+            "}"
+        }},
+
+        { "ccsd_scuseria", {
+            "Closed-shell CCSD reformulation (Scuseria, Janssen, Schaefer 1988)",
+            "Scuseria, G. E.; Janssen, C. L.; Schaefer, H. F. J. Chem. Phys. 1988, 89, 7382-7387 (DOI: 10.1063/1.455269)",
+            "scuseria1988ccsd",
+            "@article{scuseria1988ccsd,\n"
+            "  author = {Scuseria, Gustavo E. and Janssen, Curtis L. and Schaefer, Henry F.},\n"
+            "  title = {An efficient reformulation of the closed-shell coupled cluster single and double excitation ({CCSD}) equations},\n"
+            "  journal = {J. Chem. Phys.},\n"
+            "  year = {1988},\n"
+            "  volume = {89},\n"
+            "  pages = {7382--7387},\n"
+            "  doi = {10.1063/1.455269}\n"
+            "}"
+        }},
+
+        { "ccsd_stanton", {
+            "Spin-adapted CCSD residual (Stanton, Gauss, Watts, Bartlett 1991)",
+            "Stanton, J. F.; Gauss, J.; Watts, J. D.; Bartlett, R. J. J. Chem. Phys. 1991, 94, 4334-4345 (DOI: 10.1063/1.460620)",
+            "stanton1991ccsd",
+            "@article{stanton1991ccsd,\n"
+            "  author = {Stanton, John F. and Gauss, J{\\\"u}rgen and Watts, John D. and Bartlett, Rodney J.},\n"
+            "  title = {A direct product decomposition approach for symmetry exploitation in many-body methods. {I}. {E}nergy calculations},\n"
+            "  journal = {J. Chem. Phys.},\n"
+            "  year = {1991},\n"
+            "  volume = {94},\n"
+            "  pages = {4334--4345},\n"
+            "  doi = {10.1063/1.460620}\n"
+            "}"
+        }},
+
+        { "lmp2_pulay", {
+            "Local correlation (Pulay 1983)",
+            "Pulay, P. Chem. Phys. Lett. 1983, 100, 151-154 (DOI: 10.1016/0009-2614(83)80703-9)",
+            "pulay1983local",
+            "@article{pulay1983local,\n"
+            "  author = {Pulay, Peter},\n"
+            "  title = {Localizability of dynamic electron correlation},\n"
+            "  journal = {Chem. Phys. Lett.},\n"
+            "  year = {1983},\n"
+            "  volume = {100},\n"
+            "  pages = {151--154},\n"
+            "  doi = {10.1016/0009-2614(83)80703-9}\n"
+            "}"
+        }},
+
+        { "lmp2_saebo", {
+            "Local configuration interaction / local MP2 (Saebo & Pulay 1985)",
+            "Saebo, S.; Pulay, P. Chem. Phys. Lett. 1985, 113, 13-18 (DOI: 10.1016/0009-2614(85)85003-X)",
+            "saebo1985local",
+            "@article{saebo1985local,\n"
+            "  author = {S{\\ae}b{\\o}, Svein and Pulay, Peter},\n"
+            "  title = {Local configuration interaction: An efficient approach for larger molecules},\n"
+            "  journal = {Chem. Phys. Lett.},\n"
+            "  year = {1985},\n"
+            "  volume = {113},\n"
+            "  pages = {13--18},\n"
+            "  doi = {10.1016/0009-2614(85)85003-X}\n"
+            "}"
+        }},
+
+        { "boughton_pulay", {
+            "Boughton-Pulay orbital domains from projected atomic orbitals (1993)",
+            "Boughton, J. W.; Pulay, P. J. Comput. Chem. 1993, 14, 736-740 (DOI: 10.1002/jcc.540140615)",
+            "boughton1993domains",
+            "@article{boughton1993domains,\n"
+            "  author = {Boughton, James W. and Pulay, Peter},\n"
+            "  title = {Comparison of the {B}oys and {P}ipek--{M}ezey localizations in the local correlation approach and automatic virtual basis selection},\n"
+            "  journal = {J. Comput. Chem.},\n"
+            "  year = {1993},\n"
+            "  volume = {14},\n"
+            "  pages = {736--740},\n"
+            "  doi = {10.1002/jcc.540140615}\n"
+            "}"
+        }},
+
+        { "pipek_mezey", {
+            "Pipek-Mezey orbital localisation (1989)",
+            "Pipek, J.; Mezey, P. G. J. Chem. Phys. 1989, 90, 4916-4926 (DOI: 10.1063/1.456588)",
+            "pipek1989localization",
+            "@article{pipek1989localization,\n"
+            "  author = {Pipek, J{\\'a}nos and Mezey, Paul G.},\n"
+            "  title = {A fast intrinsic localization procedure applicable for ab initio and semiempirical linear combination of atomic orbital wave functions},\n"
+            "  journal = {J. Chem. Phys.},\n"
+            "  year = {1989},\n"
+            "  volume = {90},\n"
+            "  pages = {4916--4926},\n"
+            "  doi = {10.1063/1.456588}\n"
+            "}"
+        }},
+
+        { "foster_boys", {
+            "Foster-Boys orbital localisation (1960)",
+            "Foster, J. M.; Boys, S. F. Rev. Mod. Phys. 1960, 32, 300-302 (DOI: 10.1103/RevModPhys.32.300)",
+            "foster1960boys",
+            "@article{foster1960boys,\n"
+            "  author = {Foster, J. M. and Boys, S. F.},\n"
+            "  title = {Canonical configurational interaction procedure},\n"
+            "  journal = {Rev. Mod. Phys.},\n"
+            "  year = {1960},\n"
+            "  volume = {32},\n"
+            "  pages = {300--302},\n"
+            "  doi = {10.1103/RevModPhys.32.300}\n"
+            "}"
+        }},
+
+        { "pno_edmiston", {
+            "Pseudonatural orbitals (Edmiston & Krauss 1966)",
+            "Edmiston, C.; Krauss, M. J. Chem. Phys. 1966, 45, 1833-1839 (DOI: 10.1063/1.1727841)",
+            "edmiston1966pno",
+            "@article{edmiston1966pno,\n"
+            "  author = {Edmiston, Clyde and Krauss, Morris},\n"
+            "  title = {Pseudonatural orbitals as a basis for the superposition of configurations. {I}. {He$_2^+$}},\n"
+            "  journal = {J. Chem. Phys.},\n"
+            "  year = {1966},\n"
+            "  volume = {45},\n"
+            "  pages = {1833--1839},\n"
+            "  doi = {10.1063/1.1727841}\n"
+            "}"
+        }},
+
+        { "pno_meyer", {
+            "PNO-CI: pair natural orbitals (Meyer 1973)",
+            "Meyer, W. J. Chem. Phys. 1973, 58, 1017-1035 (DOI: 10.1063/1.1679283)",
+            "meyer1973pno",
+            "@article{meyer1973pno,\n"
+            "  author = {Meyer, Wilfried},\n"
+            "  title = {{PNO}--{CI} studies of electron correlation effects. {I}. {C}onfiguration expansion by means of nonorthogonal orbitals, and application to the ground state and ionized states of methane},\n"
+            "  journal = {J. Chem. Phys.},\n"
+            "  year = {1973},\n"
+            "  volume = {58},\n"
+            "  pages = {1017--1035},\n"
+            "  doi = {10.1063/1.1679283}\n"
+            "}"
+        }},
+
+        { "pno_neese", {
+            "Local PNO coupled-cluster approximations (Neese, Hansen, Liakos 2009)",
+            "Neese, F.; Hansen, A.; Liakos, D. G. J. Chem. Phys. 2009, 131, 064103 (DOI: 10.1063/1.3173827)",
+            "neese2009pno",
+            "@article{neese2009pno,\n"
+            "  author = {Neese, Frank and Hansen, Andreas and Liakos, Dimitrios G.},\n"
+            "  title = {Efficient and accurate approximations to the local coupled cluster singles doubles method using a truncated pair natural orbital basis},\n"
+            "  journal = {J. Chem. Phys.},\n"
+            "  year = {2009},\n"
+            "  volume = {131},\n"
+            "  pages = {064103},\n"
+            "  doi = {10.1063/1.3173827}\n"
+            "}"
+        }},
+
+        { "dlpno_mp2", {
+            "Local PNO-MP2 with sparse maps (Pinski et al. 2015)",
+            "Pinski, P.; Riplinger, C.; Valeev, E. F.; Neese, F. J. Chem. Phys. 2015, 143, 034108 (DOI: 10.1063/1.4926879)",
+            "pinski2015dlpnomp2",
+            "@article{pinski2015dlpnomp2,\n"
+            "  author = {Pinski, Peter and Riplinger, Christoph and Valeev, Edward F. and Neese, Frank},\n"
+            "  title = {Sparse maps---{A} systematic infrastructure for reduced-scaling electronic structure methods. {I}. {A}n efficient and simple linear scaling local {MP2} method that uses an intermediate basis of pair natural orbitals},\n"
+            "  journal = {J. Chem. Phys.},\n"
+            "  year = {2015},\n"
+            "  volume = {143},\n"
+            "  pages = {034108},\n"
+            "  doi = {10.1063/1.4926879}\n"
+            "}"
+        }},
     };
     return db;
 }

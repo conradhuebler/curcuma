@@ -8,6 +8,7 @@
  */
 
 #include "lmp2_method.h"
+#include "qm_citations.h"
 #include "qm_method.h"
 
 #include "src/core/curcuma_logger.h"
@@ -65,6 +66,7 @@ LMP2Method::LMP2Method(const json& config)
     o.frozen_core = readBool(ec, "frozen_core", false);
     o.ri_aux = readString(ec, "ri_mp2_aux", o.ri_aux, false);
     o.localizer = readString(ec, "lmp2_localizer", o.localizer, true);
+    qmcite::lmp2(o.localizer);
     o.localizer_algo = readString(ec, "lmp2_localizer_algo", o.localizer_algo, true);
     o.localizer_screen = readNumber(ec, "lmp2_localizer_screen", o.localizer_screen);
     o.bp_threshold = readNumber(ec, "lmp2_bp_threshold", o.bp_threshold);

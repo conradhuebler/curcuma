@@ -39,6 +39,7 @@
  * This program is free software under GPL-3.0
  */
 
+#include "qm_citations.h"
 #include "qm_engine.h"
 
 #include <cstdlib>
@@ -601,6 +602,8 @@ bool QMEngine::runSCF()
     const bool ri_jk = riActive() && m_ri_mode == "jk";
     if (riActive() && !ensureRI()) return false;
     const bool direct = !ri_jk && useDirectSCF();
+    if (direct) qmcite::directScf();
+    if (m_scf_mode == "adiis") CitationRegistry::cite("adiis");
     if (!ri_jk && !direct && !ensureGpuJK()) {
         const qmint::ERITensor& eri = eriActive();  // builds (and caches) on first call
         if (eri.n() != n) {

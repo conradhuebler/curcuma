@@ -64,6 +64,57 @@ inline void auxBasis(const std::string& name_or_file)
     }
 }
 
+/// Closed-shell HF/SCF machinery of the native engine: Roothaan-Hall equations, McMurchie-Davidson integrals, Pulay DIIS.
+inline void hf()
+{
+    CitationRegistry::cite("roothaan");
+    CitationRegistry::cite("md_integrals");
+    CitationRegistry::cite("diis");
+}
+
+/// Integral-direct SCF with Schwarz / density-weighted screening.
+inline void directScf()
+{
+    CitationRegistry::cite("direct_scf");
+    CitationRegistry::cite("schwarz_screening");
+}
+
+/// MP2 variants by method name: mp2, scs-mp2, sos-mp2, ri-mp2, scs-ri-mp2, sos-ri-mp2.
+inline void mp2(const std::string& variant, bool gradient = false)
+{
+    CitationRegistry::cite("mp2");
+    if (variant.find("scs") != std::string::npos) CitationRegistry::cite("scs_mp2");
+    if (variant.find("sos") != std::string::npos) CitationRegistry::cite("sos_mp2");
+    if (variant.find("ri-mp2") != std::string::npos) {
+        CitationRegistry::cite("ri_mp2_feyereisen");
+        CitationRegistry::cite("ri_vahtras");
+        CitationRegistry::cite("ri_mp2_weigend");
+    }
+    if (gradient) CitationRegistry::cite("zvector");
+}
+
+/// Canonical closed-shell CCSD.
+inline void ccsd()
+{
+    CitationRegistry::cite("ccsd_purvis");
+    CitationRegistry::cite("ccsd_scuseria");
+    CitationRegistry::cite("ccsd_stanton");
+}
+
+/// Local PNO-RI-MP2: localiser "pm" or "boys", Boughton-Pulay domains, pair natural orbitals.
+inline void lmp2(const std::string& localizer)
+{
+    mp2("ri-mp2");
+    CitationRegistry::cite("lmp2_pulay");
+    CitationRegistry::cite("lmp2_saebo");
+    CitationRegistry::cite("boughton_pulay");
+    CitationRegistry::cite(localizer == "boys" ? "foster_boys" : "pipek_mezey");
+    CitationRegistry::cite("pno_edmiston");
+    CitationRegistry::cite("pno_meyer");
+    CitationRegistry::cite("pno_neese");
+    CitationRegistry::cite("dlpno_mp2");
+}
+
 /// HF-3c composite (HF/MINIX, D3(BJ), gCP, SRB).
 inline void hf3c()
 {

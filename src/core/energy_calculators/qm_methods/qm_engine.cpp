@@ -290,6 +290,7 @@ bool QMEngine::InitialiseMolecule()
     try {
         m_basis_file = resolveBasisFile(m_basis_name);
         qmcite::orbitalBasis(m_basis_name);   // literature of the basis set actually loaded
+        qmcite::hf();
         if (m_basis_map_cache.empty())
             m_basis_map_cache = BasisSetParser::parseBasisSetFile(m_basis_file);
     } catch (const std::exception& e) {
