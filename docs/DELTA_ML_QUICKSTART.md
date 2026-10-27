@@ -21,7 +21,7 @@ correction wherever a method is accepted (`-sp`, `-opt`, `-md`). It is meant for
 | reactions, topology changes | not tested (argued to fail) | [DELTA_ML.md, "When this applies"](DELTA_ML.md) |
 | charged or open-shell systems | not tested | [RETEST, conclusion](DELTA_ML_RETEST_2026-10.md) |
 | molecules other than the four above, transfer between molecules | not tested | [THIRD_MOLECULE](DELTA_ML_THIRD_MOLECULE_DFT_2026-10.md) |
-| GPU beyond fit/step timing | not tested | [DELTA_ML.md, "GPU"](DELTA_ML.md) |
+| GPU (CUDA): correction on the device | shown for parity with the CPU (1e-13 Eh, FD gate) and speed (peo8, M1, n=3); ROCm, Vulkan, multi-GPU, charged systems not tested | [GPU](DELTA_ML_GPU_2026-10.md) |
 
 ## Worked example: n-butane, GFN-FF -> GFN2 (run 27 Oct 2026, n=1)
 

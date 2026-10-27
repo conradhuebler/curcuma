@@ -1122,8 +1122,8 @@ if(USE_CUDA)
         ${CUDA_SOURCES}
         src/core/energy_calculators/qm_methods/xtb_gpu_method.cpp
         src/core/energy_calculators/qm_methods/cuda/gpu_plugin_entry_cuda.cpp
-        # Delta-ML: cuBLAS accumulation of the normal equations
-        src/core/ml/cuda/ml_accum_cuda.cu)
+        # Delta-ML: descriptor, kernel, forces and the fit's design block on the device
+        src/core/ml/cuda/ml_model_cuda.cu)
     target_include_directories(curcuma_cuda PRIVATE ${PROJECT_SOURCE_DIR})
     target_link_libraries(curcuma_cuda PRIVATE CUDA::cudart CUDA::cusolver CUDA::cublas)
     target_sources(curcuma_cuda PRIVATE

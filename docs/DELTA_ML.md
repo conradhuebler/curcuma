@@ -500,43 +500,29 @@ correction barely moves. Do not assume the geometric gain transfers -- measure i
 
 ## GPU
 
-`-gpu cuda` offloads the fit. The training cost is dominated by one symmetric rank-k
-update per structure -- `M^2 * 3N`, which is 2.2 GFlop at M = 2000 and N = 90 against
-roughly 0.16 GFlop for building the design block itself -- so that single cuBLAS DSYRK is
-what gets moved, and everything else stays on the CPU.
+`-gpu cuda` (CUDA only; ROCm and Vulkan report "unavailable" and stay on the CPU) moves the whole correction onto the device
+(Oct 27, 2026, `src/core/ml/cuda/ml_model_cuda.cu`): neighbour lists, ACSF G2/G4, kernel, force contraction and, in the fit,
+the design block and the normal equations (cuBLAS DSYRK). The LDLT solve, centre selection and the standardisation pass stay
+on the CPU. Details, profile and acceptance: [DELTA_ML_GPU_2026-10.md](DELTA_ML_GPU_2026-10.md). Before this change the
+descriptor and the Jacobian contraction were on the host and made up 85 to 90 per cent of the GPU step.
 
-353 conformers, 90 atoms, RTX 5080:
+RTX 5080, MD, 2000 steps, n = 3 alternating, load about 1 (agent measurement, `-threads 4`):
 
-| M | CPU | CUDA | speedup | held-out MAE (both) |
-|---|---|---|---|---|
-| 2000 | 26.2 s | 16.6 s | 1.6x | 0.2992 kcal/mol |
-| 4000 | 78.6 s | 33.9 s | 2.3x | 0.2903 kcal/mol |
-| 8000 | 246.9 s | 86.6 s | 2.9x | 0.2775 kcal/mol |
+| | CPU | GPU before | GPU now |
+|---|---|---|---|
+| correction per step, peo8 (58 atoms) [ms] | 1.27 | 1.09 | 0.17 |
+| correction per step, M1 (90 atoms) [ms] | 3.13 | 2.15 | 0.29 |
+| whole step incl. GFN-FF, peo8 / M1 [ms] | 1.44 / 3.43 | 1.76 / 3.22 | 0.84 / 1.35 |
+| fit `train_seconds`, peo8 / M1 [s] | 2.5 / 11.7 | 2.1 / 7.5 | 0.8 / 2.1 |
 
-The speedup grows with M because the rank-k update's share of the work grows; the ceiling
-is set by the descriptor, Jacobian and design-block construction that remain on the host.
-Accuracy is identical to every printed digit -- cuBLAS sums in a different order, so the
-systems agree to rounding rather than bit-for-bit, and that difference does not survive
-into the reported errors.
-
-The row-major design block is handed to cuBLAS unchanged: read with leading dimension M it
-is already the column-major transpose the call wants, so the two storage conventions cancel
-and nothing is repacked.
-
-Prediction moves too: centres, weights and scaling are uploaded once, and each step
-exchanges only the standardised descriptor in and the feature-space adjoint out -- a few
-tens of kilobytes, against the ~5 MB the compact Jacobian blocks would cost. Those stay on
-the host and are contracted there. 90 atoms, M = 2000, per dynamics step:
-
-| | CPU | CUDA |
-|---|---|---|
-| GFN-FF alone | 0.31 ms | 0.68 ms |
-| Delta-ML total | 5.74 ms | 3.16 ms |
-| correction alone | 5.43 ms | **2.48 ms** |
-
-The correction is 2.2x faster; the correction value itself is identical to all ten printed
-digits. Note GFN-FF is *slower* on the GPU at this size, which eats part of the gain --
-`-gpu` is a single global switch, so the best placement per component is not expressible.
+Agreement: correction energy and gradient GPU against CPU on 25 frames per molecule within 1e-13 Eh and 1e-14 Eh/A; fully
+assembled gradient against central differences 3.5e-8 / 1.1e-8 Eh/A (peo8 / M1), identical to the CPU path; held-out error of
+CPU and GPU fits identical to the printed digits (the fitted weights differ by 1e-8 from the summation order of DSYRK). The
+whole step is now limited by GFN-FF, which is slower on the GPU than on the CPU at these sizes; `-gpu` is one global switch,
+so that placement cannot be split. Not tested: ROCm, Vulkan, multi-GPU, charged or open-shell systems, elements other than
+C/H/N/O, more than 90 atoms, M above 2000, several threads sharing one model (serialised by a mutex, not measured).
+If the GPU path cannot be used (no device, more than 512 neighbours in the cutoff, descriptor grid above 32 radial / 8 zeta /
+8 lambda) it says so and runs on the CPU.
 
 ## ConfSearch: not established, and the roles do not line up
 

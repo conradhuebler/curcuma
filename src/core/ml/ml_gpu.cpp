@@ -1,5 +1,5 @@
 /*
- * < GPU offload for the Delta-ML normal equations >
+ * < GPU offload of the Delta-ML model >
  * Copyright (C) 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
@@ -15,76 +15,182 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
- * Claude Generated (July 2026): GPU path of the Delta-ML work package.
+ * Claude Generated (July 2026, rewritten October 2026): GPU path of the Delta-ML work package.
  */
 
 #include "ml_gpu.h"
+#include "ml_gpu_abi.h"
 
-#include "src/core/curcuma_logger.h"
 #include "src/core/energy_calculators/gpu_plugin.h"
 
-#include <vector>
+#include <cmath>
 
 namespace curcuma {
 namespace ml {
 
-GpuAccumulator::GpuAccumulator(const std::string& backend, int M)
-    : m_M(M)
+namespace {
+    const char* codeText(int code)
+    {
+        switch (code) {
+        case CURCUMA_ML_ERR_ARGS:
+            return "invalid arguments";
+        case CURCUMA_ML_ERR_ALLOC:
+            return "device memory allocation failed";
+        case CURCUMA_ML_ERR_CUDA:
+            return "device runtime error";
+        case CURCUMA_ML_ERR_BLAS:
+            return "device BLAS error";
+        case CURCUMA_ML_ERR_NOT_READY:
+            return "device model not initialised";
+        case CURCUMA_ML_ERR_NEIGHBOURS:
+            return "an atom has more neighbours inside the descriptor cutoff than the device "
+                   "kernels hold (CURCUMA_ML_MAX_NEIGHBOURS = 512)";
+        default:
+            return "unknown device error";
+        }
+    }
+} // namespace
+
+GpuModel::GpuModel(const std::string& backend_in, const ACSFConfig& acsf, const Matrix& centers,
+    const Vector& mean, const Vector& scale, double sigma)
+    : m_M(static_cast<int>(centers.rows()))
 {
-    if (M <= 0)
-        return;
-
-    const std::string prefix = "curcuma_" + backend + "_ml_accum_";
-    m_create = reinterpret_cast<void* (*)(int)>(
-        gpu_plugin::resolveEntryPoint(backend, prefix + "create"));
-    m_add = reinterpret_cast<int (*)(void*, int, const double*, const double*, double)>(
-        gpu_plugin::resolveEntryPoint(backend, prefix + "add"));
-    m_fetch = reinterpret_cast<int (*)(void*, double*, double*)>(
-        gpu_plugin::resolveEntryPoint(backend, prefix + "fetch"));
-    m_destroy = reinterpret_cast<void (*)(void*)>(
-        gpu_plugin::resolveEntryPoint(backend, prefix + "destroy"));
-
-    if (!m_create || !m_add || !m_fetch || !m_destroy) {
-        CurcumaLogger::warn_fmt(
-            "delta-ML: backend '{}' provides no accumulation entry points; fitting on the CPU",
-            backend);
+    const std::string backend = (backend_in == "auto") ? std::string("cuda") : backend_in;
+    const int F = static_cast<int>(centers.cols());
+    if (m_M <= 0 || F <= 0 || mean.size() != F || scale.size() != F) {
+        m_error = "model has no centres or inconsistent feature scaling";
         return;
     }
 
-    m_ctx = m_create(M);
-    if (!m_ctx) {
-        CurcumaLogger::warn_fmt(
-            "delta-ML: backend '{}' could not allocate a {}x{} device system ({:.2f} GB); "
-            "fitting on the CPU",
-            backend, M, M, static_cast<double>(M) * M * 8.0 / 1e9);
+    // The device kernels hold the grid in fixed arrays; refuse a grid that does not fit
+    // rather than run a truncated one.
+    CurcumaMLDeviceConfig cfg {};
+    cfg.n_species = acsf.speciesCount();
+    cfg.n_radial = acsf.radialCount();
+    cfg.n_zeta = static_cast<int>(acsf.angular_zeta.size());
+    cfg.n_lambda = static_cast<int>(acsf.angular_lambda.size());
+    if (cfg.n_radial > CURCUMA_ML_MAX_RADIAL || cfg.n_zeta > CURCUMA_ML_MAX_ZETA
+        || cfg.n_lambda > CURCUMA_ML_MAX_LAMBDA || acsf.featureCount() != F) {
+        m_error = "descriptor grid exceeds the device limits (radial <= 32, zeta <= 8, lambda <= 8)";
+        return;
     }
+    cfg.rcut_radial = acsf.rcut_radial;
+    cfg.rcut_angular = acsf.rcut_angular;
+    cfg.radial_eta = acsf.radial_eta;
+    cfg.angular_eta = acsf.angular_eta;
+    for (int p = 0; p < cfg.n_radial; ++p)
+        cfg.radial_rs[p] = acsf.radial_rs[p];
+    for (int z = 0; z < cfg.n_zeta; ++z) {
+        cfg.zeta[z] = acsf.angular_zeta[z];
+        cfg.zeta_pref[z] = std::pow(2.0, 1.0 - acsf.angular_zeta[z]); // as in descriptor.cpp
+        const double zr = std::round(acsf.angular_zeta[z]);
+        cfg.zeta_int[z] = (zr == acsf.angular_zeta[z] && zr >= 1.0 && zr <= 64.0) ? static_cast<int>(zr) : 0;
+    }
+    for (int l = 0; l < cfg.n_lambda; ++l)
+        cfg.lambda[l] = static_cast<double>(acsf.angular_lambda[l]);
+
+    const std::string prefix = "curcuma_" + backend + "_ml_model_";
+    auto create = reinterpret_cast<void* (*)(const CurcumaMLDeviceConfig*, int, int, const double*,
+        const double*, const double*, double)>(gpu_plugin::resolveEntryPoint(backend, prefix + "create"));
+    m_destroy = reinterpret_cast<void (*)(void*)>(gpu_plugin::resolveEntryPoint(backend, prefix + "destroy"));
+    m_set_beta = reinterpret_cast<int (*)(void*, const double*)>(
+        gpu_plugin::resolveEntryPoint(backend, prefix + "set_beta"));
+    m_predict = reinterpret_cast<int (*)(void*, int, const double*, const int*, const int*, const int*,
+        int, double*)>(gpu_plugin::resolveEntryPoint(backend, prefix + "predict"));
+    m_accum_begin = reinterpret_cast<int (*)(void*)>(
+        gpu_plugin::resolveEntryPoint(backend, prefix + "accum_begin"));
+    m_accum_add = reinterpret_cast<int (*)(void*, int, const double*, const int*, const int*, const int*,
+        double, const double*, double, double)>(gpu_plugin::resolveEntryPoint(backend, prefix + "accum_add"));
+    m_accum_fetch = reinterpret_cast<int (*)(void*, double*, double*)>(
+        gpu_plugin::resolveEntryPoint(backend, prefix + "accum_fetch"));
+
+    if (!create || !m_destroy || !m_set_beta || !m_predict || !m_accum_begin || !m_accum_add || !m_accum_fetch) {
+        m_error = "backend '" + backend + "' provides no delta-ML entry points (plugin not built or not found)";
+        return;
+    }
+
+    const Vector inv_scale = scale.cwiseInverse(); // same expression as DeltaMLModel::standardise
+    m_ctx = create(&cfg, m_M, F, centers.data(), mean.data(), inv_scale.data(), sigma);
+    if (!m_ctx)
+        m_error = "backend '" + backend + "' found no usable device or could not upload the model";
 }
 
-GpuAccumulator::~GpuAccumulator()
+GpuModel::~GpuModel()
 {
     if (m_ctx && m_destroy)
         m_destroy(m_ctx);
 }
 
-bool GpuAccumulator::add(int rows, const double* phi, const double* y, double alpha)
+bool GpuModel::fail(int code, const char* what)
 {
-    if (!m_ctx)
-        return false;
-    return m_add(m_ctx, rows, phi, y, alpha) == 0;
+    m_error = std::string(what) + ": " + codeText(code);
+    return false;
 }
 
-bool GpuAccumulator::fetch(Matrix& A, Vector& b)
+bool GpuModel::setWeights(const Vector& beta)
 {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_ctx || beta.size() != m_M)
+        return false;
+    const int rc = m_set_beta(m_ctx, beta.data());
+    return rc == CURCUMA_ML_OK ? true : fail(rc, "uploading the weights");
+}
+
+bool GpuModel::predict(const std::vector<int>& sidx, const std::vector<int>& start,
+    const std::vector<int>& count, const Geometry& geometry, double& e_kernel, double& uncertainty,
+    Matrix* gradient)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    const int n = static_cast<int>(sidx.size());
+    if (!m_ctx || n == 0 || geometry.rows() != n || geometry.cols() != 3)
+        return false;
+    m_out.assign(2 + 3 * static_cast<std::size_t>(n), 0.0);
+    // Geometry is a row-major N x 3 typedef, which is the layout the device reads.
+    const int rc = m_predict(m_ctx, n, geometry.data(), sidx.data(), start.data(), count.data(),
+        gradient ? 1 : 0, m_out.data());
+    if (rc != CURCUMA_ML_OK)
+        return fail(rc, "prediction");
+    e_kernel = m_out[0];
+    uncertainty = m_out[1];
+    if (gradient)
+        *gradient = Eigen::Map<const Matrix>(m_out.data() + 2, n, 3);
+    return true;
+}
+
+bool GpuModel::beginAccumulation()
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
     if (!m_ctx)
         return false;
+    const int rc = m_accum_begin(m_ctx);
+    return rc == CURCUMA_ML_OK ? true : fail(rc, "allocating the normal equations");
+}
 
+bool GpuModel::accumulate(const std::vector<int>& sidx, const std::vector<int>& start,
+    const std::vector<int>& count, const Geometry& geometry, double y_energy, const double* y_grad,
+    double wE, double wF)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    const int n = static_cast<int>(sidx.size());
+    if (!m_ctx || n == 0 || geometry.rows() != n || geometry.cols() != 3)
+        return false;
+    const int rc = m_accum_add(m_ctx, n, geometry.data(), sidx.data(), start.data(), count.data(),
+        y_energy, y_grad, wE, wF);
+    return rc == CURCUMA_ML_OK ? true : fail(rc, "building the design block");
+}
+
+bool GpuModel::fetch(Matrix& A, Vector& b)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_ctx)
+        return false;
     std::vector<double> a_raw(static_cast<std::size_t>(m_M) * m_M, 0.0);
     std::vector<double> b_raw(static_cast<std::size_t>(m_M), 0.0);
-    if (m_fetch(m_ctx, a_raw.data(), b_raw.data()) != 0)
-        return false;
+    const int rc = m_accum_fetch(m_ctx, a_raw.data(), b_raw.data());
+    if (rc != CURCUMA_ML_OK)
+        return fail(rc, "reading the normal equations back");
 
-    // The device buffer holds the lower triangle in column-major order, i.e. entry (i,j)
-    // with i >= j sits at j*M + i. Mirror it into the row-major result.
+    // Lower triangle in column-major order: entry (i,j), i >= j, sits at j*M + i.
     A = Matrix::Zero(m_M, m_M);
     for (int j = 0; j < m_M; ++j) {
         for (int i = j; i < m_M; ++i) {
@@ -95,50 +201,6 @@ bool GpuAccumulator::fetch(Matrix& A, Vector& b)
     }
     b = Eigen::Map<const Vector>(b_raw.data(), m_M);
     return true;
-}
-
-GpuInference::GpuInference(const std::string& backend, const Matrix& centers, const Vector& beta,
-    const Vector& inv_scale, double sigma)
-    : m_F(static_cast<int>(centers.cols()))
-{
-    const int M = static_cast<int>(centers.rows());
-    if (M <= 0 || m_F <= 0)
-        return;
-
-    const std::string prefix = "curcuma_" + backend + "_ml_infer_";
-    m_create = reinterpret_cast<void* (*)(int, int, const double*, const double*, const double*, double)>(
-        gpu_plugin::resolveEntryPoint(backend, prefix + "create"));
-    m_run = reinterpret_cast<int (*)(void*, int, const double*, const int*, const int*, double*,
-        double*, double*)>(gpu_plugin::resolveEntryPoint(backend, prefix + "run"));
-    m_destroy = reinterpret_cast<void (*)(void*)>(
-        gpu_plugin::resolveEntryPoint(backend, prefix + "destroy"));
-
-    if (!m_create || !m_run || !m_destroy)
-        return;
-
-    // centers is row-major (Matrix is a RowMajor typedef), which is what the device expects.
-    m_ctx = m_create(M, m_F, centers.data(), beta.data(), inv_scale.data(), sigma);
-}
-
-GpuInference::~GpuInference()
-{
-    if (m_ctx && m_destroy)
-        m_destroy(m_ctx);
-}
-
-bool GpuInference::run(const Matrix& X, const std::vector<int>& start,
-    const std::vector<int>& count, double& energy, Matrix& W, double& uncertainty)
-{
-    if (!m_ctx)
-        return false;
-    const int natoms = static_cast<int>(X.rows());
-    if (natoms == 0 || static_cast<int>(start.size()) != natoms)
-        return false;
-
-    W = Matrix::Zero(natoms, m_F);
-    return m_run(m_ctx, natoms, X.data(), start.data(), count.data(), &energy, W.data(),
-               &uncertainty)
-        == 0;
 }
 
 } // namespace ml

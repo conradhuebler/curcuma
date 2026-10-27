@@ -121,18 +121,59 @@ Vector DeltaMLModel::kernelRow(const Vector& x, int element, int& start, int& co
     return (d2 * (-1.0 / (2.0 * m_sigma * m_sigma))).array().exp();
 }
 
-void DeltaMLModel::setInferenceBackend(const std::string& backend)
+bool DeltaMLModel::setInferenceBackend(const std::string& backend)
 {
-    m_gpu_infer.reset();
+    m_gpu.reset();
     if (backend.empty() || backend == "none" || backend == "cpu" || !m_trained)
-        return;
-    auto ctx = std::make_shared<GpuInference>(
-        backend, m_centers, m_beta, m_feature_scale.cwiseInverse(), m_sigma);
-    if (ctx->valid())
-        m_gpu_infer = ctx;
-    else
-        CurcumaLogger::warn_fmt(
-            "delta-ML: backend '{}' unavailable for prediction; evaluating on the CPU", backend);
+        return false;
+    auto ctx = std::make_shared<GpuModel>(backend, m_acsf, m_centers, m_feature_mean, m_feature_scale, m_sigma);
+    if (ctx->valid() && ctx->setWeights(m_beta)) {
+        m_gpu = ctx;
+        return true;
+    }
+    CurcumaLogger::warn_fmt("delta-ML: GPU backend '{}' unavailable for prediction ({}); evaluating on the CPU",
+        backend, ctx->error());
+    return false;
+}
+
+void DeltaMLModel::deviceInputs(const std::vector<int>& elements, std::vector<int>& sidx,
+    std::vector<int>& start, std::vector<int>& count) const
+{
+    // Claude Generated (October 2026): the two lookups the CPU path does per atom -- the
+    // descriptor's species index and the model's centre block -- done once on the host.
+    const int n = static_cast<int>(elements.size());
+    sidx.assign(n, -1);
+    start.assign(n, 0);
+    count.assign(n, 0);
+    for (int i = 0; i < n; ++i) {
+        sidx[i] = m_acsf.speciesIndex(elements[i]);
+        const auto it = m_element_block.find(elements[i]);
+        if (it != m_element_block.end()) {
+            start[i] = it->second.first;
+            count[i] = it->second.second;
+        }
+    }
+}
+
+bool DeltaMLModel::predictOnDevice(const std::vector<int>& elements, const Geometry& geometry,
+    double& energy, double* uncertainty, Matrix* gradient) const
+{
+    // Claude Generated (October 2026). Same quantities as the CPU path: element baseline plus
+    // kernel sum, indicator max_i (1 - max_m k_im), gradient sum_i W_i . dX_i/dR.
+    std::vector<int> sidx, start, count;
+    deviceInputs(elements, sidx, start, count);
+    double e_kernel = 0.0, unc = 1.0;
+    if (!m_gpu->predict(sidx, start, count, geometry, e_kernel, unc, gradient)) {
+        // Never a silent switch: say once why the device path ended, then stay on the CPU.
+        CurcumaLogger::error_fmt("delta-ML: GPU prediction failed ({}); continuing on the CPU",
+            m_gpu->error());
+        m_gpu.reset();
+        return false;
+    }
+    energy = baselineEnergy(elements) + e_kernel;
+    if (uncertainty)
+        *uncertainty = unc;
+    return true;
 }
 
 void DeltaMLModel::setAnchor(const std::vector<int>& elements, const Geometry& geometry,
@@ -153,6 +194,7 @@ bool DeltaMLModel::train(
     const auto t0 = std::chrono::high_resolution_clock::now();
     report = DeltaMLTrainingReport{};
     m_trained = false;
+    m_gpu.reset();
 
     if (data.empty()) {
         CurcumaLogger::error("DeltaMLModel: cannot train on an empty dataset");
@@ -368,20 +410,61 @@ bool DeltaMLModel::train(
 
     const bool want_forces = opt.use_forces && data.hasGradients();
 
-    // Optional device-side accumulation of the same system. The rank-k update below is the
-    // single dominant term of the fit, so offloading just that captures most of the cost
-    // without moving descriptors or Jacobians across the bus.
-    std::unique_ptr<GpuAccumulator> gpu;
+    // Optional device path (October 2026): the design block -- descriptor, compact Jacobian and
+    // kernel-derivative rows -- is built on the device and folded into the normal equations
+    // there; only coordinates and labels go up. Measured on 282 x 90 atoms at M = 2000 the
+    // host-side design block was two thirds of the fit (docs/DELTA_ML_GPU_2026-10.md).
+    std::shared_ptr<GpuModel> gpu;
     if (!opt.gpu.empty() && opt.gpu != "none" && opt.gpu != "cpu") {
-        gpu = std::make_unique<GpuAccumulator>(opt.gpu, M);
-        if (!gpu->valid())
+        gpu = std::make_shared<GpuModel>(opt.gpu, m_acsf, m_centers, m_feature_mean, m_feature_scale, m_sigma);
+        if (!gpu->valid() || !gpu->beginAccumulation()) {
+            CurcumaLogger::warn_fmt("DeltaMLModel: GPU backend '{}' unavailable for the fit ({}); fitting on the CPU",
+                opt.gpu, gpu->error());
             gpu.reset();
-        else if (opt.verbosity >= 2)
-            CurcumaLogger::info_fmt("DeltaMLModel: accumulating the normal equations on '{}'",
-                opt.gpu);
+        } else if (opt.verbosity >= 2) {
+            CurcumaLogger::info_fmt("DeltaMLModel: building the normal equations on '{}'", opt.gpu);
+        }
     }
 
-    for (int s = 0; s < N; ++s) {
+    if (gpu) {
+        std::vector<int> sidx, start, count;
+        std::vector<double> yg;
+        for (int s = 0; s < N && gpu; ++s) {
+            const int natoms = data[s].AtomCount();
+            deviceInputs(data[s].elements, sidx, start, count);
+            const double* ygp = nullptr;
+            if (want_forces) {
+                const Matrix dG = data[s].deltaGradient();
+                yg.resize(3 * static_cast<std::size_t>(natoms));
+                for (int c2 = 0; c2 < natoms; ++c2)
+                    for (int g = 0; g < 3; ++g)
+                        yg[3 * c2 + g] = dG(c2, g);
+                ygp = yg.data();
+            }
+            if (!gpu->accumulate(sidx, start, count, data[s].geometry, y_res(s), ygp, wE, wF)) {
+                CurcumaLogger::error_fmt("DeltaMLModel: GPU fit failed at structure {} ({}); refitting on the CPU",
+                    s, gpu->error());
+                gpu.reset();
+                break;
+            }
+            report.n_energy_rows += 1;
+            if (want_forces)
+                report.n_force_rows += 3 * natoms;
+        }
+        if (gpu && !gpu->fetch(A, b)) {
+            CurcumaLogger::error_fmt("DeltaMLModel: could not read the normal equations back ({}); refitting on the CPU",
+                gpu->error());
+            gpu.reset();
+        }
+        if (!gpu) {
+            report.n_energy_rows = 0;
+            report.n_force_rows = 0;
+            A.setZero();
+            b.setZero();
+        }
+    }
+
+    for (int s = 0; s < N && !gpu; ++s) {
         const int natoms = data[s].AtomCount();
 
         // Energy row: phi(m) = sum_i k(x_i, z_m)
@@ -393,13 +476,8 @@ bool DeltaMLModel::train(
             if (count > 0)
                 phi.segment(start, count) += k;
         }
-        if (gpu) {
-            const double yv = y_res(s);
-            gpu->add(1, phi.data(), &yv, wE);
-        } else {
-            A.selfadjointView<Eigen::Lower>().rankUpdate(phi, wE);
-            b += wE * phi * y_res(s);
-        }
+        A.selfadjointView<Eigen::Lower>().rankUpdate(phi, wE);
+        b += wE * phi * y_res(s);
         report.n_energy_rows += 1;
 
         if (!want_forces)
@@ -448,24 +526,12 @@ bool DeltaMLModel::train(
             for (int g = 0; g < 3; ++g)
                 yg(3 * c2 + g) = dG(c2, g);
 
-        if (gpu) {
-            // PhiG is row-major (3N x M); the device reads the identical buffer as the
-            // column-major PhiG^T it needs, so no repacking happens on either side.
-            gpu->add(3 * natoms, PhiG.data(), yg.data(), wF);
-        } else {
-            A.selfadjointView<Eigen::Lower>().rankUpdate(PhiG.transpose(), wF);
-            b += wF * PhiG.transpose() * yg;
-        }
+        A.selfadjointView<Eigen::Lower>().rankUpdate(PhiG.transpose(), wF);
+        b += wF * PhiG.transpose() * yg;
         report.n_force_rows += 3 * natoms;
     }
 
-    if (gpu) {
-        if (!gpu->fetch(A, b)) {
-            CurcumaLogger::error("DeltaMLModel: could not read the accumulated system back "
-                                 "from the device");
-            return false;
-        }
-    } else {
+    if (!gpu) {
         // rankUpdate only touched the lower triangle; materialise the full symmetric matrix
         // through a temporary, because writing A from a view of A itself would alias.
         const Matrix full = A.selfadjointView<Eigen::Lower>();
@@ -532,6 +598,14 @@ bool DeltaMLModel::train(
     }
 
     m_trained = true;
+    // Keep the device model for evaluate() and later predictions when the fit ran there.
+    if (gpu) {
+        if (gpu->setWeights(m_beta))
+            m_gpu = gpu;
+        else
+            CurcumaLogger::error_fmt("DeltaMLModel: could not upload the fitted weights ({}); predicting on the CPU",
+                gpu->error());
+    }
 
     report.n_structures = N;
     report.n_environments = n_env;
@@ -560,6 +634,12 @@ double DeltaMLModel::predictEnergy(
         *uncertainty = 1.0;
     if (!m_trained)
         return 0.0;
+
+    if (m_gpu) {
+        double energy = 0.0;
+        if (predictOnDevice(elements, geometry, energy, uncertainty, nullptr))
+            return energy;
+    }
 
     const ACSFDescriptor desc(m_acsf);
     Matrix X;
@@ -593,6 +673,13 @@ double DeltaMLModel::predictEnergyAndGradient(const std::vector<int>& elements,
     if (!m_trained)
         return 0.0;
 
+    if (m_gpu) {
+        double energy = 0.0;
+        if (predictOnDevice(elements, geometry, energy, uncertainty, &gradient))
+            return energy;
+        gradient = Matrix::Zero(natoms, 3); // nothing half-built survives a failed device call
+    }
+
     const ACSFDescriptor desc(m_acsf);
     Matrix X;
     std::vector<AtomJacobian> jac;
@@ -606,39 +693,6 @@ double DeltaMLModel::predictEnergyAndGradient(const std::vector<int>& elements,
 
     double energy = baselineEnergy(elements);
     double worst = 0.0;
-
-    if (m_gpu_infer) {
-        // Device path: it returns the kernel part of the energy and the feature-space
-        // adjoint; the Jacobian contraction stays here, where the blocks already live.
-        std::vector<int> blk_start(natoms, 0), blk_count(natoms, 0);
-        for (int i = 0; i < natoms; ++i) {
-            const auto it = m_element_block.find(elements[i]);
-            if (it != m_element_block.end()) {
-                blk_start[i] = it->second.first;
-                blk_count[i] = it->second.second;
-            }
-        }
-        double e_kernel = 0.0, unc = 0.0;
-        Matrix W;
-        if (m_gpu_infer->run(Xs, blk_start, blk_count, e_kernel, W, unc)) {
-            energy += e_kernel;
-            for (int i = 0; i < natoms; ++i) {
-                if (blk_count[i] <= 0)
-                    continue;
-                const Vector contrib = jac[i].d * W.row(i).transpose();
-                for (std::size_t p = 0; p < jac[i].partners.size(); ++p) {
-                    const int atom = jac[i].partners[p];
-                    for (int g = 0; g < 3; ++g)
-                        gradient(atom, g) += contrib(3 * static_cast<int>(p) + g);
-                }
-            }
-            if (uncertainty)
-                *uncertainty = unc;
-            return energy;
-        }
-        // A failed device call must not silently return a half-built gradient.
-        gradient.setZero();
-    }
 
     for (int i = 0; i < natoms; ++i) {
         const auto it = m_element_block.find(elements[i]);
@@ -687,6 +741,12 @@ double DeltaMLModel::uncertainty(const std::vector<int>& elements, const Geometr
 {
     if (!m_trained)
         return 1.0;
+
+    if (m_gpu) {
+        double energy = 0.0, worst = 1.0;
+        if (predictOnDevice(elements, geometry, energy, &worst, nullptr))
+            return worst;
+    }
 
     const ACSFDescriptor desc(m_acsf);
     Matrix X;

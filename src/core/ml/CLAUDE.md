@@ -12,6 +12,8 @@ measured on one molecule: forces 4x better on held-out conformers, but ranking a
 - `ml_dataset.h/.cpp` - `MLStructure` (geometry + base/reference energy and gradient),
   `MLDataset` with JSON persistence and a deterministic train/test split
 - `krr_model.h/.cpp` - `DeltaMLModel`: sparse kernel ridge (subset of regressors, GAP-style)
+- `ml_gpu.h/.cpp`, `ml_gpu_abi.h`, `cuda/ml_model_cuda.cu` - `GpuModel`: descriptor, kernel, forces and the fit's
+  design block on the device (plugin `curcuma_cuda`, entry points `curcuma_cuda_ml_model_*`); [docs/DELTA_ML_GPU_2026-10.md](../../../docs/DELTA_ML_GPU_2026-10.md)
 
 ## Key design points
 
@@ -32,11 +34,17 @@ measured on one molecule: forces 4x better on held-out conformers, but ranking a
   `DeltaMLMethod` warns once per process when gradients are taken from an `energy` model
 - **Graceful extrapolation**: far from training data the Gaussian kernel decays, so both
   Delta and its gradient vanish and the model falls back to the pure base method
+- **GPU path keeps the CPU definitions**: a change to `descriptor.cpp` (cutoff, grid, species handling) must be
+  repeated in `cuda/ml_model_cuda.cu`; test `cli_deltaml_06_gpu_path` (skips with 77 without a device) checks parity
+- **GPU never diverges silently**: unavailable backend -> one warning; device failure or > 512 neighbours -> error, CPU path
 
 ## Verification status (AI-generated, machine-tested)
 
-Automated: `ctest -R deltaml` (unit test `test_deltaml` + CLI tests 01-05; 03 is the FD gate of the energy model, 04 checks labels against fresh `-sp`,
-05 the `learn` loop: same seed -> byte-identical curve/dataset, validation columns, `al_criterion`).
+Automated: `ctest -R deltaml` (unit test `test_deltaml` + CLI tests 01-06; 03 is the FD gate of the energy model, 04 checks labels against fresh `-sp`,
+05 the `learn` loop: same seed -> byte-identical curve/dataset, validation columns, `al_criterion`; 06 GPU parity, FD gate and fit on the device).
+
+- GPU (Oct 2026, RTX 5080, 58/90 atoms): correction 0.17/0.29 ms per MD step (old GPU 1.09/2.15, CPU 1.27/3.13), fit (90 atoms, M 2000) 2.1 s vs 7.5 s old GPU;
+  vs CPU 25 frames each max |dE| 8.5e-14 Eh, |dg| 1.0e-14 Eh/A; FD gate 3.5e-8 Eh/A; not tested: ROCm/Vulkan, multi-GPU, charged systems, M > 2000
 
 - `learn` reproducible since Oct 2026 (per-instance thermostat engine in SimpleMD for seed > 0, sorted trajectory reading): byte-identical at -threads 1/4/8 on 9 atoms and 4/8 on peo8
 - `DeltaMLErrors::energy_mean_signed` / `energy_min_signed` (model minus reference): the latter is the "hole" of the `learn` validation (`al_validation_frames`, `al_criterion`, docs/DELTA_ML.md)
@@ -77,4 +85,4 @@ Automated: `ctest -R deltaml` (unit test `test_deltaml` + CLI tests 01-05; 03 is
   (measured: sigma_energy 1e-4 -> 3.01 kcal/mol at gradient 0.0185, 1e-6 -> 0.0039 at 0.0351)
 - Energy model: smaller relative energy error, rank correlation not better than GFN-FF (Spearman 0.467 vs ~0.50, n=10 seeds)
 - Training cost grows as M^2; centres are capped at 12000 with an explicit error
-- GPU port of the kernel and descriptor evaluation not started
+- With `-gpu cuda` GFN-FF also moves to the GPU and is slower there at 58-90 atoms (0.67 vs 0.16 ms); `-gpu` is one global switch

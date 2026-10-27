@@ -70,11 +70,13 @@ struct DeltaMLTrainingOptions {
     unsigned seed = 42;         ///< seed for the farthest-point-sampling tie-breaks
     int verbosity = 1;
     /**
-     * @brief GPU backend for the normal-equation accumulation ("cuda", "rocm", ...).
+     * @brief GPU backend for the fit ("cuda"; "auto" means "cuda").
      *
-     * Empty or "none" fits on the CPU. The fit is dominated by one symmetric rank-k update
-     * per structure (M^2 * 3N), which is what gets offloaded; everything else stays where
-     * it is. Falls back silently to the CPU when the plugin or the device is unavailable.
+     * Empty or "none" fits on the CPU. With a backend the design block (descriptor, Jacobian,
+     * kernel derivative rows) is built on the device and folded into the normal equations
+     * there (cuBLAS DSYRK); the solve stays on the CPU. The fitted model keeps the device
+     * context, so evaluate() after the fit runs there too. Unavailable plugin or device: one
+     * warning, then the CPU path (October 2026, docs/DELTA_ML_GPU_2026-10.md).
      */
     std::string gpu;
     /*! \brief Descriptor grid; default-constructed = built-in configuration (Claude Generated, Oct 2026). */
@@ -230,12 +232,17 @@ public:
         const std::vector<std::pair<int, int>>& bonds = {});
 
     /**
-     * @brief Move prediction onto a GPU backend ("cuda", ...). Empty returns to the CPU.
+     * @brief Move prediction onto a GPU backend ("cuda"; "auto" means "cuda"). Empty returns to the CPU.
      *
-     * Uploads centres, weights and scaling once. Falls back silently when the plugin or the
-     * device is unavailable, so callers need no capability check.
+     * Uploads the descriptor grid, centres, weights and scaling once; each prediction then
+     * sends coordinates and receives energy, indicator and gradient. When the backend cannot be
+     * used the reason is logged once (warning) and prediction stays on the CPU; a device failure
+     * during a run is logged as an error and the model continues on the CPU.
+     * @return true if the device path is active
      */
-    void setInferenceBackend(const std::string& backend);
+    bool setInferenceBackend(const std::string& backend);
+    /*! \brief True if predictions currently run on a device. */
+    bool onDevice() const { return m_gpu != nullptr; }
     bool hasAnchor() const { return m_anchor_geometry.rows() > 0; }
     const std::vector<int>& anchorElements() const { return m_anchor_elements; }
     const Geometry& anchorGeometry() const { return m_anchor_geometry; }
@@ -255,6 +262,14 @@ private:
      * @return kernel values, length count (empty if the element is unknown to the model)
      */
     Vector kernelRow(const Vector& x, int element, int& start, int& count) const;
+
+    /*! \brief Per atom: ACSF species index (-1 unknown) and centre block, the device inputs. */
+    void deviceInputs(const std::vector<int>& elements, std::vector<int>& sidx,
+        std::vector<int>& start, std::vector<int>& count) const;
+
+    /*! \brief Device prediction; false (after an error message, device dropped) if it failed. */
+    bool predictOnDevice(const std::vector<int>& elements, const Geometry& geometry,
+        double& energy, double* uncertainty, Matrix* gradient) const;
 
     ACSFConfig m_acsf;
 
@@ -281,7 +296,7 @@ private:
     std::vector<std::pair<int, int>> m_anchor_bonds;
 
     /// Prediction is const, so the device context is mutable state of an otherwise pure call.
-    mutable std::shared_ptr<class GpuInference> m_gpu_infer;
+    mutable std::shared_ptr<class GpuModel> m_gpu;
 };
 
 } // namespace ml

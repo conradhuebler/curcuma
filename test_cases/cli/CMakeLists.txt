@@ -359,6 +359,9 @@ set_tests_properties(cli_deltaml_04_label_consistency PROPERTIES TIMEOUT 300)
 # Claude Generated (Oct 2026): learn mode reproducible at a fixed seed, prospective validation columns, al_criterion.
 add_cli_test(deltaml 05_al_validation)
 set_tests_properties(cli_deltaml_05_al_validation PROPERTIES TIMEOUT 300)
+# Claude Generated (Oct 2026): GPU path (prediction parity, FD gate, fit); exits 77 without a CUDA plugin or device.
+add_cli_test(deltaml 06_gpu_path)
+set_tests_properties(cli_deltaml_06_gpu_path PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77 RESOURCE_LOCK "gpu")
 # Claude Generated (Oct 2026): -md.seed seeds the initial velocities; no seed keeps the legacy sequence.
 add_cli_test(simplemd 16_md_seed)
 set_tests_properties(cli_simplemd_16_md_seed PROPERTIES TIMEOUT 120 LABELS "simplemd;gfnff")
