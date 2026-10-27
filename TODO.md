@@ -62,6 +62,9 @@ Stand.
 
 ## 2. Leistung
 
+- **Delta-ML-Labels auf der GPU lohnen nicht** (2026-10-27, n=2 Wiederholungen, peo8 + 90-Atom-Wirt, [docs/DELTA_ML_LABEL_GPU_2026-10.md](docs/DELTA_ML_LABEL_GPU_2026-10.md)): beste GPU 0,06x / 0,25x der besten CPU, kein `label_gpu`.
+  Offen (Entscheidung): `-activelearn -gpu cuda` schickt die Labels heute schon auf die GPU (`LabelThread` übernimmt den globalen `gpu`-Schlüssel), 4-16x langsamer; Labels bei `-gpu` auf die CPU festlegen?
+
 - **CUDA/ROCm-Parität: ROCm-Seite** (2026-10-24, [docs/GPU_PARITY_CUDA_ROCM.md](docs/GPU_PARITY_CUDA_ROCM.md), Abschnitt A): auf ROCm fehlen residente SCF-Schleife, Geräte-Potential, Multipol on-the-fly, Solvation, Besetzungen/Broyden/Pseudodiagonalisierung, D3/D4 nach dem SCF, Gradientenschwanz; GFN-FF: Geräte-Schur, Mehr-GPU-Split, Geräte-Abstoßungsliste, tabelliertes dc6dcn, Fixed-Point.
 - **CUDA/ROCm-Parität: CUDA-Seite** (Stand 2026-10-25, [docs/GPU_PARITY_CUDA_ROCM.md](docs/GPU_PARITY_CUDA_ROCM.md), Abschnitt B): erledigt 1, 10, 12 (Faktor-Probe, Stream-Reihenfolge, Fixkomma-Flag); gemessen und nicht portiert 2, 3, 4, 5, 6, 7, 8; offen nur 9 ((entschieden 2026-10-26: `-gpu auto` entfernt)) und 5 bei Einzelkarten ueber 5000 Atomen.
 - **Erschoepfte SCF meldet 151 statt 150 Iterationen** (Zaehlung der Host-Schleife, nicht untersucht). Der D4-Gewichtsfallback auf CUDA ist seit 2026-10-25 erledigt (`k_d4_build_refw`, AIChangelog).
