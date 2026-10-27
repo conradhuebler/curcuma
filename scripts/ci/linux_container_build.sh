@@ -9,12 +9,12 @@ set -euo pipefail
 VARIANT="${1:?gpu|cpu}"
 SRC=/src
 BUILD=/tmp/build
-ROCM_ARCHS="gfx1100;gfx1101;gfx1102;gfx1150;gfx1151;gfx1200;gfx1201"
+ROCM_ARCHS="gfx1100;gfx1150;gfx1200"
 
 dnf -y install dnf-plugins-core epel-release
 dnf config-manager --set-enabled powertools || dnf config-manager --set-enabled crb
 dnf -y install gcc-toolset-12-gcc-c++ gcc-toolset-12-gcc-gfortran make git wget patchelf \
-    cmake openblas-devel lapack-devel
+    cmake
 # shellcheck disable=SC1091
 source /opt/rh/gcc-toolset-12/enable
 
@@ -31,9 +31,13 @@ fi
 mkdir -p "$BUILD"
 cd "$BUILD"
 cmake "$SRC" -DCMAKE_BUILD_TYPE=Release "${CMAKE_VARIANT[@]}" \
-    -DUSE_XTB=OFF -DUSE_TBLITE=OFF -DUSE_D3=OFF -DUSE_D4=ON -DUSE_Plumed=OFF > cmake.log 2>&1 \
+    -DUSE_XTB=OFF -DUSE_TBLITE=OFF -DUSE_D3=OFF -DUSE_D4=OFF -DUSE_Plumed=OFF > cmake.log 2>&1 \
     || { tail -n 60 cmake.log; exit 1; }
-make -j"$(nproc)" > make.log 2>&1 || { tail -n 80 make.log; exit 1; }
+# nvcc/hipcc and the large gfnff_method.cpp need several GB per job; a first run with
+# -j$(nproc) lost the runner (out of memory). One job per 3 GB of RAM.
+JOBS=$(awk -v n="$(nproc)" '/MemAvailable/{m=int($2/3000000); print (m<n?(m<1?1:m):n)}' /proc/meminfo)
+( while sleep 60; do echo "[watch] $(free -m | awk 'NR==2{print "mem used/free MB: "$3"/"$4}') $(df -h /tmp | awk 'NR==2{print "disk free: "$4}')"; done ) &
+make -j"$JOBS" > make.log 2>&1 || { tail -n 80 make.log; exit 1; }
 tail -n 3 make.log
 
 bash "$SRC/scripts/ci/package_linux.sh" "$BUILD" "/out/curcuma-$VARIANT"

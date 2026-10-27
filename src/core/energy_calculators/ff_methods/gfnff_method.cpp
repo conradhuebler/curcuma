@@ -10069,7 +10069,10 @@ std::vector<GFNFFHalogenBond> GFNFF::detectHalogenBondsNative(const Vector& char
         cell_list.build(m_geometry_bohr, xb_cutoff);
     }
 
-    for (const auto& [A, X] : ax_pairs) {
+    for (const auto& ax_pair : ax_pairs) {
+        // No structured binding: Apple clang rejects capturing one in a lambda under -fopenmp.
+        const int A = ax_pair.first;
+        const int X = ax_pair.second;
         auto process_B = [&](int B, double r_AB_sq) {
             if (B == A || B == X) return;
             if (current_basicity[B] < 1e-6) return;
