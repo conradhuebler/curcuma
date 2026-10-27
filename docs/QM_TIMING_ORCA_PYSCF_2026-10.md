@@ -614,3 +614,12 @@ C20H42 curcuma +1.30e-3 Eh, NormalPNO +2.11e-3, TightPNO +1.05e-3 (20.9 / 34.0 /
 **Day-to-day variation**: ORCA reproduced its first-study times within 3 % except anthracene 1 thread (38.3 vs 42.7 s,
 -10 %) and DLPNO C80H162 (789 vs 813 s); PySCF 1-thread times within 1 %. Not measured: repetitions (n = 1), other CPUs,
 curcuma with the legacy flag set on the same day (the "old" curcuma column is from the first study's day).
+
+## After the merge with master (Oct 27, 2026)
+
+Same machine, curcuma only (ORCA/PySCF not rerun). Energy-only HF stops on the full build of the returned density
+(`-qm.scf_verified_stop`, one J/K build less, energies within 1e-10 Eh); tight SCFs (gradients, correlated methods)
+unchanged. Wall time before / after, def2-SVP: anthracene 24T 2.03 / 1.94 s, 1T 33.2 / 31.1 s; C20H42 24T 7.76 / 7.30 s,
+1T 107.4 / 100.7 s; C40H82 24T 36.1 / 34.0 s; C80H162 GPU 25.3 / 24.4 s; ri-mp2 C20H42, ccsd (H2O)4/6, lmp2 C40H82
+unchanged (13-14 iterations). Against the ORCA column of the re-measurement section the HF ratios improve by the
+same 5-6 % (CPU). Details: [QM_SHARED_SCF_INFRA_2026-10-27.md](QM_SHARED_SCF_INFRA_2026-10-27.md).

@@ -449,6 +449,14 @@ public:
             == cudaSuccess;
     }
 
+    bool downloadJK(double* J, double* K) const override
+    {
+        // J and K are symmetric: the device layout (column-major) equals the host row-major one
+        const size_t bytes = (size_t)m_n * m_n * sizeof(double);
+        return cudaMemcpy(J, m_J, bytes, cudaMemcpyDeviceToHost) == cudaSuccess
+            && cudaMemcpy(K, m_K, bytes, cudaMemcpyDeviceToHost) == cudaSuccess;
+    }
+
     bool downloadOrbitals(double* C, double* eps) const override
     {
         const int n = m_n;

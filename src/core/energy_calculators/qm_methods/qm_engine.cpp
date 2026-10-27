@@ -218,6 +218,8 @@ QMEngine::QMEngine(QMFunctional functional, const json& config)
             throw std::invalid_argument(fmt::format("scf_damping {} is outside (0, 1] for native HF", d));
         m_scf_damping = d;
     }
+    if (config.contains("scf_verified_stop") && config["scf_verified_stop"].is_boolean())
+        m_scf_verified_stop = config["scf_verified_stop"].get<bool>();
     if (config.contains("scf_extrapolation") && config["scf_extrapolation"].is_string()) {
         m_scf_extrapolation = config["scf_extrapolation"].get<std::string>();
         std::transform(m_scf_extrapolation.begin(), m_scf_extrapolation.end(), m_scf_extrapolation.begin(), ::tolower);

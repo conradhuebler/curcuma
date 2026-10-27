@@ -126,5 +126,5 @@ iterations) was measured once and not adopted.
   makes it larger), charged molecules, other bases than def2-SVP/MINIX, RI-JK mixed precision with the new rule
   (stage-2 exact builds are triggered by `scf_threshold`, now 1e-4), ROCm/Vulkan (no device loop there),
   MD energy conservation with the tight threshold.
-- Not implemented: skipping the final full build when the last loop build was full (would save one build), SAP guess,
+- Not implemented: skipping the final full build when the last loop build was full (would save one build; done for energy-only SCFs on Oct 27, 2026, `-qm.scf_verified_stop`, [QM_SHARED_SCF_INFRA_2026-10-27.md](QM_SHARED_SCF_INFRA_2026-10-27.md)), SAP guess,
   second-order SCF.

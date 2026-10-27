@@ -67,6 +67,15 @@ public:
     virtual bool downloadDensity(bool newest, double* P) const = 0;
     /// Orbitals of the last solveAndDensity(): C (n x n, row-major, columns = MOs), eps (n).
     virtual bool downloadOrbitals(double* C, double* eps) const = 0;
+    /// J and K of the last buildFock() (n x n, symmetric). Claude Generated (Oct 27 2026): the verified stop of
+    /// the SCF loop returns the current density with these instead of a further full build; false = not
+    /// supported (the caller then builds J/K again).
+    virtual bool downloadJK(double* J, double* K) const
+    {
+        (void)J;
+        (void)K;
+        return false;
+    }
     /// Cumulative device timings since setup() (one ASCII line).
     virtual std::string stats() const { return std::string(); }
 };

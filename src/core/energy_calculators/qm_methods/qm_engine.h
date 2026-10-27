@@ -219,12 +219,15 @@ BEGIN_PARAMETER_DEFINITION(qm)
           "Start the SCF of a new geometry (opt/scan/MD step) from the previous converged occupied orbitals, re-orthonormalised in the new overlap metric, instead of from scf_guess. Same molecule only; the first geometry always uses scf_guess.",
           "SCF", {})
     // Claude Generated (Oct 27 2026): density extrapolation for warm starts, names and weights of the xtb flags
-    // (src/core/charge_extrapolation.h, master's -scf_extrapolation).
+    // (src/core/charge_extrapolation.h, master's -scf_extrapolation), and the verified stop of the SCF loop.
     PARAM(scf_extrapolation, String, "none",
           "Start the SCF of a new geometry (MD or optimisation step) from a density predicted from the converged densities of the earlier steps of the same molecule instead of the last step's orbitals only: none (warm start from the previous orbitals, scf_warm_start) | aspc (Kolafa's always stable predictor, fixed-step MD) | gauss (least-squares polynomial, irregular steps). The prediction is projected onto an idempotent closed-shell density in the new overlap metric (natural orbitals); it changes the starting point only, not the converged result. Same names and weights as the xtb flag of gfn1/gfn2. Needs scf_warm_start; falls back to the warm start when the history is too short or the predicted occupations have no clear gap.",
           "SCF", {})
     PARAM(scf_extrapolation_order, Int, 3,
           "Order of scf_extrapolation: aspc uses order+2 earlier densities, gauss fits a polynomial of this degree.",
+          "SCF", {})
+    PARAM(scf_verified_stop, Bool, true,
+          "Energy-only SCFs with scf_convergence auto, scf_mode diis/adiis (not the tight SCF of gradients and mp2/ri-mp2/lmp2/ccsd): stop on the Fock build of the density that is returned. When a full (exact) J/K build of the current density meets all three conditions (|dE|, orbital gradient of that density, ||dP|| of the step that produced it), that density, its Fock matrix and the orbitals it was built from are the result; the extra full build of one more density is skipped. In integral-direct runs the build on which convergence is predicted (orbital gradient falling below the threshold at the observed rate) is made a full one; a wrong prediction costs one full instead of an incremental build. The returned density meets the orbital-gradient threshold itself (before: the previous density did, and the returned one was one DIIS step better; the HF energy is second order in it). false = the rule before Oct 27 2026. Ignored for scf_convergence density, plain mode and RI mixed precision.",
           "SCF", {})
     PARAM(cartesian_d, Bool, false,
           "Use cartesian 6d (true) instead of spherical 5d (false, ORCA def2-SVP default).",
@@ -410,8 +413,9 @@ private:
     int m_diis_subspace = 8;                 // DIIS history depth (-qm.scf_diis_subspace)
     double m_scf_damping = 0.5;              // plain mode: fraction of the new density per step (-qm.scf_damping)
     bool m_scf_allow_unconverged = false;    // accept an unconverged SCF with a warning (-qm.scf_allow_unconverged)
-    // Oct 27 2026: density extrapolation for warm starts
+    // Oct 27 2026: verified stop (-qm.scf_verified_stop) and density extrapolation for warm starts
     // (-qm.scf_extrapolation none|aspc|gauss, -qm.scf_extrapolation_order; weights from charge_extrapolation.h)
+    bool m_scf_verified_stop = true;
     std::string m_scf_extrapolation = "none";
     int m_scf_extrap_order = 3;
     std::deque<Matrix> m_dens_hist;          // converged densities of earlier geometries, newest first
@@ -571,8 +575,11 @@ private:
     /// Q-G4: device J/K builder the resident loop can drive (nullptr = host loop).
     qmint::QMGpuJK* gpuScfJK(bool direct) const;
     /// Common tail of both loops after convergence: final full J/K build, energies, MO slots.
+    /// J_in/K_in (Oct 27 2026, verified stop): J/K of a full build of m_density already done by the loop; the
+    /// final build is then skipped.
     void finishConvergedSCF(const Matrix& C, const Vector& eps, int n_occ, int iterations, double delta_P,
-                            bool direct, double loop_ms, double fock_ms, double eig_ms, const std::string& device_stats);
+                            bool direct, double loop_ms, double fock_ms, double eig_ms, const std::string& device_stats,
+                            const Matrix* J_in = nullptr, const Matrix* K_in = nullptr);
 
     // Fock build in the active basis: F = H + 2 J(P) - K(P) (closed-shell RHF).
     // J_mu_nu = sum P_lam_sig (mu nu | lam sig); K_mu_nu = sum P_lam_sig (mu lam | nu sig).

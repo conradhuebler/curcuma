@@ -501,6 +501,51 @@ ScfConvergence makeConvergence(bool density_only, double thr_dP, double thr_E, d
     return c;
 }
 
+// Claude Generated (Oct 27 2026): verified stop of the RHF loop (-qm.scf_verified_stop, host and device loop).
+// The rule before: converged at iteration n when |dE_n|, g_n (orbital gradient of P_n) and dP_n = ||P_(n+1) - P_n||
+// are small; the loop then returned P_(n+1) after one more full J/K build. Here the test is applied to the density
+// that is returned: at the top of iteration n, right after a FULL (exact) build of P_n, |dE_n| < thr_E, g_n < thr_G
+// and dP_(n-1) = ||P_n - P_(n-1)|| < thr_dP mean P_n, F(P_n) and the orbitals C_(n-1) that P_n was built from are the
+// result (the same structure as before: the orbitals come from the previous, DIIS-extrapolated Fock matrix). This
+// saves the final build, and the returned density meets the gradient threshold itself. Integral-direct builds are
+// mostly incremental; when g_(n-1)^2 / g_(n-2) (geometric decay) and dP_(n-1) predict convergence, build n is made
+// a full one. A wrong prediction costs one full instead of one incremental build. Needs undamped updates
+// (P_n = 2 C_(n-1),occ C_(n-1),occ^T), i.e. diis/adiis, and scf_convergence auto.
+// Energy-only SCFs only: the old rule returned P_(n+1), about one DIIS step (factor ~0.25 in g) better than the
+// tested P_n; the HF energy is second order in g (no visible change), but gradients and correlation energies are
+// first order (methanol HF gradient 5e-8 instead of 5e-9 Eh/A from the tight reference), so tight SCFs
+// (m_scf_tight_now) keep the old rule.
+struct ScfVerifiedStop {
+    bool enabled = false;
+    bool force_full = false;           // the next build is a full one
+    bool have_prev = false;            // C_prev / eps_prev / dP_prev belong to the density of the next build
+    double dP_prev = std::numeric_limits<double>::infinity();
+    double g_older = std::numeric_limits<double>::infinity();  // orbital gradient one iteration before conv.grad
+    Matrix C_prev;
+    Vector eps_prev;
+
+    explicit ScfVerifiedStop(bool on) : enabled(on) {}
+    ~ScfVerifiedStop();  // out of line: -Winline (as HostDiisStore)
+    /// Top of an iteration, after conv.observe(): true when this build's density is the converged result.
+    bool accept(const ScfConvergence& conv, bool exact_full_build) const
+    {
+        return enabled && have_prev && exact_full_build && conv.converged(dP_prev);
+    }
+    /// End of an iteration that did not converge: remember dP and decide whether the next build must be full.
+    void afterStep(const ScfConvergence& conv, double delta_P, bool may_force)
+    {
+        if (!enabled) return;
+        have_prev = true;
+        dP_prev = delta_P;
+        const double g = conv.grad;
+        const double g_pred = (std::isfinite(g_older) && g < g_older && g_older > 0.0) ? g * g / g_older : g;
+        force_full = may_force && delta_P < conv.thr_dP && g_pred < conv.thr_G;
+        g_older = g;
+    }
+};
+
+ScfVerifiedStop::~ScfVerifiedStop() = default;
+
 }  // namespace
 
 // =================================================================================
@@ -607,8 +652,11 @@ bool QMEngine::runSCF()
     // (DirectFockCadence).
     Matrix J_acc, K_acc, P_ref;
     DirectFockCadence cadence(direct, useEarlyScreening(), useGpuFP32Phase(direct));
+    // Verified stop (Claude Generated, Oct 27 2026; -qm.scf_verified_stop): see ScfVerifiedStop.
+    ScfVerifiedStop vstop(m_scf_verified_stop && use_diis && !conv.density_only && !m_scf_tight_now && m_ri_mp_stage == 0);
     auto fockFromDensity = [&](const Matrix& P) -> Matrix {
-        const bool full = cadence.nextFull();
+        const bool full = cadence.nextFull() || vstop.force_full;
+        vstop.force_full = false;
         m_direct_thr_now = cadence.early ? m_scf_early_screening : -1.0;
         m_direct_fp32_now = cadence.fp32;
         if (cadence.fp32) ++cadence.fp32_builds;
@@ -664,6 +712,19 @@ bool QMEngine::runSCF()
         }
         // energy of the density this Fock matrix was built from (variational, unlike Tr(P_new (H + F)))
         conv.observe(0.5 * m_density.cwiseProduct(m_H + fock).sum(), grad_norm);
+
+        // Verified stop: this full build of P_n meets every condition -> P_n, F(P_n) and the orbitals C_(n-1)
+        // that P_n was built from are the result; no further diagonalisation and no final build.
+        if (vstop.accept(conv, cadence.since_full == 0 && !cadence.early && !cadence.fp32 && !riLowPrecision())) {
+            m_scf_last_dE = conv.dE;
+            m_scf_last_grad = conv.grad;
+            m_direct_thr_now = -1.0;
+            m_direct_fp32_now = false;
+            finishConvergedSCF(vstop.C_prev, vstop.eps_prev, n_occ, iter + 1, vstop.dP_prev, direct,
+                               std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_scf0).count(),
+                               t_fock_ms, t_eig_ms, std::string(), &J_acc, &K_acc);
+            return true;
+        }
 
         // Solve F C = S C eps (Lowdin-reduced standard problem).
         Matrix C;
@@ -732,6 +793,9 @@ bool QMEngine::runSCF()
             reportIncrementalStall(iter, cadence.best_dP, m_eri_screening);
             diis.dropIncrementalEntries();  // keep only Fock matrices from full builds
         }
+        vstop.afterStep(conv, delta_P, direct && !cadence.early && !cadence.fp32 && !riLowPrecision());
+        vstop.C_prev = std::move(C);
+        vstop.eps_prev = std::move(eps);
 
         // Density update: damped (plain) or direct (diis -- the extrapolation
         // already smoothed the Fock). Reuses NDDO's update form.
@@ -751,10 +815,15 @@ bool QMEngine::runSCF()
 // density through buildJK() (never incremental), identical for both loops.
 void QMEngine::finishConvergedSCF(const Matrix& C, const Vector& eps, int n_occ, int iterations, double delta_P,
                                   bool direct, double loop_ms, double fock_ms, double eig_ms,
-                                  const std::string& device_stats)
+                                  const std::string& device_stats, const Matrix* J_in, const Matrix* K_in)
 {
     Matrix J, K;
-    buildJK(m_density, J, K);
+    if (J_in && K_in && J_in->rows() == m_nbf && K_in->rows() == m_nbf) {
+        J = *J_in;  // verified stop: the loop's last (full, exact) build of m_density
+        K = *K_in;
+    } else {
+        buildJK(m_density, J, K);
+    }
     m_fock = m_H + J - 0.5 * K;
     m_scf_converged = true;
     m_scf_tight_done = m_scf_tight_now;
@@ -884,11 +953,14 @@ int QMEngine::runSCFDevice(int n_occ, bool direct, bool use_diis, double damping
         return true;
     };
 
+    ScfVerifiedStop vstop(m_scf_verified_stop && use_diis && !conv.density_only && !m_scf_tight_now);  // as the host loop (Oct 27 2026)
+
     for (int iter = 0; iter < m_scf_max_iter; ++iter) {
         m_scf_iterations = iter + 1;
 
         // Fock (host: fockFromDensity)
-        const bool full = cadence.nextFull();
+        const bool full = cadence.nextFull() || vstop.force_full;
+        vstop.force_full = false;
         setJKScreening(cadence.early);
         const bool fp32_build = cadence.fp32;
         if (fp32_build) ++cadence.fp32_builds;
@@ -933,6 +1005,26 @@ int QMEngine::runSCFDevice(int n_occ, bool direct, bool use_diis, double damping
             double e_n = 0.0, g_n = 0.0;
             if (!dev.scfMeasures(diis_slot, e_n, g_n)) return fail("SCF energy / orbital gradient");
             conv.observe(e_n, g_n);
+        }
+        // Verified stop (host loop: the same test): the current device P, its J/K and the orbitals of the last
+        // eigensolve are the result.
+        if (vstop.accept(conv, cadence.since_full == 0 && !cadence.early && !cadence.fp32)) {
+            m_scf_last_dE = conv.dE;
+            m_scf_last_grad = conv.grad;
+            cadence.fp32 = false;
+            setJKScreening(false);
+            Matrix P(n, n), C(n, n), J(n, n), K(n, n);
+            Vector eps(n);
+            if (!dev.downloadDensity(false, P.data()) || !dev.downloadOrbitals(C.data(), eps.data()))
+                return fail("result download");
+            const bool have_jk = dev.downloadJK(J.data(), K.data());  // false: finishConvergedSCF builds J/K
+            m_density = P;
+            finishConvergedSCF(C, eps, n_occ, iter + 1, vstop.dP_prev, direct,
+                               std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_scf0).count(),
+                               t_fock_ms, t_eig_ms,
+                               fmt::format("{} on {} (state setup {:.1f} ms)", dev.stats(), dev.name(), setup_ms),
+                               have_jk ? &J : nullptr, have_jk ? &K : nullptr);
+            return 1;
         }
 
         const double diis_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_d0).count();
@@ -989,6 +1081,7 @@ int QMEngine::runSCFDevice(int n_occ, bool direct, bool use_diis, double damping
             reportIncrementalStall(iter, cadence.best_dP, m_eri_screening);
             diis.dropIncrementalEntries();  // keep only Fock matrices from full builds
         }
+        vstop.afterStep(conv, delta_P, direct && !cadence.early && !cadence.fp32);
         if (!dev.acceptDensity(damping)) return fail("density update");
     }
 
