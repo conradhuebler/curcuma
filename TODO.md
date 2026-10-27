@@ -121,6 +121,10 @@ Stand.
 - **`-scf_precond frag` auf der GPU, offen** (2026-10-11): umgesetzt nur für die vollresidente CUDA-Schleife ([docs/SCF_PRECOND.md](docs/SCF_PRECOND.md), Abschnitt GPU). Mit Warnung ignoriert: ROCm, Vulkan, hostgetriebene CUDA-Schleife
   (Mischer auf dem Host, der CPU-Hook wäre dort direkt nutzbar), Mehr-GPU-SCF-Aufteilung (Eigenlöser/Dichte; ungetestet, nur ein Gerät hier).
   Ohne Wächter divergiert der unrelaxierte 599-Atom-Cluster mit Mischpräzision (151 Iterationen, harter Fehler, n=3).
+- **Natives RHF, GPU-Eigenlöser** (2026-10-27): syevd ist 7 % der Gerätschleife (C80H162 86 ms/Iteration); FP32-syevd in der FP32-Phase oder
+  die Pseudo-Diagonalisierung des xtb-Pfads (`eigensolveStep`) in `cuda/qm_gpu_scf.cu` spart höchstens etwa 4 % der Schleife. [docs/QM_SHARED_SCF_INFRA_2026-10-27.md](docs/QM_SHARED_SCF_INFRA_2026-10-27.md)
+- **Natives RHF, Fragment-Startdichte für Cluster** (2026-10-27): Gegenstück zu `-scf_guess fragments` der GFN-Methoden (Blockdichte einzeln konvergierter Moleküle);
+  nicht umgesetzt, Nutzen an Wasser/Harnstoff-Clustern ungemessen. [docs/QM_SHARED_SCF_INFRA_2026-10-27.md](docs/QM_SHARED_SCF_INFRA_2026-10-27.md)
 
 ## 3. Tests und Validierung
 

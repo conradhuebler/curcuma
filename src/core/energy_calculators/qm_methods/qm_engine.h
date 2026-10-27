@@ -26,6 +26,7 @@
 
 #include "qm_gpu_backend.h"
 #include "qm_gpu_scf_backend.h"
+#include <deque>
 #include <memory>
 
 #include "src/core/global.h"
@@ -217,6 +218,14 @@ BEGIN_PARAMETER_DEFINITION(qm)
     PARAM(scf_warm_start, Bool, true,
           "Start the SCF of a new geometry (opt/scan/MD step) from the previous converged occupied orbitals, re-orthonormalised in the new overlap metric, instead of from scf_guess. Same molecule only; the first geometry always uses scf_guess.",
           "SCF", {})
+    // Claude Generated (Oct 27 2026): density extrapolation for warm starts, names and weights of the xtb flags
+    // (src/core/charge_extrapolation.h, master's -scf_extrapolation).
+    PARAM(scf_extrapolation, String, "none",
+          "Start the SCF of a new geometry (MD or optimisation step) from a density predicted from the converged densities of the earlier steps of the same molecule instead of the last step's orbitals only: none (warm start from the previous orbitals, scf_warm_start) | aspc (Kolafa's always stable predictor, fixed-step MD) | gauss (least-squares polynomial, irregular steps). The prediction is projected onto an idempotent closed-shell density in the new overlap metric (natural orbitals); it changes the starting point only, not the converged result. Same names and weights as the xtb flag of gfn1/gfn2. Needs scf_warm_start; falls back to the warm start when the history is too short or the predicted occupations have no clear gap.",
+          "SCF", {})
+    PARAM(scf_extrapolation_order, Int, 3,
+          "Order of scf_extrapolation: aspc uses order+2 earlier densities, gauss fits a polynomial of this degree.",
+          "SCF", {})
     PARAM(cartesian_d, Bool, false,
           "Use cartesian 6d (true) instead of spherical 5d (false, ORCA def2-SVP default).",
           "Basis", {})
@@ -401,6 +410,14 @@ private:
     int m_diis_subspace = 8;                 // DIIS history depth (-qm.scf_diis_subspace)
     double m_scf_damping = 0.5;              // plain mode: fraction of the new density per step (-qm.scf_damping)
     bool m_scf_allow_unconverged = false;    // accept an unconverged SCF with a warning (-qm.scf_allow_unconverged)
+    // Oct 27 2026: density extrapolation for warm starts
+    // (-qm.scf_extrapolation none|aspc|gauss, -qm.scf_extrapolation_order; weights from charge_extrapolation.h)
+    std::string m_scf_extrapolation = "none";
+    int m_scf_extrap_order = 3;
+    std::deque<Matrix> m_dens_hist;          // converged densities of earlier geometries, newest first
+    long m_geom_serial = 0;                  // incremented by UpdateMolecule()
+    long m_dens_hist_serial = -1;            // geometry serial of m_dens_hist.front()
+    Matrix buildExtrapolatedGuess() const;   // empty matrix if not applicable
     // Integral-direct SCF (Sep 2026): shell-pair tables for recomputing J/K without
     // the stored tensor; rebuilt lazily per geometry (reset together with the ERI).
     std::string m_scf_direct = "auto";       // auto | on | off

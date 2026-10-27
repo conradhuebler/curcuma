@@ -20,6 +20,7 @@
  */
 
 #include "qm_lmp2.h"
+#include "src/core/gpu_fallback.h"
 
 #include "qm_engine.h"
 #include "qm_mp2.h"  // frozenCoreOrbitals
@@ -874,6 +875,10 @@ bool QMEngine::computeLMP2(const qmint::LMP2Options& opt, qmint::LMP2Result& res
         return false;
     }
     const bool fast_loc = opt.localizer_algo == "fast";
+    // Claude Generated (Oct 27 2026): as CCSD, the CPU-only part of a -gpu run is a counted fallback (-gpu_strict
+    // stops here); the RHF before it may have run on the device.
+    if (gpuRequested())
+        curcuma::reportGpuFallback("qm_lmp2", "LMP2 has no device implementation; localisation, PNOs and pair energies on the CPU");
     if (opt.distant_pairs != "dipole" && opt.distant_pairs != "drop") {
         CurcumaLogger::error("LMP2: unknown -qm.lmp2_distant_pairs '" + opt.distant_pairs + "' (use dipole | drop)");
         return false;

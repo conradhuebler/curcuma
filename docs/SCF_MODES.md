@@ -96,7 +96,9 @@ the same flags with `-qm.<name>` as its method scope: registry `qm` defaults < t
 | `-scf_diis_subspace` (`-diis_subspace`) | `6` | `8` | `8` | DIIS history depth. |
 
 HF-only SCF knobs stay in module `qm`: `-scf_guess` (`atom`), `-qm.scf_convergence`, `-qm.scf_energy_threshold`,
-`-qm.scf_gradient_threshold[_tight]`, `-qm.scf_warm_start`, early screening and FP32 phase (`-help_module qm`).
+`-qm.scf_gradient_threshold[_tight]`, `-qm.scf_warm_start`, `-scf_extrapolation none|aspc|gauss` (the xtb names, density
+extrapolation for MD warm starts, [QM_SHARED_SCF_INFRA_2026-10-27.md](QM_SHARED_SCF_INFRA_2026-10-27.md)), early screening
+and FP32 phase (`-help_module qm`).
 
 Module `xtb` (gfn1/gfn2 only): `-scf_guess` (`eeq`), `-level_shift` (`0.2` Eh, `level-shift` mode), `-eigensolver`,
 `-electronic_temperature`, `-warm_start`, `-keep_diis`, mixed precision, GPU and `-scf_precond` knobs.

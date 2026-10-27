@@ -218,6 +218,15 @@ QMEngine::QMEngine(QMFunctional functional, const json& config)
             throw std::invalid_argument(fmt::format("scf_damping {} is outside (0, 1] for native HF", d));
         m_scf_damping = d;
     }
+    if (config.contains("scf_extrapolation") && config["scf_extrapolation"].is_string()) {
+        m_scf_extrapolation = config["scf_extrapolation"].get<std::string>();
+        std::transform(m_scf_extrapolation.begin(), m_scf_extrapolation.end(), m_scf_extrapolation.begin(), ::tolower);
+        if (m_scf_extrapolation != "none" && m_scf_extrapolation != "aspc" && m_scf_extrapolation != "gauss")
+            throw std::invalid_argument(fmt::format(
+                "scf_extrapolation '{}' is not available for native HF; use none, aspc or gauss", m_scf_extrapolation));
+    }
+    if (config.contains("scf_extrapolation_order") && config["scf_extrapolation_order"].is_number())
+        m_scf_extrap_order = std::max(0, static_cast<int>(std::lround(config["scf_extrapolation_order"].get<double>())));
     if (config.contains("scf_allow_unconverged")) {
         const json& v = config["scf_allow_unconverged"];
         if (v.is_boolean())
@@ -339,6 +348,7 @@ bool QMEngine::UpdateMolecule()
     m_gpu_jk_checked = false;
     m_scf_ready = false;
     m_scf_converged = false;
+    ++m_geom_serial;  // a new geometry of the same molecule (density history of -qm.scf_extrapolation)
     return InitialiseMolecule();
 }
 
@@ -359,6 +369,8 @@ void QMEngine::resetForNewMolecule()
     m_gpu_scf_state.reset();
     m_warm_C = Matrix();
     m_warm_atoms.clear();
+    m_dens_hist.clear();
+    m_dens_hist_serial = -1;
 }
 
 double QMEngine::Calculation(bool gradient)

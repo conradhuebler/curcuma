@@ -46,6 +46,7 @@
 #include "src/core/gpu_fallback.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/units.h"
+#include "src/core/charge_extrapolation.h"
 
 #include "native_eigensolver.h"
 
@@ -771,6 +772,19 @@ void QMEngine::finishConvergedSCF(const Matrix& C, const Vector& eps, int n_occ,
     m_warm_C = C.leftCols(n_occ);
     m_warm_atoms = m_atoms;
     m_energies = eps;
+    // -qm.scf_extrapolation (Oct 27 2026): converged density per geometry, newest first; a second SCF of the same
+    // geometry (tightening) replaces its entry. Trimmed to what the predictor uses (as the xtb history).
+    if (m_scf_extrapolation != "none") {
+        if (!m_dens_hist.empty() && m_dens_hist.front().rows() != m_nbf) m_dens_hist.clear();
+        if (!m_dens_hist.empty() && m_dens_hist_serial == m_geom_serial)
+            m_dens_hist.front() = m_density;
+        else
+            m_dens_hist.push_front(m_density);
+        m_dens_hist_serial = m_geom_serial;
+        const size_t maxlen = m_scf_extrapolation == "aspc" ? static_cast<size_t>(std::max(m_scf_extrap_order + 2, 2))
+                                                            : static_cast<size_t>(std::min(2 * m_scf_extrap_order + 2, 10));
+        while (m_dens_hist.size() > maxlen) m_dens_hist.pop_back();
+    }
 
     // Diagnostic (Q-G4): -opt and batch -sp silence the method, so the loop choice and warm start
     // are not visible there; CURCUMA_QM_SCF_TRACE=1 prints one ASCII line per converged SCF.
@@ -1179,12 +1193,60 @@ Matrix QMEngine::buildWarmStartGuess() const
     return Matrix(2.0 * Cp * Cp.transpose());
 }
 
+// Claude Generated (Oct 27 2026): -qm.scf_extrapolation aspc|gauss. P_pred = sum_j w_j P_j over the converged
+// densities of the last geometries (weights of src/core/charge_extrapolation.h, sum w_j = 1, as the xtb SCC
+// extrapolation), then projected onto an idempotent closed-shell density in the CURRENT metric: natural orbitals of
+// M = (S X)^T P_pred (S X) (X = S^-1/2, so S X = S^1/2), the n_occ largest occupations kept, C = X V_occ,
+// P = 2 C C^T. Empty (warm start instead) when the history is too short, the molecule or basis changed, or the
+// predicted occupations have no clear gap (lambda_occ - lambda_virt < 1; exact: 2 and 0).
+Matrix QMEngine::buildExtrapolatedGuess() const
+{
+    const int n_occ = m_num_electrons / 2;
+    if (m_scf_extrapolation == "none" || !m_scf_warm_start || m_dens_hist.size() < 2 || m_warm_atoms != m_atoms
+        || n_occ == 0 || m_X.size() == 0 || m_dens_hist_serial == m_geom_serial)
+        return Matrix();
+    for (const Matrix& P : m_dens_hist)
+        if (P.rows() != m_nbf || P.cols() != m_nbf) return Matrix();
+    const Eigen::VectorXd w = curcuma::extrapolation::weights(m_scf_extrapolation, m_scf_extrap_order,
+                                                              static_cast<int>(m_dens_hist.size()));
+    if (w.size() < 2) return Matrix();
+    Eigen::MatrixXd P = Eigen::MatrixXd::Zero(m_nbf, m_nbf);
+    for (int j = 0; j < w.size(); ++j) P.noalias() += w(j) * Eigen::MatrixXd(m_dens_hist[j]);
+    if (!P.allFinite()) return Matrix();
+    const Eigen::MatrixXd Xc(m_X), Sc(m_S);
+    const Eigen::MatrixXd SX = gemmThreaded(Sc, false, Xc, m_threads);
+    const Eigen::MatrixXd PSX = gemmThreaded(P, false, SX, m_threads);
+    Eigen::MatrixXd M = gemmThreaded(SX, true, PSX, m_threads);
+    M = 0.5 * (M + M.transpose());
+    Eigen::VectorXd lam;
+    Eigen::MatrixXd V;
+    if (!curcuma::eigsolver::solveSymmetric(M, lam, V, m_threads)) return Matrix();
+    const int m = static_cast<int>(lam.size());
+    if (m <= n_occ) return Matrix();
+    const double lam_occ = lam(m - n_occ), lam_virt = lam(m - n_occ - 1);  // ascending order
+    if (!(lam_occ - lam_virt > 1.0)) return Matrix();
+    const Eigen::MatrixXd Vo = V.rightCols(n_occ);
+    const Eigen::MatrixXd CoT = gemmThreaded(Vo, true, Xc.transpose(), m_threads);  // (X V_occ)^T
+    const Eigen::MatrixXd Ph = gemmThreaded(CoT, true, CoT, m_threads);
+    if (CurcumaLogger::get_verbosity() >= 3)
+        CurcumaLogger::param("SCF guess", fmt::format("{} extrapolation over {} densities (natural occupations: "
+                                                      "lowest occupied {:.4f}, highest virtual {:.4f})",
+                                                      m_scf_extrapolation, static_cast<int>(w.size()), lam_occ, lam_virt));
+    CurcumaLogger::citation(m_scf_extrapolation == "aspc" ? "aspc" : "density_extrapolation");
+    return Matrix(Ph + Ph.transpose());  // = 2 C_occ C_occ^T
+}
+
 Matrix QMEngine::buildInitialGuess() const
 {
     m_last_warm_start = false;
     if (m_scf_continue && m_density.rows() == m_nbf && m_density.cols() == m_nbf) {
         m_last_warm_start = true;  // tightening a converged SCF of this geometry: its density (Oct 25 2026)
         return m_density;
+    }
+    const Matrix predicted = buildExtrapolatedGuess();  // -qm.scf_extrapolation aspc|gauss (Oct 27 2026)
+    if (predicted.size() != 0) {
+        m_last_warm_start = true;
+        return predicted;
     }
     const Matrix warm = buildWarmStartGuess();
     if (warm.size() != 0) {
