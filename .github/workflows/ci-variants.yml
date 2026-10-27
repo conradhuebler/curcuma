@@ -136,8 +136,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: avx2
-            extra: -DUSE_AVX2=ON
           - name: baseline
             extra: ""
     steps:
@@ -148,8 +146,8 @@ jobs:
         with:
           platform: x64
 
-      # AVX2 (Haswell and later). 32-byte stack alignment is a known weak point of
-      # MinGW-w64, so the smoke test below decides whether this variant is usable.
+      # No AVX2: the AVX2 build crashed in the smoke test with an access violation in 3 of 4
+      # runs (32-byte stack alignment is a known weak point of MinGW-w64).
       - name: Build
         run: scripts/build_windows.bat
         env:

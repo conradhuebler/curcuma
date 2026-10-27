@@ -44,7 +44,7 @@ CXX=g++-12 CC=gcc-12 FC=gfortran-12 cmake "$SRC" -DCMAKE_BUILD_TYPE=Release \
 # One make job per 3 GB of RAM (nvcc, hipcc and gfnff_method.cpp are memory hungry).
 JOBS=$(awk -v n="$(nproc)" '/MemAvailable/{m=int($2/3000000); print (m<n?(m<1?1:m):n)}' /proc/meminfo)
 ( while sleep 120; do report build; done ) &
-make -j"$JOBS" > make.log 2>&1 || { tail -n 80 make.log; exit 1; }
+make -j"$JOBS" > make.log 2>&1 || { grep -n -B3 -A6 -m6 -E " error|Error [0-9]|undefined reference|cannot find|fatal" make.log | cut -c1-300; exit 1; }
 tail -n 3 make.log
 
 mkdir -p "$OUT"
