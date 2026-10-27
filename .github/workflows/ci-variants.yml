@@ -85,6 +85,16 @@ jobs:
       - name: Smoke test in a clean system
         run: |
           mkdir -p smoke && tar -C smoke -xzf out/curcuma-linux-gpu.tar.gz
+          # Works without AVX512: only resolves the libraries, runs no curcuma code. The driver
+          # libraries (libcuda, libnvidia-*) come from the user's system, not from the package.
+          docker run --rm -v "$PWD:/w" ubuntu:22.04 bash -c '
+            cd /w/smoke/curcuma-gpu; bad=0
+            for f in curcuma libcurcuma_*.so; do
+              miss=$(ldd "$f" | grep "not found" | grep -v "libcuda.so\|libnvidia" || true)
+              if [ -n "$miss" ]; then echo "MISSING for $f:"; echo "$miss"; bad=1; fi
+            done
+            exit $bad'
+          echo "ldd check passed"
           if ! grep -q avx512f /proc/cpuinfo; then
             echo "Runner has no AVX512: the AVX512 build is not run."; exit 0
           fi

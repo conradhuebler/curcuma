@@ -38,3 +38,4 @@ for f in "$DEST"/*.so* "$DEST/curcuma"; do
     patchelf --set-rpath '$ORIGIN' "$f" 2>/dev/null || true
 done
 du -sh "$DEST"
+du -ah "$DEST" | sort -rh | head -n 15
