@@ -254,6 +254,8 @@ void ActiveLearn::LoadControlJson()
     m_al_target_energy = Json2KeyWord<double>(m_defaults, "al_target_energy");
     m_al_target_hole = Json2KeyWord<double>(m_defaults, "al_target_hole");
     m_al_patience = std::max(1, Json2KeyWord<int>(m_defaults, "al_patience"));
+    m_al_window = std::max(1, Json2KeyWord<int>(m_defaults, "al_window"));
+    m_al_hole_quantile = std::clamp(Json2KeyWord<double>(m_defaults, "al_hole_quantile"), 0.5, 1.0);
     m_center_sweep = parseIntList(Json2KeyWord<std::string>(m_defaults, "center_sweep"));
     m_dataset_path = Json2KeyWord<std::string>(m_defaults, "dataset");
 
@@ -936,6 +938,42 @@ std::vector<Molecule> ActiveLearn::drawValidationFrames(const std::vector<Molecu
     return out;
 }
 
+ActiveLearn::PooledValidation ActiveLearn::evaluatePool(
+    const DeltaMLModel& model, const std::vector<const MLDataset*>& pool) const
+{
+    const double kcal = 627.5094740631;
+    std::vector<double> err; // model minus reference [kcal/mol]
+    for (const MLDataset* set : pool)
+        for (std::size_t s = 0; s < set->size(); ++s) {
+            const MLStructure& st = (*set)[s];
+            const double corr = model.predictEnergy(st.elements, st.geometry);
+            err.push_back((st.energy_base + corr - st.energy_ref) * kcal);
+        }
+    PooledValidation p;
+    p.n = static_cast<int>(err.size());
+    if (err.empty())
+        return p;
+    double mean = 0.0;
+    for (double e : err)
+        mean += e;
+    mean /= static_cast<double>(err.size());
+    p.offset = mean;
+    std::vector<double> c(err.size());
+    double mae = 0.0;
+    for (std::size_t i = 0; i < err.size(); ++i) {
+        c[i] = err[i] - mean;
+        mae += std::abs(c[i]);
+    }
+    p.mae_centred = mae / static_cast<double>(c.size());
+    // Lower (1 - q) quantile, type 7: position (1 - q)(n - 1) in the sorted list.
+    std::sort(c.begin(), c.end());
+    const double pos = (1.0 - m_al_hole_quantile) * static_cast<double>(c.size() - 1);
+    const std::size_t lo = static_cast<std::size_t>(std::floor(pos));
+    const std::size_t hi = std::min(lo + 1, c.size() - 1);
+    p.hole = c[lo] + (pos - static_cast<double>(lo)) * (c[hi] - c[lo]);
+    return p;
+}
+
 void ActiveLearn::runLearn()
 {
     std::vector<Molecule> seeds;
@@ -961,8 +999,14 @@ void ActiveLearn::runLearn()
     // the prospective validation of the model ENTERING the cycle, on frames of this cycle's
     // sampling dynamics, measured before the refit; nan where there is none (cycle 0, or
     // al_validation_frames 0). val_hole_kcal is the most negative model-minus-reference energy.
+    // The pool_* columns (Claude Generated, October 2026) are what the validation criterion
+    // tests: the validation frames of the last al_window cycles re-predicted with the model
+    // entering the cycle; centred MAE, offset (mean signed error) and the hole quantile of the
+    // centred signed errors. A line whose training columns are nan is the cycle that converged
+    // (no refit).
     curve << "# cycle  n_train  E_MAE_kcal  F_RMSE_Eh_A  spearman  max_uncertainty"
-             "  val_n  val_E_MAE_kcal  val_mean_signed_kcal  val_hole_kcal  val_F_RMSE_Eh_A\n";
+             "  val_n  val_E_MAE_kcal  val_mean_signed_kcal  val_hole_kcal  val_F_RMSE_Eh_A"
+             "  pool_n  pool_E_MAE_centred_kcal  pool_offset_kcal  pool_hole_q_kcal\n";
 
     const double kcal = 627.5094740631;
     const bool criterion_known = m_al_criterion == "uncertainty" || m_al_criterion == "validation"
@@ -976,11 +1020,47 @@ void ActiveLearn::runLearn()
         CurcumaLogger::warn_fmt("activelearn: al_criterion '{}' needs al_validation_frames > 0; "
                                 "with 0 the run cannot converge and runs all {} cycles",
             m_al_criterion, m_al_cycles);
+    // Validation pool (Claude Generated, October 2026). The validation frames of the last
+    // `window` cycles, kept out of the training data while they are in the pool so that the
+    // pooled error stays out of sample. With 'uncertainty' the frames join training at once, as
+    // before October 2026 (the learning stays bit-identical), so the pool is one cycle there.
+    // Cycle 0 has no model: its frames are no validation and go straight into training.
+    const bool hold_out = m_al_criterion != "uncertainty";
+    const std::size_t window = hold_out ? static_cast<std::size_t>(m_al_window) : 1;
+    struct PoolSet {
+        int cycle;
+        MLDataset set;
+    };
+    std::vector<PoolSet> pool_sets; // oldest first
+    // Move all but the newest `keep` pool sets into the training data, oldest first.
+    const auto flush_pool = [&](std::size_t keep) {
+        while (pool_sets.size() > keep) {
+            for (std::size_t i = 0; i < pool_sets.front().set.size(); ++i) {
+                MLStructure s = pool_sets.front().set[i];
+                s.cycle = pool_sets.front().cycle;
+                data.add(s);
+            }
+            pool_sets.erase(pool_sets.begin());
+        }
+    };
+    // Columns 7-15 of the curve: single-cycle validation (val_*) and pool (pool_*).
+    const auto write_validation_columns
+        = [&](bool validated, const DeltaMLErrors& ve, const PooledValidation& pv) {
+              if (validated)
+                  curve << "  " << ve.n_structures << "  " << ve.energy_mae_centered * kcal << "  "
+                        << ve.energy_mean_signed * kcal << "  " << ve.energy_min_signed * kcal
+                        << "  " << ve.force_rmse << "  " << pv.n << "  " << pv.mae_centred << "  "
+                        << pv.offset << "  " << pv.hole;
+              else
+                  curve << "  0  nan  nan  nan  nan  0  nan  nan  nan";
+          };
+
     CurcumaLogger::result_fmt(
         "activelearn: convergence criterion '{}' in {} consecutive cycle(s); indicator <= {:.4f}, "
-        "validation ({} frames per cycle) E_MAE <= {:.3f} kcal/mol and no hole below -{:.3f} kcal/mol",
-        m_al_criterion, m_al_patience, m_al_uncertainty, m_al_validation_frames,
-        m_al_target_energy, m_al_target_hole);
+        "validation pool of {} cycle(s) x {} frames: centred E_MAE <= {:.3f} kcal/mol and hole "
+        "quantile (lowest {:.0f} %) >= -{:.3f} kcal/mol",
+        m_al_criterion, m_al_patience, m_al_uncertainty, window, m_al_validation_frames,
+        m_al_target_energy, 100.0 * (1.0 - m_al_hole_quantile), m_al_target_hole);
     int streak = 0;
     bool converged = false;
     bool stopped_early = false; ///< loop left before al_cycles for a reason other than convergence
@@ -1069,51 +1149,89 @@ void ActiveLearn::runLearn()
                 }
             }
         }
+        // Old single-cycle path, kept for 'uncertainty' (window 1) and for cycle 0.
         const auto add_validation = [&]() {
             for (std::size_t i = 0; i < validation.size(); ++i) {
                 MLStructure s = validation[i];
                 s.cycle = cycle;
                 data.add(s);
             }
+            validation = MLDataset{};
         };
+        // Pooled validation (Claude Generated, October 2026): the current model on the frames
+        // of the last `window` cycles, centred errors, hole quantile.
+        PooledValidation pv;
+        bool pool_full = false;
+        if (validated && hold_out) {
+            pool_sets.push_back(PoolSet{ cycle, validation });
+            validation = MLDataset{}; // now owned by the pool, joins training via flush_pool
+            std::vector<const MLDataset*> pool;
+            for (const PoolSet& p : pool_sets)
+                pool.push_back(&p.set);
+            pv = evaluatePool(model, pool);
+            pool_full = pool_sets.size() >= window;
+        } else if (validated) {
+            pv = evaluatePool(model, { &validation });
+            pool_full = true;
+        }
+        if (validated)
+            CurcumaLogger::result_fmt(
+                "activelearn: validation pool {} frames from {} cycle(s){} (model entering this "
+                "cycle): centred E_MAE {:.4f} kcal/mol, offset {:+.4f} kcal/mol, hole (lowest "
+                "{:.0f} %) {:+.4f} kcal/mol",
+                pv.n, hold_out ? pool_sets.size() : std::size_t{ 1 },
+                pool_full ? "" : fmt::format(", window of {} not yet full", window),
+                pv.mae_centred, pv.offset, 100.0 * (1.0 - m_al_hole_quantile), pv.hole);
 
         // Convergence: the chosen criterion in m_al_patience consecutive cycles.
         if (have_model) {
             const bool unc_ok = max_unc <= m_al_uncertainty;
-            const bool val_ok = validated && ve.energy_mae_centered * kcal <= m_al_target_energy
-                && ve.energy_min_signed * kcal >= -m_al_target_hole;
-            const bool met = (m_al_criterion == "uncertainty") ? unc_ok
-                : (m_al_criterion == "validation")             ? val_ok
-                                                               : (unc_ok && val_ok);
+            const bool val_ok = validated && pool_full && pv.mae_centred <= m_al_target_energy
+                && pv.hole >= -m_al_target_hole;
             // The plain uncertainty criterion keeps its old meaning: stop at the first cycle in which
-            // it is met (patience applies to the criteria that use the validation frames).
+            // it is met. Patience applies to the validation part only (Claude Generated, Oct 2026):
+            // 'both' stops when the validation held in al_patience consecutive cycles AND the
+            // indicator holds in the current one. Requiring the indicator twice in a row as well
+            // made 'both' unreachable: on peo8 (tuning seeds 4-6, 20 cycles) the indicator was
+            // <= 0.3 in single cycles only, never in two consecutive ones.
             const int patience_needed = (m_al_criterion == "uncertainty") ? 1 : m_al_patience;
-            streak = met ? streak + 1 : 0;
+            const bool counted = (m_al_criterion == "uncertainty") ? unc_ok : val_ok;
+            streak = counted ? streak + 1 : 0;
+            const bool stop_now = streak >= patience_needed
+                && (m_al_criterion != "both" || unc_ok);
             CurcumaLogger::result_fmt(
-                "activelearn: criterion '{}': uncertainty {}, validation {}; met in {} of {} "
-                "consecutive cycle(s)",
+                "activelearn: criterion '{}': uncertainty {} (this cycle), validation {}; {} met in "
+                "{} of {} consecutive cycle(s)",
                 m_al_criterion, unc_ok ? "met" : "not met",
-                validated ? (val_ok ? "met" : "not met") : "n/a", streak, patience_needed);
-            if (streak >= patience_needed) {
+                validated ? (val_ok ? "met" : "not met") : "n/a",
+                (m_al_criterion == "uncertainty") ? "uncertainty" : "validation", streak,
+                patience_needed);
+            if (stop_now) {
                 // The validation labels are paid for: they stay in the dataset file, but the
                 // model is not refitted, so the written model is the one that was validated.
                 add_validation();
+                flush_pool(0);
                 const std::string what = (m_al_criterion == "uncertainty")
                     ? fmt::format("uncertainty (no sampled structure above the indicator threshold "
                                   "{:.4f}; certifies coverage of the sampled region, not accuracy)",
                           m_al_uncertainty)
                     : (m_al_criterion == "validation")
-                    ? fmt::format("validation (E_MAE {:.4f} <= {:.4f} kcal/mol, deepest hole "
-                                  "{:+.4f} >= -{:.4f} kcal/mol)",
-                          ve.energy_mae_centered * kcal, m_al_target_energy,
-                          ve.energy_min_signed * kcal, m_al_target_hole)
-                    : fmt::format("both (indicator {:.4f} <= {:.4f}; validation E_MAE {:.4f} <= "
-                                  "{:.4f} kcal/mol, deepest hole {:+.4f} >= -{:.4f} kcal/mol)",
-                          max_unc, m_al_uncertainty, ve.energy_mae_centered * kcal,
-                          m_al_target_energy, ve.energy_min_signed * kcal, m_al_target_hole);
+                    ? fmt::format("validation (pool of {} frames: centred E_MAE {:.4f} <= {:.4f} "
+                                  "kcal/mol, hole {:+.4f} >= -{:.4f} kcal/mol)",
+                          pv.n, pv.mae_centred, m_al_target_energy, pv.hole, m_al_target_hole)
+                    : fmt::format("both (indicator {:.4f} <= {:.4f}; pool of {} frames: centred "
+                                  "E_MAE {:.4f} <= {:.4f} kcal/mol, hole {:+.4f} >= -{:.4f} kcal/mol)",
+                          max_unc, m_al_uncertainty, pv.n, pv.mae_centred, m_al_target_energy,
+                          pv.hole, m_al_target_hole);
                 CurcumaLogger::success_fmt("activelearn: converged in cycle {} by criterion {}; "
                                            "met in {} consecutive cycle(s)",
                     cycle + 1, what, streak);
+                // Curve line of the converged cycle: no refit, so the training columns are nan;
+                // n_train is the final number of labelled structures.
+                curve << cycle << "  " << data.size() << "  nan  nan  nan  " << max_unc;
+                write_validation_columns(validated, ve, pv);
+                curve << "\n";
+                curve.flush();
                 converged = true;
                 break;
             }
@@ -1144,6 +1262,7 @@ void ActiveLearn::runLearn()
         }
         if (picked.empty()) {
             add_validation();
+            flush_pool(0);
             CurcumaLogger::warn("activelearn: nothing selected; stopping");
             stopped_early = true;
             break;
@@ -1160,6 +1279,9 @@ void ActiveLearn::runLearn()
             data.add(s);
         }
         add_validation();
+        // Pool sets that will not be in the next cycle's pool join the training data now; in the
+        // last cycle all of them, so the final model is fitted on every label.
+        flush_pool(cycle + 1 >= m_al_cycles ? 0 : window - 1);
 
         MLDataset train, test;
         data.split(m_test_fraction, m_seed, train, test);
@@ -1180,15 +1302,11 @@ void ActiveLearn::runLearn()
         const DeltaMLErrors e = test.empty() ? DeltaMLErrors{} : model.evaluate(test);
         curve << cycle << "  " << data.size() << "  " << e.energy_mae_centered * 627.5094740631
               << "  " << e.force_rmse << "  " << e.spearman << "  " << max_unc;
-        if (validated)
-            curve << "  " << ve.n_structures << "  " << ve.energy_mae_centered * kcal << "  "
-                  << ve.energy_mean_signed * kcal << "  " << ve.energy_min_signed * kcal << "  "
-                  << ve.force_rmse;
-        else
-            curve << "  0  nan  nan  nan  nan";
+        write_validation_columns(validated, ve, pv);
         curve << "\n";
         curve.flush();
     }
+    flush_pool(0); // every paid label ends up in the dataset file, also after an early stop
     if (!converged && !stopped_early)
         CurcumaLogger::warn_fmt("activelearn: not converged -- criterion '{}' was not met in {} "
                                 "consecutive cycle(s) within al_cycles = {}",

@@ -152,31 +152,55 @@ PARAM(al_initial, Int, 15,
 PARAM(al_validation_frames, Int, 10,
     "Frames drawn uniformly at random from each cycle's sampling dynamics (excluding the "
     "selected candidates) and labelled in addition to them. The model entering the cycle is "
-    "evaluated on them BEFORE it is refitted: an unbiased error on exactly the regions the "
-    "dynamics on the learned surface visits, including energy holes the training error cannot "
-    "show. Afterwards they join the training data. Cycle 0 has no model, its frames only go "
-    "into training. 0 switches the validation off.",
+    "evaluated on them BEFORE it is refitted: an error on exactly the regions the dynamics on "
+    "the learned surface visits, including energy holes the training error cannot show. With "
+    "criterion 'validation' or 'both' they stay out of the training data while they belong to "
+    "the al_window pool, then join it; with 'uncertainty' they join it at once. 0 switches the "
+    "validation off.",
     "ActiveLearning", {})
 PARAM(al_criterion, String, "both",
     "Convergence criterion: 'uncertainty' (no sampled structure above al_uncertainty, the "
-    "original rule), 'validation' (validation error within al_target_energy and no hole deeper "
-    "than al_target_hole) or 'both' (both at once). Must hold in al_patience consecutive cycles. "
-    "'validation' and 'both' need al_validation_frames > 0. Measured on peo8 (58 atoms): the "
-    "uncertainty rule alone stopped at 87 labels with the torsion distribution still wrong.",
+    "original rule), 'validation' (pooled centred MAE within al_target_energy and hole quantile "
+    "within al_target_hole, see al_window) or 'both' (validation in al_patience consecutive "
+    "cycles and the indicator in the stopping cycle). 'validation' and 'both' need "
+    "al_validation_frames > 0. Measured on peo8 "
+    "(58 atoms): the uncertainty rule alone stopped at 87 labels with the torsion distribution "
+    "still wrong.",
     "ActiveLearning", {})
-PARAM(al_target_energy, Double, 1.0,
-    "Validation criterion: largest allowed relative (centred) energy MAE of the model on the "
-    "cycle's validation frames [kcal/mol].",
+PARAM(al_window, Int, 3,
+    "Validation pool: the validation frames of the last al_window cycles (the current one "
+    "included), about al_window * al_validation_frames frames, re-predicted each cycle with the "
+    "model entering it (no new labels). The validation criterion is only evaluated on a full "
+    "window. 1 restores a single cycle's frames. Reason: 10 frames let the MAE of one and the "
+    "same model fluctuate by 1.4 to 3.2 kcal/mol between cycles (peo8, Oct 2026). Pool frames "
+    "are kept out of training until they leave the window, so the pooled error stays out of "
+    "sample; with criterion 'uncertainty' the pool is the current cycle's frames only.",
     "ActiveLearning", {})
-PARAM(al_target_hole, Double, 2.0,
-    "Validation criterion: deepest allowed energy hole [kcal/mol], i.e. no validation frame may "
-    "have model minus reference energy below -al_target_hole. Absolute energies, so a constant "
-    "offset of the model counts as well.",
+PARAM(al_hole_quantile, Double, 0.9,
+    "Hole measure of the validation criterion: the hole is the (1 - al_hole_quantile) quantile "
+    "of the centred signed errors (model minus reference, mean signed error removed) of the "
+    "pool, i.e. 0.9 gives the depth of the lowest 10 %. 1.0 uses the single deepest frame. "
+    "Linear interpolation between order statistics; range 0.5 to 1.",
+    "ActiveLearning", {})
+PARAM(al_target_energy, Double, 2.5,
+    "Validation criterion: largest allowed centred energy MAE of the model on the pooled "
+    "validation frames [kcal/mol]. The mean signed error (constant offset) is removed first and "
+    "reported separately. Default from peo8 tuning runs (Oct 2026, seeds 4-6, 20 cycles): about "
+    "the 75th percentile of the pooled value over cycles 14-20 (median 2.12, n = 21 cycles, "
+    "3 runs); docs/DELTA_ML_ACTIVE_LEARNING_2026-10.md.",
+    "ActiveLearning", {})
+PARAM(al_target_hole, Double, 3.5,
+    "Validation criterion: largest allowed hole depth [kcal/mol], i.e. the al_hole_quantile "
+    "measure of the centred signed errors must not lie below -al_target_hole. Centred, so a "
+    "constant offset of the model does not count. Default from peo8 tuning runs (Oct 2026, see "
+    "al_target_energy): about the 25th percentile over cycles 14-20 (median -3.20 kcal/mol).",
     "ActiveLearning", {})
 PARAM(al_patience, Int, 2,
-    "Consecutive cycles in which al_criterion must hold before the run stops (criteria "
-    "'validation' and 'both'). The plain 'uncertainty' criterion always stops at the first cycle "
-    "that meets it (the behaviour before October 2026).",
+    "Consecutive cycles in which the validation part of al_criterion must hold before the run "
+    "stops ('validation' and 'both'; for 'both' the indicator must hold in the stopping cycle "
+    "only). The plain 'uncertainty' criterion always stops at the first cycle that meets it (the "
+    "behaviour before October 2026). Consecutive pools share frames, so the cycles are not "
+    "independent tests.",
     "ActiveLearning", {})
 
 PARAM(dataset, String, "",
@@ -334,6 +358,27 @@ private:
         const std::vector<std::size_t>& excluded, int cycle,
         std::vector<std::size_t>* drawn = nullptr) const;
 
+    /*! \brief Pooled validation statistics, all in kcal/mol. Claude Generated (October 2026). */
+    struct PooledValidation {
+        int n = 0;              ///< frames in the pool
+        double mae_centred = 0; ///< mean |e_i - mean(e)|
+        double offset = 0;      ///< mean signed error mean(e), model minus reference
+        double hole = 0;        ///< (1 - al_hole_quantile) quantile of e_i - mean(e), <= 0 usually
+    };
+
+    /**
+     * @brief Energy errors of `model` on a labelled pool: centred MAE, offset, hole quantile.
+     *
+     * e_i = E_base + dE_model - E_ref per frame. The constant offset mean(e) is removed before
+     * the MAE and the quantile, because it shifts every structure alike and cancels in relative
+     * energies; it is reported on its own. The hole is the lower (1 - q) quantile of the
+     * centred errors (type-7 linear interpolation), less noisy than the single minimum.
+     * Energies only (no gradients): cheap enough to re-predict the whole pool every cycle.
+     * Claude Generated (October 2026)
+     */
+    PooledValidation evaluatePool(const curcuma::ml::DeltaMLModel& model,
+        const std::vector<const curcuma::ml::MLDataset*>& pool) const;
+
     /*! \brief Training options of the main (joint) fit with M = n_centers centres. */
     curcuma::ml::DeltaMLTrainingOptions trainingOptions(int n_centers) const;
 
@@ -407,9 +452,11 @@ private:
     // Prospective validation and convergence (Claude Generated, October 2026); values from the PARAM block.
     int m_al_validation_frames = 10;
     std::string m_al_criterion = "both";
-    double m_al_target_energy = 1.0; ///< kcal/mol
-    double m_al_target_hole = 2.0;   ///< kcal/mol
+    double m_al_target_energy = 2.5; ///< kcal/mol, centred MAE of the pool
+    double m_al_target_hole = 3.5;   ///< kcal/mol, depth of the hole quantile
     int m_al_patience = 2;
+    int m_al_window = 3;             ///< cycles whose validation frames form the pool
+    double m_al_hole_quantile = 0.9; ///< hole = (1 - q) quantile of centred signed errors
 
     /* Anchor structure and, more importantly, the bond graph taken from it. Only the graph
        is pinned for later structures; everything geometry dependent is recomputed where it
