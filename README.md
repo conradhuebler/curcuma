@@ -186,29 +186,26 @@ curcuma -opt water.xyz -method gfnff -bak water.opt.xyz
 On Linux, Ctrl-C makes curcuma create an empty file `stop`. ConfScan and MD check for it,
 write a restart file and finish. A second Ctrl-C while `stop` exists ends the program at once.
 
-### Delta-ML: cheap method with a learned correction
+### Delta-ML: cheap method with a learned correction (experimental)
 
-Learns the energy difference between a cheap base method and an expensive reference. The aim is conformer search
-and pre-optimisation near reference quality. On two molecules (one 90-atom molecule and a trisaccharide) the correction
-orders conformers better than GFN-FF alone when it is trained on labels from fresh single points (Spearman gain +0.06 to
-+0.29, paired in 10 of 10 folds; also for blocked folds and as a tendency for GFN-FF minima, where pair accuracy rises and
-the Spearman interval mostly includes 0). Not shown: that it finds the lowest conformer more often. As a pre-optimisation before GFN2 it does not pay (the cheap GFN-FF pre-optimisation is as fast or faster in total time on two of three molecules);
-NVE molecular dynamics on the corrected surface conserves energy as well as GFN-FF and heats like GFN2
-([docs/DELTA_ML_PIPELINE_2026-10.md](docs/DELTA_ML_PIPELINE_2026-10.md)), and its frames lie at the GFN2 energy level, but the torsion populations are not closer to GFN2 than those of GFN-FF and
-the 500 K sampling finds no more minima per wall time ([docs/DELTA_ML_SAMPLING_2026-10.md](docs/DELTA_ML_SAMPLING_2026-10.md)); a few to ten per cent of a GFN2 step. It costs 11 to 25 times GFN-FF per step. **The internal labelling of `-activelearn` still has a
-base-energy offset and the gradient-label unit error are repaired (bc7742e6, 373b1c13, 43786e04). Results obtained with the internal labelling before
-these fixes are void** (see [docs/DELTA_ML_USECASE_TEST2_2026-10.md](docs/DELTA_ML_USECASE_TEST2_2026-10.md); re-measurement with repaired labels: held-out forces 1.7x to 4.2x better than GFN-FF, better order of conformers also for minima from unseen basins, the model energy at its own optimum unreliable: [docs/DELTA_ML_RETEST_2026-10.md](docs/DELTA_ML_RETEST_2026-10.md); third molecule and DFT reference: forces transfer (2x to 2.8x against the DFT gradient), energies only with the energy model or about 400 training frames: [docs/DELTA_ML_THIRD_MOLECULE_DFT_2026-10.md](docs/DELTA_ML_THIRD_MOLECULE_DFT_2026-10.md)). Conformers at fixed
-topology only, not reactions.
+Learns `E_ref - E_base` for one molecule (ACSF descriptor, sparse kernel ridge) and adds it to a cheap base method, usually GFN-FF
+with a GFN2 or DFT reference. Measured on four molecules (GFN2 reference unless noted): held-out forces 1.7x to 4.2x better than
+GFN-FF (1.8x to 2.8x against r2SCAN-3c), conformer minima also from unseen basins ordered better, NVE dynamics conserves energy as
+well as GFN-FF (n=1 per molecule) and samples at the GFN2 energy level. Not shown: that the lowest conformer is found more reliably,
+that a pre-optimisation before GFN2 beats a GFN-FF pre-optimisation, that MD torsion populations are closer to GFN2, or that the
+model energy at its own optimum can be trusted. Not tested: reactions or topology changes, charged and open-shell systems, other
+molecules, transfer between molecules. Cost 10 to 20 times GFN-FF per step (3 to 5 per cent of a GFN2 step; two molecules, measured under load). Results made with the internal labelling before the
+gradient-unit and base-energy repairs (bc7742e6, 373b1c13, 43786e04) are void. The fit also writes an energy-only model
+(`.deltaml.energy.json`, for `-sp` energies, not for `-opt`/`-md`).
 
 ```sh
-curcuma -activelearn conf.xyz -method gfnff -ref_method gfn2 -threads 8   # fit
-curcuma -opt mol.xyz -method deltaml:conf.deltaml.json                    # use
-curcuma -sp  mol.xyz -method deltaml:conf.deltaml.energy.json             # energy model
+curcuma -activelearn frames.xyz -method gfnff -ref_method gfn2 -threads 8          # fit
+curcuma -activelearn other.xyz -al_mode test -model frames.deltaml.json           # check on fresh frames
+curcuma -opt mol.xyz -method deltaml:frames.deltaml.json                          # use
 ```
 
-The fit writes a second, energy-only model (`.deltaml.energy.json`, for `-sp`, not for `-opt`/`-md`).
-
-AI-generated, machine-tested; human production testing pending. See [docs/DELTA_ML.md](docs/DELTA_ML.md).
+AI-generated, machine-tested; human production testing pending. Start with [docs/DELTA_ML_QUICKSTART.md](docs/DELTA_ML_QUICKSTART.md)
+(what works, worked example, failures); details in [docs/DELTA_ML.md](docs/DELTA_ML.md).
 
 ### More
 

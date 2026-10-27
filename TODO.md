@@ -58,7 +58,7 @@ Stand.
 - **`-md.seed` wirkt nicht auf die Anfangsgeschwindigkeiten** (bitgleiche Läufe für Seeds 21 bis 26 und 11, 2026-10-19): `InitVelocities` benutzt eine ungesäte statische `default_random_engine`; unabhängige MD-Läufe aus einer Startstruktur sind so nicht möglich. Ursache gelesen, nicht behoben.
 - **Delta-ML: Modellenergie am eigenen Optimum zu niedrig** (n=20 je Molekül, 2026-10-19): bei `lambda 1e-6` und 4000 Zentren liegt sie um bis zu 34 kcal/mol unter GFN2 (19/19 auf dem Trisaccharid), `lambda 1e-3` beseitigt das und verschiebt die Energie um 7 bis 16 kcal/mol nach oben; `uncertainty_abort` hilft nicht. Details: `docs/DELTA_ML_RETEST_2026-10.md`.
 - **Delta-ML aktives Lernen: Abbruchkriterium** (2026-10-27, n=3+3 Läufe peo8): ersetzt durch Pool über `al_window` 3 Zyklen, zentrierte Fehler, 10-%-Quantil, Ziele 2,5/3,5 kcal/mol aus Tuning-Seeds 4-6; `both` = Validierung `al_patience`-mal + Indikator im Stoppzyklus. Löst in 2 von 3 Läufen aus (Zyklus 18, 19), Zeitpunkt vom Indikator bestimmt, JSD wie N0 (0,221).
-  Offen: andere Moleküle, ob `validation` allein (stoppt bei 7-9) gleich gute Modelle gibt, Wandzeit +20-38 % ungeklärt. Details: `docs/DELTA_ML_ACTIVE_LEARNING_2026-10.md` (Addendum).
+  Offen: andere Moleküle, ob `validation` allein (stoppt bei 7-9) gleich gute Modelle gibt, Wandzeit +20-38 % ungeklärt. Details: `docs/DELTA_ML_ACTIVE_LEARNING_2026-10.md` (Addendum). Warntext `not converged ... was not met in N consecutive cycles` (`activelearn.cpp:1311`) sagt nicht, ob Validierung oder Indikator fehlte.
 
 ## 2. Leistung
 

@@ -1,7 +1,11 @@
 # Delta-ML: cheap method with a learned correction
 
-**Status**: 🤖 AI-generated, ⚙️ machine-tested. Human production testing pending.
+**Status**: 🤖 AI-generated, ⚙️ machine-tested, experimental. Human production testing pending.
 
+**New here?** Read [DELTA_ML_QUICKSTART.md](DELTA_ML_QUICKSTART.md) first: one table of what is shown, not shown and not
+tested with an evidence link per row, a worked example run end to end (fit, `-sp`, `-opt`, `-al_mode test`, comparison with
+GFN-FF and GFN2), the stop criteria of `-al_mode learn`, common failures, and a map from question to document and script directory.
+This file is the reference; some of its tables were measured with defective labels and say so.
 
 Learns the difference between a cheap base method and an expensive reference:
 
@@ -60,7 +64,7 @@ curcuma -activelearn mol.xyz -al_mode learn -method gfnff -ref_method gfn2 \
 # 2. Use it anywhere a method is accepted
 curcuma -sp        mol.xyz -method deltaml:conf.deltaml.json
 curcuma -opt       mol.xyz -method deltaml:conf.deltaml.json
-curcuma -confsearch mol.xyz -method deltaml:conf.deltaml.json
+curcuma -confsearch mol.xyz -method deltaml:conf.deltaml.json   # untested, see "ConfSearch: not established"
 
 # Measure accuracy against evaluation cost before committing to a model size
 curcuma -activelearn conf.xyz -center_sweep 200,500,1000,2000,4000
@@ -157,17 +161,25 @@ GFN2, 12 cycles, threshold 0.3, 4 x 10 ps at 300 K, 15 candidates, 1 run each): 
 labels (+10 per cycle), wall time 285 instead of 272 s (GFN2 labels are cheap here; with a DFT
 reference the label count dominates). Validation hole of the model entering the cycle: -51 (cycle 2),
 -10 to -14 (cycles 3 to 5), -1.9 to -8 kcal/mol (cycles 9 to 12); E_MAE 1.4 to 2.9 kcal/mol from
-cycle 6 on. The run did not converge at the defaults (1.0 / 2.0 kcal/mol).
+cycle 6 on. The run did not converge at the defaults of that time (1.0 / 2.0 kcal/mol, single-cycle 10-frame validation).
 
-**Convergence (Oct 2026).** `al_criterion` `uncertainty` (indicator, the old rule), `validation`
-(MAE <= `al_target_energy`, no hole below `-al_target_hole`) or `both` (default), held in
-`al_patience` (2) consecutive cycles. The log names the criterion that stopped the run, or says
-"not converged". On convergence the validation frames stay in the dataset file, the model is not
-refitted. With `validation` or `both`, a cycle without any frame above the indicator threshold no
-longer ends the run while the validation fails: candidates are then picked among all frames
-(farthest point, validation frames excluded). Without that, peo8 stopped in cycle 10 at indicator
-0.26 with a validation hole of -7.9 kcal/mol. `uncertainty` with `al_validation_frames 0` (patience is ignored for it) is byte-identical to the
-code before this change (9-atom test, converging and non-converging run). Motivation: on peo8
+**Convergence (Oct 2026, pooled since 483e3804).** `al_criterion` `uncertainty` (no sampled frame above
+`al_uncertainty`, the old rule), `validation` or `both` (default). `validation` pools the validation frames of the last
+`al_window` (3) cycles (about 30 frames), re-predicts them with the model entering the cycle and keeps them out of training
+while they are in the pool (cycle-0 frames go straight into training); it is only evaluated on a full pool. Errors are centred
+(the offset is reported separately): centred MAE <= `al_target_energy` (2.5 kcal/mol) and the `1 - al_hole_quantile` quantile
+(0.9: lowest 10 %) of the centred signed errors not below `-al_target_hole` (3.5 kcal/mol), in `al_patience` (2) consecutive
+cycles. `both` = `validation` as above plus the indicator in the stopping cycle only; before 483e3804 it needed the indicator in
+`al_patience` consecutive cycles too and never fired on peo8 (0 of 3). `uncertainty` always stops at the first cycle that
+meets it. The log names the criterion that stopped the run, or says "not converged". On convergence the validation frames stay
+in the dataset file, the model is not refitted. With `validation` or `both`, a cycle without any frame above the indicator
+threshold no longer ends the run while the validation fails: candidates are then picked among all frames (farthest point,
+validation frames excluded); without that, peo8 stopped in cycle 10 at indicator 0.26 with a validation hole of -7.9 kcal/mol.
+`uncertainty` with `al_validation_frames 0` was byte-identical to the code before the validation was added (9-atom test,
+converging and non-converging run). Measured on peo8 (n=3, [DELTA_ML_ACTIVE_LEARNING_2026-10.md](DELTA_ML_ACTIVE_LEARNING_2026-10.md)):
+the pooled `both` stopped in 2 of 3 runs (cycles 18, 19) with final quality equal to fixed 20 cycles (torsion JSD 0.221);
+`uncertainty` at threshold 0.3 stopped earlier with 285 to 330 labels at mean JSD 0.235 (difference not resolved). `uncertainty`
+keeps its learning bit-identical to the code before the pooling (dimethyl ether, 6 cycles, one seed). Motivation: on peo8
 the indicator reported convergence at the default threshold (87 labels) with the torsion
 distribution still wrong (docs/DELTA_ML_TRAINING_DATA_2026-10.md).
 
@@ -227,11 +239,31 @@ arguments prints the summary; the full list comes from the parameter registry.
 | `-activelearn.energy_model_n_centers` | 0 | centres of the energy model; 0 = `n_centers` |
 | `-activelearn.energy_model_lambda` | 1e-4 | regulariser of the energy model (see "Held-out accuracy") |
 | `-activelearn.energy_model_kernel_sigma` | 0 (auto) | kernel width of the energy model; 0 = median heuristic |
-| `-activelearn.al_validation_frames` | 10 | `learn`: random frames of each cycle's dynamics, scored with the current model before the refit, then trained on; 0 = off |
-| `-activelearn.al_criterion` | `both` | `learn` stop rule: `uncertainty`, `validation` or `both` |
-| `-activelearn.al_target_energy` | 1.0 | validation: largest relative energy MAE [kcal/mol] |
-| `-activelearn.al_target_hole` | 2.0 | validation: no frame with model minus reference below `-al_target_hole` [kcal/mol] |
-| `-activelearn.al_patience` | 2 | consecutive cycles the criterion `validation` or `both` must hold; `uncertainty` always stops at the first |
+| `-activelearn.al_mode` | `train` | `train` (fit given structures), `test` (score `-model` on fresh references), `learn` (active learning) |
+| `-activelearn.model` | -- | model file: output in `train`/`learn`, input in `test`; empty derives it from the input basename |
+| `-activelearn.max_structures` | 0 | use at most this many input structures (0 = all) |
+| `-activelearn.sigma_energy` / `sigma_force` | 1e-4 / 1e-3 | assumed noise [Eh, Eh/A]; only their ratio acts (DELTA_ML_RETEST_2026-10.md) |
+| `-activelearn.seed` | 42 | split, sampling MD and validation draw |
+| `-activelearn.write_dataset` | true | write `<basename>.deltaml.dataset.json` (and XYZ) for refits without new labels |
+| `-activelearn.al_cycles` | 5 | `learn`: cycles |
+| `-activelearn.al_md_method` | -- | `learn`: sampling method; empty = base in cycle 0, corrected surface afterwards |
+| `-activelearn.al_temperature` / `al_md_time` | 500 K / 2000 fs | `learn`: sampling temperature and length per run |
+| `-activelearn.al_md_runs` / `al_dump_frequency` | 4 / 50 | `learn`: sampling runs per cycle, every Nth frame a candidate |
+| `-activelearn.al_initial` / `al_candidates` | 15 / 15 | `learn`: labels in cycle 0 / per later cycle |
+| `-activelearn.al_uncertainty` | 0.5 | `learn`: indicator threshold for candidates and the `uncertainty` stop |
+| `-activelearn.al_onthefly` / `al_onthefly_threshold` | false / 0.9 | `learn`: end each sampling run at the first frame above the threshold |
+| `-activelearn.al_validation_frames` | 10 | `learn`: random frames of each cycle's dynamics, scored with the model entering the cycle before the refit; 0 = off |
+| `-activelearn.al_criterion` | `both` | `learn` stop rule: `uncertainty`, `validation` or `both` (see "Convergence") |
+| `-activelearn.al_window` | 3 | validation pool: frames of the last N cycles, kept out of training while pooled; 1 = one cycle |
+| `-activelearn.al_hole_quantile` | 0.9 | hole = the `1 - q` quantile of the centred signed errors of the pool; 1.0 = deepest frame |
+| `-activelearn.al_target_energy` | 2.5 | validation: largest centred energy MAE of the pool [kcal/mol] (1.0 before 483e3804) |
+| `-activelearn.al_target_hole` | 3.5 | validation: hole quantile not below `-al_target_hole` [kcal/mol] (2.0, deepest of 10 frames, before 483e3804) |
+| `-activelearn.al_patience` | 2 | consecutive cycles the validation part must hold (`validation`, `both`); `uncertainty` always stops at the first |
+| `-deltaml.model` | -- | model for `-method deltaml` (or `-method deltaml:<file>`) |
+| `-deltaml.base` | -- | base method; empty = the one stored in the model (a different one gives silently wrong energies) |
+| `-deltaml.enabled` | true | false runs the bare base through the same path (A/B check) |
+| `-deltaml.uncertainty_warn` / `uncertainty_abort` | 0.9 / 0 | warn once above / refuse an energy above the indicator (0 = off) |
+| `-deltaml.report_uncertainty` / `uncertainty_record` | false / -- | log the indicator per evaluation / append frames above `uncertainty_warn` to a file (`auto` names it) |
 
 The `acsf_*` values apply to every fit of a run (all cycles in `learn` mode, the centre sweep)
 and are stored in the model's `descriptor` block, which `-method deltaml:` reads back. A
@@ -309,7 +341,7 @@ the held-out block of each, the joint model's last. Model files without `role` r
 Single split, M = 2000, old ACSF grid (8 shells, eta 8). The energy gain in this table is not
 confirmed by the multi-seed held-out measurement above.
 
-353 conformers of a 90-atom C/H/N molecule (`test_cases/confs/conf.xyz` -- these are GFN2
+353 conformers of a 90-atom C/H/N molecule (`test_cases/structures/ensembles/aaa-host-frames353.xyz`, formerly test_cases/confs/conf.xyz, identical md5 -- these are GFN2
 minima, so "distance from the reference minimum" is directly measurable), base GFN-FF,
 reference GFN2, 282 training / 71 held-out, M = 2000. Held-out unless noted:
 
