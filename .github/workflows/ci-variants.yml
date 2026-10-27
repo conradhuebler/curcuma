@@ -61,8 +61,24 @@ jobs:
           sudo fallocate -l 8G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
           df -h /; free -m
 
-      - name: Build
-        run: bash scripts/ci/linux_host_gpu_build.sh
+      - name: Install toolchains and configure
+        run: bash scripts/ci/linux_host_gpu_build.sh configure
+
+      # curcuma depends on both plugins, so the plugins are built in separate steps first.
+      - name: Build core library
+        run: bash scripts/ci/linux_host_gpu_build.sh make curcuma_core
+
+      - name: Build CUDA plugin
+        run: bash scripts/ci/linux_host_gpu_build.sh make curcuma_cuda
+
+      - name: Build ROCm plugin
+        run: bash scripts/ci/linux_host_gpu_build.sh make curcuma_rocm
+
+      - name: Build everything else
+        run: bash scripts/ci/linux_host_gpu_build.sh make all
+
+      - name: Package
+        run: bash scripts/ci/linux_host_gpu_build.sh package
 
       # Unpacked in a clean image without ROCm or CUDA. The GPU plugins find no device and
       # fall back to the CPU. The AVX512 build is only run on a runner that has AVX512.

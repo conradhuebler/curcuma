@@ -1,6 +1,8 @@
 #!/bin/bash
 # Build the Linux GPU variant (AVX512, CUDA + ROCm plugins) directly on an ubuntu-22.04
 # runner, without a container, and pack it with package_linux.sh. Claude Generated.
+# Usage: linux_host_gpu_build.sh configure | make <target> | package  (one workflow step each,
+# so a lost runner shows which part was running).
 # CUDA from NVIDIA's apt repository, ROCm from repo.radeon.com; run on GitHub Actions only.
 set -euo pipefail
 SRC="$PWD"
@@ -11,6 +13,9 @@ ROCM_REPO_VERSION="${ROCM_REPO_VERSION:-7.2.1}"
 
 report() { echo "[$1] $(df -h / | awk 'NR==2{print "disk free: "$4}') $(free -m | awk 'NR==2{print "mem used MB: "$3}')"; }
 
+export PATH=/usr/local/cuda-12.8/bin:/opt/rocm/bin:$PATH
+case "${1:?configure|make|package}" in
+configure)
 report start
 sudo apt-get update
 sudo apt-get install -y g++-12 gfortran-12 cmake patchelf wget gnupg ca-certificates
@@ -43,7 +48,6 @@ echo "ROCm device library: ${BC:-NOT FOUND}"
 [ -n "$BC" ] || { ls /opt; ls /opt/rocm* | head -n 30; exit 1; }
 report rocm
 
-export PATH=/usr/local/cuda-12.8/bin:/opt/rocm/bin:$PATH
 mkdir -p "$BUILD"; cd "$BUILD"
 CXX=g++-12 CC=gcc-12 FC=gfortran-12 cmake "$SRC" -DCMAKE_BUILD_TYPE=Release \
     -DUSE_AVX512=ON -DUSE_CUDA=ON -DUSE_ROCM=ON "-DROCM_GPU_ARCH=${ROCM_ARCHS}" \
@@ -51,13 +55,20 @@ CXX=g++-12 CC=gcc-12 FC=gfortran-12 cmake "$SRC" -DCMAKE_BUILD_TYPE=Release \
     -DUSE_XTB=OFF -DUSE_TBLITE=OFF -DUSE_D3=OFF -DUSE_D4=OFF -DUSE_Plumed=OFF > cmake.log 2>&1 \
     || { tail -n 60 cmake.log; exit 1; }
 
-# One make job per 4 GB of RAM (nvcc, hipcc and gfnff_method.cpp are memory hungry).
-JOBS=$(awk -v n="$(nproc)" '/MemAvailable/{m=int($2/4000000); print (m<n?(m<1?1:m):n)}' /proc/meminfo)
-( while sleep 120; do report build; done ) &
-make -j"$JOBS" > make.log 2>&1 || { grep -n -B3 -A6 -m6 -E " error|Error [0-9]|undefined reference|cannot find|fatal" make.log | cut -c1-300; exit 1; }
-tail -n 3 make.log
-
+;;
+make)
+    cd "$BUILD"
+    # Two jobs at most, at low priority: nvcc, hipcc and gfnff_method.cpp need several GB each
+    # and a full-speed -j4 starved the runner (lost communication).
+    JOBS=$(awk -v n="$(nproc)" '/MemAvailable/{m=int($2/4000000); m=(m<n?m:n); print (m<2?(m<1?1:m):2)}' /proc/meminfo)
+    ( while sleep 120; do report "make ${2:-all}"; done ) &
+    nice -n 19 make -j"$JOBS" "${2:-all}" > "make_${2:-all}.log" 2>&1 \
+        || { grep -n -B3 -A6 -m6 -E " error|Error [0-9]|undefined reference|cannot find|fatal" "make_${2:-all}.log" | cut -c1-300; exit 1; }
+    tail -n 3 "make_${2:-all}.log";;
+package)
 mkdir -p "$OUT"
 bash "$SRC/scripts/ci/package_linux.sh" "$BUILD" "$OUT/curcuma-gpu"
 tar -C "$OUT" -czf "$OUT/curcuma-linux-gpu.tar.gz" curcuma-gpu
 ls -l "$OUT"
+;;
+esac
