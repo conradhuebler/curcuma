@@ -473,6 +473,8 @@ private:
     std::string m_ri_metric = "cholesky";    // cholesky | eigen
     double m_ri_metric_cutoff = 1.0e-10;
     double m_ri_max_memory_mb = 0.0;          ///< 0 = auto (riMemoryLimitMB)
+    mutable double m_ri_auto_avail_mb = -1.0;  ///< MemAvailable behind m_ri_auto_limit_mb (for the message)
+    mutable double m_ri_auto_limit_mb = -1.0;  ///< auto limit, read once before the first RI allocation of a setup (see riMemoryLimitMB)
     /// Effective RI host memory limit in MB (Claude Generated, Oct 25 2026): -qm.ri_max_memory_mb when > 0, else
     /// MemAvailable minus max(8000 MB, 15 %). riMemoryLimitInfo() names the source for messages.
     double riMemoryLimitMB() const;

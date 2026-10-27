@@ -2870,25 +2870,34 @@ double hostMemAvailableMB()
 // Claude Generated (Oct 25 2026): -qm.ri_max_memory_mb 0 (default) = what the machine can hold now, read when the RI
 // setup runs: MemAvailable minus max(8000 MB, 15 %) as margin for the rest of the process and the system. Replaces the
 // fixed 16000 MB that sent C40H82 RI-JK into batched recomputation and stopped RI-MP2 (docs/QM_TIMING_ORCA_PYSCF_2026-10.md).
+// The auto value is read ONCE per RI setup (cleared by resetRI) and then kept: MemAvailable shrinks by the 3-index
+// tensor as soon as it is allocated, and a later check of the peak (tensor + (ia|P) factors in RI-MP2) against a
+// re-read value counted the tensor twice (RI-MP2 C80H162: "needs 160572 MB, limit 100731 MB" although the setup
+// limit was 209778 MB). The peak includes the tensor, so it belongs to the value measured before the tensor existed.
 double QMEngine::riMemoryLimitMB() const
 {
     if (m_ri_max_memory_mb > 0.0) return m_ri_max_memory_mb;
+    if (m_ri_auto_limit_mb > 0.0) return m_ri_auto_limit_mb;
     const double avail = hostMemAvailableMB();
     if (avail <= 0.0) return 16000.0;
-    return std::max(1000.0, avail - std::max(8000.0, 0.15 * avail));
+    m_ri_auto_limit_mb = std::max(1000.0, avail - std::max(8000.0, 0.15 * avail));
+    m_ri_auto_avail_mb = avail;
+    return m_ri_auto_limit_mb;
 }
 
 std::string QMEngine::riMemoryLimitInfo() const
 {
     if (m_ri_max_memory_mb > 0.0) return fmt::format("-qm.ri_max_memory_mb {:g}", m_ri_max_memory_mb);
-    const double avail = hostMemAvailableMB();
-    if (avail <= 0.0) return "-qm.ri_max_memory_mb auto = 16000 MB (/proc/meminfo not readable)";
-    return fmt::format("-qm.ri_max_memory_mb auto = {:.0f} MB (MemAvailable {:.0f} MB minus the margin max(8000 MB, 15 %))",
-                       riMemoryLimitMB(), avail);
+    const double limit = riMemoryLimitMB();   // fixes the value on the first call
+    if (m_ri_auto_avail_mb <= 0.0) return "-qm.ri_max_memory_mb auto = 16000 MB (/proc/meminfo not readable)";
+    return fmt::format("-qm.ri_max_memory_mb auto = {:.0f} MB (MemAvailable {:.0f} MB at the start of the RI setup minus the margin max(8000 MB, 15 %))",
+                       limit, m_ri_auto_avail_mb);
 }
 
 void QMEngine::resetRI()
 {
+    m_ri_auto_limit_mb = -1.0;   // re-read MemAvailable for the next setup
+    m_ri_auto_avail_mb = -1.0;
     m_ri.reset();
     m_ri_failed = false;
     m_gpu_ri_dev.reset();
