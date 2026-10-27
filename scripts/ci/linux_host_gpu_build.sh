@@ -30,9 +30,14 @@ for v in "$ROCM_REPO_VERSION" latest; do
         | sudo tee /etc/apt/sources.list.d/rocm.list
     sudo apt-get update && break
 done
+# Ubuntu ships its own rocminfo, rocm-cmake and rocm-device-libs (version 5.0.0), which
+# outrank the vendor's 7.x packages by version number. Priority above 1000 makes the vendor
+# repository win.
+printf 'Package: *\nPin: release o=repo.radeon.com\nPin-Priority: 1001\n' | sudo tee /etc/apt/preferences.d/rocm-pin
+sudo apt-get update
 # rocm-hip-sdk is the vendor's meta package (compiler, device libraries, runtime, rocBLAS,
 # rocSOLVER). Ubuntu's own rocm-device-libs (5.0) must not be mixed in.
-sudo apt-get install -y --no-install-recommends rocm-hip-sdk rocminfo
+sudo apt-get install -y --no-install-recommends rocm-hip-sdk
 BC=$(find /opt/rocm* -name ockl.bc 2>/dev/null | head -n 3)
 echo "ROCm device library: ${BC:-NOT FOUND}"
 [ -n "$BC" ] || { ls /opt; ls /opt/rocm* | head -n 30; exit 1; }
