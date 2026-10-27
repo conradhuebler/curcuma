@@ -30,7 +30,12 @@ for v in "$ROCM_REPO_VERSION" latest; do
         | sudo tee /etc/apt/sources.list.d/rocm.list
     sudo apt-get update && break
 done
-sudo apt-get install -y --no-install-recommends hip-dev hipcc rocm-llvm rocm-device-libs hip-runtime-amd rocblas-dev rocsolver-dev rocminfo
+# rocm-hip-sdk is the vendor's meta package (compiler, device libraries, runtime, rocBLAS,
+# rocSOLVER). Ubuntu's own rocm-device-libs (5.0) must not be mixed in.
+sudo apt-get install -y --no-install-recommends rocm-hip-sdk rocminfo
+BC=$(find /opt/rocm* -name ockl.bc 2>/dev/null | head -n 3)
+echo "ROCm device library: ${BC:-NOT FOUND}"
+[ -n "$BC" ] || { ls /opt; ls /opt/rocm* | head -n 30; exit 1; }
 report rocm
 
 export PATH=/usr/local/cuda-12.8/bin:/opt/rocm/bin:$PATH
@@ -41,8 +46,8 @@ CXX=g++-12 CC=gcc-12 FC=gfortran-12 cmake "$SRC" -DCMAKE_BUILD_TYPE=Release \
     -DUSE_XTB=OFF -DUSE_TBLITE=OFF -DUSE_D3=OFF -DUSE_D4=OFF -DUSE_Plumed=OFF > cmake.log 2>&1 \
     || { tail -n 60 cmake.log; exit 1; }
 
-# One make job per 3 GB of RAM (nvcc, hipcc and gfnff_method.cpp are memory hungry).
-JOBS=$(awk -v n="$(nproc)" '/MemAvailable/{m=int($2/3000000); print (m<n?(m<1?1:m):n)}' /proc/meminfo)
+# One make job per 4 GB of RAM (nvcc, hipcc and gfnff_method.cpp are memory hungry).
+JOBS=$(awk -v n="$(nproc)" '/MemAvailable/{m=int($2/4000000); print (m<n?(m<1?1:m):n)}' /proc/meminfo)
 ( while sleep 120; do report build; done ) &
 make -j"$JOBS" > make.log 2>&1 || { grep -n -B3 -A6 -m6 -E " error|Error [0-9]|undefined reference|cannot find|fatal" make.log | cut -c1-300; exit 1; }
 tail -n 3 make.log
