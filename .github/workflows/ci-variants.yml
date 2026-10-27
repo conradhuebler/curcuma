@@ -21,53 +21,66 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  linux:
+  # Container build (AlmaLinux 8, glibc 2.28): runs on current distributions.
+  linux-cpu:
     runs-on: ubuntu-22.04
     timeout-minutes: 240
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - variant: gpu
-            image: rocm/dev-almalinux-8:7.2.1-complete
-          - variant: cpu
-            image: almalinux:8
     steps:
       - uses: actions/checkout@v4
 
-      # The ROCm image is large; the container is started by hand (not with `container:`)
-      # so the disk can be cleared first.
+      - name: Build in container
+        run: |
+          mkdir -p out
+          docker run --rm -v "$PWD:/src" -v "$PWD/out:/out" almalinux:8 \
+            bash /src/scripts/ci/linux_container_build.sh cpu
+
+      # Unpacked in a clean image: the tarball must carry everything it needs.
+      - name: Smoke test in a clean system
+        run: |
+          mkdir -p smoke && tar -C smoke -xzf out/curcuma-linux-cpu.tar.gz
+          docker run --rm -v "$PWD:/w" ubuntu:22.04 /w/smoke/curcuma-cpu/curcuma \
+            -sp /w/test_cases/structures/medium/butane.anti.xyz -method gfnff 2>&1 | tail -n 15
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-cpu
+          path: out/curcuma-linux-cpu.tar.gz
+          if-no-files-found: error
+
+  # Built directly on the runner: two container builds with the ROCm image lost the runner
+  # (reason not visible in the log). Binaries need glibc 2.35 or newer.
+  linux-gpu:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
       - name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/local/share/boost
           sudo fallocate -l 8G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
           df -h /; free -m
 
-      - name: Build in container
-        run: |
-          mkdir -p out
-          docker run --rm -v "$PWD:/src" -v "$PWD/out:/out" ${{ matrix.image }} \
-            bash /src/scripts/ci/linux_container_build.sh ${{ matrix.variant }}
+      - name: Build
+        run: bash scripts/ci/linux_host_gpu_build.sh
 
-      # Unpacked in a clean image without ROCm, CUDA or the build libraries: the tarball
-      # must carry everything it needs. The GPU plugins find no device and fall back.
+      # Unpacked in a clean image without ROCm or CUDA. The GPU plugins find no device and
+      # fall back to the CPU. The AVX512 build is only run on a runner that has AVX512.
       - name: Smoke test in a clean system
         run: |
-          mkdir -p smoke && tar -C smoke -xzf out/curcuma-linux-${{ matrix.variant }}.tar.gz
-          if [ "${{ matrix.variant }}" = gpu ] && ! grep -q avx512f /proc/cpuinfo; then
+          mkdir -p smoke && tar -C smoke -xzf out/curcuma-linux-gpu.tar.gz
+          if ! grep -q avx512f /proc/cpuinfo; then
             echo "Runner has no AVX512: the AVX512 build is not run."; exit 0
           fi
-          docker run --rm -v "$PWD:/w" ubuntu:22.04 /w/smoke/curcuma-${{ matrix.variant }}/curcuma \
-            -sp /w/test_cases/structures/medium/butane.anti.xyz -method gfnff 2>&1 | tail -n 15
-          if [ "${{ matrix.variant }}" = gpu ]; then
+          for g in "" "-gpu rocm" "-gpu cuda"; do
             docker run --rm -v "$PWD:/w" ubuntu:22.04 /w/smoke/curcuma-gpu/curcuma \
-              -sp /w/test_cases/structures/medium/butane.anti.xyz -method gfnff -gpu rocm 2>&1 | tail -n 15
-          fi
+              -sp /w/test_cases/structures/medium/butane.anti.xyz -method gfnff $g 2>&1 | tail -n 12
+          done
 
       - uses: actions/upload-artifact@v4
         with:
-          name: linux-${{ matrix.variant }}
-          path: out/curcuma-linux-${{ matrix.variant }}.tar.gz
+          name: linux-gpu
+          path: out/curcuma-linux-gpu.tar.gz
           if-no-files-found: error
 
   macos:
