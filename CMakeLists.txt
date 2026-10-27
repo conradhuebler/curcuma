@@ -1,6 +1,12 @@
 cmake_minimum_required(VERSION 3.18)
 project(curcuma)
 
+# Claude Generated (Oct 27, 2026): default language standard for targets that set none
+# (curcuma_core/_cap/curcuma set their own below). Apple clang and gcc 8 do not default to C++17.
+if(NOT DEFINED CMAKE_CXX_STANDARD)
+    set(CMAKE_CXX_STANDARD 17)
+endif()
+
 # Claude Generated 2026 - MSVC doesn't define M_PI (and friends) from <cmath>
 # unless _USE_MATH_DEFINES is set before the first include; 20+ files across
 # the codebase use M_PI directly (gcc/clang define it unconditionally), so

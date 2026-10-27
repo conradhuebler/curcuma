@@ -14,8 +14,7 @@ ROCM_ARCHS="gfx1100;gfx1101;gfx1102;gfx1150;gfx1151;gfx1200;gfx1201"
 dnf -y install dnf-plugins-core epel-release
 dnf config-manager --set-enabled powertools || dnf config-manager --set-enabled crb
 dnf -y install gcc-toolset-12-gcc-c++ gcc-toolset-12-gcc-gfortran make git wget patchelf \
-    python3-pip openblas-devel lapack-devel
-pip3 install cmake
+    cmake openblas-devel lapack-devel
 # shellcheck disable=SC1091
 source /opt/rh/gcc-toolset-12/enable
 
