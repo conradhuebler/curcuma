@@ -352,6 +352,23 @@ gradient or a correlation method follows) AND ||dP||_F < `scf_threshold` (now 1e
 `-qm.scf_convergence density -qm.scf_threshold 1e-6` restores the old rule. 30-37 % fewer iterations, HF energies
 unchanged to 1e-10 Eh; measurements and caveats: [QM_SCF_CONVERGENCE_2026-10.md](QM_SCF_CONVERGENCE_2026-10.md).
 
+## Basis-set citations (Oct 27, 2026)
+
+A native QM run registers the literature of the basis sets it actually loads; `CitationRegistry` prints it at the end of
+the run and writes `curcuma_citations.bib`. Code: `qm_methods/qm_citations.h` (`orbitalBasis` in `QMEngine` after the
+basis file is resolved, `auxBasis` in `qmri::resolveAuxBasisFile`, `hf3c` in the HF-3c constructor); entries:
+`src/core/citation_database.cpp` (DOIs checked against Crossref on that day).
+
+| Loaded | Cited |
+|---|---|
+| `def2-SVP`, `def2-SV(P)` | Weigend & Ahlrichs 2005; Schaefer, Horn & Ahlrichs 1992; Basis Set Exchange 2019, 2007, 1996 |
+| `def2-universal-JFIT` (RI-J) | Weigend 2006; RI-HF Weigend 2002; Basis Set Exchange |
+| `def2-universal-JKFIT` (RI-JK, RI-MP2, LMP2) | Weigend 2008; RI-HF Weigend 2002; Basis Set Exchange |
+| `MINIX`, `hf-3c` | Sure & Grimme 2013; Kruse & Grimme 2012 (gCP); D3, Becke-Johnson damping |
+
+Attribution is by basis-set name: a user-supplied file with another name is not cited. Not cited yet: the method papers
+(HF, MP2, RI-MP2, CCSD, PNO/Pipek-Mezey for LMP2); tests `qm_cite_*` (AI-generated, machine-tested).
+
 ## Attribution and Provenance
 
 **Origin**: xcDFT -- TCCM winter school 2019: DFT (Fortran, RKS, LDA+HF, Euler-Maclaurin x

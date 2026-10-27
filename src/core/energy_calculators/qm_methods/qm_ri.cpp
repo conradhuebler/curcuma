@@ -16,6 +16,7 @@
 
 #include "qm_ri.h"
 #include "qm_engine.h"
+#include "qm_citations.h"
 #include "qm_gpu_ri_backend.h"
 
 #include "src/core/blas_threads.h"
@@ -156,7 +157,7 @@ std::string resolveAuxBasisFile(const std::string& name_in, const std::string& m
     if (ln.empty() || ln == "auto") name = (mode == "j") ? "def2-universal-JFIT" : "def2-universal-JKFIT";
     else if (ln == "def2/j" || ln == "def2-universal-jfit" || ln == "weigend" || ln == "def2-jfit") name = "def2-universal-JFIT";
     else if (ln == "def2/jk" || ln == "def2-universal-jkfit" || ln == "def2-jkfit") name = "def2-universal-JKFIT";
-    if (name.find('/') != std::string::npos && fileExists(name)) return name;
+    if (name.find('/') != std::string::npos && fileExists(name)) { qmcite::auxBasis(name); return name; }
     const std::string file = name + ".turbomole";
     std::vector<std::string> cand;
     for (const char* var : { "CURCUMA_QM_BASIS", "CURCUMA_DFT_BASIS", "CURCUMA_DATA" })
@@ -166,7 +167,7 @@ std::string resolveAuxBasisFile(const std::string& name_in, const std::string& m
 #endif
     cand.push_back(file);
     for (const auto& c : cand)
-        if (fileExists(c)) return c;
+        if (fileExists(c)) { qmcite::auxBasis(name); return c; }   // literature of the fitting basis actually loaded
     throw std::runtime_error("auxiliary basis '" + name_in + "' not found (looked for " + file + ")");
 }
 

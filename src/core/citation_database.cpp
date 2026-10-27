@@ -954,6 +954,157 @@ const std::unordered_map<std::string, CitationData>& database()
             "  doi = {10.1103/PhysRevLett.100.123004}\n"
             "}"
         }},
+
+        // Native ab-initio QM: basis sets and auxiliary basis sets (Oct 2026, Claude Generated; DOIs checked against Crossref).
+        { "def2_basis", {
+            "def2 orbital basis sets (def2-SV(P), def2-SVP, ...; Weigend & Ahlrichs 2005)",
+            "Weigend, F.; Ahlrichs, R. Phys. Chem. Chem. Phys. 2005, 7, 3297-3305 (DOI: 10.1039/B508541A)",
+            "weigend2005def2",
+            "@article{weigend2005def2,\n"
+            "  author = {Weigend, Florian and Ahlrichs, Reinhart},\n"
+            "  title = {Balanced basis sets of split valence, triple zeta valence and quadruple zeta valence quality for {H} to {Rn}: Design and assessment of accuracy},\n"
+            "  journal = {Phys. Chem. Chem. Phys.},\n"
+            "  year = {2005},\n"
+            "  volume = {7},\n"
+            "  pages = {3297--3305},\n"
+            "  doi = {10.1039/B508541A}\n"
+            "}"
+        }},
+
+        { "def2_sv_1992", {
+            "Split-valence basis sets underlying def2-SV(P)/def2-SVP (Schaefer, Horn, Ahlrichs 1992)",
+            "Schaefer, A.; Horn, H.; Ahlrichs, R. J. Chem. Phys. 1992, 97, 2571-2577 (DOI: 10.1063/1.463096)",
+            "schaefer1992sv",
+            "@article{schaefer1992sv,\n"
+            "  author = {Sch{\\\"a}fer, Ansgar and Horn, Hans and Ahlrichs, Reinhart},\n"
+            "  title = {Fully optimized contracted {G}aussian basis sets for atoms {Li} to {Kr}},\n"
+            "  journal = {J. Chem. Phys.},\n"
+            "  year = {1992},\n"
+            "  volume = {97},\n"
+            "  pages = {2571--2577},\n"
+            "  doi = {10.1063/1.463096}\n"
+            "}"
+        }},
+
+        { "def2_jfit", {
+            "def2/J Coulomb fitting basis (def2-universal-JFIT; Weigend 2006), used for RI-J",
+            "Weigend, F. Phys. Chem. Chem. Phys. 2006, 8, 1057-1065 (DOI: 10.1039/B515623H)",
+            "weigend2006coulombfit",
+            "@article{weigend2006coulombfit,\n"
+            "  author = {Weigend, Florian},\n"
+            "  title = {Accurate {C}oulomb-fitting basis sets for {H} to {Rn}},\n"
+            "  journal = {Phys. Chem. Chem. Phys.},\n"
+            "  year = {2006},\n"
+            "  volume = {8},\n"
+            "  pages = {1057--1065},\n"
+            "  doi = {10.1039/B515623H}\n"
+            "}"
+        }},
+
+        { "def2_jkfit", {
+            "def2/JK exchange fitting basis (def2-universal-JKFIT; Weigend 2008), used for RI-JK and as RI-MP2 fitting basis",
+            "Weigend, F. J. Comput. Chem. 2008, 29, 167-175 (DOI: 10.1002/jcc.20702)",
+            "weigend2008jkfit",
+            "@article{weigend2008jkfit,\n"
+            "  author = {Weigend, Florian},\n"
+            "  title = {Hartree--{F}ock exchange fitting basis sets for {H} to {Rn}},\n"
+            "  journal = {J. Comput. Chem.},\n"
+            "  year = {2008},\n"
+            "  volume = {29},\n"
+            "  pages = {167--175},\n"
+            "  doi = {10.1002/jcc.20702}\n"
+            "}"
+        }},
+
+        { "ri_hf", {
+            "RI-J/RI-JK Hartree-Fock with auxiliary basis (Weigend 2002)",
+            "Weigend, F. Phys. Chem. Chem. Phys. 2002, 4, 4285-4291 (DOI: 10.1039/B204199P)",
+            "weigend2002rihf",
+            "@article{weigend2002rihf,\n"
+            "  author = {Weigend, Florian},\n"
+            "  title = {A fully direct {RI-HF} algorithm: Implementation, optimised auxiliary basis sets, demonstration of accuracy and efficiency},\n"
+            "  journal = {Phys. Chem. Chem. Phys.},\n"
+            "  year = {2002},\n"
+            "  volume = {4},\n"
+            "  pages = {4285--4291},\n"
+            "  doi = {10.1039/B204199P}\n"
+            "}"
+        }},
+
+        { "hf3c", {
+            "HF-3c: HF/MINIX with D3(BJ), gCP and short-range basis correction (Sure & Grimme 2013); MINIX basis set",
+            "Sure, R.; Grimme, S. J. Comput. Chem. 2013, 34, 1672-1685 (DOI: 10.1002/jcc.23317)",
+            "sure2013hf3c",
+            "@article{sure2013hf3c,\n"
+            "  author = {Sure, Rebecca and Grimme, Stefan},\n"
+            "  title = {Corrected small basis set {H}artree--{F}ock method for large systems},\n"
+            "  journal = {J. Comput. Chem.},\n"
+            "  year = {2013},\n"
+            "  volume = {34},\n"
+            "  pages = {1672--1685},\n"
+            "  doi = {10.1002/jcc.23317}\n"
+            "}"
+        }},
+
+        { "gcp", {
+            "Geometrical counterpoise correction gCP (Kruse & Grimme 2012)",
+            "Kruse, H.; Grimme, S. J. Chem. Phys. 2012, 136, 154101 (DOI: 10.1063/1.3700154)",
+            "kruse2012gcp",
+            "@article{kruse2012gcp,\n"
+            "  author = {Kruse, Holger and Grimme, Stefan},\n"
+            "  title = {A geometrical correction for the inter- and intra-molecular basis set superposition error in {H}artree--{F}ock and density functional theory calculations for large systems},\n"
+            "  journal = {J. Chem. Phys.},\n"
+            "  year = {2012},\n"
+            "  volume = {136},\n"
+            "  pages = {154101},\n"
+            "  doi = {10.1063/1.3700154}\n"
+            "}"
+        }},
+
+        { "bse_2019", {
+            "Basis Set Exchange (the shipped basis set files are BSE downloads; Pritchard et al. 2019)",
+            "Pritchard, B. P.; Altarawy, D.; Didier, B.; Gibson, T. D.; Windus, T. L. J. Chem. Inf. Model. 2019, 59, 4814-4820 (DOI: 10.1021/acs.jcim.9b00725)",
+            "pritchard2019bse",
+            "@article{pritchard2019bse,\n"
+            "  author = {Pritchard, Benjamin P. and Altarawy, Doaa and Didier, Brett and Gibson, Tara D. and Windus, Theresa L.},\n"
+            "  title = {New {B}asis {S}et {E}xchange: An open, up-to-date resource for the molecular sciences community},\n"
+            "  journal = {J. Chem. Inf. Model.},\n"
+            "  year = {2019},\n"
+            "  volume = {59},\n"
+            "  pages = {4814--4820},\n"
+            "  doi = {10.1021/acs.jcim.9b00725}\n"
+            "}"
+        }},
+
+        { "bse_2007", {
+            "Basis Set Exchange (Schuchardt et al. 2007)",
+            "Schuchardt, K. L.; Didier, B. T.; Elsethagen, T.; Sun, L.; Gurumoorthi, V.; Chase, J.; Li, J.; Windus, T. L. J. Chem. Inf. Model. 2007, 47, 1045-1052 (DOI: 10.1021/ci600510j)",
+            "schuchardt2007bse",
+            "@article{schuchardt2007bse,\n"
+            "  author = {Schuchardt, Karen L. and Didier, Brett T. and Elsethagen, Todd and Sun, Lisong and Gurumoorthi, Vidhya and Chase, Jared and Li, Jun and Windus, Theresa L.},\n"
+            "  title = {Basis {S}et {E}xchange: A community database for computational sciences},\n"
+            "  journal = {J. Chem. Inf. Model.},\n"
+            "  year = {2007},\n"
+            "  volume = {47},\n"
+            "  pages = {1045--1052},\n"
+            "  doi = {10.1021/ci600510j}\n"
+            "}"
+        }},
+
+        { "bse_1996", {
+            "Basis Set Exchange / EMSL basis set library (Feller 1996)",
+            "Feller, D. J. Comput. Chem. 1996, 17, 1571-1586 (DOI: 10.1002/(SICI)1096-987X(199610)17:13<1571::AID-JCC9>3.0.CO;2-P)",
+            "feller1996basisdb",
+            "@article{feller1996basisdb,\n"
+            "  author = {Feller, David},\n"
+            "  title = {The role of databases in support of computational chemistry calculations},\n"
+            "  journal = {J. Comput. Chem.},\n"
+            "  year = {1996},\n"
+            "  volume = {17},\n"
+            "  pages = {1571--1586},\n"
+            "  doi = {10.1002/(SICI)1096-987X(199610)17:13<1571::AID-JCC9>3.0.CO;2-P}\n"
+            "}"
+        }},
     };
     return db;
 }

@@ -29,3 +29,16 @@ target_include_directories(test_qm_update_geometry PRIVATE ${CMAKE_SOURCE_DIR} $
 target_compile_features(test_qm_update_geometry PRIVATE cxx_std_17)
 add_test(NAME qm_update_geometry COMMAND test_qm_update_geometry)
 set_tests_properties(qm_update_geometry PROPERTIES TIMEOUT 120 LABELS "qm_hf3c")
+
+# Basis-set citations of the native QM (Oct 2026): the literature of the basis sets a run loads is registered with
+# CitationRegistry and printed at the end (qm_methods/qm_citations.h, entries in src/core/citation_database.cpp). H2O keeps it fast.
+set(_QM_CITE_XYZ ${CMAKE_CURRENT_SOURCE_DIR}/../qm_1e/H2O.xyz)
+add_test(NAME qm_cite_def2 COMMAND curcuma -sp ${_QM_CITE_XYZ} -method hf -verbosity 1)
+set_tests_properties(qm_cite_def2 PROPERTIES TIMEOUT 120 LABELS "qm_hf3c;qm_cite"
+    PASS_REGULAR_EXPRESSION "Weigend & Ahlrichs 2005.*Basis Set Exchange|Basis Set Exchange.*Weigend & Ahlrichs 2005")
+add_test(NAME qm_cite_jkfit COMMAND curcuma -sp ${_QM_CITE_XYZ} -method hf -qm.ri jk -verbosity 1)
+set_tests_properties(qm_cite_jkfit PROPERTIES TIMEOUT 120 LABELS "qm_hf3c;qm_cite"
+    PASS_REGULAR_EXPRESSION "def2-universal-JKFIT; Weigend 2008")
+add_test(NAME qm_cite_hf3c COMMAND curcuma -sp ${_QM_CITE_XYZ} -method hf-3c -verbosity 1)
+set_tests_properties(qm_cite_hf3c PROPERTIES TIMEOUT 120 LABELS "qm_hf3c;qm_cite"
+    PASS_REGULAR_EXPRESSION "Sure & Grimme 2013")

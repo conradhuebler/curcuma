@@ -10,6 +10,7 @@
  */
 
 #include "hf3c_method.h"
+#include "qm_citations.h"
 #include "qm_method.h"
 
 #include "src/core/curcuma_logger.h"
@@ -40,6 +41,7 @@ HF3CMethod::HF3CMethod(const json& config)
 
     m_engine = std::make_unique<QMEngine>(QMFunctional::HF, engine_config);
     m_d3 = std::make_unique<D3ParameterGenerator>(D3ParameterGenerator::createForHF3C());
+    qmcite::hf3c();   // HF-3c = HF/MINIX + D3(BJ) + gCP + SRB: all four references
 }
 
 bool HF3CMethod::setMolecule(const Mol& mol)

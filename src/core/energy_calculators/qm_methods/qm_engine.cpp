@@ -22,6 +22,7 @@
 #include "qm_engine.h"
 #include "src/core/blas_threads.h"
 #include "src/core/curcuma_logger.h"
+#include "qm_citations.h"
 #include "src/core/energy_calculators/gpu_plugin.h"
 #include "src/core/gpu_fallback.h"
 #include "src/core/units.h"
@@ -288,6 +289,7 @@ bool QMEngine::InitialiseMolecule()
     // Resolve + parse the basis file (cached).
     try {
         m_basis_file = resolveBasisFile(m_basis_name);
+        qmcite::orbitalBasis(m_basis_name);   // literature of the basis set actually loaded
         if (m_basis_map_cache.empty())
             m_basis_map_cache = BasisSetParser::parseBasisSetFile(m_basis_file);
     } catch (const std::exception& e) {
