@@ -25,7 +25,7 @@ wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_
 sudo dpkg -i cuda-keyring_1.1-1_all.deb
 sudo apt-get update
 sudo apt-get install -y --no-install-recommends cuda-nvcc-12-8 cuda-cudart-dev-12-8 \
-    libcublas-dev-12-8 libcusolver-dev-12-8 cuda-nvrtc-dev-12-8 libcusparse-dev-12-8
+    libcublas-dev-12-8 libcusolver-dev-12-8 cuda-nvrtc-dev-12-8 libcusparse-dev-12-8 libnvjitlink-dev-12-8
 report cuda
 
 # ROCm (hipcc, runtime, rocBLAS, rocSOLVER)
@@ -66,6 +66,9 @@ make)
         || { grep -n -B3 -A6 -m6 -E " error|Error [0-9]|undefined reference|cannot find|fatal" "make_${2:-all}.log" | cut -c1-300; exit 1; }
     tail -n 3 "make_${2:-all}.log";;
 package)
+    # ldd resolves the dependencies of the CUDA/ROCm libraries (e.g. libcusparse -> libnvJitLink)
+    # only through the library path.
+    export LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64:/opt/rocm/lib:${LD_LIBRARY_PATH:-}
 mkdir -p "$OUT"
 bash "$SRC/scripts/ci/package_linux.sh" "$BUILD" "$OUT/curcuma-gpu"
 tar -C "$OUT" -czf "$OUT/curcuma-linux-gpu.tar.gz" curcuma-gpu
