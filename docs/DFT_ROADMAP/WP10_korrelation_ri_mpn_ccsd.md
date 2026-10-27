@@ -10,7 +10,7 @@
 - **Abhaengigkeit:** WP3 (RHF, ERI-Engine, `QMEngine`), fuer die GPU-Teile die Stufen Q-G1/Q-G2 aus
   [../QM_GPU_ROADMAP.md](../QM_GPU_ROADMAP.md).
 - **Referenzen auf dieser Maschine:** PySCF (venv `~/.venvs/qmref`), ORCA 6.1 (`~/Downloads/orca_6_1_0_...`).
-  Jeder Test muss spaeter auf einer anderen Maschine noch einmal gegen ORCA laufen (Betreibervorgabe).
+  Fuer Energien und Gradienten kann eine unabhaengige zweite Pruefung gegen ORCA sinnvoll bleiben; fuer Zeitmessungen nicht (Betreibervorgabe 2026-10-26: andere CPU, nicht vergleichbar).
 - Reihenfolge und Abhaengigkeiten: WP11 (kanonisches MP2, O(N^5)) zuerst, dann WP10 (RI) und RI-MP2, danach
   WP13 (RCCSD); WP12 (MP3-MP5) ist **gestrichen** (Betreiber, Okt 2026: gemeint war MP2). WP14 ist die Auswertung
   der Schwarz-Frage.
@@ -754,7 +754,7 @@ conv_tol 1e-12; ORCA 6.1 `! RHF CCSD def2-SVP ExtremeSCF [No]FrozenCore`, `%mdci
   (2-3e-10 bei H2O/NH3) folgt aus `-qm.cc_threshold 1e-10` (Prototyp mit 1e-11: 8e-12); der Rest gegen ORCA folgt
   ORCAs RHF (E(HF) curcuma - ORCA bis 1.2e-9).
 - Weitere Tests: integral-direktes SCF (Tensor fuer CCSD neu aufgebaut), 1 Thread, die drei Fehlerpfade. ORCA lief nur
-  hier, nicht auf einer zweiten Maschine (Betreibervorgabe offen).
+  hier; eine zweite Maschine ist fuer Zeiten nicht noetig (Betreibervorgabe 2026-10-26).
 - **Zeiten** (CPU, `-qm.threads 16`, CCSD-Teil ohne SCF, Transformation / Iterationen; je ein Lauf, **unter Last**: ein
   paralleler Job belegte etwa 16 der 24 Kerne, die Zahlen sind daher obere Schranken und die Thread-Skalierung ist
   nicht aussagekraeftig):

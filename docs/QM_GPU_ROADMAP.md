@@ -2,8 +2,8 @@
 
 > Status: 🤖 AI-authored. Sections 1-2 are **implemented and machine-tested** (CPU only,
 > Sep 2026). Section 3 is a plan; stages Q-G1 to Q-G4, Q-G7 (2e gradient) and Q-G8 (1e gradient)
-> are implemented (Oct 2026, AI-generated, machine-tested on one RTX 5090 only), Q-G5 and Q-G6 are
-> proposals.
+> and Q-G5 (FP32 phase of the direct SCF and mixed-precision RI-JK) are implemented (Oct 2026, AI-generated,
+> machine-tested on one RTX 5090 only), Q-G6 (multi-GPU) is a proposal.
 
 The native xTB GPU work ([SQM_GPU.md](SQM_GPU.md), [SQM_GPU_ROADMAP.md](SQM_GPU_ROADMAP.md),
 [SQM_PERFORMANCE.md](SQM_PERFORMANCE.md), [MULTI_GPU.md](MULTI_GPU.md)) produced a set of
@@ -291,7 +291,7 @@ anything is enabled by default.
 | Q-G7 | **done Oct 2026** (see below): two-electron part of the analytic RHF gradient on the device, integral-direct | Stage 3 kernels reused for the gradient |
 | Q-G8 | **done Oct 2026** (see below): one-electron part of the analytic RHF gradient on the device, from the Q-G7 tables | Stage 3 kernels reused for the gradient |
 
-**Q-G1 (Oct 2026, 🤖 AI-generated, ⚙️ machine-tested; RTX 5090 only)**: `-gpu cuda|auto` uploads the stored
+**Q-G1 (Oct 2026, 🤖 AI-generated, ⚙️ machine-tested; RTX 5090 only)**: `-gpu cuda` uploads the stored
 ERI tensor once per geometry (`cuda/qm_gpu_jk.cu`, plugin entry `curcuma_cuda_create_qm_jk`, seam
 `qm_gpu_backend.h`, loader `gpu_plugin::createQmJK`); each Fock build moves only P in and J, K out.
 Upload failure / missing plugin falls back to the CPU and is counted (`reportGpuFallback("qm_jk")`).
@@ -305,7 +305,7 @@ in the Q-G2 session). The ERI build (617 ms) is the dominant cost, which is what
 ROCm/Vulkan (no QM entry point). The tensor must fit in device memory (n <= ~250 on a 32 GB card);
 beyond that Q-G3 takes over.
 
-**Q-G2 (Oct 2026, 🤖 AI-generated, ⚙️ machine-tested; RTX 5090 only)**: with `-gpu cuda|auto` the stored
+**Q-G2 (Oct 2026, 🤖 AI-generated, ⚙️ machine-tested; RTX 5090 only)**: with `-gpu cuda` the stored
 tensor is computed on the device (`cuda/qm_gpu_eri.cu`, entry `curcuma_cuda_create_qm_eri_jk`) and handed
 to the Q-G1 J/K builder without a host copy. The host flattens the same shell/primitive-pair tables,
 Hermite coefficients, Schwarz factors and Boys grid the CPU `buildERI` uses (`qmint::buildEriGpuTables`,
@@ -360,7 +360,7 @@ builds on dP and the full rebuild every 8 iterations are `runSCF()`'s, unchanged
 4 n^2 + nshell^2 doubles plus the pair tables (measured 6.3 MB for benzene, 12.6 MB for pyrene,
 `cudaMemGetInfo` difference, 2 MB granularity).
 
-Selection (`-gpu cuda|auto`): `-qm.gpu_direct auto` (default) runs every integral-direct SCF on the
+Selection (`-gpu cuda`): `-qm.gpu_direct auto` (default) runs every integral-direct SCF on the
 device, i.e. `scf_direct on`, or `scf_direct auto` when the stored tensor fits neither
 `-qm.eri_max_memory_mb` on the host nor the device; a stored tensor that fits the device is still
 preferred (faster, below). `on` forces the device-direct path for every `-gpu` run, `off` keeps
@@ -519,7 +519,7 @@ accumulation, FP64 atomics (last bits schedule-dependent). Screen: Q_AB Q_CD (Pm
 of 1e-14 benzene was off by 2.6e-10 vs 6.2e-12 Eh/Bohr, for 5 % fewer quartets); `-qm.eri_screening 0`
 evaluates every quartet like the CPU. The 1e part stayed on the CPU (on the device since Q-G8).
 
-Selection: `-qm.gpu_grad auto` (default) and `on` both use the device whenever `-gpu cuda|auto` is active
+Selection: `-qm.gpu_grad auto` (default) and `on` both use the device whenever `-gpu cuda` is active
 (the device was faster than 4 CPU threads at every measured size, H2O included); `off` keeps the CPU. Any
 failure falls back to the CPU, counted as `qm_grad`. Independent of the SCF path: checked after the stored
 device tensor (Q-G2, default), the uploaded CPU tensor (Q-G1, `-qm.gpu_eri false`), device-direct J/K
@@ -596,7 +596,7 @@ for S and T, each contracting with P and W at once; shared-memory accumulation, 
 schedule-dependent); no screening (the CPU has none). s, p, d shells on the device (the derivative orders reach
 f through the raised tables); L > 2 is refused by the table builder and the CPU runs (counted fallback).
 
-Selection: `-qm.gpu_grad1e auto` (default) and `on` use the device whenever `-gpu cuda|auto` is active (it
+Selection: `-qm.gpu_grad1e auto` (default) and `on` use the device whenever `-gpu cuda` is active (it
 was not slower than 4 or 24 CPU threads at any measured size, H2O included); `off` keeps the CPU. Independent of
 `-qm.gpu_grad` (with `gpu_grad off` the tables are built for the 1e part alone). Any failure falls back to the
 CPU, counted as `qm_grad1e` (checked: new binary with the Q-G7 plugin, which lacks the entry point, reports `1
