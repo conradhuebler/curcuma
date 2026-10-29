@@ -58,8 +58,13 @@ RMSD with atom reordering `-rmsd`, docking `-dock`, interaction energies `-inter
 
 ## Download and requirements
 
-Prebuilt binaries are on the [Releases page](https://github.com/conradhuebler/curcuma/releases): a Linux x86_64 AppImage
-(`curcuma-<version>-x86_64-Linux.AppImage`) and a Windows x86_64 archive (`curcuma-<version>-x86_64-Windows.zip`). Every release
+Prebuilt binaries are on the [Releases page](https://github.com/conradhuebler/curcuma/releases): Linux x86_64 AppImages
+for two CPU levels (`curcuma-<version>-avx2-x86_64.AppImage` for AVX2, `curcuma-<version>-avx512-x86_64.AppImage` for AVX512) and a
+Windows x86_64 archive (`curcuma-<version>-x86_64-Windows.zip`). The AppImages run on the CPU only. GPU support comes from
+plugin archives of the same CPU level (`curcuma-<version>-plugin-cuda-<level>.tar.gz`, `...-plugin-rocm-<level>.tar.gz`): unpack
+them next to the `.AppImage` file, or into the directory of the executable from `curcuma-<version>-linux-<level>.tar.gz`, or set
+`CURCUMA_PLUGIN_DIR`. A plugin of the other CPU level is refused and the run falls back to the CPU. CUDA needs the NVIDIA driver; the
+Linux builds need glibc 2.35 or newer. Every release
 is marked as a pre-release and is built by the CI from one commit; the releases named `Curcuma CI (feature/...)` are builds
 of development branches.
 

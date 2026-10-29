@@ -1,7 +1,7 @@
-# Release variants built for distribution: two Linux tarballs (built in AlmaLinux 8
+# Release variants built for distribution: Linux tarballs (built in AlmaLinux 8
 # containers), macOS (Apple Silicon) and Windows. Build and smoke test only, artifacts are
-# not published as a release. Start by hand (Actions > Run workflow) or by a push to
-# feature/ci-container-builds.
+# not published as a release. Start by hand (Actions > Run workflow). The Linux GPU variants are
+# built by linux-gpu.yml, which ccpp.yml also calls (and publishes).
 #   linux-gpu (avx512, avx2): one build each, packed as three archives: the executable
 #       (curcuma-linux-<isa>), the CUDA plugin and the ROCm plugin (curcuma-plugin-*-<isa>).
 #       Unpack the plugin archives into the same directory as the executable archive, or
@@ -14,8 +14,6 @@ name: CiVariants
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ "feature/ci-container-builds" ]
 
 permissions:
   contents: read
@@ -51,105 +49,8 @@ jobs:
           path: out/curcuma-linux-cpu.tar.gz
           if-no-files-found: error
 
-  # Built directly on the runner: two container builds with the ROCm image lost the runner
-  # (reason not visible in the log). Binaries need glibc 2.35 or newer.
   linux-gpu:
-    name: linux-gpu (${{ matrix.isa }})
-    runs-on: ubuntu-22.04
-    timeout-minutes: 240
-    strategy:
-      fail-fast: false
-      matrix:
-        isa: [avx512, avx2]
-    env:
-      ISA: ${{ matrix.isa }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/local/share/boost
-          sudo fallocate -l 8G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
-          df -h /; free -m
-
-      - name: Install toolchains and configure
-        run: bash scripts/ci/linux_host_gpu_build.sh configure
-
-      # curcuma depends on both plugins, so the plugins are built in separate steps first.
-      - name: Build core library
-        run: bash scripts/ci/linux_host_gpu_build.sh make curcuma_core
-
-      - name: Build CUDA plugin
-        run: bash scripts/ci/linux_host_gpu_build.sh make curcuma_cuda
-
-      - name: Build ROCm plugin
-        run: bash scripts/ci/linux_host_gpu_build.sh make curcuma_rocm
-
-      - name: Build everything else
-        run: bash scripts/ci/linux_host_gpu_build.sh make all
-
-      - name: Package
-        run: bash scripts/ci/linux_host_gpu_build.sh package
-
-      # Unpacked in a clean image without ROCm or CUDA. The GPU plugins find no device and
-      # fall back to the CPU. The AVX512 build is only run on a runner that has AVX512.
-      - name: Smoke test in a clean system
-        run: |
-          mkdir -p smoke && for a in out/*.tar.gz; do tar -C smoke -xzf "$a"; done
-          # Works without the CPU feature: only resolves the libraries, runs no curcuma code. The
-          # driver libraries (libcuda, libnvidia-*) come from the user's system.
-          docker run --rm -v "$PWD:/w" -e ISA ubuntu:22.04 bash -c '
-            cd /w/smoke/curcuma-$ISA; bad=0
-            for f in curcuma libcurcuma_*.so; do
-              miss=$(ldd "$f" | grep "not found" | grep -v "libcuda.so\|libnvidia" || true)
-              if [ -n "$miss" ]; then echo "MISSING for $f:"; echo "$miss"; bad=1; fi
-            done
-            exit $bad'
-          echo "ldd check passed"
-          flag=avx2; [ "$ISA" = avx512 ] && flag=avx512f
-          if ! grep -q "$flag" /proc/cpuinfo; then
-            echo "Runner has no $flag: the $ISA build is not run."; exit 0
-          fi
-          for g in "" "-gpu rocm" "-gpu cuda"; do
-            docker run --rm -v "$PWD:/w" ubuntu:22.04 /w/smoke/curcuma-$ISA/curcuma \
-              -sp /w/test_cases/structures/medium/butane.anti.xyz -method gfnff $g 2>&1 | tail -n 12
-          done
-
-      # AppImage of the executable archive only (the libraries are already bundled flat with
-      # RUNPATH $ORIGIN, so AppRun just starts the binary). The GPU plugins are not inside;
-      # the loader finds them next to the .AppImage file ($APPIMAGE). Test: the CUDA plugin
-      # archive is unpacked beside the AppImage and -gpu cuda is requested on a runner without
-      # a GPU; the plugin has to load (no "could not be loaded" warning) and then find no device.
-      - name: AppImage
-        run: |
-          D=out/stage/base/curcuma-$ISA
-          rm -rf AppDir && mkdir -p AppDir/usr/bin && cp -a "$D"/. AppDir/usr/bin/
-          printf '#!/bin/sh\nexec "$(dirname "$(readlink -f "$0")")/usr/bin/curcuma" "$@"\n' > AppDir/AppRun
-          chmod +x AppDir/AppRun
-          cp misc/curcuma.desktop AppDir/
-          convert misc/curcuma_I.png -resize 256x256 -background none -gravity center -extent 256x256 AppDir/curcuma.png \
-            || cp misc/curcuma_I.png AppDir/curcuma.png
-          wget -q -O appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
-          chmod +x appimagetool
-          ARCH=x86_64 ./appimagetool --appimage-extract-and-run AppDir "out/curcuma-$ISA-x86_64.AppImage"
-          ls -l out/*.AppImage
-          flag=avx2; [ "$ISA" = avx512 ] && flag=avx512f
-          if ! grep -q "$flag" /proc/cpuinfo; then echo "Runner has no $flag: AppImage not run."; exit 0; fi
-          mkdir -p appt && cp "out/curcuma-$ISA-x86_64.AppImage" appt/
-          tar -C appt -xzf "out/curcuma-plugin-cuda-$ISA.tar.gz" --strip-components=1
-          cd appt
-          APPIMAGE="$PWD/curcuma-$ISA-x86_64.AppImage" ./curcuma-$ISA-x86_64.AppImage --appimage-extract-and-run \
-            -sp ../test_cases/structures/medium/butane.anti.xyz -method gfn2 -gpu cuda > run.log 2>&1 || true
-          grep -E "GPU plugin|plugin|Eigen|fall" run.log | head -n 10 || true
-          grep -c "could not be loaded" run.log || true
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: linux-${{ matrix.isa }}
-          path: |
-            out/*.tar.gz
-            out/*.AppImage
-          if-no-files-found: error
+    uses: ./.github/workflows/linux-gpu.yml
 
   macos:
     runs-on: macos-14
