@@ -95,6 +95,7 @@ namespace {
     PARAM(lbfgs_line_search, Int, 3, "Line search type: 1=Armijo, 2=Wolfe, 3=StrongWolfe, 4=Backtracking", "LBFGS", { "lbfgs_lst" })
     PARAM(lbfgs_max_line_search, Int, 20, "Maximum line search iterations", "LBFGS", { "lbfgs_ls_iter" })
     PARAM(lbfgs_min_step, Double, 1e-4, "Minimum step size for line search", "LBFGS", {})
+    PARAM(lbfgs_max_atom_step, Double, 0.0, "L-BFGS (lbfgspp): largest displacement of any single atom in one step, Angstrom; 0 = no limit. Stops the first steps from overshooting stiff bonds in large solvated systems (C=O torn at 5747 atoms); 0.2 suggested there. docs/LBFGS_ATOM_STEP_CAP.md", "LBFGS", {})
     PARAM(lbfgs_ftol, Double, 1e-4, "Armijo condition parameter (sufficient decrease)", "LBFGS", {})
     PARAM(lbfgs_wolfe, Double, 0.9, "Wolfe condition parameter (curvature)", "LBFGS", {})
     PARAM(lbfgs_eps_abs, Double, 1e-5, "L-BFGS gradient convergence epsilon (absolute)", "LBFGS", {})

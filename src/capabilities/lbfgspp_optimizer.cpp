@@ -156,8 +156,8 @@ bool LBFGSppOptimizer::InitializeOptimizerInternal()
         m_param = std::make_unique<LBFGSParam<double>>();
         configureLBFGSParam();
 
-        // Create solver with LineSearchBacktracking (matching legacy CurcumaOpt)
-        m_solver = std::make_unique<LBFGSSolver<double, LineSearchBacktracking>>(*m_param);
+        // Create solver with LineSearchBacktracking (matching legacy CurcumaOpt); the copy honours lbfgs_max_atom_step
+        m_solver = std::make_unique<LBFGSSolver<double, LineSearchBacktrackingCapped>>(*m_param);
 
         // Create objective function
         // Claude Generated (Feb 21, 2026): Pass numerical gradient flags from context
@@ -216,6 +216,8 @@ Vector LBFGSppOptimizer::CalculateOptimizationStep(const Vector& current_coordin
     double energy = m_current_energy;
 
     try {
+        // Claude Generated (Oct 2026): cap on the displacement of any atom, read by the line search in this thread
+        LBFGSAtomStepCap::value() = m_lbfgs_max_atom_step;
         // Perform single LBFGS step — calls objective function internally (line search)
         m_solver->SingleStep(*m_objective, x, energy);
 
@@ -317,6 +319,7 @@ json LBFGSppOptimizer::GetDefaultConfiguration() const
     config["lbfgs_max_line_search"] = 2;  // Legacy: LBFGS_ls_iter = 2
     config["lbfgs_min_step"] = 1e-4;      // Legacy: LBFGS_min_step = 1e-4 (not 1e-20!)
     config["lbfgs_max_step"] = 1e20;
+    config["lbfgs_max_atom_step"] = 0.0;
     config["lbfgs_ftol"] = 1e-4;
     config["lbfgs_wolfe"] = 0.9;
 
@@ -352,6 +355,8 @@ void LBFGSppOptimizer::loadLBFGSParameters(const json& config)
         m_lbfgs_min_step = config["lbfgs_min_step"];
     if (config.contains("lbfgs_max_step"))
         m_lbfgs_max_step = config["lbfgs_max_step"];
+    if (config.contains("lbfgs_max_atom_step"))
+        m_lbfgs_max_atom_step = config["lbfgs_max_atom_step"];
     if (config.contains("lbfgs_ftol"))
         m_lbfgs_ftol = config["lbfgs_ftol"];
     if (config.contains("lbfgs_wolfe"))

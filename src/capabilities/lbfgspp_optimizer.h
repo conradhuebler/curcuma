@@ -20,6 +20,7 @@
 #pragma once
 
 #include "optimizer_driver.h"
+#include "lbfgspp_capped_linesearch.h"
 #include <LBFGS.h>
 #include <LBFGSB.h>
 
@@ -102,11 +103,12 @@ private:
     int m_lbfgs_max_line_search = 20; // Maximum line search trials
     double m_lbfgs_min_step = 1e-20; // Minimum step length
     double m_lbfgs_max_step = 1e20; // Maximum step length
+    double m_lbfgs_max_atom_step = 0.0; // Largest displacement of one atom per step in Angstrom, 0 = off
     double m_lbfgs_ftol = 1e-4; // Function tolerance for line search
     double m_lbfgs_wolfe = 0.9; // Wolfe condition parameter
 
-    // LBFGSpp objects - use LineSearchBacktracking like legacy CurcumaOpt
-    std::unique_ptr<LBFGSSolver<double, LineSearchBacktracking>> m_solver;
+    // LBFGSpp objects - LineSearchBacktracking like legacy CurcumaOpt, plus the optional per-atom step cap
+    std::unique_ptr<LBFGSSolver<double, LineSearchBacktrackingCapped>> m_solver;
     std::unique_ptr<LBFGSParam<double>> m_param;
     std::unique_ptr<LBFGSppObjectiveFunction> m_objective;
 

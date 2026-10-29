@@ -803,4 +803,12 @@ if(Python3_Interpreter_FOUND)
                      ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_cn_zero_guard.py
                      $<TARGET_FILE:curcuma> ${CMAKE_SOURCE_DIR})
     set_tests_properties(gfnff_cn_zero_guard PROPERTIES TIMEOUT 300 LABELS "gfnff")
+
+    # Claude Generated (Oct 2026): -lbfgs_max_atom_step (per-atom step cap of the lbfgspp optimiser);
+    # default off = bit-identical; docs/LBFGS_ATOM_STEP_CAP.md.
+    add_test(NAME opt_lbfgs_atom_step_cap
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_lbfgs_atom_step_cap.py
+                     $<TARGET_FILE:curcuma> ${CMAKE_SOURCE_DIR})
+    set_tests_properties(opt_lbfgs_atom_step_cap PROPERTIES TIMEOUT 300 LABELS "gfnff;curcumaopt")
 endif()

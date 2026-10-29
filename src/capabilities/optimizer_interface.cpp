@@ -55,6 +55,7 @@ const json OptimizerInterfaceJson{
     { "lbfgs_max_line_search", 20 },
     { "lbfgs_min_step", 1e-20 },
     { "lbfgs_max_step", 1e20 },
+    { "lbfgs_max_atom_step", 0.0 },
     { "lbfgs_ftol", 1e-4 },
     { "lbfgs_wolfe", 0.9 },
 
