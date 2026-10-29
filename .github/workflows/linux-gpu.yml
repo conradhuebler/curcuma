@@ -1,10 +1,16 @@
 # Linux GPU variants (AVX512 and AVX2): executable archive, CUDA and ROCm plugin archives and an
 # AppImage per variant. Called by ccpp.yml (published as prerelease) and ci-variants.yml.
+# Input gpu=false builds the CPU-only executable and AppImage (no CUDA/ROCm, much shorter).
 # Artifacts: linux-avx512 and linux-avx2.
 name: LinuxGpu
 
 on:
   workflow_call:
+    inputs:
+      gpu:
+        description: "Build and package the CUDA and ROCm plugins"
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -22,6 +28,7 @@ jobs:
         isa: [avx512, avx2]
     env:
       ISA: ${{ matrix.isa }}
+      GPU: ${{ inputs.gpu && '1' || '0' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -39,9 +46,11 @@ jobs:
         run: bash scripts/ci/linux_host_gpu_build.sh make curcuma_core
 
       - name: Build CUDA plugin
+        if: ${{ inputs.gpu }}
         run: bash scripts/ci/linux_host_gpu_build.sh make curcuma_cuda
 
       - name: Build ROCm plugin
+        if: ${{ inputs.gpu }}
         run: bash scripts/ci/linux_host_gpu_build.sh make curcuma_rocm
 
       - name: Build everything else
@@ -69,7 +78,8 @@ jobs:
           if ! grep -q "$flag" /proc/cpuinfo; then
             echo "Runner has no $flag: the $ISA build is not run."; exit 0
           fi
-          for g in "" "-gpu rocm" "-gpu cuda"; do
+          gpus=("" "-gpu rocm" "-gpu cuda"); [ "$GPU" = 1 ] || gpus=("")
+          for g in "${gpus[@]}"; do
             docker run --rm -v "$PWD:/w" ubuntu:22.04 /w/smoke/curcuma-$ISA/curcuma \
               -sp /w/test_cases/structures/medium/butane.anti.xyz -method gfnff $g 2>&1 | tail -n 12
           done
@@ -94,6 +104,7 @@ jobs:
           ls -l out/*.AppImage
           flag=avx2; [ "$ISA" = avx512 ] && flag=avx512f
           if ! grep -q "$flag" /proc/cpuinfo; then echo "Runner has no $flag: AppImage not run."; exit 0; fi
+          if [ "$GPU" != 1 ]; then echo "CPU-only build: plugin lookup not tested."; exit 0; fi
           mkdir -p appt && cp "out/curcuma-$ISA-x86_64.AppImage" appt/
           tar -C appt -xzf "out/curcuma-plugin-cuda-$ISA.tar.gz" --strip-components=1
           cd appt

@@ -26,10 +26,13 @@ concurrency:
 
 jobs:
 
-  # Per CPU variant (avx512, avx2): AppImage, executable archive, CUDA and ROCm plugin archives.
-  # Two full GPU builds, so a push takes about two hours. See linux-gpu.yml.
+  # Per CPU variant (avx512, avx2): AppImage and executable archive. The CUDA and ROCm plugin
+  # archives are built on master and on manual runs only (two full GPU builds, about two hours,
+  # about 4 GB of release assets); branch builds ship CPU-only AppImages. See linux-gpu.yml.
   linux:
     uses: ./.github/workflows/linux-gpu.yml
+    with:
+      gpu: ${{ github.ref == 'refs/heads/master' || github.event_name == 'workflow_dispatch' }}
 
   windows:
     runs-on: windows-latest

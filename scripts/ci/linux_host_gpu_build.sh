@@ -10,6 +10,8 @@ BUILD="$SRC/build_gpu"
 OUT="$SRC/out"
 ROCM_ARCHS="gfx1100;gfx1150;gfx1200"
 ISA="${ISA:-avx512}"
+# GPU=0: CPU-only build, no CUDA/ROCm toolchains installed, no plugins.
+GPU="${GPU:-1}"
 case "$ISA" in avx512) ISA_FLAG=-DUSE_AVX512=ON;; avx2) ISA_FLAG=-DUSE_AVX2=ON;; *) echo "ISA must be avx512 or avx2"; exit 1;; esac
 ROCM_REPO_VERSION="${ROCM_REPO_VERSION:-7.2.1}"
 
@@ -22,6 +24,7 @@ report start
 sudo apt-get update
 sudo apt-get install -y g++-12 gfortran-12 cmake patchelf wget gnupg ca-certificates
 
+if [ "$GPU" = 1 ]; then
 # CUDA toolkit (nvcc + cudart + cublas + cusolver)
 wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
 sudo dpkg -i cuda-keyring_1.1-1_all.deb
@@ -49,11 +52,16 @@ BC=$(find /opt/rocm* -name ockl.bc 2>/dev/null | head -n 3)
 echo "ROCm device library: ${BC:-NOT FOUND}"
 [ -n "$BC" ] || { ls /opt; ls /opt/rocm* | head -n 30; exit 1; }
 report rocm
+fi
 
 mkdir -p "$BUILD"; cd "$BUILD"
+if [ "$GPU" = 1 ]; then
+    GPU_FLAGS=(-DUSE_CUDA=ON -DUSE_ROCM=ON "-DROCM_GPU_ARCH=${ROCM_ARCHS}" -DCMAKE_PREFIX_PATH=/opt/rocm -DCUDAToolkit_ROOT=/usr/local/cuda-12.8)
+else
+    GPU_FLAGS=(-DUSE_CUDA=OFF -DUSE_ROCM=OFF)
+fi
 CXX=g++-12 CC=gcc-12 FC=gfortran-12 cmake "$SRC" -DCMAKE_BUILD_TYPE=Release \
-    $ISA_FLAG -DUSE_CUDA=ON -DUSE_ROCM=ON "-DROCM_GPU_ARCH=${ROCM_ARCHS}" \
-    -DCMAKE_PREFIX_PATH=/opt/rocm -DCUDAToolkit_ROOT=/usr/local/cuda-12.8 \
+    $ISA_FLAG "${GPU_FLAGS[@]}" \
     -DUSE_XTB=OFF -DUSE_TBLITE=OFF -DUSE_D3=OFF -DUSE_D4=OFF -DUSE_Plumed=OFF > cmake.log 2>&1 \
     || { tail -n 60 cmake.log; exit 1; }
 
