@@ -64,7 +64,8 @@ Windows x86_64 archive (`curcuma-<version>-x86_64-Windows.zip`). The AppImages r
 plugin archives of the same CPU level (`curcuma-<version>-plugin-cuda-<level>.tar.gz`, `...-plugin-rocm-<level>.tar.gz`): unpack
 them next to the `.AppImage` file, or into the directory of the executable from `curcuma-<version>-linux-<level>.tar.gz`, or set
 `CURCUMA_PLUGIN_DIR`. A plugin of the other CPU level is refused and the run falls back to the CPU. CUDA needs the NVIDIA driver; the
-Linux builds need glibc 2.35 or newer. Every release
+Linux builds need glibc 2.35 or newer. The plugin archives are part of releases built from `master` only; the `Curcuma CI (feature/...)`
+releases carry the CPU-only AppImages. Every release
 is marked as a pre-release and is built by the CI from one commit; the releases named `Curcuma CI (feature/...)` are builds
 of development branches.
 
