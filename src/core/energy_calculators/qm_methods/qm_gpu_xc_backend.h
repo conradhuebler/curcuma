@@ -70,6 +70,11 @@ struct QMGpuXCSetup {
     const int* screen_count = nullptr;
     const int* screen_shell_off = nullptr;
     const int* screen_shells = nullptr;
+    // Meta-GGA (Claude Generated, Oct 2026, WP11 stage 3; appended, entry renamed to _create_qm_xc_mgga): 1 when a
+    // term depends on tau (qmxc::XCFunctional::needsTau); then gga must be 1 as well. The device forms
+    // tau = 1/2 sum_k (d_k phi P d_k phi^T)_qq per point and adds the v_tau terms of qmxc::buildVxc /
+    // qmxc::buildXCGradient (meta-GGA branches buildVxcMeta / buildXCGradientMeta of qm_xc.cpp).
+    int mgga = 0;
 };
 
 /// E_xc parts of one V_xc build (sums over the grid, as qmxc::XCResult).
@@ -79,7 +84,8 @@ struct QMGpuXCScalars {
 };
 
 /// Closed-shell Kohn-Sham exchange-correlation on a device: AO values (deriv 0/1/2, spherical transform), density
-/// and density gradient, the functional, V_xc and E_xc, and the nuclear XC gradient incl. the grid response.
+/// and density gradient (meta-GGA: also tau), the functional, V_xc and E_xc, and the nuclear XC gradient incl. the
+/// grid response.
 /// Same quantities as qmxc::buildVxc / qmxc::buildXCGradient / qmgrid::gridWeightGradient. The grid stays resident;
 /// AO values exist only per block of points (streamed), so memory is O(npts + block * nbf + nbf^2).
 class QMGpuXC {

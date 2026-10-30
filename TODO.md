@@ -168,8 +168,8 @@ Stand.
 
 ## 5. Funktionen und Refactoring (niedrige Priorität)
 
-- **Meta-GGA Stufe 3: Device-Kern für `tpss`/`scan`** (2026-10-30): `cuda/qm_gpu_xc.cu` braucht τ, v_τ und `evaluatePointMGGA` (Kerne sind schon host/device);
-  bis dahin gezählter CPU-Fallback `qm_xc`. Offen auch: offene Schale, r2SCAN/TPSSh, SCAN-taugliche Gitter. [WP11](docs/DFT_ROADMAP/WP11_meta_gga.md)
+- **Meta-GGA, offen nach Stufe 3** (2026-10-30): offene Schale, r2SCAN/TPSSh, SCAN-taugliche Gitter; Device-XC nur 1,7-2x schneller als 8 CPU-Threads
+  (FP64-GEMMs): τ aus ∂φ C_occ statt ∂φ P (~5x weniger FLOPs im X-Schritt) prüfen. [WP11](docs/DFT_ROADMAP/WP11_meta_gga.md)
 - **CG Phase 6**: winkelabhängige Ellipsoid-Energie (`calculateEffectiveDistance`, `calculateCGPairEnergy`, Rotationszüge in Casino). Phase 1 bis 5 sind umgesetzt.
 - SimpleMD: Physik des Wandpotentials prüfen; RMSD-Strategy-Pattern Phase 3; erweiterte ConfSearch-Algorithmen; bessere Trajektorienanalyse;
   ConfSearch mit GPU und mehreren Threads (nur noch relevant, solange der GPU-Geräte-Pool inaktiv ist, Korrektur 2026-09-28).

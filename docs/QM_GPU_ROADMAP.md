@@ -834,7 +834,7 @@ re-measured with it: C40 485 ms / 730 ms, C80 1110 ms / 1671 ms (V_xc / XC gradi
 The Becke weight derivative (O(npts natoms^2), not screened) now dominates every XC gradient from ~60 atoms on.
 
 Weight derivative without atom limit (`weightGradKernel`, `QMGpuXC::weightGradient`, entry
-`curcuma_cuda_create_qm_xc_screen`): the old kernel held 8 natoms doubles in shared memory (48 KB, hence 700 atoms) and
+`curcuma_cuda_create_qm_xc_screen`, since WP11 stage 3 `_create_qm_xc_mgga`): the old kernel held 8 natoms doubles in shared memory (48 KB, hence 700 atoms) and
 4 natoms^2 in global scratch per block. Now everything per point is in global scratch, mu is recomputed (the same
 expression as the stored value), S and dS are one triangle of h and h' (2 natoms^2 + 8 natoms doubles per block), and a
 fixed number of 4 virtual blocks per SM is launched in waves that fit 50 % of the free memory, so the result does not
@@ -878,3 +878,24 @@ chains were timed), a transform that mixes shells (screening then switches itsel
 exercised), other GPUs than the RTX 5090, ROCm. Not implemented: screening of the Becke weight derivative (it is
 O(npts natoms^2) on CPU and GPU and dominates every XC gradient from ~60 atoms on), point screening by weight.
 
+
+### 4.2 Meta-GGA TPSS and SCAN on the device (Oct 30 2026, WP11 stage 3)
+
+> 🤖 AI-generated, ⚙️ machine-tested (RTX 5090 only). Human production testing pending.
+
+`-method tpss|scan -gpu cuda`: V_xc/E_xc, the device-resident KS SCF loop and the XC gradient (basis part with the
+tau term, point part, Becke weight derivative) run in `cuda/qm_gpu_xc.cu`; the former counted `qm_xc` fallback for
+meta-GGAs is gone, `-gpu_strict true` runs through. Setup flag `QMGpuXCSetup::mgga` (appended), plugin entry renamed to
+`curcuma_cuda_create_qm_xc_mgga`. The point functional is `evaluatePointMGGA` of `qm_xc_kernels.h` (dual numbers, the
+CPU source). Per block: one strided-batched DGEMM [phi, d_x phi, d_y phi, d_z phi] P, tau per point, four DGEMMs for
+W = phi^T Y + sum_k d_k phi^T diag(w v_tau / 4) d_k phi (V = W + W^T), gradient term (w v_tau / 2) sum_j d_k d_j phi o
+(d_j phi P); AO screening groups as for LDA/GGA, no FP atomics, nothing depends on the free memory.
+
+Same density vs the CPU (H2O, NH3, benzene, caffeine; sg1 and 150x974): max rel |dV| <= 1.7e-15, rel |dE_xc| <=
+7.4e-15, XC gradient parts <= 4.1e-13 Eh/Bohr; SCF energies equal at 10 decimals (caffeine TPSS 1e-10). Per V_xc build,
+CPU 8 threads / GPU: benzene sg1 67 / 34 ms, 150x974 896 / 468 ms, caffeine sg1 310 / 180 ms, 150x974 3982 / 2120 ms;
+the four times larger FP64 GEMM work dominates on this card (benzene 150x974: X 152, W 237 of 490 ms per build, PBE
+49 and 65 ms). Wall benzene tpss `-opt` CPU 35.1 s / GPU 5.8 s (same minimum). LDA/PBE/B3LYP: CPU dumps bitwise
+unchanged (51/51 against the 7842f654 binary), GPU 15/18 bitwise and the three RI-JK cases within the run-to-run noise
+of the reference. Tables, the rejected batched-W variant and what was not tested:
+[WP11, "Stufe 3"](DFT_ROADMAP/WP11_meta_gga.md#stufe-3-meta-gga-auf-cuda-30-okt-2026).

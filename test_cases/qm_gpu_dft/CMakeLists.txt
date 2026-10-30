@@ -10,6 +10,7 @@
 #                         -gpu_strict true -> exit code 3
 #   qm_gpu_dft_*screen*   AO screening (-qm.xc_ao_threshold, default on): unscreened device path and small groups
 #   qm_gpu_dft_wgrad_*    Becke weight derivative device vs CPU, incl. 1410 atoms (test_qm_gpu_wgrad.cpp)
+#   *_tpss*, *_scan*      meta-GGA on the device (WP11 stage 3), only registered with USE_CUDA
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
     set(_QD ${CMAKE_CURRENT_SOURCE_DIR}/check_qm_gpu_dft.py)
@@ -96,6 +97,68 @@ if(Python3_Interpreter_FOUND)
         --xyz ${_QD_BENZ} --mode grad --method b3lyp "--extra=-qm.xc_ao_threshold 0")
     list(APPEND _qd_tests qm_gpu_dft_xc_benzene_pbe_noscreen qm_gpu_dft_grad_benzene_pbe_screen_groups
         qm_gpu_dft_grad_benzene_b3lyp_noscreen)
+    # Meta-GGA TPSS/SCAN on the device (WP11 stage 3, Claude Generated, Oct 2026); registered only with a CUDA build.
+    # Same gates as LDA/GGA/B3LYP; SCAN is grid-sensitive, so every comparison is CPU vs GPU on the SAME grid.
+    if(USE_CUDA)
+        set(_qm_tests "")
+        foreach(_mol H2O NH3 BENZ)
+            foreach(_m tpss scan)
+                string(TOLOWER ${_mol} _ml)
+                add_test(NAME qm_gpu_dft_xc_${_ml}_${_m} COMMAND ${Python3_EXECUTABLE} ${_QD} --curcuma $<TARGET_FILE:curcuma>
+                    --xyz ${_QD_${_mol}} --mode xc --method ${_m})
+                list(APPEND _qm_tests qm_gpu_dft_xc_${_ml}_${_m})
+            endforeach()
+        endforeach()
+        add_test(NAME qm_gpu_dft_xc_h2o_scan_fine COMMAND ${Python3_EXECUTABLE} ${_QD} --curcuma $<TARGET_FILE:curcuma>
+            --xyz ${_QD_H2O} --mode xc --method scan "--extra=-qm.grid 150x974")
+        add_test(NAME qm_gpu_dft_xc_benzene_tpss_noscreen COMMAND ${Python3_EXECUTABLE} ${_QD} --curcuma $<TARGET_FILE:curcuma>
+            --xyz ${_QD_BENZ} --mode xc --method tpss "--extra=-qm.xc_ao_threshold 0")
+        list(APPEND _qm_tests qm_gpu_dft_xc_h2o_scan_fine qm_gpu_dft_xc_benzene_tpss_noscreen)
+        # SCF energies, device-resident loop; -gpu_strict true must pass (no counted fallback left for tpss/scan)
+        foreach(_case benzene_tpss:BENZ:tpss benzene_scan:BENZ:scan nh3_scan_fine:NH3:scan)
+            string(REPLACE ":" ";" _p ${_case})
+            list(GET _p 0 _n)
+            list(GET _p 1 _mol)
+            list(GET _p 2 _m)
+            set(_grid "")
+            if(_n MATCHES "_fine")
+                set(_grid "-qm.grid 150x974")
+            endif()
+            add_test(NAME qm_gpu_dft_scf_${_n}_devloop COMMAND ${Python3_EXECUTABLE} ${_QD} --curcuma $<TARGET_FILE:curcuma>
+                --xyz ${_QD_${_mol}} --mode scf --method ${_m} --loop device "--extra=${_grid}"
+                "--dev-extra=-qm.gpu_scf on -gpu_strict true")
+            list(APPEND _qm_tests qm_gpu_dft_scf_${_n}_devloop)
+        endforeach()
+        add_test(NAME qm_gpu_dft_scf_benzene_tpss_rijk COMMAND ${Python3_EXECUTABLE} ${_QD} --curcuma $<TARGET_FILE:curcuma>
+            --xyz ${_QD_BENZ} --mode scf --method tpss --loop host "--extra=-qm.ri jk" "--dev-extra=-gpu_strict true")
+        list(APPEND _qm_tests qm_gpu_dft_scf_benzene_tpss_rijk)
+        # Gradients (tau term, grid response, small blocks, screened groups, unscreened path)
+        foreach(_case h2o_tpss:H2O:tpss h2o_scan:H2O:scan formaldehyde_tpss:FORM:tpss benzene_scan:BENZ:scan)
+            string(REPLACE ":" ";" _p ${_case})
+            list(GET _p 0 _n)
+            list(GET _p 1 _mol)
+            list(GET _p 2 _m)
+            add_test(NAME qm_gpu_dft_grad_${_n} COMMAND ${Python3_EXECUTABLE} ${_QD} --curcuma $<TARGET_FILE:curcuma>
+                --xyz ${_QD_${_mol}} --mode grad --method ${_m})
+            list(APPEND _qm_tests qm_gpu_dft_grad_${_n})
+        endforeach()
+        add_test(NAME qm_gpu_dft_grad_h2o_scan_noresponse COMMAND ${Python3_EXECUTABLE} ${_QD} --curcuma $<TARGET_FILE:curcuma>
+            --xyz ${_QD_H2O} --mode grad --method scan "--extra=-qm.grid_response false")
+        add_test(NAME qm_gpu_dft_grad_h2o_tpss_blocks COMMAND ${Python3_EXECUTABLE} ${_QD} --curcuma $<TARGET_FILE:curcuma>
+            --xyz ${_QD_H2O} --mode grad --method tpss "--dev-extra=-qm.gpu_xc_block_points 64")
+        add_test(NAME qm_gpu_dft_grad_benzene_tpss_screen_groups COMMAND ${Python3_EXECUTABLE} ${_QD}
+            --curcuma $<TARGET_FILE:curcuma> --xyz ${_QD_BENZ} --mode grad --method tpss "--dev-extra=-qm.gpu_xc_block_points 1024")
+        add_test(NAME qm_gpu_dft_grad_benzene_tpss_noscreen COMMAND ${Python3_EXECUTABLE} ${_QD} --curcuma $<TARGET_FILE:curcuma>
+            --xyz ${_QD_BENZ} --mode grad --method tpss "--extra=-qm.xc_ao_threshold 0")
+        add_test(NAME qm_gpu_dft_opt_h2o_tpss COMMAND ${Python3_EXECUTABLE} ${_QD} --curcuma $<TARGET_FILE:curcuma>
+            --xyz ${_QD_H2O} --mode opt --method tpss)
+        add_test(NAME qm_gpu_dft_fallback_h2o_scan_memory COMMAND ${Python3_EXECUTABLE} ${_QD} --curcuma $<TARGET_FILE:curcuma>
+            --xyz ${_QD_H2O} --mode fallback --method scan "--dev-extra=-qm.gpu_xc_max_memory_mb 0.01")
+        list(APPEND _qm_tests qm_gpu_dft_grad_h2o_scan_noresponse qm_gpu_dft_grad_h2o_tpss_blocks
+            qm_gpu_dft_grad_benzene_tpss_screen_groups qm_gpu_dft_grad_benzene_tpss_noscreen qm_gpu_dft_opt_h2o_tpss
+            qm_gpu_dft_fallback_h2o_scan_memory)
+        list(APPEND _qd_tests ${_qm_tests})
+    endif()
     set_tests_properties(${_qd_tests} PROPERTIES TIMEOUT 1500 LABELS "qm_gpu_dft;gpu" SKIP_RETURN_CODE 77)
 endif()
 

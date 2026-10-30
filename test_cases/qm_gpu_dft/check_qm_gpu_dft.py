@@ -11,7 +11,7 @@ Claude Generated (Oct 2026, GPU KS-DFT G1-G4). Modes:
   grad  : -dump_gradient of a device run (CURCUMA_QM_GPU_XC_CHECK=1, CURCUMA_QM_GPU_GRAD_CHECK=1) vs a CPU run:
           XC gradient parts vs the CPU from the same density (<= --tol-xcg Eh/Bohr), device 2e part vs the CPU 2e part
           (<= --tol-2e), total gradient of the two runs (<= --tol-total Eh/Bohr).
-  opt   : -opt (tight) with -gpu cuda and with -gpu none from the same start; the two minima must agree in energy
+  opt   : -opt (tight) with -gpu cuda and with -gpu none from the same start; the two minima must agree in total energy
           (<= --tol-opt-e Eh, read from the -sp of each optimised structure on the CPU) and geometry (largest change
           of an interatomic distance <= --tol-rmsd Angstrom); the device run must have used the device XC gradient (no fallback).
   fallback : the device run must report a counted GPU fallback "qm_xc" and still give the CPU energy (--tol-e);
@@ -190,7 +190,10 @@ elif a.mode == "opt":
                              "-no_bmt", "-verbosity", "2", "-qm.scf_threshold", "1e-10"] + a.extra.split(),
                             cwd=d, capture_output=True, text=True, timeout=3000)
         st = re.sub(r"\x1b\[[0-9;]*m", "", sp.stdout + sp.stderr)
-        e = float(list(re.finditer(r"E_elec:\s*(-?\d+\.\d+) Eh", st))[-1].group(1))
+        # total energy E_elec + E_nn: E_elec alone moves with E_nn when two minima differ by ~1e-6 A (WP11 stage 3:
+        # tpss GPU/CPU -opt ended 8e-7 A apart, E_elec 1.2e-6 Eh apart)
+        e = float(list(re.finditer(r"E_elec:\s*(-?\d+\.\d+) Eh", st))[-1].group(1)) \
+            + float(list(re.finditer(r"E_nn\s*:\s*(-?\d+\.\d+) Eh", st))[-1].group(1))
         res[gpu] = (e, read_xyz(opt), wall)
     de = abs(res["cuda"][0] - res["none"][0])
     rmsd = dist_dev(res["cuda"][1], res["none"][1])

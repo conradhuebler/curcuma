@@ -2,7 +2,8 @@
 
 - **Status Stufe 1 (Energien, CPU):** 🤖 AI-generated, ⚙️ machine-tested (`ctest -L qm_mgga` 50/50, 30. Okt 2026);
   **Stufe 2 (analytischer Gradient, CPU):** 🤖 AI-generated, ⚙️ machine-tested (`ctest -L qm_mgga_grad`, 30. Okt 2026,
-  Abschnitt „Stufe 2“); menschlicher Produktionstest ausstehend. **Stufe 3 (GPU) offen** (TODO.md).
+  Abschnitt „Stufe 2“); **Stufe 3 (CUDA: V_xc, KS-SCF-Loop, XC-Gradient):** 🤖 AI-generated, ⚙️ machine-tested
+  (`ctest -L qm_gpu_dft`, 30. Okt 2026, nur RTX 5090, Abschnitt „Stufe 3“); menschlicher Produktionstest ausstehend.
 - Name: "WP11" steht in der README-Tabelle auch für das kanonische RMP2 (historisch); diese Datei ist der Meta-GGA-Teil.
 - **Code:** Kerne `qm_xc_kernels.h` (Meta-GGA-Block: `evaluateKernelMGGA`, `evaluatePointMGGA`, Dual-Zahlen `Dual3`),
   Tabelle `kMetaGGATable` und `buildVxcMeta` in `qm_xc.cpp`, `QMFunctional::TPSS/SCAN` in `qm_engine.*`, Methodennamen in
@@ -128,8 +129,8 @@ Ausgangslage und 5 zufällige Drehungen; das Lebedev-Gitter dreht nicht mit):
 | SCAN H2O / NH3 / Benzol | 2.9e-5 / 3.5e-5 / 2.5e-4 | 1.7e-6 / 2.4e-6 / 1.0e-5 | 5.3e-7 / 4.8e-7 / 1.4e-6 | 4.8e-7 / 2.6e-7 / 6.9e-7 |
 
 Weitere Checks (ctest): UpdateMolecule A → B = frisches B (≤ 2.8e-14 Eh); 1 vs 4 Threads Energie bitgleich;
-AO-Screening 1e-12 vs 0: ≤ 4.3e-14 Eh (H2O); `-gpu cuda`: XC-Teil als gezählter CPU-Fallback `qm_xc` („meta-GGA ... has no
-device XC kernel yet"), Energie = CPU (Δ 0 auf 8 Stellen), `-gpu_strict true` endet mit Exit 3; Gradientanfrage und `-opt`
+AO-Screening 1e-12 vs 0: ≤ 4.3e-14 Eh (H2O); `-gpu cuda` (Stand Stufe 1, seit Stufe 3 nicht mehr): XC-Teil als gezählter
+CPU-Fallback `qm_xc`, Energie = CPU (Δ 0 auf 8 Stellen), `-gpu_strict true` endet mit Exit 3; Gradientanfrage und `-opt`
 enden mit Fehler (`hasGradient()` false). LDA/PBE/B3LYP/HF: `-dump_gradient` gegen das Binary vor der Änderung (16b2b122)
 60/60 CPU-Läufe bitgleich (H2O, NH3, Benzol; 1/4 Threads; Screening an/aus; RI-JK); GPU-Läufe innerhalb des
 Lauf-zu-Lauf-Rauschens der Referenz (Energie bitgleich, Gradient ≤ 1e-13 wie Referenz gegen Referenz).
@@ -147,8 +148,8 @@ Lauf-zu-Lauf-Rauschens der Referenz (Energie bitgleich, Gradient ≤ 1e-13 wie R
   Geprüft durch FD mit mitwanderndem Gitter und PySCF `grid_response=True` (Tabellen unten).
 - Ableitungen am geklemmten Punkt (τ-Boden, σ ≤ 8ρτ) wie V_xc: wo eine Klemme greift, ist der Gradient nicht die
   Ableitung der geklemmten Energie (für P positiv semidefinit nur auf Rundungsniveau).
-- `-gpu cuda`: XC-Gradient als gezählter CPU-Fallback `qm_xc` (1 Eintrag pro Lauf), 2e-Teil auf dem Device; H2O
-  TPSS/SCAN Gradient gegen `-gpu none` ≤ 3.6e-14 Eh/Å, `-gpu_strict true` endet mit Exit 3.
+- `-gpu cuda` (Stand Stufe 2, seit Stufe 3 auf dem Device): XC-Gradient als gezählter CPU-Fallback `qm_xc`, 2e-Teil auf
+  dem Device; H2O TPSS/SCAN Gradient gegen `-gpu none` ≤ 3.6e-14 Eh/Å, `-gpu_strict true` endete mit Exit 3.
 
 **(1) gegen PySCF 2.14** (`nuc_grad_method()`, identisches Gitter, def2-SVP, max |g − g_PySCF| Eh/Bohr, ohne / mit
 Gitterantwort; ctest `qm_mgga_grad_pyscf_*`, 17 Fälle, Gate 1e-9):
@@ -229,10 +230,92 @@ ORCA IntAcc 10 statt 8 ändert ORCAs H2O-Gradient um 1.7e-7; curcuma 250x770 geg
 nicht bestimmt (ORCAs Gitter, Partition und Gewichtsableitung nicht nachgebaut); SCAN nicht gegen ORCA verglichen
 (ORCAs SCAN-Energie selbst schon gitterunkonvergiert, Stufe 1).
 
+## Stufe 3: Meta-GGA auf CUDA (30. Okt 2026)
+
+- **Code:** `cuda/qm_gpu_xc.cu` (`densityXCMetaKernel`, `metaDensity`, `metaVxcProduct`, `combineTauKernel`,
+  `gradTerms<true>`), Flag `QMGpuXCSetup::mgga` (`qm_gpu_xc_backend.h`, angehängt; Plugin-Eintrag umbenannt zu
+  `curcuma_cuda_create_qm_xc_mgga`), `QMEngine::ensureGpuXC` (`qm_scf.cpp`: der Meta-GGA-Fallback ist entfernt).
+  Punktfunktional = `qmxc::kern::evaluatePointMGGA` aus `qm_xc_kernels.h` (dieselbe Quelle wie die CPU, keine Kopie).
+- **Ablauf pro Block** (AO-Screening-Gruppen wie LDA/GGA): ein strided-batched DGEMM bildet [φP, ∂_xφP, ∂_yφP, ∂_zφP],
+  τ_q = ½ Σ_k Σ_m ∂_kφ_qm (∂_kφP)_qm; V_xc: W += φᵀY + Σ_k (∂_kφ)ᵀ diag(w v_τ/4) ∂_kφ (vier DGEMMs in fester Folge),
+  V = W + Wᵀ (= Term von `buildVxcMeta`); Gradient: T_k += (w v_τ/2) Σ_j ∂_k∂_jφ ∘ (∂_jφP) (AO-Ableitung 2), Punktteil
+  und Becke-Gewichtsableitung (e_p = ρ ε_xc) unverändert. Keine FP-Atomics im XC-Teil, Blockgröße und Wellen nicht
+  vom freien Speicher abhängig (wie LDA/GGA). Der resident KS-SCF-Loop nimmt V_xc über `vxcDevice` unverändert.
+- Verworfen: die vier W-Produkte als ein strided-batched DGEMM plus Summe war auf der RTX 5090 3x langsamer
+  (Benzol 150x974: 9.2 s statt 3.1 s für 13 Aufbauten). Ein Laufzeit-`if` im Gradientenkern änderte die LDA/GGA-Bits
+  (1.7e-15 Eh/Å, andere FMA-Kontraktion); daher Template-Parameter, `<false>` ist der alte Code.
+- Fallback-Zähler: tpss/scan erzeugen keinen `qm_xc`-Eintrag mehr; `-gpu_strict true` läuft durch (ctest
+  `qm_gpu_dft_scf_*_tpss*`/`*_scan*` mit `-gpu_strict true`). Gezählter Fallback bleiben die LDA/GGA-Gründe (kein
+  Plugin, Schalen über f, > 32 Primitive, zu wenig Speicher: ctest `qm_gpu_dft_fallback_h2o_scan_memory`, Gerätefehler).
+
+GPU gegen CPU (RTX 5090, def2-SVP; „gleiche Dichte" = `CURCUMA_QM_GPU_XC_CHECK=1`, jeder Aufbau auch auf der CPU;
+SCF/Gradient = zwei Läufe, `-qm.scf_threshold 1e-10`, 4 CPU-Threads, `check_qm_gpu_dft.py`):
+
+| Molekül (n, Punkte sg1) | Funktional | Gitter | max rel\|dV\| | rel\|dE_xc\| | \|dE\| SCF | Iter. CPU/GPU | XC-Gradient gleiche Dichte (Basis/Punkte/Gewichte) | \|dg\| Lauf |
+|---|---|---|---:|---:|---:|---:|---:|---:|
+| H2O (24, 29100) | tpss / scan | sg1 | 5.5e-16 / 4.0e-16 | 7.9e-16 / 9.5e-16 | 0 / 0 | 13/13, 13/13 | ≤ 1.5e-14 / ≤ 7.7e-14 | 7.0e-14 / 6.5e-14 |
+| H2O | tpss / scan | 150x974 | 5.5e-16 / 9.4e-16 | 2.3e-15 / 4.0e-15 | 0 / 0 | 13/13, 13/13 | ≤ 3.8e-13 / ≤ 4.1e-13 | 3.8e-13 / 3.9e-13 |
+| NH3 (29, 38800) | tpss / scan | sg1 | 7.9e-16 / 9.4e-16 | 6.6e-16 / 8.9e-16 | 0 / 0 | 13/13, 13/13 | ≤ 9.8e-15 / ≤ 6.2e-14 | 1.2e-14 / 4.7e-14 |
+| NH3 | tpss / scan | 150x974 | 1.4e-15 / 9.3e-16 | 2.4e-15 / 2.2e-15 | 0 / 0 | 13/13, 13/13 | ≤ 2.1e-13 / ≤ 3.1e-13 | 2.4e-13 / 3.0e-13 |
+| Benzol (114, 116400) | tpss / scan | sg1 | 1.1e-15 / 9.1e-16 | 8.0e-16 / 8.4e-16 | 0 / 0 | 14/14, 15/15 | ≤ 9.0e-14 / ≤ 8.4e-14 | 1.5e-11 / 1.0e-11 |
+| Benzol | tpss / scan | 150x974 | 1.5e-15 / 1.7e-15 | 6.7e-15 / 7.4e-15 | 0 / 0 | 14/13, 14/14 | ≤ 3.0e-13 / ≤ 1.4e-13 | 1.3e-11 / 9.3e-12 |
+| Koffein (246, 232800) | tpss | sg1 | 6.9e-16 | 9.3e-16 | 1e-10 | 30/32 | ≤ 1.8e-13 | 5.2e-11 |
+
+\|dE\| auf den 10 gedruckten Stellen, \|dg\| in Eh/Bohr; der 2e-Teil (Q-G7, Atomics) trägt die 1e-11 der Läufe
+(gleiche Dichte ≤ 1.3e-11 Benzol, 5.3e-11 Koffein). Koffein TPSS 1e-10: 32 statt 30 Iterationen bei gleicher Energie
+(langsam konvergierende SCF, Rundung verschiebt das Ende); bei 1e-8 (Zeittabelle) 26/26. Koffein auf 150x974 nur
+in der Zeittabelle (Energie gleich), nicht gegen gleiche Dichte geprüft (CPU-Referenz ~4 s pro Aufbau x 30).
+
+Zeiten (CPU 8 Threads `-gpu none`, GPU `-gpu cuda -qm.gpu_scf on -gpu_strict true`, `-qm.scf_threshold 1e-8`, Wand in
+s; V_xc pro Aufbau = letzter Aufbau, verbosity 3; Gradient = XC-Basis- und Punktteil, CPU plus Gewichtsableitung):
+
+| System | Funktional | Gitter | \|dE\| | Iter. CPU/GPU | SCF-Loop CPU / GPU | V_xc pro Aufbau CPU / GPU | Wand CPU / GPU |
+|---|---|---|---:|---:|---:|---:|---:|
+| Benzol | tpss | sg1 | 0 | 12/12 | 1207 / 464 ms | 66.7 / 33.6 ms | 1.59 / 1.07 |
+| Benzol | scan | sg1 | 0 | 13/13 | 1292 / 506 ms | 65.9 / 33.9 ms | 1.68 / 1.01 |
+| Benzol | tpss | 150x974 | 0 | 12/12 | 11.2 / 5.7 s | 896 / 468 ms | 12.6 / 6.9 |
+| Benzol | scan | 150x974 | 0 | 12/12 | 11.2 / 5.7 s | 897 / 472 ms | 12.6 / 7.0 |
+| Koffein | tpss | sg1 | 1e-10 | 26/26 | 17.3 / 5.6 s | 310 / 180 ms | 18.3 / 7.1 |
+| Koffein | scan | sg1 | 0 | 24/24 | 16.9 / 5.1 s | 308 / 181 ms | 17.8 / 6.7 |
+| Koffein | tpss | 150x974 | 0 | 26/26 | 111.8 / 56.0 s | 3982 / 2120 ms | 117.0 / 60.1 |
+
+| Gradient (sg1) | XC-Gradient CPU (+ Gewichtsabl.) / GPU | Wand CPU / GPU | max\|g(GPU) − g(CPU)\| Eh/Bohr |
+|---|---:|---:|---:|
+| Benzol tpss / scan | 75.1 (+11.3) / 33.0 ms, 74.9 (+10.7) / 33.3 ms | 4.7 / 1.2 s, 4.9 / 1.3 s | 1.3e-11 / 1.0e-11 |
+| Koffein tpss / scan | 343 (+83) / 154 ms, 342 (+85) / 154 ms | 87.7 / 9.2 s, 87.1 / 8.8 s | 3.5e-10 / 2.8e-10 |
+
+- Der XC-Teil ist auf dieser Karte (FP64 schwach) nur 1.7-2x schneller als 8 CPU-Threads; Stufen pro Aufbau Benzol
+  150x974 (`CURCUMA_QM_GPU_XC_PROFILE=1`): AO 37, X = [φ, ∂φ]P 152, Dichte+Funktional 64, W 237 ms (PBE gleiches Gitter
+  37 / 49 / 26 / 65 ms): die viermal so vielen FP64-GEMMs dominieren. Der Gewinn der Läufe kommt vom 2e-Teil (J/K,
+  2e-Gradient) auf dem Device. Koffein-Gradient 1e-8: Differenz der Läufe aus der SCF-Konvergenz.
+- `-opt` Benzol tpss (sg1, Default-Kriterien, 8 Threads): CPU 35.1 s, GPU 5.8 s; gleiche Endenergie (E_elec
+  -434.2210594551, E_nn 202.0898086630 Eh auf 10 Stellen), Koordinaten auf den 6 geschriebenen Stellen gleich (nur das
+  Vorzeichen von Nullen verschieden). ctest `qm_gpu_dft_opt_h2o_tpss` (tight): ΔE_total 1.0e-10 Eh, max\|Δr_ij\| 6.7e-7 Å.
+- Regression: CPU `-dump_gradient` gegen das Binary von 7842f654 (git worktree, gleiche CMake-Optionen inkl. MKL) 51/51
+  bitgleich (H2O_distorted, NH3, Benzol x hf, lda beide VWN, pbe, pbe ohne Antwort, pbe ohne Screening, b3lyp beide VWN,
+  b3lyp RI-JK, tpss, scan, tpss ohne Screening, scan 150x974; 1/4 Threads). GPU (`-qm.gpu_grad off -qm.gpu_grad1e off`)
+  lda/pbe/b3lyp 15/18 bitgleich, die 3 RI-JK-Fälle Energie gleich, \|dg\| ≤ 4.0e-14 Eh/Å; das Referenz-Binary selbst gibt
+  bei RI-JK in 3 Läufen 3 verschiedene md5 (Lauf-zu-Lauf-Rauschen des RI-Pfads).
+- ctest `-L qm_gpu_dft` um 22 Fälle (`*_tpss*`, `*_scan*`, nur mit `USE_CUDA` registriert): V_xc gleiche Dichte (H2O,
+  NH3, Benzol, H2O SCAN 150x974, Benzol ohne Screening), SCF im Device-Loop (Benzol tpss/scan, NH3 SCAN 150x974; RI-JK
+  Host-Loop), Gradienten (H2O, Formaldehyd, Benzol, ohne Antwort, 64er-Blöcke, 1024er-Gruppen, ohne Screening), `-opt`
+  H2O, Speicher-Fallback. Iterationstoleranz die bestehende (±1): auf H2O/NH3/Benzol sind die Zahlen gleich bis auf
+  Benzol TPSS 150x974 (CPU 14, GPU 13). Der opt-Modus von `check_qm_gpu_dft.py` vergleicht seitdem E_elec + E_nn statt E_elec
+  (TPSS-Minima 8e-7 Å auseinander gaben 1.2e-6 Eh in E_elec, 1e-10 Eh in der Gesamtenergie). `qm_mgga_gpu_H2O_*`
+  erwarten jetzt den Device-Pfad (kein `qm_xc`-Fallback, `-gpu_strict true` Exit 0, Energie = CPU ≤ 1e-8 Eh) und
+  melden ohne CUDA-Plugin Exit 77 (skip; geprüft mit einer Binary-Kopie ohne Plugin).
+- `ctest -L "qm_mgga|qm_mgga_grad|qm_lda|qm_pbe|qm_b3lyp|qm_dft_grad|qm_gpu_dft|qm_grid|qm_hf3c"` (-j4): 320/322 im
+  ersten Lauf, die zwei Fehlschläge waren `qm_mgga_gpu_H2O_tpss/scan` mit der alten Fallback-Erwartung; nach deren
+  Anpassung 2/2 und der volle Satz erneut 322/322 (275 s).
+
 ## Nicht getestet / nicht implementiert
 
-- Nicht implementiert: GPU-Kern (Stufe 3; Energie und Gradient laufen als gezählter CPU-Fallback), offene Schale,
-  Z > 10, r2SCAN/revTPSS/TPSSh/Hybride, DFT-D, Hessian.
+- Nicht implementiert: offene Schale, Z > 10, r2SCAN/revTPSS/TPSSh/Hybride, DFT-D, Hessian; auf dem Device: τ aus den
+  besetzten Orbitalen (∂_kφ C_occ statt ∂_kφ P, für Koffein ~5x weniger FLOPs im X-Schritt; das Device-Objekt bekommt
+  nur P), FP32-Phasen, ROCm/Vulkan.
+- Stufe 3 nicht getestet: andere GPUs als die RTX 5090, Moleküle über Koffein, Stratmann-Partition auf dem Device,
+  `-qm.cartesian_d`, Multi-GPU, `-md`, SCAN-Optimierung auf dem Device (nur Gradienten), Koffein 150x974 gegen gleiche
+  Dichte.
 - Nicht getestet: Moleküle größer als Benzol, geladene Systeme, `-qm.cartesian_d`, Stratmann-Partition und
   `radii_adjust becke|none` mit Meta-GGA, integral-direct J mit Meta-GGA (Pfad wie GGA, nicht gemessen), `-md`;
   Gradient: SCAN-Optimierung gegen eine Referenzgeometrie, ORCA-Gradientenvergleich (nicht gerechnet), Wirkung der

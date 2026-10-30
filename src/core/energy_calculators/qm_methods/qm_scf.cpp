@@ -1466,12 +1466,7 @@ bool QMEngine::ensureGpuXC() const
             CurcumaLogger::warn(fmt::format("QM: unknown -qm.gpu_xc '{}' (use auto|on|off); using auto", m_gpu_xc));
         }
     }
-    if (m_xc.needsTau()) {
-        // WP11 stage 1: no device meta-GGA kernel yet; the XC part runs on the CPU (counted fallback, -gpu_strict
-        // stops here), J/K and the rest of the SCF keep their GPU paths
-        gpuXCFailed("meta-GGA '" + m_xc.name + "' has no device XC kernel yet (WP11 stage 3)");
-        return false;
-    }
+    // WP11 stage 3 (Oct 2026): meta-GGAs (tau) run on the device too (QMGpuXCSetup::mgga); no fallback of their own
     if (m_gpu_xc_obj) return true;
     if (!ensureXCGrid()) return false;
     const auto t0 = std::chrono::steady_clock::now();
@@ -1536,6 +1531,7 @@ bool QMEngine::ensureGpuXC() const
     su.term_kernel = kernels.data();
     su.term_weight = weights.data();
     su.gga = m_xc.needsGradient() ? 1 : 0;
+    su.mgga = m_xc.needsTau() ? 1 : 0;  // needsGradient() is true as well (WP11)
     su.rho_min = qmxc::kern::effectiveThreshold(m_xc.needsGradient(), m_xc_rho_threshold);
     su.atom_xyz = pos.data();
     su.inv_dist = inv_dist.data();

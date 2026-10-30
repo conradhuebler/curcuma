@@ -99,7 +99,7 @@ std::unique_ptr<qmint::QMGpuSCF> createQmScf(const std::string& backend, int n, 
 /**
  * Native-QM Kohn-Sham exchange-correlation on the device (GPU KS-DFT, Oct 2026): grid resident, AO values streamed
  * per block of points; V_xc/E_xc and the XC gradient incl. grid response (qm_gpu_xc_backend.h). nullptr with a reason
- * in `why` when the plugin/entry point (curcuma_<backend>_create_qm_xc_screen) is missing, the basis/functional is not
+ * in `why` when the plugin/entry point (curcuma_<backend>_create_qm_xc_mgga) is missing, the basis/functional is not
  * supported (shells above f, more than 32 primitives) or the device memory does not hold one block. Claude Generated.
  */
 std::unique_ptr<qmint::QMGpuXC> createQmXC(const std::string& backend, const qmint::QMGpuXCSetup& setup, int device,

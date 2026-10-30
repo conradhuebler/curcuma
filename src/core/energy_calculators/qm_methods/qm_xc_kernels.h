@@ -53,10 +53,10 @@ enum class XCKernel {
     PBE_C,     ///< GGA PBE correlation = PW92 + H(rs, t) (WP6), libxc GGA_C_PBE
     B88_X,     ///< GGA Becke 1988 exchange (WP7), libxc GGA_X_B88
     LYP_C,     ///< GGA Lee-Yang-Parr correlation, Miehlich form without Laplacian (WP7), libxc GGA_C_LYP
-    TPSS_X,    ///< meta-GGA TPSS exchange (WP11 stage 1, CPU only), libxc MGGA_X_TPSS
-    TPSS_C,    ///< meta-GGA TPSS correlation (revPKZB + PBE, WP11 stage 1, CPU only), libxc MGGA_C_TPSS
-    SCAN_X,    ///< meta-GGA SCAN exchange (WP11 stage 1, CPU only), libxc MGGA_X_SCAN
-    SCAN_C     ///< meta-GGA SCAN correlation (WP11 stage 1, CPU only), libxc MGGA_C_SCAN
+    TPSS_X,    ///< meta-GGA TPSS exchange (WP11; CPU and CUDA), libxc MGGA_X_TPSS
+    TPSS_C,    ///< meta-GGA TPSS correlation (revPKZB + PBE, WP11; CPU and CUDA), libxc MGGA_C_TPSS
+    SCAN_X,    ///< meta-GGA SCAN exchange (WP11; CPU and CUDA), libxc MGGA_X_SCAN
+    SCAN_C     ///< meta-GGA SCAN correlation (WP11; CPU and CUDA), libxc MGGA_C_SCAN
 };
 
 /// Weighted kernel: E_xc contribution = weight * integral rho eps_kernel.
@@ -339,7 +339,7 @@ QM_HD bool evaluatePoint(const XCTerm* terms, int nterms, bool gga, double rho_m
 }
 
 // ===============================================================================================================
-// Meta-GGA kernels (WP11 stage 1: TPSS and SCAN, closed shell, energies on the CPU; Claude Generated, Oct 2026)
+// Meta-GGA kernels (WP11: TPSS and SCAN, closed shell; host and device, stage 3; Claude Generated, Oct 2026)
 // ===============================================================================================================
 //
 // Variables (closed shell, total quantities, as libxc's spin-unpolarised input):

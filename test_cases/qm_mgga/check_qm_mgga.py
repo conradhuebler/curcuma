@@ -28,8 +28,9 @@ Checks (--check):
   update      UpdateMolecule A -> B equals a fresh engine on B (1e-9 Eh)
   threads     1 and 4 threads give the same energy (1e-10 Eh)
   screen      AO screening off (-qm.xc_ao_threshold 0) vs default 1e-12: |dE| <= 1e-9 Eh
-  gpu         curcuma -sp ... -gpu cuda: the meta-GGA XC part falls back to the CPU as a counted fallback (summary
-              line "qm_xc"), the energy equals the CPU run to 1e-8 Eh; with -gpu_strict true the run stops (exit 3)
+  gpu         curcuma -sp ... -gpu cuda: the meta-GGA XC part runs on the device (WP11 stage 3; until then a counted
+              qm_xc fallback): no qm_xc fallback, energy equals the CPU run to 1e-8 Eh, -gpu_strict true passes (exit 0);
+              exit 77 (skip) without a usable CUDA plugin/device
 
 Claude Generated (Oct 2026, WP11 stage 1; gradient check stage 2).
 """
@@ -219,13 +220,18 @@ def main():
             rc0, e_cpu, _ = cli_energy(a.curcuma, xyz, fn, ["-gpu", "none"])
             rc1, e_gpu, txt = cli_energy(a.curcuma, xyz, fn, ["-gpu", "cuda"])
             rc2, e_strict, _ = cli_energy(a.curcuma, xyz, fn, ["-gpu", "cuda", "-gpu_strict", "true"])
-        counted = re.search(r"\d+ x qm_xc - first: .*meta-GGA", txt) is not None
-        good = rc0 == 0 and rc1 == 0 and e_cpu is not None and e_gpu is not None and abs(e_gpu - e_cpu) <= 1e-8 \
-            and counted and rc2 == 3
+        # WP11 stage 3 (Oct 2026): the meta-GGA XC part runs on the device; no qm_xc fallback, -gpu_strict passes.
+        # Without a usable CUDA plugin/device the run falls back for that reason: skipped (exit 77).
+        if "no GPU plugin" in txt or "not loadable" in txt:
+            print(f"{mol} {fn}: no usable CUDA plugin/device: skipped")
+            sys.exit(77)
+        fallback = re.search(r"\d+ x qm_xc", txt) is not None
+        good = rc0 == 0 and rc1 == 0 and rc2 == 0 and None not in (e_cpu, e_gpu, e_strict) \
+            and abs(e_gpu - e_cpu) <= 1e-8 and abs(e_strict - e_cpu) <= 1e-8 and not fallback
         ok &= good
-        print(f"{mol} {fn}: CPU {e_cpu} (exit {rc0}), -gpu cuda {e_gpu} (exit {rc1}, counted qm_xc fallback "
-              f"{counted}), diff {None if e_cpu is None or e_gpu is None else f'{e_gpu - e_cpu:.2e}'}; "
-              f"-gpu_strict true exit {rc2} (expected 3) {'OK' if good else 'FAIL'}")
+        print(f"{mol} {fn}: CPU {e_cpu} (exit {rc0}), -gpu cuda {e_gpu} (exit {rc1}, qm_xc fallback {fallback}), "
+              f"diff {None if e_cpu is None or e_gpu is None else f'{e_gpu - e_cpu:.2e}'}; -gpu_strict true exit {rc2} "
+              f"(expected 0) {'OK' if good else 'FAIL'}")
     elif a.check in ("invariance", "update", "threads", "screen"):
         parts = a.case.split("_")
         mol, fn = parts[0], parts[1]

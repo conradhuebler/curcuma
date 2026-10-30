@@ -12,7 +12,8 @@
 #   qm_mgga_gradient_<fn>        a gradient request succeeds (stage 2; values: test_cases/qm_mgga_grad)
 #   qm_mgga_invariance_<case>    atom order and translation 1e-9 Eh; rotation (grid fixed in space) at sg1 and sg3
 #   qm_mgga_{update,threads,screen}_H2O_<fn>
-#   qm_mgga_gpu_H2O_<fn>         -gpu cuda: counted CPU fallback of the meta-GGA XC part, same energy; -gpu_strict exits
+#   qm_mgga_gpu_H2O_<fn>         -gpu cuda: XC on the device (WP11 stage 3), no qm_xc fallback, same energy, -gpu_strict
+#                                passes; skipped (77) without a CUDA plugin/device
 # Geometries: the xyz files of qm_1e and qm_hf3c (no new structure files, as qm_pbe).
 # Run:  ctest -L qm_mgga --output-on-failure
 
@@ -50,6 +51,6 @@ if(Python3_Interpreter_FOUND)
         endforeach()
         add_test(NAME qm_mgga_gpu_H2O_${_fn} COMMAND ${_MGGA_CHECK} --check gpu --case H2O_${_fn}
                  --curcuma $<TARGET_FILE:curcuma>)
-        set_tests_properties(qm_mgga_gpu_H2O_${_fn} PROPERTIES TIMEOUT 600 LABELS "qm_mgga")
+        set_tests_properties(qm_mgga_gpu_H2O_${_fn} PROPERTIES TIMEOUT 600 LABELS "qm_mgga" SKIP_RETURN_CODE 77)
     endforeach()
 endif()

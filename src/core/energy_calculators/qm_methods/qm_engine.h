@@ -69,8 +69,8 @@ enum class QMFunctional {
     LDA,   ///< Slater-Dirac + VWN5 correlation -- WP5
     PBE,   ///< PBE-GGA (+ grad rho, rung 2) -- WP6
     B3LYP, ///< B3LYP hybrid (0.2 exact exchange, B88 + LYP, VWN per -qm.vwn_variant) -- WP7
-    TPSS,  ///< TPSS meta-GGA (+ tau, rung 3; energy and gradient on the CPU) -- WP11 stages 1-2
-    SCAN   ///< SCAN meta-GGA (+ tau, rung 3; energy and gradient on the CPU) -- WP11 stages 1-2
+    TPSS,  ///< TPSS meta-GGA (+ tau, rung 3; energy, gradient; CUDA XC) -- WP11 stages 1-3
+    SCAN   ///< SCAN meta-GGA (+ tau, rung 3; energy, gradient; CUDA XC) -- WP11 stages 1-3
 };
 
 // Claude Generated: qm parameter module (functional intentionally absent -- set by method name).
@@ -281,7 +281,7 @@ END_PARAMETER_DEFINITION
  * runs the closed-shell HF SCF for QMFunctional::HF and the closed-shell
  * Kohn-Sham SCF for QMFunctional::LDA (WP5), ::PBE (WP6), the hybrid ::B3LYP (WP7) and the meta-GGAs ::TPSS,
  * ::SCAN (WP11 stage 1) (same loop, F = H + J + V_xc - (a_x/2) K). hasGradient() is true for HF and every KS
- * functional (WP8; meta-GGAs since WP11 stage 2, XC part on the CPU).
+ * functional (WP8; meta-GGAs since WP11 stage 2; XC part on CUDA since stage 3).
  *
  * Claude Generated: Native KS-DFT engine scaffold, renamed QMEngine Sep 2026
  */

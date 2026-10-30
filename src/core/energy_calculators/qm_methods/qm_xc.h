@@ -81,8 +81,8 @@
  *     MGGA_C_SCAN (= PySCF 'SCAN').
  *   Formulas, equation numbers, constants, libxc thresholds and the derivative scheme (dual numbers): the meta-GGA
  *   block of qm_xc_kernels.h. V_xc gains (1/2) v_tau grad phi_m . grad phi_n (buildVxc). Energies and (stage 2)
- *   the analytic gradient on the CPU only (buildXCGradient); no device kernel yet (stage 3,
- *   docs/DFT_ROADMAP/WP11_meta_gga.md).
+ *   the analytic gradient (buildXCGradient); stage 3: the same quantities on CUDA (cuda/qm_gpu_xc.cu, same point
+ *   kernels; docs/DFT_ROADMAP/WP11_meta_gga.md).
  *
  * Claude Generated (Oct 2026, WP5; WP6 GGA; WP7 B3LYP; WP11 meta-GGA). AI-generated, machine-tested only
  * (docs/DFT_ROADMAP/WP5_lda_vwn5.md, WP6_pbe_gga.md, WP7_b3lyp_hybrid.md, WP11_meta_gga.md).
