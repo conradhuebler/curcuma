@@ -129,7 +129,7 @@ block errors of 8 or fewer blocks. Its literature references remain unchecked (T
   equilibration 20 ps 3745 / 3755 s (94 ms/step), production 100 ps 18832 / 18857 s (94 ms/step); chain 14:35 -> 21:23,
   6.8 h per temperature. Minimisation 1273 steps not converged (gradient norm 3.0e-3), shared.
 - Peak RSS grows with the stage length: 2.0 / 2.6 / 6.8 GB (303 K) and 2.1 / 2.6 / 7.5 GB (338 K) for 10 / 20 / 100 ps;
-  a 1 ns run would need to be checked first. Cause not examined.
+  cause found and fixed on Oct 26, 2026: `SimpleMD::CSVR()` appended one double per atom and step to the never-read `m_atom_temp` (removed; [MD_LARGE_SYSTEMS.md](MD_LARGE_SYSTEMS.md)). The runs described here used the binary before the fix. A follow-up with the larger droplet: [PDMAEMA_PROBE_LARGE_DROPLET_2026-10.md](PDMAEMA_PROBE_LARGE_DROPLET_2026-10.md).
 - Disk: 159 / 162 MB per temperature, of which 118 MB is the production trajectory (about 1.2 GB per ns at 0.1 ps dumps).
 - Health checks K1-K7 passed in all 7 stage checks; single point 4.9 s and 0.9 GB at one thread.
 - Known: `-md.seed` without effect (same start velocities and CSVR noise at both T); Etot is not conserved under CSVR, so the
