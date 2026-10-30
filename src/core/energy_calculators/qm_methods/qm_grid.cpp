@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <limits>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -421,6 +422,292 @@ AOEvaluator::AOEvaluator(const std::vector<GTO::Orbital>& basis, const Matrix& Q
             for (int a = 0; a < Q.cols(); ++a)
                 if (Q(c, a) != 0.0) m_q_cols[a].emplace_back(c, Q(c, a));
     }
+    // AO screening (Claude Generated, Oct 2026): active range per shell, as flatten() derives it
+    const int nsh = static_cast<int>(m_shells.size());
+    m_out_first.assign(nsh, 0);
+    m_out_width.assign(nsh, 0);
+    m_shell_local = true;
+    if (!m_transform) {
+        for (int s = 0; s < nsh; ++s) {
+            m_out_first[s] = m_shells[s].cart.empty() ? 0 : m_shells[s].cart[0];
+            m_out_width[s] = static_cast<int>(m_shells[s].cart.size());
+        }
+        return;
+    }
+    std::vector<int> cart_shell(m_ncart, -1);
+    for (int s = 0; s < nsh; ++s)
+        for (int c : m_shells[s].cart) cart_shell[c] = s;
+    std::vector<int> col_shell(m_nbf, -1);
+    for (int a = 0; a < m_nbf; ++a)
+        for (const auto& [c, qv] : m_q_cols[a]) {
+            if (col_shell[a] >= 0 && col_shell[a] != cart_shell[c]) m_shell_local = false;
+            col_shell[a] = cart_shell[c];
+        }
+    std::vector<int> lo(nsh, m_nbf), hi(nsh, -1);
+    for (int a = 0; a < m_nbf; ++a) {
+        if (col_shell[a] < 0) {
+            m_shell_local = false;
+            continue;
+        }
+        lo[col_shell[a]] = std::min(lo[col_shell[a]], a);
+        hi[col_shell[a]] = std::max(hi[col_shell[a]], a);
+    }
+    for (int s = 0; s < nsh; ++s) {
+        if (hi[s] < lo[s]) {
+            m_shell_local = false;
+            continue;
+        }
+        m_out_first[s] = lo[s];
+        m_out_width[s] = hi[s] - lo[s] + 1;
+        for (int a = lo[s]; a <= hi[s]; ++a)
+            if (col_shell[a] != s) m_shell_local = false;  // the columns of a shell must be contiguous
+    }
+}
+
+void AOEvaluator::shellCentre(int s, double& x, double& y, double& z) const
+{
+    x = m_shells[s].x;
+    y = m_shells[s].y;
+    z = m_shells[s].z;
+}
+
+// Claude Generated (Oct 2026, AO screening): reach of every shell, formula in qm_grid.h.
+std::vector<double> AOEvaluator::shellRadii(double threshold) const
+{
+    const int nsh = static_cast<int>(m_shells.size());
+    std::vector<double> R(nsh, std::numeric_limits<double>::infinity());
+    if (!(threshold > 0.0)) return R;
+    for (int s = 0; s < nsh; ++s) {
+        const Shell& sh = m_shells[s];
+        const int np = static_cast<int>(sh.exps.size());
+        if (np == 0 || sh.cart.empty() || !(sh.amin > 0.0)) continue;  // no exponent: never screened
+        const int L = sh.l[0] + sh.m[0] + sh.n[0];
+        std::vector<double> c(np, 0.0);
+        for (size_t comp = 0; comp < sh.cart.size(); ++comp)
+            for (int k = 0; k < np; ++k) c[k] = std::max(c[k], std::abs(sh.coef[comp * np + k]));
+        double t = 1.0;
+        if (m_transform) {
+            t = 0.0;
+            for (int w = 0; w < m_out_width[s]; ++w) {
+                double sum = 0.0;
+                for (const auto& [ci, qv] : m_q_cols[m_out_first[s] + w]) sum += std::abs(qv);
+                t = std::max(t, sum);
+            }
+        }
+        auto rpow = [](double r, int k) { return k < 0 ? 0.0 : std::pow(r, k); };
+        auto bound = [&](double r) {
+            double b0 = 0.0, b1 = 0.0, b2 = 0.0;
+            for (int k = 0; k < np; ++k) {
+                const double a = sh.exps[k], e = c[k] * std::exp(-a * r * r);
+                b0 += rpow(r, L) * e;
+                b1 += (L * rpow(r, L - 1) + 2.0 * a * rpow(r, L + 1)) * e;
+                b2 += (L * (L - 1) * rpow(r, L - 2) + 2.0 * a * (2 * L + 1) * rpow(r, L) + 4.0 * a * a * rpow(r, L + 2)) * e;
+            }
+            return t * std::max(b0, std::max(b1, b2));
+        };
+        const double rtop = std::sqrt(80.0 / sh.amin);  // evaluate() skips the shell beyond this radius
+        // inwards in coarse steps of rtop/200 to the first point with bound >= threshold, then in fine steps of
+        // rtop/4000 inside the last coarse interval
+        const int ncoarse = 200, nfine = 20;
+        const double H = rtop / ncoarse, h = H / nfine;
+        int i = ncoarse;
+        while (i > 0 && bound(H * i) < threshold) --i;
+        if (i == ncoarse) {  // the bound reaches the threshold at the evaluate() cutoff: the cutoff is the reach
+            R[s] = rtop;
+            continue;
+        }
+        int j = nfine;
+        while (j > 0 && bound(H * i + h * j) < threshold) --j;
+        R[s] = std::min(rtop, H * i + h * j + 2.0 * h);
+    }
+    return R;
+}
+
+// Claude Generated (Oct 2026, AO screening): evaluate() restricted to the listed shells, compact columns.
+void AOEvaluator::evaluateShells(const Matrix& points, int begin, int count, int deriv, const int* shells, int nsh,
+                                 AOBlock& out, std::vector<int>& cols) const
+{
+    const bool grad = deriv >= 1;
+    const bool hess = deriv >= 2;
+    std::vector<int> ccol(nsh), ocol(nsh);
+    int nc = 0, no = 0;
+    cols.clear();
+    for (int j = 0; j < nsh; ++j) {
+        const int s = shells[j];
+        ccol[j] = nc;
+        nc += static_cast<int>(m_shells[s].cart.size());
+        ocol[j] = no;
+        no += m_out_width[s];
+        for (int w = 0; w < m_out_width[s]; ++w) cols.push_back(m_out_first[s] + w);
+    }
+    Matrix cbuf[10];
+    Matrix* dst[10] = { &out.phi, &out.dx, &out.dy, &out.dz, &out.dxx, &out.dxy, &out.dxz, &out.dyy, &out.dyz, &out.dzz };
+    Matrix* v[10];
+    for (int k = 0; k < 10; ++k) v[k] = m_transform ? &cbuf[k] : dst[k];
+    const int nmat = hess ? 10 : (grad ? 4 : 1);
+    for (int k = 0; k < nmat; ++k) v[k]->setZero(count, nc);
+    std::vector<double> e, ae, aae;
+    for (int j = 0; j < nsh; ++j) {
+        const Shell& s = m_shells[shells[j]];
+        const int nprim = static_cast<int>(s.exps.size());
+        e.resize(nprim);
+        ae.resize(nprim);
+        aae.resize(nprim);
+        for (int q = 0; q < count; ++q) {
+            const int p = begin + q;
+            const double x = points(p, 0) - s.x, y = points(p, 1) - s.y, z = points(p, 2) - s.z;
+            const double r2 = x * x + y * y + z * z;
+            if (s.amin * r2 > 80.0) continue;
+            for (int k = 0; k < nprim; ++k) {
+                e[k] = std::exp(-s.exps[k] * r2);
+                ae[k] = s.exps[k] * e[k];
+                aae[k] = s.exps[k] * ae[k];
+            }
+            for (size_t c = 0; c < s.cart.size(); ++c) {
+                const double* cc = &s.coef[c * nprim];
+                double R0 = 0.0, R1 = 0.0, R2 = 0.0;
+                for (int k = 0; k < nprim; ++k) {
+                    R0 += cc[k] * e[k];
+                    R1 += cc[k] * ae[k];
+                }
+                if (hess)
+                    for (int k = 0; k < nprim; ++k) R2 += cc[k] * aae[k];
+                double val[10];
+                kern::aoComponent(s.l[c], s.m[c], s.n[c], x, y, z, R0, R1, R2, deriv >= 2 ? 2 : (grad ? 1 : 0), val);
+                for (int k = 0; k < nmat; ++k) (*v[k])(q, ccol[j] + static_cast<int>(c)) = val[k];
+            }
+        }
+    }
+    for (int k = nmat; k < 10; ++k) dst[k]->resize(0, 0);
+    if (!m_transform) return;
+    for (int k = 0; k < nmat; ++k) {
+        Matrix& d = *dst[k];
+        const Matrix& src = cbuf[k];
+        d.setZero(count, no);
+        for (int j = 0; j < nsh; ++j) {
+            const int s = shells[j], c0 = m_shells[s].cart[0];
+            for (int w = 0; w < m_out_width[s]; ++w)
+                for (const auto& [c, qv] : m_q_cols[m_out_first[s] + w]) {
+                    const int lc = ccol[j] + (c - c0);
+                    for (int q = 0; q < count; ++q) d(q, ocol[j] + w) += qv * src(q, lc);
+                }
+        }
+    }
+}
+
+// =====================================================================================================
+// AO screening (Claude Generated, Oct 2026): compact blocks and shell lists per block
+// =====================================================================================================
+
+BlockScreen::BlockScreen() = default;
+BlockScreen::BlockScreen(const BlockScreen&) = default;
+BlockScreen& BlockScreen::operator=(const BlockScreen&) = default;
+BlockScreen::~BlockScreen() = default;
+
+namespace {
+/// Recursive median split of idx[lo, hi) along the longest bounding-box axis into ceil(n / block) leaves.
+void splitPoints(std::vector<int>& idx, const Matrix& pts, int lo, int hi, int block, std::vector<int>& begin,
+                 std::vector<int>& count)
+{
+    const int n = hi - lo;
+    if (n <= block) {
+        if (n > 0) {
+            begin.push_back(lo);
+            count.push_back(n);
+        }
+        return;
+    }
+    double mn[3] = { 1e300, 1e300, 1e300 }, mx[3] = { -1e300, -1e300, -1e300 };
+    for (int i = lo; i < hi; ++i)
+        for (int k = 0; k < 3; ++k) {
+            mn[k] = std::min(mn[k], pts(idx[i], k));
+            mx[k] = std::max(mx[k], pts(idx[i], k));
+        }
+    int axis = 0;
+    for (int k = 1; k < 3; ++k)
+        if (mx[k] - mn[k] > mx[axis] - mn[axis]) axis = k;
+    const int k = (n + block - 1) / block, kl = k / 2;
+    const int nl = static_cast<int>((long long)n * kl / k);
+    std::nth_element(idx.begin() + lo, idx.begin() + lo + nl, idx.begin() + hi, [&](int a, int b) {
+        const double va = pts(a, axis), vb = pts(b, axis);
+        return va < vb || (va == vb && a < b);
+    });
+    splitPoints(idx, pts, lo, lo + nl, block, begin, count);
+    splitPoints(idx, pts, lo + nl, hi, block, begin, count);
+}
+}  // namespace
+
+void sortGridBlocks(MolecularGrid& grid, int block, std::vector<int>& begin, std::vector<int>& count)
+{
+    begin.clear();
+    count.clear();
+    if (block < 1) block = 128;
+    const int npts = grid.size();
+    std::vector<int> idx(npts);
+    for (int p = 0; p < npts; ++p) idx[p] = p;
+    const int natoms = static_cast<int>(grid.atom_offset.size()) - 1;
+    for (int A = 0; A < natoms; ++A) splitPoints(idx, grid.points, grid.atom_offset[A], grid.atom_offset[A + 1], block, begin, count);
+    const bool has_quad = grid.quadrature_weights.size() == grid.weights.size();
+    Matrix pts(npts, 3);
+    Vector w(npts), qw(has_quad ? npts : 0);
+    std::vector<int> at(npts);
+    for (int i = 0; i < npts; ++i) {
+        const int p = idx[i];
+        pts.row(i) = grid.points.row(p);
+        w(i) = grid.weights(p);
+        if (has_quad) qw(i) = grid.quadrature_weights(p);
+        at[i] = grid.atom[p];
+    }
+    grid.points = std::move(pts);
+    grid.weights = std::move(w);
+    if (has_quad) grid.quadrature_weights = std::move(qw);
+    grid.atom = std::move(at);
+}
+
+bool buildBlockScreen(const MolecularGrid& grid, const AOEvaluator& ao, double threshold, const std::vector<int>& begin,
+                      const std::vector<int>& count, BlockScreen& out, std::string& why)
+{
+    out = BlockScreen();
+    if (!(threshold > 0.0)) return true;
+    if (!ao.shellLocal()) {
+        why = "AO screening: the AO transform mixes shells";
+        return false;
+    }
+    const std::vector<double> R = ao.shellRadii(threshold);
+    const int nsh = ao.nshell();
+    std::vector<double> cx(nsh), cy(nsh), cz(nsh);
+    std::vector<int> width(nsh);
+    for (int s = 0; s < nsh; ++s) {
+        ao.shellCentre(s, cx[s], cy[s], cz[s]);
+        width[s] = ao.shellFunctions(s);
+    }
+    out.threshold = threshold;
+    out.begin = begin;
+    out.count = count;
+    out.shell_off.assign(begin.size() + 1, 0);
+    for (size_t b = 0; b < begin.size(); ++b) {
+        double mn[3] = { 1e300, 1e300, 1e300 }, mx[3] = { -1e300, -1e300, -1e300 };
+        for (int p = begin[b]; p < begin[b] + count[b]; ++p)
+            for (int k = 0; k < 3; ++k) {
+                mn[k] = std::min(mn[k], grid.points(p, k));
+                mx[k] = std::max(mx[k], grid.points(p, k));
+            }
+        for (int s = 0; s < nsh; ++s) {
+            const double c[3] = { cx[s], cy[s], cz[s] };
+            double d2 = 0.0;
+            for (int k = 0; k < 3; ++k) {
+                const double d = std::max(0.0, std::max(mn[k] - c[k], c[k] - mx[k]));
+                d2 += d * d;
+            }
+            if (d2 <= R[s] * R[s]) {
+                out.shells.push_back(s);
+                out.fn_kept += width[s];
+            }
+        }
+        out.fn_total += ao.nbf();
+        out.shell_off[b + 1] = static_cast<int>(out.shells.size());
+    }
+    return true;
 }
 
 void AOEvaluator::evaluate(const Matrix& points, int begin, int count, int deriv, AOBlock& out) const

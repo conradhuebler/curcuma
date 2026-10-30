@@ -60,6 +60,16 @@ struct QMGpuXCSetup {
     // the number of grid points per streamed block (testing), else chosen from the memory budget
     double max_device_mb = 0.0;
     int block_points = 0;
+    // AO screening (Claude Generated, Oct 2026, -qm.xc_ao_threshold; appended so that the layout above is unchanged):
+    // the blocks of qmgrid::BlockScreen on the (sorted) grid above, block b = points [screen_begin[b], + screen_count[b])
+    // with the kept shells screen_shells[screen_shell_off[b] .. screen_shell_off[b+1]) (ascending). The device merges
+    // consecutive blocks into streamed groups of at most block_points points (0: kScreenGroupPoints of
+    // cuda/qm_gpu_xc.cu) and works on the union of their shells. screen_nblocks = 0: no screening.
+    int screen_nblocks = 0;
+    const int* screen_begin = nullptr;
+    const int* screen_count = nullptr;
+    const int* screen_shell_off = nullptr;
+    const int* screen_shells = nullptr;
 };
 
 /// E_xc parts of one V_xc build (sums over the grid, as qmxc::XCResult).
@@ -87,6 +97,10 @@ public:
                           long long& points_used) = 0;
     /// Points per streamed block chosen from the memory budget.
     virtual int blockPoints() const = 0;
+    /// Becke weight derivative alone (grid response part 2): g (natoms x 3, row-major, overwritten) =
+    /// sum_p f_p d w_p / d R_A for the HOST array f (npts), as qmgrid::gridWeightGradient. Any number of atoms
+    /// (O(natoms^2) device scratch per thread block, streamed in waves). Claude Generated (Oct 2026).
+    virtual bool weightGradient(const double* f, double* g) = 0;
     /// One ASCII line of cumulative device timings.
     virtual std::string stats() const { return std::string(); }
 };

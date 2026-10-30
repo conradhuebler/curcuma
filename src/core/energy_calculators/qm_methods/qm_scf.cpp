@@ -1407,6 +1407,7 @@ void QMEngine::invalidateXC() const
     m_xc_grid_ready = false;
     m_xc_grid = qmgrid::MolecularGrid();
     m_xc_ao = qmgrid::AOEvaluator();
+    m_xc_screen = qmgrid::BlockScreen();
     m_xc_last_valid = false;
     m_xc_last_P = Matrix();
     m_xc_failed = false;
@@ -1424,6 +1425,25 @@ bool QMEngine::ensureXCGrid() const
         return false;
     }
     m_xc_ao = qmgrid::AOEvaluator(m_gto_basis, m_Q);  // AO values in the active basis (basis centres of this geometry)
+    // AO screening (Claude Generated, Oct 2026, -qm.xc_ao_threshold): points of every atom sorted into compact
+    // blocks of <= 128 points, kept shells per block; CPU XC and the device object use the same grid and lists.
+    m_xc_screen = qmgrid::BlockScreen();
+    if (m_xc_ao_threshold > 0.0) {
+        const auto ts = std::chrono::steady_clock::now();
+        std::vector<int> begin, count;
+        qmgrid::sortGridBlocks(m_xc_grid, 128, begin, count);
+        if (!qmgrid::buildBlockScreen(m_xc_grid, m_xc_ao, m_xc_ao_threshold, begin, count, m_xc_screen, why)) {
+            m_xc_screen = qmgrid::BlockScreen();
+            if (CurcumaLogger::get_verbosity() >= 1)
+                CurcumaLogger::warn("QM: " + why + "; XC without AO screening");
+        } else if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info(fmt::format(
+                "QM: AO screening (threshold {:.1e}): {} blocks, {:.1f} % of the functions kept per block on average "
+                "({:.1f} ms)", m_xc_ao_threshold, m_xc_screen.nblocks(),
+                100.0 * double(m_xc_screen.fn_kept) / double(std::max<long long>(1, m_xc_screen.fn_total)),
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - ts).count()));
+        }
+    }
     m_xc_grid_ready = true;
     m_xc_last_valid = false;
     m_xc_builds = 0;
@@ -1517,6 +1537,13 @@ bool QMEngine::ensureGpuXC() const
     su.stratmann = stratmann ? 1 : 0;
     su.max_device_mb = m_gpu_xc_max_memory_mb;
     su.block_points = m_gpu_xc_block_points;
+    if (m_xc_screen.active()) {  // AO screening (Oct 2026): the host blocks and shell lists of the sorted grid
+        su.screen_nblocks = m_xc_screen.nblocks();
+        su.screen_begin = m_xc_screen.begin.data();
+        su.screen_count = m_xc_screen.count.data();
+        su.screen_shell_off = m_xc_screen.shell_off.data();
+        su.screen_shells = m_xc_screen.shells.empty() ? nullptr : m_xc_screen.shells.data();
+    }
     m_gpu_xc_obj = gpu_plugin::createQmXC(backend, su, m_gpu_device, why);
     if (!m_gpu_xc_obj) {
         gpuXCFailed("device XC setup: " + why);
@@ -1583,7 +1610,7 @@ bool QMEngine::xcGradient(Matrix& g_basis, Matrix& g_response, std::string& why)
                 const auto c0 = std::chrono::steady_clock::now();
                 qmxc::XCGradient& xc = xg;
                 qmxc::buildXCGradient(m_xc_grid, m_xc_ao, m_density, m_xc, m_xc_rho_threshold, m_threads, bf_atom,
-                                      m_atomcount, xc);
+                                      m_atomcount, xc, 128, &m_xc_screen);
                 Matrix cw = Matrix::Zero(m_atomcount, 3);
                 if (m_grid_response)
                     qmgrid::gridWeightGradient(m_atoms, atomPositionsBohr(), m_grid_options, m_xc_grid, xc.edens, cw, why,
@@ -1599,13 +1626,14 @@ bool QMEngine::xcGradient(Matrix& g_basis, Matrix& g_response, std::string& why)
             }
             if (CurcumaLogger::get_verbosity() >= 3)
                 CurcumaLogger::info(fmt::format("QM: XC gradient on {} {:.1f} ms ({} points above threshold); |g_xc basis| "
-                                                "{:.3e}, |g_response| {:.3e} Eh/Bohr", m_gpu_xc_obj->name(), dev_ms, used,
-                                                g_basis.norm(), g_response.norm()));
+                                                "{:.3e}, |g_response| {:.3e} Eh/Bohr; device XC: {}", m_gpu_xc_obj->name(), dev_ms,
+                                                used, g_basis.norm(), g_response.norm(), m_gpu_xc_obj->stats()));
             return true;
         }
         gpuXCFailed("XC gradient kernel failed");
     }
-    qmxc::buildXCGradient(m_xc_grid, m_xc_ao, m_density, m_xc, m_xc_rho_threshold, m_threads, bf_atom, m_atomcount, xg);
+    qmxc::buildXCGradient(m_xc_grid, m_xc_ao, m_density, m_xc, m_xc_rho_threshold, m_threads, bf_atom, m_atomcount, xg,
+                          128, &m_xc_screen);
     g_basis = xg.basis;
     double wms = 0.0;
     if (m_grid_response) {
@@ -1660,7 +1688,7 @@ const qmxc::XCResult& QMEngine::xcFor(const Matrix& P) const
             // CURCUMA_QM_GPU_XC_CHECK=1: the CPU V_xc of the same density, one comparison line (test_cases/qm_gpu_dft)
             if (const char* chk = std::getenv("CURCUMA_QM_GPU_XC_CHECK"); chk && chk[0] == '1') {
                 qmxc::XCResult cpu;
-                qmxc::buildVxc(m_xc_grid, m_xc_ao, P, m_xc, m_xc_rho_threshold, m_threads, cpu);
+                qmxc::buildVxc(m_xc_grid, m_xc_ao, P, m_xc, m_xc_rho_threshold, m_threads, cpu, 128, &m_xc_screen);
                 const double vmax = cpu.V.cwiseAbs().maxCoeff();
                 CurcumaLogger::result(fmt::format(
                     "QM GPU XC check: n={} points={} max|dV|={:.3e} max|V|={:.3e} rel_dV={:.3e} dExc={:.3e} rel_dExc={:.3e} "
@@ -1674,7 +1702,7 @@ const qmxc::XCResult& QMEngine::xcFor(const Matrix& P) const
             gpuXCFailed("V_xc kernel failed");
         }
     }
-    if (!on_device) qmxc::buildVxc(m_xc_grid, m_xc_ao, P, m_xc, m_xc_rho_threshold, m_threads, m_xc_last);
+    if (!on_device) qmxc::buildVxc(m_xc_grid, m_xc_ao, P, m_xc, m_xc_rho_threshold, m_threads, m_xc_last, 128, &m_xc_screen);
     m_xc_last_P = P;
     m_xc_last_valid = true;
     ++m_xc_builds;

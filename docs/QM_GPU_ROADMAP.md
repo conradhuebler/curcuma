@@ -773,7 +773,108 @@ enforced (the gfn* rules of GPU_REPRODUCIBILITY.md do not cover the native QM).
 Not tested: other GPUs (only the RTX 5090), ROCm and Vulkan (no entry point; `qm_xc_kernels.h` is written to compile
 with hipcc, neither built nor tested), multi-GPU, systems above caffeine (24 atoms, 246 functions), grids other than
 sg1 and the forced block sizes 64/96 points, the Stratmann partition on the device, cartesian d (`-qm.cartesian_d`),
-basis sets other than def2-SVP, MD. Not implemented: AO screening per block (every block evaluates and multiplies
-all nbf functions), a J-only device 2e gradient with its own screen for LDA/PBE (kx = 0 only drops the exchange
-products), weight derivative above 700 atoms (CPU fallback), FP32 phases of the XC part.
+basis sets other than def2-SVP, MD. Not implemented: a J-only device 2e gradient with its own screen for LDA/PBE
+(kx = 0 only drops the exchange products), FP32 phases of the XC part. (AO screening and the weight derivative
+above 700 atoms: section 4.1.)
+
+### 4.1 AO screening per block and weight derivative without atom limit (Oct 30 2026)
+
+> 🤖 AI-generated, ⚙️ machine-tested (CPU 24 cores, RTX 5090). Human production testing pending.
+
+`-qm.xc_ao_threshold` (default 1e-12, 0 = the code path and results of before, bitwise). `QMEngine::ensureXCGrid`
+sorts the points of every atom into compact blocks of <= 128 points (`qmgrid::sortGridBlocks`, recursive median
+split along the longest box axis) and lists per block the shells whose reach touches the block's bounding box
+(`qmgrid::buildBlockScreen`). The reach `AOEvaluator::shellRadii` is the one formula for CPU and GPU: the largest r
+at which a rigorous bound of |phi|, |grad phi| or |d2 phi| (sum_k |c_k| r^L e^(-a_k r^2) and the derivative
+analogues, times the largest |Q| column sum) reaches the threshold, capped at the old cutoff a_min r^2 = 80. CPU
+(`buildVxc`/`buildXCGradient` with the screen): per block phi_S, P_SS, X_SS scattered into the matrix of its chunk
+(union of the chunk's functions; 64 chunks, independent of the thread count, 1 vs 4 threads bitwise). GPU: consecutive
+blocks merged into groups of <= 2048 points (`-qm.gpu_xc_block_points`, at least one host block) with the union of
+their shells; the AO kernel writes zeros for a shell that the point's own block does not keep (per-block mask), so
+every point sees exactly the functions of the CPU and the two agree to rounding; P_SS gathered, W_SS = phi_S^T Y_S
+scattered group by group on one stream (no atomics), gradient columns scattered.
+
+Gate (a): threshold 0 against the binary before the change, `-dump_gradient` files bitwise identical: CPU 48/48 (H2O,
+NH3, benzene x hf, lda vwn5/vwn_rpa, pbe, b3lyp vwn5/vwn_rpa, pbe without grid response, b3lyp RI-JK x 1 and 4
+threads); GPU 12/12 (H2O, benzene, caffeine x lda, pbe, b3lyp, pbe without response; `-qm.gpu_grad off
+-qm.gpu_grad1e off`, since the device 1e/2e gradient has atomics and differs run to run even for HF).
+
+Gate (b): default threshold against 0, def2-SVP, sg1, `-qm.scf_threshold 1e-10` (alkanes 1e-7), complete runs:
+
+| system (atoms, functions) | method | |dE| Eh | max |dg| Eh/Bohr | functions kept per block |
+|---|---|---:|---:|---:|
+| H2O (3, 24) | pbe / b3lyp | 0 / 4.3e-14 | 1.7e-13 / 2.0e-14 | 99.5 % |
+| benzene (12, 114) | pbe / b3lyp | 2.3e-13 / 1.7e-13 | 4.5e-14 / 4.3e-14 | 89.6 % |
+| caffeine (24, 246) | pbe RI-J (CPU) / pbe (GPU) | 2.3e-12 / 1.4e-12 | 5.2e-13 / - | 67.6 % |
+| trisaccharide C18H32O16 (66, 636) | pbe RI-J | 4.5e-12 | 1.4e-12 | 41.5 % |
+| C40H82 (122, 970) | pbe RI-J CPU / GPU | 6.4e-12 / 2.7e-12 | 4.5e-13 / 3.6e-13 | 20.2 % |
+
+The differences are at the level of the SCF convergence noise. Even 1e-8 gives |dE| <= 3.3e-11 Eh and
+max |dg| <= 5.1e-11 Eh/Bohr (caffeine, trisaccharide), 1e-10 keeps 3-4 % fewer functions than 1e-12; the default
+1e-12 keeps four orders of magnitude of margin to that, for basis sets that were not tested (diffuse functions).
+
+Gate (c), XC time per V_xc build and per XC gradient (basis + point part; the Becke weight derivative separately),
+pbe RI-J, def2-SVP, sg1, CPU 8 threads, RTX 5090, linear alkanes generated in the scratch directory (not in the
+repository):
+
+| alkane (atoms, functions, points) | kept | V_xc CPU off / on | V_xc GPU off / on | XC grad CPU off / on | XC grad GPU off / on | weight deriv CPU / GPU |
+|---|---:|---:|---:|---:|---:|---:|
+| C10H22 (32, 250, 310400) | 60.4 % | 278 / 170 ms | 66 / 66 ms | 586 / 282 ms | 82 / 101 ms | 0.21 / 0.03 s |
+| C20H42 (62, 490, 601400) | 36.7 % | 2018 / 412 ms | 411 / 200 ms | 4478 / 763 ms | 464 / 305 ms | 2.0 / 0.19 s |
+| C40H82 (122, 970, 1183400) | 20.2 % | 23196 / 919 ms | 2981 / 489 ms | 27950 / 1765 ms | 3044 / 746 ms | 16.2 / 1.4 s |
+| C80H162 (242, 1930, 2347400) | 10.6 % | - / 2031 ms | 21391 / 1122 ms | - / 3967 ms | 21881 / 1707 ms | 130 / 11.6 s |
+
+With screening the V_xc build grows by 2.4x, 2.2x, 2.2x (CPU) and 3.0x, 2.4x, 2.3x (GPU) per doubling of the chain:
+close to linear above C20; without it 7-12x (CPU) and 6-7x (GPU). CPU C80 unscreened not run (estimated > 2 min per
+build). GPU stages with screening (C40, `CURCUMA_QM_GPU_XC_PROFILE=1`): the two DGEMMs X = phi P and W = phi^T Y are
+84 % of the time on this FP64-poor card; groups of 1024/2048/4096/8192 points: 529/489/544/605 ms per build, hence
+2048. The device groups carry 33 % of the functions (union over 16 blocks) where the 128-point CPU blocks keep 20 %
+(the GEMMs run over the union). The table was taken before the per-block zero mask was added to the AO kernel;
+re-measured with it: C40 485 ms / 730 ms, C80 1110 ms / 1671 ms (V_xc / XC gradient), the same within noise.
+The Becke weight derivative (O(npts natoms^2), not screened) now dominates every XC gradient from ~60 atoms on.
+
+Weight derivative without atom limit (`weightGradKernel`, `QMGpuXC::weightGradient`, entry
+`curcuma_cuda_create_qm_xc_screen`): the old kernel held 8 natoms doubles in shared memory (48 KB, hence 700 atoms) and
+4 natoms^2 in global scratch per block. Now everything per point is in global scratch, mu is recomputed (the same
+expression as the stored value), S and dS are one triangle of h and h' (2 natoms^2 + 8 natoms doubles per block), and a
+fixed number of 4 virtual blocks per SM is launched in waves that fit 50 % of the free memory, so the result does not
+depend on the free memory. At 1-700 atoms the result is bitwise that of the old kernel (gate (a) GPU above includes
+it). The Becke partition is not local (no cutoff without changing the result), so no neighbour list.
+`ctest -L qm_gpu_dft` (`test_qm_gpu_wgrad`, synthetic f on the grid, rel = max|g_dev - g_cpu| / max|g_cpu|):
+
+| structure (atoms) | grid (points, f != 0) | rel | CPU (threads) | GPU | device scratch |
+|---|---|---:|---:|---:|---:|
+| caffeine (24) | sg0 (93840, 80434) | 5.0e-15 | 0.07 s (4) | 0.007 s | 7.6 MB |
+| peo201-chain (1410), library | 4x6 (33840, 29006) | 7.0e-15 | 178 s (8) | 7.9 s | 15.8 GB (2 waves) |
+| peo201-chain (1410), stratmann | 4x6 (33840, 29006) | 1.9e-15 | 176 s (8) | 65 s * | 0.8 GB (29 waves) * |
+| C250H502 (752), scratch | sg0 (2940320, 2520274) | 2.5e-13 | 2966 s (24) | 134 s | 6.2 GB (1 wave) |
+
+\* run while another job held most of the device memory: 29 waves instead of 1-2, hence slower; the result does not
+depend on the waves. The ctests use every 16th point for peo201 (2115 points) to keep the CPU reference short. C250:
+grid 85 s (host), host peak 1.1 GB, device peak ~7.4 GB (sampled with nvidia-smi). Memory per wave block
+8 (2 natoms^2 + 8 natoms) bytes: 9 MB at 752, 32 MB at 1410 atoms; time O(npts natoms^2).
+
+C250H502 complete KS gradient (def2-SVP, 6010 functions, sg0, pbe, `-gpu cuda`, `-qm.scf_threshold 1e-6`): not
+finished within the 45 min limit of the attempt. Measured: grid 98 s, AO screening keeps 3.6 % of the functions per
+block, device-direct SCF iterations 8-33 s each (Fock build dominates, up to 1.3e10 quartets), iteration 14 after
+18 min; what ran in the remaining 27 min (tight SCF continuation, device 2e gradient, XC gradient) is not known
+(output buffered when the run was stopped). The weight derivative alone takes 134 s on the device there (table
+above), so the XC part is not the limit; the 2e gradient and the SCF at 6010 functions were not timed.
+
+ctest after the change: `-L "qm_1e|qm_2e|qm_grad|qm_hf3c|qm_grid|qm_lda|qm_pbe|qm_b3lyp|qm_dft_grad|qm_ri|qm_mp2"` (CPU)
+green except the two numpy-dependent `qm_opt_hf3c_*`; `-L qm_gpu` 103/104: `qm_gpu_dft_scf_benzene_pbe_rij` fails
+on the iteration count (GPU 14, CPU 16, tolerance 1; energies equal at the 10 printed decimals). Cause: the CPU
+RI-J SCF of benzene sits at the dP = 1e-10 border (threshold 0: dP 9.9e-11 at iteration 14); the screened V_xc
+(1e-13-level change) moves it to 1.8e-10 and two more iterations. Not fixed; the test tolerance was not changed.
+
+Thread independence: the screened XC part keeps fixed chunks (benzene b3lyp exact and the `qm_dft_grad_threads_*`
+cases bitwise 1 vs 4 threads). Whole runs with RI-J (caffeine) or the CPU integral-direct J/K (caffeine b3lyp, also
+with threshold 0) differ between 1 and 4 threads in the last bits (|dE| 1.6e-12 Eh, |dg| 4e-13 Eh/Angstrom); that
+comes from those J/K paths, not from the screening, and was there before.
+
+Not tested: basis sets other than def2-SVP (diffuse functions: the bound stays rigorous, the gain smaller), grids
+other than sg0/sg1, cartesian d, the Stratmann partition with screening, compact 3D molecules above 66 atoms (only
+chains were timed), a transform that mixes shells (screening then switches itself off with a warning; not
+exercised), other GPUs than the RTX 5090, ROCm. Not implemented: screening of the Becke weight derivative (it is
+O(npts natoms^2) on CPU and GPU and dominates every XC gradient from ~60 atoms on), point screening by weight.
 

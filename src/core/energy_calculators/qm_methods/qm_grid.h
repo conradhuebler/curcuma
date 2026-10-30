@@ -161,6 +161,41 @@ public:
     /// evaluate()). False + reason when Q mixes shells. Claude Generated (Oct 2026, GPU KS-DFT).
     bool flatten(FlatShells& out, std::string& why) const;
 
+    /// Number of shells (AOEvaluator grouping, the same as FlatShells::nshell).
+    int nshell() const { return static_cast<int>(m_shells.size()); }
+    /// Centre of shell s (Bohr).
+    void shellCentre(int s, double& x, double& y, double& z) const;
+    /// Active functions of shell s: [shellFirstFunction(s), + shellFunctions(s)).
+    int shellFirstFunction(int s) const { return m_out_first[s]; }
+    int shellFunctions(int s) const { return m_out_width[s]; }
+    /// True when every active function belongs to one shell (Q block diagonal per shell): needed by
+    /// evaluateShells() and the AO screening; false only for a transform that mixes shells.
+    bool shellLocal() const { return m_shell_local; }
+
+    /**
+     * @brief Reach of every shell for the AO screening (-qm.xc_ao_threshold), Bohr; the ONE formula for CPU and GPU.
+     *
+     * For a shell with angular momentum L, primitives (a_k, c_k) (c_k = largest |coefficient| of the shell's
+     * cartesian components, normalisation included) and t = largest column sum of |Q| of the shell (1 without a
+     * transform), every active function, its first and its second derivatives are bounded at distance r by
+     *   B0(r) = t sum_k c_k r^L e_k,                     e_k = exp(-a_k r^2)
+     *   B1(r) = t sum_k c_k (L r^(L-1) + 2 a_k r^(L+1)) e_k
+     *   B2(r) = t sum_k c_k (L (L-1) r^(L-2) + 2 a_k (2L+1) r^L + 4 a_k^2 r^(L+2)) e_k
+     * (|x^l y^m z^n| <= r^L, the derivative formulas of kern::aoComponent term by term). The radius R is the
+     * largest r with max(B0, B1, B2) >= threshold, found by stepping inwards from r_top = sqrt(80 / a_min) (the
+     * radius beyond which evaluate() skips the shell anyway, so R <= r_top) in steps of r_top/200, refined to
+     * r_top/4000, plus two fine steps. threshold <= 0: R = infinity (no screening). Claude Generated (Oct 2026).
+     */
+    std::vector<double> shellRadii(double threshold) const;
+
+    /**
+     * @brief AO values of a subset of shells: like evaluate(), but only the shells shells[0..nsh) (ascending), and the
+     * columns of `out` are their active functions in that order (cols[j] = active index of column j).
+     * Same arithmetic per value as evaluate(). Needs shellLocal(). Claude Generated (Oct 2026, AO screening).
+     */
+    void evaluateShells(const Matrix& points, int begin, int count, int deriv, const int* shells, int nsh,
+                        AOBlock& out, std::vector<int>& cols) const;
+
 private:
     struct Shell {
         double x = 0, y = 0, z = 0;
@@ -181,7 +216,49 @@ private:
     int m_ncart = 0, m_nbf = 0;
     bool m_transform = false;
     std::vector<std::vector<std::pair<int, double>>> m_q_cols;  ///< nonzeros of Q per active column
+    // AO screening (Oct 2026): active functions [m_out_first[s], + m_out_width[s]) of shell s; m_shell_local false
+    // when Q mixes shells (then no subset evaluation)
+    std::vector<int> m_out_first, m_out_width;
+    bool m_shell_local = true;
 };
+
+/**
+ * @brief Blocks of grid points and the shells that matter on each block (AO screening, -qm.xc_ao_threshold).
+ *
+ * Block b holds the points [begin[b], begin[b] + count[b]); shells[shell_off[b] .. shell_off[b+1]) (ascending) are
+ * the shells whose reach (AOEvaluator::shellRadii) touches the bounding box of the block. A shell that is not listed
+ * has |phi|, |grad phi|, |d2 phi| < threshold on every point of the block and is left out of density, V_xc and XC
+ * gradient there. Empty (threshold 0): no screening, the old uniform 128-point blocks. Claude Generated (Oct 2026).
+ */
+struct BlockScreen {
+    double threshold = 0.0;
+    std::vector<int> begin, count, shell_off, shells;
+    long long fn_total = 0, fn_kept = 0;  ///< sum over blocks of nbf and of the kept functions (statistics)
+    bool active() const { return threshold > 0.0 && !begin.empty(); }
+    int nblocks() const { return static_cast<int>(begin.size()); }
+    BlockScreen();
+    BlockScreen(const BlockScreen&);
+    BlockScreen& operator=(const BlockScreen&);
+    ~BlockScreen();
+};
+
+/**
+ * @brief Reorders the points of every atom into spatially compact blocks of at most `block` points (AO screening).
+ *
+ * Per atom: recursive split of its points at the median of the longest bounding-box axis into ceil(n / block)
+ * leaves of near-equal size (ties broken by the old index: deterministic). Points, weights, quadrature weights and
+ * owner are permuted together; the points of an atom stay contiguous (atom_offset unchanged). Returns the blocks
+ * (each inside one atom). Only the floating-point order of grid sums changes. Claude Generated (Oct 2026).
+ */
+void sortGridBlocks(MolecularGrid& grid, int block, std::vector<int>& begin, std::vector<int>& count);
+
+/**
+ * @brief Shell lists per block for the AO screening: shell s is kept on block b when the distance from its centre
+ * to the bounding box of the block's points is below its reach (AOEvaluator::shellRadii(threshold)).
+ * False + reason when the AO transform mixes shells. Claude Generated (Oct 2026, AO screening).
+ */
+bool buildBlockScreen(const MolecularGrid& grid, const AOEvaluator& ao, double threshold, const std::vector<int>& begin,
+                      const std::vector<int>& count, BlockScreen& out, std::string& why);
 
 /// rho_p = sum_mn P_mn phi_pm phi_pn on the block; with grad != nullptr (needs dx/dy/dz) also
 /// grad rho_p = 2 sum_mn P_mn phi_pm grad phi_pn (nblock x 3). Claude Generated (WP4).

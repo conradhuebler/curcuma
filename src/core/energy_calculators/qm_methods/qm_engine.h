@@ -88,6 +88,10 @@ BEGIN_PARAMETER_DEFINITION(qm)
     PARAM(xc_density_threshold, Double, 1.0e-12,
           "Grid points whose density rho (electrons/Bohr^3) is below this value are left out of E_xc and V_xc, for every exchange and correlation term (LDA and GGA). 0 = every point with rho > 0. libxc drops rho < 1e-15 (PBE exchange) / 1e-12 (PBE correlation) instead, see docs/DFT_ROADMAP/WP6_pbe_gga.md and WP7_b3lyp_hybrid.md.",
           "XC", {})
+    // AO screening per block of grid points (Claude Generated, Oct 2026): qmgrid::BlockScreen, CPU and device XC
+    PARAM(xc_ao_threshold, Double, 1.0e-12,
+          "AO screening of the Kohn-Sham exchange-correlation part (lda/pbe/b3lyp; CPU and -gpu cuda): the grid points of every atom are sorted into compact blocks, and on each block only the shells whose basis functions or their first or second derivatives can reach this value (a rigorous bound from exponents and coefficients, AOEvaluator::shellRadii) enter density, V_xc and XC gradient. 0 = no screening, every block uses every function (the code path and results of before Oct 2026). Errors and timings: docs/QM_GPU_ROADMAP.md section 4.",
+          "XC", {})
     // WP8 (Claude Generated, Oct 2026): grid response of the Kohn-Sham nuclear gradient
     PARAM(grid_response, Bool, true,
           "Kohn-Sham gradient (lda/pbe/b3lyp): true = include the derivative of the moving grid (points travel with their atom, Becke weight derivative; as ORCA/Q-Chem), the exact derivative of the energy curcuma computes, translationally invariant | false = basis-function part only (PySCF grad_response=False default); the error is the grid error of the gradient (measured in docs/DFT_ROADMAP/WP8_analytischer_gradient.md).",
@@ -142,7 +146,7 @@ BEGIN_PARAMETER_DEFINITION(qm)
           "With gpu_xc: at most this much device memory (MB) for the device XC object (grid, AO blocks); 0 = 60 % of the free device memory. The number of grid points per block follows from it; if not even 32 points fit, the XC part falls back to the CPU (counted as qm_xc). For testing the fallback.",
           "Performance", {})
     PARAM(gpu_xc_block_points, Int, 0,
-          "With gpu_xc: grid points per streamed block (multiple of 32; 0 = from the memory budget, at most 32768). For testing the block streaming; the results do not depend on it beyond rounding of V_xc.",
+          "With gpu_xc: grid points per streamed block (multiple of 32; 0 = from the memory budget, at most 32768). With AO screening (xc_ao_threshold > 0) the largest number of points per streamed group of screened blocks (0 = 2048). For testing the block streaming; the results do not depend on it beyond rounding of V_xc (with screening also the kept functions of a group change, within the screening error).",
           "Performance", {})
     // WP10 (Claude Generated, Oct 2026): density fitting, implementation in qm_ri.cpp
     PARAM(ri, String, "off",
@@ -428,6 +432,8 @@ private:
     // energy of one iteration share one grid pass.
     qmxc::XCFunctional m_xc;                 // a_x = 1, no XC for HF
     double m_xc_rho_threshold = 1.0e-12;     // -qm.xc_density_threshold
+    double m_xc_ao_threshold = 1.0e-12;      // -qm.xc_ao_threshold (AO screening, Oct 2026; 0 = off)
+    mutable qmgrid::BlockScreen m_xc_screen; // blocks and kept shells of the current grid (empty: no screening)
     mutable qmgrid::MolecularGrid m_xc_grid;
     bool m_grid_response = true;             // -qm.grid_response (WP8)
     std::shared_ptr<const qmgrid::MolecularGrid> m_xc_frozen_grid;  // freezeXCGrid() validation hook (WP8)

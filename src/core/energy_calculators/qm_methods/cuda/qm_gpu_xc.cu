@@ -26,6 +26,21 @@
 // floating-point atomics: repeated runs are bitwise identical for the same B and device (checked on the RTX 5090,
 // docs/QM_GPU_ROADMAP.md section 4). The Becke weight derivative runs one thread block per point at a time with
 // O(natoms^2) scratch per block in global memory; per-block partial gradients are summed in block order.
+//
+// AO screening (Oct 2026, -qm.xc_ao_threshold > 0): the host sorts the grid into compact blocks and lists the
+// shells that reach each block (qmgrid::BlockScreen, qm_grid.cpp; the one radius formula is
+// AOEvaluator::shellRadii). Here consecutive blocks are merged into streamed groups (<= kScreenGroupPoints or
+// block_points points) with the union S of their shells: AO values only for S (compact columns; zeros for a shell
+// that the point's own host block does not keep, so each point sees the CPU's functions), P_SS gathered,
+// X = phi_S P_SS, W_SS = phi_S^T Y_S (DGEMM) scattered into W(S, S) group by group (one stream, no atomics), the
+// gradient columns scattered into gfun(S). Without screening the kernels run as before (shell list nullptr).
+//
+// Weight derivative (Oct 2026): no natoms limit any more. The old kernel kept 8 natoms doubles in shared memory
+// (48 KB: natoms <= 700) and S, dS, mu, "P without one factor" (4 natoms^2) in global scratch per block. Now all
+// per-point vectors are in global scratch, mu is recomputed from the distances (the same expression, so the same
+// bits), S and dS are stored as one triangle of h and h' (2 natoms^2 in total with EX); a fixed number of virtual
+// blocks (4 per SM, independent of the free memory) is launched in waves that fit the memory, so the summation
+// order and the result do not depend on the free memory.
 
 #include "../qm_gpu_xc_backend.h"
 #include "../qm_xc_kernels.h"
@@ -47,7 +62,7 @@ constexpr int kMaxTerms = 8;
 constexpr int kMaxPrim = 32;      // primitives per shell
 constexpr int kMaxComp = 10;      // cartesian components per shell (L <= 3)
 constexpr int kChunk = 256;       // points per energy-reduction chunk (fixed, independent of B)
-constexpr int kMaxWeightAtoms = 700;  // shared memory of the weight-derivative kernel: 8 natoms doubles
+constexpr int kScreenGroupPoints = 2048;  // AO screening: points per streamed group (measured, QM_GPU_ROADMAP section 4)
 
 struct DevTerms {
     int n = 0;
@@ -62,19 +77,30 @@ struct DevShells {
 /// AO values (and derivatives) of shell blockIdx.y at points [begin, begin + count): ao[(k nbf + mu) B + q].
 /// Same arithmetic as AOEvaluator::evaluate (qm_grid.cpp): radial sums R0, R1, R2 in primitive order, components via
 /// qmgrid::kern::aoComponent, active functions as sum over the nonzero T entries in component order.
+// AO screening: shl[blockIdx.y] is the shell and col[blockIdx.y] its first (compact) column; nbf is then the number
+// of kept functions. The group consists of nblk host blocks starting at bstart[k] (relative to begin); a point of
+// block k gets the values of shell blockIdx.y only when mask[k nsh + blockIdx.y] is set, else zeros: every point
+// sees exactly the functions the CPU uses for it. shl == nullptr: every shell, columns out_first (unscreened layout).
 __global__ void aoKernel(DevShells s, const double* __restrict__ pts, int begin, int count, int deriv, int nbf, int B,
-                         double* __restrict__ ao)
+                         double* __restrict__ ao, const int* __restrict__ shl, const int* __restrict__ col,
+                         const int* __restrict__ bstart, const unsigned char* __restrict__ mask, int nblk)
 {
     const int q = blockIdx.x * blockDim.x + threadIdx.x;
     if (q >= count) return;
-    const int sh = blockIdx.y;
+    const int sh = shl ? shl[blockIdx.y] : blockIdx.y;
     const int nder = deriv >= 2 ? 10 : (deriv >= 1 ? 4 : 1);
     const int p = begin + q;
     const double x = pts[3 * p] - s.xyz[3 * sh], y = pts[3 * p + 1] - s.xyz[3 * sh + 1], z = pts[3 * p + 2] - s.xyz[3 * sh + 2];
     const double r2 = x * x + y * y + z * z;
-    const int nc = s.ncomp[sh], first = s.out_first[sh], width = s.out_width[sh], toff = s.T_off[sh];
+    const int nc = s.ncomp[sh], first = shl ? col[blockIdx.y] : s.out_first[sh], width = s.out_width[sh], toff = s.T_off[sh];
     const size_t plane = (size_t)nbf * B;
-    if (s.amin[sh] * r2 > 80.0) {
+    bool keep = true;
+    if (mask) {
+        int k = 0;
+        while (k + 1 < nblk && bstart[k + 1] <= q) ++k;
+        keep = mask[(size_t)k * gridDim.y + blockIdx.y] != 0;
+    }
+    if (!keep || s.amin[sh] * r2 > 80.0) {
         for (int k = 0; k < nder; ++k)
             for (int w = 0; w < width; ++w) ao[k * plane + (size_t)(first + w) * B + q] = 0.0;
         return;
@@ -228,10 +254,11 @@ __global__ void gradRowKernel(const double* __restrict__ ao, const double* __res
     for (int k = 0; k < 3; ++k) spoint[3 * (size_t)(begin + q) + k] = -2.0 * s[k];
 }
 
-/// Basis part: gfun[3 m + k] += sum_q T_k(q, m) (one block per function, fixed tree order).
+/// Basis part: gfun[3 m' + k] += sum_q T_k(q, m) (one block per function, fixed tree order); m' = idx[m] with AO
+/// screening (compact column m of the group), else m.
 __global__ void gradColKernel(const double* __restrict__ ao, const double* __restrict__ ZP, const double* __restrict__ X,
                               int nbf, int B, int count, int gga, const double* __restrict__ cx, const double* __restrict__ cy,
-                              const double* __restrict__ cz, double* __restrict__ gfun)
+                              const double* __restrict__ cz, double* __restrict__ gfun, const int* __restrict__ idx)
 {
     __shared__ double sh[3][256];
     const int m = blockIdx.x;
@@ -251,8 +278,29 @@ __global__ void gradColKernel(const double* __restrict__ ao, const double* __res
             for (int k = 0; k < 3; ++k) sh[k][threadIdx.x] += sh[k][threadIdx.x + o];
         __syncthreads();
     }
-    if (threadIdx.x == 0)
-        for (int k = 0; k < 3; ++k) gfun[3 * m + k] += sh[k][0];
+    if (threadIdx.x == 0) {
+        const int mg = idx ? idx[m] : m;
+        for (int k = 0; k < 3; ++k) gfun[3 * mg + k] += sh[k][0];
+    }
+}
+
+/// AO screening: Ps(i, j) = P(idx[i], idx[j]) (ns x ns, column-major; P n x n symmetric).
+__global__ void gatherKernel(const double* __restrict__ P, int n, const int* __restrict__ idx, int ns, double* __restrict__ Ps)
+{
+    const size_t k = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= (size_t)ns * ns) return;
+    const int i = (int)(k % ns), j = (int)(k / ns);
+    Ps[k] = P[(size_t)idx[i] + (size_t)idx[j] * n];
+}
+
+/// AO screening: W(idx[i], idx[j]) += Ws(i, j); the indices of one group are distinct, groups run one after the
+/// other on one stream: no atomics, fixed order.
+__global__ void scatterAddKernel(const double* __restrict__ Ws, int ns, const int* __restrict__ idx, int n, double* __restrict__ W)
+{
+    const size_t k = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= (size_t)ns * ns) return;
+    const int i = (int)(k % ns), j = (int)(k / ns);
+    W[(size_t)idx[i] + (size_t)idx[j] * n] += Ws[k];
 }
 
 /// Sum of `n` values per chunk of kChunk points (fixed tree order): part[c * narr + j] for arrays a0..a3.
@@ -310,25 +358,30 @@ __global__ void atomPointSumKernel(const double* __restrict__ spoint, const int*
         for (int k = 0; k < 3; ++k) gpts[3 * A + k] = -sh[k][0];
 }
 
-/// Becke weight derivative (qmgrid::gridWeightGradient, formulas in qm_grid.cpp section WP8): one thread block per
-/// point at a time (points blockIdx.x, + gridDim.x, ...), cell functions in per-block global scratch (S, dS, mu,
-/// "P without one factor" from prefix/suffix products as on the CPU), d w_p / d R_A for A != owner by thread A, the
-/// owner from translational invariance; accumulated into this block's slice of bgrad (natoms x 3), no atomics.
+/// Becke weight derivative (qmgrid::gridWeightGradient, formulas in qm_grid.cpp section WP8): virtual block
+/// v = v0 + blockIdx.x of G handles the points v, v + G, v + 2G, ... one at a time; cell functions h, h' per pair
+/// (lower triangle, tri(i, j) = i (i - 1)/2 + j for j < i) and "P without one factor" EX (full, prefix/suffix
+/// products as on the CPU) in this block's global scratch, the per-point vectors there too (no shared-memory limit
+/// on natoms); d w_p / d R_A for A != owner by thread A, the owner from translational invariance; accumulated into
+/// slice v of bgrad (natoms x 3), no atomics. S(i, j) = 1/2 (1 - h), S(j, i) = 1/2 (1 + h), dS = -h'/2 both ways,
+/// mu(A, D) recomputed as the CPU stores it (j < i: 1/R_ij (d_i - d_j), mu(j, i) = -mu(i, j)): the same bits as the
+/// previous kernel with stored matrices. Claude Generated (Oct 2026).
 __global__ void weightGradKernel(const double* __restrict__ pts, const double* __restrict__ quadw, const int* __restrict__ patom,
                                  const double* __restrict__ f, int npts, int na, const double* __restrict__ axyz,
-                                 const double* __restrict__ invd, const double* __restrict__ aadj, int stratmann,
-                                 double* __restrict__ scratch, double* __restrict__ bgrad)
+                                 const double* __restrict__ invd, const double* __restrict__ aadj, int stratmann, int G, int v0,
+                                 size_t per_block, double* __restrict__ scratch, double* __restrict__ bgrad)
 {
-    extern __shared__ double sm[];
-    double *dist = sm, *ux = sm + na, *uy = sm + 2 * na, *uz = sm + 3 * na, *Pv = sm + 4 * na, *dwA = sm + 5 * na;
-    double* misc = sm + 8 * na;
-    const size_t nn = (size_t)na * na;
-    double* S = scratch + (size_t)blockIdx.x * 4 * nn;
-    double* dS = S + nn;
-    double* MU = dS + nn;
-    double* EX = MU + nn;
-    double* bg = bgrad + (size_t)blockIdx.x * na * 3;
-    for (int p = blockIdx.x; p < npts; p += gridDim.x) {
+    __shared__ double zsum;
+    const int v = v0 + blockIdx.x;
+    if (v >= G) return;
+    const size_t nn = (size_t)na * na, nt = (size_t)na * (na - 1) / 2;
+    double* EX = scratch + (size_t)blockIdx.x * per_block;
+    double* H = EX + nn;
+    double* DH = H + nt;
+    double* dist = DH + nt;
+    double *ux = dist + na, *uy = ux + na, *uz = uy + na, *Pv = uz + na, *dwA = Pv + na;
+    double* bg = bgrad + (size_t)v * na * 3;
+    for (int p = v; p < npts; p += G) {
         if (f[p] == 0.0) continue;  // uniform over the block
         const int B = patom[p];
         for (int A = threadIdx.x; A < na; A += blockDim.x) {
@@ -340,52 +393,46 @@ __global__ void weightGradKernel(const double* __restrict__ pts, const double* _
             uz[A] = dz * inv;
         }
         __syncthreads();
-        for (size_t idx = threadIdx.x; idx < nn; idx += blockDim.x) {
-            const int i = (int)(idx / na), j = (int)(idx % na);
-            if (i == j) {
-                S[idx] = 1.0;
-                dS[idx] = 0.0;
-                MU[idx] = 0.0;
-                continue;
-            }
-            if (j > i) continue;
+        for (size_t t = threadIdx.x; t < nt; t += blockDim.x) {
+            // t -> (i, j), j < i: i = floor((1 + sqrt(1 + 8 t)) / 2), corrected for rounding
+            int i = (int)((1.0 + sqrt(1.0 + 8.0 * (double)t)) * 0.5);
+            while ((size_t)i * (i - 1) / 2 > t) --i;
+            while ((size_t)(i + 1) * i / 2 <= t) ++i;
+            const int j = (int)(t - (size_t)i * (i - 1) / 2);
+            const size_t idx = (size_t)i * na + j;
             const double mu = invd[idx] * (dist[i] - dist[j]);
             const double nu = mu + aadj[idx] * (1.0 - mu * mu);
-            const double h = stratmann ? qmgrid::kern::stratmannIterate(nu) : qmgrid::kern::beckeIterate(nu);
-            const double dh = (stratmann ? qmgrid::kern::stratmannIterateDerivative(nu) : qmgrid::kern::beckeIterateDerivative(nu))
+            H[t] = stratmann ? qmgrid::kern::stratmannIterate(nu) : qmgrid::kern::beckeIterate(nu);
+            DH[t] = (stratmann ? qmgrid::kern::stratmannIterateDerivative(nu) : qmgrid::kern::beckeIterateDerivative(nu))
                 * (1.0 - 2.0 * aadj[idx] * mu);
-            const size_t ji = (size_t)j * na + i;
-            S[idx] = 0.5 * (1.0 - h);
-            S[ji] = 0.5 * (1.0 + h);
-            dS[idx] = -0.5 * dh;
-            dS[ji] = -0.5 * dh;
-            MU[idx] = mu;
-            MU[ji] = -mu;
         }
         __syncthreads();
         for (int i = threadIdx.x; i < na; i += blockDim.x) {
             double* row = EX + (size_t)i * na;
-            const double* Si = S + (size_t)i * na;
             double pre = 1.0;
             for (int j = 0; j < na; ++j) {
                 row[j] = pre;
-                pre = pre * (j == i ? 1.0 : Si[j]);
+                const double Sij = j == i ? 1.0
+                    : (j < i ? 0.5 * (1.0 - H[(size_t)i * (i - 1) / 2 + j]) : 0.5 * (1.0 + H[(size_t)j * (j - 1) / 2 + i]));
+                pre = pre * Sij;
             }
             Pv[i] = pre;
             double suf = 1.0;
             for (int j = na - 1; j >= 0; --j) {
                 row[j] = (j == i) ? 0.0 : row[j] * suf;
-                suf = suf * (j == i ? 1.0 : Si[j]);
+                const double Sij = j == i ? 1.0
+                    : (j < i ? 0.5 * (1.0 - H[(size_t)i * (i - 1) / 2 + j]) : 0.5 * (1.0 + H[(size_t)j * (j - 1) / 2 + i]));
+                suf = suf * Sij;
             }
         }
         __syncthreads();
         if (threadIdx.x == 0) {
             double zs = 0.0;
             for (int i = 0; i < na; ++i) zs += Pv[i];
-            misc[0] = zs;
+            zsum = zs;
         }
         __syncthreads();
-        const double Zs = misc[0];
+        const double Zs = zsum;
         if (!(Zs > 0.0)) {
             __syncthreads();
             continue;
@@ -398,29 +445,31 @@ __global__ void weightGradKernel(const double* __restrict__ pts, const double* _
                 continue;
             }
             const double uA[3] = { ux[A], uy[A], uz[A] };
-            double s[3] = { 0.0, 0.0, 0.0 }, dPB[3] = { 0.0, 0.0, 0.0 };
+            double sa[3] = { 0.0, 0.0, 0.0 }, dPB[3] = { 0.0, 0.0, 0.0 };
             for (int D = 0; D < na; ++D) {
                 if (D == A) continue;
                 const size_t ad = (size_t)A * na + D, da = (size_t)D * na + A;
-                const double iR = invd[ad], mu = MU[ad];
-                const double cA = EX[ad] * dS[ad], cD = -EX[da] * dS[da];
+                const double iR = invd[ad];
+                const double mu = A > D ? invd[ad] * (dist[A] - dist[D]) : -(invd[da] * (dist[D] - dist[A]));
+                const double dS = -0.5 * (A > D ? DH[(size_t)A * (A - 1) / 2 + D] : DH[(size_t)D * (D - 1) / 2 + A]);
+                const double cA = EX[ad] * dS, cD = -EX[da] * dS;
                 for (int k = 0; k < 3; ++k) {
                     const double dmu = -uA[k] * iR - mu * (axyz[3 * A + k] - axyz[3 * D + k]) * iR * iR;
-                    s[k] += cA * dmu + cD * dmu;
+                    sa[k] += cA * dmu + cD * dmu;
                     if (D == B) dPB[k] += cD * dmu;
                 }
             }
             for (int k = 0; k < 3; ++k) {
-                const double dw = fw * (dPB[k] * invZ - PB * invZ * invZ * s[k]);
+                const double dw = fw * (dPB[k] * invZ - PB * invZ * invZ * sa[k]);
                 bg[3 * A + k] += dw;
                 dwA[3 * A + k] = dw;
             }
         }
         __syncthreads();
         if (threadIdx.x < 3) {
-            double s = 0.0;
-            for (int A = 0; A < na; ++A) s += dwA[3 * A + threadIdx.x];
-            bg[3 * B + threadIdx.x] -= s;
+            double sb = 0.0;
+            for (int A = 0; A < na; ++A) sb += dwA[3 * A + threadIdx.x];
+            bg[3 * B + threadIdx.x] -= sb;
         }
         __syncthreads();
     }
@@ -499,6 +548,9 @@ public:
             && alloc(&m_gfun, 3 * nb) && alloc(&m_gpts, 3 * (size_t)m_na);
         if (!ok) { why = "device allocation / upload of the grid failed"; return false; }
 
+        // AO screening: merge consecutive host blocks into groups of <= target points, union of their shells
+        if (s.screen_nblocks > 0 && !buildGroups(s, why)) return false;
+
         // Block size from the memory budget: AO values for the gradient (deriv 2 for a GGA: 10 planes, else 4),
         // X, Y, ZP (3 planes), 5 point vectors; whole-grid arrays and the n^2 matrices are already allocated.
         size_t free_b = 0, total_b = 0;
@@ -506,12 +558,15 @@ public:
         double budget = 0.6 * (double)free_b;
         if (s.max_device_mb > 0.0) budget = std::min(budget, s.max_device_mb * 1.0e6 - (double)m_bytes);
         m_nder = m_gga ? 10 : 4;
-        const double per_point = 8.0 * ((double)nb * (m_nder + 3) + 8.0);
+        const bool screened = !m_groups.empty();
+        const size_t ncol = screened ? (size_t)std::max(1, m_sub_max) : nb;  // columns of the per-block planes
+        const double per_point = 8.0 * ((double)ncol * (m_nder + 3) + 8.0);
         long long B = s.block_points > 0 ? s.block_points : (long long)(budget / per_point);
         B = std::min<long long>(B, ((long long)np + 127) / 128 * 128);
         if (s.block_points <= 0) B = std::min<long long>(B, 32768);
         B = B / 32 * 32;
-        if (B < 32 || (s.block_points > 0 && (double)B * per_point > budget)) {
+        if (screened) B = (m_group_max + 31) / 32 * 32;  // the leading dimension holds the largest group
+        if (B < 32 || ((s.block_points > 0 || screened) && (double)B * per_point > budget)) {
             char buf[200];
             std::snprintf(buf, sizeof buf, "not enough device memory for a block of grid points (budget %.1f MB, %.3f MB per 32 points)",
                           budget / 1.0e6, 32.0 * per_point / 1.0e6);
@@ -519,10 +574,17 @@ public:
             return false;
         }
         m_B = (int)B;
-        const size_t plane = (size_t)m_B * nb;
+        const size_t plane = (size_t)m_B * ncol;
         ok = alloc(&m_ao, plane * m_nder) && alloc(&m_X, plane) && alloc(&m_Y, plane) && alloc(&m_ZP, plane)
             && alloc(&m_c0, (size_t)m_B) && alloc(&m_cx, (size_t)m_B) && alloc(&m_cy, (size_t)m_B) && alloc(&m_cz, (size_t)m_B)
             && alloc(&m_spoint, 3 * np);
+        if (ok && screened) {
+            const size_t ms = (size_t)m_sub_max * m_sub_max;
+            ok = alloc(&m_Ps, std::max<size_t>(1, ms)) && alloc(&m_Ws, std::max<size_t>(1, ms))
+                && up(&m_g_shells, m_h_shells.data(), m_h_shells.size()) && up(&m_g_cols, m_h_cols.data(), m_h_cols.size())
+                && up(&m_g_idx, m_h_idx.data(), m_h_idx.size()) && up(&m_g_bstart, m_h_bstart.data(), m_h_bstart.size())
+                && up(&m_g_mask, m_h_mask.data(), m_h_mask.size());
+        }
         if (!ok) { why = "device allocation of the grid blocks failed"; return false; }
         return cudaGetLastError() == cudaSuccess;
     }
@@ -545,7 +607,20 @@ public:
         const int n = m_nbf;
         const int deriv = m_gga ? 1 : 0;
         const double one = 1.0, zero = 0.0;
-        for (int begin = 0; begin < m_npts; begin += m_B) {
+        if (!m_groups.empty()) {  // AO screening
+            if (!clearPointArrays() || cudaMemsetAsync(m_W, 0, (size_t)n * n * sizeof(double), 0) != cudaSuccess) return false;
+            for (const Group& g : m_groups) {
+                if (g.ns == 0) continue;
+                if (!groupDensity(dP, g, deriv, 0)) return false;
+                combineKernel<<<g1((size_t)m_B * g.ns), 256>>>(m_ao, g.ns, m_B, g.count, m_gga, m_c0, m_cx, m_cy, m_cz, m_Y);
+                if (cublasDgemm(m_cublas, CUBLAS_OP_T, CUBLAS_OP_N, g.ns, g.ns, g.count, &one, m_ao, m_B, m_Y, m_B, &zero, m_Ws,
+                                g.ns) != CUBLAS_STATUS_SUCCESS)
+                    return false;
+                scatterAddKernel<<<g1((size_t)g.ns * g.ns), 256>>>(m_Ws, g.ns, m_g_idx + g.idx_off, n, m_W);
+                profile(3);
+            }
+        }
+        for (int begin = 0; m_groups.empty() && begin < m_npts; begin += m_B) {
             const int count = std::min(m_B, m_npts - begin);
             if (!blockDensity(dP, begin, count, deriv, 0)) return false;
             combineKernel<<<g1((size_t)m_B * n), 256>>>(m_ao, n, m_B, count, m_gga, m_c0, m_cx, m_cy, m_cz, m_Y);
@@ -572,7 +647,22 @@ public:
         cudaMemsetAsync(m_gfun, 0, 3 * (size_t)n * sizeof(double), 0);
         const int deriv = m_gga ? 2 : 1;
         const double one = 1.0, zero = 0.0;
-        for (int begin = 0; begin < m_npts; begin += m_B) {
+        if (!m_groups.empty()) {  // AO screening
+            if (!clearPointArrays()) return false;
+            for (const Group& g : m_groups) {
+                if (g.ns == 0) continue;
+                if (!groupDensity(m_P, g, deriv, 1)) return false;
+                combineKernel<<<g1((size_t)m_B * g.ns), 256>>>(m_ao, g.ns, m_B, g.count, m_gga, m_c0, m_cx, m_cy, m_cz, m_Y);
+                if (cublasDgemm(m_cublas, CUBLAS_OP_N, CUBLAS_OP_N, g.count, g.ns, g.ns, &one, m_Y, m_B, m_Ps, g.ns, &zero, m_ZP,
+                                m_B) != CUBLAS_STATUS_SUCCESS)
+                    return false;
+                gradRowKernel<<<g1(g.count, 128), 128>>>(m_ao, m_ZP, m_X, g.ns, m_B, g.count, g.begin, m_gga, m_cx, m_cy, m_cz,
+                                                         m_spoint);
+                gradColKernel<<<g.ns, 256>>>(m_ao, m_ZP, m_X, g.ns, m_B, g.count, m_gga, m_cx, m_cy, m_cz, m_gfun,
+                                             m_g_idx + g.idx_off);
+            }
+        }
+        for (int begin = 0; m_groups.empty() && begin < m_npts; begin += m_B) {
             const int count = std::min(m_B, m_npts - begin);
             if (!blockDensity(m_P, begin, count, deriv, 1)) return false;
             // Z = w v_rho phi + sum_j v_j d_j phi (zero rows beyond count), ZP = Z P
@@ -581,7 +671,7 @@ public:
                 != CUBLAS_STATUS_SUCCESS)
                 return false;
             gradRowKernel<<<g1(count, 128), 128>>>(m_ao, m_ZP, m_X, n, m_B, count, begin, m_gga, m_cx, m_cy, m_cz, m_spoint);
-            gradColKernel<<<n, 256>>>(m_ao, m_ZP, m_X, n, m_B, count, m_gga, m_cx, m_cy, m_cz, m_gfun);
+            gradColKernel<<<n, 256>>>(m_ao, m_ZP, m_X, n, m_B, count, m_gga, m_cx, m_cy, m_cz, m_gfun, nullptr);
         }
         if (cudaGetLastError() != cudaSuccess) return false;
         qmint::QMGpuXCScalars sc;
@@ -597,7 +687,7 @@ public:
             atomPointSumKernel<<<m_na, 256>>>(m_spoint, m_aoff, m_gpts);
             if (cudaMemcpy(g_points, m_gpts, 3 * (size_t)m_na * sizeof(double), cudaMemcpyDeviceToHost) != cudaSuccess)
                 return false;
-            if (m_na >= 2 && !weightGradient(g_weights)) return false;
+            if (m_na >= 2 && !weightGradientDevice(g_weights)) return false;
         }
         const auto t2 = std::chrono::steady_clock::now();
         m_t_grad += std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -613,21 +703,147 @@ public:
                       "%d grid points in blocks of %d, %d V_xc builds %.1f ms, %d XC gradients %.1f ms (weight derivative %.1f ms), "
                       "device memory %.1f MB",
                       m_npts, m_B, m_nvxc, m_t_vxc, m_ngrad, m_t_grad, m_t_wgrad, m_bytes / 1.0e6);
-        if (!m_prof_on) return buf;
+        std::string out = buf;
+        if (!m_groups.empty()) {
+            char sc[200];
+            std::snprintf(sc, sizeof sc, "; AO screening: %d groups (<= %d points), %.1f %% of the functions kept on average",
+                          (int)m_groups.size(), m_group_max, 100.0 * m_kept_frac);
+            out += sc;
+        }
+        if (m_wgrad_waves > 0) {
+            char wg[160];
+            std::snprintf(wg, sizeof wg, "; weight derivative: %d virtual blocks in %d wave(s), scratch %.1f MB", m_wgrad_G,
+                          m_wgrad_waves, m_wgrad_scratch_mb);
+            out += wg;
+        }
+        if (!m_prof_on) return out;
         char p[200];
         std::snprintf(p, sizeof p, "; V_xc stages (synchronised): AO %.1f ms, X = phi P %.1f ms, density+XC %.1f ms, "
                       "W = phi^T Y %.1f ms, sums %.1f ms", m_prof[0], m_prof[1], m_prof[2], m_prof[3], m_prof[4]);
-        return std::string(buf) + p;
+        return out + p;
+    }
+
+    bool weightGradient(const double* f, double* g) override
+    {
+        const auto t0 = std::chrono::steady_clock::now();
+        for (int k = 0; k < 3 * m_na; ++k) g[k] = 0.0;
+        if (cudaMemcpy(m_edens, f, (size_t)m_npts * sizeof(double), cudaMemcpyHostToDevice) != cudaSuccess) return false;
+        const bool ok = m_na < 2 || weightGradientDevice(g);
+        m_t_wgrad += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        return ok && cudaGetLastError() == cudaSuccess;
     }
 
 private:
+    /// AO screening: one streamed group of consecutive host blocks, its kept shells (with compact first columns)
+    /// and functions.
+    struct Group {
+        int begin = 0, count = 0, ns = 0, nsh = 0, sh_off = 0, idx_off = 0;
+        int nblk = 0, bstart_off = 0, mask_off = 0;  // host blocks of the group, their starts, shell masks
+    };
+
+    /// Groups of <= target points from the host blocks (union of their shell lists, ascending). Claude Generated.
+    bool buildGroups(const qmint::QMGpuXCSetup& s, std::string& why)
+    {
+        int target = s.block_points > 0 ? s.block_points : kScreenGroupPoints;
+        for (int b = 0; b < s.screen_nblocks; ++b) target = std::max(target, s.screen_count[b]);  // one host block fits
+        std::vector<char> mark(m_nshell, 0);
+        std::vector<int> width(m_nshell), first(m_nshell);
+        for (int i = 0; i < m_nshell; ++i) {
+            width[i] = s.sh_out_width[i];
+            first[i] = s.sh_out_first[i];
+        }
+        long long kept = 0, total = 0;
+        int b = 0;
+        while (b < s.screen_nblocks) {
+            Group g;
+            g.begin = s.screen_begin[b];
+            int e = b;
+            while (e < s.screen_nblocks && g.count + s.screen_count[e] <= target && s.screen_begin[e] == g.begin + g.count) {
+                g.count += s.screen_count[e];
+                for (int k = s.screen_shell_off[e]; k < s.screen_shell_off[e + 1]; ++k) mark[s.screen_shells[k]] = 1;
+                ++e;
+            }
+            if (e == b) {
+                why = "AO screening: a block of the host screen is larger than the device group";
+                return false;
+            }
+            g.sh_off = (int)m_h_shells.size();
+            g.idx_off = (int)m_h_idx.size();
+            std::vector<int> gsh;
+            for (int sh = 0; sh < m_nshell; ++sh) {
+                if (!mark[sh]) continue;
+                mark[sh] = 0;
+                gsh.push_back(sh);
+                m_h_shells.push_back(sh);
+                m_h_cols.push_back(g.ns);
+                for (int w = 0; w < width[sh]; ++w) m_h_idx.push_back(first[sh] + w);
+                g.ns += width[sh];
+                ++g.nsh;
+            }
+            // per host block of the group: which of the group's shells it keeps (the AO kernel writes zeros for the
+            // others, so every point sees exactly the functions of its own block, as on the CPU)
+            g.nblk = e - b;
+            g.bstart_off = (int)m_h_bstart.size();
+            g.mask_off = (int)m_h_mask.size();
+            for (int k = b; k < e; ++k) {
+                m_h_bstart.push_back(s.screen_begin[k] - g.begin);
+                std::vector<char> in(m_nshell, 0);
+                for (int t = s.screen_shell_off[k]; t < s.screen_shell_off[k + 1]; ++t) in[s.screen_shells[t]] = 1;
+                for (int sh : gsh) m_h_mask.push_back((unsigned char)in[sh]);
+            }
+            m_h_bstart.push_back(g.count);
+            m_group_max = std::max(m_group_max, g.count);
+            m_sub_max = std::max(m_sub_max, g.ns);
+            kept += (long long)g.ns * g.count;
+            total += (long long)m_nbf * g.count;
+            m_groups.push_back(g);
+            b = e;
+        }
+        m_kept_frac = total > 0 ? (double)kept / (double)total : 1.0;
+        if (m_h_shells.empty()) m_h_shells.push_back(0), m_h_cols.push_back(0);  // non-empty uploads
+        if (m_h_idx.empty()) m_h_idx.push_back(0);
+        if (m_h_mask.empty()) m_h_mask.push_back(0);
+        return true;
+    }
+
+    /// Per-point arrays of the whole grid to zero (AO screening: groups without a shell write nothing).
+    bool clearPointArrays()
+    {
+        const size_t b = (size_t)m_npts * sizeof(double);
+        return cudaMemsetAsync(m_exw, 0, b, 0) == cudaSuccess && cudaMemsetAsync(m_ecw, 0, b, 0) == cudaSuccess
+            && cudaMemsetAsync(m_ne, 0, b, 0) == cudaSuccess && cudaMemsetAsync(m_used, 0, b, 0) == cudaSuccess
+            && cudaMemsetAsync(m_edens, 0, b, 0) == cudaSuccess && cudaMemsetAsync(m_spoint, 0, 3 * b, 0) == cudaSuccess;
+    }
+
+    /// AO screening: AO values of the kept shells of group g, P_SS (m_Ps), X = phi_S P_SS, per-point functional.
+    bool groupDensity(const double* dP, const Group& g, int deriv, int mode)
+    {
+        const double one = 1.0, zero = 0.0;
+        profile(-1);
+        aoKernel<<<dim3(g1(g.count, 128), g.nsh), 128>>>(m_sh, m_pts, g.begin, g.count, deriv, g.ns, m_B, m_ao,
+                                                         m_g_shells + g.sh_off, m_g_cols + g.sh_off, m_g_bstart + g.bstart_off,
+                                                         m_g_mask + g.mask_off, g.nblk);
+        gatherKernel<<<g1((size_t)g.ns * g.ns), 256>>>(dP, m_nbf, m_g_idx + g.idx_off, g.ns, m_Ps);
+        if (cudaGetLastError() != cudaSuccess) return false;
+        profile(0);
+        if (cublasDgemm(m_cublas, CUBLAS_OP_N, CUBLAS_OP_N, g.count, g.ns, g.ns, &one, m_ao, m_B, m_Ps, g.ns, &zero, m_X, m_B)
+            != CUBLAS_STATUS_SUCCESS)
+            return false;
+        profile(1);
+        densityXCKernel<<<g1(g.count, 128), 128>>>(m_ao, m_X, g.ns, m_B, g.count, g.begin, m_w, m_terms, m_gga, m_rho_min, mode,
+                                                   m_c0, m_cx, m_cy, m_cz, m_exw, m_ecw, m_ne, m_used, m_edens);
+        profile(2);
+        return cudaGetLastError() == cudaSuccess;
+    }
+
     /// AO values of the block, X = phi P, per-point functional and coefficient vectors (mode 0: V_xc, 1: gradient).
     bool blockDensity(const double* dP, int begin, int count, int deriv, int mode)
     {
         const int n = m_nbf;
         const double one = 1.0, zero = 0.0;
         profile(-1);
-        aoKernel<<<dim3(g1(count, 128), m_nshell), 128>>>(m_sh, m_pts, begin, count, deriv, n, m_B, m_ao);
+        aoKernel<<<dim3(g1(count, 128), m_nshell), 128>>>(m_sh, m_pts, begin, count, deriv, n, m_B, m_ao, nullptr, nullptr,
+                                                          nullptr, nullptr, 0);
         if (cudaGetLastError() != cudaSuccess) return false;
         profile(0);
         if (cublasDgemm(m_cublas, CUBLAS_OP_N, CUBLAS_OP_N, count, n, n, &one, m_ao, m_B, dP, n, &zero, m_X, m_B)
@@ -666,31 +882,40 @@ private:
         return true;
     }
 
-    /// Becke weight derivative contracted with the energy density of the last gradient() (m_edens).
-    bool weightGradient(double* g)
+    /// Becke weight derivative contracted with m_edens (energy density of the last gradient(), or the host f of
+    /// weightGradient()); adds into g. G = 4 virtual blocks per SM (fixed: the summation order does not depend on
+    /// the free memory), launched in waves of as many blocks as fit 50 % of the free memory (2 natoms^2 + 8 natoms
+    /// doubles each); fails only when not even one block fits. Claude Generated (Oct 2026: no natoms limit).
+    bool weightGradientDevice(double* g)
     {
-        if (m_na > kMaxWeightAtoms) return false;
-        const size_t nn = (size_t)m_na * m_na;
+        const size_t nn = (size_t)m_na * m_na, nt = (size_t)m_na * (m_na - 1) / 2;
+        const size_t per_block = nn + 2 * nt + 8 * (size_t)m_na;
+        const int G = std::max(1, std::min(4 * m_sms, m_npts));
         size_t free_b = 0, total_b = 0;
         cudaMemGetInfo(&free_b, &total_b);
-        const double per_block = 8.0 * (4.0 * nn + 3.0 * m_na);
-        int G = std::min(4 * m_sms, (int)std::max(1.0, 0.5 * (double)free_b / per_block));
-        G = std::max(1, std::min(G, m_npts));
+        const double bgrad_b = 8.0 * (double)G * m_na * 3;
+        const double avail = 0.5 * (double)free_b - bgrad_b;
+        const int Gw = (int)std::min<double>(G, std::floor(avail / (8.0 * (double)per_block)));
+        if (Gw < 1) return false;
         double *scratch = nullptr, *bg = nullptr;
-        if (cudaMalloc(&scratch, (size_t)G * 4 * nn * sizeof(double)) != cudaSuccess) return false;
+        if (cudaMalloc(&scratch, (size_t)Gw * per_block * sizeof(double)) != cudaSuccess) return false;
         if (cudaMalloc(&bg, (size_t)G * m_na * 3 * sizeof(double)) != cudaSuccess) {
             cudaFree(scratch);
             return false;
         }
         cudaMemset(bg, 0, (size_t)G * m_na * 3 * sizeof(double));
-        const size_t shmem = (8 * (size_t)m_na + 2) * sizeof(double);
-        weightGradKernel<<<G, 128, shmem>>>(m_pts, m_qw, m_patom, m_edens, m_npts, m_na, m_axyz, m_invd, m_aadj, m_stratmann,
-                                            scratch, bg);
+        int waves = 0;
+        for (int v0 = 0; v0 < G; v0 += Gw, ++waves)
+            weightGradKernel<<<std::min(Gw, G - v0), 128>>>(m_pts, m_qw, m_patom, m_edens, m_npts, m_na, m_axyz, m_invd, m_aadj,
+                                                            m_stratmann, G, v0, per_block, scratch, bg);
         std::vector<double> h((size_t)G * m_na * 3);
         const bool ok = cudaGetLastError() == cudaSuccess
             && cudaMemcpy(h.data(), bg, h.size() * sizeof(double), cudaMemcpyDeviceToHost) == cudaSuccess;
         cudaFree(scratch);
         cudaFree(bg);
+        m_wgrad_G = G;
+        m_wgrad_waves = waves;
+        m_wgrad_scratch_mb = 8.0 * ((double)Gw * per_block + (double)G * m_na * 3) / 1.0e6;
         if (!ok) return false;
         for (int b = 0; b < G; ++b)
             for (int k = 0; k < 3 * m_na; ++k) g[k] += h[(size_t)b * m_na * 3 + k];
@@ -726,6 +951,17 @@ private:
            *m_X = nullptr, *m_Y = nullptr, *m_ZP = nullptr, *m_c0 = nullptr, *m_cx = nullptr, *m_cy = nullptr, *m_cz = nullptr,
            *m_spoint = nullptr;
     size_t m_bytes = 0;
+    // AO screening (groups on the host, shell/column/function lists on the device)
+    std::vector<Group> m_groups;
+    std::vector<int> m_h_shells, m_h_cols, m_h_idx, m_h_bstart;
+    std::vector<unsigned char> m_h_mask;
+    int *m_g_shells = nullptr, *m_g_cols = nullptr, *m_g_idx = nullptr, *m_g_bstart = nullptr;
+    unsigned char* m_g_mask = nullptr;
+    double *m_Ps = nullptr, *m_Ws = nullptr;
+    int m_group_max = 0, m_sub_max = 0;
+    double m_kept_frac = 1.0;
+    int m_wgrad_G = 0, m_wgrad_waves = 0;
+    double m_wgrad_scratch_mb = 0.0;
     int m_nvxc = 0, m_ngrad = 0;
     double m_t_vxc = 0.0, m_t_grad = 0.0, m_t_wgrad = 0.0;
     std::string m_name = "cuda";
@@ -742,7 +978,8 @@ void setWhyXC(char* why, int whylen, const std::string& s)
 }  // namespace
 
 // Device XC object (QMGpuXC*) for one geometry, or nullptr with a reason. Claude Generated (Oct 2026, GPU KS-DFT).
-extern "C" void* curcuma_cuda_create_qm_xc(const qmint::QMGpuXCSetup* s, int device, char* why, int whylen)
+// Renamed from _create_qm_xc with the changed vtable (weightGradient) and the appended screening fields.
+extern "C" void* curcuma_cuda_create_qm_xc_screen(const qmint::QMGpuXCSetup* s, int device, char* why, int whylen)
 {
     if (!s) { setWhyXC(why, whylen, "no setup"); return nullptr; }
     if (device >= 0 && cudaSetDevice(device) != cudaSuccess) { setWhyXC(why, whylen, "cudaSetDevice failed"); return nullptr; }

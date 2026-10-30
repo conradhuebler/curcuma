@@ -292,6 +292,8 @@ QMEngine::QMEngine(QMFunctional functional, const json& config)
     }
     if (config.contains("xc_density_threshold") && config["xc_density_threshold"].is_number())
         m_xc_rho_threshold = std::max(0.0, config["xc_density_threshold"].get<double>());
+    if (config.contains("xc_ao_threshold") && config["xc_ao_threshold"].is_number())  // AO screening (Oct 2026)
+        m_xc_ao_threshold = std::max(0.0, config["xc_ao_threshold"].get<double>());
     if (config.contains("scf_early_screening") && config["scf_early_screening"].is_number())
         m_scf_early_screening = config["scf_early_screening"].get<double>();
     if (config.contains("scf_early_switch") && config["scf_early_switch"].is_number())

@@ -198,10 +198,15 @@ struct XCResult {
  * in blocks of `block` points (AOEvaluator values, rho via qmgrid::densityOnBlock). The blocks are split into a
  * fixed number of contiguous chunks that depends only on nbf (not on `threads`); every chunk accumulates its own
  * matrix and the chunks are added in order, so the result does not depend on the thread count.
- * Claude Generated (WP5).
+ * AO screening (Oct 2026): with an active `screen` (qmgrid::BlockScreen, -qm.xc_ao_threshold > 0) the blocks are
+ * those of the screen (`block` ignored) and every block works on the kept functions S only: phi_S, P_SS, the small
+ * matrix X_SS = phi_S^T Y_S is scattered into the chunk matrix over the union of the chunk's functions (64 chunks, halved above 1 GB of chunk matrices; independent of `threads`). Without a screen
+ * (or threshold 0) the code path is the unscreened one, bitwise as before.
+ * Claude Generated (WP5; screening Oct 2026).
  */
 void buildVxc(const qmgrid::MolecularGrid& grid, const qmgrid::AOEvaluator& ao, const Matrix& P,
-              const XCFunctional& f, double rho_threshold, int threads, XCResult& out, int block = 128);
+              const XCFunctional& f, double rho_threshold, int threads, XCResult& out, int block = 128,
+              const qmgrid::BlockScreen* screen = nullptr);
 
 /// Nuclear gradient of E_xc on the molecular grid (WP8), Eh/Bohr, natoms x 3 each.
 struct XCGradient {
@@ -223,10 +228,11 @@ struct XCGradient {
  * (Johnson, Gill, Pople, J. Chem. Phys. 98, 5612 (1993), eqs. 9-13 for the closed shell; second AO derivatives
  * from AOEvaluator deriv 2). `points`: for a point of atom B the translation identity d_r e = - sum_C (d e / d R_C)
  * moves - sum of all basis parts of that point onto B. bf_atom[m] = atom of active function m.
- * Fixed chunking from nbf as buildVxc: independent of `threads`. Claude Generated (Oct 2026, WP8).
+ * Fixed chunking from nbf as buildVxc: independent of `threads`. With an active `screen` the blocks and kept
+ * functions of the screen (as buildVxc). Claude Generated (Oct 2026, WP8; screening Oct 2026).
  */
 void buildXCGradient(const qmgrid::MolecularGrid& grid, const qmgrid::AOEvaluator& ao, const Matrix& P,
                      const XCFunctional& f, double rho_threshold, int threads, const std::vector<int>& bf_atom,
-                     int natoms, XCGradient& out, int block = 128);
+                     int natoms, XCGradient& out, int block = 128, const qmgrid::BlockScreen* screen = nullptr);
 
 }  // namespace qmxc

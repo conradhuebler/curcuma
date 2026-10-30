@@ -127,8 +127,9 @@ Stand.
   nicht umgesetzt, Nutzen an Wasser/Harnstoff-Clustern ungemessen. [docs/QM_SHARED_SCF_INFRA_2026-10-27.md](docs/QM_SHARED_SCF_INFRA_2026-10-27.md)
 
 - **Native LDA/PBE (WP5/WP6): J-only-Weg für integral-direct** (2026-10-30, [WP5](docs/DFT_ROADMAP/WP5_lda_vwn5.md)): `-method lda`/`pbe` mit `-qm.scf_direct on` bzw. Device-Tensor berechnet K mit und verwirft es; ein J-Digest mit eigenem Screening fehlt (CPU und GPU); auch der 2e-Gradient (kx = 0) lässt nur die K-Produkte weg.
-- **KS-DFT auf der GPU, offen** (2026-10-30, [QM_GPU_ROADMAP Abschnitt 4](docs/QM_GPU_ROADMAP.md#4-kohn-sham-dft-on-the-gpu-oct-2026)): kein AO-Screening pro Gitterblock (FP64-GEMMs dominieren auf der RTX 5090);
-  FP32-Phase (`-qm.gpu_eri_precision auto`) kostet bei KS direct +2 Iterationen (Koffein); Gewichtsableitung nur bis 700 Atome; nur RTX 5090 getestet, ROCm (`qm_xc_kernels.h` hipcc-tauglich geschrieben) nicht gebaut.
+- **KS-DFT auf der GPU, offen** (2026-10-30, [QM_GPU_ROADMAP Abschnitt 4](docs/QM_GPU_ROADMAP.md#4-kohn-sham-dft-on-the-gpu-oct-2026)): FP32-Phase (`-qm.gpu_eri_precision auto`) kostet bei KS direct +2 Iterationen (Koffein);
+  Becke-Gewichtsableitung O(npts natoms^2) (CPU und GPU) dominiert ab ~60 Atomen den XC-Gradienten (Nachbarlisten nur mit Stratmann exakt); nur RTX 5090 getestet, ROCm (`qm_xc_kernels.h` hipcc-tauglich) nicht gebaut;
+  `qm_gpu_dft_scf_benzene_pbe_rij` scheitert seit dem AO-Screening an der Iterationszahl (CPU 16 / GPU 14, dP-Grenzfall bei 1e-10, Energie gleich; QM_GPU_ROADMAP 4.1).
 
 ## 3. Tests und Validierung
 

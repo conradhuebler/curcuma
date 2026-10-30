@@ -7,6 +7,7 @@
 #                                frozen grid (fixed in space) = without response
 #   qm_dft_grad_translation_*, _rotation_*, _threads_*, _update_*   invariances, 1 vs 4 threads bitwise, UpdateMolecule
 #   qm_dft_opt_<mol>_<fn>        -opt reaches the PySCF minimum (same grid, grid response on)
+#   qm_dft_grad_screen_*         AO screening (-qm.xc_ao_threshold default vs 0, check_xc_screening.py)
 # Geometries: xyz files of qm_1e, qm_hf3c and qm_grad (no new structure files, as qm_lda/qm_pbe/qm_b3lyp).
 # Run:  ctest -L qm_dft_grad --output-on-failure
 
@@ -49,6 +50,14 @@ if(Python3_Interpreter_FOUND)
         add_test(NAME qm_dft_grad_update_${_case} COMMAND ${_DG_CHECK} --check update --case ${_case})
         set_tests_properties(qm_dft_grad_update_${_case} PROPERTIES TIMEOUT 900 LABELS "qm_dft_grad")
     endforeach()
+    # AO screening (Oct 2026): default -qm.xc_ao_threshold vs 0 on the CPU, 1 vs 4 threads bitwise
+    set(_SCR ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/check_xc_screening.py --curcuma $<TARGET_FILE:curcuma>)
+    add_test(NAME qm_dft_grad_screen_caffeine_pbe_rij COMMAND ${_SCR}
+        --xyz ${CMAKE_CURRENT_SOURCE_DIR}/../structures/medium/caffeine.xyz --method pbe "--extra=-qm.ri j" --no-thread-check)
+    add_test(NAME qm_dft_grad_screen_benzene_b3lyp COMMAND ${_SCR}
+        --xyz ${CMAKE_CURRENT_SOURCE_DIR}/../qm_hf3c/benzene.xyz --method b3lyp)
+    set_tests_properties(qm_dft_grad_screen_caffeine_pbe_rij qm_dft_grad_screen_benzene_b3lyp
+        PROPERTIES TIMEOUT 1800 LABELS "qm_dft_grad")
     foreach(_mol H2O_distorted formaldehyde_distorted)
         foreach(_fn lda pbe b3lyp)
             add_test(NAME qm_dft_opt_${_mol}_${_fn}

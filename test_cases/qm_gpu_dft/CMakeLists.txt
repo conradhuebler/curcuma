@@ -8,6 +8,8 @@
 #   qm_gpu_dft_opt_*      G3: -opt with -gpu cuda reaches the minimum of the CPU -opt (<= 1e-8 Eh, max |dr_ij| <= 1e-4 A)
 #   qm_gpu_dft_fallback_* G4: too little device memory for one block -> counted qm_xc fallback, CPU energy;
 #                         -gpu_strict true -> exit code 3
+#   qm_gpu_dft_*screen*   AO screening (-qm.xc_ao_threshold, default on): unscreened device path and small groups
+#   qm_gpu_dft_wgrad_*    Becke weight derivative device vs CPU, incl. 1410 atoms (test_qm_gpu_wgrad.cpp)
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
     set(_QD ${CMAKE_CURRENT_SOURCE_DIR}/check_qm_gpu_dft.py)
@@ -38,9 +40,14 @@ if(Python3_Interpreter_FOUND)
         --xyz ${_QD_H2O} --mode scf --method lda --loop device "--dev-extra=-qm.gpu_scf on")
     add_test(NAME qm_gpu_dft_scf_benzene_b3lyp_direct COMMAND ${Python3_EXECUTABLE} ${_QD} --curcuma $<TARGET_FILE:curcuma>
         --xyz ${_QD_BENZ} --mode scf --method b3lyp --loop device "--dev-extra=-qm.gpu_scf on -qm.gpu_direct on"
-        "--cpu-extra=-qm.scf_direct on")
+        "--cpu-extra=-qm.scf_direct on"
+        # +-2 iterations: device direct J/K uses atomics, so the count varies from run to run at the same energy
+        --tol-it 2)
     add_test(NAME qm_gpu_dft_scf_benzene_pbe_rij COMMAND ${Python3_EXECUTABLE} ${_QD} --curcuma $<TARGET_FILE:curcuma>
-        --xyz ${_QD_BENZ} --mode scf --method pbe --loop host "--extra=-qm.ri j")
+        --xyz ${_QD_BENZ} --mode scf --method pbe --loop host "--extra=-qm.ri j"
+        # +-2 iterations: the CPU RI-J SCF of benzene ends at dP ~ 1e-10, on the convergence threshold, so the screened
+        # V_xc (change ~1e-13) moves it by two iterations (docs/QM_GPU_ROADMAP.md section 4.1); energies agree.
+        --tol-it 2)
     add_test(NAME qm_gpu_dft_scf_benzene_b3lyp_rijk COMMAND ${Python3_EXECUTABLE} ${_QD} --curcuma $<TARGET_FILE:curcuma>
         --xyz ${_QD_BENZ} --mode scf --method b3lyp --loop host "--extra=-qm.ri jk")
     add_test(NAME qm_gpu_dft_scf_formaldehyde_pbe_blocks COMMAND ${Python3_EXECUTABLE} ${_QD} --curcuma $<TARGET_FILE:curcuma>
@@ -79,5 +86,37 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME qm_gpu_dft_fallback_h2o_strict COMMAND ${Python3_EXECUTABLE} ${_QD} --curcuma $<TARGET_FILE:curcuma>
         --xyz ${_QD_H2O} --mode fallback --method pbe --strict "--dev-extra=-qm.gpu_xc_max_memory_mb 0.01")
     list(APPEND _qd_tests qm_gpu_dft_fallback_h2o_memory qm_gpu_dft_fallback_h2o_strict)
+    # AO screening (Oct 2026, -qm.xc_ao_threshold): unscreened device path (threshold 0) and screened groups of
+    # 1024 points vs the CPU of the same density / the CPU run
+    add_test(NAME qm_gpu_dft_xc_benzene_pbe_noscreen COMMAND ${Python3_EXECUTABLE} ${_QD} --curcuma $<TARGET_FILE:curcuma>
+        --xyz ${_QD_BENZ} --mode xc --method pbe "--extra=-qm.xc_ao_threshold 0")
+    add_test(NAME qm_gpu_dft_grad_benzene_pbe_screen_groups COMMAND ${Python3_EXECUTABLE} ${_QD} --curcuma $<TARGET_FILE:curcuma>
+        --xyz ${_QD_BENZ} --mode grad --method pbe "--dev-extra=-qm.gpu_xc_block_points 1024")
+    add_test(NAME qm_gpu_dft_grad_benzene_b3lyp_noscreen COMMAND ${Python3_EXECUTABLE} ${_QD} --curcuma $<TARGET_FILE:curcuma>
+        --xyz ${_QD_BENZ} --mode grad --method b3lyp "--extra=-qm.xc_ao_threshold 0")
+    list(APPEND _qd_tests qm_gpu_dft_xc_benzene_pbe_noscreen qm_gpu_dft_grad_benzene_pbe_screen_groups
+        qm_gpu_dft_grad_benzene_b3lyp_noscreen)
     set_tests_properties(${_qd_tests} PROPERTIES TIMEOUT 1500 LABELS "qm_gpu_dft;gpu" SKIP_RETURN_CODE 77)
 endif()
+
+# Becke weight derivative on the device vs qmgrid::gridWeightGradient, also above the former 700-atom limit
+# (Claude Generated, Oct 2026). Structures from the library; small grids keep the O(npts natoms^2) CPU reference
+# short (peo201-chain 1410 atoms, 4x6 grid: 33840 points, f nonzero on every 16th = 2115 points). rel = max|g_dev - g_cpu| / max|g_cpu| <= 1e-12.
+add_executable(test_qm_gpu_wgrad test_qm_gpu_wgrad.cpp)
+# whole archive: the CUDA plugin binds its undefined core symbols to the executable at dlopen time (as for curcuma,
+# built -rdynamic); the archive has header-defined non-inline functions in two objects (rmsd/munkres.h), which a
+# whole-archive link sees twice, hence --allow-multiple-definition for this test executable only
+target_link_libraries(test_qm_gpu_wgrad PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,curcuma_core>")
+target_link_options(test_qm_gpu_wgrad PRIVATE "LINKER:--allow-multiple-definition")
+target_include_directories(test_qm_gpu_wgrad PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/external)
+target_compile_features(test_qm_gpu_wgrad PRIVATE cxx_std_17)
+set(_WG_PEO ${CMAKE_CURRENT_SOURCE_DIR}/../structures/bulk/peo201-chain.xyz)
+set(_WG_CAF ${CMAKE_CURRENT_SOURCE_DIR}/../structures/medium/caffeine.xyz)
+add_test(NAME qm_gpu_dft_wgrad_caffeine_sg0 COMMAND test_qm_gpu_wgrad --xyz ${_WG_CAF} --grid sg0 --threads 4)
+add_test(NAME qm_gpu_dft_wgrad_peo201_becke COMMAND test_qm_gpu_wgrad --xyz ${_WG_PEO} --grid 4x6 --stride 16 --threads 8)
+add_test(NAME qm_gpu_dft_wgrad_peo201_stratmann COMMAND test_qm_gpu_wgrad --xyz ${_WG_PEO} --grid 4x6 --partition stratmann
+    --stride 16 --threads 8)
+# the plugin is found next to the executable or on the loader path: point the loader at the curcuma binary's directory
+set_tests_properties(qm_gpu_dft_wgrad_caffeine_sg0 qm_gpu_dft_wgrad_peo201_becke qm_gpu_dft_wgrad_peo201_stratmann
+    PROPERTIES TIMEOUT 1500 LABELS "qm_gpu_dft;gpu" SKIP_RETURN_CODE 77
+    ENVIRONMENT "LD_LIBRARY_PATH=$<TARGET_FILE_DIR:curcuma>:$ENV{LD_LIBRARY_PATH}")

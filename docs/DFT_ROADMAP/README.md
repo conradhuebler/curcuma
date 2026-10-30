@@ -64,5 +64,7 @@ WP0 (Gerüst/Setup)
 
 **KS-DFT auf der GPU** (30. Okt 2026, `-gpu cuda`, `-qm.gpu_xc`): V_xc/E_xc, die KS-SCF-Schleife (geräteresident) und der KS-Gradient (XC-Teil mit Gitterantwort, 2e-Teil mit kx) laufen auf dem Gerät; Formelkerne einmal in `qm_xc_kernels.h` für CPU und GPU. ⚙️ machine-tested nur auf einer RTX 5090 (`ctest -L qm_gpu_dft` 34/34: V_xc/E_xc vs CPU gleiche Dichte ≤4.4e-15 relativ, SCF-Energie ≤1e-10 Eh, Gradient gleiche Dichte ≤4.5e-12 Eh/Bohr, `-opt` erreicht das CPU-Minimum). Messungen, nicht Getestetes: [QM_GPU_ROADMAP.md Abschnitt 4](../QM_GPU_ROADMAP.md#4-kohn-sham-dft-on-the-gpu-oct-2026).
 
+**AO-Screening pro Gitterblock und Gewichtsableitung ohne Atomgrenze** (30. Okt 2026, `-qm.xc_ao_threshold`, Default 1e-12, 0 = alter Pfad bitgleich): Punkte jedes Atoms in kompakte Blöcke sortiert, pro Block nur die Schalen mit Reichweite (`AOEvaluator::shellRadii`, eine Formel für CPU und GPU); Energie/Gradient gegen Schwelle 0 ≤6.4e-12 Eh / ≤1.4e-12 Eh/Bohr (H2O bis C40H82), V_xc pro Aufbau C40H82 CPU 23.2 → 0.92 s, GPU 3.0 → 0.49 s, nahezu linear ab C20; Becke-Gewichtsableitung auf dem Gerät ohne 700-Atom-Grenze (gleiche Bits). 🤖 AI-generated, ⚙️ machine-tested; Tabellen: [QM_GPU_ROADMAP.md Abschnitt 4.1](../QM_GPU_ROADMAP.md#41-ao-screening-per-block-and-weight-derivative-without-atom-limit-oct-30-2026).
+
 Vor jedem WP: `make -j4` in `release/` grün ohne Warning. Nach jedem WP: `ctest`.
 Volle Plandatei: `/home/conrad/.claude/plans/wir-wollen-dft-in-clever-gizmo.md`.
