@@ -1,7 +1,7 @@
 # Native ab-initio QM Implementation Guide (HF / HF-3c / KS-DFT)
 
 **Document Purpose**: Implementation guide for the native Gaussian-basis QM engine in
-Curcuma (HF, HF-3c; LDA / PBE / B3LYP pending), ported/extended from the xcDFT TCC winter
+Curcuma (HF, HF-3c, LDA, PBE, B3LYP), ported/extended from the xcDFT TCC winter
 school 2019 code with ORCA 6.1 as the validation reference.
 
 **Naming (Sep 2026)**: the engine was renamed from `DFT` to **`QMEngine`** because HF and
@@ -19,15 +19,18 @@ converges and reproduces ORCA 6.1 HF/def2-SVP on all 10 validation molecules —
 "What was wrong until July 2026" below; three real kernel defects were found and
 fixed). `ctest -L qm_1e` + `ctest -L qm_2e` 20/20. The analytic HF gradient (WP8)
 exists since Sep 2026 (see the WP8 section; `-opt` works for `hf` and `hf-3c`).
-LDA/PBE/B3LYP (WP5-WP7) are still open: those methods intentionally return the
-nuclear repulsion only. ⚠️ AI-generated / ⚙️ machine-tested only — no human
+LDA (WP5) runs since Oct 30 2026 (closed-shell RKS, Slater + VWN5/VWN-RPA,
+[WP5](DFT_ROADMAP/WP5_lda_vwn5.md)), PBE (WP6) since Oct 30 2026 (closed-shell GGA,
+[WP6](DFT_ROADMAP/WP6_pbe_gga.md)), B3LYP (WP7) since Oct 30 2026 (closed-shell hybrid, VWN per
+`-qm.vwn_variant`, [WP7](DFT_ROADMAP/WP7_b3lyp_hybrid.md)); all three have an analytic gradient with grid
+response since Oct 30 2026 (`-opt` works, [WP8](DFT_ROADMAP/WP8_analytischer_gradient.md)). ⚠️ AI-generated / ⚙️ machine-tested only — no human
 production test, and the validation set is 10 molecules in a H-Ne basis.
 
 ## Status summary
 
 (Moved here in Oct 2026 from the status table of `src/core/energy_calculators/qm_methods/CLAUDE.md`, whose line limit it exceeded.)
 
-- **Compared with**: `hf` vs ORCA 6.1 10/10 ≤4e-9 Eh (`ctest -L 'qm_1e|qm_2e'`); `hf-3c` every term vs PySCF+simple-dftd3 ≤4e-11 Eh on 17 molecules (`ctest -L qm_hf3c`); analytic `hf`/`hf-3c` gradient vs PySCF(+sdftd3) ≤2e-10 Eh/Bohr, `-opt` to the reference minimum (`ctest -L qm_grad`); LDA/PBE/B3LYP open
+- **Compared with**: `hf` vs ORCA 6.1 10/10 ≤4e-9 Eh (`ctest -L 'qm_1e|qm_2e'`); `hf-3c` every term vs PySCF+simple-dftd3 ≤4e-11 Eh on 17 molecules (`ctest -L qm_hf3c`); analytic `hf`/`hf-3c` gradient vs PySCF(+sdftd3) ≤2e-10 Eh/Bohr, `-opt` to the reference minimum (`ctest -L qm_grad`); `lda` vs PySCF/libxc on the identical grid <= 5e-12 Eh (10 cases, `ctest -L qm_lda`), vs ORCA 6.1 LSD <= 5.4e-8 Eh at converged grids (benzene 4e-7); `pbe` vs PySCF/libxc on the identical grid <= 3.9e-12 Eh (11 cases, `ctest -L qm_pbe`), vs ORCA 6.1 with libxc's mu <= 7e-8 Eh (benzene 1e-6; ORCA's default mu 0.21952 differs by 4e-6..5.5e-5 Eh); `b3lyp` vs PySCF/libxc on the identical grid <= 3.0e-11 Eh (19 cases, both VWN variants, `ctest -L qm_b3lyp`), vs ORCA 6.1 B3LYP and B3LYP/G <= 5.3e-8 Eh (benzene 6.2e-7); KS gradient (lda/pbe/b3lyp, `-qm.grid_response` default true) vs PySCF on the identical grid with and without grid response <= 3.6e-11 Eh/Bohr (27 cases incl. RI-J/RI-JK), vs FD of curcuma's energy <= 3.4e-10, `-opt` reaches the PySCF minimum (`ctest -L qm_dft_grad`, [WP8](DFT_ROADMAP/WP8_analytischer_gradient.md))
 - **Correlation on top of RHF** (Oct 2026, AI-generated, machine-tested): canonical MP2/SCS/SOS with gradient, RI-MP2, and canonical RCCSD (`ccsd`, energy only, CPU, `qm_ccsd.*`; vs PySCF <= 3.5e-10 Eh, ORCA 6.1 <= 1.5e-9 Eh on 7 molecules up to benzene), and local PNO-RI-MP2 (`lmp2`, energy only, CPU, `qm_lmp2.*`; complete spaces = RI-MP2 to 2e-12 Eh, default thresholds 3.7e-6..2.4e-5 Eh/atom on alkanes/water/small acenes, C80H162 runs; since Oct 18 2026 local fit domains with integral-direct 3-index integrals by default, `-qm.lmp2_fit local|global`, added error <= 1e-6 Eh/atom, no stored RI tensor); details and limits in [DFT_ROADMAP/WP10_korrelation_ri_mpn_ccsd.md](DFT_ROADMAP/WP10_korrelation_ri_mpn_ccsd.md) (WP11, WP13, WP15)
 - **Code and notes**: `QMEngine : public QMDriver` (`qm_engine.*`, `qm_scf.cpp`, `qm_integrals.*`, wrapper `qm_method.*`; renamed from `DFT`/`dft_*` Sep 2026, params `-qm.*`, legacy `-dft.*` merged). `HF3CMethod` (`hf3c_method.*`) = HF/MINIX + D3(BJ, `createForHF3C`, s9=0) + gCP/SRB (`gcp.*`, simple-dftd3 port; Slater exponents kept single-precision like the Fortran literals). ERI shell-quartet blocked + Schwarz (`-qm.eri_screening`) + OpenMP (`-qm.threads`) + on-the-fly 5d, see [docs/QM_GPU_ROADMAP.md](QM_GPU_ROADMAP.md). `UpdateMolecule()` now invalidates the integral/SCF caches (was silently reusing the first geometry). ⚠️ AI-generated / ⚙️ machine-tested only; closed shell, H-Ne. Integral-direct SCF (`qmint::DirectJK`, `-qm.scf_direct auto|on|off`, Sep 2026) removes the n^4 memory wall; `auto` keeps the faster stored tensor below `-qm.eri_max_memory_mb`. Gradient (WP8, Sep 2026): `gradientOneElectron`/`gradientTwoElectron` in `qm_integrals.cpp` (centre-derivative of Gaussians, two-step MD contraction), `QMEngine::computeGradient()` (Eh/Bohr; wrappers return Eh/Å); `-qm.threads` was silently ignored until then (integer-only JSON test). History (Jul 2026 kernel defects etc.): [docs/NATIVE_QM_IMPLEMENTATION.md](NATIVE_QM_IMPLEMENTATION.md).
 
@@ -235,8 +238,8 @@ stayed in place for every run. Earlier "4 threads" timings were therefore real; 
 is now the registry's 1 (or the global `-threads`).
 
 **Not tested / not implemented**: open shell; elements beyond Ne; MD with `hf`/`hf-3c`
-(energy conservation not checked); gradients of `lda`/`pbe`/`b3lyp` (no V_xc yet, they
-report `hasGradient() == false`). Every optimisation step still rebuilds the ERI tensor.
+(energy conservation not checked); gradients of `lda`/`pbe`/`b3lyp` (`hasGradient() == false`;
+a gradient request for `lda` is an error since WP5, for `pbe` since WP6, for `b3lyp` since WP7). Every optimisation step still rebuilds the ERI tensor.
 
 **SCF warm start** (Sep 2026, `-qm.scf_warm_start`, default on): the SCF of a new geometry
 of the same molecule starts from the previous converged occupied orbitals, re-orthonormalised
@@ -431,9 +434,9 @@ There is **no** `-method dft`. Each functional is its own method name, exactly l
 | Method name | Functional | Rung | WP |
 |------------|------------|------|----|
 | `hf`       | Hartree-Fock (exact exchange only) | 666 | WP3 |
-| `lda`       | Slater-Dirac + VWN5               | 1   | WP5 |
+| `lda`       | Slater-Dirac + VWN5 (`-qm.vwn_variant vwn_rpa`: VWN-RPA) | 1   | WP5 |
 | `pbe`       | PBE-GGA (+ grad rho)             | 2   | WP6 |
-| `b3lyp`     | B3LYP hybrid (+ exact exchange)   | 4   | WP7 |
+| `b3lyp`     | B3LYP hybrid (0.2 exact exchange; VWN5 default, `-qm.vwn_variant vwn_rpa`: Gaussian/libxc form) | 4   | WP7 |
 
 | `hf-3c`    | HF/MINIX + D3(BJ) + gCP + SRB (composite, `HF3CMethod`) | -- | Sep 2026 |
 | `ccsd`     | canonical closed-shell CCSD on the RHF (`CCSDMethod`, energy only) | -- | WP13, Oct 2026 |
@@ -460,11 +463,11 @@ Full plan: [`docs/DFT_ROADMAP/`](DFT_ROADMAP/) (README + WP0..WP9) and the maste
 | WP1 | GTO 1e integrals (S/T/V) | done — `ctest -L qm_1e` 10/10 (kernels corrected Jul 2026) |
 | WP2 | 4-centre ERI (McMurchie-Davidson) | done — `ctest -L qm_2e` 10/10 (kernels corrected Jul 2026) |
 | WP3 | HF-SCF (rung 666, hard ERI gate) | **done (Jul 2026)** — 10/10 molecules ≤4e-9 Eh vs ORCA, see above |
-| WP4 | DFT grid (Euler-Maclaurin + Lebedev + Becke) | open |
-| WP5 | LDA (Slater-Dirac + VWN5) | open |
-| WP6 | PBE-GGA (+ grad rho) | open |
-| WP7 | B3LYP hybrid (+ exact exchange) | open |
-| WP8 | Analytic gradient | **done for `hf`/`hf-3c` (Sep 2026)** — vs PySCF ≤1.9e-10 Eh/Bohr, `-opt` works (`ctest -L qm_grad`) |
+| WP4 | DFT grid (Treutler-Ahlrichs + Lebedev + Becke, `qm_grid.*`) | machine-tested (Oct 2026) — grid vs PySCF ≤8e-13, `ctest -L qm_grid`; [WP4](DFT_ROADMAP/WP4_dft_grid_becke.md) |
+| WP5 | LDA (Slater-Dirac + VWN5/VWN-RPA, `qm_xc.*`) | machine-tested (Oct 2026) — vs PySCF same grid ≤5e-12 Eh, `ctest -L qm_lda`; [WP5](DFT_ROADMAP/WP5_lda_vwn5.md) |
+| WP6 | PBE-GGA (PBE-X + PBE-C/PW92, `qm_xc.*`) | machine-tested (Oct 2026) — vs PySCF same grid ≤3.9e-12 Eh, `ctest -L qm_pbe`; [WP6](DFT_ROADMAP/WP6_pbe_gga.md) |
+| WP7 | B3LYP hybrid (B88 + LYP + 0.2 HF, `qm_xc.*`) | machine-tested (Oct 2026) — vs PySCF same grid ≤3.0e-11 Eh, vs ORCA ≤5.3e-8 Eh, `ctest -L qm_b3lyp`; [WP7](DFT_ROADMAP/WP7_b3lyp_hybrid.md) |
+| WP8 | Analytic gradient | **done for `hf`/`hf-3c` (Sep 2026)** — vs PySCF ≤1.9e-10 Eh/Bohr, `-opt` works (`ctest -L qm_grad`); `lda`/`pbe`/`b3lyp` (Oct 2026, grid response default on) vs PySCF same grid ≤3.6e-11 Eh/Bohr, `-opt` works (`ctest -L qm_dft_grad`); [WP8](DFT_ROADMAP/WP8_analytischer_gradient.md) |
 | WP9 | Integration, CLI, parameters, docs, CTest | open |
 
 ---

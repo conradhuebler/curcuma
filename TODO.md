@@ -126,6 +126,11 @@ Stand.
 - **Natives RHF, Fragment-Startdichte für Cluster** (2026-10-27): Gegenstück zu `-scf_guess fragments` der GFN-Methoden (Blockdichte einzeln konvergierter Moleküle);
   nicht umgesetzt, Nutzen an Wasser/Harnstoff-Clustern ungemessen. [docs/QM_SHARED_SCF_INFRA_2026-10-27.md](docs/QM_SHARED_SCF_INFRA_2026-10-27.md)
 
+- **Native LDA/PBE (WP5/WP6): J-only-Weg für integral-direct** (2026-10-30, [WP5](docs/DFT_ROADMAP/WP5_lda_vwn5.md)): `-method lda`/`pbe` mit `-qm.scf_direct on` bzw. Device-Tensor berechnet K mit und verwirft es; ein J-Digest mit eigenem Screening fehlt. V_xc nur CPU, keine AO-Screening-Listen pro Block.
+- **Native KS-Gradient (WP8 DFT): GPU und J-only** (2026-10-30, [WP8](docs/DFT_ROADMAP/WP8_analytischer_gradient.md)): der 2e-Teil für lda/pbe/b3lyp läuft immer auf der CPU
+  (`gradientTwoElectronScaled`, Q-G7-Kernel hat RHF-Gewichte); für LDA/PBE fehlt ein J-only-Gradient mit eigenem Screening, XC-Gradient nur CPU.
+  Benzol B3LYP: 2e 2.9 s von ~3 s Gradient.
+
 ## 3. Tests und Validierung
 
 - **xtb-Referenzenergien der Teststruktur-Bibliothek** (2026-10-11, `test_cases/reference_data/xtb_library_energies.json`): 66 Strukturen GFN-FF, 64 GFN2 gerechnet (peo201-chain 1410 Atome GFN2: +1,6e-3 Eh, mit `d4_atm_cutoff 40.0` +2,6e-5). GFN-FF: 57 <= 1e-6 Eh, 8 > 1e-4 (hydronium-water2 -0,169 Eh Standard `ensemble` gegen xtb Referenzregel;
@@ -149,6 +154,8 @@ Stand.
   Dateien oder Zeichenketten, keine Zahlen (Energieerhaltung, Temperatur, Drift).
 - **CG-Testbeispiel und `mc_cg_chain`** (2026-10-09): `test_cases/cg/` (`cg_params.json`, `simple_beads.vtf`; die `.vtf` ist als `cg-spheres2` in der Strukturbibliothek, die Parameterdatei nicht) ist untracked und soll als ctest eingebunden werden. `test_cases/mc_cg_chain/` (README, Casino- und Kraftfeld-Konfiguration, 100-Perlen-Kette als VTF, Laufskript; ebenfalls untracked) muss aufgearbeitet werden: Struktur in die Bibliothek, Lauf als Test.
 - **Trisaccharid als optimierte Struktur** (2026-10-09): `trisaccharide-c18h32o16` (xtb 6.6.0, Methode unvermerkt) soll durch `.gfn2-opt` ersetzt werden (und `.gfnff-opt` für GFN-FF). Blockiert: TBLite-Referenzen `sqm_reference/reference_data/triose_gfn{1,2}.ref.json` und die GFN-FF-Terme `reference_data/triose.ref.json` gelten für die alte Geometrie und müssen dort neu erzeugt werden (`USE_TBLITE` im `release/`-Build aus); danach `triose=` in `test_cases/CMakeLists.txt` (Zeilen 18, 27) umstellen. GFN-FF-Minimum liegt 1,0 Å (RMSD) von der xtb-Geometrie, Ursache offen.
+- **Native KS-Gradient (WP8 DFT), offene Tests** (2026-10-30): `-md` mit lda/pbe/b3lyp, Stratmann-Partition und `radii_adjust becke|none` im Gradienten,
+  `-qm.cartesian_d`, integral-direct und Device-1e mit KS, Systeme größer als Benzol; RI-JK-Gradient nicht thread-bitweise (schon die RI-JK-SCF-Energie).
 - ConfScan: Accept/Reject-Meldungen bei Standard-Verbosity nicht sichtbar (Eintrag von 2025, nicht erneut geprüft).
 
 - **Fehlschlagende ctest-Einträge nach dem Merge von origin/master** (14. Okt. 2026, 11 von 353, Ursachen und Belege in [docs/BROKEN_TESTS_2026-10-14.md](docs/BROKEN_TESTS_2026-10-14.md)): confscan 01-07 und der Thread-Override des Loggers (`set_verbosity` ist neben `set_thread_verbosity` wirkungslos, ca. 600 Aufrufe); `cli_analysis_02` (Info-Zeile, Test ohne `-verbosity 2`); `cli_simplemd_14` (keine REACT-Zeile, Ursache offen); `cli_sqm_12` (behoben 2026-10-26: Test umgeschrieben); `xtb_cpscf` (Toleranzen).

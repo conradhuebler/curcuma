@@ -658,6 +658,11 @@ add_subdirectory(qm_ri)
 add_subdirectory(qm_mp2)
 add_subdirectory(qm_ccsd)  # Claude Generated (Oct 2026, WP13): canonical RCCSD vs PySCF
 add_subdirectory(qm_lmp2)  # Claude Generated (Oct 2026, WP15): local PNO-RI-MP2 (exactness + regression)
+add_subdirectory(qm_grid)  # Claude Generated (Oct 2026, WP4): DFT quadrature grid vs PySCF, Lebedev order, N_el
+add_subdirectory(qm_lda)  # Claude Generated (Oct 2026, WP5): LDA kernels vs libxc, energies vs PySCF on the same grid
+add_subdirectory(qm_pbe)  # Claude Generated (Oct 2026, WP6): PBE kernels vs libxc, V_xc vs FD, energies vs PySCF on the same grid
+add_subdirectory(qm_b3lyp)  # Claude Generated (Oct 2026, WP7): B88/LYP kernels vs libxc, hybrid energies vs PySCF on the same grid
+add_subdirectory(qm_dft_grad)  # Claude Generated (Oct 2026, WP8): Kohn-Sham analytic gradient vs FD and PySCF, -opt
 # Claude Generated (Oct 2026): property tests generated from the structure library (test_cases/struct_test_policy.json):
 # translation/rotation/permutation invariance, sum of forces and torque, finite-difference gradient, repeat and thread
 # independence, CPU against CUDA. The selection is made by scripts/gen_struct_tests.py at configure time.
