@@ -33,7 +33,7 @@ add_library(test_molecule_registry unit/test_molecule_registry.cpp)
 target_link_libraries(test_molecule_registry curcuma_core)
 # the registry reads its geometries from the structure library (test_cases/structures)
 target_compile_definitions(test_molecule_registry PRIVATE
-    CURCUMA_STRUCTURE_LIBRARY_DIR="${CMAKE_SOURCE_DIR}/test_cases/structures")
+    CURCUMA_STRUCTURE_LIBRARY_DIR="${CURCUMA_STRUCTURES_DIR}")
 
 if(USE_PCH)
     target_precompile_headers(test_molecule_registry REUSE_FROM curcuma_core)
@@ -159,6 +159,32 @@ add_test(NAME gfnff_react_fd_gradient
          COMMAND test_gfnff_react_fd
          WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 
+# Claude Generated (Sep 2026): GeometryTools angle/dihedral/radius of gyration.
+# External potentials: parsing and selection resolution. Claude Generated 2026.
+add_executable(test_external_potentials test_external_potentials.cpp)
+target_link_libraries(test_external_potentials curcuma_cap curcuma_core)
+add_test(NAME external_potentials COMMAND test_external_potentials)
+set_tests_properties(external_potentials PROPERTIES TIMEOUT 300)
+
+add_executable(test_geometry_tools test_geometry_tools.cpp)
+target_link_libraries(test_geometry_tools curcuma_core)
+if(USE_PCH)
+        target_precompile_headers(test_geometry_tools REUSE_FROM curcuma_core)
+endif()
+add_test(NAME geometry_tools COMMAND test_geometry_tools)
+set_tests_properties(geometry_tools PROPERTIES TIMEOUT 60)
+
+# Claude Generated (Sep 2026): react-scan bookkeeping — refractory count, authoritative
+# empty bond set, exchange-resolution sigma counts, event record, bond orders.
+add_executable(test_gfnff_react_filters test_gfnff_react_filters.cpp)
+target_link_libraries(test_gfnff_react_filters curcuma_core)
+if(USE_PCH)
+        target_precompile_headers(test_gfnff_react_filters REUSE_FROM curcuma_core)
+endif()
+add_test(NAME gfnff_react_filters
+         COMMAND test_gfnff_react_filters
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(gfnff_react_filters PROPERTIES TIMEOUT 120 LABELS "gfnff;react")
 # Claude Generated (Sep 27, 2026): frag_charge_model ensemble must not depend on the geometry
 # the topology was built at (Known Issue #31; check 5 of cli_gfnff_05_frag_charge_ensemble,
 # which needs a reused calculator instance the -sp CLI cannot express).
@@ -475,6 +501,24 @@ foreach(EO_MOL triose caffeine)
         set_tests_properties(gfnff_gpu_energy_only_geometry_${EO_MOL}
             PROPERTIES TIMEOUT 120 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu")
     endif()
+    # Claude Generated (Oct 2026): the same check on ROCm, with the fused dispersion gather (default) and with
+    # CURCUMA_ROCM_DISP_FUSED=0 (per-pair C6/dC6dCN kernel). The fused path leaves the per-pair C6 stale in gradient
+    # calls and refills it before the next energy-only call; this test is the only one that runs that refill.
+    if(USE_ROCM)
+        add_test(NAME gfnff_rocm_energy_only_geometry_${EO_MOL}
+                 COMMAND test_gfnff_energy_only_geometry
+                         ${CMAKE_CURRENT_BINARY_DIR}/molecules/larger/${EO_MOL}.xyz rocm
+                 WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+        set_tests_properties(gfnff_rocm_energy_only_geometry_${EO_MOL}
+            PROPERTIES TIMEOUT 120 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;rocm")
+        add_test(NAME gfnff_rocm_energy_only_geometry_unfused_${EO_MOL}
+                 COMMAND test_gfnff_energy_only_geometry
+                         ${CMAKE_CURRENT_BINARY_DIR}/molecules/larger/${EO_MOL}.xyz rocm
+                 WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+        set_tests_properties(gfnff_rocm_energy_only_geometry_unfused_${EO_MOL}
+            PROPERTIES TIMEOUT 120 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;rocm"
+                       ENVIRONMENT "CURCUMA_ROCM_DISP_FUSED=0")
+    endif()
 endforeach()
 
 
@@ -531,6 +575,21 @@ set_tests_properties(purification PROPERTIES TIMEOUT 60 LABELS "native_xtb;eigen
 
 # Claude Generated (Jun 2026): seeded block LOBPCG kernel (the iterative `-eigensolver lobpcg`
 # path) vs Eigen's lowest-k eigenpairs, incl. a warm-start (subspace-recycling) case.
+# The measurement capability. Claude Generated 2026 - checked against geometry
+# worked out by hand, not against a previous run of the same code.
+# The CIF reader and supercell builder. Claude Generated 2026 - the face-centring
+# case is checked against positions worked out on paper, because a reader that
+# ignores symmetry returns a well-formed molecule with the wrong atom count.
+add_executable(test_cif test_cif.cpp)
+target_link_libraries(test_cif curcuma_core)
+add_test(NAME cif COMMAND test_cif)
+set_tests_properties(cif PROPERTIES TIMEOUT 60)
+
+add_executable(test_measurement test_measurement.cpp)
+target_link_libraries(test_measurement curcuma_cap curcuma_core)
+add_test(NAME measurement_capability COMMAND test_measurement)
+set_tests_properties(measurement_capability PROPERTIES TIMEOUT 120)
+
 add_executable(test_lobpcg unit/test_lobpcg.cpp)
 target_link_libraries(test_lobpcg curcuma_core)
 if(USE_PCH)
@@ -633,6 +692,28 @@ add_executable(test_tst_rate test_tst_rate.cpp)
 target_include_directories(test_tst_rate PRIVATE ${CMAKE_SOURCE_DIR})
 add_test(NAME test_tst_rate COMMAND test_tst_rate)
 set_tests_properties(test_tst_rate PROPERTIES TIMEOUT 60 LABELS "pathcv;unit")
+
+# Claude Generated (Oct 2026): property tests generated from the structure library (test_cases/struct_test_policy.json):
+# translation/rotation/permutation invariance, sum of forces and torque, finite-difference gradient, repeat and thread
+# independence, CPU against CUDA. The selection is made by scripts/gen_struct_tests.py at configure time.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    set(CURCUMA_STRUCT_PYTHON "${Python3_EXECUTABLE}")
+    get_filename_component(CURCUMA_STRUCT_REPO "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
+    execute_process(COMMAND "${Python3_EXECUTABLE}" "${CURCUMA_STRUCT_REPO}/scripts/gen_struct_tests.py"
+                            --out "${CMAKE_CURRENT_BINARY_DIR}/generated_struct_tests.cmake" --cuda "${USE_CUDA}" --rocm "${USE_ROCM}"
+                    RESULT_VARIABLE _struct_gen_rc ERROR_VARIABLE _struct_gen_err)
+    if(_struct_gen_rc EQUAL 0)
+        include("${CMAKE_CURRENT_BINARY_DIR}/generated_struct_tests.cmake")
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+            "${CURCUMA_STRUCTURES_DIR}/manifest.json" "${CMAKE_CURRENT_SOURCE_DIR}/struct_test_policy.json"
+            "${CURCUMA_STRUCT_REPO}/scripts/gen_struct_tests.py")
+    else()
+        message(WARNING "structure property tests not generated: ${_struct_gen_err}")
+    endif()
+else()
+    message(STATUS "Python3 not found - structure property tests are not generated")
+endif()
 
 # Claude Generated (Sep 2026): interface-level gradient + frequency contract.
 # Guards two things nothing else covered:

@@ -101,6 +101,29 @@ public:
     /// JSON sub-scope names carrying method-specific parameters (controller["gfnff"], ...):
     /// the single source of truth for EnergyCalculator / opt / MD / ConfSearch forwarding.
     static const std::vector<std::string>& methodParameterScopes();
+    /**
+     * @brief JSON parameter scope that carries the parameters of a method ("xtb", "tblite", "ulysses", ...).
+     * Claude Generated (Oct 16, 2026). Used by the CLI to route a flat flag that several modules register
+     * (e.g. -electronic_temperature: tblite, ulysses, xtb) to the module of the selected -method instead of
+     * leaving it in the command module, where no method reads it.
+     * gfn1/gfn2 (native), xtb-* (external XTB) -> "xtb"; tblite-*, ipea1 -> "tblite"; the Ulysses methods
+     * -> "ulysses"; eht -> "eht"; native NDDO (pm3, am1, mndo, pm6) -> "scf"; "" when the method has
+     * no scope of its own.
+     */
+    static std::string parameterScopeForMethod(const std::string& method_name);
+    /// Claude Generated (Oct 2026): true when the method reads the shared registry module "scf"
+    /// (scf_parameters.h): native gfn1/gfn2 and NDDO, and the external tblite, xtb and Ulysses wrappers.
+    static bool readsSharedScfScope(const std::string& method_name);
+    /**
+     * @brief Resolve the shared "scf" scope of a method config in place. Claude Generated (Oct 2026).
+     * Rewrites aliases in config["scf"] to their canonical names (max_iterations -> scf_max_iterations)
+     * and drops the "method default" markers (0, -1, "auto"), so a reader can treat a present key as
+     * set. For the external wrappers it copies scf_max_iterations / scf_damping onto their own names
+     * (tblite.max_iterations, tblite.damping, xtb.max_iterations, ulysses.max_iterations) unless that
+     * scope sets them itself; for xtb-gfn1/2 it also copies the xtb-scope max_iterations,
+     * electronic_temperature and spin into the tblite scope, which the TBLite provider reads.
+     */
+    static void applySharedScfScope(json& config, const std::string& method_name);
 
     // Provider availability (compile flags + runtime probes); public so table rows can use them.
     static bool hasOrca();

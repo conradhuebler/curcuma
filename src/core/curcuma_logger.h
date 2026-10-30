@@ -24,6 +24,9 @@
 #include <fmt/color.h>
 #include <fmt/core.h>
 #include <set>
+#include <functional>
+#include <cstdint>
+#include <sstream>
 #include <string>
 #include <type_traits>
 #include <unordered_map>
@@ -49,10 +52,71 @@ private:
 
 public:
     // Configuration methods
-    static void set_verbosity(int level) { m_verbosity = level; }
+    // ------------------------------------------------------------------
+    // Capturing the output  -  Claude Generated 2026
+    //
+    // curcuma prints. Embedded in a GUI that is a problem: the text goes to a
+    // terminal nobody is looking at, which is why qurcuma runs every controller at
+    // verbosity 0 and had to have SimpleMD::stopReason() retrofitted just to learn
+    // why a run ended.
+    //
+    // A sink is THREAD-LOCAL on purpose. Two CurcumaMethods can run at once -- the
+    // MD worker and a job started from a chat window -- and a process-wide sink
+    // would hand each of them the other's output.
+    // ------------------------------------------------------------------
+    enum class SinkLevel { Debug = 0,
+        Info = 1,
+        Warning = 2,
+        Error = 3 };
+
+    using Sink = std::function<void(SinkLevel, const std::string&)>;
+
+    /// Captures everything the CURRENT THREAD logs while it is alive. Scopes nest;
+    /// every scope on the stack sees the message, so an outer "capture this whole
+    /// job" still works when an inner one is installed.
+    class SinkScope {
+    public:
+        explicit SinkScope(Sink sink);
+        ~SinkScope();
+        SinkScope(const SinkScope&) = delete;
+        SinkScope& operator=(const SinkScope&) = delete;
+
+        /// Identifies this capture, so records can be attributed to a run.
+        std::uint64_t id() const { return m_id; }
+
+    private:
+        std::uint64_t m_id = 0;
+    };
+
+    /// How many sinks are active on this thread. For tests and diagnostics.
+    static std::size_t active_sink_count();
+
+    /// Process-wide default, as before. The CLI sets this once.
+    // Claude Generated (Oct 16, 2026): also updates this thread's override when one is active (defined in
+    // curcuma_logger.cpp). set_verbosity() used to change the global level only; since the per-thread override
+    // (d2cbb701, Sep 9) every set_verbosity() call made inside a CurcumaMethod scope on that thread was
+    // ineffective, because get_verbosity() reads the override first. About 80 call sites (silence a
+    // section, re-assert the level after setup, restore) assume the call takes effect on the calling thread;
+    // seven cli_confscan tests and cli_gfnff_06/07 failed on it. Threads without an override are unchanged.
+    static void set_verbosity(int level);
+
+    // Claude Generated 2026 - Per-thread override.
+    //
+    // CurcumaMethod used to save and restore the *global* level around its own
+    // lifetime, with a comment stating the assumption: single-threaded, strictly
+    // nested. qurcuma breaks both -- the MD worker and a job from the chat dock
+    // overlap -- and then one destructor restores a level another thread had
+    // captured, leaving a run either mute or shouting.
+    //
+    // -1 means "no override, use the process default", which is also what restores
+    // the previous state when a scope ends.
+    static void set_thread_verbosity(int level);
+    static int thread_verbosity();
+    /// The level actually in force on this thread.
+    static int effective_verbosity();
     static void set_colors(bool enable) { m_use_colors = enable; }
     static void set_format(OutputFormat fmt) { m_format = fmt; }
-    static int get_verbosity() { return m_verbosity; }
+    static int get_verbosity() { return effective_verbosity(); }
     static bool colors_enabled() { return m_use_colors; }
 
     // Claude Generated: global progress-bar switch. Disabled via -noprogress or when
@@ -96,6 +160,20 @@ public:
 
     // Special formatting functions
     static void result_raw(const std::string& data);
+
+    /// Claude Generated 2026 - Drop-in for `std::cout << a << b << std::endl`.
+    ///
+    /// Same stream semantics, so the formatting of numbers is byte-for-byte what
+    /// std::cout produced; unconditional, so migrating a print does not silently
+    /// hide it at low verbosity; and it reaches any sink, which is the point --
+    /// curcuma's setup chatter went to a terminal nobody was watching.
+    template <typename... Args>
+    static void raw(Args&&... args)
+    {
+        std::ostringstream stream;
+        (stream << ... << args);
+        result_raw(stream.str());
+    }
     static void progress(int current, int total, const std::string& msg);
     // Claude Generated: live in-place progress bar (carriage-return). No-op when the global
     // switch is off (set_progress_enabled). The caller handles verbosity gating, because the
@@ -203,8 +281,11 @@ public:
 
 private:
     // Helper functions for internal formatting
-    static void log_colored(fmt::color color, const std::string& prefix, const std::string& msg, bool force_visible = false);
+    static void log_colored(fmt::color color, const std::string& prefix, const std::string& msg,
+        bool force_visible = false, SinkLevel level = SinkLevel::Info);
     static void log_plain(const std::string& msg);
+    /// Hand @p text to every sink on this thread. Never throws into the caller.
+    static void emit_to_sinks(SinkLevel level, const std::string& text);
     static std::string format_json_value(const json& value);
     static std::string format_energy_relative(double eh_diff);
     static std::string format_time(double fs);

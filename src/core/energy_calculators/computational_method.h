@@ -22,6 +22,8 @@
 #include "src/core/global.h"
 #include "json.hpp"
 
+class GFNFF;   ///< forward declaration for gfnffInstance(); no header dependency
+
 using json = nlohmann::json;
 
 /**
@@ -107,6 +109,34 @@ public:
      * @return Vector of per-atom CN values, or empty vector if not supported
      */
     virtual Vector getCN() const { return Vector(); }
+
+    /**
+     * @brief The GFNFF instance behind this method, or nullptr for anything else.
+     *
+     * Claude Generated (Sep 2026). Lets a driver read live force-field state — the
+     * reactive bond list and its events, the hydrogen/halogen-bond lists — without
+     * knowing which backend runs the energy.
+     *
+     * VIRTUAL on purpose: the CUDA and ROCm wrappers live in dlopen plugins and
+     * derive from an `extern template` base, so an inline accessor on the concrete
+     * class is not resolvable from outside the plugin (see the "deliberately NOT
+     * final" note in gfnff_gpu_method.h). Dispatching through the vtable, which the
+     * plugin emits, is what works across that boundary.
+     */
+    virtual GFNFF* gfnffInstance() const { return nullptr; }
+
+    /**
+     * @brief True if this method set up a molecule it should not calculate (Claude Generated, Oct 2026).
+     *
+     * A GPU GFN-FF wrapper answers true when the CPU applies a charge rule that the device path does not
+     * (net charge on several fragments with frag_charge_model ensemble). EnergyCalculator::setMolecule()
+     * then reports a GPU fallback and replaces the method by the CPU one. Virtual for the same reason as
+     * gfnffInstance(): the plugins derive from an `extern template` base.
+     */
+    virtual bool requestsCpuFallback() const { return false; }
+    /// Reason shown with the counted GPU fallback when requestsCpuFallback() is true (empty: the default
+    /// charge-rule text). Claude Generated (Oct 2026).
+    virtual std::string cpuFallbackReason() const { return std::string(); }
     
     /**
      * @brief Copy gradient into pre-allocated target (avoids heap allocation).

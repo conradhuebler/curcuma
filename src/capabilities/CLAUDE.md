@@ -49,7 +49,7 @@ Hessian, docking. Energies and gradients always come from `EnergyCalculator`. Do
 
 ## Open items
 
-- `CurcumaOpt` features without a driver counterpart: `opt_h` (first priority in the former note), Hessian after opt, `mo_scheme`, `./stop` file, GFN2 dipole,
+- `CurcumaOpt` features without a driver counterpart: `opt_h` (the driver side exists: `OptimizerDriver::setConstraints`, 0 = held; the element-based selection is missing), Hessian after opt, `mo_scheme`, `./stop` file, GFN2 dipole,
   `fusion` (needs a `Molecule::Check()` gate, which `OptimizerDriver` does not have)
 - Parallel `-opt` batch has no live progress bar: `CxxThreadPool` updates it only in legacy mode (work-package note OPT_MULTIXYZ_PARALLELISM_WP in docs/, not committed to git yet)
 - ConfScan `Reorder`: a thread disabled for one candidate can stay disabled for the next (exclude-list `continue`, re-enable only inside

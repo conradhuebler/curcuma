@@ -215,6 +215,24 @@ struct GFNFFHydrogenBond {
 };
 
 /**
+ * @brief Per-atom inputs of the H-bond detection in flat arrays (Claude Generated, Oct 2026)
+ *
+ * Filled by GFNFF::prepareHBDetectInputs() (the O(N) part of detectHydrogenBondsNative()), consumed by the
+ * device-side detection (FFWorkspaceGPU::detectHBondsOnDevice(), -gfnff.gpu_hb_detect_on_device).
+ */
+struct GFNFFHBDetectInputs {
+    int natoms = 0;
+    std::vector<double> basicity, acidity, charge;  ///< current_basicity / current_acidity / Phase-1 charge
+    std::vector<char> is_hb_hyd, ab_ok;             ///< HB-capable hydrogen / atom may be donor or acceptor
+    std::vector<int> hb_hyd_list;                   ///< the HB hydrogens, ascending
+    std::vector<int> nbr_off, nbr_idx;              ///< topology neighbour lists (neighbors_B / neighbors_C source)
+    std::vector<int> bond_off, bond_idx;            ///< bonded partners of each atom (is_bonded)
+    std::vector<int> hyd_off, hyd_idx;              ///< HB hydrogens bonded to each atom (hyd_on)
+    double hbthr1 = 0.0, hbthr2 = 0.0;              ///< squared-Bohr thresholds of the AB pair and the case-1 criterion
+    double min_pair_energy = 0.0;                   ///< hb_min_pair_energy_eh (case-1 pruning, 0 = off)
+};
+
+/**
  * @brief GFN-FF Halogen Bond (XB) three-body term
  *
  * Reference: gfnff_engrad.F90 - rbxgfnff_eg()

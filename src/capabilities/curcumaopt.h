@@ -60,13 +60,20 @@ const json OptJsonPrivate{
 // ============================================================================
 namespace {
     BEGIN_PARAMETER_DEFINITION(opt)
+    MODULE_INFO("Geometry optimisation and single-point energies: optimiser choice, convergence and the energy method.", "Optimisation", {"opt", "sp"})
 
     // Basic
-    PARAM(method, String, "gfnff", "Energy/gradient method. Default gfnff: the fast general-purpose choice (native GFN-FF). gfn2 is the accurate one (native GFN2-xTB, ~100x slower); gfn1, eht, pm3, uff, qmdff also available.", "Basic", {})
-    PARAM(optimizer, String, "auto", "Optimizer algorithm: auto, lbfgspp, lbfgs, diis, rfo, ancopt", "Basic", {})
-    PARAM(threads, Int, 1, "Number of parallel threads", "Basic", {})
-    PARAM(charge, Int, 0, "Total molecular charge", "Basic", { "Charge" })
-    PARAM(spin, Int, 0, "Spin multiplicity", "Basic", { "Spin" })
+    // master's fuller help text, this branch's tier/bounds annotations.
+    PARAM(method, String, "gfnff", "Energy/gradient method. Default gfnff: the fast general-purpose choice (native GFN-FF). gfn2 is the accurate one (native GFN2-xTB, ~100x slower); gfn1, eht, pm3, uff, qmdff also available.", "Basic", {},
+        "tier=primary")
+    PARAM(optimizer, String, "auto", "Optimizer algorithm: auto, lbfgspp, lbfgs, diis, rfo, ancopt", "Basic", {},
+        "tier=primary")
+    PARAM(threads, Int, 1, "Number of parallel threads", "Basic", {},
+        "min=1")
+    PARAM(charge, Int, 0, "Total molecular charge", "Basic", { "Charge" },
+        "tier=primary")
+    PARAM(spin, Int, 0, "Spin multiplicity", "Basic", { "Spin" },
+        "tier=primary")
     PARAM(verbosity, Int, 1, "Output level: 0=silent, 1=table, 2=detailed, 3=debug", "Basic", { "verbose" })
 
     // Convergence

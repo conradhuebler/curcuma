@@ -37,6 +37,42 @@ inline double Distance(const Position& a, const Position& b)
     return distance;
 }
 
+/*! \brief Angle a-b-c at the middle atom b, in degrees (0 ... 180).
+ *
+ * Claude Generated (Sep 2026). The cosine is clamped before acos: rounding can push
+ * the dot product a hair outside [-1, 1] for a straight or fully folded arrangement,
+ * which would return NaN.
+ */
+inline double Angle(const Position& a, const Position& b, const Position& c)
+{
+    const Position u = a - b;
+    const Position v = c - b;
+    const double nu = u.norm(), nv = v.norm();
+    if (nu < 1e-12 || nv < 1e-12)
+        return 0.0;
+    double cosine = u.dot(v) / (nu * nv);
+    cosine = std::max(-1.0, std::min(1.0, cosine));
+    return radiansToDegrees(std::acos(cosine));
+}
+
+/*! \brief Dihedral a-b-c-d in degrees, signed (-180 ... 180, IUPAC convention).
+ *
+ * Claude Generated (Sep 2026). Standard atan2 form over the two plane normals, so
+ * the sign distinguishes the two enantiomeric arrangements instead of folding them
+ * onto one another.
+ */
+inline double Dihedral(const Position& a, const Position& b, const Position& c, const Position& d)
+{
+    const Position b1 = b - a, b2 = c - b, b3 = d - c;
+    const double n2 = b2.norm();
+    if (n2 < 1e-12)
+        return 0.0;
+    const Position nn1 = b1.cross(b2);
+    const Position nn2 = b2.cross(b3);
+    const Position m = nn1.cross(b2 / n2);
+    return radiansToDegrees(std::atan2(m.dot(nn2), nn1.dot(nn2)));
+}
+
 inline Position Centroid(const Geometry& geom)
 {
     Position position{ 0, 0, 0 };
@@ -48,6 +84,26 @@ inline Position Centroid(const Geometry& geom)
     position /= double(geom.rows());
 
     return position;
+}
+
+/*! \brief Radius of gyration of a bare geometry, in the geometry's length unit.
+ *
+ * Claude Generated (Sep 2026). Unweighted: every position counts once, so this is a
+ * pure shape measure of a coordinate set and needs no element information. For the
+ * mass-weighted radius (and the PBC-aware and per-fragment variants) use
+ * Molecule::GyrationRadius, which has the masses.
+ */
+inline double GyrationRadius(const Geometry& geom)
+{
+    if (geom.rows() == 0)
+        return 0.0;
+    const Position centre = Centroid(geom);
+    double sum = 0.0;
+    for (int i = 0; i < geom.rows(); ++i) {
+        const Position d = Position(geom.row(i)) - centre;
+        sum += d.squaredNorm();
+    }
+    return std::sqrt(sum / double(geom.rows()));
 }
 
 inline Geometry RotationX(double alpha)

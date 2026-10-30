@@ -19,6 +19,7 @@
  */
 
 #include "energycalculator.h"
+#include "src/core/gpu_fallback.h"
 #include "energy_calculators/ff_methods/forcefield_method.h"
 #include "gpu_device_pool.h"
 #include "energy_calculators/gpu_plugin.h"
@@ -291,6 +292,31 @@ void EnergyCalculator::setMolecule(const Mol& mol) {
             return;
         }
         
+        // Claude Generated (Oct 2026): a GPU GFN-FF wrapper does not apply the CPU charge rule
+        // frag_charge_model ensemble (net charge on several fragments). It says so after its setup
+        // (requestsCpuFallback()); the calculation then runs on the CPU method, counted like every
+        // other GPU fallback (-gpu_strict true stops here). -gfnff.frag_charge_model reference keeps
+        // the GPU, with the same rule on both sides.
+        if (m_method->requestsCpuFallback()) {
+            json cpu_config = m_controller;
+            cpu_config["gpu"] = "none";
+            const std::string why = m_method->cpuFallbackReason();
+            curcuma::reportGpuFallback(!why.empty() ? why
+                                       : "GFN-FF: charged system with several fragments needs frag_charge_model ensemble, "
+                                         "calculation on the CPU",
+                                       !why.empty() ? fmt::format("{} atoms; -gfnff.solvent none keeps the GPU", mol.m_number_atoms)
+                                                    : fmt::format("{} atoms, charge {}; -gfnff.frag_charge_model reference keeps the GPU",
+                                                                  mol.m_number_atoms, mol.m_charge));
+            if (!createMethod(m_method_name, cpu_config) || !m_method->setMolecule(mol)) {
+                CurcumaLogger::error("Failed to set molecule in the CPU method after the GPU fallback");
+                handleMethodError("setMolecule in CPU method after GPU fallback");
+                return;
+            }
+            CurcumaLogger::info(!why.empty() ? why + " - CPU method used"
+                : std::string("GFN-FF: charged system with several fragments, GPU path does not apply frag_charge_model "
+                              "ensemble - CPU method used (-gfnff.frag_charge_model reference keeps the GPU)"));
+        }
+
         m_initialized = true;
         ClearError();
 

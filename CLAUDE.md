@@ -155,8 +155,8 @@ numbers: [docs/KNOWN_ISSUES_ARCHIVE.md](docs/KNOWN_ISSUES_ARCHIVE.md).
 | External | TBLite (`tblite-*`, `ipea1`), XTB (`xtb-*`), Ulysses (`ugfn2`, PM6, RM1 ...), ORCA, DFT-D3/D4, `xtb-gfnff` | |
 | Force fields | UFF, QMDFF, coarse-grained `cg` (`-load_ff_json`), parameter caching for all | CLEANUP_2026_09.md |
 
-- **GPU** (`-gpu cuda|rocm|vulkan|auto`): runtime `dlopen` plugins, CPU-only runs need none. CUDA (run on H200, RTX 5090, RTX 5080, RTX A4500, GTX 1660) and ROCm (Radeon 890M gfx1150 only) for gfn1/gfn2/gfnff, Vulkan opt-in. Multi-GPU, tuning flags, ROCm build unverified: [SQM_GPU.md](docs/SQM_GPU.md), [MULTI_GPU.md](docs/MULTI_GPU.md), [GPU_TUNING.md](docs/GPU_TUNING.md), [GPU_PLUGIN_STARTUP.md](docs/GPU_PLUGIN_STARTUP.md). GPU fallbacks are counted; `-gpu_strict true` exits at the first.
-- **SCF** (native xTB): Broyden default; `-scf_mode`, `-scf_guess h0|eeq|fragments`; NaN or unconverged SCF is an error (`-scf_allow_unconverged true`); `-scf_extrapolation aspc|gauss`; `-large_system_mode fragments|dc|sparse`; threads `-threads N`: [SCF_MODES.md](docs/SCF_MODES.md), [SQM_LARGE_SYSTEMS.md](docs/SQM_LARGE_SYSTEMS.md), [SQM_THREADING.md](docs/SQM_THREADING.md).
+- **GPU** (`-gpu cuda|rocm|vulkan`; `-gpu auto` was removed Oct 26, 2026): runtime `dlopen` plugins, CPU-only runs need none. CUDA (run on H200, RTX 5090, RTX 5080, RTX A4500, GTX 1660) and ROCm (Radeon 890M gfx1150 only) for gfn1/gfn2/gfnff, Vulkan opt-in. Multi-GPU, tuning flags, ROCm build unverified: [SQM_GPU.md](docs/SQM_GPU.md), [MULTI_GPU.md](docs/MULTI_GPU.md), [GPU_TUNING.md](docs/GPU_TUNING.md), [GPU_PLUGIN_STARTUP.md](docs/GPU_PLUGIN_STARTUP.md). GPU fallbacks are counted; `-gpu_strict true` exits at the first.
+- **SCF** (native xTB): Broyden default; shared knobs in module `scf`; `-scf_guess h0|eeq|fragments`; NaN or unconverged SCF is an error (`-scf_allow_unconverged true`); `-scf_extrapolation aspc|gauss`; `-large_system_mode fragments|dc|sparse`; threads `-threads N`: [SCF_MODES.md](docs/SCF_MODES.md), [SQM_LARGE_SYSTEMS.md](docs/SQM_LARGE_SYSTEMS.md), [SQM_THREADING.md](docs/SQM_THREADING.md). Opt-in `-scf_precond frag` (CPU loop and the resident CUDA loop for GFN1 and GFN2; neutral closed shell): fragment Broyden seed with guard, fewer iterations (AI): [SCF_PRECOND.md](docs/SCF_PRECOND.md).
 - **Solvation**: TBLite (CPCM/GB/ALPB), Ulysses GBSA, native gfn1/gfn2 ALPB+GBSA (≤1e-8 Eh vs tblite), native GFN-FF ALPB (≤1e-8 Eh vs xtb 6.7.1); native CPCM pending: [SOLVATION.md](docs/SOLVATION.md), [SQM_SOLVATION_WP.md](docs/SQM_SOLVATION_WP.md).
 - **Optimisation**: LBFGS and others, constraints; default `auto` optimiser can abort on a high-symmetry system whose only active mode is totally symmetric (use `-opt.optimizer lbfgs`).
 - **ConfSearch / ConfScan / RMSD**: ConfScan filter protocol for structures with topological symmetry (energy, rotational constants, Vietoris-Rips barcodes, permutation reuse): preprint [ChemRxiv 10.26434/chemrxiv.15009180/v1](https://chemrxiv.org/doi/full/10.26434/chemrxiv.15009180/v1); dual-method (`-md_method`, `-opt_method`), restartable (`-restart`), MTD screen: [CONFSEARCH_DUAL_METHOD.md](docs/CONFSEARCH_DUAL_METHOD.md), [CONFSEARCH_RESTART.md](docs/CONFSEARCH_RESTART.md), [CONFSEARCH_MTD_SCREEN.md](docs/CONFSEARCH_MTD_SCREEN.md).
@@ -302,6 +302,8 @@ ctest -R "cli_rmsd_01" --verbose
 
 **Test count**: `ctest -N` in `release/` lists 333 tests (Oct 1, 2026); run `ctest` for the current result. The per-category counts above are historical.
 
+**Generated structure tests** (`ctest -L structinv -j8`, 128 tests with CUDA, 73 s): translation/rotation/permutation invariance, forces, finite-difference gradient, repeat, threads, CPU against CUDA, generated from `test_cases/structures` and `struct_test_policy.json`; a loosened limit needs a `known_deviations` entry with the reason: [docs/STRUCTURE_TESTS.md](docs/STRUCTURE_TESTS.md).
+
 ## Project Management
 
 - **Knowledge store (Obsidian vault)**: `~/Nextcloud/Obsidan/Wissen/`, German, operator-owned. Read its `00 Regeln.md` before writing anything into it.
@@ -312,7 +314,7 @@ ctest -R "cli_rmsd_01" --verbose
 - **rev-gfnff backlog**: places where GFN-FF could be better than the reference, each checked against an external reference (r2SCAN-3c, GFN2, DLPNO, experiment): [docs/REV_GFNFF_TODO.md](docs/REV_GFNFF_TODO.md). Port fidelity stays the default.
 - **Regression check before/after a change**: `scripts/refset_regression.py` runs MOR41/GMTKN55 through two curcuma binaries (reference built from a worktree) and reports which energies moved; `scripts/scan_convergence.py` separates real changes from non-converged SCF. See [docs/REGRESSION_CHECK.md](docs/REGRESSION_CHECK.md).
 - **Benchmark sets**: `scripts/fetch_testset.py` fetches MOR41 and GMTKN55 on demand (S30L is manual/paywalled); `scripts/gmtkn55_compare.py` caches energies in `_run/energies.json` and reuses them unless `--recompute` is passed (see Validation Traps); `scripts/testset_perf.py` benchmarks wall-clock. See [docs/TESTSET_RETRIEVAL.md](docs/TESTSET_RETRIEVAL.md), [docs/GMTKN55_VALIDATION.md](docs/GMTKN55_VALIDATION.md).
-- **EEQ solver**: `-eeq_solver.solve_method auto|cholesky|ppcg|pcg|lu|ldlt|batched` (alias `-gfnff.solve`), same names on CPU and `-gpu cuda`, `auto` switches to ppcg at 500 atoms (`eeq_ppcg_min_atoms`; local-inverse preconditioner by default, `-eeq_solver.eeq_ppcg_precond diag` restores Jacobi), unknown name = error, verbosity 1 names the running path: [docs/EEQ_SOLVER_CONTROL.md](docs/EEQ_SOLVER_CONTROL.md). Benchmark: `scripts/eeq_solver_benchmark.py <library id> --curcuma BIN [--xtb xtb]`, [docs/EEQ_SOLVER_BENCHMARK.md](docs/EEQ_SOLVER_BENCHMARK.md).
+- **EEQ solver**: `-gfnff.solve_method auto|cholesky|ppcg|pcg|lu|ldlt|batched` (flat `-solve_method`; old `-eeq_solver.<name>` still works and wins), same names on CPU and `-gpu cuda`, `auto` switches to ppcg at 500 atoms (`eeq_ppcg_min_atoms`; local-inverse preconditioner by default, `-gfnff.eeq_ppcg_precond diag` restores Jacobi), unknown name = error, verbosity 1 names the running path: [docs/EEQ_SOLVER_CONTROL.md](docs/EEQ_SOLVER_CONTROL.md). Benchmark: `scripts/eeq_solver_benchmark.py <library id> --curcuma BIN [--xtb xtb]`, [docs/EEQ_SOLVER_BENCHMARK.md](docs/EEQ_SOLVER_BENCHMARK.md).
 - **Before merging a branch with compute or performance changes**: skill `/pre-merge-check` (user-level, source in the vault `_artefacts/skills/pre-merge-check/`, project profile profil-curcuma in the same vault folder): parity matrix across backends (CPU, CUDA, ROCm, Vulkan), dead code, merge risks, acceptance (bitwise md5 incl. MD diagnostics, GPU against its own scatter, full `make` + `ctest -j1`). Method note: vault `Wissen/Merge-Prüfung vor dem Merge - Parität und Altlasten.md`.
 - **S30L-CI** (manually supplied, not in `fetch_testset.py`): 30 host-guest complexes with explicit counterions, `test_cases/s30lci_test_set/` (per-structure dirs gitignored, `reference_s30lci`/`README` tracked), run via `scripts/s30lci_gfnff_compare.py`.
 
@@ -354,6 +356,8 @@ before committing, or enable the hook with `git config core.hooksPath scripts/gi
 - **Branch names**: `feature/<topic>` for new capabilities, `fix/<topic>` for bug fixes; `<topic>` is 2-4 lowercase ASCII words in kebab-case naming the subject, no dates or issue numbers (e.g. `feature/gfnff-solvation`, `fix/bmt-dir-collision`)
 - **Why the scheme matters**: `.github/workflows/ccpp.yml` builds `feature/**` and `fix/**` automatically and publishes each as its own `ci-<branch>` prerelease — a branch outside the scheme has to be added to the workflow by hand
 
+- **`devel/methods` is the integration branch for method work (gfn1/gfn2/gfnff, CUDA/ROCm)**: finished `feature/*` and `fix/*` branches go there first, never straight to `master`. The operator syncs and tests it on the different machines (CUDA, ROCm); only then does `devel/methods` merge into `master`. Not covered by the CI branch list (`ccpp.yml` has no `devel/**`); AI sessions neither push nor merge it into `master` unasked.
+
 ## Standards
 
 ### Universal Logging System (`src/core/curcuma_logger.h/.cpp`)
@@ -394,7 +398,7 @@ before committing, or enable the hook with `git config core.hooksPath scripts/gi
 - **CLI Arguments**: Automatically split into controller subdocuments via `CLI2Json()`
 - **Structure**: `controller[keyword][parameter]` - e.g. `controller["opt"]["verbosity"]`, `controller["hessian"]["MaxIter"]`
 - **Global Parameters**: `verbosity`, `threads`, `method`, `gpu` are additionally duplicated at top-level
-- **Flat-flag auto-routing (2026)**: Any registered PARAM is reachable by its flat name (`-cn_cutoff_bohr 5.5` routes to `controller["gfnff"]["cn_cutoff_bohr"]` because the registry records ownership). Same-name in the active command's module wins; truly ambiguous names (multiple owners, none matching) warn and stay in the command module. Dotted form `-<module>.<param>` always works for disambiguation. Unregistered/legacy flags stay in the command module (unchanged).
+- **Flat-flag auto-routing (2026)**: Any registered PARAM is reachable by its flat name (`-cn_cutoff_bohr 5.5` routes to `controller["gfnff"]["cn_cutoff_bohr"]` because the registry records ownership). Same-name in the active command's module wins; several owners and none matching the command: routed to the module of the selected `-method` if it owns the name (`MethodFactory::parameterScopeForMethod`, test `cli_sqm_15`), else warn and stay. Dotted form `-<module>.<param>` always works for disambiguation. Unregistered/legacy flags stay in the command module (unchanged).
 - **JSON round-trip (2026)**: `-export_run file.json` writes the resolved controller plus `_command`, `_input`, and full registry defaults for every touched module. `-import_config file.json` performs a recursive deep merge (CLI wins at every depth). Invoking `curcuma -import_config run.json` reads `_command`/`_input` from the JSON, so the file alone is enough to replay a run. See [docs/CLI_ROUND_TRIP.md](docs/CLI_ROUND_TRIP.md).
 
 ## Validation Method and Traps
@@ -420,8 +424,8 @@ Complete table with sources: [docs/KNOWN_ISSUES_ARCHIVE.md](docs/KNOWN_ISSUES_AR
 and `AIChangelog.md`, not into this file; only open items and traps stay here.
 
 - GFN-FF energy depends on atom numbering in pprcht and curcuma (911/2557 GMTKN55+MOR41 structures; REV_GFNFF_TODO #12) (#34)
-- ROCm GFN-FF: no Coulomb term by default (F-1), `-scf_mixed_precision false` ignored (G2-13), wave32 assumption (F-17) (#37)
-- Bit-identical results only at a fixed CPU thread count; GPU not run-to-run reproducible (#36)
+- ROCm: `-scf_mixed_precision false` ignored (G2-13), wave32 assumption (F-17) (#37)
+- Bit-identical results only at a fixed CPU thread count; the CUDA GFN1/GFN2 SCF and GFN-FF charge/force path are bitwise reproducible since Oct 17, 2026, the ROCm ones (gfx1200 only, `-gfnff.rocm_fixed_point`, `-xtb.rocm_fixed_point`) since Oct 25, 2026 (the multi-GPU EEQ split equals the single-GPU result only to 1e-12, independent of the GPU count; [GPU_REPRODUCIBILITY.md](docs/GPU_REPRODUCIBILITY.md), #36)
 - `shouldUpdateHBXB()` RMSD trigger off by `sqrt(natoms)` (ported from the reference, left); D4 ATM C6 frozen at setup (#33)
 - `DC13/c20bowl` Coulomb -6.29 kcal/mol, not root-caused (#14); gfn1/gfn2 gradients vs xtb at exactly coincident coordinates (#28)
 - Charge placement (#31) untested for periodic systems, GPU runtime, many fragments; `-DUSE_PORTABLE_MATH` unconfirmed on Windows (#7)

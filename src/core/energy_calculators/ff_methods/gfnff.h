@@ -36,9 +36,11 @@
 #include "src/core/global.h"
 #include "src/core/functional_groups.h"
 #include "src/core/periodic_table.h"
+#include <functional>
 #include <algorithm>
 #include <tuple>
 #include <utility>
+#include <limits>
 #include <optional>
 #include <vector>
 #include <memory>
@@ -282,124 +284,139 @@ void printGFNFFParamGenReport(const GFNFFParamGenReport& r);
 // energy +1.63 kcal. At 10 Bohr the CN is converged and matches the reference; the SP
 // bond energy is bit-identical to the legacy per-bond path (which used the full CN).
 BEGIN_PARAMETER_DEFINITION(gfnff)
-PARAM(accuracy, String, "normal", "Accuracy profile: loose|normal|medium|high. Maps to EEQ and CN parameters.", "Basic", {})
-PARAM(allow_unconverged_charges, Bool, false, "Allow calculation to continue with unconverged EEQ charges (warn instead of abort).", "Advanced", {})
-PARAM(skip_phase2, Bool, false, "Skip Phase 2 EEQ refinement and use Phase 1 topology charges directly. Faster but less accurate.", "Advanced", {})
+// ---- EEQ charges ----
+// The PARAMs of the former registry module eeq_solver live here since Oct 2026 (EEQSolver is
+// used by GFN-FF only). EEQSolver still reads the JSON scope "eeq_solver": -eeq_solver.<name>
+// lands there and wins over -gfnff.<name>; the flat -<name> and -gfnff.<name> reach it through
+// the gfnff scope (GFNFF::forwardEEQSolverParams, ConfigManager flat keys, fixEEQSolverChoice in
+// method_factory.cpp, eeq_value() in gfnff_gpu_method_impl.h). ParameterRegistry::canonicalModule
+// maps lookups by "eeq_solver" to this module.
+PARAM(accuracy, String, "normal", "Accepted for compatibility, but no code reads it, so it has no effect. The tolerances are set by eeq_ppcg_tol, pcg_tolerance, cn_accuracy and hb_accuracy.", "EEQ", {},
+        "enum=loose|normal|medium|high")
+PARAM(allow_unconverged_charges, Bool, false, "A failed EEQ solve always falls back to Phase-1 or uniform charges; true reports this as a warning instead of an error. The GPU path ignores it.", "EEQ", {})
+PARAM(skip_phase2, Bool, false, "Use the Phase-1 topology charges as final charges and skip the geometry-dependent Phase-2 EEQ solve. Faster, less accurate.", "EEQ", {})
+PARAM(solve_method, String, "auto", "EEQ linear solver: auto, cholesky, ppcg, pcg, lu, ldlt or batched (inexact). auto takes ppcg from eeq_ppcg_min_atoms and eeq_ppcg_min_nfrag on, else cholesky. See EEQ_SOLVER_CONTROL.md.", "EEQ", {})
+PARAM(solve, String, "auto", "Older name of solve_method; a non-auto solve_method wins when both are given.", "EEQ", {})
+PARAM(eeq_ppcg_min_atoms, Int, 500, "auto takes ppcg only from this many atoms on; smaller systems use the exact cholesky solve.", "EEQ", {})
+PARAM(eeq_ppcg_min_nfrag, Int, 1, "auto takes ppcg only with at least this many fragments. 0: auto never takes it; solve_method ppcg still runs it.", "EEQ", {})
+PARAM(eeq_ppcg_tol, Double, 1e-12, "Relative residual tolerance of the CPU ppcg solve, |P r| <= tol*(|b|+1). The GPU ppcg uses pcg_tolerance as an absolute tolerance instead.", "EEQ", {})
+PARAM(eeq_ppcg_max_iter, Int, 500, "Iteration cap of ppcg on CPU and GPU; a CPU solve that does not converge uses the exact cholesky solve for that step.", "EEQ", {})
+PARAM(eeq_ppcg_precond, String, "localinv", "ppcg preconditioner: 'localinv' (sparse local inverse, fewer iterations, costs a build) or 'diag' (Jacobi). If localinv is not positive definite the solve uses diag with a warning.", "EEQ", {"ppcg_precond"})
+PARAM(eeq_localinv_radius_bohr, Double, 8.0, "localinv: keep the inverse entries of atom pairs within this distance (Bohr).", "EEQ", {})
+PARAM(eeq_localinv_ext_bohr, Double, 10.0, "localinv: radius (Bohr) of the block inverted per atom, at least eeq_localinv_radius_bohr. The build cost grows with the cube of the atoms inside it.", "EEQ", {})
+PARAM(eeq_localinv_rebuild_bohr, Double, 1.0, "localinv: rebuild once an atom moved more than this (Bohr) since the last build; 0 rebuilds at every solve. A stale preconditioner changes the iteration count, not the charges.", "EEQ", {})
+PARAM(max_pcg_iterations, Int, 100, "Iteration cap of the pcg solver on the CPU; the GPU pcg uses 200 unless this is given.", "EEQ", {})
+PARAM(pcg_tolerance, Double, 1e-10, "Residual tolerance of the pcg solver; on the GPU also the absolute tolerance of ppcg.", "EEQ", {})
+PARAM(pcg_large_threshold, Int, 500, "Atom count above which the pcg solver uses the large-system cap and tolerance (pcg_large_system_*).", "EEQ", {})
+PARAM(pcg_large_system_iterations, Int, 100, "pcg above pcg_large_threshold atoms: the cap becomes max(max_pcg_iterations, min(pcg_large_system_scaling*N, this)).", "EEQ", {})
+PARAM(pcg_large_system_scaling, Int, 10, "pcg above pcg_large_threshold atoms: iterations per atom in the cap, see pcg_large_system_iterations.", "EEQ", {})
+PARAM(pcg_large_system_tol_factor, Double, 1e-6, "pcg above pcg_large_threshold atoms: the tolerance becomes max(pcg_tolerance, factor*(|rhs|+1)).", "EEQ", {})
+PARAM(eeq_max_iterations, Int, -1, "Older name: a value > 0 sets max_pcg_iterations; -1 leaves it alone.", "EEQ", {})
+PARAM(eeq_tolerance, Double, -1.0, "Older name: a value > 0 sets pcg_tolerance; -1 leaves it alone.", "EEQ", {})
+PARAM(eeq_accuracy, Double, 1e-6, "Older name of pcg_large_system_tol_factor, which it sets; larger is faster and less accurate.", "EEQ", {})
+PARAM(eeq_batched_max_error_eh, Double, 1e-6, "batched solver: warn when the estimated energy error of the dropped inter-fragment coupling exceeds this (Eh). 0 skips the estimate.", "EEQ", {})
+PARAM(eeq_distance_cutoff, Double, 0.0, "Drop EEQ matrix elements beyond this distance (Bohr); 0 keeps all, as the reference. A cutoff makes the charges inconsistent with the full Coulomb energy and spoils MD energy conservation.", "EEQ", {})
+PARAM(eeq_distance_cutoff_auto, Bool, false, "After Phase 1, set the EEQ cutoff to 30 Bohr when the system is one fragment with all |q| < 0.5 e. An explicit eeq_distance_cutoff wins.", "EEQ", {})
+PARAM(eeq_refactor_eps_bohr, Double, 0.0, "Reuse the Cholesky factor of the EEQ matrix until an atom moved more than this (Bohr), corrected by eeq_refine_iters steps. 0 factorises at every call (exact).", "EEQ", {})
+PARAM(eeq_refactor_force_every, Int, 0, "With eeq_refactor_eps_bohr > 0: refactorise at least every N calls; 0 = on displacement only.", "EEQ", {})
+PARAM(eeq_refine_iters, Int, 1, "With a reused Cholesky factor: iterative-refinement steps per solve, O(N^2) each; more steps leave a smaller charge error. 0 = none.", "EEQ", {})
+PARAM(eeq_matrix_rebuild_eps_bohr, Double, 0.0, "Reuse the off-diagonal EEQ Coulomb matrix while atoms moved less than this (Bohr) and the CN changed less than 0.05. 0 rebuilds it at every call.", "EEQ", {})
+PARAM(eeq_extrapolation, String, "none", "Start guess of the pcg solver from earlier steps: 'none' (last solution), 'aspc' (fixed-step MD) or 'gauss' (polynomial fit). The converged charges are unchanged.", "EEQ", {})
+PARAM(eeq_extrapolation_order, Int, 3, "Order of eeq_extrapolation: for 'aspc' the predictor order k (k+2 steps), for 'gauss' the polynomial degree.", "EEQ", {})
+PARAM(use_iterative_refinement, Bool, false, "Repeat the Phase-2 EEQ solve until the charges change less than convergence_threshold or max_iterations is reached. false: one solve.", "EEQ", {})
+PARAM(max_iterations, Int, 50, "Most Phase-2 repetitions with use_iterative_refinement; no effect otherwise.", "EEQ", {})
+PARAM(convergence_threshold, Double, 1e-6, "use_iterative_refinement: stop once the largest charge change between two Phase-2 solves is below this (e).", "EEQ", {})
+PARAM(calculate_cn, Bool, true, "Compute the coordination numbers inside the EEQ solver when the caller passes none.", "EEQ", {})
+PARAM(static_charges, Bool, false, "Keep the EEQ charges of the first call for all later steps. Only for equilibrium MD; wrong for charge transfer or ionic dynamics.", "EEQ", {})
+PARAM(verbosity, Int, 0, "Print level of the EEQ solver alone (0-3). GFN-FF sets it from -verbosity unless -eeq_solver.verbosity is given.", "Output", {})
+PARAM(dump_charges, Bool, false, "Write the Phase-1 and Phase-2 charges of each final-charge solve to charges_dump_N<atoms>.json in the working directory, for diagnosis.", "Output", {})
+// ---- Net charge of multi-fragment systems ----
+PARAM(frag_charge_model, String, "ensemble", "Net charge of a charged multi-fragment system: 'reference' puts it on the fragment of atom 1 (pprcht/xtb), 'ensemble' weights the placements continuously; CPU only. See FRAG_CHARGE_MODEL.md.", "Fragment charge", {})
+PARAM(frag_charge_s_max, Double, 1.0, "ensemble: end of the contact window in units of the bond threshold r_thr; between 1 and s_max close fragments are blended. 1.0 = no window, placement rule only.", "Fragment charge", {})
+PARAM(frag_charge_tau, Double, 1.0, "ensemble: temperature (kcal/mol) of the Boltzmann average over chemically identical charge placements; keeps energy and gradient smooth at degeneracies.", "Fragment charge", {})
+PARAM(frag_charge_sigma, Double, 0.05, "ensemble: width (e) of the weighting by free Phase-1 EEQ charge between different charge carriers that the parity rule leaves tied.", "Fragment charge", {})
+PARAM(frag_charge_max_edges, Int, 4, "ensemble: most fragment contacts blended at once (2^n corners, at most 10); further contacts count as fully separated, with a warning.", "Fragment charge", {})
+PARAM(frag_charge_max_placements, Int, 6, "ensemble: most integer charge placements evaluated per corner, preselected by free Phase-1 EEQ charge.", "Fragment charge", {})
+PARAM(frag_charge_variant_memory_mb, Int, 8192, "ensemble: memory budget (MB) for the charge variants held at once; above it fewer placements and corners are kept, with a warning. See FRAG_CHARGE_MODEL.md.", "Fragment charge", {})
+PARAM(frag_charge_enumerate, Bool, false, "ensemble, validation only: enumerate all charge distributions instead of the bounded selection, which gives the same placements. Refused above 2 million distributions.", "Fragment charge", {})
+PARAM(frag_charge_autodetect, Bool, false, "Charged system of exactly two fragments: try both charge placements and keep the lower EEQ energy. Off because the reference never does this and it can pick the wrong fragment.", "Fragment charge", {})
+// ---- Topology and coordination number ----
 // ORIGIN NOTE (do not duplicate on merge): nh_linear_fix and its guard in
 // determineHybridizationFortran() were first added on the `confsearch` branch (51830efa,
-// Aug 29 2026), where the artefact was found, and ported here in Sep 2026. The guard has
-// since been REFINED here (it now also requires the nitrogen's heavy partner to be
-// branched), so the two branches are no longer identical: THIS version is the newer one,
-// take it on merge. The PARAM text below is still byte-identical to confsearch's.
-PARAM(nh_linear_fix, Bool, true, "Do not let the angle-only GEODEP rule (input angle > 160 deg -> sp) promote a 2-coordinate nitrogen that carries a hydrogen to sp hybridisation. Why: the reference rule (gfnff_ini.f90, gen%linthr) declares ANY near-linear input angle linear-by-design, so a thermally stretched =N-H (measured: a guanidine imine N-H at 179 deg in a hot MD snapshot) is re-perceived as sp, gets theta0=180, and the distortion becomes its own equilibrium -- the structure optimises INTO the artefact and appears ~160 kJ/mol too deep (xtb 6.7.1 reproduces this with -276 kJ/mol, so it is an inherited method defect, not a port bug). In a conformer search, where every snapshot optimisation derives its own topology, one such event founds a self-reinforcing family (measured: 75 percent of a WEKLQ pool within three temperature stages). The genuine sp cases of an N-H nitrogen (H-N=C isocyanide-like, R-N=N terminal, metal nitriles, azides) are all caught by the STRUCTURAL rules that run before the angle fallback and are unaffected by this guard. Set false for bit-faithful reference (xtb/pprcht) behaviour, e.g. for validation against the Fortran implementations.", "Advanced", {})
-PARAM(frag_charge_autodetect, Bool, false, "For a CHARGED molecule that falls into exactly TWO fragments, try both placements of the net charge and keep the one with the lower EEQ electrostatic energy. Off by default because that is NOT what the reference does: its auto-detection block (gfnff_ini.f90, nfrag==2 branch) is gated on sum(qfrag(2:nfrag)) > 999 while qfrag is pre-initialised to [charge, 0, ...], so the block is dead code in both pprcht and xtb and the effective rule is 'whole charge on fragment 0'. Enabling the trial changes which fragment carries the charge and can be very wrong: GMTKN55 AHB21/21 (formate ... HF) then puts the -1 on the two-atom HF fragment, giving its hydrogen a charge of -0.52 and shifting the Coulomb term by 237 kcal/mol. Enable only to reproduce curcuma's pre-Sep-2026 behaviour or to experiment with the placement rule.", "Advanced", {})
-PARAM(frag_charge_model, String, "ensemble", "How the net charge of a CHARGED molecule that GFN-FF perceives as several fragments is placed. reference = the pprcht/xtb rule: the whole charge on fragment 0, i.e. on the fragment that contains atom 1, one integer placement, identical to every release so far. ensemble = chemistry-aware and continuous: every integer placement of the charge over the fragments is a complete GFN-FF evaluation with parameters consistent with that placement, placements are chosen by electron-count parity - fewest odd-electron fragments - then weighted by their free Phase-1 EEQ charge, and chemically identical placements by their energy with temperature frag_charge_tau, and fragments that are close to their pass-1 bond threshold are blended continuously with a merged corner that treats them as one EEQ group - weight 1-lambda, lambda = smootherstep of r/r_thr between 1 and frag_charge_s_max - so the energy is continuous where the fragment count changes. Engaged only for charged systems with two or more fragments; CPU; not in react topology mode. See docs/FRAG_CHARGE_MODEL.md.", "Advanced", {})
-PARAM(frag_charge_s_max, Double, 1.0, "frag_charge_model ensemble: end of the contact window in units of the pass-1 bond threshold r_thr of each atom pair. Between s = r/r_thr = 1, where pass 1 splits the pair, and s_max two fragments are partly merged; beyond s_max they are fully separated and only integer placements remain. 1.0 switches the window off: only the placement rule acts, and the energy keeps the reference rule's step at the split.", "Advanced", {})
-PARAM(frag_charge_tau, Double, 1.0, "frag_charge_model ensemble: temperature in kcal/mol of the Boltzmann average over integer charge placements. Small = the lowest-energy placement wins; placements closer than a few tau are averaged, which keeps the energy and gradient smooth at degeneracies such as a symmetric X...X- pair.", "Advanced", {})
-PARAM(frag_charge_sigma, Double, 0.05, "frag_charge_model ensemble: width in elementary charges of the weighting between chemically DIFFERENT charge carriers that the electron-count parity rule leaves tied, by the free single-constraint Phase-1 EEQ charge each carrier holds. Chemically identical carriers, e.g. the two ends of a symmetric X...X- pair, are weighted by their energies with frag_charge_tau instead.", "Advanced", {})
-PARAM(frag_charge_max_edges, Int, 4, "frag_charge_model ensemble: maximum number of fragment-fragment contacts inside the window that are blended - 2^n corners are evaluated. Contacts beyond this count, the most separated first, are treated as fully separated and a warning is printed.", "Advanced", {})
-PARAM(frag_charge_max_placements, Int, 6, "frag_charge_model ensemble: maximum number of integer charge placements evaluated per corner. With more groups the candidates are pre-selected by the free single-constraint Phase-1 EEQ charge of each group.", "Advanced", {})
-PARAM(frag_charge_variant_memory_mb, Int, 8192, "frag_charge_model ensemble: memory budget in MB for the charge variants held at the same time. Each variant is a complete GFN-FF instance; its size is estimated as 72 bytes * N^2 (measured 64-74 bytes * N^2 at N = 2822 and 6200 atoms). When placements x corners would exceed the budget, fewer placements per corner are evaluated (the ones with the lowest free-charge score are dropped), corners with the smallest weight are dropped if needed, variants not used in the current step are released, and a warning is printed once. At least one variant is always kept. The default leaves every system below about 4400 atoms unchanged at frag_charge_s_max 1.0.", "Advanced", {})
-PARAM(frag_charge_enumerate, Bool, false, "frag_charge_model ensemble, validation only: select the charge placements by enumerating ALL C(|charge|+G-1, |charge|) distributions over the G fragment groups, as before Oct 2026, instead of the bounded dynamic-programming selection that gives the same placements in the same order. Refused, with a warning, above 2 million distributions (memory).", "Advanced", {})
-PARAM(cn_cutoff_bohr, Double, 10.0, "CN neighbor list cutoff radius in Bohr (reference cnthr=100 Bohr^2=10 Bohr). 0 = use accuracy-based threshold instead.", "Advanced", {})
-PARAM(cn_accuracy, Double, 1.0, "CN accuracy for threshold calculation (cnthr = 100 - log10(acc)*50). Only used when cn_cutoff_bohr = 0. Set to 0 for full O(N^2) reference mode.", "Advanced", {})
-PARAM(solve, String, "auto",
-      "EEQ solver: auto | cholesky | ppcg | pcg | lu | ldlt | batched, CPU and GPU (-gpu cuda). Alias of -eeq_solver.solve_method, which wins if both are set to a non-auto value. See eeq_solver.solve_method.", "Algorithm", {})
-PARAM(eeq_max_iterations, Int, -1,
-      "Max EEQ PCG iterations. -1 = use adaptive default (200 small, 5000 large). Passed to eeq_solver.", "Algorithm", {})
-PARAM(eeq_tolerance, Double, -1.0,
-      "EEQ PCG tolerance. -1 = use adaptive default (1e-10 small, 1e-6*||rhs|| large). Passed to eeq_solver.", "Algorithm", {})
-PARAM(eeq_accuracy, Double, 1e-6,
-      "Target EEQ charge accuracy (e). Sets pcg_large_system_tol_factor. Higher = faster but less accurate.", "Algorithm", {})
-// WP-C (May 2026): canonical PARAM definition lives in eeq_solver.h:965 with default 0.0
-// (matches Fortran goed_gfnff). Forwarded to eeq_solver sub-config via
-// gfnff_method.cpp::forwardEEQSolverParams. Removing the duplicate here eliminates the
-// 30.0-vs-0.0 default discrepancy that overrode the Fortran-matching behaviour.
-// PARAM(eeq_distance_cutoff, Double, 30.0, ...) — REMOVED, see eeq_solver.h:965
-PARAM(gpu_block_size, Int, 0,
-      "GPU kernel block size (0 = adaptive, 32/64/128/256/512). 512 = max occupancy. Passed to ff_workspace_gpu.", "Advanced", {})
-PARAM(nb_cell_list_min_atoms, Int, 800,
-      "Min atom count to use SpatialCellList for non-bonded neighbor detection (HB/XB and Coulomb when eeq_distance_cutoff>0). Below this falls back to O(N²) loop. 0 = always use cell list.", "Advanced", {"hb_cell_list_min_atoms"})
-PARAM(hb_parallel_min_pairs, Int, 500,
-      "Min AB-pair count to parallelise HB detection via CxxThreadPool. 0 = always parallel (if pool available). -1 = never parallel.", "Advanced", {})
-PARAM(static_charges, Bool, false,
-      "Skip Phase-2 EEQ refinement after initialisation; reuse initial charges. Saves ~30 ms/step. Invalid for charge-transfer or ionic dynamics.", "Performance", {})
-PARAM(static_cn, Bool, false,
-      "Cache CN, dcn, CNF and D4 Gaussian-weights/dc6dcn after first call. Saves ~25 ms/step CPU, ~5-10 ms/step GPU. Invalid for sp2/sp3 changes.", "Performance", {})
-PARAM(static_all, Bool, false,
-      "Shorthand: enables static_charges=true AND static_cn=true. Use only for stable production NVT/NPT in equilibrium regime.", "Performance", {})
-PARAM(eeq_distance_cutoff_auto, Bool, false,
-      "Auto-enable eeq_distance_cutoff=30 Bohr after Phase-1 when nfrag==1 and max|q|<0.5 e. Saves ~12 ms/step polymer. Falls back to 0.0 for ionic/multi-fragment systems.", "Performance", {})
-PARAM(dispersion_cutoff_bohr, Double, 0.0, "Cutoff (Bohr) for D4 dispersion pair-list. 0 = full O(N^2) (Fortran-parity). Recommended for large systems: 15.0. Energy drift < 1 muEh at 15 Bohr. When active, CN-derivative stencil is extended to cover the cutoff range.", "Performance", {})
-PARAM(disp_half_contraction, Bool, true,
-      "Lever 3 Opt B: per-atom half-contraction fast path for the D4 dispersion C6 and dc6dcn build. About 7x faster inner contraction on large systems; reassociates the FP sum at ~1e-16 so energy matches to ~1e-10 Eh and gradient to ~1e-7. Set false for strictly bit-identical reproductions.", "Performance", {})
-PARAM(eeq_refactor_eps_bohr, Double, 0.0, "WP-EEQ-Cache: reuse the EEQ Cholesky factor while no atom moved more than this many Bohr, corrected by eeq_refine_iters refinement steps. 0 (default since Sep 27, 2026) = factorise on every call, exact. Below eeq_ppcg_min_atoms (500) the cache saves no time - 450-atom water cluster 16.05 ms per call cached vs 15.53 ms uncached - and one refinement step leaves 1e-5 to 8e-4 e charge error. Forwarded to eeq_solver.eeq_refactor_eps_bohr.", "Performance", {})
-PARAM(eeq_refactor_force_every, Int, 0,
-      "WP-EEQ-Cache: Force EEQ Cholesky refactorization every N steps. "
-      "0 = geometry-triggered only. Recommended: 100 for long MD. "
-      "Forwarded to eeq_solver.eeq_refactor_force_every.", "Performance", {})
-PARAM(eeq_refine_iters, Int, 1, "A4: iterative-refinement steps when the EEQ solve reuses a cached Cholesky factor - only with eeq_refactor_eps_bohr > 0. O(N^2) per step; in MD at eps 0.05 Bohr 1 step leaves 1e-5 to 8e-4 e, 3 steps about 1e-7 e. 0 disables. Forwarded to eeq_solver.eeq_refine_iters.", "Performance", {})
-// NOTE: each PARAM is kept on a SINGLE line on purpose. The param_parser clears its
-// buffer on the first ')' it sees, so a multi-line PARAM whose help text contains '(...)'
-// is silently dropped from the registry (see eeq_refactor_* above). Single-line is safe.
-PARAM(gpu_cn_pair_regen, Bool, true, "Task 10: regenerate the GPU CN-derivative pair list when the topology-displacement check fires (atoms moved past 0.5 Bohr). true keeps the list fresh during opt/MD; false reverts to the legacy build-once-and-latch behaviour.", "Performance", {})
-PARAM(gpu_cn_pair_regen_every, Int, 0, "Task 10: force GPU CN-derivative pair-list regeneration every N gradient steps (0 = topology-triggered only). MD safety net for slow drift below the displacement threshold.", "Performance", {})
-PARAM(gpu_cn_pair_cutoff_factor, Double, 2.5, "Task 10: GPU CN-derivative pair-list cutoff = factor*(rcov_i+rcov_j). Default 2.5 (erf-CN derivative ~exp(-126) beyond this). Larger = more pairs toward the CPU 40 Bohr reach and slower; smaller = faster with more truncation error.", "Performance", {})
-PARAM(gpu_cn_pair_skin_bohr, Double, 1.0, "K1 (Oct 2026), CUDA only: Verlet skin of the GPU CN pair list in Bohr. The list keeps pairs up to factor*(rcov_i+rcov_j) + 2*skin and is rebuilt only when an atom moved more than skin + rs_min/2*(factor-1-8/7.5) since the last build, so no pair with an erf-CN term above 0.5*erfc(8) = 6e-30 is missing. Negative = legacy: rebuild whenever the 0.5 Bohr topology displacement check fires (every MD step).", "Performance", {})
-PARAM(gpu_eeq_overlap, Bool, true, "K3 (Oct 2026), CUDA only: the device projected-PCG EEQ solve waits only for its inputs (coordinates, right-hand side) and runs in parallel to the D4 dc6dcn kernel and the charge-independent kernels. false = legacy: it waits for all prior device work.", "Performance", {})
-PARAM(gpu_dispersion_overlap, Bool, true, "K2 (Oct 2026), CUDA only: the gradient-mode D4 dispersion kernel starts right after dc6dcn, parallel to the EEQ solve; it reads no EEQ charge. false = legacy: it runs after the EEQ solve. Changes only the summation order of the atomic gradient adds.", "Performance", {})
-PARAM(gpu_staged_list_upload, Bool, true, "Oct 2026, CUDA only: during MD the rebuilt D4 dispersion and repulsion pair lists are converted by -threads host threads into a pinned double buffer and copied asynchronously in chunks (polymer_2x, 9.4 M D4 pairs: 118 -> 48 ms per rebuild, 16 threads). The device receives the same bytes. false = legacy serial conversion and blocking pageable copies.", "Performance", {})
-PARAM(hb_accuracy, Double, 0.1, "Task 11: HB-list accuracy driving the Fortran thresholds hbthr1 = 200 - log10(acc)*50, hbthr2 = 400 - log10(acc)*50 (Bohr^2). Smaller = larger cutoffs = more HB pairs = more accurate but slower. 0.1 reproduces the gfnff reference.", "Performance", {})
-PARAM(hb_thr1_bohr2, Double, 0.0, "Task 11: direct override of hbthr1, the A-B distance-squared cutoff for nhb2 detection (Bohr^2). 0 = derive from hb_accuracy.", "Performance", {})
-PARAM(hb_thr2_bohr2, Double, 0.0, "Task 11: direct override of hbthr2, the A-H-B sum-of-squares cutoff for nhb1 detection (Bohr^2). 0 = derive from hb_accuracy.", "Performance", {})
-PARAM(hb_update_rmsd_bohr, Double, 0.3, "Task 11: per-atom RMSD (Bohr) that triggers an HB/XB list rebuild. 0.3 reproduces the gfnff reference (gfnff_ini2.f90:717). Smaller = rebuild more often = less near-threshold staleness in MD but slower.", "Performance", {})
-PARAM(hb_update_force_every, Int, 10, "Force an HB/XB list rebuild every N energy evaluations, in addition to the RMSD trigger (0 = RMSD-triggered only). Default 10 since Sep 2026: the RMSD trigger computes sqrt(sum d^2)/N (faithful to gfnff_ini2.f90:717, kept unchanged pending a reference check - see TODO.md), which is sqrt(N) smaller than a per-atom RMSD, so it practically never fires beyond a few dozen atoms (triose, 66 atoms, 200 fs at 800 K: per-atom RMSD 2.2 Bohr, trigger value 0.27, no rebuild; the stale list held 1602 H-bond triples against 1488 in a fresh build, 6e-6 Eh apart). One rebuild costs ~100 ms on polymer_2x (7320 atoms, 150k triples, ~20-50 triples change per 0.5 fs step), so every 10 steps is ~0.7 percent of an MD step. 1 = every step (exact classification, ~7 percent there).", "Performance", {})
-PARAM(hb_min_pair_energy_eh, Double, 1e-9, "Sep 2026 (docs/GFNFF_PERFORMANCE_LEVERS.md lever #1): skip allocating a GFNFFHydrogenBond for a case-1 (unbound A...H...B) candidate when the EXACT |E_HB| the energy kernel would compute is below this (Eh), evaluated at detection time from the same formula calcHydrogenBonds uses - not an approximation, and not the rejected raw-distance cut from the same doc (which moved energy 0.79 Eh). Case 2/3/4 (donor-bonded H) are NEVER pruned by this, regardless of value: their acceptor feeds bond_hb_data/hb_cn_H, a geometric quantity uncorrelated with |E_HB| - pruning them shifted the bond term by 0.18 kcal/mol on a test system even though the HB term itself barely moved. 0 disables. On a 3000-water/14640-atom system the case-1 candidate list alone was over 1M entries dominated by long-range, damping-suppressed near-zero contributors.", "Performance", {})
-PARAM(xb_min_pair_energy_eh, Double, 1e-9, "Sep 2026 (docs/GFNFF_PERFORMANCE_LEVERS.md lever #1, XB counterpart): skip allocating a GFNFFHalogenBond when the EXACT |E_XB| the energy kernel would compute is below this (Eh) - the XB formula has no case-dependent branch, so this is exact, not an approximation. 0 disables.", "Performance", {})
-PARAM(nonbonded_rebuild_every, Int, 1, "The non-bonded repulsion pair list is built from a hard 20 Bohr distance cutoff; a pair that starts beyond it and diffuses closer during MD was never re-evaluated (fixed Sep 2026 - see GFNFF::updateNonbondedRepulsionIfNeeded). This rebuilds it from the current geometry every N energy evaluations - used only when nonbonded_skin_bohr is 0 (since Sep 27, 2026 the skin, default 2 Bohr, drives the rebuild instead). 1 = every step, unconditionally correct - no pair can cross the cutoff undetected. The same schedule drives the explicit Coulomb list of eeq_distance_cutoff > 0 and the D4 list when dispersion_cutoff_bohr <= 50 leaves it without a skin. Raise only after confirming the rebuild cost matters for your system size; a stale list can let two atoms pass through the repulsive wall with zero force, which is far more expensive to debug than the rebuild.", "Performance", {})
-PARAM(nonbonded_skin_bohr, Double, 2.0, "Verlet skin (Bohr) for the non-bonded repulsion list and the explicit Coulomb list of eeq_distance_cutoff > 0. 2 (default since Sep 27, 2026; was 0): measured per energy call polymer 1410 atoms GPU 45.9 -> 26.6 ms, CPU 85.5 -> 71.8 ms, polymer_2x 7320 atoms GPU 431 -> 182 ms; 200-step run averages equal to 2e-15; 4 Bohr is not faster. Only active from nb_cell_list_min_atoms (800) on - below, the list holds every pair and is never rebuilt. 0 = rebuild on the nonbonded_rebuild_every step count. > 0 = build the lists that much wider than their kernel cutoff (20 Bohr repulsion, eeq_distance_cutoff Coulomb) and rebuild only once some atom moved more than skin/2 since the last build - exact, since no pair can then cross the kernel cutoff unseen (Verlet 1967). Energies are unchanged up to floating-point summation order (the longer list shifts the thread partition); only the rebuild schedule and the list length change. See docs/GFNFF_PAIR_LIST_REFRESH.md for measured costs.", "Performance", {})
-PARAM(dispersion_c6_update, Bool, true, "Recompute every stored D4 pair C6 from the current coordination numbers whenever the geometry changed (GFNFF::refreshDispersionC6). Before Sep 2026 C6 stayed at the setup geometry while the dispersion gradient already used dC6/dCN at the current CN, so MD and optimisation energies drifted away from a single point at the same geometry (triose: 0.18 kcal/mol after 200 fs at 800 K). Single points are unaffected. false restores the old frozen-C6 behaviour for comparisons.", "Algorithm", {})
-PARAM(eeq_mixed_precision, Bool, false, "WP-B GPU only: factor the EEQ Coulomb matrix in FP32 then refine the solution with the FP64 residual, dsposv-style, for full FP64 accuracy at a fraction of the FP64-factor cost on FP64-weak GPUs. Opt-in on CUDA and ROCm (default OFF; enable per card after measuring). Applies to the factor-dominated few-fragment solve paths; the many-fragment general path stays FP64.", "Performance", {})
-PARAM(eeq_mixed_precision_iters, Int, 2, "WP-B GPU only: number of FP64-residual / FP32-correction refinement steps for eeq_mixed_precision. Minimum 1. Two steps reach FP64 accuracy on the validation set.", "Performance", {})
-PARAM(coulomb_r_cut, Double, 0.0, "GFN-FF electrostatics: per-pair distance cutoff in Bohr. 0 (default since Sep 25, 2026) = no cutoff, as the reference goed_gfnff and as the EEQ solve itself, which never truncates. A positive value is a HARD cutoff without switching: a pair crossing it changes the energy discontinuously - on a 500-water cluster, moving one oxygen by 0.0005 Angstrom jumped the energy by 5 kJ/mol and made the analytic gradient wrong by 0.96 Eh/Angstrom at that atom - and it truncates the long-range 1/r sum: the former default of 100 Bohr put polymer_2x, 7320 atoms and 88 Angstrom wide, 112.7 kcal/mol above the reference. Systems below about 53 Angstrom never reach 100 Bohr. Only set a value for speed, knowing both effects.", "Performance", {})
-PARAM(coulomb_implicit, Bool, true, "CPU: evaluate the N^2/2 Coulomb pairs on the fly from the per-atom EEQ charges and alpeeq instead of building and storing a pair list. The stored list costs 128 bytes per pair - 3.4 GB and ~0.5 s of pure write bandwidth at 7320 atoms, which threading does not remove (measured). Energies agree with the stored path to rounding; set false for the stored list (e.g. to compare). Not used with eeq_distance_cutoff > 0, where the list is already short.", "Performance", {})
-PARAM(farfield_shortcut, Bool, true, "CPU exact far-field shortcut: for gamma_ij*r >= 6.5 (gamma_ij = 1/sqrt(alpha_i+alpha_j)) erf(gamma_ij*r) is exactly 1.0 in FP64 and exp(-(gamma_ij*r)^2) <= 4.4e-19 is below one ulp of the force, so the Coulomb pair energy/force (FFWorkspace::calcCoulomb) and the EEQ matrix element erf(gamma r)/r (final charges, corrected EEQ matrix) are evaluated as q_i q_j/r, -q_i q_j/r^3 and 1/r without erf/exp. Bit-identical to the full evaluation in the cases checked (set false to compare). Forwarded to eeq_solver.farfield_shortcut. The CUDA kernels always use the shortcut, with the threshold 6.0 instead of 6.5 (gamma_ij*r); ROCm and Vulkan have none.", "Performance", {})
-PARAM(gpu_coulomb_implicit, Bool, true, "GPU only: the device enumerates all Coulomb atom pairs itself (per-atom gather, gamma_ij from per-atom alpeeq) instead of reading an N^2/2 pair list built on the host. Saves the host list (24.5 M pairs / 2.7 GB and ~1.5 s at 7320 atoms). Not used with eeq_distance_cutoff > 0. Set false for the stored pair list.", "Performance", {})
-PARAM(gpu_disp_pairs_on_device, Bool, false, "WP-A GPU only: build the D4 dispersion pair list on the device via a two-pass enumeration plus per-pair C6 contraction, replacing the host O(N^2) GenerateDispersionPairsNative loop and the per-build H2D upload. Default OFF keeps the proven host build. Bit-identical to the host list up to the FP order of the device Gaussian weights. Measured Sep 2026 on polymer_2x (7320 atoms): pair build 630 -> 32 ms, SP wall 6.8 -> 5.6 s, energy identical; see docs/GPU_TUNING.md.", "Performance", {})
-PARAM(eeq_rocm_cpu_fragment_threshold, Int, 16, "ROCm GFN-FF only: fragment count at or above which the device EEQ solve is replaced by the exact CPU PCG block-Jacobi warm-start solver, whose O(N^2 k) cost beats the device dense N x N Cholesky O(N^3) for solvent boxes and keeps ROCm charges identical to the CPU path. Set 0 to always use the device solve.", "Performance", {})
-// Implicit solvation (WP5, Claude Generated June 2026). Registering these here is
-// what makes -gfnff.solvent reach GFNFF::InitialiseMolecule (the value was silently
-// ignored before, since the gfnff module declared no solvent PARAM). Use the dotted
-// -gfnff.solvent form; the flat -solvent is ambiguous across providers.
-PARAM(solvent, String, "none",
-      "Implicit solvent for the native GFN-FF ALPB/GBSA model (e.g. 'water', 'dmso', "
-      "'acetone', 'chloroform'). 'none' (default) runs gas phase. Born electrostatics "
-      "at the EEQ charges + CDS surface term + state shift; the reaction field is a "
-      "post-hoc add-on (the EEQ charges do not yet feel the solvent). Use the dotted "
-      "-gfnff.solvent (the flat -solvent is ambiguous across providers).", "Solvation", {})
-PARAM(solvent_model, String, "alpb",
-      "GFN-FF implicit solvation model: 'alpb' (default, P16 Born kernel) or 'gbsa' "
-      "(Still kernel, no shape term). CPCM is not implemented natively. Legacy numeric "
-      "codes (2=gbsa, 3=alpb) are also accepted.", "Solvation", {})
-// React topology mode (Claude Generated Aug 2026): event-driven reactive bond topology.
-// Bonds may form and break during MD; all bonded terms are rebuilt at change events.
-// See docs/GFNFF_REACT_TOPOLOGY.md. PARAMs stay single-line, see note above.
-PARAM(gpu_split_devices, String, "auto", "Multi-GPU split of ONE molecule (CUDA): the implicit Coulomb tiles and the projected-PCG EEQ (matrix column blocks + matvec) are spread over these devices. auto = the -gpu_devices pool, else every visible device, unless the run is a leased batch worker or pinned with an explicit -gpu_device; a comma list (e.g. 0,1); none = off.", "Performance", {})
-PARAM(gpu_split_min_atoms, Int, 1000, "Use the multi-GPU split only from this many atoms on. Measured Sep 2026 (4x A4500, MD step): 1410 atoms 16.0 -> 12.0 ms, 7320 atoms 139 -> 76 ms; below 1000 atoms not measured.", "Performance", {})
-PARAM(gpu_split_eeq_min_atoms, Int, 4000, "Use the multi-GPU split for the EEQ (matrix column blocks + PCG matvec) only from this many atoms on; the per-iteration peer latency outweighs it below. Measured Sep 2026 (4x A4500): 1410 atoms EEQ 8.1 -> 8.2 ms (no gain), 7320 atoms 77 -> 35 ms.", "Performance", {})
-PARAM(topology_mode, String, "constant", "Topology mode: constant (default since Sep 29, 2026) = topology and bond list frozen after init, as in the Fortran reference (gfnff_hbset reads only the setup topology); auto = full topology recalculation whenever an atom moved more than 0.5 Bohr (measured: identical results, ~1.6 s per recalculation at 7320 atoms), react = bond topology is re-detected with hysteresis during MD and all bonded terms are rebuilt at change events. default is accepted as an alias for constant.", "Basic", {})
-PARAM(react_bond_form_factor, Double, 1.6, "React mode: a non-bonded pair becomes a bond when r < factor * covalent-radius sum * element fat scaling. Optimistic on purpose: the Gaussian bond well is weak at this distance and formation is expected mid-collision. Must stay below react_bond_break_factor and below typical hydrogen-bond contact distances.", "Reactive", {})
-PARAM(react_bond_break_factor, Double, 2.6, "React mode: an existing bond is removed when r > factor * covalent-radius sum * element fat scaling. Conservative on purpose: the bond is kept until its Gaussian well has largely decayed, so removal causes only a small energy jump. The wide gap to react_bond_form_factor is the hysteresis that prevents flicker.", "Reactive", {})
-PARAM(react_check_every, Int, 5, "React mode: run the O N^2 hysteresis bond scan every N energy calls. 0 = displacement-triggered only.", "Reactive", {})
-PARAM(react_check_disp_bohr, Double, 0.25, "React mode: also run the bond scan when any atom moved more than this distance in Bohr since the last scan. 0 disables the displacement trigger.", "Reactive", {})
-PARAM(react_refractory_scans, Int, 10, "React mode: a pair whose bond just broke may not re-form for this many scans. Interrupts the form/break cycle that otherwise pumps the recombination energy through the thermostat over and over. 0 disables.", "Reactive", {})
-PARAM(react_valence_cap, Bool, true, "React mode: refuse a new bond while an atom already uses its element valence plus one exchange slack, counting bond orders so multiple bonds consume valence. Prevents unphysical agglomerates; disable to sample unconstrained formation. Refused formations are logged at verbosity 2.", "Reactive", {})
-PARAM(react_exchange_scans, Int, 20, "React mode: an atom may stay above its nominal valence for at most this many scans, then its weakest bond is broken. Forces exchange intermediates like a hydrogen bridging two heavy atoms to resolve instead of staying geometrically locked. 0 disables.", "Reactive", {})
-PARAM(react_slack_form_factor, Double, 1.2, "React mode: tighter formation radius factor for bonds that push an atom above its nominal sigma valence into the exchange slack. A genuine exchange intermediate has the extra partner near bond distance; the ordinary optimistic factor would re-create bridges endlessly.", "Reactive", {})
-PARAM(storsion_reference_loop_bug, Bool, false, "Reproduce the reference implementation's triple-bond-torsion (sTors) loop bug bit-for-bit. Both pprcht/gfnff and xtb 6.7.1 call sTors_eg(m,...) with the array SIZE m instead of the loop index, so they evaluate only the LAST detected C-triplebond-C torsion, m times, and drop all others (and give exactly zero whenever the last slot was never filled). Curcuma sums every detected torsion, which is what the term is meant to do - its erefhalf is a DLPNO-CCSD(T) diphenylacetylene reference value, not a fitted parameter. Enable only to reproduce reference totals exactly.", "Advanced", {})
-PARAM(hh_repulsion_bpair, Bool, true, "Take the 1,3/1,4 classification of the non-bonded H...H repulsion factors hh13rep/hh14rep from the reference pair table topo%bpair, i.e. nbondmat, as in gfnff_ini.f90:755-756. false restores the former plain BFS bond count, which differs across neighbour entries stored on one side only - eta bonds, main-group metals - and there depends on the atom order of the input. Default since Sep 2026.", "Advanced", {})
-PARAM(dispersion_atm, Bool, false, "Add a D4 Axilrod-Teller-Muto three-body dispersion term over BONDED i-j-k triples only, s9=1, zero damping. The GFN-FF reference has no such term - its dispersion is pairwise, gfnff_gdisp0.f90 d3_gradient - and bonded triples are the ones the damping suppresses, so the term is at most 0.025 kcal/mol on MOR41+GMTKN55. Default off since Sep 2026; true reproduces the earlier curcuma totals.", "Advanced", {})
-PARAM(amideh_acidity_order_bug, Bool, false, "Reproduce the reference atom-order bug in the amide-H donor acidity: gfnff_ini.f90:793-798 resets hbaci of atom i and scales hbaci of its first neighbour in the same loop, so the 0.8 amide factor on the nitrogen survives only when the nitrogen precedes its H in the input. The H-bond then depends on the atom numbering and is 1.25x stronger otherwise. curcuma applies the factor regardless of order; enable only to reproduce reference totals for arbitrary atom orders.", "Advanced", {})
+// Aug 29 2026) and ported here in Sep 2026. The guard has since been REFINED here (it also
+// requires the nitrogen's heavy partner to be branched) and the help text was shortened in
+// Oct 2026, so the two branches differ: THIS version is the newer one, take it on merge.
+PARAM(topology_mode, String, "constant", "'constant' freezes the topology after setup, as the reference; 'auto' recomputes it once an atom moved > 0.5 Bohr; 'react' re-detects bonds during MD. 'default' = constant.", "Topology", {})
+PARAM(cn_cutoff_bohr, Double, 10.0, "Neighbour-list cutoff (Bohr) of the coordination number; 10 matches the reference. 0 uses the cn_accuracy threshold instead.", "Topology", {})
+PARAM(cn_accuracy, Double, 1.0, "With cn_cutoff_bohr 0: CN threshold as in the reference, 100 - 50*log10(acc) Bohr^2. 0 takes all pairs.", "Topology", {})
+PARAM(static_cn, Bool, false, "Keep CN, its derivatives and the D4 weights and C6 of the first call for all later steps. Only for equilibrium MD; wrong when hybridisation changes.", "Topology", {})
+PARAM(static_all, Bool, false, "Shorthand for static_charges and static_cn together.", "Topology", {})
+// ---- Reactive topology (topology_mode react, docs/GFNFF_REACT_TOPOLOGY.md) ----
+PARAM(react_bond_form_factor, Double, 1.6, "react: a pair becomes bonded when r < factor * covalent-radius sum (element-scaled). Must stay below react_bond_break_factor.", "Reactive", {})
+PARAM(react_bond_break_factor, Double, 2.6, "react: a bond breaks when r > factor * covalent-radius sum (element-scaled); the gap to react_bond_form_factor is the hysteresis against flicker.", "Reactive", {})
+PARAM(react_check_every, Int, 5, "react: run the O(N^2) bond scan every N energy calls; 0 = on displacement only.", "Reactive", {})
+PARAM(react_check_disp_bohr, Double, 0.25, "react: also scan when an atom moved more than this (Bohr) since the last scan; 0 disables this trigger.", "Reactive", {})
+PARAM(react_refractory_scans, Int, 10, "react: a pair whose bond just broke may not re-form for this many scans, which stops form/break cycles. 0 disables.", "Reactive", {})
+PARAM(react_valence_cap, Bool, true, "react: refuse a new bond while an atom uses its valence plus one exchange slot, counting bond orders. false allows unconstrained formation.", "Reactive", {})
+PARAM(react_exchange_scans, Int, 20, "react: an atom may exceed its nominal valence for at most this many scans, then its weakest bond breaks. 0 disables.", "Reactive", {})
+PARAM(react_slack_form_factor, Double, 1.2, "react: tighter formation factor for bonds that push an atom into the exchange slot above its sigma valence.", "Reactive", {})
+// ---- Hydrogen and halogen bonds ----
+PARAM(hb_accuracy, Double, 0.1, "Accuracy of the HB search thresholds, 200 and 400 - 50*log10(acc) Bohr^2; smaller finds more pairs. 0.1 is the reference value.", "HB/XB", {})
+PARAM(hb_thr1_bohr2, Double, 0.0, "Override hbthr1, the A-B distance-squared cutoff of the HB search (Bohr^2); 0 derives it from hb_accuracy.", "HB/XB", {})
+PARAM(hb_thr2_bohr2, Double, 0.0, "Override hbthr2, the A-H-B sum-of-squares cutoff of the HB search (Bohr^2); 0 derives it from hb_accuracy.", "HB/XB", {})
+PARAM(hb_update_rmsd_bohr, Double, 0.3, "Rebuild the HB/XB lists once sqrt(sum d^2)/N since the last build exceeds this (Bohr), as the reference; 0.3 is the reference value.", "HB/XB", {})
+PARAM(hb_update_force_every, Int, 10, "Also rebuild the HB/XB lists every N energy calls, since the displacement trigger rarely fires in large systems. 0 = trigger only, 1 = every call.", "HB/XB", {})
+PARAM(hb_min_pair_energy_eh, Double, 1e-9, "Drop unbound (case 1) H-bond candidates with exact |E_HB| below this (Eh); donor-bonded cases and the serial small-system search keep all. 0 keeps all.", "HB/XB", {})
+PARAM(xb_min_pair_energy_eh, Double, 1e-9, "Drop halogen-bond candidates whose exact |E_XB| is below this (Eh). 0 keeps all.", "HB/XB", {})
+PARAM(hb_parallel_min_pairs, Int, 500, "Run the H-bond detection on the thread pool above this many A-B pairs; 0 = always, -1 = never.", "HB/XB", {})
+// ---- Dispersion ----
+PARAM(dispersion_cutoff_bohr, Double, 0.0, "Cutoff (Bohr) of the D4 dispersion pair list; 0 keeps all pairs, as the reference. A cutoff also widens the CN-derivative range to match.", "Dispersion", {})
+PARAM(dispersion_c6_update, Bool, true, "Recompute the D4 pair C6 from the current CN at each new geometry, so MD and optimisation agree with single points. false keeps C6 of the setup geometry.", "Dispersion", {})
+PARAM(disp_half_contraction, Bool, true, "Faster per-atom contraction for the D4 C6 and dC6/dCN; it changes the summation order (energies agree to about 1e-10 Eh). false for the plain contraction.", "Dispersion", {})
+// ---- Electrostatics ----
+PARAM(coulomb_r_cut, Double, 0.0, "Hard per-pair cutoff (Bohr) of the GFN-FF electrostatics; 0 = none, as the reference. A cutoff makes the energy discontinuous and truncates the 1/r sum.", "Coulomb", {})
+PARAM(coulomb_implicit, Bool, true, "CPU: evaluate the Coulomb pairs on the fly from per-atom data instead of storing an N^2/2 pair list; same energies. Not used with eeq_distance_cutoff > 0.", "Coulomb", {})
+PARAM(farfield_shortcut, Bool, true, "CPU Coulomb energy and EEQ matrix: use 1/r for erf(g r)/r where g r >= 6.5, where erf is exactly 1.0 in FP64. Bit-identical in the cases checked; false evaluates erf everywhere.", "Coulomb", {})
+// ---- Pair lists ----
+PARAM(nb_cell_list_min_atoms, Int, 800, "From this atom count on, non-bonded neighbours (repulsion, HB/XB, cutoff Coulomb) come from a cell list; below, all pairs are scanned. 0 = always the cell list.", "Pair lists", {"hb_cell_list_min_atoms"})
+PARAM(nonbonded_skin_bohr, Double, 2.0, "Verlet skin (Bohr) of the repulsion and cutoff Coulomb lists, rebuilt once an atom moved more than skin/2 (exact). Active from nb_cell_list_min_atoms on; 0 uses nonbonded_rebuild_every.", "Pair lists", {})
+PARAM(nonbonded_rebuild_every, Int, 1, "With nonbonded_skin_bohr 0: rebuild the repulsion and cutoff Coulomb lists every N energy calls; 1 is always safe. See GFNFF_PAIR_LIST_REFRESH.md.", "Pair lists", {})
+// ---- Implicit solvation (use the dotted -gfnff.solvent; the flat -solvent is shared) ----
+PARAM(solvent, String, "none", "Implicit solvent for native GFN-FF ALPB, such as water or dmso; 'none' = gas phase, and the EEQ charges feel the solvent. Use -gfnff.solvent, since the flat -solvent is shared.", "Solvation", {})
+PARAM(solvent_model, String, "alpb", "Solvation model. GFN-FF has ALPB only, as the reference: 'gbsa' (or code 2) runs ALPB with a warning.", "Solvation", {})
+// ---- Deliberate deviations from the reference (docs/KNOWN_ISSUES_ARCHIVE.md switch table) ----
+PARAM(nh_linear_fix, Bool, true, "Keep a 2-coordinate N-H nitrogen from becoming sp by the angle-only rule (> 160 deg), which lets stretched N-H geometries optimise into a too deep artefact. false = reference rule.", "Reference", {})
+PARAM(storsion_reference_loop_bug, Bool, false, "Reproduce the reference loop bug that evaluates only the last C#C triple-bond torsion; curcuma sums all of them. true only to match reference totals.", "Reference", {})
+PARAM(hh_repulsion_bpair, Bool, true, "Classify H...H 1,3/1,4 repulsion from the bond-pair table, as the reference. false uses a BFS bond count, which can depend on the atom order.", "Reference", {})
+PARAM(amideh_acidity_order_bug, Bool, false, "Reproduce the reference atom-order bug in the amide-H donor acidity, which makes the H-bond depend on whether N precedes its H. true only to match reference totals.", "Reference", {})
+PARAM(dispersion_atm, Bool, false, "Add a D4 three-body (ATM) term over bonded triples. The reference dispersion is pairwise, so it is off.", "Reference", {})
+// ---- GPU ----
+PARAM(gpu_block_size, Int, 0, "GPU kernel block size: 0 adaptive, else 32, 64, 128, 256 or 512.", "GPU", {})
+PARAM(gpu_cn_pair_regen, Bool, true, "GPU: rebuild the CN-derivative pair list when the topology displacement check fires. false builds it once.", "GPU", {})
+PARAM(gpu_cn_pair_regen_every, Int, 0, "GPU: also rebuild the CN-derivative pair list every N gradient steps; 0 = on the displacement check only.", "GPU", {})
+PARAM(gpu_cn_pair_cutoff_factor, Double, 2.5, "GPU CN-derivative pair list cutoff, factor*(rcov_i+rcov_j). Larger is slower and more complete, smaller is faster and truncates more.", "GPU", {})
+PARAM(gpu_cn_pair_skin_bohr, Double, 1.0, "GPU: Verlet skin (Bohr) of the CN pair list, rebuilt only once atoms moved far enough to lose a term above 1e-29. Negative rebuilds at every topology check.", "GPU", {})
+PARAM(gpu_eeq_overlap, Bool, true, "CUDA: the device EEQ solve waits only for its own inputs and overlaps with the dispersion and charge-independent kernels. false waits for all earlier work.", "GPU", {})
+PARAM(gpu_dispersion_overlap, Bool, true, "GPU: run the D4 dispersion gradient kernel parallel to the EEQ solve, which it does not need; changes only the summation order. false runs it after.", "GPU", {})
+PARAM(gpu_hb_detect_on_device, Bool, true, "GPU: build the H-bond triples on the device at each HB/XB refresh (same set as the host, other order; halogen bonds stay on the host). false = host detection.", "GPU", {})
+PARAM(gpu_hb_detect_verify, Bool, false, "With gpu_hb_detect_on_device: also run the host detection at each refresh and report differences (HBVERIFY lines on stderr). Diagnostic only.", "GPU", {})
+PARAM(gpu_staged_list_upload, Bool, true, "GPU MD: convert rebuilt pair lists on host threads into pinned memory and copy them asynchronously (CUDA: D4, repulsion, H-bond; ROCm: repulsion). false = serial copies.", "GPU", {})
+PARAM(gpu_coulomb_implicit, Bool, true, "GPU: enumerate the Coulomb pairs on the device instead of uploading an N^2/2 host list. Not used with eeq_distance_cutoff > 0.", "GPU", {})
+PARAM(gpu_disp_pairs_on_device, Bool, true, "GPU: build the D4 dispersion pair list on the device, in the host order. false builds it on the host.", "GPU", {})
+PARAM(gpu_rep_pairs_on_device, Bool, true, "GPU: rebuild the repulsion pair list on the device when the skin rule fires; only for distance-filtered lists (nb_cell_list_min_atoms). false builds it on the host.", "GPU", {})
+PARAM(eeq_mixed_precision, Bool, false, "GPU EEQ: factor the matrix in FP32 and refine to FP64 accuracy, for FP64-weak cards. Opt-in; few-fragment paths only.", "GPU", {})
+PARAM(eeq_mixed_precision_iters, Int, 2, "Refinement steps of eeq_mixed_precision, at least 1.", "GPU", {})
+PARAM(gpu_block_jacobi_max_frag_atoms, Int, 300, "GPU pcg: fragments larger than this get the diagonal instead of the dense block-Jacobi preconditioner, whose build grows steeply with size. See EEQ_SOLVER_CONTROL.md.", "GPU", {})
+PARAM(gpu_block_jacobi_max_nfrag, Int, 400, "GPU pcg: above this many fragments no block-Jacobi preconditioner is built (one host round trip per fragment); the diagonal Jacobi is used.", "GPU", {})
+PARAM(gpu_split_devices, String, "auto", "CUDA: GPUs to split one molecule over (Coulomb tiles, ppcg EEQ). 'auto' = the -gpu_devices pool or all, unless pinned or a batch worker; a list like '0,1'; 'none'.", "GPU", {})
+PARAM(gpu_split_min_atoms, Int, 1000, "CUDA: use the multi-GPU split from this many atoms on.", "GPU", {})
+PARAM(gpu_split_eeq_min_atoms, Int, 4000, "CUDA: split the EEQ over several GPUs from this many atoms on; below, the peer latency outweighs the gain. See MULTI_GPU.md.", "GPU", {})
+PARAM(gpu_eeq_mixed_precision, Bool, true, "CUDA multi-GPU EEQ: PCG matvec on an FP32 copy, restarted from the FP64 residual until the FP64 tolerance is met. false (or CURCUMA_EEQ_MIXED=0) = FP64.", "GPU", {})
+PARAM(gpu_eeq_mixed_rho, Double, 1e-5, "gpu_eeq_mixed_precision: each FP32 round stops at this fraction of its starting residual. Larger values need more FP64 restarts.", "GPU", {})
+PARAM(rocm_dc6dcn_tables, Bool, false, "ROCm: per-pair C6 and dC6/dCN from per-atom partner tables (the CUDA scheme) instead of the fused gather, which is faster. CURCUMA_DC6DCN_TABLES=0|1 overrides it.", "GPU", {})
+PARAM(rocm_device_schur, Bool, true, "ROCm: do the Schur step of the dense EEQ solve on the device, so only nfrag + nfrag^2 numbers reach the host. false does it on the host.", "GPU", {})
+PARAM(rocm_fixed_point, Bool, true, "ROCm: sum forces, dE/dCN, energies and CN in 64-bit fixed point, so repeated runs are bitwise identical. false uses FP64 atomics.", "GPU", {})
+PARAM(eeq_rocm_cpu_fragment_threshold, Int, 16, "ROCm: from this fragment count on, a stalled device EEQ falls back to the CPU; giving the key explicitly forces the exact CPU EEQ there. 0 = always the device.", "GPU", {})
 END_PARAMETER_DEFINITION
 
 class GFNFF {
@@ -432,7 +449,7 @@ public:
     struct GFNFFTopology {
         // Atom classification
         Vector neighbor_counts;                                  // Simple neighbor counts (integer CN)
-        std::vector<int> hybridization;                          // 0=sp3, 1=sp, 2=sp2, 3=terminal, 5=hypervalent
+        std::vector<int> hybridization;                          // 0=none/octahedral, 1=sp, 2=sp2, 3=sp3, 5=hypervalent (determineHybridizationFortran)
         std::vector<int> pi_fragments;                           // Pi fragment assignment per atom
         std::vector<int> pi_atoms_final;                         // Fortran post-Hueckel piadr (gfnff_ini.f90:1016, "piadr = itmp"): 1 iff the atom ends a bond inside a SOLVED pi-system. Stricter than pi_fragments and the array every consumer after the Hueckel section tests - Claude Generated Sep 2026
         std::vector<int> itag;                                   // -1 iff atom is eta-coordinated to a metal (Fortran itag; gfnff_ini2.f90:170-198) - Claude Generated Jul 2026
@@ -775,6 +792,8 @@ public:
 
     /// frag_charge_model resolved to ensemble (false: reference rule, or react topology mode). Claude Generated (Oct 2026).
     bool fragEnsembleRequested() const { return m_frag_ensemble; }
+    /// True when an implicit solvent (ALPB) is active; the GPU wrappers do not apply it. Claude Generated (Oct 2026).
+    bool solvationActive() const { return m_solvation != nullptr; }
 
     /**
      * @brief Charge placements of the frag_charge_model ensemble for one corner (bounded selection)
@@ -824,6 +843,14 @@ public:
     /// N^2/2 Coulomb pair list (the device enumerates the pairs). Only honoured without an
     /// EEQ distance cutoff. Must be set before InitialiseMolecule. No effect on the CPU path.
     void setImplicitCoulombPairs(bool v) { m_implicit_coulomb_pairs = v; }
+
+    /// Claude Generated (Oct 2026): set by a GPU method that never runs this object's CPU
+    /// workspace (ROCm wrapper): updateHBXBIfNeeded() then re-detects the HB/XB lists for
+    /// getLastHBonds()/getLastXBonds() but does not copy them into m_workspace nor rebuild its
+    /// bond-HB data (12 + 16 ms per re-detection at 582k H bonds). No effect on the CPU path.
+    void setSkipHostHBWorkspaceUpdate(bool v) { m_skip_host_hb_workspace = v; }
+    /// Claude Generated (Oct 2026): GPU wrappers read the repulsion lists from getLast*Repulsions() and never run the CPU workspace; skips the 1.5 M-entry copy into it per rebuild.
+    void setSkipHostRepulsionWorkspaceUpdate(bool v) { m_skip_host_rep_workspace = v; }
 
     /**
      * @brief Export topology information for restart/topology I/O
@@ -897,17 +924,6 @@ public:
      * subsequent calls return nullptr.
      */
     std::unique_ptr<GFNFFParameterSet> consumeCachedParameterSet() { return std::move(m_cached_parameter_set); }
-
-    /**
-     * @brief Heap clone of the current cached parameter set.
-     *
-     * Claude Generated (Aug 2026): for consumers that must not steal the cached copy,
-     * e.g. the GPU wrapper rebuilding its device workspace after a react-mode topology
-     * change. Returns nullptr if no set is cached.
-     */
-    std::unique_ptr<GFNFFParameterSet> cloneCachedParameterSet() const {
-        return m_cached_parameter_set ? std::make_unique<GFNFFParameterSet>(*m_cached_parameter_set) : nullptr;
-    }
 
     // === GPU orchestration helpers (Claude Generated March 2026) ===
     // These expose internal CN/EEQ computation so that GGFNFFComputationalMethod
@@ -997,6 +1013,29 @@ public:
     /// True if updateHBXBIfNeeded() ran and changed lists since last call
     bool consumeHBXBUpdate() { bool r = m_hbxb_updated; m_hbxb_updated = false; return r; }
 
+    // ---- Device-side H-bond detection (Claude Generated, Oct 2026; CUDA and ROCm, -gfnff.gpu_hb_detect_on_device) ----
+
+    /// Per-atom inputs of the H-bond detection in flat arrays, the part of detectHydrogenBondsNative() that
+    /// is O(N): basicity/acidity with the functional-group overrides, the HB hydrogens, the donor/acceptor
+    /// atom filter, the thresholds, and the neighbour / bond / hydrogen-on-atom lists as CSR. The device
+    /// enumerates the (A, H, B) triples from them (FFWorkspaceGPU::detectHBondsOnDevice()).
+    using HBDetectInputs = GFNFFHBDetectInputs;
+    HBDetectInputs prepareHBDetectInputs(const Vector& charges) const;
+
+    /// The trigger part of updateHBXBIfNeeded() (periodic forced rebuild or RMSD test), with its bookkeeping.
+    /// True when the lists have to be rebuilt now.
+    bool hbxbRefreshDue();
+
+    /// Halogen bonds from the host detection (they stay on the host: a few entries).
+    std::vector<GFNFFHalogenBond> detectXBForDevice() const;
+
+    /// Host detection of the H-bond list as the reference of the device list (verification only).
+    std::vector<GFNFFHydrogenBond> detectHBHostReference() const;
+
+    /// Bookkeeping after a device-side re-detection: stores the XB list, the counts and the reference geometry,
+    /// invalidates the host H-bond list and flags the update (consumeHBXBUpdate()).
+    void commitHBXBDeviceUpdate(int n_hb, std::vector<GFNFFHalogenBond>&& xbonds);
+
     /**
      * @brief Periodically rebuild the bonded/non-bonded repulsion pair lists from the
      * current geometry.
@@ -1031,6 +1070,36 @@ public:
 
     /// True if updateNonbondedRepulsionIfNeeded() rebuilt the lists since last check
     bool consumeNonbondedRepulsionUpdate() { bool r = m_nb_rep_updated; m_nb_rep_updated = false; return r; }
+
+    /**
+     * @brief Per-atom and per-pair tables from which a device rebuilds the non-bonded repulsion list.
+     *
+     * Claude Generated (Oct 2026): the pair term of generateRepulsionPairsNative() is
+     * alpha = sqrt(dum_i * dum_j) * ff, repab = repz_i * repz_j * REPSCALN, r_cut = 20 Bohr, with
+     * dum_i = repan[Z_i] * (1 + q_i * QREPSCAL) * (1 + NREPSCAL / (1 + cn_i^2)) per atom and ff a
+     * function of the element pair (H-H: HHFAC, times HH13REP / HH14REP for topological distance
+     * 2 / 3). Everything except the distance test depends on the topology only, so these tables
+     * stay valid until the next topology rebuild.
+     */
+    struct RepulsionDeviceInputs {
+        std::vector<int> valid;             ///< [N] 1 if the element has repulsion parameters
+        std::vector<int> metal;             ///< [N] 1 if PeriodicTable::getMetalType(Z) > 0
+        std::vector<double> dum;            ///< [N] per-atom alpha factor
+        std::vector<double> repz;           ///< [N] effective nuclear charge factor
+        std::vector<long long> bond_keys;   ///< sorted i * N + j of bond-list entries with i < j (excluded pairs)
+        std::vector<long long> hh_keys;     ///< sorted i * N + j (i < j) of H-H pairs at topological distance 2 or 3
+        std::vector<int> hh_dist;           ///< distance (2 or 3) belonging to hh_keys
+        double repscaln = 0.0, hhfac = 0.0, hh13 = 0.0, hh14 = 0.0;
+        double build_radius_bohr = 0.0;     ///< 20 Bohr kernel cutoff + Verlet skin
+        double r_cut_bohr = 20.0;           ///< value stored as GFNFFRepulsion::r_cut
+    };
+
+    /// Fills the tables above; false if the topology cannot be mapped (the caller keeps the host build).
+    bool repulsionDeviceInputs(RepulsionDeviceInputs& out) const;
+
+    /// Claude Generated (Oct 2026): the GPU wrapper rebuilds the non-bonded repulsion list on the device;
+    /// updateNonbondedRepulsionIfNeeded() then only decides WHEN (skin rule, counters) and flags the update.
+    void setSkipHostRepulsionPairs(bool v) { m_skip_host_rep_pairs = v; }
 
     /// Last rebuilt bonded/non-bonded repulsion pair lists (for GPU SoA re-upload)
     const std::vector<GFNFFRepulsion>& getLastBondedRepulsions() const { return m_last_bonded_reps; }
@@ -1176,6 +1245,34 @@ public:
     /// Number of bonded-term rebuilds since initialisation (react mode).
     int reactiveRebuildCount() const { return m_react_rebuild_count; }
 
+    /// Bond orders parallel to reactiveBonds(): 1 + round(Hueckel pi order), clamped to
+    /// 1..3, refreshed at every rebuild (react mode). Cheap to read; never recomputes.
+    const std::vector<int>& reactiveBondOrders() const { return m_react_bond_orders; }
+
+    /// Topology mode in effect after parameter parsing: "auto", "constant" or "react".
+    const std::string& topologyMode() const { return m_topology_mode; }
+
+    /**
+     * @brief One react-mode topology change event (Claude Generated Sep 2026).
+     *
+     * Recorded by detectReactiveBondChanges(); de_jump_eh is filled by the rebuild:
+     * E(new topology with its EEQ charges) - E(old topology with its charges) at the
+     * same geometry, i.e. the potential-energy discontinuity the dynamics experiences.
+     * NaN when it could not be measured (no CN state yet, first energy call).
+     */
+    struct ReactEvent {
+        long call = 0;                                    ///< energy-call counter at the scan
+        std::vector<std::pair<int, int>> formed;          ///< canonical i<j pairs
+        std::vector<std::pair<int, int>> broken;          ///< canonical i<j pairs (incl. exchange resolutions)
+        double de_jump_eh = std::numeric_limits<double>::quiet_NaN();
+    };
+
+    /// Move out all events recorded since the last call (react mode; empty otherwise).
+    /// A run that never consumes them (the CLI) keeps only the most recent
+    /// kReactEventLimit; the log line of every event is written regardless.
+    std::vector<ReactEvent> consumeReactEvents() { return std::exchange(m_react_events, {}); }
+    static constexpr size_t kReactEventLimit = 4096;
+
     const std::vector<GFNFFHydrogenBond>& getLastHBonds() const { return m_last_hbonds; }
     const std::vector<GFNFFHalogenBond>& getLastXBonds() const { return m_last_xbonds; }
 
@@ -1199,9 +1296,16 @@ public:
      * HB-alpha pair list.  Mirrors the cross-referencing logic in generateGFNFFParameterSet().
      *
      * @param hbonds  New HB list from getLastHBonds()
-     * @param bonds   Static bond list from GFNFFParameterSet (m_gpu_params_leaked->bonds)
+     * @param bonds   Static bond list from GFNFFParameterSet (m_gpu_params->bonds)
      * @return BondHBRebuildResult with updated bond_hb_data, per-bond nr_hb, per-bond hb_H_atom
      */
+    /// Same as above from plain (A, H, B) arrays (device detection, which keeps no host struct list)
+    /// Shared body of the two rebuilds: n entries, get(m, A, H, B) returns entry m
+    BondHBRebuildResult rebuildBondHBDataCore(size_t n, const std::function<void(size_t, int&, int&, int&)>& get,
+                                              const std::vector<Bond>& bonds) const;
+    BondHBRebuildResult rebuildBondHBDataFromTriples(const std::vector<int>& hb_i, const std::vector<int>& hb_j,
+                                                     const std::vector<int>& hb_k,
+                                                     const std::vector<Bond>& bonds) const;
     BondHBRebuildResult rebuildBondHBData(const std::vector<GFNFFHydrogenBond>& hbonds,
                                            const std::vector<Bond>& bonds) const;
 
@@ -1500,7 +1604,10 @@ private:
     CoulombSelfEnergy generateCoulombSelfEnergyNative() const;
 
     /// Generate repulsion pair parameters as native GFNFFRepulsion structs (bonded + nonbonded)
-    std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> generateRepulsionPairsNative() const;
+    /// @param reuse_nonbonded optional storage of the previous non-bonded list (Oct 2026): its memory is taken over
+    ///        and overwritten, so a rebuild during MD does not fault in a fresh 1.5 M-entry vector. Same list as without.
+    std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> generateRepulsionPairsNative(
+        std::vector<GFNFFRepulsion>* reuse_nonbonded = nullptr) const;
 
     /// Generate dispersion pair parameters as native GFNFFDispersion structs + ATM triples + method name
     std::tuple<std::vector<GFNFFDispersion>, std::vector<ATMTriple>, std::string> generateDispersionPairsNative() const;
@@ -1520,7 +1627,10 @@ private:
     bool repulsionListIsDistanceFiltered() const;
 
     /// Detect hydrogen bonds as native GFNFFHydrogenBond structs
-    std::vector<GFNFFHydrogenBond> detectHydrogenBondsNative(const Vector& charges) const;
+    /// @param storage  Optional previous list (Claude Generated, Oct 2026): taken over, its entries are reused as
+    ///                 the slots of the result in the parallel cell-list path (same result as without it)
+    std::vector<GFNFFHydrogenBond> detectHydrogenBondsNative(const Vector& charges,
+                                                             std::vector<GFNFFHydrogenBond>* storage = nullptr) const;
 
     /// Detect halogen bonds as native GFNFFHalogenBond structs
     std::vector<GFNFFHalogenBond> detectHalogenBondsNative(const Vector& charges) const;
@@ -2786,6 +2896,12 @@ private:
     double m_react_slack_form_factor = 1.2; ///< Tighter formation radius for slack-consuming bonds
     std::map<int, int> m_react_overvalence_streak; ///< Atom -> consecutive over-valent scans
     std::map<std::pair<int, int>, int> m_react_refractory; ///< Pair -> remaining blocked scans
+    bool m_react_owns_bonds = false; ///< react mode: m_forced_bonds is authoritative even when empty
+    std::vector<int> m_react_bond_orders; ///< Parallel to m_react_bonds, see reactiveBondOrders()
+    std::vector<ReactEvent> m_react_events; ///< Events since the last consumeReactEvents()
+
+    /// Refresh m_react_bond_orders from the cached Hueckel pi orders (after a rebuild / init).
+    void refreshReactBondOrders();
 
     /**
      * @brief React mode: O(N^2) hysteresis scan over all atom pairs; updates m_react_bonds.
@@ -2807,6 +2923,12 @@ private:
 
     // Claude Generated (March 2026): Topology persistence in param.json
     bool m_cache_topology = true;   ///< Cache Phase-1 EEQ topology in param.json (opt-out)
+    /// Claude Generated (Oct 2026): per-chunk buffers of generateRepulsionPairsNative() kept between MD rebuilds (only
+    /// when the caller passes reuse storage): no 70 MB free + page-faulting re-allocation per refresh at 6200 atoms.
+    mutable std::vector<std::vector<GFNFFRepulsion>> m_rep_part_cache;
+    bool m_skip_host_rep_workspace = false;  ///< Oct 2026: GPU wrapper owns the repulsion lists (setSkipHostRepulsionWorkspaceUpdate)
+    bool m_skip_host_hb_workspace = false;  ///< Oct 2026: GPU wrapper owns the HB/XB lists (setSkipHostHBWorkspaceUpdate)
+    bool m_skip_host_rep_pairs = false;   ///< Oct 2026: the GPU wrapper builds the non-bonded repulsion list
     bool m_skip_host_disp_pairs = false;  ///< WP-A: GPU builds D4 pairs; skip host O(N^2) loop
     bool m_implicit_coulomb_pairs = false; ///< GPU enumerates Coulomb pairs; skip host list
     bool m_print_timing = true;     ///< Print init timing summary at verbosity >= 1

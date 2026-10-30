@@ -117,7 +117,7 @@ so a CPU-only run does not touch them.
 - **ROCm / HIP** (`-DUSE_ROCM=ON -DCMAKE_PREFIX_PATH=/opt/rocm -DROCM_GPU_ARCH=gfxNNNN`): `hip-runtime-amd`, `rocm-llvm`, `rocm-device-libs`, `rocminfo`, `rocblas`, `rocsolver`. [docs/SQM_ROCM.md](docs/SQM_ROCM.md)
 - **Vulkan** (`-DUSE_VULKAN=ON`): `vulkan-icd-loader`, `vulkan-headers` and a driver with `shaderFloat64`; no ROCm needed on AMD. [docs/SQM_VULKAN.md](docs/SQM_VULKAN.md)
 - **Several GPUs**: `-gpu_device N` pins a run; batch runs spread over the visible devices (`-gpu_devices`, `-gpu_workers_per_device`); one large molecule can be split over several GPUs. [docs/MULTI_GPU.md](docs/MULTI_GPU.md), [docs/GPU_TUNING.md](docs/GPU_TUNING.md)
-- **GFN-FF EEQ solver**: `-eeq_solver.solve_method auto|cholesky|ppcg|pcg|lu|ldlt|batched` (alias `-gfnff.solve`) picks the charge solver; `auto` switches to `ppcg` at 500 atoms. The names mean the same on the CPU and with `-gpu cuda`; `-gpu rocm` accepts only `auto` and `cholesky`. `batched` drops cross-fragment Coulomb (inexact). [docs/EEQ_SOLVER_CONTROL.md](docs/EEQ_SOLVER_CONTROL.md)
+- **GFN-FF EEQ solver**: `-gfnff.solve_method auto|cholesky|ppcg|pcg|lu|ldlt|batched` (flat `-solve_method`; the older `-eeq_solver.solve_method` and `-gfnff.solve` are still accepted) picks the charge solver; `auto` switches to `ppcg` at 500 atoms. The names mean the same on the CPU and with `-gpu cuda`; `-gpu rocm` accepts `auto`, `cholesky` and `ppcg`. `batched` drops cross-fragment Coulomb (inexact). [docs/EEQ_SOLVER_CONTROL.md](docs/EEQ_SOLVER_CONTROL.md)
 - **Tuning**: every performance knob is a CLI flag; `python scripts/tuning_sweep.py mol.xyz --method gfn2 [--gpu cuda]` measures them on your machine and checks that no setting changes the energy.
 
 ## Using curcuma
@@ -131,6 +131,14 @@ curcuma -md water.xyz -method gfnff         # molecular dynamics
 curcuma -rmsd a.xyz b.xyz                   # RMSD (reorders atoms if needed)
 curcuma -confsearch mol.xyz -md_method gfnff -opt_method gfn2
 ```
+
+**Container walls**: `-md.wall_potential harmonic|logfermi|pbc`. The first two push an
+escaping atom back and do work on it; the harmonic force constant is `wall_temp * kB`, far
+too soft at its 298 K default to hold a hot gas. `pbc` exerts no force and instead moves a
+whole molecule that left the container back in on the opposite side, so it neither heats nor
+lets anything out. It is a container, not a periodic cell: the energy has no minimum image,
+so interactions are not continued across the boundary (see
+[docs/WP-PERIODIC-NONBONDED.md](docs/WP-PERIODIC-NONBONDED.md)).
 
 ### Getting help
 
@@ -181,6 +189,7 @@ write a restart file and finish. A second Ctrl-C while `stop` exists ends the pr
 ### More
 
 [docs/](docs/) holds one document per feature: the SCF modes ([docs/SCF_MODES.md](docs/SCF_MODES.md)),
+the opt-in GFN1/GFN2 SCF preconditioner `-scf_precond frag`, with segmentation of large molecules ([docs/SCF_PRECOND.md](docs/SCF_PRECOND.md), experimental),
 solvation ([docs/SOLVATION.md](docs/SOLVATION.md)), temperature ramps
 ([docs/TEMPERATURE_RAMP.md](docs/TEMPERATURE_RAMP.md)), large-system MD
 ([docs/MD_LARGE_SYSTEMS.md](docs/MD_LARGE_SYSTEMS.md)), PLUMED ([docs/PLUMED_HELP.md](docs/PLUMED_HELP.md)),
@@ -201,6 +210,7 @@ the root [CLAUDE.md](CLAUDE.md) holds the project rules, the open items and the 
 
 ```sh
 cd build && ctest --output-on-failure    # test suite
+cd build && ctest -L structinv -j8        # generated property tests of the structure library (docs/STRUCTURE_TESTS.md)
 ```
 
 ## Please cite

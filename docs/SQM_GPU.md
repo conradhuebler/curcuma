@@ -9,8 +9,8 @@
 
 `-method gfn1|gfn2 -gpu cuda` runs the native xTB tight-binding solver with its
 heavy linear algebra on an NVIDIA GPU (cuSOLVER / cuBLAS), mirroring the existing
-GFN-FF CUDA stack. `-gpu auto` uses the GPU when the build and a device are
-available, else falls back to the CPU. The CPU path (`XTB` class, all `xtb_*.cpp`)
+GFN-FF CUDA stack. `-gpu cuda` (or `rocm`, `vulkan`) uses the GPU when the plugin and a device are
+available, else falls back to the CPU with a warning (`-gpu auto` was removed Oct 26, 2026). The CPU path (`XTB` class, all `xtb_*.cpp`)
 is unchanged and `#ifdef`-free — the GPU variant is a sibling, selected by the
 factory, that **owns** a validated CPU `XTB` (host setup + properties) and a
 device context (`XtbGpuContext`, cuSOLVER/cuBLAS handles + one stream).
@@ -224,6 +224,8 @@ FP32→FP64 decision) — only then does the latency region actually shrink.
 
 ## Notes / limits
 
+- **`-scf_precond frag` (Oct 2026, AI-generated, machine-tested only)**: the fully device-resident GFN2 loop applies the fragment Broyden seed M on the device (one CUDA block per fragment block, guard on ||F||_2); ROCm, Vulkan, the host-driven CUDA loop and a multi-GPU SCF split ignore the switch with a warning. Measurements: [SCF_PRECOND.md](SCF_PRECOND.md#gpu-cuda-resident-loop).
+- Plugin rebuild (Oct 2026): the `GpuScfBackend` interface gained virtual methods (`supportsResidentPreconditioner`, `residentSetPreconditioner`, ...) inserted before `residentScfStep`; the plugin loader checks no ABI version, so rebuild `libcurcuma_cuda`/`_rocm`/`_vulkan` together with the executable.
 - **Implicit solvation (ALPB/GBSA) on GPU (WP4a+WP4b, 2026-06-07)**: `-xtb.solvent`
   works on `-gpu cuda` for both GFN1 and GFN2, matching the CPU/tblite refs to 1e-8
   (`ctest -L gpu_*_solvation|gpu_*_gbsa`, 28 tests). GFN1 uses the host-driven loop

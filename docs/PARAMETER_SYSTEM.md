@@ -282,6 +282,35 @@ if (def) {
 }
 ```
 
+#### Merged modules
+
+`ParameterRegistry::canonicalModule(name)` maps a module whose PARAMs moved into another one to its new home (table
+`kMergedModules` in `parameter_registry.cpp`; at present `eeq_solver` -> `gfnff`). `findDefinition`, `resolveAlias`,
+`getDefaultJson` and `printHelp` apply it, so `ConfigManager("eeq_solver", ...)` and `-help_module eeq_solver` keep working;
+`getForModule` and `-list_modules` do not, so the old name is no longer listed and `-export_run` fills defaults only under the
+new module. The old name stays a JSON scope and dotted CLI prefix (`-eeq_solver.solve_method` lands in `controller["eeq_solver"]`).
+
+#### Shared module `scf`
+
+Module `scf` (`src/core/energy_calculators/qm_methods/scf_parameters.h`) holds the SCF knobs several methods read:
+`scf_threshold`, `scf_max_iterations` (aliases `max_iterations`, `SCFmaxiter`), `scf_damping`, `scf_allow_unconverged`,
+`scf_mode`, `scf_diis_start` (alias `diis_start`), `scf_diis_subspace` (alias `diis_subspace`). Their registry defaults (0, -1, `auto`) mean "the method's own value", so each
+method keeps its default. `MethodFactory::applySharedScfScope()` runs on every method config: it rewrites aliases in
+`controller["scf"]` to canonical names, drops the default markers, and copies `scf_max_iterations`/`scf_damping` onto the
+external wrappers' own names (`tblite.max_iterations`, `tblite.damping`, `xtb.max_iterations`, `ulysses.max_iterations`).
+
+| spelling | lands in | read by |
+|---|---|---|
+| `-scf_threshold 1e-7` (flat) | `controller["scf"]` | all methods that read `scf` |
+| `-scf.scf_threshold 1e-7` | `controller["scf"]` | same |
+| `-xtb.scf_threshold 1e-7` | `controller["xtb"]` | gfn1/gfn2 only; wins over `scf` |
+| `-tblite.max_iterations 50` | `controller["tblite"]` | TBLite only; wins over `scf` |
+
+A flat name that `scf` shares with other modules (`-max_iterations`, `-diis_start`) goes to the active command's module if it
+owns it (`-opt` and `-sp`, module `opt`, own both), else to the scope of the selected `-method` if that registers it, else to `scf` when the method
+reads it (`MethodFactory::readsSharedScfScope`). Knobs of one solver only (level shift, eigensolver, mixed precision, GPU,
+`scf_precond`, `electronic_temperature`) stay in module `xtb`.
+
 ## JSON Export/Import
 
 ### Export Default Configuration

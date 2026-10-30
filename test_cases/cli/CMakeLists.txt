@@ -39,8 +39,8 @@ macro(add_cli_test CATEGORY TEST_NAME)
                 set(_sid "${_line}")
                 set(_sname "${_line}.xyz")
             endif()
-            file(GLOB _smatch "${CMAKE_SOURCE_DIR}/test_cases/structures/*/${_sid}.xyz"
-                              "${CMAKE_SOURCE_DIR}/test_cases/structures/*/${_sid}.vtf")
+            file(GLOB _smatch "${CURCUMA_STRUCTURES_DIR}/*/${_sid}.xyz"
+                              "${CURCUMA_STRUCTURES_DIR}/*/${_sid}.vtf")
             list(LENGTH _smatch _smatch_n)
             if(NOT _smatch_n EQUAL 1)
                 message(FATAL_ERROR "structure '${_sid}' listed in ${_struct_list} is not in test_cases/structures exactly once")
@@ -117,6 +117,9 @@ set_tests_properties(cli_gfnff_06_eeq_solver_control PROPERTIES TIMEOUT 900 RESO
 # Claude Generated (Oct 2026): local-inverse preconditioner of the projected PCG (eeq_ppcg_precond localinv).
 add_cli_test(gfnff 07_eeq_localinv)
 set_tests_properties(cli_gfnff_07_eeq_localinv PROPERTIES TIMEOUT 900 RESOURCE_LOCK "gpu" LABELS "gfnff;eeq")
+# Claude Generated (Oct 2026): the GPU GFN-FF wrapper reads the EEQ flags under every spelling (skip_phase2 found Oct 26).
+add_cli_test(gfnff 10_gpu_eeq_scope_flags)
+set_tests_properties(cli_gfnff_10_gpu_eeq_scope_flags PROPERTIES TIMEOUT 300 RESOURCE_LOCK "gpu" LABELS "gfnff;eeq;gpu" SKIP_RETURN_CODE 77)
 # Claude Generated (Oct 2026): exact far-field shortcut of the CPU Coulomb term and EEQ matrix (-gfnff.farfield_shortcut), bit-identity.
 add_cli_test(gfnff 09_farfield_shortcut)
 set_tests_properties(cli_gfnff_09_farfield_shortcut PROPERTIES TIMEOUT 900 LABELS "gfnff;eeq")
@@ -136,7 +139,24 @@ if(USE_ROCM)
     add_cli_test(gfnff_gpu 02_rocm_singlepoint)
     set_tests_properties(cli_gfnff_gpu_02_rocm_singlepoint
         PROPERTIES TIMEOUT 120 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;rocm;cli")
+    # Claude Generated (Oct 2026): ROCm against CPU single point of a Mn complex (D4 Gaussian weights on the device).
+    add_cli_test(gfnff_gpu 04_rocm_metal_dispersion)
+    set_tests_properties(cli_gfnff_gpu_04_rocm_metal_dispersion
+        PROPERTIES TIMEOUT 120 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;rocm;cli")
+    # Claude Generated (Oct 2026): charged multi-fragment system, GPU request falls back to the CPU method (frag_charge_model ensemble).
+    add_cli_test(gfnff_gpu 05_rocm_charged_fragments)
+    set_tests_properties(cli_gfnff_gpu_05_rocm_charged_fragments
+        PROPERTIES TIMEOUT 120 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;rocm;cli")
 endif()
+
+# Claude Generated (Oct 26, 2026): -gpu auto was removed (operator decision); it warns, counts a GPU fallback and runs on the CPU.
+# Needs no GPU, so it is registered in every build.
+add_test(NAME cli_gpu_auto_removed
+         COMMAND $<TARGET_FILE:curcuma> -sp ${CMAKE_SOURCE_DIR}/test_cases/structures/medium/caffeine.xyz
+                 -method gfnff -gpu auto -no_bmt -verbosity 1
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(cli_gpu_auto_removed PROPERTIES TIMEOUT 120 LABELS "gpu;cli"
+                     PASS_REGULAR_EXPRESSION "-gpu auto was removed")
 
 # =============================================================================
 # Vulkan native-xTB nuclear gradient (V-AP1) — only when USE_VULKAN=ON.
@@ -216,6 +236,8 @@ add_cli_test(simplemd 13_gfnff_react_noevent)
 add_cli_test(simplemd 14_gfnff_react_h_recombination)
 set_tests_properties(cli_simplemd_13_gfnff_react_noevent PROPERTIES TIMEOUT 300 LABELS "simplemd;gfnff;react")
 set_tests_properties(cli_simplemd_14_gfnff_react_h_recombination PROPERTIES TIMEOUT 300 LABELS "simplemd;gfnff;react")
+add_cli_test(simplemd 15_gfnff_react_water_noevent)
+set_tests_properties(cli_simplemd_15_gfnff_react_water_noevent PROPERTIES TIMEOUT 300 LABELS "simplemd;gfnff;react")
 set_tests_properties(cli_simplemd_12_eeq_cutoff_auto PROPERTIES TIMEOUT 180 LABELS "simplemd;gfnff;eeq_cutoff")
 # Claude Generated (Jul 2026): RMSD-MTD strided-scheme regression tests (docs/RMSD_MTD_TEXTBOOK.md 6)
 add_cli_test(simplemd 13_rmsd_mtd_legacy_ab)
@@ -317,6 +339,18 @@ add_cli_test(sqm 08_ngfn1_baseline_singlepoint)    # native ngfn1 vs TBLite-gfn1
 add_cli_test(sqm 09_ngfn2_baseline_singlepoint)    # native ngfn2 broken-state snapshot
 add_cli_test(sqm 10_gfn2_optimization_smoke)       # gfn2 -opt anchor (gradient = zero pre-AP-4)
 add_cli_test(sqm 11_gfn2_provider_check)           # routing anchor — updated for AP 3 (native backend)
+add_cli_test(sqm 12_gfn2_scf_precond)              # -scf_precond frag: same energy, fewer SCF iterations, ignored for ions (Oct 2026)
+add_cli_test(sqm 15_flat_flag_routing)             # flat -electronic_temperature routed to the module of -method (Oct 2026)
+# -scf_precond frag on the device-resident CUDA loop (Oct 2026); exit 77 (skip) without a usable CUDA device.
+if(USE_CUDA)
+    add_cli_test(sqm 13_gfn2_scf_precond_cuda)
+    set_tests_properties(cli_sqm_13_gfn2_scf_precond_cuda
+        PROPERTIES TIMEOUT 300 RESOURCE_LOCK "gpu" LABELS "sqm;gpu;cli" SKIP_RETURN_CODE 77)
+    # Open-shell GFN1/GFN2 on the CUDA path against the CPU, energy and gradient (Known Issue #39, Oct 2026).
+    add_cli_test(sqm 14_open_shell_cuda)
+    set_tests_properties(cli_sqm_14_open_shell_cuda
+        PROPERTIES TIMEOUT 300 RESOURCE_LOCK "gpu" LABELS "sqm;gpu;cli" SKIP_RETURN_CODE 77)
+endif()
 
 # cli_sqm_04..07 are enabled since 2026-10-09: the native gfn1/gfn2 match the TBLite references (4e-9 Eh, OH radical 8e-4 Eh).
 # cli_sqm_10 stays disabled: it expects the log markers 'Geometry Optimisation converged' / 'gfn2 Final Energy', which -opt does not print

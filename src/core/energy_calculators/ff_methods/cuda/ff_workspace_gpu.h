@@ -109,6 +109,19 @@ public:
     bool prepareCoulombSplit();
     void launchCoulombSplit();
 
+    /**
+     * @brief Split the D4 dispersion pair list (k_dc6dcn_per_pair + k_dispersion) of ONE molecule
+     * over the helper devices of setCoulombSplitDevices() (Claude Generated, Oct 2026). Contiguous
+     * pair ranges; every helper keeps its own copy of the pair data, C6 and dC6/dCN of its range
+     * (rebuilt when the pair list changes) and returns partial gradient, dE/dCN and energy.
+     * Off for periodic systems, below the Coulomb split's atom threshold, and with
+     * CURCUMA_GFNFF_DISP_SPLIT=0.
+     */
+    bool prepareDispSplit();
+    void launchDispSplitHelpers(bool gradient);
+    void appendDispSplitParts(void* stream);
+    std::string dispSplitStatus() const;
+
     /// WP5-A: D2D path — charges already on GPU after GPU Schur complement.
     /// Enqueues a D2D copy on the main workspace stream; no H2D upload happens
     /// in launchChargeDependentAndFinish() for this step.
@@ -244,6 +257,21 @@ public:
     /// Uses HBAlphaSoA + BondSoA; no CPU loop or H2D upload.
     void computeBondHBCN();
 
+    /**
+     * @brief Device-side H-bond detection (Claude Generated, Oct 2026, -gfnff.gpu_hb_detect_on_device)
+     *
+     * Enumerates the (A, H, B) triples of GFNFF::detectHydrogenBondsNative() on the device from the flat
+     * per-atom inputs (GFNFF::prepareHBDetectInputs()), sorts them by key (A*N+H)*N+B and writes the H-bond SoA
+     * directly (what updateHBonds() uploads). Case 1 triples have A < B by atom index. The caller must
+     * invalidateGraph() afterwards (hbonds.n changed). Needs the current geometry on the device.
+     * @param hb_i,hb_j,hb_k  host copies of the triples in list order (rebuildBondHBDataFromTriples())
+     * @param hb_case,hb_parent  optional host copies of case type and acceptor parent (verification)
+     * @return number of triples
+     */
+    int detectHBondsOnDevice(const GFNFFHBDetectInputs& in, std::vector<int>& hb_i, std::vector<int>& hb_j,
+                             std::vector<int>& hb_k, std::vector<int>* hb_case = nullptr,
+                             std::vector<int>* hb_parent = nullptr);
+
     /// Re-upload HBond SoA after dynamic re-detection (called after updateHBXBIfNeeded)
     void updateHBonds(const std::vector<GFNFFHydrogenBond>& hbonds,
                       const std::vector<int>& atom_types);
@@ -266,6 +294,11 @@ public:
     void updateRepulsion(const std::vector<GFNFFRepulsion>& bonded_reps,
                           const std::vector<GFNFFRepulsion>& nonbonded_reps);
 
+    /// Claude Generated (Oct 2026): rebuild the NON-bonded repulsion list on the device from the current
+    /// device coordinates (replaces updateRepulsion() for that list; the bonded list is unchanged). The
+    /// coordinates must be uploaded; the caller invalidates the graph.
+    void generateNonbondedRepulsionOnGPU(const GFNFF::RepulsionDeviceInputs& inputs);
+
     /**
      * @brief Re-upload the D4 dispersion SoA after a skin-triggered rebuild.
      *
@@ -280,6 +313,8 @@ public:
     /// Claude Generated (Oct 2026): staged upload of rebuilt pair lists (updateDispersion(),
     /// updateRepulsion()): chunked conversion by `threads` host threads into a pinned double
     /// buffer, asynchronous copies. Same device content as the serial upload (enabled = false).
+    /// ROCm (Oct 2026): updateRepulsion() only, one pinned block kept across refreshes; `threads`
+    /// also sets the host threads of the ROCm HB list pack.
     void setStagedListUpload(bool enabled, int threads)
     {
         m_staged_list_upload = enabled;
@@ -687,6 +722,7 @@ private:
 
     // Term enable flags
     bool m_dispersion_enabled = true;
+    bool m_disp_helpers_launched = false;  ///< Oct 2026: helper devices hold this step's dispersion pairs (launchDispSplitHelpers)
     bool m_disp_c6_update = true;   ///< Claude Generated (Sep 2026): per-step C6 refresh in k_dc6dcn_per_pair
     bool m_hbond_enabled      = true;
     bool m_repulsion_enabled  = true;

@@ -812,7 +812,7 @@ if(USE_CUDA)
     add_test(NAME sqm_cuda_broyden
         COMMAND test_xtb_cuda_broyden --quiet --tol 1e-10)
     set_tests_properties(sqm_cuda_broyden
-        PROPERTIES TIMEOUT 120 LABELS "gpu_scf")
+        PROPERTIES TIMEOUT 120 RESOURCE_LOCK "gpu" LABELS "gpu_scf")
 endif()
 
 # === tblite-dependent executables (dump + multipole) ===

@@ -934,9 +934,11 @@ bool EEQSolver::gpuSupports(EEQSolveMethod m, const std::string& backend) {
     // Vulkan: GFN-FF runs on the CPU there (gpu_plugin_entry_vulkan.cpp), so the CPU solves every name.
     if (backend == "vulkan")
         return true;
-    // ROCm: no device ppcg/pcg/batched path (has_device_schur=false); only the dense Cholesky route exists.
+    // ROCm: no device pcg/batched/lu/ldlt path (has_device_schur=false); the dense Cholesky route and,
+    // since Oct 2026 (Claude Generated), the projected PCG with the diagonal Jacobi exist.
     if (backend == "rocm")
-        return m == EEQSolveMethod::Auto || m == EEQSolveMethod::SchurCholesky;
+        return m == EEQSolveMethod::Auto || m == EEQSolveMethod::SchurCholesky
+            || m == EEQSolveMethod::ProjectedPCG;
     if (m == EEQSolveMethod::LU || m == EEQSolveMethod::LDLT)
         return backend == "cuda";   // Oct 2026: augmented LU (getrf) and LDL^T (sytrf) exist only in the CUDA plugin
     return m == EEQSolveMethod::Auto || m == EEQSolveMethod::SchurCholesky || m == EEQSolveMethod::ProjectedPCG
@@ -4105,7 +4107,7 @@ Vector EEQSolver::calculateFinalCharges(
             // partition wrote A(j,i) column-wise over the whole matrix. Threads take contiguous
             // ranges of the tile list. Element values depend neither on order nor on thread:
             // the matrix is bitwise identical (checked by a full-matrix hash, docs/EEQ_SOLVER_CONTROL.md).
-            constexpr int TILE = 64;
+            static constexpr int TILE = 64;  // static: the [&] lambda below must not capture it, or MSVC (C2131) no longer treats it as a constant in `buf[TILE * TILE]`
             const int nb = (natoms + TILE - 1) / TILE;
             const long long ntiles = static_cast<long long>(nb) * (nb + 1) / 2;
             double* const A_data = A.data();                       // RowMajor: A(i,j) = A_data[i*ld + j]

@@ -108,9 +108,13 @@ clusters and bulk systems (up to 2910 atoms, charge -3..+3); `cli_gfnff_08_frag_
 - **The hardcoded fallback is the real default.** `GFNFF::GFNFF(const json&)` reads each setting with
   `m_parameters.value(key, FALLBACK)`, and the CLI does not merge full registry defaults into
   `controller["gfnff"]`. Changing the PARAM default in `gfnff.h` alone has no runtime effect.
-- **GPU**: the GPU wrapper does not call `GFNFF::Calculation()`, so `-gpu` runs keep the reference
-  rule (code inspection; not runtime-tested). Since Oct 11, 2026 a charged multi-fragment system with `-gpu` and
-  `frag_charge_model` not `reference` prints one warning per run (`GFNFFGpuMethodImpl::setMolecule`).
+- **GPU**: the GPU wrapper does not call `GFNFF::Calculation()`, so it cannot apply the ensemble. Since Oct 14, 2026 a charged
+  multi-fragment system with `-gpu` and `frag_charge_model` not `reference` runs on the CPU method: `GFNFFGpuMethodImpl` sets
+  `requestsCpuFallback()` after its setup, `EnergyCalculator::setMolecule()` reports a GPU fallback (counted, `-gpu_strict true`
+  exits with code 3) and replaces the method. `-gfnff.frag_charge_model reference` keeps the GPU with the same rule on both sides.
+  Measured on ROCm (n = 1 per structure): GMTKN55 gfnff, ROCm against CPU 0 of 2462 differ (25 before); `cl2-anion` and
+  `hydronium-water2`, 100 MD steps, last frame identical. Tests `cli_gfnff_gpu_05_rocm_charged_fragments`. CUDA uses the same
+  wrapper code and was not run.
 - Cost: each variant is a full GFN-FF evaluation; tiny for the parity-decided cases, 2^k corners
   times placements with the window on.
 - A reused calculator (optimisation, MD) on master still has the stale CN / D4-C6 defect of

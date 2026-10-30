@@ -37,6 +37,13 @@
 #define D4_MAX_ELEM 118
 #define D4_MAX_REF  7
 
+/// Far-field threshold of the erf-damped Coulomb pair: gamma_ij r >= 6, tested as r^2 >= 36 (alp_i + alp_j).
+/// Claude Generated (Oct 2026). Not a cutoff: HIP erf(x) is exactly 1.0 for x >= 6 in FP64 (0 of 3e8 sampled
+/// points in [6, 9] differ, gfx1200; between 5.9007 and 6.0 it is not yet 1.0, so the threshold stays at 6) and
+/// the Gaussian of the force is below exp(-36) = 2.3e-16. The pair is then q_i q_j / r (matrix element 1 / r).
+/// Same switch as CUDA GFNFF_COUL_FARFIELD_X2 (cuda/gfnff_kernels.cuh).
+#define GFNFF_COUL_FARFIELD_GAMMA_R 6.0
+
 // ============================================================================
 // Pairwise kernels: 1 thread = 1 pair
 // ============================================================================
@@ -374,8 +381,40 @@ __global__ GFNFF_KERNEL_BOUNDS void k_hbonds(
     const double* __restrict__ cx,
     const double* __restrict__ cy,
     const double* __restrict__ cz,
+    const int*    __restrict__ slot_off,  ///< [n+1] slot range per triple (slot mode), nullptr otherwise
+    double*       __restrict__ slot_g,    ///< [3*nslots] per-slot gradient (slot mode), nullptr: atomicAdd into grad
+    const double* __restrict__ Qs_H,      ///< [n] precomputed charge scaling of q_H (nullptr: computed in the kernel)
+    const double* __restrict__ Qs_A,      ///< [n] same for -q_A
+    const double* __restrict__ Qs_B,      ///< [n] same for -q_B
     double*                    grad,
     double*                    energy
+);
+
+/// Claude Generated (Oct 2026): non-bonded repulsion as a per-atom gather over a directed-edge CSR
+/// (one workgroup per atom, 3 atomicAdd per atom). Same pair formula as k_repulsion up to FP rounding.
+__global__ __launch_bounds__(256) void k_repulsion_gather(
+    int N,
+    const int*    __restrict__ csr_off,      ///< [N+1]
+    const int*    __restrict__ csr_partner,  ///< [2n] partner atom per directed edge
+    const int*    __restrict__ csr_pairidx,  ///< [2n] pair index per directed edge
+    const double* __restrict__ alpha,
+    const double* __restrict__ repab,
+    const double* __restrict__ r_cut,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    double*                    grad,
+    double*                    energy
+);
+
+/// Claude Generated (Oct 2026): per-atom sum of per-slot gradient vectors (k_hbonds slot mode).
+/// One workgroup per atom, 3 atomicAdd per atom with at least one slot.
+__global__ __launch_bounds__(256) void k_slot_gather(
+    int N,
+    const int*    __restrict__ atom_off,    ///< [N+1]
+    const int*    __restrict__ atom_slots,  ///< [nslots] slot indices grouped by atom
+    const double* __restrict__ slot_g,      ///< [3*nslots]
+    double*                    grad
 );
 
 // ============================================================================
@@ -484,29 +523,36 @@ __global__ GFNFF_KERNEL_BOUNDS void k_cn_compute(
     double        threshold_sq);             ///< distance cutoff squared (Bohr²)
 
 // ============================================================================
-// DC6DCN per-pair kernel (Phase 2 GPU optimization)
-// Claude Generated (March 2026): Compute dc6/dcn directly per dispersion pair,
-// eliminating O(N²) CPU matrix construction.
+// D4 C6 / dC6dCN per pair, factorised over the partner element (Claude Generated, Oct 2026).
+// Replaces the March 2026 k_dc6dcn_per_pair double loop; definitions and formulas in gfnff_rocm.hip.
+// refn is read from d_refn_const (constant memory, uploaded via upload_refn_const).
 // ============================================================================
 
-/// Compute dC6(i,j)/dCN(i) and dC6(i,j)/dCN(j) for each dispersion pair.
-/// Formula: dc6dcn(i,j) = Σ_{ri,rj} dgw(i,ri) * gw(j,rj) * C6_ref(Zi,Zj,ri,rj)
-/// Thread layout: 1 thread per dispersion pair.
-/// Reference: d4param_generator.cpp:computeDC6DCN(), Fortran gfnff_gdisp0.f90:262-305
-__global__ GFNFF_KERNEL_BOUNDS void k_dc6dcn_per_pair(
-    int n_pairs,
-    const int*    __restrict__ idx_i,          ///< [n] pair atom i indices
-    const int*    __restrict__ idx_j,          ///< [n] pair atom j indices
+/// Per-atom half: u(i,e,r) = sum_ri dgw(i,ri) C6ref(Zi,e,ri,r), v(i,e,r) = sum_ri gw(i,ri) C6ref(Zi,e,ri,r).
+/// Thread layout: 1 thread per (atom, element type present).
+__global__ GFNFF_KERNEL_BOUNDS void k_disp_uv(
+    int natoms, int ntypes,
     const int*    __restrict__ atom_types,     ///< [N] atomic numbers (1-based)
+    const int*    __restrict__ ctype_elem,     ///< [ntypes] 0-based element of each compact type
     const double* __restrict__ gw,             ///< [N * MAX_REF] Gaussian weights (padded)
     const double* __restrict__ dgw,            ///< [N * MAX_REF] weight derivatives
-    const double* __restrict__ c6_flat,        ///< [MAX_ELEM² * MAX_REF²] C6 reference table
+    const double* __restrict__ c6_flat,        ///< [MAX_ELEM^2 * MAX_REF^2] C6 reference table
+    double*       __restrict__ uv);            ///< [N * ntypes * 2*MAX_REF] output u | v
+
+/// Per-pair half: C6 = v.gw_j, dC6/dCN_i = u.gw_j, dC6/dCN_j = v.dgw_j (21 FMA per pair).
+/// Thread layout: 1 thread per dispersion pair.
+/// Reference: d4param_generator.cpp:computeDC6DCN(), Fortran gfnff_gdisp0.f90:262-305
+__global__ GFNFF_KERNEL_BOUNDS void k_dc6dcn_per_pair_uv(
+    int n_pairs, int ntypes,
+    const int*    __restrict__ idx_i,          ///< [n] pair atom i indices
+    const int*    __restrict__ idx_j,          ///< [n] pair atom j indices
+    const int*    __restrict__ atom_ctype,     ///< [N] compact element type per atom
+    const double* __restrict__ uv,             ///< output of k_disp_uv
+    const double* __restrict__ gw,             ///< [N * MAX_REF] Gaussian weights (padded)
+    const double* __restrict__ dgw,            ///< [N * MAX_REF] weight derivatives
     double*       __restrict__ dc6dcn_ij,      ///< [n] output: dC6(i,j)/dCN(i)
     double*       __restrict__ dc6dcn_ji,      ///< [n] output: dC6(i,j)/dCN(j)
-    double*       __restrict__ c6_out          ///< [n] output: C6(i,j) at the current CN, or nullptr
-    // refn read from d_refn_const (constant memory, uploaded via upload_refn_const)
-    // Claude Generated (Sep 2026): mirror of the CUDA per-step C6 refresh (unverified: no ROCm SDK here).
-);
+    double*       __restrict__ c6_out);        ///< [n] output: C6(i,j) at the current CN, or nullptr
 
 // ============================================================================
 // GPU dlogdcn computation (Apr 2026)
@@ -590,6 +636,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_generate_cn_pairs_count(
     const double* __restrict__ cz,
     const int*    __restrict__ atom_types,
     double        cutoff_factor,
+    double        extra_bohr,
     int*          d_count);
 
 __global__ GFNFF_KERNEL_BOUNDS void k_generate_cn_pairs_write(
@@ -599,6 +646,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_generate_cn_pairs_write(
     const double* __restrict__ cz,
     const int*    __restrict__ atom_types,
     double        cutoff_factor,
+    double        extra_bohr,
     int*          d_counter,
     int*          idx_i,
     int*          idx_j,

@@ -115,6 +115,23 @@ class Molecule
 
       inline double Mass() const { return m_mass; }
       double CalculateMass();
+
+      /**
+       * @brief Density in g/cm^3 for a container of @p volume in Angstrom^3.
+       *
+       * Sums the atomic masses on demand, so it does not depend on
+       * CalculateMass() having been called, and applies the same defensive
+       * minimum of 1 u for undefined elements and coarse-grained particles.
+       * Returns 0 for a non-positive volume rather than a division by zero.
+       *
+       * 1 u/Angstrom^3 = 1.66053906660 g/cm^3 (the atomic mass unit in grams
+       * times the 10^24 Angstrom^3 in a cm^3). Liquid water at 25 C is
+       * 0.997 g/cm^3, which is what a solvation box is checked against.
+       *
+       * Claude Generated 2026 - the conversion belongs here rather than in every
+       * caller that has a box and wants to know what is in it.
+       */
+      double Density(double volume) const;
       std::vector<double> FragmentMass() const { return m_mass_fragments; }
 
       void InitialiseConnectedMass(double scaling = 1.3, bool protons = true);

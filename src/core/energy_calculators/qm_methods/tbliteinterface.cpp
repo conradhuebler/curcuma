@@ -377,8 +377,9 @@ double TBLiteInterface::Calculation(bool gradient)
         double effective_accuracy = m_acc;
 
         if (m_method_switch == 2) { // GFN2-xTB needs stronger settings
-            effective_damping = std::max(0.6, m_damping); // Stronger damping for GFN2
-            effective_maxiter = std::max(150, m_SCFmaxiter); // More iterations for GFN2
+            // Stronger damping / more iterations for GFN2, unless the user set them (Oct 2026)
+            effective_damping = m_user_damping ? m_damping : std::max(0.6, m_damping);
+            effective_maxiter = m_user_maxiter ? m_SCFmaxiter : std::max(150, m_SCFmaxiter);
             effective_accuracy = std::min(0.5, (double)m_acc); // Higher accuracy for GFN2
 
             if (CurcumaLogger::get_verbosity() >= 2) {
@@ -464,8 +465,8 @@ double TBLiteInterface::Calculation(bool gradient)
         double effective_accuracy = m_acc;
 
         if (m_method_switch == 2) { // GFN2-xTB needs stronger settings
-            effective_damping = std::max(0.6, m_damping);
-            effective_maxiter = std::max(150, m_SCFmaxiter);
+            effective_damping = m_user_damping ? m_damping : std::max(0.6, m_damping);
+            effective_maxiter = m_user_maxiter ? m_SCFmaxiter : std::max(150, m_SCFmaxiter);
             effective_accuracy = std::min(0.5, (double)m_acc);
         }
 

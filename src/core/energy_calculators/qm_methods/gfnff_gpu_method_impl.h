@@ -15,7 +15,10 @@
  *       static constexpr const char* name           = "CUDA";           // log prose
  *       static constexpr const char* workspace_name = "FFWorkspaceGPU"; // error text
  *       static constexpr bool has_device_schur      = true;   // false on ROCm
- *       static constexpr bool has_cn_pair_skin      = true;   // false on ROCm (K1, Oct 2026)
+ *       static constexpr bool has_device_ppcg       = true;   // WP7-E projected PCG (ROCm too, Oct 2026)
+ *       static constexpr bool has_localinv_upload   = true;   // host-built localinv upload (ROCm too, Oct 2026)
+ *       static constexpr bool has_localinv_device_build = true; // device-built localinv (ROCm too, Oct 2026)
+ *       static constexpr bool has_cn_pair_skin      = true;   // K1 CN pair-list skin (ROCm too, Oct 2026)
  *       static constexpr bool has_stream_overlap    = true;   // false on ROCm (K2/K3, Oct 2026)
  *       static constexpr int  default_eeq_cpu_fragment_threshold = 0;   // 16 on ROCm
  *       static void downloadDoubles(double* host, const double* device, int n);
@@ -68,10 +71,26 @@
 
 #include <atomic>
 #include <chrono>
+#include <type_traits>
 #include <sstream>
 #include <cmath>
 #include <cstring>
 #include <memory>
+
+/// Claude Generated (Oct 2026): true when the backend has a static downloadEEQCharges(host, device, n)
+/// (ROCm: charges of its small-system device EEQ come from a host copy made with the status read-back).
+/// A backend without the member (CUDA) gets false and keeps Backend::downloadDoubles unchanged.
+template <class B, class = void>
+struct gfnffBackendEEQChargeDownload : std::false_type {};
+template <class B>
+struct gfnffBackendEEQChargeDownload<B, std::void_t<decltype(&B::downloadEEQCharges)>> : std::true_type {};
+
+/// Claude Generated (Oct 2026): true iff the backend traits declare `has_device_repulsion_build = true` (CUDA).
+template <class B, class = void>
+struct gfnffBackendRepulsionBuild : std::false_type {};
+template <class B>
+struct gfnffBackendRepulsionBuild<B, std::void_t<decltype(B::has_device_repulsion_build)>>
+    : std::bool_constant<B::has_device_repulsion_build> {};
 
 template <class Backend>
 class GFNFFGpuMethodImpl : public ComputationalMethod {
@@ -127,6 +146,15 @@ public:
     json getStreamTimings() const override;
     void setForcePhaseTiming(bool on) override;
 
+    /// CPU-side GFNFF instance (topology, EEQ charges, react bond list and its
+    /// events). Overrides the virtual hook rather than being a plain inline
+    /// accessor: this class lives in a dlopen plugin and derives from an
+    /// `extern template` base, so only a vtable dispatch is resolvable from outside
+    /// the plugin. Claude Generated (Sep 2026).
+    GFNFF* getGFNFF() const { return m_gfnff.get(); }
+    GFNFF* gfnffInstance() const override { return m_gfnff.get(); }
+    bool requestsCpuFallback() const override { return m_cpu_fallback_requested; }
+    std::string cpuFallbackReason() const override { return m_cpu_fallback_reason; }
     /// Device index this method is pinned to (-1 = runtime default). Claude Generated (Sep 2026).
     int gpuDevice() const { return m_gpu_device; }
 
@@ -164,6 +192,8 @@ private:
     // WP2: cached topology-constant EEQ data (avoid prepareEEQParametersForGPU per step)
     std::vector<int>    m_eeq_fraglist;          ///< [N] fragment IDs (topology-constant)
     std::vector<double> m_eeq_rhs_constraints;   ///< [nfrag] target charges (topology-constant)
+    std::string         m_cpu_fallback_reason;             ///< text for the counted fallback (empty: charge-rule text)
+    bool                m_cpu_fallback_requested = false;  ///< charged multi-fragment system: CPU method wanted (see requestsCpuFallback())
     int                 m_eeq_nfrag = 1;         ///< number of fragments (topology-constant)
 
     json             m_parameters;
@@ -193,6 +223,18 @@ private:
         double dlogdcn = 0.0;         ///< dlogdcn / CN-pair-list setup (gradient only)
         double hb_cn = 0.0;           ///< per-bond HB coordination number kernel
         double hbxb = 0.0;            ///< dynamic HB/XB re-detection
+        // Claude Generated (Oct 2026): host-side list refreshes that were inside "total" but in no
+        // named phase (step-time spikes of 35 ms / 180 ms on urea400-water1000, see Labor journal).
+        double pre = 0.0;             ///< setGeometry + react topology + displacement check, before the CN launch
+        double rep_update = 0.0;      ///< non-bonded repulsion pair-list refresh (step 2d)
+        // Claude Generated (Oct 2026): split of hbxb (host detection / bond cross reference / device uploads)
+        double hb_detect = 0.0;       ///< updateHBXBIfNeeded(): trigger test + host detection of the HB/XB lists
+        double hb_rebuild = 0.0;      ///< rebuildBondHBData(): bond-HB cross reference (host)
+        double hb_upload = 0.0;       ///< updateHBonds/XBonds/HBAlphaPairs/BondHBMetadata: device uploads
+        double rep_upload = 0.0;      ///< part of rep_update spent in the device upload (rest: host list generation)
+        double rep_pairs = 0.0;       ///< non-bonded repulsion pairs after the last refresh (count, not ms)
+        double disp_update = 0.0;     ///< D4 dispersion pair-list refresh incl. device rebuild (step 2e)
+        double coul_update = 0.0;     ///< Coulomb pair-list refresh (step 2e)
         double launch = 0.0;          ///< charge-independent GPU kernel launch overhead
         double eeq_solve = 0.0;       ///< EEQ Phase 2 solve — GPU Schur/PCG or CPU fallback
         double coulomb_postprocess = 0.0; ///< Coulomb kernel + postprocess + D2H download
@@ -309,10 +351,10 @@ private:
     double m_eeq_ppcg_tolerance  = 1e-10;  ///< GPU tol is absolute on |r| (unlike CPU's relative eeq_ppcg_tol)
     int    m_eeq_ppcg_min_nfrag  = 1;      ///< Auto strategy: prefer ProjectedPCG over PCG when nfrag>=this
     int    m_eeq_ppcg_min_atoms  = 500;    ///< ... and N>=this
-    // Claude Generated (Oct 2026): local-inverse preconditioner of WP7-E (eeq_ppcg_precond localinv),
-    // CUDA only. Built on the device (EEQSolverGPU::requestLocalInverseDeviceBuild, default) or, with
-    // CURCUMA_LOCALINV_HOST_BUILD=1 or the multi-GPU split, on the host by EEQSolver::buildLocalInverse
-    // and uploaded as CSR.
+    // Claude Generated (Oct 2026): local-inverse preconditioner of WP7-E (eeq_ppcg_precond localinv).
+    // CUDA and ROCm (Oct 2026): built on the device (requestLocalInverseDeviceBuild, default,
+    // has_localinv_device_build) or, with CURCUMA_LOCALINV_HOST_BUILD=1 or the CUDA multi-GPU split,
+    // on the host by EEQSolver::buildLocalInverse and uploaded as CSR (has_localinv_upload).
     bool   m_eeq_localinv = false;
     double m_eeq_localinv_radius = 8.0;
     double m_eeq_localinv_ext = 10.0;
@@ -330,6 +372,19 @@ private:
     /// After a WP7-E solve: books device builds/rejections and reports every Jacobi re-solve as a
     /// GPU fallback (curcuma::reportGpuFallback, -gpu_strict). Claude Generated (Oct 2026).
     void finishLocalInverseGPU();
+    /// true when the local inverse for N atoms is built on the device (backend has the device build,
+    /// CURCUMA_LOCALINV_HOST_BUILD unset, and the solver can build it, e.g. no multi-GPU split).
+    /// Claude Generated (Oct 2026).
+    bool localInverseDeviceBuildSelected(int N) const
+    {
+        if constexpr (Backend::has_localinv_device_build) {
+            static const bool host_build_env = [] { const char* e = std::getenv("CURCUMA_LOCALINV_HOST_BUILD"); return e && *e && *e != '0'; }();
+            return !host_build_env && m_eeq_gpu && m_eeq_gpu->localInverseDeviceBuildPossible(N);
+        } else {
+            (void)N;
+            return false;
+        }
+    }
 
     // Deliverable 3 (Jun 2026): fragment count at/above which the device EEQ solve is
     // replaced by the exact CPU PCG/block-Jacobi solver. The device path does a dense
@@ -338,6 +393,10 @@ private:
     // device Schur paths). From eeq_rocm_cpu_fragment_threshold; the traits supply the
     // per-backend default (0 for CUDA, 16 for ROCm).
     int    m_eeq_cpu_fragment_threshold = Backend::default_eeq_cpu_fragment_threshold;
+    /// Claude Generated (Oct 2026), ROCm: eeq_rocm_cpu_fragment_threshold given explicitly. Then
+    /// nfrag >= threshold always takes the CPU EEQ (the pre-Oct-2026 route), also when the solver
+    /// resolves to ppcg; by default the device projected PCG runs there.
+    bool   m_eeq_cpu_route_forced = false;
 
     bool m_split_configured = false;  ///< Claude Generated (Sep 2026): multi-GPU split set up
     bool m_split_reported = false;
@@ -354,7 +413,15 @@ private:
     /// current CN + Gaussian weights (factored out of initGPUWorkspace() so the skin-triggered
     /// rebuild of GFNFF::updateDispersionPairsIfNeeded() can repeat it).
     void buildDispersionPairsOnDevice();
+    /// Claude Generated (Oct 2026): compare the device H-bond list with detectHydrogenBondsNative() (sets, case 1
+    /// with A < B); prints a summary to stderr and warns on a difference (-gfnff.gpu_hb_detect_verify).
+    void verifyDeviceHBList(const std::vector<int>& di, const std::vector<int>& dj, const std::vector<int>& dk,
+                            const std::vector<int>& dcase, const std::vector<int>& dparent);
     bool m_disp_pairs_on_device = false;  ///< WP-A mode active (gpu_disp_pairs_on_device)
+    bool m_disp_pairs_requested = false;  ///< the D4 pair list is built on the device (setting, backend default, ROCm env)
+    bool m_hb_detect_on_device = false;   ///< Oct 2026: H-bond triples enumerated on the device (gpu_hb_detect_on_device)
+    bool m_hb_detect_verify = false;      ///< compare the device list with the host detection at every refresh
+    bool m_rep_pairs_on_device = false;   ///< Oct 2026: non-bonded repulsion list rebuilt on the device (gpu_rep_pairs_on_device)
 };
 
 // ---------------------------------------------------------------------------
@@ -381,8 +448,8 @@ GFNFFGpuMethodImpl<Backend>::GFNFFGpuMethodImpl(const std::string& method_name,
     // Claude Generated (April 2026): Read accuracy-related flags for GPU fallback behavior
     // config.value("gfnff", config) falls back to config itself so top-level CLI params work.
     json gfnff_cfg = config.value("gfnff", config);
-    m_allow_unconverged_charges = gfnff_cfg.value("allow_unconverged_charges", false);
-    m_skip_phase2 = gfnff_cfg.value("skip_phase2", false);
+    m_allow_unconverged_charges = gfnff_cfg.value("allow_unconverged_charges", false);   // re-read below with the eeq_solver scope first
+    m_skip_phase2 = gfnff_cfg.value("skip_phase2", false);                               // re-read below with the eeq_solver scope first
     // eeq_rmsd_threshold: per-atom RMSD (Bohr) below which the Cholesky factor is reused.
     // 0.0 (default) = always refactorize, matches reference CPU behavior exactly.
     // Suggested MD value: 0.05–0.10 Bohr (saves ~12 ms/step when geometry barely changes).
@@ -417,6 +484,11 @@ GFNFFGpuMethodImpl<Backend>::GFNFFGpuMethodImpl(const std::string& method_name,
         }
         return gfnff_cfg.value(key, dflt);
     };
+    // Claude Generated (Oct 26, 2026): -eeq_solver.skip_phase2 and -eeq_solver.allow_unconverged_charges steered the CPU
+    // EEQSolver but not this wrapper, which read the gfnff scope only (GPU MD of peo201-chain: -eeq_solver.skip_phase2 true
+    // changed the first CPU step and left the device EEQ on, -gfnff.skip_phase2 true bypassed it).
+    m_allow_unconverged_charges = eeq_value("allow_unconverged_charges", false);
+    m_skip_phase2 = eeq_value("skip_phase2", false);
     // Claude Generated (Sep 28, 2026, docs/MULTI_GPU_GAPS.md X-1): the solver keys below are
     // eeq_solver PARAMs since the parameter parser registers multi-line PARAMs, so a flat flag
     // (-pcg_tolerance 1e-12) is routed to the eeq_solver scope. Read that scope first, like the
@@ -513,9 +585,15 @@ bool GFNFFGpuMethodImpl<Backend>::setMolecule(const Mol& mol)
     // generator to skip its O(N^2) pair loop (keep only CN + gw the device reuses).
     // Must be set before InitialiseMolecule triggers host parameter generation.
     {
-        bool disp_dev = m_parameters.value("gpu_disp_pairs_on_device", false);
-        if (m_parameters.contains("gfnff") && m_parameters["gfnff"].is_object())
-            disp_dev = disp_dev || m_parameters["gfnff"].value("gpu_disp_pairs_on_device", false);
+        // Claude Generated (Oct 14, 2026): default on for CUDA and ROCm (device build in the host pair order; checked on
+        // 27 structures on CUDA and 16 on ROCm, docs/GPU_STEP_PAUSES_2026-10-14.md). The gfnff scope wins over the top level.
+        bool disp_dev = Backend::default_disp_pairs_on_device;
+        if (m_parameters.contains("gfnff") && m_parameters["gfnff"].is_object()
+            && m_parameters["gfnff"].contains("gpu_disp_pairs_on_device"))
+            disp_dev = m_parameters["gfnff"].value("gpu_disp_pairs_on_device", disp_dev);
+        else
+            disp_dev = m_parameters.value("gpu_disp_pairs_on_device", disp_dev);
+        m_disp_pairs_requested = disp_dev;
         m_gfnff->setSkipHostDispPairs(disp_dev);
         // Claude Generated (Sep 2026): the device enumerates the Coulomb pairs itself;
         // `-gpu_coulomb_implicit false` restores the host pair list.
@@ -524,6 +602,13 @@ bool GFNFFGpuMethodImpl<Backend>::setMolecule(const Mol& mol)
             coul_implicit = m_parameters["gfnff"].value("gpu_coulomb_implicit", coul_implicit);
         m_gfnff->setImplicitCoulombPairs(coul_implicit);
         m_gfnff->setKeepFullParameterSet(true);  // consumeCachedParameterSet() needs every pair list
+        // Claude Generated (Oct 2026): the wrapper never runs the CPU workspace of m_gfnff (no
+        // GFNFF::Calculation()), so its HB/XB lists need no update on a re-detection (every backend
+        // since the CUDA measurement of Oct 14; first ROCm only).
+        m_gfnff->setSkipHostHBWorkspaceUpdate(true);
+        // Claude Generated (Oct 2026): the repulsion lists of the wrapper come from getLast*Repulsions();
+        // the CPU workspace never runs, so a refresh need not copy them into it (every backend).
+        m_gfnff->setSkipHostRepulsionWorkspaceUpdate(true);
     }
 
     // CPU topology + parameter generation (same as CPU gfnff)
@@ -539,6 +624,20 @@ bool GFNFFGpuMethodImpl<Backend>::setMolecule(const Mol& mol)
     if (!initGPUWorkspace()) {
         return false;
     }
+
+    // Oct 2026: from here on the non-bonded repulsion list is rebuilt on the device (default on for CUDA,
+    // `-gfnff.gpu_rep_pairs_on_device false` keeps the host build). Set after the setup build on purpose.
+    if constexpr (gfnffBackendRepulsionBuild<Backend>::value) {
+        bool rep_dev = true;
+        if (m_parameters.contains("gpu_rep_pairs_on_device")) rep_dev = m_parameters.value("gpu_rep_pairs_on_device", rep_dev);
+        if (m_parameters.contains("gfnff") && m_parameters["gfnff"].is_object())
+            rep_dev = m_parameters["gfnff"].value("gpu_rep_pairs_on_device", rep_dev);
+        typename GFNFF::RepulsionDeviceInputs probe;
+        if (rep_dev && m_gfnff->repulsionDeviceInputs(probe)) {
+            m_rep_pairs_on_device = true;
+            m_gfnff->setSkipHostRepulsionPairs(true);
+        }
+    }
     auto t_init_end = std::chrono::high_resolution_clock::now();
 
     m_gpu_upload_time_ms = std::chrono::duration<double, std::milli>(t_init_end - t_after_topo).count();
@@ -546,17 +645,18 @@ bool GFNFFGpuMethodImpl<Backend>::setMolecule(const Mol& mol)
     m_initialized = true;
 
     // Claude Generated (Oct 2026): the GPU wrapper never calls GFNFF::Calculation(), so the
-    // frag_charge_model ensemble (CPU default) does not act here: the reference rule puts the whole
-    // net charge on the fragment holding atom 1. Say so, once per run, when it would have mattered.
-    if (m_eeq_nfrag > 1 && mol.m_charge != 0 && m_gfnff->fragEnsembleRequested()) {
-        static std::atomic<bool> warned{ false };
-        if (!warned.exchange(true)) {
-            CurcumaLogger::warn(fmt::format(
-                "GFN-FF {}: net charge {} on {} fragments - the GPU path uses the reference charge placement "
-                "(whole charge on the fragment holding atom 1), the CPU default frag_charge_model ensemble is not "
-                "applied; energies can differ from the CPU. Set -gfnff.frag_charge_model reference to silence "
-                "this warning and make the CPU use the same rule.", Backend::name, mol.m_charge, m_eeq_nfrag));
-        }
+    // frag_charge_model ensemble (CPU default) does not act here: the reference rule would put the whole
+    // net charge on the fragment holding atom 1 (GMTKN55 gfnff, ROCm against CPU: 25 of 2462 structures
+    // differ, up to 131 kcal/mol, all of them charged). A charged molecule with several fragments therefore
+    // asks EnergyCalculator for the CPU method (requestsCpuFallback()); -gfnff.frag_charge_model reference
+    // keeps the GPU and makes the CPU use the same rule.
+    m_cpu_fallback_requested = (m_eeq_nfrag > 1 && mol.m_charge != 0 && m_gfnff->fragEnsembleRequested());
+    // Claude Generated (Oct 2026): the ALPB solvation term exists only in GFNFF::Calculation(), which this
+    // wrapper never calls; before this check -gfnff.solvent water on -gpu rocm returned the gas-phase
+    // energy without a message (caffeine, 1 run: -4.67273706 against -4.68976245 Eh on the CPU).
+    if (m_gfnff->solvationActive()) {
+        m_cpu_fallback_requested = true;
+        m_cpu_fallback_reason = "GFN-FF: implicit solvent (ALPB) is not applied by the GPU path, calculation on the CPU";
     }
 
     CitationRegistry::cite("gfnff");
@@ -725,6 +825,11 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
         // staged pinned upload (same bytes, parallel conversion); fallback is the PARAM default.
         if constexpr (Backend::has_staged_list_upload)
             m_gpu_workspace->setStagedListUpload(cfg_get_bool("gpu_staged_list_upload", true), m_host_threads);
+        // Claude Generated (Oct 2026): H-bond triples enumerated on the device (CUDA and ROCm, default on).
+        if constexpr (Backend::has_device_hb_detect) {
+            m_hb_detect_on_device = cfg_get_bool("gpu_hb_detect_on_device", true);
+            m_hb_detect_verify = m_hb_detect_on_device && cfg_get_bool("gpu_hb_detect_verify", false);
+        }
         // Claude Generated (Sep 2026): per-step D4 C6 refresh on the device, same switch as the
         // CPU path (GFNFF::refreshDispersionC6()).
         m_gpu_workspace->setDispersionC6Update(cfg_get_bool("dispersion_c6_update", true));
@@ -735,9 +840,12 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
         // no device Schur paths (ROCm). The key is documented as "ROCm only", and on CUDA the
         // host EEQ it selects is the path that segfaults inside a CUDA process on polymer_2x
         // (TECHNICAL_DEBT.md F-Q9), so the CUDA wrapper keeps its trait default (0).
-        if constexpr (!Backend::has_device_schur)
+        if constexpr (!Backend::has_device_schur) {
             m_eeq_cpu_fragment_threshold = cfg_get_int("eeq_rocm_cpu_fragment_threshold",
                                                        Backend::default_eeq_cpu_fragment_threshold);
+            m_eeq_cpu_route_forced = gfnff_cfg.contains("eeq_rocm_cpu_fragment_threshold")
+                                  || m_parameters.contains("eeq_rocm_cpu_fragment_threshold");
+        }
 
         // Phase 2: Upload C6 reference table for GPU dc6dcn per-pair computation
         D4ParameterGenerator* d4 = m_gfnff->getD4Generator();
@@ -752,7 +860,7 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
             // overwritten here). Needs CN + gw on the device first. Default OFF: the
             // proven host build stays the reference; the ROCm workspace additionally rebuilds
             // the gather CSR. See docs/GFNFF_PERFORMANCE_LEVERS.md.
-            if (cfg_get_bool("gpu_disp_pairs_on_device", false)) {
+            if (m_disp_pairs_requested) {
                 m_disp_pairs_on_device = true;
                 buildDispersionPairsOnDevice();
                 if (CurcumaLogger::get_verbosity() >= 1)
@@ -805,6 +913,8 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
             }
             if (devs.size() > 1) {
                 m_gpu_workspace->setCoulombSplitDevices(devs, min_atoms);
+                m_eeq_gpu->setSplitMixedPrecision(cfg_get_bool("gpu_eeq_mixed_precision", true),
+                                                  cfg_get_dbl("gpu_eeq_mixed_rho", 1e-5));
                 m_eeq_gpu->setSplitDevices(devs, std::max(min_atoms, cfg_get_int("gpu_split_eeq_min_atoms", 4000)));
                 m_split_configured = true;
             }
@@ -841,7 +951,7 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
             // WP6: upload fragment topology for batched Cholesky (nfrag > 1), and since Sep 2026
             // also for one fragment on the device-Schur backend, which then takes the projected
             // PCG from eeq_ppcg_min_atoms on like the CPU (F-4; see singleFragmentPPCG()).
-            if (m_eeq_nfrag > 1 || (m_eeq_nfrag == 1 && Backend::has_device_schur)) {
+            if (m_eeq_nfrag > 1 || (m_eeq_nfrag == 1 && (Backend::has_device_schur || Backend::has_device_ppcg))) {
                 m_eeq_gpu->uploadFragmentTopology(m_eeq_nfrag, m_eeq_fraglist, natoms);
                 // WP7-B: cache min inter-fragment distance for batched-solver warning.
                 m_eeq_batched_check_pending = true;  // batched error estimate once per topology
@@ -891,6 +1001,16 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
     }
 
     auto t0 = std::chrono::high_resolution_clock::now();
+    // CURCUMA_GFNFF_STEPPHASE=1: GAP lines name the host sections that no phase timer covers (> 0.5 ms)
+    static const bool gap_log = [] { const char* e = std::getenv("CURCUMA_GFNFF_STEPPHASE"); return e && *e && std::string(e) != "0"; }();
+    auto gap_t = t0;
+    auto gap_lap = [&](const char* what) {
+        if (!gap_log) return;
+        const auto now = std::chrono::high_resolution_clock::now();
+        const double ms = std::chrono::duration<double, std::milli>(now - gap_t).count();
+        if (ms > 0.5) fmt::print(stderr, "GAP {} {:.2f}\n", what, ms);
+        gap_t = now;
+    };
 
     // Claude Generated (May 2026): Enable per-stream kernel timing at verbosity >= 2.
     // This disables CUDA Graph replay so events get recorded each step.
@@ -934,6 +1054,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
     // --- Step 0: GPU topology displacement check (Claude Generated March 2026) ---
     // Runs on GPU where coords already live. Result fed to GFNFF::needsFullTopologyUpdate()
     // to skip CPU O(N) Eigen matrix subtraction.
+    const auto t_pre_start = std::chrono::high_resolution_clock::now();
     m_gpu_workspace->setGeometry(geom_bohr);
 
     // React topology mode (Claude Generated Aug 2026): run the CPU hysteresis scan;
@@ -955,6 +1076,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
         m_cn_pairs_generated = false;
         m_eeq_has_ref_geom = false;
     }
+    gap_lap("after_setgeometry_react");
 
     // K1 (Oct 2026, Claude Generated): true when the CN pair list is a Verlet list with its own
     // reference geometry (see initGPUWorkspace() for the threshold derivation).
@@ -975,6 +1097,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
                 m_cn_pairs_generated = false;
         }
     }
+    gap_lap("after_checkDisplacement");
 
     // K1 (Oct 2026, Claude Generated): rebuild an existing CN pair list BEFORE computeCN when an
     // atom moved more than m_cn_pair_max_disp since its build, so this step's CN and chain rule
@@ -986,6 +1109,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
             m_gpu_workspace->generateCNPairListOnGPU();
         }
     }
+    gap_lap("after_K1_cnlist_rebuild");
 
     // --- Step 1: GPU CN computation (G-P1: truly async, no sync here) ---
     // k_cn_compute + k_dlogdcn + 3 async D2H launches on main stream.
@@ -993,6 +1117,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
     // finalizeCNForCPU() is called after Phase 4 launch to sync without sleeping.
     // Static-Mode (WP-S1): skip when frozen_cn — d_cn_final/d_dlogdcn retain previous-step values.
     auto t_cn_start = std::chrono::high_resolution_clock::now();
+    m_last_gpu_prep_timing.pre = std::chrono::duration<double, std::milli>(t_cn_start - t_pre_start).count();
     if (!m_gpu_workspace->frozenCN()) {
         m_gpu_workspace->computeCN(m_atom_types);
     }
@@ -1031,25 +1156,73 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
 
     // --- Step 2c: Dynamic HB/XB re-detection (must happen before kernel launch) ---
     auto t_hbxb_start = std::chrono::high_resolution_clock::now();
-    m_gfnff->updateHBXBIfNeeded(nullptr);
-    bool hbxb_updated = m_gfnff->consumeHBXBUpdate();
+    // CURCUMA_GFNFF_STEPPHASE=1: sub-timers of a fired refresh (stderr), Claude Generated (Oct 2026)
+    static const bool hb_phase_log = [] { const char* e = std::getenv("CURCUMA_GFNFF_STEPPHASE"); return e && *e && std::string(e) != "0"; }();
+    auto hb_t = std::chrono::steady_clock::now();
+    auto hb_lap = [&](const char* what) {
+        if (!hb_phase_log) return;
+        const auto now = std::chrono::steady_clock::now();
+        fmt::print(stderr, "HBXBSUB {} {:.2f}\n", what, std::chrono::duration<double, std::milli>(now - hb_t).count());
+        hb_t = now;
+    };
+    bool hbxb_updated = false;
+    bool hb_on_device = false;                       // the H-bond list of this refresh was built on the device
+    std::vector<int> dev_hb_i, dev_hb_j, dev_hb_k;   // its (A, H, B) triples on the host
+    if constexpr (Backend::has_device_hb_detect) {
+        if (m_hb_detect_on_device) {
+            hb_on_device = true;
+            if (m_gfnff->hbxbRefreshDue()) {
+                const Vector& topo_q = m_gfnff->getTopologyInfo().topology_charges;
+                const auto in = m_gfnff->prepareHBDetectInputs(topo_q);
+                std::vector<int> dev_case, dev_parent;
+                const int n_hb = m_gpu_workspace->detectHBondsOnDevice(in, dev_hb_i, dev_hb_j, dev_hb_k,
+                    m_hb_detect_verify ? &dev_case : nullptr, m_hb_detect_verify ? &dev_parent : nullptr);
+                if (m_hb_detect_verify)
+                    verifyDeviceHBList(dev_hb_i, dev_hb_j, dev_hb_k, dev_case, dev_parent);
+                m_gfnff->commitHBXBDeviceUpdate(n_hb, m_gfnff->detectXBForDevice());
+                hbxb_updated = m_gfnff->consumeHBXBUpdate();
+            }
+        }
+    }
+    if (!hb_on_device) {
+        m_gfnff->updateHBXBIfNeeded(nullptr);
+        hbxb_updated = m_gfnff->consumeHBXBUpdate();
+    }
+    const auto t_hb_det_end = std::chrono::high_resolution_clock::now();
+    m_last_gpu_prep_timing.hb_detect = std::chrono::duration<double, std::milli>(t_hb_det_end - t_hbxb_start).count();
+    m_last_gpu_prep_timing.hb_rebuild = 0.0;
+    m_last_gpu_prep_timing.hb_upload = 0.0;
+    if (hbxb_updated) hb_lap("detect");
     if (hbxb_updated) {
-        m_gpu_workspace->updateHBonds(m_gfnff->getLastHBonds(), m_atom_types);
+        if (!hb_on_device)
+            m_gpu_workspace->updateHBonds(m_gfnff->getLastHBonds(), m_atom_types);
         m_gpu_workspace->updateXBonds(m_gfnff->getLastXBonds(), m_atom_types);
+        const auto t_hb_up1 = std::chrono::high_resolution_clock::now();
+        m_last_gpu_prep_timing.hb_upload = std::chrono::duration<double, std::milli>(t_hb_up1 - t_hb_det_end).count();
+        hb_lap("upload_hb_xb");
 
         // Claude Generated (Apr 2026): Propagate HB re-detection to bond metadata and alpha pairs.
         // Without this, the bond SoA's nr_hb/hb_H_atom and the HB alpha pair list become stale,
         // causing gradient errors at H-bond atoms during optimization/MD.
         // Reference: Fortran gfnff_ini2.f90:1008-1060 (bond_hb_AHB_set0/set1)
         if (m_gpu_params) {
-            auto hb_update = m_gfnff->rebuildBondHBData(
-                m_gfnff->getLastHBonds(), m_gpu_params->bonds);
+            const auto t_hb_rb0 = std::chrono::high_resolution_clock::now();
+            auto hb_update = hb_on_device
+                ? m_gfnff->rebuildBondHBDataFromTriples(dev_hb_i, dev_hb_j, dev_hb_k, m_gpu_params->bonds)
+                : m_gfnff->rebuildBondHBData(m_gfnff->getLastHBonds(), m_gpu_params->bonds);
+            const auto t_hb_rb1 = std::chrono::high_resolution_clock::now();
+            m_last_gpu_prep_timing.hb_rebuild = std::chrono::duration<double, std::milli>(t_hb_rb1 - t_hb_rb0).count();
+            hb_lap("rebuildBondHBData");
 
             // Update HB alpha (H,B) pair list on GPU
             m_gpu_workspace->updateHBAlphaPairs(hb_update.bond_hb_data, m_atom_types);
+            hb_lap("updateHBAlphaPairs");
 
             // Update per-bond nr_hb and hb_H_atom metadata on GPU
             m_gpu_workspace->updateBondHBMetadata(hb_update.bond_nr_hb, hb_update.bond_hb_H_atom);
+            m_last_gpu_prep_timing.hb_upload += std::chrono::duration<double, std::milli>(
+                std::chrono::high_resolution_clock::now() - t_hb_rb1).count();
+            hb_lap("updateBondHBMetadata");
 
             // Update leaked params' bond_hb_data for HB CN computation (Step 2b)
             m_gpu_params->bond_hb_data = std::move(hb_update.bond_hb_data);
@@ -1068,19 +1241,44 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
         m_gpu_workspace->invalidateGraph();
     }
     auto t_hbxb_end = std::chrono::high_resolution_clock::now();
+    gap_t = t_hbxb_end;
 
     // --- Step 2d: Periodic non-bonded repulsion pair-list refresh ---
     // Claude Generated (Sep 2026): the repulsion pair list is otherwise built ONCE from a
     // hard 20 Bohr cutoff at setMolecule() time and never revisited (identical bug on
     // CPU and GPU, since both go through GFNFF::InitialiseMolecule() -> initGPUWorkspace()
     // once). See GFNFF::updateNonbondedRepulsionIfNeeded() for the full rationale.
+    const auto t_rep_start = std::chrono::high_resolution_clock::now();
     m_gfnff->updateNonbondedRepulsionIfNeeded(nullptr);
+    m_last_gpu_prep_timing.rep_upload = 0.0;
+    gap_lap("repulsion_host_build");
+    if constexpr (gfnffBackendRepulsionBuild<Backend>::value) {
+        if (m_rep_pairs_on_device && m_gfnff->consumeNonbondedRepulsionUpdate()) {
+            // The skin rule fired on the host; the list is rebuilt from the device coordinates. The
+            // tables depend on the topology only and are cheap to collect, so no cache to invalidate.
+            typename GFNFF::RepulsionDeviceInputs rep_in;
+            if (m_gfnff->repulsionDeviceInputs(rep_in)) {
+                m_gpu_workspace->generateNonbondedRepulsionOnGPU(rep_in);   // device coordinates set at the start of the call
+                m_gpu_workspace->invalidateGraph();
+            } else {
+                m_has_error = true;
+                m_error_message = "GFN-FF GPU: repulsion tables unavailable after the device build was enabled";
+                CurcumaLogger::error(m_error_message);
+                return 0.0;
+            }
+        }
+    }
     if (m_gfnff->consumeNonbondedRepulsionUpdate()) {
+        const auto t_rep_up = std::chrono::high_resolution_clock::now();
         m_gpu_workspace->updateRepulsion(m_gfnff->getLastBondedRepulsions(),
                                           m_gfnff->getLastNonbondedRepulsions());
+        m_last_gpu_prep_timing.rep_upload = std::chrono::duration<double, std::milli>(
+            std::chrono::high_resolution_clock::now() - t_rep_up).count();
+        m_last_gpu_prep_timing.rep_pairs = static_cast<double>(m_gfnff->getLastNonbondedRepulsions().size());
         // Repulsion SoA n-values changed → captured graph is stale (same reasoning as HB/XB).
         m_gpu_workspace->invalidateGraph();
     }
+    gap_lap("repulsion_upload");
 
     // --- Step 2e: D4 dispersion pair-list skin check + explicit Coulomb list refresh ---
     // Claude Generated (Sep 2026): same one-shot-list bug as the repulsion list above; see
@@ -1088,23 +1286,33 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
     // prepareAndLaunchChargeIndependent() and computeGaussianWeightsOnGPU(), which read the
     // dispersion SoA (k_dc6dcn_per_pair, k_dispersion). Both lists change their SoA n ->
     // the captured CUDA graph is stale and must be invalidated, exactly like HB/XB/repulsion.
+    const auto t_disp_start = std::chrono::high_resolution_clock::now();
+    m_last_gpu_prep_timing.rep_update = std::chrono::duration<double, std::milli>(t_disp_start - t_rep_start).count();
+    gap_lap("before_dispersion_update");
     m_gfnff->updateDispersionPairsIfNeeded(nullptr);
+    gap_lap("dispersion_host_generator");
     if (m_gfnff->consumeDispersionPairsUpdate()) {
         if (m_disp_pairs_on_device) {
             buildDispersionPairsOnDevice();   // host generator refreshed CN + weights; device builds pairs
+            gap_lap("dispersion_device_build");
         } else if (m_gfnff->getWorkspace()) {
             m_gpu_workspace->updateDispersion(m_gfnff->getWorkspace()->d4Dispersions());
         }
         m_gpu_workspace->invalidateGraph();
     }
+    const auto t_coul_start = std::chrono::high_resolution_clock::now();
+    m_last_gpu_prep_timing.disp_update = std::chrono::duration<double, std::milli>(t_coul_start - t_disp_start).count();
+    gap_lap("dispersion_update");
     m_gfnff->updateCoulombPairsIfNeeded(nullptr);
     if (m_gfnff->consumeCoulombPairsUpdate() && m_gfnff->getWorkspace()) {
         m_gpu_workspace->updateCoulombPairs(m_gfnff->getWorkspace()->coulombPairs());
         m_gpu_workspace->invalidateGraph();
     }
+    m_last_gpu_prep_timing.coul_update = std::chrono::duration<double, std::milli>(
+        std::chrono::high_resolution_clock::now() - t_coul_start).count();
 
     // HB/XB pair list consistency: CPU vs GPU (verbosity >= 3)
-    if (CurcumaLogger::get_verbosity() >= 3) {
+    if (CurcumaLogger::get_verbosity() >= 3 && !hb_on_device) {
         const auto& hb_cpu = m_gfnff->getLastHBonds();
         const auto& hb_gpu = m_gpu_workspace->getLastHBonds();
         if (hb_cpu.size() != hb_gpu.size()) {
@@ -1139,6 +1347,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
         }
     }
 
+    gap_lap("coulomb_update_and_checks");
     auto t_prep_end = std::chrono::high_resolution_clock::now();
 
     // === OVERLAP: Launch charge-independent GPU kernels ===
@@ -1214,7 +1423,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
         m_eeq_nfrag           = topo_params.nfrag;
 
         // WP6: upload fragment topology for batched Cholesky (nfrag > 1); one fragment too (F-4)
-        if (m_eeq_nfrag > 1 || (m_eeq_nfrag == 1 && Backend::has_device_schur)) {
+        if (m_eeq_nfrag > 1 || (m_eeq_nfrag == 1 && (Backend::has_device_schur || Backend::has_device_ppcg))) {
             m_eeq_gpu->uploadFragmentTopology(m_eeq_nfrag, m_eeq_fraglist, N);
             // WP7-B: refresh min inter-fragment distance after topology rebuild.
             m_eeq_batched_check_pending = true;  // batched error estimate once per topology
@@ -1236,6 +1445,29 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
     //   4. a rejected or failed device solve keeps the last accepted charges (reported as a
     //      GPU fallback, src/core/gpu_fallback.h)
     Vector charges(N);
+    // Deliverable 3 (Jun 2026) / Oct 2026, ROCm only (threshold 0 on CUDA): exact CPU EEQ
+    // (prepareCNAndEEQ with the configured solver; auto = projected PCG for many fragments) for
+    // high fragment counts where the device has no usable solve. The normal device path leaves CN
+    // GPU-resident (WP5-D), so m_gpu_cn_final is synced to the current geometry first.
+    auto eeqCpuFragmentRoute = [&]() {
+        m_gpu_workspace->finalizeCNForCPU(m_gpu_cn_final);
+        m_gfnff->prepareCNAndEEQ(gradient, /*gpu_only=*/true, &m_gpu_cn_final, /*skip_eeq=*/false);
+        charges = m_gfnff->getLastCharges();
+        m_gpu_workspace->setEEQCharges(charges);
+    };
+    // Claude Generated (Oct 2026): a ROCm many-fragment system whose solver resolves to ppcg takes
+    // the device projected PCG (WP7-E) instead of the CPU route, unless the threshold was given
+    // explicitly (m_eeq_cpu_route_forced). Same resolution rule as the dispatch below.
+    const bool many_frag_cpu_route = m_eeq_cpu_fragment_threshold > 0
+        && m_eeq_nfrag >= m_eeq_cpu_fragment_threshold;
+    bool many_frag_device_ppcg = false;
+    if constexpr (Backend::has_device_ppcg) {
+        many_frag_device_ppcg = many_frag_cpu_route && !m_eeq_cpu_route_forced
+            && m_gpu_workspace->isEEQTopoValid() && m_eeq_gpu->isFragmentTopoValid()
+            && EEQSolver::resolveMethod(m_eeq_strategy, N, m_eeq_nfrag, m_eeq_ppcg_min_atoms,
+                                        m_eeq_ppcg_min_nfrag) == EEQSolveMethod::ProjectedPCG;
+    }
+    bool cpu_route_after_device = false;   ///< device ppcg failed on a many-fragment ROCm system
     if (m_gpu_workspace->frozenCharges()) {
         // Static-Mode (WP-S1): GPU d_charges retain previous-step values, no upload needed.
         // CPU-side charges fetched for any consumer that still needs them.
@@ -1262,26 +1494,18 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
         }
         charges = m_gfnff->getLastCharges();
         m_gpu_workspace->setEEQCharges(charges);
-    } else if (m_eeq_cpu_fragment_threshold > 0
-               && m_eeq_nfrag >= m_eeq_cpu_fragment_threshold) {
+    } else if (many_frag_cpu_route && !many_frag_device_ppcg) {
         // Deliverable 3 (Jun 2026), ROCm only (threshold 0 on CUDA): high fragment count
-        // (solvent box). The device EEQ does a dense N x N Cholesky for nfrag>1 - O(N^3),
-        // intractable here - and the device PCG/batched/general-Schur variants are not
-        // ported on ROCm (they return false). Route to the CPU EEQ (prepareCNAndEEQ), which solves
-        // with the configured solver (auto: projected PCG for many fragments, O(N^2 k)) and keeps
-        // the charges identical to the CPU path.
+        // (solvent box) and the solver does not resolve to ppcg (or the threshold was given
+        // explicitly). The device EEQ would be a dense N x N Cholesky plus a host Schur step over
+        // nfrag+1 columns, intractable here; the device PCG/batched/general-Schur variants are not
+        // ported on ROCm. Route to the CPU EEQ, which keeps the charges identical to the CPU path.
         if (CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::info(fmt::format(
-                "EEQ GPU Phase 2: nfrag={} >= {} - routing to exact CPU PCG (device dense Cholesky avoided)",
+                "EEQ GPU Phase 2: nfrag={} >= {} - routing to the exact CPU EEQ (device dense Cholesky avoided)",
                 m_eeq_nfrag, m_eeq_cpu_fragment_threshold));
         }
-        // The normal device path leaves CN GPU-resident (WP5-D), so m_gpu_cn_final is stale
-        // here. Sync the current-geometry CN to the CPU before the CPU EEQ solve (mirrors the
-        // pre-dispatch finalize at the top of this function for the other CPU-EEQ branches).
-        m_gpu_workspace->finalizeCNForCPU(m_gpu_cn_final);
-        m_gfnff->prepareCNAndEEQ(gradient, /*gpu_only=*/true, &m_gpu_cn_final, /*skip_eeq=*/false);
-        charges = m_gfnff->getLastCharges();
-        m_gpu_workspace->setEEQCharges(charges);
+        eeqCpuFragmentRoute();
     } else {
         // === GPU EEQ: Build Coulomb matrix + Cholesky solve on GPU ===
         // WP2: use topology-constant alpha/gam/chi/cnf already on GPU;
@@ -1338,7 +1562,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
 
         // One fragment: projected PCG (WP7-E) when it is the resolved method; WP5-A stays the fallback.
         // It is also what lets the multi-GPU split (gpu_split_devices) reach single-fragment molecules.
-        const bool single_frag_ppcg = Backend::has_device_schur && m_eeq_nfrag == 1
+        const bool single_frag_ppcg = Backend::has_device_ppcg && m_eeq_nfrag == 1
             && resolved_method == EEQSolveMethod::ProjectedPCG
             && m_eeq_gpu->isFragmentTopoValid();
         const bool single_frag_pcg = Backend::has_device_schur && m_eeq_nfrag == 1
@@ -1349,9 +1573,22 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
             const char* path = "CPU-fallback";
             if (gpu_eeq_applicable) {
                 if constexpr (!Backend::has_device_schur) {
-                    // ROCm: no device ppcg/pcg/batched/Schur (EEQSolver::gpuSupports allows auto and cholesky
-                    // only); every solve is the dense device Cholesky of WP2 plus the host Schur step.
-                    path = "WP2 dense Cholesky + CPU Schur";
+                    // ROCm: no device pcg/batched/Schur/lu/ldlt (EEQSolver::gpuSupports allows auto, cholesky
+                    // and ppcg). Oct 2026: projected PCG with the diagonal Jacobi or the host-built local
+                    // inverse (eeq_ppcg_precond); every other solve is the dense device Cholesky of WP2
+                    // plus the host Schur step.
+                    if (resolved_method == EEQSolveMethod::ProjectedPCG && m_eeq_gpu->isFragmentTopoValid()) {
+                        if (m_eeq_localinv && localInverseDeviceBuildSelected(N))
+                            path = m_eeq_nfrag == 1 ? "WP7-E projected PCG, one fragment, precond=localinv gpu build=device"
+                                                    : "WP7-E projected PCG, precond=localinv gpu build=device";
+                        else if (m_eeq_localinv && m_eeq_nfrag <= kLocalInvMaxNfrag)
+                            path = m_eeq_nfrag == 1 ? "WP7-E projected PCG, one fragment, precond=localinv gpu build=host"
+                                                    : "WP7-E projected PCG, precond=localinv gpu build=host";
+                        else
+                            path = m_eeq_nfrag == 1 ? "WP7-E projected PCG, one fragment, diagonal Jacobi"
+                                                    : "WP7-E projected PCG, diagonal Jacobi";
+                    } else
+                        path = "WP2 dense Cholesky + CPU Schur";
                 } else if (resolved_method == EEQSolveMethod::LU) {
                     path = "augmented LU (getrf)";
                 } else if (resolved_method == EEQSolveMethod::LDLT) {
@@ -1369,8 +1606,10 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
                 }
             }
             // Once per run (and again if the path changes), not every MD/opt step.
-            // On ROCm "auto" may resolve to projected PCG by size, but only the dense Cholesky runs there.
-            const EEQSolveMethod shown_method = Backend::has_device_schur ? resolved_method : EEQSolveMethod::SchurCholesky;
+            // On ROCm only ppcg and the dense Cholesky run on the device; anything else is shown as cholesky.
+            const EEQSolveMethod shown_method = (Backend::has_device_schur
+                                                 || resolved_method == EEQSolveMethod::ProjectedPCG)
+                ? resolved_method : EEQSolveMethod::SchurCholesky;
             const std::string line = fmt::format("EEQ solver (final charges): {}{} [GPU {}, {}], N={}, nfrag={}",
                 EEQSolver::methodName(shown_method),
                 m_eeq_strategy == EEQSolveMethod::Auto ? " (auto)" : "",
@@ -1570,6 +1809,12 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
                         finishLocalInverseGPU();
                         if (eeq_ok) {
                             used_gpu_schur = true;
+                        } else if (many_frag_device_ppcg) {
+                            // ROCm many-fragment system (Claude Generated, Oct 2026): no dense fallback
+                            // (nfrag+1 right-hand sides plus a host Schur step), the exact CPU EEQ instead.
+                            cpu_route_after_device = true;
+                            CurcumaLogger::warn("EEQ GPU: WP7-E projected PCG stalled, using the CPU EEQ for this step");
+                            curcuma::reportGpuFallback("GFN-FF EEQ: projected PCG stalled, CPU EEQ step");
                         } else {
                             CurcumaLogger::warn("EEQ GPU: WP7-E projected PCG stalled, falling through to WP7-A");
                             curcuma::reportGpuFallback("GFN-FF EEQ: projected PCG stalled, dense Cholesky step");
@@ -1629,7 +1874,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
                     // Replaces D2H of z1+Z2 (~N·(1+nfrag) doubles) with D2H of
                     // Cz1+S (nfrag + nfrag² doubles) and a tiny CPU Gauss-elim.
                     // Cross-fragment Coulomb correctly retained (single N×N Cholesky).
-                    if (!eeq_ok && m_eeq_gpu->isFragmentTopoValid()) {
+                    if (!eeq_ok && !cpu_route_after_device && m_eeq_gpu->isFragmentTopoValid()) {
                         eeq_ok = m_eeq_gpu->solveWithDeviceRHSAndGPUSchurGeneral(
                             N, m_eeq_nfrag,
                             m_gpu_workspace->getDeviceXPtr(),
@@ -1653,7 +1898,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
                             }
                         }
                     }
-                    if (!eeq_ok) {
+                    if (!eeq_ok && !cpu_route_after_device) {
                         // Fallback: WP2 exact GPU solve + CPU Schur complement.
                         // Triggers when fragment topo invalid OR Cholesky failed in WP7-A.
                         if constexpr (Backend::has_device_schur) {
@@ -1713,8 +1958,12 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
             if (eeq_ok) {
                 if (used_gpu_schur) {
                     // Download for storeChargesFromGPU() — EEQ stream already synced.
-                    Backend::downloadDoubles(m_eeq_charges_gpu.data(),
-                                             m_eeq_gpu->getDeviceChargesPtr(), N);
+                    if constexpr (gfnffBackendEEQChargeDownload<Backend>::value)
+                        Backend::downloadEEQCharges(m_eeq_charges_gpu.data(),
+                                                    m_eeq_gpu->getDeviceChargesPtr(), N);
+                    else
+                        Backend::downloadDoubles(m_eeq_charges_gpu.data(),
+                                                 m_eeq_gpu->getDeviceChargesPtr(), N);
                     // Test hook (Claude Generated, Sep 2026): CURCUMA_EEQ_GPU_FORCE_REJECT=1
                     // rejects every GPU EEQ solution, so the fallback below can be exercised on
                     // a well-conditioned molecule. Read once; zero cost when unset.
@@ -1864,6 +2113,9 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
                         m_eeq_gpu->getLastCholInfo()));
                 }
                 if (gpu_charges_accepted) used_gpu_eeq = true;
+            } else if (cpu_route_after_device) {
+                eeqCpuFragmentRoute();   // reported above (projected PCG stalled)
+                used_gpu_eeq = true;     // charges are the exact CPU solution, not a fallback to old ones
             } else {
                 CurcumaLogger::warn("GPU EEQ Cholesky failed (not SPD), falling back to CPU solver");
                 curcuma::reportGpuFallback("GFN-FF EEQ: device Cholesky failed (not SPD)");
@@ -1946,6 +2198,21 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
     m_last_gpu_prep_timing.total     = std::chrono::duration<double, std::milli>(t4 - t0).count();
 
     ++m_calc_count;
+
+    // Claude Generated (Oct 2026): CURCUMA_GFNFF_STEPPHASE=1 prints one line per calculator call
+    // (ms): cn, dlogdcn, hb_cn, hbxb (fired flag), launch, eeq_solve, coulomb+postprocess, total.
+    {
+        static const bool phase_log = [] {
+            const char* e = std::getenv("CURCUMA_GFNFF_STEPPHASE");
+            return e && *e && std::string(e) != "0";
+        }();
+        if (phase_log) {
+            const auto& T = m_last_gpu_prep_timing;
+            fmt::print(stderr, "STEPPHASE {} grad={} cn={:.2f} dlogdcn={:.2f} hb_cn={:.2f} hbxb={:.2f}{} launch={:.2f} eeq={:.2f} coul={:.2f} total={:.2f}\n",
+                       m_calc_count, gradient ? 1 : 0, T.cn, T.dlogdcn, T.hb_cn, T.hbxb, hbxb_updated ? "[F]" : "",
+                       T.launch, T.eeq_solve, T.coulomb_postprocess, T.total);
+        }
+    }
 
     if (CurcumaLogger::get_verbosity() >= 2) {
         // Claude Generated (Apr 2026): Granular GPU timing + wallclock-normalized breakdown
@@ -2093,15 +2360,14 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
 template <class Backend>
 void GFNFFGpuMethodImpl<Backend>::prepareLocalInverseGPU(int N, double cutoff_sq)
 {
-    if constexpr (!Backend::has_device_schur) {
-        (void)N; (void)cutoff_sq;   // CUDA only: the ROCm solver has no upload entry point
+    if constexpr (!Backend::has_localinv_upload) {
+        (void)N; (void)cutoff_sq;   // backend without an upload entry point
     } else {
         if (!m_eeq_localinv) return;
         const int nfrag = m_eeq_nfrag;
-        // Oct 2026: default is the device build; the host build stays for the multi-GPU split and as
-        // comparison (CURCUMA_LOCALINV_HOST_BUILD=1).
-        static const bool host_build_env = [] { const char* e = std::getenv("CURCUMA_LOCALINV_HOST_BUILD"); return e && *e && *e != '0'; }();
-        const bool device_build = !host_build_env && m_eeq_gpu->localInverseDeviceBuildPossible(N);
+        // Oct 2026: the default is the device build (CUDA, and ROCm since Oct 2026); the host build
+        // stays for the CUDA multi-GPU split and as comparison (CURCUMA_LOCALINV_HOST_BUILD=1).
+        const bool device_build = localInverseDeviceBuildSelected(N);
         if (!device_build && nfrag > kLocalInvMaxNfrag) {
             if (!m_eeq_li) {
                 CurcumaLogger::warn(fmt::format("EEQ GPU ppcg localinv: nfrag = {} > {} (dense S^-1 on the device), "
@@ -2132,18 +2398,20 @@ void GFNFFGpuMethodImpl<Backend>::prepareLocalInverseGPU(int N, double cutoff_sq
         }
         if (!rebuild) return;
 
-        if (device_build) {
-            // The device builds G inside the next WP7-E solve, from the matrix assembled there; this
-            // record keeps the geometry for the rebuild rule, finishLocalInverseGPU books the result.
-            auto rec = std::make_shared<LocalInversePreconditioner>();
-            rec->natoms = N;
-            rec->nfrag = nfrag;
-            rec->frag = frag;
-            rec->geometry = X;
-            rec->ok = true;
-            m_eeq_li = rec;
-            m_eeq_gpu->requestLocalInverseDeviceBuild(m_eeq_localinv_radius, m_eeq_localinv_ext);
-            return;
+        if constexpr (Backend::has_localinv_device_build) {
+            if (device_build) {
+                // The device builds G inside the next WP7-E solve, from the matrix assembled there; this
+                // record keeps the geometry for the rebuild rule, finishLocalInverseGPU books the result.
+                auto rec = std::make_shared<LocalInversePreconditioner>();
+                rec->natoms = N;
+                rec->nfrag = nfrag;
+                rec->frag = frag;
+                rec->geometry = X;
+                rec->ok = true;
+                m_eeq_li = rec;
+                m_eeq_gpu->requestLocalInverseDeviceBuild(m_eeq_localinv_radius, m_eeq_localinv_ext);
+                return;
+            }
         }
 
         std::vector<double> alpha(N), gam(N);
@@ -2213,7 +2481,7 @@ void GFNFFGpuMethodImpl<Backend>::prepareLocalInverseGPU(int N, double cutoff_sq
 template <class Backend>
 void GFNFFGpuMethodImpl<Backend>::finishLocalInverseGPU()
 {
-    if constexpr (Backend::has_device_schur) {
+    if constexpr (Backend::has_localinv_device_build) {
         if (!m_eeq_localinv) return;
         const auto st = m_eeq_gpu->localInverseDeviceStats();
         if (st.builds > m_eeq_li_seen_dev_builds) {
@@ -2233,6 +2501,15 @@ void GFNFFGpuMethodImpl<Backend>::finishLocalInverseGPU()
         m_eeq_li_seen_dev_builds = st.builds;
         m_eeq_li_seen_dev_failures = st.build_failures;
         m_eeq_li_seen_runtime = st.runtime_fallbacks;
+    } else if constexpr (Backend::has_localinv_upload) {
+        // ROCm (Claude Generated, Oct 2026): host build only, so builds and rejections are booked in
+        // prepareLocalInverseGPU; here only the Jacobi re-solves, as GPU fallbacks like on CUDA.
+        if (!m_eeq_localinv) return;
+        const long rt = m_eeq_gpu->localInverseRuntimeFallbacks();
+        for (long k = m_eeq_li_seen_runtime; k < rt; ++k)
+            curcuma::reportGpuFallback("GFN-FF EEQ: localinv re-solve with Jacobi",
+                                       "breakdown (rz <= 0 / pAp <= 0) or stall");
+        m_eeq_li_seen_runtime = rt;
     }
 }
 
@@ -2376,6 +2653,15 @@ json GFNFFGpuMethodImpl<Backend>::getLastPrepTiming() const
         {"gpu_dlogdcn",             g.dlogdcn},
         {"gpu_hb_cn",               g.hb_cn},
         {"gpu_hbxb_update",         g.hbxb},
+        {"gpu_pre",                 g.pre},
+        {"gpu_hb_detect",           g.hb_detect},
+        {"gpu_hb_rebuild",          g.hb_rebuild},
+        {"gpu_hb_upload",           g.hb_upload},
+        {"gpu_rep_update",          g.rep_update},
+        {"gpu_rep_upload",          g.rep_upload},
+        {"gpu_rep_pairs",           g.rep_pairs},
+        {"gpu_disp_update",         g.disp_update},
+        {"gpu_coul_update",         g.coul_update},
         {"gpu_kernel_launch",       g.launch},
         {"gpu_coulomb_postprocess", g.coulomb_postprocess},
     };
@@ -2414,11 +2700,52 @@ json GFNFFGpuMethodImpl<Backend>::getStreamTimings() const
 }
 
 template <class Backend>
+void GFNFFGpuMethodImpl<Backend>::verifyDeviceHBList(const std::vector<int>& di, const std::vector<int>& dj,
+                                                     const std::vector<int>& dk, const std::vector<int>& dcase,
+                                                     const std::vector<int>& dparent)
+{
+    using Entry = std::array<int, 5>;   // A, H, B, case, parent
+    auto canon = [](int A, int H, int B, int ct, int par) {
+        if (ct == 1 && A > B) std::swap(A, B);   // case 1: the host orientation follows its cell order
+        return Entry{A, H, B, ct, par};
+    };
+    std::vector<Entry> dev, host;
+    dev.reserve(di.size());
+    for (size_t m = 0; m < di.size(); ++m) dev.push_back(canon(di[m], dj[m], dk[m], dcase[m], dparent[m]));
+    const auto hb = m_gfnff->detectHBHostReference();
+    host.reserve(hb.size());
+    for (const auto& x : hb) host.push_back(canon(x.i, x.j, x.k, x.case_type, x.acceptor_parent_index));
+    std::sort(dev.begin(), dev.end());
+    std::sort(host.begin(), host.end());
+    std::vector<Entry> only_dev, only_host;
+    std::set_difference(dev.begin(), dev.end(), host.begin(), host.end(), std::back_inserter(only_dev));
+    std::set_difference(host.begin(), host.end(), dev.begin(), dev.end(), std::back_inserter(only_host));
+    long long dup_dev = 0;
+    for (size_t m = 1; m < dev.size(); ++m) if (dev[m] == dev[m - 1]) ++dup_dev;
+    fmt::print(stderr, "HBVERIFY device {} host {} only-device {} only-host {} duplicates-device {}\n",
+               dev.size(), host.size(), only_dev.size(), only_host.size(), dup_dev);
+    auto show = [](const char* tag, const std::vector<Entry>& v) {
+        for (size_t m = 0; m < v.size() && m < 5; ++m)
+            fmt::print(stderr, "HBVERIFY   {} A={} H={} B={} case={} parent={}\n", tag, v[m][0], v[m][1], v[m][2], v[m][3], v[m][4]);
+    };
+    show("only-device", only_dev);
+    show("only-host", only_host);
+    if (!only_dev.empty() || !only_host.empty())
+        CurcumaLogger::warn(fmt::format("GPU H-bond detection differs from the host list: {} only on the device, {} only on the host",
+                                         only_dev.size(), only_host.size()));
+}
+
+template <class Backend>
 void GFNFFGpuMethodImpl<Backend>::buildDispersionPairsOnDevice()
 {
     // WP-A (Jun 2026) device build, moved here unchanged from initGPUWorkspace() (Sep 2026).
     D4ParameterGenerator* d4 = m_gfnff->getD4Generator();
     if (!d4) return;
+    // Oct 2026: the setup-time call comes from initGPUWorkspace() before the first setGeometry(): the device
+    // coordinates were zero, every pair counted as "within 60 Bohr" and the list held all N(N-1)/2 pairs
+    // (polymer_2x: 26.8 instead of 9.4 M; energies unaffected since k_dispersion skips pairs beyond r_cut,
+    // but dc6dcn and dispersion ran 1.9x / 1.6x slower until the first rebuild). Upload the geometry first.
+    m_gpu_workspace->setGeometry(m_gfnff->getGeometryBohr());
     const int Nd = static_cast<int>(m_atom_types.size());
     // Host Gaussian weights (same as getChargeWeightedC6 uses) -> flat [N*MAX_REF].
     const auto& hgw = d4->getGaussianWeights();

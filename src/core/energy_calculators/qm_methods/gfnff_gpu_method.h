@@ -11,7 +11,7 @@
  *
  * Usage:
  *   ./curcuma -sp mol.xyz -method gfnff -gpu cuda    # Explicit GPU
- *   ./curcuma -sp mol.xyz -method gfnff -gpu auto   # GPU if available
+ *   ./curcuma -sp mol.xyz -method gfnff -gpu cuda   # GPU
  *   ./curcuma -sp mol.xyz -method gfnff             # CPU (default)
  */
 
@@ -42,6 +42,14 @@ struct GFNFFCudaBackend {
     /// CUDA implements the device Schur EEQ solves (WP5-A / WP7-A / WP7-B / WP7-C),
     /// so a failure there is a real numerical failure and is warned about.
     static constexpr bool has_device_schur = true;
+    /// WP7-E projected PCG on the device (Claude Generated, Oct 2026: separate trait since ROCm has it too).
+    static constexpr bool has_device_ppcg = true;
+    /// Local-inverse preconditioner of WP7-E uploaded from a host build (setLocalInversePreconditioner).
+    /// Claude Generated (Oct 2026, separate trait since ROCm has it too).
+    static constexpr bool has_localinv_upload = true;
+    /// Device build of the local inverse (requestLocalInverseDeviceBuild). Claude Generated (Oct 2026,
+    /// separate trait since ROCm has it too; on CUDA it was gated by has_device_schur, also true).
+    static constexpr bool has_localinv_device_build = true;
     /// Multi-GPU split of one molecule (Coulomb tiles + EEQ PCG). Claude Generated (Sep 2026).
     static constexpr bool has_multi_gpu_split = true;
     /// K1 (Oct 2026): CN pair list as a Verlet list with skin (cnPairListStale(), setCNPairSkin()).
@@ -51,6 +59,12 @@ struct GFNFFCudaBackend {
     static constexpr bool has_stream_overlap = true;
     /// Oct 2026: staged pinned upload of rebuilt pair lists (setStagedListUpload()).
     static constexpr bool has_staged_list_upload = true;
+    /// Oct 2026: device-side H-bond detection (FFWorkspaceGPU::detectHBondsOnDevice()).
+    static constexpr bool has_device_hb_detect = true;
+    /// Oct 14, 2026: -gfnff.gpu_disp_pairs_on_device defaults to true (CUDA and ROCm).
+    static constexpr bool default_disp_pairs_on_device = true;
+    /// Oct 2026: non-bonded repulsion list rebuilt on the device (generateNonbondedRepulsionOnGPU()).
+    static constexpr bool has_device_repulsion_build = true;
 
     /// 0 = never route the EEQ to the CPU PCG; the device Schur paths handle nfrag>1.
     static constexpr int default_eeq_cpu_fragment_threshold = 0;

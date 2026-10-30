@@ -65,4 +65,17 @@ void addD4CovalentCNGradient(const std::vector<int>& atoms,
                              Matrix& grad_out,
                              double cutoff_bohr = 30.0);
 
+/**
+ * @brief The constants of the CN above for a device port (Claude Generated, Oct 2026).
+ *
+ * rad[Z], en[Z] (Z = 0..118, index 0 dummy) and kn, k4, k5, k6: the same values computeD4CovalentCN and
+ * addD4CovalentCNGradient use, so the GPU pair kernels need no second copy of the tables.
+ */
+struct D4CovalentCNTables {
+    const double* rad;   ///< 119 entries, Bohr (D3 covalent radii x 4/3)
+    const double* en;    ///< 119 entries, Pauling electronegativities
+    double kn, k4, k5, k6;
+};
+D4CovalentCNTables d4CovalentCNTables();
+
 }  // namespace curcuma::dispersion

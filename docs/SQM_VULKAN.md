@@ -34,7 +34,7 @@ hand-written SPIR-V compute shader.
 
 ```
 ./curcuma -sp mol.xyz -method gfn2 -gpu vulkan   # explicit Vulkan
-./curcuma -sp mol.xyz -method gfn1 -gpu auto     # GPU if a backend is compiled
+./curcuma -sp mol.xyz -method gfn1 -gpu vulkan   # GPU
 ```
 
 `-gpu vulkan` on a build without Vulkan (or with no FP64-capable device) warns and falls

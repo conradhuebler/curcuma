@@ -20,6 +20,7 @@ Core data structures and shared infrastructure. All energy methods live in
 
 - PARAM blocks in headers are scanned at build time into `generated/parameter_registry.h` (target `GenerateParams`)
 - `ConfigManager(module, json)`: `get<T>(key[, default])`, case-insensitive, aliases via `ParameterRegistry::resolveAlias()`, dot keys (`"topological.save_image"`)
+- A module merged into another keeps its name as JSON scope and dotted CLI prefix; `ParameterRegistry::canonicalModule()` (table `kMergedModules`: `eeq_solver` -> `gfnff`) answers registry lookups by the old name
 - New capabilities use the registry (root CLAUDE.md, "Parameter Definition Standards")
 
 ## Invariants and traps

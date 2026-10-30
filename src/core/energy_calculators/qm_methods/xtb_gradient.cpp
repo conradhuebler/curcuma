@@ -50,6 +50,7 @@ namespace curcuma::xtb {
  * ========================================================================== */
 void XTB::calculateGradient()
 {
+    ensureHostIntegrals(__func__);   // Claude Generated (Oct 2026): host copies of S/H0/L/gamma are lazy
     const int nat = m_atomcount;
     const int nsh = m_basis.nsh;
     const int nao = m_basis.nao;
@@ -838,18 +839,39 @@ void XTB::calculateGradient()
  * ============================================================================ */
 bool XTB::calculateGradientGpu()
 {
-    // X-I1: d device gradient is backend-gated (CUDA yes; ROCm/Vulkan -> CPU).
+    // X-I1: the device gradient is backend-gated by supportsGradient() (CUDA and ROCm yes, Vulkan -> CPU;
+    // corrected Oct 2026, the ROCm adapter has supportsGradient() = true).
     if (!m_gpu_scf || !m_gpu_scf->supportsGradient()
         || (m_has_dshell && !m_gpu_scf->supportsDshell())) return false;
     const int nat = m_atomcount;
     const int nao = m_basis.nao;
 
-    // Converged AO potential (v_sh + v_at expanded to AO resolution).
-    Vector v_ao = Vector::Zero(nao);
-    for (int ao = 0; ao < nao; ++ao)
-        v_ao(ao) = m_pot.v_sh(m_basis.ao2sh[ao]) + m_pot.v_at(m_basis.ao2at[ao]);
+    // Converged AO potential (v_sh + v_at expanded to AO resolution). With m_dev_potentials the device holds it
+    // (and v_dp / v_qp) from convergedPotentials(); nothing is built or uploaded here.
+    Vector v_ao;
+    if (!m_dev_potentials) {
+        v_ao = Vector::Zero(nao);
+        for (int ao = 0; ao < nao; ++ao)
+            v_ao(ao) = m_pot.v_sh(m_basis.ao2sh[ao]) + m_pot.v_at(m_basis.ao2at[ao]);
+    }
 
-    const int nocc_orbs = static_cast<int>(std::round(m_wfn.nocc / 2.0));
+    int nocc_orbs = static_cast<int>(std::round(m_wfn.nocc / 2.0));
+    // Oct 16, 2026 (Known Issue #40): the device builds W = sum_k 2 eps_k C_k C_k^T over the first nocc_orbs
+    // orbitals, i.e. integer closed-shell occupations. With the Fermi smearing of electronic_temperature > 0
+    // the occupations are fractional (small HOMO-LUMO gap: PCl3_TS, (NH3)2 2+, strained C60 isomers: GPU
+    // gradient up to 0.033 Eh/A off) and for an open shell they are the sum of the two spin fillings. The
+    // host gradient uses W = sum_k f_k eps_k C_k C_k^T (f = focc, see calculateGradient); hand the device the
+    // same weights through the existing interface: eps_eff = f eps / 2 over the leading ncol orbitals.
+    Vector eps_eff = m_wfn.eps;
+    if (m_wfn.focc.size() == nao && m_wfn.eps.size() == nao) {
+        int ncol = 0;
+        for (int i = 0; i < nao; ++i)
+            if (m_wfn.focc(i) > 1.0e-12) ncol = i + 1;
+        if (ncol > 0) {
+            nocc_orbs = ncol;
+            eps_eff = 0.5 * m_wfn.focc.cwiseProduct(m_wfn.eps);
+        }
+    }
 
     // GFN2 multipole potentials for the device multipole-integral Pulay term.
     Eigen::MatrixXd v_dp_empty, v_qp_empty;
@@ -864,8 +886,11 @@ bool XTB::calculateGradientGpu()
     const Eigen::MatrixXd C_empty;
     Matrix grad_dev;   // nat×3, Eh/Bohr (sections 1/2/3 incl. GFN2 multipole Pulay)
     Vector dEdcn;      // nat
-    if (!m_gpu_scf->gradient(P_empty, C_empty, m_wfn.eps, nocc_orbs, v_ao, m_wfn.q_sh,
-                             v_dp, v_qp, grad_dev, dEdcn, /*pc_resident=*/true))
+    const bool grad_ok = m_dev_potentials
+        ? m_gpu_scf->gradientResident(eps_eff, nocc_orbs, grad_dev, dEdcn)
+        : m_gpu_scf->gradient(P_empty, C_empty, eps_eff, nocc_orbs, v_ao, m_wfn.q_sh,
+                              v_dp, v_qp, grad_dev, dEdcn, /*pc_resident=*/true);
+    if (!grad_ok)
         return false;
     if (grad_dev.rows() != nat || grad_dev.cols() != 3 || dEdcn.size() != nat)
         return false;
@@ -889,6 +914,37 @@ bool XTB::calculateGradientGpu()
         && m_disp_gradient.rows() == nat && m_disp_gradient.cols() == 3) {
         m_gradient += m_disp_gradient;
         if (m_disp_dEdcn.size() == nat) dEdcn += m_disp_dEdcn;
+    }
+
+    // Claude Generated (Oct 2026): sections 5 and 4 below on the device (one call: direct multipole gradient +
+    // dE/dr_mp -> dE/dCN + CN chain rule). CURCUMA_GRAD_TAIL_DEVICE=0 keeps the host loops; they are also the
+    // fallback when the backend has no such call.
+    {
+        const char* env_off = std::getenv("CURCUMA_GRAD_TAIL_DEVICE");
+        if (!(env_off && env_off[0] == '0')) {
+            const bool gfn2 = (m_method == MethodType::GFN2);
+            const bool with_mp = gfn2 && m_mp_initialized && !m_mp_grad_off;
+            std::vector<double> rcov_au(nat), rad(with_mp ? nat : 0), vcn(with_mp ? nat : 0), gtail(3 * nat, 0.0);
+            for (int i = 0; i < nat; ++i) {
+                rcov_au[i] = covalent_rad_d3_au(m_atoms[i]);
+                if (with_mp) { rad[i] = gfn2_params::p_rad[m_atoms[i] - 1]; vcn[i] = gfn2_params::p_vcn[m_atoms[i] - 1]; }
+            }
+            bool ok_mp_inputs = true;
+            if (with_mp)
+                ok_mp_inputs = m_wfn.q_at.size() == nat && m_wfn.dp_at.cols() == nat && m_wfn.qp_at.cols() == nat
+                    && static_cast<int>(m_mp_mrad.size()) == nat && m_coordination_numbers.size() == nat;
+            if (ok_mp_inputs && m_gpu_scf->gradientTailDevice(
+                    nat, gfn2, with_mp, xyz.data(), dEdcn.data(), rcov_au.data(),
+                    with_mp ? m_wfn.q_at.data() : nullptr, with_mp ? m_wfn.dp_at.data() : nullptr,
+                    with_mp ? m_wfn.qp_at.data() : nullptr, with_mp ? m_mp_mrad.data() : nullptr,
+                    with_mp ? m_coordination_numbers.data() : nullptr, with_mp ? rad.data() : nullptr,
+                    with_mp ? vcn.data() : nullptr, gfn2_params::mp_dmp3, gfn2_params::mp_dmp5,
+                    gfn2_params::mp_shift, gfn2_params::mp_kexp, gfn2_params::mp_rmax, gtail.data())) {
+                for (int i = 0; i < nat; ++i)
+                    for (int k = 0; k < 3; ++k) m_gradient(i, k) += gtail[3 * i + k];
+                return true;
+            }
+        }
     }
 
     // 5. GFN2 direct multipole interaction gradient (host; O(nat²) over the

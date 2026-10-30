@@ -4,8 +4,8 @@ Claude Generated (Oct 2026) — 🤖 AI-generated, ⚙️ machine-tested (`cli_g
 
 ## Rule
 
-`-eeq_solver.solve_method NAME` (alias `-gfnff.solve NAME`; the `eeq_solver` spelling wins when both are set to a non-auto name) chooses the
-linear solve of the EEQ charge system. **The same names run on the CPU and, with `-gpu cuda`, on the GPU; `-gpu rocm` accepts only `auto` and `cholesky`, `-gpu vulkan` accepts all names (GFN-FF runs on the CPU there).** An explicit name is never
+`-gfnff.solve_method NAME` (flat `-solve_method NAME`; the older spellings `-eeq_solver.solve_method NAME` and `-gfnff.solve NAME` are still
+accepted, see "Parameters" below for which wins) chooses the linear solve of the EEQ charge system. **The same names run on the CPU and, with `-gpu cuda`, on the GPU; `-gpu rocm` accepts `auto`, `cholesky` and `ppcg` (Oct 2026), `-gpu vulkan` accepts all names (GFN-FF runs on the CPU there).** An explicit name is never
 overridden by a size threshold.
 
 | name | algorithm | CPU | GPU (CUDA) |
@@ -18,16 +18,45 @@ overridden by a size threshold.
 | `lu` | dense LU of the augmented (N+nfrag) system | yes | augmented LU, cuSOLVER getrf/getrs (Oct 2026; ROCm: error; Vulkan: CPU solver) |
 | `ldlt` | dense Bunch-Kaufman LDL^T of A_nn + Schur (`dsytrf` + `dsytrs2`) | yes | cuSOLVER `sytrf` + `Xsytrs` (in blocks of 1024 right-hand sides) + Schur (Oct 2026; ROCm: error; Vulkan: CPU solver) |
 
-ROCm has no device `ppcg`/`pcg`/`batched` (`has_device_schur=false`): `ppcg`, `pcg`, `batched`, `lu`, `ldlt` with `-gpu rocm` are an error naming the valid names (`auto, cholesky`); `auto` and `cholesky` run the dense device Cholesky of the WP2 path plus the host Schur step (verbosity 1: `cholesky ... [GPU ROCm, WP2 dense Cholesky + CPU Schur]`; from 16 fragments the EEQ goes to the CPU solver). Checked by `eeq_gpu_supports` (names only, no device).
+ROCm has a device `ppcg` (Oct 2026, `has_device_ppcg`; diagonal Jacobi or, with the default `eeq_ppcg_precond localinv`, the local inverse built on the device (default, `has_localinv_device_build`) or, with `CURCUMA_LOCALINV_HOST_BUILD=1`, built on the host and uploaded as CSR (`has_localinv_upload`)) but no device `pcg`/`batched` (`has_device_schur=false`): `pcg`, `batched`, `lu`, `ldlt` with `-gpu rocm` are an error naming the valid names (`auto, cholesky, ppcg`). `cholesky` runs the dense device Cholesky of the WP2 path plus the host Schur step (verbosity 1: `cholesky ... [GPU ROCm, WP2 dense Cholesky + CPU Schur]`). `auto` and `ppcg` run the device projected PCG (`... WP7-E projected PCG, diagonal Jacobi`); with 16 or more fragments a stalled device solve uses the CPU solver for that step, and giving `-gfnff.eeq_rocm_cpu_fragment_threshold` explicitly forces the CPU solver from that fragment count on. Names checked by `eeq_gpu_supports` (no device); the device solve measured in [ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md](ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md).
 
 | | CPU | CUDA | ROCm / Vulkan |
 |---|---|---|---|
-| `ppcg` stop | relative: `eeq_ppcg_tol` 1e-12, `|P r| <= tol (|b|+1)` | absolute on `|r|`: `pcg_tolerance` 1e-10 | no `ppcg` |
+| `ppcg` stop | relative: `eeq_ppcg_tol` 1e-12, `|P r| <= tol (|b|+1)` | absolute on `|r|`: `pcg_tolerance` 1e-10 | ROCm: as CUDA (absolute `|r| <= tol`); Vulkan: no device `ppcg` |
 | far-field shortcut (`farfield_shortcut`) | gamma_ij*r >= 6.5 (`COULOMB_FARFIELD_X2` = 42.25) | gamma_ij*r >= 6.0 (`GFNFF_COUL_FARFIELD_X2` = 36) | none |
-| `localinv` preconditioner | yes | yes | no (ROCm; Vulkan runs the CPU) |
+| `localinv` preconditioner | yes | yes | ROCm: device build (default) or host build + device apply (Oct 13, 2026; median CG iterations 56-69 -> 12-16 at 1410-7320 atoms); Vulkan runs the CPU |
 
 Aliases `schur_cholesky` = `cholesky`, `projected_pcg` = `ppcg`. **An unknown name is an error** that lists the valid ones (it used to mean `auto`).
-The thresholds are arguments: `-eeq_solver.eeq_ppcg_min_atoms`, `-eeq_solver.eeq_ppcg_min_nfrag` (0 = auto never picks `ppcg`).
+The thresholds are arguments: `-gfnff.eeq_ppcg_min_atoms`, `-gfnff.eeq_ppcg_min_nfrag` (0 = auto never picks `ppcg`).
+
+`ldlt` equals `cholesky` for an SPD A_nn (every gas-phase system). It is not a fallback: for an indefinite A_nn (implicit-solvation reaction
+field) the robust path is the augmented-LU fallback of `cholesky`, which `ldlt` does not reproduce.
+
+## Parameters (module `gfnff`, category EEQ)
+
+The EEQ solver PARAMs are defined in the `gfnff` block of `src/core/energy_calculators/ff_methods/gfnff.h` (category EEQ, GPU-only ones under
+GPU); `curcuma -help_module gfnff` lists them. Until Oct 2026 they formed a registry module `eeq_solver`, which was merged into `gfnff` because
+only GFN-FF uses the solver. Names, types, defaults and aliases did not change. Every spelling acts:
+
+| spelling | lands in | precedence |
+|---|---|---|
+| `-eeq_solver.<name>` | `controller["eeq_solver"]`, the JSON scope `EEQSolver` reads | wins over the other spellings |
+| `-gfnff.<name>`, flat `-<name>` | `controller["gfnff"]`, reaches the solver as a flat key (CPU), through `eeq_value()` (GPU) and, for `solve_method`, through `fixEEQSolverChoice()` | used when the `eeq_solver` scope does not set the name |
+| `-gfnff.solve`, `eeq_max_iterations`, `eeq_tolerance`, `eeq_accuracy` | older gfnff names, copied into the `eeq_solver` scope by `GFNFF::forwardEEQSolverParams()` | CPU: the last three beat `max_pcg_iterations` / `pcg_tolerance` / `pcg_large_system_tol_factor` of the gfnff scope; the GPU reads only those canonical names. `solve` acts only while every `solve_method` is auto |
+
+`ParameterRegistry::canonicalModule()` answers lookups by the name `eeq_solver` (defaults, aliases such as `ppcg_precond`, `-help_module
+eeq_solver`) from `gfnff`. The GPU wrapper reads `skip_phase2` and `allow_unconverged_charges` from the gfnff scope only, so the `-eeq_solver.`
+spelling of these two does not reach the GPU path. `accuracy` has no reader and no effect.
+
+Measurements behind some defaults (one machine each, not repeated):
+
+- `eeq_refactor_eps_bohr` (cached Cholesky factor, default 0 = off): 450-atom water cluster 16.05 ms per energy call cached vs 15.53 ms uncached,
+  so below `eeq_ppcg_min_atoms` it saves nothing; in MD at eps 0.05 Bohr one refinement step (`eeq_refine_iters` 1) left a charge error of 1e-5 to
+  8e-4 e, three steps about 1e-7 e.
+- `eeq_ppcg_tol`: 1e-10 instead of 1e-12 saves about 15 % of the iterations.
+- `gpu_block_jacobi_max_frag_atoms` / `gpu_block_jacobi_max_nfrag` (CUDA `pcg`, EEQ solver benchmark, Sep 2026): at nfrag 500, largest fragment
+  3 / 250 / 500 / 1410 atoms took 5.7 / 7.6 / 11.4 / 53.0 s per 2 steps; 3-atom fragments at nfrag 500 / 1000 / ~2440 took 5.8 / 21.1 / > 150 s;
+  a polymer_2x-like system (nfrag ~1500) exceeded 120 s. The preconditioner build is a serial host loop with two device synchronisations per fragment.
 
 ## One implementation of the choice
 
@@ -95,7 +124,7 @@ Cost on polymer_2x: 82 ms on the CPU, 336 ms on the GPU path (host loop), once (
 
 Claude Generated (Oct 10, 2026) — 🤖 AI-generated, ⚙️ machine-tested (`cli_gfnff_07_eeq_localinv`, measurements below); human production testing pending.
 
-`-eeq_solver.eeq_ppcg_precond localinv` (the default since Oct 10, 2026; `diag` restores the diagonal Jacobi) replaces the diagonal Jacobi of the projected PCG, CPU and `-gpu cuda` (WP7-E).
+`-gfnff.eeq_ppcg_precond localinv` (or `-eeq_solver.eeq_ppcg_precond`; the default since Oct 10, 2026; `diag` restores the diagonal Jacobi) replaces the diagonal Jacobi of the projected PCG, CPU and `-gpu cuda` (WP7-E).
 Per atom the dense block of A over all atoms within `eeq_localinv_ext_bohr` (default 10) is factorised, the column of the atom is solved and
 its entries within `eeq_localinv_radius_bohr` (default 8) are kept; G = (Gl + Gl^T)/2. It enters as a constraint preconditioner,
 z = G r - G C^T S^-1 C G r with S = C G C^T, so the iterates stay on the fragment-charge constraints; derivation and references in
@@ -108,7 +137,7 @@ z = G r - G C^T S^-1 C G r with S = C G C^T, so the iterates stay on the fragmen
   G changes only the iteration count, never the converged charges (same `eeq_ppcg_tol`).
 - **Reproducibility**: the build is independent of the thread count (one thread per atom row, fixed summation order); MD charges at a fixed
   thread count are bit-identical between runs. The GPU path as a whole is not bit-reproducible (two diag runs: charges within 9e-12 e).
-- **CUDA only** on the device side; ROCm has no device `ppcg` at all (so no preconditioner there).
+- **CUDA only** on the device side: `pcg`, `batched`, `lu`, `ldlt`; ROCm has `ppcg` with Jacobi or `localinv` (device build, host build as comparison). ROCm device build: 3.6 ms (1410 atoms), 3.9 (2910), 11.0 (6200, urea400-water1000), 7.9 (7320) per build against 11.8 / 15.1 / 247 / 37 ms for the host build (median of 8-15 builds in 100 MD steps, subagent measurement); MD step urea400-water1000 124.4 ms with the host build, 88.7 ms with the device build (Jacobi 104.7), peo201x2-water1500 58.7 -> 55.2 ms (CPU 144.9), author's measurement, 3 alternating runs. Test hooks `CURCUMA_LOCALINV_TEST_INDEFINITE`/`_REJECT` exist on ROCm as on CUDA; no ctest runs the ROCm device build.
 
 ### GPU: build on the device (Oct 10, 2026)
 
@@ -198,7 +227,7 @@ GPU MD step breakdown and the CN-list / overlap / staged-upload switches: [GFNFF
 
 ## Not tested / open
 
-- ROCm: not built or run here; the rejection of `ppcg`/`pcg`/`batched`/`lu`/`ldlt` is tested by name only (`eeq_gpu_supports`). Vulkan runs GFN-FF on the CPU, so the CPU solvers apply.
+- ROCm: the rejection of `pcg`/`batched`/`lu`/`ldlt` is tested by name only (`eeq_gpu_supports`); the device `ppcg` was run on one RX 9060 XT (gfx1200), see the analysis document. Vulkan runs GFN-FF on the CPU, so the CPU solvers apply.
 - Multi-GPU split and the batch-worker device pool were not run after this change.
 - localinv: the GPU fallbacks were triggered only through the test hooks (no natural rejection or breakdown in any run); not run with ALPB
   solvation, `eeq_distance_cutoff > 0`, transition metals, MD longer than 50 fs, optimisations, nfrag > 4096, or `eeq_localinv_ext_bohr` large

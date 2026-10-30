@@ -19,6 +19,10 @@
 
 #include "src/core/units.h"
 #include "curcuma_logger.h"
+
+#include <vector>
+
+#include <atomic>
 #include "citation_registry.h"
 #include <algorithm>
 #include <cstdlib> // for getenv
@@ -36,6 +40,34 @@
 
 // Static member definitions - Claude Generated
 int CurcumaLogger::m_verbosity = 1;
+
+// Claude Generated 2026 - see the header: the level has to be per-thread, or two
+// concurrent runs corrupt each other's.
+namespace {
+thread_local int t_verbosity_override = -1;
+}
+
+void CurcumaLogger::set_thread_verbosity(int level)
+{
+    t_verbosity_override = level;
+}
+
+int CurcumaLogger::thread_verbosity()
+{
+    return t_verbosity_override;
+}
+
+void CurcumaLogger::set_verbosity(int level)
+{
+    m_verbosity = level;
+    if (t_verbosity_override >= 0)
+        t_verbosity_override = level;
+}
+
+int CurcumaLogger::effective_verbosity()
+{
+    return t_verbosity_override >= 0 ? t_verbosity_override : m_verbosity;
+}
 bool CurcumaLogger::m_use_colors = true;
 bool CurcumaLogger::m_progress_enabled = true; // Claude Generated: global progress-bar switch
 CurcumaLogger::OutputFormat CurcumaLogger::m_format = CurcumaLogger::OutputFormat::TERMINAL;
@@ -97,19 +129,19 @@ void CurcumaLogger::initialize(int verbosity, bool auto_detect_colors)
 void CurcumaLogger::error(const std::string& msg)
 {
     // Errors always visible
-    log_colored(fmt::color::red, "[ERROR] ", msg, true);
+    log_colored(fmt::color::red, "[ERROR] ", msg, true, SinkLevel::Error);
 }
 
 void CurcumaLogger::warn(const std::string& msg)
 {
-    if (m_verbosity >= 1) {
-        log_colored(fmt::color::orange, "[WARN]  ", msg);
+    if (effective_verbosity() >= 1) {
+        log_colored(fmt::color::orange, "[WARN]  ", msg, false, SinkLevel::Warning);
     }
 }
 
 void CurcumaLogger::success(const std::string& msg)
 {
-    if (m_verbosity >= 1) {
+    if (effective_verbosity() >= 1) {
         log_colored(fmt::color::lime_green, "[OK]    ", msg);
     }
 }
@@ -117,14 +149,14 @@ void CurcumaLogger::success(const std::string& msg)
 // Claude Generated: Neutral result reporting for non-success/failure outcomes
 void CurcumaLogger::result(const std::string& msg)
 {
-    if (m_verbosity >= 1) {
+    if (effective_verbosity() >= 1) {
         log_colored(fmt::color::white, "[RESULT]", msg);
     }
 }
 
 void CurcumaLogger::info(const std::string& msg)
 {
-    if (m_verbosity >= 2) {
+    if (effective_verbosity() >= 2) {
         log_plain("        " + msg);
     }
 }
@@ -177,7 +209,7 @@ void CurcumaLogger::addCitation(const std::string& key, const std::string& full_
             m_citation_registry[key] = full_text;
         }
 
-        if (m_verbosity >= 2) {
+        if (effective_verbosity() >= 2) {
             auto it = m_citation_registry.find(key);
             display = (it != m_citation_registry.end()) ? it->second : full_text;
             if (display.empty()) display = key;
@@ -208,35 +240,35 @@ void CurcumaLogger::printCitations()
 
 void CurcumaLogger::param(const std::string& key, const std::string& value)
 {
-    if (m_verbosity >= 2) {
+    if (effective_verbosity() >= 2) {
         log_colored(fmt::color::cornflower_blue, "[PARAM] ", key + ": " + value);
     }
 }
 
 void CurcumaLogger::param(const std::string& key, int value)
 {
-    if (m_verbosity >= 2) {
+    if (effective_verbosity() >= 2) {
         log_colored(fmt::color::cornflower_blue, "[PARAM] ", key + ": " + std::to_string(value));
     }
 }
 
 void CurcumaLogger::param(const std::string& key, double value)
 {
-    if (m_verbosity >= 2) {
+    if (effective_verbosity() >= 2) {
         log_colored(fmt::color::cornflower_blue, "[PARAM] ", fmt::format("{}: {:.6g}", key, value));
     }
 }
 
 void CurcumaLogger::param(const std::string& key, bool value)
 {
-    if (m_verbosity >= 2) {
+    if (effective_verbosity() >= 2) {
         log_colored(fmt::color::cornflower_blue, "[PARAM] ", key + ": " + (value ? "true" : "false"));
     }
 }
 
 void CurcumaLogger::param_table(const json& parameters, const std::string& title)
 {
-    if (m_verbosity >= 2) {
+    if (effective_verbosity() >= 2) {
         if (!parameters.empty()) {
             log_colored(fmt::color::cyan, "[TABLE] ", title);
             std::string separator(title.length() + 8, '-');
@@ -274,7 +306,7 @@ void CurcumaLogger::param_table(const json& parameters, const std::string& title
 
 void CurcumaLogger::param_comparison_table(const json& defaults, const json& controller, const std::string& title)
 {
-    if (m_verbosity < 1)
+    if (effective_verbosity() < 1)
         return;
 
     log_colored(fmt::color::cyan, "[TABLE] ", title);
@@ -341,12 +373,13 @@ void CurcumaLogger::param_comparison_table(const json& defaults, const json& con
 void CurcumaLogger::result_raw(const std::string& data)
 {
     // Raw results for scripting - no colors, no prefix
+    emit_to_sinks(SinkLevel::Info, data);
     fmt::print("{}\n", data);
 }
 
 void CurcumaLogger::header(const std::string& title)
 {
-    if (m_verbosity >= 2) {
+    if (effective_verbosity() >= 2) {
         std::string separator(title.length() + 4, '=');
         log_colored(fmt::color::cyan, "", separator);
         log_colored(fmt::color::cyan, "", "  " + title);
@@ -356,7 +389,7 @@ void CurcumaLogger::header(const std::string& title)
 
 void CurcumaLogger::progress(int current, int total, const std::string& msg)
 {
-    if (m_verbosity >= 2) {
+    if (effective_verbosity() >= 2) {
         double percent = (100.0 * current) / total;
         log_colored(fmt::color::yellow, "[PROG]  ",
             fmt::format("{} [{:3.0f}%] {}/{}", msg, percent, current, total));
@@ -399,7 +432,7 @@ void CurcumaLogger::progress_done()
 
 void CurcumaLogger::energy_rel(double value_eh, const std::string& label)
 {
-    if (m_verbosity >= 1) {
+    if (effective_verbosity() >= 1) {
         std::string formatted = format_energy_relative(value_eh);
         log_colored(fmt::color::cornflower_blue, "[ENERGY]", label + ": " + formatted);
     }
@@ -407,7 +440,7 @@ void CurcumaLogger::energy_rel(double value_eh, const std::string& label)
 
 void CurcumaLogger::energy_abs(double value_eh, const std::string& label)
 {
-    if (m_verbosity >= 1) {
+    if (effective_verbosity() >= 1) {
         log_colored(fmt::color::cornflower_blue, "[ENERGY]",
             fmt::format("{}: {:.8f} Eh", label, value_eh));
     }
@@ -415,7 +448,7 @@ void CurcumaLogger::energy_abs(double value_eh, const std::string& label)
 
 void CurcumaLogger::length(double value_bohr, const std::string& label)
 {
-    if (m_verbosity >= 2) {
+    if (effective_verbosity() >= 2) {
         log_colored(fmt::color::cornflower_blue, "[LENGTH]",
             fmt::format("{}: {:.4f} Å", label, bohr_to_angstrom(value_bohr)));
     }
@@ -423,7 +456,7 @@ void CurcumaLogger::length(double value_bohr, const std::string& label)
 
 void CurcumaLogger::time(double value_aut, const std::string& label)
 {
-    if (m_verbosity >= 2) {
+    if (effective_verbosity() >= 2) {
         std::string formatted = format_time(value_aut * 24.188843265857); // AUT_TO_FS
         log_colored(fmt::color::cornflower_blue, "[TIME]  ", label + ": " + formatted);
     }
@@ -440,7 +473,7 @@ void CurcumaLogger::debug(int level, const std::string& msg)
 void CurcumaLogger::debug_var(const std::string& name, const std::string& value)
 {
     if (1 <= 2) { // CURCUMA_DEBUG_LEVEL
-        log_colored(fmt::color::magenta, "[DEBUG] ", fmt::format("{} = {}", name, value));
+        log_colored(fmt::color::magenta, "[DEBUG] ", fmt::format("{} = {}", name, value), false, SinkLevel::Debug);
     }
 }
 
@@ -459,8 +492,70 @@ void CurcumaLogger::debug_timing(const std::string& label)
 // Private Helper Implementation
 // ============================================================================
 
-void CurcumaLogger::log_colored(fmt::color color, const std::string& prefix, const std::string& msg, bool force)
+// ============================================================================
+// Output capture  -  Claude Generated 2026
+// ============================================================================
+
+namespace {
+
+struct SinkEntry {
+    std::uint64_t id;
+    CurcumaLogger::Sink sink;
+};
+
+// Thread-local: two CurcumaMethods can run at once, and a process-wide list would
+// hand each of them the other's output.
+thread_local std::vector<SinkEntry> t_sinks;
+thread_local bool t_in_sink = false;
+std::atomic<std::uint64_t> g_next_sink_id { 1 };
+
+/// Restores the reentrancy flag even if a sink throws.
+struct SinkGuard {
+    SinkGuard() { t_in_sink = true; }
+    ~SinkGuard() { t_in_sink = false; }
+};
+
+}  // namespace
+
+CurcumaLogger::SinkScope::SinkScope(Sink sink)
+    : m_id(g_next_sink_id.fetch_add(1))
 {
+    t_sinks.push_back({ m_id, std::move(sink) });
+}
+
+CurcumaLogger::SinkScope::~SinkScope()
+{
+    for (auto it = t_sinks.rbegin(); it != t_sinks.rend(); ++it) {
+        if (it->id == m_id) {
+            t_sinks.erase(std::next(it).base());
+            return;
+        }
+    }
+}
+
+std::size_t CurcumaLogger::active_sink_count()
+{
+    return t_sinks.size();
+}
+
+void CurcumaLogger::emit_to_sinks(SinkLevel level, const std::string& text)
+{
+    if (t_sinks.empty() || t_in_sink)
+        return;   // a sink that logs would otherwise recurse without end
+    SinkGuard guard;
+    for (const auto& entry : t_sinks) {
+        if (entry.sink)
+            entry.sink(level, text);
+    }
+}
+
+void CurcumaLogger::log_colored(fmt::color color, const std::string& prefix, const std::string& msg,
+    bool force, SinkLevel level)
+{
+    // The sink gets the message without prefix or colour: a consumer wants the
+    // content and carries the level in its own record.
+    emit_to_sinks(level, msg);
+
     if (m_format == OutputFormat::PLAIN) {
         // Plain mode: content only, no prefixes, no colors (like ORCA/Gaussian)
         fmt::print("{}\n", msg);
@@ -473,6 +568,7 @@ void CurcumaLogger::log_colored(fmt::color color, const std::string& prefix, con
 
 void CurcumaLogger::log_plain(const std::string& msg)
 {
+    emit_to_sinks(SinkLevel::Info, msg);
     fmt::print("{}\n", msg);
 }
 
