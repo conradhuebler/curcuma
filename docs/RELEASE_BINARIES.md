@@ -30,4 +30,4 @@ Plugin archives are not built on branch pushes (two GPU builds take about two ho
 
 ## Status
 
-AI-generated CI. Checked by CI: the packages build, resolve all libraries in a clean Ubuntu 22.04 (`ldd`), the CPU-only program starts, and the AVX2 AppImage loads the CUDA plugin placed next to it on a runner without GPU. Operator report: the AVX2 base program with plugins placed afterwards works on his machine (GPU model not recorded). Not checked: the AVX512 variant on AVX512 hardware, ROCm through the packages, other distributions, the rejection of a plugin of the wrong level.
+AI-generated CI. Checked by CI: the packages build, resolve all libraries in a clean Ubuntu 22.04 (`ldd`), the CPU-only program starts, and the AVX2 AppImage loads the CUDA plugin placed next to it on a runner without GPU. Operator report (Oct 30, 2026): both CPU levels (AVX2 and AVX512) with the CUDA and the ROCm plugin placed next to the program work, each on a different machine; which machine ran which combination, and the GPU models, are not recorded. Not checked: other distributions, the rejection of a plugin of the wrong level, ROCm cards outside `gfx1100`, `gfx1150`, `gfx1200`.
