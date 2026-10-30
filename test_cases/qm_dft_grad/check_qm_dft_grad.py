@@ -20,7 +20,7 @@ Checks (gradients in Eh/Bohr; standard library only, no numpy):
                      Angstrom) and the energy at it against the PySCF/scipy-BFGS minimum (same grid, grid response on);
                      the energy gate is 1e-6 because the final orientation may differ (grid not rotationally
                      invariant); in addition curcuma's energy and gradient AT the PySCF minimum (1e-9 Eh, 1e-6 Eh/Bohr)
-Claude Generated (Oct 2026, WP8).
+Claude Generated (Oct 2026, WP8; --h/--tol and the meta-GGA cases of test_cases/qm_mgga_grad WP11 stage 2).
 """
 import argparse
 import json
@@ -89,6 +89,8 @@ def main():
     ap.add_argument("--case", default="")
     ap.add_argument("--fd", default="moving")
     ap.add_argument("--curcuma", default="")
+    ap.add_argument("--h", default="")      # FD step (Bohr), default of the driver: 2e-3 (WP11 stage 2)
+    ap.add_argument("--tol", type=float, default=2e-9)  # FD gate (WP11 stage 2: meta-GGA cases)
     a = ap.parse_args()
     ref = json.load(open(a.ref))
     ok = True
@@ -107,12 +109,13 @@ def main():
     elif a.check == "fd":
         mol, opts = parse_case(a.case)
         resp = "1" if a.fd == "moving" else "0"
-        out = run(a.exe, ["grad", os.path.join(TC, XYZ[mol])] + opts + ["--fd", a.fd, "--response", resp])
+        out = run(a.exe, ["grad", os.path.join(TC, XYZ[mol])] + opts + ["--fd", a.fd, "--response", resp]
+                  + (["--h", a.h] if a.h else []))
         d = maxdiff(out["gradient"], out["fd_gradient"])
-        ok = d <= 2e-9
+        ok = d <= a.tol
         print(f"{a.case}: analytic (grid response {'on' if resp == '1' else 'off'}) vs FD ({a.fd} grid, h "
               f"{out['fd_step_bohr']} Bohr): max diff {d:.2e}, max|g| {max(map(abs, out['gradient'])):.2e} "
-              f"{'OK' if ok else 'FAIL'} (tol 2e-9)")
+              f"{'OK' if ok else 'FAIL'} (tol {a.tol:.0e})")
     elif a.check == "translation":
         mol, opts = parse_case(a.case)
         x = os.path.join(TC, XYZ[mol])

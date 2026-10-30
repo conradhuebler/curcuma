@@ -5,7 +5,7 @@
  * Modes (JSON on stdout, gradients in Eh/Bohr, atom-major; check_qm_dft_grad.py compares with reference.json from
  * scripts/qm_dft_grad_pyscf_reference.py):
  *
- *   test_qm_dft_grad grad <xyz> [--functional lda|pbe|b3lyp|hf] [--vwn vwn5|vwn_rpa] [--grid sg1] [--ri off|j|jk]
+ *   test_qm_dft_grad grad <xyz> [--functional lda|pbe|b3lyp|tpss|scan|hf] [--vwn vwn5|vwn_rpa] [--grid sg1] [--ri off|j|jk]
  *                         [--response 1|0] [--threads N] [--fd moving|frozen] [--h 2e-3] [--fd_atoms N]
  *       KS/def2-SVP SCF (scf_threshold 1e-10, energy 1e-12, orbital gradient 1e-9) and its analytic gradient, parts
  *       {1e, 2e, nuc, xc basis, grid response}, sum over atoms and total torque sum_A (R_A - R_c) x g_A.
@@ -78,8 +78,9 @@ json engineConfig(const Args& a, int threads)
 
 QMFunctional functionalOf(const std::string& s)
 {
+    // tpss/scan: WP11 stage 2 (meta-GGA gradient), Claude Generated (Oct 2026)
     return s == "lda" ? QMFunctional::LDA : s == "pbe" ? QMFunctional::PBE : s == "hf" ? QMFunctional::HF
-                                                                                     : QMFunctional::B3LYP;
+         : s == "tpss" ? QMFunctional::TPSS : s == "scan" ? QMFunctional::SCAN : QMFunctional::B3LYP;
 }
 
 std::unique_ptr<QMEngine> makeEngine(const Args& a, const std::vector<int>& Z, const std::vector<double>& ang,

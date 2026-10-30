@@ -168,8 +168,6 @@ Stand.
 
 ## 5. Funktionen und Refactoring (niedrige Priorität)
 
-- **Meta-GGA Stufe 2: analytischer Gradient für `tpss`/`scan`** (2026-10-30): v_τ-Terme im Basis-, Punkt- und Gitterantwortteil von `buildXCGradient`
-  (AO-Zweitableitungen vorhanden); bis dahin ist eine Gradientanfrage ein Fehler. Danach PySCF-Vergleich wie WP8. [WP11](docs/DFT_ROADMAP/WP11_meta_gga.md)
 - **Meta-GGA Stufe 3: Device-Kern für `tpss`/`scan`** (2026-10-30): `cuda/qm_gpu_xc.cu` braucht τ, v_τ und `evaluatePointMGGA` (Kerne sind schon host/device);
   bis dahin gezählter CPU-Fallback `qm_xc`. Offen auch: offene Schale, r2SCAN/TPSSh, SCAN-taugliche Gitter. [WP11](docs/DFT_ROADMAP/WP11_meta_gga.md)
 - **CG Phase 6**: winkelabhängige Ellipsoid-Energie (`calculateEffectiveDistance`, `calculateCGPairEnergy`, Rotationszüge in Casino). Phase 1 bis 5 sind umgesetzt.

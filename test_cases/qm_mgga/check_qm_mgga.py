@@ -21,8 +21,8 @@ Checks (--check):
               threads identical (0), V_xc symmetric; --case <mol>_<functional>[_screen]
   energy      SCF energy and E_xc vs PySCF RKS on the identical grid (--case), ENERGY_TOL Eh; electrons on the grid
               vs PySCF to 1e-8; RI cases against PySCF density_fit with the same aux file
-  gradient    a gradient request fails loudly (no meta-GGA gradient in stage 1): gradient_failed true,
-              hasGradient() false, error text names the meta-GGA
+  gradient    a gradient request succeeds (WP11 stage 2): gradient_failed false, hasGradient() true, SCF converged;
+              the values are checked in test_cases/qm_mgga_grad (PySCF, FD)
   invariance  atom order reversed and translation: |dE| <= 1e-9 Eh; rotation (the Lebedev grid stays fixed in space):
               |dE| reported, limit ROT_TOL at the case's grid
   update      UpdateMolecule A -> B equals a fresh engine on B (1e-9 Eh)
@@ -31,7 +31,7 @@ Checks (--check):
   gpu         curcuma -sp ... -gpu cuda: the meta-GGA XC part falls back to the CPU as a counted fallback (summary
               line "qm_xc"), the energy equals the CPU run to 1e-8 Eh; with -gpu_strict true the run stops (exit 3)
 
-Claude Generated (Oct 2026, WP11 stage 1).
+Claude Generated (Oct 2026, WP11 stage 1; gradient check stage 2).
 """
 import argparse
 import json
@@ -207,8 +207,7 @@ def main():
     elif a.check == "gradient":
         fn = a.case.split("_")[1]
         out = run(a.exe, ["energy", os.path.join(tc, "qm_1e/H2O.xyz"), "--functional", fn, "--gradient"])
-        good = out.get("gradient_failed") is True and out["has_gradient"] is False \
-            and "meta-GGA" in out.get("gradient_error", "") and out["converged"]
+        good = out.get("gradient_failed") is False and out["has_gradient"] is True and out["converged"]
         ok &= good
         print(f"{fn} gradient request: failed={out.get('gradient_failed')} has_gradient={out['has_gradient']} "
               f"'{out.get('gradient_error')}' {'OK' if good else 'FAIL'}")

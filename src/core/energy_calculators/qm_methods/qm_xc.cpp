@@ -672,6 +672,137 @@ void buildVxcMeta(const qmgrid::MolecularGrid& grid, const qmgrid::AOEvaluator& 
     out.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 }
 
+/**
+ * buildXCGradient for a meta-GGA functional (WP11 stage 2). Blocks as buildVxcMeta (screen blocks with the kept
+ * functions, else uniform `block`-point blocks with all functions); AO derivatives up to second order.
+ *
+ * E_xc = sum_g w_g e(rho, sigma, tau); with phi_m on atom A, d phi_m / d A_k = - d_k phi_m:
+ *   d rho / d A_k     = -2 sum_{m on A} d_k phi_m (P phi)_m
+ *   d sigma / d A_k   = 2 grad rho . d grad rho / d A_k   (GGA part, unchanged from buildXCGradient)
+ *   d tau / d A_k     = - sum_{m on A} sum_j d_k d_j phi_m (P d_j phi)_m        (tau = 1/2 sum_j sum_mn P d_j phi d_j phi)
+ * so per point and function (T_k as in buildXCGradient, dE/dA_k = -2 sum_g sum_{m on A} T_k):
+ *   T_k = d_k phi (Z P) + sum_j v_j d_k d_j phi (P phi) + sum_j (w v_tau / 2) d_k d_j phi (P d_j phi),
+ *   Z = w v_rho phi + sum_j v_j d_j phi,  v_j = 2 w v_sigma d_j rho.
+ * Only second AO derivatives are needed (tau holds first derivatives, its nuclear derivative one more).
+ * The point part (grid response) uses the same translation identity as the GGA path; the Becke weight derivative
+ * needs only e_p = rho eps_xc (`edens`), which is the meta-GGA integrand here.
+ * Derivatives are taken at libxc's clamped point (tau floor, sigma <= 8 rho tau), as in V_xc: where a clamp is active
+ * the gradient is not the derivative of the clamped energy (for P positive semidefinite tau >= tau_W holds exactly,
+ * the clamp only acts at rounding level). Fixed chunk count (32): 1 vs N threads bitwise.
+ * Claude Generated (Oct 2026, WP11 stage 2).
+ */
+void buildXCGradientMeta(const qmgrid::MolecularGrid& grid, const qmgrid::AOEvaluator& ao, const Matrix& P,
+                         const XCFunctional& f, double rho_threshold, int threads, const std::vector<int>& bf_atom,
+                         int natoms, XCGradient& out, int block, const qmgrid::BlockScreen* screen)
+{
+    const auto t0 = std::chrono::steady_clock::now();
+    const int n = ao.nbf();
+    const int npts = grid.size();
+    const double rho_min = effectiveThreshold(f, rho_threshold);
+    const bool screened = screen && screen->active();
+    if (block < 1) block = 128;
+    const int nblocks = screened ? screen->nblocks() : (npts + block - 1) / block;
+    const int nchunks = std::max(1, std::min(32, nblocks));
+    const Eigen::MatrixXd Pd(P);
+    std::vector<Matrix> gb(nchunks);
+    std::vector<long> used_c(nchunks, 0);
+    out.edens = Vector::Zero(npts);
+    Matrix spoint = Matrix::Zero(npts, 3);  // per point: sum over all functions of the basis part
+
+#pragma omp parallel for schedule(dynamic, 1) num_threads(threads > 0 ? threads : 1)
+    for (int c = 0; c < nchunks; ++c) {
+        const int b0 = static_cast<int>((long long)nblocks * c / nchunks);
+        const int b1 = static_cast<int>((long long)nblocks * (c + 1) / nchunks);
+        Matrix g = Matrix::Zero(natoms, 3);
+        long used = 0;
+        qmgrid::AOBlock blk;
+        std::vector<int> cols;
+        Matrix grad;
+        Eigen::MatrixXd PhiP;
+        for (int b = b0; b < b1; ++b) {
+            int begin = 0, count = 0;
+            if (screened) {
+                begin = screen->begin[b];
+                count = screen->count[b];
+                const int off = screen->shell_off[b], nsh = screen->shell_off[b + 1] - off;
+                if (nsh == 0) continue;  // no function reaches the block: rho = 0 there
+                ao.evaluateShells(grid.points, begin, count, 2, screen->shells.data() + off, nsh, blk, cols);
+            } else {
+                begin = b * block;
+                count = std::min(block, npts - begin);
+                ao.evaluate(grid.points, begin, count, 2, blk);
+                cols.resize(n);
+                for (int m = 0; m < n; ++m) cols[m] = m;
+            }
+            const Eigen::MatrixXd phi(blk.phi);
+            const Eigen::MatrixXd d[3] = { Eigen::MatrixXd(blk.dx), Eigen::MatrixXd(blk.dy), Eigen::MatrixXd(blk.dz) };
+            const Eigen::MatrixXd Ps = gatherP(Pd, cols);
+            Vector rho, sigma, tau = Vector::Zero(count);
+            densitySubset(phi, d, Ps, rho, &grad, PhiP);  // PhiP = phi P_SS
+            sigma = grad.rowwise().squaredNorm();
+            Eigen::MatrixXd dP[3];  // (d_j phi) P_SS
+            for (int k = 0; k < 3; ++k) {
+                dP[k].noalias() = d[k] * Ps;
+                for (int q = 0; q < count; ++q) tau(q) += 0.5 * d[k].row(q).dot(dP[k].row(q));
+            }
+            Vector ex, ec, vrho, vsigma, vtau;
+            evaluateXCMeta(f, rho, sigma, tau, rho_threshold, ex, ec, vrho, vsigma, vtau);
+            Eigen::VectorXd wv(count), vx(count), vy(count), vz(count), wt(count);
+            bool any = false;
+            for (int q = 0; q < count; ++q) {
+                const double w = grid.weights(begin + q);
+                wv(q) = w * vrho(q);
+                vx(q) = vy(q) = vz(q) = wt(q) = 0.0;
+                if (rho(q) >= rho_min && rho(q) > 0.0) {
+                    out.edens(begin + q) = rho(q) * (ex(q) + ec(q));
+                    ++used;
+                    any = true;
+                    const double w2s = 2.0 * w * vsigma(q);
+                    vx(q) = w2s * grad(q, 0);
+                    vy(q) = w2s * grad(q, 1);
+                    vz(q) = w2s * grad(q, 2);
+                    wt(q) = 0.5 * w * vtau(q);
+                }
+            }
+            if (!any) continue;
+            Eigen::MatrixXd Zm = wv.asDiagonal() * phi;
+            Zm.noalias() += vx.asDiagonal() * d[0];
+            Zm.noalias() += vy.asDiagonal() * d[1];
+            Zm.noalias() += vz.asDiagonal() * d[2];
+            const Eigen::MatrixXd ZP = Zm * Ps;
+            Eigen::MatrixXd T[3] = { d[0].cwiseProduct(ZP), d[1].cwiseProduct(ZP), d[2].cwiseProduct(ZP) };
+            const Eigen::MatrixXd xx(blk.dxx), xy(blk.dxy), xz(blk.dxz), yy(blk.dyy), yz(blk.dyz), zz(blk.dzz);
+            // GGA: sum_j v_j d_k d_j phi_m (P phi)_m
+            T[0].noalias() += ((vx.asDiagonal() * xx) + (vy.asDiagonal() * xy) + (vz.asDiagonal() * xz)).cwiseProduct(PhiP);
+            T[1].noalias() += ((vx.asDiagonal() * xy) + (vy.asDiagonal() * yy) + (vz.asDiagonal() * yz)).cwiseProduct(PhiP);
+            T[2].noalias() += ((vx.asDiagonal() * xz) + (vy.asDiagonal() * yz) + (vz.asDiagonal() * zz)).cwiseProduct(PhiP);
+            // tau: sum_j (w v_tau / 2) d_k d_j phi_m (P d_j phi)_m
+            T[0].noalias() += (wt.asDiagonal() * (xx.cwiseProduct(dP[0]) + xy.cwiseProduct(dP[1]) + xz.cwiseProduct(dP[2])));
+            T[1].noalias() += (wt.asDiagonal() * (xy.cwiseProduct(dP[0]) + yy.cwiseProduct(dP[1]) + yz.cwiseProduct(dP[2])));
+            T[2].noalias() += (wt.asDiagonal() * (xz.cwiseProduct(dP[0]) + yz.cwiseProduct(dP[1]) + zz.cwiseProduct(dP[2])));
+            const int ns = static_cast<int>(cols.size());
+            for (int k = 0; k < 3; ++k) {
+                const Eigen::VectorXd colsum = T[k].colwise().sum().transpose();
+                for (int m = 0; m < ns; ++m) g(bf_atom[cols[m]], k) += -2.0 * colsum(m);
+                const Eigen::VectorXd rowsum = T[k].rowwise().sum();
+                for (int q = 0; q < count; ++q) spoint(begin + q, k) = -2.0 * rowsum(q);
+            }
+        }
+        gb[c] = std::move(g);
+        used_c[c] = used;
+    }
+    out.basis = Matrix::Zero(natoms, 3);
+    out.points_used = 0;
+    for (int c = 0; c < nchunks; ++c) {
+        out.basis += gb[c];
+        out.points_used += used_c[c];
+    }
+    out.points = Matrix::Zero(natoms, 3);
+    for (int p = 0; p < npts; ++p)
+        for (int k = 0; k < 3; ++k) out.points(grid.atom[p], k) -= spoint(p, k);
+    out.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+}
+
 }  // namespace
 
 void buildVxc(const qmgrid::MolecularGrid& grid, const qmgrid::AOEvaluator& ao, const Matrix& P,
@@ -786,12 +917,8 @@ void buildXCGradient(const qmgrid::MolecularGrid& grid, const qmgrid::AOEvaluato
                      const XCFunctional& f, double rho_threshold, int threads, const std::vector<int>& bf_atom,
                      int natoms, XCGradient& out, int block, const qmgrid::BlockScreen* screen)
 {
-    if (f.needsTau()) {  // WP11 stage 1: no meta-GGA gradient yet; never a silent wrong number
-        out.basis = Matrix::Constant(natoms, 3, std::numeric_limits<double>::quiet_NaN());
-        out.points = out.basis;
-        out.edens = Vector::Zero(grid.size());
-        out.points_used = 0;
-        out.ms = 0.0;
+    if (f.needsTau()) {  // WP11 stage 2: meta-GGA in its own function, the LDA/GGA paths below are unchanged
+        buildXCGradientMeta(grid, ao, P, f, rho_threshold, threads, bf_atom, natoms, out, block, screen);
         return;
     }
     if (screen && screen->active()) {  // AO screening (Oct 2026); the unscreened path below is unchanged

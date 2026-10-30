@@ -9,7 +9,7 @@
 #   qm_mgga_vxcfd_<mol>_<fn>     V_xc vs finite difference of E_xc in P; 1 vs 4 threads bitwise (unscreened, screened)
 #   qm_mgga_energy_<case>        E and E_xc vs PySCF RKS (same grid: Treutler x Lebedev, Becke, no pruning) to 1e-8 Eh;
 #                                *_rij/_rijk: -qm.ri j|jk vs PySCF density_fit with the same JFIT/JKFIT file (J only)
-#   qm_mgga_gradient_<fn>        a gradient request fails loudly (no meta-GGA gradient in stage 1)
+#   qm_mgga_gradient_<fn>        a gradient request succeeds (stage 2; values: test_cases/qm_mgga_grad)
 #   qm_mgga_invariance_<case>    atom order and translation 1e-9 Eh; rotation (grid fixed in space) at sg1 and sg3
 #   qm_mgga_{update,threads,screen}_H2O_<fn>
 #   qm_mgga_gpu_H2O_<fn>         -gpu cuda: counted CPU fallback of the meta-GGA XC part, same energy; -gpu_strict exits

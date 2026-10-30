@@ -1,7 +1,8 @@
 # WP11 — Meta-GGA TPSS und SCAN (+ τ, rung 3)
 
 - **Status Stufe 1 (Energien, CPU):** 🤖 AI-generated, ⚙️ machine-tested (`ctest -L qm_mgga` 50/50, 30. Okt 2026);
-  menschlicher Produktionstest ausstehend. **Stufe 2 (Gradient) und Stufe 3 (GPU) offen** (TODO.md).
+  **Stufe 2 (analytischer Gradient, CPU):** 🤖 AI-generated, ⚙️ machine-tested (`ctest -L qm_mgga_grad`, 30. Okt 2026,
+  Abschnitt „Stufe 2“); menschlicher Produktionstest ausstehend. **Stufe 3 (GPU) offen** (TODO.md).
 - Name: "WP11" steht in der README-Tabelle auch für das kanonische RMP2 (historisch); diese Datei ist der Meta-GGA-Teil.
 - **Code:** Kerne `qm_xc_kernels.h` (Meta-GGA-Block: `evaluateKernelMGGA`, `evaluatePointMGGA`, Dual-Zahlen `Dual3`),
   Tabelle `kMetaGGATable` und `buildVxcMeta` in `qm_xc.cpp`, `QMFunctional::TPSS/SCAN` in `qm_engine.*`, Methodennamen in
@@ -133,11 +134,109 @@ enden mit Fehler (`hasGradient()` false). LDA/PBE/B3LYP/HF: `-dump_gradient` geg
 60/60 CPU-Läufe bitgleich (H2O, NH3, Benzol; 1/4 Threads; Screening an/aus; RI-JK); GPU-Läufe innerhalb des
 Lauf-zu-Lauf-Rauschens der Referenz (Energie bitgleich, Gradient ≤ 1e-13 wie Referenz gegen Referenz).
 
+## Stufe 2: analytischer Gradient (CPU, 30. Okt 2026)
+
+- **Code:** `buildXCGradientMeta` in `qm_xc.cpp` (eigene Funktion, LDA/GGA-Pfade unverändert), Aufruf über
+  `qmxc::buildXCGradient`; `QMEngine::hasGradient()` true für alle KS-Funktionale; Testtreiber `test_qm_dft_grad`
+  (`--functional tpss|scan`), Tests `test_cases/qm_mgga_grad/`, Referenz `scripts/qm_dft_grad_pyscf_reference.py --set mgga`.
+- **Formel** (Basisteil, Johnson/Gill/Pople 1993 um τ erweitert): ∂τ/∂A_k = −Σ_{m auf A} Σ_j ∂_k∂_jφ_m (P ∂_jφ)_m,
+  also im WP8-Ausdruck zusätzlich Σ_j (w v_τ/2) ∂_k∂_jφ_m (P ∂_jφ)_m. Es reichen AO-Zweitableitungen (deriv 2), deriv 3
+  ist nicht nötig (τ enthält erste Ableitungen, seine Kernableitung eine mehr).
+- **Gitterantwort:** Punktteil über dieselbe Translationsidentität wie WP8 (der τ-Term steckt in der Punktsumme);
+  die Becke-Gewichtsableitung braucht nur e_p = ρ ε_xc(ρ, σ, τ) (`edens`) und ist unverändert wiederverwendet.
+  Geprüft durch FD mit mitwanderndem Gitter und PySCF `grid_response=True` (Tabellen unten).
+- Ableitungen am geklemmten Punkt (τ-Boden, σ ≤ 8ρτ) wie V_xc: wo eine Klemme greift, ist der Gradient nicht die
+  Ableitung der geklemmten Energie (für P positiv semidefinit nur auf Rundungsniveau).
+- `-gpu cuda`: XC-Gradient als gezählter CPU-Fallback `qm_xc` (1 Eintrag pro Lauf), 2e-Teil auf dem Device; H2O
+  TPSS/SCAN Gradient gegen `-gpu none` ≤ 3.6e-14 Eh/Å, `-gpu_strict true` endet mit Exit 3.
+
+**(1) gegen PySCF 2.14** (`nuc_grad_method()`, identisches Gitter, def2-SVP, max |g − g_PySCF| Eh/Bohr, ohne / mit
+Gitterantwort; ctest `qm_mgga_grad_pyscf_*`, 17 Fälle, Gate 1e-9):
+
+| Fall | TPSS | SCAN | Größe der Gitterantwort TPSS / SCAN |
+|---|---|---|---|
+| H2O / NH3 / CH4 / HF / Benzol sg1 | ≤ 9.7e-12 / ≤ 9.7e-12 | ≤ 7.3e-12 / ≤ 7.6e-12 | 1.2e-5..9.5e-5 / 2.6e-4..9.9e-2 |
+| H2O sg3, H2O RI-J sg1, NH3 150x974 | ≤ 8.6e-12 / ≤ 8.5e-12 | ≤ 6.6e-12 / ≤ 6.7e-12 | 6.3e-8..1.1e-5 / 5.0e-3..3.9e-2 |
+| Benzol TPSS RI-JK sg1 | 9.7e-12 / 9.7e-12 | – | 5.5e-5 |
+| H2O / NH3 250x1454 (ad hoc, nicht im ctest) | 5.4e-12 / – | 1.9e-12 / 6.2e-12 | |
+
+**(2) FD der eigenen Energie** (4-Punkt, Schritt h in Bohr, in Å verschoben, alle Atome, max |g − FD| Eh/Bohr):
+
+| Fall | mitwanderndes Gitter vs mit Antwort | eingefrorenes Gitter vs ohne Antwort |
+|---|---|---|
+| H2O TPSS sg1 | 2.7e-11 (h 2e-3) | 3.1e-7 (h 2e-3), 1.0e-6 (5e-4), 2.7e-9 (1e-4), 2.1e-9 (2e-5) |
+| H2O SCAN sg1 | 7.2e-10 (2e-3), 2.0e-10 (5e-4), 9.6e-10 (1e-4) | 1.4e-5 (2e-3), 5.2e-8 (5e-4), 1.3e-9 (1e-4), 5.3e-9 (2e-5) |
+| NH3 TPSS sg1 | 8.0e-11 (2e-3), 3.0e-10 (5e-4) | 1.0e-7 (2e-3), 3.0e-9 (1e-4), 2.0e-9 (5e-5) |
+| H2O TPSS / SCAN 250x1454 | 1.9e-10 / 1.3e-10 (5e-4) | – / 1.1e-9 (1e-4) |
+
+- Eingefrorenes Gitter, großes h: abweichend ist jeweils nur die Komponente des Schweratoms entlang der Symmetrieachse
+  (O_z, N_z); sie fällt mit kleinerem h auf das FD-Rauschen (≤ 5e-9), nicht monoton (TPSS 5e-4 schlechter als 2e-3).
+  Deutung (nicht bewiesen): Punkte des eigenen Atoms auf der Achse nahe am Kern, über die der Kern bei raumfestem
+  Gitter wandert; der Meta-GGA-Integrand ist dort bei Schritten ≥ Abstand der innersten Radialschalen nicht glatt
+  genug für den 4-Punkt-Stern. LDA/GGA zeigten das nicht (WP8). Die PySCF-Werte ohne Antwort (= Ableitung bei
+  raumfestem Gitter) stimmen unabhängig davon auf ≤ 6e-12. ctest: mitwandernd h 5e-4 (Gate 2e-9), eingefroren
+  h 1e-4 (Gate 1e-8).
+
+**(3) Gitterstreuung des Gradienten** (H2O/NH3, max |g − g(500x1454)| Eh/Bohr, mit / ohne Gitterantwort; die
+Referenz teilt das 1454er Winkelgitter, Winkelfehler daher getrennt):
+
+| | sg1 | sg3 | 99x974 | 150x974 | 250x1454 | 300x1454 | 400x590 |
+|---|---|---|---|---|---|---|---|
+| TPSS H2O mit | 7.4e-6 | 2.4e-7 | 2.6e-7 | 2.8e-7 | 4e-13 | 5e-13 | 2.5e-7 |
+| TPSS NH3 mit | 3.8e-5 | 4.4e-7 | 5.8e-8 | 5.9e-8 | 5e-13 | 5e-13 | 4.6e-7 |
+| SCAN H2O mit / ohne | 5.8e-4 / 4.0e-2 | 1.1e-4 / 5.0e-3 | 8.3e-5 / 5.0e-3 | 3.9e-5 / 1.4e-2 | 9.3e-6 / 2.2e-3 | 6.2e-7 / 2.1e-4 | 2.3e-5 / 5.0e-5 |
+| SCAN NH3 mit / ohne | 6.6e-4 / 2.3e-2 | 1.1e-4 / 1.0e-2 | 1.0e-4 / 1.0e-2 | 3.5e-5 / 5.2e-3 | 4.5e-6 / 3.2e-4 | 1.0e-6 / 8.0e-5 | 1.8e-5 / 1.2e-4 |
+
+Winkel 300x1454 gegen 300x2030 (mit Antwort): TPSS H2O/NH3 1.5e-8/1.9e-8, SCAN 1.0e-5/3.7e-6. Rotation (Gitter dreht
+nicht mit, max Δg zurückgedreht): TPSS sg1 4.0e-5/7.7e-5, 150x974 4.2e-7/1.7e-7, 250x1454 5.0e-8/4.6e-8; SCAN sg1
+1.8e-4/1.2e-4, 150x974 1.4e-5/1.2e-5, 250x1454 1.2e-5/6.4e-6 (H2O/NH3). Translation: Gradient unverändert ≤ 3.3e-13,
+Σ_A g_A mit Antwort ≤ 1e-12.
+
+- **TPSS:** Gradient auf 250x1454 bis ~5e-8 Eh/Bohr gitterkonvergiert, sg1 bis 8e-5.
+- **SCAN:** ohne Gitterantwort unbrauchbar (Fehler bis 4e-2 Eh/Bohr auf sg1, 2e-3 noch bei 250x1454); mit Antwort
+  bleibt eine Streuung von ~1e-5 Eh/Bohr selbst bei 250x1454/300x1454 (Rotation, Winkelgitter). `-qm.grid_response
+  false` mit SCAN ist daher nicht zu empfehlen; für Optimierungen feine Gitter (≥ 300x1454) und lockere
+  Gradientenkriterien erwarten.
+
+**(4) `-opt`** (`-opt.convergence_preset tight`, sg1, Referenz scipy-BFGS auf PySCF-Energie + Gradient mit Antwort):
+
+| Start | ΔE (curcuma-Min − PySCF-Min) | max Δd_ij (Å) | max\|g\| am Ende | curcuma am PySCF-Minimum ΔE / max\|g\| |
+|---|---|---|---|---|
+| H2O_distorted TPSS | 3.5e-11 | 5.5e-6 | 2.6e-6 | 3.3e-12 / 1.6e-8 |
+| NH3 (`qm_1e/NH3.xyz`) TPSS | 7.3e-11 | 8.7e-6 | 3.5e-6 | 3.0e-12 / 5.3e-8 |
+| formaldehyde_distorted TPSS | 1.2e-11 | 2.5e-6 | 1.3e-6 | 5.3e-12 / 2.0e-7 (= PySCF-Restgradient) |
+
+CLI ohne tight (Default-Kriterien, 4 Threads): H2O_distorted TPSS 3.9 s, E 9.3e-8 über dem PySCF-Minimum, max |g| am
+Ende 4.3e-6; NH3 TPSS 5.7 s, ΔE 1.1e-9, 6.0e-6; SCAN H2O/NH3 laufen durch (5.8/4.1 s, Endgradient 1.9e-6/9.8e-7),
+für SCAN ohne PySCF-Geometrievergleich.
+
+**(5) Threads, UpdateMolecule, Regression:** 1 vs 4 Threads Gradient bitgleich (NH3 TPSS/SCAN, Benzol TPSS);
+UpdateMolecule gegen neue Instanz max Δg 1.6e-12 (TPSS) / 1.2e-12 (SCAN). LDA/PBE/B3LYP/HF: `-dump_gradient` gegen das
+Binary von 3ff3ae37 60/60 CPU-Läufe bitgleich (H2O_distorted, NH3, Benzol; 1/4 Threads; beide VWN-Varianten,
+`grid_response false`, RI-JK, Screening an/aus); nach dem vollen Neubau 5/5 Stichproben (H2O) erneut bitgleich.
+`ctest -L qm_mgga_grad` 38/38.
+
+**(6) gegen ORCA 6.1** (`! LibXC(TPSS)|TPSS def2-SVP NoRI VeryTightSCF DefGrid3 EnGrad`, `IntAcc 8 AngularGrid 7
+GridPruning 0`; curcuma 250x1454 mit Antwort; max |g_ORCA − g| Eh/Bohr):
+
+| | LibXC(TPSS) | TPSS nativ | ΔE LibXC(TPSS) |
+|---|---|---|---|
+| H2O | 2.1e-6 | 2.1e-6 | -8.6e-8 |
+| NH3 | 5.6e-7 | 5.8e-7 | +5.3e-9 |
+
+ORCA IntAcc 10 statt 8 ändert ORCAs H2O-Gradient um 1.7e-7; curcuma 250x770 gegen 250x1454 2.7e-7. Die 2e-6 bei H2O
+(O_z) sind damit nicht durch die Winkelpunktzahl erklärt; Größenordnung wie WP8 (PBE H2O 1.3e-6 gegen ORCA). Ursache
+nicht bestimmt (ORCAs Gitter, Partition und Gewichtsableitung nicht nachgebaut); SCAN nicht gegen ORCA verglichen
+(ORCAs SCAN-Energie selbst schon gitterunkonvergiert, Stufe 1).
+
 ## Nicht getestet / nicht implementiert
 
-- Nicht implementiert: Gradient (Stufe 2), GPU-Kern (Stufe 3), offene Schale, Z > 10, r2SCAN/revTPSS/TPSSh/Hybride, DFT-D.
+- Nicht implementiert: GPU-Kern (Stufe 3; Energie und Gradient laufen als gezählter CPU-Fallback), offene Schale,
+  Z > 10, r2SCAN/revTPSS/TPSSh/Hybride, DFT-D, Hessian.
 - Nicht getestet: Moleküle größer als Benzol, geladene Systeme, `-qm.cartesian_d`, Stratmann-Partition und
-  `radii_adjust becke|none` mit Meta-GGA, integral-direct J mit Meta-GGA (Pfad wie GGA, nicht gemessen), `-md`.
+  `radii_adjust becke|none` mit Meta-GGA, integral-direct J mit Meta-GGA (Pfad wie GGA, nicht gemessen), `-md`;
+  Gradient: SCAN-Optimierung gegen eine Referenzgeometrie, ORCA-Gradientenvergleich (nicht gerechnet), Wirkung der
+  Klemmen (τ-Boden, σ ≤ 8ρτ) auf den Gradienten außer über die Testmoleküle.
 - SCAN-Gleichungsnummern nicht am Paper geprüft; Formeln folgen libxc 7.0.0 (über libxc-Werte validiert, nicht über das
   Paper).
 - Menschlicher Produktionstest ausstehend.

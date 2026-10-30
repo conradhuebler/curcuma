@@ -511,14 +511,8 @@ double QMEngine::Calculation(bool gradient)
     m_gradient_failed = false;
     m_gradient_error.clear();
     if (gradient) {
-        if (m_xc.needsTau()) {
-            // WP11 stage 1 (Oct 2026): the meta-GGA gradient (v_tau terms, grid response) is not implemented
-            m_gradient = Matrix::Zero(m_atomcount, 3);
-            m_gradient_failed = true;
-            m_gradient_error = fmt::format("QM: no analytic gradient for the meta-GGA '{}' yet (energies only, "
-                                           "docs/DFT_ROADMAP/WP11_meta_gga.md stage 2)", m_xc.name);
-            CurcumaLogger::error(m_gradient_error);
-        } else if (isKohnSham() && xcSetupFailed()) {
+        // WP11 stage 2 (Oct 2026): meta-GGAs take the same path (v_tau terms in qmxc::buildXCGradient)
+        if (isKohnSham() && xcSetupFailed()) {
             m_gradient = Matrix::Zero(m_atomcount, 3);
             m_gradient_failed = true;
             m_gradient_error = "QM: DFT grid could not be built -- no analytic gradient";

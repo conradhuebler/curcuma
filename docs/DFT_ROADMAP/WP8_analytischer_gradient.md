@@ -129,7 +129,8 @@ Energien unverändert: H2O HF -75.9575137984; `ctest -L "qm_1e|qm_2e|qm_grad|qm_
 ## Nicht getestet / nicht implementiert
 
 - Nicht implementiert: offene Schalen, Z > 10, GPU-KS-Gradient (2e-Teil für KS immer CPU; das Device-2e-Kernel hat die
-  RHF-Gewichte), Hessian, meta-GGA, Dispersion, Gitter-Pruning, SSF-Screening.
+  RHF-Gewichte), Hessian, Dispersion, Gitter-Pruning, SSF-Screening. Meta-GGA-Gradient: WP11 Stufe 2
+  (`WP11_meta_gga.md`).
 - Nicht getestet: `-md` mit KS, Stratmann-Partition und `radii_adjust becke|none` im Gradienten (Code vorhanden, nur
   über die gemeinsame Formel), `euler_maclaurin`-Radialgitter, kartesische d (`-qm.cartesian_d`), integral-direct und
   Device-1e-Pfad mit KS, Moleküle über Benzol, geladene Systeme, Gitter-Rotationsinvarianz über 3 Orientierungen hinaus.

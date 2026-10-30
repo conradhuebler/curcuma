@@ -17,8 +17,12 @@ optimisations: the start structures test_cases/qm_grad/{H2O,formaldehyde}_distor
           Stored: minimum energy and geometry (Angstrom) per functional.
 Geometries: Angstrom xyz files converted to Bohr with curcuma's CODATA 2018 factor.
 
-Run:  ~/.venvs/qmref/bin/python scripts/qm_dft_grad_pyscf_reference.py [--only grad|opt]
-Claude Generated (Oct 2026, WP8).
+--set mgga (WP11 stage 2): the meta-GGAs tpss ('MGGA_X_TPSS,MGGA_C_TPSS') and scan ('MGGA_X_SCAN,MGGA_C_SCAN'),
+          cases CASES_MGGA / OPT_MGGA, written to test_cases/qm_mgga_grad/reference.json (same settings as above;
+          grids "NxM" = n_rad x n_ang, as curcuma -qm.grid NxM).
+
+Run:  ~/.venvs/qmref/bin/python scripts/qm_dft_grad_pyscf_reference.py [--only grad|opt] [--set ks|mgga]
+Claude Generated (Oct 2026, WP8; --set mgga WP11 stage 2).
 """
 import argparse
 import importlib.util
@@ -51,7 +55,8 @@ XYZ = {
 LEVELS = {"sg0": (23, 170), "sg1": (50, 194), "sg2": (75, 302), "sg3": (99, 590)}
 XC = {("lda", "vwn5"): "LDA_X,LDA_C_VWN", ("lda", "vwn_rpa"): "LDA_X,LDA_C_VWN_RPA",
       ("pbe", "vwn5"): "GGA_X_PBE,GGA_C_PBE",
-      ("b3lyp", "vwn5"): "HYB_GGA_XC_B3LYP5", ("b3lyp", "vwn_rpa"): "HYB_GGA_XC_B3LYP"}
+      ("b3lyp", "vwn5"): "HYB_GGA_XC_B3LYP5", ("b3lyp", "vwn_rpa"): "HYB_GGA_XC_B3LYP",
+      ("tpss", "vwn5"): "MGGA_X_TPSS,MGGA_C_TPSS", ("scan", "vwn5"): "MGGA_X_SCAN,MGGA_C_SCAN"}
 
 # case: (molecule, functional, vwn, grid, ri)
 CASES = {}
@@ -67,6 +72,18 @@ CASES["NH3_lda_vwn5_rij_sg1"] = ("NH3", "lda", "vwn5", "sg1", "j")
 CASES["benzene_b3lyp_vwn_rpa_rijk_sg1"] = ("benzene", "b3lyp", "vwn_rpa", "sg1", "jk")
 
 OPT = {f"{m}_{f}": (m, f) for m in ("H2O_distorted", "formaldehyde_distorted") for f in ("lda", "pbe", "b3lyp")}
+
+# WP11 stage 2 (Claude Generated, Oct 2026): meta-GGA gradient references (vwn is unused, kept for the case format)
+CASES_MGGA = {}
+for _f in ("tpss", "scan"):
+    for _m in ("H2O", "NH3", "CH4", "HF", "benzene"):
+        CASES_MGGA[f"{_m}_{_f}_sg1"] = (_m, _f, "vwn5", "sg1", "off")
+    CASES_MGGA[f"H2O_{_f}_sg3"] = ("H2O", _f, "vwn5", "sg3", "off")
+    CASES_MGGA[f"H2O_{_f}_rij_sg1"] = ("H2O", _f, "vwn5", "sg1", "j")
+    CASES_MGGA[f"NH3_{_f}_150x974"] = ("NH3", _f, "vwn5", "150x974", "off")
+CASES_MGGA["benzene_tpss_rijk_sg1"] = ("benzene", "tpss", "vwn5", "sg1", "jk")
+OPT_MGGA = {"H2O_distorted_tpss": ("H2O_distorted", "tpss"), "NH3_tpss": ("NH3", "tpss"),
+            "formaldehyde_distorted_tpss": ("formaldehyde_distorted", "tpss")}
 
 
 def parse_turbomole(path):
@@ -97,7 +114,7 @@ def make_mf(mol, functional, vwn, level, ri):
     if ri != "off":
         mf = mf.density_fit(auxbasis=parse_turbomole(os.path.join(QMDIR, AUX[ri])), only_dfj=(ri == "j"))
     mf.xc = XC[(functional, vwn)]
-    mf.grids.atom_grid = LEVELS[level]
+    mf.grids.atom_grid = LEVELS[level] if level in LEVELS else tuple(int(v) for v in level.split("x"))
     mf.grids.prune = None
     mf.grids.radi_method = radi.treutler
     mf.grids.becke_scheme = gen_grid.original_becke
@@ -153,7 +170,13 @@ def opt_ref(mol_name, functional):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", choices=["grad", "opt"])
+    ap.add_argument("--set", choices=["ks", "mgga"], default="ks")
     a = ap.parse_args()
+    global OUT
+    cases, opts = CASES, OPT
+    if a.set == "mgga":
+        OUT = os.path.join(TC, "qm_mgga_grad", "reference.json")
+        cases, opts = CASES_MGGA, OPT_MGGA
     ref = {}
     if os.path.exists(OUT):
         ref = json.load(open(OUT))
@@ -161,14 +184,14 @@ def main():
                 "scipy": scipy.__version__})
     if a.only in (None, "grad"):
         ref["gradients"] = {}
-        for case, args in CASES.items():
+        for case, args in cases.items():
             ref["gradients"][case] = grad_ref(*args)
             r = ref["gradients"][case]
             d = np.abs(np.array(r["gradient"]) - np.array(r["gradient_response"])).max()
             print(f"{case:34s} E {r['energy']:.10f}  max|g_resp - g| {d:.2e}", flush=True)
     if a.only in (None, "opt"):
         ref["optimisations"] = {}
-        for case, args in OPT.items():
+        for case, args in opts.items():
             ref["optimisations"][case] = opt_ref(*args)
             r = ref["optimisations"][case]
             print(f"opt {case:30s} E {r['energy']:.10f} max|g| {r['max_gradient']:.1e} ({r['iterations']} it)",

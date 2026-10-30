@@ -80,8 +80,9 @@
  *   - SCAN (J. Sun, A. Ruzsinszky, J. P. Perdew, Phys. Rev. Lett. 115, 036402 (2015)), libxc MGGA_X_SCAN +
  *     MGGA_C_SCAN (= PySCF 'SCAN').
  *   Formulas, equation numbers, constants, libxc thresholds and the derivative scheme (dual numbers): the meta-GGA
- *   block of qm_xc_kernels.h. V_xc gains (1/2) v_tau grad phi_m . grad phi_n (buildVxc). Energies on the CPU only;
- *   no analytic gradient and no device kernel yet (stages 2 and 3, docs/DFT_ROADMAP/WP11_meta_gga.md).
+ *   block of qm_xc_kernels.h. V_xc gains (1/2) v_tau grad phi_m . grad phi_n (buildVxc). Energies and (stage 2)
+ *   the analytic gradient on the CPU only (buildXCGradient); no device kernel yet (stage 3,
+ *   docs/DFT_ROADMAP/WP11_meta_gga.md).
  *
  * Claude Generated (Oct 2026, WP5; WP6 GGA; WP7 B3LYP; WP11 meta-GGA). AI-generated, machine-tested only
  * (docs/DFT_ROADMAP/WP5_lda_vwn5.md, WP6_pbe_gga.md, WP7_b3lyp_hybrid.md, WP11_meta_gga.md).
@@ -266,8 +267,12 @@ struct XCGradient {
  * from AOEvaluator deriv 2). `points`: for a point of atom B the translation identity d_r e = - sum_C (d e / d R_C)
  * moves - sum of all basis parts of that point onto B. bf_atom[m] = atom of active function m.
  * Fixed chunking from nbf as buildVxc: independent of `threads`. With an active `screen` the blocks and kept
- * functions of the screen (as buildVxc). A meta-GGA functional (f.needsTau()) has no gradient yet (WP11 stage 2):
- * basis and points are set to NaN, never a silent wrong number. Claude Generated (Oct 2026, WP8; screening Oct 2026).
+ * functions of the screen (as buildVxc).
+ *   meta-GGA (WP11 stage 2, f.needsTau()): with d tau / d A_k = - sum_{m on A} sum_j d_k d_j phi_m (P d_j phi)_m the
+ *   bracket gains sum_j (v_tau / 2) d_k d_j phi_m (P d_j phi)_m (still AO deriv 2); own function (buildXCGradientMeta
+ *   in qm_xc.cpp), the LDA/GGA paths are unchanged. `edens` is rho eps_xc(rho, sigma, tau), so the Becke weight
+ *   derivative (qmgrid::gridWeightGradient) and the point part need no meta-GGA term of their own.
+ * Claude Generated (Oct 2026, WP8; screening Oct 2026; meta-GGA WP11 stage 2).
  */
 void buildXCGradient(const qmgrid::MolecularGrid& grid, const qmgrid::AOEvaluator& ao, const Matrix& P,
                      const XCFunctional& f, double rho_threshold, int threads, const std::vector<int>& bf_atom,

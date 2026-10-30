@@ -15,7 +15,7 @@
  *   test_qm_mgga energy <xyz> [--functional tpss|scan] [--grid sg1] [--threads N] [--ri off|j|jk]
  *                      [--ao-threshold 1e-12] [--gradient]
  *       Closed-shell KS/def2-SVP SCF (scf_threshold 1e-10, energy 1e-12, orbital gradient 1e-9): E, E_xc, E_x, E_c,
- *       electrons on the grid, iterations; with --gradient whether the request failed (WP11 stage 1: it must).
+ *       electrons on the grid, iterations; with --gradient whether the request failed (WP11 stage 2: it must not).
  *
  *   test_qm_mgga update <xyzA> <xyzB> [options as energy]
  *       Engine on geometry A, then UpdateMolecule to B, against a fresh engine on B.
