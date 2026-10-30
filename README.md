@@ -59,15 +59,10 @@ RMSD with atom reordering `-rmsd`, docking `-dock`, interaction energies `-inter
 ## Download and requirements
 
 Prebuilt binaries are on the [Releases page](https://github.com/conradhuebler/curcuma/releases): Linux x86_64 AppImages
-for two CPU levels (`curcuma-<version>-avx2-x86_64.AppImage` for AVX2, `curcuma-<version>-avx512-x86_64.AppImage` for AVX512) and a
-Windows x86_64 archive (`curcuma-<version>-x86_64-Windows.zip`). The AppImages run on the CPU only. GPU support comes from
-plugin archives of the same CPU level (`curcuma-<version>-plugin-cuda-<level>.tar.gz`, `...-plugin-rocm-<level>.tar.gz`): unpack
-them next to the `.AppImage` file, or into the directory of the executable from `curcuma-<version>-linux-<level>.tar.gz`, or set
-`CURCUMA_PLUGIN_DIR`. A plugin of the other CPU level is refused and the run falls back to the CPU. CUDA needs the NVIDIA driver; the
-Linux builds need glibc 2.35 or newer. The plugin archives are part of releases built from `master` only; the `Curcuma CI (feature/...)`
-releases carry the CPU-only AppImages. Every release
-is marked as a pre-release and is built by the CI from one commit; the releases named `Curcuma CI (feature/...)` are builds
-of development branches.
+for AVX2 and AVX512 CPUs and a Windows x86_64 archive. GPU support (CUDA, ROCm) is a separate plugin download of the same CPU level
+that is unpacked next to the AppImage; plugins are part of releases built from `master` only. Every release is marked as a
+pre-release and is built by the CI from one commit; the releases named `Curcuma CI (feature/...)` are builds of development
+branches. File names, plugin setup and requirements: [docs/RELEASE_BINARIES.md](docs/RELEASE_BINARIES.md).
 
 To build from source:
 
