@@ -36,18 +36,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 S = ROOT / "test_cases/structures"
 
-# name, file, atoms, methods. Fixed list: change it only together with the table in the document.
+# name, file, atoms, [(method, repeats or None for --repeats, timeout s or None for --timeout)].
+# Fixed list: change it only together with the table in the document.
 SYSTEMS = [
-    ("caffeine", S / "medium/caffeine.xyz", 24, ["gfnff", "gfn2"]),
-    ("trisaccharide", S / "large/trisaccharide-c18h32o16.xyz", 66, ["gfnff", "gfn2"]),
-    ("aaa-bglc.conf76", S / "clusters/aaa-bglc.conf76.xyz", 117, ["gfnff", "gfn2"]),
-    ("macrocycle-bgal", S / "clusters/macrocycle-bgal.xyz", 231, ["gfnff", "gfn2"]),
-    ("peo201-chain", S / "bulk/peo201-chain.xyz", 1410, ["gfnff", "gfn2"]),
-    ("peo201-water500", S / "bulk/peo201-water500.xyz", 2910, ["gfnff"]),
-    ("urea400-water1000", S / "bulk/urea400-water1000.xyz", 6200, ["gfnff"]),
-    ("peo201x2-water1500", S / "bulk/peo201x2-water1500.xyz", 7320, ["gfnff"]),
+    ("caffeine", S / "medium/caffeine.xyz", 24, [("gfnff", None, None), ("gfn2", None, None)]),
+    ("jl22-bgal.conf6", S / "clusters/jl22-bgal.conf6.xyz", 173, [("gfnff", None, None), ("gfn2", None, None)]),
+    ("peo201-chain", S / "bulk/peo201-chain.xyz", 1410, [("gfnff", None, None), ("gfn2", None, None)]),
+    ("peo201-water500", S / "bulk/peo201-water500.xyz", 2910, [("gfnff", None, None), ("gfn2", 3, 1800)]),
+    ("peo201x2-water1500", S / "bulk/peo201x2-water1500.xyz", 7320, [("gfnff", None, None), ("gfn2", 1, 3600)]),
 ]
-QUICK = {"caffeine", "peo201-chain", "peo201x2-water1500"}
+QUICK = {"caffeine", "peo201-chain"}
 
 ENERGY = re.compile(r"Single Point Energy\s*=\s*(-?\d+\.\d+)\s*Eh")
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
@@ -112,7 +110,7 @@ def main():
     ap.add_argument("--threads", type=int, default=min(os.cpu_count() or 1, 16))
     ap.add_argument("--backends", default="cpu,rocm")
     ap.add_argument("--systems", default="")
-    ap.add_argument("--quick", action="store_true", help="three systems only (smoke test of the setup)")
+    ap.add_argument("--quick", action="store_true", help="two systems only (smoke test of the setup)")
     ap.add_argument("--timeout", type=int, default=900)
     ap.add_argument("--etol", type=float, default=1e-6, help="energy tolerance between backends in Eh")
     ap.add_argument("--json", default="")
@@ -132,14 +130,15 @@ def main():
     results = []   # (system, atoms, method, backend, [times], [energies], errors)
     binary_hash = ""
     for name, path, atoms, methods in systems:
-        for method in methods:
+        for method, reps, tmo in methods:
+            reps = reps or a.repeats
             times = {b: [] for b in backends}
             energies = {b: [] for b in backends}
             errors = {b: [] for b in backends}
-            for rep in range(a.repeats):
+            for rep in range(reps):
                 order = backends[rep % len(backends):] + backends[:rep % len(backends)]   # alternate
                 for b in order:
-                    dt, e, extra = run_one(binary, path, method, b, a.threads, a.timeout)
+                    dt, e, extra = run_one(binary, path, method, b, a.threads, tmo or a.timeout)
                     if dt is None:
                         errors[b].append(extra)
                     else:
@@ -162,7 +161,7 @@ def main():
     print(f"- Binary `{prov['binary']}` (built {prov['binary_mtime']}, reports commit `{binary_hash or 'unknown'}`); "
           f"repository HEAD `{prov['repo_head']}`, {prov['repo_dirty_files']} uncommitted files, "
           f"{prov['sources_newer_than_binary']} source files newer than the binary.")
-    print(f"- {a.repeats} repeats per cell, backends alternating, `-threads {a.threads}`, RAM {info['ram_gb']} GB, "
+    print(f"- {a.repeats} repeats per cell unless the n column says otherwise, backends alternating, `-threads {a.threads}`, RAM {info['ram_gb']} GB, "
           f"load average at start {load0}, at end {load1}.")
     print("- Wall time of the whole process (start, plugin load, device initialisation included), `-sp`, fresh directory per run, "
           "GPU runs with `-gpu_strict true`.")

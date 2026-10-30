@@ -4,7 +4,7 @@ This file tracks significant improvements, refactorings, and new features genera
 
 Format: One line per change, newest first.
 - docs/RELEASE_BINARIES.md: download files, plugin setup, requirements; old assets of the branch prerelease removed (Oct 30, 2026)
-- docs/PERFORMANCE_TABLE.md and scripts/perf_table.py: wall-time table per machine, backend and method (median of n, alternating backends, fixed system list); no block recorded yet (Oct 30, 2026)
+- docs/PERFORMANCE_TABLE.md and scripts/perf_table.py: wall-time table per machine, backend and method (median of n, alternating backends, fixed system list); first block: Core Ultra 5 225 + RX 9060 XT, commit 77f033ca (Oct 30, 2026)
 - scripts/gpu_parity_check.py: CUDA/ROCm parity from source text (seam, traits counted; kernels, env, params informational), known differences in scripts/gpu_parity_known.json; not in CI (Oct 30, 2026)
 - ccpp.yml now publishes the AVX2 and AVX512 AppImages and executable archives (plus CUDA/ROCm plugin archives on master and manual runs only; job in linux-gpu.yml) instead of the baseline AppImage; old build_unix_github/deploy_unix_github scripts removed; not yet run via ccpp.yml (Oct 29, 2026)
 - GPU plugins as separate CI archives per ISA (avx2, avx512), plugin search path (`CURCUMA_PLUGIN_DIR`, AppImage directory, XDG data) and Eigen-alignment check at load; Vulkan not packaged, nothing run yet ([GPU_PLUGIN_STARTUP.md](docs/GPU_PLUGIN_STARTUP.md)) (Oct 27, 2026)
