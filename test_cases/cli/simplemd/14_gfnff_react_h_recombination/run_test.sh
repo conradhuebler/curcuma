@@ -13,6 +13,9 @@
 #       configurations need ~1.89x the temperature, and 3000*1.8897 = 5670 K is
 #       what 6000 K reflects. Verified: 6000 K/r=2.5 gives 3 formations and 6
 #       rebuilds, 9000 K/r=1.8 gives 4/8; 3000 K gives 0 for every seed tried.)
+#   (Oct 30, 2026: -md.seed now reaches the velocity draw (cherry-pick of 17a103e4), so the seed decides
+#    whether an event happens at 6000 K: seeds 1..8 and 42 give formed 1/2/0/0/0/3/1/0/0 (n=1 each).
+#    Seed 42 gave none, seed 6 gives 3 formations and 5 rebuilds; the test needs a seed with events.)
 #   2. every rebuild logs its dE_jump (the accepted energy discontinuity
 #      is measured, not hidden)
 #   3. the run stays numerically stable (no NaN/Inf, no crash)
@@ -31,7 +34,7 @@ run_test() {
     cleanup_bmt_dirs
     timeout 280 $CURCUMA -md input.xyz -method gfnff -gfnff.topology_mode react \
         -temperature 6000 -maxtime 5000 -md.time_step 0.5 -threads 1 \
-        -md.seed 42 -md.no_restart -md.rattle_12 false \
+        -md.seed 6 -md.no_restart -md.rattle_12 false \
         -md.wall_type spheric -md.wall_radius 2.5 \
         -no_bmt > stdout.log 2> stderr.log
     return $?

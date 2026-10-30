@@ -11,7 +11,6 @@ Stand.
 
 ## 1. Korrektheit (offen)
 
-- **Zwei `SimpleMD`-Läufe im selben Prozess starten mit verschiedenen Anfangsgeschwindigkeiten** (gleicher `-seed 1`, NVE, 18 Atome, 2026-10-22, n=1 Paar): der zweite Lauf weicht ab, getrennte Prozesse sind identisch.
   Vermutlich ein statischer Zufallsgenerator; nicht untersucht. `test_cases/test_md_hbond_log.cpp` startet deshalb einen Prozess je Lauf. Betrifft jeden, der mehrere MD in einem Prozess einbettet.
 
 
@@ -57,9 +56,6 @@ Stand.
 - **Exitcode bei fehlgeschlagenem Setup**: `-md` gibt seit `a2b7c5f0` 1 zurück; prüfen, ob dasselbe für `-opt` und `-sp` gilt (nicht geprüft).
 - **UFF- und QMDFF-Gradient falsch** (Eintrag vom 2026-09-27: UFF-Winkel ohne den Faktor -sin(theta); Fix vorbereitet, Betreiber: "erstmal nicht").
   Nicht erneut geprüft; Details im Archiv unter "UFF- und QMDFF-Gradient falsch".
-- **`-seed` wirkt nicht auf die Anfangsgeschwindigkeiten der MD.** Geprüft 2026-10-01: `SimpleMD::InitVelocities()` (`simplemd.cpp:1141`)
-  zieht aus `static std::default_random_engine generator` (Z. 1143) mit festem Standardseed. Ein Fix ändert jede MD-Startgeschwindigkeit.
-- **`shouldUpdateHBXB()`: RMSD-Formel ohne Faktor `sqrt(natoms)`** (`gfnff_method.cpp:3058`, geprüft 2026-10-01). Bei 7320 Atomen
   ~13,6 Å mittlere Verschiebung bis zum Auslösen. Aus der Fortran-Referenz übernommen (`gfnff_ini2.f90:717`); vor einer Änderung gegen
   MOR41/GMTKN55 prüfen und das Abweichen von der Referenz entscheiden.
 - **D4-ATM-C6 auf den Tripeln bleibt auf dem Setup-Wert eingefroren.** Ohne Wirkung, solange `dispersion_atm` aus ist (Voreinstellung).
@@ -97,7 +93,7 @@ Stand.
   Validierung nur PDMAEMA-Einheit/Dimer in Wasserclustern (n=16/8): Kraefte nicht signifikant besser, Relativenergien besser. [docs/POLYMERBUILD_CHARGE.md](docs/POLYMERBUILD_CHARGE.md)
 - **100-ps-Probelauf (AB)5 im Wassertropfen** (2026-10-25, n=1 je T, 303/338 K): ausgewertet, offen: Kette wandert in beiden Läufen zur Tropfenoberfläche
   (COM-Versatz 1,1-1,4 -> 3,2-3,5 A, 35 A^2 unbedeckt in H2), 338 K Epot-Drift -1,25e-3 Eh/ps, Rg nicht stationär (tau 5-15 ps, 3-15 unabhängige Werte);
-  `-md.seed` wirkt nicht (auch CSVR). Läufe unter `~/curcuma_runs/probe100/`. [docs/PDMAEMA_PROBE_100PS_2026-10.md](docs/PDMAEMA_PROBE_100PS_2026-10.md)
+  (`-md.seed` wirkte in diesen Läufen nicht, seit 2026-10-30 behoben.) Läufe unter `~/curcuma_runs/probe100/`. [docs/PDMAEMA_PROBE_100PS_2026-10.md](docs/PDMAEMA_PROBE_100PS_2026-10.md)
 - **`-trajprops hb_criterion energy`** baut GFN-FF ohne `charge_groups`/`cn_zero_guard` (`countHydrogenBondsByEnergy`), also nicht das
   Ladungsmodell des Laufs. [docs/PDMAEMA_PROBE_100PS_2026-10.md](docs/PDMAEMA_PROBE_100PS_2026-10.md)
 - **H...Cl-Bindungserkennung als Energiestufe** (2026-10-25, starrer Scan n=1): frische GFN-FF-Topologie gibt +34 kcal/mol bei 1,7->1,6 A (ohne Gruppen),
@@ -221,7 +217,7 @@ Code-gebundene Entscheidungen, die bei Ihnen liegen. Fachliche Fragen und Projek
 - `-scf_precond_guard`: Vorgabe `g2:4:best` kostet auf dem unrelaxierten 599-Atom-Cluster bei 8 Threads 4 Iterationen gegen `none` (Kriterium war <= 3);
   über 5 Threadzahlen liegt frag (55-62) unter none (58-138). Varianten streuen 58-109, eine konvergiert nicht. Vorgabe behalten? [docs/SCF_PRECOND.md](docs/SCF_PRECOND.md)
 - `shouldUpdateHBXB()` korrigieren und damit von der Fortran-Referenz abweichen, oder als Referenzeigenschaft belassen?
-- UFF-/QMDFF-Gradient reparieren (Stand: "erstmal nicht")? `-seed` für die MD-Startgeschwindigkeiten reparieren (ändert jede MD)?
+- UFF-/QMDFF-Gradient reparieren (Stand: "erstmal nicht")?
 - GPU-Bitgleichheit angehen (Sammel-Kernel statt `atomicAdd`) oder bei Ensemblevergleichen bleiben?
 - Vault, fachliche Fragen: `Offene Fragen/` ("Valenzanteil im reaktiven GFN-FF", "Veraltete C6-Dispersion und Paarlisten in inaktiven Topologie-Ecken",
   "Lücke zwischen GFN2-xTB und Doppelhybrid-Methoden schließen", "RRHO-Näherung durch MD ... ersetzen", "Ladungsplatzierung bei geladenen Mehrfragment-Systemen in GFN-FF - was ist physikalisch besser", Known Issue #31).
