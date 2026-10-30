@@ -2622,15 +2622,16 @@ Matrix gradientOneElectron(const std::vector<GTO::Orbital>& basis,
     const int n = (int)basis.size();
     const int natoms = (int)atomZ.size();
     Matrix grad = Matrix::Zero(natoms, 3);
+    // Oct 2026 (WP8): fixed round-robin chunks of rows, each with its own accumulator, added in chunk order, so the
+    // result is bitwise the same for every thread count (before: per-thread sums under omp critical).
+    const int nchunk = std::max(1, std::min(64, n));
+    std::vector<Matrix> gchunk(nchunk, Matrix::Zero(natoms, 3));
 #ifdef _OPENMP
-#pragma omp parallel num_threads(threads > 0 ? threads : 1)
+#pragma omp parallel for schedule(dynamic, 1) num_threads(threads > 0 ? threads : 1)
 #endif
-    {
-        Matrix g = Matrix::Zero(natoms, 3);
-#ifdef _OPENMP
-#pragma omp for schedule(dynamic, 1)
-#endif
-        for (int mu = 0; mu < n; ++mu) {
+    for (int ch = 0; ch < nchunk; ++ch) {
+        Matrix& g = gchunk[ch];
+        for (int mu = ch; mu < n; mu += nchunk) {
             const GTO::Orbital& a = basis[mu];
             int l1, m1, n1;
             GTO::orbitalTypeToComponents(a.type, l1, m1, n1);
@@ -2676,11 +2677,8 @@ Matrix gradientOneElectron(const std::vector<GTO::Orbital>& basis,
                 }
             }
         }
-#ifdef _OPENMP
-#pragma omp critical
-#endif
-        grad += g;
     }
+    for (int ch = 0; ch < nchunk; ++ch) grad += gchunk[ch];
     (void)threads;
     return grad;
 }
@@ -2871,16 +2869,17 @@ Matrix gradientTwoElectronDriver(const std::vector<GTO::Orbital>& basis, const s
             pairs.push_back(makeShellPair(sh, A, B, 1, 1));
     const int np = (int)pairs.size();
 
+    // Oct 2026 (WP8): fixed round-robin chunks of bra pairs with their own accumulators, added in chunk order:
+    // bitwise the same result for every thread count (before: per-thread sums under omp critical).
+    const int nchunk = std::max(1, std::min(256, np));
+    std::vector<Matrix> gchunk(nchunk, Matrix::Zero(natoms, 3));
 #ifdef _OPENMP
-#pragma omp parallel num_threads(threads > 0 ? threads : 1)
+#pragma omp parallel for schedule(dynamic, 1) num_threads(threads > 0 ? threads : 1)
 #endif
-    {
-        Matrix g = Matrix::Zero(natoms, 3);
+    for (int ch = 0; ch < nchunk; ++ch) {
+        Matrix& g = gchunk[ch];
         std::vector<double> Dq;
-#ifdef _OPENMP
-#pragma omp for schedule(dynamic, 1)
-#endif
-        for (int i = 0; i < np; ++i) {
+        for (int i = ch; i < np; i += nchunk) {
             const ShellPair& bra = pairs[i];
             for (int j = i; j < np; ++j) {
                 const ShellPair& ket = pairs[j];
@@ -2899,19 +2898,18 @@ Matrix gradientTwoElectronDriver(const std::vector<GTO::Orbital>& basis, const s
                 }
             }
         }
-#ifdef _OPENMP
-#pragma omp critical
-#endif
-        grad += g;
     }
+    for (int ch = 0; ch < nchunk; ++ch) grad += gchunk[ch];
     (void)threads;
     return grad;
 }
 
 // gradientTwoElectron (exchange_only = false, the WP8 expression unchanged) and gradientTwoElectronExchange
 // (Claude Generated, Oct 2026, RI-J gradient: only the exchange part D = -1/4 (P_ml P_ns + P_ms P_nl)).
+// WP8 KS (Oct 2026): kx scales the exchange part (a_x of a hybrid, 0 for LDA/GGA); kx = 1 keeps the HF expression
+// bit for bit.
 Matrix gradientTwoElectronImpl(const std::vector<GTO::Orbital>& basis, const Matrix& P,
-                               int natoms, int threads, bool exchange_only)
+                               int natoms, int threads, bool exchange_only, double kx = 1.0)
 {
     if (basis.empty()) return Matrix::Zero(natoms, 3);
     const std::vector<EriShell> sh = groupShells(basis);
@@ -2930,9 +2928,14 @@ Matrix gradientTwoElectronImpl(const std::vector<GTO::Orbital>& basis, const Mat
                         if (exchange_only)
                             Dq[((size_t)(a * nB + b) * nC + c) * nD + d] =
                                 -0.25 * (P(m, l) * P(n, s) + P(m, s) * P(n, l));
-                        else
+                        else if (kx == 1.0)
                             Dq[((size_t)(a * nB + b) * nC + c) * nD + d] =
                                 P(m, n) * P(l, s) - 0.25 * (P(m, l) * P(n, s) + P(m, s) * P(n, l));
+                        else if (kx == 0.0)
+                            Dq[((size_t)(a * nB + b) * nC + c) * nD + d] = P(m, n) * P(l, s);
+                        else
+                            Dq[((size_t)(a * nB + b) * nC + c) * nD + d] =
+                                P(m, n) * P(l, s) - 0.25 * kx * (P(m, l) * P(n, s) + P(m, s) * P(n, l));
                     }
     };
     return gradientTwoElectronDriver(basis, sh, natoms, threads, fill);
@@ -2952,6 +2955,13 @@ Matrix gradientTwoElectronExchange(const std::vector<GTO::Orbital>& basis, const
                                    int natoms, int threads)
 {
     return gradientTwoElectronImpl(basis, P, natoms, threads, true);
+}
+
+// Declared in qm_ri.h (same reason). Claude Generated (Oct 2026, WP8 Kohn-Sham gradient).
+Matrix gradientTwoElectronScaled(const std::vector<GTO::Orbital>& basis, const Matrix& P, double kx,
+                                 int natoms, int threads)
+{
+    return gradientTwoElectronImpl(basis, P, natoms, threads, false, kx);
 }
 
 // Declared in qm_mp2.h (same reason as above). Claude Generated (Oct 2026, MP2 gradient).

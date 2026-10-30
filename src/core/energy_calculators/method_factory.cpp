@@ -517,7 +517,7 @@ const std::vector<MethodDescriptor>& MethodFactory::methodTable()
         // name; it is fixed here, never a parameter. Shared settings live in -qm.*
         // (the pre-Sep-2026 -dft.* scope is still merged).
         { {"hf", "lda", "pbe", "b3lyp"}, "Quantum Methods (native)",
-          "Native ab-initio QM: hf = closed-shell RHF (validated vs ORCA); lda/pbe/b3lyp = E_nn only, V_xc pending",
+          "Native ab-initio QM: hf = closed-shell RHF (validated vs ORCA); lda/pbe/b3lyp = closed-shell Kohn-Sham with analytic gradient (b3lyp VWN per -qm.vwn_variant, default vwn5)",
           always, {{"Native", always}},
           [](const std::string& m, const json& c) -> std::unique_ptr<ComputationalMethod> {
               const QMFunctional f = (m == "hf")    ? QMFunctional::HF

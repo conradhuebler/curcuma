@@ -568,6 +568,8 @@ set(curcuma_core_SRC
         src/core/energy_calculators/qm_methods/nddo_method.cpp
         src/core/energy_calculators/qm_methods/qm_engine.cpp
         src/core/energy_calculators/qm_methods/qm_integrals.cpp
+        src/core/energy_calculators/qm_methods/qm_grid.cpp
+        src/core/energy_calculators/qm_methods/qm_xc.cpp
         src/core/energy_calculators/qm_methods/qm_method.cpp
         src/core/energy_calculators/qm_methods/qm_scf.cpp
         src/core/energy_calculators/qm_methods/qm_ri.cpp

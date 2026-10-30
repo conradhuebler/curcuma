@@ -100,13 +100,19 @@ double QMMethod::calculateEnergy(bool gradient)
         // Claude Generated (Oct 2026, WP10): no energy without the fit the user asked for.
         m_has_error = true;
         m_error_message = "density fitting (-qm.ri " + m_engine->riMode() + ") setup failed, see the error above";
-    } else if (m_engine->getFunctional() == QMFunctional::HF && !m_engine->scfConverged()
+    } else if (m_engine->xcSetupFailed()) {
+        // Claude Generated (Oct 2026, WP5): no LDA/PBE/B3LYP energy without its grid
+        m_has_error = true;
+        m_error_message = "DFT grid (-qm.grid*) could not be built, see the error above";
+    } else if ((m_engine->getFunctional() == QMFunctional::HF || m_engine->isKohnSham()) && !m_engine->scfConverged()
                && !m_engine->scfAllowUnconverged()) {
         // Claude Generated (Oct 27 2026): master's rule for every SCF method (docs/SCF_MODES.md "Failure handling"):
         // an unconverged SCF is an error, not a result. Before, HF printed an error and returned the energy (exit 0).
         m_has_error = true;
-        m_error_message = fmt::format("native HF SCF did not converge within {} iterations; "
+        m_error_message = fmt::format("native {} SCF did not converge within {} iterations; "
                                       "-scf_allow_unconverged true accepts the unconverged energy",
+                                      m_engine->isKohnSham() ? "Kohn-Sham (" + m_engine->xcFunctional().name + ")"
+                                                                : std::string("HF"),
                                       m_engine->scfMaxIter());
     } else if (gradient && m_engine->gradientFailed()) {
         // Claude Generated (Oct 2026): fail loud instead of handing back a zero gradient
@@ -124,7 +130,7 @@ Matrix QMMethod::getGradient() const
         return Matrix::Zero(m_molecule.AtomCount(), 3);
     }
     if (!m_engine->hasGradient())
-        return Matrix::Zero(m_molecule.AtomCount(), 3);  // lda/pbe/b3lyp: no V_xc, no gradient
+        return Matrix::Zero(m_molecule.AtomCount(), 3);  // no analytic gradient for this functional
     // The engine works in Eh/Bohr; ComputationalMethod::getGradient() is Eh/Angstrom
     // (dE/dx[A] = dE/dx[Bohr] * Bohr-per-Angstrom), see Known Issue #28.
     return m_engine->gradientBohr() * CurcumaUnit::Length::ANGSTROM_TO_BOHR;
@@ -149,10 +155,21 @@ json QMMethod::getEnergyDecomposition() const
         decomp["exchange"] = c[3];
         decomp["electronic"] = c[4];
         decomp["nuclear_repulsion"] = m_last_energy - c[4];
+    } else if (m_engine->isKohnSham() && m_engine->scfConverged()) {
+        // WP5 (Claude Generated, Oct 2026): {ET, EV, EJ, E_x(HF part, 0 for LDA/PBE), E_elec} + E_xc
+        const std::vector<double> c = m_engine->energyComponents();
+        decomp["kinetic"] = c[0];
+        decomp["nuclear_attraction"] = c[1];
+        decomp["coulomb"] = c[2];
+        decomp["exchange_correlation"] = m_engine->xcEnergy();
+        decomp["xc_exchange"] = m_engine->xcExchangeEnergy();
+        decomp["xc_correlation"] = m_engine->xcCorrelationEnergy();
+        if (m_engine->xcFunctional().exact_exchange != 0.0)
+            decomp["exact_exchange"] = c[3];  // WP7 hybrid: -(a_x/4) Tr(PK)
+        decomp["electronic"] = c[4];
+        decomp["nuclear_repulsion"] = m_last_energy - c[4];
     } else {
-        // DFT functionals without V_xc yet: the total IS the nuclear repulsion.
-        decomp["nuclear_repulsion"] = m_last_energy;
-        decomp["electronic"] = 0.0;
+        // unconverged or failed SCF (WP7: no functional returns E_nn alone any more): no components
     }
     return decomp;
 }

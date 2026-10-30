@@ -23,6 +23,7 @@
 #include "src/core/blas_threads.h"
 #include "src/core/curcuma_logger.h"
 #include "qm_citations.h"
+#include "qm_ri.h"  // qmint::gradientTwoElectronScaled (WP8 Kohn-Sham gradient)
 #include "src/core/energy_calculators/gpu_plugin.h"
 #include "src/core/gpu_fallback.h"
 #include "src/core/units.h"
@@ -50,6 +51,14 @@ std::string functionalName(QMFunctional f)
         case QMFunctional::B3LYP: return "b3lyp";
     }
     return "qm";
+}
+
+// "HF" / "LDA" ... for SCF messages (Claude Generated, WP5)
+std::string scfLabel(QMFunctional f)
+{
+    std::string s = functionalName(f);
+    std::transform(s.begin(), s.end(), s.begin(), ::toupper);
+    return s;
 }
 
 // Element number -> standard symbol. WP1 supports H (1) through Ne (10) only,
@@ -239,8 +248,39 @@ QMEngine::QMEngine(QMFunctional functional, const json& config)
         else if (v.is_string())
             m_scf_allow_unconverged = (v.get<std::string>() == "true" || v.get<std::string>() == "1");
     }
+    // WP4 grid settings (validated when a grid is built; HF does not use them). Claude Generated (Oct 2026).
+    if (config.contains("grid") && config["grid"].is_string()) m_grid_options.level = config["grid"].get<std::string>();
+    if (config.contains("grid_radial") && config["grid_radial"].is_string())
+        m_grid_options.radial = config["grid_radial"].get<std::string>();
+    if (config.contains("grid_partition") && config["grid_partition"].is_string())
+        m_grid_options.partition = config["grid_partition"].get<std::string>();
+    if (config.contains("grid_radii_adjust") && config["grid_radii_adjust"].is_string())
+        m_grid_options.radii_adjust = config["grid_radii_adjust"].get<std::string>();
     if (config.contains("scf_guess") && config["scf_guess"].is_string())
         m_scf_guess = config["scf_guess"].get<std::string>();
+    // WP5 (Claude Generated, Oct 2026): the XC functional follows the method name; -qm.vwn_variant picks the VWN fit
+    // of lda and (WP7) of b3lyp. Default vwn5 for both (ORCA's B3LYP); Gaussian/libxc/PySCF B3LYP is vwn_rpa.
+    if (m_functional == QMFunctional::LDA || m_functional == QMFunctional::B3LYP) {
+        qmxc::VWNVariant v = qmxc::VWNVariant::VWN5;
+        if (config.contains("vwn_variant") && config["vwn_variant"].is_string()
+            && !qmxc::parseVWNVariant(config["vwn_variant"].get<std::string>(), v))
+            throw std::invalid_argument(fmt::format("vwn_variant '{}' is unknown; use vwn5 or vwn_rpa",
+                                                    config["vwn_variant"].get<std::string>()));
+        m_xc = m_functional == QMFunctional::LDA ? qmxc::ldaFunctional(v) : qmxc::b3lypFunctional(v);
+    }
+    // WP6 (Claude Generated, Oct 2026): PBE = GGA_X_PBE + GGA_C_PBE, no parameters of its own
+    if (m_functional == QMFunctional::PBE) m_xc = qmxc::pbeFunctional();
+    if (config.contains("grid_response")) {  // WP8 (Oct 2026)
+        const json& v = config["grid_response"];
+        if (v.is_boolean())
+            m_grid_response = v.get<bool>();
+        else if (v.is_number())
+            m_grid_response = v.get<double>() != 0.0;
+        else if (v.is_string())
+            m_grid_response = (v.get<std::string>() == "true" || v.get<std::string>() == "1");
+    }
+    if (config.contains("xc_density_threshold") && config["xc_density_threshold"].is_number())
+        m_xc_rho_threshold = std::max(0.0, config["xc_density_threshold"].get<double>());
     if (config.contains("scf_early_screening") && config["scf_early_screening"].is_number())
         m_scf_early_screening = config["scf_early_screening"].get<double>();
     if (config.contains("scf_early_switch") && config["scf_early_switch"].is_number())
@@ -353,6 +393,7 @@ bool QMEngine::UpdateMolecule()
     m_gpu_jk_checked = false;
     m_scf_ready = false;
     m_scf_converged = false;
+    invalidateXC();   // WP5: grid and V_xc belong to the old geometry
     ++m_geom_serial;  // a new geometry of the same molecule (density history of -qm.scf_extrapolation)
     return InitialiseMolecule();
 }
@@ -371,6 +412,7 @@ void QMEngine::resetForNewMolecule()
     m_gpu_jk_checked = false;
     m_scf_ready = false;
     m_scf_converged = false;
+    invalidateXC();
     m_gpu_scf_state.reset();
     m_warm_C = Matrix();
     m_warm_atoms.clear();
@@ -385,19 +427,13 @@ double QMEngine::Calculation(bool gradient)
 
     const double e_nn = calculateCoreRepulsionEnergy();
 
-    // Only the HF functional has a real SCF (rung 666, exact exchange only). The
-    // DFT functionals (LDA/PBE/B3LYP) need V_xc (WP4 grid -> WP5-WP7); they stay on
-    // the scaffold (E_nn + 0) with a clear notice rather than a silently wrong HF
-    // energy. Honest per CLAUDE.md.
-    if (m_functional != QMFunctional::HF) {
-        m_total_energy = e_nn;
+    // Every QMFunctional has a real SCF since WP7 (HF WP3, LDA WP5, PBE WP6, B3LYP WP7). A functional without a
+    // density-functional part that is not HF would be a programming error: never return E_nn as an energy.
+    if (m_functional != QMFunctional::HF && !isKohnSham()) {
+        m_total_energy = std::numeric_limits<double>::quiet_NaN();
         m_scf_converged = false;
-        if (CurcumaLogger::get_verbosity() >= 1) {
-            CurcumaLogger::result(fmt::format(
-                "native QM ({}) -- V_xc not yet implemented (WP5-WP7); "
-                "returning nuclear repulsion only", functionalName(m_functional)));
-            CurcumaLogger::energy_abs(m_total_energy, "nuclear repulsion energy");
-        }
+        CurcumaLogger::error(fmt::format("native QM ({}): no exchange-correlation functional set up",
+                                         functionalName(m_functional)));
         return m_total_energy;
     }
 
@@ -419,11 +455,11 @@ double QMEngine::Calculation(bool gradient)
             // unless -scf_allow_unconverged true, which keeps the energy of the last density with a warning.
             if (m_scf_allow_unconverged)
                 CurcumaLogger::warn(fmt::format(
-                    "QM HF SCF did not converge in {} iterations; energy of the last density accepted "
-                    "(-scf_allow_unconverged true)", m_scf_max_iter));
-            else
+                    "QM {} SCF did not converge in {} iterations; energy of the last density accepted "
+                    "(-scf_allow_unconverged true)", scfLabel(m_functional), m_scf_max_iter));
+            else if (!xcSetupFailed())
                 CurcumaLogger::error(fmt::format(
-                    "QM HF SCF did not converge in {} iterations", m_scf_max_iter));
+                    "QM {} SCF did not converge in {} iterations", scfLabel(m_functional), m_scf_max_iter));
         }
         if (riActive()) riReport();
     }
@@ -435,7 +471,11 @@ double QMEngine::Calculation(bool gradient)
     m_gradient_failed = false;
     m_gradient_error.clear();
     if (gradient) {
-        if (m_scf_converged)
+        if (isKohnSham() && xcSetupFailed()) {
+            m_gradient = Matrix::Zero(m_atomcount, 3);
+            m_gradient_failed = true;
+            m_gradient_error = "QM: DFT grid could not be built -- no analytic gradient";
+        } else if (m_scf_converged)
             computeGradient();
         else {
             // Oct 27 2026: a failed gradient, not a zero one (a zero gradient let -opt report convergence)
@@ -446,17 +486,56 @@ double QMEngine::Calculation(bool gradient)
     }
 
     if (CurcumaLogger::get_verbosity() >= 1) {
-        CurcumaLogger::result(fmt::format("native QM -- HF/{}{} SCF {} ({} iterations)",
-            m_basis_name, riActive() ? (m_ri_mode == "j" ? " RI-J" : " RI-JK") : "",
-            m_scf_converged ? "converged" : "NOT converged",
-            m_scf_iterations));
+        // RI label (WP7): a pure density functional only fits J (jk = J with the JKFIT aux); a hybrid with ri j fits
+        // J and keeps the exact exchange; ri jk fits both, as HF.
+        const bool pure_dft = isKohnSham() && m_xc.exact_exchange == 0.0;
+        const char* ri_label = !riActive() ? ""
+            : m_ri_mode == "j"             ? (isKohnSham() && !pure_dft ? " RI-J (exact K)" : " RI-J")
+            : pure_dft                     ? " RI-J (JK aux)"
+                                           : " RI-JK";
+        if (isKohnSham())
+            CurcumaLogger::result(fmt::format("native QM -- {} {}/{}{} grid {} SCF {} ({} iterations)",
+                scfLabel(m_functional), m_xc.label(), m_basis_name, ri_label, m_grid_options.level,
+                m_scf_converged ? "converged" : "NOT converged", m_scf_iterations));
+        else
+            CurcumaLogger::result(fmt::format("native QM -- HF/{}{} SCF {} ({} iterations)",
+                m_basis_name, ri_label, m_scf_converged ? "converged" : "NOT converged", m_scf_iterations));
         if (m_scf_converged && CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::param("E_elec", fmt::format("{:.10f} Eh", m_e_elec));
             CurcumaLogger::param("E_nn  ", fmt::format("{:.10f} Eh", e_nn));
+            if (isKohnSham()) {
+                CurcumaLogger::param("E_xc  ", fmt::format("{:.10f} Eh (E_x {:.10f}, E_c {:.10f})", m_exc, m_exc_x, m_exc_c));
+                CurcumaLogger::param("N_grid", fmt::format("{:.8f} (electrons on the grid, {} exact)", m_exc_nelec,
+                                                           m_num_electrons));
+            }
         }
-        CurcumaLogger::energy_abs(m_total_energy, "total HF energy");
+        CurcumaLogger::energy_abs(m_total_energy, isKohnSham() ? "total " + scfLabel(m_functional) + " energy"
+                                                               : std::string("total HF energy"));
     }
     return m_total_energy;
+}
+
+Matrix QMEngine::atomPositionsBohr() const
+{
+    Matrix pos(m_atomcount, 3);
+    for (int i = 0; i < m_atomcount; ++i)
+        for (int k = 0; k < 3; ++k) pos(i, k) = Length::angstrom_to_bohr(m_geometry(i, k));
+    return pos;
+}
+
+// WP4 (Claude Generated, Oct 2026): molecular DFT grid of the current geometry (qm_grid.cpp).
+bool QMEngine::buildGrid(qmgrid::MolecularGrid& grid, std::string& why) const
+{
+    const auto t0 = std::chrono::steady_clock::now();
+    if (!qmgrid::buildMolecularGrid(m_atoms, atomPositionsBohr(), m_grid_options, grid, why, m_threads)) return false;
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info(fmt::format("QM: DFT grid {} ({} radial x {} angular per atom, {} partition, radii {}): "
+                                        "{} points in {:.1f} ms",
+            m_grid_options.level, grid.n_radial, grid.n_angular, m_grid_options.partition,
+            m_grid_options.radii_adjust, grid.size(),
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count()));
+    }
+    return true;
 }
 
 std::string QMEngine::getMethodNameStr() const
@@ -502,6 +581,7 @@ void QMEngine::buildOneElectronIntegrals()
 
     // New geometry -> invalidate the WP3 active-basis ERI and SCF caches.
     resetRI();  // WP10: fitted tensor belongs to the old geometry
+    invalidateXC();  // WP5: DFT grid, AO evaluator (basis centres) and V_xc of the old geometry
     m_eri_active_ready = false;
     m_direct = qmint::DirectJK();
     m_gpu_jk.reset();
@@ -634,7 +714,10 @@ bool QMEngine::computeGradient()
     // Q-G7/Q-G8: the device gradient parts read one set of tables (cartesian, Hermite tables raised by
     // one on both shells), built once per gradient on the host when at least one part runs there.
     const std::string be1 = gpuGradBackend(m_gpu_grad1e, "gpu_grad1e", "qm_grad1e", m_gpu_grad1e_failed);
-    const std::string be2 = ri ? std::string() : gpuGradBackend(m_gpu_grad, "gpu_grad", "qm_grad", m_gpu_grad_failed);
+    // Kohn-Sham (WP8): the device 2e kernel has the RHF weights, so the 2e part stays on the CPU (no GPU KS gradient).
+    const bool ks = isKohnSham();
+    const double kx = ks ? m_xc.exact_exchange : 1.0;
+    const std::string be2 = (ri || ks) ? std::string() : gpuGradBackend(m_gpu_grad, "gpu_grad", "qm_grad", m_gpu_grad_failed);
     qmint::EriGpuTables tables;
     std::string tab_why;
     bool tables_ok = false;
@@ -665,12 +748,31 @@ bool QMEngine::computeGradient()
         on_device = dev_info.find("device") != std::string::npos;
     } else {
         on_device = !be2.empty() && gpuGradientTwoElectron(tables_ok ? &tables : nullptr, tab_why, be2, Pc, g2, dev_info);
-        if (!on_device) g2 = qmint::gradientTwoElectron(m_gto_basis, Pc, m_atomcount, m_threads);
+        if (!on_device)
+            g2 = ks ? qmint::gradientTwoElectronScaled(m_gto_basis, Pc, kx, m_atomcount, m_threads)
+                    : qmint::gradientTwoElectron(m_gto_basis, Pc, m_atomcount, m_threads);
     }
     const auto t2 = std::chrono::steady_clock::now();
     const Matrix gn = calculateCoreRepulsionGradient();
-    m_gradient = g1 + g2 + gn;
-    m_gradient_parts = { g1, g2, gn };
+    if (!ks) {
+        m_gradient = g1 + g2 + gn;
+        m_gradient_parts = { g1, g2, gn };
+    } else {
+        // WP8 DFT: W above holds the KS orbital energies, so -W dS is the Pulay term of the KS Fock matrix
+        qmcite::ksGradient(m_grid_response);
+        Matrix gxc, gresp;
+        std::string why;
+        if (!xcGradient(gxc, gresp, why)) {
+            m_gradient = Matrix::Zero(m_atomcount, 3);
+            m_gradient_failed = true;
+            m_gradient_error = "XC gradient failed: " + why;
+            CurcumaLogger::error("QM: " + m_gradient_error);
+            return false;
+        }
+        m_gradient = g1 + g2 + gn + gxc + gresp;
+        m_gradient_parts = { g1, g2, gn, gxc, gresp };
+    }
+    const auto t3 = std::chrono::steady_clock::now();
 
     auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
     // Diagnostic (Q-G7/Q-G8): -opt silences the method; CURCUMA_QM_SCF_TRACE=1 (the Q-G4 switch) also
@@ -680,9 +782,17 @@ bool QMEngine::computeGradient()
                    on_device1 ? "device" : "cpu", on_device ? "device" : "cpu", ms(t_tab0, t_tab), ms(t1, t2), ms(t_tab, t1));
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info(fmt::format(
-            "QM: analytic gradient |g| = {:.6e} Eh/Bohr (device tables {:.1f} ms; 1e {:.1f} ms {}; 2e {:.1f} ms {}; {} threads)",
+            "QM: analytic gradient |g| = {:.6e} Eh/Bohr (device tables {:.1f} ms; 1e {:.1f} ms {}; 2e {:.1f} ms {}; {}{} threads)",
             m_gradient.norm(), ms(t_tab0, t_tab), ms(t_tab, t1), on_device1 ? "on the device: " + dev1_info : "CPU",
-            ms(t1, t2), ri ? dev_info : (on_device ? "on the device: " + dev_info : "CPU"), m_threads));
+            ms(t1, t2), ri ? dev_info : (on_device ? "on the device: " + dev_info : "CPU"),
+            ks ? fmt::format("XC {:.1f} ms (grid response {}); ", ms(t2, t3), m_grid_response ? "on" : "off") : std::string(),
+            m_threads));
+        if (ks) {
+            const Eigen::RowVector3d sum = m_gradient.colwise().sum();
+            CurcumaLogger::info(fmt::format("QM: sum of the gradient over atoms ({:.3e}, {:.3e}, {:.3e}) Eh/Bohr "
+                                            "(zero up to rounding with grid response, else the grid error)",
+                                            sum(0), sum(1), sum(2)));
+        }
     }
     return true;
 }

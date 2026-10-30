@@ -9,9 +9,10 @@
  * parameters live in the `qm` module (`-qm.basis`, `-qm.scf_*`). `-dft.*` is still
  * accepted as a legacy scope (merged below `-qm.*` in QMMethod).
  *
- * Status: 1e/2e GTO integrals (WP1/WP2) and the closed-shell HF SCF (WP3) are
- * done; LDA/PBE/B3LYP still return E_nn only (V_xc pending, WP4-WP7); no
- * analytic gradient yet (WP8).
+ * Status: 1e/2e GTO integrals (WP1/WP2), the closed-shell HF SCF (WP3), the DFT
+ * grid (WP4) and the closed-shell Kohn-Sham SCF for LDA (WP5, Slater + VWN5/VWN-RPA)
+ * , PBE (WP6, GGA) and the hybrid B3LYP (WP7) are done; analytic gradient for HF
+ * (WP8, Sep 2026) and for LDA/PBE/B3LYP incl. the grid response (WP8 DFT, Oct 2026).
  *
  * Ported from xcDFT (TCCM winter school 2019: DFT), src/<file>.f90
  * Second reference: ORCA 6.1 (def2-SVP).
@@ -36,6 +37,8 @@
 
 #include "basissetparser.hpp"  // BasisSetParser::parseBasisSetFile / createGTOFromBasis (WP1)
 #include "qm_integrals.hpp"   // qmint 1e/2e integral kernels (WP1/WP2)
+#include "qm_grid.h"         // qmgrid molecular DFT grid + AO values on points (WP4)
+#include "qm_xc.h"           // qmxc exchange-correlation functionals and V_xc (WP5)
 #include "qm_driver.h"
 
 #include <string>
@@ -65,7 +68,7 @@ enum class QMFunctional {
     HF,    ///< Hartree-Fock (rung 666, exact exchange only) -- WP3
     LDA,   ///< Slater-Dirac + VWN5 correlation -- WP5
     PBE,   ///< PBE-GGA (+ grad rho, rung 2) -- WP6
-    B3LYP  ///< B3LYP hybrid (+ exact exchange, rung 4) -- WP7
+    B3LYP  ///< B3LYP hybrid (0.2 exact exchange, B88 + LYP, VWN per -qm.vwn_variant) -- WP7
 };
 
 // Claude Generated: qm parameter module (functional intentionally absent -- set by method name).
@@ -74,8 +77,29 @@ BEGIN_PARAMETER_DEFINITION(qm)
     PARAM(basis, String, "def2-SVP",
           "Basis set (Turbomole/BSE format file, e.g. def2-SVP).",
           "Basis", {})
+    // WP4 (Claude Generated, Oct 2026): molecular quadrature grid, implementation in qm_grid.cpp
     PARAM(grid, String, "sg1",
-          "DFT quadrature grid (Euler-Maclaurin x Lebedev x Becke, WP4).",
+          "DFT quadrature grid (radial x Lebedev per atom, Becke partition, no pruning): sg0 (23 x 170) | sg1 (50 x 194) | sg2 (75 x 302) | sg3 (99 x 590) | <n_radial>x<n_angular> (e.g. 75x302, angular count must be a Lebedev size). The SG-n names only take over the point counts; the grids are unpruned, not the published SG-n grids. Used by the DFT functionals (WP5+); HF ignores it.",
+          "Grid", {})
+    // WP5 (Claude Generated, Oct 2026): LDA exchange-correlation, implementation in qm_xc.cpp
+    PARAM(vwn_variant, String, "vwn5",
+          "VWN correlation of -method lda and -method b3lyp (closed shell, paramagnetic fit only): vwn5 (Monte-Carlo fit, VWN functional V; libxc LDA_C_VWN, PySCF SVWN / 'LDA,VWN', ORCA LSD / VWN5; B3LYP as ORCA 'B3LYP' and PySCF 'B3LYP5'; default) | vwn_rpa (RPA fit; libxc LDA_C_VWN_RPA, PySCF VWN3, ORCA VWN3; B3LYP as Gaussian, libxc/PySCF 'B3LYP' and ORCA 'B3LYP/G'; alias vwn3). The variant is printed with the result.",
+          "XC", {})
+    PARAM(xc_density_threshold, Double, 1.0e-12,
+          "Grid points whose density rho (electrons/Bohr^3) is below this value are left out of E_xc and V_xc, for every exchange and correlation term (LDA and GGA). 0 = every point with rho > 0. libxc drops rho < 1e-15 (PBE exchange) / 1e-12 (PBE correlation) instead, see docs/DFT_ROADMAP/WP6_pbe_gga.md and WP7_b3lyp_hybrid.md.",
+          "XC", {})
+    // WP8 (Claude Generated, Oct 2026): grid response of the Kohn-Sham nuclear gradient
+    PARAM(grid_response, Bool, true,
+          "Kohn-Sham gradient (lda/pbe/b3lyp): true = include the derivative of the moving grid (points travel with their atom, Becke weight derivative; as ORCA/Q-Chem), the exact derivative of the energy curcuma computes, translationally invariant | false = basis-function part only (PySCF grad_response=False default); the error is the grid error of the gradient (measured in docs/DFT_ROADMAP/WP8_analytischer_gradient.md).",
+          "XC", {})
+    PARAM(grid_radial, String, "treutler",
+          "Radial quadrature of the DFT grid: treutler (Treutler-Ahlrichs M4 with element-specific xi, as PySCF radi.treutler) | euler_maclaurin (Murray-Handy-Laming, r = R (i/(N+1-i))^2 with the Bragg radius R, as xcDFT).",
+          "Grid", {})
+    PARAM(grid_partition, String, "becke",
+          "Atomic partition of the DFT grid: becke (Becke 1988, three iterations of f(x) = 3/2 x - 1/2 x^3) | stratmann (Stratmann-Scuseria-Frisch 1996 polynomial, a = 0.64, without their screening).",
+          "Grid", {})
+    PARAM(grid_radii_adjust, String, "treutler",
+          "Atomic size adjustment of the grid partition (PySCF formula a_ij = 1/4 (r_j/r_i - r_i/r_j), clipped to +-1/2): treutler (r = sqrt(Bragg radius), PySCF default) | becke (r = Bragg radius) | none.",
           "Grid", {})
     PARAM(threads, Int, 1,
           "Number of OpenMP threads for the ERI build and the J/K (Fock) builds.",
@@ -238,8 +262,9 @@ END_PARAMETER_DEFINITION
  * @brief Native ab-initio QM engine: Gaussian basis, 1e/2e integrals, RHF SCF
  *
  * Inherits QMDriver (matrix-based QM base) exactly like NDDO. Calculation()
- * runs the closed-shell HF SCF for QMFunctional::HF; the DFT functionals
- * return E_nn only until V_xc exists (WP5-WP7). hasGradient() is false until WP8.
+ * runs the closed-shell HF SCF for QMFunctional::HF and the closed-shell
+ * Kohn-Sham SCF for QMFunctional::LDA (WP5), ::PBE (WP6) and the hybrid ::B3LYP (WP7)
+ * (same loop, F = H + J + V_xc - (a_x/2) K). hasGradient() is true for HF and the KS functionals (WP8).
  *
  * Claude Generated: Native KS-DFT engine scaffold, renamed QMEngine Sep 2026
  */
@@ -267,13 +292,26 @@ public:
     /// -qm.scf_gradient_threshold_tight (MP2/CCSD energies are first order in the orbital error).
     void setTightOrbitals(bool on) { m_scf_tight_orbitals = on; }
 
-    /// Analytic nuclear gradient exists for the closed-shell HF level (WP8, Sep 2026).
-    bool hasGradient() const override { return m_functional == QMFunctional::HF; }
+    /// Analytic nuclear gradient: closed-shell HF (WP8, Sep 2026) and Kohn-Sham lda/pbe/b3lyp (WP8 DFT, Oct 2026:
+    /// HF-like terms with a_x-weighted exchange + XC basis part + optional grid response, -qm.grid_response).
+    bool hasGradient() const override { return m_functional == QMFunctional::HF || isKohnSham(); }
+    /// True for a Kohn-Sham functional (WP5: lda, WP6: pbe, WP7: b3lyp). Claude Generated (Oct 2026).
+    bool isKohnSham() const { return m_xc.hasXC(); }
+    /// The XC functional of this engine (a_x = 1 and no density functional for HF).
+    const qmxc::XCFunctional& xcFunctional() const { return m_xc; }
+    /// E_xc, its exchange and correlation parts and the grid electron count of the last converged KS SCF (Eh).
+    double xcEnergy() const { return m_exc; }
+    double xcExchangeEnergy() const { return m_exc_x; }
+    double xcCorrelationEnergy() const { return m_exc_c; }
+    double xcGridElectrons() const { return m_exc_nelec; }
+    /// True when the DFT grid of the current geometry could not be built (invalid -qm.grid*); reason printed.
+    bool xcSetupFailed() const { return isKohnSham() && m_xc_failed; }
     /// dE/dR in Eh/BOHR (natoms x 3), valid after Calculation(true) with a converged
     /// HF SCF. NOTE the unit: the ComputationalMethod contract is Eh/Angstrom, the
     /// wrappers convert (Known Issue #28).
     const Matrix& gradientBohr() const { return m_gradient; }
-    /// Last gradient split into its parts (Eh/Bohr): {one-electron, two-electron, E_nn}.
+    /// Last gradient split into its parts (Eh/Bohr): {one-electron, two-electron, E_nn}; Kohn-Sham adds
+    /// {XC basis part, grid response (point motion + weight derivative)} (WP8, the last is zero without grid response).
     const std::vector<Matrix>& gradientParts() const { return m_gradient_parts; }
     /// True when the last gradient request could not be served (RI gradient error); the reason is in
     /// gradientError(). The gradient is then zero and must not be used. Claude Generated (Oct 2026).
@@ -293,6 +331,24 @@ public:
     int nbf() const { return m_nbf; }
     int numElectrons() const { return m_num_electrons; }
     const std::vector<GTO::Orbital>& gtoBasis() const { return m_gto_basis; }
+    /// Cartesian -> active basis transform (ncart x nbf; empty: active basis = cartesian). Valid after
+    /// InitialiseMolecule(); hand it to qmgrid::AOEvaluator together with gtoBasis(). Claude Generated (WP4).
+    const Matrix& sphericalTransform() const { return m_Q; }
+    /// Atomic numbers and positions in Bohr (natoms x 3) of the current geometry. Claude Generated (WP4).
+    const std::vector<int>& atomicNumbers() const { return m_atoms; }
+    Matrix atomPositionsBohr() const;
+    /// Grid settings from -qm.grid, -qm.grid_radial, -qm.grid_partition, -qm.grid_radii_adjust (WP4).
+    const qmgrid::GridOptions& gridOptions() const { return m_grid_options; }
+    /// Molecular DFT grid of the current geometry with gridOptions() (-qm.threads for the partition).
+    /// False + reason for an invalid setting. Claude Generated (WP4); the engine does not cache it (WP5 decides).
+    bool buildGrid(qmgrid::MolecularGrid& grid, std::string& why) const;
+    /// Validation hook (WP8, Claude Generated, Oct 2026): use `grid` (points, weights, owners) for every later V_xc
+    /// and XC gradient of this engine instead of the grid of the current geometry, i.e. a grid fixed in space. A
+    /// finite difference of the energy with a frozen grid is the gradient WITHOUT grid response; without the hook
+    /// the grid moves with the atoms and the finite difference is the gradient WITH grid response. Not a user option.
+    void freezeXCGrid(const qmgrid::MolecularGrid& grid);
+    /// -qm.grid_response (WP8): true when the XC gradient includes the derivative of the moving grid.
+    bool gridResponse() const { return m_grid_response; }
 
     // WP2 4-centre ERI (chemists' (mu nu | lam sig)). Built LAZILY on first
     // request -- NOT built by InitialiseMolecule/Calculation, so the scaffold
@@ -304,9 +360,8 @@ public:
     const qmint::ERITensor& cartesianERI() const;
     bool eriReady() const { return m_eri_ready; }
 
-    // WP3 SCF state (valid after Calculation() for QMFunctional::HF). Getters are
-    // for the wrapper / dumper. Non-HF functionals keep the WP1 scaffold and report
-    // m_scf_converged == false (V_xc pending WP5-WP7).
+    // WP3 SCF state (valid after Calculation() for HF and the Kohn-Sham functionals). Getters are
+    // for the wrapper / dumper.
     bool scfConverged() const { return m_scf_converged; }
     int scfIterations() const { return m_scf_iterations; }
     const Matrix& density() const { return m_density; }
@@ -354,6 +409,39 @@ private:
     bool m_integrals_ready = false;
     Matrix m_T, m_V;                                 // kinetic + nuclear attraction (final basis)
 
+    // WP4: DFT grid settings (qm_grid.h)
+    qmgrid::GridOptions m_grid_options;
+
+    // WP5 (Claude Generated, Oct 2026): Kohn-Sham XC. The grid and the AO evaluator are built once per geometry
+    // (ensureXCGrid) and dropped in buildOneElectronIntegrals / UpdateMolecule / resetForNewMolecule; the last
+    // V_xc is cached together with the density it belongs to (bitwise comparison) so that the Fock build and the
+    // energy of one iteration share one grid pass.
+    qmxc::XCFunctional m_xc;                 // a_x = 1, no XC for HF
+    double m_xc_rho_threshold = 1.0e-12;     // -qm.xc_density_threshold
+    mutable qmgrid::MolecularGrid m_xc_grid;
+    bool m_grid_response = true;             // -qm.grid_response (WP8)
+    std::shared_ptr<const qmgrid::MolecularGrid> m_xc_frozen_grid;  // freezeXCGrid() validation hook (WP8)
+    mutable qmgrid::AOEvaluator m_xc_ao;
+    mutable bool m_xc_grid_ready = false;
+    mutable bool m_xc_failed = false;
+    mutable Matrix m_xc_last_P;
+    mutable qmxc::XCResult m_xc_last;
+    mutable bool m_xc_last_valid = false;
+    mutable long m_xc_builds = 0;
+    mutable double m_xc_ms = 0.0;
+    double m_exc = 0.0, m_exc_x = 0.0, m_exc_c = 0.0, m_exc_nelec = 0.0;
+    void invalidateXC() const;               ///< new geometry / molecule: grid, AO evaluator, V_xc cache
+    bool ensureXCGrid() const;               ///< grid of the current geometry; false + error printed
+    const qmxc::XCResult& xcFor(const Matrix& P) const;  ///< V_xc, E_xc of P (cached for the last P)
+    /// Two-electron matrices of the SCF: J and K for HF (buildJK); for a pure density functional (a_x = 0) J only
+    /// and K = 0 (no exchange build with the stored tensor or RI; integral-direct still digests K, see qm_scf.cpp).
+    void buildJKForSCF(const Matrix& P, Matrix& J, Matrix& K) const;
+    void buildCoulombOnly(const Matrix& P, Matrix& J) const;
+    /// F = H + J - (a_x/2) K + V_xc[P]  (HF: H + J - K/2, bitwise the expression before WP5).
+    Matrix composeFock(const Matrix& P, const Matrix& J, const Matrix& K) const;
+    /// E_elec of P with its Fock matrix F = composeFock(P, ...): 1/2 Tr(P(H+F)) - 1/2 Tr(P V_xc) + E_xc.
+    double scfEnergy(const Matrix& P, const Matrix& F) const;
+
     // WP2: 4-centre ERI (cartesian), built lazily on first cartesianERI() call.
     // Mutable so the const getter can populate the cache.
     mutable qmint::ERITensor m_eri_cart;
@@ -363,6 +451,8 @@ private:
     std::vector<Matrix> m_gradient_parts;
     bool computeGradient();  ///< fills m_gradient (Eh/Bohr) from the converged SCF
     Matrix calculateCoreRepulsionGradient() const;  ///< dE_nn/dR, Eh/Bohr
+    /// WP8 (Oct 2026): XC part of the KS gradient (Eh/Bohr): basis part and grid response (zero when off).
+    bool xcGradient(Matrix& g_basis, Matrix& g_response, std::string& why) const;
 
     // WP3: SCF state. The SCF runs in the active basis (m_nbf, spherical 5d by
     // default or cartesian when m_cartesian_d). The active-basis ERI is the
@@ -583,7 +673,7 @@ private:
                             bool direct, double loop_ms, double fock_ms, double eig_ms, const std::string& device_stats,
                             const Matrix* J_in = nullptr, const Matrix* K_in = nullptr);
 
-    // Fock build in the active basis: F = H + 2 J(P) - K(P) (closed-shell RHF).
+    // Fock build in the active basis: F = H + J(P) - 1/2 K(P) (closed-shell RHF); KS: composeFock.
     // J_mu_nu = sum P_lam_sig (mu nu | lam sig); K_mu_nu = sum P_lam_sig (mu lam | nu sig).
     Matrix buildFock(const Matrix& P) const;
     // J(P), K(P): exact path or, with -qm.ri j|jk, the density fit (dispatcher in qm_ri.cpp).

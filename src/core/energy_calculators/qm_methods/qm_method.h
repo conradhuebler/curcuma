@@ -6,7 +6,7 @@
  * (hf/lda/pbe/b3lyp) is passed as a QMFunctional enum set by the method name in
  * MethodFactory, not as a parameter. Engine settings come from the `qm` scope
  * (`-qm.basis`, `-qm.scf_*`); the pre-Sep-2026 `dft` scope is still merged.
- * Analytic gradient: `hf` only (WP8, Sep 2026), returned in Eh/Angstrom.
+ * Analytic gradient: `hf` (WP8, Sep 2026) and `lda`/`pbe`/`b3lyp` (WP8 DFT, Oct 2026), returned in Eh/Angstrom.
  *
  * Claude Generated: Native KS-DFT method wrapper for MethodFactory integration,
  *                   renamed DFTMethod -> QMMethod (Sep 2026)
@@ -39,12 +39,12 @@ public:
     std::string getMethodName() const override { return m_method_name; }
     bool isThreadSafe() const override { return true; }
 
-    /// Analytic gradient for `hf` (WP8, Sep 2026); lda/pbe/b3lyp have none yet.
+    /// Analytic gradient for `hf` (WP8, Sep 2026) and the Kohn-Sham functionals (WP8 DFT, Oct 2026).
     bool hasGradient() const override { return m_engine->hasGradient(); }
     void setThreadCount(int threads) override { (void)threads; }
     void setParameters(const json& params) override { (void)params; }
     json getParameters() const override { return json{}; }
-    /// WP10: a gradient request with -qm.ri j|jk is an error (no RI gradient exists).
+    /// WP10: -qm.ri j|jk has an RI gradient since Oct 2026; a gradient that cannot be formed is an error.
     bool hasError() const override { return m_has_error; }
     std::string getErrorMessage() const override { return m_error_message; }
 

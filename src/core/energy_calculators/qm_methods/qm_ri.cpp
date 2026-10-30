@@ -2297,15 +2297,6 @@ void upperSolveRowsLT(const Eigen::MatrixXd& L, Matrix& T, int threads)
     }
 }
 
-int threadId()
-{
-#ifdef _OPENMP
-    return omp_get_thread_num();
-#else
-    return 0;
-#endif
-}
-
 }  // namespace
 
 void RIJK::applyFitTranspose(Matrix& X) const
@@ -2325,7 +2316,7 @@ void RIJK::applyFitTranspose(Matrix& X) const
     throw std::logic_error("RIJK::applyFitTranspose: no metric factor (setup not run)");
 }
 
-bool RIJK::gradientDensities(const Matrix& P, Eigen::VectorXd& c, Matrix& G, Eigen::MatrixXd& M2, std::string& why) const
+bool RIJK::gradientDensities(const Matrix& P, double kx, Eigen::VectorXd& c, Matrix& G, Eigen::MatrixXd& M2, std::string& why) const
 {
     const int n = m_n, N = m_naux, threads = std::max(1, m_opt.threads);
     const int rows = (int)m_T.rows();  // mode jk: nfit (B), mode j: naux (T_n)
@@ -2354,7 +2345,7 @@ bool RIJK::gradientDensities(const Matrix& P, Eigen::VectorXd& c, Matrix& G, Eig
     c = m_dn.cwiseProduct(cn);  // raw auxiliary basis
     M2 = 0.5 * c * c.transpose();
     G.resize(0, 0);
-    if (m_opt.mode == "j") return true;
+    if (m_opt.mode == "j" || kx == 0.0) return true;  // Coulomb only (RI-J, or a pure density functional)
 
     const double need_mb = (double)N * ncol * 8.0 / 1.0e6;
     if (need_mb + tensorMB() > m_opt.max_memory_mb) {
@@ -2448,7 +2439,7 @@ bool RIJK::gradientDensities(const Matrix& P, Eigen::VectorXd& c, Matrix& G, Eig
             // G^P = c_P P - 1/2 D_PP U V^T (symmetric: packed lower triangle; P symmetrised, which changes
             // nothing for an exactly symmetric density)
             double* y = G.data() + (size_t)Pi * ncol;
-            const double cp = c(Pi), dp = -0.5 * m_dn(Pi);
+            const double cp = c(Pi), dp = -0.5 * kx * m_dn(Pi);  // kx: WP8 hybrid (1 for RHF)
             for (int m = 0; m < n; ++m) {
                 const double* um = &U[(size_t)m * r];
                 double* ym = y + (size_t)m * (m + 1) / 2;
@@ -2467,7 +2458,7 @@ bool RIJK::gradientDensities(const Matrix& P, Eigen::VectorXd& c, Matrix& G, Eig
     Matrix Zt = Z.transpose();
     applyFitTranspose(Zt);  // N x N
     for (int Pi = 0; Pi < N; ++Pi)
-        for (int Qi = 0; Qi < N; ++Qi) M2(Pi, Qi) -= 0.25 * m_dn(Pi) * m_dn(Qi) * 0.5 * (Zt(Pi, Qi) + Zt(Qi, Pi));
+        for (int Qi = 0; Qi < N; ++Qi) M2(Pi, Qi) -= kx * 0.25 * m_dn(Pi) * m_dn(Qi) * 0.5 * (Zt(Pi, Qi) + Zt(Qi, Pi));
     return true;
 }
 
@@ -2557,13 +2548,14 @@ Matrix RIJK::threeIndexGradient(const std::vector<GTO::Orbital>& basis, const Ma
     const double thr = m_opt.screening * 1.0e-2;
     const bool haveSchwarz = (int)m_osch.size() == npairs && (int)m_asch.size() == naux_sh;
     const Matrix Pc = P;
-    std::vector<Matrix> gt(threads, Matrix::Zero(natoms, 3));
-#pragma omp parallel num_threads(threads)
-    {
-        Matrix& g = gt[threadId()];
+    // Oct 2026 (WP8): fixed round-robin chunks with own accumulators, added in order (thread-count independent)
+    const int nchunk = std::max(1, std::min(256, npairs));
+    std::vector<Matrix> gt(nchunk, Matrix::Zero(natoms, 3));
+#pragma omp parallel for schedule(dynamic, 1) num_threads(threads)
+    for (int ch = 0; ch < nchunk; ++ch) {
+        Matrix& g = gt[ch];
         std::vector<double> blk, tmp;
-#pragma omp for schedule(dynamic)
-        for (int k = 0; k < npairs; ++k) {
+        for (int k = ch; k < npairs; k += nchunk) {
             const int A = gs.oidx[k].first, B = gs.oidx[k].second;
             const int aA = gs.osh[A].atom, aB = gs.osh[B].atom;
             Pair braR;
@@ -2588,7 +2580,7 @@ Matrix RIJK::threeIndexGradient(const std::vector<GTO::Orbital>& basis, const Ma
         }
     }
     Matrix grad = Matrix::Zero(natoms, 3);
-    for (int t = 0; t < threads; ++t) grad += gt[t];
+    for (int t = 0; t < nchunk; ++t) grad += gt[t];
     return grad;
 }
 
@@ -2758,13 +2750,13 @@ Matrix RIJK::metricGradient(const Eigen::MatrixXd& M2, int natoms) const
         apairs.push_back(makePair(m_aux[s], units[s]));
         apairsR.push_back(makePairRaised(m_aux[s], units[s]));
     }
-    std::vector<Matrix> gt(threads, Matrix::Zero(natoms, 3));
-#pragma omp parallel num_threads(threads)
-    {
-        Matrix& g = gt[threadId()];
+    const int nchunk = std::max(1, std::min(256, ns));  // Oct 2026 (WP8): thread-count independent sum
+    std::vector<Matrix> gt(nchunk, Matrix::Zero(natoms, 3));
+#pragma omp parallel for schedule(dynamic, 1) num_threads(threads)
+    for (int ch = 0; ch < nchunk; ++ch) {
+        Matrix& g = gt[ch];
         std::vector<double> blk, tmp;
-#pragma omp for schedule(dynamic)
-        for (int cs = 0; cs < ns; ++cs) {
+        for (int cs = ch; cs < ns; cs += nchunk) {
             const int ac = m_aux[cs].atom;
             for (int ds = cs + 1; ds < ns; ++ds) {
                 const int ad = m_aux[ds].atom;
@@ -2787,7 +2779,7 @@ Matrix RIJK::metricGradient(const Eigen::MatrixXd& M2, int natoms) const
         }
     }
     Matrix grad = Matrix::Zero(natoms, 3);
-    for (int t = 0; t < threads; ++t) grad += gt[t];
+    for (int t = 0; t < nchunk; ++t) grad += gt[t];
     return grad;
 }
 
@@ -3021,7 +3013,9 @@ bool QMEngine::riGradientTwoElectron(const Matrix& Pc, Matrix& g2, std::string& 
     Matrix G;
     Eigen::MatrixXd M2;
     const Matrix* Q = m_Q.size() != 0 ? &m_Q : nullptr;
-    if (!ri->gradientDensities(m_density, c, G, M2, why)) {
+    // WP8 (Oct 2026): Kohn-Sham weights the exchange part with a_x (0 for LDA/GGA, 0.2 for B3LYP)
+    const double kx = isKohnSham() ? m_xc.exact_exchange : 1.0;
+    if (!ri->gradientDensities(m_density, kx, c, G, M2, why)) {
         info = "RI gradient not possible: " + why;
         return false;
     }
@@ -3055,9 +3049,12 @@ bool QMEngine::riGradientTwoElectron(const Matrix& Pc, Matrix& g2, std::string& 
     const double t_2c = msGlue(t2), t_dens = std::chrono::duration<double, std::milli>(t1 - t0).count();
     const double t_ri = msGlue(t0);
     double t_k = 0.0;
-    if (m_ri_mode == "j") {
+    if (m_ri_mode == "j" && kx != 0.0) {
         const auto tk = std::chrono::steady_clock::now();
-        g += qmint::gradientTwoElectronExchange(m_gto_basis, Pc, m_atomcount, m_threads);
+        if (kx == 1.0)
+            g += qmint::gradientTwoElectronExchange(m_gto_basis, Pc, m_atomcount, m_threads);
+        else
+            g += kx * qmint::gradientTwoElectronExchange(m_gto_basis, Pc, m_atomcount, m_threads);
         t_k = msGlue(tk);
     }
     g2 = g;

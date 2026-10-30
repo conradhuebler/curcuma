@@ -41,6 +41,7 @@
 
 #include "qm_citations.h"
 #include "qm_engine.h"
+#include "qm_ri.h"  // RIJK::coulomb (WP5 J-only build)
 
 #include <cstdlib>
 #include "src/core/energy_calculators/gpu_plugin.h"
@@ -601,10 +602,15 @@ bool QMEngine::runSCF()
     // neither (no 4-index tensor, full builds only); RI-J keeps the exact path for the exchange.
     const bool ri_jk = riActive() && m_ri_mode == "jk";
     if (riActive() && !ensureRI()) return false;
+    // WP5: Kohn-Sham functional -> grid of this geometry (built once, cached until the geometry changes)
+    if (isKohnSham()) {
+        if (!ensureXCGrid()) return false;
+        qmcite::kohnSham(m_xc, m_grid_options.radial == "treutler");
+    }
     const bool direct = !ri_jk && useDirectSCF();
     if (direct) qmcite::directScf();
     if (m_scf_mode == "adiis") CitationRegistry::cite("adiis");
-    if (!ri_jk && !direct && !ensureGpuJK()) {
+    if (!ri_jk && !direct && !ensureGpuJK()) {  // KS: J only, from the same tensor
         const qmint::ERITensor& eri = eriActive();  // builds (and caches) on first call
         if (eri.n() != n) {
             CurcumaLogger::error(fmt::format(
@@ -628,7 +634,8 @@ bool QMEngine::runSCF()
 
     // Q-G4: device-resident loop (same iterations on device matrices); -1 = not usable or a
     // device error, then the host loop below runs from the same start density.
-    if (!riActive() && gpuRequested() && m_gpu_scf != "off" && m_gpu_scf != "false" && !m_gpu_scf_failed) {
+    // KS (WP5): the device loop has no V_xc, the host loop runs (J/K may still come from the device).
+    if (!riActive() && !isKohnSham() && gpuRequested() && m_gpu_scf != "off" && m_gpu_scf != "false" && !m_gpu_scf_failed) {
         const Matrix guess = m_density;
         const int r = runSCFDevice(n_occ, direct, use_diis, damping);
         if (r >= 0) return r == 1;
@@ -664,16 +671,17 @@ bool QMEngine::runSCF()
         m_direct_fp32_now = cadence.fp32;
         if (cadence.fp32) ++cadence.fp32_builds;
         if (full) {
-            buildJK(P, J_acc, K_acc);
+            buildJKForSCF(P, J_acc, K_acc);
         } else {
             Matrix dJ, dK;
-            buildJK(P - P_ref, dJ, dK);
+            buildJKForSCF(P - P_ref, dJ, dK);
             J_acc += dJ;
             K_acc += dK;
         }
         cadence.built(full);
         P_ref = P;
-        return m_H + J_acc - 0.5 * K_acc;
+        // HF: H + J - K/2; KS: + V_xc[P] - (a_x/2) K (V_xc is not linear in P: always from the full density)
+        return composeFock(P, J_acc, K_acc);
     };
 
     for (int iter = 0; iter < m_scf_max_iter; ++iter) {
@@ -714,7 +722,7 @@ bool QMEngine::runSCF()
             grad_norm = HostDiisStore::orbitalGradient(fock, m_density, m_S, m_X, m_threads).norm();
         }
         // energy of the density this Fock matrix was built from (variational, unlike Tr(P_new (H + F)))
-        conv.observe(0.5 * m_density.cwiseProduct(m_H + fock).sum(), grad_norm);
+        conv.observe(scfEnergy(m_density, fock), grad_norm);
 
         // Verified stop: this full build of P_n meets every condition -> P_n, F(P_n) and the orbitals C_(n-1)
         // that P_n was built from are the result; no further diagonalisation and no final build.
@@ -809,7 +817,7 @@ bool QMEngine::runSCF()
     m_direct_thr_now = -1.0;
     m_direct_fp32_now = false;
     m_fock = buildFock(m_density);
-    m_e_elec = 0.5 * m_density.cwiseProduct(m_H + m_fock).sum();
+    m_e_elec = scfEnergy(m_density, m_fock);
     return false;
 }
 
@@ -825,9 +833,9 @@ void QMEngine::finishConvergedSCF(const Matrix& C, const Vector& eps, int n_occ,
         J = *J_in;  // verified stop: the loop's last (full, exact) build of m_density
         K = *K_in;
     } else {
-        buildJK(m_density, J, K);
+        buildJKForSCF(m_density, J, K);
     }
-    m_fock = m_H + J - 0.5 * K;
+    m_fock = composeFock(m_density, J, K);
     m_scf_converged = true;
     m_scf_tight_done = m_scf_tight_now;
 
@@ -835,8 +843,16 @@ void QMEngine::finishConvergedSCF(const Matrix& C, const Vector& eps, int n_occ,
     m_et = m_density.cwiseProduct(m_T).sum();
     m_ev = m_density.cwiseProduct(m_V).sum();
     m_ej = 0.5 * m_density.cwiseProduct(J).sum();
-    m_ex = -0.25 * m_density.cwiseProduct(K).sum();
-    m_e_elec = 0.5 * m_density.cwiseProduct(m_H + m_fock).sum();
+    m_ex = isKohnSham() ? -0.25 * m_xc.exact_exchange * m_density.cwiseProduct(K).sum()
+                        : -0.25 * m_density.cwiseProduct(K).sum();
+    m_e_elec = scfEnergy(m_density, m_fock);
+    if (isKohnSham()) {
+        const qmxc::XCResult& xc = xcFor(m_density);
+        m_exc = xc.exc;
+        m_exc_x = xc.ex;
+        m_exc_c = xc.ec;
+        m_exc_nelec = xc.nelec;
+    }
 
     // Store the MO spectrum for wrapper compatibility (QMDriver slots).
     m_mo = C;
@@ -867,8 +883,8 @@ void QMEngine::finishConvergedSCF(const Matrix& C, const Vector& eps, int n_occ,
 
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::success(fmt::format(
-            "QM HF SCF converged in {} iterations (dP = {:.3e}{}, start: {}{})",
-            iterations, delta_P,
+            "QM {} SCF converged in {} iterations (dP = {:.3e}{}, start: {}{})",
+            isKohnSham() ? "KS-" + m_xc.label().substr(0, m_xc.label().find(' ')) : std::string("HF"), iterations, delta_P,
             m_scf_convergence == "density"
                 ? std::string()
                 : fmt::format(", dE = {:.1e}, |g| = {:.1e} < {:.0e}", m_scf_last_dE, m_scf_last_grad,
@@ -882,6 +898,10 @@ void QMEngine::finishConvergedSCF(const Matrix& C, const Vector& eps, int n_occ,
                    : std::string()));
         if (!device_stats.empty()) CurcumaLogger::info("QM: device SCF: " + device_stats);
         if (m_gpu_djk) CurcumaLogger::info("QM: device direct J/K: " + m_gpu_djk->stats());
+        if (isKohnSham())
+            CurcumaLogger::info(fmt::format("QM: V_xc builds {} ({:.1f} ms; grid {} points, {} above rho {:.0e} in the "
+                                            "last build; {} threads)", m_xc_builds, m_xc_ms, m_xc_grid.size(),
+                                            m_xc_last.points_used, m_xc_rho_threshold, m_threads));
     }
 }
 
@@ -1366,8 +1386,183 @@ Matrix QMEngine::buildInitialGuess() const
 Matrix QMEngine::buildFock(const Matrix& P) const
 {
     Matrix J, K;
-    buildJK(P, J, K);
-    return m_H + J - 0.5 * K;
+    buildJKForSCF(P, J, K);
+    return composeFock(P, J, K);
+}
+
+// =================================================================================
+// WP5 Kohn-Sham pieces (Claude Generated, Oct 2026): F = H + J - (a_x/2) K + V_xc, E with E_xc
+// =================================================================================
+
+void QMEngine::invalidateXC() const
+{
+    m_xc_grid_ready = false;
+    m_xc_grid = qmgrid::MolecularGrid();
+    m_xc_ao = qmgrid::AOEvaluator();
+    m_xc_last_valid = false;
+    m_xc_last_P = Matrix();
+    m_xc_failed = false;
+}
+
+bool QMEngine::ensureXCGrid() const
+{
+    if (m_xc_grid_ready) return true;
+    std::string why;
+    if (m_xc_frozen_grid) {
+        m_xc_grid = *m_xc_frozen_grid;  // WP8 validation hook: grid fixed in space
+    } else if (!buildGrid(m_xc_grid, why)) {
+        m_xc_failed = true;
+        CurcumaLogger::error("QM: DFT grid could not be built: " + why);
+        return false;
+    }
+    m_xc_ao = qmgrid::AOEvaluator(m_gto_basis, m_Q);  // AO values in the active basis (basis centres of this geometry)
+    m_xc_grid_ready = true;
+    m_xc_last_valid = false;
+    m_xc_builds = 0;
+    m_xc_ms = 0.0;
+    return true;
+}
+
+// WP8 (Claude Generated, Oct 2026): validation hook, grid fixed in space (see qm_engine.h).
+void QMEngine::freezeXCGrid(const qmgrid::MolecularGrid& grid)
+{
+    m_xc_frozen_grid = std::make_shared<const qmgrid::MolecularGrid>(grid);
+    invalidateXC();
+}
+
+// WP8 (Claude Generated, Oct 2026): XC part of the Kohn-Sham nuclear gradient of the converged density (Eh/Bohr).
+//   g_basis    = the basis-function part (qmxc::buildXCGradient), the whole XC gradient of a grid fixed in space;
+//   g_response = with -qm.grid_response: point motion (qmxc XCGradient::points) + Becke weight derivative
+//                (qmgrid::gridWeightGradient), so that g_basis + g_response is the derivative of the energy whose
+//                grid moves with the atoms (the energy curcuma reports); zero otherwise.
+bool QMEngine::xcGradient(Matrix& g_basis, Matrix& g_response, std::string& why) const
+{
+    g_response = Matrix::Zero(m_atomcount, 3);
+    if (!ensureXCGrid()) {
+        why = "no DFT grid";
+        g_basis = Matrix::Zero(m_atomcount, 3);
+        return false;
+    }
+    std::vector<int> bf_atom(m_nbf, 0);
+    if (m_Q.size() != 0) {
+        for (int a = 0; a < m_nbf; ++a)
+            for (int c = 0; c < m_Q.rows(); ++c)
+                if (m_Q(c, a) != 0.0) {
+                    bf_atom[a] = m_gto_basis[c].atom;
+                    break;
+                }
+    } else {
+        for (int a = 0; a < m_nbf; ++a) bf_atom[a] = m_gto_basis[a].atom;
+    }
+    qmxc::XCGradient xg;
+    qmxc::buildXCGradient(m_xc_grid, m_xc_ao, m_density, m_xc, m_xc_rho_threshold, m_threads, bf_atom, m_atomcount, xg);
+    g_basis = xg.basis;
+    double wms = 0.0;
+    if (m_grid_response) {
+        if (m_xc_frozen_grid) {
+            why = "grid response with a frozen grid (validation hook) is undefined; use -qm.grid_response false";
+            return false;
+        }
+        const auto t0 = std::chrono::steady_clock::now();
+        Matrix gw = Matrix::Zero(m_atomcount, 3);
+        if (!qmgrid::gridWeightGradient(m_atoms, atomPositionsBohr(), m_grid_options, m_xc_grid, xg.edens, gw, why,
+                                        m_threads))
+            return false;
+        g_response = xg.points + gw;
+        wms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    }
+    if (CurcumaLogger::get_verbosity() >= 3)
+        CurcumaLogger::info(fmt::format("QM: XC gradient {:.1f} ms ({} points above threshold), weight derivative "
+                                        "{:.1f} ms; |g_xc basis| {:.3e}, |g_response| {:.3e} Eh/Bohr",
+                                        xg.ms, xg.points_used, wms, g_basis.norm(), g_response.norm()));
+    return true;
+}
+
+const qmxc::XCResult& QMEngine::xcFor(const Matrix& P) const
+{
+    if (m_xc_last_valid && m_xc_last_P.rows() == P.rows() && m_xc_last_P.cols() == P.cols()
+        && (m_xc_last_P.array() == P.array()).all())
+        return m_xc_last;
+    if (!ensureXCGrid()) {
+        // never a silent zero V_xc: NaN makes the SCF fail loudly
+        m_xc_last = qmxc::XCResult();
+        m_xc_last.V = Matrix::Constant(m_nbf, m_nbf, std::numeric_limits<double>::quiet_NaN());
+        m_xc_last.exc = std::numeric_limits<double>::quiet_NaN();
+        m_xc_last_valid = false;
+        return m_xc_last;
+    }
+    qmxc::buildVxc(m_xc_grid, m_xc_ao, P, m_xc, m_xc_rho_threshold, m_threads, m_xc_last);
+    m_xc_last_P = P;
+    m_xc_last_valid = true;
+    ++m_xc_builds;
+    m_xc_ms += m_xc_last.ms;
+    if (CurcumaLogger::get_verbosity() >= 3)
+        CurcumaLogger::info(fmt::format("QM: V_xc build {}: E_xc = {:.10f} Eh (E_x {:.10f}, E_c {:.10f}), N_grid = {:.8f}, "
+                                        "{:.1f} ms", m_xc_builds, m_xc_last.exc, m_xc_last.ex, m_xc_last.ec,
+                                        m_xc_last.nelec, m_xc_last.ms));
+    return m_xc_last;
+}
+
+Matrix QMEngine::composeFock(const Matrix& P, const Matrix& J, const Matrix& K) const
+{
+    if (!isKohnSham()) return m_H + J - 0.5 * K;  // HF: unchanged expression
+    Matrix F = m_H + J + xcFor(P).V;
+    if (m_xc.exact_exchange != 0.0) F -= (0.5 * m_xc.exact_exchange) * K;  // hybrids (WP7)
+    return F;
+}
+
+double QMEngine::scfEnergy(const Matrix& P, const Matrix& F) const
+{
+    const double e = 0.5 * P.cwiseProduct(m_H + F).sum();
+    if (!isKohnSham()) return e;
+    // 1/2 Tr(P(H+F)) counts 1/2 Tr(P V_xc) instead of E_xc: E = Tr(Ph) + 1/2 Tr(PJ) - a_x/4 Tr(PK) + E_xc
+    const qmxc::XCResult& xc = xcFor(P);
+    return e - 0.5 * P.cwiseProduct(xc.V).sum() + xc.exc;
+}
+
+void QMEngine::buildJKForSCF(const Matrix& P, Matrix& J, Matrix& K) const
+{
+    if (!isKohnSham() || m_xc.exact_exchange != 0.0) {
+        buildJK(P, J, K);
+        return;
+    }
+    buildCoulombOnly(P, J);
+    K = Matrix::Zero(m_nbf, m_nbf);
+}
+
+// J(P) alone (pure density functionals). Stored tensor: buildCoulomb only (the exchange contraction is skipped);
+// RI (-qm.ri j|jk): J from the fit, no exchange; device stored tensor: the J/K kernel, K discarded; integral-direct
+// (CPU DirectJK or the device builder): J/K digest of the same quartets, K discarded -- a J-only direct kernel with
+// its own (looser) screen does not exist yet. RI mixed precision keeps the full buildJK (its stage machine counts
+// exact builds there).
+void QMEngine::buildCoulombOnly(const Matrix& P, Matrix& J) const
+{
+    if (riActive()) {
+        if (m_ri_mp_stage != 0) {
+            Matrix K;
+            buildJK(P, J, K);
+            return;
+        }
+        if (!ensureRI()) {
+            J = Matrix::Constant(m_nbf, m_nbf, std::numeric_limits<double>::quiet_NaN());
+            return;
+        }
+        const auto t0 = std::chrono::steady_clock::now();
+        if (!gpuRIBuild(P, J, nullptr)) J = m_ri->coulomb(P);
+        m_ri_build_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        ++m_ri_builds;
+        return;
+    }
+    if (!useDirectSCF()) {
+        Matrix K;
+        if (ensureGpuJK() && gpuBuildJK(P, J, K)) return;
+        if (!useDirectSCF()) {
+            J = qmint::buildCoulomb(eriActive(), P, m_threads);
+            return;
+        }
+    }
+    Matrix K;
+    buildJKExact(P, J, K);
 }
 
 // Claude Generated (Oct 2026): the early loose-screening phase applies to a cold-started

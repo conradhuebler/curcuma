@@ -12,6 +12,7 @@
 #pragma once
 
 #include "src/core/citation_registry.h"
+#include "qm_xc.h"  // XCFunctional (kohnSham)
 
 #include <algorithm>
 #include <cctype>
@@ -122,6 +123,60 @@ inline void hf3c()
     CitationRegistry::cite("gcp");
     CitationRegistry::cite("d3");
     CitationRegistry::cite("bj");
+}
+
+/// Closed-shell Kohn-Sham (WP5 LDA, WP6 PBE, WP7 B3LYP; Claude Generated Oct 2026): Kohn-Sham, the papers of the
+/// kernels in the functional (Dirac/Slater exchange, VWN correlation with both variants in one paper, PBE with its
+/// PW92 LDA correlation, B88, LYP with the Laplacian-free form of Miehlich et al.), for a hybrid (a_x != 0) Becke 1993
+/// and Stephens et al. 1994 (B3LYP), and the molecular grid (Becke partition, Treutler radial, Lebedev angular).
+inline void kohnSham(const qmxc::XCFunctional& f, bool treutler_radial)
+{
+    CitationRegistry::cite("kohn_sham");
+    for (const qmxc::XCTerm& t : f.terms) {
+        switch (t.kernel) {
+            case qmxc::XCKernel::SlaterX:
+                CitationRegistry::cite("dirac_exchange");
+                CitationRegistry::cite("slater_exchange");
+                break;
+            case qmxc::XCKernel::VWN5_C:
+            case qmxc::XCKernel::VWNRPA_C:
+                CitationRegistry::cite("vwn");
+                break;
+            case qmxc::XCKernel::PW92_C:
+                CitationRegistry::cite("pw92");
+                break;
+            case qmxc::XCKernel::PBE_X:
+            case qmxc::XCKernel::PBE_C:
+                CitationRegistry::cite("pbe");
+                CitationRegistry::cite("pw92");
+                break;
+            case qmxc::XCKernel::B88_X:
+                CitationRegistry::cite("b88");
+                break;
+            case qmxc::XCKernel::LYP_C:
+                CitationRegistry::cite("lyp");
+                CitationRegistry::cite("lyp_miehlich");
+                break;
+        }
+    }
+    if (f.name == "b3lyp") {
+        CitationRegistry::cite("becke1993");
+        CitationRegistry::cite("b3lyp");
+    }
+    CitationRegistry::cite("becke_grid");
+    if (treutler_radial) CitationRegistry::cite("treutler_grid");
+    CitationRegistry::cite("lebedev");
+}
+
+/// Kohn-Sham nuclear gradient (WP8, Claude Generated, Oct 2026): the closed-shell gradient formulas and, with
+/// -qm.grid_response, the Becke weight derivative (Becke 1988 grid paper is cited by kohnSham()).
+inline void ksGradient(bool grid_response)
+{
+    CitationRegistry::cite("ks_gradient_jgp");
+    if (grid_response) {
+        CitationRegistry::cite("ks_gradient_gjpf");
+        CitationRegistry::cite("becke_grid");
+    }
 }
 
 } // namespace qmcite

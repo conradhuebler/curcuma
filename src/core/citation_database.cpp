@@ -1152,6 +1152,236 @@ const std::unordered_map<std::string, CitationData>& database()
             "}"
         }},
 
+        // Native Kohn-Sham DFT, WP5 (Oct 2026, Claude Generated; DOIs checked against Crossref).
+        { "kohn_sham", {
+            "Kohn-Sham density functional theory (Kohn & Sham 1965)",
+            "Kohn, W.; Sham, L. J. Phys. Rev. 1965, 140, A1133-A1138 (DOI: 10.1103/PhysRev.140.A1133)",
+            "kohn1965",
+            "@article{kohn1965,\n"
+            "  author = {Kohn, W. and Sham, L. J.},\n"
+            "  title = {Self-Consistent Equations Including Exchange and Correlation Effects},\n"
+            "  journal = {Phys. Rev.},\n"
+            "  year = {1965},\n"
+            "  volume = {140},\n"
+            "  pages = {A1133--A1138},\n"
+            "  doi = {10.1103/PhysRev.140.A1133}\n"
+            "}"
+        }},
+
+        { "dirac_exchange", {
+            "Exchange energy of the uniform electron gas (Dirac 1930)",
+            "Dirac, P. A. M. Math. Proc. Cambridge Philos. Soc. 1930, 26, 376-385 (DOI: 10.1017/S0305004100016108)",
+            "dirac1930",
+            "@article{dirac1930,\n"
+            "  author = {Dirac, P. A. M.},\n"
+            "  title = {Note on Exchange Phenomena in the Thomas Atom},\n"
+            "  journal = {Math. Proc. Cambridge Philos. Soc.},\n"
+            "  year = {1930},\n"
+            "  volume = {26},\n"
+            "  pages = {376--385},\n"
+            "  doi = {10.1017/S0305004100016108}\n"
+            "}"
+        }},
+
+        { "slater_exchange", {
+            "Local exchange potential (Slater 1951)",
+            "Slater, J. C. Phys. Rev. 1951, 81, 385-390 (DOI: 10.1103/PhysRev.81.385)",
+            "slater1951",
+            "@article{slater1951,\n"
+            "  author = {Slater, J. C.},\n"
+            "  title = {A Simplification of the Hartree-Fock Method},\n"
+            "  journal = {Phys. Rev.},\n"
+            "  year = {1951},\n"
+            "  volume = {81},\n"
+            "  pages = {385--390},\n"
+            "  doi = {10.1103/PhysRev.81.385}\n"
+            "}"
+        }},
+
+        { "vwn", {
+            "VWN local correlation (Vosko, Wilk & Nusair 1980)",
+            "Vosko, S. H.; Wilk, L.; Nusair, M. Can. J. Phys. 1980, 58, 1200-1211 (DOI: 10.1139/p80-159)",
+            "vosko1980",
+            "@article{vosko1980,\n"
+            "  author = {Vosko, S. H. and Wilk, L. and Nusair, M.},\n"
+            "  title = {Accurate spin-dependent electron liquid correlation energies for local spin density calculations: a critical analysis},\n"
+            "  journal = {Can. J. Phys.},\n"
+            "  year = {1980},\n"
+            "  volume = {58},\n"
+            "  pages = {1200--1211},\n"
+            "  doi = {10.1139/p80-159}\n"
+            "}"
+        }},
+
+        // Native Kohn-Sham DFT, WP6 (Oct 2026, Claude Generated; DOIs checked against Crossref).
+        { "pbe", {
+            "PBE generalized gradient approximation (Perdew, Burke & Ernzerhof 1996)",
+            "Perdew, J. P.; Burke, K.; Ernzerhof, M. Phys. Rev. Lett. 1996, 77, 3865-3868 (DOI: 10.1103/PhysRevLett.77.3865)",
+            "perdew1996pbe",
+            "@article{perdew1996pbe,\n"
+            "  author = {Perdew, John P. and Burke, Kieron and Ernzerhof, Matthias},\n"
+            "  title = {Generalized Gradient Approximation Made Simple},\n"
+            "  journal = {Phys. Rev. Lett.},\n"
+            "  year = {1996},\n"
+            "  volume = {77},\n"
+            "  pages = {3865--3868},\n"
+            "  doi = {10.1103/PhysRevLett.77.3865}\n"
+            "}"
+        }},
+
+        { "pw92", {
+            "PW92 local correlation (Perdew & Wang 1992)",
+            "Perdew, J. P.; Wang, Y. Phys. Rev. B 1992, 45, 13244-13249 (DOI: 10.1103/PhysRevB.45.13244)",
+            "perdew1992pw92",
+            "@article{perdew1992pw92,\n"
+            "  author = {Perdew, John P. and Wang, Yue},\n"
+            "  title = {Accurate and simple analytic representation of the electron-gas correlation energy},\n"
+            "  journal = {Phys. Rev. B},\n"
+            "  year = {1992},\n"
+            "  volume = {45},\n"
+            "  pages = {13244--13249},\n"
+            "  doi = {10.1103/PhysRevB.45.13244}\n"
+            "}"
+        }},
+
+        // Native Kohn-Sham DFT, WP7 B3LYP (Oct 2026, Claude Generated; DOIs checked against Crossref).
+        { "b88", {
+            "B88 gradient-corrected exchange (Becke 1988)",
+            "Becke, A. D. Phys. Rev. A 1988, 38, 3098-3100 (DOI: 10.1103/PhysRevA.38.3098)",
+            "becke1988b88",
+            "@article{becke1988b88,\n"
+            "  author = {Becke, A. D.},\n"
+            "  title = {Density-functional exchange-energy approximation with correct asymptotic behavior},\n"
+            "  journal = {Phys. Rev. A},\n"
+            "  year = {1988},\n"
+            "  volume = {38},\n"
+            "  pages = {3098--3100},\n"
+            "  doi = {10.1103/PhysRevA.38.3098}\n"
+            "}"
+        }},
+
+        { "lyp", {
+            "LYP correlation (Lee, Yang & Parr 1988)",
+            "Lee, C.; Yang, W.; Parr, R. G. Phys. Rev. B 1988, 37, 785-789 (DOI: 10.1103/PhysRevB.37.785)",
+            "lee1988lyp",
+            "@article{lee1988lyp,\n"
+            "  author = {Lee, Chengteh and Yang, Weitao and Parr, Robert G.},\n"
+            "  title = {Development of the Colle-Salvetti correlation-energy formula into a functional of the electron density},\n"
+            "  journal = {Phys. Rev. B},\n"
+            "  year = {1988},\n"
+            "  volume = {37},\n"
+            "  pages = {785--789},\n"
+            "  doi = {10.1103/PhysRevB.37.785}\n"
+            "}"
+        }},
+
+        { "lyp_miehlich", {
+            "LYP without Laplacian (Miehlich, Savin, Stoll & Preuss 1989)",
+            "Miehlich, B.; Savin, A.; Stoll, H.; Preuss, H. Chem. Phys. Lett. 1989, 157, 200-206 (DOI: 10.1016/0009-2614(89)87234-3)",
+            "miehlich1989",
+            "@article{miehlich1989,\n"
+            "  author = {Miehlich, Burkhard and Savin, Andreas and Stoll, Hermann and Preuss, Heinzwerner},\n"
+            "  title = {Results obtained with the correlation energy density functionals of Becke and Lee, Yang and Parr},\n"
+            "  journal = {Chem. Phys. Lett.},\n"
+            "  year = {1989},\n"
+            "  volume = {157},\n"
+            "  pages = {200--206},\n"
+            "  doi = {10.1016/0009-2614(89)87234-3}\n"
+            "}"
+        }},
+
+        { "becke1993", {
+            "Three-parameter hybrid functional with exact exchange (Becke 1993)",
+            "Becke, A. D. J. Chem. Phys. 1993, 98, 5648-5652 (DOI: 10.1063/1.464913)",
+            "becke1993",
+            "@article{becke1993,\n"
+            "  author = {Becke, Axel D.},\n"
+            "  title = {Density-functional thermochemistry. III. The role of exact exchange},\n"
+            "  journal = {J. Chem. Phys.},\n"
+            "  year = {1993},\n"
+            "  volume = {98},\n"
+            "  pages = {5648--5652},\n"
+            "  doi = {10.1063/1.464913}\n"
+            "}"
+        }},
+
+        { "b3lyp", {
+            "B3LYP (Stephens, Devlin, Chabalowski & Frisch 1994)",
+            "Stephens, P. J.; Devlin, F. J.; Chabalowski, C. F.; Frisch, M. J. J. Phys. Chem. 1994, 98, 11623-11627 (DOI: 10.1021/j100096a001)",
+            "stephens1994",
+            "@article{stephens1994,\n"
+            "  author = {Stephens, P. J. and Devlin, F. J. and Chabalowski, C. F. and Frisch, M. J.},\n"
+            "  title = {Ab Initio Calculation of Vibrational Absorption and Circular Dichroism Spectra Using Density Functional Force Fields},\n"
+            "  journal = {J. Phys. Chem.},\n"
+            "  year = {1994},\n"
+            "  volume = {98},\n"
+            "  pages = {11623--11627},\n"
+            "  doi = {10.1021/j100096a001}\n"
+            "}"
+        }},
+
+        { "becke_grid", {
+            "Multicentre numerical integration, fuzzy cells (Becke 1988)",
+            "Becke, A. D. J. Chem. Phys. 1988, 88, 2547-2553 (DOI: 10.1063/1.454033)",
+            "becke1988grid",
+            "@article{becke1988grid,\n"
+            "  author = {Becke, A. D.},\n"
+            "  title = {A multicenter numerical integration scheme for polyatomic molecules},\n"
+            "  journal = {J. Chem. Phys.},\n"
+            "  year = {1988},\n"
+            "  volume = {88},\n"
+            "  pages = {2547--2553},\n"
+            "  doi = {10.1063/1.454033}\n"
+            "}"
+        }},
+
+        // WP8 (Claude Generated, Oct 2026): Kohn-Sham nuclear gradient and its grid weight derivative.
+        // DOIs checked against Crossref (api.crossref.org) on Oct 30 2026.
+        { "ks_gradient_jgp", {
+            "Kohn-Sham gradient with grid weight derivatives (Johnson, Gill & Pople 1993)",
+            "Johnson, B. G.; Gill, P. M. W.; Pople, J. A. J. Chem. Phys. 1993, 98, 5612-5626 (DOI: 10.1063/1.464906)",
+            "johnson1993",
+            "@article{johnson1993,\n"
+            "  author = {Johnson, B. G. and Gill, P. M. W. and Pople, J. A.},\n"
+            "  title = {The performance of a family of density functional methods},\n"
+            "  journal = {J. Chem. Phys.},\n"
+            "  year = {1993},\n"
+            "  volume = {98},\n"
+            "  pages = {5612--5626},\n"
+            "  doi = {10.1063/1.464906}\n"
+            "}"
+        }},
+
+        { "ks_gradient_gjpf", {
+            "B-LYP gradients with the Becke grid (Gill, Johnson, Pople & Frisch 1992)",
+            "Gill, P. M. W.; Johnson, B. G.; Pople, J. A.; Frisch, M. J. Chem. Phys. Lett. 1992, 197, 499-505 (DOI: 10.1016/0009-2614(92)85807-M)",
+            "gill1992",
+            "@article{gill1992,\n"
+            "  author = {Gill, P. M. W. and Johnson, B. G. and Pople, J. A. and Frisch, M. J.},\n"
+            "  title = {The performance of the {Becke-Lee-Yang-Parr} ({B-LYP}) density functional theory with various basis sets},\n"
+            "  journal = {Chem. Phys. Lett.},\n"
+            "  year = {1992},\n"
+            "  volume = {197},\n"
+            "  pages = {499--505},\n"
+            "  doi = {10.1016/0009-2614(92)85807-M}\n"
+            "}"
+        }},
+
+        { "treutler_grid", {
+            "Radial quadrature M4 (Treutler & Ahlrichs 1995)",
+            "Treutler, O.; Ahlrichs, R. J. Chem. Phys. 1995, 102, 346-354 (DOI: 10.1063/1.469408)",
+            "treutler1995",
+            "@article{treutler1995,\n"
+            "  author = {Treutler, O. and Ahlrichs, R.},\n"
+            "  title = {Efficient molecular numerical integration schemes},\n"
+            "  journal = {J. Chem. Phys.},\n"
+            "  year = {1995},\n"
+            "  volume = {102},\n"
+            "  pages = {346--354},\n"
+            "  doi = {10.1063/1.469408}\n"
+            "}"
+        }},
+
         { "schwarz_screening", {
             "Cauchy-Schwarz and density-weighted integral screening in direct SCF (Haeser & Ahlrichs 1989)",
             "Haeser, M.; Ahlrichs, R. J. Comput. Chem. 1989, 10, 104-111 (DOI: 10.1002/jcc.540100111)",

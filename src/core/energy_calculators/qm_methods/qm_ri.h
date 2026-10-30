@@ -251,7 +251,8 @@ public:
     /// G (naux x npair(), packed like tensor(), active orbital basis; empty in mode j where G^P_mn = c_P P_mn) and the 2-index
     /// density M2 (naux x naux), so that dE/dx = sum G^P_mn (mn|P)^x - sum M2_PQ (P|Q)^x.
     /// Exposed for the device contraction (-qm.gpu_ri_grad). Claude Generated (Oct 2026).
-    bool gradientDensities(const Matrix& P, Eigen::VectorXd& c, Matrix& G, Eigen::MatrixXd& M2, std::string& why) const;
+    /// kx scales the exchange part (WP8 Kohn-Sham: a_x of the hybrid, 0 = Coulomb only, G empty; 1 = RHF).
+    bool gradientDensities(const Matrix& P, double kx, Eigen::VectorXd& c, Matrix& G, Eigen::MatrixXd& M2, std::string& why) const;
     /// 2-index part sum_PQ M2_PQ (P|Q)^x (Eh/Bohr, natoms x 3) on the host (cheap, N^2 shell pairs).
     Matrix metricGradient(const Eigen::MatrixXd& M2, int natoms) const;
     /// 3-index part sum G^P_mn (mn|P)^x on the host. G empty: G^P_mn = c_P P_mn (mode j).
@@ -378,4 +379,9 @@ namespace qmint {
 /// gradient (Coulomb fitted, exchange exact). Defined in qm_integrals.cpp; declared here so that
 /// qm_integrals.hpp (included by the CUDA kernel units) stays untouched. Claude Generated (Oct 2026).
 Matrix gradientTwoElectronExchange(const std::vector<GTO::Orbital>& basis, const Matrix& P, int natoms, int threads = 1);
+/// @brief Exact two-electron gradient of a Kohn-Sham energy (Eh/Bohr): Coulomb part plus kx times the exchange part,
+/// D = P_mn P_ls - (kx/4) (P_ml P_ns + P_ms P_nl); kx = a_x of a hybrid (0.2 for B3LYP), 0 for LDA/GGA, 1 = the RHF
+/// gradientTwoElectron. Same kernel. Claude Generated (Oct 2026, WP8).
+Matrix gradientTwoElectronScaled(const std::vector<GTO::Orbital>& basis, const Matrix& P, double kx, int natoms,
+                                 int threads = 1);
 }  // namespace qmint
