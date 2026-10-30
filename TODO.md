@@ -11,6 +11,11 @@ Stand.
 
 ## 1. Korrektheit (offen)
 
+- **FEHLER: GMTKN55 `G21EA/EA_16` (SiH3-) mit gfn1 liefert keine Energie** (2026-10-30, Ursache bekannt, vorerst gewollt): Abbruch "implausible charge distribution" (max |q| 5.55 > 5.00, auch aus H0); xtb 6.7 konvergiert auf dieselbe SCC-Energie (-7.94141906 Eh) mit Si = -5.55 e, derselbe q^3-Runaway.
+  Der Fehler bleibt, die Struktur fehlt damit in jedem gfn1-Vergleich. Keine gültige Energie für dieses System.
+- **PLUMED-Bias nur auf `feature/bmt-plumed-nebmd` korrigiert** (`96c29c50`, 2026-10-30): `upstream/master` hat Vorzeichenfehler und kB statt kB*T noch; biased PLUMED-Läufe davor sind ungültig. Offen: nach master bringen, betroffene Läufe neu rechnen. [docs/PLUMED_HELP.md](docs/PLUMED_HELP.md).
+- **`-md -method uff` schreibt `<basename>.param.json` trotz BMT ins Arbeitsverzeichnis** (2026-10-30, gemessen, alter und neuer Stand gleich): verstößt gegen die BMT-Regel in `CLAUDE.md`.
+- **PLUMED rechnet Schritt 0 doppelt** (2026-10-30): Init und erster Integrationsschritt rufen beide `performPlumedCalc()`, COLVAR hat zwei Zeilen bei t = 0; Folgen für HILLS nicht geprüft. `energyUnits = 2625.5` steht als Literal statt über `CurcumaUnit`.
 - **Flache SCF-Namen, die auch das Optimiermodul kennt** (2026-10-26, Ursache gefunden): `-diis_start`, `-max_iterations` gehören auch zu `opt`, das `-sp` und `-opt`
   benutzen; das Befehlsmodul gewinnt, also erreichen sie den SCF nicht (keine Warnung). Wirksam: `-scf_max_iterations`, `-scf.diis_start`, `-xtb.diis_start`.
   Offen: soll `-sp` die Optimiererparameter überhaupt besitzen? [docs/PARAMETER_SYSTEM.md](docs/PARAMETER_SYSTEM.md), "Shared module scf".
@@ -31,8 +36,6 @@ Stand.
 - **Exitcode bei fehlgeschlagenem Setup**: `-md` gibt seit `a2b7c5f0` 1 zurück; prüfen, ob dasselbe für `-opt` und `-sp` gilt (nicht geprüft).
 - **UFF- und QMDFF-Gradient falsch** (Eintrag vom 2026-09-27: UFF-Winkel ohne den Faktor -sin(theta); Fix vorbereitet, Betreiber: "erstmal nicht").
   Nicht erneut geprüft; Details im Archiv unter "UFF- und QMDFF-Gradient falsch".
-- **`-seed` wirkt nicht auf die Anfangsgeschwindigkeiten der MD.** Geprüft 2026-10-01: `SimpleMD::InitVelocities()` (`simplemd.cpp:1141`)
-  zieht aus `static std::default_random_engine generator` (Z. 1143) mit festem Standardseed. Ein Fix ändert jede MD-Startgeschwindigkeit.
 - **`shouldUpdateHBXB()`: RMSD-Formel ohne Faktor `sqrt(natoms)`** (`gfnff_method.cpp:3058`, geprüft 2026-10-01). Bei 7320 Atomen
   ~13,6 Å mittlere Verschiebung bis zum Auslösen. Aus der Fortran-Referenz übernommen (`gfnff_ini2.f90:717`); vor einer Änderung gegen
   MOR41/GMTKN55 prüfen und das Abweichen von der Referenz entscheiden.
@@ -58,8 +61,6 @@ Stand.
 - **Restraint-Modus-Tube** (`umbrella_kz`) laeuft ueber `applyExternalForces` (einen Schritt verzoegert, nicht in `trueGradient()`), ueberschneidet sich mit `z_wall`.
 - **`Molecule::CalculateDihedral` falsch** (`src/core/molecule.cpp` ~551, benutzt von `-dihedral` in `src/main.cpp` ~523): das Skalarprodukt der unnormierten Flaechennormalen wird vor der Division durch die Betraege auf [-1,1] begrenzt
   (Agent-Nachrechnung: 116.4 Grad fuer eine +60-Grad-Geometrie), Ausgabe 0..2pi statt IUPAC. Korrekt ist `GFNFF_Geometry::calculateDihedralAngle`. Nicht repariert, nicht gegengeprueft ausser der Rechnung des Agenten.
-- **MD-Startgeschwindigkeiten und Andersen**: ein prozessweit geteilter statischer Generator, Seeds mehrerer SimpleMD-Instanzen nicht unabhängig reproduzierbar
-  (NEB-MD-Fenster). Vault: Projekte-Notiz `curcuma NEB-MD Pfad-Sampling`.
 
 ## 2. Leistung
 
@@ -127,6 +128,9 @@ Stand.
 
 ## 3. Tests und Validierung
 
+- **PLUMED, ungetestet** (Stand 2026-10-30, getestet nur Ar2-RESTRAINT und Ethan-Torsion mit GFN-FF): QM-Methoden, größere Systeme, Restart, NPT/`setVirial`, PLUMED zusammen mit GPU. Gemeldete extreme PLUMED-Langsamkeit nicht nachgemessen. Well-tempered METAD lag 10 % über der freien MD (2.66 gegen 2.43 kcal/mol, Hügel nicht konvergiert).
+- **GPU nach dem NEB-MD-Merge** (2026-10-30, RTX 5080, Stand vor `96c29c50`): CUDA bitgleich auf Koffein und Benzol, Vulkan nur ohne `-gpu_strict` geprüft (CPU-Fallback nicht ausgeschlossen), ROCm nicht testbar (kein SDK). NEB-MD auf CUDA nur 1 ps ohne Zahlenvergleich zur CPU.
+- **Compiler-Warnungen aus dem Master** (2026-10-30, kein Neubau zum Nachzählen): `measurement.h` (`-Wsuggest-override`), `xtb_native.cpp` (`t_gp0`), `src/helpers/main.cpp` (`columns`), dazu 65 `-Winline`; die Vorgabe "warnungsfreier Build" aus `CLAUDE.md` ist nicht erfüllt.
 - **xtb-Referenzenergien der Teststruktur-Bibliothek** (2026-10-11, `test_cases/reference_data/xtb_library_energies.json`): 66 Strukturen GFN-FF, 64 GFN2 gerechnet (peo201-chain 1410 Atome GFN2: +1,6e-3 Eh, mit `d4_atm_cutoff 40.0` +2,6e-5). GFN-FF: 57 <= 1e-6 Eh, 8 > 1e-4 (hydronium-water2 -0,169 Eh Standard `ensemble` gegen xtb Referenzregel;
   jl22-bgal/macrocycle-bgal 173/231 Atome +0,25 bis +0,80 kcal/mol, nicht erklärt: `storsion_reference_loop_bug` ändert nichts, Term-Vergleich und pprcht/gfnff als dritte Meinung stehen aus). GFN2: max 5,2e-5 Eh, mit `-xtb.d4_atm_cutoff 40.0` auf macrocycle-bgal 5e-5 -> -2e-7 Eh. Offen: ctest gegen die Datei (Toleranzen), 4 Strukturen > 3000 Atome ohne xtb-GFN-FF (xtb wird bei 6200 und 7320 Atomen am 48-GB-Deckel getötet; curcuma 5 s), na2cl2 GFN2 xtb unkonvergiert.
 
@@ -137,7 +141,7 @@ Stand.
   engine" (`docs/archive/CG.md`, geprüft 2026-10-01).
 - **Zwei ctests scheitern reproduzierbar** (am 2026-10-01 auf `master` und auf `fix/remove-dead-code` gleich, `confscan_dtemplate` 3 von 3 Läufen auf `master`): `xtb_cpscf` (Gate (C), Antwort Mulliken gegen EEQ: H2 8.2e-5 gegen 1e-6, H2O und HCN je über 1.5e-4), `test_orca_interface` ("O2 triplet mult=3" in `methodToOrcaKeyword`), `confscan_dtemplate` (bis 2026-10-09 erwartet 17/2/1/305, tatsächlich 14/5/1/237 unabhängig von `CurcumaThreads` 1/4/24; die Zähler sind jetzt die aktuellen des Binaries und gleich denen von `confscan_free`/`confscan_subspace`; ob `dtemplate` tatsächlich wie `subspace` rechnet oder die alten Werte vor 2026-08 anders zustande kamen, ist nicht geklärt). Die Einordnung "flaky" für `confscan_dtemplate` in älteren Notizen trifft nicht zu.
 - **Voller ctest 2026-10-11** (Paket 4, CPU-only ohne `-march=native` und CUDA-Build, je 9 rot, `confscan_dtemplate` grün): `test_orca_interface` scheitert auch bei "O2 quartet mult=5" (nicht nur Triplett); `cli_errors_01` bis `_06` und `parameter_io_tests` codieren `${PROJECT_ROOT}/release/curcuma` fest (grün mit umgebogenem Pfad, ohne `release/` rot);
-  Warnung `-Wdelete-non-virtual-dtor` auf `delete md` in `src/main.cpp` (`SimpleMD`, virtuelle Funktionen, Destruktor nicht virtuell: `simplemd.h:813`); nicht gebaut: MinGW, ROCm (Compiler fehlen).
+  Nicht gebaut: MinGW, ROCm (Compiler fehlen).
 - **Strukturbibliothek** (`test_cases/structures/`, Phasen 0 bis 4 erledigt): 69 Strukturen, alle Tests und Skripte lesen sie; 65 % der Herkunftsangaben sind `unknown`
   (Altbestand, nur abgeleitet). Offen: Phase 4 (getrackte `.out`-Dateien als Beleg,
   115 untracked Laufausgaben in `test_cases/` entfernen, Berichte in `test_cases/cli/` ins Archiv), case.json je Test. Das Optimierungslevel der `unknown`-Strukturen
@@ -156,6 +160,7 @@ Stand.
 
 ## 4. Betreiber-Prüfung offen (🤖/⚙️, nur Sie vergeben ✅)
 
+- PLUMED-Vorzeichen und kB*T (`96c29c50`); CSVR chi2(Nf-1) (`521fa5e8`, Ethan 6 x 25 ps: 314.1 -> 297.0 K, Verhältnis 0.9455 gegen 18/19); NEB-MD-Pipeline, nur Ethan reproduziert (4 Läufe, AIChangelog 2026-10-30); `.md.csv`-Ausgabe und PLUMED-Routing.
 - CODATA-2018-Einheiten (`191cebe3`; Rest 0,0036 kcal/mol gegen pprcht auf polymer_2x nicht verfolgt), Known Issue #35.
 - `eeq_refactor_eps_bohr` Voreinstellung 0 (Faktor-Cache aus) und `nonbonded_skin_bohr` 2,0; Ladungsplatzierung `ensemble` (#31);
   Stillstandserkennung `-opt.stall_steps` 20; `-scf_guess fragments`; `-scf_precond frag` (Okt 2026, opt-in).
@@ -177,14 +182,12 @@ Stand.
 
 Code-gebundene Entscheidungen, die bei Ihnen liegen. Fachliche Fragen und Projektstatus stehen im Vault und sind nur verlinkt.
 
-- **GMTKN55 `G21EA/EA_16` (SiH3-) mit gfn1**: curcuma bricht mit "implausible charge distribution" ab (max |q| 5.55 > 5.00, auch aus H0). xtb 6.7 konvergiert auf dieselbe SCC-Energie (-7.94141906 Eh) mit Si = -5.55 e, also derselbe q^3-Runaway. Fehler behalten (jetziges Verhalten) oder Grenze/Schalter? Die Struktur fehlt deshalb in jedem gfn1-Vergleich.
-
 - Branch `feature/nebmd-path-sampling` nach master mergen? (enthält überwiegend Master-Arbeit; `/pre-merge-check` fällig.) NEB-MD-Status: Vault `Projekte/curcuma NEB-MD Pfad-Sampling`.
 - `-scf_pseudo_diag` als Standard einschalten? (Messungen sprechen dafür, Abschnitt 2.)
 - `-scf_precond_guard`: Vorgabe `g2:4:best` kostet auf dem unrelaxierten 599-Atom-Cluster bei 8 Threads 4 Iterationen gegen `none` (Kriterium war <= 3);
   über 5 Threadzahlen liegt frag (55-62) unter none (58-138). Varianten streuen 58-109, eine konvergiert nicht. Vorgabe behalten? [docs/SCF_PRECOND.md](docs/SCF_PRECOND.md)
 - `shouldUpdateHBXB()` korrigieren und damit von der Fortran-Referenz abweichen, oder als Referenzeigenschaft belassen?
-- UFF-/QMDFF-Gradient reparieren (Stand: "erstmal nicht")? `-seed` für die MD-Startgeschwindigkeiten reparieren (ändert jede MD)?
+- UFF-/QMDFF-Gradient reparieren (Stand: "erstmal nicht")?
 - GPU-Bitgleichheit angehen (Sammel-Kernel statt `atomicAdd`) oder bei Ensemblevergleichen bleiben?
 - Vault, fachliche Fragen: `Offene Fragen/` ("Valenzanteil im reaktiven GFN-FF", "Veraltete C6-Dispersion und Paarlisten in inaktiven Topologie-Ecken",
   "Lücke zwischen GFN2-xTB und Doppelhybrid-Methoden schließen", "RRHO-Näherung durch MD ... ersetzen", "Ladungsplatzierung bei geladenen Mehrfragment-Systemen in GFN-FF - was ist physikalisch besser", Known Issue #31).
