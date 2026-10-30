@@ -7,6 +7,9 @@ vector (sigma 0.12 A, seed 5) so that the first steps are large. -opt, default o
   2. Without the cap the largest single-atom displacement in iterations 1-4 exceeds 0.05 A, so
      the test can see the cap (otherwise checks 3-4 would pass for any code).
   3. With -lbfgs_max_atom_step 0.05 no atom moves by more than 0.05 A (+1e-6) between consecutive frames.
+  5. Default = auto (cap negative): below -lbfgs_atom_step_auto_natoms (2000) the cap is off, so "no flag" is the uncapped run;
+     with -lbfgs_atom_step_auto_natoms 10 the run equals the explicit 0.2 A run bit for bit, and with
+     -lbfgs_max_atom_step 0 added it equals the uncapped run again.
   4. The capped run ends at the same minimum: energy within 1e-3 Eh of the uncapped one (measured 2.1e-4 Eh: both stop at the default convergence criteria; threshold set after that run).
 Usage: check_lbfgs_atom_step_cap.py CURCUMA_BINARY SOURCE_DIR
 """
@@ -99,5 +102,14 @@ if failed == 0:
     check(r_cap["maxstep"] <= 0.05 + 1e-6, "3. capped run: largest single-atom step <= 0.05 A")
     check(r_none["e"] is not None and r_cap["e"] is not None and abs(r_none["e"] - r_cap["e"]) < 1e-3,
           "4. capped run reaches the same minimum (|dE| < 1e-3 Eh)")
+    r_auto = run("auto", ["-lbfgs_atom_step_auto_natoms", "10"])
+    r_02 = run("ex02", ["-lbfgs_max_atom_step", "0.2"])
+    r_off = run("off", ["-lbfgs_atom_step_auto_natoms", "10", "-lbfgs_max_atom_step", "0"])
+    check(all(r is not None for r in (r_auto, r_02, r_off)), "5. auto/explicit/off runs wrote results")
+    if failed == 0:
+        check(np.array_equal(r_auto["x"], r_02["x"]) and r_auto["maxstep"] == r_02["maxstep"],
+              "5a. auto (natoms threshold 10) == explicit 0.2 A, bit-identical")
+        check(r_auto["maxstep"] <= 0.2 + 1e-6 and r_none["maxstep"] > 0.2, "5b. auto cap 0.2 A is active (uncapped step %.3f A)" % r_none["maxstep"])
+        check(np.array_equal(r_off["x"], r_none["x"]), "5c. explicit 0 with the threshold below natoms == uncapped")
 print("RESULT:", "FAIL (%d)" % failed if failed else "PASS")
 sys.exit(1 if failed else 0)

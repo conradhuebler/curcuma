@@ -2025,7 +2025,8 @@ int executeOptimization(const json& controller, int argc, char** argv) {
         fmt::print("  -lbfgs_line_search <n>   Line search: 1=Armijo, 2=Wolfe, 3=StrongWolfe, 4=Backtrack (default: 3)\n");
         fmt::print("  -lbfgs_max_line_search <n>  Max line search iterations (default: 20)\n");
         fmt::print("  -lbfgs_min_step <f>      Minimum step size (default: 1e-4)\n");
-        fmt::print("  -lbfgs_max_atom_step <f> Largest displacement of one atom per step in Angstrom, 0 = off (default: 0; 0.2 for large solvated systems)\n");
+        fmt::print("  -lbfgs_max_atom_step <f> Largest displacement of one atom per step in Angstrom, 0 = off (default: auto, 0.2 from 2000 atoms on)\n");
+        fmt::print("  -lbfgs_atom_step_auto_natoms <n>  Atom count from which the automatic cap applies (default: 2000)\n");
         fmt::print("  -lbfgs_ftol <f>          Armijo sufficient-decrease parameter (default: 1e-4)\n");
         fmt::print("  -lbfgs_wolfe <f>         Wolfe curvature parameter (default: 0.9)\n\n");
         fmt::print("Native optimizer tuning (lbfgs/diis/rfo):\n");
