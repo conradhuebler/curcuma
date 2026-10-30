@@ -377,6 +377,7 @@ PARAM(hb_parallel_min_pairs, Int, 500, "Run the H-bond detection on the thread p
 // ---- Dispersion ----
 PARAM(dispersion_cutoff_bohr, Double, 0.0, "Cutoff (Bohr) of the D4 dispersion pair list; 0 keeps all pairs, as the reference. A cutoff also widens the CN-derivative range to match.", "Dispersion", {})
 PARAM(dispersion_c6_update, Bool, true, "Recompute the D4 pair C6 from the current CN at each new geometry, so MD and optimisation agree with single points. false keeps C6 of the setup geometry.", "Dispersion", {})
+PARAM(disp_c6_fused, Bool, true, "CPU: evaluate each D4 pair's C6 and dC6/dCN inside the dispersion energy loop instead of storing them per pair every step (same values bit for bit, less memory traffic). false for the stored per-pair path.", "Dispersion", {})
 PARAM(disp_half_contraction, Bool, true, "Faster per-atom contraction for the D4 C6 and dC6/dCN; it changes the summation order (energies agree to about 1e-10 Eh). false for the plain contraction.", "Dispersion", {})
 // ---- Electrostatics ----
 PARAM(coulomb_r_cut, Double, 0.0, "Hard per-pair cutoff (Bohr) of the GFN-FF electrostatics; 0 = none, as the reference. A cutoff makes the energy discontinuous and truncates the 1/r sum.", "Coulomb", {})

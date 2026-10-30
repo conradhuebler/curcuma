@@ -4,6 +4,13 @@
 **Implementation**: AI-generated, machine-tested — **human production testing pending**
 **Location**: `src/core/energy_calculators/ff_methods/`
 
+## Fused D4 pair C6 on the CPU, `-gfnff.disp_c6_fused` (Oct 30, 2026) 🤖⚙️
+
+- Default on. Before, every gradient step wrote C6 into each `GFNFFDispersion` (`refreshDispersionC6`) and dC6/dCN into `D4DC6DCNPairs` (`computeDC6DCN`), two passes over the 60-Bohr list (12.8 M pairs at 5747 atoms), which the energy loop then read back. Now `FFWorkspace::calcD4Dispersion` evaluates C6 = sum_b g_i[Z_j][b] w_j[b] and both derivatives per pair from the generator's per-atom view (`D4FusedC6View`, kernels in `dispersion/d4_pair_c6.h`, also called by the generator itself); pairs beyond 50 Bohr are skipped before any C6 work.
+- Same operations, same order: bit-identical to the release binary (`106552c3`; up to `09b98150` only optimiser and doc changes) on 327 MOR41/GMTKN55 structures (1 thread) and the 3003/5747-atom droplets (8 threads, with charge groups), md5 of `-dump_gradient`; 200 MD steps of the 5747-atom system identical in every `md_diagnostics` value and in the trajectory. Weight refresh without derivative rebuild (`-d4param.d4_cn_cache_threshold` > 0) keeps the derivative state of the last rebuild, as the stored path did; ctest `gfnff_d4_fused_c6`.
+- Time, Ryzen 9950X3D CCD1 (cores 8-15, 32 MB L3), 8 threads, 200-step MD with the production flags, base/new alternated: ms/step mean (n = 5, sd) chain 3003 atoms 87.2 (6.0) -> 64.6 (4.9), chain 5747 268.7 (34.1) -> 225.1 (28.8), water 3000 77.3 (10.9) -> 59.2 (6.6), water 5475 248.6 (36.2) -> 187.3 (26.5); median of the paired changes -26 / -23 / -22 / -25 %. Spread from memory traffic of other jobs on CCD0. Instrumented (n = 2 undisturbed runs, 5747 atoms): D4 weights + C6/dC6 refresh 42.0 -> 0.5 ms, D4 energy loop 22.6 -> 16.2 ms (no dC6 lookup), EEQ unchanged; step 208 -> 161 ms.
+- Not tested: GPU paths (unchanged, they do not request the fused mode), `disp_half_contraction false` (fused mode then stays off), reactive topology mode. `GFNFFDispersion::C6` is only current right after a list rebuild while the mode is active.
+
 ## Isolated ion gradient, `-gfnff.cn_zero_guard` (Oct 25, 2026) 🤖⚙️
 
 - Opt-in (default = reference): Coulomb TERM 1b chain-rule term 0 at CN = 0; removes a spurious force on an isolated ion (Cl- ... H2O, H-Cl 3.2 A: FD 6.6e-4 -> 1.5e-5 Eh/A), energy unchanged, GPU falls back to CPU. Known Issue #43 in [KNOWN_ISSUES_ARCHIVE.md](KNOWN_ISSUES_ARCHIVE.md).

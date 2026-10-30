@@ -270,6 +270,12 @@ public:
     /// Oct 2026: per-pair arrays of the D4 generator instead of a dense N x N matrix)
     void setDC6DCNPtr(const D4DC6DCNPairs* ptr) { m_dc6dcn_ptr = ptr; }
 
+    /// Fused D4 pair C6 (Claude Generated, Oct 2026): with a view set, calcD4Dispersion() computes
+    /// each pair's C6 and dC6/dCN from per-atom data (d4_pair_c6.h) and ignores
+    /// GFNFFDispersion::C6 and the setDC6DCNPtr() arrays' values (the pointer still gates the
+    /// dC6/dCN term). nullptr = stored per-pair values. Set by GFNFF::prepareCNAndEEQ().
+    void setD4FusedC6View(const D4FusedC6View* view) { m_d4_fused_c6 = view; }
+
     /// Set baseline energy (e0 from parameter set)
     void setE0(double e0) { m_e0 = e0; }
 
@@ -446,6 +452,7 @@ private:
     Vector m_cn, m_cnf;
     CNDerivStore m_dcn;  // Claude Generated (WP4, May 2026): pair-list replaces std::vector<SpMatrix>
     const D4DC6DCNPairs* m_dc6dcn_ptr = nullptr;
+    const D4FusedC6View* m_d4_fused_c6 = nullptr;  // Claude Generated (Oct 2026), see setD4FusedC6View()
     double m_e0 = 0.0;
 
     // Coulomb self-energy parameters (O(N), extracted at init)

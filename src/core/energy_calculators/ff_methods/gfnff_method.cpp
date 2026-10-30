@@ -1408,6 +1408,15 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
     const bool reuse_cn = m_static_cn && m_static_state_captured;
     const bool freeze_eeq = m_static_charges && m_static_state_captured;
 
+    // Claude Generated (Oct 2026): fused D4 pair C6 on the CPU workspace path. The generator
+    // then stops writing C6 and dC6/dCN into the ~N^2 pair arrays every step, and the
+    // workspace evaluates both per pair inside the energy loop (same operations, same bits;
+    // see D4ParameterGenerator::requestFusedPairC6()). Needs the per-step C6 refresh; the
+    // GPU paths (gpu_only) keep their own kernels. -gfnff.disp_c6_fused false: old path.
+    if (m_d4_generator && !gpu_only && m_workspace
+        && m_parameters.value("dispersion_c6_update", true) && m_parameters.value("disp_c6_fused", true))
+        m_d4_generator->requestFusedPairC6();
+
 #ifdef GFNFF_CN_DCN_FUSION
     // WP-D Stage D (May 2026): track whether the fused CN+DCN path was taken so
     // the separate DCN call below is skipped. Declared here so both the CN block
@@ -1763,6 +1772,9 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
                 m_d4_generator->refreshC6WeightsForCN(cn_std, pool, m_threads);
                 weights_fresh = true;
             }
+            // Claude Generated (Oct 2026): fused mode - C6 is evaluated in the energy loop
+            if (m_d4_generator->fusedPairC6View())
+                return;
             // getChargeWeightedC6 is const and reads only per-atom caches: pairs are independent.
             const int np = static_cast<int>(d4_pairs.size());
             auto c6_worker = [&](int t_id, int T) {
@@ -1788,6 +1800,11 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
         if (do_timing && weights_fresh)
             t_d4_gw += std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t_c6).count();
     }
+
+    // Claude Generated (Oct 2026): hand the fused D4 view (or nullptr) to the CPU workspace after
+    // the last generator update of this call; see requestFusedPairC6() above.
+    if (!gpu_only && m_workspace)
+        m_workspace->setD4FusedC6View(m_d4_generator ? m_d4_generator->fusedPairC6View() : nullptr);
 
     // WP-P1 (May 2026): cache phase-timings into a member so MD diagnostics can read them
     // after every Calculation() pass, independent of whether the caller passed out_timing.
@@ -2405,6 +2422,10 @@ bool GFNFF::refreshDispersionC6()
     const int P = static_cast<int>(pairs.size());
     if (P == 0)
         return false;
+    // Claude Generated (Oct 2026): fused mode - the energy loop computes C6 from the same
+    // weights itself (FFWorkspace::calcD4Dispersion), nothing to write here.
+    if (m_d4_generator->fusedPairC6View())
+        return true;
     const D4ParameterGenerator& gen = *m_d4_generator;
     // Claude Generated (Oct 2026): contiguous pair blocks instead of stride T (stride put
     // neighbouring pairs, which share atom rows and cache lines, on different threads).
@@ -12690,6 +12711,11 @@ std::tuple<std::vector<GFNFFDispersion>, std::vector<ATMTriple>, std::string> GF
             d4_input["d4_cn_cache_threshold"] = 0.0;
 
         ConfigManager d4_config("d4param", d4_input);
+        // Claude Generated (Oct 2026): the workspace may still hold the fused view of the
+        // generator replaced here (reactive topology rebuild); drop it before it dangles. The new
+        // pair list carries fresh C6; prepareCNAndEEQ() sets the view again.
+        if (m_workspace)
+            m_workspace->setD4FusedC6View(nullptr);
         m_d4_generator = std::make_unique<D4ParameterGenerator>(d4_config);
 
         const TopologyInfo& topo_info = getCachedTopology();

@@ -134,6 +134,33 @@ struct D4DC6DCNPairs {
 };
 
 /**
+ * @brief Per-atom D4 data from which the CPU energy loop evaluates each pair's C6 and
+ *        dC6/dCN itself (Claude Generated, Oct 2026).
+ *
+ * Replaces, on the CPU FFWorkspace path, the two per-step passes over the whole D4 pair list
+ * (writing GFNFFDispersion::C6 and D4DC6DCNPairs::dc6_di/dc6_dj, ~12.8 M pairs at 5747 atoms)
+ * by the formulas of d4_pair_c6.h inside FFWorkspace::calcD4Dispersion. Filled and owned by
+ * D4ParameterGenerator (fusedPairC6View()); all pointers stay valid until its next update.
+ * Index layout: per-atom rows of MAX_REF = 7 doubles; g/dg rows (atom*K + slot)*7.
+ * Two states: C6 uses the CURRENT weights; dC6/dCN uses the weights of the last derivative
+ * rebuild (the *_d pointers). They differ only after a weight refresh without derivative
+ * rebuild (D4ParameterGenerator::refreshC6WeightsForCN), exactly as the stored arrays did.
+ * Not used by the GPU paths (they keep their own C6 / dC6dCN kernels).
+ */
+struct D4FusedC6View {
+    int K = 0;                       ///< element slots per atom row of g/dg
+    const int* slot = nullptr;       ///< [atom] slot of the atom's element
+    const int* nb = nullptr;         ///< [atom] reference states (<= 7), current weights
+    const double* g = nullptr;       ///< half-contraction of the current weights
+    const double* w = nullptr;       ///< current Gaussian weights, [atom*7 + b]
+    const int* nb_d = nullptr;       ///< as nb, state of the last dC6/dCN rebuild
+    const double* g_d = nullptr;     ///< as g, state of the last dC6/dCN rebuild
+    const double* dg_d = nullptr;    ///< half-contraction of dw/dCN
+    const double* w_d = nullptr;     ///< as w, state of the last dC6/dCN rebuild
+    const double* dw_d = nullptr;    ///< dw/dCN, [atom*7 + b]
+};
+
+/**
  * @brief D3 Dispersion pairwise term (standard BJ damping)
  *
  * D3 uses standard BJ damping: E = -s6*C6/(r^6+R0^6) - s8*C8/(r^8+R0^8)

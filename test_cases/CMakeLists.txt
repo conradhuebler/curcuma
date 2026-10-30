@@ -804,6 +804,21 @@ if(Python3_Interpreter_FOUND)
                      $<TARGET_FILE:curcuma> ${CMAKE_SOURCE_DIR})
     set_tests_properties(gfnff_cn_zero_guard PROPERTIES TIMEOUT 300 LABELS "gfnff")
 
+    # Claude Generated (Oct 2026): fused D4 pair C6 (-gfnff.disp_c6_fused, default on) is bit-identical to the
+    # stored per-pair path: -sp gradient files and 20-step MD (also with d4_cn_cache_threshold); docs/GFNFF_STATUS.md.
+    add_test(NAME gfnff_d4_fused_c6
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_d4_fused_c6.py
+                     $<TARGET_FILE:curcuma> ${CMAKE_SOURCE_DIR})
+    set_tests_properties(gfnff_d4_fused_c6 PROPERTIES TIMEOUT 300 LABELS "gfnff;d4")
+    # Claude Generated (Oct 2026): CPU projected PCG - deferred constraint block (fallback fills it) and the CG
+    # guards that replace the sparse-Cholesky check of the local inverse; docs/EEQ_SOLVER_CONTROL.md.
+    add_test(NAME gfnff_eeq_ppcg_guards
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_eeq_ppcg_guards.py
+                     $<TARGET_FILE:curcuma> ${CMAKE_SOURCE_DIR})
+    set_tests_properties(gfnff_eeq_ppcg_guards PROPERTIES TIMEOUT 600 LABELS "gfnff;eeq")
+
     # Claude Generated (Oct 2026): -lbfgs_max_atom_step (per-atom step cap of the lbfgspp optimiser);
     # default off = bit-identical; docs/LBFGS_ATOM_STEP_CAP.md.
     add_test(NAME opt_lbfgs_atom_step_cap

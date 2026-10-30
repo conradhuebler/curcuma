@@ -39,6 +39,8 @@ Each item was a real defect; evidence in [docs/KNOWN_ISSUES_ARCHIVE.md](../../..
 - **`-gfnff.charge_groups ionpairs`** (experimental): neutral systems; onium fragments +1, odd-electron fragments -1 (parity), groups read from the final topology and applied from pass 1 (`buildIonPairChargeGroups`, end of `calculateTopologyInfo`); not for shared-proton reactions ([docs/FRAG_CHARGE_MODEL.md](../../../../docs/FRAG_CHARGE_MODEL.md)).
 - **`-gfnff.cn_zero_guard`** (opt-in): TERM 1b in `FFWorkspace::postProcess` is 0 at CN == 0 (isolated ion); gradient only, GPU falls back to CPU (Known Issue #43).
 - **Topology cache** (`<basename>.topo.json`): delete it before re-measuring after any topology or charge change.
+- **Phase-2 A on the CPU ppcg path** has an unwritten constraint block (stale memory); a new reader of C or the full A must call `fillDeferredConstraintBlock` first, as the direct-solver fallback does (Oct 2026).
+- **CPU localinv G is not checked for definiteness**: the CG guards (rz, pAp, convergence, true residual after each build) fall back to Jacobi; keep them when changing the PPCG (`gfnff_eeq_ppcg_guards`).
 - **No numerical path may depend on the verbosity level** (#38) or on thread arrival order (#36).
 - **Element-indexed tables**: check the length against the highest Z used (#22).
 
@@ -55,6 +57,7 @@ Each item was a real defect; evidence in [docs/KNOWN_ISSUES_ARCHIVE.md](../../..
 - GPU GFN-FF with net charge and several fragments (frag_charge_model ensemble) runs on the CPU method: `requestsCpuFallback()` in the wrapper, `EnergyCalculator::setMolecule()` swaps, counted GPU fallback; `-gfnff.frag_charge_model reference` keeps the GPU.
 - GPU GFN-FF with an implicit solvent (`-gfnff.solvent`, ALPB) also runs on the CPU method (counted fallback, `cpuFallbackReason()`); before Oct 17, 2026 the GPU path returned the gas-phase energy without a message.
 - ROCm (Oct 2026): the gradient-mode dispersion is the fused gather `k_dispersion_gather_uv` (C6 and dC6/dCN per edge from per-atom u/v vectors, no `k_dc6dcn_per_pair`); `CURCUMA_ROCM_DISP_FUSED=0` selects the unfused path.
+- CPU fused D4 pair C6 (Oct 2026, `disp_c6_fused`, default true): `calcD4Dispersion` computes C6 and dC6/dCN per pair from the generator's per-atom `D4FusedC6View` (`../dispersion/d4_pair_c6.h`); `GFNFFDispersion::C6` and `getDC6DCN()` are then not maintained per step (C6 only at a list rebuild). Bit-identical; [docs/GFNFF_STATUS.md](../../../../docs/GFNFF_STATUS.md).
 - GPU `k_dispersion` reads no EEQ charge (`zetac6` holds the Phase-1 topology charges, C6/dC6dCN come from the CN); since K2 (Oct 2026) it runs right after `dc6dcn`, parallel to the EEQ solve.
 - GFN-FF dispersion follows the reference: D4 C6 from Casimir-Polder integration with CN-only Gaussian weights and the modified BJ damping of `gfnff_gdisp0.f90`, not standard D3/D4 (`../dispersion/d4param_generator.cpp`). The three-body ATM term is not in the reference and is off by default (`dispersion_atm`).
 - `uff-d3`: `ForceFieldGenerator::GenerateUFFD3Parameters()` merges UFF terms with the D3 pair list.
