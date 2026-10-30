@@ -1335,6 +1335,38 @@ const std::unordered_map<std::string, CitationData>& database()
             "}"
         }},
 
+        // WP11 (Claude Generated, Oct 2026): meta-GGA functionals TPSS and SCAN.
+        // DOIs checked against Crossref (api.crossref.org) on Oct 30 2026.
+        { "tpss", {
+            "TPSS meta-GGA (Tao, Perdew, Staroverov & Scuseria 2003)",
+            "Tao, J.; Perdew, J. P.; Staroverov, V. N.; Scuseria, G. E. Phys. Rev. Lett. 2003, 91, 146401 (DOI: 10.1103/PhysRevLett.91.146401)",
+            "tao2003",
+            "@article{tao2003,\n"
+            "  author = {Tao, Jianmin and Perdew, John P. and Staroverov, Viktor N. and Scuseria, Gustavo E.},\n"
+            "  title = {Climbing the Density Functional Ladder: Nonempirical Meta-Generalized Gradient Approximation Designed for Molecules and Solids},\n"
+            "  journal = {Phys. Rev. Lett.},\n"
+            "  year = {2003},\n"
+            "  volume = {91},\n"
+            "  pages = {146401},\n"
+            "  doi = {10.1103/PhysRevLett.91.146401}\n"
+            "}"
+        }},
+
+        { "scan", {
+            "SCAN meta-GGA (Sun, Ruzsinszky & Perdew 2015)",
+            "Sun, J.; Ruzsinszky, A.; Perdew, J. P. Phys. Rev. Lett. 2015, 115, 036402 (DOI: 10.1103/PhysRevLett.115.036402)",
+            "sun2015",
+            "@article{sun2015,\n"
+            "  author = {Sun, Jianwei and Ruzsinszky, Adrienn and Perdew, John P.},\n"
+            "  title = {Strongly Constrained and Appropriately Normed Semilocal Density Functional},\n"
+            "  journal = {Phys. Rev. Lett.},\n"
+            "  year = {2015},\n"
+            "  volume = {115},\n"
+            "  pages = {036402},\n"
+            "  doi = {10.1103/PhysRevLett.115.036402}\n"
+            "}"
+        }},
+
         // WP8 (Claude Generated, Oct 2026): Kohn-Sham nuclear gradient and its grid weight derivative.
         // DOIs checked against Crossref (api.crossref.org) on Oct 30 2026.
         { "ks_gradient_jgp", {

@@ -1,5 +1,6 @@
 /*
- * <Native QM: exchange-correlation functionals of closed-shell Kohn-Sham DFT (WP5: LDA, WP6: PBE, WP7: B3LYP)>
+ * <Native QM: exchange-correlation functionals of closed-shell Kohn-Sham DFT (WP5: LDA, WP6: PBE, WP7: B3LYP,
+ *  WP11: meta-GGA TPSS and SCAN)>
  * Copyright (C) 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * Kohn-Sham DFT (W. Kohn, L. J. Sham, Phys. Rev. 140, A1133 (1965)) replaces the Hartree-Fock exchange by an
@@ -71,8 +72,19 @@
  *   Further global hybrids (e.g. PBE0 = 0.75 PBE-X + PBE-C + 0.25 HF) are one more table function like
  *   b3lypFunctional(); not added (not validated).
  *
- * Claude Generated (Oct 2026, WP5; WP6 GGA; WP7 B3LYP). AI-generated, machine-tested only
- * (docs/DFT_ROADMAP/WP5_lda_vwn5.md, WP6_pbe_gga.md, WP7_b3lyp_hybrid.md).
+ * WP11 stage 1 (Oct 2026): meta-GGAs, rung 3, which also depend on the kinetic energy density
+ *   tau = 1/2 sum_i^occ |grad psi_i|^2 (both spins) = 1/2 sum_mn P_mn grad phi_m . grad phi_n
+ * (the convention of libxc's spin-unpolarised tau and of PySCF's eval_rho):
+ *   - TPSS (J. Tao, J. P. Perdew, V. N. Staroverov, G. E. Scuseria, Phys. Rev. Lett. 91, 146401 (2003)), libxc
+ *     MGGA_X_TPSS + MGGA_C_TPSS (= PySCF 'TPSS', ORCA 'TPSS');
+ *   - SCAN (J. Sun, A. Ruzsinszky, J. P. Perdew, Phys. Rev. Lett. 115, 036402 (2015)), libxc MGGA_X_SCAN +
+ *     MGGA_C_SCAN (= PySCF 'SCAN').
+ *   Formulas, equation numbers, constants, libxc thresholds and the derivative scheme (dual numbers): the meta-GGA
+ *   block of qm_xc_kernels.h. V_xc gains (1/2) v_tau grad phi_m . grad phi_n (buildVxc). Energies on the CPU only;
+ *   no analytic gradient and no device kernel yet (stages 2 and 3, docs/DFT_ROADMAP/WP11_meta_gga.md).
+ *
+ * Claude Generated (Oct 2026, WP5; WP6 GGA; WP7 B3LYP; WP11 meta-GGA). AI-generated, machine-tested only
+ * (docs/DFT_ROADMAP/WP5_lda_vwn5.md, WP6_pbe_gga.md, WP7_b3lyp_hybrid.md, WP11_meta_gga.md).
  *
  * This program is free software under GPL-3.0
  */
@@ -106,6 +118,8 @@ std::string vwnName(VWNVariant v);
 bool isExchangeKernel(XCKernel k);
 /// True when the kernel depends on sigma = |grad rho|^2 (GGA).
 bool isGGAKernel(XCKernel k);
+/// True when the kernel depends on tau (meta-GGA, WP11); it needs sigma as well.
+bool isMGGAKernel(XCKernel k);
 /// Short kernel name for the output ("Slater", "VWN5", "PBE-X", ...).
 std::string kernelName(XCKernel k);
 
@@ -122,8 +136,12 @@ struct XCFunctional {
     std::vector<XCTerm> terms;        ///< empty = no density functional (HF)
     /// True when there is any density-functional part (else the SCF is plain HF).
     bool hasXC() const { return !terms.empty(); }
-    /// GGA: the kernels need sigma = |grad rho|^2 (AO derivatives on the grid) and return v_sigma.
+    /// GGA: the kernels need sigma = |grad rho|^2 (AO derivatives on the grid) and return v_sigma (also true for a
+    /// meta-GGA).
     bool needsGradient() const;
+    /// Meta-GGA (WP11): the kernels also need tau and return v_tau; V_xc and E_xc then come from the meta-GGA branch
+    /// of buildVxc (CPU only, no analytic gradient, no device kernel yet).
+    bool needsTau() const;
     /// Human-readable label for the output.
     std::string label() const;
     // Special members out of line: the implicit inline ones trip -Winline (as qmgrid::GridOptions).
@@ -141,6 +159,14 @@ XCFunctional pbeFunctional();
 /// (VWN5: ORCA B3LYP, PySCF B3LYP5; VWN-RPA: Gaussian/libxc/PySCF B3LYP, ORCA B3LYP/G) is named in the label.
 /// Claude Generated (WP7).
 XCFunctional b3lypFunctional(VWNVariant v);
+/**
+ * @brief The meta-GGA functionals by method name (WP11): "tpss" (TPSS_X + TPSS_C), "scan" (SCAN_X + SCAN_C), a_x = 0.
+ *
+ * One table (qm_xc.cpp, kMetaGGATable): name, label, exact-exchange fraction, terms. A global meta-GGA hybrid is one
+ * more row once its kernels exist (TPSSh: 0.9 TPSS_X + TPSS_C with a_x = 0.1; r2SCAN needs its own kernels); neither
+ * is implemented or validated. False for an unknown name. Claude Generated (WP11).
+ */
+bool metaGGAFunctional(const std::string& name, XCFunctional& f);
 
 // ---------------------------------------------------------------------------------------------------------------
 // Point kernels (closed shell, rho = total density > 0). eps = energy per electron (Eh), v = d(rho eps)/d rho,
@@ -163,6 +189,10 @@ void b88Exchange(double rho, double sigma, double& eps, double& vrho, double& vs
 void lypCorrelation(double rho, double sigma, double& eps, double& vrho, double& vsigma);
 /// Any kernel by enum (sigma ignored by LDA kernels, vsigma = 0 for them). Claude Generated (WP6).
 void evaluateKernel(XCKernel k, double rho, double sigma, double& eps, double& vrho, double& vsigma);
+/// A meta-GGA kernel (TPSS_X, TPSS_C, SCAN_X, SCAN_C) at (rho, sigma, tau): eps, v_rho, v_sigma, v_tau, with libxc's
+/// tau floor and sigma <= 8 rho tau (qm_xc_kernels.h). NaN for a kernel that is not a meta-GGA. Claude Generated (WP11).
+void evaluateKernelMGGA(XCKernel k, double rho, double sigma, double tau, double& eps, double& vrho, double& vsigma,
+                        double& vtau);
 
 /**
  * @brief Functional values on a block of points.
@@ -174,6 +204,9 @@ void evaluateKernel(XCKernel k, double rho, double sigma, double& eps, double& v
  */
 void evaluateXC(const XCFunctional& f, const Vector& rho, const Vector& sigma, double rho_threshold, Vector& ex,
                 Vector& ec, Vector& vrho, Vector& vsigma);
+/// evaluateXC for a meta-GGA functional (f.needsTau()): also tau in and v_tau out. Claude Generated (WP11).
+void evaluateXCMeta(const XCFunctional& f, const Vector& rho, const Vector& sigma, const Vector& tau,
+                    double rho_threshold, Vector& ex, Vector& ec, Vector& vrho, Vector& vsigma, Vector& vtau);
 
 /// Result of one V_xc build.
 struct XCResult {
@@ -194,6 +227,10 @@ struct XCResult {
  *        (dE_xc/dP_mn with sigma = grad rho . grad rho and d grad rho / dP_mn = grad(phi_m phi_n)),
  *        built as X = phi^T [ (w v_rho / 2) phi + 2 w v_sigma (grad rho . grad phi) ], V = X + X^T,
  *   E_xc = sum_g w_g rho_g eps_xc(rho_g, sigma_g),
+ *   meta-GGA (WP11, f.needsTau()): V_mn = sum_g w_g [ v_rho phi_m phi_n + 2 v_sigma grad rho . grad(phi_m phi_n)
+ *        + (1/2) v_tau grad phi_m . grad phi_n ]   (d tau / d P_mn = (1/2) grad phi_m . grad phi_n), the tau part
+ *        built as sum_k (d_k phi)^T diag(w v_tau / 2) (d_k phi); own function (buildVxcMeta in qm_xc.cpp), screened
+ *        and unscreened, chunking as the screened path; the LDA/GGA code paths are not touched,
  *
  * in blocks of `block` points (AOEvaluator values, rho via qmgrid::densityOnBlock). The blocks are split into a
  * fixed number of contiguous chunks that depends only on nbf (not on `threads`); every chunk accumulates its own
@@ -229,7 +266,8 @@ struct XCGradient {
  * from AOEvaluator deriv 2). `points`: for a point of atom B the translation identity d_r e = - sum_C (d e / d R_C)
  * moves - sum of all basis parts of that point onto B. bf_atom[m] = atom of active function m.
  * Fixed chunking from nbf as buildVxc: independent of `threads`. With an active `screen` the blocks and kept
- * functions of the screen (as buildVxc). Claude Generated (Oct 2026, WP8; screening Oct 2026).
+ * functions of the screen (as buildVxc). A meta-GGA functional (f.needsTau()) has no gradient yet (WP11 stage 2):
+ * basis and points are set to NaN, never a silent wrong number. Claude Generated (Oct 2026, WP8; screening Oct 2026).
  */
 void buildXCGradient(const qmgrid::MolecularGrid& grid, const qmgrid::AOEvaluator& ao, const Matrix& P,
                      const XCFunctional& f, double rho_threshold, int threads, const std::vector<int>& bf_atom,

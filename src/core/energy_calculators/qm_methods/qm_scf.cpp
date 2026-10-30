@@ -1466,6 +1466,12 @@ bool QMEngine::ensureGpuXC() const
             CurcumaLogger::warn(fmt::format("QM: unknown -qm.gpu_xc '{}' (use auto|on|off); using auto", m_gpu_xc));
         }
     }
+    if (m_xc.needsTau()) {
+        // WP11 stage 1: no device meta-GGA kernel yet; the XC part runs on the CPU (counted fallback, -gpu_strict
+        // stops here), J/K and the rest of the SCF keep their GPU paths
+        gpuXCFailed("meta-GGA '" + m_xc.name + "' has no device XC kernel yet (WP11 stage 3)");
+        return false;
+    }
     if (m_gpu_xc_obj) return true;
     if (!ensureXCGrid()) return false;
     const auto t0 = std::chrono::steady_clock::now();

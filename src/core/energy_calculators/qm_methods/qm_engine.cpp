@@ -32,6 +32,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <stdexcept>
@@ -49,6 +50,8 @@ std::string functionalName(QMFunctional f)
         case QMFunctional::LDA:   return "lda";
         case QMFunctional::PBE:   return "pbe";
         case QMFunctional::B3LYP: return "b3lyp";
+        case QMFunctional::TPSS:  return "tpss";
+        case QMFunctional::SCAN:  return "scan";
     }
     return "qm";
 }
@@ -281,6 +284,30 @@ QMEngine::QMEngine(QMFunctional functional, const json& config)
     }
     // WP6 (Claude Generated, Oct 2026): PBE = GGA_X_PBE + GGA_C_PBE, no parameters of its own
     if (m_functional == QMFunctional::PBE) m_xc = qmxc::pbeFunctional();
+    // WP11 stage 1 (Claude Generated, Oct 2026): meta-GGAs from the table in qm_xc.cpp, no parameters of their own
+    if (m_functional == QMFunctional::TPSS || m_functional == QMFunctional::SCAN)
+        qmxc::metaGGAFunctional(functionalName(m_functional), m_xc);
+    if (m_xc.needsTau() && CurcumaLogger::get_verbosity() >= 1) {
+        // Grid hint from the WP11 measurements (def2-SVP, H2O..benzene, grid table in WP11_meta_gga.md): TPSS needs
+        // about 99x974 for 1e-6 Eh (benzene: 2.4e-6 at sg3), SCAN converges slowly and non-monotonically in the
+        // radial count (benzene: 4e-5 Eh at 250, 3e-6 at 300, 7e-7 at 400 radial points). No default is changed.
+        int nrad = 0, nang = 0;
+        const std::string& lv = m_grid_options.level;
+        if (lv == "sg0") nrad = 23, nang = 170;
+        else if (lv == "sg1") nrad = 50, nang = 194;
+        else if (lv == "sg2") nrad = 75, nang = 302;
+        else if (lv == "sg3") nrad = 99, nang = 590;
+        else if (std::sscanf(lv.c_str(), "%dx%d", &nrad, &nang) != 2) nrad = nang = 0;
+        const bool scan = m_xc.name == "scan";
+        if (nrad > 0 && (scan ? (nrad < 400 || nang < 590) : nang < 974))
+            CurcumaLogger::warn(fmt::format(
+                "QM: meta-GGA '{}' on grid {}: {}; compare energies only on the same grid "
+                "(docs/DFT_ROADMAP/WP11_meta_gga.md, grid table)", m_xc.name, lv,
+                scan ? "SCAN energies change by up to 3e-3 Eh between sg1, sg2 and sg3 and converge slowly in the "
+                       "radial count; about 1e-6 Eh needs -qm.grid 400x590 (300x590 for H2O/CH4)"
+                     : "TPSS energies change by up to 2.4e-5 Eh from sg1 and 2.4e-6 Eh from sg3 (benzene); about "
+                       "1e-6 Eh needs -qm.grid 99x974"));
+    }
     if (config.contains("grid_response")) {  // WP8 (Oct 2026)
         const json& v = config["grid_response"];
         if (v.is_boolean())
@@ -484,7 +511,14 @@ double QMEngine::Calculation(bool gradient)
     m_gradient_failed = false;
     m_gradient_error.clear();
     if (gradient) {
-        if (isKohnSham() && xcSetupFailed()) {
+        if (m_xc.needsTau()) {
+            // WP11 stage 1 (Oct 2026): the meta-GGA gradient (v_tau terms, grid response) is not implemented
+            m_gradient = Matrix::Zero(m_atomcount, 3);
+            m_gradient_failed = true;
+            m_gradient_error = fmt::format("QM: no analytic gradient for the meta-GGA '{}' yet (energies only, "
+                                           "docs/DFT_ROADMAP/WP11_meta_gga.md stage 2)", m_xc.name);
+            CurcumaLogger::error(m_gradient_error);
+        } else if (isKohnSham() && xcSetupFailed()) {
             m_gradient = Matrix::Zero(m_atomcount, 3);
             m_gradient_failed = true;
             m_gradient_error = "QM: DFT grid could not be built -- no analytic gradient";

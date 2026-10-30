@@ -125,7 +125,7 @@ inline void hf3c()
     CitationRegistry::cite("bj");
 }
 
-/// Closed-shell Kohn-Sham (WP5 LDA, WP6 PBE, WP7 B3LYP; Claude Generated Oct 2026): Kohn-Sham, the papers of the
+/// Closed-shell Kohn-Sham (WP5 LDA, WP6 PBE, WP7 B3LYP, WP11 TPSS/SCAN; Claude Generated Oct 2026): Kohn-Sham, the papers of the
 /// kernels in the functional (Dirac/Slater exchange, VWN correlation with both variants in one paper, PBE with its
 /// PW92 LDA correlation, B88, LYP with the Laplacian-free form of Miehlich et al.), for a hybrid (a_x != 0) Becke 1993
 /// and Stephens et al. 1994 (B3LYP), and the molecular grid (Becke partition, Treutler radial, Lebedev angular).
@@ -156,6 +156,19 @@ inline void kohnSham(const qmxc::XCFunctional& f, bool treutler_radial)
             case qmxc::XCKernel::LYP_C:
                 CitationRegistry::cite("lyp");
                 CitationRegistry::cite("lyp_miehlich");
+                break;
+            case qmxc::XCKernel::TPSS_X:  // WP11: TPSS correlation builds on PBE correlation (PW92 LDA part)
+            case qmxc::XCKernel::TPSS_C:
+                CitationRegistry::cite("tpss");
+                if (t.kernel == qmxc::XCKernel::TPSS_C) {
+                    CitationRegistry::cite("pbe");
+                    CitationRegistry::cite("pw92");
+                }
+                break;
+            case qmxc::XCKernel::SCAN_X:  // WP11: SCAN correlation uses PW92 in eps_c^1
+            case qmxc::XCKernel::SCAN_C:
+                CitationRegistry::cite("scan");
+                if (t.kernel == qmxc::XCKernel::SCAN_C) CitationRegistry::cite("pw92");
                 break;
         }
     }

@@ -516,13 +516,15 @@ const std::vector<MethodDescriptor>& MethodFactory::methodTable()
         // Claude Generated: native ab-initio QM engine. Each level is its own method
         // name; it is fixed here, never a parameter. Shared settings live in -qm.*
         // (the pre-Sep-2026 -dft.* scope is still merged).
-        { {"hf", "lda", "pbe", "b3lyp"}, "Quantum Methods (native)",
-          "Native ab-initio QM: hf = closed-shell RHF (validated vs ORCA); lda/pbe/b3lyp = closed-shell Kohn-Sham with analytic gradient (b3lyp VWN per -qm.vwn_variant, default vwn5)",
+        { {"hf", "lda", "pbe", "b3lyp", "tpss", "scan"}, "Quantum Methods (native)",
+          "Native ab-initio QM: hf = closed-shell RHF (validated vs ORCA); lda/pbe/b3lyp = closed-shell Kohn-Sham with analytic gradient (b3lyp VWN per -qm.vwn_variant, default vwn5); tpss/scan = closed-shell meta-GGA, energy only, CPU XC (WP11 stage 1)",
           always, {{"Native", always}},
           [](const std::string& m, const json& c) -> std::unique_ptr<ComputationalMethod> {
               const QMFunctional f = (m == "hf")    ? QMFunctional::HF
                                     : (m == "lda")   ? QMFunctional::LDA
                                     : (m == "pbe")   ? QMFunctional::PBE
+                                    : (m == "tpss")  ? QMFunctional::TPSS
+                                    : (m == "scan")  ? QMFunctional::SCAN
                                                      : QMFunctional::B3LYP;
               CurcumaLogger::success("Method '" + m + "' resolved to native QM engine");
               return std::make_unique<QMMethod>(f, c); } },
@@ -642,7 +644,7 @@ bool isExternalXtbGfn(const std::string& m)
 bool isNativeQm(const std::string& m)
 {
     static const std::vector<std::string> names = {
-        "hf", "lda", "pbe", "b3lyp", "hf-3c", "hf3c", "mp2", "scs-mp2", "sos-mp2",
+        "hf", "lda", "pbe", "b3lyp", "tpss", "scan", "hf-3c", "hf3c", "mp2", "scs-mp2", "sos-mp2",
         "ri-mp2", "scs-ri-mp2", "sos-ri-mp2", "ccsd", "lmp2", "local-ri-mp2" };
     return std::find(names.begin(), names.end(), m) != names.end();
 }

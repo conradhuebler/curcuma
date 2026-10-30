@@ -68,7 +68,9 @@ enum class QMFunctional {
     HF,    ///< Hartree-Fock (rung 666, exact exchange only) -- WP3
     LDA,   ///< Slater-Dirac + VWN5 correlation -- WP5
     PBE,   ///< PBE-GGA (+ grad rho, rung 2) -- WP6
-    B3LYP  ///< B3LYP hybrid (0.2 exact exchange, B88 + LYP, VWN per -qm.vwn_variant) -- WP7
+    B3LYP, ///< B3LYP hybrid (0.2 exact exchange, B88 + LYP, VWN per -qm.vwn_variant) -- WP7
+    TPSS,  ///< TPSS meta-GGA (+ tau, rung 3; energy only, CPU) -- WP11 stage 1
+    SCAN   ///< SCAN meta-GGA (+ tau, rung 3; energy only, CPU) -- WP11 stage 1
 };
 
 // Claude Generated: qm parameter module (functional intentionally absent -- set by method name).
@@ -277,8 +279,9 @@ END_PARAMETER_DEFINITION
  *
  * Inherits QMDriver (matrix-based QM base) exactly like NDDO. Calculation()
  * runs the closed-shell HF SCF for QMFunctional::HF and the closed-shell
- * Kohn-Sham SCF for QMFunctional::LDA (WP5), ::PBE (WP6) and the hybrid ::B3LYP (WP7)
- * (same loop, F = H + J + V_xc - (a_x/2) K). hasGradient() is true for HF and the KS functionals (WP8).
+ * Kohn-Sham SCF for QMFunctional::LDA (WP5), ::PBE (WP6), the hybrid ::B3LYP (WP7) and the meta-GGAs ::TPSS,
+ * ::SCAN (WP11 stage 1) (same loop, F = H + J + V_xc - (a_x/2) K). hasGradient() is true for HF and the LDA/GGA/hybrid
+ * KS functionals (WP8), false for the meta-GGAs (no analytic gradient yet; a request is an error).
  *
  * Claude Generated: Native KS-DFT engine scaffold, renamed QMEngine Sep 2026
  */
@@ -308,7 +311,8 @@ public:
 
     /// Analytic nuclear gradient: closed-shell HF (WP8, Sep 2026) and Kohn-Sham lda/pbe/b3lyp (WP8 DFT, Oct 2026:
     /// HF-like terms with a_x-weighted exchange + XC basis part + optional grid response, -qm.grid_response).
-    bool hasGradient() const override { return m_functional == QMFunctional::HF || isKohnSham(); }
+    /// WP11 stage 1: false for a meta-GGA (tpss, scan), whose gradient is not implemented yet.
+    bool hasGradient() const override { return m_functional == QMFunctional::HF || (isKohnSham() && !m_xc.needsTau()); }
     /// True for a Kohn-Sham functional (WP5: lda, WP6: pbe, WP7: b3lyp). Claude Generated (Oct 2026).
     bool isKohnSham() const { return m_xc.hasXC(); }
     /// The XC functional of this engine (a_x = 1 and no density functional for HF).
