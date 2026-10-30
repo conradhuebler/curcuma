@@ -34,7 +34,7 @@ struct QMGpuGradExtra {
 };
 
 /// Two-electron part of the closed-shell RHF nuclear gradient on a device, integral-direct:
-///   g_X = 1/2 sum_{mnls} D_mnls d(mn|ls)/dX,  D_mnls = P_mn P_ls - 1/4 (P_ml P_ns + P_ms P_nl),
+///   g_X = 1/2 sum_{mnls} D_mnls d(mn|ls)/dX,  D_mnls = P_mn P_ls - kx/4 (P_ml P_ns + P_ms P_nl),
 /// the same definition, units (Eh/Bohr) and canonical-quartet / translational-invariance scheme
 /// as qmint::gradientTwoElectron (qm_integrals.cpp). Device memory O(n^2) (P, Pmax) plus the
 /// pair tables; no ERI or derivative-integral tensor is ever stored.
@@ -47,7 +47,10 @@ public:
     /// skip a canonical shell quartet if
     ///   Q_AB Q_CD (Pmax_AB Pmax_CD + 1/4 (Pmax_AC Pmax_BD + Pmax_AD Pmax_BC)) < threshold
     /// (0 = every quartet, as the CPU reference). False on a device error (caller: CPU fallback).
-    virtual bool compute(const double* P, double threshold, double* grad) = 0;
+    /// kx (Claude Generated, Oct 2026, GPU KS-DFT): weight of the exchange part, D = P_mn P_ls - kx/4 (...), as
+    /// qmint::gradientTwoElectronScaled; kx = 1 is the RHF expression (same code path), kx = 0 (LDA/PBE) drops the
+    /// exchange products and their screening term. Entry point curcuma_<backend>_create_qm_grad2e_kx.
+    virtual bool compute(const double* P, double threshold, double kx, double* grad) = 0;
     /// Shell quartets evaluated in the last compute().
     virtual long long lastQuartets() const { return 0; }
     /// One ASCII line of device timings, empty if none.

@@ -126,10 +126,9 @@ Stand.
 - **Natives RHF, Fragment-Startdichte für Cluster** (2026-10-27): Gegenstück zu `-scf_guess fragments` der GFN-Methoden (Blockdichte einzeln konvergierter Moleküle);
   nicht umgesetzt, Nutzen an Wasser/Harnstoff-Clustern ungemessen. [docs/QM_SHARED_SCF_INFRA_2026-10-27.md](docs/QM_SHARED_SCF_INFRA_2026-10-27.md)
 
-- **Native LDA/PBE (WP5/WP6): J-only-Weg für integral-direct** (2026-10-30, [WP5](docs/DFT_ROADMAP/WP5_lda_vwn5.md)): `-method lda`/`pbe` mit `-qm.scf_direct on` bzw. Device-Tensor berechnet K mit und verwirft es; ein J-Digest mit eigenem Screening fehlt. V_xc nur CPU, keine AO-Screening-Listen pro Block.
-- **Native KS-Gradient (WP8 DFT): GPU und J-only** (2026-10-30, [WP8](docs/DFT_ROADMAP/WP8_analytischer_gradient.md)): der 2e-Teil für lda/pbe/b3lyp läuft immer auf der CPU
-  (`gradientTwoElectronScaled`, Q-G7-Kernel hat RHF-Gewichte); für LDA/PBE fehlt ein J-only-Gradient mit eigenem Screening, XC-Gradient nur CPU.
-  Benzol B3LYP: 2e 2.9 s von ~3 s Gradient.
+- **Native LDA/PBE (WP5/WP6): J-only-Weg für integral-direct** (2026-10-30, [WP5](docs/DFT_ROADMAP/WP5_lda_vwn5.md)): `-method lda`/`pbe` mit `-qm.scf_direct on` bzw. Device-Tensor berechnet K mit und verwirft es; ein J-Digest mit eigenem Screening fehlt (CPU und GPU); auch der 2e-Gradient (kx = 0) lässt nur die K-Produkte weg.
+- **KS-DFT auf der GPU, offen** (2026-10-30, [QM_GPU_ROADMAP Abschnitt 4](docs/QM_GPU_ROADMAP.md#4-kohn-sham-dft-on-the-gpu-oct-2026)): kein AO-Screening pro Gitterblock (FP64-GEMMs dominieren auf der RTX 5090);
+  FP32-Phase (`-qm.gpu_eri_precision auto`) kostet bei KS direct +2 Iterationen (Koffein); Gewichtsableitung nur bis 700 Atome; nur RTX 5090 getestet, ROCm (`qm_xc_kernels.h` hipcc-tauglich geschrieben) nicht gebaut.
 
 ## 3. Tests und Validierung
 

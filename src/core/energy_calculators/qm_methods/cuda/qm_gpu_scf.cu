@@ -14,6 +14,7 @@
 //
 //   Fock      F = H + J - 1/2 K              J, K from the device J/K builder (Q-G1..Q-G3),
 //                                            full or incremental on P - P_ref
+//             KS: F = H + J + V_xc - kx/2 K  V_xc from the device XC object (cuda/qm_gpu_xc.cu), full P (Oct 2026)
 //   DIIS      e = X^T (F P S - S P F) X     commutator in the orthonormal basis (Pulay 1982);
 //                                            Gram matrix B_ij = <e_i, e_j> and the ADIIS model
 //                                            (Hu, Yang, J. Chem. Phys. 132, 054109 (2010)) are
@@ -52,6 +53,19 @@ __global__ void fockKernel(const double* __restrict__ H, const double* __restric
     const size_t k = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (k >= nn) return;
     const double f = __dsub_rn(__dadd_rn(H[k], J[k]), __dmul_rn(0.5, K[k]));
+    F[k] = f;
+    HF[k] = __dadd_rn(H[k], f);
+}
+
+/// Kohn-Sham Fock matrix (Claude Generated, Oct 2026): F = ((H + J) + V) - (kx/2) K (no K term for kx = 0), HF = H + F;
+/// the expression of QMEngine::composeFock (m_H + J + V_xc, then F -= (0.5 a_x) K), explicit rounding.
+__global__ void fockKSKernel(const double* __restrict__ H, const double* __restrict__ J, const double* __restrict__ K,
+                             const double* __restrict__ V, double kx, double* __restrict__ F, double* __restrict__ HF, size_t nn)
+{
+    const size_t k = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= nn) return;
+    double f = __dadd_rn(__dadd_rn(H[k], J[k]), V[k]);
+    if (kx != 0.0) f = __dsub_rn(f, __dmul_rn(0.5 * kx, K[k]));
     F[k] = f;
     HF[k] = __dadd_rn(H[k], f);
 }
@@ -212,7 +226,7 @@ public:
             && alloc(&m_dK, nn) && alloc(&m_F, nn) && alloc(&m_HF, nn) && alloc(&m_Fuse, nn) && alloc(&m_T1, nn)
             && alloc(&m_T2, nn) && alloc(&m_C, nn) && alloc(&m_eps, (size_t)n) && alloc(&m_partial, (size_t)kRedBlocks * 1024)
             && alloc(&m_out, 1024) && alloc(&m_coef, 64) && alloc(&m_info, 1) && alloc(&m_slots, 64)
-            && alloc(&m_specs, 1024);
+            && alloc(&m_specs, 1024) && alloc(&m_V, nn);
         if (!ok) { why = "device allocation for the resident SCF failed"; return false; }
         int lwork = 0;
         if (cusolverDnDsyevd_bufferSize(m_cusolver, CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_LOWER, n, m_T1, n,
@@ -267,10 +281,21 @@ public:
             for (int j = 0; j < n; ++j) Xc[(size_t)j * n + i] = X[(size_t)i * n + j];
         m_t_fock = m_t_diis = m_t_eig = m_t_dens = 0.0;
         m_iters = 0;
+        m_nxc = 0;
         return cudaMemcpy(m_H, H, nn * sizeof(double), cudaMemcpyHostToDevice) == cudaSuccess
             && cudaMemcpy(m_S, S, nn * sizeof(double), cudaMemcpyHostToDevice) == cudaSuccess
             && cudaMemcpy(m_X, Xc.data(), nn * sizeof(double), cudaMemcpyHostToDevice) == cudaSuccess;
     }
+
+    bool setKohnSham(qmint::QMGpuXC* xc, double kx) override
+    {
+        if (xc && xc->nbf() != m_n) return false;
+        m_xc = xc;
+        m_kx = kx;
+        m_exc = 0.0;
+        return true;
+    }
+    double lastExc() const override { return m_exc; }
 
     bool setDensity(const double* P) override
     {
@@ -291,7 +316,16 @@ public:
             addKernel<<<grid1(nn), 256>>>(m_K, m_dK, nn);
         }
         if (cudaMemcpyAsync(m_Pref, m_P, nn * sizeof(double), cudaMemcpyDeviceToDevice, 0) != cudaSuccess) return false;
-        fockKernel<<<grid1(nn), 256>>>(m_H, m_J, m_K, m_F, m_HF, nn);
+        if (m_xc) {
+            // Kohn-Sham: V_xc always from the full current density (not incremental), as the host loop
+            qmint::QMGpuXCScalars sc;
+            if (!m_xc->vxcDevice(m_P, m_V, sc)) return false;
+            m_exc = sc.ex + sc.ec;
+            ++m_nxc;
+            fockKSKernel<<<grid1(nn), 256>>>(m_H, m_J, m_K, m_V, m_kx, m_F, m_HF, nn);
+        } else {
+            fockKernel<<<grid1(nn), 256>>>(m_H, m_J, m_K, m_F, m_HF, nn);
+        }
         // J/K builders are synchronous; the few element-wise kernels after them are included
         // in the next synchronising call's time instead of forcing a sync here.
         m_t_fock += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
@@ -429,9 +463,11 @@ public:
             Es = m_T1;
         }
         std::vector<PairSpec> specs = { { m_P, nullptr, m_HF, nullptr }, { Es, nullptr, Es, nullptr } };
+        if (m_xc) specs.push_back({ m_P, nullptr, m_V, nullptr });  // Kohn-Sham: Tr(P V_xc)
         std::vector<double> out;
         if (!reducePairs(specs, out, m_t_diis)) return false;
         e_elec = 0.5 * out[0];
+        if (m_xc) e_elec = e_elec - 0.5 * out[2] + m_exc;  // QMEngine::scfEnergy
         err_norm = std::sqrt(out[1]);
         return true;
     }
@@ -476,6 +512,7 @@ public:
                       "%d resident iterations: Fock (J/K) %.1f ms, DIIS %.1f ms, eigensolve (F'=X^T F X + syevd) %.1f ms, "
                       "C = X C' + density %.1f ms",
                       m_iters, m_t_fock, m_t_diis, m_t_eig, m_t_dens);
+        if (m_xc) return std::string(buf) + ", Fock incl. " + std::to_string(m_nxc) + " device V_xc builds (" + m_xc->name() + ")";
         return buf;
     }
 
@@ -542,6 +579,10 @@ private:
     int *m_info = nullptr, *m_slots = nullptr;
     PairSpec* m_specs = nullptr;
     bool m_pending_diis = false;
+    qmint::QMGpuXC* m_xc = nullptr;  // Kohn-Sham (not owned; QMEngine keeps it alive during the SCF)
+    double m_kx = 1.0, m_exc = 0.0;
+    double* m_V = nullptr;
+    int m_nxc = 0;
     double m_t_fock = 0.0, m_t_diis = 0.0, m_t_eig = 0.0, m_t_dens = 0.0;
     std::string m_name = "cuda";
 };
@@ -555,7 +596,8 @@ void setWhyScf(char* why, int whylen, const std::string& s)
 
 // Resident SCF state for n basis functions on `device` (QMGpuSCF*), or nullptr with a reason.
 // Claude Generated (Oct 2026, Q-G4).
-extern "C" void* curcuma_cuda_create_qm_scf(int n, int device, char* why, int whylen)
+// _ks (Oct 2026): QMGpuSCF::setKohnSham added, entry renamed with the vtable.
+extern "C" void* curcuma_cuda_create_qm_scf_ks(int n, int device, char* why, int whylen)
 {
     if (n <= 0) { setWhyScf(why, whylen, "empty basis"); return nullptr; }
     if (device >= 0 && cudaSetDevice(device) != cudaSuccess) { setWhyScf(why, whylen, "cudaSetDevice failed"); return nullptr; }

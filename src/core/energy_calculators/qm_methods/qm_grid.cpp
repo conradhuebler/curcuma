@@ -9,6 +9,7 @@
 
 #include "qm_grid.h"
 #include "qm_grid_tables.hpp"
+#include "qm_xc_kernels.h"  // partition polynomials and AO components shared with cuda/qm_gpu_xc.cu
 
 #include <algorithm>
 #include <cctype>
@@ -30,6 +31,14 @@ MolecularGrid& MolecularGrid::operator=(const MolecularGrid&) = default;
 MolecularGrid::~MolecularGrid() = default;
 AOBlock::AOBlock() = default;
 AOBlock::~AOBlock() = default;
+AOEvaluator::Shell::Shell() = default;
+AOEvaluator::Shell::Shell(const Shell&) = default;
+AOEvaluator::Shell::Shell(Shell&&) noexcept = default;
+AOEvaluator::Shell& AOEvaluator::Shell::operator=(const Shell&) = default;
+AOEvaluator::Shell& AOEvaluator::Shell::operator=(Shell&&) noexcept = default;
+AOEvaluator::Shell::~Shell() = default;
+FlatShells::FlatShells() = default;
+FlatShells::~FlatShells() = default;
 AOEvaluator::AOEvaluator() = default;
 AOEvaluator::AOEvaluator(const AOEvaluator&) = default;
 AOEvaluator& AOEvaluator::operator=(const AOEvaluator&) = default;
@@ -107,24 +116,11 @@ std::string lower(std::string s)
     return s;
 }
 
-/// Becke's cell function argument after three iterations of f(x) = 3/2 x - 1/2 x^3 (Becke 1988, eq. 19-20).
-inline double beckeIterate(double g)
-{
-    g = (3.0 - g * g) * g * 0.5;
-    g = (3.0 - g * g) * g * 0.5;
-    g = (3.0 - g * g) * g * 0.5;
-    return g;
-}
-
-/// Stratmann-Scuseria-Frisch polynomial (CPL 257, 213 (1996), eq. 14, a = 0.64), as pyscf gen_grid.stratmann.
-inline double stratmannIterate(double g)
-{
-    const double a = 0.64;
-    if (g <= -a) return -1.0;
-    if (g >= a) return 1.0;
-    const double ma = g / a, ma2 = ma * ma;
-    return (1.0 / 16.0) * (ma * (35.0 + ma2 * (-35.0 + ma2 * (21.0 - 5.0 * ma2))));
-}
+// Partition polynomials (Becke, Stratmann) and their derivatives: qm_xc_kernels.h (shared with the GPU).
+using kern::beckeIterate;
+using kern::stratmannIterate;
+using kern::beckeIterateDerivative;
+using kern::stratmannIterateDerivative;
 
 /// 1/R_ij and the size-adjustment parameters a_ij of the partition (shared by buildMolecularGrid and
 /// gridWeightGradient). Claude Generated (WP4; split out for WP8).
@@ -156,23 +152,6 @@ bool partitionPairs(const std::vector<int>& Z, const Matrix& posBohr, const std:
             }
         }
     return true;
-}
-
-/// d h / d nu of the partition polynomial h (beckeIterate / stratmannIterate). Claude Generated (WP8).
-inline double beckeIterateDerivative(double g)
-{
-    // h = f(f(f(g))), f(x) = (3 - x^2) x / 2, f'(x) = 3/2 (1 - x^2)
-    const double g1 = (3.0 - g * g) * g * 0.5;
-    const double g2 = (3.0 - g1 * g1) * g1 * 0.5;
-    return 1.5 * (1.0 - g2 * g2) * 1.5 * (1.0 - g1 * g1) * 1.5 * (1.0 - g * g);
-}
-
-inline double stratmannIterateDerivative(double g)
-{
-    const double a = 0.64;
-    if (g <= -a || g >= a) return 0.0;
-    const double z = g / a, z2 = z * z;
-    return (1.0 / 16.0) * (35.0 + z2 * (-105.0 + z2 * (105.0 - 35.0 * z2))) / a;
 }
 
 }  // namespace
@@ -403,14 +382,6 @@ void powersOf(GTO::OrbitalType t, int& l, int& m, int& n)
     }
 }
 
-/// x^k for small non-negative k (k = -1 returns 0; only used multiplied by a zero power).
-inline double ipow(double x, int k)
-{
-    if (k < 0) return 0.0;
-    double v = 1.0;
-    for (int i = 0; i < k; ++i) v *= x;
-    return v;
-}
 }  // namespace
 
 AOEvaluator::AOEvaluator(const std::vector<GTO::Orbital>& basis, const Matrix& Q)
@@ -461,10 +432,6 @@ void AOEvaluator::evaluate(const Matrix& points, int begin, int count, int deriv
     Matrix* dst[10] = { &out.phi, &out.dx, &out.dy, &out.dz, &out.dxx, &out.dxy, &out.dxz, &out.dyy, &out.dyz, &out.dzz };
     Matrix* v[10];
     for (int k = 0; k < 10; ++k) v[k] = m_transform ? &cbuf[k] : dst[k];
-    Matrix& vphi = *v[0];
-    Matrix& vdx = *v[1];
-    Matrix& vdy = *v[2];
-    Matrix& vdz = *v[3];
     const int nmat = hess ? 10 : (grad ? 4 : 1);
     for (int k = 0; k < nmat; ++k) v[k]->setZero(count, m_ncart);
     std::vector<double> e, ae, aae;
@@ -492,35 +459,10 @@ void AOEvaluator::evaluate(const Matrix& points, int begin, int count, int deriv
                 }
                 if (hess)
                     for (int k = 0; k < nprim; ++k) R2 += cc[k] * aae[k];
-                const int l = s.l[c], m = s.m[c], n = s.n[c];
-                const double xl = ipow(x, l), ym = ipow(y, m), zn = ipow(z, n);
                 const int mu = s.cart[c];
-                vphi(q, mu) = xl * ym * zn * R0;
-                if (grad) {
-                    // d/dx [x^l exp(-a r^2)] = (l x^(l-1) - 2 a x^(l+1)) exp(-a r^2)
-                    vdx(q, mu) = (l * ipow(x, l - 1) * R0 - 2.0 * x * xl * R1) * ym * zn;
-                    vdy(q, mu) = (m * ipow(y, m - 1) * R0 - 2.0 * y * ym * R1) * xl * zn;
-                    vdz(q, mu) = (n * ipow(z, n - 1) * R0 - 2.0 * z * zn * R1) * xl * ym;
-                }
-                if (hess) {
-                    // d2/dx2 [x^l e^(-a r^2)] = (l (l-1) x^(l-2) - 2 a (2l+1) x^l + 4 a^2 x^(l+2)) e^(-a r^2);
-                    // d2/dxdy = (l x^(l-1) - 2 a x^(l+1)) (m y^(m-1) - 2 a y^(m+1)) e^(-a r^2), contracted per power of a.
-                    auto second = [&](int li, double xi, double xil) {
-                        return li * (li - 1) * ipow(xi, li - 2) * R0 - 2.0 * (2 * li + 1) * xil * R1
-                               + 4.0 * xi * xi * xil * R2;
-                    };
-                    auto mixed = [&](int li, double xi, double xil, int lj, double xj, double xjl) {
-                        const double a0 = li * ipow(xi, li - 1), a1 = -2.0 * xi * xil;  // coefficients of a^0, a^1
-                        const double b0 = lj * ipow(xj, lj - 1), b1 = -2.0 * xj * xjl;
-                        return a0 * b0 * R0 + (a0 * b1 + a1 * b0) * R1 + a1 * b1 * R2;
-                    };
-                    (*v[4])(q, mu) = second(l, x, xl) * ym * zn;
-                    (*v[7])(q, mu) = second(m, y, ym) * xl * zn;
-                    (*v[9])(q, mu) = second(n, z, zn) * xl * ym;
-                    (*v[5])(q, mu) = mixed(l, x, xl, m, y, ym) * zn;
-                    (*v[6])(q, mu) = mixed(l, x, xl, n, z, zn) * ym;
-                    (*v[8])(q, mu) = mixed(m, y, ym, n, z, zn) * xl;
-                }
+                double val[10];
+                kern::aoComponent(s.l[c], s.m[c], s.n[c], x, y, z, R0, R1, R2, deriv >= 2 ? 2 : (grad ? 1 : 0), val);
+                for (int k = 0; k < nmat; ++k) (*v[k])(q, mu) = val[k];
             }
         }
     }
@@ -534,6 +476,85 @@ void AOEvaluator::evaluate(const Matrix& points, int begin, int count, int deriv
                 for (int q = 0; q < count; ++q) d(q, a) += qv * src(q, c);
     };
     for (int k = 0; k < nmat; ++k) transform(cbuf[k], *dst[k]);
+}
+
+// Claude Generated (Oct 2026, GPU KS-DFT): flat tables of the shells for cuda/qm_gpu_xc.cu.
+bool AOEvaluator::flatten(FlatShells& f, std::string& why) const
+{
+    f = FlatShells();
+    f.nbf = m_nbf;
+    f.ncart = m_ncart;
+    f.nshell = static_cast<int>(m_shells.size());
+    // active column -> shell that owns it (all its nonzeros must lie in that shell's cartesian rows)
+    std::vector<int> cart_shell(m_ncart, -1);
+    for (int si = 0; si < f.nshell; ++si)
+        for (int c : m_shells[si].cart) cart_shell[c] = si;
+    for (int si = 0; si < f.nshell; ++si) {
+        const Shell& s = m_shells[si];
+        const int nc = static_cast<int>(s.cart.size());
+        const int np = static_cast<int>(s.exps.size());
+        f.xyz.insert(f.xyz.end(), { s.x, s.y, s.z });
+        f.amin.push_back(s.amin);
+        f.nprim.push_back(np);
+        f.prim_off.push_back(static_cast<int>(f.exps.size()));
+        f.exps.insert(f.exps.end(), s.exps.begin(), s.exps.end());
+        f.ncomp.push_back(nc);
+        f.comp_off.push_back(static_cast<int>(f.coef_off.size()));
+        f.cart_first.push_back(s.cart.empty() ? 0 : s.cart[0]);
+        f.max_ncomp = std::max(f.max_ncomp, nc);
+        for (int c = 0; c < nc; ++c) {
+            if (c > 0 && s.cart[c] != s.cart[c - 1] + 1) {
+                why = "AO tables: cartesian components of a shell are not consecutive";
+                return false;
+            }
+            f.lmn.insert(f.lmn.end(), { s.l[c], s.m[c], s.n[c] });
+            f.coef_off.push_back(static_cast<int>(f.coef.size()));
+            f.coef.insert(f.coef.end(), s.coef.begin() + (size_t)c * np, s.coef.begin() + (size_t)(c + 1) * np);
+        }
+        if (!m_transform) {
+            f.out_first.push_back(s.cart.empty() ? 0 : s.cart[0]);
+            f.out_width.push_back(nc);
+            f.T_off.push_back(-1);
+            continue;
+        }
+        int lo = m_nbf, hi = -1;
+        for (int a = 0; a < m_nbf; ++a)
+            for (const auto& [c, qv] : m_q_cols[a])
+                if (cart_shell[c] == si) {
+                    lo = std::min(lo, a);
+                    hi = std::max(hi, a);
+                }
+        if (hi < lo) {
+            why = "AO tables: shell without an active function";
+            return false;
+        }
+        f.out_first.push_back(lo);
+        f.out_width.push_back(hi - lo + 1);
+        f.T_off.push_back(static_cast<int>(f.T.size()));
+        std::vector<double> T((size_t)nc * (hi - lo + 1), 0.0);
+        for (int a = lo; a <= hi; ++a)
+            for (const auto& [c, qv] : m_q_cols[a]) {
+                if (cart_shell[c] != si) {
+                    why = "AO tables: the spherical transform mixes shells";
+                    return false;
+                }
+                T[(size_t)(c - s.cart[0]) * (hi - lo + 1) + (a - lo)] = qv;
+            }
+        f.T.insert(f.T.end(), T.begin(), T.end());
+    }
+    return true;
+}
+
+bool partitionTables(const std::vector<int>& Z, const Matrix& posBohr, const GridOptions& opt, Matrix& inv_dist,
+                     Matrix& a, bool& stratmann, std::string& why)
+{
+    const std::string partition = lower(opt.partition);
+    stratmann = (partition == "stratmann");
+    if (partition != "becke" && !stratmann) {
+        why = "unknown grid partition '" + opt.partition + "'";
+        return false;
+    }
+    return partitionPairs(Z, posBohr, lower(opt.radii_adjust), inv_dist, a, why);
 }
 
 void densityOnBlock(const AOBlock& ao, const Matrix& P, Vector& rho, Matrix* grad)

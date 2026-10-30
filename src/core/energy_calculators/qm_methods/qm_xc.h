@@ -82,6 +82,7 @@
 #include "src/core/global.h"  // Matrix (row-major), Vector
 
 #include "qm_grid.h"
+#include "qm_xc_kernels.h"  // point kernels shared with cuda/qm_gpu_xc.cu (one source for CPU and GPU)
 
 #include <string>
 #include <vector>
@@ -99,22 +100,7 @@ bool parseVWNVariant(const std::string& name, VWNVariant& v);
 /// "VWN5" | "VWN-RPA" (output label).
 std::string vwnName(VWNVariant v);
 
-/**
- * @brief One closed-shell exchange or correlation kernel (a point function of rho and, for a GGA, sigma).
- *
- * A functional is a weighted sum of kernels (XCFunctional::terms). WP7 (B3LYP) combines B88 exchange and LYP
- * correlation with SlaterX and VWN5_C or VWNRPA_C.
- */
-enum class XCKernel {
-    SlaterX,   ///< LDA Dirac/Slater exchange (WP5)
-    VWN5_C,    ///< LDA VWN5 correlation (WP5)
-    VWNRPA_C,  ///< LDA VWN-RPA correlation (WP5)
-    PW92_C,    ///< LDA Perdew-Wang 1992 correlation with libxc's LDA_C_PW_MOD constants (WP6, part of PBE)
-    PBE_X,     ///< GGA PBE exchange (WP6), libxc GGA_X_PBE
-    PBE_C,     ///< GGA PBE correlation = PW92 + H(rs, t) (WP6), libxc GGA_C_PBE
-    B88_X,     ///< GGA Becke 1988 exchange (WP7), libxc GGA_X_B88
-    LYP_C      ///< GGA Lee-Yang-Parr correlation, Miehlich form without Laplacian (WP7), libxc GGA_C_LYP
-};
+// XCKernel and XCTerm are defined in qm_xc_kernels.h (shared with the GPU kernels, Oct 2026).
 
 /// True for an exchange kernel (its energy is reported as E_x), false for correlation.
 bool isExchangeKernel(XCKernel k);
@@ -122,12 +108,6 @@ bool isExchangeKernel(XCKernel k);
 bool isGGAKernel(XCKernel k);
 /// Short kernel name for the output ("Slater", "VWN5", "PBE-X", ...).
 std::string kernelName(XCKernel k);
-
-/// Weighted kernel: E_xc contribution = weight * integral rho eps_kernel.
-struct XCTerm {
-    XCKernel kernel = XCKernel::SlaterX;
-    double weight = 1.0;
-};
 
 /**
  * @brief Closed-shell exchange-correlation functional: what the SCF needs to know.

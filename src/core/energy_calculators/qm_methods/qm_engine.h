@@ -134,6 +134,16 @@ BEGIN_PARAMETER_DEFINITION(qm)
     PARAM(gpu_grad1e, String, "auto",
           "With -gpu cuda|auto, one-electron part of the analytic RHF gradient on the device (Q-G8: overlap, kinetic and nuclear-attraction derivative integrals, basis and Hellmann-Feynman parts, contracted with the density and the energy-weighted density; reads the same device tables as the two-electron part). auto | on (device whenever -gpu is active) | off (CPU). The nuclear repulsion gradient stays on the host. Any device error falls back to the CPU and is counted as qm_grad1e.",
           "Performance", {})
+    // GPU KS-DFT (Claude Generated, Oct 2026): exchange-correlation on the device, cuda/qm_gpu_xc.cu
+    PARAM(gpu_xc, String, "auto",
+          "With -gpu cuda, Kohn-Sham exchange-correlation on the device (lda/pbe/b3lyp): the molecular grid is uploaded once per geometry, AO values (with first and second derivatives), density, functional (the same point kernels as the CPU, qm_xc_kernels.h), V_xc, E_xc and the XC nuclear gradient incl. the grid response run on the device in streamed blocks of grid points; with it the device-resident SCF loop (gpu_scf) also runs Kohn-Sham. auto | on (same as auto; a failure is counted) | off (CPU XC). Any device error or too little device memory falls back to the CPU and is counted as qm_xc.",
+          "Performance", {})
+    PARAM(gpu_xc_max_memory_mb, Double, 0.0,
+          "With gpu_xc: at most this much device memory (MB) for the device XC object (grid, AO blocks); 0 = 60 % of the free device memory. The number of grid points per block follows from it; if not even 32 points fit, the XC part falls back to the CPU (counted as qm_xc). For testing the fallback.",
+          "Performance", {})
+    PARAM(gpu_xc_block_points, Int, 0,
+          "With gpu_xc: grid points per streamed block (multiple of 32; 0 = from the memory budget, at most 32768). For testing the block streaming; the results do not depend on it beyond rounding of V_xc.",
+          "Performance", {})
     // WP10 (Claude Generated, Oct 2026): density fitting, implementation in qm_ri.cpp
     PARAM(ri, String, "off",
           "Density fitting (resolution of the identity) for the two-electron part: off (exact integrals, the reference) | j (RI-J: Coulomb from the fit, exchange exact) | jk (RI-JK: Coulomb and exchange from the fit, Weigend 2002). A method variant: energies differ from the exact path by the fitting error (about 1e-5 Eh per atom). The analytic gradient is the derivative of the RI energy (fitted integrals and metric differentiated; RI-J keeps the exact exchange gradient).",
@@ -544,6 +554,17 @@ private:
     // Q-G8 (Oct 2026): one-electron gradient on the device (-qm.gpu_grad1e auto|on|off).
     std::string m_gpu_grad1e = "auto";
     mutable bool m_gpu_grad1e_failed = false;  // device 1e gradient failed once: CPU from then on
+    // GPU KS-DFT (Claude Generated, Oct 2026): device exchange-correlation (-qm.gpu_xc auto|on|off). One object per
+    // geometry (grid resident), dropped in invalidateXC(); a failure sets m_gpu_xc_failed (CPU XC from then on).
+    std::string m_gpu_xc = "auto";
+    double m_gpu_xc_max_memory_mb = 0.0;
+    int m_gpu_xc_block_points = 0;
+    mutable std::unique_ptr<qmint::QMGpuXC> m_gpu_xc_obj;
+    mutable bool m_gpu_xc_failed = false;
+    /// Device XC object of the current geometry (created on first use); false = CPU XC (failure counted once).
+    bool ensureGpuXC() const;
+    /// Drops the device XC object and switches to the CPU XC for this engine (counted as qm_xc).
+    void gpuXCFailed(const std::string& why) const;
     /// Backend for a device gradient part (mode = m_gpu_grad / m_gpu_grad1e), or "" when that part
     /// runs on the CPU. A missing plugin is counted as a fallback under `tag` and sets `failed`.
     std::string gpuGradBackend(const std::string& mode, const char* option, const char* tag, bool& failed) const;
@@ -551,7 +572,7 @@ private:
     /// (nullptr = table build failed, reason in `why`). False = failed (counted as qm_grad); the
     /// caller then runs qmint::gradientTwoElectron.
     bool gpuGradientTwoElectron(const qmint::EriGpuTables* tables, const std::string& why_tables, const std::string& backend,
-                                const Matrix& Pc, Matrix& g2, std::string& info) const;
+                                const Matrix& Pc, double kx, Matrix& g2, std::string& info) const;
     /// Q-G8: device 1e gradient (S, T, V derivatives with Pc and Wc, Eh/Bohr) from the same tables.
     /// False = failed (counted as qm_grad1e); the caller then runs qmint::gradientOneElectron.
     bool gpuGradientOneElectron(const qmint::EriGpuTables* tables, const std::string& why_tables, const std::string& backend,

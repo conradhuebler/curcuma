@@ -634,8 +634,10 @@ bool QMEngine::runSCF()
 
     // Q-G4: device-resident loop (same iterations on device matrices); -1 = not usable or a
     // device error, then the host loop below runs from the same start density.
-    // KS (WP5): the device loop has no V_xc, the host loop runs (J/K may still come from the device).
-    if (!riActive() && !isKohnSham() && gpuRequested() && m_gpu_scf != "off" && m_gpu_scf != "false" && !m_gpu_scf_failed) {
+    // KS (WP5): the device loop needs V_xc on the device (GPU KS-DFT, Oct 2026: -qm.gpu_xc); without it the host
+    // loop runs (J/K and V_xc may still come from the device).
+    if (!riActive() && gpuRequested() && m_gpu_scf != "off" && m_gpu_scf != "false" && !m_gpu_scf_failed
+        && (!isKohnSham() || ensureGpuXC())) {
         const Matrix guess = m_density;
         const int r = runSCFDevice(n_occ, direct, use_diis, damping);
         if (r >= 0) return r == 1;
@@ -902,6 +904,7 @@ void QMEngine::finishConvergedSCF(const Matrix& C, const Vector& eps, int n_occ,
             CurcumaLogger::info(fmt::format("QM: V_xc builds {} ({:.1f} ms; grid {} points, {} above rho {:.0e} in the "
                                             "last build; {} threads)", m_xc_builds, m_xc_ms, m_xc_grid.size(),
                                             m_xc_last.points_used, m_xc_rho_threshold, m_threads));
+        if (isKohnSham() && m_gpu_xc_obj) CurcumaLogger::info("QM: device XC: " + m_gpu_xc_obj->stats());
     }
 }
 
@@ -955,6 +958,9 @@ int QMEngine::runSCFDevice(int n_occ, bool direct, bool use_diis, double damping
     qmint::QMGpuSCF& dev = *m_gpu_scf_state;
     QMScfAccelerator diis(m_diis_subspace, m_scf_mode == "adiis");
     if (!dev.setup(m_H.data(), m_S.data(), m_X.data(), n_occ, diis.capacity())) return fail("setup");
+    // Kohn-Sham (GPU KS-DFT, Oct 2026): V_xc of every Fock build from the device XC object, F = H + J + V_xc - (a_x/2) K
+    if (!dev.setKohnSham(isKohnSham() ? m_gpu_xc_obj.get() : nullptr, isKohnSham() ? m_xc.exact_exchange : 1.0))
+        return fail("Kohn-Sham setup");
     if (!dev.setDensity(m_density.data())) return fail("density upload");
     const double setup_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_setup0).count();
 
@@ -989,6 +995,7 @@ int QMEngine::runSCFDevice(int n_occ, bool direct, bool use_diis, double damping
         if (fp32_build) ++cadence.fp32_builds;
         const auto t_f0 = std::chrono::steady_clock::now();
         if (!dev.buildFock(jk, full)) return fail("Fock build");
+        if (isKohnSham()) ++m_xc_builds;  // one device V_xc per Fock build (its time is in the Fock time)
         cadence.built(full);
         if (direct) m_direct_quartets += jk->lastQuartets();
         const double fock_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_f0).count();
@@ -1396,6 +1403,7 @@ Matrix QMEngine::buildFock(const Matrix& P) const
 
 void QMEngine::invalidateXC() const
 {
+    m_gpu_xc_obj.reset();  // GPU KS-DFT: the device grid belongs to the old geometry
     m_xc_grid_ready = false;
     m_xc_grid = qmgrid::MolecularGrid();
     m_xc_ao = qmgrid::AOEvaluator();
@@ -1421,6 +1429,111 @@ bool QMEngine::ensureXCGrid() const
     m_xc_builds = 0;
     m_xc_ms = 0.0;
     return true;
+}
+
+// GPU KS-DFT (Claude Generated, Oct 2026): device XC object of the current geometry (cuda/qm_gpu_xc.cu). Grid points
+// and weights are built on the host (qmgrid::buildMolecularGrid, a few ms; measured in docs/QM_GPU_ROADMAP.md section 4)
+// and uploaded once; the shells come from the AOEvaluator of the same grid, so the device evaluates exactly the
+// functions of the CPU path.
+bool QMEngine::ensureGpuXC() const
+{
+    if (!isKohnSham() || !gpuRequested() || m_gpu_xc_failed) return false;
+    if (m_gpu_xc == "off" || m_gpu_xc == "false") return false;
+    if (m_gpu_xc != "auto" && m_gpu_xc != "on" && m_gpu_xc != "true") {
+        static bool warned = false;
+        if (!warned && CurcumaLogger::get_verbosity() >= 1) {
+            warned = true;
+            CurcumaLogger::warn(fmt::format("QM: unknown -qm.gpu_xc '{}' (use auto|on|off); using auto", m_gpu_xc));
+        }
+    }
+    if (m_gpu_xc_obj) return true;
+    if (!ensureXCGrid()) return false;
+    const auto t0 = std::chrono::steady_clock::now();
+    const std::string backend = m_gpu;
+    if (backend == "none" || !gpu_plugin::available(backend)) {
+        gpuXCFailed("no GPU plugin for -gpu " + m_gpu);
+        return false;
+    }
+    std::string why;
+    qmgrid::FlatShells fs;
+    if (!m_xc_ao.flatten(fs, why)) {
+        gpuXCFailed(why);
+        return false;
+    }
+    const Matrix pos = atomPositionsBohr();
+    Matrix inv_dist, a_adj;
+    bool stratmann = false;
+    if (!qmgrid::partitionTables(m_atoms, pos, m_grid_options, inv_dist, a_adj, stratmann, why)) {
+        gpuXCFailed(why);
+        return false;
+    }
+    std::vector<int> sh_atom(fs.nshell), kernels;
+    std::vector<double> weights;
+    for (int s = 0; s < fs.nshell; ++s) sh_atom[s] = m_gto_basis[fs.cart_first[s]].atom;
+    for (const qmxc::XCTerm& t : m_xc.terms) {
+        kernels.push_back(static_cast<int>(t.kernel));
+        weights.push_back(t.weight);
+    }
+    qmint::QMGpuXCSetup su;
+    su.nbf = m_nbf;
+    su.npts = m_xc_grid.size();
+    su.natoms = m_atomcount;
+    su.points = m_xc_grid.points.data();
+    su.weights = m_xc_grid.weights.data();
+    su.quad_weights = m_xc_grid.quadrature_weights.size() == m_xc_grid.weights.size() ? m_xc_grid.quadrature_weights.data()
+                                                                                       : nullptr;
+    su.point_atom = m_xc_grid.atom.data();
+    su.atom_offset = m_xc_grid.atom_offset.data();
+    su.nshell = fs.nshell;
+    su.max_ncomp = fs.max_ncomp;
+    su.nexps = (int)fs.exps.size();
+    su.ncoef = (int)fs.coef.size();
+    su.nlmn = (int)fs.lmn.size();
+    su.nT = (int)fs.T.size();
+    su.ncomp_total = (int)fs.coef_off.size();
+    su.sh_xyz = fs.xyz.data();
+    su.sh_amin = fs.amin.data();
+    su.sh_nprim = fs.nprim.data();
+    su.sh_prim_off = fs.prim_off.data();
+    su.sh_ncomp = fs.ncomp.data();
+    su.sh_comp_off = fs.comp_off.data();
+    su.sh_out_first = fs.out_first.data();
+    su.sh_out_width = fs.out_width.data();
+    su.sh_T_off = fs.T_off.data();
+    su.sh_atom = sh_atom.data();
+    su.exps = fs.exps.data();
+    su.coef = fs.coef.data();
+    su.coef_off = fs.coef_off.data();
+    su.lmn = fs.lmn.data();
+    su.T = fs.T.empty() ? nullptr : fs.T.data();
+    su.nterms = (int)kernels.size();
+    su.term_kernel = kernels.data();
+    su.term_weight = weights.data();
+    su.gga = m_xc.needsGradient() ? 1 : 0;
+    su.rho_min = qmxc::kern::effectiveThreshold(m_xc.needsGradient(), m_xc_rho_threshold);
+    su.atom_xyz = pos.data();
+    su.inv_dist = inv_dist.data();
+    su.a_adjust = a_adj.data();
+    su.stratmann = stratmann ? 1 : 0;
+    su.max_device_mb = m_gpu_xc_max_memory_mb;
+    su.block_points = m_gpu_xc_block_points;
+    m_gpu_xc_obj = gpu_plugin::createQmXC(backend, su, m_gpu_device, why);
+    if (!m_gpu_xc_obj) {
+        gpuXCFailed("device XC setup: " + why);
+        return false;
+    }
+    if (CurcumaLogger::get_verbosity() >= 2)
+        CurcumaLogger::info(fmt::format("QM: V_xc/E_xc on {} ({} grid points uploaded, blocks of {} points; setup {:.1f} ms)",
+                                        m_gpu_xc_obj->name(), su.npts, m_gpu_xc_obj->blockPoints(),
+                                        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count()));
+    return true;
+}
+
+void QMEngine::gpuXCFailed(const std::string& why) const
+{
+    m_gpu_xc_failed = true;
+    m_gpu_xc_obj.reset();
+    curcuma::reportGpuFallback("qm_xc", "device exchange-correlation: " + why + "; CPU XC");
 }
 
 // WP8 (Claude Generated, Oct 2026): validation hook, grid fixed in space (see qm_engine.h).
@@ -1454,7 +1567,44 @@ bool QMEngine::xcGradient(Matrix& g_basis, Matrix& g_response, std::string& why)
     } else {
         for (int a = 0; a < m_nbf; ++a) bf_atom[a] = m_gto_basis[a].atom;
     }
-    qmxc::XCGradient xg;
+    // GPU KS-DFT (Oct 2026): basis part, point part and Becke weight derivative on the device (not for the frozen-grid
+    // validation hook). CURCUMA_QM_GPU_XC_CHECK=1 also runs the CPU parts and prints "QM GPU XC grad check: ...".
+    qmxc::XCGradient xg;  // CPU result (also the reference of the device check below)
+    if (!m_xc_frozen_grid && ensureGpuXC()) {
+        const auto t0 = std::chrono::steady_clock::now();
+        Matrix gb = Matrix::Zero(m_atomcount, 3), gp = Matrix::Zero(m_atomcount, 3), gw = Matrix::Zero(m_atomcount, 3);
+        long long used = 0;
+        const Matrix P = m_density;  // contiguous row-major
+        if (m_gpu_xc_obj->gradient(P.data(), m_grid_response, gb.data(), gp.data(), gw.data(), used)) {
+            const double dev_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            g_basis = gb;
+            g_response = m_grid_response ? Matrix(gp + gw) : Matrix(Matrix::Zero(m_atomcount, 3));
+            if (const char* chk = std::getenv("CURCUMA_QM_GPU_XC_CHECK"); chk && chk[0] == '1') {
+                const auto c0 = std::chrono::steady_clock::now();
+                qmxc::XCGradient& xc = xg;
+                qmxc::buildXCGradient(m_xc_grid, m_xc_ao, m_density, m_xc, m_xc_rho_threshold, m_threads, bf_atom,
+                                      m_atomcount, xc);
+                Matrix cw = Matrix::Zero(m_atomcount, 3);
+                if (m_grid_response)
+                    qmgrid::gridWeightGradient(m_atoms, atomPositionsBohr(), m_grid_options, m_xc_grid, xc.edens, cw, why,
+                                               m_threads);
+                const double cpu_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - c0).count();
+                const double db = (gb - xc.basis).cwiseAbs().maxCoeff();
+                const double dp = m_grid_response ? (gp - xc.points).cwiseAbs().maxCoeff() : 0.0;
+                const double dw = m_grid_response ? (gw - cw).cwiseAbs().maxCoeff() : 0.0;
+                CurcumaLogger::result(fmt::format(
+                    "QM GPU XC grad check: natoms={} max|dbasis|={:.3e} max|dpoints|={:.3e} max|dweights|={:.3e} "
+                    "max|basis|={:.3e} points_used dev={} cpu={} dev_ms={:.1f} cpu_ms={:.1f}",
+                    m_atomcount, db, dp, dw, xc.basis.cwiseAbs().maxCoeff(), used, xc.points_used, dev_ms, cpu_ms));
+            }
+            if (CurcumaLogger::get_verbosity() >= 3)
+                CurcumaLogger::info(fmt::format("QM: XC gradient on {} {:.1f} ms ({} points above threshold); |g_xc basis| "
+                                                "{:.3e}, |g_response| {:.3e} Eh/Bohr", m_gpu_xc_obj->name(), dev_ms, used,
+                                                g_basis.norm(), g_response.norm()));
+            return true;
+        }
+        gpuXCFailed("XC gradient kernel failed");
+    }
     qmxc::buildXCGradient(m_xc_grid, m_xc_ao, m_density, m_xc, m_xc_rho_threshold, m_threads, bf_atom, m_atomcount, xg);
     g_basis = xg.basis;
     double wms = 0.0;
@@ -1491,7 +1641,40 @@ const qmxc::XCResult& QMEngine::xcFor(const Matrix& P) const
         m_xc_last_valid = false;
         return m_xc_last;
     }
-    qmxc::buildVxc(m_xc_grid, m_xc_ao, P, m_xc, m_xc_rho_threshold, m_threads, m_xc_last);
+    bool on_device = false;
+    if (ensureGpuXC()) {
+        // GPU KS-DFT (Oct 2026): host density in, V_xc and the E_xc parts back (host SCF loop, final energy)
+        const auto t0 = std::chrono::steady_clock::now();
+        qmint::QMGpuXCScalars sc;
+        Matrix V(m_nbf, m_nbf);
+        const Matrix Pc = P;  // contiguous row-major
+        if (m_gpu_xc_obj->vxc(Pc.data(), V.data(), sc)) {
+            m_xc_last.V = V;
+            m_xc_last.ex = sc.ex;
+            m_xc_last.ec = sc.ec;
+            m_xc_last.exc = sc.ex + sc.ec;
+            m_xc_last.nelec = sc.nelec;
+            m_xc_last.points_used = static_cast<long>(sc.points_used);
+            m_xc_last.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            on_device = true;
+            // CURCUMA_QM_GPU_XC_CHECK=1: the CPU V_xc of the same density, one comparison line (test_cases/qm_gpu_dft)
+            if (const char* chk = std::getenv("CURCUMA_QM_GPU_XC_CHECK"); chk && chk[0] == '1') {
+                qmxc::XCResult cpu;
+                qmxc::buildVxc(m_xc_grid, m_xc_ao, P, m_xc, m_xc_rho_threshold, m_threads, cpu);
+                const double vmax = cpu.V.cwiseAbs().maxCoeff();
+                CurcumaLogger::result(fmt::format(
+                    "QM GPU XC check: n={} points={} max|dV|={:.3e} max|V|={:.3e} rel_dV={:.3e} dExc={:.3e} rel_dExc={:.3e} "
+                    "dEx={:.3e} dEc={:.3e} dN={:.3e} used dev={} cpu={} dev_ms={:.1f} cpu_ms={:.1f}",
+                    m_nbf, m_xc_grid.size(), (V - cpu.V).cwiseAbs().maxCoeff(), vmax,
+                    (V - cpu.V).cwiseAbs().maxCoeff() / std::max(vmax, 1e-300), m_xc_last.exc - cpu.exc,
+                    std::abs(m_xc_last.exc - cpu.exc) / std::max(std::abs(cpu.exc), 1e-300), m_xc_last.ex - cpu.ex,
+                    m_xc_last.ec - cpu.ec, m_xc_last.nelec - cpu.nelec, sc.points_used, cpu.points_used, m_xc_last.ms, cpu.ms));
+            }
+        } else {
+            gpuXCFailed("V_xc kernel failed");
+        }
+    }
+    if (!on_device) qmxc::buildVxc(m_xc_grid, m_xc_ao, P, m_xc, m_xc_rho_threshold, m_threads, m_xc_last);
     m_xc_last_P = P;
     m_xc_last_valid = true;
     ++m_xc_builds;

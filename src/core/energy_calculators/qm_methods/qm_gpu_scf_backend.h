@@ -12,6 +12,7 @@
 // and take ~9 min each to compile; this one is only seen by cuda/qm_gpu_scf.cu and the core.
 
 #include "qm_gpu_backend.h"
+#include "qm_gpu_xc_backend.h"  // qmint::QMGpuXC (Kohn-Sham, Oct 2026)
 
 #include <string>
 
@@ -34,6 +35,13 @@ public:
     virtual bool setup(const double* H, const double* S, const double* X, int n_occ, int nslots) = 0;
     /// Current density P (the start guess).
     virtual bool setDensity(const double* P) = 0;
+    /// Kohn-Sham (Claude Generated, Oct 2026, GPU KS-DFT): with xc != nullptr every buildFock() also forms V_xc[P]
+    /// with that device XC object (same device) and F = H + J + V_xc - (kx/2) K (kx = 0: no K term); scfMeasures()
+    /// then returns E = 1/2 Tr(P (H + F)) - 1/2 Tr(P V_xc) + E_xc (QMEngine::scfEnergy). xc = nullptr restores RHF.
+    /// Entry point curcuma_<backend>_create_qm_scf_ks (renamed with this method). False = wrong dimension.
+    virtual bool setKohnSham(QMGpuXC* xc, double kx) = 0;
+    /// E_xc of the last buildFock() (Kohn-Sham only, else 0).
+    virtual double lastExc() const { return 0.0; }
     /// F = H + J - 1/2 K from the current density with the device J/K builder `jk`:
     /// full: J, K := JK(P); else J += JK(P - P_ref), K += ... (incremental, linear in P);
     /// then P_ref := P. Same arithmetic as the host loop's fockFromDensity().

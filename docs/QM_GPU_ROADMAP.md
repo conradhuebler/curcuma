@@ -3,7 +3,8 @@
 > Status: 🤖 AI-authored. Sections 1-2 are **implemented and machine-tested** (CPU only,
 > Sep 2026). Section 3 is a plan; stages Q-G1 to Q-G4, Q-G7 (2e gradient) and Q-G8 (1e gradient)
 > and Q-G5 (FP32 phase of the direct SCF and mixed-precision RI-JK) are implemented (Oct 2026, AI-generated,
-> machine-tested on one RTX 5090 only), Q-G6 (multi-GPU) is a proposal.
+> machine-tested on one RTX 5090 only), Q-G6 (multi-GPU) is a proposal. Section 4: Kohn-Sham DFT on the GPU
+> (Oct 30 2026, AI-generated, machine-tested on one RTX 5090 only).
 
 The native xTB GPU work ([SQM_GPU.md](SQM_GPU.md), [SQM_GPU_ROADMAP.md](SQM_GPU_ROADMAP.md),
 [SQM_PERFORMANCE.md](SQM_PERFORMANCE.md), [MULTI_GPU.md](MULTI_GPU.md)) produced a set of
@@ -683,3 +684,96 @@ bytes; device K unpacks per row block with the `unpackPairs` kernel in `cuda/qm_
 limit on the 32 GB card n <= ~1155-1195 (estimated), C40H82 (n=970, 16.9 GB) now runs on the card, 146 -> 62 s.
 Tables, energies, what was not tested:
 [WP10 doc, "Skalierung RI-JK" and "Gepackter 3-Index-Tensor"](DFT_ROADMAP/WP10_korrelation_ri_mpn_ccsd.md#skalierung-ri-jk-okt-2026).
+
+## 4. Kohn-Sham DFT on the GPU (Oct 2026)
+
+> 🤖 AI-generated, ⚙️ machine-tested on one RTX 5090 (sm_120, plugin built for sm_75 and JIT-compiled from PTX on
+> the first run after a rebuild). Human production testing pending.
+
+`-method lda|pbe|b3lyp -gpu cuda` (`-qm.gpu_xc auto|on|off`, default auto). Code: `cuda/qm_gpu_xc.cu`, seam
+`qm_gpu_xc_backend.h`, plugin entry `curcuma_cuda_create_qm_xc`, engine side `QMEngine::ensureGpuXC`, `xcFor`,
+`xcGradient` (`qm_scf.cpp`). Tests: `ctest -L qm_gpu_dft` (34, reference = CPU run of the same binary).
+
+- **One source of the formulas**: the XC point kernels, the Becke/Stratmann polynomials and one AO component live in
+  `qm_xc_kernels.h` as `inline` / `__host__ __device__` functions; `qm_xc.cpp`, `qm_grid.cpp` and the .cu call them.
+  After the move the CPU results are bitwise unchanged (`-dump_gradient` energies and gradients of hf/lda (both VWN)/
+  pbe/b3lyp (both VWN) on H2O, NH3, benzene, 18 runs).
+- **Grid**: built on the host (`buildMolecularGrid`: benzene 3.7 ms, caffeine 20-28 ms, against SCF loops of 0.15 and
+  1.8 s on the GPU) and uploaded once per geometry; the device object dies with the geometry (`invalidateXC`).
+- **Per block of B points** (B from the memory budget, max 32768; `-qm.gpu_xc_max_memory_mb`,
+  `-qm.gpu_xc_block_points`): AO values with first/second derivatives and the spherical transform (one thread per
+  point and shell), X = phi P (DGEMM), rho and grad rho, the functional, W += phi^T Y (DGEMM; `cublasDsyr2k` was
+  40 ms per call for n = 24 and was replaced), V = W + W^T. E_xc and N from per-point arrays summed in fixed 256-point
+  chunks. No floating-point atomics in the XC part.
+- **SCF**: the device-resident loop takes V_xc from the device object (`QMGpuSCF::setKohnSham`, F = H + J + V_xc -
+  (a_x/2) K, E with -1/2 Tr(P V_xc) + E_xc); RI-J/RI-JK keep the host loop (as HF) with device V_xc. Host and device
+  loop share the driver (`runSCF`/`runSCFDevice`), so DIIS, cadence and convergence test are the same.
+- **Gradient**: XC basis part (AO deriv 2 for a GGA), point part of the grid response and Becke weight derivative
+  (one thread block per point, O(natoms^2) scratch per block, natoms <= 700) on the device; the Q-G7 2e kernel takes the
+  exchange weight kx (`compute(P, thr, kx, g)`; kx = 1 the RHF branch, kx = 0 no exchange products and no exchange
+  screening term). Plugin entries renamed with the changed vtables: `_create_qm_scf_ks`, `_create_qm_grad2e_kx`.
+- **Fallbacks** (counted as `qm_xc`, `-gpu_strict true` exits with code 3): no plugin, shells above f, more than 32
+  primitives, not even 32 points fit the memory budget, any device error; V_xc and the gradient then run on the CPU.
+
+G1, V_xc and E_xc on the same density (every SCF build, `CURCUMA_QM_GPU_XC_CHECK=1`), lda vwn5/vwn_rpa, pbe, b3lyp
+vwn5/vwn_rpa, def2-SVP, sg1 grid:
+
+| system (n, points) | max rel max|dV| | max rel |dE_xc| | max |dN| | dev / CPU (4 thr) per build |
+|---|---:|---:|---:|---:|
+| H2O (24, 29100) | 8.9e-16 | 9.4e-16 | 8.9e-15 | 0.2-0.3 / 2.4-4.0 ms |
+| NH3 (29, 38800) | 1.1e-15 | 1.5e-15 | 1.4e-14 | 0.3-0.4 / 3.6-6.5 ms |
+| benzene (114, 116400) | 4.4e-15 | 3.3e-15 | 1.1e-13 | 6.6-7.7 / 49-69 ms |
+
+The deviation is rounding order (GEMM vs Eigen sums, device exp/cbrt/log within an ulp of glibc); the points above
+the density threshold are the same set. Caffeine b3lyp (n = 246, 232800 points): 50 vs 191 ms per V_xc build (8 CPU
+threads); the FP64 GEMMs dominate on this FP64-poor card (benzene: X = phi P 7.4 ms, W 4.5 ms, AO 1.5 ms per build).
+
+G2, SCF energies and times (def2-SVP, `-qm.scf_threshold 1e-8`, CPU 8 threads `-gpu none`, GPU `-gpu cuda -qm.gpu_scf
+on`; direct: CPU `-qm.scf_direct on`, GPU `-qm.gpu_direct on`):
+
+| system | method | variant | |dE| GPU-CPU | iterations CPU/GPU | SCF loop CPU / GPU | wall CPU / GPU | GPU loop |
+|---|---|---|---:|---:|---:|---:|---|
+| benzene | pbe | exact | 0 | 12/12 | 718 / 152 ms | 1.06 / 0.73 s | device |
+| benzene | b3lyp | exact | 0 | 11/11 | 925 / 140 ms | 1.29 / 0.61 s | device |
+| benzene | pbe | RI-J | 0 | 12/12 | 442 / 182 ms | 0.78 / 0.60 s | host |
+| benzene | b3lyp | RI-JK | 0 | 11/11 | 421 / 275 ms | 0.54 / 0.56 s | host |
+| benzene | b3lyp | direct | 0 | 13/13 | 856 / 282 ms | 0.96 / 0.74 s | device |
+| caffeine | pbe | exact | 1e-10 | 24/24 | 13.3 / 1.9 s | 14.1 / 3.3 s | device |
+| caffeine | b3lyp | exact | 0 | 22/22 | 11.8 / 1.8 s | 12.6 / 3.2 s | device |
+| caffeine | pbe | RI-J | 0 | 24/24 | 5.5 / 1.4 s | 6.0 / 2.8 s | host |
+| caffeine | b3lyp | RI-JK | 0 | 22/22 | 5.5 / 1.8 s | 6.2 / 2.6 s | host |
+| caffeine | b3lyp | direct | 0 | 22/24 | 11.8 / 2.2 s | 12.6 / 3.0 s | device |
+
+|dE| at the 10 printed decimals. Caffeine direct: the 2 extra iterations come from the Q-G5 FP32 phase
+(`-qm.gpu_eri_precision auto` switches it on from 150 functions on this card); with `-qm.gpu_eri_precision fp64` the
+device loop needs 22 iterations as the CPU, same energy. The ctests compare at `scf_threshold 1e-10` (7 cases, all
+|dE| <= 1e-10 Eh, iterations equal except benzene b3lyp direct 21/20).
+
+G3, gradient (CPU 8 threads; same-density comparisons from `ctest -L qm_gpu_dft`: XC basis/point/weight parts
+<= 8.6e-15 Eh/Bohr, 2e part <= 4.5e-12 Eh/Bohr):
+
+| system | method | max |g(GPU run) - g(CPU run)| | XC gradient CPU / GPU | 2e CPU / GPU | wall CPU / GPU |
+|---|---|---:|---:|---:|---:|
+| benzene | pbe | 1.4e-11 Eh/Bohr | 79 / 13 ms | 2.9 / 0.17 s | 4.1 / 0.9 s |
+| benzene | b3lyp | 4.5e-12 | 77 / 13 ms | 2.9 / 0.17 s | 4.4 / 0.9 s |
+| caffeine | pbe | 5.8e-10 | 500 / 72 ms | 68.2 / 1.9 s | 83.7 / 5.4 s |
+| caffeine | b3lyp | 5.6e-10 | 506 / 72 ms | 68.2 / 1.9 s | 82.1 / 5.2 s |
+
+(two independent SCFs at 1e-8; the caffeine difference is the SCF convergence, the same-density parts agree to 1e-14.)
+`-opt` (tight, CPU run 4 threads): H2O, formaldehyde, benzene with pbe and b3lyp reach the same minimum as the CPU
+`-opt` (energy of the optimised structure identical at 10 decimals, coordinates identical at the 6 written
+decimals); wall GPU / CPU: H2O 1.0/1.4 s (pbe), 1.4/2.6 s (b3lyp); formaldehyde 2.9/9.7, 3.0/10.0 s; benzene 5.8/96.8,
+6.6/115.7 s.
+
+Reproducibility: with the stored device tensor the SCF energy and the XC gradient are bitwise repeatable (benzene b3lyp,
+3 runs, `-qm.gpu_grad off -qm.gpu_grad1e off`); with the device 1e/2e gradient (atomics, Q-G7/Q-G8) and the direct J/K
+(atomics, Q-G3) the last bits change from run to run (gradient norm in the 13th digit, direct energy 4e-13 Eh). Not
+enforced (the gfn* rules of GPU_REPRODUCIBILITY.md do not cover the native QM).
+
+Not tested: other GPUs (only the RTX 5090), ROCm and Vulkan (no entry point; `qm_xc_kernels.h` is written to compile
+with hipcc, neither built nor tested), multi-GPU, systems above caffeine (24 atoms, 246 functions), grids other than
+sg1 and the forced block sizes 64/96 points, the Stratmann partition on the device, cartesian d (`-qm.cartesian_d`),
+basis sets other than def2-SVP, MD. Not implemented: AO screening per block (every block evaluates and multiplies
+all nbf functions), a J-only device 2e gradient with its own screen for LDA/PBE (kx = 0 only drops the exchange
+products), weight derivative above 700 atoms (CPU fallback), FP32 phases of the XC part.
+

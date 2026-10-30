@@ -13,7 +13,7 @@
 // Claude Generated (Oct 2026, Q-G1..Q-G4 of docs/QM_GPU_ROADMAP.md): backend-free interface the
 // QMEngine drives a GPU through. The concrete classes live in a runtime plugin
 // (libcurcuma_cuda.so, entries curcuma_cuda_create_qm_jk / curcuma_cuda_create_qm_eri_jk /
-// curcuma_cuda_create_qm_direct_jk / curcuma_cuda_create_qm_scf), so the core carries no CUDA symbol.
+// curcuma_cuda_create_qm_direct_jk / curcuma_cuda_create_qm_scf_ks), so the core carries no CUDA symbol.
 namespace qmint {
 
 /// Coulomb/exchange builder on a device: either holding the stored ERI tensor (Q-G1/Q-G2) or

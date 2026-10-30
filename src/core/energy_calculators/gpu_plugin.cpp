@@ -214,9 +214,11 @@ std::unique_ptr<qmint::QMGpuSCF> createQmScf(const std::string& backend, int n, 
         return nullptr;
     }
     using create_fn = void* (*)(int, int, char*, int);
-    create_fn fn = resolveSymbol<create_fn>(handle, "curcuma_" + backend + "_create_qm_scf");
+    // _ks (Oct 2026, GPU KS-DFT): QMGpuSCF gained setKohnSham(); the entry was renamed with the vtable, so an older
+    // plugin is refused (counted host-loop fallback) instead of being called through a shorter vtable.
+    create_fn fn = resolveSymbol<create_fn>(handle, "curcuma_" + backend + "_create_qm_scf_ks");
     if (!fn) {
-        why = "plugin has no entry point curcuma_" + backend + "_create_qm_scf";
+        why = "plugin has no entry point curcuma_" + backend + "_create_qm_scf_ks";
         return nullptr;
     }
     char buf[512] = { 0 };
@@ -235,15 +237,37 @@ std::unique_ptr<qmint::QMGpuGrad2e> createQmGrad2e(const std::string& backend, c
         return nullptr;
     }
     using create_fn = void* (*)(const qmint::QMGpuEriTables*, const qmint::QMGpuGradExtra*, int, char*, int);
-    create_fn fn = resolveSymbol<create_fn>(handle, "curcuma_" + backend + "_create_qm_grad2e");
+    // _kx (Oct 2026, GPU KS-DFT): compute() gained the exchange weight kx; renamed with the vtable (see createQmScf).
+    create_fn fn = resolveSymbol<create_fn>(handle, "curcuma_" + backend + "_create_qm_grad2e_kx");
     if (!fn) {
-        why = "plugin has no entry point curcuma_" + backend + "_create_qm_grad2e";
+        why = "plugin has no entry point curcuma_" + backend + "_create_qm_grad2e_kx";
         return nullptr;
     }
     char buf[512] = { 0 };
     void* p = fn(&tables, &extra, device, buf, (int)sizeof buf);
     if (!p) why = buf;
     return std::unique_ptr<qmint::QMGpuGrad2e>(static_cast<qmint::QMGpuGrad2e*>(p));
+}
+
+// Claude Generated (Oct 2026, GPU KS-DFT): Kohn-Sham exchange-correlation on the device.
+std::unique_ptr<qmint::QMGpuXC> createQmXC(const std::string& backend, const qmint::QMGpuXCSetup& setup, int device,
+                                           std::string& why)
+{
+    void* handle = pluginHandle(backend, /*quiet=*/true);
+    if (!handle) {
+        why = "plugin libcurcuma_" + backend + ".so not loadable";
+        return nullptr;
+    }
+    using create_fn = void* (*)(const qmint::QMGpuXCSetup*, int, char*, int);
+    create_fn fn = resolveSymbol<create_fn>(handle, "curcuma_" + backend + "_create_qm_xc");
+    if (!fn) {
+        why = "plugin has no entry point curcuma_" + backend + "_create_qm_xc";
+        return nullptr;
+    }
+    char buf[512] = { 0 };
+    void* p = fn(&setup, device, buf, (int)sizeof buf);
+    if (!p) why = buf;
+    return std::unique_ptr<qmint::QMGpuXC>(static_cast<qmint::QMGpuXC*>(p));
 }
 
 // Claude Generated (Oct 2026, MP2 gradient): 2e derivative contraction of the MP2 gradient on the device.

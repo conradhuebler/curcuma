@@ -83,6 +83,7 @@ struct GradArgs {
     const double* P;              // cartesian density, n x n
     const double* Pmax;           // nshell x nshell
     double thr;                   // density-weighted screening threshold (0 = none)
+    double kx;                    // exchange weight (1 = RHF, 0 = pure DFT, 0.2 = B3LYP; Oct 2026)
     int natoms;
     double* grad;                 // natoms x 3
     unsigned long long* counter;
@@ -127,8 +128,11 @@ __device__ inline bool gradQuartet(const DevTables& d, const GradArgs& g, long l
     if (aA == g.sh_atom[B] && aA == g.sh_atom[C] && aA == g.sh_atom[D]) return false;
     if (g.thr > 0.0) {
         const int ns = d.nshell;
-        const double bound = g.Pmax[A * ns + B] * g.Pmax[C * ns + D]
-            + 0.25 * (g.Pmax[A * ns + C] * g.Pmax[B * ns + D] + g.Pmax[A * ns + D] * g.Pmax[B * ns + C]);
+        const double bound = g.kx == 1.0
+            ? g.Pmax[A * ns + B] * g.Pmax[C * ns + D]
+                + 0.25 * (g.Pmax[A * ns + C] * g.Pmax[B * ns + D] + g.Pmax[A * ns + D] * g.Pmax[B * ns + C])
+            : g.Pmax[A * ns + B] * g.Pmax[C * ns + D]
+                + 0.25 * g.kx * (g.Pmax[A * ns + C] * g.Pmax[B * ns + D] + g.Pmax[A * ns + D] * g.Pmax[B * ns + C]);
         if (d.pr_schwarz[i] * d.pr_schwarz[j] * bound < g.thr) return false;
     }
     return true;
@@ -311,11 +315,18 @@ __device__ void quartetGrad(const DevTables& d, const GradArgs& g, int i, int j,
     const size_t n = (size_t)d.n_out;
     const double* P = g.P;
     gsync<GS>();  // previous quartet is done with Dq
-    // step 1: D_abcd = P_ab P_cd - 1/4 (P_ac P_bd + P_ad P_bc), as gradientTwoElectron
+    // step 1: D_abcd = P_ab P_cd - kx/4 (P_ac P_bd + P_ad P_bc), the three branches of gradientTwoElectronImpl
+    // (kx = 1: the RHF expression unchanged; kx = 0: Coulomb only; else scaled), Oct 2026
+    const double kx = g.kx;
     for (int e = lane; e < nq; e += GS) {
         const int ab = e / nCD, cd = e % nCD;
         const int m = oA + ab / nB, nn = oB + ab % nB, l = oC + cd / nD, sg = oD + cd % nD;
-        Dq[e] = P[m * n + nn] * P[l * n + sg] - 0.25 * (P[m * n + l] * P[nn * n + sg] + P[m * n + sg] * P[nn * n + l]);
+        if (kx == 1.0)
+            Dq[e] = P[m * n + nn] * P[l * n + sg] - 0.25 * (P[m * n + l] * P[nn * n + sg] + P[m * n + sg] * P[nn * n + l]);
+        else if (kx == 0.0)
+            Dq[e] = P[m * n + nn] * P[l * n + sg];
+        else
+            Dq[e] = P[m * n + nn] * P[l * n + sg] - 0.25 * kx * (P[m * n + l] * P[nn * n + sg] + P[m * n + sg] * P[nn * n + l]);
     }
     gsync<GS>();
     double o1[6] = { 0, 0, 0, 0, 0, 0 }, o2[6] = { 0, 0, 0, 0, 0, 0 };
@@ -456,7 +467,7 @@ public:
         return cudaGetLastError() == cudaSuccess;
     }
 
-    bool compute(const double* P, double threshold, double* grad) override
+    bool compute(const double* P, double threshold, double kx, double* grad) override
     {
         const auto t0 = std::chrono::steady_clock::now();
         const size_t n2 = (size_t)m_n * m_n;
@@ -476,6 +487,7 @@ public:
         g.P = m_P;
         g.Pmax = m_Pmax;
         g.thr = threshold;
+        g.kx = kx;
         g.natoms = m_natoms;
         g.grad = m_grad;
         g.counter = m_counter;
@@ -592,7 +604,8 @@ private:
 
 // 2e-gradient builder (QMGpuGrad2e*), or nullptr with a reason in `why`. `t` from
 // qmint::buildEriGradGpuTables (cartesian, raised Hermite tables). Claude Generated (Q-G7).
-extern "C" void* curcuma_cuda_create_qm_grad2e(const qmint::QMGpuEriTables* t, const qmint::QMGpuGradExtra* x, int device,
+// _kx (Oct 2026): compute() takes the exchange weight, entry renamed with the vtable.
+extern "C" void* curcuma_cuda_create_qm_grad2e_kx(const qmint::QMGpuEriTables* t, const qmint::QMGpuGradExtra* x, int device,
                                                char* why, int whylen)
 {
     if (device >= 0 && cudaSetDevice(device) != cudaSuccess) { setWhy(why, whylen, "cudaSetDevice failed"); return nullptr; }

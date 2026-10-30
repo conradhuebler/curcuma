@@ -1146,6 +1146,8 @@ if(USE_CUDA)
         src/core/energy_calculators/qm_methods/cuda/qm_gpu_rimp2.cu
         # Claude Generated (Oct 2026): 3-index part of the RI gradient on the device
         src/core/energy_calculators/qm_methods/cuda/qm_gpu_ri_grad.cu
+        # Claude Generated (Oct 2026): Kohn-Sham exchange-correlation on the device (V_xc, E_xc, XC gradient)
+        src/core/energy_calculators/qm_methods/cuda/qm_gpu_xc.cu
     )
     set_property(SOURCE ${CUDA_SOURCES} PROPERTY LANGUAGE CUDA)
     set_property(SOURCE ${CUDA_SOURCES} PROPERTY CUDA_SEPARABLE_COMPILATION ON)

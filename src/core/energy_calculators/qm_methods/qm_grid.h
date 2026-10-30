@@ -105,6 +105,24 @@ int lebedevDegree(int npts);
 bool buildMolecularGrid(const std::vector<int>& Z, const Matrix& posBohr, const GridOptions& opt,
                         MolecularGrid& grid, std::string& why, int threads = 1);
 
+/**
+ * @brief Flat description of the AOEvaluator basis for the device AO kernel (cuda/qm_gpu_xc.cu).
+ *
+ * Shells as AOEvaluator groups them (consecutive cartesian components on one centre with the same exponents).
+ * Per shell: centre (Bohr), smallest exponent, primitives [prim_off, prim_off + nprim) of exps, components
+ * [comp_off, comp_off + ncomp) with powers lmn (3 per component) and coefficients coef[coef_off[c] + k]; active
+ * functions [out_first, out_first + out_width) with T (ncomp x out_width, row-major, offset T_off; -1 = identity,
+ * then out_width = ncomp). The transform is per shell; flatten() refuses a Q that mixes shells.
+ * Claude Generated (Oct 2026, GPU KS-DFT).
+ */
+struct FlatShells {
+    int nbf = 0, ncart = 0, nshell = 0, max_ncomp = 0;
+    std::vector<double> xyz, amin, exps, coef, T;
+    std::vector<int> nprim, prim_off, ncomp, comp_off, lmn, coef_off, out_first, out_width, T_off, cart_first;
+    FlatShells();
+    ~FlatShells();
+};
+
 /// AO values on a block of points: phi(p, mu); with deriv >= 1 also dphi/dx, dphi/dy, dphi/dz; with deriv >= 2
 /// also the second derivatives (WP8: GGA nuclear gradient).
 struct AOBlock {
@@ -139,6 +157,9 @@ public:
     /// Points [begin, begin + count) of `points` (rows, Bohr). deriv 0: values, 1: values + gradients,
     /// 2: values + gradients + second derivatives (WP8).
     void evaluate(const Matrix& points, int begin, int count, int deriv, AOBlock& out) const;
+    /// Flat shell tables for the device AO kernel (same shells, exponents, coefficients and transform as
+    /// evaluate()). False + reason when Q mixes shells. Claude Generated (Oct 2026, GPU KS-DFT).
+    bool flatten(FlatShells& out, std::string& why) const;
 
 private:
     struct Shell {
@@ -148,6 +169,13 @@ private:
         std::vector<int> cart;                 ///< flat cartesian indices of the components
         std::vector<int> l, m, n;              ///< powers per component
         std::vector<double> coef;              ///< component-major, exps.size() per component
+        // Special members out of line: the implicit inline ones trip -Winline.
+        Shell();
+        Shell(const Shell&);
+        Shell(Shell&&) noexcept;
+        Shell& operator=(const Shell&);
+        Shell& operator=(Shell&&) noexcept;
+        ~Shell();
     };
     std::vector<Shell> m_shells;
     int m_ncart = 0, m_nbf = 0;
@@ -174,6 +202,12 @@ void densityOnBlock(const AOBlock& ao, const Matrix& P, Vector& rho, Matrix* gra
  */
 bool gridWeightGradient(const std::vector<int>& Z, const Matrix& posBohr, const GridOptions& opt,
                         const MolecularGrid& grid, const Vector& f, Matrix& grad, std::string& why, int threads = 1);
+
+/// 1/R_ij (natoms x natoms, 0 on the diagonal) and the size-adjustment parameters a_ij of the partition of
+/// buildMolecularGrid(opt), plus whether the Stratmann polynomial is used; for the device grid response
+/// (cuda/qm_gpu_xc.cu). False + reason for coinciding atoms or unknown names. Claude Generated (Oct 2026).
+bool partitionTables(const std::vector<int>& Z, const Matrix& posBohr, const GridOptions& opt, Matrix& inv_dist,
+                     Matrix& a, bool& stratmann, std::string& why);
 
 /// sum_p w_p rho(r_p) over the whole grid (electron count for the SCF density P in the AO basis of `ao`),
 /// blocks of `block` points over `threads` OpenMP threads; per-block partial sums are added in block order, so the

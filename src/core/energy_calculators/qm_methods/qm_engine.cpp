@@ -178,6 +178,17 @@ QMEngine::QMEngine(QMFunctional functional, const json& config)
         else if (config["gpu_grad1e"].is_string())
             m_gpu_grad1e = config["gpu_grad1e"].get<std::string>();
     }
+    if (config.contains("gpu_xc")) {
+        // Accept a CLI boolean too (-qm.gpu_xc true/false). Claude Generated (Oct 2026, GPU KS-DFT).
+        if (config["gpu_xc"].is_boolean())
+            m_gpu_xc = config["gpu_xc"].get<bool>() ? "on" : "off";
+        else if (config["gpu_xc"].is_string())
+            m_gpu_xc = config["gpu_xc"].get<std::string>();
+    }
+    if (config.contains("gpu_xc_max_memory_mb") && config["gpu_xc_max_memory_mb"].is_number())
+        m_gpu_xc_max_memory_mb = config["gpu_xc_max_memory_mb"].get<double>();
+    if (config.contains("gpu_xc_block_points") && config["gpu_xc_block_points"].is_number())
+        m_gpu_xc_block_points = std::max(0, static_cast<int>(std::lround(config["gpu_xc_block_points"].get<double>())));
     if (config.contains("gpu_scf_min_nbf") && config["gpu_scf_min_nbf"].is_number())
         m_gpu_scf_min_nbf = static_cast<int>(std::lround(config["gpu_scf_min_nbf"].get<double>()));
     if (config.contains("gpu_max_memory_mb") && config["gpu_max_memory_mb"].is_number())
@@ -714,10 +725,10 @@ bool QMEngine::computeGradient()
     // Q-G7/Q-G8: the device gradient parts read one set of tables (cartesian, Hermite tables raised by
     // one on both shells), built once per gradient on the host when at least one part runs there.
     const std::string be1 = gpuGradBackend(m_gpu_grad1e, "gpu_grad1e", "qm_grad1e", m_gpu_grad1e_failed);
-    // Kohn-Sham (WP8): the device 2e kernel has the RHF weights, so the 2e part stays on the CPU (no GPU KS gradient).
+    // Kohn-Sham (WP8): exchange weight kx = a_x of the 2e part; the device 2e kernel takes it (GPU KS-DFT, Oct 2026).
     const bool ks = isKohnSham();
     const double kx = ks ? m_xc.exact_exchange : 1.0;
-    const std::string be2 = (ri || ks) ? std::string() : gpuGradBackend(m_gpu_grad, "gpu_grad", "qm_grad", m_gpu_grad_failed);
+    const std::string be2 = ri ? std::string() : gpuGradBackend(m_gpu_grad, "gpu_grad", "qm_grad", m_gpu_grad_failed);
     qmint::EriGpuTables tables;
     std::string tab_why;
     bool tables_ok = false;
@@ -747,7 +758,7 @@ bool QMEngine::computeGradient()
         }
         on_device = dev_info.find("device") != std::string::npos;
     } else {
-        on_device = !be2.empty() && gpuGradientTwoElectron(tables_ok ? &tables : nullptr, tab_why, be2, Pc, g2, dev_info);
+        on_device = !be2.empty() && gpuGradientTwoElectron(tables_ok ? &tables : nullptr, tab_why, be2, Pc, kx, g2, dev_info);
         if (!on_device)
             g2 = ks ? qmint::gradientTwoElectronScaled(m_gto_basis, Pc, kx, m_atomcount, m_threads)
                     : qmint::gradientTwoElectron(m_gto_basis, Pc, m_atomcount, m_threads);
@@ -826,7 +837,8 @@ std::string QMEngine::gpuGradBackend(const std::string& mode, const char* option
 // -qm.eri_screening / 100, 0 = all quartets, as the CPU). CURCUMA_QM_GPU_GRAD_CHECK=1 also runs the CPU
 // reference and prints one comparison line (test_cases/qm_gpu/check_qm_gpu_grad.py parses it).
 bool QMEngine::gpuGradientTwoElectron(const qmint::EriGpuTables* tables, const std::string& why_tables,
-                                      const std::string& backend, const Matrix& Pc, Matrix& g2, std::string& info) const
+                                      const std::string& backend, const Matrix& Pc, double kx, Matrix& g2,
+                                      std::string& info) const
 {
     const auto t0 = std::chrono::steady_clock::now();
     std::string why = why_tables;
@@ -848,7 +860,7 @@ bool QMEngine::gpuGradientTwoElectron(const qmint::EriGpuTables* tables, const s
     // than the ERI screen: benzene/def2-SVP 2.6e-10 (1e-12) vs 6.2e-12 Eh/Bohr (1e-14) from the
     // unscreened CPU gradient, for 5 % more quartets. 0 keeps every quartet (as the CPU).
     const double grad_thr = m_eri_screening * 1.0e-2;
-    if (!dev || !dev->compute(P.data(), grad_thr, g.data())) {
+    if (!dev || !dev->compute(P.data(), grad_thr, kx, g.data())) {
         m_gpu_grad_failed = true;
         curcuma::reportGpuFallback("qm_grad", "device 2e gradient " + std::string(dev ? "kernel failed" : "not possible: " + why));
         return false;
@@ -859,7 +871,8 @@ bool QMEngine::gpuGradientTwoElectron(const qmint::EriGpuTables* tables, const s
     info = fmt::format("{} ({}; setup {:.1f} ms)", dev->name(), dev->stats(), ms(t0, t1));
     if (const char* chk = std::getenv("CURCUMA_QM_GPU_GRAD_CHECK"); chk && chk[0] == '1') {
         const auto c0 = std::chrono::steady_clock::now();
-        const Matrix gc = qmint::gradientTwoElectron(m_gto_basis, Pc, m_atomcount, m_threads);
+        const Matrix gc = kx == 1.0 ? qmint::gradientTwoElectron(m_gto_basis, Pc, m_atomcount, m_threads)
+                                    : qmint::gradientTwoElectronScaled(m_gto_basis, Pc, kx, m_atomcount, m_threads);
         const double cpu_ms = ms(c0, std::chrono::steady_clock::now());
         const Eigen::RowVector3d sd = g2.colwise().sum(), sc = gc.colwise().sum();
         CurcumaLogger::result(fmt::format(

@@ -663,6 +663,7 @@ add_subdirectory(qm_lda)  # Claude Generated (Oct 2026, WP5): LDA kernels vs lib
 add_subdirectory(qm_pbe)  # Claude Generated (Oct 2026, WP6): PBE kernels vs libxc, V_xc vs FD, energies vs PySCF on the same grid
 add_subdirectory(qm_b3lyp)  # Claude Generated (Oct 2026, WP7): B88/LYP kernels vs libxc, hybrid energies vs PySCF on the same grid
 add_subdirectory(qm_dft_grad)  # Claude Generated (Oct 2026, WP8): Kohn-Sham analytic gradient vs FD and PySCF, -opt
+add_subdirectory(qm_gpu_dft)  # Claude Generated (Oct 2026): Kohn-Sham DFT on the GPU vs the CPU (skipped without CUDA)
 # Claude Generated (Oct 2026): property tests generated from the structure library (test_cases/struct_test_policy.json):
 # translation/rotation/permutation invariance, sum of forces and torque, finite-difference gradient, repeat and thread
 # independence, CPU against CUDA. The selection is made by scripts/gen_struct_tests.py at configure time.

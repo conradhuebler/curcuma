@@ -35,6 +35,7 @@
 #include "computational_method.h"   // ComputationalMethod, json (global namespace)
 #include "qm_methods/qm_gpu_backend.h"  // qmint::QMGpuJK
 #include "qm_methods/qm_gpu_scf_backend.h"  // qmint::QMGpuSCF (Q-G4)
+#include "qm_methods/qm_gpu_xc_backend.h"  // qmint::QMGpuXC (GPU KS-DFT, Oct 2026)
 #include "qm_methods/qm_gpu_grad_backend.h"  // qmint::QMGpuGrad2e (Q-G7)
 #include "qm_methods/qm_gpu_mp2_grad_backend.h"  // qmint::QMGpuMP2Grad2e (MP2 gradient)
 #include "qm_methods/qm_gpu_grad1e_backend.h"  // qmint::QMGpuGrad1e (Q-G8)
@@ -94,6 +95,15 @@ std::unique_ptr<qmint::QMGpuJK> createQmDirectJK(const std::string& backend, con
  * `why` when the plugin/entry point is missing or an allocation fails. Claude Generated (Oct 2026).
  */
 std::unique_ptr<qmint::QMGpuSCF> createQmScf(const std::string& backend, int n, int device, std::string& why);
+
+/**
+ * Native-QM Kohn-Sham exchange-correlation on the device (GPU KS-DFT, Oct 2026): grid resident, AO values streamed
+ * per block of points; V_xc/E_xc and the XC gradient incl. grid response (qm_gpu_xc_backend.h). nullptr with a reason
+ * in `why` when the plugin/entry point (curcuma_<backend>_create_qm_xc) is missing, the basis/functional is not
+ * supported (shells above f, more than 32 primitives) or the device memory does not hold one block. Claude Generated.
+ */
+std::unique_ptr<qmint::QMGpuXC> createQmXC(const std::string& backend, const qmint::QMGpuXCSetup& setup, int device,
+                                           std::string& why);
 
 /**
  * Native-QM two-electron gradient builder (Q-G7): integral-direct derivative integrals contracted
