@@ -8,8 +8,8 @@ Built by `.github/workflows/ccpp.yml` (AutomaticBuild), which calls `linux-gpu.y
 |---|---|---|
 | `curcuma-<v>-avx2-x86_64.AppImage`, `curcuma-<v>-avx512-x86_64.AppImage` | CPU-only program, libraries bundled | all |
 | `curcuma-<v>-linux-<level>.tar.gz` | the same program as an archive, top directory `curcuma-<level>/` | all |
-| `curcuma-<v>-plugin-cuda-<level>.tar.gz` | `libcurcuma_cuda.so` and the CUDA libraries (about 1.1 GB) | `master` and manual runs only |
-| `curcuma-<v>-plugin-rocm-<level>.tar.gz` | `libcurcuma_rocm.so`, HIP, rocBLAS, rocSOLVER and rocBLAS kernels (about 1.0 GB) | `master` and manual runs only |
+| `curcuma-<v>-plugin-cuda-<level>.tar.gz` | `libcurcuma_cuda.so` and the CUDA libraries (about 1.1 GB) | manual runs only |
+| `curcuma-<v>-plugin-rocm-<level>.tar.gz` | `libcurcuma_rocm.so`, HIP, rocBLAS, rocSOLVER and rocBLAS kernels (about 1.0 GB) | manual runs only |
 | `curcuma-<v>-x86_64-Windows.zip` | Windows build (baseline, no AVX2/AVX512, no GPU) | all |
 
 `<level>` is `avx512` if `grep -c avx512f /proc/cpuinfo` is above 0, otherwise `avx2`. Linux builds need glibc 2.35 or newer. Vulkan is not shipped.

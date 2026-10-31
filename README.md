@@ -60,7 +60,7 @@ RMSD with atom reordering `-rmsd`, docking `-dock`, interaction energies `-inter
 
 Prebuilt binaries are on the [Releases page](https://github.com/conradhuebler/curcuma/releases): Linux x86_64 AppImages
 for AVX2 and AVX512 CPUs and a Windows x86_64 archive. GPU support (CUDA, ROCm) is a separate plugin download of the same CPU level
-that is unpacked next to the AppImage; plugins are part of releases built from `master` only. Every release is marked as a
+that is unpacked next to the AppImage; plugins are part of manually started runs only. Every release is marked as a
 pre-release and is built by the CI from one commit; the releases named `Curcuma CI (feature/...)` are builds of development
 branches. File names, plugin setup and requirements: [docs/RELEASE_BINARIES.md](docs/RELEASE_BINARIES.md).
 
