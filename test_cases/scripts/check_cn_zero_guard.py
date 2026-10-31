@@ -6,8 +6,10 @@ no structure file is added to the repository.
   1. The switch never changes the energy: printed single-point energy and the energy line of -dump_gradient are equal
      with and without it, for an isolated Cl- ... H2O (H-Cl 3.2 A), a bound Cl- ... H2O (H-Cl 2.2 A) and a water dimer.
   2. Isolated Cl- (H-Cl 3.2 A, CN(Cl) = 0 exactly): with the switch the analytic gradient agrees with a central finite
-     difference of the own energy (h = 2e-3 A, 12 components incl. the Cl ones) within 2e-5 Eh/A; the reference
-     formula (switch off) is off by more than 1e-4 Eh/A there.
+     difference of the own energy (h = 2e-3 A, 12 components incl. the Cl ones) within 2e-5 Eh/A; so does the default
+     without the switch (charged, two fragments: frag_charge_model ensemble is a fragment-charge override, and every
+     override applies the guard since Oct 31, 2026); with -gfnff.frag_charge_model reference and the Cl- as atom 1 the
+     reference formula (switch off) is off by more than 1e-4 Eh/A, the switch repairs it.
   3. Bound Cl- (H-Cl 2.2 A, CN > 0) and the neutral water dimer: gradients bit-identical with and without the switch,
      and within 2e-5 Eh/A of the finite difference.
 Usage: check_cn_zero_guard.py CURCUMA_BINARY SOURCE_DIR
@@ -109,8 +111,19 @@ print("2. isolated Cl- (CN = 0): gradient against central finite difference, 12 
 err_on = fd_error(el_iso, X_iso, -1, ON)
 err_off = fd_error(el_iso, X_iso, -1, [])
 check(err_on <= 2e-5, f"switch on: max |FD - analytic| = {err_on:.2e} Eh/A (<= 2e-5)")
-check(err_off > 1e-4, f"switch off (reference formula): max |FD - analytic| = {err_off:.2e} Eh/A (> 1e-4)")
-check(not np.array_equal(G_off["Cl- ... H2O 3.2 A"], G_on["Cl- ... H2O 3.2 A"]), "switch changes this gradient")
+# Claude Generated (Oct 31, 2026): a charged system with several fragments runs the default frag_charge_model ensemble,
+# whose variants are fragment-charge overrides, and every override applies the guard (GFNFF::cnZeroGuardEffective, the
+# charge-groups Cl- defect of 1 Eh/A): the switch changes nothing here (before: 6.58e-4 Eh/A with the switch off).
+check(err_off <= 2e-5, f"switch off, default charge model (ensemble override, guard always on): max |FD - analytic| = {err_off:.2e} Eh/A (<= 2e-5)")
+check(np.array_equal(G_off["Cl- ... H2O 3.2 A"], G_on["Cl- ... H2O 3.2 A"]), "default charge model: the switch does not change this gradient")
+# the reference charge model puts the net charge on the fragment of atom 1: Cl- first, so that it carries the -1; only
+# there the reference formula (switch off) is still in force
+REF = ["-gfnff.frag_charge_model", "reference"]
+el_ref, X_ref = [el_iso[3]] + el_iso[:3], np.vstack([X_iso[3:4], X_iso[:3]])
+err_ref_off = fd_error(el_ref, X_ref, -1, REF)
+err_ref_on = fd_error(el_ref, X_ref, -1, REF + ON)
+check(err_ref_off > 1e-4, f"reference charge model (Cl- first), switch off (reference formula): max |FD - analytic| = {err_ref_off:.2e} Eh/A (> 1e-4)")
+check(err_ref_on <= 2e-5, f"reference charge model (Cl- first), switch on: max |FD - analytic| = {err_ref_on:.2e} Eh/A (<= 2e-5)")
 
 print("3. CN > 0 and neutral: gradient unchanged and consistent")
 for name in ("Cl- ... H2O 2.2 A", "water dimer"):

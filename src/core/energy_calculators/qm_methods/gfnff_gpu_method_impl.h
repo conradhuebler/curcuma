@@ -750,7 +750,11 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
         m_gpu_workspace = std::make_unique<GpuWorkspace>(*pending, natoms, atom_types);
         // Claude Generated (Oct 2026): -gfnff.cn_zero_guard on the device (k_coulomb_postprocess), same exact
         // CN == 0.0 test as the CPU FFWorkspace; before this the wrapper fell back to the CPU method.
-        m_gpu_workspace->setCnZeroGuard(m_gfnff->cnZeroGuardRequested());
+        // Oct 31, 2026: like the CPU workspace (GFNFF::cnZeroGuardEffective) the guard is also on whenever a
+        // fragment-charge override is active (charge groups put q = -1 on an isolated counter-ion); the user groups
+        // are in the topology at this point (calculateTopologyInfo Phase 10 ran before the parameter set). Not run
+        // on hardware after this change (no CUDA build of this worktree).
+        m_gpu_workspace->setCnZeroGuard(m_gfnff->cnZeroGuardEffective());
 
         // Claude Generated (Sep 2026, F-16): keep only what the GPU path reads later (bonds and
         // the bond-HB cross-reference, see calculateEnergy); the rest (D4 pairs, repulsion

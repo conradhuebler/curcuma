@@ -18,6 +18,10 @@ Uses only the curcuma binary. Builds the chain (polymerbuild also writes the gro
      scripts/charge_groups_for_solvated.py): unit sums +1, Cl- -1, every water 0; no groups: units not +1; gradient
      against a central finite difference (12 components); rejections (partly covered fragment, wrong sum, atom in two
      groups, unknown key value); permuted atom order; "rest": "single" equals the file without the key.
+  7. stored library structure pdmaema-ab2-h2-water24-cl2.grad-defect with its group file (rest per_fragment): the Cl- whose
+     nearest H is 3.18 A away sits at GFN-FF CN = 0 exactly and carries q = -1; the analytic gradient on it and on that H
+     against a central finite difference (tolerance 5e-5 Eh/A; 0.93 / 1.05 Eh/A before Oct 31, 2026: Coulomb TERM 1b
+     q*cnf/(2*sqrt(0) + 1e-16), Known Issue #43), and -gfnff.cn_zero_guard true changes nothing with groups (always on).
 Usage: check_charge_groups.py CURCUMA_BINARY SOURCE_DIR
 """
 import json, os, re, subprocess, sys, tempfile
@@ -439,6 +443,33 @@ check(abs((e_sp - e_s) - (e_sp0 - e_s0)) < 1e-5,
 json.dump({"rest": "single", "groups": groups}, open("single.json", "w"))
 e_single, _ = sp("base.xyz", "single.json")
 check(e_single == e_grp, "rest single (explicit) == groups without the key (%.8f / %.8f Eh)" % (e_single, e_grp))
+
+# (vii) Claude Generated (Oct 31, 2026): the stored defect structure (library id pdmaema-ab2-h2-water24-cl2.grad-defect,
+# group file test_cases/reference_data/charge_groups/) - Cl- 180 at CN = 0 exactly (nearest H 98 at 3.18 A) with q = -1
+# from the groups. Before the fix the analytic gradient on it was (0.928, -0.049, -1.025) against FD (-0.009, -0.009, 0.021)
+# Eh/A: Coulomb TERM 1b q*cnf/(2*sqrt(CN) + 1e-16) at CN = 0 (Known Issue #43); the fix applies the cn_zero_guard
+# whenever a fragment-charge override is active. Components: Cl- 180 (x, y, z) and its nearest H 98 (x, z).
+el_d, X_d = read_xyz(lib("pdmaema-ab2-h2-water24-cl2.grad-defect"))
+groups_d = src + "/test_cases/reference_data/charge_groups/pdmaema-ab2-h2-water24-cl2.groups.json"
+write_mol("defect.xyz", el_d, X_d)
+e_d, _ = sp("defect.xyz", groups_d, "q_d.txt", "defect.grad", charge=0)
+q_d = np.loadtxt("q_d.txt")
+G = np.loadtxt("defect.grad", comments="#")
+check(el_d[180] == "Cl" and abs(q_d[180] + 1.0) < 1e-6, "defect structure: atom 180 is a Cl- with q = %.6f from the groups" % q_d[180])
+worst, scale = 0.0, 0.0
+for i, k in ((180, 0), (180, 1), (180, 2), (98, 0), (98, 2)):
+    Xp_, Xm_ = X_d.copy(), X_d.copy()
+    Xp_[i, k] += h
+    Xm_[i, k] -= h
+    write_mol("p.xyz", el_d, Xp_)
+    write_mol("m.xyz", el_d, Xm_)
+    fd = (sp("p.xyz", groups_d, charge=0)[0] - sp("m.xyz", groups_d, charge=0)[0]) / (2 * h)
+    worst = max(worst, abs(fd - G[i, k]))
+    scale = max(scale, abs(G[i, k]))
+check(worst < 5e-5, "defect structure, rest per_fragment, Cl- at CN = 0: gradient against finite difference, 5 components: max |diff| %.2e Eh/A (largest %.3f)" % (worst, scale))
+e_dg, _ = sp("defect.xyz", groups_d, None, "defect_guard.grad", charge=0, extra=["-gfnff.cn_zero_guard", "true"])
+G_g = np.loadtxt("defect_guard.grad", comments="#")
+check(e_dg == e_d and np.array_equal(G, G_g), "defect structure: -gfnff.cn_zero_guard true changes neither energy nor gradient with groups (guard always on with an override)")
 
 print("FAILED" if failed else "all passed")
 sys.exit(1 if failed else 0)
