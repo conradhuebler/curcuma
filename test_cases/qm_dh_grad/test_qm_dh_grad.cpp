@@ -20,7 +20,7 @@
  *       DoubleHybridMethod energy and analytic gradient, parts, sum over atoms, torque; with --fd the central 4-point
  *       finite difference of the total energy (moving grid = with grid response, frozen grid = without).
  *
- *   test_qm_dh_grad rotate|threads <xyz> [options]   rotated/translated geometry; 1 vs 4 threads (bitwise target)
+ *   test_qm_dh_grad rotate|threads <xyz> [options]   rotated/translated geometry; 1 vs 4 vs 8 threads (bitwise)
  *   test_qm_dh_grad update <xyzA> <xyzB> [options]   updateGeometry A -> B against a fresh method on B
  *
  * Claude Generated (Oct 2026, WP12 stage 2). GPL-3.0.
@@ -42,6 +42,8 @@
 
 namespace {
 
+// Driver defaults = the PySCF/libxc reference convention (PZ81-P86, no frozen core), always passed explicitly to
+// DoubleHybridMethod; curcuma's own DH defaults are vwn5 + frozen core since Oct 31 2026.
 struct Args {
     std::string mode, xyz, xyz2, method = "b2plyp", grid = "sg1", pt2 = "ri", p86 = "pz81", fd;
     int threads = 4, fd_atoms = -1;
@@ -238,11 +240,13 @@ int modeThreads(const Args& a)
 {
     Mol m;
     if (!readMol(a.xyz, m)) return 1;
-    double E1, E4;
-    Matrix g1, g4;
-    if (!gradientAt(a, m, 1, E1, g1) || !gradientAt(a, m, 4, E4, g4)) return 2;
-    json out = { { "energy_1", E1 }, { "energy_4", E4 }, { "max_dg", (g1 - g4).cwiseAbs().maxCoeff() },
-        { "bitwise", (g1.array() == g4.array()).all() && E1 == E4 } };
+    // 1 vs 4 vs 8 threads (8 added Oct 31 2026 with the fixed chunks of mp2GradientHost)
+    double E1, E4, E8;
+    Matrix g1, g4, g8;
+    if (!gradientAt(a, m, 1, E1, g1) || !gradientAt(a, m, 4, E4, g4) || !gradientAt(a, m, 8, E8, g8)) return 2;
+    json out = { { "energy_1", E1 }, { "energy_4", E4 }, { "energy_8", E8 },
+        { "max_dg", std::max((g1 - g4).cwiseAbs().maxCoeff(), (g1 - g8).cwiseAbs().maxCoeff()) },
+        { "bitwise", (g1.array() == g4.array()).all() && (g1.array() == g8.array()).all() && E1 == E4 && E1 == E8 } };
     std::cout << out.dump(1) << std::endl;
     return 0;
 }

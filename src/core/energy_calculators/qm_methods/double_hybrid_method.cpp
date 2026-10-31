@@ -52,6 +52,16 @@ bool readBool(const json& j, const char* key, bool fallback)
     return fallback;
 }
 
+/// -qm.frozen_core for a double hybrid: "auto" (registry default) or absent = true (the DH default since Oct 31
+/// 2026, as ORCA), otherwise the explicit value. Claude Generated (Oct 2026, WP12).
+bool frozenCoreSetting(const json& ec)
+{
+    if (!ec.contains("frozen_core")) return true;
+    const json& v = ec["frozen_core"];
+    if (v.is_string() && lower(v.get<std::string>()) == "auto") return true;
+    return readBool(ec, "frozen_core", true);
+}
+
 const char* dispersionName(DHDispersion d)
 {
     return d == DHDispersion::D3BJ ? "D3(BJ)" : d == DHDispersion::D4 ? "D4" : "none";
@@ -175,10 +185,17 @@ DoubleHybridMethod::DoubleHybridMethod(const std::string& name, const json& conf
     m_def = d;
     const json ec = QMMethod::engineConfig(config);  // qm defaults < top level < dft < scf < qm
 
-    const std::string p86 = readString(ec, "p86_lda", "pz81");
+    // Oct 31 2026 (operator decision, WP12 doc): default vwn5 (ORCA, smooth); pz81 = libxc GGA_C_P86 (PySCF, Psi4).
+    const std::string p86 = readString(ec, "p86_lda", "vwn5");
     if (p86 != "pz81" && p86 != "vwn5")
-        throw std::invalid_argument("-qm.p86_lda '" + p86 + "' is unknown; use pz81 or vwn5");
+        throw std::invalid_argument("-qm.p86_lda '" + p86 + "' is unknown; use vwn5 or pz81");
     m_p86_vwn5 = (p86 == "vwn5");
+    if (m_def->uses_p86 && m_p86_vwn5 && std::string(m_def->name).rfind("revdsd-", 0) == 0
+        && CurcumaLogger::get_verbosity() >= 1)
+        CurcumaLogger::warn(fmt::format("{}: P86 on VWN5 (default -qm.p86_lda vwn5, as ORCA's revDSD-PBEP86/2021), but "
+                                        "the revDSD-PBEP86 parameters were fitted with PZ81-P86 (Mehta et al. 2023, who "
+                                        "give other numbers for VWN5); -qm.p86_lda pz81 runs the fitted definition",
+                                        m_def->name));
 
     const std::string disp = readString(ec, "dispersion", "auto");
     if (disp == "auto")
@@ -200,7 +217,9 @@ DoubleHybridMethod::DoubleHybridMethod(const std::string& name, const json& conf
     if (pt2 != "ri" && pt2 != "canonical")
         throw std::invalid_argument("-qm.dh_pt2 '" + pt2 + "' is unknown; use ri or canonical");
     m_options.ri = (pt2 == "ri");
-    m_options.frozen_core = readBool(ec, "frozen_core", false);
+    // Oct 31 2026 (operator decision, WP12 doc): frozen core is the double-hybrid default (as ORCA); "auto" is the
+    // registry marker for "method default" (mp2/ri-mp2/ccsd/lmp2 read it as false), an explicit true/false wins.
+    m_options.frozen_core = frozenCoreSetting(ec);
     if (ec.contains("mp2_max_memory_mb") && ec["mp2_max_memory_mb"].is_number())
         m_options.max_memory_mb = ec["mp2_max_memory_mb"].get<double>();
     if (ec.contains("mp2_batch_mb") && ec["mp2_batch_mb"].is_number())

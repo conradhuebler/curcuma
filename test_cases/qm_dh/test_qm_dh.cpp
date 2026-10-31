@@ -34,6 +34,8 @@
 
 namespace {
 
+// Driver defaults = the PySCF/libxc reference convention (PZ81-P86, no frozen core), always passed explicitly to
+// DoubleHybridMethod; curcuma's own DH defaults are vwn5 + frozen core since Oct 31 2026.
 struct Args {
     std::string mode, xyz, xyz2, method = "b2plyp", grid = "sg1", pt2 = "ri", p86 = "pz81", dispersion = "auto";
     int threads = 4;

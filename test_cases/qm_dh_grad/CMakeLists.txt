@@ -28,7 +28,7 @@ if(Python3_Interpreter_FOUND)
         set_tests_properties(qm_dh_grad_fxc_${_case} PROPERTIES TIMEOUT 600 LABELS "qm_dh_grad")
     endforeach()
     # every table row on H2O (RI, moving and frozen grid), plus canonical / frozen-core / other molecules. The P86 rows
-    # run with -qm.p86_lda vwn5 (_vwn5): the default PZ81 local part (libxc LDA_C_PZ) is discontinuous at r_s = 1, so the
+    # run with -qm.p86_lda vwn5 (_vwn5, the curcuma default since Oct 31 2026; the driver default is pz81): the PZ81 local part (libxc LDA_C_PZ) is discontinuous at r_s = 1, so the
     # FD of a PZ81-P86 energy picks up jumps of ~1e-9 Eh per grid point crossing the seam (3e-5 Eh/Bohr at h 1e-3,
     # WP12 doc stage 2); the PZ81 second derivatives are checked by qm_dh_grad_kernel and _fxc_H2O_dsd-pbep86.
     set(_FD_CASES)
@@ -72,10 +72,13 @@ if(Python3_Interpreter_FOUND)
         add_test(NAME qm_dh_grad_update_${_case} COMMAND ${_DG} --check update --case ${_case})
         set_tests_properties(qm_dh_grad_update_${_case} PROPERTIES TIMEOUT 900 LABELS "qm_dh_grad")
     endforeach()
-    # formaldehyde with dsd-pbep86-d3bj on the default PZ81-P86 stalls at |g| ~ 3e-5 Eh/Bohr (r_s = 1 jumps of PZ81, the
-    # line search fails, exit 1; WP12 doc stage 2): run on VWN5-P86
+    # formaldehyde with dsd-pbep86-d3bj on PZ81-P86 stalls at |g| ~ 3e-5 Eh/Bohr (r_s = 1 jumps of PZ81, the line search
+    # fails, exit 1; WP12 doc stage 2): run on VWN5-P86. The opt cases pass -qm.p86_lda / -qm.frozen_core explicitly
+    # (driver convention: pz81, no fc); _default runs curcuma's defaults (since Oct 31 2026 vwn5 + frozen core) and
+    # must converge with exit 0.
     foreach(_case H2O_distorted_b2plyp NH3_b2plyp formaldehyde_distorted_b2plyp H2O_distorted_dsd-pbep86-d3bj
-                  NH3_dsd-pbep86-d3bj formaldehyde_distorted_dsd-pbep86-d3bj_vwn5 H2O_distorted_dsd-pbeb95-d3bj)
+                  NH3_dsd-pbep86-d3bj formaldehyde_distorted_dsd-pbep86-d3bj_vwn5 H2O_distorted_dsd-pbeb95-d3bj
+                  formaldehyde_distorted_dsd-pbep86-d3bj_default)
         add_test(NAME qm_dh_opt_${_case} COMMAND ${_DG} --check opt --case ${_case} --curcuma $<TARGET_FILE:curcuma>)
         set_tests_properties(qm_dh_opt_${_case} PROPERTIES TIMEOUT 1800 LABELS "qm_dh_grad")
     endforeach()

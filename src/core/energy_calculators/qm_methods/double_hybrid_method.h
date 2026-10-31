@@ -45,7 +45,8 @@
 class D3ParameterGenerator;
 
 // Claude Generated (Oct 2026, WP12 stage 1): double-hybrid settings of the qm module (PT2 options are shared with
-// mp2/ri-mp2: -qm.frozen_core, -qm.ri_mp2_aux, -qm.gpu_mp2, -qm.mp2_batch_mb, -qm.mp2_max_memory_mb).
+// mp2/ri-mp2: -qm.frozen_core, -qm.ri_mp2_aux, -qm.gpu_mp2, -qm.mp2_batch_mb, -qm.mp2_max_memory_mb). Since Oct 31 2026
+// -qm.frozen_core "auto" (its default) means true for the double hybrids (as ORCA), false for mp2 and the others.
 BEGIN_PARAMETER_DEFINITION(qm)
     PARAM(dispersion, String, "auto",
           "Double hybrids: dispersion term. auto = the one in the method name (none for b2plyp, dsd-pbep86, ...; D3(BJ) for the -d3bj names; D4 for revdsd-pbep86-d4) | none (drop it, e.g. to compare the KS + PT2 part with a reference without dispersion) | d3bj (only for a method whose table row has D3(BJ) parameters) | d4 (not available: native D4 exists only for GFN2; an error). The D3(BJ) term is the native one of hf-3c, two-body only (s9 = 0).",
@@ -53,8 +54,10 @@ BEGIN_PARAMETER_DEFINITION(qm)
     PARAM(dh_pt2, String, "ri",
           "Double hybrids: PT2 integrals. ri = density-fitted (ia|jb) with -qm.ri_mp2_aux (default def2-universal-JKFIT = def2/JK, no def2-SVP/C ships with curcuma: a method variant, the label says so) | canonical = exact (ia|jb) from the n^4 AO tensor (as -method mp2).",
           "DoubleHybrid", {})
-    PARAM(p86_lda, String, "pz81",
-          "Double hybrids with P86 correlation (dsd-pbep86*, revdsd-pbep86*): local correlation under the P86 gradient term. pz81 = Perdew-Zunger 1981 (libxc GGA_C_P86, Perdew 1986, Gaussian, Q-Chem, Psi4; the revDSD parameters were fitted with it) | vwn5 (libxc GGA_C_P86VWN; what ORCA 6.1 uses, it has no PZ81). The two differ by 2.0e-3 Eh (H2O) to 5.8e-3 Eh (benzene) for dsd-pbep86/def2-SVP (WP12 doc).",
+    // Default vwn5 since Oct 31 2026 (operator decision, WP12 doc; before: pz81). Behaviour change for dsd-pbep86*,
+    // revdsd-pbep86*: energies move by 1e-3..6e-3 Eh.
+    PARAM(p86_lda, String, "vwn5",
+          "Double hybrids with P86 correlation (dsd-pbep86*, revdsd-pbep86*): local correlation under the P86 gradient term. vwn5 (default since Oct 31 2026; libxc GGA_C_P86VWN, what ORCA 6.1 uses, smooth) | pz81 = Perdew-Zunger 1981 (libxc GGA_C_P86 as in Gaussian, Q-Chem, Psi4, PySCF; discontinuous at r_s = 1, so energies jump by ~1e-9 Eh when a grid point crosses rho = 3/(4 pi) and -opt can stall at |g| ~ 3e-5). The revDSD-PBEP86 parameters were fitted with pz81 (Mehta et al. 2023), the default vwn5 uses them as ORCA's revDSD-PBEP86/2021 does. The two differ by 1e-3..6e-3 Eh for def2-SVP (table in the WP12 doc).",
           "DoubleHybrid", {})
 END_PARAMETER_DEFINITION
 

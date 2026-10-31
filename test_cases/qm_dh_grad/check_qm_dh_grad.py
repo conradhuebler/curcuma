@@ -13,9 +13,9 @@ scripts/qm_dh_grad_pyscf_reference.py. Gradients in Eh/Bohr; standard library on
   pyscf --case C   analytic gradient with grid response vs FD of the PySCF double-hybrid energy (reference.json)
   orca --case C    250x1454 frozen-core gradient vs ORCA 6.1 EnGrad (reference_orca.json, --tol) and vs the stored
                    curcuma gradient (1e-9)
-  translation / rotation / threads / update   as qm_dft_grad
+  translation / rotation / update   as qm_dft_grad; threads: 1 vs 4 vs 8 threads bitwise (RI and canonical)
   opt --case M_F   curcuma -opt -method F: final max|g| and the PySCF-minimum check (if stored)
-Case names: <molecule>_<method>[_canonical][_fc][_vwn5][_sg3]. Claude Generated (Oct 2026, WP12 stage 2).
+Case names: <molecule>_<method>[_canonical][_fc][_vwn5][_default][_sg3]. Claude Generated (Oct 2026, WP12 stage 2).
 """
 import argparse
 import json
@@ -46,6 +46,8 @@ def maxdiff(a, b):
 
 
 def parse_case(case):
+    # The driver's own defaults are the PySCF/libxc convention (PZ81-P86, no frozen core), NOT curcuma's double-hybrid
+    # defaults (since Oct 31 2026: -qm.p86_lda vwn5, frozen core). Token "default" = curcuma's defaults (vwn5 + fc).
     for mol in sorted(XYZ, key=len, reverse=True):
         if case.startswith(mol + "_"):
             rest = case[len(mol) + 1:].split("_")
@@ -60,6 +62,8 @@ def parse_case(case):
             opts += ["--fc"]
         elif r == "vwn5":
             opts += ["--p86", "vwn5"]
+        elif r == "default":
+            opts += ["--p86", "vwn5", "--fc", "--cli-defaults"]
         elif r.startswith("sg") or "x" in r:
             opts += ["--grid", r]
     return mol, opts
@@ -179,12 +183,10 @@ def main():
     elif a.check == "threads":
         mol, opts = parse_case(a.case)
         out = run(a.exe, ["threads", os.path.join(TC, XYZ[mol])] + opts)
-        # canonical PT2: mp2GradientHost (shared with -method mp2, unchanged) chunks its first quarter transformation by
-        # the thread count, so canonical gradients agree only to ~1e-15 (pre-existing for mp2 as well); RI: bitwise
-        canonical = "--pt2" in opts
-        ok = out["bitwise"] is True or (canonical and out["max_dg"] <= 1e-13 and out["energy_1"] == out["energy_4"])
-        print(f"{a.case}: 1 vs 4 threads max|dg| {out['max_dg']:.1e}, bitwise {out['bitwise']} (gate: bitwise; canonical "
-              f"PT2 1e-13 with the energy bitwise) {'OK' if ok else 'FAIL'}")
+        # since Oct 31 2026 mp2GradientHost uses fixed chunks, so RI and canonical PT2 are both gated bitwise
+        ok = out["bitwise"] is True
+        print(f"{a.case}: 1 vs 4 vs 8 threads max|dg| {out['max_dg']:.1e}, bitwise {out['bitwise']} (gate: bitwise) "
+              f"{'OK' if ok else 'FAIL'}")
     elif a.check == "update":
         mol, opts = parse_case(a.case)
         out = run(a.exe, ["update", os.path.join(TC, XYZ[mol]), os.path.join(TC, XYZ["H2O_distorted"])] + opts)
@@ -194,13 +196,16 @@ def main():
     elif a.check == "opt":
         mol, opts = parse_case(a.case)
         method = opts[1]
-        cli = []  # driver options -> curcuma flags
-        if "--p86" in opts:
-            cli += ["-qm.p86_lda", opts[opts.index("--p86") + 1]]
+        # driver options -> curcuma flags, always explicit (the curcuma defaults differ from the driver's since Oct 31
+        # 2026); "_default" cases pass no p86/frozen-core flag and check that the curcuma defaults are vwn5 + fc
+        cli_defaults = "--cli-defaults" in opts
+        opts = [x for x in opts if x != "--cli-defaults"]
+        cli = []
         if "--pt2" in opts:
             cli += ["-qm.dh_pt2", opts[opts.index("--pt2") + 1]]
-        if "--fc" in opts:
-            cli += ["-qm.frozen_core", "true"]
+        if not cli_defaults:
+            cli += ["-qm.p86_lda", opts[opts.index("--p86") + 1] if "--p86" in opts else "pz81"]
+            cli += ["-qm.frozen_core", "true" if "--fc" in opts else "false"]
         with tempfile.TemporaryDirectory() as tmp:
             shutil.copy(os.path.join(TC, XYZ[mol]), os.path.join(tmp, "start.xyz"))
             p = subprocess.run([os.path.abspath(a.curcuma), "-opt", "start.xyz", "-method", method, "-no_bmt",

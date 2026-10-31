@@ -170,8 +170,6 @@ Stand.
 
 - **Doppelhybride, Stufe 3 (GPU) und D4** (2026-10-31): P86/B95-Kerne und der PT2-Gradient (Z-Vektor, f_xc) auf dem Device (jetzt
   gezählte Fallbacks `qm_xc`, `qm_dh_grad`), D4 für `revdsd-pbep86-d4` (natives D4 nur für GFN2). [WP12](docs/DFT_ROADMAP/WP12_doppelhybride.md)
-- **MP2-Gradient 1 vs 4 Threads nicht bitgleich** (2026-10-31, vorbestehend an a5596a8c, md5 der `-dump_gradient`): `mp2GradientHost`
-  teilt die erste Viertel-Transformation nach Threadzahl (Kommentar dort sagt das Gegenteil); trifft auch kanonische DH (~1e-15).
 - **Doppelhybrid-Gradient, Rest** (2026-10-31): mit `-qm.ri j|jk` im KS-SCF ein Fehler (PT2-Antwort zur RI-SCF fehlt); RI-PT2-Gradient
   hält n²·naux im Speicher (B für alle MO-Paare); `-md`/Hessian nicht getestet. [WP12](docs/DFT_ROADMAP/WP12_doppelhybride.md)
 - **Meta-GGA, offen nach Stufe 3** (2026-10-30): offene Schale, r2SCAN/TPSSh, SCAN-taugliche Gitter; Device-XC nur 1,7-2x schneller als 8 CPU-Threads
@@ -194,9 +192,8 @@ Code-gebundene Entscheidungen, die bei Ihnen liegen. Fachliche Fragen und Projek
 - `-scf_precond_guard`: Vorgabe `g2:4:best` kostet auf dem unrelaxierten 599-Atom-Cluster bei 8 Threads 4 Iterationen gegen `none` (Kriterium war <= 3);
   über 5 Threadzahlen liegt frag (55-62) unter none (58-138). Varianten streuen 58-109, eine konvergiert nicht. Vorgabe behalten? [docs/SCF_PRECOND.md](docs/SCF_PRECOND.md)
 - Doppelhybride (WP12): `dsd-pbeb95` ohne Dispersion fehlt, weil ORCA 6.1 (0,70 HF / 0,52 B95) und Psi4 (0,69 / 0,54) verschiedene
-  Parameter nennen (Paper Kozuch/Martin 2013 nicht gelesen); Default von `-qm.frozen_core` (false, ORCA rechnet DH mit frozen core) und
-  `-qm.p86_lda pz81` (ORCA: VWN5) beibehalten? PZ81 (libxc LDA_C_PZ) springt bei r_s = 1: die Energie ist dort unstetig
-  (~1e-9 Eh pro Gitterpunkt, FD-Gradient 3e-5 Eh/Bohr daneben); `pz81_mod`/VWN5 wären glatt. [WP12](docs/DFT_ROADMAP/WP12_doppelhybride.md)
+  Parameter nennen (Paper Kozuch/Martin 2013 nicht gelesen). Seit 2026-10-31 rechnet `revdsd-pbep86` per Default auf VWN5-P86 mit den
+  PZ81-Fitparametern (wie ORCA `revDSD-PBEP86/2021`); eigene Zeile mit Mehtas VWN5-Satz (0,4200 / 0,6090 / 0,0476) anlegen? [WP12](docs/DFT_ROADMAP/WP12_doppelhybride.md)
 - `shouldUpdateHBXB()` korrigieren und damit von der Fortran-Referenz abweichen, oder als Referenzeigenschaft belassen?
 - UFF-/QMDFF-Gradient reparieren (Stand: "erstmal nicht")? `-seed` für die MD-Startgeschwindigkeiten reparieren (ändert jede MD)?
 - GPU-Bitgleichheit angehen (Sammel-Kernel statt `atomicAdd`) oder bei Ensemblevergleichen bleiben?

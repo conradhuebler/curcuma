@@ -394,6 +394,10 @@ Matrix gradientTwoElectronScaled(const std::vector<GTO::Orbital>& basis, const M
 ///   D2 = P2_mn P_ls + P_mn P2_ls - (kx/4)(P2_ml P_ns + P_ml P2_ns + P2_ms P_nl + P_ms P2_nl) + Dns,
 /// Dns the non-separable canonical-PT2 part in the ACTIVE basis (as gradientTwoElectronMP2) or nullptr (RI-PT2: its
 /// non-separable part is the 3-index derivative of qmri::RIJK). P, P2 cartesian. Same driver as gradientTwoElectron.
+/// include_ks = true (Oct 31 2026) adds the Kohn-Sham part P_mn P_ls - (kx/4)(P_ml P_ns + P_ms P_nl) of
+/// gradientTwoElectronScaled to the same quartet weights: ONE pass over the derivative integrals for KS + PT2 instead
+/// of two (the integral derivatives dominate; the result equals the sum of the two passes up to rounding).
 Matrix gradientTwoElectronDHPT2(const std::vector<GTO::Orbital>& basis, const Matrix& P, const Matrix& P2,
-                                const double* Dns, const Matrix* Q, double kx, int natoms, int threads = 1);
+                                const double* Dns, const Matrix* Q, double kx, int natoms, int threads = 1,
+                                bool include_ks = false);
 }  // namespace qmint

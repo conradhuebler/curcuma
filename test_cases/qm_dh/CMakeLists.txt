@@ -9,7 +9,8 @@
 #   qm_dh_canonical_<case>       -qm.dh_pt2 canonical vs pyscf.mp.MP2 on the KS orbitals
 #   qm_dh_d3_<case>              D3(BJ) term of the -d3bj names vs ORCA 6.1 (two-body)
 #   qm_dh_{gradient,update,threads}_<fn>   gradient request succeeds (stage 2); UpdateMolecule; 1 vs 4 threads bitwise
-#   qm_dh_cli_*                  curcuma -sp prints the energy, -opt runs (stage 2), D4 request is an error
+#   qm_dh_cli_*                  curcuma -sp prints the energy, -opt runs (stage 2), D4 request is an error,
+#                                cli_defaults: DH default frozen core + VWN5-P86 (Oct 31 2026), mp2 keeps no fc
 #   qm_dh_gpu_H2O                -gpu cuda: counted qm_xc fallback, same energy, -gpu_strict exits; skip (77) without
 #                                a CUDA plugin
 # Run:  ctest -L qm_dh --output-on-failure
@@ -64,7 +65,7 @@ if(Python3_Interpreter_FOUND)
             set_tests_properties(qm_dh_${_chk}_${_fn} PROPERTIES TIMEOUT 600 LABELS "qm_dh")
         endforeach()
     endforeach()
-    foreach(_chk cli_sp cli_opt cli_d4 cli_unknown_option)
+    foreach(_chk cli_sp cli_opt cli_d4 cli_unknown_option cli_defaults)
         add_test(NAME qm_dh_${_chk} COMMAND ${_DH_CHECK} --check ${_chk} --case H2O_b2plyp)
         set_tests_properties(qm_dh_${_chk} PROPERTIES TIMEOUT 600 LABELS "qm_dh")
     endforeach()

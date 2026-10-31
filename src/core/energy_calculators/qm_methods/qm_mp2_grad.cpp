@@ -167,10 +167,14 @@ void mp2GradientHost(const double* eri, int n, const Matrix& C, const Vector& ep
             for (int i = 0; i < o; ++i) CoCm(m, i) = Co[(size_t)m * o + i];
         for (int i0 = 0; i0 < o; i0 += batch) {
             const int ib = std::min(batch, o - i0);
-            // (i nu|lam sig) = sum_mu C_mu,i (mu nu|lam sig): tall-skinny E_cm (n^3 x n) * Co, OpenMP over row chunks
+            // (i nu|lam sig) = sum_mu C_mu,i (mu nu|lam sig): tall-skinny E_cm (n^3 x n) * Co, OpenMP over row chunks.
+            // Oct 31 2026: the chunk size is FIXED (8192 rows), not derived from the thread count: the GEMM of a row
+            // block may round differently with another block height, so a thread-dependent split made the MP2 and
+            // canonical double-hybrid gradients differ in the last bits between thread counts (now 1/4/8 bitwise;
+            // the bits differ from a06631c0 at the 1e-15 level). mp2EnergyHost (qm_mp2.cpp) keeps its split.
             {
                 const Eigen::Index rows = (Eigen::Index)n3;
-                const Eigen::Index chunk = std::max<Eigen::Index>(1024, (rows + 8 * threads - 1) / (8 * threads));
+                const Eigen::Index chunk = 8192;
                 const Eigen::Index nchunk = (rows + chunk - 1) / chunk;
                 Eigen::Map<Eigen::MatrixXd> X(X1.data(), rows, ib);
                 const Eigen::MatrixXd Cb = CoCm.middleCols(i0, ib);

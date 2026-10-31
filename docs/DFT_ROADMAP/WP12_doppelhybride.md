@@ -3,6 +3,11 @@
 - **Status Stufe 1 (Energien, CPU):** 🤖 AI-generated, ⚙️ machine-tested (`ctest -L qm_dh`, 31. Okt 2026); menschlicher
   Produktionstest ausstehend. **Stufe 2 (analytischer Gradient, CPU):** 🤖 AI-generated, ⚙️ machine-tested (`ctest -L
   qm_dh_grad`, 31. Okt 2026), menschlicher Produktionstest ausstehend. **Stufe 3 (GPU-Kerne, D4)** offen (TODO.md).
+- **Verhaltensänderung 31. Okt 2026** (Betreiberentscheidung, Abschnitt „Entscheidungen vom 2026-10-31“): Defaults
+  `-qm.p86_lda vwn5` (vorher `pz81`) und frozen core für alle Doppelhybride (vorher aus); KS- und PT2-Zweielektronen-
+  ableitung in einem Durchlauf; MP2-Gradient über Threadzahlen bitgleich. Energien von `dsd-pbep86*`/`revdsd-pbep86*`
+  ändern sich um 1.3e-3..5.8e-3 Eh (P86), die aller Doppelhybride durch frozen core; ältere Zahlen unten nennen ihre
+  Einstellungen.
 - Name: „WP12“ stand in der README-Tabelle für die gestrichene Bewertung der Schwarz-Ansätze; diese Datei ist das neue WP12.
 - **Code:** `qm_methods/double_hybrid_method.{h,cpp}` (Tabelle `doubleHybridTable()`, Klasse `DoubleHybridMethod`, Parameter
   `-qm.dispersion`, `-qm.dh_pt2`, `-qm.p86_lda`), Kerne `P86_C`, `P86VWN_C`, `B95_C` in `qm_xc_kernels.h`,
@@ -23,7 +28,7 @@ E = E_KS[a_x HF + Σ w_k E_xc,k] + c_os E_os + c_ss E_ss + E_disp: geschlossensc
 MP2-Paarsummen von `qm_mp2.h` mit den KS-Orbitalen und -Eigenwerten (keine Einfachanregungen, wie in allen DH-Definitionen),
 getrennt nach Spin (os/ss), skaliert. PT2 standardmäßig RI (`-qm.ri_mp2_aux`, Default def2-universal-JKFIT = def2/JK; kein
 def2-SVP/C vorhanden: Methodenvariante, Ausgabe sagt es), `-qm.dh_pt2 canonical` = exakte Integrale. Frozen core über
-`-qm.frozen_core` (Default false wie mp2; ORCA rechnet DH mit frozen core). Seit Stufe 2 mit analytischem Gradient
+`-qm.frozen_core` (seit 31. Okt 2026 Default an für Doppelhybride, wie ORCA; mp2 und die anderen bleiben aus). Seit Stufe 2 mit analytischem Gradient
 (`hasGradient()` true außer D4, `-opt` läuft); `-gpu cuda`: J/K und RI-MP2-Summe auf dem Device (vorhandene Pfade), XC mit
 P86/B95 als gezählter `qm_xc`-Fallback auf der CPU, der PT2-Gradient als gezählter `qm_dh_grad`-Fallback, `-gpu_strict true`
 endet mit Exit 3.
@@ -52,9 +57,11 @@ endet mit Exit 3.
 - Widersprüche gefunden: die D4-Parameter von revDSD-PBEP86 in der dftd4-Tabelle (s6 0.5132, a1 0.44, a2 3.60) weichen von
   Mehta et al. ab; die s-dftd3-Einträge `dsdblyp` (s6 0.50, s8 0.2130, a2 6.0519) gehören zum DSD-BLYP von 2010, nicht zu KM2013.
 - **P86-Lokalteil:** libxc `GGA_C_P86` (Perdew 1986, Gaussian, Q-Chem, Psi4) setzt den Gradiententerm auf PZ81, ORCA (kein
-  PZ81) auf VWN5 (Ausgabe `LDAOpt VWN-5`). Default `-qm.p86_lda pz81`; `vwn5` reproduziert ORCA. Unterschied dsd-pbep86/def2-SVP:
-  2.0e-3 Eh (H2O) bis 5.8e-3 Eh (Benzol). Die revDSD-Parameter wurden mit PZ81 gefittet (Mehta et al.); ORCAs
-  `revDSD-PBEP86/2021` nutzt dieselben Zahlen auf VWN5 (Mehta et al. geben für VWN5 eigene: 0.4200 / 0.6090 / 0.0476).
+  PZ81) auf VWN5 (Ausgabe `LDAOpt VWN-5`). Default seit 31. Okt 2026 `-qm.p86_lda vwn5` (vorher `pz81`); `pz81` = libxc/PySCF.
+  Unterschied siehe Tabelle unten (1.3e-3..5.8e-3 Eh). **Widerspruch:** die revDSD-Parameter wurden mit PZ81 gefittet (Mehta
+  et al.); der Default nutzt sie wie ORCAs `revDSD-PBEP86/2021` auf VWN5 (Mehta et al. geben für VWN5 eigene: 0.4200 / 0.6090 /
+  0.0476, hier nicht eingebaut); `revdsd-pbep86*` warnt bei verbosity >= 1, `-qm.p86_lda pz81` rechnet die gefittete Definition.
+  Für DSD-PBEP86 (KM2013, Paper nicht gelesen) ist nicht geprüft, auf welchem Lokalteil gefittet wurde.
 - ORCA-Falle: `%mp2 PS` ist opposite spin, `PT` same spin (Ausgabe „aa/bb pairs“ = PT).
 - D3(BJ): zweikörperig (s9 = 0), wie die DSD-Fits (Psi4 „d3bj2b“) und ORCAs D3BJ (nur E6/E8).
 
@@ -196,7 +203,7 @@ sg1; max |g − FD| über die 4 Moleküle; 416 Läufe):
 | dsd-pbep86 (VWN5) | 1.6e-10 | 1.7e-10 | 1.7e-10 | 1.7e-10 | 1.6e-10 | 1.6e-10 | 1.6e-10 | 1.6e-10 | 8-9 |
 | dsd-pbep86-d3bj (VWN5) | 1.3e-10 | 1.2e-10 | 1.3e-10 | 1.2e-10 | 1.6e-10 | 1.6e-10 | 1.6e-10 | 1.6e-10 | 8-10 |
 | revdsd-pbep86 (VWN5) | 1.5e-10 | 1.5e-10 | 1.4e-10 | 1.5e-10 | 1.3e-10 | 1.3e-10 | 1.3e-10 | 1.3e-10 | 8-10 |
-| dsd-pbep86 (PZ81, Default) | 3.3e-5 | 3.3e-5 | 3.3e-5 | 3.3e-5 | 3.3e-5 | 3.3e-5 | 3.3e-5 | 3.3e-5 | 8-9 |
+| dsd-pbep86 (PZ81, Default bis 31. Okt 2026) | 3.3e-5 | 3.3e-5 | 3.3e-5 | 3.3e-5 | 3.3e-5 | 3.3e-5 | 3.3e-5 | 3.3e-5 | 8-9 |
 | dsd-pbep86-d3bj (PZ81) | 3.7e-5 | 3.7e-5 | 3.7e-5 | 3.7e-5 | 5.4e-5 | 5.4e-5 | 5.4e-5 | 5.4e-5 | 8-10 |
 | revdsd-pbep86 (PZ81) | 4.3e-5 | 4.3e-5 | 4.3e-5 | 4.3e-5 | 4.7e-5 | 4.7e-5 | 4.7e-5 | 4.7e-5 | 8-10 |
 
@@ -208,7 +215,8 @@ sg1; max |g − FD| über die 4 Moleküle; 416 Läufe):
   kein Gradientenfehler: dieselbe Zahl gegen die FD der PySCF-Energie (3.31e-5, unten), gleiche Größe für RI/kanonisch/fc und
   mitwanderndes/eingefrorenes Gitter, VWN5-P86 ≤ 1.7e-10. Der analytische Gradient ist die Ableitung des glatten Teils.
   Folge für `-opt`: H2CO mit dsd-pbep86-d3bj (PZ81) bleibt bei |g| ≈ 3.1e-5 stehen (Liniensuche, Exit 1, Geometrie ≤ 1e-9 Eh
-  vom Minimum), mit `-qm.p86_lda vwn5` konvergiert es (48 Schritte, |g| 1.4e-6); H2O und NH3 mit PZ81 konvergieren.
+  vom Minimum), mit `-qm.p86_lda vwn5` konvergiert es (48 Schritte, |g| 1.4e-6); H2O und NH3 mit PZ81 konvergieren. Deshalb
+  seit 31. Okt 2026 der VWN5-Default (Nachweis unten).
 
 **(2) gegen PySCF 2.14** (kein DH-Gradient in PySCF/libxc: 4-Punkt-FD, h 1e-3 Bohr, der PySCF-DH-Energie aus Komponenten wie
 Stufe 1, gleiches Gitter, PySCF baut es pro Geometrie neu = mitwanderndes Gitter; curcuma mit Gitterantwort; ctest
@@ -237,9 +245,9 @@ curcuma-Ausgabe der xyz-Datei hat 6). dsd-pbep86 (VWN5-P86 wie ORCA) H2O 2.1e-6 
 
 **(5) Weitere Checks:** Σ_A g_A mit Gitterantwort ≤ 4.1e-14 (ohne 5-9e-6, Gitterfehler); verschobene Geometrie max |Δg| ≤ 2.8e-13;
 gedrehte Geometrie (Gitter dreht nicht mit) max |Δg| 1.3e-5..2.8e-5 bei sg1 (Gitterfehler, wie WP8); `updateGeometry` gegen
-frisch ≤ 1.9e-12; 1 vs 4 Threads: RI-PT2 bitgleich (NH3 b2plyp, Benzol dsd-pbep86-d3bj), kanonisches PT2 nur auf 1e-15
-(Benzol b2plyp 8.3e-16, NH3 dsd-pbeb95-d3bj 1.3e-16): `mp2GradientHost` (unverändert, mit `-method mp2` geteilt) teilt die
-erste Viertel-Transformation nach Threadzahl auf; auch der MP2-Gradient von HEAD ist 1 vs 4 Threads nicht bitgleich (md5).
+frisch ≤ 1.9e-12; 1 vs 4 Threads: RI-PT2 bitgleich (NH3 b2plyp, Benzol dsd-pbep86-d3bj), kanonisches PT2 damals nur auf 1e-15
+(Benzol b2plyp 8.3e-16, NH3 dsd-pbeb95-d3bj 1.3e-16): `mp2GradientHost` (mit `-method mp2` geteilt) teilte die erste
+Viertel-Transformation nach Threadzahl auf. Seit 31. Okt 2026 feste Blöcke, 1/4/8 Threads bitgleich (nächster Abschnitt).
 `-gpu cuda` (RTX 5090): gezählter `qm_dh_grad`-Fallback, Gradient = CPU bis 4e-14 Eh/Å, `-gpu_strict true` Exit 3.
 `ctest -L qm_dh_grad` 66/66 (201 s, -j4).
 
@@ -249,9 +257,89 @@ ohne Screening), b3lyp (beide VWN, RI-JK), tpss, scan, mp2/scs-mp2 (+ fc, Gradie
 hf-3c, Doppelhybrid-Energien (b2plyp + fc + kanonisch, dsd-pbep86, dsd-pbep86-d3bj, dsd-pbeb95-d3bj, revdsd-pbep86 VWN5,
 b2gp-plyp-d3bj): 160/160 bitgleich. Nach dem letzten Build (Zitat `dh_gradient`) erneut 160/160. `ctest -L "qm_dh|qm_dh_grad|qm_mgga|qm_mgga_grad|qm_lda|qm_pbe|qm_b3lyp|qm_dft_grad|qm_gpu_dft|qm_grid|qm_hf3c|qm_mp2|qm_cite"` (-j4) 552/552 (453 s).
 
-**Kosten** (Benzol b2plyp sg1, 8 Threads, ruhige Maschine, einmal gemessen): Energie 1.6 s, Energie + Gradient RI-PT2 8.8 s,
-kanonisch 9.5 s; davon Z-Vektor (9 Iterationen, je J/K + F_xc) 1.0 s, PT2-Zweielektronenableitung 2.9 s (eigener Durchlauf
-neben dem KS-2e-Teil, ~3 s laut WP8: beide in einem Durchlauf wären ~3 s billiger, nicht umgesetzt).
+**Kosten** (Benzol b2plyp sg1, 8 Threads, ruhige Maschine, einmal gemessen, Stand a06631c0): Energie 1.6 s, Energie + Gradient
+RI-PT2 8.8 s, kanonisch 9.5 s; davon Z-Vektor (9 Iterationen, je J/K + F_xc) 1.0 s, PT2-Zweielektronenableitung 2.9 s (eigener
+Durchlauf neben dem KS-2e-Teil). Seit 31. Okt 2026 ein gemeinsamer Durchlauf (Tabelle im nächsten Abschnitt).
+
+## Entscheidungen vom 2026-10-31 (Betreiber) und ihre Umsetzung
+
+**(a) `-qm.p86_lda` Default `vwn5` (vorher `pz81`).** Grund: PZ81 (libxc `LDA_C_PZ`) ist bei r_s = 1 unstetig (Sprung
+~1e-9 Eh pro Gitterpunkt, der die Fläche ρ = 3/(4π) überquert, s. Stufe 2 (1)); `-opt` H2CO dsd-pbep86-d3bj blieb stehen.
+VWN5 ist das, was ORCA 6.1 rechnet. Nachweis (`formaldehyde_distorted`, `-qm.scf_threshold 1e-9 -opt.convergence_preset
+tight`, 4 Threads): Binary a06631c0 mit seinen Defaults (PZ81, ohne fc) Exit 1 nach 17 Schritten, |g| 3.1e-5; neues Binary mit
+seinen Defaults (VWN5, fc) Exit 0 nach 49 Schritten, |g| 9e-6 (Normzeile der Ausgabe); neuer ctest
+`qm_dh_opt_formaldehyde_distorted_dsd-pbep86-d3bj_default` (keine P86-/fc-Flags, Endgradient 4.4e-6 Eh/Bohr). Mit dem
+normalen Preset konvergierten beide Binaries (12 Schritte). **Widerspruch, offen benannt:** die revDSD-PBEP86-Parameter sind
+auf PZ81 gefittet (Mehta et al. 2023); `revdsd-pbep86*` rechnet jetzt per Default ORCAs Variante (dieselben Zahlen auf
+VWN5) und warnt (verbosity >= 1); `-qm.p86_lda pz81` gibt die gefittete Definition, Mehtas eigener VWN5-Satz ist nicht
+eingebaut (TODO.md, Entscheidungen). Unterschied VWN5 − PZ81 (`test_qm_dh_grad grad`, def2-SVP, sg1, RI-PT2, frozen core,
+Gitterantwort, Eh bzw. Eh/Bohr; H2CO = `qm_grad/formaldehyde_hf3c_min_reference.xyz`):
+
+| Funktional | Molekül | E(PZ81) | E(VWN5) − E(PZ81) | max \|Δg\| | max \|g\| (PZ81) |
+|---|---|---|---|---|---|
+| dsd-pbep86 | H2O | −76.2119985940 | −1.976e-3 | 2.96e-4 | 8.4e-2 |
+| dsd-pbep86 | NH3 | −56.3847124298 | −1.338e-3 | 3.41e-4 | 5.0e-2 |
+| dsd-pbep86 | H2CO | −114.1895884246 | −2.805e-3 | 4.72e-4 | 1.3e-2 |
+| dsd-pbep86 | Benzol | −231.5592803541 | −5.795e-3 | 2.32e-4 | 9.3e-3 |
+| dsd-pbep86-d3bj | H2O | −76.2063166108 | −1.976e-3 | 2.97e-4 | 8.5e-2 |
+| dsd-pbep86-d3bj | NH3 | −56.3804751086 | −1.338e-3 | 3.41e-4 | 4.8e-2 |
+| dsd-pbep86-d3bj | H2CO | −114.1821968626 | −2.806e-3 | 4.72e-4 | 1.2e-2 |
+| dsd-pbep86-d3bj | Benzol | −231.5421769606 | −5.798e-3 | 2.32e-4 | 9.8e-3 |
+| revdsd-pbep86 | H2O | −76.2026674540 | −1.897e-3 | 2.85e-4 | 8.6e-2 |
+| revdsd-pbep86 | NH3 | −56.3783196306 | −1.285e-3 | 3.27e-4 | 4.7e-2 |
+| revdsd-pbep86 | H2CO | −114.1767461156 | −2.694e-3 | 4.53e-4 | 1.1e-2 |
+| revdsd-pbep86 | Benzol | −231.5182280189 | −5.568e-3 | 2.23e-4 | 1.1e-2 |
+
+Die Gradientendifferenz (2-5e-4 Eh/Bohr) verschiebt Gleichgewichtsgeometrien; nicht gemessen, um wie viel.
+
+**(b) frozen core Default an, nur für Doppelhybride** (wie ORCA). `-qm.frozen_core` ist jetzt ein String-Parameter mit der
+Marke `auto` (wie die `scf`-Marken): Doppelhybride lesen `auto` als true, mp2/scs-mp2/sos-mp2/ri-mp2/scs-ri-mp2/sos-ri-mp2/
+ccsd/lmp2 als false (Verhalten unverändert); explizit `true`/`false` gilt für jede Methode. `-export_run` schreibt `auto`, ein
+Replay behält also den Methoden-Default (geprüft: H2O b2plyp, Replay mit 1 eingefrorenen Orbital, Energie gleich auf 12 Stellen). Eingefroren pro Atom (`qmint::frozenCoreOrbitals`, ladungsunabhängig): H-He 0, Li-Ne
+1 (1s), Na-Ar 5, K-Kr 9; im Engine-Umfang (H-Ne) also 1 pro Atom ab Li. Gegen ORCA mit frozen core verglichen nur für H, C, N, O,
+F, Ne (Abschnitte (2), (3)); ob ORCA bei Li, Be, B gleich zählt, ist nicht geprüft. ctest `qm_dh_cli_defaults` (H2O
+dsd-pbep86: 1 eingefroren und P86 auf VWN5; `-qm.frozen_core false`: 0; mp2: 0; mp2 `-qm.frozen_core true`: 1).
+
+**Tests und Referenzen:** die PySCF-/libxc-Vergleiche (`qm_dh_energy_*`, `qm_dh_fc_*`, `qm_dh_canonical_*`,
+`qm_dh_grad_pyscf_*`, `qm_dh_grad_fd_*`) laufen über die Testtreiber, die `p86_lda` und `frozen_core` immer explizit setzen
+(Treiber-Default = PySCF-Konvention: pz81, ohne fc; `_vwn5`/`@vwn5`, `_fc`/`--fc` wie bisher); `reference.json` bleibt
+unverändert gültig. Die ORCA-Vergleiche setzten schon `-qm.frozen_core true` und VWN5 (entspricht jetzt den Defaults). Die
+`qm_dh_opt_*`-Fälle setzen beide Flags jetzt explizit auf der curcuma-Kommandozeile (vorher erbten sie die alten Defaults).
+
+**(c) KS- und PT2-Zweielektronenableitung in einem Durchlauf.** `computeGradient(defer = true)` lässt den CPU-KS-2e-Teil weg,
+`qmint::gradientTwoElectronDHPT2(..., include_ks = true)` addiert P_mn P_ls − (a_x/4)(P_ml P_ns + P_ms P_nl) zu den
+PT2-Quartettgewichten (separabel P2 × P, kanonisch zusätzlich 4 Γ^sym): ein Durchlauf über die Integralableitungen
+(mn|ls)^X für RI- und kanonischen Pfad. **Nicht zusammengelegt:** der RI-PT2-3-Index- und Metrikteil ((mn|P)^X, (P|Q)^X):
+andere Integrale, und die KS-SCF eines Doppelhybrids ist exakt (`-qm.ri j|jk` ist ein Fehler), es gibt also keinen
+KS-3-Index-Durchlauf, mit dem er zusammengehen könnte; der 1e-Teil bleibt ebenfalls getrennt (60 ms). Läuft der KS-2e-Teil auf
+dem Device (`-gpu cuda`, Q-G7), bleibt er dort und der PT2-Teil getrennt auf der CPU (wie vorher); geprüft b2plyp RTX 5090
+gegen CPU: H2O_distorted 1.4e-13, Benzol 3.6e-11 Eh/Bohr (a06631c0 ebenfalls 3.6e-11: Quartett-Screen des Device-2e-Teils). Zeiten (Benzol b2plyp sg1,
+def2-SVP, `-qm.frozen_core false`, 8 Threads, CPU, ruhige Maschine, je 3 Läufe, Median, Wandzeit des ganzen `-sp` mit
+`-dump_gradient`):
+
+| PT2 | vorher (a06631c0) Wand | nachher Wand | vorher KS-2e + PT2-2e | nachher gemeinsamer Durchlauf |
+|---|---|---|---|---|
+| RI | 8.43 s (8.34 / 8.43 / 8.64) | 5.61 s (5.58 / 5.61 / 5.67) | 2785 + 2928 ms | 2885 ms |
+| kanonisch | 9.04 s (8.95 / 9.04 / 9.14) | 6.17 s (6.16 / 6.17 / 6.24) | 2818 + 2869 ms | 2855 ms |
+
+**(d) MP2-Gradient über Threadzahlen bitgleich** (Korrektur des Betreibers an der ersten Fassung des Auftrags, die MP2 unberührt
+lassen sollte): `mp2GradientHost` (`qm_mp2_grad.cpp`) schnitt die erste Viertel-Transformation in Zeilenblöcke, deren Höhe aus
+der Threadzahl folgte; jetzt feste 8192 Zeilen. Die MP2- und kanonischen DH-Gradienten weichen deshalb im letzten Bit von
+a06631c0 ab (Verhaltensänderung, kein bitgleicher MP2-Gradient mehr zu a06631c0). `mp2EnergyHost` (`qm_mp2.cpp`) hat dieselbe
+threadabhängige Aufteilung und blieb unverändert (Auftrag: Energien bitgleich); MP2-Energien waren 1/4/8 Threads auf H2O_distorted
+und NH3 bitgleich, größere Systeme nicht geprüft.
+
+**Regression** (Binary a06631c0 = `release/` vor der Änderung kopiert, gleiche CMake-Optionen, gegen das neue; CPU `-gpu none`,
+`-verbosity 2` Energiezeilen + md5 bzw. Zahlen des `-dump_gradient`; H2O_distorted, NH3, Benzol (ohne mp2/scs-mp2/ccsd/kanonisch),
+1 und 4 Threads; Doppelhybride mit den alten Defaults explizit `-qm.frozen_core false -qm.p86_lda pz81`):
+hf, lda (2), pbe (3), b3lyp (3 inkl. RI-JK), tpss, scan, hf-3c Gradienten und ri-mp2 (+fc), sos-ri-mp2, ccsd, lmp2, mp2,
+scs-mp2, mp2 fc Energien: 112/112 bitgleich (md5 und Energiezeilen). mp2, mp2 fc, scs-mp2 Gradient (12 Läufe): Energiezeilen
+gleich, Gradient max |Δg| 5.0e-15 Eh/Bohr; Doppelhybrid-Gradienten (b2plyp RI/RI+fc/kanonisch, dsd-pbep86, dsd-pbep86-d3bj,
+dsd-pbeb95-d3bj, revdsd-pbep86 VWN5, b2gp-plyp-d3bj kanonisch; 44 Läufe): Energiezeilen gleich, max |Δg| 5.7e-14 Eh/Bohr (Gate
+1e-12). **Threads** (neues Binary, 1/4/8, md5 + Energiezeilen): mp2, scs-mp2, mp2 fc, b2plyp RI/kanonisch, dsd-pbep86-d3bj
+RI/kanonisch (H2O_distorted, NH3; RI-DH auch Benzol) und ri-mp2-/mp2-Energien: 23/23 bitgleich; das alte Binary: 11/23 (alle 12
+Abweichungen kanonische Gradienten, 1 Thread gegen 4 = 8). `qm_dh_grad_threads_*` prüft jetzt 1/4/8 Threads auf Bitgleichheit,
+auch kanonisch.
 
 ## Nicht getestet / nicht implementiert
 

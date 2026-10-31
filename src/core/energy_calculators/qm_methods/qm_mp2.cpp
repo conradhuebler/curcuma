@@ -93,6 +93,9 @@ void mp2EnergyHost(const double* eri, int n, const Matrix& C, const Vector& eps,
         //    (this machine: MKL sequential, see WP10 doc "BLAS (Korrektur)"), so threading inside one dgemm cannot be relied on.
         {
             const Eigen::Index rows = (Eigen::Index)n3;
+            // NOTE (Oct 31 2026): the block height depends on the thread count (mp2GradientHost uses fixed 8192 rows
+            // since then); energies were bitwise over 1/4/8 threads on H2O and NH3, larger systems not checked. Left
+            // unchanged on purpose: changing it would change the MP2 energy bits.
             const Eigen::Index chunk = std::max<Eigen::Index>(1024, (rows + 8 * threads - 1) / (8 * threads));
             const Eigen::Index nchunk = (rows + chunk - 1) / chunk;
             Eigen::Map<Eigen::MatrixXd> X(X1.data(), rows, ib);

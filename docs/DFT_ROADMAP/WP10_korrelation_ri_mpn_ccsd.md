@@ -583,6 +583,11 @@ Produktionstest steht aus.**
   GPU-2e-Teil Naphthalin: 2PDM nach kartesisch 682 ms (Host), Upload 780 ms, Kerne 1157 ms, 10.4 GB Device-Speicher;
   Benzol 78 / 122 / 192 ms. GPU gegen CPU, ganzer Gradient Naphthalin: 2.6e-12 Eh/Bohr. Speicher Host (gerechnet):
   Tensor n^4 + 2PDM n^4 (Naphthalin 2 x 8.4 GB) plus o v o v- und o n o v-Felder.
+- **Threadzahl (31. Okt 2026, Verhaltensaenderung):** `mp2GradientHost` schnitt die erste Viertel-Transformation in
+  threadzahlabhaengige Zeilenbloecke, der Gradient war 1 gegen 4/8 Threads nicht bitgleich (md5, H2O_distorted, NH3); jetzt
+  feste 8192-Zeilen-Bloecke: 1/4/8 Threads bitgleich, gegen a06631c0 max |dg| 5.0e-15 Eh/Bohr, Energien bitgleich
+  (`mp2EnergyHost` unveraendert, hat dieselbe Aufteilung; dort 1/4/8 Threads auf H2O_distorted und NH3 bitgleich, groessere
+  Systeme nicht geprueft). Messungen: [WP12](WP12_doppelhybride.md), Abschnitt "Entscheidungen vom 2026-10-31".
 - **Nicht getestet:** offene Schale (nicht implementiert), Elemente ausser H, C, N, O, F, andere Basen als def2-SVP,
   kartesisch 6d, geladene Molekuele, Systeme ueber 180 BF, `-md` und `-hessian` mit mp2 (laufen ueber `getGradient()`,
   nicht geprueft), ROCm/Vulkan (keine Implementierung, `-gpu rocm` faellt gezaehlt auf die CPU), entartete

@@ -491,7 +491,11 @@ private:
 
     // WP8: gradient parts {1e, 2e, nuclear repulsion} of the last computeGradient()
     std::vector<Matrix> m_gradient_parts;
-    bool computeGradient();  ///< fills m_gradient (Eh/Bohr) from the converged SCF
+    bool computeGradient() { bool deferred = false; return computeGradient(false, deferred); }  ///< fills m_gradient (Eh/Bohr) from the converged SCF
+    /// defer_cpu_two_electron (double hybrids, Oct 31 2026): when the exact 2e part would run on the CPU it is NOT
+    /// formed (two_electron_deferred = true, part 2e = 0); computeDoubleHybridGradient adds it to its own PT2 pass
+    /// (qmint::gradientTwoElectronDHPT2 with include_ks). A device 2e part (Q-G7) runs as before. Claude Generated.
+    bool computeGradient(bool defer_cpu_two_electron, bool& two_electron_deferred);
     Matrix calculateCoreRepulsionGradient() const;  ///< dE_nn/dR, Eh/Bohr
     /// WP8 (Oct 2026): XC part of the KS gradient (Eh/Bohr): basis part and grid response (zero when off).
     bool xcGradient(Matrix& g_basis, Matrix& g_response, std::string& why) const;

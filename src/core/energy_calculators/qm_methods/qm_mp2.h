@@ -48,8 +48,10 @@
 
 // Claude Generated (Oct 2026, WP11): MP2 settings of the qm module.
 BEGIN_PARAMETER_DEFINITION(qm)
-    PARAM(frozen_core, Bool, false,
-          "MP2: keep the chemical core orbitals out of the correlation treatment (H-He none, Li-Ne 1s, Na-Ar 1s2s2p, K-Kr [Ne]3s3p; per atom, independent of the charge). The lowest n_core RHF orbitals are frozen.",
+    // Claude Generated (Oct 31 2026): "auto" marker (as the scf module) so that double hybrids can default to true while
+    // mp2/ri-mp2/scs-mp2/ccsd/lmp2 keep false; -export_run writes "auto" and a replay keeps the method default.
+    PARAM(frozen_core, String, "auto",
+          "Correlated methods: keep the chemical core orbitals out of the correlation treatment (H-He none, Li-Ne 1s, Na-Ar 1s2s2p, K-Kr [Ne]3s3p; per atom, independent of the charge). The lowest n_core orbitals of the reference are frozen. auto (default) = the method's own default: false for mp2, scs-mp2, sos-mp2, ri-mp2, scs-ri-mp2, sos-ri-mp2, ccsd, lmp2; true for the double hybrids (b2plyp, dsd-*, ..., since Oct 31 2026, as ORCA). true | false set it explicitly for every method.",
           "Correlation", {})
     PARAM(mp2_max_memory_mb, Double, 32000.0,
           "MP2: largest AO tensor (n^4 * 8 bytes, in MB) the MP2 step may build on the host when the SCF did not store one (integral-direct SCF). Above it MP2 stops with an error (no integral-direct MP2 yet).",

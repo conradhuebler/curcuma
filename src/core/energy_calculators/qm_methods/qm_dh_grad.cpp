@@ -383,11 +383,27 @@ bool QMEngine::computeDoubleHybridGradient(const qmint::MP2Options& opt, double 
     CitationRegistry::cite("dh_gradient");
 
     // ---- 1. KS gradient of the hybrid (WP8/WP11 path, parts {1e, 2e, E_nn, XC basis, grid response}) ----
-    if (!computeGradient()) return false;
-    const Matrix gKS = m_gradient;
+    // Oct 31 2026: a CPU KS 2e part is deferred and formed together with the PT2 2e part in step 5 (one pass over the
+    // derivative integrals, qmint::gradientTwoElectronDHPT2 include_ks); a device KS 2e part (Q-G7) stays separate.
+    bool ks2e_deferred = false;
+    if (!computeGradient(true, ks2e_deferred)) return false;
+    Matrix gKS = m_gradient;
     std::vector<Matrix> parts = m_gradient_parts;
     while (parts.size() < 5) parts.push_back(Matrix::Zero(m_atomcount, 3));
-    if (o == 0 || v == 0) return true;  // no PT2 term
+    auto ksTwoElectronOnly = [&]() {  // the deferred KS 2e part alone (no PT2 term to merge with)
+        if (!ks2e_deferred) return;
+        Matrix Pc0 = m_density;
+        if (m_Q.size() != 0) Pc0 = m_Q * m_density * m_Q.transpose();
+        const Matrix g2ks = qmint::gradientTwoElectronScaled(m_gto_basis, Pc0, m_xc.exact_exchange, m_atomcount, m_threads);
+        gKS += g2ks;
+        parts[1] += g2ks;
+        m_gradient = gKS;
+        m_gradient_parts = parts;
+    };
+    if (o == 0 || v == 0) {  // no PT2 term
+        ksTwoElectronOnly();
+        return true;
+    }
 
     // ---- 2. PT2 intermediates ----
     Matrix Poo, Pvv, L1, L2, G3;
@@ -571,8 +587,12 @@ bool QMEngine::computeDoubleHybridGradient(const qmint::MP2Options& opt, double 
     res.t_grad_deriv1e_ms = msSince(t_1e0);
     const auto t_2e0 = std::chrono::steady_clock::now();
     const Matrix* Qp = m_Q.size() != 0 ? &m_Q : nullptr;
+    // One pass over the 4-index derivative integrals: PT2 part (separable P2 x P, canonical non-separable Gamma) plus,
+    // when deferred in step 1, the KS part P x P (same quartets, same kernel). The RI-PT2 3-index and metric
+    // derivatives below are other integrals ((mn|P)^X, (P|Q)^X) and cannot join this pass; the KS SCF of a double
+    // hybrid is exact (riActive() is an error above), so there is no KS 3-index pass to merge them with.
     Matrix g2 = qmint::gradientTwoElectronDHPT2(m_gto_basis, Pc, P2c, GammaBuf ? GammaBuf.get() : nullptr, Qp,
-                                                m_xc.exact_exchange, m_atomcount, m_threads);
+                                                m_xc.exact_exchange, m_atomcount, m_threads, ks2e_deferred);
     if (ri) g2 += ri->threeIndexGradient(m_gto_basis, Qp, Eigen::VectorXd(), m_density, G3, m_atomcount)
                 - ri->metricGradient(M2, m_atomcount);
     res.t_grad_deriv2e_ms = msSince(t_2e0);
@@ -582,8 +602,9 @@ bool QMEngine::computeDoubleHybridGradient(const qmint::MP2Options& opt, double 
     m_gradient = gKS + g1 + g2 + gxb + gxr;
     m_gradient_parts = { parts[0] + g1, parts[1] + g2, parts[2], parts[3] + gxb, parts[4] + gxr };
     if (CurcumaLogger::get_verbosity() >= 3)
-        CurcumaLogger::info(fmt::format("double-hybrid gradient: PT2 parts |1e| {:.3e}, |2e{}| {:.3e}, |XC basis| {:.3e}, "
+        CurcumaLogger::info(fmt::format("double-hybrid gradient: PT2 parts |1e| {:.3e}, |2e{}{}| {:.3e}, |XC basis| {:.3e}, "
                                         "|XC grid response| {:.3e} Eh/Bohr; Z-vector {} iterations",
-                                        g1.norm(), ri ? " + RI" : "", g2.norm(), gxb.norm(), gxr.norm(), it));
+                                        g1.norm(), ks2e_deferred ? " incl. KS 2e (one pass)" : "", ri ? " + RI" : "",
+                                        g2.norm(), gxb.norm(), gxr.norm(), it));
     return true;
 }

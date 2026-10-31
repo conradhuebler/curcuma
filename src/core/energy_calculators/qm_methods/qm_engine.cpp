@@ -742,8 +742,9 @@ Matrix QMEngine::calculateCoreRepulsionGradient() const
 // density P and energy-weighted density W are taken back with the 6d->5d map Q:
 // E = Tr(P_sph H_sph) = Tr(P_sph Q^T H_cart Q) = Tr((Q P_sph Q^T) H_cart). Q only
 // mixes components of one shell on one atom, so it does not depend on geometry.
-bool QMEngine::computeGradient()
+bool QMEngine::computeGradient(bool defer_cpu_two_electron, bool& two_electron_deferred)
 {
+    two_electron_deferred = false;
     const int n_occ = m_num_electrons / 2;
     Matrix W = Matrix::Zero(m_nbf, m_nbf);
     for (int i = 0; i < n_occ; ++i)
@@ -800,7 +801,10 @@ bool QMEngine::computeGradient()
         on_device = dev_info.find("device") != std::string::npos;
     } else {
         on_device = !be2.empty() && gpuGradientTwoElectron(tables_ok ? &tables : nullptr, tab_why, be2, Pc, kx, g2, dev_info);
-        if (!on_device)
+        if (!on_device && defer_cpu_two_electron) {
+            g2 = Matrix::Zero(m_atomcount, 3);  // formed by the caller in its own pass (double hybrids)
+            two_electron_deferred = true;
+        } else if (!on_device)
             g2 = ks ? qmint::gradientTwoElectronScaled(m_gto_basis, Pc, kx, m_atomcount, m_threads)
                     : qmint::gradientTwoElectron(m_gto_basis, Pc, m_atomcount, m_threads);
     }
@@ -836,7 +840,7 @@ bool QMEngine::computeGradient()
         CurcumaLogger::info(fmt::format(
             "QM: analytic gradient |g| = {:.6e} Eh/Bohr (device tables {:.1f} ms; 1e {:.1f} ms {}; 2e {:.1f} ms {}; {}{} threads)",
             m_gradient.norm(), ms(t_tab0, t_tab), ms(t_tab, t1), on_device1 ? "on the device: " + dev1_info : "CPU",
-            ms(t1, t2), ri ? dev_info : (on_device ? "on the device: " + dev_info : "CPU"),
+            ms(t1, t2), ri ? dev_info : (on_device ? "on the device: " + dev_info : (two_electron_deferred ? "CPU, deferred to the double-hybrid pass" : "CPU")),
             ks ? fmt::format("XC {:.1f} ms (grid response {}); ", ms(t2, t3), m_grid_response ? "on" : "off") : std::string(),
             m_threads));
         if (ks) {

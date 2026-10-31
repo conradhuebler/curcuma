@@ -11,6 +11,7 @@ Gates (definitions as in check_qm_mgga.py; measured values in docs/DFT_ROADMAP/W
   d3         |E_D3(BJ) - ORCA 6.1| <= 1e-9 Eh (ORCA prints 12 digits)
   threads    1 vs 4 threads: total energy bitwise; update: UpdateMolecule A -> B = fresh B to 1e-10 Eh
   gradient / cli_opt  since stage 2 (Oct 2026): the gradient request and -opt must succeed (values in ../qm_dh_grad)
+  cli_defaults  Oct 31 2026 defaults: DH frozen core (1 orbital for H2O) and VWN5-P86, explicit false wins, mp2 no fc
 Claude Generated (Oct 2026, WP12 stage 1).
 """
 import argparse
@@ -45,7 +46,9 @@ def driver(a, args):
 
 
 def split_case(case):
-    """'H2O_dsd-pbep86@vwn5_sg1' -> molecule, method, p86 variant, grid."""
+    """'H2O_dsd-pbep86@vwn5_sg1' -> molecule, method, p86 variant, grid. Without '@' the P86 variant is pz81: the
+    PySCF/libxc references (GGA_C_P86 = PZ81) need it, so it is passed explicitly (curcuma's default is vwn5 since
+    Oct 31 2026); frozen core is passed explicitly as well (--fc or not; curcuma's DH default is fc since then)."""
     parts = case.split("_")
     mol, grid = parts[0], parts[-1] if len(parts) > 2 else "sg1"
     fn = "_".join(parts[1:-1]) if len(parts) > 2 else parts[1]
@@ -195,6 +198,23 @@ def check_cli(a, chk):
                 print(txt[-1500:])
                 if rc != 0 or not os.path.exists(os.path.join(tmp, "H2O.opt.xyz")) or "no analytic gradient" in txt:
                     sys.exit(f"-opt with b2plyp must run on the analytic gradient (exit {rc})")
+            elif chk == "cli_defaults":
+                # Oct 31 2026 defaults: double hybrids frozen core + VWN5-P86, explicit false still wins, mp2 keeps no fc
+                def frozen(args):
+                    rc, txt = curcuma_run(a, ["-sp", "H2O.xyz", "-no_bmt", "-verbosity", "1"] + args, tmp)
+                    txt = re.sub(r"\x1b\[[0-9;]*m", "", txt)
+                    m = re.search(r"(\d+) frozen", txt)
+                    return rc, (int(m.group(1)) if m else None), txt
+                rc1, n1, t1 = frozen(["-method", "dsd-pbep86"])
+                rc2, n2, _ = frozen(["-method", "dsd-pbep86", "-qm.frozen_core", "false"])
+                rc3, n3, _ = frozen(["-method", "mp2"])
+                rc4, n4, _ = frozen(["-method", "mp2", "-qm.frozen_core", "true"])
+                vwn = "P86 on VWN5" in t1
+                print(f"  dsd-pbep86 default: {n1} frozen, VWN5 {vwn}; -qm.frozen_core false: {n2}; mp2 default: {n3}; "
+                      f"mp2 -qm.frozen_core true: {n4}")
+                if (rc1, rc2, rc3, rc4) != (0, 0, 0, 0) or (n1, n2, n3, n4) != (1, 0, 0, 1) or not vwn:
+                    print(t1[-1500:])
+                    sys.exit("defaults: expected 1/0/0/1 frozen orbitals and P86 on VWN5")
             elif chk == "cli_d4":
                 rc, txt = curcuma_run(a, ["-sp", "H2O.xyz", "-method", "revdsd-pbep86-d4", "-no_bmt"], tmp)
                 print(txt[-1200:])

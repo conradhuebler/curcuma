@@ -3017,9 +3017,10 @@ Matrix gradientTwoElectronMP2(const std::vector<GTO::Orbital>& basis, const Matr
 }
 
 // Declared in qm_ri.h (same reason as above). Claude Generated (Oct 2026, WP12 stage 2: double-hybrid gradient).
-// The PT2 part only (the KS part P x P is the gradientTwoElectronScaled call of computeGradient); Dns optional.
+// The PT2 part (Dns optional); with include_ks also the KS part P x P of gradientTwoElectronScaled, so that
+// computeDoubleHybridGradient needs one pass over the derivative integrals (Oct 31 2026, saves the second pass).
 Matrix gradientTwoElectronDHPT2(const std::vector<GTO::Orbital>& basis, const Matrix& P, const Matrix& P2,
-                                const double* Dns, const Matrix* Q, double kx, int natoms, int threads)
+                                const double* Dns, const Matrix* Q, double kx, int natoms, int threads, bool include_ks)
 {
     if (basis.empty()) return Matrix::Zero(natoms, 3);
     const std::vector<EriShell> sh = groupShells(basis);
@@ -3057,9 +3058,13 @@ Matrix gradientTwoElectronDHPT2(const std::vector<GTO::Orbital>& basis, const Ma
                     for (int e = 0; e < nD; ++e) {
                         const int m = A.first + a, n = B.first + b, l = C.first + c, s = D.first + e;
                         const size_t idx = ((size_t)(a * nB + b) * nC + c) * nD + e;
-                        Dq[idx] = (P2(m, n) * P(l, s) + P(m, n) * P2(l, s))
+                        const double pt2 = (P2(m, n) * P(l, s) + P(m, n) * P2(l, s))
                                 - 0.25 * kx * (P2(m, l) * P(n, s) + P(m, l) * P2(n, s) + P2(m, s) * P(n, l) + P(m, s) * P2(n, l))
                                 + (Dns ? blk[idx] : 0.0);
+                        // KS part: the expression of gradientTwoElectronImpl (general kx branch)
+                        Dq[idx] = include_ks
+                            ? (P(m, n) * P(l, s) - 0.25 * kx * (P(m, l) * P(n, s) + P(m, s) * P(n, l))) + pt2
+                            : pt2;
                     }
     };
     return gradientTwoElectronDriver(basis, sh, natoms, threads, fill);
