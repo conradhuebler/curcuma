@@ -77,7 +77,7 @@ def provenance(binary):
             "repo_head": head, "repo_dirty_files": dirty, "sources_newer_than_binary": newer}
 
 
-def run_one(binary, src, method, backend, threads, timeout):
+def run_one(binary, src, method, backend, threads, timeout, memmax="24G"):
     tmp = Path(tempfile.mkdtemp(prefix="perf_"))
     try:
         inp = tmp / src.name
@@ -86,7 +86,7 @@ def run_one(binary, src, method, backend, threads, timeout):
         if backend != "cpu":
             cmd += ["-gpu", backend, "-gpu_strict", "true"]   # a silent CPU fallback would be timed as GPU
         if shutil.which("systemd-run"):
-            cmd = ["systemd-run", "--user", "--scope", "-q", "-p", "MemoryMax=24G", "-p", "MemorySwapMax=0"] + cmd
+            cmd = ["systemd-run", "--user", "--scope", "-q", "-p", f"MemoryMax={memmax}", "-p", "MemorySwapMax=0"] + cmd
         t0 = time.perf_counter()
         try:
             r = subprocess.run(cmd, cwd=tmp, capture_output=True, text=True, timeout=timeout)
@@ -113,6 +113,7 @@ def main():
     ap.add_argument("--quick", action="store_true", help="two systems only (smoke test of the setup)")
     ap.add_argument("--timeout", type=int, default=900)
     ap.add_argument("--etol", type=float, default=1e-6, help="energy tolerance between backends in Eh")
+    ap.add_argument("--memory-max", default="24G", help="MemoryMax of the systemd scope per run")
     ap.add_argument("--json", default="")
     ap.add_argument("--note", default="")
     a = ap.parse_args()
@@ -138,7 +139,7 @@ def main():
             for rep in range(reps):
                 order = backends[rep % len(backends):] + backends[:rep % len(backends)]   # alternate
                 for b in order:
-                    dt, e, extra = run_one(binary, path, method, b, a.threads, tmo or a.timeout)
+                    dt, e, extra = run_one(binary, path, method, b, a.threads, tmo or a.timeout, a.memory_max)
                     if dt is None:
                         errors[b].append(extra)
                     else:
