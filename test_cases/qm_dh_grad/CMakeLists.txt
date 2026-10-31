@@ -10,6 +10,7 @@
 #   qm_dh_grad_pyscf_<case>        vs FD of the PySCF double-hybrid energy (same grid, moving)
 #   qm_dh_grad_orca_<case>         vs ORCA 6.1 EnGrad (matched settings, 250x1454, frozen core), stored gradient
 #   qm_dh_grad_{translation,rotation,threads,update}_<case>, qm_dh_opt_<case> (-opt reaches a stationary point)
+#   qm_dh_grad_direct_<case>       forced integral-direct J/K (eri_screening 1e-10) vs stored tensor: Z-vector converges
 # Geometries: xyz files of qm_1e, qm_hf3c and qm_grad (no new structure files).
 # Run:  ctest -L qm_dh_grad --output-on-failure
 add_executable(test_qm_dh_grad test_qm_dh_grad.cpp)
@@ -67,6 +68,12 @@ if(Python3_Interpreter_FOUND)
     foreach(_case NH3_b2plyp NH3_dsd-pbeb95-d3bj_canonical_fc benzene_dsd-pbep86-d3bj)
         add_test(NAME qm_dh_grad_threads_${_case} COMMAND ${_DG} --check threads --case ${_case})
         set_tests_properties(qm_dh_grad_threads_${_case} PROPERTIES TIMEOUT 900 LABELS "qm_dh_grad")
+    endforeach()
+    # integral-direct J/K in the Z-vector (power-of-two scaling in dhG4, Oct 31 2026): eri_screening 1e-10 makes the
+    # absolute direct screen bite on H2O/NH3 (before the fix: 100 iterations, residual 4e-9 / 1e-8)
+    foreach(_case H2O_dsd-pbep86-d3bj_vwn5 NH3_b2plyp)
+        add_test(NAME qm_dh_grad_direct_${_case} COMMAND ${_DG} --check direct --case ${_case} --screening 1e-10 --tol 1e-10)
+        set_tests_properties(qm_dh_grad_direct_${_case} PROPERTIES TIMEOUT 600 LABELS "qm_dh_grad")
     endforeach()
     foreach(_case H2O_b2plyp H2O_dsd-pbeb95-d3bj_fc)
         add_test(NAME qm_dh_grad_update_${_case} COMMAND ${_DG} --check update --case ${_case})

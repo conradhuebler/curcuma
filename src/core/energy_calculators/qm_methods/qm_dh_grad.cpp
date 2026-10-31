@@ -111,7 +111,23 @@ Matrix QMEngine::dhG4(const Matrix& X_mo, const qmint::ERITensor* eri, bool& ok)
         J = qmint::buildCoulomb(*eri, Xao, m_threads);
         K = qmint::buildExchange(*eri, Xao, m_threads);
     } else {
-        buildJKExact(Xao, J, K);
+        // Claude Generated (Oct 31 2026): the integral-direct builders (host DirectJK, device Q-G3) skip a quartet when
+        // Q_AB Q_CD max|X| < eri_screening, an ABSOLUTE bound, so J/K(X) are not homogeneous in X: for the small
+        // search directions of the late Z-vector iterations most quartets drop out (benzene, forced direct: J(aX)/a
+        // off by 1.4e-1 relative at a = 1e-8) and the CG stalls near max|R| 3e-10 (WP12 doc, stage 3, Z-vector
+        // finding). X is scaled by a power of two s to max|X| in [0.5, 1) and J, K by 1/s: exact in floating point,
+        // so a stored tensor gives the same bits, and the direct screen becomes relative to max|X|.
+        const double xmax = Xao.cwiseAbs().maxCoeff();
+        if (xmax > 0.0 && std::isfinite(xmax)) {
+            int e2 = 0;
+            std::frexp(xmax, &e2);  // xmax = f 2^e2, f in [0.5, 1)
+            const Matrix Xs = Xao * std::ldexp(1.0, -e2);
+            buildJKExact(Xs, J, K);
+            J *= std::ldexp(1.0, e2);
+            K *= std::ldexp(1.0, e2);
+        } else {
+            buildJKExact(Xao, J, K);
+        }
     }
     Matrix Vx;
     if (!dhFxc(Xao, Vx)) {

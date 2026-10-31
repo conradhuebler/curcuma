@@ -17,6 +17,7 @@
  *
  *   test_qm_dh_grad grad <xyz> --method M [--pt2 ri|canonical] [--fc] [--grid sg1] [--response 1|0] [--threads N]
  *                        [--p86 pz81|vwn5] [--fd moving|frozen] [--h 1e-3] [--fd_atoms N]
+ *                        [--scf_direct on|off|auto] [--eri_screening X]
  *       DoubleHybridMethod energy and analytic gradient, parts, sum over atoms, torque; with --fd the central 4-point
  *       finite difference of the total energy (moving grid = with grid response, frozen grid = without).
  *
@@ -46,9 +47,11 @@ namespace {
 // DoubleHybridMethod; curcuma's own DH defaults are vwn5 + frozen core since Oct 31 2026.
 struct Args {
     std::string mode, xyz, xyz2, method = "b2plyp", grid = "sg1", pt2 = "ri", p86 = "pz81", fd;
+    std::string scf_direct;   // --scf_direct on|off|auto ("" = engine default; Claude Generated, Oct 31 2026)
     int threads = 4, fd_atoms = -1;
     bool fc = false, response = true;
     double h = 1.0e-3;  // Bohr
+    double eri_screening = -1.0;  // --eri_screening (< 0 = engine default)
     Args();
     Args(const Args&);
     ~Args();  // out of line: the implicit inline one trips -Winline
@@ -92,6 +95,8 @@ json methodConfig(const Args& a, int threads)
         { "scf_gradient_threshold", 1e-9 }, { "scf_gradient_threshold_tight", 1e-9 }, { "scf_max_iterations", 300 },
         { "threads", threads }, { "grid", a.grid }, { "frozen_core", a.fc }, { "dh_pt2", a.pt2 }, { "p86_lda", a.p86 },
         { "grid_response", a.response } };
+    if (!a.scf_direct.empty()) qm["scf_direct"] = a.scf_direct;
+    if (a.eri_screening >= 0.0) qm["eri_screening"] = a.eri_screening;
     return { { "qm", qm } };
 }
 
@@ -482,6 +487,8 @@ int main(int argc, char** argv)
         else if (s == "--fd") a.fd = next();
         else if (s == "--h") a.h = std::stod(next());
         else if (s == "--fd_atoms") a.fd_atoms = std::stoi(next());
+        else if (s == "--scf_direct") a.scf_direct = next();
+        else if (s == "--eri_screening") a.eri_screening = std::stod(next());
         else {
             std::cerr << "unknown option " << s << "\n";
             return 1;

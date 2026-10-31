@@ -15,6 +15,9 @@ scripts/qm_dh_grad_pyscf_reference.py. Gradients in Eh/Bohr; standard library on
                    curcuma gradient (1e-9)
   translation / rotation / update   as qm_dft_grad; threads: 1 vs 4 vs 8 threads bitwise (RI and canonical)
   opt --case M_F   curcuma -opt -method F: final max|g| and the PySCF-minimum check (if stored)
+  direct --case C --screening X   integral-direct J/K (forced, eri_screening X) vs the stored tensor: Z-vector converged
+                   (residual <= 1e-10, at most 2x the stored iterations + 2) and max|g_direct - g_stored| <= --tol; the
+                   absolute direct screen stalled the Z-vector before the power-of-two scaling in dhG4 (Oct 31 2026)
 Case names: <molecule>_<method>[_canonical][_fc][_vwn5][_default][_sg3]. Claude Generated (Oct 2026, WP12 stage 2).
 """
 import argparse
@@ -112,6 +115,7 @@ def main():
     ap.add_argument("--curcuma", default="")
     ap.add_argument("--extra", default="")
     ap.add_argument("--orca", default="")
+    ap.add_argument("--screening", default="1e-10")
     a = ap.parse_args()
     ref = json.load(open(a.ref))
     ok = True
@@ -187,6 +191,17 @@ def main():
         ok = out["bitwise"] is True
         print(f"{a.case}: 1 vs 4 vs 8 threads max|dg| {out['max_dg']:.1e}, bitwise {out['bitwise']} (gate: bitwise) "
               f"{'OK' if ok else 'FAIL'}")
+    elif a.check == "direct":  # Claude Generated (Oct 31 2026)
+        mol, opts = parse_case(a.case)
+        x = os.path.join(TC, XYZ[mol])
+        st = run(a.exe, ["grad", x] + opts + ["--scf_direct", "off"])
+        di = run(a.exe, ["grad", x] + opts + ["--scf_direct", "on", "--eri_screening", a.screening])
+        it_s, it_d = st["info"]["zvector_iterations"], di["info"]["zvector_iterations"]
+        res_d = di["info"]["zvector_residual"]
+        d = maxdiff(di["gradient"], st["gradient"])
+        ok = res_d <= 1e-10 and it_d <= 2 * it_s + 2 and d <= a.tol
+        print(f"{a.case}: Z-vector stored {it_s} it., direct (eri_screening {a.screening}) {it_d} it., residual "
+              f"{res_d:.1e} (1e-10); max|g_direct - g_stored| {d:.1e} (tol {a.tol:.0e}) {'OK' if ok else 'FAIL'}")
     elif a.check == "update":
         mol, opts = parse_case(a.case)
         out = run(a.exe, ["update", os.path.join(TC, XYZ[mol]), os.path.join(TC, XYZ["H2O_distorted"])] + opts)
