@@ -301,6 +301,22 @@ public:
         return true;
     }
 
+    bool prepareConvergedPotentials(bool gfn2) override { return m_ctx && m_ctx->convergedPotentials(gfn2); }
+    bool gradientResident(const Vector& eps, int nocc_orbs, Matrix& grad_out, Vector& dEdcn_out) override
+    {
+        if (!m_ctx || m_n <= 0 || m_nat <= 0 || static_cast<int>(eps.size()) < nocc_orbs) return false;
+        std::vector<double> grad(3 * m_nat, 0.0), dEdcn(m_nat, 0.0);
+        if (!m_ctx->computeGradient(nullptr, nullptr, eps.data(), nocc_orbs, nullptr, nullptr, nullptr, nullptr,
+                                    grad.data(), dEdcn.data(), /*pc_resident=*/true, /*resident_potentials=*/true))
+            return false;
+        grad_out.resize(m_nat, 3);
+        for (int i = 0; i < m_nat; ++i)
+            for (int k = 0; k < 3; ++k) grad_out(i, k) = grad[3 * i + k];
+        dEdcn_out.resize(m_nat);
+        for (int i = 0; i < m_nat; ++i) dEdcn_out(i) = dEdcn[i];
+        return true;
+    }
+
     // ---- Single-shot D4 EEQ charge model (Stage 5, Part A) ----------------
     bool supportsDeviceEeq() const override { return true; }
 
@@ -384,6 +400,56 @@ public:
                                     e_atom_out, grad_out, dEdcn_out);
     }
 
+    bool gradientTailDevice(int nat, bool is_gfn2, bool with_mp, const double* xyz_bohr, const double* dEdcn,
+                            const double* rcov_au, const double* q_at, const double* dp_at, const double* qp_at,
+                            const double* mrad, const double* cn, const double* rad, const double* vcn,
+                            double dmp3, double dmp5, double shift, double kexp, double rmax,
+                            double* grad_out) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->gradientTailDevice(nat, is_gfn2, with_mp, xyz_bohr, dEdcn, rcov_au, q_at, dp_at, qp_at, mrad,
+                                         cn, rad, vcn, dmp3, dmp5, shift, kexp, rmax, grad_out);
+    }
+    bool d4CovalentCnDevice(int nat, const int* Z, const double* xyz_bohr, const double* rad, const double* en,
+                            double kn, double k4, double k5, double k6, double cutoff,
+                            double* cn_out) override
+    {
+        return m_ctx && m_ctx->d4CovalentCnDevice(nat, Z, xyz_bohr, rad, en, kn, k4, k5, k6, cutoff, cn_out);
+    }
+    bool downloadCn(double* cn_out, int nat) override
+    {
+        return m_ctx && cn_out && nat == m_nat && m_ctx->downloadCn(cn_out);
+    }
+    bool repulsionEnergyDevice(int nat, bool is_gfn2, const int* z, const double* xyz_bohr, const double* alpha,
+                               const double* zeff, double kexp, double rexp, double kexp_light,
+                               double* energy_out) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->repulsionEnergyDevice(nat, is_gfn2, z, xyz_bohr, alpha, zeff, kexp, rexp, kexp_light,
+                                            energy_out);
+    }
+    bool d3DispersionDevice(int nat, const int* Z, const double* xyz_ang, int nt, const int* atom_type,
+                            const double* c6tab, const double* r6tab, const int* nref_tab,
+                            const double* refcn_tab, const double* rcov_ang, int nrcov,
+                            double s6, double s8, double a1, double a2, double k1, double k2,
+                            double cn_cut_ang, double bohr_per_ang, double fold_unit,
+                            bool need_gradient, double* energy_out, double* grad_out) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->d3DispersionDevice(nat, Z, xyz_ang, nt, atom_type, c6tab, r6tab, nref_tab, refcn_tab,
+                                         rcov_ang, nrcov, s6, s8, a1, a2, k1, k2, cn_cut_ang, bohr_per_ang,
+                                         fold_unit, need_gradient, energy_out, grad_out);
+    }
+    bool d4PostScfDevice(int nat, const double* q_at, bool with_atm, double s9, double a1, double a2, double alp,
+                         double atm_cutoff, double cn_cutoff, const double* rad, const double* en, double kn,
+                         double k4, double k5, double k6, double* energy_out, double* grad_out,
+                         double* dEdq_out) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->d4PostScfDevice(nat, q_at, with_atm, s9, a1, a2, alp, atm_cutoff, cn_cutoff, rad, en,
+                                      kn, k4, k5, k6, energy_out, grad_out, dEdq_out);
+    }
+
     // ---- Device D4 reference weights from resident q_at (Stage 6, S6.2b) ---
     bool beginDispersionWeights(const std::vector<double>& cn, const std::vector<double>& gi,
                                 const std::vector<double>& zeff, const std::vector<double>& refcn,
@@ -415,11 +481,58 @@ public:
                                         n0_sh.data(), n0_at.data(), alpha, max_hist, w0);
     }
 
+    bool supportsResidentLoopGfn1() const override { return true; }
+    bool beginResidentLoopGfn1(const Vector& q_sh0, const Vector& q_at0, const Vector& n0_sh,
+                               const Vector& n0_at, const std::vector<double>& gamma3_at,
+                               double Tele, double n_elec, int nocc_pairs,
+                               double alpha, int max_hist, double w0) override
+    {
+        if (!m_ctx) return false;
+        const int nsh = static_cast<int>(q_sh0.size());
+        const int nat = static_cast<int>(q_at0.size());
+        if (nsh <= 0 || nat <= 0 || m_n <= 0 || static_cast<int>(gamma3_at.size()) != nat) return false;
+        return m_ctx->beginResidentLoopGfn1(nsh, nat, m_n, Tele, n_elec, nocc_pairs, q_sh0.data(), q_at0.data(),
+                                            n0_sh.data(), n0_at.data(), gamma3_at.data(), alpha, max_hist, w0);
+    }
+
+    bool setResidentOpenShell(double n_alpha, double n_beta) override
+    {
+        return m_ctx && m_ctx->setResidentOpenShell(n_alpha, n_beta);
+    }
+
     bool residentScfStep(bool fp32, double& dq, double& e_band, double& e_coulomb,
                          double& e_third, double& e_multipole) override
     {
         if (!m_ctx) return false;
         return m_ctx->residentScfStep(fp32, &dq, &e_band, &e_coulomb, &e_third, &e_multipole);
+    }
+
+    // ---- Broyden seed preconditioner in the resident loop (Claude Generated, Oct 2026) ----
+    bool supportsResidentPreconditioner() const override { return true; }
+    // Claude Generated (Oct 2026, parity item C1): the GFN1 resident loop mixes the shell charges alone through the same
+    // device Broyden (broydenBegin(nsh)), the blocks and indices of M are layout-neutral, so GFN1 takes M as well.
+    bool supportsResidentPreconditionerGfn1() const override { return true; }
+    unsigned long long residentPreconditionerTag() const override
+    {
+        return m_ctx ? m_ctx->broydenPreconditionerTag() : 0;
+    }
+    bool multiGpuScfSplit(int nao) const override { return m_ctx && m_ctx->multiGpuScfSplit(nao); }
+    bool residentSetPreconditioner(const curcuma::xtb::GpuPrecondFlat* data, unsigned long long tag,
+                                   curcuma::xtb::GpuBroydenGuardFn guard, bool keep, bool best) override
+    {
+        if (!m_ctx) return false;
+        if (!data) return m_ctx->broydenSetPreconditioner(nullptr, tag, std::move(guard), keep, best);
+        XtbGpuContext::BroydenPrecond pc;
+        pc.N = data->N;
+        pc.nblocks = data->nblocks();
+        pc.max_dim = data->max_dim;
+        pc.idx_off = data->idx_off.data();
+        pc.idx = data->idx.data();
+        pc.b_off = data->b_off.data();
+        pc.B = data->B.data();
+        pc.fallback = data->fallback.data();
+        if (static_cast<int>(data->fallback.size()) != data->N) return false;
+        return m_ctx->broydenSetPreconditioner(&pc, tag, std::move(guard), keep, best);
     }
 
     bool residentLoopCharges(Vector& q_sh, Vector& q_at, Eigen::MatrixXd& dp_at,
@@ -484,6 +597,14 @@ public:
     }
 
     bool supportsOnTheFlyMultipole() const override { return true; }
+    bool supportsStoredMultipoleOnDevice() const override { return true; }
+    bool beginPotentialStored(int nat, int nsh, const double* xyz_bohr, const double* mrad, double dmp3,
+                              double dmp5, const double* dkernel, const double* qkernel,
+                              const double* gamma3) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->beginPotentialStored(nat, nsh, xyz_bohr, mrad, dmp3, dmp5, dkernel, qkernel, gamma3);
+    }
     std::string lastError() const override { return m_ctx ? m_ctx->lastError() : std::string(); }
     bool beginPotentialOnTheFly(int nat, int nsh, const double* xyz_bohr, const double* mrad,
                                 double dmp3, double dmp5, const double* dkernel,
@@ -684,7 +805,7 @@ XtbGpuComputationalMethod::XtbGpuComputationalMethod(MethodType method, const js
                 if (x->is_string()) { try { return std::stod(x->get<std::string>()); } catch (...) {} }
                 return def;
             };
-            bool pseudo = false;
+            bool pseudo = true;   // Oct 15, 2026: default on (PARAM scf_pseudo_diag)
             if (const json* x = scfval("scf_pseudo_diag"))
                 pseudo = x->is_boolean() ? x->get<bool>()
                        : x->is_number()  ? x->get<double>() != 0.0
@@ -694,8 +815,8 @@ XtbGpuComputationalMethod::XtbGpuComputationalMethod(MethodType method, const js
                 pseudo64 = x->is_boolean() ? x->get<bool>()
                          : x->is_number()  ? x->get<double>() != 0.0
                          : (x->is_string() && (x->get<std::string>() == "true" || x->get<std::string>() == "1"));
-            ctx->setPseudoDiagonalisation(pseudo, scfnum("scf_pseudo_diag_max_dq", 0.05),
-                                          static_cast<int>(scfnum("scf_pseudo_diag_max_steps", 8)), pseudo64);
+            ctx->setPseudoDiagonalisation(pseudo, scfnum("scf_pseudo_diag_max_dq", 0.3),
+                                          static_cast<int>(scfnum("scf_pseudo_diag_max_steps", 12)), pseudo64);
         }
 
         // Claude Generated (Sep 2026, multi-GPU): `-gpu_density_devices all|0,1,..|solver|none`

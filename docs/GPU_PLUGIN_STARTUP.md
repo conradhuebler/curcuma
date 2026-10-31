@@ -80,7 +80,7 @@ What changed:
 - **Runtime dispatch** (`method_factory.cpp` `resolveGpuMode()`): `-gpu cuda|rocm|vulkan`
   probes `gpu_plugin::available(backend)` (a quiet `dlopen`); missing plugin → warning
   *"the plugin libcurcuma_<b>.so is not present … cmake -DUSE_<B>=ON"* and CPU fallback.
-  `-gpu auto` takes the first plugin present in the order cuda, rocm, vulkan. Unknown
+  `-gpu auto` was removed (Oct 26, 2026: it warns, counts a GPU fallback and uses the CPU); the backend is always named. Unknown
   values warn and use CPU. `curcuma -methods` lists the plugins found next to the binary.
 - **`EnergyCalculator::m_gpu_fallback`** (the "requested GPU but running on CPU" flag the
   capabilities print) uses the same runtime probe.
@@ -98,3 +98,15 @@ What changed:
 Adding a fourth backend now means: one `gpu_plugin_entry_<b>.cpp` with the two C entry
 points, one `add_library(curcuma_<b> SHARED …)` block, and appending `"<b>"` to
 `gpu_plugin::knownBackends()`. Nothing else in the core changes.
+
+## Plugin search path and variant check (Oct 2026)
+
+> 🤖 AI-generated; compiled only in syntax checks of `gpu_plugin.cpp` and the ROCm entry file, never run (no plugin was loaded through the new path).
+
+Linux search order for `libcurcuma_<backend>.so` (`gpu_plugin.cpp`, `pluginHandle`): `$CURCUMA_PLUGIN_DIR`, the executable's directory, the directory of the AppImage file (`$APPIMAGE`), `$XDG_DATA_HOME/curcuma/plugins` (else `~/.local/share/curcuma/plugins`), then the loader's default path. Windows is unchanged (executable directory, then default path).
+
+Plugin and executable share Eigen objects, so both need the same `EIGEN_MAX_ALIGN_BYTES` (AVX2 32, AVX512 64). Each plugin exports `curcuma_<backend>_eigen_align()`; the loader refuses a plugin whose value differs and falls back to the CPU with a warning. A plugin without the symbol is accepted.
+
+CI (`ci-variants.yml`) packs the executable and each plugin as separate archives per variant (`curcuma-linux-<isa>`, `curcuma-plugin-cuda-<isa>`, `curcuma-plugin-rocm-<isa>`, all with top directory `curcuma-<isa>/`). Vulkan is not packaged.
+
+AppImage (`ci-variants.yml`, step "AppImage"): built per ISA from the executable archive only (`curcuma-<isa>-x86_64.AppImage`), plugins are not inside and are found next to the `.AppImage` file. CI check on the AVX2 variant (runner without GPU): CUDA plugin archive unpacked beside the AppImage, `-gpu cuda -method gfn2` printed the GPU-fallback warning and no "could not be loaded" warning. Not checked: a run on a machine with a GPU, the AVX512 AppImage (runner lacks AVX512), starting the AppImage on another distribution.

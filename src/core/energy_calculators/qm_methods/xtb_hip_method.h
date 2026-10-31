@@ -6,7 +6,7 @@
  *
  * Claude Generated (2026-06): ComputationalMethod adapter for the ROCm path of
  * native GFN1/GFN2 — the AMD/HIP sibling of XtbGpuComputationalMethod (CUDA).
- * Selected by the factory when `-gpu rocm` (or `-gpu auto` on a ROCm-only build) is
+ * Selected by the factory when `-gpu rocm` is
  * given and the build has USE_ROCM.
  *
  * Design: OWNS a NativeXtbMethod (the validated CPU pipeline: config, large-system
@@ -19,7 +19,7 @@
  *
  * Usage:
  *   ./curcuma -sp mol.xyz -method gfn2 -gpu rocm   # explicit ROCm
- *   ./curcuma -sp mol.xyz -method gfn1 -gpu auto   # GPU if available
+ *   ./curcuma -sp mol.xyz -method gfn1 -gpu rocm   # GPU
  *   ./curcuma -sp mol.xyz -method gfn2             # CPU (default)
  */
 
@@ -44,6 +44,30 @@ public:
     explicit XtbHipComputationalMethod(curcuma::xtb::MethodType method,
                                        const json& config = json{});
     ~XtbHipComputationalMethod() override;
+
+    /**
+     * @brief Energy (and gradient) as in XtbGpuAdapter, then one warning per new solver
+     *        fallback of the resident ROCm SCF (XtbHipContext::solverFallbackEvents()).
+     *        Each kind of fallback is reported once per method object, not per geometry; while
+     *        the logger is at verbosity 0 (optimiser/MD steps) it stays pending and is printed
+     *        by a later call or, at level 1, by the destructor.
+     *        Claude Generated (Oct 2026).
+     */
+    double calculateEnergy(bool gradient = false) override;
+
+private:
+    /// Prints a warning for every bit of the context's fallback mask not reported yet;
+    /// below verbosity 1 only when final_report is true (then at level 1).
+    void reportSolverFallbacks(bool final_report = false);
+    unsigned m_reported_fallbacks = 0;   ///< SolverFallbackEvent bits already printed
+    bool m_reported_mp_fallback = false; ///< -xtb.rocm_device_multipole fallback printed (Claude Generated, Oct 2026)
+    bool m_reported_pot_fallback = false; ///< -xtb.rocm_device_potential fallback printed (Claude Generated, Oct 2026)
+    bool m_reported_res_fallback = false; ///< -xtb.rocm_resident_loop fallback printed (Claude Generated, Oct 2026)
+    bool m_reported_solv_fallback = false; ///< -xtb.rocm_device_solvation fallback printed (WP6, Claude Generated, Oct 2026)
+    bool m_reported_pseudo_fallback = false; ///< -scf_pseudo_diag path turned off, printed (WP7, Claude Generated, Oct 2026)
+    bool m_pseudo_diag = false;              ///< -scf_pseudo_diag active on ROCm (WP7): counts printed at verbosity 2
+    bool m_reported_ps_fallback[3] = {false, false, false}; ///< WP8a post-SCF D4 / D3 / CN fallback printed (Claude Generated, Oct 2026)
+    bool m_reported_gr_fallback[3] = {false, false, false}; ///< WP8b gradient potentials / tail / lazy copies fallback printed (Claude Generated, Oct 2026)
 };
 
 #endif // USE_ROCM

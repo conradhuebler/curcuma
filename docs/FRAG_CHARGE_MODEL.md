@@ -108,9 +108,13 @@ clusters and bulk systems (up to 2910 atoms, charge -3..+3); `cli_gfnff_08_frag_
 - **The hardcoded fallback is the real default.** `GFNFF::GFNFF(const json&)` reads each setting with
   `m_parameters.value(key, FALLBACK)`, and the CLI does not merge full registry defaults into
   `controller["gfnff"]`. Changing the PARAM default in `gfnff.h` alone has no runtime effect.
-- **GPU**: the GPU wrapper does not call `GFNFF::Calculation()`, so `-gpu` runs keep the reference
-  rule (code inspection; not runtime-tested). Since Oct 11, 2026 a charged multi-fragment system with `-gpu` and
-  `frag_charge_model` not `reference` prints one warning per run (`GFNFFGpuMethodImpl::setMolecule`).
+- **GPU**: the GPU wrapper does not call `GFNFF::Calculation()`, so it cannot apply the ensemble. Since Oct 14, 2026 a charged
+  multi-fragment system with `-gpu` and `frag_charge_model` not `reference` runs on the CPU method: `GFNFFGpuMethodImpl` sets
+  `requestsCpuFallback()` after its setup, `EnergyCalculator::setMolecule()` reports a GPU fallback (counted, `-gpu_strict true`
+  exits with code 3) and replaces the method. `-gfnff.frag_charge_model reference` keeps the GPU with the same rule on both sides.
+  Measured on ROCm (n = 1 per structure): GMTKN55 gfnff, ROCm against CPU 0 of 2462 differ (25 before); `cl2-anion` and
+  `hydronium-water2`, 100 MD steps, last frame identical. Tests `cli_gfnff_gpu_05_rocm_charged_fragments`. CUDA uses the same
+  wrapper code and was not run.
 - Cost: each variant is a full GFN-FF evaluation; tiny for the parity-decided cases, 2^k corners
   times placements with the window on.
 - A reused calculator (optimisation, MD) on master still has the stale CN / D4-C6 defect of
@@ -119,3 +123,40 @@ clusters and bulk systems (up to 2910 atoms, charge -3..+3); `cli_gfnff_08_frag_
   `gfnff_frag_charge_history`, and up to 503 fragments in `cli_gfnff_08_frag_charge_many_fragments`.
   **Not tested**: periodic systems, charged systems with more than a few fragments in a window, long MD
   with the window on.
+
+## Ion pairs: `-gfnff.charge_groups ionpairs` (Oct 2026, experimental)
+
+Status: AI-generated, machine-tested (section 5 of `test_cases/scripts/check_charge_groups.py`), no human review, human
+production testing pending. Off by default. Code: `GFNFF::buildIonPairChargeGroups`, `perceiveAromaticCationRings`, called at
+the end of `calculateTopologyInfo` (`gfnff_method.cpp`); PARAMs `charge_groups`, `ionpair_charge`, `ionpair_aromatic` (`gfnff.h`).
+
+`ensemble` and `reference` place only a net charge. In a neutral system of several fragments every fragment is held at 0, so
+the cation and the anion of an ion pair are both neutral while the separated ions carry +1/-1. The parity rule sets the formal charges:
+1. Q = 0, closed shell (spin 0, even electron count), at least two fragments in the final topology of the reference q-loop.
+2. Cation fragments hold onium centres (`perceiveOniumCentres` valence_only: N with 4 / O with 3 partners in `nb_full`, no metal
+   or over-coordinated partner); with `ionpair_aromatic true` also isolated 5/6 rings of C and N with a Hueckel count of 7.
+3. Anions by parity: fragments without a centre whose neutral electron count is odd; an even fragment (host, solvent) stays 0.
+   Their number must equal the number of centres n_plus, otherwise nothing happens (warning, "ambiguous").
+4. One EEQ group per fragment (+`ionpair_charge` per centre, -`ionpair_charge` per anion, 0 otherwise); the topology is then
+   rebuilt with these groups from pass 1, through `applyUserChargeGroups` as for a group file. Once per instance; one extra
+   topology build at initialisation when the rule fires, no extra cost per step; the groups are constant, so the analytic gradient
+   needs no extra term. Verbosity >= 1 prints the roles and that the rule is not meant for shared-proton reactions.
+
+Measured (n = 1 run per structure; GMTKN55/S30L-CI references; held-out: r2SCAN-3c on xtb GFN2 geometries):
+- IL16, 12 onium pairs: MAD 65.58 -> 21.06 kcal/mol (11 better, 1 worse); all 16 with `ionpair_aromatic`: 71.62 -> 19.11.
+- S30L-CI (n = 30): MAD 10.445 -> 9.79 (24/27/28 affected; host even, so complex and monomer get the same roles).
+- Held-out, 24 ion pairs: MAD 66.99 -> 12.08 (halides n = 6: 115.43 -> 26.45, others n = 18: 50.85 -> 7.29); 4 complexes ion
+  pair + neutral fragment: 15.79 -> 7.32 (5.73 aromatic). The first record (67.27 -> 13.46, 16.3 -> 7.8) mixed in 15 stale geometries.
+
+Limits (read before use):
+- Not for reactions with a shared proton: proton-transfer transition states and H3O+/OH- or NH4+/NH2- type complexes get formal
+  charges. WTMAD-2 92.595 -> 93.063 (+0.47; 92.955 with `ionpair_aromatic`); WCPT18 (n = 5) MAD 22.9 -> 102.9, PX13 (n = 2)
+  22.9 -> 102.4, WATER27 H3OpH2O6OHm +40 -> +112; held-out shared-proton controls: 6 of 10 grow by +39 to +196 (MAD 32.25 -> 99.60).
+  No tested quantity (contact distance, free EEQ charge, GFN-FF energy) separates these from ammonium halide pairs.
+- Not perceived: guanidinium/amidinium, phosphonium, sulfonium, protonated carbonyls, fused or substituted aromatic cations,
+  dianions (an anion fragment gets one -q), open shells. A fragment with k onium centres gets +k (not tested for k > 1).
+- Groups frozen per instance: not for MD with bond breaking or `-gfnff.react` (not tested). GPU: CUDA on the device EEQ (Oct 31, 2026,
+  10-step MD charges GPU against CPU 2.4e-15 e on NH4+ Cl-), ROCm falls back to the CPU method (untested there). Fragment order: IL16/144 changes by -2.4e-4 Eh between the two fragment
+  orders without the switch and by -4.1e-4 Eh with it (230, 187, 008: 0; n = 1 run each).
+- Falsifier set (24 pairs, 10 shared-proton controls, 4 three-fragment complexes): vault `_artefacts/2026-10-24_curcuma_ionpair-falsifier-package.tar.gz`;
+  its `species/*.xyz` are NOT the geometries of its r2SCAN-3c energies for 85 of 124 species (rewritten after ORCA started): to be replaced.

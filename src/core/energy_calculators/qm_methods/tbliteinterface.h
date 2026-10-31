@@ -82,6 +82,13 @@ public:
     Vector OrbitalEnergies() const override;
     Vector OrbitalOccupations() const override;
     void setMethod(const std::string& method) override;
+    /// Claude Generated (Oct 2026): mark max_iterations / damping as given by the user (-tblite.* or
+    /// the shared -scf_max_iterations / -scf_damping). Only unset values get the GFN2 raise to 150 / 0.6.
+    void setUserScfSettings(bool max_iterations_set, bool damping_set)
+    {
+        m_user_maxiter = max_iterations_set;
+        m_user_damping = damping_set;
+    }
     virtual bool hasGradient() const { return true; }
 
 private:
@@ -95,6 +102,8 @@ private:
     double m_thr = 1.0e-10;
     int m_acc = 2;
     int m_SCFmaxiter = 100;
+    bool m_user_maxiter = false;
+    bool m_user_damping = false;
     int m_guess = 0;
     int m_error_count = 0;
     double m_damping = 0.5;

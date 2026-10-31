@@ -11,17 +11,54 @@ Stand.
 
 ## 1. Korrektheit (offen)
 
+  Vermutlich ein statischer Zufallsgenerator; nicht untersucht. `test_cases/test_md_hbond_log.cpp` startet deshalb einen Prozess je Lauf. Betrifft jeden, der mehrere MD in einem Prozess einbettet.
+
+
+
+- **`-gfnff.charge_groups` auf der GPU** (2026-10-23): GPU-Methode faellt auf die CPU zurueck (Aenderung in `gfnff_gpu_method_impl.h` nicht uebersetzt, nicht gelaufen); mehrere Fragmente nur, wenn jede Gruppe eine Vereinigung ganzer Fragmente ist (2026-10-24) oder mit `"rest": "per_fragment"` (2026-10-25).
+
+- **`-gfnff.charge_groups auto`: offene Grenzen** (2026-10-23): nur Kationen (Anionen, Carbenium fehlen); nur ein Fragment (Ionenpaare, S30L-CI 24/27/28 nicht erfasst); Gruppe einmal je Instanz, kein Neu-Gruppieren bei Bindungsbruch (unstetig, nicht gelaufen); GPU nicht gelaufen. Gruppenausdehnung (Radius 2, 14 Atome) offen (Schritt 3, Potentialmass). [docs/POLYMERBUILD_CHARGE.md](docs/POLYMERBUILD_CHARGE.md)
+
+- **`-gfnff.charge_groups auto` auf hypervalenten P/S-Geruesten** (2026-10-23, n=3): PArel h4p2o71/h4p2o72/s4o41 werden erkannt (Bedingung (c) blockt P/S nicht), Energie +53 bis +178 kcal/mol; freie Gruppensumme bis -0,90 e wird auf +1 gezwungen. Ob P/S-Partner blocken sollen, ist zu entscheiden.
+
+- **Topologie-Cache `<basename>.topo.json` traegt die Molekuelladung nicht** (2026-10-23, n=1): eine bei Ladung 2 geschriebene Datei wird bei Ladung 0 wiederverwendet (gleiche Energie -14,11678988 Eh, (AB)2). Cache-Schluessel um Ladung/Spin ergaenzen; nicht untersucht, ob die Ladung beim Laden doch gelesen wird.
+
+- **`cli_simplemd_14_gfnff_react_h_recombination` schlaegt fehl** (2026-10-23, n=1 Binary mit und ohne Ladungsgruppen-Aenderung): "no bond formation events", MD laeuft 0,2 s ohne Fehler. Ursache nicht untersucht.
+
+- **`polymerbuild`: Optimierungsschritte laufen mit Ladung 0, ohne Ladungsgruppen** (2026-10-23): die Formalladung steht nur im Ergebnis. `-gfnff.charge_groups` existiert, wird beim Bauen aber nicht benutzt (Gruppen der wachsenden Kette je Schritt noetig). [docs/POLYMERBUILD_CHARGE.md](docs/POLYMERBUILD_CHARGE.md)
+
+- **`-opt` (LBFGS++): Abriss der C=O-Bindung bei 5747 Atomen** (diagnostiziert 2026-10-29, [docs/LBFGS_ATOM_STEP_CAP.md](docs/LBFGS_ATOM_STEP_CAP.md)): Schalter `-lbfgs_max_atom_step` (Default auto: 0,2 A ab 2000 Atomen) behebt es in L1. Offen: Schwelle 2000 Atome belegen (nur eine Struktur gemessen), Cap auf MOR41/GMTKN55 pruefen, Bindungscheck am Ende von `-opt`, Nebenbefunde (`alpha=`-Ausgabe, Hilfe `lbfgs_line_search`, Doppel-Default `lbfgs_max_line_search`).
+- **Entscheidung: Default von `-md.seed`** (2026-10-31): seit dem Seed-Fix ist der Default -1 = Uhrzeit, eine MD ist also nicht mehr bitgleich wiederholbar (vorher war sie es, weil der Seed wirkungslos war); `cli_gfnff_07_eeq_localinv` wurde dadurch flaky und nutzt jetzt `-md.seed 1`. Alternative: Default 0 (aus Atomzahl und T0, mit der Startgeometrie im Seed reproduzierbar). Betrifft jede MD und alle Vergleichslaeufe.
+- **ROCm: Ladungsgruppen und `cn_zero_guard` bleiben auf der CPU** (Luecke, 2026-10-31): CUDA hat beides auf dem Device (Commit `fix/gpu-charge-groups`, gemessen 15,5 ms/Schritt bei 5747 Atomen), ROCm nicht: kein Hardwaretest, Trait `has_charge_groups_cn_guard = false` haelt den CPU-Rueckfall, der HIP-Kern ist nie kompiliert (kein hipcc) und nie gelaufen. Zu tun auf ROCm-Hardware: GPU gegen CPU wie bei CUDA (Gruppensummen, Gradient Cl-, 200 MD-Schritte), dann Trait auf true. Vulkan: nicht betrachtet. Ausserdem: `k_subtract_qtmp` (CUDA) hat keinen Aufrufer, Loeschkandidat.
+- **`SimpleMD::CSVR()` hatte statische Verteilungen (Z. 5059, jetzt Instanz-Member `m_csvr_*`, Oct 31 2026, ohne dof-1-Änderung; Fix auf `feature/nebmd-path-sampling` bleibt maßgeblich für dof-1)** (`static std::normal_distribution d`, `csvr_last_dof`, `static std::chi_squared_distribution dchi`, `simplemd.cpp` um Z. 5059): Datenrennen bei mehreren gleichzeitigen SimpleMD-Instanzen (ConfSearch, NEB-MD); der Fix liegt auf `feature/nebmd-path-sampling`, nicht hier. Einzelne MD ist nicht betroffen.
+- **Rechenzeit je MD-Schritt ~ N^1,55** (diagnostiziert 2026-10-29, [docs/MD_STEPTIME_SCALING_2026-10.md](docs/MD_STEPTIME_SCALING_2026-10.md)): All-Pairs-Anteil (EEQ-Matrix/PPCG, Coulomb, D4-Liste), N^2 = 74 % bei 5750 Atomen. Offen, Hebel je 5-15 %: Constraint-Block nur fuer Schur/LU, pAp-Pruefung statt serieller Definitheitspruefung, D4-C6-Auffrischung fusionieren; Linearisierung braucht Cutoff/Ewald (aendert Energien, Entscheidung).
+
+- **Literaturverweise der Trajektorien- und Ionen-Methoden pruefen** (Oktober 2026): die Quellen fuer Blockfehler, H-Brueckenkriterium, g(r), Shrake-Rupley, Sondenradius, Bondi-Radien, Fibonacci-Punkte und `-ionize`
+  stehen in `docs/TRAJPROPS.md`, `src/core/citation_database.cpp` und `src/capabilities/trajprops.h`; sie stammen aus dem Gedaechtnis der KI und sind NICHT gegen die Arbeiten geprueft. Ebenso offen: welchen Radiensatz Min 2015 fuer die WASA verwendet.
+
+- **Flat-Flag ohne Modulpräfix erreicht den nativen xTB nicht** (bestätigt 2026-10-11, n=1): `-diis_start 1` landet laut `-export_run` in `/opt` und `/sp`, nicht in `/xtb`; der Name ist in
+  `curcumaopt.h`, `lbfgs.h` und `native_xtb_method.h` registriert, bei `-verbosity 2` kommt keine Warnung. `-xtb.diis_start 1` wirkt (seit `1bb4781b`). Ursache im Routing nicht untersucht;
+  gleiches Muster für andere mehrfach registrierte Namen möglich. Vault: Labor `curcuma GFN2-SCF-Vorkonditionierung`, Schritt 19.
+- **Flache SCF-Namen, die auch das Optimiermodul kennt** (2026-10-26, Ursache gefunden): `-diis_start`, `-max_iterations` gehören auch zu `opt`, das `-sp` und `-opt`
+  benutzen; das Befehlsmodul gewinnt, also erreichen sie den SCF nicht (keine Warnung). Wirksam: `-scf_max_iterations`, `-scf.diis_start`, `-xtb.diis_start`.
+  Offen: soll `-sp` die Optimiererparameter überhaupt besitzen? [docs/PARAMETER_SYSTEM.md](docs/PARAMETER_SYSTEM.md), "Shared module scf".
+- **SCF-Modul `scf` bei tblite/xtb/Ulysses nicht gelaufen** (2026-10-26): Abbildung auf `max_iterations`/`damping` nur per `-verbosity 3` gesehen, die
+  TBLite-Änderung (GFN2-Anhebung auf 150/0.6 nur ohne Nutzerwert) nur syntaxgeprüft; kein Provider in `release/`. `-hessian` endet mit 0, wenn ein
+  Verschiebungs-SCF scheitert (pm3, `-scf_max_iterations 3`), nicht untersucht. [docs/SCF_MODES.md](docs/SCF_MODES.md)
+- **Offene Schalen über die CLI: Aliase und ctest fehlen** (2026-10-11): `-multi`, `-multiplicity`, `-uhf`, `-xtb.spin` werden still ignoriert; Zeile 2 "Ladung Multiplizität" der ORCA-xyz wird nicht gelesen;
+  ungerade Elektronenzahl ohne `-spin` besetzt fraktional (tblite), xtb nimmt ein Dublett (Entscheidung offen); es gibt keinen ctest für `-spin` (Known Issue #9). Flag mit Leerzeichen und Paritätswiderspruch
+  sind seit 2026-10-11 Fehler bzw. Warnung (`CLI2Json`, `buildReferenceOccupations`). Vault: Labor `curcuma GFN2-SCF-Vorkonditionierung`, Schritt 13.
 - **GFN-FF-Energie hängt von der Atomnummerierung ab** (911 von 2557 Strukturen, bis 237 kcal/mol bei geladenen Mehrfragment-Systemen;
   in pprcht und curcuma). Referenzeigenschaft, kein Portierungsfehler. [docs/REV_GFNFF_TODO.md](docs/REV_GFNFF_TODO.md) #12, Known Issue #34.
-- **ROCm-GFN-FF ohne Coulomb-Term** als Voreinstellung seit `ab6e3f5e` (F-1, Umgehung `-gfnff.gpu_coulomb_implicit false`); GFN1/GFN2 auf ROCm
-  ignorieren `-scf_mixed_precision false` (G2-13); Energiesummen nehmen wave32 an (F-17). Keine ROCm-Hardware, nur dokumentiert:
-  [docs/MULTI_GPU_GAPS.md](docs/MULTI_GPU_GAPS.md).
+- **GPU-Schrittzeit GFN-FF, Reste und nicht ROCm-spezifische Hebel** (Stand 13. Okt. 2026, Messwerte in [docs/ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md](docs/ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md)): (a) MD-Integrator und Thermostat auf der GPU statt `SimpleMD` auf der CPU (7320 Atome: 4-7 ms Luecke und 4,3 MB Transfer pro Schritt, etwa 10 %); (b) viele kleine Moleküle gebündelt auf der GPU (Konformerensuche, Durchsatz); (c) Coulomb (10 ms bei 7320 Atomen) und Dispersion (7,5 ms) weiter ausreizen, auch 20 % lohnen sich; (e) `-gpu auto` samt Schwelle entfernt (2026-10-26); Break-even Wasser auf ROCm zwischen 300 und 600 Atomen, andere Systemtypen offen; CUDA gemessen 17. Okt. 2026 ([GPU_TUNING.md](docs/GPU_TUNING.md)): MD-Schritt ab etwa 66 Atomen schneller, aber 0,8 s Start je Prozess, `-gpu auto` hat auf CUDA keine Schwelle (Entscheidung offen); (f) projiziertes PCG macht bei 600 Atomen ca. 11 Host-Roundtrips je Schritt, Abhilfe: Konvergenzflag auf dem Device; (g) Logzeile sagt bei kleinem Device-EEQ noch "WP2 dense Cholesky + CPU Schur" (kosmetisch); (d) danach GFN1/GFN2 auf ROCm (Host-Eigenloeser unterhalb eines Break-evens, Cache-L, Pseudo-Diagonalisierung), erst nachdem GFN-FF ausgereizt ist.
+- **Periodisches GFN-FF fehlt** (zurueckgestellt, Entscheidung Okt. 2026): die CPU nutzt das Gitter nirgends, die ROCm-Kernel haben `applyMIC` und `setUnitCell`, aber `unitcell 9 9 9` aendert die Energie von `water8-cluster` weder auf CPU noch auf ROCm (8 Stellen). Plan und Stand: [docs/GFNFF-CPU.md](docs/GFNFF-CPU.md), [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md) ("Periodic boundary conditions: not implemented").
+- **Frag-Ladungs-Ensemble auf der GPU**: geladene Mehrfragment-Systeme laufen seit 14. Okt. 2026 auf der CPU-Methode (GPU-Rueckfall, gezaehlt); das Ensemble selbst (`GFNFF::fragEnsembleBlend`) laeuft nur dort. Auf der GPU abbilden waere die Alternative, [docs/FRAG_CHARGE_MODEL.md](docs/FRAG_CHARGE_MODEL.md).
+- **ROCm**: GFN1/GFN2 ignorieren `-scf_mixed_precision false` (G2-13); Energiesummen nehmen wave32 an (F-17). Dokumentiert in
+  [docs/MULTI_GPU_GAPS.md](docs/MULTI_GPU_GAPS.md). Leistung (EEQ auf der CPU, rocSOLVER-Eigenloeser):
+  [docs/ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md](docs/ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md).
 - **Exitcode bei fehlgeschlagenem Setup**: `-md` gibt seit `a2b7c5f0` 1 zurück; prüfen, ob dasselbe für `-opt` und `-sp` gilt (nicht geprüft).
 - **UFF- und QMDFF-Gradient falsch** (Eintrag vom 2026-09-27: UFF-Winkel ohne den Faktor -sin(theta); Fix vorbereitet, Betreiber: "erstmal nicht").
   Nicht erneut geprüft; Details im Archiv unter "UFF- und QMDFF-Gradient falsch".
-- **`-seed` wirkt nicht auf die Anfangsgeschwindigkeiten der MD.** Geprüft 2026-10-01: `SimpleMD::InitVelocities()` (`simplemd.cpp:1141`)
-  zieht aus `static std::default_random_engine generator` (Z. 1143) mit festem Standardseed. Ein Fix ändert jede MD-Startgeschwindigkeit.
-- **`shouldUpdateHBXB()`: RMSD-Formel ohne Faktor `sqrt(natoms)`** (`gfnff_method.cpp:3058`, geprüft 2026-10-01). Bei 7320 Atomen
   ~13,6 Å mittlere Verschiebung bis zum Auslösen. Aus der Fortran-Referenz übernommen (`gfnff_ini2.f90:717`); vor einer Änderung gegen
   MOR41/GMTKN55 prüfen und das Abweichen von der Referenz entscheiden.
 - **D4-ATM-C6 auf den Tripeln bleibt auf dem Setup-Wert eingefroren.** Ohne Wirkung, solange `dispersion_atm` aus ist (Voreinstellung).
@@ -34,7 +71,7 @@ Stand.
 - **`DC13/c20bowl`**: Coulomb -6,29 kcal/mol gegen die Referenz, Ladungen ~6x zu groß, nicht eingegrenzt (Known Issue #14).
 - **Reproduzierbarkeit**: GPU läuft nicht bitgleich (`atomicAdd`-Reihenfolge); CPU nicht bitgleich über verschiedene Threadzahlen
   (`FFWorkspace` partitioniert nach Threadzahl). Betreiber 2026-09-27: später. Erster Schritt: Repulsion als Sammel-Kernel hinter
-  einem Schalter, messen auf A4500 und H200. Archiv: "CPU/GPU-Trajektorien-Divergenz" und "Bitgleichheit".
+  einem Schalter, messen auf A4500 und H200. Archiv: "CPU/GPU-Trajektorien-Divergenz" und "Bitgleichheit". Stand 17. Okt. 2026: GFN1/GFN2-SCF auf der GPU bitgleich; GFN-FF-CUDA-Ladungs- und Kraftpfad ebenfalls (Fixkomma, 9 von 9 Trajektorien identisch); Gradienten von GFN1/GFN2 ebenfalls; Energien ebenfalls; offen sind ROCm und Split gegen Ein-GPU-Lauf (1e-12, FP32 + anderer Kernel), Optionen in [docs/GPU_REPRODUCIBILITY.md](docs/GPU_REPRODUCIBILITY.md).
 - **Verbosity** ist ein geteilter Static und lässt sich über `CxxThreadPool`-Worker nicht sauber scopen (Known Issue #3).
 - **ConfSearch**: Wide-Hill-MTD-Aufblähung innerhalb eines Laufs; `threads=1` im Legacy-Modus mit Fortschrittsbalken (SIGSEGV nach der
   Optimierung, Eintrag von 2025, nicht erneut geprüft). [docs/CONFSEARCH_ROADMAP.md](docs/CONFSEARCH_ROADMAP.md).
@@ -53,31 +90,73 @@ Stand.
   corruption, so it is a stale/invalid object rather than an overflow -- next step is an
   AddressSanitizer build. `cli_confsearch_04` was moved to qmdff, so the suite is green and this
   issue is NOT covered by a test any more.
+- **LBFGSpp prüft die Krümmung nicht** (geprüft 2026-10-18, n=1): `BFGSMat::add_correction` überspringt das Update bei `s'y <= 0` nicht; auf einer rauen Delta-ML-Fläche (alte Defaults, 120 Zentren) bricht der Optimierer `auto` mit Exit 1 ab. Beobachtet an `cli_deltaml_01` mit dem alten ACSF-Gitter, mit den neuen Defaults (6 Schalen, eta 4) konvergiert er. Details: `AIChangelog.md` (Delta-ML), Vault `Projekte/curcuma Delta-ML`.
+- **`-opt.optimizer lbfgs` macht bei großem Startgradienten einen Nullschritt** (n=160 Läufe, 2026-10-19): ab etwa 0,3 Eh/Bohr Exit 1, 0 Iterationen, kein Fehlertext, auch für GFN2 und GFN-FF allein (400-K-MD-Frames); der Standardoptimierer läuft durch. Ursache nicht untersucht.
+- **Delta-ML: Modellenergie am eigenen Optimum zu niedrig** (n=20 je Molekül, 2026-10-19): bei `lambda 1e-6` und 4000 Zentren liegt sie um bis zu 34 kcal/mol unter GFN2 (19/19 auf dem Trisaccharid), `lambda 1e-3` beseitigt das und verschiebt die Energie um 7 bis 16 kcal/mol nach oben; `uncertainty_abort` hilft nicht. Details: `docs/DELTA_ML_RETEST_2026-10.md`.
+- **Delta-ML aktives Lernen: Abbruchkriterium** (2026-10-27, n=3+3 Läufe peo8): ersetzt durch Pool über `al_window` 3 Zyklen, zentrierte Fehler, 10-%-Quantil, Ziele 2,5/3,5 kcal/mol aus Tuning-Seeds 4-6; `both` = Validierung `al_patience`-mal + Indikator im Stoppzyklus. Löst in 2 von 3 Läufen aus (Zyklus 18, 19), Zeitpunkt vom Indikator bestimmt, JSD wie N0 (0,221).
+  Offen: andere Moleküle, ob `validation` allein (stoppt bei 7-9) gleich gute Modelle gibt, Wandzeit +20-38 % ungeklärt. Details: `docs/DELTA_ML_ACTIVE_LEARNING_2026-10.md` (Addendum). Warntext `not converged ... was not met in N consecutive cycles` (`activelearn.cpp:1311`) sagt nicht, ob Validierung oder Indikator fehlte.
+- **`charge_groups ionpairs`** (experimentell, Paritätsregel, 2026-10-24): setzt Formalladungen auch in Protonentransfer-TS und Komplexen mit geteiltem
+  Proton (WTMAD-2 +0,47; WCPT18/PX13 bis +143 kcal/mol; Kontrollen 6/10 +39 bis +196). Offen: Wahrnehmung Guanidinium/Amidinium, Phosphonium,
+  Sulfonium, protonierte Carbonyle, Dianionen; Gruppen je Instanz eingefroren (MD/react nicht geprüft). [docs/FRAG_CHARGE_MODEL.md](docs/FRAG_CHARGE_MODEL.md)
+- **Kontinuierliches Ladungsmodell für Ionenpaare** (rev-gfnff, SQE/ACKS2-artig): kein geprüftes GFN-FF-Maß trennt Ammoniumhalogenid-Paare von
+  Protonentransfer-TS. Falsifikator-Paket im Vault; dessen `species/*.xyz` passen bei 85/124 Spezies nicht zu den ORCA-Energien (vor Nutzung ersetzen).
+- **Fragmentreihenfolge im Mehrfragment-EEQ**: IL16/144 (neutrales Ionenpaar) ändert beim Vertauschen der Fragmentreihenfolge die Energie um
+  -2,4e-4 Eh und Ladungen um 7,8e-3 e, ohne Schalter, auf allen Lösern; mit `ionpairs` -4,1e-4 Eh; 230/187/008: 0 (n=1 je, 2026-10-24, nicht eingegrenzt).
+- **Coulomb-CN-Kettenregel bei CN = 0, Rest** (2026-10-25): CPU-Schalter `-gfnff.cn_zero_guard` (opt-in, Known Issue #43). Offen: CUDA/ROCm-Kernel
+  `k_subtract_qtmp`/`k_coulomb_postprocess` (bisher CPU-Rückfall, GPU-Zweig nicht übersetzt), Bestätigung in pprcht `gfnff_engrad.F90` (nur Vorrunde),
+  Default-Entscheidung (Betreiber); Hessian (FD der Gradienten) erbt den Schalter, nicht gelaufen.
+- **`frag_charge_model ensemble` bei Polymer^n+ + Cl-** (2026-10-25, n=1 je): Einheit nur +1, daher Q = +1 aus (AB)2 (+2) und Cl- als Polymer 0 / Cl +1
+  (Paritätsregel), (AB)3+Cl-: Polymer +1 / Cl +1. NVE 1 ps, 50 K: Etot-Sprünge bis -0,093 Eh (4 > 1e-3), der erste bei H(N)...Cl 1,65 A;
+  `reference` und Dateigruppen 1e-5 bzw. 2e-7 Eh/ps. Ursache des Sprungs in der MD nicht eingegrenzt. [docs/FRAG_CHARGE_MODEL.md](docs/FRAG_CHARGE_MODEL.md)
+- **`charge_groups` `"rest": "per_fragment"`** (2026-10-25): Gruppen je Instanz eingefroren, geänderte Fragmentierung in der MD wird nicht erkannt
+  (nur Codelesen; in keinem Lauf aufgetreten, Kontaktpaar-MD kam nicht unter 1,9 A, 2026-10-25); Fragmente des Skripts aus Kovalenzradien, nicht aus der GFN-FF-Topologie; periodisch, GPU, equilibrierte MD offen.
+  Validierung nur PDMAEMA-Einheit/Dimer in Wasserclustern (n=16/8): Kraefte nicht signifikant besser, Relativenergien besser. [docs/POLYMERBUILD_CHARGE.md](docs/POLYMERBUILD_CHARGE.md)
+- **100-ps-Probelauf (AB)5 im Wassertropfen** (2026-10-25, n=1 je T, 303/338 K): ausgewertet, offen: Kette wandert in beiden Läufen zur Tropfenoberfläche
+  (COM-Versatz 1,1-1,4 -> 3,2-3,5 A, 35 A^2 unbedeckt in H2), 338 K Epot-Drift -1,25e-3 Eh/ps, Rg nicht stationär (tau 5-15 ps, 3-15 unabhängige Werte);
+  (`-md.seed` wirkte in diesen Läufen nicht, seit 2026-10-30 behoben.) Läufe unter `~/curcuma_runs/probe100/`. [docs/PDMAEMA_PROBE_100PS_2026-10.md](docs/PDMAEMA_PROBE_100PS_2026-10.md)
+- **`-trajprops hb_criterion energy`** baut GFN-FF ohne `charge_groups`/`cn_zero_guard` (`countHydrogenBondsByEnergy`), also nicht das
+  Ladungsmodell des Laufs. [docs/PDMAEMA_PROBE_100PS_2026-10.md](docs/PDMAEMA_PROBE_100PS_2026-10.md)
+- **H...Cl-Bindungserkennung als Energiestufe** (2026-10-25, starrer Scan n=1): frische GFN-FF-Topologie gibt +34 kcal/mol bei 1,7->1,6 A (ohne Gruppen),
+  +50 bei 1,8->1,7 A mit Gruppen (Pass-2-Radien mit q(Cl) = -1), dazu -21 bei 1,2 A (N-Cl); ORCA/GFN2 glatt. In MD nicht erreicht; `auto` baut dort die
+  Topologie ohne Bindungsterme neu, Gruppen bleiben ungeprueft (Codelesen). Entscheidung offen. [docs/POLYMERBUILD_CHARGE.md](docs/POLYMERBUILD_CHARGE.md)
 
 ## 2. Leistung
 
+- **Delta-ML-Labels auf der GPU lohnen nicht** (2026-10-27, n=2 Wiederholungen, peo8 + 90-Atom-Wirt, [docs/DELTA_ML_LABEL_GPU_2026-10.md](docs/DELTA_ML_LABEL_GPU_2026-10.md)): beste GPU 0,06x / 0,25x der besten CPU, kein `label_gpu`.
+  Offen (Entscheidung): `-activelearn -gpu cuda` schickt die Labels heute schon auf die GPU (`LabelThread` übernimmt den globalen `gpu`-Schlüssel), 4-16x langsamer; Labels bei `-gpu` auf die CPU festlegen?
+
+- **CUDA/ROCm-Parität: ROCm-Seite** (2026-10-24, [docs/GPU_PARITY_CUDA_ROCM.md](docs/GPU_PARITY_CUDA_ROCM.md), Abschnitt A): auf ROCm fehlen residente SCF-Schleife, Geräte-Potential, Multipol on-the-fly, Solvation, Besetzungen/Broyden/Pseudodiagonalisierung, D3/D4 nach dem SCF, Gradientenschwanz; GFN-FF: Geräte-Schur, Mehr-GPU-Split, Geräte-Abstoßungsliste, tabelliertes dc6dcn, Fixed-Point.
+- **CUDA/ROCm-Parität: CUDA-Seite** (Stand 2026-10-25, [docs/GPU_PARITY_CUDA_ROCM.md](docs/GPU_PARITY_CUDA_ROCM.md), Abschnitt B): erledigt 1, 10, 12 (Faktor-Probe, Stream-Reihenfolge, Fixkomma-Flag); gemessen und nicht portiert 2, 3, 4, 5, 6, 7, 8; offen nur 9 ((entschieden 2026-10-26: `-gpu auto` entfernt)) und 5 bei Einzelkarten ueber 5000 Atomen.
+- **Erschoepfte SCF meldet 151 statt 150 Iterationen** (Zaehlung der Host-Schleife, nicht untersucht). Der D4-Gewichtsfallback auf CUDA ist seit 2026-10-25 erledigt (`k_d4_build_refw`, AIChangelog).
+- **ROCm: rocSOLVER liefert bei mehreren Prozessen auf einer GPU sporadisch falsche Ergebnisse** (2026-10-17, [docs/ROCM_GFN_POTENTIAL_2026-10-14.md](docs/ROCM_GFN_POTENTIAL_2026-10-14.md), Reproduzierer `scripts/rocsolver_concurrency_check.cpp`): `potrf` 6 und `sygvd` 8 von je 12000 Aufrufen bei 4 Prozessen, 0 bei einem. Offen: Meldung an AMD, anderer Treiber/ROCm-Stand, Wirkung im `sygvd`-Standardpfad, Messung des Caches mit Probe gegen den Standardpfad, CUDA-Gegenprobe.
+- **GFN1/GFN2 auf ROCm** (Stand 2026-10-15, [docs/ROCM_GFN_POTENTIAL_2026-10-14.md](docs/ROCM_GFN_POTENTIAL_2026-10-14.md)): erledigt sind Dichte-GEMM über ncol, gecachter Cholesky-Faktor, syrk (Opt-in) und explizites L^-1 (Opt-in seit 2026-10-17, vorher Default; peo201-chain 14.18 -> 12.85 s, n=3) mit einmaligem Fallback-Hinweis; Multipol-Potential/-Energie auf dem Gerät als Opt-in `-xtb.rocm_device_multipole` (2026-10-17, peo201-chain 14.92 -> 14.38 s, n=3).
+  Offen: Host-Threads auf ROCm Default 1 (CUDA 8); Entscheidung, ob `-xtb.rocm_device_multipole` Default wird (Opt/MD, Solvens, Fallback nicht gelaufen); restliche Host-Lücke pro Iteration; D4-ATM 1.2 s; späterer FP64-Wechsel (-19 %, n=1); Pseudo-Diagonalisierung wie CUDA.
+  CUDA-`w_from_goo` (`xtb_gpu_context.cu`) nimmt noch geschlossene Schale an; CUDA/Vulkan mit der Open-Shell-Gradientenkorrektur nicht gelaufen.
+- **Host-Rechnung im GPU-Lauf, Rest** (Stand 17. Okt. 2026, zweite Runde): auf der Karte sind D4/ATM, D3, Multipol-Matrizen, Abstoßung, Gradient-Schwanz, Gradient-Potentiale, D4-CN, Hamilton-CN; S/H0/L/gamma werden nur auf Anforderung auf den Host kopiert (Tabelle in docs/GPU_TUNING.md). Offen: ROCm/Vulkan unberührt; Verbosity-3-Stelle (GFN1, 9,5 s, nicht gefunden); PR18 (MOR41) GFN2-Gradient springt selten um 4e-7 (GPU-Nichtreproduzierbarkeit, auch Host-gegen-Host). Mit `-threads 1` gleich schnell wie `-threads 16`: nichts davon skaliert.
 - **GFN2 auf der GPU, Eigenlöser = 73 % des Laufs** (polymer_2x, 1x A4500). Offen:
-  (a) `-scf_pseudo_diag` als Standard einschalten (Betreiberentscheidung, Messungen sprechen dafür);
+  (a) erledigt 15. Okt. 2026: `-scf_pseudo_diag` ist Standard (Betreiberentscheidung); polymer_2x 4x A4500 113,6 -> 90,0 s;
   (b) `-scf_pseudo_diag_fp64` auf einer GPU mit vollem FP64 (H200) messen;
-  (c) CPU-Pfad für `-scf_pseudo_diag` in `XTB::solveEigen` (Schätzung 20 bis 25 %, nicht implementiert, kein Gewinn unter ~1500 Basisfunktionen);
+  (c) CPU-Pfad `-scf_pseudo_diag_cpu` erledigt 15. Okt. 2026 (opt-in, EXPERIMENTAL): polymer GFN2 -9 %, GFN1 -19 %, [docs/GFN2_GPU_COST_PLAN.md](docs/GFN2_GPU_COST_PLAN.md); offen: Default-Entscheidung, MOR41/GMTKN55-Lauf, FP32-GEMMs für die FP32-Phase;
+  (d) Pseudo-Schritt auf mehrere GPUs verteilen: nach Messung verworfen (Schritt 2,3 s von 3,4 s je Iteration, geschätzter Gewinn 5 s von 90),
   (d) Teilspektrum: der residente Loop übergibt `n_eig = 0`, Grund unbekannt, schließt sich derzeit mit der verteilten FP64-Lösung aus;
   (e) Schwellen `gpu_eigensolver_min_nao` (4000) und `gpu_density_min_nao` nachmessen;
   (f) `purify`/`lobpcg` gibt es nur auf der CPU, auf der GPU ist es der einzige Hebel, der die Skalierung ändert;
-  (g) Setup und Integrale (32 s) nie im Detail profiliert.
+  (g) Setup ist profiliert (~13 s, nsys, GFN2_GPU_COST_PLAN.md 0.3); Integrale/Setup nur bei Bedarf weiter.
   **`scf_fp32_stall_patience` nicht ändern**, bis die Fixpunktfrage (Schritt 1 weicht um 2,7e-6 Eh ab) geklärt ist.
   Zahlen und Begründungen: Archiv, Abschnitt "GPU-SCF GFN1/GFN2"; [docs/GFN2_GPU_COST_PLAN.md](docs/GFN2_GPU_COST_PLAN.md).
 - **GPU-Gradient GFN1/GFN2**: Punkte 1 bis 6 umgesetzt; offen: der H0-Paar-Kernel (454 ms) ist einzelkartig, und `densityPatternDistributed`
   kopiert die C-Spaltenscheiben bei jedem Aufruf neu. [docs/SQM_PERFORMANCE.md](docs/SQM_PERFORMANCE.md).
 - **GFN-FF-MD, EEQ-Löser** (polymer_2x): offen sind ein matrixfreier Matvec nur für Systeme > 20000 Atome sowie localinv mit offener Schale, `eeq_distance_cutoff` > 0 und MD über 2 ps
+- **`localinv` bei 32 Threads (SMT) langsamer als bei 16** (2026-10-13, polymer_2x 80 auf 176 ms, urea400 34 auf 106 ms, n=3; M-Aufbau ist es nicht); Ursache offen. Messung: Vault-Labor `curcuma EEQ-Solver Benchmark`.
   (messen). Erledigtes (lokale Inverse, symmetrisches Matvec, Fernfeld-Kurzschluss CPU/CUDA) steht in `AIChangelog.md` und [docs/EEQ_SOLVER_CONTROL.md](docs/EEQ_SOLVER_CONTROL.md);
   Journal: Vault-Laborjournal "curcuma EEQ-Solver Benchmark".
-- **GPU-Lauf rechnet Host-`D4DC6DCNPairs` ohne Leser** (Paket 2, 2026-10-11): `computeDC6DCN` am Ende von `GenerateDispersionPairsNative` im `-gpu`-Lauf, ~216 MiB (24 B x 9,4 Mio. Paare) und Rechenzeit je Neubau; Guard braucht GPU-Modus-API
-  in D4-Generator/GFNFF/Wrapper (P1a-Skip in `updateCNValuesForGradient` beachten). HIP liest `m_disp_idx_*_host` und füllt `m_h_dc6dcn_*` noch (nicht kompilierbar hier).
+- **ROCm rechnet Host-`D4DC6DCNPairs` ohne Leser**: mit `gpu_disp_pairs_on_device true` (CUDA-Standard) entfällt die Host-Liste (polymer_2x, Spitzen-RSS 3,68 GB statt 3,91 GB mit `false`, je 1 Lauf, 17. Okt. 2026); ROCm hat den Schalter aus, HIP liest `m_disp_idx_*_host` und füllt `m_h_dc6dcn_*` noch (nicht kompilierbar hier).
 - **GPU-GFN-FF-MD, Schrittzerlegung polymer_2x** (Stand 21,7 ms je Schritt, vorher 38,4; erledigt: `AIChangelog.md`, [docs/GFNFF-PERFORMANCE-ROADMAP.md](docs/GFNFF-PERFORMANCE-ROADMAP.md)):
-  offen: CG-Iterationen unter Last (K5); Host-Neubau überlappt nicht mit Gerätearbeit (HB 12,8 ms alle 10, Repulsion 11 ms alle ~8, D4 125 ms alle ~83 Schritte); K1-K3 und gestaffeltes Hochladen auf ROCm. Journal: Labor/curcuma EEQ-Solver Benchmark.
-- **ROCm-GFN-FF, Rückstand** (Hardware nötig, groß): nur `auto`/`cholesky` zulässig (kein Geräte-ppcg, kein localinv); fehlen: K1-Fehlerbehebung (CN-Liste jeden Schritt),
-  Fernfeld, K2/K3, gestaffelter Upload. [docs/EEQ_SOLVER_CONTROL.md](docs/EEQ_SOLVER_CONTROL.md).
-- **GPU-Fernfeld und Toleranz angleichen**: Fernfeld in den Mehr-GPU-Kernel `k_eeq_build_cols` (`eeq_solver_gpu.cu`, klein); CUDA-Schwelle 6,0 auf 6,5 wie CPU (nicht bitgleich, mit Messung);
+  offen: CG-Iterationen unter Last (K5); Host-Neubau überlappt nicht mit Gerätearbeit (Stand 16. Okt. 2026, 296 Schritte, 20,0 ms/Schritt: HB/XB 2,2 ms/Schritt (31 Refreshs à 25 ms: Erkennung 14,5, Upload 5,1, Bond-HB-Neuaufbau 3; die HB-Liste ändert sich bei jedem Refresh, 49,6k -> 50,4k Paare, Überspringen bei unveränderter Liste greift nicht; Erkennung skaliert schlecht mit Threads, 4/8/16/32: 24,5/21,5/12,8/10,5 ms; `hb_update_force_every` 10 -> 20 spart 1,1 ms/Schritt, ändert aber die Trajektorie, |dE_total| bis 6e-4 über 300 Schritte, n=1; Entscheidung offen), CN-Liste K1 1,0, Repulsion-Geräteneubau 0,9, D4 0,7; Repulsion lief vorher auf dem Host, 3,3 ms/Schritt). ROCm-Rückstand: siehe unten. Journal: Labor/curcuma EEQ-Solver Benchmark.
+- **CUDA GFN-FF MD, Schrittpausen urea400-water1000** (Stand 2026-10-14, [docs/GPU_STEP_PAUSES_2026-10-14.md](docs/GPU_STEP_PAUSES_2026-10-14.md)): offen: ROCm-Spiegel der D4-Setup-Reihenfolge (`gfnff_rocm.hip`); D4-Sortierung und HB-Erkennung sind auf ROCm gespiegelt, beide Schalter dort Standard;
+  geladene Mehrfragmentsysteme laufen auf der CPU (15-fach langsamer je MD-Schritt bei 2910 Atomen), Ladungsmodell: Vault "curcuma Ladungsträger-Heuristik", Abschnitt GPU-Aspekte. Journal: Labor/curcuma GPU-Backends.
+- **ROCm-GFN-FF, Rückstand** (Hardware nötig, groß; Stand 2026-10-17, Codelesung): Geräte-ppcg, localinv, K1 (CN-Paarliste mit Verlet-Skin), Fernfeld und gestaffelter Repulsions-Upload sind vorhanden, K3 ist ein No-op; fehlen: K2 nur teilweise, Geräte-Schur für Mehrfragmentsysteme (dichter Cholesky-Pfad rechnet die Schur auf dem Host), ALPB-Solvatation und PBC auf dem Gerät (Solvens: CPU-Fallback seit 2026-10-17). [docs/EEQ_SOLVER_CONTROL.md](docs/EEQ_SOLVER_CONTROL.md), Host-/Geräteaufteilung: [docs/ROCM_HOST_PARTS_2026-10-17.md](docs/ROCM_HOST_PARTS_2026-10-17.md).
+- **GPU-Fernfeld und Toleranz angleichen**: (Fernfeld in `k_eeq_build_cols` steht seit Okt. 2026 drin, mit `rsqrt`); CUDA-Schwelle 6,0 auf 6,5 wie CPU (nicht bitgleich, mit Messung);
   GPU-ppcg auf relatives `eeq_ppcg_tol` statt absolutem `pcg_tolerance` (ändert Ergebnisse).
 - **CPU-MD-Schritt polymer_2x** (Stand 212 ms bei 16 Threads, vorher 294; erledigt: `AIChangelog.md`, [docs/EEQ_SOLVER_CONTROL.md](docs/EEQ_SOLVER_CONTROL.md)): offen Coulomb vektorisiert (~6 ms),
   `d4_gw` (E) (~10-15 ms); 1 Thread: `cn` +4,8 ms ungeklärt. Journal: Labor/curcuma EEQ-Solver Benchmark, Abschnitt "CPU-MD-Schritt polymer_2x zerlegt".
@@ -85,13 +164,28 @@ Stand.
   in einem Durchlauf (gemm statt 2 dgemv, 13 ms, Rundung nicht gesichert); Matrix wird jeden Schritt neu gebaut (48 ms). Nicht exakt: eps-Wiederverwendung der Matrix, Extrapolation, lockerere Toleranz.
 - **GFN-FF CPU `d4_gw`** (Stand 34 ms je Schritt bei 16 Threads, vorher 103; erledigt: `AIChangelog.md`, [docs/GFNFF-PERFORMANCE-ROADMAP.md](docs/GFNFF-PERFORMANCE-ROADMAP.md)):
   offen (D) C6 und dc6 in einem Durchlauf, (E) C6 erst in `calcD4Dispersion`. Nicht exakt: Paare bei kleiner CN-Änderung auslassen (#32).
-- **Genauigkeitsprofile `-accuracy loose|normal|high` (geplant, nicht begonnen, Betreiber 2026-10-10: jetzt nicht umsetzen)**: der Parameter `accuracy` (`gfnff.h:285`, `eeq_solver.h:1182`) wird nur
+- **Genauigkeitsprofile `-accuracy loose|normal|high` (geplant, nicht begonnen, Betreiber 2026-10-10: jetzt nicht umsetzen)**: der Parameter `accuracy` (`gfnff.h`, Modul `gfnff`) wird nur
   durchgereicht, nichts liest ihn. Plan: eine zentrale Auflösung wie bei der Solver-Wahl, `normal` = heutiges Referenzverhalten bitgleich, Einzelschalter überschreiben; zuerst ein Scan der Schalter
   (`eeq_ppcg_tol`, `cn_`/`hb_accuracy`, `eeq_distance_cutoff`, `coulomb_r_cut`, `dispersion_cutoff_bohr`) mit Fehler in E, F, NVE-Drift und Zeit, dann Fehlerbudget je Stufe; Abschneidegrenzen nur mit glatter Auslaufzone und konsistenter EEQ-Matrix. Offen: Stufennamen, Budget, `gfnff` oder `revgfnff`.
 - **GFN-FF Static-Mode-Initiative** (Mai 2026): die PARAMs `static_charges`/`static_cn` (WP-S1) sind im Code (`gfnff.h:323`), und der
   Changelog nennt WP-S1 bis S3 als umgesetzt. WP-S4 (Validierungssuite, 32-Konfigurationen-Matrix) nicht geprüft.
   [docs/GFNFF_STATIC_WP4_VALIDATION_SUITE.md](docs/GFNFF_STATIC_WP4_VALIDATION_SUITE.md).
 - **Speicher für Systeme > 1000 Atome** (Molecule-Datenstruktur, Distanzmatrix-Cache): geplant, nicht begonnen.
+- **SCF-Vorkonditionierer `-scf_precond frag`** (Okt 2026, [docs/SCF_PRECOND.md](docs/SCF_PRECOND.md)), nicht umgesetzt: Ionen und geladene
+  Fragmente (nur Skalarschritt), offene Schalen, GFN1 auf der GPU; GPU siehe unten.
+- **`-scf_precond` `auto`-Modus** (2026-10-12): Aufbau von M lohnt sich nur bei wiederholter SCF (Census: Einzelpunkt eines Moleküls 1,25x bis 22x langsamer; Break-even etwa 2 SCFs unter 10 Atomen, 8 bei 10-30, 62 bei 30-100). Regel (wiederholte SCF in MD/Opt/Hessian, Fragmente <= 30 Atome) und
+  Volkszählung der Schalter-Standardfrage: [docs/SCF_PRECOND.md](docs/SCF_PRECOND.md), Abschnitt Census.
+- **`-scf_precond frag`, ungemessen**: Systeme > 600 Atome (CPU) bzw. > 1499 (GPU); M-Erneuerung in langer MD (> 500 fs, `-scf_precond_rebuild_rms`);
+  Hessian mit der eingebauten Funktion (jedes Objekt ausgelenkter Geometrien baut sein eigenes M; gemessen nur der Prototyp bis 197 Atome); Fragmente über
+  `-scf_precond_max_fragment_atoms` (Standard 100; Gewinn nur bis ~30 Atomen gemessen); Elemente außer H, C, N, O; Solvatation.
+- **`-scf_precond_segment_atoms` (RAS), offen** (2026-10-12): gemessen PEO (58, 212, 1410 Atome), Polystyrol 325 und ein Peptid 309 Atome (n=1, 12->5, 15->6/7 Iterationen);
+  gemessen auch MD 200 fs und Hessian (M von den Hessian-Workern geteilt); offen: GPU-Hessian baut M weiterhin je Worker, lange MD (> 200 fs), ladungsgetrennte Systeme, Proteine mit Resten als Einheit. [docs/SCF_PRECOND.md](docs/SCF_PRECOND.md)
+- **GFN2-MD: Etot springt in den ersten 3 Schritten um 4 bis 6 mEh** (2026-10-12, Peptid/Polystyrol 309/325 Atome, NVE, 1 fs, mit und ohne `scf_precond`); Ursache offen, 200 fs belegen keine Langzeitstabilitaet (Zeitschritt, `-scf_threshold`, laengerer Lauf pruefen).
+- **`-scf_precond_jacobian response`** (2026-10-12): GFN2 und GFN1 (CPU), geschlossenschalig, gemessen n=1 an PEO/Polystyrol/Peptid; offen: Standard auf `response` umstellen?, occ-occ/virt-virt-Paare auslassen
+  (etwa halbe GEMM-Kosten), analytische Potentialableitung statt Differenzen, weitere Nutzer von J (Hessian, Analyse). [docs/SCF_PRECOND.md](docs/SCF_PRECOND.md)
+- **`-scf_precond frag` auf der GPU, offen** (2026-10-11): umgesetzt nur für die vollresidente CUDA-Schleife ([docs/SCF_PRECOND.md](docs/SCF_PRECOND.md), Abschnitt GPU). Mit Warnung ignoriert: ROCm, Vulkan, hostgetriebene CUDA-Schleife
+  (Mischer auf dem Host, der CPU-Hook wäre dort direkt nutzbar), Mehr-GPU-SCF-Aufteilung (Eigenlöser/Dichte; ungetestet, nur ein Gerät hier).
+  Ohne Wächter divergiert der unrelaxierte 599-Atom-Cluster mit Mischpräzision (151 Iterationen, harter Fehler, n=3).
 
 ## 3. Tests und Validierung
 
@@ -118,11 +212,13 @@ Stand.
 - **Trisaccharid als optimierte Struktur** (2026-10-09): `trisaccharide-c18h32o16` (xtb 6.6.0, Methode unvermerkt) soll durch `.gfn2-opt` ersetzt werden (und `.gfnff-opt` für GFN-FF). Blockiert: TBLite-Referenzen `sqm_reference/reference_data/triose_gfn{1,2}.ref.json` und die GFN-FF-Terme `reference_data/triose.ref.json` gelten für die alte Geometrie und müssen dort neu erzeugt werden (`USE_TBLITE` im `release/`-Build aus); danach `triose=` in `test_cases/CMakeLists.txt` (Zeilen 18, 27) umstellen. GFN-FF-Minimum liegt 1,0 Å (RMSD) von der xtb-Geometrie, Ursache offen.
 - ConfScan: Accept/Reject-Meldungen bei Standard-Verbosity nicht sichtbar (Eintrag von 2025, nicht erneut geprüft).
 
+- **Fehlschlagende ctest-Einträge nach dem Merge von origin/master** (14. Okt. 2026, 11 von 353, Ursachen und Belege in [docs/BROKEN_TESTS_2026-10-14.md](docs/BROKEN_TESTS_2026-10-14.md)): confscan 01-07 und der Thread-Override des Loggers (`set_verbosity` ist neben `set_thread_verbosity` wirkungslos, ca. 600 Aufrufe); `cli_analysis_02` (Info-Zeile, Test ohne `-verbosity 2`); `cli_simplemd_14` (keine REACT-Zeile, Ursache offen); `cli_sqm_12` (behoben 2026-10-26: Test umgeschrieben); `xtb_cpscf` (Toleranzen).
+
 ## 4. Betreiber-Prüfung offen (🤖/⚙️, nur Sie vergeben ✅)
 
 - CODATA-2018-Einheiten (`191cebe3`; Rest 0,0036 kcal/mol gegen pprcht auf polymer_2x nicht verfolgt), Known Issue #35.
 - `eeq_refactor_eps_bohr` Voreinstellung 0 (Faktor-Cache aus) und `nonbonded_skin_bohr` 2,0; Ladungsplatzierung `ensemble` (#31);
-  Stillstandserkennung `-opt.stall_steps` 20; `-scf_guess fragments`.
+  Stillstandserkennung `-opt.stall_steps` 20; `-scf_guess fragments`; `-scf_precond frag` (Okt 2026, opt-in).
 
 ## 5. Funktionen und Refactoring (niedrige Priorität)
 
@@ -141,9 +237,10 @@ Stand.
 
 Code-gebundene Entscheidungen, die bei Ihnen liegen. Fachliche Fragen und Projektstatus stehen im Vault und sind nur verlinkt.
 
-- `-scf_pseudo_diag` als Standard einschalten? (Messungen sprechen dafür, Abschnitt 2.)
+- `-scf_precond_guard`: Vorgabe `g2:4:best` kostet auf dem unrelaxierten 599-Atom-Cluster bei 8 Threads 4 Iterationen gegen `none` (Kriterium war <= 3);
+  über 5 Threadzahlen liegt frag (55-62) unter none (58-138). Varianten streuen 58-109, eine konvergiert nicht. Vorgabe behalten? [docs/SCF_PRECOND.md](docs/SCF_PRECOND.md)
 - `shouldUpdateHBXB()` korrigieren und damit von der Fortran-Referenz abweichen, oder als Referenzeigenschaft belassen?
-- UFF-/QMDFF-Gradient reparieren (Stand: "erstmal nicht")? `-seed` für die MD-Startgeschwindigkeiten reparieren (ändert jede MD)?
+- UFF-/QMDFF-Gradient reparieren (Stand: "erstmal nicht")?
 - GPU-Bitgleichheit angehen (Sammel-Kernel statt `atomicAdd`) oder bei Ensemblevergleichen bleiben?
 - Vault, fachliche Fragen: `Offene Fragen/` ("Valenzanteil im reaktiven GFN-FF", "Veraltete C6-Dispersion und Paarlisten in inaktiven Topologie-Ecken",
   "Lücke zwischen GFN2-xTB und Doppelhybrid-Methoden schließen", "RRHO-Näherung durch MD ... ersetzen", "Ladungsplatzierung bei geladenen Mehrfragment-Systemen in GFN-FF - was ist physikalisch besser", Known Issue #31).
@@ -159,8 +256,10 @@ vier ungenutzte `optimiser/*.h`, core/accuracy_profile.cpp (inkludierte einen ni
 Offen, Aufrufer vor dem Löschen erneut suchen:
 - `src/capabilities/curcumaopt.h`: hält den PARAM-Block des Moduls `opt` (28 Parameter); die Klasse `CurcumaOpt` ist ohne Implementierung. Die Parameter müssen erst in ein anderes Header umziehen.
 - `src/capabilities/rmsd/rmsd_costmatrix.*`, `rmsd_assignment.*` (`CostMatrixCalculator`, `MunkresAssignmentSolver`): kompiliert und von `rmsd_strategies.h` eingebunden, die Klassen selbst werden nirgends aufgerufen. Entscheidung nötig, ob die Strategien sie künftig nutzen sollen.
+- dc6dcn-Skip-Pruefung (`FFWorkspaceGPU::shouldSkipDc6dcn()` in `cuda/ff_workspace_gpu.h`, hat keinen Aufrufer; ROCm fuehrt sie mit `CURCUMA_ROCM_LEAN_STEP=0` noch aus).
 - `main.cpp` führt `modern_optimizer` noch in der Liste der Scope-Module; das Modul existiert nicht mehr.
 - `src/helpers/`: `imagewrite.cpp`, `storage_bench.cpp`, `polymer_topo.cpp`, `gfnff_term_validator.cpp` ohne CMake-Target (eigenständige `main()`-Programme).
+- PARAM `gfnff.accuracy` (loose|normal|medium|high) bleibt: kein Leser bis jetzt, soll mit den Genauigkeitsprofilen (Eintrag oben) eine Bedeutung bekommen. Nicht entfernen; der Hilfetext sagt bis dahin "no effect".
 
 ## 8. Aus der alten Liste entfernt (überholt oder erledigt)
 
@@ -175,3 +274,6 @@ Offen, Aufrufer vor dem Löschen erneut suchen:
 | Optimierer: Liniensuchfehlschlag als Konvergenz, Abbruch ohne Struktur, SCF-Unsinn als Ergebnis | behoben 2026-09-27 |
 | Hessian: SCF-Schwelle erreicht die Worker nicht | behoben 2026-09-29 |
 | Cholesky-Faktor-Cache in der MD nicht exakt | Cache standardmäßig aus (`eeq_refactor_eps_bohr` 0), Betreiber-Prüfung offen (Abschnitt 4) |
+- **Generierte Struktur-Tests ausbauen** (2026-10-25, [docs/STRUCTURE_TESTS.md](docs/STRUCTURE_TESTS.md)): (a) Ladung/Spin fuer 57 von 80 Strukturen im Manifest bestaetigen (Vorschlagsliste `assumed_neutral_closed_shell` in `struct_test_policy.json`); (b) Groessenkonsistenz bei Clustern, Strukturen ueber 12 Atome, geladene/offene Systeme; (c) alte Ausgabetext-Tests der `cli_*`-Gruppe einordnen und ersetzen.
+- **GFN-FF Inversionsterm: Knick bei C3v-Ammoniak** (Known Issue #42): Ursache und Referenzverhalten (pprcht, xtb) offen; Test `structinv_ammonia_ideal_c3v_gfnff` traegt eine Ausnahme.
+

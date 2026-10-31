@@ -90,6 +90,9 @@ public:
      */
     void start() override;
 
+    /// Claude Generated (Oct 2026): empty if the last start() produced a polymer, else the reason (main.cpp turns it into exit status 1)
+    std::string error() const { return m_error; }
+
     /**
      * @brief Print help for polymer build options
      */
@@ -474,12 +477,18 @@ private:
 
     ConfigManager m_config;
     bool m_silent;
+    int m_formal_charge = 0; // sum of the fragment charges of the sequence
+    std::map<std::string, int> m_fragment_charge;
+    int fragmentCharge(const std::string& name);
+    void finishOutput(Molecule& polymer, const std::vector<int>& atom_monomer_id, const std::vector<SequenceEntry>& sequence);
+    std::string m_error; // set by every failure path of start(); cleared at its beginning
     std::map<std::string, std::string> m_fragments;
     std::map<std::string, FragmentTopologyTemplate> m_fragment_templates;  ///< Claude Generated: Cached topology templates by fragment name
     mutable std::map<std::string, Vector> m_fragment_cn_templates;         ///< Claude Generated 2026: Cached GFN-FF CN per fragment (Xx→H)
 
     // vvvvvvvvvvvv PARAMETER DEFINITION BLOCK vvvvvvvvvvvv
     BEGIN_PARAMETER_DEFINITION(polymerbuild)
+    MODULE_INFO("Build polymer chains from monomer fragments.", "Assembly", {"polymerbuild"})
 
     // Sequence options
     PARAM(sequence, String, "", "Polymer sequence string (e.g., (A)10-B-(C)5)", "Assembly", { "seq" })
@@ -487,6 +496,7 @@ private:
     PARAM(cap, String, "H", "Capping element for all chain ends (H, F, Cl, none) — overridden per end by cap_start/cap_end", "Assembly", { "c" })
     PARAM(cap_start, String, "", "Override cap for the chain start (defaults to cap)", "Assembly", {})
     PARAM(cap_end, String, "", "Override cap for the chain end (defaults to cap)", "Assembly", {})
+    PARAM(charge_model, String, "none", "Write atomic partial charges next to the result with this model (none, gfnff, gfn1, gfn2); the formal charge is the sum of the fragment charges (Charge = N in the XYZ comment)", "Output", {})
     PARAM(cap_intermediate, String, "H", "Element substituted for Xx during intermediate FF optimization (default H; use I or F for stronger LJ repulsion at chain ends)", "Refinement", { "ci" })
 
     // Optimization options
@@ -500,6 +510,7 @@ private:
     // LM placement hardening — Claude Generated 2026
     PARAM(lm_k_bond, Double, 100000.0, "Bond-length constraint weight for fragment placement LM", "Refinement", {})
     PARAM(lm_bond_tolerance, Double, 0.1, "Warn if LM bond length exceeds target by more than this (Å)", "Refinement", {})
+    PARAM(lm_multistart, Int, 8, "Extra LM starts (fragment spun about the new bond) if the placement stays overstretched after the retry (0=off)", "Refinement", {})
     PARAM(lm_retry_on_stretch, Bool, true, "Retry LM with alternative initial guess when bond is overstretched", "Refinement", {})
     PARAM(lm_contract_bond, Bool, false, "Contract overstretched LM bond by sliding fragment along anchor axis before assembly", "Refinement", {})
 

@@ -41,3 +41,31 @@
 #define BEGIN_PARAMETER_DEFINITION(module)
 #define PARAM(name, type, default_value, help_text, category, ...) // Variadic to support multiple aliases
 #define END_PARAMETER_DEFINITION
+
+// Claude Generated 2026 - Optional trailing annotation on PARAM, and module
+// metadata. Both are additive: every existing PARAM line keeps working untouched,
+// and a module without MODULE_INFO simply has no description.
+//
+//   MODULE_INFO("what this module configures", "Category", {"cli", "verbs"})
+//
+// The CLI verb a module serves was recorded nowhere. Only ten of the thirty-six
+// commands share a name with their module -- `md` is `simplemd`, `dock` is
+// `docking` -- so anything generating an interface had to guess.
+//
+// PARAM gains an optional seventh argument: one string of "key=value" pairs
+// separated by ';'. Recognised keys:
+//
+//   tier=primary|advanced|expert   how prominently to offer it (default advanced)
+//   enum=a|b|c                     the permitted values
+//   unit=K                         the unit, which used to live in the help prose
+//   min=0  max=1                   numeric bounds
+//   requires=wall_type!=none       when the parameter matters at all
+//   deprecated                     flag, no value
+//   replaced_by=new_name
+//
+//   PARAM(thermostat, String, "csvr", "Thermostat type.", "Thermostat", {},
+//         "tier=primary; enum=csvr|berendsen|andersen|nosehover|none")
+//
+// New ParamTypes: StringList and Json (their default is written as JSON text),
+// Selection (FragString grammar) and Path.
+#define MODULE_INFO(description, category, ...)

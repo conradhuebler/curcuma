@@ -60,13 +60,20 @@ const json OptJsonPrivate{
 // ============================================================================
 namespace {
     BEGIN_PARAMETER_DEFINITION(opt)
+    MODULE_INFO("Geometry optimisation and single-point energies: optimiser choice, convergence and the energy method.", "Optimisation", {"opt", "sp"})
 
     // Basic
-    PARAM(method, String, "gfnff", "Energy/gradient method. Default gfnff: the fast general-purpose choice (native GFN-FF). gfn2 is the accurate one (native GFN2-xTB, ~100x slower); gfn1, eht, pm3, uff, qmdff also available.", "Basic", {})
-    PARAM(optimizer, String, "auto", "Optimizer algorithm: auto, lbfgspp, lbfgs, diis, rfo, ancopt", "Basic", {})
-    PARAM(threads, Int, 1, "Number of parallel threads", "Basic", {})
-    PARAM(charge, Int, 0, "Total molecular charge", "Basic", { "Charge" })
-    PARAM(spin, Int, 0, "Spin multiplicity", "Basic", { "Spin" })
+    // master's fuller help text, this branch's tier/bounds annotations.
+    PARAM(method, String, "gfnff", "Energy/gradient method. Default gfnff: the fast general-purpose choice (native GFN-FF). gfn2 is the accurate one (native GFN2-xTB, ~100x slower); gfn1, eht, pm3, uff, qmdff also available.", "Basic", {},
+        "tier=primary")
+    PARAM(optimizer, String, "auto", "Optimizer algorithm: auto, lbfgspp, lbfgs, diis, rfo, ancopt", "Basic", {},
+        "tier=primary")
+    PARAM(threads, Int, 1, "Number of parallel threads", "Basic", {},
+        "min=1")
+    PARAM(charge, Int, 0, "Total molecular charge", "Basic", { "Charge" },
+        "tier=primary")
+    PARAM(spin, Int, 0, "Spin multiplicity", "Basic", { "Spin" },
+        "tier=primary")
     PARAM(verbosity, Int, 1, "Output level: 0=silent, 1=table, 2=detailed, 3=debug", "Basic", { "verbose" })
 
     // Convergence
@@ -88,6 +95,8 @@ namespace {
     PARAM(lbfgs_line_search, Int, 3, "Line search type: 1=Armijo, 2=Wolfe, 3=StrongWolfe, 4=Backtracking", "LBFGS", { "lbfgs_lst" })
     PARAM(lbfgs_max_line_search, Int, 20, "Maximum line search iterations", "LBFGS", { "lbfgs_ls_iter" })
     PARAM(lbfgs_min_step, Double, 1e-4, "Minimum step size for line search", "LBFGS", {})
+    PARAM(lbfgs_max_atom_step, Double, -1.0, "L-BFGS (lbfgspp): largest displacement of any single atom in one step, Angstrom. 0 = no limit; negative (default) = auto: 0.2 from lbfgs_atom_step_auto_natoms atoms on, no limit below. Stops the first steps from overshooting stiff bonds in large solvated systems (C=O torn at 5747 atoms). docs/LBFGS_ATOM_STEP_CAP.md", "LBFGS", {})
+    PARAM(lbfgs_atom_step_auto_natoms, Int, 2000, "L-BFGS (lbfgspp): atom count from which the automatic step cap (lbfgs_max_atom_step < 0) applies", "LBFGS", {})
     PARAM(lbfgs_ftol, Double, 1e-4, "Armijo condition parameter (sufficient decrease)", "LBFGS", {})
     PARAM(lbfgs_wolfe, Double, 0.9, "Wolfe condition parameter (curvature)", "LBFGS", {})
     PARAM(lbfgs_eps_abs, Double, 1e-5, "L-BFGS gradient convergence epsilon (absolute)", "LBFGS", {})

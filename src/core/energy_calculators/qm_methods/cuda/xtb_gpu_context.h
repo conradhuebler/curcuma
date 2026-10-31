@@ -19,6 +19,7 @@
 
 #ifdef USE_CUDA
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -330,7 +331,11 @@ public:
     bool computeGradient(const double* P, const double* C, const double* eps,
                          int nocc_orbs, const double* v_ao, const double* q_sh,
                          const double* v_dp, const double* v_qp,
-                         double* grad_out, double* dEdcn_out, bool pc_resident = false);
+                         double* grad_out, double* dEdcn_out, bool pc_resident = false,
+                         bool resident_potentials = false);
+    /// Build v_ao (and for GFN2 v_dp / v_qp) at the converged charges of the resident loop on the device; the next
+    /// computeGradient(..., resident_potentials = true) uses them (Claude Generated, Oct 2026).
+    bool convergedPotentials(bool gfn2);
 
     /// Allocate the resident SCF work buffers (C/P/Cw/eps/occ/pop + cuSOLVER
     /// dsyevd workspace) sized to the basis nao, and mark the device-computed
@@ -397,6 +402,47 @@ public:
     /// GpuScfBackend docs in xtb_native.h). Claude Generated (Sep 2026).
     bool dispersionGradient(int nat, const double* W, const double* dWq, const double* dWc,
                             double* e_atom_out, double* grad_out, double* dEdcn_out, double* dEdq_out);
+    /**
+     * Whole post-SCF D4 of GFN2 on the device (Claude Generated, Oct 2026): weights W/dWq/dWc from the converged
+     * charges, 2-body energy and gradient, the ATM three-body term (q = 0 weights, C6 matrices, neighbour list and
+     * kernel), and the dE/dCN fold with the EN-weighted covalent CN. Needs beginDispersion + beginDispersionWeights
+     * of the same geometry. energy_out = E_2body + E_ATM (Eh), grad_out [3 nat] Eh/Bohr including the CN fold,
+     * dEdq_out [nat] = dE_2body/dq. rad/en/kn/k4/k5/k6: tables of d4_ncoord. False = the caller uses the host flow.
+     */
+    /**
+     * GFN1 D3(BJ) dispersion on the device (Claude Generated, Oct 2026): D3 CN, Gaussian weights, two-body
+     * energy / direct gradient / dE/dCN and the CN chain rule (D3ParameterGenerator::buildDeviceTables supplies
+     * the element-pair tables). xyz_ang in Angstrom. energy_out in Eh; grad_out [3 nat] in Eh/Bohr (CN fold
+     * included, only written when need_gradient). bohr_per_ang is the factor of getEnergyAndGradient, fold_unit
+     * the `au` of the host fold. False = the caller uses the host D3.
+     */
+    /**
+     * The host O(nat^2) tail of the GPU gradient on the device (Claude Generated, Oct 2026): for GFN2 (with_mp) the
+     * direct multipole interaction gradient and the dE/dr_mp -> dE/dCN conversion through the damping radius,
+     * then the CN chain rule of dEdcn (plus that conversion) into the Cartesian gradient. xyz in Bohr, dEdcn [nat]
+     * as the host holds it before section 5, rcov_au the D3 covalent radii in Bohr. dp_at is [k + 3 atom],
+     * qp_at [k + 6 atom]. grad_out [3 nat] Eh/Bohr is the sum of both sections, to be added to the gradient.
+     */
+    bool gradientTailDevice(int nat, bool is_gfn2, bool with_mp, const double* xyz_bohr, const double* dEdcn,
+                            const double* rcov_au, const double* q_at, const double* dp_at, const double* qp_at,
+                            const double* mrad, const double* cn, const double* rad, const double* vcn,
+                            double dmp3, double dmp5, double shift, double kexp, double rmax, double* grad_out);
+    /// EN-weighted covalent CN of dftd4 on the device (Claude Generated, Oct 2026); same tables and constants as
+    /// curcuma::dispersion::computeD4CovalentCN, cutoff in Bohr, cn_out [nat].
+    bool d4CovalentCnDevice(int nat, const int* Z, const double* xyz_bohr, const double* rad, const double* en,
+                            double kn, double k4, double k5, double k6, double cutoff, double* cn_out);
+    /// xTB repulsion energy on the device (Claude Generated, Oct 2026); alpha / zeff are the per-atom parameters.
+    bool repulsionEnergyDevice(int nat, bool is_gfn2, const int* z, const double* xyz_bohr, const double* alpha,
+                               const double* zeff, double kexp, double rexp, double kexp_light, double* energy_out);
+    bool d3DispersionDevice(int nat, const int* Z, const double* xyz_ang, int nt, const int* atom_type,
+                            const double* c6tab, const double* r6tab, const int* nref_tab,
+                            const double* refcn_tab, const double* rcov_ang, int nrcov,
+                            double s6, double s8, double a1, double a2, double k1, double k2,
+                            double cn_cut_ang, double bohr_per_ang, double fold_unit,
+                            bool need_gradient, double* energy_out, double* grad_out);
+    bool d4PostScfDevice(int nat, const double* q_at, bool with_atm, double s9, double a1, double a2, double alp,
+                         double atm_cutoff, double cn_cutoff, const double* rad, const double* en, double kn,
+                         double k4, double k5, double k6, double* energy_out, double* grad_out, double* dEdq_out);
     bool dispersionATM(int nat, const double* c6, const double* dc6dcn,
                        double s9, double a1, double a2, double alp, double cutoff,
                        double* e_atom_out, double* grad_out, double* dEdcn_out);
@@ -416,6 +462,10 @@ public:
     /// Same as beginPotential, but without the 18 nat² interaction matrices: the device
     /// rebuilds their elements per iteration from the geometry (Bohr) and the damping radii.
     /// Claude Generated (Sep 2026, large systems).
+    /// Same state as beginPotential(), but the stored interaction matrices are built on the device from the
+    /// geometry and the damping radii (Claude Generated, Oct 2026): no 18 nat^2 doubles on the host or over the bus.
+    bool beginPotentialStored(int nat, int nsh, const double* xyz_bohr, const double* mrad, double dmp3,
+                              double dmp5, const double* dkernel, const double* qkernel, const double* gamma3);
     bool beginPotentialOnTheFly(int nat, int nsh, const double* xyz_bohr, const double* mrad,
                                 double dmp3, double dmp5, const double* dkernel,
                                 const double* qkernel, const double* gamma3);
@@ -487,6 +537,45 @@ public:
     bool broydenBegin(int N, double alpha, int max_hist, double w0);
     bool broydenUpdate(int N, const double* vin, const double* vout, double* vnext);
 
+    /* ----- Broyden seed preconditioner (Claude Generated, Oct 2026) ------ *
+     * -scf_precond frag on the device (docs/SCF_PRECOND.md). M = sum_b R_b^T B_b R_b + C is
+     * block-diagonal on the packed SCC vector: block b covers the indices
+     * idx[idx_off[b] .. idx_off[b+1]) with the row-major matrix B + b_off[b]; C = fallback
+     * (alpha outside every block, 0 inside). With M set, runBroydenUpdate uses M*F instead of
+     * alpha*F in the linear step and the seed, and u = M*dF + dx/|dF| (BroydenMixer step hook).
+     * M*v: one CUDA block per Schwarz block, v gathered into shared memory, one warp per row.
+     * broydenBegin clears the active state, the guard and the fired index; the uploaded blocks
+     * stay resident under their tag, so a later SCF with the same M passes pc = nullptr.
+     *
+     * Guard: while M is active every update computes ||F||_2 (cublasDnrm2, one scalar to the
+     * host) and calls guard(n, ||F||, &store_best) with the update index n since broydenBegin.
+     * store_best: x_n and F_n are copied into device buffers. A true return drops M like
+     * BroydenMixer::dropStepHook(keep) - keep: u_k += alpha*dF_k - M*dF_k, otherwise the history
+     * is reset - and with best the update continues from x_best with F_best. No evaluation of the
+     * SCC map. An empty guard means no guard. */
+    struct BroydenPrecond {
+        int N = 0, nblocks = 0, max_dim = 0;
+        const int* idx_off = nullptr;   ///< nblocks + 1
+        const int* idx = nullptr;
+        const int* b_off = nullptr;     ///< nblocks + 1
+        const double* B = nullptr;
+        const double* fallback = nullptr;  ///< N
+    };
+    using BroydenGuard = std::function<bool(int n, double fnorm, bool* store_best)>;
+    /// Activate M for the current SCF (after broydenBegin). pc = nullptr reuses the resident upload,
+    /// which must carry @p tag. False (M stays off, last error set) on a size mismatch, a block
+    /// larger than the shared-memory limit, or a failed upload.
+    bool broydenSetPreconditioner(const BroydenPrecond* pc, unsigned long long tag,
+                                  BroydenGuard guard, bool keep, bool best);
+    /// Tag of the resident M upload (0 = none).
+    unsigned long long broydenPreconditionerTag() const;
+    /// True while M is applied (set and not dropped by the guard).
+    bool broydenPreconditionerActive() const;
+    /// Update index at which the guard dropped M in this SCF, -1 = not fired.
+    int broydenGuardFiredAt() const;
+    /// True if a multi-GPU eigensolver or density split would engage for @p nao basis functions.
+    bool multiGpuScfSplit(int nao) const;
+
     /* ----- Stage 6 (S6.5): fully device-resident GFN2 SCF loop ----------- *
      * beginResidentLoop uploads the initial SCC guess (q_sh/dp_at/qp_at), the
      * EEQ-guess q_at, and the reference shell/atom occupations once, and sets up
@@ -502,6 +591,16 @@ public:
                            const double* qp_at0, const double* q_at0,
                            const double* n0_sh, const double* n0_at,
                            double alpha, int max_hist, double w0);
+    /** Open shell on the resident loop: two Fermi fillings (n_alpha, n_beta), summed. Call after
+     *  beginResidentLoop (which resets it to the closed-shell filling). Claude Generated (Oct 2026). */
+    /** GFN1 on the resident loop (Claude Generated, Oct 2026): shell charges only, v_sh = gamma q_sh,
+     *  v_at = Gamma_A q_A^2 (atom-resolved third order, gamma3_at = Gamma_A per atom), no D4 weights, no
+     *  multipoles. residentScfStep / residentLoopCharges are shared with GFN2 (dp/qp are not touched). */
+    bool beginResidentLoopGfn1(int nsh, int nat, int nao, double Tele, double n_elec, int nocc_pairs,
+                               const double* q_sh0, const double* q_at0, const double* n0_sh,
+                               const double* n0_at, const double* gamma3_at,
+                               double alpha, int max_hist, double w0);
+    bool setResidentOpenShell(double n_alpha, double n_beta);
     bool residentScfStep(bool fp32, double* dq_out, double* e_band, double* e_coulomb,
                          double* e_third, double* e_multipole);
     bool residentLoopCharges(double* q_sh, double* q_at, double* dp_at, double* qp_at,
@@ -531,6 +630,10 @@ private:
     /// Device-pointer Broyden update core (S6.4); shared by broydenUpdate (test
     /// upload/download) and the fused resident loop. Queues all work on the stream.
     bool runBroydenUpdate(const double* dvin, const double* dvout, double* dvnext);
+    /// dst = M*src on the device (dst must not alias src). Claude Generated (Oct 2026).
+    bool applyBroydenPreconditioner(const double* src, double* dst);
+    /// Guard hit: drop M, rewrite (keep) or reset the history. Claude Generated (Oct 2026).
+    bool dropBroydenPreconditioner(bool keep);
 
     /// Reduce the resident Fock in dC to standard form with the cached L, solve
     /// it and back-transform → generalized eigenvectors in dC, ascending
@@ -554,6 +657,11 @@ private:
     /// resident step.
     bool buildDevicePotentialAndSolve(int n, bool fp32, int n_eig, double* eps_out,
                                       bool download_eps);
+    bool buildDevicePotentialOnly(int n);       ///< the potential half of the above (Oct 2026)
+    bool buildDevicePotentialOnlyGfn1(int n);
+    /// GFN1 counterpart (shell gamma + atom-resolved third order, no D4/multipole).
+    bool buildDevicePotentialAndSolveGfn1(int n, bool fp32, int n_eig, double* eps_out,
+                                          bool download_eps);
     /// Stage 6: density + Mulliken-AO from the RESIDENT occupations (dOcc), keeping
     /// the populations resident (no pop_ao download). band_out = Σ P⊙H0.
     bool residentDensityResident(int n, int ncol, double* band_out);

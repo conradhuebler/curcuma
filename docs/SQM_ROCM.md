@@ -32,7 +32,7 @@ independently).
 
 ```
 ./curcuma -sp mol.xyz -method gfn2 -gpu rocm    # explicit ROCm
-./curcuma -sp mol.xyz -method gfn1 -gpu auto    # GPU if a backend is compiled
+./curcuma -sp mol.xyz -method gfn1 -gpu rocm    # GPU
 ./curcuma -sp mol.xyz -method gfn2              # CPU (default)
 ```
 
@@ -199,6 +199,10 @@ Separate from the native xTB ROCm path above; mirrors the CUDA GFN-FF GPU pipeli
 - **Build**: `cmake -DUSE_ROCM=ON -DUSE_D4=OFF -DUSE_D3=OFF
   -DROCM_GPU_ARCH=gfx1150 -DCMAKE_PREFIX_PATH=/opt/rocm` (a dedicated `release_rocm/` dir, not
   the canonical CPU `release/`). Needs `rocsolver` + `rocblas`.
+  `ROCM_GPU_ARCH` may be a list (`-DROCM_GPU_ARCH="gfx1100;gfx1150;gfx1200"`), one code object per entry; only RDNA
+  (gfx10/11/12) is accepted, other families fail at configure time. At plugin load every visible device is checked
+  against the built list (`CURCUMA_ROCM_BUILT_ARCHS`, `gpu_plugin_entry_rocm.cpp`); a mismatch warns and falls back to
+  the CPU instead of aborting in `hip::StatCO::getStatFunc`. Not run on a card here: the check is compiled in CI only.
 - **Device code** (`ff_methods/rocm/`): `gfnff_rocm.hip` is a **single** hipcc TU (the
   single-TU rule avoids cross-TU device linking so the final g++ link stays libgomp-safe, same
   reason as `xtb_hip_context.hip`). It bundles the hipified kernels (`gfnff_kernels_hip.h`),
@@ -225,7 +229,7 @@ Separate from the native xTB ROCm path above; mirrors the CUDA GFN-FF GPU pipeli
   RDNA. Both were rewritten as **per-atom GATHER** kernels (`k_coulomb_gather` / `k_dispersion_gather`,
   built from a per-atom CSR adjacency; the dynamic dc6dcn stays pair-indexed and is read via a
   CSR pair-index + is_i flag → no per-step rebuild; Coulomb additionally has a dense, coalesced,
-  shared-mem-tiled `k_coulomb_dense` that recomputes gamma from the per-atom EEQ alpha). Each atom
+  shared-mem-tiled `k_coulomb_dense` (replaced by the each-pair-once `k_coulomb_tiles_hip` on Oct 13, 2026) that recomputes gamma from the per-atom EEQ alpha). Each atom
   accumulates locally and writes grad with 3 (+1 for dEdcn) atomicAdd, bit-identical to the pair
   kernels. Result on polymer/1410: phase-2 (Coulomb+Disp+DMA) **122 → 15 ms**, full energy+gradient
   eval **~150 → ~26 ms**, and the **MD went from slower-than-CPU to ~2.3× faster** (30 fs:

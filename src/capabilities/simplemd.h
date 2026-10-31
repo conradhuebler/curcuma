@@ -20,6 +20,10 @@
 
 #pragma once
 
+#include "external_potentials.h"
+
+#include <mutex>
+
 #include <chrono>
 #include <deque>
 #include <ctime>
@@ -33,6 +37,8 @@
 #endif
 
 #include "src/capabilities/md_diagnostics.h"
+
+class GFNFF;   // Claude Generated (Oct 2026): hydrogen-bond log, defined in gfnff.h
 #include "src/capabilities/rmsd.h"
 #include "src/capabilities/rmsdtraj.h"
 
@@ -202,7 +208,11 @@ enum class WallGeometry {
 // Claude Generated 2025: Type-safe wall potential
 enum class WallPotentialType {
     LogFermi,
-    Harmonic
+    Harmonic,
+    /// Claude Generated (Sep 2026): no potential at all — a molecule that leaves
+    /// the container is translated back in on the opposite side, so the container
+    /// keeps its content without doing work on it. See wrapIntoContainer().
+    Periodic
 };
 
 class SimpleMD : public CurcumaMethod {
@@ -245,8 +255,33 @@ public:
 
     /** Execute one MD step (position+velocity update, thermostat, rattle, output
      *  for the current step counter). Returns false when the simulation should
-     *  terminate (m_unstable, maxtime reached, CheckStop()). */
+     *  terminate; stopReason() then says why. */
     bool step();
+
+    /**
+     * @brief Why step() last returned false (Claude Generated Sep 2026).
+     *
+     * A driver that runs the loop itself (the qurcuma GUI) cannot see curcuma's
+     * console output, and every abort message is gated behind verbosity >= 1
+     * while the normal end-of-time exit prints nothing at all. Without this a
+     * finished run and a run that fell apart look identical to the caller.
+     */
+    enum class StopReason {
+        Running,     ///< step() has not returned false yet
+        NotPrepared, ///< prepareRun() was not called, or the run was already torn down
+        MaxTime,     ///< the configured simulation time is reached — the normal end
+        StopFile,    ///< a file named "stop" appeared in the working directory
+        Unstable,    ///< NaN/Inf in gradient, velocities or energy
+        EpotAbort,   ///< epot_abort: the mean potential energy left its window
+        TempAbort,   ///< temp_abort: the mean temperature ran away from the target
+        TopoCheck    ///< topo_check: the molecule broke into more fragments than it started with
+    };
+
+    /// Why the run ended. Meaningful once step() has returned false.
+    StopReason stopReason() const { return m_stop_reason; }
+
+    /// One plain sentence for stopReason(), for a driver that reports to a user.
+    std::string stopReasonText() const;
 
     /** Final printout, final trajectory frame, plumed/metadynamics finalize,
      *  curcuma_final.json. Automatically invoked at end of start(). */
@@ -258,10 +293,56 @@ public:
      *  Hartree/Bohr (same units as m_eigen_gradient). */
     void applyExternalForces(const Geometry& forces);
 
+    /**
+     * @brief Replace the configured external potentials while the run is going.
+     *
+     * @p list has the shape of the `external_potentials` parameter. Applied before
+     * the next step, like the thermostat setpoint and the wall parameters, so an
+     * agent can adjust a pull and watch the response. Accumulated work starts over
+     * with the new set: it belongs to the potential that did it.
+     *
+     * Returns false and fills @p error when the list does not parse; the previous
+     * set then stays in force. Thread-safe. Claude Generated 2026.
+     */
+    bool setExternalPotentials(const json& list, std::string* error = nullptr);
+
+    /** @brief The configured potentials, their settings and the work they did. */
+    json externalPotentials() const;
+
+    /** @brief Total work the external potentials have done, in Eh. Cheap enough to
+     *  ask for every frame, unlike externalPotentials(). Claude Generated 2026. */
+    double externalWork() const;
+
     // Getters for stepwise GUI feedback
     const Geometry& positions() const { return m_eigen_geometry; }
     const Geometry& velocities() const { return m_eigen_velocities; }
     const Geometry& gradient() const { return m_eigen_gradient; }
+    /// Claude Generated 2026 - Where the run got to. Pure; the trajectory and
+    /// restart files are written by the run itself, not by asking for this.
+    ///
+    /// Note for whoever merges the reactff2 line: stopReason() lives there and
+    /// belongs in here as "stop_reason". It is left out rather than guessed,
+    /// because a run that ended badly reporting nothing is better than one
+    /// reporting a reason it does not have.
+    json Results() const override;
+
+    /**
+     * @brief Volume of the confinement container in Angstrom^3, 0 when there is
+     * none or when curcuma sizes it at run time (all bounds still zero).
+     *
+     * Claude Generated 2026 - the run knows its own box; a caller that wants a
+     * density should not have to reconstruct it from the controller.
+     */
+    double containerVolume() const;
+
+    /**
+     * @brief Density of the contents of the container in g/cm^3, 0 without a
+     * sized container. In a fixed box with a fixed number of molecules this does
+     * not change during the run: its use is checking a packing, not following one.
+     * Claude Generated 2026.
+     */
+    double density() const;
+
     double potentialEnergy() const { return m_Epot; }
     double kineticEnergy() const { return m_Ekin; }
     double currentTemperature() const { return m_T; }
@@ -345,6 +426,34 @@ private:
 
     bool WriteGeometry();
     void applyPeriodicBoundaryConditions();  // Claude Generated (Oct 2025): PBC wrapping
+
+    /**
+     * @brief Re-enter molecules that left the wall container on the opposite side.
+     *
+     * Claude Generated (Sep 2026). Active only for wall_potential = pbc; a no-op
+     * otherwise. Unlike the harmonic and logfermi walls this exerts NO force and
+     * therefore adds no energy: a confining potential has to push a hot atom back,
+     * which heats the system (and, at the harmonic default, is too soft to hold it
+     * at all), whereas wrapping only relocates it.
+     *
+     * Whole fragments are moved by one common vector, never single atoms: tearing a
+     * molecule across the boundary would stretch its bonds to container size, which
+     * the force field would read as a dissociation (and the reactive topology scan
+     * would then actually break the bond).
+     *
+     * A rectangular container wraps per axis, the way a periodic cell does. A sphere
+     * cannot tile space, so a fragment leaving at r is placed at the antipodal point
+     * the same distance inside the boundary; that is a container rule, not a lattice.
+     *
+     * INCOMPLETE, and knowingly so: the GFN-FF energy has no minimum-image
+     * convention, so a wrapped fragment does not continue its interactions across
+     * the boundary and its destination can be genuinely occupied (measured: a wrap
+     * to 0.024 A, NaN one step later). Until the non-bonded terms are periodic this
+     * refuses a wrap into occupied space and reflects the fragment elastically
+     * instead. Contained and free of heating, but not periodic. The real fix is
+     * docs/WP-PERIODIC-NONBONDED.md.
+     */
+    void wrapIntoContainer();
     /*! \brief Claude Generated (Sep 2026): run one integration step, with optional step
      *  rejection (adaptive_step). Without it this is a plain call to Integrator(). */
     void IntegratorStep();
@@ -408,6 +517,8 @@ private:
     void StepRamp(RampState& rs, double& T0, double measuredT);  ///< advance one schedule by one step
     void UpdateTemperatureRamp();                                ///< drive global + region setpoints (called each step)
     void ParseThermalRegions();                                  ///< read temp_regions specs from the controller
+    void ParseExternalPotentials();                              ///< read external_potentials from the controller
+    void ApplyExternalPotentials();                              ///< add their energy and gradient, and advance the work
     void ResolveThermalRegions();                                ///< resolve atom indices + default complement (needs molecule)
     double RegionTemperature(const std::vector<int>& atoms, int dof) const;  ///< instantaneous T of an atom subset
     void ApplyThermostat();
@@ -524,8 +635,20 @@ private:
     // Stepwise-API state (Claude Generated 2026)
     Geometry m_external_forces;          // additive per-atom force contribution, cleared after use
     bool m_external_forces_pending = false;
+
+    // Claude Generated 2026 - Configured external potentials: unlike the injection
+    // above they persist, they are described by the controller, and they carry the
+    // work they have done. Guarded because a caller changes them mid-run.
+    std::vector<curcuma::ExternalPotential> m_external_potentials;
+    std::vector<curcuma::ExternalPotential> m_pending_external_potentials;
+    bool m_pending_external_potentials_valid = false;
+    mutable std::mutex m_external_potential_mutex;
+    Geometry m_previous_geometry;        // for the work integral over one step
+    double m_external_potential_energy = 0.0;
     bool m_run_prepared = false;         // true after prepareRun(), false after finalizeRun()
     bool m_run_aborted = false;          // mirrors former local `aborted` flag in start()
+    bool m_wall_wrap = false;            ///< wall_potential=pbc: wrap instead of push (wrapIntoContainer)
+    StopReason m_stop_reason = StopReason::Running;  ///< see stopReason()
     std::vector<json> m_run_states;      // rescue states carried across step() calls
     json m_last_dump_state;              // K6 (Oct 2026): state of the last WriteGeometry() dump, -rescue only
 
@@ -692,6 +815,16 @@ private:
     bool m_md_diagnostics = false;
     std::unique_ptr<MDDiagnosticsWriter> m_diag_writer;
 
+    // Claude Generated (Oct 2026): hydrogen-bond log (hb_log_frequency > 0 only)
+    int m_hb_log_frequency = 0;
+    double m_hb_log_limit_kj = 0.0;
+    std::vector<int> m_hb_log_a, m_hb_log_b;
+    std::ofstream m_hb_log_file;
+    GFNFF* m_hb_log_gfnff = nullptr;
+    bool m_hb_log_warned_empty = false;
+    void SetupHydrogenBondLog();
+    void LogHydrogenBonds();
+
     // WP-P1 (May 2026): per-phase wall-clock breakdown for diagnostics
     bool m_md_diagnostics_timing = false;
     double m_last_ff_ms = 0.0;     ///< wall-clock of last m_interface->CalculateEnergy()
@@ -713,13 +846,18 @@ private:
      * different velocities without any extra bookkeeping (the search's diversity comes from the
      * structures, not from the velocity draw). */
     std::mt19937 m_rng;
+    /// Claude Generated (Oct 31, 2026): CSVR distributions per instance (were function-local statics shared by
+    /// all instances: normal_distribution caches its second value, so concurrent MD runs consumed a common
+    /// state and same-seed runs diverged). Same member names as on feature/nebmd-path-sampling.
+    std::normal_distribution<double> m_csvr_norm{ 0.0, 1.0 };
+    std::chi_squared_distribution<float> m_csvr_chi{ 1.0f };
+    int m_csvr_last_dof = -1;
     int m_time_step = 0;
     int m_dof = 0;
     int m_mtd_time = 0, m_loop_time = 0;
     // Claude Generated (Jul 2026): RMSD-MTD screen accounting (Kabsch fits done vs skipped over the run).
     long long m_bias_hills_evaluated = 0, m_bias_hills_screened = 0;
 
-    std::vector<std::vector<double>> m_atom_temp;
     std::vector<double> m_zeta; // Thermostatische Variablen
     std::vector<double> m_xi; // Zeitderivate von zeta
     std::vector<double> m_Q; // Trägheiten der Thermostatkette
@@ -754,30 +892,47 @@ private:
     // vvvvvvvvvvvv PARAMETER DEFINITION BLOCK vvvvvvvvvvvv
     // Claude Generated - Parameter Registry Integration (October 2025)
     BEGIN_PARAMETER_DEFINITION(simplemd)
+    MODULE_INFO("Molecular dynamics: integrator, thermostat, constraints, walls and bias potentials.", "Dynamics", {"md"})
 
     // --- Basic Simulation Parameters ---
-    PARAM(method, String, "gfnff", "Energy calculation method. Default gfnff: the fast choice for MD and conformer sampling. gfn2 is the more accurate one (semi-empirical QM, ~100x slower); uff/qmdff remain available.", "Basic", {})
-    PARAM(temperature, Double, 298.15, "Target temperature in Kelvin.", "Basic", {"T"})
-    PARAM(initial_temperature, Double, -1.0, "Initial temperature for velocity sampling (K). -1: same as 'temperature'. Use this to anneal into the target or to start cold/warm; the thermostat still drives toward 'temperature'. Ignored on restart (velocities come from the restart file).", "Basic", {"T_init", "T0", "initT"})
-    PARAM(time_step, Double, 1.0, "Integration time step in femtoseconds.", "Basic", {"dt"})
-    PARAM(max_time, Double, 1000.0, "Maximum simulation time in femtoseconds.", "Basic", {"MaxTime"})
-    PARAM(charge, Int, 0, "Total charge of the system.", "Basic", {})
-    PARAM(spin, Int, 0, "Total spin multiplicity of the system (0=singlet, 1=doublet).", "Basic", {"Spin"})
+    // master's texts and its gfnff default, this branch's tier/unit/bound
+    // annotations. The default matters: master moved every capability to gfnff.
+    PARAM(method, String, "gfnff", "Energy calculation method. Default gfnff: the fast choice for MD and conformer sampling. gfn2 is the more accurate one (semi-empirical QM, ~100x slower); uff/qmdff remain available.", "Basic", {},
+        "tier=primary")
+    PARAM(temperature, Double, 298.15, "Target temperature in Kelvin.", "Basic", {"T"},
+        "tier=primary; unit=K; min=0")
+    PARAM(initial_temperature, Double, -1.0, "Initial temperature for velocity sampling (K). -1: same as 'temperature'. Use this to anneal into the target or to start cold/warm; the thermostat still drives toward 'temperature'. Ignored on restart (velocities come from the restart file).", "Basic", {"T_init", "T0", "initT"},
+        "unit=K")
+    PARAM(time_step, Double, 1.0, "Integration time step in femtoseconds.", "Basic", {"dt"},
+        "tier=primary; unit=fs; min=0")
+    PARAM(max_time, Double, 1000.0, "Maximum simulation time in femtoseconds.", "Basic", {"MaxTime"},
+        "tier=primary; unit=fs; min=0")
+    PARAM(charge, Int, 0, "Total charge of the system.", "Basic", {},
+        "tier=primary")
+    PARAM(spin, Int, 0, "Total spin multiplicity of the system (0=singlet, 1=doublet).", "Basic", {"Spin"},
+        "tier=primary")
     PARAM(seed, Int, -1, "Random seed (-1: time, 0: auto).", "Basic", {})
-    PARAM(threads, Int, 1, "Number of parallel threads.", "Basic", {})
+    PARAM(threads, Int, 1, "Number of parallel threads.", "Basic", {},
+        "min=1")
 
     // --- Thermostat ---
-    PARAM(thermostat, String, "csvr", "Thermostat type: berendsen|andersen|nosehover|csvr|none.", "Thermostat", {})
-    PARAM(coupling, Double, 10.0, "Thermostat coupling time in fs.", "Thermostat", {})
-    PARAM(andersen_probability, Double, 0.001, "Andersen thermostat collision probability.", "Thermostat", {})
-    PARAM(chain_length, Int, 3, "Chain length for Nosé-Hoover thermostat.", "Thermostat", {"chainlength"})
+    PARAM(thermostat, String, "csvr", "Thermostat type.", "Thermostat", {},
+        "tier=primary; enum=csvr|berendsen|andersen|nosehover|none")
+    PARAM(coupling, Double, 10.0, "Thermostat coupling time in fs.", "Thermostat", {},
+        "unit=fs; min=0")
+    PARAM(andersen_probability, Double, 0.001, "Andersen thermostat collision probability.", "Thermostat", {},
+        "min=0; max=1")
+    PARAM(chain_length, Int, 3, "Chain length for Nosé-Hoover thermostat.", "Thermostat", {"chainlength"},
+        "min=1")
 
     // --- System Control ---
-    PARAM(remove_com_motion, Double, 100.0, "Remove translation/rotation every N fs.", "System", {"rm_COM"})
+    PARAM(remove_com_motion, Double, 100.0, "Remove translation/rotation every N fs.", "System", {"rm_COM"},
+        "unit=fs")
     PARAM(remove_com_mode, Int, 1, "Removal mode (0:none, 1:trans only, 2:rot only, 3:both). Rotation removal is opt-in (use 2 or 3).", "System", {"rmrottrans"})
     PARAM(no_center, Bool, false, "Disable centering of the molecule at the origin.", "System", {"nocenter"})
     PARAM(use_com, Bool, false, "Use center of mass (otherwise geometric center).", "System", {"COM"})
-    PARAM(hydrogen_mass, Int, 1, "Hydrogen mass scaling factor for HMR.", "System", {"hmass"})
+    PARAM(hydrogen_mass, Int, 1, "Hydrogen mass scaling factor for HMR.", "System", {"hmass"},
+        "min=1")
 
     // --- Adaptive step (Claude Generated, Sep 2026) ---
     PARAM(adaptive_step, Bool, false, "Repeat an integration step with a subdivided time step when it violates energy conservation. Standard step rejection: neither a constraint nor a mass modification, the trajectory stays the same physics. Off by default.", "Algorithm", {})
@@ -801,7 +956,7 @@ private:
     PARAM(no_restart, Bool, false, "Disable automatic loading from restart files.", "Restart", {"norestart"})
 
     // --- RATTLE Constraints ---
-    PARAM(rattle, Int, 0, "RATTLE constraint algorithm (0:off, 1:on, 2:H-only).", "RATTLE", {})
+    PARAM(rattle, Int, 0, "RATTLE constraint algorithm (0:off, 1:on, 2:H-only). Not available with gfnff topology_mode=react (constraints are frozen at initialisation).", "RATTLE", {})
     PARAM(rattle_12, Bool, true, "Constrain 1-2 bond distances.", "RATTLE", {})
     PARAM(rattle_13, Bool, false, "Constrain 1-3 distances (angles).", "RATTLE", {})
     PARAM(rattle_tol_12, Double, 1e-4, "Tolerance for 1-2 constraints (squared Bohr).", "RATTLE", {})
@@ -809,17 +964,28 @@ private:
     PARAM(rattle_max_iterations, Int, 100, "Maximum RATTLE iterations.", "RATTLE", {"rattle_maxiter"})
 
     // --- Wall Potentials ---
-    PARAM(wall_type, String, "none", "Wall type: none|spheric|rect.", "Walls", {"wall"})
-    PARAM(wall_potential, String, "harmonic", "Wall potential function: logfermi|harmonic.", "Walls", {})
-    PARAM(wall_radius, Double, 0.0, "Radius for spherical wall (Å). Auto-sized if 0.", "Walls", {"wall_spheric_radius"})
-    PARAM(wall_temp, Double, 298.15, "Wall temperature/strength in K.", "Walls", {})
-    PARAM(wall_beta, Double, 6.0, "Steepness parameter for wall potential.", "Walls", {})
-    PARAM(wall_x_min, Double, 0.0, "Min x-boundary for rectangular wall (Å).", "Walls", {})
-    PARAM(wall_x_max, Double, 0.0, "Max x-boundary for rectangular wall (Å).", "Walls", {})
-    PARAM(wall_y_min, Double, 0.0, "Min y-boundary for rectangular wall (Å).", "Walls", {})
-    PARAM(wall_y_max, Double, 0.0, "Max y-boundary for rectangular wall (Å).", "Walls", {})
-    PARAM(wall_z_min, Double, 0.0, "Min z-boundary for rectangular wall (Å).", "Walls", {})
-    PARAM(wall_z_max, Double, 0.0, "Max z-boundary for rectangular wall (Å).", "Walls", {})
+    PARAM(wall_type, String, "none", "Wall type: none|spheric|rect.", "Walls", {"wall"},
+        "enum=none|spheric|rect")
+    PARAM(wall_potential, String, "harmonic", "Wall behaviour: logfermi|harmonic push escaping atoms back (and do work on them); pbc exerts no force and instead moves a whole molecule that left the container back in on the opposite side. pbc is a container, not a periodic cell: the energy has no minimum image, so interactions are not continued across the boundary and a molecule whose destination is occupied is reflected instead (see docs/WP-PERIODIC-NONBONDED.md).", "Walls", {},
+        "enum=logfermi|harmonic|pbc; requires=wall_type!=none")
+    PARAM(wall_radius, Double, 0.0, "Radius for spherical wall (Å). Auto-sized if 0.", "Walls", {"wall_spheric_radius"},
+        "unit=A; min=0; requires=wall_type=spheric")
+    PARAM(wall_temp, Double, 298.15, "Wall temperature/strength in K.", "Walls", {},
+        "unit=K; min=0; requires=wall_type!=none")
+    PARAM(wall_beta, Double, 6.0, "Steepness parameter for wall potential.", "Walls", {},
+        "min=0; requires=wall_type!=none")
+    PARAM(wall_x_min, Double, 0.0, "Min x-boundary for rectangular wall (Å).", "Walls", {},
+        "unit=A; requires=wall_type=rect")
+    PARAM(wall_x_max, Double, 0.0, "Max x-boundary for rectangular wall (Å).", "Walls", {},
+        "unit=A; requires=wall_type=rect")
+    PARAM(wall_y_min, Double, 0.0, "Min y-boundary for rectangular wall (Å).", "Walls", {},
+        "unit=A; requires=wall_type=rect")
+    PARAM(wall_y_max, Double, 0.0, "Max y-boundary for rectangular wall (Å).", "Walls", {},
+        "unit=A; requires=wall_type=rect")
+    PARAM(wall_z_min, Double, 0.0, "Min z-boundary for rectangular wall (Å).", "Walls", {},
+        "unit=A; requires=wall_type=rect")
+    PARAM(wall_z_max, Double, 0.0, "Max z-boundary for rectangular wall (Å).", "Walls", {},
+        "unit=A; requires=wall_type=rect")
 
     // --- Metadynamics (PLUMED) ---
     PARAM(mtd, Bool, false, "Enable PLUMED metadynamics.", "Metadynamics", {})
@@ -827,25 +993,39 @@ private:
 
     // --- RMSD-based Metadynamics (Internal) ---
     PARAM(rmsd_mtd, Bool, false, "Enable internal RMSD-based metadynamics.", "RMSD-MTD", {})
-    PARAM(rmsd_mtd_k, Double, 0.01, "Hill-height constant: bias height W_i = k * counter_i (Eh). The force is the exact gradient of the bias, so k is ~100x smaller than the pre-2026 value.", "RMSD-MTD", {"k_rmsd"})
+    PARAM(rmsd_mtd_k, Double, 0.01, "Hill-height constant: bias height W_i = k * counter_i (Eh). The force is the exact gradient of the bias, so k is ~100x smaller than the pre-2026 value.", "RMSD-MTD", {"k_rmsd"},
+        "requires=rmsd_mtd")
     PARAM(gyration_bias, Bool, false, "Add a bias on the RADIUS OF GYRATION to the dynamics: E = 1/2 * k * (Rg - Rg0)^2, with the analytic gradient. A second collective variable next to the RMSD bias, and it addresses a gap that variable cannot: the RMSD bias drives AWAY from visited structures but has no preference in compactness, so a search can sit in an extended family indefinitely. Measured on a 107-atom peptide: the deep basin sits at Rg = 4.076 A; of a run that found it, 38 of 2210 structures lie below 4.20, and of a run that did not, 0 of 1513 -- the compact corner was simply never entered. Imposing the same compaction as a STATIC restraint in an optimisation was tried and does not work (0 of 45 restrained builds survive the clash gate: a harmonic restraint between two distant atoms satisfies its distance along the shortest path, which runs through the molecule). During dynamics the molecule folds along a physical trajectory instead, which is why this belongs here and not in the proposal generator. Off by default -- new term, measure before trusting.", "Bias", {})
-    PARAM(gyration_target, Double, -1.0, "Target radius of gyration Rg0 in Angstrom for -gyration_bias. -1 = derive it from the starting structure as 0.95 * Rg(start), i.e. ask for a 5 percent contraction relative to where the run begins. Set an absolute value when a target compactness is known from a reference structure.", "Bias", {})
-    PARAM(gyration_force, Double, 0.1, "Force constant k of the gyration bias in Eh/Angstrom^2. Scale reference: at k = 0.1 a deviation of 0.5 A costs 0.0125 Eh = 33 kJ/mol, which is the order of the conformer spread on a peptide of this size -- strong enough to matter, not strong enough to dominate the force field. The RMSD hills next to it are k_hill * counter with k_hill = 0.01 Eh.", "Bias", {})
-    PARAM(gyration_one_sided, Bool, true, "Act only when Rg EXCEEDS the target, like a wall. The bias then pushes towards compactness and never resists a structure that is already compact enough -- which is the asymmetry the measurement calls for (the missing region is compact, not extended). false = a plain two-sided harmonic that also holds the molecule away from over-collapse.", "Bias", {})
-    PARAM(gyration_heavy_only, Bool, true, "Compute Rg over heavy atoms only. Hydrogens follow their host and add noise without adding a coordinate; the reference numbers this term was designed against are heavy-atom radii.", "Bias", {})
+    PARAM(gyration_target, Double, -1.0, "Target radius of gyration Rg0 in Angstrom for -gyration_bias. -1 = derive it from the starting structure as 0.95 * Rg(start), i.e. ask for a 5 percent contraction relative to where the run begins. Set an absolute value when a target compactness is known from a reference structure.", "Bias", {},
+        "requires=gyration_bias")
+    PARAM(gyration_force, Double, 0.1, "Force constant k of the gyration bias in Eh/Angstrom^2. Scale reference: at k = 0.1 a deviation of 0.5 A costs 0.0125 Eh = 33 kJ/mol, which is the order of the conformer spread on a peptide of this size -- strong enough to matter, not strong enough to dominate the force field. The RMSD hills next to it are k_hill * counter with k_hill = 0.01 Eh.", "Bias", {},
+        "requires=gyration_bias")
+    PARAM(gyration_one_sided, Bool, true, "Act only when Rg EXCEEDS the target, like a wall. The bias then pushes towards compactness and never resists a structure that is already compact enough -- which is the asymmetry the measurement calls for (the missing region is compact, not extended). false = a plain two-sided harmonic that also holds the molecule away from over-collapse.", "Bias", {},
+        "requires=gyration_bias")
+    PARAM(gyration_heavy_only, Bool, true, "Compute Rg over heavy atoms only. Hydrogens follow their host and add noise without adding a coordinate; the reference numbers this term was designed against are heavy-atom radii.", "Bias", {},
+        "requires=gyration_bias")
     PARAM(rg_flood, Bool, false, "Target-free compactness sampling: well-tempered 1-D metadynamics on the heavy-atom radius of gyration, V(Rg) = SUM_j w_j exp(-(Rg-Rg_j)^2/(2 sigma^2)), a hill deposited every rmsd_mtd_deposit_stride at the CURRENT Rg with height w = W0 exp(-V(Rg)/(kB dT)) (Barducci). It has no target value: it pushes the trajectory away from the Rg values already visited, towards BOTH the compact and the extended side. Why (measured on a 107-atom peptide, 17343 bias deposits of two production runs): the RMSD bias alone leaves the seed's Rg upwards in 90 percent of deposits, +0.7 to +0.85 A median at every temperature, because expansion is the cheapest way to gain RMSD against every deposited hill; a direct A/B from the same seed (450 K, 1000 fs) gave +0.20 A without and +0.52 A with the RMSD bias. In all four pools examined the mean energy is worst exactly in the Rg bins where those deposits land. Compact products were only ever inherited from compact seeds. This term corrects the distribution of candidates; it is NOT a ranking criterion (Spearman Rg-E only 0.2-0.5) and knows nothing about any reference structure. Off by default -- new term, A/B pending.", "Bias", {})
-    PARAM(rg_flood_sigma, Double, -1.0, "Hill width sigma in Angstrom for -rg_flood. -1 = adaptive: the standard deviation of Rg over the first rg_flood_warmup fs of THIS trajectory, i.e. the fluctuation inside the starting basin (the textbook choice of a metadynamics hill width). Measured on 299 walkers of a peptide search: median 0.17 A (quartiles 0.12-0.24). Fallback 0.15 A when the warm-up gives less than 0.05 A.", "Bias", {})
-    PARAM(rg_flood_w0, Double, -1.0, "Initial hill height W0 in Hartree for -rg_flood. -1 = kB*T/4 of the run temperature (about 0.9 kJ/mol at 450 K). With the well-tempered damping (rg_flood_dt) the bias converges to dT/(T+dT) times the free-energy profile along Rg -- it can level that profile, it can never grow into a mountain (the lesson of the RMSD counter runaway).", "Bias", {})
-    PARAM(rg_flood_dt, Double, 2000.0, "Well-tempered bias temperature dT in Kelvin for -rg_flood: each new hill is damped by exp(-V(Rg)/(kB dT)). Same default as rmsd_mtd_dt.", "Bias", {})
-    PARAM(rg_flood_wall, Double, -1.0, "Soft upper wall for -rg_flood in Angstrom: above this Rg a one-sided harmonic 1/2 k (Rg-wall)^2 (k = rg_flood_wall_force) is added, so the flooding does not spend its budget filling the extended side first. -1 = no wall. ConfSearch sets it per repetition from the search's OWN pool (the rg_flood_wall_quantile of the heavy-atom Rg of the optimised minima found so far), i.e. data-driven and reference-free; measured, 98-100 percent of the 50 lowest conformers of every pool lie below its 95th percentile.", "Bias", {})
-    PARAM(rg_flood_wall_force, Double, 0.05, "Force constant of the -rg_flood_wall in Eh/Angstrom^2 (0.05: a 0.5 A excursion beyond the wall costs 16 kJ/mol).", "Bias", {})
-    PARAM(rg_flood_warmup, Double, 300.0, "Warm-up in fs before -rg_flood starts acting: Rg is only recorded (for the adaptive sigma), no hill and no force. Measured basin fluctuation settles within 300 fs.", "Bias", {})
-    PARAM(rmsd_mtd_alpha, Double, 10.0, "Width parameter for RMSD Gaussians.", "RMSD-MTD", {"alpha_rmsd"})
+    PARAM(rg_flood_sigma, Double, -1.0, "Hill width sigma in Angstrom for -rg_flood. -1 = adaptive: the standard deviation of Rg over the first rg_flood_warmup fs of THIS trajectory, i.e. the fluctuation inside the starting basin (the textbook choice of a metadynamics hill width). Measured on 299 walkers of a peptide search: median 0.17 A (quartiles 0.12-0.24). Fallback 0.15 A when the warm-up gives less than 0.05 A.", "Bias", {},
+        "requires=rg_flood")
+    PARAM(rg_flood_w0, Double, -1.0, "Initial hill height W0 in Hartree for -rg_flood. -1 = kB*T/4 of the run temperature (about 0.9 kJ/mol at 450 K). With the well-tempered damping (rg_flood_dt) the bias converges to dT/(T+dT) times the free-energy profile along Rg -- it can level that profile, it can never grow into a mountain (the lesson of the RMSD counter runaway).", "Bias", {},
+        "requires=rg_flood")
+    PARAM(rg_flood_dt, Double, 2000.0, "Well-tempered bias temperature dT in Kelvin for -rg_flood: each new hill is damped by exp(-V(Rg)/(kB dT)). Same default as rmsd_mtd_dt.", "Bias", {},
+        "requires=rg_flood")
+    PARAM(rg_flood_wall, Double, -1.0, "Soft upper wall for -rg_flood in Angstrom: above this Rg a one-sided harmonic 1/2 k (Rg-wall)^2 (k = rg_flood_wall_force) is added, so the flooding does not spend its budget filling the extended side first. -1 = no wall. ConfSearch sets it per repetition from the search's OWN pool (the rg_flood_wall_quantile of the heavy-atom Rg of the optimised minima found so far), i.e. data-driven and reference-free; measured, 98-100 percent of the 50 lowest conformers of every pool lie below its 95th percentile.", "Bias", {},
+        "requires=rg_flood")
+    PARAM(rg_flood_wall_force, Double, 0.05, "Force constant of the -rg_flood_wall in Eh/Angstrom^2 (0.05: a 0.5 A excursion beyond the wall costs 16 kJ/mol).", "Bias", {},
+        "requires=rg_flood")
+    PARAM(rg_flood_warmup, Double, 300.0, "Warm-up in fs before -rg_flood starts acting: Rg is only recorded (for the adaptive sigma), no hill and no force. Measured basin fluctuation settles within 300 fs.", "Bias", {},
+        "requires=rg_flood")
+    PARAM(rmsd_mtd_alpha, Double, 10.0, "Width parameter for RMSD Gaussians.", "RMSD-MTD", {"alpha_rmsd"},
+        "requires=rmsd_mtd")
     PARAM(rmsd_mtd_pace, Int, 1, "DEPRECATED and ignored under the strided scheme (use rmsd_mtd_deposit_stride). Only honoured by rmsd_mtd_scheme=legacy.", "RMSD-MTD", {"mtd_steps"})
     PARAM(rmsd_mtd_max_gaussians, Int, -1, "Maximum number of stored bias structures.", "RMSD-MTD", {"max_rmsd_N"})
     PARAM(rmsd_mtd_ref_file, String, "none", "File with reference structures for RMSD-MTD.", "RMSD-MTD", {"rmsd_ref_file"})
-    PARAM(rmsd_mtd_atoms, String, "-1", "Atom indices to use for RMSD calculation.", "RMSD-MTD", {"rmsd_atoms"})
-    PARAM(rmsd_mtd_dt, Double, 2000.0, "Well-tempered bias temperature Delta_T (K). Only used when wtmtd=true, and only for the reported well-tempered energy -- it never affects the force or the exploration.", "RMSD-MTD", {"rmsd_DT"})
+    PARAM(rmsd_mtd_atoms, String, "-1", "Atom indices to use for RMSD calculation.", "RMSD-MTD", {"rmsd_atoms"},
+        "requires=rmsd_mtd")
+    PARAM(rmsd_mtd_dt, Double, 2000.0, "Well-tempered bias temperature Delta_T (K). Only used when wtmtd=true, and only for the reported well-tempered energy -- it never affects the force or the exploration.", "RMSD-MTD", {"rmsd_DT"},
+        "unit=K; requires=wtmtd")
     PARAM(rmsd_mtd_max_height, Int, 0, "Cap the per-structure hill counter used in the bias force: W_i = k * min(counter_i, cap). 0 = unbounded (legacy). Stops the shared bias pool from heating the dynamics over many runs (counter_i grows on every visit).", "RMSD-MTD", {})
     PARAM(rmsd_mtd_freeze_inherited, Bool, false, "Freeze the hill heights of bias structures already present at this MD run's start; only structures deposited during this run gain height. Bounds the cumulative bias force across successive shared-pool runs (geometry sharing is preserved).", "RMSD-MTD", {})
     PARAM(rmsd_mtd_screen, Bool, true, "Skip bias hills whose Gaussian contribution is provably negligible, using a rotation/translation-invariant RMSD lower bound (principal radii of gyration of the RMSD subset) plus a Gaussian cutoff. Physics-preserving: energy, force and the visited set are unaffected. false = evaluate every hill (legacy).", "RMSD-MTD", {})
@@ -868,6 +1048,11 @@ private:
     PARAM(md_diagnostics, Bool, false, "Write per-step diagnostics to <basename>.diag.jsonl (energy decomposition, charges, CN, gradient norms, HB/XB counts). Frequency follows dump_frequency. One JSON object per line.", "Output", {})
     // --- WP-P1 Timing Instrumentation (May 2026) ---
     PARAM(md_diagnostics_timing, Bool, false, "Add a timing_ms block to each <basename>.diag.jsonl record (per-phase wall-clock: CN/EEQ/dcn/D4-weights/FF/integrator/HBXB/I-O). GPU runs add a gpu sub-block with per-kernel-category times. Requires md_diagnostics=true. ~1-2 us per hook.", "Output", {})
+    // Claude Generated (Oct 2026): opt-in hydrogen-bond log by GFN-FF triple energy. Off (0) = nothing runs.
+    PARAM(hb_log_frequency, Int, 0, "Log the hydrogen bonds every N steps to <basename>.hbonds.csv: number of GFN-FF triples (A-H...B) with an energy below hb_log_energy_limit, per direction, and the sum of the triple energies. GFN-FF only; 0 = off (the run is then exactly as without this option). Recording the triple energies costs one write per triple and step.", "Output", {}, "min=0")
+    PARAM(hb_log_energy_limit, Double, 0.0, "hb_log_frequency: a triple counts when its energy is below this (kJ/mol, negative = attractive; 0 counts every attractive triple). Calibrate with `-trajprops -hb_criterion energy` and its histogram.", "Output", {})
+    PARAM(hb_log_selection, Selection, "", "hb_log_frequency: first atom group (selection grammar, a leading ! means all atoms except the rest); empty = all atoms.", "Output", {})
+    PARAM(hb_log_selection_b, Selection, "", "hb_log_frequency: second group; bonds between the two groups are counted per direction, empty counts bonds inside the first group.", "Output", {})
 
     // --- ConfSearch robustness gates (Jun 2026, Claude Generated) ---
     PARAM(topo_check, Bool, false, "Abort the MD run when the molecule fragments (number of connected components grows above the start value). Off by default so reactive paths are still sampled.", "ConfSearch", {})
@@ -881,8 +1066,16 @@ private:
     PARAM(geometry_abort_factor, Double, 10.0, "Abort the MD when the molecule's largest coordinate span grows beyond this factor times its span at the start (never below 50 Angstrom, so small molecules keep room). Unlike topo_check this is not about chemistry -- it catches a trajectory that has been torn apart and is no longer sampling anything. Measured on a 107-atom peptide (span 16 Angstrom) whose accumulated RMSD-MTD bias reached 27-98 Eh: the span grew past 1000 Angstrom, the run continued to its last step and kept depositing the debris into the shared bias pool. 0 disables the check.", "ConfSearch", {})
 
     // --- Temperature Ramp (Jun 2026, Claude Generated) ---
+    // Claude Generated 2026 - Registered at last. It was read from the controller by
+    // ParseThermalRegions() but never declared, so it had no default, never showed up
+    // in -export_config, and no schema could describe it.
+    PARAM(external_potentials, Json, "[]", "Directed external potentials: a list of {kind, atoms, ...} objects. kind is constant_force (direction, magnitude in Eh/A), centroid_harmonic (target, k in Eh/A^2) or distance_harmonic (atoms_b, k, r0 in A). atoms uses the selection grammar. Persistent, unlike the transient force injection, and changeable while the run is going.", "External Potentials", {},
+        "tier=primary")
+    PARAM(temp_regions, Json, "[]", "Per-region thermostats: a list of {atoms, temperature, schedule} objects. atoms uses the selection grammar.", "Temperature Ramp", {},
+        "tier=advanced")
     PARAM(temp_ramp, Bool, false, "Enable a multi-stage temperature ramp schedule (see temp_schedule). A live GUI slider / setTargetTemperature() overrides it for the rest of the run.", "Temperature Ramp", {})
-    PARAM(temp_schedule, String, "", "Ramp schedule 'target:mode:value;...'. mode=steps ramps the setpoint linearly from the previous target to <target> over <value> integration steps; mode=reach jumps the setpoint to <target> and advances once |<T>-target| < value Kelvin. Example: '500:steps:5000;500:steps:2000;300:reach:10'.", "Temperature Ramp", {})
+    PARAM(temp_schedule, String, "", "Ramp schedule 'target:mode:value;...'. mode=steps ramps the setpoint linearly from the previous target to <target> over <value> integration steps; mode=reach jumps the setpoint to <target> and advances once |<T>-target| < value Kelvin. Example: '500:steps:5000;500:steps:2000;300:reach:10'.", "Temperature Ramp", {},
+        "requires=temp_ramp")
 
     END_PARAMETER_DEFINITION
     // ^^^^^^^^^^^^ PARAMETER DEFINITION BLOCK ^^^^^^^^^^^^

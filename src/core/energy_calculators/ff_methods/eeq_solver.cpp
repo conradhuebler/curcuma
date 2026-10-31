@@ -934,9 +934,11 @@ bool EEQSolver::gpuSupports(EEQSolveMethod m, const std::string& backend) {
     // Vulkan: GFN-FF runs on the CPU there (gpu_plugin_entry_vulkan.cpp), so the CPU solves every name.
     if (backend == "vulkan")
         return true;
-    // ROCm: no device ppcg/pcg/batched path (has_device_schur=false); only the dense Cholesky route exists.
+    // ROCm: no device pcg/batched/lu/ldlt path (has_device_schur=false); the dense Cholesky route and,
+    // since Oct 2026 (Claude Generated), the projected PCG with the diagonal Jacobi exist.
     if (backend == "rocm")
-        return m == EEQSolveMethod::Auto || m == EEQSolveMethod::SchurCholesky;
+        return m == EEQSolveMethod::Auto || m == EEQSolveMethod::SchurCholesky
+            || m == EEQSolveMethod::ProjectedPCG;
     if (m == EEQSolveMethod::LU || m == EEQSolveMethod::LDLT)
         return backend == "cuda";   // Oct 2026: augmented LU (getrf) and LDL^T (sytrf) exist only in the CUDA plugin
     return m == EEQSolveMethod::Auto || m == EEQSolveMethod::SchurCholesky || m == EEQSolveMethod::ProjectedPCG
@@ -1513,6 +1515,28 @@ Matrix EEQSolver::buildCorrectedEEQMatrix(
 // Claude Generated (March 2026): Routes augmented EEQ system to configured solver
 // Used by both Phase 1 (calculateTopologyCharges) and Phase 2 (calculateFinalCharges)
 
+/// Claude Generated (Oct 2026): writes the constraint rows/columns of the Phase-2 matrix that
+/// calculateFinalCharges left unwritten for the projected PCG (m_deferred_constraint_A): zero
+/// bottomRows/rightCols(nfrag), then A(N+f, j) = A(j, N+f) = 1 for every atom j of fragment f -
+/// exactly the entries of the eager path. No-op when nothing was deferred.
+void EEQSolver::fillDeferredConstraintBlock(int natoms, int nfrag) const
+{
+    Matrix* A = m_deferred_constraint_A;
+    if (!A || nfrag <= 0) return;
+    m_deferred_constraint_A = nullptr;
+    A->bottomRows(nfrag).setZero();
+    A->rightCols(nfrag).setZero();
+    if (!m_ppcg_atom_frag || static_cast<int>(m_ppcg_atom_frag->size()) != natoms)
+        throw std::logic_error("EEQ: deferred constraint block without the atom -> fragment map");
+    for (int j = 0; j < natoms; ++j) {
+        const int f = (*m_ppcg_atom_frag)[j];
+        if (f >= 0) {
+            (*A)(natoms + f, j) = 1.0;
+            (*A)(j, natoms + f) = 1.0;
+        }
+    }
+}
+
 Vector EEQSolver::dispatchSolve(
     const Matrix& A,
     const Vector& x,
@@ -1701,6 +1725,9 @@ Vector EEQSolver::dispatchSolve(
             }
             if (m_verbosity >= 1)
                 CurcumaLogger::warn("EEQ: projected PCG did not converge, using the exact Schur-Cholesky solve for this step");
+            // Claude Generated (Oct 2026): the direct solvers below read C (and LU the full A); Phase 2
+            // may have deferred the constraint block for the PPCG. C is a view into A, so it sees the fill.
+            fillDeferredConstraintBlock(natoms, nfrag);
         }
 
         if (method_to_use == EEQSolveMethod::PCG) {
@@ -2031,7 +2058,7 @@ std::shared_ptr<LocalInversePreconditioner> EEQSolver::buildLocalInverse(
     const Matrix& geometry_bohr, const std::vector<int>& frag, int nfrag,
     const std::function<void(const std::vector<int>& idx, double* out)>& fill_block,
     double radius_bohr, double ext_bohr, CxxThreadPool* pool, int num_threads,
-    bool want_dense_S_inverse)
+    bool want_dense_S_inverse, bool check_definite)
 {
     const auto t0 = std::chrono::steady_clock::now();
     auto pc = std::make_shared<LocalInversePreconditioner>();
@@ -2148,8 +2175,37 @@ std::shared_ptr<LocalInversePreconditioner> EEQSolver::buildLocalInverse(
     // fallback path can be exercised (cli_gfnff_07_eeq_localinv); no effect when unset.
     static const bool test_reject = [] { const char* e = std::getenv("CURCUMA_LOCALINV_TEST_REJECT"); return e && *e && *e != '0'; }();
     if (test_reject) return finish(false, "rejected by CURCUMA_LOCALINV_TEST_REJECT");
-    // Definiteness of G: a sparse Cholesky (AMD ordering) must succeed.
-    {
+    // Claude Generated (Oct 2026): test hook CURCUMA_LOCALINV_TEST_INDEFINITE, same modes as the CUDA/ROCm
+    // device build: 1 = G -> -G (negative definite), 2 = G_ii -> -G_ii for every 10th atom (indefinite),
+    // 3 = G unchanged, the true-residual check fails (solveWithProjectedPCG). CPU only: 4 = G -> G - s v v^T with
+    // v = e_i - e_j (j: first stored neighbour of i in the same fragment, every 10th atom i, s = 100 G_ii), so
+    // C v = 0 leaves S = C G C^T (and its check) unchanged while G is indefinite - only the CG guards can see it.
+    // Only to exercise the guards of the CPU solver (cli_gfnff_07_eeq_localinv); 0 / unset = off.
+    static const int test_indefinite = [] { const char* e = std::getenv("CURCUMA_LOCALINV_TEST_INDEFINITE"); return e ? std::atoi(e) : 0; }();
+    if (test_indefinite == 1 || test_indefinite == 2) {
+        for (int i = 0; i < N; ++i)
+            for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(pc->G, i); it; ++it)
+                if (test_indefinite == 1 || (it.col() == i && i % 10 == 0)) it.valueRef() = -it.value();
+    } else if (test_indefinite == 4) {
+        for (int i = 0; i < N; i += 10) {
+            int j = -1;
+            for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(pc->G, i); it; ++it)
+                if (it.col() != i && frag[it.col()] == frag[i]) { j = static_cast<int>(it.col()); break; }
+            if (j < 0) continue;
+            const double sg = 100.0 * pc->G.coeff(i, i);
+            pc->G.coeffRef(i, i) -= sg;
+            pc->G.coeffRef(j, j) -= sg;
+            pc->G.coeffRef(i, j) += sg;
+            pc->G.coeffRef(j, i) += sg;
+        }
+    }
+    // Definiteness of G: a sparse Cholesky (AMD ordering) must succeed. Claude Generated (Oct 2026): only on
+    // request (check_definite; the GPU host build keeps it). It is serial and grew from 44 to 190 ms per build
+    // between 3003 and 5747 atoms; the CPU projected PCG instead guards every solve (rz > 0, pAp > 0, a
+    // non-converged localinv run and a failed true-residual check after each new build all redo the solve
+    // with Jacobi), see solveWithProjectedPCG. A converged solve is correct for any G: the stopping test is
+    // on the projected residual of A itself, the preconditioner only steers the iterates.
+    if (check_definite) {
         const auto tc = std::chrono::steady_clock::now();
         Eigen::SparseMatrix<double> Gc = pc->G;
         Eigen::SimplicialLLT<Eigen::SparseMatrix<double>> llt(Gc);
@@ -2270,8 +2326,10 @@ Vector EEQSolver::solveWithProjectedPCG(
                     for (int rr = c; rr < n; ++rr) out[static_cast<size_t>(c) * n + rr] = col[idx[rr]];
                 }
             };
+            // Claude Generated (Oct 2026): no sparse-Cholesky definiteness check (check_definite = false); the
+            // guards of the CG below replace it.
             m_localinv = buildLocalInverse(X, frag, nfrag, fill, m_localinv_radius, m_localinv_ext,
-                                           m_ppcg_pool, m_ppcg_threads);
+                                           m_ppcg_pool, m_ppcg_threads, false, false);
             build_ms_this_call = m_localinv->build_ms;
             m_localinv_build_ms_total += m_localinv->build_ms;
             if (m_localinv->ok) {
@@ -2421,15 +2479,38 @@ Vector EEQSolver::solveWithProjectedPCG(
         return true;
     };
     int iters_discarded = 0;
+    // Claude Generated (Oct 2026): guards that replace the definiteness check of the build (see buildLocalInverse).
+    // A local inverse is dropped for Jacobi (until the next rebuild) when (a) the CG sees rz <= 0 or pAp <= 0,
+    // (b) it does not converge within eeq_ppcg_max_iter, or (c) after the FIRST converged solve with a new build
+    // the true projected residual |P(b - A q)| exceeds kTrueResidualFactor x tol (one extra dense matvec per
+    // build). (c) catches a recurrence residual that drifted from the true one, which an indefinite G could cause
+    // without ever producing rz <= 0. The solve is then repeated with Jacobi from the same start.
+    constexpr double kTrueResidualFactor = 10.0;
+    double true_res_ratio = -1.0;
+    const char* li_failure = nullptr;
     if (!run_cg(li)) {
-        // Never continue with an M that is not positive definite: drop it, redo with Jacobi.
+        li_failure = "indefinite in the CG (rz <= 0 or pAp <= 0)";
+    } else if (li && !converged) {
+        li_failure = "no convergence with the local inverse";
+    } else if (li && !m_localinv->verified) {
+        matvec(q, Ap);
+        Vector r_true = rhs_atoms - Ap;
+        project(r_true);
+        true_res_ratio = r_true.norm() / tol_abs;
+        static const bool test_true_res_fail = [] { const char* e = std::getenv("CURCUMA_LOCALINV_TEST_INDEFINITE"); return e && std::atoi(e) == 3; }();
+        if (test_true_res_fail) true_res_ratio = 1e30;   // test hook, see buildLocalInverse
+        if (true_res_ratio <= kTrueResidualFactor) m_localinv->verified = true;
+        else li_failure = "true residual above the tolerance after the first solve";
+    }
+    if (li_failure) {
+        // Never continue with an M that failed a guard: drop it, redo with Jacobi.
         iters_discarded = iters;
         ++m_localinv_runtime_fallbacks;
-        CurcumaLogger::warn(fmt::format("EEQ ppcg localinv: indefinite preconditioner detected in the CG after {} "
-                                        "iterations, solve repeated with diagonal Jacobi (fallbacks so far: {})",
-                                        iters, m_localinv_runtime_fallbacks));
+        CurcumaLogger::warn(fmt::format("EEQ ppcg localinv: preconditioner unusable ({}) after {} iterations, "
+                                        "solve repeated with diagonal Jacobi (fallbacks so far: {})",
+                                        li_failure, iters, m_localinv_runtime_fallbacks));
         m_localinv->ok = false;
-        m_localinv->why = "indefinite in the CG";
+        m_localinv->why = li_failure;
         li = nullptr;
         run_cg(nullptr);
     }
@@ -2440,10 +2521,10 @@ Vector EEQSolver::solveWithProjectedPCG(
     static const bool print_iters = [] { const char* e = std::getenv("CURCUMA_PPCG_ITERS"); return e && *e && *e != '0'; }();
     if (print_iters) {
         if (m_ppcg_localinv)
-            fprintf(stderr, "PPCG N=%d nfrag=%d iters=%d converged=%d |r|=%.3e precond=%s build_ms=%.1f blocks_ms=%.1f check_ms=%.1f discarded=%d nnz_row=%.1f block=%.0f\n",
+            fprintf(stderr, "PPCG N=%d nfrag=%d iters=%d converged=%d |r|=%.3e precond=%s build_ms=%.1f blocks_ms=%.1f check_ms=%.1f discarded=%d nnz_row=%.1f block=%.0f true_res/tol=%.3g\n",
                     natoms, nfrag, iters, converged ? 1 : 0, r_norm, li ? "localinv" : "diag", build_ms_this_call,
                     build_ms_this_call > 0 ? m_localinv->blocks_ms : 0.0, build_ms_this_call > 0 ? m_localinv->check_ms : 0.0,
-                    iters_discarded, li ? li->nnz_per_row : 0.0, li ? li->mean_block : 0.0);
+                    iters_discarded, li ? li->nnz_per_row : 0.0, li ? li->mean_block : 0.0, true_res_ratio);
         else
             fprintf(stderr, "PPCG N=%d nfrag=%d iters=%d converged=%d |r|=%.3e\n", natoms, nfrag, iters, converged ? 1 : 0, r_norm);
     }
@@ -4035,7 +4116,16 @@ Vector EEQSolver::calculateFinalCharges(
         // Only the constraint rows/columns need clearing: every entry of the natoms x natoms
         // block is (re)written below (diagonal, both triangles, cutoff zeros, or the cached
         // off-diagonal copy). Zeroing the full (N+nfrag)^2 matrix cost O(N^2) per solve.
-        if (nfrag > 0) {
+        // Claude Generated (Oct 2026): the projected PCG never reads the constraint rows/columns -
+        // it takes the atom -> fragment map (m_ppcg_atom_frag, set below for this solve). On that
+        // path the block is left unwritten (zeroing and the 1.0 entries cost 11 ms at N = 5747,
+        // nfrag = 1831, strided writes into every row) and filled only if the PPCG fails and
+        // dispatchSolve falls back to a direct solver (fillDeferredConstraintBlock). The verbosity-3
+        // diagnostics of small systems print/decompose the full A, so they keep the eager block.
+        const bool defer_constraints = nfrag > 0
+            && resolveMethod(m_solve_method, natoms, nfrag, m_ppcg_min_atoms, m_ppcg_min_nfrag) == EEQSolveMethod::ProjectedPCG
+            && !(m_verbosity >= 3 && natoms <= 100);
+        if (nfrag > 0 && !defer_constraints) {
             A.bottomRows(nfrag).setZero();
             A.rightCols(nfrag).setZero();
         }
@@ -4105,7 +4195,7 @@ Vector EEQSolver::calculateFinalCharges(
             // partition wrote A(j,i) column-wise over the whole matrix. Threads take contiguous
             // ranges of the tile list. Element values depend neither on order nor on thread:
             // the matrix is bitwise identical (checked by a full-matrix hash, docs/EEQ_SOLVER_CONTROL.md).
-            constexpr int TILE = 64;
+            static constexpr int TILE = 64;  // static: the [&] lambda below must not capture it, or MSVC (C2131) no longer treats it as a constant in `buf[TILE * TILE]`
             const int nb = (natoms + TILE - 1) / TILE;
             const long long ntiles = static_cast<long long>(nb) * (nb + 1) / 2;
             double* const A_data = A.data();                       // RowMajor: A(i,j) = A_data[i*ld + j]
@@ -4230,7 +4320,7 @@ Vector EEQSolver::calculateFinalCharges(
             }
             if (f < 0 || f >= nfrag) f = -1;
             atom_frag[j] = f;
-            if (f >= 0) {
+            if (f >= 0 && !defer_constraints) {
                 A(natoms + f, j) = 1.0;
                 A(j, natoms + f) = 1.0;
             }
@@ -4358,7 +4448,9 @@ Vector EEQSolver::calculateFinalCharges(
         m_ppcg_atom_frag = &atom_frag;
         m_ppcg_pool = pool;
         m_ppcg_threads = num_threads > 0 ? num_threads : 1;
+        m_deferred_constraint_A = defer_constraints ? &A : nullptr;
         Vector new_charges = dispatchSolve(A, x, natoms, nfrag, total_charge, pool, num_threads, "final charges");
+        m_deferred_constraint_A = nullptr;
         m_ppcg_geometry = nullptr;
         m_ppcg_atom_frag = nullptr;
         m_ppcg_pool = nullptr;

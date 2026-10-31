@@ -1,0 +1,4 @@
+# Structures from test_cases/structures (id, optionally 'as <file name>'); see structures/README.md
+dinitrogen as n2.xyz
+hydroxyl as oh.xyz
+benzene as benzene.xyz

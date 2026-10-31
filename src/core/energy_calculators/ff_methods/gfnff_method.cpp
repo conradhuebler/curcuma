@@ -90,6 +90,7 @@ struct SetupScope {
 #include "src/core/energy_calculators/ff_methods/param_generator_thread.h"  // Claude Generated (Feb 2026): Parallel parameter generation
 #include "src/core/config_manager.h"
 #include <cmath>
+#include <algorithm>
 #include <fstream>
 #include <functional>
 #include <future>  // Claude Generated (March 2026): std::async for parallel init phases
@@ -655,6 +656,12 @@ GFNFF::GFNFF(const json& parameters)
         }
     }
 
+    // Claude Generated (Oct 2026): user EEQ charge groups. The cached topology holds Phase-1 charges that depend
+    // on the constraints, so the cache is bypassed (read and write) while groups are given.
+    loadUserChargeGroups();
+    if (!m_user_groups.empty() || m_auto_charge_groups || m_ionpair_groups)
+        m_cache_topology = false;
+
     // Initialize EEQ solver (Dec 2025 - Phase 3)
     // CRITICAL FIX (Dec 25, 2025): Pass global CurcumaLogger verbosity to EEQSolver
     json eeq_params = m_parameters;
@@ -886,6 +893,13 @@ bool GFNFF::InitialiseMolecule()
     // if it falls back to placeholder charges.
     m_eeq_solve_failed = false;
     if (m_eeq_solver) m_eeq_solver->clearSolveStatus();
+    // Claude Generated (Oct 2026): a re-initialised object still holds the pointer to its
+    // distance buffer (m_shared_srab) from the previous geometry. The phase-2 EEQ solve of the
+    // topology set-up below would read those stale distances (Coulomb term off by -3.7 to
+    // -5.5 kcal/mol on a trisaccharide conformer set, charges up to 0.07 e) and Calculation()
+    // then skips its own phase 2 because the geometry has not changed since the set-up. A fresh
+    // object starts with a null pointer and recomputes the distances locally; do the same here.
+    if (m_eeq_solver) m_eeq_solver->setExternalDistances(nullptr, nullptr);
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("=== GFNFF::InitialiseMolecule() START ===");
@@ -910,6 +924,13 @@ bool GFNFF::InitialiseMolecule()
     ++m_topology_version;
     m_cached_bond_list.reset();
     m_static_topology_valid = false;  // Reset static topology cache for new molecule
+    // React bookkeeping must not survive a re-initialisation (stale atom indices when
+    // one GFNFF object is reused for another molecule). Claude Generated (Sep 2026).
+    m_react_owns_bonds = false;
+    m_react_bond_orders.clear();
+    m_react_events.clear();
+    m_react_refractory.clear();
+    m_react_overvalence_streak.clear();
 
     // React topology mode (Claude Generated Aug 2026): guards + initial bond-set seed.
     if (m_topology_mode == "react") {
@@ -930,6 +951,10 @@ bool GFNFF::InitialiseMolecule()
         // seed if present; otherwise geometric detection at the plain 1.3 factor.
         m_react_bonds = getCachedBondList();
         m_forced_bonds = m_react_bonds;
+        // From here on the react set is authoritative: an EMPTY set must stay empty
+        // (getCachedBondList() would otherwise fall back to geometric detection with a
+        // different criterion once every bond has broken).
+        m_react_owns_bonds = true;
         // The bond-list call above marked the geometry as seen in the SHARED
         // m_geometry_tracker, which would make getCachedTopology() return the (empty)
         // cached topology below. Reset tracker + bond cache so initialisation takes
@@ -1140,9 +1165,11 @@ const std::vector<std::pair<int,int>>& GFNFF::getCachedBondList() const {
 
         std::vector<std::pair<int,int>> bonds;
 
-        if (!m_forced_bonds.empty()) {
+        if (!m_forced_bonds.empty() || m_react_owns_bonds) {
             // Use externally provided bond list exclusively (e.g. from polymerbuild topology)
             // This prevents spurious inter-monomer bonds from geometric detection — Claude Generated
+            // In react mode the list is owned by the hysteresis scan and is used even when
+            // it is empty (all bonds broken): no silent geometric re-detection.
             for (const auto& fb : m_forced_bonds) {
                 auto canonical = fb.first < fb.second ? fb : std::make_pair(fb.second, fb.first);
                 if (canonical.first < m_atomcount && canonical.second < m_atomcount)
@@ -1387,6 +1414,15 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
     // m_last_cn, m_last_dcn, m_last_cnf, m_d4_generator's per-pair dc6dcn retain previous values.
     const bool reuse_cn = m_static_cn && m_static_state_captured;
     const bool freeze_eeq = m_static_charges && m_static_state_captured;
+
+    // Claude Generated (Oct 2026): fused D4 pair C6 on the CPU workspace path. The generator
+    // then stops writing C6 and dC6/dCN into the ~N^2 pair arrays every step, and the
+    // workspace evaluates both per pair inside the energy loop (same operations, same bits;
+    // see D4ParameterGenerator::requestFusedPairC6()). Needs the per-step C6 refresh; the
+    // GPU paths (gpu_only) keep their own kernels. -gfnff.disp_c6_fused false: old path.
+    if (m_d4_generator && !gpu_only && m_workspace
+        && m_parameters.value("dispersion_c6_update", true) && m_parameters.value("disp_c6_fused", true))
+        m_d4_generator->requestFusedPairC6();
 
 #ifdef GFNFF_CN_DCN_FUSION
     // WP-D Stage D (May 2026): track whether the fused CN+DCN path was taken so
@@ -1743,6 +1779,9 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
                 m_d4_generator->refreshC6WeightsForCN(cn_std, pool, m_threads);
                 weights_fresh = true;
             }
+            // Claude Generated (Oct 2026): fused mode - C6 is evaluated in the energy loop
+            if (m_d4_generator->fusedPairC6View())
+                return;
             // getChargeWeightedC6 is const and reads only per-atom caches: pairs are independent.
             const int np = static_cast<int>(d4_pairs.size());
             auto c6_worker = [&](int t_id, int T) {
@@ -1768,6 +1807,11 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
         if (do_timing && weights_fresh)
             t_d4_gw += std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t_c6).count();
     }
+
+    // Claude Generated (Oct 2026): hand the fused D4 view (or nullptr) to the CPU workspace after
+    // the last generator update of this call; see requestFusedPairC6() above.
+    if (!gpu_only && m_workspace)
+        m_workspace->setD4FusedC6View(m_d4_generator ? m_d4_generator->fusedPairC6View() : nullptr);
 
     // WP-P1 (May 2026): cache phase-timings into a member so MD diagnostics can read them
     // after every Calculation() pass, independent of whether the caller passed out_timing.
@@ -1921,7 +1965,7 @@ GFNFF::EEQGPUParams GFNFF::prepareEEQParametersForGPU(const Vector& cn) const
 // Claude Generated (March 2026): Exposed for GPU orchestration
 // ---------------------------------------------------------------------------
 
-void GFNFF::updateHBXBIfNeeded(FFWorkspace* extra_ws)
+bool GFNFF::hbxbRefreshDue()
 {
     // Task #11 (Jun 2026): optional periodic forced rebuild for continuous MD where
     // near-threshold pairs must be re-classified faster than the RMSD trigger fires.
@@ -1933,26 +1977,53 @@ void GFNFF::updateHBXBIfNeeded(FFWorkspace* extra_ws)
         // Claude Generated (Apr 2026): If lists were freshly built during init and geometry
         // has not changed, skip redundant re-detection. This saves ~8s on large single-points.
         if (m_hbxb_fresh && !shouldUpdateHBXB(m_geometry_bohr))
-            return;
+            return false;
 
         if (!shouldUpdateHBXB(m_geometry_bohr))
-            return;
+            return false;
     }
+    return true;
+}
+
+void GFNFF::updateHBXBIfNeeded(FFWorkspace* extra_ws)
+{
+    // Claude Generated (Oct 2026): the trigger moved into hbxbRefreshDue() (same logic, same counters)
+    // so the device-side detection can use it too.
+    if (!hbxbRefreshDue())
+        return;
 
     // Store old counts for verbose output
     int old_hb_count = m_hb_reference ? m_hb_reference->nhb_count : 0;
     int old_xb_count = m_hb_reference ? m_hb_reference->nxb_count : 0;
     int old_disp_count = m_workspace ? m_workspace->dispersionPairCount() : 0;
 
+    static const bool hb_sub_log = [] { const char* e = std::getenv("CURCUMA_GFNFF_STEPPHASE"); return e && *e && std::string(e) != "0"; }();
+    auto hbs_t = std::chrono::steady_clock::now();
+    auto hbs_lap = [&](const char* what) {
+        if (!hb_sub_log) return;
+        const auto now = std::chrono::steady_clock::now();
+        fmt::print(stderr, "HBXBDET {} {:.2f}\n", what, std::chrono::duration<double, std::milli>(now - hbs_t).count());
+        hbs_t = now;
+    };
     // Get current topology with updated geometry
     const TopologyInfo& topo = getCachedTopology();
+    hbs_lap("getCachedTopology");
 
     // Re-detect HB/XB pairs with Phase-1 charges (topology_charges)
-    auto new_hbonds_native = detectHydrogenBondsNative(topo.topology_charges);
+    // Claude Generated (Oct 2026): the entries of the previous list are reused as the slots of the
+    // new one: the detection move-assigns the new entries into them on the pool workers (which also
+    // frees the old neighbour vectors there), instead of appending 582k entries on one thread into
+    // fresh memory and destroying the old list afterwards on this thread (urea400-water1000).
+    std::vector<GFNFFHydrogenBond> hb_storage;
+    hb_storage.swap(m_last_hbonds);
+    hbs_lap("swap");
+    auto new_hbonds_native = detectHydrogenBondsNative(topo.topology_charges, &hb_storage);
+    hbs_lap("detectHB");
     auto new_xbonds_native = detectHalogenBondsNative(topo.topology_charges);
+    hbs_lap("detectXB");
 
-    // Update internal workspace
-    if (m_workspace) {
+    // Update internal workspace (not when a GPU method owns the lists, setSkipHostHBWorkspaceUpdate)
+    if (m_workspace && !m_skip_host_hb_workspace) {
         m_workspace->updateHBonds(new_hbonds_native);
         m_workspace->updateXBonds(new_xbonds_native);
     }
@@ -1969,13 +2040,14 @@ void GFNFF::updateHBXBIfNeeded(FFWorkspace* extra_ws)
     // kept the setup-time one, so CPU and GPU diverged from the first re-detection on. Same
     // cross-reference as generateGFNFFParameterSet(), applied to the CPU workspace(s) here.
     if (m_parameters.value("hbond", true)) {
-        for (FFWorkspace* ws : { m_workspace.get(), extra_ws }) {
+        for (FFWorkspace* ws : { m_skip_host_hb_workspace ? nullptr : m_workspace.get(), extra_ws }) {
             if (!ws) continue;
             auto hb_update = rebuildBondHBData(new_hbonds_native, ws->bonds());
             ws->updateBondHBData(hb_update.bond_nr_hb, std::move(hb_update.bond_hb_data));
         }
     }
 
+    hbs_lap("workspace_updates");
     // Store re-detected lists for external consumers (e.g. GPU SoA re-upload)
     m_last_hbonds = std::move(new_hbonds_native);
     m_last_xbonds = std::move(new_xbonds_native);
@@ -1995,6 +2067,166 @@ void GFNFF::updateHBXBIfNeeded(FFWorkspace* extra_ws)
         CurcumaLogger::param("XB pairs", fmt::format("{} → {}", old_xb_count, m_hb_reference->nxb_count));
         CurcumaLogger::param("Dispersion pairs", std::to_string(old_disp_count) + " (static)");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Device-side H-bond detection: host inputs (Claude Generated, Oct 2026)
+// ---------------------------------------------------------------------------
+
+GFNFF::HBDetectInputs GFNFF::prepareHBDetectInputs(const Vector& charges) const
+{
+    // The O(N) part of detectHydrogenBondsNative() (steps 0 and 1, the thresholds, the atom filter of the
+    // AB pairs, the bond partner and hydrogen-on-atom lists), copied from there and kept in step with it:
+    // the device list is compared against the host list by -gfnff.gpu_hb_detect_verify.
+    using namespace GFNFFParameters;
+    HBDetectInputs in;
+    const int n = m_atomcount;
+    in.natoms = n;
+    const TopologyInfo& topo_info = getCachedTopology();
+    const auto& bonds = getCachedBondList();
+
+    in.basicity.resize(n);
+    in.acidity.resize(n);
+    FunctionalGroupDetector detector(n, m_atoms, topo_info.neighbor_lists, topo_info.hybridization,
+                                     topo_info.pi_fragments);
+    for (int i = 0; i < n; ++i) {
+        in.basicity[i] = hb_basicity[m_atoms[i]];
+        in.acidity[i] = hb_acidity[m_atoms[i]];
+        if (m_atoms[i] == 8) {
+            if (detector.isCarbonylOxygen(i)) in.basicity[i] = 0.68;
+            else if (detector.isNitroOxygen(i)) in.basicity[i] = 0.47;
+        } else if (m_atoms[i] == 6 && topo_info.neighbor_lists[i].size() == 2) {
+            const int n1 = topo_info.neighbor_lists[i][0];
+            const int n2 = topo_info.neighbor_lists[i][1];
+            Vector r_i = m_geometry_bohr.row(i);
+            Vector v1 = Vector(m_geometry_bohr.row(n1)) - r_i;
+            Vector v2 = Vector(m_geometry_bohr.row(n2)) - r_i;
+            double cos_phi = v1.dot(v2) / (v1.norm() * v2.norm());
+            double phi_deg = curcuma_acos(std::clamp(cos_phi, -1.0, 1.0)) * 180.0 / M_PI;
+            if (phi_deg < 150.0 && charges[i] > -0.4) in.basicity[i] = 1.46;
+        }
+    }
+    const bool amideh_order_bug = m_parameters.value("amideh_acidity_order_bug", false);
+    for (int i = 0; i < n; ++i) {
+        if (detector.isAmideHydrogen(i)) {
+            int nitrogen = topo_info.neighbor_lists[i][0];
+            if (!amideh_order_bug || nitrogen < i) in.acidity[nitrogen] *= 0.80;
+        }
+    }
+
+    // HB-capable hydrogens (step 1)
+    std::vector<int> first_bond_partner(n, -1);
+    for (const auto& bond : bonds) {
+        if (bond.first >= 0 && bond.first < n && first_bond_partner[bond.first] == -1)
+            first_bond_partner[bond.first] = bond.second;
+        if (bond.second >= 0 && bond.second < n && first_bond_partner[bond.second] == -1)
+            first_bond_partner[bond.second] = bond.first;
+    }
+    in.is_hb_hyd.assign(n, 0);
+    for (int h = 0; h < n; ++h) {
+        if (m_atoms[h] != 1) continue;
+        if (topo_info.hybridization[h] == 1) continue;
+        const int atom_A = first_bond_partner[h];
+        if (atom_A == -1) continue;
+        double q_threshold = 0.01;
+        if (m_atoms[atom_A] > 10) q_threshold -= 0.20;
+        if (topo_info.hybridization[atom_A] == 3 && m_atoms[atom_A] == 6) q_threshold += 0.05;
+        if (charges[h] > q_threshold) {
+            in.is_hb_hyd[h] = 1;
+            in.hb_hyd_list.push_back(h);
+        }
+    }
+
+    const double hb_acc = m_parameters.value("hb_accuracy", 0.1);
+    const double thr1_override = m_parameters.value("hb_thr1_bohr2", 0.0);
+    const double thr2_override = m_parameters.value("hb_thr2_bohr2", 0.0);
+    in.hbthr1 = (thr1_override > 0.0) ? thr1_override : (200.0 - std::log10(hb_acc) * 50.0);
+    in.hbthr2 = (thr2_override > 0.0) ? thr2_override : (400.0 - std::log10(hb_acc) * 50.0);
+    in.min_pair_energy = m_parameters.value("hb_min_pair_energy_eh", 1e-9);
+    // Below the cell-list threshold the host takes its legacy loop, and only its parallel variant (more than
+    // hb_parallel_min_pairs AB pairs) prunes the weak case-1 triples; the serial variant keeps them. The same list
+    // needs the same rule here (the AB pair count is the legacy one: no distance filter, j < i).
+    const int cell_threshold = m_parameters.value("nb_cell_list_min_atoms",
+        m_parameters.value("hb_cell_list_min_atoms", 800));
+    const bool legacy_branch = !(cell_threshold == 0 || n >= cell_threshold);
+
+    // atom filter of the AB pairs (ab_atom_ok of the cell-list branch)
+    in.ab_ok.assign(n, 0);
+    for (int a = 0; a < n; ++a) {
+        bool ok = true;
+        if (m_atoms[a] == 6 && topo_info.pi_fragments[a] == 0) ok = false;
+        double q_thresh = 0.10;
+        if (m_atoms[a] > 10) q_thresh += 0.2;
+        if (charges[a] > q_thresh) ok = false;
+        in.ab_ok[a] = ok ? 1 : 0;
+    }
+
+    if (legacy_branch) {
+        long long n_ab = 0;
+        for (int i = 0; i < n; ++i) {
+            if (!in.ab_ok[i]) continue;
+            for (int j = 0; j < i; ++j) {
+                if (!in.ab_ok[j]) continue;
+                if (in.basicity[i] * in.acidity[j] < 1e-6 && in.basicity[j] * in.acidity[i] < 1e-6) continue;
+                ++n_ab;
+            }
+        }
+        const int par_threshold = m_parameters.value("hb_parallel_min_pairs", 500);
+        const bool legacy_parallel = (threadPool() != nullptr && par_threshold >= 0 && n_ab > par_threshold);
+        if (!legacy_parallel) in.min_pair_energy = 0.0;
+    }
+
+    // CSR lists
+    in.charge.assign(charges.data(), charges.data() + charges.size());
+    in.nbr_off.assign(n + 1, 0);
+    for (int a = 0; a < n; ++a) in.nbr_off[a + 1] = in.nbr_off[a] + static_cast<int>(topo_info.neighbor_lists[a].size());
+    in.nbr_idx.reserve(in.nbr_off[n]);
+    for (int a = 0; a < n; ++a)
+        for (int nb : topo_info.neighbor_lists[a]) in.nbr_idx.push_back(nb);
+
+    std::vector<std::vector<int>> partners(n), hyd_on(n);
+    for (const auto& bond : bonds) {
+        const int a = bond.first, b = bond.second;
+        if (a >= 0 && a < n) partners[a].push_back(b);
+        if (b >= 0 && b < n) partners[b].push_back(a);
+        if (in.is_hb_hyd[a]) hyd_on[b].push_back(a);
+        if (in.is_hb_hyd[b]) hyd_on[a].push_back(b);
+    }
+    in.bond_off.assign(n + 1, 0);
+    in.hyd_off.assign(n + 1, 0);
+    for (int a = 0; a < n; ++a) {
+        in.bond_off[a + 1] = in.bond_off[a] + static_cast<int>(partners[a].size());
+        in.hyd_off[a + 1] = in.hyd_off[a] + static_cast<int>(hyd_on[a].size());
+    }
+    in.bond_idx.reserve(in.bond_off[n]);
+    in.hyd_idx.reserve(in.hyd_off[n]);
+    for (int a = 0; a < n; ++a) {
+        for (int p : partners[a]) in.bond_idx.push_back(p);
+        for (int h : hyd_on[a]) in.hyd_idx.push_back(h);
+    }
+    return in;
+}
+
+std::vector<GFNFFHalogenBond> GFNFF::detectXBForDevice() const
+{
+    return detectHalogenBondsNative(getCachedTopology().topology_charges);
+}
+
+std::vector<GFNFFHydrogenBond> GFNFF::detectHBHostReference() const
+{
+    return detectHydrogenBondsNative(getCachedTopology().topology_charges);
+}
+
+void GFNFF::commitHBXBDeviceUpdate(int n_hb, std::vector<GFNFFHalogenBond>&& xbonds)
+{
+    m_last_hbonds.clear();   // the device list is the only copy (see GFNFFGpuMethodImpl, device detection)
+    m_last_xbonds = std::move(xbonds);
+    m_hbxb_updated = true;
+    m_hb_reference = HBReferenceGeometry{};
+    m_hb_reference->reference_positions = m_geometry_bohr;
+    m_hb_reference->nhb_count = n_hb;
+    m_hb_reference->nxb_count = static_cast<int>(m_last_xbonds.size());
+    m_hb_reference->needs_update = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -2032,6 +2264,13 @@ void GFNFF::updateNonbondedRepulsionIfNeeded(FFWorkspace* extra_ws)
     m_rep_list_ref_geometry = m_geometry_bohr;
     ++m_rep_rebuild_count;
 
+    if (m_skip_host_rep_pairs) {
+        // Oct 2026 (Claude Generated): only the decision is made here; the wrapper rebuilds the list on
+        // the device from repulsionDeviceInputs() and the current coordinates.
+        m_nb_rep_updated = true;
+        return;
+    }
+
     auto start_time = std::chrono::high_resolution_clock::now();
 
     int old_bonded_count = static_cast<int>(m_last_bonded_reps.size());
@@ -2042,9 +2281,11 @@ void GFNFF::updateNonbondedRepulsionIfNeeded(FFWorkspace* extra_ws)
     // declaration) — that function must not be called a third time per its own
     // "heap corruption" warning at its FFWorkspace-construction call site, and it would
     // regenerate every term (bonds/angles/torsions/...), not just the two we need.
-    auto [bonded_rep, nonbonded_rep] = generateRepulsionPairsNative();
+    // Claude Generated (Oct 2026): the previous non-bonded list is dead from here on (the workspace and
+    // the GPU copy are overwritten below), so its storage is reused for the new one.
+    auto [bonded_rep, nonbonded_rep] = generateRepulsionPairsNative(&m_last_nonbonded_reps);
 
-    if (m_workspace)
+    if (m_workspace && !m_skip_host_rep_workspace)
         m_workspace->updateRepulsion(bonded_rep, nonbonded_rep);
     if (extra_ws)
         extra_ws->updateRepulsion(bonded_rep, nonbonded_rep);
@@ -2188,6 +2429,10 @@ bool GFNFF::refreshDispersionC6()
     const int P = static_cast<int>(pairs.size());
     if (P == 0)
         return false;
+    // Claude Generated (Oct 2026): fused mode - the energy loop computes C6 from the same
+    // weights itself (FFWorkspace::calcD4Dispersion), nothing to write here.
+    if (m_d4_generator->fusedPairC6View())
+        return true;
     const D4ParameterGenerator& gen = *m_d4_generator;
     // Claude Generated (Oct 2026): contiguous pair blocks instead of stride T (stride put
     // neighbouring pairs, which share atom rows and cache lines, on different threads).
@@ -2280,20 +2525,12 @@ bool GFNFF::detectReactiveBondChanges()
         fat_val[i] = fat[m_atoms[i]];
     }
 
-    // Coordination cap for bond FORMATION: normal element valence + 1 (the +1 allows
-    // the exchange intermediate, e.g. linear H-H-H or 5-coordinate carbon in flight).
-    // Strict for the 2nd period and halogens where hypervalence does not exist —
-    // without this, hot confined systems grow unphysical agglomerates (e.g. N with 6
-    // neighbours). Hypervalence-capable elements (Si, P, S, ...) and metals stay at 6,
-    // the angle generator's neighbour limit. Existing bonds are never removed by the
-    // cap — only new formations are refused. Empirical v1; the principled replacement
-    // is an over-coordination energy (docs/GFNFF_REACT_TOPOLOGY.md, Open refinements).
-    // Tick down refractory counters (one unit per scan).
-    for (auto it = m_react_refractory.begin(); it != m_react_refractory.end();) {
-        if (--(it->second) <= 0)
-            it = m_react_refractory.erase(it);
-        else
-            ++it;
+    // A non-finite coordinate would make every distance comparison false: nothing
+    // forms, nothing breaks, and the scan would silently stand still until the
+    // gradient NaN trap fires. Refuse to scan instead (the trap reports the cause).
+    if (!m_geometry_bohr.allFinite()) {
+        CurcumaLogger::warn("REACT scan skipped: geometry contains NaN/Inf");
+        return false;
     }
 
     // Valence cap for bond FORMATION, bond-order aware: an atom may take a new sigma
@@ -2445,7 +2682,8 @@ bool GFNFF::detectReactiveBondChanges()
         // exchange slack: it only forms at the tighter slack radius. Otherwise an H
         // sitting on one partner keeps re-bridging to the next heavy atom at the
         // optimistic radius and the exchange resolution has to undo it over and over.
-        {
+        // Part of the valence-cap family: react_valence_cap=false samples unconstrained.
+        if (m_react_valence_cap) {
             const bool uses_slack = (sigma_count[p.first] >= static_cast<int>(valence_cap(p.first) - 1.0 + 0.5))
                 || (sigma_count[p.second] >= static_cast<int>(valence_cap(p.second) - 1.0 + 0.5));
             if (uses_slack) {
@@ -2493,6 +2731,10 @@ bool GFNFF::detectReactiveBondChanges()
                     for (int k = 0; k < static_cast<int>(next.size()); ++k) {
                         if (next[k].first != a && next[k].second != a)
                             continue;
+                        // A bond formed in this very scan is not a candidate: breaking it
+                        // here would arm the refractory map for a bond that never existed.
+                        if (std::find(formed.begin(), formed.end(), next[k]) != formed.end())
+                            continue;
                         int o = (next[k].first == a) ? next[k].second : next[k].first;
                         double r = (m_geometry_bohr.row(a) - m_geometry_bohr.row(o)).norm();
                         double ratio = r / ((rcov[a] + rcov[o]) * fat_val[a] * fat_val[o]);
@@ -2505,6 +2747,11 @@ bool GFNFF::detectReactiveBondChanges()
                         auto pair = next[worst];
                         broken.push_back(pair);
                         next.erase(next.begin() + worst);
+                        // Keep the sigma bookkeeping consistent for atoms checked later in
+                        // this scan (the partner must not lose a second bond for a
+                        // count that no longer exists).
+                        --sigma_count[pair.first];
+                        --sigma_count[pair.second];
                         if (CurcumaLogger::get_verbosity() >= 1)
                             CurcumaLogger::result(fmt::format(
                                 "REACT exchange resolved: broke {}{}-{}{} (atom {} over-valent for {} scans)",
@@ -2520,6 +2767,16 @@ bool GFNFF::detectReactiveBondChanges()
         }
     }
 
+    // Tick down the refractory counters AFTER the formation loop: an entry armed with
+    // N below then blocks exactly N subsequent scans (ticking before the loop erased
+    // it one scan early).
+    for (auto it = m_react_refractory.begin(); it != m_react_refractory.end();) {
+        if (--(it->second) <= 0)
+            it = m_react_refractory.erase(it);
+        else
+            ++it;
+    }
+
     if (formed.empty() && broken.empty())
         return false;
 
@@ -2531,6 +2788,20 @@ bool GFNFF::detectReactiveBondChanges()
             m_react_refractory[b] = m_react_refractory_scans;
 
     m_react_bonds = std::move(next);
+
+    // Event record for programmatic consumers (GUI, SimpleMD); dE_jump is filled in by
+    // rebuildReactiveTopology(). Bounded, because a CLI run never consumes the list.
+    // Claude Generated (Sep 2026).
+    {
+        ReactEvent ev;
+        ev.call = m_react_calls;
+        ev.formed = formed;
+        ev.broken = broken;
+        m_react_events.push_back(std::move(ev));
+        if (m_react_events.size() > kReactEventLimit)
+            m_react_events.erase(m_react_events.begin(),
+                m_react_events.begin() + (m_react_events.size() - kReactEventLimit));
+    }
 
     if (CurcumaLogger::get_verbosity() >= 1) {
         auto atom_label = [&](int a) {
@@ -2557,7 +2828,7 @@ void GFNFF::updateReactiveTopologyIfNeeded()
     bool scan = (m_react_check_every > 0) && (m_react_calls % m_react_check_every == 0);
     if (!scan && m_react_check_disp > 0.0
         && m_react_ref_geometry.rows() == m_geometry_bohr.rows()) {
-        double max_disp = (m_geometry_bohr - m_react_ref_geometry).array().abs().maxCoeff();
+        double max_disp = (m_geometry_bohr - m_react_ref_geometry).rowwise().norm().maxCoeff();
         scan = (max_disp > m_react_check_disp);
     }
     if (!scan)
@@ -2573,17 +2844,26 @@ bool GFNFF::rebuildReactiveTopology()
 {
     const int verb = CurcumaLogger::get_verbosity();
 
-    // Diagnostic: energy on the OLD topology at the current geometry, so the
-    // discontinuity introduced by the rebuild (dE_jump) is measured, not hidden.
-    // Requires CN state from a previous step; skipped otherwise.
-    const bool diag = (verb >= 1) && m_workspace && (m_last_cn.size() == m_atomcount);
+    // Energy on the OLD topology at the current geometry, so the discontinuity the
+    // dynamics experiences (dE_jump) is measured, not hidden. Always measured: the
+    // cost is two workspace evaluations per EVENT (not per step), and GUI consumers
+    // read it through the event record at verbosity 0. Requires CN state from a
+    // previous step; NaN otherwise.
+    const bool diag = m_workspace && (m_last_cn.size() == m_atomcount);
     double e_before = 0.0;
     if (diag) {
         m_workspace->setGeometry(m_geometry_bohr);
         e_before = m_workspace->calculate(false);
     }
 
+    // Snapshot for rollback: if parameter generation throws, the engines keep their
+    // old interaction lists, so the bond bookkeeping must return to the old set too;
+    // otherwise the next getCachedTopology() would rebuild from a bond list the force
+    // field never adopted. The dropped change is re-detected at the next scan.
+    const std::vector<std::pair<int, int>> old_bonds = m_forced_bonds;
+
     m_forced_bonds = m_react_bonds;
+    m_react_owns_bonds = true;
 
     // Force the full topology path in getCachedTopology(): the bond list changed even
     // if atoms moved less than the 0.5 Bohr displacement trigger. The react scan keeps
@@ -2596,7 +2876,14 @@ bool GFNFF::rebuildReactiveTopology()
     try {
         ff_params = generateGFNFFParameterSet();
     } catch (const std::exception& e) {
-        CurcumaLogger::error(std::string("REACT rebuild: parameter generation failed: ") + e.what());
+        CurcumaLogger::error(std::string("REACT rebuild: parameter generation failed, keeping the previous topology: ") + e.what());
+        m_forced_bonds = old_bonds;
+        m_react_bonds = old_bonds;
+        m_cached_bond_list.reset();
+        m_geometry_tracker.reset();
+        m_static_topology_valid = false;
+        if (!m_react_events.empty())
+            m_react_events.pop_back();
         return false;
     }
 
@@ -2614,6 +2901,8 @@ bool GFNFF::rebuildReactiveTopology()
         m_workspace->rebuildInteractionLists(std::move(ff_params));
     }
 
+    refreshReactBondOrders();
+
     m_react_rebuilt = true;
     ++m_react_rebuild_count;
     m_hbxb_updated = true; // HB/XB lists were rebuilt inside parameter generation
@@ -2621,12 +2910,45 @@ bool GFNFF::rebuildReactiveTopology()
     if (diag) {
         double e_after = m_workspace->calculate(false);
         double de = e_after - e_before;
-        CurcumaLogger::result(fmt::format(
-            "REACT rebuild #{}: {} bonds, dE_jump = {:.6f} Eh ({:+.1f} kJ/mol)",
-            m_react_rebuild_count, m_react_bonds.size(), de,
-            de * CurcumaUnit::Energy::HARTREE_TO_KJMOL));
+        if (!m_react_events.empty())
+            m_react_events.back().de_jump_eh = de;
+        if (verb >= 1)
+            CurcumaLogger::result(fmt::format(
+                "REACT rebuild #{}: {} bonds, dE_jump = {:.6f} Eh ({:+.1f} kJ/mol)",
+                m_react_rebuild_count, m_react_bonds.size(), de,
+                de * CurcumaUnit::Energy::HARTREE_TO_KJMOL));
     }
     return true;
+}
+
+// Bond orders for the react bond list from the cached FT-HMO pi orders (fresh after a
+// rebuild or the initial parameter generation). Claude Generated (Sep 2026).
+//
+// The FT-Hueckel solver carries ONE p orbital per atom, so it models a single pi
+// system: measured pi orders are ~1.0 for an sp2-sp2 double bond (ethylene C=C,
+// diazene N=N) AND for an sp-sp triple bond (N2 0.999, CO 0.994, acetylene 1.000),
+// while the sp C-H bonds of acetylene stay at 0.0. A linear sp-sp bond carries a
+// SECOND, degenerate pi system that the solver does not represent; it is added back
+// here so the reported order is the chemical one. Bond types cannot be used for this
+// (btyp=3 marks every bond at an sp atom, the acetylene C-H included).
+void GFNFF::refreshReactBondOrders()
+{
+    m_react_bond_orders.assign(m_react_bonds.size(), 1);
+    if (!m_cached_topology)
+        return;
+    const auto& pibo = m_cached_topology->pi_bond_orders;
+    if (static_cast<int>(pibo.size()) < m_atomcount * (m_atomcount + 1) / 2)
+        return;
+    const auto& hyb = m_cached_topology->hybridization;
+    const bool have_hyb = static_cast<int>(hyb.size()) >= m_atomcount;
+    for (size_t k = 0; k < m_react_bonds.size(); ++k) {
+        const int i = m_react_bonds[k].first, j = m_react_bonds[k].second;
+        const double pi = std::max(0.0, pibo[lin(i, j)]);
+        int order = 1 + static_cast<int>(std::lround(pi));
+        if (have_hyb && hyb[i] == 1 && hyb[j] == 1 && pi > 0.5)
+            ++order; // second (degenerate) pi system of a linear sp-sp bond
+        m_react_bond_orders[k] = std::clamp(order, 1, 3);
+    }
 }
 
 double GFNFF::Calculation(bool gradient)
@@ -3524,6 +3846,554 @@ json GFNFF::exportTopology() const
     return topo_json;
 }
 
+/**
+ * Claude Generated (Oct 2026): read -gfnff.charge_groups. File format {"groups": [{"atoms": [0-based...], "charge": q}]}.
+ * EEQ background: the charges minimise E(q) = sum_i chi_i q_i + 1/2 sum_ij q_i q_j A_ij under linear constraints
+ * C q = Q with one row per group (membership matrix C, group charges Q), solved with Lagrange multipliers in the
+ * augmented matrix. The reference uses one row per covalently connected fragment; here the rows are user groups.
+ */
+void GFNFF::loadUserChargeGroups()
+{
+    m_user_groups.clear();
+    const std::string file = m_parameters.value("charge_groups", std::string());
+    if (file.empty())
+        return;
+    if (file == "auto") {
+        // groups are perceived from the topology (Phase 10, buildAutoChargeGroups); the fallback 2 is the default
+        m_auto_charge_groups = true;
+        m_charge_group_radius = std::max(0, m_parameters.value("charge_group_radius", 2));
+        return;
+    }
+    if (file == "ionpairs") {
+        // Claude Generated (Oct 2026): EXPERIMENTAL, formal fragment charges in neutral ion pairs; the groups are
+        // perceived from the topology (Phase 10, buildIonPairChargeGroups). The fallbacks here are the defaults
+        // (root CLAUDE.md, Known Issue #31): 1.0 = formal charge, aromatic cation rings off.
+        m_ionpair_groups = true;
+        m_ionpair_charge = m_parameters.value("ionpair_charge", 1.0);
+        m_ionpair_aromatic = m_parameters.value("ionpair_aromatic", false);
+        return;
+    }
+    try {
+        std::ifstream in(file);
+        if (!in.good()) {
+            CurcumaLogger::error("GFNFF charge_groups: cannot open " + file);
+            return;
+        }
+        json j;
+        in >> j;
+        // Claude Generated (Oct 2026): optional top-level key "rest" (applyUserChargeGroups); "single" is the old behaviour
+        const std::string rest = j.value("rest", std::string("single"));
+        if (rest == "per_fragment")
+            m_user_groups_rest_per_fragment = true;
+        else if (rest != "single") {
+            CurcumaLogger::error("GFNFF charge_groups ignored: unknown value \"" + rest + "\" of the key rest in " + file + " (single | per_fragment)");
+            return;
+        }
+        for (const auto& g : j.at("groups")) {
+            UserChargeGroup group;
+            group.atoms = g.at("atoms").get<std::vector<int>>();
+            group.charge = g.at("charge").get<double>();
+            if (!group.atoms.empty())
+                m_user_groups.push_back(std::move(group));
+        }
+    } catch (const std::exception& e) {
+        CurcumaLogger::error(std::string("GFNFF charge_groups: cannot parse ") + file + ": " + e.what());
+        m_user_groups.clear();
+    }
+}
+
+/**
+ * @brief "rest": "per_fragment": groups inside fragments, every uncovered fragment its own neutral group
+ *
+ * Claude Generated (Oct 2026). For a solute that is ONE fragment split into several groups (polymer units) in a solvent of
+ * many fragments (water, counter-ions). Rules, each violation rejects the groups with a message (run continues without):
+ *   1. a topological fragment is either completely covered by groups (several groups may split it) or not at all;
+ *   2. every uncovered fragment becomes one more EEQ constraint row with charge 0 (no charge flows between solvent
+ *      molecules); a charged solvent fragment (Cl-) must be written into the file as a group;
+ *   3. the group charges sum to the molecule charge (1e-6);
+ *   4. atom indices 0-based, in range, each atom in at most one group (checked by the caller).
+ * Group order: the file groups, then the uncovered fragments by their smallest atom index; the decisions are properties of
+ * the atom sets, not of the numbering (Known Issue #34).
+ * @param fraglist 1-based file group per atom, 0 = not in a file group (filled by the caller)
+ * @return empty string on success, else the reason
+ */
+std::string GFNFF::completeChargeGroupsPerFragment(const std::vector<int>& topo_fraglist, std::vector<int>& fraglist,
+                                                    std::vector<double>& qfrag, int& n_rest) const
+{
+    const int n = m_atomcount;
+    n_rest = 0;
+    if (static_cast<int>(topo_fraglist.size()) != n)
+        return "the topological fragments are not known";
+    std::map<int, int> covered, size, first_atom; // per topological fragment id
+    for (int i = 0; i < n; ++i) {
+        const int f = topo_fraglist[i];
+        size[f]++;
+        if (fraglist[i] != 0)
+            covered[f]++;
+        if (first_atom.find(f) == first_atom.end())
+            first_atom[f] = i; // atoms ascending: smallest index of the fragment
+    }
+    for (const auto& kv : size) {
+        const int c = covered.count(kv.first) ? covered[kv.first] : 0;
+        if (c != 0 && c != kv.second)
+            return fmt::format("with rest per_fragment every fragment must be covered completely or not at all; the fragment of atom {} ({} atoms) has {} atoms in groups",
+                first_atom[kv.first], kv.second, c);
+    }
+    std::vector<std::pair<int, int>> uncovered; // (smallest atom, fragment id)
+    for (const auto& kv : size)
+        if (!covered.count(kv.first))
+            uncovered.emplace_back(first_atom[kv.first], kv.first);
+    std::sort(uncovered.begin(), uncovered.end());
+    std::map<int, int> rest_group;
+    for (const auto& u : uncovered) {
+        qfrag.push_back(0.0);
+        rest_group[u.second] = static_cast<int>(qfrag.size()); // 1-based group id
+    }
+    for (int i = 0; i < n; ++i)
+        if (fraglist[i] == 0)
+            fraglist[i] = rest_group.at(topo_fraglist[i]);
+    n_rest = static_cast<int>(uncovered.size());
+    double total = 0.0;
+    for (double q : qfrag)
+        total += q;
+    if (std::abs(total - static_cast<double>(m_charge)) > 1e-6)
+        return fmt::format("with rest per_fragment the group charges must sum to the molecule charge: sum {:.6f}, molecule charge {} (uncovered fragments count 0)",
+            total, m_charge);
+    return std::string();
+}
+
+void GFNFF::applyUserChargeGroups(int nfrag_topological, const std::vector<int>* topo_fraglist) const
+{
+    auto reject = [&](const std::string& why) {
+        CurcumaLogger::error("GFNFF charge_groups ignored: " + why);
+        m_user_groups.clear();
+    };
+    // Claude Generated (Oct 2026): several topological fragments are accepted when every group is a union of whole fragments
+    // (checked below), e.g. a neutral ion pair with +q on the cation and -q on the anion fragment.
+    if (nfrag_topological != 1 && (topo_fraglist == nullptr || static_cast<int>(topo_fraglist->size()) != m_atomcount))
+        return reject(fmt::format("the molecule has {} fragments, groups are supported inside one connected molecule only", nfrag_topological));
+    const int n = m_atomcount;
+    std::vector<int> fraglist(n, 0); // 1-based group id, 0 = not yet assigned
+    std::vector<double> qfrag;
+    double assigned = 0.0;
+    for (size_t g = 0; g < m_user_groups.size(); ++g) {
+        for (int a : m_user_groups[g].atoms) {
+            if (a < 0 || a >= n)
+                return reject(fmt::format("atom index {} out of range (0..{})", a, n - 1));
+            if (fraglist[a] != 0)
+                return reject(fmt::format("atom {} is in two groups", a));
+            fraglist[a] = static_cast<int>(g) + 1;
+        }
+        qfrag.push_back(m_user_groups[g].charge);
+        assigned += m_user_groups[g].charge;
+    }
+    if (m_user_groups_rest_per_fragment) {
+        // Claude Generated (Oct 2026): "rest": "per_fragment" (completeChargeGroupsPerFragment); "single" continues below unchanged
+        if (topo_fraglist == nullptr)
+            return reject("rest per_fragment needs the topological fragments");
+        int n_rest = 0;
+        const std::string why = completeChargeGroupsPerFragment(*topo_fraglist, fraglist, qfrag, n_rest);
+        if (!why.empty())
+            return reject(why);
+        m_frag_override.active = true;
+        m_frag_override.fraglist = fraglist;
+        m_frag_override.nfrag = static_cast<int>(qfrag.size());
+        m_frag_override.qfrag = qfrag;
+        m_frag_is_variant = true; // no ensemble blending on top of user groups
+        if (CurcumaLogger::get_verbosity() >= 1)
+            CurcumaLogger::info(fmt::format("GFNFF charge_groups: {} groups + {} uncovered fragments (rest per_fragment, charge 0 each), {} topological fragments, EEQ constraint rows {}",
+                m_user_groups.size(), n_rest, nfrag_topological, qfrag.size()));
+        return;
+    }
+    int nfrag = static_cast<int>(m_user_groups.size());
+    const bool rest = std::any_of(fraglist.begin(), fraglist.end(), [](int f) { return f == 0; });
+    const double rest_charge = static_cast<double>(m_charge) - assigned;
+    if (rest) {
+        ++nfrag;
+        for (int& f : fraglist)
+            if (f == 0)
+                f = nfrag;
+        qfrag.push_back(rest_charge);
+    } else if (std::abs(rest_charge) > 1e-6) {
+        return reject(fmt::format("the groups cover all atoms but their charges sum to {:.4f}, molecule charge is {}", assigned, m_charge));
+    }
+    if (nfrag_topological > 1) {
+        // every topological fragment must lie completely inside one group (the fragment charges are then well defined)
+        std::map<int, int> owner;
+        for (int i = 0; i < n; ++i) {
+            auto it = owner.find((*topo_fraglist)[i]);
+            if (it == owner.end())
+                owner[(*topo_fraglist)[i]] = fraglist[i];
+            else if (it->second != fraglist[i])
+                return reject(fmt::format("group borders cut through a topological fragment (atom {}): with several fragments every group must be a union of whole fragments", i));
+        }
+    }
+    m_frag_override.active = true; // same override the frag_charge_model variants use (setFragmentOverride)
+    m_frag_override.fraglist = fraglist;
+    m_frag_override.nfrag = nfrag;
+    m_frag_override.qfrag = qfrag;
+    m_frag_is_variant = true;       // no ensemble blending on top of user groups
+    if (CurcumaLogger::get_verbosity() >= 1)
+        CurcumaLogger::info(fmt::format("GFNFF charge_groups: {} groups + {} (rest charge {:.3f}), EEQ constraint rows {}",
+            m_user_groups.size(), rest ? "remaining atoms" : "no remainder", rest ? rest_charge : 0.0, nfrag));
+}
+
+/**
+ * @brief Nominal sigma valence of a partner atom for condition (c) of the onium perception
+ *
+ * Claude Generated (Oct 2026). Same table as rev-gfnff's GFNFF::revValence (curcuma_branches/curcuma, Oct 2026):
+ * H, halogens 1; O 2; N, B, Al 3; C, Si 4; He/Ne/Ar 0; every other element 6 (hypervalent main group and
+ * metals: never counted as over-coordinated, so S and P partners do not block).
+ */
+static int oniumPartnerValence(int Z)
+{
+    switch (Z) {
+    case 1: case 9: case 17: case 35: case 53: return 1;
+    case 2: case 10: case 18: return 0;
+    case 5: case 13: case 7: return 3;
+    case 6: case 14: return 4;
+    case 8: return 2;
+    default: return 6;
+    }
+}
+
+/**
+ * @brief Perceive onium centres (NR4+, R3O+) for -gfnff.charge_groups auto
+ *
+ * Claude Generated (Oct 2026). Origin: the onium rule of rev-gfnff stage 3a(ii)
+ * (FFWorkspace::prepareConservingShare, -gfnff.rev_share_onium_rule, Oct 17, 2026; evaluation of 38 onium
+ * structures in GMTKN55/MOR41/S30L-CI in test_cases/revgfnff_share_onium/REPORT_onium.md of that branch).
+ * A centre is an N with exactly 4 or an O with exactly 3 partners in the full neighbour list nb_full (the list the
+ * fragment search uses), accepted when
+ *   (a) the system is closed shell: spin 0 and (sum Z - charge) even;
+ *   (b) no partner is a metal (PeriodicTable::getMetalType > 0);
+ *   (c) no partner has more partners than its nominal valence (oniumPartnerValence; a bridging H blocks);
+ *   (d) the fragment is a cation: qfrag >= +1. The fragment charge is fixed before any EEQ solve; the Phase-1
+ *       topology charges, which the rev rule reads, depend on the groups made here and would be circular.
+ * This mode works only for one fragment (nfrag == 1), so qfrag[0] = m_charge and (d) is m_charge >= 1. The rev rule's
+ * second branch of (d), an odd electron count of the component (cation of a neutral ion pair), cannot occur:
+ * the component is the whole molecule and (a) makes its electron count even.
+ * @return centres, 0-based, ascending (independent of the atom order as a set)
+ */
+std::vector<int> GFNFF::perceiveOniumCentres(const TopologyInfo& topo_info, int nfrag_topological, bool valence_only) const
+{
+    // valence_only (Claude Generated, Oct 2026): conditions (a)-(c) only, no fragment count and no cation test (d);
+    // used by charge_groups ionpairs, where the cation test is the fragment-charge rule itself.
+    std::vector<int> centres;
+    const int n = m_atomcount;
+    if ((!valence_only && nfrag_topological != 1) || static_cast<int>(topo_info.nb_full.size()) != n)
+        return centres;
+    long electrons = -static_cast<long>(m_charge);
+    for (int i = 0; i < n; ++i)
+        electrons += m_atoms[i];
+    if (m_spin != 0 || (electrons % 2) != 0) // (a)
+        return centres;
+    if (!valence_only && m_charge < 1) // (d), qfrag[0] == m_charge for one fragment
+        return centres;
+    for (int i = 0; i < n; ++i) {
+        const int Z = m_atoms[i];
+        const int nb = static_cast<int>(topo_info.nb_full[i].size());
+        if (!((Z == 7 && nb == 4) || (Z == 8 && nb == 3)))
+            continue;
+        bool blocked = false;
+        for (int j : topo_info.nb_full[i]) {
+            const int Zj = m_atoms[j];
+            if (PeriodicTable::getMetalType(Zj) > 0                                              // (b)
+                || static_cast<int>(topo_info.nb_full[j].size()) > oniumPartnerValence(Zj)) {    // (c)
+                blocked = true;
+                break;
+            }
+        }
+        if (!blocked)
+            centres.push_back(i);
+    }
+    return centres;
+}
+
+/**
+ * @brief -gfnff.charge_groups auto: one +1 group per onium centre, then the same override as a group file
+ *
+ * Claude Generated (Oct 2026). Group = every atom within m_charge_group_radius bonds of the centre (breadth-first
+ * search on nb_full). The whole mode is rejected with a warning, and the run continues without groups, when two
+ * groups share an atom or when there are more centres than the molecule charge (a second, invisible charge
+ * carrier). All decisions use sets of atoms, never the atom order (Known Issue #34).
+ */
+void GFNFF::buildAutoChargeGroups(const TopologyInfo& topo_info, int nfrag_topological) const
+{
+    m_auto_groups_done = true;
+    m_user_groups.clear();
+    if (nfrag_topological != 1) {
+        CurcumaLogger::warn(fmt::format("GFNFF charge_groups auto ignored: the molecule has {} fragments, groups are supported inside one connected molecule only", nfrag_topological));
+        return;
+    }
+    const std::vector<int> centres = perceiveOniumCentres(topo_info, nfrag_topological);
+    int n_n = 0, n_o = 0;
+    for (int c : centres)
+        (m_atoms[c] == 7 ? n_n : n_o)++;
+    if (centres.empty()) {
+        if (CurcumaLogger::get_verbosity() >= 1)
+            CurcumaLogger::result(fmt::format("GFNFF charge_groups auto: 0 onium centres (charge {}, spin {}), no groups", m_charge, m_spin));
+        return;
+    }
+    if (static_cast<int>(centres.size()) > m_charge) {
+        CurcumaLogger::warn(fmt::format("GFNFF charge_groups auto ignored: {} onium centres but molecule charge {} (another charge carrier is not visible), no groups",
+            centres.size(), m_charge));
+        return;
+    }
+    const int n = m_atomcount;
+    std::vector<int> owner(n, -1);
+    std::vector<UserChargeGroup> groups;
+    for (size_t g = 0; g < centres.size(); ++g) {
+        std::vector<int> dist(n, -1);
+        std::queue<int> q;
+        dist[centres[g]] = 0;
+        q.push(centres[g]);
+        UserChargeGroup group;
+        group.charge = 1.0;
+        while (!q.empty()) {
+            const int a = q.front();
+            q.pop();
+            group.atoms.push_back(a);
+            if (dist[a] >= m_charge_group_radius)
+                continue;
+            for (int b : topo_info.nb_full[a])
+                if (dist[b] < 0) {
+                    dist[b] = dist[a] + 1;
+                    q.push(b);
+                }
+        }
+        std::sort(group.atoms.begin(), group.atoms.end());
+        for (int a : group.atoms) {
+            if (owner[a] >= 0) {
+                CurcumaLogger::warn(fmt::format("GFNFF charge_groups auto ignored: atom {} lies within {} bonds of the onium centres {} and {}, no groups",
+                    a, m_charge_group_radius, centres[owner[a]], centres[g]));
+                return;
+            }
+            owner[a] = static_cast<int>(g);
+        }
+        groups.push_back(std::move(group));
+    }
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        std::string sizes;
+        for (const auto& group : groups)
+            sizes += fmt::format(" {}", group.atoms.size());
+        CurcumaLogger::result(fmt::format("GFNFF charge_groups auto: {} onium centres (N {}, O {}), radius {}, group sizes{}",
+            centres.size(), n_n, n_o, m_charge_group_radius, sizes));
+    }
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        for (size_t g = 0; g < groups.size(); ++g) {
+            std::string atoms;
+            for (int a : groups[g].atoms)
+                atoms += fmt::format(" {}", a);
+            CurcumaLogger::info(fmt::format("GFNFF charge_groups auto group {}: centre {} atoms{}", g + 1, centres[g], atoms));
+        }
+    }
+    m_user_groups = std::move(groups);
+    applyUserChargeGroups(nfrag_topological);
+}
+
+/**
+ * @brief -gfnff.charge_groups ionpairs: formal charges on the whole fragments of a NEUTRAL ion pair (EXPERIMENTAL)
+ *
+ * Claude Generated (Oct 2026). GFN-FF constrains every topological fragment to an integer charge; for a neutral system
+ * of several fragments the reference sets every fragment to 0 (qfrag = [0, ...]; frag_charge_model has no net charge to
+ * place), so the cation and the anion of an ion pair are both neutral, while the separated ions of a reaction energy are
+ * computed with their charges. This rule (the "parity rule") sets the formal fragment charges:
+ *   1. only Q = 0, nfrag >= 2 (the topological fragments GFN-FF constrains in its EEQ);
+ *   2. cation fragments: fragments with onium centres (perceiveOniumCentres valence_only: closed-shell system, N with 4 /
+ *      O with 3 partners, no metal or over-coordinated partner); with ionpair_aromatic also the 7-pi C/N rings of
+ *      perceiveAromaticCationRings; +q per centre (q = ionpair_charge, 1.0 = formal); n_plus = number of centres;
+ *   3. anion fragments: the fragments without a centre whose NEUTRAL electron count (sum Z) is odd. A fragment with an
+ *      even count cannot be a closed-shell mono-ion and stays neutral (a host or solvent molecule); exactly n_plus such
+ *      fragments are required, each gets -q; any other count is ambiguous and nothing happens (warning);
+ *   4. every cation fragment must have an even electron count at its formal charge, else nothing happens (warning).
+ * Input: the FINAL topology of the reference q-loop (fragments and nb_full after pass 2). One group per fragment
+ * (neutral fragments get their own group with charge 0, so no charge flows between them), in fragment order, into
+ * m_user_groups; calculateTopologyInfo then rebuilds the topology and applyUserChargeGroups puts them into Phase 10 of
+ * pass 1, as for a group file. The groups are constants of the topology: the analytic gradient needs no extra term.
+ * Decisions use atom sets (centres, fragment membership), not the atom order (Known Issue #34). Perceived once per
+ * instance (like auto): a later geometry or bond change keeps the groups.
+ * Intended for stable ion pairs; for proton-transfer transition states and shared-proton complexes the formal charges
+ * are wrong (GMTKN55 WCPT18/PX13 errors grow by up to 143 kcal/mol, docs/FRAG_CHARGE_MODEL.md).
+ */
+void GFNFF::buildIonPairChargeGroups(const TopologyInfo& topo_info, int nfrag_topological, const std::vector<int>& topo_fraglist) const
+{
+    m_ionpair_done = true;
+    m_user_groups.clear();
+    const int n = m_atomcount;
+    const bool verbose = CurcumaLogger::get_verbosity() >= 1;
+    auto off = [&](const std::string& why, bool warn) {
+        if (warn)
+            CurcumaLogger::warn("GFNFF charge_groups ionpairs: " + why + ", no effect");
+        else if (verbose)
+            CurcumaLogger::result("GFNFF charge_groups ionpairs: " + why + ", no effect");
+    };
+    if (static_cast<int>(topo_fraglist.size()) != n || static_cast<int>(topo_info.nb_full.size()) != n)
+        return off("topology incomplete", true);
+    const int nf = nfrag_topological;
+    if (nf <= 1)
+        return off(fmt::format("{} fragment(s)", nf), false);
+    if (m_charge != 0)
+        return off(fmt::format("charge {} (neutral systems only; a net charge is placed by frag_charge_model)", m_charge), false);
+    const std::vector<int> centres = perceiveOniumCentres(topo_info, nf, true); // closed-shell test (spin 0, even count) inside
+    // ionpair_aromatic: one centre per aromatic cation ring, represented by its first atom (only the fragment matters)
+    std::vector<int> ring_centres;
+    if (m_ionpair_aromatic)
+        for (const auto& ring : perceiveAromaticCationRings(topo_info))
+            ring_centres.push_back(ring.front());
+    std::vector<int> n_centres(nf, 0), n_atoms(nf, 0);
+    std::vector<long> sum_z(nf, 0);
+    for (int i = 0; i < n; ++i) {
+        const int f = topo_fraglist[i] - 1;
+        if (f < 0 || f >= nf)
+            return off("fragment list inconsistent", true);
+        sum_z[f] += m_atoms[i];
+        n_atoms[f]++;
+    }
+    int n_n = 0, n_o = 0;
+    for (int c : centres) {
+        n_centres[topo_fraglist[c] - 1]++;
+        (m_atoms[c] == 7 ? n_n : n_o)++;
+    }
+    for (int c : ring_centres)
+        n_centres[topo_fraglist[c] - 1]++;
+    int n_plus = 0, n_cat = 0, n_an = 0;
+    std::vector<char> anion(nf, 0);
+    for (int f = 0; f < nf; ++f) {
+        n_plus += n_centres[f];
+        n_cat += n_centres[f] > 0;
+        if (n_centres[f] == 0 && (sum_z[f] % 2) != 0) {
+            anion[f] = 1;
+            ++n_an;
+        }
+    }
+    const std::string head = fmt::format("{} fragments, {} cation centres (onium N {}, onium O {}, aromatic rings {}) in {} cation fragments, {} odd-electron fragments without a centre",
+        nf, n_plus, n_n, n_o, ring_centres.size(), n_cat, n_an);
+    if (n_plus == 0)
+        return off(head + fmt::format(" (spin {}), no cation fragment", m_spin), false);
+    for (int f = 0; f < nf; ++f)
+        if (n_centres[f] > 0 && ((sum_z[f] - n_centres[f]) % 2) != 0)
+            return off(head + fmt::format(", cation fragment {} ({} atoms) would have an odd electron count at formal charge {:+d}", f + 1, n_atoms[f], n_centres[f]), true);
+    if (n_an != n_plus)
+        return off(head + fmt::format(" but {} anions needed: ambiguous", n_plus), true);
+    const double q = m_ionpair_charge;
+    std::vector<UserChargeGroup> groups(nf);
+    for (int i = 0; i < n; ++i)
+        groups[topo_fraglist[i] - 1].atoms.push_back(i); // ascending within each fragment
+    std::string desc;
+    for (int f = 0; f < nf; ++f) {
+        groups[f].charge = n_centres[f] > 0 ? q * n_centres[f] : (anion[f] ? -q : 0.0);
+        desc += fmt::format(" {}:{}/{:+.2f}", f + 1, n_atoms[f], groups[f].charge);
+    }
+    if (verbose) {
+        CurcumaLogger::result("GFNFF charge_groups ionpairs: " + head + fmt::format(", roles (fragment:atoms/charge){}; {} cation fragment(s) {:+.4f} per centre, {} anion fragment(s) {:+.4f} each",
+            desc, n_cat, q, n_an, -q));
+        CurcumaLogger::result("GFNFF charge_groups ionpairs: intended for stable ion pairs, NOT for reactions with a shared proton (proton-transfer transition states, H3O+/OH- or NH4+/NH2- type complexes)");
+    }
+    m_user_groups = std::move(groups); // applied by calculateTopologyInfo (rebuilt q-loop, Phase 10 of pass 1)
+}
+
+/**
+ * @brief Aromatic cation rings (pyridinium, imidazolium type) for -gfnff.ionpair_aromatic (EXPERIMENTAL)
+ *
+ * Claude Generated (Oct 2026). Runs in Phase 10, before GFN-FF's own hybridization and ring search, so it reads partner
+ * counts on nb_full. A ring qualifies when
+ *   - it is a chordless 5- or 6-membered cycle of C and N only; every ring C has exactly 3 partners, every ring N 2 or 3;
+ *   - every exocyclic partner of a ring atom is an H with one partner or a C with exactly 4 partners (no exocyclic pi
+ *     bond, no heteroatom or metal substituent; conservative: substituted or fused aromatics are not recognised);
+ *   - no ring atom lies in a second qualifying cycle (no fused systems);
+ *   - the Hueckel electron count is 7: C 1, pyridine-type N (2 partners) 1, pyrrole-type N (3 partners) 2. Seven pi
+ *     electrons of a closed-shell aromatic ring mean one was given up: a 6-pi cation. Pyrrole, imidazole and pyridine
+ *     count 6 and are not touched.
+ * Closed shell is required (spin 0, even electron count of the system). The cycles are found as sorted atom sets with
+ * the smallest index as the start (each cycle once), so the result is a property of the atom set, not of the order.
+ * @return one ascending atom list per qualifying ring, sorted
+ */
+std::vector<std::vector<int>> GFNFF::perceiveAromaticCationRings(const TopologyInfo& topo_info) const
+{
+    std::vector<std::vector<int>> out;
+    const int n = m_atomcount;
+    if (static_cast<int>(topo_info.nb_full.size()) != n)
+        return out;
+    long electrons = -static_cast<long>(m_charge);
+    for (int i = 0; i < n; ++i)
+        electrons += m_atoms[i];
+    if (m_spin != 0 || (electrons % 2) != 0)
+        return out;
+    const auto& nb = topo_info.nb_full;
+    std::vector<char> cand(n, 0);
+    for (int i = 0; i < n; ++i) {
+        const int k = static_cast<int>(nb[i].size());
+        cand[i] = (m_atoms[i] == 6 && k == 3) || (m_atoms[i] == 7 && (k == 2 || k == 3));
+    }
+    // all simple cycles of length 5 or 6 inside the candidate subgraph; start = smallest atom of the cycle
+    std::set<std::vector<int>> cycles;
+    std::vector<int> path;
+    std::vector<char> on_path(n, 0);
+    std::function<void(int, int)> dfs = [&](int start, int cur) {
+        for (int nxt : nb[cur]) {
+            if (!cand[nxt] || nxt < start)
+                continue;
+            if (nxt == start && path.size() >= 5) {
+                std::vector<int> c = path;
+                std::sort(c.begin(), c.end());
+                cycles.insert(c);
+                continue;
+            }
+            if (on_path[nxt] || path.size() >= 6)
+                continue;
+            on_path[nxt] = 1;
+            path.push_back(nxt);
+            dfs(start, nxt);
+            path.pop_back();
+            on_path[nxt] = 0;
+        }
+    };
+    for (int s = 0; s < n; ++s) {
+        if (!cand[s])
+            continue;
+        path.assign(1, s);
+        on_path[s] = 1;
+        dfs(s, s);
+        on_path[s] = 0;
+    }
+    std::vector<int> n_cycles(n, 0);
+    for (const auto& c : cycles)
+        for (int a : c)
+            n_cycles[a]++;
+    for (const auto& c : cycles) {
+        bool ok = true;
+        int pi = 0;
+        for (int a : c) {
+            if (n_cycles[a] != 1) { // fused or bridged
+                ok = false;
+                break;
+            }
+            int in_ring = 0;
+            for (int b : nb[a]) {
+                if (std::binary_search(c.begin(), c.end(), b)) {
+                    ++in_ring;
+                    continue;
+                }
+                const int zb = m_atoms[b];
+                const int kb = static_cast<int>(nb[b].size());
+                if (!((zb == 1 && kb == 1) || (zb == 6 && kb == 4))) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (!ok || in_ring != 2) { // a chord makes the cycle not a ring of its own
+                ok = false;
+                break;
+            }
+            pi += (m_atoms[a] == 7 && nb[a].size() == 3) ? 2 : 1;
+        }
+        if (ok && pi == 7)
+            out.push_back(c);
+    }
+    return out;
+}
+
 bool GFNFF::importTopology(const json& topo_json)
 {
     if (topo_json.empty()) {
@@ -3751,6 +4621,8 @@ bool GFNFF::initializeForceField()
         CurcumaLogger::error(std::string("GFN-FF parameter generation failed: ") + e.what());
         return false;
     }
+    if (m_topology_mode == "react")
+        refreshReactBondOrders();
 
     // Claude Generated (April 2026): Forward term enable/disable flags from config to parameter set.
     // User flags may be under m_parameters["gfnff"] (controller JSON sub-object).
@@ -3820,12 +4692,15 @@ bool GFNFF::initializeForceField()
         m_workspace = std::make_unique<FFWorkspace>(num_threads);
         m_workspace->setAtomTypes(m_atoms);
         m_workspace->setFarfieldShortcut(m_parameters.value("farfield_shortcut", true));  // Oct 2026; fallback = PARAM default
+        m_workspace->setCnZeroGuard(cnZeroGuardEffective());                               // Oct 2026; PARAM (fallback false = reference) or a fragment-charge override (Oct 31, 2026)
 
         // Keep a copy for external consumers (full pair lists only when a GPU wrapper asked
         // for them, bonded terms otherwise), then MOVE the set into the workspace. The former
         // two full copies cost ~3 s / 1.2 GB on a 3000-atom water box (B3, Sep 2026).
         m_cached_parameter_set = makeParameterSetCache(ff_params);
         m_workspace->setInteractionLists(std::move(ff_params));
+        if (m_record_hb_energies && !m_hb_energy_source)   // Oct 2026: a GPU source records on the device
+            m_workspace->setRecordHBondEnergies(true);
 
         if (num_threads > 1 && threadPool()) {
             m_workspace->setPool(threadPool());
@@ -4085,39 +4960,114 @@ GFNFF::BondHBRebuildResult GFNFF::rebuildBondHBData(
     const std::vector<GFNFFHydrogenBond>& hbonds,
     const std::vector<Bond>& bonds) const
 {
+    return rebuildBondHBDataCore(hbonds.size(),
+        [&hbonds](size_t m, int& A, int& H, int& B) { const auto& hb = hbonds[m]; A = hb.i; H = hb.j; B = hb.k; },
+        bonds);
+}
+
+GFNFF::BondHBRebuildResult GFNFF::rebuildBondHBDataFromTriples(
+    const std::vector<int>& hb_i, const std::vector<int>& hb_j, const std::vector<int>& hb_k,
+    const std::vector<Bond>& bonds) const
+{
+    return rebuildBondHBDataCore(hb_i.size(),
+        [&](size_t m, int& A, int& H, int& B) { A = hb_i[m]; H = hb_j[m]; B = hb_k[m]; },
+        bonds);
+}
+
+GFNFF::BondHBRebuildResult GFNFF::rebuildBondHBDataCore(
+    size_t n_hb, const std::function<void(size_t, int&, int&, int&)>& get_hb,
+    const std::vector<Bond>& bonds) const
+{
     BondHBRebuildResult result;
     const int nb = static_cast<int>(bonds.size());
     result.bond_nr_hb.assign(nb, 0);
     result.bond_hb_H_atom.assign(nb, -1);
 
-    // Build A-H → B_atoms map from the new HB list (only N/O acceptors).
-    // Claude Generated (Oct 2026): hash map instead of std::map (only find() is used; each
-    // B list keeps the HB-list order), 56k entries per re-detection at 7320 atoms.
-    auto ah_key = [](int a, int h) { return (static_cast<long long>(a) << 32) ^ static_cast<unsigned int>(h); };
-    std::unordered_map<long long, std::vector<int>> ah_to_b_atoms;
-    ah_to_b_atoms.reserve(hbonds.size());
-    for (const auto& hb : hbonds) {
-        int z_b = (hb.k < m_atomcount) ? m_atoms[hb.k] : 0;
-        if (z_b == 7 || z_b == 8)
-            ah_to_b_atoms[ah_key(hb.i, hb.j)].push_back(hb.k);
+    // Claude Generated (Oct 2026): only the (A, H) pairs of X-H bonds with A = N or O are ever
+    // looked up, so the B lists are collected for those keys alone (per-H key table, a few
+    // entries per hydrogen) instead of a hash map over the (A, H) pair of every H bond (case 1
+    // included). Same B lists in HB-list order, same entries in bond order; 16 -> 6.6 ms per
+    // call with 582k H bonds (urea400-water1000).
+    auto bond_key_atoms = [&](const Bond& bond, int& hbA, int& hbH) -> bool {
+        hbH = -1; hbA = -1;
+        if (bond.i < m_atomcount && m_atoms[bond.i] == 1) { hbH = bond.i; hbA = bond.j; }
+        else if (bond.j < m_atomcount && m_atoms[bond.j] == 1) { hbH = bond.j; hbA = bond.i; }
+        else return false;
+        return !(hbA >= m_atomcount || (m_atoms[hbA] != 7 && m_atoms[hbA] != 8));
+    };
+    // Keys per hydrogen as CSR: key_A[key_off[H] .. key_off[H+1]) are the A atoms, key ids in
+    // key_id; the same (A, H) from two bonds shares one key, as in the former map.
+    std::vector<int> key_off(m_atomcount + 1, 0);
+    for (int b = 0; b < nb; ++b) {
+        int hbA, hbH;
+        if (bond_key_atoms(bonds[b], hbA, hbH)) ++key_off[hbH + 1];
+    }
+    for (int a = 0; a < m_atomcount; ++a) key_off[a + 1] += key_off[a];
+    std::vector<int> key_A(key_off[m_atomcount], -1), key_id(key_off[m_atomcount], -1);
+    std::vector<int> key_fill(key_off.begin(), key_off.end() - 1);
+    std::vector<int> bond_key(nb, -1);
+    int nkeys = 0;
+    for (int b = 0; b < nb; ++b) {
+        int hbA, hbH;
+        if (!bond_key_atoms(bonds[b], hbA, hbH)) continue;
+        int id = -1;
+        for (int q = key_off[hbH]; q < key_fill[hbH]; ++q)
+            if (key_A[q] == hbA) { id = key_id[q]; break; }
+        if (id < 0) {
+            id = nkeys++;
+            key_A[key_fill[hbH]] = hbA;
+            key_id[key_fill[hbH]] = id;
+            ++key_fill[hbH];
+        }
+        bond_key[b] = id;
+    }
+    // Claude Generated (Oct 2026): the pass over the H-bond list (582k entries of ~200 bytes each on
+    // urea400-water1000, memory-bound) runs in parallel chunks; every chunk records its (key, B)
+    // hits in list order, and the chunks are joined in order, so each key's B list is the serial one.
+    std::vector<std::vector<int>> key_B(nkeys);
+    {
+        const size_t nhbs = n_hb;
+        const int T = (nhbs < 20000) ? 1 : std::max(1, m_threads);
+        // Oct 2026: 16 chunks per thread (was 4). A device-built list grouped by case type (ROCm) has all hits
+        // (cases 2-4) in its last quarter; with 4 chunks per thread those heavy chunks were scheduled last
+        // (3.1-4.0 ms instead of 2.0-2.5 ms at 590k triples). The joined result does not depend on the count.
+        const int nchunk = (T == 1) ? 1 : 16 * T;
+        std::vector<std::vector<std::pair<int, int>>> hits(nchunk);
+        auto scan = [&](int c) {
+            const size_t a = nhbs * c / nchunk, e = nhbs * (c + 1) / nchunk;
+            auto& out = hits[c];
+            for (size_t m = a; m < e; ++m) {
+                int hb_A, hb_H, hb_B;
+                get_hb(m, hb_A, hb_H, hb_B);
+                int z_b = (hb_B < m_atomcount) ? m_atoms[hb_B] : 0;
+                if (z_b != 7 && z_b != 8) continue;
+                if (hb_H < 0 || hb_H >= m_atomcount) continue;
+                for (int q = key_off[hb_H]; q < key_fill[hb_H]; ++q)
+                    if (key_A[q] == hb_A) { out.emplace_back(key_id[q], hb_B); break; }
+            }
+        };
+        if (nchunk == 1) {
+            scan(0);
+        } else {
+            #pragma omp parallel for num_threads(T) schedule(dynamic, 1)
+            for (int c = 0; c < nchunk; ++c) scan(c);
+        }
+        std::vector<int> cnt(nkeys, 0);
+        for (const auto& h : hits) for (const auto& kb : h) ++cnt[kb.first];
+        for (int id = 0; id < nkeys; ++id) key_B[id].reserve(cnt[id]);
+        for (const auto& h : hits) for (const auto& kb : h) key_B[kb.first].push_back(kb.second);
     }
 
     for (int b = 0; b < nb; ++b) {
-        const Bond& bond = bonds[b];
-        int hbH = -1, hbA = -1;
-        if (bond.i < m_atomcount && m_atoms[bond.i] == 1) { hbH = bond.i; hbA = bond.j; }
-        else if (bond.j < m_atomcount && m_atoms[bond.j] == 1) { hbH = bond.j; hbA = bond.i; }
-        else continue;
-        if (hbA >= m_atomcount || (m_atoms[hbA] != 7 && m_atoms[hbA] != 8)) continue;
-
-        auto it = ah_to_b_atoms.find(ah_key(hbA, hbH));
-        if (it != ah_to_b_atoms.end() && !it->second.empty()) {
-            result.bond_nr_hb[b] = static_cast<int>(it->second.size());
-            result.bond_hb_H_atom[b] = hbH;
-            BondHBEntry entry;
-            entry.A = hbA; entry.H = hbH; entry.B_atoms = it->second;
-            result.bond_hb_data.push_back(entry);
-        }
+        const int id = bond_key[b];
+        if (id < 0 || key_B[id].empty()) continue;
+        int hbA, hbH;
+        bond_key_atoms(bonds[b], hbA, hbH);
+        result.bond_nr_hb[b] = static_cast<int>(key_B[id].size());
+        result.bond_hb_H_atom[b] = hbH;
+        BondHBEntry entry;
+        entry.A = hbA; entry.H = hbH; entry.B_atoms = key_B[id];
+        result.bond_hb_data.push_back(entry);
     }
     return result;
 }
@@ -8761,14 +9711,28 @@ double GFNFF::estimateXBStrength(int A, int X, int B,
     return std::abs(R_damp * Q_B * acidity_X * Q_X);
 }
 
-std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& charges) const
+std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& charges,
+                                                                std::vector<GFNFFHydrogenBond>* storage) const
 {
+    static const bool dhb_log = [] { const char* e = std::getenv("CURCUMA_GFNFF_STEPPHASE"); return e && *e && std::string(e) != "0"; }();
+    auto dhb_t = std::chrono::steady_clock::now();
+    auto dhb_lap = [&](const char* what) {
+        if (!dhb_log) return;
+        const auto now = std::chrono::steady_clock::now();
+        fmt::print(stderr, "DHB {} {:.2f}\n", what, std::chrono::duration<double, std::milli>(now - dhb_t).count());
+        dhb_t = now;
+    };
     // Claude Generated (March 2026): Native struct version of detectHydrogenBonds
     auto start_time = std::chrono::high_resolution_clock::now();
 
     using namespace GFNFFParameters;
 
     std::vector<GFNFFHydrogenBond> hbonds;
+    // Oct 2026: the entries of the previous list (see updateHBXBIfNeeded()) are reused as the
+    // slots of the new list in the parallel cell-list branch below; the other branches do not use
+    // them (they are destroyed on return).
+    std::vector<GFNFFHydrogenBond> recycled;
+    if (storage) recycled.swap(*storage);
 
     // Claude Generated (2025): Phase 2.1 - Hydrogen Bond Detection
     // Reference: gfnff_ini.f90:806-839 and gfnff_ini2.f90:1063-1113
@@ -8877,6 +9841,7 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
     }
 
     CurcumaLogger::info(fmt::format("Found {} HB hydrogens", hb_hydrogens.size()));
+    dhb_lap("step0_and_hydrogens");
 
     // Step 2 & 3: Identify potential acceptor-donor pairs (A-B) and actual HB contacts
     // Claude Generated (Feb 25, 2026): Rewritten to match Fortran gfnff_ini2.f90:700-748
@@ -9008,6 +9973,7 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
         }
     }
 
+    dhb_lap("ab_pairs");
     // Lambda to create HB native entry for nhb2 (Case 2, 3, or 4). Returns true iff an entry
     // was actually appended (false on the pre-existing is_bonded skip or the new lever-1
     // strength skip) so callers can keep the verbosity-3 nhb2_count diagnostic accurate.
@@ -9132,7 +10098,70 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
             out.push_back(std::move(hb));
         };
 
-        auto process_pair = [&](int i, int j, std::vector<GFNFFHydrogenBond>& out) {
+        // Claude Generated (Oct 2026): the case-1 strength test of estimateHBStrengthCase1() on
+        // plain doubles (no Vector copies). Returns +1 (keep) or -1 (drop) only when the value is
+        // more than a relative 1e-6 away from the threshold and the out-of-line exponent is more
+        // than 1e-6 away from its cut at 15; otherwise 0 and the caller runs the exact function.
+        // The two evaluations differ by a few ulp in the distances, which moves the estimate by a
+        // relative amount far below 1e-6 (every factor is a product, quotient, power or exp of
+        // positive, well-conditioned terms), so every decision equals the exact one.
+        auto case1StrengthDecision = [&](int A, int H, int B, double thr) -> int {
+            using namespace GFNFFParameters;
+            const double ax = m_geometry_bohr(A, 0), ay = m_geometry_bohr(A, 1), az = m_geometry_bohr(A, 2);
+            const double hx = m_geometry_bohr(H, 0), hy = m_geometry_bohr(H, 1), hz = m_geometry_bohr(H, 2);
+            const double bx = m_geometry_bohr(B, 0), by = m_geometry_bohr(B, 1), bz = m_geometry_bohr(B, 2);
+            const double r_AH = std::sqrt((hx - ax) * (hx - ax) + (hy - ay) * (hy - ay) + (hz - az) * (hz - az));
+            const double r_HB = std::sqrt((bx - hx) * (bx - hx) + (by - hy) * (by - hy) + (bz - hz) * (bz - hz));
+            const double r_AB = std::sqrt((bx - ax) * (bx - ax) + (by - ay) * (by - ay) + (bz - az) * (bz - az));
+            const double r_vdw_AB = covalent_radii[m_atoms[A] - 1] + covalent_radii[m_atoms[B] - 1];
+            const double expo_outl = (HB_BACUT / r_vdw_AB) * ((r_AH + r_HB) / r_AB - 1.0);
+            if (std::abs(expo_outl - 15.0) < 1e-6) return 0;
+            if (expo_outl > 15.0) return (0.0 < thr * (1.0 - 1e-6)) ? -1 : 0;
+            // Upper bound first (no pow): Q_* < 1, damp_short < 1, bas <= max(Q_A b_A, Q_B b_B),
+            // aci <= max(a_A, a_B) (weighted means), 2/(1+e^x) <= 2 e^-x, damp_long with t^6 as a
+            // product. Most candidates are rejected here.
+            const double bA = current_basicity[A], bB = current_basicity[B];
+            const double aA = current_acidity[A], aB = current_acidity[B];
+            if (bA >= 0.0 && bB >= 0.0 && aA >= 0.0 && aB >= 0.0) {
+                const double t = r_AB * r_AB / HB_LONGCUT;
+                const double t2 = t * t;
+                const double outl_bound = (expo_outl > 0.0) ? 2.0 * std::exp(-expo_outl) : 2.0;
+                const double bound = std::max(bA, bB) * std::max(aA, aB) / (1.0 + t2 * t2 * t2)
+                    / (r_AB * r_AB * r_AB) * outl_bound;
+                if (std::isfinite(bound) && bound < thr * (1.0 - 1e-6)) return -1;
+            }
+            const double damp_outl = 2.0 / (1.0 + std::exp(expo_outl));
+            const double r_AH_4 = r_AH * r_AH * r_AH * r_AH;
+            const double r_HB_4 = r_HB * r_HB * r_HB * r_HB;
+            const double denom_DA = 1.0 / (r_AH_4 + r_HB_4);
+            const double Q_H = ws_charge_scaling(charges[H], HB_ST, HB_SF);
+            const double Q_A = ws_charge_scaling(-charges[A], HB_ST, HB_SF);
+            const double Q_B = ws_charge_scaling(-charges[B], HB_ST, HB_SF);
+            const double bas = (Q_A * current_basicity[A] * r_AH_4 + Q_B * current_basicity[B] * r_HB_4) * denom_DA;
+            const double aci = (current_acidity[B] * r_AH_4 + current_acidity[A] * r_HB_4) * denom_DA;
+            const double damp_short = ws_damping_short_range(r_AB, r_vdw_AB, HB_SCUT, HB_ALP);
+            const double damp_long = ws_damping_long_range(r_AB, HB_LONGCUT, HB_ALP);
+            const double rdamp = damp_short * damp_long / (r_AB * r_AB * r_AB);
+            const double est = std::abs(bas * aci * rdamp * Q_H * damp_outl);
+            if (!std::isfinite(est)) return 0;
+            if (est < thr * (1.0 - 1e-6)) return -1;
+            if (est > thr * (1.0 + 1e-6)) return 1;
+            return 0;
+        };
+
+        // Claude Generated (Oct 2026): the hydrogens around atom i (forEachNeighbor order, with
+        // the squared distance it computed) are the same for every pair (i, j); ab_pairs holds
+        // the pairs of one i consecutively, so each worker collects them once per i and walks
+        // the copy for every j. Same sequence, same r_iH^2 values as one query per pair.
+        // Stored as separate arrays so that the distance pre-test below vectorises; `crit` and
+        // `pass` are scratch arrays of the same length.
+        struct HCandidateCache {
+            int i = -1;
+            std::vector<int> H;
+            std::vector<double> r2, x, y, z, crit;
+            std::vector<int> pass;
+        };
+        auto process_pair = [&](int i, int j, std::vector<GFNFFHydrogenBond>& out, HCandidateCache& hcache) {
             const Vector r_i = m_geometry_bohr.row(i);
             const Vector r_j = m_geometry_bohr.row(j);
             const double r_AB_sq = (r_i - r_j).squaredNorm();
@@ -9145,18 +10174,78 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
                     make_nhb2(j, H, i, out);
                 }
             }
-            hyd_cells.forEachNeighbor(i, hbthr2, [&](int H, double r_iH_sq) {
-                if (!is_hb_hyd[H]) return;
-                if (is_bonded(i, H) || is_bonded(j, H)) return;  // bonded to neither
-                const Vector r_H = m_geometry_bohr.row(H);
-                const double r_jH_sq = (r_j - r_H).squaredNorm();
-                if (r_AB_sq + r_iH_sq + r_jH_sq < hbthr2) {
+            // Claude Generated (Oct 2026): conservative pre-test of the case-1 criterion below on
+            // plain doubles, before the bond look-ups and the Vector copy of r_H. r_jH^2 computed
+            // here differs from the Eigen value by a few ulp; with the relative margin 1e-9 a
+            // rejected hydrogen fails the exact test r_AB^2 + r_iH^2 + r_jH^2 < hbthr2 as well, so
+            // the visited sequence and every appended entry are unchanged. 85 % of the visits on
+            // urea400-water1000 end here.
+            const double xj = m_geometry_bohr(j, 0), yj = m_geometry_bohr(j, 1), zj = m_geometry_bohr(j, 2);
+            const double case1_reject = hbthr2 * (1.0 + 1e-9);
+            const double case1_accept = hbthr2 * (1.0 - 1e-9);
+            if (hcache.i != i) {
+                hcache.H.clear(); hcache.r2.clear(); hcache.x.clear(); hcache.y.clear(); hcache.z.clear();
+                hyd_cells.forEachNeighbor(i, hbthr2, [&](int H, double r_iH_sq) {
+                    hcache.H.push_back(H);
+                    hcache.r2.push_back(r_iH_sq);
+                    hcache.x.push_back(m_geometry_bohr(H, 0));
+                    hcache.y.push_back(m_geometry_bohr(H, 1));
+                    hcache.z.push_back(m_geometry_bohr(H, 2));
+                });
+                hcache.crit.resize(hcache.H.size());
+                hcache.pass.resize(hcache.H.size());
+                hcache.i = i;
+            }
+            // Pass 1 (vectorisable): the plain-double criterion for every candidate; pass 2 keeps
+            // the indices below the reject bound in their original order.
+            const int ncand = static_cast<int>(hcache.H.size());
+            {
+                const double* cx = hcache.x.data();
+                const double* cy = hcache.y.data();
+                const double* cz = hcache.z.data();
+                const double* cr = hcache.r2.data();
+                double* cc = hcache.crit.data();
+                for (int q = 0; q < ncand; ++q) {
+                    const double dx = xj - cx[q];
+                    const double dy = yj - cy[q];
+                    const double dz = zj - cz[q];
+                    cc[q] = r_AB_sq + cr[q] + (dx * dx + dy * dy + dz * dz);
+                }
+            }
+            int npass = 0;
+            {
+                const double* cc = hcache.crit.data();
+                int* pp = hcache.pass.data();
+                for (int q = 0; q < ncand; ++q) {
+                    pp[npass] = q;
+                    npass += (cc[q] < case1_reject) ? 1 : 0;
+                }
+            }
+            for (int pq = 0; pq < npass; ++pq) {
+                const int q = hcache.pass[pq];
+                const int H = hcache.H[q];
+                const double r_iH_sq = hcache.r2[q];
+                const double crit = hcache.crit[q];
+                if (!is_hb_hyd[H]) continue;
+                if (is_bonded(i, H) || is_bonded(j, H)) continue;  // bonded to neither
+                // Claude Generated (Oct 2026): outside the +-1e-9 band the plain-double value
+                // decides the same as the exact Eigen expression; inside it the exact one decides.
+                if (!(crit < case1_accept)) {
+                    const Vector r_H = m_geometry_bohr.row(H);
+                    const double r_jH_sq = (r_j - r_H).squaredNorm();
+                    if (!(r_AB_sq + r_iH_sq + r_jH_sq < hbthr2)) continue;
+                }
+                {
                     if (hb_min_pair_energy > 0.0) {
-                        const double est = estimateHBStrengthCase1(i, H, j,
-                            current_basicity[i], current_basicity[j],
-                            current_acidity[i], current_acidity[j],
-                            charges[H], charges[i], charges[j]);
-                        if (est < hb_min_pair_energy) return;
+                        const int dec = case1StrengthDecision(i, H, j, hb_min_pair_energy);
+                        if (dec < 0) continue;
+                        if (dec == 0) {
+                            const double est = estimateHBStrengthCase1(i, H, j,
+                                current_basicity[i], current_basicity[j],
+                                current_acidity[i], current_acidity[j],
+                                charges[H], charges[i], charges[j]);
+                            if (est < hb_min_pair_energy) continue;
+                        }
                     }
                     GFNFFHydrogenBond hb;
                     hb.case_type = 1;
@@ -9169,9 +10258,10 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
                     hb.r_cut = 50.0;
                     out.push_back(std::move(hb));
                 }
-            });
+            }
         };
 
+        dhb_lap("pre_loop_setup");
         CxxThreadPool* opt_pool = threadPool();
         const int opt_par_threshold = m_parameters.value("hb_parallel_min_pairs", 500);
         const bool opt_parallel = (opt_pool != nullptr && opt_par_threshold >= 0
@@ -9189,20 +10279,42 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
                 if (start >= ab_pairs.size()) break;
                 futures.push_back(opt_pool->enqueue([&, start, end]() {
                     std::vector<GFNFFHydrogenBond> local;
+                    HCandidateCache hcache;
                     for (size_t idx = start; idx < end; ++idx)
-                        process_pair(ab_pairs[idx].i, ab_pairs[idx].j, local);
+                        process_pair(ab_pairs[idx].i, ab_pairs[idx].j, local, hcache);
                     return local;
                 }));
             }
+            // Claude Generated (Oct 2026): the chunks are placed in order at their offsets by the
+            // pool workers (move assignment into a list of the final length, built on the
+            // recycled entries of the previous list) instead of being appended one after the
+            // other by this thread, which took ~19 ms for 582k entries (urea400-water1000).
+            std::vector<std::vector<GFNFFHydrogenBond>> locals;
+            locals.reserve(futures.size());
             for (auto& f : futures) {
-                auto local = f.get();
-                for (const auto& hb : local) { if (hb.case_type == 1) nhb1_count++; else nhb2_count++; }
-                // Oct 2026: moved, not copied (the neighbour vectors of each entry were reallocated)
-                hbonds.insert(hbonds.end(), std::make_move_iterator(local.begin()), std::make_move_iterator(local.end()));
+                locals.push_back(f.get());
             }
+            std::vector<size_t> offsets(locals.size() + 1, 0);
+            for (size_t c = 0; c < locals.size(); ++c) {
+                offsets[c + 1] = offsets[c] + locals[c].size();
+                for (const auto& hb : locals[c]) { if (hb.case_type == 1) nhb1_count++; else nhb2_count++; }
+            }
+            const size_t base = hbonds.size();   // 0: nothing is appended before this point
+            if (base == 0) hbonds.swap(recycled);
+            hbonds.resize(base + offsets.back());
+            std::vector<std::future<void>> placed;
+            placed.reserve(locals.size());
+            for (size_t c = 0; c < locals.size(); ++c) {
+                placed.push_back(opt_pool->enqueue([&hbonds, &locals, &offsets, base, c]() {
+                    std::move(locals[c].begin(), locals[c].end(), hbonds.begin() + static_cast<std::ptrdiff_t>(base + offsets[c]));
+                    std::vector<GFNFFHydrogenBond>().swap(locals[c]);
+                }));
+            }
+            for (auto& f : placed) f.get();
         } else {
             std::vector<GFNFFHydrogenBond> local;
-            for (const auto& ab : ab_pairs) process_pair(ab.i, ab.j, local);
+            HCandidateCache hcache;
+            for (const auto& ab : ab_pairs) process_pair(ab.i, ab.j, local, hcache);
             for (const auto& hb : local) { if (hb.case_type == 1) nhb1_count++; else nhb2_count++; }
             hbonds.insert(hbonds.end(), std::make_move_iterator(local.begin()), std::make_move_iterator(local.end()));
         }
@@ -9391,6 +10503,7 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
         }
     }
     }  // end Lever 1 branch: if (have_cell_list) { optimized } else { legacy full scan }
+    dhb_lap("hb_loop_total");
 
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info(fmt::format("Detected {} hydrogen bonds", hbonds.size()));
@@ -9541,7 +10654,10 @@ std::vector<GFNFFHalogenBond> GFNFF::detectHalogenBondsNative(const Vector& char
         cell_list.build(m_geometry_bohr, xb_cutoff);
     }
 
-    for (const auto& [A, X] : ax_pairs) {
+    for (const auto& ax_pair : ax_pairs) {
+        // No structured binding: Apple clang rejects capturing one in a lambda under -fopenmp.
+        const int A = ax_pair.first;
+        const int X = ax_pair.second;
         auto process_B = [&](int B, double r_AB_sq) {
             if (B == A || B == X) return;
             if (current_basicity[B] < 1e-6) return;
@@ -9959,6 +11075,21 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
     m_frag_carry_nfrag = 0;
     m_frag_carry_list.clear();
     m_frag_carry_qfrag.clear();
+    // Claude Generated (Oct 2026): -gfnff.charge_groups ionpairs. The roles are read from the FINAL fragments of this
+    // (untouched, reference) q-loop - pass 2 can split what pass 1 kept together (GMTKN55 WCPT18/ts7h2o) - and the
+    // groups then enter in Phase 10 of pass 1 of a rebuilt q-loop, exactly like a group file. Once per instance; the
+    // rebuild happens only when the rule fires (one extra topology build at initialisation, no cost per step).
+    if (m_ionpair_groups && !m_ionpair_done && !m_frag_override.active) {
+        buildIonPairChargeGroups(topo2, topo2.nfrag, topo2.fraglist);
+        if (!m_user_groups.empty()) {
+            m_cached_bond_list.reset();
+            if (m_eeq_solver) {
+                m_eeq_solver->invalidateCholeskyCache();
+                m_eeq_solver->invalidateMatrixCache();
+            }
+            return calculateTopologyInfo();
+        }
+    }
     return topo2;
 }
 
@@ -10073,6 +11204,17 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     // 100 kcal/mol on that structure; the same mechanism drove the AHB21/BH76/G21EA/SIE4x4
     // family. See the rev-gfnff TODO for the physics side of this - the reference is not
     // right either, it is simply self-consistent.
+    if ((!m_user_groups.empty() || (m_auto_charge_groups && !m_auto_groups_done)) && !m_frag_override.active) {
+        // Claude Generated (Oct 2026): -gfnff.charge_groups. Groups inside one connected molecule, or (several
+        // fragments) unions of whole fragments; they become the EEQ constraint groups through the same override the
+        // frag_charge_model variants use. auto: the groups are perceived here, once (pass 2 of the q-loop and later
+        // builds keep the result). ionpairs: perceived after the q-loop (calculateTopologyInfo), applied here.
+        const auto frag_probe = detectMolecularFragments(topo_info.nb_full);
+        if (m_auto_charge_groups && m_user_groups.empty())
+            buildAutoChargeGroups(topo_info, frag_probe.first);
+        else
+            applyUserChargeGroups(frag_probe.first, &frag_probe.second);
+    }
     if (m_frag_override.active
         && static_cast<int>(m_frag_override.fraglist.size()) == m_atomcount) {
         // frag_charge_model ensemble variant (Sep 2026): grouping and integer group charges are
@@ -11258,7 +12400,7 @@ GFNFF::CoulombSelfEnergy GFNFF::generateCoulombSelfEnergyNative() const
     return self;
 }
 
-std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::generateRepulsionPairsNative() const
+std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::generateRepulsionPairsNative(std::vector<GFNFFRepulsion>* reuse_nonbonded) const
 {
     // Claude Generated (March 2026): Native struct version of generateGFNFFRepulsionPairs
     // Reference: Fortran gfnff_engrad.F90:467-495 (bonded), 255-276 (non-bonded)
@@ -11404,6 +12546,13 @@ std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::gener
         // (nonbonded_skin_bohr, default 2 since Sep 27, 2026). Pairs between 20 and 20+skin are stored but the
         // kernel still skips them (r.r_cut stays NB_REP_RCUT); they are the reserve that lets
         // updateNonbondedRepulsionIfNeeded() rebuild only after skin/2 of atomic motion.
+        // Claude Generated (Oct 2026): take over the old list's memory (all entries are overwritten below)
+        // and size the per-chunk vectors from its length, instead of growing 96 vectors by push_back.
+        size_t prev_total = 0;
+        if (reuse_nonbonded) {
+            prev_total = reuse_nonbonded->size();
+            nonbonded_reps.swap(*reuse_nonbonded);
+        }
         SpatialCellList rep_cells;
         rep_cells.build(m_geometry_bohr, NB_REP_RCUT + nonbondedSkinBohr());
         // Claude Generated (Oct 2026): the serial candidate collection (forEachPair) is split
@@ -11411,7 +12560,12 @@ std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::gener
         // forEachPairOfAtom(), which visits the pairs of one atom in forEachPair() order, and
         // the ranges are concatenated in order: the list is the serial one, element for element.
         const int n_chunks = (m_rep_diag || rep_threads == 1) ? 1 : std::min(m_atomcount, 8 * rep_threads);
-        std::vector<std::vector<GFNFFRepulsion>> part(std::max(1, n_chunks));
+        std::vector<std::vector<GFNFFRepulsion>> part_local;
+        std::vector<std::vector<GFNFFRepulsion>>& part = reuse_nonbonded ? m_rep_part_cache : part_local;
+        part.resize(std::max(1, n_chunks));
+        for (auto& pp : part) pp.clear();   // keeps the capacity of the previous rebuild
+        if (prev_total > 0)
+            for (auto& pp : part) pp.reserve(prev_total / part.size() + prev_total / part.size() / 8 + 16);
         auto run_chunk = [&](int c) {
             const int a = static_cast<int>(static_cast<long long>(m_atomcount) * c / n_chunks);
             const int b = static_cast<int>(static_cast<long long>(m_atomcount) * (c + 1) / n_chunks);
@@ -11430,8 +12584,16 @@ std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::gener
         }
         size_t total = 0;
         for (const auto& pp : part) total += pp.size();
-        nonbonded_reps.reserve(total);
-        for (auto& pp : part) nonbonded_reps.insert(nonbonded_reps.end(), pp.begin(), pp.end());
+        // Same order as the serial concatenation: chunk c lands at the sum of the sizes before it. Every
+        // entry is overwritten, so the (reused) storage is only resized, never cleared.
+        nonbonded_reps.resize(total);
+        {
+            std::vector<size_t> off(part.size() + 1, 0);
+            for (size_t c = 0; c < part.size(); ++c) off[c + 1] = off[c] + part[c].size();
+            #pragma omp parallel for num_threads(rep_threads) schedule(static)
+            for (int c = 0; c < static_cast<int>(part.size()); ++c)
+                std::copy(part[c].begin(), part[c].end(), nonbonded_reps.begin() + off[c]);
+        }
     } else {
         std::vector<std::pair<int, int>> cand;
         cand.reserve(static_cast<size_t>(m_atomcount) * (m_atomcount - 1) / 2);
@@ -11473,6 +12635,56 @@ std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::gener
     return {std::move(bonded_reps), std::move(nonbonded_reps)};
 }
 
+bool GFNFF::repulsionDeviceInputs(RepulsionDeviceInputs& out) const
+{
+    // Claude Generated (Oct 2026): same per-atom arithmetic and the same pair exclusions as
+    // make_nb_rep() in generateRepulsionPairsNative(); see the struct doc in gfnff.h.
+    using namespace GFNFFParameters;
+    const int N = m_atomcount;
+    const TopologyInfo& topo = getCachedTopology();
+    const bool hh_use_bpair = m_parameters.value("hh_repulsion_bpair", true);
+    const SparseTopoTable& hh_table = hh_use_bpair ? topo.bpair : topo.topo_distances;
+    if (hh_table.n != N || hh_table.default_value == 2 || hh_table.default_value == 3)
+        return false;
+
+    out = RepulsionDeviceInputs{};
+    out.valid.assign(N, 0);
+    out.metal.assign(N, 0);
+    out.dum.assign(N, 0.0);
+    out.repz.assign(N, 1.0);
+    for (int i = 0; i < N; ++i) {
+        const int zi = m_atoms[i] - 1;
+        out.valid[i] = (zi >= 0 && zi < static_cast<int>(repan_angewChem2020.size())) ? 1 : 0;
+        out.metal[i] = PeriodicTable::getMetalType(m_atoms[i]) > 0 ? 1 : 0;
+        if (!out.valid[i]) continue;
+        out.repz[i] = (zi < static_cast<int>(repz.size())) ? repz[zi] : 1.0;
+        const double qa = (i < topo.topology_charges.size()) ? topo.topology_charges[i] : 0.0;
+        const double cn = (i < topo.neighbor_counts.size()) ? topo.neighbor_counts[i] : 0.0;
+        const double fn = 1.0 + NREPSCAL / (1.0 + cn * cn);
+        out.dum[i] = repan_angewChem2020[zi] * (1.0 + qa * QREPSCAL) * fn;
+    }
+    // The host skips a pair only if (i, j) with i < j is a bond-list entry in that order.
+    for (const auto& b : getCachedBondList())
+        if (b.first >= 0 && b.second < N && b.first < b.second)
+            out.bond_keys.push_back(static_cast<long long>(b.first) * N + b.second);
+    std::sort(out.bond_keys.begin(), out.bond_keys.end());
+    for (int i = 0; i < N; ++i) {
+        if (m_atoms[i] != 1) continue;
+        for (const auto& e : hh_table.row(i))
+            if (e.first > i && e.first < N && m_atoms[e.first] == 1 && (e.second == 2 || e.second == 3)) {
+                out.hh_keys.push_back(static_cast<long long>(i) * N + e.first);
+                out.hh_dist.push_back(e.second);
+            }
+    }
+    // rows are sorted by j, atoms are visited by i: the keys are already sorted
+    out.repscaln = REPSCALN;
+    out.hhfac = HHFAC;
+    out.hh13 = HH13REP;
+    out.hh14 = HH14REP;
+    out.build_radius_bohr = 20.0 + nonbondedSkinBohr();
+    return true;
+}
+
 std::tuple<std::vector<GFNFFDispersion>, std::vector<ATMTriple>, std::string> GFNFF::generateDispersionPairsNative() const
 {
     auto disp_start = std::chrono::high_resolution_clock::now();
@@ -11509,6 +12721,11 @@ std::tuple<std::vector<GFNFFDispersion>, std::vector<ATMTriple>, std::string> GF
             d4_input["d4_cn_cache_threshold"] = 0.0;
 
         ConfigManager d4_config("d4param", d4_input);
+        // Claude Generated (Oct 2026): the workspace may still hold the fused view of the
+        // generator replaced here (reactive topology rebuild); drop it before it dangles. The new
+        // pair list carries fresh C6; prepareCNAndEEQ() sets the view again.
+        if (m_workspace)
+            m_workspace->setD4FusedC6View(nullptr);
         m_d4_generator = std::make_unique<D4ParameterGenerator>(d4_config);
 
         const TopologyInfo& topo_info = getCachedTopology();

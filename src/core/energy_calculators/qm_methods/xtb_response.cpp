@@ -26,6 +26,9 @@
 #include <Eigen/Dense>
 
 #include <algorithm>
+#include <array>
+#include <chrono>
+#include <cstdlib>
 #include <cmath>
 
 namespace curcuma::xtb {
@@ -271,6 +274,7 @@ Matrix XTB::solveZVector(const Matrix& rhs_ov) const
  * ------------------------------------------------------------------ */
 void XTB::computeMullikenChargeResponse(const Vector& dEdq, Matrix& grad_out) const
 {
+    ensureHostIntegrals(__func__);   // Claude Generated (Oct 2026): host copies of S/H0/L/gamma are lazy
     using namespace curcuma::xtb::gfn1_params;
     using namespace curcuma::xtb::gfn2_params;
 
@@ -661,6 +665,192 @@ void XTB::computeMullikenChargeResponse(const Vector& dEdq, Matrix& grad_out) co
             }
         }
     }
+}
+
+
+/* ------------------------------------------------------------------ *
+ *  SCC-map Jacobian by linear response (Claude Generated, Oct 2026)  *
+ * ------------------------------------------------------------------ */
+void XTB::unpackSccVector(const Vector& x)
+{
+    const int nsh = m_basis.nsh;
+    const int nat = m_atomcount;
+    m_wfn.q_sh = x.head(nsh);
+    m_wfn.q_at = Vector::Zero(nat);
+    for (int s = 0; s < nsh; ++s) m_wfn.q_at(m_basis.sh2at[s]) += m_wfn.q_sh(s);
+    if (m_method == MethodType::GFN2) {
+        m_wfn.dp_at = Eigen::MatrixXd::Zero(3, nat);
+        m_wfn.qp_at = Eigen::MatrixXd::Zero(6, nat);
+        for (int k = 0; k < 3; ++k) m_wfn.dp_at.row(k) = x.segment(nsh + k * nat, nat).transpose();
+        for (int k = 0; k < 6; ++k) m_wfn.qp_at.row(k) = x.segment(nsh + 3 * nat + k * nat, nat).transpose();
+    }
+}
+
+Potential XTB::scfPotentialAt(const Vector& x)
+{
+    // Same sequence as the potential part of the SCC map in Calculation() (evalG).
+    unpackSccVector(x);
+    Potential pot = m_pot;
+    pot.reset();
+    addCoulombShellPotential(pot);
+    addThirdOrderPotential(pot);
+    if (m_method == MethodType::GFN2) {
+        addMultipolePotential(pot);
+        addDispersionPotential(pot);
+    }
+    addSolvationPotential(pot);
+    return pot;
+}
+
+/**
+ * Theory (coupled-perturbed SCF with fractional occupations; Pople, Krishnan, Schlegel, Binkley,
+ * Int. J. Quantum Chem. Symp. 13, 225 (1979) for CPHF): the SCC map is
+ *     G = Pop o Dens o Fock o Pot,   x -> v(x) -> F = H0 + F1(v) -> F C = S C eps -> P = C f C^T -> x_out.
+ * F1 is linear in v (buildFock without H0), Pop is linear in P (updatePopulations). First-order
+ * perturbation theory of the generalized eigenproblem with occupations f_p = 2/(1+exp((eps_p-mu)/kT))
+ * (solveEigen, f in [0,2]) and a fixed electron count gives in the MO basis (dF' = C^T dF C)
+ *     dP'_pq = w_pq dF'_pq,  w_pq = (f_p - f_q)/(eps_p - eps_q),  w_pp = f'_p = -f_p (1 - f_p/2)/kT,
+ *     dP'_pp = f'_p (dF'_pp - dmu),  dmu = sum_p f'_p dF'_pp / sum_p f'_p   (sum_p dP'_pp = 0),
+ * and dP = C dP' C^T. With SC = S C and V_k = D_k^T C (D_k: GFN2 dipole/quadrupole integrals):
+ *     dF' = -1/2 (B + B^T),  B = C^T [diag(dv_ao) SC + sum_k diag(dv_k,ao) V_k]
+ *     dq_sh(s) = -sum_{mu in s} sum_p SC(mu,p) Z(p,mu),   dm_k(A) = -sum_{mu in A} sum_p V_k(mu,p) Z(p,mu),
+ * Z = dP' C^T. dv = dv/dx_k by central differences of scfPotentialAt (no eigensolve; exact for the
+ * linear and the quadratic third-order terms, O(h^2) for D4). Columns are processed in batches as GEMMs.
+ * Cost per column: two nao^3 GEMMs plus two potential evaluations, against two full SCC-map evaluations
+ * (Fock, reduction, eigensolve, density, populations) for central differences.
+ */
+bool XTB::computeScfJacobianResponse(const Vector& x_star, PrecondMatrix& J, std::string& err)
+{
+    ensureHostIntegrals(__func__);   // Claude Generated (Oct 2026): host copies of S/H0/L/gamma are lazy
+    const int nao = m_basis.nao;
+    const int nsh = m_basis.nsh;
+    const int nat = m_atomcount;
+    const bool gfn2 = (m_method == MethodType::GFN2);
+    const int nmp = gfn2 ? 9 : 0;   // GFN2: dp and qp per atom; GFN1 mixes q_sh only
+    const int dim = nsh + nmp * nat;
+    if (!gfn2 && m_method != MethodType::GFN1) { err = "response Jacobian: GFN1 and GFN2 only"; return false; }
+    if (openShell()) { err = "response Jacobian: closed shell only"; return false; }
+    if (x_star.size() != dim) { err = "response Jacobian: SCC vector length mismatch"; return false; }
+    if (gfn2) {
+        ensureHostMultipoleIntegrals();
+        if (!m_mp_initialized) { err = "response Jacobian: multipole integrals missing"; return false; }
+    }
+
+    // 1. Orbitals of F(v(x*)).
+    const Potential pot0 = scfPotentialAt(x_star);
+    const Matrix F0 = buildFock(m_H0, m_S, pot0);
+    m_eig_fp32 = false;
+    if (!solveEigen(F0, m_S) || m_wfn.C.cols() != nao || m_wfn.eps.size() != nao || m_wfn.focc.size() != nao) {
+        err = "response Jacobian: eigensolve failed";
+        return false;
+    }
+    const Matrix C = m_wfn.C;
+    const Vector eps = m_wfn.eps;
+    const Vector f = m_wfn.focc;
+
+    // 2. Response weights w_pq and Fermi derivatives f'_p.
+    const double kT = m_electronic_temp * 3.166808e-6;   // K -> Eh, as in solveEigen
+    Vector dfde = Vector::Zero(nao);
+    if (kT > 0.0)
+        for (int p = 0; p < nao; ++p) dfde(p) = -f(p) * (1.0 - 0.5 * f(p)) / kT;
+    const double sum_dfde = dfde.sum();
+    Matrix W(nao, nao);
+    for (int q = 0; q < nao; ++q)
+        for (int p = 0; p < nao; ++p) {
+            const double de = eps(p) - eps(q);
+            W(p, q) = (std::fabs(de) > 1.0e-8) ? (f(p) - f(q)) / de : 0.5 * (dfde(p) + dfde(q));
+        }
+
+    // 3. AO-side matrices SC = S C, V_k = D_k^T C (k = 0..2 dipole, 3..8 quadrupole).
+    std::array<Matrix, 10> V;   // GFN1: only V[0]
+    V[0].noalias() = m_S * C;
+    if (gfn2) {
+        for (int k = 0; k < 3; ++k) V[1 + k].noalias() = m_dp_int[k].transpose() * C;
+        for (int k = 0; k < 6; ++k) V[4 + k].noalias() = m_qp_int[k].transpose() * C;
+    }
+    std::array<Matrix, 10> Vt;
+    for (int c = 0; c <= nmp; ++c) Vt[c] = V[c].transpose();
+
+    // 4. Columns in batches. Phase times for the developer switch CURCUMA_SCF_JAC_COMPARE.
+    using rclk = std::chrono::steady_clock;
+    auto since = [](rclk::time_point a) { return std::chrono::duration<double, std::milli>(rclk::now() - a).count(); };
+    double t_pot = 0.0, t_asm = 0.0, t_gemm = 0.0, t_rest = 0.0;
+    const double h = 1.0e-4;
+    // Batch of columns: four buffers of nb*nao^2 doubles (M, B, dP', Z); 2e6 doubles each = 64 MB per job, so
+    // a dozen parallel fragment jobs stay below 1 GB (Oct 2026: against 8e6 per buffer the same time on PEO 58/100 atoms, J equal to 6e-17).
+    const int nb = std::max(1, std::min(dim, static_cast<int>(2.0e6 / (static_cast<double>(nao) * nao))));
+    J.resize(dim, dim);
+    Matrix Mb(nao, static_cast<Eigen::Index>(nb) * nao), Bb, Pb(static_cast<Eigen::Index>(nb) * nao, nao), Zb;
+    Vector xp = x_star;
+    for (int k0 = 0; k0 < dim; k0 += nb) {
+        const int nk = std::min(nb, dim - k0);
+        for (int c = 0; c < nk; ++c) {
+            const int k = k0 + c;
+            auto tp = rclk::now();
+            xp(k) = x_star(k) + h;
+            const Potential pp = scfPotentialAt(xp);
+            xp(k) = x_star(k) - h;
+            const Potential pm = scfPotentialAt(xp);
+            xp(k) = x_star(k);
+            t_pot += since(tp);
+            tp = rclk::now();
+            auto blk = Mb.middleCols(static_cast<Eigen::Index>(c) * nao, nao);
+            for (int mu = 0; mu < nao; ++mu) {
+                const int sh = m_basis.ao2sh[mu];
+                const int at = m_basis.ao2at[mu];
+                const double u0 = (pp.v_sh(sh) + pp.v_at(at) - pm.v_sh(sh) - pm.v_at(at)) / (2.0 * h);
+                blk.row(mu) = u0 * V[0].row(mu);
+                if (!gfn2) continue;
+                for (int d = 0; d < 3; ++d) {
+                    const double u = (pp.v_dp(d, at) - pm.v_dp(d, at)) / (2.0 * h);
+                    if (u != 0.0) blk.row(mu) += u * V[1 + d].row(mu);
+                }
+                for (int d = 0; d < 6; ++d) {
+                    const double u = (pp.v_qp(d, at) - pm.v_qp(d, at)) / (2.0 * h);
+                    if (u != 0.0) blk.row(mu) += u * V[4 + d].row(mu);
+                }
+            }
+            t_asm += since(tp);
+        }
+        auto tg = rclk::now();
+        const auto Mused = Mb.leftCols(static_cast<Eigen::Index>(nk) * nao);
+        Bb.noalias() = C.transpose() * Mused;                        // B_c = C^T M_c, all columns at once
+        t_gemm += since(tg);
+        tg = rclk::now();
+        for (int c = 0; c < nk; ++c) {
+            const auto B = Bb.middleCols(static_cast<Eigen::Index>(c) * nao, nao);
+            Matrix dF = -0.5 * (B + B.transpose());
+            double dmu = 0.0;
+            if (sum_dfde != 0.0) dmu = dfde.dot(dF.diagonal()) / sum_dfde;
+            auto dP = Pb.middleRows(static_cast<Eigen::Index>(c) * nao, nao);
+            dP = W.cwiseProduct(dF);
+            for (int p = 0; p < nao; ++p) dP(p, p) -= dfde(p) * dmu;
+        }
+        t_rest += since(tg);
+        tg = rclk::now();
+        Zb.noalias() = Pb.topRows(static_cast<Eigen::Index>(nk) * nao) * C.transpose();   // Z_c = dP'_c C^T
+        t_gemm += since(tg);
+        tg = rclk::now();
+        for (int c = 0; c < nk; ++c) {
+            const auto Z = Zb.middleRows(static_cast<Eigen::Index>(c) * nao, nao);
+            Vector out = Vector::Zero(dim);
+            Eigen::RowVectorXd g(nao);
+            g = Vt[0].cwiseProduct(Z).colwise().sum();            // sum_p SC(mu,p) Z(p,mu)
+            for (int mu = 0; mu < nao; ++mu) out(m_basis.ao2sh[mu]) -= g(mu);
+            for (int d = 0; d < nmp; ++d) {
+                g = Vt[1 + d].cwiseProduct(Z).colwise().sum();
+                for (int mu = 0; mu < nao; ++mu) out(nsh + d * nat + m_basis.ao2at[mu]) -= g(mu);
+            }
+            out(k0 + c) -= 1.0;
+            J.col(k0 + c) = out;
+        }
+        t_rest += since(tg);
+    }
+    if (std::getenv("CURCUMA_SCF_JAC_COMPARE"))
+        fmt::print(stderr, "SCFJACRESP nao {} dim {} batch {} t_pot_ms {:.1f} t_assemble_ms {:.1f} t_gemm_ms {:.1f} t_rest_ms {:.1f}\n",
+                   nao, dim, nb, t_pot, t_asm, t_gemm, t_rest);
+    if (!J.allFinite()) { err = "response Jacobian: non-finite entries"; return false; }
+    return true;
 }
 
 } // namespace curcuma::xtb

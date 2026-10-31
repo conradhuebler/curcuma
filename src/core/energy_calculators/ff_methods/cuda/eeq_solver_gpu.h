@@ -78,6 +78,19 @@ public:
      * @param min_atoms       use the split only from this many atoms on
      */
     void setSplitDevices(const std::vector<int>& helper_devices, int min_atoms);
+    /**
+     * @brief Mixed precision for the matvec of the split projected PCG (Claude Generated, Oct 2026).
+     *
+     * Besides the FP64 column blocks every device keeps an FP32 copy; the PCG iterations multiply with the FP32
+     * copy and each round of iterations stops at rho times the residual it started from. Then the true residual
+     * b - A q is formed with the FP64 matvec and the Krylov space restarts from it (defect correction), until the
+     * FP64 residual meets the tolerance. The tolerance is the same as in the pure FP64 solve; only the cost of the
+     * iterations changes (half the matrix traffic). Call before the first solve.
+     *
+     * @param on  false = FP64 matvec only
+     * @param rho round reduction, e.g. 1e-5 (1e-3 and larger need more rounds; below ~1e-7 the FP32 error limits it)
+     */
+    void setSplitMixedPrecision(bool on, double rho = 1e-5);
     /// "" when off, else a one-line status (devices, columns, solves) or why it is not used.
     std::string splitStatus() const;
 
@@ -334,8 +347,9 @@ public:
      * Claude Generated (Oct 2026). Built on the host (EEQSolver::buildLocalInverse, maths in
      * eeq_solver.h, LocalInversePreconditioner) and uploaded here as CSR: G (N x N), H = G C^T
      * (N x nfrag) and the dense S^-1 = (C G C^T)^-1 (nfrag x nfrag). While set, the projected
-     * PCG applies z = G r - H S^-1 C G r instead of the diagonal Jacobi. CUDA only (the ROCm
-     * build has no definition; the wrapper calls it only for Backend::has_device_schur).
+     * PCG applies z = G r - H S^-1 C G r instead of the diagonal Jacobi. CUDA and (Oct 2026)
+     * ROCm (rocm/eeq_solver_hip.hiph); the wrapper calls it for Backend::has_localinv_upload.
+     * The device-build members below are defined for CUDA and (Oct 2026) ROCm; the multi-GPU split is CUDA only.
      * @return false if the upload failed (preconditioner stays off)
      */
     bool setLocalInversePreconditioner(int N, int nfrag,

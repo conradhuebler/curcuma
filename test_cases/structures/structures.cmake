@@ -1,10 +1,13 @@
 # Claude Generated (Oct 2026): helpers to use the structure library (test_cases/structures) from CMake.
 # Rules: test_cases/structures/README.md
 
+# Resolved here, not from CMAKE_SOURCE_DIR: when curcuma is embedded (qurcuma) the top-level source dir is not curcuma's.
+set(CURCUMA_STRUCTURES_DIR "${CMAKE_CURRENT_LIST_DIR}")
+
 # curcuma_structure_path(<id> <out_var>): absolute path of the library file of a structure id (xyz or vtf).
 function(curcuma_structure_path id out_var)
-    file(GLOB _found "${CMAKE_SOURCE_DIR}/test_cases/structures/*/${id}.xyz"
-                     "${CMAKE_SOURCE_DIR}/test_cases/structures/*/${id}.vtf")
+    file(GLOB _found "${CURCUMA_STRUCTURES_DIR}/*/${id}.xyz"
+                     "${CURCUMA_STRUCTURES_DIR}/*/${id}.vtf")
     list(LENGTH _found _n)
     if(NOT _n EQUAL 1)
         message(FATAL_ERROR "structure '${id}' is not in test_cases/structures exactly once")

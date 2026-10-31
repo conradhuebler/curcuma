@@ -1,6 +1,12 @@
 cmake_minimum_required(VERSION 3.18)
 project(curcuma)
 
+# Claude Generated (Oct 27, 2026): default language standard for targets that set none
+# (curcuma_core/_cap/curcuma set their own below). Apple clang and gcc 8 do not default to C++17.
+if(NOT DEFINED CMAKE_CXX_STANDARD)
+    set(CMAKE_CXX_STANDARD 17)
+endif()
+
 # Claude Generated 2026 - MSVC doesn't define M_PI (and friends) from <cmath>
 # unless _USE_MATH_DEFINES is set before the first include; 20+ files across
 # the codebase use M_PI directly (gcc/clang define it unconditionally), so
@@ -199,7 +205,7 @@ FetchContent_Declare(CxxThreadPool
 # ripser: header-only, no CMakeLists.txt at root — use Populate to avoid add_subdirectory
 FetchContent_Declare(ripser
     GIT_REPOSITORY https://github.com/conradhuebler/ripser
-    GIT_TAG        dcb13c22db2017ef80e68bdf9bed6ec3b77ad70d
+    GIT_TAG        5512434c08ffa81a1dda3d1e32206bccc40206b1
     SOURCE_DIR     ${CMAKE_SOURCE_DIR}/external/ripser
 )
 # cpp-d4: headers always needed, library only when USE_D4=ON
@@ -531,6 +537,7 @@ set(curcuma_core_SRC
         src/capabilities/torsion_space.cpp
         src/capabilities/confgen.cpp
         src/capabilities/confstat.cpp
+        src/capabilities/activelearn.cpp
         src/capabilities/docking.cpp
         src/capabilities/analysenciplot.cpp
         src/capabilities/nebdocking.cpp
@@ -540,6 +547,11 @@ set(curcuma_core_SRC
         src/capabilities/rmsd/rmsd_costmatrix.cpp
         src/capabilities/rmsd/rmsd_assignment.cpp
         src/capabilities/rmsdtraj.cpp
+        src/capabilities/external_potentials.cpp
+        src/capabilities/measurement.cpp
+        src/capabilities/ionize.cpp
+        src/capabilities/trajprops.cpp
+        src/tools/cif.cpp
         src/capabilities/simplemd.cpp
         src/capabilities/md_diagnostics.cpp
         src/capabilities/analysis.cpp
@@ -565,6 +577,7 @@ set(curcuma_core_SRC
         src/core/energy_calculators/qm_methods/xtb_scf.cpp
         src/core/energy_calculators/qm_methods/xtb_fragment_scf.cpp
         src/core/energy_calculators/qm_methods/xtb_dc.cpp
+        src/core/energy_calculators/qm_methods/xtb_precond.cpp
         src/core/energy_calculators/qm_methods/xtb_sparse.cpp
         src/core/energy_calculators/qm_methods/native_eigensolver.cpp
         src/core/energy_calculators/qm_methods/xtb_multipole.cpp
@@ -619,6 +632,12 @@ set(curcuma_core_SRC
         src/core/curcuma_logger.cpp
         src/core/citation_database.cpp
         src/core/citation_registry.cpp
+        # Delta-ML: descriptor, dataset and sparse kernel-ridge regression
+        src/core/ml/descriptor.cpp
+        src/core/ml/ml_dataset.cpp
+        src/core/ml/krr_model.cpp
+        src/core/ml/ml_gpu.cpp
+        src/core/energy_calculators/ml_methods/deltaml_method.cpp
         src/tools/formats.h
         src/tools/geometry.h
         src/tools/general.h
@@ -656,6 +675,11 @@ set(curcuma_cap_SRC
         src/capabilities/rmsd/rmsd_costmatrix.cpp
         src/capabilities/rmsd/rmsd_assignment.cpp
         src/capabilities/rmsdtraj.cpp
+        src/capabilities/external_potentials.cpp
+        src/capabilities/measurement.cpp
+        src/capabilities/ionize.cpp
+        src/capabilities/trajprops.cpp
+        src/tools/cif.cpp
         src/capabilities/simplemd.cpp
         src/capabilities/md_diagnostics.cpp
         src/capabilities/analysis.cpp
@@ -1139,7 +1163,9 @@ if(USE_CUDA)
     add_library(curcuma_cuda SHARED
         ${CUDA_SOURCES}
         src/core/energy_calculators/qm_methods/xtb_gpu_method.cpp
-        src/core/energy_calculators/qm_methods/cuda/gpu_plugin_entry_cuda.cpp)
+        src/core/energy_calculators/qm_methods/cuda/gpu_plugin_entry_cuda.cpp
+        # Delta-ML: descriptor, kernel, forces and the fit's design block on the device
+        src/core/ml/cuda/ml_model_cuda.cu)
     target_include_directories(curcuma_cuda PRIVATE ${PROJECT_SOURCE_DIR})
     target_link_libraries(curcuma_cuda PRIVATE CUDA::cudart CUDA::cusolver CUDA::cublas)
     target_sources(curcuma_cuda PRIVATE
@@ -1279,7 +1305,7 @@ endif()
 # Build: cmake -DUSE_ROCM=ON -DCMAKE_PREFIX_PATH=/opt/rocm && make -j4
 # (USE_ROCM is the single switch - it builds both the native-xTB and GFN-FF GPU paths
 #  into ONE plugin, libcurcuma_rocm.so, mirroring CUDA. ROCM_GPU_ARCH is auto-detected
-#  from rocminfo; override only if wrong.)
+#  from rocminfo; override only if wrong, or give a list for a build without a GPU.)
 # The two HIP TUs (xTB context: device handshake + rocSOLVER eigensolver + resident-SCF
 # __global__ kernels; GFN-FF: single-TU port of the CUDA kernels) are compiled by hipcc
 # into plain relocatable objects via custom commands, then linked into the plugin as
@@ -1334,6 +1360,21 @@ if(USE_ROCM)
     endif()
 
 
+    # ROCM_GPU_ARCH may be a list (-DROCM_GPU_ARCH="gfx1100;gfx1150;gfx1200"): one code
+    # object per entry in the same binary, the runtime picks the one matching the card.
+    # The plugin checks the visible devices against this list at load time and falls back
+    # to the CPU when none matches (gpu_plugin_entry_rocm.cpp). Only RDNA (gfx10/11/12) was
+    # run; the kernels assume wave32, so other families are refused.
+    set(_rocm_offload_flags ${ROCM_GPU_ARCH})
+    foreach(_a IN LISTS ROCM_GPU_ARCH)
+        if(NOT _a MATCHES "^gfx1[012][0-9a-f][0-9a-f]?$")
+            message(FATAL_ERROR "ROCm: '${_a}' is not an RDNA architecture (gfx10xx/gfx11xx/gfx12xx). "
+                "The kernels assume wave32 and were only run on gfx1150 and gfx1200.")
+        endif()
+    endforeach()
+    list(TRANSFORM _rocm_offload_flags PREPEND "--offload-arch=")
+    string(REPLACE ";" "," _rocm_built_archs "${ROCM_GPU_ARCH}")
+
     # hipcc compile defines shared by both device TUs. Match the g++ build's Eigen
     # alignment (CURCUMA_EIGEN_ALIGN, set with the march/AVX switch above) so Eigen
     # objects crossing the hipcc TU <-> g++ boundary share one ABI. FMT_HEADER_ONLY:
@@ -1375,7 +1416,7 @@ if(USE_ROCM)
     set(_hip_ctx_obj ${CMAKE_CURRENT_BINARY_DIR}/xtb_hip_context.hip.o)
     add_custom_command(
         OUTPUT  ${_hip_ctx_obj}
-        COMMAND ${HIPCC_EXECUTABLE} -c -fPIC -O2 -std=c++17 --offload-arch=${ROCM_GPU_ARCH}
+        COMMAND ${HIPCC_EXECUTABLE} -c -fPIC -O2 -std=c++17 ${_rocm_offload_flags}
                 ${_hipcc_defs} ${_hipcc_incs}
                 ${_hip_ctx_src} -o ${_hip_ctx_obj}
         DEPENDS ${_hip_ctx_src} ${_hip_ctx_hdrs}
@@ -1402,7 +1443,7 @@ if(USE_ROCM)
     set(_hip_ff_obj ${CMAKE_CURRENT_BINARY_DIR}/gfnff_rocm.hip.o)
     add_custom_command(
         OUTPUT  ${_hip_ff_obj}
-        COMMAND ${HIPCC_EXECUTABLE} -c -fPIC -O2 -std=c++17 --offload-arch=${ROCM_GPU_ARCH}
+        COMMAND ${HIPCC_EXECUTABLE} -c -fPIC -O2 -std=c++17 ${_rocm_offload_flags}
                 ${_hipcc_defs} ${_hipcc_incs}
                 ${_hip_ff_src} -o ${_hip_ff_obj}
         DEPENDS ${_hip_ff_src} ${_hip_ff_hdrs}
@@ -1428,6 +1469,7 @@ if(USE_ROCM)
     # a single ABI across the dlopen boundary (see the CUDA plugin).
     target_compile_definitions(curcuma_rocm PRIVATE
         USE_ROCM __HIP_PLATFORM_AMD__ HAVE_ROCSOLVER HAVE_ROCBLAS
+        CURCUMA_ROCM_BUILT_ARCHS="${_rocm_built_archs}"
         $<TARGET_PROPERTY:curcuma_core,COMPILE_DEFINITIONS>)
     set_target_properties(curcuma_rocm PROPERTIES
         POSITION_INDEPENDENT_CODE ON
@@ -1547,6 +1589,11 @@ target_link_libraries(curcuma fmt::fmt-header-only)
 
 target_link_libraries(curcuma curcuma_core)
 
+# Claude Generated (Oct 2026): energy-only ablation, local persistent-homology features vs ACSF
+# (src/helpers/ml_barcode_ablation.cpp). Experiment helper, not registered in ctest.
+add_executable(ml_barcode_ablation src/helpers/ml_barcode_ablation.cpp)
+target_link_libraries(ml_barcode_ablation curcuma_cap curcuma_core curcuma_cap)
+
 # Claude Generated (May 2026, ICX + USE_GFNFF OpenMP fix): when both Intel ICX (libiomp5)
 # and gfortran-built gfnff-lib (libgomp DT_NEEDED) end up in the same binary, the two
 # OpenMP runtimes corrupt each other's heap. We hit double-free in __kmp_invoke_microtask
@@ -1649,6 +1696,21 @@ add_test(
 
 # 1. Define the parser executable
 add_executable(curcuma_param_parser scripts/param_parser/main.cpp)
+
+# Claude Generated (Oct 26, 2026): the parser runs during the build (GenerateParams) on the machine that builds, so it must run on any
+# x86-64 CPU. It needs no vector code, but it inherits CMAKE_CXX_FLAGS (-march=native, -mavx2, -mavx512f ... above): an AVX512 build on a
+# CI runner without AVX512 would die with "illegal instruction" when the parser starts. Give this target the baseline instruction set;
+# target options come after CMAKE_CXX_FLAGS, so they win. Only flags the compiler knows are added (no effect on MSVC or ARM).
+if(NOT MSVC)
+    include(CheckCXXCompilerFlag)
+    foreach(_flag -march=x86-64 -mtune=generic -mno-avx512f -mno-avx512vl -mno-avx512dq -mno-avx512bw -mno-avx2 -mno-avx -mno-fma)
+        string(MAKE_C_IDENTIFIER "CURCUMA_PP_${_flag}" _var)
+        check_cxx_compiler_flag("${_flag}" ${_var})
+        if(${_var})
+            target_compile_options(curcuma_param_parser PRIVATE ${_flag})
+        endif()
+    endforeach()
+endif()
 
 # 2. Get all header files in the project
 file(GLOB_RECURSE ALL_PROJECT_HEADERS "src/*.h" "src/**/*.h")

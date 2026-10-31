@@ -29,6 +29,7 @@
 #include "src/core/curcuma_logger.h"
 #include "src/core/citation_registry.h"
 
+#include "src/capabilities/activelearn.h"
 #include "src/capabilities/analysenciplot.h"
 #include "src/capabilities/analysis.h"
 #include "src/capabilities/confscan.h"
@@ -52,6 +53,8 @@
 #include "src/capabilities/trajectory_statistics.h"
 #include "src/capabilities/trajectoryanalysis.h"
 #include "src/capabilities/polymerbuild.h"
+#include "src/capabilities/ionize.h"
+#include "src/capabilities/trajprops.h"
 #include "src/tools/trajectory_writer.h"
 
 #include "src/tools/general.h"
@@ -687,8 +690,7 @@ json CLI2Json(int argc, char** argv)
     // both at top level (controller[param]) and module level (controller[module][param])
     // ENHANCED: Added "method" to support global energy method specification
     // Claude Generated (March 2026): Added "gpu" for GPU acceleration control.
-    //   -gpu <backend>: none (default, CPU) | cuda | rocm | vulkan | auto.
-    //   "auto" picks the first compiled GPU backend (cuda > rocm > vulkan), else CPU.
+    //   -gpu <backend>: none (default, CPU) | cuda | rocm | vulkan. ("auto" was removed Oct 26, 2026: warning, CPU.)
     //   Applies to gfn1/gfn2 (USE_*_XTB builds) and gfnff (USE_* builds); an explicit
     //   backend not compiled in warns and falls back to CPU.
     // Claude Generated (Jul 2026): Added "charge","spin" — molecular charge/spin must reach
@@ -764,6 +766,16 @@ json CLI2Json(int argc, char** argv)
         std::string sub = current.substr(0, 1);
 
         if (sub == "-") {
+            // Claude Generated (Oct 2026): a flag token that contains whitespace ("-spin 1" as ONE
+            // argv entry, e.g. from a shell variable that was not word-split) used to become the
+            // boolean key "spin 1" and was silently ignored - the run then reported a closed-shell
+            // energy for a radical. No parameter name contains whitespace, so refuse it.
+            if (current.find_first_of(" \t\r\n") != std::string::npos) {
+                CurcumaLogger::error("Command-line argument '" + current
+                    + "' contains whitespace: flag and value must be separate arguments "
+                      "(check shell quoting / variable expansion).");
+                exit(1);
+            }
             current.erase(0, 1);
             // Claude Generated (Jun 2026): canonicalize hyphens to underscores in CLI
             // parameter names so "-opt-method" matches the JSON key "opt_method".
@@ -951,6 +963,28 @@ json CLI2Json(int argc, char** argv)
             }
             if (matches_current)
                 continue;
+
+            // Claude Generated (Oct 16, 2026): a name several modules register (-electronic_temperature:
+            // tblite, ulysses, xtb) is routed to the module of the selected -method when that module is
+            // one of the owners. Before, it stayed in the command module with a warning and no method
+            // ever read it (-electronic_temperature 40000 did not change a native gfn2 energy).
+            if (owners.size() > 1 && key.contains("method") && key["method"].is_string()) {
+                std::string method_scope = MethodFactory::parameterScopeForMethod(key["method"].get<std::string>());
+                // Oct 2026: a shared SCF knob (-max_iterations, -diis_start: module "scf" via aliases, and others)
+                // goes to "scf" when the method's own scope does not register it but the method reads "scf".
+                if (std::find(owners.begin(), owners.end(), method_scope) == owners.end()
+                    && std::find(owners.begin(), owners.end(), std::string("scf")) != owners.end()
+                    && MethodFactory::readsSharedScfScope(key["method"].get<std::string>()))
+                    method_scope = "scf";
+                if (!method_scope.empty()
+                    && std::find(owners.begin(), owners.end(), method_scope) != owners.end()) {
+                    CurcumaLogger::info("CLI flag -" + pname + " is registered in several modules; routed to -"
+                        + method_scope + "." + pname + " for the selected method \"" + key["method"].get<std::string>() + "\".");
+                    reroute_targets[method_scope][pname] = it.value();
+                    reroute_remove.push_back(pname);
+                    continue;
+                }
+            }
 
             if (owners.size() > 1) {
                 std::string candidates;
@@ -1682,21 +1716,9 @@ int executeRMSD(const json& controller, int argc, char** argv) {
 
     // Write RMSD results as JSON
     {
-        json rmsd_result;
-        rmsd_result["rmsd"] = driver->RMSD();
-        rmsd_result["rmsd_raw"] = driver->RMSDRaw();
-
-        // Permutation vector: identity if no reordering was performed
-        std::vector<int> permutation = driver->ReorderRules();
-        if (permutation.empty()) {
-            permutation.resize(driver->ReferenceAligned().AtomCount());
-            std::iota(permutation.begin(), permutation.end(), 0);
-        }
-        rmsd_result["permutation"] = permutation;
-        rmsd_result["reference_xyz"] = driver->ReferenceAligned().XYZString();
-        // Geometry whose deviation equals RMSD() (reordered+aligned, or plain best-fit when
-        // no reorder ran). Same result as the old TargetReorderd()/TargetAligned() fallback.
-        rmsd_result["reorder_xyz"] = driver->TargetForRMSD().XYZString();
+        // Claude Generated 2026 - The document now comes from the driver; the file
+        // names are the only part the CLI knows and the driver does not.
+        json rmsd_result = driver->Results();
         rmsd_result["reference_file"] = reffile;
         rmsd_result["target_file"] = tarfile;
 
@@ -1866,6 +1888,12 @@ int executeSinglePoint(const json& controller, int argc, char** argv) {
     };
     read_dump_path(controller);                                    // top-level (dotted -opt.dump_gradient)
     if (controller.contains("opt")) read_dump_path(controller["opt"]); // sp routes flat flags into "opt"
+    // Claude Generated (Oct 2026): -dump_atomic_charges <path> writes the atomic partial charges of the method
+    // (EEQ for gfnff, Mulliken for gfn1/gfn2; one value per atom in e) for comparing charge models.
+    std::string dump_atomic_charges_path;
+    for (const json* j : { &controller, controller.contains("opt") ? &controller["opt"] : nullptr })
+        if (j && j->is_object() && j->contains("dump_atomic_charges") && (*j)["dump_atomic_charges"].is_string())
+            dump_atomic_charges_path = (*j)["dump_atomic_charges"].get<std::string>();
     const bool want_gradient = read_bool(controller, "gradient")
         || (controller.contains("opt") && read_bool(controller["opt"], "gradient"))
         || !dump_gradient_path.empty();
@@ -1939,6 +1967,21 @@ int executeSinglePoint(const json& controller, int argc, char** argv) {
         }
     }
 
+    if (!dump_atomic_charges_path.empty()) {
+        const Vector charges = energy_calc.Charges();
+        std::ofstream cf(dump_atomic_charges_path);
+        if (cf && charges.size() == molecule.AtomCount()) {
+            cf << "# atomic partial charges [e], method " << method << ", one atom per row, total "
+               << fmt::format("{:.6f}", charges.sum()) << "\n";
+            for (int i = 0; i < charges.size(); ++i)
+                cf << fmt::format("{:.10f}\n", charges(i));
+        } else {
+            CurcumaLogger::error(fmt::format("Could not write -dump_atomic_charges {} ({} charges for {} atoms)",
+                dump_atomic_charges_path, static_cast<int>(charges.size()), molecule.AtomCount()));
+            return 1;
+        }
+    }
+
     return 0;
 }
 
@@ -1989,6 +2032,8 @@ int executeOptimization(const json& controller, int argc, char** argv) {
         fmt::print("  -lbfgs_line_search <n>   Line search: 1=Armijo, 2=Wolfe, 3=StrongWolfe, 4=Backtrack (default: 3)\n");
         fmt::print("  -lbfgs_max_line_search <n>  Max line search iterations (default: 20)\n");
         fmt::print("  -lbfgs_min_step <f>      Minimum step size (default: 1e-4)\n");
+        fmt::print("  -lbfgs_max_atom_step <f> Largest displacement of one atom per step in Angstrom, 0 = off (default: auto, 0.2 from 2000 atoms on)\n");
+        fmt::print("  -lbfgs_atom_step_auto_natoms <n>  Atom count from which the automatic cap applies (default: 2000)\n");
         fmt::print("  -lbfgs_ftol <f>          Armijo sufficient-decrease parameter (default: 1e-4)\n");
         fmt::print("  -lbfgs_wolfe <f>         Wolfe curvature parameter (default: 0.9)\n\n");
         fmt::print("Native optimizer tuning (lbfgs/diis/rfo):\n");
@@ -2332,6 +2377,28 @@ int executeCasino(const json& controller, int argc, char** argv) {
     return 0;
 }
 
+// Delta-ML model training and active learning: -activelearn  -- Claude Generated 2026
+//
+//   curcuma -activelearn conf.xyz -method gfnff -ref_method gfn2 -threads 8
+//   curcuma -activelearn conf.xyz -center_sweep 200,500,1000,2000
+//   curcuma -activelearn conf.xyz -al_mode test -model conf.deltaml.json
+//
+// The resulting model plugs into any capability through '-method deltaml:<file.json>'.
+int executeActiveLearn(const json& controller, int argc, char** argv) {
+    if (argc < 3) {
+        ActiveLearn dummy(json{}, true);
+        dummy.printHelp();
+        return 0;
+    }
+
+    auto* learner = new ActiveLearn(controller, false);
+    initializeBMT(learner, argv[2], "activelearn", controller); // also sets the input file
+    learner->start();
+    learner->processBakFiles();
+    delete learner;
+    return 0;
+}
+
 int executeTrajectoryAnalysis(const json& controller, int argc, char** argv) {
     if (argc < 3) {
         TrajectoryAnalysis dummy(json{}, true);
@@ -2386,7 +2453,39 @@ int executePolymerBuild(const json& controller, int argc, char** argv)
     initializeBMT(&builder, "polymer", "polymerbuild", controller);
     builder.start();
     builder.processBakFiles();
+    if (!builder.error().empty()) {
+        std::cerr << "polymerbuild failed: " << builder.error() << std::endl;
+        return 1;
+    }
     return 0;
+}
+
+// Counter-ion placement: -ionize system.xyz -charge N  (Claude Generated 2026)
+int executeIonize(const json& controller, int argc, char** argv)
+{
+    if (argc < 3) {
+        std::cerr << "Please use curcuma for counter-ions as follows:\ncurcuma -ionize solvated.xyz -charge 15 [-anion Cl] [-cation Na] [-solvent H2O]" << std::endl;
+        return 1;
+    }
+    curcuma::Ionize ionizer(controller, false);
+    initializeBMT(&ionizer, argv[2], "ionize", controller);
+    ionizer.start();
+    ionizer.processBakFiles();
+    return ionizer.error().empty() ? 0 : 1;
+}
+
+// Streaming trajectory properties: -trajprops traj.xyz -selection "F1" -last_fraction 0.3333  (Claude Generated 2026)
+int executeTrajProps(const json& controller, int argc, char** argv)
+{
+    if (argc < 3) {
+        std::cerr << "Please use curcuma for trajectory properties as follows:\ncurcuma -trajprops traj.xyz [-quantity gyration] [-selection F1] [-last_fraction 0.3333]" << std::endl;
+        return 1;
+    }
+    curcuma::TrajectoryProperties props(controller, false);
+    initializeBMT(&props, argv[2], "trajprops", controller);
+    props.start();
+    props.processBakFiles();
+    return props.error().empty() ? 0 : 1;
 }
 
 // ============================================================================
@@ -2636,10 +2735,16 @@ const std::map<std::string, CapabilityInfo> CAPABILITY_REGISTRY = {
                   {"XYZ", "MOL2", "SDF"}, executeConfStat}},
     {"confgen", {"Torsion/energy-decomposition analysis of a conformer ensemble", "conformational",
                   {"XYZ", "MOL2", "SDF"}, executeConfGen}},
+    {"activelearn", {"Delta-ML model training: lift a cheap method to a reference level", "calculation",
+                  {"XYZ", "MOL2", "SDF"}, executeActiveLearn}},
     {"dock", {"Molecular docking calculations", "docking",
               {"XYZ", "MOL2", "SDF"}, executeDocking}},
     {"polymerbuild", {"Iterative polymer assembly from fragments", "assembly",
                   {"XYZ"}, executePolymerBuild}},
+    {"trajprops", {"Streaming properties of a long trajectory (gyration radius)", "analysis",
+                  {"XYZ", "VTF"}, executeTrajProps}},
+    {"ionize", {"Neutralise a solvated system by replacing solvent with counter-ions", "assembly",
+                  {"XYZ"}, executeIonize}},
     {"md", {"Molecular dynamics simulation", "dynamics",
             {"XYZ", "VTF", "MOL2", "SDF"}, executeSimpleMD}},
     {"casino", {"Casino Monte Carlo simulation with enhanced sampling", "dynamics",

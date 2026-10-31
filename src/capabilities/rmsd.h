@@ -191,6 +191,11 @@ public:
 
     /*! \brief Best-fit RMSD after reordering (the permutation RMSD); equals the plain value
      *  when no reordering ran. */
+    /// Claude Generated 2026 - What this run computed, without the caller's
+    /// context: the file names that appear in the CLI's .rmsd.json are the CLI's
+    /// own concern and are added there. Pure -- writes nothing.
+    json Results() const override;
+
     inline double RMSD() const { return m_rmsd; }
 
     /*! \brief Plain best-fit RMSD in the original atom order, WITHOUT reordering. Only
@@ -413,9 +418,11 @@ private:
     // vvvvvvvvvvvv PARAMETER DEFINITION BLOCK vvvvvvvvvvvv
     // Claude Generated - Parameter Registry Integration (October 2025)
     BEGIN_PARAMETER_DEFINITION(rmsd)
+    MODULE_INFO("RMSD between two structures, with atom reordering and fragment-wise alignment.", "Analysis", {"rmsd"})
 
     // --- General & Threading ---
-    PARAM(threads, Int, 1, "Number of threads for parallel execution.", "Performance", {})
+    PARAM(threads, Int, 1, "Number of threads for parallel execution.", "Performance", {},
+        "min=1")
     /* Claude Generated (Aug 2026): 'heavy' used to be a plain alias of 'protons', which
        inverted its meaning - a bare CLI flag becomes true, so '-heavy' asked for
        protons=true, i.e. the exact opposite of heavy-only, and only '-heavy false'
@@ -428,7 +435,8 @@ private:
     PARAM(no_reorder, Bool, false, "Disable all reordering logic.", "General", {"noreorder"})
 
     // --- Alignment Method ---
-    PARAM(method, String, "subspace", "Alignment method: subspace (default, recommended)|inertia (recommended)|template|dtemplate|incr (legacy)|molalign (external)|hungarian|predefined.", "Method", {"RMSDmethod", "rmsdmethod"})
+    PARAM(method, String, "subspace", "Alignment method: subspace (default, recommended)|inertia (recommended)|template|dtemplate|incr (legacy)|molalign (external)|hungarian|predefined.", "Method", {"RMSDmethod", "rmsdmethod"},
+        "tier=primary; enum=subspace|inertia|template|dtemplate|incr|molalign|hungarian|predefined")
     PARAM(limit, Int, 0, "Limit for subspace and dtemplate methods.", "Method", {})
     PARAM(element, String, "7", "Element(s) for template methods (e.g., \"7,8\").", "Method", {"Element"})
     PARAM(order_file, String, "", "Path to a file with a predefined atom order.", "Method", {"order"})

@@ -180,7 +180,7 @@ Measured: 182 ms per energy call on polymer_2x on one A4500, EEQ ~79 ms, Coulomb
 
 **Correctness**
 
-- **F-1 ROCm computes no Coulomb term by default - since `ab6e3f5e` (Sep 17, 2026).** *Open,
+- **F-1 ROCm computes no Coulomb term by default - since `ab6e3f5e` (Sep 17, 2026).** *FIXED by `743cffba` ("implicit Coulomb had no HIP consumer"); verified Oct 13, 2026 on gfx1200: gfnff single point and MD energies equal the CPU at 8-10 decimals on 1410, 6200 and 7320 atoms (docs/ROCM_EVALUATION_2026-10-13.md). The text below is the original finding.* *Was open,
   documentation only (operator decision Sep 28: no ROCm code changes without ROCm hardware); workaround
   in TODO.md and KNOWN_ISSUES_ARCHIVE.md Known Issue #35.* The shared
   wrapper sets implicit Coulomb pairs by default (`qm_methods/gfnff_gpu_method_impl.h:403-406`), which

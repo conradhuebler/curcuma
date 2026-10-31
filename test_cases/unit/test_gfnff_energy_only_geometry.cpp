@@ -70,5 +70,22 @@ int main(int argc, char* argv[])
     const double diff = e_energy_only - e_gradient;
     std::printf("backend=%s  E(energy-only at B)=%.12f  E(gradient call at B)=%.12f  diff=%.3e Eh\n",
                 gpu.c_str(), e_energy_only, e_gradient, diff);
-    return std::abs(diff) <= 1e-8 ? 0 : 1;
+
+    // Claude Generated (Oct 2026): frozen coordination numbers (-gfnff.static_cn). The ROCm fused
+    // dispersion gather forms C6 per edge in gradient calls and leaves the per-pair C6 array stale;
+    // an energy-only call with frozen CN does not refresh the Gaussian weights and must refill that
+    // array from the stored per-atom data. Setup happens at A, the first (gradient) call at B, so
+    // the stale per-pair C6 belongs to A and the frozen CN to B; the energy-only call at B must equal
+    // the gradient call at B.
+    json config_static = config;
+    config_static["gfnff"]["static_cn"] = true;
+    EnergyCalculator calc_static("gfnff", config_static);
+    calc_static.setMolecule(mol_a);
+    calc_static.updateGeometry(mol_b.m_geometry);
+    const double e_grad_b = calc_static.CalculateEnergy(true);
+    const double e_eo_same = calc_static.CalculateEnergy(false);
+    const double diff_same = e_eo_same - e_grad_b;
+    std::printf("backend=%s  static_cn: E(gradient call at B)=%.12f  E(energy-only at B again)=%.12f  diff=%.3e Eh\n",
+                gpu.c_str(), e_grad_b, e_eo_same, diff_same);
+    return (std::abs(diff) <= 1e-8 && std::abs(diff_same) <= 1e-8) ? 0 : 1;
 }

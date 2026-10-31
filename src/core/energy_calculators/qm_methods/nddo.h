@@ -72,6 +72,21 @@ public:
     NDDOMethodType getMethodType() const { return m_method_type; }
     std::string getMethodNameStr() const { return NDDOParams::methodName(m_method_type); }
 
+    /* SCF controls (Claude Generated, Oct 2026), set by NDDOMethod from the shared "scf" scope
+     * (scf_parameters.h). Out-of-range values keep the defaults set in the constructor. */
+    void setScfMaxIterations(int n) { if (n > 0) m_scf_max_iterations = n; }
+    void setScfThreshold(double t) { if (t > 0.0) m_scf_threshold = t; }
+    /// Fraction of the new density taken per step: P = d*P_new + (1-d)*P_old (default 0.6).
+    void setScfDamping(double d) { if (d > 0.0 && d <= 1.0) m_scf_mixing = d; }
+    void setScfUseDiis(bool b) { m_scf_use_diis = b; }   ///< scf_mode diis (default) or plain
+    void setDiisStart(int n) { if (n >= 0) m_diis_start = n; }
+    void setDiisSubspace(int n) { if (n >= 2) m_diis_subspace = n; }
+    void setScfAllowUnconverged(bool b) { m_scf_allow_unconverged = b; }
+
+    /// Error of the last Calculation (unconverged or non-finite SCF); empty when it succeeded.
+    /// Calculation() clears it at the start of every outer call (not inside the numerical gradient).
+    const std::string& scfError() const { return m_scf_error; }
+
 private:
     // Method identity
     NDDOMethodType m_method_type;
@@ -155,6 +170,13 @@ private:
 
     int m_scf_max_iterations;
     double m_scf_threshold;
-    double m_scf_damping;
+    double m_scf_mixing;            // fraction of the new density per step
+    bool m_scf_use_diis = true;
+    int m_diis_start = 3;           // plain damped iterations before DIIS extrapolates
+    int m_diis_subspace = 8;        // DIIS history depth
+    bool m_scf_allow_unconverged = false;
     bool m_scf_converged;
+    std::string m_scf_error;
+    double m_scf_last_dP = 0.0;     // ||dP||_F of the last SCF iteration
+    int m_calc_depth = 0;           // > 0 inside Calculation (numerical gradient re-enters it)
 };

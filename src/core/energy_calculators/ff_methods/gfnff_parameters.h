@@ -134,6 +134,33 @@ struct D4DC6DCNPairs {
 };
 
 /**
+ * @brief Per-atom D4 data from which the CPU energy loop evaluates each pair's C6 and
+ *        dC6/dCN itself (Claude Generated, Oct 2026).
+ *
+ * Replaces, on the CPU FFWorkspace path, the two per-step passes over the whole D4 pair list
+ * (writing GFNFFDispersion::C6 and D4DC6DCNPairs::dc6_di/dc6_dj, ~12.8 M pairs at 5747 atoms)
+ * by the formulas of d4_pair_c6.h inside FFWorkspace::calcD4Dispersion. Filled and owned by
+ * D4ParameterGenerator (fusedPairC6View()); all pointers stay valid until its next update.
+ * Index layout: per-atom rows of MAX_REF = 7 doubles; g/dg rows (atom*K + slot)*7.
+ * Two states: C6 uses the CURRENT weights; dC6/dCN uses the weights of the last derivative
+ * rebuild (the *_d pointers). They differ only after a weight refresh without derivative
+ * rebuild (D4ParameterGenerator::refreshC6WeightsForCN), exactly as the stored arrays did.
+ * Not used by the GPU paths (they keep their own C6 / dC6dCN kernels).
+ */
+struct D4FusedC6View {
+    int K = 0;                       ///< element slots per atom row of g/dg
+    const int* slot = nullptr;       ///< [atom] slot of the atom's element
+    const int* nb = nullptr;         ///< [atom] reference states (<= 7), current weights
+    const double* g = nullptr;       ///< half-contraction of the current weights
+    const double* w = nullptr;       ///< current Gaussian weights, [atom*7 + b]
+    const int* nb_d = nullptr;       ///< as nb, state of the last dC6/dCN rebuild
+    const double* g_d = nullptr;     ///< as g, state of the last dC6/dCN rebuild
+    const double* dg_d = nullptr;    ///< half-contraction of dw/dCN
+    const double* w_d = nullptr;     ///< as w, state of the last dC6/dCN rebuild
+    const double* dw_d = nullptr;    ///< dw/dCN, [atom*7 + b]
+};
+
+/**
  * @brief D3 Dispersion pairwise term (standard BJ damping)
  *
  * D3 uses standard BJ damping: E = -s6*C6/(r^6+R0^6) - s8*C8/(r^8+R0^8)
@@ -212,6 +239,39 @@ struct GFNFFHydrogenBond {
 
     mutable double strength = 1.0;
     double sigmoid_width = 0.5;
+};
+
+/**
+ * @brief Energy of one hydrogen-bond triple A-H...B, in Eh. Claude Generated (Oct 2026).
+ *
+ * The same value the workspace adds to the hydrogen-bond energy; indices are 0-based atom
+ * numbers of the triple in the list of GFNFF::getLastHBonds(). A triple outside its cut-off
+ * contributes 0. See FFWorkspace::hydrogenBondEnergies().
+ */
+struct GFNFFHBondEnergy {
+    int donor = 0;
+    int hydrogen = 0;
+    int acceptor = 0;
+    int case_type = 1;
+    double energy = 0.0;
+};
+
+/**
+ * @brief Per-atom inputs of the H-bond detection in flat arrays (Claude Generated, Oct 2026)
+ *
+ * Filled by GFNFF::prepareHBDetectInputs() (the O(N) part of detectHydrogenBondsNative()), consumed by the
+ * device-side detection (FFWorkspaceGPU::detectHBondsOnDevice(), -gfnff.gpu_hb_detect_on_device).
+ */
+struct GFNFFHBDetectInputs {
+    int natoms = 0;
+    std::vector<double> basicity, acidity, charge;  ///< current_basicity / current_acidity / Phase-1 charge
+    std::vector<char> is_hb_hyd, ab_ok;             ///< HB-capable hydrogen / atom may be donor or acceptor
+    std::vector<int> hb_hyd_list;                   ///< the HB hydrogens, ascending
+    std::vector<int> nbr_off, nbr_idx;              ///< topology neighbour lists (neighbors_B / neighbors_C source)
+    std::vector<int> bond_off, bond_idx;            ///< bonded partners of each atom (is_bonded)
+    std::vector<int> hyd_off, hyd_idx;              ///< HB hydrogens bonded to each atom (hyd_on)
+    double hbthr1 = 0.0, hbthr2 = 0.0;              ///< squared-Bohr thresholds of the AB pair and the case-1 criterion
+    double min_pair_energy = 0.0;                   ///< hb_min_pair_energy_eh (case-1 pruning, 0 = off)
 };
 
 /**

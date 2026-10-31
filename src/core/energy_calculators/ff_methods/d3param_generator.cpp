@@ -1088,6 +1088,51 @@ void D3ParameterGenerator::computeDC6DCN() const
     m_dc6dcn_computed = true;
 }
 
+D3ParameterGenerator::DeviceTables D3ParameterGenerator::buildDeviceTables(const std::vector<int>& atoms) const
+{
+    DeviceTables t;
+    t.s6 = m_config.get<double>("d3_s6", 1.0);
+    t.s8 = m_config.get<double>("d3_s8", 1.0);
+    t.a1 = m_config.get<double>("d3_a1", 0.4);
+    t.a2 = m_config.get<double>("d3_a2", 4.0);
+    t.nref.assign(MAX_ELEM, 0);
+    t.refcn.assign(static_cast<size_t>(MAX_ELEM) * MAX_REF, 0.0);
+    for (int z = 1; z <= MAX_ELEM; ++z) {
+        t.nref[z - 1] = getNumberofReferences(z);
+        for (int r = 0; r < MAX_REF; ++r) t.refcn[static_cast<size_t>(z - 1) * MAX_REF + r] = getReferenceCN(z, r);
+    }
+    for (int z : atoms)
+        if (z >= 1 && z <= MAX_ELEM && std::find(t.type_z.begin(), t.type_z.end(), z) == t.type_z.end())
+            t.type_z.push_back(z);
+    std::sort(t.type_z.begin(), t.type_z.end());
+    t.nt = static_cast<int>(t.type_z.size());
+    t.atom_type.assign(atoms.size(), -1);
+    for (size_t a = 0; a < atoms.size(); ++a) {
+        auto it = std::find(t.type_z.begin(), t.type_z.end(), atoms[a]);
+        if (it != t.type_z.end()) t.atom_type[a] = static_cast<int>(it - t.type_z.begin());
+    }
+    t.c6tab.assign(static_cast<size_t>(t.nt) * t.nt * MAX_REF * MAX_REF, 0.0);
+    t.r6tab.assign(static_cast<size_t>(t.nt) * t.nt, 0.0);
+    for (int ti = 0; ti < t.nt; ++ti)
+        for (int tj = 0; tj < t.nt; ++tj) {
+            const int zi = t.type_z[ti], zj = t.type_z[tj];
+            t.r6tab[static_cast<size_t>(ti) * t.nt + tj] = getR6(zi, zj);
+            bool swap_refs = false;
+            const auto* blk = refC6Block(zi, zj, swap_refs);
+            if (!blk) continue;
+            const int ni = getNumberofReferences(zi), nj = getNumberofReferences(zj);
+            for (int ra = 0; ra < ni && ra < MAX_REF; ++ra)
+                for (int rb = 0; rb < nj && rb < MAX_REF; ++rb) {
+                    int ri = swap_refs ? rb : ra;     // the same rule as interpolateC6 / computeDC6DCN
+                    int rj = swap_refs ? ra : rb;
+                    if (ri > MAX_REF - 1) ri = MAX_REF - 1;
+                    if (rj > MAX_REF - 1) rj = MAX_REF - 1;
+                    t.c6tab[((static_cast<size_t>(ti) * t.nt + tj) * MAX_REF + ra) * MAX_REF + rb] = (*blk)[ri][rj];
+                }
+        }
+    return t;
+}
+
 const Eigen::MatrixXd& D3ParameterGenerator::getDC6DCN() const
 {
     if (!m_dc6dcn_computed)

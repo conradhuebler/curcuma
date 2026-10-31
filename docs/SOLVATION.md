@@ -42,6 +42,7 @@ curcuma -opt mol.xyz -method gfn1 -xtb.solvent dmso                          # d
 - `-xtb.solvent <name>`: water, dmso, acetone, chloroform, methanol, … (tblite set)
 - `-xtb.solvent_model`: `alpb` (default when a solvent is given), `gbsa`, `cpcm` (not yet native), `none`.
   Legacy numeric codes (3=alpb, 2=gbsa, 1=cpcm, 0=none) are still accepted.
+- ROCm (`-gpu rocm`): the reaction field v_at += B q_at enters the device SCF potential and the resident loop (`-xtb.rocm_device_solvation`, default true; energy and gradient on the host); see [GPU_TUNING.md](GPU_TUNING.md).
 
 **Validation (machine-tested):** native total energy matches tblite to ≤1e-8 Eh for
 7 molecules × {water, dmso, acetone, chloroform} × {gfn1, gfn2} — for **both** models

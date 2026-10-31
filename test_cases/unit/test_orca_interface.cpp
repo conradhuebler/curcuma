@@ -179,26 +179,28 @@ static void test_build_geometry_block(OrcaInterfaceTest& t)
     t.assert_true(block.find("*xyz 0 1") != std::string::npos, "CH4 header");
     t.assert_true(block.find("C ") != std::string::npos, "C element");
 
-    // Hydroxide anion: charge -1, doublet (m_spin = 0.5 -> mult = 2)
+    // Hydroxide anion: charge -1, closed shell (m_spin = 0 -> mult = 1)
     Mol oh_minus = makeMol({ 8, 1 },
         Matrix::Zero(2, 3),
         -1, 0);
     block = iface.buildGeometryBlock(oh_minus);
     t.assert_true(block.find("*xyz -1 1") != std::string::npos, "OH- header charge=-1 mult=1");
 
-    // Triplet O2: charge 0, multiplicity 3 (m_spin = 1.0 -> mult = 2*1+1 = 3)
+    // Triplet O2: charge 0, multiplicity 3. m_spin is the NUMBER OF UNPAIRED ELECTRONS (= multiplicity - 1,
+    // abstract_interface.h setMult; orcainterface.cpp: multiplicity = m_spin + 1), so triplet = 2.
+    // (The expectation used to be the old 2*S+1 reading with m_spin = S; fixed Oct 2026.)
     Mol o2_triplet = makeMol({ 8, 8 },
         Matrix::Zero(2, 3),
-        0, 1);
+        0, 2);
     block = iface.buildGeometryBlock(o2_triplet);
     t.assert_true(block.find("*xyz 0 3") != std::string::npos, "O2 triplet mult=3");
 
-    // Quadrat O2: m_spin = 1.5 -> mult = 4
+    // Quartet (three unpaired electrons, charge 0 is only a geometry-block test): m_spin = 3 -> mult = 4
     Mol o2_quartet = makeMol({ 8, 8 },
         Matrix::Zero(2, 3),
-        0, 2);
+        0, 3);
     block = iface.buildGeometryBlock(o2_quartet);
-    t.assert_true(block.find("*xyz 0 5") != std::string::npos, "O2 quartet mult=5");
+    t.assert_true(block.find("*xyz 0 4") != std::string::npos, "O2 quartet mult=4");
 }
 
 // =================================================================================
