@@ -252,12 +252,15 @@ def check_gpu(a, case):
                 sys.exit("no energy line")
             d = abs(float(mc.group(1)) - float(mg.group(1)))
             print(f"  CPU {mc.group(1)} GPU {mg.group(1)} d {d:.1e}")
-            if "qm_xc" not in gpu:
+            # WP12 stage 3 (Oct 31 2026): P86/B95 run on the device, no qm_xc fallback; -gpu_strict true runs through
+            if "qm_xc" in gpu or "GPU fallbacks during this run" in gpu:
                 print(gpu[-2000:])
-                sys.exit("expected a counted qm_xc fallback")
+                sys.exit("expected the device XC path (no counted qm_xc fallback)")
             rc2, strict = curcuma_run(a, base + ["-gpu", "cuda", "-gpu_strict", "true"], tmp)
+            ms = rx.search(strict)
             print(f"  -gpu_strict true exit {rc2}")
-            if d > 1e-8 or rc2 == 0:
+            if d > 1e-8 or rc2 != 0 or not ms or abs(float(ms.group(1)) - float(mc.group(1))) > 1e-8:
+                print(strict[-2000:])
                 sys.exit("FAIL")
         finally:
             os.chdir(cwd)

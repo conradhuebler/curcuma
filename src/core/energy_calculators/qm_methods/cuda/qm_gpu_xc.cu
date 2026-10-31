@@ -50,8 +50,15 @@
 //             sum_k (d_k phi)^T diag(w v_tau / 2) (d_k phi), the term of buildVxcMeta; four DGEMMs, fixed order)
 //   gradient  T_k += (w v_tau / 2) sum_j d_k d_j phi o DP_j                    (AO deriv 2, as for a GGA)
 // The LDA/GGA kernels are untouched (separate kernels; the gradient kernels are templates, <false> = the old code).
+//
+// Double hybrids (Oct 31 2026, WP12 stage 3): P86 (PZ81 / VWN5 local part) and B95 need no code here, they come in
+// through evaluatePoint / evaluatePointMGGA of qm_xc_kernels.h (GGA and meta-GGA paths). For the double-hybrid
+// gradient the object (QMGpuXCSetup::fxc) also forms F_xc[D] and the P2-directional XC gradient with the second
+// derivatives of qm_xc_fxc_kernels.h: separate kernels (densityPairKernel, respRowKernel, respColKernel), so the
+// LDA/GGA/meta-GGA kernels and, without the flag, their block sizes are unchanged.
 
 #include "../qm_gpu_xc_backend.h"
+#include "../qm_xc_fxc_kernels.h"
 #include "../qm_xc_kernels.h"
 
 #include <cublas_v2.h>
@@ -575,6 +582,186 @@ __global__ void symmetrizeKernel(const double* __restrict__ W, double* __restric
     V[k] = W[k] + W[j + i * n];
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// Double-hybrid gradient parts (WP12 stage 3, Claude Generated, Oct 31 2026): XC kernel response F_xc[D] of the
+// Z-vector equations and the P2-directional derivative of the XC gradient, device versions of qmxc::buildFxc and
+// qmxc::buildXCResponseGradient (qm_xc_response.cpp, formulas in qm_xc_fxc.h). The second derivatives come from
+// qmxc::fxc::evaluatePointFxc (qm_xc_fxc_kernels.h, the host source). Two densities per block: Xa = phi P (the KS
+// density) and Xb = phi D (or phi P2), each with the d_k phi planes for a meta-GGA. No FP atomics; the block sizes are
+// those of the object (fixed for a fixed setup), so a repeated call gives the same bits.
+// ---------------------------------------------------------------------------------------------------------------
+
+/// Per point: rho, grad rho, tau of the density a (KS density P) and b (D or P2), first and second functional
+/// derivatives (v, H) at a, the directional derivatives dv_x = sum_y H_xy y_b, and the coefficient vectors:
+///   mode 0 (F_xc):     c0 = w dv_rho / 2, cj = 2 w (dv_sigma d_j rho_a + v_sigma d_j rho_b), ct = w dv_tau / 4
+///                      (W += phi^T Y + sum_k d_k phi^T diag(ct) d_k phi, V = W + W^T: the X + X^T + tau term of buildFxc)
+///   mode 1 (gradient): c0 = w v_rho, cj = 2 w v_sigma d_j rho_a, ct = w v_tau / 2 (Z and wt of the CPU),
+///                      d0 = w dv_rho, dj = 2 w (dv_sigma d_j rho_a + v_sigma d_j rho_b), dt = w dv_tau / 2 (dZ, dwt),
+///                      edens = v_rho rho_b + v_sigma sigma_b + v_tau tau_b, used = 1 (sigma_b = 2 grad rho_a . grad rho_b)
+/// Points below the threshold get zeros (as the CPU skips them). Claude Generated (Oct 31 2026).
+__global__ void densityPairKernel(const double* __restrict__ ao, const double* __restrict__ Xa, const double* __restrict__ Xb,
+                                  int nbf, int B, int count, int begin, const double* __restrict__ wgt, DevTerms terms, int gga,
+                                  int mgga, double rho_min, int mode, double* __restrict__ c0, double* __restrict__ cx,
+                                  double* __restrict__ cy, double* __restrict__ cz, double* __restrict__ ct,
+                                  double* __restrict__ d0, double* __restrict__ dx, double* __restrict__ dy,
+                                  double* __restrict__ dz, double* __restrict__ dt, double* __restrict__ used,
+                                  double* __restrict__ edens)
+{
+    const int q = blockIdx.x * blockDim.x + threadIdx.x;
+    if (q >= count) return;
+    const size_t plane = (size_t)nbf * B;
+    double ra = 0.0, rb = 0.0, ga[3] = { 0.0, 0.0, 0.0 }, gb[3] = { 0.0, 0.0, 0.0 }, ta = 0.0, tb = 0.0;
+    for (int m = 0; m < nbf; ++m) {
+        const size_t i = (size_t)m * B + q;
+        const double phi = ao[i], xa = Xa[i], xb = Xb[i];
+        ra += phi * xa;
+        rb += phi * xb;
+        if (gga) {
+            for (int k = 0; k < 3; ++k) {
+                const double d = ao[(k + 1) * plane + i];
+                ga[k] += d * xa;
+                gb[k] += d * xb;
+                if (mgga) {
+                    ta += d * Xa[(k + 1) * plane + i];
+                    tb += d * Xb[(k + 1) * plane + i];
+                }
+            }
+        }
+    }
+    for (int k = 0; k < 3; ++k) {
+        ga[k] *= 2.0;
+        gb[k] *= 2.0;
+    }
+    ta *= 0.5;
+    tb *= 0.5;
+    const double sigma = gga ? ga[0] * ga[0] + ga[1] * ga[1] + ga[2] * ga[2] : 0.0;
+    double v[3], H[6];
+    const bool ok = qmxc::fxc::evaluatePointFxc(terms.t, terms.n, rho_min, ra, sigma, ta, v, H);
+    const int p = begin + q;
+    if (!ok) {
+        c0[q] = cx[q] = cy[q] = cz[q] = 0.0;
+        if (mgga) ct[q] = 0.0;
+        if (mode == 1) {
+            d0[q] = dx[q] = dy[q] = dz[q] = 0.0;
+            if (mgga) dt[q] = 0.0;
+            used[p] = 0.0;
+            edens[p] = 0.0;
+        }
+        return;
+    }
+    const double w = wgt[p];
+    const double s1 = gga ? 2.0 * (ga[0] * gb[0] + ga[1] * gb[1] + ga[2] * gb[2]) : 0.0;
+    const double dvr = H[0] * rb + H[1] * s1 + H[2] * tb;
+    const double dvs = H[1] * rb + H[3] * s1 + H[4] * tb;
+    const double dvt = H[2] * rb + H[4] * s1 + H[5] * tb;
+    double* cj[3] = { cx, cy, cz };
+    if (mode == 0) {
+        c0[q] = 0.5 * (w * dvr);
+        for (int k = 0; k < 3; ++k) cj[k][q] = 2.0 * w * (dvs * ga[k] + v[1] * gb[k]);
+        if (mgga) ct[q] = 0.25 * w * dvt;
+        return;
+    }
+    double* dj[3] = { dx, dy, dz };
+    c0[q] = w * v[0];
+    d0[q] = w * dvr;
+    for (int k = 0; k < 3; ++k) {
+        cj[k][q] = 2.0 * w * v[1] * ga[k];
+        dj[k][q] = 2.0 * w * (dvs * ga[k] + v[1] * gb[k]);
+    }
+    if (mgga) {
+        ct[q] = 0.5 * w * v[2];
+        dt[q] = 0.5 * w * dvt;
+    }
+    used[p] = 1.0;
+    edens[p] = v[0] * rb + v[1] * s1 + v[2] * tb;
+}
+
+/// T_k(q, m) of buildXCResponseGradient: d_k phi o ZP + sum_j d_k d_j phi o (vj (phi P2) + dvj (phi P))
+/// (+ meta-GGA: sum_j d_k d_j phi o (wt (d_j phi P2) + dwt (d_j phi P))), ZP = Z P2 + dZ P. Xa = phi P planes,
+/// Xb = phi P2 planes (each [phi, d_x phi, d_y phi, d_z phi] X for a meta-GGA). Claude Generated (Oct 31 2026).
+__device__ inline void respTerms(const double* ao, const double* ZP, const double* Xa, const double* Xb, size_t plane,
+                                 size_t i, int gga, int mgga, const double vj[3], const double dvj[3], double wt, double dwt,
+                                 double t[3])
+{
+    const double zp = ZP[i];
+    t[0] = ao[plane + i] * zp;
+    t[1] = ao[2 * plane + i] * zp;
+    t[2] = ao[3 * plane + i] * zp;
+    if (!gga) return;
+    const double a = Xb[i], b = Xa[i];
+    const double u0 = vj[0] * a + dvj[0] * b, u1 = vj[1] * a + dvj[1] * b, u2 = vj[2] * a + dvj[2] * b;
+    const double xx = ao[4 * plane + i], xy = ao[5 * plane + i], xz = ao[6 * plane + i];
+    const double yy = ao[7 * plane + i], yz = ao[8 * plane + i], zz = ao[9 * plane + i];
+    t[0] += xx * u0 + xy * u1 + xz * u2;
+    t[1] += xy * u0 + yy * u1 + yz * u2;
+    t[2] += xz * u0 + yz * u1 + zz * u2;
+    if (mgga) {
+        const double s0 = wt * Xb[plane + i] + dwt * Xa[plane + i];
+        const double s1 = wt * Xb[2 * plane + i] + dwt * Xa[2 * plane + i];
+        const double s2 = wt * Xb[3 * plane + i] + dwt * Xa[3 * plane + i];
+        t[0] += xx * s0 + xy * s1 + xz * s2;
+        t[1] += xy * s0 + yy * s1 + yz * s2;
+        t[2] += xz * s0 + yz * s1 + zz * s2;
+    }
+}
+
+/// Response gradient, point part: spoint[(begin + q) 3 + k] = -2 sum_m T_k(q, m). Claude Generated (Oct 31 2026).
+__global__ void respRowKernel(const double* __restrict__ ao, const double* __restrict__ ZP, const double* __restrict__ Xa,
+                              const double* __restrict__ Xb, int nbf, int B, int count, int begin, int gga, int mgga,
+                              const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+                              const double* __restrict__ dx, const double* __restrict__ dy, const double* __restrict__ dz,
+                              const double* __restrict__ ct, const double* __restrict__ dt, double* __restrict__ spoint)
+{
+    const int q = blockIdx.x * blockDim.x + threadIdx.x;
+    if (q >= count) return;
+    const size_t plane = (size_t)nbf * B;
+    const double vj[3] = { cx[q], cy[q], cz[q] }, dvj[3] = { dx[q], dy[q], dz[q] };
+    const double wt = mgga ? ct[q] : 0.0, dwt = mgga ? dt[q] : 0.0;
+    double s[3] = { 0.0, 0.0, 0.0 };
+    for (int m = 0; m < nbf; ++m) {
+        double t[3];
+        respTerms(ao, ZP, Xa, Xb, plane, (size_t)m * B + q, gga, mgga, vj, dvj, wt, dwt, t);
+        s[0] += t[0];
+        s[1] += t[1];
+        s[2] += t[2];
+    }
+    for (int k = 0; k < 3; ++k) spoint[3 * (size_t)(begin + q) + k] = -2.0 * s[k];
+}
+
+/// Response gradient, basis part: gfun[3 m' + k] += sum_q T_k(q, m) (one block per function, fixed tree order).
+/// Claude Generated (Oct 31 2026).
+__global__ void respColKernel(const double* __restrict__ ao, const double* __restrict__ ZP, const double* __restrict__ Xa,
+                              const double* __restrict__ Xb, int nbf, int B, int count, int gga, int mgga,
+                              const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+                              const double* __restrict__ dx, const double* __restrict__ dy, const double* __restrict__ dz,
+                              const double* __restrict__ ct, const double* __restrict__ dt, double* __restrict__ gfun,
+                              const int* __restrict__ idx)
+{
+    __shared__ double sh[3][256];
+    const int m = blockIdx.x;
+    const size_t plane = (size_t)nbf * B;
+    double s[3] = { 0.0, 0.0, 0.0 };
+    for (int q = threadIdx.x; q < count; q += blockDim.x) {
+        const double vj[3] = { cx[q], cy[q], cz[q] }, dvj[3] = { dx[q], dy[q], dz[q] };
+        double t[3];
+        respTerms(ao, ZP, Xa, Xb, plane, (size_t)m * B + q, gga, mgga, vj, dvj, mgga ? ct[q] : 0.0, mgga ? dt[q] : 0.0, t);
+        s[0] += t[0];
+        s[1] += t[1];
+        s[2] += t[2];
+    }
+    for (int k = 0; k < 3; ++k) sh[k][threadIdx.x] = s[k];
+    __syncthreads();
+    for (int o = blockDim.x / 2; o > 0; o >>= 1) {
+        if (threadIdx.x < o)
+            for (int k = 0; k < 3; ++k) sh[k][threadIdx.x] += sh[k][threadIdx.x + o];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        const int mg = idx ? idx[m] : m;
+        for (int k = 0; k < 3; ++k) gfun[3 * mg + k] += sh[k][0];
+    }
+}
+
 inline unsigned g1(size_t n, int t = 256) { return (unsigned)((n + t - 1) / t); }
 
 class QmGpuXCCuda final : public qmint::QMGpuXC {
@@ -595,6 +782,7 @@ public:
         m_nshell = s.nshell;
         m_stratmann = s.stratmann;
         m_mgga = s.mgga;
+        m_fxc = s.fxc;
         if (m_nbf <= 0 || m_npts <= 0 || m_na <= 0) { why = "empty grid or basis"; return false; }
         if (m_mgga && !m_gga) { why = "meta-GGA setup without the GGA flag"; return false; }
         if (s.nterms <= 0 || s.nterms > kMaxTerms) { why = "functional with more than 8 terms"; return false; }
@@ -655,7 +843,10 @@ public:
         const bool screened = !m_groups.empty();
         const size_t ncol = screened ? (size_t)std::max(1, m_sub_max) : nb;  // columns of the per-block planes
         const int nxp = m_mgga ? 4 : 1;  // planes of X: phi P (+ d_k phi P for a meta-GGA)
-        const double per_point = 8.0 * ((double)ncol * (m_nder + 1 + 2 * nxp) + (m_mgga ? 9.0 : 8.0));
+        // WP12 stage 3: with fxc the second density (nxp planes), the dZ plane and five more point vectors; without it
+        // the expression (and with it the block size of LDA/GGA/meta-GGA) is the one of before
+        const double per_point = m_fxc ? 8.0 * ((double)ncol * (m_nder + 1 + 2 * nxp + nxp + 1) + (m_mgga ? 9.0 : 8.0) + 5.0)
+                                       : 8.0 * ((double)ncol * (m_nder + 1 + 2 * nxp) + (m_mgga ? 9.0 : 8.0));
         long long B = s.block_points > 0 ? s.block_points : (long long)(budget / per_point);
         B = std::min<long long>(B, ((long long)np + 127) / 128 * 128);
         if (s.block_points <= 0) B = std::min<long long>(B, 32768);
@@ -673,9 +864,14 @@ public:
         ok = alloc(&m_ao, plane * m_nder) && alloc(&m_X, plane * nxp) && alloc(&m_Y, plane * nxp) && alloc(&m_ZP, plane)
             && alloc(&m_c0, (size_t)m_B) && alloc(&m_cx, (size_t)m_B) && alloc(&m_cy, (size_t)m_B) && alloc(&m_cz, (size_t)m_B)
             && alloc(&m_spoint, 3 * np) && (!m_mgga || alloc(&m_ct, (size_t)m_B));
+        if (ok && m_fxc)  // WP12 stage 3: second density, dZ and the directional coefficients
+            ok = alloc(&m_X2, plane * nxp) && alloc(&m_Y2, plane) && alloc(&m_P2, nb * nb) && alloc(&m_d0, (size_t)m_B)
+                && alloc(&m_dx, (size_t)m_B) && alloc(&m_dy, (size_t)m_B) && alloc(&m_dz, (size_t)m_B)
+                && (!m_mgga || alloc(&m_dt, (size_t)m_B));
         if (ok && screened) {
             const size_t ms = (size_t)m_sub_max * m_sub_max;
             ok = alloc(&m_Ps, std::max<size_t>(1, ms)) && alloc(&m_Ws, std::max<size_t>(1, ms))
+                && (!m_fxc || alloc(&m_P2s, std::max<size_t>(1, ms)))
                 && up(&m_g_shells, m_h_shells.data(), m_h_shells.size()) && up(&m_g_cols, m_h_cols.data(), m_h_cols.size())
                 && up(&m_g_idx, m_h_idx.data(), m_h_idx.size()) && up(&m_g_bstart, m_h_bstart.data(), m_h_bstart.size())
                 && up(&m_g_mask, m_h_mask.data(), m_h_mask.size());
@@ -820,6 +1016,12 @@ public:
                       "device memory %.1f MB",
                       m_npts, m_B, m_nvxc, m_t_vxc, m_ngrad, m_t_grad, m_t_wgrad, m_bytes / 1.0e6);
         std::string out = buf;
+        if (m_fxc) {
+            char fx[160];
+            std::snprintf(fx, sizeof fx, "; %d F_xc builds %.1f ms, %d XC response gradients %.1f ms", m_nfxc, m_t_fxc, m_nresp,
+                          m_t_resp);
+            out += fx;
+        }
         if (!m_groups.empty()) {
             char sc[200];
             std::snprintf(sc, sizeof sc, "; AO screening: %d groups (<= %d points), %.1f %% of the functions kept on average",
@@ -837,6 +1039,110 @@ public:
         std::snprintf(p, sizeof p, "; V_xc stages (synchronised): AO %.1f ms, X = phi P %.1f ms, density+XC %.1f ms, "
                       "W = phi^T Y %.1f ms, sums %.1f ms", m_prof[0], m_prof[1], m_prof[2], m_prof[3], m_prof[4]);
         return out + p;
+    }
+
+    // WP12 stage 3 (Claude Generated, Oct 31 2026): F_xc[D] of the double-hybrid Z-vector, the device version of
+    // qmxc::buildFxc. Blocks/groups as vxcDevice (AO deriv 1 for a GGA), two densities per block, then the V_xc
+    // assembly of that path (combineKernel, phi^T Y, meta-GGA tau products, V = W + W^T).
+    bool fxc(const double* P, const double* D, double* V) override
+    {
+        if (!m_fxc) return false;
+        const auto t0 = std::chrono::steady_clock::now();
+        const int n = m_nbf;
+        const size_t bytes = (size_t)n * n * sizeof(double);
+        if (cudaMemcpy(m_P, P, bytes, cudaMemcpyHostToDevice) != cudaSuccess
+            || cudaMemcpy(m_P2, D, bytes, cudaMemcpyHostToDevice) != cudaSuccess)
+            return false;
+        const int deriv = m_gga ? 1 : 0;
+        const double one = 1.0, zero = 0.0;
+        if (!m_groups.empty()) {  // AO screening
+            if (cudaMemsetAsync(m_W, 0, bytes, 0) != cudaSuccess) return false;
+            for (const Group& g : m_groups) {
+                if (g.ns == 0) continue;
+                if (!groupPair(g, deriv, 0)) return false;
+                combineKernel<<<g1((size_t)m_B * g.ns), 256>>>(m_ao, g.ns, m_B, g.count, m_gga, m_c0, m_cx, m_cy, m_cz, m_Y);
+                if (m_mgga) {
+                    if (!metaVxcProduct(g.ns, g.count, m_Ws, false)) return false;
+                } else if (cublasDgemm(m_cublas, CUBLAS_OP_T, CUBLAS_OP_N, g.ns, g.ns, g.count, &one, m_ao, m_B, m_Y, m_B, &zero,
+                                       m_Ws, g.ns) != CUBLAS_STATUS_SUCCESS)
+                    return false;
+                scatterAddKernel<<<g1((size_t)g.ns * g.ns), 256>>>(m_Ws, g.ns, m_g_idx + g.idx_off, n, m_W);
+            }
+        }
+        for (int begin = 0; m_groups.empty() && begin < m_npts; begin += m_B) {
+            const int count = std::min(m_B, m_npts - begin);
+            if (!blockPair(begin, count, deriv, 0)) return false;
+            combineKernel<<<g1((size_t)m_B * n), 256>>>(m_ao, n, m_B, count, m_gga, m_c0, m_cx, m_cy, m_cz, m_Y);
+            if (m_mgga) {
+                if (!metaVxcProduct(n, count, m_W, begin != 0)) return false;
+            } else if (cublasDgemm(m_cublas, CUBLAS_OP_T, CUBLAS_OP_N, n, n, count, &one, m_ao, m_B, m_Y, m_B,
+                                   begin == 0 ? &zero : &one, m_W, n) != CUBLAS_STATUS_SUCCESS)
+                return false;
+        }
+        symmetrizeKernel<<<g1((size_t)n * n), 256>>>(m_W, m_V, n);
+        if (cudaGetLastError() != cudaSuccess || cudaMemcpy(V, m_V, bytes, cudaMemcpyDeviceToHost) != cudaSuccess) return false;
+        ++m_nfxc;
+        m_t_fxc += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        return true;
+    }
+
+    // WP12 stage 3 (Claude Generated, Oct 31 2026): the P2-directional XC gradient, the device version of
+    // qmxc::buildXCResponseGradient plus the Becke weight part of its energy density (weightGradientDevice).
+    bool responseGradient(const double* P, const double* P2, bool response, double* g_basis, double* g_points,
+                          double* g_weights, long long& points_used) override
+    {
+        if (!m_fxc) return false;
+        const auto t0 = std::chrono::steady_clock::now();
+        const int n = m_nbf;
+        const size_t bytes = (size_t)n * n * sizeof(double);
+        if (cudaMemcpy(m_P, P, bytes, cudaMemcpyHostToDevice) != cudaSuccess
+            || cudaMemcpy(m_P2, P2, bytes, cudaMemcpyHostToDevice) != cudaSuccess)
+            return false;
+        if (cudaMemsetAsync(m_gfun, 0, 3 * (size_t)n * sizeof(double), 0) != cudaSuccess || !clearPointArrays()) return false;
+        const int deriv = m_gga ? 2 : 1;
+        const double one = 1.0, zero = 0.0;
+        // ZP = Z P2 + dZ P (Z in plane 0 of m_Y, dZ in m_Y2), then the T_k row and column sums
+        auto contract = [&](int ns, int count, int begin, const double* Pa, const double* Pb, const int* idx) {
+            combineKernel<<<g1((size_t)m_B * ns), 256>>>(m_ao, ns, m_B, count, m_gga, m_c0, m_cx, m_cy, m_cz, m_Y);
+            combineKernel<<<g1((size_t)m_B * ns), 256>>>(m_ao, ns, m_B, count, m_gga, m_d0, m_dx, m_dy, m_dz, m_Y2);
+            if (cublasDgemm(m_cublas, CUBLAS_OP_N, CUBLAS_OP_N, count, ns, ns, &one, m_Y, m_B, Pb, ns, &zero, m_ZP, m_B)
+                    != CUBLAS_STATUS_SUCCESS
+                || cublasDgemm(m_cublas, CUBLAS_OP_N, CUBLAS_OP_N, count, ns, ns, &one, m_Y2, m_B, Pa, ns, &one, m_ZP, m_B)
+                    != CUBLAS_STATUS_SUCCESS)
+                return false;
+            respRowKernel<<<g1(count, 128), 128>>>(m_ao, m_ZP, m_X, m_X2, ns, m_B, count, begin, m_gga, m_mgga, m_cx, m_cy, m_cz,
+                                                   m_dx, m_dy, m_dz, m_ct, m_dt, m_spoint);
+            respColKernel<<<ns, 256>>>(m_ao, m_ZP, m_X, m_X2, ns, m_B, count, m_gga, m_mgga, m_cx, m_cy, m_cz, m_dx, m_dy, m_dz,
+                                       m_ct, m_dt, m_gfun, idx);
+            return cudaGetLastError() == cudaSuccess;
+        };
+        if (!m_groups.empty()) {  // AO screening
+            for (const Group& g : m_groups) {
+                if (g.ns == 0) continue;
+                if (!groupPair(g, deriv, 1) || !contract(g.ns, g.count, g.begin, m_Ps, m_P2s, m_g_idx + g.idx_off)) return false;
+            }
+        }
+        for (int begin = 0; m_groups.empty() && begin < m_npts; begin += m_B) {
+            const int count = std::min(m_B, m_npts - begin);
+            if (!blockPair(begin, count, deriv, 1) || !contract(n, count, begin, m_P, m_P2, nullptr)) return false;
+        }
+        qmint::QMGpuXCScalars sc;
+        if (!energySums(sc)) return false;  // exw/ecw/ne are zero here; only the point count is read
+        points_used = sc.points_used;
+        std::vector<double> gfun(3 * (size_t)n);
+        if (cudaMemcpy(gfun.data(), m_gfun, gfun.size() * sizeof(double), cudaMemcpyDeviceToHost) != cudaSuccess) return false;
+        for (int k = 0; k < 3 * m_na; ++k) g_basis[k] = g_points[k] = g_weights[k] = 0.0;
+        for (int m = 0; m < n; ++m)
+            for (int k = 0; k < 3; ++k) g_basis[3 * m_bf_atom[m] + k] += -2.0 * gfun[3 * (size_t)m + k];
+        if (response) {
+            atomPointSumKernel<<<m_na, 256>>>(m_spoint, m_aoff, m_gpts);
+            if (cudaMemcpy(g_points, m_gpts, 3 * (size_t)m_na * sizeof(double), cudaMemcpyDeviceToHost) != cudaSuccess)
+                return false;
+            if (m_na >= 2 && !weightGradientDevice(g_weights)) return false;
+        }
+        ++m_nresp;
+        m_t_resp += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        return cudaGetLastError() == cudaSuccess;
     }
 
     bool weightGradient(const double* f, double* g) override
@@ -974,6 +1280,46 @@ private:
         return cudaGetLastError() == cudaSuccess;
     }
 
+    /// WP12 stage 3: Xa = phi Pa, Xb = phi Pb (meta-GGA: the four planes each, one strided-batched GEMM per density),
+    /// then densityPairKernel. ns columns (n or the kept functions of a group). Claude Generated (Oct 31 2026).
+    bool pairDensity(const double* Pa, const double* Pb, int ns, int begin, int count, int mode)
+    {
+        const double one = 1.0, zero = 0.0;
+        const long long plane = (long long)ns * m_B;
+        const int nxp = m_mgga ? 4 : 1;
+        if (cublasDgemmStridedBatched(m_cublas, CUBLAS_OP_N, CUBLAS_OP_N, count, ns, ns, &one, m_ao, m_B, plane, Pa, ns, 0, &zero,
+                                      m_X, m_B, plane, nxp) != CUBLAS_STATUS_SUCCESS
+            || cublasDgemmStridedBatched(m_cublas, CUBLAS_OP_N, CUBLAS_OP_N, count, ns, ns, &one, m_ao, m_B, plane, Pb, ns, 0,
+                                         &zero, m_X2, m_B, plane, nxp) != CUBLAS_STATUS_SUCCESS)
+            return false;
+        densityPairKernel<<<g1(count, 128), 128>>>(m_ao, m_X, m_X2, ns, m_B, count, begin, m_w, m_terms, m_gga, m_mgga, m_rho_min,
+                                                   mode, m_c0, m_cx, m_cy, m_cz, m_ct, m_d0, m_dx, m_dy, m_dz, m_dt, m_used,
+                                                   m_edens);
+        return cudaGetLastError() == cudaSuccess;
+    }
+
+    /// WP12 stage 3: AO values of group g, P and the second density (m_P, m_P2) gathered to the kept functions, the
+    /// pair densities. Claude Generated (Oct 31 2026).
+    bool groupPair(const Group& g, int deriv, int mode)
+    {
+        aoKernel<<<dim3(g1(g.count, 128), g.nsh), 128>>>(m_sh, m_pts, g.begin, g.count, deriv, g.ns, m_B, m_ao,
+                                                         m_g_shells + g.sh_off, m_g_cols + g.sh_off, m_g_bstart + g.bstart_off,
+                                                         m_g_mask + g.mask_off, g.nblk);
+        gatherKernel<<<g1((size_t)g.ns * g.ns), 256>>>(m_P, m_nbf, m_g_idx + g.idx_off, g.ns, m_Ps);
+        gatherKernel<<<g1((size_t)g.ns * g.ns), 256>>>(m_P2, m_nbf, m_g_idx + g.idx_off, g.ns, m_P2s);
+        if (cudaGetLastError() != cudaSuccess) return false;
+        return pairDensity(m_Ps, m_P2s, g.ns, g.begin, g.count, mode);
+    }
+
+    /// WP12 stage 3: AO values of the block [begin, begin + count) (all functions) and the pair densities of m_P, m_P2.
+    bool blockPair(int begin, int count, int deriv, int mode)
+    {
+        aoKernel<<<dim3(g1(count, 128), m_nshell), 128>>>(m_sh, m_pts, begin, count, deriv, m_nbf, m_B, m_ao, nullptr, nullptr,
+                                                          nullptr, nullptr, 0);
+        if (cudaGetLastError() != cudaSuccess) return false;
+        return pairDensity(m_P, m_P2, m_nbf, begin, count, mode);
+    }
+
     /// Meta-GGA (WP11 stage 3): [X, DP_x, DP_y, DP_z] = [phi, d_x phi, d_y phi, d_z phi] P (one strided-batched
     /// GEMM over the four consecutive AO planes, P (ns x ns) shared), then the per-point functional with tau.
     /// ns = columns of the block (n, or the kept functions of a screened group). Claude Generated (Oct 2026).
@@ -1104,6 +1450,13 @@ private:
            *m_spoint = nullptr;
     int m_mgga = 0;          // meta-GGA (WP11 stage 3): m_X has 4 planes, m_ct the per-point v_tau coefficient
     double* m_ct = nullptr;
+    // double-hybrid gradient (WP12 stage 3): second density planes, dZ, D or P2 (full and gathered), directional
+    // coefficients
+    int m_fxc = 0;
+    double *m_X2 = nullptr, *m_Y2 = nullptr, *m_P2 = nullptr, *m_P2s = nullptr, *m_d0 = nullptr, *m_dx = nullptr,
+           *m_dy = nullptr, *m_dz = nullptr, *m_dt = nullptr;
+    int m_nfxc = 0, m_nresp = 0;
+    double m_t_fxc = 0.0, m_t_resp = 0.0;
     size_t m_bytes = 0;
     // AO screening (groups on the host, shell/column/function lists on the device)
     std::vector<Group> m_groups;
@@ -1133,8 +1486,9 @@ void setWhyXC(char* why, int whylen, const std::string& s)
 
 // Device XC object (QMGpuXC*) for one geometry, or nullptr with a reason. Claude Generated (Oct 2026, GPU KS-DFT).
 // Renamed from _create_qm_xc with the changed vtable (weightGradient) and the appended screening fields, then from
-// _create_qm_xc_screen with the appended meta-GGA flag (WP11 stage 3): an old host never hands a short setup to it.
-extern "C" void* curcuma_cuda_create_qm_xc_mgga(const qmint::QMGpuXCSetup* s, int device, char* why, int whylen)
+// _create_qm_xc_screen with the appended meta-GGA flag (WP11 stage 3), then from _create_qm_xc_mgga with the appended
+// fxc flag and the vtable entries fxc/responseGradient (WP12 stage 3): an old host never hands a short setup to it.
+extern "C" void* curcuma_cuda_create_qm_xc_fxc(const qmint::QMGpuXCSetup* s, int device, char* why, int whylen)
 {
     if (!s) { setWhyXC(why, whylen, "no setup"); return nullptr; }
     if (device >= 0 && cudaSetDevice(device) != cudaSuccess) { setWhyXC(why, whylen, "cudaSetDevice failed"); return nullptr; }

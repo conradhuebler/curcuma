@@ -259,9 +259,9 @@ std::unique_ptr<qmint::QMGpuXC> createQmXC(const std::string& backend, const qmi
         return nullptr;
     }
     using create_fn = void* (*)(const qmint::QMGpuXCSetup*, int, char*, int);
-    create_fn fn = resolveSymbol<create_fn>(handle, "curcuma_" + backend + "_create_qm_xc_mgga");
+    create_fn fn = resolveSymbol<create_fn>(handle, "curcuma_" + backend + "_create_qm_xc_fxc");
     if (!fn) {
-        why = "plugin has no entry point curcuma_" + backend + "_create_qm_xc_mgga";
+        why = "plugin has no entry point curcuma_" + backend + "_create_qm_xc_fxc";
         return nullptr;
     }
     char buf[512] = { 0 };

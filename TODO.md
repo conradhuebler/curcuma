@@ -168,8 +168,11 @@ Stand.
 
 ## 5. Funktionen und Refactoring (niedrige Priorität)
 
-- **Doppelhybride, Stufe 3 (GPU) und D4** (2026-10-31): P86/B95-Kerne und der PT2-Gradient (Z-Vektor, f_xc) auf dem Device (jetzt
-  gezählte Fallbacks `qm_xc`, `qm_dh_grad`), D4 für `revdsd-pbep86-d4` (natives D4 nur für GFN2). [WP12](docs/DFT_ROADMAP/WP12_doppelhybride.md)
+- **Doppelhybride, D4 und GPU-Rest** (2026-10-31): D4 für `revdsd-pbep86-d4` (natives D4 nur für GFN2); im GPU-Gradienten bleiben die
+  PT2-Zwischengrößen (RI-/kanonische Amplituden, Lagrangian, Z-Vektor-Algebra) Host-Code, gezählt als `qm_dh_grad_pt2` (`-gpu_strict
+  true` endet beim Gradienten mit Exit 3); ROCm/Vulkan fehlen. [WP12](docs/DFT_ROADMAP/WP12_doppelhybride.md) Stufe 3
+- **Doppelhybrid-Z-Vektor mit integral-direkten Host-J/K** (2026-10-31): Koffein (246 Funktionen, CPU) stagniert bei max|R| 3.4e-10
+  bzw. 7.6e-9 nach 100 Iterationen (GPU: 18 Iterationen); Ursache prüfen (Screening-Rauschen?), ggf. Tensor/Cadence wie MP2. [WP12](docs/DFT_ROADMAP/WP12_doppelhybride.md) Stufe 3
 - **Doppelhybrid-Gradient, Rest** (2026-10-31): mit `-qm.ri j|jk` im KS-SCF ein Fehler (PT2-Antwort zur RI-SCF fehlt); RI-PT2-Gradient
   hält n²·naux im Speicher (B für alle MO-Paare); `-md`/Hessian nicht getestet. [WP12](docs/DFT_ROADMAP/WP12_doppelhybride.md)
 - **Meta-GGA, offen nach Stufe 3** (2026-10-30): offene Schale, r2SCAN/TPSSh, SCAN-taugliche Gitter; Device-XC nur 1,7-2x schneller als 8 CPU-Threads
@@ -194,6 +197,8 @@ Code-gebundene Entscheidungen, die bei Ihnen liegen. Fachliche Fragen und Projek
 - Doppelhybride (WP12): `dsd-pbeb95` ohne Dispersion fehlt, weil ORCA 6.1 (0,70 HF / 0,52 B95) und Psi4 (0,69 / 0,54) verschiedene
   Parameter nennen (Paper Kozuch/Martin 2013 nicht gelesen). Seit 2026-10-31 rechnet `revdsd-pbep86` per Default auf VWN5-P86 mit den
   PZ81-Fitparametern (wie ORCA `revDSD-PBEP86/2021`); eigene Zeile mit Mehtas VWN5-Satz (0,4200 / 0,6090 / 0,0476) anlegen? [WP12](docs/DFT_ROADMAP/WP12_doppelhybride.md)
+- Doppelhybrid-Gradient auf der GPU (WP12 Stufe 3): die Host-PT2-Zwischengrößen zählen als Fallback `qm_dh_grad_pt2`, der MP2-Gradient
+  zählt seine Host-Amplituden nicht; zählen lassen (heute: `-gpu_strict true` + DH-Gradient = Exit 3) oder wie MP2 behandeln? [WP12](docs/DFT_ROADMAP/WP12_doppelhybride.md)
 - `shouldUpdateHBXB()` korrigieren und damit von der Fortran-Referenz abweichen, oder als Referenzeigenschaft belassen?
 - UFF-/QMDFF-Gradient reparieren (Stand: "erstmal nicht")? `-seed` für die MD-Startgeschwindigkeiten reparieren (ändert jede MD)?
 - GPU-Bitgleichheit angehen (Sammel-Kernel statt `atomicAdd`) oder bei Ensemblevergleichen bleiben?

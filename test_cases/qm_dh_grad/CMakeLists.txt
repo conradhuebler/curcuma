@@ -3,7 +3,7 @@
 # test_qm_dh_grad (C++) prints JSON; check_qm_dh_grad.py applies the gates. reference.json:
 # scripts/qm_dh_grad_pyscf_reference.py (PySCF 2.14, libxc 7.0.0); reference_orca.json: scripts/qm_dh_grad_orca_compare.py
 # (ORCA 6.1.0).
-#   qm_dh_grad_kernel              jet derivatives (qm_xc_fxc.h) vs production v, libxc second derivatives, FD
+#   qm_dh_grad_kernel              jet derivatives (qm_xc_fxc_kernels.h) vs production v, libxc second derivatives, FD
 #   qm_dh_grad_fxc_<case>          F_xc[D] and the directional XC gradient vs FD of V_xc / of the XC gradient
 #   qm_dh_grad_fd_<case>_<grid>    analytic vs 4-point FD (h 1e-3 Bohr) of curcuma's energy: moving grid = with grid
 #                                  response, frozen grid = without; tol 1e-8 Eh/Bohr

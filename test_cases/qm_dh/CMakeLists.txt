@@ -11,8 +11,8 @@
 #   qm_dh_{gradient,update,threads}_<fn>   gradient request succeeds (stage 2); UpdateMolecule; 1 vs 4 threads bitwise
 #   qm_dh_cli_*                  curcuma -sp prints the energy, -opt runs (stage 2), D4 request is an error,
 #                                cli_defaults: DH default frozen core + VWN5-P86 (Oct 31 2026), mp2 keeps no fc
-#   qm_dh_gpu_H2O                -gpu cuda: counted qm_xc fallback, same energy, -gpu_strict exits; skip (77) without
-#                                a CUDA plugin
+#   qm_dh_gpu_H2O                -gpu cuda: XC on the device (WP12 stage 3), no qm_xc fallback, same energy,
+#                                -gpu_strict true exit 0; skip (77) without a CUDA plugin (GPU gradient: qm_gpu_dft *_dh_*)
 # Run:  ctest -L qm_dh --output-on-failure
 
 add_executable(test_qm_dh test_qm_dh.cpp)

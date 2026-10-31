@@ -2,7 +2,9 @@
 
 - **Status Stufe 1 (Energien, CPU):** 🤖 AI-generated, ⚙️ machine-tested (`ctest -L qm_dh`, 31. Okt 2026); menschlicher
   Produktionstest ausstehend. **Stufe 2 (analytischer Gradient, CPU):** 🤖 AI-generated, ⚙️ machine-tested (`ctest -L
-  qm_dh_grad`, 31. Okt 2026), menschlicher Produktionstest ausstehend. **Stufe 3 (GPU-Kerne, D4)** offen (TODO.md).
+  qm_dh_grad`, 31. Okt 2026), menschlicher Produktionstest ausstehend. **Stufe 3 (CUDA):** 🤖 AI-generated, ⚙️ machine-tested
+  nur auf einer RTX 5090 (`ctest -L qm_gpu_dft`, Fälle `*dh*`, 31. Okt 2026), menschlicher Produktionstest ausstehend; Abschnitt
+  „Stufe 3“ unten. **D4** offen (eigener Auftrag, TODO.md).
 - **Verhaltensänderung 31. Okt 2026** (Betreiberentscheidung, Abschnitt „Entscheidungen vom 2026-10-31“): Defaults
   `-qm.p86_lda vwn5` (vorher `pz81`) und frozen core für alle Doppelhybride (vorher aus); KS- und PT2-Zweielektronen-
   ableitung in einem Durchlauf; MP2-Gradient über Threadzahlen bitgleich. Energien von `dsd-pbep86*`/`revdsd-pbep86*`
@@ -16,7 +18,7 @@
   Tests `test_cases/qm_dh/`, Referenzen `scripts/qm_dh_pyscf_reference.py` (PySCF 2.14, libxc 7.0.0),
   `scripts/qm_dh_orca_compare.py` (ORCA 6.1.0).
 - **Code Stufe 2:** `QMEngine::computeDoubleHybridGradient` (`qm_dh_grad.cpp`: RI-PT2-Zwischengrößen, KS-Orbitalhessian
-  `dhG4`, Z-Vektor, Kräfte), `qmxc::buildFxc`/`buildXCResponseGradient` (`qm_xc_response.cpp`), Jet-Kerne `qm_xc_fxc.h`,
+  `dhG4`, Z-Vektor, Kräfte), `qmxc::buildFxc`/`buildXCResponseGradient` (`qm_xc_response.cpp`), Jet-Kerne `qm_xc_fxc.h` (seit Stufe 3 `qm_xc_fxc_kernels.h`, Host und Device),
   `qmint::gradientTwoElectronDHPT2` (`qm_integrals.cpp`, deklariert in `qm_ri.h`), `RIJK::fitTransposeRows`/`auxNormalisation`,
   D3(BJ)-Gradient wie hf-3c in `DoubleHybridMethod::calculateEnergy`, Zitat `dh_gradient` (Neese/Schwabe/Grimme 2007).
   Tests `test_cases/qm_dh_grad/`, Referenzen `scripts/qm_dh_grad_pyscf_reference.py`, `scripts/qm_dh_grad_orca_compare.py`,
@@ -29,9 +31,10 @@ MP2-Paarsummen von `qm_mp2.h` mit den KS-Orbitalen und -Eigenwerten (keine Einfa
 getrennt nach Spin (os/ss), skaliert. PT2 standardmäßig RI (`-qm.ri_mp2_aux`, Default def2-universal-JKFIT = def2/JK; kein
 def2-SVP/C vorhanden: Methodenvariante, Ausgabe sagt es), `-qm.dh_pt2 canonical` = exakte Integrale. Frozen core über
 `-qm.frozen_core` (seit 31. Okt 2026 Default an für Doppelhybride, wie ORCA; mp2 und die anderen bleiben aus). Seit Stufe 2 mit analytischem Gradient
-(`hasGradient()` true außer D4, `-opt` läuft); `-gpu cuda`: J/K und RI-MP2-Summe auf dem Device (vorhandene Pfade), XC mit
-P86/B95 als gezählter `qm_xc`-Fallback auf der CPU, der PT2-Gradient als gezählter `qm_dh_grad`-Fallback, `-gpu_strict true`
-endet mit Exit 3.
+(`hasGradient()` true außer D4, `-opt` läuft); `-gpu cuda` (seit Stufe 3): Energien aller Doppelhybride ganz auf dem Device
+(J/K, V_xc/E_xc mit P86/B95, resident KS-SCF-Loop, RI-MP2-Summe), kein gezählter Fallback, `-gpu_strict true` läuft durch; im
+Gradienten KS-Teil, F_xc des Z-Vektors, XC-Antwortgradient und PT2-1e/2e/RI-3-Index-Ableitungen auf dem Device, die
+PT2-Zwischengrößen (Amplituden, Lagrangian, Z-Vektor-Algebra) auf dem Host als gezählter Fallback `qm_dh_grad_pt2`.
 
 ## Parameter und Quellen
 
@@ -173,7 +176,7 @@ eingefroren, i, j aktiv besetzt, a, b virtuell, k, l alle besetzt, p, q alle. He
 5. **Dispersion:** D3(BJ)-Gradient des hf-3c-Codes (Paar + CN-Kette).
 6. **Kerne f_xc:** zweite Ableitungen per Vorwärts-AD zweiter Ordnung (Jet: Wert, 3 Gradienten, 6 Hessian-Einträge)
    auf eigenen, nur-Energie-Templates der Kerne B88, LYP, PBE-X, PZ81, VWN5, P86-Gradiententerm, PW92, B95
-   (`qm_xc_fxc.h`); Begründung: von Hand gesetzte zweite Ableitungen von LYP/P86/B95 sind fehleranfällig, AD ist exakt
+   (`qm_xc_fxc.h`, seit Stufe 3 `qm_xc_fxc_kernels.h`); Begründung: von Hand gesetzte zweite Ableitungen von LYP/P86/B95 sind fehleranfällig, AD ist exakt
    bis Rundung. Die Produktionskerne (Energie, V_xc) bleiben unberührt; die Jet-Ableitungen erster Ordnung werden gegen
    sie geprüft (ctest), die zweiten gegen libxc (PySCF `eval_xc(deriv=2)`) und gegen FD der Produktionspotentiale.
 
@@ -341,17 +344,79 @@ RI/kanonisch (H2O_distorted, NH3; RI-DH auch Benzol) und ri-mp2-/mp2-Energien: 2
 Abweichungen kanonische Gradienten, 1 Thread gegen 4 = 8). `qm_dh_grad_threads_*` prüft jetzt 1/4/8 Threads auf Bitgleichheit,
 auch kanonisch.
 
+## Stufe 3: CUDA (31. Okt 2026)
+
+- **Code:** keine neue Kernformel. P86 (PZ81/VWN5) und B95 laufen über `evaluatePoint`/`evaluatePointMGGA` aus
+  `qm_xc_kernels.h` durch den GGA- bzw. Meta-GGA-Pfad von `cuda/qm_gpu_xc.cu`; entfernt ist nur die CPU-only-Sperre in
+  `QMEngine::ensureGpuXC` (`qm_scf.cpp`) samt `isCpuOnlyKernel`. Gradient: `qm_dh_grad_gpu.cpp` (Device-Dispatch; in
+  `qm_dh_grad.cpp` nur Haken), `QMGpuXC::fxc`/`responseGradient` mit `densityPairKernel`, `respRowKernel`, `respColKernel`
+  (`cuda/qm_gpu_xc.cu`), Jets in `qm_xc_fxc_kernels.h` (aus `qm_xc_fxc.h` herausgelöst, `QM_HD`, Host-Arithmetik
+  unverändert), Setup-Flag `QMGpuXCSetup::fxc` (angehängt, nur für Doppelhybride gesetzt), Plugin-Eintrag umbenannt zu
+  `curcuma_cuda_create_qm_xc_fxc`.
+- **Aufwand/Nutzen pro Baustein** (Auftrag (a)-(d)): (a) KS-Anteil inkl. XC-Gradient: fällt mit P86/B95 auf dem Device
+  von selbst ab (vorhandene Q-G7/Q-G8- und XC-Gradientenpfade). (b) F_xc im Z-Vektor: die Jets waren reiner C++-Code
+  ohne Container, also device-tauglich; ein Kernel mit zwei Dichten pro Block plus die V_xc-Montage des vorhandenen Pfads.
+  (c) XC-Richtungsableitung: Basis- und Punktteil als eigener T_k-Kern, der Gewichtsteil über die vorhandene
+  Becke-Ableitung mit der Richtungs-Energiedichte. (d) PT2-2e: ein GPU-MP2-Gradient existiert (`cuda/qm_gpu_mp2_grad.cu`),
+  hat aber a_x = 1 fest; statt eines neuen Kerns die Polarisation des Q-G7-Kerns (kx = a_x): separabler Teil =
+  1/2 [G(P + P2) − G(P − P2)] (zwei Läufe), kanonisches Γ über den MP2-Kern mit P = P2 = 0, RI-3-Index über
+  `cuda/qm_gpu_ri_grad.cu`, PT2-1e über Q-G8. **Nicht portiert:** die PT2-Zwischengrößen (RI: B für alle MO-Paare,
+  (ia|jb), Amplituden, P_ij/P_ab, Γ, L1/L2, Rücktransformation; kanonisch `mp2GradientHost`) und die Z-Vektor-Algebra:
+  gezählter Fallback `qm_dh_grad_pt2`. Der RI-Metrikteil (P|Q)^X bleibt Host-Code wie im RI-JK-Gradienten (nicht gezählt).
+- **Fallbacks danach:** Energie: keiner (`-gpu_strict true` läuft durch, ctest `qm_gpu_dft_scf_*dsd*`, `qm_dh_gpu_H2O`).
+  Gradient: genau `qm_dh_grad_pt2`; Device-Fehler je Teil: `qm_dh_xc` (F_xc/Antwortgradient), `qm_grad1e`, `qm_grad`,
+  `qm_mp2_grad`, `qm_ri_grad`. `-gpu_strict true` mit Gradient endet mit Exit 3 (ctest
+  `qm_gpu_dft_fallback_dh_h2o_b2plyp_grad_strict`).
+
+GPU gegen CPU auf identischem Gitter (RTX 5090, def2-SVP, `check_qm_gpu_dft.py`, 83 Fälle; Tabellen und Funktionale:
+[QM_GPU_ROADMAP.md 4.3](../QM_GPU_ROADMAP.md#43-double-hybrids-on-the-device-oct-31-2026-wp12-stage-3)): V_xc gleiche Dichte
+max rel ≤ 2.1e-15, E_xc ≤ 6.4e-15 relativ; SCF H2O/NH3/Benzol (sg1: alle 10 Funktionale, 150x974: 4) E_KS gleich auf
+10 Stellen, Gesamtenergie (12 Stellen) ≤ 1.0e-12 Eh, Iterationen gleich bis auf Benzol 150x974 (±1); Koffein E_KS gleich,
+Gesamt ≤ 1.5e-11 Eh, 2-3 Iterationen auseinander (langsam konvergierende SCF, wie WP11 Koffein TPSS 30/32). Gradient
+gleiche Dichte (H2O, NH3, Benzol, Koffein; sg1, 150x974): F_xc rel ≤ 3.8e-15, XC-Antwortgradient ≤ 1.5e-16, PT2-2e ≤ 7.9e-12,
+RI-3-Index ≤ 2.6e-15 Eh/Bohr; ganze Läufe GPU gegen CPU ≤ 8.4e-12 (Benzol), Koffein 1.6e-10 Eh/Bohr (Ende der SCF).
+Iterationstoleranz der neuen ctests: die bestehende ±1 (`--tol-it` unverändert): auf H2O/NH3/Benzol sg1 sind die Zahlen
+in allen 30 Fällen gleich, die ctests nutzen nur diese Moleküle und sg1.
+
+**Zeiten** (CPU 8 Threads gegen RTX 5090, sg1, `-qm.scf_threshold 1e-8`, Defaults fc + VWN5-P86, je 3 Läufe, Median;
+Tabellen in [QM_GPU_ROADMAP.md 4.3](../QM_GPU_ROADMAP.md#43-double-hybrids-on-the-device-oct-31-2026-wp12-stage-3)): Energie
+Benzol dsd-pbep86-d3bj 1.53 / 0.76 s (SCF-Loop 1091 / 197 ms, V_xc pro Aufbau 34.7 / 12.0 ms), dsd-pbeb95-d3bj 1.93 / 1.04 s;
+Koffein 12.65 / 3.98 s bzw. 16.40 / 6.71 s (Iterationen bei 1e-8 gleich). Energie + Gradient Benzol 5.83 / 1.74 s
+(dsd-pbep86-d3bj), 5.80 / 1.71 s (b2plyp), 6.97 / 2.39 s (dsd-pbeb95-d3bj); Koffein 121.0 / 14.6, 120.1 / 14.4, 161.0 / 21.1 s.
+`-opt` Benzol: dsd-pbep86-d3bj 69.5 / 15.7 s, b2plyp 80.5 / 18.0 s, Endenergien gleich auf 12 Stellen. **Befund Koffein:** der
+CPU-Z-Vektor bricht nach 100 Iterationen mit max|R| 3.4e-10 (dsd-pbep86-d3bj) bzw. 7.6e-9 (dsd-pbeb95-d3bj) ab (Warnung,
+akzeptiert unter 1e-6), auf der GPU (exakte J/K aus dem Device-Tensor) konvergiert er in 18 Iterationen; vermutete Ursache
+das Screening-Rauschen der integral-direkten Host-J/K (246 Funktionen, Tensor 29 GB), nicht untersucht (TODO.md). Ein Teil
+des Koffein-Faktors (8.3x) stammt daher; Benzol 3.4x.
+
+**Regression** (Binary d0f21497 = `release/` vor der Änderung kopiert, mit seinem Plugin): CPU `-gpu none`, md5 der
+`-dump_gradient`-Dateien und Energiezeilen, H2O_distorted/NH3/Benzol, 1 und 4 Threads, Methoden wie Stufe 2 plus
+Doppelhybrid-Gradienten (b2plyp RI/ohne fc/kanonisch, dsd-pbep86 (VWN5, PZ81), dsd-pbep86-d3bj, dsd-pbeb95-d3bj,
+revdsd-pbep86, b2gp-plyp-d3bj kanonisch, dsd-blyp ohne Gitterantwort) und -Energien: 174/180 bitgleich. **Abweichung:** die
+6 Fälle `dsd-pbeb95-d3bj`-Gradient (Energiezeilen gleich, 1 = 4 Threads) weichen im letzten Bit ab: max |Δg| 8.3e-16
+(H2O), 8.4e-16 (NH3), 2.0e-14 Eh/Å (Benzol). Ursache nicht gefunden. Geprüft: Objektcode von `qm_xc.cpp`, `qm_grid.cpp`,
+`qm_xc_response.cpp` gleich dem von HEAD; die vom Linker genommenen schwachen Jet-Kopien `b95`/`kernelJet` in
+`qm_dh_grad.cpp.o` bytegleich; `sizeof(QMEngine)` unverändert; ein Nachbau von HEAD im Scratch-Verzeichnis reproduzierte
+schon b2plyp nicht bitgleich (als Referenz unbrauchbar). Zwischenstand: mit dem Device-Code direkt in `qm_dh_grad.cpp`
+dieselbe B95-Abweichung, mit `functionalCovered` außer Linie (eine Jet-Quelle) wichen alle Doppelhybrid-Gradienten im
+letzten Bit ab (verworfen). GPU (`-gpu cuda -qm.gpu_scf on`), lda/pbe/b3lyp (beide VWN)/tpss/scan/pbe ohne Antwort ×
+H2O_distorted/NH3/Benzol: ohne Device-1e/2e-Gradient (keine Atomics) 21/21 bitgleich; mit (Atomics) Energiezeilen
+21/21 gleich, max |Δg| ≤ 1.0e-13 Eh/Bohr, das Referenz-Binary gegen sich selbst 7.9e-14 (Benzol scan).
+
 ## Nicht getestet / nicht implementiert
 
-- Nicht implementiert: PT2-Gradient mit RI-J/RI-JK-SCF (`-qm.ri j|jk`: Fehler), Gradient auf dem Device (gezählter Fallback),
-  Hessian, P86/B95 auf dem Device (Stufe 3), D4, VV10/NL, offene Schale, Z > 10, `dsd-pbeb95` ohne
+- Nicht implementiert: PT2-Gradient mit RI-J/RI-JK-SCF (`-qm.ri j|jk`: Fehler), PT2-Zwischengrößen des Gradienten auf dem
+  Device (gezählter Fallback `qm_dh_grad_pt2`, Stufe 3), ROCm/Vulkan, Hessian, D4, VV10/NL, offene Schale, Z > 10, `dsd-pbeb95` ohne
   Dispersion, `revdsd-pbep86-d3bj`, PWPB95, ωB2PLYP u. a. range-separierte DH, SCS-Varianten mit eigenen Einfachanregungen.
+- Stufe 3 nicht getestet: andere GPUs als die RTX 5090, Moleküle über Koffein, `-md`, kanonischer PT2-Gradient über Benzol
+  auf dem Device (n⁴-Γ wird hochgeladen), Stratmann-Partition, kartesische d, `-qm.xc_ao_threshold 0` mit den neuen
+  Kernen, Multi-GPU; `-opt` nur Benzol (dsd-pbep86-d3bj, b2plyp) und ctest H2O dsd-pbep86-d3bj.
 - Nicht getestet: andere Basen als def2-SVP, def2-SVP/C (nicht vorhanden), `-qm.ri j|jk` im SCF der DH (läuft über den
   B3LYP-Pfad, nicht gemessen), integral-direct SCF + kanonisches PT2 großer Systeme, Moleküle größer als Benzol, geladene Systeme;
   Gradient: `-md`, Moleküle größer als Benzol (Gradient nur bis H2CO validiert, Benzol nur Threads), integral-direct SCF,
   kartesische d, sg2/sg3-Gitter, Stratmann-Partition, `-qm.xc_ao_threshold 0` (die Tests laufen mit dem Default-Screening),
   Speicherbedarf des RI-Gradienten (n²·naux für B aller MO-Paare) bei großen Systemen.
-- Stufe 2: die Jet-Kerne in `qm_xc_fxc.h` sind eine zweite Niederschrift der Kernformeln (nur für f_xc); eine Änderung an einem
+- Stufe 2: die Jet-Kerne in `qm_xc_fxc_kernels.h` (bis Stufe 2 `qm_xc_fxc.h`) sind eine zweite Niederschrift der Kernformeln (nur für f_xc); eine Änderung an einem
   Produktionskern muss dort nachgezogen werden (`qm_dh_grad_kernel` vergleicht die ersten Ableitungen).
 - LiH mit dsd-pbeb95-d3bj auf sg1: SCF konvergiert nicht (curcuma und PySCF stagnieren bei |g| ≈ 6e-5, E_KS beider −8.0158776);
   auf 99x590 in 10 Iterationen konvergiert. Kein ctest-Fall, Ursache nicht untersucht.

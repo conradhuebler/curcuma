@@ -2,7 +2,7 @@
 """ctest gates for the double-hybrid analytic gradient (WP12 stage 2); reference.json from
 scripts/qm_dh_grad_pyscf_reference.py. Gradients in Eh/Bohr; standard library only (no numpy).
 
-  kernel        jet first derivatives (qm_xc_fxc.h) = production potentials (qm_xc_kernels.h) to 1e-11 relative;
+  kernel        jet first derivatives (qm_xc_fxc_kernels.h) = production potentials (qm_xc_kernels.h) to 1e-11 relative;
                 jet second derivatives vs libxc 7.0.0 (eval_xc deriv 2) <= 1e-8 relative and vs a 4-point FD of the
                 production potentials <= 1e-5 relative after removing 10 x the stencil rounding noise (scale: max(|ref|,
                 1e-3 max|row|), FD only where defined)

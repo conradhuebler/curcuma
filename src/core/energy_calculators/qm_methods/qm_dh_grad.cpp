@@ -98,6 +98,7 @@ std::vector<int> QMEngine::activeFunctionAtoms() const
 bool QMEngine::dhFxc(const Matrix& D, Matrix& V) const
 {
     if (!ensureXCGrid()) return false;
+    if (dhFxcDevice(D, V)) return true;  // WP12 stage 3: device F_xc (qm_dh_grad_gpu.cpp)
     return qmxc::buildFxc(m_xc_grid, m_xc_ao, m_density, D, m_xc, m_xc_rho_threshold, m_threads, V, &m_xc_screen);
 }
 
@@ -129,6 +130,7 @@ bool QMEngine::dhXCResponseGradient(const Matrix& P2, Matrix& g_basis, Matrix& g
         why = "no DFT grid";
         return false;
     }
+    if (dhXCResponseGradientDevice(P2, g_basis, g_response, why)) return true;  // WP12 stage 3 (qm_dh_grad_gpu.cpp)
     qmxc::XCGradient xg;
     if (!qmxc::buildXCResponseGradient(m_xc_grid, m_xc_ao, m_density, P2, m_xc, m_xc_rho_threshold, m_threads,
                                        activeFunctionAtoms(), m_atomcount, xg, &m_xc_screen)) {
@@ -364,8 +366,12 @@ bool QMEngine::computeDoubleHybridGradient(const qmint::MP2Options& opt, double 
     std::string missing;
     if (!qmxc::fxc::functionalCovered(m_xc, &missing))
         return fail("double-hybrid gradient: no second functional derivative (f_xc) for kernel " + missing);
+    // WP12 stage 3 (Oct 31 2026): with -gpu the KS gradient, F_xc, the XC response gradient and the PT2 1e/2e/RI
+    // derivatives run on the device (qm_dh_grad_gpu.cpp, each part counts its own fallback); the PT2 intermediates
+    // (amplitudes, unrelaxed density, Lagrangian, Z-vector algebra) are host code.
     if (gpuRequested())
-        curcuma::reportGpuFallback("qm_dh_grad", "the double-hybrid PT2 gradient (Z-vector, f_xc, PT2 forces) runs on the CPU");
+        curcuma::reportGpuFallback("qm_dh_grad_pt2", "double-hybrid PT2 intermediates (amplitudes, unrelaxed density, "
+                                                     "Lagrangian, Z-vector algebra) run on the CPU");
     const int n = m_nbf, n_occ = m_num_electrons / 2;
     if (m_mo.rows() != n || m_mo.cols() != n || m_energies.size() != n)
         return fail("double-hybrid gradient: no MO coefficients / orbital energies from the SCF");
@@ -582,6 +588,17 @@ bool QMEngine::computeDoubleHybridGradient(const qmint::MP2Options& opt, double 
 
     // ---- 5. PT2 forces ----
     Matrix posBohr = atomPositionsBohr();
+    if (gpuRequested()) {  // WP12 stage 3: device 1e/2e/RI-3-index parts with per-part CPU fallback (qm_dh_grad_gpu.cpp)
+        Matrix g1, g2;
+        dhPT2ForcesDevice(posBohr, Pc, P2c, Wc, GammaBuf ? GammaBuf.get() : nullptr, ri.get(), G3, M2, ks2e_deferred, it, res,
+                          g1, g2);
+        Matrix gxb, gxr;
+        std::string why;
+        if (!dhXCResponseGradient(P2ao, gxb, gxr, why)) return fail("double-hybrid gradient: XC part failed: " + why);
+        m_gradient = gKS + g1 + g2 + gxb + gxr;
+        m_gradient_parts = { parts[0] + g1, parts[1] + g2, parts[2], parts[3] + gxb, parts[4] + gxr };
+        return true;
+    }
     const auto t_1e0 = std::chrono::steady_clock::now();
     const Matrix g1 = qmint::gradientOneElectron(m_gto_basis, m_atoms, posBohr, P2c, Wc, m_threads);
     res.t_grad_deriv1e_ms = msSince(t_1e0);

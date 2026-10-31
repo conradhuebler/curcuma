@@ -899,3 +899,93 @@ the four times larger FP64 GEMM work dominates on this card (benzene 150x974: X 
 unchanged (51/51 against the 7842f654 binary), GPU 15/18 bitwise and the three RI-JK cases within the run-to-run noise
 of the reference. Tables, the rejected batched-W variant and what was not tested:
 [WP11, "Stufe 3"](DFT_ROADMAP/WP11_meta_gga.md#stufe-3-meta-gga-auf-cuda-30-okt-2026).
+
+### 4.3 Double hybrids on the device (Oct 31 2026, WP12 stage 3)
+
+> 🤖 AI-generated, ⚙️ machine-tested (RTX 5090 only). Human production testing pending.
+
+`-method b2plyp|b2gp-plyp|dsd-blyp|dsd-pbep86|revdsd-pbep86` (+ `-d3bj` names) `-gpu cuda`. **Energies**: P86 (PZ81 and
+VWN5 local part) runs through the GGA path, B95 through the meta-GGA path of `cuda/qm_gpu_xc.cu`; both reach the device
+via `evaluatePoint`/`evaluatePointMGGA` of `qm_xc_kernels.h` (no new .cu code, the former CPU-only gate in
+`QMEngine::ensureGpuXC` is gone), so V_xc/E_xc, the device-resident KS SCF loop and the RI-MP2 sum run without a counted
+fallback and `-gpu_strict true` runs through. **Gradient** (`qm_dh_grad_gpu.cpp`, each part with its own counted CPU
+fallback):
+
+| part | device | how |
+|---|---|---|
+| KS gradient (1e, 2e with a_x, XC basis/points/Becke weights) | yes | existing Q-G7/Q-G8 and XC gradient paths (P86/B95 now included) |
+| F_xc[D] in every Z-vector iteration | yes | `QMGpuXC::fxc`: two densities per block, `qmxc::fxc::evaluatePointFxc` (jets of `qm_xc_fxc_kernels.h`, host and device), then the V_xc assembly |
+| P2-directional XC gradient | yes | `QMGpuXC::responseGradient`: basis and point parts, Becke weight part from its energy density |
+| PT2 1e derivative integrals | yes | Q-G8 with (P2, W) |
+| PT2 2e, separable (P2 x P, a_x exchange) | yes | polarisation of the Q-G7 kernel: 1/2 [G(P + P2) - G(P - P2)], two passes, no new kernel |
+| PT2 2e, canonical Gamma | yes | MP2 2e kernel (`cuda/qm_gpu_mp2_grad.cu`) with P = P2 = 0 |
+| RI-PT2 3-index part | yes | `RIJK::threeIndexGradientDevice` (`cuda/qm_gpu_ri_grad.cu`); the 2-index metric part stays on the host as in the RI-JK gradient |
+| PT2 intermediates (RI/canonical amplitudes, unrelaxed density, Lagrangian, Z-vector algebra) | no | host code, counted `qm_dh_grad_pt2`; `-gpu_strict true` with a gradient exits 3 |
+
+New device seam: `QMGpuXCSetup::fxc` (appended; set only for double hybrids, so the block sizes of every other
+functional are unchanged) and the virtuals `QMGpuXC::fxc`/`responseGradient`; plugin entry renamed to
+`curcuma_cuda_create_qm_xc_fxc`. New kernels `densityPairKernel`, `respRowKernel`, `respColKernel`; no FP atomics in the
+XC part, block sizes and waves independent of the free memory.
+
+GPU vs CPU, same binary, same grid (`check_qm_gpu_dft.py`; "same density" = `CURCUMA_QM_GPU_XC_CHECK=1` /
+`CURCUMA_QM_GPU_GRAD_CHECK=1` / `CURCUMA_QM_GPU_RI_GRAD_CHECK=1`, every device build also on the CPU; SCF `-qm.scf_threshold
+1e-10`, 4 CPU threads; gradients in Eh/Bohr):
+
+| molecule | grid | functionals | max rel\|dV\| | rel\|dE_xc\| | \|dE_KS\| / \|dE_total\| | iterations dev/CPU |
+|---|---|---|---:|---:|---:|---|
+| H2O | sg1 / 150x974 | all 10 / 4 | 1.0e-15 / 1.5e-15 | 6.6e-16 / 4.5e-15 | 0 / 0 | equal |
+| NH3 | sg1 / 150x974 | all 10 / 4 | 7.3e-16 / 1.6e-15 | 7.7e-16 / 3.2e-15 | 0 / 0 | equal |
+| benzene | sg1 / 150x974 | all 10 / 4 | 8.6e-16 / 2.1e-15 | 7.4e-16 / 6.4e-15 | 0 / <= 1.0e-12 | equal / +-1 |
+| caffeine | sg1 | 3 | 1.0e-15 | 8.6e-16 | 0 / <= 1.5e-11 | 32/29, 26/29, 27/29 |
+
+V_xc columns: dsd-pbep86 (VWN5 and PZ81 local part) and dsd-pbeb95-d3bj (b2plyp for caffeine); SCF: all 10 table
+functionals on sg1 (b2plyp, dsd-pbep86-d3bj, dsd-pbeb95-d3bj, revdsd-pbep86 on 150x974), device-resident loop with
+`-gpu_strict true`. Caffeine at 1e-10: 2-3 iterations apart at equal energies, the slow-convergence pattern of section
+4.2 (TPSS caffeine 30/32); not a ctest case.
+
+| molecule | grid | F_xc rel\|dV\| | XC response grad | PT2 2e | RI 3-index | KS XC grad (basis/points/weights) | KS 2e | \|g(GPU run) - g(CPU run)\| |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| H2O | sg1 / 150x974 | 7.5e-16 / 1.4e-15 | 1.0e-17 / 6.1e-17 | 3.5e-15 / 2.7e-15 | 1.5e-16 / 3.5e-17 | <= 3.5e-14 / <= 8.2e-14 | 8.4e-15 / 3.6e-15 | 6.5e-14 / 1.2e-13 |
+| NH3 | sg1 / 150x974 | 1.1e-15 / 2.1e-15 | 1.6e-17 / 4.9e-17 | 3.1e-15 / 4.0e-15 | 8.3e-17 / 4.9e-17 | <= 3.6e-14 / <= 5.3e-14 | 6.2e-15 / 5.3e-15 | 3.7e-14 / 6.6e-14 |
+| benzene | sg1 / 150x974 | 1.2e-15 / 3.8e-15 | 3.3e-17 / 1.5e-16 | 1.2e-12 / 1.2e-12 | 4.0e-16 / 3.4e-16 | <= 4.5e-14 / <= 1.1e-13 | 8.4e-12 / 7.5e-12 | 8.4e-12 / 8.1e-12 |
+| caffeine | sg1 | 2.8e-15 | 9.5e-17 | 7.9e-12 | 2.6e-15 | <= 3.9e-14 | 2.3e-11 | 1.6e-10 (SCF end) |
+
+Gradient functionals: b2plyp, dsd-pbep86-d3bj, dsd-pbeb95-d3bj, revdsd-pbep86 on sg1, dsd-pbep86-d3bj and dsd-pbeb95-d3bj
+on 150x974, caffeine dsd-pbep86-d3bj and dsd-pbeb95-d3bj (RI-PT2, frozen core, grid response). The 1e-12 of benzene in the 2e columns is the quartet screen and the
+atomics of the Q-G7 kernel (section 4, G3: 2e part <= 4.5e-12 on the same density).
+
+Times (CPU 8 threads `-gpu none` vs GPU `-gpu cuda -qm.gpu_scf on`, def2-SVP, sg1, `-qm.scf_threshold 1e-8`, frozen core
+and P86 on VWN5 (defaults), three runs each, median of the wall time; SCF loop and V_xc per build = median of the
+printed values, V_xc per build = total of all builds / builds; quiet machine, 24 cores, RTX 5090):
+
+| system | functional | \|dE\| Eh | iterations CPU/GPU | SCF loop CPU / GPU | V_xc per build CPU / GPU | wall energy CPU / GPU |
+|---|---|---:|---:|---:|---:|---:|
+| benzene | dsd-pbep86-d3bj | 0 | 12/12 | 1091 / 197 ms | 34.7 / 12.0 ms | 1.53 / 0.76 s |
+| benzene | dsd-pbeb95-d3bj | 0 | 12/12 | 1469 / 455 ms | 65.9 / 33.4 ms | 1.93 / 1.04 s |
+| caffeine | dsd-pbep86-d3bj | 1.8e-11 | 23/23 | 11.30 / 2.05 s | 141 / 56 ms | 12.65 / 3.98 s |
+| caffeine | dsd-pbeb95-d3bj | 4.7e-11 | 22/22 | 14.82 / 4.66 s | 319 / 178 ms | 16.40 / 6.71 s |
+
+| system | functional | wall energy + gradient CPU / GPU | Z-vector GPU (iterations) | PT2 2e + RI GPU | Z-vector CPU (iterations) | 2e pass CPU |
+|---|---|---:|---:|---:|---:|---:|
+| benzene | dsd-pbep86-d3bj | 5.83 / 1.74 s | 197 ms (9) | 393 ms | 1038 ms (9) | 2857 ms |
+| benzene | b2plyp | 5.80 / 1.71 s | 189 ms | 391 ms | - | - |
+| benzene | dsd-pbeb95-d3bj | 6.97 / 2.39 s | 517 ms (9) | 393 ms | 1525 ms (9) | 3053 ms |
+| caffeine | dsd-pbep86-d3bj | 121.0 / 14.6 s | 2262 ms (18) | 4116 ms | 33458 ms (100, stalled) | 68883 ms |
+| caffeine | b2plyp | 120.1 / 14.4 s | 2121 ms | 4104 ms | - | - |
+| caffeine | dsd-pbeb95-d3bj | 161.0 / 21.1 s | 5680 ms (18) | 4116 ms | 71169 ms (100, stalled) | 68744 ms |
+
+GPU parts from `CURCUMA_QM_SCF_TRACE=1` of the timed runs; CPU parts from one `test_qm_dh_grad` run each with the same
+settings (`--fc --p86 vwn5 --threads 8`). Not the same scope in the last two columns: the CPU 2e pass contains the KS
+and the PT2 4-index part (one pass, stage 2) plus the RI 3-index part; the GPU column is the PT2 part (two Q-G7 passes) plus
+RI, the KS 2e part runs earlier on the device inside the KS gradient. **CPU Z-vector of caffeine:** stops at the
+100-iteration limit with max residual 3.4e-10 (dsd-pbep86-d3bj) and 7.6e-9 (dsd-pbeb95-d3bj) instead of 1e-10 (accepted
+below 1e-6 with a warning); on the GPU the same equations converge in 18 iterations. Not investigated; the likely cause is
+the screening noise of the host integral-direct J/K (246 functions, the stored tensor would need 29 GB), the effect the
+MP2 gradient avoids by rebuilding the tensor. Part of the caffeine speed-up (8.3x, 7.6x) comes from that stall; benzene:
+3.4x, 2.9x. `-opt` benzene (sg1, default criteria): dsd-pbep86-d3bj CPU 69.5 s / GPU 15.7 s, b2plyp 80.5 / 18.0 s, final
+energies of the optimised structures (`-sp` on the CPU) equal at 12 decimals (-231.549022022659, -231.818464545902 Eh).
+
+Not tested: other GPUs than the RTX 5090, ROCm/Vulkan (no entry point), molecules above caffeine, `-md`, canonical PT2
+gradient above benzene on the device (n^4 Gamma upload), Stratmann partition, cartesian d, `-qm.xc_ao_threshold 0` with the
+new kernels, multi-GPU. Not implemented: the PT2 intermediates on the device, tau from the occupied orbitals (as for the
+meta-GGAs), FP32 phases.

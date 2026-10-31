@@ -62,7 +62,7 @@ enum class XCKernel {
     TPSS_C,    ///< meta-GGA TPSS correlation (revPKZB + PBE, WP11; CPU and CUDA), libxc MGGA_C_TPSS
     SCAN_X,    ///< meta-GGA SCAN exchange (WP11; CPU and CUDA), libxc MGGA_X_SCAN
     SCAN_C,    ///< meta-GGA SCAN correlation (WP11; CPU and CUDA), libxc MGGA_C_SCAN
-    // WP12 stage 1 (double hybrids, Oct 2026): CPU only, the device XC falls back for them (QMEngine::ensureGpuXC)
+    // WP12 (double hybrids, Oct 2026): CPU since stage 1, CUDA since stage 3 (Oct 31 2026)
     P86_C,     ///< GGA Perdew 1986 correlation on PZ81 local correlation (WP12), libxc GGA_C_P86
     P86VWN_C,  ///< GGA Perdew 1986 gradient term on VWN5 local correlation (WP12; ORCA's P86), libxc GGA_C_P86VWN
     B95_C      ///< meta-GGA Becke 1995 correlation (WP12), libxc MGGA_C_BC95
@@ -123,12 +123,6 @@ QM_HD bool isGGA(XCKernel k)
 {
     return k == XCKernel::PBE_X || k == XCKernel::PBE_C || k == XCKernel::B88_X || k == XCKernel::LYP_C
         || k == XCKernel::P86_C || k == XCKernel::P86VWN_C;
-}
-/// True for the kernels added for the double hybrids (WP12 stage 1): validated on the CPU only, the device XC is not
-/// used with them (QMEngine::ensureGpuXC reports a counted fallback). Claude Generated (Oct 2026, WP12).
-QM_HD bool isCpuOnlyKernel(XCKernel k)
-{
-    return k == XCKernel::P86_C || k == XCKernel::P86VWN_C || k == XCKernel::B95_C;
 }
 /// Density below which a point is left out of E_xc and V_xc (gga: functional needs sigma).
 QM_HD double effectiveThreshold(bool gga, double rho_threshold)

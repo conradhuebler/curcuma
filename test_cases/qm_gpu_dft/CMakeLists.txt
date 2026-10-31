@@ -11,6 +11,8 @@
 #   qm_gpu_dft_*screen*   AO screening (-qm.xc_ao_threshold, default on): unscreened device path and small groups
 #   qm_gpu_dft_wgrad_*    Becke weight derivative device vs CPU, incl. 1410 atoms (test_qm_gpu_wgrad.cpp)
 #   *_tpss*, *_scan*      meta-GGA on the device (WP11 stage 3), only registered with USE_CUDA
+#   *_dh_*, DH names      double hybrids on the device (WP12 stage 3, USE_CUDA only): P86/B95 V_xc, DH energies with
+#                         -gpu_strict true, gradient parts incl. F_xc / XC response / PT2 2e (qm_dh_grad_pt2 allowed)
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
     set(_QD ${CMAKE_CURRENT_SOURCE_DIR}/check_qm_gpu_dft.py)
@@ -158,8 +160,69 @@ if(Python3_Interpreter_FOUND)
             qm_gpu_dft_grad_benzene_tpss_screen_groups qm_gpu_dft_grad_benzene_tpss_noscreen qm_gpu_dft_opt_h2o_tpss
             qm_gpu_dft_fallback_h2o_scan_memory)
         list(APPEND _qd_tests ${_qm_tests})
+        # Double hybrids on the device (WP12 stage 3, Claude Generated, Oct 31 2026): P86 (VWN5 default, PZ81) through the
+        # GGA path, B95 through the meta-GGA path, energies with -gpu_strict true; gradient parts F_xc (Z-vector), XC
+        # response gradient, PT2 1e/2e/RI-3-index on the device. The PT2 intermediates stay on the host as the counted
+        # qm_dh_grad_pt2 fallback, the only one the gradient cases allow; -gpu_strict true with a gradient exits 3 on it.
+        set(_dh_tests "")
+        foreach(_case h2o_dsd-pbep86:H2O:dsd-pbep86: h2o_dsd-pbep86_pz81:H2O:dsd-pbep86:-qm.p86_lda=pz81
+                      h2o_dsd-pbeb95-d3bj:H2O:dsd-pbeb95-d3bj: benzene_dsd-pbep86-d3bj:BENZ:dsd-pbep86-d3bj:
+                      benzene_dsd-pbeb95-d3bj:BENZ:dsd-pbeb95-d3bj:)
+            string(REPLACE ":" ";" _p "${_case}")
+            list(GET _p 0 _n)
+            list(GET _p 1 _mol)
+            list(GET _p 2 _m)
+            list(LENGTH _p _len)
+            set(_x "")
+            if(_len GREATER 3)
+                list(GET _p 3 _x)
+                string(REPLACE "=" " " _x "${_x}")
+            endif()
+            add_test(NAME qm_gpu_dft_xc_${_n} COMMAND ${Python3_EXECUTABLE} ${_QD} --curcuma $<TARGET_FILE:curcuma>
+                --xyz ${_QD_${_mol}} --mode xc --method ${_m} "--extra=${_x}")
+            list(APPEND _dh_tests qm_gpu_dft_xc_${_n})
+        endforeach()
+        foreach(_case benzene_dsd-pbep86-d3bj:BENZ:dsd-pbep86-d3bj benzene_dsd-pbeb95-d3bj:BENZ:dsd-pbeb95-d3bj
+                      nh3_b2plyp:NH3:b2plyp)
+            string(REPLACE ":" ";" _p ${_case})
+            list(GET _p 0 _n)
+            list(GET _p 1 _mol)
+            list(GET _p 2 _m)
+            add_test(NAME qm_gpu_dft_scf_${_n}_devloop COMMAND ${Python3_EXECUTABLE} ${_QD} --curcuma $<TARGET_FILE:curcuma>
+                --xyz ${_QD_${_mol}} --mode scf --method ${_m} --loop device --dh "--dev-extra=-qm.gpu_scf on -gpu_strict true")
+            list(APPEND _dh_tests qm_gpu_dft_scf_${_n}_devloop)
+        endforeach()
+        foreach(_case h2o_dsd-pbep86-d3bj:H2O:dsd-pbep86-d3bj:
+                      h2o_dsd-pbeb95-d3bj_canonical:H2O:dsd-pbeb95-d3bj:-qm.dh_pt2=canonical
+                      formaldehyde_b2plyp_noresponse:FORM:b2plyp:-qm.grid_response=false
+                      nh3_revdsd-pbep86_nofc:NH3:revdsd-pbep86:-qm.frozen_core=false
+                      benzene_dsd-pbeb95-d3bj:BENZ:dsd-pbeb95-d3bj:)
+            string(REPLACE ":" ";" _p "${_case}")
+            list(GET _p 0 _n)
+            list(GET _p 1 _mol)
+            list(GET _p 2 _m)
+            list(LENGTH _p _len)
+            set(_x "")
+            if(_len GREATER 3)
+                list(GET _p 3 _x)
+                string(REPLACE "=" " " _x "${_x}")
+            endif()
+            add_test(NAME qm_gpu_dft_grad_dh_${_n} COMMAND ${Python3_EXECUTABLE} ${_QD} --curcuma $<TARGET_FILE:curcuma>
+                --xyz ${_QD_${_mol}} --mode grad --method ${_m} --dh --allow-fallback qm_dh_grad_pt2 "--extra=${_x}")
+            list(APPEND _dh_tests qm_gpu_dft_grad_dh_${_n})
+        endforeach()
+        add_test(NAME qm_gpu_dft_opt_dh_h2o_dsd-pbep86-d3bj COMMAND ${Python3_EXECUTABLE} ${_QD} --curcuma $<TARGET_FILE:curcuma>
+            --xyz ${_QD_H2O} --mode opt --method dsd-pbep86-d3bj --allow-fallback qm_dh_grad_pt2)
+        add_test(NAME qm_gpu_dft_fallback_dh_h2o_b2plyp_grad_strict COMMAND ${Python3_EXECUTABLE} ${_QD}
+            --curcuma $<TARGET_FILE:curcuma> --xyz ${_QD_H2O} --mode fallback --method b2plyp --strict --dh
+            --fallback-name qm_dh_grad_pt2)
+        list(APPEND _dh_tests qm_gpu_dft_opt_dh_h2o_dsd-pbep86-d3bj qm_gpu_dft_fallback_dh_h2o_b2plyp_grad_strict)
+        list(APPEND _qd_tests ${_dh_tests})
     endif()
     set_tests_properties(${_qd_tests} PROPERTIES TIMEOUT 1500 LABELS "qm_gpu_dft;gpu" SKIP_RETURN_CODE 77)
+    if(USE_CUDA)
+        set_tests_properties(${_dh_tests} PROPERTIES LABELS "qm_gpu_dft;qm_dh;gpu")
+    endif()
 endif()
 
 # Becke weight derivative on the device vs qmgrid::gridWeightGradient, also above the former 700-atom limit

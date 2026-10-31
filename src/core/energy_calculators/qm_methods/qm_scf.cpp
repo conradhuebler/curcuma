@@ -1466,15 +1466,11 @@ bool QMEngine::ensureGpuXC() const
             CurcumaLogger::warn(fmt::format("QM: unknown -qm.gpu_xc '{}' (use auto|on|off); using auto", m_gpu_xc));
         }
     }
-    // WP11 stage 3 (Oct 2026): meta-GGAs (tau) run on the device too (QMGpuXCSetup::mgga); no fallback of their own
+    // WP11 stage 3 (Oct 2026): meta-GGAs (tau) run on the device too (QMGpuXCSetup::mgga); no fallback of their own.
+    // WP12 stage 3 (Oct 31 2026): the double-hybrid kernels P86 (PZ81 and VWN5 local part, GGA path) and B95
+    // (meta-GGA path) run on the device as well; they reach the device through the same evaluatePoint /
+    // evaluatePointMGGA of qm_xc_kernels.h, so the former CPU-only gate (counted qm_xc fallback) is gone.
     if (m_gpu_xc_obj) return true;
-    // WP12 stage 1 (Claude Generated, Oct 2026): the double-hybrid kernels (P86, P86-VWN5, B95) are validated on the
-    // CPU only; with them the XC part stays on the CPU, counted as a qm_xc fallback (no device run of untested code).
-    for (const qmxc::XCTerm& t : m_xc.terms)
-        if (t.weight != 0.0 && qmxc::kern::isCpuOnlyKernel(t.kernel)) {
-            gpuXCFailed("kernel " + qmxc::kernelName(t.kernel) + " (double hybrid, WP12 stage 1) is CPU-only");
-            return false;
-        }
     if (!ensureXCGrid()) return false;
     const auto t0 = std::chrono::steady_clock::now();
     const std::string backend = m_gpu;
@@ -1539,6 +1535,9 @@ bool QMEngine::ensureGpuXC() const
     su.term_weight = weights.data();
     su.gga = m_xc.needsGradient() ? 1 : 0;
     su.mgga = m_xc.needsTau() ? 1 : 0;  // needsGradient() is true as well (WP11)
+    // WP12 stage 3 (Oct 31 2026): double hybrids reserve the buffers of F_xc / the response gradient (gradient path);
+    // every other functional keeps the setup, and so the block sizes, of before
+    su.fxc = m_functional == QMFunctional::DoubleHybrid ? 1 : 0;
     su.rho_min = qmxc::kern::effectiveThreshold(m_xc.needsGradient(), m_xc_rho_threshold);
     su.atom_xyz = pos.data();
     su.inv_dist = inv_dist.data();

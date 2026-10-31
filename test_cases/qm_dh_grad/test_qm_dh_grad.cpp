@@ -6,7 +6,7 @@
  *
  *   test_qm_dh_grad kernel <reference.json>
  *       At the (rho, sigma[, tau]) points of reference.json["kernel"]: for B88_X, LYP_C, PBE_X, P86_C, P86VWN_C, B95_C
- *       the jet first derivatives (qm_xc_fxc.h) next to the production potentials (qm_xc_kernels.h), the jet second
+ *       the jet first derivatives (qm_xc_fxc_kernels.h) next to the production potentials (qm_xc_kernels.h), the jet second
  *       derivatives and a central 4-point finite difference of the production potentials (test tool only).
  *
  *   test_qm_dh_grad fxc <xyz> --method M [options]

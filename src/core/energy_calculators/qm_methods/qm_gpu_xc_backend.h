@@ -75,6 +75,11 @@ struct QMGpuXCSetup {
     // tau = 1/2 sum_k (d_k phi P d_k phi^T)_qq per point and adds the v_tau terms of qmxc::buildVxc /
     // qmxc::buildXCGradient (meta-GGA branches buildVxcMeta / buildXCGradientMeta of qm_xc.cpp).
     int mgga = 0;
+    // Double-hybrid gradient (Claude Generated, Oct 31 2026, WP12 stage 3; appended, entry renamed to
+    // _create_qm_xc_fxc): 1 reserves the extra per-block buffers of fxc() and responseGradient() (a second density
+    // on the grid, the directional coefficients) in the memory budget; 0 leaves the block sizes of LDA/GGA/meta-GGA
+    // exactly as before, and the two calls then return false.
+    int fxc = 0;
 };
 
 /// E_xc parts of one V_xc build (sums over the grid, as qmxc::XCResult).
@@ -109,6 +114,21 @@ public:
     virtual bool weightGradient(const double* f, double* g) = 0;
     /// One ASCII line of cumulative device timings.
     virtual std::string stats() const { return std::string(); }
+    /// XC kernel response (double-hybrid Z-vector, WP12 stage 3): V = F_xc[D] = d/dt V_xc[P + t D] at t = 0 for the
+    /// HOST densities P (the KS density) and D (symmetric), the quantity of qmxc::buildFxc (qm_xc_fxc.h) with the
+    /// second derivatives of qmxc::fxc::evaluatePointFxc (qm_xc_fxc_kernels.h). V n x n, overwritten. False when the
+    /// object was set up without QMGpuXCSetup::fxc or on a device error. Claude Generated (Oct 31 2026).
+    virtual bool fxc(const double* P, const double* D, double* V) { (void)P, (void)D, (void)V; return false; }
+    /// Directional derivative in direction P2 of the XC nuclear gradient at density P (host arrays), the quantity of
+    /// qmxc::buildXCResponseGradient plus, with response, the Becke weight part of its energy density
+    /// (qmgrid::gridWeightGradient): g_basis, g_points, g_weights natoms x 3 (Eh/Bohr, overwritten; g_points and
+    /// g_weights zero without response). Same preconditions as fxc(). Claude Generated (Oct 31 2026).
+    virtual bool responseGradient(const double* P, const double* P2, bool response, double* g_basis, double* g_points,
+                                  double* g_weights, long long& points_used)
+    {
+        (void)P, (void)P2, (void)response, (void)g_basis, (void)g_points, (void)g_weights, (void)points_used;
+        return false;
+    }
 };
 
 }  // namespace qmint

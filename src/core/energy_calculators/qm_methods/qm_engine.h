@@ -697,6 +697,23 @@ private:
     bool dhFxc(const Matrix& D, Matrix& V) const;
     /// d/dt of the XC gradient at P + t P2 (basis part, and with -qm.grid_response the point and weight parts).
     bool dhXCResponseGradient(const Matrix& P2, Matrix& g_basis, Matrix& g_response, std::string& why) const;
+    /// WP12 stage 3 (Claude Generated, Oct 31 2026; qm_dh_grad_gpu.cpp): device parts of the double-hybrid gradient.
+    /// F_xc / the response gradient on the device XC object (QMGpuXC::fxc / responseGradient); false = the caller runs
+    /// the CPU builder; a device failure is counted once as qm_dh_xc (CPU from then on).
+    mutable bool m_gpu_dh_xc_failed = false;
+    void gpuDHXCFailed(const std::string& why) const;
+    bool dhFxcDevice(const Matrix& D, Matrix& V) const;
+    bool dhXCResponseGradientDevice(const Matrix& P2, Matrix& g_basis, Matrix& g_response, std::string& why) const;
+    /// PT2 two-electron forces on the device (Eh/Bohr): separable part (P2 x P, a_x-scaled exchange) by polarisation
+    /// of the Q-G7 kernel, 1/2 [G(P + P2) - G(P - P2)], canonical non-separable part Gamma through the MP2 2e kernel with
+    /// P = P2 = 0. False when a device part is not possible (the caller then runs qmint::gradientTwoElectronDHPT2).
+    bool dhPT2TwoElectronDevice(const qmint::EriGpuTables* tables, const std::string& why_tables, const std::string& backend,
+                                const Matrix& Pc, const Matrix& P2c, const double* Gamma, Matrix& g2, std::string& info) const;
+    /// Step 5 of computeDoubleHybridGradient with -gpu: PT2 1e (P2c, Wc), 2e (Pc, P2c, Gamma active n^4 or nullptr)
+    /// and RI-PT2 3-index/metric (ri, G3, M2) derivatives, each on the device or on the CPU; g1, g2 Eh/Bohr.
+    void dhPT2ForcesDevice(const Matrix& posBohr, const Matrix& Pc, const Matrix& P2c, const Matrix& Wc, const double* Gamma,
+                           qmri::RIJK* ri, const Matrix& G3, const Eigen::MatrixXd& M2, bool ks2e_deferred,
+                           int zvector_iterations, qmint::MP2Result& res, Matrix& g1, Matrix& g2) const;
     /// Active atom of every active basis function (as xcGradient).
     std::vector<int> activeFunctionAtoms() const;
     /// RI-PT2 gradient intermediates (own mode-j setup): energies, unrelaxed blocks, L1 (n x o), L2 (n x v), the
