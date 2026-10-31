@@ -58,10 +58,24 @@ RMSD with atom reordering `-rmsd`, docking `-dock`, interaction energies `-inter
 
 ## Download and requirements
 
-Prebuilt binaries are on the [Releases page](https://github.com/conradhuebler/curcuma/releases): a Linux x86_64 AppImage
-(`curcuma-<version>-x86_64-Linux.AppImage`) and a Windows x86_64 archive (`curcuma-<version>-x86_64-Windows.zip`). Every release
-is marked as a pre-release and is built by the CI from one commit; the releases named `Curcuma CI (feature/...)` are builds
-of development branches.
+Prebuilt binaries are on the [Releases page](https://github.com/conradhuebler/curcuma/releases): Linux x86_64 AppImages
+for AVX2 and AVX512 CPUs and a Windows x86_64 archive. GPU support (CUDA, ROCm) is a separate plugin download of the same CPU level
+that is unpacked next to the AppImage; plugins are part of manually started runs only. Every release is marked as a
+pre-release and is built by the CI from one commit; the releases named `Curcuma CI (feature/...)` are builds of development
+branches. File names, plugin setup and requirements: [docs/RELEASE_BINARIES.md](docs/RELEASE_BINARIES.md).
+
+**GPU plugins (CUDA, ROCm).** The AppImages and the executable archives run on the CPU only. The GPU code is in two
+separate archives per CPU level, `curcuma-<v>-plugin-cuda-<level>.tar.gz` (about 1.1 GB) and
+`curcuma-<v>-plugin-rocm-<level>.tar.gz` (about 1.0 GB). They are built only by a manually started CI run
+(Actions > AutomaticBuild > Run workflow), so a normal release may contain none; a plugin release is marked by these files.
+
+1. Pick `<level>`: `avx512` if `grep -c avx512f /proc/cpuinfo` is above 0, otherwise `avx2`. AppImage and plugin must have the same level; a plugin of the other level is refused with a warning and the run continues on the CPU.
+2. Unpack the plugin archive next to the AppImage: `tar -xzf curcuma-<v>-plugin-cuda-<level>.tar.gz --strip-components=1`.
+3. Select the backend: `./curcuma-<v>-<level>-x86_64.AppImage -sp mol.xyz -method gfn2 -gpu cuda` (or `-gpu rocm`). `-gpu_strict true` stops at the first CPU fallback.
+
+Plugins are looked up in `$CURCUMA_PLUGIN_DIR`, the executable's directory, the directory of the `.AppImage` file and `~/.local/share/curcuma/plugins`.
+CUDA needs the NVIDIA driver. ROCm needs the `amdgpu` driver and a card of the types `gfx1100`, `gfx1150` or `gfx1200`; other cards fall back to the CPU.
+Checked by the operator on one machine each for CUDA and ROCm (GPU models not recorded); other distributions and ROCm cards are untested. Details: [docs/RELEASE_BINARIES.md](docs/RELEASE_BINARIES.md), [docs/GPU_PLUGIN_STARTUP.md](docs/GPU_PLUGIN_STARTUP.md).
 
 To build from source:
 
