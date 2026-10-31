@@ -46,8 +46,8 @@ variants (`GFNFF::setFragmentOverride`), so Phase 1 and Phase 2 and the gradient
 Inside one connected molecule, or with several fragments when every group is a union of whole fragments (else rejected; for groups
 inside a fragment next to other fragments see "Solvated polymer" below; used by
 `ionpairs`, [FRAG_CHARGE_MODEL.md](FRAG_CHARGE_MODEL.md)); groups that overlap, fall outside the molecule or leave an inconsistent total are
-rejected with an error and the run continues without groups. Topology cache is bypassed, the GPU method falls back to the CPU
-(`requestsCpuFallback`; the GPU edit is not compiled in the CPU build).
+rejected with an error and the run continues without groups. Topology cache is bypassed. GPU (Oct 31, 2026): CUDA solves the
+group constraints in the device EEQ (GFNFF_STATUS.md); ROCm falls back to the CPU method (`requestsCpuFallback`, untested there).
 
 Measured ((AB)5, 267 atoms, +5, one group = one protonated unit of 27 atoms, charge +1):
 
@@ -156,7 +156,7 @@ fragments) or neutral partner does not, so reaction energies move by the same am
 
 Limits: cations only (no anions, no carbenium); one connected molecule; group charge fixed +1; the group is perceived once
 per GFNFF instance (nothing resets it: a later molecule on the same instance or a bond change in MD would keep the old
-groups, not run; a regrouping would be a discontinuous step); GPU falls back to the CPU after a successful perception (not compiled or run here); the
+groups, not run; a regrouping would be a discontinuous step); GPU: as for a group file (CUDA on the device, ROCm CPU fallback); the
 topology cache is bypassed. The cache `<basename>.topo.json` carries no molecule charge: a file written at charge 2 is
 reused at charge 0 (seen in this work, the test runs with `-gfnff.cache_topology false`).
 
@@ -201,15 +201,15 @@ one on the 182-atom system (constraints raise the EEQ energy, see the accuracy t
 
 Limits: the groups are fixed per GFNFF instance at the first topology (code reading, not run in MD): a later change of the
 fragmentation (proton transfer, Cl- binding an H) keeps the original rows, no message, no re-check; with the default
-`topology_mode constant` the topology is frozen as well. No periodic system tested. GPU: the GPU method falls back to the CPU
-(as for every group file, not run).
+`topology_mode constant` the topology is frozen as well. No periodic system tested. GPU: CUDA on the device, ROCm CPU
+fallback (as for every group file).
 
 Isolated ion: a Cl- whose GFN-FF coordination number is exactly 0 (nearest H at 3.2 A: CN 0; at 2.2 A: CN > 0, both measured)
 gets a spurious force from the reference CN chain rule (Known Issue #39 in [KNOWN_ISSUES_ARCHIVE.md](KNOWN_ISSUES_ARCHIVE.md)),
 largest with an H at about 3.1-3.4 A. In the 182-atom check above the Cl- have neighbours; a Cl- with a first hydration shell
 (H at about 2.2 A) is at CN > 0 and the switch changes nothing (measured on Cl- ... H2O, (AB)2 + Cl- + 10 H2O and the 24 cluster snapshots below only). For a Cl- that can be without neighbours (gas-phase complex, few waters, ion leaving a chain) set
-`-gfnff.cn_zero_guard true`: gradient only, energy unchanged; the GPU method then falls back to the CPU method (not run on a
-GPU). (AB)3 + Cl- with groups +3/-1: FD error 3.86e-3 -> 1.9e-6 Eh/A; NVE Cl- + 2 H2O: Etot max-min 3.1e-3 -> 2.6e-5 Eh (n=1 each).
+`-gfnff.cn_zero_guard true`: gradient only, energy unchanged; CUDA applies it on the device, ROCm falls back to the CPU
+method. (AB)3 + Cl- with groups +3/-1: FD error 3.86e-3 -> 1.9e-6 Eh/A; NVE Cl- + 2 H2O: Etot max-min 3.1e-3 -> 2.6e-5 Eh (n=1 each).
 
 ## Validation on a microsolvated unit (Oct 2026)
 

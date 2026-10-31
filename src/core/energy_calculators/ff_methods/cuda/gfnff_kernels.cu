@@ -2789,7 +2789,8 @@ __global__ GFNFF_KERNEL_BOUNDS void k_coulomb_postprocess(
     const double* __restrict__ alp,
     double*                    dEdcn,
     double*                    energy,
-    bool                       do_subtract)
+    bool                       do_subtract,
+    bool                       cn_zero_guard)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     double local_E = 0.0;
@@ -2815,8 +2816,12 @@ __global__ GFNFF_KERNEL_BOUNDS void k_coulomb_postprocess(
         // Coulomb TERM 1b chain-rule: dEdcn[i] -= qtmp
         if (do_subtract) {
             double cn_i = fmax(cn[i], 0.0);
-            double qtmp = q * cnf[i] / (2.0 * sqrt(cn_i) + 1e-16);
-            dEdcn[i] -= qtmp;
+            // Claude Generated (Oct 2026): gfnff.cn_zero_guard, same exact test as FFWorkspace::postProcess
+            // (CPU): at CN_i == 0.0 the energy -q*cnf*sqrt(max(CN,0)) is flat, so TERM 1b is 0 (no threshold).
+            if (!(cn_zero_guard && cn_i == 0.0)) {
+                double qtmp = q * cnf[i] / (2.0 * sqrt(cn_i) + 1e-16);
+                dEdcn[i] -= qtmp;
+            }
         }
     }
 

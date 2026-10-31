@@ -3811,7 +3811,8 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
             impl.d_coul_alp.ptr,
             impl.d_dEdcn.ptr,
             &impl.d_energies.ptr[impl.E_COUL_SELF],
-            do_subtract);
+            do_subtract,
+            m_cn_zero_guard);
         checkCuda(cudaGetLastError(), "k_coulomb_postprocess launch");
     }
 

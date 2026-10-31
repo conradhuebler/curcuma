@@ -20,6 +20,7 @@
  *       static constexpr bool has_localinv_device_build = true; // device-built localinv (ROCm too, Oct 2026)
  *       static constexpr bool has_cn_pair_skin      = true;   // K1 CN pair-list skin (ROCm too, Oct 2026)
  *       static constexpr bool has_stream_overlap    = true;   // false on ROCm (K2/K3, Oct 2026)
+ *       static constexpr bool has_charge_groups_cn_guard = true; // false on ROCm: CPU fallback (Oct 2026)
  *       static constexpr int  default_eeq_cpu_fragment_threshold = 0;   // 16 on ROCm
  *       static void downloadDoubles(double* host, const double* device, int n);
  *   };
@@ -656,12 +657,17 @@ bool GFNFFGpuMethodImpl<Backend>::setMolecule(const Mol& mol)
     // asks EnergyCalculator for the CPU method (requestsCpuFallback()); -gfnff.frag_charge_model reference
     // keeps the GPU and makes the CPU use the same rule.
     m_cpu_fallback_requested = (m_eeq_nfrag > 1 && mol.m_charge != 0 && m_gfnff->fragEnsembleRequested());
-    // user EEQ charge groups (-gfnff.charge_groups) are implemented and checked on the CPU method only
-    if (m_gfnff->hasUserChargeGroups())
-        m_cpu_fallback_requested = true;
-    // -gfnff.cn_zero_guard: the device kernels (k_subtract_qtmp) keep the reference TERM 1b formula
-    if (m_gfnff->cnZeroGuardRequested())
-        m_cpu_fallback_requested = true;
+    // Claude Generated (Oct 2026): user EEQ charge groups (-gfnff.charge_groups file|auto|ionpairs) need no CPU
+    // fallback on CUDA: the topology build (calculateTopologyInfo, Phase 10) writes them into TopologyInfo::fraglist/nfrag/
+    // qfrag, prepareEEQParametersForGPU hands exactly these to the device EEQ (fraglist -> uploadFragmentTopology,
+    // qfrag -> rhs_constraints, one Lagrange row per group), and -gfnff.cn_zero_guard runs in k_coulomb_postprocess.
+    // A charged system with groups still takes the ensemble fallback above unless frag_charge_model is reference.
+    // ROCm (has_charge_groups_cn_guard = false): the same code is compiled but untested on hardware, the CPU
+    // fallback stays there.
+    if constexpr (!Backend::has_charge_groups_cn_guard) {
+        if (m_gfnff->hasUserChargeGroups() || m_gfnff->cnZeroGuardRequested())
+            m_cpu_fallback_requested = true;
+    }
     // Claude Generated (Oct 2026): the ALPB solvation term exists only in GFNFF::Calculation(), which this
     // wrapper never calls; before this check -gfnff.solvent water on -gpu rocm returned the gas-phase
     // energy without a message (caffeine, 1 run: -4.67273706 against -4.68976245 Eh on the CPU).
@@ -742,6 +748,9 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
         // === 1. Create GPU workspace from full parameter set ===
         // All energy terms (including HB, XB, ATM, BATM, sTors) run on GPU.
         m_gpu_workspace = std::make_unique<GpuWorkspace>(*pending, natoms, atom_types);
+        // Claude Generated (Oct 2026): -gfnff.cn_zero_guard on the device (k_coulomb_postprocess), same exact
+        // CN == 0.0 test as the CPU FFWorkspace; before this the wrapper fell back to the CPU method.
+        m_gpu_workspace->setCnZeroGuard(m_gfnff->cnZeroGuardRequested());
 
         // Claude Generated (Sep 2026, F-16): keep only what the GPU path reads later (bonds and
         // the bond-HB cross-reference, see calculateEnergy); the rest (D4 pairs, repulsion

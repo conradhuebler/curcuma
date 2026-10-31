@@ -461,7 +461,8 @@ __global__ GFNFF_KERNEL_BOUNDS void k_coulomb_postprocess(
     const double* __restrict__ alp,
     double*                    dEdcn,
     double*                    energy,
-    bool                       do_subtract
+    bool                       do_subtract,
+    bool                       cn_zero_guard   ///< gfnff.cn_zero_guard: TERM 1b = 0 at CN == 0.0 (Oct 2026)
 );
 
 /// CN chain-rule gradient: pairwise kernel over CN-relevant atom pairs.

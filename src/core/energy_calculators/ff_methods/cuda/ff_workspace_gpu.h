@@ -677,6 +677,12 @@ public:
     bool frozenCN() const { return m_frozen_cn; }
     bool frozenCharges() const { return m_frozen_charges; }
 
+    /// Claude Generated (Oct 2026): gfnff.cn_zero_guard on the device - k_coulomb_postprocess sets the TERM 1b
+    /// chain-rule term to 0 for CN_i == 0.0 exactly, like FFWorkspace::setCnZeroGuard on the CPU. Set before the
+    /// first step (a captured CUDA graph keeps the value it was captured with).
+    void setCnZeroGuard(bool v) { m_cn_zero_guard = v; }
+    bool cnZeroGuard() const { return m_cn_zero_guard; }
+
 private:
     std::unique_ptr<FFWorkspaceGPUImpl> m_impl;
 
@@ -719,6 +725,7 @@ private:
     // and EEQ-charge upload are skipped (device buffers retain previous-step values).
     bool    m_frozen_cn = false;
     bool    m_frozen_charges = false;
+    bool    m_cn_zero_guard = false;   ///< gfnff.cn_zero_guard (Oct 2026), default = reference TERM 1b
 
     // Last uploaded HB/XB bond lists (for CPU vs GPU comparison debugging)
     std::vector<GFNFFHydrogenBond> m_last_hbonds;

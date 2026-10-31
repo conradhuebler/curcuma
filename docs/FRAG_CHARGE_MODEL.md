@@ -155,8 +155,8 @@ Limits (read before use):
   No tested quantity (contact distance, free EEQ charge, GFN-FF energy) separates these from ammonium halide pairs.
 - Not perceived: guanidinium/amidinium, phosphonium, sulfonium, protonated carbonyls, fused or substituted aromatic cations,
   dianions (an anion fragment gets one -q), open shells. A fragment with k onium centres gets +k (not tested for k > 1).
-- Groups frozen per instance: not for MD with bond breaking or `-gfnff.react` (not tested). GPU falls back to the CPU method
-  (`hasUserChargeGroups`, read in the code, not run). Fragment order: IL16/144 changes by -2.4e-4 Eh between the two fragment
+- Groups frozen per instance: not for MD with bond breaking or `-gfnff.react` (not tested). GPU: CUDA on the device EEQ (Oct 31, 2026,
+  10-step MD charges GPU against CPU 2.4e-15 e on NH4+ Cl-), ROCm falls back to the CPU method (untested there). Fragment order: IL16/144 changes by -2.4e-4 Eh between the two fragment
   orders without the switch and by -4.1e-4 Eh with it (230, 187, 008: 0; n = 1 run each).
 - Falsifier set (24 pairs, 10 shared-proton controls, 4 three-fragment complexes): vault `_artefacts/2026-10-24_curcuma_ionpair-falsifier-package.tar.gz`;
   its `species/*.xyz` are NOT the geometries of its r2SCAN-3c energies for 85 of 124 species (rewritten after ORCA started): to be replaced.

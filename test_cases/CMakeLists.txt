@@ -748,6 +748,16 @@ if(Python3_Interpreter_FOUND)
                          ${CMAKE_CURRENT_BINARY_DIR}/molecules/larger/polymer_2x.xyz)
         set_tests_properties(gfnff_gpu_split_equals_single
             PROPERTIES TIMEOUT 600 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu" SKIP_RETURN_CODE 77)
+
+        # Claude Generated (Oct 2026): -gfnff.charge_groups (file/auto/ionpairs) and -gfnff.cn_zero_guard on the CUDA
+        # path without CPU fallback (-gpu_strict true): gradient and MD charges against the CPU method. Skipped (77)
+        # without a CUDA device or plugin.
+        add_test(NAME gfnff_gpu_charge_groups
+                 COMMAND ${Python3_EXECUTABLE}
+                         ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_gpu_charge_groups.py
+                         $<TARGET_FILE:curcuma> ${CMAKE_SOURCE_DIR})
+        set_tests_properties(gfnff_gpu_charge_groups
+            PROPERTIES TIMEOUT 900 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;charge" SKIP_RETURN_CODE 77)
     endif()
 
     # Claude Generated (Sep 2026): adaptive (step-rejecting) integrator.

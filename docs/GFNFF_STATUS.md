@@ -11,9 +11,16 @@
 - Time, Ryzen 9950X3D CCD1 (cores 8-15, 32 MB L3), 8 threads, 200-step MD with the production flags, base/new alternated: ms/step mean (n = 5, sd) chain 3003 atoms 87.2 (6.0) -> 64.6 (4.9), chain 5747 268.7 (34.1) -> 225.1 (28.8), water 3000 77.3 (10.9) -> 59.2 (6.6), water 5475 248.6 (36.2) -> 187.3 (26.5); median of the paired changes -26 / -23 / -22 / -25 %. Spread from memory traffic of other jobs on CCD0. Instrumented (n = 2 undisturbed runs, 5747 atoms): D4 weights + C6/dC6 refresh 42.0 -> 0.5 ms, D4 energy loop 22.6 -> 16.2 ms (no dC6 lookup), EEQ unchanged; step 208 -> 161 ms.
 - Not tested: GPU paths (unchanged, they do not request the fused mode), `disp_half_contraction false` (fused mode then stays off), reactive topology mode. `GFNFFDispersion::C6` is only current right after a list rebuild while the mode is active.
 
+## Charge groups and `cn_zero_guard` on CUDA (Oct 31, 2026) 🤖⚙️
+
+- No CPU fallback on `-gpu cuda` any more: the groups were already in `TopologyInfo::fraglist/nfrag/qfrag`, which `prepareEEQParametersForGPU` hands to the device EEQ (one constraint row per group); `cn_zero_guard` is a flag of `k_coulomb_postprocess` (exact CN == 0.0 test as on the CPU). Trait `has_charge_groups_cn_guard`.
+- Measured, RTX 5080, GPU against CPU of the same build (n=1 each): Cl- ... H2O gradient 3.9e-14 Eh/A with the switch (3.8e-14 without), FD error 6.6e-4 -> 1.5e-5 Eh/A on the GPU as on the CPU; 10-step MD charges <= 1e-14 e (chain file/auto groups, ionpairs, chain + Cl- + water); 3003 / 5747 atoms (WP7-E ppcg, nfrag 920 / 1836): charges <= 3.4e-11 e, mean Epot 1.6e-11 / 4.1e-11 Eh, the same 5747 atoms without groups 1.7e-11 e / 3.8e-11 Eh; group sums <= 1.5e-15; 200 MD steps 5747 atoms: Epot identical at 6 decimals every step, no GPU fallback.
+- MD step (200 steps, production flags, n=3): 5.7 ms at 3003 atoms (`frag_charge_model reference`, the system has charge 2), 15.5 ms at 5747 atoms; CPU 8 threads about 52 / 125 ms (operator figure, not re-measured here).
+- Not covered: ROCm keeps the CPU fallback for both switches (kernel compiled, never run on ROCm hardware); Vulkan, multi-GPU split, charged systems with groups under the default `frag_charge_model ensemble` (still the ensemble CPU fallback). ctest `gfnff_gpu_charge_groups`.
+
 ## Isolated ion gradient, `-gfnff.cn_zero_guard` (Oct 25, 2026) 🤖⚙️
 
-- Opt-in (default = reference): Coulomb TERM 1b chain-rule term 0 at CN = 0; removes a spurious force on an isolated ion (Cl- ... H2O, H-Cl 3.2 A: FD 6.6e-4 -> 1.5e-5 Eh/A), energy unchanged, GPU falls back to CPU. Known Issue #43 in [KNOWN_ISSUES_ARCHIVE.md](KNOWN_ISSUES_ARCHIVE.md).
+- Opt-in (default = reference): Coulomb TERM 1b chain-rule term 0 at CN = 0; removes a spurious force on an isolated ion (Cl- ... H2O, H-Cl 3.2 A: FD 6.6e-4 -> 1.5e-5 Eh/A), energy unchanged. Known Issue #43 in [KNOWN_ISSUES_ARCHIVE.md](KNOWN_ISSUES_ARCHIVE.md).
 
 ## xtb library regression gate (Oct 11, 2026) 🤖⚙️
 
