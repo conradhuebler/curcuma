@@ -26,7 +26,7 @@ Requirements: CUDA needs the NVIDIA driver (`libcuda` is taken from the system).
 
 ## Getting the plugins from a branch
 
-Plugin archives are not built on branch pushes (two GPU builds take about two hours). Start Actions > AutomaticBuild or CiVariants with "Run workflow" on the branch; the plugins are in the artifacts `linux-avx2` and `linux-avx512` (login required, kept 90 days), or `gh run download <run id> -n linux-avx512`.
+Plugin archives are not built on pushes, neither on branches nor on `master` (two GPU builds take about two hours). Start Actions > AutomaticBuild or CiVariants with "Run workflow" on the branch; the plugins are in the artifacts `linux-avx2` and `linux-avx512` (login required, kept 90 days), or `gh run download <run id> -n linux-avx512`.
 
 ## Status
 
