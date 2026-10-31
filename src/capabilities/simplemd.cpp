@@ -39,6 +39,8 @@
 #include "src/capabilities/optimizer_factory.h"
 #include "src/capabilities/rmsd.h"
 #include "src/capabilities/rmsdtraj.h"
+#include "src/capabilities/trajprops.h"        // Claude Generated (Oct 2026): hydrogen-bond classification
+#include "src/core/energy_calculators/ff_methods/gfnff.h"
 #include "src/capabilities/shared_bias_pool.h"  // Claude Generated (Apr 2026)
 #include "src/capabilities/rmsd_mtd_core.h"      // Claude Generated (Jul 2026): strided-scheme decision helpers
 
@@ -312,13 +314,6 @@ void SimpleMD::LoadControlJson()
     m_print = m_config.get<int>("print_frequency");
     m_max_top_diff = m_config.get<int>("MaxTopoDiff", 15);  // Not in PARAM block, using default
     m_seed = m_config.get<int>("seed");
-    m_velocity_seed = (m_seed > 0) ? m_seed : 0; // 0: legacy fixed sequence
-    if (m_velocity_seed > 0) {
-        m_velocity_rng.seed(static_cast<std::default_random_engine::result_type>(m_velocity_seed));
-        // Claude Generated (Oct 2026): own stream for the thermostat, decorrelated from the velocities.
-        std::seed_seq thermostat_seq{ static_cast<unsigned>(m_velocity_seed), 0x7468u };
-        m_thermostat_rng.seed(thermostat_seq);
-    }
     m_threads = m_config.get<int>("threads");
 
     // Claude Generated 2025: System Control & Output Parameters
@@ -451,6 +446,10 @@ void SimpleMD::LoadControlJson()
     m_md_diagnostics = m_config.get<bool>("md_diagnostics");
     // WP-P1 (May 2026): per-phase wall-clock timing in the JSONL records
     m_md_diagnostics_timing = m_config.get<bool>("md_diagnostics_timing");
+
+    // Claude Generated (Oct 2026): hydrogen-bond log, off unless asked for
+    m_hb_log_frequency = m_config.get<int>("hb_log_frequency");
+    m_hb_log_limit_kj = m_config.get<double>("hb_log_energy_limit");
 
     // Claude Generated 2025: RATTLE Parameters
     m_rm_COM = m_config.get<double>("remove_com_motion");
@@ -639,8 +638,6 @@ bool SimpleMD::Initialise()
     m_eigen_masses = Eigen::VectorXd::Zero(3*m_natoms);
     m_eigen_inv_masses = Eigen::VectorXd::Zero(3*m_natoms);
 
-    static std::random_device rd{};
-    static std::mt19937 gen{ rd() };
     if (m_seed == -1) {
         const auto start = std::chrono::high_resolution_clock::now();
         m_seed = std::chrono::duration_cast<std::chrono::seconds>(start.time_since_epoch()).count();
@@ -648,7 +645,9 @@ bool SimpleMD::Initialise()
         m_seed = m_natoms * m_T0;
     if (m_verbosity >= 1)
         CurcumaLogger::raw("Random seed is ", m_seed);
-    gen.seed(m_seed);
+    // Claude Generated (Sep 2026): the engine that was seeded here was a function-local static
+    // nothing else ever used -- every stochastic site had its own, unseeded one. m_rng replaces
+    // all of them and is seeded in seedRandomEngine() once the geometry is in place.
 
     if (m_initfile != "none") {
         json md;
@@ -735,7 +734,8 @@ bool SimpleMD::Initialise()
         m_seed = m_T0 * m_natoms;
     if (m_verbosity >= 1)
         CurcumaLogger::raw("Random seed is ", m_seed);
-    gen.seed(m_seed);
+    // Claude Generated (Sep 2026): m_rng is seeded in seedRandomEngine() (geometry-dependent),
+    // called from InitVelocities. This second block only resolves the -1/0 sentinels.
 
 
     m_start_fragments = m_molecule.GetFragments();
@@ -786,7 +786,6 @@ bool SimpleMD::Initialise()
 
     //m_gradient = std::vector<double>(3 * m_natoms, 0);
     m_virial = std::vector<double>(3 * m_natoms, 0);
-    m_atom_temp = std::vector<std::vector<double>>(m_natoms);
     if(m_opt)
     {
         // Claude Generated (Apr 2026): Use unified optimizer instead of legacy CurcumaOpt
@@ -1180,13 +1179,24 @@ void SimpleMD::InitConstrainedBonds()
         CurcumaLogger::result_fmt("{} degrees of freedom (no constraints)", m_dof);
 }
 
+void SimpleMD::seedRandomEngine()
+{
+    // Claude Generated (Sep 2026): see the m_rng comment in the header. The geometry enters the
+    // seed so that the walkers of a search differ without needing per-walker seed bookkeeping,
+    // while a rerun of the SAME structure with the SAME -seed reproduces exactly. Coordinates are
+    // quantised to 1e-6 Angstrom first: bitwise noise from a re-read file must not change the seed.
+    std::size_t h = 1469598103934665603ULL;
+    for (int i = 0; i < 3 * m_natoms; ++i) {
+        const long long q = std::llround(m_eigen_geometry.data()[i] * 1e6);
+        h ^= static_cast<std::size_t>(q) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+    }
+    m_rng.seed(static_cast<std::mt19937::result_type>(static_cast<std::size_t>(m_seed) ^ h));
+}
+
 void SimpleMD::InitVelocities(double scaling)
 {
-    // Claude Generated (Oct 2026): with an explicit `-md.seed N` (N > 0) the velocities come from the
-    // seeded member engine (successive calls continue its stream); otherwise the legacy static engine
-    // keeps the old fixed sequence, so default runs are bit-identical to earlier versions.
-    static std::default_random_engine legacy_generator;
-    std::default_random_engine& generator = (m_velocity_seed > 0) ? m_velocity_rng : legacy_generator;
+    seedRandomEngine();
+    std::mt19937& generator = m_rng;
     for (size_t i = 0; i < m_natoms; ++i) {
         // Claude Generated (Jun 2026): sample from m_T_init (initial
         // temperature) rather than m_T0 (thermostat target) so callers can
@@ -2085,6 +2095,9 @@ void SimpleMD::prepareRun()
         }
     }
 
+    if (m_hb_log_frequency > 0)
+        SetupHydrogenBondLog();
+
     // WP-P1 (May 2026): force per-phase timing collection when diagnostics-timing is on
     if (m_md_diagnostics && m_md_diagnostics_timing && m_interface) {
         m_interface->setForcePhaseTiming(true);
@@ -2522,9 +2535,7 @@ void SimpleMD::ApplyThermostatRegion(const std::vector<int>& atoms, double T0, i
             return;
         const double Ekin_target = 0.5 * kb_Eh * T0 * dof;
         const double c = std::exp(-(m_dT / 2.0 * m_respa) / m_coupling);
-        static std::mt19937 legacy_gen{ std::random_device{}() };
-        // Claude Generated (Oct 2026): a seeded run draws from its own engine (m_thermostat_rng).
-        std::mt19937& gen = (m_velocity_seed > 0) ? m_thermostat_rng : legacy_gen;
+        std::mt19937& gen = m_rng; // Claude Generated (Sep 2026): instance RNG
         std::normal_distribution<double> dnorm{ 0.0, 1.0 };
         std::chi_squared_distribution<double> dchi{ static_cast<double>(dof) };
         const double R = dnorm(gen);
@@ -2539,24 +2550,17 @@ void SimpleMD::ApplyThermostatRegion(const std::vector<int>& atoms, double T0, i
             m_eigen_velocities.data()[3 * i + 2] *= alpha;
         }
     } else if (type == ThermostatType::Andersen) {
-        static std::default_random_engine legacy_generator;
+        std::mt19937& generator = m_rng; // Claude Generated (Sep 2026): instance RNG
         const double probability = m_andersen * m_dT;
         std::uniform_real_distribution<double> uniform_dist(0.0, 1.0);
-        // Claude Generated (Oct 2026): a seeded run draws from its own engine (m_thermostat_rng).
-        const auto collide = [&](auto& generator) {
-            for (int i : atoms) {
-                if (uniform_dist(generator) < probability) {
-                    std::normal_distribution<double> distribution(0.0, std::sqrt(kb_Eh * T0 * m_eigen_inv_masses.data()[3 * i]));
-                    m_eigen_velocities.data()[3 * i + 0] = (m_eigen_velocities.data()[3 * i + 0] + distribution(generator)) / 2.0;
-                    m_eigen_velocities.data()[3 * i + 1] = (m_eigen_velocities.data()[3 * i + 1] + distribution(generator)) / 2.0;
-                    m_eigen_velocities.data()[3 * i + 2] = (m_eigen_velocities.data()[3 * i + 2] + distribution(generator)) / 2.0;
-                }
+        for (int i : atoms) {
+            if (uniform_dist(generator) < probability) {
+                std::normal_distribution<double> distribution(0.0, std::sqrt(kb_Eh * T0 * m_eigen_inv_masses.data()[3 * i]));
+                m_eigen_velocities.data()[3 * i + 0] = (m_eigen_velocities.data()[3 * i + 0] + distribution(generator)) / 2.0;
+                m_eigen_velocities.data()[3 * i + 1] = (m_eigen_velocities.data()[3 * i + 1] + distribution(generator)) / 2.0;
+                m_eigen_velocities.data()[3 * i + 2] = (m_eigen_velocities.data()[3 * i + 2] + distribution(generator)) / 2.0;
             }
-        };
-        if (m_velocity_seed > 0)
-            collide(m_thermostat_rng);
-        else
-            collide(legacy_generator);
+        }
     }
 }
 
@@ -2725,6 +2729,10 @@ bool SimpleMD::step()
         file2.close();
     }
     //////////// Dipole
+
+    // Claude Generated (Oct 2026): hydrogen-bond log (opt-in; the test is one integer compare when off)
+    if (m_hb_log_gfnff && m_step % m_hb_log_frequency == 0)
+        LogHydrogenBonds();
 
     if (m_step % m_dump == 0) {
         if (bool write = WriteGeometry()) {
@@ -5053,30 +5061,16 @@ void SimpleMD::CSVR()
 {
     double Ekin_target = 0.5 * kb_Eh * (m_T0)*m_dof;
     double c = exp(-(m_dT / 2.0 * m_respa) / m_coupling);
-    static std::default_random_engine rd{};
-    static std::mt19937 gen{ rd() };
-    static std::normal_distribution<> d{ 0, 1 };
-    // Lazy-reinit when m_dof changes (e.g. after RATTLE constraint setup or
-    // first call with a different molecule). A stale static distribution with
-    // the wrong DOF produces wrong fluctuation widths in the CSVR rescaling.
-    static int csvr_last_dof = -1;
-    static std::chi_squared_distribution<float> dchi{ 1.0f };
-    if (m_dof != csvr_last_dof) {
-        dchi = std::chi_squared_distribution<float>(static_cast<float>(m_dof));
-        csvr_last_dof = m_dof;
+    // Claude Generated (Sep 2026): the instance RNG, not a shared function-local static.
+    std::mt19937& gen = m_rng;
+    // Lazy-reinit when m_dof changes (e.g. after RATTLE constraint setup): a stale distribution
+    // with the wrong DOF produces wrong fluctuation widths in the CSVR rescaling.
+    if (m_dof != m_csvr_last_dof) {
+        m_csvr_chi = std::chi_squared_distribution<float>(static_cast<float>(m_dof));
+        m_csvr_last_dof = m_dof;
     }
-    double R, SNf;
-    if (m_velocity_seed > 0) {
-        // Claude Generated (Oct 2026): seeded run -> per-instance engine and fresh distributions,
-        // so concurrent runs do not share a stream (see m_thermostat_rng).
-        std::normal_distribution<> dl{ 0, 1 };
-        std::chi_squared_distribution<float> dchil{ static_cast<float>(m_dof) };
-        R = dl(m_thermostat_rng);
-        SNf = dchil(m_thermostat_rng);
-    } else {
-        R = d(gen);
-        SNf = dchi(gen);
-    }
+    double R = m_csvr_norm(gen);
+    double SNf = m_csvr_chi(gen);
     double alpha2 = c + (1 - c) * (SNf + R * R) * Ekin_target / (m_dof * m_Ekin) + 2 * R * sqrt(c * (1 - c) * Ekin_target / (m_dof * m_Ekin));
     m_Ekin_exchange += m_Ekin * (alpha2 - 1);
     double alpha = sqrt(alpha2);
@@ -5084,33 +5078,24 @@ void SimpleMD::CSVR()
         m_eigen_velocities.data()[3 * i + 0] *= alpha;
         m_eigen_velocities.data()[3 * i + 1] *= alpha;
         m_eigen_velocities.data()[3 * i + 2] *= alpha;
-
-        m_atom_temp[i].push_back(m_eigen_masses.data()[3 * i] * (m_eigen_velocities.data()[3 * i + 0] * m_eigen_velocities.data()[3 * i + 0] + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1] + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]) / (kb_Eh * m_dof));
     }
     m_seed++;
 }
 
 void SimpleMD::Andersen()
 {
-    static std::default_random_engine legacy_generator;
+    std::mt19937& generator = m_rng; // Claude Generated (Sep 2026): instance RNG
     double probability = m_andersen * m_dT;
     std::uniform_real_distribution<double> uniform_dist(0.0, 1.0);
-    // Claude Generated (Oct 2026): a seeded run draws from its own engine (m_thermostat_rng).
-    const auto collide = [&](auto& generator) {
-        for (size_t i = 0; i < m_natoms; ++i) {
-            if (uniform_dist(generator) < probability) {
-                std::normal_distribution<double> distribution(0.0, std::sqrt(kb_Eh * m_T0 * m_eigen_inv_masses.data()[3 * i]));
-                m_eigen_velocities.data()[3 * i + 0] = (m_eigen_velocities.data()[3 * i + 0] + distribution(generator)) / 2.0;
-                m_eigen_velocities.data()[3 * i + 1] = (m_eigen_velocities.data()[3 * i + 1] + distribution(generator)) / 2.0;
-                m_eigen_velocities.data()[3 * i + 2] = (m_eigen_velocities.data()[3 * i + 2] + distribution(generator)) / 2.0;
-                m_seed += 3;
-            }
+    for (size_t i = 0; i < m_natoms; ++i) {
+        if (uniform_dist(generator) < probability) {
+            std::normal_distribution<double> distribution(0.0, std::sqrt(kb_Eh * m_T0 * m_eigen_inv_masses.data()[3 * i]));
+            m_eigen_velocities.data()[3 * i + 0] = (m_eigen_velocities.data()[3 * i + 0] + distribution(generator)) / 2.0;
+            m_eigen_velocities.data()[3 * i + 1] = (m_eigen_velocities.data()[3 * i + 1] + distribution(generator)) / 2.0;
+            m_eigen_velocities.data()[3 * i + 2] = (m_eigen_velocities.data()[3 * i + 2] + distribution(generator)) / 2.0;
+            m_seed += 3;
         }
-    };
-    if (m_velocity_seed > 0)
-        collide(m_thermostat_rng);
-    else
-        collide(legacy_generator);
+    }
 }
 void SimpleMD::NoseHover()
 {
@@ -5199,4 +5184,48 @@ json SimpleMD::Results() const
         result["density"] = m_molecule.Density(volume); // g/cm^3
     }
     return result;
+}
+
+/* Claude Generated (Oct 2026) - Hydrogen-bond log by GFN-FF triple energy.
+ *
+ * Opt-in (hb_log_frequency > 0). The triples are the A-H...B candidates GFN-FF evaluates anyway;
+ * their single energies are recorded by the force field (GFNFF::setRecordHBondEnergies) and counted
+ * here when below hb_log_energy_limit. Recording does not change the dynamics (the same terms are
+ * summed as before). Only GFN-FF has such triples; with another method the log is refused. */
+void SimpleMD::SetupHydrogenBondLog()
+{
+    GFNFF* gfnff = (m_interface && m_interface->Interface()) ? m_interface->Interface()->gfnffInstance() : nullptr;
+    if (!gfnff) {
+        CurcumaLogger::error("hb_log_frequency needs the gfnff method (hydrogen-bond triples); the hydrogen-bond log is off");
+        return;
+    }
+    m_hb_log_a = curcuma::resolveSelection(m_molecule, m_config.get<std::string>("hb_log_selection"));
+    m_hb_log_b = curcuma::resolveSelection(m_molecule, m_config.get<std::string>("hb_log_selection_b"));
+    if ((!m_config.get<std::string>("hb_log_selection").empty() && m_hb_log_a.empty())
+        || (!m_config.get<std::string>("hb_log_selection_b").empty() && m_hb_log_b.empty())) {
+        CurcumaLogger::error("hb_log_selection / hb_log_selection_b matched no atoms; the hydrogen-bond log is off");
+        return;
+    }
+    m_hb_log_file.open(outputPath(Basename() + ".hbonds.csv"));
+    if (!m_hb_log_file.is_open()) {
+        CurcumaLogger::error("cannot write " + outputPath(Basename() + ".hbonds.csv") + "; the hydrogen-bond log is off");
+        return;
+    }
+    m_hb_log_file << "step,time_fs,hbonds_total,a_donates,b_donates,energy_sum_kj_mol\n";
+    gfnff->setRecordHBondEnergies(true);
+    m_hb_log_gfnff = gfnff;
+}
+
+void SimpleMD::LogHydrogenBonds()
+{
+    const std::vector<GFNFFHBondEnergy> triples = m_hb_log_gfnff->hydrogenBondEnergies();
+    if (triples.empty() && !m_hb_log_warned_empty) {
+        CurcumaLogger::warn("hydrogen-bond log: no GFN-FF triples recorded (no candidates, or the force field does not record them)");
+        m_hb_log_warned_empty = true;
+    }
+    const curcuma::HBondEnergyCount c = curcuma::classifyHBondEnergies(
+        triples, static_cast<int>(m_natoms), m_hb_log_a, m_hb_log_b, m_hb_log_limit_kj);
+    m_hb_log_file << m_step << "," << m_currentStep << "," << c.count.total() << "," << c.count.aDonates << ","
+                  << c.count.bDonates << "," << c.energySumKJ << "\n";
+    m_hb_log_file.flush();
 }

@@ -134,18 +134,14 @@ nominates its own labels, and the model is refitted before sampling continues. M
 a 9-atom test: with the threshold at 0.5 a cycle collected 4 frames instead of 44, three of
 which had tripped the threshold.
 
-**Reproducibility (fixed Oct 2026).** `-activelearn.seed` gives each sampling run the seed
-`seed + 1000 * cycle + run`, which reaches SimpleMD (initial velocities, `-md.seed` since
-f47e17d2). The CSVR and Andersen thermostats, however, drew from process-wide static engines;
-the concurrent runs of a cycle consumed that one stream in scheduling order, so two `-threads 4`
-runs with the same seed differed already in cycle 0 (9-atom test: 2/2 runs different; with
-`-simplemd.thermostat berendsen`, which draws nothing, 2/2 identical; with `-threads 1` identical).
-A positive seed now gives every SimpleMD its own thermostat engine (unseeded MD keeps the old
-streams, trajectory md5 unchanged); trajectory files are read in sorted order (directory order is
-unspecified). Same seed, input and binary: byte-identical curve and dataset at `-threads 1`, 4
-and 8 (9-atom test) and at 4 and 8 on peo8 (12 cycles, 3 runs; labels are thread-independent
-since Oct 2026). Seeded `-md` runs (seed > 0)
-no longer reproduce trajectories of f47e17d2 to a36d9b12, since their thermostat stream changed.
+**Reproducibility (Oct 2026).** `-activelearn.seed` gives each sampling run the seed `seed + 1000 * cycle + run`, which reaches
+SimpleMD. Before the merge of `devel/methods` (Oct 31, 2026) the thermostats drew from process-wide static engines, so the
+concurrent runs of a cycle consumed one stream in scheduling order and two `-threads 4` runs with the same seed differed. Since
+the merge every SimpleMD instance draws from its own engine `m_rng` (seeded from the seed and the start geometry; velocities and
+thermostats alike), and the CSVR distributions are instance members (`m_csvr_*`) instead of function-local statics. Trajectory files
+are read in sorted order. Checked after the merge: `cli_deltaml_05_al_validation` (9-atom test, same seed, `-threads 4`: curve
+and dataset byte-identical) passes; the peo8 byte-identity (12 cycles, 3 runs) was measured before the merge with the earlier
+mechanism and not repeated. Seeded `-md` runs no longer reproduce trajectories of earlier builds.
 
 **Prospective validation (Oct 2026).** Each cycle also labels `al_validation_frames` (10) frames
 drawn at random from its own sampling dynamics, never the selected candidates, and scores the

@@ -37,6 +37,8 @@
 #endif
 
 #include "src/capabilities/md_diagnostics.h"
+
+class GFNFF;   // Claude Generated (Oct 2026): hydrogen-bond log, defined in gfnff.h
 #include "src/capabilities/rmsd.h"
 #include "src/capabilities/rmsdtraj.h"
 
@@ -394,6 +396,12 @@ private:
 
     void InitVelocities(double scaling = 1.0);
 
+    /* Claude Generated (Sep 2026): seeds m_rng from m_seed and the current start geometry, so a
+     * repeat of the same structure with the same seed is bit-identical while different structures
+     * (the walkers of a search) get different velocities on their own. Called once, after the
+     * geometry is in place. */
+    void seedRandomEngine();
+
     double FastEnergy();
     double CleanEnergy();
 
@@ -744,6 +752,16 @@ private:
     bool m_md_diagnostics = false;
     std::unique_ptr<MDDiagnosticsWriter> m_diag_writer;
 
+    // Claude Generated (Oct 2026): hydrogen-bond log (hb_log_frequency > 0 only)
+    int m_hb_log_frequency = 0;
+    double m_hb_log_limit_kj = 0.0;
+    std::vector<int> m_hb_log_a, m_hb_log_b;
+    std::ofstream m_hb_log_file;
+    GFNFF* m_hb_log_gfnff = nullptr;
+    bool m_hb_log_warned_empty = false;
+    void SetupHydrogenBondLog();
+    void LogHydrogenBonds();
+
     // WP-P1 (May 2026): per-phase wall-clock breakdown for diagnostics
     bool m_md_diagnostics_timing = false;
     double m_last_ff_ms = 0.0;     ///< wall-clock of last m_interface->CalculateEnergy()
@@ -752,23 +770,31 @@ private:
 
     int m_mtd_dT = -1;
     int m_seed = -1;
-    /// Claude Generated (Oct 2026): `-md.seed N` (N > 0) also seeds the initial velocities through this
-    /// engine. Without it InitVelocities() keeps its fixed legacy sequence (static default engine), so
-    /// existing runs and golden values do not change; before this the seed never reached the velocities.
-    int m_velocity_seed = 0;
-    std::default_random_engine m_velocity_rng;
-    /// Claude Generated (Oct 2026): with a positive seed the stochastic thermostats (CSVR, Andersen,
-    /// global and regional) draw from this per-instance engine. The legacy engines are process-wide
-    /// statics, so concurrent MD runs (MDThread pools) consumed one shared stream in scheduling order
-    /// and two runs with the same seed diverged. Not stored in restart files.
-    std::mt19937 m_thermostat_rng;
+    /* Claude Generated (Sep 2026): THE random source of this MD instance. Before, every
+     * stochastic site held its own function-local `static` engine: InitVelocities and Andersen
+     * used a default-constructed (i.e. fixed-seed) engine, CSVR a random_device-seeded one, and
+     * none of them ever saw m_seed. Consequences measured: `-seed` was read, logged and ignored,
+     * and two processes with identical input produced BIT-IDENTICAL trajectories (12 runs with
+     * seeds 1..8 agreed to 0.00e+00 in every coordinate), so an MD could not be repeated with a
+     * different realisation. Being function-local statics they were also shared across all
+     * SimpleMD instances of a process, which is where the per-walker variation in ConfSearch
+     * accidentally came from. Seeded in seedRandomEngine() from m_seed AND the start geometry:
+     * same structure + same seed = same trajectory (reproducible), different structures =
+     * different velocities without any extra bookkeeping (the search's diversity comes from the
+     * structures, not from the velocity draw). */
+    std::mt19937 m_rng;
+    /// Claude Generated (Oct 31, 2026): CSVR distributions per instance (were function-local statics shared by
+    /// all instances: normal_distribution caches its second value, so concurrent MD runs consumed a common
+    /// state and same-seed runs diverged). Same member names as on feature/nebmd-path-sampling.
+    std::normal_distribution<double> m_csvr_norm{ 0.0, 1.0 };
+    std::chi_squared_distribution<float> m_csvr_chi{ 1.0f };
+    int m_csvr_last_dof = -1;
     int m_time_step = 0;
     int m_dof = 0;
     int m_mtd_time = 0, m_loop_time = 0;
     // Claude Generated (Jul 2026): RMSD-MTD screen accounting (Kabsch fits done vs skipped over the run).
     long long m_bias_hills_evaluated = 0, m_bias_hills_screened = 0;
 
-    std::vector<std::vector<double>> m_atom_temp;
     std::vector<double> m_zeta; // Thermostatische Variablen
     std::vector<double> m_xi; // Zeitderivate von zeta
     std::vector<double> m_Q; // Trägheiten der Thermostatkette
@@ -822,7 +848,7 @@ private:
         "tier=primary")
     PARAM(spin, Int, 0, "Total spin multiplicity of the system (0=singlet, 1=doublet).", "Basic", {"Spin"},
         "tier=primary")
-    PARAM(seed, Int, -1, "Random seed (-1: time, 0: auto). A positive value also seeds the initial velocities, so runs from one start differ only by the seed; without it the velocities follow a fixed sequence.", "Basic", {})
+    PARAM(seed, Int, -1, "Random seed (-1: time, 0: auto).", "Basic", {})
     PARAM(threads, Int, 1, "Number of parallel threads.", "Basic", {},
         "min=1")
 
@@ -937,6 +963,11 @@ private:
     PARAM(md_diagnostics, Bool, false, "Write per-step diagnostics to <basename>.diag.jsonl (energy decomposition, charges, CN, gradient norms, HB/XB counts). Frequency follows dump_frequency. One JSON object per line.", "Output", {})
     // --- WP-P1 Timing Instrumentation (May 2026) ---
     PARAM(md_diagnostics_timing, Bool, false, "Add a timing_ms block to each <basename>.diag.jsonl record (per-phase wall-clock: CN/EEQ/dcn/D4-weights/FF/integrator/HBXB/I-O). GPU runs add a gpu sub-block with per-kernel-category times. Requires md_diagnostics=true. ~1-2 us per hook.", "Output", {})
+    // Claude Generated (Oct 2026): opt-in hydrogen-bond log by GFN-FF triple energy. Off (0) = nothing runs.
+    PARAM(hb_log_frequency, Int, 0, "Log the hydrogen bonds every N steps to <basename>.hbonds.csv: number of GFN-FF triples (A-H...B) with an energy below hb_log_energy_limit, per direction, and the sum of the triple energies. GFN-FF only; 0 = off (the run is then exactly as without this option). Recording the triple energies costs one write per triple and step.", "Output", {}, "min=0")
+    PARAM(hb_log_energy_limit, Double, 0.0, "hb_log_frequency: a triple counts when its energy is below this (kJ/mol, negative = attractive; 0 counts every attractive triple). Calibrate with `-trajprops -hb_criterion energy` and its histogram.", "Output", {})
+    PARAM(hb_log_selection, Selection, "", "hb_log_frequency: first atom group (selection grammar, a leading ! means all atoms except the rest); empty = all atoms.", "Output", {})
+    PARAM(hb_log_selection_b, Selection, "", "hb_log_frequency: second group; bonds between the two groups are counted per direction, empty counts bonds inside the first group.", "Output", {})
 
     // --- ConfSearch robustness gates (Jun 2026, Claude Generated) ---
     PARAM(topo_check, Bool, false, "Abort the MD run when the molecule fragments (number of connected components grows above the start value). Off by default so reactive paths are still sampled.", "ConfSearch", {})

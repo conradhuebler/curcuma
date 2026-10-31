@@ -3,7 +3,7 @@
 Status: 🤖 AI-generated scripts (`scripts/deltaml_usecase9/`), ⚙️ machine-tested, peo8 only (58 atoms, one start structure), not human-reviewed. Measured
 by a Sonnet agent with the binary of commit f585879f. Follows [DELTA_ML_TRAINING_DATA_2026-10.md](DELTA_ML_TRAINING_DATA_2026-10.md).
 
-What changed in f585879f: reproducible sampling MD for a given `-activelearn.seed` and thread count (per-instance thermostat engines), 10 validation frames per
+What changed in f585879f: reproducible sampling MD for a given `-activelearn.seed` and thread count (per-instance thermostat engines; replaced at the merge of devel/methods on Oct 31, 2026 by the instance engine `m_rng`, see DELTA_ML.md), 10 validation frames per
 cycle scored with the model that drove the cycle (before the refit), and `al_criterion` uncertainty | validation | both with `al_target_energy` 1.0 kcal/mol,
 `al_target_hole` 2.0 kcal/mol, `al_patience` 2. Setup of the runs as in the training-data experiment (300 K, 4 MD runs of 10 ps per cycle, 15 candidates, 15 initial, indicator
 threshold 0.3, 8 threads, at most 20 cycles); every final model then ran 4 MD seeds of 40 ps (NVT 300 K) against the pooled GFN2 seeds 2 to 4 (noise floor of the torsion

@@ -68,6 +68,9 @@ struct GFNFFRocmBackend {
     /// the dispersion gather is enqueued right after the Gaussian weights, so the GPU works on it while the
     /// host solves the EEQ. K3 is a no-op here (no input event, setStreamPriorityHigh() returns false).
     static constexpr bool has_stream_overlap = true;
+    /// Claude Generated (Oct 2026): false on ROCm - the cn_zero_guard flag of k_coulomb_postprocess is compiled but
+    /// never run on ROCm hardware (untested), so charge groups and cn_zero_guard keep the CPU fallback here.
+    static constexpr bool has_charge_groups_cn_guard = false;
     /// Claude Generated (Oct 2026): -gfnff.gpu_staged_list_upload reaches the ROCm workspace; there it selects the
     /// pinned staged upload of the repulsion lists only (FFWorkspaceHip::updateRepulsion). The D4 list is built on
     /// the device, the HB list is packed by -threads host threads regardless of the switch.

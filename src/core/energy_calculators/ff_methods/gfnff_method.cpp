@@ -656,6 +656,12 @@ GFNFF::GFNFF(const json& parameters)
         }
     }
 
+    // Claude Generated (Oct 2026): user EEQ charge groups. The cached topology holds Phase-1 charges that depend
+    // on the constraints, so the cache is bypassed (read and write) while groups are given.
+    loadUserChargeGroups();
+    if (!m_user_groups.empty() || m_auto_charge_groups || m_ionpair_groups)
+        m_cache_topology = false;
+
     // Initialize EEQ solver (Dec 2025 - Phase 3)
     // CRITICAL FIX (Dec 25, 2025): Pass global CurcumaLogger verbosity to EEQSolver
     json eeq_params = m_parameters;
@@ -1409,6 +1415,15 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
     const bool reuse_cn = m_static_cn && m_static_state_captured;
     const bool freeze_eeq = m_static_charges && m_static_state_captured;
 
+    // Claude Generated (Oct 2026): fused D4 pair C6 on the CPU workspace path. The generator
+    // then stops writing C6 and dC6/dCN into the ~N^2 pair arrays every step, and the
+    // workspace evaluates both per pair inside the energy loop (same operations, same bits;
+    // see D4ParameterGenerator::requestFusedPairC6()). Needs the per-step C6 refresh; the
+    // GPU paths (gpu_only) keep their own kernels. -gfnff.disp_c6_fused false: old path.
+    if (m_d4_generator && !gpu_only && m_workspace
+        && m_parameters.value("dispersion_c6_update", true) && m_parameters.value("disp_c6_fused", true))
+        m_d4_generator->requestFusedPairC6();
+
 #ifdef GFNFF_CN_DCN_FUSION
     // WP-D Stage D (May 2026): track whether the fused CN+DCN path was taken so
     // the separate DCN call below is skipped. Declared here so both the CN block
@@ -1764,6 +1779,9 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
                 m_d4_generator->refreshC6WeightsForCN(cn_std, pool, m_threads);
                 weights_fresh = true;
             }
+            // Claude Generated (Oct 2026): fused mode - C6 is evaluated in the energy loop
+            if (m_d4_generator->fusedPairC6View())
+                return;
             // getChargeWeightedC6 is const and reads only per-atom caches: pairs are independent.
             const int np = static_cast<int>(d4_pairs.size());
             auto c6_worker = [&](int t_id, int T) {
@@ -1789,6 +1807,11 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
         if (do_timing && weights_fresh)
             t_d4_gw += std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t_c6).count();
     }
+
+    // Claude Generated (Oct 2026): hand the fused D4 view (or nullptr) to the CPU workspace after
+    // the last generator update of this call; see requestFusedPairC6() above.
+    if (!gpu_only && m_workspace)
+        m_workspace->setD4FusedC6View(m_d4_generator ? m_d4_generator->fusedPairC6View() : nullptr);
 
     // WP-P1 (May 2026): cache phase-timings into a member so MD diagnostics can read them
     // after every Calculation() pass, independent of whether the caller passed out_timing.
@@ -2406,6 +2429,10 @@ bool GFNFF::refreshDispersionC6()
     const int P = static_cast<int>(pairs.size());
     if (P == 0)
         return false;
+    // Claude Generated (Oct 2026): fused mode - the energy loop computes C6 from the same
+    // weights itself (FFWorkspace::calcD4Dispersion), nothing to write here.
+    if (m_d4_generator->fusedPairC6View())
+        return true;
     const D4ParameterGenerator& gen = *m_d4_generator;
     // Claude Generated (Oct 2026): contiguous pair blocks instead of stride T (stride put
     // neighbouring pairs, which share atom rows and cache lines, on different threads).
@@ -3819,6 +3846,554 @@ json GFNFF::exportTopology() const
     return topo_json;
 }
 
+/**
+ * Claude Generated (Oct 2026): read -gfnff.charge_groups. File format {"groups": [{"atoms": [0-based...], "charge": q}]}.
+ * EEQ background: the charges minimise E(q) = sum_i chi_i q_i + 1/2 sum_ij q_i q_j A_ij under linear constraints
+ * C q = Q with one row per group (membership matrix C, group charges Q), solved with Lagrange multipliers in the
+ * augmented matrix. The reference uses one row per covalently connected fragment; here the rows are user groups.
+ */
+void GFNFF::loadUserChargeGroups()
+{
+    m_user_groups.clear();
+    const std::string file = m_parameters.value("charge_groups", std::string());
+    if (file.empty())
+        return;
+    if (file == "auto") {
+        // groups are perceived from the topology (Phase 10, buildAutoChargeGroups); the fallback 2 is the default
+        m_auto_charge_groups = true;
+        m_charge_group_radius = std::max(0, m_parameters.value("charge_group_radius", 2));
+        return;
+    }
+    if (file == "ionpairs") {
+        // Claude Generated (Oct 2026): EXPERIMENTAL, formal fragment charges in neutral ion pairs; the groups are
+        // perceived from the topology (Phase 10, buildIonPairChargeGroups). The fallbacks here are the defaults
+        // (root CLAUDE.md, Known Issue #31): 1.0 = formal charge, aromatic cation rings off.
+        m_ionpair_groups = true;
+        m_ionpair_charge = m_parameters.value("ionpair_charge", 1.0);
+        m_ionpair_aromatic = m_parameters.value("ionpair_aromatic", false);
+        return;
+    }
+    try {
+        std::ifstream in(file);
+        if (!in.good()) {
+            CurcumaLogger::error("GFNFF charge_groups: cannot open " + file);
+            return;
+        }
+        json j;
+        in >> j;
+        // Claude Generated (Oct 2026): optional top-level key "rest" (applyUserChargeGroups); "single" is the old behaviour
+        const std::string rest = j.value("rest", std::string("single"));
+        if (rest == "per_fragment")
+            m_user_groups_rest_per_fragment = true;
+        else if (rest != "single") {
+            CurcumaLogger::error("GFNFF charge_groups ignored: unknown value \"" + rest + "\" of the key rest in " + file + " (single | per_fragment)");
+            return;
+        }
+        for (const auto& g : j.at("groups")) {
+            UserChargeGroup group;
+            group.atoms = g.at("atoms").get<std::vector<int>>();
+            group.charge = g.at("charge").get<double>();
+            if (!group.atoms.empty())
+                m_user_groups.push_back(std::move(group));
+        }
+    } catch (const std::exception& e) {
+        CurcumaLogger::error(std::string("GFNFF charge_groups: cannot parse ") + file + ": " + e.what());
+        m_user_groups.clear();
+    }
+}
+
+/**
+ * @brief "rest": "per_fragment": groups inside fragments, every uncovered fragment its own neutral group
+ *
+ * Claude Generated (Oct 2026). For a solute that is ONE fragment split into several groups (polymer units) in a solvent of
+ * many fragments (water, counter-ions). Rules, each violation rejects the groups with a message (run continues without):
+ *   1. a topological fragment is either completely covered by groups (several groups may split it) or not at all;
+ *   2. every uncovered fragment becomes one more EEQ constraint row with charge 0 (no charge flows between solvent
+ *      molecules); a charged solvent fragment (Cl-) must be written into the file as a group;
+ *   3. the group charges sum to the molecule charge (1e-6);
+ *   4. atom indices 0-based, in range, each atom in at most one group (checked by the caller).
+ * Group order: the file groups, then the uncovered fragments by their smallest atom index; the decisions are properties of
+ * the atom sets, not of the numbering (Known Issue #34).
+ * @param fraglist 1-based file group per atom, 0 = not in a file group (filled by the caller)
+ * @return empty string on success, else the reason
+ */
+std::string GFNFF::completeChargeGroupsPerFragment(const std::vector<int>& topo_fraglist, std::vector<int>& fraglist,
+                                                    std::vector<double>& qfrag, int& n_rest) const
+{
+    const int n = m_atomcount;
+    n_rest = 0;
+    if (static_cast<int>(topo_fraglist.size()) != n)
+        return "the topological fragments are not known";
+    std::map<int, int> covered, size, first_atom; // per topological fragment id
+    for (int i = 0; i < n; ++i) {
+        const int f = topo_fraglist[i];
+        size[f]++;
+        if (fraglist[i] != 0)
+            covered[f]++;
+        if (first_atom.find(f) == first_atom.end())
+            first_atom[f] = i; // atoms ascending: smallest index of the fragment
+    }
+    for (const auto& kv : size) {
+        const int c = covered.count(kv.first) ? covered[kv.first] : 0;
+        if (c != 0 && c != kv.second)
+            return fmt::format("with rest per_fragment every fragment must be covered completely or not at all; the fragment of atom {} ({} atoms) has {} atoms in groups",
+                first_atom[kv.first], kv.second, c);
+    }
+    std::vector<std::pair<int, int>> uncovered; // (smallest atom, fragment id)
+    for (const auto& kv : size)
+        if (!covered.count(kv.first))
+            uncovered.emplace_back(first_atom[kv.first], kv.first);
+    std::sort(uncovered.begin(), uncovered.end());
+    std::map<int, int> rest_group;
+    for (const auto& u : uncovered) {
+        qfrag.push_back(0.0);
+        rest_group[u.second] = static_cast<int>(qfrag.size()); // 1-based group id
+    }
+    for (int i = 0; i < n; ++i)
+        if (fraglist[i] == 0)
+            fraglist[i] = rest_group.at(topo_fraglist[i]);
+    n_rest = static_cast<int>(uncovered.size());
+    double total = 0.0;
+    for (double q : qfrag)
+        total += q;
+    if (std::abs(total - static_cast<double>(m_charge)) > 1e-6)
+        return fmt::format("with rest per_fragment the group charges must sum to the molecule charge: sum {:.6f}, molecule charge {} (uncovered fragments count 0)",
+            total, m_charge);
+    return std::string();
+}
+
+void GFNFF::applyUserChargeGroups(int nfrag_topological, const std::vector<int>* topo_fraglist) const
+{
+    auto reject = [&](const std::string& why) {
+        CurcumaLogger::error("GFNFF charge_groups ignored: " + why);
+        m_user_groups.clear();
+    };
+    // Claude Generated (Oct 2026): several topological fragments are accepted when every group is a union of whole fragments
+    // (checked below), e.g. a neutral ion pair with +q on the cation and -q on the anion fragment.
+    if (nfrag_topological != 1 && (topo_fraglist == nullptr || static_cast<int>(topo_fraglist->size()) != m_atomcount))
+        return reject(fmt::format("the molecule has {} fragments, groups are supported inside one connected molecule only", nfrag_topological));
+    const int n = m_atomcount;
+    std::vector<int> fraglist(n, 0); // 1-based group id, 0 = not yet assigned
+    std::vector<double> qfrag;
+    double assigned = 0.0;
+    for (size_t g = 0; g < m_user_groups.size(); ++g) {
+        for (int a : m_user_groups[g].atoms) {
+            if (a < 0 || a >= n)
+                return reject(fmt::format("atom index {} out of range (0..{})", a, n - 1));
+            if (fraglist[a] != 0)
+                return reject(fmt::format("atom {} is in two groups", a));
+            fraglist[a] = static_cast<int>(g) + 1;
+        }
+        qfrag.push_back(m_user_groups[g].charge);
+        assigned += m_user_groups[g].charge;
+    }
+    if (m_user_groups_rest_per_fragment) {
+        // Claude Generated (Oct 2026): "rest": "per_fragment" (completeChargeGroupsPerFragment); "single" continues below unchanged
+        if (topo_fraglist == nullptr)
+            return reject("rest per_fragment needs the topological fragments");
+        int n_rest = 0;
+        const std::string why = completeChargeGroupsPerFragment(*topo_fraglist, fraglist, qfrag, n_rest);
+        if (!why.empty())
+            return reject(why);
+        m_frag_override.active = true;
+        m_frag_override.fraglist = fraglist;
+        m_frag_override.nfrag = static_cast<int>(qfrag.size());
+        m_frag_override.qfrag = qfrag;
+        m_frag_is_variant = true; // no ensemble blending on top of user groups
+        if (CurcumaLogger::get_verbosity() >= 1)
+            CurcumaLogger::info(fmt::format("GFNFF charge_groups: {} groups + {} uncovered fragments (rest per_fragment, charge 0 each), {} topological fragments, EEQ constraint rows {}",
+                m_user_groups.size(), n_rest, nfrag_topological, qfrag.size()));
+        return;
+    }
+    int nfrag = static_cast<int>(m_user_groups.size());
+    const bool rest = std::any_of(fraglist.begin(), fraglist.end(), [](int f) { return f == 0; });
+    const double rest_charge = static_cast<double>(m_charge) - assigned;
+    if (rest) {
+        ++nfrag;
+        for (int& f : fraglist)
+            if (f == 0)
+                f = nfrag;
+        qfrag.push_back(rest_charge);
+    } else if (std::abs(rest_charge) > 1e-6) {
+        return reject(fmt::format("the groups cover all atoms but their charges sum to {:.4f}, molecule charge is {}", assigned, m_charge));
+    }
+    if (nfrag_topological > 1) {
+        // every topological fragment must lie completely inside one group (the fragment charges are then well defined)
+        std::map<int, int> owner;
+        for (int i = 0; i < n; ++i) {
+            auto it = owner.find((*topo_fraglist)[i]);
+            if (it == owner.end())
+                owner[(*topo_fraglist)[i]] = fraglist[i];
+            else if (it->second != fraglist[i])
+                return reject(fmt::format("group borders cut through a topological fragment (atom {}): with several fragments every group must be a union of whole fragments", i));
+        }
+    }
+    m_frag_override.active = true; // same override the frag_charge_model variants use (setFragmentOverride)
+    m_frag_override.fraglist = fraglist;
+    m_frag_override.nfrag = nfrag;
+    m_frag_override.qfrag = qfrag;
+    m_frag_is_variant = true;       // no ensemble blending on top of user groups
+    if (CurcumaLogger::get_verbosity() >= 1)
+        CurcumaLogger::info(fmt::format("GFNFF charge_groups: {} groups + {} (rest charge {:.3f}), EEQ constraint rows {}",
+            m_user_groups.size(), rest ? "remaining atoms" : "no remainder", rest ? rest_charge : 0.0, nfrag));
+}
+
+/**
+ * @brief Nominal sigma valence of a partner atom for condition (c) of the onium perception
+ *
+ * Claude Generated (Oct 2026). Same table as rev-gfnff's GFNFF::revValence (curcuma_branches/curcuma, Oct 2026):
+ * H, halogens 1; O 2; N, B, Al 3; C, Si 4; He/Ne/Ar 0; every other element 6 (hypervalent main group and
+ * metals: never counted as over-coordinated, so S and P partners do not block).
+ */
+static int oniumPartnerValence(int Z)
+{
+    switch (Z) {
+    case 1: case 9: case 17: case 35: case 53: return 1;
+    case 2: case 10: case 18: return 0;
+    case 5: case 13: case 7: return 3;
+    case 6: case 14: return 4;
+    case 8: return 2;
+    default: return 6;
+    }
+}
+
+/**
+ * @brief Perceive onium centres (NR4+, R3O+) for -gfnff.charge_groups auto
+ *
+ * Claude Generated (Oct 2026). Origin: the onium rule of rev-gfnff stage 3a(ii)
+ * (FFWorkspace::prepareConservingShare, -gfnff.rev_share_onium_rule, Oct 17, 2026; evaluation of 38 onium
+ * structures in GMTKN55/MOR41/S30L-CI in test_cases/revgfnff_share_onium/REPORT_onium.md of that branch).
+ * A centre is an N with exactly 4 or an O with exactly 3 partners in the full neighbour list nb_full (the list the
+ * fragment search uses), accepted when
+ *   (a) the system is closed shell: spin 0 and (sum Z - charge) even;
+ *   (b) no partner is a metal (PeriodicTable::getMetalType > 0);
+ *   (c) no partner has more partners than its nominal valence (oniumPartnerValence; a bridging H blocks);
+ *   (d) the fragment is a cation: qfrag >= +1. The fragment charge is fixed before any EEQ solve; the Phase-1
+ *       topology charges, which the rev rule reads, depend on the groups made here and would be circular.
+ * This mode works only for one fragment (nfrag == 1), so qfrag[0] = m_charge and (d) is m_charge >= 1. The rev rule's
+ * second branch of (d), an odd electron count of the component (cation of a neutral ion pair), cannot occur:
+ * the component is the whole molecule and (a) makes its electron count even.
+ * @return centres, 0-based, ascending (independent of the atom order as a set)
+ */
+std::vector<int> GFNFF::perceiveOniumCentres(const TopologyInfo& topo_info, int nfrag_topological, bool valence_only) const
+{
+    // valence_only (Claude Generated, Oct 2026): conditions (a)-(c) only, no fragment count and no cation test (d);
+    // used by charge_groups ionpairs, where the cation test is the fragment-charge rule itself.
+    std::vector<int> centres;
+    const int n = m_atomcount;
+    if ((!valence_only && nfrag_topological != 1) || static_cast<int>(topo_info.nb_full.size()) != n)
+        return centres;
+    long electrons = -static_cast<long>(m_charge);
+    for (int i = 0; i < n; ++i)
+        electrons += m_atoms[i];
+    if (m_spin != 0 || (electrons % 2) != 0) // (a)
+        return centres;
+    if (!valence_only && m_charge < 1) // (d), qfrag[0] == m_charge for one fragment
+        return centres;
+    for (int i = 0; i < n; ++i) {
+        const int Z = m_atoms[i];
+        const int nb = static_cast<int>(topo_info.nb_full[i].size());
+        if (!((Z == 7 && nb == 4) || (Z == 8 && nb == 3)))
+            continue;
+        bool blocked = false;
+        for (int j : topo_info.nb_full[i]) {
+            const int Zj = m_atoms[j];
+            if (PeriodicTable::getMetalType(Zj) > 0                                              // (b)
+                || static_cast<int>(topo_info.nb_full[j].size()) > oniumPartnerValence(Zj)) {    // (c)
+                blocked = true;
+                break;
+            }
+        }
+        if (!blocked)
+            centres.push_back(i);
+    }
+    return centres;
+}
+
+/**
+ * @brief -gfnff.charge_groups auto: one +1 group per onium centre, then the same override as a group file
+ *
+ * Claude Generated (Oct 2026). Group = every atom within m_charge_group_radius bonds of the centre (breadth-first
+ * search on nb_full). The whole mode is rejected with a warning, and the run continues without groups, when two
+ * groups share an atom or when there are more centres than the molecule charge (a second, invisible charge
+ * carrier). All decisions use sets of atoms, never the atom order (Known Issue #34).
+ */
+void GFNFF::buildAutoChargeGroups(const TopologyInfo& topo_info, int nfrag_topological) const
+{
+    m_auto_groups_done = true;
+    m_user_groups.clear();
+    if (nfrag_topological != 1) {
+        CurcumaLogger::warn(fmt::format("GFNFF charge_groups auto ignored: the molecule has {} fragments, groups are supported inside one connected molecule only", nfrag_topological));
+        return;
+    }
+    const std::vector<int> centres = perceiveOniumCentres(topo_info, nfrag_topological);
+    int n_n = 0, n_o = 0;
+    for (int c : centres)
+        (m_atoms[c] == 7 ? n_n : n_o)++;
+    if (centres.empty()) {
+        if (CurcumaLogger::get_verbosity() >= 1)
+            CurcumaLogger::result(fmt::format("GFNFF charge_groups auto: 0 onium centres (charge {}, spin {}), no groups", m_charge, m_spin));
+        return;
+    }
+    if (static_cast<int>(centres.size()) > m_charge) {
+        CurcumaLogger::warn(fmt::format("GFNFF charge_groups auto ignored: {} onium centres but molecule charge {} (another charge carrier is not visible), no groups",
+            centres.size(), m_charge));
+        return;
+    }
+    const int n = m_atomcount;
+    std::vector<int> owner(n, -1);
+    std::vector<UserChargeGroup> groups;
+    for (size_t g = 0; g < centres.size(); ++g) {
+        std::vector<int> dist(n, -1);
+        std::queue<int> q;
+        dist[centres[g]] = 0;
+        q.push(centres[g]);
+        UserChargeGroup group;
+        group.charge = 1.0;
+        while (!q.empty()) {
+            const int a = q.front();
+            q.pop();
+            group.atoms.push_back(a);
+            if (dist[a] >= m_charge_group_radius)
+                continue;
+            for (int b : topo_info.nb_full[a])
+                if (dist[b] < 0) {
+                    dist[b] = dist[a] + 1;
+                    q.push(b);
+                }
+        }
+        std::sort(group.atoms.begin(), group.atoms.end());
+        for (int a : group.atoms) {
+            if (owner[a] >= 0) {
+                CurcumaLogger::warn(fmt::format("GFNFF charge_groups auto ignored: atom {} lies within {} bonds of the onium centres {} and {}, no groups",
+                    a, m_charge_group_radius, centres[owner[a]], centres[g]));
+                return;
+            }
+            owner[a] = static_cast<int>(g);
+        }
+        groups.push_back(std::move(group));
+    }
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        std::string sizes;
+        for (const auto& group : groups)
+            sizes += fmt::format(" {}", group.atoms.size());
+        CurcumaLogger::result(fmt::format("GFNFF charge_groups auto: {} onium centres (N {}, O {}), radius {}, group sizes{}",
+            centres.size(), n_n, n_o, m_charge_group_radius, sizes));
+    }
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        for (size_t g = 0; g < groups.size(); ++g) {
+            std::string atoms;
+            for (int a : groups[g].atoms)
+                atoms += fmt::format(" {}", a);
+            CurcumaLogger::info(fmt::format("GFNFF charge_groups auto group {}: centre {} atoms{}", g + 1, centres[g], atoms));
+        }
+    }
+    m_user_groups = std::move(groups);
+    applyUserChargeGroups(nfrag_topological);
+}
+
+/**
+ * @brief -gfnff.charge_groups ionpairs: formal charges on the whole fragments of a NEUTRAL ion pair (EXPERIMENTAL)
+ *
+ * Claude Generated (Oct 2026). GFN-FF constrains every topological fragment to an integer charge; for a neutral system
+ * of several fragments the reference sets every fragment to 0 (qfrag = [0, ...]; frag_charge_model has no net charge to
+ * place), so the cation and the anion of an ion pair are both neutral, while the separated ions of a reaction energy are
+ * computed with their charges. This rule (the "parity rule") sets the formal fragment charges:
+ *   1. only Q = 0, nfrag >= 2 (the topological fragments GFN-FF constrains in its EEQ);
+ *   2. cation fragments: fragments with onium centres (perceiveOniumCentres valence_only: closed-shell system, N with 4 /
+ *      O with 3 partners, no metal or over-coordinated partner); with ionpair_aromatic also the 7-pi C/N rings of
+ *      perceiveAromaticCationRings; +q per centre (q = ionpair_charge, 1.0 = formal); n_plus = number of centres;
+ *   3. anion fragments: the fragments without a centre whose NEUTRAL electron count (sum Z) is odd. A fragment with an
+ *      even count cannot be a closed-shell mono-ion and stays neutral (a host or solvent molecule); exactly n_plus such
+ *      fragments are required, each gets -q; any other count is ambiguous and nothing happens (warning);
+ *   4. every cation fragment must have an even electron count at its formal charge, else nothing happens (warning).
+ * Input: the FINAL topology of the reference q-loop (fragments and nb_full after pass 2). One group per fragment
+ * (neutral fragments get their own group with charge 0, so no charge flows between them), in fragment order, into
+ * m_user_groups; calculateTopologyInfo then rebuilds the topology and applyUserChargeGroups puts them into Phase 10 of
+ * pass 1, as for a group file. The groups are constants of the topology: the analytic gradient needs no extra term.
+ * Decisions use atom sets (centres, fragment membership), not the atom order (Known Issue #34). Perceived once per
+ * instance (like auto): a later geometry or bond change keeps the groups.
+ * Intended for stable ion pairs; for proton-transfer transition states and shared-proton complexes the formal charges
+ * are wrong (GMTKN55 WCPT18/PX13 errors grow by up to 143 kcal/mol, docs/FRAG_CHARGE_MODEL.md).
+ */
+void GFNFF::buildIonPairChargeGroups(const TopologyInfo& topo_info, int nfrag_topological, const std::vector<int>& topo_fraglist) const
+{
+    m_ionpair_done = true;
+    m_user_groups.clear();
+    const int n = m_atomcount;
+    const bool verbose = CurcumaLogger::get_verbosity() >= 1;
+    auto off = [&](const std::string& why, bool warn) {
+        if (warn)
+            CurcumaLogger::warn("GFNFF charge_groups ionpairs: " + why + ", no effect");
+        else if (verbose)
+            CurcumaLogger::result("GFNFF charge_groups ionpairs: " + why + ", no effect");
+    };
+    if (static_cast<int>(topo_fraglist.size()) != n || static_cast<int>(topo_info.nb_full.size()) != n)
+        return off("topology incomplete", true);
+    const int nf = nfrag_topological;
+    if (nf <= 1)
+        return off(fmt::format("{} fragment(s)", nf), false);
+    if (m_charge != 0)
+        return off(fmt::format("charge {} (neutral systems only; a net charge is placed by frag_charge_model)", m_charge), false);
+    const std::vector<int> centres = perceiveOniumCentres(topo_info, nf, true); // closed-shell test (spin 0, even count) inside
+    // ionpair_aromatic: one centre per aromatic cation ring, represented by its first atom (only the fragment matters)
+    std::vector<int> ring_centres;
+    if (m_ionpair_aromatic)
+        for (const auto& ring : perceiveAromaticCationRings(topo_info))
+            ring_centres.push_back(ring.front());
+    std::vector<int> n_centres(nf, 0), n_atoms(nf, 0);
+    std::vector<long> sum_z(nf, 0);
+    for (int i = 0; i < n; ++i) {
+        const int f = topo_fraglist[i] - 1;
+        if (f < 0 || f >= nf)
+            return off("fragment list inconsistent", true);
+        sum_z[f] += m_atoms[i];
+        n_atoms[f]++;
+    }
+    int n_n = 0, n_o = 0;
+    for (int c : centres) {
+        n_centres[topo_fraglist[c] - 1]++;
+        (m_atoms[c] == 7 ? n_n : n_o)++;
+    }
+    for (int c : ring_centres)
+        n_centres[topo_fraglist[c] - 1]++;
+    int n_plus = 0, n_cat = 0, n_an = 0;
+    std::vector<char> anion(nf, 0);
+    for (int f = 0; f < nf; ++f) {
+        n_plus += n_centres[f];
+        n_cat += n_centres[f] > 0;
+        if (n_centres[f] == 0 && (sum_z[f] % 2) != 0) {
+            anion[f] = 1;
+            ++n_an;
+        }
+    }
+    const std::string head = fmt::format("{} fragments, {} cation centres (onium N {}, onium O {}, aromatic rings {}) in {} cation fragments, {} odd-electron fragments without a centre",
+        nf, n_plus, n_n, n_o, ring_centres.size(), n_cat, n_an);
+    if (n_plus == 0)
+        return off(head + fmt::format(" (spin {}), no cation fragment", m_spin), false);
+    for (int f = 0; f < nf; ++f)
+        if (n_centres[f] > 0 && ((sum_z[f] - n_centres[f]) % 2) != 0)
+            return off(head + fmt::format(", cation fragment {} ({} atoms) would have an odd electron count at formal charge {:+d}", f + 1, n_atoms[f], n_centres[f]), true);
+    if (n_an != n_plus)
+        return off(head + fmt::format(" but {} anions needed: ambiguous", n_plus), true);
+    const double q = m_ionpair_charge;
+    std::vector<UserChargeGroup> groups(nf);
+    for (int i = 0; i < n; ++i)
+        groups[topo_fraglist[i] - 1].atoms.push_back(i); // ascending within each fragment
+    std::string desc;
+    for (int f = 0; f < nf; ++f) {
+        groups[f].charge = n_centres[f] > 0 ? q * n_centres[f] : (anion[f] ? -q : 0.0);
+        desc += fmt::format(" {}:{}/{:+.2f}", f + 1, n_atoms[f], groups[f].charge);
+    }
+    if (verbose) {
+        CurcumaLogger::result("GFNFF charge_groups ionpairs: " + head + fmt::format(", roles (fragment:atoms/charge){}; {} cation fragment(s) {:+.4f} per centre, {} anion fragment(s) {:+.4f} each",
+            desc, n_cat, q, n_an, -q));
+        CurcumaLogger::result("GFNFF charge_groups ionpairs: intended for stable ion pairs, NOT for reactions with a shared proton (proton-transfer transition states, H3O+/OH- or NH4+/NH2- type complexes)");
+    }
+    m_user_groups = std::move(groups); // applied by calculateTopologyInfo (rebuilt q-loop, Phase 10 of pass 1)
+}
+
+/**
+ * @brief Aromatic cation rings (pyridinium, imidazolium type) for -gfnff.ionpair_aromatic (EXPERIMENTAL)
+ *
+ * Claude Generated (Oct 2026). Runs in Phase 10, before GFN-FF's own hybridization and ring search, so it reads partner
+ * counts on nb_full. A ring qualifies when
+ *   - it is a chordless 5- or 6-membered cycle of C and N only; every ring C has exactly 3 partners, every ring N 2 or 3;
+ *   - every exocyclic partner of a ring atom is an H with one partner or a C with exactly 4 partners (no exocyclic pi
+ *     bond, no heteroatom or metal substituent; conservative: substituted or fused aromatics are not recognised);
+ *   - no ring atom lies in a second qualifying cycle (no fused systems);
+ *   - the Hueckel electron count is 7: C 1, pyridine-type N (2 partners) 1, pyrrole-type N (3 partners) 2. Seven pi
+ *     electrons of a closed-shell aromatic ring mean one was given up: a 6-pi cation. Pyrrole, imidazole and pyridine
+ *     count 6 and are not touched.
+ * Closed shell is required (spin 0, even electron count of the system). The cycles are found as sorted atom sets with
+ * the smallest index as the start (each cycle once), so the result is a property of the atom set, not of the order.
+ * @return one ascending atom list per qualifying ring, sorted
+ */
+std::vector<std::vector<int>> GFNFF::perceiveAromaticCationRings(const TopologyInfo& topo_info) const
+{
+    std::vector<std::vector<int>> out;
+    const int n = m_atomcount;
+    if (static_cast<int>(topo_info.nb_full.size()) != n)
+        return out;
+    long electrons = -static_cast<long>(m_charge);
+    for (int i = 0; i < n; ++i)
+        electrons += m_atoms[i];
+    if (m_spin != 0 || (electrons % 2) != 0)
+        return out;
+    const auto& nb = topo_info.nb_full;
+    std::vector<char> cand(n, 0);
+    for (int i = 0; i < n; ++i) {
+        const int k = static_cast<int>(nb[i].size());
+        cand[i] = (m_atoms[i] == 6 && k == 3) || (m_atoms[i] == 7 && (k == 2 || k == 3));
+    }
+    // all simple cycles of length 5 or 6 inside the candidate subgraph; start = smallest atom of the cycle
+    std::set<std::vector<int>> cycles;
+    std::vector<int> path;
+    std::vector<char> on_path(n, 0);
+    std::function<void(int, int)> dfs = [&](int start, int cur) {
+        for (int nxt : nb[cur]) {
+            if (!cand[nxt] || nxt < start)
+                continue;
+            if (nxt == start && path.size() >= 5) {
+                std::vector<int> c = path;
+                std::sort(c.begin(), c.end());
+                cycles.insert(c);
+                continue;
+            }
+            if (on_path[nxt] || path.size() >= 6)
+                continue;
+            on_path[nxt] = 1;
+            path.push_back(nxt);
+            dfs(start, nxt);
+            path.pop_back();
+            on_path[nxt] = 0;
+        }
+    };
+    for (int s = 0; s < n; ++s) {
+        if (!cand[s])
+            continue;
+        path.assign(1, s);
+        on_path[s] = 1;
+        dfs(s, s);
+        on_path[s] = 0;
+    }
+    std::vector<int> n_cycles(n, 0);
+    for (const auto& c : cycles)
+        for (int a : c)
+            n_cycles[a]++;
+    for (const auto& c : cycles) {
+        bool ok = true;
+        int pi = 0;
+        for (int a : c) {
+            if (n_cycles[a] != 1) { // fused or bridged
+                ok = false;
+                break;
+            }
+            int in_ring = 0;
+            for (int b : nb[a]) {
+                if (std::binary_search(c.begin(), c.end(), b)) {
+                    ++in_ring;
+                    continue;
+                }
+                const int zb = m_atoms[b];
+                const int kb = static_cast<int>(nb[b].size());
+                if (!((zb == 1 && kb == 1) || (zb == 6 && kb == 4))) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (!ok || in_ring != 2) { // a chord makes the cycle not a ring of its own
+                ok = false;
+                break;
+            }
+            pi += (m_atoms[a] == 7 && nb[a].size() == 3) ? 2 : 1;
+        }
+        if (ok && pi == 7)
+            out.push_back(c);
+    }
+    return out;
+}
+
 bool GFNFF::importTopology(const json& topo_json)
 {
     if (topo_json.empty()) {
@@ -4117,12 +4692,15 @@ bool GFNFF::initializeForceField()
         m_workspace = std::make_unique<FFWorkspace>(num_threads);
         m_workspace->setAtomTypes(m_atoms);
         m_workspace->setFarfieldShortcut(m_parameters.value("farfield_shortcut", true));  // Oct 2026; fallback = PARAM default
+        m_workspace->setCnZeroGuard(m_parameters.value("cn_zero_guard", false));          // Oct 2026; fallback = PARAM default (reference)
 
         // Keep a copy for external consumers (full pair lists only when a GPU wrapper asked
         // for them, bonded terms otherwise), then MOVE the set into the workspace. The former
         // two full copies cost ~3 s / 1.2 GB on a 3000-atom water box (B3, Sep 2026).
         m_cached_parameter_set = makeParameterSetCache(ff_params);
         m_workspace->setInteractionLists(std::move(ff_params));
+        if (m_record_hb_energies && !m_hb_energy_source)   // Oct 2026: a GPU source records on the device
+            m_workspace->setRecordHBondEnergies(true);
 
         if (num_threads > 1 && threadPool()) {
             m_workspace->setPool(threadPool());
@@ -10076,7 +10654,10 @@ std::vector<GFNFFHalogenBond> GFNFF::detectHalogenBondsNative(const Vector& char
         cell_list.build(m_geometry_bohr, xb_cutoff);
     }
 
-    for (const auto& [A, X] : ax_pairs) {
+    for (const auto& ax_pair : ax_pairs) {
+        // No structured binding: Apple clang rejects capturing one in a lambda under -fopenmp.
+        const int A = ax_pair.first;
+        const int X = ax_pair.second;
         auto process_B = [&](int B, double r_AB_sq) {
             if (B == A || B == X) return;
             if (current_basicity[B] < 1e-6) return;
@@ -10494,6 +11075,21 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
     m_frag_carry_nfrag = 0;
     m_frag_carry_list.clear();
     m_frag_carry_qfrag.clear();
+    // Claude Generated (Oct 2026): -gfnff.charge_groups ionpairs. The roles are read from the FINAL fragments of this
+    // (untouched, reference) q-loop - pass 2 can split what pass 1 kept together (GMTKN55 WCPT18/ts7h2o) - and the
+    // groups then enter in Phase 10 of pass 1 of a rebuilt q-loop, exactly like a group file. Once per instance; the
+    // rebuild happens only when the rule fires (one extra topology build at initialisation, no cost per step).
+    if (m_ionpair_groups && !m_ionpair_done && !m_frag_override.active) {
+        buildIonPairChargeGroups(topo2, topo2.nfrag, topo2.fraglist);
+        if (!m_user_groups.empty()) {
+            m_cached_bond_list.reset();
+            if (m_eeq_solver) {
+                m_eeq_solver->invalidateCholeskyCache();
+                m_eeq_solver->invalidateMatrixCache();
+            }
+            return calculateTopologyInfo();
+        }
+    }
     return topo2;
 }
 
@@ -10608,6 +11204,17 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     // 100 kcal/mol on that structure; the same mechanism drove the AHB21/BH76/G21EA/SIE4x4
     // family. See the rev-gfnff TODO for the physics side of this - the reference is not
     // right either, it is simply self-consistent.
+    if ((!m_user_groups.empty() || (m_auto_charge_groups && !m_auto_groups_done)) && !m_frag_override.active) {
+        // Claude Generated (Oct 2026): -gfnff.charge_groups. Groups inside one connected molecule, or (several
+        // fragments) unions of whole fragments; they become the EEQ constraint groups through the same override the
+        // frag_charge_model variants use. auto: the groups are perceived here, once (pass 2 of the q-loop and later
+        // builds keep the result). ionpairs: perceived after the q-loop (calculateTopologyInfo), applied here.
+        const auto frag_probe = detectMolecularFragments(topo_info.nb_full);
+        if (m_auto_charge_groups && m_user_groups.empty())
+            buildAutoChargeGroups(topo_info, frag_probe.first);
+        else
+            applyUserChargeGroups(frag_probe.first, &frag_probe.second);
+    }
     if (m_frag_override.active
         && static_cast<int>(m_frag_override.fraglist.size()) == m_atomcount) {
         // frag_charge_model ensemble variant (Sep 2026): grouping and integer group charges are
@@ -12114,6 +12721,11 @@ std::tuple<std::vector<GFNFFDispersion>, std::vector<ATMTriple>, std::string> GF
             d4_input["d4_cn_cache_threshold"] = 0.0;
 
         ConfigManager d4_config("d4param", d4_input);
+        // Claude Generated (Oct 2026): the workspace may still hold the fused view of the
+        // generator replaced here (reactive topology rebuild); drop it before it dangles. The new
+        // pair list carries fresh C6; prepareCNAndEEQ() sets the view again.
+        if (m_workspace)
+            m_workspace->setD4FusedC6View(nullptr);
         m_d4_generator = std::make_unique<D4ParameterGenerator>(d4_config);
 
         const TopologyInfo& topo_info = getCachedTopology();

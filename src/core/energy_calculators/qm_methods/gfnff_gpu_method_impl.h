@@ -20,6 +20,7 @@
  *       static constexpr bool has_localinv_device_build = true; // device-built localinv (ROCm too, Oct 2026)
  *       static constexpr bool has_cn_pair_skin      = true;   // K1 CN pair-list skin (ROCm too, Oct 2026)
  *       static constexpr bool has_stream_overlap    = true;   // false on ROCm (K2/K3, Oct 2026)
+ *       static constexpr bool has_charge_groups_cn_guard = true; // false on ROCm: CPU fallback (Oct 2026)
  *       static constexpr int  default_eeq_cpu_fragment_threshold = 0;   // 16 on ROCm
  *       static void downloadDoubles(double* host, const double* device, int n);
  *   };
@@ -546,6 +547,11 @@ GFNFFGpuMethodImpl<Backend>::GFNFFGpuMethodImpl(const std::string& method_name,
 template <class Backend>
 GFNFFGpuMethodImpl<Backend>::~GFNFFGpuMethodImpl()
 {
+    // Claude Generated (Oct 2026): the HB energy source captures this object; unregister it first, so a
+    // GFNFF that outlives the wrapper (CURCUMA_GFNFF_GPU_LEAK) never calls into a destroyed one.
+    if (m_gfnff)
+        m_gfnff->setHBondEnergySource({}, {});
+
     // Destroy GPU workspace first (holds CUDA resources) - on the device that owns them.
     bindDevice();
     m_gpu_workspace.reset();
@@ -651,6 +657,17 @@ bool GFNFFGpuMethodImpl<Backend>::setMolecule(const Mol& mol)
     // asks EnergyCalculator for the CPU method (requestsCpuFallback()); -gfnff.frag_charge_model reference
     // keeps the GPU and makes the CPU use the same rule.
     m_cpu_fallback_requested = (m_eeq_nfrag > 1 && mol.m_charge != 0 && m_gfnff->fragEnsembleRequested());
+    // Claude Generated (Oct 2026): user EEQ charge groups (-gfnff.charge_groups file|auto|ionpairs) need no CPU
+    // fallback on CUDA: the topology build (calculateTopologyInfo, Phase 10) writes them into TopologyInfo::fraglist/nfrag/
+    // qfrag, prepareEEQParametersForGPU hands exactly these to the device EEQ (fraglist -> uploadFragmentTopology,
+    // qfrag -> rhs_constraints, one Lagrange row per group), and -gfnff.cn_zero_guard runs in k_coulomb_postprocess.
+    // A charged system with groups still takes the ensemble fallback above unless frag_charge_model is reference.
+    // ROCm (has_charge_groups_cn_guard = false): the same code is compiled but untested on hardware, the CPU
+    // fallback stays there.
+    if constexpr (!Backend::has_charge_groups_cn_guard) {
+        if (m_gfnff->hasUserChargeGroups() || m_gfnff->cnZeroGuardRequested())
+            m_cpu_fallback_requested = true;
+    }
     // Claude Generated (Oct 2026): the ALPB solvation term exists only in GFNFF::Calculation(), which this
     // wrapper never calls; before this check -gfnff.solvent water on -gpu rocm returned the gas-phase
     // energy without a message (caffeine, 1 run: -4.67273706 against -4.68976245 Eh on the CPU).
@@ -731,6 +748,9 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
         // === 1. Create GPU workspace from full parameter set ===
         // All energy terms (including HB, XB, ATM, BATM, sTors) run on GPU.
         m_gpu_workspace = std::make_unique<GpuWorkspace>(*pending, natoms, atom_types);
+        // Claude Generated (Oct 2026): -gfnff.cn_zero_guard on the device (k_coulomb_postprocess), same exact
+        // CN == 0.0 test as the CPU FFWorkspace; before this the wrapper fell back to the CPU method.
+        m_gpu_workspace->setCnZeroGuard(m_gfnff->cnZeroGuardRequested());
 
         // Claude Generated (Sep 2026, F-16): keep only what the GPU path reads later (bonds and
         // the bond-HB cross-reference, see calculateEnergy); the rest (D4 pairs, repulsion
@@ -767,6 +787,25 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
         // G3a (Apr 2026): Optional fixed GPU kernel block size (0 = adaptive default)
         if (gfnff_cfg.contains("gpu_block_size"))
             m_gpu_workspace->setBlockSize(gfnff_cfg.value("gpu_block_size", 0));
+
+        // Claude Generated (Oct 2026): per-triple hydrogen-bond energies. The device evaluates the term, so
+        // GFNFF::setRecordHBondEnergies()/hydrogenBondEnergies() go to this workspace; a caller reaches them
+        // through gfnffInstance() as on the CPU. The device copy is downloaded only when asked for.
+        m_gfnff->setHBondEnergySource(
+            [this](bool on) {
+                if (m_gpu_workspace) {
+                    bindDevice();
+                    m_gpu_workspace->setRecordHBondEnergies(on);
+                }
+            },
+            [this]() {
+                std::vector<GFNFFHBondEnergy> out;
+                if (m_gpu_workspace) {
+                    bindDevice();
+                    m_gpu_workspace->downloadHBondEnergies(out);
+                }
+                return out;
+            });
 
         // Task #10 (Jun 2026): CN-derivative pair-list regen + cutoff knobs.
         // Prefer the nested gfnff-scoped value, fall back to top-level m_parameters.

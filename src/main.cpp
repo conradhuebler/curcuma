@@ -52,6 +52,8 @@
 #include "src/capabilities/trajectory_statistics.h"
 #include "src/capabilities/trajectoryanalysis.h"
 #include "src/capabilities/polymerbuild.h"
+#include "src/capabilities/ionize.h"
+#include "src/capabilities/trajprops.h"
 #include "src/tools/trajectory_writer.h"
 
 #include "src/tools/general.h"
@@ -1885,6 +1887,12 @@ int executeSinglePoint(const json& controller, int argc, char** argv) {
     };
     read_dump_path(controller);                                    // top-level (dotted -opt.dump_gradient)
     if (controller.contains("opt")) read_dump_path(controller["opt"]); // sp routes flat flags into "opt"
+    // Claude Generated (Oct 2026): -dump_atomic_charges <path> writes the atomic partial charges of the method
+    // (EEQ for gfnff, Mulliken for gfn1/gfn2; one value per atom in e) for comparing charge models.
+    std::string dump_atomic_charges_path;
+    for (const json* j : { &controller, controller.contains("opt") ? &controller["opt"] : nullptr })
+        if (j && j->is_object() && j->contains("dump_atomic_charges") && (*j)["dump_atomic_charges"].is_string())
+            dump_atomic_charges_path = (*j)["dump_atomic_charges"].get<std::string>();
     const bool want_gradient = read_bool(controller, "gradient")
         || (controller.contains("opt") && read_bool(controller["opt"], "gradient"))
         || !dump_gradient_path.empty();
@@ -1958,6 +1966,21 @@ int executeSinglePoint(const json& controller, int argc, char** argv) {
         }
     }
 
+    if (!dump_atomic_charges_path.empty()) {
+        const Vector charges = energy_calc.Charges();
+        std::ofstream cf(dump_atomic_charges_path);
+        if (cf && charges.size() == molecule.AtomCount()) {
+            cf << "# atomic partial charges [e], method " << method << ", one atom per row, total "
+               << fmt::format("{:.6f}", charges.sum()) << "\n";
+            for (int i = 0; i < charges.size(); ++i)
+                cf << fmt::format("{:.10f}\n", charges(i));
+        } else {
+            CurcumaLogger::error(fmt::format("Could not write -dump_atomic_charges {} ({} charges for {} atoms)",
+                dump_atomic_charges_path, static_cast<int>(charges.size()), molecule.AtomCount()));
+            return 1;
+        }
+    }
+
     return 0;
 }
 
@@ -2003,6 +2026,8 @@ int executeOptimization(const json& controller, int argc, char** argv) {
         fmt::print("  -lbfgs_line_search <n>   Line search: 1=Armijo, 2=Wolfe, 3=StrongWolfe, 4=Backtrack (default: 3)\n");
         fmt::print("  -lbfgs_max_line_search <n>  Max line search iterations (default: 20)\n");
         fmt::print("  -lbfgs_min_step <f>      Minimum step size (default: 1e-4)\n");
+        fmt::print("  -lbfgs_max_atom_step <f> Largest displacement of one atom per step in Angstrom, 0 = off (default: auto, 0.2 from 2000 atoms on)\n");
+        fmt::print("  -lbfgs_atom_step_auto_natoms <n>  Atom count from which the automatic cap applies (default: 2000)\n");
         fmt::print("  -lbfgs_ftol <f>          Armijo sufficient-decrease parameter (default: 1e-4)\n");
         fmt::print("  -lbfgs_wolfe <f>         Wolfe curvature parameter (default: 0.9)\n\n");
         fmt::print("Native optimizer tuning (lbfgs/diis/rfo):\n");
@@ -2398,7 +2423,39 @@ int executePolymerBuild(const json& controller, int argc, char** argv)
     initializeBMT(&builder, "polymer", "polymerbuild", controller);
     builder.start();
     builder.processBakFiles();
+    if (!builder.error().empty()) {
+        std::cerr << "polymerbuild failed: " << builder.error() << std::endl;
+        return 1;
+    }
     return 0;
+}
+
+// Counter-ion placement: -ionize system.xyz -charge N  (Claude Generated 2026)
+int executeIonize(const json& controller, int argc, char** argv)
+{
+    if (argc < 3) {
+        std::cerr << "Please use curcuma for counter-ions as follows:\ncurcuma -ionize solvated.xyz -charge 15 [-anion Cl] [-cation Na] [-solvent H2O]" << std::endl;
+        return 1;
+    }
+    curcuma::Ionize ionizer(controller, false);
+    initializeBMT(&ionizer, argv[2], "ionize", controller);
+    ionizer.start();
+    ionizer.processBakFiles();
+    return ionizer.error().empty() ? 0 : 1;
+}
+
+// Streaming trajectory properties: -trajprops traj.xyz -selection "F1" -last_fraction 0.3333  (Claude Generated 2026)
+int executeTrajProps(const json& controller, int argc, char** argv)
+{
+    if (argc < 3) {
+        std::cerr << "Please use curcuma for trajectory properties as follows:\ncurcuma -trajprops traj.xyz [-quantity gyration] [-selection F1] [-last_fraction 0.3333]" << std::endl;
+        return 1;
+    }
+    curcuma::TrajectoryProperties props(controller, false);
+    initializeBMT(&props, argv[2], "trajprops", controller);
+    props.start();
+    props.processBakFiles();
+    return props.error().empty() ? 0 : 1;
 }
 
 // ============================================================================
@@ -2652,6 +2709,10 @@ const std::map<std::string, CapabilityInfo> CAPABILITY_REGISTRY = {
               {"XYZ", "MOL2", "SDF"}, executeDocking}},
     {"polymerbuild", {"Iterative polymer assembly from fragments", "assembly",
                   {"XYZ"}, executePolymerBuild}},
+    {"trajprops", {"Streaming properties of a long trajectory (gyration radius)", "analysis",
+                  {"XYZ", "VTF"}, executeTrajProps}},
+    {"ionize", {"Neutralise a solvated system by replacing solvent with counter-ions", "assembly",
+                  {"XYZ"}, executeIonize}},
     {"md", {"Molecular dynamics simulation", "dynamics",
             {"XYZ", "VTF", "MOL2", "SDF"}, executeSimpleMD}},
     {"casino", {"Casino Monte Carlo simulation with enhanced sampling", "dynamics",

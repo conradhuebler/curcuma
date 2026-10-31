@@ -38,6 +38,7 @@
 #include "src/core/periodic_table.h"
 #include <functional>
 #include <algorithm>
+#include <functional>
 #include <tuple>
 #include <utility>
 #include <limits>
@@ -340,6 +341,10 @@ PARAM(frag_charge_max_placements, Int, 6, "ensemble: most integer charge placeme
 PARAM(frag_charge_variant_memory_mb, Int, 8192, "ensemble: memory budget (MB) for the charge variants held at once; above it fewer placements and corners are kept, with a warning. See FRAG_CHARGE_MODEL.md.", "Fragment charge", {})
 PARAM(frag_charge_enumerate, Bool, false, "ensemble, validation only: enumerate all charge distributions instead of the bounded selection, which gives the same placements. Refused above 2 million distributions.", "Fragment charge", {})
 PARAM(frag_charge_autodetect, Bool, false, "Charged system of exactly two fragments: try both charge placements and keep the lower EEQ energy. Off because the reference never does this and it can pick the wrong fragment.", "Fragment charge", {})
+PARAM(charge_groups, String, "", "Charge groups inside ONE connected molecule (with several fragments: every group a union of whole fragments): path of a JSON file {\"groups\": [{\"atoms\": [0, 1, ...], \"charge\": 1.0}, ...]} (0-based atom indices), the word auto, or the word ionpairs. Each group gets its own EEQ constraint sum(q_i) = charge, the atoms outside all groups form one more group with the remaining charge (total charge minus the group charges); with the file key \"rest\": \"per_fragment\" every fragment must instead be covered by groups completely or not at all, each uncovered fragment (e.g. a water molecule) becomes its own group with charge 0 and the group charges must sum to the total charge (solvated polymers, docs/POLYMERBUILD_CHARGE.md). Lets a polyelectrolyte keep its charge on the ammonium groups instead of spreading it over the chain. auto perceives onium centres (N with 4, O with 3 neighbours; closed shell, no metal or over-coordinated partner, molecule charge >= +1) and makes one +1 group of all atoms within charge_group_radius bonds of each; overlapping groups or more centres than the molecule charge reject the whole mode with a warning. ionpairs (EXPERIMENTAL, Oct 2026) acts on NEUTRAL closed-shell systems of several fragments: a fragment with onium centres (N with 4 / O with 3 partners, no metal or over-coordinated partner) is a cation with +ionpair_charge per centre; the fragments without a centre whose neutral electron count is odd are the anions (-ionpair_charge each; a fragment with an even count, e.g. a neutral host or solvent molecule, cannot be a closed-shell mono-ion and stays neutral); their number must equal the number of centres, otherwise the system is ambiguous and nothing happens (warning). The groups are whole fragments with fixed formal charges (one EEQ constraint per fragment, neutral fragments 0), perceived once per instance: intended for stable ion pairs, NOT for proton-transfer transition states or complexes with a shared proton (the formal charges are then wrong), and not for MD with bond breaking. Charged systems, one fragment, no centre: no effect. Off by default (reference behaviour). Topology cache is bypassed. GPU: runs on the CUDA device EEQ (no fallback since Oct 31, 2026); ROCm falls back to the CPU method (untested there).", "Charge", {})
+PARAM(charge_group_radius, Int, 2, "charge_groups auto: a group holds every atom within this many bonds of its onium centre (2 = the centre, its partners and their partners, e.g. the hydrogens of an ammonium head group).", "Charge", {})
+PARAM(ionpair_charge, Double, 1.0, "EXPERIMENTAL (Oct 2026), charge_groups ionpairs: charge per onium centre on a cation fragment (1.0 = formal charge); every anion fragment gets the negative of it. The parity check always uses the formal integer charges.", "Charge", {})
+PARAM(ionpair_aromatic, Bool, false, "EXPERIMENTAL (Oct 2026), only with charge_groups ionpairs: also count aromatic cation rings as cationic centres - an isolated 5- or 6-membered ring of C and N only (ring C with exactly 3 partners, ring N with 2 or 3), every exocyclic partner H or a C with 4 partners, no fused ring, Hueckel count (C 1, N with 2 partners 1, N with 3 partners 2) equal to 7, e.g. imidazolium and pyridinium; pyrrole, imidazole and pyridine count 6 and stay neutral. Closed-shell systems only. Off by default.", "Charge", {})
 // ---- Topology and coordination number ----
 // ORIGIN NOTE (do not duplicate on merge): nh_linear_fix and its guard in
 // determineHybridizationFortran() were first added on the `confsearch` branch (51830efa,
@@ -372,6 +377,7 @@ PARAM(hb_parallel_min_pairs, Int, 500, "Run the H-bond detection on the thread p
 // ---- Dispersion ----
 PARAM(dispersion_cutoff_bohr, Double, 0.0, "Cutoff (Bohr) of the D4 dispersion pair list; 0 keeps all pairs, as the reference. A cutoff also widens the CN-derivative range to match.", "Dispersion", {})
 PARAM(dispersion_c6_update, Bool, true, "Recompute the D4 pair C6 from the current CN at each new geometry, so MD and optimisation agree with single points. false keeps C6 of the setup geometry.", "Dispersion", {})
+PARAM(disp_c6_fused, Bool, true, "CPU: evaluate each D4 pair's C6 and dC6/dCN inside the dispersion energy loop instead of storing them per pair every step (same values bit for bit, less memory traffic). false for the stored per-pair path.", "Dispersion", {})
 PARAM(disp_half_contraction, Bool, true, "Faster per-atom contraction for the D4 C6 and dC6/dCN; it changes the summation order (energies agree to about 1e-10 Eh). false for the plain contraction.", "Dispersion", {})
 // ---- Electrostatics ----
 PARAM(coulomb_r_cut, Double, 0.0, "Hard per-pair cutoff (Bohr) of the GFN-FF electrostatics; 0 = none, as the reference. A cutoff makes the energy discontinuous and truncates the 1/r sum.", "Coulomb", {})
@@ -387,6 +393,8 @@ PARAM(solvent_model, String, "alpb", "Solvation model. GFN-FF has ALPB only, as 
 // ---- Deliberate deviations from the reference (docs/KNOWN_ISSUES_ARCHIVE.md switch table) ----
 PARAM(nh_linear_fix, Bool, true, "Keep a 2-coordinate N-H nitrogen from becoming sp by the angle-only rule (> 160 deg), which lets stretched N-H geometries optimise into a too deep artefact. false = reference rule.", "Reference", {})
 PARAM(storsion_reference_loop_bug, Bool, false, "Reproduce the reference loop bug that evaluates only the last C#C triple-bond torsion; curcuma sums all of them. true only to match reference totals.", "Reference", {})
+// Claude Generated (Oct 2026): opt-in correction of the Coulomb TERM 1b chain rule at CN = 0 (FFWorkspace::postProcess).
+PARAM(cn_zero_guard, Bool, false, "Gradient-only correction of the Coulomb chain-rule term dE/dCN_i = -q_i*cnf_i/(2*sqrt(CN_i) + 1e-16) (TERM 1b, gfnff_engrad.F90) for an atom whose coordination number is exactly 0. For an isolated atom (e.g. Cl- without any neighbour within reach of the erf counting function) 0.5*(1+erf(x)) rounds to exactly 0 in FP64 while its analytic derivative exp(-x^2) does not, so the reference formula multiplies a tiny dCN/dR by q*cnf*1e16 and produces a spurious force (measured 3.9e-3 Eh/Angstrom on the Cl of (AB)3 + Cl-). The energy uses sqrt(max(CN,0)) and is constant there, so the correct derivative is 0. true sets that term to 0 when CN_i <= 0 (exact test, no threshold: for CN > 0 the formula is the derivative of the energy actually evaluated). Never changes the energy; changes the gradient only for structures with an atom at CN = 0. Default false = reference behaviour. GPU: CUDA applies the same test in k_coulomb_postprocess (no fallback since Oct 31, 2026); ROCm falls back to the CPU method (kernel compiled, untested).", "Advanced", {})
 PARAM(hh_repulsion_bpair, Bool, true, "Classify H...H 1,3/1,4 repulsion from the bond-pair table, as the reference. false uses a BFS bond count, which can depend on the atom order.", "Reference", {})
 PARAM(amideh_acidity_order_bug, Bool, false, "Reproduce the reference atom-order bug in the amide-H donor acidity, which makes the H-bond depend on whether N precedes its H. true only to match reference totals.", "Reference", {})
 PARAM(dispersion_atm, Bool, false, "Add a D4 three-body (ATM) term over bonded triples. The reference dispersion is pairwise, so it is off.", "Reference", {})
@@ -786,6 +794,12 @@ public:
      * Must be called before InitialiseMolecule(). Claude Generated (Sep 2026).
      */
     void setFragmentOverride(const std::vector<int>& fraglist, int nfrag, const std::vector<double>& qfrag);
+
+    /// Claude Generated (Oct 2026): -gfnff.charge_groups was given (EEQ constraint groups inside one fragment)
+    bool hasUserChargeGroups() const { return !m_user_groups.empty(); }
+
+    /// Claude Generated (Oct 2026): -gfnff.cn_zero_guard true (TERM 1b set to 0 at CN = 0, CPU only)
+    bool cnZeroGuardRequested() const { return m_parameters.value("cn_zero_guard", false); }
 
     /// frag_charge_model ensemble: number of charge variants evaluated in the last call (0 = inactive)
     int fragEnsembleVariantCount() const { return m_frag_last_nvariants; }
@@ -1367,6 +1381,60 @@ public:
     };
     const Vector& getLastCNF() const { return m_last_cnf; }
     FFWorkspace* getWorkspace() const { return m_workspace.get(); }
+
+    /**
+     * @brief Record the energy of every hydrogen-bond triple at each evaluation.
+     *
+     * Claude Generated (Oct 2026). Takes effect from the next calculation. The values are the
+     * terms that make up the hydrogen-bond energy (Eh), so a count of triples below an energy
+     * limit is possible without recomputing anything. Recorded by whatever evaluates the term:
+     * the CPU workspace, or the device workspace of a GPU method that registered itself with
+     * setHBondEnergySource().
+     */
+    void setRecordHBondEnergies(bool on)
+    {
+        m_record_hb_energies = on;
+        if (m_hb_energy_set_record) {
+            m_hb_energy_set_record(on);
+            return;
+        }
+        if (m_workspace)
+            m_workspace->setRecordHBondEnergies(on);
+    }
+    bool recordsHBondEnergies() const { return m_record_hb_energies; }
+
+    /// Per-triple energies of the last evaluation, in the order of getLastHBonds(); empty when not
+    /// recording, not yet evaluated, or the list was replaced since. On a GPU method the values are
+    /// downloaded from the device by this call.
+    std::vector<GFNFFHBondEnergy> hydrogenBondEnergies() const
+    {
+        if (m_hb_energy_source)
+            return m_hb_energy_source();
+        if (!m_workspace || m_skip_host_hb_workspace)
+            return {};
+        return m_workspace->hydrogenBondEnergies();
+    }
+
+    /**
+     * @brief Route setRecordHBondEnergies()/hydrogenBondEnergies() to a GPU workspace.
+     *
+     * Claude Generated (Oct 2026). A GPU method evaluates the hydrogen bonds on the device and never
+     * runs this object's CPU workspace, so it registers two calls here: @p set_record switches the
+     * device recording, @p energies downloads the values of the last device evaluation. The current
+     * recording flag is passed on at once, and the CPU workspace stops recording while a source is set.
+     * Empty functions hand the term back to the CPU workspace (the GPU wrapper does this before it
+     * releases its device workspace).
+     */
+    void setHBondEnergySource(std::function<void(bool)> set_record,
+                              std::function<std::vector<GFNFFHBondEnergy>()> energies)
+    {
+        m_hb_energy_set_record = std::move(set_record);
+        m_hb_energy_source = std::move(energies);
+        if (m_hb_energy_set_record)
+            m_hb_energy_set_record(m_record_hb_energies);
+        if (m_workspace)
+            m_workspace->setRecordHBondEnergies(m_record_hb_energies && !m_hb_energy_source);
+    }
     /// GPU wrappers: keep the FULL parameter set for consumeCachedParameterSet() (default: bonded terms only).
     void setKeepFullParameterSet(bool keep) { m_keep_full_parameter_set = keep; }
     /// Shared CxxThreadPool (null before initializeForceField()).
@@ -2748,6 +2816,9 @@ private:
     json m_parameters; ///< GFN-FF parameters
     int m_threads = 1; ///< Claude Generated (WP1, May 2026): cached thread count, kept in sync with m_parameters["threads"]
     std::unique_ptr<CxxThreadPool> m_pool; ///< Shared worker pool (topology setup, EEQ, workspace kernels)
+    bool m_record_hb_energies = false;   ///< setRecordHBondEnergies(); applied when the workspace is created
+    std::function<void(bool)> m_hb_energy_set_record;                   ///< GPU source (setHBondEnergySource), empty = CPU
+    std::function<std::vector<GFNFFHBondEnergy>()> m_hb_energy_source;  ///< GPU source: downloads the device values
     std::unique_ptr<FFWorkspace> m_workspace; ///< Claude Generated (Mar 2026): Unified workspace (replaces ForceField path)
 
     GeoGradMatrix m_geometry_bohr; ///< Geometry in Bohr (GFN-FF parameters are in Bohr) — WP-G: RowMajor
@@ -3029,8 +3100,53 @@ private:
         std::vector<int> fraglist;   // 1-based group id per atom
         std::vector<double> qfrag;   // integer charge per group
     };
-    FragOverride m_frag_override;
-    bool m_frag_is_variant = false;      ///< this instance is a variant (never nests)
+    mutable FragOverride m_frag_override;      // mutable: set from the const topology build for user charge groups
+
+    /// Claude Generated (Oct 2026): user-defined EEQ charge groups (-gfnff.charge_groups), 0-based atoms + group charge
+    struct UserChargeGroup {
+        std::vector<int> atoms;
+        double charge = 0.0;
+    };
+    mutable std::vector<UserChargeGroup> m_user_groups;
+    /// Claude Generated (Oct 2026): file key "rest": "per_fragment" (default "single"): every topological fragment is either
+    /// fully covered by groups or fully uncovered; each uncovered fragment becomes its own group with charge 0 (solvated systems)
+    bool m_user_groups_rest_per_fragment = false;
+    void loadUserChargeGroups();      ///< parse the JSON file named by charge_groups (constructor)
+    void applyUserChargeGroups(int nfrag_topological, const std::vector<int>* topo_fraglist = nullptr) const; ///< turn the groups into m_frag_override (Phase 10 of the topology)
+    /// Claude Generated (Oct 2026): rest per_fragment: check coverage, add one neutral group per uncovered fragment, check the charge sum; "" = ok
+    std::string completeChargeGroupsPerFragment(const std::vector<int>& topo_fraglist, std::vector<int>& fraglist,
+                                                std::vector<double>& qfrag, int& n_rest) const;
+    /**
+     * @brief Onium centres for -gfnff.charge_groups auto (0-based atom indices, ascending)
+     *
+     * Claude Generated (Oct 2026). N with exactly 4 or O with exactly 3 partners in nb_full, accepted when
+     * (a) closed shell, (b) no metal partner, (c) no over-coordinated partner, (d) cationic fragment.
+     * valence_only (charge_groups ionpairs): (a)-(c) only, any number of fragments.
+     * Origin: the onium rule of rev-gfnff (FFWorkspace::prepareConservingShare, Oct 17, 2026).
+     */
+    std::vector<int> perceiveOniumCentres(const TopologyInfo& topo_info, int nfrag_topological, bool valence_only = false) const;
+    void buildAutoChargeGroups(const TopologyInfo& topo_info, int nfrag_topological) const; ///< auto mode: centres -> m_user_groups -> applyUserChargeGroups
+    bool m_auto_charge_groups = false;          ///< charge_groups == "auto"
+    /**
+     * @brief -gfnff.charge_groups ionpairs: formal charges on the whole fragments of a neutral ion pair (EXPERIMENTAL)
+     *
+     * Claude Generated (Oct 2026). Q = 0, closed shell, nfrag >= 2: cation fragments = fragments with onium centres
+     * (perceiveOniumCentres valence_only; with ionpair_aromatic also 7-pi C/N rings), +ionpair_charge per centre; anion
+     * fragments = fragments without a centre whose NEUTRAL electron count is odd, exactly n_plus of them, -ionpair_charge
+     * each; even-count fragments stay neutral; any other count: no effect (warning). Reads the final topology of the
+     * reference q-loop, writes one group per fragment into m_user_groups; calculateTopologyInfo rebuilds the topology
+     * with them (applyUserChargeGroups in Phase 10 of pass 1). Once per instance.
+     */
+    void buildIonPairChargeGroups(const TopologyInfo& topo_info, int nfrag_topological, const std::vector<int>& topo_fraglist) const;
+    bool m_ionpair_groups = false;              ///< charge_groups == "ionpairs"
+    double m_ionpair_charge = 1.0;              ///< ionpair_charge (charge per onium centre)
+    bool m_ionpair_aromatic = false;            ///< ionpair_aromatic (aromatic cation rings as centres)
+    mutable bool m_ionpair_done = false;        ///< ionpairs perception ran (once per instance)
+    /// Claude Generated (Oct 2026): aromatic cation rings for ionpair_aromatic; one sorted atom list per ring
+    std::vector<std::vector<int>> perceiveAromaticCationRings(const TopologyInfo& topo_info) const;
+    int m_charge_group_radius = 2;              ///< charge_group_radius (bonds)
+    mutable bool m_auto_groups_done = false;    ///< auto perception ran (once per instance, not again in q-loop pass 2)
+    mutable bool m_frag_is_variant = false;      ///< this instance is a variant (never nests)
     mutable int m_frag_split_pass = 0;   ///< q-loop pass that split the fragments (1 or 2), set by calculateTopologyInfo
     bool m_frag_ensemble = false;        ///< frag_charge_model == ensemble
     double m_frag_s_max = 1.1;

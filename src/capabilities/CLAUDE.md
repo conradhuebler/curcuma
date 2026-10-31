@@ -28,6 +28,7 @@ Hessian, docking. Energies and gradients always come from `EnergyCalculator`. Do
 - `-opt` PARAMs live in `curcumaopt.h` although `CurcumaOpt` is not built: the registry is generated from every header (`GLOB_RECURSE`), built or not
 - `-optimizer auto` (default) always means LBFGSpp; `selectOptimalOptimizer()` has no caller. `lbfgs` is the native L-BFGS; unknown names fall back to LBFGSpp
 - `OptimizerDriver` owns loop, convergence and output; every abort returns the last accepted structure, which `-opt` writes even if not converged
+- LBFGSpp runs with a copy of its backtracking line search (`lbfgspp_capped_linesearch.h`, `external/LBFGSpp` is untracked): `-lbfgs_max_atom_step` caps one atom's step, 0 = off ([docs](../../docs/LBFGS_ATOM_STEP_CAP.md))
 - `stall_steps`/`stall_rmsd` (20 / 1e-6 A) end a frozen run as "No progress"; a zero step counts as converged only if the driver criteria hold
 - Multi-XYZ `-opt -threads N`: one `CxxThreadPool` worker and `EnergyCalculator` per frame, logger silenced, then an input-order summary (`optimizeBatch`)
 - ConfSearch registers its flags (71 PARAMs) so the auto-router leaves them alone; `-T` is not one (`-startT`/`-endT`); unregistered SimpleMD keys: `confsearch.h:241-244`
