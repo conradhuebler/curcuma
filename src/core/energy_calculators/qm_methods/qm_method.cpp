@@ -13,6 +13,8 @@
 #include "src/core/energy_calculators/method_factory.h"
 #include "src/core/parameter_registry.h"
 #include "src/core/units.h"
+#include "src/core/energy_calculators/dispersion/d4_dft.h"
+#include "qm_citations.h"
 
 #include <fmt/format.h>
 
@@ -56,22 +58,49 @@ json QMMethod::engineConfig(const json& config)
     return full_config;
 }
 
-QMMethod::QMMethod(QMFunctional functional, const json& config)
+QMMethod::QMMethod(QMFunctional functional, const json& config, bool with_d4_name)
     : m_engine(nullptr)
     , m_calculation_done(false)
     , m_last_energy(0.0)
 {
-    m_engine = std::make_unique<QMEngine>(functional, engineConfig(config));
+    const json ec = engineConfig(config);
+    m_engine = std::make_unique<QMEngine>(functional, ec);
     m_method_name = m_engine->getMethodNameStr();
 
     // Convert to lowercase for MethodFactory consistency
     std::transform(m_method_name.begin(), m_method_name.end(),
                    m_method_name.begin(), ::tolower);
 
+    // WP12 stage 4 (Claude Generated, Oct 2026): native DFT-D4 for pbe/b3lyp/tpss/scan. -qm.dispersion auto = the
+    // method name (-d4 or not), d4 = add it, none = drop it; d3bj has no parameters for these functionals here.
+    std::string disp = "auto";
+    if (ec.contains("dispersion") && ec["dispersion"].is_string()) disp = ec["dispersion"].get<std::string>();
+    std::transform(disp.begin(), disp.end(), disp.begin(), ::tolower);
+    bool want_d4 = with_d4_name;
+    if (disp == "d4")
+        want_d4 = true;
+    else if (disp == "none")
+        want_d4 = false;
+    else if (disp != "auto")
+        throw std::invalid_argument("-qm.dispersion '" + disp + "' is not available for " + m_method_name
+                                    + " (auto, none or d4; D3(BJ) only for hf-3c and the -d3bj double hybrids)");
+    if (want_d4) {
+        const curcuma::dispersion::D4DftParams* p = curcuma::dispersion::findD4DftParameters(m_method_name);
+        if (!p || functional == QMFunctional::HF || functional == QMFunctional::LDA)
+            throw std::invalid_argument("-qm.dispersion d4: no D4 parameters for " + m_method_name
+                                        + " (pbe, b3lyp, tpss, scan and the double hybrids b2plyp, b2gp-plyp, "
+                                          "revdsd-pbep86)");
+        m_d4 = std::make_unique<curcuma::dispersion::D4DftDispersion>(*p);
+        m_method_name += "-d4";
+        qmcite::d4Dft();
+    }
+
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info("QMMethod initialized: " + m_engine->getMethodNameStr());
     }
 }
+
+QMMethod::~QMMethod() = default;
 
 bool QMMethod::setMolecule(const Mol& mol)
 {
@@ -85,6 +114,7 @@ bool QMMethod::setMolecule(const Mol& mol)
 bool QMMethod::updateGeometry(const Matrix& geometry)
 {
     m_calculation_done = false;
+    m_molecule.m_geometry = geometry;  // WP12 stage 4: the D4 term reads it
     // QMInterface::UpdateMolecule(Matrix) stores the geometry and calls the
     // engine's UpdateMolecule(), which invalidates the integral/SCF caches.
     return m_engine->UpdateMolecule(geometry);
@@ -120,6 +150,27 @@ double QMMethod::calculateEnergy(bool gradient)
         m_has_error = true;
         m_error_message = m_engine->gradientError();
     }
+    if (m_d4 && !m_has_error) {
+        // WP12 stage 4: native D4 (EEQ charges, ATM), energy Eh, gradient Eh/Bohr incl. dq/dR (Angstrom geometry
+        // of m_molecule, kept current by updateGeometry).
+        const Matrix geom_bohr = m_molecule.m_geometry * CurcumaUnit::Length::ANGSTROM_TO_BOHR;
+        m_d4_gradient_bohr = Matrix();
+        if (!m_d4->compute(m_molecule.m_atoms, geom_bohr, static_cast<double>(m_molecule.m_charge), gradient,
+                           m_e_disp, m_d4_gradient_bohr)) {
+            m_has_error = true;
+            m_error_message = m_method_name + ": " + m_d4->error();
+            return m_last_energy;
+        }
+        if (CurcumaLogger::get_verbosity() >= 1)
+            CurcumaLogger::result(fmt::format("  E(disp D4)     = {:.12f} Eh  (two-body {:.12f}, ATM {:.12f}; EEQ "
+                                              "charges; s6 {:g}, s8 {:g}, a1 {:g}, a2 {:g}, s9 {:g})",
+                                              m_e_disp, m_d4->twoBodyEnergy(), m_d4->threeBodyEnergy(),
+                                              m_d4->params().s6, m_d4->params().s8, m_d4->params().a1,
+                                              m_d4->params().a2, m_d4->params().s9));
+        m_last_energy += m_e_disp;
+        if (CurcumaLogger::get_verbosity() >= 1)
+            CurcumaLogger::energy_abs(m_last_energy, "total " + m_method_name + " energy");
+    }
     return m_last_energy;
 }
 
@@ -133,6 +184,8 @@ Matrix QMMethod::getGradient() const
         return Matrix::Zero(m_molecule.AtomCount(), 3);  // no analytic gradient for this functional
     // The engine works in Eh/Bohr; ComputationalMethod::getGradient() is Eh/Angstrom
     // (dE/dx[A] = dE/dx[Bohr] * Bohr-per-Angstrom), see Known Issue #28.
+    if (m_d4 && m_d4_gradient_bohr.rows() == m_molecule.AtomCount())
+        return (m_engine->gradientBohr() + m_d4_gradient_bohr) * CurcumaUnit::Length::ANGSTROM_TO_BOHR;
     return m_engine->gradientBohr() * CurcumaUnit::Length::ANGSTROM_TO_BOHR;
 }
 
@@ -170,6 +223,10 @@ json QMMethod::getEnergyDecomposition() const
         decomp["nuclear_repulsion"] = m_last_energy - c[4];
     } else {
         // unconverged or failed SCF (WP7: no functional returns E_nn alone any more): no components
+    }
+    if (m_d4) {
+        decomp["dispersion"] = m_e_disp;  // WP12 stage 4; nuclear_repulsion above then holds E_nn + E_disp
+        if (decomp.contains("nuclear_repulsion")) decomp["nuclear_repulsion"] = decomp["nuclear_repulsion"].get<double>() - m_e_disp;
     }
     return decomp;
 }

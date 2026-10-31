@@ -42,6 +42,7 @@
 // CUDA GPU methods are loaded at runtime from libcurcuma_cuda.so via gpu_plugin (so the
 // cuBLAS/cuSOLVER runtime never touches the CPU startup path). No CUDA headers here.
 #include "gpu_plugin.h"
+#include "method_catalog.h"   // Claude Generated (Oct 2026): routing scope per method
 #ifdef USE_TBLITE
 #include "qm_methods/tblite_method.h"
 #endif
@@ -493,6 +494,8 @@ auto always = []() { return true; };
 
 } // namespace
 
+// New method => add a row to this table AND to the method catalog (method_catalog.cpp: names, status, gradient,
+// GPU, parameter groups); see docs/METHODS_OVERVIEW.md. ctest method_catalog_consistency fails otherwise.
 const std::vector<MethodDescriptor>& MethodFactory::methodTable()
 {
     static const std::vector<MethodDescriptor> table = {
@@ -517,18 +520,21 @@ const std::vector<MethodDescriptor>& MethodFactory::methodTable()
         // Claude Generated: native ab-initio QM engine. Each level is its own method
         // name; it is fixed here, never a parameter. Shared settings live in -qm.*
         // (the pre-Sep-2026 -dft.* scope is still merged).
-        { {"hf", "lda", "pbe", "b3lyp", "tpss", "scan"}, "Quantum Methods (native)",
-          "Native ab-initio QM: hf = closed-shell RHF (validated vs ORCA); lda/pbe/b3lyp = closed-shell Kohn-Sham with analytic gradient (b3lyp VWN per -qm.vwn_variant, default vwn5); tpss/scan = closed-shell meta-GGA, energy only, CPU XC (WP11 stage 1)",
+        { {"hf", "lda", "pbe", "b3lyp", "tpss", "scan", "pbe-d4", "b3lyp-d4", "tpss-d4", "scan-d4"}, "Quantum Methods (native)",
+          "Native ab-initio QM: hf = closed-shell RHF (validated vs ORCA); lda/pbe/b3lyp = closed-shell Kohn-Sham with analytic gradient (b3lyp VWN per -qm.vwn_variant, default vwn5); tpss/scan = closed-shell meta-GGA (WP11); -d4 = + native DFT-D4 (EEQ, ATM; energy and gradient, CPU; WP12 stage 4)",
           always, {{"Native", always}},
-          [](const std::string& m, const json& c) -> std::unique_ptr<ComputationalMethod> {
+          [](const std::string& name, const json& c) -> std::unique_ptr<ComputationalMethod> {
+              // WP12 stage 4 (Oct 2026): "<functional>-d4" = the functional plus native DFT-D4
+              const bool d4 = name.size() > 3 && name.compare(name.size() - 3, 3, "-d4") == 0;
+              const std::string m = d4 ? name.substr(0, name.size() - 3) : name;
               const QMFunctional f = (m == "hf")    ? QMFunctional::HF
                                     : (m == "lda")   ? QMFunctional::LDA
                                     : (m == "pbe")   ? QMFunctional::PBE
                                     : (m == "tpss")  ? QMFunctional::TPSS
                                     : (m == "scan")  ? QMFunctional::SCAN
                                                      : QMFunctional::B3LYP;
-              CurcumaLogger::success("Method '" + m + "' resolved to native QM engine");
-              return std::make_unique<QMMethod>(f, c); } },
+              CurcumaLogger::success("Method '" + name + "' resolved to native QM engine");
+              return std::make_unique<QMMethod>(f, c, d4); } },
         // Claude Generated (Sep 2026): native HF-3c = HF/MINIX + D3(BJ) + gCP + SRB.
         // The external ORCA HF-3c is reachable as "orca-hf-3c".
         { {"hf-3c", "hf3c"}, "Quantum Methods (native)",
@@ -554,8 +560,9 @@ const std::vector<MethodDescriptor>& MethodFactory::methodTable()
         // Claude Generated (Oct 2026, WP12 stage 1): double hybrids = hybrid KS SCF + scaled PT2 on the KS orbitals
         // (+ D3(BJ) for the -d3bj names); table and sources in qm_methods/double_hybrid_method.cpp; energy only.
         { {"b2plyp", "b2plyp-d3bj", "b2gp-plyp", "b2gp-plyp-d3bj", "dsd-blyp", "dsd-blyp-d3bj", "dsd-pbep86",
-           "dsd-pbep86-d3bj", "dsd-pbeb95-d3bj", "revdsd-pbep86", "revdsd-pbep86-d4"}, "Quantum Methods (native)",
-          "Native double hybrids (KS hybrid + c_os/c_ss PT2 with RI, -qm.dh_pt2; D3(BJ) for -d3bj names, D4 not available; H-Ne, closed shell, energy only, CPU XC)",
+           "dsd-pbep86-d3bj", "dsd-pbeb95-d3bj", "revdsd-pbep86", "revdsd-pbep86-d4", "b2plyp-d4", "b2gp-plyp-d4"},
+          "Quantum Methods (native)",
+          "Native double hybrids (KS hybrid + c_os/c_ss PT2 with RI, -qm.dh_pt2; D3(BJ) for -d3bj names, native D4 (EEQ, ATM) for -d4 names; H-Ne, closed shell, analytic gradient)",
           always, {{"Native", always}},
           [](const std::string& m, const json& c) -> std::unique_ptr<ComputationalMethod> {
               CurcumaLogger::success("Method '" + m + "' resolved to native double hybrid");
@@ -650,45 +657,20 @@ bool isExternalXtbGfn(const std::string& m)
 {
     return m == "xtb-gfn1" || m == "xtb-gfn2";
 }
-// Native ab-initio rows (QMEngine): all read registry module "qm" and, since Oct 27 2026, the shared "scf" scope.
-bool isNativeQm(const std::string& m)
-{
-    static const std::vector<std::string> names = {
-        "hf", "lda", "pbe", "b3lyp", "tpss", "scan", "hf-3c", "hf3c", "mp2", "scs-mp2", "sos-mp2",
-        "ri-mp2", "scs-ri-mp2", "sos-ri-mp2", "ccsd", "lmp2", "local-ri-mp2",
-        // WP12 stage 1 (Oct 2026): double hybrids
-        "b2plyp", "b2plyp-d3bj", "b2gp-plyp", "b2gp-plyp-d3bj", "dsd-blyp", "dsd-blyp-d3bj", "dsd-pbep86",
-        "dsd-pbep86-d3bj", "dsd-pbeb95-d3bj", "revdsd-pbep86", "revdsd-pbep86-d4" };
-    return std::find(names.begin(), names.end(), m) != names.end();
-}
 }
 
+// Claude Generated (Oct 31, 2026): routing scope and shared-scf membership come from the method catalog
+// (method_catalog.cpp, route_scope and the groups of module "scf"), the one source for help, the warning
+// about unread parameters and the flat-flag routing. The former name lists here (isNativeQm, ngfn1/ngfn2)
+// were removed; the derived values are identical for every MethodFactory name (curcuma -check_method_catalog routes).
 std::string MethodFactory::parameterScopeForMethod(const std::string& method_name)
 {
-    std::string m = method_name;
-    std::transform(m.begin(), m.end(), m.begin(), ::tolower);
-    auto in = [&m](const std::vector<std::string>& v) { return std::find(v.begin(), v.end(), m) != v.end(); };
-    // Oct 2026: pm3/am1/mndo/pm6 resolve to the native NDDO rows, which read only the shared
-    // "scf" scope; before, they were routed to the Ulysses scope that no native code reads.
-    if (isNativeNddo(m)) return "scf";
-    if (m.rfind("tblite-", 0) == 0 || in(m_tblite_methods)) return "tblite";
-    if (in(m_ulysses_methods)) return "ulysses";
-    // Native gfn1/gfn2 (and their ngfn aliases) read the "xtb" scope, like the external XTB methods.
-    if (m == "gfn1" || m == "gfn2" || m == "ngfn1" || m == "ngfn2" || m.rfind("xtb-gfn", 0) == 0) return "xtb";
-    if (m == "eht") return "eht";
-    // Oct 27 2026: native QM (hf, hf-3c, mp2, ccsd, lmp2, ...) reads module "qm", so -scf_threshold / -scf_guess
-    // land in -qm.* (one owner wins) instead of warning about several owners and staying in the command module.
-    if (isNativeQm(m)) return "qm";
-    return "";
+    return MethodCatalog::routeScope(method_name);
 }
 
 bool MethodFactory::readsSharedScfScope(const std::string& method_name)
 {
-    std::string m = method_name;
-    std::transform(m.begin(), m.end(), m.begin(), ::tolower);
-    auto in = [&m](const std::vector<std::string>& v) { return std::find(v.begin(), v.end(), m) != v.end(); };
-    return m == "gfn1" || m == "gfn2" || m == "ngfn1" || m == "ngfn2" || isNativeNddo(m) || isNativeQm(m)
-        || isExternalXtbGfn(m) || m.rfind("tblite-", 0) == 0 || in(m_tblite_methods) || in(m_ulysses_methods);
+    return MethodCatalog::readsSharedScf(method_name);
 }
 
 void MethodFactory::applySharedScfScope(json& config, const std::string& method_name)

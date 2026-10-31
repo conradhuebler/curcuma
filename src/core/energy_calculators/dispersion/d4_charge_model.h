@@ -43,6 +43,23 @@ public:
     D4ChargeModel() = default;
 
     /**
+     * @brief Parameter set and CN of the EEQ system.
+     *
+     * GfnffAngew2020 (default, unchanged): the angewChem2020 element set of gfnff_par.h with the GFN-FF
+     * log-compressed erf CN (cap 4.4), as described above (native GFN2 `-d4_charge_source eeq`).
+     * Eeq2019: the charge model dftd4 uses for DFT-D4 (multicharge 0.6.0 new_eeq2019_model, Caldeweyher et al.
+     * 2019): chi, eta, kcnchi, rad of d4_eeq_tables.h (Z <= 103), A_ii = eta_i + sqrt(2/pi)/rad_i,
+     * A_ij = erf(r_ij/sqrt(rad_i^2 + rad_j^2))/r_ij, x_i = -chi_i + kcnchi_i CN_i/sqrt(CN_i + 1e-14),
+     * CN = erf count with kcn 7.5 over D3 covalent radii x 4/3 (d4CovalentCNTables().rad), pair cutoff 25 Bohr,
+     * then CN' = log(1 + e^8) - log(1 + e^(8 - CN)) (cn_max 8). Claude Generated (Oct 2026, WP12 stage 4).
+     */
+    enum class Model { GfnffAngew2020, Eeq2019 };
+    void setModel(Model m) { m_model = m; }
+    Model model() const { return m_model; }
+    /// Highest atomic number the Eeq2019 parameter set covers (103).
+    static int eeq2019MaxZ();
+
+    /**
      * @brief Solve the single-shot EEQ system and cache state for the gradient.
      *
      * @param atoms        Atomic numbers (1-based), size N
@@ -93,6 +110,11 @@ public:
                               std::vector<double>& rcov_bohr);
 
 private:
+    /// Eeq2019 branch of computeCharges / addChargeResponseGradient (Claude Generated, WP12 stage 4).
+    Vector computeChargesEeq2019(const std::vector<int>& atoms, const Matrix& geom_bohr, double total_charge);
+    void addChargeResponseGradientEeq2019(const Vector& dEdq, Matrix& grad_out) const;
+
+    Model m_model = Model::GfnffAngew2020;
     // Cached state from the last computeCharges() call.
     int m_n = 0;
     std::vector<int> m_atoms;

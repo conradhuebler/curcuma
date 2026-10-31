@@ -311,11 +311,21 @@ owns it (`-opt` and `-sp`, module `opt`, own both), else to the scope of the sel
 reads it (`MethodFactory::readsSharedScfScope`). Knobs of one solver only (level shift, eigensolver, mixed precision, GPU,
 `scf_precond`, `electronic_temperature`) stay in module `xtb`.
 
-Native QM methods (`hf`, `hf-3c`, `lda`/`pbe`/`b3lyp`, `mp2`, RI/SCS/SOS variants, `ccsd`, `lmp2`) have the scope `qm`
-(`parameterScopeForMethod`, Oct 27, 2026): flat `-scf_threshold`, `-scf_mode`, `-scf_guess`, `-scf_diis_start` land in
+Native QM methods (`hf`, `hf-3c`, `lda`/`pbe`/`b3lyp`, `tpss`/`scan`, the `-d4` names, `mp2`, RI/SCS/SOS variants,
+`ccsd`, `lmp2` and the double hybrids `b2plyp`, `b2gp-plyp`, `dsd-*`, `revdsd-pbep86` with `-d3bj`/`-d4`) have the scope
+`qm` (`parameterScopeForMethod`, Oct 27, 2026; dispersion of the KS and double-hybrid methods: `-qm.dispersion`): flat `-scf_threshold`, `-scf_mode`, `-scf_guess`, `-scf_diis_start` land in
 `controller["qm"]`, `-max_iterations` in `scf` (or with the optimiser at `-sp`/`-opt`). `QMMethod::engineConfig` merges
 registry `qm` defaults < top level < `dft` < `scf` < `qm` and maps aliases of the `qm`/`dft` scopes (`-qm.diis_start` ->
 `scf_diis_start`); the top level is not alias-resolved, its `diis_start` belongs to the optimiser.
+
+### Per-method declaration (method catalog, Oct 31, 2026)
+
+Which parameters a method reads, its routing scope (`parameterScopeForMethod`) and whether it reads `scf`
+(`readsSharedScfScope`) come from one table, `src/core/energy_calculators/method_catalog.cpp`. `curcuma -help <method>`
+lists the parameters by topic with flat name and module form; a `-<module>.<name>` that is not registered, or a parameter
+the selected `-method` does not read, gives a warning at run time (no error). `curcuma -check_method_catalog` (ctest
+`method_catalog_consistency`) fails when a factory name or a registered parameter of a method module is not declared.
+Rules and the knob x method table: [METHODS_OVERVIEW.md](METHODS_OVERVIEW.md).
 
 ## JSON Export/Import
 

@@ -10,6 +10,7 @@
 #include "d4param_generator.h"
 #include "d4_charge_scaling.h"  // shared exact dftd4 zeta (AP6b)
 #include "d4_ncoord.h"          // dftd4 EN-weighted covalent CN (GFN2 D4 path)
+#include "d4_eeq_tables.h"      // dftd4 EEQ-variant reference charges clsq/clsh (WP12 stage 4)
 #include "src/core/energy_calculators/ff_methods/gfnff_par.h"
 #include "d4_reference_data_fixed.cpp"  // D4 reference data (365 lines)
 #include "d4_reference_cn_fortran.cpp"  // D4 reference CN data (Fortran dftd3param.f90 - January 2026)
@@ -901,6 +902,30 @@ double D4ParameterGenerator::getAtomicPolarizability(int atom, int frequency_ind
 // the current molecule. Returns false (→ rebuild) when the cache is empty or a molecule with a
 // new element is seen, so restricting the precompute to present elements stays correct even when
 // the same generator instance is reused across molecules with different element sets.
+// Claude Generated (Oct 2026, WP12 stage 4): select the reference-charge variant of the D4 model. Eeq loads
+// dftd4's clsq/clsh (set_refq_eeq, set_refalpha_eeq), Gfn2 restores refq/refh. Only the two charge tables
+// differ between the variants; hcount, ascale, refsys, alphaiw, refcovcn are shared (dftd4 reference.f90).
+void D4ParameterGenerator::setReferenceChargeVariant(ChargeVariant v)
+{
+    if (v == m_charge_variant) return;
+    m_charge_variant = v;
+    if (v == ChargeVariant::Eeq) {
+        using namespace curcuma::dispersion::d4eeq;
+        m_refq.assign(kRefElements, std::vector<double>(kMaxRef, 0.0));
+        m_refh_charges.assign(kRefElements, std::vector<double>(kMaxRef, 0.0));
+        for (int e = 0; e < kRefElements; ++e)
+            for (int r = 0; r < kMaxRef; ++r) {
+                m_refq[e][r] = kD4EeqRefQ[e][r];
+                m_refh_charges[e][r] = kD4EeqRefH[e][r];
+            }
+    } else {
+        m_refq = ::d4_refq;
+        m_refh_charges = ::d4_refh_charges;
+    }
+    m_c6_reference_cached = false;  // the alpha correction of computeC6Reference reads m_refh_charges
+    m_weights_cached = false;
+}
+
 bool D4ParameterGenerator::c6CacheCoversAtoms() const
 {
     if (!m_c6_reference_cached)

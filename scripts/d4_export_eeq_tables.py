@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+"""Export the EEQ-variant data of DFT-D4 into a C++ header (WP12 stage 4, D4 for the native DFT methods).
+
+Writes src/core/energy_calculators/dispersion/d4_eeq_tables.h with
+  * clsq, clsh (7 x 118): the reference charges and the charges of the secondary (hydrogen) systems of the dftd4
+    reference states for the EEQ charge model (dftd4 reference.f90 set_refq_eeq / set_refalpha_eeq). curcuma's
+    native D4 tables d4_refq / d4_refh_charges hold the GFN2 variant (refq / refh) used by native GFN2;
+  * the EEQ(2019) element parameters chi, eta, kcnchi, rad (103 elements) of multicharge (param/eeq2019.f90),
+    the charge model dftd4 uses for D4 with DFT (Caldeweyher et al. 2019).
+
+Inputs (source trees, not shipped with curcuma; untar them anywhere):
+    dftd4 v4.3.1      https://github.com/dftd4/dftd4/archive/refs/tags/v4.3.1.tar.gz       (src/dftd4/reference.inc)
+    multicharge 0.6.0 https://github.com/grimme-lab/multicharge/archive/refs/tags/v0.6.0.tar.gz (src/multicharge/param/eeq2019.f90)
+dftd4 4.3.1 pins multicharge v0.6.0 (subprojects/multicharge.wrap).
+
+    python3 scripts/d4_export_eeq_tables.py --dftd4 <dftd4-4.3.1> --multicharge <multicharge-0.6.0>
+
+The script also compares the GFN2-variant tables of reference.inc (refq, refh, hcount, ascale, refcovcn) with the
+tables curcuma already has (d4_reference_data_fixed.cpp, d4_corrections_data.cpp are not parsed: only refq/refh/
+refcovcn of d4_reference_data_fixed.cpp) and prints the largest difference, so a mismatch of the shared data shows.
+Values are written with repr() of the parsed float (the Fortran literals have 14 decimals or fewer).
+Claude Generated (Oct 2026).
+"""
+import argparse
+import os
+import re
+import sys
+
+MAX_ELEM = 118
+MAX_REF = 7
+
+
+def parse_ref_table(text, name):
+    """data <name> (ir, num) / value / -> {(num, ir): value} (1-based)."""
+    pat = re.compile(r"data\s+" + name + r"\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)\s*/\s*([-+0-9.eEdD]+)_wp\s*/")
+    out = {}
+    for m in pat.finditer(text):
+        out[(int(m.group(2)), int(m.group(1)))] = float(m.group(3).replace("d", "e").replace("D", "e"))
+    return out
+
+
+def parse_f90_array(text, name):
+    m = re.search(r"real\(wp\),\s*parameter\s*::\s*" + name + r"\(max_elem\)\s*=\s*\[(.*?)\]", text, re.S)
+    if not m:
+        sys.exit(f"array {name} not found")
+    vals = re.findall(r"([-+]?[0-9]*\.[0-9]+)_wp", m.group(1))
+    return [float(v) for v in vals]
+
+
+def table_to_rows(tab):
+    rows = []
+    for z in range(1, MAX_ELEM + 1):
+        rows.append([tab.get((z, ir), 0.0) for ir in range(1, MAX_REF + 1)])
+    return rows
+
+
+def parse_curcuma_table(path, name):
+    txt = open(path).read()
+    m = re.search(r"std::vector<std::vector<double>>\s+" + name + r"\s*=\s*\{(.*?)\n\};", txt, re.S)
+    if not m:
+        return None
+    rows = re.findall(r"\{([^{}]*)\}", m.group(1))
+    return [[float(v) for v in r.split(",") if v.strip()] for r in rows]
+
+
+def maxdiff(a, b):
+    d = 0.0
+    for ra, rb in zip(a, b):
+        for x, y in zip(ra, rb):
+            d = max(d, abs(x - y))
+    return d
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--dftd4", required=True)
+    ap.add_argument("--multicharge", required=True)
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    ap.add_argument("--out", default=os.path.join(root, "src/core/energy_calculators/dispersion/d4_eeq_tables.h"))
+    a = ap.parse_args()
+
+    ref = open(os.path.join(a.dftd4, "src/dftd4/reference.inc")).read()
+    clsq = table_to_rows(parse_ref_table(ref, "clsq"))
+    clsh = table_to_rows(parse_ref_table(ref, "clsh"))
+
+    cur = os.path.join(root, "src/core/energy_calculators/dispersion/d4_reference_data_fixed.cpp")
+    for f90, cpp in (("refq", "d4_refq"), ("refh", "d4_refh_charges"), ("refcovcn", "d4_refcovcn")):
+        mine = parse_curcuma_table(cur, cpp)
+        theirs = table_to_rows(parse_ref_table(ref, f90))
+        if mine is None:
+            print(f"  {cpp}: not found in {cur}")
+            continue
+        print(f"  check {f90:8s} (dftd4 4.3.1) vs curcuma {cpp:16s}: max |diff| = {maxdiff(mine, theirs):.3e}")
+
+    eeq = open(os.path.join(a.multicharge, "src/multicharge/param/eeq2019.f90")).read()
+    arrays = {n: parse_f90_array(eeq, n) for n in ("eeq_chi", "eeq_eta", "eeq_kcnchi", "eeq_rad")}
+    for n, v in arrays.items():
+        if len(v) != 103:
+            sys.exit(f"{n}: {len(v)} values, expected 103")
+
+    def fmt_rows(rows):
+        lines = []
+        for z, r in enumerate(rows, start=1):
+            lines.append("    { " + ", ".join(repr(x) for x in r) + " },  // Z=" + str(z))
+        return "\n".join(lines)
+
+    def fmt_vec(v):
+        lines = []
+        for i in range(0, len(v), 5):
+            lines.append("    " + ", ".join(repr(x) for x in v[i:i + 5]) + ",")
+        return "\n".join(lines)
+
+    hdr = f"""/*
+ * DFT-D4 data of the EEQ charge-model variant (generated, do not edit)
+ * Copyright (C) 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
+ *
+ * Generated by scripts/d4_export_eeq_tables.py from dftd4 v4.3.1 src/dftd4/reference.inc (clsq, clsh; LGPL-3.0)
+ * and multicharge v0.6.0 src/multicharge/param/eeq2019.f90 (chi, eta, kcnchi, rad; Apache-2.0).
+ * References: E. Caldeweyher, S. Ehlert, A. Hansen, H. Neugebauer, S. Spicher, C. Bannwarth, S. Grimme,
+ * J. Chem. Phys. 150, 154122 (2019), DOI 10.1063/1.5090222 (D4 model, EEQ parameters);
+ * E. Caldeweyher, C. Bannwarth, S. Grimme, J. Chem. Phys. 147, 034112 (2017), DOI 10.1063/1.4993215.
+ *
+ * kD4EeqRefQ[Z-1][ref] = clsq(ref, Z): reference charge of D4 reference state ref of element Z (EEQ variant).
+ * kD4EeqRefH[Z-1][ref] = clsh(ref, Z): charge of the secondary system subtracted from that reference.
+ * kEeq2019Chi/Eta/Kcn/Rad[Z-1]: EEQ(2019) electronegativity, chemical hardness, CN scaling, charge width (Bohr).
+ * The GFN2 variant (refq/refh) is in d4_reference_data_fixed.cpp (d4_refq, d4_refh_charges).
+ * Claude Generated (Oct 2026, WP12 stage 4).
+ */
+#pragma once
+
+namespace curcuma::dispersion::d4eeq {{
+
+constexpr int kRefElements = {MAX_ELEM};
+constexpr int kMaxRef = {MAX_REF};
+constexpr int kEeqElements = 103;
+
+constexpr double kD4EeqRefQ[{MAX_ELEM}][{MAX_REF}] = {{
+{fmt_rows(clsq)}
+}};
+
+constexpr double kD4EeqRefH[{MAX_ELEM}][{MAX_REF}] = {{
+{fmt_rows(clsh)}
+}};
+
+constexpr double kEeq2019Chi[103] = {{
+{fmt_vec(arrays["eeq_chi"])}
+}};
+
+constexpr double kEeq2019Eta[103] = {{
+{fmt_vec(arrays["eeq_eta"])}
+}};
+
+constexpr double kEeq2019Kcn[103] = {{
+{fmt_vec(arrays["eeq_kcnchi"])}
+}};
+
+constexpr double kEeq2019Rad[103] = {{
+{fmt_vec(arrays["eeq_rad"])}
+}};
+
+}}  // namespace curcuma::dispersion::d4eeq
+"""
+    with open(a.out, "w") as f:
+        f.write(hdr)
+    print("wrote", a.out)
+
+
+if __name__ == "__main__":
+    main()

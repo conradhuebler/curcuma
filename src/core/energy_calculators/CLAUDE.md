@@ -7,6 +7,7 @@ Every energy method behind one interface. `EnergyCalculator` (`src/core/energyca
 
 - `computational_method.h` - the abstract interface
 - `method_factory.{h,cpp}` - table-driven registry (`methodTable()`, one `MethodDescriptor` per family)
+- `method_catalog.{h,cpp}` - per-method help and parameter declaration, the one source for `-help <method>` and flat-flag routing
 - `gpu_plugin.{h,cpp}` - runtime `dlopen` loader for `libcurcuma_{cuda,rocm,vulkan}.so` ([docs/GPU_PLUGIN_STARTUP.md](../../../docs/GPU_PLUGIN_STARTUP.md))
 - `qm_methods/` - native xTB/EHT/NDDO and external QM wrappers (own CLAUDE.md)
 - `ff_methods/` - FFWorkspace engine, GFN-FF, UFF/QMDFF/CG (own CLAUDE.md)
@@ -32,6 +33,7 @@ Every energy method behind one interface. `EnergyCalculator` (`src/core/energyca
 1. A `ComputationalMethod` subclass with its `PARAM` block
 2. One row in `MethodFactory::methodTable()`
 3. Its JSON sub-scope name in `MethodFactory::methodParameterScopes()`, the list EnergyCalculator, opt, MD, Hessian and ConfSearch forward
+4. One row in the method catalog `method_catalog.cpp` (status, gradient, GPU, restrictions, parameter groups, routing scope); a new PARAM of a method module goes into a group there. `-help <method>`, `parameterScopeForMethod`, `readsSharedScfScope` and the unread-parameter warning read it; ctest `method_catalog_consistency` fails otherwise ([docs/METHODS_OVERVIEW.md](../../../docs/METHODS_OVERVIEW.md))
 
 ## Parameter flow and traps
 

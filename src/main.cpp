@@ -60,6 +60,7 @@
 // Claude Generated: Parameter registry system
 #include "generated/parameter_registry.h"
 #include "src/core/parameter_registry.h"
+#include "src/core/energy_calculators/method_catalog.h"  // Claude Generated (Oct 2026): per-method help, unread-parameter warning
 
 #include "src/capabilities/optimiser/OptimiseDipoleScaling.h"
 
@@ -1119,6 +1120,25 @@ json CLI2Json(int argc, char** argv)
     for (const auto& [param, value] : global_values.items()) {
         controller[param] = value;  // Top-level access (backward compat)
         controller["global"][param] = value;  // Explicit global namespace
+    }
+
+    // Claude Generated (Oct 31, 2026): warn about parameters the selected method does not read or that are not
+    // registered (MethodCatalog, docs/METHODS_OVERVIEW.md). Only with an explicit -method (or -md_method,
+    // -opt_method, ...); a warning, never an error, so existing command lines keep working. -verbosity 0 silences it.
+    {
+        std::vector<std::string> methods;
+        if (controller.contains("method") && controller["method"].is_string())
+            methods.push_back(controller["method"].get<std::string>());
+        if (controller.contains(module_name) && controller[module_name].is_object())
+            for (const auto& [k, v] : controller[module_name].items())
+                if (k.size() > 7 && k.compare(k.size() - 7, 7, "_method") == 0 && v.is_string()
+                    && MethodCatalog::find(v.get<std::string>()))
+                    methods.push_back(v.get<std::string>());
+        const bool silent = controller.contains("verbosity") && controller["verbosity"].is_number()
+            && controller["verbosity"].get<double>() <= 0.0;
+        if (!methods.empty() && !silent)
+            for (const auto& w : MethodCatalog::unreadParameterWarnings(controller, methods, module_name))
+                CurcumaLogger::warn(w);
     }
     return controller;
 }
@@ -2748,7 +2768,8 @@ void showStructuredHelp(const std::string& category = "") {
         std::cout << "  curcuma -traj md_output.xyz -stride 10     # Trajectory analysis" << std::endl;
         std::cout << std::endl;
 
-        std::cout << "Get detailed help: curcuma -help [category]" << std::endl;
+        std::cout << "Get detailed help: curcuma -help [category|capability]" << std::endl;
+        std::cout << "Energy methods:    curcuma -help methods (all), curcuma -help <method> (e.g. gfn2, gfnff, b2plyp)" << std::endl;
         std::cout << "   Available categories: ";
         bool first = true;
         for (const auto& [cat, capabilities] : categories) {
@@ -2815,6 +2836,30 @@ void showStructuredHelp(const std::string& category = "") {
             }
             std::cout << std::endl;
 
+        } else if (CAPABILITY_REGISTRY.count(category) > 0) {
+            // Claude Generated (Oct 31, 2026): -help <capability>. Capability names are resolved before method
+            // names; the one collision (orca: capability and ORCA method) is reported, -help method:<name> forces the method.
+            const auto& info = CAPABILITY_REGISTRY.at(category);
+            std::cout << "  -" << category << std::endl;
+            std::cout << "   Description: " << info.description << std::endl;
+            std::cout << "   Category: " << info.category << std::endl;
+            std::cout << "   Usage: curcuma -" << category << " input_file [options]" << std::endl;
+            auto& reg = ParameterRegistry::getInstance();
+            std::vector<std::string> mods = reg.modulesForCommand(category);
+            if (mods.empty() && !reg.getForModule(category).empty())
+                mods.push_back(category);
+            for (const auto& mod : mods) {
+                std::cout << std::endl;
+                reg.printHelp(mod);
+            }
+            if (mods.empty())
+                std::cout << "   No registered parameters; detailed help: curcuma -" << category << " (without arguments)" << std::endl;
+            if (MethodCatalog::find(category))
+                std::cout << "Note: '" << category << "' is also a method name; see curcuma -help method:" << category << std::endl;
+        } else if (category == "methods") {
+            MethodCatalog::printMethodsOverview();
+        } else if (MethodCatalog::printMethodHelp(category.rfind("method:", 0) == 0 ? category.substr(7) : category)) {
+            // Claude Generated (Oct 31, 2026): -help <method>, organised per method (docs/METHODS_OVERVIEW.md)
         } else {
             std::cout << "Error: Unknown category: " << category << std::endl;
             std::cout << std::endl;
@@ -2964,6 +3009,46 @@ int main(int argc, char **argv) {
             showStructuredHelp();
         }
         return 0;
+    }
+
+    // Claude Generated (Oct 31, 2026): consistency of the method catalog (ctest method_catalog_consistency).
+    // "routes" additionally prints routing scope and shared-scf membership of every MethodFactory name.
+    if (command == "check_method_catalog") {
+        if (argc >= 3 && std::string(argv[2]) == "routes") {
+            for (const auto& d : MethodFactory::methodTable())
+                for (const auto& n : d.names)
+                    std::cout << n << " scope=" << MethodFactory::parameterScopeForMethod(n)
+                              << " scf=" << (MethodFactory::readsSharedScfScope(n) ? 1 : 0) << std::endl;
+            return 0;
+        }
+        if (argc >= 3 && std::string(argv[2]) == "knobs") {  // markdown of the knob x method table (docs/METHODS_OVERVIEW.md)
+            std::string head = "| Knob |", rule = "|---|";
+            for (const auto& c : MethodCatalog::scfKnobColumns()) {
+                head += " " + c + " |";
+                rule += "---|";
+            }
+            std::cout << head << std::endl << rule << std::endl;
+            for (const auto& row : MethodCatalog::scfKnobTable()) {
+                std::string line = "| `" + row.knob + "` |";
+                for (const auto& cell : row.effect) {
+                    std::string c = cell;
+                    for (size_t p = c.find('|'); p != std::string::npos; p = c.find('|', p + 2))
+                        c.replace(p, 1, "\\|");
+                    line += " " + c + " |";
+                }
+                std::cout << line << std::endl;
+            }
+            return 0;
+        }
+        auto problems = MethodCatalog::consistencyProblems();
+        for (const auto& [name, info] : CAPABILITY_REGISTRY)
+            if (MethodCatalog::find(name))
+                std::cout << "collision (resolved as capability by -help): " << name << std::endl;
+        for (const auto& p : problems)
+            std::cout << "PROBLEM: " << p << std::endl;
+        std::cout << (problems.empty() ? "method catalog consistent" : "method catalog INCONSISTENT") << " ("
+                  << MethodCatalog::entries().size() << " rows, " << problems.size() << " problems)" << std::endl;
+        return problems.empty() ? 0 : 1;
     }
 
     // Phase 2: List available computational methods - Claude Generated 2025

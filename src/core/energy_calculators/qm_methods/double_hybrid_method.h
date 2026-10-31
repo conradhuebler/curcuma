@@ -12,11 +12,14 @@
  *   step 2: E_os, E_ss = the MP2 pair sums of qm_mp2.h with the KS orbitals and eigenvalues (non-canonical in the
  *           HF sense: the KS Fock operator is not the HF one, the single excitations are dropped, as in every
  *           double-hybrid definition): RI (QMEngine::computeRIMP2, default) or exact integrals (computeMP2),
- *   step 3: E_disp = D3(BJ) for the -d3bj rows (native D3ParameterGenerator, the HF-3c code; s9 = 0).
+ *   step 3: E_disp = D3(BJ) for the -d3bj rows (native D3ParameterGenerator, the HF-3c code; s9 = 0), D4 for the
+ *           -d4 rows (native D4 of GFN2 with EEQ(2019) charges and ATM, curcuma::dispersion::D4DftDispersion, WP12
+ *           stage 4).
  *
  * The functional table (name, a_x, kernels, c_os, c_ss, dispersion and the source of every number) is
  * kDoubleHybridTable in double_hybrid_method.cpp. Methods: b2plyp, b2plyp-d3bj, b2gp-plyp, b2gp-plyp-d3bj, dsd-blyp,
- * dsd-blyp-d3bj, dsd-pbep86, dsd-pbep86-d3bj, dsd-pbeb95-d3bj, revdsd-pbep86, revdsd-pbep86-d4.
+ * dsd-blyp-d3bj, dsd-pbep86, dsd-pbep86-d3bj, dsd-pbeb95-d3bj, revdsd-pbep86, revdsd-pbep86-d4, b2plyp-d4,
+ * b2gp-plyp-d4.
  *
  * Gradient (stage 2, Oct 2026): QMEngine::computeDoubleHybridGradient (qm_dh_grad.cpp: KS gradient + PT2 part from
  * the Z-vector equations with the KS orbital Hessian incl. the XC kernel f_xc, RI or canonical PT2, frozen core) plus
@@ -43,13 +46,17 @@
 #include <vector>
 
 class D3ParameterGenerator;
+namespace curcuma::dispersion {
+class D4DftDispersion;
+struct D4DftParams;
+}
 
 // Claude Generated (Oct 2026, WP12 stage 1): double-hybrid settings of the qm module (PT2 options are shared with
 // mp2/ri-mp2: -qm.frozen_core, -qm.ri_mp2_aux, -qm.gpu_mp2, -qm.mp2_batch_mb, -qm.mp2_max_memory_mb). Since Oct 31 2026
 // -qm.frozen_core "auto" (its default) means true for the double hybrids (as ORCA), false for mp2 and the others.
 BEGIN_PARAMETER_DEFINITION(qm)
     PARAM(dispersion, String, "auto",
-          "Double hybrids: dispersion term. auto = the one in the method name (none for b2plyp, dsd-pbep86, ...; D3(BJ) for the -d3bj names; D4 for revdsd-pbep86-d4) | none (drop it, e.g. to compare the KS + PT2 part with a reference without dispersion) | d3bj (only for a method whose table row has D3(BJ) parameters) | d4 (not available: native D4 exists only for GFN2; an error). The D3(BJ) term is the native one of hf-3c, two-body only (s9 = 0).",
+          "Dispersion term of the native DFT methods. Double hybrids: auto = the one in the method name (none for b2plyp, dsd-pbep86, ...; D3(BJ) for the -d3bj names; D4 for the -d4 names) | none (drop it, e.g. to compare the KS + PT2 part with a reference without dispersion) | d3bj (only for a method whose table row has D3(BJ) parameters) | d4 (a -d4 name, or a name whose -d4 row has the same XC/PT2 numbers: b2plyp, b2gp-plyp, revdsd-pbep86). pbe/b3lyp/tpss/scan: auto = none unless the name ends in -d4, d4 adds D4, none drops it. D3(BJ) = the native one of hf-3c, two-body (s9 = 0); D4 = the native D4 of GFN2 with EEQ(2019) charges and ATM (dftd4 bj-eeq-atm, s9 = 1; dispersion/d4_dft.h), CPU.",
           "DoubleHybrid", {})
     PARAM(dh_pt2, String, "ri",
           "Double hybrids: PT2 integrals. ri = density-fitted (ia|jb) with -qm.ri_mp2_aux (default def2-universal-JKFIT = def2/JK, no def2-SVP/C ships with curcuma: a method variant, the label says so) | canonical = exact (ia|jb) from the n^4 AO tensor (as -method mp2).",
@@ -68,7 +75,8 @@ enum class DHDispersion { None, D3BJ, D4 };
  * @brief One double hybrid: everything that defines it, with the source of the numbers.
  *
  * E_xc(DFT) = sum terms[k].weight * E_kernel; exact exchange a_x; PT2 scaling c_os, c_ss; dispersion parameters
- * (D3(BJ): s6, a1, s8, a2 in Bohr; D4 parameters are listed for the record only, D4 is not implemented).
+ * (D3(BJ): s6, a1, s8, a2 in Bohr). D4 rows leave s6..a2 at 0: their parameters live in ONE place,
+ * curcuma::dispersion::d4DftParameters() (dispersion/d4_dft.cpp), under the row name without "-d4".
  * Claude Generated (Oct 2026, WP12).
  */
 struct DoubleHybridDef {
@@ -112,9 +120,9 @@ public:
 
     std::string getMethodName() const override { return m_def->name; }
     bool isThreadSafe() const override { return true; }
-    /// WP12 stage 2: analytic gradient for every table row (RI or canonical PT2, frozen core or not); false only for
-    /// D4 dispersion (not implemented, the energy is an error too).
-    bool hasGradient() const override { return m_dispersion != DHDispersion::D4; }
+    /// WP12 stage 2: analytic gradient for every table row (RI or canonical PT2, frozen core or not); D4 since
+    /// stage 4 (Oct 2026).
+    bool hasGradient() const override { return true; }
     void setThreadCount(int threads) override { (void)threads; }
     void setParameters(const json& params) override { (void)params; }
     json getParameters() const override { return json{}; }
@@ -140,6 +148,8 @@ private:
     const DoubleHybridDef* m_def = nullptr;  ///< row of doubleHybridTable() (static storage)
     std::unique_ptr<QMEngine> m_engine;
     std::unique_ptr<D3ParameterGenerator> m_d3;
+    std::unique_ptr<curcuma::dispersion::D4DftDispersion> m_d4;  ///< WP12 stage 4
+    const curcuma::dispersion::D4DftParams* m_d4_params = nullptr;
     qmint::MP2Options m_options;
     qmint::MP2Result m_pt2;
     qmint::MP2Result m_pt2_grad;          ///< WP12 stage 2: result of computeDoubleHybridGradient

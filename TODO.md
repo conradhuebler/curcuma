@@ -58,6 +58,9 @@ Stand.
   ("needs 160572 MB ... auto = 100731 MB", beim RI-Setup 209778 MB), obwohl es passt. Grenze aus dem Setup übernehmen oder den belegten Tensor abziehen.
   [docs/QM_TIMING_ORCA_PYSCF_2026-10.md](docs/QM_TIMING_ORCA_PYSCF_2026-10.md), Abschnitt "Re-measurement".
 
+- **GFN2-D4-Tabellen weichen von dftd4 4.3.1 ab** (2026-10-31, Befund): `d4_refq`/`d4_refh_charges` 10 statt 14 Dezimalen, Sc ohne 4. Referenzladung,
+  `d4_refcovcn` mit 4. Eintrag für Sr/Ba; Auswirkung auf GFN2 gegen tblite messen, dann korrigieren (`scripts/d4_export_eeq_tables.py` druckt den Vergleich). [WP12](docs/DFT_ROADMAP/WP12_doppelhybride.md) Stufe 4
+
 ## 2. Leistung
 
 - **CUDA/ROCm-Parität: ROCm-Seite** (2026-10-24, [docs/GPU_PARITY_CUDA_ROCM.md](docs/GPU_PARITY_CUDA_ROCM.md), Abschnitt A): auf ROCm fehlen residente SCF-Schleife, Geräte-Potential, Multipol on-the-fly, Solvation, Besetzungen/Broyden/Pseudodiagonalisierung, D3/D4 nach dem SCF, Gradientenschwanz; GFN-FF: Geräte-Schur, Mehr-GPU-Split, Geräte-Abstoßungsliste, tabelliertes dc6dcn, Fixed-Point.
@@ -168,11 +171,11 @@ Stand.
 
 ## 5. Funktionen und Refactoring (niedrige Priorität)
 
-- **Doppelhybride, D4 und GPU-Rest** (2026-10-31): D4 für `revdsd-pbep86-d4` (natives D4 nur für GFN2); im GPU-Gradienten bleiben die
+- **Doppelhybride, GPU-Rest** (2026-10-31): im GPU-Gradienten bleiben die
   PT2-Zwischengrößen (RI-/kanonische Amplituden, Lagrangian, Z-Vektor-Algebra) Host-Code, gezählt als `qm_dh_grad_pt2` (`-gpu_strict
   true` endet beim Gradienten mit Exit 3); ROCm/Vulkan fehlen. [WP12](docs/DFT_ROADMAP/WP12_doppelhybride.md) Stufe 3
-- **Doppelhybrid-Z-Vektor mit integral-direkten Host-J/K** (2026-10-31): Koffein (246 Funktionen, CPU) stagniert bei max|R| 3.4e-10
-  bzw. 7.6e-9 nach 100 Iterationen (GPU: 18 Iterationen); Ursache prüfen (Screening-Rauschen?), ggf. Tensor/Cadence wie MP2. [WP12](docs/DFT_ROADMAP/WP12_doppelhybride.md) Stufe 3
+- **Integral-direkte Host-J/K nicht wiederholbar** (2026-10-31): `DirectJK::build` summiert die Thread-Teilmatrizen in `omp critical`
+  (Reihenfolge zufällig): zweimal dieselbe Anwendung weicht ab 4 Threads um ~3e-16 ab (1 Thread bitgleich), damit vermutlich auch direkte SCF/Gradienten (nicht gemessen). Feste Reduktion? [WP12](docs/DFT_ROADMAP/WP12_doppelhybride.md) Stufe 3, Z-Vektor-Befund
 - **Doppelhybrid-Gradient, Rest** (2026-10-31): mit `-qm.ri j|jk` im KS-SCF ein Fehler (PT2-Antwort zur RI-SCF fehlt); RI-PT2-Gradient
   hält n²·naux im Speicher (B für alle MO-Paare); `-md`/Hessian nicht getestet. [WP12](docs/DFT_ROADMAP/WP12_doppelhybride.md)
 - **Meta-GGA, offen nach Stufe 3** (2026-10-30): offene Schale, r2SCAN/TPSSh, SCAN-taugliche Gitter; Device-XC nur 1,7-2x schneller als 8 CPU-Threads
@@ -197,6 +200,8 @@ Code-gebundene Entscheidungen, die bei Ihnen liegen. Fachliche Fragen und Projek
 - Doppelhybride (WP12): `dsd-pbeb95` ohne Dispersion fehlt, weil ORCA 6.1 (0,70 HF / 0,52 B95) und Psi4 (0,69 / 0,54) verschiedene
   Parameter nennen (Paper Kozuch/Martin 2013 nicht gelesen). Seit 2026-10-31 rechnet `revdsd-pbep86` per Default auf VWN5-P86 mit den
   PZ81-Fitparametern (wie ORCA `revDSD-PBEP86/2021`); eigene Zeile mit Mehtas VWN5-Satz (0,4200 / 0,6090 / 0,0476) anlegen? [WP12](docs/DFT_ROADMAP/WP12_doppelhybride.md)
+- D4 für Doppelhybride (WP12 Stufe 4): DSD-BLYP/-PBEP86/-PBEB95-D4 fehlen (zu welchem DSD-XC/PT2-Satz gehören dftd4s s6 0,54/0,47/0,54?);
+  `revdsd-pbep86-d4` nimmt a2 4,201 (Paper), ORCA 4,2014 (bis 2,4e-6 Eh); VWN5-Satz von Mehta (s6 0,5850, a1 0,370, a2 4,183) anlegen? [WP12](docs/DFT_ROADMAP/WP12_doppelhybride.md)
 - Doppelhybrid-Gradient auf der GPU (WP12 Stufe 3): die Host-PT2-Zwischengrößen zählen als Fallback `qm_dh_grad_pt2`, der MP2-Gradient
   zählt seine Host-Amplituden nicht; zählen lassen (heute: `-gpu_strict true` + DH-Gradient = Exit 3) oder wie MP2 behandeln? [WP12](docs/DFT_ROADMAP/WP12_doppelhybride.md)
 - `shouldUpdateHBXB()` korrigieren und damit von der Fortran-Referenz abweichen, oder als Referenzeigenschaft belassen?
@@ -206,6 +211,10 @@ Code-gebundene Entscheidungen, die bei Ihnen liegen. Fachliche Fragen und Projek
   "Lücke zwischen GFN2-xTB und Doppelhybrid-Methoden schließen", "RRHO-Näherung durch MD ... ersetzen", "Ladungsplatzierung bei geladenen Mehrfragment-Systemen in GFN-FF - was ist physikalisch besser", Known Issue #31).
 - Vault, Projektstatus: `Projekte/curcuma rev-gfnff`, `curcuma GPU-Backends`, `curcuma Native QM auf der GPU`, `curcuma Schwarz-Ansätze für QM-Matrizen`, `curcuma MD-Stabilität großer Systeme`, `curcuma ConfSearch Weiterentwicklung`,
   `curcuma GFN-FF Transitionsmetalle (MOR41)`, `curcuma Reaktives GFN-FF (react-Topologie)`, `curcuma Konformerenfilter (reorder_paper)`.
+
+- **Methodenhilfe: mehrdeutige flache Namen bei Methoden ohne Routing-Scope** (2026-10-31): `gfnff`, `uff`, `cg`, `d3`/`d4`, ORCA haben im Methodenkatalog keinen `route_scope`; `-method gfnff -solvent water` bleibt im Befehlsmodul und wirkt nicht (jetzt Warnung). Ein Scope `gfnff` machte es wirksam = Verhaltensänderung, Entscheidung offen. [docs/METHODS_OVERVIEW.md](docs/METHODS_OVERVIEW.md)
+- **Registrierte Parameter ohne Wirkung** (2026-10-31): `d3param.*`/`d4param.*` erreichen keine Methode (`-method uff-d3 -d3_s8 10` ändert die Energie nicht), `-d3 1`/`-d4 1` bei `uff` ebenso (Wasser, Benzol); `orca.cpcm_epsilon`, `orca.alpb_epsilon`, `d3param.d3_rs6`/`d3_rs8` haben keinen Leser (String-Suche). Entfernen oder anschließen? `method_catalog.cpp` (kUnclaimed)
+- **Unread-Parameter-Warnung, Lücken** (2026-10-31): nur Kommandozeile (nicht `-import_config`), nur mit explizitem `-method`; nicht registrierte Altflags des Befehlsmoduls werden nicht bewertet; `-scf_damping` bei HF/KS in `scf_mode diis` wirkt nicht und warnt nicht (Tabelle: "differs"). [docs/METHODS_OVERVIEW.md](docs/METHODS_OVERVIEW.md)
 
 ## 7. Löschkandidaten
 

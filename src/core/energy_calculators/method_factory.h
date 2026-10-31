@@ -106,14 +106,14 @@ public:
      * Claude Generated (Oct 16, 2026). Used by the CLI to route a flat flag that several modules register
      * (e.g. -electronic_temperature: tblite, ulysses, xtb) to the module of the selected -method instead of
      * leaving it in the command module, where no method reads it.
-     * gfn1/gfn2 (native), xtb-* (external XTB) -> "xtb"; tblite-*, ipea1 -> "tblite"; the Ulysses methods
-     * -> "ulysses"; eht -> "eht"; native NDDO (pm3, am1, mndo, pm6) -> "scf"; native QM (hf, lda, pbe, b3lyp,
-     * hf-3c, mp2 and RI variants, ccsd, lmp2) -> "qm" (Oct 27 2026); "" when the method has no scope of its own.
+     * Since Oct 31, 2026 the value is MethodCatalogEntry::route_scope (method_catalog.cpp), the single source
+     * for help, routing and the unread-parameter warning: gfn1/gfn2, xtb-gfn1/2, xtb-gfnff -> "xtb"; tblite-*,
+     * ipea1 -> "tblite"; Ulysses names -> "ulysses"; eht -> "eht"; native NDDO -> "scf"; native QM -> "qm";
+     * "" for the force fields, d3/d4 and ORCA.
      */
     static std::string parameterScopeForMethod(const std::string& method_name);
     /// Claude Generated (Oct 2026): true when the method reads the shared registry module "scf"
-    /// (scf_parameters.h): native gfn1/gfn2, NDDO and QM (hf, hf-3c, mp2, ccsd, lmp2, ...; Oct 27 2026), and the
-    /// external tblite, xtb and Ulysses wrappers.
+    /// (scf_parameters.h): a catalog row of the method has a group of module "scf" (method_catalog.cpp).
     static bool readsSharedScfScope(const std::string& method_name);
     /**
      * @brief Resolve the shared "scf" scope of a method config in place. Claude Generated (Oct 2026).

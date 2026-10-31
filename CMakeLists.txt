@@ -559,6 +559,7 @@ set(curcuma_core_SRC
         src/core/energy_calculators/qm_methods/qm_driver.cpp
         src/core/energy_calculators/qm_methods/ulyssesinterface.cpp
         src/core/energy_calculators/method_factory.cpp
+        src/core/energy_calculators/method_catalog.cpp
         src/core/energy_calculators/gpu_plugin.cpp
         src/core/gpu_device_pool.cpp
         src/core/gpu_fallback.cpp
@@ -609,6 +610,7 @@ set(curcuma_core_SRC
         src/core/energy_calculators/dispersion/d4_evaluator.cpp
         src/core/energy_calculators/dispersion/d4_charge_model.cpp
         src/core/energy_calculators/dispersion/d4_ncoord.cpp
+        src/core/energy_calculators/dispersion/d4_dft.cpp
         src/core/energy_calculators/ff_methods/cg_potentials.cpp
         src/core/energy_calculators/ff_methods/fast_exp.cpp
         src/core/curcuma_logger.cpp

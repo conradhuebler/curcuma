@@ -275,6 +275,17 @@ add_cli_test(routing 01_flat_param_routing)
 add_cli_test(routing 02_roundtrip_replay)
 add_cli_test(routing 03_confsearch_param_routing)   # ConfSearch registry migration guard
 add_cli_test(routing 04_qm_scf_routing)             # shared scf / qm flags for native hf, hf-3c (Oct 2026)
+add_cli_test(routing 05_method_help)                # -help <method>, -help methods, unread-parameter warning (Oct 31 2026)
+# Claude Generated (Oct 31 2026): every MethodFactory name and every registered parameter of a method module is declared
+# in the method catalog (src/core/energy_calculators/method_catalog.cpp, docs/METHODS_OVERVIEW.md).
+add_test(NAME method_catalog_consistency COMMAND $<TARGET_FILE:curcuma> -check_method_catalog
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(method_catalog_consistency PROPERTIES TIMEOUT 60 LABELS "cli;routing")
+# The knob x method table in docs/METHODS_OVERVIEW.md must be the output of the code table (no second copy that drifts).
+add_test(NAME method_catalog_knob_table
+         COMMAND bash -c "diff <($<TARGET_FILE:curcuma> -check_method_catalog knobs | grep '^|') <(sed -n '/knob-table-begin/,/knob-table-end/p' '${CMAKE_SOURCE_DIR}/docs/METHODS_OVERVIEW.md' | grep '^|')"
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(method_catalog_knob_table PROPERTIES TIMEOUT 60 LABELS "cli;routing")
 
 # =============================================================================
 # Error Handling Tests (6 scenarios) - Phase 1-2 Implementation

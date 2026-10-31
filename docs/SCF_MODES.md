@@ -2,6 +2,8 @@
 
 Selectable SCF strategies and initial guesses for the native GFN1/GFN2-xTB
 implementation (`curcuma::xtb::XTB`, the canonical `gfn2` / `gfn1` backends).
+How each shared knob acts on the other methods (NDDO, HF, KS, double hybrids, external providers):
+table "Shared SCF knobs" in [METHODS_OVERVIEW.md](METHODS_OVERVIEW.md), also `curcuma -help <method>`.
 
 > Status: AI-implemented, machine-tested. The default mode is now `broyden`
 > (charge-vector quasi-Newton mixing, like tblite); it converges the 231-atom

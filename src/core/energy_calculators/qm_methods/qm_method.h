@@ -7,6 +7,8 @@
  * MethodFactory, not as a parameter. Engine settings come from the `qm` scope
  * (`-qm.basis`, `-qm.scf_*`); the pre-Sep-2026 `dft` scope is still merged.
  * Analytic gradient: `hf` (WP8, Sep 2026) and `lda`/`pbe`/`b3lyp` (WP8 DFT, Oct 2026), returned in Eh/Angstrom.
+ * D4 (WP12 stage 4, Oct 2026): `pbe-d4`, `b3lyp-d4`, `tpss-d4`, `scan-d4` or `-qm.dispersion d4` add the native
+ * DFT-D4 (curcuma::dispersion::D4DftDispersion, EEQ charges, ATM) to energy and gradient, CPU.
  *
  * Claude Generated: Native KS-DFT method wrapper for MethodFactory integration,
  *                   renamed DFTMethod -> QMMethod (Sep 2026)
@@ -22,10 +24,15 @@
 #include <memory>
 #include <string>
 
+namespace curcuma::dispersion {
+class D4DftDispersion;
+}
+
 class QMMethod : public ComputationalMethod {
 public:
-    explicit QMMethod(QMFunctional functional, const json& config = json{});
-    ~QMMethod() = default;
+    /// with_d4_name: the method name carried "-d4" (pbe-d4, ...); -qm.dispersion d4|none overrides it.
+    explicit QMMethod(QMFunctional functional, const json& config = json{}, bool with_d4_name = false);
+    ~QMMethod();
 
     bool setMolecule(const Mol& mol) override;
     bool updateGeometry(const Matrix& geometry) override;
@@ -64,4 +71,7 @@ private:
     bool m_calculation_done;
     double m_last_energy;
     std::string m_method_name;
+    std::unique_ptr<curcuma::dispersion::D4DftDispersion> m_d4;  ///< WP12 stage 4, null without D4
+    double m_e_disp = 0.0;
+    Matrix m_d4_gradient_bohr;
 };

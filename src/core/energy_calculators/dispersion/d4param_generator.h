@@ -272,6 +272,20 @@ public:
     }
     bool usesD4CovalentCN() const { return m_use_d4_covalent_cn; }
 
+    /**
+     * @brief Reference-charge variant of the D4 model (dftd4 d4_qmod).
+     *
+     * Gfn2 (default, unchanged behaviour): reference charges refq and secondary-system charges refh of the
+     * GFN2 variant (d4_refq, d4_refh_charges), what native GFN2 and tblite use. Eeq: clsq / clsh, the variant
+     * dftd4 uses with its EEQ(2019) charges for DFT-D4 (set_refq_eeq, set_refalpha_eeq; tables in
+     * d4_eeq_tables.h, dftd4 4.3.1). Switching invalidates the C6 reference cache (the alpha correction reads
+     * refh/clsh). The secondary-system zeta correction is applied only with setD4CovalentCN(true).
+     * Claude Generated (Oct 2026, WP12 stage 4).
+     */
+    enum class ChargeVariant { Gfn2, Eeq };
+    void setReferenceChargeVariant(ChargeVariant v);
+    ChargeVariant referenceChargeVariant() const { return m_charge_variant; }
+
     // Accumulate the D4 charge-response gradient Σ_A dEdq(A)·∂q_A/∂R into
     // grad_out (Hartree/Bohr). Valid only when the single-shot EEQ model was
     // used for the current geometry; otherwise a no-op.
@@ -345,6 +359,7 @@ private:
     // the C6 interpolation (see setD4CovalentCN / d4_ncoord.h).
     std::vector<double> m_precomputed_cn;   ///< one-shot CN from the device (setPrecomputedCovalentCN)
     bool m_use_d4_covalent_cn = false;
+    ChargeVariant m_charge_variant = ChargeVariant::Gfn2;  ///< WP12 stage 4: refq/refh (Gfn2) or clsq/clsh (Eeq)
 
     // Claude Generated: build the JSON d4_dispersion_pairs / ATM-triple lists.
     // On by default for GFN-FF; native GFN2 turns it off (setBuildPairLists).

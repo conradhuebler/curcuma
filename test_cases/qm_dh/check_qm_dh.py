@@ -12,6 +12,11 @@ Gates (definitions as in check_qm_mgga.py; measured values in docs/DFT_ROADMAP/W
   threads    1 vs 4 threads: total energy bitwise; update: UpdateMolecule A -> B = fresh B to 1e-10 Eh
   gradient / cli_opt  since stage 2 (Oct 2026): the gradient request and -opt must succeed (values in ../qm_dh_grad)
   cli_defaults  Oct 31 2026 defaults: DH frozen core (1 orbital for H2O) and VWN5-P86, explicit false wins, mp2 no fc
+  d4         (WP12 stage 4) native D4 term alone vs dftd4 4.3.1 (reference_d4.json): |E|, |E_2body|, |E_ATM| <= 1e-12 Eh,
+             charges and CN <= 1e-10, gradient <= 1e-11 Eh/Bohr; vs ORCA 6.1 (reference_orca_d4.json, 9 printed
+             decimals) |E|, |g| <= 1e-9; analytic gradient vs 4-point FD of the D4 energy <= 1e-10 Eh/Bohr
+  dhd4 / ksd4  method with D4 - method without = the D4 term (energy 1e-12 Eh, gradient 1e-12 Eh/Bohr); dhd4 with
+             --fd: whole-method gradient vs 4-point FD of its energy <= 5e-10 Eh/Bohr (moving grid, VWN5-P86)
 Claude Generated (Oct 2026, WP12 stage 1).
 """
 import argparse
@@ -216,10 +221,41 @@ def check_cli(a, chk):
                     print(t1[-1500:])
                     sys.exit("defaults: expected 1/0/0/1 frozen orbitals and P86 on VWN5")
             elif chk == "cli_d4":
+                # WP12 stage 4 (Oct 2026): revdsd-pbep86-d4 runs with native D4; a DH without D4 parameters is an error
                 rc, txt = curcuma_run(a, ["-sp", "H2O.xyz", "-method", "revdsd-pbep86-d4", "-no_bmt"], tmp)
-                print(txt[-1200:])
-                if "D4 dispersion for double hybrids is not available" not in txt:
-                    sys.exit(f"revdsd-pbep86-d4 must report the missing D4 (exit {rc})")
+                print(txt[-1500:])
+                m = re.search(r"E\(disp D4\)\s+=\s+(-?\d+\.\d+)", txt)
+                if rc != 0 or not m or not re.search(r"E\(revdsd-pbep86-d4\)\s+=", txt):
+                    sys.exit(f"revdsd-pbep86-d4 must run and print E(disp D4) (exit {rc})")
+                rc2, txt2 = curcuma_run(a, ["-sp", "H2O.xyz", "-method", "dsd-blyp", "-qm.dispersion", "d4", "-no_bmt"],
+                                        tmp)
+                print(txt2[-800:])
+                if "has no D4 parameters" not in txt2:
+                    sys.exit(f"-qm.dispersion d4 on dsd-blyp must be an error naming the D4 methods (exit {rc2})")
+            elif chk == "cli_ks_d4":
+                # WP12 stage 4: pbe-d4 = pbe + D4 on the command line, and -qm.dispersion d4 on pbe is the same
+                vals = {}
+                for tag, args in (("pbe", ["-method", "pbe"]), ("pbe-d4", ["-method", "pbe-d4"]),
+                                  ("flag", ["-method", "pbe", "-qm.dispersion", "d4"])):
+                    rc, txt = curcuma_run(a, ["-sp", "H2O.xyz", "-no_bmt"] + args, tmp)
+                    m = re.findall(r"Single Point Energy = (-?\d+\.\d+) Eh", txt)
+                    d = re.findall(r"E\(disp D4\)\s+=\s+(-?\d+\.\d+)", txt)
+                    if rc != 0 or not m:
+                        print(txt[-1500:])
+                        sys.exit(f"-sp {args} failed (exit {rc})")
+                    vals[tag] = (float(m[-1]), float(d[-1]) if d else 0.0)
+                print(f"  pbe {vals['pbe']}, pbe-d4 {vals['pbe-d4']}, pbe -qm.dispersion d4 {vals['flag']}")
+                e0, (e4, d4), (ef, df) = vals["pbe"][0], vals["pbe-d4"], vals["flag"]
+                if d4 == 0.0 or abs(e4 - e0 - d4) > 2e-8 or abs(ef - e4) > 1e-12:
+                    sys.exit("pbe-d4 must equal pbe + E(disp D4) (8 printed decimals) and pbe -qm.dispersion d4")
+            elif chk == "cli_opt_d4":
+                # WP12 stage 4: -opt with revdsd-pbep86-d4 (analytic gradient incl. D4) from a distorted H2O
+                shutil.copy(os.path.join(TC, "qm_grad", "H2O_distorted.xyz"), os.path.join(tmp, "H2Od.xyz"))
+                rc, txt = curcuma_run(a, ["-opt", "H2Od.xyz", "-method", "revdsd-pbep86-d4", "-no_bmt",
+                                          "-opt.convergence_preset", "tight"], tmp)
+                print(txt[-1500:])
+                if rc != 0 or not os.path.exists(os.path.join(tmp, "H2Od.opt.xyz")):
+                    sys.exit(f"-opt with revdsd-pbep86-d4 failed (exit {rc})")
             elif chk == "cli_unknown_option":
                 rc, txt = curcuma_run(a, ["-sp", "H2O.xyz", "-method", "b2plyp", "-qm.dispersion", "d3bj", "-no_bmt"],
                                       tmp)
@@ -228,6 +264,59 @@ def check_cli(a, chk):
                     sys.exit(f"-qm.dispersion d3bj on b2plyp must be an error naming b2plyp-d3bj (exit {rc})")
         finally:
             os.chdir(cwd)
+    print("OK")
+
+
+def check_d4(a, case):
+    """WP12 stage 4: the D4 term alone against dftd4 4.3.1 and ORCA 6.1, analytic gradient against FD."""
+    ref = json.load(open(os.path.join(HERE, "reference_d4.json")))["cases"][case]
+    orca = json.load(open(os.path.join(HERE, "reference_orca_d4.json")))["disp"].get(case)
+    out = driver(a, ["d4", os.path.join(TC, ref["xyz"]), "--method", ref["functional"], "--fd"])
+    if out.get("error"):
+        sys.exit(f"error: {out}")
+    md = lambda x, y: max(abs(p - q) for p, q in zip(x, y))
+    ok = compare("E_D4", out["energy"], ref["energy"], 1e-12)
+    ok &= compare("E2", out["two_body"], ref["two_body"], 1e-12)
+    ok &= compare("E3", out["three_body"], ref["three_body"], 1e-12)
+    rows = [("q", md(out["charges"], ref["charges"]), 1e-10), ("CN", md(out["cn"], ref["cn"]), 1e-10),
+            ("g-dftd4", md(out["gradient"], ref["gradient"]), 1e-11),
+            ("g-FD", md(out["gradient"], out["fd_gradient"]), 1e-10)]
+    if orca:
+        ok &= compare("E_ORCA", out["energy"], orca["energy"], 1e-9)
+        rows.append(("g-ORCA", md(out["gradient"], orca["gradient"]), 1e-9))
+    for tag, d, tol in rows:
+        print(f"  {tag:8s} max |d| {d:.2e} (gate {tol:.0e})")
+        ok &= d <= tol
+    if not ok:
+        sys.exit("FAIL")
+    print("OK")
+
+
+def check_with_without(a, case, mode):
+    """WP12 stage 4: E(method with D4) - E(without) and the gradients = the D4 term alone; dhd4 also vs FD."""
+    mol, fn = case.split("_", 1)
+    xyz = os.path.join(TC, REF_XYZ.get(mol, {"H2CO": "qm_grad/formaldehyde_hf3c_min_reference.xyz"}.get(mol, "")))
+    args = [mode, xyz, "--method", fn]
+    if mode == "dhd4":
+        args += ["--p86", "vwn5", "--fc"]
+        if mol == "H2O":
+            args += ["--fd"]
+    out = driver(a, args)
+    w, n, d4 = out["with"], out["none"], out["d4"]
+    if w["error"] or n["error"]:
+        sys.exit(f"error: {w['message']} / {n['message']}")
+    md = lambda x, y: max(abs(p - q) for p, q in zip(x, y))
+    de = w["energy"] - n["energy"] - d4["energy"]
+    dg = md([p - q for p, q in zip(w["gradient"], n["gradient"])], d4["gradient"])
+    print(f"  {w['name']}: E {w['energy']:.12f}, E(none) {n['energy']:.12f}, E_D4 {d4['energy']:.12f}; "
+          f"E - E(none) - E_D4 {de:+.1e}; max |g - g(none) - g_D4| {dg:.1e}")
+    ok = abs(de) <= 1e-12 and dg <= 1e-12
+    if "fd_gradient" in out:
+        f = md(w["gradient"], out["fd_gradient"])
+        print(f"  max |g - FD(E)| {f:.2e} Eh/Bohr (gate 5e-10)")
+        ok &= f <= 5e-10
+    if not ok:
+        sys.exit("FAIL")
     print("OK")
 
 
@@ -290,6 +379,10 @@ def main():
         check_d3(a, json.load(open(a.orca)), a.case)
     elif a.check in ("gradient", "threads", "update"):
         check_simple(a, a.case, a.check)
+    elif a.check == "d4":
+        check_d4(a, a.case)
+    elif a.check in ("dhd4", "ksd4"):
+        check_with_without(a, a.case, a.check)
     elif a.check.startswith("cli_"):
         check_cli(a, a.check)
     elif a.check == "gpu":

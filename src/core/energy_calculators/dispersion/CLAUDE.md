@@ -12,8 +12,10 @@ energy/gradient kernel (`curcuma::dispersion::D4Evaluator`). Native D3 lives in
 - `d4_evaluator.{h,cpp}` - `D4Params`, `DampingFormula`, two-body kernel + `computeATM()` (three-body)
 - `d4_charge_model.{h,cpp}` - single-shot dftd4 EEQ with analytic `dq/dx` (`D4ChargeModel`)
 - `d4_ncoord.{h,cpp}` - dftd4 EN-weighted covalent CN (GFN2 path); `d4_charge_scaling.h` - shared dftd4 zeta
+- `d4_dft.{h,cpp}` - DFT-D4 for the native DFT methods (WP12 stage 4): parameter table `d4DftParameters()` with sources, `D4DftDispersion` (EEQ(2019) charges, covalent CN, `ChargeVariant::Eeq`, 2-body + ATM, gradient incl. dq/dR)
+- `d4_eeq_tables.h` - generated (`scripts/d4_export_eeq_tables.py`, dftd4 4.3.1 + multicharge 0.6.0): clsq/clsh, EEQ(2019) chi/eta/kcn/rad; do not edit
 - Data, `#include`d into `d4param_generator.cpp` (not compiled on their own): `d4_reference_data_fixed.cpp`, `d4_reference_cn_fortran.cpp`, `d4_alphaiw_data.cpp`, `d4_corrections_data.cpp`
-- Compiled units (CMakeLists.txt `curcuma_core_SRC`): `d4param_generator`, `d4_evaluator`, `d4_charge_model`, `d4_ncoord`
+- Compiled units (CMakeLists.txt `curcuma_core_SRC`): `d4param_generator`, `d4_evaluator`, `d4_charge_model`, `d4_ncoord`, `d4_dft`
 
 ## Formula and users
 
@@ -24,11 +26,13 @@ energy/gradient kernel (`curcuma::dispersion::D4Evaluator`). Native D3 lives in
 | GFN-FF | `GenerateDispersionPairsNative()`, then `FFWorkspace::calcD4Dispersion` (own inline kernel; GPU `k_dispersion`) | 1.0 | 2.0 | 0.58 | 4.80 | off (`-gfnff.dispersion_atm`) |
 | Native GFN2 | `XTB::calcDispersionEnergy` calls `D4Evaluator::computeEnergyAndGradient` + `computeATM` | 1.0 | 2.7 | 0.52 | 5.00 | s9 5.0, alpha 16, cutoff `-xtb.d4_atm_cutoff` |
 | Native GFN1 | `D3ParameterGenerator::createForGFN1()` (D3, not D4) | 1.0 | 2.4 | 0.63 | 5.00 | none |
+| Native DFT (`*-d4`, `-qm.dispersion d4`) | `D4DftDispersion::compute` (same evaluator, EEQ(2019) charges, `ChargeVariant::Eeq`) | per functional | | | | s9 1, alpha 16, 40 Bohr |
 
 - GFN2 couples D4 self-consistently: `XTB::addDispersionPotential` adds `dE_D4/dq` each SCF iteration; the reference build runs once per geometry (`m_d4_prepared`, reset in `XTB::Calculation`)
 - GFN2 GPU D4 runs in the backend contexts (`xtb_gpu_context.cu`, `xtb_hip_context.hip`, Vulkan), not through `D4Evaluator` (its empty `launchGpuKernel()` hook was removed on 2026-10-01)
 - `-d4_charge_source` (GFN2, `xtb` scope): `mulliken` default (variational response), `eeq` (single-shot EEQ), `cpscf` (explicit Z-vector); see [docs/D4_Q_RESPONSE.md](../../../../docs/D4_Q_RESPONSE.md)
 - GFN-FF uses `zetac6` from topology charges as a fixed per-pair prefactor (no `dq/dx` term)
+- Reference charges: `D4ParameterGenerator::setReferenceChargeVariant` Gfn2 (default: refq/refh, GFN2) or Eeq (clsq/clsh, DFT-D4); `D4ChargeModel::setModel` GfnffAngew2020 (default) or Eeq2019 (dftd4's EEQ); defaults leave GFN2/GFN-FF unchanged
 
 ## Invariants and traps
 
@@ -42,12 +46,14 @@ energy/gradient kernel (`curcuma::dispersion::D4Evaluator`). Native D3 lives in
 - The `d4_a1` PARAM help text says "GFN2-xTB: 0.63"; native GFN2 uses 0.52 (`xtb_native.cpp`, `D4Params` blocks)
 - `GenerateParameters()` carries two in-code fallbacks for `d4_a1`/`d4_a2`: 0.58/4.80 for the pair `R0`, 0.44/4.60 for the exported `d4_damping` JSON; whether the latter is ever read is not checked
 - GFN2 D4 residuals vs tblite: [docs/GFN2_D4_STATUS.md](../../../../docs/GFN2_D4_STATUS.md); `ctest -L d4_diag` is registered only when `release_tblite/dumps/*_gfn2.json` exist (none in `release/`)
+- curcuma's GFN2 tables differ from dftd4 4.3.1 `reference.inc`: `d4_refq`/`d4_refh_charges` have 10 decimals (dftd4 14), Sc (Z=21) lacks its 4th reference charge (1.0291, refh -0.3430), `d4_refcovcn` has a 4th entry for Sr/Ba (15.121/14.677, dftd4 0); not changed (GFN2 bitwise), effect not measured (`scripts/d4_export_eeq_tables.py` prints the check)
+- DFT-D4 2-body pairs: built at 60 Bohr, evaluated at 50 (`PAIR_EVAL_CUTOFF_BOHR`); dftd4 sums to 60 Bohr: pairs at 50-60 Bohr are missing (no test molecule that large)
 
 ### Open: native D3/D4 as a general add-on correction (note of 2026-06-26, full text in the archive)
 
 - `DispersionMethod` (`-method d3|d4`) still routes to the external s-dftd3/cpp-d4 (`USE_D3`/`USE_D4`)
 - `uff-d3` already evaluates native D3 pairs (`forcefield.cpp:180,354`); D3 presets: `createForGFN1/GFNFF/UFFD3/PBE0/BLYP/B3LYP/TPSS/PBE/BP86`, `createForMethod`
-- D4 has no functional presets; only native GFN2 fills `D4Params`
+- D4 functional presets since Oct 2026 for the native DFT methods only (`d4DftParameters()`); `-method d4` still external
 - Potential plan:
   1. Add a native-backed add-on: re-point `DispersionMethod` at the native generators, or a `NativeDispersionMethod` adding `E_disp + grad E_disp` onto the host
   2. D4: functional presets (PBE0-D4, B3LYP-D4, ...) or a dftd4-style lookup table; decide the charge source (EEQ default, host Mulliken opt-in)
@@ -56,7 +62,7 @@ energy/gradient kernel (`curcuma::dispersion::D4Evaluator`). Native D3 lives in
 
 ## Verification
 
-- `ctest -R "gfnff"` (GFN-FF D4 via FFWorkspace), `ctest -R d4_dedq` (`dE/dq`, EEQ `dq/dx`), `ctest -R xtb_gradient` (GFN2 analytic vs FD: H2O, CH4, NH3)
+- `ctest -L qm_d4` (DFT-D4 vs dftd4 4.3.1 and ORCA 6.1, gradient vs FD); `ctest -R "gfnff"` (GFN-FF D4 via FFWorkspace), `ctest -R d4_dedq` (`dE/dq`, EEQ `dq/dx`), `ctest -R xtb_gradient` (GFN2 analytic vs FD: H2O, CH4, NH3)
 
 ## References
 

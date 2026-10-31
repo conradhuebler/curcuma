@@ -18,11 +18,28 @@
  *   test_qm_dh update <xyzA> <xyzB> --method <name> [options as energy]
  *       Method on geometry A, then updateGeometry(B), against a fresh method on B.
  *
+ *   test_qm_dh d4 <xyz> --method <functional> [--charge q] [--fd]
+ *       WP12 stage 4: the native DFT-D4 term alone (curcuma::dispersion::D4DftDispersion, parameters of
+ *       d4DftParameters() for <functional>): energy, two-body / ATM parts, EEQ charges, CN, analytic gradient
+ *       (Eh/Bohr) and with --fd the 4-point central difference of the D4 energy (h = 5e-4 Bohr, every coordinate).
+ *
+ *   test_qm_dh dhd4 <xyz> --method <dh-name> [--p86 ..] [--fc] [--fd]
+ *       WP12 stage 4: energy + gradient of the double hybrid (its dispersion per --dispersion), of the same method
+ *       with --dispersion none, and of the D4 term alone (the D4 parameters of the method name without "-d4"):
+ *       the differences E - E(none) and g - g(none) must be the D4 term; with --fd also the 4-point central
+ *       difference of the whole energy (h = 1e-3 Bohr in Angstrom, every coordinate; the grid moves with the atoms).
+ *
+ *   test_qm_dh ksd4 <xyz> --method <pbe|b3lyp|tpss|scan> [--grid g]
+ *       WP12 stage 4: QMMethod <name>-d4 against QMMethod <name> and the D4 term alone (energy, gradient).
+ *
  * Claude Generated (Oct 2026, WP12 stage 1). GPL-3.0.
  */
 #include "src/core/curcuma_logger.h"
 #include "src/core/energy_calculators/qm_methods/double_hybrid_method.h"
+#include "src/core/energy_calculators/qm_methods/qm_method.h"
 #include "src/core/energy_calculators/qm_methods/qm_xc.h"
+#include "src/core/energy_calculators/dispersion/d4_dft.h"
+#include "src/core/units.h"
 
 #include <algorithm>
 #include <cmath>
@@ -39,7 +56,8 @@ namespace {
 struct Args {
     std::string mode, xyz, xyz2, method = "b2plyp", grid = "sg1", pt2 = "ri", p86 = "pz81", dispersion = "auto";
     int threads = 4;
-    bool fc = false, gradient = false;
+    int charge = 0;
+    bool fc = false, gradient = false, fd = false;
     double ao_threshold = 1e-12;
 };
 
@@ -221,6 +239,8 @@ int parse(int argc, char** argv, Args& a)
         else if (s == "--ao-threshold") a.ao_threshold = std::stod(next());
         else if (s == "--fc") a.fc = true;
         else if (s == "--gradient") a.gradient = true;
+        else if (s == "--fd") a.fd = true;
+        else if (s == "--charge") a.charge = std::stoi(next());
         else pos.push_back(s);
     }
     if (!pos.empty()) a.xyz = pos[0];
@@ -244,6 +264,118 @@ int main(int argc, char** argv)
             Mol m;
             if (!readMol(a.xyz, m)) return 2;
             std::cout << runEnergy(a, m).dump(1) << std::endl;
+            return 0;
+        }
+        if (a.mode == "d4") {
+            // WP12 stage 4 (Claude Generated, Oct 2026): the D4 term alone, with analytic and FD gradient
+            Mol m;
+            if (!readMol(a.xyz, m)) return 2;
+            const auto* p = curcuma::dispersion::findD4DftParameters(a.method);
+            if (!p) {
+                std::cout << json({ { "error", "no D4 parameters for " + a.method } }).dump(1) << std::endl;
+                return 0;
+            }
+            curcuma::dispersion::D4DftDispersion d4(*p);
+            const Matrix xb = m.m_geometry * CurcumaUnit::Length::ANGSTROM_TO_BOHR;
+            double e = 0.0;
+            Matrix g;
+            json out;
+            if (!d4.compute(m.m_atoms, xb, a.charge, true, e, g)) {
+                std::cout << json({ { "error", d4.error() } }).dump(1) << std::endl;
+                return 0;
+            }
+            out["energy"] = e;
+            out["two_body"] = d4.twoBodyEnergy();
+            out["three_body"] = d4.threeBodyEnergy();
+            out["charges"] = std::vector<double>(d4.charges().data(), d4.charges().data() + d4.charges().size());
+            out["cn"] = d4.coordinationNumbers();
+            std::vector<double> gv, fdv;
+            for (int i = 0; i < g.rows(); ++i)
+                for (int k = 0; k < 3; ++k) gv.push_back(g(i, k));
+            out["gradient"] = gv;
+            if (a.fd) {
+                curcuma::dispersion::D4DftDispersion d4fd(*p);
+                const double h = 5e-4;
+                for (int i = 0; i < xb.rows(); ++i)
+                    for (int k = 0; k < 3; ++k) {
+                        auto en = [&](double x) {
+                            Matrix y = xb;
+                            y(i, k) = x;
+                            double ee = 0.0;
+                            Matrix gg;
+                            d4fd.compute(m.m_atoms, y, a.charge, false, ee, gg);
+                            return ee;
+                        };
+                        fdv.push_back(fd4(en, xb(i, k), h));
+                    }
+                out["fd_gradient"] = fdv;
+            }
+            std::cout << out.dump(1) << std::endl;
+            return 0;
+        }
+        if (a.mode == "dhd4" || a.mode == "ksd4") {
+            // WP12 stage 4 (Claude Generated, Oct 2026): the method with D4 = the method without + the D4 term
+            Mol m;
+            if (!readMol(a.xyz, m)) return 2;
+            auto flat = [](const Matrix& g) {
+                std::vector<double> v;
+                for (int i = 0; i < g.rows(); ++i)
+                    for (int k = 0; k < 3; ++k) v.push_back(g(i, k));
+                return v;
+            };
+            std::string key = a.method;
+            if (key.size() > 3 && key.compare(key.size() - 3, 3, "-d4") == 0) key.resize(key.size() - 3);
+            json out;
+            auto run = [&](const std::string& disp, json& o, std::unique_ptr<ComputationalMethod>& keep) {
+                Args b = a;
+                b.dispersion = disp;
+                json cfg = methodConfig(b);
+                std::unique_ptr<ComputationalMethod> meth;
+                if (a.mode == "dhd4") {
+                    meth = std::make_unique<DoubleHybridMethod>(a.method, cfg);
+                } else {
+                    const QMFunctional f = key == "pbe" ? QMFunctional::PBE : key == "tpss" ? QMFunctional::TPSS
+                        : key == "scan" ? QMFunctional::SCAN : QMFunctional::B3LYP;
+                    meth = std::make_unique<QMMethod>(f, cfg, false);
+                }
+                meth->setMolecule(m);
+                o["energy"] = meth->calculateEnergy(true);
+                o["error"] = meth->hasError();
+                o["message"] = meth->getErrorMessage();
+                o["gradient"] = flat(meth->getGradient() * CurcumaUnit::Length::BOHR_TO_ANGSTROM);  // Eh/Bohr
+                o["name"] = meth->getMethodName();
+                keep = std::move(meth);
+            };
+            std::unique_ptr<ComputationalMethod> with, without;
+            json ow, on;
+            run(a.mode == "dhd4" ? a.dispersion : "d4", ow, with);
+            run("none", on, without);
+            out["with"] = ow;
+            out["none"] = on;
+            const auto* p = curcuma::dispersion::findD4DftParameters(key);
+            if (p) {
+                curcuma::dispersion::D4DftDispersion d4(*p);
+                double e = 0.0;
+                Matrix g;
+                d4.compute(m.m_atoms, m.m_geometry * CurcumaUnit::Length::ANGSTROM_TO_BOHR, 0, true, e, g);
+                out["d4"] = { { "energy", e }, { "gradient", flat(g) } };
+            }
+            if (a.fd) {
+                const double h = 1e-3 * CurcumaUnit::Length::BOHR_TO_ANGSTROM;
+                std::vector<double> fdv;
+                for (int i = 0; i < m.m_geometry.rows(); ++i)
+                    for (int k = 0; k < 3; ++k) {
+                        auto en = [&](double x) {
+                            Matrix y = m.m_geometry;
+                            y(i, k) = x;
+                            with->updateGeometry(y);
+                            return with->calculateEnergy(false);
+                        };
+                        fdv.push_back(fd4(en, m.m_geometry(i, k), h) * CurcumaUnit::Length::BOHR_TO_ANGSTROM);
+                    }
+                out["fd_gradient"] = fdv;
+            }
+            std::cout << out.dump(1) << std::endl;
             return 0;
         }
         if (a.mode == "update") {

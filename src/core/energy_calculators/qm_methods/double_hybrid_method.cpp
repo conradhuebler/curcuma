@@ -15,6 +15,7 @@
 #include "src/core/energy_calculators/ff_methods/d3param_generator.h"
 #include "src/core/units.h"
 #include "src/core/energy_calculators/ff_methods/cn_calculator.h"
+#include "src/core/energy_calculators/dispersion/d4_dft.h"
 
 #include <fmt/format.h>
 
@@ -100,6 +101,14 @@ void doubleHybrid(const std::string& name, bool ri, bool d3bj)
         if (name.rfind("b2", 0) == 0) CitationRegistry::cite("goerigk_grimme_2011");
     }
 }
+
+// WP12 stage 4 (Claude Generated, Oct 2026): DFT-D4 (model, EEQ charges, parameter fits: Caldeweyher 2017/2019/2020;
+// reference data and algorithm of the dftd4 library, which the native code follows).
+void d4Dft()
+{
+    CitationRegistry::cite("d4");
+    CitationRegistry::cite("dftd4");
+}
 }  // namespace qmcite
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -148,10 +157,18 @@ const std::vector<DoubleHybridDef>& doubleHybridTable()
           true, "Santra et al., JPCA 123, 5129 (2019), DOI 10.1021/acs.jpca.9b03157 (paper not read); numbers from Mehta "
                 "et al., Can. J. Chem. 101, 656 (2023), DOI 10.1139/cjc-2022-0277, Table 1 (PZ81); = ORCA 6.1 "
                 "revDSD-PBEP86/2021 XC/PT2" },
+        // D4 rows (WP12 stage 4): s6..a2 stay 0 here; the D4 parameters are d4DftParameters() under the row name
+        // without "-d4" (dispersion/d4_dft.cpp, with their sources).
         { "revdsd-pbep86-d4", "revDSD-PBEP86-D4", 0.69, { { XCKernel::PBE_X, 0.31 }, { XCKernel::P86_C, 0.4224 } },
-          0.5935, 0.0566, DHDispersion::D4, 0.5917, 0.371, 0.0, 4.201, true,
-          "as revdsd-pbep86; D4 (s6 0.5917, a1 0.371, a2 4.201, s8 0, ATM 1) from Mehta et al. 2023 Table 1, NOT "
-          "implemented" },
+          0.5935, 0.0566, DHDispersion::D4, 0, 0, 0, 0, true,
+          "as revdsd-pbep86; D4(EEQ)-ATM s6 0.5917, a1 0.371, a2 4.201, s8 0, s9 1 (Mehta et al. 2023 Table 1, "
+          "PZ81 row)" },
+        { "b2plyp-d4", "B2PLYP-D4", 0.53, { { XCKernel::B88_X, 0.47 }, { XCKernel::LYP_C, 0.73 } }, 0.27, 0.27,
+          DHDispersion::D4, 0, 0, 0, 0, false,
+          DH_SRC_B2PLYP "; D4(EEQ)-ATM from dftd4 4.3.1 parameters.toml (Caldeweyher et al. 2019)" },
+        { "b2gp-plyp-d4", "B2GP-PLYP-D4", 0.65, { { XCKernel::B88_X, 0.35 }, { XCKernel::LYP_C, 0.64 } }, 0.36, 0.36,
+          DHDispersion::D4, 0, 0, 0, 0, false,
+          DH_SRC_B2GP "; D4(EEQ)-ATM from dftd4 4.3.1 parameters.toml (Caldeweyher et al. 2019)" },
     };
     return table;
 }
@@ -208,9 +225,21 @@ DoubleHybridMethod::DoubleHybridMethod(const std::string& name, const json& conf
                                                     "table (use the -d3bj method name, e.g. {}-d3bj, if it exists)",
                                                     m_def->name, m_def->name));
         m_dispersion = DHDispersion::D3BJ;
-    } else if (disp == "d4")
+    } else if (disp == "d4") {
+        // WP12 stage 4: a -d4 row, or a row whose -d4 row has the same KS and PT2 numbers (b2plyp, b2gp-plyp,
+        // revdsd-pbep86); the dsd-* rows have no D4 set whose XC/PT2 numbers could be checked (WP12 doc).
+        if (m_def->dispersion != DHDispersion::D4) {
+            const DoubleHybridDef* d4row = findDoubleHybrid(std::string(m_def->name) + "-d4");
+            const bool same = d4row && d4row->a_x == m_def->a_x && d4row->c_os == m_def->c_os
+                && d4row->c_ss == m_def->c_ss && d4row->terms[0].kernel == m_def->terms[0].kernel
+                && d4row->terms[0].weight == m_def->terms[0].weight && d4row->terms[1].kernel == m_def->terms[1].kernel
+                && d4row->terms[1].weight == m_def->terms[1].weight;
+            if (!same)
+                throw std::invalid_argument(fmt::format("-qm.dispersion d4: method {} has no D4 parameters (D4 names: "
+                                                        "b2plyp-d4, b2gp-plyp-d4, revdsd-pbep86-d4)", m_def->name));
+        }
         m_dispersion = DHDispersion::D4;
-    else
+    } else
         throw std::invalid_argument("-qm.dispersion '" + disp + "' is unknown; use auto, none, d3bj or d4");
 
     const std::string pt2 = readString(ec, "dh_pt2", "ri");
@@ -238,6 +267,16 @@ DoubleHybridMethod::DoubleHybridMethod(const std::string& name, const json& conf
         json d3 = { { "d3_s6", m_def->s6 }, { "d3_s8", m_def->s8 }, { "d3_a1", m_def->a1 }, { "d3_a2", m_def->a2 },
                     { "d3_s9", 0.0 }, { "d3_alp", 14.0 } };
         m_d3 = std::make_unique<D3ParameterGenerator>(ConfigManager("d3param", d3));
+    }
+    if (m_dispersion == DHDispersion::D4) {
+        std::string key = m_def->name;
+        if (key.size() > 3 && key.compare(key.size() - 3, 3, "-d4") == 0) key.resize(key.size() - 3);
+        m_d4_params = curcuma::dispersion::findD4DftParameters(key);
+        if (!m_d4_params)
+            throw std::invalid_argument("double hybrid " + std::string(m_def->name) + ": no D4 parameters for '" + key
+                                        + "' (dispersion/d4_dft.cpp)");
+        m_d4 = std::make_unique<curcuma::dispersion::D4DftDispersion>(*m_d4_params);
+        qmcite::d4Dft();
     }
     qmcite::doubleHybrid(m_def->name, m_options.ri, m_dispersion == DHDispersion::D3BJ);
 }
@@ -269,15 +308,6 @@ double DoubleHybridMethod::calculateEnergy(bool gradient)
     m_error_message.clear();
     const double nan = std::numeric_limits<double>::quiet_NaN();
     if (gradient) m_gradient_bohr = Matrix();  // no stale gradient after a failed request
-    if (m_dispersion == DHDispersion::D4) {
-        m_error = true;
-        m_error_message = std::string(m_def->name) + ": D4 dispersion for double hybrids is not available in curcuma (native D4 is "
-                                       "GFN2-only); use -qm.dispersion none for the KS + PT2 part (= " + m_def->name
-            + " without D4) or a -d3bj double hybrid";
-        CurcumaLogger::error(m_error_message);
-        return nan;
-    }
-
     // 1. hybrid KS SCF
     m_e_ks = m_engine->Calculation(false);
     if (!m_engine->scfConverged()) {
@@ -304,6 +334,18 @@ double DoubleHybridMethod::calculateEnergy(bool gradient)
             CNCalculator::addD3CNGradient(m_molecule.m_atoms, m_molecule.m_geometry, dEdcn, g_disp, /*k1=*/16.0,
                                           /*k2=*/4.0 / 3.0,
                                           /*distance_unit_to_bohr=*/CurcumaUnit::Length::BOHR_TO_ANGSTROM);
+    }
+    if (m_d4) {
+        // WP12 stage 4: native D4 (EEQ charges, ATM) on the geometry in Bohr; gradient Eh/Bohr incl. dq/dR
+        Matrix g4;
+        if (!m_d4->compute(m_molecule.m_atoms, m_molecule.m_geometry * CurcumaUnit::Length::ANGSTROM_TO_BOHR,
+                           static_cast<double>(m_molecule.m_charge), gradient, m_e_disp, g4)) {
+            m_error = true;
+            m_error_message = std::string(m_def->name) + ": " + m_d4->error();
+            CurcumaLogger::error(m_error_message);
+            return nan;
+        }
+        if (gradient) g_disp = g4;
     }
     m_e_total = m_e_ks + m_e_pt2 + m_e_disp;
     // 4. analytic gradient (WP12 stage 2): KS + PT2 (Z-vector with the KS orbital Hessian) + dispersion
@@ -340,10 +382,16 @@ double DoubleHybridMethod::calculateEnergy(bool gradient)
         CurcumaLogger::result(fmt::format("  E(KS hybrid)   = {:.12f} Eh", m_e_ks));
         CurcumaLogger::result(fmt::format("  E(PT2)         = {:.12f} Eh  ({:g} x OS {:.12f} + {:g} x SS {:.12f})", m_e_pt2,
                                           m_def->c_os, m_pt2.e_os, m_def->c_ss, m_pt2.e_ss));
-        if (m_dispersion != DHDispersion::None)
+        if (m_dispersion == DHDispersion::D3BJ)
             CurcumaLogger::result(fmt::format("  E(disp {})  = {:.12f} Eh  (s6 {:g}, a1 {:g}, s8 {:g}, a2 {:g}, two-body)",
                                               dispersionName(m_dispersion), m_e_disp, m_def->s6, m_def->a1, m_def->s8,
                                               m_def->a2));
+        else if (m_d4)
+            CurcumaLogger::result(fmt::format("  E(disp D4)     = {:.12f} Eh  (two-body {:.12f}, ATM {:.12f}; EEQ "
+                                              "charges; s6 {:g}, s8 {:g}, a1 {:g}, a2 {:g}, s9 {:g})",
+                                              m_e_disp, m_d4->twoBodyEnergy(), m_d4->threeBodyEnergy(),
+                                              m_d4_params->s6, m_d4_params->s8, m_d4_params->a1, m_d4_params->a2,
+                                              m_d4_params->s9));
         CurcumaLogger::result(fmt::format("  E({})  = {:.12f} Eh", m_def->name, m_e_total));
         if (CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::param("E_xc", fmt::format("{:.12f} Eh", m_engine->xcEnergy()));

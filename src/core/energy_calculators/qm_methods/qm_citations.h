@@ -197,6 +197,9 @@ inline void kohnSham(const qmxc::XCFunctional& f, bool treutler_radial)
 /// PT2 part (MP2, with RI the RI-MP2 papers), D3(BJ) for the -d3bj names (Grimme 2010 D3, Grimme 2011 BJ, and for
 /// b2plyp/b2gp-plyp the D3(BJ) parameter paper). The KS part is cited by kohnSham() when the SCF runs.
 void doubleHybrid(const std::string& name, bool ri, bool d3bj);  // defined in double_hybrid_method.cpp (-Winline)
+/// DFT-D4 of the native DFT methods (WP12 stage 4, Claude Generated, Oct 2026): D4 model papers and the dftd4
+/// library whose data and algorithm the native code follows. Defined in double_hybrid_method.cpp.
+void d4Dft();
 
 /// Kohn-Sham nuclear gradient (WP8, Claude Generated, Oct 2026): the closed-shell gradient formulas and, with
 /// -qm.grid_response, the Becke weight derivative (Becke 1988 grid paper is cited by kohnSham()).
