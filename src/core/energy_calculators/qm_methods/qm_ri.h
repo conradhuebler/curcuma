@@ -264,6 +264,11 @@ public:
                                   const Matrix& G, int natoms, const std::string& backend, int device, Matrix& grad,
                                   std::string& info, std::string& why) const;
     const std::vector<Shell>& auxShells() const { return m_aux; }
+    /// WP12 stage 2 (Claude Generated, Oct 2026, double-hybrid RI-PT2 gradient): X (nfit rows) := F^T X (naux rows),
+    /// the transpose of the metric factor of fitRows (B = F T_n), and the Coulomb normalisation D_PP = 1/sqrt((P|P)), so
+    /// that J_raw^-1 (P|..) = D F^T B: the raw-basis fitting coefficients of a fitted quantity.
+    void fitTransposeRows(Matrix& X) const { applyFitTranspose(X); }
+    const Eigen::VectorXd& auxNormalisation() const { return m_dn; }
 
 private:
     RIOptions m_opt;
@@ -384,4 +389,11 @@ Matrix gradientTwoElectronExchange(const std::vector<GTO::Orbital>& basis, const
 /// gradientTwoElectron. Same kernel. Claude Generated (Oct 2026, WP8).
 Matrix gradientTwoElectronScaled(const std::vector<GTO::Orbital>& basis, const Matrix& P, double kx, int natoms,
                                  int threads = 1);
+/// @brief PT2 part of the double-hybrid two-electron gradient (Eh/Bohr; WP12 stage 2, Claude Generated, Oct 2026):
+/// 1/2 sum D2 (mn|ls)^X with the separable P2 x P part, exchange scaled by kx = a_x,
+///   D2 = P2_mn P_ls + P_mn P2_ls - (kx/4)(P2_ml P_ns + P_ml P2_ns + P2_ms P_nl + P_ms P2_nl) + Dns,
+/// Dns the non-separable canonical-PT2 part in the ACTIVE basis (as gradientTwoElectronMP2) or nullptr (RI-PT2: its
+/// non-separable part is the 3-index derivative of qmri::RIJK). P, P2 cartesian. Same driver as gradientTwoElectron.
+Matrix gradientTwoElectronDHPT2(const std::vector<GTO::Orbital>& basis, const Matrix& P, const Matrix& P2,
+                                const double* Dns, const Matrix* Q, double kx, int natoms, int threads = 1);
 }  // namespace qmint

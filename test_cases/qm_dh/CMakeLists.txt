@@ -8,8 +8,8 @@
 #   qm_dh_fc_<case>              the same with -qm.frozen_core true
 #   qm_dh_canonical_<case>       -qm.dh_pt2 canonical vs pyscf.mp.MP2 on the KS orbitals
 #   qm_dh_d3_<case>              D3(BJ) term of the -d3bj names vs ORCA 6.1 (two-body)
-#   qm_dh_{gradient,update,threads}_<fn>   gradient request is an error; UpdateMolecule; 1 vs 4 threads bitwise
-#   qm_dh_cli_*                  curcuma -sp prints the energy, -opt stops with an error, D4 request is an error
+#   qm_dh_{gradient,update,threads}_<fn>   gradient request succeeds (stage 2); UpdateMolecule; 1 vs 4 threads bitwise
+#   qm_dh_cli_*                  curcuma -sp prints the energy, -opt runs (stage 2), D4 request is an error
 #   qm_dh_gpu_H2O                -gpu cuda: counted qm_xc fallback, same energy, -gpu_strict exits; skip (77) without
 #                                a CUDA plugin
 # Run:  ctest -L qm_dh --output-on-failure

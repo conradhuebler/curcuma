@@ -1671,6 +1671,22 @@ const std::unordered_map<std::string, CitationData>& database()
             "}"
         }},
 
+        // WP12 stage 2 (Claude Generated, Oct 2026): DOI checked against Crossref (Oct 31 2026)
+        { "dh_gradient", {
+            "Analytic gradient of double-hybrid functionals (Neese, Schwabe, Grimme 2007)",
+            "Neese, F.; Schwabe, T.; Grimme, S. J. Chem. Phys. 2007, 126, 124115 (DOI: 10.1063/1.2712433)",
+            "neese2007dhgradient",
+            "@article{neese2007dhgradient,\n"
+            "  author = {Neese, Frank and Schwabe, Tobias and Grimme, Stefan},\n"
+            "  title = {Analytic derivatives for perturbatively corrected ``double hybrid'' density functionals: Theory, implementation, and applications},\n"
+            "  journal = {J. Chem. Phys.},\n"
+            "  year = {2007},\n"
+            "  volume = {126},\n"
+            "  pages = {124115},\n"
+            "  doi = {10.1063/1.2712433}\n"
+            "}"
+        }},
+
         { "ri_mp2_feyereisen", {
             "RI-MP2: resolution of the identity for MP2 (Feyereisen et al. 1993)",
             "Feyereisen, M.; Fitzgerald, G.; Komornicki, A. Chem. Phys. Lett. 1993, 208, 359-363 (DOI: 10.1016/0009-2614(93)87156-W)",

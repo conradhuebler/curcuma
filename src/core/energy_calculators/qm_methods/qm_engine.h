@@ -418,6 +418,15 @@ public:
     /// gradientBohr()/gradientParts() ({1e, 2e, E_nn}, Eh/Bohr). False on error (reason in gradientError()).
     /// Implemented in qm_mp2_grad.cpp.
     bool computeMP2Gradient(const qmint::MP2Options& opt, double c_os, double c_ss, qmint::MP2Result& res);
+    /// WP12 stage 2 (Claude Generated, Oct 2026): analytic nuclear gradient of E_KS + c_os E_OS + c_ss E_SS for the
+    /// double-hybrid KS reference of the last Calculation() (QMFunctional::DoubleHybrid, converged, exact-integral SCF):
+    /// KS gradient (computeGradient) + PT2 part from the Z-vector equations with the KS orbital Hessian (Coulomb,
+    /// a_x exchange, XC kernel f_xc), PT2 RI (opt.ri, own mode-j setup with opt.ri_aux) or canonical (n^4 tensor),
+    /// frozen core supported. Fills gradientBohr()/gradientParts() ({1e, 2e incl. RI, E_nn, XC basis, grid
+    /// response}, Eh/Bohr, PT2 parts added in) and res (timings, Z-vector iterations; energies of the gradient
+    /// path). CPU only (with -gpu a counted qm_dh_grad fallback). False with gradientError() on error.
+    /// Implemented in qm_dh_grad.cpp (derivation: docs/DFT_ROADMAP/WP12_doppelhybride.md, stage 2).
+    bool computeDoubleHybridGradient(const qmint::MP2Options& opt, double c_os, double c_ss, qmint::MP2Result& res);
     /// WP13 (Claude Generated, Oct 2026): canonical closed-shell CCSD on the converged exact-integral RHF of the
     /// last Calculation() (CPU, full MO integrals incl. v^4, no RI, no gradient). Implemented in qm_ccsd.cpp.
     /// False on error (unconverged amplitudes, memory limit, -qm.ri active).
@@ -677,6 +686,20 @@ private:
     /// else from the engine's exact J/K builder (stored tensor, device, or integral-direct).
     Matrix mp2G4(const Matrix& X_mo, const qmint::ERITensor* eri = nullptr) const;
     mutable bool m_gpu_mp2_grad_failed = false;  ///< device MP2 2e derivative failed once: CPU from then on
+    // WP12 stage 2 (Claude Generated, Oct 2026; qm_dh_grad.cpp): pieces of the double-hybrid gradient.
+    /// KS orbital Hessian product G4(X) = C^T (4 J - 2 a_x K + 4 F_xc)(C X C^T) C (J/K as mp2G4, F_xc on the CPU grid).
+    Matrix dhG4(const Matrix& X_mo, const qmint::ERITensor* eri, bool& ok) const;
+    /// F_xc[D] (qmxc::buildFxc) on the grid of the current geometry; false if the grid or a kernel jet is missing.
+    bool dhFxc(const Matrix& D, Matrix& V) const;
+    /// d/dt of the XC gradient at P + t P2 (basis part, and with -qm.grid_response the point and weight parts).
+    bool dhXCResponseGradient(const Matrix& P2, Matrix& g_basis, Matrix& g_response, std::string& why) const;
+    /// Active atom of every active basis function (as xcGradient).
+    std::vector<int> activeFunctionAtoms() const;
+    /// RI-PT2 gradient intermediates (own mode-j setup): energies, unrelaxed blocks, L1 (n x o), L2 (n x v), the
+    /// 3-index density G (raw aux, packed) and the 2-index density M2; the RIJK object for the derivative integrals.
+    bool dhRIIntermediates(const qmint::MP2Options& opt, int nf, double c_os, double c_ss, qmint::MP2Result& res,
+                           Matrix& Poo, Matrix& Pvv, Matrix& L1, Matrix& L2, Matrix& G3, Eigen::MatrixXd& M2,
+                           std::shared_ptr<qmri::RIJK>& ri, std::string& why);
     /// RI tensor for a correlation method (RI-MP2, LMP2; Claude Generated, Oct 2026): the SCF's own tensor when -qm.ri
     /// ran with the same auxiliary file, else a separate mode-j setup (raw (Q|mn) + metric factor). nullptr + `why` on
     /// failure; `src` says which; setup time goes to `setup_ms`. Implemented in qm_rimp2.cpp.

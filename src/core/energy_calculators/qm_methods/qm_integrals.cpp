@@ -3016,4 +3016,53 @@ Matrix gradientTwoElectronMP2(const std::vector<GTO::Orbital>& basis, const Matr
     return gradientTwoElectronDriver(basis, sh, natoms, threads, fill);
 }
 
+// Declared in qm_ri.h (same reason as above). Claude Generated (Oct 2026, WP12 stage 2: double-hybrid gradient).
+// The PT2 part only (the KS part P x P is the gradientTwoElectronScaled call of computeGradient); Dns optional.
+Matrix gradientTwoElectronDHPT2(const std::vector<GTO::Orbital>& basis, const Matrix& P, const Matrix& P2,
+                                const double* Dns, const Matrix* Q, double kx, int natoms, int threads)
+{
+    if (basis.empty()) return Matrix::Zero(natoms, 3);
+    const std::vector<EriShell> sh = groupShells(basis);
+    const ShellOutput so = makeShellOutput(sh, (int)basis.size(), Q);
+    const int na = so.n;
+    std::vector<Eigen::MatrixXd> Tt(sh.size());
+    for (size_t s = 0; s < sh.size(); ++s)
+        if (so.spherical && !so.identity[s]) Tt[s] = so.T[s].transpose();
+    auto fill = [&](int sA, int sB, int sC, int sD, std::vector<double>& Dq) {
+        const EriShell& A = sh[sA];
+        const EriShell& B = sh[sB];
+        const EriShell& C = sh[sC];
+        const EriShell& D = sh[sD];
+        const int nA = (int)A.lmn.size(), nB = (int)B.lmn.size(), nC = (int)C.lmn.size(), nD = (int)D.lmn.size();
+        thread_local std::vector<double> blk, tmp;
+        if (Dns) {
+            int d[4] = { so.width[sA], so.width[sB], so.width[sC], so.width[sD] };
+            const int f0 = so.first[sA], f1 = so.first[sB], f2 = so.first[sC], f3 = so.first[sD];
+            blk.resize((size_t)d[0] * d[1] * d[2] * d[3]);
+            for (int a = 0; a < d[0]; ++a)
+                for (int b = 0; b < d[1]; ++b)
+                    for (int c = 0; c < d[2]; ++c) {
+                        const double* src = Dns + ((((size_t)(f0 + a) * na + (f1 + b)) * na + (f2 + c)) * na + f3);
+                        double* dst = &blk[(((size_t)a * d[1] + b) * d[2] + c) * d[3]];
+                        for (int e = 0; e < d[3]; ++e) dst[e] = src[e];
+                    }
+            const int s4[4] = { sA, sB, sC, sD };
+            for (int k = 0; k < 4; ++k)
+                if (so.spherical && !so.identity[s4[k]]) transformAxis(blk, tmp, d, k, Tt[s4[k]]);
+        }
+        Dq.resize((size_t)nA * nB * nC * nD);
+        for (int a = 0; a < nA; ++a)
+            for (int b = 0; b < nB; ++b)
+                for (int c = 0; c < nC; ++c)
+                    for (int e = 0; e < nD; ++e) {
+                        const int m = A.first + a, n = B.first + b, l = C.first + c, s = D.first + e;
+                        const size_t idx = ((size_t)(a * nB + b) * nC + c) * nD + e;
+                        Dq[idx] = (P2(m, n) * P(l, s) + P(m, n) * P2(l, s))
+                                - 0.25 * kx * (P2(m, l) * P(n, s) + P(m, l) * P2(n, s) + P2(m, s) * P(n, l) + P(m, s) * P2(n, l))
+                                + (Dns ? blk[idx] : 0.0);
+                    }
+    };
+    return gradientTwoElectronDriver(basis, sh, natoms, threads, fill);
+}
+
 }  // namespace qmint

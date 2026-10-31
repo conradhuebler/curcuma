@@ -13,6 +13,8 @@
 
 #include "src/core/curcuma_logger.h"
 #include "src/core/energy_calculators/ff_methods/d3param_generator.h"
+#include "src/core/units.h"
+#include "src/core/energy_calculators/ff_methods/cn_calculator.h"
 
 #include <fmt/format.h>
 
@@ -247,14 +249,7 @@ double DoubleHybridMethod::calculateEnergy(bool gradient)
     m_error = false;
     m_error_message.clear();
     const double nan = std::numeric_limits<double>::quiet_NaN();
-    if (gradient) {
-        // Stage 1 has no double-hybrid gradient; a KS-only or zero gradient would optimise the wrong surface.
-        m_error = true;
-        m_error_message = std::string(m_def->name) + " has no analytic gradient (WP12 stage 1: energies only; use -sp, or b3lyp/mp2 "
-                                       "for -opt/-md/-hessian)";
-        CurcumaLogger::error(m_error_message);
-        return nan;
-    }
+    if (gradient) m_gradient_bohr = Matrix();  // no stale gradient after a failed request
     if (m_dispersion == DHDispersion::D4) {
         m_error = true;
         m_error_message = std::string(m_def->name) + ": D4 dispersion for double hybrids is not available in curcuma (native D4 is "
@@ -278,15 +273,40 @@ double DoubleHybridMethod::calculateEnergy(bool gradient)
         return nan;
     }
     m_e_pt2 = m_def->c_os * m_pt2.e_os + m_def->c_ss * m_pt2.e_ss;
-    // 3. dispersion
+    // 3. dispersion (WP12 stage 2: with its gradient, pair part + CN chain as hf-3c, Eh/Bohr)
     m_e_disp = 0.0;
+    const int nat = m_molecule.AtomCount();
+    Matrix g_disp = Matrix::Zero(nat, 3);
     if (m_d3) {
         m_d3->prepareForEnergyGradient(m_molecule.m_atoms, m_molecule.m_geometry);
-        Matrix g = Matrix::Zero(m_molecule.AtomCount(), 3);
-        Vector dEdcn = Vector::Zero(m_molecule.AtomCount());
-        m_e_disp = m_d3->getEnergyAndGradient(false, g, dEdcn);
+        Vector dEdcn = Vector::Zero(nat);
+        m_e_disp = m_d3->getEnergyAndGradient(gradient, g_disp, dEdcn);
+        if (gradient && dEdcn.size() == nat)
+            CNCalculator::addD3CNGradient(m_molecule.m_atoms, m_molecule.m_geometry, dEdcn, g_disp, /*k1=*/16.0,
+                                          /*k2=*/4.0 / 3.0,
+                                          /*distance_unit_to_bohr=*/CurcumaUnit::Length::BOHR_TO_ANGSTROM);
     }
     m_e_total = m_e_ks + m_e_pt2 + m_e_disp;
+    // 4. analytic gradient (WP12 stage 2): KS + PT2 (Z-vector with the KS orbital Hessian) + dispersion
+    if (gradient) {
+        if (!m_engine->computeDoubleHybridGradient(m_options, m_def->c_os, m_def->c_ss, m_pt2_grad)) {
+            m_error = true;
+            m_error_message = std::string(m_def->name) + ": " + m_engine->gradientError();
+            m_gradient_bohr = Matrix::Zero(nat, 3);
+            return nan;
+        }
+        m_gradient_bohr = m_engine->gradientBohr() + g_disp;
+        m_gradient_parts = m_engine->gradientParts();
+        m_gradient_parts.push_back(g_disp);
+        if (CurcumaLogger::get_verbosity() >= 2)
+            CurcumaLogger::info(fmt::format("{} gradient: |g| = {:.6e} Eh/Bohr; Z-vector {} iterations (max residual "
+                                            "{:.1e}); PT2 amplitudes {:.1f} ms, back-transformation {:.1f} ms, Z-vector "
+                                            "{:.1f} ms, 1e {:.1f} ms, 2e {:.1f} ms ({})",
+                                            m_def->name, m_gradient_bohr.norm(), m_pt2_grad.zvector_iterations,
+                                            m_pt2_grad.zvector_residual, m_pt2_grad.t_grad_amplitudes_ms,
+                                            m_pt2_grad.t_grad_backtrans_ms, m_pt2_grad.t_grad_zvector_ms,
+                                            m_pt2_grad.t_grad_deriv1e_ms, m_pt2_grad.t_grad_deriv2e_ms, m_pt2_grad.info));
+    }
 
     if (CurcumaLogger::get_verbosity() >= 1) {
         const std::string pt2 = m_options.ri
@@ -315,6 +335,13 @@ double DoubleHybridMethod::calculateEnergy(bool gradient)
         CurcumaLogger::energy_abs(m_e_total, "total " + std::string(m_def->name) + " energy");
     }
     return m_e_total;
+}
+
+// Claude Generated (Oct 2026, WP12 stage 2).
+Matrix DoubleHybridMethod::getGradient() const
+{
+    if (m_gradient_bohr.rows() != m_molecule.AtomCount()) return Matrix::Zero(m_molecule.AtomCount(), 3);
+    return m_gradient_bohr * CurcumaUnit::Length::ANGSTROM_TO_BOHR;  // Eh/Bohr -> Eh/Angstrom
 }
 
 json DoubleHybridMethod::getEnergyDecomposition() const

@@ -1,5 +1,5 @@
 /*
- * <Native double-hybrid density functionals (WP12 stage 1: energies, CPU)>
+ * <Native double-hybrid density functionals (WP12 stage 1: energies; stage 2: analytic gradient; CPU)>
  * Copyright (C) 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * A double hybrid adds a scaled second-order perturbation energy, evaluated with the Kohn-Sham orbitals and
@@ -18,9 +18,11 @@
  * kDoubleHybridTable in double_hybrid_method.cpp. Methods: b2plyp, b2plyp-d3bj, b2gp-plyp, b2gp-plyp-d3bj, dsd-blyp,
  * dsd-blyp-d3bj, dsd-pbep86, dsd-pbep86-d3bj, dsd-pbeb95-d3bj, revdsd-pbep86, revdsd-pbep86-d4.
  *
- * Energy only (stage 1): hasGradient() is false, a gradient request is an error (-opt/-md stop). GPU: J/K and the
- * RI-MP2 sum may run on the device through the existing paths; the XC kernels P86/B95 are CPU-only (counted qm_xc
- * fallback, QMEngine::ensureGpuXC).
+ * Gradient (stage 2, Oct 2026): QMEngine::computeDoubleHybridGradient (qm_dh_grad.cpp: KS gradient + PT2 part from
+ * the Z-vector equations with the KS orbital Hessian incl. the XC kernel f_xc, RI or canonical PT2, frozen core) plus
+ * the D3(BJ) gradient; CPU only. GPU: J/K and the RI-MP2 sum may run on the device through the existing paths; the
+ * XC kernels P86/B95 are CPU-only (counted qm_xc fallback, QMEngine::ensureGpuXC), the PT2 gradient is a counted
+ * qm_dh_grad fallback.
  *
  * Claude Generated (Oct 2026, WP12 stage 1, docs/DFT_ROADMAP/WP12_doppelhybride.md). AI-generated, machine-tested;
  * human production test pending.
@@ -96,18 +98,20 @@ public:
 
     bool setMolecule(const Mol& mol) override;
     bool updateGeometry(const Matrix& geometry) override;
-    /// E_KS + c_os E_os + c_ss E_ss + E_disp (Eh). gradient = true is an error (stage 1, no analytic gradient).
+    /// E_KS + c_os E_os + c_ss E_ss + E_disp (Eh); gradient = true also forms the analytic gradient (stage 2).
     double calculateEnergy(bool gradient = false) override;
 
-    Matrix getGradient() const override { return Matrix::Zero(m_molecule.AtomCount(), 3); }
+    /// Eh/Angstrom (ComputationalMethod contract) of the last calculateEnergy(true); zero before.
+    Matrix getGradient() const override;
     Vector getCharges() const override { return Vector::Zero(m_molecule.AtomCount()); }
     Vector getBondOrders() const override { return Vector::Zero(0); }
     Position getDipole() const override { return Position::Zero(); }
 
     std::string getMethodName() const override { return m_def->name; }
     bool isThreadSafe() const override { return true; }
-    /// Stage 1: energies only (the double-hybrid gradient needs the Z-vector of the KS response: stage 2).
-    bool hasGradient() const override { return false; }
+    /// WP12 stage 2: analytic gradient for every table row (RI or canonical PT2, frozen core or not); false only for
+    /// D4 dispersion (not implemented, the energy is an error too).
+    bool hasGradient() const override { return m_dispersion != DHDispersion::D4; }
     void setThreadCount(int threads) override { (void)threads; }
     void setParameters(const json& params) override { (void)params; }
     json getParameters() const override { return json{}; }
@@ -120,6 +124,14 @@ public:
 
     const qmint::MP2Result& pt2Result() const { return m_pt2; }
     const DoubleHybridDef& definition() const { return *m_def; }
+    /// Gradient (Eh/Bohr) of the last calculateEnergy(true) and its parts {1e, 2e, E_nn, XC basis, grid response,
+    /// dispersion} (PT2 contributions summed into the first five). Claude Generated (WP12 stage 2).
+    const Matrix& gradientBohr() const { return m_gradient_bohr; }
+    const std::vector<Matrix>& gradientParts() const { return m_gradient_parts; }
+    /// The KS engine (validation hooks only, e.g. QMEngine::freezeXCGrid in the finite-difference test).
+    QMEngine& engine() { return *m_engine; }
+    /// Z-vector iterations and timings of the last gradient.
+    const qmint::MP2Result& pt2GradientResult() const { return m_pt2_grad; }
 
 private:
     const DoubleHybridDef* m_def = nullptr;  ///< row of doubleHybridTable() (static storage)
@@ -127,6 +139,9 @@ private:
     std::unique_ptr<D3ParameterGenerator> m_d3;
     qmint::MP2Options m_options;
     qmint::MP2Result m_pt2;
+    qmint::MP2Result m_pt2_grad;          ///< WP12 stage 2: result of computeDoubleHybridGradient
+    Matrix m_gradient_bohr;               ///< WP12 stage 2: total gradient (Eh/Bohr)
+    std::vector<Matrix> m_gradient_parts;
     DHDispersion m_dispersion = DHDispersion::None;  ///< after -qm.dispersion
     bool m_p86_vwn5 = false;
     Mol m_molecule;

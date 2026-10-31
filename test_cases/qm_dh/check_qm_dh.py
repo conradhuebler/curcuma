@@ -10,6 +10,7 @@ Gates (definitions as in check_qm_mgga.py; measured values in docs/DFT_ROADMAP/W
   fc / canonical  the same PT2 gates for frozen core / exact-integral PT2
   d3         |E_D3(BJ) - ORCA 6.1| <= 1e-9 Eh (ORCA prints 12 digits)
   threads    1 vs 4 threads: total energy bitwise; update: UpdateMolecule A -> B = fresh B to 1e-10 Eh
+  gradient / cli_opt  since stage 2 (Oct 2026): the gradient request and -opt must succeed (values in ../qm_dh_grad)
 Claude Generated (Oct 2026, WP12 stage 1).
 """
 import argparse
@@ -146,10 +147,11 @@ def check_simple(a, case, chk):
     mol, fn = case.split("_", 1)
     xyz = os.path.join(TC, REF_XYZ[mol])
     if chk == "gradient":
+        # WP12 stage 2 (Oct 2026): the gradient exists now; a request must succeed (values: test_cases/qm_dh_grad)
         out = driver(a, ["energy", xyz, "--method", fn, "--gradient"])
         print(out.get("message"))
-        if out.get("has_gradient") or not out.get("error") or "no analytic gradient" not in out.get("message", ""):
-            sys.exit("a gradient request must be an error and hasGradient() false")
+        if not out.get("has_gradient") or out.get("error"):
+            sys.exit("a gradient request must succeed and hasGradient() be true (WP12 stage 2)")
     elif chk == "threads":
         e1 = driver(a, ["energy", xyz, "--method", fn, "--threads", "1"])["energy"]
         e4 = driver(a, ["energy", xyz, "--method", fn, "--threads", "4"])["energy"]
@@ -188,10 +190,11 @@ def check_cli(a, chk):
                     sys.exit(f"-sp failed (exit {rc})")
                 print("  E(b2plyp) =", m.group(1))
             elif chk == "cli_opt":
+                # WP12 stage 2 (Oct 2026): -opt runs on the analytic gradient (geometry checks: test_cases/qm_dh_grad)
                 rc, txt = curcuma_run(a, ["-opt", "H2O.xyz", "-method", "b2plyp", "-no_bmt"], tmp)
                 print(txt[-1500:])
-                if "no analytic gradient" not in txt:
-                    sys.exit(f"-opt must stop with the gradient error (exit {rc})")
+                if rc != 0 or not os.path.exists(os.path.join(tmp, "H2O.opt.xyz")) or "no analytic gradient" in txt:
+                    sys.exit(f"-opt with b2plyp must run on the analytic gradient (exit {rc})")
             elif chk == "cli_d4":
                 rc, txt = curcuma_run(a, ["-sp", "H2O.xyz", "-method", "revdsd-pbep86-d4", "-no_bmt"], tmp)
                 print(txt[-1200:])

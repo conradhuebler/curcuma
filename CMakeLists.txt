@@ -570,6 +570,7 @@ set(curcuma_core_SRC
         src/core/energy_calculators/qm_methods/qm_integrals.cpp
         src/core/energy_calculators/qm_methods/qm_grid.cpp
         src/core/energy_calculators/qm_methods/qm_xc.cpp
+        src/core/energy_calculators/qm_methods/qm_xc_response.cpp
         src/core/energy_calculators/qm_methods/qm_method.cpp
         src/core/energy_calculators/qm_methods/qm_scf.cpp
         src/core/energy_calculators/qm_methods/qm_ri.cpp
@@ -577,6 +578,7 @@ set(curcuma_core_SRC
         src/core/energy_calculators/qm_methods/hf3c_method.cpp
         src/core/energy_calculators/qm_methods/qm_mp2.cpp
         src/core/energy_calculators/qm_methods/qm_mp2_grad.cpp
+        src/core/energy_calculators/qm_methods/qm_dh_grad.cpp
         src/core/energy_calculators/qm_methods/mp2_method.cpp
         src/core/energy_calculators/qm_methods/qm_ccsd.cpp
         src/core/energy_calculators/qm_methods/ccsd_method.cpp
