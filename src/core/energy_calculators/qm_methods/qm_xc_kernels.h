@@ -25,8 +25,13 @@
 
 #if defined(__CUDACC__) || defined(__HIPCC__)
 #define QM_HD __host__ __device__ inline
+#define QM_HD_NOINLINE __host__ __device__ inline
 #else
 #define QM_HD inline
+// WP12 (Oct 2026): the double-hybrid kernels are kept out of line on the host, so that adding them to the switch of
+// evaluateKernel does not change GCC's inlining (and FMA contraction) of the existing kernels: with them inlined, the
+// B3LYP gradient changed in the last bit (CPU dumps vs 602f727f), with noinline it is bitwise as before.
+#define QM_HD_NOINLINE inline __attribute__((noinline))
 #endif
 
 // The project builds with -Winline; GCC may decline to inline the larger kernels into evaluateKernel (only a
@@ -56,7 +61,11 @@ enum class XCKernel {
     TPSS_X,    ///< meta-GGA TPSS exchange (WP11; CPU and CUDA), libxc MGGA_X_TPSS
     TPSS_C,    ///< meta-GGA TPSS correlation (revPKZB + PBE, WP11; CPU and CUDA), libxc MGGA_C_TPSS
     SCAN_X,    ///< meta-GGA SCAN exchange (WP11; CPU and CUDA), libxc MGGA_X_SCAN
-    SCAN_C     ///< meta-GGA SCAN correlation (WP11; CPU and CUDA), libxc MGGA_C_SCAN
+    SCAN_C,    ///< meta-GGA SCAN correlation (WP11; CPU and CUDA), libxc MGGA_C_SCAN
+    // WP12 stage 1 (double hybrids, Oct 2026): CPU only, the device XC falls back for them (QMEngine::ensureGpuXC)
+    P86_C,     ///< GGA Perdew 1986 correlation on PZ81 local correlation (WP12), libxc GGA_C_P86
+    P86VWN_C,  ///< GGA Perdew 1986 gradient term on VWN5 local correlation (WP12; ORCA's P86), libxc GGA_C_P86VWN
+    B95_C      ///< meta-GGA Becke 1995 correlation (WP12), libxc MGGA_C_BC95
 };
 
 /// Weighted kernel: E_xc contribution = weight * integral rho eps_kernel.
@@ -106,12 +115,20 @@ QM_HD bool isExchange(XCKernel k)
 /// True when the kernel depends on tau = 1/2 sum_i |grad psi_i|^2 (meta-GGA, WP11); such a kernel needs sigma too.
 QM_HD bool isMGGA(XCKernel k)
 {
-    return k == XCKernel::TPSS_X || k == XCKernel::TPSS_C || k == XCKernel::SCAN_X || k == XCKernel::SCAN_C;
+    return k == XCKernel::TPSS_X || k == XCKernel::TPSS_C || k == XCKernel::SCAN_X || k == XCKernel::SCAN_C
+        || k == XCKernel::B95_C;
 }
 /// True when the kernel depends on sigma = |grad rho|^2 (GGA).
 QM_HD bool isGGA(XCKernel k)
 {
-    return k == XCKernel::PBE_X || k == XCKernel::PBE_C || k == XCKernel::B88_X || k == XCKernel::LYP_C;
+    return k == XCKernel::PBE_X || k == XCKernel::PBE_C || k == XCKernel::B88_X || k == XCKernel::LYP_C
+        || k == XCKernel::P86_C || k == XCKernel::P86VWN_C;
+}
+/// True for the kernels added for the double hybrids (WP12 stage 1): validated on the CPU only, the device XC is not
+/// used with them (QMEngine::ensureGpuXC reports a counted fallback). Claude Generated (Oct 2026, WP12).
+QM_HD bool isCpuOnlyKernel(XCKernel k)
+{
+    return k == XCKernel::P86_C || k == XCKernel::P86VWN_C || k == XCKernel::B95_C;
 }
 /// Density below which a point is left out of E_xc and V_xc (gga: functional needs sigma).
 QM_HD double effectiveThreshold(bool gga, double rho_threshold)
@@ -289,6 +306,80 @@ QM_HD void lypCorrelation(double rho, double sigma, double& eps, double& vrho, d
     vsigma = -H;
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// WP12 stage 1 (double hybrids; Claude Generated, Oct 2026): PZ81 local correlation and the P86 gradient correction.
+// ---------------------------------------------------------------------------------------------------------------
+
+// Perdew-Zunger 1981 paramagnetic correlation (J. P. Perdew, A. Zunger, Phys. Rev. B 23, 5048 (1981), eqs. C3 and
+// C5 with the paramagnetic constants of their table; libxc LDA_C_PZ lda_c_pz.c par_pz, NOT the continuity-corrected
+// LDA_C_PZ_MOD): r_s >= 1: eps = gamma / (1 + beta1 sqrt(r_s) + beta2 r_s),
+//               r_s <  1: eps = A ln r_s + B + C r_s ln r_s + D r_s;      v = eps - (r_s/3) d eps/d r_s.
+constexpr double kPZ_gamma = -0.1423, kPZ_beta1 = 1.0529, kPZ_beta2 = 0.3334;
+constexpr double kPZ_A = 0.0311, kPZ_B = -0.048, kPZ_C = 0.0020, kPZ_D = -0.0116;
+QM_HD void pz81Correlation(double rho, double& eps, double& v)
+{
+    const double rs = ::cbrt(3.0 / (4.0 * kPi * rho));
+    double de = 0.0;
+    if (rs >= 1.0) {
+        const double srs = ::sqrt(rs);
+        const double den = 1.0 + kPZ_beta1 * srs + kPZ_beta2 * rs;
+        eps = kPZ_gamma / den;
+        de = -kPZ_gamma * (0.5 * kPZ_beta1 / srs + kPZ_beta2) / (den * den);
+    } else {
+        const double lr = ::log(rs);
+        eps = kPZ_A * lr + kPZ_B + kPZ_C * rs * lr + kPZ_D * rs;
+        de = kPZ_A / rs + kPZ_C * (lr + 1.0) + kPZ_D;
+    }
+    v = eps - rs / 3.0 * de;
+}
+
+// Perdew 1986 gradient correction (J. P. Perdew, Phys. Rev. B 33, 8822 (1986), eqs. 6, 8, 9; libxc gga_c_p86.mpl,
+// constants p86_val of gga_c_p86.c), closed shell (d(zeta = 0) = 1):
+//   e_H = rho eps_H = sigma rho^(-4/3) C(r_s) exp(-Phi),   Phi = f~ (C_inf / C(r_s)) |grad rho| / rho^(7/6),
+//   C(r_s) = a + (b + alpha r_s + beta r_s^2) / (1 + gamma r_s + delta r_s^2 + 1e4 beta r_s^3),  C_inf = a + b,
+//   a = 0.001667, b = 0.002568, alpha = 0.023266, beta = 7.389e-6, gamma = 8.723, delta = 0.472, f~ = 1.745 * 0.11.
+// Derivatives (by hand; d Phi/d sigma = Phi / (2 sigma), d r_s/d rho = -r_s/(3 rho)):
+//   v_sigma = rho^(-4/3) C exp(-Phi) (1 - Phi/2)                                  (finite at sigma = 0)
+//   v_rho   = (e_H / rho) [ -4/3 + 7 Phi / 6 - (r_s C' / (3 C)) (1 + Phi) ]
+// The total P86 correlation is a local LDA part plus this term: libxc GGA_C_P86 (Perdew's own choice, Gaussian,
+// Q-Chem) uses PZ81; ORCA has no PZ81 and puts the term on VWN5 (libxc GGA_C_P86VWN; the ORCA output prints
+// "LDAOpt VWN-5" for its P86 double hybrids, checked with ORCA 6.1).
+constexpr double kP86_a = 0.001667, kP86_b = 0.002568, kP86_alpha = 0.023266, kP86_beta = 7.389e-6;
+constexpr double kP86_gamma = 8.723, kP86_delta = 0.472, kP86_ftilde = 1.745 * 0.11;
+QM_HD void p86GradientCorrection(double rho, double sigma, double& eps, double& vrho, double& vsigma)
+{
+    const double rs = ::cbrt(3.0 / (4.0 * kPi * rho));
+    const double N = kP86_b + kP86_alpha * rs + kP86_beta * rs * rs;
+    const double Dn = 1.0 + kP86_gamma * rs + kP86_delta * rs * rs + 1.0e4 * kP86_beta * rs * rs * rs;
+    const double Np = kP86_alpha + 2.0 * kP86_beta * rs;
+    const double Dnp = kP86_gamma + 2.0 * kP86_delta * rs + 3.0e4 * kP86_beta * rs * rs;
+    const double C = kP86_a + N / Dn;
+    const double Cp = (Np * Dn - N * Dnp) / (Dn * Dn);
+    const double rho13 = ::cbrt(rho);
+    const double rm43 = 1.0 / (rho * rho13);                               // rho^(-4/3)
+    const double y = ::sqrt(sigma) / (rho * ::sqrt(rho13));                // |grad rho| / rho^(7/6)
+    const double Phi = kP86_ftilde * (kP86_a + kP86_b) / C * y;
+    const double ex = ::exp(-Phi);
+    const double eH = sigma * rm43 * C * ex;
+    eps = eH / rho;
+    vsigma = rm43 * C * ex * (1.0 - 0.5 * Phi);
+    vrho = eH / rho * (-4.0 / 3.0 + 7.0 / 6.0 * Phi - rs * Cp / (3.0 * C) * (1.0 + Phi));
+}
+
+/// P86 correlation: local part (PZ81 for libxc GGA_C_P86, VWN5 for GGA_C_P86VWN) + p86GradientCorrection.
+QM_HD_NOINLINE void p86Correlation(double rho, double sigma, bool vwn_local, double& eps, double& vrho, double& vsigma)
+{
+    double el = 0.0, vl = 0.0;
+    if (vwn_local)
+        vwnCorrelation(rho, false, el, vl);
+    else
+        pz81Correlation(rho, el, vl);
+    double eh = 0.0, vh = 0.0;
+    p86GradientCorrection(rho, sigma, eh, vh, vsigma);
+    eps = el + eh;
+    vrho = vl + vh;
+}
+
 /// Any kernel by enum (sigma ignored by LDA kernels, vsigma = 0 for them). False for an unknown kernel.
 QM_HD bool evaluateKernel(XCKernel k, double rho, double sigma, double& eps, double& vrho, double& vsigma)
 {
@@ -302,10 +393,13 @@ QM_HD bool evaluateKernel(XCKernel k, double rho, double sigma, double& eps, dou
         case XCKernel::PBE_C:    pbeCorrelation(rho, sigma, eps, vrho, vsigma); return true;
         case XCKernel::B88_X:    b88Exchange(rho, sigma, eps, vrho, vsigma); return true;
         case XCKernel::LYP_C:    lypCorrelation(rho, sigma, eps, vrho, vsigma); return true;
+        case XCKernel::P86_C:    p86Correlation(rho, sigma, false, eps, vrho, vsigma); return true;
+        case XCKernel::P86VWN_C: p86Correlation(rho, sigma, true, eps, vrho, vsigma); return true;
         case XCKernel::TPSS_X:
         case XCKernel::TPSS_C:
         case XCKernel::SCAN_X:
-        case XCKernel::SCAN_C:   eps = vrho = 0.0; return false;  // meta-GGA: evaluateKernelMGGA (needs tau)
+        case XCKernel::SCAN_C:
+        case XCKernel::B95_C:    eps = vrho = 0.0; return false;  // meta-GGA: evaluateKernelMGGA (needs tau)
     }
     return false;
 }
@@ -664,6 +758,37 @@ QM_HD Dual3 scanCorrelationDual(const Dual3& R, const Dual3& S, const Dual3& T)
     return e1 + fc * (e0 - e1);
 }
 
+// Becke 1995 (B95) correlation (A. D. Becke, J. Chem. Phys. 104, 1040 (1996); libxc mgga_c_bc95.mpl with the PW92
+// LDA_C_PW_MOD constants, css = 0.038, copp = 0.0031 of mgga_c_bc95.c). WP12 stage 1 (Claude Generated, Oct 2026).
+constexpr double kB95_css = 0.038, kB95_copp = 0.0031;
+
+/// B95 correlation, closed shell (rho_a = rho_b = rho/2, |grad rho_s|^2 = sigma/4, tau_s = tau/2 with libxc's
+/// tau = 1/2 sum |grad psi|^2), in libxc's per-spin variables x_s^2 = |grad rho_s|^2 / rho_s^(8/3) and
+/// t_s = tau_s / rho_s^(5/3) (Stoll partition, util.mpl lda_stoll_par / lda_stoll_perp):
+///   eps_c = eps^PW92(rho/2, zeta = 1) g_par + [eps^PW92(rho, zeta = 0) - eps^PW92(rho/2, zeta = 1)] g_perp,
+///   g_par  = (t_s - x_s^2/8) / (K_F (1 + css x_s^2)^2),  K_F = (3/10) (6 pi^2)^(2/3)   (t_s - x_s^2/8 = D_s/rho_s^(5/3),
+///            Becke's same-spin hole curvature, zero for a one-electron density: no self-correlation),
+///   g_perp = 1 / (1 + copp (x_a^2 + x_b^2)) = 1 / (1 + 2 copp x_s^2).
+/// eps^PW92(n, zeta = 1) is the ferromagnetic PW92 set at the spin density; its product with g_par counts both spins
+/// (2 x 1/2 of lda_stoll_par). Derivatives by the dual numbers, as TPSS and SCAN. Claude Generated (WP12).
+QM_HD Dual3 b95CorrelationDual(const Dual3& R, const Dual3& S, const Dual3& T)
+{
+    const Dual3 n = 0.5 * R;                                  // spin density
+    const Dual3 rs_n = dcbrt(3.0 / (4.0 * kPi) / n);
+    const Dual3 rs_R = dcbrt(3.0 / (4.0 * kPi) / R);
+    const Dual3 eF = pw92GDual(rs_n, kPWF_A, kPWF_alpha1, kPWF_beta1, kPWF_beta2, kPWF_beta3, kPWF_beta4);
+    const Dual3 eP = pw92GDual(rs_R, kPW_A, kPW_alpha1, kPW_beta1, kPW_beta2, kPW_beta3, kPW_beta4);
+    const Dual3 n13 = dcbrt(n);
+    const Dual3 n53 = n * n13 * n13;
+    const Dual3 xs2 = 0.25 * S / (n53 * n);                  // (sigma/4) / n^(8/3)
+    const Dual3 ts = 0.5 * T / n53;                          // (tau/2) / n^(5/3)
+    const double KF = 0.3 * ::cbrt(36.0 * kPi * kPi * kPi * kPi);  // (3/10) (6 pi^2)^(2/3)
+    const Dual3 q = 1.0 + kB95_css * xs2;
+    const Dual3 gpar = (ts - xs2 / 8.0) / (KF * q * q);
+    const Dual3 gperp = 1.0 / (1.0 + 2.0 * kB95_copp * xs2);
+    return eF * gpar + (eP - eF) * gperp;
+}
+
 /**
  * @brief One meta-GGA kernel at one point: eps, v_rho = d(rho eps)/d rho, v_sigma = d(rho eps)/d sigma,
  * v_tau = d(rho eps)/d tau (closed shell, total rho, sigma, tau). Applies libxc's tau floor and sigma <= 8 rho tau
@@ -684,6 +809,7 @@ QM_HD bool evaluateKernelMGGA(XCKernel k, double rho, double sigma, double tau, 
         case XCKernel::TPSS_C: e = tpssCorrelationDual(R, S, T); break;
         case XCKernel::SCAN_X: e = scanExchangeDual(R, S, T); break;
         case XCKernel::SCAN_C: e = scanCorrelationDual(R, S, T); break;
+        case XCKernel::B95_C:  e = b95CorrelationDual(R, S, T); break;
         default: return false;
     }
     mggaOutputs(rho, e, eps, vrho, vsigma, vtau);

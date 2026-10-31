@@ -52,6 +52,7 @@ std::string functionalName(QMFunctional f)
         case QMFunctional::B3LYP: return "b3lyp";
         case QMFunctional::TPSS:  return "tpss";
         case QMFunctional::SCAN:  return "scan";
+        case QMFunctional::DoubleHybrid: return "dh";  // WP12: KS part of a double hybrid, label from m_xc
     }
     return "qm";
 }
@@ -352,6 +353,16 @@ QMEngine::QMEngine(QMFunctional functional, const json& config)
 }
 
 QMEngine::~QMEngine() = default;
+
+// WP12 stage 1 (Claude Generated, Oct 2026): the double-hybrid wrapper hands its KS functional in before the first
+// molecule (grid, V_xc cache and SCF are built from m_xc later). Same grid hint as the meta-GGA ctor branch is not
+// repeated here: B95 is the only tau kernel of the table and its grid dependence was measured separately (WP12 doc).
+bool QMEngine::setXCFunctional(const qmxc::XCFunctional& f)
+{
+    if (m_functional != QMFunctional::DoubleHybrid || !f.hasXC() || m_integrals_ready) return false;
+    m_xc = f;
+    return true;
+}
 
 // =================================================================================
 // QMDriver Interface

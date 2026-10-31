@@ -239,8 +239,10 @@ bool QMEngine::computeRIMP2(const qmint::MP2Options& opt, qmint::MP2Result& res)
 {
     res = qmint::MP2Result();
     res.ri = true;
-    if (m_functional != QMFunctional::HF) {
-        CurcumaLogger::error("RI-MP2: needs the HF reference (QMFunctional::HF)");
+    // WP12 stage 1 (Oct 2026): the double hybrids evaluate the same PT2 expression on their KS orbitals and
+    // orbital energies (the HF path is unchanged)
+    if (m_functional != QMFunctional::HF && m_functional != QMFunctional::DoubleHybrid) {
+        CurcumaLogger::error("RI-MP2: needs the HF or double-hybrid KS reference");
         return false;
     }
     if (!m_scf_converged) {

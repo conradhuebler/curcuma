@@ -170,6 +170,18 @@ inline void kohnSham(const qmxc::XCFunctional& f, bool treutler_radial)
                 CitationRegistry::cite("scan");
                 if (t.kernel == qmxc::XCKernel::SCAN_C) CitationRegistry::cite("pw92");
                 break;
+            case qmxc::XCKernel::P86_C:  // WP12: P86 gradient term on PZ81 (libxc GGA_C_P86) or VWN5 (ORCA's P86)
+                CitationRegistry::cite("p86");
+                CitationRegistry::cite("pz81");
+                break;
+            case qmxc::XCKernel::P86VWN_C:
+                CitationRegistry::cite("p86");
+                CitationRegistry::cite("vwn");
+                break;
+            case qmxc::XCKernel::B95_C:  // WP12: B95 uses PW92 for the spin-resolved LDA parts
+                CitationRegistry::cite("b95");
+                CitationRegistry::cite("pw92");
+                break;
         }
     }
     if (f.name == "b3lyp") {
@@ -180,6 +192,11 @@ inline void kohnSham(const qmxc::XCFunctional& f, bool treutler_radial)
     if (treutler_radial) CitationRegistry::cite("treutler_grid");
     CitationRegistry::cite("lebedev");
 }
+
+/// Double hybrids (WP12 stage 1, Claude Generated, Oct 2026) by method name: the paper of the functional, the
+/// PT2 part (MP2, with RI the RI-MP2 papers), D3(BJ) for the -d3bj names (Grimme 2010 D3, Grimme 2011 BJ, and for
+/// b2plyp/b2gp-plyp the D3(BJ) parameter paper). The KS part is cited by kohnSham() when the SCF runs.
+void doubleHybrid(const std::string& name, bool ri, bool d3bj);  // defined in double_hybrid_method.cpp (-Winline)
 
 /// Kohn-Sham nuclear gradient (WP8, Claude Generated, Oct 2026): the closed-shell gradient formulas and, with
 /// -qm.grid_response, the Becke weight derivative (Becke 1988 grid paper is cited by kohnSham()).

@@ -32,6 +32,7 @@
 #include "qm_methods/mp2_method.h"   // Claude Generated: native canonical MP2 (WP11, Oct 2026)
 #include "qm_methods/ccsd_method.h"  // Claude Generated: native canonical RCCSD (WP13, Oct 2026)
 #include "qm_methods/lmp2_method.h"  // Claude Generated: native local PNO-RI-MP2 (WP15, Oct 2026)
+#include "qm_methods/double_hybrid_method.h"  // Claude Generated: native double hybrids (WP12, Oct 2026)
 #include "qm_methods/dispersion_method.h"
 #include "qm_methods/eht_method.h"
 #include "qm_methods/external_gfnff_method.h"
@@ -550,6 +551,15 @@ const std::vector<MethodDescriptor>& MethodFactory::methodTable()
           [](const std::string& m, const json& c) -> std::unique_ptr<ComputationalMethod> {
               CurcumaLogger::success("Method '" + m + "' resolved to native RI-MP2");
               return std::make_unique<MP2Method>(m, c); } },
+        // Claude Generated (Oct 2026, WP12 stage 1): double hybrids = hybrid KS SCF + scaled PT2 on the KS orbitals
+        // (+ D3(BJ) for the -d3bj names); table and sources in qm_methods/double_hybrid_method.cpp; energy only.
+        { {"b2plyp", "b2plyp-d3bj", "b2gp-plyp", "b2gp-plyp-d3bj", "dsd-blyp", "dsd-blyp-d3bj", "dsd-pbep86",
+           "dsd-pbep86-d3bj", "dsd-pbeb95-d3bj", "revdsd-pbep86", "revdsd-pbep86-d4"}, "Quantum Methods (native)",
+          "Native double hybrids (KS hybrid + c_os/c_ss PT2 with RI, -qm.dh_pt2; D3(BJ) for -d3bj names, D4 not available; H-Ne, closed shell, energy only, CPU XC)",
+          always, {{"Native", always}},
+          [](const std::string& m, const json& c) -> std::unique_ptr<ComputationalMethod> {
+              CurcumaLogger::success("Method '" + m + "' resolved to native double hybrid");
+              return std::make_unique<DoubleHybridMethod>(m, c); } },
         // Claude Generated (Oct 2026, WP13): canonical closed-shell CCSD on the native RHF; energy only.
         { {"ccsd"}, "Quantum Methods (native)",
           "Native canonical RCCSD on the native RHF (exact integrals, no RI; H-Ne, closed shell, energy only; -qm.frozen_core, -qm.cc_*)",
@@ -645,7 +655,10 @@ bool isNativeQm(const std::string& m)
 {
     static const std::vector<std::string> names = {
         "hf", "lda", "pbe", "b3lyp", "tpss", "scan", "hf-3c", "hf3c", "mp2", "scs-mp2", "sos-mp2",
-        "ri-mp2", "scs-ri-mp2", "sos-ri-mp2", "ccsd", "lmp2", "local-ri-mp2" };
+        "ri-mp2", "scs-ri-mp2", "sos-ri-mp2", "ccsd", "lmp2", "local-ri-mp2",
+        // WP12 stage 1 (Oct 2026): double hybrids
+        "b2plyp", "b2plyp-d3bj", "b2gp-plyp", "b2gp-plyp-d3bj", "dsd-blyp", "dsd-blyp-d3bj", "dsd-pbep86",
+        "dsd-pbep86-d3bj", "dsd-pbeb95-d3bj", "revdsd-pbep86", "revdsd-pbep86-d4" };
     return std::find(names.begin(), names.end(), m) != names.end();
 }
 }

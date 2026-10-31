@@ -168,6 +168,10 @@ Stand.
 
 ## 5. Funktionen und Refactoring (niedrige Priorität)
 
+- **Doppelhybride, Stufe 2 (Gradient)** (2026-10-31): analytischer Gradient von `b2plyp`/`dsd-*` (Z-Vektor mit KS-Antwort: XC-Kern f_xc,
+  a_x-gewichtetes K, RI-PT2-Dichten); bis dahin `hasGradient()` false, `-opt` bricht ab. [WP12](docs/DFT_ROADMAP/WP12_doppelhybride.md)
+- **Doppelhybride, Stufe 3 (GPU) und D4** (2026-10-31): P86/B95-Kerne auf dem Device (jetzt gezählter `qm_xc`-Fallback), D4 für
+  `revdsd-pbep86-d4` (natives D4 nur für GFN2). [WP12](docs/DFT_ROADMAP/WP12_doppelhybride.md)
 - **Meta-GGA, offen nach Stufe 3** (2026-10-30): offene Schale, r2SCAN/TPSSh, SCAN-taugliche Gitter; Device-XC nur 1,7-2x schneller als 8 CPU-Threads
   (FP64-GEMMs): τ aus ∂φ C_occ statt ∂φ P (~5x weniger FLOPs im X-Schritt) prüfen. [WP11](docs/DFT_ROADMAP/WP11_meta_gga.md)
 - **CG Phase 6**: winkelabhängige Ellipsoid-Energie (`calculateEffectiveDistance`, `calculateCGPairEnergy`, Rotationszüge in Casino). Phase 1 bis 5 sind umgesetzt.
@@ -187,6 +191,9 @@ Code-gebundene Entscheidungen, die bei Ihnen liegen. Fachliche Fragen und Projek
 
 - `-scf_precond_guard`: Vorgabe `g2:4:best` kostet auf dem unrelaxierten 599-Atom-Cluster bei 8 Threads 4 Iterationen gegen `none` (Kriterium war <= 3);
   über 5 Threadzahlen liegt frag (55-62) unter none (58-138). Varianten streuen 58-109, eine konvergiert nicht. Vorgabe behalten? [docs/SCF_PRECOND.md](docs/SCF_PRECOND.md)
+- Doppelhybride (WP12): `dsd-pbeb95` ohne Dispersion fehlt, weil ORCA 6.1 (0,70 HF / 0,52 B95) und Psi4 (0,69 / 0,54) verschiedene
+  Parameter nennen (Paper Kozuch/Martin 2013 nicht gelesen); Default von `-qm.frozen_core` (false, ORCA rechnet DH mit frozen core) und
+  `-qm.p86_lda pz81` (ORCA: VWN5) beibehalten? [WP12](docs/DFT_ROADMAP/WP12_doppelhybride.md)
 - `shouldUpdateHBXB()` korrigieren und damit von der Fortran-Referenz abweichen, oder als Referenzeigenschaft belassen?
 - UFF-/QMDFF-Gradient reparieren (Stand: "erstmal nicht")? `-seed` für die MD-Startgeschwindigkeiten reparieren (ändert jede MD)?
 - GPU-Bitgleichheit angehen (Sammel-Kernel statt `atomicAdd`) oder bei Ensemblevergleichen bleiben?

@@ -1367,6 +1367,173 @@ const std::unordered_map<std::string, CitationData>& database()
             "}"
         }},
 
+        // WP12 stage 1 (Claude Generated, Oct 2026): double hybrids, P86, PZ81, B95.
+        // DOIs checked against Crossref (api.crossref.org) on Oct 31 2026.
+        { "p86", {
+            "P86 gradient correction to the correlation energy (Perdew 1986)",
+            "Perdew, J. P. Phys. Rev. B 1986, 33, 8822-8824 (DOI: 10.1103/PhysRevB.33.8822)",
+            "perdew1986",
+            "@article{perdew1986,\n"
+            "  author = {Perdew, John P.},\n"
+            "  title = {Density-functional approximation for the correlation energy of the inhomogeneous electron gas},\n"
+            "  journal = {Phys. Rev. B},\n"
+            "  year = {1986},\n"
+            "  volume = {33},\n"
+            "  pages = {8822--8824},\n"
+            "  doi = {10.1103/PhysRevB.33.8822}\n"
+            "}"
+        }},
+
+        { "pz81", {
+            "PZ81 local correlation (Perdew & Zunger 1981)",
+            "Perdew, J. P.; Zunger, A. Phys. Rev. B 1981, 23, 5048-5079 (DOI: 10.1103/PhysRevB.23.5048)",
+            "perdew1981",
+            "@article{perdew1981,\n"
+            "  author = {Perdew, John P. and Zunger, Alex},\n"
+            "  title = {Self-interaction correction to density-functional approximations for many-electron systems},\n"
+            "  journal = {Phys. Rev. B},\n"
+            "  year = {1981},\n"
+            "  volume = {23},\n"
+            "  pages = {5048--5079},\n"
+            "  doi = {10.1103/PhysRevB.23.5048}\n"
+            "}"
+        }},
+
+        { "b95", {
+            "B95 correlation (Becke 1996)",
+            "Becke, A. D. J. Chem. Phys. 1996, 104, 1040-1046 (DOI: 10.1063/1.470829)",
+            "becke1996",
+            "@article{becke1996,\n"
+            "  author = {Becke, Axel D.},\n"
+            "  title = {Density-functional thermochemistry. IV. A new dynamical correlation functional and implications for exact-exchange mixing},\n"
+            "  journal = {J. Chem. Phys.},\n"
+            "  year = {1996},\n"
+            "  volume = {104},\n"
+            "  pages = {1040--1046},\n"
+            "  doi = {10.1063/1.470829}\n"
+            "}"
+        }},
+
+        { "b2plyp", {
+            "B2PLYP double hybrid (Grimme 2006)",
+            "Grimme, S. J. Chem. Phys. 2006, 124, 034108 (DOI: 10.1063/1.2148954)",
+            "grimme2006b2plyp",
+            "@article{grimme2006b2plyp,\n"
+            "  author = {Grimme, Stefan},\n"
+            "  title = {Semiempirical hybrid density functional with perturbative second-order correlation},\n"
+            "  journal = {J. Chem. Phys.},\n"
+            "  year = {2006},\n"
+            "  volume = {124},\n"
+            "  pages = {034108},\n"
+            "  doi = {10.1063/1.2148954}\n"
+            "}"
+        }},
+
+        { "b2gpplyp", {
+            "B2GP-PLYP double hybrid (Karton et al. 2008)",
+            "Karton, A.; Tarnopolsky, A.; Lamere, J.-F.; Schatz, G. C.; Martin, J. M. L. J. Phys. Chem. A 2008, 112, 12868-12886 (DOI: 10.1021/jp801805p)",
+            "karton2008",
+            "@article{karton2008,\n"
+            "  author = {Karton, Amir and Tarnopolsky, Alex and Lamere, Jean-Francois and Schatz, George C. and Martin, Jan M. L.},\n"
+            "  title = {Highly Accurate First-Principles Benchmark Data Sets for the Parametrization and Validation of Density Functional and Other Approximate Methods. Derivation of a Robust, Generally Applicable, Double-Hybrid Functional for Thermochemistry and Thermochemical Kinetics},\n"
+            "  journal = {J. Phys. Chem. A},\n"
+            "  year = {2008},\n"
+            "  volume = {112},\n"
+            "  pages = {12868--12886},\n"
+            "  doi = {10.1021/jp801805p}\n"
+            "}"
+        }},
+
+        { "dsd_blyp_2010", {
+            "DSD-BLYP spin-component-scaled double hybrid (Kozuch, Gruzman & Martin 2010)",
+            "Kozuch, S.; Gruzman, D.; Martin, J. M. L. J. Phys. Chem. C 2010, 114, 20801-20808 (DOI: 10.1021/jp1070852)",
+            "kozuch2010",
+            "@article{kozuch2010,\n"
+            "  author = {Kozuch, Sebastian and Gruzman, David and Martin, Jan M. L.},\n"
+            "  title = {DSD-BLYP: A General Purpose Double Hybrid Density Functional Including Spin Component Scaling and Dispersion Correction},\n"
+            "  journal = {J. Phys. Chem. C},\n"
+            "  year = {2010},\n"
+            "  volume = {114},\n"
+            "  pages = {20801--20808},\n"
+            "  doi = {10.1021/jp1070852}\n"
+            "}"
+        }},
+
+        { "dsd_pbep86_2011", {
+            "DSD-PBEP86 (Kozuch & Martin 2011)",
+            "Kozuch, S.; Martin, J. M. L. Phys. Chem. Chem. Phys. 2011, 13, 20104 (DOI: 10.1039/c1cp22592h)",
+            "kozuch2011",
+            "@article{kozuch2011,\n"
+            "  author = {Kozuch, Sebastian and Martin, Jan M. L.},\n"
+            "  title = {DSD-PBEP86: in search of the best double-hybrid DFT with spin-component scaled MP2 and dispersion corrections},\n"
+            "  journal = {Phys. Chem. Chem. Phys.},\n"
+            "  year = {2011},\n"
+            "  volume = {13},\n"
+            "  pages = {20104},\n"
+            "  doi = {10.1039/c1cp22592h}\n"
+            "}"
+        }},
+
+        { "dsd_2013", {
+            "DSD double hybrids, parameter sets with and without dispersion (Kozuch & Martin 2013)",
+            "Kozuch, S.; Martin, J. M. L. J. Comput. Chem. 2013, 34, 2327-2344 (DOI: 10.1002/jcc.23391)",
+            "kozuch2013",
+            "@article{kozuch2013,\n"
+            "  author = {Kozuch, Sebastian and Martin, Jan M. L.},\n"
+            "  title = {Spin-component-scaled double hybrids: An extensive search for the best fifth-rung functionals blending DFT and perturbation theory},\n"
+            "  journal = {J. Comput. Chem.},\n"
+            "  year = {2013},\n"
+            "  volume = {34},\n"
+            "  pages = {2327--2344},\n"
+            "  doi = {10.1002/jcc.23391}\n"
+            "}"
+        }},
+
+        { "revdsd_2019", {
+            "revDSD-PBEP86-D4 (Santra, Sylvetsky & Martin 2019)",
+            "Santra, G.; Sylvetsky, N.; Martin, J. M. L. J. Phys. Chem. A 2019, 123, 5129-5143 (DOI: 10.1021/acs.jpca.9b03157)",
+            "santra2019",
+            "@article{santra2019,\n"
+            "  author = {Santra, Golokesh and Sylvetsky, Nitai and Martin, Jan M. L.},\n"
+            "  title = {Minimally Empirical Double-Hybrid Functionals Trained against the GMTKN55 Database: revDSD-PBEP86-D4, revDOD-PBE-D4, and DOD-SCAN-D4},\n"
+            "  journal = {J. Phys. Chem. A},\n"
+            "  year = {2019},\n"
+            "  volume = {123},\n"
+            "  pages = {5129--5143},\n"
+            "  doi = {10.1021/acs.jpca.9b03157}\n"
+            "}"
+        }},
+
+        { "revdsd_pz81_2023", {
+            "revDSD-PBEP86 parameters for PZ81 and VWN5 local correlation (Mehta, Santra & Martin 2023)",
+            "Mehta, N.; Santra, G.; Martin, J. M. L. Can. J. Chem. 2023, 101, 656-663 (DOI: 10.1139/cjc-2022-0277)",
+            "mehta2023",
+            "@article{mehta2023,\n"
+            "  author = {Mehta, Nisha and Santra, Golokesh and Martin, Jan M. L.},\n"
+            "  title = {Is explicitly correlated double-hybrid density functional theory advantageous for vibrational frequencies?},\n"
+            "  journal = {Can. J. Chem.},\n"
+            "  year = {2023},\n"
+            "  volume = {101},\n"
+            "  pages = {656--663},\n"
+            "  doi = {10.1139/cjc-2022-0277}\n"
+            "}"
+        }},
+
+        { "goerigk_grimme_2011", {
+            "D3(BJ) parameters of the double hybrids (Goerigk & Grimme 2011)",
+            "Goerigk, L.; Grimme, S. Phys. Chem. Chem. Phys. 2011, 13, 6670 (DOI: 10.1039/c0cp02984j)",
+            "goerigk2011",
+            "@article{goerigk2011,\n"
+            "  author = {Goerigk, Lars and Grimme, Stefan},\n"
+            "  title = {A thorough benchmark of density functional methods for general main group thermochemistry, kinetics, and noncovalent interactions},\n"
+            "  journal = {Phys. Chem. Chem. Phys.},\n"
+            "  year = {2011},\n"
+            "  volume = {13},\n"
+            "  pages = {6670},\n"
+            "  doi = {10.1039/c0cp02984j}\n"
+            "}"
+        }},
+
         // WP8 (Claude Generated, Oct 2026): Kohn-Sham nuclear gradient and its grid weight derivative.
         // DOIs checked against Crossref (api.crossref.org) on Oct 30 2026.
         { "ks_gradient_jgp", {

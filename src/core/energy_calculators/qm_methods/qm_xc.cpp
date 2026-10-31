@@ -77,6 +77,9 @@ std::string kernelName(XCKernel k)
         case XCKernel::TPSS_C:   return "TPSS-C";
         case XCKernel::SCAN_X:   return "SCAN-X";
         case XCKernel::SCAN_C:   return "SCAN-C";
+        case XCKernel::P86_C:    return "P86(PZ81)";
+        case XCKernel::P86VWN_C: return "P86(VWN5)";
+        case XCKernel::B95_C:    return "B95";
     }
     return "?";
 }

@@ -665,6 +665,7 @@ add_subdirectory(qm_b3lyp)  # Claude Generated (Oct 2026, WP7): B88/LYP kernels 
 add_subdirectory(qm_mgga)  # Claude Generated (Oct 2026, WP11 stage 1): TPSS/SCAN kernels vs libxc, V_xc vs FD, energies vs PySCF
 add_subdirectory(qm_dft_grad)  # Claude Generated (Oct 2026, WP8): Kohn-Sham analytic gradient vs FD and PySCF, -opt
 add_subdirectory(qm_mgga_grad)  # Claude Generated (Oct 2026, WP11 stage 2): meta-GGA analytic gradient vs FD and PySCF, -opt
+add_subdirectory(qm_dh)  # Claude Generated (Oct 2026, WP12 stage 1): double hybrids (P86/B95 kernels, KS + PT2 vs PySCF, D3(BJ) vs ORCA)
 add_subdirectory(qm_gpu_dft)  # Claude Generated (Oct 2026): Kohn-Sham DFT on the GPU vs the CPU (skipped without CUDA)
 # Claude Generated (Oct 2026): property tests generated from the structure library (test_cases/struct_test_policy.json):
 # translation/rotation/permutation invariance, sum of forces and torque, finite-difference gradient, repeat and thread

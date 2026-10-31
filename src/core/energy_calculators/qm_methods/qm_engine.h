@@ -70,7 +70,11 @@ enum class QMFunctional {
     PBE,   ///< PBE-GGA (+ grad rho, rung 2) -- WP6
     B3LYP, ///< B3LYP hybrid (0.2 exact exchange, B88 + LYP, VWN per -qm.vwn_variant) -- WP7
     TPSS,  ///< TPSS meta-GGA (+ tau, rung 3; energy, gradient; CUDA XC) -- WP11 stages 1-3
-    SCAN   ///< SCAN meta-GGA (+ tau, rung 3; energy, gradient; CUDA XC) -- WP11 stages 1-3
+    SCAN,  ///< SCAN meta-GGA (+ tau, rung 3; energy, gradient; CUDA XC) -- WP11 stages 1-3
+    /// Double hybrid (WP12 stage 1, Oct 2026): the KS part only; its XC functional is handed in by
+    /// DoubleHybridMethod through setXCFunctional() (table in double_hybrid_method.cpp), the PT2 part is
+    /// computeRIMP2/computeMP2 on the KS orbitals.
+    DoubleHybrid
 };
 
 // Claude Generated: qm parameter module (functional intentionally absent -- set by method name).
@@ -317,6 +321,15 @@ public:
     bool isKohnSham() const { return m_xc.hasXC(); }
     /// The XC functional of this engine (a_x = 1 and no density functional for HF).
     const qmxc::XCFunctional& xcFunctional() const { return m_xc; }
+    /**
+     * @brief Set the KS functional of a QMFunctional::DoubleHybrid engine (WP12 stage 1).
+     *
+     * Only allowed before the first molecule (the grid, V_xc cache and SCF are built from it); false (and nothing
+     * changed) for another QMFunctional or when f has no density-functional part. Claude Generated (Oct 2026).
+     */
+    bool setXCFunctional(const qmxc::XCFunctional& f);
+    /// True for the double-hybrid KS reference (the PT2 routines accept these orbitals). Claude Generated (WP12).
+    bool isDoubleHybrid() const { return m_functional == QMFunctional::DoubleHybrid; }
     /// E_xc, its exchange and correlation parts and the grid electron count of the last converged KS SCF (Eh).
     double xcEnergy() const { return m_exc; }
     double xcExchangeEnergy() const { return m_exc_x; }

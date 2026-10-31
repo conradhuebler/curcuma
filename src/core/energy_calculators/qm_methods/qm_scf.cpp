@@ -1468,6 +1468,13 @@ bool QMEngine::ensureGpuXC() const
     }
     // WP11 stage 3 (Oct 2026): meta-GGAs (tau) run on the device too (QMGpuXCSetup::mgga); no fallback of their own
     if (m_gpu_xc_obj) return true;
+    // WP12 stage 1 (Claude Generated, Oct 2026): the double-hybrid kernels (P86, P86-VWN5, B95) are validated on the
+    // CPU only; with them the XC part stays on the CPU, counted as a qm_xc fallback (no device run of untested code).
+    for (const qmxc::XCTerm& t : m_xc.terms)
+        if (t.weight != 0.0 && qmxc::kern::isCpuOnlyKernel(t.kernel)) {
+            gpuXCFailed("kernel " + qmxc::kernelName(t.kernel) + " (double hybrid, WP12 stage 1) is CPU-only");
+            return false;
+        }
     if (!ensureXCGrid()) return false;
     const auto t0 = std::chrono::steady_clock::now();
     const std::string backend = m_gpu;
