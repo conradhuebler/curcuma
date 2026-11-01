@@ -30,7 +30,7 @@ What is copied how:
   * MINIX: Sure & Grimme, J. Comput. Chem. 34, 1672-1685 (2013), Table 1 (composition of the MINIX basis):
         H-He, B-Ne : MINIS;  Li-Be, Na-Mg : MINIS + 1(p);  Al-Ar : MINIS + 1(d);  K-Zn : SV;  Ga-Kr : SVP;
         Rb-Xe      : def2-SV(P) with ECP
-    Only H-Ne is exported (Rb-Xe would need def2-SV(P) plus the def2 ECP in the SCF, which the engine lacks).
+    Only H-Ne is exported (Na-Kr need the added p/d shells, taken from an ORCA export; not done, Nov 2026).
     MINIS = BSE 'Scaled MINI' (MINI-scaled.0.json, original BSE contributor David Feller); coefficients renormalised
     to a unit-norm contraction, 10 decimals (= ORCA 6.1 orca_exportbasis -b minix = qm_methods/MINIX.dat); the Li/Be
     p shell (exponent 0.1 / 0.25, coefficient 1) is not in BSE and is taken from ORCA 6.1.
@@ -130,7 +130,7 @@ FAMILIES = [
     ("def2_mtzv", "def2-mTZVP, def2-mTZVPP"),
     ("def2_jk", "def2-universal-JFIT, def2-universal-JKFIT, def2-SV(P)-JKFIT, def2-mTZVPP-RIJ"),
     ("def2_rifit", "def2-*-RIFIT (SVP, SV(P), SVPD, TZVP, TZVPP, TZVPD, TZVPPD, QZVP, QZVPP, QZVPPD)"),
-    ("def2_ecp", "def2-ECP (effective core potentials; NOT used by the engine yet)"),
+    ("def2_ecp", "def2-ECP (effective core potentials; used by qm_ecp.cpp)"),
     ("minix", "MINIX (H-Ne)"),
 ]
 # stage-1 sets: embedded H-Ne must equal the shipped files (same shells, same order)
@@ -566,7 +566,7 @@ def notice(w, title, license_text, family_sets, cite_keys):
     if any(s["name"] == "MINIX" for s in family_sets):
         w.append(" * MINIX: Sure & Grimme, J. Comput. Chem. 2013, 34, 1672-1685, Table 1 (MINIX composition):")
         w.append(" *     H-He, B-Ne: MINIS; Li-Be: MINIS+1(p); Na-Mg: MINIS+1(p); Al-Ar: MINIS+1(d); K-Zn: SV;")
-        w.append(" *     Ga-Kr: SVP; Rb-Xe: def2-SV(P) with ECP.  Only H-Ne is built in (Rb-Xe needs the def2 ECP in the SCF).")
+        w.append(" *     Ga-Kr: SVP; Rb-Xe: def2-SV(P) with ECP.  Only H-Ne is built in (the added p/d shells of Na-Kr are not exported).")
         w.append(" *   MINIS = BSE 'Scaled MINI' (data/huzinaga/MINI-scaled.0.json, original BSE contributor David Feller):")
         w.append(" *   exponents as in BSE; coefficients = BSE coefficients renormalised to a unit-norm contracted function,")
         w.append(" *   10 decimals (= ORCA 6.1 orca_exportbasis -b minix = qm_methods/MINIX.dat). Li/Be extra p shell")

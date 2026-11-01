@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """ctest checker for the native QM engine with f and g shells (ctest -L qm_fg). Standard library only.
 
+Also used by test_cases/qm_ecp (elements beyond Ne, def2-ECP) with --reference qm_ecp/reference.json; a case may carry
+"orca_tol" (ORCA's ECP energies differ from PySCF and curcuma by up to 6e-8 Eh for Xe and Hg, cause not identified).
+
 Checks (--check):
   ref    one case of reference.json (written by scripts/qm_fg_reference.py): dump_qm_energy (built-in basis sets
          only, CURCUMA_QM_BASIS_EMBEDDED_ONLY=1) against PySCF (energy |dE| <= --tol, default 1e-8 Eh; gradient
@@ -69,7 +72,7 @@ def write_xyz(path, atoms):
 
 
 def check_ref(a):
-    ref = json.load(open(os.path.join(HERE, "reference.json")))["cases"][a.case]
+    ref = json.load(open(a.reference))["cases"][a.case]
     xyz = os.path.join(TC, ref["xyz"])
     qm = dict(ref["qm"])
     qm.setdefault("scf_threshold", 1e-10)
@@ -83,6 +86,7 @@ def check_ref(a):
     if "orca" in ref:
         do = e - ref["orca"]["energy"]
         tol_o = max(a.tol, 2e-8) if ref["method"] == "ri-mp2" else a.tol
+        tol_o = ref.get("orca_tol", tol_o)  # per-case ORCA tolerance (qm_ecp: ORCA's ECP energies, Nov 2026)
         line += "  ORCA diff %+.2e" % do
         if abs(do) > tol_o:
             ok = False
@@ -98,7 +102,7 @@ def check_ref(a):
 
 
 def check_fd(a):
-    ref = json.load(open(os.path.join(HERE, "reference.json")))["cases"][a.case]
+    ref = json.load(open(a.reference))["cases"][a.case]
     xyz = os.path.join(TC, ref["xyz"])
     qm = dict(ref["qm"])
     qm["scf_threshold"] = 1e-11 if "QZV" not in qm["basis"] else 1e-10
@@ -127,7 +131,7 @@ def check_fd(a):
 
 
 def check_gpu(a):
-    ref = json.load(open(os.path.join(HERE, "reference.json")))["cases"][a.case]
+    ref = json.load(open(a.reference))["cases"][a.case]
     xyz = os.path.join(TC, ref["xyz"])
     args = []
     for k, v in ref["qm"].items():
@@ -166,6 +170,8 @@ def main():
     ap.add_argument("--gtol", type=float, default=None)
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--coords", nargs="*", default=["0:z", "1:x", "1:z"])
+    ap.add_argument("--reference", default=os.path.join(HERE, "reference.json"),
+                    help="reference file (default: qm_fg/reference.json; test_cases/qm_ecp passes its own)")
     a = ap.parse_args()
     if a.gtol is None:
         a.gtol = 1e-8

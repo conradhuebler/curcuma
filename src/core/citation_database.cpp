@@ -1150,6 +1150,50 @@ const std::unordered_map<std::string, CitationData>& database()
             "}"
         }},
 
+        // Native QM effective core potentials (Nov 2026, Claude Generated; DOIs checked against Crossref).
+        { "ecp_stuttgart_4d5d", {
+            "Stuttgart energy-adjusted pseudopotentials of the 4d/5d transition elements (part of def2-ECP)",
+            "Andrae, D.; Haeussermann, U.; Dolg, M.; Stoll, H.; Preuss, H. Theor. Chim. Acta 1990, 77, 123-141 (DOI: 10.1007/BF01114537)",
+            "andrae1990ecp",
+            "@article{andrae1990ecp,\n"
+            "  author = {Andrae, D. and H{\\\"a}u{\\ss}ermann, U. and Dolg, M. and Stoll, H. and Preu{\\ss}, H.},\n"
+            "  title = {Energy-adjusted ab initio pseudopotentials for the second and third row transition elements},\n"
+            "  journal = {Theor. Chim. Acta},\n"
+            "  year = {1990},\n"
+            "  volume = {77},\n"
+            "  pages = {123--141},\n"
+            "  doi = {10.1007/BF01114537}\n"
+            "}"
+        }},
+        { "ecp_stuttgart_postd", {
+            "Stuttgart small-core pseudopotentials of the post-d main-group elements (part of def2-ECP)",
+            "Metz, B.; Stoll, H.; Dolg, M. J. Chem. Phys. 2000, 113, 2563-2569 (DOI: 10.1063/1.1305880)",
+            "metz2000ecp",
+            "@article{metz2000ecp,\n"
+            "  author = {Metz, Bernhard and Stoll, Hermann and Dolg, Michael},\n"
+            "  title = {Small-core multiconfiguration-{D}irac-{H}artree-{F}ock-adjusted pseudopotentials for post-d main group elements: Application to {PbH} and {PbO}},\n"
+            "  journal = {J. Chem. Phys.},\n"
+            "  year = {2000},\n"
+            "  volume = {113},\n"
+            "  pages = {2563--2569},\n"
+            "  doi = {10.1063/1.1305880}\n"
+            "}"
+        }},
+        { "ecp_half_numerical", {
+            "Half-numerical evaluation of semi-local pseudopotential integrals (scheme of the native ECP code)",
+            "Flores-Moreno, R.; Alvarez-Mendez, R. J.; Vela, A.; Koester, A. M. J. Comput. Chem. 2006, 27, 1009-1019 (DOI: 10.1002/jcc.20410)",
+            "floresmoreno2006ecp",
+            "@article{floresmoreno2006ecp,\n"
+            "  author = {Flores-Moreno, Roberto and Alvarez-Mendez, Rodrigo J. and Vela, Alberto and K{\\\"o}ster, Andreas M.},\n"
+            "  title = {Half-numerical evaluation of pseudopotential integrals},\n"
+            "  journal = {J. Comput. Chem.},\n"
+            "  year = {2006},\n"
+            "  volume = {27},\n"
+            "  pages = {1009--1019},\n"
+            "  doi = {10.1002/jcc.20410}\n"
+            "}"
+        }},
+
         // Native ab-initio QM: basis sets and auxiliary basis sets (Oct 2026, Claude Generated; DOIs checked against Crossref).
         { "def2_basis", {
             "def2 orbital basis sets (def2-SV(P), def2-SVP, ...; Weigend & Ahlrichs 2005)",

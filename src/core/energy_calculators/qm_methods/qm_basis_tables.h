@@ -42,7 +42,7 @@
  *   generator: the numbers equal the BSE json data (data/<name>.1.table.json composed as BSE composes it).
  * MINIX: Sure & Grimme, J. Comput. Chem. 2013, 34, 1672-1685, Table 1 (MINIX composition):
  *     H-He, B-Ne: MINIS; Li-Be: MINIS+1(p); Na-Mg: MINIS+1(p); Al-Ar: MINIS+1(d); K-Zn: SV;
- *     Ga-Kr: SVP; Rb-Xe: def2-SV(P) with ECP.  Only H-Ne is built in (Rb-Xe needs the def2 ECP in the SCF).
+ *     Ga-Kr: SVP; Rb-Xe: def2-SV(P) with ECP.  Only H-Ne is built in (the added p/d shells of Na-Kr are not exported).
  *   MINIS = BSE 'Scaled MINI' (data/huzinaga/MINI-scaled.0.json, original BSE contributor David Feller):
  *   exponents as in BSE; coefficients = BSE coefficients renormalised to a unit-norm contracted function,
  *   10 decimals (= ORCA 6.1 orca_exportbasis -b minix = qm_methods/MINIX.dat). Li/Be extra p shell

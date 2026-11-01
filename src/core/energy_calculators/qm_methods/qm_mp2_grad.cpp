@@ -452,7 +452,7 @@ bool QMEngine::computeMP2Gradient(const qmint::MP2Options& opt, double c_os, dou
         return fail("MP2 gradient: no MO coefficients / orbital energies from the SCF");
     int nf = 0;
     if (opt.frozen_core)
-        for (int Z : m_atoms) nf += qmint::frozenCoreOrbitals(Z);
+        nf += frozenCoreCount();
     if (nf >= n_occ && n_occ > 0)
         return fail(fmt::format("MP2 gradient: frozen core ({} orbitals) leaves no active occupied orbital", nf));
     const int o = n_occ - nf, v = n - n_occ;
@@ -650,7 +650,8 @@ bool QMEngine::computeMP2Gradient(const qmint::MP2Options& opt, double c_os, dou
         tables_ok = qmint::buildEriGradGpuTables(m_gto_basis, m_eri_screening, tables, tab_why);
     if (!be1.empty())
         on_device1 = gpuGradientOneElectron(tables_ok ? &tables : nullptr, tab_why, be1, posBohr, Ptc, Wc, g1, dev1_info);
-    if (!on_device1) g1 = qmint::gradientOneElectron(m_gto_basis, m_atoms, posBohr, Ptc, Wc, m_threads);
+    if (!on_device1) g1 = qmint::gradientOneElectron(m_gto_basis, m_core_charges, posBohr, Ptc, Wc, m_threads);
+    if (hasECP()) g1 += ecpGradient(Ptc);  // ECP term, CPU (Nov 2026)
     res.t_grad_deriv1e_ms = msSince(t_1e0);
     const auto t_2e0 = std::chrono::steady_clock::now();
     Matrix g2;

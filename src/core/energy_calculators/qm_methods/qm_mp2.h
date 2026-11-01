@@ -111,9 +111,9 @@ struct MP2Result {
     double zvector_residual = 0.0;
 };
 
-/// Number of frozen core orbitals for an atom of nuclear charge Z (chemical core of the
-/// preceding noble gas: 0 for H-He, 1 for Li-Ne, 5 for Na-Ar, 9 for K-Kr, 18 for Rb-Xe).
-/// Claude Generated (Oct 2026, WP11).
+/// Number of frozen core orbitals for an all-electron atom of nuclear charge Z: 0 for H-He, 1 for Li-Ne, and the
+/// ORCA/PySCF chemical-core table above Ne (Na-Mg 1, Al-Zn 5, Ga-Sr 9, Y-Cd 14, In-Yb 18, Lu-Hg 23, Tl-No 34).
+/// An ECP is subtracted by QMEngine::frozenCoreCount. Claude Generated (Oct 2026, WP11; Z > 10 Nov 2026).
 int frozenCoreOrbitals(int Z);
 
 /// @brief Canonical closed-shell MP2 pair energies from the AO tensor on the host.

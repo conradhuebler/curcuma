@@ -24,6 +24,8 @@
 #include "src/core/curcuma_logger.h"
 #include "qm_citations.h"
 #include "qm_basis_embedded.h"  // built-in basis sets (Nov 2026)
+#include "qm_elements.h"
+#include "qm_mp2.h"  // qmint::frozenCoreOrbitals
 #include "qm_ri.h"  // qmint::gradientTwoElectronScaled (WP8 Kohn-Sham gradient)
 #include "src/core/energy_calculators/gpu_plugin.h"
 #include "src/core/gpu_fallback.h"
@@ -66,16 +68,9 @@ std::string scfLabel(QMFunctional f)
     return s;
 }
 
-// Element number -> standard symbol. WP1 supports H (1) through Ne (10) only,
-// the elements present in the shipped def2-SVP basis file.
-const char* elementSymbol(int Z)
-{
-    static const char* kSymbols[] = {
-        nullptr, "H", "He", "Li", "Be", "B", "C", "N", "O", "F", "Ne"
-    };
-    if (Z < 1 || Z > 10) return nullptr;
-    return kSymbols[Z];
-}
+// Element number -> standard symbol (qm_elements.h, Z = 1..103; H-Ne only before Nov 2026). Whether the basis has
+// the element is checked by the lookup in InitialiseMolecule.
+const char* elementSymbol(int Z) { return qmelem::symbol(Z); }
 
 bool fileExists(const std::string& path)
 {
@@ -145,6 +140,7 @@ QMEngine::QMEngine(QMFunctional functional, const json& config)
 {
     if (config.contains("basis") && config["basis"].is_string())
         m_basis_name = config["basis"].get<std::string>();
+    if (config.contains("ecp") && config["ecp"].is_string()) m_ecp_name = config["ecp"].get<std::string>();
     if (config.contains("cartesian_d") && config["cartesian_d"].is_boolean())
         m_cartesian_d = config["cartesian_d"].get<bool>();
     // is_number(), not is_number_integer(): the CLI and the registry defaults can
@@ -397,26 +393,55 @@ bool QMEngine::InitialiseMolecule()
         if (CurcumaLogger::get_verbosity() >= 2)
             CurcumaLogger::info(embedded ? fmt::format("QM: orbital basis {}: embedded copy (built into the binary)", m_basis_name)
                                          : fmt::format("QM: orbital basis {}: file {}", m_basis_name, m_basis_file));
-        if (m_basis_map_cache.empty()) {
+        // Claude Generated (Nov 2026): the built-in text is read up to the highest Z of the molecule (never below
+        // Ne); a later molecule with a heavier element re-reads it.
+        const int need_z = qmbasis::parseMaxZ(m_atoms);
+        if (m_basis_map_cache.empty() || (embedded && need_z > m_basis_cache_max_z)) {
             std::string text;
-            if (embedded && !qmbasis::embeddedText(m_basis_file, text, qmbasis::kEngineMaxZ))
+            m_basis_cache_max_z = need_z;
+            if (embedded && !qmbasis::embeddedText(m_basis_file, text, need_z))
                 throw std::runtime_error("no built-in text for " + m_basis_file);
             m_basis_map_cache = embedded ? BasisSetParser::parseBasisSetString(text)
                                          : BasisSetParser::parseBasisSetFile(m_basis_file);
+        }
+        // Claude Generated (Nov 2026): a basis FILE without an element of the molecule (e.g. the H-Ne def2-SVP.dat
+        // of the source directory) takes that element from the built-in copy of the same name; the file wins for
+        // every element it has, so H-Ne results do not change.
+        if (!embedded) {
+            std::vector<int> missing;
+            for (int Z : m_atoms)
+                if (const char* sy = elementSymbol(Z); sy && !m_basis_map_cache.count(sy)) missing.push_back(Z);
+            const auto* e = missing.empty() ? nullptr : qmbasis::findEmbedded(m_basis_name, "data");
+            if (e) {
+                const auto builtin = BasisSetParser::parseBasisSetString(qmbasis::embeddedSetText(*e, need_z));
+                for (int Z : missing) {
+                    auto f = builtin.find(elementSymbol(Z));
+                    if (f == builtin.end()) continue;
+                    m_basis_map_cache[f->first] = f->second;
+                    if (CurcumaLogger::get_verbosity() >= 2)
+                        CurcumaLogger::info(fmt::format("QM: element {} not in {}: taken from the built-in {}",
+                                                        f->first, m_basis_file, m_basis_name));
+                }
+            }
         }
     } catch (const std::exception& e) {
         CurcumaLogger::error(std::string("QM: basis setup failed: ") + e.what());
         return false;
     }
 
+    // Nuclear charges of the operator: Z, minus the ECP core (setupECP, Nov 2026).
+    m_core_charges = m_atoms;
+    m_ecp_ncore.assign(m_atoms.size(), 0);
+    if (!setupECP()) return false;
+
     // Build the flat contracted cartesian basis (Bohr centers, pre-normalized).
     m_gto_basis.clear();
     for (int i = 0; i < m_atomcount; ++i) {
         const int Z = m_atoms[i];
         const char* sym = elementSymbol(Z);
-        if (sym == nullptr) {
+        if (sym == nullptr || Z > qmbasis::kEngineMaxZ) {
             CurcumaLogger::error(fmt::format(
-                "QM: element Z={} is outside the WP1 H-Ne scope", Z));
+                "QM: element Z={} is outside the native QM range (H-Rn, Z <= {})", Z, qmbasis::kEngineMaxZ));
             return false;
         }
         auto it = m_basis_map_cache.find(sym);
@@ -441,11 +466,16 @@ bool QMEngine::InitialiseMolecule()
 
     // Number of electrons (nuclear charge sum minus total molecular charge).
     int nelec = 0;
-    for (int Z : m_atoms) nelec += Z;
+    for (int Zc : m_core_charges) nelec += Zc;  // Z - n_core (ECP, Nov 2026)
     nelec -= static_cast<int>(std::round(m_charge));
     m_num_electrons = nelec;
 
-    buildOneElectronIntegrals();
+    try {
+        buildOneElectronIntegrals();
+    } catch (const std::exception& e) {
+        CurcumaLogger::error(std::string("QM: one-electron integrals failed: ") + e.what());
+        return false;
+    }
     m_integrals_ready = true;
 
     if (CurcumaLogger::get_verbosity() >= 2) {
@@ -455,6 +485,91 @@ bool QMEngine::InitialiseMolecule()
             m_num_electrons));
     }
     return true;
+}
+
+// Claude Generated (Nov 2026): ECP setup. -qm.ecp auto takes def2-ECP for a def2 orbital basis (BSE combines
+// every def2 set with it for Rb-Rn), none otherwise; the element blocks are the built-in Turbomole text.
+// Sets m_ecp_ncore, m_core_charges (Z - n_core) and the centre list (positions filled per geometry).
+bool QMEngine::setupECP()
+{
+    m_ecp_centres.clear();
+    std::string name = m_ecp_name;
+    std::string low = name;
+    std::transform(low.begin(), low.end(), low.begin(), ::tolower);
+    if (low == "auto") {
+        std::string b = m_basis_name;
+        std::transform(b.begin(), b.end(), b.begin(), ::tolower);
+        const auto* e = qmbasis::findEmbedded(m_basis_name, "data");
+        name = (e && std::string(e->ecp) == "def2-ECP") || b.rfind("def2-", 0) == 0 ? "def2-ECP" : "none";
+        low = name == "none" ? "none" : "def2-ecp";
+    }
+    if (low == "none") {
+        for (int Z : m_atoms)
+            if (qmbasis::embeddedElementBlock("def2-ECP", Z) != nullptr && m_basis_name.rfind("def2-", 0) == 0) {
+                CurcumaLogger::warn(fmt::format("QM: -qm.ecp none with {} for element Z={}: the def2 basis of this "
+                                                "element is a valence basis made for def2-ECP", m_basis_name, Z));
+                break;
+            }
+        return true;
+    }
+    if (low != "def2-ecp") {
+        CurcumaLogger::error(fmt::format("QM: unknown -qm.ecp '{}' (use auto|def2-ECP|none)", m_ecp_name));
+        return false;
+    }
+    for (int i = 0; i < m_atomcount; ++i) {
+        const int Z = m_atoms[i];
+        const char* block = qmbasis::embeddedElementBlock("def2-ECP", Z);
+        if (block == nullptr) continue;  // all-electron element (H-Kr)
+        auto it = m_ecp_elements.find(Z);
+        if (it == m_ecp_elements.end()) {
+            qmecp::ElementECP e;
+            std::string why;
+            if (!qmecp::parseTurbomoleECP(block, e, why)) {
+                CurcumaLogger::error(fmt::format("QM: def2-ECP of Z={}: {}", Z, why));
+                return false;
+            }
+            it = m_ecp_elements.emplace(Z, e).first;
+        }
+        if (it->second.ncore >= Z) {
+            CurcumaLogger::error(fmt::format("QM: def2-ECP of Z={} replaces {} electrons", Z, it->second.ncore));
+            return false;
+        }
+        m_ecp_ncore[i] = it->second.ncore;
+        m_core_charges[i] = Z - it->second.ncore;
+        qmecp::EcpCentre c;
+        c.atom = i;
+        c.ecp = &it->second;
+        m_ecp_centres.push_back(c);
+    }
+    if (!m_ecp_centres.empty()) {
+        qmcite::ecp("def2-ECP");
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            int nc = 0;
+            for (int v : m_ecp_ncore) nc += v;
+            CurcumaLogger::info(fmt::format("QM: def2-ECP on {} atom(s), {} core electrons replaced", m_ecp_centres.size(), nc));
+        }
+    }
+    return true;
+}
+
+Matrix QMEngine::ecpGradient(const Matrix& Pc) const
+{
+    if (m_ecp_centres.empty()) return Matrix::Zero(m_atomcount, 3);
+    qmecp::EcpOptions eo;
+    eo.threads = std::max(1, m_threads);
+    return qmecp::gradientECP(m_gto_basis, m_ecp_centres, Pc, m_atomcount, eo, m_ecp_levels);
+}
+
+// Claude Generated (Nov 2026): chemical (noble-gas) frozen core minus the orbitals an ECP removed already, the
+// convention of PySCF (data.elements.chemcore); e.g. I with the 28-electron def2-ECP: [Kr] 18 - 14 = 4 orbitals.
+int QMEngine::frozenCoreCount() const
+{
+    int nf = 0;
+    for (size_t i = 0; i < m_atoms.size(); ++i) {
+        const int nc = i < m_ecp_ncore.size() ? m_ecp_ncore[i] / 2 : 0;
+        nf += std::max(0, qmint::frozenCoreOrbitals(m_atoms[i]) - nc);
+    }
+    return nf;
 }
 
 // Claude Generated (Sep 2026): the base UpdateMolecule() only returned true, so a
@@ -655,7 +770,29 @@ void QMEngine::buildOneElectronIntegrals()
     curcuma::ScopedBlasThreads omp_guard(std::max(1, m_threads));
     const Matrix Scart = qmint::buildOverlap(m_gto_basis);
     const Matrix Tcart = qmint::buildKinetic(m_gto_basis);
-    const Matrix Vcart = qmint::buildNuclearAttraction(m_gto_basis, m_atoms, atomPosBohr);
+    Matrix Vcart = qmint::buildNuclearAttraction(m_gto_basis, m_core_charges, atomPosBohr);
+    // Claude Generated (Nov 2026): ECP (local + semi-local) is part of the one-electron potential V.
+    if (!m_ecp_centres.empty()) {
+        for (auto& c : m_ecp_centres) {
+            c.x = atomPosBohr(c.atom, 0);
+            c.y = atomPosBohr(c.atom, 1);
+            c.z = atomPosBohr(c.atom, 2);
+        }
+        qmecp::EcpOptions eo;
+        eo.threads = std::max(1, m_threads);
+        Matrix Vecp;
+        std::string why;
+        const auto te0 = std::chrono::steady_clock::now();
+        if (!qmecp::buildECP(m_gto_basis, m_ecp_centres, eo, Vecp, m_ecp_levels, why)) throw std::runtime_error(why);
+        Vcart += Vecp;
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            std::string lv;
+            for (int l : m_ecp_levels.level) lv += (lv.empty() ? "" : ",") + std::to_string((1 << l) - 1);
+            CurcumaLogger::info(fmt::format("QM: ECP matrix for {} centres in {:.1f} ms (radial points {})",
+                                            m_ecp_centres.size(),
+                                            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - te0).count(), lv));
+        }
+    }
     const Matrix Hcart = Tcart + Vcart;
 
     // New geometry -> invalidate the WP3 active-basis ERI and SCF caches.
@@ -754,7 +891,7 @@ Matrix QMEngine::calculateCoreRepulsionGradient() const
                 r2 += d[k] * d[k];
             }
             if (r2 < 1.0e-24) continue;
-            const double f = -(double)m_atoms[i] * m_atoms[j] / (r2 * std::sqrt(r2));
+            const double f = -(double)m_core_charges[i] * m_core_charges[j] / (r2 * std::sqrt(r2));
             for (int k = 0; k < 3; ++k) {
                 g(i, k) += f * d[k];
                 g(j, k) -= f * d[k];
@@ -811,7 +948,8 @@ bool QMEngine::computeGradient(bool defer_cpu_two_electron, bool& two_electron_d
     std::string dev1_info;
     const bool on_device1 = !be1.empty()
         && gpuGradientOneElectron(tables_ok ? &tables : nullptr, tab_why, be1, posBohr, Pc, Wc, g1, dev1_info);
-    if (!on_device1) g1 = qmint::gradientOneElectron(m_gto_basis, m_atoms, posBohr, Pc, Wc, m_threads);
+    if (!on_device1) g1 = qmint::gradientOneElectron(m_gto_basis, m_core_charges, posBohr, Pc, Wc, m_threads);
+    if (hasECP()) g1 += ecpGradient(Pc);  // ECP term, CPU on every path (Nov 2026)
     const auto t1 = std::chrono::steady_clock::now();
     // Two-electron part: RI (-qm.ri j|jk), device (Q-G7) or CPU.
     Matrix g2;
@@ -979,7 +1117,7 @@ bool QMEngine::gpuGradientOneElectron(const qmint::EriGpuTables* tables, const s
         }
         for (int i = 0; i < m_atomcount; ++i) {
             for (int k = 0; k < 3; ++k) atom_xyz[3 * i + k] = posBohr(i, k);
-            atom_Z[i] = (double)m_atoms[i];
+            atom_Z[i] = (double)m_core_charges[i];
         }
         qmint::QMGpuGrad1eExtra extra;
         extra.base.natoms = m_atomcount;
@@ -1006,7 +1144,7 @@ bool QMEngine::gpuGradientOneElectron(const qmint::EriGpuTables* tables, const s
     info = fmt::format("{} ({}; setup {:.1f} ms)", dev->name(), dev->stats(), ms(t0, t1));
     if (const char* chk = std::getenv("CURCUMA_QM_GPU_GRAD_CHECK"); chk && chk[0] == '1') {
         const auto c0 = std::chrono::steady_clock::now();
-        const Matrix gc = qmint::gradientOneElectron(m_gto_basis, m_atoms, posBohr, Pc, Wc, m_threads);
+        const Matrix gc = qmint::gradientOneElectron(m_gto_basis, m_core_charges, posBohr, Pc, Wc, m_threads);
         const double cpu_ms = ms(c0, std::chrono::steady_clock::now());
         const Eigen::RowVector3d sd = g1.colwise().sum(), sc = gc.colwise().sum();
         CurcumaLogger::result(fmt::format(
@@ -1025,7 +1163,7 @@ bool QMEngine::gpuGradientOneElectron(const qmint::EriGpuTables* tables, const s
 double QMEngine::calculateCoreRepulsionEnergy() const
 {
     // E_nn = sum_{i<j} Z_i * Z_j / R_ij  in atomic units (Hartree).
-    // m_atoms holds nuclear charges (element numbers); m_geometry is in Angstrom.
+    // m_core_charges: Z, or Z - n_core for an atom with an ECP (Nov 2026); m_geometry is in Angstrom.
     double e_nn = 0.0;
     const int n = m_atomcount;
     for (int i = 0; i < n; ++i) {
@@ -1036,7 +1174,7 @@ double QMEngine::calculateCoreRepulsionEnergy() const
             const double r_ang = std::sqrt(dx * dx + dy * dy + dz * dz);
             if (r_ang < 1.0e-12) continue;  // skip coincident atoms
             const double r_bohr = Length::angstrom_to_bohr(r_ang);
-            e_nn += (m_atoms[i] * m_atoms[j]) / r_bohr;
+            e_nn += (m_core_charges[i] * m_core_charges[j]) / r_bohr;
         }
     }
     return e_nn;

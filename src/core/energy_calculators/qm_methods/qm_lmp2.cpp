@@ -25,6 +25,7 @@
 #include "qm_engine.h"
 #include "qm_mp2.h"  // frozenCoreOrbitals
 #include "qm_ri.h"
+#include "qm_basis_embedded.h"  // parseMaxZ
 
 #include "src/core/curcuma_logger.h"
 #include "src/core/units.h"
@@ -901,7 +902,7 @@ bool QMEngine::computeLMP2(const qmint::LMP2Options& opt, qmint::LMP2Result& res
     const int n_occ = m_num_electrons / 2;
     int n_frozen = 0;
     if (opt.frozen_core)
-        for (int Z : m_atoms) n_frozen += qmint::frozenCoreOrbitals(Z);
+        n_frozen += frozenCoreCount();
     if (n_frozen >= n_occ && n_occ > 0) {
         CurcumaLogger::error(fmt::format("LMP2: frozen core ({} orbitals) leaves no active occupied orbital ({} occupied)",
                                          n_frozen, n_occ));
@@ -1202,7 +1203,7 @@ bool QMEngine::computeLMP2(const qmint::LMP2Options& opt, qmint::LMP2Result& res
         const auto t_setup = std::chrono::steady_clock::now();
         qmri::ThreeIndexDirect eri;
         try {
-            const qmri::AuxBasisMap aux = qmri::parseTurbomoleBasis(file);
+            const qmri::AuxBasisMap aux = qmri::parseTurbomoleBasis(file, qmbasis::parseMaxZ(m_atoms));
             Matrix pos(natm, 3);
             for (int a = 0; a < natm; ++a)
                 for (int k = 0; k < 3; ++k) pos(a, k) = xyz(a, k);

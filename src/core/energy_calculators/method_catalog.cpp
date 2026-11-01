@@ -94,7 +94,7 @@ const std::vector<MethodParamGroup> kGroups = {
     { "tblite_all", "", "tblite", {}, {}, "Module tblite (TBLite library wrapper)." },
     { "ulysses_all", "", "ulysses", {}, {}, "Module ulysses (Ulysses library wrapper)." },
     // native ab-initio QM (module qm)
-    { "qm_basis", "Basis", "qm", { "basis", "cartesian_d" }, {}, "" },
+    { "qm_basis", "Basis", "qm", { "basis", "cartesian_d", "ecp" }, {}, "" },
     { "qm_scf", "SCF (-qm.*, precedence over the shared -scf.*)", "qm", kQmScf, {},
       "Flat -scf_threshold, -scf_mode, ... land here for this method (routing scope qm)." },
     { "qm_scf_correlated", "SCF (-qm.*, precedence over the shared -scf.*)", "qm", without(kQmScf, "scf_allow_unconverged"), {},
@@ -162,7 +162,7 @@ const std::map<std::string, std::set<std::string>> kLegacyKeys = {
 // ---------------------------------------------------------------------------------------------
 const std::string kAI = "native, AI-generated, machine-tested (not TESTED)";
 const std::string kExt = "external library; curcuma wrapper AI-generated";
-const std::string kQmRestr = "closed shell only; elements H-Ne (shipped basis and auxiliary files)";
+const std::string kQmRestr = "closed shell only; elements H-Rn (built-in def2 sets, def2-ECP for Rb-Rn via -qm.ecp, ECP terms on the CPU)";
 
 const std::vector<std::string> kUlyssesOnly = { "ugfn2", "mndod", "rm1", "pm3pddg", "mndopddg", "pm3bp",
     "pm6-d3h4x", "am1-d3h4x", "pm3-d3h4x", "mndo-d3h4x", "mndod-d3h4x", "rm1-d3h4x", "pm3pddg-d3h4x", "mndopddg-d3h4x", "pm3bp-d3h4x",

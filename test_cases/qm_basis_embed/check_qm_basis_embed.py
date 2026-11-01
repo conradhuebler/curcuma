@@ -184,6 +184,17 @@ def dump(a, *args):
     return p.returncode, p.stdout, p.stderr
 
 
+def element_tables():
+    """(BSE upper-case names, lower-case symbols) for Z = 1..103, read from qm_elements.h (the table the engine uses)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    hdr = os.path.join(here, "..", "..", "src", "core", "energy_calculators", "qm_methods", "qm_elements.h")
+    txt = open(hdr).read()
+    blocks = re.findall(r"\{ nullptr,(.*?)\};", txt, re.S)
+    syms = [x.lower() for x in re.findall(r'"([A-Za-z]+)"', blocks[0])]
+    names = re.findall(r'"([A-Z]+)"', blocks[1])
+    return names, syms
+
+
 def text_numbers(text, fmt):
     """{(element symbol lower, L letter, iprim within shell): [(exp, coef)]} read from the text as Python doubles,
     in the order of the text (shell index implied by order)."""
@@ -191,8 +202,8 @@ def text_numbers(text, fmt):
     out = []
     lines = text.splitlines()
     if fmt == "data":
-        hne = ["HYDROGEN", "HELIUM", "LITHIUM", "BERYLLIUM", "BORON", "CARBON", "NITROGEN", "OXYGEN", "FLUORINE", "NEON"]
-        sym = ["h", "he", "li", "be", "b", "c", "n", "o", "f", "ne"]
+        hne, sym = element_tables()
+        dropped = set()
         i = lines.index("$DATA") + 1
         el = None
         while i < len(lines):
@@ -205,6 +216,11 @@ def text_numbers(text, fmt):
             if len(t) == 1:
                 el = sym[hne.index(t[0])] if t[0] in hne else None
                 continue
+            if t[0].upper() not in "SPDFG":
+                # shell above g (h: def2-QZVP family, Ce-Yb): the parser drops the whole element
+                out[:] = [x for x in out if x[0] != el]
+                dropped.add(el)
+                el = None
             for k in range(int(t[1])):
                 tok = lines[i].split()
                 i += 1

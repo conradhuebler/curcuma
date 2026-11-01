@@ -39,6 +39,8 @@
 #include "qm_integrals.hpp"   // qmint 1e/2e integral kernels (WP1/WP2)
 #include "qm_grid.h"         // qmgrid molecular DFT grid + AO values on points (WP4)
 #include "qm_xc.h"           // qmxc exchange-correlation functionals and V_xc (WP5)
+#include "qm_ecp.h"          // qmecp semi-local ECP integrals (Nov 2026)
+#include <map>
 #include "qm_driver.h"
 
 #include <string>
@@ -81,7 +83,11 @@ enum class QMFunctional {
 // Was `dft` until Sep 2026; QMMethod still merges a legacy `dft` scope below `qm`.
 BEGIN_PARAMETER_DEFINITION(qm)
     PARAM(basis, String, "def2-SVP",
-          "Orbital basis (exact name or $DATA file). Built in (all elements the Basis Set Exchange has): def2-SVP, def2-SV(P), def2-SVPD, def2-TZVP, def2-TZVPP, def2-TZVPD, def2-TZVPPD, def2-QZVP, def2-QZVPP, def2-QZVPD, def2-QZVPPD, def2-mTZVP, def2-mTZVPP, and MINIX (H-Ne). The engine runs H-Ne with s, p, d, f and g shells (all def2 sets and MINIX; f/g since Nov 2026, CUDA ERI/gradient kernels s, p, d only: L > 2 falls back to the CPU, counted). A <name>.dat in the search path wins ($CURCUMA_QM_BASIS, $CURCUMA_DATA, the source directory, the current directory).",
+          "Orbital basis (exact name or $DATA file). Built in (all elements the Basis Set Exchange has): def2-SVP, def2-SV(P), def2-SVPD, def2-TZVP, def2-TZVPP, def2-TZVPD, def2-TZVPPD, def2-QZVP, def2-QZVPP, def2-QZVPD, def2-QZVPPD, def2-mTZVP, def2-mTZVPP, and MINIX (H-Ne). The engine runs H-Rn (Z <= 86) with s, p, d, f and g shells; Rb-Rn with the def2-ECP (-qm.ecp). CUDA ERI/gradient kernels s, p, d only: L > 2 falls back to the CPU, counted. A <name>.dat in the search path wins ($CURCUMA_QM_BASIS, $CURCUMA_DATA, the source directory, the current directory); elements a file lacks come from the built-in set of the same name.",
+          "Basis", {})
+    // Claude Generated (Nov 2026): effective core potentials, implementation in qm_ecp.cpp
+    PARAM(ecp, String, "auto",
+          "Effective core potential: auto (def2-ECP, Rb-Rn, with every def2 orbital basis; none for other bases) | def2-ECP | none (all-electron; a def2 basis for Rb-Rn is a valence basis, so this is wrong for those elements). Semi-local ECP integrals: local part analytic, projector part with a converged radial quadrature (docs/NATIVE_QM_IMPLEMENTATION.md). Not on the GPU (the ECP matrix and gradient are CPU terms).",
           "Basis", {})
     // WP4 (Claude Generated, Oct 2026): molecular quadrature grid, implementation in qm_grid.cpp
     PARAM(grid, String, "sg1",
@@ -361,6 +367,11 @@ public:
     const Matrix& coreHamiltonian() const { return m_H; }
     int nbf() const { return m_nbf; }
     int numElectrons() const { return m_num_electrons; }
+    /// Charge each nucleus carries in V, E_nn and the guess: Z, or Z - n_core for an atom with an ECP (Nov 2026).
+    const std::vector<int>& coreCharges() const { return m_core_charges; }
+    /// Frozen-core orbitals of the molecule: sum of qmint::frozenCoreOrbitals(Z) minus the orbitals an ECP already
+    /// removed (n_core / 2 per atom, never below 0). Claude Generated (Nov 2026).
+    int frozenCoreCount() const;
     const std::vector<GTO::Orbital>& gtoBasis() const { return m_gto_basis; }
     /// Cartesian -> active basis transform (ncart x nbf; empty: active basis = cartesian). Valid after
     /// InitialiseMolecule(); hand it to qmgrid::AOEvaluator together with gtoBasis(). Claude Generated (WP4).
@@ -446,6 +457,19 @@ private:
     int m_nbf = 0;                                   // #basis functions (after d transform)
     std::vector<GTO::Orbital> m_gto_basis;           // flat contracted cartesian basis (Bohr centers)
     BasisSetParser::BasisSetMap m_basis_map_cache;  // parsed basis file (per element symbol)
+    int m_basis_cache_max_z = 0;                     // built-in text parsed up to this Z (Nov 2026)
+    std::vector<int> m_core_charges;                 // Z - n_core(ECP) per atom (Nov 2026; = m_atoms without ECP)
+    std::vector<int> m_ecp_ncore;                    // core electrons an ECP replaces, per atom (0 = all-electron)
+    std::string m_ecp_name = "auto";                 // -qm.ecp
+    std::map<int, qmecp::ElementECP> m_ecp_elements; // parsed ECP per element
+    std::vector<qmecp::EcpCentre> m_ecp_centres;     // atoms with an ECP (positions in Bohr, set per geometry)
+    qmecp::EcpLevels m_ecp_levels;                   // radial quadrature orders of the energy build
+    bool setupECP();                                 // fill m_ecp_* and m_core_charges (InitialiseMolecule)
+public:
+    /// ECP part of dE/dR (natoms x 3, Eh/Bohr) for a cartesian one-electron density Pc; zero without ECP atoms.
+    Matrix ecpGradient(const Matrix& Pc) const;
+    bool hasECP() const { return !m_ecp_centres.empty(); }
+private:
     bool m_integrals_ready = false;
     Matrix m_T, m_V;                                 // kinetic + nuclear attraction (final basis)
 

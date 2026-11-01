@@ -546,14 +546,14 @@ const std::vector<MethodDescriptor>& MethodFactory::methodTable()
               return std::make_unique<HF3CMethod>(c); } },
         // Claude Generated (Oct 2026, WP11): canonical closed-shell MP2 on the native RHF; energy only.
         { {"mp2", "scs-mp2", "sos-mp2"}, "Quantum Methods (native)",
-          "Native canonical RMP2 / SCS-MP2 / SOS-MP2 on the native RHF (no RI; H-Ne, closed shell, energy only; -qm.frozen_core)",
+          "Native canonical RMP2 / SCS-MP2 / SOS-MP2 on the native RHF (no RI; H-Rn with def2-ECP for Rb-Rn, closed shell; -qm.frozen_core)",
           always, {{"Native", always}},
           [](const std::string& m, const json& c) -> std::unique_ptr<ComputationalMethod> {
               CurcumaLogger::success("Method '" + m + "' resolved to native canonical MP2");
               return std::make_unique<MP2Method>(m, c); } },
         // Claude Generated (Oct 2026): RI-MP2 on the native RHF (aux -qm.ri_mp2_aux, default def2-universal-JKFIT).
         { {"ri-mp2", "scs-ri-mp2", "sos-ri-mp2"}, "Quantum Methods (native)",
-          "Native RI-MP2 / SCS / SOS on the native RHF (aux def2-universal-JKFIT by default, a JK set as correlation fitting basis; def2-<X>-RIFIT = def2-<X>/C via -qm.ri_mp2_aux; H-Ne, closed shell, energy only)",
+          "Native RI-MP2 / SCS / SOS on the native RHF (aux def2-universal-JKFIT by default, a JK set as correlation fitting basis; def2-<X>-RIFIT = def2-<X>/C via -qm.ri_mp2_aux; H-Rn with def2-ECP for Rb-Rn, closed shell, energy only)",
           always, {{"Native", always}},
           [](const std::string& m, const json& c) -> std::unique_ptr<ComputationalMethod> {
               CurcumaLogger::success("Method '" + m + "' resolved to native RI-MP2");
@@ -563,21 +563,21 @@ const std::vector<MethodDescriptor>& MethodFactory::methodTable()
         { {"b2plyp", "b2plyp-d3bj", "b2gp-plyp", "b2gp-plyp-d3bj", "dsd-blyp", "dsd-blyp-d3bj", "dsd-pbep86",
            "dsd-pbep86-d3bj", "dsd-pbeb95-d3bj", "revdsd-pbep86", "revdsd-pbep86-d4", "b2plyp-d4", "b2gp-plyp-d4"},
           "Quantum Methods (native)",
-          "Native double hybrids (KS hybrid + c_os/c_ss PT2 with RI, -qm.dh_pt2; D3(BJ) for -d3bj names, native D4 (EEQ, ATM) for -d4 names; H-Ne, closed shell, analytic gradient)",
+          "Native double hybrids (KS hybrid + c_os/c_ss PT2 with RI, -qm.dh_pt2; D3(BJ) for -d3bj names, native D4 (EEQ, ATM) for -d4 names; H-Rn with def2-ECP for Rb-Rn, closed shell, analytic gradient)",
           always, {{"Native", always}},
           [](const std::string& m, const json& c) -> std::unique_ptr<ComputationalMethod> {
               CurcumaLogger::success("Method '" + m + "' resolved to native double hybrid");
               return std::make_unique<DoubleHybridMethod>(m, c); } },
         // Claude Generated (Oct 2026, WP13): canonical closed-shell CCSD on the native RHF; energy only.
         { {"ccsd"}, "Quantum Methods (native)",
-          "Native canonical RCCSD on the native RHF (exact integrals, no RI; H-Ne, closed shell, energy only; -qm.frozen_core, -qm.cc_*)",
+          "Native canonical RCCSD on the native RHF (exact integrals, no RI; H-Rn with def2-ECP for Rb-Rn, closed shell, energy only; -qm.frozen_core, -qm.cc_*)",
           always, {{"Native", always}},
           [](const std::string&, const json& c) -> std::unique_ptr<ComputationalMethod> {
               CurcumaLogger::success("Method 'ccsd' resolved to native canonical RCCSD");
               return std::make_unique<CCSDMethod>(c); } },
         // Claude Generated (Oct 2026, WP15): local PNO-based RI-MP2 on the native RHF; energy only.
         { {"lmp2", "local-ri-mp2"}, "Quantum Methods (native)",
-          "Native local PNO-RI-MP2 (Pipek-Mezey/Boys LMOs, BP+radius PAO domains, T_CutPNO; aux -qm.ri_mp2_aux; H-Ne, closed shell, energy only; -qm.lmp2_*)",
+          "Native local PNO-RI-MP2 (Pipek-Mezey/Boys LMOs, BP+radius PAO domains, T_CutPNO; aux -qm.ri_mp2_aux; closed shell, energy only, tested on H/C/N/O only; -qm.lmp2_*)",
           always, {{"Native", always}},
           [](const std::string&, const json& c) -> std::unique_ptr<ComputationalMethod> {
               CurcumaLogger::success("Method 'lmp2' resolved to native local PNO-RI-MP2");

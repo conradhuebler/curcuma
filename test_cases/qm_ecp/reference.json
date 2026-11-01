@@ -1,0 +1,518 @@
+{
+ "generator": "scripts/qm_ecp_reference.py",
+ "pyscf": "2.14.0",
+ "libxc": "7.0.0",
+ "cases": {
+  "hf_nacl_def2-SVP": {
+   "xyz": "structures/small/sodium-chloride.xyz",
+   "method": "hf",
+   "qm": {
+    "basis": "def2-SVP"
+   },
+   "gradient": false,
+   "label": "qm_z",
+   "pyscf": {
+    "nbf": 33,
+    "bse_text": false,
+    "frozen": 0,
+    "energy": -621.2223514582012
+   },
+   "orca": {
+    "energy": -621.22235145743,
+    "input": "! RHF def2-SVP NoRI VeryTightSCF"
+   }
+  },
+  "hf_zncl2_def2-SVP": {
+   "xyz": "structures/metals/zinc-dichloride.xyz",
+   "method": "hf",
+   "qm": {
+    "basis": "def2-SVP"
+   },
+   "gradient": false,
+   "label": "qm_z",
+   "pyscf": {
+    "nbf": 67,
+    "bse_text": false,
+    "frozen": 0,
+    "energy": -2696.3869858561
+   },
+   "orca": {
+    "energy": -2696.386985853612,
+    "input": "! RHF def2-SVP NoRI VeryTightSCF"
+   }
+  },
+  "hf_hbr_def2-TZVP": {
+   "xyz": "structures/small/hydrogen-bromide.xyz",
+   "method": "hf",
+   "qm": {
+    "basis": "def2-TZVP"
+   },
+   "gradient": false,
+   "label": "qm_z",
+   "pyscf": {
+    "nbf": 54,
+    "bse_text": false,
+    "frozen": 0,
+    "energy": -2573.0008596645303
+   },
+   "orca": {
+    "energy": -2573.000859662019,
+    "input": "! RHF def2-TZVP NoRI VeryTightSCF"
+   }
+  },
+  "b3lyp_so2_def2-SVP_sg1": {
+   "xyz": "structures/small/sulfur-dioxide.xyz",
+   "method": "b3lyp",
+   "qm": {
+    "basis": "def2-SVP",
+    "grid": "sg1"
+   },
+   "gradient": false,
+   "label": "qm_z",
+   "pyscf": {
+    "nbf": 46,
+    "bse_text": false,
+    "frozen": 0,
+    "energy": -548.2321702733698
+   }
+  },
+  "pbe_kcl_def2-TZVP_sg1": {
+   "xyz": "structures/small/potassium-chloride.xyz",
+   "method": "pbe",
+   "qm": {
+    "basis": "def2-TZVP",
+    "grid": "sg1"
+   },
+   "gradient": false,
+   "label": "qm_z",
+   "pyscf": {
+    "nbf": 70,
+    "bse_text": false,
+    "frozen": 0,
+    "energy": -1059.8045076706042
+   }
+  },
+  "hfgrad_h2s_def2-SVP": {
+   "xyz": "structures/small/hydrogen-sulfide.d-shell-validation.xyz",
+   "method": "hf",
+   "qm": {
+    "basis": "def2-SVP"
+   },
+   "gradient": true,
+   "label": "qm_z",
+   "pyscf": {
+    "nbf": 28,
+    "bse_text": false,
+    "refine_dE": 0.0,
+    "frozen": 0,
+    "energy": -398.567012717827,
+    "gradient": [
+     [
+      2.357729184260708e-17,
+      -4.4161686569144924e-17,
+      -0.007989389540914438
+     ],
+     [
+      0.00017261561779657875,
+      -2.408322231872639e-16,
+      0.003994694770452334
+     ],
+     [
+      -0.00017261561779857715,
+      2.849939097562337e-16,
+      0.003994694770453222
+     ]
+    ]
+   }
+  },
+  "b3lypgrad_so2_def2-SVP_sg1": {
+   "xyz": "structures/small/sulfur-dioxide.xyz",
+   "method": "b3lyp",
+   "qm": {
+    "basis": "def2-SVP",
+    "grid": "sg1"
+   },
+   "gradient": true,
+   "label": "qm_z",
+   "pyscf": {
+    "nbf": 46,
+    "bse_text": false,
+    "refine_dE": -3.410605131648481e-13,
+    "frozen": 0,
+    "energy": -548.2321702733707,
+    "gradient": [
+     [
+      -8.064010647657136e-14,
+      -3.2616403900136897e-16,
+      0.04633368234141244
+     ],
+     [
+      -0.03742953675122962,
+      1.0686891181121148e-15,
+      -0.02316684117065826
+     ],
+     [
+      0.03742953675137173,
+      -7.475891880086009e-16,
+      -0.023166841170709773
+     ]
+    ]
+   }
+  },
+  "mp2fc_nacl_def2-SVP": {
+   "xyz": "structures/small/sodium-chloride.xyz",
+   "method": "mp2",
+   "qm": {
+    "basis": "def2-SVP",
+    "frozen_core": true
+   },
+   "gradient": false,
+   "label": "qm_z",
+   "pyscf": {
+    "nbf": 33,
+    "bse_text": false,
+    "frozen": 6,
+    "energy": -621.3609764553046
+   }
+  },
+  "hf_hi_def2-SVP": {
+   "xyz": "structures/small/hydrogen-iodide.xyz",
+   "method": "hf",
+   "qm": {
+    "basis": "def2-SVP"
+   },
+   "gradient": false,
+   "label": "qm_ecp",
+   "pyscf": {
+    "nbf": 31,
+    "bse_text": false,
+    "frozen": 0,
+    "energy": -297.23153166335885
+   },
+   "orca": {
+    "energy": -297.231531663263,
+    "input": "! RHF def2-SVP NoRI VeryTightSCF"
+   }
+  },
+  "hf_hi_def2-TZVP": {
+   "xyz": "structures/small/hydrogen-iodide.xyz",
+   "method": "hf",
+   "qm": {
+    "basis": "def2-TZVP"
+   },
+   "gradient": false,
+   "label": "qm_ecp",
+   "pyscf": {
+    "nbf": 56,
+    "bse_text": false,
+    "frozen": 0,
+    "energy": -297.2420092462267
+   },
+   "orca": {
+    "energy": -297.242009246075,
+    "input": "! RHF def2-TZVP NoRI VeryTightSCF"
+   }
+  },
+  "hf_ch3i_def2-SVP": {
+   "xyz": "structures/small/iodomethane.xyz",
+   "method": "hf",
+   "qm": {
+    "basis": "def2-SVP"
+   },
+   "gradient": false,
+   "label": "qm_ecp",
+   "pyscf": {
+    "nbf": 55,
+    "bse_text": false,
+    "frozen": 0,
+    "energy": -336.2329874277371
+   },
+   "orca": {
+    "energy": -336.232987427592,
+    "input": "! RHF def2-SVP NoRI VeryTightSCF"
+   }
+  },
+  "hf_csi_def2-SVP": {
+   "xyz": "structures/small/caesium-iodide.xyz",
+   "method": "hf",
+   "qm": {
+    "basis": "def2-SVP"
+   },
+   "gradient": false,
+   "label": "qm_ecp",
+   "pyscf": {
+    "nbf": 50,
+    "bse_text": false,
+    "frozen": 0,
+    "energy": -316.60416261512046
+   },
+   "orca": {
+    "energy": -316.604162615394,
+    "input": "! RHF def2-SVP NoRI VeryTightSCF"
+   }
+  },
+  "hf_xef2_def2-SVP": {
+   "xyz": "structures/small/xenon-difluoride.xyz",
+   "method": "hf",
+   "qm": {
+    "basis": "def2-SVP"
+   },
+   "gradient": false,
+   "label": "qm_ecp",
+   "orca_tol": 5e-08,
+   "pyscf": {
+    "nbf": 78,
+    "bse_text": false,
+    "frozen": 0,
+    "energy": -526.8163595023959
+   },
+   "orca": {
+    "energy": -526.816359526214,
+    "input": "! RHF def2-SVP NoRI VeryTightSCF"
+   }
+  },
+  "hf_hgcl2_def2-SVP": {
+   "xyz": "structures/metals/mercury-dichloride.xyz",
+   "method": "hf",
+   "qm": {
+    "basis": "def2-SVP"
+   },
+   "gradient": false,
+   "label": "qm_ecp",
+   "orca_tol": 1e-07,
+   "pyscf": {
+    "nbf": 68,
+    "bse_text": false,
+    "frozen": 0,
+    "energy": -1071.2887764956924
+   },
+   "orca": {
+    "energy": -1071.288776556787,
+    "input": "! RHF def2-SVP NoRI VeryTightSCF"
+   }
+  },
+  "hf_pbh4_def2-SVP": {
+   "xyz": "structures/small/plumbane.xyz",
+   "method": "hf",
+   "qm": {
+    "basis": "def2-SVP"
+   },
+   "gradient": false,
+   "label": "qm_ecp",
+   "pyscf": {
+    "nbf": 46,
+    "bse_text": false,
+    "frozen": 0,
+    "energy": -194.06572510924283
+   },
+   "orca": {
+    "energy": -194.065725109222,
+    "input": "! RHF def2-SVP NoRI VeryTightSCF"
+   }
+  },
+  "hf_cef4_def2-SVP": {
+   "xyz": "structures/metals/cerium-tetrafluoride.xyz",
+   "method": "hf",
+   "qm": {
+    "basis": "def2-SVP"
+   },
+   "gradient": false,
+   "label": "qm_ecp",
+   "pyscf": {
+    "nbf": 134,
+    "bse_text": true,
+    "frozen": 0,
+    "energy": -871.3016284157738
+   },
+   "orca": {
+    "energy": -871.30162841556,
+    "input": "! RHF def2-SVP NoRI VeryTightSCF"
+   }
+  },
+  "b3lyp_hi_def2-SVP_sg1": {
+   "xyz": "structures/small/hydrogen-iodide.xyz",
+   "method": "b3lyp",
+   "qm": {
+    "basis": "def2-SVP",
+    "grid": "sg1"
+   },
+   "gradient": false,
+   "label": "qm_ecp",
+   "pyscf": {
+    "nbf": 31,
+    "bse_text": false,
+    "frozen": 0,
+    "energy": -298.29484238677605
+   }
+  },
+  "hfgrad_hit_def2-SVP": {
+   "xyz": "structures/small/hydrogen-iodide.tilted.xyz",
+   "method": "hf",
+   "qm": {
+    "basis": "def2-SVP"
+   },
+   "gradient": true,
+   "label": "qm_ecp",
+   "pyscf": {
+    "nbf": 31,
+    "bse_text": false,
+    "refine_dE": -1.1368683772161603e-13,
+    "frozen": 0,
+    "energy": -297.2306372865509,
+    "gradient": [
+     [
+      -0.0005771190599809656,
+      0.00023084762399215933,
+      -0.019044928979373488
+     ],
+     [
+      0.0005771190599811044,
+      -0.00023084762399208994,
+      0.019044928979373488
+     ]
+    ]
+   }
+  },
+  "hfgrad_hit_def2-TZVP": {
+   "xyz": "structures/small/hydrogen-iodide.tilted.xyz",
+   "method": "hf",
+   "qm": {
+    "basis": "def2-TZVP"
+   },
+   "gradient": true,
+   "label": "qm_ecp",
+   "pyscf": {
+    "nbf": 56,
+    "bse_text": false,
+    "refine_dE": -6.821210263296962e-13,
+    "frozen": 0,
+    "energy": -297.2409800637659,
+    "gradient": [
+     [
+      -0.0006230509546722302,
+      0.000249220381868958,
+      -0.020560681504151024
+     ],
+     [
+      0.0006230509546715918,
+      -0.0002492203818689233,
+      0.020560681504159017
+     ]
+    ]
+   }
+  },
+  "b3lypgrad_hit_def2-SVP_sg1": {
+   "xyz": "structures/small/hydrogen-iodide.tilted.xyz",
+   "method": "b3lyp",
+   "qm": {
+    "basis": "def2-SVP",
+    "grid": "sg1"
+   },
+   "gradient": true,
+   "label": "qm_ecp",
+   "pyscf": {
+    "nbf": 31,
+    "bse_text": false,
+    "refine_dE": 4.547473508864641e-13,
+    "frozen": 0,
+    "energy": -298.29471552831745,
+    "gradient": [
+     [
+      -0.0002654442353038772,
+      0.00010597725784319487,
+      -0.009035722120333212
+     ],
+     [
+      0.0002654442353037523,
+      -0.00010597725784312201,
+      0.009035722120335432
+     ]
+    ]
+   }
+  },
+  "rijkgrad_hit_def2-SVP": {
+   "xyz": "structures/small/hydrogen-iodide.tilted.xyz",
+   "method": "hf",
+   "qm": {
+    "basis": "def2-SVP",
+    "ri": "jk",
+    "ri_aux": "def2-universal-JKFIT"
+   },
+   "gradient": true,
+   "label": "qm_ecp",
+   "pyscf": {
+    "nbf": 31,
+    "bse_text": false,
+    "refine_dE": 5.684341886080802e-14,
+    "frozen": 0,
+    "energy": -297.2306258432865,
+    "gradient": [
+     [
+      -0.0005762154081657839,
+      0.0002304861632766199,
+      -0.019015108469284225
+     ],
+     [
+      0.0005762154081595805,
+      -0.00023048616326391477,
+      0.01901510846927712
+     ]
+    ]
+   }
+  },
+  "mp2fc_hi_def2-SVP": {
+   "xyz": "structures/small/hydrogen-iodide.xyz",
+   "method": "mp2",
+   "qm": {
+    "basis": "def2-SVP",
+    "frozen_core": true
+   },
+   "gradient": false,
+   "label": "qm_ecp",
+   "pyscf": {
+    "nbf": 31,
+    "bse_text": false,
+    "frozen": 4,
+    "energy": -297.3600829056275
+   }
+  },
+  "rimp2fc_hi_def2-SVP": {
+   "xyz": "structures/small/hydrogen-iodide.xyz",
+   "method": "ri-mp2",
+   "qm": {
+    "basis": "def2-SVP",
+    "frozen_core": true,
+    "ri_mp2_aux": "def2-universal-JKFIT"
+   },
+   "gradient": false,
+   "label": "qm_ecp",
+   "pyscf": {
+    "nbf": 31,
+    "bse_text": false,
+    "frozen": 4,
+    "energy": -297.3600324632915
+   }
+  },
+  "mp2grad_hit_def2-SVP": {
+   "xyz": "structures/small/hydrogen-iodide.tilted.xyz",
+   "method": "mp2",
+   "qm": {
+    "basis": "def2-SVP",
+    "frozen_core": true
+   },
+   "gradient": true,
+   "label": "qm_ecp"
+  },
+  "b2plypgrad_hit_def2-SVP_sg1": {
+   "xyz": "structures/small/hydrogen-iodide.tilted.xyz",
+   "method": "b2plyp",
+   "qm": {
+    "basis": "def2-SVP",
+    "grid": "sg1",
+    "frozen_core": false
+   },
+   "gradient": true,
+   "label": "qm_ecp"
+  }
+ }
+}

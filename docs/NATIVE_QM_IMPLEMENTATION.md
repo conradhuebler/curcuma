@@ -25,6 +25,8 @@ LDA (WP5) runs since Oct 30 2026 (closed-shell RKS, Slater + VWN5/VWN-RPA,
 `-qm.vwn_variant`, [WP7](DFT_ROADMAP/WP7_b3lyp_hybrid.md)); all three have an analytic gradient with grid
 response since Oct 30 2026 (`-opt` works, [WP8](DFT_ROADMAP/WP8_analytischer_gradient.md)). ⚠️ AI-generated / ⚙️ machine-tested only — no human
 production test, and the validation set is 10 molecules in a H-Ne basis.
+Since Nov 1 2026 the engine takes H-Rn (Na-Kr all-electron, Rb-Rn with the def2-ECP), see
+[stage 4](#stage-4-elements-beyond-ne-and-def2-ecp-nov-1-2026); the older sections below describe the H-Ne state of their date.
 
 ## Status summary
 
@@ -461,6 +463,84 @@ LMP2 and the double hybrids. Fitting sets were already general in l (up to h for
   reference), LMP2 beyond the complete-space check, MP2/DH gradients with f/g only against the FD of curcuma's own energy, ORCA for the KS energies (only
   PySCF on the same grid), thread scaling, molecules larger than NH3/CH4, the GPU on another card than the RTX 5090. Human production test
   pending.
+
+### Stage 4: elements beyond Ne and def2-ECP (Nov 1, 2026)
+
+AI-generated, machine-tested (no human production test). The engine takes H-Rn (Z <= 86, `qmbasis::kEngineMaxZ`):
+Na-Kr all-electron, Rb-Rn with the semi-local def2-ECP (`-qm.ecp auto`, default: def2-ECP for every def2 orbital
+basis; `def2-ECP` | `none`). Closed shell only, as before; hf-3c stays H-Ne (MINIX, gCP and SRB tables).
+
+- Elements: one table `qm_elements.h` (symbols, BSE `$DATA` names) for `BasisSetParser`, `QMEngine` and the aux parser;
+  the parsers read the built-in blocks up to `qmbasis::parseMaxZ(atoms)` = max(10, highest Z), so an H-Ne molecule
+  parses exactly the text of before. A basis or aux FILE that lacks an element of the molecule (the H-Ne
+  `def2-SVP.dat`/`def2-universal-J(K)FIT.turbomole` of the source directory) takes that element from the built-in set
+  of the same name; the file still wins for every element it has.
+- Grid: the Treutler/Bragg tables already covered Z <= 86; the grid is unpruned (same points per atom), so PySCF with
+  `atom_grid = (n_rad, n_ang)`, `prune = None` reproduces it for heavy atoms too.
+- Charges: `QMEngine::m_core_charges` = Z - n_core is the charge of V, E_nn and its gradient, the SAD/atom guesses, the
+  electron count and the device 1e gradient (`atom_Z`); the grid, D3/D4 and the frozen core read the real Z.
+- ECP integrals (`qm_ecp.{h,cpp}`, formulas in the header): local part = three-centre Gaussian overlaps (analytic);
+  semi-local projectors l < L (L = 3, lanthanides L = 5 with s-g projectors) by angular projection of each basis
+  function onto the ECP centre: binomial shift to C, exp(2 alpha D r cos g) = sum (2 lambda + 1) i_lambda P_lambda, the
+  angular integrals of monomial x P_lambda x Y_lm EXACT with a Lebedev grid of degree 2 (n + l), the radial integral by
+  Gauss-Chebyshev (2nd kind) on r = ln(2/(1-x))/ln 2 with 2^k - 1 points, k doubled from 7 until max|dV| <
+  max(1e-13, 2e-15 max|V|) (`CURCUMA_QM_ECP_DEBUG=1` prints each order; HI/XeF2 accept 2047 points, CeF4 4095;
+  energies unchanged to 1e-14 Eh when the radial map is scaled by 0.5, 2 or 3). Only the r^0 terms (n = 2) of def2-ECP
+  are implemented; other powers are rejected by the parser. Scheme: Flores-Moreno et al., J. Comput. Chem. 27, 1009
+  (2006); McMurchie, Davidson, J. Comput. Phys. 44, 289 (1981).
+- ECP gradient: derivative functions d phi/dA = 2 alpha phi(a+1) - a phi(a-1) through the same projections, the ECP
+  centre by translational invariance; added after every `gradientOneElectron` call (HF/KS, MP2, double hybrids, also
+  when the 1e part runs on the device). It is the exact derivative of the quadrature energy at the order the energy
+  build accepted (reused, `m_ecp_levels`).
+- Frozen core (Z > 10): the ORCA 6.1 table (`Freezing NCore` checked for 22 elements Na-Pb with def2-SVP), identical
+  to PySCF `chemcore_atm`: Na-Mg 1, Al-Zn 5, Ga-Sr 9, Y-Cd 14, In-Yb 18, Lu-Hg 23, Tl-No 34 orbitals, minus n_core/2 of
+  an ECP (e.g. I: 18 - 14 = 4, as ORCA "NCore=8" and PySCF). Li and Be keep curcuma's 1s (ORCA/PySCF freeze nothing
+  there; kept so H-Ne results do not change).
+- CUDA: the ECP matrix and gradient are CPU terms on every path (no fallback counted, nothing on the device to fall
+  back from); the device SCF loop uses H with the ECP inside; `-gpu cuda` energies equal the CPU (CH3I HF, HI B3LYP;
+  device 1e gradient vs CPU <= 1.4e-13 Eh/Bohr before the ECP term is added). RTX 5090 only.
+
+Checks (PySCF 2.14 / libxc 7.0.0, basis and ECP by PySCF name, Ce from curcuma's BSE text because PySCF's def2 library
+has no lanthanides; ORCA 6.1.0 `! RHF <basis> NoRI VeryTightSCF`; constructed geometries in `test_cases/structures`):
+
+| what | cases | max deviation |
+|---|---|---|
+| HF def2-SVP, all-electron (NaCl NaF SO2 AlCl3 KCl MgCl2 ZnCl2 TiCl4 CuCl HBr GeH4 Cl2 Kr) vs PySCF / ORCA | 13 | 2.9e-11 (TiCl4) / 3.6e-9 Eh (TiCl4) |
+| HF def2-TZVP, all-electron (NaCl SO2 AlCl3 KCl ZnCl2 TiCl4 CuCl HBr GeH4 Kr) vs PySCF / ORCA (8 of them) | 10 / 8 | 3.6e-11 / 2.6e-9 Eh |
+| b3lyp def2-SVP (NaCl SO2 ZnCl2 TiCl4 HBr), pbe def2-TZVP (KCl ZnCl2 Cl2), tpss def2-SVP (SO2 CuCl) vs PySCF same grid | 10 | 7.1e-11 Eh (TiCl4 b3lyp) |
+| gradients all-electron vs PySCF (HF SVP SO2 ZnCl2 NaCl HBr, TZVP ZnCl2 KCl; b3lyp SVP SO2 ZnCl2; pbe TZVP CuCl) | 9 | 6.8e-11 Eh/Bohr |
+| HF def2-SVP with ECP (HI I2 CH3I RbCl CsI SnH4 HgCl2 PbH4 AgCl LaF3 CeF4) vs PySCF | 11 | 2.4e-11 Eh (LaF3) |
+| HF def2-SVP with ECP, same 11 vs ORCA | 11 | 6.1e-8 Eh (HgCl2; AgCl 4.5e-9, LaF3 1.8e-9, others <= 6e-10) |
+| HF def2-TZVP with ECP (HI I2 CH3I RbCl CsI HgCl2 AgCl) vs PySCF / ORCA (+ CeF4 ORCA) | 7 / 8 | 1.1e-12 / 6.1e-8 Eh (HgCl2; CeF4 1.2e-10) |
+| XeF2 HF def2-SVP / TZVP: curcuma vs PySCF, vs ORCA; PySCF vs ORCA | 2 | 2.7e-9 / 1.6e-6; 2.1e-8 / 2.4e-8; 2.4e-8 / 1.6e-6 Eh |
+| b3lyp def2-SVP (HI CH3I HgCl2), pbe def2-TZVP (I2 AgCl), tpss def2-SVP (SnH4) vs PySCF same grid | 6 | 3.3e-11 Eh (XeF2 b3lyp 1.7e-8, the PySCF Xe offset) |
+| MP2 frozen core def2-SVP (HI CH3I HgCl2 NaCl KCl; PySCF `frozen = chemcore`), MP2 full HI, RI-MP2 fc HI, RI-MP2 I2 TZVP, RI-JK HF HI ZnCl2 | 10 | 1.2e-11 Eh |
+| CCSD fc HI def2-SVP vs PySCF | 1 | 4.3e-10 Eh |
+| gradients with ECP vs PySCF (HF SVP HI-tilted CH3I HgCl2, TZVP HI-tilted I2; b3lyp SVP HI-tilted CH3I; pbe TZVP HI-tilted; RI-JK) | 9 | 2.7e-11 Eh/Bohr (XeF2: 2.1e-6, the PySCF offset) |
+| gradients with ECP vs ORCA 6.1 EnGrad (HF SVP HI-tilted CH3I XeF2 HgCl2) | 4 | 2.6e-7 Eh/Bohr (XeF2; HI 3.4e-8) |
+| FD gate: analytic vs 4-point central difference of curcuma's energy (HF SVP HI CH3I XeF2, TZVP I2; b3lyp, tpss, mp2, b2plyp HI) | 21 coordinates | 2.0e-10 Eh/Bohr (CH3I) |
+| D3(BJ) of b2plyp-d3bj, CH3I and HgCl2, vs ORCA 6.1 | 2 | equal at ORCA's 9 printed decimals |
+
+- ORCA vs PySCF: for Hg (HgCl2) PySCF equals curcuma to 5e-12 Eh while ORCA is 6.1e-8 Eh off; for XeF2 PySCF is
+  1.6e-6 Eh (TZVP) off both ORCA and curcuma, the Xe atom alone agrees in all three to 1e-12 Eh, so the PySCF offset
+  comes from functions of other centres projected onto Xe. Which program is right was not established; curcuma's
+  value is stable under changes of the radial quadrature (above), the angular part is exact by construction.
+- ctest `-L "qm_z|qm_ecp"` (31 tests, reference `test_cases/qm_ecp/reference.json` from `scripts/qm_ecp_reference.py`,
+  checker `test_cases/qm_fg/check_qm_fg.py --reference`): 31/31 pass, 8.0 s wall at -j4 (25 s test time; CeF4 def2-SVP 6.7 s the longest).
+- Timing (this machine, `dump_qm_energy`): H2O def2-SVP HF before/after 0.0196/0.0196 s (median of 15 process runs, incl. start-up); HI def2-SVP
+  HF energy 0.09 s, + gradient 0.29 s; I2 def2-TZVP (100 functions) HF energy 2.25 s, energy + gradient 35.4 s on 1
+  thread (ECP matrix 132 ms, 1e gradient incl. ECP 0.49 s, the exact 2e gradient 32.7 s), 1.07 / 5.80 s on 8 threads;
+  CH3I def2-TZVP 2.43 / 18.7 s (1 thread), 1.13 / 3.49 s (8 threads); TiCl4 def2-TZVP (193 functions, all-electron)
+  HF energy 41 s on 1 thread; CeF4 def2-TZVP HF 29 s on 4 threads.
+- Not tested / not implemented: open shell (the engine is closed-shell only; most free heavy atoms and many TM
+  compounds are open shell); h orbital shells; ECP terms with r^(n-2), n != 2 (not in def2-ECP, rejected); ECP
+  integrals or gradient on the GPU (CPU terms); relativistic effects beyond the scalar-relativistic ECP (no spin-orbit
+  ECP, no DKH/ZORA for the all-electron 4th row); elements beyond Rn; MINIX/hf-3c beyond Ne (MINIX for Na-Kr needs the
+  ORCA export of the added shells and gCP/SRB tables, not attempted); ghost atoms and point charges; large systems
+  (largest case: TiCl4 TZVP 193 functions, CeF4 TZVP); 3d compounds other than closed-shell ZnCl2, TiCl4, CuCl, the
+  other lanthanides (only Ce, L = 5 path) and La; LMP2 and the D4 term with heavy elements (they run, no reference);
+  MP2/DH gradients with ECP only against curcuma's own FD; the frozen-core table above Ne only by element, not by
+  correlated energies against ORCA; thread scaling of the ECP code.
 
 ## Basis-set citations (Oct 27, 2026)
 

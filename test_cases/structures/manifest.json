@@ -477,6 +477,25 @@
    "description": "44 frames of a complex of host C33H45N9 and guest C7H14O6; the guest is methyl alpha-D-galactopyranoside in all 44 frames (see analysis); curcuma conformer output"
   },
   {
+   "id": "caesium-iodide",
+   "class": "small",
+   "file": "small/caesium-iodide.xyz",
+   "format": "xyz",
+   "formula": "CsI",
+   "natoms": 2,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "equilibrium",
+   "size_bytes": 161,
+   "sha256": "0b4e3710c84cba2e4fb1e8db1a650278a82a5e9a96192ada50412f26819373db",
+   "provenance": {
+    "kind": "constructed",
+    "description": "CsI on z, Cs-I 3.315 A"
+   },
+   "notes": "native QM tests for elements beyond Ne and the def2-ECP (test_cases/qm_ecp, Nov 2026); geometry typed in by hand, bond lengths are rounded literature-like values that were NOT checked against a source"
+  },
+  {
    "id": "caffeine",
    "class": "medium",
    "file": "medium/caffeine.xyz",
@@ -546,6 +565,25 @@
    },
    "legacy": true,
    "aliases": []
+  },
+  {
+   "id": "cerium-tetrafluoride",
+   "class": "metals",
+   "file": "metals/cerium-tetrafluoride.xyz",
+   "format": "xyz",
+   "formula": "CeF4",
+   "natoms": 5,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "equilibrium",
+   "size_bytes": 311,
+   "sha256": "f4e368da47b2f8470f1cac1f4b5c52b02a4d8e7d120592c3836a8d9e2a089ebe",
+   "provenance": {
+    "kind": "constructed",
+    "description": "CeF4 tetrahedral, Ce-F 2.0 A (idealised Td; the real molecule may not be Td)"
+   },
+   "notes": "native QM tests for elements beyond Ne and the def2-ECP (test_cases/qm_ecp, Nov 2026); geometry typed in by hand, bond lengths are rounded literature-like values that were NOT checked against a source"
   },
   {
    "id": "cg-spheres2",
@@ -920,6 +958,25 @@
    "description": "comment line: He2 non-bonded test, 3.0 A separation"
   },
   {
+   "id": "hydrogen-bromide",
+   "class": "small",
+   "file": "small/hydrogen-bromide.xyz",
+   "format": "xyz",
+   "formula": "BrH",
+   "natoms": 2,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "equilibrium",
+   "size_bytes": 163,
+   "sha256": "188e33613e610989cf35327bfe7ae2b3a5f43b77d8716e6965763453890b3ec7",
+   "provenance": {
+    "kind": "constructed",
+    "description": "HBr on z, H-Br 1.414 A"
+   },
+   "notes": "native QM tests for elements beyond Ne and the def2-ECP (test_cases/qm_ecp, Nov 2026); geometry typed in by hand, bond lengths are rounded literature-like values that were NOT checked against a source"
+  },
+  {
    "id": "hydrogen-chloride",
    "class": "small",
    "file": "small/hydrogen-chloride.xyz",
@@ -1107,6 +1164,44 @@
    "description": "same coordinates as hydrogen-cyanide; only the comment line differs (cli/gpu_gradient test)"
   },
   {
+   "id": "hydrogen-iodide",
+   "class": "small",
+   "file": "small/hydrogen-iodide.xyz",
+   "format": "xyz",
+   "formula": "HI",
+   "natoms": 2,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "equilibrium",
+   "size_bytes": 162,
+   "sha256": "632e208d0db7e236306f41d488ae240110d284af3b53c54fb4aef6ce7bc9a8a6",
+   "provenance": {
+    "kind": "constructed",
+    "description": "HI on z, H-I 1.609 A"
+   },
+   "notes": "native QM tests for elements beyond Ne and the def2-ECP (test_cases/qm_ecp, Nov 2026); geometry typed in by hand, bond lengths are rounded literature-like values that were NOT checked against a source"
+  },
+  {
+   "id": "hydrogen-iodide.tilted",
+   "class": "small",
+   "file": "small/hydrogen-iodide.tilted.xyz",
+   "format": "xyz",
+   "formula": "HI",
+   "natoms": 2,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "non-equilibrium",
+   "size_bytes": 169,
+   "sha256": "86c5e8bad14aecbba0871806246ffc9f896675871e9ee00bfe0acd09bde52153",
+   "provenance": {
+    "kind": "constructed",
+    "description": "HI stretched to about 1.651 A and tilted off the z axis (I at 0.05/0.02/0, H at 0.1/0/1.65 A), nonzero forces in x and z for gradient tests"
+   },
+   "notes": "native QM tests for elements beyond Ne and the def2-ECP (test_cases/qm_ecp, Nov 2026); geometry typed in by hand, bond lengths are rounded literature-like values that were NOT checked against a source"
+  },
+  {
    "id": "hydrogen-sulfide.d-shell-validation",
    "class": "small",
    "file": "small/hydrogen-sulfide.d-shell-validation.xyz",
@@ -1181,6 +1276,25 @@
    "aliases": [
     "oh"
    ]
+  },
+  {
+   "id": "iodomethane",
+   "class": "small",
+   "file": "small/iodomethane.xyz",
+   "format": "xyz",
+   "formula": "CH3I",
+   "natoms": 5,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "equilibrium",
+   "size_bytes": 302,
+   "sha256": "22388af9c14be33af775b9694cdd301a7f9848b61942a1128854eaa0cb9cfd13",
+   "provenance": {
+    "kind": "constructed",
+    "description": "CH3I in C3v, C-I 2.139 A, C-H 1.084 A, H-C-I 107.6 deg"
+   },
+   "notes": "native QM tests for elements beyond Ne and the def2-ECP (test_cases/qm_ecp, Nov 2026); geometry typed in by hand, bond lengths are rounded literature-like values that were NOT checked against a source"
   },
   {
    "id": "jl22-bgal.conf6",
@@ -1502,6 +1616,25 @@
     "numgrad"
    ],
    "description": "UFF optimisation with numerical gradients of the macrocycle-bgal complex (comparison of LBFGS implementations, 2025)"
+  },
+  {
+   "id": "mercury-dichloride",
+   "class": "metals",
+   "file": "metals/mercury-dichloride.xyz",
+   "format": "xyz",
+   "formula": "Cl2Hg",
+   "natoms": 3,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "equilibrium",
+   "size_bytes": 213,
+   "sha256": "ba693cb11bf91b094b3fba4cec6e8b9421a0fa054e2d5425d2572a2231813ae4",
+   "provenance": {
+    "kind": "constructed",
+    "description": "linear Cl-Hg-Cl, Hg-Cl 2.25 A"
+   },
+   "notes": "native QM tests for elements beyond Ne and the def2-ECP (test_cases/qm_ecp, Nov 2026); geometry typed in by hand, bond lengths are rounded literature-like values that were NOT checked against a source"
   },
   {
    "id": "methane",
@@ -2045,6 +2178,25 @@
    "description": "comment line: PH3 d-shell validation (X-I1)"
   },
   {
+   "id": "plumbane",
+   "class": "small",
+   "file": "small/plumbane.xyz",
+   "format": "xyz",
+   "formula": "H4Pb",
+   "natoms": 5,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "equilibrium",
+   "size_bytes": 299,
+   "sha256": "6507cf79543260cb03594ad0d87abc3d36283dd00d6c5f2828062fafb6460ed8",
+   "provenance": {
+    "kind": "constructed",
+    "description": "PbH4 tetrahedral, Pb-H 1.75 A"
+   },
+   "notes": "native QM tests for elements beyond Ne and the def2-ECP (test_cases/qm_ecp, Nov 2026); geometry typed in by hand, bond lengths are rounded literature-like values that were NOT checked against a source"
+  },
+  {
    "id": "polymerbuild-fragment-2xx",
    "class": "small",
    "file": "small/polymerbuild-fragment-2xx.xyz",
@@ -2091,6 +2243,25 @@
    "notes": "Built to test -scf_precond segmentation on a molecule with aromatic rings. GFN2 SCF: 12 iterations without M."
   },
   {
+   "id": "potassium-chloride",
+   "class": "small",
+   "file": "small/potassium-chloride.xyz",
+   "format": "xyz",
+   "formula": "ClK",
+   "natoms": 2,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "equilibrium",
+   "size_bytes": 165,
+   "sha256": "6d2c69f874e71eaaa4db9d0a0404bc3c5896ea659f96de73324d0dfff8f281f3",
+   "provenance": {
+    "kind": "constructed",
+    "description": "KCl on z, K-Cl 2.667 A"
+   },
+   "notes": "native QM tests for elements beyond Ne and the def2-ECP (test_cases/qm_ecp, Nov 2026); geometry typed in by hand, bond lengths are rounded literature-like values that were NOT checked against a source"
+  },
+  {
    "id": "silane.d-shell-validation",
    "class": "small",
    "file": "small/silane.d-shell-validation.xyz",
@@ -2112,6 +2283,44 @@
     "sih4"
    ],
    "description": "comment line: SiH4 d-shell validation (X-I1)"
+  },
+  {
+   "id": "sodium-chloride",
+   "class": "small",
+   "file": "small/sodium-chloride.xyz",
+   "format": "xyz",
+   "formula": "ClNa",
+   "natoms": 2,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "equilibrium",
+   "size_bytes": 162,
+   "sha256": "33f9f430677ef0810173662a2e1c7c0898ea2df5dc74c7859546444b3d7c08fc",
+   "provenance": {
+    "kind": "constructed",
+    "description": "NaCl on z, Na-Cl 2.361 A"
+   },
+   "notes": "native QM tests for elements beyond Ne and the def2-ECP (test_cases/qm_ecp, Nov 2026); geometry typed in by hand, bond lengths are rounded literature-like values that were NOT checked against a source"
+  },
+  {
+   "id": "sulfur-dioxide",
+   "class": "small",
+   "file": "small/sulfur-dioxide.xyz",
+   "format": "xyz",
+   "formula": "O2S",
+   "natoms": 3,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "equilibrium",
+   "size_bytes": 209,
+   "sha256": "e24c623b6b239b16916375732c7091911476cbf54e88af0d1c3dbc81f2fb046c",
+   "provenance": {
+    "kind": "constructed",
+    "description": "SO2 in xz, S-O 1.4308 A, O-S-O 119.5 deg"
+   },
+   "notes": "native QM tests for elements beyond Ne and the def2-ECP (test_cases/qm_ecp, Nov 2026); geometry typed in by hand, bond lengths are rounded literature-like values that were NOT checked against a source"
   },
   {
    "id": "trisaccharide-c18h32o16",
@@ -2458,6 +2667,44 @@
    "aliases": [
     "water8_cluster"
    ]
+  },
+  {
+   "id": "xenon-difluoride",
+   "class": "small",
+   "file": "small/xenon-difluoride.xyz",
+   "format": "xyz",
+   "formula": "F2Xe",
+   "natoms": 3,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "equilibrium",
+   "size_bytes": 211,
+   "sha256": "6ed959df74b3fed8670af685ee5c9c63ae9834820255408a9d6b8d4ef3d67f3d",
+   "provenance": {
+    "kind": "constructed",
+    "description": "linear F-Xe-F, Xe-F 1.977 A"
+   },
+   "notes": "native QM tests for elements beyond Ne and the def2-ECP (test_cases/qm_ecp, Nov 2026); geometry typed in by hand, bond lengths are rounded literature-like values that were NOT checked against a source"
+  },
+  {
+   "id": "zinc-dichloride",
+   "class": "metals",
+   "file": "metals/zinc-dichloride.xyz",
+   "format": "xyz",
+   "formula": "Cl2Zn",
+   "natoms": 3,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "equilibrium",
+   "size_bytes": 210,
+   "sha256": "8c2338e4104ab8f19a3f9609ac13e13d93bbef1b7ae493757f6ac27ea3174341",
+   "provenance": {
+    "kind": "constructed",
+    "description": "linear Cl-Zn-Cl, Zn-Cl 2.072 A"
+   },
+   "notes": "native QM tests for elements beyond Ne and the def2-ECP (test_cases/qm_ecp, Nov 2026); geometry typed in by hand, bond lengths are rounded literature-like values that were NOT checked against a source"
   }
  ],
  "sets": [

@@ -20,7 +20,7 @@ set of the BSE for every element it has:
 | def2-mTZVPP-RIJ | H-Ar, Fe (19) | `def2-mtzvpp-rij.1.tm.bz2` |
 | def2-{SVP,SV(P),SVPD,TZVP,TZVPP,TZVPD,TZVPPD,QZVPP,QZVPPD}-RIFIT | H-La, Hf-Rn (72) | `<name>.1.tm.bz2` |
 | def2-QZVP-RIFIT | H-Ca, Ga-Sr, In-Ba, Tl-Rn (42) | `def2-qzvp-rifit.1.tm.bz2` |
-| def2-ECP (effective core potentials, raw text, unused by the engine) | Rb-Rn (50) | `def2-ecp.1.tm.bz2` |
+| def2-ECP (effective core potentials, Turbomole text, used by `qm_ecp.cpp` since Nov 2026) | Rb-Rn (50) | `def2-ecp.1.tm.bz2` |
 | MINIX (MINIS part) | H-Ne | `basis_set_exchange/data/huzinaga/MINI-scaled.0.json` ('Scaled MINI') |
 
 def2 data: every exponent/coefficient token unchanged except a Fortran `D` exponent marker written as `E`; shell order as
@@ -133,6 +133,7 @@ Metz et al. J. Chem. Phys. 113, 2563 (2000) and Theor. Chem. Acc. 104, 22 (2000)
 11113 (2003); Dolg et al. Theor. Chim. Acta 85, 441 (1993); Cao, Dolg J. Chem. Phys. 115, 7348 (2001). MINIX/HF-3c:
 R. Sure, S. Grimme, J. Comput. Chem. 2013, 34, 1672-1685. Basis Set Exchange: B. P. Pritchard et al., J. Chem. Inf.
 Model. 59, 4814-4820 (2019). The orbital and fitting references are cited at run time (`qm_citations.h`) whether the
-file or the built-in copy is loaded; the ECP and lanthanide references are not (nothing uses those data yet).
+file or the built-in copy is loaded; of the ECP references Andrae et al. 1990 and Metz et al. 2000 are cited when the
+def2-ECP is used (Nov 2026), the others and the lanthanide basis reference are not.
 
 Status: AI-generated, machine-tested (Claude Generated, Nov 2026).

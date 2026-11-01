@@ -85,6 +85,19 @@ inline void auxBasis(const std::string& name_or_file)
     }
 }
 
+/// Effective core potential by name (def2-ECP: Weigend & Ahlrichs 2005 define the combination, Stuttgart ECPs for
+/// the 4d/5d and post-d elements; the half-numerical integral scheme). Claude Generated (Nov 2026).
+inline void ecp(const std::string& name)
+{
+    if (lowerStem(name) == "def2-ecp") {
+        CitationRegistry::cite("def2_basis");
+        CitationRegistry::cite("ecp_stuttgart_4d5d");
+        CitationRegistry::cite("ecp_stuttgart_postd");
+        bse();
+    }
+    CitationRegistry::cite("ecp_half_numerical");
+}
+
 /// Closed-shell HF/SCF machinery of the native engine: Roothaan-Hall equations, McMurchie-Davidson integrals, Pulay DIIS.
 inline void hf()
 {

@@ -737,7 +737,7 @@ bool QMEngine::computeCCSD(const qmint::CCSDOptions& opt, qmint::CCSDResult& res
     }
     int n_frozen = 0;
     if (opt.frozen_core)
-        for (int Z : m_atoms) n_frozen += qmint::frozenCoreOrbitals(Z);
+        n_frozen += frozenCoreCount();
     if (n_frozen >= n_occ && n_occ > 0) {
         CurcumaLogger::error(fmt::format("CCSD: frozen core ({} orbitals) leaves no active occupied orbital ({} occupied)",
                                          n_frozen, n_occ));

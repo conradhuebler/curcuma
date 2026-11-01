@@ -32,6 +32,7 @@
 #include "qm_gpu_rimp2_backend.h"
 #include "qm_mp2.h"
 #include "qm_ri.h"
+#include "qm_basis_embedded.h"  // parseMaxZ
 
 #include "src/core/curcuma_logger.h"
 #include "src/core/energy_calculators/gpu_plugin.h"
@@ -201,7 +202,7 @@ std::shared_ptr<qmri::RIJK> QMEngine::correlationRI(const std::string& file, std
     const auto t0 = std::chrono::steady_clock::now();
     std::shared_ptr<qmri::RIJK> ri;
     try {
-        const qmri::AuxBasisMap aux = qmri::parseTurbomoleBasis(file);
+        const qmri::AuxBasisMap aux = qmri::parseTurbomoleBasis(file, qmbasis::parseMaxZ(m_atoms));
         Matrix pos = Matrix::Zero(m_atomcount, 3);
         for (int i = 0; i < m_atomcount; ++i)
             for (int k = 0; k < 3; ++k) pos(i, k) = CurcumaUnit::Length::angstrom_to_bohr(m_geometry(i, k));
@@ -253,7 +254,7 @@ bool QMEngine::computeRIMP2(const qmint::MP2Options& opt, qmint::MP2Result& res)
     const int n_occ = m_num_electrons / 2;
     int n_frozen = 0;
     if (opt.frozen_core)
-        for (int Z : m_atoms) n_frozen += qmint::frozenCoreOrbitals(Z);
+        n_frozen += frozenCoreCount();
     if (n_frozen >= n_occ && n_occ > 0) {
         CurcumaLogger::error(fmt::format("RI-MP2: frozen core ({} orbitals) leaves no active occupied orbital ({} occupied)",
                                          n_frozen, n_occ));

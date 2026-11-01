@@ -393,7 +393,7 @@ bool QMEngine::computeDoubleHybridGradient(const qmint::MP2Options& opt, double 
         return fail("double-hybrid gradient: no MO coefficients / orbital energies from the SCF");
     int nf = 0;
     if (opt.frozen_core)
-        for (int Z : m_atoms) nf += qmint::frozenCoreOrbitals(Z);
+        nf += frozenCoreCount();
     if (nf >= n_occ && n_occ > 0)
         return fail(fmt::format("double-hybrid gradient: frozen core ({} orbitals) leaves no active occupied orbital", nf));
     const int o = n_occ - nf, v = n - n_occ;
@@ -616,7 +616,8 @@ bool QMEngine::computeDoubleHybridGradient(const qmint::MP2Options& opt, double 
         return true;
     }
     const auto t_1e0 = std::chrono::steady_clock::now();
-    const Matrix g1 = qmint::gradientOneElectron(m_gto_basis, m_atoms, posBohr, P2c, Wc, m_threads);
+    Matrix g1 = qmint::gradientOneElectron(m_gto_basis, m_core_charges, posBohr, P2c, Wc, m_threads);
+    if (hasECP()) g1 += ecpGradient(P2c);  // ECP term (Nov 2026)
     res.t_grad_deriv1e_ms = msSince(t_1e0);
     const auto t_2e0 = std::chrono::steady_clock::now();
     const Matrix* Qp = m_Q.size() != 0 ? &m_Q : nullptr;

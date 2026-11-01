@@ -1186,7 +1186,7 @@ Matrix QMEngine::buildAtomicGuess() const
         const Eigen::MatrixXd C = ges.eigenvectors();
 
         // Aufbau over this atom's orbitals with fractional occupation of the last.
-        double z = static_cast<double>(m_atoms[a]);
+        double z = static_cast<double>(m_core_charges[a]);  // Z - n_core with an ECP
         for (int k = 0; k < m && z > 0.0; ++k) {
             const double f = std::min(2.0, z);
             z -= f;
@@ -1240,9 +1240,18 @@ Matrix QMEngine::buildAtomicHFGuess() const
             for (int i : cidx) sub.push_back(m_gto_basis[i]);
             Matrix pos(1, 3);
             for (int k = 0; k < 3; ++k) pos(0, k) = CurcumaUnit::Length::angstrom_to_bohr(m_geometry(a, k));
-            const std::vector<int> zv{ Z };
+            const std::vector<int> zv{ m_core_charges[a] };
             Matrix Sa = qmint::buildOverlap(sub);
             Matrix Ha = qmint::buildKinetic(sub) + qmint::buildNuclearAttraction(sub, zv, pos);
+            // the free atom's own ECP (Nov 2026)
+            for (const auto& c : m_ecp_centres)
+                if (c.atom == a) {
+                    qmecp::EcpOptions eo;
+                    qmecp::EcpLevels lv;
+                    Matrix Ve;
+                    std::string why;
+                    if (qmecp::buildECP(sub, { c }, eo, Ve, lv, why)) Ha += Ve;
+                }
             Matrix Qa;
             if (m_Q.size() != 0) {
                 Qa = Matrix::Zero((int)cidx.size(), m);
@@ -1264,7 +1273,7 @@ Matrix QMEngine::buildAtomicHFGuess() const
                 const Eigen::VectorXd e = ges.eigenvalues();
                 const Eigen::MatrixXd C = ges.eigenvectors();
                 Eigen::MatrixXd Pn = Eigen::MatrixXd::Zero(m, m);
-                double left = static_cast<double>(Z);
+                double left = static_cast<double>(m_core_charges[a]);
                 for (int k = 0; k < m && left > 1.0e-12;) {
                     int g = 1;
                     while (k + g < m && std::abs(e(k + g) - e(k)) < 1.0e-5) ++g;
@@ -1284,7 +1293,7 @@ Matrix QMEngine::buildAtomicHFGuess() const
         const Eigen::MatrixXd& Pa = it->second;
         for (int p = 0; p < m; ++p)
             for (int q = 0; q < m; ++q) P(idx[p], idx[q]) = Pa(p, q);
-        occupied += static_cast<double>(Z);
+        occupied += static_cast<double>(m_core_charges[a]);
     }
     const double nelec = static_cast<double>(m_num_electrons);
     if (occupied > 1.0e-12 && std::abs(occupied - nelec) > 1.0e-12)

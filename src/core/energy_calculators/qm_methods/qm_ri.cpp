@@ -18,6 +18,7 @@
 #include "qm_engine.h"
 #include "qm_citations.h"
 #include "qm_basis_embedded.h"  // built-in fitting sets (Nov 2026)
+#include "qm_elements.h"
 #include "qm_gpu_ri_backend.h"
 
 #include "src/core/blas_threads.h"
@@ -84,17 +85,27 @@ bool fileExists(const std::string& p)
 // Lines starting with '#' are comments. Coefficients refer to normalised primitives.
 // Claude Generated (Nov 2026): `path` may be the pseudo path "[embedded]/<name>.turbomole" of a built-in set
 // (resolveAuxBasisFile); its text goes through the same stream parser as a file.
-AuxBasisMap parseTurbomoleBasis(const std::string& path)
+AuxBasisMap parseTurbomoleBasis(const std::string& path, int max_z)
 {
     if (qmbasis::isEmbeddedPath(path)) {
         std::string text;
-        if (!qmbasis::embeddedText(path, text, qmbasis::kEngineMaxZ)) throw std::runtime_error("no built-in text for " + path);
+        if (!qmbasis::embeddedText(path, text, max_z)) throw std::runtime_error("no built-in text for " + path);
         std::istringstream in(text);
         return parseTurbomoleStream(in, path);
     }
     std::ifstream in(path);
     if (!in) throw std::runtime_error("cannot open auxiliary basis file " + path);
-    return parseTurbomoleStream(in, path);
+    AuxBasisMap map = parseTurbomoleStream(in, path);
+    // Claude Generated (Nov 2026): elements the file lacks (the H-Ne .turbomole files of the source directory) come
+    // from the built-in set of the same name, if there is one; the file wins for every element it has.
+    std::string stem = path.substr(path.find_last_of('/') == std::string::npos ? 0 : path.find_last_of('/') + 1);
+    if (stem.size() > 10 && stem.compare(stem.size() - 10, 10, ".turbomole") == 0) stem.resize(stem.size() - 10);
+    if (const auto* e = qmbasis::findEmbedded(stem, "turbomole"); e && max_z > 10) {
+        std::istringstream bin(qmbasis::embeddedSetText(*e, max_z));
+        for (auto& [el, shells] : parseTurbomoleStream(bin, path + " (built-in fill-in)"))
+            if (!map.count(el)) map[el] = shells;
+    }
+    return map;
 }
 
 AuxBasisMap parseTurbomoleStream(std::istream& in, const std::string& path)
@@ -270,7 +281,13 @@ std::vector<Shell> orbitalShells(const std::vector<GTO::Orbital>& basis)
 }
 
 namespace {
-const char* kSymbols[] = { nullptr, "h", "he", "li", "be", "b", "c", "n", "o", "f", "ne" };
+// lower-case symbol, the key of the Turbomole aux parser (qm_elements.h; Claude Generated, Nov 2026: Z = 1..103)
+std::string auxKey(int Z)
+{
+    std::string s = qmelem::symbol(Z);
+    for (char& c : s) c = (char)std::tolower((unsigned char)c);
+    return s;
+}
 
 // Cartesian components of one shell in PySCF order: x-power descending, then y-power descending.
 std::vector<std::array<int, 3>> cartesianComponents(int L)
@@ -296,9 +313,9 @@ std::vector<Shell> auxiliaryShells(const AuxBasisMap& aux, const std::vector<int
     int first = 0;
     for (size_t a = 0; a < atomZ.size(); ++a) {
         const int Z = atomZ[a];
-        if (Z < 1 || Z > 10) throw std::runtime_error(fmt::format("RI: element Z={} outside H-Ne", Z));
-        auto it = aux.find(kSymbols[Z]);
-        if (it == aux.end()) throw std::runtime_error(fmt::format("RI: no auxiliary functions for element {}", kSymbols[Z]));
+        if (qmelem::symbol(Z) == nullptr) throw std::runtime_error(fmt::format("RI: element Z={} outside 1..103", Z));
+        auto it = aux.find(auxKey(Z));
+        if (it == aux.end()) throw std::runtime_error(fmt::format("RI: no auxiliary functions for element {}", qmelem::symbol(Z)));
         for (const AuxShellData& d : it->second) {
             Shell s;
             s.x = pos(a, 0);
@@ -2970,7 +2987,7 @@ namespace {
 // Auxiliary shells of the molecule for an auxiliary basis file (geometry in Angstrom). Claude Generated (Oct 2026).
 std::vector<qmri::Shell> riAuxShells(const std::string& file, const std::vector<int>& atoms, const Matrix& geomAngstrom)
 {
-    const qmri::AuxBasisMap aux = qmri::parseTurbomoleBasis(file);
+    const qmri::AuxBasisMap aux = qmri::parseTurbomoleBasis(file, qmbasis::parseMaxZ(atoms));
     Matrix pos = Matrix::Zero((Eigen::Index)atoms.size(), 3);
     for (int i = 0; i < (int)atoms.size(); ++i)
         for (int k = 0; k < 3; ++k) pos(i, k) = CurcumaUnit::Length::angstrom_to_bohr(geomAngstrom(i, k));

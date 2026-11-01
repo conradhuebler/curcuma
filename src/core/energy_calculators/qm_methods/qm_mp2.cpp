@@ -44,11 +44,18 @@ namespace qmint {
 int frozenCoreOrbitals(int Z)
 {
     if (Z <= 2) return 0;    // H, He
-    if (Z <= 10) return 1;   // Li-Ne: 1s
-    if (Z <= 18) return 5;   // Na-Ar: [He]2s2p -> 1s 2s 2p
-    if (Z <= 36) return 9;   // K-Kr: [Ne]3s3p
-    if (Z <= 54) return 18;  // Rb-Xe: [Ar]3d4s4p
-    return 27;               // beyond Xe: [Kr]4d5s5p (outside the engine's basis files anyway)
+    if (Z <= 10) return 1;   // Li-Ne: 1s (also Li, Be, where ORCA/PySCF freeze nothing; kept, H-Ne results unchanged)
+    // Z > 10 (Nov 2026): the ORCA 6.1 / PySCF chemcore table (all-electron core, before an ECP is subtracted, see
+    // QMEngine::frozenCoreCount). ORCA 6.1 "Freezing NCore" checked for Na, Mg, Al, K, Ca, Sc, Zn, Ga, Kr, Rb, Sr,
+    // Y, Cd, In, I, Cs, Ba, La, Hf, Hg, Tl, Pb with def2-SVP; PySCF pyscf.data.elements.chemcore_atm has the same.
+    if (Z <= 12) return 1;   // Na, Mg: 1s
+    if (Z <= 30) return 5;   // Al-Zn: [Ne]
+    if (Z <= 38) return 9;   // Ga-Sr: [Ar]
+    if (Z <= 48) return 14;  // Y-Cd: [Ar]3d
+    if (Z <= 70) return 18;  // In-Yb: [Kr]
+    if (Z <= 80) return 23;  // Lu-Hg: [Kr]4d
+    if (Z <= 102) return 34; // Tl-No: [Xe]4f
+    return 50;
 }
 
 // Claude Generated (Oct 2026, WP11): CPU canonical MP2, batches over the active occupied index.
@@ -236,7 +243,7 @@ bool QMEngine::computeMP2(const qmint::MP2Options& opt, qmint::MP2Result& res)
     const int n_occ = m_num_electrons / 2;
     int n_frozen = 0;
     if (opt.frozen_core)
-        for (int Z : m_atoms) n_frozen += qmint::frozenCoreOrbitals(Z);
+        n_frozen += frozenCoreCount();
     if (n_frozen >= n_occ && n_occ > 0) {
         CurcumaLogger::error(fmt::format("MP2: frozen core ({} orbitals) leaves no active occupied orbital ({} occupied)",
                                          n_frozen, n_occ));

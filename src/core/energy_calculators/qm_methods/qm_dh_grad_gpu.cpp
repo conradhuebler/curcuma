@@ -192,7 +192,8 @@ void QMEngine::dhPT2ForcesDevice(const Matrix& posBohr, const Matrix& Pc, const 
     std::string dev1_info;
     const bool on_device1 = !be1.empty()
         && gpuGradientOneElectron(tables_ok ? &tables : nullptr, tab_why, be1, posBohr, P2c, Wc, g1, dev1_info);
-    if (!on_device1) g1 = qmint::gradientOneElectron(m_gto_basis, m_atoms, posBohr, P2c, Wc, m_threads);
+    if (!on_device1) g1 = qmint::gradientOneElectron(m_gto_basis, m_core_charges, posBohr, P2c, Wc, m_threads);
+    if (hasECP()) g1 += ecpGradient(P2c);  // ECP term, CPU (Nov 2026)
     res.t_grad_deriv1e_ms = msSinceGpu(t_1e0);
     const auto t_2e0 = std::chrono::steady_clock::now();
     const Matrix* Qp = m_Q.size() != 0 ? &m_Q : nullptr;

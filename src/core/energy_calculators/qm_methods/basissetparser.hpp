@@ -13,6 +13,7 @@
 #include <tuple>
 #include <vector>
 
+#include "qm_elements.h"     // element names (Z = 1..103)
 #include "qm_integrals.hpp"  // primitiveNorm, normalizeOrbitalSelfOverlap (WP1)
 #include "GTOIntegrals.hpp"
 #include "STOIntegrals.hpp"
@@ -125,9 +126,8 @@ inline std::string toUpper(std::string str)
 // from the atomic number.
 //
 // Claude Generated (Nov 2026): the parser reads any std::istream (parseBasisSetStream), so the built-in basis
-// sets (qm_basis_embedded.h, text in qm_basis_tables.h) go through exactly the same code as a file. Element blocks
-// outside H-Ne (e.g. SODIUM in the shipped def2-SV(P).dat) are skipped; before they stopped the parse with
-// "Failed to parse shell primitive count", so -qm.basis def2-SV(P) never loaded.
+// sets (qm_basis_embedded.h, text in qm_basis_tables.h) go through exactly the same code as a file. Element headers
+// are read for Z = 1..103 (qm_elements.h; H-Ne only before Nov 2026); a header token that is no element is skipped.
 inline BasisSetMap parseBasisSetStream(std::istream& file)
 {
     BasisSetMap basisSetMap;
@@ -148,20 +148,9 @@ inline BasisSetMap parseBasisSetStream(std::istream& file)
         throw std::runtime_error("Invalid basis set file format, $DATA not found.");
     }
 
-    // Full element name / symbol (any case) -> standard symbol. Scope: H-Ne,
-    // the elements present in the shipped def2-SVP file. Keys are uppercase;
-    // looked up via toUpper(first).
-    static const std::map<std::string, std::string> nameToSymbol = {
-        { "HYDROGEN", "H" }, { "HELIUM", "He" }, { "LITHIUM", "Li" },
-        { "BERYLLIUM", "Be" }, { "BORON", "B" }, { "CARBON", "C" },
-        { "NITROGEN", "N" }, { "OXYGEN", "O" }, { "FLUORINE", "F" },
-        { "NEON", "Ne" },
-        { "H", "H" }, { "HE", "He" }, { "LI", "Li" }, { "BE", "Be" },
-        { "B", "B" }, { "C", "C" }, { "N", "N" }, { "O", "O" },
-        { "F", "F" }, { "NE", "Ne" }
-    };
-    // VSIP defaults per symbol (used only by the Hückel STO path; the DFT 1e
-    // integrals ignore VSIP).
+    // Element header (full BSE name or symbol, any case) -> atomic number via qm_elements.h (Z = 1..103; Nov 2026,
+    // before: H-Ne only). VSIP defaults per symbol are used only by the Hueckel STO path (the QM 1e integrals ignore
+    // them); elements without an entry get the generic values below.
     static const std::map<std::string, std::tuple<int, double, double, double>> elemInfo = {
         { "H", { 1, -13.6, 0.0, 0.0 } }, { "He", { 2, -24.6, 0.0, 0.0 } },
         { "Li", { 3, -5.39, -3.67, 0.0 } }, { "Be", { 4, -9.32, -4.0, 0.0 } },
@@ -207,8 +196,8 @@ inline BasisSetMap parseBasisSetStream(std::istream& file)
             } else {
                 isHeader = !std::isdigit((unsigned char)second[0]);
             }
-            if (isHeader && nameToSymbol.find(up) == nameToSymbol.end()) {
-                // element header outside H-Ne (a single all-alpha token): skip its block
+            if (isHeader && qmelem::atomicNumber(up) == 0) {
+                // header token that is no element name (a single all-alpha token): skip its block
                 isHeader = false;
                 if (second.empty()) {
                     flush();
@@ -221,7 +210,8 @@ inline BasisSetMap parseBasisSetStream(std::istream& file)
         if (isHeader) {
             flush();
             skipping = false;
-            std::string sym = nameToSymbol.at(toUpper(first));
+            const int zh = qmelem::atomicNumber(first);
+            std::string sym = qmelem::symbol(zh);
             current = ElementBasis();
             current.symbol = sym;
             auto ei = elemInfo.find(sym);
@@ -231,7 +221,7 @@ inline BasisSetMap parseBasisSetStream(std::istream& file)
                 current.vsip_p = std::get<2>(ei->second);
                 current.vsip_d = std::get<3>(ei->second);
             } else {
-                current.atomicNumber = 0;
+                current.atomicNumber = zh;
                 current.vsip_s = -10.0;
                 current.vsip_p = -5.0;
                 current.vsip_d = 0.0;
@@ -247,6 +237,17 @@ inline BasisSetMap parseBasisSetStream(std::istream& file)
             throw std::runtime_error("Shell line before any element header: " + line);
         if (first.empty())
             throw std::runtime_error("Empty shell type string");
+        {
+            // A shell above g (h: the def2-QZVP family for Ce-Yb) is outside the engine. The element is dropped, the rest of
+            // its block skipped, so a molecule without it still reads the set; one with it fails later with "no basis for
+            // element". Claude Generated (Nov 2026).
+            const char up = static_cast<char>(std::toupper(static_cast<unsigned char>(first[0])));
+            if (up != 'S' && up != 'P' && up != 'D' && up != 'F' && up != 'G' && std::isalpha(static_cast<unsigned char>(up))) {
+                haveCurrent = false;
+                skipping = true;
+                continue;
+            }
+        }
         ShellType shellType = charToShellType(first[0]);
         int numPrimitives = 0;
         if (!(std::istringstream(second) >> numPrimitives))

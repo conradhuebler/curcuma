@@ -66,7 +66,9 @@ using AuxBasisMap = std::map<std::string, std::vector<AuxShellData>>;
 /// @brief Parse a Turbomole-format basis file ($jbas / $jkbas blocks, "*" separators,
 /// "n l" shell headers followed by n "exponent coefficient" lines). Throws on malformed input.
 /// `path` may be the pseudo path "[embedded]/<name>.turbomole" of a built-in set (qm_basis_embedded.h).
-AuxBasisMap parseTurbomoleBasis(const std::string& path);
+/// max_z: element blocks of a built-in set read up to this Z (qmbasis::parseMaxZ(atoms); 0 = all). A file is always
+/// read whole. (max_z Claude Generated, Nov 2026.)
+AuxBasisMap parseTurbomoleBasis(const std::string& path, int max_z = 0);
 
 /// @brief The same parser on a stream; `path` only labels error messages (Claude Generated, Nov 2026).
 AuxBasisMap parseTurbomoleStream(std::istream& in, const std::string& path);

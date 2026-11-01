@@ -10,10 +10,9 @@
  *     -QZVPD, -QZVPPD, -mTZVP, -mTZVPP (every element BSE has), MINIX (H-Ne)
  *   fitting (Turbomole text, qmri::parseTurbomoleBasis): def2-universal-JFIT, -JKFIT, def2-SV(P)-JKFIT,
  *     def2-mTZVPP-RIJ, def2-{SVP,SV(P),SVPD,TZVP,TZVPP,TZVPD,TZVPPD,QZVP,QZVPP,QZVPPD}-RIFIT
- *   ECP (Turbomole '$ecp' text): def2-ECP, Rb-Rn. NOTHING in the engine uses it yet (the SCF stops at Z > 10);
- *     embeddedElementBlock("def2-ECP", Z) is the raw getter for a future ECP integral code.
- * The engine itself is limited to H-Ne and to s, p, d, f, g shells (createGTOFromBasis; f/g since Nov 2026): every
- * def2 orbital set and MINIX run for H-Ne; elements beyond Ne and the ECP are stored for the next stage.
+ *   ECP (Turbomole '$ecp' text): def2-ECP, Rb-Rn; read by qm_ecp.cpp (embeddedElementBlock("def2-ECP", Z)).
+ * The engine takes H-Rn (kEngineMaxZ) with s, p, d, f, g shells (createGTOFromBasis; f/g since Nov 2026, Z > 10
+ * since Nov 2026); MINIX stays H-Ne.
  *
  * Lookup order of QMEngine (orbital, `-qm.basis`) and qmri::resolveAuxBasisFile (`-qm.ri_aux`, `-qm.ri_mp2_aux`):
  *   1. an explicit path (contains '/') that exists
@@ -24,7 +23,7 @@
  * CURCUMA_QM_BASIS_EMBEDDED_ONLY=1 skips steps 1-4 (test hook; ctest qm_basis_*).
  *
  * A resolved built-in set is passed around as the pseudo path "[embedded]/<name>.dat" or ".turbomole";
- * embeddedText() assembles its text (header + element blocks + footer; the engine asks only for H-Ne, kEngineMaxZ)
+ * embeddedText() assembles its text (header + element blocks + footer; the engine asks for the blocks up to parseMaxZ(atoms))
  * and the parsers read it through the same stream parser as a file; for H-Ne the parse result equals that of a
  * file written from the full text (ctest qm_basis_sets_*). The data are stored per element and live in
  * one translation unit (qm_basis_embedded.cpp), so only that file compiles the several MB of text.
@@ -75,17 +74,26 @@ std::string embeddedPath(const tables::EmbeddedBasisSet& s, const char* extensio
 /// Full text of a set: header, the blocks of the elements 1..max_z (0 = all), footer.
 std::string embeddedSetText(const tables::EmbeddedBasisSet& s, int max_z = 0);
 
-/// Highest Z the engine handles (H-Ne). The engine's parsers get only the blocks up to this Z: parsing the full
-/// text costs up to 2.1 ms (def2-universal-JKFIT, 86 elements) against 0.1 ms for H-Ne, per RI setup. Raise it
-/// together with the element range of QMEngine::InitialiseMolecule.
-inline constexpr int kEngineMaxZ = 10;
+/// Highest Z the engine handles (H-Rn, the def2 range; Nov 2026, H-Ne before). The parsers get only the blocks up
+/// to the highest Z of the molecule (parseMaxZ): parsing the full text costs up to 2.1 ms (def2-universal-JKFIT,
+/// 86 elements) against 0.1 ms for H-Ne, per RI setup.
+inline constexpr int kEngineMaxZ = 86;
+
+/// Number of element blocks a parser needs for these atoms: max(10, highest Z), capped at kEngineMaxZ. Never below
+/// 10, so an H-Ne molecule reads exactly the text it read before Nov 2026. Claude Generated (Nov 2026).
+inline int parseMaxZ(const std::vector<int>& atoms)
+{
+    int z = 10;
+    for (int a : atoms) z = a > z ? a : z;
+    return z > kEngineMaxZ ? kEngineMaxZ : z;
+}
 
 /// Text of the built-in set behind a pseudo path into `text` (elements 1..max_z, 0 = all); false if the path is
-/// not one. QMEngine and qmri pass kEngineMaxZ.
+/// not one. QMEngine and qmri pass parseMaxZ(atoms).
 bool embeddedText(const std::string& path, std::string& text, int max_z = 0);
 
 /// Raw, parser-agnostic text of element Z in the built-in set `name` (any format), nullptr if absent.
-/// For "def2-ECP" this is the Turbomole '$ecp' block ("ncore = .. lmax = ..", potentials); unused by the engine.
+/// For "def2-ECP" this is the Turbomole '$ecp' block ("ncore = .. lmax = ..", potentials), read by QMEngine::setupECP.
 const char* embeddedElementBlock(const std::string& name, int Z);
 
 /// Atomic numbers present in a built-in set (ascending).
