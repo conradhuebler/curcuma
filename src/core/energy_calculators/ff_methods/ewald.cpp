@@ -104,11 +104,19 @@ EwaldSum::EwaldSum(const PBCUtils::OrthoCell& cell, double alpha, double r_cut, 
 double EwaldSum::realSpaceKernel(double r, double alpha, double& dkernel_dr)
 {
     // K(r) = erfc(a r)/r,  dK/dr = -erfc(a r)/r^2 - (2 a/sqrt(pi)) exp(-a^2 r^2)/r
-    // B2 hook: a Gaussian-charge correction -erfc(g_ij r)/r (and its derivative) belongs here.
     const double erfc_ar = std::erfc(alpha * r);
     const double inv_r = 1.0 / r;
     dkernel_dr = -erfc_ar * inv_r * inv_r - (2.0 * alpha / std::sqrt(kPi)) * std::exp(-alpha * alpha * r * r) * inv_r;
     return erfc_ar * inv_r;
+}
+
+// Claude Generated (Nov 2026, B2): g_min = 1/sqrt(2 max alp); erfc(g_min r) < erfc(XMAX) for r > XMAX / g_min
+double gaussianCorrectionRadius(const Eigen::VectorXd& alp)
+{
+    double amax = 0.0;
+    for (Eigen::Index i = 0; i < alp.size(); ++i)
+        amax = std::max(amax, alp(i));
+    return amax > 0.0 ? GAUSSIAN_CORRECTION_XMAX * std::sqrt(2.0 * amax) : 0.0;
 }
 
 // Claude Generated (Nov 2026): real-space pair list with linked cells (Allen & Tildesley, Sec. 5.3, from memory)
@@ -175,68 +183,86 @@ std::vector<std::pair<int, int>> EwaldSum::realSpacePairs(const Eigen::MatrixXd&
     return pairs;
 }
 
-// Claude Generated (Nov 2026): one pass over pairs and k vectors
-EwaldResult EwaldSum::evaluate(const Eigen::MatrixXd& positions, const Eigen::VectorXd& charges,
-    bool want_gradient, bool want_potentials) const
+// ---- 1. Real space: sum_{i<j} q_i q_j K_ij(r) over minimum-image pairs with r < r_cut,
+// K_ij = erfc(a r)/r, minus erfc(g_ij r)/r for Gaussian charges (B2, g_ij r < XMAX).
+// Claude Generated (Nov 2026, B0; range form B2)
+void EwaldSum::realSpaceRange(const Eigen::MatrixXd& positions, const Eigen::VectorXd& charges,
+    const std::vector<std::pair<int, int>>& pairs, int begin, int end, const Eigen::VectorXd* gaussian_alp,
+    bool want_gradient, bool want_potentials, EwaldResult& acc) const
 {
-    const int N = static_cast<int>(positions.rows());
-    if (positions.cols() != 3 || charges.size() != N)
-        throw std::invalid_argument("EwaldSum: positions must be N x 3 and charges of length N");
     const double alpha = m_par.alpha;
-
-    EwaldResult res;
-    if (want_gradient)
-        res.gradient = Eigen::MatrixXd::Zero(N, 3);
-    if (want_potentials)
-        res.potentials = Eigen::VectorXd::Zero(N);
-
-    // ---- 1. Real space: sum_{i<j} q_i q_j erfc(a r)/r over minimum-image pairs with r < r_cut.
-    for (const auto& pr : realSpacePairs(positions)) {
-        const int i = pr.first, j = pr.second;
+    const double two_over_sqrt_pi = 2.0 / std::sqrt(kPi);
+    for (int idx = begin; idx < end; ++idx) {
+        const int i = pairs[idx].first, j = pairs[idx].second;
         double d[3] = { positions(j, 0) - positions(i, 0), positions(j, 1) - positions(i, 1),
             positions(j, 2) - positions(i, 2) };
         PBCUtils::applyMinimumImageOrtho(m_cell, d[0], d[1], d[2]);
         const double r = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
         double dK;
-        const double K = realSpaceKernel(r, alpha, dK);
-        res.terms.real += charges(i) * charges(j) * K;
+        double K = realSpaceKernel(r, alpha, dK);
+        if (gaussian_alp) {
+            // erf(g r)/r = 1/r - erfc(g r)/r: the cloud pair is the point pair minus this term
+            const double g = 1.0 / std::sqrt((*gaussian_alp)(i) + (*gaussian_alp)(j));
+            const double x = g * r;
+            if (x < GAUSSIAN_CORRECTION_XMAX) {
+                const double erfc_g = std::erfc(x);
+                const double inv_r = 1.0 / r;
+                K -= erfc_g * inv_r;
+                dK += erfc_g * inv_r * inv_r + g * two_over_sqrt_pi * std::exp(-x * x) * inv_r;
+            }
+        }
+        acc.terms.real += charges(i) * charges(j) * K;
         if (want_potentials) {
-            res.potentials(i) += charges(j) * K;
-            res.potentials(j) += charges(i) * K;
+            acc.potentials(i) += charges(j) * K;
+            acc.potentials(j) += charges(i) * K;
         }
         if (want_gradient) {
             // d = r_j - r_i, so dr/dr_j = d/r and dr/dr_i = -d/r
             const double f = charges(i) * charges(j) * dK / r;
             for (int a = 0; a < 3; ++a) {
-                res.gradient(i, a) -= f * d[a];
-                res.gradient(j, a) += f * d[a];
+                acc.gradient(i, a) -= f * d[a];
+                acc.gradient(j, a) += f * d[a];
             }
         }
     }
+}
 
-    // ---- 2. Reciprocal space. Phase factors exp(i 2 pi n x_a / L_a) per atom and axis by the
-    // recursion e^{i(n+1)t} = e^{int} e^{it}; negative n is the complex conjugate.
-    std::vector<cplx> table[3];
+// ---- 2a. Phase factors exp(i 2 pi n x_a / L_a) per atom and axis by the recursion
+// e^{i(n+1)t} = e^{int} e^{it}; negative n is the complex conjugate. Claude Generated (Nov 2026)
+EwaldPhaseTable EwaldSum::phaseTable(const Eigen::MatrixXd& positions) const
+{
+    const int N = static_cast<int>(positions.rows());
+    EwaldPhaseTable t;
+    t.natoms = N;
     for (int a = 0; a < 3; ++a) {
+        t.nmax[a] = m_nmax[a];
         const int nn = m_nmax[a] + 1;
-        table[a].assign(static_cast<size_t>(N) * nn, cplx(1.0, 0.0));
+        t.table[a].assign(static_cast<size_t>(N) * nn, cplx(1.0, 0.0));
         for (int i = 0; i < N; ++i) {
-            const double t = 2.0 * kPi * positions(i, a) * m_cell.inv_L[a];
-            const cplx e1(std::cos(t), std::sin(t));
-            cplx* row = &table[a][static_cast<size_t>(i) * nn];
+            const double ph = 2.0 * kPi * positions(i, a) * m_cell.inv_L[a];
+            const cplx e1(std::cos(ph), std::sin(ph));
+            cplx* row = &t.table[a][static_cast<size_t>(i) * nn];
             for (int n = 1; n < nn; ++n)
                 row[n] = row[n - 1] * e1;
         }
     }
+    return t;
+}
+
+// ---- 2b. Reciprocal space over the k vectors [k_begin, k_end). This loop (N_k x N complex products)
+// is the cost centre; the caller spreads the k range over threads. Claude Generated (Nov 2026)
+void EwaldSum::reciprocalRange(const EwaldPhaseTable& table, const Eigen::VectorXd& charges, int k_begin, int k_end,
+    bool want_gradient, bool want_potentials, EwaldResult& acc) const
+{
+    const int N = table.natoms;
     auto phase = [&](int a, int i, int n) {
-        const cplx v = table[a][static_cast<size_t>(i) * (m_nmax[a] + 1) + std::abs(n)];
+        const cplx v = table.table[a][static_cast<size_t>(i) * (table.nmax[a] + 1) + std::abs(n)];
         return n >= 0 ? v : std::conj(v);
     };
-
-    // This k loop is the cost centre (N_k x N complex products) and the place to parallelise.
     std::vector<cplx> exy(N), eikr(N);
     int last_nx = -1, last_ny = 0;
-    for (const KVector& kv : m_kvectors) {
+    for (int kidx = k_begin; kidx < k_end; ++kidx) {
+        const KVector& kv = m_kvectors[kidx];
         if (kv.n[0] != last_nx || kv.n[1] != last_ny) {
             for (int i = 0; i < N; ++i)
                 exy[i] = phase(0, i, kv.n[0]) * phase(1, i, kv.n[1]);
@@ -248,53 +274,95 @@ EwaldResult EwaldSum::evaluate(const Eigen::MatrixXd& positions, const Eigen::Ve
             eikr[i] = exy[i] * phase(2, i, kv.n[2]);
             S += charges(i) * eikr[i];
         }
-        res.terms.reciprocal += kv.weight * std::norm(S); // weight already holds the -k partner
+        acc.terms.reciprocal += kv.weight * std::norm(S); // weight already holds the -k partner
         if (!want_potentials && !want_gradient)
             continue;
         for (int i = 0; i < N; ++i) {
             // conj(e_i) S = [cos_i C + sin_i S_s] + i [cos_i S_s - sin_i C]
             const cplx z = std::conj(eikr[i]) * S;
             if (want_potentials)
-                res.potentials(i) += 2.0 * kv.weight * z.real(); // d|S|^2/dq_i = 2 Re(conj(e_i) S)
+                acc.potentials(i) += 2.0 * kv.weight * z.real(); // d|S|^2/dq_i = 2 Re(conj(e_i) S)
             if (want_gradient) {
                 const double g = 2.0 * kv.weight * charges(i) * z.imag(); // d|S|^2/dr_i = 2 q_i k Im(conj(e_i) S)
                 for (int a = 0; a < 3; ++a)
-                    res.gradient(i, a) += g * kv.k[a];
+                    acc.gradient(i, a) += g * kv.k[a];
             }
         }
     }
+}
 
-    // ---- 3. Self energy: each Gaussian screening cloud interacts with its own point charge in step 2.
+// ---- 3. Self energy: each Gaussian screening cloud interacts with its own point charge in step 2.
+// ---- 4. Neutralising background for a charged cell (Q != 0); B2: plus the Gaussian background
+//         (pi Q/V) sum_i q_i alp_i (derivation in ewald.h). Claude Generated (Nov 2026)
+void EwaldSum::selfAndBackground(const Eigen::VectorXd& charges, const Eigen::VectorXd* gaussian_alp,
+    bool want_potentials, EwaldResult& acc) const
+{
+    const int N = static_cast<int>(charges.size());
+    const double alpha = m_par.alpha;
     const double self_pref = alpha / std::sqrt(kPi);
-    // ---- 4. Neutralising background for a charged cell (Q != 0).
     const double Q = charges.sum();
     const double bg_pref = kPi / (alpha * alpha * m_volume);
-    res.terms.self = -self_pref * charges.squaredNorm();
-    res.terms.background = -0.5 * bg_pref * Q * Q;
-    if (want_potentials) {
-        for (int i = 0; i < N; ++i)
-            res.potentials(i) += -2.0 * self_pref * charges(i) - bg_pref * Q;
+    acc.terms.self += -self_pref * charges.squaredNorm();
+    acc.terms.background += -0.5 * bg_pref * Q * Q;
+    double q_alp = 0.0; // sum_i q_i alp_i
+    if (gaussian_alp) {
+        q_alp = charges.dot(*gaussian_alp);
+        acc.terms.gaussian_background += (kPi / m_volume) * Q * q_alp;
     }
+    if (want_potentials) {
+        for (int i = 0; i < N; ++i) {
+            acc.potentials(i) += -2.0 * self_pref * charges(i) - bg_pref * Q;
+            if (gaussian_alp) // d/dq_i of (pi/V) Q sum_j q_j alp_j
+                acc.potentials(i) += (kPi / m_volume) * (q_alp + Q * (*gaussian_alp)(i));
+        }
+    }
+}
+
+// Claude Generated (Nov 2026): one pass over pairs and k vectors, composed of the range functions
+EwaldResult EwaldSum::evaluate(const Eigen::MatrixXd& positions, const Eigen::VectorXd& charges,
+    bool want_gradient, bool want_potentials, const Eigen::VectorXd* gaussian_alp) const
+{
+    const int N = static_cast<int>(positions.rows());
+    if (positions.cols() != 3 || charges.size() != N)
+        throw std::invalid_argument("EwaldSum: positions must be N x 3 and charges of length N");
+    if (gaussian_alp && gaussian_alp->size() != N)
+        throw std::invalid_argument("EwaldSum: gaussian_alp must have length N");
+
+    EwaldResult res;
+    if (want_gradient)
+        res.gradient = Eigen::MatrixXd::Zero(N, 3);
+    if (want_potentials)
+        res.potentials = Eigen::VectorXd::Zero(N);
+
+    const std::vector<std::pair<int, int>> pairs = realSpacePairs(positions);
+    realSpaceRange(positions, charges, pairs, 0, static_cast<int>(pairs.size()), gaussian_alp,
+        want_gradient, want_potentials, res);
+    const EwaldPhaseTable table = phaseTable(positions);
+    reciprocalRange(table, charges, 0, numberOfKVectors(), want_gradient, want_potentials, res);
+    selfAndBackground(charges, gaussian_alp, want_potentials, res);
     return res;
 }
 
-double EwaldSum::energy(const Eigen::MatrixXd& positions, const Eigen::VectorXd& charges) const
+double EwaldSum::energy(const Eigen::MatrixXd& positions, const Eigen::VectorXd& charges,
+    const Eigen::VectorXd* gaussian_alp) const
 {
-    return evaluate(positions, charges, false, false).terms.total();
+    return evaluate(positions, charges, false, false, gaussian_alp).terms.total();
 }
 
-Eigen::MatrixXd EwaldSum::gradient(const Eigen::MatrixXd& positions, const Eigen::VectorXd& charges) const
+Eigen::MatrixXd EwaldSum::gradient(const Eigen::MatrixXd& positions, const Eigen::VectorXd& charges,
+    const Eigen::VectorXd* gaussian_alp) const
 {
-    return evaluate(positions, charges, true, false).gradient;
+    return evaluate(positions, charges, true, false, gaussian_alp).gradient;
 }
 
-Eigen::VectorXd EwaldSum::potentials(const Eigen::MatrixXd& positions, const Eigen::VectorXd& charges) const
+Eigen::VectorXd EwaldSum::potentials(const Eigen::MatrixXd& positions, const Eigen::VectorXd& charges,
+    const Eigen::VectorXd* gaussian_alp) const
 {
-    return evaluate(positions, charges, false, true).potentials;
+    return evaluate(positions, charges, false, true, gaussian_alp).potentials;
 }
 
 // Claude Generated (Nov 2026): dense Ewald matrix, formula in ewald.h
-Eigen::MatrixXd EwaldSum::matrix(const Eigen::MatrixXd& positions) const
+Eigen::MatrixXd EwaldSum::matrix(const Eigen::MatrixXd& positions, const Eigen::VectorXd* gaussian_alp) const
 {
     const int N = static_cast<int>(positions.rows());
     const double alpha = m_par.alpha;
@@ -305,11 +373,21 @@ Eigen::MatrixXd EwaldSum::matrix(const Eigen::MatrixXd& positions) const
         double dx = positions(j, 0) - positions(i, 0), dy = positions(j, 1) - positions(i, 1),
                dz = positions(j, 2) - positions(i, 2);
         PBCUtils::applyMinimumImageOrtho(m_cell, dx, dy, dz);
+        const double r = std::sqrt(dx * dx + dy * dy + dz * dz);
         double dK;
-        const double K = realSpaceKernel(std::sqrt(dx * dx + dy * dy + dz * dz), alpha, dK);
+        double K = realSpaceKernel(r, alpha, dK);
+        if (gaussian_alp) {
+            const double x = r / std::sqrt((*gaussian_alp)(i) + (*gaussian_alp)(j));
+            if (x < GAUSSIAN_CORRECTION_XMAX)
+                K -= std::erfc(x) / r;
+        }
         A(i, j) += K;
         A(j, i) += K;
     }
+    if (gaussian_alp) // (pi Q/V) sum_i q_i alp_i = 1/2 sum_ij q_i q_j (pi/V)(alp_i + alp_j)
+        for (int i = 0; i < N; ++i)
+            for (int j = 0; j < N; ++j)
+                A(i, j) += (kPi / m_volume) * ((*gaussian_alp)(i) + (*gaussian_alp)(j));
 
     // 2 w cos(k.(r_i - r_j)) = 2 w (cos_i cos_j + sin_i sin_j), the diagonal included
     Eigen::VectorXd c(N), s(N);

@@ -32,6 +32,7 @@
 #include "gfnff_parameters.h"
 #include "ff_terms.h"  // Bond, Angle, Dihedral, Inversion, vdW, EQ, CNDerivStore, GeoGradMatrix
 #include "src/tools/pbc_utils.h"  // PBCUtils::OrthoCell (Nov 2026, A1)
+#include "ewald.h"                // curcuma::ewald::EwaldSum, periodic GFN-FF Coulomb (Nov 2026, B2)
 
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
@@ -156,9 +157,21 @@ struct FFAccumulator {
 
     bool has_components = false;
 
-    void reset(int natoms, bool do_gradient, bool store_components) {
+    /// Claude Generated (Nov 2026, B2): periodic Coulomb (Ewald) of this partition. Real and reciprocal
+    /// energies for the term report; coulomb_potentials (dE_pair/dq_i, size N) only when requested.
+    double ewald_real = 0.0, ewald_recip = 0.0;
+    Vector coulomb_potentials;
+
+    void reset(int natoms, bool do_gradient, bool store_components, bool want_potentials = false) {
         energy.reset();
         timings.reset();
+        ewald_real = ewald_recip = 0.0;
+        if (want_potentials) {
+            if (coulomb_potentials.size() != natoms) coulomb_potentials.resize(natoms);
+            coulomb_potentials.setZero();
+        } else {
+            coulomb_potentials.resize(0);
+        }
         if (do_gradient) {
             if (gradient.rows() != natoms || gradient.cols() != 3)
                 gradient.resize(natoms, 3);
@@ -347,6 +360,32 @@ public:
     bool hasPeriodicCell() const { return m_cell_bohr.active; }
     int numThreads() const { return m_num_threads; }
 
+    // === Periodic Coulomb by Ewald summation (Claude Generated, Nov 2026, WP-PERIODIC-NONBONDED B2) ===
+    /// Replace the GFN-FF Coulomb pair term by the Ewald sum of the Gaussian charges (ewald.h, B2):
+    /// calcCoulombEwald() instead of calcCoulomb(); the self, background and Gaussian-background terms
+    /// are added in postProcess(). Needs the periodic cell (setPeriodicCell) and the per-atom alp
+    /// (setInteractionLists / setCoulombSelfEnergyParams); throws without a cell. The charges stay the
+    /// ones last set by setEEQCharges(); the GFN-FF self-energy (TERM 2+3) is unchanged.
+    void setEwald(const curcuma::ewald::EwaldParameters& p);
+    void clearEwald() { m_ewald.reset(); m_coulomb_ewald = false; }
+    bool ewaldActive() const { return m_coulomb_ewald && m_ewald != nullptr; }
+    const curcuma::ewald::EwaldSum* ewald() const { return m_ewald.get(); }
+    /// Also accumulate dE_pair/dq_i (periodic Coulomb pair energy only, for the periodic EEQ, B3).
+    void setWantCoulombPotentials(bool v) { m_want_coulomb_potentials = v; }
+    /// phi_i = dE_pair/dq_i after calculate() with setWantCoulombPotentials(true); empty otherwise.
+    const Vector& coulombPotentials() const { return m_result_coulomb_potentials; }
+    /// Periodic Coulomb pair energy (real + reciprocal + self + background + Gaussian background) of the last calculate().
+    double ewaldPairEnergy() const { return m_ewald_terms.total(); }
+    const curcuma::ewald::EwaldEnergyTerms& ewaldTerms() const { return m_ewald_terms; }
+    /// Milliseconds of the per-step Ewald setup (real-space pair list, phase table) in the last calculate().
+    double ewaldSetupMs() const { return m_ewald_setup_ms; }
+    /// Per-atom Coulomb self-energy inputs (setCoulombSelfEnergyParams order): tests copy them between instances.
+    const Vector& coulombChiBase() const { return m_coul_chi_base; }
+    const Vector& coulombGam() const { return m_coul_gam; }
+    const Vector& coulombAlp() const { return m_coul_alp; }
+    const Vector& coulombCnf() const { return m_coul_cnf; }
+    const Vector& coulombChiStatic() const { return m_coul_chi_static; }
+
     // Term enable flags (match ForceField flags)
     void setDispersionEnabled(bool v) { m_dispersion_enabled = v; }
     void setHBondEnabled(bool v) { m_hbond_enabled = v; }
@@ -506,6 +545,16 @@ private:
     bool   m_cn_zero_guard = false;
     /// Claude Generated (Nov 2026, A1): periodic orthorhombic cell in Bohr (inactive = no PBC).
     PBCUtils::OrthoCell m_cell_bohr;
+    /// Claude Generated (Nov 2026, B2): Ewald sum of the GFN-FF Coulomb term, see setEwald().
+    std::unique_ptr<curcuma::ewald::EwaldSum> m_ewald;
+    bool m_coulomb_ewald = false;
+    bool m_want_coulomb_potentials = false;
+    Eigen::MatrixXd m_ewald_pos;                      ///< column-major copy of m_geometry for the ewald kernels
+    std::vector<std::pair<int, int>> m_ewald_pairs;   ///< real-space pairs of the current geometry (rebuilt per calculate)
+    curcuma::ewald::EwaldPhaseTable m_ewald_table;    ///< phase factors of the current geometry
+    curcuma::ewald::EwaldEnergyTerms m_ewald_terms;   ///< result split of the last calculate()
+    Vector m_result_coulomb_potentials;
+    double m_ewald_setup_ms = 0.0;
 
     // Term-enable flags
     bool m_dispersion_enabled = true;
@@ -582,6 +631,8 @@ private:
     void calcBondedRepulsion(int p);
     void calcNonbondedRepulsion(int p);
     void calcCoulomb(int p);
+    /// Claude Generated (Nov 2026, B2): periodic Coulomb, real-space pairs and k vectors of partition p.
+    void calcCoulombEwald(int p);
     void calcHydrogenBonds(int p);
     void calcHalogenBonds(int p);
     void calcATM(int p);

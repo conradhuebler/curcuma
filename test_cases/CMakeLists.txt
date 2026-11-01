@@ -717,6 +717,17 @@ endif()
 add_test(NAME pbc_dispersion_tail COMMAND test_pbc_dispersion_tail WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 set_tests_properties(pbc_dispersion_tail PROPERTIES TIMEOUT 300 LABELS "pbc;gfnff")
 
+# Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED B2): periodic GFN-FF Coulomb pair term by Ewald summation
+# (coulomb_ewald): alpha independence with the GFN-FF Gaussian widths, large-cell limit, fixed-charge invariances,
+# finite differences, charged cell, pure k-space Gaussian reference, point-charge limit, no-cell bitwise check.
+add_executable(test_pbc_coulomb_ewald unit/test_pbc_coulomb_ewald.cpp)
+target_link_libraries(test_pbc_coulomb_ewald curcuma_core test_molecule_registry)
+if(USE_PCH)
+    target_precompile_headers(test_pbc_coulomb_ewald REUSE_FROM curcuma_core)
+endif()
+add_test(NAME pbc_coulomb_ewald COMMAND test_pbc_coulomb_ewald WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(pbc_coulomb_ewald PROPERTIES TIMEOUT 600 LABELS "pbc;gfnff;ewald")
+
 # Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A4a): periodic repulsion and bonded terms (minimum image)
 add_executable(test_pbc_bonded_repulsion unit/test_pbc_bonded_repulsion.cpp)
 target_link_libraries(test_pbc_bonded_repulsion curcuma_core test_molecule_registry)

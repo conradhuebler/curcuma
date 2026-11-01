@@ -486,3 +486,109 @@ Scaling exponent 1.54 (1000 to 6000 and 3000 to 6000), as expected for O(N^1.5) 
   correction, threading, cached geometry between calls.
 - **Not tested**: very small cells with r_cut far below the nearest pair distances, a few close pairs (r << 1 Bohr),
   more than 6000 charges, eps below 1e-14. Human production testing pending.
+
+## B2 periodic GFN-FF Coulomb pair term by Ewald summation (2026-11-01, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+Switch `-gfnff.coulomb_ewald` (default **false**; cell only). The EEQ charges are still the non-periodic ones (B3
+pending): with the switch on, the energy is not variational in the charges, and the forces are the fixed-charge
+derivatives (the finite-difference check below is therefore at fixed charges). B3 sets the default to true once the
+EEQ matrix is periodic. Without a cell, or with the switch off, the path is bitwise what it was (test (g)).
+
+### Step 0: what the Coulomb code actually does (checked against the source before anything was changed)
+
+- (i) Pair term `q_i q_j erf(gamma_ij r)/r`, `gamma_ij = 1/sqrt(alp_i + alp_j)` with `alp_i = alpeeq_i =
+  (alpha_i + ff q_i^(1))^2` (charge-corrected, Phase-1 charge): `ff_workspace_gfnff.cpp:1090-1093` (implicit loop),
+  `:1132-1146` (stored list), `gfnff_method.cpp:12572` (`c.gamma_ij`), `eeq_solver.cpp:1231` (alpeeq). The hypothesis
+  "gamma = 1/sqrt(alpha_i^2 + alpha_j^2)" holds with `alpha_i^2 = alp_i`. Far-field shortcut: `erf = 1` for
+  `gamma r >= 6.5` (`:1035`), exact in FP64.
+- (ii) Local terms, unchanged by B2 (`ff_workspace.cpp:549-552`, TERM 2+3 in `postProcess`): `-q_i chi_i(CN)` and
+  `1/2 q_i^2 (gam_i + sqrt(2/pi)/sqrt(alp_i))`. The second part equals the Gaussian self-energy
+  `q^2/sqrt(2 pi alp)` = `1/2 q^2 lim erf(gamma_ii r)/r`, so the GFN-FF energy is "Gaussian clouds minus their
+  self-interaction", which is what the periodic sum has to reproduce.
+- (iii) No pair exceptions: every `i < j` pair, bonded or not, same or different fragment
+  (`gfnff_method.cpp:12635-12639`, implicit loop `ff_workspace_gfnff.cpp:1060-1104`). Only cutoffs exist:
+  `coulomb_r_cut` (default none) and `eeq_distance_cutoff` (explicit list only); pairs with a NaN charge or
+  `alp <= 0` are skipped.
+- (iv) `alpha_eeq` (`gfnff_par.h:99`, Bohr): H 0.585, C 0.903, N 1.278, O 0.905, Cl 2.057, Br 2.002, I 2.178,
+  Ne 2.942 (largest), He 0.432 (smallest); `alp = alpha^2` from 0.19 (He) to 8.65 (Ne), with the charge correction
+  `ff` up to 0.5 (group 7). `gamma_min = 1/sqrt(2 max alp)`: 0.34/Bohr for Cl-Cl, 0.24 for Ne-Ne. The correction
+  `erfc(gamma r)/r` is below 2e-17 (one ulp of the 1/r it corrects, `erfc(6)`) beyond `r_g = 6 sqrt(2 max alp)`:
+  7.7 Bohr for a water box (O with charge correction: alp 0.84), 17.4 Bohr with Cl, 25 Bohr with Ne.
+  `GAUSSIAN_CORRECTION_XMAX = 6` in `ewald.h`; erfc(5.04) would be 1e-12.
+- (v) dE/dq does not exist in the workspace. The charges enter through the EEQ matrix
+  `A_ij = erf(gamma_ij r)/r` (`eeq_solver.cpp:1475-1483`, `:3391`), the gradient treats them as fixed
+  (Hellmann-Feynman by the EEQ stationarity, TERM 1b for chi(CN)); `NumGradFixedCharges` (`gfnff_method.cpp:14105`)
+  runs `m_workspace->calculate(false)` at the stored charges. B2 adds `FFWorkspace::coulombPotentials()`.
+
+### Derivation (Gaussian correction and the background of a charged cell)
+
+Target: `E_target = 1/2 sum'_{(i,j,n)} q_i q_j erf(g_ij |r_ij + n|)/|r_ij + n|` (prime: no `(i,i,0)`), with the
+tin-foil / "k = 0 dropped" convention of B0. Let `F_G = (1/2V) sum_{k != 0} (4 pi/k^2) |rho_G(k)|^2` with
+`rho_G(k) = sum_i q_i exp(-k^2 alp_i/4) e^{i k r_i}` (cloud `q (pi alp)^{-3/2} exp(-r^2/alp)`, pair potential
+`erf(r/sqrt(alp_i + alp_j))/r`), which contains the Gaussian self-energies `S_G = sum_i q_i^2/sqrt(2 pi alp_i)`;
+`E_target = F_G - S_G`. With the point-charge structure factor `S(k)`:
+`F_G - F_pt = sum_{k != 0} (4 pi/(2V k^2)) (|rho_G|^2 - |S|^2)`. The absolutely convergent lattice sum of
+`h_ij(r) = -erfc(g_ij r)/r` over all `(i,j,n)` equals, by Poisson summation, the same k sum *including* k = 0, where
+`h_ij(k = 0) = -pi/g_ij^2 = -pi (alp_i + alp_j)`, so the k = 0 part is `-(pi Q/V) sum_i q_i alp_i`. Its `(i,i,0)`
+term is `S_G - (point self)`, and B0's `E_pt = F_pt - (point self)`. Hence
+
+    E_target = E_pt(real + recip + self + background)
+               - sum'_{(i,j,n)} 1/2 q_i q_j erfc(g_ij |r_ij + n|)/|r_ij + n|
+               + (pi Q / V) sum_i q_i alp_i
+
+The last term is the interaction of the neutralising background with the difference between a cloud and a point
+(space average of `-q erfc(r/sqrt alp)/r` is `-pi q alp`); it vanishes for Q = 0, is alpha_E-independent, and is
+therefore invisible to the alpha-independence test. It is checked against an independent pure reciprocal-space sum
+of the clouds (test e2). Limit `L -> inf`, `r_g << L`: `E_pt -> sum_{i<j} q_i q_j/r`, the correction
+`-> -sum_{i<j} q_i q_j erfc(g r)/r`, sum `= sum_{i<j} q_i q_j erf(g r)/r`; the images `(i,i,n != 0)` carry
+`erfc(g L) < 1e-16` and are not summed (enforced: `max(ewald_r_cut, r_g) < L_min/2`, also in the A1 check).
+
+Implementation: one real-space kernel `[erfc(a r) - erfc(g_ij r)]/r` per minimum-image pair within
+`r_cut = max(ewald_r_cut, r_g)` (`EwaldSum::realSpaceRange`, correction only for `g r < 6`), reciprocal part, self,
+background and Gaussian background from the B0 code (`reciprocalRange`, `selfAndBackground`; `evaluate()` is now
+the composition of these, B0 tests unchanged, 24/24). In `FFWorkspace`: `calcCoulombEwald(p)` takes the linear
+slice `p` of the per-step pair list (linked cells) and of the half-space k list, every partition accumulates its own
+energy, gradient and potentials (`coulomb_potentials`), `reduce()` sums in partition order, `postProcess()` adds the
+O(N) terms; the same `CxxThreadPool` pattern as the other kernels, reproducible at a fixed thread count. Parameters:
+`ewald_tolerance` (1e-8), `ewald_r_cut` (0 = `min(L/2, max(15 sqrt(L/40), r_g))`, from the B0 timing optimum
+~ sqrt(L)), `ewald_alpha` (0 = from the tolerance; set for the alpha tests). Refused: `eeq_distance_cutoff > 0`,
+`coulomb_r_cut > 0`, `r_cut >= L_min/2`.
+
+### Tests (`ctest -R pbc_coulomb_ewald`, `test_cases/unit/test_pbc_coulomb_ewald.cpp`, 41 checks, 10 s)
+
+| Test | Result |
+|---|---|
+| (a) alpha independence, 20 H2O in L = 44 Bohr, r_cut 19, alpha 0.25/0.32/0.42 (N_k 10k/21k/47k), tol 1e-10 | E_coul 1.3e-12 rel, gradient 1.1e-10, potentials 4.1e-12 (of max); EEQ charges bitwise equal across alphas |
+| (b) large-cell limit, periodic E_coul (fixed charges) minus the plain path, L = 150/200/300 Bohr | H2O (dipole 0.692 e Bohr): -2.97e-7 / -1.25e-7 / -3.72e-8 Eh = exactly -2 pi M^2/(3V), exponent 3.00; water dimer (registry geometry has no net dipole) 7.4e-9 / 1.7e-9 / 2.3e-10, exponent 5.00; benzene 3.3e-10 / 7.8e-11 / 1.0e-11, exponent 5.00 |
+| (c) fixed charges and fixed alp/gam/chi (the non-periodic Phase-1 EEQ gives a torn or replicated box slightly different alpeeq): translation, atom-wise wrap, 2x1x1 supercell | energy 0 / 1.3e-16 / 3.1e-15 rel, Coulomb gradient 6.6e-15 / 6.4e-15 / 1.4e-14; 4 threads vs 1: E 7.6e-16, gradient 6.6e-14, potentials 5.1e-15; 4 threads run-to-run bitwise |
+| (d) FD at fixed charges, h = 1e-4 / 2e-4 A, dispersion_tail off | Coulomb component vs `gradientCoulomb`: 1.36e-9 / 5.42e-9 Eh/Bohr (ratio 4.00, quadratic; 1.7e-7 of max |g|); potentials vs FD dE_pair/dq 4.8e-12; E_pair = 1/2 q.phi 1.3e-16. The total vs `NumGradFixedCharges` differs by 2.2e-6 Eh/Bohr independent of h, the same with the plain Coulomb in the cell and 1.5e-6 without a cell (`--fd-diagnose`): pre-existing, not Coulomb, not located (TODO.md) |
+| (e) charged cell, H3O+ 2 H2O + 18 H2O (Q = +1), L = 44, 3 alphas | E_coul 1.1e-11 rel, gradient 7.4e-11, potentials 2.4e-12; background -2.95e-4 .. -1.05e-4 (alpha dependent), Gaussian background -2.29e-4 (alpha independent) |
+| (e2) `EwaldSum` with Gaussian widths vs an independent pure k-space sum of the clouds (long double, 121^3 k, 10 charges, Q = 1.39, cell 12 x 13 x 14, alp 0.08-0.34 Bohr^2 so that r_g = 4.9 < L/2) | energy 1.5e-13 rel, potentials 1.3e-13; without the Gaussian background the error is 8.2e-4 (the test discriminates it); 3 r_cut spread 5e-14; gradient vs FD 3.5e-9; dense Gaussian A q = phi 7.3e-14 |
+| (f) alp = 1e-12 (point limit) vs B0 point-charge Ewald | energy 3.7e-15, gradient 0, potentials 1.2e-14 |
+| (g) no cell: `coulomb_ewald true` vs false; CLI `-sp` + md5 of `-dump_gradient` on benzene, caffeine, methyl-a-d-glucopyranoside, water8-cluster, hydronium-water2 (+1), urea-water-cluster197, peo201-water500 at 1 and 4 threads, binary before vs after | bitwise; all 14 md5 identical (energies -2.36477550, -4.67273706, -3.96002715, -2.61818827, 0.29809137, -28.60465251, -367.39771445 Eh) |
+| (i) `ctest -R 'gfnff|frag|eeq|simplemd|pbc|ewald|react'` list before/after | identical plus `pbc_coulomb_ewald` (116 -> 117) |
+
+(h) Timing (`test_pbc_coulomb_ewald --perf <xyz> <L>` and `--perf-box <nwat> <L>`, tol 1e-8, energy + gradient,
+median of 3 `calculate(true)`; "Coulomb" = CPU-sum of the Coulomb term over partitions incl. pair-list/phase setup,
+"wall" = the whole workspace step):
+
+| System | Path | 1 thread Coulomb / wall (ms) | 4 threads Coulomb CPU-sum / wall (ms) |
+|---|---|---|---|
+| peo201-water500 (2910 atoms, droplet) in L = 110 Bohr | plain O(N^2), no cell (4.2 M pairs, far-field shortcut) | 18.6 / 54 | 19.1 / 15.4 |
+| | Ewald auto r_cut 24.9 (N_k 36k, 547k pairs) | 233 / 276 | 241 / 79 |
+| | Ewald r_cut 40 (N_k 8.8k, 1.6 M pairs) | 152 / 197 | 151 / 60 |
+| random water box, 970 H2O, L = 58 Bohr (water density) | plain, no cell | 18.8 / 86 | 19.4 / 28 |
+| | Ewald auto r_cut 18.1 (N_k 14k, 534k pairs) | 119 / 204 | 122 / 66 |
+| | Ewald r_cut 20 (N_k 10k, 726k pairs) | 109 / 194 | 112 / 63 |
+
+The Ewald Coulomb costs 6-12 x the all-pairs path (which is 4.4 ns per pair thanks to the far-field shortcut; the
+k loop is N_k x N complex products, no SIMD, no PME); the workspace step with Ewald scales 3.1 x from 1 to 4 threads.
+The E_coul of the droplet in the cell (-53.2373) differs from the free droplet (-53.2347) by the images; the water
+box shows -82.501 (periodic) against -82.737 (the same coordinates without images).
+
+- **Not implemented**: periodic EEQ (B3: the matrix-vector product is `coulombPotentials()`, the dense matrix
+  `EwaldSum::matrix(pos, &alp)`), GPU (cell -> CPU fallback), PME, virial, triclinic cells, a Verlet skin for the
+  Ewald pair list (rebuilt every step, 3-11 ms at 2910 atoms).
+- **Not tested**: MD energy conservation with Ewald, systems with Ne/heavy halogens near the `r_g < L/2` limit,
+  more than 2910 atoms, `topology_mode react` with Ewald, the ALPB solvation combined with a cell.
+- Human production testing pending.

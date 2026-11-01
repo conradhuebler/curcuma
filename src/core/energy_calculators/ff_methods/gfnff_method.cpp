@@ -650,6 +650,12 @@ GFNFF::GFNFF(const json& parameters)
     m_print_timing = m_parameters.value("print_timing", true);
     // Nov 2026 (A3c): fallback == PARAM default of dispersion_tail (gfnff.h); no effect without a cell
     m_dispersion_tail = m_parameters.value("dispersion_tail", true);
+    // Nov 2026 (B2): fallbacks == PARAM defaults of coulomb_ewald, ewald_tolerance, ewald_r_cut, ewald_alpha
+    // (gfnff.h); no effect without a cell
+    m_coulomb_ewald = m_parameters.value("coulomb_ewald", false);
+    m_ewald_tolerance = m_parameters.value("ewald_tolerance", 1e-8);
+    m_ewald_r_cut = m_parameters.value("ewald_r_cut", 0.0);
+    m_ewald_alpha = m_parameters.value("ewald_alpha", 0.0);
 
     // frag_charge_model (Claude Generated, Sep 24, 2026; ported to master Sep 27, 2026 - Known
     // Issue #31, docs/FRAG_CHARGE_MODEL.md): chemistry-aware, continuous fragment charge
@@ -4925,6 +4931,22 @@ bool GFNFF::initializeForceField()
         m_workspace->setFarfieldShortcut(m_parameters.value("farfield_shortcut", true));  // Oct 2026; fallback = PARAM default
         m_workspace->setCnZeroGuard(cnZeroGuardEffective());                               // Oct 2026; PARAM (fallback false = reference) or a fragment-charge override (Oct 31, 2026)
         m_workspace->setPeriodicCell(m_cell_bohr_ortho);                                   // Nov 2026: read by the D4 (A3b), repulsion and bonded-term (A4a) kernels; inactive without a cell
+        if (coulombEwaldActive()) {
+            // Nov 2026 (B2): periodic Coulomb pair term by Ewald summation (FFWorkspace::calcCoulombEwald).
+            // The cutoff-based electrostatics variants are truncations of the same sum and cannot combine with it.
+            if (m_parameters.value("eeq_distance_cutoff", 0.0) > 0.0 || coulombRCutBohr() < std::numeric_limits<double>::infinity())
+                throw std::runtime_error("GFN-FF: coulomb_ewald cannot be combined with eeq_distance_cutoff or coulomb_r_cut");
+            const curcuma::ewald::EwaldParameters ep = ewaldParameters();
+            const double half = 0.5 * m_cell_bohr_ortho.minLength();
+            if (!(ep.r_cut < half))
+                throw std::runtime_error(fmt::format("GFN-FF: Ewald real-space radius {:.4f} Bohr (max(ewald_r_cut, r_g = {:.4f})) "
+                                                     "is not below L_min/2 = {:.4f} Bohr", ep.r_cut, ewaldGaussianRadiusBohr(), half));
+            m_workspace->setEwald(ep);
+            if (CurcumaLogger::get_verbosity() >= 1)
+                CurcumaLogger::info(fmt::format("GFN-FF Coulomb: Ewald sum (alpha {:.4f} 1/Bohr, r_cut {:.3f} Bohr, k_max {:.3f} 1/Bohr, "
+                                                "{} k vectors, Gaussian correction radius {:.3f} Bohr); EEQ charges non-periodic (B3 pending)",
+                    ep.alpha, ep.r_cut, ep.k_max, m_workspace->ewald()->numberOfKVectors(), ewaldGaussianRadiusBohr()));
+        }
 
         // Keep a copy for external consumers (full pair lists only when a GPU wrapper asked
         // for them, bonded terms otherwise), then MOVE the set into the workspace. The former
@@ -13292,6 +13314,12 @@ std::vector<std::pair<std::string, double>> GFNFF::activeCutoffsBohr() const
     const double coul = m_parameters.value("coulomb_r_cut", 0.0);
     if (coul > 0.0)
         cut.emplace_back("coulomb_r_cut", coul);
+    // Nov 2026 (B2): Ewald real-space loop radius max(ewald_r_cut, r_g). At configurePeriodicCell() the
+    // topology does not exist yet, so r_g comes from the element table (alpha^2, no charge correction);
+    // the final value with the charge-corrected alpeeq is checked again when the workspace is set up.
+    if (m_has_pbc && m_coulomb_ewald)
+        cut.emplace_back("Ewald real-space radius max(ewald_r_cut, r_g = 6 sqrt(2 max alp)) (coulomb_ewald)",
+            ewaldParameters().r_cut);
 
     // Reactive bond scan (detectReactiveBondChanges): break_factor * (rcov_i + rcov_j) * fat_i * fat_j,
     // largest over the element pairs present.
@@ -13409,6 +13437,56 @@ double GFNFF::coulombRCutBohr() const
     // (polymer_2x: +112.7 kcal/mol vs pprcht). <= 0 means no cutoff.
     const double rc = m_parameters.value("coulomb_r_cut", 0.0);
     return rc > 0.0 ? rc : std::numeric_limits<double>::infinity();
+}
+
+// Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED B2)
+double GFNFF::ewaldGaussianRadiusBohr() const
+{
+    // alp_i = alpeeq_i = (alpha_i + ff q_i)^2 from the topology (the value the Coulomb kernel uses,
+    // generateCoulombSelfEnergyNative), else the element table alpha^2 (before the topology exists).
+    Vector alp = Vector::Zero(m_atomcount);
+    const bool have_topo = m_cached_topology.has_value() && m_cached_topology->alpeeq.size() == m_atomcount;
+    for (int i = 0; i < m_atomcount; ++i) {
+        if (have_topo) {
+            alp(i) = m_cached_topology->alpeeq(i);
+        } else {
+            const int z = m_atoms[i];
+            const double a = (z >= 1 && z <= static_cast<int>(GFNFFParameters::alpha_eeq.size()))
+                ? GFNFFParameters::alpha_eeq[z - 1] : 0.903430;
+            alp(i) = a * a;
+        }
+    }
+    return curcuma::ewald::gaussianCorrectionRadius(alp);
+}
+
+// Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED B2)
+curcuma::ewald::EwaldParameters GFNFF::ewaldParameters() const
+{
+    const double half = 0.5 * m_cell_bohr_ortho.minLength();
+    const double r_g = ewaldGaussianRadiusBohr();
+    // Automatic cutoff: 15 sqrt(L_min / 40) Bohr (the B0 timing optimum was 15.1 / 17.1 / 20.4 Bohr at
+    // L = 40.7 / 58.7 / 73.9 Bohr, i.e. ~ sqrt(L)), never below r_g, never above L_min/2 (the EwaldSum
+    // constructor and the setup check refuse that).
+    double r_cut = m_ewald_r_cut > 0.0 ? m_ewald_r_cut
+                                       : std::min(half, std::max(15.0 * std::sqrt(m_cell_bohr_ortho.minLength() / 40.0), r_g));
+    curcuma::ewald::EwaldParameters p = curcuma::ewald::chooseEwaldParameters(m_cell_bohr_ortho, m_ewald_tolerance, r_cut);
+    if (m_ewald_alpha > 0.0) {
+        p.alpha = m_ewald_alpha;
+        p.k_max = 2.0 * m_ewald_alpha * std::sqrt(-std::log(m_ewald_tolerance));
+    }
+    p.r_cut = std::max(p.r_cut, r_g);  // the loop must reach every pair with a Gaussian correction
+    return p;
+}
+
+void GFNFF::setWantCoulombPotentials(bool v)
+{
+    if (m_workspace)
+        m_workspace->setWantCoulombPotentials(v);
+}
+
+Vector GFNFF::coulombPotentials() const
+{
+    return m_workspace ? m_workspace->coulombPotentials() : Vector();
 }
 
 bool GFNFF::repulsionListIsDistanceFiltered() const

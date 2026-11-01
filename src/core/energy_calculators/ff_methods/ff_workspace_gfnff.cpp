@@ -1162,6 +1162,50 @@ void FFWorkspace::calcCoulomb(int p)
 }
 
 // ============================================================================
+// Periodic Coulomb by Ewald summation (Claude Generated, Nov 2026, WP-PERIODIC-NONBONDED B2)
+// Pair term of the GFN-FF Coulomb energy, sum_{i<j} q_i q_j erf(g_ij r)/r (calcCoulomb above), summed over
+// all periodic images: point-charge Ewald sum plus the real-space Gaussian correction -erfc(g_ij r)/r per
+// pair (ewald.h). Partition p takes the pair range [begin, end) of the per-step pair list and the k range
+// [k_begin, k_end) of the half-space k list, both linear splits as every other list here, so the result at a
+// fixed thread count is reproducible. Self, background and Gaussian background terms: postProcess().
+// Charges: m_eeq_charges (fixed during the step, the non-periodic EEQ until B3); alp: m_coul_alp (alpeeq).
+// ============================================================================
+void FFWorkspace::calcCoulombEwald(int p)
+{
+    auto& acc = m_accumulators[p];
+    const int T = m_num_threads;
+    const auto [begin, end] = linearRange(static_cast<int>(m_ewald_pairs.size()), p, T);
+    const auto [k_begin, k_end] = linearRange(m_ewald->numberOfKVectors(), p, T);
+    if (begin == end && k_begin == k_end)
+        return;
+
+    Matrix grad_before;
+    if (acc.has_components && m_do_gradient) grad_before = acc.gradient;
+
+    const bool want_pot = acc.coulomb_potentials.size() == m_natoms;
+    curcuma::ewald::EwaldResult res;
+    if (m_do_gradient)
+        res.gradient = Eigen::MatrixXd::Zero(m_natoms, 3);
+    if (want_pot)
+        res.potentials = Eigen::VectorXd::Zero(m_natoms);
+
+    m_ewald->realSpaceRange(m_ewald_pos, m_eeq_charges, m_ewald_pairs, begin, end, &m_coul_alp,
+        m_do_gradient, want_pot, res);
+    m_ewald->reciprocalRange(m_ewald_table, m_eeq_charges, k_begin, k_end, m_do_gradient, want_pot, res);
+
+    acc.energy.coulomb += res.terms.real + res.terms.reciprocal;
+    acc.ewald_real += res.terms.real;
+    acc.ewald_recip += res.terms.reciprocal;
+    if (m_do_gradient)
+        acc.gradient += res.gradient;
+    if (want_pot)
+        acc.coulomb_potentials += res.potentials;
+
+    if (acc.has_components && m_do_gradient)
+        acc.grad_coulomb += (acc.gradient - grad_before);
+}
+
+// ============================================================================
 // HB/XB Damping Helper Functions: ws_damping_short_range/ws_damping_long_range/
 // ws_damping_out_of_line/ws_charge_scaling moved (Sep 2026) to gfnff_par.h under
 // GFNFFParameters, so gfnff_method.cpp's detection-time strength pre-check can share them

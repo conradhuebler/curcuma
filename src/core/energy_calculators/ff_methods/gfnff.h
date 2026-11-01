@@ -385,6 +385,10 @@ PARAM(disp_half_contraction, Bool, true, "Faster per-atom contraction for the D4
 // ---- Electrostatics ----
 PARAM(coulomb_r_cut, Double, 0.0, "Hard per-pair cutoff (Bohr) of the GFN-FF electrostatics; 0 = none, as the reference. A cutoff makes the energy discontinuous and truncates the 1/r sum.", "Coulomb", {})
 PARAM(coulomb_implicit, Bool, true, "CPU: evaluate the Coulomb pairs on the fly from per-atom data instead of storing an N^2/2 pair list; same energies. Not used with eeq_distance_cutoff > 0.", "Coulomb", {})
+PARAM(coulomb_ewald, Bool, false, "Periodic cell only (CPU): sum the GFN-FF Coulomb pair term q_i q_j erf(g_ij r)/r over all periodic images by Ewald summation (point-charge Ewald plus the real-space Gaussian correction -erfc(g_ij r)/r, charged cells with neutralising background and the Gaussian background term). The EEQ charges are still the NON-periodic ones (B3 pending), so the energy is not variational in them: forces are the fixed-charge derivatives. No effect without a cell; incompatible with eeq_distance_cutoff and coulomb_r_cut. Default false = plain distances, as before.", "Coulomb", {})
+PARAM(ewald_tolerance, Double, 1e-8, "coulomb_ewald: per-term tolerance eps that sets the splitting parameter alpha = sqrt(-ln eps)/r_cut and k_max = 2 alpha sqrt(-ln eps) (ewald.h). Overridden by ewald_alpha.", "Coulomb", {})
+PARAM(ewald_r_cut, Double, 0.0, "coulomb_ewald: real-space cutoff (Bohr) of the Ewald sum; 0 = automatic, min(L_min/2, max(15 sqrt(L_min/40), r_g)) with r_g = 6 sqrt(2 max alp_i) the radius beyond which every Gaussian correction erfc(g_ij r) is below 2e-17. The loop radius is max(ewald_r_cut, r_g) and must stay below L_min/2.", "Coulomb", {})
+PARAM(ewald_alpha, Double, 0.0, "coulomb_ewald: splitting parameter alpha (1/Bohr); 0 = from ewald_tolerance and the cutoff. An explicit value keeps k_max = 2 alpha sqrt(-ln ewald_tolerance). For alpha-independence tests.", "Coulomb", {})
 PARAM(farfield_shortcut, Bool, true, "CPU Coulomb energy and EEQ matrix: use 1/r for erf(g r)/r where g r >= 6.5, where erf is exactly 1.0 in FP64. Bit-identical in the cases checked; false evaluates erf everywhere.", "Coulomb", {})
 // ---- Pair lists ----
 PARAM(nb_cell_list_min_atoms, Int, 800, "From this atom count on, non-bonded neighbours (repulsion, HB/XB, cutoff Coulomb) come from a cell list; below, all pairs are scanned. 0 = always the cell list.", "Pair lists", {"hb_cell_list_min_atoms"})
@@ -1433,6 +1437,14 @@ public:
     };
     const Vector& getLastCNF() const { return m_last_cnf; }
     FFWorkspace* getWorkspace() const { return m_workspace.get(); }
+
+    // Periodic Coulomb by Ewald summation (Claude Generated, Nov 2026, WP-PERIODIC-NONBONDED B2)
+    /// true when a cell is active and coulomb_ewald is set: the workspace sums the Coulomb pair term by Ewald.
+    bool coulombEwaldActive() const { return m_cell_bohr_ortho.active && m_coulomb_ewald; }
+    /// dE_pair/dq_i of the periodic Coulomb pair energy (fixed charges) after Calculation() with
+    /// setWantCoulombPotentials(true); empty otherwise. Input for the periodic EEQ (B3).
+    void setWantCoulombPotentials(bool v);
+    Vector coulombPotentials() const;
     /// Claude Generated (Nov 2026, A4c): element factor of the bond criterion (fat table), read by the periodic topology
     /// test to enumerate images independently; 1.0 outside 1..86.
     static double bondDetectionElementFactor(int z) { return (z >= 1 && z <= 86) ? fat[z] : 1.0; }
@@ -1809,6 +1821,13 @@ private:
     double cnThresholdSqBohr() const;
     /// Claude Generated (Sep 2026): electrostatics pair cutoff in Bohr; coulomb_r_cut <= 0 (default) = none, as the reference
     double coulombRCutBohr() const;
+
+    // Periodic Coulomb by Ewald summation (Claude Generated, Nov 2026, WP-PERIODIC-NONBONDED B2); public part at getWorkspace()
+    /// Radius r_g = 6 sqrt(2 max alp_i) beyond which the Gaussian correction is below 2e-17 (ewald.h);
+    /// from the topology's charge-corrected alpeeq when available, else from the element table alpha^2.
+    double ewaldGaussianRadiusBohr() const;
+    /// Ewald parameters of this instance: ewald_alpha / ewald_tolerance / ewald_r_cut, loop radius max(r_cut, r_g).
+    curcuma::ewald::EwaldParameters ewaldParameters() const;
     /// Claude Generated (Sep 2026): true if the repulsion list is cell-list built (distance-filtered),
     /// false if the O(N^2) build stores every pair (N < nb_cell_list_min_atoms) and so cannot go stale
     bool repulsionListIsDistanceFiltered() const;
@@ -3158,6 +3177,10 @@ private:
     bool m_implicit_coulomb_pairs = false; ///< GPU enumerates Coulomb pairs; skip host list
     bool m_print_timing = true;     ///< Print init timing summary at verbosity >= 1
     bool m_dispersion_tail = true;  ///< Nov 2026 (A3c): PARAM dispersion_tail (periodic cell only)
+    bool m_coulomb_ewald = false;   ///< Nov 2026 (B2): PARAM coulomb_ewald (periodic cell only)
+    double m_ewald_tolerance = 1e-8;  ///< Nov 2026 (B2): PARAM ewald_tolerance
+    double m_ewald_r_cut = 0.0;       ///< Nov 2026 (B2): PARAM ewald_r_cut, 0 = automatic
+    double m_ewald_alpha = 0.0;       ///< Nov 2026 (B2): PARAM ewald_alpha, 0 = from the tolerance
 
     // Claude Generated (April 2026): Timing for consolidated summary
     double m_param_gen_time_ms = 0.0;       ///< Parameter generation time (generateGFNFFParameterSet) for summary

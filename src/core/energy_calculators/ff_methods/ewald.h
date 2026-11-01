@@ -53,8 +53,35 @@
  *        + (4 pi / V) sum_{k != 0} exp(-k^2/(4a^2))/k^2 cos(k.(r_i - r_j))
  *        - (2 a / sqrt(pi)) delta_ij - pi / (a^2 V)
  *
+ * ---------------------------------------------------------------------------------------
+ * B2 (Nov 2026): Gaussian charges (GFN-FF EEQ), optional per-atom width alp_i (Bohr^2)
+ * ---------------------------------------------------------------------------------------
+ * GFN-FF interacts its EEQ charges as Gaussian clouds, pair term q_i q_j erf(g_ij r)/r with
+ * g_ij = 1/sqrt(alp_i + alp_j) (alp_i = alpeeq_i = (alpha_i + ff q_i)^2, gfnff_ini.f90:718-725), and keeps
+ * the Gaussian self-energy q_i^2/sqrt(2 pi alp_i) in its EEQ self term. With erf = 1 - erfc the periodic
+ * pair energy of the clouds, for the same tin-foil / k = 0-dropped convention as the point charges, is
+ *
+ *   E_G = E_pt(real + reciprocal + self + background)
+ *         - sum_{(i,j,n) != (i,i,0)} 1/2 q_i q_j erfc(g_ij |r_ij + n|)/|r_ij + n|        (short range, MIC)
+ *         + (pi Q / V) sum_i q_i alp_i                                                   (Q != 0 only)
+ *
+ * Derivation (Poisson summation of the absolutely convergent correction h_ij(r) = -erfc(g_ij r)/r with
+ * h_ij(k = 0) = -pi (alp_i + alp_j)): the k != 0 part of the correction is exactly the difference
+ * between the Gaussian and the point-charge reciprocal sums, the k = 0 part, -(pi Q/V) sum_i q_i alp_i,
+ * is NOT in the convention "k = 0 dropped" and has to be added back; it is the interaction of the
+ * neutralising background with the difference between a cloud and a point (space average of
+ * -q erfc(r/sqrt alp)/r is -pi q alp). For Q = 0 it vanishes, and E_G -> sum_{i<j} q_i q_j erf(g r)/r
+ * for L -> infinity (the point-Ewald sum tends to sum_{i<j} q_i q_j / r, the correction to
+ * -sum_{i<j} q_i q_j erfc(g r)/r; the (i,i,0) term of the correction is the Gaussian minus the point
+ * self-energy, which both sides exclude, and the images (i,i,n != 0) carry erfc(g L) < 1e-16).
+ * The correction is applied only for g_ij r < GAUSSIAN_CORRECTION_XMAX (erfc(6) = 2e-17, below one
+ * ulp of the 1/r it corrects); the real-space loop radius r_cut must therefore reach
+ * gaussianCorrectionRadius(alp) = XMAX / g_min, g_min = 1/sqrt(2 max_i alp_i), and stay below L_min/2.
+ * Derivation and tests: docs/WP-PERIODIC-NONBONDED.md, section B2.
+ *
  * Not implemented: PME/particle-mesh (cost here is O(N^1.5) at best), triclinic cells, the
- * virial/pressure tensor, the dipole (vacuum) boundary term, slab correction, threading.
+ * virial/pressure tensor, the dipole (vacuum) boundary term, slab correction. Threading is done by the
+ * caller over the range functions (FFWorkspace, per-partition accumulators, deterministic order).
  * A virial formula for diagonal strain (derived, untested) is in docs/WP-PERIODIC-NONBONDED.md, section B0.
  */
 
@@ -64,11 +91,27 @@
 
 #include <Eigen/Dense>
 
+#include <complex>
 #include <utility>
 #include <vector>
 
 namespace curcuma {
 namespace ewald {
+
+/// B2: the Gaussian correction -erfc(g r)/r is applied for g r < XMAX; erfc(6) = 2.2e-17 (Claude Generated, Nov 2026)
+constexpr double GAUSSIAN_CORRECTION_XMAX = 6.0;
+
+/*! \brief Radius beyond which every Gaussian correction is below XMAX: XMAX * sqrt(2 max_i alp_i) - Claude Generated (Nov 2026, B2) */
+double gaussianCorrectionRadius(const Eigen::VectorXd& alp);
+
+/*! \brief Per-atom, per-axis phase factors exp(i 2 pi n x_a / L_a), n = 0..nmax - Claude Generated (Nov 2026, B2)
+ * Built once per geometry (phaseTable), read by reciprocalRange() from any thread.
+ */
+struct EwaldPhaseTable {
+    int natoms = 0;
+    int nmax[3] = { 0, 0, 0 };
+    std::vector<std::complex<double>> table[3]; ///< [atom * (nmax+1) + n]
+};
 
 /*! \brief Ewald parameters (atomic units) - Claude Generated (Nov 2026) */
 struct EwaldParameters {
@@ -100,7 +143,18 @@ struct EwaldEnergyTerms {
     double reciprocal = 0.0;
     double self = 0.0;
     double background = 0.0;
-    double total() const { return real + reciprocal + self + background; }
+    /// B2: (pi Q/V) sum_i q_i alp_i for Gaussian charges in a charged cell; 0 for point charges or Q = 0
+    double gaussian_background = 0.0;
+    double total() const { return real + reciprocal + self + background + gaussian_background; }
+    EwaldEnergyTerms& operator+=(const EwaldEnergyTerms& o)
+    {
+        real += o.real;
+        reciprocal += o.reciprocal;
+        self += o.self;
+        background += o.background;
+        gaussian_background += o.gaussian_background;
+        return *this;
+    }
 };
 
 /*! \brief Everything one evaluation can return - Claude Generated (Nov 2026) */
@@ -126,26 +180,43 @@ public:
     {
     }
 
-    /// Total energy E (Eh).
-    double energy(const Eigen::MatrixXd& positions, const Eigen::VectorXd& charges) const;
+    /// Total energy E (Eh). gaussian_alp (B2): per-atom alp_i (Bohr^2) of Gaussian charges, nullptr = points.
+    double energy(const Eigen::MatrixXd& positions, const Eigen::VectorXd& charges,
+        const Eigen::VectorXd* gaussian_alp = nullptr) const;
     /// Gradient dE/dr_i (N x 3, Eh/Bohr; the force is its negative, as everywhere in curcuma).
-    Eigen::MatrixXd gradient(const Eigen::MatrixXd& positions, const Eigen::VectorXd& charges) const;
+    Eigen::MatrixXd gradient(const Eigen::MatrixXd& positions, const Eigen::VectorXd& charges,
+        const Eigen::VectorXd* gaussian_alp = nullptr) const;
     /// Potentials phi_i = dE/dq_i = (A q)_i without building A (what an iterative EEQ solver needs).
-    Eigen::VectorXd potentials(const Eigen::MatrixXd& positions, const Eigen::VectorXd& charges) const;
+    Eigen::VectorXd potentials(const Eigen::MatrixXd& positions, const Eigen::VectorXd& charges,
+        const Eigen::VectorXd* gaussian_alp = nullptr) const;
     /// Energy terms plus, on request, gradient and potentials in one pass over pairs and k vectors.
     EwaldResult evaluate(const Eigen::MatrixXd& positions, const Eigen::VectorXd& charges,
-        bool want_gradient, bool want_potentials) const;
+        bool want_gradient, bool want_potentials, const Eigen::VectorXd* gaussian_alp = nullptr) const;
     /// Dense Ewald matrix A (N x N, symmetric), A q = phi. O(N^2 N_k): small test systems only.
-    Eigen::MatrixXd matrix(const Eigen::MatrixXd& positions) const;
+    /// With gaussian_alp: A_ij -= erfc(g_ij r)/r (pairs, g r < XMAX) and A_ij += (pi/V)(alp_i + alp_j) (all i, j).
+    Eigen::MatrixXd matrix(const Eigen::MatrixXd& positions, const Eigen::VectorXd* gaussian_alp = nullptr) const;
 
-    /*! \brief Real-space pair kernel erfc(a r)/r and its r-derivative
-     *
-     * Hook for B2 (GFN-FF Gaussian charges): the EEQ interaction there is erf(g_ij r)/r instead of
-     * 1/r, i.e. a pairwise short-range correction -erfc(g_ij r)/r on top of the point-charge Ewald
-     * sum. That correction would be added here (or next to the call in the pair loop), with a
-     * per-pair g_ij. Deliberately not built in B0.
-     */
+    /*! \brief Real-space pair kernel erfc(a r)/r and its r-derivative (point charges) */
     static double realSpaceKernel(double r, double alpha, double& dkernel_dr);
+
+    // ---- Range interface (B2, Claude Generated Nov 2026): the same four pieces evaluate() is made of,
+    // callable per index range from several threads. Every function ADDS into `acc` (terms, and
+    // gradient / potentials when they have size N x 3 / N); the caller allocates and reduces.
+
+    /// Pairs (i < j) with minimum-image distance < r_cut; linked cells when every axis has >= 3 cells.
+    std::vector<std::pair<int, int>> realSpacePairs(const Eigen::MatrixXd& positions) const;
+    /// Phase factors per atom and axis for reciprocalRange().
+    EwaldPhaseTable phaseTable(const Eigen::MatrixXd& positions) const;
+    /// Real-space terms of pairs[begin, end): point kernel, minus the Gaussian correction when gaussian_alp is given.
+    void realSpaceRange(const Eigen::MatrixXd& positions, const Eigen::VectorXd& charges,
+        const std::vector<std::pair<int, int>>& pairs, int begin, int end, const Eigen::VectorXd* gaussian_alp,
+        bool want_gradient, bool want_potentials, EwaldResult& acc) const;
+    /// Reciprocal terms of the k vectors [k_begin, k_end) (indices into the stored half-space list).
+    void reciprocalRange(const EwaldPhaseTable& table, const Eigen::VectorXd& charges, int k_begin, int k_end,
+        bool want_gradient, bool want_potentials, EwaldResult& acc) const;
+    /// Self, neutralising background and (with gaussian_alp) the Gaussian background term; O(N), one call.
+    void selfAndBackground(const Eigen::VectorXd& charges, const Eigen::VectorXd* gaussian_alp,
+        bool want_potentials, EwaldResult& acc) const;
 
     const EwaldParameters& parameters() const { return m_par; }
     int numberOfKVectors() const { return static_cast<int>(m_kvectors.size()); }
@@ -158,9 +229,6 @@ private:
         double k[3];   ///< 2 pi n_a / L_a (1/Bohr)
         double weight; ///< (4 pi / V) exp(-k^2/(4 a^2)) / k^2; already doubled for the -k partner
     };
-
-    /// Pairs (i < j) with minimum-image distance < r_cut; linked cells when every axis has >= 3 cells.
-    std::vector<std::pair<int, int>> realSpacePairs(const Eigen::MatrixXd& positions) const;
 
     PBCUtils::OrthoCell m_cell;
     EwaldParameters m_par;

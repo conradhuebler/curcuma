@@ -306,6 +306,15 @@ void FFWorkspace::setCoulombSelfEnergyParams(const Vector& chi_base, const Vecto
     m_coul_chi_static = chi_static;
 }
 
+// Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED B2)
+void FFWorkspace::setEwald(const curcuma::ewald::EwaldParameters& p)
+{
+    if (!m_cell_bohr.active)
+        throw std::runtime_error("FFWorkspace::setEwald: no periodic cell set");
+    m_ewald = std::make_unique<curcuma::ewald::EwaldSum>(m_cell_bohr, p);  // throws for r_cut > L_min/2
+    m_coulomb_ewald = true;
+}
+
 double FFWorkspace::calculate(bool gradient)
 {
     const bool do_timing = (CurcumaLogger::get_verbosity() >= 2);
@@ -313,6 +322,23 @@ double FFWorkspace::calculate(bool gradient)
     double t_execute = 0.0, t_reduce = 0.0, t_post = 0.0;
 
     m_do_gradient = gradient;
+
+    // Periodic Coulomb (Claude Generated, Nov 2026, B2): the real-space pair list (minimum image, r < r_cut,
+    // linked cells) and the phase table of this geometry, built once here before the partitions read them.
+    // Not reached without setEwald(): the non-periodic path is bitwise what it was.
+    m_ewald_terms = curcuma::ewald::EwaldEnergyTerms();
+    m_ewald_setup_ms = 0.0;
+    const bool ewald_now = ewaldActive() && m_coulomb_enabled && m_method_type == FFMethodType::GFN_FF;
+    if (ewald_now) {
+        if (m_coul_alp.size() != m_natoms || m_eeq_charges.size() != m_natoms)
+            throw std::runtime_error("FFWorkspace: Ewald Coulomb needs per-atom alp and EEQ charges of size natoms");
+        auto t0 = std::chrono::high_resolution_clock::now();
+        m_ewald_pos = m_geometry;  // one column-major copy for the ewald kernels (RowMajor workspace geometry)
+        m_ewald_pairs = m_ewald->realSpacePairs(m_ewald_pos);
+        m_ewald_table = m_ewald->phaseTable(m_ewald_pos);
+        m_ewald_setup_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
+    }
+    const bool want_pot = ewald_now && m_want_coulomb_potentials;
 
     // Select execute function based on method type
     auto executeMethod = [this](int t) {
@@ -339,12 +365,18 @@ double FFWorkspace::calculate(bool gradient)
     auto t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
     if (m_num_threads == 1) {
         // T=1: Direct call, zero pool overhead
-        m_accumulators[0].reset(m_natoms, gradient, m_store_components);
+        m_accumulators[0].reset(m_natoms, gradient, m_store_components, want_pot);
         executeMethod(0);
 
         // acc[0] IS the result — zero-copy swap
         m_result_energy = m_accumulators[0].energy;
         m_result_timings = m_accumulators[0].timings;  // Claude Generated (May 2026): per-term timing
+        m_ewald_terms.real = m_accumulators[0].ewald_real;       // B2
+        m_ewald_terms.reciprocal = m_accumulators[0].ewald_recip;
+        if (want_pot)
+            m_result_coulomb_potentials.swap(m_accumulators[0].coulomb_potentials);
+        else
+            m_result_coulomb_potentials.resize(0);
         if (gradient) {
             m_result_gradient.swap(m_accumulators[0].gradient);
             m_dEdcn_total = m_accumulators[0].dEdcn;
@@ -365,7 +397,7 @@ double FFWorkspace::calculate(bool gradient)
     } else {
         // T>1: Pool + barrier
         for (int t = 0; t < m_num_threads; ++t)
-            m_accumulators[t].reset(m_natoms, gradient, m_store_components);
+            m_accumulators[t].reset(m_natoms, gradient, m_store_components, want_pot);
 
         std::vector<std::future<void>> futures;
         futures.reserve(m_num_threads - 1);
@@ -446,7 +478,12 @@ void FFWorkspace::executeGFNFF(int p)
         t = tic(); calcNonbondedRepulsion(p); timings.nonbonded_rep = toc(t);
     }
     if (m_coulomb_enabled) {
-        t = tic(); calcCoulomb(p); timings.coulomb = toc(t);
+        t = tic();
+        if (ewaldActive())
+            calcCoulombEwald(p);  // Nov 2026 (B2): periodic cell with coulomb_ewald
+        else
+            calcCoulomb(p);
+        timings.coulomb = toc(t);
     }
 
     // HB/XB three-body terms
@@ -479,6 +516,9 @@ void FFWorkspace::reduce()
     // Sum all accumulators into result
     m_result_energy = m_accumulators[0].energy;
     m_result_timings = m_accumulators[0].timings;  // Claude Generated (May 2026)
+    m_ewald_terms.real = m_accumulators[0].ewald_real;  // B2 (Nov 2026): fixed partition order, reproducible per thread count
+    m_ewald_terms.reciprocal = m_accumulators[0].ewald_recip;
+    m_result_coulomb_potentials = m_accumulators[0].coulomb_potentials;
     if (m_do_gradient) {
         m_result_gradient = m_accumulators[0].gradient;
         m_dEdcn_total = m_accumulators[0].dEdcn;
@@ -500,6 +540,10 @@ void FFWorkspace::reduce()
     for (int t = 1; t < m_num_threads; ++t) {
         m_result_energy += m_accumulators[t].energy;
         m_result_timings += m_accumulators[t].timings;  // Claude Generated (May 2026): CPU-sum
+        m_ewald_terms.real += m_accumulators[t].ewald_real;
+        m_ewald_terms.reciprocal += m_accumulators[t].ewald_recip;
+        if (m_result_coulomb_potentials.size() == m_natoms && m_accumulators[t].coulomb_potentials.size() == m_natoms)
+            m_result_coulomb_potentials += m_accumulators[t].coulomb_potentials;
         if (m_do_gradient) {
             m_result_gradient += m_accumulators[t].gradient;
             m_dEdcn_total += m_accumulators[t].dEdcn;
@@ -554,6 +598,27 @@ void FFWorkspace::postProcess(bool gradient)
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::info(fmt::format("  Coulomb self-energy (workspace): EN={:+.12f}, Self={:+.12f} Eh", E_en, E_self));
         }
+    }
+    // Periodic Coulomb (Claude Generated, Nov 2026, B2): Ewald self term, neutralising background and the
+    // Gaussian background (pi Q/V) sum q_i alp_i of the point-charge-plus-correction sum (ewald.h). Sequential,
+    // O(N), thread-count independent. The GFN-FF self term above (Gaussian self-energy, chi) is untouched.
+    if (ewaldActive() && m_coulomb_enabled && m_method_type == FFMethodType::GFN_FF
+        && m_coul_alp.size() == m_natoms && m_eeq_charges.size() == m_natoms) {
+        curcuma::ewald::EwaldResult tail;
+        const bool want_pot = m_result_coulomb_potentials.size() == m_natoms;
+        if (want_pot)
+            tail.potentials = Eigen::VectorXd::Zero(m_natoms);
+        m_ewald->selfAndBackground(m_eeq_charges, &m_coul_alp, want_pot, tail);
+        m_ewald_terms.self = tail.terms.self;
+        m_ewald_terms.background = tail.terms.background;
+        m_ewald_terms.gaussian_background = tail.terms.gaussian_background;
+        m_result_energy.coulomb += tail.terms.self + tail.terms.background + tail.terms.gaussian_background;
+        if (want_pot)
+            m_result_coulomb_potentials += tail.potentials;
+        if (CurcumaLogger::get_verbosity() >= 3)
+            CurcumaLogger::info(fmt::format("  Coulomb Ewald (workspace): real={:+.12f} recip={:+.12f} self={:+.12f} bg={:+.12f} gauss_bg={:+.12f} Eh",
+                m_ewald_terms.real, m_ewald_terms.reciprocal, m_ewald_terms.self, m_ewald_terms.background,
+                m_ewald_terms.gaussian_background));
     }
     if (do_timing) {
         t_self_energy = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
