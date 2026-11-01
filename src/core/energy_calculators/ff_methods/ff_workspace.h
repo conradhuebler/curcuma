@@ -426,6 +426,10 @@ public:
 
     /// Master bond list (read-only; used to re-derive the bond-HB cross reference)
     const std::vector<Bond>& bonds() const { return m_bonds; }
+    /// Claude Generated (Nov 2026, A4c): current bonded-term lists (read-only; topology tests)
+    const std::vector<Angle>& angles() const { return m_angles; }
+    const std::vector<Dihedral>& dihedrals() const { return m_dihedrals; }
+    const std::vector<Inversion>& inversions() const { return m_inversions; }
 
     /**
      * @brief Replace the bond-HB cross reference after an HB re-detection.

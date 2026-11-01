@@ -530,7 +530,7 @@ public:
      */
     struct GFNFFDynamicState {
         Vector coordination_numbers;                             // D3 CN (geometry-dependent)
-        Eigen::MatrixXd distance_matrix;                         // N×N distances in Bohr (only for initial topology, not per-step)
+        Eigen::MatrixXd distance_matrix;                         // unused since Nov 2026 (A4c): the topology forms its distances on the fly; kept empty
     };
 
     /**
@@ -1433,6 +1433,9 @@ public:
     };
     const Vector& getLastCNF() const { return m_last_cnf; }
     FFWorkspace* getWorkspace() const { return m_workspace.get(); }
+    /// Claude Generated (Nov 2026, A4c): element factor of the bond criterion (fat table), read by the periodic topology
+    /// test to enumerate images independently; 1.0 outside 1..86.
+    static double bondDetectionElementFactor(int z) { return (z >= 1 && z <= 86) ? fat[z] : 1.0; }
 
     /**
      * @brief Record the energy of every hydrogen-bond triple at each evaluation.
@@ -1758,6 +1761,48 @@ private:
     void updateDispersionTail(bool gradient);
     /// Claude Generated (Nov 2026, A1): (name, radius in Bohr) of every cutoff in use; checked by configurePeriodicCell().
     std::vector<std::pair<std::string, double>> activeCutoffsBohr() const;
+    /// Claude Generated (Nov 2026, A4c): x_i - x_j in Bohr from m_geometry_bohr, minimum image with a cell (one
+    /// branch per call; the O(N^2) loops of the bond detection and the reactive scan branch once per call instead).
+    Eigen::RowVector3d pairVectorBohr(int i, int j) const
+    {
+        Eigen::RowVector3d d = m_geometry_bohr.row(i) - m_geometry_bohr.row(j);
+        if (m_cell_bohr_ortho.active)
+            PBCUtils::applyMinimumImageOrtho(m_cell_bohr_ortho, d(0), d(1), d(2));
+        return d;
+    }
+    /**
+     * @brief Reassembled geometry for the topology build with a periodic cell - Claude Generated (Nov 2026, A4c)
+     *
+     * Every connected component of the current bond list (getCachedBondList(), minimum-image distances) is placed
+     * as one intact molecule: its lowest-index atom keeps its position, every bonded neighbour is put at the
+     * minimum image next to the atom it was reached from (breadth first). The result differs from m_geometry_bohr
+     * by whole lattice vectors per atom, so every minimum-image quantity (CN, D4, repulsion, HB/XB, bonded terms)
+     * is unchanged, while the plain-distance topology code (hybridisation angles, neighbour sets, angle/torsion/
+     * inversion generation, Phase-1 EEQ) sees intact molecules. A component whose bonds close around the cell
+     * (a chain bonded to its own image) has no such placement: error with the offending bond. Without a cell the
+     * input is returned unchanged.
+     * @return false with the message in error when a component winds around the cell
+     */
+    bool unwrapFragmentsForTopology(GeoGradMatrix& unwrapped_bohr, std::string& error) const;
+    /**
+     * @brief Swap the reassembled geometry in for the topology build - Claude Generated (Nov 2026, A4c)
+     *
+     * Constructed at the start of generateGFNFFParameterSet(): with an active cell it replaces m_geometry_bohr and
+     * m_geometry by the result of unwrapFragmentsForTopology() and restores both in the destructor (also on an
+     * exception). The bond list is detected on the input geometry first (minimum image, it defines the placement) and
+     * once more on the reassembled geometry inside the build (same set, lattice shifts do not change the minimum image).
+     * Reference geometries recorded during the build (pair-list skins, HB trigger) hold the reassembled copy; their
+     * triggers take minimum-image displacements, so the restored input counts as unmoved. Without a cell: no-op.
+     */
+    struct TopologyGeometryScope {
+        explicit TopologyGeometryScope(GFNFF& ff);
+        ~TopologyGeometryScope();
+        TopologyGeometryScope(const TopologyGeometryScope&) = delete;
+        TopologyGeometryScope& operator=(const TopologyGeometryScope&) = delete;
+        GFNFF& m_ff;
+        bool m_swapped = false;
+        GeoGradMatrix m_saved_bohr, m_saved_ang;
+    };
     /// Claude Generated (Nov 2026, A2): range of the per-step CN in Bohr; CN-derivative range with a cell.
     double cnDerivativeRangeBohr() const;
     /// Claude Generated (Nov 2026, A2): CN threshold in Bohr^2 for cn_cutoff_bohr = 0, reference cnthr(cn_accuracy).
@@ -2396,11 +2441,12 @@ private:
      *
      * @param ii Atom index
      * @param nb Neighbour list to search (pass nb_hc for Fortran parity)
-     * @param distance_matrix Interatomic distances
      * @return CN of the closest non-metal neighbour, or 0 if there is none
+     *
+     * Nov 2026 (A4c): distances formed from m_geometry_bohr on the fly (the former dense N x N matrix had
+     * no other reader; 240 MB at 5475 atoms). Same expression as the matrix entry, bitwise equal.
      */
-    int nnNearestNoM(int ii, const std::vector<std::vector<int>>& nb,
-                     const Eigen::MatrixXd& distance_matrix) const;
+    int nnNearestNoM(int ii, const std::vector<std::vector<int>>& nb) const;
 
     /**
      * @brief Fortran-faithful hybridization assignment
@@ -2414,14 +2460,13 @@ private:
      * Also WRITES itag: sets +1 for carbenes and NO2 nitrogen (consumed by Hueckel/HB),
      * on top of the -1 eta tags already set by computeEtaCoordination().
      *
-     * @param topo Topology holding nb_full / nb_hc / nb_nometal / distance_matrix
+     * @param topo Topology holding nb_full / nb_hc / nb_nometal
      * @param nbdum The eta-aware per-atom mixture
      * @param itag In/out tag vector (-1 eta in, +1 carbene/NO2 out)
      * @return Hybridization per atom (0 none/octahedral, 1 sp, 2 sp2, 3 sp3, 5 hypervalent)
      */
     std::vector<int> determineHybridizationFortran(const GFNFFTopology& topo,
                                                    const std::vector<std::vector<int>>& nbdum,
-                                                   const Eigen::MatrixXd& distance_matrix,
                                                    std::vector<int>& itag) const;
 
     /**

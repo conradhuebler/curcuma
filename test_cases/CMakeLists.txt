@@ -722,6 +722,15 @@ endif()
 add_test(NAME pbc_hbond COMMAND test_pbc_hbond WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 set_tests_properties(pbc_hbond PROPERTIES TIMEOUT 300 LABELS "pbc;gfnff")
 
+# Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A4c): periodic topology generation, reactive scan, cache key
+add_executable(test_pbc_topology unit/test_pbc_topology.cpp)
+target_link_libraries(test_pbc_topology curcuma_core test_molecule_registry)
+if(USE_PCH)
+    target_precompile_headers(test_pbc_topology REUSE_FROM curcuma_core)
+endif()
+add_test(NAME pbc_topology COMMAND test_pbc_topology WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(pbc_topology PROPERTIES TIMEOUT 300 LABELS "pbc;gfnff;react")
+
 # Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A3b): a periodic cell sends a GPU GFN-FF method to the CPU
 # (MethodFactory::periodicCellNeedsCpu); runs without a GPU, with a stand-in for the plugin wrapper.
 add_executable(test_pbc_gpu_guard unit/test_pbc_gpu_guard.cpp)

@@ -363,3 +363,74 @@ topology generation, reactive topology, BATM/ATM, and the charge ensemble `fragE
 - **Not tested**: HB case 4, XB in a halogen-bonded crystal (only fi-pyridine exists, its N is bonded to I in the topology, so
   its XB triples go to other acceptors), MD with a cell, `nb_cell_list_min_atoms` XB cell-list branch with a cell (HB one
   tested), GPU (unchanged; the A3b guard runs a cell on the CPU, `prepareHBDetectInputs` still plain). Human production testing pending.
+
+## A4c periodic topology generation and reactive topology (2026-11-01, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+On `feature/bulk` (base `af776bf8`), CPU only. **Periodic now additionally: the bond criterion, the whole topology build
+(hybridisation, neighbour sets, rings, pi systems, angle/torsion/inversion/sTors generation, HB/XB set-up detection), the
+reactive bond scan, the charge-ensemble contact window (`fragEnsembleBlend`) and the topology cache key.** A structure with a
+cell whose molecules are torn in the input (per-atom wrap, SimpleMD fragment wrap) is initialised directly. Still plain
+distances: Coulomb and the per-step Phase-2 EEQ (Ewald is block B), ATM/BATM, native GFN1/GFN2; GPU unchanged (A3b guard).
+
+- **Bond criterion** (`getCachedBondList`): with a cell the pair distance is the minimum image; the distance functor is
+  chosen once per call (generic lambda), the plain instantiation is the old loop. The same for the reactive scan
+  (`detectReactiveBondChanges`, form/break thresholds) and the contact window `fragWindowEdges`; the bond-graph split and
+  the window gradient of `fragEnsembleBlend` use `pairVectorBohr()` (one branch per pair, only in the ensemble path).
+- **Reassembled geometry instead of hundreds of MIC sites** (`unwrapFragmentsForTopology`, `TopologyGeometryScope` at
+  the start of `generateGFNFFParameterSet`): every connected component of the minimum-image bond list is placed as one
+  intact molecule (lowest-index atom keeps its position, neighbours at the minimum image next to the atom they were
+  reached from, breadth first); `m_geometry_bohr`/`m_geometry` are swapped for the build and restored afterwards (also on
+  an exception). The copy differs from the input by whole lattice vectors per atom, so every minimum-image quantity (CN,
+  D4, repulsion, HB/XB detection, bonded terms) is unchanged, and the plain-distance topology code (`bangl` in the
+  hybridisation, `nnNearestNoM`, the icase-2/3 neighbour predicate, angle/torsion/inversion generation, `sdum` sorting,
+  the Phase-1 EEQ matrix) sees intact molecules. A pair accepted by the icase-2/3 predicate is a bond (its threshold is
+  the icase-1 one without `fm >= 1`), so its plain distance in the copy is the minimum image; a plain distance is never
+  shorter than the minimum image, so no spurious contact appears. The bond list is detected on the input first (it
+  defines the placement) and once more inside the build (same set: lattice shifts leave the minimum image unchanged;
+  one extra O(N^2) pass per build, cell only). The reference geometries recorded during the build (pair-list skins, HB
+  trigger, `m_last_eeq_geometry`) hold the reassembled copy; the skin and HB triggers take minimum-image displacements
+  (A3b/A4b) and see the restored input as unmoved, the EEQ reference differs and costs one Phase-2 solve on the first call.
+- **Refused**: a component whose bonds close around the cell (a chain bonded to its own periodic image, mismatch > 1e-6
+  Bohr on a second path to an atom): `std::runtime_error` naming the bond. Such a system has no intact placement; the
+  bonded terms alone would be right (A4a), the topology around the closing bond not. **Reported, not repaired**: a bond
+  that only the charge-shrunk pass 2 of the q-loop adds between two separately placed fragments and that spans the cell
+  (warning per bond; its angles/torsions are built from the plain vector). Not covered: `topology_mode auto` re-derives
+  the topology from `Calculation()` on the input geometry as is (the scope is only in `generateGFNFFParameterSet`).
+- **Dense N x N distance matrix removed** (`calculateTopologyInfoOnce` phase 2.1): its only reader was `nnNearestNoM`
+  (bonded pairs), which forms the distance itself with the same expression (bitwise). 240 MB at 5475 atoms; on
+  peo201-water500 (2910 atoms, 4 threads) topology 105.8 -> 90.5 ms, parameter generation 330 -> 281 ms, max RSS
+  559 -> 494 MB, `-sp` wall time (median of 3) 0.348 -> 0.329 s at 4 threads, 0.691 -> 0.667 s at 1 thread.
+  With a 100 A cube: topology 95.5 ms, parameter generation 296 ms, RSS 501 MB, wall 0.346 s.
+- **Phase-1 EEQ / topology charges**: the Phase-1 matrix is a plain Coulomb over the reassembled geometry: right inside
+  each molecule, non-periodic between fragments (each fragment sits where its anchor atom put it). Coulomb and the per-step
+  Phase-2 EEQ (`computeSharedDistances`, `prepareCNAndEEQ`) are untouched and read the input geometry with plain
+  distances: a torn input gives a different Coulomb energy than the intact one (caffeine torn -0.1622 vs intact -0.1744
+  Eh), and nothing beyond L/2 is periodic there. Left for the Ewald block on purpose.
+- **Topology cache** (`computeTopologyFingerprint`): `|cell=Lx,Ly,Lz` (Bohr, 12 digits) is appended only when a cell is
+  active, so the fingerprint and every existing cache file without a cell are unchanged (checked: caffeine, urea197
+  fingerprints and charges before/after identical); a cache written with a cell is not read without one, nor with another
+  cell, and vice versa ("fingerprint mismatch - recalculating").
+- **Reactive topology**: minimum-image scan, scan trigger `react_check_disp_bohr` on minimum-image displacements (a
+  fragment wrap triggers no scan); a rebuild runs the full `generateGFNFFParameterSet` with the reassembled geometry, so
+  two molecules that bond across a face become one intact component. The displacement test of the react scan and the
+  cutoff list are unchanged otherwise.
+- **Smallest accepted cell**: the topology thresholds (bond criterion < 6 Bohr, reactive scan 2.6 x rcov sum, topology-init
+  CN 40 Bohr with minimum image, A2) add no blocker; defaults L > 42.43 Bohr (sqrt(hbthr2)), `hbond false` L > 40 Bohr
+  (repulsion 20; water dimer 40.5 accepted, 39.9 refused).
+- **Tests** (`ctest -R pbc_topology`, labels pbc/gfnff/react): (a) caffeine, hydronium-water2 (+1, default charge
+  ensemble), acetic acid dimer, 44 Bohr cube, torn per atom at the corner and initialised directly: bond list, angle/
+  dihedral/inversion counts, hybridisation, fragment count identical to the intact instance, topology charges identical
+  (anchored and fully torn variants), every periodic term <= 1.5e-15 Eh (hydronium E_HB -8.31e-3 Eh equal under the
+  ensemble model); with cell == without cell for the intact molecule; torn without a cell has fewer bonds (not vacuous).
+  (b) 2x1x1 supercell: counts exactly doubled, periodic terms = 2 x cell to 7.1e-15 Eh (Coulomb not). (c) 60 random
+  waters, L 43.5 Bohr, wrapped per atom (8 torn): 120 bonds = the O-H pairs = an independent 27-image enumeration of the
+  charge-shrunk criterion with the instance's Phase-1 charges; 110 without a cell; threads 1/4 identical. (d) react,
+  H + H from 4.0 to 1.2 Bohr in the centre and across the x face: formation at the same step (20), E_after, E_final and
+  dE_jump (-0.1471063 Eh) equal to 1e-12. (e) cache fingerprints: cell != plain, same cell reproduced, other cell
+  different. (f) smallest cell as above.
+- **Without a cell**: -sp energy (16 digits) and `-dump_gradient` md5 identical before/after on the 7 structures of A2 at 1
+  and 4 threads (benzene, caffeine, methyl-glucopyranoside, water8, hydronium-water2, urea-water197, peo201-water500).
+- **Not tested**: polymers wider than the cell (the refusal path only by reading), metals and eta fragments under a
+  cell, `nb_cell_list_min_atoms` >= 800-atom neighbour-set path with torn input (peo201 with a 100 A cube runs, numbers
+  not compared), charge groups / ionpairs with a cell, MD with a cell and react, `topology_mode auto`, GPU. Human
+  production testing pending.

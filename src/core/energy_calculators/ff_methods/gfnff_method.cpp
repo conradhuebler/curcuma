@@ -1244,25 +1244,39 @@ const std::vector<std::pair<int,int>>& GFNFF::getCachedBondList() const {
             // in row order, so the bond list is identical to the serial one (7320 atoms: 26.8 M
             // pair tests, previously serial in both q-loop passes).
             std::vector<std::vector<std::pair<int,int>>> row_bonds(m_atomcount);
-            #pragma omp parallel for schedule(dynamic, 64)
-            for (int i = 0; i < m_atomcount; ++i) {
-                const int zi = m_atoms[i];
-                const double ncn_i = (zi >= 1 && zi <= 86) ? static_cast<double>(normcn[zi - 1]) : 4.0;
-                for (int j = i + 1; j < m_atomcount; ++j) {
-                    const int zj = m_atoms[j];
-                    const double ncn_j = (zj >= 1 && zj <= 86) ? static_cast<double>(normcn[zj - 1]) : 4.0;
+            // Nov 2026 (A4c): with a periodic cell the pair distance is the minimum image, so a bond
+            // across a cell face is found (torn input, SimpleMD fragment wrap, reactive MD). The
+            // distance functor is chosen once per call; the plain instantiation is the old loop.
+            auto detect = [&](auto&& pair_distance) {
+                #pragma omp parallel for schedule(dynamic, 64)
+                for (int i = 0; i < m_atomcount; ++i) {
+                    const int zi = m_atoms[i];
+                    const double ncn_i = (zi >= 1 && zi <= 86) ? static_cast<double>(normcn[zi - 1]) : 4.0;
+                    for (int j = i + 1; j < m_atomcount; ++j) {
+                        const int zj = m_atoms[j];
+                        const double ncn_j = (zj >= 1 && zj <= 86) ? static_cast<double>(normcn[zj - 1]) : 4.0;
 
-                    double rco = GFNFFParameters::computeRabEstimate(zi, zj, ncn_i, ncn_j);
-                    rco -= qshift[i] + qshift[j];
-                    rco *= fat_val[i] * fat_val[j];
+                        double rco = GFNFFParameters::computeRabEstimate(zi, zj, ncn_i, ncn_j);
+                        rco -= qshift[i] + qshift[j];
+                        rco *= fat_val[i] * fat_val[j];
 
-                    const double threshold = fm_atom[i] * fm_atom[j] * rthr * rco;
-                    const double distance = (m_geometry_bohr.row(i) - m_geometry_bohr.row(j)).norm();
+                        const double threshold = fm_atom[i] * fm_atom[j] * rthr * rco;
+                        const double distance = pair_distance(i, j);
 
-                    if (distance < threshold) {
-                        row_bonds[i].emplace_back(i, j);
+                        if (distance < threshold) {
+                            row_bonds[i].emplace_back(i, j);
+                        }
                     }
                 }
+            };
+            if (m_cell_bohr_ortho.active) {
+                detect([&](int i, int j) {
+                    Eigen::RowVector3d d = m_geometry_bohr.row(i) - m_geometry_bohr.row(j);
+                    PBCUtils::applyMinimumImageOrtho(m_cell_bohr_ortho, d(0), d(1), d(2));
+                    return d.norm();
+                });
+            } else {
+                detect([&](int i, int j) { return (m_geometry_bohr.row(i) - m_geometry_bohr.row(j)).norm(); });
             }
             for (const auto& rb : row_bonds)
                 bonds.insert(bonds.end(), rb.begin(), rb.end());
@@ -2387,6 +2401,110 @@ double GFNFF::maxAtomDisplacement(const Eigen::MatrixXd& a, const Eigen::MatrixX
 }
 
 // ---------------------------------------------------------------------------
+// Reassembled topology geometry with a periodic cell (WP-PERIODIC-NONBONDED A4c)
+// Claude Generated (Nov 2026)
+// ---------------------------------------------------------------------------
+
+bool GFNFF::unwrapFragmentsForTopology(GeoGradMatrix& unwrapped_bohr, std::string& error) const
+{
+    unwrapped_bohr = m_geometry_bohr;
+    error.clear();
+    if (!m_cell_bohr_ortho.active)
+        return true;
+
+    const auto& bonds = getCachedBondList();  // minimum-image bond criterion with a cell
+    std::vector<std::vector<int>> nb(m_atomcount);
+    for (const auto& [a, b] : bonds) {
+        if (a < 0 || b < 0 || a >= m_atomcount || b >= m_atomcount)
+            continue;
+        nb[a].push_back(b);
+        nb[b].push_back(a);
+    }
+
+    // Breadth first from the lowest-index atom of every component; that atom keeps its input
+    // position, each neighbour is placed at the minimum image next to the atom it was reached from.
+    // Reaching an already placed atom through a second path must give the same position; otherwise
+    // the component's bonds wind around the cell (a chain bonded to its own image).
+    constexpr double kWindingTolBohr = 1e-6;
+    std::vector<char> placed(m_atomcount, 0);
+    std::vector<int> queue;
+    queue.reserve(m_atomcount);
+    int ntorn_fragments = 0;
+    for (int start = 0; start < m_atomcount; ++start) {
+        if (placed[start])
+            continue;
+        placed[start] = 1;
+        queue.clear();
+        queue.push_back(start);
+        bool fragment_moved = false;
+        for (size_t head = 0; head < queue.size(); ++head) {
+            const int i = queue[head];
+            for (int j : nb[i]) {
+                Eigen::RowVector3d d = m_geometry_bohr.row(j) - m_geometry_bohr.row(i);
+                PBCUtils::applyMinimumImageOrtho(m_cell_bohr_ortho, d(0), d(1), d(2));
+                const Eigen::RowVector3d candidate = unwrapped_bohr.row(i) + d;
+                if (!placed[j]) {
+                    placed[j] = 1;
+                    unwrapped_bohr.row(j) = candidate;
+                    queue.push_back(j);
+                    if ((candidate - m_geometry_bohr.row(j)).norm() > kWindingTolBohr)
+                        fragment_moved = true;
+                } else if ((candidate - unwrapped_bohr.row(j)).norm() > kWindingTolBohr) {
+                    error = fmt::format("GFN-FF periodic topology: the bonded fragment containing atoms {} and {} winds around the "
+                                        "cell (bond {}-{} closes onto a periodic image, mismatch {:.3f} Bohr); a molecule bonded to "
+                                        "its own image has no intact placement and is not supported by the topology generation (A4c)",
+                        start + 1, j + 1, i + 1, j + 1, (candidate - unwrapped_bohr.row(j)).norm());
+                    return false;
+                }
+            }
+        }
+        if (fragment_moved)
+            ++ntorn_fragments;
+    }
+    if (ntorn_fragments > 0 && CurcumaLogger::get_verbosity() >= 2)
+        CurcumaLogger::info(fmt::format("GFN-FF periodic topology: {} fragment(s) reassembled across the cell boundary for the topology build",
+            ntorn_fragments));
+    return true;
+}
+
+GFNFF::TopologyGeometryScope::TopologyGeometryScope(GFNFF& ff)
+    : m_ff(ff)
+{
+    if (!ff.m_cell_bohr_ortho.active)
+        return;
+    GeoGradMatrix unwrapped;
+    std::string error;
+    if (!ff.unwrapFragmentsForTopology(unwrapped, error)) {
+        CurcumaLogger::error(error);
+        throw std::runtime_error(error);
+    }
+    m_saved_bohr = ff.m_geometry_bohr;
+    m_saved_ang = ff.m_geometry;
+    ff.m_geometry_bohr = unwrapped;
+    ff.m_geometry = unwrapped * CurcumaUnit::Length::BOHR_TO_ANGSTROM;
+    // getCachedBondList() above marked the input geometry as seen in the shared tracker, which would
+    // make getCachedTopology() return the (empty) cached topology for an intact input (same trap as
+    // the react seed in InitialiseMolecule). Reset both, so the build takes the full topology path
+    // and re-detects the bond list once on the reassembled geometry (same set: the minimum image is
+    // invariant under lattice shifts of either atom; one extra O(N^2) pass per build, cell only).
+    ff.m_cached_bond_list.reset();
+    ff.m_geometry_tracker.reset();
+    m_swapped = true;
+}
+
+GFNFF::TopologyGeometryScope::~TopologyGeometryScope()
+{
+    if (!m_swapped)
+        return;
+    m_ff.m_geometry_bohr = m_saved_bohr;
+    m_ff.m_geometry = m_saved_ang;
+    // The input geometry is the one the topology belongs to: mark it as seen, so neither the bond
+    // list nor (topology_mode auto) the topology is rebuilt on the first energy call.
+    m_ff.m_geometry_tracker.updateGeometry(m_ff.m_geometry_bohr);
+    m_ff.m_last_topology_geometry = m_ff.m_geometry_bohr;
+}
+
+// ---------------------------------------------------------------------------
 // updateDispersionPairsIfNeeded — Verlet-skin refresh of the D4 pair list
 // Claude Generated (Sep 2026): see the declaration in gfnff.h for the bug and the skin argument.
 // ---------------------------------------------------------------------------
@@ -2674,32 +2792,46 @@ bool GFNFF::detectReactiveBondChanges()
     std::vector<double> valence_used(m_atomcount, 0.0);
 
     std::vector<std::pair<double, std::pair<int, int>>> candidates; // (r, pair)
-    for (int i = 0; i < m_atomcount; ++i) {
-        for (int j = i + 1; j < m_atomcount; ++j) {
-            double r = (m_geometry_bohr.row(i) - m_geometry_bohr.row(j)).norm();
-            double thr = (rcov[i] + rcov[j]) * fat_val[i] * fat_val[j];
-            if (current.count({ i, j }) > 0) {
-                // Existing bond survives until it stretches past the break threshold
-                if (r > m_react_break_factor * thr) {
-                    broken.emplace_back(i, j);
-                } else {
-                    next.emplace_back(i, j);
-                    double bo = bond_order(i, j);
-                    valence_used[i] += bo;
-                    valence_used[j] += bo;
-                    if (m_atoms[i] == m_atoms[j]) {
-                        ++same_el_neighbors[i];
-                        ++same_el_neighbors[j];
+    // Nov 2026 (A4c): with a periodic cell every scan distance is the minimum image, so a bond
+    // forms or breaks across a cell face exactly as in the cell centre (the list stores atom
+    // pairs; FFWorkspace images each bond at every call, A4a). Functor chosen once per call.
+    auto scan = [&](auto&& pair_distance) {
+        for (int i = 0; i < m_atomcount; ++i) {
+            for (int j = i + 1; j < m_atomcount; ++j) {
+                double r = pair_distance(i, j);
+                double thr = (rcov[i] + rcov[j]) * fat_val[i] * fat_val[j];
+                if (current.count({ i, j }) > 0) {
+                    // Existing bond survives until it stretches past the break threshold
+                    if (r > m_react_break_factor * thr) {
+                        broken.emplace_back(i, j);
+                    } else {
+                        next.emplace_back(i, j);
+                        double bo = bond_order(i, j);
+                        valence_used[i] += bo;
+                        valence_used[j] += bo;
+                        if (m_atoms[i] == m_atoms[j]) {
+                            ++same_el_neighbors[i];
+                            ++same_el_neighbors[j];
+                        }
+                        if (m_atoms[j] == 1) ++h_neighbors[i];
+                        if (m_atoms[i] == 1) ++h_neighbors[j];
+                        ++sigma_count[i];
+                        ++sigma_count[j];
                     }
-                    if (m_atoms[j] == 1) ++h_neighbors[i];
-                    if (m_atoms[i] == 1) ++h_neighbors[j];
-                    ++sigma_count[i];
-                    ++sigma_count[j];
+                } else if (r < m_react_form_factor * thr) {
+                    candidates.emplace_back(r, std::make_pair(i, j));
                 }
-            } else if (r < m_react_form_factor * thr) {
-                candidates.emplace_back(r, std::make_pair(i, j));
             }
         }
+    };
+    if (m_cell_bohr_ortho.active) {
+        scan([&](int i, int j) {
+            Eigen::RowVector3d d = m_geometry_bohr.row(i) - m_geometry_bohr.row(j);
+            PBCUtils::applyMinimumImageOrtho(m_cell_bohr_ortho, d(0), d(1), d(2));
+            return d.norm();
+        });
+    } else {
+        scan([&](int i, int j) { return (m_geometry_bohr.row(i) - m_geometry_bohr.row(j)).norm(); });
     }
 
     // Closest candidates claim the remaining valence first.
@@ -2895,7 +3027,8 @@ void GFNFF::updateReactiveTopologyIfNeeded()
     bool scan = (m_react_check_every > 0) && (m_react_calls % m_react_check_every == 0);
     if (!scan && m_react_check_disp > 0.0
         && m_react_ref_geometry.rows() == m_geometry_bohr.rows()) {
-        double max_disp = (m_geometry_bohr - m_react_ref_geometry).rowwise().norm().maxCoeff();
+        // Nov 2026 (A4c): minimum-image displacement, so a fragment wrap by SimpleMD triggers no scan
+        double max_disp = maxAtomDisplacement(m_geometry_bohr, m_react_ref_geometry, m_cell_bohr_ortho);
         scan = (max_disp > m_react_check_disp);
     }
     if (!scan)
@@ -3791,6 +3924,12 @@ std::string GFNFF::computeTopologyFingerprint() const
         if (i > 0) data += ",";
         data += std::to_string(bonds[i].first) + "-" + std::to_string(bonds[i].second);
     }
+    // Nov 2026 (A4c): the cell is part of the key, appended ONLY when one is active, so the
+    // fingerprint (and every existing cache file) without a cell is unchanged. A topology built
+    // with a cell (bond list from minimum-image distances, Phase-1 charges from the reassembled
+    // geometry) is thus never reused without it, nor with another cell, and vice versa.
+    if (m_cell_bohr_ortho.active)
+        data += fmt::format("|cell={:.12e},{:.12e},{:.12e}", m_cell_bohr_ortho.L[0], m_cell_bohr_ortho.L[1], m_cell_bohr_ortho.L[2]);
     // Use std::hash for a fast, non-cryptographic fingerprint
     size_t hash = std::hash<std::string>{}(data);
     return std::to_string(hash);
@@ -4833,7 +4972,27 @@ GFNFFParameterSet GFNFF::generateGFNFFParameterSet()
     GFNFFParameterSet params;
     params.e0 = 0.0;
 
+    // Nov 2026 (A4c): with a periodic cell the topology and every generator below run on the
+    // reassembled geometry (intact molecules); restored when this scope ends. No-op without a cell.
+    TopologyGeometryScope topology_geometry(*this);
+
     const TopologyInfo& topo_info = getCachedTopology();
+
+    if (topology_geometry.m_swapped) {
+        // The q-loop's second pass (charge-shrunk radii) may add a bond that pass 1, which fixed the
+        // placement, did not have; between two separately placed fragments such a bond can span the
+        // cell. Its own term is evaluated by minimum image in the workspace, but the angles and
+        // torsions generated around it here would see the plain vector. Reported, not repaired.
+        for (const auto& [i, j] : getCachedBondList()) {
+            const Eigen::RowVector3d plain = m_geometry_bohr.row(i) - m_geometry_bohr.row(j);
+            const double gap = plain.norm() - pairVectorBohr(i, j).norm();
+            if (gap > 1e-6)
+                CurcumaLogger::warn(fmt::format("GFN-FF periodic topology: bond {}-{} spans the cell in the reassembled geometry "
+                                                "(plain {:.3f} vs minimum-image {:.3f} Bohr; added by the charge-shrunk pass): "
+                                                "angle/torsion parameters around it are built from the plain vector",
+                    i + 1, j + 1, plain.norm(), plain.norm() - gap));
+        }
+    }
 
     // Validate charges
     for (int i = 0; i < topo_info.eeq_charges.size(); ++i) {
@@ -8868,14 +9027,15 @@ std::vector<int> GFNFF::computeEtaCoordination(const std::vector<std::vector<int
     return itag;
 }
 
-int GFNFF::nnNearestNoM(int ii, const std::vector<std::vector<int>>& nb,
-                        const Eigen::MatrixXd& distance_matrix) const
+int GFNFF::nnNearestNoM(int ii, const std::vector<std::vector<int>>& nb) const
 {
     /**
      * Claude Generated (July 2026) - port of gfnff_ini2.f90:431-450 (nn_nearest_noM).
      * Returns the coordination number of the nearest NON-METAL neighbour of ii, or 0
      * if ii has no non-metal neighbour. Fortran calls this with topo%nb, i.e. the
      * HC-filtered list (nb_hc) - NOT the nbdum mixture.
+     * Nov 2026 (A4c): bonded-pair distance formed here (plain; the topology geometry holds
+     * intact molecules, see TopologyGeometryScope) instead of the dense N x N matrix.
      */
     using GFNFFParameters::metal_type;
 
@@ -8884,7 +9044,7 @@ int GFNFF::nnNearestNoM(int ii, const std::vector<std::vector<int>>& nb,
     for (int jj : nb[ii]) {
         const int z = m_atoms[jj];
         if (z >= 1 && z <= 86 && metal_type[z - 1] != 0) continue;  // skip metals
-        const double r = distance_matrix(ii, jj);
+        const double r = (m_geometry_bohr.row(ii) - m_geometry_bohr.row(jj)).norm();
         if (r < rmin) {
             rmin = r;
             jmin = jj;
@@ -8895,7 +9055,6 @@ int GFNFF::nnNearestNoM(int ii, const std::vector<std::vector<int>>& nb,
 
 std::vector<int> GFNFF::determineHybridizationFortran(const GFNFFTopology& topo,
                                                       const std::vector<std::vector<int>>& nbdum,
-                                                      const Eigen::MatrixXd& distance_matrix,
                                                       std::vector<int>& itag) const
 {
     /**
@@ -9072,7 +9231,7 @@ std::vector<int> GFNFF::determineHybridizationFortran(const GFNFFTopology& topo,
             if (nb20i > 3 && ati > 10 && nbdiff == 0) hyb[i] = 5;
             if (nb20i == 2) hyb[i] = 3;
             if (nb20i == 2 && nbmdiff > 0) {
-                const int j = nnNearestNoM(i, nbhc, distance_matrix);
+                const int j = nnNearestNoM(i, nbhc);
                 if (j == 3) hyb[i] = 2;  // M-O-X conjugated
                 if (j == 4) hyb[i] = 3;  // M-O-X non-conjugated
             }
@@ -11274,33 +11433,13 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
         }
     }
 
-    // Phase 2.1: Build distance matrices FIRST (Claude Generated - Dec 2025)
-    // All N×N distances computed once to eliminate redundant sqrt() calls
-    if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::info("Phase 2.1: Computing distance matrices");
-    }
+    // Phase 2.1 (dense N x N distance matrix) removed Nov 2026 (A4c): its only reader was
+    // nnNearestNoM (bonded pairs), which now forms the distance itself; 240 MB at 5475 atoms.
+    // With a periodic cell the topology runs on the reassembled geometry of
+    // TopologyGeometryScope, so every intramolecular plain distance below is the minimum image.
     auto phase_timer = std::chrono::high_resolution_clock::now();
-    topo_info.distance_matrix = Eigen::MatrixXd::Zero(m_atomcount, m_atomcount);
-    // P2a (Apr 2026): squared_dist_matrix removed — was dead weight (written but never read)
-
-    // Claude Generated (March 2026): OpenMP parallelization for O(N²) distance matrix
-    #pragma omp parallel for schedule(static)
-    for (int i = 0; i < m_atomcount; ++i) {
-        for (int j = i + 1; j < m_atomcount; ++j) {
-            Eigen::Vector3d rij = m_geometry_bohr.row(i) - m_geometry_bohr.row(j);
-            double dist = rij.norm();
-
-            // Symmetric matrix — each (i,j) pair written by exactly one thread
-            topo_info.distance_matrix(i, j) = topo_info.distance_matrix(j, i) = dist;
-        }
-    }
-
-    {
-        std::chrono::duration<double, std::milli> dt = std::chrono::high_resolution_clock::now() - phase_timer;
-        m_param_gen_report.t_distance_matrix = static_cast<double>(dt.count());
-        setupProfile().add("topo: distance matrix", static_cast<double>(static_cast<double>(dt.count())));
-        phase_timer = std::chrono::high_resolution_clock::now();
-    }
+    topo_info.distance_matrix.resize(0, 0);
+    m_param_gen_report.t_distance_matrix = 0.0;
 
     // Phase 2.2: Build adjacency list from cached bond list (Claude Generated - Dec 2025)
     // Used in generateGFNFFAngles() to avoid O(N_bonds) search per atom
@@ -11334,7 +11473,7 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     // Optional diff of the two hybridization assignments (energies unaffected).
     if (std::getenv("CURCUMA_HYBDIFF")) {
         std::vector<int> itag_probe = topo_info.itag;
-        std::vector<int> hyb_fortran = determineHybridizationFortran(topo_info, nbdum, topo_info.distance_matrix, itag_probe);
+        std::vector<int> hyb_fortran = determineHybridizationFortran(topo_info, nbdum, itag_probe);
         std::vector<int> hyb_current = determineHybridization(topo_info.nb_full);
         int ndiff = 0;
         for (int i = 0; i < m_atomcount; ++i) {
@@ -11420,8 +11559,7 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     // already set by buildNeighborListSet. Claude Generated (Jul 2026).
     if (m_use_fortran_hyb) {
         SetupScope sc("topo:   hybridization");
-        topo_info.hybridization = determineHybridizationFortran(
-            topo_info, nbdum, topo_info.distance_matrix, topo_info.itag);
+        topo_info.hybridization = determineHybridizationFortran(topo_info, nbdum, topo_info.itag);
     } else {
         topo_info.hybridization = determineHybridization(topo_info.adjacency_list);
     }
@@ -13224,9 +13362,9 @@ void GFNFF::updateDispersionTail(bool gradient)
 
 void GFNFF::configurePeriodicCell()
 {
-    // Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A1): cell and cutoff check. Since A2 the
-    // coordination number (value, derivative, topology CN) applies the minimum image, since A3b the
-    // D4 pair term; the other energy terms (repulsion, Coulomb/EEQ, HB/XB, ATM, bonded) do not yet.
+    // Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A1): cell and cutoff check. Minimum image since
+    // A2 in the CN, A3b/c D4 pair term and tail, A4a repulsion and bonded terms, A4b HB/XB, A4c topology
+    // build and reactive scan; Coulomb/EEQ (Ewald pending) and ATM/BATM still use plain distances.
     m_cell_bohr_ortho = PBCUtils::OrthoCell();
     if (!m_has_pbc)
         return;
@@ -13258,7 +13396,8 @@ void GFNFF::configurePeriodicCell()
     }
     if (CurcumaLogger::get_verbosity() >= 2)
         CurcumaLogger::param("periodic cell (Bohr)",
-            fmt::format("{:.4f} x {:.4f} x {:.4f}, all cutoffs below L_min/2 = {:.4f}; minimum image in the CN (A2) and the D4 pair term (A3b) only",
+            fmt::format("{:.4f} x {:.4f} x {:.4f}, all cutoffs below L_min/2 = {:.4f}; minimum image in CN, D4 (+ tail), repulsion, bonded "
+                        "terms, HB/XB, topology and reactive scan; Coulomb/EEQ and ATM are not periodic",
                 cell.L[0], cell.L[1], cell.L[2], 0.5 * cell.minLength()));
 }
 

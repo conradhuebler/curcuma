@@ -203,25 +203,33 @@ double GFNFF::fragPass1Threshold(int i, int j) const
 std::vector<GFNFF::FragEdge> GFNFF::fragWindowEdges(const std::vector<int>& fraglist, int nfrag) const
 {
     std::map<std::pair<int, int>, FragEdge> edges;
-    for (int i = 0; i < m_atomcount; ++i) {
-        const int fi = fraglist[i] - 1;
-        for (int j = i + 1; j < m_atomcount; ++j) {
-            const int fj = fraglist[j] - 1;
-            if (fi == fj || fi < 0 || fj < 0 || fi >= nfrag || fj >= nfrag)
-                continue;
-            const double r = (m_geometry_bohr.row(i) - m_geometry_bohr.row(j)).norm();
-            const double thr = fragPass1Threshold(i, j);
-            if (thr <= 0.0 || r >= m_frag_s_max * thr)
-                continue;
-            double L, dL;
-            fragWindowL(r / thr, m_frag_s_max, L, dL);
-            const auto key = std::make_pair(std::min(fi, fj), std::max(fi, fj));
-            FragEdge& e = edges[key];
-            e.f = key.first;
-            e.g = key.second;
-            e.contacts.push_back({ i, j, thr, L, dL });
+    // Nov 2026 (A4c): with a periodic cell the contact distance is the minimum image, so fragments
+    // touching across a cell face enter the window like any other pair (functor chosen once per call).
+    auto collect = [&](auto&& pair_distance) {
+        for (int i = 0; i < m_atomcount; ++i) {
+            const int fi = fraglist[i] - 1;
+            for (int j = i + 1; j < m_atomcount; ++j) {
+                const int fj = fraglist[j] - 1;
+                if (fi == fj || fi < 0 || fj < 0 || fi >= nfrag || fj >= nfrag)
+                    continue;
+                const double r = pair_distance(i, j);
+                const double thr = fragPass1Threshold(i, j);
+                if (thr <= 0.0 || r >= m_frag_s_max * thr)
+                    continue;
+                double L, dL;
+                fragWindowL(r / thr, m_frag_s_max, L, dL);
+                const auto key = std::make_pair(std::min(fi, fj), std::max(fi, fj));
+                FragEdge& e = edges[key];
+                e.f = key.first;
+                e.g = key.second;
+                e.contacts.push_back({ i, j, thr, L, dL });
+            }
         }
-    }
+    };
+    if (m_cell_bohr_ortho.active)
+        collect([&](int i, int j) { return pairVectorBohr(i, j).norm(); });
+    else
+        collect([&](int i, int j) { return (m_geometry_bohr.row(i) - m_geometry_bohr.row(j)).norm(); });
     std::vector<FragEdge> out;
     for (auto& kv : edges) {
         FragEdge e = std::move(kv.second);
@@ -465,7 +473,7 @@ double GFNFF::fragEnsembleBlend(bool gradient, double e_master)
         for (int i = 0; i < m_atomcount; ++i)
             for (int j : topo.nb_full[i]) {
                 if (j <= i || j >= m_atomcount) continue;
-                const double r = (m_geometry_bohr.row(i) - m_geometry_bohr.row(j)).norm();
+                const double r = pairVectorBohr(i, j).norm();  // Nov 2026 (A4c): minimum image with a cell
                 if (r <= fragPass1Threshold(i, j))
                     parent[root(i)] = root(j);
             }
@@ -922,7 +930,7 @@ double GFNFF::fragEnsembleBlend(bool gradient, double e_master)
                 for (size_t m2 = 0; m2 < cs.size(); ++m2)
                     if (m2 != m) dlam *= cs[m2].L;
                 if (dlam == 0.0) continue;
-                const Eigen::RowVector3d rij = m_geometry_bohr.row(cs[m].i) - m_geometry_bohr.row(cs[m].j);
+                const Eigen::RowVector3d rij = pairVectorBohr(cs[m].i, cs[m].j);  // Nov 2026 (A4c): minimum image with a cell
                 const double r = rij.norm();
                 const Eigen::RowVector3d ds = rij / (r * cs[m].thr);
                 g.row(cs[m].i) += coef * dlam * ds;
