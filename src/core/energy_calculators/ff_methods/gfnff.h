@@ -1265,6 +1265,8 @@ public:
     bool dispersionTailActive() const;
     /// Claude Generated (Nov 2026, A3b): number of D4 pair-list rebuilds since set-up (diagnostic, tests)
     long dispersionRebuildCount() const { return m_disp_rebuild_count; }
+    /// Claude Generated (Nov 2026, A4a): number of non-bonded repulsion list rebuilds since set-up (diagnostic, tests)
+    long repulsionRebuildCount() const { return m_rep_rebuild_count; }
 
     // Claude Generated (Apr 2026): Timing accessors for GPU orchestrator
     double getParamGenTimeMs() const { return m_param_gen_time_ms; }

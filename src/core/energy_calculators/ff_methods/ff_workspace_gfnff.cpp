@@ -109,6 +109,44 @@ void FFWorkspace::computeHBCoordinationNumbers(int p)
 }
 
 // ============================================================================
+// Periodic cell: local image frame of a bonded term
+// Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A4a)
+//
+// With an active cell every bonded term (bond, angle, torsion, inversion, sTors) is evaluated
+// on a small local copy of its atoms in which each atom is the minimum image next to its chain
+// predecessor (bond vector x_atom - x_ref taken as minimum image, Allen & Tildesley 2017,
+// Sec. 1.6.3). So the bond, angle and torsion vectors are minimum-image vectors and a molecule
+// that the input tears across a face gives the same term as the intact one. The local copy
+// differs from the true positions by whole lattice vectors per atom, so d(term)/d(local
+// position) = d(term)/d(true position): the gradient goes to the same atom indices as before,
+// with the same sign. Without a cell nothing here runs; the kernels read m_geometry as before.
+// ============================================================================
+
+/// loc.row(slot) = loc.row(ref_slot) + minimum image of (geo.row(atom) - loc.row(ref_slot)).
+static inline void placeMinimumImage(const PBCUtils::OrthoCell& cell, const GeoGradMatrix& geo,
+                                     GeoGradMatrix& loc, int slot, int atom, int ref_slot)
+{
+    double d0 = geo(atom, 0) - loc(ref_slot, 0);
+    double d1 = geo(atom, 1) - loc(ref_slot, 1);
+    double d2 = geo(atom, 2) - loc(ref_slot, 2);
+    PBCUtils::applyMinimumImageOrtho(cell, d0, d1, d2);
+    loc(slot, 0) = loc(ref_slot, 0) + d0;
+    loc(slot, 1) = loc(ref_slot, 1) + d1;
+    loc(slot, 2) = loc(ref_slot, 2) + d2;
+}
+
+/// Local frame of a four-atom chain a-b-c-d (torsions, sTors): b at its position, a and c
+/// next to b, d next to c; slots 0..3 = a, b, c, d.
+static inline void placeChainOfFour(const PBCUtils::OrthoCell& cell, const GeoGradMatrix& geo,
+                                    GeoGradMatrix& loc, int a, int b, int c, int d)
+{
+    loc.row(1) = geo.row(b);
+    placeMinimumImage(cell, geo, loc, 0, a, 1);
+    placeMinimumImage(cell, geo, loc, 2, c, 1);
+    placeMinimumImage(cell, geo, loc, 3, d, 2);
+}
+
+// ============================================================================
 // Bond Stretching (GFN-FF exponential potential)
 // Reference: Fortran gfnff_engrad.F90:675-721
 // ============================================================================
@@ -121,12 +159,20 @@ void FFWorkspace::calcBonds(int p)
     if (acc.has_components && m_do_gradient) grad_before = acc.gradient;
 
     bool use_dynamic_r0 = (m_d3_cn.size() > 0);
+    const bool pbc = m_cell_bohr.active;  // Nov 2026 (A4a): minimum-image bond vector
 
     for (int idx = begin; idx < end; ++idx) {
         const auto& bond = m_bonds[idx];
 
         Eigen::VectorXd vi = m_geometry.row(bond.i);
         Eigen::VectorXd vj = m_geometry.row(bond.j);
+        if (pbc) {  // j as the image next to i; dr/dx_j is the same for every image of j
+            double d0 = vj(0) - vi(0), d1 = vj(1) - vi(1), d2 = vj(2) - vi(2);
+            PBCUtils::applyMinimumImageOrtho(m_cell_bohr, d0, d1, d2);
+            vj(0) = vi(0) + d0;
+            vj(1) = vi(1) + d1;
+            vj(2) = vi(2) + d2;
+        }
         Matrix derivate;
         double rij = UFF::BondStretching(vi, vj, derivate, m_do_gradient);
 
@@ -216,11 +262,26 @@ void FFWorkspace::calcAngles(int p)
         return 1.0 * GFNFFParameters::gfnff_aatoau * rcov_scale_angle;
     };
 
+    // Nov 2026 (A4a): with a cell the positions come from the local image frame (slots 0, 1, 2 =
+    // i, j, k; i and k next to the centre j), see placeMinimumImage(). Gradient rows below still
+    // use angle.i/j/k.
+    const bool pbc = m_cell_bohr.active;
+    GeoGradMatrix loc;
+    if (pbc) loc.resize(3, 3);
+    const GeoGradMatrix& G = pbc ? loc : m_geometry;
+
     for (int idx = begin; idx < end; ++idx) {
         const auto& angle = m_angles[idx];
-        auto i = m_geometry.row(angle.i);
-        auto j = m_geometry.row(angle.j);
-        auto k = m_geometry.row(angle.k);
+        int si = angle.i, sj = angle.j, sk = angle.k;
+        if (pbc) {
+            loc.row(1) = m_geometry.row(angle.j);
+            placeMinimumImage(m_cell_bohr, m_geometry, loc, 0, angle.i, 1);
+            placeMinimumImage(m_cell_bohr, m_geometry, loc, 2, angle.k, 1);
+            si = 0; sj = 1; sk = 2;
+        }
+        auto i = G.row(si);
+        auto j = G.row(sj);
+        auto k = G.row(sk);
         Matrix derivate;
         double costheta = UFF::AngleBending(i, j, k, derivate, m_do_gradient);
         costheta = std::max(-1.0, std::min(1.0, costheta));
@@ -310,15 +371,26 @@ void FFWorkspace::calcDihedrals(int p)
         return 1.0 * GFNFFParameters::gfnff_aatoau * rcov_scale_tors;
     };
 
+    // Nov 2026 (A4a): local image frame with a cell (slots 0..3 = i, j, k, l), placeChainOfFour()
+    const bool pbc = m_cell_bohr.active;
+    GeoGradMatrix loc;
+    if (pbc) loc.resize(4, 3);
+    const GeoGradMatrix& G = pbc ? loc : m_geometry;
+
     for (int idx = begin; idx < end; ++idx) {
         const auto& dih = m_dihedrals[idx];
+        int si = dih.i, sj = dih.j, sk = dih.k, sl = dih.l;
+        if (pbc) {
+            placeChainOfFour(m_cell_bohr, m_geometry, loc, dih.i, dih.j, dih.k, dih.l);
+            si = 0; sj = 1; sk = 2; sl = 3;
+        }
 
         Matrix derivate;
         double phi = GFNFF_Geometry::calculateDihedralAngle(
-            m_geometry.row(dih.i).transpose(),
-            m_geometry.row(dih.j).transpose(),
-            m_geometry.row(dih.k).transpose(),
-            m_geometry.row(dih.l).transpose(),
+            G.row(si).transpose(),
+            G.row(sj).transpose(),
+            G.row(sk).transpose(),
+            G.row(sl).transpose(),
             derivate, m_do_gradient);
 
         double V = dih.V;
@@ -330,10 +402,10 @@ void FFWorkspace::calcDihedrals(int p)
         double energy = V * (1.0 + std::cos(c1));
 
         // Three-bond distance damping
-        Eigen::Vector3d ri = m_geometry.row(dih.i).transpose();
-        Eigen::Vector3d rj = m_geometry.row(dih.j).transpose();
-        Eigen::Vector3d rk = m_geometry.row(dih.k).transpose();
-        Eigen::Vector3d rl = m_geometry.row(dih.l).transpose();
+        Eigen::Vector3d ri = G.row(si).transpose();
+        Eigen::Vector3d rj = G.row(sj).transpose();
+        Eigen::Vector3d rk = G.row(sk).transpose();
+        Eigen::Vector3d rl = G.row(sl).transpose();
 
         double r_ij_sq = (ri - rj).squaredNorm();
         double r_jk_sq = (rj - rk).squaredNorm();
@@ -417,15 +489,26 @@ void FFWorkspace::calcExtraTorsions(int p)
         return 1.0 * GFNFFParameters::gfnff_aatoau * rcov_scale_tors;
     };
 
+    // Nov 2026 (A4a): local image frame with a cell, as in calcDihedrals()
+    const bool pbc = m_cell_bohr.active;
+    GeoGradMatrix loc;
+    if (pbc) loc.resize(4, 3);
+    const GeoGradMatrix& G = pbc ? loc : m_geometry;
+
     for (int idx = begin; idx < end; ++idx) {
         const auto& dih = m_extra_dihedrals[idx];
+        int si = dih.i, sj = dih.j, sk = dih.k, sl = dih.l;
+        if (pbc) {
+            placeChainOfFour(m_cell_bohr, m_geometry, loc, dih.i, dih.j, dih.k, dih.l);
+            si = 0; sj = 1; sk = 2; sl = 3;
+        }
 
         Matrix derivate;
         double phi = GFNFF_Geometry::calculateDihedralAngle(
-            m_geometry.row(dih.i).transpose(),
-            m_geometry.row(dih.j).transpose(),
-            m_geometry.row(dih.k).transpose(),
-            m_geometry.row(dih.l).transpose(),
+            G.row(si).transpose(),
+            G.row(sj).transpose(),
+            G.row(sk).transpose(),
+            G.row(sl).transpose(),
             derivate, m_do_gradient);
 
         double V = dih.V;
@@ -436,10 +519,10 @@ void FFWorkspace::calcExtraTorsions(int p)
         double c1 = n * (phi - phi0) + M_PI;
         double energy = V * (1.0 + std::cos(c1));
 
-        Eigen::Vector3d ri = m_geometry.row(dih.i).transpose();
-        Eigen::Vector3d rj = m_geometry.row(dih.j).transpose();
-        Eigen::Vector3d rk = m_geometry.row(dih.k).transpose();
-        Eigen::Vector3d rl = m_geometry.row(dih.l).transpose();
+        Eigen::Vector3d ri = G.row(si).transpose();
+        Eigen::Vector3d rj = G.row(sj).transpose();
+        Eigen::Vector3d rk = G.row(sk).transpose();
+        Eigen::Vector3d rl = G.row(sl).transpose();
 
         double r_ij_sq = (ri - rj).squaredNorm();
         double r_jk_sq = (rj - rk).squaredNorm();
@@ -534,14 +617,30 @@ void FFWorkspace::calcInversions(int p)
         return -4.0 * rr_val / (r2_val * one_plus_rr * one_plus_rr);
     };
 
+    // Nov 2026 (A4a): local image frame with a cell: the centre i at its position, its three
+    // bonded neighbours as the images next to it (slots 0..3 = i, j, k, l); the 1-3 damping
+    // distances nb1-nb2, nb1-nb3 follow from these positions.
+    const bool pbc = m_cell_bohr.active;
+    GeoGradMatrix loc;
+    if (pbc) loc.resize(4, 3);
+    const GeoGradMatrix& G = pbc ? loc : m_geometry;
+
     for (int idx = begin; idx < end; ++idx) {
         const auto& inv = m_inversions[idx];
+        int si = inv.i, sj = inv.j, sk = inv.k, sl = inv.l;
+        if (pbc) {
+            loc.row(0) = m_geometry.row(inv.i);
+            placeMinimumImage(m_cell_bohr, m_geometry, loc, 1, inv.j, 0);
+            placeMinimumImage(m_cell_bohr, m_geometry, loc, 2, inv.k, 0);
+            placeMinimumImage(m_cell_bohr, m_geometry, loc, 3, inv.l, 0);
+            si = 0; sj = 1; sk = 2; sl = 3;
+        }
 
         // Atom layout: i=center, j=nb1, k=nb2, l=nb3
-        Eigen::Vector3d r_center = m_geometry.row(inv.i).transpose();
-        Eigen::Vector3d r_nb1 = m_geometry.row(inv.j).transpose();
-        Eigen::Vector3d r_nb2 = m_geometry.row(inv.k).transpose();
-        Eigen::Vector3d r_nb3 = m_geometry.row(inv.l).transpose();
+        Eigen::Vector3d r_center = G.row(si).transpose();
+        Eigen::Vector3d r_nb1 = G.row(sj).transpose();
+        Eigen::Vector3d r_nb2 = G.row(sk).transpose();
+        Eigen::Vector3d r_nb3 = G.row(sl).transpose();
 
         // Out-of-plane angle via calculateOutOfPlaneAngle
         Matrix derivate;
@@ -631,15 +730,28 @@ void FFWorkspace::calcSTorsions(int p)
     Matrix grad_before;
     if (acc.has_components && m_do_gradient) grad_before = acc.gradient;
 
+    // Nov 2026 (A4a): local image frame with a cell. The sTors atoms ii-jj-kk-ll are not a bond
+    // chain (jj and kk sit at the two ends of the C#C unit, about 7.5 Bohr apart); each step of
+    // the chain is still far below L/2, so placeChainOfFour() images them consistently.
+    const bool pbc = m_cell_bohr.active;
+    GeoGradMatrix loc;
+    if (pbc) loc.resize(4, 3);
+    const GeoGradMatrix& G = pbc ? loc : m_geometry;
+
     for (int idx = begin; idx < end; ++idx) {
         const auto& stor = m_storsions[idx];
+        int si = stor.i, sj = stor.j, sk = stor.k, sl = stor.l;
+        if (pbc) {
+            placeChainOfFour(m_cell_bohr, m_geometry, loc, stor.i, stor.j, stor.k, stor.l);
+            si = 0; sj = 1; sk = 2; sl = 3;
+        }
         Matrix derivate;
         // GFN-FF uses Bohr coordinates internally (m_au = 1.0)
         double phi = GFNFF_Geometry::calculateDihedralAngle(
-            m_geometry.row(stor.i).transpose(),
-            m_geometry.row(stor.j).transpose(),
-            m_geometry.row(stor.k).transpose(),
-            m_geometry.row(stor.l).transpose(),
+            G.row(si).transpose(),
+            G.row(sj).transpose(),
+            G.row(sk).transpose(),
+            G.row(sl).transpose(),
             derivate, m_do_gradient);
 
         double erefhalf = stor.erefhalf;
@@ -834,12 +946,17 @@ void FFWorkspace::calcBondedRepulsion(int p)
     Matrix grad_before;
     if (acc.has_components && m_do_gradient) grad_before = acc.gradient;
 
+    // Nov 2026 (A4a): minimum-image pair vector with a cell (no-op without one); 20 Bohr < L_min/2
+    // (activeCutoffsBohr()), so the nearest image is the only one within r_cut.
+    const bool pbc = m_cell_bohr.active;
     for (int idx = begin; idx < end; ++idx) {
         const auto& rep = m_bonded_reps[idx];
 
         Eigen::Vector3d ri = m_geometry.row(rep.i);
         Eigen::Vector3d rj = m_geometry.row(rep.j);
         Eigen::Vector3d rij_vec = ri - rj;
+        if (pbc)
+            PBCUtils::applyMinimumImageOrtho(m_cell_bohr, rij_vec[0], rij_vec[1], rij_vec[2]);
         double rij = rij_vec.norm();
         if (rij > rep.r_cut || rij < 1e-8) continue;
 
@@ -872,12 +989,18 @@ void FFWorkspace::calcNonbondedRepulsion(int p)
     if (begin == end) return;
     // Non-bonded repulsion goes to total gradient only, NOT to g_rep component
 
+    // Nov 2026 (A4a): minimum-image pair vector with a cell, as in calcD4Dispersion(): the list
+    // holds pairs (i < j, each once, never images); r_cut 20 < L_min/2, so only the nearest image
+    // of j can lie within r_cut of i, and no self-image can.
+    const bool pbc = m_cell_bohr.active;
     for (int idx = begin; idx < end; ++idx) {
         const auto& rep = m_nonbonded_reps[idx];
 
         Eigen::Vector3d ri = m_geometry.row(rep.i);
         Eigen::Vector3d rj = m_geometry.row(rep.j);
         Eigen::Vector3d rij_vec = ri - rj;
+        if (pbc)
+            PBCUtils::applyMinimumImageOrtho(m_cell_bohr, rij_vec[0], rij_vec[1], rij_vec[2]);
         double rij = rij_vec.norm();
         if (rij > rep.r_cut || rij < 1e-8) continue;
 

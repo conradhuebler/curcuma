@@ -279,3 +279,39 @@ without a cell). Variant (ii) of A3a: per call from the current CN, force throug
 - **Not tested**: real liquids, other elements than H/O, charged systems (zeta from topology charges), MD energy
   conservation with the tail, the P1a CN-cache threshold and static-CN mode (the tail follows the same stale weights as the
   pair term), frag_charge_model variants with a cell. Human production testing pending.
+
+## A4a periodic repulsion and bonded terms (2026-11-01, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+On `feature/bulk` (base `34657480`), CPU only. **Periodic now: CN (A2), D4 pair term and tail (A3b/c), bonded and non-bonded
+repulsion, bonds, angles, torsions (incl. extra torsions), inversions, sTors.** Still plain distances: HB/XB (incl. the HB
+modulation of X-H bonds, `computeHBCoordinationNumbers`), Coulomb/EEQ, topology generation (distance matrix), reactive
+topology, BATM/ATM; these are A4b and later.
+
+- **Repulsion** (`calcBondedRepulsion`, `calcNonbondedRepulsion`): pair vector as minimum image, as in `calcD4Dispersion`.
+  The distance-filtered list (`nb_cell_list_min_atoms`) is built with the periodic `SpatialCellList` (pairs i < j, each once,
+  never images); the skin trigger uses `maxAtomDisplacement(a, b, cell)`, so a fragment wrap is no motion. The all-pairs
+  list below the threshold needs no change.
+- **Bonded terms**: with a cell each term is evaluated on a local copy of its atoms (`placeMinimumImage`,
+  `placeChainOfFour` in `ff_workspace_gfnff.cpp`): bond j next to i; angle i, k next to the centre j; torsion and sTors
+  i, k next to j, l next to k; inversion the three neighbours next to the centre. The angles therefore come from
+  minimum-image bond vectors. The copy differs from the true positions by whole lattice vectors, so the derivatives are
+  unchanged and go to the same atom rows with the same sign (checked per term in the test). Without a cell the kernels read
+  `m_geometry` as before; one branch per term, outside the arithmetic.
+- **Cutoff check**: with a cell only the repulsion evaluation radius 20 Bohr is listed (argument of A3b: the list stores
+  pairs, the kernel images at every call, the trigger is wrap-safe), not 20 + skin. Smallest accepted cube with defaults
+  stays HB/XB-bound, L > 42.4 Bohr; with `hbond false` L > 40 Bohr.
+- **Torn input**: the terms are correct for a molecule torn across a face, but the topology is still built from plain
+  distances, so such a geometry can only be handed to an instance initialised intact (`UpdateMolecule`, constant topology).
+- **Tests** (`ctest -R pbc_bonded_repulsion`, hbond off, 44 Bohr cube; water dimer, caffeine rotated and distorted by up to
+  0.05 A so the inversions are non-zero): shifted by (L,-L,2L), centred on the corner, per-atom wrapped (torn) and one atom
+  by L vs the cell centre: every term <= 2.7e-15 Eh, term gradients per atom <= 5.8e-15 Eh/Bohr (without a cell the same
+  geometries differ by up to 2.0 Eh). 40 random waters (120 atoms, L 41 Bohr): E_nbrep = 27-image brute force 3.5e-17 for
+  the all-pairs list and the periodic cell list (build radius 22 > L/2), images 7.1e-4 Eh, threads 1/4 7.6e-17; L 39.8
+  refused. 2x1x1 supercell: water terms 1.4e-14, caffeine 3.3e-16. Central FD (torn caffeine, 8 atoms 0.08-0.32 A from a
+  face) at h 2e-4 -> 1e-4 A: angle 1.2e-8 -> 2.9e-9, torsion + inversion 4.0e-9 -> 1.0e-9, repulsion 3.6e-8 -> 9.1e-9 Eh/A
+  (max gradients 2.6e-2 / 9.0e-3 / 1.1e-1). Repulsion list: wrap by +L no rebuild, dE 0; 1 A move rebuilds, = fresh instance.
+- **Without a cell**: -sp energy (16 digits) and `-dump_gradient` md5 identical before/after on the 7 structures of A2 at 1
+  and 4 threads; peo201-water500 -sp wall time (median of 3) 0.350 -> 0.350 s at 4 threads, 0.690 -> 0.691 s at 1 thread.
+- **Not tested**: sTors and extra torsions (no library structure has them under a cell; code identical to the torsion path),
+  bonds with dynamic r0 through a torn bond only via the term energies, MD with a cell, GPU (unchanged; the A3b guard runs a
+  cell on the CPU). Human production testing pending.

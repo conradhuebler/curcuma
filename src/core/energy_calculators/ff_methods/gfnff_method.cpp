@@ -2278,7 +2278,9 @@ void GFNFF::updateNonbondedRepulsionIfNeeded(FFWorkspace* extra_ws)
     bool do_rebuild = false;
     double max_disp = 0.0;
     if (skin > 0.0) {
-        max_disp = maxAtomDisplacement(m_geometry_bohr, m_rep_list_ref_geometry);
+        // Nov 2026 (A4a): minimum-image displacement with a cell (a fragment wrap by SimpleMD is
+        // no motion), exact by the argument at activeCutoffsBohr(); identical without a cell.
+        max_disp = maxAtomDisplacement(m_geometry_bohr, m_rep_list_ref_geometry, m_cell_bohr_ortho);
         do_rebuild = (max_disp > 0.5 * skin);
     } else {
         const int rebuild_every = std::max(1, m_parameters.value("nonbonded_rebuild_every", 1));
@@ -4749,7 +4751,7 @@ bool GFNFF::initializeForceField()
         m_workspace->setAtomTypes(m_atoms);
         m_workspace->setFarfieldShortcut(m_parameters.value("farfield_shortcut", true));  // Oct 2026; fallback = PARAM default
         m_workspace->setCnZeroGuard(cnZeroGuardEffective());                               // Oct 2026; PARAM (fallback false = reference) or a fragment-charge override (Oct 31, 2026)
-        m_workspace->setPeriodicCell(m_cell_bohr_ortho);                                   // Nov 2026 (A1): stored only, inactive without a cell
+        m_workspace->setPeriodicCell(m_cell_bohr_ortho);                                   // Nov 2026: read by the D4 (A3b), repulsion and bonded-term (A4a) kernels; inactive without a cell
 
         // Keep a copy for external consumers (full pair lists only when a GPU wrapper asked
         // for them, bonded terms otherwise), then MOVE the set into the workspace. The former
@@ -12637,7 +12639,11 @@ std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::gener
             nonbonded_reps.swap(*reuse_nonbonded);
         }
         SpatialCellList rep_cells;
-        rep_cells.build(m_geometry_bohr, NB_REP_RCUT + nonbondedSkinBohr());
+        // Nov 2026 (A4a): periodic cell list with a cell (minimum-image pairs i < j, each once;
+        // inactive cell = the former non-periodic build). The build radius 20 + skin may reach
+        // L_min/2: the periodic grid then has fewer cells, still every pair once at its
+        // minimum-image distance; only the kernel radius 20 must stay below L_min/2.
+        rep_cells.build(m_geometry_bohr, NB_REP_RCUT + nonbondedSkinBohr(), m_cell_bohr_ortho);
         // Claude Generated (Oct 2026): the serial candidate collection (forEachPair) is split
         // as well. Atom ranges are walked in parallel with
         // forEachPairOfAtom(), which visits the pairs of one atom in forEachPair() order, and
@@ -13027,9 +13033,16 @@ std::vector<std::pair<std::string, double>> GFNFF::activeCutoffsBohr() const
 
     // Repulsion (generateRepulsionPairsNative): r_cut 20 Bohr; the distance-filtered list is
     // built at 20 + nonbonded_skin_bohr.
+    // Nov 2026 (A4a): with a cell only the kernel radius 20 is checked, by the argument given for
+    // D4 above (the list stores pairs, the kernel takes the minimum image at every call, the
+    // skin trigger uses minimum-image displacements); the build radius 20 + skin may exceed L/2.
     if (m_parameters.value("repulsion", true)) {
-        const double rep = 20.0 + (repulsionListIsDistanceFiltered() ? nonbondedSkinBohr() : 0.0);
-        cut.emplace_back("repulsion radius 20 (+ nonbonded_skin_bohr for the cell-list build)", rep);
+        if (m_has_pbc) {
+            cut.emplace_back("repulsion evaluation radius 20", 20.0);
+        } else {
+            const double rep = 20.0 + (repulsionListIsDistanceFiltered() ? nonbondedSkinBohr() : 0.0);
+            cut.emplace_back("repulsion radius 20 (+ nonbonded_skin_bohr for the cell-list build)", rep);
+        }
     }
 
     // HB / XB search (detectHydrogenBondsNative, detectHalogenBondsNative): A-B within

@@ -233,6 +233,19 @@ namespace TestMolecules {
                 .tolerances = {},
                 .atom_count = 6
             }
+        },
+        // Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A4a): bonded terms incl. torsions and
+        // inversions (sp2 N, C=O) under a periodic cell (pbc_bonded_repulsion)
+        {
+            "caffeine", {
+                .name = "caffeine",
+                .description = "Caffeine C8H10N4O2 (structure library caffeine)",
+                .category = "larger",
+                .library_id = "caffeine",
+                .reference_energies = {},
+                .tolerances = {},
+                .atom_count = 24
+            }
         }
     };
 
@@ -240,7 +253,7 @@ namespace TestMolecules {
         ensureLoaded();
         auto it = s_molecule_registry.find(name);
         if (it == s_molecule_registry.end()) {
-            throw std::invalid_argument("Molecule '" + name + "' not found in registry. Available molecules: H2, HCl, OH, CH4, CH3OH, CH3OCH3, C6H6, HCN, H2O, H2O_dimer, NH3, O3, monosaccharide, triose. Note: 'polymer' is xyz-path-only (1410 atoms — too large to inline).");
+            throw std::invalid_argument("Molecule '" + name + "' not found in registry. Available molecules: H2, HCl, OH, CH4, CH3OH, CH3OCH3, C6H6, HCN, H2O, H2O_dimer, NH3, O3, monosaccharide, triose, caffeine. Note: 'polymer' is xyz-path-only (1410 atoms — too large to inline).");
         }
         return it->second;
     }

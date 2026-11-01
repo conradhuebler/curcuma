@@ -400,6 +400,8 @@ public:
 
     /// Current D4 pair list (read-only; GPU re-upload source after a rebuild)
     const std::vector<GFNFFDispersion>& d4Dispersions() const { return m_d4_dispersions; }
+    /// Claude Generated (Nov 2026, A4a): current non-bonded repulsion pair list (read-only; tests)
+    const std::vector<GFNFFRepulsion>& nonbondedRepulsions() const { return m_nonbonded_reps; }
 
     /**
      * @brief Mutable access to the D4 pair list, for the per-step C6 refresh only.
