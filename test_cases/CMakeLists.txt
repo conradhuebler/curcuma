@@ -685,6 +685,16 @@ endif()
 add_test(NAME pbc_cn COMMAND test_pbc_cn WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 set_tests_properties(pbc_cn PROPERTIES TIMEOUT 300 LABELS "pbc;gfnff")
 
+# Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A3b): periodic D4 dispersion pair term (energy,
+# gradient incl. dC6/dCN, cut-off reduction, Verlet list under wrapping). Dispersion term only.
+add_executable(test_pbc_dispersion unit/test_pbc_dispersion.cpp)
+target_link_libraries(test_pbc_dispersion curcuma_core test_molecule_registry)
+if(USE_PCH)
+    target_precompile_headers(test_pbc_dispersion REUSE_FROM curcuma_core)
+endif()
+add_test(NAME pbc_dispersion COMMAND test_pbc_dispersion WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(pbc_dispersion PROPERTIES TIMEOUT 300 LABELS "pbc;gfnff")
+
 # Streaming trajectory properties. Claude Generated 2026 - geometry worked out by hand.
 add_executable(test_trajprops test_trajprops.cpp)
 target_link_libraries(test_trajprops curcuma_cap curcuma_core)

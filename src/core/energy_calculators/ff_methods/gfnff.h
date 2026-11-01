@@ -376,7 +376,7 @@ PARAM(hb_min_pair_energy_eh, Double, 1e-9, "Drop unbound (case 1) H-bond candida
 PARAM(xb_min_pair_energy_eh, Double, 1e-9, "Drop halogen-bond candidates whose exact |E_XB| is below this (Eh). 0 keeps all.", "HB/XB", {})
 PARAM(hb_parallel_min_pairs, Int, 500, "Run the H-bond detection on the thread pool above this many A-B pairs; 0 = always, -1 = never.", "HB/XB", {})
 // ---- Dispersion ----
-PARAM(dispersion_cutoff_bohr, Double, 0.0, "Cutoff (Bohr) of the D4 dispersion pair list; 0 keeps all pairs, as the reference. A cutoff also widens the CN-derivative range to match.", "Dispersion", {})
+PARAM(dispersion_cutoff_bohr, Double, 0.0, "Cutoff (Bohr) of the D4 dispersion pair list; 0 keeps all pairs, as the reference. A cutoff also widens the CN-derivative range to match. With a periodic cell, 0 reduces the 50 Bohr evaluation radius to just below L_min/2 (no tail correction yet); an explicit value must be below L_min/2.", "Dispersion", {})
 PARAM(dispersion_c6_update, Bool, true, "Recompute the D4 pair C6 from the current CN at each new geometry, so MD and optimisation agree with single points. false keeps C6 of the setup geometry.", "Dispersion", {})
 PARAM(disp_c6_fused, Bool, true, "CPU: evaluate each D4 pair's C6 and dC6/dCN inside the dispersion energy loop instead of storing them per pair every step (same values bit for bit, less memory traffic). false for the stored per-pair path.", "Dispersion", {})
 PARAM(disp_half_contraction, Bool, true, "Faster per-atom contraction for the D4 C6 and dC6/dCN; it changes the summation order (energies agree to about 1e-10 Eh). false for the plain contraction.", "Dispersion", {})
@@ -1225,6 +1225,41 @@ public:
      * compared against (see updateDispersionPairsIfNeeded()).
      */
     static double maxAtomDisplacement(const Eigen::MatrixXd& a, const Eigen::MatrixXd& b);
+    /**
+     * @brief Wrap-safe variant (WP-PERIODIC-NONBONDED A3b) - Claude Generated (Nov 2026)
+     *
+     * With an active cell each per-atom displacement b_i - a_i is taken as its minimum image, so an
+     * atom (or a whole fragment, SimpleMD::applyPeriodicBoundaryConditions) moved by a lattice vector
+     * counts as not moved. This is exact for the skin test: the minimum-image pair distance d(x) is
+     * 1-Lipschitz in each atom position and invariant under lattice shifts, hence
+     * |d(b) - d(a)| <= |mic(b_i - a_i)| + |mic(b_j - a_j)|, and the minimum-image displacement never
+     * exceeds the true (unwrapped) one. Valid while no atom moves more than L_min/2 - skin/2 between
+     * two calls (the reference is reset at every rebuild). Inactive cell: the function above.
+     */
+    static double maxAtomDisplacement(const Eigen::MatrixXd& a, const Eigen::MatrixXd& b,
+                                      const PBCUtils::OrthoCell& cell);
+
+    /**
+     * @brief The two radii of the D4 pair list, one source of truth - Claude Generated (Nov 2026, A3b)
+     *
+     * eval: radius of the kernel (GFNFFDispersion::r_cut); build: radius of the list (Verlet
+     * list, skin = build - eval). Without a cell: build min(60, dispersion_cutoff_bohr),
+     * eval min(50, dispersion_cutoff_bohr), as before. With a cell and no user cutoff
+     * (dispersion_cutoff_bohr <= 0) the evaluation radius is reduced to just below L_min/2 when 50
+     * is not below it (capped = true), and the build radius to eval + 10 (the default skin). A user
+     * cutoff is never reduced; one >= L_min/2 is refused by configurePeriodicCell().
+     * Read by applyDispersionCutoff(), dispersionSkinBohr(), activeCutoffsBohr(), the generator.
+     */
+    struct D4RadiiBohr {
+        double eval = 50.0;
+        double build = 60.0;
+        bool capped = false;           ///< eval reduced to L_min/2 (no user cutoff)
+        double eval_uncapped = 50.0;   ///< eval before the reduction
+        bool user_cutoff = false;      ///< dispersion_cutoff_bohr > 0
+    };
+    D4RadiiBohr dispersionRadiiBohr() const;
+    /// Claude Generated (Nov 2026, A3b): number of D4 pair-list rebuilds since set-up (diagnostic, tests)
+    long dispersionRebuildCount() const { return m_disp_rebuild_count; }
 
     // Claude Generated (Apr 2026): Timing accessors for GPU orchestrator
     double getParamGenTimeMs() const { return m_param_gen_time_ms; }
@@ -1703,7 +1738,8 @@ private:
      *
      * Without a cell (m_has_pbc false) this only resets m_cell_bohr_ortho and the non-periodic
      * path stays unchanged. With a cell: refuses a non-orthorhombic cell and every active cutoff
-     * that is not below L_min/2 (D4 build/evaluation radius, repulsion incl. Verlet skin, CN list
+     * that is not below L_min/2 (D4 evaluation radius, since A3b not the build radius, and reduced to
+     * L_min/2 when no dispersion_cutoff_bohr is set; repulsion incl. Verlet skin, CN list
      * and CN-derivative range, HB/XB search radii, coulomb_r_cut if set, reactive bond scan).
      * Coulomb and EEQ without a cutoff are not checked (needs Ewald, out of A1 scope).
      * @throws std::runtime_error with the names, values and L_min/2 in Bohr

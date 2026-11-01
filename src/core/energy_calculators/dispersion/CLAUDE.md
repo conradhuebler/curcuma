@@ -35,7 +35,7 @@ energy/gradient kernel (`curcuma::dispersion::D4Evaluator`). Native D3 lives in
 - `D4ParameterGenerator`'s PARAM defaults are GFN-FF values (a1 0.58, a2 4.80, s8 2.0); every caller must fill `D4Params` explicitly
 - `D4Evaluator`'s guard on unset params is an `assert`, compiled out in `release/` (`-O3 -DNDEBUG`)
 - The C6 reference matrix is built lazily for the elements present; `c6CacheCoversAtoms()` rebuilds it when a reused generator meets a new element
-- GFN-FF pair list: built at `PAIR_BUILD_CUTOFF_BOHR` 60, evaluated at `PAIR_EVAL_CUTOFF_BOHR` 50; per-pair C6 must be refreshed after geometry changes (`-gfnff.dispersion_c6_update`)
+- GFN-FF pair list: built at `PAIR_BUILD_CUTOFF_BOHR` 60, evaluated at `PAIR_EVAL_CUTOFF_BOHR` 50; per-pair C6 must be refreshed after geometry changes (`-gfnff.dispersion_c6_update`); with a periodic cell the radii come from `GFNFF::dispersionRadiiBohr()` and pairs are stored once at their minimum-image distance (`setPeriodicCell`)
 
 ## Open items
 

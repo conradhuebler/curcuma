@@ -2343,6 +2343,23 @@ double GFNFF::maxAtomDisplacement(const Eigen::MatrixXd& a, const Eigen::MatrixX
     return (a - b).rowwise().norm().maxCoeff();
 }
 
+double GFNFF::maxAtomDisplacement(const Eigen::MatrixXd& a, const Eigen::MatrixXd& b,
+                                  const PBCUtils::OrthoCell& cell)
+{
+    // Claude Generated (Nov 2026, A3b): see gfnff.h for why the minimum image is exact here.
+    if (!cell.active)
+        return maxAtomDisplacement(a, b);
+    if (a.rows() == 0 || a.rows() != b.rows() || a.cols() != b.cols() || a.cols() != 3)
+        return std::numeric_limits<double>::infinity();
+    double max_d2 = 0.0;
+    for (Eigen::Index i = 0; i < a.rows(); ++i) {
+        double dx = a(i, 0) - b(i, 0), dy = a(i, 1) - b(i, 1), dz = a(i, 2) - b(i, 2);
+        PBCUtils::applyMinimumImageOrtho(cell, dx, dy, dz);
+        max_d2 = std::max(max_d2, dx * dx + dy * dy + dz * dz);
+    }
+    return std::sqrt(max_d2);
+}
+
 // ---------------------------------------------------------------------------
 // updateDispersionPairsIfNeeded — Verlet-skin refresh of the D4 pair list
 // Claude Generated (Sep 2026): see the declaration in gfnff.h for the bug and the skin argument.
@@ -2360,7 +2377,9 @@ void GFNFF::updateDispersionPairsIfNeeded(FFWorkspace* extra_ws)
     bool do_rebuild = false;
     double max_disp = 0.0;
     if (skin > 0.0) {
-        max_disp = maxAtomDisplacement(m_geometry_bohr, m_disp_list_ref_geometry);
+        // Nov 2026 (A3b): minimum-image displacement with a cell, so a fragment wrapped by
+        // SimpleMD (a lattice shift) does not count as moved; identical without a cell.
+        max_disp = maxAtomDisplacement(m_geometry_bohr, m_disp_list_ref_geometry, m_cell_bohr_ortho);
         do_rebuild = (max_disp > 0.5 * skin);
     } else {
         const int rebuild_every = std::max(1, m_parameters.value("nonbonded_rebuild_every", 1));
@@ -4622,7 +4641,9 @@ bool GFNFF::initializeForceField()
         CurcumaLogger::param("  coulomb_pair_r_cut",
             std::string("100.00 Bohr  (per-pair, hardcoded; effective no-cutoff for typical chemistry)"));
         CurcumaLogger::param("  dispersion_r_cut",
-            std::string("D3: 38.73 Bohr (sqrt(dispthr=1500))  |  D4: 50.0 Bohr (pair eval) / 60.0 Bohr (pair generation)"));
+            fmt::format("D3: 38.73 Bohr (sqrt(dispthr=1500))  |  D4: {:.1f} Bohr (pair eval) / {:.1f} Bohr (pair generation){}",
+                dispersionRadiiBohr().eval, dispersionRadiiBohr().build,
+                dispersionRadiiBohr().capped ? ", reduced to L_min/2" : ""));
         CurcumaLogger::param("  hb_r_cut / xb_r_cut / rep_r_cut",
             std::string("50.0 / 20.0 / 20.0 Bohr  (Struct defaults, set per pair)"));
     }
@@ -12791,6 +12812,8 @@ std::tuple<std::vector<GFNFFDispersion>, std::vector<ATMTriple>, std::string> GF
         // WP-A: when the GPU builds the pair list on device, keep only the CN + gw
         // (the device reuses them) and skip the host O(N^2) pair loop + host dc6dcn.
         m_d4_generator->setSkipPairLoop(m_skip_host_disp_pairs);
+        // Nov 2026 (A3b): periodic CN and minimum-image pair list with a cell (inactive: unchanged)
+        m_d4_generator->setPeriodicCell(m_cell_bohr_ortho, dispersionRadiiBohr().build);
 
         dispersions = m_d4_generator->GenerateDispersionPairsNative(m_atoms, m_geometry_bohr);
 
@@ -12863,29 +12886,68 @@ double GFNFF::dispersionCutoffBohr() const
     return disp_cut;
 }
 
+GFNFF::D4RadiiBohr GFNFF::dispersionRadiiBohr() const
+{
+    // Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A3b): the only place where the D4 build
+    // and evaluation radii are derived (see gfnff.h). Without a cell the former expressions.
+    D4RadiiBohr r;
+    r.build = D4ParameterGenerator::PAIR_BUILD_CUTOFF_BOHR;
+    r.eval = D4ParameterGenerator::PAIR_EVAL_CUTOFF_BOHR;
+    const double user = dispersionCutoffBohr();
+    if (user > 0.0) {
+        r.user_cutoff = true;
+        r.build = std::min(r.build, user);
+        r.eval = std::min(r.eval, user);
+    }
+    r.eval_uncapped = r.eval;
+    if (m_cell_bohr_ortho.active && !r.user_cutoff) {
+        const double half = 0.5 * m_cell_bohr_ortho.minLength();
+        if (!(r.eval < half)) {
+            // Just below L_min/2: the minimum image is unique for every distance the kernel
+            // evaluates (a pair at exactly L/2 has two equidistant images; it is excluded).
+            r.eval = std::nextafter(half, 0.0);
+            r.build = std::min(r.build, r.eval + (D4ParameterGenerator::PAIR_BUILD_CUTOFF_BOHR
+                                                  - D4ParameterGenerator::PAIR_EVAL_CUTOFF_BOHR));
+            r.capped = true;
+        }
+    }
+    return r;
+}
+
 void GFNFF::applyDispersionCutoff(std::vector<GFNFFDispersion>& dispersions, bool report) const
 {
-    // WP-Disp (Mai 2026) filter, unchanged; extracted Sep 2026 (Claude Generated) so that the
-    // setup build and the MD rebuild produce the same list.
-    const double disp_cut = dispersionCutoffBohr();
-    if (disp_cut <= 0.0)
+    // WP-Disp (Mai 2026) filter; extracted Sep 2026 (Claude Generated) so that the setup build and
+    // the MD rebuild produce the same list. Nov 2026 (A3b): radii from dispersionRadiiBohr(),
+    // minimum-image distance with a cell. Without a cell the same pairs and r_cut as before:
+    // a user cutoff c gives build min(60, c) (the generator list ends at 60 anyway) and
+    // eval min(50, c) = min(stamped 50, c).
+    const D4RadiiBohr rad = dispersionRadiiBohr();
+    if (!rad.user_cutoff && !rad.capped)
         return;
-    const double disp_cut_sq = disp_cut * disp_cut;
+    const double build_sq = rad.build * rad.build;
     const size_t n_full = dispersions.size();
+    const PBCUtils::OrthoCell& cell = m_cell_bohr_ortho;
     dispersions.erase(
         std::remove_if(dispersions.begin(), dispersions.end(),
             [&](const GFNFFDispersion& d) {
+                if (cell.active) {
+                    double dx = m_geometry_bohr(d.i, 0) - m_geometry_bohr(d.j, 0);
+                    double dy = m_geometry_bohr(d.i, 1) - m_geometry_bohr(d.j, 1);
+                    double dz = m_geometry_bohr(d.i, 2) - m_geometry_bohr(d.j, 2);
+                    PBCUtils::applyMinimumImageOrtho(cell, dx, dy, dz);
+                    return dx * dx + dy * dy + dz * dz > build_sq;
+                }
                 Eigen::Vector3d ri = m_geometry_bohr.row(d.i);
                 Eigen::Vector3d rj = m_geometry_bohr.row(d.j);
-                return (ri - rj).squaredNorm() > disp_cut_sq;
+                return (ri - rj).squaredNorm() > build_sq;
             }),
         dispersions.end());
     for (auto& d : dispersions)
-        d.r_cut = std::min(d.r_cut, disp_cut);
+        d.r_cut = std::min(d.r_cut, rad.eval);
     if (report) {
         CurcumaLogger::param("dispersion_cutoff_bohr",
-            fmt::format("{:.1f} Bohr  ({} / {} pairs retained)",
-                disp_cut, dispersions.size(), n_full));
+            fmt::format("{:.1f} Bohr evaluation, {:.1f} Bohr list{}  ({} / {} pairs retained)",
+                rad.eval, rad.build, rad.capped ? " (reduced to L_min/2)" : "", dispersions.size(), n_full));
     }
 }
 
@@ -12893,14 +12955,9 @@ double GFNFF::dispersionSkinBohr() const
 {
     // Claude Generated (Sep 2026): skin = build radius - evaluation radius of the D4 list.
     // Default 60 - 50 = 10 Bohr; an active dispersion_cutoff_bohr caps both radii.
-    double build = D4ParameterGenerator::PAIR_BUILD_CUTOFF_BOHR;
-    double eval  = D4ParameterGenerator::PAIR_EVAL_CUTOFF_BOHR;
-    const double disp_cut = dispersionCutoffBohr();
-    if (disp_cut > 0.0) {
-        build = std::min(build, disp_cut);
-        eval  = std::min(eval, disp_cut);
-    }
-    return std::max(0.0, build - eval);
+    // Nov 2026 (A3b): radii from dispersionRadiiBohr().
+    const D4RadiiBohr rad = dispersionRadiiBohr();
+    return std::max(0.0, rad.build - rad.eval);
 }
 
 double GFNFF::nonbondedSkinBohr() const
@@ -12934,17 +12991,31 @@ std::vector<std::pair<std::string, double>> GFNFF::activeCutoffsBohr() const
         cut.emplace_back("CN-derivative range max(40, eeq_distance_cutoff, dispersion_cutoff_bohr, CN range)",
             std::max({ 40.0, m_parameters.value("eeq_distance_cutoff", 0.0), disp_cut, cnDerivativeRangeBohr() }));
 
-    // D4 pair list (D4ParameterGenerator, applyDispersionCutoff, dispersionSkinBohr): built at
-    // 60 Bohr, evaluated at 50 Bohr, both capped by dispersion_cutoff_bohr.
+    // D4 pair list (dispersionRadiiBohr(): D4ParameterGenerator, applyDispersionCutoff,
+    // dispersionSkinBohr): built at 60 Bohr, evaluated at 50 Bohr, both capped by
+    // dispersion_cutoff_bohr; with a cell and no user cutoff the evaluation radius is reduced
+    // to L_min/2 automatically.
+    // Nov 2026 (A3b): with a cell only the EVALUATION radius must be below L_min/2, not the
+    // build radius. The list stores pairs (i < j), each once, never images; the kernel forms the
+    // minimum image from the current coordinates at every call, so a pair whose nearest image
+    // changes between rebuilds is still evaluated with its nearest image. With eval < L/2 at most
+    // one image of j lies within eval of i (two images are L apart), so the minimum image is the
+    // only one that can contribute, and no self-image (i, i + nL) can. A build radius >= L/2 only
+    // keeps pairs whose every image is beyond eval: harmless. A pair absent from the list has a
+    // minimum-image distance > build at the reference geometry; that distance is 1-Lipschitz in
+    // each atom position (a minimum over images of Lipschitz functions), so it cannot drop below
+    // eval before one of the two atoms has moved (minimum image, maxAtomDisplacement with the
+    // cell) more than (build - eval)/2, which is the rebuild trigger.
     if (m_parameters.value("dispersion", true)) {
-        double build = D4ParameterGenerator::PAIR_BUILD_CUTOFF_BOHR;
-        double eval = D4ParameterGenerator::PAIR_EVAL_CUTOFF_BOHR;
-        if (disp_cut > 0.0) {
-            build = std::min(build, disp_cut);
-            eval = std::min(eval, disp_cut);
+        const D4RadiiBohr rad = dispersionRadiiBohr();
+        if (m_has_pbc) {
+            cut.emplace_back(rad.capped ? "D4 dispersion evaluation radius (reduced to just below L_min/2)"
+                                        : "D4 dispersion evaluation radius min(50, dispersion_cutoff_bohr)",
+                rad.eval);
+        } else {
+            cut.emplace_back("D4 dispersion evaluation radius min(50, dispersion_cutoff_bohr)", rad.eval);
+            cut.emplace_back("D4 dispersion pair-list build radius min(60, dispersion_cutoff_bohr)", rad.build);
         }
-        cut.emplace_back("D4 dispersion evaluation radius min(50, dispersion_cutoff_bohr)", eval);
-        cut.emplace_back("D4 dispersion pair-list build radius min(60, dispersion_cutoff_bohr)", build);
     }
 
     // Repulsion (generateRepulsionPairsNative): r_cut 20 Bohr; the distance-filtered list is
@@ -13011,8 +13082,8 @@ double GFNFF::cnDerivativeRangeBohr() const
 void GFNFF::configurePeriodicCell()
 {
     // Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A1): cell and cutoff check. Since A2 the
-    // coordination number (value, derivative, topology CN) applies the minimum image; the other
-    // energy terms (dispersion, repulsion, Coulomb/EEQ, HB/XB, bonded) do not yet.
+    // coordination number (value, derivative, topology CN) applies the minimum image, since A3b the
+    // D4 pair term; the other energy terms (repulsion, Coulomb/EEQ, HB/XB, ATM, bonded) do not yet.
     m_cell_bohr_ortho = PBCUtils::OrthoCell();
     if (!m_has_pbc)
         return;
@@ -13022,15 +13093,25 @@ void GFNFF::configurePeriodicCell()
         CurcumaLogger::error("GFN-FF: " + error);
         throw std::runtime_error("GFN-FF: " + error);
     }
+    // Nov 2026 (A3b): set before the check, because dispersionRadiiBohr() reduces the default D4
+    // evaluation radius to the cell; reset when the check fails.
+    m_cell_bohr_ortho = cell;
     error = PBCUtils::checkCutoffsAgainstCell(cell, activeCutoffsBohr(), "Bohr");
     if (!error.empty()) {
+        m_cell_bohr_ortho = PBCUtils::OrthoCell();
         CurcumaLogger::error("GFN-FF: " + error);
         throw std::runtime_error("GFN-FF: " + error);
     }
-    m_cell_bohr_ortho = cell;
+    if (m_parameters.value("dispersion", true)) {
+        const D4RadiiBohr rad = dispersionRadiiBohr();
+        if (rad.capped)
+            CurcumaLogger::warn(fmt::format("GFN-FF: D4 evaluation cutoff reduced from {:.4f} to {:.4f} Bohr (L/2); "
+                                            "long-range tail correction not yet applied",
+                rad.eval_uncapped, rad.eval));
+    }
     if (CurcumaLogger::get_verbosity() >= 2)
         CurcumaLogger::param("periodic cell (Bohr)",
-            fmt::format("{:.4f} x {:.4f} x {:.4f}, all cutoffs below L_min/2 = {:.4f}; minimum image in the CN only (A2), not in the energy terms",
+            fmt::format("{:.4f} x {:.4f} x {:.4f}, all cutoffs below L_min/2 = {:.4f}; minimum image in the CN (A2) and the D4 pair term (A3b) only",
                 cell.L[0], cell.L[1], cell.L[2], 0.5 * cell.minLength()));
 }
 

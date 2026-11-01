@@ -2173,7 +2173,9 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
         // weightedC6Gfn2 reads, so it is the authoritative one for the GFN2 C6.
         m_cn_values = curcuma::dispersion::computeD4CovalentCN(m_atoms, geometry_bohr);
     } else {
-        m_cn_values = CNCalculator::calculateGFNFFCN(m_atoms, geometry_bohr);
+        // Nov 2026 (A3b): minimum image with a periodic cell (nullptr: non-periodic, unchanged)
+        m_cn_values = CNCalculator::calculateGFNFFCN(m_atoms, geometry_bohr, 1600.0, -7.5, 4.4, nullptr,
+            m_cell.active ? &m_cell : nullptr);
     }
 
     // Step 2: Reuse topology charges or compute fresh
@@ -2238,9 +2240,24 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
     // (zeta) or on the element pair (r4r2ij, R0^2) are taken from tables filled with the
     // identical expressions, in the same (i-element, j-element) operand order.
     const int n_at = static_cast<int>(m_atoms.size());
+    // Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A3b): with a periodic cell every pair is
+    // tested once, at its minimum-image distance, against the caller's build radius
+    // (GFNFF::dispersionRadiiBohr()). The list holds pairs, not images: the kernel forms the
+    // minimum image again from the current coordinates at every evaluation. Without a cell the
+    // former expression and the 60 Bohr constant, bit for bit.
+    const bool periodic = m_cell.active;
+    const double build_sq_pbc = m_pair_build_cutoff_bohr * m_pair_build_cutoff_bohr;
     auto pair_in_list = [&](int i, int j) -> bool {
-        const double r2 = (geometry_bohr.row(i) - geometry_bohr.row(j)).squaredNorm();
-        if (r2 > disp_cutoff_sq) return false;
+        if (periodic) {
+            double dx = geometry_bohr(i, 0) - geometry_bohr(j, 0);
+            double dy = geometry_bohr(i, 1) - geometry_bohr(j, 1);
+            double dz = geometry_bohr(i, 2) - geometry_bohr(j, 2);
+            PBCUtils::applyMinimumImageOrtho(m_cell, dx, dy, dz);
+            if (dx * dx + dy * dy + dz * dz > build_sq_pbc) return false;
+        } else {
+            const double r2 = (geometry_bohr.row(i) - geometry_bohr.row(j)).squaredNorm();
+            if (r2 > disp_cutoff_sq) return false;
+        }
         const int atom_i = m_atoms[i];
         const int atom_j = m_atoms[j];
         return !(atom_i < 1 || atom_i > MAX_ELEM || atom_j < 1 || atom_j > MAX_ELEM);

@@ -754,6 +754,12 @@ void FFWorkspace::calcD4Dispersion(int p)
         Eigen::Vector3d ri = m_geometry.row(disp.i);
         Eigen::Vector3d rj = m_geometry.row(disp.j);
         Eigen::Vector3d rij_vec = ri - rj;
+        // Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A3b): minimum image with a periodic
+        // cell (no-op without one). r_cut < L_min/2 (GFNFF::dispersionRadiiBohr(), checked in
+        // configurePeriodicCell()), so at most one image of j lies within r_cut of i, and it is
+        // this one; energy, force and the dE/dCN terms below all use it.
+        if (m_cell_bohr.active)
+            PBCUtils::applyMinimumImageOrtho(m_cell_bohr, rij_vec[0], rij_vec[1], rij_vec[2]);
         double rij = rij_vec.norm();
 
         if (rij > disp.r_cut || rij < 1e-10) continue;

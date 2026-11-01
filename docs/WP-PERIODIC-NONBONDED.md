@@ -174,3 +174,63 @@ periodic. Without a cell every path is unchanged (checked bit for bit, see below
   (inclusive) vs CPU strict `<`, radii `d_rcov_d3 * 4/3` vs `gfnff_cn_rcov_bohr()`, fixed-point CN sums. Not run.
 - Human production testing pending.
 
+
+## A3b periodic D4 dispersion pair term (2026-11-01, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+On `feature/bulk` (base `674d5a27`). **CN (A2) and the D4 pair term are periodic; nothing else.** Repulsion, Coulomb/EEQ,
+HB/XB, bonded terms, topology bonds and ATM still use plain distances; no long-range tail correction yet (A3c).
+
+- **Kernel** `FFWorkspace::calcD4Dispersion`: pair vector as minimum image from `m_cell_bohr` (no-op without a cell);
+  energy, force and the dC6/dCN terms use it. **Generator** `D4ParameterGenerator::setPeriodicCell()`: CN with minimum image,
+  pair list `i < j` at the minimum-image distance, each pair once, never images.
+- **Radii, one source**: `GFNFF::dispersionRadiiBohr()` (eval, build, capped) is read by `applyDispersionCutoff`,
+  `dispersionSkinBohr`, `activeCutoffsBohr`, the generator and the verbosity-2 table. Without a cell: 50 / 60, capped by
+  `dispersion_cutoff_bohr` as before. With a cell and no user cutoff the evaluation radius becomes `nextafter(L_min/2, 0)`
+  when 50 is not below it, the list radius eval + 10; verbosity 1 prints "D4 evaluation cutoff reduced from X to Y Bohr
+  (L/2); long-range tail correction not yet applied". An explicit cutoff >= L_min/2 is still an error.
+- **Why the build radius may exceed L/2** (comment in `activeCutoffsBohr`): the list stores pairs, the kernel forms the
+  minimum image at every call; with eval < L/2 only the nearest image can lie within eval, and no self-image. A pair absent
+  from the list cannot reach eval before an atom moved (build - eval)/2, because the minimum-image distance is 1-Lipschitz.
+  With a cell only the evaluation radius is checked against L/2.
+- **Verlet trigger**: `maxAtomDisplacement(a, b, cell)` takes each displacement as minimum image, so a fragment wrap by
+  SimpleMD is no motion. The plain version was safe (it over-estimates) but rebuilt the list after every wrap.
+  Valid while no atom moves more than L/2 - skin/2 between two calls.
+- **Smallest cube with defaults** is now set by HB/XB 21.2 Bohr (L > 42.4 Bohr; water dimer: 23.0 A accepted, 22.0 A
+  refused), with the repulsion cell list (`nb_cell_list_min_atoms`, large systems) by repulsion 22 (L > 44); D4 no longer blocks.
+- **Tests** (`ctest -R pbc_dispersion`, water molecules from `water-dimer.roo2.8`, intact, moved rigidly): dimer shifted
+  by L / contact across the boundary = no cell, 6.5e-19 Eh; 21 random waters (63 atoms, L 24 Bohr, r_c 11.5, hbond and
+  repulsion off) = 27-image brute force 3.5e-18 (images -6.6e-3 Eh), no pair missing, threads 1/4 3e-17; 2x1x1 supercell
+  = 2 x cell 1.4e-17; analytic gradient (incl. dE/dCN, max 1.6e-5 of max 1.6e-4 Eh/A) vs central FD for 6 atoms 0.06-0.4 A from a face
+  1.1e-11 Eh/A at h = 1e-4 A, 4.3e-11 at 2e-4 (quadratic); default cutoff reduced to 12 Bohr and = brute force 1.7e-18;
+  explicit 12.5 / 50 refused; wrap by +L: no rebuild, dE 0; small moves = fresh instance; 5.7 Bohr move rebuilds.
+- **Without a cell**: -sp energy (16 digits) and `-dump_gradient` md5 identical before/after on the 7 structures of A2 at 1
+  and 4 threads.
+- **GPU (code reading, not changed)**: `k_dispersion` applies `applyMIC` with the same arithmetic and an inclusive
+  `rij <= r_cut` (CPU skips `rij > r_cut`: same). Missing: the device pair builder `k_disp_pairs_build` uses plain
+  distances, the 60 Bohr constant and a hard-coded `r_cut = 50` (neither the cap nor the minimum image), and
+  `k_check_displacement` is not wrap-safe. With `gpu_disp_pairs_on_device` (default) a cell therefore gives a wrong
+  dispersion energy, now also for small cells that A1 used to refuse. The host-built list (`gpu_disp_pairs_on_device false`)
+  carries the MIC pairs and the capped `r_cut`, not run.
+- **ATM (off by default)**: triples and kernel without minimum image; three independent minimum images close the triangle
+  only if r_ij + r_jk < L/2, so with the 25 Bohr ATM cutoff a cell needs L > 100 Bohr or a per-triple image choice.
+  The bonded ATM (batm, 1,4 pairs) is a bonded term and shares their state (fine for intact molecules, wrong for torn ones).
+- Human production testing pending.
+
+### Cutoff dependence measured in A3a (clusters, no cell; input for A3c)
+
+E(r_c) - E(50) in kcal/mol, `-sp gfnff`, E_tot change = E_disp change; r_c = 50/60/0 bit-identical (eval radius min(50, r_c)).
+
+| system (N) | E_disp(50) Eh | 20 | 25 | 30 | 35 | 40 |
+|---|---|---|---|---|---|---|
+| urea197 (197) | -0.1612275 | 0.158 | 0.0081 | 6e-5 | 0 | 0 |
+| peo500 (2910) | -2.1199138 | 14.08 | 5.29 | 2.20 | 0.943 | 0.390 |
+| urea1000 (6200) | -6.4752113 | 52.61 | 21.36 | 9.53 | 4.371 | 1.909 |
+| peo1500 (7320) | -4.7189039 | 33.34 | 13.19 | 5.81 | 2.674 | 1.188 |
+
+- log-log slope of E(r_c) - E(inf) over 30-40 Bohr: -4.7 (urea1000), -4.3 (peo1500), not the bulk -3, because cluster
+  shells beyond 30 Bohr are only partly filled; effective <C6 zeta> per pair is distance-independent (urea1000 6.25-6.33 au).
+- C8 share of the tail: 6.6 % (20-25 Bohr shell), 3.1 % (30-35), 2.3 % (35-40).
+- Extrapolation to the 1825-H2O box (r_c 35.8 Bohr), **not measured**: E_tail ~ -14.7 kcal/mol (~0.4 % of E_disp,
+  <C6 zeta> = 6.3 au assumed), pressure ~ -37 bar.
+- Recommendation for A3c: variant (ii), tail per step from the current CN through the per-atom factorisation
+  sum_i sum_j zeta_i zeta_j C6_ij (O(N K 7), no pairs), dE_tail/dCN into `acc.dEdcn`, virial dE/dV = -E_tail/V.

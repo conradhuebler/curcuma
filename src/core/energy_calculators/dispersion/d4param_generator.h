@@ -27,6 +27,7 @@
 #include "src/core/energy_calculators/ff_methods/gfnff_parameters.h"  // GFNFFDispersion struct
 #include "src/core/energy_calculators/ff_methods/cn_calculator.h"  // CN calculation for D4
 #include "d4_charge_model.h"  // single-shot EEQ + analytical dq/dx (q-response)
+#include "src/tools/pbc_utils.h"  // OrthoCell, minimum image (Nov 2026, A3b)
 
 #include <Eigen/Dense>
 #include <memory>
@@ -104,6 +105,20 @@ public:
     // O(N) CN + Gaussian weights the device reuses and skips the O(N^2) pair loop
     // + host dc6dcn (the GPU recomputes dc6dcn on device). Returns an empty list.
     void setSkipPairLoop(bool v) { m_skip_pair_loop = v; }
+
+    /**
+     * @brief Periodic cell for the GFN-FF pair list (WP-PERIODIC-NONBONDED A3b) - Claude Generated (Nov 2026)
+     *
+     * Active cell: GenerateDispersionPairsNative() computes its CN with the minimum image and keeps
+     * every pair (i < j) whose minimum-image distance is <= pair_build_cutoff_bohr, once per pair (not
+     * per image). Inactive cell (default): the non-periodic list built at PAIR_BUILD_CUTOFF_BOHR, bit
+     * for bit as before; pair_build_cutoff_bohr is then ignored.
+     */
+    void setPeriodicCell(const PBCUtils::OrthoCell& cell, double pair_build_cutoff_bohr)
+    {
+        m_cell = cell;
+        m_pair_build_cutoff_bohr = pair_build_cutoff_bohr;
+    }
 
     // Claude Generated (Feb 15, 2026): dc6dcn computation for dispersion CN gradient
     // Reference: Fortran gfnff_gdisp0.f90:174-210, 262-305
@@ -369,6 +384,8 @@ private:
     // GFN-FF uses topology-based charges (topo%qa) for zetac6 scaling, NOT geometry-dependent EEQ
     Vector m_topology_charges;  // Phase 1 topology charges from GFNFF::TopologyInfo
     bool m_skip_pair_loop = false;  // WP-A: GPU builds the pair list; skip the host O(N^2) loop
+    PBCUtils::OrthoCell m_cell;     // Nov 2026 (A3b): periodic cell of the pair list, inactive = none
+    double m_pair_build_cutoff_bohr = PAIR_BUILD_CUTOFF_BOHR;  // build radius with an active cell
 
     // Molecular CN calculation (December 2025 Phase 2 - CN+Charge weighting)
     std::vector<double> m_cn_values;  // Cached GFNFFCN values for current geometry
