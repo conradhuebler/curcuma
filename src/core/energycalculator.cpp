@@ -183,6 +183,7 @@ void EnergyCalculator::initializeCommon(const json& controller) {
 bool EnergyCalculator::createMethod(const std::string& method_name, const json& config) {
     CurcumaLogger::info("Creating computational method");
     CurcumaLogger::param("requested_method", method_name);
+    m_requested_method_name = method_name;
     
     try {
         // Prepare configuration for method creation
@@ -294,6 +295,19 @@ void EnergyCalculator::setMolecule(const Mol& mol) {
             CurcumaLogger::info("Calling computational method setMolecule...");
         }
         
+        // Claude Generated (Nov 2026, A3b): the GPU GFN-FF paths (CUDA, ROCm, Vulkan) have no minimum image
+        // (device pair builders, EEQ matrix), so a periodic cell would give a wrong energy without a message.
+        // Swap to the CPU method BEFORE the device setup; counted GPU fallback, -gpu_strict true stops here.
+        if (MethodFactory::periodicCellNeedsCpu(mol, *m_method)) {
+            json cpu_config = m_controller;
+            cpu_config["gpu"] = "none";
+            if (!createMethod(m_requested_method_name, cpu_config)) {
+                CurcumaLogger::error("Failed to create the CPU method after the GPU fallback (periodic cell)");
+                handleMethodError("createMethod for CPU method after GPU fallback (periodic cell)");
+                return;
+            }
+        }
+
         // Set molecule in computational method
         if (!m_method->setMolecule(mol)) {
             CurcumaLogger::error("Failed to set molecule in computational method");
@@ -316,7 +330,7 @@ void EnergyCalculator::setMolecule(const Mol& mol) {
                                        !why.empty() ? fmt::format("{} atoms; -gfnff.solvent none keeps the GPU", mol.m_number_atoms)
                                                     : fmt::format("{} atoms, charge {}; -gfnff.frag_charge_model reference keeps the GPU",
                                                                   mol.m_number_atoms, mol.m_charge));
-            if (!createMethod(m_method_name, cpu_config) || !m_method->setMolecule(mol)) {
+            if (!createMethod(m_requested_method_name, cpu_config) || !m_method->setMolecule(mol)) {
                 CurcumaLogger::error("Failed to set molecule in the CPU method after the GPU fallback");
                 handleMethodError("setMolecule in CPU method after GPU fallback");
                 return;

@@ -460,6 +460,7 @@ private:
     json m_parameter;                                 ///< Method-specific parameters
     
     std::string m_method_name;                        ///< Method name
+    std::string m_requested_method_name;              ///< Name passed to createMethod() (gfnff-fast stays gfnff-fast on a CPU fallback)
     std::string m_geometry_file;                      ///< Geometry file for caching
     std::string m_basename;                           ///< Base name for parameter files
     

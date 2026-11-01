@@ -211,6 +211,10 @@ HB/XB, bonded terms, topology bonds and ATM still use plain distances; no long-r
   `k_check_displacement` is not wrap-safe. With `gpu_disp_pairs_on_device` (default) a cell therefore gives a wrong
   dispersion energy, now also for small cells that A1 used to refuse. The host-built list (`gpu_disp_pairs_on_device false`)
   carries the MIC pairs and the capped `r_cut`, not run.
+- **GPU: fallback to the CPU with a cell until the port** (Nov 1, 2026): `MethodFactory::periodicCellNeedsCpu()`, called in
+  `EnergyCalculator::setMolecule()` before the device setup (all backends, also the multi-GPU batch) and for the deltaml base:
+  warning "periodic cell set: GPU path has no minimum image yet, using CPU", counted fallback, `-gpu_strict true` exits 3.
+  Native gfn1/gfn2 untouched (CPU and GPU both ignore the cell). ctest `pbc_gpu_guard` (stand-in wrapper, no device).
 - **ATM (off by default)**: triples and kernel without minimum image; three independent minimum images close the triangle
   only if r_ij + r_jk < L/2, so with the 25 Bohr ATM cutoff a cell needs L > 100 Bohr or a per-triple image choice.
   The bonded ATM (batm, 1,4 pairs) is a bonded term and shares their state (fine for intact molecules, wrong for torn ones).

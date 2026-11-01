@@ -695,6 +695,16 @@ endif()
 add_test(NAME pbc_dispersion COMMAND test_pbc_dispersion WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 set_tests_properties(pbc_dispersion PROPERTIES TIMEOUT 300 LABELS "pbc;gfnff")
 
+# Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A3b): a periodic cell sends a GPU GFN-FF method to the CPU
+# (MethodFactory::periodicCellNeedsCpu); runs without a GPU, with a stand-in for the plugin wrapper.
+add_executable(test_pbc_gpu_guard unit/test_pbc_gpu_guard.cpp)
+target_link_libraries(test_pbc_gpu_guard curcuma_core test_molecule_registry)
+if(USE_PCH)
+    target_precompile_headers(test_pbc_gpu_guard REUSE_FROM curcuma_core)
+endif()
+add_test(NAME pbc_gpu_guard COMMAND test_pbc_gpu_guard WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(pbc_gpu_guard PROPERTIES TIMEOUT 120 LABELS "pbc;gfnff;gpu")
+
 # Streaming trajectory properties. Claude Generated 2026 - geometry worked out by hand.
 add_executable(test_trajprops test_trajprops.cpp)
 target_link_libraries(test_trajprops curcuma_cap curcuma_core)

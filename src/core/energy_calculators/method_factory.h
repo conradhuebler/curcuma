@@ -125,6 +125,21 @@ public:
      */
     static void applySharedScfScope(json& config, const std::string& method_name);
 
+    /**
+     * @brief True if `method` is a GFN-FF method from a GPU plugin (CUDA/ROCm/Vulkan). Claude Generated (Nov 2026).
+     * The plugin wrappers derive from ComputationalMethod directly and expose their GFNFF object through
+     * gfnffInstance(); the CPU class GFNFFComputationalMethod is the only other method that does.
+     */
+    static bool isGpuGfnffMethod(const ComputationalMethod& method);
+    /**
+     * @brief Periodic cell on a GPU GFN-FF method: warn, count the GPU fallback, return true. Claude Generated (Nov 2026).
+     * The device paths have no minimum image (pair builders, EEQ matrix; docs/WP-PERIODIC-NONBONDED.md, A3b), so the
+     * caller must replace the method by the CPU one before its setMolecule(). Under -gpu_strict the counted fallback
+     * ends the run (exit 3). False, with no output, without a cell or for any other method. Native gfn1/gfn2 are not
+     * affected: CPU and GPU both ignore the cell, so a fallback would change nothing but the speed.
+     */
+    static bool periodicCellNeedsCpu(const Mol& mol, const ComputationalMethod& method);
+
     // Provider availability (compile flags + runtime probes); public so table rows can use them.
     static bool hasOrca();
     static bool hasTBLite();

@@ -176,6 +176,18 @@ bool DeltaMLMethod::initialiseBase(const Mol& mol)
         CurcumaLogger::error(m_error_message);
         return false;
     }
+    // Claude Generated (Nov 2026, A3b): a GPU GFN-FF base has no minimum image; with a periodic cell
+    // it is replaced by the CPU one (counted GPU fallback, -gpu_strict true exits), as in EnergyCalculator.
+    if (MethodFactory::periodicCellNeedsCpu(mol, *m_base)) {
+        base_config["gpu"] = "none";
+        m_base = MethodFactory::create(m_base_method, base_config);
+        if (!m_base) {
+            m_has_error = true;
+            m_error_message = "deltaml could not create the CPU base method '" + m_base_method + "' (periodic cell)";
+            CurcumaLogger::error(m_error_message);
+            return false;
+        }
+    }
 
     // Topology anchor: hand the base method the bond graph captured when the model was
     // fitted, and let it set itself up at the structure actually being evaluated. GFN-FF

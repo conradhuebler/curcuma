@@ -624,6 +624,24 @@ bool MethodFactory::readsSharedScfScope(const std::string& method_name)
         || isExternalXtbGfn(m) || m.rfind("tblite-", 0) == 0 || in(m_tblite_methods) || in(m_ulysses_methods);
 }
 
+// Claude Generated (Nov 2026): see method_factory.h. The plugin classes (GFNFFGpuMethodImpl<Backend>) are not
+// visible here; they are recognised as "has a GFNFF object, but is not the CPU wrapper".
+bool MethodFactory::isGpuGfnffMethod(const ComputationalMethod& method)
+{
+    return method.gfnffInstance() != nullptr && dynamic_cast<const GFNFFComputationalMethod*>(&method) == nullptr;
+}
+
+// Claude Generated (Nov 2026, A3b guard): one decision for EnergyCalculator::setMolecule() and the deltaml base.
+bool MethodFactory::periodicCellNeedsCpu(const Mol& mol, const ComputationalMethod& method)
+{
+    if (!mol.m_has_pbc || !isGpuGfnffMethod(method))
+        return false;
+    CurcumaLogger::warn("periodic cell set: GPU path has no minimum image yet, using CPU");
+    curcuma::reportGpuFallback("GFN-FF: periodic cell set, GPU path has no minimum image yet, calculation on the CPU",
+                               fmt::format("{} atoms", mol.m_number_atoms));
+    return true;
+}
+
 void MethodFactory::applySharedScfScope(json& config, const std::string& method_name)
 {
     if (!config.is_object())
