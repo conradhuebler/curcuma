@@ -346,6 +346,19 @@ set_tests_properties(test_gfnff_reinit PROPERTIES TIMEOUT 120 LABELS "gfnff;unit
 add_test(NAME test_fast_exp
          COMMAND test_fast_exp)
 
+# Claude Generated (Nov 2026, B0): stand-alone Ewald sum for point charges (ewald.h);
+# NaCl Madelung vs Evjen, alpha independence, FD, supercell, charged cell; "perf" = timing scan.
+add_executable(test_ewald
+        unit/test_ewald.cpp)
+target_link_libraries(test_ewald curcuma_core)
+if(USE_PCH)
+        target_precompile_headers(test_ewald REUSE_FROM curcuma_core)
+endif()
+add_test(NAME ewald_correctness COMMAND test_ewald)
+set_tests_properties(ewald_correctness PROPERTIES TIMEOUT 120 LABELS "ewald;unit")
+add_test(NAME ewald_performance COMMAND test_ewald perf)
+set_tests_properties(ewald_performance PROPERTIES TIMEOUT 600 LABELS "ewald;perf")
+
 # Claude Generated (Sep 2026): vendored fdlibm erf/acos/exp/log (CURCUMA_PORTABLE_MATH
 # layer, docs/PORTABLE_ERF.md) pinned against the host libm + special values. Header-only
 # functions, so no library link is needed. Run via: ctest -R test_portable_math

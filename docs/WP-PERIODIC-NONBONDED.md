@@ -434,3 +434,55 @@ distances: Coulomb and the per-step Phase-2 EEQ (Ewald is block B), ATM/BATM, na
   cell, `nb_cell_list_min_atoms` >= 800-atom neighbour-set path with torn input (peo201 with a 100 A cube runs, numbers
   not compared), charge groups / ionpairs with a cell, MD with a cell and react, `topology_mode auto`, GPU. Human
   production testing pending.
+
+## B0 stand-alone Ewald sum for point charges (2026-11-01, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+`src/core/energy_calculators/ff_methods/ewald.h/.cpp` (namespace `curcuma::ewald`, class `EwaldSum`): direct Ewald
+sum (no PME) in an orthorhombic `PBCUtils::OrthoCell`, atomic units (Bohr, e, Eh, E = q_i q_j / r). **Not connected to
+GFN-FF or the EEQ**; nothing calls it outside `test_ewald`, so the default path is untouched.
+
+- **Terms**: real space `sum_{i<j} q_i q_j erfc(a r)/r` (minimum image, r < r_cut <= L_min/2, linked cells when every
+  axis has >= 3 cells, else all pairs); reciprocal `(1/(2V)) sum_{k!=0} (4 pi/k^2) exp(-k^2/(4a^2)) |S(k)|^2` over the
+  half space (n and -n, weight doubled), phase factors per atom and axis by recursion; self `-(a/sqrt pi) sum q^2`;
+  background `-pi Q^2/(2 a^2 V)`. Boundary condition tin-foil: no dipole term, k = 0 dropped.
+- **Interface**: `energy`, `gradient` (dE/dr, Eh/Bohr), `potentials` (phi_i = dE/dq_i = (A q)_i without A),
+  `evaluate` (all in one pass, with the four terms), `matrix` (dense A, tests only). `realSpaceKernel()` is the hook for
+  B2 (Gaussian-charge correction -erfc(g_ij r)/r), not built.
+- **Parameters** (`chooseEwaldParameters(cell, eps, r_cut)`, r_cut default L_min/2): `a = sqrt(-ln eps)/r_cut` from
+  exp(-(a r_cut)^2) = eps, `k_max = 2 a sqrt(-ln eps)` from exp(-k_max^2/(4a^2)) = eps. A per-term criterion, not a bound
+  on the total error: at eps = 1e-6 (N = 1000 random charges) the energy is off by 2.6e-6 relative, the gradient by
+  8.5e-9 of its maximum.
+- **Literature**: Ewald (1921), Allen & Tildesley (2017), Frenkel & Smit, de Leeuw, Perram & Smith (1980) cited from
+  memory, not checked against the pages; the formulas were re-derived and are checked by the tests below.
+
+Tests (`ctest -R ewald_`, `test_cases/unit/test_ewald.cpp`; `ewald_correctness` 0.4 s, `ewald_performance` 6.4 s, label `perf`):
+
+| Test | Result |
+|---|---|
+| (a) NaCl, 8-ion cubic cell, Madelung M | Ewald 1.747564594633 (3 alphas, spread 2e-13); Evjen (neutral cubes, n = 40/80, Richardson) 1.7475645946, rel 8e-14 (independent of Ewald); literature 1.747565 (one web search: Wikipedia, Spektrum lexicon; 1.747564594633 quoted from Borwein et al. in the search summary, page not opened) |
+| (b) alpha independence, 64 neutral random charges, L 30 Bohr, eps 1e-12, r_cut 15/12/9 (9 = linked-cell path) | E 6.3e-13 rel, gradient 5.2e-13, potentials 1.1e-13 (of max) |
+| (c) naive long-double Ewald (all images, full k cube, no recursion; self-consistency, not independent), 12 charges, 9 x 10 x 11 Bohr | E rel error 4.6e-7 / 4.4e-9 / 5.1e-11 / 4.9e-13 / 1.6e-13 at eps 1e-6 / 1e-8 / 1e-10 / 1e-12 / 1e-14 |
+| (d) FD, 16 charges, charged cell | gradient 1.7e-10 Eh/Bohr at h = 1e-4, 6.7e-10 at 2e-4 (ratio 4.04, quadratic); phi vs dE/dq 1.9e-11 rel; E = 1/2 q.phi 2e-14 |
+| (e) translation by an arbitrary vector and by L; single atoms shifted by L | 6e-15 and 4e-16 (E and gradient) |
+| (f) 2x1x1 supercell; dense A | E/N 1.7e-15, gradient, potentials 1e-15; A q = phi 5e-14, A symmetric exactly |
+| (g) one charge in a uniform background, cubic L = 10 Bohr, E = -xi q^2/(2L) | Ewald xi = 2.837297479 (3 alphas, spread 1.1e-12); independent neutral-cube sum (charge + background cube, Bethe shift +pi/(6L), m = 40/80, Richardson) 2.8372974957, rel 5.7e-9; the value 2.837297 is from the task text, not found by the search |
+
+(h) Timing, eps 1e-6, energy + gradient + potentials, one thread, uniform random positions at the atom density of
+water (0.1003 / A^3), scan of 8 r_cut values from 8 Bohr to L/2:
+
+| N | L (Bohr) | fastest r_cut (Bohr) | alpha | N_k (half space) | time (s) |
+|---|---|---|---|---|---|
+| 1000 | 40.7 | 15.1 | 0.247 | 3537 | 0.016 |
+| 3000 | 58.7 | 17.1 | 0.217 | 7121 | 0.086 |
+| 6000 | 73.9 | 20.4 | 0.182 | 8439 | 0.250 |
+
+Scaling exponent 1.54 (1000 to 6000 and 3000 to 6000), as expected for O(N^1.5) with optimal alpha. The k loop in
+`EwaldSum::evaluate` (N_k x N complex products) is the place to parallelise (over k with per-thread S, or over atoms).
+
+- **Virial (derived here, not implemented, not tested)**: diagonal strain of an orthorhombic box, W_aa = -dE/d eps_aa:
+  real `-sum_pairs q_i q_j K'(r) d_a^2 / r`; reciprocal per k `E_k [1 - 2 k_a^2 (1/k^2 + 1/(4a^2))]`; self 0;
+  background `E_bg`. Needed for block C (NPT).
+- **Not implemented**: PME/particle mesh, triclinic cells, virial/pressure, vacuum (dipole) boundary term, slab
+  correction, threading, cached geometry between calls.
+- **Not tested**: very small cells with r_cut far below the nearest pair distances, a few close pairs (r << 1 Bohr),
+  more than 6000 charges, eps below 1e-14. Human production testing pending.
