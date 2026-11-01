@@ -41,22 +41,42 @@ inline void bse()
 inline void orbitalBasis(const std::string& name_or_file)
 {
     const std::string s = lowerStem(name_or_file);
-    if (s.rfind("def2-", 0) == 0) {
+    if (s == "def2-mtzvp") {   // Claude Generated (Nov 2026): stage-2 built-in sets, references as listed by BSE
+        CitationRegistry::cite("def2_mtzvp");
+        bse();
+    } else if (s == "def2-mtzvpp") {
+        CitationRegistry::cite("def2_mtzvpp");
+        bse();
+    } else if (s.rfind("def2-", 0) == 0) {
         CitationRegistry::cite("def2_basis");
         if (s.rfind("def2-sv", 0) == 0)
             CitationRegistry::cite("def2_sv_1992");
+        if (s.rfind("def2-qzv", 0) == 0)
+            CitationRegistry::cite("def2_qzvp_2003");
+        if (s.size() > 6 && s.back() == 'd' && s.find("vp") != std::string::npos)  // def2-SVPD ... def2-QZVPPD
+            CitationRegistry::cite("def2_diffuse");
         bse();
     } else if (s == "minix") {
         CitationRegistry::cite("hf3c");   // MINIX is defined in the HF-3c paper
     }
 }
 
-/// Auxiliary (density fitting) basis set by name or file (def2-universal-JFIT / -JKFIT).
+/// Auxiliary (density fitting) basis set by name or file (def2-universal-JFIT / -JKFIT, def2-SV(P)-JKFIT, def2-*-RIFIT,
+/// def2-mTZVPP-RIJ).
 inline void auxBasis(const std::string& name_or_file)
 {
     const std::string s = lowerStem(name_or_file);
     CitationRegistry::cite("ri_hf");
-    if (s.find("jkfit") != std::string::npos) {
+    if (s.find("rifit") != std::string::npos) {   // def2-*-RIFIT (= def2-*/C), Claude Generated (Nov 2026)
+        CitationRegistry::cite("def2_rifit_1998");
+        if (s.find("qzvpp") != std::string::npos) CitationRegistry::cite("def2_rifit_2005");
+        if (s.find("vpd-") != std::string::npos || s.find("vppd-") != std::string::npos)
+            CitationRegistry::cite("def2_rifit_diffuse");
+        bse();
+    } else if (s.find("mtzvpp-rij") != std::string::npos) {
+        CitationRegistry::cite("def2_mtzvpp");
+        bse();
+    } else if (s.find("jkfit") != std::string::npos) {
         CitationRegistry::cite("def2_jkfit");
         bse();
     } else if (s.find("jfit") != std::string::npos) {

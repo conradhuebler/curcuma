@@ -244,9 +244,9 @@ Stand.
 
 ## 5. Funktionen und Refactoring (niedrige Priorität)
 
-- Eingebaute Basissätze (Nov 2026): nur def2-SVP, def2-SV(P), MINIX, def2-universal-JFIT/-JKFIT für H-Ne; alle anderen Sätze nur über den
-  Suchpfad, keine ECPs (MINIX braucht sie für Rb-Xe). Die mitgelieferte `def2-SV(P).dat` weicht jenseits von Ar für 33 Elemente (Z 21-30, 37,
-  49-54, 57-72) von der aktuellen BSE-Revision ab; von der Engine (H-Ne) nicht benutzt. [THIRD_PARTY_NOTICES](docs/THIRD_PARTY_NOTICES.md)
+- **Native QM, nächste Basis-Stufe** (Nov 2026): alle def2-Sätze und def2-ECP sind eingebaut (alle BSE-Elemente), die Engine nutzt davon
+  nur H-Ne mit s/p/d-Schalen: f/g-Schalen (`createGTOFromBasis`, 6d->5d-Transformation, GPU-Tabellen L <= 2) für die def2-TZVP-Familie ab B und alle def2-QZVP*,
+  dann Z > 10 und ECP-Integrale (`qmbasis::embeddedElementBlock("def2-ECP", Z)`, auch MINIX Rb-Xe). [THIRD_PARTY_NOTICES](docs/THIRD_PARTY_NOTICES.md)
 - **Doppelhybride, GPU-Rest** (2026-10-31): im GPU-Gradienten bleiben die
   PT2-Zwischengrößen (RI-/kanonische Amplituden, Lagrangian, Z-Vektor-Algebra) Host-Code, gezählt als `qm_dh_grad_pt2` (`-gpu_strict
   true` endet beim Gradienten mit Exit 3); ROCm/Vulkan fehlen. [WP12](docs/DFT_ROADMAP/WP12_doppelhybride.md) Stufe 3

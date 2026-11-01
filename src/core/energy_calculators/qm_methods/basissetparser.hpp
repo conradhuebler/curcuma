@@ -525,7 +525,8 @@ inline std::vector<GTO::Orbital> createGTOFromBasis(
         case F_SHELL:
         case G_SHELL:
             throw std::runtime_error(
-                "createGTOFromBasis: f/g shells not supported (def2-SVP H-Ne has none).");
+                "f/g shells are not supported by the native QM engine (s, p, d only: def2-SVP, -SV(P), -SVPD, "
+                "-mTZVP, -mTZVPP and MINIX run for H-Ne, the def2-TZVP family only for H-Be, def2-QZVP* not at all)");
         default:
             break;
         }

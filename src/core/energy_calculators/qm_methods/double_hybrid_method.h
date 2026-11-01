@@ -59,7 +59,7 @@ BEGIN_PARAMETER_DEFINITION(qm)
           "Dispersion term of the native DFT methods. Double hybrids: auto = the one in the method name (none for b2plyp, dsd-pbep86, ...; D3(BJ) for the -d3bj names; D4 for the -d4 names) | none (drop it, e.g. to compare the KS + PT2 part with a reference without dispersion) | d3bj (only for a method whose table row has D3(BJ) parameters) | d4 (a -d4 name, or a name whose -d4 row has the same XC/PT2 numbers: b2plyp, b2gp-plyp, revdsd-pbep86). pbe/b3lyp/tpss/scan: auto = none unless the name ends in -d4, d4 adds D4, none drops it. D3(BJ) = the native one of hf-3c, two-body (s9 = 0); D4 = the native D4 of GFN2 with EEQ(2019) charges and ATM (dftd4 bj-eeq-atm, s9 = 1; dispersion/d4_dft.h), CPU.",
           "DoubleHybrid", {})
     PARAM(dh_pt2, String, "ri",
-          "Double hybrids: PT2 integrals. ri = density-fitted (ia|jb) with -qm.ri_mp2_aux (default def2-universal-JKFIT = def2/JK, no def2-SVP/C ships with curcuma: a method variant, the label says so) | canonical = exact (ia|jb) from the n^4 AO tensor (as -method mp2).",
+          "Double hybrids: PT2 integrals. ri = density-fitted (ia|jb) with -qm.ri_mp2_aux (default def2-universal-JKFIT = def2/JK, a JK set as correlation fit: a method variant, the label says so; def2-<X>-RIFIT = def2-<X>/C is built in) | canonical = exact (ia|jb) from the n^4 AO tensor (as -method mp2).",
           "DoubleHybrid", {})
     // Default vwn5 since Oct 31 2026 (operator decision, WP12 doc; before: pz81). Behaviour change for dsd-pbep86*,
     // revdsd-pbep86*: energies move by 1e-3..6e-3 Eh.

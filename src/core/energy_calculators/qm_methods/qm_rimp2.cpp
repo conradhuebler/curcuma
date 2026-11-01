@@ -19,9 +19,9 @@
  *   3. Pair energies: CPU qmint::riMp2EnergyHost (one BLAS GEMM per i and block of j <= i) or the device
  *      (cuda/qm_gpu_rimp2.cu, batches over i, cuBLAS DGEMM), CPU fallback counted as qm_ri_mp2.
  *
- * Auxiliary basis caveat: curcuma ships no def2-SVP/C file; the default correlation fitting basis
- * is def2-universal-JKFIT (or -JFIT). That is a method variant, not RI-MP2/def2-SVP/C as in other
- * programs. Energy only (no RI-MP2 gradient).
+ * Auxiliary basis caveat: the default correlation fitting basis is def2-universal-JKFIT (or -JFIT). That is a
+ * method variant, not RI-MP2/def2-SVP/C as in other programs; the RI-MP2 sets def2-<X>-RIFIT (= def2-<X>/C) are
+ * built in since Nov 2026 (-qm.ri_mp2_aux def2-SVP-RIFIT). Energy only (no RI-MP2 gradient).
  *
  * Claude Generated (Oct 2026). AI-generated, machine-tested.
  *

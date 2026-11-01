@@ -614,6 +614,7 @@ set(curcuma_core_SRC
         src/core/energy_calculators/qm_methods/qm_method.cpp
         src/core/energy_calculators/qm_methods/qm_scf.cpp
         src/core/energy_calculators/qm_methods/qm_ri.cpp
+        src/core/energy_calculators/qm_methods/qm_basis_embedded.cpp
         src/core/energy_calculators/qm_methods/gcp.cpp
         src/core/energy_calculators/qm_methods/hf3c_method.cpp
         src/core/energy_calculators/qm_methods/qm_mp2.cpp

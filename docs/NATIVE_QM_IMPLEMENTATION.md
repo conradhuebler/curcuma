@@ -373,8 +373,8 @@ methods, `-qm.ri j|jk`, RI-MP2, LMP2 and the double hybrids without basis files.
   source directory, the current directory, then the built-in copy by exact name. A file always wins; the files in
   `qm_methods/` stay in the repository as reference and override. `-verbosity 2` prints `basis <name>: file <path>` or
   `basis <name>: embedded copy`. `CURCUMA_QM_BASIS_EMBEDDED_ONLY=1` skips the file search (test hook).
-- Any other name (e.g. `def2-TZVP`) still needs `<name>.dat` / `<name>.turbomole` in the search path; the error names
-  the searched paths and the built-in sets. Citations are registered for built-in sets as for files.
+- Any other name still needs `<name>.dat` / `<name>.turbomole` in the search path (stage 2 below built in all def2
+  sets); the error names the searched paths and the built-in sets. Citations are registered for built-in sets as for files.
 - Equality: the generator checks that every number of the embedded text equals, as a double, the number in the
   repository file (1496 values); ctest `qm_basis_bitwise_*` (hf, hf-3c, b3lyp, RI-J, RI-JK, RI-MP2, def2-SV(P) on H2O)
   require identical 17-digit energies file vs built-in; energies before/after the change are bitwise identical.
@@ -385,7 +385,34 @@ methods, `-qm.ri j|jk`, RI-MP2, LMP2 and the double hybrids without basis files.
   parse shell primitive count"), so `-qm.basis def2-SV(P)` never loaded; blocks outside H-Ne are now skipped.
 - Header check (needs the BSE files, so not a ctest): `python3 scripts/qm_basis_export_tables.py --check [--cache DIR]`;
   `--compare-orca DIR` repeats the ORCA comparison from `orca_exportbasis` outputs.
-- Not done: other basis sets, elements beyond Ne, ECPs (the MINIX definition needs ECPs for Rb-Xe).
+- Not done in stage 1: other basis sets, elements beyond Ne, ECPs (the MINIX definition needs ECPs for Rb-Xe).
+
+### Stage 2: all def2 sets and def2-ECP (Nov 1, 2026)
+
+AI-generated, machine-tested. The generator now writes every def2 orbital set (SVP, SV(P), SVPD, TZVP, TZVPP, TZVPD,
+TZVPPD, QZVP, QZVPP, QZVPD, QZVPPD, mTZVP, mTZVPP), every def2 fitting set (universal-JFIT/-JKFIT, SV(P)-JKFIT,
+mTZVPP-RIJ, ten `-RIFIT` sets) and def2-ECP for every element the BSE has (list and element ranges in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)); MINIX stays H-Ne.
+
+- Layout: one generated header per family (`qm_basis_data_{def2_sv,def2_tzv,def2_qzv,def2_mtzv,def2_jk,def2_rifit,def2_ecp,minix}.h`)
+  plus the registry `qm_basis_tables.h`, text stored per element (`blocks[Z-1]`), each element one raw literal (pieces
+  < 15000 characters); only `qm_basis_embedded.cpp` includes them (compile 2.3 s). 4.24 MB of headers; the binary grew
+  33,600,816 -> 37,193,008 bytes (+3.43 MiB; `.rodata` +3,443,296 B, `.text` +52,544 B).
+- The engine's parsers get only H-Ne (`qmbasis::kEngineMaxZ`): the full text of def2-universal-JKFIT parses in 2.1 ms,
+  its H-Ne part in 0.10 ms (orbital sets <= 0.75 ms vs <= 0.16 ms). `qm_basis_parse` parses every full text too.
+- Engine limits unchanged: H-Ne and s, p, d shells. Run: def2-SVP, -SV(P), -SVPD, -mTZVP, -mTZVPP, MINIX (H-Ne);
+  the def2-TZVP family only for H-Be (f from B on); def2-QZVP* never (f/g); a clear error otherwise. def2-ECP is raw text
+  (`qmbasis::embeddedElementBlock("def2-ECP", Z)`), nothing uses it.
+- Fitting aliases: ORCA names `def2-<X>/C` -> `def2-<X>-RIFIT` (where ORCA has them), `def2-mTZVPP/J` ->
+  `def2-mTZVPP-RIJ`, and every built-in fitting name in any letter case.
+- Checks: generator (`--check`): every number equals the BSE json data (BSE composition); vs ORCA 6.1 exports for H-Ne
+  at the 10-decimal print resolution. ctest `qm_basis_sets_{H2O,NH3,BeH2}`: file written from the built-in text vs
+  embedded-only bitwise; `qm_basis_orca_{H2O,NH3,BeH2}` (reference `test_cases/qm_basis_embed/reference_orca.json`,
+  `scripts/qm_basis_orca_reference.py`): HF with SVP, SV(P), SVPD, mTZVP, mTZVPP and BeH2 TZVP family <= 1.3e-9 Eh,
+  RI-JK def2/JK and RI-J def2-mTZVPP/J <= 1.3e-9 Eh, RI-MP2 with eight `-RIFIT` sets vs ORCA <= 1.0e-8 Eh and vs PySCF
+  DFMP2 <= 6.9e-12 Eh (ORCA's RI-MP2 is offset by up to 1e-8 Eh from both, the same for every aux set).
+- Not tested: any element beyond Ne (the engine rejects it), f/g shells (rejected), the ECP data in any calculation,
+  def2-SV(P)-RIFIT and def2-QZVP-RIFIT against ORCA (no ORCA name; tested bitwise only), elements beyond Ne against ORCA.
 
 ## Basis-set citations (Oct 27, 2026)
 

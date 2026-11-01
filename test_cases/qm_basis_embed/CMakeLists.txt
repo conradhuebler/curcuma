@@ -5,20 +5,28 @@
 # keeps priority. check_qm_basis_embed.py runs each method once with the basis files forced from a temporary
 # directory and once embedded-only (CURCUMA_QM_BASIS_EMBEDDED_ONLY=1), and requires bitwise identical energies
 # (dump_qm_energy prints 17 significant digits), plus: CLI run from an empty directory, a modified file in
-# $CURCUMA_QM_BASIS beats the embedded copy, and an unknown basis (def2-TZVP) fails naming the search path.
+# $CURCUMA_QM_BASIS beats the embedded copy, and an unknown basis (def2-XZVP) fails naming the search path.
+# Stage 2 (Nov 2026): every def2 orbital/fitting set of BSE and def2-ECP are built in; qm_basis_parse (parsers read
+# every embedded number exactly), qm_basis_sets_<mol> (file written from the built-in text vs embedded-only,
+# bitwise), qm_basis_orca_<mol> (ORCA 6.1, reference_orca.json, 1e-8 Eh), qm_basis_fg_rejected, qm_basis_ecp_raw.
 #
 # Run:  ctest -L qm_basis --output-on-failure
 add_executable(dump_qm_energy dump_qm_energy.cpp)
 target_link_libraries(dump_qm_energy PRIVATE curcuma_core)
 target_include_directories(dump_qm_energy PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/external)
 target_compile_features(dump_qm_energy PRIVATE cxx_std_17)
+add_executable(dump_embedded_basis dump_embedded_basis.cpp)
+target_link_libraries(dump_embedded_basis PRIVATE curcuma_core)
+target_include_directories(dump_embedded_basis PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/external)
+target_compile_features(dump_embedded_basis PRIVATE cxx_std_17)
 
 # The generated header vs the generator (`scripts/qm_basis_export_tables.py --check`) needs the BSE files (download
 # or --cache) and is a script step, not a ctest (docs/NATIVE_QM_IMPLEMENTATION.md, "Built-in basis sets").
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
     set(_BE_CHECK ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/check_qm_basis_embed.py
-        --dump $<TARGET_FILE:dump_qm_energy> --curcuma $<TARGET_FILE:curcuma>)
+        --dump $<TARGET_FILE:dump_qm_energy> --curcuma $<TARGET_FILE:curcuma>
+        --dump-basis $<TARGET_FILE:dump_embedded_basis>)
     # bitwise: files from a temporary $CURCUMA_QM_BASIS vs embedded-only, 17 significant digits
     foreach(_c "hf;hf" "hf3c;hf-3c" "b3lyp;b3lyp" "ri_jk;hf;--qm=ri=jk" "ri_j;hf;--qm=ri=j" "rimp2;ri-mp2"
                "svp_p;hf;--qm=basis=def2-SV(P)")
@@ -45,4 +53,13 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME qm_basis_file_priority COMMAND ${_BE_CHECK} --case priority)
     add_test(NAME qm_basis_missing COMMAND ${_BE_CHECK} --case missing)
     set_tests_properties(qm_basis_file_priority qm_basis_missing PROPERTIES TIMEOUT 600 LABELS "qm_basis")
+    add_test(NAME qm_basis_parse COMMAND ${_BE_CHECK} --case parse)
+    add_test(NAME qm_basis_fg_rejected COMMAND ${_BE_CHECK} --case fg)
+    add_test(NAME qm_basis_ecp_raw COMMAND ${_BE_CHECK} --case ecp)
+    set_tests_properties(qm_basis_parse qm_basis_fg_rejected qm_basis_ecp_raw PROPERTIES TIMEOUT 600 LABELS "qm_basis")
+    foreach(_mol H2O NH3 BeH2)
+        add_test(NAME qm_basis_sets_${_mol} COMMAND ${_BE_CHECK} --case sets --molecule ${_mol})
+        add_test(NAME qm_basis_orca_${_mol} COMMAND ${_BE_CHECK} --case orca --molecule ${_mol} --tol 1e-8)
+        set_tests_properties(qm_basis_sets_${_mol} qm_basis_orca_${_mol} PROPERTIES TIMEOUT 900 LABELS "qm_basis")
+    endforeach()
 endif()

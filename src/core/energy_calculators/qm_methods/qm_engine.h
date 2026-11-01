@@ -81,7 +81,7 @@ enum class QMFunctional {
 // Was `dft` until Sep 2026; QMMethod still merges a legacy `dft` scope below `qm`.
 BEGIN_PARAMETER_DEFINITION(qm)
     PARAM(basis, String, "def2-SVP",
-          "Orbital basis (name or $DATA file); built in, H-Ne: def2-SVP, def2-SV(P), MINIX; a <name>.dat in the search path wins and is needed for other names (search path: $CURCUMA_QM_BASIS, $CURCUMA_DATA, the source directory, the current directory).",
+          "Orbital basis (exact name or $DATA file). Built in (all elements the Basis Set Exchange has): def2-SVP, def2-SV(P), def2-SVPD, def2-TZVP, def2-TZVPP, def2-TZVPD, def2-TZVPPD, def2-QZVP, def2-QZVPP, def2-QZVPD, def2-QZVPPD, def2-mTZVP, def2-mTZVPP, and MINIX (H-Ne). The engine runs H-Ne with s, p, d shells only: def2-SVP, -SV(P), -SVPD, -mTZVP, -mTZVPP and MINIX work for H-Ne, the def2-TZVP family only for H-Be (f shells from B on), def2-QZVP* not at all (f/g; rejected with an error). A <name>.dat in the search path wins ($CURCUMA_QM_BASIS, $CURCUMA_DATA, the source directory, the current directory).",
           "Basis", {})
     // WP4 (Claude Generated, Oct 2026): molecular quadrature grid, implementation in qm_grid.cpp
     PARAM(grid, String, "sg1",
@@ -159,7 +159,7 @@ BEGIN_PARAMETER_DEFINITION(qm)
           "Density fitting (resolution of the identity) for the two-electron part: off (exact integrals, the reference) | j (RI-J: Coulomb from the fit, exchange exact) | jk (RI-JK: Coulomb and exchange from the fit, Weigend 2002). A method variant: energies differ from the exact path by the fitting error (about 1e-5 Eh per atom). The analytic gradient is the derivative of the RI energy (fitted integrals and metric differentiated; RI-J keeps the exact exchange gradient).",
           "DensityFitting", {})
     PARAM(ri_aux, String, "auto",
-          "Auxiliary basis for -qm.ri: auto (def2-universal-JFIT for j, -JKFIT for jk) | def2/J | def2/JK | name | Turbomole file; built in, H-Ne: def2-universal-JFIT/-JKFIT; a <name>.turbomole in the search path ($CURCUMA_QM_BASIS, $CURCUMA_DATA, the source directory, the current directory) wins.",
+          "Auxiliary basis for -qm.ri: auto (def2-universal-JFIT for j, -JKFIT for jk) | def2/J | def2/JK | name | Turbomole file. Built in (all elements BSE has): def2-universal-JFIT, def2-universal-JKFIT, def2-SV(P)-JKFIT, def2-mTZVPP-RIJ (def2-mTZVPP/J) and the RI-MP2 sets def2-{SVP,SV(P),SVPD,TZVP,TZVPP,TZVPD,TZVPPD,QZVP,QZVPP,QZVPPD}-RIFIT (ORCA def2-<X>/C accepted where ORCA has it); names are matched without letter case. A <name>.turbomole in the search path ($CURCUMA_QM_BASIS, $CURCUMA_DATA, the source directory, the current directory) wins.",
           "DensityFitting", {})
     PARAM(ri_metric, String, "cholesky",
           "Factorisation of the Coulomb metric J_PQ = (P|Q): cholesky (J = L L^T, falls back to eigen if J is not numerically positive definite) | eigen (J^-1/2 from the eigendecomposition, eigenvalues of the Coulomb-normalised metric below ri_metric_cutoff dropped).",

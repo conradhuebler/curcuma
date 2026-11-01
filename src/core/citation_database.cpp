@@ -1211,6 +1211,128 @@ const std::unordered_map<std::string, CitationData>& database()
             "}"
         }},
 
+        // Built-in def2 sets of stage 2 (Nov 2026, Claude Generated): references as listed by the Basis Set Exchange
+        // components of these sets (REFERENCES.json at commit 4adaf13), DOIs checked against Crossref.
+        { "def2_qzvp_2003", {
+            "def2-QZVP/-QZVPP quadruple-zeta basis sets for H-Kr (Weigend, Furche, Ahlrichs 2003)",
+            "Weigend, F.; Furche, F.; Ahlrichs, R. J. Chem. Phys. 2003, 119, 12753-12762 (DOI: 10.1063/1.1627293)",
+            "weigend2003qzvp",
+            "@article{weigend2003qzvp,\n"
+            "  author = {Weigend, Florian and Furche, Filipp and Ahlrichs, Reinhart},\n"
+            "  title = {Gaussian basis sets of quadruple zeta valence quality for atoms {H}--{Kr}},\n"
+            "  journal = {J. Chem. Phys.},\n"
+            "  year = {2003},\n"
+            "  volume = {119},\n"
+            "  pages = {12753--12762},\n"
+            "  doi = {10.1063/1.1627293}\n"
+            "}"
+        }},
+
+        { "def2_diffuse", {
+            "Diffuse def2 basis sets def2-SVPD, -TZVPD, -TZVPPD, -QZVPD, -QZVPPD (Rappoport & Furche 2010)",
+            "Rappoport, D.; Furche, F. J. Chem. Phys. 2010, 133, 134105 (DOI: 10.1063/1.3484283)",
+            "rappoport2010diffuse",
+            "@article{rappoport2010diffuse,\n"
+            "  author = {Rappoport, Dmitrij and Furche, Filipp},\n"
+            "  title = {Property-optimized {G}aussian basis sets for molecular response calculations},\n"
+            "  journal = {J. Chem. Phys.},\n"
+            "  year = {2010},\n"
+            "  volume = {133},\n"
+            "  pages = {134105},\n"
+            "  doi = {10.1063/1.3484283}\n"
+            "}"
+        }},
+
+        { "def2_mtzvp", {
+            "def2-mTZVP basis set of B97-3c (Brandenburg, Bannwarth, Hansen, Grimme 2018)",
+            "Brandenburg, J. G.; Bannwarth, C.; Hansen, A.; Grimme, S. J. Chem. Phys. 2018, 148, 064104 (DOI: 10.1063/1.5012601)",
+            "brandenburg2018b973c",
+            "@article{brandenburg2018b973c,\n"
+            "  author = {Brandenburg, Jan Gerit and Bannwarth, Christoph and Hansen, Andreas and Grimme, Stefan},\n"
+            "  title = {{B97-3c}: A revised low-cost variant of the {B97-D} density functional method},\n"
+            "  journal = {J. Chem. Phys.},\n"
+            "  year = {2018},\n"
+            "  volume = {148},\n"
+            "  pages = {064104},\n"
+            "  doi = {10.1063/1.5012601}\n"
+            "}"
+        }},
+
+        { "def2_mtzvpp", {
+            "def2-mTZVPP basis set and its RI-J set def2-mTZVPP-RIJ of r2SCAN-3c (Grimme, Hansen, Ehlert, Mewes 2021)",
+            "Grimme, S.; Hansen, A.; Ehlert, S.; Mewes, J.-M. J. Chem. Phys. 2021, 154, 064103 (DOI: 10.1063/5.0040021)",
+            "grimme2021r2scan3c",
+            "@article{grimme2021r2scan3c,\n"
+            "  author = {Grimme, Stefan and Hansen, Andreas and Ehlert, Sebastian and Mewes, Jan-Michael},\n"
+            "  title = {{r$^2$SCAN-3c}: A ``{S}wiss army knife'' composite electronic-structure method},\n"
+            "  journal = {J. Chem. Phys.},\n"
+            "  year = {2021},\n"
+            "  volume = {154},\n"
+            "  pages = {064103},\n"
+            "  doi = {10.1063/5.0040021}\n"
+            "}"
+        }},
+
+        { "def2_rifit_1998", {
+            "RI-MP2 auxiliary basis sets def2-*-RIFIT (= def2-*/C; Weigend, Haeser, Patzelt, Ahlrichs 1998)",
+            "Weigend, F.; Haeser, M.; Patzelt, H.; Ahlrichs, R. Chem. Phys. Lett. 1998, 294, 143-152 (DOI: 10.1016/S0009-2614(98)00862-8)",
+            "weigend1998rimp2aux",
+            "@article{weigend1998rimp2aux,\n"
+            "  author = {Weigend, Florian and H{\\\"a}ser, Marco and Patzelt, Holger and Ahlrichs, Reinhart},\n"
+            "  title = {{RI-MP2}: optimized auxiliary basis sets and demonstration of efficiency},\n"
+            "  journal = {Chem. Phys. Lett.},\n"
+            "  year = {1998},\n"
+            "  volume = {294},\n"
+            "  pages = {143--152},\n"
+            "  doi = {10.1016/S0009-2614(98)00862-8}\n"
+            "}"
+        }},
+
+        { "def2_rifit_2005", {
+            "RI-MP2 auxiliary basis sets for QZVPP (def2-QZVPP-RIFIT; Haettig 2005)",
+            "Haettig, C. Phys. Chem. Chem. Phys. 2005, 7, 59-66 (DOI: 10.1039/B415208E)",
+            "hattig2005rifit",
+            "@article{hattig2005rifit,\n"
+            "  author = {H{\\\"a}ttig, Christof},\n"
+            "  title = {Optimization of auxiliary basis sets for {RI-MP2} and {RI-CC2} calculations: Core--valence and quintuple-$\\zeta$ basis sets for {H} to {Ar} and {QZVPP} basis sets for {Li} to {Kr}},\n"
+            "  journal = {Phys. Chem. Chem. Phys.},\n"
+            "  year = {2005},\n"
+            "  volume = {7},\n"
+            "  pages = {59--66},\n"
+            "  doi = {10.1039/B415208E}\n"
+            "}"
+        }},
+
+        { "def2_rifit_2007", {
+            "RI-MP2 auxiliary basis sets for Rb-Rn (def2-*-RIFIT; Hellweg, Haettig, Hoefener, Klopper 2007)",
+            "Hellweg, A.; Haettig, C.; Hoefener, S.; Klopper, W. Theor. Chem. Acc. 2007, 117, 587-597 (DOI: 10.1007/s00214-007-0250-5)",
+            "hellweg2007rifit",
+            "@article{hellweg2007rifit,\n"
+            "  author = {Hellweg, Arnim and H{\\\"a}ttig, Christof and H{\\\"o}fener, Sebastian and Klopper, Wim},\n"
+            "  title = {Optimized accurate auxiliary basis sets for {RI-MP2} and {RI-CC2} calculations for the atoms {Rb} to {Rn}},\n"
+            "  journal = {Theor. Chem. Acc.},\n"
+            "  year = {2007},\n"
+            "  volume = {117},\n"
+            "  pages = {587--597},\n"
+            "  doi = {10.1007/s00214-007-0250-5}\n"
+            "}"
+        }},
+
+        { "def2_rifit_diffuse", {
+            "RI-MP2 auxiliary basis sets of the diffuse def2 sets (def2-SVPD/TZVPD/TZVPPD/QZVPPD-RIFIT; Hellweg & Rappoport 2015)",
+            "Hellweg, A.; Rappoport, D. Phys. Chem. Chem. Phys. 2015, 17, 1010-1017 (DOI: 10.1039/C4CP04286G)",
+            "hellweg2015rifitd",
+            "@article{hellweg2015rifitd,\n"
+            "  author = {Hellweg, Arnim and Rappoport, Dmitrij},\n"
+            "  title = {Development of new auxiliary basis functions of the {K}arlsruhe segmented contracted basis sets including diffuse basis functions (def2-{SVPD}, def2-{TZVPPD}, and def2-{QVPPD}) for {RI-MP2} and {RI-CC} calculations},\n"
+            "  journal = {Phys. Chem. Chem. Phys.},\n"
+            "  year = {2015},\n"
+            "  volume = {17},\n"
+            "  pages = {1010--1017},\n"
+            "  doi = {10.1039/C4CP04286G}\n"
+            "}"
+        }},
+
         { "ri_hf", {
             "RI-J/RI-JK Hartree-Fock with auxiliary basis (Weigend 2002)",
             "Weigend, F. Phys. Chem. Chem. Phys. 2002, 4, 4285-4291 (DOI: 10.1039/B204199P)",

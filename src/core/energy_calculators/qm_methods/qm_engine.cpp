@@ -129,7 +129,7 @@ std::string resolveBasisFile(const std::string& name)
     for (const auto& p : candidates) looked += (looked.empty() ? "" : ", ") + p;
     throw std::runtime_error(fmt::format(
         "basis set '{}' not found: looked for {} (search path: explicit path, $CURCUMA_QM_BASIS, $CURCUMA_DATA, "
-        "the source directory, the current directory){}; built in are only {} (H-Ne)",
+        "the source directory, the current directory){}; built in are {}",
         name, looked.empty() ? stem + ".dat" : looked,
         qmbasis::embeddedOnly() ? " -- file search disabled by CURCUMA_QM_BASIS_EMBEDDED_ONLY" : "",
         qmbasis::embeddedNames("data")));
@@ -393,13 +393,17 @@ bool QMEngine::InitialiseMolecule()
         m_basis_file = resolveBasisFile(m_basis_name);
         qmcite::orbitalBasis(m_basis_name);   // literature of the basis set actually loaded (file or built-in)
         qmcite::hf();
-        const char* embedded = qmbasis::embeddedText(m_basis_file);
+        const bool embedded = qmbasis::isEmbeddedPath(m_basis_file);
         if (CurcumaLogger::get_verbosity() >= 2)
             CurcumaLogger::info(embedded ? fmt::format("QM: orbital basis {}: embedded copy (built into the binary)", m_basis_name)
                                          : fmt::format("QM: orbital basis {}: file {}", m_basis_name, m_basis_file));
-        if (m_basis_map_cache.empty())
-            m_basis_map_cache = embedded ? BasisSetParser::parseBasisSetString(embedded)
+        if (m_basis_map_cache.empty()) {
+            std::string text;
+            if (embedded && !qmbasis::embeddedText(m_basis_file, text, qmbasis::kEngineMaxZ))
+                throw std::runtime_error("no built-in text for " + m_basis_file);
+            m_basis_map_cache = embedded ? BasisSetParser::parseBasisSetString(text)
                                          : BasisSetParser::parseBasisSetFile(m_basis_file);
+        }
     } catch (const std::exception& e) {
         CurcumaLogger::error(std::string("QM: basis setup failed: ") + e.what());
         return false;
@@ -424,8 +428,15 @@ bool QMEngine::InitialiseMolecule()
         const double bx = Length::angstrom_to_bohr(m_geometry(i, 0));
         const double by = Length::angstrom_to_bohr(m_geometry(i, 1));
         const double bz = Length::angstrom_to_bohr(m_geometry(i, 2));
-        auto orbs = BasisSetParser::createGTOFromBasis(it->second, bx, by, bz, i);
-        m_gto_basis.insert(m_gto_basis.end(), orbs.begin(), orbs.end());
+        // Claude Generated (Nov 2026): the built-in def2-TZVP family (B-Ne) and def2-QZVP family (all) have f/g
+        // shells; the engine handles s, p, d only, so they fail here with a clear message instead of an uncaught throw.
+        try {
+            auto orbs = BasisSetParser::createGTOFromBasis(it->second, bx, by, bz, i);
+            m_gto_basis.insert(m_gto_basis.end(), orbs.begin(), orbs.end());
+        } catch (const std::exception& e) {
+            CurcumaLogger::error(fmt::format("QM: basis {} for element {}: {}", m_basis_name, sym, e.what()));
+            return false;
+        }
     }
 
     // Number of electrons (nuclear charge sum minus total molecular charge).

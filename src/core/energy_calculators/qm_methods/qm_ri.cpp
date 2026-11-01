@@ -86,7 +86,9 @@ bool fileExists(const std::string& p)
 // (resolveAuxBasisFile); its text goes through the same stream parser as a file.
 AuxBasisMap parseTurbomoleBasis(const std::string& path)
 {
-    if (const char* text = qmbasis::embeddedText(path)) {
+    if (qmbasis::isEmbeddedPath(path)) {
+        std::string text;
+        if (!qmbasis::embeddedText(path, text, qmbasis::kEngineMaxZ)) throw std::runtime_error("no built-in text for " + path);
         std::istringstream in(text);
         return parseTurbomoleStream(in, path);
     }
@@ -169,6 +171,21 @@ std::string resolveAuxBasisFile(const std::string& name_in, const std::string& m
     if (ln.empty() || ln == "auto") name = (mode == "j") ? "def2-universal-JFIT" : "def2-universal-JKFIT";
     else if (ln == "def2/j" || ln == "def2-universal-jfit" || ln == "weigend" || ln == "def2-jfit") name = "def2-universal-JFIT";
     else if (ln == "def2/jk" || ln == "def2-universal-jkfit" || ln == "def2-jkfit") name = "def2-universal-JKFIT";
+    else {
+        // Claude Generated (Nov 2026): ORCA names of the RI-MP2 fitting sets, def2-<X>/C = def2-<X>-RIFIT (the same
+        // numbers for H-Ne, checked by scripts/qm_basis_export_tables.py --compare-orca), def2-mTZVPP/J =
+        // def2-mTZVPP-RIJ, and any built-in fitting set name in other letter case.
+        static const char* const kOrcaC[][2] = {
+            { "def2-svp/c", "def2-SVP-RIFIT" }, { "def2-svpd/c", "def2-SVPD-RIFIT" },
+            { "def2-tzvp/c", "def2-TZVP-RIFIT" }, { "def2-tzvpp/c", "def2-TZVPP-RIFIT" },
+            { "def2-tzvpd/c", "def2-TZVPD-RIFIT" }, { "def2-tzvppd/c", "def2-TZVPPD-RIFIT" },
+            { "def2-qzvpp/c", "def2-QZVPP-RIFIT" }, { "def2-qzvppd/c", "def2-QZVPPD-RIFIT" },
+            { "def2-mtzvpp/j", "def2-mTZVPP-RIJ" } };
+        for (const auto& a : kOrcaC)
+            if (ln == a[0]) name = a[1];
+        if (name == name_in && name.find('/') == std::string::npos)
+            if (const auto* e = qmbasis::findEmbeddedNoCase(name, "turbomole")) name = e->name;
+    }
     // Claude Generated (Nov 2026): the built-in copy (qm_basis_embedded.h) comes LAST, a file always wins;
     // CURCUMA_QM_BASIS_EMBEDDED_ONLY=1 skips the file search (test hook).
     const bool verbose = CurcumaLogger::get_verbosity() >= 2;
@@ -202,7 +219,7 @@ std::string resolveAuxBasisFile(const std::string& name_in, const std::string& m
     for (const auto& c : cand) looked += (looked.empty() ? "" : ", ") + c;
     throw std::runtime_error(fmt::format(
         "auxiliary basis '{}' not found: looked for {} (search path: explicit path, $CURCUMA_QM_BASIS, $CURCUMA_DATA, "
-        "the source directory, the current directory){}; built in are only {} (H-Ne)",
+        "the source directory, the current directory){}; built in are {}",
         name_in, looked.empty() ? file : looked,
         qmbasis::embeddedOnly() ? " -- file search disabled by CURCUMA_QM_BASIS_EMBEDDED_ONLY" : "",
         qmbasis::embeddedNames("turbomole")));

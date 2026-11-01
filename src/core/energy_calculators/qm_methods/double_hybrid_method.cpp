@@ -371,8 +371,9 @@ double DoubleHybridMethod::calculateEnergy(bool gradient)
 
     if (CurcumaLogger::get_verbosity() >= 1) {
         const std::string pt2 = m_options.ri
-            ? fmt::format("RI-PT2 (aux {}, {} functions; JK set as correlation fit, not def2-SVP/C)", m_pt2.aux_name,
-                          m_pt2.n_aux)
+            ? fmt::format("RI-PT2 (aux {}, {} functions; {})", m_pt2.aux_name, m_pt2.n_aux,
+                          m_pt2.aux_name.find("RIFIT") != std::string::npos ? "RI-MP2 fitting set"
+                                                                            : "JK set as correlation fit, not def2-SVP/C")
             : std::string("canonical PT2 (exact integrals)");
         CurcumaLogger::result(fmt::format("native double hybrid {} -- {}{}; {}; {} frozen core orbital(s), {} active "
                                           "occupied, {} virtual; dispersion {}",

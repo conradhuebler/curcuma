@@ -1,0 +1,478 @@
+{
+ "_comment": [
+  "ORCA 6.1.0 total energies (Eh) for the built-in basis-set tests (ctest qm_basis_orca_*). Claude Generated (Nov 2026).",
+  "Written by scripts/qm_basis_orca_reference.py: '! RHF <basis> NoRI|RIJK def2/JK|RIJONX VeryTightSCF', RI-MP2 =",
+  "'! RHF MP2 <basis> NoRI NoFrozenCore' + '%mp2 RI true' + '%basis AuxC \"def2-<X>/C\"'.",
+  "curcuma side: dump_qm_energy with the settings in 'curcuma', CURCUMA_QM_BASIS_EMBEDDED_ONLY=1.",
+  "pyscf (RI-MP2 only): PySCF 2.x DFMP2, own def2-<x>-ri data, RHF conv_tol 1e-13; ORCA's RI-MP2 is ~1e-8 Eh off both."
+ ],
+ "H2O": {
+  "xyz": "../../test_cases/qm_1e/H2O.xyz",
+  "hf_def2-SVP": {
+   "method": "hf",
+   "curcuma": {
+    "basis": "def2-SVP"
+   },
+   "orca": -75.957513799035,
+   "orca_input": [
+    "! RHF def2-SVP NoRI VeryTightSCF",
+    "* xyz 0 1",
+    "O  0.000000  0.000000  0.000000"
+   ]
+  },
+  "hf_def2-SV(P)": {
+   "method": "hf",
+   "curcuma": {
+    "basis": "def2-SV(P)"
+   },
+   "orca": -75.934171537928,
+   "orca_input": [
+    "! RHF def2-SV(P) NoRI VeryTightSCF",
+    "* xyz 0 1",
+    "O  0.000000  0.000000  0.000000"
+   ]
+  },
+  "hf_def2-SVPD": {
+   "method": "hf",
+   "curcuma": {
+    "basis": "def2-SVPD"
+   },
+   "orca": -75.971566731934,
+   "orca_input": [
+    "! RHF def2-SVPD NoRI VeryTightSCF",
+    "* xyz 0 1",
+    "O  0.000000  0.000000  0.000000"
+   ]
+  },
+  "hf_def2-mTZVP": {
+   "method": "hf",
+   "curcuma": {
+    "basis": "def2-mTZVP"
+   },
+   "orca": -76.04777413847,
+   "orca_input": [
+    "! RHF def2-mTZVP NoRI VeryTightSCF",
+    "* xyz 0 1",
+    "O  0.000000  0.000000  0.000000"
+   ]
+  },
+  "hf_def2-mTZVPP": {
+   "method": "hf",
+   "curcuma": {
+    "basis": "def2-mTZVPP"
+   },
+   "orca": -76.056181137957,
+   "orca_input": [
+    "! RHF def2-mTZVPP NoRI VeryTightSCF",
+    "* xyz 0 1",
+    "O  0.000000  0.000000  0.000000"
+   ]
+  },
+  "rijk_def2-SVP_def2-universal-JKFIT": {
+   "method": "hf",
+   "curcuma": {
+    "basis": "def2-SVP",
+    "ri": "jk",
+    "ri_aux": "def2-universal-JKFIT"
+   },
+   "orca": -75.95746006451,
+   "orca_input": [
+    "! RHF def2-SVP RIJK def2/JK VeryTightSCF",
+    "* xyz 0 1",
+    "O  0.000000  0.000000  0.000000"
+   ]
+  },
+  "rij_def2-SVP_def2-mTZVPP-RIJ": {
+   "method": "hf",
+   "curcuma": {
+    "basis": "def2-SVP",
+    "ri": "j",
+    "ri_aux": "def2-mTZVPP-RIJ"
+   },
+   "orca": -75.95829186895,
+   "orca_input": [
+    "! RHF def2-SVP RIJONX VeryTightSCF",
+    "%basis AuxJ \"def2-mTZVPP/J\" end",
+    "* xyz 0 1"
+   ]
+  },
+  "rimp2_def2-SVP_def2-SVP-RIFIT": {
+   "method": "ri-mp2",
+   "curcuma": {
+    "basis": "def2-SVP",
+    "ri_mp2_aux": "def2-SVP-RIFIT"
+   },
+   "orca": -76.157406920157,
+   "orca_input": [
+    "! RHF MP2 def2-SVP NoRI NoFrozenCore VeryTightSCF",
+    "%basis AuxC \"def2-SVP/C\" end",
+    "%mp2 RI true end"
+   ],
+   "pyscf": -76.157406930106
+  },
+  "rimp2_def2-SVP_def2-TZVP-RIFIT": {
+   "method": "ri-mp2",
+   "curcuma": {
+    "basis": "def2-SVP",
+    "ri_mp2_aux": "def2-TZVP-RIFIT"
+   },
+   "orca": -76.157431853569,
+   "orca_input": [
+    "! RHF MP2 def2-SVP NoRI NoFrozenCore VeryTightSCF",
+    "%basis AuxC \"def2-TZVP/C\" end",
+    "%mp2 RI true end"
+   ],
+   "pyscf": -76.157431863517
+  },
+  "rimp2_def2-SVP_def2-TZVPP-RIFIT": {
+   "method": "ri-mp2",
+   "curcuma": {
+    "basis": "def2-SVP",
+    "ri_mp2_aux": "def2-TZVPP-RIFIT"
+   },
+   "orca": -76.157446838883,
+   "orca_input": [
+    "! RHF MP2 def2-SVP NoRI NoFrozenCore VeryTightSCF",
+    "%basis AuxC \"def2-TZVPP/C\" end",
+    "%mp2 RI true end"
+   ],
+   "pyscf": -76.157446848824
+  },
+  "rimp2_def2-SVP_def2-QZVPP-RIFIT": {
+   "method": "ri-mp2",
+   "curcuma": {
+    "basis": "def2-SVP",
+    "ri_mp2_aux": "def2-QZVPP-RIFIT"
+   },
+   "orca": -76.157496676716,
+   "orca_input": [
+    "! RHF MP2 def2-SVP NoRI NoFrozenCore VeryTightSCF",
+    "%basis AuxC \"def2-QZVPP/C\" end",
+    "%mp2 RI true end"
+   ],
+   "pyscf": -76.157496686676
+  },
+  "rimp2_def2-SVPD_def2-SVPD-RIFIT": {
+   "method": "ri-mp2",
+   "curcuma": {
+    "basis": "def2-SVPD",
+    "ri_mp2_aux": "def2-SVPD-RIFIT"
+   },
+   "orca": -76.185360778442,
+   "orca_input": [
+    "! RHF MP2 def2-SVPD NoRI NoFrozenCore VeryTightSCF",
+    "%basis AuxC \"def2-SVPD/C\" end",
+    "%mp2 RI true end"
+   ],
+   "pyscf": -76.185360779787
+  },
+  "rimp2_def2-SVPD_def2-TZVPD-RIFIT": {
+   "method": "ri-mp2",
+   "curcuma": {
+    "basis": "def2-SVPD",
+    "ri_mp2_aux": "def2-TZVPD-RIFIT"
+   },
+   "orca": -76.185362561927,
+   "orca_input": [
+    "! RHF MP2 def2-SVPD NoRI NoFrozenCore VeryTightSCF",
+    "%basis AuxC \"def2-TZVPD/C\" end",
+    "%mp2 RI true end"
+   ],
+   "pyscf": -76.185362563287
+  },
+  "rimp2_def2-SVPD_def2-TZVPPD-RIFIT": {
+   "method": "ri-mp2",
+   "curcuma": {
+    "basis": "def2-SVPD",
+    "ri_mp2_aux": "def2-TZVPPD-RIFIT"
+   },
+   "orca": -76.185369765693,
+   "orca_input": [
+    "! RHF MP2 def2-SVPD NoRI NoFrozenCore VeryTightSCF",
+    "%basis AuxC \"def2-TZVPPD/C\" end",
+    "%mp2 RI true end"
+   ],
+   "pyscf": -76.185369767054
+  },
+  "rimp2_def2-SVPD_def2-QZVPPD-RIFIT": {
+   "method": "ri-mp2",
+   "curcuma": {
+    "basis": "def2-SVPD",
+    "ri_mp2_aux": "def2-QZVPPD-RIFIT"
+   },
+   "orca": -76.185391301979,
+   "orca_input": [
+    "! RHF MP2 def2-SVPD NoRI NoFrozenCore VeryTightSCF",
+    "%basis AuxC \"def2-QZVPPD/C\" end",
+    "%mp2 RI true end"
+   ],
+   "pyscf": -76.185391303342
+  }
+ },
+ "NH3": {
+  "xyz": "../../test_cases/qm_1e/NH3.xyz",
+  "hf_def2-SVP": {
+   "method": "hf",
+   "curcuma": {
+    "basis": "def2-SVP"
+   },
+   "orca": -56.140097551964,
+   "orca_input": [
+    "! RHF def2-SVP NoRI VeryTightSCF",
+    "* xyz 0 1",
+    "N   0.000000  0.000000  0.149000"
+   ]
+  },
+  "hf_def2-SV(P)": {
+   "method": "hf",
+   "curcuma": {
+    "basis": "def2-SV(P)"
+   },
+   "orca": -56.120502211523,
+   "orca_input": [
+    "! RHF def2-SV(P) NoRI VeryTightSCF",
+    "* xyz 0 1",
+    "N   0.000000  0.000000  0.149000"
+   ]
+  },
+  "hf_def2-SVPD": {
+   "method": "hf",
+   "curcuma": {
+    "basis": "def2-SVPD"
+   },
+   "orca": -56.147616900566,
+   "orca_input": [
+    "! RHF def2-SVPD NoRI VeryTightSCF",
+    "* xyz 0 1",
+    "N   0.000000  0.000000  0.149000"
+   ]
+  },
+  "hf_def2-mTZVP": {
+   "method": "hf",
+   "curcuma": {
+    "basis": "def2-mTZVP"
+   },
+   "orca": -56.19800539375,
+   "orca_input": [
+    "! RHF def2-mTZVP NoRI VeryTightSCF",
+    "* xyz 0 1",
+    "N   0.000000  0.000000  0.149000"
+   ]
+  },
+  "hf_def2-mTZVPP": {
+   "method": "hf",
+   "curcuma": {
+    "basis": "def2-mTZVPP"
+   },
+   "orca": -56.207909457384,
+   "orca_input": [
+    "! RHF def2-mTZVPP NoRI VeryTightSCF",
+    "* xyz 0 1",
+    "N   0.000000  0.000000  0.149000"
+   ]
+  },
+  "rijk_def2-SVP_def2-universal-JKFIT": {
+   "method": "hf",
+   "curcuma": {
+    "basis": "def2-SVP",
+    "ri": "jk",
+    "ri_aux": "def2-universal-JKFIT"
+   },
+   "orca": -56.140075864548,
+   "orca_input": [
+    "! RHF def2-SVP RIJK def2/JK VeryTightSCF",
+    "* xyz 0 1",
+    "N   0.000000  0.000000  0.149000"
+   ]
+  },
+  "rij_def2-SVP_def2-mTZVPP-RIJ": {
+   "method": "hf",
+   "curcuma": {
+    "basis": "def2-SVP",
+    "ri": "j",
+    "ri_aux": "def2-mTZVPP-RIJ"
+   },
+   "orca": -56.140940583878,
+   "orca_input": [
+    "! RHF def2-SVP RIJONX VeryTightSCF",
+    "%basis AuxJ \"def2-mTZVPP/J\" end",
+    "* xyz 0 1"
+   ]
+  },
+  "rimp2_def2-SVP_def2-SVP-RIFIT": {
+   "method": "ri-mp2",
+   "curcuma": {
+    "basis": "def2-SVP",
+    "ri_mp2_aux": "def2-SVP-RIFIT"
+   },
+   "orca": -56.333664943495,
+   "orca_input": [
+    "! RHF MP2 def2-SVP NoRI NoFrozenCore VeryTightSCF",
+    "%basis AuxC \"def2-SVP/C\" end",
+    "%mp2 RI true end"
+   ],
+   "pyscf": -56.333664946808
+  },
+  "rimp2_def2-SVP_def2-TZVP-RIFIT": {
+   "method": "ri-mp2",
+   "curcuma": {
+    "basis": "def2-SVP",
+    "ri_mp2_aux": "def2-TZVP-RIFIT"
+   },
+   "orca": -56.333672478495,
+   "orca_input": [
+    "! RHF MP2 def2-SVP NoRI NoFrozenCore VeryTightSCF",
+    "%basis AuxC \"def2-TZVP/C\" end",
+    "%mp2 RI true end"
+   ],
+   "pyscf": -56.333672481831
+  },
+  "rimp2_def2-SVP_def2-TZVPP-RIFIT": {
+   "method": "ri-mp2",
+   "curcuma": {
+    "basis": "def2-SVP",
+    "ri_mp2_aux": "def2-TZVPP-RIFIT"
+   },
+   "orca": -56.333692497536,
+   "orca_input": [
+    "! RHF MP2 def2-SVP NoRI NoFrozenCore VeryTightSCF",
+    "%basis AuxC \"def2-TZVPP/C\" end",
+    "%mp2 RI true end"
+   ],
+   "pyscf": -56.333692500874
+  },
+  "rimp2_def2-SVP_def2-QZVPP-RIFIT": {
+   "method": "ri-mp2",
+   "curcuma": {
+    "basis": "def2-SVP",
+    "ri_mp2_aux": "def2-QZVPP-RIFIT"
+   },
+   "orca": -56.33372984453,
+   "orca_input": [
+    "! RHF MP2 def2-SVP NoRI NoFrozenCore VeryTightSCF",
+    "%basis AuxC \"def2-QZVPP/C\" end",
+    "%mp2 RI true end"
+   ],
+   "pyscf": -56.333729847869
+  },
+  "rimp2_def2-SVPD_def2-SVPD-RIFIT": {
+   "method": "ri-mp2",
+   "curcuma": {
+    "basis": "def2-SVPD",
+    "ri_mp2_aux": "def2-SVPD-RIFIT"
+   },
+   "orca": -56.354275043363,
+   "orca_input": [
+    "! RHF MP2 def2-SVPD NoRI NoFrozenCore VeryTightSCF",
+    "%basis AuxC \"def2-SVPD/C\" end",
+    "%mp2 RI true end"
+   ],
+   "pyscf": -56.354275050787
+  },
+  "rimp2_def2-SVPD_def2-TZVPD-RIFIT": {
+   "method": "ri-mp2",
+   "curcuma": {
+    "basis": "def2-SVPD",
+    "ri_mp2_aux": "def2-TZVPD-RIFIT"
+   },
+   "orca": -56.354282578519,
+   "orca_input": [
+    "! RHF MP2 def2-SVPD NoRI NoFrozenCore VeryTightSCF",
+    "%basis AuxC \"def2-TZVPD/C\" end",
+    "%mp2 RI true end"
+   ],
+   "pyscf": -56.35428258593
+  },
+  "rimp2_def2-SVPD_def2-TZVPPD-RIFIT": {
+   "method": "ri-mp2",
+   "curcuma": {
+    "basis": "def2-SVPD",
+    "ri_mp2_aux": "def2-TZVPPD-RIFIT"
+   },
+   "orca": -56.35429213082,
+   "orca_input": [
+    "! RHF MP2 def2-SVPD NoRI NoFrozenCore VeryTightSCF",
+    "%basis AuxC \"def2-TZVPPD/C\" end",
+    "%mp2 RI true end"
+   ],
+   "pyscf": -56.354292138228
+  },
+  "rimp2_def2-SVPD_def2-QZVPPD-RIFIT": {
+   "method": "ri-mp2",
+   "curcuma": {
+    "basis": "def2-SVPD",
+    "ri_mp2_aux": "def2-QZVPPD-RIFIT"
+   },
+   "orca": -56.354305965875,
+   "orca_input": [
+    "! RHF MP2 def2-SVPD NoRI NoFrozenCore VeryTightSCF",
+    "%basis AuxC \"def2-QZVPPD/C\" end",
+    "%mp2 RI true end"
+   ],
+   "pyscf": -56.354305973284
+  }
+ },
+ "BeH2": {
+  "xyz": "../../test_cases/qm_1e/BeH2.xyz",
+  "hf_def2-SVP": {
+   "method": "hf",
+   "curcuma": {
+    "basis": "def2-SVP"
+   },
+   "orca": -15.753499058377,
+   "orca_input": [
+    "! RHF def2-SVP NoRI VeryTightSCF",
+    "* xyz 0 1",
+    "Be  0.000000  0.000000  0.000000"
+   ]
+  },
+  "hf_def2-TZVP": {
+   "method": "hf",
+   "curcuma": {
+    "basis": "def2-TZVP"
+   },
+   "orca": -15.769383595698,
+   "orca_input": [
+    "! RHF def2-TZVP NoRI VeryTightSCF",
+    "* xyz 0 1",
+    "Be  0.000000  0.000000  0.000000"
+   ]
+  },
+  "hf_def2-TZVPP": {
+   "method": "hf",
+   "curcuma": {
+    "basis": "def2-TZVPP"
+   },
+   "orca": -15.770041574736,
+   "orca_input": [
+    "! RHF def2-TZVPP NoRI VeryTightSCF",
+    "* xyz 0 1",
+    "Be  0.000000  0.000000  0.000000"
+   ]
+  },
+  "hf_def2-TZVPD": {
+   "method": "hf",
+   "curcuma": {
+    "basis": "def2-TZVPD"
+   },
+   "orca": -15.769806129121,
+   "orca_input": [
+    "! RHF def2-TZVPD NoRI VeryTightSCF",
+    "* xyz 0 1",
+    "Be  0.000000  0.000000  0.000000"
+   ]
+  },
+  "hf_def2-TZVPPD": {
+   "method": "hf",
+   "curcuma": {
+    "basis": "def2-TZVPPD"
+   },
+   "orca": -15.770424973869,
+   "orca_input": [
+    "! RHF def2-TZVPPD NoRI VeryTightSCF",
+    "* xyz 0 1",
+    "Be  0.000000  0.000000  0.000000"
+   ]
+  }
+ }
+}

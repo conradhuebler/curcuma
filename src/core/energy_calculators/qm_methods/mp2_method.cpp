@@ -124,12 +124,16 @@ double MP2Method::calculateEnergy(bool gradient)
     const int v = CurcumaLogger::get_verbosity();
     if (v >= 1) {
         if (m_options.ri) {
-            // Label carries the auxiliary set: JK/J fitting sets used as correlation fitting basis (no def2-SVP/C)
+            // Label carries the auxiliary set: a JK/J fitting set used as correlation fitting basis is a method
+            // variant; def2-*-RIFIT (= def2-*/C) is the RI-MP2 set (Claude Generated, Nov 2026)
+            const bool rifit = m_result.aux_name.find("RIFIT") != std::string::npos;
             CurcumaLogger::result(fmt::format("native {} -- RHF reference ({}), RI-MP2 (aux {}; {} fitted functions; "
-                                              "method variant, not RI-MP2/def2-SVP/C) ({} basis functions, {} frozen "
+                                              "{}) ({} basis functions, {} frozen "
                                               "core orbital(s), {} active occupied, {} virtual)",
                                               m_variant, m_result.scf_ri.empty() ? "exact integrals" : m_result.scf_ri,
-                                              m_result.aux_name, m_result.n_aux, m_result.n_basis, m_result.n_frozen,
+                                              m_result.aux_name, m_result.n_aux,
+                                              rifit ? "RI-MP2 fitting set" : "method variant, not RI-MP2/def2-SVP/C",
+                                              m_result.n_basis, m_result.n_frozen,
                                               m_result.n_occ_active, m_result.n_virt));
         } else {
             CurcumaLogger::result(fmt::format("native {} -- RHF reference, canonical MP2 ({} basis functions, {} frozen "
