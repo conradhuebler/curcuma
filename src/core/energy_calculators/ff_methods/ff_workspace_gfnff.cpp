@@ -1582,17 +1582,23 @@ void FFWorkspace::calcHalogenBonds(int p)
         // Claude Generated (Mar 2026): Port from ForceFieldThread
         // Reference: gfnff_engrad.F90 - rbxgfnff_eg()
         if (m_do_gradient) {
-            // Short-range damping derivative w.r.t. r_XB
+            // Short-range damping derivative w.r.t. r_XB.
+            // damp_s = 1/(1+t), t = (scut*rvdw/r^2)^alp, dt/dr = -2*alp*t/r
+            // => d(damp_s)/dr = +2*alp*damp_s*t / (r*(1+t))
+            // (Fortran rbxgfnff_eg: +2*hbalp*ratio3/(1+ratio3); Known Issue #46, sign was wrong)
             double ratio_short = XB_SCUT * r_vdw_AB / (r_XB * r_XB);
             double damp_short_term = std::pow(ratio_short, HB_ALP);
-            double ddamp_short_dr = -2.0 * HB_ALP * damp_short * damp_short_term
+            double ddamp_short_dr = 2.0 * HB_ALP * damp_short * damp_short_term
                                   / (r_XB * (1.0 + damp_short_term));
 
-            // Long-range damping derivative w.r.t. r_XB
+            // Long-range damping derivative w.r.t. r_XB.
+            // damp_l = 1/(1+u), u = (r^2/longcut)^alp, du/dr = 2*alp*u/r
+            // => d(damp_l)/dr = -2*alp*damp_l*u / (r*(1+u))
+            // (Fortran: -2*hbalp*ratio1/(1+ratio1); Known Issue #46, was r/longcut instead of 1/r)
             double ratio_long = (r_XB * r_XB) / HB_LONGCUT_XB;
             double damp_long_term = std::pow(ratio_long, HB_ALP);
-            double ddamp_long_dr = -2.0 * HB_ALP * r_XB * damp_long * damp_long_term
-                                 / (HB_LONGCUT_XB * (1.0 + damp_long_term));
+            double ddamp_long_dr = -2.0 * HB_ALP * damp_long * damp_long_term
+                                 / (r_XB * (1.0 + damp_long_term));
 
             // Out-of-line damping derivatives
             double exp_term = std::exp(expo_outl);
