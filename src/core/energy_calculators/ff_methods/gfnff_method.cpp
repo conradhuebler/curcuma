@@ -1482,10 +1482,12 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
                 m_last_cn_raw = Vector::Map(cn_result.cn_raw.data(), m_atomcount).eval();
                 m_last_cn_neighbors = std::move(cn_result.neighbors);
             } else {
-                // Fallback: threshold-based O(N²) path — no neighbor list available
+                // Fallback: threshold-based O(N²) path — no neighbor list available.
+                // Nov 2026 (A2): the reference threshold from cn_accuracy (cnThresholdSqBohr), as in
+                // updateDynamicState; it was a fixed 1600 Bohr^2 here before.
                 std::vector<double> cn_raw_std;
                 auto cn_vec = CNCalculator::calculateGFNFFCN(
-                    m_atoms, m_geometry_bohr, 1600.0, -7.5, 4.4, &cn_raw_std, &m_cell_bohr_ortho);
+                    m_atoms, m_geometry_bohr, cnThresholdSqBohr(), -7.5, 4.4, &cn_raw_std, &m_cell_bohr_ortho);
                 if (m_gpu_path_preallocated) {
                     std::memcpy(m_last_cn.data(), cn_vec.data(), m_atomcount * sizeof(double));
                 } else {
@@ -1620,14 +1622,16 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
             // WP-Disp (Mai 2026): extend stencil for dispersion cutoff (Site D).
             // dC6(i,j)/dCN(i) * dCN(i)/dx_k requires CN derivatives to reach all j
             // in the active dispersion pair-list; stencil must cover that range.
-            double max_nonbonded_cut = std::max({ 40.0, eeq_cut, disp_cut });
+            // Nov 2026 (A2): never below the CN range itself (only matters for cn_cutoff_bohr = 0
+            // with cn_accuracy <= 0, the all-pairs CN; otherwise the CN range is <= 40).
+            double max_nonbonded_cut = std::max({ 40.0, eeq_cut, disp_cut, cnDerivativeRangeBohr() });
             // Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A2): dCN_i/dx_k is non-zero only
             // for the pairs the CN sum itself contains, so the derivative never needs a range
             // beyond the CN one. The chain rule of dispersion/EEQ multiplies the per-atom dE/dCN_i
             // (already summed over every partner j of i) by dCN_i/dx_k; the reach of j does not
             // enter dCN_i/dx_k. With the neighbour list (cn_cutoff_bohr > 0) this threshold is
             // not read at all; it matters only for the N^2 branch (cn_cutoff_bohr = 0, whose CN
-            // uses 1600 Bohr^2 above, or an external CN without a list). With a periodic cell it
+            // uses cnThresholdSqBohr() above, or an external CN without a list). With a periodic cell it
             // is therefore the CN range, so the 40-Bohr floor does not block the L/2 check;
             // without a cell it stays exactly as it was.
             if (m_cell_bohr_ortho.active)
@@ -4609,7 +4613,8 @@ bool GFNFF::initializeForceField()
                     cnDerivativeRangeBohr()));
         else
             CurcumaLogger::param("  cn_deriv_cutoff",
-                std::string("40.00 Bohr  (hardcoded, topology-init + per-step CN derivatives)"));
+                fmt::format("{:.2f} Bohr  (max(40, eeq_distance_cutoff, dispersion_cutoff_bohr, CN range))",
+                    std::max({ 40.0, eeq_cut, dispersionCutoffBohr(), cnDerivativeRangeBohr() })));
         CurcumaLogger::param("  eeq_distance_cutoff",
             fmt::format("{:.2f} Bohr  ({})", eeq_cut,
                 eeq_cut > 0.0 ? "OPT-IN — Hellmann-Feynman risk if inconsistent across sites"
@@ -12913,24 +12918,21 @@ std::vector<std::pair<std::string, double>> GFNFF::activeCutoffsBohr() const
     // CN neighbour list (prepareCNAndEEQ, CNCalculator): cn_cutoff_bohr, or with 0 the
     // accuracy threshold cnthr = 100 - 50 log10(acc) Bohr^2 (acc 0 = all pairs).
     const double cn_cutoff = m_parameters.value("cn_cutoff_bohr", 10.0);
-    const double cn_acc = m_parameters.value("cn_accuracy", 1.0);
     if (cn_cutoff > 0.0)
         cut.emplace_back("cn_cutoff_bohr (CN neighbour list)", cn_cutoff);
     else
-        cut.emplace_back("CN accuracy threshold sqrt(100 - 50 log10(cn_accuracy))",
-            cn_acc > 0.0 ? std::sqrt(std::max(0.0, 100.0 - 50.0 * std::log10(cn_acc)))
-                         : std::numeric_limits<double>::infinity());
+        cut.emplace_back("CN accuracy threshold sqrt(100 - 50 log10(cn_accuracy))", cnDerivativeRangeBohr());
 
     // CN-derivative range (prepareCNAndEEQ). Without a cell: max(40, eeq_distance_cutoff,
-    // dispersion_cutoff_bohr); with a cell (Nov 2026, A2) the CN range itself, see
+    // dispersion_cutoff_bohr, CN range); with a cell (Nov 2026, A2) the CN range itself, see
     // cnDerivativeRangeBohr(). Only cells are checked, so the periodic value is the one listed.
     const double disp_cut = dispersionCutoffBohr();
     if (m_has_pbc)
-        cut.emplace_back("CN-derivative range (= CN range: cn_cutoff_bohr, or 40 for the 1600 Bohr^2 "
-                         "per-step CN with cn_cutoff_bohr = 0)", cnDerivativeRangeBohr());
+        cut.emplace_back("CN-derivative range (= CN range: cn_cutoff_bohr, or sqrt(cnthr(cn_accuracy)) "
+                         "with cn_cutoff_bohr = 0)", cnDerivativeRangeBohr());
     else
-        cut.emplace_back("CN-derivative range max(40, eeq_distance_cutoff, dispersion_cutoff_bohr)",
-            std::max({ 40.0, m_parameters.value("eeq_distance_cutoff", 0.0), disp_cut }));
+        cut.emplace_back("CN-derivative range max(40, eeq_distance_cutoff, dispersion_cutoff_bohr, CN range)",
+            std::max({ 40.0, m_parameters.value("eeq_distance_cutoff", 0.0), disp_cut, cnDerivativeRangeBohr() }));
 
     // D4 pair list (D4ParameterGenerator, applyDispersionCutoff, dispersionSkinBohr): built at
     // 60 Bohr, evaluated at 50 Bohr, both capped by dispersion_cutoff_bohr.
@@ -12988,13 +12990,22 @@ std::vector<std::pair<std::string, double>> GFNFF::activeCutoffsBohr() const
     return cut;
 }
 
+double GFNFF::cnThresholdSqBohr() const
+{
+    // Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A2): squared CN pair threshold for
+    // cn_cutoff_bohr = 0, the reference cnthr(cn_accuracy). Read by the per-step N^2 CN
+    // (prepareCNAndEEQ), cnDerivativeRangeBohr(); updateDynamicState reaches the same formula
+    // through CNCalculator::calculateGFNFFCN(..., cn_cutoff_bohr, cn_accuracy, ...).
+    return CNCalculator::gfnffAccuracyThresholdSqBohr(m_parameters.value("cn_accuracy", 1.0));
+}
+
 double GFNFF::cnDerivativeRangeBohr() const
 {
     // Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A2): the range of the per-step CN
-    // (prepareCNAndEEQ): cn_cutoff_bohr with the neighbour list, else the fixed 1600 Bohr^2 of
-    // the N^2 fallback there. Used as CN-derivative range with a periodic cell only.
+    // (prepareCNAndEEQ, updateDynamicState): cn_cutoff_bohr with the neighbour list, else
+    // sqrt(cnThresholdSqBohr()). CN-derivative range with a periodic cell, lower bound without.
     const double cn_cutoff = m_parameters.value("cn_cutoff_bohr", 10.0);
-    return cn_cutoff > 0.0 ? cn_cutoff : 40.0;
+    return cn_cutoff > 0.0 ? cn_cutoff : std::sqrt(std::max(0.0, cnThresholdSqBohr()));
 }
 
 void GFNFF::configurePeriodicCell()

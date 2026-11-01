@@ -352,24 +352,22 @@ std::vector<double> CNCalculator::calculateGFNFFCN(
         }
         return cn_values;
 
-    } else if (cn_accuracy > 0.0) {
-        // ============================================================
-        // MODE 2: Fortran accuracy-based threshold (O(N²) with skip)
-        // ============================================================
-        // Reference: gfnff_param.f90:551
-        // cnthr = 100.0 - log10(accuracy) * 50.0
-        double cnthr = 100.0 - std::log10(cn_accuracy) * 50.0;
-        double threshold = cnthr;  // threshold in Bohr²
-        return calculateGFNFFCN(atoms, geometry_bohr, threshold, kn, cnmax, nullptr, cell);
-
     } else {
         // ============================================================
-        // MODE 3: Full O(N²) reference mode (no cutoff)
+        // MODE 2 (cn_accuracy > 0): Fortran accuracy-based threshold (O(N²) with skip)
+        // MODE 3 (cn_accuracy <= 0): full O(N²) reference mode (threshold 1e30)
         // ============================================================
-        // Use a very large threshold to disable skipping
-        double threshold = 1e30;  // Effectively no cutoff
+        const double threshold = gfnffAccuracyThresholdSqBohr(cn_accuracy);  // Bohr²
         return calculateGFNFFCN(atoms, geometry_bohr, threshold, kn, cnmax, nullptr, cell);
     }
+}
+
+double CNCalculator::gfnffAccuracyThresholdSqBohr(double cn_accuracy)
+{
+    // Claude Generated (Nov 2026, A2). Reference: gfnff_param.f90:551, cnthr = 100 - log10(acc)*50.
+    if (cn_accuracy > 0.0)
+        return 100.0 - std::log10(cn_accuracy) * 50.0;
+    return 1e30;  // effectively no cutoff
 }
 
 // WP-D Stage C (May 2026): single-pass CN + cn_raw + symmetric neighbor list.

@@ -424,12 +424,32 @@ static void testSupercell()
     }
 }
 
+// Claude Generated (Nov 2026, A2): cn_cutoff_bohr = 0 means the reference threshold
+// cnthr = 100 - 50 log10(acc) Bohr^2 (gfnff_param.f90:551) in every call; the mode overload
+// and the threshold overload fed by gfnffAccuracyThresholdSqBohr() must agree bitwise.
+static void testAccuracyThreshold()
+{
+    check(CNCalculator::gfnffAccuracyThresholdSqBohr(1.0) == 100.0, "cnthr(1) = 100 Bohr^2");
+    check(std::abs(CNCalculator::gfnffAccuracyThresholdSqBohr(0.1) - 150.0) < 1e-12, "cnthr(0.1) = 150 Bohr^2");
+    check(CNCalculator::gfnffAccuracyThresholdSqBohr(0.0) >= 1e30, "cnthr(0) = all pairs");
+    const Mol m = dimerAngstrom();
+    const std::vector<int> atoms(m.m_atoms.begin(), m.m_atoms.end());
+    const Eigen::MatrixXd gb = m.m_geometry * A2B;
+    for (double acc : { 1.0, 0.1, 0.0 }) {
+        const auto mode = CNCalculator::calculateGFNFFCN(atoms, gb, 0.0, acc, -7.5, 4.4);
+        const auto thr = CNCalculator::calculateGFNFFCN(atoms, gb,
+            CNCalculator::gfnffAccuracyThresholdSqBohr(acc), -7.5, 4.4, nullptr);
+        check(mode == thr, "cn_cutoff_bohr 0: mode CN == threshold CN bitwise, acc " + std::to_string(acc));
+    }
+}
+
 int main()
 {
     CurcumaLogger::set_verbosity(0);
     testCellList();
     testShiftAndDerivative();
     testSupercell();
+    testAccuracyThreshold();
     if (g_failures == 0)
         std::printf("pbc_cn: all checks passed\n");
     return g_failures == 0 ? 0 : 1;

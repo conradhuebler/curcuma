@@ -113,6 +113,12 @@ public:
         const PBCUtils::OrthoCell* cell = nullptr
     );
 
+    /// Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A2): squared CN pair threshold in Bohr^2
+    /// of the reference for cn_cutoff_bohr = 0: cnthr = 100 - 50 log10(acc) (gfnff_param.f90:551,
+    /// applied as r > sqrt(cnthr) in gfnff_cn.f90:77/84); acc <= 0 gives 1e30 (all pairs).
+    /// The only place of this formula; every cn_cutoff_bohr = 0 CN call goes through it.
+    static double gfnffAccuracyThresholdSqBohr(double cn_accuracy);
+
     /// WP-D Stage C (May 2026): CN + cn_raw + symmetric neighbor list in one pass.
     /// Returns all three so dcn can skip its own N²-erf loop AND its O(N²) pair scan.
     struct CNResult {

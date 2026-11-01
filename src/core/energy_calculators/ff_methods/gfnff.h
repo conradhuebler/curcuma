@@ -1713,6 +1713,8 @@ private:
     std::vector<std::pair<std::string, double>> activeCutoffsBohr() const;
     /// Claude Generated (Nov 2026, A2): range of the per-step CN in Bohr; CN-derivative range with a cell.
     double cnDerivativeRangeBohr() const;
+    /// Claude Generated (Nov 2026, A2): CN threshold in Bohr^2 for cn_cutoff_bohr = 0, reference cnthr(cn_accuracy).
+    double cnThresholdSqBohr() const;
     /// Claude Generated (Sep 2026): electrostatics pair cutoff in Bohr; coulomb_r_cut <= 0 (default) = none, as the reference
     double coulombRCutBohr() const;
     /// Claude Generated (Sep 2026): true if the repulsion list is cell-list built (distance-filtered),

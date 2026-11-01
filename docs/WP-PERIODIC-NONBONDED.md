@@ -154,8 +154,9 @@ periodic. Without a cell every path is unchanged (checked bit for bit, see below
 - **40-Bohr floor**: the derivative support is the CN support (dCN_i/dx_k = 0 unless k is a CN partner of i). With the
   neighbour list (default `cn_cutoff_bohr` 10) the threshold is not read at all; the "stencil must cover the dispersion
   range" comment at that site is wrong (the reach of j enters dE/dCN_i, not dCN_i/dx_k). With a cell the range is now
-  `cnDerivativeRangeBohr()` = `cn_cutoff_bohr` (40 for `cn_cutoff_bohr` 0, matching the 1600 Bohr^2 per-step CN there);
+  `cnDerivativeRangeBohr()` = `cn_cutoff_bohr` (for `cn_cutoff_bohr` 0 sqrt(cnthr), see the next item);
   without a cell `max(40, eeq_distance_cutoff, dispersion_cutoff_bohr)` as before. The L/2 check lists the periodic value.
+- **`cn_cutoff_bohr` 0 unified (resolved)**: the per-step N^2 CN used a fixed 1600 Bohr^2, `updateDynamicState` cnthr = 100 - 50 log10(`cn_accuracy`); all now use cnthr via `CNCalculator::gfnffAccuracyThresholdSqBohr` / `GFNFF::cnThresholdSqBohr` (reference gfnff_param.f90:551, gfnff_engrad.F90:299; the reference accuracy is 0.1, i.e. 150 Bohr^2, our `cn_accuracy` default 1 gives 100); default path bitwise unchanged on the 7 structures, `cn_cutoff_bohr` 0 bitwise unchanged on caffeine, water8, urea197.
 - **Smallest accepted cube with defaults** is still L > 120 Bohr (D4 build 60); next blockers repulsion 22, HB/XB 21.2.
 - **Topology-init CN** keeps its 40-Bohr threshold with the minimum image; for L/2 < 40 pairs beyond L/2 count with their
   nearest image only (their erf contribution is below 1e-20 for the pairs measured; not checked for heavy elements).
