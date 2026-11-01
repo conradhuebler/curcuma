@@ -126,7 +126,8 @@ with a cell is the non-periodic energy (ctest `pbc_foundation` checks this bit f
   (`topology_mode react`). Coulomb/EEQ without cutoff are not checked (Ewald). Without a cell nothing changes.
 - **Consequence**: with the defaults the smallest accepted cube is L > 120 Bohr (63.5 A, D4 build radius). Even with
   `dispersion_cutoff_bohr <= 35` the CN-derivative floor of 40 Bohr needs L > 80 Bohr (42.3 A), so the 1825-water box of
-  A0 (37.9 A) is refused. Whether that 40-Bohr floor is needed at all is open (the CN derivative itself ends at 10 Bohr).
+  A0 (37.9 A) is refused. Whether that 40-Bohr floor is needed at all is open (the CN derivative itself ends at 10 Bohr);
+  answered in A2: not needed, with a cell it is now the CN range.
 - **SimpleMD**: `applyPeriodicBoundaryConditions()` wraps whole fragments (`Molecule::GetFragments()`, covalent-radius
   graph, MIC distances with a cell) by their centre of mass into fractional [0,1) via `PBCUtils::wrapFragmentsIntoCell()`;
   O(N) gate before the O(N^2) fragment search. Systems with CG beads keep the per-bead wrap (2 A bead radius would merge a
@@ -134,3 +135,41 @@ with a cell is the non-periodic energy (ctest `pbc_foundation` checks this bit f
 - **Not done in A1**: MIC in the pair loops and pair-list builders (A2), EEQ/Coulomb periodicity, triclinic cells, GPU
   parity of the check (the GPU wrapper calls the same `GFNFF` set-up, not verified on a GPU), removal of the
   `wrapIntoContainer()` stopgap. Human production testing pending.
+
+## A2 periodic coordination number (2026-11-01, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+On `feature/bulk` (base `273ff2cd`). **Only the CN is periodic.** Dispersion, repulsion, Coulomb/EEQ, HB/XB, bonded terms,
+topology bonds and the D4 generator's own set-up CN still use plain distances, so a periodic GFN-FF energy is not yet
+periodic. Without a cell every path is unchanged (checked bit for bit, see below).
+
+- **CN value**: `CNCalculator::calculateGFNFFCN` (both overloads) and `calculateGFNFFCNWithNeighbors` take an optional
+  `const PBCUtils::OrthoCell*`; active cell: every pair vector is the minimum image (`applyMinimumImageOrtho`). The
+  neighbour-list pass uses a periodic `SpatialCellList` (`calculateGFNFFCNWithNeighborsPeriodic`), neighbours sorted
+  ascending (the non-periodic order), thread-count independent. All GFN-FF CPU call sites pass `&m_cell_bohr_ortho`:
+  per-step CN and its N^2 fallback, `updateDynamicState`, topology-init CN, angle CN, `mchar` (incl. its pair loop),
+  `calculateTopologyCharges`, `NumGradFixedCharges`.
+- **CN derivative**: `calculateCoordinationNumberDerivatives` (every branch: threaded/serial, `GFNFF_FAST_EXP` or not,
+  neighbour list or threshold, the cn_raw recompute) and the fused path (`GFNFF_CN_DCN_FUSION`, off in `release/`, not
+  compiled or tested) take r_ij = x_j - x_i as minimum image, so both pair entries and the diagonal refer to the nearest image.
+- **40-Bohr floor**: the derivative support is the CN support (dCN_i/dx_k = 0 unless k is a CN partner of i). With the
+  neighbour list (default `cn_cutoff_bohr` 10) the threshold is not read at all; the "stencil must cover the dispersion
+  range" comment at that site is wrong (the reach of j enters dE/dCN_i, not dCN_i/dx_k). With a cell the range is now
+  `cnDerivativeRangeBohr()` = `cn_cutoff_bohr` (40 for `cn_cutoff_bohr` 0, matching the 1600 Bohr^2 per-step CN there);
+  without a cell `max(40, eeq_distance_cutoff, dispersion_cutoff_bohr)` as before. The L/2 check lists the periodic value.
+- **Smallest accepted cube with defaults** is still L > 120 Bohr (D4 build 60); next blockers repulsion 22, HB/XB 21.2.
+- **Topology-init CN** keeps its 40-Bohr threshold with the minimum image; for L/2 < 40 pairs beyond L/2 count with their
+  nearest image only (their erf contribution is below 1e-20 for the pairs measured; not checked for heavy elements).
+- **Tests** (`ctest -R pbc_`): `pbc_cn` (cell list vs brute-force MIC on 4 grids; GFN-FF CN/dCN of the water dimer with one
+  molecule shifted by L and/or torn across the boundary equal to the intact dimer without cell to 4.4e-16 / 3.6e-15;
+  small (8,8,9) Bohr cell with cut 3.9 equal to a 27-image brute-force sum, 1.3e-15, images change CN by 0.81;
+  2x1x1/1x1x2 supercells equal per atom; 384-atom 4x4x4 replica equal to the single cell and bitwise for 1 and 4 threads;
+  analytic dCN vs central FD (Angstrom) for the torn dimer 4.7e-8 at h = 1e-4 A, quadratic in h). `pbc_foundation`'s
+  100 A cell check is now 1e-12 Eh, not bitwise (MIC arithmetic L*(d/L) is not exact).
+- **Not tested**: total energy or gradient with a cell (not periodic yet), CN with charge groups/react mode under a cell,
+  GPU paths. Without a cell: -sp energy (15 decimals) and full gradient dump (17 digits, md5) identical before/after for
+  benzene, caffeine, methyl-glucopyranoside, water8, hydronium-water2, urea-water197, peo201-water500 at 1 and 4 threads.
+- **GPU (code reading only)**: `k_cn_compute`/`k_cn_chainrule` use `applyMIC` with the same `rint` arithmetic (the
+  off-diagonal products are exact zeros), so CPU and GPU can agree to rounding; differences: GPU pair test `r2 > thr`
+  (inclusive) vs CPU strict `<`, radii `d_rcov_d3 * 4/3` vs `gfnff_cn_rcov_bohr()`, fixed-point CN sums. Not run.
+- Human production testing pending.
+

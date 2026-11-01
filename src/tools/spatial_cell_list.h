@@ -27,13 +27,23 @@
 #include <cmath>
 #include <functional>
 
+#include "src/tools/pbc_utils.h"
+
 /*!
  * @brief Minimal spatial cell-list for O(N) neighbor queries.
  *
- * Header-only, no PBC (molecular systems).  Cell size == cutoff,
- * therefore only 27 neighbor cells have to be inspected.
+ * Header-only.  Cell size == cutoff, therefore only 27 neighbor cells have to be inspected.
  * For N < ~800 the build overhead usually does not pay off;
  * callers should keep a sequential fallback path.
+ *
+ * Periodic mode (Claude Generated, Nov 2026, WP-PERIODIC-NONBONDED A2): build() with an active
+ * PBCUtils::OrthoCell bins the atoms by their wrapped fractional coordinate into a grid that
+ * spans the cell (cell size >= cutoff), the neighbour cells wrap around, and every squared
+ * distance handed to a callback is that of the minimum-image vector
+ * (PBCUtils::applyMinimumImageOrtho of x_i - x_j). Requires cutoff < L_min/2, so at most one image
+ * of an atom is within the cutoff; the caller checks that (PBCUtils::checkCutoffsAgainstCell).
+ * The periodic queries visit pairs in a different order than the non-periodic ones; without a
+ * cell (or with an inactive one) the class behaves exactly as before.
  */
 class SpatialCellList {
 public:
@@ -45,6 +55,7 @@ public:
      */
     void build(const Eigen::MatrixXd& coords, double cutoff)
     {
+        m_periodic = false;  // Nov 2026: a rebuild without a cell is non-periodic again
         m_coords = coords;
         m_natoms = static_cast<int>(coords.rows());
         m_cutoff = cutoff;
@@ -124,6 +135,62 @@ public:
         }
     }
 
+    /*! @brief Build a periodic cell list - Claude Generated (Nov 2026, A2).
+     *  @param coords  Nx3 matrix (same unit as the cell), atoms may lie outside the cell.
+     *  @param cutoff  Pair cutoff, must be < cell.minLength()/2 (not checked here).
+     *  @param cell    Orthorhombic cell; inactive -> identical to build(coords, cutoff).
+     */
+    void build(const Eigen::MatrixXd& coords, double cutoff, const PBCUtils::OrthoCell& cell)
+    {
+        if (!cell.active) {
+            m_periodic = false;
+            build(coords, cutoff);
+            return;
+        }
+        m_periodic = true;
+        m_pbc = cell;
+        m_coords = coords;
+        m_natoms = static_cast<int>(coords.rows());
+        m_cutoff = cutoff;
+        m_cells.clear();
+        if (m_natoms == 0 || cutoff <= 0.0)
+            return;
+
+        // n cells per axis with L/n >= cutoff, so a pair within the cutoff is in the same or an
+        // adjacent (wrapped) cell. Same allocation budget as the non-periodic build: halving n
+        // only enlarges the cells, which is always correct.
+        constexpr double kMaxCells = 2.0e6;
+        double n[3];
+        for (int k = 0; k < 3; ++k)
+            n[k] = std::max(1.0, std::floor(cell.L[k] / cutoff));
+        while (n[0] * n[1] * n[2] > kMaxCells)
+            for (int k = 0; k < 3; ++k)
+                n[k] = std::max(1.0, std::floor(n[k] / 2.0));
+        m_ncells_x = static_cast<int>(n[0]);
+        m_ncells_y = static_cast<int>(n[1]);
+        m_ncells_z = static_cast<int>(n[2]);
+        m_cells.resize(static_cast<size_t>(m_ncells_x) * m_ncells_y * m_ncells_z);
+        for (int i = 0; i < m_natoms; ++i) {
+            int cx, cy, cz;
+            atomCellCoords(i, cx, cy, cz);
+            m_cells[cellIndex(cx, cy, cz)].push_back(i);
+        }
+    }
+
+    /*! @brief True when the list was built with an active periodic cell. */
+    bool periodic() const { return m_periodic; }
+
+    /*! @brief Pair displacement x_i - x_j, minimum image in periodic mode - Claude Generated (Nov 2026).
+     *  The same vector whose squared norm the queries hand to their callbacks. */
+    void displacement(int i, int j, double& dx, double& dy, double& dz) const
+    {
+        dx = m_coords(i, 0) - m_coords(j, 0);
+        dy = m_coords(i, 1) - m_coords(j, 1);
+        dz = m_coords(i, 2) - m_coords(j, 2);
+        if (m_periodic)
+            PBCUtils::applyMinimumImageOrtho(m_pbc, dx, dy, dz);
+    }
+
     /*! @brief True if no atoms were inserted. */
     bool empty() const { return m_natoms == 0; }
 
@@ -160,6 +227,22 @@ public:
         const double cutoff_sq = m_cutoff * m_cutoff;
         int cix, ciy, ciz;
         atomCellCoords(i, cix, ciy, ciz);
+
+        if (m_periodic) {
+            // Every distinct wrapped neighbour cell once; j > i gives each pair once.
+            forEachPeriodicNeighbourCell(cix, ciy, ciz, [&](int nci) {
+                for (int j : m_cells[nci]) {
+                    if (j <= i)
+                        continue;
+                    double ddx, ddy, ddz;
+                    displacement(i, j, ddx, ddy, ddz);
+                    const double r2 = ddx * ddx + ddy * ddy + ddz * ddz;
+                    if (r2 <= cutoff_sq)
+                        callback(i, j, r2);
+                }
+            });
+            return;
+        }
 
         for (int dz = -1; dz <= 1; ++dz) {
             int nz = ciz + dz;
@@ -228,6 +311,21 @@ public:
         int cix, ciy, ciz;
         atomCellCoords(i, cix, ciy, ciz);
 
+        if (m_periodic) {
+            forEachPeriodicNeighbourCell(cix, ciy, ciz, [&](int nci) {
+                for (int j : m_cells[nci]) {
+                    if (j == i)
+                        continue;
+                    double ddx, ddy, ddz;
+                    displacement(i, j, ddx, ddy, ddz);
+                    const double r2 = ddx * ddx + ddy * ddy + ddz * ddz;
+                    if (r2 <= cutoff_sq)
+                        callback(j, r2);
+                }
+            });
+            return;
+        }
+
         for (int dz = -1; dz <= 1; ++dz) {
             int nz = ciz + dz;
             if (nz < 0 || nz >= m_ncells_z)
@@ -255,6 +353,8 @@ public:
     }
 
 private:
+    bool m_periodic = false;      ///< built with an active cell (Nov 2026, A2)
+    PBCUtils::OrthoCell m_pbc;    ///< that cell
     int m_natoms = 0;
     double m_cutoff = 0.0;
     double m_inv_cell_size = 0.0;
@@ -290,8 +390,63 @@ private:
                          axisCell(m_coords(atom, 2), m_min[2], m_ncells_z));
     }
 
+    /*! @brief Claude Generated (Nov 2026, A2): cell along one axis of the periodic grid from the
+     *  wrapped fractional coordinate s - floor(s) in [0,1); NaN goes to cell 0. */
+    static inline int axisCellPeriodic(double x, double inv_L, int n)
+    {
+        double s = x * inv_L;
+        s -= std::floor(s);
+        if (s >= 1.0)  // s = -1e-17 rounds to 1.0 above; that atom belongs to cell 0
+            s = 0.0;
+        const double t = s * static_cast<double>(n);
+        if (!(t >= 0.0))
+            return 0;
+        const double f = std::floor(t);
+        if (f >= static_cast<double>(n - 1))
+            return n - 1;
+        return static_cast<int>(f);
+    }
+
+    /*! @brief Claude Generated (Nov 2026, A2): the distinct cells c-1, c, c+1 (mod n) of one
+     *  axis; fewer than three when n < 3, so no cell is visited twice. Returns their count. */
+    static inline int periodicAxisNeighbours(int c, int n, int out[3])
+    {
+        if (n == 1) {
+            out[0] = 0;
+            return 1;
+        }
+        if (n == 2) {
+            out[0] = 0;
+            out[1] = 1;
+            return 2;
+        }
+        out[0] = (c + n - 1) % n;
+        out[1] = c;
+        out[2] = (c + 1) % n;
+        return 3;
+    }
+
+    template <typename Func>
+    void forEachPeriodicNeighbourCell(int cix, int ciy, int ciz, Func&& f) const
+    {
+        int xs[3], ys[3], zs[3];
+        const int nx = periodicAxisNeighbours(cix, m_ncells_x, xs);
+        const int ny = periodicAxisNeighbours(ciy, m_ncells_y, ys);
+        const int nz = periodicAxisNeighbours(ciz, m_ncells_z, zs);
+        for (int a = 0; a < nz; ++a)
+            for (int b = 0; b < ny; ++b)
+                for (int c = 0; c < nx; ++c)
+                    f(cellIndex(xs[c], ys[b], zs[a]));
+    }
+
     inline void atomCellCoords(int atom, int& cx, int& cy, int& cz) const
     {
+        if (m_periodic) {
+            cx = axisCellPeriodic(m_coords(atom, 0), m_pbc.inv_L[0], m_ncells_x);
+            cy = axisCellPeriodic(m_coords(atom, 1), m_pbc.inv_L[1], m_ncells_y);
+            cz = axisCellPeriodic(m_coords(atom, 2), m_pbc.inv_L[2], m_ncells_z);
+            return;
+        }
         cx = axisCell(m_coords(atom, 0), m_min[0], m_ncells_x);
         cy = axisCell(m_coords(atom, 1), m_min[1], m_ncells_y);
         cz = axisCell(m_coords(atom, 2), m_min[2], m_ncells_z);

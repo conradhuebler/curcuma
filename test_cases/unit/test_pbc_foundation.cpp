@@ -149,7 +149,8 @@ static void testCutoffCheck()
     const auto none = gfnffEnergy(nullptr);
     check(!none.first, "no cell: GFN-FF runs without error");
 
-    // 20 A cube: L/2 = 18.9 Bohr, below the CN-derivative range (40) and the D4 radii (50/60)
+    // 20 A cube: L/2 = 18.9 Bohr, below the D4 radii (50/60) and the repulsion/HB radii (since A2 the
+    // CN-derivative range with a cell is the CN cutoff, 10 Bohr, and no longer blocks)
     const Eigen::Matrix3d small = Eigen::Matrix3d::Identity() * 20.0;
     check(gfnffEnergy(&small).first, "20 A cell: cutoff check raises an error");
 
@@ -161,8 +162,9 @@ static void testCutoffCheck()
     const Eigen::Matrix3d large = Eigen::Matrix3d::Identity() * 100.0;
     const auto big = gfnffEnergy(&large);
     check(!big.first, "100 A cell: no error");
-    // A1 applies no minimum image yet: the energy must be the non-periodic one, bit for bit.
-    check(big.second == none.second, "100 A cell: energy equals the no-cell energy bit for bit");
+    // The minimum image (only in the CN since A2) does not change any pair of a dimer in a 100 A cell, but
+    // the MIC arithmetic (d*inv_L*L) is not bit-exact, so compare to 1e-12 Eh instead of bit for bit.
+    check(std::abs(big.second - none.second) < 1e-12, "100 A cell: energy equals the no-cell energy to 1e-12 Eh");
     std::printf("water dimer GFN-FF: no cell %.15f Eh, 100 A cell %.15f Eh\n", none.second, big.second);
 }
 

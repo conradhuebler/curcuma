@@ -675,6 +675,16 @@ endif()
 add_test(NAME pbc_foundation COMMAND test_pbc_foundation WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 set_tests_properties(pbc_foundation PROPERTIES TIMEOUT 120 LABELS "pbc;gfnff")
 
+# Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A2): periodic coordination number (value and
+# derivative), periodic SpatialCellList. Tests the CN only; the energy terms have no minimum image yet.
+add_executable(test_pbc_cn unit/test_pbc_cn.cpp)
+target_link_libraries(test_pbc_cn curcuma_core test_molecule_registry)
+if(USE_PCH)
+    target_precompile_headers(test_pbc_cn REUSE_FROM curcuma_core)
+endif()
+add_test(NAME pbc_cn COMMAND test_pbc_cn WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(pbc_cn PROPERTIES TIMEOUT 300 LABELS "pbc;gfnff")
+
 # Streaming trajectory properties. Claude Generated 2026 - geometry worked out by hand.
 add_executable(test_trajprops test_trajprops.cpp)
 target_link_libraries(test_trajprops curcuma_cap curcuma_core)

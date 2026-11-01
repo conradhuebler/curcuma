@@ -1310,7 +1310,8 @@ void GFNFF::updateDynamicState(TopologyInfo& topo) const {
     // P2b (Apr 2026): Configurable CN cutoff — neighbor list, accuracy-based, or full O(N²)
     double cn_cutoff_bohr = m_parameters.value("cn_cutoff_bohr", 10.0);
     double cn_accuracy = m_parameters.value("cn_accuracy", 1.0);
-    auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr, cn_cutoff_bohr, cn_accuracy, -7.5, 4.4);
+    auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr, cn_cutoff_bohr, cn_accuracy, -7.5, 4.4,
+        &m_cell_bohr_ortho);  // Nov 2026 (A2): minimum image with a periodic cell
     topo.coordination_numbers = Eigen::Map<const Eigen::VectorXd>(cn_vec.data(), cn_vec.size());
 }
 
@@ -1469,8 +1470,10 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
 #endif
             if (cn_cutoff_bohr > 0.0) {
                 // Oct 2026: rows over the pool, bitwise equal to the serial pass (see cn_calculator.cpp).
+                // Nov 2026 (A2): periodic neighbour list and minimum image with a cell.
                 auto cn_result = CNCalculator::calculateGFNFFCNWithNeighbors(
-                    m_atoms, m_geometry_bohr, cn_cutoff_bohr, -7.5, 4.4, threadPool(), m_threads);
+                    m_atoms, m_geometry_bohr, cn_cutoff_bohr, -7.5, 4.4, threadPool(), m_threads,
+                    &m_cell_bohr_ortho);
                 if (m_gpu_path_preallocated) {
                     std::memcpy(m_last_cn.data(), cn_result.cn_values.data(), m_atomcount * sizeof(double));
                 } else {
@@ -1482,7 +1485,7 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
                 // Fallback: threshold-based O(N²) path — no neighbor list available
                 std::vector<double> cn_raw_std;
                 auto cn_vec = CNCalculator::calculateGFNFFCN(
-                    m_atoms, m_geometry_bohr, 1600.0, -7.5, 4.4, &cn_raw_std);
+                    m_atoms, m_geometry_bohr, 1600.0, -7.5, 4.4, &cn_raw_std, &m_cell_bohr_ortho);
                 if (m_gpu_path_preallocated) {
                     std::memcpy(m_last_cn.data(), cn_vec.data(), m_atomcount * sizeof(double));
                 } else {
@@ -1617,7 +1620,18 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
             // WP-Disp (Mai 2026): extend stencil for dispersion cutoff (Site D).
             // dC6(i,j)/dCN(i) * dCN(i)/dx_k requires CN derivatives to reach all j
             // in the active dispersion pair-list; stencil must cover that range.
-            const double max_nonbonded_cut = std::max({ 40.0, eeq_cut, disp_cut });
+            double max_nonbonded_cut = std::max({ 40.0, eeq_cut, disp_cut });
+            // Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A2): dCN_i/dx_k is non-zero only
+            // for the pairs the CN sum itself contains, so the derivative never needs a range
+            // beyond the CN one. The chain rule of dispersion/EEQ multiplies the per-atom dE/dCN_i
+            // (already summed over every partner j of i) by dCN_i/dx_k; the reach of j does not
+            // enter dCN_i/dx_k. With the neighbour list (cn_cutoff_bohr > 0) this threshold is
+            // not read at all; it matters only for the N^2 branch (cn_cutoff_bohr = 0, whose CN
+            // uses 1600 Bohr^2 above, or an external CN without a list). With a periodic cell it
+            // is therefore the CN range, so the 40-Bohr floor does not block the L/2 check;
+            // without a cell it stays exactly as it was.
+            if (m_cell_bohr_ortho.active)
+                max_nonbonded_cut = cnDerivativeRangeBohr();
             const double cn_deriv_cutoff_sq = max_nonbonded_cut * max_nonbonded_cut;
             // WP-D Stage A (May 2026): pass cn_raw to skip the N²-erf loop in dcn step 1.
             // WP-D Stage C (May 2026): pass neighbor list (when available) to replace the
@@ -4589,8 +4603,13 @@ bool GFNFF::initializeForceField()
             fmt::format("{:.2f} Bohr  (per-step CN neighbor list)", cn_cut));
         CurcumaLogger::param("  cn_accuracy",
             fmt::format("{:.2f}  (used when cn_cutoff_bohr=0)", cn_acc));
-        CurcumaLogger::param("  cn_deriv_cutoff",
-            std::string("40.00 Bohr  (hardcoded, topology-init + per-step CN derivatives)"));
+        if (m_cell_bohr_ortho.active)  // Nov 2026 (A2): with a cell the derivative range is the CN range
+            CurcumaLogger::param("  cn_deriv_cutoff",
+                fmt::format("{:.2f} Bohr  (periodic cell: CN range; topology-init CN 40 Bohr with minimum image)",
+                    cnDerivativeRangeBohr()));
+        else
+            CurcumaLogger::param("  cn_deriv_cutoff",
+                std::string("40.00 Bohr  (hardcoded, topology-init + per-step CN derivatives)"));
         CurcumaLogger::param("  eeq_distance_cutoff",
             fmt::format("{:.2f} Bohr  ({})", eeq_cut,
                 eeq_cut > 0.0 ? "OPT-IN — Hellmann-Feynman risk if inconsistent across sites"
@@ -7224,6 +7243,12 @@ CNDerivStore GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, con
     // step 1 (the N²-erf loop that recomputes cn_raw) is skipped. Saves ~10 ms/step
     // on polymer N=1410 (WP-P2 baseline).
     const bool have_cn_raw = (cn_raw_in.size() == m_atomcount);
+    // Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A2): with a periodic cell every pair
+    // vector r_ij = x_j - x_i is the minimum image, the same vector the CN value was built from,
+    // so dCN_i/dx_j and dCN_j/dx_i (stored as the two pair entries and the diagonal) refer to the
+    // nearest image. Without a cell the branch is never taken and the numbers are unchanged.
+    const PBCUtils::OrthoCell& cell = m_cell_bohr_ortho;
+    const bool pbc = cell.active;
 
     const double kn = -7.5;
     const double cnmax = 4.4;
@@ -7250,7 +7275,9 @@ CNDerivStore GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, con
                 Eigen::Vector3d pos_i = m_geometry_bohr.row(i);
                 for (int j = 0; j < m_atomcount; ++j) {
                     if (i == j) continue;
-                    double distance_sq = (pos_i - m_geometry_bohr.row(j).transpose()).squaredNorm();
+                    Eigen::Vector3d d_ij = pos_i - m_geometry_bohr.row(j).transpose();
+                    if (pbc) PBCUtils::applyMinimumImageOrtho(cell, d_ij[0], d_ij[1], d_ij[2]);  // A2: minimum image
+                    double distance_sq = d_ij.squaredNorm();
                     if (distance_sq > threshold) continue;
                     double distance = std::sqrt(distance_sq);
                     double r_cov = rcov_bohr[i] + rcov_bohr[j];
@@ -7282,7 +7309,9 @@ CNDerivStore GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, con
             Eigen::Vector3d pos_i = m_geometry_bohr.row(i);
             for (int j = 0; j < m_atomcount; ++j) {
                 if (i == j) continue;
-                double distance_sq = (pos_i - m_geometry_bohr.row(j).transpose()).squaredNorm();
+                Eigen::Vector3d d_ij = pos_i - m_geometry_bohr.row(j).transpose();
+                if (pbc) PBCUtils::applyMinimumImageOrtho(cell, d_ij[0], d_ij[1], d_ij[2]);  // A2: minimum image
+                double distance_sq = d_ij.squaredNorm();
                 if (distance_sq > threshold) continue;
                 double distance = std::sqrt(distance_sq);
                 double r_cov = rcov_bohr[i] + rcov_bohr[j];
@@ -7360,6 +7389,7 @@ CNDerivStore GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, con
                     for (int j : (*neighbors)[i]) {
                         if (j >= i) continue;  // upper triangle only
                         Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
+                        if (pbc) PBCUtils::applyMinimumImageOrtho(cell, r_ij_vec[0], r_ij_vec[1], r_ij_vec[2]);  // A2: minimum image
                         double r_ij_sq = r_ij_vec.squaredNorm();
                         double r_ij = std::sqrt(r_ij_sq);
                         double rcov_sum = rcov_bohr[i] + rcov_bohr[j];
@@ -7376,6 +7406,7 @@ CNDerivStore GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, con
                 } else {
                     for (int j = 0; j < i; ++j) {
                         Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
+                        if (pbc) PBCUtils::applyMinimumImageOrtho(cell, r_ij_vec[0], r_ij_vec[1], r_ij_vec[2]);  // A2: minimum image
                         double r_ij_sq = r_ij_vec.squaredNorm();
                         if (r_ij_sq > threshold) continue;
 
@@ -7426,6 +7457,7 @@ CNDerivStore GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, con
                     for (int j : (*neighbors)[i]) {
                         if (j >= i) continue;
                         Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
+                        if (pbc) PBCUtils::applyMinimumImageOrtho(cell, r_ij_vec[0], r_ij_vec[1], r_ij_vec[2]);  // A2: minimum image
                         double r_ij = std::sqrt(r_ij_vec.squaredNorm());
                         double rcov_sum = rcov_bohr[i] + rcov_bohr[j];
                         double dr = (r_ij - rcov_sum) / rcov_sum;
@@ -7447,6 +7479,7 @@ CNDerivStore GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, con
                 } else {
                     for (int j = 0; j < i; ++j) {
                         Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
+                        if (pbc) PBCUtils::applyMinimumImageOrtho(cell, r_ij_vec[0], r_ij_vec[1], r_ij_vec[2]);  // A2: minimum image
                         double r_ij_sq = r_ij_vec.squaredNorm();
                         if (r_ij_sq > threshold) continue;
                         double r_ij = std::sqrt(r_ij_sq);
@@ -7523,6 +7556,7 @@ CNDerivStore GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, con
             for (int j : (*neighbors)[i]) {
                 if (j >= i) continue;
                 Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
+                if (pbc) PBCUtils::applyMinimumImageOrtho(cell, r_ij_vec[0], r_ij_vec[1], r_ij_vec[2]);  // A2: minimum image
                 double r_ij_sq = r_ij_vec.squaredNorm();
                 double r_ij = std::sqrt(r_ij_sq);
                 double rcov_sum = rcov_bohr[i] + rcov_bohr[j];
@@ -7539,6 +7573,7 @@ CNDerivStore GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, con
         } else {
             for (int j = 0; j < i; ++j) {
                 Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
+                if (pbc) PBCUtils::applyMinimumImageOrtho(cell, r_ij_vec[0], r_ij_vec[1], r_ij_vec[2]);  // A2: minimum image
                 double r_ij_sq = r_ij_vec.squaredNorm();
                 if (r_ij_sq > threshold) continue;
                 double r_ij = std::sqrt(r_ij_sq);
@@ -7583,6 +7618,7 @@ CNDerivStore GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, con
             for (int j : (*neighbors)[i]) {
                 if (j >= i) continue;
                 Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
+                if (pbc) PBCUtils::applyMinimumImageOrtho(cell, r_ij_vec[0], r_ij_vec[1], r_ij_vec[2]);  // A2: minimum image
                 double r_ij = std::sqrt(r_ij_vec.squaredNorm());
                 double rcov_sum = rcov_bohr[i] + rcov_bohr[j];
                 double dr = (r_ij - rcov_sum) / rcov_sum;
@@ -7604,6 +7640,7 @@ CNDerivStore GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, con
         } else {
             for (int j = 0; j < i; ++j) {
                 Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
+                if (pbc) PBCUtils::applyMinimumImageOrtho(cell, r_ij_vec[0], r_ij_vec[1], r_ij_vec[2]);  // A2: minimum image
                 double r_ij_sq = r_ij_vec.squaredNorm();
                 if (r_ij_sq > threshold) continue;
                 double r_ij = std::sqrt(r_ij_sq);
@@ -7649,6 +7686,9 @@ GFNFF::CNAndDerivResult GFNFF::computeCNAndDerivativesFused(
     const double cnmax   = 4.4;
     const double sqrtpi  = 1.77245385091;
     const double cutoff_sq = cn_cutoff_bohr * cn_cutoff_bohr;
+    // Nov 2026 (A2): minimum image with a periodic cell (O(N^2) scan; cutoff < L/2 is checked).
+    const PBCUtils::OrthoCell& cell = m_cell_bohr_ortho;
+    const bool pbc = cell.active;
 
     // Pre-compute covalent radii in Bohr with GFN-FF 4/3 scaling
     std::vector<double> rcov_bohr(N);
@@ -7693,6 +7733,7 @@ GFNFF::CNAndDerivResult GFNFF::computeCNAndDerivativesFused(
                 for (int j = 0; j < i; ++j) {
                     if (rcov_bohr[j] == 0.0) continue;
                     Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
+                    if (pbc) PBCUtils::applyMinimumImageOrtho(cell, r_ij_vec[0], r_ij_vec[1], r_ij_vec[2]);  // A2: minimum image
                     double r_ij_sq = r_ij_vec.squaredNorm();
                     if (r_ij_sq >= cutoff_sq) continue;
 
@@ -7761,6 +7802,7 @@ GFNFF::CNAndDerivResult GFNFF::computeCNAndDerivativesFused(
             for (int j = 0; j < i; ++j) {
                 if (rcov_bohr[j] == 0.0) continue;
                 Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
+                if (pbc) PBCUtils::applyMinimumImageOrtho(cell, r_ij_vec[0], r_ij_vec[1], r_ij_vec[2]);  // A2: minimum image
                 double r_ij_sq = r_ij_vec.squaredNorm();
                 if (r_ij_sq >= cutoff_sq) continue;
 
@@ -9049,7 +9091,7 @@ std::vector<double> GFNFF::computeMetallicCharacter() const
     // Using 6 here leaves mchar ~1e-4 low; 10 reproduces Fortran mchar exactly.
     constexpr double mchar_cutoff_bohr = 10.0;
     auto cn_res = CNCalculator::calculateGFNFFCNWithNeighbors(
-        m_atoms, m_geometry_bohr, mchar_cutoff_bohr, kn, cnmax);
+        m_atoms, m_geometry_bohr, mchar_cutoff_bohr, kn, cnmax, nullptr, 1, &m_cell_bohr_ortho);
 
     // Scaled covalent radii in Bohr (must match CNCalculator exactly)
     std::vector<double> rcov_bohr(m_atomcount, 0.0);
@@ -9072,6 +9114,7 @@ std::vector<double> GFNFF::computeMetallicCharacter() const
         for (int m : cn_res.neighbors[i]) {
             if (m == i || rcov_bohr[m] == 0.0) continue;
             Eigen::Vector3d d = m_geometry_bohr.row(i) - m_geometry_bohr.row(m);
+            PBCUtils::applyMinimumImageOrtho(m_cell_bohr_ortho, d[0], d[1], d[2]);  // A2; no-op without a cell
             const double r = d.norm();
             if (r < 1e-12) continue;
 
@@ -9560,7 +9603,8 @@ std::vector<Angle> GFNFF::generateAnglesNative(const TopologyInfo& topo_info) co
     // CN VALUE cutoff: see explanatory comment at the constexpr definition in
     // generateGFNFFAngles (~ line 3500). Distinct from cn_deriv_cutoff_sq.
     constexpr double cn_value_cutoff_sq = 40.0 * 40.0;
-    auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr, cn_value_cutoff_sq);
+    auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr, cn_value_cutoff_sq, -7.5, 4.4,
+        nullptr, &m_cell_bohr_ortho);  // Nov 2026 (A2): minimum image with a periodic cell
     Vector coord_numbers = Eigen::Map<Vector>(cn_vec.data(), cn_vec.size());
 
     std::vector<Angle> angles_vec;
@@ -11253,7 +11297,8 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     std::vector<double> cn_vec;
     {
         SetupScope sc("topo:   GFN-FF CN (full O(N^2))");
-        cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
+        cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr, 1600.0, -7.5, 4.4, nullptr,
+            &m_cell_bohr_ortho);  // Nov 2026 (A2): minimum image with a periodic cell
     }
     topo_info.coordination_numbers = Eigen::Map<Vector>(cn_vec.data(), cn_vec.size());
 
@@ -12876,11 +12921,16 @@ std::vector<std::pair<std::string, double>> GFNFF::activeCutoffsBohr() const
             cn_acc > 0.0 ? std::sqrt(std::max(0.0, 100.0 - 50.0 * std::log10(cn_acc)))
                          : std::numeric_limits<double>::infinity());
 
-    // CN-derivative range (prepareCNAndEEQ): max(40, eeq_distance_cutoff, dispersion_cutoff_bohr).
-    const double eeq_cut = m_parameters.value("eeq_distance_cutoff", 0.0);
+    // CN-derivative range (prepareCNAndEEQ). Without a cell: max(40, eeq_distance_cutoff,
+    // dispersion_cutoff_bohr); with a cell (Nov 2026, A2) the CN range itself, see
+    // cnDerivativeRangeBohr(). Only cells are checked, so the periodic value is the one listed.
     const double disp_cut = dispersionCutoffBohr();
-    cut.emplace_back("CN-derivative range max(40, eeq_distance_cutoff, dispersion_cutoff_bohr)",
-        std::max({ 40.0, eeq_cut, disp_cut }));
+    if (m_has_pbc)
+        cut.emplace_back("CN-derivative range (= CN range: cn_cutoff_bohr, or 40 for the 1600 Bohr^2 "
+                         "per-step CN with cn_cutoff_bohr = 0)", cnDerivativeRangeBohr());
+    else
+        cut.emplace_back("CN-derivative range max(40, eeq_distance_cutoff, dispersion_cutoff_bohr)",
+            std::max({ 40.0, m_parameters.value("eeq_distance_cutoff", 0.0), disp_cut }));
 
     // D4 pair list (D4ParameterGenerator, applyDispersionCutoff, dispersionSkinBohr): built at
     // 60 Bohr, evaluated at 50 Bohr, both capped by dispersion_cutoff_bohr.
@@ -12938,10 +12988,20 @@ std::vector<std::pair<std::string, double>> GFNFF::activeCutoffsBohr() const
     return cut;
 }
 
+double GFNFF::cnDerivativeRangeBohr() const
+{
+    // Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A2): the range of the per-step CN
+    // (prepareCNAndEEQ): cn_cutoff_bohr with the neighbour list, else the fixed 1600 Bohr^2 of
+    // the N^2 fallback there. Used as CN-derivative range with a periodic cell only.
+    const double cn_cutoff = m_parameters.value("cn_cutoff_bohr", 10.0);
+    return cn_cutoff > 0.0 ? cn_cutoff : 40.0;
+}
+
 void GFNFF::configurePeriodicCell()
 {
-    // Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A1): cell and cutoff check only; no
-    // energy term applies the minimum image yet, so a periodic energy is still the non-periodic one.
+    // Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A1): cell and cutoff check. Since A2 the
+    // coordination number (value, derivative, topology CN) applies the minimum image; the other
+    // energy terms (dispersion, repulsion, Coulomb/EEQ, HB/XB, bonded) do not yet.
     m_cell_bohr_ortho = PBCUtils::OrthoCell();
     if (!m_has_pbc)
         return;
@@ -12959,7 +13019,7 @@ void GFNFF::configurePeriodicCell()
     m_cell_bohr_ortho = cell;
     if (CurcumaLogger::get_verbosity() >= 2)
         CurcumaLogger::param("periodic cell (Bohr)",
-            fmt::format("{:.4f} x {:.4f} x {:.4f}, all cutoffs below L_min/2 = {:.4f}; minimum image NOT yet applied in the energy terms",
+            fmt::format("{:.4f} x {:.4f} x {:.4f}, all cutoffs below L_min/2 = {:.4f}; minimum image in the CN only (A2), not in the energy terms",
                 cell.L[0], cell.L[1], cell.L[2], 0.5 * cell.minLength()));
 }
 
@@ -13147,7 +13207,8 @@ bool GFNFF::calculateTopologyCharges(TopologyInfo& topo_info) const
     // Initialize coordination numbers if not already present
     if (topo_info.coordination_numbers.size() != m_atomcount) {
         // Phase 2C: Migrate to shared CNCalculator for GFN-FF CN calculation
-        auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
+        auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr, 1600.0, -7.5, 4.4, nullptr,
+            &m_cell_bohr_ortho);  // Nov 2026 (A2)
         topo_info.coordination_numbers = Eigen::Map<Vector>(cn_vec.data(), cn_vec.size());
         if (topo_info.coordination_numbers.size() != m_atomcount) {
             CurcumaLogger::error("calculateTopologyCharges: Failed to calculate CN");
@@ -13673,7 +13734,8 @@ Matrix GFNFF::NumGradFixedCharges(double dx)
     Matrix numgrad = Matrix::Zero(m_atomcount, 3);
 
     auto energy_at = [&]() {
-        auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
+        auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr, 1600.0, -7.5, 4.4, nullptr,
+            &m_cell_bohr_ortho);  // Nov 2026 (A2)
         m_workspace->setGeometry(m_geometry_bohr);
         const Vector cn = Vector::Map(cn_vec.data(), cn_vec.size()).eval();
         m_workspace->setD3CN(cn);

@@ -10,6 +10,8 @@
 #include "gfnff_par.h"  // gfnff_cn_rcov_bohr: the one CN radius source (Sep 2026)
 #include "src/core/curcuma_logger.h"
 #include "src/core/math_compat.h"
+#include "src/tools/pbc_utils.h"
+#include "src/tools/spatial_cell_list.h"
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
 #include <cmath>
@@ -123,7 +125,8 @@ std::vector<double> CNCalculator::calculateGFNFFCN(
     double threshold,
     double kn,
     double cnmax,
-    std::vector<double>* out_cn_raw)
+    std::vector<double>* out_cn_raw,
+    const PBCUtils::OrthoCell* cell)
 {
     // Calculate GFN-FF coordination numbers using error function with log transformation
     // Formula: erfCN = 0.5 * (1 + erf(kn * (r - rcov) / rcov))
@@ -142,6 +145,9 @@ std::vector<double> CNCalculator::calculateGFNFFCN(
     for (int i = 0; i < natoms; ++i)
         rcov_bohr[i] = GFNFFParameters::gfnff_cn_rcov_bohr(atoms[i]);
 
+    // Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A2): periodic cell -> minimum image.
+    const bool pbc = (cell != nullptr && cell->active);
+
     // Claude Generated (Mar 2026, Phase 4): Parallelized outer loop — each atom independent
     #pragma omp parallel for schedule(dynamic, 32)
     for (int i = 0; i < natoms; ++i) {
@@ -154,7 +160,16 @@ std::vector<double> CNCalculator::calculateGFNFFCN(
             if (i == j) continue;
             if (rcov_bohr[j] == 0.0) continue;
 
-            double distance_sq = (pos_i - geometry_bohr.row(j).transpose()).squaredNorm();
+            double distance_sq;
+            if (pbc) {
+                double dx = pos_i(0) - geometry_bohr(j, 0);
+                double dy = pos_i(1) - geometry_bohr(j, 1);
+                double dz = pos_i(2) - geometry_bohr(j, 2);
+                PBCUtils::applyMinimumImageOrtho(*cell, dx, dy, dz);
+                distance_sq = dx * dx + dy * dy + dz * dz;
+            } else {
+                distance_sq = (pos_i - geometry_bohr.row(j).transpose()).squaredNorm();
+            }
             if (distance_sq > threshold) continue;
 
             double distance = std::sqrt(distance_sq);
@@ -259,7 +274,8 @@ std::vector<double> CNCalculator::calculateGFNFFCN(
     double cn_cutoff_bohr,
     double cn_accuracy,
     double kn,
-    double cnmax)
+    double cnmax,
+    const PBCUtils::OrthoCell* cell)
 {
     /**
      * P2b (Apr 2026): Configurable CN calculation with three modes:
@@ -285,6 +301,11 @@ std::vector<double> CNCalculator::calculateGFNFFCN(
         rcov_bohr[i] = GFNFFParameters::gfnff_cn_rcov_bohr(atoms[i]);
 
     // Mode selection
+    // Nov 2026 (A2): with a periodic cell mode 1 is the periodic neighbour-list pass.
+    if (cn_cutoff_bohr > 0.0 && cell != nullptr && cell->active) {
+        return calculateGFNFFCNWithNeighbors(atoms, geometry_bohr, cn_cutoff_bohr, kn, cnmax,
+            nullptr, 1, cell).cn_values;
+    }
     if (cn_cutoff_bohr > 0.0) {
         // ============================================================
         // MODE 1: Neighbor-list with cutoff (fast, O(N*k))
@@ -339,7 +360,7 @@ std::vector<double> CNCalculator::calculateGFNFFCN(
         // cnthr = 100.0 - log10(accuracy) * 50.0
         double cnthr = 100.0 - std::log10(cn_accuracy) * 50.0;
         double threshold = cnthr;  // threshold in Bohr²
-        return calculateGFNFFCN(atoms, geometry_bohr, threshold, kn, cnmax);
+        return calculateGFNFFCN(atoms, geometry_bohr, threshold, kn, cnmax, nullptr, cell);
 
     } else {
         // ============================================================
@@ -347,7 +368,7 @@ std::vector<double> CNCalculator::calculateGFNFFCN(
         // ============================================================
         // Use a very large threshold to disable skipping
         double threshold = 1e30;  // Effectively no cutoff
-        return calculateGFNFFCN(atoms, geometry_bohr, threshold, kn, cnmax);
+        return calculateGFNFFCN(atoms, geometry_bohr, threshold, kn, cnmax, nullptr, cell);
     }
 }
 
@@ -361,9 +382,13 @@ CNCalculator::CNResult CNCalculator::calculateGFNFFCNWithNeighbors(
     double kn,
     double cnmax,
     CxxThreadPool* pool,
-    int threads)
+    int threads,
+    const PBCUtils::OrthoCell* cell)
 {
     const int natoms = static_cast<int>(atoms.size());
+    if (cell != nullptr && cell->active)
+        return calculateGFNFFCNWithNeighborsPeriodic(atoms, geometry_bohr, cn_cutoff_bohr, kn, cnmax,
+            pool, threads, *cell);
 
     std::vector<double> rcov_bohr(natoms, 0.0);
     for (int i = 0; i < natoms; ++i)
@@ -469,5 +494,89 @@ CNCalculator::CNResult CNCalculator::calculateGFNFFCNWithNeighbors(
     }
     run(cn_worker);
 
+    return result;
+}
+
+// Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A2): periodic variant of
+// calculateGFNFFCNWithNeighbors(). Same counting function (gfnff_cn.f90:66-126, erf form with
+// the log compression), every pair distance taken with the orthorhombic minimum image
+// (Allen & Tildesley Sec. 1.6.3; PBCUtils::minimumImageOrtho, the rint arithmetic of the GPU
+// applyMIC). Neighbours come from a periodic SpatialCellList (cell size >= cutoff, cells wrap
+// around), the pair test is the strict dist_sq < cutoff_sq of the non-periodic pass. Because
+// cutoff < L_min/2 (checked by GFNFF::configurePeriodicCell), at most one image of j lies within
+// the cutoff of i, so neighbors[i] holds each j once; it is sorted ascending, the order of the
+// non-periodic list, and the per-atom sums do not depend on the thread count.
+CNCalculator::CNResult CNCalculator::calculateGFNFFCNWithNeighborsPeriodic(
+    const std::vector<int>& atoms,
+    const Eigen::MatrixXd& geometry_bohr,
+    double cn_cutoff_bohr,
+    double kn,
+    double cnmax,
+    CxxThreadPool* pool,
+    int threads,
+    const PBCUtils::OrthoCell& cell)
+{
+    const int natoms = static_cast<int>(atoms.size());
+
+    std::vector<double> rcov_bohr(natoms, 0.0);
+    for (int i = 0; i < natoms; ++i)
+        rcov_bohr[i] = GFNFFParameters::gfnff_cn_rcov_bohr(atoms[i]);
+
+    CNResult result;
+    result.cn_values.resize(natoms, 0.0);
+    result.cn_raw.resize(natoms, 0.0);
+    result.neighbors.resize(natoms);
+    result.cutoff_sq = cn_cutoff_bohr * cn_cutoff_bohr;
+    const double cutoff_sq = result.cutoff_sq;
+    if (natoms == 0 || !(cn_cutoff_bohr > 0.0))
+        return result;
+
+    SpatialCellList cells;
+    cells.build(geometry_bohr, cn_cutoff_bohr, cell);
+
+    const int T = (pool && threads > 1 && natoms > 64) ? std::min(threads, natoms) : 1;
+    auto worker = [&](int t_id, int T) {
+        for (int i = t_id; i < natoms; i += T) {
+            if (rcov_bohr[i] == 0.0) continue;
+            std::vector<int>& nb = result.neighbors[i];
+            // The cell list filters with r2 <= cutoff^2; the strict test below is the one of the
+            // non-periodic pass, applied to the same minimum-image vector.
+            cells.forEachNeighbor(i, cutoff_sq, [&](int j, double) {
+                if (rcov_bohr[j] == 0.0) return;
+                double dx = geometry_bohr(i, 0) - geometry_bohr(j, 0);
+                double dy = geometry_bohr(i, 1) - geometry_bohr(j, 1);
+                double dz = geometry_bohr(i, 2) - geometry_bohr(j, 2);
+                PBCUtils::applyMinimumImageOrtho(cell, dx, dy, dz);
+                if (dx * dx + dy * dy + dz * dz < cutoff_sq)
+                    nb.push_back(j);
+            });
+            std::sort(nb.begin(), nb.end());
+
+            double cn_raw_i = 0.0;
+            for (int j : nb) {
+                double dx = geometry_bohr(i, 0) - geometry_bohr(j, 0);
+                double dy = geometry_bohr(i, 1) - geometry_bohr(j, 1);
+                double dz = geometry_bohr(i, 2) - geometry_bohr(j, 2);
+                PBCUtils::applyMinimumImageOrtho(cell, dx, dy, dz);
+                double dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+                double rcov_ij = rcov_bohr[i] + rcov_bohr[j];
+                double dr = (dist - rcov_ij) / rcov_ij;
+                cn_raw_i += 0.5 * (1.0 + curcuma_erf(kn * dr));
+            }
+            result.cn_raw[i] = cn_raw_i;
+            result.cn_values[i] = curcuma_log(1.0 + curcuma_exp(cnmax))
+                                - curcuma_log(1.0 + curcuma_exp(cnmax - cn_raw_i));
+        }
+    };
+
+    if (T > 1) {
+        std::vector<std::future<void>> futures;
+        futures.reserve(T - 1);
+        for (int t = 1; t < T; ++t) futures.push_back(pool->enqueue(worker, t, T));
+        worker(0, T);
+        for (auto& f : futures) f.get();
+    } else {
+        worker(0, 1);
+    }
     return result;
 }

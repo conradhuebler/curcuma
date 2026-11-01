@@ -1711,6 +1711,8 @@ private:
     void configurePeriodicCell();
     /// Claude Generated (Nov 2026, A1): (name, radius in Bohr) of every cutoff in use; checked by configurePeriodicCell().
     std::vector<std::pair<std::string, double>> activeCutoffsBohr() const;
+    /// Claude Generated (Nov 2026, A2): range of the per-step CN in Bohr; CN-derivative range with a cell.
+    double cnDerivativeRangeBohr() const;
     /// Claude Generated (Sep 2026): electrostatics pair cutoff in Bohr; coulomb_r_cut <= 0 (default) = none, as the reference
     double coulombRCutBohr() const;
     /// Claude Generated (Sep 2026): true if the repulsion list is cell-list built (distance-filtered),

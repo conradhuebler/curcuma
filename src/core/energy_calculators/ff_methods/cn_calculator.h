@@ -24,6 +24,9 @@
 
 class ConfigManager;  // Forward declaration — avoids circular include
 class CxxThreadPool;  // Forward declaration for the row-parallel CN pass
+namespace PBCUtils {
+struct OrthoCell;     // src/tools/pbc_utils.h; periodic CN (WP-PERIODIC-NONBONDED A2)
+}
 
 /**
  * @brief Coordination Number Calculator
@@ -66,6 +69,10 @@ public:
      * @param threshold Distance cutoff in Bohr² (default: 1600.0 = 40²)
      * @param kn Steepness parameter (default: -7.5)
      * @param cnmax Max CN for log compression (default: 4.4)
+     * @param cell Orthorhombic periodic cell in Bohr (Nov 2026, A2); nullptr or inactive: no
+     *        periodicity, numbers bit for bit those of the non-periodic code. Active: every pair
+     *        distance is the minimum image (PBCUtils::minimumImageOrtho), so each pair counts
+     *        once, with its nearest image, also when the threshold exceeds L/2.
      * @return Vector of coordination numbers (one per atom, max 4.4)
      */
     static std::vector<double> calculateGFNFFCN(
@@ -74,7 +81,8 @@ public:
         double threshold = 1600.0,
         double kn = -7.5,
         double cnmax = 4.4,
-        std::vector<double>* out_cn_raw = nullptr  ///< WP-D (May 2026): optional raw CN output for reuse in dcn calculation
+        std::vector<double>* out_cn_raw = nullptr,  ///< WP-D (May 2026): optional raw CN output for reuse in dcn calculation
+        const PBCUtils::OrthoCell* cell = nullptr
     );
 
     /**
@@ -92,6 +100,7 @@ public:
      * @param cn_accuracy Accuracy for threshold mode (only used when cn_cutoff_bohr = 0)
      * @param kn Steepness parameter (default: -7.5)
      * @param cnmax Max CN for log compression (default: 4.4)
+     * @param cell Periodic cell in Bohr or nullptr, as in the overload above (Nov 2026, A2)
      * @return Vector of coordination numbers (one per atom)
      */
     static std::vector<double> calculateGFNFFCN(
@@ -100,7 +109,8 @@ public:
         double cn_cutoff_bohr,
         double cn_accuracy,
         double kn,
-        double cnmax
+        double cnmax,
+        const PBCUtils::OrthoCell* cell = nullptr
     );
 
     /// WP-D Stage C (May 2026): CN + cn_raw + symmetric neighbor list in one pass.
@@ -116,6 +126,11 @@ public:
     /// Oct 2026: with pool and threads > 1 the pair scan (i < j) and the CN sums are split over
     /// the pool by rows; results are bitwise those of the serial pass for any thread count
     /// (same pair test, same neighbor order, same per-atom summation order).
+    /// Nov 2026 (A2): with an active periodic @p cell (Bohr) the neighbours are found by a
+    /// periodic SpatialCellList and every distance is the minimum image; neighbors[i] is sorted
+    /// ascending (as in the non-periodic list), so the result does not depend on the thread count.
+    /// The caller guarantees cn_cutoff_bohr < L_min/2 (GFNFF::configurePeriodicCell checks it).
+    /// Without a cell (nullptr or inactive) the code path and the numbers are unchanged.
     static CNResult calculateGFNFFCNWithNeighbors(
         const std::vector<int>& atoms,
         const Eigen::MatrixXd& geometry_bohr,
@@ -123,7 +138,8 @@ public:
         double kn = -7.5,
         double cnmax = 4.4,
         CxxThreadPool* pool = nullptr,
-        int threads = 1
+        int threads = 1,
+        const PBCUtils::OrthoCell* cell = nullptr
     );
 
     /**
@@ -166,6 +182,17 @@ public:
     static const std::vector<double>& covalentRadiiD3() { return COVALENT_RADII; }
 
 private:
+    /// Claude Generated (Nov 2026, A2): periodic pass of calculateGFNFFCNWithNeighbors().
+    static CNResult calculateGFNFFCNWithNeighborsPeriodic(
+        const std::vector<int>& atoms,
+        const Eigen::MatrixXd& geometry_bohr,
+        double cn_cutoff_bohr,
+        double kn,
+        double cnmax,
+        CxxThreadPool* pool,
+        int threads,
+        const PBCUtils::OrthoCell& cell);
+
     // Covalent radii from simple-dftd3 (Angstrom)
     // Data source: s-dftd3 atomic radii - 86 elements (H through Rn)
     static const std::vector<double> COVALENT_RADII;

@@ -23,7 +23,7 @@ measurement HUD and its live plots. Pinned by the `geometry_tools` ctest.
 | `general.h` (`Tools::`) | String parsing/conversion, `mean`/`median`/`stdev`/`Histogram`, `CreateList()` range parser; global `RunTimer` |
 | `info.h` (`General::`) | `StartUp()` banner (version, git hash) |
 | `pbc_utils.h/.cpp` (`PBCUtils::`) | Lattice vectors from a,b,c,alpha,beta,gamma and back, minimum image, PBC distance, cell check; orthorhombic `OrthoCell` MIC (GPU `rint` arithmetic), cutoff-vs-L/2 check, fragment-wise wrap (Nov 2026) |
-| `spatial_cell_list.h` | Cell list for O(N) neighbour queries, no PBC; build cost does not pay off below roughly 800 atoms |
+| `spatial_cell_list.h` | Cell list for O(N) neighbour queries; `build(coords, cutoff, OrthoCell)` wraps around an orthorhombic cell (minimum-image distances, cutoff < L/2, Nov 2026); build cost does not pay off below roughly 800 atoms |
 | `string_similarity.h` (`StringUtils::`) | Levenshtein distance for "Did you mean" method suggestions |
 | `trajectory_writer.{h,cpp}`, `trajectory_helpers.h` | TrajectoryWriter and its JSON schema helpers |
 | `bmt_utils.{h,cpp}` (`BMTUtils::`) | BMT output directories |
