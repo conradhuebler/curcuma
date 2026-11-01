@@ -102,6 +102,26 @@ struct SetupScope {
 #include <fmt/format.h>
 #include "src/tools/spatial_cell_list.h"  // Claude Generated (Apr 2026): O(N) neighbor queries for HB/XB
 
+// Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A4b): minimum-image helpers of the HB/XB detection.
+// Only called with an active cell; the non-periodic code keeps its own expressions (bitwise unchanged).
+/// Squared minimum-image distance |x_b - x_a|^2 (Bohr^2).
+static inline double hbMicDistSq(const PBCUtils::OrthoCell& cell, const GeoGradMatrix& g, int a, int b)
+{
+    double d0 = g(b, 0) - g(a, 0), d1 = g(b, 1) - g(a, 1), d2 = g(b, 2) - g(a, 2);
+    PBCUtils::applyMinimumImageOrtho(cell, d0, d1, d2);
+    return d0 * d0 + d1 * d1 + d2 * d2;
+}
+/// Position of the minimum image of atom next to ref: ref + MIC(x_atom - ref).
+static inline void hbImageNear(const PBCUtils::OrthoCell& cell, const GeoGradMatrix& g, int atom,
+                               double rx, double ry, double rz, double& x, double& y, double& z)
+{
+    double d0 = g(atom, 0) - rx, d1 = g(atom, 1) - ry, d2 = g(atom, 2) - rz;
+    PBCUtils::applyMinimumImageOrtho(cell, d0, d1, d2);
+    x = rx + d0;
+    y = ry + d1;
+    z = rz + d2;
+}
+
 // Claude Generated (January 2026): Helper function for transition metal detection
 static inline bool is_transition_metal(int Z) {
     // Transition metal series: d-block elements
@@ -3474,8 +3494,22 @@ bool GFNFF::shouldUpdateHBXB(const Eigen::MatrixXd& current_geometry) const
 
     // RMSD check (Fortran threshold: 0.3 Bohr per atom)
     // Formula: rmsd = sqrt(sum((xyz - hbrefgeo)^2)) / n
-    double sum_sq_diff = (current_geometry - m_hb_reference->reference_positions)
-                         .array().square().sum();
+    double sum_sq_diff = 0.0;
+    if (m_cell_bohr_ortho.active) {
+        // Nov 2026 (A4b): per-atom displacement as minimum image, so a wrap by a lattice vector
+        // (SimpleMD fragment wrap) is no motion. Valid while no atom moves more than L/2 between two
+        // re-detections (same assumption as maxAtomDisplacement(a, b, cell)).
+        for (int a = 0; a < current_geometry.rows(); ++a) {
+            double d0 = current_geometry(a, 0) - m_hb_reference->reference_positions(a, 0);
+            double d1 = current_geometry(a, 1) - m_hb_reference->reference_positions(a, 1);
+            double d2 = current_geometry(a, 2) - m_hb_reference->reference_positions(a, 2);
+            PBCUtils::applyMinimumImageOrtho(m_cell_bohr_ortho, d0, d1, d2);
+            sum_sq_diff += d0 * d0 + d1 * d1 + d2 * d2;
+        }
+    } else {
+        sum_sq_diff = (current_geometry - m_hb_reference->reference_positions)
+                          .array().square().sum();
+    }
     double rmsd = std::sqrt(sum_sq_diff) / static_cast<double>(m_atomcount);
 
     // Update if geometry changed significantly
@@ -9738,9 +9772,13 @@ double GFNFF::estimateHBStrengthCase1(int A, int H, int B,
 {
     // Exact mirror of calcHydrogenBonds' case_type==1 branch (ff_workspace_gfnff.cpp).
     using namespace GFNFFParameters;
-    const Vector pos_A = m_geometry_bohr.row(A);
+    Vector pos_A = m_geometry_bohr.row(A);
     const Vector pos_H = m_geometry_bohr.row(H);
-    const Vector pos_B = m_geometry_bohr.row(B);
+    Vector pos_B = m_geometry_bohr.row(B);
+    if (m_cell_bohr_ortho.active) {  // Nov 2026 (A4b): the kernel frame, A and B next to H
+        hbImageNear(m_cell_bohr_ortho, m_geometry_bohr, A, pos_H(0), pos_H(1), pos_H(2), pos_A(0), pos_A(1), pos_A(2));
+        hbImageNear(m_cell_bohr_ortho, m_geometry_bohr, B, pos_H(0), pos_H(1), pos_H(2), pos_B(0), pos_B(1), pos_B(2));
+    }
     const double r_AH = (pos_H - pos_A).norm();
     const double r_HB = (pos_B - pos_H).norm();
     const double r_AB = (pos_B - pos_A).norm();
@@ -9772,9 +9810,13 @@ double GFNFF::estimateXBStrength(int A, int X, int B,
     // Exact mirror of calcHalogenBonds (ff_workspace_gfnff.cpp) — the XB formula has no
     // case-dependent branch, so this is the complete, exact energy magnitude.
     using namespace GFNFFParameters;
-    const Vector pos_A = m_geometry_bohr.row(A);
+    Vector pos_A = m_geometry_bohr.row(A);
     const Vector pos_X = m_geometry_bohr.row(X);
-    const Vector pos_B = m_geometry_bohr.row(B);
+    Vector pos_B = m_geometry_bohr.row(B);
+    if (m_cell_bohr_ortho.active) {  // Nov 2026 (A4b): the kernel frame, A and B next to X
+        hbImageNear(m_cell_bohr_ortho, m_geometry_bohr, A, pos_X(0), pos_X(1), pos_X(2), pos_A(0), pos_A(1), pos_A(2));
+        hbImageNear(m_cell_bohr_ortho, m_geometry_bohr, B, pos_X(0), pos_X(1), pos_X(2), pos_B(0), pos_B(1), pos_B(2));
+    }
     const double r_AX = (pos_X - pos_A).norm();
     const double r_XB = (pos_B - pos_X).norm();
     const double r_AB = (pos_B - pos_A).norm();
@@ -9857,6 +9899,10 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
 
             Vector v1 = r_n1 - r_i;
             Vector v2 = r_n2 - r_i;
+            if (m_cell_bohr_ortho.active) {  // Nov 2026 (A4b): bond vectors as minimum images
+                PBCUtils::applyMinimumImageOrtho(m_cell_bohr_ortho, v1(0), v1(1), v1(2));
+                PBCUtils::applyMinimumImageOrtho(m_cell_bohr_ortho, v2(0), v2(1), v2(2));
+            }
 
             double cos_phi = v1.dot(v2) / (v1.norm() * v2.norm());
             double phi_deg = curcuma_acos(std::clamp(cos_phi, -1.0, 1.0)) * 180.0 / M_PI;
@@ -9941,6 +9987,14 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
         hbthr2 = (thr2_override > 0.0) ? thr2_override : (400.0 - std::log10(hb_acc) * 50.0);
     }
 
+    // Nov 2026 (WP-PERIODIC-NONBONDED A4b): with a cell every distance below is a minimum-image distance.
+    // The accepted triples satisfy r_AB^2 < hbthr1 and (case 1) r_AB^2 + r_AH^2 + r_BH^2 < hbthr2, so
+    // r_AB + r_AH + r_BH < sqrt(3 hbthr2) = 36.7 Bohr < L_min (hbthr2 < (L_min/2)^2 is checked); the three
+    // minimum-image vectors therefore close a triangle (their sum differs from 0 by a lattice vector of
+    // length < L_min, i.e. by none) and the kernel's H-anchored image frame reproduces them. Case 2-4
+    // (A-H bonded): r_HB <= r_AB + r_AH, same argument. Atom pairs, not images, are stored.
+    const bool hb_pbc = m_cell_bohr_ortho.active;
+
     // Sep 2026 (lever #1): drop a candidate before allocating its GFNFFHydrogenBond when the
     // EXACT |E_HB| the energy kernel would compute is below this. 0 disables (old behaviour).
     const double hb_min_pair_energy = m_parameters.value("hb_min_pair_energy_eh", 1e-9);
@@ -9979,7 +10033,8 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
     SpatialCellList cell_list;
     bool have_cell_list = false;
     if (hb_cell_threshold == 0 || m_atomcount >= hb_cell_threshold) {
-        cell_list.build(m_geometry_bohr, std::sqrt(hbthr2));
+        // Nov 2026 (A4b): periodic cell list with a cell (minimum-image r2, sqrt(hbthr2) < L_min/2 checked)
+        cell_list.build(m_geometry_bohr, std::sqrt(hbthr2), m_cell_bohr_ortho);
         have_cell_list = true;
         // Claude Generated (Oct 2026): the per-atom part of the filter below (pi carbon, charge)
         // decides first: atoms failing it are left out of a copy of the cell list with the
@@ -10191,9 +10246,13 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
         // positive, well-conditioned terms), so every decision equals the exact one.
         auto case1StrengthDecision = [&](int A, int H, int B, double thr) -> int {
             using namespace GFNFFParameters;
-            const double ax = m_geometry_bohr(A, 0), ay = m_geometry_bohr(A, 1), az = m_geometry_bohr(A, 2);
+            double ax = m_geometry_bohr(A, 0), ay = m_geometry_bohr(A, 1), az = m_geometry_bohr(A, 2);
             const double hx = m_geometry_bohr(H, 0), hy = m_geometry_bohr(H, 1), hz = m_geometry_bohr(H, 2);
-            const double bx = m_geometry_bohr(B, 0), by = m_geometry_bohr(B, 1), bz = m_geometry_bohr(B, 2);
+            double bx = m_geometry_bohr(B, 0), by = m_geometry_bohr(B, 1), bz = m_geometry_bohr(B, 2);
+            if (hb_pbc) {  // A4b: the frame of the kernel, A and B next to H
+                hbImageNear(m_cell_bohr_ortho, m_geometry_bohr, A, hx, hy, hz, ax, ay, az);
+                hbImageNear(m_cell_bohr_ortho, m_geometry_bohr, B, hx, hy, hz, bx, by, bz);
+            }
             const double r_AH = std::sqrt((hx - ax) * (hx - ax) + (hy - ay) * (hy - ay) + (hz - az) * (hz - az));
             const double r_HB = std::sqrt((bx - hx) * (bx - hx) + (by - hy) * (by - hy) + (bz - hz) * (bz - hz));
             const double r_AB = std::sqrt((bx - ax) * (bx - ax) + (by - ay) * (by - ay) + (bz - az) * (bz - az));
@@ -10248,7 +10307,8 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
         auto process_pair = [&](int i, int j, std::vector<GFNFFHydrogenBond>& out, HCandidateCache& hcache) {
             const Vector r_i = m_geometry_bohr.row(i);
             const Vector r_j = m_geometry_bohr.row(j);
-            const double r_AB_sq = (r_i - r_j).squaredNorm();
+            const double r_AB_sq = hb_pbc ? hbMicDistSq(m_cell_bohr_ortho, m_geometry_bohr, i, j)
+                                          : (r_i - r_j).squaredNorm();
             if (r_AB_sq > hbthr1) return;
             const bool ij_nonbond = !is_bonded(i, j);
             if (ij_nonbond) {
@@ -10264,7 +10324,9 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
             // rejected hydrogen fails the exact test r_AB^2 + r_iH^2 + r_jH^2 < hbthr2 as well, so
             // the visited sequence and every appended entry are unchanged. 85 % of the visits on
             // urea400-water1000 end here.
-            const double xj = m_geometry_bohr(j, 0), yj = m_geometry_bohr(j, 1), zj = m_geometry_bohr(j, 2);
+            double xj = m_geometry_bohr(j, 0), yj = m_geometry_bohr(j, 1), zj = m_geometry_bohr(j, 2);
+            if (hb_pbc)  // A4b: j and the cached hydrogens as images next to i
+                hbImageNear(m_cell_bohr_ortho, m_geometry_bohr, j, r_i(0), r_i(1), r_i(2), xj, yj, zj);
             const double case1_reject = hbthr2 * (1.0 + 1e-9);
             const double case1_accept = hbthr2 * (1.0 - 1e-9);
             if (hcache.i != i) {
@@ -10272,9 +10334,12 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
                 hyd_cells.forEachNeighbor(i, hbthr2, [&](int H, double r_iH_sq) {
                     hcache.H.push_back(H);
                     hcache.r2.push_back(r_iH_sq);
-                    hcache.x.push_back(m_geometry_bohr(H, 0));
-                    hcache.y.push_back(m_geometry_bohr(H, 1));
-                    hcache.z.push_back(m_geometry_bohr(H, 2));
+                    double hx = m_geometry_bohr(H, 0), hy = m_geometry_bohr(H, 1), hz = m_geometry_bohr(H, 2);
+                    if (hb_pbc)
+                        hbImageNear(m_cell_bohr_ortho, m_geometry_bohr, H, r_i(0), r_i(1), r_i(2), hx, hy, hz);
+                    hcache.x.push_back(hx);
+                    hcache.y.push_back(hy);
+                    hcache.z.push_back(hz);
                 });
                 hcache.crit.resize(hcache.H.size());
                 hcache.pass.resize(hcache.H.size());
@@ -10316,7 +10381,8 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
                 // decides the same as the exact Eigen expression; inside it the exact one decides.
                 if (!(crit < case1_accept)) {
                     const Vector r_H = m_geometry_bohr.row(H);
-                    const double r_jH_sq = (r_j - r_H).squaredNorm();
+                    const double r_jH_sq = hb_pbc ? hbMicDistSq(m_cell_bohr_ortho, m_geometry_bohr, j, H)
+                                                  : (r_j - r_H).squaredNorm();
                     if (!(r_AB_sq + r_iH_sq + r_jH_sq < hbthr2)) continue;
                 }
                 {
@@ -10428,7 +10494,7 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
                 this, &ab_pairs, start, end,
                 &current_basicity, &current_acidity, &charges,
                 &topo_info, &hb_hydrogens, &is_bonded,
-                hbthr1, hbthr2, hb_min_pair_energy
+                hbthr1, hbthr2, hb_min_pair_energy, hb_pbc
             ]() {
                 std::vector<GFNFFHydrogenBond> local_hbonds;
                 auto local_create_nhb2 = [&](int donor_A, int H, int acceptor_B,
@@ -10480,7 +10546,8 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
                     int j = ab.j;
                     Vector r_i = m_geometry_bohr.row(i);
                     Vector r_j = m_geometry_bohr.row(j);
-                    double r_AB_sq = (r_i - r_j).squaredNorm();
+                    double r_AB_sq = hb_pbc ? hbMicDistSq(m_cell_bohr_ortho, m_geometry_bohr, i, j)
+                                            : (r_i - r_j).squaredNorm();
                     if (r_AB_sq > hbthr1) continue;
                     bool ij_nonbond = !is_bonded(i, j);
                     for (int H : hb_hydrogens) {
@@ -10494,8 +10561,10 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
                                               charges, topo_info, local_hbonds, is_bonded);
                         } else if (!h_bonded_to_i && !h_bonded_to_j) {
                             Vector r_H = m_geometry_bohr.row(H);
-                            double r_iH_sq = (r_i - r_H).squaredNorm();
-                            double r_jH_sq = (r_j - r_H).squaredNorm();
+                            double r_iH_sq = hb_pbc ? hbMicDistSq(m_cell_bohr_ortho, m_geometry_bohr, i, H)
+                                                    : (r_i - r_H).squaredNorm();
+                            double r_jH_sq = hb_pbc ? hbMicDistSq(m_cell_bohr_ortho, m_geometry_bohr, j, H)
+                                                    : (r_j - r_H).squaredNorm();
                             if (r_AB_sq + r_iH_sq + r_jH_sq < hbthr2) {
                                 if (hb_min_pair_energy > 0.0) {
                                     const double est = estimateHBStrengthCase1(i, H, j,
@@ -10541,7 +10610,8 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
 
             Vector r_i = m_geometry_bohr.row(i);
             Vector r_j = m_geometry_bohr.row(j);
-            double r_AB_sq = (r_i - r_j).squaredNorm();
+            double r_AB_sq = hb_pbc ? hbMicDistSq(m_cell_bohr_ortho, m_geometry_bohr, i, j)
+                                    : (r_i - r_j).squaredNorm();
 
             if (r_AB_sq > hbthr1) continue;  // nhb2 distance check
 
@@ -10562,8 +10632,10 @@ std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& ch
                     // Reference: gfnff_ini2.f90:742 — rab + sqrab(inh) + sqrab(jnh) < hbthr2
                     // All distances are squared in Fortran's sqrab array
                     Vector r_H = m_geometry_bohr.row(H);
-                    double r_iH_sq = (r_i - r_H).squaredNorm();
-                    double r_jH_sq = (r_j - r_H).squaredNorm();
+                    double r_iH_sq = hb_pbc ? hbMicDistSq(m_cell_bohr_ortho, m_geometry_bohr, i, H)
+                                            : (r_i - r_H).squaredNorm();
+                    double r_jH_sq = hb_pbc ? hbMicDistSq(m_cell_bohr_ortho, m_geometry_bohr, j, H)
+                                            : (r_j - r_H).squaredNorm();
                     if (r_AB_sq + r_iH_sq + r_jH_sq < hbthr2) {
                         // Case 1: A...H...B (both A and B are acceptors, H is unshared)
                         GFNFFHydrogenBond hb;
@@ -10666,6 +10738,10 @@ std::vector<GFNFFHalogenBond> GFNFF::detectHalogenBondsNative(const Vector& char
 
             Vector v1 = r_n1 - r_i;
             Vector v2 = r_n2 - r_i;
+            if (m_cell_bohr_ortho.active) {  // Nov 2026 (A4b): bond vectors as minimum images
+                PBCUtils::applyMinimumImageOrtho(m_cell_bohr_ortho, v1(0), v1(1), v1(2));
+                PBCUtils::applyMinimumImageOrtho(m_cell_bohr_ortho, v2(0), v2(1), v2(2));
+            }
 
             double cos_phi = v1.dot(v2) / (v1.norm() * v2.norm());
             double phi_deg = curcuma_acos(std::clamp(cos_phi, -1.0, 1.0)) * 180.0 / M_PI;
@@ -10735,7 +10811,8 @@ std::vector<GFNFFHalogenBond> GFNFF::detectHalogenBondsNative(const Vector& char
     bool use_cell_list = (xb_cell_threshold == 0 || m_atomcount >= xb_cell_threshold);
     SpatialCellList cell_list;
     if (use_cell_list) {
-        cell_list.build(m_geometry_bohr, xb_cutoff);
+        // Nov 2026 (A4b): periodic with a cell (minimum-image A-B distance, xb_cutoff < L_min/2 checked)
+        cell_list.build(m_geometry_bohr, xb_cutoff, m_cell_bohr_ortho);
     }
 
     for (const auto& ax_pair : ax_pairs) {
@@ -10810,7 +10887,8 @@ std::vector<GFNFFHalogenBond> GFNFF::detectHalogenBondsNative(const Vector& char
             for (int B = 0; B < m_atomcount; ++B) {
                 Vector r_A = m_geometry_bohr.row(A);
                 Vector r_B = m_geometry_bohr.row(B);
-                double r_AB_sq = (r_B - r_A).squaredNorm();
+                double r_AB_sq = m_cell_bohr_ortho.active ? hbMicDistSq(m_cell_bohr_ortho, m_geometry_bohr, A, B)
+                                                          : (r_B - r_A).squaredNorm();
                 if (r_AB_sq > xb_thr2) continue;
                 process_B(B, r_AB_sq);
             }
@@ -13055,6 +13133,20 @@ std::vector<std::pair<std::string, double>> GFNFF::activeCutoffsBohr() const
         const double hbthr2 = (thr2_override > 0.0) ? thr2_override : (400.0 - std::log10(hb_acc) * 50.0);
         cut.emplace_back("HB A-B search radius sqrt(hbthr1)", std::sqrt(hbthr1));
         cut.emplace_back("HB A-H-B / XB A-B search radius sqrt(hbthr2)", std::sqrt(hbthr2));
+        // Nov 2026 (A4b): which HB/XB radii must be below L_min/2. The search radii above, because the
+        // detection takes minimum-image distances and must see the one image of each partner within them;
+        // with r_AB^2 + r_AH^2 + r_BH^2 < hbthr2 the three minimum-image vectors of a case-1 triple then
+        // close a triangle (r_AB + r_AH + r_BH < sqrt(3 hbthr2) < L_min), so the triple the detection
+        // accepts is the one the kernel evaluates. The kernels evaluate each stored triple in a frame
+        // anchored on H (X): A and B are the images next to H (X), neighbours next to their centre
+        // (bonds << L/2). The HB kernel radius r_cut = 50 Bohr acts on r_AB inside that frame and selects
+        // no image, so it is not listed; between re-detections a triple whose r_HB grows beyond L/2
+        // switches to the other image of B (energy there below the damping, a few 1e-9 Eh at most;
+        // a re-detection drops such triples the same way without a cell). The XB kernel cuts at
+        // r_XB > 20 Bohr: the image of B within it is unique only below L_min/2, so it is listed.
+        // HB coordination number (computeHBCoordinationNumbers): erf term exactly 0 beyond ~2 rcov.
+        if (m_has_pbc)
+            cut.emplace_back("XB evaluation radius r_XB 20", 20.0);
     }
 
     // Explicit Coulomb cutoff, only when set; without it Coulomb and EEQ are unbounded sums

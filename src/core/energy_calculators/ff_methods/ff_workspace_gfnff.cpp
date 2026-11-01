@@ -70,6 +70,8 @@ void FFWorkspace::computeHBCoordinationNumbers(int p)
             double dx = m_geometry(B, 0) - m_geometry(H, 0);
             double dy = m_geometry(B, 1) - m_geometry(H, 1);
             double dz = m_geometry(B, 2) - m_geometry(H, 2);
+            if (m_cell_bohr.active)  // Nov 2026 (A4b): B as the image next to H, as in calcHydrogenBonds
+                PBCUtils::applyMinimumImageOrtho(m_cell_bohr, dx, dy, dz);
             double r2 = dx * dx + dy * dy + dz * dz;
             if (r2 > thr) continue;
             double r = std::sqrt(r2);
@@ -1182,6 +1184,24 @@ void FFWorkspace::calcHydrogenBonds(int p)
 
     using namespace GFNFFParameters;
 
+    // Nov 2026 (WP-PERIODIC-NONBONDED A4b): with a cell each triple is evaluated in a local image
+    // frame anchored on the hydrogen: A and B as the minimum images next to H, the neighbours of B and
+    // the acceptor parent C next to B, the neighbours D of C next to C (case 3). All distances, the
+    // out-of-line terms, the lone-pair vector and the H...B=C angle / D-B-C-H torsions therefore come
+    // from minimum-image vectors of one consistent geometry, also for a molecule torn across a face.
+    // The frame differs from the true positions by whole lattice vectors per atom, so the gradient rows
+    // and signs are unchanged (same argument as placeMinimumImage). Without a cell imageNear() returns
+    // the row of m_geometry, i.e. the former code path value for value.
+    const bool pbc = m_cell_bohr.active;
+    auto imageNear = [&](int atom, const Eigen::Vector3d& ref) -> Eigen::Vector3d {
+        Eigen::Vector3d x = m_geometry.row(atom).transpose();
+        if (!pbc)
+            return x;
+        double d0 = x(0) - ref(0), d1 = x(1) - ref(1), d2 = x(2) - ref(2);
+        PBCUtils::applyMinimumImageOrtho(m_cell_bohr, d0, d1, d2);
+        return Eigen::Vector3d(ref(0) + d0, ref(1) + d1, ref(2) + d2);
+    };
+
     for (int idx = begin; idx < end; ++idx) {
         const auto& hb = m_hbonds[idx];
         // Partitions own disjoint index ranges, so writing slot idx needs no lock.
@@ -1189,9 +1209,9 @@ void FFWorkspace::calcHydrogenBonds(int p)
         if (record)
             m_hb_triple_energy[idx] = 0.0;
 
-        Eigen::Vector3d pos_A = m_geometry.row(hb.i).transpose();
         Eigen::Vector3d pos_H = m_geometry.row(hb.j).transpose();
-        Eigen::Vector3d pos_B = m_geometry.row(hb.k).transpose();
+        Eigen::Vector3d pos_A = imageNear(hb.i, pos_H);
+        Eigen::Vector3d pos_B = imageNear(hb.k, pos_H);
 
         double r_AH = (pos_H - pos_A).norm();
         double r_HB = (pos_B - pos_H).norm();
@@ -1226,7 +1246,7 @@ void FFWorkspace::calcHydrogenBonds(int p)
         if (hb.case_type >= 2) {
             double hbnbcut_save = (elem_B == 7 && hb.neighbors_B.size() == 1) ? 2.0 : HB_NBCUT;
             for (int nb : hb.neighbors_B) {
-                Eigen::Vector3d pos_nb = m_geometry.row(nb).transpose();
+                Eigen::Vector3d pos_nb = imageNear(nb, pos_B);
                 double r_Anb = (pos_nb - pos_A).norm();
                 double r_Bnb = (pos_nb - pos_B).norm();
                 double expo_nb = (hbnbcut_save / r_vdw_AB) * ((r_Anb + r_Bnb) / r_AB - 1.0);
@@ -1257,7 +1277,7 @@ void FFWorkspace::calcHydrogenBonds(int p)
 
             nbb_lp = static_cast<int>(hb.neighbors_B.size());
             for (int nb_idx : hb.neighbors_B) {
-                lp_vector += (m_geometry.row(nb_idx).transpose() - pos_B);
+                lp_vector += (imageNear(nb_idx, pos_B) - pos_B);
             }
             double vnorm = lp_vector.norm();
             if (vnorm > 1e-10 && nbb_lp > 0) {
@@ -1300,9 +1320,9 @@ void FFWorkspace::calcHydrogenBonds(int p)
                 double fc_bend = 1.0 - BEND_HB;
                 double kijk = fc_bend / ((std::cos(0.0) - std::cos(c0)) * (std::cos(0.0) - std::cos(c0)));
 
-                Eigen::Vector3d va = m_geometry.row(C_idx).transpose();
-                Eigen::Vector3d vb = m_geometry.row(B_idx).transpose();
-                Eigen::Vector3d vc = m_geometry.row(H_idx).transpose();
+                Eigen::Vector3d va = imageNear(C_idx, pos_B);  // C next to B (A4b)
+                Eigen::Vector3d vb = pos_B;
+                Eigen::Vector3d vc = pos_H;
 
                 Eigen::Vector3d vab = va - vb;
                 Eigen::Vector3d vcb = vc - vb;
@@ -1337,14 +1357,15 @@ void FFWorkspace::calcHydrogenBonds(int p)
             }
 
             // etors: product of torsion terms D-B-C-H (with gradient)
+            const Eigen::Vector3d pos_C = imageNear(C_idx, pos_B);
             for (int D_idx : hb.neighbors_C) {
                 if (D_idx == B_idx) continue;
                 Matrix dihedral_grad;
                 double phi = GFNFF_Geometry::calculateDihedralAngle(
-                    m_geometry.row(D_idx).transpose(),
-                    m_geometry.row(B_idx).transpose(),
-                    m_geometry.row(C_idx).transpose(),
-                    m_geometry.row(H_idx).transpose(),
+                    imageNear(D_idx, pos_C),  // D next to C (A4b)
+                    pos_B,
+                    pos_C,
+                    pos_H,
                     dihedral_grad, m_do_gradient);
 
                 double tshift = TORS_HB;
@@ -1483,7 +1504,7 @@ void FFWorkspace::calcHydrogenBonds(int p)
                 double hbnbcut_g = (elem_B == 7 && hb.neighbors_B.size() == 1) ? 2.0 : HB_NBCUT;
                 for (size_t nb_i = 0; nb_i < hb.neighbors_B.size(); ++nb_i) {
                     int nb = hb.neighbors_B[nb_i];
-                    Eigen::Vector3d pos_nb = m_geometry.row(nb).transpose();
+                    Eigen::Vector3d pos_nb = imageNear(nb, pos_B);
                     Eigen::Vector3d dranb = pos_A - pos_nb;
                     Eigen::Vector3d drbnb = pos_B - pos_nb;
                     double ranb = dranb.norm();
@@ -1667,12 +1688,23 @@ void FFWorkspace::calcHalogenBonds(int p)
 
     using namespace GFNFFParameters;
 
+    // Nov 2026 (WP-PERIODIC-NONBONDED A4b): with a cell A and B are the minimum images next to the
+    // halogen X (local image frame as in calcHydrogenBonds); the r_XB cut r_cut = 20 Bohr is below
+    // L_min/2 (checked in GFNFF::activeCutoffsBohr), so the image of B within it is unique.
+    const bool pbc = m_cell_bohr.active;
     for (int idx = begin; idx < end; ++idx) {
         const auto& xb = m_xbonds[idx];
 
         Eigen::Vector3d pos_A = m_geometry.row(xb.i).transpose();
         Eigen::Vector3d pos_X = m_geometry.row(xb.j).transpose();
         Eigen::Vector3d pos_B = m_geometry.row(xb.k).transpose();
+        if (pbc) {
+            for (Eigen::Vector3d* p : { &pos_A, &pos_B }) {
+                double d0 = (*p)(0) - pos_X(0), d1 = (*p)(1) - pos_X(1), d2 = (*p)(2) - pos_X(2);
+                PBCUtils::applyMinimumImageOrtho(m_cell_bohr, d0, d1, d2);
+                *p = Eigen::Vector3d(pos_X(0) + d0, pos_X(1) + d1, pos_X(2) + d2);
+            }
+        }
 
         Eigen::Vector3d r_AX_vec = pos_X - pos_A;
         Eigen::Vector3d r_XB_vec = pos_B - pos_X;

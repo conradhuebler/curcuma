@@ -246,6 +246,41 @@ namespace TestMolecules {
                 .tolerances = {},
                 .atom_count = 24
             }
+        },
+        // Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A4b): real hydrogen bonds and a halogen
+        // bond under a periodic cell (pbc_hbond)
+        {
+            "acetic_acid_dimer", {
+                .name = "acetic_acid_dimer",
+                .description = "Cyclic acetic acid dimer, two O-H...O=C hydrogen bonds (structure library acetic-acid-dimer.cyclic-hb)",
+                .category = "dimers",
+                .library_id = "acetic-acid-dimer.cyclic-hb",
+                .reference_energies = {},
+                .tolerances = {},
+                .atom_count = 16
+            }
+        },
+        {
+            "hydronium_water2", {
+                .name = "hydronium_water2",
+                .description = "H3O+ with two waters, charge +1 (structure library hydronium-water2)",
+                .category = "dimers",
+                .library_id = "hydronium-water2",
+                .reference_energies = {},
+                .tolerances = {},
+                .atom_count = 10
+            }
+        },
+        {
+            "fi_pyridine", {
+                .name = "fi_pyridine",
+                .description = "F-I...pyridine halogen-bond complex (structure library fi-pyridine)",
+                .category = "dimers",
+                .library_id = "fi-pyridine",
+                .reference_energies = {},
+                .tolerances = {},
+                .atom_count = 13
+            }
         }
     };
 
@@ -253,7 +288,7 @@ namespace TestMolecules {
         ensureLoaded();
         auto it = s_molecule_registry.find(name);
         if (it == s_molecule_registry.end()) {
-            throw std::invalid_argument("Molecule '" + name + "' not found in registry. Available molecules: H2, HCl, OH, CH4, CH3OH, CH3OCH3, C6H6, HCN, H2O, H2O_dimer, NH3, O3, monosaccharide, triose, caffeine. Note: 'polymer' is xyz-path-only (1410 atoms — too large to inline).");
+            throw std::invalid_argument("Molecule '" + name + "' not found in registry. Available molecules: H2, HCl, OH, CH4, CH3OH, CH3OCH3, C6H6, HCN, H2O, H2O_dimer, NH3, O3, monosaccharide, triose, caffeine, acetic_acid_dimer, hydronium_water2, fi_pyridine. Note: 'polymer' is xyz-path-only (1410 atoms — too large to inline).");
         }
         return it->second;
     }

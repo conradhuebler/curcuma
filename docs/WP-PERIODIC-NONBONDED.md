@@ -315,3 +315,51 @@ topology, BATM/ATM; these are A4b and later.
 - **Not tested**: sTors and extra torsions (no library structure has them under a cell; code identical to the torsion path),
   bonds with dynamic r0 through a torn bond only via the term energies, MD with a cell, GPU (unchanged; the A3b guard runs a
   cell on the CPU). Human production testing pending.
+
+## A4b periodic hydrogen and halogen bonds (2026-11-01, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+On `feature/bulk` (base `196f3a50`), CPU only. **Periodic now additionally: HB and XB terms, their detection, the HB
+coordination number (modulation of the X-H bond term) and the re-detection trigger.** Still plain distances: Coulomb/EEQ,
+topology generation, reactive topology, BATM/ATM, and the charge ensemble `fragEnsembleBlend` (see below).
+
+- **Kernels** (`calcHydrogenBonds`, `calcHalogenBonds`): each stored triple is evaluated in a local image frame anchored on H
+  (on X for XB): A and B are the minimum images next to H, the neighbours of B and the acceptor parent C next to B, the
+  neighbours D of C next to C (case 3), so distances, out-of-line terms, the lone-pair vector (case 4), the H...B=C angle and
+  the D-B-C-H torsions come from one consistent minimum-image geometry; gradient rows unchanged (lattice-vector argument of A4a).
+- **Detection** (`detectHydrogenBondsNative`, `detectHalogenBondsNative`): periodic `SpatialCellList` in the cell-list branch,
+  minimum-image distances in both legacy branches, in the case-1 pre-test (cached hydrogens and j as images next to i), in
+  `estimateHBStrengthCase1` / `estimateXBStrength` (kernel frame) and in the carbene angle. Lists store atom triples, never images.
+- **HB coordination number** (`computeHBCoordinationNumbers`): H...B vector as minimum image. **Trigger** (`shouldUpdateHBXB`):
+  per-atom displacement as minimum image, so a wrap by a lattice vector is no motion (valid while no atom moves > L/2).
+- **Which radii are checked against L_min/2** (comment in `activeCutoffsBohr`): the search radii sqrt(hbthr1) 15.8 and
+  sqrt(hbthr2) 21.2 (the detection must see the one image within them). With r_AB^2 + r_AH^2 + r_BH^2 < hbthr2 the three
+  minimum-image vectors of a case-1 triple close a triangle (sum < sqrt(3 hbthr2) = 36.7 Bohr < L_min), case 2-4 likewise
+  (r_HB <= r_AB + r_AH), so the accepted triple is the one the kernel evaluates. New: the XB kernel radius r_XB 20 Bohr (image
+  of B within it unique). Not checked: the HB kernel radius r_cut 50 (acts on r_AB inside the frame, selects no image); a
+  triple whose r_HB grows past L/2 between re-detections switches to the other image of B (in the water box the largest
+  r_HB of any triple is 17.5 Bohr). HB CN: erf term exactly 0 beyond ~2 rcov.
+- **Smallest accepted cube**: unchanged, defaults L > 42.43 Bohr (sqrt(hbthr2)); `hbond false` L > 40 Bohr (repulsion 20).
+- **Tests** (`ctest -R pbc_hbond`; library structures hydronium-water2 (+1), acetic-acid-dimer.cyclic-hb, fi-pyridine, new
+  registry names): (a) 44 Bohr cube, one instance initialised in the centre, `hb_update_force_every 1` (lists re-detected on each
+  variant): shifted by (L,-L,2L), each fragment by a different lattice vector, centred on the corner, torn per atom: E_HB,
+  E_XB, E_bond <= 1.3e-15 Eh, HB/XB/bond gradients <= 3.3e-15 Eh/Bohr, triple lists identical (21 / 48 / 550 HB, 3 XB; cases
+  1/2/3 present, case 4 in none); without a cell the fragment-shifted geometry loses E_HB entirely (7.7e-3 Eh). (c) 40 random
+  waters, L 43 Bohr, `hb_min_pair_energy_eh 0`: 1371 triples = independent 27-image enumeration, E_HB = reference 1.7e-18 Eh,
+  656 triples through images (-7.1e-4 Eh); 1/4 threads 4e-18; cell-list = legacy detection; L 42.3 refused, with `hbond false`
+  accepted. (d) 2x1x1 supercell: E_HB, E_bond = 2 x cell 1.4e-14, 2742 = 2 x 1371 triples. (e) torn composite (acetic acid
+  dimer + F-I...pyridine, 10 atoms within 0.01 A of a face): HB FD 3.4e-11 -> 8.5e-12 Eh/A at h 2e-4 -> 1e-4 A (max |g| 4.6e-4).
+  (f) wrap by +L: no re-detection, dE 0; RMSD 0.33 Bohr move re-detects, = instance re-detecting every call.
+- **Pre-existing XB gradient defect (not periodic, not fixed)**: in `calcHalogenBonds` the short-range damping derivative has the
+  wrong sign and the long-range one uses r/c instead of 1/r (`cuda/gfnff_kernels.cu` the same); FD residual 1.2e-4 of 5.4e-4
+  Eh/A with and without a cell. Both corrections together give 4e-12 (tried, reverted: outside A4b). The test checks only that
+  the cell changes nothing (residual torn = residual intact without cell, 4.8e-21). Energy unaffected.
+- **Charge ensemble not periodic**: hydronium-water2 torn per atom changed E_HB by 4.4e-3 and E_bond by 0.32 Eh with the
+  default `frag_charge_model ensemble` (net charge, several fragments): `fragEnsembleBlend` re-fragments with plain distances.
+  The test uses `frag_charge_model reference`; open item (TODO.md).
+- **XB list near L/2**: a system wider than L/2 sees its own image within the 21.2 Bohr XB search radius (composite: one extra
+  triple F...O image, r_XB > 20, energy 0). Correct for a periodic system, but a cell-vs-no-cell list comparison differs.
+- **Without a cell**: -sp energy (16 digits) and `-dump_gradient` md5 identical before/after on the 7 structures of A2 at 1 and
+  4 threads; peo201-water500 wall time (median of 3) 0.347 -> 0.346 s at 4 threads, 0.691 -> 0.692 s at 1 thread.
+- **Not tested**: HB case 4, XB in a halogen-bonded crystal (only fi-pyridine exists, its N is bonded to I in the topology, so
+  its XB triples go to other acceptors), MD with a cell, `nb_cell_list_min_atoms` XB cell-list branch with a cell (HB one
+  tested), GPU (unchanged; the A3b guard runs a cell on the CPU, `prepareHBDetectInputs` still plain). Human production testing pending.
