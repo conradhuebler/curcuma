@@ -56,6 +56,9 @@ struct FFEnergyComponents {
     double bonded_rep = 0, nonbonded_rep = 0;   // GFN-FF exponential repulsion
     double coulomb = 0, hbond = 0, xbond = 0;
     double atm = 0, batm = 0, stors = 0;
+    // Claude Generated (Nov 2026, A3c): homogeneous long-range D4 tail, periodic cell only (0 otherwise);
+    // set in postProcess() from setDispersionTail(), not by a kernel
+    double disp_tail = 0;
     // Claude Generated (May 2026, HB-investigation): per-case HB diagnostic split.
     // Sum of cases equals hbond. Counts compare against Fortran nhb1/nhb2.
     double hbond_case1 = 0, hbond_case2 = 0, hbond_case3 = 0, hbond_case4 = 0;
@@ -68,6 +71,7 @@ struct FFEnergyComponents {
         bonded_rep = nonbonded_rep = 0;
         coulomb = hbond = xbond = 0;
         atm = batm = stors = 0;
+        disp_tail = 0;
         hbond_case1 = hbond_case2 = hbond_case3 = hbond_case4 = 0;
         hbond_case1_count = hbond_case2_count = hbond_case3_count = hbond_case4_count = 0;
     }
@@ -79,6 +83,7 @@ struct FFEnergyComponents {
         bonded_rep += o.bonded_rep; nonbonded_rep += o.nonbonded_rep;
         coulomb += o.coulomb; hbond += o.hbond; xbond += o.xbond;
         atm += o.atm; batm += o.batm; stors += o.stors;
+        disp_tail += o.disp_tail;
         // Claude Generated (May 2026, HB-investigation): per-case reduction
         hbond_case1 += o.hbond_case1; hbond_case2 += o.hbond_case2;
         hbond_case3 += o.hbond_case3; hbond_case4 += o.hbond_case4;
@@ -93,7 +98,7 @@ struct FFEnergyComponents {
         return bond + angle + dihedral + inversion + dispersion +
                vdw + rep +
                bonded_rep + nonbonded_rep + coulomb + hbond + xbond +
-               atm + batm + stors;
+               atm + batm + stors + disp_tail;  // disp_tail last: + 0.0 leaves the sum unchanged without a cell
     }
 };
 
@@ -277,6 +282,24 @@ public:
     /// dC6/dCN term). nullptr = stored per-pair values. Set by GFNFF::prepareCNAndEEQ().
     void setD4FusedC6View(const D4FusedC6View* view) { m_d4_fused_c6 = view; }
 
+    /// Homogeneous long-range D4 tail (Claude Generated, Nov 2026, WP-PERIODIC-NONBONDED A3c): energy and
+    /// dE_tail/dCN computed by GFNFF (D4ParameterGenerator::homogeneousDispersionTail) before calculate().
+    /// postProcess() stores the energy as FFEnergyComponents::disp_tail and adds dEdcn to the CN chain
+    /// rule (gradient calls only, dEdcn of size natoms). clearDispersionTail(): no tail (no cell, switched
+    /// off); every following calculate() is then bitwise what it was without this term.
+    void setDispersionTail(double energy, const Vector& dEdcn)
+    {
+        m_disp_tail_active = true;
+        m_disp_tail_energy = energy;
+        m_disp_tail_dEdcn = dEdcn;
+    }
+    void clearDispersionTail()
+    {
+        m_disp_tail_active = false;
+        m_disp_tail_energy = 0.0;
+        m_disp_tail_dEdcn.resize(0);
+    }
+
     /// Set baseline energy (e0 from parameter set)
     void setE0(double e0) { m_e0 = e0; }
 
@@ -459,6 +482,9 @@ private:
     CNDerivStore m_dcn;  // Claude Generated (WP4, May 2026): pair-list replaces std::vector<SpMatrix>
     const D4DC6DCNPairs* m_dc6dcn_ptr = nullptr;
     const D4FusedC6View* m_d4_fused_c6 = nullptr;  // Claude Generated (Oct 2026), see setD4FusedC6View()
+    bool m_disp_tail_active = false;  // Claude Generated (Nov 2026, A3c), see setDispersionTail()
+    double m_disp_tail_energy = 0.0;
+    Vector m_disp_tail_dEdcn;
     double m_e0 = 0.0;
 
     // Coulomb self-energy parameters (O(N), extracted at init)

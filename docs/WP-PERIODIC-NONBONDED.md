@@ -178,7 +178,7 @@ periodic. Without a cell every path is unchanged (checked bit for bit, see below
 ## A3b periodic D4 dispersion pair term (2026-11-01, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
 
 On `feature/bulk` (base `674d5a27`). **CN (A2) and the D4 pair term are periodic; nothing else.** Repulsion, Coulomb/EEQ,
-HB/XB, bonded terms, topology bonds and ATM still use plain distances; no long-range tail correction yet (A3c).
+HB/XB, bonded terms, topology bonds and ATM still use plain distances; the long-range tail followed in A3c (below).
 
 - **Kernel** `FFWorkspace::calcD4Dispersion`: pair vector as minimum image from `m_cell_bohr` (no-op without a cell);
   energy, force and the dC6/dCN terms use it. **Generator** `D4ParameterGenerator::setPeriodicCell()`: CN with minimum image,
@@ -238,3 +238,44 @@ E(r_c) - E(50) in kcal/mol, `-sp gfnff`, E_tot change = E_disp change; r_c = 50/
   <C6 zeta> = 6.3 au assumed), pressure ~ -37 bar.
 - Recommendation for A3c: variant (ii), tail per step from the current CN through the per-atom factorisation
   sum_i sum_j zeta_i zeta_j C6_ij (O(N K 7), no pairs), dE_tail/dCN into `acc.dEdcn`, virial dE/dV = -E_tail/V.
+
+## A3c homogeneous long-range D4 tail (2026-11-01, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+On `feature/bulk` (base `4801aab1`), CPU only, active only with a cell (`-gfnff.dispersion_tail`, default true, no effect
+without a cell). Variant (ii) of A3a: per call from the current CN, force through dE/dCN.
+
+- **Formula** (`D4ParameterGenerator::homogeneousDispersionTail`, derivation in the comment there): beyond the evaluation
+  radius r_c (`dispersionRadiiBohr().eval`, < L_min/2) g(r) = 1, i.e. every atom j of the cell has images with density 1/V:
+  E_tail = (1/2) sum_i sum_j (1/V) int_{r_c}^inf 4 pi r^2 e_ij dr = -(2 pi/V) [S6/(3 r_c^3) + 2 S8/(5 r_c^5)],
+  S6 = sum_ij zeta_i zeta_j C6_ij, S8 = sum_ij zeta_i zeta_j r4r2ij C6_ij over all N^2 ordered pairs incl. i = j (self images).
+  s6 = 1, s8 = 2 as in the kernel. Factorised per partner element and reference (O(N K 49), no pairs); C6 from the current
+  Gaussian weights, zeta fixed (topology charges); dE/dCN_k = 2 zeta_k sum_j f_kj dC6_kj/dCN_k into the CN chain rule.
+- **Damping (large-r form, R0 dropped)**: over-binds the C6 part by at most (1/3)(R0/r_c)^6, the C8 part by (5/13)(R0/r_c)^8
+  (R0 O-O 7.41 Bohr): 3.0e-5 at r_c 35, 2.1e-2 at 11.5 (measured on a single species: 2.9e-5 and 2.1e-2 of the tail).
+  At small r_c this is the dominant error: keeping the damping in the same g(r) = 1 integral (diagnostic in the test, per
+  element pair by quadrature, same cost) reduces the r_c dependence below from 8.61 / 0.88 to 0.99 / 0.003 kcal/mol.
+- **Reported** as "Dispersion tail" (verbosity 2 table, only when non-zero), `FFEnergyComponents::disp_tail`,
+  `GFNFF::DispersionTailEnergy()`, JSON key `DispersionTail`; `DispersionEnergy()` stays the pair term. The A3b warning now
+  appears only with the tail off. Not implemented: virial/pressure, dE_tail/dV = -E_tail/V at fixed r_c (needed for NPT).
+- **Tests** (`ctest -R pbc_dispersion_tail`, waters from `water-dimer.roo2.8`): prefactor vs radial quadrature 6e-16 /
+  2e-15; factorised S6/S8 vs the explicit O(N^2) sum over `getChargeWeightedC6` 5.4e-14 / 7.4e-15 (63 atoms); central FD of
+  pair + tail (6 atoms 0.05-0.26 A from a face) 3.1e-11 -> 7.8e-12 Eh/A at h 2e-4 -> 1e-4 A, tail alone 3.2e-12 -> 7.8e-13
+  (tail force max 1.5e-6 of max dispersion force 1.8e-4 Eh/A); no cell or tail off: tail 0, energy and gradient bitwise
+  equal; 2x1x1 supercell E_tail = 2 x cell 2.2e-15. `pbc_dispersion` and `pbc_foundation` now set `dispersion_tail false`
+  (pair-term checks; the dimer tail in the 100 A cell is -4e-10 Eh).
+- **r_c dependence** (100 waters at 0.92 x liquid density, random sequential placement, L 28 Bohr, NOT a liquid):
+  E_pair + E_tail at r_c 8 / 10 / 12 Bohr relative to 12: -8.61 / -0.88 / 0 kcal/mol, E_pair alone moves 35.1 kcal/mol.
+- **Replica check** (`test_pbc_dispersion_tail --measure`): small cell r_c = L/2 + tail vs its 2x2x2 replica r_c = L + tail,
+  per small cell. Random packing (300 atoms, L 28 Bohr): explicit shell L/2..L -8.114 kcal/mol, tail difference -8.149, so
+  E_pair + E_tail differ by 0.035 kcal/mol (1.2e-4 per atom; tail -9.22). Cubic water lattice 5^3 (spacing 3.1 A, L 29.3
+  Bohr): shell -8.392 vs tail -9.631, difference 1.24 kcal/mol (a lattice has no g(r) = 1 at 14.6 Bohr). No periodic liquid
+  water box exists in the repository (structures/bulk are clusters without a cell); none was built.
+- **1825-H2O extrapolation of A3a checked on a lattice**: 12^3 = 1728 waters on the 3.1 A lattice (liquid density, r_c 35.15
+  Bohr): E_tail -10.14 kcal/mol (-1.96e-3 per atom, 0.37 % of E_pair, C8 share 1.6 %), against the extrapolated -14.7. The
+  difference is the assumed <zeta^2 C6> = 6.3 au (urea/water); water gives 4.26 au. At fixed density E_tail at r_c = L/2 does
+  not depend on N, so 1728 and 1825 compare directly.
+- **Without a cell**: -sp energy (16 digits) and `-dump_gradient` md5 identical before/after on the 7 structures of A2 at 1
+  and 4 threads. **GPU**: not changed; with a cell the A3b guard runs GFN-FF on the CPU, so the tail is always the CPU one.
+- **Not tested**: real liquids, other elements than H/O, charged systems (zeta from topology charges), MD energy
+  conservation with the tail, the P1a CN-cache threshold and static-CN mode (the tail follows the same stale weights as the
+  pair term), frag_charge_model variants with a cell. Human production testing pending.

@@ -154,6 +154,8 @@ void printGFNFFEnergyReport(const GFNFFEnergyReport& r)
     row("sTors",               r.stors,        r.t_stors);
     CurcumaLogger::result("  Non-bonded:");
     row("Dispersion",          r.dispersion,   r.t_dispersion);
+    if (r.disp_tail != 0.0)  // Nov 2026 (A3c): periodic cell only, no timing of its own
+        row("Dispersion tail",     r.disp_tail,    GFNFFEnergyReport::TermTiming{});
     row("Repulsion (bonded)",  r.bonded_rep,   r.t_bonded_rep);
     row("Repulsion (nonbond)", r.nonbonded_rep, r.t_nonbonded_rep);
     CurcumaLogger::result("  Electrostatics:");
@@ -626,6 +628,8 @@ GFNFF::GFNFF(const json& parameters)
     }
     m_cache_topology = m_parameters.value("cache_topology", true);
     m_print_timing = m_parameters.value("print_timing", true);
+    // Nov 2026 (A3c): fallback == PARAM default of dispersion_tail (gfnff.h); no effect without a cell
+    m_dispersion_tail = m_parameters.value("dispersion_tail", true);
 
     // frag_charge_model (Claude Generated, Sep 24, 2026; ported to master Sep 27, 2026 - Known
     // Issue #31, docs/FRAG_CHARGE_MODEL.md): chemistry-aware, continuous fragment charge
@@ -3107,6 +3111,8 @@ double GFNFF::calculationSingle(bool gradient)
     auto t_ff_start = std::chrono::high_resolution_clock::now();
     double energy_hartree;
 
+    // Nov 2026 (A3c): homogeneous D4 tail from the CN weights prepareCNAndEEQ() just set (no cell: cleared)
+    updateDispersionTail(gradient);
     energy_hartree = m_workspace->calculate(gradient);
     t_threads = std::chrono::duration<double, std::milli>(
         std::chrono::high_resolution_clock::now() - t_ff_start).count();
@@ -3365,6 +3371,7 @@ double GFNFF::calculationSingle(bool gradient)
             rep.inversion     = comp.inversion;
             rep.stors         = comp.stors;
             rep.dispersion    = comp.dispersion;
+            rep.disp_tail     = comp.disp_tail;
             rep.bonded_rep    = comp.bonded_rep;
             rep.nonbonded_rep = comp.nonbonded_rep;
             rep.coulomb       = comp.coulomb;
@@ -13079,6 +13086,37 @@ double GFNFF::cnDerivativeRangeBohr() const
     return cn_cutoff > 0.0 ? cn_cutoff : std::sqrt(std::max(0.0, cnThresholdSqBohr()));
 }
 
+bool GFNFF::dispersionTailActive() const
+{
+    return m_cell_bohr_ortho.active && m_dispersion_tail && m_d4_generator
+        && m_parameters.value("dispersion", true);
+}
+
+void GFNFF::updateDispersionTail(bool gradient)
+{
+    // Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A3c). Formula, derivation and the damping error
+    // bound: D4ParameterGenerator::homogeneousDispersionTail(). r_c is the pair term's evaluation radius
+    // (the kernel counts every image with r <= r_c, r_c < L_min/2), V the orthorhombic cell volume.
+    // C6 come from the generator's current Gaussian weights, i.e. the same CN state as the pair term
+    // (including its P1a CN-change threshold and the static-CN mode); dE/dCN from the weight derivatives
+    // that updateCNValuesForGradient() built for this CN. Diagnostic calls of m_workspace->calculate()
+    // outside calculationSingle() (react dE_jump, NumGradFixedCharges) keep the last tail.
+    // Virial / NPT (not implemented): dE_tail/dV = -E_tail/V at fixed r_c.
+    if (!m_workspace)
+        return;
+    if (!dispersionTailActive()) {
+        m_workspace->clearDispersionTail();
+        return;
+    }
+    const double rc = dispersionRadiiBohr().eval;
+    const double V = m_cell_bohr_ortho.L[0] * m_cell_bohr_ortho.L[1] * m_cell_bohr_ortho.L[2];
+    Vector dEdcn;
+    if (gradient)
+        dEdcn = Vector::Zero(m_atomcount);
+    const double e = m_d4_generator->homogeneousDispersionTail(rc, V, gradient ? &dEdcn : nullptr);
+    m_workspace->setDispersionTail(e, dEdcn);
+}
+
 void GFNFF::configurePeriodicCell()
 {
     // Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A1): cell and cutoff check. Since A2 the
@@ -13104,10 +13142,14 @@ void GFNFF::configurePeriodicCell()
     }
     if (m_parameters.value("dispersion", true)) {
         const D4RadiiBohr rad = dispersionRadiiBohr();
-        if (rad.capped)
+        // Nov 2026 (A3c): the warning only when the homogeneous tail is switched off
+        if (rad.capped && !m_dispersion_tail)
             CurcumaLogger::warn(fmt::format("GFN-FF: D4 evaluation cutoff reduced from {:.4f} to {:.4f} Bohr (L/2); "
-                                            "long-range tail correction not yet applied",
+                                            "long-range tail correction off (dispersion_tail false)",
                 rad.eval_uncapped, rad.eval));
+        else if (m_dispersion_tail && CurcumaLogger::get_verbosity() >= 1)
+            CurcumaLogger::info(fmt::format("GFN-FF: D4 pair term up to {:.4f} Bohr, homogeneous long-range tail beyond it",
+                rad.eval));
     }
     if (CurcumaLogger::get_verbosity() >= 2)
         CurcumaLogger::param("periodic cell (Bohr)",
@@ -13200,6 +13242,7 @@ GFNFF_WS_ENERGY(STorsEnergy, stors)
 GFNFF_WS_ENERGY(BondedRepulsionEnergy, bonded_rep)
 GFNFF_WS_ENERGY(NonbondedRepulsionEnergy, nonbonded_rep)
 GFNFF_WS_ENERGY(DispersionEnergy, dispersion)
+GFNFF_WS_ENERGY(DispersionTailEnergy, disp_tail)
 GFNFF_WS_ENERGY(D4Energy, dispersion)
 GFNFF_WS_ENERGY(CoulombEnergy, coulomb)
 GFNFF_WS_ENERGY(BatmEnergy, batm)

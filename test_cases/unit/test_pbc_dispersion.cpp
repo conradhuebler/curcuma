@@ -294,6 +294,7 @@ static json boxFlags(double rc)
     json e = json::object();
     e["hbond"] = false;      // HB/XB search radii 15.8/21.2 Bohr exceed L/2 = 12 Bohr
     e["repulsion"] = false;  // repulsion list 22 Bohr likewise
+    e["dispersion_tail"] = false;  // Nov 2026 (A3c): pair term only here; the tail is tested in pbc_dispersion_tail
     if (rc > 0.0)
         e["dispersion_cutoff_bohr"] = rc;
     return e;

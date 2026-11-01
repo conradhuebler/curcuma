@@ -132,7 +132,9 @@ static curcuma::Molecule waterDimer()
 // Returns (error flag of the calculator, energy); the cell is in Angstrom.
 static std::pair<bool, double> gfnffEnergy(const Eigen::Matrix3d* cell)
 {
-    json config = { { "verbosity", 0 }, { "threads", 1 }, { "gfnff", json::object() }, { "gpu", "none" } };
+    // Nov 2026 (A3c): the homogeneous D4 tail is real physics of the periodic images (about -4e-10 Eh for the
+    // dimer in the 100 A cell) and is tested in pbc_dispersion_tail; this test compares the plain terms only.
+    json config = { { "verbosity", 0 }, { "threads", 1 }, { "gfnff", { { "dispersion_tail", false } } }, { "gpu", "none" } };
     curcuma::Molecule mol = waterDimer();
     if (cell)
         mol.setUnitCell(*cell, true);

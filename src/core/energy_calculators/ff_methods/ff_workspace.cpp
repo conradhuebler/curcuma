@@ -559,6 +559,11 @@ void FFWorkspace::postProcess(bool gradient)
         t_self_energy = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
     }
 
+    // Homogeneous long-range D4 tail (Claude Generated, Nov 2026, A3c): energy computed by GFNFF from the
+    // current CN weights, see setDispersionTail(); its dE/dCN joins the chain rule below.
+    if (m_disp_tail_active)
+        m_result_energy.disp_tail = m_disp_tail_energy;
+
     // =========================================================================
     // dEdcn chain-rule gradient + Coulomb TERM 1b
     // Reference: Fortran gfnff_engrad.F90:418-422 (bond/disp), 449-454 (coulomb)
@@ -602,6 +607,10 @@ void FFWorkspace::postProcess(bool gradient)
 
         // Combined matvec: gradient += dcn * (dEdcn_total - qtmp)
         Vector dEdcn_combined = has_term1b ? (m_dEdcn_total - qtmp).eval() : m_dEdcn_total;
+        // A3c tail (Nov 2026): only with a cell; without one this line is not reached, bitwise as before
+        const bool tail_cn = m_disp_tail_active && m_disp_tail_dEdcn.size() == m_natoms;
+        if (tail_cn)
+            dEdcn_combined += m_disp_tail_dEdcn;
         // CPU dEdcn_combined (verbosity >= 3)
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::info(fmt::format("=== CPU dEdcn_combined (natoms={}) ===", m_natoms));
@@ -617,6 +626,8 @@ void FFWorkspace::postProcess(bool gradient)
         // Per-component CN corrections
         if (m_store_components) {
             Vector dEdcn_disp = m_dEdcn_total - m_dEdcn_bond_total;
+            if (tail_cn)
+                dEdcn_disp += m_disp_tail_dEdcn;  // tail force counted as dispersion
             m_dcn.applyAdd(m_dEdcn_bond_total, m_result_grad_bond);
             m_dcn.applyAdd(dEdcn_disp, m_result_grad_dispersion);
             if (has_term1b)

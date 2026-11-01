@@ -36,6 +36,7 @@ energy/gradient kernel (`curcuma::dispersion::D4Evaluator`). Native D3 lives in
 - `D4Evaluator`'s guard on unset params is an `assert`, compiled out in `release/` (`-O3 -DNDEBUG`)
 - The C6 reference matrix is built lazily for the elements present; `c6CacheCoversAtoms()` rebuilds it when a reused generator meets a new element
 - GFN-FF pair list: built at `PAIR_BUILD_CUTOFF_BOHR` 60, evaluated at `PAIR_EVAL_CUTOFF_BOHR` 50; per-pair C6 must be refreshed after geometry changes (`-gfnff.dispersion_c6_update`); with a periodic cell the radii come from `GFNFF::dispersionRadiiBohr()` and pairs are stored once at their minimum-image distance (`setPeriodicCell`)
+- Periodic tail (A3c): `homogeneousDispersionTail()` sums zeta_i zeta_j C6_ij over all ordered pairs incl. i = j, factorised per partner element (O(N K 49)); large-r form without R0 damping, error <= (1/3)(R0/r_c)^6; uses the current Gaussian weights and `m_zeta_atom` of the last native list build
 
 ## Open items
 

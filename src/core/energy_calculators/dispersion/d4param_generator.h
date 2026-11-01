@@ -120,6 +120,31 @@ public:
         m_pair_build_cutoff_bohr = pair_build_cutoff_bohr;
     }
 
+    /**
+     * @brief Long-range tail of the GFN-FF D4 pair term for homogeneous density beyond r_c
+     *        (WP-PERIODIC-NONBONDED A3c) - Claude Generated (Nov 2026)
+     *
+     * E_tail = -(2 pi / V) [ S6 / (3 r_c^3) + 2 S8 / (5 r_c^5) ],
+     *   S6 = sum_i sum_j zeta_i zeta_j C6_ij,  S8 = sum_i sum_j zeta_i zeta_j r4r2ij C6_ij,
+     * both sums over ALL ordered atom pairs of the cell including i = j (derivation in the .cpp).
+     * C6_ij from the CURRENT Gaussian CN weights (the state the pair term uses), zeta_i the
+     * per-atom factor of the last pair-list build (topology charges, fixed). Factorised over the
+     * partner element: O(N K 49), no pair loop. Large-r form (damping R0 dropped), see .cpp.
+     *
+     * @param rc_bohr        evaluation radius of the pair term (GFNFF::dispersionRadiiBohr().eval)
+     * @param volume_bohr3   cell volume
+     * @param dEdcn          if non-null (size N): dE_tail/dCN_i is ADDED, from the stored
+     *                       Gaussian-weight derivatives (valid after updateCNValuesForGradient)
+     * @param s6_out,s8_out  optional: the two sums (tests, report)
+     * @return E_tail in Eh; 0 if the per-atom data is not complete (then dEdcn is untouched)
+     */
+    double homogeneousDispersionTail(double rc_bohr, double volume_bohr3, Vector* dEdcn = nullptr,
+                                     double* s6_out = nullptr, double* s8_out = nullptr) const;
+    /// E_tail from the two sums (the prefactor of homogeneousDispersionTail), public for tests.
+    static double homogeneousTailFromSums(double s6, double s8, double rc_bohr, double volume_bohr3);
+    /// Per-atom zeta of the last pair-list build (zetac6_ij = zeta_i zeta_j), empty before.
+    const std::vector<double>& atomZeta() const { return m_zeta_atom; }
+
     // Claude Generated (Feb 15, 2026): dc6dcn computation for dispersion CN gradient
     // Reference: Fortran gfnff_gdisp0.f90:174-210, 262-305
     // @param skip_dc6dcn  If true, skip O(N²) dc6dcn matrix (GPU computes per-pair)
@@ -386,6 +411,7 @@ private:
     bool m_skip_pair_loop = false;  // WP-A: GPU builds the pair list; skip the host O(N^2) loop
     PBCUtils::OrthoCell m_cell;     // Nov 2026 (A3b): periodic cell of the pair list, inactive = none
     double m_pair_build_cutoff_bohr = PAIR_BUILD_CUTOFF_BOHR;  // build radius with an active cell
+    std::vector<double> m_zeta_atom;  // Nov 2026 (A3c): zeta_i of the last native pair-list build
 
     // Molecular CN calculation (December 2025 Phase 2 - CN+Charge weighting)
     std::vector<double> m_cn_values;  // Cached GFNFFCN values for current geometry

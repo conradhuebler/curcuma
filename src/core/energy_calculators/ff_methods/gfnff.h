@@ -170,6 +170,7 @@ struct GFNFFEnergyReport {
     double bond = 0, angle = 0, dihedral = 0, inversion = 0, stors = 0;
     double dispersion = 0, bonded_rep = 0, nonbonded_rep = 0;
     double coulomb = 0, hbond = 0, xbond = 0, atm = 0, batm = 0;
+    double disp_tail = 0;  ///< Nov 2026 (A3c): homogeneous D4 tail, printed only when non-zero (periodic cell)
     // Claude Generated (May 2026, HB-investigation): per-case HB diagnostic split.
     // hbond = case1 + case2 + case3 + case4. Counts compare against Fortran nhb1/nhb2.
     double hbond_case1 = 0, hbond_case2 = 0, hbond_case3 = 0, hbond_case4 = 0;
@@ -376,7 +377,8 @@ PARAM(hb_min_pair_energy_eh, Double, 1e-9, "Drop unbound (case 1) H-bond candida
 PARAM(xb_min_pair_energy_eh, Double, 1e-9, "Drop halogen-bond candidates whose exact |E_XB| is below this (Eh). 0 keeps all.", "HB/XB", {})
 PARAM(hb_parallel_min_pairs, Int, 500, "Run the H-bond detection on the thread pool above this many A-B pairs; 0 = always, -1 = never.", "HB/XB", {})
 // ---- Dispersion ----
-PARAM(dispersion_cutoff_bohr, Double, 0.0, "Cutoff (Bohr) of the D4 dispersion pair list; 0 keeps all pairs, as the reference. A cutoff also widens the CN-derivative range to match. With a periodic cell, 0 reduces the 50 Bohr evaluation radius to just below L_min/2 (no tail correction yet); an explicit value must be below L_min/2.", "Dispersion", {})
+PARAM(dispersion_cutoff_bohr, Double, 0.0, "Cutoff (Bohr) of the D4 dispersion pair list; 0 keeps all pairs, as the reference. A cutoff also widens the CN-derivative range to match. With a periodic cell, 0 reduces the 50 Bohr evaluation radius to just below L_min/2 (the part beyond it is added by dispersion_tail); an explicit value must be below L_min/2.", "Dispersion", {})
+PARAM(dispersion_tail, Bool, true, "Periodic cell only: add the long-range D4 tail beyond the evaluation radius for homogeneous density (g(r) = 1), from the current CN, with its force through dE/dCN; reported as 'Dispersion tail'. No effect without a cell. false leaves the pair term cut at the evaluation radius.", "Dispersion", {})
 PARAM(dispersion_c6_update, Bool, true, "Recompute the D4 pair C6 from the current CN at each new geometry, so MD and optimisation agree with single points. false keeps C6 of the setup geometry.", "Dispersion", {})
 PARAM(disp_c6_fused, Bool, true, "CPU: evaluate each D4 pair's C6 and dC6/dCN inside the dispersion energy loop instead of storing them per pair every step (same values bit for bit, less memory traffic). false for the stored per-pair path.", "Dispersion", {})
 PARAM(disp_half_contraction, Bool, true, "Faster per-atom contraction for the D4 C6 and dC6/dCN; it changes the summation order (energies agree to about 1e-10 Eh). false for the plain contraction.", "Dispersion", {})
@@ -1258,6 +1260,9 @@ public:
         bool user_cutoff = false;      ///< dispersion_cutoff_bohr > 0
     };
     D4RadiiBohr dispersionRadiiBohr() const;
+    /// Claude Generated (Nov 2026, A3c): true when the homogeneous D4 tail is evaluated (cell, dispersion on,
+    /// dispersion_tail true, CPU D4 generator present)
+    bool dispersionTailActive() const;
     /// Claude Generated (Nov 2026, A3b): number of D4 pair-list rebuilds since set-up (diagnostic, tests)
     long dispersionRebuildCount() const { return m_disp_rebuild_count; }
 
@@ -1745,6 +1750,10 @@ private:
      * @throws std::runtime_error with the names, values and L_min/2 in Bohr
      */
     void configurePeriodicCell();
+    /// Claude Generated (Nov 2026, A3c): evaluate the homogeneous D4 tail for the current CN weights and hand
+    /// energy and dE/dCN to the workspace (clears it when dispersionTailActive() is false). Called right
+    /// before m_workspace->calculate() in calculationSingle().
+    void updateDispersionTail(bool gradient);
     /// Claude Generated (Nov 2026, A1): (name, radius in Bohr) of every cutoff in use; checked by configurePeriodicCell().
     std::vector<std::pair<std::string, double>> activeCutoffsBohr() const;
     /// Claude Generated (Nov 2026, A2): range of the per-step CN in Bohr; CN-derivative range with a cell.
@@ -2587,6 +2596,8 @@ public:
      * @return Dispersion correction energy or 0 if not calculated
      */
     double DispersionEnergy() const;
+    /// Claude Generated (Nov 2026, A3c): homogeneous long-range D4 tail (0 without a cell or with dispersion_tail false)
+    double DispersionTailEnergy() const;
 
     /**
      * @brief Get Coulomb electrostatic energy component
@@ -3099,6 +3110,7 @@ private:
     bool m_skip_host_disp_pairs = false;  ///< WP-A: GPU builds D4 pairs; skip host O(N^2) loop
     bool m_implicit_coulomb_pairs = false; ///< GPU enumerates Coulomb pairs; skip host list
     bool m_print_timing = true;     ///< Print init timing summary at verbosity >= 1
+    bool m_dispersion_tail = true;  ///< Nov 2026 (A3c): PARAM dispersion_tail (periodic cell only)
 
     // Claude Generated (April 2026): Timing for consolidated summary
     double m_param_gen_time_ms = 0.0;       ///< Parameter generation time (generateGFNFFParameterSet) for summary

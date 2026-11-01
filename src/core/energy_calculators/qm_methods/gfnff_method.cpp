@@ -192,6 +192,9 @@ json GFNFFComputationalMethod::getEnergyDecomposition() const {
     energy_json["Torsion"] = m_gfnff->DihedralEnergy();
     energy_json["Inversion"] = m_gfnff->InversionEnergy();
     energy_json["Dispersion"] = m_gfnff->DispersionEnergy();
+    // Nov 2026 (A3c): homogeneous long-range D4 tail, a separate key and only with a periodic cell
+    if (m_gfnff->DispersionTailEnergy() != 0.0)
+        energy_json["DispersionTail"] = m_gfnff->DispersionTailEnergy();
     energy_json["Coulomb"] = m_gfnff->CoulombEnergy();
     // Claude Generated (Jul 2026): the repulsion term was missing from the decomposition although
     // the accessor exists. For GFN-FF it is one of the largest contributions (+1.06 Eh = 2781 kJ/mol

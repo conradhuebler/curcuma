@@ -2138,6 +2138,132 @@ void D4ParameterGenerator::fusedBuildView()
     }
 }
 
+// ============================================================================
+// Homogeneous long-range tail of the GFN-FF D4 pair term (WP-PERIODIC-NONBONDED A3c)
+// Claude Generated (Nov 2026)
+// ============================================================================
+//
+// Pair term (FFWorkspace::calcD4Dispersion, s6 = 1 and s8 = 2 hard-coded there):
+//   e_ij(r) = -zeta_i zeta_j C6_ij [ 1/(r^6 + R0^6) + 2 r4r2ij/(r^8 + R0^8) ]
+// The full lattice energy is (1/2) sum_i sum_j sum_n' e_ij(|r_ij + n L|), n' excluding the
+// term i = j, n = 0. The kernel counts exactly the images with |r| <= r_c (r_c < L_min/2: at most
+// the minimum image of j, never a self image of i). Beyond r_c assume g(r) = 1: the images of a
+// fixed atom j fill space with density 1/V, independent of where j sits in the cell, so
+//   E_tail = (1/2) sum_i sum_j (1/V) int_{r_c}^inf 4 pi r^2 e_ij(r) dr,
+// with the sum over ALL j of the cell including j = i (the self images of i are lattice partners
+// beyond r_c like any other; for N atoms the double sum has N^2 terms, the usual N rho/2 tail).
+// Large-r form 1/(r^6+R0^6) -> r^-6, 1/(r^8+R0^8) -> r^-8:
+//   int r^2 r^-6 = 1/(3 r_c^3),  int r^2 r^-8 = 1/(5 r_c^5)
+//   E_tail = -(2 pi / V) [ S6/(3 r_c^3) + 2 S8/(5 r_c^5) ]
+//   S6 = sum_ij zeta_i zeta_j C6_ij,  S8 = sum_ij zeta_i zeta_j r4r2ij C6_ij.
+// Damping error bound: 1/(r^6+R0^6) >= r^-6 (1 - (R0/r)^6), so the large-r form over-binds the C6
+// part by at most int r^-4 (R0/r)^6 / int r^-4 = (1/3)(R0/r_c)^6 relative, the C8 part by
+// (5/13)(R0/r_c)^8. R0 = 0.58 sqrt(r4r2ij) + 4.80 (same table as the pair list); O-O 7.4 Bohr:
+// 3.0e-5 at r_c 35, 1.6e-3 at r_c 18, 0.21 at r_c 8 Bohr (C6 part; relative to the tail itself).
+// Factorisation: C6_ij = sum_a sum_b w_i[a] w_j[b] C6ref(Z_i,a; Z_j,b) and r4r2ij = 3 sqZ_i sqZ_j
+// (sqZ per element). With W[Z][b] = sum_{j in Z} zeta_j w_j[b] (all atoms of element Z):
+//   C_iZ = sum_a w_i[a] sum_b C6ref(Z_i,a; Z,b) W[Z][b]  =  sum_{j in Z} zeta_j C6_ij
+//   S6 = sum_i zeta_i sum_Z C_iZ,  S8 = sum_i zeta_i 3 sqZ_i sum_Z sqZ_Z C_iZ.
+// Gradient: S = sum_ij f_ij C6(CN_i, CN_j) with f symmetric, C6 symmetric, so
+//   dS/dCN_k = 2 sum_j f_kj dC6_kj/dCN_k  (also right for j = k: both arguments of C6_kk move,
+//   and the two partial derivatives are equal because C6ref(Z,a;Z,b) = C6ref(Z,b;Z,a)),
+//   dC6_kj/dCN_k = sum_a dw_k[a] sum_b C6ref(Z_k,a; Z_j,b) w_j[b]  ->  D_kZ like C_kZ with dw_k.
+// zeta is fixed (topology charges), so there is no dq term. The volume derivative (virial, NPT)
+// is dE_tail/dV = -E_tail/V at fixed r_c; not implemented here (no barostat uses it yet).
+double D4ParameterGenerator::homogeneousTailFromSums(double s6, double s8, double rc_bohr, double volume_bohr3)
+{
+    const double pi = 3.14159265358979323846;
+    const double rc3 = rc_bohr * rc_bohr * rc_bohr;
+    const double rc5 = rc3 * rc_bohr * rc_bohr;
+    return -(2.0 * pi / volume_bohr3) * (s6 / (3.0 * rc3) + 2.0 * s8 / (5.0 * rc5));
+}
+
+double D4ParameterGenerator::homogeneousDispersionTail(double rc_bohr, double volume_bohr3, Vector* dEdcn,
+                                                       double* s6_out, double* s8_out) const
+{
+    const int N = static_cast<int>(m_atoms.size());
+    if (s6_out) *s6_out = 0.0;
+    if (s8_out) *s8_out = 0.0;
+    if (N == 0 || !(rc_bohr > 0.0) || !(volume_bohr3 > 0.0)) return 0.0;
+    if (static_cast<int>(m_zeta_atom.size()) != N || static_cast<int>(m_gaussian_weights.size()) != N
+        || m_c6_flat_cache.empty())
+        return 0.0;
+    const bool want_grad = (dEdcn != nullptr);
+    if (want_grad && (dEdcn->size() != N || static_cast<int>(m_gaussian_weight_derivatives.size()) != N))
+        return 0.0;
+
+    // element slots of the elements present, references per element
+    std::vector<int> elems;
+    std::array<int, MAX_ELEM + 1> slot;
+    slot.fill(-1);
+    for (int Z : m_atoms) {
+        if (Z < 1 || Z > MAX_ELEM) return 0.0;  // the pair list skips such atoms; keep the tail consistent: off
+        if (slot[Z] < 0) {
+            slot[Z] = static_cast<int>(elems.size());
+            elems.push_back(Z);
+        }
+    }
+    const int K = static_cast<int>(elems.size());
+    std::vector<int> nref(K);
+    std::vector<double> sqz(K);
+    for (int s = 0; s < K; ++s) {
+        const int e = elems[s] - 1;
+        nref[s] = std::min<int>(e < static_cast<int>(m_refn.size()) ? m_refn[e] : 0, MAX_REF);
+        sqz[s] = getSqrtZr4r2(elems[s]);
+    }
+    // W[Z][b] = sum_{j in Z} zeta_j w_j[b]
+    std::vector<double> W(static_cast<size_t>(K) * MAX_REF, 0.0);
+    for (int j = 0; j < N; ++j) {
+        const int s = slot[m_atoms[j]];
+        const auto& wj = m_gaussian_weights[j];
+        const int nb = std::min<int>(std::min<int>(wj.size(), MAX_REF), nref[s]);
+        for (int b = 0; b < nb; ++b) W[static_cast<size_t>(s) * MAX_REF + b] += m_zeta_atom[j] * wj[b];
+    }
+
+    const double pi = 3.14159265358979323846;
+    const double rc3 = rc_bohr * rc_bohr * rc_bohr;
+    const double rc5 = rc3 * rc_bohr * rc_bohr;
+    const double pref6 = -(2.0 * pi / volume_bohr3) / (3.0 * rc3);        // dE/dS6
+    const double pref8 = -(2.0 * pi / volume_bohr3) * 2.0 / (5.0 * rc5);  // dE/dS8
+
+    double S6 = 0.0, S8 = 0.0;
+    for (int i = 0; i < N; ++i) {
+        const int si = slot[m_atoms[i]];
+        const int ei = m_atoms[i] - 1;
+        const auto& wi = m_gaussian_weights[i];
+        const int na = std::min<int>(std::min<int>(wi.size(), MAX_REF), nref[si]);
+        const std::vector<double>* dwi = want_grad ? &m_gaussian_weight_derivatives[i] : nullptr;
+        const int nda = dwi ? std::min<int>(static_cast<int>(dwi->size()), na) : 0;
+        double c6sum = 0.0, c8sum = 0.0, d6sum = 0.0, d8sum = 0.0;
+        for (int s = 0; s < K; ++s) {
+            const size_t base = static_cast<size_t>(ei) * MAX_ELEM * MAX_REF * MAX_REF
+                              + static_cast<size_t>(elems[s] - 1) * MAX_REF * MAX_REF;
+            const double* Ws = &W[static_cast<size_t>(s) * MAX_REF];
+            double c = 0.0, d = 0.0;
+            for (int a = 0; a < na; ++a) {
+                double h = 0.0;  // sum_b C6ref(Z_i,a; Z,b) W[Z][b]
+                const double* row = &m_c6_flat_cache[base + static_cast<size_t>(a) * MAX_REF];
+                for (int b = 0; b < nref[s]; ++b) h += row[b] * Ws[b];
+                c += wi[a] * h;
+                if (a < nda) d += (*dwi)[a] * h;
+            }
+            c6sum += c;
+            c8sum += sqz[s] * c;
+            d6sum += d;
+            d8sum += sqz[s] * d;
+        }
+        const double zi = m_zeta_atom[i];
+        const double r4 = 3.0 * sqz[si];
+        S6 += zi * c6sum;
+        S8 += zi * r4 * c8sum;
+        if (want_grad)
+            (*dEdcn)(i) += 2.0 * zi * (pref6 * d6sum + pref8 * r4 * d8sum);
+    }
+    if (s6_out) *s6_out = S6;
+    if (s8_out) *s8_out = S8;
+    return pref6 * S6 + pref8 * S8;
+}
+
 // Claude Generated (Apr 2026): P1a — CN-change threshold check for Gaussian weight caching
 bool D4ParameterGenerator::canSkipGaussianWeightsUpdate(const std::vector<double>& new_cn) const
 {
@@ -2273,6 +2399,7 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
             q_i = (i < static_cast<int>(m_eeq_charges.size())) ? m_eeq_charges(i) : 0.0;
         zeta_atom[i] = GFNFFParameters::zetaChargeScale(m_atoms[i], q_i);
     }
+    m_zeta_atom = zeta_atom;  // Nov 2026 (A3c): the same factors for homogeneousDispersionTail()
     // r4r2ij and R0^2 per ordered element pair of the elements present (slot = index in elems)
     std::vector<int> elems;
     std::vector<int> elem_slot(MAX_ELEM + 1, -1);

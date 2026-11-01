@@ -157,6 +157,7 @@ void addScaled(FFEnergyComponents& a, const FFEnergyComponents& b, double w)
     a.bonded_rep += w * b.bonded_rep; a.nonbonded_rep += w * b.nonbonded_rep;
     a.coulomb += w * b.coulomb; a.hbond += w * b.hbond; a.xbond += w * b.xbond;
     a.atm += w * b.atm; a.batm += w * b.batm; a.stors += w * b.stors;
+    a.disp_tail += w * b.disp_tail;  // Nov 2026 (A3c)
     a.hbond_case1 += w * b.hbond_case1; a.hbond_case2 += w * b.hbond_case2;
     a.hbond_case3 += w * b.hbond_case3; a.hbond_case4 += w * b.hbond_case4;
 }
