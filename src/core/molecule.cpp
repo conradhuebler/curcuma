@@ -148,8 +148,12 @@ Molecule::Molecule(const Mol& other)
     m_energy = other.m_energy;
     m_spin = other.m_spin;
     m_bonds = other.m_bonds;
-    m_unit_cell = other.m_unit_cell; // Claude Generated 2025: Copy PBC data from Mol
-    m_has_pbc = other.m_has_pbc;
+    // Claude Generated (Nov 2026): setXYZComment() above may already have parsed a cell from the comment line;
+    // copy the Mol value only if it carries one, else the parsed cell is overwritten with 'no PBC'.
+    if (other.m_has_pbc) {
+        m_unit_cell = other.m_unit_cell;
+        m_has_pbc = true;
+    }
     CalculateMass(); // Claude Generated 2025: Initialize molecular mass from atom types
 }
 
@@ -162,8 +166,12 @@ Molecule::Molecule(const Mol* other)
     m_energy = other->m_energy;
     m_spin = other->m_spin;
     m_bonds = other->m_bonds;
-    m_unit_cell = other->m_unit_cell; // Claude Generated 2025: Copy PBC data from Mol
-    m_has_pbc = other->m_has_pbc;
+    // Claude Generated (Nov 2026): setXYZComment() above may already have parsed a cell from the comment line;
+    // copy the Mol value only if it carries one, else the parsed cell is overwritten with 'no PBC'.
+    if (other->m_has_pbc) {
+        m_unit_cell = other->m_unit_cell;
+        m_has_pbc = true;
+    }
     CalculateMass(); // Claude Generated 2025: Initialize molecular mass from atom types
 }
 
@@ -710,6 +718,9 @@ void Molecule::LoadMolecule(const Molecule& molecule)
     m_bonds = molecule.m_bonds;
     InitialiseEmptyGeometry(molecule.AtomCount());
     setGeometry(molecule.getGeometry());
+    // Claude Generated (Nov 2026): the cell was dropped here, so Molecule(file) lost the unit cell of an XYZ file
+    m_unit_cell = molecule.m_unit_cell;
+    m_has_pbc = molecule.m_has_pbc;
 }
 
 void Molecule::LoadMolecule(const Molecule* molecule)
@@ -721,6 +732,8 @@ void Molecule::LoadMolecule(const Molecule* molecule)
 
     InitialiseEmptyGeometry(molecule->AtomCount());
     setGeometry(molecule->getGeometry());
+    m_unit_cell = molecule->m_unit_cell; // Claude Generated (Nov 2026): see the reference overload
+    m_has_pbc = molecule->m_has_pbc;
 }
 
 void Molecule::LoadMolecule(const Mol& molecule)
@@ -736,8 +749,12 @@ void Molecule::LoadMolecule(const Mol& molecule)
     m_bonds = molecule.m_bonds;
     m_persistent_topology = molecule.m_topology;
     m_has_persistent_topology = molecule.m_has_topology;
-    m_unit_cell = molecule.m_unit_cell; // Claude Generated 2025: Copy PBC data
-    m_has_pbc = molecule.m_has_pbc;
+    // Claude Generated (Nov 2026): setXYZComment() above may already have parsed a cell from the comment line;
+    // copy the Mol value only if it carries one, else the parsed cell is overwritten with 'no PBC'.
+    if (molecule.m_has_pbc) {
+        m_unit_cell = molecule.m_unit_cell;
+        m_has_pbc = true;
+    }
 }
 
 void Molecule::LoadMolecule(const Mol* molecule)
@@ -753,8 +770,12 @@ void Molecule::LoadMolecule(const Mol* molecule)
     m_bonds = molecule->m_bonds;
     m_persistent_topology = molecule->m_topology;
     m_has_persistent_topology = molecule->m_has_topology;
-    m_unit_cell = molecule->m_unit_cell; // Claude Generated 2025: Copy PBC data
-    m_has_pbc = molecule->m_has_pbc;
+    // Claude Generated (Nov 2026): setXYZComment() above may already have parsed a cell from the comment line;
+    // copy the Mol value only if it carries one, else the parsed cell is overwritten with 'no PBC'.
+    if (molecule->m_has_pbc) {
+        m_unit_cell = molecule->m_unit_cell;
+        m_has_pbc = true;
+    }
 }
 
 Molecule Molecule::getFragmentMolecule(const int fragment) const
