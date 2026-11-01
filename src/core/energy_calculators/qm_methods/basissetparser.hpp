@@ -123,13 +123,13 @@ inline std::string toUpper(std::string str)
 // full names like HYDROGEN or standard symbols like H/He) and keys the result
 // map by the standard element symbol, so DFT can look up by symbol derived
 // from the atomic number.
-inline BasisSetMap parseBasisSetFile(const std::string& filename)
+//
+// Claude Generated (Nov 2026): the parser reads any std::istream (parseBasisSetStream), so the built-in basis
+// sets (qm_basis_embedded.h, text in qm_basis_tables.h) go through exactly the same code as a file. Element blocks
+// outside H-Ne (e.g. SODIUM in the shipped def2-SV(P).dat) are skipped; before they stopped the parse with
+// "Failed to parse shell primitive count", so -qm.basis def2-SV(P) never loaded.
+inline BasisSetMap parseBasisSetStream(std::istream& file)
 {
-    std::ifstream file(filename);
-    if (!file.is_open()) {
-        throw std::runtime_error("Could not open basis set file: " + filename);
-    }
-
     BasisSetMap basisSetMap;
     std::string line;
 
@@ -179,6 +179,7 @@ inline BasisSetMap parseBasisSetFile(const std::string& filename)
 
     ElementBasis current;
     bool haveCurrent = false;
+    bool skipping = false;  // inside the block of an element outside the table (not read)
     auto flush = [&]() {
         if (!haveCurrent) return;
         basisSetMap[current.symbol] = current;
@@ -206,12 +207,20 @@ inline BasisSetMap parseBasisSetFile(const std::string& filename)
             } else {
                 isHeader = !std::isdigit((unsigned char)second[0]);
             }
-            if (isHeader && nameToSymbol.find(up) == nameToSymbol.end())
+            if (isHeader && nameToSymbol.find(up) == nameToSymbol.end()) {
+                // element header outside H-Ne (a single all-alpha token): skip its block
                 isHeader = false;
+                if (second.empty()) {
+                    flush();
+                    skipping = true;
+                    continue;
+                }
+            }
         }
 
         if (isHeader) {
             flush();
+            skipping = false;
             std::string sym = nameToSymbol.at(toUpper(first));
             current = ElementBasis();
             current.symbol = sym;
@@ -230,6 +239,8 @@ inline BasisSetMap parseBasisSetFile(const std::string& filename)
             haveCurrent = true;
             continue;
         }
+
+        if (skipping) continue;  // shell and primitive lines of a skipped element
 
         // Shell line: "<S|P|D|F|G> <numPrim> [<numContractions>]"
         if (!haveCurrent)
@@ -275,6 +286,23 @@ inline BasisSetMap parseBasisSetFile(const std::string& filename)
     }
     flush();
     return basisSetMap;
+}
+
+/// Parse a basis set file in the curcuma $DATA format (see parseBasisSetStream).
+inline BasisSetMap parseBasisSetFile(const std::string& filename)
+{
+    std::ifstream file(filename);
+    if (!file.is_open()) {
+        throw std::runtime_error("Could not open basis set file: " + filename);
+    }
+    return parseBasisSetStream(file);
+}
+
+/// Parse basis set text in the curcuma $DATA format, e.g. a built-in set (Claude Generated, Nov 2026).
+inline BasisSetMap parseBasisSetString(const std::string& text)
+{
+    std::istringstream in(text);
+    return parseBasisSetStream(in);
 }
 
 // Create a minimal STO-type basis from a GTO basis set

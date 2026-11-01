@@ -64,7 +64,7 @@ BEGIN_PARAMETER_DEFINITION(qm)
           "Correlation", {})
     // Claude Generated (Oct 2026): RI-MP2 (methods ri-mp2, scs-ri-mp2, sos-ri-mp2), implementation qm_rimp2.cpp
     PARAM(ri_mp2_aux, String, "def2-universal-JKFIT",
-          "RI-MP2: auxiliary basis for the correlation fit (ia|jb) ~ sum_P B_ia^P B_jb^P: def2-universal-JKFIT (default) | def2-universal-JFIT (def2/JK, def2/J accepted) | path to a Turbomole-format file. No def2-SVP/C file ships with curcuma, so RI-MP2 here uses a JK/J fitting set as correlation fitting basis: a method variant, not identical to RI-MP2/def2-SVP/C of other programs. Independent of -qm.ri (the SCF stays exact unless -qm.ri j|jk is given).",
+          "RI-MP2: auxiliary basis for the correlation fit (ia|jb) ~ sum_P B_ia^P B_jb^P: def2-universal-JKFIT (default) | def2-universal-JFIT (def2/JK, def2/J accepted) | path to a Turbomole-format file; both are built into the binary (H-Ne), a file of that name in the search path ($CURCUMA_QM_BASIS, $CURCUMA_DATA, the source directory, the current directory) takes precedence. No def2-SVP/C file ships with curcuma, so RI-MP2 here uses a JK/J fitting set as correlation fitting basis: a method variant, not identical to RI-MP2/def2-SVP/C of other programs. Independent of -qm.ri (the SCF stays exact unless -qm.ri j|jk is given).",
           "Correlation", {})
 END_PARAMETER_DEFINITION
 

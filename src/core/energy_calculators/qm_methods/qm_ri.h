@@ -45,6 +45,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <istream>
 #include <string>
 #include <vector>
 
@@ -64,11 +65,16 @@ using AuxBasisMap = std::map<std::string, std::vector<AuxShellData>>;
 
 /// @brief Parse a Turbomole-format basis file ($jbas / $jkbas blocks, "*" separators,
 /// "n l" shell headers followed by n "exponent coefficient" lines). Throws on malformed input.
+/// `path` may be the pseudo path "[embedded]/<name>.turbomole" of a built-in set (qm_basis_embedded.h).
 AuxBasisMap parseTurbomoleBasis(const std::string& path);
+
+/// @brief The same parser on a stream; `path` only labels error messages (Claude Generated, Nov 2026).
+AuxBasisMap parseTurbomoleStream(std::istream& in, const std::string& path);
 
 /// @brief Resolve an auxiliary set name to a file: "auto" -> def2-universal-JFIT (mode j) or
 /// def2-universal-JKFIT (mode jk); def2/J, def2/JK, def2-universal-jfit ... accepted; a path is used as
-/// is. Search order as for the orbital basis: $CURCUMA_QM_BASIS, $CURCUMA_DATA, the source directory, cwd.
+/// is. Search order as for the orbital basis: $CURCUMA_QM_BASIS, $CURCUMA_DATA, the source directory, cwd, then the
+/// built-in copy (pseudo path "[embedded]/<name>.turbomole"). Throws naming the search path if nothing is found.
 std::string resolveAuxBasisFile(const std::string& name, const std::string& mode);
 
 // ---------------------------------------------------------------------------

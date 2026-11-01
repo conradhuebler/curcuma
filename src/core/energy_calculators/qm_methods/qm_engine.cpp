@@ -23,6 +23,7 @@
 #include "src/core/blas_threads.h"
 #include "src/core/curcuma_logger.h"
 #include "qm_citations.h"
+#include "qm_basis_embedded.h"  // built-in basis sets (Nov 2026)
 #include "qm_ri.h"  // qmint::gradientTwoElectronScaled (WP8 Kohn-Sham gradient)
 #include "src/core/energy_calculators/gpu_plugin.h"
 #include "src/core/gpu_fallback.h"
@@ -82,46 +83,56 @@ bool fileExists(const std::string& path)
     return f.good();
 }
 
-// Resolve a basis-set name (e.g. "def2-SVP") to a .dat file path.
-// Order: explicit path/.dat as-is; $CURCUMA_QM_BASIS/<name>.dat;
+// Resolve a basis-set name (e.g. "def2-SVP") to a .dat file path or to a built-in set.
+// Order: explicit path (contains '/') as-is; $CURCUMA_QM_BASIS/<name>.dat ($CURCUMA_DFT_BASIS, old name);
 // $CURCUMA_DATA/<name>.dat; source-relative
-// <CURCUMA_SOURCE_DIR>/src/core/energy_calculators/qm_methods/<name>.dat;
-// cwd-relative <name>.dat. Returns the first existing candidate, else the
-// source-relative path (parseBasisSetFile will throw a clear error if absent).
+// <CURCUMA_SOURCE_DIR>/src/core/energy_calculators/qm_methods/<name>.dat; cwd-relative <name>.dat;
+// LAST the built-in copy of that name (qm_basis_embedded.h), returned as the pseudo path "[embedded]/<name>.dat".
+// A file always wins over the built-in copy; CURCUMA_QM_BASIS_EMBEDDED_ONLY=1 skips the file search (test hook).
+// Throws with the searched locations if nothing is found.
+// Claude Generated (Nov 2026): built-in fallback and the error message (before: the source path was returned and
+// the parser failed with "Could not open basis set file").
 std::string resolveBasisFile(const std::string& name)
 {
-    // Explicit path or already a .dat file -> use as-is if it exists.
-    if (name.find('/') != std::string::npos) {
-        if (fileExists(name)) return name;
-    }
     std::string stem = name;
     if (stem.size() >= 4 && stem.compare(stem.size() - 4, 4, ".dat") == 0)
         stem = stem.substr(0, stem.size() - 4);
 
     std::vector<std::string> candidates;
-    // CURCUMA_QM_BASIS (CURCUMA_DFT_BASIS is the pre-Sep-2026 name, still read)
-    for (const char* var : { "CURCUMA_QM_BASIS", "CURCUMA_DFT_BASIS" }) {
-        if (const char* env = std::getenv(var))
+    if (!qmbasis::embeddedOnly()) {
+        // Explicit path or already a .dat file -> use as-is if it exists.
+        if (name.find('/') != std::string::npos) {
+            if (fileExists(name)) return name;
+        }
+        // CURCUMA_QM_BASIS (CURCUMA_DFT_BASIS is the pre-Sep-2026 name, still read)
+        for (const char* var : { "CURCUMA_QM_BASIS", "CURCUMA_DFT_BASIS" }) {
+            if (const char* env = std::getenv(var))
+                if (env[0] != '\0') candidates.push_back(std::string(env) + "/" + stem + ".dat");
+        }
+        if (const char* env = std::getenv("CURCUMA_DATA")) {
             if (env[0] != '\0') candidates.push_back(std::string(env) + "/" + stem + ".dat");
-    }
-    if (const char* env = std::getenv("CURCUMA_DATA")) {
-        if (env[0] != '\0') candidates.push_back(std::string(env) + "/" + stem + ".dat");
-    }
+        }
 #ifdef CURCUMA_SOURCE_DIR
-    candidates.push_back(std::string(CURCUMA_SOURCE_DIR) +
-                         "/src/core/energy_calculators/qm_methods/" + stem + ".dat");
+        candidates.push_back(std::string(CURCUMA_SOURCE_DIR) +
+                             "/src/core/energy_calculators/qm_methods/" + stem + ".dat");
 #endif
-    candidates.push_back(stem + ".dat");  // cwd-relative fallback
+        candidates.push_back(stem + ".dat");  // cwd-relative fallback
 
-    for (const auto& p : candidates)
-        if (fileExists(p)) return p;
+        for (const auto& p : candidates)
+            if (fileExists(p)) return p;
+    }
 
-#ifdef CURCUMA_SOURCE_DIR
-    return std::string(CURCUMA_SOURCE_DIR) +
-           "/src/core/energy_calculators/qm_methods/" + stem + ".dat";
-#else
-    return stem + ".dat";
-#endif
+    if (const auto* e = qmbasis::findEmbedded(stem, "data"))
+        return qmbasis::embeddedPath(*e, ".dat");
+
+    std::string looked;
+    for (const auto& p : candidates) looked += (looked.empty() ? "" : ", ") + p;
+    throw std::runtime_error(fmt::format(
+        "basis set '{}' not found: looked for {} (search path: explicit path, $CURCUMA_QM_BASIS, $CURCUMA_DATA, "
+        "the source directory, the current directory){}; built in are only {} (H-Ne)",
+        name, looked.empty() ? stem + ".dat" : looked,
+        qmbasis::embeddedOnly() ? " -- file search disabled by CURCUMA_QM_BASIS_EMBEDDED_ONLY" : "",
+        qmbasis::embeddedNames("data")));
 }
 }  // namespace
 
@@ -380,10 +391,15 @@ bool QMEngine::InitialiseMolecule()
     // Resolve + parse the basis file (cached).
     try {
         m_basis_file = resolveBasisFile(m_basis_name);
-        qmcite::orbitalBasis(m_basis_name);   // literature of the basis set actually loaded
+        qmcite::orbitalBasis(m_basis_name);   // literature of the basis set actually loaded (file or built-in)
         qmcite::hf();
+        const char* embedded = qmbasis::embeddedText(m_basis_file);
+        if (CurcumaLogger::get_verbosity() >= 2)
+            CurcumaLogger::info(embedded ? fmt::format("QM: orbital basis {}: embedded copy (built into the binary)", m_basis_name)
+                                         : fmt::format("QM: orbital basis {}: file {}", m_basis_name, m_basis_file));
         if (m_basis_map_cache.empty())
-            m_basis_map_cache = BasisSetParser::parseBasisSetFile(m_basis_file);
+            m_basis_map_cache = embedded ? BasisSetParser::parseBasisSetString(embedded)
+                                         : BasisSetParser::parseBasisSetFile(m_basis_file);
     } catch (const std::exception& e) {
         CurcumaLogger::error(std::string("QM: basis setup failed: ") + e.what());
         return false;

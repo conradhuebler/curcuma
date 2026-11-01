@@ -173,6 +173,7 @@ numbers: [docs/KNOWN_ISSUES_ARCHIVE.md](docs/KNOWN_ISSUES_ARCHIVE.md).
 - **Trajectory properties**: `-trajprops` streams a long trajectory frame by frame (R_g, hydrogen bonds, g(r), SASA, each with block error; 🤖, ⚙️; literature references unchecked, see TODO.md): [TRAJPROPS.md](docs/TRAJPROPS.md).
 - **GFN-FF hydrogen-bond energies per triple**: `GFNFF::setRecordHBondEnergies` / `hydrogenBondEnergies()`, CPU workspace (🤖, ⚙️) and CUDA/ROCm device workspace (🤖, compiled, never run on a GPU): [HBOND_ENERGIES.md](docs/HBOND_ENERGIES.md); opt-in log during MD `-hb_log_frequency`.
 - **Other**: `-interaction` (E(AB)-E(A)-E(B), S30L modes), NEB, trajectory analysis (parallel, TrajectoryWriter), scattering, Hessian, persistent diagram, orbitals.
+- **Built-in basis sets** (native QM, H-Ne): def2-SVP, def2-SV(P), MINIX, def2-universal-JFIT/-JKFIT in the binary, a file in the search path wins; data and license: [THIRD_PARTY_NOTICES.md](docs/THIRD_PARTY_NOTICES.md).
 - **Output**: default BMT directory (Basename.Method.Timestamp), `-bak` copies files back, `-no_bmt` writes to CWD (see `src/tools/CLAUDE.md`).
 - **Core**: MNDO integrals ([MNDO_INTEGRALS.md](docs/MNDO_INTEGRALS.md)); one force-field engine `FFWorkspace` (legacy `ForceField`/`ForceFieldThread` GFN-FF path removed Sep 2026, [CLEANUP_2026_09.md](docs/CLEANUP_2026_09.md)).
 

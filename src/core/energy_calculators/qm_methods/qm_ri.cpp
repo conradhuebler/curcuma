@@ -17,6 +17,7 @@
 #include "qm_ri.h"
 #include "qm_engine.h"
 #include "qm_citations.h"
+#include "qm_basis_embedded.h"  // built-in fitting sets (Nov 2026)
 #include "qm_gpu_ri_backend.h"
 
 #include "src/core/blas_threads.h"
@@ -81,10 +82,21 @@ bool fileExists(const std::string& p)
 //   he ...
 //   $end
 // Lines starting with '#' are comments. Coefficients refer to normalised primitives.
+// Claude Generated (Nov 2026): `path` may be the pseudo path "[embedded]/<name>.turbomole" of a built-in set
+// (resolveAuxBasisFile); its text goes through the same stream parser as a file.
 AuxBasisMap parseTurbomoleBasis(const std::string& path)
 {
+    if (const char* text = qmbasis::embeddedText(path)) {
+        std::istringstream in(text);
+        return parseTurbomoleStream(in, path);
+    }
     std::ifstream in(path);
     if (!in) throw std::runtime_error("cannot open auxiliary basis file " + path);
+    return parseTurbomoleStream(in, path);
+}
+
+AuxBasisMap parseTurbomoleStream(std::istream& in, const std::string& path)
+{
     AuxBasisMap map;
     std::string line, element;
     bool expect_element = false;
@@ -157,18 +169,43 @@ std::string resolveAuxBasisFile(const std::string& name_in, const std::string& m
     if (ln.empty() || ln == "auto") name = (mode == "j") ? "def2-universal-JFIT" : "def2-universal-JKFIT";
     else if (ln == "def2/j" || ln == "def2-universal-jfit" || ln == "weigend" || ln == "def2-jfit") name = "def2-universal-JFIT";
     else if (ln == "def2/jk" || ln == "def2-universal-jkfit" || ln == "def2-jkfit") name = "def2-universal-JKFIT";
-    if (name.find('/') != std::string::npos && fileExists(name)) { qmcite::auxBasis(name); return name; }
+    // Claude Generated (Nov 2026): the built-in copy (qm_basis_embedded.h) comes LAST, a file always wins;
+    // CURCUMA_QM_BASIS_EMBEDDED_ONLY=1 skips the file search (test hook).
+    const bool verbose = CurcumaLogger::get_verbosity() >= 2;
     const std::string file = name + ".turbomole";
     std::vector<std::string> cand;
-    for (const char* var : { "CURCUMA_QM_BASIS", "CURCUMA_DFT_BASIS", "CURCUMA_DATA" })
-        if (const char* env = std::getenv(var); env && env[0] != '\0') cand.push_back(std::string(env) + "/" + file);
+    if (!qmbasis::embeddedOnly()) {
+        if (name.find('/') != std::string::npos && fileExists(name)) {
+            qmcite::auxBasis(name);
+            if (verbose) CurcumaLogger::info("QM: auxiliary basis " + name + ": file " + name);
+            return name;
+        }
+        for (const char* var : { "CURCUMA_QM_BASIS", "CURCUMA_DFT_BASIS", "CURCUMA_DATA" })
+            if (const char* env = std::getenv(var); env && env[0] != '\0') cand.push_back(std::string(env) + "/" + file);
 #ifdef CURCUMA_SOURCE_DIR
-    cand.push_back(std::string(CURCUMA_SOURCE_DIR) + "/src/core/energy_calculators/qm_methods/" + file);
+        cand.push_back(std::string(CURCUMA_SOURCE_DIR) + "/src/core/energy_calculators/qm_methods/" + file);
 #endif
-    cand.push_back(file);
-    for (const auto& c : cand)
-        if (fileExists(c)) { qmcite::auxBasis(name); return c; }   // literature of the fitting basis actually loaded
-    throw std::runtime_error("auxiliary basis '" + name_in + "' not found (looked for " + file + ")");
+        cand.push_back(file);
+        for (const auto& c : cand)
+            if (fileExists(c)) {
+                qmcite::auxBasis(name);   // literature of the fitting basis actually loaded
+                if (verbose) CurcumaLogger::info("QM: auxiliary basis " + name + ": file " + c);
+                return c;
+            }
+    }
+    if (const auto* e = qmbasis::findEmbedded(name, "turbomole")) {
+        qmcite::auxBasis(name);
+        if (verbose) CurcumaLogger::info("QM: auxiliary basis " + name + ": embedded copy (built into the binary)");
+        return qmbasis::embeddedPath(*e, ".turbomole");
+    }
+    std::string looked;
+    for (const auto& c : cand) looked += (looked.empty() ? "" : ", ") + c;
+    throw std::runtime_error(fmt::format(
+        "auxiliary basis '{}' not found: looked for {} (search path: explicit path, $CURCUMA_QM_BASIS, $CURCUMA_DATA, "
+        "the source directory, the current directory){}; built in are only {} (H-Ne)",
+        name_in, looked.empty() ? file : looked,
+        qmbasis::embeddedOnly() ? " -- file search disabled by CURCUMA_QM_BASIS_EMBEDDED_ONLY" : "",
+        qmbasis::embeddedNames("turbomole")));
 }
 
 // =================================================================================

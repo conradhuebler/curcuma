@@ -81,7 +81,7 @@ enum class QMFunctional {
 // Was `dft` until Sep 2026; QMMethod still merges a legacy `dft` scope below `qm`.
 BEGIN_PARAMETER_DEFINITION(qm)
     PARAM(basis, String, "def2-SVP",
-          "Basis set (Turbomole/BSE format file, e.g. def2-SVP).",
+          "Orbital basis (name or $DATA file); built in, H-Ne: def2-SVP, def2-SV(P), MINIX; a <name>.dat in the search path wins and is needed for other names (search path: $CURCUMA_QM_BASIS, $CURCUMA_DATA, the source directory, the current directory).",
           "Basis", {})
     // WP4 (Claude Generated, Oct 2026): molecular quadrature grid, implementation in qm_grid.cpp
     PARAM(grid, String, "sg1",
@@ -159,7 +159,7 @@ BEGIN_PARAMETER_DEFINITION(qm)
           "Density fitting (resolution of the identity) for the two-electron part: off (exact integrals, the reference) | j (RI-J: Coulomb from the fit, exchange exact) | jk (RI-JK: Coulomb and exchange from the fit, Weigend 2002). A method variant: energies differ from the exact path by the fitting error (about 1e-5 Eh per atom). The analytic gradient is the derivative of the RI energy (fitted integrals and metric differentiated; RI-J keeps the exact exchange gradient).",
           "DensityFitting", {})
     PARAM(ri_aux, String, "auto",
-          "Auxiliary basis for -qm.ri: auto (def2-universal-JFIT for j, def2-universal-JKFIT for jk) | def2/J | def2/JK | path to a Turbomole-format basis file. Shipped files: def2-universal-JFIT.turbomole, def2-universal-JKFIT.turbomole (H-Ne).",
+          "Auxiliary basis for -qm.ri: auto (def2-universal-JFIT for j, -JKFIT for jk) | def2/J | def2/JK | name | Turbomole file; built in, H-Ne: def2-universal-JFIT/-JKFIT; a <name>.turbomole in the search path ($CURCUMA_QM_BASIS, $CURCUMA_DATA, the source directory, the current directory) wins.",
           "DensityFitting", {})
     PARAM(ri_metric, String, "cholesky",
           "Factorisation of the Coulomb metric J_PQ = (P|Q): cholesky (J = L L^T, falls back to eigen if J is not numerically positive definite) | eigen (J^-1/2 from the eigendecomposition, eigenvalues of the Coulomb-normalised metric below ri_metric_cutoff dropped).",
