@@ -778,6 +778,7 @@ add_subdirectory(qm_dh)  # Claude Generated (Oct 2026, WP12 stage 1): double hyb
 add_subdirectory(qm_dh_grad)  # Claude Generated (Oct 2026, WP12 stage 2): double-hybrid analytic gradient vs FD, PySCF, ORCA, -opt
 add_subdirectory(qm_gpu_dft)  # Claude Generated (Oct 2026): Kohn-Sham DFT on the GPU vs the CPU (skipped without CUDA)
 add_subdirectory(qm_basis_embed)  # Claude Generated (Nov 2026): embedded def2/MINIX basis sets vs the files, search-path priority
+add_subdirectory(qm_fg)  # Claude Generated (Nov 2026): f/g shells (def2-TZVP*/QZVP*) vs PySCF and ORCA, FD gate
 # Claude Generated (Oct 2026): property tests generated from the structure library (test_cases/struct_test_policy.json):
 # translation/rotation/permutation invariance, sum of forces and torque, finite-difference gradient, repeat and thread
 # independence, CPU against CUDA. The selection is made by scripts/gen_struct_tests.py at configure time.

@@ -12,9 +12,8 @@
  *     def2-mTZVPP-RIJ, def2-{SVP,SV(P),SVPD,TZVP,TZVPP,TZVPD,TZVPPD,QZVP,QZVPP,QZVPPD}-RIFIT
  *   ECP (Turbomole '$ecp' text): def2-ECP, Rb-Rn. NOTHING in the engine uses it yet (the SCF stops at Z > 10);
  *     embeddedElementBlock("def2-ECP", Z) is the raw getter for a future ECP integral code.
- * The engine itself is limited to H-Ne and to s, p, d shells (createGTOFromBasis): def2-SVP, -SV(P), -SVPD,
- * -mTZVP, -mTZVPP and MINIX run for H-Ne, the def2-TZVP family only for H-Be (f from B on), def2-QZVP* not at
- * all; the rest is stored for the next stage.
+ * The engine itself is limited to H-Ne and to s, p, d, f, g shells (createGTOFromBasis; f/g since Nov 2026): every
+ * def2 orbital set and MINIX run for H-Ne; elements beyond Ne and the ECP are stored for the next stage.
  *
  * Lookup order of QMEngine (orbital, `-qm.basis`) and qmri::resolveAuxBasisFile (`-qm.ri_aux`, `-qm.ri_mp2_aux`):
  *   1. an explicit path (contains '/') that exists

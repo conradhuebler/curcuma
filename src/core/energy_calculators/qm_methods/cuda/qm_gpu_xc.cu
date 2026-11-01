@@ -76,7 +76,7 @@ namespace {
 
 constexpr int kMaxTerms = 8;
 constexpr int kMaxPrim = 32;      // primitives per shell
-constexpr int kMaxComp = 10;      // cartesian components per shell (L <= 3)
+constexpr int kMaxComp = 15;      // cartesian components per shell (L <= 4; 10 until Nov 2026)
 constexpr int kChunk = 256;       // points per energy-reduction chunk (fixed, independent of B)
 constexpr int kScreenGroupPoints = 2048;  // AO screening: points per streamed group (measured, QM_GPU_ROADMAP section 4)
 
@@ -786,7 +786,7 @@ public:
         if (m_nbf <= 0 || m_npts <= 0 || m_na <= 0) { why = "empty grid or basis"; return false; }
         if (m_mgga && !m_gga) { why = "meta-GGA setup without the GGA flag"; return false; }
         if (s.nterms <= 0 || s.nterms > kMaxTerms) { why = "functional with more than 8 terms"; return false; }
-        if (s.max_ncomp > kMaxComp) { why = "shells above f (more than 10 cartesian components) not supported"; return false; }
+        if (s.max_ncomp > kMaxComp) { why = "shells above g (more than 15 cartesian components) not supported"; return false; }
         for (int i = 0; i < m_nshell; ++i)
             if (s.sh_nprim[i] > kMaxPrim) { why = "shell with more than 32 primitives"; return false; }
         m_terms.n = s.nterms;

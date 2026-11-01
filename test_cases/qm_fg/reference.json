@@ -1,0 +1,763 @@
+{
+ "generator": "scripts/qm_fg_reference.py",
+ "pyscf": "2.14.0",
+ "libxc": "7.0.0",
+ "cases": {
+  "hf_H2O_def2-TZVP": {
+   "molecule": "H2O",
+   "xyz": "qm_1e/H2O.xyz",
+   "method": "hf",
+   "qm": {
+    "basis": "def2-TZVP"
+   },
+   "gradient": false,
+   "pyscf": {
+    "nbf": 43,
+    "energy": -76.05666794163297
+   },
+   "orca": {
+    "energy": -76.056667942148,
+    "input": [
+     "! RHF def2-TZVP NoRI VeryTightSCF",
+     "* xyz 0 1",
+     "O  0.000000  0.000000  0.000000"
+    ]
+   }
+  },
+  "hf_H2O_def2-TZVPP": {
+   "molecule": "H2O",
+   "xyz": "qm_1e/H2O.xyz",
+   "method": "hf",
+   "qm": {
+    "basis": "def2-TZVPP"
+   },
+   "gradient": false,
+   "pyscf": {
+    "nbf": 59,
+    "energy": -76.0604375141069
+   },
+   "orca": {
+    "energy": -76.06043751458,
+    "input": [
+     "! RHF def2-TZVPP NoRI VeryTightSCF",
+     "* xyz 0 1",
+     "O  0.000000  0.000000  0.000000"
+    ]
+   }
+  },
+  "hf_H2O_def2-TZVPD": {
+   "molecule": "H2O",
+   "xyz": "qm_1e/H2O.xyz",
+   "method": "hf",
+   "qm": {
+    "basis": "def2-TZVPD"
+   },
+   "gradient": false,
+   "pyscf": {
+    "nbf": 58,
+    "energy": -76.05874395689432
+   },
+   "orca": {
+    "energy": -76.058743957419,
+    "input": [
+     "! RHF def2-TZVPD NoRI VeryTightSCF",
+     "* xyz 0 1",
+     "O  0.000000  0.000000  0.000000"
+    ]
+   }
+  },
+  "hf_H2O_def2-QZVP": {
+   "molecule": "H2O",
+   "xyz": "qm_1e/H2O.xyz",
+   "method": "hf",
+   "qm": {
+    "basis": "def2-QZVP"
+   },
+   "gradient": false,
+   "pyscf": {
+    "nbf": 117,
+    "energy": -76.06480483902824
+   },
+   "orca": {
+    "energy": -76.064804839505,
+    "input": [
+     "! RHF def2-QZVP NoRI VeryTightSCF",
+     "* xyz 0 1",
+     "O  0.000000  0.000000  0.000000"
+    ]
+   }
+  },
+  "hf_H2O_def2-QZVPP": {
+   "molecule": "H2O",
+   "xyz": "qm_1e/H2O.xyz",
+   "method": "hf",
+   "qm": {
+    "basis": "def2-QZVPP"
+   },
+   "gradient": false,
+   "pyscf": {
+    "nbf": 117,
+    "energy": -76.06480483902823
+   },
+   "orca": {
+    "energy": -76.064804839505,
+    "input": [
+     "! RHF def2-QZVPP NoRI VeryTightSCF",
+     "* xyz 0 1",
+     "O  0.000000  0.000000  0.000000"
+    ]
+   }
+  },
+  "hf_NH3_def2-TZVPP": {
+   "molecule": "NH3",
+   "xyz": "qm_1e/NH3.xyz",
+   "method": "hf",
+   "qm": {
+    "basis": "def2-TZVPP"
+   },
+   "gradient": false,
+   "pyscf": {
+    "nbf": 73,
+    "energy": -56.210655136581984
+   },
+   "orca": {
+    "energy": -56.210655135247,
+    "input": [
+     "! RHF def2-TZVPP NoRI VeryTightSCF",
+     "* xyz 0 1",
+     "N   0.000000  0.000000  0.149000"
+    ]
+   }
+  },
+  "hf_CH4_def2-TZVPPD": {
+   "molecule": "CH4",
+   "xyz": "qm_1e/CH4.xyz",
+   "method": "hf",
+   "qm": {
+    "basis": "def2-TZVPPD"
+   },
+   "gradient": false,
+   "pyscf": {
+    "nbf": 105,
+    "energy": -40.21446483958319
+   },
+   "orca": {
+    "energy": -40.214464839341,
+    "input": [
+     "! RHF def2-TZVPPD NoRI VeryTightSCF",
+     "* xyz 0 1",
+     "C   0.000000  0.000000  0.000000"
+    ]
+   }
+  },
+  "hf_HF_def2-QZVPPD": {
+   "molecule": "HF",
+   "xyz": "qm_1e/HF.xyz",
+   "method": "hf",
+   "qm": {
+    "basis": "def2-QZVPPD"
+   },
+   "gradient": false,
+   "pyscf": {
+    "nbf": 99,
+    "energy": -100.07040447818927
+   },
+   "orca": {
+    "energy": -100.070404477835,
+    "input": [
+     "! RHF def2-QZVPPD NoRI VeryTightSCF",
+     "* xyz 0 1",
+     "F  0.000000  0.000000  0.000000"
+    ]
+   }
+  },
+  "lda_H2O_def2-TZVP_sg1": {
+   "molecule": "H2O",
+   "xyz": "qm_1e/H2O.xyz",
+   "method": "lda",
+   "qm": {
+    "basis": "def2-TZVP",
+    "grid": "sg1"
+   },
+   "gradient": false,
+   "pyscf": {
+    "nbf": 43,
+    "energy": -75.89335290162505
+   }
+  },
+  "pbe_H2O_def2-TZVP_sg1": {
+   "molecule": "H2O",
+   "xyz": "qm_1e/H2O.xyz",
+   "method": "pbe",
+   "qm": {
+    "basis": "def2-TZVP",
+    "grid": "sg1"
+   },
+   "gradient": false,
+   "pyscf": {
+    "nbf": 43,
+    "energy": -76.36883340246852
+   }
+  },
+  "b3lyp_H2O_def2-TZVP_sg1": {
+   "molecule": "H2O",
+   "xyz": "qm_1e/H2O.xyz",
+   "method": "b3lyp",
+   "qm": {
+    "basis": "def2-TZVP",
+    "grid": "sg1"
+   },
+   "gradient": false,
+   "pyscf": {
+    "nbf": 43,
+    "energy": -76.41971099515119
+   }
+  },
+  "tpss_H2O_def2-TZVP_sg1": {
+   "molecule": "H2O",
+   "xyz": "qm_1e/H2O.xyz",
+   "method": "tpss",
+   "qm": {
+    "basis": "def2-TZVP",
+    "grid": "sg1"
+   },
+   "gradient": false,
+   "pyscf": {
+    "nbf": 43,
+    "energy": -76.45644060503086
+   }
+  },
+  "lda_H2O_def2-QZVP_sg1": {
+   "molecule": "H2O",
+   "xyz": "qm_1e/H2O.xyz",
+   "method": "lda",
+   "qm": {
+    "basis": "def2-QZVP",
+    "grid": "sg1"
+   },
+   "gradient": false,
+   "pyscf": {
+    "nbf": 117,
+    "energy": -75.90443592893575
+   }
+  },
+  "pbe_H2O_def2-QZVP_sg1": {
+   "molecule": "H2O",
+   "xyz": "qm_1e/H2O.xyz",
+   "method": "pbe",
+   "qm": {
+    "basis": "def2-QZVP",
+    "grid": "sg1"
+   },
+   "gradient": false,
+   "pyscf": {
+    "nbf": 117,
+    "energy": -76.37935206568837
+   }
+  },
+  "b3lyp_H2O_def2-QZVP_sg1": {
+   "molecule": "H2O",
+   "xyz": "qm_1e/H2O.xyz",
+   "method": "b3lyp",
+   "qm": {
+    "basis": "def2-QZVP",
+    "grid": "sg1"
+   },
+   "gradient": false,
+   "pyscf": {
+    "nbf": 117,
+    "energy": -76.4299628780747
+   }
+  },
+  "tpss_H2O_def2-QZVP_sg1": {
+   "molecule": "H2O",
+   "xyz": "qm_1e/H2O.xyz",
+   "method": "tpss",
+   "qm": {
+    "basis": "def2-QZVP",
+    "grid": "sg1"
+   },
+   "gradient": false,
+   "pyscf": {
+    "nbf": 117,
+    "energy": -76.46560538454372
+   }
+  },
+  "hfgrad_H2O_def2-TZVP": {
+   "molecule": "H2O",
+   "xyz": "qm_1e/H2O.xyz",
+   "method": "hf",
+   "qm": {
+    "basis": "def2-TZVP"
+   },
+   "gradient": true,
+   "pyscf": {
+    "nbf": 43,
+    "refine_dE": -5.684341886080802e-14,
+    "energy": -76.05666794163311,
+    "gradient": [
+     [
+      2.2331653787074183e-16,
+      2.420148940357192e-16,
+      0.05513667339112427
+     ],
+     [
+      -0.02631050165626192,
+      -1.1190512229869647e-15,
+      -0.027568336695563023
+     ],
+     [
+      0.0263105016562597,
+      8.770363289504431e-16,
+      -0.027568336695562357
+     ]
+    ]
+   }
+  },
+  "hfgrad_H2O_def2-QZVPP": {
+   "molecule": "H2O",
+   "xyz": "qm_1e/H2O.xyz",
+   "method": "hf",
+   "qm": {
+    "basis": "def2-QZVPP"
+   },
+   "gradient": true,
+   "pyscf": {
+    "nbf": 117,
+    "refine_dE": 5.684341886080802e-14,
+    "energy": -76.06480483902837,
+    "gradient": [
+     [
+      -3.419905862550041e-15,
+      -2.784006175135489e-17,
+      0.052677476675251356
+     ],
+     [
+      -0.023463648620763333,
+      -3.1449725528796163e-16,
+      -0.026338738337609913
+     ],
+     [
+      0.02346364862076422,
+      3.4233731703962003e-16,
+      -0.026338738337616796
+     ]
+    ]
+   }
+  },
+  "hfgrad_NH3_def2-TZVPD": {
+   "molecule": "NH3",
+   "xyz": "qm_1e/NH3.xyz",
+   "method": "hf",
+   "qm": {
+    "basis": "def2-TZVPD"
+   },
+   "gradient": true,
+   "pyscf": {
+    "nbf": 64,
+    "refine_dE": -4.263256414560601e-14,
+    "energy": -56.209366983845506,
+    "gradient": [
+     [
+      7.039396459327296e-16,
+      -0.0002811984256953046,
+      0.07939158712742245
+     ],
+     [
+      8.495528702723819e-17,
+      0.03288043452858136,
+      -0.026544325269970526
+     ],
+     [
+      0.028337463854758216,
+      -0.016299618051440645,
+      -0.02642363092872524
+     ],
+     [
+      -0.028337463854756884,
+      -0.016299618051444753,
+      -0.02642363092872746
+     ]
+    ]
+   }
+  },
+  "ldagrad_H2O_def2-TZVP_sg1": {
+   "molecule": "H2O",
+   "xyz": "qm_1e/H2O.xyz",
+   "method": "lda",
+   "qm": {
+    "basis": "def2-TZVP",
+    "grid": "sg1"
+   },
+   "gradient": true,
+   "pyscf": {
+    "nbf": 43,
+    "refine_dE": 1.4210854715202004e-14,
+    "energy": -75.89335290162514,
+    "gradient": [
+     [
+      -9.919333998133268e-16,
+      6.795114884794947e-16,
+      0.08428969107738382
+     ],
+     [
+      -0.05211024806928233,
+      -9.63274192135682e-16,
+      -0.042144845538690356
+     ],
+     [
+      0.05211024806927789,
+      2.9388979731369705e-16,
+      -0.04214484553868969
+     ]
+    ]
+   }
+  },
+  "pbegrad_H2O_def2-TZVP_sg1": {
+   "molecule": "H2O",
+   "xyz": "qm_1e/H2O.xyz",
+   "method": "pbe",
+   "qm": {
+    "basis": "def2-TZVP",
+    "grid": "sg1"
+   },
+   "gradient": true,
+   "pyscf": {
+    "nbf": 43,
+    "refine_dE": 1.5631940186722204e-13,
+    "energy": -76.36883340246844,
+    "gradient": [
+     [
+      3.0798514674626173e-16,
+      -1.5747003450405145e-16,
+      0.08545613782795902
+     ],
+     [
+      -0.0495120728116043,
+      7.538271101963566e-16,
+      -0.042728068913982176
+     ],
+     [
+      0.04951207281160386,
+      -6.005808460155048e-16,
+      -0.0427280689139824
+     ]
+    ]
+   }
+  },
+  "b3lypgrad_H2O_def2-TZVP_sg1": {
+   "molecule": "H2O",
+   "xyz": "qm_1e/H2O.xyz",
+   "method": "b3lyp",
+   "qm": {
+    "basis": "def2-TZVP",
+    "grid": "sg1"
+   },
+   "gradient": true,
+   "pyscf": {
+    "nbf": 43,
+    "refine_dE": 1.1368683772161603e-13,
+    "energy": -76.41971099515114,
+    "gradient": [
+     [
+      9.0878670351385e-16,
+      2.48333148641752e-15,
+      0.07651366630186818
+     ],
+     [
+      -0.04355290113301402,
+      2.9264501896417617e-15,
+      -0.03825683315093342
+     ],
+     [
+      0.04355290113301269,
+      -5.403604689946055e-15,
+      -0.03825683315093653
+     ]
+    ]
+   }
+  },
+  "tpssgrad_H2O_def2-TZVP_sg1": {
+   "molecule": "H2O",
+   "xyz": "qm_1e/H2O.xyz",
+   "method": "tpss",
+   "qm": {
+    "basis": "def2-TZVP",
+    "grid": "sg1"
+   },
+   "gradient": true,
+   "pyscf": {
+    "nbf": 43,
+    "refine_dE": 1.5631940186722204e-13,
+    "energy": -76.45644060503085,
+    "gradient": [
+     [
+      -1.6213583844993552e-15,
+      2.0966608329095354e-15,
+      0.08394397262601228
+     ],
+     [
+      -0.047666539207041225,
+      -1.892518866641123e-15,
+      -0.04197198631300347
+     ],
+     [
+      0.047666539207039005,
+      -1.96220936008386e-16,
+      -0.04197198631300458
+     ]
+    ]
+   }
+  },
+  "b3lypgrad_H2O_def2-QZVP_sg1": {
+   "molecule": "H2O",
+   "xyz": "qm_1e/H2O.xyz",
+   "method": "b3lyp",
+   "qm": {
+    "basis": "def2-QZVP",
+    "grid": "sg1"
+   },
+   "gradient": true,
+   "pyscf": {
+    "nbf": 117,
+    "refine_dE": -2.7000623958883807e-13,
+    "energy": -76.4299628780748,
+    "gradient": [
+     [
+      2.237712650313511e-15,
+      -1.890364222583416e-17,
+      0.07453551014147619
+     ],
+     [
+      -0.041064664068487744,
+      6.491594719487893e-16,
+      -0.0372677550707472
+     ],
+     [
+      0.041064664068477974,
+      -6.367390265186683e-16,
+      -0.037267755070748976
+     ]
+    ]
+   }
+  },
+  "rijk_H2O_def2-TZVP": {
+   "molecule": "H2O",
+   "xyz": "qm_1e/H2O.xyz",
+   "method": "hf",
+   "qm": {
+    "basis": "def2-TZVP",
+    "ri": "jk",
+    "ri_aux": "def2-universal-JKFIT"
+   },
+   "gradient": true,
+   "pyscf": {
+    "nbf": 43,
+    "refine_dE": 1.4210854715202004e-14,
+    "energy": -76.05666571813013,
+    "gradient": [
+     [
+      -4.180296014826667e-16,
+      6.315382092500719e-15,
+      0.05511626272090586
+     ],
+     [
+      -0.026300170157777636,
+      -1.8625973332568557e-15,
+      -0.02755813136045493
+     ],
+     [
+      0.026300170157779856,
+      9.746659405563044e-16,
+      -0.027558131360452265
+     ]
+    ]
+   },
+   "orca": {
+    "energy": -76.056665718637,
+    "input": [
+     "! RHF def2-TZVP RIJK def2/JK VeryTightSCF",
+     "* xyz 0 1",
+     "O  0.000000  0.000000  0.000000"
+    ]
+   }
+  },
+  "rijk_H2O_def2-QZVP": {
+   "molecule": "H2O",
+   "xyz": "qm_1e/H2O.xyz",
+   "method": "hf",
+   "qm": {
+    "basis": "def2-QZVP",
+    "ri": "jk",
+    "ri_aux": "def2-universal-JKFIT"
+   },
+   "gradient": false,
+   "pyscf": {
+    "nbf": 117,
+    "energy": -76.06480283417393
+   },
+   "orca": {
+    "energy": -76.064802834647,
+    "input": [
+     "! RHF def2-QZVP RIJK def2/JK VeryTightSCF",
+     "* xyz 0 1",
+     "O  0.000000  0.000000  0.000000"
+    ]
+   }
+  },
+  "pberij_H2O_def2-TZVP_sg1": {
+   "molecule": "H2O",
+   "xyz": "qm_1e/H2O.xyz",
+   "method": "pbe",
+   "qm": {
+    "basis": "def2-TZVP",
+    "grid": "sg1",
+    "ri": "j",
+    "ri_aux": "def2-universal-JFIT"
+   },
+   "gradient": true,
+   "pyscf": {
+    "nbf": 43,
+    "refine_dE": 8.526512829121202e-14,
+    "energy": -76.36898548977516,
+    "gradient": [
+     [
+      -1.1473336278979987e-16,
+      1.2708179708989898e-16,
+      0.08531729699575141
+     ],
+     [
+      -0.04942926977005957,
+      -8.18504208134616e-15,
+      -0.042658648497881035
+     ],
+     [
+      0.04942926977005824,
+      8.055882759763653e-15,
+      -0.04265864849787748
+     ]
+    ]
+   }
+  },
+  "mp2_H2O_def2-TZVP": {
+   "molecule": "H2O",
+   "xyz": "qm_1e/H2O.xyz",
+   "method": "mp2",
+   "qm": {
+    "basis": "def2-TZVP",
+    "frozen_core": false
+   },
+   "gradient": false,
+   "pyscf": {
+    "nbf": 43,
+    "energy": -76.32536454013143
+   }
+  },
+  "rimp2_H2O_def2-TZVP": {
+   "molecule": "H2O",
+   "xyz": "qm_1e/H2O.xyz",
+   "method": "ri-mp2",
+   "qm": {
+    "basis": "def2-TZVP",
+    "ri_mp2_aux": "def2-TZVP-RIFIT",
+    "frozen_core": false
+   },
+   "gradient": false,
+   "pyscf": {
+    "nbf": 43,
+    "energy": -76.32531194280263
+   },
+   "orca": {
+    "energy": -76.325311942802,
+    "input": [
+     "! RHF MP2 def2-TZVP NoRI NoFrozenCore VeryTightSCF",
+     "%basis AuxC \"def2-TZVP/C\" end",
+     "%mp2 RI true end"
+    ]
+   }
+  },
+  "rimp2_H2O_def2-QZVPP": {
+   "molecule": "H2O",
+   "xyz": "qm_1e/H2O.xyz",
+   "method": "ri-mp2",
+   "qm": {
+    "basis": "def2-QZVPP",
+    "ri_mp2_aux": "def2-QZVPP-RIFIT",
+    "frozen_core": false
+   },
+   "gradient": false,
+   "pyscf": {
+    "nbf": 117,
+    "energy": -76.36994646140936
+   },
+   "orca": {
+    "energy": -76.369946447093,
+    "input": [
+     "! RHF MP2 def2-QZVPP NoRI NoFrozenCore VeryTightSCF",
+     "%basis AuxC \"def2-QZVPP/C\" end",
+     "%mp2 RI true end"
+    ]
+   }
+  },
+  "ccsd_H2O_def2-TZVP": {
+   "molecule": "H2O",
+   "xyz": "qm_1e/H2O.xyz",
+   "method": "ccsd",
+   "qm": {
+    "basis": "def2-TZVP",
+    "frozen_core": false
+   },
+   "gradient": false,
+   "pyscf": {
+    "nbf": 43,
+    "energy": -76.33265165641266
+   }
+  },
+  "b2plyp_H2O_def2-TZVP_sg1": {
+   "molecule": "H2O",
+   "xyz": "qm_1e/H2O.xyz",
+   "method": "b2plyp",
+   "qm": {
+    "basis": "def2-TZVP",
+    "grid": "sg1",
+    "frozen_core": false
+   },
+   "gradient": false,
+   "pyscf": {
+    "nbf": 43,
+    "e_ks": -76.32186531919136,
+    "e_os": -0.2384579976994518,
+    "e_ss": -0.07559218405440862,
+    "energy": -76.4066588682649
+   }
+  },
+  "hfcart_H2O_def2-TZVP": {
+   "molecule": "H2O",
+   "xyz": "qm_1e/H2O.xyz",
+   "method": "hf",
+   "qm": {
+    "basis": "def2-TZVP",
+    "cartesian_d": true
+   },
+   "gradient": false,
+   "pyscf": {
+    "nbf": 48,
+    "energy": -76.05724212130711
+   }
+  },
+  "hfcart_H2O_def2-QZVP": {
+   "molecule": "H2O",
+   "xyz": "qm_1e/H2O.xyz",
+   "method": "hf",
+   "qm": {
+    "basis": "def2-QZVP",
+    "cartesian_d": true
+   },
+   "gradient": false,
+   "pyscf": {
+    "nbf": 142,
+    "energy": -76.06489021978471
+   }
+  }
+ }
+}

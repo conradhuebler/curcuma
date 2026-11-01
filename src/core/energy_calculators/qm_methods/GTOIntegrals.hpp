@@ -40,8 +40,37 @@ enum OrbitalType {
     DZZ = 6,
     DXY = 7,
     DXZ = 8,
-    DYZ = 9
+    DYZ = 9,
+    // Claude Generated (Nov 2026): f (10 components) and g (15 components) shells, cartesian
+    // components in lexicographic order x^a y^b z^c, a descending, then b descending
+    // (xxx, xxy, xxz, xyy, xyz, xzz, yyy, yyz, yzz, zzz; PySCF/libcint order). The d set keeps its
+    // historical order above (the spherical transform and the device kernels rely on it).
+    FXXX = 10, FXXY, FXXZ, FXYY, FXYZ, FXZZ, FYYY, FYYZ, FYZZ, FZZZ,
+    GXXXX = 20, GXXXY, GXXXZ, GXXYY, GXXYZ, GXXZZ, GXYYY, GXYYZ, GXYZZ, GXZZZ,
+    GYYYY, GYYYZ, GYYZZ, GYZZZ, GZZZZ  // = 34
 };
+
+/// Highest angular momentum of the orbital basis the GTO path handles (g). Claude Generated (Nov 2026).
+constexpr int kMaxOrbitalL = 4;
+
+/// @brief Cartesian component `k` (0-based, lexicographic order) of a shell with angular momentum L >= 3:
+/// powers (a, b, c) of x^a y^b z^c with a descending, then b descending. Claude Generated (Nov 2026).
+static inline void lexicographicComponent(int L, int k, int& a, int& b, int& c)
+{
+    int idx = 0;
+    for (int x = L; x >= 0; --x)
+        for (int y = L - x; y >= 0; --y) {
+            if (idx == k) { a = x; b = y; c = L - x - y; return; }
+            ++idx;
+        }
+    a = b = c = 0;
+}
+
+/// @brief Orbital type of cartesian component `k` of an f (L = 3) or g (L = 4) shell. Claude Generated (Nov 2026).
+static inline OrbitalType higherShellType(int L, int k)
+{
+    return static_cast<OrbitalType>((L == 3 ? FXXX : GXXXX) + k);
+}
 
 // Structure for a contracted Gaussian function
 struct Orbital {
@@ -113,6 +142,22 @@ static inline double calculatePrimitiveOverlap(double alpha1, double alpha2, dou
     return prefactor * overlap_x * overlap_y * overlap_z;
 }
 
+/// f/g branch of orbitalTypeToComponents (powers of x^l y^m z^n; anything else gives 0, 0, 0).
+/// Claude Generated (Nov 2026).
+#if defined(__GNUC__)
+__attribute__((noinline, cold))
+#endif
+static void higherShellComponents(OrbitalType type, int& l, int& m, int& n)
+{
+    if (type >= FXXX && type <= FZZZ)
+        lexicographicComponent(3, type - FXXX, l, m, n);
+    else if (type >= GXXXX && type <= GZZZZ)
+        lexicographicComponent(4, type - GXXXX, l, m, n);
+    else {
+        l = 0; m = 0; n = 0;
+    }
+}
+
 // Convert orbital type to cartesian angular-momentum components (l, m, n)
 // where the Gaussian is x^l y^m z^n. Claude Generated (WP1): 6-d cartesian set.
 static inline void orbitalTypeToComponents(OrbitalType type, int& l, int& m, int& n)
@@ -139,7 +184,11 @@ static inline void orbitalTypeToComponents(OrbitalType type, int& l, int& m, int
     case DYZ:
         l = 0; m = 1; n = 1; break;
     default:
-        l = 0; m = 0; n = 0; break;
+        // Claude Generated (Nov 2026): f and g components (lexicographic order, see the enum), out of line (cold).
+        // Even so the larger body changes GCC's inlining in qm_integrals.cpp (inline-unit-growth limit): s/p/d
+        // gradients moved by <= 3.4e-15 Eh/Angstrom against 9bcac826, energies stayed bitwise (Nov 2026).
+        higherShellComponents(type, l, m, n);
+        break;
     }
 }
 

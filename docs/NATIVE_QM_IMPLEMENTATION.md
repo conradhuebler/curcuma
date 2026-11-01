@@ -400,8 +400,7 @@ mTZVPP-RIJ, ten `-RIFIT` sets) and def2-ECP for every element the BSE has (list 
   33,600,816 -> 37,193,008 bytes (+3.43 MiB; `.rodata` +3,443,296 B, `.text` +52,544 B).
 - The engine's parsers get only H-Ne (`qmbasis::kEngineMaxZ`): the full text of def2-universal-JKFIT parses in 2.1 ms,
   its H-Ne part in 0.10 ms (orbital sets <= 0.75 ms vs <= 0.16 ms). `qm_basis_parse` parses every full text too.
-- Engine limits unchanged: H-Ne and s, p, d shells. Run: def2-SVP, -SV(P), -SVPD, -mTZVP, -mTZVPP, MINIX (H-Ne);
-  the def2-TZVP family only for H-Be (f from B on); def2-QZVP* never (f/g); a clear error otherwise. def2-ECP is raw text
+- Engine limits at stage 2: H-Ne and s, p, d shells (f and g since stage 3 below). def2-ECP is raw text
   (`qmbasis::embeddedElementBlock("def2-ECP", Z)`), nothing uses it.
 - Fitting aliases: ORCA names `def2-<X>/C` -> `def2-<X>-RIFIT` (where ORCA has them), `def2-mTZVPP/J` ->
   `def2-mTZVPP-RIJ`, and every built-in fitting name in any letter case.
@@ -411,8 +410,57 @@ mTZVPP-RIJ, ten `-RIFIT` sets) and def2-ECP for every element the BSE has (list 
   `scripts/qm_basis_orca_reference.py`): HF with SVP, SV(P), SVPD, mTZVP, mTZVPP and BeH2 TZVP family <= 1.3e-9 Eh,
   RI-JK def2/JK and RI-J def2-mTZVPP/J <= 1.3e-9 Eh, RI-MP2 with eight `-RIFIT` sets vs ORCA <= 1.0e-8 Eh and vs PySCF
   DFMP2 <= 6.9e-12 Eh (ORCA's RI-MP2 is offset by up to 1e-8 Eh from both, the same for every aux set).
-- Not tested: any element beyond Ne (the engine rejects it), f/g shells (rejected), the ECP data in any calculation,
+- Not tested: any element beyond Ne (the engine rejects it), the ECP data in any calculation,
   def2-SV(P)-RIFIT and def2-QZVP-RIFIT against ORCA (no ORCA name; tested bitwise only), elements beyond Ne against ORCA.
+
+### Stage 3: f and g shells (Nov 1, 2026)
+
+AI-generated, machine-tested. The orbital basis takes f (l = 3) and g (l = 4) shells, so every built-in def2 set
+(def2-TZVP ... def2-QZVPPD) runs for H-Ne with HF, all KS functionals, the gradients, RI-J/RI-JK, MP2, RI-MP2, CCSD,
+LMP2 and the double hybrids. Fitting sets were already general in l (up to h for def2-QZVPP-RIFIT on B-Ne).
+
+- Code: `GTO::OrbitalType` has 10 f and 15 g cartesian components in lexicographic order (xxx, xxy, ..., zzz; d keeps
+  its old order); `createGTOFromBasis` emits them; `qmint::higherShellSphericalColumns` (`qm_spherical_fg.cpp`) gives
+  the 2l+1 real solid harmonics (Schlegel-Frisch formula, order m = 0, +1, -1, ...), orthonormalised in the shell's
+  overlap block like d. The McMurchie-Davidson ERI, 1e, gradient, RI and grid AO kernels were already general in l;
+  pairs with l_a + l_b > 4 take the generic `mdQuartet` (the templated fast path covers s/p/d).
+- s/p/d regression against 9bcac826 (24 cases, hf/hf-3c/lda/pbe/b3lyp/tpss/scan/RI-J/RI-JK/mp2/ri-mp2/ccsd/lmp2/b2plyp/
+  dsd-pbep86, stored and direct SCF, cartesian d): all energies bitwise identical; 9 of 17 gradients differ in the last
+  bits, <= 3.4e-15 Eh/Angstrom (gradient magnitudes 1e-3..0.2). Cause (checked by compiling the old `qm_integrals.cpp` with the new `GTOIntegrals.hpp`):
+  the larger body of the inline `GTO::orbitalTypeToComponents` changes GCC's inlining in `qm_integrals.cpp`, which is at
+  its inline-unit-growth limit (also before), so `gradientOneElectron` and others are compiled differently; three
+  variants of the f/g branch (cold out-of-line static, extern, zero-then-call) all did the same.
+- Checks (`ctest -L qm_fg`, 34 cases, 10 s wall at -j4; reference `test_cases/qm_fg/reference.json` from
+  `scripts/qm_fg_reference.py`, PySCF 2.14 / libxc 7.0.0, ORCA 6.1.0 VeryTightSCF; molecules of `test_cases/qm_1e`):
+  | what | cases | max deviation |
+  |---|---|---|
+  | HF vs PySCF (H2O TZVP/TZVPP/TZVPD/QZVP/QZVPP, NH3 TZVPP, CH4 TZVPPD, HF QZVPPD) | 8 | 7.5e-13 Eh |
+  | HF vs ORCA 6.1 (same 8) | 8 | 1.3e-9 Eh (NH3; H2O 4.7-5.2e-10, the same offset as def2-SVP) |
+  | HF cartesian (`-qm.cartesian_d true`: 6d/10f/15g) vs PySCF cart=True, TZVP and QZVP | 2 | 1.0e-12 Eh |
+  | lda/pbe/b3lyp/tpss vs PySCF on the identical grid (sg1), H2O TZVP and QZVP | 8 | 3.7e-11 Eh (b3lyp TZVP), others <= 3.3e-12 |
+  | gradients vs PySCF (HF H2O TZVP/QZVPP, NH3 TZVPD; lda/pbe/b3lyp/tpss TZVP, b3lyp QZVP; RI-JK; PBE RI-J) | 11 | 9.4e-11 Eh/Bohr (b3lyp TZVP), others <= 9.3e-12 |
+  | RI-JK (JKFIT, aux up to g) HF TZVP/QZVP vs PySCF / ORCA RIJK def2/JK | 2 | 3.8e-13 / 5.1e-10 Eh |
+  | MP2 TZVP, CCSD TZVP, b2plyp TZVP (RI-PT2 JKFIT) vs PySCF | 3 | 3.4e-11 Eh (CCSD) |
+  | RI-MP2 TZVP (TZVP-RIFIT, aux g) and QZVPP (QZVPP-RIFIT, aux h) vs PySCF DFMP2 / ORCA | 2 | 4.1e-13 / 1.4e-8 Eh (ORCA's RI-MP2 offset) |
+  | analytic gradient vs 4-point FD of curcuma's energy (hf, b3lyp, tpss, RI-JK, mp2, b2plyp; TZVP) | 6 | 2.4e-10 Eh/Bohr |
+  | `-gpu cuda` vs CPU (hf, b3lyp TZVP) | 2 | energy equal at 8 decimals |
+- Timing (this machine, `dump_qm_energy`, idle): H2O def2-QZVPP (117 functions) HF energy 3.46 s on 1 thread, 1.84 s
+  on 4; energy + gradient 18.3 s on 1, 5.7 s on 4 threads. s/p/d before/after (1 thread): H2O def2-SVP HF 0.021-0.023 s
+  both, caffeine def2-SVP HF 85.1 / 84.8 s, B3LYP 110.2 / 110.5 s.
+- Integral-direct SCF (`-qm.scf_direct on`, checked by hand, not in ctest): H2O QZVP HF and B3LYP equal the stored
+  tensor to 1.1e-13 / 6e-14 Eh.
+- LMP2 (by hand): complete pair spaces equal RI-MP2 on H2O def2-TZVP to 1.0e-12 Eh; with the default thresholds the
+  truncation error is 4.8e-4 Eh (1.6e-4 Eh/atom), larger than the 3.7e-6..2.4e-5 Eh/atom measured with def2-SVP.
+- SCF: def2-QZVP* on H2O has a ||dP|| noise floor of ~1e-11 (the stored-ERI SCF with -qm.scf_threshold 1e-12 does not
+  converge in 200 iterations, 1e-10, the default, converges in 16).
+- GPU: the CUDA ERI/J/K, direct, 1e/2e gradient and RI gradient kernels stay s/p/d; with an f/g basis they refuse at
+  table build and the CPU runs them (counted fallbacks `qm_eri`, `qm_direct`, `qm_grad`, `qm_grad1e`, `qm_ri_grad`;
+  `-gpu_strict true` stops). The device XC AO kernel takes up to g (`kMaxComp` 10 -> 15).
+- Not tested / not implemented: h and higher orbital shells (rejected by the parser), elements beyond Ne, ECP, open
+  shell (the engine is closed-shell RHF/RKS only), SCAN and the other double hybrids with f/g (they run, no
+  reference), LMP2 beyond the complete-space check, MP2/DH gradients with f/g only against the FD of curcuma's own energy, ORCA for the KS energies (only
+  PySCF on the same grid), thread scaling, molecules larger than NH3/CH4, the GPU on another card than the RTX 5090. Human production test
+  pending.
 
 ## Basis-set citations (Oct 27, 2026)
 

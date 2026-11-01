@@ -50,7 +50,8 @@ for orb, auxes in (("def2-SVP", ("SVP", "TZVP", "TZVPP", "QZVPP")), ("def2-SVPD"
             'AuxC "def2-%s/C"' % x, "RI true")
 
 
-# BeH2 only: the TZVP family has at most d shells for H-Be (f from B on), so the engine runs it there
+# BeH2 only: the TZVP family has at most d shells for H-Be (chosen when the engine had no f shells; f/g cases since
+# Nov 2026: scripts/qm_fg_reference.py, test_cases/qm_fg)
 BEH2_CASES = {"hf_" + b: ("hf", {"basis": b}, "RHF %s NoRI" % b, "", "")
               for b in ("def2-SVP", "def2-TZVP", "def2-TZVPP", "def2-TZVPD", "def2-TZVPPD")}
 

@@ -244,9 +244,9 @@ Stand.
 
 ## 5. Funktionen und Refactoring (niedrige Priorität)
 
-- **Native QM, nächste Basis-Stufe** (Nov 2026): alle def2-Sätze und def2-ECP sind eingebaut (alle BSE-Elemente), die Engine nutzt davon
-  nur H-Ne mit s/p/d-Schalen: f/g-Schalen (`createGTOFromBasis`, 6d->5d-Transformation, GPU-Tabellen L <= 2) für die def2-TZVP-Familie ab B und alle def2-QZVP*,
-  dann Z > 10 und ECP-Integrale (`qmbasis::embeddedElementBlock("def2-ECP", Z)`, auch MINIX Rb-Xe). [THIRD_PARTY_NOTICES](docs/THIRD_PARTY_NOTICES.md)
+- **Native QM, nächste Basis-Stufe** (Nov 2026): alle def2-Sätze und def2-ECP sind eingebaut, die Engine rechnet H-Ne mit s-g (f/g seit Nov 1);
+  offen: Z > 10 und ECP-Integrale (`qmbasis::embeddedElementBlock("def2-ECP", Z)`, auch MINIX Rb-Xe); CUDA-ERI/J/K/Gradient-Kerne für L > 2 (heute
+  gezählter CPU-Fallback), Template-Schnellpfad `mdQuartetT` für l_a+l_b > 4. [Stufe 3](docs/NATIVE_QM_IMPLEMENTATION.md#stage-3-f-and-g-shells-nov-1-2026)
 - **Doppelhybride, GPU-Rest** (2026-10-31): im GPU-Gradienten bleiben die
   PT2-Zwischengrößen (RI-/kanonische Amplituden, Lagrangian, Z-Vektor-Algebra) Host-Code, gezählt als `qm_dh_grad_pt2` (`-gpu_strict
   true` endet beim Gradienten mit Exit 3); ROCm/Vulkan fehlen. [WP12](docs/DFT_ROADMAP/WP12_doppelhybride.md) Stufe 3

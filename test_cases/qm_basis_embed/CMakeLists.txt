@@ -8,7 +8,7 @@
 # $CURCUMA_QM_BASIS beats the embedded copy, and an unknown basis (def2-XZVP) fails naming the search path.
 # Stage 2 (Nov 2026): every def2 orbital/fitting set of BSE and def2-ECP are built in; qm_basis_parse (parsers read
 # every embedded number exactly), qm_basis_sets_<mol> (file written from the built-in text vs embedded-only,
-# bitwise), qm_basis_orca_<mol> (ORCA 6.1, reference_orca.json, 1e-8 Eh), qm_basis_fg_rejected, qm_basis_ecp_raw.
+# bitwise), qm_basis_orca_<mol> (ORCA 6.1, reference_orca.json, 1e-8 Eh), qm_basis_ecp_raw. f/g shells (def2-TZVP*/QZVP*): test_cases/qm_fg.
 #
 # Run:  ctest -L qm_basis --output-on-failure
 add_executable(dump_qm_energy dump_qm_energy.cpp)
@@ -54,9 +54,8 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME qm_basis_missing COMMAND ${_BE_CHECK} --case missing)
     set_tests_properties(qm_basis_file_priority qm_basis_missing PROPERTIES TIMEOUT 600 LABELS "qm_basis")
     add_test(NAME qm_basis_parse COMMAND ${_BE_CHECK} --case parse)
-    add_test(NAME qm_basis_fg_rejected COMMAND ${_BE_CHECK} --case fg)
     add_test(NAME qm_basis_ecp_raw COMMAND ${_BE_CHECK} --case ecp)
-    set_tests_properties(qm_basis_parse qm_basis_fg_rejected qm_basis_ecp_raw PROPERTIES TIMEOUT 600 LABELS "qm_basis")
+    set_tests_properties(qm_basis_parse qm_basis_ecp_raw PROPERTIES TIMEOUT 600 LABELS "qm_basis")
     foreach(_mol H2O NH3 BeH2)
         add_test(NAME qm_basis_sets_${_mol} COMMAND ${_BE_CHECK} --case sets --molecule ${_mol})
         add_test(NAME qm_basis_orca_${_mol} COMMAND ${_BE_CHECK} --case orca --molecule ${_mol} --tol 1e-8)

@@ -455,7 +455,8 @@ inline std::vector<STO::Orbital> createSTOFromGTOBasis(
 // spherical transform, and pre-normalizes primitives (Turbomole basis files
 // give coefficients for already-normalized primitives, so we multiply by the
 // primitive norm to recover coefficients for the raw x^l exp(-a r^2) kernels)
-// and then renormalizes each contracted AO so S_ii = 1. f/g shells throw.
+// and then renormalizes each contracted AO so S_ii = 1. f/g shells (Nov 2026): 10/15 cartesian components in
+// lexicographic order (GTO::lexicographicComponent). Shells above g throw in charToShellType.
 inline std::vector<GTO::Orbital> createGTOFromBasis(
     const ElementBasis& basis,
     double x, double y, double z,
@@ -523,10 +524,20 @@ inline std::vector<GTO::Orbital> createGTOFromBasis(
             }
         } break;
         case F_SHELL:
-        case G_SHELL:
-            throw std::runtime_error(
-                "f/g shells are not supported by the native QM engine (s, p, d only: def2-SVP, -SV(P), -SVPD, "
-                "-mTZVP, -mTZVPP and MINIX run for H-Ne, the def2-TZVP family only for H-Be, def2-QZVP* not at all)");
+        case G_SHELL: {
+            // Claude Generated (Nov 2026): f and g shells, cartesian components in lexicographic order
+            // (GTO::lexicographicComponent: xxx, xxy, xxz, ..., zzz); the spherical transform
+            // (qm_integrals.cpp buildSphericalTransform) collapses each to 2l+1 real solid harmonics.
+            const int L = shell.type == F_SHELL ? 3 : 4;
+            const int ncomp = (L + 1) * (L + 2) / 2;
+            for (int c = 0; c < shell.numContractions; ++c)
+                for (int k = 0; k < ncomp; ++k) {
+                    int a, b, cc;
+                    GTO::lexicographicComponent(L, k, a, b, cc);
+                    gtoOrbitals.push_back(makeOrbital(GTO::higherShellType(L, k), a, b, cc,
+                                                      shell.exponents, shell.coefficients[c], basis.vsip_d));
+                }
+        } break;
         default:
             break;
         }

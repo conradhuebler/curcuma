@@ -19,8 +19,6 @@ Cases (--case):
             a temporary $CURCUMA_QM_BASIS and embedded-only; 17-digit energies must be identical.
   orca      for one molecule: each case of reference_orca.json embedded-only against ORCA 6.1, |dE| <= --tol (RI-MP2:
             2e-8, ORCA's RI-MP2 is ~1e-8 off) and, for RI-MP2, against PySCF DFMP2 at 1e-9.
-  fg        an orbital set with f/g shells for the molecule (def2-TZVP/-TZVPPD/-QZVP on H2O, def2-QZVPP on BeH2)
-            fails with a clear error (the engine handles s, p, d only).
   ecp       def2-ECP is built in for Rb-Rn as raw text (ncore/lmax line), has no parser and no user in the engine.
 
 Claude Generated (Nov 2026). GPL-3.0.
@@ -342,16 +340,6 @@ def case_orca(a):
     print("max |dE| %.2e Eh" % worst)
 
 
-def case_fg(a):
-    for mol, basis in (("H2O", "def2-TZVP"), ("H2O", "def2-TZVPPD"), ("H2O", "def2-QZVP"), ("BeH2", "def2-QZVPP")):
-        rc, out = run([a.dump, MOLS[mol], "hf"] + qm_args(["basis=" + basis]), env_with(CURCUMA_QM_BASIS_EMBEDDED_ONLY="1"))
-        if rc == 0:
-            fail(basis + " ran although the engine has no f/g shells", out)
-        if "f/g shells are not supported" not in out:
-            fail(basis + ": no clear f/g error message", out)
-        print(mol, basis, "->", [l for l in out.splitlines() if "f/g" in l][0].strip())
-
-
 def case_ecp(a):
     rc, listing, err = dump(a, "--list")
     row = [r for r in listing.splitlines() if r.startswith("def2-ECP\t")]
@@ -371,7 +359,7 @@ def case_ecp(a):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--case", required=True,
-                    choices=["bitwise", "empty", "priority", "missing", "parse", "sets", "orca", "fg", "ecp"])
+                    choices=["bitwise", "empty", "priority", "missing", "parse", "sets", "orca", "ecp"])
     ap.add_argument("--dump-basis", help="dump_embedded_basis binary")
     ap.add_argument("--molecule", default="H2O", choices=sorted(MOLS))
     ap.add_argument("--tol", type=float, default=1e-8)
@@ -383,7 +371,7 @@ def main():
     ap.add_argument("--cite", default="", help="regex that must appear in the citation block (case empty)")
     a = ap.parse_args()
     {"bitwise": case_bitwise, "empty": case_empty, "priority": case_priority, "missing": case_missing,
-     "parse": case_parse, "sets": case_sets, "orca": case_orca, "fg": case_fg, "ecp": case_ecp}[a.case](a)
+     "parse": case_parse, "sets": case_sets, "orca": case_orca, "ecp": case_ecp}[a.case](a)
     print("PASS")
 
 

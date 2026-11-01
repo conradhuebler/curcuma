@@ -81,7 +81,7 @@ enum class QMFunctional {
 // Was `dft` until Sep 2026; QMMethod still merges a legacy `dft` scope below `qm`.
 BEGIN_PARAMETER_DEFINITION(qm)
     PARAM(basis, String, "def2-SVP",
-          "Orbital basis (exact name or $DATA file). Built in (all elements the Basis Set Exchange has): def2-SVP, def2-SV(P), def2-SVPD, def2-TZVP, def2-TZVPP, def2-TZVPD, def2-TZVPPD, def2-QZVP, def2-QZVPP, def2-QZVPD, def2-QZVPPD, def2-mTZVP, def2-mTZVPP, and MINIX (H-Ne). The engine runs H-Ne with s, p, d shells only: def2-SVP, -SV(P), -SVPD, -mTZVP, -mTZVPP and MINIX work for H-Ne, the def2-TZVP family only for H-Be (f shells from B on), def2-QZVP* not at all (f/g; rejected with an error). A <name>.dat in the search path wins ($CURCUMA_QM_BASIS, $CURCUMA_DATA, the source directory, the current directory).",
+          "Orbital basis (exact name or $DATA file). Built in (all elements the Basis Set Exchange has): def2-SVP, def2-SV(P), def2-SVPD, def2-TZVP, def2-TZVPP, def2-TZVPD, def2-TZVPPD, def2-QZVP, def2-QZVPP, def2-QZVPD, def2-QZVPPD, def2-mTZVP, def2-mTZVPP, and MINIX (H-Ne). The engine runs H-Ne with s, p, d, f and g shells (all def2 sets and MINIX; f/g since Nov 2026, CUDA ERI/gradient kernels s, p, d only: L > 2 falls back to the CPU, counted). A <name>.dat in the search path wins ($CURCUMA_QM_BASIS, $CURCUMA_DATA, the source directory, the current directory).",
           "Basis", {})
     // WP4 (Claude Generated, Oct 2026): molecular quadrature grid, implementation in qm_grid.cpp
     PARAM(grid, String, "sg1",
@@ -274,7 +274,7 @@ BEGIN_PARAMETER_DEFINITION(qm)
           "Energy-only SCFs with scf_convergence auto, scf_mode diis/adiis (not the tight SCF of gradients and mp2/ri-mp2/lmp2/ccsd): stop on the Fock build of the density that is returned. When a full (exact) J/K build of the current density meets all three conditions (|dE|, orbital gradient of that density, ||dP|| of the step that produced it), that density, its Fock matrix and the orbitals it was built from are the result; the extra full build of one more density is skipped. In integral-direct runs the build on which convergence is predicted (orbital gradient falling below the threshold at the observed rate) is made a full one; a wrong prediction costs one full instead of an incremental build. The returned density meets the orbital-gradient threshold itself (before: the previous density did, and the returned one was one DIIS step better; the HF energy is second order in it). false = the rule before Oct 27 2026. Ignored for scf_convergence density, plain mode and RI mixed precision.",
           "SCF", {})
     PARAM(cartesian_d, Bool, false,
-          "Use cartesian 6d (true) instead of spherical 5d (false, ORCA def2-SVP default).",
+          "Use cartesian functions (true: 6d, 10f, 15g) instead of spherical ones (false: 5d, 7f, 9g, the ORCA/PySCF def2 default).",
           "Basis", {})
 END_PARAMETER_DEFINITION
 

@@ -366,22 +366,8 @@ bool buildMolecularGrid(const std::vector<int>& Z, const Matrix& posBohr, const 
 // =====================================================================================================
 
 namespace {
-void powersOf(GTO::OrbitalType t, int& l, int& m, int& n)
-{
-    l = m = n = 0;
-    switch (t) {
-    case GTO::PX: l = 1; break;
-    case GTO::PY: m = 1; break;
-    case GTO::PZ: n = 1; break;
-    case GTO::DXX: l = 2; break;
-    case GTO::DYY: m = 2; break;
-    case GTO::DZZ: n = 2; break;
-    case GTO::DXY: l = 1; m = 1; break;
-    case GTO::DXZ: l = 1; n = 1; break;
-    case GTO::DYZ: m = 1; n = 1; break;
-    default: break;
-    }
-}
+// Claude Generated (Nov 2026): the one component table (GTOIntegrals.hpp), which knows f and g too.
+void powersOf(GTO::OrbitalType t, int& l, int& m, int& n) { GTO::orbitalTypeToComponents(t, l, m, n); }
 
 }  // namespace
 
@@ -396,7 +382,9 @@ AOEvaluator::AOEvaluator(const std::vector<GTO::Orbital>& basis, const Matrix& Q
         if (!m_shells.empty()) {
             const Shell& s = m_shells.back();
             join = (s.x == o.x && s.y == o.y && s.z == o.z && s.exps == o.exponents &&
-                    s.l[0] + s.m[0] + s.n[0] == l + m + n);
+                    s.l[0] + s.m[0] + s.n[0] == l + m + n &&
+                    // Nov 2026: at most one shell's components (two shells with equal exponents stay apart)
+                    static_cast<int>(s.cart.size()) < (l + m + n + 1) * (l + m + n + 2) / 2);
         }
         if (!join) {
             Shell s;

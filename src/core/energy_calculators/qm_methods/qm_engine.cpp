@@ -428,8 +428,8 @@ bool QMEngine::InitialiseMolecule()
         const double bx = Length::angstrom_to_bohr(m_geometry(i, 0));
         const double by = Length::angstrom_to_bohr(m_geometry(i, 1));
         const double bz = Length::angstrom_to_bohr(m_geometry(i, 2));
-        // Claude Generated (Nov 2026): the built-in def2-TZVP family (B-Ne) and def2-QZVP family (all) have f/g
-        // shells; the engine handles s, p, d only, so they fail here with a clear message instead of an uncaught throw.
+        // Claude Generated (Nov 2026): a shell above g (or another parser error) fails here with a clear message
+        // instead of an uncaught throw; s, p, d, f, g are handled (f/g since Nov 2026).
         try {
             auto orbs = BasisSetParser::createGTOFromBasis(it->second, bx, by, bz, i);
             m_gto_basis.insert(m_gto_basis.end(), orbs.begin(), orbs.end());

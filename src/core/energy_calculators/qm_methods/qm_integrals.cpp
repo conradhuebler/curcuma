@@ -690,6 +690,14 @@ static bool isDShell(const GTO::Orbital& o)
            o.type == GTO::DXY || o.type == GTO::DXZ || o.type == GTO::DYZ;
 }
 
+/// Total angular momentum of one cartesian AO.
+static int orbitalL(const GTO::Orbital& o)
+{
+    int l, m, n;
+    GTO::orbitalTypeToComponents(o.type, l, m, n);
+    return l + m + n;
+}
+
 Matrix buildSphericalTransform(const std::vector<GTO::Orbital>& basis,
                                const Matrix& Scart)
 {
@@ -705,26 +713,41 @@ Matrix buildSphericalTransform(const std::vector<GTO::Orbital>& basis,
         {  0,  0,  0,  1,  0,  0 },  // xy
     };
 
+    // Claude Generated (Nov 2026): f and g shells (l >= 3, (l+1)(l+2)/2 contiguous components in lexicographic
+    // order) collapse to 2l+1 real solid harmonics as well. The d branch below is the Sep 2026 code unchanged.
     bool anyD = false;
-    for (const auto& o : basis) if (isDShell(o)) { anyD = true; break; }
+    for (const auto& o : basis) if (isDShell(o) || orbitalL(o) >= 3) { anyD = true; break; }
     if (!anyD) return Matrix();  // empty -> caller keeps cartesian
 
-    // nbf_sph = nbf_cart - (#d shells)  (each 6d shell collapses to 5d)
-    int nDshells = 0;
+    // nbf_sph = nbf_cart - sum over shells of (ncart - (2l+1))  (6d -> 5d, 10f -> 7f, 15g -> 9g)
+    int nsph = 0;
     for (int i = 0; i < n; ) {
+        const int L = orbitalL(basis[i]);
         if (isDShell(basis[i])) {
-            ++nDshells;
+            nsph += 5;
             i += 6;  // assume contiguous block of 6
+        } else if (L >= 3) {
+            nsph += 2 * L + 1;
+            i += (L + 1) * (L + 2) / 2;
         } else {
+            ++nsph;
             ++i;
         }
     }
-    const int nsph = n - nDshells;
     Matrix Q = Matrix::Zero(n, nsph);
 
     int sphCol = 0;
     int i = 0;
     while (i < n) {
+        const int Lsh = orbitalL(basis[i]);
+        if (Lsh >= 3) {
+            // f/g shell (Claude Generated, Nov 2026): 2l+1 real solid harmonics, qm_spherical_fg.cpp
+            const int nc = (Lsh + 1) * (Lsh + 2) / 2;
+            higherShellSphericalColumns(basis, Scart, i, Lsh, Q, sphCol);
+            i += nc;
+            sphCol += 2 * Lsh + 1;
+            continue;
+        }
         if (!isDShell(basis[i])) {
             Q(i, sphCol) = 1.0;  // 1:1 s/p passthrough
             ++i;

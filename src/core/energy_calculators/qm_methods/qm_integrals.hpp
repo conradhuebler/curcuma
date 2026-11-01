@@ -121,6 +121,12 @@ Matrix buildCoreHamiltonian(const std::vector<GTO::Orbital>& basis,
 Matrix buildSphericalTransform(const std::vector<GTO::Orbital>& basis,
                                const Matrix& Scart);
 
+/// @brief Columns col..col+2L of Q for the f (L = 3) or g (L = 4) shell whose cartesian components start at row
+/// `base` (lexicographic order, basissetparser): 2L+1 real solid harmonics (order m = 0, +1, -1, ...), orthonormal
+/// in the shell block of Scart. Used by buildSphericalTransform (qm_spherical_fg.cpp). Claude Generated (Nov 2026).
+void higherShellSphericalColumns(const std::vector<GTO::Orbital>& basis, const Matrix& Scart, int base, int L,
+                                 Matrix& Q, int col);
+
 /// @brief Apply the spherical transform: M_sph = Q^T * M_cart * Q.
 /// Returns M_cart unchanged if Q is empty.
 Matrix applySphericalTransform(const Matrix& Mcart, const Matrix& Q);
