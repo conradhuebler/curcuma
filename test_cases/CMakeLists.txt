@@ -942,6 +942,14 @@ if(Python3_Interpreter_FOUND)
                      $<TARGET_FILE:curcuma> ${CMAKE_SOURCE_DIR})
     set_tests_properties(gfnff_cn_zero_guard PROPERTIES TIMEOUT 300 LABELS "gfnff")
 
+    # Claude Generated (Nov 2026): GFN-FF halogen-bond gradient against a central finite difference of the
+    # assembled energy (fi-pyridine, fi-pyridine + acetic acid dimer); Known Issue #46.
+    add_test(NAME gfnff_xb_gradient_fd
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_gfnff_xb_gradient_fd.py
+                     $<TARGET_FILE:curcuma> ${CMAKE_SOURCE_DIR})
+    set_tests_properties(gfnff_xb_gradient_fd PROPERTIES TIMEOUT 300 LABELS "gfnff")
+
     # Claude Generated (Oct 2026): fused D4 pair C6 (-gfnff.disp_c6_fused, default on) is bit-identical to the
     # stored per-pair path: -sp gradient files and 20-step MD (also with d4_cn_cache_threshold); docs/GFNFF_STATUS.md.
     add_test(NAME gfnff_d4_fused_c6

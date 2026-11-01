@@ -1949,14 +1949,16 @@ __global__ void k_xbonds(
                 double ratio_short = XB_SCUT_D * r_vdw_AB / (r_XB * r_XB);
                 double damp_short_term = 1.0;
                 for (int p = 0; p < (int)HB_ALP_D; ++p) damp_short_term *= ratio_short;
-                double ddamp_short_dr = -2.0 * HB_ALP_D * damp_short * damp_short_term
+                // Known Issue #46: d(damp_s)/dr = +2*alp*damp_s*t/(r*(1+t)), d(damp_l)/dr = -2*alp*damp_l*u/(r*(1+u))
+                // (Fortran rbxgfnff_eg); the sign of the first and 1/r of the second were wrong
+                double ddamp_short_dr = 2.0 * HB_ALP_D * damp_short * damp_short_term
                                       / (r_XB * (1.0 + damp_short_term));
 
                 double ratio_long = (r_XB * r_XB) / HB_LONGCUT_XB_D;
                 double damp_long_term = 1.0;
                 for (int p = 0; p < (int)HB_ALP_D; ++p) damp_long_term *= ratio_long;
-                double ddamp_long_dr = -2.0 * HB_ALP_D * r_XB * damp_long * damp_long_term
-                                     / (HB_LONGCUT_XB_D * (1.0 + damp_long_term));
+                double ddamp_long_dr = -2.0 * HB_ALP_D * damp_long * damp_long_term
+                                     / (r_XB * (1.0 + damp_long_term));
 
                 double exp_term = exp(expo_outl);
                 double denom_outl = 1.0 + exp_term;
@@ -2081,14 +2083,15 @@ __global__ GFNFF_KERNEL_BOUNDS void k_xbonds_mixed(
                 float damp_short_term = 1.0f;
                 float ratio_short_g = XB_SCUT_D * r_vdw_AB / (r_XB * r_XB);
                 for (int p = 0; p < 6; ++p) damp_short_term *= ratio_short_g;
-                float ddamp_short_dr = -2.0f * HB_ALP_D * damp_short * damp_short_term
+                // Known Issue #46 (see the FP64 kernel above)
+                float ddamp_short_dr = 2.0f * HB_ALP_D * damp_short * damp_short_term
                                       / (r_XB * (1.0f + damp_short_term));
 
                 float damp_long_term = 1.0f;
                 float ratio_long_g = (r_XB * r_XB) / HB_LONGCUT_XB_D;
                 for (int p = 0; p < 6; ++p) damp_long_term *= ratio_long_g;
-                float ddamp_long_dr = -2.0f * HB_ALP_D * r_XB * damp_long * damp_long_term
-                                     / (HB_LONGCUT_XB_D * (1.0f + damp_long_term));
+                float ddamp_long_dr = -2.0f * HB_ALP_D * damp_long * damp_long_term
+                                     / (r_XB * (1.0f + damp_long_term));
 
                 float exp_t = expf(expo_outl);
                 float denom_outl = 1.0f + exp_t;
