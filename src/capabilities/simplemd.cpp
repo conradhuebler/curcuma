@@ -39,6 +39,8 @@
 #include "src/capabilities/optimizer_factory.h"
 #include "src/capabilities/rmsd.h"
 #include "src/capabilities/rmsdtraj.h"
+#include "src/capabilities/trajprops.h"        // Claude Generated (Oct 2026): hydrogen-bond classification
+#include "src/core/energy_calculators/ff_methods/gfnff.h"
 #include "src/capabilities/shared_bias_pool.h"  // Claude Generated (Apr 2026)
 #include "src/capabilities/rmsd_mtd_core.h"      // Claude Generated (Jul 2026): strided-scheme decision helpers
 
@@ -157,6 +159,7 @@ int BiasThread::execute()
         }
     };
 
+    m_min_rmsd = std::numeric_limits<double>::infinity();
     for (int i = 0; i < m_biased_structures.size(); ++i) {
         // Structure 0 supplies the COLVAR reference RMSD, so it is never skipped.
         bool centered = false;
@@ -180,6 +183,11 @@ int BiasThread::execute()
         m_last_evaluated++;
         m_driver.setTarget(m_target);
         double rmsd = centered ? m_driver.BestFitRMSDCentered() : m_driver.BestFitRMSD();
+        // Claude Generated (Jul 2026): distance to the closest visited structure, for the novelty
+        // target (rmsd_mtd_target). Tracked in BOTH bias paths -- this legacy per-run pool is what a
+        // standalone -md uses, the shared pool is what ConfSearch uses.
+        if (rmsd < m_min_rmsd)
+            m_min_rmsd = rmsd;
         double expr = exp(-rmsd * rmsd * m_alpha);
         double height = m_k * m_biased_structures[i].counter; // W_i = k * counter_i
         double bias_energy = height * expr;
@@ -354,6 +362,44 @@ void SimpleMD::LoadControlJson()
     m_rmsd_mtd = m_config.get<bool>("rmsd_mtd");
     m_k_rmsd = m_config.get<double>("rmsd_mtd_k");
     m_alpha_rmsd = m_config.get<double>("rmsd_mtd_alpha");
+    // Claude Generated (Sep 2026): Gyrationsradius-Bias
+    m_gyration_bias = m_config.get<bool>("gyration_bias");
+    m_gyration_target = m_config.get<double>("gyration_target");
+    m_gyration_force = m_config.get<double>("gyration_force");
+    m_gyration_one_sided = m_config.get<bool>("gyration_one_sided");
+    m_gyration_heavy_only = m_config.get<bool>("gyration_heavy_only");
+    // Claude Generated (Sep 2026): Rg flooding (target-free compactness CV), see ApplyRgFlood()
+    m_rg_flood = m_config.get<bool>("rg_flood");
+    m_rg_flood_sigma = m_config.get<double>("rg_flood_sigma");
+    m_rg_flood_w0 = m_config.get<double>("rg_flood_w0");
+    m_rg_flood_dt = m_config.get<double>("rg_flood_dt");
+    m_rg_flood_wall = m_config.get<double>("rg_flood_wall");
+    m_rg_flood_wall_force = m_config.get<double>("rg_flood_wall_force");
+    m_rg_flood_warmup_fs = m_config.get<double>("rg_flood_warmup");
+    {
+        // Hills handed in by the caller (ConfSearch: the Rg of the pool minima found so far) -- a plain
+        // array, not a registered PARAM; ConfigManager keeps unknown flat keys verbatim.
+        json cfg = m_config.exportConfig();
+        m_rg_seed_hills.clear();
+        if (cfg.contains("rg_flood_seed_hills") && cfg["rg_flood_seed_hills"].is_array())
+            for (const auto& v : cfg["rg_flood_seed_hills"])
+                if (v.is_number())
+                    m_rg_seed_hills.push_back(v.get<double>());
+        // Claude Generated (Sep 2026): distance restraints during the dynamics (ConfGen steering).
+        m_distance_restraints.clear();
+        if (cfg.contains("distance_restraints") && cfg["distance_restraints"].is_array())
+            for (const auto& e : cfg["distance_restraints"]) {
+                if (!e.is_object())
+                    continue;
+                MDDistanceRestraint r;
+                r.i = e.value("i", -1);
+                r.j = e.value("j", -1);
+                r.target = e.value("target", 0.0);
+                r.force = e.value("force", 1.0);
+                if (r.i >= 0 && r.j >= 0 && r.i != r.j && r.target > 0.0)
+                    m_distance_restraints.push_back(r);
+            }
+    }
     m_mtd_steps = m_config.get<int>("rmsd_mtd_pace");
     m_chain_length = m_config.get<int>("chain_length");
     m_rmsd_rmsd = m_config.get<double>("rmsd_rmsd", 1.0);  // Not in PARAM block - legacy
@@ -398,9 +444,12 @@ void SimpleMD::LoadControlJson()
     m_topo_check_interval = m_config.get<int>("topo_check_interval", 0);
     m_epot_abort = m_config.get<bool>("epot_abort", false);
     m_epot_abort_window = m_config.get<double>("epot_abort_window", 250.0);
+    m_rmsd_mtd_target = m_config.get<double>("rmsd_mtd_target", 0.0);
     m_temp_abort = m_config.get<bool>("temp_abort", false);
     m_temp_abort_factor = m_config.get<double>("temp_abort_factor", 1.5);
     m_temp_abort_delta = m_config.get<double>("temp_abort_delta", 300.0);
+    m_geometry_abort_factor = m_config.get<double>("geometry_abort_factor", 10.0);
+
 
     // Claude Generated (2026): global temperature ramp + per-atom-subset regions
     m_temp_ramp = m_config.get<bool>("temp_ramp");
@@ -444,6 +493,10 @@ void SimpleMD::LoadControlJson()
     m_md_diagnostics = m_config.get<bool>("md_diagnostics");
     // WP-P1 (May 2026): per-phase wall-clock timing in the JSONL records
     m_md_diagnostics_timing = m_config.get<bool>("md_diagnostics_timing");
+
+    // Claude Generated (Oct 2026): hydrogen-bond log, off unless asked for
+    m_hb_log_frequency = m_config.get<int>("hb_log_frequency");
+    m_hb_log_limit_kj = m_config.get<double>("hb_log_energy_limit");
 
     // Claude Generated 2025: RATTLE Parameters
     m_rm_COM = m_config.get<double>("remove_com_motion");
@@ -626,14 +679,41 @@ bool SimpleMD::Initialise()
     m_eigen_geometry = Eigen::MatrixXd::Zero(m_natoms, 3);
     m_eigen_geometry_old = Eigen::MatrixXd::Zero(m_natoms, 3);
     m_eigen_gradient = Eigen::MatrixXd::Zero(m_natoms, 3);
+    /* Claude Generated (Sep 2026): Atomauswahl und ggf. Zielwert des Gyrationsradius-Bias. Der
+     * Vorgabewert -1 leitet das Ziel aus der Startstruktur ab (5 % Kontraktion), damit der Term
+     * ohne Kenntnis einer Referenzstruktur benutzbar ist. */
+    if (m_gyration_bias) {
+        m_gyration_indices.clear();
+        for (int i = 0; i < m_natoms; ++i)
+            if (!m_gyration_heavy_only || m_molecule.Atom(i).first != 1)
+                m_gyration_indices.push_back(i);
+    }
+    /* Claude Generated (Sep 2026): Rg flooding works on the heavy atoms only and starts every run
+     * fresh -- its hills are this trajectory's memory, the search-wide memory arrives through
+     * rg_flood_seed_hills. */
+    if (!m_distance_restraints.empty() && m_verbosity >= 1)
+        CurcumaLogger::result_fmt("SimpleMD: {} harmonic distance restraint(s) act during the dynamics",
+            static_cast<int>(m_distance_restraints.size()));
+    if (m_rg_flood) {
+        m_rg_indices.clear();
+        for (int i = 0; i < m_natoms; ++i)
+            if (m_molecule.Atom(i).first != 1)
+                m_rg_indices.push_back(i);
+        m_rg_hill_pos.clear();
+        m_rg_hill_w.clear();
+        m_rg_warmup.clear();
+        m_rg_flood_armed = false;
+        m_rg_flood_deposits = 0;
+        m_rg_flood_last_deposit_step = -1;
+        m_rg_seen_min = 1e9;
+        m_rg_seen_max = 0.0;
+    }
     m_eigen_gradient_old = Eigen::MatrixXd::Zero(m_natoms, 3);
     m_eigen_velocities = Eigen::MatrixXd::Zero(m_natoms, 3);
 
     m_eigen_masses = Eigen::VectorXd::Zero(3*m_natoms);
     m_eigen_inv_masses = Eigen::VectorXd::Zero(3*m_natoms);
 
-    static std::random_device rd{};
-    static std::mt19937 gen{ rd() };
     if (m_seed == -1) {
         const auto start = std::chrono::high_resolution_clock::now();
         m_seed = std::chrono::duration_cast<std::chrono::seconds>(start.time_since_epoch()).count();
@@ -641,7 +721,9 @@ bool SimpleMD::Initialise()
         m_seed = m_natoms * m_T0;
     if (m_verbosity >= 1)
         CurcumaLogger::raw("Random seed is ", m_seed);
-    gen.seed(m_seed);
+    // Claude Generated (Sep 2026): the engine that was seeded here was a function-local static
+    // nothing else ever used -- every stochastic site had its own, unseeded one. m_rng replaces
+    // all of them and is seeded in seedRandomEngine() once the geometry is in place.
 
     if (m_initfile != "none") {
         json md;
@@ -728,11 +810,29 @@ bool SimpleMD::Initialise()
         m_seed = m_T0 * m_natoms;
     if (m_verbosity >= 1)
         CurcumaLogger::raw("Random seed is ", m_seed);
-    gen.seed(m_seed);
+    // Claude Generated (Sep 2026): m_rng is seeded in seedRandomEngine() (geometry-dependent),
+    // called from InitVelocities. This second block only resolves the -1/0 sentinels.
 
 
     m_start_fragments = m_molecule.GetFragments();
     m_start_fragment_count = static_cast<int>(m_start_fragments.size());  // Claude Generated (Jun 2026): topo-check reference
+    /* Claude Generated (Aug 2026): the walker index for the provenance of a deposit. ConfSearch gives
+     * every MD run a basename ending in ".tN"; N is the walker. Read HERE and not in
+     * LoadControlJson: the basename is overridden by MDThread after the constructor has run. */
+    {
+        const std::string base = Basename();
+        const std::size_t pos = base.rfind(".t");
+        if (pos != std::string::npos) {
+            try { m_walker_id = std::stoi(base.substr(pos + 2)); } catch (...) { m_walker_id = -1; }
+        }
+    }
+    // Claude Generated (Aug 2026): yardstick for the geometry sanity abort, see m_geometry_abort_factor.
+    {
+        const Geometry start_geometry = m_molecule.getGeometry();
+        m_start_extent = (start_geometry.rows() > 0)
+            ? (start_geometry.colwise().maxCoeff() - start_geometry.colwise().minCoeff()).maxCoeff()
+            : 0.0;
+    }
     m_scaling_vector_linear = std::vector<double>(m_natoms, 1);
     m_scaling_vector_nonlinear = std::vector<double>(m_natoms, 1);
     if (m_scaling_json != "none") {
@@ -779,7 +879,6 @@ bool SimpleMD::Initialise()
 
     //m_gradient = std::vector<double>(3 * m_natoms, 0);
     m_virial = std::vector<double>(3 * m_natoms, 0);
-    m_atom_temp = std::vector<std::vector<double>>(m_natoms);
     if(m_opt)
     {
         // Claude Generated (Apr 2026): Use unified optimizer instead of legacy CurcumaOpt
@@ -863,7 +962,14 @@ bool SimpleMD::Initialise()
     // than nested inside controller["simplemd"]. Without this forwarding, keys
     // like "gpu" or "charge" are silently dropped.
     for (auto& [key, value] : m_controller.items()) {
-        if (key == "simplemd" || key == "global" || value.is_object())
+        if (key == "simplemd" || key == "global")
+            continue;
+        // Objects used to be skipped wholesale, which silently dropped every method
+        // sub-scope -- '-gfnff.solvent', '-eeq_solver.*', '-deltaml.*' never reached the
+        // energy calculator from a dynamics run, while the identical flag worked from
+        // '-sp'. Forward the scopes the calculator actually consumes; other objects
+        // (other capabilities' blocks) stay out. Claude Generated (July 2026).
+        if (value.is_object() && !EnergyCalculator::isMethodScope(key))
             continue;
         if (!ec_config.contains(key) || ec_config[key].is_null()) {
             ec_config[key] = value;
@@ -884,7 +990,10 @@ bool SimpleMD::Initialise()
     // constructor never sees flat flags like -static_all true or -eeq_distance_cutoff_auto
     // true that the registry routed into controller["gfnff"]. Mirrors the
     // EnergyCalculator::reattachMethodScopes fix used by the opt/sp path (WP6).
-    for (const auto& scope : MethodFactory::methodParameterScopes()) {
+    static const std::vector<std::string> kMethodScopes = {
+        "gfnff", "eeq_solver", "tblite", "xtb", "ulysses", "eht", "dftd3", "dftd4", "orca"
+    };
+    for (const auto& scope : kMethodScopes) {
         if (m_controller.contains(scope) && m_controller[scope].is_object()
             && !ec_config.contains(scope)) {
             ec_config[scope] = m_controller[scope];
@@ -915,8 +1024,8 @@ bool SimpleMD::Initialise()
     }
 
     m_interface = new EnergyCalculator(m_method, ec_config, Basename());
-    // Fail loud (Sep 2026): an unknown/unavailable method used to leave a calculator without a
-    // backend and the first FastEnergy() call segfaulted. Abort the setup with the reason.
+    // Fail loud (Sep 2026, from devel/methods): an unknown/unavailable method used to leave a
+    // calculator without a backend and the first FastEnergy() call segfaulted. Abort with the reason.
     if (m_interface->Error()) {
         CurcumaLogger::error("MD setup failed: " + m_interface->ErrorMessage());
         return false;
@@ -1021,29 +1130,72 @@ bool SimpleMD::Initialise()
             m_bias_threads.push_back(thread);
             m_bias_pool->addThread(thread);
         }
+        // Claude Generated (Jul 2026): resolve the hills file before touching FileIterator, which
+        // THROWS on a missing file -- an uncaught std::runtime_error here aborted the whole MD run.
+        // A restart written before Jul 2026 (or copied to another directory) records a bare
+        // "<basename>.mtd.xyz" while the file sits in the BMT directory, so try the recorded path
+        // first, then the two canonical locations. An unresolvable file is a warning, not a crash:
+        // the run continues with an empty bias pool, which is exactly what a fresh run does.
+        auto resolveBiasFile = [this](const std::string& recorded) -> std::string {
+            std::vector<std::string> candidates;
+            if (!recorded.empty() && recorded != "none")
+                candidates.push_back(recorded);
+            candidates.push_back(outputPath(Basename() + ".mtd.xyz"));
+            candidates.push_back(Basename() + ".mtd.xyz");
+            for (const auto& c : candidates) {
+                std::ifstream test(c);
+                if (test.good())
+                    return c;
+            }
+            return "";
+        };
+
         if (m_restart) {
-            if (m_verbosity >= 1) {
-                CurcumaLogger::raw("Reading structure files from ", m_rmsd_ref_file);
-                for (const auto& i : m_bias_json)
-                    CurcumaLogger::raw(i);
-            }
-            FileIterator file(m_rmsd_ref_file);
-            int index = 0;
-            while (!file.AtEnd()) {
-                Molecule mol = file.Next();
+            const std::string bias_file = resolveBiasFile(m_rmsd_ref_file);
+            if (bias_file.empty()) {
+                // fmt::print (not CurcumaLogger) for the same reason as the neighbouring cout: the
+                // global logger level is still clamped to 0 by the energy-method setup at this point,
+                // so a warn_fmt here would be swallowed. Gated on m_verbosity to honour silent mode.
                 if (m_verbosity >= 1)
-                    CurcumaLogger::raw(m_bias_json[index]);
-                int thread_index = index % m_bias_threads.size();
-                m_bias_threads[thread_index]->addGeometry(mol.getGeometry(), m_bias_json[index]);
-                ++index;
+                    fmt::print("[WARNING] RMSD-MTD restart: hills file '{}' not found -- continuing with an empty bias pool\n",
+                        m_rmsd_ref_file.empty() ? std::string("none") : m_rmsd_ref_file);
+            } else {
+                if (m_verbosity >= 1) {
+                    CurcumaLogger::raw("Reading structure files from ", bias_file);
+                    for (const auto& i : m_bias_json)
+                        CurcumaLogger::raw(i);
+                }
+                FileIterator file(bias_file);
+                int index = 0;
+                while (!file.AtEnd()) {
+                    Molecule mol = file.Next();
+                    // The bias metadata (counter/index/...) and the geometry file are two separate
+                    // artefacts; a truncated or mismatched pair must not read out of bounds.
+                    if (index >= static_cast<int>(m_bias_json.size())) {
+                        if (m_verbosity >= 1)
+                            fmt::print("[WARNING] RMSD-MTD restart: {} holds more structures than the restart metadata ({}) -- ignoring the surplus\n",
+                                bias_file, static_cast<int>(m_bias_json.size()));
+                        break;
+                    }
+                    if (m_verbosity >= 1)
+                        CurcumaLogger::raw(m_bias_json[index]);
+                    int thread_index = index % m_bias_threads.size();
+                    m_bias_threads[thread_index]->addGeometry(mol.getGeometry(), m_bias_json[index]);
+                    ++index;
+                }
+                m_bias_structure_count = index;
             }
-            m_bias_structure_count = index;
-        } else {
-            if (m_rmsd_ref_file != "none") {
+        } else if (m_rmsd_ref_file != "none") {
+            // User-supplied reference structures (-rmsd_mtd_ref_file): a missing file IS a user
+            // error, so it stays loud -- but reported instead of an uncaught exception.
+            std::ifstream test(m_rmsd_ref_file);
+            if (!test.good()) {
+                fmt::print("[ERROR] RMSD-MTD: reference file '{}' (-rmsd_mtd_ref_file) not found -- starting without preloaded hills\n",
+                    m_rmsd_ref_file);
+            } else {
                 if (m_verbosity >= 1)
                     CurcumaLogger::raw("Reading structure files from ", m_rmsd_ref_file);
                 int index = 0;
-
                 FileIterator file(m_rmsd_ref_file);
                 while (!file.AtEnd()) {
                     Molecule mol = file.Next();
@@ -1166,9 +1318,24 @@ void SimpleMD::InitConstrainedBonds()
         CurcumaLogger::result_fmt("{} degrees of freedom (no constraints)", m_dof);
 }
 
+void SimpleMD::seedRandomEngine()
+{
+    // Claude Generated (Sep 2026): see the m_rng comment in the header. The geometry enters the
+    // seed so that the walkers of a search differ without needing per-walker seed bookkeeping,
+    // while a rerun of the SAME structure with the SAME -seed reproduces exactly. Coordinates are
+    // quantised to 1e-6 Angstrom first: bitwise noise from a re-read file must not change the seed.
+    std::size_t h = 1469598103934665603ULL;
+    for (int i = 0; i < 3 * m_natoms; ++i) {
+        const long long q = std::llround(m_eigen_geometry.data()[i] * 1e6);
+        h ^= static_cast<std::size_t>(q) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+    }
+    m_rng.seed(static_cast<std::mt19937::result_type>(static_cast<std::size_t>(m_seed) ^ h));
+}
+
 void SimpleMD::InitVelocities(double scaling)
 {
-    static std::default_random_engine generator;
+    seedRandomEngine();
+    std::mt19937& generator = m_rng;
     for (size_t i = 0; i < m_natoms; ++i) {
         // Claude Generated (Jun 2026): sample from m_T_init (initial
         // temperature) rather than m_T0 (thermostat target) so callers can
@@ -1581,8 +1748,11 @@ nlohmann::json SimpleMD::WriteRestartInformation()
         restart["rmsd_econv"] = m_rmsd_econv;
         restart["wtmtd"] = m_wtmtd;
         restart["rmsd_DT"] = m_rmsd_DT;
-        // The deposits are written through outputPath(), so record that same path - a bare
-        // basename resolves against the CWD, where the file does not exist in BMT mode.
+        // Claude Generated (Jul 2026): record the path the hills file was ACTUALLY written to.
+        // Every writer of ".mtd.xyz" goes through outputPath(), so under BMT the file lives in
+        // "<basename>.<keyword>.<timestamp>/". Storing the bare name here made every restart point
+        // at a non-existent CWD path -> the reload in Initialise() threw an uncaught
+        // std::runtime_error ("File not found") and the whole run aborted with exit 1.
         restart["rmsd_ref_file"] = outputPath(Basename() + ".mtd.xyz");
         restart["counter"] = m_bias_structure_count;
         restart["rmsd_atoms"] = m_rmsd_atoms;
@@ -1976,7 +2146,6 @@ std::string SimpleMD::stopReasonText() const
 void SimpleMD::prepareRun()
 {
     if (m_initialised == false) {
-        CurcumaLogger::error("MD not initialised (setup failed, see the messages above) - nothing to run");
         m_run_prepared = false;
         return;
     }
@@ -2066,6 +2235,9 @@ void SimpleMD::prepareRun()
             m_diag_writer.reset();
         }
     }
+
+    if (m_hb_log_frequency > 0)
+        SetupHydrogenBondLog();
 
     // WP-P1 (May 2026): force per-phase timing collection when diagnostics-timing is on
     if (m_md_diagnostics && m_md_diagnostics_timing && m_interface) {
@@ -2504,7 +2676,7 @@ void SimpleMD::ApplyThermostatRegion(const std::vector<int>& atoms, double T0, i
             return;
         const double Ekin_target = 0.5 * kb_Eh * T0 * dof;
         const double c = std::exp(-(m_dT / 2.0 * m_respa) / m_coupling);
-        static std::mt19937 gen{ std::random_device{}() };
+        std::mt19937& gen = m_rng; // Claude Generated (Sep 2026): instance RNG
         std::normal_distribution<double> dnorm{ 0.0, 1.0 };
         std::chi_squared_distribution<double> dchi{ static_cast<double>(dof) };
         const double R = dnorm(gen);
@@ -2519,7 +2691,7 @@ void SimpleMD::ApplyThermostatRegion(const std::vector<int>& atoms, double T0, i
             m_eigen_velocities.data()[3 * i + 2] *= alpha;
         }
     } else if (type == ThermostatType::Andersen) {
-        static std::default_random_engine generator;
+        std::mt19937& generator = m_rng; // Claude Generated (Sep 2026): instance RNG
         const double probability = m_andersen * m_dT;
         std::uniform_real_distribution<double> uniform_dist(0.0, 1.0);
         for (int i : atoms) {
@@ -2625,6 +2797,28 @@ bool SimpleMD::step()
         m_stop_reason = StopReason::EpotAbort;
         return false;
     }
+    // Claude Generated (Aug 2026): geometry sanity abort. Not a chemical criterion like topo_check
+    // (which the user may deliberately leave off for reactive dynamics) but a "this is not a
+    // molecule any more" test: once the largest coordinate span has grown past
+    // geometry_abort_factor times its starting value, every further step is wasted and, worse,
+    // every further deposit poisons the shared bias pool. Measured on a 107-atom peptide (span
+    // 16 A) under an accumulated bias of 27-98 Eh: spans of 1000-9500 A, run continuing to the
+    // last of 50000 steps. The floor of 50 A keeps small molecules from tripping on normal motion.
+    if (m_geometry_abort_factor > 0 && m_step > 0 && m_eigen_geometry.rows() > 0) {
+        const double extent = (m_eigen_geometry.colwise().maxCoeff() - m_eigen_geometry.colwise().minCoeff()).maxCoeff();
+        const double limit = std::max(50.0, m_geometry_abort_factor * m_start_extent);
+        if (extent > limit) {
+            if (m_verbosity >= 1)
+                fmt::print(fg(fmt::color::orange) | fmt::emphasis::bold,
+                    "MD aborted: the structure spans {:.0f} A (start {:.1f} A, limit {:.0f} A) -- it has been "
+                    "torn apart, not deformed. With RMSD-MTD this usually means the accumulated hills "
+                    "(W = k*counter) outweigh the molecule; bound them with -rmsd_mtd_max_height or "
+                    "lower -rmsd_mtd_k.\n",
+                    extent, m_start_extent, limit);
+            m_run_aborted = true;
+            return false;
+        }
+    }
     // Temperature runaway abort: the shared bias pool's hills (W_i = k*counter_i) grow over
     // successive runs and pump energy in faster than the thermostat removes it -> the running-mean
     // temperature climbs above the target. Either an over-factor (relative) or over-delta (absolute)
@@ -2644,6 +2838,29 @@ bool SimpleMD::step()
             return false;
         }
     }
+    // Claude Generated (Jul 2026): novelty target -- end the run once the walker stands at least
+    // rmsd_mtd_target Angstrom away from EVERY structure the bias pool has seen (including its own
+    // start, which is hill 0). This makes "explore until you are somewhere genuinely new" the
+    // termination criterion instead of a fixed number of femtoseconds: a run that escapes early
+    // stops early and hands its budget to the next one, and a run that is still circling its start
+    // keeps going until max_time.
+    //
+    // Why the distance to the POOL and not to the start: measured on a 107-atom peptide, the
+    // conformers a search produces already sit 4-6 A from the input (117 of 141 in that shell) --
+    // the radius is not the problem. What is missing is coverage of DIRECTIONS at that radius; the
+    // closest structure to a reference conformer 5.4 A away was still 2.7 A off. Distance to the
+    // nearest visited point measures exactly that, distance to the start does not.
+    if (m_rmsd_mtd_target > 0 && m_rmsd_mtd && m_step > 0
+        && std::isfinite(m_bias_min_rmsd) && m_bias_min_rmsd >= m_rmsd_mtd_target) {
+        if (m_verbosity >= 1)
+            fmt::print(fg(fmt::color::green) | fmt::emphasis::bold,
+                "MD stopped: novelty target reached -- {:.2f} A from every visited structure "
+                "(target {:.2f} A) after {:.0f} fs\n",
+                m_bias_min_rmsd, m_rmsd_mtd_target, m_currentStep * m_time_step);
+        m_novelty_reached = true;
+        return false;
+    }
+
     // Topology abort: a growth in the connected-component count means the molecule
     // fragmented. Only the fragment count is used (robust against transient bond-length
     // fluctuations at high T). m_eigen_geometry holds the current coordinates.
@@ -2698,6 +2915,10 @@ bool SimpleMD::step()
         file2.close();
     }
     //////////// Dipole
+
+    // Claude Generated (Oct 2026): hydrogen-bond log (opt-in; the test is one integer compare when off)
+    if (m_hb_log_gfnff && m_step % m_hb_log_frequency == 0)
+        LogHydrogenBonds();
 
     if (m_step % m_dump == 0) {
         if (bool write = WriteGeometry()) {
@@ -2866,6 +3087,13 @@ void SimpleMD::finalizeRun()
     if (m_rmsd_mtd) {
         if (m_verbosity >= 1)
             CurcumaLogger::raw("Sum of Energy of COLVARs:");
+        // Claude Generated (Jul 2026): the final hills dump must TRUNCATE on its first structure and
+        // append afterwards. The old condition "i == j && i == 0" only truncates when bias thread 0
+        // owns a structure at position 0 -- with an empty thread 0 (round-robin distribution) every
+        // structure was appended, so a stale .mtd.xyz (e.g. from an earlier run sharing the same BMT
+        // directory) silently got this run's hills appended to it and the restart reload then read a
+        // mixture of two runs.
+        bool first_hill_dump = true;
         for (int i = 0; i < m_bias_threads.size(); ++i) {
             auto structures = m_bias_threads[i]->getBiasStructure();
             for (int j = 0; j < structures.size(); ++j) {
@@ -2874,9 +3102,10 @@ void SimpleMD::finalizeRun()
                 m_rmsd_mtd_molecule.setGeometry(structures[j].geometry);
                 m_rmsd_mtd_molecule.setEnergy(structures[j].energy);
                 m_rmsd_mtd_molecule.setName(std::to_string(structures[j].index) + " " + std::to_string(structures[j].rmsd_reference));
-                if (i == j && i == 0)
+                if (first_hill_dump) {
                     m_rmsd_mtd_molecule.writeXYZFile(outputPath(Basename() + ".mtd.xyz"));
-                else
+                    first_hill_dump = false;
+                } else
                     m_rmsd_mtd_molecule.appendXYZFile(outputPath(Basename() + ".mtd.xyz"));
             }
         }
@@ -2891,6 +3120,13 @@ void SimpleMD::finalizeRun()
                 m_bias_hills_evaluated, m_bias_hills_screened, screen_pct, m_mtd_time) << std::endl;
         writeMtdProvenance();
     }
+    // Claude Generated (Sep 2026): one line on the Rg flooding, so a log shows what the term did.
+    if (m_rg_flood && m_verbosity >= 1)
+        std::cout << fmt::format("Rg flooding: {} hill(s) deposited by this run (+{} seeded), sigma {:.3f} A, W0 {:.5f} Eh, "
+                                 "Rg visited {:.3f}-{:.3f} A{}",
+            m_rg_flood_deposits, static_cast<int>(m_rg_seed_hills.size()), m_rg_flood_sigma_eff, m_rg_flood_w0_eff,
+            m_rg_seen_min, m_rg_seen_max,
+            m_rg_flood_armed ? "" : " (never armed -- run shorter than rg_flood_warmup)") << std::endl;
     // Per-instance filename so concurrent MD workers don't overwrite each other's final dump.
     std::ofstream restart_file(snapshotPath(Basename() + ".final.json"));
     nlohmann::json restart;
@@ -3016,6 +3252,13 @@ void SimpleMD::writeMtdProvenance()
     if (m_verbosity >= 1)
         std::cout << "RMSD-MTD provenance: " << m_mtd_deposits.size() << " deposits written to "
                   << base << ".mtd_hills.csv (+ coverage, gnuplot)" << std::endl;
+    // Claude Generated (Aug 2026): a run that keeps proposing hills on a molecule which has come
+    // apart is not exploring any more -- say so, even though the deposits themselves are refused.
+    if (m_deposits_rejected > 0 && m_verbosity >= 1)
+        fmt::print(fg(fmt::color::orange),
+            "RMSD-MTD: {} deposit(s) refused -- the molecule had fragmented at that point "
+            "(they would have biased a structure that no longer exists).\n",
+            m_deposits_rejected);
 }
 
 /* Claude Generated 2026 - Queue external per-atom force contribution for the
@@ -3482,6 +3725,9 @@ void SimpleMD::Verlet()
 #endif
     WallPotential();
     ApplyExternalPotentials();
+    m_gyration_potential = ApplyGyrationBias();
+    m_rg_flood_potential = ApplyRgFlood();
+    m_restraint_potential = ApplyDistanceRestraints();
     ekin = 0.0;
 
     for (int i = 0; i < m_natoms; ++i) {
@@ -3741,6 +3987,9 @@ void SimpleMD::Rattle()
 #endif
     WallPotential();
     ApplyExternalPotentials();
+    m_gyration_potential = ApplyGyrationBias();
+    m_rg_flood_potential = ApplyRgFlood();
+    m_restraint_potential = ApplyDistanceRestraints();
 
     for (int i = 0; i < m_natoms; ++i) {
         m_eigen_velocities.data()[3 * i + 0] -= 0.5 * dt * m_eigen_gradient.data()[3 * i + 0] * m_eigen_inv_masses.data()[3 * i + 0];
@@ -3841,8 +4090,19 @@ void SimpleMD::Rattle()
     if (max_err_12 > m_rattle_max_err_12) m_rattle_max_err_12 = max_err_12;
     if (max_err_13 > m_rattle_max_err_13) m_rattle_max_err_13 = max_err_13;
 
-    if (move)
-        RemoveRotations();
+    // Claude Generated (Jul 2026): the unconditional per-fragment RemoveRotations() that used to sit
+    // here is gone. It zeroed EVERY fragment's linear and angular momentum on EVERY constrained step,
+    // which silently disabled all inter-fragment motion: an RMSD-MTD bias (or any collective force)
+    // accelerates two fragments apart, and the removal threw that momentum away again in the same
+    // step. Measured A/B on the acetic-acid dimer (3 ps, gfnff, rmsd_mtd, T=500 K, seed 42, rattle 2):
+    // with the call the fragment-COM distance spanned 0.43 A and 44 hills were deposited, without it
+    // 2.17 A and 127 hills -- i.e. "the bias does not grip" under RATTLE. Pinned by
+    // test_cases/cli/simplemd/15_rattle_mtd_fragments.
+    // It also removed 6*nfrag DOF while the DOF bookkeeping in InitConstrainedBonds only accounts for
+    // the configured remove_com_mode, so the reported temperature was too low (thermostat overheats).
+    // COM/rotation removal is the main loop's job (m_rm_COM_step + remove_com_mode, applied before the
+    // integrator for Verlet AND Rattle), so this path now behaves like the unconstrained one.
+    (void)move;
 
     delete[] coord;
     for (int i = 0; i < m_natoms; ++i) {
@@ -3955,6 +4215,9 @@ void SimpleMD::EvaluateBias(bool do_deposit)
     }
 
     double current_bias = 0;    // exploration bias: drives force + deposition
+    double current_bias_unit = 0; // Claude Generated (Aug 2026): k-free sum (counter*Gaussian) --
+                                  // deposit criterion for k=0 harvest-only mode, where current_bias
+                                  // is identically zero and the k-scaled criterion would never fire
     double current_bias_wt = 0; // optional well-tempered energy (opt-in, COLVAR output only)
     double rmsd_reference = 0;
 
@@ -3985,6 +4248,7 @@ void SimpleMD::EvaluateBias(bool do_deposit)
             initial.time = m_currentStep;
             initial.rmsd_reference = 0;
             initial.counter = 1;
+            initial.energy = m_Epot; // see the deposit path below
             initial.index = 0;
             initial.temperature = m_T0;
             int deposited = m_shared_pool->depositBiasStructure(initial);
@@ -3996,6 +4260,8 @@ void SimpleMD::EvaluateBias(bool do_deposit)
             Molecule out_mol(m_molecule);
             out_mol.setGeometry(full_geometry);
             out_mol.setName(std::to_string(m_currentStep));
+            // Claude Generated (Jul 2026): route through outputPath() like every other .mtd.xyz
+            // writer (BMT rule) -- the shared-pool path was the only one dropping it into the CWD.
             out_mol.writeXYZFile(outputPath(Basename() + ".mtd.xyz"));
             if (m_nocolvarfile == false) {
                 std::ofstream colvarfile;
@@ -4092,6 +4358,7 @@ void SimpleMD::EvaluateBias(bool do_deposit)
         // Evaluate the bias from the snapshot — hill height W_i = k * counter_i,
         // V(x) = Sum_i Sum_p W_i * exp(-alpha*RMSD_{i,p}^2) (p over identity + symmetry images),
         // force = exact negative gradient. Well-tempered (opt-in) only feeds current_bias_wt.
+        m_bias_min_rmsd = std::numeric_limits<double>::infinity();
         for (const auto& bs : bias_snapshot) {
             // Effective hill counter: frozen if inherited at run start (only this run's deposits
             // grow), then capped by rmsd_mtd_max_height. Both default-off -> eff = bs.counter
@@ -4117,8 +4384,14 @@ void SimpleMD::EvaluateBias(bool do_deposit)
                 // two CenterMolecule passes; else the legacy self-centering BestFitRMSD.
                 double rmsd = centered ? m_shared_pool_driver.BestFitRMSDCentered()
                                        : m_shared_pool_driver.BestFitRMSD();
+                // Claude Generated (Jul 2026): distance to the CLOSEST visited structure. Free here
+                // -- the bias evaluates exactly this RMSD for every hill anyway. Hills skipped by
+                // the Gaussian screen are provably far, so they can never hold the minimum.
+                if (rmsd < m_bias_min_rmsd)
+                    m_bias_min_rmsd = rmsd;
                 double expr = exp(-rmsd * rmsd * m_alpha_rmsd);
                 current_bias += height * expr;
+                current_bias_unit += eff_counter * expr;
                 if (m_wtmtd)
                     current_bias_wt += m_k_rmsd * bs.factor * expr;
                 double dEdR = -2.0 * m_alpha_rmsd * height * rmsd * expr;
@@ -4244,15 +4517,29 @@ void SimpleMD::EvaluateBias(bool do_deposit)
         // to the number of existing reference structures → it is a new conformation.
         // First structure (pool empty) is always accepted.
         int pool_count = m_shared_pool->biasStructureCount();
+        // Claude Generated (Aug 2026): k = 0 is harvest-only mode (zero bias force, deposits still
+        // wanted). The k-scaled criterion is then 0 < 0 = never; use the k-free unit-height sums
+        // instead -- for k > 0 both formulations are the same inequality scaled by 1/k, but the
+        // k > 0 path stays untouched to remain bit-identical.
+        const double crit_bias = (m_k_rmsd > 0.0) ? current_bias : current_bias_unit;
+        const double crit_vmin = (m_k_rmsd > 0.0) ? m_vmin : RMSDMTD::vMin(1.0, m_alpha_rmsd, m_r_dep);
         bool deposit = !m_rmsd_fix_structure
-            && (strided ? (do_deposit && RMSDMTD::shouldDeposit(current_bias, m_vmin, pool_count))
-                        : (pool_count == 0 || current_bias * m_rmsd_econv < static_cast<double>(pool_count)));
-        // Claude Generated (Jun 2026): never deposit a fragmented structure into the shared
-        // pool (only relevant when topo_check is on; the run aborts shortly after anyway).
-        if (deposit && m_topo_check) {
+            && (strided ? (do_deposit && RMSDMTD::shouldDeposit(crit_bias, crit_vmin, pool_count))
+                        : (pool_count == 0 || crit_bias * m_rmsd_econv < static_cast<double>(pool_count)));
+        // Claude Generated (Jun 2026, unconditional since Aug 2026): never deposit a fragmented
+        // structure into the shared pool. This used to be gated on -topo_check (default off), so a
+        // trajectory that had been torn apart kept filling the pool with debris -- measured on a
+        // 107-atom peptide, 98.8 % of a 32000-structure pool were fragments of median extent
+        // 1695 Angstrom. Such hills bias nothing useful and make every later cycle worse, whether
+        // or not the user wants the run itself to abort (which is what -topo_check decides).
+        if (deposit) {
             m_molecule.setGeometry(full_geometry);
-            if (static_cast<int>(m_molecule.GetFragments().size()) > m_start_fragment_count)
+            if (static_cast<int>(m_molecule.GetFragments().size()) > m_start_fragment_count) {
                 deposit = false;
+                m_deposits_rejected++;
+                if (m_shared_pool)
+                    m_shared_pool->noteRejectedDeposit();
+            }
         }
         if (deposit) {
             BiasStructure new_bs;
@@ -4260,7 +4547,13 @@ void SimpleMD::EvaluateBias(bool do_deposit)
             new_bs.rmsd_reference = rmsd_reference;
             new_bs.time = m_currentStep;
             new_bs.counter = 1;
+            // Claude Generated (Jul 2026): record the snapshot's own potential energy. It was left at
+            // 0, and ConfSearch writes bias structures as copies of a reference molecule -- so every
+            // exported snapshot carried the REFERENCE's energy in its xyz comment, a plausible-looking
+            // number belonging to a different geometry.
+            new_bs.energy = m_Epot;
             new_bs.temperature = m_T0;
+            new_bs.origin = m_walker_id;   // provenance, see BiasStructure::origin
             int new_count = m_shared_pool->depositBiasStructure(new_bs);
             m_mtd_deposits.push_back({new_count, double(m_step), m_step * m_dT, m_Epot, rmsd_reference, 'B', 0, false});
             m_bias_structure_count++;
@@ -4268,7 +4561,7 @@ void SimpleMD::EvaluateBias(bool do_deposit)
             Molecule out_mol(m_molecule);
             out_mol.setGeometry(full_geometry);
             out_mol.setName(std::to_string(m_currentStep));
-            out_mol.appendXYZFile(outputPath(Basename() + ".mtd.xyz"));
+            out_mol.appendXYZFile(outputPath(Basename() + ".mtd.xyz")); // BMT, see the write above
             if (CurcumaLogger::get_verbosity() >= 2)
                 CurcumaLogger::result_fmt("RMSD-MTD: Deposited bias structure {} (pool total: {})",
                     new_count, m_shared_pool->biasStructureCount());
@@ -4345,6 +4638,11 @@ void SimpleMD::EvaluateBias(bool do_deposit)
         m_bias_pool->Reset();
     }
     rmsd_reference = m_bias_threads[0]->RMSDReference();
+    // Claude Generated (Jul 2026): novelty measure for rmsd_mtd_target -- the distance to the
+    // closest visited structure across all bias threads (each thread holds a slice of the pool).
+    m_bias_min_rmsd = std::numeric_limits<double>::infinity();
+    for (auto* t : m_bias_threads)
+        m_bias_min_rmsd = std::min(m_bias_min_rmsd, t->MinRMSD());
     m_rmsd_mtd_molecule.setGeometry(current_geometry);
 
     if (m_nocolvarfile == false) {
@@ -4368,6 +4666,15 @@ void SimpleMD::EvaluateBias(bool do_deposit)
     bool local_deposit = (m_rmsd_fix_structure == false)
         && (strided ? (do_deposit && RMSDMTD::shouldDeposit(current_bias, m_vmin, m_bias_structure_count))
                     : (current_bias * m_rmsd_econv < m_bias_structure_count));
+    // Claude Generated (Aug 2026): same fragment guard as the shared-pool path above -- a hill on
+    // a molecule that has come apart biases nothing that exists.
+    if (local_deposit) {
+        m_molecule.setGeometry(m_rmsd_mtd_molecule.getGeometry());
+        if (static_cast<int>(m_molecule.GetFragments().size()) > m_start_fragment_count) {
+            local_deposit = false;
+            m_deposits_rejected++;
+        }
+    }
     if (local_deposit) {
         int thread_index = m_bias_structure_count % m_bias_threads.size();
         m_bias_threads[thread_index]->addGeometry(current_geometry, rmsd_reference, m_currentStep, m_bias_structure_count);
@@ -4521,6 +4828,195 @@ double SimpleMD::ApplyRectLogFermiWalls()
 
     return potential;
     // std::cout << potential*kbT << std::endl;
+}
+
+
+double SimpleMD::ApplyGyrationBias()
+{
+    /* Claude Generated (Sep 2026): Bias auf den Gyrationsradius als zweite Kollektivvariable neben
+     * dem RMSD-Bias.
+     *
+     *     Rg^2 = 1/N * sum_i |r_i - R|^2,   R = Schwerpunkt der gewaehlten Atome
+     *     E    = 1/2 * k * (Rg - Rg0)^2                    (einseitig: nur fuer Rg > Rg0)
+     *     dE/dr_j = k * (Rg - Rg0) * (r_j - R) / (N * Rg)
+     *
+     * Die Ableitung des Schwerpunkts faellt heraus, weil sum_i (r_i - R) = 0 ist.
+     *
+     * EINHEITEN: dieselbe Konvention wie die beiden anderen Zusatzterme dieser Datei -- die
+     * Wandpotentiale und der RMSD-Hügelgradient schreiben Eh/Angstrom in m_eigen_gradient, und
+     * dieser Term muss mit dem RMSD-Bias auf einer Skala liegen, weil beide gleichzeitig wirken.
+     * (Die QM-Schnittstelle liefert ihren Gradienten selbst; ob deren Konvention dieselbe ist, ist
+     * eine offene Frage, die aelter ist als dieser Term und beide vorhandenen Zusatzterme
+     * gleichermassen betrifft.) */
+    if (!m_gyration_bias || m_gyration_indices.empty())
+        return 0.0;
+    const int n = static_cast<int>(m_gyration_indices.size());
+    double cx = 0.0, cy = 0.0, cz = 0.0;
+    for (int idx : m_gyration_indices) {
+        cx += m_eigen_geometry.data()[3 * idx + 0];
+        cy += m_eigen_geometry.data()[3 * idx + 1];
+        cz += m_eigen_geometry.data()[3 * idx + 2];
+    }
+    cx /= n; cy /= n; cz /= n;
+    double sum2 = 0.0;
+    for (int idx : m_gyration_indices) {
+        const double dx = m_eigen_geometry.data()[3 * idx + 0] - cx;
+        const double dy = m_eigen_geometry.data()[3 * idx + 1] - cy;
+        const double dz = m_eigen_geometry.data()[3 * idx + 2] - cz;
+        sum2 += dx * dx + dy * dy + dz * dz;
+    }
+    const double rg = std::sqrt(sum2 / n);
+    m_gyration_current = rg;
+    if (rg < 1e-8)
+        return 0.0;
+    /* Vorgabe -1: Ziel aus der STARTGEOMETRIE ableiten, einmalig beim ersten Aufruf. So ist der Term
+     * ohne Kenntnis einer Referenzstruktur benutzbar -- er verlangt dann 5 % Kontraktion gegenueber
+     * dem Punkt, an dem der Lauf beginnt, statt einen absoluten Wert vorauszusetzen. */
+    if (m_gyration_target <= 0.0) {
+        m_gyration_target = 0.95 * rg;
+        if (m_verbosity >= 1)
+            CurcumaLogger::result_fmt("SimpleMD: gyration bias -- target derived from the start "
+                                      "structure: Rg0 = {:.3f} A (0.95 x {:.3f}), k = {} Eh/A^2{}",
+                m_gyration_target, rg, m_gyration_force, m_gyration_one_sided ? ", one-sided" : "");
+    }
+    const double dev = rg - m_gyration_target;
+    if (m_gyration_one_sided && dev <= 0.0)
+        return 0.0;
+    const double energy = 0.5 * m_gyration_force * dev * dev;
+    const double pref = m_gyration_force * dev / (n * rg);
+    for (int idx : m_gyration_indices) {
+        m_eigen_gradient.data()[3 * idx + 0] += pref * (m_eigen_geometry.data()[3 * idx + 0] - cx);
+        m_eigen_gradient.data()[3 * idx + 1] += pref * (m_eigen_geometry.data()[3 * idx + 1] - cy);
+        m_eigen_gradient.data()[3 * idx + 2] += pref * (m_eigen_geometry.data()[3 * idx + 2] - cz);
+    }
+    return energy;
+}
+
+double SimpleMD::ApplyRgFlood()
+{
+    /* Claude Generated (Sep 2026): target-free compactness sampling. Well-tempered metadynamics on
+     * the heavy-atom radius of gyration (see PARAM rg_flood for the measurement behind it):
+     *
+     *     Rg      = sqrt( 1/N sum_i |r_i - R|^2 ),   R = centroid of the heavy atoms
+     *     V(Rg)   = sum_j w_j exp( -(Rg - Rg_j)^2 / (2 sigma^2) )  [+ 1/2 k (Rg - wall)^2 for Rg > wall]
+     *     w_new   = W0 exp( -V_hills(Rg) / (kB dT) )              (Barducci, Bussi, Parrinello 2008)
+     *     dE/dr_j = dV/dRg * (r_j - R) / (N Rg)                  (centroid derivative cancels)
+     *
+     * Same unit convention as ApplyGyrationBias and the wall potentials (Eh, Angstrom). The first
+     * rg_flood_warmup fs only record Rg: the adaptive sigma is the fluctuation of the starting basin,
+     * and the hills the caller hands in (rg_flood_seed_hills) are placed with that sigma once known. */
+    if (!m_rg_flood || m_rg_indices.empty())
+        return 0.0;
+    const int n = static_cast<int>(m_rg_indices.size());
+    double cx = 0.0, cy = 0.0, cz = 0.0;
+    for (int idx : m_rg_indices) {
+        cx += m_eigen_geometry.data()[3 * idx + 0];
+        cy += m_eigen_geometry.data()[3 * idx + 1];
+        cz += m_eigen_geometry.data()[3 * idx + 2];
+    }
+    cx /= n; cy /= n; cz /= n;
+    double sum2 = 0.0;
+    for (int idx : m_rg_indices) {
+        const double dx = m_eigen_geometry.data()[3 * idx + 0] - cx;
+        const double dy = m_eigen_geometry.data()[3 * idx + 1] - cy;
+        const double dz = m_eigen_geometry.data()[3 * idx + 2] - cz;
+        sum2 += dx * dx + dy * dy + dz * dz;
+    }
+    const double rg = std::sqrt(sum2 / n);
+    if (rg < 1e-8)
+        return 0.0;
+    m_rg_seen_min = std::min(m_rg_seen_min, rg);
+    m_rg_seen_max = std::max(m_rg_seen_max, rg);
+
+    if (!m_rg_flood_armed) {
+        m_rg_warmup.push_back(rg);
+        if (m_step * m_dT < m_rg_flood_warmup_fs)
+            return 0.0;
+        if (m_rg_flood_sigma > 0.0) {
+            m_rg_flood_sigma_eff = m_rg_flood_sigma;
+        } else {
+            double mean = 0.0;
+            for (double v : m_rg_warmup) mean += v;
+            mean /= m_rg_warmup.size();
+            double var = 0.0;
+            for (double v : m_rg_warmup) var += (v - mean) * (v - mean);
+            var /= std::max<std::size_t>(1, m_rg_warmup.size() - 1);
+            m_rg_flood_sigma_eff = (std::sqrt(var) >= 0.05) ? std::sqrt(var) : 0.15;
+        }
+        m_rg_flood_w0_eff = (m_rg_flood_w0 > 0.0) ? m_rg_flood_w0 : kb_Eh * m_T0 / 4.0;
+        for (double p : m_rg_seed_hills) {
+            m_rg_hill_pos.push_back(p);
+            m_rg_hill_w.push_back(m_rg_flood_w0_eff);
+        }
+        m_rg_flood_armed = true;
+        m_rg_flood_last_deposit_step = m_step;
+        if (m_verbosity >= 1)
+            CurcumaLogger::result_fmt("Rg flooding armed after {:.0f} fs: sigma = {:.3f} A{}, W0 = {:.5f} Eh "
+                                      "({:.2f} kJ/mol), dT = {} K, {} hill(s) seeded from the caller{}, Rg now {:.3f} A",
+                m_step * m_dT, m_rg_flood_sigma_eff, m_rg_flood_sigma > 0.0 ? "" : " (adaptive)",
+                m_rg_flood_w0_eff, m_rg_flood_w0_eff * 2625.5, m_rg_flood_dt,
+                static_cast<int>(m_rg_seed_hills.size()),
+                m_rg_flood_wall > 0.0 ? fmt::format(", soft wall above {:.3f} A", m_rg_flood_wall) : "", rg);
+    }
+
+    const double s2 = m_rg_flood_sigma_eff * m_rg_flood_sigma_eff;
+    double v_hills = 0.0, dv = 0.0;
+    for (std::size_t j = 0; j < m_rg_hill_pos.size(); ++j) {
+        const double d = rg - m_rg_hill_pos[j];
+        const double g = std::exp(-d * d / (2.0 * s2));
+        v_hills += m_rg_hill_w[j] * g;
+        dv += -m_rg_hill_w[j] * g * d / s2;
+    }
+    double energy = v_hills;
+    if (m_rg_flood_wall > 0.0 && rg > m_rg_flood_wall) {
+        const double dev = rg - m_rg_flood_wall;
+        energy += 0.5 * m_rg_flood_wall_force * dev * dev;
+        dv += m_rg_flood_wall_force * dev;
+    }
+    // Deposit on the same cadence as the RMSD hills; the height is damped by the bias already there.
+    if (m_step - m_rg_flood_last_deposit_step >= std::max(1, m_deposit_stride_steps)) {
+        const double w = m_rg_flood_w0_eff * std::exp(-v_hills / (kb_Eh * std::max(1.0, m_rg_flood_dt)));
+        m_rg_hill_pos.push_back(rg);
+        m_rg_hill_w.push_back(w);
+        m_rg_flood_last_deposit_step = m_step;
+        ++m_rg_flood_deposits;
+    }
+    const double pref = dv / (n * rg);
+    for (int idx : m_rg_indices) {
+        m_eigen_gradient.data()[3 * idx + 0] += pref * (m_eigen_geometry.data()[3 * idx + 0] - cx);
+        m_eigen_gradient.data()[3 * idx + 1] += pref * (m_eigen_geometry.data()[3 * idx + 1] - cy);
+        m_eigen_gradient.data()[3 * idx + 2] += pref * (m_eigen_geometry.data()[3 * idx + 2] - cz);
+    }
+    return energy;
+}
+
+double SimpleMD::ApplyDistanceRestraints()
+{
+    // Claude Generated (Sep 2026): E = sum 1/2 k (d - d0)^2, dE/dr_i = k (d - d0) (r_i - r_j)/d.
+    // Same unit convention as the wall, RMSD-hill and Rg terms of this file (Eh, Angstrom).
+    if (m_distance_restraints.empty())
+        return 0.0;
+    double energy = 0.0;
+    for (const MDDistanceRestraint& r : m_distance_restraints) {
+        if (r.i >= m_natoms || r.j >= m_natoms)
+            continue;
+        const double dx = m_eigen_geometry.data()[3 * r.i + 0] - m_eigen_geometry.data()[3 * r.j + 0];
+        const double dy = m_eigen_geometry.data()[3 * r.i + 1] - m_eigen_geometry.data()[3 * r.j + 1];
+        const double dz = m_eigen_geometry.data()[3 * r.i + 2] - m_eigen_geometry.data()[3 * r.j + 2];
+        const double d = std::sqrt(dx * dx + dy * dy + dz * dz);
+        if (d < 1e-8)
+            continue;
+        const double dev = d - r.target;
+        energy += 0.5 * r.force * dev * dev;
+        const double pref = r.force * dev / d;
+        m_eigen_gradient.data()[3 * r.i + 0] += pref * dx;
+        m_eigen_gradient.data()[3 * r.i + 1] += pref * dy;
+        m_eigen_gradient.data()[3 * r.i + 2] += pref * dz;
+        m_eigen_gradient.data()[3 * r.j + 0] -= pref * dx;
+        m_eigen_gradient.data()[3 * r.j + 1] -= pref * dy;
+        m_eigen_gradient.data()[3 * r.j + 2] -= pref * dz;
+    }
+    return energy;
 }
 
 double SimpleMD::ApplySphericHarmonicWalls()
@@ -5026,20 +5522,16 @@ void SimpleMD::CSVR()
 {
     double Ekin_target = 0.5 * kb_Eh * (m_T0)*m_dof;
     double c = exp(-(m_dT / 2.0 * m_respa) / m_coupling);
-    static std::default_random_engine rd{};
-    static std::mt19937 gen{ rd() };
-    static std::normal_distribution<> d{ 0, 1 };
-    // Lazy-reinit when m_dof changes (e.g. after RATTLE constraint setup or
-    // first call with a different molecule). A stale static distribution with
-    // the wrong DOF produces wrong fluctuation widths in the CSVR rescaling.
-    static int csvr_last_dof = -1;
-    static std::chi_squared_distribution<float> dchi{ 1.0f };
-    if (m_dof != csvr_last_dof) {
-        dchi = std::chi_squared_distribution<float>(static_cast<float>(m_dof));
-        csvr_last_dof = m_dof;
+    // Claude Generated (Sep 2026): the instance RNG, not a shared function-local static.
+    std::mt19937& gen = m_rng;
+    // Lazy-reinit when m_dof changes (e.g. after RATTLE constraint setup): a stale distribution
+    // with the wrong DOF produces wrong fluctuation widths in the CSVR rescaling.
+    if (m_dof != m_csvr_last_dof) {
+        m_csvr_chi = std::chi_squared_distribution<float>(static_cast<float>(m_dof));
+        m_csvr_last_dof = m_dof;
     }
-    double R = d(gen);
-    double SNf = dchi(gen);
+    double R = m_csvr_norm(gen);
+    double SNf = m_csvr_chi(gen);
     double alpha2 = c + (1 - c) * (SNf + R * R) * Ekin_target / (m_dof * m_Ekin) + 2 * R * sqrt(c * (1 - c) * Ekin_target / (m_dof * m_Ekin));
     m_Ekin_exchange += m_Ekin * (alpha2 - 1);
     double alpha = sqrt(alpha2);
@@ -5047,15 +5539,13 @@ void SimpleMD::CSVR()
         m_eigen_velocities.data()[3 * i + 0] *= alpha;
         m_eigen_velocities.data()[3 * i + 1] *= alpha;
         m_eigen_velocities.data()[3 * i + 2] *= alpha;
-
-        m_atom_temp[i].push_back(m_eigen_masses.data()[3 * i] * (m_eigen_velocities.data()[3 * i + 0] * m_eigen_velocities.data()[3 * i + 0] + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1] + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]) / (kb_Eh * m_dof));
     }
     m_seed++;
 }
 
 void SimpleMD::Andersen()
 {
-    static std::default_random_engine generator;
+    std::mt19937& generator = m_rng; // Claude Generated (Sep 2026): instance RNG
     double probability = m_andersen * m_dT;
     std::uniform_real_distribution<double> uniform_dist(0.0, 1.0);
     for (size_t i = 0; i < m_natoms; ++i) {
@@ -5155,4 +5645,48 @@ json SimpleMD::Results() const
         result["density"] = m_molecule.Density(volume); // g/cm^3
     }
     return result;
+}
+
+/* Claude Generated (Oct 2026) - Hydrogen-bond log by GFN-FF triple energy.
+ *
+ * Opt-in (hb_log_frequency > 0). The triples are the A-H...B candidates GFN-FF evaluates anyway;
+ * their single energies are recorded by the force field (GFNFF::setRecordHBondEnergies) and counted
+ * here when below hb_log_energy_limit. Recording does not change the dynamics (the same terms are
+ * summed as before). Only GFN-FF has such triples; with another method the log is refused. */
+void SimpleMD::SetupHydrogenBondLog()
+{
+    GFNFF* gfnff = (m_interface && m_interface->Interface()) ? m_interface->Interface()->gfnffInstance() : nullptr;
+    if (!gfnff) {
+        CurcumaLogger::error("hb_log_frequency needs the gfnff method (hydrogen-bond triples); the hydrogen-bond log is off");
+        return;
+    }
+    m_hb_log_a = curcuma::resolveSelection(m_molecule, m_config.get<std::string>("hb_log_selection"));
+    m_hb_log_b = curcuma::resolveSelection(m_molecule, m_config.get<std::string>("hb_log_selection_b"));
+    if ((!m_config.get<std::string>("hb_log_selection").empty() && m_hb_log_a.empty())
+        || (!m_config.get<std::string>("hb_log_selection_b").empty() && m_hb_log_b.empty())) {
+        CurcumaLogger::error("hb_log_selection / hb_log_selection_b matched no atoms; the hydrogen-bond log is off");
+        return;
+    }
+    m_hb_log_file.open(outputPath(Basename() + ".hbonds.csv"));
+    if (!m_hb_log_file.is_open()) {
+        CurcumaLogger::error("cannot write " + outputPath(Basename() + ".hbonds.csv") + "; the hydrogen-bond log is off");
+        return;
+    }
+    m_hb_log_file << "step,time_fs,hbonds_total,a_donates,b_donates,energy_sum_kj_mol\n";
+    gfnff->setRecordHBondEnergies(true);
+    m_hb_log_gfnff = gfnff;
+}
+
+void SimpleMD::LogHydrogenBonds()
+{
+    const std::vector<GFNFFHBondEnergy> triples = m_hb_log_gfnff->hydrogenBondEnergies();
+    if (triples.empty() && !m_hb_log_warned_empty) {
+        CurcumaLogger::warn("hydrogen-bond log: no GFN-FF triples recorded (no candidates, or the force field does not record them)");
+        m_hb_log_warned_empty = true;
+    }
+    const curcuma::HBondEnergyCount c = curcuma::classifyHBondEnergies(
+        triples, static_cast<int>(m_natoms), m_hb_log_a, m_hb_log_b, m_hb_log_limit_kj);
+    m_hb_log_file << m_step << "," << m_currentStep << "," << c.count.total() << "," << c.count.aDonates << ","
+                  << c.count.bDonates << "," << c.energySumKJ << "\n";
+    m_hb_log_file.flush();
 }

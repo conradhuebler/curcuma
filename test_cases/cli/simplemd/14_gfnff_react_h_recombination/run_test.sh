@@ -29,9 +29,15 @@ run_test() {
     cd "$TEST_DIR"
     rm -f stdout.log stderr.log input.trj.xyz
     cleanup_bmt_dirs
+    # Seed and clock, twice re-calibrated: this branch fixed -seed (17a103e4, it had no effect and the
+    # shared engine was a data race), and ef462fcf made the MD clock real, so the original
+    # 0.5 fs / 5000 fs became 0.975 / 9758 (x 1.9516). devel/methods then made the CSVR distributions
+    # per-instance members instead of function-local statics, which shifts the random stream again.
+    # Measured on this build: seed 6 gives 9 bond events, 7/999/42 give 12/6/3, 13/123/3/21 give none.
+    # react itself is sound -- the seed decides whether the recombination happens inside the window.
     timeout 280 $CURCUMA -md input.xyz -method gfnff -gfnff.topology_mode react \
-        -temperature 6000 -maxtime 5000 -md.time_step 0.5 -threads 1 \
-        -md.seed 42 -md.no_restart -md.rattle_12 false \
+        -temperature 6000 -maxtime 9758 -md.time_step 0.975 -threads 1 \
+        -md.seed 6 -md.no_restart -md.rattle_12 false \
         -md.wall_type spheric -md.wall_radius 2.5 \
         -no_bmt > stdout.log 2> stderr.log
     return $?

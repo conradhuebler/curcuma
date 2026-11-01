@@ -712,6 +712,11 @@ json ForceFieldMethod::getEnergyDecomposition() const {
     energy_json["Inversion"] = m_forcefield->InversionEnergy();
     energy_json["Dispersion"] = m_forcefield->DispersionEnergy();
     energy_json["Coulomb"] = 0.0;
+    // Claude Generated (Jul 2026, kept on the merge): Repulsion and VdW were missing although both
+    // accessors exist and are non-zero for UFF/QMDFF -- without them the decomposition does not sum
+    // to the total energy, which breaks any analysis attributing differences to structure (ConfGen).
+    energy_json["Repulsion"] = m_forcefield->RepulsionEnergy();
+    energy_json["VdW"] = m_forcefield->VdWEnergy();
     energy_json["HBond"] = 0.0;
     energy_json["XBond"] = 0.0;
     energy_json["ATM"] = 0.0;

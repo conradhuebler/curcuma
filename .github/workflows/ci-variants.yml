@@ -1,0 +1,133 @@
+# Release variants built for distribution: Linux tarballs (built in AlmaLinux 8
+# containers), macOS (Apple Silicon) and Windows. Build and smoke test only, artifacts are
+# not published as a release. Start by hand (Actions > Run workflow). The Linux GPU variants are
+# built by linux-gpu.yml, which ccpp.yml also calls (and publishes).
+#   linux-gpu (avx512, avx2): one build each, packed as three archives: the executable
+#       (curcuma-linux-<isa>), the CUDA plugin and the ROCm plugin (curcuma-plugin-*-<isa>).
+#       Unpack the plugin archives into the same directory as the executable archive, or
+#       point CURCUMA_PLUGIN_DIR (or the directory of the AppImage) at them.
+#   linux-cpu : AVX2, no AVX512, no GPU plugins, built on glibc 2.28
+# The GPU plugins share Eigen objects with the executable, so plugin and executable must come
+# from the same ISA build (the loader compares the Eigen alignment and refuses a mismatch).
+# Vulkan is not built.
+name: CiVariants
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-variants-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Container build (AlmaLinux 8, glibc 2.28): runs on current distributions.
+  linux-cpu:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build in container
+        run: |
+          mkdir -p out
+          docker run --rm -v "$PWD:/src" -v "$PWD/out:/out" almalinux:8 \
+            bash /src/scripts/ci/linux_container_build.sh cpu
+
+      # Unpacked in a clean image: the tarball must carry everything it needs.
+      - name: Smoke test in a clean system
+        run: |
+          mkdir -p smoke && tar -C smoke -xzf out/curcuma-linux-cpu.tar.gz
+          docker run --rm -v "$PWD:/w" ubuntu:22.04 /w/smoke/curcuma-cpu/curcuma \
+            -sp /w/test_cases/structures/medium/butane.anti.xyz -method gfnff 2>&1 | tail -n 15
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-cpu
+          path: out/curcuma-linux-cpu.tar.gz
+          if-no-files-found: error
+
+  linux-gpu:
+    uses: ./.github/workflows/linux-gpu.yml
+
+  macos:
+    runs-on: macos-14
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: brew install cmake libomp
+
+      # -mcpu=apple-m1 runs on every Apple Silicon generation (M1 to M4).
+      - name: Build
+        run: |
+          mkdir build_mac && cd build_mac
+          cmake .. -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_FLAGS="-mcpu=apple-m1" -DCMAKE_C_FLAGS="-mcpu=apple-m1" \
+            -DCMAKE_PREFIX_PATH="$(brew --prefix libomp)" \
+            -DUSE_XTB=OFF -DUSE_TBLITE=OFF -DUSE_D3=OFF -DUSE_D4=OFF -DUSE_Plumed=OFF > cmake.log 2>&1 \
+            || { tail -n 60 cmake.log; exit 1; }
+          make -j"$(sysctl -n hw.ncpu)" > make.log 2>&1 || { tail -n 80 make.log; exit 1; }
+
+      - name: Smoke test
+        run: ./build_mac/curcuma -sp test_cases/structures/medium/butane.anti.xyz -method gfnff 2>&1 | tail -n 15
+
+      # Homebrew libraries are bundled so the binary also runs without Homebrew.
+      - name: Package
+        run: |
+          mkdir -p pkg/curcuma-macos && cp build_mac/curcuma pkg/curcuma-macos/
+          for i in 1 2 3; do
+            for f in pkg/curcuma-macos/*; do
+              otool -L "$f" | awk 'NR>1{print $1}' | grep -E '^/(opt/homebrew|usr/local)' | while read -r lib; do
+                b=$(basename "$lib"); [ -e "pkg/curcuma-macos/$b" ] || cp -L "$lib" "pkg/curcuma-macos/$b"
+                chmod u+w "pkg/curcuma-macos/$b"
+                install_name_tool -change "$lib" "@loader_path/$b" "$f"
+              done
+            done
+          done
+          tar -C pkg -czf curcuma-macos-arm64.tar.gz curcuma-macos
+          ./pkg/curcuma-macos/curcuma -sp test_cases/structures/medium/butane.anti.xyz -method gfnff 2>&1 | tail -n 5
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: curcuma-macos-arm64.tar.gz
+          if-no-files-found: error
+
+  windows:
+    name: windows (${{ matrix.name }})
+    runs-on: windows-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: baseline
+            extra: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MinGW
+        uses: e-t-l/setup-mingw@patch-1
+        with:
+          platform: x64
+
+      # No AVX2: the AVX2 build crashed in the smoke test with an access violation in 3 of 4
+      # runs (32-byte stack alignment is a known weak point of MinGW-w64).
+      - name: Build
+        run: scripts/build_windows.bat
+        env:
+          CURCUMA_CMAKE_EXTRA: ${{ matrix.extra }}
+
+      - name: Smoke test
+        shell: cmd
+        run: bin\curcuma.exe -sp test_cases\structures\medium\butane.anti.xyz -method gfnff
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ matrix.name }}
+          path: curcuma-windows.zip
+          if-no-files-found: error

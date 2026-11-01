@@ -134,6 +134,9 @@ const std::vector<MethodParamGroup> kGroups = {
       "Module forcefield (ForceFieldGenerator). Not every parameter applies to every force field (h4/hh: hydrogen-bond corrections). "
       "Probe of Oct 31 2026: -d3 / -d4 with -method uff did not change the energy." },
     // dispersion-only and ORCA
+    // learned correction (module deltaml, src/core/ml)
+    { "deltaml_all", "", "deltaml", {}, {},
+      "Module deltaml; the base method (-deltaml.base) keeps reading its own parameters." },
     { "dftd3_all", "", "dftd3", {}, {}, "Module dftd3 (external s-dftd3, USE_D3 builds)." },
     { "dftd4_all", "", "dftd4", {}, {}, "Module dftd4 (external cpp-d4, USE_D4 builds)." },
     { "orca_all", "", "orca", {}, {}, "Module orca (external ORCA process)." },
@@ -265,6 +268,10 @@ const std::vector<MethodCatalogEntry> kCatalog = {
     { { "cg", "cg-lj" }, "native force field", "native (ForceFieldMethod)", "native, AI-generated, machine-tested", "analytic", "no",
       "Coarse-grained Lennard-Jones spheres/ellipsoids; parameters via -load_ff_json FILE.",
       "coarse-grained beads (element 226)", "", "", { "forcefield_all" }, {} },
+    { { "deltaml" }, "machine learning", "native (DeltaMLMethod, CPU and CUDA)", "native, AI-generated, machine-tested", "analytic", "cuda",
+      "Delta-ML: a base method plus a learned correction (-deltaml.model FILE or the name 'deltaml:<model.json>').",
+      "experimental; trained model required; see the quickstart for what was and was not tested", "docs/DELTA_ML_QUICKSTART.md", "",
+      { "deltaml_all" }, {} },
     { { "ipea1" }, "external: TBLite", "TBLite", kExt, "analytic", "no",
       "IPEA1-xTB (GFN1 reparametrised for ionisation potentials and electron affinities) via TBLite.",
       "needs a USE_TBLITE build", "", "tblite", { "scf_maxiter_damping", "tblite_all" }, {} },

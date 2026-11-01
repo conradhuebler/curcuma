@@ -61,6 +61,21 @@ double LBFGSppObjectiveFunction::operator()(const Vector& x, Vector& grad)
             }
         }
 
+        // Claude Generated (Aug 2026): NaN/Inf is not the only unusable probe. A near-degenerate
+        // L-BFGS update (s.y ~ 0, which is what happens when the structure is ALREADY at its
+        // minimum) produces a search direction of ~1e150, and the resulting coordinates are large
+        // but perfectly FINITE -- so the check above passes them straight to the energy method,
+        // where every overlap exponential overflows. Measured on a batch of 30 peptide conformers
+        // that were already gfn2 minima: 52 such probes, each surfacing as "native SCF eigensolver
+        // failed at iteration 0 (often a singular overlap, e.g. an unsupported basis shell)", which
+        // is a diagnosis of the symptom. Rejecting the probe here costs one comparison and lets the
+        // line search back off; the SCF has its own guard for callers that bypass this one.
+        constexpr double kMaxCoordAngstrom = 1.0e4;
+        if (x.cwiseAbs().maxCoeff() > kMaxCoordAngstrom) {
+            m_error = true;
+            return 0.0;
+        }
+
         double energy;
         const bool reuse = m_primed && m_primed_x.size() == x.size() && m_primed_gradient.size() == x.size()
             && (m_primed_x.array() == x.array()).all();
@@ -91,6 +106,27 @@ double LBFGSppObjectiveFunction::operator()(const Vector& x, Vector& grad)
             Geometry gradient_geom = m_energy_calculator->Gradient();
             grad = Vector::Map(gradient_geom.data(), gradient_geom.size());
         }
+
+        // Claude Generated (Jul 2026): a NON-FINITE GRADIENT is an error too. Only the ENERGY was
+        // checked here, so a method that returns a finite energy with a NaN gradient (GFN-FF does
+        // exactly that for pathological geometries: "energy is finite and returned, but the
+        // gradient is invalid") fed NaN straight into LBFGSpp's line search. hasError() makes the
+        // driver take a zero step and stop on this structure instead of following garbage.
+        if (!grad.allFinite()) {
+            m_error = true;
+            return 0.0;
+        }
+
+        // Claude Generated (Jul 2026): harmonic dihedral restraints, E += 1/2 k (phi - phi_0)^2.
+        // Added here, inside the objective, so LBFGSpp's own line-search evaluations see the same
+        // biased surface (see bindRestraints). Energy and gradient are updated together --
+        // the line search accepts a step by the returned energy, so a gradient-only bias would be
+        // fought by it (the identical lesson as the interactive-grab bias below).
+        // Claude Generated (Oct 2026): NOT on the primed (reused) evaluation -- the driver's
+        // evaluateEnergyAndGradient() has already added the restraints to the energy/gradient that
+        // prime() hands over, so adding them again counted them twice at the start geometry.
+        if (!reuse && m_restraints && !m_restraints->empty())
+            energy += m_restraints->apply(m_molecule->getGeometry(), grad);
 
         // Apply constraints to gradient
         for (int i = 0; i < m_atom_count && i < m_constraints.size(); ++i) {
@@ -152,12 +188,21 @@ bool LBFGSppOptimizer::InitializeOptimizerInternal()
         // Load LBFGS-specific parameters from configuration
         loadLBFGSParameters(m_configuration);
 
+        // Claude Generated (Oct 2026): lbfgs_max_atom_step < 0 (default) = auto: 0.2 A per atom and step from
+        // lbfgs_atom_step_auto_natoms atoms on, otherwise off. 0 switches the cap off for every size.
+        if (m_lbfgs_max_atom_step < 0.0) {
+            m_lbfgs_max_atom_step = (static_cast<int>(m_molecule.AtomCount()) >= m_lbfgs_atom_step_auto_natoms) ? 0.2 : 0.0;
+            if (m_lbfgs_max_atom_step > 0.0)
+                CurcumaLogger::info_fmt("LBFGSpp: step cap {:.2f} A per atom (auto, {} atoms; -lbfgs_max_atom_step 0 switches it off)",
+                    m_lbfgs_max_atom_step, m_molecule.AtomCount());
+        }
+
         // Create LBFGSpp parameter object
         m_param = std::make_unique<LBFGSParam<double>>();
         configureLBFGSParam();
 
-        // Create solver with LineSearchBacktracking (matching legacy CurcumaOpt)
-        m_solver = std::make_unique<LBFGSSolver<double, LineSearchBacktracking>>(*m_param);
+        // Create solver with LineSearchBacktracking (matching legacy CurcumaOpt); the copy honours lbfgs_max_atom_step
+        m_solver = std::make_unique<LBFGSSolver<double, LineSearchBacktrackingCapped>>(*m_param);
 
         // Create objective function
         // Claude Generated (Feb 21, 2026): Pass numerical gradient flags from context
@@ -167,6 +212,9 @@ bool LBFGSppOptimizer::InitializeOptimizerInternal()
         // Claude Generated 2026 - Route the driver's interactive grab bias into
         // the objective so it reaches LBFGSpp's internal gradient evaluations.
         m_objective->bindExternalForces(&m_external_forces);
+        // Claude Generated (Jul 2026): same routing for the dihedral restraints -- they must be
+        // visible to LBFGSpp's internal evaluations, not only to the driver's.
+        m_objective->bindRestraints(&m_context.restraints);
 
         // Initialize coordinate vector and LBFGSpp single-step workspace
         m_current_coordinates = MoleculeToCoordinates(m_molecule);
@@ -216,6 +264,8 @@ Vector LBFGSppOptimizer::CalculateOptimizationStep(const Vector& current_coordin
     double energy = m_current_energy;
 
     try {
+        // Claude Generated (Oct 2026): cap on the displacement of any atom, read by the line search in this thread
+        LBFGSAtomStepCap::value() = m_lbfgs_max_atom_step;
         // Perform single LBFGS step — calls objective function internally (line search)
         m_solver->SingleStep(*m_objective, x, energy);
 
@@ -317,6 +367,8 @@ json LBFGSppOptimizer::GetDefaultConfiguration() const
     config["lbfgs_max_line_search"] = 2;  // Legacy: LBFGS_ls_iter = 2
     config["lbfgs_min_step"] = 1e-4;      // Legacy: LBFGS_min_step = 1e-4 (not 1e-20!)
     config["lbfgs_max_step"] = 1e20;
+    config["lbfgs_max_atom_step"] = -1.0;
+    config["lbfgs_atom_step_auto_natoms"] = 2000;
     config["lbfgs_ftol"] = 1e-4;
     config["lbfgs_wolfe"] = 0.9;
 
@@ -352,6 +404,10 @@ void LBFGSppOptimizer::loadLBFGSParameters(const json& config)
         m_lbfgs_min_step = config["lbfgs_min_step"];
     if (config.contains("lbfgs_max_step"))
         m_lbfgs_max_step = config["lbfgs_max_step"];
+    if (config.contains("lbfgs_max_atom_step"))
+        m_lbfgs_max_atom_step = config["lbfgs_max_atom_step"];
+    if (config.contains("lbfgs_atom_step_auto_natoms"))
+        m_lbfgs_atom_step_auto_natoms = config["lbfgs_atom_step_auto_natoms"];
     if (config.contains("lbfgs_ftol"))
         m_lbfgs_ftol = config["lbfgs_ftol"];
     if (config.contains("lbfgs_wolfe"))

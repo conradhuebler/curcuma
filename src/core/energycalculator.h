@@ -92,6 +92,17 @@ public:
      */
     ~EnergyCalculator();
 
+    /**
+     * @brief Is this controller key a method sub-scope the energy calculator consumes?
+     *
+     * Capabilities that rebuild a narrower configuration for their calculator have to
+     * forward these, otherwise every '-<module>.<param>' silently disappears on the way
+     * down. Exposed here so the list lives in exactly one place.
+     *
+     * Claude Generated (July 2026)
+     */
+    static bool isMethodScope(const std::string& key);
+
     // =================================================================================
     // Molecular Setup and Geometry Management
     // =================================================================================
@@ -433,6 +444,8 @@ public:
 
     /** @brief Enable/disable SCF warm-start (reuse converged charges across steps). */
     void setWarmStart(bool on);
+    /// Claude Generated (Aug 2026): drop the saved SCF guess (call when the STRUCTURE changes).
+    void resetWarmStart();
 
     /** @brief Enable/disable iterative mode (raise SCF display threshold by one level). */
     void setIterativeMode(bool on);
@@ -458,6 +471,11 @@ private:
     // Status flags
     bool m_initialized = false;                       ///< Initialization status
     bool m_containsNaN = false;                      ///< NaN detection flag
+    /* Claude Generated (Jul 2026): how often this calculator reported a non-finite energy/gradient.
+     * A line search re-enters the same pathological geometry many times, so the message is printed
+     * once per structure (all of them at verbosity >= 2). The error STATE is always set. */
+    int m_nan_energy_reports = 0;
+    int m_nan_gradient_reports = 0;
     bool m_error = false;                            ///< Error state flag
     std::string m_error_message;                     ///< Error description
     bool m_gpu_fallback = false;                    ///< GPU requested but its plugin is absent (CPU used)

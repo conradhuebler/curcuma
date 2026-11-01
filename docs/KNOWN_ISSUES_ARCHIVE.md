@@ -66,6 +66,7 @@ in the open-items table below; **info** = no defect.
 | 40 | GFN1/GFN2 GPU | device gradient used integer occupations: wrong for fractional (Fermi) occupations, up to 0.033 Eh/A on GMTKN55 | fixed (Oct 16, 2026) |
 | 41 | GFN2 GPU | resident SCF loop converged on the shell charges alone, ignoring the multipole moments (#29 on the CPU): H2, H2+ stopped after 2 iterations, gradient 0.002 against 0.0098 Eh/A | fixed (Oct 16, 2026) |
 | 42 | GFN-FF | inversion energy has a kink at exactly the ideal C3v ammonia geometry; analytic and finite-difference gradient differ by 6e-5 Eh/A there | open (found by the generated structure tests, Oct 25, 2026) |
+| 43 | GFN-FF | Coulomb TERM 1b chain rule at CN = 0 (isolated ion) gives a spurious force | split (`-gfnff.cn_zero_guard`) |
 
 ## Open items
 
@@ -109,6 +110,7 @@ the CLI section of `CLAUDE.md`).
 | `-gfnff.hh_repulsion_bpair false` | on | BFS distance for H...H repulsion | #34 |
 | `-gfnff.dispersion_c6_update false` | on | D4 C6 frozen at setup | #32 #33 |
 | `-gfnff.gpu_coulomb_implicit false` | on | ROCm workaround for the missing Coulomb term | #37 |
+| `-gfnff.cn_zero_guard true` | off (reference) | TERM 1b chain-rule term 0 at CN = 0: gradient only, energy unchanged; CUDA on the device, ROCm falls back to the CPU method | #43 |
 | `-DUSE_PORTABLE_MATH=ON` | off | fdlibm-derived `erf`/`acos`/`exp`/`log` | #7 |
 | `-DUSE_LEGACY_UNIT_CONSTANTS=ON` | off | pre-CODATA-2018 constants, bit for bit | #35 |
 
@@ -463,3 +465,34 @@ Fix: dq is taken over the packed input and output vectors (nsh + 9 nat entries) 
 
 Found by the generated structure tests ([STRUCTURE_TESTS.md](STRUCTURE_TESTS.md)): `ammonia.ideal-c3v`, gfnff, central finite difference (Richardson) against the analytic gradient differs by 5.5e-5 to 6.0e-5 Eh/A for every step from 0.0005 to 0.02 A, so it is neither truncation nor noise. Four of nine components agree to 1e-10, the others do not. Energy decomposition along a shift of the N atom in x (21 points, 0.002 A): bond, angle, dispersion, repulsion and Coulomb are smooth (ratio of the largest to the median second difference 1.0-1.5), the inversion term has ratio 74 and a slope that changes from about 9e-5 to 2e-6 Eh/A at exactly dx = 0. Distorting the geometry randomly by up to 0.02 A did not remove the mismatch in two of three cases (1.5e-4 and 1.9e-4 Eh/A, third 1.2e-8), so exact symmetry is not the only trigger. Not checked: whether pprcht/gfnff and xtb have the same kink (no reference program on this machine), which geometric quantity of the inversion term is non-differentiable, the relation to #34 (atom-order dependence; both live in geometry-dependent decisions). The test carries a 2e-4 Eh/A `known_deviations` limit with this reason.
 
+## #43 GFN-FF: Coulomb TERM 1b chain rule at CN = 0 gives a spurious force on an isolated ion — opt-in switch (Oct 25, 2026, 🤖 AI-generated, ⚙️ machine-tested; human production testing pending)
+
+- **Cause**: `FFWorkspace::postProcess` (TERM 1b, `gfnff_engrad.F90`) adds `dcn * (-q*cnf/(2*sqrt(CN)+1e-16))`. For an atom without a neighbour inside the erf counting range `0.5*(1+erf(-7.5*dr))` rounds to exactly 0 (log-compressed CN = 0 for dr = r/r0-1 > 0.757 in FP64, smallest nonzero compressed CN 8.9e-16, no negative values; Python scan of the formula), while `dcn` keeps `exp(-56 dr^2)`: `q*cnf*1e16` times a tiny `dcn` row is a force on the ion and, equal and opposite, its neighbours. It matters for dr ~ 0.76-0.95 (H...Cl- about 3.1-3.4 A). The energy (`sqrt(max(CN,0))`) is flat there, so the derivative is 0. The same formula is in pprcht `gfnff_engrad.F90` (previous round, not re-checked here) and in the CUDA/ROCm kernels (`k_subtract_qtmp`, fused postprocess).
+- **Switch**: `-gfnff.cn_zero_guard true` sets the term to 0 when `max(CN,0) == 0.0` (exact test; for CN > 0 the formula is the derivative of the evaluated energy). Default off = reference. GPU (Oct 31, 2026): CUDA applies the same exact test in `k_coulomb_postprocess` (GPU against CPU gradient 3.9e-14 Eh/A on Cl- ... H2O, FD error 6.6e-4 -> 1.5e-5 on the GPU, RTX 5080, n=1; ctest `gfnff_gpu_charge_groups`); ROCm keeps the CPU fallback (kernel compiled, untested on hardware).
+- **Measured** (central FD h = 2e-3 A, 12 components, perturbed 0.06 A; off -> on): (AB)3 + Cl- (+2) with file groups +3/-1 3.86e-3 -> 1.9e-6 Eh/A, with `frag_charge_model ensemble` 3.86e-3 -> 2.0e-6; Cl- ... H2O at H-Cl 3.2 A 6.6e-4 -> 1.5e-5 (unperturbed 3.3e-3 -> 5.2e-6); at 2.2 A (CN > 0) and a water trimer unchanged, gradients bit-identical. 271 structures (every 12th of the 2647 GMTKN55/MOR41/S30L-CI sweep + 60 with a nearest neighbour beyond 2.4 A): printed energies identical to the reference build with the switch on and off, gradients identical off 271/271, on 270/271 (RG18/c2h6Ar, 1.2e-15). NVE 1 ps, 50 K, Cl- + 2 H2O (n=1 each): Etot max-min 3.1e-3 Eh, 6 jumps > 1e-3 Eh off; 2.6e-5 Eh, none on; with the reference formula the Cl- never came closer than 3.14 A to an H, with the switch it bound (1.85 A). (AB)2 + Cl- + 10 H2O: Cl- never at CN = 0, trajectories bit-identical. Test `gfnff_cn_zero_guard`.
+
+## #45 `gfnff_d4_fused_c6` is a bitwise test and the build flags decide it - OPEN (Nov 1, 2026, AI/machine-tested)
+
+The test requires the fused D4 pair-C6 path (`-gfnff.disp_c6_fused true`, default) and the stored
+path to produce byte-identical gradient files. Measured on `trisaccharide-c18h32o16`, `-sp`,
+1 thread (4 threads behave the same), always the same source tree:
+
+| build | fused | stored | |
+|---|---|---|---|
+| `USE_AVX512=ON USE_AVX2=ON USE_BLAS=ON` (this repo's `release/`) | `ff8b2021` | `12a07749` | differ |
+| same source, all three `OFF` | `cbb97316` | `cbb97316` | identical, whole check passes |
+| devel/methods, all three `OFF` | `68b040cb` | `68b040cb` | identical |
+
+So the mismatch is a property of the translation, not of the code: vectorisation and an external
+BLAS reorder the summation in one path and not in the other. The energy is unaffected
+(-9.91771881 Eh in every build); only the last bits of the gradient move. Two ways out: the test
+declares its flag assumption and skips otherwise, or the two paths are made order-identical under
+vectorisation.
+
+Side note for any bitwise comparison ACROSS builds: two builds of the same source differ anyway in
+the 11th digit of the gradient and by 5e-15 Eh in the energy. Only fused-vs-stored WITHIN one
+binary is a meaningful bitwise test.
+
+## #44 Geometry restraints: gradient unit bug made `-hold_polar_h` optimisations fail - FIXED (Oct 9, 2026, AI/machine-tested)
+
+`GeometryRestraints::apply()` multiplied its gradient by 0.529 (stale Eh/Bohr assumption) while `EnergyCalculator::Gradient()` and the optimisers use Eh/Angstrom, so restraint energy and gradient disagreed and the LBFGS line search stopped with "zero step" whenever a restraint was stretched. In the gfn2 portfolio runs (`-hold_polar_h`) 36-50 % of all optimisations ended unsuccessfully (563/1376, 495/1380, 548/1377, 688/1382); unsuccessful structures are written with their last geometry and energy. Probe, 12 real RELAX inputs, 16 polar-H restraints (k = 5 Eh/A^2): zero-step 12/12 before, 0/12 after the fix; converged 4/12 (k = 5), 6/12 (k = 2), 7/12 (k = 1), 10/12 unrestrained. Energy offset to the unrestrained minimum on 4 converged frames: +3.7 / +2.9 / +1.9 kJ/mol (k = 5 / 2 / 1). Second bug of the same cause family: `prime()` handed restraint-inclusive energy/gradient to `LBFGSppObjectiveFunction::operator()`, which added the restraints again (start geometry counted twice; master's `prime()` x this branch's restraints). Regression test: `test_geometry_restraints` (finite difference of the whole objective, 22/22). **ConfSearch check after the fix (Oct 2026, gfn2, 1 cycle at 600 K, 2 seeds, 20-21 RELAX structures each, identical inputs per seed):** unsuccessful optimisations free 0/41, k = 1 0/41, k = 2 0/41, k = 5 1/41 (the unit bug had given 25-45 % in comparable first-repetition batches: 5/20, 6/21, 10/19, 9/22); median energy offset to the unrestrained result +0.2/+0.5 (k = 1), +0.3/+0.8 (k = 2), +0.4/+1.1 kJ/mol (k = 5) per seed. The plain `-opt` probe above converged less (k = 5: 4/12), so its stiffness warning does not carry over to ConfSearch's RELAX step (reason not investigated: different convergence settings are likely). **Protection untested:** the unrestrained arm produced 0 tautomers in 41 structures (RATTLE is auto-enabled at 600 K in the exploration MD, largest H-donor distance 1.02 A), so the test cannot show whether a weaker k still prevents proton transfer. Harder scenarios (not run): start structures with a polar H moved 0.3-0.5 A towards an acceptor, relax free vs k = 1/2/5; 800-1000 K without RATTLE. **Open:** ANCOPT multiplies the gradient by 1.889 (`ancopt_optimizer.cpp:540-556`, same old assumption); all earlier `-hold_polar_h` results (incl. run `20260930_235013` and the gfn2 portfolio) were produced with the bug. Details: [CONFSEARCH_POTENTIAL_REVIEW.md](CONFSEARCH_POTENTIAL_REVIEW.md).

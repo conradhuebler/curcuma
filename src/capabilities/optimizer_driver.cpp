@@ -19,6 +19,7 @@
  */
 
 #include "optimizer_driver.h"
+#include "src/capabilities/optimisation/convergence_presets.h"
 #include "src/tools/general.h"
 #include <cmath>
 #include <fstream>
@@ -101,29 +102,17 @@ OptimizationContext OptimizationContext::fromJson(const json& config, EnergyCalc
     OptimizationContext context;
     context.energy_calculator = calc;
 
-    // Apply convergence preset as base layer; individual params below override it
+    // Apply convergence preset as base layer; individual params below override it.
+    // Values live in optimisation/convergence_presets.h -- one definition for all three call sites.
     if (config.contains("convergence_preset")) {
-        std::string preset = config["convergence_preset"].get<std::string>();
-        if (preset == "loose") {
-            context.energy_threshold = 1.0;
-            context.rmsd_threshold = 0.05;
-            context.gradient_threshold = 1e-3;
-            context.max_iterations = 1000;
-        } else if (preset == "normal") {
-            context.energy_threshold = 0.1;
-            context.rmsd_threshold = 0.01;
-            context.gradient_threshold = 5e-4;
-            context.max_iterations = 5000;
-        } else if (preset == "tight") {
-            context.energy_threshold = 1e-6 * 2625.5;
-            context.rmsd_threshold = 1e-3;
-            context.gradient_threshold = 1e-5;
-            context.max_iterations = 10000;
-        } else if (preset == "verytight") {
-            context.energy_threshold = 1e-7 * 2625.5;
-            context.rmsd_threshold = 1e-4;
-            context.gradient_threshold = 1e-6;
-            context.max_iterations = 20000;
+        Optimization::ConvergencePreset preset;
+        if (Optimization::lookupConvergencePreset(config["convergence_preset"].get<std::string>(), preset)) {
+            context.energy_threshold = preset.energy_threshold;
+            context.rmsd_threshold = preset.rmsd_threshold;
+            context.gradient_threshold = preset.gradient_threshold;
+            context.max_iterations = preset.max_iterations;
+            context.max_iterations_floor = preset.max_iterations;
+            context.max_iterations_per_atom = preset.iterations_per_atom;
         }
     }
 
@@ -134,8 +123,15 @@ OptimizationContext OptimizationContext::fromJson(const json& config, EnergyCalc
         context.rmsd_threshold = config["rmsd_threshold"].get<double>();
     if (config.contains("gradient_threshold"))
         context.gradient_threshold = config["gradient_threshold"].get<double>();
-    if (config.contains("max_iterations"))
+    if (config.contains("max_iterations")) {
         context.max_iterations = config["max_iterations"].get<int>();
+        context.max_iterations_per_atom = 0; // an explicit cap is used verbatim, never scaled
+    }
+    // The preset layer travels as data through the factory, so the size term arrives here too.
+    if (config.contains("max_iterations_per_atom")) {
+        context.max_iterations_per_atom = config["max_iterations_per_atom"].get<int>();
+        context.max_iterations_floor = context.max_iterations;
+    }
     if (config.contains("convergence_count"))
         context.convergence_count = config["convergence_count"].get<int>();
 
@@ -155,6 +151,12 @@ OptimizationContext OptimizationContext::fromJson(const json& config, EnergyCalc
         context.stall_steps = static_cast<int>(config["stall_steps"].get<double>());
     if (config.contains("stall_rmsd") && config["stall_rmsd"].is_number())
         context.stall_rmsd = config["stall_rmsd"].get<double>();
+
+    // Claude Generated (Jul 2026): harmonic dihedral restraints (empty unless requested).
+    context.restraints = Optimization::GeometryRestraints::fromJson(config);
+    // Claude Generated (Aug 2026): see OptimizationContext::reuse_calculator.
+    if (config.contains("reuse_calculator"))
+        context.reuse_calculator = config["reuse_calculator"].get<bool>();
 
     // Claude Generated (Feb 21, 2026): Numerical gradient option for debugging
     if (config.contains("numgrad"))
@@ -220,6 +222,19 @@ bool OptimizerDriver::InitializeOptimization(const Molecule* molecule)
     m_molecule = *molecule;
     m_eval_cache_valid = false;   // new molecule / calculator setup below
 
+    // Claude Generated (Aug 2026): size-scaled step cap, recomputed for every molecule (the driver
+    // can be reused for a different one). See convergence_presets.h for the measurements behind it.
+    if (m_context.max_iterations_per_atom > 0) {
+        const Optimization::ConvergencePreset scale { 0.0, 0.0, 0.0,
+            m_context.max_iterations_floor, m_context.max_iterations_per_atom };
+        const int scaled = Optimization::scaledMaxIterations(scale, m_molecule.AtomCount());
+        if (scaled != m_context.max_iterations && m_context.verbosity >= 2)
+            CurcumaLogger::info_fmt("Step cap scaled to {} for {} atoms ({} per atom, floor {})",
+                scaled, m_molecule.AtomCount(), m_context.max_iterations_per_atom,
+                m_context.max_iterations_floor);
+        m_context.max_iterations = scaled;
+    }
+
     // Validate context
     if (!m_context.isValid()) {
         CurcumaLogger::error_fmt("Invalid optimization context: {}", m_context.getValidationErrors());
@@ -233,8 +248,13 @@ bool OptimizerDriver::InitializeOptimization(const Molecule* molecule)
     }
 
     // Initialize energy calculator with molecule (Claude Apr 2026: Required for first call)
-    // updateGeometry() only updates coordinates, but the calculator needs full initialization
-    m_context.energy_calculator->setMolecule(m_molecule.getMolInfo());
+    // updateGeometry() only updates coordinates, but the calculator needs full initialization.
+    // Claude Generated (Aug 2026): a caller that optimises many geometries of the same molecule
+    // through one shared calculator can skip the re-initialisation (see reuse_calculator).
+    if (m_context.reuse_calculator)
+        m_context.energy_calculator->updateGeometry(m_molecule.getGeometry());
+    else
+        m_context.energy_calculator->setMolecule(m_molecule.getMolInfo());
 
     // Setup RMSD driver for convergence checking
     json rmsd_config = {
@@ -483,6 +503,19 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
                 return failed_with_last("Energy evaluation failed during optimization");
             }
 
+            // Claude Generated (Jul 2026): a NaN slips through EVERY numeric guard below, because
+            // every comparison with NaN is false -- the energy-rise limit does not fire, the
+            // convergence tests do not fire, and the loop grinds on re-evaluating a geometry that
+            // has already diverged (observed: 20 line-search evaluations per step, all NaN). Stop
+            // here instead, and stop before the diverged coordinates are written into m_molecule.
+            if (!std::isfinite(new_energy) || !new_coords.allFinite()) {
+                CurcumaLogger::set_verbosity(saved_global_verbosity);
+                CurcumaLogger::warn_fmt("Optimisation diverged at iteration {} (non-finite energy or coordinates) "
+                                        "-- keeping the last valid geometry",
+                    m_current_iteration);
+                break; // the accepted coordinates/energy from the previous iteration stay in place
+            }
+
             // Check for energy rise limit
             energy_change_kjmol = (new_energy - m_current_energy) * CURCUMA_EH_TO_KJMOL;
             if (energy_change_kjmol > m_context.max_energy_rise) {
@@ -505,6 +538,15 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
             // Update common state
             m_current_energy = new_energy;
             m_current_gradient = new_gradient;
+            // Claude Generated (Jul 2026): remember the geometry this energy belongs to. The LBFGSpp
+            // objective functor writes every LINE-SEARCH TRIAL point into m_molecule
+            // (LBFGSppObjectiveFunction::operator() -> CoordinatesToMolecule(x, *m_molecule)), so
+            // after a step that ends the loop (zero step / exhausted line search) m_molecule holds a
+            // trial geometry while m_current_energy is the last ACCEPTED one. Writing that pair out
+            // produced structures whose stored energy did not belong to their coordinates -- measured
+            // on a penta-alanine snapshot: file said -9.168083 Eh, the written geometry is worth
+            // -8.668213 Eh (1312 kJ/mol), and it poisoned the whole ConfSearch energy ranking.
+            m_accepted_coordinates = new_coords;
 
             // Claude Generated 2026 - External-force bias (interactive mouse grab)
             // is NOT applied here: every optimizer pre-evaluates its own gradient
@@ -614,6 +656,11 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
             }
         }
 
+        // Restore the geometry belonging to m_current_energy before anything is reported or written
+        // (see m_accepted_coordinates above).
+        if (m_accepted_coordinates.size() == 3 * m_molecule.AtomCount())
+            CoordinatesToMolecule(m_accepted_coordinates, m_molecule);
+
         // Create result
         m_molecule.setEnergy(m_current_energy);
         OptimizationResult result = OptimizationResult::success_result(
@@ -719,6 +766,13 @@ bool OptimizerDriver::evaluateEnergyAndGradient(const Vector& coordinates, doubl
                 return false;
             }
         }
+
+        // Claude Generated (Jul 2026): harmonic dihedral restraints. Added BEFORE the atom
+        // constraints so a frozen atom stays frozen even if a restraint pulls on it, and added to
+        // the ENERGY as well -- a line search accepts a step by the returned energy, so a
+        // gradient-only bias would be fought rather than followed.
+        if (!m_context.restraints.empty())
+            energy += m_context.restraints.apply(m_molecule.getGeometry(), gradient);
 
         // Apply constraints if specified
         if (m_context.use_constraints && !m_context.atom_constraints.empty()) {

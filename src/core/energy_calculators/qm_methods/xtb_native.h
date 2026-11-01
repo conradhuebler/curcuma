@@ -1112,6 +1112,29 @@ public:
     // set m_keep_diis=true via -keep_diis true to experiment with history reuse.
     // Claude Generated.
     void setWarmStart(bool on)    { m_warmstart = on; }
+    /** Claude Generated (Aug 2026): forget the saved SCC state.
+     *  The warm start is meant for the NEXT GEOMETRY STEP of the same structure. When one
+     *  calculator is reused for a batch of different conformers, the guess of structure k comes
+     *  from structure k-1 -- a different geometry, and with -scf_extrapolation even a history of
+     *  them -- which can make the first diagonalisation fail outright. Callers that switch
+     *  structures call this in between. */
+    void resetWarmStart()
+    {
+        m_warmstart_q_sh.resize(0);
+        m_warmstart_dp_at.resize(0, 0);
+        m_warmstart_qp_at.resize(0, 0);
+        m_scf_history.clear();
+        // Clearing the saved guess is not enough: UpdateMolecule() PROMOTES the live
+        // wavefunction into the warm-start slot (`m_warmstart_q_sh = m_wfn.q_sh`) whenever the
+        // last SCF converged, and setMolecule() runs after this call -- so the charges of the
+        // PREVIOUS structure were saved right back in. The promotion is gated on
+        // m_scf_converged, which is the honest state here anyway: no SCF has converged for the
+        // structure that is about to be set. Also drop the live SCC vector itself.
+        m_scf_converged = false;
+        m_wfn.q_sh.resize(0);
+        m_wfn.dp_at.resize(0, 0);
+        m_wfn.qp_at.resize(0, 0);
+    }
     bool isWarmStart() const      { return m_warmstart; }
     void setKeepDiis(bool on)     { m_keep_diis = on; }
     bool isKeepDiis() const       { return m_keep_diis; }

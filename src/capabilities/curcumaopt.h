@@ -77,7 +77,7 @@ namespace {
     PARAM(verbosity, Int, 1, "Output level: 0=silent, 1=table, 2=detailed, 3=debug", "Basic", { "verbose" })
 
     // Convergence
-    PARAM(convergence_preset, String, "normal", "Convergence preset: loose, normal, tight, verytight (sets all thresholds)", "Convergence", { "conv_preset", "ConvPreset" })
+    PARAM(convergence_preset, String, "normal", "Convergence preset: loose, normal, tight, verytight. Sets all four thresholds, one decade apart per step -- dE 1/0.1/0.01/0.001 kJ/mol, dRMSD 0.1/0.01/1e-3/1e-4 A, gradient norm 5e-3/5e-4/5e-5/5e-6 Eh/Bohr, step cap max(50,1*N)/max(500,10*N)/max(1000,25*N)/max(5000,100*N) for N atoms -- a fixed cap either truncates large molecules or is pointless for small ones (500 steps converge butane but stop a 107-atom peptide 17 kJ/mol short). An explicit -max_iterations switches the scaling off. The step cap is what actually separates the presets in cost: measured on a 107-atom peptide, the thresholds alone cost 656 steps (loose) vs 750 (verytight), because a cartesian L-BFGS spends its work getting NEAR the minimum, not on the last digits.", "Convergence", { "conv_preset", "ConvPreset" })
     PARAM(energy_threshold, Double, 0.1, "Energy change threshold [kJ/mol]", "Convergence", { "d_e", "dE" })
     PARAM(rmsd_threshold, Double, 0.01, "RMSD change threshold [Angstrom]", "Convergence", { "d_rmsd", "dRMSD" })
     PARAM(gradient_threshold, Double, 5e-4, "Gradient norm threshold [Eh/Bohr]", "Convergence", { "grad_norm", "GradNorm" })
@@ -95,6 +95,8 @@ namespace {
     PARAM(lbfgs_line_search, Int, 3, "Line search type: 1=Armijo, 2=Wolfe, 3=StrongWolfe, 4=Backtracking", "LBFGS", { "lbfgs_lst" })
     PARAM(lbfgs_max_line_search, Int, 20, "Maximum line search iterations", "LBFGS", { "lbfgs_ls_iter" })
     PARAM(lbfgs_min_step, Double, 1e-4, "Minimum step size for line search", "LBFGS", {})
+    PARAM(lbfgs_max_atom_step, Double, -1.0, "L-BFGS (lbfgspp): largest displacement of any single atom in one step, Angstrom. 0 = no limit; negative (default) = auto: 0.2 from lbfgs_atom_step_auto_natoms atoms on, no limit below. Stops the first steps from overshooting stiff bonds in large solvated systems (C=O torn at 5747 atoms). docs/LBFGS_ATOM_STEP_CAP.md", "LBFGS", {})
+    PARAM(lbfgs_atom_step_auto_natoms, Int, 2000, "L-BFGS (lbfgspp): atom count from which the automatic step cap (lbfgs_max_atom_step < 0) applies", "LBFGS", {})
     PARAM(lbfgs_ftol, Double, 1e-4, "Armijo condition parameter (sufficient decrease)", "LBFGS", {})
     PARAM(lbfgs_wolfe, Double, 0.9, "Wolfe condition parameter (curvature)", "LBFGS", {})
     PARAM(lbfgs_eps_abs, Double, 1e-5, "L-BFGS gradient convergence epsilon (absolute)", "LBFGS", {})
@@ -312,4 +314,10 @@ private:
     int m_charge = 0, m_spin = 0;
     int m_serial = false;
     int m_maxiter = 100, m_maxrise = 10, m_optimethod = 1, m_diis_hist = 10, m_diis_start = 10;
+    /* Claude Generated (Aug 2026): size-scaled step cap (see optimisation/convergence_presets.h).
+     * m_maxiter is the floor, m_maxiter_per_atom the size term; the effective cap is computed
+     * per molecule in EffectiveMaxIterations(). An explicit -max_iterations sets the term to 0. */
+    int m_maxiter_per_atom = 0;
+    /// Effective step cap for a molecule of `atoms` atoms.
+    int EffectiveMaxIterations(int atoms) const;
 };

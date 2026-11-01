@@ -8,6 +8,7 @@
 
 #include "src/core/units.h"
 #include "d4param_generator.h"
+#include "d4_pair_c6.h"
 #include "d4_charge_scaling.h"  // shared exact dftd4 zeta (AP6b)
 #include "d4_ncoord.h"          // dftd4 EN-weighted covalent CN (GFN2 D4 path)
 #include "d4_eeq_tables.h"      // dftd4 EEQ-variant reference charges clsq/clsh (WP12 stage 4)
@@ -24,6 +25,7 @@
 #include <chrono>
 #include <fstream>  // Claude Generated (Mar 5, 2026): For diagnostic JSON output
 #include <limits>
+#include <stdexcept>
 #include <thread>
 #include <future>
 #include <mutex>  // Claude Generated (Jun 2026): std::call_once guard for shared global D4 tables
@@ -1451,9 +1453,9 @@ double D4ParameterGenerator::getChargeWeightedC6(int Zi, int Zj, size_t atom_i, 
             const auto& wj = m_gaussian_weights[atom_j];
             const double* g = &m_c6_half_g[c6HalfIndex(static_cast<int>(atom_i), slot_j)];
             const int nb = std::min<int>(wj.size(), MAX_REF);
-            double c6 = 0.0;
-            for (int b = 0; b < nb; ++b) c6 += g[b] * wj[b];
-            return c6;
+            // Claude Generated (Oct 2026): the shared kernel (d4_pair_c6.h), also used by the
+            // fused CPU energy loop - same loop as before, so the same bits.
+            return D4PairC6::c6(g, wj.data(), nb);
         }
     }
 
@@ -1950,10 +1952,8 @@ void D4ParameterGenerator::computeDC6DCN(CxxThreadPool* pool, int num_threads)
             const double* g  = &m_c6_half_g [c6HalfIndex(i, slot_j)];
             const double* dg = &m_c6_half_dg[c6HalfIndex(i, slot_j)];
             const int nb = std::min<int>(nref_j, MAX_REF);
-            for (int b = 0; b < nb; ++b) {
-                dc6_di += dg[b] * gw_j[b];
-                dc6_dj += g[b]  * dgw_j[b];
-            }
+            // Claude Generated (Oct 2026): shared kernel (d4_pair_c6.h), same loop as before
+            D4PairC6::dc6dcn(g, dg, gw_j.data(), dgw_j.data(), nb, dc6_di, dc6_dj);
         } else {
             // Exact flat path (also the disp_half_contraction=false reproduction).
             const size_t base_ij = static_cast<size_t>(elem_i) * MAX_ELEM * MAX_REF * MAX_REF
@@ -2031,7 +2031,14 @@ bool D4ParameterGenerator::updateCNValuesForGradient(const std::vector<double>& 
         // Lever 3 Opt B: rebuild the half-contraction (CN changed → weights changed)
         // before computeDC6DCN. Reuses m_dc6dcn.pairs from the last pair-list build.
         precomputeC6HalfContraction(pool, num_threads);
-        computeDC6DCN(pool, num_threads);
+        // Claude Generated (Oct 2026): in the fused mode the energy loop evaluates dC6/dCN
+        // per pair itself (requestFusedPairC6()); only the per-atom view is refreshed.
+        if (!fusedTakeDerivativeRebuild())
+            computeDC6DCN(pool, num_threads);
+    } else if (m_fused_active) {
+        // The view would point at stale weights. Only the GPU paths pass skip_dc6dcn, and
+        // they never request the fused mode.
+        throw std::logic_error("D4ParameterGenerator: skip_dc6dcn while the fused pair-C6 mode is active");
     }
 
     // Store CN for next step's threshold check
@@ -2045,8 +2052,115 @@ bool D4ParameterGenerator::updateCNValuesForGradient(const std::vector<double>& 
 void D4ParameterGenerator::refreshC6WeightsForCN(const std::vector<double>& cn, CxxThreadPool* pool, int num_threads)
 {
     m_cn_values = cn;
+    // Claude Generated (Oct 2026): fused mode - keep the derivative state of the last rebuild
+    // (the stored dc6dcn of the unfused path stays at that state too), then refresh the view.
+    fusedSaveDerivativeState();
     precomputeGaussianWeights(pool, num_threads);
     precomputeC6HalfContraction(pool, num_threads);
+    if (m_fused_active)
+        fusedBuildView();
+}
+
+// ---------------------------------------------------------------------------
+// Fused per-pair C6 (Claude Generated, Oct 2026) - see requestFusedPairC6() in the header.
+// The unfused path writes, every MD step, C6 into each GFNFFDispersion and dC6/dCN into
+// D4DC6DCNPairs (two passes over ~12.8 M pairs at 5747 atoms, ~45 ms), and the energy loop
+// reads both back. Here the energy loop computes the same three 7-term sums from per-atom
+// arrays (D4PairC6, d4_pair_c6.h) - the identical operations, so the identical bits.
+// ---------------------------------------------------------------------------
+
+bool D4ParameterGenerator::fusedPairC6Possible() const
+{
+    // Conditions under which getChargeWeightedC6() and computeDC6DCN() both take the
+    // half-contraction branch for every pair; otherwise the fused mode stays off.
+    static const bool s_c6_debug = (std::getenv("CURCUMA_C6DEBUG") != nullptr);
+    const int N = static_cast<int>(m_atoms.size());
+    if (s_c6_debug || !m_c6_half_valid || N == 0 || m_c6_half_natoms != N || !m_dc6dcn_pairs_valid)
+        return false;
+    if (static_cast<int>(m_gaussian_weights.size()) != N
+        || static_cast<int>(m_gaussian_weight_derivatives.size()) != N)
+        return false;
+    for (int i = 0; i < N; ++i) {
+        const int Z = m_atoms[i];
+        if (Z < 1 || Z > MAX_ELEM || m_elem_slot[Z] < 0)
+            return false;
+        const auto& w = m_gaussian_weights[i];
+        const auto& dw = m_gaussian_weight_derivatives[i];
+        if (w.empty() || dw.empty() || w.size() != dw.size())
+            return false;
+    }
+    return true;
+}
+
+bool D4ParameterGenerator::fusedTakeDerivativeRebuild()
+{
+    if (!m_fused_requested)
+        return false;
+    if (!fusedPairC6Possible()) {
+        if (m_fused_active) // per-atom data cannot become incomplete for a fixed atom list
+            throw std::logic_error("D4ParameterGenerator: fused pair-C6 data incomplete while active");
+        return false;
+    }
+    if (!m_fused_active) {
+        m_fused_active = true;
+        // dc6_di/dc6_dj are not maintained from now on: drop them (no stale reader, -16 B/pair)
+        std::vector<double>().swap(m_dc6dcn.dc6_di);
+        std::vector<double>().swap(m_dc6dcn.dc6_dj);
+        m_dc6dcn_computed = false;
+    }
+    m_fused_d_is_current = true;
+    fusedBuildView();
+    return true;
+}
+
+void D4ParameterGenerator::fusedSaveDerivativeState()
+{
+    if (!m_fused_active || !m_fused_d_is_current)
+        return;
+    m_fused_nb_d = m_fused_nb;
+    m_fused_w_d = m_fused_w;
+    m_fused_dw_d = m_fused_dw;
+    m_fused_g_d = m_c6_half_g;
+    m_fused_dg_d = m_c6_half_dg;
+    m_fused_d_is_current = false;
+}
+
+void D4ParameterGenerator::fusedBuildView()
+{
+    const int N = static_cast<int>(m_atoms.size());
+    m_fused_slot.resize(N);
+    m_fused_nb.resize(N);
+    m_fused_w.assign(static_cast<size_t>(N) * MAX_REF, 0.0);
+    m_fused_dw.assign(static_cast<size_t>(N) * MAX_REF, 0.0);
+    for (int i = 0; i < N; ++i) {
+        m_fused_slot[i] = m_elem_slot[m_atoms[i]];
+        const auto& w = m_gaussian_weights[i];
+        const auto& dw = m_gaussian_weight_derivatives[i];
+        const int nb = std::min<int>(w.size(), MAX_REF);  // == getChargeWeightedC6 / computeDC6DCN
+        m_fused_nb[i] = nb;
+        std::copy(w.begin(), w.begin() + nb, m_fused_w.begin() + static_cast<size_t>(i) * MAX_REF);
+        std::copy(dw.begin(), dw.begin() + std::min<int>(dw.size(), MAX_REF),
+                  m_fused_dw.begin() + static_cast<size_t>(i) * MAX_REF);
+    }
+    D4FusedC6View& v = m_fused_view;
+    v.K = m_c6_half_K;
+    v.slot = m_fused_slot.data();
+    v.nb = m_fused_nb.data();
+    v.g = m_c6_half_g.data();
+    v.w = m_fused_w.data();
+    if (m_fused_d_is_current) {
+        v.nb_d = m_fused_nb.data();
+        v.g_d = m_c6_half_g.data();
+        v.dg_d = m_c6_half_dg.data();
+        v.w_d = m_fused_w.data();
+        v.dw_d = m_fused_dw.data();
+    } else {
+        v.nb_d = m_fused_nb_d.data();
+        v.g_d = m_fused_g_d.data();
+        v.dg_d = m_fused_dg_d.data();
+        v.w_d = m_fused_w_d.data();
+        v.dw_d = m_fused_dw_d.data();
+    }
 }
 
 // Claude Generated (Apr 2026): P1a — CN-change threshold check for Gaussian weight caching
@@ -2238,7 +2352,9 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
     m_dc6dcn_pairs_valid = true;
 
     // dc6dcn for the gradient (derivatives + half-contraction already built above).
-    computeDC6DCN(pool, num_threads);
+    // Claude Generated (Oct 2026): not stored in the fused mode, see requestFusedPairC6().
+    if (!fusedTakeDerivativeRebuild())
+        computeDC6DCN(pool, num_threads);
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::result_fmt("D4 native dispersion: {} pairs generated", all_pairs.size());

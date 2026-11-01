@@ -1,6 +1,12 @@
 cmake_minimum_required(VERSION 3.18)
 project(curcuma)
 
+# Claude Generated (Oct 27, 2026): default language standard for targets that set none
+# (curcuma_core/_cap/curcuma set their own below). Apple clang and gcc 8 do not default to C++17.
+if(NOT DEFINED CMAKE_CXX_STANDARD)
+    set(CMAKE_CXX_STANDARD 17)
+endif()
+
 # Claude Generated 2026 - MSVC doesn't define M_PI (and friends) from <cmath>
 # unless _USE_MATH_DEFINES is set before the first include; 20+ files across
 # the codebase use M_PI directly (gcc/clang define it unconditionally), so
@@ -199,7 +205,7 @@ FetchContent_Declare(CxxThreadPool
 # ripser: header-only, no CMakeLists.txt at root — use Populate to avoid add_subdirectory
 FetchContent_Declare(ripser
     GIT_REPOSITORY https://github.com/conradhuebler/ripser
-    GIT_TAG        dcb13c22db2017ef80e68bdf9bed6ec3b77ad70d
+    GIT_TAG        5512434c08ffa81a1dda3d1e32206bccc40206b1
     SOURCE_DIR     ${CMAKE_SOURCE_DIR}/external/ripser
 )
 # cpp-d4: headers always needed, library only when USE_D4=ON
@@ -250,6 +256,34 @@ foreach(_fc_dep LBFGSpp CxxThreadPool ripser cpp-d4)
         FetchContent_Populate(${_fc_dep})
     endif()
 endforeach()
+
+# Claude Generated (Jul 2026): repair a dangling-reference bug in the fetched ripser header.
+#
+# ripser.h declares its simplex enumerators as FUNCTION-LOCAL STATICS:
+#     static simplex_boundary_enumerator facets(0, *this);
+#     static simplex_coboundary_enumerator cofacets(*this);
+# Both enumerators store `const ripser& parent` and `const binomial_coeff_table&`. A function-local
+# static is constructed on the FIRST call and never again, so from the second ripser instance in a
+# process onwards these references point at a DESTROYED object -- `parent.n` and the binomial table
+# are read from freed memory. curcuma builds one ripser instance per structure (ConfScan's
+# persistent-diagram descriptor), so this is hit constantly; it usually goes unnoticed because a
+# fresh instance often lands on the same heap address, and it segfaults as soon as the allocation
+# pattern changes between two ConfScan runs (reproduced: ConfSearch with two ConfScan passes in one
+# cycle crashed in compute_dim_0_pairs; removing `static` fixes it, 0/0 crashes afterwards).
+#
+# The fix belongs upstream in https://github.com/conradhuebler/ripser -- once it is pushed there and
+# the GIT_TAG above is bumped, this step becomes a silent no-op (it only rewrites what it finds).
+set(_ripser_header ${CMAKE_SOURCE_DIR}/external/ripser/ripser.h)
+if(EXISTS ${_ripser_header})
+    file(READ ${_ripser_header} _ripser_src)
+    string(FIND "${_ripser_src}" "static simplex_" _ripser_static_pos)
+    if(NOT _ripser_static_pos EQUAL -1)
+        string(REPLACE "static simplex_boundary_enumerator" "simplex_boundary_enumerator" _ripser_src "${_ripser_src}")
+        string(REPLACE "static simplex_coboundary_enumerator" "simplex_coboundary_enumerator" _ripser_src "${_ripser_src}")
+        file(WRITE ${_ripser_header} "${_ripser_src}")
+        message(STATUS "ripser: removed function-local static simplex enumerators (dangling reference across instances)")
+    endif()
+endif()
 
 set(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
 
@@ -500,7 +534,10 @@ set(curcuma_core_SRC
         src/capabilities/confscan.cpp
         src/capabilities/confsearch.cpp
         src/capabilities/shared_bias_pool.cpp
+        src/capabilities/torsion_space.cpp
+        src/capabilities/confgen.cpp
         src/capabilities/confstat.cpp
+        src/capabilities/activelearn.cpp
         src/capabilities/docking.cpp
         src/capabilities/analysenciplot.cpp
         src/capabilities/nebdocking.cpp
@@ -512,6 +549,8 @@ set(curcuma_core_SRC
         src/capabilities/rmsdtraj.cpp
         src/capabilities/external_potentials.cpp
         src/capabilities/measurement.cpp
+        src/capabilities/ionize.cpp
+        src/capabilities/trajprops.cpp
         src/tools/cif.cpp
         src/capabilities/simplemd.cpp
         src/capabilities/md_diagnostics.cpp
@@ -616,6 +655,12 @@ set(curcuma_core_SRC
         src/core/curcuma_logger.cpp
         src/core/citation_database.cpp
         src/core/citation_registry.cpp
+        # Delta-ML: descriptor, dataset and sparse kernel-ridge regression
+        src/core/ml/descriptor.cpp
+        src/core/ml/ml_dataset.cpp
+        src/core/ml/krr_model.cpp
+        src/core/ml/ml_gpu.cpp
+        src/core/energy_calculators/ml_methods/deltaml_method.cpp
         src/tools/formats.h
         src/tools/geometry.h
         src/tools/general.h
@@ -641,6 +686,8 @@ set(curcuma_cap_SRC
         src/capabilities/confscan.cpp
         src/capabilities/confsearch.cpp
         src/capabilities/shared_bias_pool.cpp
+        src/capabilities/torsion_space.cpp
+        src/capabilities/confgen.cpp
         src/capabilities/confstat.cpp
         src/capabilities/docking.cpp
         src/capabilities/analysenciplot.cpp
@@ -653,6 +700,8 @@ set(curcuma_cap_SRC
         src/capabilities/rmsdtraj.cpp
         src/capabilities/external_potentials.cpp
         src/capabilities/measurement.cpp
+        src/capabilities/ionize.cpp
+        src/capabilities/trajprops.cpp
         src/tools/cif.cpp
         src/capabilities/simplemd.cpp
         src/capabilities/md_diagnostics.cpp
@@ -1174,7 +1223,9 @@ if(USE_CUDA)
     add_library(curcuma_cuda SHARED
         ${CUDA_SOURCES}
         src/core/energy_calculators/qm_methods/xtb_gpu_method.cpp
-        src/core/energy_calculators/qm_methods/cuda/gpu_plugin_entry_cuda.cpp)
+        src/core/energy_calculators/qm_methods/cuda/gpu_plugin_entry_cuda.cpp
+        # Delta-ML: descriptor, kernel, forces and the fit's design block on the device
+        src/core/ml/cuda/ml_model_cuda.cu)
     target_include_directories(curcuma_cuda PRIVATE ${PROJECT_SOURCE_DIR})
     target_link_libraries(curcuma_cuda PRIVATE CUDA::cudart CUDA::cusolver CUDA::cublas)
     target_sources(curcuma_cuda PRIVATE
@@ -1314,7 +1365,7 @@ endif()
 # Build: cmake -DUSE_ROCM=ON -DCMAKE_PREFIX_PATH=/opt/rocm && make -j4
 # (USE_ROCM is the single switch - it builds both the native-xTB and GFN-FF GPU paths
 #  into ONE plugin, libcurcuma_rocm.so, mirroring CUDA. ROCM_GPU_ARCH is auto-detected
-#  from rocminfo; override only if wrong.)
+#  from rocminfo; override only if wrong, or give a list for a build without a GPU.)
 # The two HIP TUs (xTB context: device handshake + rocSOLVER eigensolver + resident-SCF
 # __global__ kernels; GFN-FF: single-TU port of the CUDA kernels) are compiled by hipcc
 # into plain relocatable objects via custom commands, then linked into the plugin as
@@ -1369,6 +1420,21 @@ if(USE_ROCM)
     endif()
 
 
+    # ROCM_GPU_ARCH may be a list (-DROCM_GPU_ARCH="gfx1100;gfx1150;gfx1200"): one code
+    # object per entry in the same binary, the runtime picks the one matching the card.
+    # The plugin checks the visible devices against this list at load time and falls back
+    # to the CPU when none matches (gpu_plugin_entry_rocm.cpp). Only RDNA (gfx10/11/12) was
+    # run; the kernels assume wave32, so other families are refused.
+    set(_rocm_offload_flags ${ROCM_GPU_ARCH})
+    foreach(_a IN LISTS ROCM_GPU_ARCH)
+        if(NOT _a MATCHES "^gfx1[012][0-9a-f][0-9a-f]?$")
+            message(FATAL_ERROR "ROCm: '${_a}' is not an RDNA architecture (gfx10xx/gfx11xx/gfx12xx). "
+                "The kernels assume wave32 and were only run on gfx1150 and gfx1200.")
+        endif()
+    endforeach()
+    list(TRANSFORM _rocm_offload_flags PREPEND "--offload-arch=")
+    string(REPLACE ";" "," _rocm_built_archs "${ROCM_GPU_ARCH}")
+
     # hipcc compile defines shared by both device TUs. Match the g++ build's Eigen
     # alignment (CURCUMA_EIGEN_ALIGN, set with the march/AVX switch above) so Eigen
     # objects crossing the hipcc TU <-> g++ boundary share one ABI. FMT_HEADER_ONLY:
@@ -1410,7 +1476,7 @@ if(USE_ROCM)
     set(_hip_ctx_obj ${CMAKE_CURRENT_BINARY_DIR}/xtb_hip_context.hip.o)
     add_custom_command(
         OUTPUT  ${_hip_ctx_obj}
-        COMMAND ${HIPCC_EXECUTABLE} -c -fPIC -O2 -std=c++17 --offload-arch=${ROCM_GPU_ARCH}
+        COMMAND ${HIPCC_EXECUTABLE} -c -fPIC -O2 -std=c++17 ${_rocm_offload_flags}
                 ${_hipcc_defs} ${_hipcc_incs}
                 ${_hip_ctx_src} -o ${_hip_ctx_obj}
         DEPENDS ${_hip_ctx_src} ${_hip_ctx_hdrs}
@@ -1437,7 +1503,7 @@ if(USE_ROCM)
     set(_hip_ff_obj ${CMAKE_CURRENT_BINARY_DIR}/gfnff_rocm.hip.o)
     add_custom_command(
         OUTPUT  ${_hip_ff_obj}
-        COMMAND ${HIPCC_EXECUTABLE} -c -fPIC -O2 -std=c++17 --offload-arch=${ROCM_GPU_ARCH}
+        COMMAND ${HIPCC_EXECUTABLE} -c -fPIC -O2 -std=c++17 ${_rocm_offload_flags}
                 ${_hipcc_defs} ${_hipcc_incs}
                 ${_hip_ff_src} -o ${_hip_ff_obj}
         DEPENDS ${_hip_ff_src} ${_hip_ff_hdrs}
@@ -1463,6 +1529,7 @@ if(USE_ROCM)
     # a single ABI across the dlopen boundary (see the CUDA plugin).
     target_compile_definitions(curcuma_rocm PRIVATE
         USE_ROCM __HIP_PLATFORM_AMD__ HAVE_ROCSOLVER HAVE_ROCBLAS
+        CURCUMA_ROCM_BUILT_ARCHS="${_rocm_built_archs}"
         $<TARGET_PROPERTY:curcuma_core,COMPILE_DEFINITIONS>)
     set_target_properties(curcuma_rocm PROPERTIES
         POSITION_INDEPENDENT_CODE ON
@@ -1581,6 +1648,11 @@ endif(WIN32)
 target_link_libraries(curcuma fmt::fmt-header-only)
 
 target_link_libraries(curcuma curcuma_core)
+
+# Claude Generated (Oct 2026): energy-only ablation, local persistent-homology features vs ACSF
+# (src/helpers/ml_barcode_ablation.cpp). Experiment helper, not registered in ctest.
+add_executable(ml_barcode_ablation src/helpers/ml_barcode_ablation.cpp)
+target_link_libraries(ml_barcode_ablation curcuma_cap curcuma_core curcuma_cap)
 
 # Claude Generated (May 2026, ICX + USE_GFNFF OpenMP fix): when both Intel ICX (libiomp5)
 # and gfortran-built gfnff-lib (libgomp DT_NEEDED) end up in the same binary, the two

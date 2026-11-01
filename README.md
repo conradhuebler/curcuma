@@ -53,7 +53,7 @@ re-measure them.
 **Capabilities** (each prints its options with `curcuma -<capability>` without arguments): single point
 `-sp`, optimisation `-opt`, Hessian and frequencies `-hessian`, molecular dynamics `-md` (thermostats,
 RATTLE, temperature ramps, PLUMED metadynamics), conformer search `-confsearch` and filtering `-confscan`,
-RMSD with atom reordering `-rmsd`, docking `-dock`, interaction energies `-interaction`, implicit solvation
+RMSD with atom reordering `-rmsd`, docking `-dock`, interaction energies `-interaction`, counter-ion placement `-ionize`, streaming trajectory properties `-trajprops`, implicit solvation
 (ALPB/GBSA for native GFN1/GFN2, ALPB for GFN-FF), trajectory and structure analysis `-analysis`.
 
 ## Download and requirements
@@ -78,10 +78,24 @@ Native ab-initio QM engine (**`hf`, `hf-3c`, `lda`, `pbe` and `b3lyp` usable** â
 - see [docs/NATIVE_QM_IMPLEMENTATION.md](docs/NATIVE_QM_IMPLEMENTATION.md), the [DFT roadmap](docs/DFT_ROADMAP/) and the [performance/GPU roadmap](docs/QM_GPU_ROADMAP.md)
 
 > Native GFN1/GFN2 are validated against tblite to a 1e-8 Eh target â€” see [docs/SQM_VALIDATION.md](docs/SQM_VALIDATION.md). For explicit tblite or xtb backends use `tblite-gfn1`/`tblite-gfn2` or `xtb-gfn1`/`xtb-gfn2`.
-Prebuilt binaries are on the [Releases page](https://github.com/conradhuebler/curcuma/releases): a Linux x86_64 AppImage
-(`curcuma-<version>-x86_64-Linux.AppImage`) and a Windows x86_64 archive (`curcuma-<version>-x86_64-Windows.zip`). Every release
-is marked as a pre-release and is built by the CI from one commit; the releases named `Curcuma CI (feature/...)` are builds
-of development branches.
+Prebuilt binaries are on the [Releases page](https://github.com/conradhuebler/curcuma/releases): Linux x86_64 AppImages
+for AVX2 and AVX512 CPUs and a Windows x86_64 archive. GPU support (CUDA, ROCm) is a separate plugin download of the same CPU level
+that is unpacked next to the AppImage; plugins are part of manually started runs only. Every release is marked as a
+pre-release and is built by the CI from one commit; the releases named `Curcuma CI (feature/...)` are builds of development
+branches. File names, plugin setup and requirements: [docs/RELEASE_BINARIES.md](docs/RELEASE_BINARIES.md).
+
+**GPU plugins (CUDA, ROCm).** The AppImages and the executable archives run on the CPU only. The GPU code is in two
+separate archives per CPU level, `curcuma-<v>-plugin-cuda-<level>.tar.gz` (about 1.1 GB) and
+`curcuma-<v>-plugin-rocm-<level>.tar.gz` (about 1.0 GB). They are built only by a manually started CI run
+(Actions > AutomaticBuild > Run workflow), so a normal release may contain none; a plugin release is marked by these files.
+
+1. Pick `<level>`: `avx512` if `grep -c avx512f /proc/cpuinfo` is above 0, otherwise `avx2`. AppImage and plugin must have the same level; a plugin of the other level is refused with a warning and the run continues on the CPU.
+2. Unpack the plugin archive next to the AppImage: `tar -xzf curcuma-<v>-plugin-cuda-<level>.tar.gz --strip-components=1`.
+3. Select the backend: `./curcuma-<v>-<level>-x86_64.AppImage -sp mol.xyz -method gfn2 -gpu cuda` (or `-gpu rocm`). `-gpu_strict true` stops at the first CPU fallback.
+
+Plugins are looked up in `$CURCUMA_PLUGIN_DIR`, the executable's directory, the directory of the `.AppImage` file and `~/.local/share/curcuma/plugins`.
+CUDA needs the NVIDIA driver. ROCm needs the `amdgpu` driver and a card of the types `gfx1100`, `gfx1150` or `gfx1200`; other cards fall back to the CPU.
+Checked by the operator on one machine each for CUDA and ROCm (GPU models not recorded); other distributions and ROCm cards are untested. Details: [docs/RELEASE_BINARIES.md](docs/RELEASE_BINARIES.md), [docs/GPU_PLUGIN_STARTUP.md](docs/GPU_PLUGIN_STARTUP.md).
 
 To build from source:
 
@@ -152,6 +166,7 @@ curcuma -rmsd a.xyz b.xyz                   # RMSD (reorders atoms if needed)
 curcuma -confsearch mol.xyz -md_method gfnff -opt_method gfn2
 ```
 
+ConfSearch options added in 2026 (convergence presets, ConfGen, diverse seeding, per-cycle output, polar-H release pass, Rg flooding, route move) are described in [docs/USAGE_TOOLS.md](docs/USAGE_TOOLS.md#confsearch-additions-jul-sep-2026).
 **Container walls**: `-md.wall_potential harmonic|logfermi|pbc`. The first two push an
 escaping atom back and do work on it; the harmonic force constant is `wall_temp * kB`, far
 too soft at its 298 K default to hold a hot gas. `pbc` exerts no force and instead moves a
@@ -207,6 +222,27 @@ curcuma -opt water.xyz -method gfnff -bak water.opt.xyz
 
 On Linux, Ctrl-C makes curcuma create an empty file `stop`. ConfScan and MD check for it,
 write a restart file and finish. A second Ctrl-C while `stop` exists ends the program at once.
+
+### Delta-ML: cheap method with a learned correction (experimental)
+
+Learns `E_ref - E_base` for one molecule (ACSF descriptor, sparse kernel ridge) and adds it to a cheap base method, usually GFN-FF
+with a GFN2 or DFT reference. Measured on four molecules (GFN2 reference unless noted): held-out forces 1.7x to 4.2x better than
+GFN-FF (1.8x to 2.8x against r2SCAN-3c), conformer minima also from unseen basins ordered better, NVE dynamics conserves energy as
+well as GFN-FF (n=1 per molecule) and samples at the GFN2 energy level. Not shown: that the lowest conformer is found more reliably,
+that a pre-optimisation before GFN2 beats a GFN-FF pre-optimisation, that MD torsion populations are closer to GFN2, or that the
+model energy at its own optimum can be trusted. Not tested: reactions or topology changes, charged and open-shell systems, other
+molecules, transfer between molecules. Cost 10 to 20 times GFN-FF per step (3 to 5 per cent of a GFN2 step; two molecules, measured under load). Results made with the internal labelling before the
+gradient-unit and base-energy repairs (bc7742e6, 373b1c13, 43786e04) are void. The fit also writes an energy-only model
+(`.deltaml.energy.json`, for `-sp` energies, not for `-opt`/`-md`).
+
+```sh
+curcuma -activelearn frames.xyz -method gfnff -ref_method gfn2 -threads 8          # fit
+curcuma -activelearn other.xyz -al_mode test -model frames.deltaml.json           # check on fresh frames
+curcuma -opt mol.xyz -method deltaml:frames.deltaml.json                          # use
+```
+
+AI-generated, machine-tested; human production testing pending. Start with [docs/DELTA_ML_QUICKSTART.md](docs/DELTA_ML_QUICKSTART.md)
+(what works, worked example, failures); details in [docs/DELTA_ML.md](docs/DELTA_ML.md).
 
 ### More
 

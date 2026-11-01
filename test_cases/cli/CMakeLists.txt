@@ -244,12 +244,31 @@ add_cli_test(simplemd 13_rmsd_mtd_legacy_ab)
 set_tests_properties(cli_simplemd_13_rmsd_mtd_legacy_ab PROPERTIES TIMEOUT 300 LABELS "simplemd;gfnff;rmsd_mtd")
 add_cli_test(simplemd 14_rmsd_mtd_coverage)
 set_tests_properties(cli_simplemd_14_rmsd_mtd_coverage PROPERTIES TIMEOUT 200 LABELS "simplemd;gfnff;rmsd_mtd")
+# Claude Generated (Jul 2026): RATTLE must not freeze inter-fragment motion (bias-under-constraints)
+add_cli_test(simplemd 15_rattle_mtd_fragments)
+set_tests_properties(cli_simplemd_15_rattle_mtd_fragments PROPERTIES TIMEOUT 250 LABELS "simplemd;gfnff;rmsd_mtd;rattle")
+
+# =============================================================================
+# ConfGen Tests (Claude Generated, Jul 2026): torsion/energy-decomposition ensemble analysis
+# =============================================================================
+add_cli_test(confgen 01_matched_pairs)
+set_tests_properties(cli_confgen_01_matched_pairs PROPERTIES TIMEOUT 250 LABELS "confgen;gfnff;conformer")
+add_cli_test(confgen 02_generate)
+set_tests_properties(cli_confgen_02_generate PROPERTIES TIMEOUT 300 LABELS "confgen;gfnff;conformer")
 
 # =============================================================================
 # ConfSearch Tests (Claude Generated, Jul 2026)
 # =============================================================================
 add_cli_test(confsearch 01_gfnff_smoke)
 set_tests_properties(cli_confsearch_01_gfnff_smoke PROPERTIES TIMEOUT 400 LABELS "confsearch;gfnff;rmsd_mtd")
+add_cli_test(confsearch 02_confgen_phase)
+set_tests_properties(cli_confsearch_02_confgen_phase PROPERTIES TIMEOUT 400 LABELS "confsearch;gfnff;confgen")
+add_cli_test(confsearch 03_two_stage_phase3b)
+set_tests_properties(cli_confsearch_03_two_stage_phase3b PROPERTIES TIMEOUT 400 LABELS "confsearch;gfnff;qmdff;dual_method")
+add_cli_test(confsearch 04_relax_pes_opt)
+set_tests_properties(cli_confsearch_04_relax_pes_opt PROPERTIES TIMEOUT 400 LABELS "confsearch;gfnff;qmdff;dual_method")
+add_cli_test(confsearch 05_seed_cold_bias)
+set_tests_properties(cli_confsearch_05_seed_cold_bias PROPERTIES TIMEOUT 600 LABELS "confsearch;gfnff;seeding")
 
 # =============================================================================
 # CG (Coarse Graining) Tests — disabled: -vtf command not implemented in main.cpp
@@ -352,6 +371,31 @@ endif()
 # Allow the optimization test more wall-clock — caffeine -opt can run > 30 s
 # (kept for reference; test is currently DISABLED)
 set_tests_properties(cli_sqm_10_gfn2_optimization_smoke PROPERTIES TIMEOUT 180)
+
+# =============================================================================
+# Delta-ML Tests
+# Claude Generated (July 2026): train a delta model, use it as a method, reload it.
+# Invariants only -- the sharp derivative check lives in the test_deltaml unit test.
+# =============================================================================
+add_cli_test(deltaml 01_train_and_predict)
+add_cli_test(deltaml 02_trajectory_workflow)
+set_tests_properties(cli_deltaml_02_trajectory_workflow PROPERTIES TIMEOUT 300)
+# Claude Generated (Oct 2026): energy-only second model, warning on gradient use, FD gate.
+# Reads the 9-atom fixture of 01_train_and_predict from its sibling build directory.
+add_cli_test(deltaml 03_energy_model)
+set_tests_properties(cli_deltaml_03_energy_model PROPERTIES TIMEOUT 300)
+# Claude Generated (Oct 2026): stored labels equal fresh -sp single points, input order, -threads 1 == 4.
+add_cli_test(deltaml 04_label_consistency)
+set_tests_properties(cli_deltaml_04_label_consistency PROPERTIES TIMEOUT 300)
+# Claude Generated (Oct 2026): learn mode reproducible at a fixed seed, prospective validation columns, al_criterion.
+add_cli_test(deltaml 05_al_validation)
+set_tests_properties(cli_deltaml_05_al_validation PROPERTIES TIMEOUT 300)
+# Claude Generated (Oct 2026): GPU path (prediction parity, FD gate, fit); exits 77 without a CUDA plugin or device.
+add_cli_test(deltaml 06_gpu_path)
+set_tests_properties(cli_deltaml_06_gpu_path PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77 RESOURCE_LOCK "gpu")
+# Claude Generated (Oct 2026): -md.seed seeds the initial velocities; no seed keeps the legacy sequence.
+add_cli_test(simplemd 16_md_seed)
+set_tests_properties(cli_simplemd_16_md_seed PROPERTIES TIMEOUT 120 LABELS "simplemd;gfnff")
 
 message(STATUS "Added CLI test scenarios with build directory isolation")
 message(STATUS "  - Tests execute from: ${CMAKE_CURRENT_BINARY_DIR}/category/test_name")

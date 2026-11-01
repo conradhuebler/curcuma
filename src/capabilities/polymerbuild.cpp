@@ -1,6 +1,7 @@
 #include "polymerbuild.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/energycalculator.h"
+#include "src/core/fileiterator.h"
 #include "src/core/pseudoff.h"
 #include "src/tools/geometry.h"
 #include "optimizer_factory.h"
@@ -9,6 +10,7 @@
 #include "src/core/elements.h"
 #include "src/core/energy_calculators/ff_methods/cn_calculator.h"
 
+#include <algorithm>
 #include <regex>
 #include <iostream>
 #include <sstream>
@@ -219,6 +221,82 @@ struct PolymerPlacementFunctor {
 // PolymerBuild Implementation
 // ============================================================================
 
+/**
+ * Claude Generated (Oct 2026) - Bonds between an open Xx connection point and the atom it hangs on.
+ *
+ * The persistent topology stores heavy-atom bonds only (see the fragment template: "skip Xx-Xx and
+ * heavy-Xx bonds"). For an optimisation or MD the Xx that is still open is replaced by cap_intermediate
+ * (H) and the bond list is passed to the force field from that topology, so this H had no bond: it
+ * drifted from its carbon (1.07 A in the fragment -> about 2.9 A), and the chain-end caps came out
+ * unbound in the final structure. The Xx sits at bonding distance when this is called (it is a fragment
+ * atom that has only been moved with its monomer), so its parent is the nearest non-Xx atom within 1.6 A.
+ */
+static void appendCapBonds(const Molecule& polymer, std::vector<std::pair<int, int>>& bonds)
+{
+    const int n = polymer.AtomCount();
+    const Geometry geometry = polymer.getGeometry();
+    for (int k = 0; k < n; ++k) {
+        if (polymer.Atom(k).first != 0)
+            continue;
+        int parent = -1;
+        double nearest = 1.6;
+        for (int j = 0; j < n; ++j) {
+            if (j == k || polymer.Atom(j).first == 0)
+                continue;
+            const double d = (geometry.row(k) - geometry.row(j)).norm();
+            if (d < nearest) {
+                nearest = d;
+                parent = j;
+            }
+        }
+        if (parent < 0)
+            continue;
+        const std::pair<int, int> bond { std::min(k, parent), std::max(k, parent) };
+        if (std::find(bonds.begin(), bonds.end(), bond) == bonds.end())
+            bonds.push_back(bond);
+    }
+}
+
+/**
+ * Claude Generated (Oct 2026): chain integrity. Counts bonds longer than 1.3 times the sum of the covalent radii among
+ * the interface bonds and the stored topology (heavy-atom bonds of every monomer). A placement or an optimisation that
+ * tore a bond used to leave it in the result with only a warning in the log and exit status 0; (AB)5 PDMAEMA came out
+ * with a backbone C-C of 5.1 A.
+ */
+static int countBrokenBonds(const Molecule& polymer, const std::vector<std::pair<int, int>>& interface_bonds, bool report)
+{
+    const int n = polymer.AtomCount();
+    const Geometry geometry = polymer.getGeometry();
+    std::set<std::pair<int, int>> bonds;
+    for (const auto& [a, b] : interface_bonds)
+        bonds.insert({ std::min(a, b), std::max(a, b) });
+    if (polymer.hasPersistentTopology()) {
+        const Matrix topo = polymer.getTopologyMatrix();
+        if (topo.rows() == n && topo.cols() == n)
+            for (int i = 0; i < n; ++i)
+                for (int j = i + 1; j < n; ++j)
+                    if (topo(i, j) > 0.5)
+                        bonds.insert({ i, j });
+    }
+    int broken = 0;
+    for (const auto& [a, b] : bonds) {
+        if (a < 0 || b >= n)
+            continue;
+        const int ea = polymer.Atom(a).first, eb = polymer.Atom(b).first;
+        if (ea == 0 || eb == 0)
+            continue;  // open Xx connection points are not bonded atoms
+        const double d = (geometry.row(a) - geometry.row(b)).norm();
+        const double limit = 1.3 * (Elements::CovalentRadius[ea] + Elements::CovalentRadius[eb]);
+        if (d > limit) {
+            ++broken;
+            if (report && broken <= 10)
+                CurcumaLogger::error(fmt::format("Broken chain: bond {}({}) - {}({}) is {:.3f} A long (limit {:.3f} A)",
+                    a, Elements::ElementAbbr[ea], b, Elements::ElementAbbr[eb], d, limit));
+        }
+    }
+    return broken;
+}
+
 PolymerBuild::PolymerBuild(const json& controller, bool silent)
     : m_config("polymerbuild", controller)
     , m_silent(silent)
@@ -245,6 +323,7 @@ PolymerBuild::PolymerBuild(const json& controller, bool silent)
             }
         } catch (...) {
              if (fragments_str != "{}")
+                m_error = "cannot parse the fragments JSON map";
                 CurcumaLogger::error("Failed to parse fragments JSON map: " + fragments_str);
         }
     }
@@ -256,6 +335,7 @@ void PolymerBuild::start()
 {
     std::string sequence_str = m_config.get<std::string>("sequence", "");
     if (sequence_str.empty()) {
+        m_error = "No polymer sequence provided";
         CurcumaLogger::error("No polymer sequence provided. Use -sequence \"(A)10-B\"");
         return;
     }
@@ -265,6 +345,7 @@ void PolymerBuild::start()
 
     std::vector<SequenceEntry> sequence = parseSequence(sequence_str);
     if (sequence.empty()) {
+        m_error = "Parsed sequence is empty or invalid";
         CurcumaLogger::error("Parsed sequence is empty or invalid");
         return;
     }
@@ -916,6 +997,59 @@ ConnectionResult PolymerBuild::connectMolecule(
         }
     }
 
+    // Claude Generated (Oct 2026): multi-start. The placement is a rigid-body search; when the growing chain end is
+    // shielded by earlier units (e.g. ABAB + A in PDMAEMA/protonated PDMAEMA) one start can stay at 2.5-3.4 A for
+    // good and the chain came out broken. Spin the fragment about the new bond axis and repeat the LM from there.
+    const int n_starts = m_config.get<int>("lm_multistart", 8);
+    if (actual_bond_length > bond_length + bond_tolerance && n_starts > 0) {
+        const double length_before = actual_bond_length;
+        int used_start = 0;
+        for (int k = 1; k <= n_starts; ++k) {
+            const double theta = 2.0 * M_PI * k / (n_starts + 1);
+            const Eigen::Matrix3d Rk = Eigen::AngleAxisd(theta, Eigen::Vector3d(v_out)).toRotationMatrix() * R;
+            const double ryk = -std::asin(std::clamp(Rk(2, 0), -1.0, 1.0));
+            double rxk, rzk;
+            if (std::abs(std::cos(ryk)) > 1e-6) {
+                rxk = std::atan2(Rk(2, 1), Rk(2, 2));
+                rzk = std::atan2(Rk(1, 0), Rk(0, 0));
+            } else {
+                rxk = std::atan2(-Rk(1, 2), Rk(1, 1));
+                rzk = 0.0;
+            }
+            const Position rot_k{ rxk * 180.0 / M_PI, ryk * 180.0 / M_PI, rzk * 180.0 / M_PI };
+            const Position trans_k = target_anchor_pos - Rk * (anchor_atom_orig - fragment_centroid);
+
+            auto [t_k, r_k] = optimizeFragmentPlacement(
+                polymer_lm, fragment_lm, anchor_poly, polymer_active_idx_lm, next_active_idx_lm,
+                bond_length, trans_k, rot_k, step_number + 2000 + k, -1, -1);
+
+            Geometry g_k = fragment_lm.getGeometry();
+            for (int i = 0; i < g_k.rows(); ++i) {
+                Position pk = g_k.row(i).transpose();
+                pk -= fragment_centroid;
+                pk = PolymerPlacementFunctor(6, 1).rotatePoint(pk, r_k);
+                pk += t_k;
+                g_k.row(i) = pk.transpose();
+            }
+            const double length_k = (g_k.row(next_active_idx_lm).transpose() - anchor_poly).norm();
+            if (length_k < actual_bond_length) {
+                opt_translation = t_k;
+                opt_rotation = r_k;
+                frag_geom = g_k;
+                actual_bond_length = length_k;
+                used_start = k;
+            }
+            if (actual_bond_length <= bond_length + bond_tolerance)
+                break;
+        }
+        if (used_start > 0)
+            CurcumaLogger::info(fmt::format("LM multi-start {} of {}: bond length {:.3f} A (was {:.3f} A)",
+                used_start, n_starts, actual_bond_length, length_before));
+        if (actual_bond_length > bond_length + bond_tolerance)
+            CurcumaLogger::warn(fmt::format("LM multi-start ({} starts) left the bond at {:.3f} A (target {:.3f} A)",
+                n_starts, actual_bond_length, bond_length));
+    }
+
     // Optional post-LM bond contraction: slide fragment along anchor axis to exact target
     if (actual_bond_length > bond_length + bond_tolerance
         && m_config.get<bool>("lm_contract_bond", false)) {
@@ -1545,8 +1679,15 @@ int PolymerBuild::verifyAndFixTopology(
     }
 
     // Get actual topology
-    Matrix actual = mol.hasPersistentTopology() ? mol.getTopologyMatrix() : Matrix::Zero(n, n);
-    if (!mol.hasPersistentTopology()) {
+    Matrix actual = Matrix::Zero(n, n);
+    int known_atoms = n;  // atoms covered by the stored topology; later atoms are new (appended fragment)
+    if (mol.hasPersistentTopology()) {
+        // The stored matrix can be smaller than the molecule right after connectFragment (atoms appended
+        // after it was set). Copy the overlap; reading actual(i,j) beyond it was out-of-bounds (Oct 2026).
+        const Matrix stored = mol.getTopologyMatrix();
+        known_atoms = std::min<int>(n, static_cast<int>(std::min(stored.rows(), stored.cols())));
+        actual.topLeftCorner(known_atoms, known_atoms) = stored.topLeftCorner(known_atoms, known_atoms);
+    } else {
         auto [_, topo] = mol.DistanceMatrix();
         actual = topo;
     }
@@ -1571,8 +1712,18 @@ int PolymerBuild::verifyAndFixTopology(
         }
     }
 
+    // Differences confined to atoms beyond the stored topology are the new fragment: expected, not a defect
+    bool only_new_atoms = (known_atoms < n) && (extra == 0);
+    for (const auto& [i, j] : missing_bonds)
+        if (j < known_atoms) only_new_atoms = false;
+
     // Log diagnostics
-    if (missing > 0 || extra > 0) {
+    if (only_new_atoms) {
+        if (CurcumaLogger::get_verbosity() >= 2)
+            CurcumaLogger::info(fmt::format(
+                "verifyAndFixTopology{}: {} bonds of the {} appended atoms added to the stored topology",
+                context_label.empty() ? "" : " [" + context_label + "]", missing, n - known_atoms));
+    } else if (missing > 0 || extra > 0) {
         CurcumaLogger::warn(fmt::format(
             "verifyAndFixTopology{}: {} missing bonds, {} extra bonds",
             context_label.empty() ? "" : " [" + context_label + "]",
@@ -2258,6 +2409,7 @@ SubchainResult PolymerBuild::buildSubchain(
         const auto& entry = fragment_entries[i];
         std::string next_name = entry.fragment_name;
         if (m_fragments.find(next_name) == m_fragments.end()) {
+            m_error = "fragment not found: " + next_name;
             CurcumaLogger::error("Fragment not found in map: " + next_name);
             continue;
         }
@@ -2539,6 +2691,8 @@ SubchainResult PolymerBuild::buildSubchain(
                 if (polymer.hasPersistentTopology()) {
                     const Matrix topo = polymer.getTopologyMatrix();
                     m_opt.m_bonds.clear();
+                    appendCapBonds(polymer, m_opt.m_bonds);
+                    const std::vector<std::pair<int, int>> cap_bonds = m_opt.m_bonds;  // expected extras of the check below
                     int n = topo.rows();
                     int topo_bond_count = 0;
                     for (int ii = 0; ii < n; ++ii)
@@ -2556,6 +2710,12 @@ SubchainResult PolymerBuild::buildSubchain(
                             for (int jj = 0; jj < n; ++jj)
                                 if (ii != jj && topo(ii, jj) > 0.5)
                                     ++topo_bonds_per_atom[ii];
+
+                        // The open-Xx cap bonds are passed on purpose (appendCapBonds), not part of the topology
+                        for (const auto& b : cap_bonds) {
+                            ++topo_bonds_per_atom[b.first];
+                            ++topo_bonds_per_atom[b.second];
+                        }
 
                         // Count bonds per atom in passed list
                         std::vector<int> passed_bonds_per_atom(n, 0);
@@ -2761,6 +2921,7 @@ SubchainResult PolymerBuild::buildSubchain(
                             if (polymer.hasPersistentTopology()) {
                                 const Matrix& topo = polymer.getTopologyMatrix();
                                 m_opt.m_bonds.clear();
+                                appendCapBonds(polymer, m_opt.m_bonds);
                                 int n = topo.rows();
                                 for (int ii2 = 0; ii2 < n; ++ii2)
                                     for (int jj2 = ii2 + 1; jj2 < n; ++jj2)
@@ -2868,6 +3029,7 @@ SubchainResult PolymerBuild::buildSubchain(
                         if (polymer.hasPersistentTopology()) {
                             const Matrix& t = polymer.getTopologyMatrix();
                             md_info.m_bonds.clear();
+                            appendCapBonds(polymer, md_info.m_bonds);
                             int n_md = polymer.AtomCount();
                             for (int ii2 = 0; ii2 < n_md; ++ii2)
                                 for (int jj2 = ii2 + 1; jj2 < n_md; ++jj2)
@@ -2948,6 +3110,7 @@ SubchainResult PolymerBuild::buildSubchain(
             if (polymer.hasPersistentTopology()) {
                 const Matrix& t = polymer.getTopologyMatrix();
                 md_info.m_bonds.clear();
+                appendCapBonds(polymer, md_info.m_bonds);
                 int nn = t.rows();
                 for (int ii2 = 0; ii2 < nn; ++ii2)
                     for (int jj2 = ii2 + 1; jj2 < nn; ++jj2)
@@ -3016,6 +3179,11 @@ SubchainResult PolymerBuild::buildSubchain(
 /// Claude Generated: Assemble polymer — dispatches between sequential and divide-and-conquer
 void PolymerBuild::assemblePolymer(const std::vector<SequenceEntry>& sequence)
 {
+    m_formal_charge = 0;
+    for (const auto& entry : sequence)
+        m_formal_charge += fragmentCharge(entry.fragment_name);
+    if (m_formal_charge != 0)
+        CurcumaLogger::warn(fmt::format("Formal charge {} from the fragments goes into the result; every optimisation step of the build runs with charge 0, and GFN-FF spreads a net charge over the connected chain (docs/POLYMERBUILD_CHARGE.md)", m_formal_charge));
     int scs = m_config.get<int>("subchain_size", 0);
 
     if (scs >= 2 && scs < (int)sequence.size()) {
@@ -3075,6 +3243,7 @@ void PolymerBuild::assemblePolymer(const std::vector<SequenceEntry>& sequence)
 
         // Abort if the first sub-chain failed to build (e.g. missing fragment file) — Claude Generated 2026
         if (subchains.empty() || subchains[0].molecule.AtomCount() == 0) {
+            m_error = "first sub-chain is empty";
             CurcumaLogger::error("Polymer assembly failed: first sub-chain is empty (check fragment files/sequence)");
             return;
         }
@@ -3173,6 +3342,7 @@ void PolymerBuild::assemblePolymer(const std::vector<SequenceEntry>& sequence)
             if (polymer.hasPersistentTopology()) {
                 const Matrix topo = polymer.getTopologyMatrix();
                 m_opt.m_bonds.clear();
+                appendCapBonds(polymer, m_opt.m_bonds);
                 int n = topo.rows();
                 for (int ii = 0; ii < n; ++ii)
                     for (int jj = ii + 1; jj < n; ++jj)
@@ -3217,8 +3387,16 @@ void PolymerBuild::assemblePolymer(const std::vector<SequenceEntry>& sequence)
 
         // Phase 3: Capping + final output
         polymer.setName("polymer_A");
+        const int broken_bonds = countBrokenBonds(polymer, interface_bonds, true);
         applyCapping(polymer);
-        polymer.writeXYZFile(outputPath(polymer.Name() + "_final.xyz"));
+        if (broken_bonds > 0 || !m_error.empty()) {
+            polymer.writeXYZFile(outputPath(polymer.Name() + "_broken.xyz"));
+            if (broken_bonds > 0)
+                m_error = "chain is broken (" + std::to_string(broken_bonds) + " bonds too long)";
+            CurcumaLogger::error("Polymer assembly FAILED (" + m_error + "), structure written to " + polymer.Name() + "_broken.xyz (no _final.xyz)");
+            return;
+        }
+        finishOutput(polymer, atom_monomer_id, sequence);
         CurcumaLogger::success(fmt::format(
             "D&C polymer assembly completed: {}_final.xyz ({} atoms)",
             polymer.Name(), polymer.AtomCount()));
@@ -3229,14 +3407,100 @@ void PolymerBuild::assemblePolymer(const std::vector<SequenceEntry>& sequence)
         Molecule polymer = result.molecule;
         // Abort on empty result (e.g. missing first fragment) — Claude Generated 2026
         if (polymer.AtomCount() == 0) {
+            m_error = "result is empty";
             CurcumaLogger::error("Polymer assembly failed: result is empty (check fragment files/sequence)");
             return;
         }
         polymer.setName("polymer_A");
+        const int broken_bonds = countBrokenBonds(polymer, result.interface_bonds, true);
         applyCapping(polymer);
-        polymer.writeXYZFile(outputPath(polymer.Name() + "_final.xyz"));
+        if (broken_bonds > 0 || !m_error.empty()) {
+            polymer.writeXYZFile(outputPath(polymer.Name() + "_broken.xyz"));
+            if (broken_bonds > 0)
+                m_error = "chain is broken (" + std::to_string(broken_bonds) + " bonds too long)";
+            CurcumaLogger::error("Polymer assembly FAILED (" + m_error + "), structure written to " + polymer.Name() + "_broken.xyz (no _final.xyz)");
+            return;
+        }
+        finishOutput(polymer, result.atom_monomer_id, sequence);
         CurcumaLogger::success("Polymer assembly completed: " + polymer.Name() + "_final.xyz");
     }
+}
+
+/// Claude Generated (Oct 2026): formal charge of a fragment, read from "** Charge = N **" in its XYZ comment line
+int PolymerBuild::fragmentCharge(const std::string& name)
+{
+    auto it = m_fragment_charge.find(name);
+    if (it != m_fragment_charge.end())
+        return it->second;
+    int charge = 0;
+    auto file = m_fragments.find(name);
+    if (file != m_fragments.end()) {
+        // FileIterator parses the XYZ comment line (the Molecule(file) constructor does not)
+        FileIterator reader(file->second);
+        if (!reader.AtEnd())
+            charge = reader.Next().Charge();
+    }
+    m_fragment_charge[name] = charge;
+    return charge;
+}
+
+/**
+ * Claude Generated (Oct 2026): write polymer_A_final.xyz with the formal charge (sum of the fragment charges) in its
+ * header and, with -charge_model gfnff|gfn1|gfn2, the atomic partial charges of that model next to it.
+ * The optimisation steps of the build itself still run with charge 0 (docs/POLYMERBUILD_CHARGE.md).
+ */
+void PolymerBuild::finishOutput(Molecule& polymer, const std::vector<int>& atom_monomer_id, const std::vector<SequenceEntry>& sequence)
+{
+    polymer.setCharge(m_formal_charge);
+    polymer.writeXYZFile(outputPath(polymer.Name() + "_final.xyz"));
+
+    // EEQ charge groups: every monomer with a non-zero fragment charge is one group (-gfnff.charge_groups FILE).
+    // Without them GFN-FF spreads the net charge over the whole connected chain (docs/POLYMERBUILD_CHARGE.md).
+    if (m_formal_charge != 0 && static_cast<int>(atom_monomer_id.size()) == polymer.AtomCount()) {
+        json groups = json::array();
+        for (size_t m = 0; m < sequence.size(); ++m) {
+            const int charge = fragmentCharge(sequence[m].fragment_name);
+            if (charge == 0)
+                continue;
+            json atoms = json::array();
+            for (int i = 0; i < polymer.AtomCount(); ++i)
+                if (atom_monomer_id[i] == static_cast<int>(m))
+                    atoms.push_back(i);
+            if (!atoms.empty())
+                groups.push_back({ { "atoms", atoms }, { "charge", static_cast<double>(charge) } });
+        }
+        if (!groups.empty()) {
+            const std::string groups_file = outputPath(polymer.Name() + "_final.groups.json");
+            std::ofstream gout(groups_file);
+            gout << json({ { "groups", groups } }).dump(1) << "\n";
+            CurcumaLogger::success(fmt::format("{} charge groups written to {} (use -gfnff.charge_groups {})", groups.size(), groups_file, groups_file));
+        }
+    } else if (m_formal_charge != 0) {
+        CurcumaLogger::warn("Charge groups not written: atom-to-monomer map does not match the atom count");
+    }
+
+    const std::string model = m_config.get<std::string>("charge_model", "none");
+    if (model == "none" || model.empty())
+        return;
+    json controller;
+    controller["verbosity"] = 0;
+    controller["threads"] = m_threads;
+    EnergyCalculator energy_calc(model, controller);
+    energy_calc.setMolecule(polymer.getMolInfo());
+    energy_calc.CalculateEnergy(false);
+    const Vector charges = energy_calc.Charges();
+    if (energy_calc.Error() || charges.size() != polymer.AtomCount()) {
+        m_error = "partial charges with model " + model + " failed";
+        CurcumaLogger::error("Partial charges (" + model + ") failed: " + energy_calc.ErrorMessage());
+        return;
+    }
+    const std::string file = outputPath(polymer.Name() + "_final.charges");
+    std::ofstream out(file);
+    out << "# atomic partial charges [e], model " << model << ", formal charge " << m_formal_charge << ", sum "
+        << fmt::format("{:.6f}", charges.sum()) << "; atom index (from 0), element, charge\n";
+    for (int i = 0; i < charges.size(); ++i)
+        out << fmt::format("{} {} {:.8f}\n", i, Elements::ElementAbbr[polymer.Atom(i).first], charges(i));
+    CurcumaLogger::success(fmt::format("Partial charges ({}) written to {}", model, file));
 }
 
 void PolymerBuild::applyCapping(Molecule& mol)
