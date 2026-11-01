@@ -73,3 +73,64 @@ periodic cell and the wrap becomes a pure bookkeeping operation.
 - A dimer split across the boundary has the same energy as the unsplit dimer.
 - NVE drift over a few ps with a molecule crossing the boundary repeatedly.
 - The non-periodic path stays bit-identical when no cell is set.
+
+## A0 survey (2026-11-01, Claude Generated, read-only)
+
+Done by an agent on `master` (`c3f570fb`); full table with lines in the session scratchpad. Re-checked on
+`origin/devel/methods` (`1bd051a5`) only for items 1, 2 and 5. **Line numbers of the other items are from `master` and must be
+re-read before coding.** Distances in Bohr unless noted.
+
+1. **CPU reads the cell nowhere.** `GFNFF::InitialiseMolecule` copies `m_has_pbc`/`m_unit_cell` (`ff_methods/gfnff_method.cpp:880-882`);
+   only accessors in `gfnff.h:2559-2562` and a copy in `gfnff_frag_charge.cpp:259` use them. `FFWorkspace`, CN, EEQ and D4 have no
+   cell member. This is why `unitcell 9 9 9` leaves the CPU energy unchanged.
+2. **`SimpleMD::applyPeriodicBoundaryConditions()` wraps every atom separately** into [0,1) (`simplemd.cpp:3447`, called at 3753 and
+   4121) once the XYZ carries a cell. That tears molecules, and the bonded terms use raw differences. Needs fragment-wise wrap for a
+   box, or MIC in the bonded terms. Open: does the topology recomputation (0.5 Bohr jump) replace the workspace bond list?
+3. **Topology assumes a connected geometry** (dense N x N distance matrix, hybridisation, neighbour lists, linearity test); 240 MB at
+   5475 atoms. Fragments and phase-1 EEQ depend only on the bond graph.
+4. **Six pair lists are built from non-periodic distances:** D4, non-bonded repulsion, explicit Coulomb, HB, XB, CN neighbours.
+   `SpatialCellList` (`tools/spatial_cell_list.h`) has no wrap-around; one periodic cell list would cover all six.
+5. **Lattice convention mismatch:** `buildLatticeVectors` writes vectors as rows (`tools/pbc_utils.h:60-95`, verified), the MIC helper
+   uses `cell_inv * r` (columns). Identical for orthorhombic cells, wrong for triclinic. Scope: orthorhombic only until fixed.
+6. **GPU MIC is incomplete:** present in dispersion, repulsion, Coulomb, bonds, angles, HB/XB energies, CN; absent in dihedrals,
+   inversions, sTors, ATM, mixed XB, the pair-list builders, HB detection and all EEQ matrix kernels (so EEQ charges are
+   computed without MIC and inserted into a Coulomb with MIC). ROCm likewise. (From code reading, not measured.)
+7. **Cutoffs (master):** CN 10; CN derivative range max(40, eeq_cut, disp_cut); D4 pair build 60 / evaluation 50 (skin 10); ATM off
+   (`dispersion_atm` false); repulsion 20 (+2 skin); Coulomb and EEQ **no cutoff** (`coulomb_r_cut` 0, `eeq_distance_cutoff` 0);
+   HB 15.8 / 21.2; XB 21.2; reactive scan 1.6 / 2.6 x covalent radii sum, every 5 calls.
+   Against L/2 for 1825 H2O (L = 37.9 A, L/2 = 35.8 Bohr): D4 evaluation (50 Bohr) and the CN derivative range (40) exceed it;
+   `dispersion_cutoff_bohr` must be <= 35. The remainder beyond 35 Bohr is not quantified.
+8. **D3 vs D4:** D3 in native GFN1 (pair loop without cutoff, CN 25, s9 = 0) and uff-d3 (cutoff 100); the GFN-FF D3 variant aborts with
+   an error. D4 in native GFN2 (`D4Evaluator`, pair 50, ATM 25) and in GFN-FF (own variant).
+9. **Native GFN1/GFN2 have no MIC** (xtb_h0, xtb_gradient, xtb_response, xtb_precond, xtb_multipole); not part of this work.
+10. **Reusable:** `PBCUtils::applyMinimumImage` / `calculateDistancePBC` (header-only). Proposal: one inline orthorhombic MIC in Bohr
+    with the same `rint` arithmetic as `applyMIC` on the GPU, so CPU and GPU stay comparable.
+
+## A1 foundation (2026-11-01, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+Done on `feature/bulk` (base `1bd051a5`). **Still no minimum image in any energy term and no Ewald**: a GFN-FF energy
+with a cell is the non-periodic energy (ctest `pbc_foundation` checks this bit for bit).
+
+- **Shared MIC** in `src/tools/pbc_utils.h` (MIC inline; check and wrap in `pbc_utils.cpp`, part of `curcuma_core`). Chosen
+  over `ff_methods/` because SimpleMD (`capabilities/`) and `Molecule` use the same header: `OrthoCell`, `makeOrthoCell()`,
+  `minimumImageOrtho()`, `applyMinimumImageOrtho()`. Arithmetic of the GPU `applyMIC`
+  (`s = d*inv_L; s -= rint(s); d = L*s`), `inv_L` from the Eigen inverse like the GPU upload. Unit-agnostic; Bohr in GFN-FF.
+- **Cell into `FFWorkspace`**: `GFNFF::configurePeriodicCell()` (start of `InitialiseMolecule()`) builds the Bohr cell,
+  `FFWorkspace::setPeriodicCell()` stores it (member only, nothing reads it yet). A non-orthorhombic cell is an error;
+  the message names the row/column mismatch of `buildLatticeVectors()` vs `applyMinimumImage()` (not repaired).
+- **Cutoff check** (`GFNFF::activeCutoffsBohr()`, `PBCUtils::checkCutoffsAgainstCell()`): every listed radius must be
+  `< L_min/2`, else `std::runtime_error` naming each cutoff, its value and `L_min/2` in Bohr. Checked: CN list
+  (`cn_cutoff_bohr` 10), CN-derivative range `max(40, eeq_distance_cutoff, dispersion_cutoff_bohr)`, D4 evaluation 50 and
+  build 60 (both capped by `dispersion_cutoff_bohr`), repulsion 20 (+ `nonbonded_skin_bohr` from `nb_cell_list_min_atoms`
+  on), HB `sqrt(hbthr1)` 15.8 and `sqrt(hbthr2)` 21.2 (also the XB radius), `coulomb_r_cut` if set, reactive scan
+  (`topology_mode react`). Coulomb/EEQ without cutoff are not checked (Ewald). Without a cell nothing changes.
+- **Consequence**: with the defaults the smallest accepted cube is L > 120 Bohr (63.5 A, D4 build radius). Even with
+  `dispersion_cutoff_bohr <= 35` the CN-derivative floor of 40 Bohr needs L > 80 Bohr (42.3 A), so the 1825-water box of
+  A0 (37.9 A) is refused. Whether that 40-Bohr floor is needed at all is open (the CN derivative itself ends at 10 Bohr).
+- **SimpleMD**: `applyPeriodicBoundaryConditions()` wraps whole fragments (`Molecule::GetFragments()`, covalent-radius
+  graph, MIC distances with a cell) by their centre of mass into fractional [0,1) via `PBCUtils::wrapFragmentsIntoCell()`;
+  O(N) gate before the O(N^2) fragment search. Systems with CG beads keep the per-bead wrap (2 A bead radius would merge a
+  melt into one fragment). A fragment already torn in the input is moved as it is, not reassembled.
+- **Not done in A1**: MIC in the pair loops and pair-list builders (A2), EEQ/Coulomb periodicity, triclinic cells, GPU
+  parity of the check (the GPU wrapper calls the same `GFNFF` set-up, not verified on a GPU), removal of the
+  `wrapIntoContainer()` stopgap. Human production testing pending.

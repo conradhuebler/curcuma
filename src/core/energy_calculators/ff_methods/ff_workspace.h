@@ -31,6 +31,7 @@
 #include <limits>
 #include "gfnff_parameters.h"
 #include "ff_terms.h"  // Bond, Angle, Dihedral, Inversion, vdW, EQ, CNDerivStore, GeoGradMatrix
+#include "src/tools/pbc_utils.h"  // PBCUtils::OrthoCell (Nov 2026, A1)
 
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
@@ -316,6 +317,11 @@ public:
     void setFarfieldShortcut(bool v) { m_farfield_shortcut = v; }
     /// Claude Generated (Oct 2026): TERM 1b chain-rule term set to 0 at CN_i <= 0 (gfnff.cn_zero_guard, see postProcess).
     void setCnZeroGuard(bool v) { m_cn_zero_guard = v; }
+    /// Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A1): orthorhombic cell in Bohr. Stored only;
+    /// no energy term applies the minimum image yet (A2). Inactive by default = non-periodic path.
+    void setPeriodicCell(const PBCUtils::OrthoCell& cell_bohr) { m_cell_bohr = cell_bohr; }
+    const PBCUtils::OrthoCell& periodicCell() const { return m_cell_bohr; }
+    bool hasPeriodicCell() const { return m_cell_bohr.active; }
     int numThreads() const { return m_num_threads; }
 
     // Term enable flags (match ForceField flags)
@@ -466,6 +472,8 @@ private:
     bool   m_farfield_shortcut = true;
     /// Claude Generated (Oct 2026): opt-in, default false = reference formula (gfnff.cn_zero_guard).
     bool   m_cn_zero_guard = false;
+    /// Claude Generated (Nov 2026, A1): periodic orthorhombic cell in Bohr (inactive = no PBC).
+    PBCUtils::OrthoCell m_cell_bohr;
 
     // Term-enable flags
     bool m_dispersion_enabled = true;

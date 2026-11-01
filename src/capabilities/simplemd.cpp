@@ -53,6 +53,7 @@
 #include "src/core/units.h"               // Claude Generated (Sep 2026): CurcumaUnit::Constants::FS_TO_MD_TIME
 
 #include "src/tools/geometry.h"
+#include "src/tools/pbc_utils.h"  // fragment-wise PBC wrap (Nov 2026, A1)
 
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
@@ -3442,35 +3443,50 @@ void SimpleMD::wrapIntoContainer()
             wrapped, reflected));
 }
 
-// Claude Generated (Oct 2025): Apply Periodic Boundary Conditions
-// Wraps all atoms into the central unit cell using fractional coordinates
+// Claude Generated (Oct 2025, changed Nov 2026 for WP-PERIODIC-NONBONDED A1): Apply Periodic
+// Boundary Conditions. Wraps whole fragments by their centre of mass into the central cell.
+// The former per-atom wrap into fractional [0,1) tore every molecule that crossed a face, and
+// the bonded terms use raw coordinate differences, so a torn bond became a ~L long bond.
+// Fragments come from the covalent-radius bond graph of Molecule::GetFragments() (with a cell
+// it uses minimum-image distances), as in wrapIntoContainer(). Systems with CG beads
+// (m_is_cg_system) keep the per-bead wrap: a CG bead has a 2 A "covalent radius", so the bond graph would merge a dense melt into
+// one fragment and nothing would ever be wrapped.
 void SimpleMD::applyPeriodicBoundaryConditions()
 {
     if (!m_has_pbc) return;
 
-    // Get unit cell matrix and its inverse
-    Eigen::Matrix3d cell = m_molecule.getUnitCell();
-    Eigen::Matrix3d cell_inv = m_molecule.getUnitCellInverse();
+    const Eigen::Matrix3d cell = m_molecule.getUnitCell();
+    const Eigen::Matrix3d cell_inv = m_molecule.getUnitCellInverse();
 
-    // Wrap each atom into central cell
-    for (int i = 0; i < m_natoms; ++i) {
-        Eigen::Vector3d pos = m_eigen_geometry.row(i);
-
-        // Convert to fractional coordinates: r_frac = cell_inv * r_cart
-        Eigen::Vector3d frac = cell_inv * pos;
-
-        // Wrap to [0, 1) range
-        frac[0] -= std::floor(frac[0]);
-        frac[1] -= std::floor(frac[1]);
-        frac[2] -= std::floor(frac[2]);
-
-        // Convert back to Cartesian: r_cart = cell * r_frac
-        pos = cell * frac;
-        m_eigen_geometry.row(i) = pos;
+    // Cheap O(N) gate, as in wrapIntoContainer(): the O(N^2) fragment analysis only runs when
+    // some atom is outside fractional [0,1). (A molecule straddling a face keeps it running.)
+    bool any_outside = false;
+    for (int i = 0; i < m_natoms && !any_outside; ++i) {
+        const Eigen::Vector3d frac = cell_inv * Eigen::Vector3d(m_eigen_geometry(i, 0), m_eigen_geometry(i, 1), m_eigen_geometry(i, 2));
+        any_outside = (frac.minCoeff() < 0.0 || frac.maxCoeff() >= 1.0);
     }
+    if (!any_outside)
+        return;
+
+    std::vector<std::vector<int>> fragments;
+    if (m_is_cg_system) {
+        fragments.resize(m_natoms);
+        for (int i = 0; i < m_natoms; ++i)
+            fragments[i] = { i };
+    } else {
+        // Fragments from the CURRENT geometry (reactive runs combine and split molecules).
+        m_molecule.setGeometry(m_eigen_geometry);
+        fragments = m_molecule.GetFragments();
+    }
+    std::vector<double> masses(m_natoms);
+    for (int i = 0; i < m_natoms; ++i)
+        masses[i] = Elements::AtomicMass[m_atomtype[i]];
+
+    const int moved = PBCUtils::wrapFragmentsIntoCell(m_eigen_geometry, masses, fragments, cell, cell_inv);
 
     // Update molecule geometry after PBC wrapping
-    m_molecule.setGeometry(m_eigen_geometry);
+    if (moved > 0)
+        m_molecule.setGeometry(m_eigen_geometry);
 }
 
 /* Claude Generated (Sep 2026): threshold of the step-rejection criterion, in Hartree.

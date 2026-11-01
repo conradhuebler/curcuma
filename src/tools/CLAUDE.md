@@ -1,7 +1,7 @@
 # CLAUDE.md - src/tools/
 
-Utilities used across curcuma. Mostly header-only `inline` functions; `bmt_utils.cpp` and
-`trajectory_writer.cpp` are compiled. Element data and unit constants are NOT here (`src/core/elements.h`,
+Utilities used across curcuma. Mostly header-only `inline` functions; `bmt_utils.cpp`,
+`trajectory_writer.cpp` and `pbc_utils.cpp` are compiled. Element data and unit constants are NOT here (`src/core/elements.h`,
 `periodic_table.h`, `units.h`).
 
 ## GeometryTools (`geometry.h`)
@@ -22,7 +22,7 @@ measurement HUD and its live plots. Pinned by the `geometry_tools` ctest.
 | `geometry.h` (`GeometryTools::`) | `Distance`, `Centroid`, rotation matrices, translate/rotate geometry |
 | `general.h` (`Tools::`) | String parsing/conversion, `mean`/`median`/`stdev`/`Histogram`, `CreateList()` range parser; global `RunTimer` |
 | `info.h` (`General::`) | `StartUp()` banner (version, git hash) |
-| `pbc_utils.h` (`PBCUtils::`) | Lattice vectors from a,b,c,alpha,beta,gamma and back, minimum image, PBC distance, cell check |
+| `pbc_utils.h/.cpp` (`PBCUtils::`) | Lattice vectors from a,b,c,alpha,beta,gamma and back, minimum image, PBC distance, cell check; orthorhombic `OrthoCell` MIC (GPU `rint` arithmetic), cutoff-vs-L/2 check, fragment-wise wrap (Nov 2026) |
 | `spatial_cell_list.h` | Cell list for O(N) neighbour queries, no PBC; build cost does not pay off below roughly 800 atoms |
 | `string_similarity.h` (`StringUtils::`) | Levenshtein distance for "Did you mean" method suggestions |
 | `trajectory_writer.{h,cpp}`, `trajectory_helpers.h` | TrajectoryWriter and its JSON schema helpers |

@@ -21,7 +21,12 @@
 #pragma once
 
 #include <Eigen/Dense>
+#include <algorithm>
 #include <cmath>
+#include <string>
+#include <utility>
+#include <vector>
+
 
 namespace PBCUtils {
 
@@ -281,5 +286,123 @@ inline bool isValidUnitCell(const Eigen::Matrix3d& cell)
 
     return true;
 }
+
+// ============================================================================
+// Orthorhombic (rectangular) cells - Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A1)
+//
+// Foundation of periodic GFN-FF: one minimum-image function shared by the CPU force-field
+// engine (FFWorkspace, Bohr), the cell-size check and SimpleMD. Only diagonal cells are
+// accepted. The general matrix functions above mix two conventions (buildLatticeVectors()
+// stores the lattice vectors as ROWS, applyMinimumImage() multiplies cell_inv * r as if they
+// were COLUMNS); the two agree only for a diagonal cell, so a triclinic cell is refused here
+// instead of being silently mis-imaged. That inconsistency is known and not repaired here.
+// ============================================================================
+
+/*! \brief Diagonal of an orthorhombic cell with its reciprocal - Claude Generated (Nov 2026)
+ *
+ * Lengths are in whatever unit the caller works in (FFWorkspace: Bohr, SimpleMD: Angstrom).
+ * inv_L is taken from the diagonal of the Eigen 3x3 inverse of the cell matrix, the same
+ * matrix the GPU path uploads as d_lattice_inv (gfnff_gpu_method_impl.h), so CPU and GPU
+ * apply the same reciprocal, not a re-rounded 1/L.
+ */
+struct OrthoCell {
+    bool active = false;                  ///< false: no cell, every function below is a no-op
+    double L[3] = { 0.0, 0.0, 0.0 };      ///< box lengths
+    double inv_L[3] = { 0.0, 0.0, 0.0 };  ///< reciprocal box lengths (diagonal of cell^-1)
+
+    /// Shortest box length; the minimum image is unique only for distances below minLength()/2.
+    double minLength() const { return std::min(L[0], std::min(L[1], L[2])); }
+};
+
+/*! \brief True when every off-diagonal element is negligible against the box - Claude Generated (Nov 2026)
+ * \param cell 3x3 lattice matrix (any unit)
+ * \param rel_tol off-diagonal elements must be <= rel_tol * largest diagonal element
+ *
+ * buildLatticeVectors(a, b, c, 90, 90, 90) leaves b*cos(90 deg) ~ 6e-16*b off the diagonal,
+ * hence a relative tolerance instead of an exact zero test.
+ */
+inline bool isOrthorhombic(const Eigen::Matrix3d& cell, double rel_tol = 1e-10)
+{
+    const double scale = cell.diagonal().cwiseAbs().maxCoeff();
+    if (!(scale > 0.0))
+        return false;
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c)
+            if (r != c && std::abs(cell(r, c)) > rel_tol * scale)
+                return false;
+    return cell(0, 0) > 0.0 && cell(1, 1) > 0.0 && cell(2, 2) > 0.0;
+}
+
+/*! \brief Build an OrthoCell from a 3x3 cell matrix - Claude Generated (Nov 2026)
+ * \param cell lattice matrix, must be orthorhombic (isOrthorhombic())
+ * \param error set to a message and returned cell inactive when the cell is not orthorhombic
+ */
+OrthoCell makeOrthoCell(const Eigen::Matrix3d& cell, std::string& error);
+
+/*! \brief Minimum-image component for an orthorhombic cell - Claude Generated (Nov 2026)
+ * \param d     one Cartesian component of r_j - r_i
+ * \param L     box length along that axis
+ * \param inv_L reciprocal box length (OrthoCell::inv_L)
+ * \return d shifted by an integer number of box lengths into [-L/2, L/2]
+ *
+ * Minimum-image convention, Allen & Tildesley, "Computer Simulation of Liquids", 2nd ed.
+ * (2017), Sec. 1.6.3 (periodic boundary conditions): s = d/L, s <- s - rint(s), d <- L s.
+ * The arithmetic is that of applyMIC() in cuda/gfnff_kernels.cu and rocm/gfnff_rocm.hip for a
+ * diagonal lattice (the off-diagonal products there are exact zeros): one multiplication by
+ * the reciprocal, rint (round half to even, odd function, so mic(-d) = -mic(d)), one
+ * multiplication by L. A pair exactly on the boundary (|s| = 0.5) keeps its sign: rint(+-0.5) = 0.
+ */
+inline double minimumImageOrtho(double d, double L, double inv_L)
+{
+    double s = d * inv_L;
+    s -= std::rint(s);
+    return L * s;
+}
+
+/*! \brief Apply the orthorhombic minimum image to a displacement in place - Claude Generated (Nov 2026)
+ *
+ * No-op for an inactive cell, so a call site without a cell keeps its numbers bit for bit.
+ */
+inline void applyMinimumImageOrtho(const OrthoCell& cell, double& dx, double& dy, double& dz)
+{
+    if (!cell.active)
+        return;
+    dx = minimumImageOrtho(dx, cell.L[0], cell.inv_L[0]);
+    dy = minimumImageOrtho(dy, cell.L[1], cell.inv_L[1]);
+    dz = minimumImageOrtho(dz, cell.L[2], cell.inv_L[2]);
+}
+
+/*! \brief Check interaction cutoffs against half the shortest box length - Claude Generated (Nov 2026)
+ * \param cell    active orthorhombic cell
+ * \param cutoffs (name, radius) of every cutoff that is in use, same unit as the cell
+ * \param unit    unit name for the message ("Bohr")
+ * \return empty string when every radius is < L_min/2, otherwise one message naming every
+ *         offending cutoff with its value and L_min/2
+ *
+ * Under the minimum-image convention a pair interacts only with its nearest image; a cutoff
+ * at or above L/2 would need a second image (Allen & Tildesley, Sec. 1.6.3). Non-finite
+ * radii (no cutoff) are reported as well, the caller decides which terms to pass.
+ */
+std::string checkCutoffsAgainstCell(const OrthoCell& cell,
+    const std::vector<std::pair<std::string, double>>& cutoffs, const std::string& unit);
+
+/*! \brief Wrap whole fragments into the cell by their centre of mass - Claude Generated (Nov 2026)
+ * \param geometry  N x 3 Cartesian coordinates, modified in place
+ * \param masses    atomic masses, size N
+ * \param fragments atom indices per fragment (e.g. Molecule::GetFragments())
+ * \param cell      lattice matrix, same unit as geometry
+ * \param cell_inv  its inverse
+ * \return number of fragments that were moved
+ *
+ * Each fragment is translated by one integer lattice vector so that its centre of mass lands
+ * in fractional [0,1); all atoms of a fragment get the same shift, so intramolecular distances
+ * are kept (up to the rounding of adding n*L). Replaces the former per-atom wrap of SimpleMD,
+ * which tore molecules apart at the boundary. Uses the same frac = cell_inv * r and
+ * r = cell * frac as that former code (correct for orthorhombic cells, see the note above).
+ * A fragment that is already torn in the input is moved as it is, not reassembled.
+ */
+int wrapFragmentsIntoCell(Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>& geometry,
+    const std::vector<double>& masses, const std::vector<std::vector<int>>& fragments,
+    const Eigen::Matrix3d& cell, const Eigen::Matrix3d& cell_inv);
 
 } // namespace PBCUtils

@@ -913,6 +913,10 @@ bool GFNFF::InitialiseMolecule()
         return false;
     }
 
+    // Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A1): periodic cell and cutoff check before
+    // any topology work; throws on a non-orthorhombic or too small cell, no-op without a cell.
+    configurePeriodicCell();
+
     // Convert geometry from Angström to Bohr (GFN-FF parameters are in Bohr)
     // CRITICAL: Must happen BEFORE validateMolecule() since validation checks m_geometry_bohr.rows()
     // TODO: Alternative approach (Option B) would convert parameters to Angström instead.
@@ -4693,6 +4697,7 @@ bool GFNFF::initializeForceField()
         m_workspace->setAtomTypes(m_atoms);
         m_workspace->setFarfieldShortcut(m_parameters.value("farfield_shortcut", true));  // Oct 2026; fallback = PARAM default
         m_workspace->setCnZeroGuard(cnZeroGuardEffective());                               // Oct 2026; PARAM (fallback false = reference) or a fragment-charge override (Oct 31, 2026)
+        m_workspace->setPeriodicCell(m_cell_bohr_ortho);                                   // Nov 2026 (A1): stored only, inactive without a cell
 
         // Keep a copy for external consumers (full pair lists only when a GPU wrapper asked
         // for them, bonded terms otherwise), then MOVE the set into the workspace. The former
@@ -12852,6 +12857,110 @@ double GFNFF::nonbondedSkinBohr() const
 {
     // Claude Generated (Sep 2026): Verlet skin of the repulsion and explicit-Coulomb lists.
     return std::max(0.0, m_parameters.value("nonbonded_skin_bohr", 2.0));  // default 2 since Sep 27, 2026
+}
+
+std::vector<std::pair<std::string, double>> GFNFF::activeCutoffsBohr() const
+{
+    // Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A1). Every value is read from the same
+    // parameter (and the same fallback) as the code that uses it; the comment names that site.
+    std::vector<std::pair<std::string, double>> cut;
+
+    // CN neighbour list (prepareCNAndEEQ, CNCalculator): cn_cutoff_bohr, or with 0 the
+    // accuracy threshold cnthr = 100 - 50 log10(acc) Bohr^2 (acc 0 = all pairs).
+    const double cn_cutoff = m_parameters.value("cn_cutoff_bohr", 10.0);
+    const double cn_acc = m_parameters.value("cn_accuracy", 1.0);
+    if (cn_cutoff > 0.0)
+        cut.emplace_back("cn_cutoff_bohr (CN neighbour list)", cn_cutoff);
+    else
+        cut.emplace_back("CN accuracy threshold sqrt(100 - 50 log10(cn_accuracy))",
+            cn_acc > 0.0 ? std::sqrt(std::max(0.0, 100.0 - 50.0 * std::log10(cn_acc)))
+                         : std::numeric_limits<double>::infinity());
+
+    // CN-derivative range (prepareCNAndEEQ): max(40, eeq_distance_cutoff, dispersion_cutoff_bohr).
+    const double eeq_cut = m_parameters.value("eeq_distance_cutoff", 0.0);
+    const double disp_cut = dispersionCutoffBohr();
+    cut.emplace_back("CN-derivative range max(40, eeq_distance_cutoff, dispersion_cutoff_bohr)",
+        std::max({ 40.0, eeq_cut, disp_cut }));
+
+    // D4 pair list (D4ParameterGenerator, applyDispersionCutoff, dispersionSkinBohr): built at
+    // 60 Bohr, evaluated at 50 Bohr, both capped by dispersion_cutoff_bohr.
+    if (m_parameters.value("dispersion", true)) {
+        double build = D4ParameterGenerator::PAIR_BUILD_CUTOFF_BOHR;
+        double eval = D4ParameterGenerator::PAIR_EVAL_CUTOFF_BOHR;
+        if (disp_cut > 0.0) {
+            build = std::min(build, disp_cut);
+            eval = std::min(eval, disp_cut);
+        }
+        cut.emplace_back("D4 dispersion evaluation radius min(50, dispersion_cutoff_bohr)", eval);
+        cut.emplace_back("D4 dispersion pair-list build radius min(60, dispersion_cutoff_bohr)", build);
+    }
+
+    // Repulsion (generateRepulsionPairsNative): r_cut 20 Bohr; the distance-filtered list is
+    // built at 20 + nonbonded_skin_bohr.
+    if (m_parameters.value("repulsion", true)) {
+        const double rep = 20.0 + (repulsionListIsDistanceFiltered() ? nonbondedSkinBohr() : 0.0);
+        cut.emplace_back("repulsion radius 20 (+ nonbonded_skin_bohr for the cell-list build)", rep);
+    }
+
+    // HB / XB search (detectHydrogenBondsNative, detectHalogenBondsNative): A-B within
+    // sqrt(hbthr1), A-H-B sum of squares and the XB A-B distance within hbthr2.
+    if (m_parameters.value("hbond", true)) {
+        const double hb_acc = m_parameters.value("hb_accuracy", 0.1);
+        const double thr1_override = m_parameters.value("hb_thr1_bohr2", 0.0);
+        const double thr2_override = m_parameters.value("hb_thr2_bohr2", 0.0);
+        const double hbthr1 = (thr1_override > 0.0) ? thr1_override : (200.0 - std::log10(hb_acc) * 50.0);
+        const double hbthr2 = (thr2_override > 0.0) ? thr2_override : (400.0 - std::log10(hb_acc) * 50.0);
+        cut.emplace_back("HB A-B search radius sqrt(hbthr1)", std::sqrt(hbthr1));
+        cut.emplace_back("HB A-H-B / XB A-B search radius sqrt(hbthr2)", std::sqrt(hbthr2));
+    }
+
+    // Explicit Coulomb cutoff, only when set; without it Coulomb and EEQ are unbounded sums
+    // that need an Ewald treatment, not part of A1.
+    const double coul = m_parameters.value("coulomb_r_cut", 0.0);
+    if (coul > 0.0)
+        cut.emplace_back("coulomb_r_cut", coul);
+
+    // Reactive bond scan (detectReactiveBondChanges): break_factor * (rcov_i + rcov_j) * fat_i * fat_j,
+    // largest over the element pairs present.
+    if (m_topology_mode == "react") {
+        std::vector<int> elements(m_atoms.begin(), m_atoms.end());
+        std::sort(elements.begin(), elements.end());
+        elements.erase(std::unique(elements.begin(), elements.end()), elements.end());
+        double react = 0.0;
+        for (int zi : elements)
+            for (int zj : elements) {
+                const double fi = (zi >= 0 && zi < 87) ? fat[zi] : 1.0;
+                const double fj = (zj >= 0 && zj < 87) ? fat[zj] : 1.0;
+                react = std::max(react, m_react_break_factor * (getCovalentRadius(zi) + getCovalentRadius(zj)) * fi * fj);
+            }
+        cut.emplace_back("reactive bond scan react_bond_break_factor * (rcov_i + rcov_j) * fat_i * fat_j", react);
+    }
+    return cut;
+}
+
+void GFNFF::configurePeriodicCell()
+{
+    // Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A1): cell and cutoff check only; no
+    // energy term applies the minimum image yet, so a periodic energy is still the non-periodic one.
+    m_cell_bohr_ortho = PBCUtils::OrthoCell();
+    if (!m_has_pbc)
+        return;
+    std::string error;
+    const PBCUtils::OrthoCell cell = PBCUtils::makeOrthoCell(getUnitCellBohr(), error);
+    if (!cell.active) {
+        CurcumaLogger::error("GFN-FF: " + error);
+        throw std::runtime_error("GFN-FF: " + error);
+    }
+    error = PBCUtils::checkCutoffsAgainstCell(cell, activeCutoffsBohr(), "Bohr");
+    if (!error.empty()) {
+        CurcumaLogger::error("GFN-FF: " + error);
+        throw std::runtime_error("GFN-FF: " + error);
+    }
+    m_cell_bohr_ortho = cell;
+    if (CurcumaLogger::get_verbosity() >= 2)
+        CurcumaLogger::param("periodic cell (Bohr)",
+            fmt::format("{:.4f} x {:.4f} x {:.4f}, all cutoffs below L_min/2 = {:.4f}; minimum image NOT yet applied in the energy terms",
+                cell.L[0], cell.L[1], cell.L[2], 0.5 * cell.minLength()));
 }
 
 double GFNFF::coulombRCutBohr() const

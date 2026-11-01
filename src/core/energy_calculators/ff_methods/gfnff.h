@@ -1698,6 +1698,19 @@ private:
     double dispersionSkinBohr() const;
     /// Claude Generated (Sep 2026): Verlet skin of the repulsion / explicit-Coulomb lists (nonbonded_skin_bohr)
     double nonbondedSkinBohr() const;
+    /**
+     * @brief Periodic cell set-up and cell-size check (WP-PERIODIC-NONBONDED A1) - Claude Generated (Nov 2026)
+     *
+     * Without a cell (m_has_pbc false) this only resets m_cell_bohr_ortho and the non-periodic
+     * path stays unchanged. With a cell: refuses a non-orthorhombic cell and every active cutoff
+     * that is not below L_min/2 (D4 build/evaluation radius, repulsion incl. Verlet skin, CN list
+     * and CN-derivative range, HB/XB search radii, coulomb_r_cut if set, reactive bond scan).
+     * Coulomb and EEQ without a cutoff are not checked (needs Ewald, out of A1 scope).
+     * @throws std::runtime_error with the names, values and L_min/2 in Bohr
+     */
+    void configurePeriodicCell();
+    /// Claude Generated (Nov 2026, A1): (name, radius in Bohr) of every cutoff in use; checked by configurePeriodicCell().
+    std::vector<std::pair<std::string, double>> activeCutoffsBohr() const;
     /// Claude Generated (Sep 2026): electrostatics pair cutoff in Bohr; coulomb_r_cut <= 0 (default) = none, as the reference
     double coulombRCutBohr() const;
     /// Claude Generated (Sep 2026): true if the repulsion list is cell-list built (distance-filtered),
@@ -2958,6 +2971,9 @@ private:
     // Claude Generated (April 2026): Periodic Boundary Conditions
     bool m_has_pbc = false;                                              ///< PBC active flag
     Eigen::Matrix3d m_unit_cell = Eigen::Matrix3d::Identity();          ///< Unit cell (Angstrom, from Mol)
+    /// Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A1): orthorhombic cell in Bohr, set by
+    /// configurePeriodicCell() and handed to the FFWorkspace; inactive without a cell.
+    PBCUtils::OrthoCell m_cell_bohr_ortho;
 
     double m_energy_total; ///< Total energy in Hartree
     Vector m_charges; ///< Atomic partial charges

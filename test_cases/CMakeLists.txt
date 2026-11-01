@@ -665,6 +665,16 @@ target_link_libraries(test_ionize curcuma_cap curcuma_core)
 add_test(NAME ionize_capability COMMAND test_ionize)
 set_tests_properties(ionize_capability PROPERTIES TIMEOUT 120)
 
+# Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A1): orthorhombic minimum image, GFN-FF cell-size
+# check and fragment-wise PBC wrap (docs/WP-PERIODIC-NONBONDED.md)
+add_executable(test_pbc_foundation unit/test_pbc_foundation.cpp)
+target_link_libraries(test_pbc_foundation curcuma_core test_molecule_registry)
+if(USE_PCH)
+    target_precompile_headers(test_pbc_foundation REUSE_FROM curcuma_core)
+endif()
+add_test(NAME pbc_foundation COMMAND test_pbc_foundation WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(pbc_foundation PROPERTIES TIMEOUT 120 LABELS "pbc;gfnff")
+
 # Streaming trajectory properties. Claude Generated 2026 - geometry worked out by hand.
 add_executable(test_trajprops test_trajprops.cpp)
 target_link_libraries(test_trajprops curcuma_cap curcuma_core)
