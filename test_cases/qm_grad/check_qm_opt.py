@@ -8,14 +8,18 @@ simple-dftd3, BFGS to |g| < 1e-7). Claude Generated (Sep 2026).
 
 Usage: check_qm_opt.py --curcuma <bin> --start <xyz> --ref <xyz>
 """
-import argparse, os, re, shutil, subprocess, sys, tempfile
+import argparse, json, os, re, shutil, subprocess, sys, tempfile
 
 
 def rmsd_curcuma(cur, tmp, a, b):
-    """Optimal-rotation RMSD of two xyz files from curcuma's own -rmsd (no reordering, no numpy)."""
-    out = subprocess.run([cur, "-rmsd", a, b, "-no_reorder", "true", "-no_bmt", "-verbosity", "1"],
-                         cwd=tmp, capture_output=True, text=True, timeout=60, check=True).stdout
-    return float(re.search(r"RMSD for two molecules\s+(-?[\d.]+(?:[eE][-+]?\d+)?)", out).group(1))
+    """Optimal-rotation RMSD of two xyz files from curcuma's own -rmsd (no reordering, no numpy).
+
+    Reads the full-precision "rmsd" from the <b>.rmsd.json that -rmsd writes next to the inputs.
+    """
+    subprocess.run([cur, "-rmsd", a, b, "-no_reorder", "true", "-no_bmt", "-verbosity", "0"],
+                   cwd=tmp, capture_output=True, text=True, timeout=60, check=True)
+    with open(os.path.join(tmp, os.path.splitext(b)[0] + ".rmsd.json")) as f:
+        return float(json.load(f)["rmsd"])
 
 
 def main():
