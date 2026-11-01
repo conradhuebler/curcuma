@@ -2,7 +2,7 @@
 """-opt with the native hf-3c must reach the independent reference minimum.
 
 Runs `curcuma -opt <start> -method hf-3c` (tight convergence), re-evaluates the
-optimised structure with `-sp`, and compares energy and (Kabsch-aligned) geometry
+optimised structure with `-sp`, and compares energy and (aligned with `curcuma -rmsd`) geometry
 with the reference minimum made by scripts/hf3c_opt_reference.py (PySCF +
 simple-dftd3, BFGS to |g| < 1e-7). Claude Generated (Sep 2026).
 
@@ -11,18 +11,11 @@ Usage: check_qm_opt.py --curcuma <bin> --start <xyz> --ref <xyz>
 import argparse, os, re, shutil, subprocess, sys, tempfile
 
 
-def read_xyz(path):
-    L = open(path).read().splitlines(); n = int(L[0])
-    return [l.split()[0] for l in L[2:2 + n]], [list(map(float, l.split()[1:4])) for l in L[2:2 + n]]
-
-
-def kabsch_rmsd(a, b):
-    import numpy as np
-    a = np.array(a); b = np.array(b); a -= a.mean(0); b -= b.mean(0)
-    U, S, Vt = np.linalg.svd(a.T @ b)
-    d = np.sign(np.linalg.det(U @ Vt))
-    R = U @ np.diag([1, 1, d]) @ Vt
-    return float(np.sqrt(((a @ R - b) ** 2).sum(1).mean()))
+def rmsd_curcuma(cur, tmp, a, b):
+    """Optimal-rotation RMSD of two xyz files from curcuma's own -rmsd (no reordering, no numpy)."""
+    out = subprocess.run([cur, "-rmsd", a, b, "-no_reorder", "true", "-no_bmt", "-verbosity", "1"],
+                         cwd=tmp, capture_output=True, text=True, timeout=60, check=True).stdout
+    return float(re.search(r"RMSD for two molecules\s+(-?[\d.]+(?:[eE][-+]?\d+)?)", out).group(1))
 
 
 def main():
@@ -42,9 +35,8 @@ def main():
                               "-qm.scf_threshold", "1e-9"], cwd=tmp, capture_output=True, text=True,
                              timeout=600, check=True).stdout
         e = float(re.search(r"E\(HF-3c\)\s*=\s*(-?\d+\.\d+)", out).group(1))
-        _, x_opt = read_xyz(os.path.join(tmp, "start.opt.xyz"))
-    _, x_ref = read_xyz(a.ref)
-    rmsd = kabsch_rmsd(x_opt, x_ref)
+        shutil.copy(a.ref, os.path.join(tmp, "ref.xyz"))
+        rmsd = rmsd_curcuma(cur, tmp, "start.opt.xyz", "ref.xyz")
     ok = abs(e - e_ref) <= 1e-9 and rmsd <= 1e-4   # observed: 3e-12 Eh, 1e-6 A
     print(f"E(opt) {e:.10f}  E(ref) {e_ref:.10f}  diff {e - e_ref:+.2e}  RMSD {rmsd:.2e} A  {'ok' if ok else 'FAIL'}")
     sys.exit(0 if ok else 1)

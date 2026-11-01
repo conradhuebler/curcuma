@@ -343,7 +343,7 @@ products (DIIS error, X^T F X, density as one GEMM instead of n_occ rank-1 updat
 |---|---|
 | J/K, naphthalene/def2-SVP, one full direct build vs old kernel | max deviation 1e-13 (max J 14) |
 | E_elec vs release binary before the change (hf: benzene stored+direct, anthracene, C20H42, C40H82, C80H162; hf-3c: benzene, BF3, formaldehyde, HCN, LiF, He-CH4) | identical to the 10 printed decimals |
-| `ctest -L qm` | 274/276; the two `qm_opt_hf3c_*` need numpy (pass with the venv python) |
+| `ctest -L qm` | all pass; `qm_opt_hf3c_*` no longer need numpy (alignment by `curcuma -rmsd`, Nov 1 2026) |
 | one direct build, 1 thread (bench_qm_integrals, cos-density) | naphthalene 7.0 -> 1.5 s, anthracene 18.2 -> 7.6 s (measured before the template and loop steps) |
 
 Not tested: f shells (not supported by the basis loader), cartesian d beyond the existing ctests, other
