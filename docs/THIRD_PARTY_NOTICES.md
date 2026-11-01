@@ -21,7 +21,8 @@ set of the BSE for every element it has:
 | def2-{SVP,SV(P),SVPD,TZVP,TZVPP,TZVPD,TZVPPD,QZVPP,QZVPPD}-RIFIT | H-La, Hf-Rn (72) | `<name>.1.tm.bz2` |
 | def2-QZVP-RIFIT | H-Ca, Ga-Sr, In-Ba, Tl-Rn (42) | `def2-qzvp-rifit.1.tm.bz2` |
 | def2-ECP (effective core potentials, Turbomole text, used by `qm_ecp.cpp` since Nov 2026) | Rb-Rn (50) | `def2-ecp.1.tm.bz2` |
-| MINIX (MINIS part) | H-Ne | `basis_set_exchange/data/huzinaga/MINI-scaled.0.json` ('Scaled MINI') |
+| MINIX (stage 5a, Nov 2026: H-Rn) | H-Rn (86) | MINIS part H-Ar: `basis_set_exchange/data/huzinaga/MINI-scaled.0.json` ('Scaled MINI'); K-Zn: `data/AHLRICHS_VDZ.0.table.json` ('Ahlrichs VDZ' = SV); Ga-Rn: `def2-svp.1.tm.bz2` |
+| MINIX-ECP (stage 5a) | Rb-Rn (50) | `def2-ecp.1.tm.bz2`; In-Xe, Tl-At: `data/STUTTGART_RLC-ECP.0.table.json` ('Stuttgart RLC ECP'), rewritten as below |
 
 def2 data: every exponent/coefficient token unchanged except a Fortran `D` exponent marker written as `E`; shell order as
 in the `.tm` source. The generator checks each set against the BSE json data composed the way BSE composes it
@@ -52,13 +53,29 @@ every element; for 37 elements beyond Ne (Sc-Zn, Rb, In-Xe, Ce-Lu, Tl-Rn) its sh
 | Ga-Kr | SVP |
 | Rb-Xe | def2-SV(P) with ECP |
 
-Built in: H-Ne only (Rb-Xe needs def2-SV(P) plus the def2 ECP in the SCF, which the engine does not have). Per element:
+Built in: H-Rn (stage 5a, Nov 2026; H-Ne before), composed as ORCA 6.1 exports MINIX (`orca_exportbasis -b minix`,
+the reference for HF-3c here). Per element:
 
 | Element | Exponents | Contraction coefficients |
 |---|---|---|
-| H, He, B-Ne | BSE MINI-scaled | BSE MINI-scaled, each contraction renormalised to a unit-norm contracted function, 10 decimals |
-| Li, Be (s shells) | BSE MINI-scaled | as above |
-| Li, Be (added p shell: 0.1 / 0.25, coefficient 1) | ORCA 6.1 `orca_exportbasis -b minix` (not in BSE) | ORCA 6.1 |
+| H-Ar (MINIS shells) | BSE MINI-scaled | BSE MINI-scaled, each contraction renormalised to a unit-norm contracted function, 10 decimals |
+| Li, Be, Na, Mg (added p shell: 0.1 / 0.25 / 0.05 / 0.2, coefficient 1) | ORCA 6.1 `orca_exportbasis -b minix` (not in BSE) | ORCA 6.1 |
+| Al-Ar (added d shell: 0.30, 0.35, 0.45, 0.55, 0.65, 0.696) | ORCA 6.1 export tokens (equal to the def2-SV(P) d of BSE) | ORCA 6.1 |
+| K-Zn | BSE 'Ahlrichs VDZ' json tokens (= SV) | unchanged |
+| Ga-Rn | BSE def2-SVP Turbomole tokens (Table 1 says SVP for Ga-Kr, def2-SV(P) for Rb-Xe; ORCA's MINIX has the def2-SVP f shell for Y-Cd and La-Hg, so it is def2-SVP throughout) | unchanged |
+
+**MINIX-ECP** (Rb-Rn, the ECPs ORCA 6.1 assigns to MINIX, `-qm.ecp MINIX-ECP`, automatic for MINIX): def2-ECP for
+Rb-Cd, Cs-Hg and Rn; for In-Xe and Tl-At ORCA uses the large-core Stuttgart ECPs (ECP46MWB, ECP78MWB; Bergner et al.,
+Mol. Phys. 80, 1431 (1993)) together with the def2-SVP valence basis. BSE writes these with semi-local s, p, d, f (and
+g for Xe and Tl-At) potentials and a zero local potential; ORCA's export takes the f potential as the local part
+(every l < 3 block becomes U_l - U_f) and has no g potential, and for Po its d block additionally contains -U_g. The
+generator reproduces ORCA's form from the BSE numbers (`minix_ecp()`).
+
+**ORCA 6.1 comparison of MINIX H-Rn and MINIX-ECP** (`--compare-orca`, 2026-11-01, strict for MINIX): 989 shells,
+exponents within the rounding of ORCA's 10th decimal (max abs. diff 5.0e-11), normalised coefficients max abs. 1.1e-8
+in ORCA's scale (Ce s shells, strongly cancelling contractions printed with 10 decimals); MINIX-ECP: 50 elements, same
+core sizes and potentials, max rel. diff 2.2e-8 (ORCA's own data have fewer digits for Y-Cd, Xe, Hf-Hg; the BSE values
+are kept).
 
 The renormalised BSE coefficients equal the ORCA 6.1 export and the shipped `MINIX.dat` token for token (raw BSE
 coefficients differ from them by up to 1.1e-6 relative, a pure normalisation factor per contraction).
@@ -132,7 +149,8 @@ Phys. 90, 1730 (1989); Leininger et al. Chem. Phys. Lett. 255, 274 (1996); Kaupp
 Metz et al. J. Chem. Phys. 113, 2563 (2000) and Theor. Chem. Acc. 104, 22 (2000); Peterson et al. J. Chem. Phys. 119,
 11113 (2003); Dolg et al. Theor. Chim. Acta 85, 441 (1993); Cao, Dolg J. Chem. Phys. 115, 7348 (2001). MINIX/HF-3c:
 R. Sure, S. Grimme, J. Comput. Chem. 2013, 34, 1672-1685. Basis Set Exchange: B. P. Pritchard et al., J. Chem. Inf.
-Model. 59, 4814-4820 (2019). The orbital and fitting references are cited at run time (`qm_citations.h`) whether the
+Model. 59, 4814-4820 (2019). MINIX-ECP large-core part: A. Bergner, M. Dolg, W. Kuechle, H. Stoll, H. Preuss, Mol.
+Phys. 80, 1431-1441 (1993). The orbital and fitting references are cited at run time (`qm_citations.h`) whether the
 file or the built-in copy is loaded; of the ECP references Andrae et al. 1990 and Metz et al. 2000 are cited when the
 def2-ECP is used (Nov 2026), the others and the lanthanide basis reference are not.
 

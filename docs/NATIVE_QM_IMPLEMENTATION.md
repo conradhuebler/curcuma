@@ -36,7 +36,7 @@ Since Nov 1 2026 the engine takes H-Rn (Na-Kr all-electron, Rb-Rn with the def2-
 - **AO screening of the XC part** (Oct 30 2026, `-qm.xc_ao_threshold`, default 1e-12; 0 = previous path, bitwise): compact 128-point blocks per atom, per block only the shells whose rigorous value/derivative bound (`AOEvaluator::shellRadii`, one formula for CPU and GPU) reaches the threshold; |dE| <= 6.4e-12 Eh, max |dg| <= 1.4e-12 Eh/Bohr against threshold 0 (H2O..C40H82, def2-SVP); V_xc per build C40H82 23.2 -> 0.92 s (CPU 8 threads), 3.0 -> 0.49 s (RTX 5090); the device Becke weight derivative has no 700-atom limit any more. AI-generated, machine-tested; [QM_GPU_ROADMAP.md section 4.1](QM_GPU_ROADMAP.md#41-ao-screening-per-block-and-weight-derivative-without-atom-limit-oct-30-2026).
 - **Meta-GGA TPSS and SCAN, stage 1** (Oct 30 2026, `-method tpss|scan`, energies on the CPU): tau-dependent kernels with dual-number derivatives in `qm_xc_kernels.h`, V_xc with (1/2) v_tau grad phi . grad phi (`buildVxcMeta`); kernels vs libxc <= 7.7e-11 (scaled), energies vs PySCF on the identical grid <= 1.4e-11 Eh (28 cases incl. RI-J), vs ORCA 6.1 LibXC(TPSS) fine grid <= 8.5e-8 Eh (benzene 2.4e-6); SCAN is very grid-sensitive (sg1-sg3 up to 3e-3 Eh, about 400x590 for 1e-6 Eh); no GPU kernel (counted CPU fallback). **Stage 2** (Oct 30 2026): analytic gradient on the CPU (`buildXCGradientMeta`, tau term with second AO derivatives, Becke weight derivative reused), vs PySCF same grid <= 9.7e-12 Eh/Bohr with and without grid response, `-opt` works (TPSS minima vs PySCF/scipy); SCAN gradients scatter by ~1e-5 Eh/Bohr even at 300x1454 and need the grid response. **Stage 3** (Oct 30 2026): V_xc, the device-resident KS SCF loop and the XC gradient on CUDA (`cuda/qm_gpu_xc.cu`, same point kernels), no `qm_xc` fallback for tpss/scan any more; vs the CPU from the same density rel |dV| <= 1.7e-15, XC gradient parts <= 4.1e-13 Eh/Bohr, SCF energies equal at 10 decimals (H2O..caffeine, sg1 and 150x974); per V_xc build only 1.7-2x faster than 8 CPU threads on the RTX 5090 (FP64 GEMMs), benzene tpss `-opt` 35.1 s CPU / 5.8 s GPU; RTX 5090 only. AI-generated, machine-tested; [DFT_ROADMAP/WP11_meta_gga.md](DFT_ROADMAP/WP11_meta_gga.md).
 - **Double hybrids, stage 1** (Oct 31 2026, `-method b2plyp|b2gp-plyp|dsd-blyp|dsd-pbep86|revdsd-pbep86` and `-d3bj` names, energies on the CPU): hybrid KS SCF + c_os E_os + c_ss E_ss on the KS orbitals (RI or canonical PT2, `-qm.dh_pt2`) + native D3(BJ); new P86 (PZ81/VWN5) and B95 kernels; KS/PT2 components vs PySCF same grid <= 1.5e-11 Eh, vs ORCA 6.1 matched <= 4e-8 Eh (small molecules); stage 1 without gradient (stage 2 added it on the CPU), no D4 (stage 4 added it). **Stage 3** (Oct 31 2026, CUDA): P86/B95 through the device GGA/meta-GGA paths, so energies of all double hybrids run on the device without a counted fallback (`-gpu_strict true` passes; V_xc vs CPU same density <= 2.1e-15 relative, energies equal at 10-12 decimals); gradient: KS part, F_xc of the Z-vector, XC response gradient, PT2 1e/2e (polarisation of the Q-G7 kernel, Gamma via the MP2 kernel) and RI-3-index on the device (same density <= 7.9e-12 Eh/Bohr), the PT2 intermediates stay host code (counted `qm_dh_grad_pt2`); RTX 5090 only. **Stage 4** (Oct 31 2026, D4, CPU): `revdsd-pbep86-d4`, `b2plyp-d4`, `b2gp-plyp-d4`, `pbe/b3lyp/tpss/scan-d4` and `-qm.dispersion d4` use the native D4 of GFN2 (`D4ParameterGenerator`, `D4Evaluator`, `D4ChargeModel`) with dftd4's EEQ(2019) charges, its EEQ reference charges (clsq/clsh) and ATM (`dispersion/d4_dft.*`); D4 term vs dftd4 4.3.1 <= 1e-17 Eh (2-body, ATM, charges, gradient incl. dq/dR), vs ORCA 6.1 within its 9 printed decimals, revDSD-PBEP86-D4 total vs ORCA 2-3e-8 Eh, gradient <= 1.5e-6 Eh/Bohr. AI-generated, machine-tested; [DFT_ROADMAP/WP12_doppelhybride.md](DFT_ROADMAP/WP12_doppelhybride.md), [QM_GPU_ROADMAP.md 4.3](QM_GPU_ROADMAP.md#43-double-hybrids-on-the-device-oct-31-2026-wp12-stage-3).
-- **Compared with**: `hf` vs ORCA 6.1 10/10 ≤4e-9 Eh (`ctest -L 'qm_1e|qm_2e'`); `hf-3c` every term vs PySCF+simple-dftd3 ≤4e-11 Eh on 17 molecules (`ctest -L qm_hf3c`); analytic `hf`/`hf-3c` gradient vs PySCF(+sdftd3) ≤2e-10 Eh/Bohr, `-opt` to the reference minimum (`ctest -L qm_grad`); `lda` vs PySCF/libxc on the identical grid <= 5e-12 Eh (10 cases, `ctest -L qm_lda`), vs ORCA 6.1 LSD <= 5.4e-8 Eh at converged grids (benzene 4e-7); `pbe` vs PySCF/libxc on the identical grid <= 3.9e-12 Eh (11 cases, `ctest -L qm_pbe`), vs ORCA 6.1 with libxc's mu <= 7e-8 Eh (benzene 1e-6; ORCA's default mu 0.21952 differs by 4e-6..5.5e-5 Eh); `b3lyp` vs PySCF/libxc on the identical grid <= 3.0e-11 Eh (19 cases, both VWN variants, `ctest -L qm_b3lyp`), vs ORCA 6.1 B3LYP and B3LYP/G <= 5.3e-8 Eh (benzene 6.2e-7); KS gradient (lda/pbe/b3lyp, `-qm.grid_response` default true) vs PySCF on the identical grid with and without grid response <= 3.6e-11 Eh/Bohr (27 cases incl. RI-J/RI-JK), vs FD of curcuma's energy <= 3.4e-10, `-opt` reaches the PySCF minimum (`ctest -L qm_dft_grad`, [WP8](DFT_ROADMAP/WP8_analytischer_gradient.md))
+- **Compared with**: `hf` vs ORCA 6.1 10/10 ≤4e-9 Eh (`ctest -L 'qm_1e|qm_2e'`); `hf-3c` every term vs PySCF+simple-dftd3 ≤4e-11 Eh on 17 molecules (`ctest -L qm_hf3c`), beyond Ne (Nov 2026, H-Rn) every term vs ORCA 6.1 ≤7.2e-8 Eh on 21 molecules Na..Pb, Ce (`ctest -L qm_hf3c_z`, [stage 5a](#stage-5a-hf-3c-beyond-ne-nov-1-2026)); analytic `hf`/`hf-3c` gradient vs PySCF(+sdftd3) ≤2e-10 Eh/Bohr, `-opt` to the reference minimum (`ctest -L qm_grad`); `lda` vs PySCF/libxc on the identical grid <= 5e-12 Eh (10 cases, `ctest -L qm_lda`), vs ORCA 6.1 LSD <= 5.4e-8 Eh at converged grids (benzene 4e-7); `pbe` vs PySCF/libxc on the identical grid <= 3.9e-12 Eh (11 cases, `ctest -L qm_pbe`), vs ORCA 6.1 with libxc's mu <= 7e-8 Eh (benzene 1e-6; ORCA's default mu 0.21952 differs by 4e-6..5.5e-5 Eh); `b3lyp` vs PySCF/libxc on the identical grid <= 3.0e-11 Eh (19 cases, both VWN variants, `ctest -L qm_b3lyp`), vs ORCA 6.1 B3LYP and B3LYP/G <= 5.3e-8 Eh (benzene 6.2e-7); KS gradient (lda/pbe/b3lyp, `-qm.grid_response` default true) vs PySCF on the identical grid with and without grid response <= 3.6e-11 Eh/Bohr (27 cases incl. RI-J/RI-JK), vs FD of curcuma's energy <= 3.4e-10, `-opt` reaches the PySCF minimum (`ctest -L qm_dft_grad`, [WP8](DFT_ROADMAP/WP8_analytischer_gradient.md))
 - **Correlation on top of RHF** (Oct 2026, AI-generated, machine-tested): canonical MP2/SCS/SOS with gradient, RI-MP2, and canonical RCCSD (`ccsd`, energy only, CPU, `qm_ccsd.*`; vs PySCF <= 3.5e-10 Eh, ORCA 6.1 <= 1.5e-9 Eh on 7 molecules up to benzene), and local PNO-RI-MP2 (`lmp2`, energy only, CPU, `qm_lmp2.*`; complete spaces = RI-MP2 to 2e-12 Eh, default thresholds 3.7e-6..2.4e-5 Eh/atom on alkanes/water/small acenes, C80H162 runs; since Oct 18 2026 local fit domains with integral-direct 3-index integrals by default, `-qm.lmp2_fit local|global`, added error <= 1e-6 Eh/atom, no stored RI tensor); details and limits in [DFT_ROADMAP/WP10_korrelation_ri_mpn_ccsd.md](DFT_ROADMAP/WP10_korrelation_ri_mpn_ccsd.md) (WP11, WP13, WP15)
 - **Code and notes**: `QMEngine : public QMDriver` (`qm_engine.*`, `qm_scf.cpp`, `qm_integrals.*`, wrapper `qm_method.*`; renamed from `DFT`/`dft_*` Sep 2026, params `-qm.*`, legacy `-dft.*` merged). `HF3CMethod` (`hf3c_method.*`) = HF/MINIX + D3(BJ, `createForHF3C`, s9=0) + gCP/SRB (`gcp.*`, simple-dftd3 port; Slater exponents kept single-precision like the Fortran literals). ERI shell-quartet blocked + Schwarz (`-qm.eri_screening`) + OpenMP (`-qm.threads`) + on-the-fly 5d, see [docs/QM_GPU_ROADMAP.md](QM_GPU_ROADMAP.md). `UpdateMolecule()` now invalidates the integral/SCF caches (was silently reusing the first geometry). ⚠️ AI-generated / ⚙️ machine-tested only; closed shell, H-Ne. Integral-direct SCF (`qmint::DirectJK`, `-qm.scf_direct auto|on|off`, Sep 2026) removes the n^4 memory wall; `auto` keeps the faster stored tensor below `-qm.eri_max_memory_mb`. Gradient (WP8, Sep 2026): `gradientOneElectron`/`gradientTwoElectron` in `qm_integrals.cpp` (centre-derivative of Gaussians, two-step MD contraction), `QMEngine::computeGradient()` (Eh/Bohr; wrappers return Eh/Å); `-qm.threads` was silently ignored until then (integer-only JSON test). History (Jul 2026 kernel defects etc.): [docs/NATIVE_QM_IMPLEMENTATION.md](NATIVE_QM_IMPLEMENTATION.md).
 
@@ -160,7 +160,7 @@ reachable as `-method orca-hf-3c`.
 
 | term | implementation | parameters |
 |---|---|---|
-| HF/MINIX | `QMEngine(HF)` with the basis forced to `MINIX.dat` (ORCA export, H-Ne) | -- |
+| HF/MINIX | `QMEngine(HF)` with the basis forced to MINIX (built in, H-Rn since Nov 2026; `MINIX.dat` = ORCA export for H-Ne) and `-qm.ecp MINIX-ECP` | -- |
 | D3(BJ) | `D3ParameterGenerator::createForHF3C()` | s6=1, s8=0.8777, a1=0.4171, a2=2.9149, **s9=0** (two-body only; ORCA prints only E6/E8) |
 | gCP | `gcp.{h,cpp}`, ported from simple-dftd3 `gcp.f90` + `gcp/param.f90` (hf/minix) | sigma=0.1290, eta=1.1526, alpha=1.1549, beta=1.1763, `emiss`/`nbas` tables |
 | SRB ("bas") | same file (`base` term) | `-qscal sum (Z_A Z_B)^1.5 exp(-rscal R0_AB^0.75 R_AB)`, qscal=0.03, rscal=0.7, R0 = D3 pair radii |
@@ -186,8 +186,8 @@ alone over all 55 H-Ne element pairs: energy <= 2.3e-12, gradient <= 2.3e-12 Eh/
   the truncated 12-term B_n series, the other branch the closed form; He...CH4 exercises
   the He-C case.
 
-**Not implemented / not tested**: closed shell only; H-Ne only (MINIX file and gCP tables);
-no charged/open-shell reference comparison; not tested against ORCA beyond H2O; `-md` with
+**Not implemented / not tested**: closed shell only; beyond Ne see [stage 5a](#stage-5a-hf-3c-beyond-ne-nov-1-2026);
+no charged/open-shell reference comparison; `-md` with
 `hf-3c` technically possible (gradient exists) but not tested. Human production testing pending.
 
 ---
@@ -468,7 +468,7 @@ LMP2 and the double hybrids. Fitting sets were already general in l (up to h for
 
 AI-generated, machine-tested (no human production test). The engine takes H-Rn (Z <= 86, `qmbasis::kEngineMaxZ`):
 Na-Kr all-electron, Rb-Rn with the semi-local def2-ECP (`-qm.ecp auto`, default: def2-ECP for every def2 orbital
-basis; `def2-ECP` | `none`). Closed shell only, as before; hf-3c stays H-Ne (MINIX, gCP and SRB tables).
+basis; `def2-ECP` | `none`). Closed shell only, as before; hf-3c beyond Ne: stage 5a below.
 
 - Elements: one table `qm_elements.h` (symbols, BSE `$DATA` names) for `BasisSetParser`, `QMEngine` and the aux parser;
   the parsers read the built-in blocks up to `qmbasis::parseMaxZ(atoms)` = max(10, highest Z), so an H-Ne molecule
@@ -535,12 +535,67 @@ has no lanthanides; ORCA 6.1.0 `! RHF <basis> NoRI VeryTightSCF`; constructed ge
 - Not tested / not implemented: open shell (the engine is closed-shell only; most free heavy atoms and many TM
   compounds are open shell); h orbital shells; ECP terms with r^(n-2), n != 2 (not in def2-ECP, rejected); ECP
   integrals or gradient on the GPU (CPU terms); relativistic effects beyond the scalar-relativistic ECP (no spin-orbit
-  ECP, no DKH/ZORA for the all-electron 4th row); elements beyond Rn; MINIX/hf-3c beyond Ne (MINIX for Na-Kr needs the
-  ORCA export of the added shells and gCP/SRB tables, not attempted); ghost atoms and point charges; large systems
+  ECP, no DKH/ZORA for the all-electron 4th row); elements beyond Rn; ghost atoms and point charges; large systems
   (largest case: TiCl4 TZVP 193 functions, CeF4 TZVP); 3d compounds other than closed-shell ZnCl2, TiCl4, CuCl, the
   other lanthanides (only Ce, L = 5 path) and La; LMP2 and the D4 term with heavy elements (they run, no reference);
   MP2/DH gradients with ECP only against curcuma's own FD; the frozen-core table above Ne only by element, not by
   correlated energies against ORCA; thread scaling of the ECP code.
+
+### Stage 5a: hf-3c beyond Ne (Nov 1, 2026)
+
+AI-generated, machine-tested (no human production test). `-method hf-3c` runs H-Rn, closed shell; the reference is
+ORCA 6.1 `! HF-3c` (Sure & Grimme, J. Comput. Chem. 34, 1672 (2013)).
+
+- **MINIX** (built in, `scripts/qm_basis_export_tables.py`): composed as `orca_exportbasis -b minix` prints it, from
+  BSE where the shells exist: H-Ar MINIS (MINI-scaled, renormalised) plus the p shell of Li/Be/Na/Mg (ORCA tokens, not
+  in BSE) and the d shell of Al-Ar (ORCA tokens = def2-SV(P) d); K-Zn BSE 'Ahlrichs VDZ' (SV); Ga-Rn def2-SVP (ORCA's
+  MINIX has the def2-SVP f shell for Y-Cd and La-Hg although Table 1 says def2-SV(P) for Rb-Xe). Every shell compared
+  with the export (989 shells, exponents within the 10th printed decimal; [notices](THIRD_PARTY_NOTICES.md)). H-Ne
+  blocks unchanged (generator check against `MINIX.dat`).
+- **MINIX-ECP** (`-qm.ecp MINIX-ECP`, forced by hf-3c): def2-ECP except In-Xe and Tl-At, where ORCA uses the large-core
+  Stuttgart ECPs (46/78 core electrons) with the def2-SVP valence basis, written with the f potential local and without
+  BSE's g potential (Po: plus -U_g in d, an ORCA quirk reproduced). So HI has 8 electrons in HF-3c, 26 with def2-SVP.
+- **gCP/SRB** (`gcp.cpp`): tables H-Kr (simple-dftd3 `param.f90`), Z > 36 through the effective atomic number of both
+  references (Rb-Xe -> K-Kr, Cs-La -> K-Sc, Ce-Lu -> Sc, Hf-Rn -> Ti-Kr), 1s/2s/3s Slater overlaps. Two places where
+  simple-dftd3 and ORCA's gCP program (`otool_gcp` 1.06) differ, ORCA followed: Slater exponent average (s+p)/2 for
+  Ga-Kr and (s+p+d)/3 for Sc-Zn (simple-dftd3: s and (s+2d)/3; E_gCP differs by up to 1e-3 Eh); the SRB term skips
+  every pair with an element beyond Ar (gcp `basegrad`: `iz > 18 cycle`; simple-dftd3 has no cut). The H-Ne tables stay
+  the double-precision simple-dftd3 values; otool reads single-precision literals (emiss, D3 radii), hence the
+  residual <= 1.2e-8 Eh in `reference_gcp.json`.
+- **otool_gcp gradient defects** (measured against a central difference of its own energy, `scripts/hf3c_gcp_reference.py`):
+  pairs with He or Ne (no virtual MINIX functions: the other atom's term is skipped) and pairs of different elements
+  whose Slater exponents differ by < 0.1 (Cl-O, Co/Ni/Cu/As with O or H, ...) give gradients up to 9.4e-3 Eh/Bohr off
+  otool's own energy derivative. ORCA's EnGrad presumably inherits them (not isolated); curcuma's gradient is the
+  derivative of its energy (FD gate below). None of the 21 molecules below contains such a pair.
+- **D3(BJ)**: unchanged (real Z, HF-3c parameters); equals ORCA to <= 2.5e-10 Eh (TiCl4) on all 21 molecules.
+
+Checks (ORCA 6.1.0 `! HF-3c VeryTightSCF` / `EnGrad` / `Opt TightOpt`, `scripts/hf3c_orca_reference.py`; otool_gcp
+1.06; constructed geometries in `test_cases/structures`):
+
+| what | cases | max deviation |
+|---|---|---|
+| gCP and SRB vs otool_gcp, every element H-Rn (4-atom clusters X, H, O, X) + 4 mixed clusters | 90 | 1.2e-8 Eh (Ar); gradient vs otool <= 9.9e-9 Eh/Bohr where otool is self-consistent (73), vs own 4-point FD <= 1.9e-9 |
+| E(HF/MINIX) vs ORCA: NaF NaCl H2S PH3 SiH4 HCl SO2 AlCl3 KCl ZnCl2 TiCl4 GeH4 HBr Br2 HI CH3I XeF2 CsI HgCl2 PbH4 CeF4 | 21 | 7.2e-8 (XeF2), 6.0e-8 (HgCl2), others <= 5.1e-9 Eh |
+| E(D3BJ) vs ORCA | 21 | 2.5e-10 Eh |
+| E(gCP+SRB) vs ORCA (9 printed decimals) | 21 | 2.0e-8 Eh (SO2), others <= 2.2e-9 |
+| total vs ORCA | 21 | 7.2e-8 (XeF2), 6.0e-8 (HgCl2), 1.8e-8 (SO2), others <= 7.3e-9 Eh |
+| gradient vs ORCA EnGrad (NaF H2S SO2 KCl ZnCl2 HBr HI CH3I PbH4) | 9 | 1.1e-7 Eh/Bohr (SO2, ZnCl2), others <= 2.9e-8 |
+| FD gate, 4-point, 0.005 Bohr (NaF H2S HBr HI, 3 coordinates each) | 12 | 3.1e-10 Eh/Bohr |
+| `-opt` (L-BFGS, verytight) vs ORCA `Opt TightOpt` minimum energy (H2S, HI) | 2 | 2.1e-10 / 3.6e-11 Eh |
+
+- XeF2 and HgCl2: the HF part carries the offset stage 4 found for ORCA's ECPs of Xe and Hg with def2-SVP (2.1e-8 /
+  6.1e-8 Eh); ORCA's ECP data for Y-Cd, Xe and Hf-Hg have fewer digits than BSE (up to 2.2e-8 relative, generator
+  `--compare-orca`), a plausible cause, not proven.
+- H-Ne unchanged: the 17 `qm_hf3c` molecules give bitwise the same terms and 15-digit `-dump_gradient` as HEAD f690d3ca
+  (both built CPU-only with the same options; a CUDA-enabled build differs from a CPU-only one in the last bits, ~4e-14 Eh,
+  for HEAD as well).
+- ctest `-L qm_hf3c_z`: 28 tests (gCP/SRB all elements, 21 ORCA cases, 4 FD gates, 2 optimisations), 7.5 s wall at -j4
+  (27 s test time, CeF4 5.5 s the longest).
+- Not tested / not implemented: open shell (the engine is closed-shell only; most free heavy atoms and many TM
+  compounds are open shell), charged molecules, the other lanthanides than Ce, La, Hf-Au and Tl-At other than Pb
+  against ORCA (gCP/SRB only via otool), Rb/Sr/Y-Cd/In-Sb/Te compounds against ORCA, `-md` with hf-3c, the GPU
+  path with heavy elements, ORCA's gradient on molecules with the otool gradient defect pairs, large molecules.
+  Human production test pending.
 
 ## Basis-set citations (Oct 27, 2026)
 

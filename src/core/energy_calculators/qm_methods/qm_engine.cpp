@@ -487,51 +487,66 @@ bool QMEngine::InitialiseMolecule()
     return true;
 }
 
-// Claude Generated (Nov 2026): ECP setup. -qm.ecp auto takes def2-ECP for a def2 orbital basis (BSE combines
-// every def2 set with it for Rb-Rn), none otherwise; the element blocks are the built-in Turbomole text.
-// Sets m_ecp_ncore, m_core_charges (Z - n_core) and the centre list (positions filled per geometry).
+// Claude Generated (Nov 2026): ECP setup. -qm.ecp auto takes the ECP the built-in orbital set names (def2-ECP for
+// the def2 sets, MINIX-ECP for MINIX, stage 5a) and def2-ECP for any other def2-* basis, none otherwise; the element
+// blocks are the built-in Turbomole text. Sets m_ecp_ncore, m_core_charges (Z - n_core) and the centre list
+// (positions filled per geometry).
 bool QMEngine::setupECP()
 {
     m_ecp_centres.clear();
     std::string name = m_ecp_name;
     std::string low = name;
     std::transform(low.begin(), low.end(), low.begin(), ::tolower);
+    const auto* orbital = qmbasis::findEmbedded(m_basis_name, "data");
     if (low == "auto") {
         std::string b = m_basis_name;
         std::transform(b.begin(), b.end(), b.begin(), ::tolower);
-        const auto* e = qmbasis::findEmbedded(m_basis_name, "data");
-        name = (e && std::string(e->ecp) == "def2-ECP") || b.rfind("def2-", 0) == 0 ? "def2-ECP" : "none";
-        low = name == "none" ? "none" : "def2-ecp";
+        if (orbital && orbital->ecp[0] != '\0')
+            name = orbital->ecp;
+        else
+            name = b.rfind("def2-", 0) == 0 ? "def2-ECP" : "none";
+        low = name;
+        std::transform(low.begin(), low.end(), low.begin(), ::tolower);
     }
     if (low == "none") {
-        for (int Z : m_atoms)
-            if (qmbasis::embeddedElementBlock("def2-ECP", Z) != nullptr && m_basis_name.rfind("def2-", 0) == 0) {
-                CurcumaLogger::warn(fmt::format("QM: -qm.ecp none with {} for element Z={}: the def2 basis of this "
-                                                "element is a valence basis made for def2-ECP", m_basis_name, Z));
-                break;
-            }
+        const char* made_for = (orbital && orbital->ecp[0] != '\0') ? orbital->ecp
+                               : (m_basis_name.rfind("def2-", 0) == 0 ? "def2-ECP" : nullptr);
+        if (made_for != nullptr)
+            for (int Z : m_atoms)
+                if (qmbasis::embeddedElementBlock(made_for, Z) != nullptr) {
+                    CurcumaLogger::warn(fmt::format("QM: -qm.ecp none with {} for element Z={}: the {} basis of this "
+                                                    "element is a valence basis made for {}", m_basis_name, Z,
+                                                    m_basis_name, made_for));
+                    break;
+                }
         return true;
     }
-    if (low != "def2-ecp") {
-        CurcumaLogger::error(fmt::format("QM: unknown -qm.ecp '{}' (use auto|def2-ECP|none)", m_ecp_name));
+    if (low == "def2-ecp")
+        name = "def2-ECP";
+    else if (low == "minix-ecp")
+        name = "MINIX-ECP";
+    else {
+        CurcumaLogger::error(fmt::format("QM: unknown -qm.ecp '{}' (use auto|def2-ECP|MINIX-ECP|none)", m_ecp_name));
         return false;
     }
+    if (m_ecp_set != name) m_ecp_elements.clear();  // the cache holds one set
+    m_ecp_set = name;
     for (int i = 0; i < m_atomcount; ++i) {
         const int Z = m_atoms[i];
-        const char* block = qmbasis::embeddedElementBlock("def2-ECP", Z);
+        const char* block = qmbasis::embeddedElementBlock(name, Z);
         if (block == nullptr) continue;  // all-electron element (H-Kr)
         auto it = m_ecp_elements.find(Z);
         if (it == m_ecp_elements.end()) {
             qmecp::ElementECP e;
             std::string why;
             if (!qmecp::parseTurbomoleECP(block, e, why)) {
-                CurcumaLogger::error(fmt::format("QM: def2-ECP of Z={}: {}", Z, why));
+                CurcumaLogger::error(fmt::format("QM: {} of Z={}: {}", name, Z, why));
                 return false;
             }
             it = m_ecp_elements.emplace(Z, e).first;
         }
         if (it->second.ncore >= Z) {
-            CurcumaLogger::error(fmt::format("QM: def2-ECP of Z={} replaces {} electrons", Z, it->second.ncore));
+            CurcumaLogger::error(fmt::format("QM: {} of Z={} replaces {} electrons", name, Z, it->second.ncore));
             return false;
         }
         m_ecp_ncore[i] = it->second.ncore;
@@ -542,11 +557,11 @@ bool QMEngine::setupECP()
         m_ecp_centres.push_back(c);
     }
     if (!m_ecp_centres.empty()) {
-        qmcite::ecp("def2-ECP");
+        qmcite::ecp(name);
         if (CurcumaLogger::get_verbosity() >= 2) {
             int nc = 0;
             for (int v : m_ecp_ncore) nc += v;
-            CurcumaLogger::info(fmt::format("QM: def2-ECP on {} atom(s), {} core electrons replaced", m_ecp_centres.size(), nc));
+            CurcumaLogger::info(fmt::format("QM: {} on {} atom(s), {} core electrons replaced", name, m_ecp_centres.size(), nc));
         }
     }
     return true;

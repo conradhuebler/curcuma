@@ -1,0 +1,348 @@
+{
+ "_about": "ORCA 6.1.0 `! HF-3c VeryTightSCF` references, scripts/hf3c_orca_reference.py",
+ "_units": "Eh, gradient Eh/Bohr",
+ "cases": {
+  "NaF": {
+   "xyz": "structures/small/sodium-fluoride.xyz",
+   "orca_input": "HF-3c VeryTightSCF EnGrad",
+   "hf": -259.6735092104031,
+   "d3": -0.001474411887,
+   "gcp_srb": -0.004045677,
+   "total": -259.67902929879,
+   "gradient": [
+    [
+     -0.0,
+     -0.0,
+     -0.030373354129
+    ],
+    [
+     0.0,
+     0.0,
+     0.030373354128
+    ]
+   ]
+  },
+  "NaCl": {
+   "xyz": "structures/small/sodium-chloride.xyz",
+   "orca_input": "HF-3c VeryTightSCF",
+   "hf": -618.2521587806091,
+   "d3": -0.003609946562,
+   "gcp_srb": -0.000143936,
+   "total": -618.255912663471
+  },
+  "H2S": {
+   "xyz": "structures/small/hydrogen-sulfide.d-shell-validation.xyz",
+   "orca_input": "HF-3c VeryTightSCF EnGrad",
+   "hf": -396.7327519621986,
+   "d3": -0.005338131617,
+   "gcp_srb": 0.02991429,
+   "total": -396.708175804216,
+   "gradient": [
+    [
+     -0.0,
+     0.0,
+     0.02900516813
+    ],
+    [
+     -0.017992595154,
+     -0.0,
+     -0.014502584065
+    ],
+    [
+     0.017992595154,
+     0.0,
+     -0.014502584065
+    ]
+   ]
+  },
+  "PH3": {
+   "xyz": "structures/small/phosphine.d-shell-validation.xyz",
+   "orca_input": "HF-3c VeryTightSCF",
+   "hf": -340.74069250094203,
+   "d3": -0.008799940673,
+   "gcp_srb": 0.036765323,
+   "total": -340.712727118316
+  },
+  "SiH4": {
+   "xyz": "structures/small/silane.d-shell-validation.xyz",
+   "orca_input": "HF-3c VeryTightSCF",
+   "hf": -289.7254439028418,
+   "d3": -0.010370791686,
+   "gcp_srb": 0.037416245,
+   "total": -289.698398449828
+  },
+  "HCl": {
+   "xyz": "structures/small/hydrogen-chloride.xyz",
+   "orca_input": "HF-3c VeryTightSCF",
+   "hf": -457.7367251736927,
+   "d3": -0.002219897229,
+   "gcp_srb": 0.018983485,
+   "total": -457.719961586221
+  },
+  "SO2": {
+   "xyz": "structures/small/sulfur-dioxide.xyz",
+   "orca_input": "HF-3c VeryTightSCF EnGrad",
+   "hf": -544.1809323005791,
+   "d3": -0.00826353007,
+   "gcp_srb": -0.073286397,
+   "total": -544.262482228049,
+   "gradient": [
+    [
+     0.0,
+     -0.0,
+     -0.028512390058
+    ],
+    [
+     0.019101222902,
+     0.0,
+     0.014256195029
+    ],
+    [
+     -0.019101222902,
+     0.0,
+     0.014256195029
+    ]
+   ]
+  },
+  "AlCl3": {
+   "xyz": "structures/small/aluminium-trichloride.xyz",
+   "orca_input": "HF-3c VeryTightSCF",
+   "hf": -1612.772947925063,
+   "d3": -0.017797727845,
+   "gcp_srb": -0.001021465,
+   "total": -1612.791767117608
+  },
+  "KCl": {
+   "xyz": "structures/small/potassium-chloride.xyz",
+   "orca_input": "HF-3c VeryTightSCF EnGrad",
+   "hf": -1056.4134645774961,
+   "d3": -0.003776471786,
+   "gcp_srb": 0.000257889,
+   "total": -1056.416983160783,
+   "gradient": [
+    [
+     0.0,
+     0.0,
+     0.017365258107
+    ],
+    [
+     -0.0,
+     -0.0,
+     -0.017365258057
+    ]
+   ]
+  },
+  "ZnCl2": {
+   "xyz": "structures/metals/zinc-dichloride.xyz",
+   "orca_input": "HF-3c VeryTightSCF EnGrad",
+   "hf": -2692.219076326866,
+   "d3": -0.01102136068,
+   "gcp_srb": 0.002469144,
+   "total": -2692.227628543946,
+   "gradient": [
+    [
+     0.0,
+     -0.0,
+     0.0
+    ],
+    [
+     -0.0,
+     0.0,
+     -0.010934071645
+    ],
+    [
+     -0.0,
+     -0.0,
+     0.010934071645
+    ]
+   ]
+  },
+  "TiCl4": {
+   "xyz": "structures/metals/titanium-tetrachloride.xyz",
+   "orca_input": "HF-3c VeryTightSCF",
+   "hf": -2677.7130635154253,
+   "d3": -0.031057745111,
+   "gcp_srb": 0.00396201,
+   "total": -2677.740159250836
+  },
+  "GeH4": {
+   "xyz": "structures/small/germane.xyz",
+   "orca_input": "HF-3c VeryTightSCF",
+   "hf": -2077.3912819934253,
+   "d3": -0.009847183029,
+   "gcp_srb": 0.009954998,
+   "total": -2077.391174178655
+  },
+  "HBr": {
+   "xyz": "structures/small/hydrogen-bromide.xyz",
+   "orca_input": "HF-3c VeryTightSCF EnGrad",
+   "hf": -2572.674530709616,
+   "d3": -0.002451698028,
+   "gcp_srb": 0.003931345,
+   "total": -2572.673051062245,
+   "gradient": [
+    [
+     0.0,
+     -0.0,
+     0.005479961292
+    ],
+    [
+     -0.0,
+     0.0,
+     -0.005479961292
+    ]
+   ]
+  },
+  "Br2": {
+   "xyz": "structures/small/dibromine.xyz",
+   "orca_input": "HF-3c VeryTightSCF",
+   "hf": -5144.184889376977,
+   "d3": -0.0065280498,
+   "gcp_srb": 0.000306255,
+   "total": -5144.191111172076
+  },
+  "HI": {
+   "xyz": "structures/small/hydrogen-iodide.xyz",
+   "orca_input": "HF-3c VeryTightSCF EnGrad",
+   "hf": -11.6014613726139,
+   "d3": -0.002899182239,
+   "gcp_srb": 0.002610706,
+   "total": -11.601749848953,
+   "gradient": [
+    [
+     0.0,
+     0.0,
+     0.007168758481
+    ],
+    [
+     -0.0,
+     -0.0,
+     -0.007168758481
+    ]
+   ]
+  },
+  "CH3I": {
+   "xyz": "structures/small/iodomethane.xyz",
+   "orca_input": "HF-3c VeryTightSCF EnGrad",
+   "hf": -50.38455526739998,
+   "d3": -0.014499000278,
+   "gcp_srb": 0.005185343,
+   "total": -50.393868924378,
+   "gradient": [
+    [
+     -4.9e-11,
+     0.0,
+     0.014345101252
+    ],
+    [
+     2.591e-09,
+     -0.0,
+     -0.008569113023
+    ],
+    [
+     0.000526765887,
+     -1.96e-10,
+     -0.001925329859
+    ],
+    [
+     -0.000263384045,
+     0.000456195815,
+     -0.001925329185
+    ],
+    [
+     -0.000263384384,
+     -0.00045619562,
+     -0.001925329185
+    ]
+   ]
+  },
+  "XeF2": {
+   "xyz": "structures/small/xenon-difluoride.xyz",
+   "orca_input": "HF-3c VeryTightSCF",
+   "hf": -212.69184608877856,
+   "d3": -0.006205599219,
+   "gcp_srb": 0.006647769,
+   "total": -212.691403919397
+  },
+  "CsI": {
+   "xyz": "structures/small/caesium-iodide.xyz",
+   "orca_input": "HF-3c VeryTightSCF",
+   "hf": -30.99258009195322,
+   "d3": -0.00356077661,
+   "gcp_srb": 8.454e-06,
+   "total": -30.996132414563
+  },
+  "HgCl2": {
+   "xyz": "structures/metals/mercury-dichloride.xyz",
+   "orca_input": "HF-3c VeryTightSCF",
+   "hf": -1067.2201069260943,
+   "d3": -0.012683505636,
+   "gcp_srb": 0.001622864,
+   "total": -1067.231167567531
+  },
+  "PbH4": {
+   "xyz": "structures/small/plumbane.xyz",
+   "orca_input": "HF-3c VeryTightSCF EnGrad",
+   "hf": -5.39657745124149,
+   "d3": -0.010388022368,
+   "gcp_srb": 0.005916552,
+   "total": -5.401048921209,
+   "gradient": [
+    [
+     0.0,
+     -0.0,
+     0.0
+    ],
+    [
+     -0.001824392177,
+     -0.001824392177,
+     -0.001824392177
+    ],
+    [
+     -0.001824392177,
+     0.001824392177,
+     0.001824392177
+    ],
+    [
+     0.001824392177,
+     -0.001824392177,
+     0.001824392177
+    ],
+    [
+     0.001824392177,
+     0.001824392177,
+     -0.001824392177
+    ]
+   ]
+  },
+  "CeF4": {
+   "xyz": "structures/metals/cerium-tetrafluoride.xyz",
+   "orca_input": "HF-3c VeryTightSCF",
+   "hf": -869.3025148571903,
+   "d3": -0.010169513092,
+   "gcp_srb": 0.01494181,
+   "total": -869.297742559783
+  }
+ },
+ "opt": {
+  "H2S": {
+   "xyz": "structures/small/hydrogen-sulfide.d-shell-validation.xyz",
+   "orca_input": "HF-3c Opt TightOpt VeryTightSCF",
+   "total": -396.70969652585,
+   "orca_final_geometry": [
+    "  S          -0.00000000000000      0.00000000000000     -0.00953775538601",
+    "  H           0.99819621425060      0.00000000000000      0.93566887769301",
+    "  H          -0.99819621425060      0.00000000000000      0.93566887769301"
+   ]
+  },
+  "HI": {
+   "xyz": "structures/small/hydrogen-iodide.xyz",
+   "orca_input": "HF-3c Opt TightOpt VeryTightSCF",
+   "total": -11.601864383815,
+   "orca_final_geometry": [
+    "  I           0.00000000000000      0.00000000000000     -0.00855388779709",
+    "  H           0.00000000000000      0.00000000000000      1.61755388779709"
+   ]
+  }
+ }
+}

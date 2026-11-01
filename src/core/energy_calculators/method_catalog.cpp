@@ -220,7 +220,9 @@ const std::vector<MethodCatalogEntry> kCatalog = {
       { { "scan", "SCAN meta-GGA" }, { "tpss-d4", "+ native D4" }, { "scan-d4", "+ native D4" } } },
     { { "hf-3c", "hf3c" }, "native ab-initio QM", "native (HF3CMethod on QMEngine)", kAI, "analytic", "cuda (HF part; D3, gCP, SRB on the CPU)",
       "HF-3c composite: HF/MINIX + D3(BJ) + gCP + short-range basis correction (Sure, Grimme 2013).",
-      "closed shell; elements H-Ne (MINIX file, gCP tables); basis is fixed to MINIX and -qm.ri is ignored (both warn)",
+      "closed shell; elements H-Rn (MINIX and MINIX-ECP as ORCA 6.1 composes them, gCP/SRB via effective atomic numbers; "
+      "compared with ORCA on 21 molecules up to Pb and Ce, see the doc); basis fixed to MINIX, -qm.ecp to MINIX-ECP, "
+      "-qm.ri ignored (all warn)",
       "docs/NATIVE_QM_IMPLEMENTATION.md", "qm", { "qm_scf", "qm_cpu", "qm_gpu", "scf_all" },
       { { "orca-hf-3c", "ORCA's HF-3c (external)" } } },
     { { "mp2", "scs-mp2", "sos-mp2" }, "native ab-initio QM", "native (MP2Method on QMEngine)", kAI, "analytic (exact-integral SCF only)", "cuda",

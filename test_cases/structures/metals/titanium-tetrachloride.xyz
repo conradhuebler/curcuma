@@ -1,0 +1,7 @@
+5
+id=titanium-tetrachloride charge=0 spin=0 level=n/a source=constructed
+Ti 0 0 0
+Cl 1.252850 1.252850 1.252850
+Cl -1.252850 -1.252850 1.252850
+Cl -1.252850 1.252850 -1.252850
+Cl 1.252850 -1.252850 -1.252850

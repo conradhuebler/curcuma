@@ -58,6 +58,7 @@ inline void orbitalBasis(const std::string& name_or_file)
         bse();
     } else if (s == "minix") {
         CitationRegistry::cite("hf3c");   // MINIX is defined in the HF-3c paper
+        bse();                             // MINIS, Ahlrichs SV and def2-SVP parts taken from BSE (Nov 2026)
     }
 }
 
@@ -93,6 +94,12 @@ inline void ecp(const std::string& name)
         CitationRegistry::cite("def2_basis");
         CitationRegistry::cite("ecp_stuttgart_4d5d");
         CitationRegistry::cite("ecp_stuttgart_postd");
+        bse();
+    } else if (lowerStem(name) == "minix-ecp") {  // Nov 2026: def2-ECP plus large-core Stuttgart ECPs (In-Xe, Tl-At)
+        CitationRegistry::cite("def2_basis");
+        CitationRegistry::cite("ecp_stuttgart_4d5d");
+        CitationRegistry::cite("ecp_stuttgart_postd");
+        CitationRegistry::cite("ecp_stuttgart_large_core");
         bse();
     }
     CitationRegistry::cite("ecp_half_numerical");

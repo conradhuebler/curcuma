@@ -244,8 +244,8 @@ Stand.
 
 ## 5. Funktionen und Refactoring (niedrige Priorität)
 
-- **Native QM, nächste Basis-Stufe** (Nov 2026): H-Rn mit s-g und def2-ECP laufen (Stufe 4); offen: MINIX/hf-3c über Ne (ORCA-Export, gCP/SRB),
-  ECP auf der GPU, offene Schalen; CUDA-ERI/J/K/Gradient-Kerne für L > 2 (gezählter CPU-Fallback), `mdQuartetT` für l_a+l_b > 4; XeF2: PySCF weicht
+- **Native QM, nächste Basis-Stufe** (Nov 2026): H-Rn mit s-g und def2-ECP laufen (Stufe 4), hf-3c H-Rn (Stufe 5a); offen:
+  ECP auf der GPU, offene Schalen; otool_gcp-Gradientenfehler (He/Ne-Paare, Exponenten < 0.1) gegen ORCA-EnGrad nicht isoliert; CUDA-ERI/J/K/Gradient-Kerne für L > 2 (gezählter CPU-Fallback), `mdQuartetT` für l_a+l_b > 4; XeF2: PySCF weicht
   1.6e-6 Eh von curcuma/ORCA ab, ungeklärt. [Stufe 4](docs/NATIVE_QM_IMPLEMENTATION.md#stage-4-elements-beyond-ne-and-def2-ecp-nov-1-2026)
 - **Doppelhybride, GPU-Rest** (2026-10-31): im GPU-Gradienten bleiben die
   PT2-Zwischengrößen (RI-/kanonische Amplituden, Lagrangian, Z-Vektor-Algebra) Host-Code, gezählt als `qm_dh_grad_pt2` (`-gpu_strict

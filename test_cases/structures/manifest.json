@@ -221,6 +221,25 @@
    "description": "comment line: cyclic hydrogen-bonded acetic acid dimer"
   },
   {
+   "id": "aluminium-trichloride",
+   "class": "small",
+   "file": "small/aluminium-trichloride.xyz",
+   "format": "xyz",
+   "formula": "AlCl3",
+   "natoms": 4,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "non-equilibrium",
+   "size_bytes": 134,
+   "sha256": "373b96f37a60dc00569e34a5236cf14e5b7b719a7daad0ba215fd47f9b3795ea",
+   "provenance": {
+    "kind": "constructed",
+    "description": "AlCl3 planar D3h, r(Al-Cl) = 2.06 A"
+   },
+   "notes": "Constructed from a typical bond length for the native HF-3c element validation vs ORCA 6.1 (Nov 2026)"
+  },
+  {
    "id": "ammonia.alt1",
    "class": "small",
    "file": "small/ammonia.alt1.xyz",
@@ -675,6 +694,25 @@
    "description": "GMTKN55 G21EA/EA_25, the dichlorine radical anion (docs/KNOWN_ISSUES_ARCHIVE.md #17); charge -1 per that entry, not in the file"
   },
   {
+   "id": "dibromine",
+   "class": "small",
+   "file": "small/dibromine.xyz",
+   "format": "xyz",
+   "formula": "Br2",
+   "natoms": 2,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "non-equilibrium",
+   "size_bytes": 82,
+   "sha256": "700915bc6b25c6fca35278f260f180545a8f7c04dc72e2703957c3a59dc47858",
+   "provenance": {
+    "kind": "constructed",
+    "description": "Br2, r = 2.281 A"
+   },
+   "notes": "Constructed from a typical bond length for the native HF-3c element validation vs ORCA 6.1 (Nov 2026)"
+  },
+  {
    "id": "dihydrogen.r0.47",
    "class": "small",
    "file": "small/dihydrogen.r0.47.xyz",
@@ -884,6 +922,25 @@
     "fi_pyr"
    ],
    "description": "formula C5H5FIN; GMTKN55 HAL59 FI_pyr (a halogen-bond complex, see docs/KNOWN_ISSUES_ARCHIVE.md #26); identity from the name and the formula"
+  },
+  {
+   "id": "germane",
+   "class": "small",
+   "file": "small/germane.xyz",
+   "format": "xyz",
+   "formula": "GeH4",
+   "natoms": 5,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "non-equilibrium",
+   "size_bytes": 189,
+   "sha256": "79a63a116e76d3b0e3f231a69e98619a35e49d0c3b51684bcaecb587db61e5a2",
+   "provenance": {
+    "kind": "constructed",
+    "description": "GeH4 Td, r(Ge-H) = 1.525 A"
+   },
+   "notes": "Constructed from a typical bond length for the native HF-3c element validation vs ORCA 6.1 (Nov 2026)"
   },
   {
    "id": "h-atoms4",
@@ -2304,6 +2361,25 @@
    "notes": "native QM tests for elements beyond Ne and the def2-ECP (test_cases/qm_ecp, Nov 2026); geometry typed in by hand, bond lengths are rounded literature-like values that were NOT checked against a source"
   },
   {
+   "id": "sodium-fluoride",
+   "class": "small",
+   "file": "small/sodium-fluoride.xyz",
+   "format": "xyz",
+   "formula": "FNa",
+   "natoms": 2,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "non-equilibrium",
+   "size_bytes": 87,
+   "sha256": "63e102f043ac5512a5ac6765c82acc59d75f74575591d647385e9837bfb74e70",
+   "provenance": {
+    "kind": "constructed",
+    "description": "NaF diatomic, r = 1.926 A"
+   },
+   "notes": "Constructed from a typical bond length for the native HF-3c element validation vs ORCA 6.1 (Nov 2026)"
+  },
+  {
    "id": "sulfur-dioxide",
    "class": "small",
    "file": "small/sulfur-dioxide.xyz",
@@ -2321,6 +2397,25 @@
     "description": "SO2 in xz, S-O 1.4308 A, O-S-O 119.5 deg"
    },
    "notes": "native QM tests for elements beyond Ne and the def2-ECP (test_cases/qm_ecp, Nov 2026); geometry typed in by hand, bond lengths are rounded literature-like values that were NOT checked against a source"
+  },
+  {
+   "id": "titanium-tetrachloride",
+   "class": "metals",
+   "file": "metals/titanium-tetrachloride.xyz",
+   "format": "xyz",
+   "formula": "Cl4Ti",
+   "natoms": 5,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "non-equilibrium",
+   "size_bytes": 208,
+   "sha256": "0872b53d3b4932a73d3347cee42cbe639db4c4cd5b2a8c002a4649d8c51b08ca",
+   "provenance": {
+    "kind": "constructed",
+    "description": "TiCl4 Td, r(Ti-Cl) = 2.17 A"
+   },
+   "notes": "Constructed from a typical bond length for the native HF-3c element validation vs ORCA 6.1 (Nov 2026)"
   },
   {
    "id": "trisaccharide-c18h32o16",

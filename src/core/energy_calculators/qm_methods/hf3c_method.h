@@ -20,7 +20,9 @@
  * The HF part is the native QMEngine with the basis forced to MINIX; the other
  * `-qm.*` settings (SCF threshold, guess, ...) are honoured.
  *
- * Scope: closed shell, H-Ne (MINIX file + gCP tables). Analytic gradient (Sep 2026):
+ * Scope: closed shell, H-Rn (Nov 2026, stage 5a; H-Ne before): MINIX and MINIX-ECP as ORCA 6.1 composes them
+ * (built in, scripts/qm_basis_export_tables.py), gCP/SRB with the effective atomic numbers of the gCP program
+ * (gcp.h). Element coverage of the comparison with ORCA: docs/NATIVE_QM_IMPLEMENTATION.md. Analytic gradient (Sep 2026):
  * HF (QMEngine, WP8) + D3 (with the CN chain rule) + gCP/SRB, returned in Eh/Angstrom.
  *
  * Claude Generated: native HF-3c composite (Sep 2026)

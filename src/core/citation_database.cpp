@@ -1179,6 +1179,20 @@ const std::unordered_map<std::string, CitationData>& database()
             "  doi = {10.1063/1.1305880}\n"
             "}"
         }},
+        { "ecp_stuttgart_large_core", {
+            "Stuttgart large-core pseudopotentials of groups 13-17 (MINIX-ECP of HF-3c for In-Xe, Tl-At, as in ORCA)",
+            "Bergner, A.; Dolg, M.; Kuechle, W.; Stoll, H.; Preuss, H. Mol. Phys. 1993, 80, 1431-1441 (DOI: 10.1080/00268979300103121)",
+            "bergner1993ecp",
+            "@article{bergner1993ecp,\n"
+            "  author = {Bergner, A. and Dolg, M. and K{\\\"u}chle, W. and Stoll, H. and Preu{\\ss}, H.},\n"
+            "  title = {Ab initio energy-adjusted pseudopotentials for elements of groups 13--17},\n"
+            "  journal = {Mol. Phys.},\n"
+            "  year = {1993},\n"
+            "  volume = {80},\n"
+            "  pages = {1431--1441},\n"
+            "  doi = {10.1080/00268979300103121}\n"
+            "}"
+        }},
         { "ecp_half_numerical", {
             "Half-numerical evaluation of semi-local pseudopotential integrals (scheme of the native ECP code)",
             "Flores-Moreno, R.; Alvarez-Mendez, R. J.; Vela, A.; Koester, A. M. J. Comput. Chem. 2006, 27, 1009-1019 (DOI: 10.1002/jcc.20410)",

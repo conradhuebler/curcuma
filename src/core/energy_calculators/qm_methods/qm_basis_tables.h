@@ -35,18 +35,24 @@
  *   def2-QZVPP-RIFIT       <- basis_set_exchange/tests/sources/def2-qzvpp-rifit.1.tm.bz2  (H-La, Hf-Rn)
  *   def2-QZVPPD-RIFIT      <- basis_set_exchange/tests/sources/def2-qzvppd-rifit.1.tm.bz2  (H-La, Hf-Rn)
  *   def2-ECP               <- basis_set_exchange/tests/sources/def2-ecp.1.tm.bz2  (Rb-Rn)
- *   MINIX                  <- basis_set_exchange/data/huzinaga/MINI-scaled.0.json  (H-Ne)
+ *   MINIX                  <- basis_set_exchange/data/huzinaga/MINI-scaled.0.json (H-Ar), data/AHLRICHS_VDZ (K-Zn), basis_set_exchange/tests/sources/def2-svp.1.tm.bz2 (Ga-Rn)  (H-Rn)
+ *   MINIX-ECP              <- basis_set_exchange/tests/sources/def2-ecp.1.tm.bz2, data/STUTTGART_RLC-ECP (In-Xe, Tl-At)  (Rb-Rn)
  * def2 data: the BSE Turbomole sources, every exponent/coefficient token unchanged except Fortran 'D' -> 'E'
  *   (shell order as in the source). The BSE files state 'Data from Turbomole 7.3'; the BSE BSD-3 notice
  *   below is the licence the data are used under; Turbomole's own terms were NOT verified. Checked by the
  *   generator: the numbers equal the BSE json data (data/<name>.1.table.json composed as BSE composes it).
  * MINIX: Sure & Grimme, J. Comput. Chem. 2013, 34, 1672-1685, Table 1 (MINIX composition):
  *     H-He, B-Ne: MINIS; Li-Be: MINIS+1(p); Na-Mg: MINIS+1(p); Al-Ar: MINIS+1(d); K-Zn: SV;
- *     Ga-Kr: SVP; Rb-Xe: def2-SV(P) with ECP.  Only H-Ne is built in (the added p/d shells of Na-Kr are not exported).
- *   MINIS = BSE 'Scaled MINI' (data/huzinaga/MINI-scaled.0.json, original BSE contributor David Feller):
+ *     Ga-Kr: SVP; Rb-Xe: def2-SV(P) with ECP. Built in: H-Rn, composed as ORCA 6.1 exports MINIX
+ *     (orca_exportbasis -b minix, the reference; every shell compared with it by the generator):
+ *   H-Ar MINIS = BSE 'Scaled MINI' (data/huzinaga/MINI-scaled.0.json, original BSE contributor David Feller):
  *   exponents as in BSE; coefficients = BSE coefficients renormalised to a unit-norm contracted function,
- *   10 decimals (= ORCA 6.1 orca_exportbasis -b minix = qm_methods/MINIX.dat). Li/Be extra p shell
- *   (exponent 0.1 / 0.25, coefficient 1): from ORCA 6.1 orca_exportbasis -b minix (not in BSE).
+ *   10 decimals (= ORCA 6.1 orca_exportbasis -b minix; H-Ne = qm_methods/MINIX.dat). Extra shells, tokens
+ *   from the ORCA 6.1 export: p of Li/Be/Na/Mg (0.1/0.25/0.05/0.2, not in BSE), d of Al-Ar (equal to the
+ *   def2-SV(P) d of BSE). K-Zn: BSE 'Ahlrichs VDZ' (= SV), json tokens unchanged. Ga-Rn: def2-SVP (BSE
+ *   Turbomole tokens, 'D' -> 'E'); ORCA's MINIX has the def2-SVP f shell for Y-Cd and La-Hg.
+ *   MINIX-ECP (Rb-Rn): def2-ECP, except In-Xe and Tl-At: BSE 'Stuttgart RLC ECP' (ECP46MWB/ECP78MWB,
+ *   large core, as ORCA 6.1 assigns them to MINIX) with the f potential made the local part (ORCA's form).
  * A file found in the basis search path takes precedence over these copies (qm_basis_embedded.h).
  *
  * References (BibTeX from src/core/citation_database.cpp):
@@ -176,6 +182,33 @@
  *     pages = {1672--1685},
  *     doi = {10.1002/jcc.23317}
  *   }
+ *   @article{andrae1990ecp,
+ *     author = {Andrae, D. and H{\"a}u{\ss}ermann, U. and Dolg, M. and Stoll, H. and Preu{\ss}, H.},
+ *     title = {Energy-adjusted ab initio pseudopotentials for the second and third row transition elements},
+ *     journal = {Theor. Chim. Acta},
+ *     year = {1990},
+ *     volume = {77},
+ *     pages = {123--141},
+ *     doi = {10.1007/BF01114537}
+ *   }
+ *   @article{metz2000ecp,
+ *     author = {Metz, Bernhard and Stoll, Hermann and Dolg, Michael},
+ *     title = {Small-core multiconfiguration-{D}irac-{H}artree-{F}ock-adjusted pseudopotentials for post-d main group elements: Application to {PbH} and {PbO}},
+ *     journal = {J. Chem. Phys.},
+ *     year = {2000},
+ *     volume = {113},
+ *     pages = {2563--2569},
+ *     doi = {10.1063/1.1305880}
+ *   }
+ *   @article{bergner1993ecp,
+ *     author = {Bergner, A. and Dolg, M. and K{\"u}chle, W. and Stoll, H. and Preu{\ss}, H.},
+ *     title = {Ab initio energy-adjusted pseudopotentials for elements of groups 13--17},
+ *     journal = {Mol. Phys.},
+ *     year = {1993},
+ *     volume = {80},
+ *     pages = {1431--1441},
+ *     doi = {10.1080/00268979300103121}
+ *   }
  *
  * Basis Set Exchange license (BSD-3-Clause), reproduced verbatim:
  *
@@ -259,9 +292,10 @@ const EmbeddedBasisSet kEmbeddedBasisSets[] = {
     { "def2-QZVPP-RIFIT", "turbomole", kHeader_def2_QZVPP_RIFIT, kFooter_def2_QZVPP_RIFIT, kBlocks_def2_QZVPP_RIFIT, 86, "H-La, Hf-Rn", "" },
     { "def2-QZVPPD-RIFIT", "turbomole", kHeader_def2_QZVPPD_RIFIT, kFooter_def2_QZVPPD_RIFIT, kBlocks_def2_QZVPPD_RIFIT, 86, "H-La, Hf-Rn", "" },
     { "def2-ECP", "ecp", kHeader_def2_ECP, kFooter_def2_ECP, kBlocks_def2_ECP, 86, "Rb-Rn", "" },
-    { "MINIX", "data", kHeader_MINIX, kFooter_MINIX, kBlocks_MINIX, 10, "H-Ne", "" },
+    { "MINIX", "data", kHeader_MINIX, kFooter_MINIX, kBlocks_MINIX, 86, "H-Rn", "MINIX-ECP" },
+    { "MINIX-ECP", "ecp", kHeader_MINIX_ECP, kFooter_MINIX_ECP, kBlocks_MINIX_ECP, 86, "Rb-Rn", "" },
 };
-const int kEmbeddedBasisSetCount = 29;
+const int kEmbeddedBasisSetCount = 30;
 
 }  // namespace tables
 }  // namespace qmbasis

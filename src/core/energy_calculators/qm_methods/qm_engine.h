@@ -83,11 +83,11 @@ enum class QMFunctional {
 // Was `dft` until Sep 2026; QMMethod still merges a legacy `dft` scope below `qm`.
 BEGIN_PARAMETER_DEFINITION(qm)
     PARAM(basis, String, "def2-SVP",
-          "Orbital basis (exact name or $DATA file). Built in (all elements the Basis Set Exchange has): def2-SVP, def2-SV(P), def2-SVPD, def2-TZVP, def2-TZVPP, def2-TZVPD, def2-TZVPPD, def2-QZVP, def2-QZVPP, def2-QZVPD, def2-QZVPPD, def2-mTZVP, def2-mTZVPP, and MINIX (H-Ne). The engine runs H-Rn (Z <= 86) with s, p, d, f and g shells; Rb-Rn with the def2-ECP (-qm.ecp). CUDA ERI/gradient kernels s, p, d only: L > 2 falls back to the CPU, counted. A <name>.dat in the search path wins ($CURCUMA_QM_BASIS, $CURCUMA_DATA, the source directory, the current directory); elements a file lacks come from the built-in set of the same name.",
+          "Orbital basis (exact name or $DATA file). Built in (all elements the Basis Set Exchange has): def2-SVP, def2-SV(P), def2-SVPD, def2-TZVP, def2-TZVPP, def2-TZVPD, def2-TZVPPD, def2-QZVP, def2-QZVPP, def2-QZVPD, def2-QZVPPD, def2-mTZVP, def2-mTZVPP, and MINIX (H-Rn, the HF-3c basis as ORCA 6.1 composes it). The engine runs H-Rn (Z <= 86) with s, p, d, f and g shells; Rb-Rn with the def2-ECP (MINIX: MINIX-ECP) (-qm.ecp). CUDA ERI/gradient kernels s, p, d only: L > 2 falls back to the CPU, counted. A <name>.dat in the search path wins ($CURCUMA_QM_BASIS, $CURCUMA_DATA, the source directory, the current directory); elements a file lacks come from the built-in set of the same name.",
           "Basis", {})
     // Claude Generated (Nov 2026): effective core potentials, implementation in qm_ecp.cpp
     PARAM(ecp, String, "auto",
-          "Effective core potential: auto (def2-ECP, Rb-Rn, with every def2 orbital basis; none for other bases) | def2-ECP | none (all-electron; a def2 basis for Rb-Rn is a valence basis, so this is wrong for those elements). Semi-local ECP integrals: local part analytic, projector part with a converged radial quadrature (docs/NATIVE_QM_IMPLEMENTATION.md). Not on the GPU (the ECP matrix and gradient are CPU terms).",
+          "Effective core potential: auto (def2-ECP, Rb-Rn, with every def2 orbital basis; MINIX-ECP with MINIX; none for other bases) | def2-ECP | MINIX-ECP (ORCA 6.1's MINIX ECPs: def2-ECP except the large-core Stuttgart ECPs for In-Xe and Tl-At) | none (all-electron; a def2 basis for Rb-Rn is a valence basis, so this is wrong for those elements). Semi-local ECP integrals: local part analytic, projector part with a converged radial quadrature (docs/NATIVE_QM_IMPLEMENTATION.md). Not on the GPU (the ECP matrix and gradient are CPU terms).",
           "Basis", {})
     // WP4 (Claude Generated, Oct 2026): molecular quadrature grid, implementation in qm_grid.cpp
     PARAM(grid, String, "sg1",
@@ -462,6 +462,7 @@ private:
     std::vector<int> m_ecp_ncore;                    // core electrons an ECP replaces, per atom (0 = all-electron)
     std::string m_ecp_name = "auto";                 // -qm.ecp
     std::map<int, qmecp::ElementECP> m_ecp_elements; // parsed ECP per element
+    std::string m_ecp_set;                           // ECP set of m_ecp_elements (def2-ECP, MINIX-ECP), Nov 2026
     std::vector<qmecp::EcpCentre> m_ecp_centres;     // atoms with an ECP (positions in Bohr, set per geometry)
     qmecp::EcpLevels m_ecp_levels;                   // radial quadrature orders of the energy build
     bool setupECP();                                 // fill m_ecp_* and m_core_charges (InitialiseMolecule)

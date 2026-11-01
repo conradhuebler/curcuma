@@ -19,6 +19,8 @@
 
 #include <fmt/format.h>
 
+#include <algorithm>
+
 HF3CMethod::HF3CMethod(const json& config)
     : m_gcp_params(gcp::hf3c())
 {
@@ -38,6 +40,14 @@ HF3CMethod::HF3CMethod(const json& config)
     if (ri != "off" && ri != "false" && CurcumaLogger::get_verbosity() >= 1)
         CurcumaLogger::warn("hf-3c: -qm.ri " + ri + " ignored -- HF-3c uses exact integrals (use -method hf for RI)");
     engine_config["ri"] = "off";
+    // Stage 5a (Claude Generated, Nov 2026): Rb-Rn need the MINIX-ECP (ORCA 6.1's MINIX ECPs, large core for In-Xe
+    // and Tl-At); another -qm.ecp is a different method.
+    const std::string ecp = engine_config.contains("ecp") && engine_config["ecp"].is_string() ? engine_config["ecp"].get<std::string>() : "auto";
+    std::string ecp_low = ecp;
+    std::transform(ecp_low.begin(), ecp_low.end(), ecp_low.begin(), ::tolower);
+    if (ecp_low != "auto" && ecp_low != "minix-ecp" && CurcumaLogger::get_verbosity() >= 1)
+        CurcumaLogger::warn("hf-3c: -qm.ecp " + ecp + " ignored -- HF-3c uses MINIX-ECP for Rb-Rn");
+    engine_config["ecp"] = "MINIX-ECP";
 
     m_engine = std::make_unique<QMEngine>(QMFunctional::HF, engine_config);
     m_d3 = std::make_unique<D3ParameterGenerator>(D3ParameterGenerator::createForHF3C());
@@ -50,7 +60,8 @@ bool HF3CMethod::setMolecule(const Mol& mol)
     m_calculation_done = false;
     m_error = false;
     if (!gcp::supports(mol.m_atoms)) {
-        CurcumaLogger::error("hf-3c: only H-Ne are supported (MINIX basis file and gCP tables)");
+        CurcumaLogger::error("hf-3c: only H-Rn (Z <= 86) are supported (MINIX basis, MINIX-ECP, gCP/SRB tables); "
+                             "closed shell only");
         m_error = true;
         return false;
     }

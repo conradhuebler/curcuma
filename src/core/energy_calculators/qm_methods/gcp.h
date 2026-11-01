@@ -21,8 +21,14 @@
  * whose Python API (`dftd3.interface.GeometricCounterpoise(method="hf3c")`)
  * is the validation oracle (test_cases/qm_hf3c).
  *
- * Scope: H-Ne, the elements of the shipped MINIX basis. Only the parameter
- * set for HF-3c (hf/minix + base) is provided.
+ * Scope: H-Rn. The reference tables cover H-Kr; heavier elements take the
+ * parameters of an effective atomic number (Rb-Xe -> K-Kr, Cs-La -> K-Sc,
+ * Ce-Lu -> Sc, Hf-Rn -> Ti-Kr), as simple-dftd3 and gCP 1.06 (ORCA's
+ * otool_gcp) do; the SRB term of HF-3c uses the effective numbers too and,
+ * as otool_gcp, only pairs of H-Ar (simple-dftd3 has no such cut).
+ * Only the parameter set for HF-3c (hf/minix + base) is provided.
+ * Extension beyond Ne (Nov 2026, Claude Generated): checked against otool_gcp
+ * 1.06 of ORCA 6.1 for every element (test_cases/qm_hf3c, test_gcp_elements).
  *
  * Claude Generated: native gCP/SRB for HF-3c (Sep 2026)
  *
@@ -53,7 +59,7 @@ struct Parameters {
 /// HF-3c = HF/MINIX gCP + SRB (simple-dftd3 gcp/param.f90, case p_minix_bas).
 Parameters hf3c();
 
-/// True if every element of the molecule has gCP/SRB data (H-Ne).
+/// True if every element of the molecule has gCP/SRB data (H-Rn, via the effective atomic number).
 bool supports(const std::vector<int>& atoms);
 
 /**

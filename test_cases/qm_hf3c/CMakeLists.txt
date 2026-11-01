@@ -22,6 +22,35 @@ if(Python3_Interpreter_FOUND)
     endforeach()
 endif()
 
+# gCP + SRB of HF-3c for every element H-Rn vs otool_gcp 1.06 of ORCA 6.1 (Nov 2026, Claude Generated;
+# reference_gcp.json from scripts/hf3c_gcp_reference.py, synthetic 4-7 atom clusters, no molecules).
+add_executable(test_gcp_elements test_gcp_elements.cpp)
+target_link_libraries(test_gcp_elements PRIVATE curcuma_core)
+target_include_directories(test_gcp_elements PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/external)
+target_compile_features(test_gcp_elements PRIVATE cxx_std_17)
+add_test(NAME qm_hf3c_gcp_elements COMMAND test_gcp_elements ${CMAKE_CURRENT_SOURCE_DIR}/reference_gcp.json)
+set_tests_properties(qm_hf3c_gcp_elements PROPERTIES TIMEOUT 60 LABELS "qm_hf3c;qm_hf3c_z")
+
+# HF-3c beyond Ne vs ORCA 6.1 (Nov 2026, stage 5a, Claude Generated): check_hf3c_z.py with reference_orca_z.json
+# (scripts/hf3c_orca_reference.py; ORCA 6.1.0 `! HF-3c VeryTightSCF`, EnGrad, `Opt TightOpt`). Structures from
+# test_cases/structures. ref: every term and the total <= 1e-7 Eh, gradient vs EnGrad where stored; fd: FD gate of
+# the assembled gradient (4-point, 0.005 Bohr) <= 1e-8 Eh/Bohr; opt: -opt minimum vs ORCA's <= 1e-7 Eh.
+if(Python3_Interpreter_FOUND)
+    set(_HF3C_Z_CHECK ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/check_hf3c_z.py --curcuma $<TARGET_FILE:curcuma>)
+    foreach(_case NaF NaCl H2S PH3 SiH4 HCl SO2 AlCl3 KCl ZnCl2 TiCl4 GeH4 HBr Br2 HI CH3I XeF2 CsI HgCl2 PbH4 CeF4)
+        add_test(NAME qm_hf3c_z_ref_${_case} COMMAND ${_HF3C_Z_CHECK} --check ref --case ${_case})
+        set_tests_properties(qm_hf3c_z_ref_${_case} PROPERTIES TIMEOUT 600 LABELS "qm_hf3c;qm_hf3c_z")
+    endforeach()
+    foreach(_case NaF H2S HBr HI)
+        add_test(NAME qm_hf3c_z_fd_${_case} COMMAND ${_HF3C_Z_CHECK} --check fd --case ${_case} --coords 0:x 0:z 1:z)
+        set_tests_properties(qm_hf3c_z_fd_${_case} PROPERTIES TIMEOUT 600 LABELS "qm_hf3c;qm_hf3c_z")
+    endforeach()
+    foreach(_case H2S HI)
+        add_test(NAME qm_hf3c_z_opt_${_case} COMMAND ${_HF3C_Z_CHECK} --check opt --case ${_case})
+        set_tests_properties(qm_hf3c_z_opt_${_case} PROPERTIES TIMEOUT 900 LABELS "qm_hf3c;qm_hf3c_z")
+    endforeach()
+endif()
+
 # updateGeometry() must invalidate the integral/SCF caches (opt/scan/MD path).
 add_executable(test_qm_update_geometry test_qm_update_geometry.cpp)
 target_link_libraries(test_qm_update_geometry PRIVATE curcuma_core)

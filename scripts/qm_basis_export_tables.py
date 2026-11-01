@@ -122,6 +122,7 @@ SETS = [
     ("def2-QZVPPD-RIFIT", "cbas", "def2-qzvppd-rifit.1.tm.bz2", "def2_rifit"),
     ("def2-ECP", "ecp", "def2-ecp.1.tm.bz2", "def2_ecp"),
     ("MINIX", "orbital", "huzinaga/MINI-scaled.0.json", "minix"),
+    ("MINIX-ECP", "ecp", "def2-ECP + STUTTGART_RLC-ECP", "minix"),
 ]
 FAMILIES = [
     ("def2_sv", "def2-SVP, def2-SV(P), def2-SVPD"),
@@ -131,7 +132,7 @@ FAMILIES = [
     ("def2_jk", "def2-universal-JFIT, def2-universal-JKFIT, def2-SV(P)-JKFIT, def2-mTZVPP-RIJ"),
     ("def2_rifit", "def2-*-RIFIT (SVP, SV(P), SVPD, TZVP, TZVPP, TZVPD, TZVPPD, QZVP, QZVPP, QZVPPD)"),
     ("def2_ecp", "def2-ECP (effective core potentials; used by qm_ecp.cpp)"),
-    ("minix", "MINIX (H-Ne)"),
+    ("minix", "MINIX (H-Rn) and MINIX-ECP (Rb-Rn), the HF-3c basis of ORCA 6.1"),
 ]
 # stage-1 sets: embedded H-Ne must equal the shipped files (same shells, same order)
 REPO_FILES = {"def2-SVP": "def2-SVP.dat", "def2-SV(P)": "def2-SV(P).dat", "MINIX": "MINIX.dat",
@@ -150,7 +151,27 @@ ORCA_NAMES = {"def2-SVP": "def2-svp", "def2-SV(P)": "def2-sv(p)", "def2-SVPD": "
 # BSE table file stem where it is not the set name
 TABLE_NAMES = {"def2-mTZVP": "def2-mtzvp", "def2-mTZVPP": "def2-mtzvpp", "def2-mTZVPP-RIJ": "def2-mtzvpp-rij"}
 LICENSE_PATH = "LICENSE"
-MINIX_EXTRA_P = {"li": ("0.1000000000", "1.0000000000"), "be": ("0.2500000000", "1.0000000000")}
+# MINIX shells beyond MINIS (Sure & Grimme 2013, Table 1: Li-Be, Na-Mg MINIS+1(p); Al-Ar MINIS+1(d)): exponent and
+# coefficient tokens as ORCA 6.1 `orca_exportbasis -b minix` prints them (the p shells are not in BSE; the Al-Ar d
+# exponents equal the polarisation d of BSE def2-SV(P), checked with --compare-orca).
+MINIX_EXTRA_P = {"li": ("0.1000000000", "1.0000000000"), "be": ("0.2500000000", "1.0000000000"),
+                 "na": ("0.0500000000", "1.0000000000"), "mg": ("0.2000000000", "1.0000000000")}
+MINIX_EXTRA_D = {"al": ("0.3000000000", "1.0000000000"), "si": ("0.3500000000", "1.0000000000"),
+                 "p": ("0.4500000000", "1.0000000000"), "s": ("0.5500000000", "1.0000000000"),
+                 "cl": ("0.6500000000", "1.0000000000"), "ar": ("0.6960000000", "1.0000000000")}
+# MINIX composition per element range as ORCA 6.1 exports it (stage 5a, Nov 2026; every shell compared with the
+# export, --compare-orca): H-Ar MINIS (+ the extra shells above), K-Zn Ahlrichs SV (BSE 'Ahlrichs VDZ', Schaefer,
+# Horn, Ahlrichs 1992), Ga-Rn def2-SVP (Table 1 names SVP for Ga-Kr and def2-SV(P) for Rb-Xe; ORCA's MINIX carries
+# the f shell of def2-SVP for Y-Cd and La-Hg, i.e. it is def2-SVP throughout).
+MINIX_MINIS_MAX_Z, MINIX_SV_MAX_Z, MINIX_MAX_Z = 18, 30, 86
+# MINIX-ECP: ORCA's MINIX ECPs (Rb-Rn). Equal to def2-ECP except In-Xe and Tl-At, where ORCA uses the large-core
+# Stuttgart ECPs (ECP46MWB, ECP78MWB; BSE 'Stuttgart RLC ECP', Bergner et al. 1993) with the def2-SVP valence
+# basis, written with the f potential as the local part (BSE: f semi-local, zero g local) and without the g
+# potential BSE has for Xe and Tl-At (ORCA drops it), see minix_ecp().
+MINIX_RLC_ECP = set("in sn sb te i xe tl pb bi po at".split())
+# ORCA 6.1's MINIX ECP of Po has, in its d block, the BSE g potential with the opposite sign as an extra term
+# (d = U_d - U_g - U_f); no other element has it. Reproduced because ORCA is the reference (Nov 2026).
+MINIX_ECP_ORCA_MINUS_G = {("po", 2)}
 # literature per family (keys of src/core/citation_database.cpp; BibTeX copied into the header)
 FAMILY_CITES = {
     "def2_sv": ["def2_basis", "def2_sv_1992", "def2_diffuse", "bse_2019"],
@@ -160,7 +181,8 @@ FAMILY_CITES = {
     "def2_jk": ["def2_jfit", "def2_jkfit", "def2_mtzvpp", "bse_2019"],
     "def2_rifit": ["def2_rifit_1998", "def2_rifit_2005", "def2_rifit_2007", "def2_rifit_diffuse", "bse_2019"],
     "def2_ecp": ["bse_2019"],
-    "minix": ["hf3c", "bse_2019"],
+    "minix": ["hf3c", "def2_sv_1992", "def2_basis", "ecp_stuttgart_4d5d", "ecp_stuttgart_postd",
+              "ecp_stuttgart_large_core", "bse_2019"],
 }
 
 
@@ -376,23 +398,129 @@ def normalised(l, exps, coefs):
     return [c / n for c in coefs]
 
 
-def minix_from_bse(js):
-    """MINIX H-Ne: BSE MINI-scaled (renormalised, 10 decimals) + the Li/Be p shell."""
+def minis_shells(js, z):
+    """MINIS of element z: BSE MINI-scaled renormalised to unit norm, 10 decimals (= ORCA 6.1's MINIX export)."""
+    shells = []
+    for sh in js["elements"][str(z)]["electron_shells"]:
+        (l,) = sh["angular_momentum"]
+        assert len(sh["coefficients"]) == 1, "general contraction in MINI-scaled"
+        exps = [float(x) for x in sh["exponents"]]
+        coefs = normalised(l, exps, [float(x) for x in sh["coefficients"][0]])
+        shells.append((l, [("%.10f" % e, "%.10f" % c) for e, c in zip(exps, coefs)]))
+        for tok, e in zip(shells[-1][1], exps):
+            assert float(tok[0]) == e, "exponent not exact at 10 decimals"
+    return shells
+
+
+def minix_from_bse(js, sv, svp):
+    """MINIX H-Rn (stage 5a, Nov 2026; H-Ne unchanged since stage 1).
+
+    js: BSE MINI-scaled json; sv: compose_bse('AHLRICHS_VDZ'); svp: def2-SVP shells parsed from the .tm file."""
     out = {}
-    for z, el in enumerate(HNE, start=1):
-        shells = []
-        for sh in js["elements"][str(z)]["electron_shells"]:
-            (l,) = sh["angular_momentum"]
-            assert len(sh["coefficients"]) == 1, "general contraction in MINI-scaled"
-            exps = [float(x) for x in sh["exponents"]]
-            coefs = normalised(l, exps, [float(x) for x in sh["coefficients"][0]])
-            shells.append((l, [("%.10f" % e, "%.10f" % c) for e, c in zip(exps, coefs)]))
-            for tok, e in zip(shells[-1][1], exps):
-                assert float(tok[0]) == e, "exponent not exact at 10 decimals"
-        if el in MINIX_EXTRA_P:
-            shells.append((1, [MINIX_EXTRA_P[el]]))
+    for z in range(1, MINIX_MAX_Z + 1):
+        el = SYMBOLS[z - 1]
+        if z <= MINIX_MINIS_MAX_Z:
+            shells = minis_shells(js, z)
+            if el in MINIX_EXTRA_P:
+                shells.append((1, [MINIX_EXTRA_P[el]]))
+            if el in MINIX_EXTRA_D:
+                shells.append((2, [MINIX_EXTRA_D[el]]))
+        elif z <= MINIX_SV_MAX_Z:
+            shells = [(l, list(p)) for l, p in sv[el][0]]
+            assert sv[el][1] is None
+        else:
+            shells = [(l, list(p)) for l, p in svp[el]]
         out[el] = shells
     return out
+
+
+def minix_ecp(def2_ecp, rlc):
+    """MINIX-ECP (Rb-Rn) as Turbomole '$ecp' lines.
+
+    def2-ECP elements: the def2-ECP lines unchanged. In-Xe, Tl-At: BSE 'Stuttgart RLC ECP' (lmax g with a zero local
+    g potential, semi-local s, p, d, f; for Xe and Tl-At lmax h, zero h, semi-local s-g) rewritten the way ORCA 6.1
+    exports it for MINIX: the f potential U_f is the local part, every l < 3 block becomes U_l - U_f (the U_l terms,
+    then the U_f terms with the opposite sign), and a semi-local g potential is DROPPED (ORCA's export has none)."""
+    out = {}
+    for z in range(37, MINIX_MAX_Z + 1):
+        el = SYMBOLS[z - 1]
+        if el not in MINIX_RLC_ECP:
+            out[el] = list(def2_ecp[el])
+            continue
+        ncore, pots = rlc[el][1]
+        blocks = dict((L, p) for L, p in pots)
+        top = max(blocks)
+        assert sorted(blocks) == list(range(top + 1)) and top in (4, 5), (el, sorted(blocks))
+        assert all(float(c) == 0.0 for c, _, _ in blocks[top]), (el, "nonzero local potential")
+        # Xe, Tl-At: BSE also has a semi-local g potential (lmax h); ORCA's MINIX export drops it (checked).
+        neg = lambda t: t[1:] if t.startswith("-") else "-" + t
+        lines = ["ncore = %d lmax = 3" % ncore, "f"]
+        lines += ["%s %d %s" % (c, int(r), e) for c, r, e in blocks[3]]
+        for L in (0, 1, 2):
+            lines.append("%s-f" % LETTERS[L])
+            lines += ["%s %d %s" % (c, int(r), e) for c, r, e in blocks[L]]
+            if (el, L) in MINIX_ECP_ORCA_MINUS_G:  # ORCA quirk, see MINIX_ECP_ORCA_MINUS_G
+                lines += ["%s %d %s" % (neg(c), int(r), e) for c, r, e in blocks[4]]
+            lines += ["%s %d %s" % (neg(c), int(r), e) for c, r, e in blocks[3]]
+        out[el] = lines
+    return out
+
+
+def read_orca_ecp(path):
+    """ORCA NewECP blocks -> {element: (ncore, {local L or (l, lmax): sorted [(coef, r, exp)]})} with floats."""
+    out, el, cur, lmax = {}, None, None, None
+    for line in open(path):
+        t = line.split()
+        if not t:
+            continue
+        if t[0] == "NewECP":
+            el, cur = t[1].lower(), None
+            out[el] = [None, {}]
+            continue
+        if el is None:
+            continue
+        if t[0] == "End":
+            el = None
+        elif t[0] == "N_core":
+            out[el][0] = int(t[1])
+        elif t[0] == "lmax":
+            lmax = LETTERS.index(t[1])
+        elif len(t) == 2 and t[0] in LETTERS:
+            cur = LETTERS.index(t[0])
+            out[el][1][cur if cur == lmax else (cur, lmax)] = []
+        elif len(t) == 4:
+            key = cur if cur == lmax else (cur, lmax)
+            out[el][1][key].append((float(t[2]), int(t[3]), float(t[1])))
+    return {e: (n, {k: sorted(v) for k, v in b.items()}) for e, (n, b) in out.items()}
+
+
+def compare_orca_ecp(lines_by_el, orca_file):
+    """MINIX-ECP against ORCA's export: same ncore and the same potentials as numbers (ORCA prints 10 decimals)."""
+    orca = read_orca_ecp(orca_file)
+    worst, n, worst_el, fewer = 0.0, 0, None, set()
+    for el, lines in lines_by_el.items():
+        ncore, pots = tm_ecp_to_values(lines)
+        lmax = int(re.match(r"ncore\s*=\s*\d+\s+lmax\s*=\s*(\d+)", lines[0]).group(1))
+        mine = {}
+        for L, p in pots:
+            mine[L if L == lmax else (L, lmax)] = sorted(p)
+        on, op = orca[el]
+        assert on == ncore and sorted(op, key=str) == sorted(mine, key=str), (el, "ECP structure differs from ORCA")
+        for k in mine:
+            assert len(mine[k]) == len(op[k]), (el, k)
+            for (c1, r1, e1), (c2, r2, e2) in zip(mine[k], op[k]):
+                assert r1 == r2, (el, k)
+                dd = max(abs(c1 - c2) / max(1.0, abs(c2)), abs(e1 - e2) / max(1.0, abs(e2)))
+                if dd > 1e-9:
+                    fewer.add(el)
+                if dd > worst:
+                    worst, worst_el = dd, (el, k, c1, c2, e1, e2)
+        n += 1
+    # Hf-Hg: ORCA's own def2-ECP data carry fewer digits than BSE for some terms (Hf: 10.0467225 vs 10.04672251),
+    # up to 2.2e-8 relative (Nov 2026); the BSE values are kept.
+    assert worst < 5e-8, (worst, worst_el)
+    return ("%d elements equal to ORCA (ncore, potentials; max rel diff %.1e; above 1e-9 for %s)"
+            % (n, worst, " ".join(sorted(fewer, key=SYMBOLS.index)) or "none"))
 
 
 # ------------------------------------------------------------------------------------------------- text
@@ -468,10 +596,10 @@ def read_orca(orca_file):
     return data
 
 
-def compare_orca(name, emb, orca_file, elements):
+def compare_orca(name, emb, orca_file, elements, strict=False):
     """Max relative differences against an ORCA NewGTO export (shells matched by L, length and exponents)."""
     data = read_orca(orca_file)
-    de = dc_norm = ac = 0.0
+    de = de_abs = dc_norm = ac = 0.0
     nsh = 0
     missing = []
     for e in elements:
@@ -489,6 +617,7 @@ def compare_orca(name, emb, orca_file, elements):
             ea, eb = [num(x) for x, _ in pa], [num(x) for x, _ in pb]
             ca, cb = [num(y) for _, y in pa], [num(y) for _, y in pb]
             de = max(de, max(abs(x - y) / abs(y) for x, y in zip(ea, eb)))
+            de_abs = max(de_abs, max(abs(x - y) for x, y in zip(ea, eb)))
             na, nb = normalised(l, ea, ca), normalised(l, eb, cb)
             dc_norm = max(dc_norm, max(abs(x - y) / max(abs(y), 1e-300) for x, y in zip(na, nb)))
             # ORCA prints 10 decimals: absolute difference in ORCA's scale (embedded rescaled to ORCA's norm)
@@ -499,6 +628,12 @@ def compare_orca(name, emb, orca_file, elements):
            " scale)" % (nsh, de, dc_norm, ac))
     if missing:
         msg += "; not in ORCA: " + " ".join(missing)
+    if strict:  # MINIX (stage 5a): ORCA's export is the reference, printed with 10 decimals
+        # exponents: within the rounding of the 10th decimal; coefficients: ORCA prints the coefficients of the
+        # normalised contraction with 10 decimals, which for strongly cancelling contractions (Ce s shells) leaves
+        # up to 1.1e-8 after renormalising both sides (Nov 2026 measurement).
+        msg += ", max abs diff exponents %.1e" % de_abs
+        assert not missing and de_abs < 5.1e-11 and ac < 2e-8, (name, msg)
     return msg
 
 
@@ -556,9 +691,14 @@ def notice(w, title, license_text, family_sets, cite_keys):
     w.append(" * Source: Basis Set Exchange repository, https://github.com/MolSSI-BSE/basis_set_exchange")
     w.append(" *   commit " + BSE_COMMIT + " (master of 2026-08-07, downloaded 2026-11-01)")
     for s in family_sets:
-        path = (BSE_DATA if s["kind"] == "orbital" and s["name"] == "MINIX" else BSE_TM) + s["src"]
+        if s["name"] == "MINIX":
+            path = BSE_DATA + s["src"] + " (H-Ar), data/AHLRICHS_VDZ (K-Zn), " + BSE_TM + "def2-svp.1.tm.bz2 (Ga-Rn)"
+        elif s["name"] == "MINIX-ECP":
+            path = BSE_TM + "def2-ecp.1.tm.bz2, data/STUTTGART_RLC-ECP (In-Xe, Tl-At)"
+        else:
+            path = BSE_TM + s["src"]
         w.append(" *   %-22s <- %s  (%s)" % (s["name"], path, s["range"]))
-    if any(s["name"] != "MINIX" for s in family_sets):
+    if any(not s["name"].startswith("MINIX") for s in family_sets):
         w.append(" * def2 data: the BSE Turbomole sources, every exponent/coefficient token unchanged except Fortran 'D' -> 'E'")
         w.append(" *   (shell order as in the source). The BSE files state 'Data from Turbomole 7.3'; the BSE BSD-3 notice")
         w.append(" *   below is the licence the data are used under; Turbomole's own terms were NOT verified. Checked by the")
@@ -566,11 +706,16 @@ def notice(w, title, license_text, family_sets, cite_keys):
     if any(s["name"] == "MINIX" for s in family_sets):
         w.append(" * MINIX: Sure & Grimme, J. Comput. Chem. 2013, 34, 1672-1685, Table 1 (MINIX composition):")
         w.append(" *     H-He, B-Ne: MINIS; Li-Be: MINIS+1(p); Na-Mg: MINIS+1(p); Al-Ar: MINIS+1(d); K-Zn: SV;")
-        w.append(" *     Ga-Kr: SVP; Rb-Xe: def2-SV(P) with ECP.  Only H-Ne is built in (the added p/d shells of Na-Kr are not exported).")
-        w.append(" *   MINIS = BSE 'Scaled MINI' (data/huzinaga/MINI-scaled.0.json, original BSE contributor David Feller):")
+        w.append(" *     Ga-Kr: SVP; Rb-Xe: def2-SV(P) with ECP. Built in: H-Rn, composed as ORCA 6.1 exports MINIX")
+        w.append(" *     (orca_exportbasis -b minix, the reference; every shell compared with it by the generator):")
+        w.append(" *   H-Ar MINIS = BSE 'Scaled MINI' (data/huzinaga/MINI-scaled.0.json, original BSE contributor David Feller):")
         w.append(" *   exponents as in BSE; coefficients = BSE coefficients renormalised to a unit-norm contracted function,")
-        w.append(" *   10 decimals (= ORCA 6.1 orca_exportbasis -b minix = qm_methods/MINIX.dat). Li/Be extra p shell")
-        w.append(" *   (exponent 0.1 / 0.25, coefficient 1): from ORCA 6.1 orca_exportbasis -b minix (not in BSE).")
+        w.append(" *   10 decimals (= ORCA 6.1 orca_exportbasis -b minix; H-Ne = qm_methods/MINIX.dat). Extra shells, tokens")
+        w.append(" *   from the ORCA 6.1 export: p of Li/Be/Na/Mg (0.1/0.25/0.05/0.2, not in BSE), d of Al-Ar (equal to the")
+        w.append(" *   def2-SV(P) d of BSE). K-Zn: BSE 'Ahlrichs VDZ' (= SV), json tokens unchanged. Ga-Rn: def2-SVP (BSE")
+        w.append(" *   Turbomole tokens, 'D' -> 'E'); ORCA's MINIX has the def2-SVP f shell for Y-Cd and La-Hg.")
+        w.append(" *   MINIX-ECP (Rb-Rn): def2-ECP, except In-Xe and Tl-At: BSE 'Stuttgart RLC ECP' (ECP46MWB/ECP78MWB,")
+        w.append(" *   large core, as ORCA 6.1 assigns them to MINIX) with the f potential made the local part (ORCA's form).")
     w.append(" * A file found in the basis search path takes precedence over these copies (qm_basis_embedded.h).")
     w.append(" *")
     w.append(" * References (BibTeX from src/core/citation_database.cpp):")
@@ -673,8 +818,13 @@ def build(cache, report):
     for name, kind, src, fam in SETS:
         s = {"name": name, "kind": kind, "src": src, "family": fam, "ecp": ""}
         if name == "MINIX":
-            data, ecp = minix_from_bse(fetch_json(BSE_DATA + src, cache)), {}
-            s["bse"] = None
+            svp = next(x for x in sets if x["name"] == "def2-SVP")["data"]
+            data = minix_from_bse(fetch_json(BSE_DATA + src, cache), compose_bse("AHLRICHS_VDZ.0.table.json", cache), svp)
+            ecp, s["bse"] = {}, None
+            s["ecp"] = "MINIX-ECP"
+        elif name == "MINIX-ECP":
+            data, s["bse"] = {}, None
+            ecp = minix_ecp(ecp_ref, compose_bse("STUTTGART_RLC-ECP.0.table.json", cache))
         else:
             data, ecp = parse_tm(bz2.decompress(fetch(BSE_TM + src, cache)).decode())
             bse = compose_bse(TABLE_NAMES.get(name, name) + ".1.table.json", cache)
@@ -683,7 +833,8 @@ def build(cache, report):
             s["bse"] = bse
         s["data"], s["ecp_lines"] = data, ecp
         if kind == "ecp":
-            ecp_ref = ecp
+            if name == "def2-ECP":
+                ecp_ref = ecp
             s["format"] = "ecp"
             s["header"], s["footer"] = "$ecp\n", "*\n$end\n"
             s["blocks"] = {el: ecp_block(el, name, ecp[el]) for el in ecp}
@@ -707,7 +858,7 @@ def build(cache, report):
 
     # (2) ECP sections of the orbital .tm files == def2-ECP; json ECP components
     for s in sets:
-        if s["kind"] == "orbital" and s["name"] != "MINIX":
+        if s["kind"] == "orbital" and not s["name"].startswith("MINIX"):
             if s["ecp_lines"]:
                 for el, lines in s["ecp_lines"].items():
                     assert lines == ecp_ref[el], (s["name"], el, "ECP section differs from def2-ECP")
@@ -732,7 +883,9 @@ def build(cache, report):
         for s in sets:
             c = s.get("check")
             if c is None:
-                chk = "MINIX: BSE MINI-scaled renormalised + ORCA Li/Be p (equals qm_methods/MINIX.dat)"
+                chk = ("MINIX: BSE MINI-scaled renormalised + ORCA p/d (H-Ar), Ahlrichs VDZ (K-Zn), def2-SVP (Ga-Rn);"
+                       " H-Ne equals qm_methods/MINIX.dat" if s["name"] == "MINIX" else
+                       "MINIX-ECP: def2-ECP + Stuttgart RLC (In-Xe, Tl-At), f local")
             elif s["kind"] == "ecp":
                 chk = "ECP of %d elements equal (%d values)" % (c["ecp"], c["values"])
             else:
@@ -777,12 +930,21 @@ def main():
     license_text, sets = build(a.cache, True)
     if a.compare_orca:
         for s in sets:
+            if s["name"] == "MINIX-ECP":
+                continue  # compared together with MINIX (same ORCA export)
             if s["name"] not in ORCA_NAMES:
                 print("ORCA %-21s no ORCA 6.1 set of that name" % s["name"])
                 continue
             f = os.path.join(a.compare_orca, ORCA_NAMES[s["name"]].replace("/", "_") + ".bas")
             if not os.path.exists(f):
                 print("ORCA %-21s missing %s" % (s["name"], f))
+                continue
+            if s["name"] == "MINIX":
+                els = SYMBOLS[:MINIX_MAX_Z]
+                print("ORCA %-21s (%s) H-Rn: %s" % (s["name"], ORCA_NAMES[s["name"]],
+                                                     compare_orca(s["name"], s["data"], f, els, strict=True)))
+                print("ORCA %-21s (%s) Rb-Rn: %s" % ("MINIX-ECP", ORCA_NAMES[s["name"]], compare_orca_ecp(
+                    next(x for x in sets if x["name"] == "MINIX-ECP")["ecp_lines"], f)))
                 continue
             print("ORCA %-21s (%s) H-Ne: %s" % (s["name"], ORCA_NAMES[s["name"]], compare_orca(s["name"], s["data"], f, HNE)))
     files = outputs(license_text, sets)
