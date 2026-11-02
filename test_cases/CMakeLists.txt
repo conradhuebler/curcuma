@@ -766,6 +766,17 @@ endif()
 add_test(NAME pbc_topology COMMAND test_pbc_topology WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 set_tests_properties(pbc_topology PROPERTIES TIMEOUT 300 LABELS "pbc;gfnff;react")
 
+# Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED D1): with a cell SimpleMD's COM removal must leave the rigid
+# rotation alone (it is not conserved under PBC and its removal drained the NVE energy); -restart_file accepts
+# the {"MD": {...}} layout curcuma writes.
+add_executable(test_pbc_md_com_removal unit/test_pbc_md_com_removal.cpp)
+target_link_libraries(test_pbc_md_com_removal curcuma_core test_molecule_registry)
+if(USE_PCH)
+    target_precompile_headers(test_pbc_md_com_removal REUSE_FROM curcuma_core)
+endif()
+add_test(NAME pbc_md_com_removal COMMAND test_pbc_md_com_removal WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(pbc_md_com_removal PROPERTIES TIMEOUT 300 LABELS "pbc;simplemd;gfnff")
+
 # Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A3b): a periodic cell sends a GPU GFN-FF method to the CPU
 # (MethodFactory::periodicCellNeedsCpu); runs without a GPU, with a stand-in for the plugin wrapper.
 add_executable(test_pbc_gpu_guard unit/test_pbc_gpu_guard.cpp)

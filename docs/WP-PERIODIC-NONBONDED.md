@@ -750,5 +750,94 @@ without the cell: the 0.5 fs step at 400 K), the loss comes in plateaus and drop
 intervals: -1.6e-3, -0.9e-3, -0.9e-3, -1.1e-3, -3.7e-3, ... -7.9e-3), 11 fragment wraps in 600 steps with dE_tot at the
 wrap steps within the noise (-3.4e-4 .. +3.3e-4), HB-list changes every 10 steps likewise; `-coulomb false` runs are
 unphysical with and without the cell (-0.2 Eh/ps, discarded). **Open (TODO.md): not located; next a longer per-step
-series with a work balance (dE_pot vs -F.dx per step) to find the steps where energy and force disagree.**
+series with a work balance (dE_pot vs -F.dx per step) to find the steps where energy and force disagree.** **Resolved in D1 below (2026-11-02): the loss was the COM/rotation removal, and these runs were fresh starts because `-restart_file` had rejected the restart file.**
 
+## D1 NVE energy loss with a cell: cause and fix (2026-11-02, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+On `feature/bulk` (base `7b4beca1`), CPU only. The B3 finding (j) is reproduced and root-caused: **the energy was
+removed by SimpleMD's periodic COM/rotation removal, not by the periodic energy surface.** Two bookkeeping defects, both
+in `src/capabilities/simplemd.cpp`:
+
+1. **`RemoveRotation()` (remove_com_mode 1, the default, every `remove_com_motion` = 100 fs) subtracts the rigid
+   rotation `omega = I^-1 L` of the whole system together with the COM velocity.** In a cluster in vacuum the angular
+   momentum L is a constant of motion, so after the first call nothing is taken out. With a cell L about the COM of the
+   wrapped coordinates is not conserved (no rotational symmetry; every wrap moves a molecule by a lattice vector), so
+   every call removed `1/2 L^T I^-1 L` of kinetic energy: the loss is a staircase with one step per 200 MD steps. Fix:
+   with a cell (`m_has_pbc`) the translation only is removed, and the DOF count subtracts 3 instead of 6 (the reported
+   T of a periodic run changes by that ratio, e.g. 534 -> 537 DOF for 180 atoms). Modes 2/3 (per-fragment rotations,
+   opt-in) are unchanged.
+2. **`-restart_file` rejected curcuma's own restart files.** The files SimpleMD writes wrap the state as
+   `{"MD": {...}}`; the `-restart_file` path handed the outer object to the validator, which failed on the missing
+   `method` and **silently started a fresh run** (`[ERROR] Restart file validation failed ... Starting fresh simulation
+   instead`, exit 0). Every B3 "NVE after CSVR" run therefore started from the random packing with fresh 300 K
+   velocities and no thermostat, which is why T rose to 350-430 K. Fix: the wrapped layout is unwrapped. Note that a
+   restart file carries `thermostat`, `dT`, `MaxTime`, `T` and overrides the CLI; the protocol below edits the file.
+
+### Evidence (pre-fix binary saved, 2 ps NVE from a fresh start at 300 K, dt 0.5 fs, 3 threads; drift = linear fit of
+E_tot over the last 1.5 ps; `max-min` of E_tot over the run; box60 = the B3 packing, box60b = a second packing, seed 2)
+
+| experiment | run | drift (Eh/ps) | max-min (Eh) | comment |
+|---|---|---|---|---|
+| 1 reproduce, cell, default removal (n = 3) | box60 seed 7 / seed 11 / box60b seed 7 | -5.9e-3 / -9.6e-3 / -6.5e-3 | 1.2e-2 / 1.7e-2 / 1.8e-2 | B3 (j): -4.0e-3 / 8.6e-3 |
+| 1 no cell, default removal (n = 3) | same three | -1.0e-5 / -1.7e-5 / -1.5e-5 | 1.3e-3 / 1.6e-3 / 1.5e-3 | reference level |
+| discriminator: cell, `-remove_com_motion 0` (n = 3) | same three | -4.2e-5 / -3.6e-5 / -6.8e-5 | 1.28e-3 / 1.56e-3 / 1.52e-3 | **equal to no cell** (max-min to 2 digits) |
+| no cell, `-remove_com_motion 0` (n = 3) | same three | -1.9e-5 / -2.5e-5 / -2.4e-5 | 1.26e-3 / 1.56e-3 / 1.52e-3 | removal is inert in vacuum |
+| A giant cell L = 300 Bohr, cluster centred, no wrap, no image interaction | default removal / off | -5.9e-6 / -1.4e-5 | 1.40e-3 / 1.40e-3 | cell plumbing alone does not drift: L is conserved without wraps |
+| B ladder, L = 44 Bohr, 3 ps, default removal | 1 / 2 / 8 H2O | -2.8e-7 / -1.8e-6 / **-3.0e-3** | 1.9e-5 / 9.8e-5 / 5.8e-3 | drift appears with collisions + wraps |
+| B ladder, removal off | 1 / 2 / 8 H2O | -2.9e-7 / +1.4e-8 / -2.3e-6 | 1.9e-5 / 8.8e-5 / 1.5e-4 | 8 H2O: 1300 x smaller |
+| C dt scaling, cell, default removal, box60 seed 7 | dt 0.25 / 0.5 / 1.0 fs | -5.6e-3 / -5.9e-3 / -9.7e-3 | 1.0e-2 / 1.2e-2 / 1.9e-2 | loss per time, not per step: an event every 100 fs |
+| per-step series (B3 diagnostics run, 600 steps, cell) | dE_tot at steps 200 and 400 | -6.7e-4 / -6.9e-4 Eh | | the two largest of 600 steps (per-step noise 2.4e-4); no cell: rank 70 and 143. Sum -1.36e-3 Eh / 0.3 ps = -4.5e-3 Eh/ps = the B3 drift |
+
+(D, the per-term path integral along the trajectory, was not needed: with the removal off the periodic run conserves
+energy as well as the cluster, so no term of the energy surface jumps between steps at the 1e-5 Eh/ps level resolved
+here. The B3 variants (Ewald tolerance, HB lists, dispersion, tail, dt) all lost energy because the removal ran in all
+of them.) `-coulomb_ewald false` (B3: +2.2e-2 Eh/ps) was not re-measured; that path is non-periodic with wrapping and
+is not expected to conserve energy.
+
+### After the fix (release binary, same protocol)
+
+| run | drift (Eh/ps) | max-min (Eh) |
+|---|---|---|
+| cell, default removal, box60 seed 7 / seed 11 / box60b seed 7 | -3.6e-5 / -1.7e-5 / -2.6e-5 | 1.28e-3 / 1.56e-3 / 1.53e-3 |
+| no cell, box60 seed 7 (bitwise the same run as before the fix) | -1.0e-5 | 1.26e-3 |
+| 8 H2O in L = 44 Bohr, default removal, 2 ps | -3.1e-6 | 1.5e-4 |
+| **B3 protocol** (CSVR 300 K 1 ps, then NVE 2 ps from the restart file with `thermostat` edited to none; `-restart_file` now loads it, verified: no "fresh simulation" line, periodic EEQ line present): cell seed 7 / seed 11 | -5.3e-5 / -8.5e-5 | 5.0e-4 / 5.8e-4 |
+| B3 protocol, no cell, seed 7 | -4.0e-6 | 4.1e-4 |
+| **dense box**: 420 H2O in L = 44 Bohr (1260 atoms, 0.100 atoms/A^3, random packing at 1.7 A, 378 fragments after CSVR, i.e. merged waters, not a liquid; 300 L-BFGS steps, not converged; CSVR 1 ps raised E_tot by 1.57 Eh while the packing relaxed), NVE 2 ps dt 0.5 fs, pcg EEQ 23 iterations, default removal, n = 1 | -6.4e-4 (-3.7e-4 <E_kin>/ps; <E_tot> per 0.5 ps window -144.17989 / .18020 / .18054 / .18082, monotone) | 3.0e-3 (std 5.4e-4) |
+| dense box, same restart, `-hb_update_force_every 1 -hb_min_pair_energy_eh 0` (HB/XB lists every step), dt 0.5 fs, n = 1 | **-2.9e-5** (windows -144.17976 / .17974 / .17983 / .17973, flat) | 2.0e-3 (std 3.4e-4) |
+| dense box, same restart, dt 0.25 fs, default HB refresh (every 10 steps = 2.5 fs), n = 1 | -3.5e-4 (windows monotone) | 9.3e-4 (std 2.3e-4) |
+
+**Second, smaller source at liquid density: the HB/XB list refresh interval.** With the default `hb_update_force_every 10` the
+HB/XB pair lists are stale for 10 steps and the energy surface jumps at every refresh; at 1260 atoms with many hydrogen bonds
+this costs -6.4e-4 Eh/ps (-3.7e-4 <E_kin>/ps) and goes away with the lists rebuilt every step (-2.9e-5 Eh/ps, 22 x less, n = 1
+each from the same restart). Halving dt halves the loss (refresh every 2.5 fs instead of 5 fs), it does not quarter it, so it
+is not the Verlet dt^2 error. This is not a cell effect (the same refresh runs without a cell, where B3 measured it on 60 H2O as
+below the noise) but a density effect that the periodic box makes reachable; the default is a speed trade-off (TODO.md,
+section GPU: 10 -> 20 saves 1.1 ms/step at 7320 atoms) and is left to the operator. The dilute protocol residual of
+-5e-5..-8.5e-5 Eh/ps above is of the same order as this run with per-step lists and was not pursued further.
+
+The cell run now conserves energy at the level of the cluster (fluctuation amplitude max-min equal to 2 digits in every pair; the
+fitted drift of the protocol runs, -5e-5..-8e-5 Eh/ps against -4e-6 without the cell, is n = 2 against n = 1 of a still relaxing
+system (T 300 -> 367-379 K with the cell, 308 K without, because the periodic gas condenses) and is 50-100 x below the B3 loss;
+whether it is a residual cell effect (HB-list refresh every 10 steps, D4/repulsion cutoffs) is not resolved here). The per-cause
+balance: the rotation removal accounts for the whole B3 loss within the resolution of these runs; the restart defect changed the
+starting state (fresh 300 K velocities on the unrelaxed packing instead of the CSVR state) but not the loss rate (fresh-start
+runs lose -5.9e-3..-9.6e-3 Eh/ps with the pre-fix binary, like the B3 runs that were, unknowingly, fresh starts too).
+
+### Checks
+
+- `test_cases/unit/test_pbc_md_com_removal.cpp` (ctest `pbc_md_com_removal`, 0.04 s): 8 registry waters in L = 44 Bohr, a restart
+  velocity field thermal + COM drift + rigid rotation, one step of 1e-6 fs with the removal due at step 0; with a cell the
+  velocities after the step equal v_in - v_com (8e-6, tolerance 3e-5 from the 6-decimal restart format) and E_kin equals
+  E_kin(v_in - v_com); without a cell v_in - v_com - omega x (r - r_com) as before; the `{"MD": {...}}` file is accepted.
+  Before the fix 5 of its 8 checks failed (cell: 2.4e-2 velocity residual, E_kin 0.0384 instead of 0.0816 Eh; wrapped restart
+  ignored, 1.1e-1), after it 8/8 pass.
+- No-cell path bitwise: `-sp -dump_gradient` md5 and printed energy on benzene, caffeine, methyl-a-d-glucopyranoside, water8,
+  hydronium-water2 (+1), urea-water197, peo201-water500 at 1 and 4 threads: 14/14 identical to the pre-fix binary; the no-cell
+  NVE run (box60 seed 7) is bitwise the same trajectory before and after (drift -1.00e-5, max-min 1.26e-3, E(end)-E(0) +6.65e-4).
+- `ctest -j1 -R 'gfnff|frag|eeq|simplemd|pbc|ewald|react'`: 118 passed, 1 skipped (GPU), 0 failed (119 incl. the new test).
+- `scripts/check_docs.py`: the 9 known errors only.
+
+Not covered: `-gpu` runs (the wrap and the removal are CPU code in SimpleMD, so the same fix applies, not run), modes 2/3 under a
+cell (per-fragment rotation removal takes rotational energy out of every molecule, with or without a cell; opt-in, unchanged),
+the spherical container (`wall_type spheric` has no lattice, `m_has_pbc` false: the full removal still runs there).

@@ -736,7 +736,15 @@ bool SimpleMD::Initialise()
         } catch ([[maybe_unused]] nlohmann::json::parse_error& e) {
             throw 404;
         }
-        LoadRestartInformation(md);
+        // Claude Generated (Nov 2026, D1): the files curcuma writes (<basename>.final.json,
+        // <basename>_step_N.json) wrap the state in {"MD": {...}}, as the automatic restart
+        // (LoadRestartInformation() below) expects. Passed through -restart_file, the wrapped
+        // object failed the "method" check and the run silently started fresh.
+        const std::string key = MethodName()[0];
+        if (md.contains(key) && md[key].is_object())
+            LoadRestartInformation(md[key]);
+        else
+            LoadRestartInformation(md);
 
     } else if (!m_restart && !m_norestart)
         LoadRestartInformation();
@@ -1272,7 +1280,8 @@ void SimpleMD::InitConstrainedBonds()
             return 6;              // 3 trans + 3 rot (non-linear)
         };
         if (m_rmrottrans == 1) {
-            dof_com_removed = dof_for_fragment(static_cast<size_t>(m_natoms));
+            // With a cell RemoveRotation() removes the translation only (see there).
+            dof_com_removed = m_has_pbc ? 3 : dof_for_fragment(static_cast<size_t>(m_natoms));
         } else {
             for (const auto& frag : m_molecule.GetFragments())
                 dof_com_removed += dof_for_fragment(frag.size());
@@ -5310,8 +5319,16 @@ void SimpleMD::RemoveRotation()
     // molecules, single atoms). See SimpleMD::RemoveRotations above for the
     // rationale. Required so that 2-atom systems do not get NaN velocities
     // at step 0 and crash the integrator with "NaN/Inf velocity".
+    //
+    // Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED D1): with a unit cell only the
+    // total momentum is conserved; the angular momentum about the centre of mass of the
+    // WRAPPED coordinates is not a constant of motion (no rotational symmetry, and every
+    // wrap moves a molecule by a lattice vector). Subtracting that rigid rotation every
+    // remove_com_motion fs removed 1/2 L^T I^-1 L of kinetic energy each time: 60 H2O in
+    // L = 44 Bohr lost 6e-3 Eh/ps in NVE, 8 H2O 3e-3 Eh/ps, nothing with the removal off.
+    // In a periodic system only the translation is removed (DOF count: InitConstrainedBonds).
     Position omega = { 0, 0, 0 };
-    if (m_natoms > 1) {
+    if (m_natoms > 1 && !m_has_pbc) {
         Eigen::JacobiSVD<Geometry> svd(matrix, Eigen::ComputeFullU | Eigen::ComputeFullV);
         const double sv0 = svd.singularValues()(0);
         const double sv_tol = 1e-12 * std::max(sv0, 1e-300);
