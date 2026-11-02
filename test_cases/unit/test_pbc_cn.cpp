@@ -156,6 +156,7 @@ static json gfnffConfig(int threads)
     c["verbosity"] = 0;
     c["threads"] = threads;
     c["cache_topology"] = false;
+    c["coulomb_ewald"] = false;  // Nov 2026 (B3): this test isolates terms other than Coulomb/EEQ; keep the plain (non-periodic) Coulomb and EEQ of A1-A4
     return c;
 }
 

@@ -652,7 +652,8 @@ GFNFF::GFNFF(const json& parameters)
     m_dispersion_tail = m_parameters.value("dispersion_tail", true);
     // Nov 2026 (B2): fallbacks == PARAM defaults of coulomb_ewald, ewald_tolerance, ewald_r_cut, ewald_alpha
     // (gfnff.h); no effect without a cell
-    m_coulomb_ewald = m_parameters.value("coulomb_ewald", false);
+    m_coulomb_ewald = m_parameters.value("coulomb_ewald", true);   // B3: default true (periodic EEQ + Coulomb)
+    m_eeq_ewald_dense_max = m_parameters.value("eeq_ewald_dense_max_atoms", 1000);
     m_ewald_tolerance = m_parameters.value("ewald_tolerance", 1e-8);
     m_ewald_r_cut = m_parameters.value("ewald_r_cut", 0.0);
     m_ewald_alpha = m_parameters.value("ewald_alpha", 0.0);
@@ -958,6 +959,9 @@ bool GFNFF::InitialiseMolecule()
     ++m_topology_version;
     m_cached_bond_list.reset();
     m_static_topology_valid = false;  // Reset static topology cache for new molecule
+    // Claude Generated (Nov 2026, B3): periodic EEQ matrix for the solver; after the cache reset, so that
+    // ewaldGaussianRadiusBohr() reads the element table and not a stale topology.
+    configurePeriodicEwald();
     // React bookkeeping must not survive a re-initialisation (stale atom indices when
     // one GFNFF object is reused for another molecule). Claude Generated (Sep 2026).
     m_react_owns_bonds = false;
@@ -3222,9 +3226,14 @@ double GFNFF::calculationSingle(bool gradient)
     // this step sees the new topology.
     updateReactiveTopologyIfNeeded();
 
-    computeSharedDistances();
-    if (m_eeq_solver) {
-        m_eeq_solver->setExternalDistances(&m_shared_srab, &m_shared_dist_too_close);
+    // Nov 2026 (B3): the periodic EEQ reads no distance buffer (Ewald pairs and k vectors instead)
+    if (periodicEEQActive()) {
+        if (m_eeq_solver) m_eeq_solver->setExternalDistances(nullptr, nullptr);
+    } else {
+        computeSharedDistances();
+        if (m_eeq_solver) {
+            m_eeq_solver->setExternalDistances(&m_shared_srab, &m_shared_dist_too_close);
+        }
     }
 
     // D4 pair-list skin check (Claude Generated, Sep 2026): must precede prepareCNAndEEQ(),
@@ -4933,19 +4942,35 @@ bool GFNFF::initializeForceField()
         m_workspace->setPeriodicCell(m_cell_bohr_ortho);                                   // Nov 2026: read by the D4 (A3b), repulsion and bonded-term (A4a) kernels; inactive without a cell
         if (coulombEwaldActive()) {
             // Nov 2026 (B2): periodic Coulomb pair term by Ewald summation (FFWorkspace::calcCoulombEwald).
-            // The cutoff-based electrostatics variants are truncations of the same sum and cannot combine with it.
-            if (m_parameters.value("eeq_distance_cutoff", 0.0) > 0.0 || coulombRCutBohr() < std::numeric_limits<double>::infinity())
-                throw std::runtime_error("GFN-FF: coulomb_ewald cannot be combined with eeq_distance_cutoff or coulomb_r_cut");
-            const curcuma::ewald::EwaldParameters ep = ewaldParameters();
-            const double half = 0.5 * m_cell_bohr_ortho.minLength();
-            if (!(ep.r_cut < half))
-                throw std::runtime_error(fmt::format("GFN-FF: Ewald real-space radius {:.4f} Bohr (max(ewald_r_cut, r_g = {:.4f})) "
-                                                     "is not below L_min/2 = {:.4f} Bohr", ep.r_cut, ewaldGaussianRadiusBohr(), half));
+            // B3: the SAME parameters as the EEQ solver's matrix (m_ewald_params, configurePeriodicEwald), so the
+            // charges minimise the functional the workspace evaluates (Hellmann-Feynman gradient). The Gaussian
+            // correction radius is re-checked with the charge-corrected alpeeq of the topology, which can exceed
+            // the element-table value the parameters were chosen from.
+            const double r_g = ewaldGaussianRadiusBohr();
+            if (r_g > m_ewald_params.r_cut * (1.0 + 1e-12)) {
+                // The charge-corrected alpeeq (e.g. iodine: r_g 19.03 vs 18.46 Bohr from the element table) needs a
+                // larger real-space radius: re-derive the parameters (ewaldParameters() now reads alpeeq), hand them
+                // to the EEQ solver as well and forget the set-up charges, so the first Calculation() re-solves them
+                // with the final matrix. Still refused when r_g does not fit below L_min/2.
+                const double half = 0.5 * m_cell_bohr_ortho.minLength();
+                const curcuma::ewald::EwaldParameters np = ewaldParameters();
+                if (!(np.r_cut < half))
+                    throw std::runtime_error(fmt::format("GFN-FF: Gaussian correction radius r_g = {:.4f} Bohr (from the charge-corrected alpeeq) "
+                                                         "is not below L_min/2 = {:.4f} Bohr; the Ewald sum needs a larger cell", r_g, half));
+                if (CurcumaLogger::get_verbosity() >= 1)
+                    CurcumaLogger::info(fmt::format("GFN-FF Coulomb: Ewald real-space radius raised from {:.4f} to {:.4f} Bohr (Gaussian correction radius of the charge-corrected alpeeq)",
+                        m_ewald_params.r_cut, np.r_cut));
+                m_ewald_params = np;
+                if (m_eeq_solver)
+                    m_eeq_solver->setPeriodicEwald(m_cell_bohr_ortho, np, m_eeq_ewald_dense_max);
+                m_last_eeq_geometry.resize(0, 0);
+            }
+            const curcuma::ewald::EwaldParameters ep = m_ewald_params;
             m_workspace->setEwald(ep);
             if (CurcumaLogger::get_verbosity() >= 1)
                 CurcumaLogger::info(fmt::format("GFN-FF Coulomb: Ewald sum (alpha {:.4f} 1/Bohr, r_cut {:.3f} Bohr, k_max {:.3f} 1/Bohr, "
-                                                "{} k vectors, Gaussian correction radius {:.3f} Bohr); EEQ charges non-periodic (B3 pending)",
-                    ep.alpha, ep.r_cut, ep.k_max, m_workspace->ewald()->numberOfKVectors(), ewaldGaussianRadiusBohr()));
+                                                "{} k vectors, Gaussian correction radius {:.3f} Bohr); EEQ charges periodic with the same matrix",
+                    ep.alpha, ep.r_cut, ep.k_max, m_workspace->ewald()->numberOfKVectors(), r_g));
         }
 
         // Keep a copy for external consumers (full pair lists only when a GPU wrapper asked
@@ -13392,7 +13417,7 @@ void GFNFF::configurePeriodicCell()
 {
     // Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A1): cell and cutoff check. Minimum image since
     // A2 in the CN, A3b/c D4 pair term and tail, A4a repulsion and bonded terms, A4b HB/XB, A4c topology
-    // build and reactive scan; Coulomb/EEQ (Ewald pending) and ATM/BATM still use plain distances.
+    // build and reactive scan, B2/B3 Coulomb and Phase-2 EEQ by Ewald summation (coulomb_ewald); ATM/BATM still use plain distances.
     m_cell_bohr_ortho = PBCUtils::OrthoCell();
     if (!m_has_pbc)
         return;
@@ -13425,8 +13450,40 @@ void GFNFF::configurePeriodicCell()
     if (CurcumaLogger::get_verbosity() >= 2)
         CurcumaLogger::param("periodic cell (Bohr)",
             fmt::format("{:.4f} x {:.4f} x {:.4f}, all cutoffs below L_min/2 = {:.4f}; minimum image in CN, D4 (+ tail), repulsion, bonded "
-                        "terms, HB/XB, topology and reactive scan; Coulomb/EEQ and ATM are not periodic",
-                cell.L[0], cell.L[1], cell.L[2], 0.5 * cell.minLength()));
+                        "terms, HB/XB, topology and reactive scan; Coulomb and EEQ by Ewald summation when coulomb_ewald is set ({}); ATM is not periodic",
+                cell.L[0], cell.L[1], cell.L[2], 0.5 * cell.minLength(), m_coulomb_ewald ? "on" : "OFF, plain distances"));
+}
+
+// Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED B3)
+bool GFNFF::periodicEEQActive() const
+{
+    return coulombEwaldActive() && m_eeq_solver && m_eeq_solver->periodicEwaldActive();
+}
+
+// Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED B3): one set of Ewald parameters for the EEQ matrix and the
+// Coulomb energy, fixed before the topology build (the first Phase-2 solve runs inside it) from the element-table
+// alpha; the alpeeq-based Gaussian radius is re-checked when the workspace is created.
+void GFNFF::configurePeriodicEwald()
+{
+    m_ewald_params = curcuma::ewald::EwaldParameters();
+    if (!coulombEwaldActive()) {
+        if (m_eeq_solver) m_eeq_solver->clearPeriodicEwald();
+        return;
+    }
+    // The cutoff-based electrostatics variants are truncations of the same sum and cannot combine with it;
+    // the ALPB reaction field enters the EEQ matrix and the Coulomb energy non-periodically.
+    if (m_parameters.value("eeq_distance_cutoff", 0.0) > 0.0 || coulombRCutBohr() < std::numeric_limits<double>::infinity())
+        throw std::runtime_error("GFN-FF: coulomb_ewald cannot be combined with eeq_distance_cutoff or coulomb_r_cut");
+    if (m_solvation)
+        throw std::runtime_error("GFN-FF: coulomb_ewald (periodic EEQ) cannot be combined with an implicit solvent");
+    const curcuma::ewald::EwaldParameters ep = ewaldParameters();
+    const double half = 0.5 * m_cell_bohr_ortho.minLength();
+    if (!(ep.r_cut < half))
+        throw std::runtime_error(fmt::format("GFN-FF: Ewald real-space radius {:.4f} Bohr (max(ewald_r_cut, r_g = {:.4f})) "
+                                             "is not below L_min/2 = {:.4f} Bohr", ep.r_cut, ewaldGaussianRadiusBohr(), half));
+    m_ewald_params = ep;
+    if (m_eeq_solver)
+        m_eeq_solver->setPeriodicEwald(m_cell_bohr_ortho, ep, m_eeq_ewald_dense_max);
 }
 
 double GFNFF::coulombRCutBohr() const

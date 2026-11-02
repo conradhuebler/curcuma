@@ -401,11 +401,12 @@ distances: Coulomb and the per-step Phase-2 EEQ (Ewald is block B), ATM/BATM, na
   peo201-water500 (2910 atoms, 4 threads) topology 105.8 -> 90.5 ms, parameter generation 330 -> 281 ms, max RSS
   559 -> 494 MB, `-sp` wall time (median of 3) 0.348 -> 0.329 s at 4 threads, 0.691 -> 0.667 s at 1 thread.
   With a 100 A cube: topology 95.5 ms, parameter generation 296 ms, RSS 501 MB, wall 0.346 s.
-- **Phase-1 EEQ / topology charges**: the Phase-1 matrix is a plain Coulomb over the reassembled geometry: right inside
-  each molecule, non-periodic between fragments (each fragment sits where its anchor atom put it). Coulomb and the per-step
-  Phase-2 EEQ (`computeSharedDistances`, `prepareCNAndEEQ`) are untouched and read the input geometry with plain
-  distances: a torn input gives a different Coulomb energy than the intact one (caffeine torn -0.1622 vs intact -0.1744
-  Eh), and nothing beyond L/2 is periodic there. Left for the Ewald block on purpose.
+- **Phase-1 EEQ / topology charges** (corrected in B3): the Phase-1 matrix uses topological (bond-graph) distances
+  only and is zero between fragments (`calculateTopologyChargesMultiRHS`), so it reads no geometry across fragments
+  and needs no cell; the earlier statement here ("plain Coulomb over the reassembled geometry, non-periodic between
+  fragments") was wrong. Until B3, Coulomb and the per-step Phase-2 EEQ (`computeSharedDistances`, `prepareCNAndEEQ`)
+  read the input geometry with plain distances: a torn input gave a different Coulomb energy than the intact one
+  (caffeine torn -0.1622 vs intact -0.1744 Eh). Since B3 both are periodic by Ewald summation (`coulomb_ewald`).
 - **Topology cache** (`computeTopologyFingerprint`): `|cell=Lx,Ly,Lz` (Bohr, 12 digits) is appended only when a cell is
   active, so the fingerprint and every existing cache file without a cell are unchanged (checked: caffeine, urea197
   fingerprints and charges before/after identical); a cache written with a cell is not read without one, nor with another
@@ -592,3 +593,162 @@ box shows -82.501 (periodic) against -82.737 (the same coordinates without image
 - **Not tested**: MD energy conservation with Ewald, systems with Ne/heavy halogens near the `r_g < L/2` limit,
   more than 2910 atoms, `topology_mode react` with Ewald, the ALPB solvation combined with a cell.
 - Human production testing pending.
+
+## B3 periodic EEQ with the Ewald matrix (2026-11-01, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+On `feature/bulk` (base `31da9f67`), CPU only. **With a cell, `coulomb_ewald` is now on by default**: the Phase-2 EEQ
+charges are solved with the Ewald matrix of the Gaussian charges, the Coulomb energy is the B2 Ewald sum with the same
+parameters, and the total gradient is consistent with the energy (finite-difference gate below). `coulomb_ewald false`
+is the emergency exit (plain distances in Coulomb and EEQ, not periodic). Without a cell nothing changes (bitwise, (g)).
+
+### Step 0: what the EEQ code does (checked against the source before the change)
+
+- **Matrix build per solver path** (`eeq_solver.cpp`): every path starts from the same dense augmented matrix
+  `m_phase2_A` ((N+nfrag)^2, row-major): `calculateFinalCharges` fills the N x N block in 64 x 64 tiles of the lower
+  triangle from the packed distance buffer (`m_shared_srab`, plain distances, `GFNFF::computeSharedDistances`),
+  `A_ij = erf(r/sqrt(alp_i + alp_j))/r` (far field `1/r` for `r^2 >= 42.25 (alp_i + alp_j)`), diagonal
+  `gam_i + sqrt(2/pi)/sqrt(alp_i)`, then the constraint rows/columns (0/1 per fragment; left unwritten for ppcg,
+  `fillDeferredConstraintBlock`) and `dispatchSolve`: `cholesky`/`ldlt` = Schur complement over A_nn with the
+  constraints as right-hand sides, `lu` = the augmented system, `ppcg` = projected CG on A_nn with the atom -> fragment
+  map and the `localinv` preconditioner built from the entries of A_nn within a radius, `pcg` = nfrag+1 block-Jacobi
+  solves, `batched` = per-fragment LU without inter-fragment coupling. `eeq_matrix_rebuild_eps_bohr` caches the N x N
+  block, `eeq_refactor_eps_bohr` the Cholesky factor. `alp_i` = `alpeeq_i = (alpha_i + ff q_i^(1))^2` from the
+  topology (Phase-1 charge, fixed per topology).
+- **chi(CN)**: Phase 2 right-hand side `x_i = -chi_i + dxi_i (+ amide-H -0.02) + cnf_i sqrt(CN_i)` with the
+  per-step CN (`calculateFinalCharges`, "4. Setup RHS"); the workspace self-energy uses the same
+  `chi_base_i + cnf_i sqrt(CN_i)` (`postProcess`, TERM 2+3) and its derivative is TERM 1b
+  (`qtmp_i = q_i cnf_i/(2 sqrt(CN_i))` into the CN chain rule `m_dcn.applyAdd`). `dxi` is topology-based; for
+  2-coordinate carbon it reads a bond angle from the plain geometry (`detectHybridization`, carbene test).
+- **Phase 1** (`calculateTopologyChargesMultiRHS`): Floyd-Warshall/Dijkstra topological distances over the bond
+  graph, `A_ij = 0` between fragments, chi with the integer neighbour count. **It reads no geometry across
+  fragments**, so the A4c statement "non-periodic between fragments" was wrong: with the periodic bond graph (A4c)
+  Phase 1 needs no cell and is unchanged by B3. Its only geometry use is the dxi bond angle above.
+- **Charge consumers in the gradient**: the Phase-2 charges `q` enter only the Coulomb energy (`calcCoulomb` /
+  `calcCoulombEwald`, TERM 2+3, TERM 1b). HB/XB strengths, `zetac6` of D4, the bond `fqq` and `alpeeq` use the
+  Phase-1 topology charges, constant per topology. Hence `dE/dr = dE/dr|_q + dE/dq . dq/dr` with `dE/dq = 0` on the
+  constraint surface (EEQ stationarity): the fixed-charge Coulomb gradient (dA/dr at fixed q, B2) plus TERM 1b
+  (dchi/dCN) is the complete gradient. **No bilinear term `z^T (dA/dr) q` and no polarisation identity are needed**,
+  provided the charges minimise the same functional the workspace evaluates; the B2 gradient is exactly the gradient
+  of the quadratic form `1/2 q^T A_ew(r) q` at fixed q (its FD test d). What remained inconsistent in B2 was only that
+  the charges came from the non-periodic matrix.
+- **Pre-existing**: the h-independent 1.5-2.2e-6 Eh/Bohr discrepancy of `NumGradFixedCharges` against the analytic
+  gradient (B2 test d, TODO.md) is not a gradient error: `NumGradFixedCharges` evaluates `calculate(false)` with the
+  CN of the plain 40-Bohr threshold formula and without refreshing the D4 C6 weights, i.e. a different function than
+  the one the gradient belongs to. The full energy with re-solved charges (test (e) below) agrees to 2.3e-8 Eh/A.
+
+### Formulas
+
+Phase-2 functional with the pair sum over all images (`gfnff_engrad.F90` goed_gfnff, images added):
+
+    E(q) = sum_i [ -chi_i(CN) q_i + 1/2 (gam_i + sqrt(2/pi)/sqrt(alp_i)) q_i^2 ] + 1/2 q^T A_ew q
+    A_ew,ij = erfc(a r)/r - erfc(g_ij r)/r [MIC pairs, r < r_cut, g r < 6] + (4 pi/V) sum_{k!=0} e^{-k^2/4a^2}/k^2 cos(k.r_ij)
+              - (2a/sqrt(pi)) delta_ij - pi/(a^2 V) + (pi/V)(alp_i + alp_j)
+
+(ewald.h; `E_pair = 1/2 q^T A_ew q` holds for the B2 sum incl. the Gaussian correction and both backgrounds, test
+e2/f of B2). The system `(A_ew + D) q + C^T lambda = chi`, `C q = q_frag` has the same chi, D and constraints as
+without a cell. The Gaussian background of a charged cell, `(pi Q/V) sum_i q_i alp_i`, is kept as the symmetric
+quadratic form `1/2 q^T [(pi/V)(alp_i + alp_j)] q` (identical for every q, not only on the constraint surface);
+treating it as the linear shift `chi_i -> chi_i - pi Q alp_i/V` gives the same charges, because the two gradients
+differ by `(pi/V)(sum_j q_j alp_j)` times the all-ones vector, which lies in the span of the constraint rows and is
+absorbed by the multipliers. The diagonal of `A_ew` is `sum_k 2 w_k - 2a/sqrt(pi) - pi/(a^2 V) + 2 pi alp_i/V`
+(`EwaldSum::diagonal`), the reciprocal part being the same for every atom (`|e^{ik r}|^2 = 1`): the Jacobi
+preconditioner needs no matrix.
+
+### Implementation
+
+- `EEQSolver::setPeriodicEwald(cell, parameters, dense_max)` (from `GFNFF::configurePeriodicEwald()`, called in
+  `InitialiseMolecule` after the topology-cache reset, before the topology build whose Phase-2 solve is the first
+  periodic one); `calculateFinalCharges` branches to `calculateFinalChargesPeriodic` after chi/gam/alpeeq are known.
+  Two paths: **dense** (`EwaldSum::matrix`, now k vectors in blocks with symmetric rank updates and the phase-table
+  recursion, O(N^2 N_k) flops as GEMM; then `dispatchSolve` with the direct method fixed, cholesky / lu / ldlt) and
+  **matrix-free pcg** (`PeriodicEEQOperator::apply` = `realSpaceRange` + `reciprocalRange` split over the pool,
+  reduced in partition order, + `selfAndBackground` + D x; projected CG on the constraint null space with the
+  constraint-preconditioner `z = M^-1 r - M^-1 C^T (C M^-1 C^T)^-1 C M^-1 r`, Jacobi M, warm start from the previous
+  charges with the constraints re-enforced, stop `|P r| <= eeq_ppcg_tol (|b|+1)`, cap `eeq_ppcg_max_iter`; a
+  breakdown or no convergence falls back to the dense solve for N <= 4 x dense_max, else error). `auto` = dense
+  up to `eeq_ewald_dense_max_atoms` (1000), pcg above; `ppcg` -> pcg with one warning; `batched` refused;
+  reaction field, `use_iterative_refinement`, `eeq_distance_cutoff`, `coulomb_r_cut` refused. The periodic path has
+  no matrix cache and no cached factor. `GFNFF::Calculation` skips `computeSharedDistances()` (O(N^2) buffer) when
+  the EEQ is periodic. One parameter set `m_ewald_params` (chosen from the element-table alpha before the topology
+  exists) feeds both the solver and `FFWorkspace::setEwald`; at workspace creation the Gaussian radius from the
+  charge-corrected alpeeq is re-checked: when it exceeds `r_cut` (iodine: 19.03 vs 18.46 Bohr from the element
+  table) the parameters are re-derived with the larger radius, handed to the solver again and the set-up charges
+  are discarded so the first `Calculation()` re-solves them with the final matrix (verbosity 1 reports the raise;
+  refused when r_g does not fit below L_min/2).
+- A lattice-vector shift of any atom leaves `A_ew` unchanged (MIC pairs, `k . nL = 2 pi n`), so the Phase-2 solve
+  inside the topology build (A4c reassembled geometry) and the per-step solve on the input geometry see the same
+  matrix; the torn-input checks (d) confirm this.
+
+### Tests (`ctest -R pbc_eeq_ewald`, `test_cases/unit/test_pbc_eeq_ewald.cpp`, 59 checks, 44 s)
+
+Water boxes: 20 H2O random rigid packing in L = 44 Bohr (60 atoms, several atoms within 0.03 A of a face), the same
+with H3O+(H2O)2 (Q = +1, 64 atoms, default ensemble charge model); solver tolerance `eeq_ppcg_tol` 1e-12 (1e-14 in
+(e)), Ewald `ewald_tolerance` 1e-10 / 1e-12.
+
+| Test | Result |
+|---|---|
+| (a) dense cholesky vs lu vs matrix-free pcg (tol 1e-13) | charges 3.0e-15 / 1.6e-12 e, energy 5.3e-15 Eh, gradient 2.7e-13 Eh/Bohr; `ppcg` redirected, `batched` refused, `auto` switches at `eeq_ewald_dense_max_atoms`; pcg 4 threads vs 1 thread 3.6e-15 e, 4 threads run-to-run bitwise |
+| (b) alpha_E 0.25 / 0.32 / 0.42, r_cut 19 (N_k 10k / 21k / 47k) | neutral: charges 3.8e-12 e, E_tot 3.6e-13 rel, total gradient 1.3e-10 of max; Q = +1: 5.1e-12 e, 9.2e-13, 7.6e-11 |
+| (c) large cell L = 200 / 300 Bohr vs the non-periodic path (charges, E_tot, gradient) | water dimer (no dipole): 8.1e-10 e, 2.3e-10 Eh, 8.1e-11 Eh/Bohr, exponent 5.00; benzene 8.6e-11 e, 1.0e-11 Eh, exponent 5.00; 8-water cluster (M = 2.96 e Bohr): E(pbc) - E = -2.294e-6 / -6.796e-7 Eh against the tin-foil dipole term -2 pi M^2/(3V) = -2.293e-6 / -6.795e-7 (rest 3e-11), charges 4.6e-6 / 1.4e-6 e (exponent 2.99), gradient 1.7e-7 Eh/Bohr at L = 300 |
+| (d) translation, atom-wise wrap (1 / 28 torn coordinates), 2x1x1 supercell (charges per atom, E, gradient), `hb_min_pair_energy_eh 0` | neutral: 1.2e-14 e / 0 / 3.4e-15; 1.3e-14 / 4.1e-16 / 3.6e-15; 1.4e-14 e / 9.5e-16 rel / 6.9e-15 Eh/Bohr. Q = +1: 1.0e-14 / 1.6e-16 / 7.0e-15; 1.1e-14 / 1.6e-16 / 6.3e-15; 1.1e-14 / 1.6e-16 / 1.2e-14. With the default HB candidate filter (1e-9 Eh) the Q = +1 supercell differed by 1.8e-9 Eh (one dropped candidate), independent of the Ewald tolerance |
+| (e) **gate**: analytic total gradient vs central FD of the total energy with re-solved charges, h = 1e-4 / 2e-4 A, `hb_update_force_every 1`, `hb_min_pair_energy_eh 0` | neutral, dense: 2.33e-8 / 9.31e-8 Eh/A (ratio 4.00), Richardson 8.9e-11; neutral, pcg tol 1e-14: 2.33e-8 / 9.31e-8, Richardson 5.8e-11; Q = +1, dense: 2.35e-8 / 9.38e-8 (ratio 4.00), Richardson 1.1e-10; max |g| 1.6e-2 / 7.2e-2 Eh/A. Thresholds 1e-7 and 1e-8 met |
+| (f) MIC-only EEQ (minimum-image erf(g r)/r matrix with the instance's fragment constraints, built in the test) vs Ewald EEQ, 50 H2O in L = 44 Bohr (0.014 atoms/A^3, dilute) | max charge deviation 4.8e-3 e (mean 1.5e-3, max q 0.63); E_EEQ(MIC, q_mic) - E_EEQ(Ewald, q_ew) = -3.6e-3 Eh = E_tot(MIC) - E_tot(Ewald) (the workspace Coulomb component is E_EEQ(q) exactly, every other term uses Phase-1 charges); the MIC charges in the Ewald functional lie 1.0e-4 Eh above its minimum. The test-built dense Ewald system reproduces the instance charges to 7e-15 e |
+| (f, liquid density, `--mic-vs-ewald 970 58`, not in ctest) 970 H2O in L = 58 Bohr, 2910 atoms, 0.101 atoms/A^3, random rigid packing at 1.7 A minimum distance (947 fragments: some waters merge) - **not an equilibrated liquid** | max charge deviation 2.0e-2 e (mean 3.7e-3, max q 0.70); E_EEQ(MIC) - E_EEQ(Ewald) = E_tot(MIC) - E_tot(Ewald) = -3.4e-2 Eh (-21 kcal/mol, 1.2e-5 Eh per atom); MIC charges in the Ewald functional 1.3e-2 Eh above the minimum; instance charges (pcg) reproduced by the test-built dense system to 7.5e-14 e. This is the B1 measurement: a MIC-only EEQ is not an acceptable approximation of the periodic one |
+| (g0) / (g) no cell | `coulomb_ewald` default vs false bitwise (energy, charges, gradient); CLI `-sp` + md5 of `-dump_gradient` on benzene, caffeine, methyl-a-d-glucopyranoside, water8-cluster, hydronium-water2 (+1), urea-water-cluster197, peo201-water500 at 1 and 4 threads: 14/14 md5 identical to the binary before B3 |
+| (i) `ctest -R 'gfnff|frag|eeq|simplemd|pbc|ewald|react'` list | identical plus `pbc_eeq_ewald` (117 -> 118) |
+
+(h) Timing (`test_pbc_eeq_ewald --perf-box <nwat> <L> <threads>`; median of 3 `Calculation(true)` at perturbed geometries
+after set-up, `eeq_ppcg_tol` 1e-12, `ewald_tolerance` 1e-8; random water packing at liquid density, not a liquid; the
+no-cell EEQ (ppcg + localinv) is not timed separately):
+
+| System | Path | EEQ solve (ms, iterations) | Coulomb CPU-sum (ms) | Calculation(true) wall (ms) |
+|---|---|---|---|---|
+| 970 H2O, 2910 atoms, L = 58 Bohr, 4 threads | no cell | - | 19.1 | 42.2 |
+| | cell, pcg, r_cut auto 18.06 (N_k 14008) | 386.7 (15) | 123.2 | 459.2 |
+| | cell, pcg, r_cut 25 (N_k 5317) | 477.3 (15) | 128.7 | 554.3 |
+| 970 H2O, 1 thread | no cell | - | 18.9 | 120.2 |
+| | cell, pcg, r_cut auto | 1364.3 (15) | 119.0 | 1582.2 |
+| | cell, pcg, r_cut 25 | 1606.1 (15) | 124.7 | 1828.1 |
+| 300 H2O, 900 atoms, L = 44 Bohr (dilute, the smallest accepted cube), 4 threads | cell, dense cholesky (N_k 9174) | 85.0 | 22.1 | 98.7 |
+| 500 H2O, 1500 atoms, L = 46.5 Bohr, 4 threads | no cell | - | 5.3 | 15.3 |
+| | cell, pcg (N_k 10002) | 138.6 (15) | 44.5 | 168.3 |
+| | cell, dense cholesky | 238.1 | 44.2 | 267.6 |
+
+With a cell the step costs 11 x the all-pairs path at 2910 atoms (13 x at 1 thread): the EEQ solve dominates (15 CG
+iterations with warm start, each a real-space pass over 0.5 M pairs plus N x N_k complex products; the pair list and
+the phase table are built twice per step, once for the solver and once for the workspace). The dense path is slower
+than pcg already at 1500 atoms (238 vs 139 ms), so `eeq_ewald_dense_max_atoms` = 1000 is a two-point estimate, not
+tuned. CLI `-md` on the same box, 20 steps of 0.5 fs, 4 threads: 14.5 s with the cell (20-21 iterations per step, cold
+start every step is not the case: the warm start is the previous step) vs 1.4 s without (both including set-up).
+
+(j) NVE energy conservation (**finding, n = 1 per row**): 60 H2O random packing in L = 44 Bohr (0.014 atoms/A^3, a
+dilute gas, not a liquid), dt 0.5 fs, CSVR 300 K for 1 ps (coupling 100 fs, seed 7) then 2 ps NVE from the restart
+(velocities included), 4 threads, defaults unless noted; drift = linear fit of E_tot(t) over the 41 records, relative
+to the mean kinetic energy of the run. The system is still relaxing (T rises from 300 to 350-430 K in every run).
+
+| run | E_tot drift (Eh/ps) | relative (<E_kin>/ps) | E_tot std / max-min (Eh) |
+|---|---|---|---|
+| no cell (same molecules as a cluster in vacuum) | +1.1e-4 | +3.7e-4 | 1.8e-4 / 9.1e-4 |
+| cell, defaults (Ewald Coulomb + EEQ, dense cholesky, tol 1e-8) | -4.0e-3 | -1.1e-2 | 2.4e-3 / 8.6e-3 |
+| cell, `coulomb_ewald false` (plain Coulomb/EEQ with wrap, the state before B3) | +2.2e-2 | +6.4e-2 | 1.3e-2 / 4.2e-2 |
+| cell, `hb_update_force_every 1`, `hb_min_pair_energy_eh 0` | -5.1e-3 | -1.5e-2 | 3.1e-3 / 1.0e-2 |
+| cell, `ewald_tolerance 1e-10` | -8.5e-3 | -2.3e-2 | 5.1e-3 / 1.5e-2 |
+| cell, `ewald_r_cut 21` (N_k smaller) | -6.1e-3 | -1.7e-2 | 3.6e-3 / 1.3e-2 |
+| cell, dt 0.25 fs (1 ps) | -9.4e-3 | -2.8e-2 | 2.9e-3 / 1.1e-2 |
+| cell, `dispersion_tail false` | -7.5e-3 | -2.1e-2 | 4.6e-3 / 1.6e-2 |
+| cell, `hbond false` | -2.5e-3 | -8.5e-3 | 1.6e-3 / 5.0e-3 |
+| cell, `dispersion false` | -4.4e-3 | -1.3e-2 | 2.7e-3 / 8.1e-3 |
+
+With the cell the total energy is lost at 2.5-9e-3 Eh/ps (1-3 % of E_kin per ps), 20-80 x the cluster, in every
+variant; the periodic Coulomb/EEQ makes it 5 x better than the plain-distance Coulomb with wrapping, but the loss is
+not removed by a tighter Ewald tolerance, a smaller time step, the HB lists, the D4 tail or dispersion as a whole,
+so it is not located in a single term by these runs (trajectories diverge, so the variants are different n = 1
+samples, not a controlled series). The static gradient (test e) is consistent to 2e-8 Eh/A, so the candidate is a
+discontinuity between steps (pair-list, minimum-image or wrap events), not the force at a fixed geometry. A 0.3 ps
+run with per-step diagnostics (`md_diagnostics`, dump every step) shows: per-step |dE_tot| noise 2.4e-4 Eh (the same
+without the cell: the 0.5 fs step at 400 K), the loss comes in plateaus and drops (E_tot - E_tot(0) at 0.1 ps
+intervals: -1.6e-3, -0.9e-3, -0.9e-3, -1.1e-3, -3.7e-3, ... -7.9e-3), 11 fragment wraps in 600 steps with dE_tot at the
+wrap steps within the noise (-3.4e-4 .. +3.3e-4), HB-list changes every 10 steps likewise; `-coulomb false` runs are
+unphysical with and without the cell (-0.2 Eh/ps, discarded). **Open (TODO.md): not located; next a longer per-step
+series with a work balance (dE_pot vs -F.dx per step) to find the steps where energy and force disagree.**
+

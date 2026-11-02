@@ -110,6 +110,7 @@ static json config(int threads, const json& extra)
     c["verbosity"] = 0;
     c["threads"] = threads;
     c["cache_topology"] = false;
+    c["coulomb_ewald"] = false;  // Nov 2026 (B3): this test isolates terms other than Coulomb/EEQ; keep the plain (non-periodic) Coulomb and EEQ of A1-A4
     c["hbond"] = false;  // HB/XB not periodic (A4b); also removes the HB modulation of the X-H bonds
     for (auto it = extra.begin(); it != extra.end(); ++it)
         c[it.key()] = it.value();

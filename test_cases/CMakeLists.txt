@@ -728,6 +728,17 @@ endif()
 add_test(NAME pbc_coulomb_ewald COMMAND test_pbc_coulomb_ewald WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 set_tests_properties(pbc_coulomb_ewald PROPERTIES TIMEOUT 600 LABELS "pbc;gfnff;ewald")
 
+# Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED B3): periodic EEQ with the Ewald matrix (dense and matrix-free),
+# consistency of charges, energy and total gradient with a cell (finite differences), large-cell limit, invariances,
+# MIC-only EEQ against the Ewald EEQ, no-cell bitwise check.
+add_executable(test_pbc_eeq_ewald unit/test_pbc_eeq_ewald.cpp)
+target_link_libraries(test_pbc_eeq_ewald curcuma_core test_molecule_registry)
+if(USE_PCH)
+    target_precompile_headers(test_pbc_eeq_ewald REUSE_FROM curcuma_core)
+endif()
+add_test(NAME pbc_eeq_ewald COMMAND test_pbc_eeq_ewald WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(pbc_eeq_ewald PROPERTIES TIMEOUT 900 LABELS "pbc;gfnff;ewald;eeq")
+
 # Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A4a): periodic repulsion and bonded terms (minimum image)
 add_executable(test_pbc_bonded_repulsion unit/test_pbc_bonded_repulsion.cpp)
 target_link_libraries(test_pbc_bonded_repulsion curcuma_core test_molecule_registry)

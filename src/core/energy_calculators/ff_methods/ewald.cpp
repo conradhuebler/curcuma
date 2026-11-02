@@ -389,20 +389,57 @@ Eigen::MatrixXd EwaldSum::matrix(const Eigen::MatrixXd& positions, const Eigen::
             for (int j = 0; j < N; ++j)
                 A(i, j) += (kPi / m_volume) * ((*gaussian_alp)(i) + (*gaussian_alp)(j));
 
-    // 2 w cos(k.(r_i - r_j)) = 2 w (cos_i cos_j + sin_i sin_j), the diagonal included
-    Eigen::VectorXd c(N), s(N);
-    for (const KVector& kv : m_kvectors) {
-        for (int i = 0; i < N; ++i) {
-            const double t = kv.k[0] * positions(i, 0) + kv.k[1] * positions(i, 1) + kv.k[2] * positions(i, 2);
-            c(i) = std::cos(t);
-            s(i) = std::sin(t);
+    // 2 w cos(k.(r_i - r_j)) = 2 w (cos_i cos_j + sin_i sin_j), the diagonal included. B3 (Nov 2026): the k
+    // vectors are taken in blocks, C(i, k) = sqrt(2 w_k) cos(k.r_i), S likewise, and the block enters as the
+    // symmetric rank update A += C C^T + S S^T (one GEMM-class product per block instead of N_k rank-2
+    // updates); phases from the recursion table, not cos/sin per (k, atom). Lower triangle only, mirrored at the end.
+    const EwaldPhaseTable tab = phaseTable(positions);
+    auto phase = [&](int a, int i, int n) {
+        const cplx v = tab.table[a][static_cast<size_t>(i) * (tab.nmax[a] + 1) + std::abs(n)];
+        return n >= 0 ? v : std::conj(v);
+    };
+    const int Nk = numberOfKVectors();
+    const int KB = std::max(1, std::min(Nk, static_cast<int>((16u << 20) / (2 * sizeof(double) * std::max(1, N)))));
+    Eigen::MatrixXd C(N, KB), S(N, KB);
+    for (int k0 = 0; k0 < Nk; k0 += KB) {
+        const int nb = std::min(KB, Nk - k0);
+        for (int kk = 0; kk < nb; ++kk) {
+            const KVector& kv = m_kvectors[k0 + kk];
+            const double sw = std::sqrt(2.0 * kv.weight);
+            for (int i = 0; i < N; ++i) {
+                const cplx e = phase(0, i, kv.n[0]) * phase(1, i, kv.n[1]) * phase(2, i, kv.n[2]);
+                C(i, kk) = sw * e.real();
+                S(i, kk) = sw * e.imag();
+            }
         }
-        A.noalias() += (2.0 * kv.weight) * (c * c.transpose() + s * s.transpose());
+        A.selfadjointView<Eigen::Lower>().rankUpdate(C.leftCols(nb));
+        A.selfadjointView<Eigen::Lower>().rankUpdate(S.leftCols(nb));
     }
+    A.triangularView<Eigen::StrictlyUpper>() = A.transpose();
 
     A.diagonal().array() -= 2.0 * alpha / std::sqrt(kPi);
     A.array() -= kPi / (alpha * alpha * m_volume);
     return A;
+}
+
+// Claude Generated (Nov 2026, B3): the diagonal of the reciprocal part is the same for every atom
+double EwaldSum::reciprocalDiagonal() const
+{
+    double d = 0.0;
+    for (const KVector& kv : m_kvectors)
+        d += 2.0 * kv.weight;
+    return d;
+}
+
+// Claude Generated (Nov 2026, B3): A_ii of matrix() without building it (Jacobi preconditioner)
+Eigen::VectorXd EwaldSum::diagonal(int natoms, const Eigen::VectorXd* gaussian_alp) const
+{
+    const double alpha = m_par.alpha;
+    const double base = reciprocalDiagonal() - 2.0 * alpha / std::sqrt(kPi) - kPi / (alpha * alpha * m_volume);
+    Eigen::VectorXd d = Eigen::VectorXd::Constant(natoms, base);
+    if (gaussian_alp)
+        d += (2.0 * kPi / m_volume) * (*gaussian_alp);
+    return d;
 }
 
 } // namespace ewald

@@ -1550,11 +1550,13 @@ Vector EEQSolver::dispatchSolve(
     // Oct 2026: ONE resolution rule shared with the GPU path (resolveMethod). An explicit method
     // runs as requested; auto picks projected PCG / Cholesky by the size thresholds and never
     // selects the inexact batched solver.
-    EEQSolveMethod method_to_use = resolveMethod(m_solve_method, natoms, nfrag, m_ppcg_min_atoms, m_ppcg_min_nfrag);
+    // Nov 2026 (B3): the periodic dense path fixes the direct method itself (m_method_override).
+    EEQSolveMethod method_to_use = m_method_override ? *m_method_override
+        : resolveMethod(m_solve_method, natoms, nfrag, m_ppcg_min_atoms, m_ppcg_min_nfrag);
     if (CurcumaLogger::get_verbosity() >= 1) {
-        const std::string line = fmt::format("EEQ solver ({}): {}{} [CPU], N={}, nfrag={}",
+        const std::string line = fmt::format("EEQ solver ({}): {}{} [CPU{}], N={}, nfrag={}",
             (phase && *phase) ? phase : "charges", methodName(method_to_use),
-            m_solve_method == EEQSolveMethod::Auto ? " (auto)" : "", natoms, nfrag);
+            m_solve_method == EEQSolveMethod::Auto ? " (auto)" : "", m_solver_line_suffix, natoms, nfrag);
         reportSolverLine(line);
     }
 
@@ -3886,6 +3888,29 @@ Vector EEQSolver::calculateFinalCharges(
         m_pending_cn       = cn;
     }
 
+    // Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED B3): with a periodic cell and coulomb_ewald the
+    // Coulomb block is the Ewald matrix; no distance buffer, no tile build, no matrix cache (own function).
+    if (m_ewald) {
+        if (m_reaction_field)
+            throw std::runtime_error("EEQSolver: the periodic (Ewald) EEQ cannot be combined with an implicit-solvation reaction field");
+        if (m_config.get<bool>("use_iterative_refinement", false))
+            throw std::runtime_error("EEQSolver: use_iterative_refinement is not available with the periodic (Ewald) EEQ");
+        Vector alpha_corrected(natoms);
+        if (alpeeq.has_value() && alpeeq->size() == natoms) {
+            alpha_corrected = *alpeeq;
+        } else {
+            for (int i = 0; i < natoms; ++i) {   // same fallback as the non-periodic loop below (base alpha^2)
+                const int z_i = atoms[i];
+                double alpha_base = (z_i >= 1 && z_i <= 86) ? alpha_eeq[z_i - 1] : 0.903430;
+                if (z_i == 6) alpha_base = 0.906988;
+                else if (z_i == 8) alpha_base = 0.915779;
+                alpha_corrected(i) = alpha_base * alpha_base;
+            }
+        }
+        return calculateFinalChargesPeriodic(atoms, geometry_bohr, total_charge, topology_charges, cn, topology,
+            chi_corrected, gam_corrected, alpha_corrected, is_amide_h, pool, num_threads);
+    }
+
     // Claude Generated (Mar 2026): Pre-allocated distance buffer — avoids 13 MB alloc per step (N=1280)
     // WP-FF-Packed-Triangular (May 2026): buffer is now packed lower-triangular (N(N+1)/2 doubles).
     ensurePhase2Buffers(natoms, nfrag);
@@ -5337,3 +5362,322 @@ std::vector<bool> EEQSolver::detectAmideHydrogens(
     return is_amide_h;
 }
 
+
+// =====================================================================================================
+// Periodic EEQ with the Ewald matrix (WP-PERIODIC-NONBONDED B3, Claude Generated Nov 2026)
+// =====================================================================================================
+//
+// Energy minimised by the Phase-2 charges (gfnff_engrad.F90 goed_gfnff, with the pair sum over all images):
+//
+//   E(q) = sum_i [ -chi_i(CN) q_i + 1/2 (gam_i + sqrt(2/pi)/sqrt(alp_i)) q_i^2 ] + E_pair(q),
+//   E_pair(q) = 1/2 sum'_{(i,j,n)} q_i q_j erf(g_ij |r_ij + n|)/|r_ij + n| = 1/2 q^T A_ew q      (ewald.h, B2)
+//
+// so the EEQ system is (A_ew + D) q + C^T lambda = chi, C q = q_frag, with D the local diagonal above and A_ew the
+// Gaussian-charge Ewald matrix (real space erfc(a r)/r - erfc(g_ij r)/r, reciprocal sum, -2a/sqrt(pi) delta_ij,
+// -pi/(a^2 V), (pi/V)(alp_i + alp_j)). The background terms of a charged cell are part of A_ew as a quadratic
+// form, 1/2 q^T [(pi/V)(alp_i + alp_j)] q = (pi Q/V) sum_i q_i alp_i: with Q fixed by the constraints the
+// linear form "chi_i -> chi_i - pi Q alp_i/V" gives the same charges (the two differ by (pi/V)(sum_j q_j alp_j)
+// times the all-ones vector, which the Lagrange multipliers absorb), and the symmetric form is what
+// EwaldSum::matrix() / potentials() already compute. Because q minimises the same E(q) the workspace evaluates
+// (FFWorkspace::calcCoulombEwald with the same EwaldSum parameters), dE/dr = dE/dr|_q (Hellmann-Feynman):
+// the fixed-charge Ewald gradient of B2 plus the chi(CN) chain rule (TERM 1b) is the full gradient, no dq/dr.
+//
+// Matrix-free product: A x = EwaldSum potentials of the "charges" x (real-space pairs and k vectors split
+// linearly over the pool, reduced in order, so the result is reproducible at a fixed thread count) plus D x.
+namespace {
+
+std::pair<int, int> periodicRange(int total, int t, int T)
+{
+    return { static_cast<int>(static_cast<long long>(total) * t / T), static_cast<int>(static_cast<long long>(total) * (t + 1) / T) };
+}
+
+struct PeriodicEEQOperator {
+    const curcuma::ewald::EwaldSum& ew;
+    Eigen::MatrixXd pos;                          ///< column-major N x 3 copy of the geometry (Bohr)
+    std::vector<std::pair<int, int>> pairs;       ///< minimum-image pairs within r_cut
+    curcuma::ewald::EwaldPhaseTable table;        ///< per-atom phase factors
+    const Vector& alp;                            ///< alpeeq_i (Bohr^2)
+    Vector diag_local;                            ///< gam_i + sqrt(2/pi)/sqrt(alp_i)
+    CxxThreadPool* pool;
+    int T;
+    int N;
+
+    PeriodicEEQOperator(const curcuma::ewald::EwaldSum& e, const Matrix& geometry_bohr, const Vector& alp_in,
+        const Vector& diag_in, CxxThreadPool* p, int threads)
+        : ew(e), pos(geometry_bohr), alp(alp_in), diag_local(diag_in), pool(p), N(static_cast<int>(geometry_bohr.rows()))
+    {
+        T = (p && threads > 1) ? threads : 1;
+        pairs = ew.realSpacePairs(pos);
+        table = ew.phaseTable(pos);
+    }
+
+    /// A x, with A = Ewald matrix of the Gaussian charges + diag_local
+    Vector apply(const Vector& x) const
+    {
+        std::vector<curcuma::ewald::EwaldResult> acc(T);
+        auto worker = [&](int t) {
+            acc[t].potentials = Vector::Zero(N);
+            const auto [b, e] = periodicRange(static_cast<int>(pairs.size()), t, T);
+            ew.realSpaceRange(pos, x, pairs, b, e, &alp, false, true, acc[t]);
+            const auto [kb, ke] = periodicRange(ew.numberOfKVectors(), t, T);
+            ew.reciprocalRange(table, x, kb, ke, false, true, acc[t]);
+        };
+        if (T > 1) {
+            std::vector<std::future<void>> futures;
+            futures.reserve(T - 1);
+            for (int t = 1; t < T; ++t)
+                futures.push_back(pool->enqueue(worker, t));
+            worker(0);
+            for (auto& f : futures)
+                f.get();
+        } else {
+            worker(0);
+        }
+        Vector y = acc[0].potentials;
+        for (int t = 1; t < T; ++t)
+            y += acc[t].potentials;
+        curcuma::ewald::EwaldResult tail;
+        tail.potentials = Vector::Zero(N);
+        ew.selfAndBackground(x, &alp, true, tail);
+        y += tail.potentials;
+        y += diag_local.cwiseProduct(x);
+        return y;
+    }
+
+    Vector diagonal() const { return ew.diagonal(N, &alp) + diag_local; }
+};
+
+} // namespace
+
+void EEQSolver::setPeriodicEwald(const PBCUtils::OrthoCell& cell, const curcuma::ewald::EwaldParameters& p, int dense_max_atoms)
+{
+    m_ewald = std::make_unique<curcuma::ewald::EwaldSum>(cell, p);  // throws for r_cut > L_min/2
+    m_ewald_cell = cell;
+    m_ewald_dense_max = dense_max_atoms;
+    m_periodic_last_q.resize(0);
+}
+
+Vector EEQSolver::calculateFinalChargesPeriodic(const std::vector<int>& atoms, const Matrix& geometry_bohr, int total_charge,
+    const Vector& topology_charges, const Vector& cn, const std::optional<TopologyInput>& topology,
+    const Vector& chi_corrected, const Vector& gam_corrected, const Vector& alpha_corrected,
+    const std::vector<bool>& is_amide_h, CxxThreadPool* pool, int num_threads)
+{
+    const int natoms = static_cast<int>(atoms.size());
+    const double TSQRT2PI = 0.797884560802866;  // sqrt(2/pi)
+    const int nfrag = topology.has_value() ? topology->nfrag : 1;
+    const auto t_start = std::chrono::high_resolution_clock::now();
+
+    // Right-hand side (as the non-periodic path): x_i = chieeq_i + cnf_i sqrt(CN_i), amide H shift -0.02
+    Vector rhs(natoms);
+    for (int i = 0; i < natoms; ++i) {
+        const EEQParameters params_i = getParameters(atoms[i], cn(i));
+        double chi = chi_corrected(i);
+        if (atoms[i] == 1 && is_amide_h[i])
+            chi -= 0.02;
+        rhs(i) = chi + params_i.cnf * std::sqrt(cn(i));
+    }
+    // Fragment membership and target charges (as the non-periodic path)
+    std::vector<int> atom_frag(natoms, -1);
+    std::vector<double> nfrag_atoms(nfrag, 0.0), qfrag(nfrag, 0.0);
+    for (int j = 0; j < natoms; ++j) {
+        int f = -1;
+        if (topology.has_value() && j < static_cast<int>(topology->fraglist.size()))
+            f = topology->fraglist[j] - 1;
+        else if (nfrag > 0)
+            f = 0;
+        if (f < 0 || f >= nfrag) f = -1;
+        atom_frag[j] = f;
+        if (f >= 0) nfrag_atoms[f] += 1.0;
+    }
+    for (int f = 0; f < nfrag; ++f)
+        qfrag[f] = (topology.has_value() && f < static_cast<int>(topology->qfrag.size())) ? topology->qfrag[f]
+                                                                                         : (f == 0 ? static_cast<double>(total_charge) : 0.0);
+    Vector diag_local(natoms);
+    for (int i = 0; i < natoms; ++i)
+        diag_local(i) = gam_corrected(i) + TSQRT2PI / std::sqrt(alpha_corrected(i));
+
+    // Which path: dense direct solve (cholesky, lu, ldlt; auto below dense_max) or matrix-free CG (pcg; auto above).
+    EEQSolveMethod method = m_solve_method;
+    if (method == EEQSolveMethod::Auto)
+        method = (natoms <= m_ewald_dense_max) ? EEQSolveMethod::SchurCholesky : EEQSolveMethod::PCG;
+    if (method == EEQSolveMethod::ProjectedPCG) {
+        if (!m_periodic_ppcg_warned && CurcumaLogger::get_verbosity() >= 1)
+            CurcumaLogger::warn("EEQ solver ppcg (local-inverse preconditioner) has no periodic Ewald matrix; using the matrix-free pcg instead");
+        m_periodic_ppcg_warned = true;
+        method = EEQSolveMethod::PCG;
+    }
+    if (method == EEQSolveMethod::Batched)
+        throw std::runtime_error("EEQ solver 'batched' drops the inter-fragment Coulomb and is not available with a periodic cell; use auto, cholesky, lu, ldlt or pcg");
+    for (int f = 0; f < nfrag; ++f)
+        if (nfrag_atoms[f] == 0.0 && method == EEQSolveMethod::PCG)
+            throw std::runtime_error(fmt::format("EEQ periodic pcg: fragment {} has no atoms", f + 1));
+
+    const int T = (pool && num_threads > 1) ? num_threads : 1;
+    Vector new_charges;
+    m_periodic_iters = 0;
+
+    if (method == EEQSolveMethod::PCG) {
+        // ---- matrix-free projected conjugate gradient on the constraint null space ----
+        m_periodic_path = "matrix-free pcg";
+        const PeriodicEEQOperator op(*m_ewald, geometry_bohr, alpha_corrected, diag_local, pool, T);
+        const Vector Minv = op.diagonal().cwiseInverse();
+        std::vector<double> sM(nfrag, 0.0);
+        for (int i = 0; i < natoms; ++i)
+            if (atom_frag[i] >= 0) sM[atom_frag[i]] += Minv(i);
+        // P v = v - sum_f (1_f . v / n_f) 1_f: orthogonal projection onto {C v = 0}
+        auto project = [&](Vector& v) {
+            std::vector<double> s(nfrag, 0.0);
+            for (int i = 0; i < natoms; ++i)
+                if (atom_frag[i] >= 0) s[atom_frag[i]] += v(i);
+            for (int i = 0; i < natoms; ++i)
+                if (atom_frag[i] >= 0) v(i) -= s[atom_frag[i]] / nfrag_atoms[atom_frag[i]];
+        };
+        // Constraint preconditioner z = M^-1 r - M^-1 C^T (C M^-1 C^T)^-1 C M^-1 r (C z = 0 exactly)
+        auto precondition = [&](const Vector& r) {
+            Vector z = Minv.cwiseProduct(r);
+            std::vector<double> s(nfrag, 0.0);
+            for (int i = 0; i < natoms; ++i)
+                if (atom_frag[i] >= 0) s[atom_frag[i]] += z(i);
+            for (int i = 0; i < natoms; ++i)
+                if (atom_frag[i] >= 0) z(i) -= Minv(i) * s[atom_frag[i]] / sM[atom_frag[i]];
+            return z;
+        };
+        // Start vector: the previous charges when they belong to this system, else uniform per fragment;
+        // in both cases the constraints are enforced exactly before the iteration starts.
+        Vector q = (m_periodic_last_q.size() == natoms) ? m_periodic_last_q : Vector::Zero(natoms);
+        {
+            std::vector<double> s(nfrag, 0.0);
+            for (int i = 0; i < natoms; ++i)
+                if (atom_frag[i] >= 0) s[atom_frag[i]] += q(i);
+            for (int i = 0; i < natoms; ++i)
+                if (atom_frag[i] >= 0) q(i) += (qfrag[atom_frag[i]] - s[atom_frag[i]]) / nfrag_atoms[atom_frag[i]];
+        }
+        Vector r = rhs - op.apply(q);
+        project(r);
+        Vector z = precondition(r);
+        Vector p = z;
+        double rz = r.dot(z);
+        const double tol = m_ppcg_tol * (rhs.norm() + 1.0);
+        bool converged = false, breakdown = false;
+        int it = 0;
+        for (; it < m_ppcg_max_iter; ++it) {
+            if (r.norm() <= tol) { converged = true; break; }
+            Vector Ap = op.apply(p);
+            const double pAp = p.dot(Ap);
+            if (!(pAp > 0.0)) { breakdown = true; break; }
+            const double a = rz / pAp;
+            q += a * p;
+            r -= a * Ap;
+            project(r);
+            z = precondition(r);
+            const double rz_new = r.dot(z);
+            if (!(rz_new > 0.0) && r.norm() > tol) { breakdown = true; break; }
+            p = z + (rz_new / rz) * p;
+            rz = rz_new;
+        }
+        if (r.norm() <= tol) converged = true;
+        m_periodic_iters = it;
+        if (!converged) {
+            const std::string why = breakdown ? "breakdown (A not positive definite on the constraint space)" : "no convergence";
+            if (natoms <= 4 * m_ewald_dense_max) {
+                CurcumaLogger::warn(fmt::format("EEQ periodic pcg: {} after {} iterations (|r| {:.2e}, tol {:.2e}); using the dense cholesky solve for this step",
+                    why, it, r.norm(), tol));
+                method = EEQSolveMethod::SchurCholesky;
+            } else {
+                throw std::runtime_error(fmt::format("EEQ periodic pcg: {} after {} iterations (|r| {:.2e}, tol {:.2e})", why, it, r.norm(), tol));
+            }
+        } else {
+            new_charges = q;
+            if (CurcumaLogger::get_verbosity() >= 1)
+                reportSolverLine(fmt::format("EEQ solver (final charges): pcg{} [CPU, periodic Ewald matrix-free, {} iterations], N={}, nfrag={}",
+                    m_solve_method == EEQSolveMethod::Auto ? " (auto)" : "", it, natoms, nfrag));
+        }
+    }
+
+    if (method != EEQSolveMethod::PCG) {
+        // ---- dense Ewald matrix, direct solve through dispatchSolve (cholesky / lu / ldlt) ----
+        m_periodic_path = std::string("dense ") + methodName(method);
+        ensurePhase2Buffers(natoms, nfrag);
+        Matrix& A = m_phase2_A;
+        Vector& x = m_phase2_rhs;
+        {
+            curcuma::ScopedBlasThreads _blas_threads(T);
+            A.topLeftCorner(natoms, natoms) = m_ewald->matrix(geometry_bohr, &alpha_corrected);
+        }
+        A.diagonal().head(natoms) += diag_local;
+        if (nfrag > 0) {
+            A.bottomRows(nfrag).setZero();
+            A.rightCols(nfrag).setZero();
+        }
+        for (int j = 0; j < natoms; ++j)
+            if (atom_frag[j] >= 0) {
+                A(natoms + atom_frag[j], j) = 1.0;
+                A(j, natoms + atom_frag[j]) = 1.0;
+            }
+        x.head(natoms) = rhs;
+        for (int f = 0; f < nfrag; ++f)
+            x(natoms + f) = qfrag[f];
+        curcuma::ScopedBlasThreads _blas_threads(T);
+        m_method_override = method;
+        m_solver_line_suffix = ", periodic Ewald dense";
+        m_ppcg_geometry = &geometry_bohr;
+        m_ppcg_atom_frag = &atom_frag;
+        m_ppcg_pool = pool;
+        m_ppcg_threads = T;
+        try {
+            new_charges = dispatchSolve(A, x, natoms, nfrag, total_charge, pool, num_threads, "final charges");
+        } catch (...) {
+            m_method_override.reset();
+            m_solver_line_suffix.clear();
+            m_ppcg_geometry = nullptr;
+            m_ppcg_atom_frag = nullptr;
+            m_ppcg_pool = nullptr;
+            throw;
+        }
+        m_method_override.reset();
+        m_solver_line_suffix.clear();
+        m_ppcg_geometry = nullptr;
+        m_ppcg_atom_frag = nullptr;
+        m_ppcg_pool = nullptr;
+    }
+    m_periodic_solve_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t_start).count();
+
+    if (new_charges.size() != natoms || !new_charges.allFinite()) {
+        if (isValidChargeCache(m_last_successful_charges, natoms, total_charge)) {
+            CurcumaLogger::warn(fmt::format("EEQ Phase 2 (periodic): solve failed for N={}, using last successful charges as fallback", natoms));
+            return m_last_successful_charges;
+        }
+        CurcumaLogger::warn(fmt::format("EEQ Phase 2 (periodic): solve failed for N={}, no valid prior charges - using Phase 1 topology charges", natoms));
+        m_phase2_historically_implausible = true;
+        m_phase2_implausible_natoms = natoms;
+        return topology_charges;
+    }
+
+    // Plausibility (as the non-periodic path): max |q| against Phase 1. The Coulomb-energy ratio test of
+    // the non-periodic path needs q^T A q of both charge sets; with the periodic operator that is two more
+    // products, done only at verbosity >= 2 where the value is printed.
+    const double max_q_p2 = new_charges.cwiseAbs().maxCoeff();
+    const double max_q_p1 = topology_charges.cwiseAbs().maxCoeff();
+    if (max_q_p2 > std::max(10.0, 5.0 * max_q_p1)) {
+        CurcumaLogger::warn(fmt::format("EEQ Phase 2 (periodic): implausible charges (max |q| = {:.2f}, Phase 1 max = {:.2f}), using Phase 1",
+            max_q_p2, max_q_p1));
+        m_phase2_historically_implausible = true;
+        m_phase2_implausible_natoms = natoms;
+        return topology_charges;
+    }
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        Vector Aq;
+        if (method == EEQSolveMethod::PCG) {
+            const PeriodicEEQOperator op(*m_ewald, geometry_bohr, alpha_corrected, diag_local, pool, T);
+            Aq = op.apply(new_charges);
+        } else {
+            Aq = m_phase2_A.topLeftCorner(natoms, natoms) * new_charges;
+        }
+        CurcumaLogger::info(fmt::format("[EEQ] Phase 2 (periodic, {}): E_EEQ = {:+.10f} Eh, {} ms, max |q| {:.4f}",
+            m_periodic_path, 0.5 * new_charges.dot(Aq) - new_charges.dot(rhs), m_periodic_solve_ms, max_q_p2));
+    }
+    m_phase2_historically_implausible = false;
+    m_last_successful_charges = new_charges;
+    m_periodic_last_q = new_charges;
+    return new_charges;
+}

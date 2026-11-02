@@ -134,7 +134,7 @@ static std::pair<bool, double> gfnffEnergy(const Eigen::Matrix3d* cell)
 {
     // Nov 2026 (A3c): the homogeneous D4 tail is real physics of the periodic images (about -4e-10 Eh for the
     // dimer in the 100 A cell) and is tested in pbc_dispersion_tail; this test compares the plain terms only.
-    json config = { { "verbosity", 0 }, { "threads", 1 }, { "gfnff", { { "dispersion_tail", false } } }, { "gpu", "none" } };
+    json config = { { "verbosity", 0 }, { "threads", 1 }, { "gfnff", { { "dispersion_tail", false }, { "coulomb_ewald", false } } }, { "gpu", "none" } };
     curcuma::Molecule mol = waterDimer();
     if (cell)
         mol.setUnitCell(*cell, true);
@@ -166,6 +166,7 @@ static void testCutoffCheck()
     check(!big.first, "100 A cell: no error");
     // The minimum image (only in the CN since A2) does not change any pair of a dimer in a 100 A cell, but
     // the MIC arithmetic (d*inv_L*L) is not bit-exact, so compare to 1e-12 Eh instead of bit for bit.
+    // Nov 2026 (B3): coulomb_ewald false above, because the periodic Coulomb/EEQ differ from the cluster by the image terms.
     check(std::abs(big.second - none.second) < 1e-12, "100 A cell: energy equals the no-cell energy to 1e-12 Eh");
     std::printf("water dimer GFN-FF: no cell %.15f Eh, 100 A cell %.15f Eh\n", none.second, big.second);
 }

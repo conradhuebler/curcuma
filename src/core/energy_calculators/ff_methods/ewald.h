@@ -192,9 +192,17 @@ public:
     /// Energy terms plus, on request, gradient and potentials in one pass over pairs and k vectors.
     EwaldResult evaluate(const Eigen::MatrixXd& positions, const Eigen::VectorXd& charges,
         bool want_gradient, bool want_potentials, const Eigen::VectorXd* gaussian_alp = nullptr) const;
-    /// Dense Ewald matrix A (N x N, symmetric), A q = phi. O(N^2 N_k): small test systems only.
+    /// Dense Ewald matrix A (N x N, symmetric), A q = phi. O(N^2 N_k) flops (reciprocal part as rank-k updates
+    /// in blocks of k vectors, B3): the dense EEQ matrix of a periodic cell up to ~1000 atoms, and tests.
     /// With gaussian_alp: A_ij -= erfc(g_ij r)/r (pairs, g r < XMAX) and A_ij += (pi/V)(alp_i + alp_j) (all i, j).
     Eigen::MatrixXd matrix(const Eigen::MatrixXd& positions, const Eigen::VectorXd* gaussian_alp = nullptr) const;
+    /// Reciprocal-space diagonal A_ii = sum_{k != 0} (4 pi/V) exp(-k^2/(4a^2))/k^2, the same for every atom
+    /// (|e^{ik r}|^2 = 1); with the self and background terms it gives the diagonal of A for a Jacobi
+    /// preconditioner without the matrix (B3, Claude Generated Nov 2026).
+    double reciprocalDiagonal() const;
+    /// Diagonal of the Gaussian-charge Ewald matrix, A_ii = reciprocalDiagonal() - 2a/sqrt(pi) - pi/(a^2 V)
+    /// + 2 pi alp_i / V (the last term only with gaussian_alp). No pair term: real-space pairs have i != j.
+    Eigen::VectorXd diagonal(int natoms, const Eigen::VectorXd* gaussian_alp = nullptr) const;
 
     /*! \brief Real-space pair kernel erfc(a r)/r and its r-derivative (point charges) */
     static double realSpaceKernel(double r, double alpha, double& dkernel_dr);

@@ -32,6 +32,26 @@ The thresholds are arguments: `-gfnff.eeq_ppcg_min_atoms`, `-gfnff.eeq_ppcg_min_
 `ldlt` equals `cholesky` for an SPD A_nn (every gas-phase system). It is not a fallback: for an indefinite A_nn (implicit-solvation reaction
 field) the robust path is the augmented-LU fallback of `cholesky`, which `ldlt` does not reproduce.
 
+## Periodic cell (coulomb_ewald, B3, Nov 2026)
+
+Claude Generated — 🤖 AI-generated, ⚙️ machine-tested (`pbc_eeq_ewald`); human production testing pending. With a cell and
+`coulomb_ewald` (default true) the Phase-2 Coulomb block is the Ewald matrix of the Gaussian charges
+(`docs/WP-PERIODIC-NONBONDED.md`, B3), with the same parameters as the Coulomb energy. Phase 1 (topological distances) is
+unchanged. The names then mean:
+
+| name | with a cell |
+|---|---|
+| `auto` | dense `cholesky` up to `eeq_ewald_dense_max_atoms` (1000) atoms, matrix-free `pcg` above |
+| `cholesky`, `lu`, `ldlt` | dense Ewald matrix (`EwaldSum::matrix`, O(N^2 N_k)), then the direct solve as without a cell |
+| `pcg` | matrix-free projected conjugate gradient: A x by `EwaldSum` potentials (real-space pairs and k vectors split over the pool), Jacobi preconditioner from the analytic diagonal, warm start from the previous charges, stop at `eeq_ppcg_tol` (relative, 1e-12), cap `eeq_ppcg_max_iter`; no convergence falls back to the dense solve for N <= 4 x `eeq_ewald_dense_max_atoms`, else error |
+| `ppcg` | redirected to the matrix-free `pcg` with one warning (the local-inverse preconditioner has no periodic matrix) |
+| `batched` | error (drops the inter-fragment Coulomb) |
+
+Not available with a cell and `coulomb_ewald`: `eeq_distance_cutoff`, `coulomb_r_cut`, implicit solvent, `use_iterative_refinement`,
+`eeq_matrix_rebuild_eps_bohr` (ignored: the matrix is rebuilt at every solve), the cached Cholesky factor (`eeq_refactor_eps_bohr`,
+ignored on the periodic path). `coulomb_ewald false` restores the plain-distance EEQ and Coulomb (not periodic, emergency exit).
+Verbosity 1 prints `EEQ solver (final charges): pcg [CPU, periodic Ewald matrix-free, N iterations]` or `cholesky [CPU, periodic Ewald dense]`.
+
 ## Parameters (module `gfnff`, category EEQ)
 
 The EEQ solver PARAMs are defined in the `gfnff` block of `src/core/energy_calculators/ff_methods/gfnff.h` (category EEQ, GPU-only ones under

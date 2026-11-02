@@ -7,7 +7,7 @@
  * The GFN-FF pair term sum_{i<j} q_i q_j erf(g_ij r)/r (Gaussian charges, g_ij = 1/sqrt(alp_i + alp_j)) summed
  * over all periodic images: point-charge Ewald sum (B0) minus the real-space correction erfc(g_ij r)/r per
  * pair, plus the Gaussian background (pi Q/V) sum q_i alp_i for a charged cell (ewald.h). Charges stay the
- * non-periodic EEQ ones (B3 pending), so every comparison below is at FIXED charges. Switch: coulomb_ewald.
+ * periodic ones since B3 (test_pbc_eeq_ewald); the comparisons (c), (d) below are at FIXED charges. Switch: coulomb_ewald (default true with a cell).
  *
  * (a)  alpha independence with the real GFN-FF alp (water box, 20 H2O, L = 44 Bohr, 3 alphas, tol 1e-10):
  *      Coulomb energy, total gradient, potentials dE_pair/dq.
@@ -230,7 +230,7 @@ static void testAlphaIndependence(const Mol& box, const char* label, const json&
         dP = std::max(dP, relMatDiff(r[0].phi, r[t].phi));
         dQ = std::max(dQ, (r[0].q - r[t].q).cwiseAbs().maxCoeff());
     }
-    check(dQ == 0.0, "EEQ charges identical across alphas (non-periodic EEQ)", dQ, 1e-300);
+    check(dQ < 1e-10, "EEQ charges across alphas (periodic EEQ since B3, alpha-independent to the solver tolerance)", dQ, 1e-10);
     check(dE < 1e-9, "Coulomb energy spread over 3 alphas rel", dE, 1e-9);
     check(dG < 1e-8, "gradient spread (max abs / max |g|)", dG, 1e-8);
     check(dP < 1e-8, "potential spread (max abs / max |phi|)", dP, 1e-8);

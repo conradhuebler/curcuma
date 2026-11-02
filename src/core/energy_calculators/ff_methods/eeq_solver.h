@@ -31,6 +31,8 @@
 #include "src/core/config_manager.h"
 #include "src/core/parameter_macros.h"
 #include "src/core/charge_extrapolation.h"
+#include "ewald.h"              // periodic EEQ matrix (B3, Nov 2026): EwaldSum, EwaldParameters
+#include "src/tools/pbc_utils.h"
 
 #include <Eigen/Dense>
 #include <deque>
@@ -535,6 +537,28 @@ public:
     /// gfnff_engrad.F90:1346-1350). nullptr = gas phase. Lifetime managed by caller
     /// (GFNFF holds the ALPBSolvation that owns the matrix). Claude Generated.
     void setReactionField(const Eigen::MatrixXd* born_matrix) { m_reaction_field = born_matrix; }
+
+    /*! \brief Periodic EEQ (WP-PERIODIC-NONBONDED B3, Claude Generated Nov 2026).
+     *
+     * With a cell and coulomb_ewald the Phase-2 Coulomb block A_ij = erf(g_ij r)/r is replaced by the
+     * Ewald matrix of the Gaussian charges (ewald.h: point-charge Ewald sum, real-space correction
+     * -erfc(g_ij r)/r, self and background terms, Gaussian background (pi/V)(alp_i + alp_j)), plus the
+     * unchanged local diagonal gam_i + sqrt(2/pi)/sqrt(alp_i). The right-hand side chi_i(CN) and the
+     * fragment-charge constraints are the same as without a cell. Two paths (calculateFinalChargesPeriodic):
+     * dense (EwaldSum::matrix, then cholesky / lu / ldlt through dispatchSolve) for N <= dense_max_atoms
+     * under `auto`, else a matrix-free projected conjugate gradient (A x = EwaldSum potentials of x,
+     * Jacobi preconditioner, warm start from the previous charges, tolerance eeq_ppcg_tol); `ppcg` is
+     * redirected to it with a warning, `batched` is refused. The same parameters p must be used by the
+     * energy (FFWorkspace::setEwald) so that the charges minimise the evaluated functional.
+     * Phase 1 is untouched (topological distances, no geometry between fragments).
+     */
+    void setPeriodicEwald(const PBCUtils::OrthoCell& cell, const curcuma::ewald::EwaldParameters& p, int dense_max_atoms);
+    void clearPeriodicEwald() { m_ewald.reset(); m_periodic_last_q.resize(0); }
+    bool periodicEwaldActive() const { return m_ewald != nullptr; }
+    /// Diagnostics of the last periodic Phase-2 solve: CG iterations (0 on the dense path), solve time, path name.
+    int lastPeriodicIterations() const { return m_periodic_iters; }
+    double lastPeriodicSolveMs() const { return m_periodic_solve_ms; }
+    const std::string& lastPeriodicPath() const { return m_periodic_path; }
 
     /// WP-S3 (May 2026): effective Coulomb-matrix cutoff used by the
     /// sparsification (override wins, otherwise the ConfigManager value).
@@ -1163,6 +1187,24 @@ private:
     /// Column-major to match ALPBSolvation::bornMatrix(); symmetric, so the storage
     /// order vs the row-major augmented EEQ matrix is irrelevant.
     const Eigen::MatrixXd* m_reaction_field = nullptr;
+
+    // ===== Periodic EEQ (B3, Nov 2026), see setPeriodicEwald() =====
+    std::unique_ptr<curcuma::ewald::EwaldSum> m_ewald;  ///< Ewald sum of the cell; nullptr = non-periodic matrix
+    PBCUtils::OrthoCell m_ewald_cell;                   ///< the cell m_ewald was built for
+    int    m_ewald_dense_max = 1000;                    ///< `auto`: dense up to this many atoms, matrix-free CG above
+    bool   m_periodic_ppcg_warned = false;              ///< the ppcg -> pcg redirection is reported once
+    Vector m_periodic_last_q;                           ///< warm start of the matrix-free CG
+    int    m_periodic_iters = 0;                        ///< CG iterations of the last periodic solve (0 = dense)
+    double m_periodic_solve_ms = 0.0;                   ///< wall time of the last periodic solve (matrix/operator build + solve)
+    std::string m_periodic_path;                        ///< "dense cholesky", "matrix-free pcg", ...
+    std::optional<EEQSolveMethod> m_method_override;    ///< dispatchSolve uses this instead of resolveMethod() when set
+    std::string m_solver_line_suffix;                   ///< appended to the verbosity-1 solver line (periodic path)
+    /// Phase-2 solve with the periodic Ewald matrix (dense or matrix-free); the arguments are the Phase-2
+    /// inputs calculateFinalCharges prepared (chi without the CNF term, gam, alpeeq, amide-H flags).
+    Vector calculateFinalChargesPeriodic(const std::vector<int>& atoms, const Matrix& geometry_bohr, int total_charge,
+        const Vector& topology_charges, const Vector& cn, const std::optional<TopologyInput>& topology,
+        const Vector& chi_corrected, const Vector& gam_corrected, const Vector& alpha_corrected,
+        const std::vector<bool>& is_amide_h, CxxThreadPool* pool, int num_threads);
 
     /// Last truly successful charges (Phase 2 if available, otherwise Phase 1).
     /// Initialized from topology_charges on first call, then overwritten with the Phase 2
