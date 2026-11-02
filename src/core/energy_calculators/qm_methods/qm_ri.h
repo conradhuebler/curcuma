@@ -397,6 +397,11 @@ Matrix gradientTwoElectronExchange(const std::vector<GTO::Orbital>& basis, const
 /// gradientTwoElectron. Same kernel. Claude Generated (Oct 2026, WP8).
 Matrix gradientTwoElectronScaled(const std::vector<GTO::Orbital>& basis, const Matrix& P, double kx, int natoms,
                                  int threads = 1);
+/// @brief Exact two-electron gradient of an unrestricted (UHF/UKS) energy (Eh/Bohr), cartesian spin densities Pa, Pb:
+/// D = Pt_mn Pt_ls - (kx/2) sum_s (Ps_ml Ps_ns + Ps_ms Ps_nl), Pt = Pa + Pb; kx = 1 for UHF, a_x for UKS. Same kernel as
+/// gradientTwoElectron (Pa = Pb = P/2 is the RHF weight). Claude Generated (Nov 2026, stage 5b).
+Matrix gradientTwoElectronUHF(const std::vector<GTO::Orbital>& basis, const Matrix& Pa, const Matrix& Pb, double kx,
+                              int natoms, int threads = 1);
 /// @brief PT2 part of the double-hybrid two-electron gradient (Eh/Bohr; WP12 stage 2, Claude Generated, Oct 2026):
 /// 1/2 sum D2 (mn|ls)^X with the separable P2 x P part, exchange scaled by kx = a_x,
 ///   D2 = P2_mn P_ls + P_mn P2_ls - (kx/4)(P2_ml P_ns + P_ml P2_ns + P2_ms P_nl + P_ms P2_nl) + Dns,

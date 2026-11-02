@@ -113,6 +113,13 @@ inline void hf()
     CitationRegistry::cite("diis");
 }
 
+/// Open-shell (unrestricted) SCF of the native engine: Pople-Nesbet UHF; UKS in a finite basis (stage 5b, Nov 2026).
+inline void uhf(bool kohn_sham)
+{
+    CitationRegistry::cite("pople_nesbet");
+    if (kohn_sham) CitationRegistry::cite("uks_finite_basis");
+}
+
 /// Integral-direct SCF with Schwarz / density-weighted screening.
 inline void directScf()
 {

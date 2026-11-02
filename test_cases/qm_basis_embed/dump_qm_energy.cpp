@@ -10,6 +10,8 @@
  *
  * --gradient (Nov 2026, used by test_cases/qm_fg): also prints the analytic gradient, one line per atom,
  * "grad <atom> gx gy gz" in Eh/Bohr (the EnergyCalculator contract is Eh/Angstrom; converted here with units.h).
+ * --charge Q / --spin S (Nov 2026, stage 5b, test_cases/qm_uhf): molecular charge and unpaired electrons; an
+ * unrestricted run also prints "s2 <S^2>".
  *
  * VALUE is parsed as JSON when possible (true, 1e-10, ...), else taken as a string.
  *
@@ -34,6 +36,8 @@ int main(int argc, char** argv)
     const std::string xyz = argv[1], method = argv[2];
     int verbosity = 0, threads = 1;
     bool gradient = false;
+    int charge = 0, spin = 0;
+    bool set_charge = false, set_spin = false;
     json qm = { { "scf_threshold", 1e-10 }, { "scf_max_iterations", 200 } };
     for (int i = 3; i < argc; ++i) {
         const std::string a = argv[i];
@@ -45,6 +49,12 @@ int main(int argc, char** argv)
             verbosity = std::stoi(argv[++i]);
         } else if (a == "--threads" && i + 1 < argc) {
             threads = std::stoi(argv[++i]);
+        } else if (a == "--charge" && i + 1 < argc) {
+            charge = std::stoi(argv[++i]);
+            set_charge = true;
+        } else if (a == "--spin" && i + 1 < argc) {
+            spin = std::stoi(argv[++i]);
+            set_spin = true;
         } else if (a == "--gradient") {
             gradient = true;
         }
@@ -52,6 +62,8 @@ int main(int argc, char** argv)
     CurcumaLogger::set_verbosity(verbosity);
     json config = { { "verbosity", verbosity }, { "threads", threads }, { "qm", qm } };
     curcuma::Molecule mol(xyz);
+    if (set_charge) mol.setCharge(charge);  // only when given: the xyz comment may carry them
+    if (set_spin) mol.setSpin(spin);
     EnergyCalculator calc(method, config);
     calc.setMolecule(mol.getMolInfo());
     const double e = calc.CalculateEnergy(gradient);
@@ -61,6 +73,8 @@ int main(int argc, char** argv)
     }
     std::fflush(stdout);
     std::printf("\nenergy %.17g\n", e);  // own line: the logger may leave a colour code on the current one
+    const json dec = calc.getEnergyDecomposition();
+    if (dec.contains("s2") && dec["s2"].is_number()) std::printf("s2 %.17g\n", dec["s2"].get<double>());
     if (gradient) {
         const Matrix& g = calc.Gradient();  // Eh/Angstrom
         const double f = 1.0 / CurcumaUnit::Length::angstrom_to_bohr(1.0);  // -> Eh/Bohr

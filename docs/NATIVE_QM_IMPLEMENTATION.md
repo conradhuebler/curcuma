@@ -32,6 +32,7 @@ Since Nov 1 2026 the engine takes H-Rn (Na-Kr all-electron, Rb-Rn with the def2-
 
 (Moved here in Oct 2026 from the status table of `src/core/energy_calculators/qm_methods/CLAUDE.md`, whose line limit it exceeded.)
 
+- **Open shell, UHF/UKS** (Nov 2 2026, stage 5b, `-spin <unpaired electrons>`, `-qm.reference auto|rhf|uhf`): `hf`, `hf-3c`, `lda`, `pbe`, `b3lyp` unrestricted on the CPU; vs PySCF <= 1.6e-12 Eh (UHF, 18 cases to Cu and I/ECP), ORCA 6.1 <= 1.7e-9 Eh, UKS same grid <= 1.5e-11 Eh, gradients <= 4.6e-12 Eh/Bohr; meta-GGA, double hybrids and the correlated methods reject open shell; [stage 5b](#stage-5b-open-shell-uhf-and-uks-nov-2-2026).
 - **Kohn-Sham DFT on the GPU** (Oct 30 2026, `-gpu cuda`, `-qm.gpu_xc auto|on|off`): V_xc/E_xc (grid uploaded once, AO values streamed per block), the device-resident KS SCF loop and the KS gradient (XC part with grid response, 2e part with the exchange weight kx) on the device; XC formulas once in `qm_xc_kernels.h` for CPU and GPU (CPU results bitwise unchanged); vs the CPU of the same binary: V_xc/E_xc <= 4.4e-15 relative on the same density, SCF energies <= 1e-10 Eh, gradients on the same density <= 4.5e-12 Eh/Bohr; caffeine b3lyp SCF 12.6 -> 3.2 s, gradient 82 -> 5.2 s (8 CPU threads vs RTX 5090). AI-generated, machine-tested on one RTX 5090 only; details and what was not tested: [QM_GPU_ROADMAP.md section 4](QM_GPU_ROADMAP.md#4-kohn-sham-dft-on-the-gpu-oct-2026).
 - **AO screening of the XC part** (Oct 30 2026, `-qm.xc_ao_threshold`, default 1e-12; 0 = previous path, bitwise): compact 128-point blocks per atom, per block only the shells whose rigorous value/derivative bound (`AOEvaluator::shellRadii`, one formula for CPU and GPU) reaches the threshold; |dE| <= 6.4e-12 Eh, max |dg| <= 1.4e-12 Eh/Bohr against threshold 0 (H2O..C40H82, def2-SVP); V_xc per build C40H82 23.2 -> 0.92 s (CPU 8 threads), 3.0 -> 0.49 s (RTX 5090); the device Becke weight derivative has no 700-atom limit any more. AI-generated, machine-tested; [QM_GPU_ROADMAP.md section 4.1](QM_GPU_ROADMAP.md#41-ao-screening-per-block-and-weight-derivative-without-atom-limit-oct-30-2026).
 - **Meta-GGA TPSS and SCAN, stage 1** (Oct 30 2026, `-method tpss|scan`, energies on the CPU): tau-dependent kernels with dual-number derivatives in `qm_xc_kernels.h`, V_xc with (1/2) v_tau grad phi . grad phi (`buildVxcMeta`); kernels vs libxc <= 7.7e-11 (scaled), energies vs PySCF on the identical grid <= 1.4e-11 Eh (28 cases incl. RI-J), vs ORCA 6.1 LibXC(TPSS) fine grid <= 8.5e-8 Eh (benzene 2.4e-6); SCAN is very grid-sensitive (sg1-sg3 up to 3e-3 Eh, about 400x590 for 1e-6 Eh); no GPU kernel (counted CPU fallback). **Stage 2** (Oct 30 2026): analytic gradient on the CPU (`buildXCGradientMeta`, tau term with second AO derivatives, Becke weight derivative reused), vs PySCF same grid <= 9.7e-12 Eh/Bohr with and without grid response, `-opt` works (TPSS minima vs PySCF/scipy); SCAN gradients scatter by ~1e-5 Eh/Bohr even at 300x1454 and need the grid response. **Stage 3** (Oct 30 2026): V_xc, the device-resident KS SCF loop and the XC gradient on CUDA (`cuda/qm_gpu_xc.cu`, same point kernels), no `qm_xc` fallback for tpss/scan any more; vs the CPU from the same density rel |dV| <= 1.7e-15, XC gradient parts <= 4.1e-13 Eh/Bohr, SCF energies equal at 10 decimals (H2O..caffeine, sg1 and 150x974); per V_xc build only 1.7-2x faster than 8 CPU threads on the RTX 5090 (FP64 GEMMs), benzene tpss `-opt` 35.1 s CPU / 5.8 s GPU; RTX 5090 only. AI-generated, machine-tested; [DFT_ROADMAP/WP11_meta_gga.md](DFT_ROADMAP/WP11_meta_gga.md).
@@ -591,11 +592,81 @@ Checks (ORCA 6.1.0 `! HF-3c VeryTightSCF` / `EnGrad` / `Opt TightOpt`, `scripts/
   for HEAD as well).
 - ctest `-L qm_hf3c_z`: 28 tests (gCP/SRB all elements, 21 ORCA cases, 4 FD gates, 2 optimisations), 7.5 s wall at -j4
   (27 s test time, CeF4 5.5 s the longest).
-- Not tested / not implemented: open shell (the engine is closed-shell only; most free heavy atoms and many TM
-  compounds are open shell), charged molecules, the other lanthanides than Ce, La, Hf-Au and Tl-At other than Pb
+- Not tested / not implemented: open shell (closed-shell only at this stage; UHF/UKS came with stage 5b), charged molecules, the other lanthanides than Ce, La, Hf-Au and Tl-At other than Pb
   against ORCA (gCP/SRB only via otool), Rb/Sr/Y-Cd/In-Sb/Te compounds against ORCA, `-md` with hf-3c, the GPU
   path with heavy elements, ORCA's gradient on molecules with the otool gradient defect pairs, large molecules.
   Human production test pending.
+
+## Stage 5b: open shell, UHF and UKS (Nov 2, 2026)
+
+AI-generated, machine-tested (no human production test). `hf`, `hf-3c`, `lda`, `pbe` and `b3lyp` run unrestricted
+(Pople-Nesbet UHF, J. Chem. Phys. 22, 571 (1954); UKS in a finite basis, Pople, Gill, Johnson, Chem. Phys. Lett. 199,
+557 (1992)) when the molecule has unpaired electrons.
+
+- **Input**: `-spin <n>` = number of unpaired electrons n_alpha - n_beta (multiplicity - 1, the convention of gfn2),
+  `-charge` as before. `-qm.reference auto|rhf|uhf` (default auto: RHF/RKS for `-spin 0`, UHF/UKS for `-spin > 0`;
+  `uhf` also for a singlet). Errors instead of results: odd electron count with `-spin 0` ("pass -spin 1"), parity of
+  electrons and `-spin` contradicting, `-qm.reference rhf` with `-spin > 0` (no ROHF), tpss/scan (no spin-polarised
+  meta-GGA kernels), mp2/ri-mp2/lmp2/ccsd and every double hybrid on an open shell (`QMEngine::requireClosedShell`, plus a
+  guard in each `compute*` routine). All are checked in `QMEngine::resolveSpinState` before any SCF.
+- **SCF** (`qm_uscf.cpp`): P_s = C_s,occ C_s,occ^T, F_s = h + J[P_a + P_b] - a_x K[P_s] + V_xc,s; DIIS/ADIIS with one
+  coefficient vector for both spins (error (e_a, e_b)), the convergence test of the RHF loop with |dE|,
+  ||(e_a, e_b)||_F and ||(dP_a, dP_b)||_F (`qm_scf_internal.h`: accelerator, test and threaded GEMM moved there
+  unchanged from `qm_scf.cpp`). Start: the RHF guess density split evenly over the spins (as PySCF), the previous
+  geometry's spin orbitals (warm start), or the converged densities when a tight SCF continues an energy-only one.
+  Every Fock build is a full build (no incremental direct builds, no verified stop, no device loop).
+  `-qm.uhf_guess_mix true` rotates the first alpha (+45 deg) and beta (-45 deg) HOMO/LUMO pair (PySCF init_guess_mixed);
+  not validated against a reference.
+- **J/K**: stored tensor J from P_a + P_b and K per spin; integral-direct, RI-J and RI-JK two `buildJK` calls (J
+  linear); pure functionals J only.
+- **<S^2>** = S_z(S_z + 1) + n_beta - Tr(P_a S P_b S): verbosity 2 and the result line print it, the energy
+  decomposition carries `s2`, `s2_exact`, `n_alpha`, `n_beta`, `reference`.
+- **UKS kernels** (`qm_xc_spin.{h,cpp}`): exchange by spin scaling with the closed-shell kernels (Slater, B88, PBE-X);
+  correlation VWN5 (libxc LDA_C_VWN), VWN-RPA (libxc LDA_C_VWN_RPA: plain f(zeta) interpolation of the RPA fits, NOT the
+  VWN5 spin-stiffness form; checked numerically against libxc first), PW92 (LDA_C_PW_MOD), PBE-C, LYP (Miehlich form)
+  with 5-variable dual numbers; V_xc and XC gradient CPU-only, without AO screening (`-qm.xc_ao_threshold` is ignored on
+  this path).
+- **Gradient**: 1e part with P_a + P_b and W_a + W_b (incl. ECP), two-electron weight
+  D = Pt Pt - (kx/2) sum_s (Ps Ps + Ps Ps) (`qmint::gradientTwoElectronUHF`), RI: D(Pt, 0) + 1/2 sum_s [D(2Ps, kx) -
+  D(2Ps, 0)] from the existing RI gradient (`riGradientForDensity`, five passes; RI-J: exact exchange per spin), UKS:
+  spin XC basis part + grid response (point part and Becke weight derivative with the total energy density).
+- **GPU**: none. With `-gpu cuda` an open shell runs every part on the CPU (`gpuRequested()` is false) and the fallback
+  `qm_uhf` is counted once per engine (`-gpu_strict true` therefore stops).
+
+| check (ctest `-L "qm_uhf|qm_uks"`, `scripts/qm_uhf_reference.py`) | cases | max deviation |
+|---|---|---|
+| UHF energy vs PySCF 2.14 (def2-SVP/TZVP: OH, NH2, CH3, O2, NO, CN, CH2, H2O+, Li, Na, K, Cl, I (ECP), Cu; RI-J, RI-JK) | 18 | 1.6e-12 Eh (Cu) |
+| UHF energy vs ORCA 6.1 `! UHF <basis> NoRI VeryTightSCF` | 16 | 1.7e-9 Eh (Cu), 1.4e-9 (O2) |
+| <S^2> vs PySCF / ORCA (6 printed decimals) | 18 / 16 | 1.8e-9 / 7.8e-7 |
+| UHF gradient vs PySCF (CH3 distorted, CH2 triplet incl. RI-J/RI-JK, H2O+) | 5 | 1.2e-12 Eh/Bohr |
+| UKS energy vs PySCF same grid (sg1; lda vwn5/vwn_rpa, pbe, b3lyp B3LYP5/B3LYP; NH2, O2, CH3, Li, Na/TZVP, RI-JK) | 14 | 1.5e-11 Eh (b3lyp; lda/pbe <= 8e-13) |
+| UKS gradient vs PySCF with grid response (pbe CH2, b3lyp CH3, lda H2O+) | 3 | 4.6e-12 Eh/Bohr |
+| spin kernels vs libxc spin = 1 (8 kernels, 40 points incl. rho_b = 0), \|d\|/(1+\|ref\|) | 8 | 1.1e-14 with both rho_s >= 1e-10; 1.2e-8 (PBE-C) with an empty channel, where libxc raises rho_s to its density threshold (1e-12 measured for GGA_C_PBE) and curcuma does not; closed-shell limit vs the RKS kernels 3.9e-15 |
+| FD gate, 4-point, 0.005 Bohr (UHF, UHF RI-JK, hf-3c, pbe, b3lyp; 3 coordinates each) | 15 | 1.8e-10 Eh/Bohr |
+| `-qm.reference uhf` on singlet water = RHF/RKS (hf, pbe, b3lyp; energy, gradient, <S^2>) | 3 | 4.3e-14 Eh, 9e-15 Eh/Bohr |
+| integral-direct UHF = stored tensor (CH2, energy and gradient) | 1 | 0 Eh, 2.2e-15 Eh/Bohr |
+
+- **hf-3c open shell**: CH3 (distorted) vs ORCA 6.1 `! UHF HF-3c VeryTightSCF EnGrad`: E(UHF/MINIX) 5.4e-10 Eh, total
+  1.2e-9 Eh, <S^2> equal to 6 decimals, gCP+SRB equal within ORCA's 9 printed decimals; gradient 7.6e-7 Eh/Bohr from
+  ORCA, of which the UHF/MINIX part alone 4.3e-7 (ORCA `! UHF MINIX EnGrad`). ORCA's UHF/def2-SVP gradient of the same
+  molecule is 1.1e-7 Eh/Bohr from PySCF (curcuma = PySCF to 8e-13), so the gradient difference is ORCA's gradient
+  precision, not a curcuma term (inferred, not isolated further); curcuma's hf-3c gradient vs own FD 1.8e-10.
+- **Degenerate states**: OH (pi^3) with UKS/LDA landed 1.2e-7 Eh below PySCF (same grid): with a degenerate pair the grid
+  energy depends on the orientation of the hole; no UKS test uses OH, NO or atoms with an open p shell (PySCF did not
+  converge UKS for NO/LDA, Cl and I atoms to 1e-13).
+- ctest `-L "qm_uhf|qm_uks"`: 61 tests (39 qm_uhf, 22 qm_uks), 2.9 s wall at -j8 (14 s test time); `ctest -L qm_` 961/961
+  passed (417 s at -j6, CUDA build, RTX 5090 machine). H2O/def2-SVP HF process time old/new binary: 18.7/18.6 ms
+  (1 thread), 17.1/17.3 ms (4 threads), median of 15 (startup included).
+- Closed shell bitwise unchanged: 14 dumps (hf stored/direct, b3lyp, pbe RI-JK, hf RI-JK, b3lyp RI-J, hf-3c, mp2
+  gradient, ri-mp2, HI def2-SVP/TZVP with ECP, tpss, b2plyp, ccsd) give md5-identical 17-digit energies and gradients
+  against the binary built before the change.
+- Not tested / not implemented: ROHF; open-shell meta-GGAs, double hybrids, MP2/RI-MP2/LMP2/CCSD; any GPU path (CPU
+  fallback only); AO screening on the UKS path; broken-symmetry singlets (`-qm.uhf_guess_mix` only smoke-tested) and
+  convergence to the wrong state in general (the tests only compare the state PySCF and ORCA also reach); transition
+  metal compounds beyond the Cu atom; charged open shell with an ECP; molecules larger than 5 atoms; `-md` and
+  `-scf_extrapolation` with UHF (the density history is RHF only, so UHF warm-starts from the previous orbitals);
+  incremental integral-direct builds (every UHF Fock build is full, slower for large molecules). Human production
+  test pending.
 
 ## Basis-set citations (Oct 27, 2026)
 
@@ -812,6 +883,7 @@ testing against an external 2e reference (ORCA/xcDFT/libint) is pending.
 |------|------|
 | `src/core/energy_calculators/qm_methods/qm_engine.h/.cpp` | `QMFunctional` enum, `qm` PARAM block, `QMEngine : public QMDriver` (basis, 1e integrals, lazy ERI, geometry updates) |
 | `src/core/energy_calculators/qm_methods/qm_scf.cpp` | closed-shell RHF SCF (SAD/H0 guess, DIIS), Fock build, active-basis ERI |
+| `src/core/energy_calculators/qm_methods/qm_uscf.cpp`, `qm_scf_internal.h`, `qm_xc_spin.{h,cpp}` | open shell (stage 5b): UHF/UKS SCF, gradient, spin-polarised XC; SCF pieces shared with `qm_scf.cpp` |
 | `src/core/energy_calculators/qm_methods/qm_integrals.hpp/.cpp` | 1e kernels, shell-quartet-blocked MD ERI (reference `shellQuartet`, Hermite-matrix `mdQuartetT` used by the SCF; Schwarz, OpenMP, on-the-fly 5d), J/K, spherical transforms (`namespace qmint`) |
 | `src/core/energy_calculators/qm_methods/qm_method.h/.cpp` | `QMMethod : public ComputationalMethod` wrapper, `engineConfig()` scope merge |
 | `src/core/energy_calculators/qm_methods/hf3c_method.h/.cpp` | `HF3CMethod`: HF/MINIX + D3(BJ) + gCP + SRB |

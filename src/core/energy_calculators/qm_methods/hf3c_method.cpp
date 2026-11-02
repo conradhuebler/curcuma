@@ -124,7 +124,8 @@ double HF3CMethod::calculateEnergy(bool gradient)
     }
 
     if (CurcumaLogger::get_verbosity() >= 1) {
-        CurcumaLogger::result("native HF-3c = HF/MINIX + D3(BJ) + gCP + SRB");
+        CurcumaLogger::result(m_engine->isOpenShell() ? "native HF-3c = UHF/MINIX + D3(BJ) + gCP + SRB (open shell; D3, gCP, SRB spin independent)"
+                                                      : "native HF-3c = HF/MINIX + D3(BJ) + gCP + SRB");
         CurcumaLogger::result(fmt::format("  E(HF/MINIX) = {:.12f} Eh", m_e_hf));
         CurcumaLogger::result(fmt::format("  E(D3BJ)     = {:.12f} Eh", m_e_d3));
         CurcumaLogger::result(fmt::format("  E(gCP)      = {:.12f} Eh", m_e_gcp));
@@ -136,7 +137,10 @@ double HF3CMethod::calculateEnergy(bool gradient)
     }
     // Claude Generated (Oct 27 2026): master's rule (docs/SCF_MODES.md "Failure handling"): an unconverged SCF is an
     // error unless -scf_allow_unconverged true; a gradient of an unconverged SCF is always an error.
-    if (!m_engine->scfConverged() && !m_engine->scfAllowUnconverged()) {
+    if (m_engine->spinStateRejected()) {  // stage 5b: electrons / -spin / -qm.reference contradict
+        m_run_error = true;
+        m_run_message = "hf-3c: " + m_engine->spinError();
+    } else if (!m_engine->scfConverged() && !m_engine->scfAllowUnconverged()) {
         m_run_error = true;
         m_run_message = fmt::format("hf-3c: HF SCF did not converge within {} iterations; "
                                     "-scf_allow_unconverged true accepts the unconverged energy", m_engine->scfMaxIter());
@@ -163,5 +167,6 @@ json HF3CMethod::getEnergyDecomposition() const
     decomp["gcp"] = m_e_gcp;
     decomp["srb"] = m_e_srb;
     decomp["total"] = m_e_total;
+    if (m_engine->isOpenShell() && m_engine->scfConverged()) decomp["s2"] = m_engine->spinSquared();  // stage 5b
     return decomp;
 }

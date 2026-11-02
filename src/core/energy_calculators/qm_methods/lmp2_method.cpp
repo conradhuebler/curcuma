@@ -119,8 +119,14 @@ double LMP2Method::calculateEnergy(bool gradient)
         return std::numeric_limits<double>::quiet_NaN();
     }
     const auto t0 = std::chrono::steady_clock::now();
+    m_engine->requireClosedShell("lmp2");  // stage 5b: open-shell input is an error, not a UHF reference
     m_e_hf = m_engine->Calculation(false);
     const double t_scf = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    if (m_engine->spinStateRejected()) {
+        m_error = true;
+        m_error_message = m_engine->spinError();
+        return std::numeric_limits<double>::quiet_NaN();
+    }
     if (!m_engine->scfConverged()) {
         m_error = true;
         m_error_message = "LMP2: the RHF SCF did not converge";

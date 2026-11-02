@@ -239,6 +239,10 @@ std::shared_ptr<qmri::RIJK> QMEngine::correlationRI(const std::string& file, std
 bool QMEngine::computeRIMP2(const qmint::MP2Options& opt, qmint::MP2Result& res)
 {
     res = qmint::MP2Result();
+    if (m_open_shell) {  // stage 5b (Nov 2026): closed-shell formulas (n_occ = N/2) only
+        CurcumaLogger::error("QM: RI-MP2 needs a closed-shell RHF/RKS reference; the last SCF was unrestricted (open shell)");
+        return false;
+    }
     res.ri = true;
     // WP12 stage 1 (Oct 2026): the double hybrids evaluate the same PT2 expression on their KS orbitals and
     // orbital energies (the HF path is unchanged)

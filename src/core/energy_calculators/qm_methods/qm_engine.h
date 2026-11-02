@@ -39,6 +39,7 @@
 #include "qm_integrals.hpp"   // qmint 1e/2e integral kernels (WP1/WP2)
 #include "qm_grid.h"         // qmgrid molecular DFT grid + AO values on points (WP4)
 #include "qm_xc.h"           // qmxc exchange-correlation functionals and V_xc (WP5)
+#include "qm_xc_spin.h"      // spin-polarised XC for UHF/UKS (stage 5b, Nov 2026)
 #include "qm_ecp.h"          // qmecp semi-local ECP integrals (Nov 2026)
 #include <map>
 #include "qm_driver.h"
@@ -279,6 +280,13 @@ BEGIN_PARAMETER_DEFINITION(qm)
     PARAM(scf_verified_stop, Bool, true,
           "Energy-only SCFs with scf_convergence auto, scf_mode diis/adiis (not the tight SCF of gradients and mp2/ri-mp2/lmp2/ccsd): stop on the Fock build of the density that is returned. When a full (exact) J/K build of the current density meets all three conditions (|dE|, orbital gradient of that density, ||dP|| of the step that produced it), that density, its Fock matrix and the orbitals it was built from are the result; the extra full build of one more density is skipped. In integral-direct runs the build on which convergence is predicted (orbital gradient falling below the threshold at the observed rate) is made a full one; a wrong prediction costs one full instead of an incremental build. The returned density meets the orbital-gradient threshold itself (before: the previous density did, and the returned one was one DIIS step better; the HF energy is second order in it). false = the rule before Oct 27 2026. Ignored for scf_convergence density, plain mode and RI mixed precision.",
           "SCF", {})
+    // Claude Generated (Nov 2026, stage 5b): open-shell reference, implementation in qm_uscf.cpp
+    PARAM(reference, String, "auto",
+          "Spin treatment of hf, hf-3c and the Kohn-Sham functionals lda/pbe/b3lyp: auto (RHF/RKS for -spin 0, UHF/UKS for -spin > 0; -spin is the number of unpaired electrons n_alpha - n_beta, multiplicity - 1, as for gfn2) | rhf (closed shell only; -spin > 0 is an error, ROHF is not implemented) | uhf (unrestricted also for a singlet, e.g. a broken-symmetry start with uhf_guess_mix). An odd electron count with -spin 0 is an error. Open shell runs on the CPU (a -gpu request is a counted fallback, qm_uhf); meta-GGAs (tpss, scan), double hybrids and the correlated methods (mp2, ri-mp2, lmp2, ccsd) reject open-shell input.",
+          "SCF", {})
+    PARAM(uhf_guess_mix, Bool, false,
+          "UHF/UKS only: rotate the alpha HOMO and LUMO of the first iteration by +45 degrees and the beta pair by -45 degrees (PySCF init_guess_mixed), which breaks the spin symmetry of the start; for broken-symmetry singlets with -qm.reference uhf. Checked only on H2 at 2.5 A and singlet O2 (equal to PySCF UHF from the same rotated start); which state an SCF reaches is not guaranteed.",
+          "SCF", {})
     PARAM(cartesian_d, Bool, false,
           "Use cartesian functions (true: 6d, 10f, 15g) instead of spherical ones (false: 5d, 7f, 9g, the ORCA/PySCF def2 default).",
           "Basis", {})
@@ -354,6 +362,24 @@ public:
     /// gradientError(). The gradient is then zero and must not be used. Claude Generated (Oct 2026).
     bool gradientFailed() const { return m_gradient_failed; }
     const std::string& gradientError() const { return m_gradient_error; }
+
+    // --- Open shell (stage 5b, Claude Generated Nov 2026; qm_uscf.cpp) ---
+    /// True when the current molecule runs unrestricted (UHF/UKS): -spin > 0, or -qm.reference uhf.
+    bool isOpenShell() const { return m_open_shell; }
+    int nAlpha() const { return m_nalpha; }
+    int nBeta() const { return m_nbeta; }
+    /// <S^2> of the last converged UHF/UKS determinant and the exact value S(S+1), S = (n_alpha - n_beta)/2.
+    double spinSquared() const { return m_s2; }
+    double spinSquaredExact() const { return m_s2_exact; }
+    const Matrix& densityAlpha() const { return m_density_a; }
+    const Matrix& densityBeta() const { return m_density_b; }
+    /// Correlated methods and double hybrids (closed shell only) call this before Calculation(): an open-shell
+    /// molecule then fails with an error naming `method` instead of running a UHF SCF the method cannot use.
+    void requireClosedShell(const std::string& method) { m_closed_shell_only = method; }
+    /// True when the last Calculation() stopped because of the spin state (closed-shell-only method on an open shell,
+    /// parity of electrons and -spin, ROHF requested, open-shell functional not available); reason in spinError().
+    bool spinStateRejected() const { return !m_spin_error.empty(); }
+    const std::string& spinError() const { return m_spin_error; }
 
     // Property access
     std::string getMethodNameStr() const;
@@ -839,4 +865,39 @@ private:
     // ERI in the active basis (cartesian, or the cartesian tensor transformed by
     // Q to spherical 5d). Built lazily on first SCF; empty Q -> unchanged tensor.
     const qmint::ERITensor& eriActive() const;
+
+    // --- Stage 5b (Claude Generated, Nov 2026): unrestricted HF / KS, implementation in qm_uscf.cpp ---
+    std::string m_reference = "auto";        ///< -qm.reference auto | rhf | uhf
+    bool m_uhf_guess_mix = false;            ///< -qm.uhf_guess_mix
+    bool m_open_shell = false;               ///< this molecule runs UHF/UKS (set by resolveSpinState)
+    int m_nalpha = 0, m_nbeta = 0;
+    std::string m_closed_shell_only;         ///< requireClosedShell(): method name, empty = open shell allowed
+    std::string m_spin_error;                ///< reason when the spin state was rejected (empty = fine)
+    mutable bool m_uhf_gpu_reported = false; ///< the qm_uhf GPU fallback is counted once per engine
+    Matrix m_density_a, m_density_b;         ///< converged spin densities P_s = C_s,occ C_s,occ^T
+    Matrix m_fock_a, m_fock_b;               ///< converged spin Fock (KS) matrices
+    Matrix m_mo_b;                           ///< beta orbitals (alpha: m_mo)
+    Vector m_energies_b;                     ///< beta orbital energies (alpha: m_energies)
+    Matrix m_warm_Ca, m_warm_Cb;             ///< occupied spin orbitals of the last converged UHF (warm start)
+    double m_s2 = 0.0, m_s2_exact = 0.0;
+    /// Electron count, -spin and -qm.reference -> m_open_shell, n_alpha, n_beta; false + m_spin_error on a
+    /// contradiction (parity, ROHF, open-shell functional or method not available).
+    bool resolveSpinState();
+    /// UHF/UKS SCF (DIIS on both spins, same convergence test as runSCF); sets m_density_a/b, m_density, m_e_elec.
+    bool runUSCF();
+    /// J[Pa + Pb], K[Pa], K[Pb] on every J/K path (stored tensor, integral-direct, RI-J, RI-JK); a pure density
+    /// functional builds J only (Ka = Kb = 0).
+    void buildJKSpin(const Matrix& Pa, const Matrix& Pb, Matrix& J, Matrix& Ka, Matrix& Kb) const;
+    /// Spin V_xc and E_xc (cached for the last density pair, as xcFor).
+    const qmxc::XCResultSpin& xcForSpin(const Matrix& Pa, const Matrix& Pb) const;
+    mutable Matrix m_xcs_last_Pa, m_xcs_last_Pb;
+    mutable qmxc::XCResultSpin m_xcs_last;
+    mutable bool m_xcs_last_valid = false;
+    /// UHF/UKS analytic gradient (1e with P_a + P_b and W_a + W_b, UHF 2e weight, spin XC, ECP, E_nn), Eh/Bohr.
+    bool computeGradientUHF();
+    /// RI two-electron gradient of the unrestricted energy (Eh/Bohr): J part of P_a + P_b, exchange per spin.
+    bool riGradientTwoElectronUHF(const Matrix& Pac, const Matrix& Pbc, Matrix& g2, std::string& info) const;
+    /// RI part of the gradient of 1/2 Tr(P J[P]) - kx/4 Tr(P K[P]) for an active-basis density P (mode j: Coulomb only, the
+    /// caller adds the exact exchange); shared by riGradientTwoElectron and riGradientTwoElectronUHF.
+    bool riGradientForDensity(const Matrix& P, double kx, Matrix& g2, std::string& info) const;
 };

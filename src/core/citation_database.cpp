@@ -1497,6 +1497,37 @@ const std::unordered_map<std::string, CitationData>& database()
             "}"
         }},
 
+        // Claude Generated (Nov 2026, stage 5b): unrestricted HF / KS of the native QM engine
+        { "pople_nesbet", {
+            "Unrestricted Hartree-Fock (Pople-Nesbet equations, 1954)",
+            "Pople, J. A.; Nesbet, R. K. J. Chem. Phys. 1954, 22, 571-572 (DOI: 10.1063/1.1740120)",
+            "pople1954",
+            "@article{pople1954,\n"
+            "  author = {Pople, J. A. and Nesbet, R. K.},\n"
+            "  title = {Self-consistent orbitals for radicals},\n"
+            "  journal = {J. Chem. Phys.},\n"
+            "  year = {1954},\n"
+            "  volume = {22},\n"
+            "  pages = {571--572},\n"
+            "  doi = {10.1063/1.1740120}\n"
+            "}"
+        }},
+
+        { "uks_finite_basis", {
+            "Unrestricted Kohn-Sham in a finite basis (Pople, Gill, Johnson 1992)",
+            "Pople, J. A.; Gill, P. M. W.; Johnson, B. G. Chem. Phys. Lett. 1992, 199, 557-560 (DOI: 10.1016/0009-2614(92)85009-Y)",
+            "pople1992",
+            "@article{pople1992,\n"
+            "  author = {Pople, J. A. and Gill, P. M. W. and Johnson, B. G.},\n"
+            "  title = {Kohn-Sham density-functional theory within a finite basis set},\n"
+            "  journal = {Chem. Phys. Lett.},\n"
+            "  year = {1992},\n"
+            "  volume = {199},\n"
+            "  pages = {557--560},\n"
+            "  doi = {10.1016/0009-2614(92)85009-Y}\n"
+            "}"
+        }},
+
         { "md_integrals", {
             "McMurchie-Davidson scheme for Gaussian integrals (1978)",
             "McMurchie, L. E.; Davidson, E. R. J. Comput. Phys. 1978, 26, 218-231 (DOI: 10.1016/0021-9991(78)90092-X)",

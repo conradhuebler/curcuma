@@ -855,6 +855,10 @@ long localThreeIndex(const qmri::ThreeIndexDirect& eri, const MatX& L, const Mat
 bool QMEngine::computeLMP2(const qmint::LMP2Options& opt, qmint::LMP2Result& res)
 {
     res = qmint::LMP2Result();
+    if (m_open_shell) {  // stage 5b (Nov 2026): closed-shell formulas (n_occ = N/2) only
+        CurcumaLogger::error("QM: LMP2 needs a closed-shell RHF/RKS reference; the last SCF was unrestricted (open shell)");
+        return false;
+    }
     if (m_functional != QMFunctional::HF) {
         CurcumaLogger::error("LMP2: needs the HF reference (QMFunctional::HF)");
         return false;

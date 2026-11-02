@@ -97,7 +97,13 @@ double MP2Method::calculateEnergy(bool gradient)
     // Spin-component scaling of the correlation energy whose gradient is formed (Claude Generated, Oct 2026)
     const double c_os = scs ? 1.2 : sos ? 1.3 : 1.0;
     const double c_ss = scs ? 1.0 / 3.0 : sos ? 0.0 : 1.0;
+    m_engine->requireClosedShell(m_variant);  // stage 5b: open-shell input is an error, not a UHF reference
     m_e_hf = m_engine->Calculation(false);
+    if (m_engine->spinStateRejected()) {
+        m_error = true;
+        m_error_message = m_engine->spinError();
+        return std::numeric_limits<double>::quiet_NaN();
+    }
     if (!m_engine->scfConverged()) {
         m_error = true;
         m_error_message = "MP2: the RHF SCF did not converge";

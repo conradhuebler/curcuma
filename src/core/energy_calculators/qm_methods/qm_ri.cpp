@@ -3043,6 +3043,73 @@ void installDeviceExchange(const std::shared_ptr<qmri::RIJK>& ri, const std::str
 // separate stored setup is made for it (same aux basis and options; error if it does not fit, Oct 2026).
 bool QMEngine::riGradientTwoElectron(const Matrix& Pc, Matrix& g2, std::string& info) const
 {
+    // WP8 (Oct 2026): Kohn-Sham weights the exchange part with a_x (0 for LDA/GGA, 0.2 for B3LYP)
+    const double kx = isKohnSham() ? m_xc.exact_exchange : 1.0;
+    Matrix g;
+    if (!riGradientForDensity(m_density, kx, g, info)) return false;
+    if (m_ri_mode == "j" && kx != 0.0) {
+        const auto tk = std::chrono::steady_clock::now();
+        if (kx == 1.0)
+            g += qmint::gradientTwoElectronExchange(m_gto_basis, Pc, m_atomcount, m_threads);
+        else
+            g += kx * qmint::gradientTwoElectronExchange(m_gto_basis, Pc, m_atomcount, m_threads);
+        info += fmt::format(", exact exchange {:.1f} ms", msGlue(tk));
+    }
+    g2 = g;
+    return true;
+}
+
+// Claude Generated (Nov 2026, stage 5b): unrestricted RI gradient. The RI energy is quadratic in each density, so
+//   E = 1/2 Tr(Pt J[Pt]) - (kx/2) sum_s Tr(Ps K[Ps]),
+// and D(P, kx) = riGradientForDensity(P, kx) is the gradient of 1/2 Tr(P J[P]) - (kx/4) Tr(P K[P]); since
+// D(2 Ps, kx) - D(2 Ps, 0) = grad(-kx Tr(Ps K[Ps])),
+//   grad E = D(Pt, 0) + 1/2 sum_s [ D(2 Ps, kx) - D(2 Ps, 0) ],
+// five RI gradient passes on positive semidefinite densities. RI-J (mode j): Coulomb fitted (D(Pt, 0)), exchange exact
+// (gradientTwoElectronUHF with the Coulomb part removed). Pac, Pbc: cartesian spin densities.
+bool QMEngine::riGradientTwoElectronUHF(const Matrix& Pac, const Matrix& Pbc, Matrix& g2, std::string& info) const
+{
+    const double kx = isKohnSham() ? m_xc.exact_exchange : 1.0;
+    const Matrix Pt = m_density_a + m_density_b;
+    Matrix g;
+    std::string i0;
+    if (!riGradientForDensity(Pt, 0.0, g, i0)) {
+        info = i0;
+        return false;
+    }
+    info = "J: " + i0;
+    if (kx == 0.0) {
+        g2 = g;
+        return true;
+    }
+    if (m_ri_mode == "j") {
+        // exact exchange part only: UHF weight minus its Coulomb part
+        const Matrix gx = qmint::gradientTwoElectronUHF(m_gto_basis, Pac, Pbc, kx, m_atomcount, m_threads)
+            - qmint::gradientTwoElectronUHF(m_gto_basis, Pac, Pbc, 0.0, m_atomcount, m_threads);
+        g2 = g + gx;
+        info += ", exact exchange per spin";
+        return true;
+    }
+    for (const Matrix* Ps : { &m_density_a, &m_density_b }) {
+        Matrix gk, g0;
+        std::string ik;
+        const Matrix P2 = 2.0 * (*Ps);
+        if (!riGradientForDensity(P2, kx, gk, ik) || !riGradientForDensity(P2, 0.0, g0, ik)) {
+            info = ik;
+            return false;
+        }
+        g += 0.5 * (gk - g0);
+    }
+    info += ", exchange per spin (4 more RI passes)";
+    g2 = g;
+    return true;
+}
+
+// The RI part of the gradient of 1/2 J[P].P - (kx/4) K[P].P for the active-basis density P (mode j: Coulomb only, the
+// caller adds the exact exchange). On failure `info` holds the reason. The gradient needs the stored FP64 tensor: after
+// a batched or FP32 SCF a separate stored setup is made for it (same aux basis and options; error if it does not fit,
+// Oct 2026). Body of the former riGradientTwoElectron (Oct 2026), split out unchanged in Nov 2026 (stage 5b).
+bool QMEngine::riGradientForDensity(const Matrix& P, double kx, Matrix& g2, std::string& info) const
+{
     if (!ensureRI()) {
         info = "RI gradient: density fitting setup failed (-qm.ri " + m_ri_mode + ")";
         return false;
@@ -3084,9 +3151,7 @@ bool QMEngine::riGradientTwoElectron(const Matrix& Pc, Matrix& g2, std::string& 
     Matrix G;
     Eigen::MatrixXd M2;
     const Matrix* Q = m_Q.size() != 0 ? &m_Q : nullptr;
-    // WP8 (Oct 2026): Kohn-Sham weights the exchange part with a_x (0 for LDA/GGA, 0.2 for B3LYP)
-    const double kx = isKohnSham() ? m_xc.exact_exchange : 1.0;
-    if (!ri->gradientDensities(m_density, kx, c, G, M2, why)) {
+    if (!ri->gradientDensities(P, kx, c, G, M2, why)) {
         info = "RI gradient not possible: " + why;
         return false;
     }
@@ -3098,18 +3163,18 @@ bool QMEngine::riGradientTwoElectron(const Matrix& Pc, Matrix& g2, std::string& 
     const std::string be = gpuGradBackend(m_gpu_ri_grad, "gpu_ri_grad", "qm_ri_grad", m_gpu_ri_grad_failed);
     if (!be.empty()) {
         std::string dwhy;
-        on_device = ri->threeIndexGradientDevice(m_gto_basis, Q, c, m_density, G, m_atomcount, be, m_gpu_device, g3, dev_info, dwhy);
+        on_device = ri->threeIndexGradientDevice(m_gto_basis, Q, c, P, G, m_atomcount, be, m_gpu_device, g3, dev_info, dwhy);
         if (!on_device) {
             m_gpu_ri_grad_failed = true;
             curcuma::reportGpuFallback("qm_ri_grad", "device RI gradient not possible: " + dwhy);
         }
     }
-    if (!on_device) g3 = ri->threeIndexGradient(m_gto_basis, Q, c, m_density, G, m_atomcount);
+    if (!on_device) g3 = ri->threeIndexGradient(m_gto_basis, Q, c, P, G, m_atomcount);
     const double t_3c = msGlue(t1);
     if (on_device) {
         if (const char* chk = std::getenv("CURCUMA_QM_GPU_RI_GRAD_CHECK"); chk && chk[0] == '1') {
             const auto c0 = std::chrono::steady_clock::now();
-            const Matrix gc = ri->threeIndexGradient(m_gto_basis, Q, c, m_density, G, m_atomcount);
+            const Matrix gc = ri->threeIndexGradient(m_gto_basis, Q, c, P, G, m_atomcount);
             CurcumaLogger::result(fmt::format("QM GPU RI grad check: natoms={} max|dev-cpu|={:.3e} max|cpu|={:.3e} dev_ms={:.1f} cpu_ms={:.1f}",
                                               m_atomcount, (g3 - gc).cwiseAbs().maxCoeff(), gc.cwiseAbs().maxCoeff(), t_3c, msGlue(c0)));
         }
@@ -3119,19 +3184,10 @@ bool QMEngine::riGradientTwoElectron(const Matrix& Pc, Matrix& g2, std::string& 
     Matrix g = g3 - ri->metricGradient(M2, m_atomcount);
     const double t_2c = msGlue(t2), t_dens = std::chrono::duration<double, std::milli>(t1 - t0).count();
     const double t_ri = msGlue(t0);
-    double t_k = 0.0;
-    if (m_ri_mode == "j" && kx != 0.0) {
-        const auto tk = std::chrono::steady_clock::now();
-        if (kx == 1.0)
-            g += qmint::gradientTwoElectronExchange(m_gto_basis, Pc, m_atomcount, m_threads);
-        else
-            g += kx * qmint::gradientTwoElectronExchange(m_gto_basis, Pc, m_atomcount, m_threads);
-        t_k = msGlue(tk);
-    }
     g2 = g;
-    info = fmt::format("RI-{}: densities {:.1f} ms, 3-index {:.1f} ms {}, metric {:.1f} ms (total {:.1f} ms){}{}",
+    info = fmt::format("RI-{}: densities {:.1f} ms, 3-index {:.1f} ms {}, metric {:.1f} ms (total {:.1f} ms){}",
                        m_ri_mode == "j" ? "J" : "JK", t_dens, t_3c, on_device ? "(" + dev_info + ")" : std::string("(CPU)"), t_2c, t_ri,
-                       m_ri_mode == "j" ? fmt::format(", exact exchange {:.1f} ms", t_k) : std::string(), rebuilt);
+                       rebuilt);
     return true;
 }
 

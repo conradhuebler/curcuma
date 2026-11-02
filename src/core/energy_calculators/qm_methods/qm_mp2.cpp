@@ -229,6 +229,10 @@ const double* QMEngine::mp2HostTensor(const qmint::MP2Options& opt, qmint::MP2Re
 bool QMEngine::computeMP2(const qmint::MP2Options& opt, qmint::MP2Result& res)
 {
     res = qmint::MP2Result();
+    if (m_open_shell) {  // stage 5b (Nov 2026): closed-shell formulas (n_occ = N/2) only
+        CurcumaLogger::error("QM: MP2 needs a closed-shell RHF/RKS reference; the last SCF was unrestricted (open shell)");
+        return false;
+    }
     // WP12 stage 1 (Oct 2026): the double hybrids evaluate the same PT2 expression on their KS orbitals and
     // orbital energies (the HF path is unchanged)
     if (m_functional != QMFunctional::HF && m_functional != QMFunctional::DoubleHybrid) {

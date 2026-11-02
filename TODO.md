@@ -245,8 +245,11 @@ Stand.
 ## 5. Funktionen und Refactoring (niedrige Priorität)
 
 - **Native QM, nächste Basis-Stufe** (Nov 2026): H-Rn mit s-g und def2-ECP laufen (Stufe 4), hf-3c H-Rn (Stufe 5a); offen:
-  ECP auf der GPU, offene Schalen; otool_gcp-Gradientenfehler (He/Ne-Paare, Exponenten < 0.1) gegen ORCA-EnGrad nicht isoliert; CUDA-ERI/J/K/Gradient-Kerne für L > 2 (gezählter CPU-Fallback), `mdQuartetT` für l_a+l_b > 4; XeF2: PySCF weicht
+  ECP auf der GPU; otool_gcp-Gradientenfehler (He/Ne-Paare, Exponenten < 0.1) gegen ORCA-EnGrad nicht isoliert; CUDA-ERI/J/K/Gradient-Kerne für L > 2 (gezählter CPU-Fallback), `mdQuartetT` für l_a+l_b > 4; XeF2: PySCF weicht
   1.6e-6 Eh von curcuma/ORCA ab, ungeklärt. [Stufe 4](docs/NATIVE_QM_IMPLEMENTATION.md#stage-4-elements-beyond-ne-and-def2-ecp-nov-1-2026)
+- **Native QM offene Schale, Rest** (2026-11-02, Stufe 5b): UHF/UKS laufen (hf, hf-3c, lda, pbe, b3lyp, CPU); offen: GPU-Pfad (jetzt gezählter
+  Fallback `qm_uhf`), UKS mit AO-Screening, inkrementelle direkte Fock-Builds, ROHF, spinpolarisierte Meta-GGAs, UMP2/UCCSD/UHF-Doppelhybride,
+  Broken-Symmetry (`-qm.uhf_guess_mix` nur angespielt). [Stufe 5b](docs/NATIVE_QM_IMPLEMENTATION.md#stage-5b-open-shell-uhf-and-uks-nov-2-2026)
 - **Doppelhybride, GPU-Rest** (2026-10-31): im GPU-Gradienten bleiben die
   PT2-Zwischengrößen (RI-/kanonische Amplituden, Lagrangian, Z-Vektor-Algebra) Host-Code, gezählt als `qm_dh_grad_pt2` (`-gpu_strict
   true` endet beim Gradienten mit Exit 3); ROCm/Vulkan fehlen. [WP12](docs/DFT_ROADMAP/WP12_doppelhybride.md) Stufe 3

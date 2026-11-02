@@ -126,7 +126,11 @@ double QMMethod::calculateEnergy(bool gradient)
     m_error_message.clear();
     m_last_energy = m_engine->Calculation(gradient);
     m_calculation_done = true;
-    if (m_engine->riSetupFailed()) {
+    if (m_engine->spinStateRejected()) {
+        // stage 5b (Nov 2026): electrons/-spin/-qm.reference contradict, or no open-shell variant exists
+        m_has_error = true;
+        m_error_message = m_engine->spinError();
+    } else if (m_engine->riSetupFailed()) {
         // Claude Generated (Oct 2026, WP10): no energy without the fit the user asked for.
         m_has_error = true;
         m_error_message = "density fitting (-qm.ri " + m_engine->riMode() + ") setup failed, see the error above";
@@ -223,6 +227,14 @@ json QMMethod::getEnergyDecomposition() const
         decomp["nuclear_repulsion"] = m_last_energy - c[4];
     } else {
         // unconverged or failed SCF (WP7: no functional returns E_nn alone any more): no components
+    }
+    if (m_engine->isOpenShell() && m_engine->scfConverged()) {
+        // stage 5b: unrestricted reference, <S^2> and its exact value
+        decomp["reference"] = m_engine->isKohnSham() ? "UKS" : "UHF";
+        decomp["n_alpha"] = m_engine->nAlpha();
+        decomp["n_beta"] = m_engine->nBeta();
+        decomp["s2"] = m_engine->spinSquared();
+        decomp["s2_exact"] = m_engine->spinSquaredExact();
     }
     if (m_d4) {
         decomp["dispersion"] = m_e_disp;  // WP12 stage 4; nuclear_repulsion above then holds E_nn + E_disp

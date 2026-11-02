@@ -715,6 +715,10 @@ void ccsdSolve(const CCSDIntegrals& I, const CCSDOptions& opt, int threads, CCSD
 bool QMEngine::computeCCSD(const qmint::CCSDOptions& opt, qmint::CCSDResult& res)
 {
     res = qmint::CCSDResult();
+    if (m_open_shell) {  // stage 5b (Nov 2026): closed-shell formulas (n_occ = N/2) only
+        CurcumaLogger::error("QM: CCSD needs a closed-shell RHF/RKS reference; the last SCF was unrestricted (open shell)");
+        return false;
+    }
     if (m_functional != QMFunctional::HF) {
         CurcumaLogger::error("CCSD: needs the HF reference (QMFunctional::HF)");
         return false;

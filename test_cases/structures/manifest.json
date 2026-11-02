@@ -240,6 +240,24 @@
    "notes": "Constructed from a typical bond length for the native HF-3c element validation vs ORCA 6.1 (Nov 2026)"
   },
   {
+   "id": "amidogen",
+   "class": "small",
+   "file": "small/amidogen.xyz",
+   "format": "xyz",
+   "formula": "H2N",
+   "natoms": 3,
+   "frames": 1,
+   "charge": 0,
+   "spin": 1,
+   "role": "equilibrium",
+   "size_bytes": 203,
+   "sha256": "d41be7397c00aea1af5fed2998d02bd56f21a4d294108e2628c6285eb7c3ae63",
+   "provenance": {
+    "kind": "constructed",
+    "description": "NH2 radical (doublet), C2v, r(NH) 1.024 A, angle 103.4 deg: rounded experimental r_e (NIST CCCBDB), built by hand for the UHF/UKS tests (stage 5b), not optimised at any level"
+   }
+  },
+  {
    "id": "ammonia.alt1",
    "class": "small",
    "file": "small/ammonia.alt1.xyz",
@@ -672,6 +690,24 @@
    "description": "VTF input of cli/cg/01_single_point"
   },
   {
+   "id": "chlorine-atom",
+   "class": "atoms",
+   "file": "atoms/chlorine-atom.xyz",
+   "format": "xyz",
+   "formula": "Cl",
+   "natoms": 1,
+   "frames": 1,
+   "charge": 0,
+   "spin": 1,
+   "role": "equilibrium",
+   "size_bytes": 112,
+   "sha256": "c3631e93523574ad6a55112dd9f79022f0d94e96597f20eb6458355bef0e7a20",
+   "provenance": {
+    "kind": "constructed",
+    "description": "single Cl atom at the origin (doublet ground state), for the UHF/UKS tests (stage 5b)"
+   }
+  },
+  {
    "id": "cl2-anion",
    "class": "clusters",
    "file": "clusters/cl2-anion.xyz",
@@ -692,6 +728,42 @@
     "cl2m_ea25"
    ],
    "description": "GMTKN55 G21EA/EA_25, the dichlorine radical anion (docs/KNOWN_ISSUES_ARCHIVE.md #17); charge -1 per that entry, not in the file"
+  },
+  {
+   "id": "copper-atom",
+   "class": "atoms",
+   "file": "atoms/copper-atom.xyz",
+   "format": "xyz",
+   "formula": "Cu",
+   "natoms": 1,
+   "frames": 1,
+   "charge": 0,
+   "spin": 1,
+   "role": "equilibrium",
+   "size_bytes": 110,
+   "sha256": "382325afbe47c398eb73c3692260c2980f9bc252a55cd40267bcf66863bf8261",
+   "provenance": {
+    "kind": "constructed",
+    "description": "single Cu atom at the origin (doublet ground state), for the UHF/UKS tests (stage 5b)"
+   }
+  },
+  {
+   "id": "cyano-radical",
+   "class": "small",
+   "file": "small/cyano-radical.xyz",
+   "format": "xyz",
+   "formula": "CN",
+   "natoms": 2,
+   "frames": 1,
+   "charge": 0,
+   "spin": 1,
+   "role": "equilibrium",
+   "size_bytes": 160,
+   "sha256": "82db4c7f4dad45b7b7d0058025bf3229c4811feea33ca0e230148f7dc522999b",
+   "provenance": {
+    "kind": "constructed",
+    "description": "CN radical (doublet), r 1.1718 A: rounded experimental r_e (NIST CCCBDB), built by hand for the UHF tests (stage 5b)"
+   }
   },
   {
    "id": "dibromine",
@@ -857,6 +929,24 @@
     "version": "0.0.209-2-g7e38f75",
     "description": "N2, N-N 1.0983 A (experiment 1.0977 A); former test_cases/molecules/dimers/NN.xyz; method of the Curcuma run not recorded",
     "energy_eh": -5.763935
+   }
+  },
+  {
+   "id": "dioxygen",
+   "class": "small",
+   "file": "small/dioxygen.xyz",
+   "format": "xyz",
+   "formula": "O2",
+   "natoms": 2,
+   "frames": 1,
+   "charge": 0,
+   "spin": 2,
+   "role": "equilibrium",
+   "size_bytes": 155,
+   "sha256": "2ba14fb13d3713be3e301837e99c158a86584b4e7233d966ae80f758f8ac917e",
+   "provenance": {
+    "kind": "constructed",
+    "description": "O2 triplet ground state, r 1.2075 A: rounded experimental r_e (NIST CCCBDB), built by hand for the UHF/UKS tests (stage 5b)"
    }
   },
   {
@@ -1335,6 +1425,24 @@
    ]
   },
   {
+   "id": "iodine-atom",
+   "class": "atoms",
+   "file": "atoms/iodine-atom.xyz",
+   "format": "xyz",
+   "formula": "I",
+   "natoms": 1,
+   "frames": 1,
+   "charge": 0,
+   "spin": 1,
+   "role": "equilibrium",
+   "size_bytes": 110,
+   "sha256": "83bd6b302e2452e8ab0e97d29d37880e8a9723d5cbd43f0372d46d5ae6101b8d",
+   "provenance": {
+    "kind": "constructed",
+    "description": "single I atom at the origin (doublet ground state), for the UHF/UKS tests (stage 5b)"
+   }
+  },
+  {
    "id": "iodomethane",
    "class": "small",
    "file": "small/iodomethane.xyz",
@@ -1476,6 +1584,24 @@
     "gfn-ff"
    ],
    "description": "file name GFN-FF.xyz and xtb 6.6.0 optimisation comment; method taken from the file name"
+  },
+  {
+   "id": "lithium-atom",
+   "class": "atoms",
+   "file": "atoms/lithium-atom.xyz",
+   "format": "xyz",
+   "formula": "Li",
+   "natoms": 1,
+   "frames": 1,
+   "charge": 0,
+   "spin": 1,
+   "role": "equilibrium",
+   "size_bytes": 111,
+   "sha256": "5ae3cae24ae2115c07a29248715e0929c566ca6210a24c5074729e6a26691d33",
+   "provenance": {
+    "kind": "constructed",
+    "description": "single Li atom at the origin (doublet ground state), for the UHF/UKS tests (stage 5b)"
+   }
   },
   {
    "id": "lithium-hydride.r1.595",
@@ -1864,6 +1990,24 @@
    "needs_name": true
   },
   {
+   "id": "methyl",
+   "class": "small",
+   "file": "small/methyl.xyz",
+   "format": "xyz",
+   "formula": "CH3",
+   "natoms": 4,
+   "frames": 1,
+   "charge": 0,
+   "spin": 1,
+   "role": "equilibrium",
+   "size_bytes": 249,
+   "sha256": "076e5fcc72c7bcce9a1cc9e62a1a2d33a21ebb38984e4d1dfeb83ffa191c3591",
+   "provenance": {
+    "kind": "constructed",
+    "description": "CH3 radical (doublet), planar D3h, r(CH) 1.079 A: rounded experimental r_e (NIST CCCBDB), built by hand for the UHF/UKS tests (stage 5b), not optimised"
+   }
+  },
+  {
    "id": "methyl-a-d-galactopyranoside",
    "class": "medium",
    "file": "medium/methyl-a-d-galactopyranoside.xyz",
@@ -1918,6 +2062,60 @@
    "legacy": true
   },
   {
+   "id": "methyl.pyramidal",
+   "class": "small",
+   "file": "small/methyl.pyramidal.xyz",
+   "format": "xyz",
+   "formula": "CH3",
+   "natoms": 4,
+   "frames": 1,
+   "charge": 0,
+   "spin": 1,
+   "role": "non-equilibrium",
+   "size_bytes": 259,
+   "sha256": "e8cd8fc4c2fe63a0788d55dd60f219bf2e676f13c456a820cd5ca9772940b054",
+   "provenance": {
+    "kind": "constructed",
+    "description": "CH3 radical (doublet) deliberately distorted (C 0.12 A out of the H plane, r(CH) 1.09 A, H angles and heights perturbed), built by hand for gradient tests of UHF/UKS (stage 5b); no symmetry, not a minimum"
+   }
+  },
+  {
+   "id": "methylene-triplet",
+   "class": "small",
+   "file": "small/methylene-triplet.xyz",
+   "format": "xyz",
+   "formula": "CH2",
+   "natoms": 3,
+   "frames": 1,
+   "charge": 0,
+   "spin": 2,
+   "role": "equilibrium",
+   "size_bytes": 212,
+   "sha256": "49590b3fae1356b8ffef041bc9427cd355bcbd64561649ec0c231e32e5f22442",
+   "provenance": {
+    "kind": "constructed",
+    "description": "CH2 triplet (3B1), r(CH) 1.077 A, angle 133.9 deg: rounded experimental values (NIST CCCBDB), built by hand for the UHF tests (stage 5b)"
+   }
+  },
+  {
+   "id": "methylene-triplet.distorted",
+   "class": "small",
+   "file": "small/methylene-triplet.distorted.xyz",
+   "format": "xyz",
+   "formula": "CH2",
+   "natoms": 3,
+   "frames": 1,
+   "charge": 0,
+   "spin": 2,
+   "role": "non-equilibrium",
+   "size_bytes": 222,
+   "sha256": "250c1d3174fb525f15fcd02abc4f52e469e37ebf95436ae162c033ac5eab5dfb",
+   "provenance": {
+    "kind": "constructed",
+    "description": "CH2 triplet deliberately distorted (r(CH) 1.060 and 1.110 A, angle 128 deg), built by hand for gradient tests of UHF/UKS (stage 5b); not a minimum"
+   }
+  },
+  {
    "id": "mor41-pr05",
    "class": "small",
    "file": "small/mor41-pr05.xyz",
@@ -1961,6 +2159,24 @@
     "nacl"
    ],
    "description": "comment line: 4 isolated Na+/Cl- ions"
+  },
+  {
+   "id": "nitric-oxide",
+   "class": "small",
+   "file": "small/nitric-oxide.xyz",
+   "format": "xyz",
+   "formula": "NO",
+   "natoms": 2,
+   "frames": 1,
+   "charge": 0,
+   "spin": 1,
+   "role": "equilibrium",
+   "size_bytes": 159,
+   "sha256": "6824e8ce742c6f8d6ad7a75bd1620612917ff25beb66dd7d58b713128ca6e60b",
+   "provenance": {
+    "kind": "constructed",
+    "description": "NO radical (doublet), r 1.1508 A: rounded experimental r_e (NIST CCCBDB), built by hand for the UHF/UKS tests (stage 5b)"
+   }
   },
   {
    "id": "ozone",
@@ -2300,6 +2516,24 @@
    "notes": "Built to test -scf_precond segmentation on a molecule with aromatic rings. GFN2 SCF: 12 iterations without M."
   },
   {
+   "id": "potassium-atom",
+   "class": "atoms",
+   "file": "atoms/potassium-atom.xyz",
+   "format": "xyz",
+   "formula": "K",
+   "natoms": 1,
+   "frames": 1,
+   "charge": 0,
+   "spin": 1,
+   "role": "equilibrium",
+   "size_bytes": 113,
+   "sha256": "3a78401ab8d7637c05da14159651f91ff69558da5bedc05c6bb114f5ed2a81f3",
+   "provenance": {
+    "kind": "constructed",
+    "description": "single K atom at the origin (doublet ground state), for the UHF/UKS tests (stage 5b)"
+   }
+  },
+  {
    "id": "potassium-chloride",
    "class": "small",
    "file": "small/potassium-chloride.xyz",
@@ -2340,6 +2574,24 @@
     "sih4"
    ],
    "description": "comment line: SiH4 d-shell validation (X-I1)"
+  },
+  {
+   "id": "sodium-atom",
+   "class": "atoms",
+   "file": "atoms/sodium-atom.xyz",
+   "format": "xyz",
+   "formula": "Na",
+   "natoms": 1,
+   "frames": 1,
+   "charge": 0,
+   "spin": 1,
+   "role": "equilibrium",
+   "size_bytes": 110,
+   "sha256": "d048743153156f22c729e54a1f17f46eaeb113b1927441a2df5db29af7c0a7f8",
+   "provenance": {
+    "kind": "constructed",
+    "description": "single Na atom at the origin (doublet ground state), for the UHF/UKS tests (stage 5b)"
+   }
   },
   {
    "id": "sodium-chloride",
@@ -2622,6 +2874,24 @@
     }
    ],
    "aliases": []
+  },
+  {
+   "id": "water-cation",
+   "class": "small",
+   "file": "small/water-cation.xyz",
+   "format": "xyz",
+   "formula": "H2O",
+   "natoms": 3,
+   "frames": 1,
+   "charge": 1,
+   "spin": 1,
+   "role": "equilibrium",
+   "size_bytes": 207,
+   "sha256": "caae52afb9f1ee075b87e26ce78d8869f61b95ab9c0a43d5eaae701260d14d4d",
+   "provenance": {
+    "kind": "constructed",
+    "description": "H2O+ (doublet), r(OH) 0.999 A, angle 110.5 deg: approximate literature values of the cation ground state (rounded, not checked against a specific source), built by hand for UHF/UKS tests (stage 5b); not optimised"
+   }
   },
   {
    "id": "water-dimer.roo2.8",

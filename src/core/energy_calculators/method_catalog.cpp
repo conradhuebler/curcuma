@@ -67,7 +67,8 @@ const std::vector<std::string> kQmScf = { "scf_max_iterations", "scf_threshold",
                                           "scf_gradient_threshold", "scf_gradient_threshold_tight", "scf_mode",
                                           "scf_diis_start", "scf_diis_subspace", "scf_damping", "scf_allow_unconverged",
                                           "scf_guess", "scf_early_screening", "scf_early_switch", "scf_warm_start",
-                                          "scf_extrapolation", "scf_extrapolation_order", "scf_verified_stop" };
+                                          "scf_extrapolation", "scf_extrapolation_order", "scf_verified_stop", "reference",
+                                          "uhf_guess_mix" };
 
 std::vector<std::string> without(std::vector<std::string> v, const std::string& name)
 {
@@ -162,7 +163,9 @@ const std::map<std::string, std::set<std::string>> kLegacyKeys = {
 // ---------------------------------------------------------------------------------------------
 const std::string kAI = "native, AI-generated, machine-tested (not TESTED)";
 const std::string kExt = "external library; curcuma wrapper AI-generated";
-const std::string kQmRestr = "closed shell only; elements H-Rn (built-in def2 sets, def2-ECP for Rb-Rn via -qm.ecp, ECP terms on the CPU)";
+const std::string kQmRestr = "closed shell only (open-shell input, -spin > 0, is an error); elements H-Rn (built-in def2 sets, def2-ECP for Rb-Rn via -qm.ecp, ECP terms on the CPU)";
+// stage 5b (Nov 2026): hf, hf-3c, lda, pbe, b3lyp also run unrestricted
+const std::string kQmRestrOpen = "open shell (UHF/UKS) via -spin (unpaired electrons) or -qm.reference uhf, CPU only (-gpu: counted fallback qm_uhf), no ROHF; elements H-Rn (built-in def2 sets, def2-ECP for Rb-Rn via -qm.ecp, ECP terms on the CPU)";
 
 const std::vector<std::string> kUlyssesOnly = { "ugfn2", "mndod", "rm1", "pm3pddg", "mndopddg", "pm3bp",
     "pm6-d3h4x", "am1-d3h4x", "pm3-d3h4x", "mndo-d3h4x", "mndod-d3h4x", "rm1-d3h4x", "pm3pddg-d3h4x", "mndopddg-d3h4x", "pm3bp-d3h4x",
@@ -198,19 +201,19 @@ const std::vector<MethodCatalogEntry> kCatalog = {
       "docs/MNDO_INTEGRALS.md", "scf", { "scf_all" },
       { { "am1", "AM1 parameters" }, { "mndo", "MNDO parameters" }, { "pm6", "PM6 parameters, no reference test" } } },
     { { "hf" }, "native ab-initio QM", "native (QMEngine, QMMethod)", kAI, "analytic", "cuda",
-      "Closed-shell restricted Hartree-Fock in a Gaussian basis (default def2-SVP).",
-      kQmRestr, "docs/NATIVE_QM_IMPLEMENTATION.md", "qm", plus(kQmBase, { "qm_dispersion" }),
+      "Restricted (closed shell) or unrestricted (open shell, -spin > 0) Hartree-Fock in a Gaussian basis (default def2-SVP).",
+      kQmRestrOpen, "docs/NATIVE_QM_IMPLEMENTATION.md", "qm", plus(kQmBase, { "qm_dispersion" }),
       { { "hf-3c", "HF/MINIX + D3(BJ) + gCP + SRB" }, { "orca-hf-3c", "ORCA's HF-3c (external)" } } },
     { { "lda" }, "native ab-initio QM", "native (QMEngine, QMMethod)", kAI, "analytic", "cuda",
-      "Closed-shell Kohn-Sham LDA: Slater exchange + VWN correlation (-qm.vwn_variant).",
-      kQmRestr, "docs/DFT_ROADMAP/WP5_lda_vwn5.md", "qm", plus(kKsBase, { "qm_vwn", "qm_dispersion" }), {} },
+      "Kohn-Sham LDA (RKS, or UKS for -spin > 0): Slater exchange + VWN correlation (-qm.vwn_variant).",
+      kQmRestrOpen, "docs/DFT_ROADMAP/WP5_lda_vwn5.md", "qm", plus(kKsBase, { "qm_vwn", "qm_dispersion" }), {} },
     { { "pbe", "pbe-d4" }, "native ab-initio QM", "native (QMEngine, QMMethod)", kAI, "analytic", "cuda (D4 term on the CPU)",
-      "Closed-shell Kohn-Sham PBE GGA; pbe-d4 adds native DFT-D4 (EEQ charges, ATM).",
-      kQmRestr, "docs/DFT_ROADMAP/WP6_pbe_gga.md", "qm", plus(kKsBase, { "qm_dispersion" }),
+      "Kohn-Sham PBE GGA (RKS, or UKS for -spin > 0); pbe-d4 adds native DFT-D4 (EEQ charges, ATM).",
+      kQmRestrOpen, "docs/DFT_ROADMAP/WP6_pbe_gga.md", "qm", plus(kKsBase, { "qm_dispersion" }),
       { { "pbe-d4", "+ native D4 (also -qm.dispersion d4)" } } },
     { { "b3lyp", "b3lyp-d4" }, "native ab-initio QM", "native (QMEngine, QMMethod)", kAI, "analytic", "cuda (D4 term on the CPU)",
-      "Closed-shell Kohn-Sham B3LYP hybrid (VWN per -qm.vwn_variant, default vwn5 as ORCA); b3lyp-d4 adds native DFT-D4.",
-      kQmRestr, "docs/DFT_ROADMAP/WP7_b3lyp_hybrid.md", "qm", plus(kKsBase, { "qm_vwn", "qm_dispersion" }),
+      "Kohn-Sham B3LYP hybrid (RKS, or UKS for -spin > 0; VWN per -qm.vwn_variant, default vwn5 as ORCA); b3lyp-d4 adds native DFT-D4.",
+      kQmRestrOpen, "docs/DFT_ROADMAP/WP7_b3lyp_hybrid.md", "qm", plus(kKsBase, { "qm_vwn", "qm_dispersion" }),
       { { "b3lyp-d4", "+ native D4" } } },
     { { "tpss", "scan", "tpss-d4", "scan-d4" }, "native ab-initio QM", "native (QMEngine, QMMethod)", kAI, "analytic",
       "cuda (D4 term on the CPU)",
@@ -220,7 +223,7 @@ const std::vector<MethodCatalogEntry> kCatalog = {
       { { "scan", "SCAN meta-GGA" }, { "tpss-d4", "+ native D4" }, { "scan-d4", "+ native D4" } } },
     { { "hf-3c", "hf3c" }, "native ab-initio QM", "native (HF3CMethod on QMEngine)", kAI, "analytic", "cuda (HF part; D3, gCP, SRB on the CPU)",
       "HF-3c composite: HF/MINIX + D3(BJ) + gCP + short-range basis correction (Sure, Grimme 2013).",
-      "closed shell; elements H-Rn (MINIX and MINIX-ECP as ORCA 6.1 composes them, gCP/SRB via effective atomic numbers; "
+      "closed shell, or open shell with UHF/MINIX (-spin > 0, CPU only; D3, gCP, SRB spin independent); elements H-Rn (MINIX and MINIX-ECP as ORCA 6.1 composes them, gCP/SRB via effective atomic numbers; "
       "compared with ORCA on 21 molecules up to Pb and Ce, see the doc); basis fixed to MINIX, -qm.ecp to MINIX-ECP, "
       "-qm.ri ignored (all warn)",
       "docs/NATIVE_QM_IMPLEMENTATION.md", "qm", { "qm_scf", "qm_cpu", "qm_gpu", "scf_all" },

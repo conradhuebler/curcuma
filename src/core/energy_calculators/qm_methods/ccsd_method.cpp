@@ -90,7 +90,13 @@ double CCSDMethod::calculateEnergy(bool gradient)
         CurcumaLogger::error(m_error_message);
         return std::numeric_limits<double>::quiet_NaN();
     }
+    m_engine->requireClosedShell("ccsd");  // stage 5b: open-shell input is an error, not a UHF reference
     m_e_hf = m_engine->Calculation(false);
+    if (m_engine->spinStateRejected()) {
+        m_error = true;
+        m_error_message = m_engine->spinError();
+        return std::numeric_limits<double>::quiet_NaN();
+    }
     if (!m_engine->scfConverged()) {
         m_error = true;
         m_error_message = "CCSD: the RHF SCF did not converge";

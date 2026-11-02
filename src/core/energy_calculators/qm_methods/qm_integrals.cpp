@@ -2987,6 +2987,36 @@ Matrix gradientTwoElectronScaled(const std::vector<GTO::Orbital>& basis, const M
     return gradientTwoElectronImpl(basis, P, natoms, threads, false, kx);
 }
 
+// Declared in qm_ri.h (same reason). Claude Generated (Nov 2026, stage 5b): UHF/UKS two-electron gradient,
+//   E_2 = 1/2 sum Pt_mn Pt_ls (mn|ls) - (kx/2) sum_s sum Ps_ml Ps_ns (mn|ls),   Pt = Pa + Pb,
+//   D   = Pt_mn Pt_ls - (kx/2) sum_s (Ps_ml Ps_ns + Ps_ms Ps_nl)
+// (Pa = Pb = P/2 gives the RHF weight of gradientTwoElectronScaled). Same canonical-quartet driver.
+Matrix gradientTwoElectronUHF(const std::vector<GTO::Orbital>& basis, const Matrix& Pa, const Matrix& Pb, double kx,
+                              int natoms, int threads)
+{
+    if (basis.empty()) return Matrix::Zero(natoms, 3);
+    const std::vector<EriShell> sh = groupShells(basis);
+    const Matrix Pt = Pa + Pb;
+    auto fill = [&](int sA, int sB, int sC, int sD, std::vector<double>& Dq) {
+        const EriShell& A = sh[sA];
+        const EriShell& B = sh[sB];
+        const EriShell& C = sh[sC];
+        const EriShell& D = sh[sD];
+        const int nA = (int)A.lmn.size(), nB = (int)B.lmn.size(), nC = (int)C.lmn.size(), nD = (int)D.lmn.size();
+        Dq.resize((size_t)nA * nB * nC * nD);
+        for (int a = 0; a < nA; ++a)
+            for (int b = 0; b < nB; ++b)
+                for (int c = 0; c < nC; ++c)
+                    for (int d = 0; d < nD; ++d) {
+                        const int m = A.first + a, n = B.first + b, l = C.first + c, s = D.first + d;
+                        const double kab = Pa(m, l) * Pa(n, s) + Pa(m, s) * Pa(n, l) + Pb(m, l) * Pb(n, s)
+                            + Pb(m, s) * Pb(n, l);
+                        Dq[((size_t)(a * nB + b) * nC + c) * nD + d] = Pt(m, n) * Pt(l, s) - 0.5 * kx * kab;
+                    }
+    };
+    return gradientTwoElectronDriver(basis, sh, natoms, threads, fill);
+}
+
 // Declared in qm_mp2.h (same reason as above). Claude Generated (Oct 2026, MP2 gradient).
 // D = P P - 1/4 (P P + P P)                                  (RHF, as gradientTwoElectron)
 //   + (P2_mn P_ls + P_mn P2_ls) - 1/4 (P2_ml P_ns + P_ml P2_ns + P2_ms P_nl + P_ms P2_nl)   (P2 x P_HF)

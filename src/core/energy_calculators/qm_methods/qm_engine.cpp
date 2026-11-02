@@ -349,6 +349,16 @@ QMEngine::QMEngine(QMFunctional functional, const json& config)
     if (config.contains("eri_max_memory_mb") && config["eri_max_memory_mb"].is_number())
         m_eri_max_memory_mb = config["eri_max_memory_mb"].get<double>();
     readRIConfig(config);  // WP10 -qm.ri* (qm_ri.cpp)
+    // stage 5b (Claude Generated, Nov 2026): open-shell reference
+    if (config.contains("reference") && config["reference"].is_string()) {
+        m_reference = config["reference"].get<std::string>();
+        std::transform(m_reference.begin(), m_reference.end(), m_reference.begin(), ::tolower);
+        if (m_reference != "auto" && m_reference != "rhf" && m_reference != "uhf")
+            throw std::invalid_argument(fmt::format("reference '{}' is not available for native QM; use auto, rhf or uhf",
+                                                    config["reference"].get<std::string>()));
+    }
+    if (config.contains("uhf_guess_mix") && config["uhf_guess_mix"].is_boolean())
+        m_uhf_guess_mix = config["uhf_guess_mix"].get<bool>();
 
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info(fmt::format("Initializing native QM engine (functional={}, basis={})",
@@ -623,6 +633,10 @@ void QMEngine::resetForNewMolecule()
     invalidateXC();
     m_gpu_scf_state.reset();
     m_warm_C = Matrix();
+    m_warm_Ca = Matrix();  // stage 5b
+    m_warm_Cb = Matrix();
+    m_density_a = Matrix();
+    m_density_b = Matrix();
     m_warm_atoms.clear();
     m_dens_hist.clear();
     m_dens_hist_serial = -1;
@@ -645,6 +659,22 @@ double QMEngine::Calculation(bool gradient)
         return m_total_energy;
     }
 
+    // Stage 5b (Nov 2026): electrons, -spin and -qm.reference decide RHF/RKS or UHF/UKS; a contradiction (parity,
+    // ROHF, a closed-shell-only method, a functional without spin-polarised kernels) is an error, never a result.
+    m_gradient_failed = false;
+    m_gradient_error.clear();
+    if (!resolveSpinState()) {
+        m_total_energy = std::numeric_limits<double>::quiet_NaN();
+        m_scf_converged = false;
+        m_scf_ready = false;
+        if (gradient) {
+            m_gradient = Matrix::Zero(m_atomcount, 3);
+            m_gradient_failed = true;
+            m_gradient_error = m_spin_error;
+        }
+        return m_total_energy;
+    }
+
     // --- HF: real closed-shell SCF (WP3) ---
     // Claude Generated (Oct 25 2026): an analytic gradient (or a correlated method, setTightOrbitals) needs the
     // tight orbital-gradient threshold; an energy-only SCF of this geometry is then continued from its density.
@@ -655,7 +685,7 @@ double QMEngine::Calculation(bool gradient)
         m_scf_tight_now = want_tight;
         m_scf_continue = continue_tight;
         m_scf_tight_done = false;
-        const bool ok = runSCF();
+        const bool ok = m_open_shell ? runUSCF() : runSCF();  // stage 5b: UHF/UKS in qm_uscf.cpp
         m_scf_continue = false;
         m_scf_ready = true;
         if (!ok && !riSetupFailed()) {  // WP10: a failed RI setup has reported its own error
@@ -684,8 +714,12 @@ double QMEngine::Calculation(bool gradient)
             m_gradient = Matrix::Zero(m_atomcount, 3);
             m_gradient_failed = true;
             m_gradient_error = "QM: DFT grid could not be built -- no analytic gradient";
-        } else if (m_scf_converged)
-            computeGradient();
+        } else if (m_scf_converged) {
+            if (m_open_shell)
+                computeGradientUHF();  // stage 5b
+            else
+                computeGradient();
+        }
         else {
             // Oct 27 2026: a failed gradient, not a zero one (a zero gradient let -opt report convergence)
             m_gradient = Matrix::Zero(m_atomcount, 3);
@@ -702,13 +736,19 @@ double QMEngine::Calculation(bool gradient)
             : m_ri_mode == "j"             ? (isKohnSham() && !pure_dft ? " RI-J (exact K)" : " RI-J")
             : pure_dft                     ? " RI-J (JK aux)"
                                            : " RI-JK";
+        // stage 5b: open shell names the reference and the spin occupation
+        const std::string spin_label = m_open_shell
+            ? fmt::format(" (unrestricted, n_alpha {}, n_beta {}{})", m_nalpha, m_nbeta,
+                          m_scf_converged ? fmt::format(", <S^2> {:.6f}", m_s2) : std::string())
+            : std::string();
         if (isKohnSham())
-            CurcumaLogger::result(fmt::format("native QM -- {} {}/{}{} grid {} SCF {} ({} iterations)",
-                scfLabel(m_functional), m_xc.label(), m_basis_name, ri_label, m_grid_options.level,
-                m_scf_converged ? "converged" : "NOT converged", m_scf_iterations));
+            CurcumaLogger::result(fmt::format("native QM -- {}{} {}/{}{} grid {} SCF {} ({} iterations){}",
+                m_open_shell ? "U" : "", scfLabel(m_functional), m_xc.label(), m_basis_name, ri_label, m_grid_options.level,
+                m_scf_converged ? "converged" : "NOT converged", m_scf_iterations, spin_label));
         else
-            CurcumaLogger::result(fmt::format("native QM -- HF/{}{} SCF {} ({} iterations)",
-                m_basis_name, ri_label, m_scf_converged ? "converged" : "NOT converged", m_scf_iterations));
+            CurcumaLogger::result(fmt::format("native QM -- {}HF/{}{} SCF {} ({} iterations){}",
+                m_open_shell ? "U" : "", m_basis_name, ri_label, m_scf_converged ? "converged" : "NOT converged",
+                m_scf_iterations, spin_label));
         if (m_scf_converged && CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::param("E_elec", fmt::format("{:.10f} Eh", m_e_elec));
             CurcumaLogger::param("E_nn  ", fmt::format("{:.10f} Eh", e_nn));
@@ -719,7 +759,7 @@ double QMEngine::Calculation(bool gradient)
             }
         }
         CurcumaLogger::energy_abs(m_total_energy, isKohnSham() ? "total " + scfLabel(m_functional) + " energy"
-                                                               : std::string("total HF energy"));
+                                                               : std::string(m_open_shell ? "total UHF energy" : "total HF energy"));
     }
     return m_total_energy;
 }

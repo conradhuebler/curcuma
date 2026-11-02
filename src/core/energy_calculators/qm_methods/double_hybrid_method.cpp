@@ -309,7 +309,13 @@ double DoubleHybridMethod::calculateEnergy(bool gradient)
     const double nan = std::numeric_limits<double>::quiet_NaN();
     if (gradient) m_gradient_bohr = Matrix();  // no stale gradient after a failed request
     // 1. hybrid KS SCF
+    m_engine->requireClosedShell(m_def->name);  // stage 5b: open-shell input is an error
     m_e_ks = m_engine->Calculation(false);
+    if (m_engine->spinStateRejected()) {
+        m_error = true;
+        m_error_message = m_engine->spinError();
+        return nan;
+    }
     if (!m_engine->scfConverged()) {
         m_error = true;
         m_error_message = std::string(m_def->name) + ": the KS SCF did not converge";
