@@ -9,12 +9,14 @@
 #   qm_uhf_direct_<case>  integral-direct UHF = stored tensor (1e-9 Eh, gradient 1e-8 Eh/Bohr)
 #   qm_uhf_reject_<what>  closed-shell-only methods (mp2, ri-mp2, ccsd, lmp2, b2plyp), meta-GGAs (tpss, scan) and a
 #                         contradicting spin state (odd electrons with -spin 0, -qm.reference rhf with -spin 1) are errors
-#   qm_uhf_gpu_<case>     -gpu cuda: CPU result and the counted fallback qm_uhf; 77 = skip without CUDA
+#   qm_gpu_uhf_*          stage 6a, label qm_gpu_uhf: -gpu cuda (dump_qm_energy --gpu) vs the CPU (energy 1e-9 Eh, <S^2>
+#                         1e-8, gradient 1e-8 Eh/Bohr), vs PySCF, and the FD gate of the device path; only the counted
+#                         qm_uhf_scf fallback (host SCF loop) is allowed; 77 = skip without CUDA plugin/device
 #   qm_uhf_opt_hf         curcuma -opt of a distorted CH3 radical
 #   qm_uks_kernel         spin-polarised kernels vs libxc (spin = 1), own FD, closed-shell limit
 #   qm_uks_ref_<case>     UKS energy / <S^2> / gradient vs PySCF on the same grid (sg1)
 #   qm_uks_fd_<case>      UKS gradient (grid response) vs FD; qm_uks_rhf_<f>: -qm.reference uhf on a singlet = RKS
-# Run:  ctest -L "qm_uhf|qm_uks" --output-on-failure
+# Run:  ctest -L "qm_uhf|qm_uks" --output-on-failure;  GPU: ctest -L qm_gpu_uhf
 add_executable(test_qm_uks_kernel test_qm_uks_kernel.cpp)
 target_link_libraries(test_qm_uks_kernel PRIVATE curcuma_core)
 target_include_directories(test_qm_uks_kernel PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/external
@@ -46,8 +48,29 @@ if(Python3_Interpreter_FOUND)
         add_test(NAME qm_uhf_reject_${_what} COMMAND ${_UHF_CHECK} --check reject --case ${_what})
         set_tests_properties(qm_uhf_reject_${_what} PROPERTIES TIMEOUT 300 LABELS "qm_uhf")
     endforeach()
-    add_test(NAME qm_uhf_gpu_uhf_oh_svp COMMAND ${_UHF_CHECK} --check gpu --case uhf_oh_svp --curcuma $<TARGET_FILE:curcuma>)
-    set_tests_properties(qm_uhf_gpu_uhf_oh_svp PROPERTIES TIMEOUT 600 LABELS "qm_uhf" SKIP_RETURN_CODE 77)
+    # stage 6a (Nov 2026): open shell on the CUDA backend (device J/K, V_xc, gradient parts; host SCF loop)
+    set(_UHF_GPU ${_UHF_CHECK} --plugin-dir $<TARGET_FILE_DIR:curcuma>)
+    foreach(_case uhfgrad_ch2d_svp uhfgrad_ch3p_svp uhfgrad_ch2d_svp_rijk uhf_o2_svp uksgrad_pbe_ch2d_svp
+                  uksgrad_b3lyp_ch3p_svp uksgrad_lda_h2op_svp uks_b3lyp_vwn5_nh2_svp_rijk hf3cgrad_ch3p)
+        add_test(NAME qm_gpu_uhf_${_case} COMMAND ${_UHF_GPU} --check gpu --case ${_case})
+        set_tests_properties(qm_gpu_uhf_${_case} PROPERTIES TIMEOUT 600 LABELS "qm_gpu_uhf" SKIP_RETURN_CODE 77)
+    endforeach()
+    add_test(NAME qm_gpu_uhf_direct_uhfgrad_ch2d_svp COMMAND ${_UHF_GPU} --check gpu --case uhfgrad_ch2d_svp
+             --extra-qm scf_direct=on)
+    add_test(NAME qm_gpu_uhf_direct_uksgrad_b3lyp_ch3p_svp COMMAND ${_UHF_GPU} --check gpu --case uksgrad_b3lyp_ch3p_svp
+             --extra-qm scf_direct=on)
+    set_tests_properties(qm_gpu_uhf_direct_uhfgrad_ch2d_svp qm_gpu_uhf_direct_uksgrad_b3lyp_ch3p_svp PROPERTIES
+                         TIMEOUT 600 LABELS "qm_gpu_uhf" SKIP_RETURN_CODE 77)
+    foreach(_case uhfgrad_ch2d_svp uhf_k_svp uksgrad_b3lyp_ch3p_svp uksgrad_pbe_ch2d_svp)
+        add_test(NAME qm_gpu_uhf_ref_${_case} COMMAND ${_UHF_GPU} --check ref --gpu --case ${_case})
+        set_tests_properties(qm_gpu_uhf_ref_${_case} PROPERTIES TIMEOUT 600 LABELS "qm_gpu_uhf" SKIP_RETURN_CODE 77)
+    endforeach()
+    add_test(NAME qm_gpu_uhf_fd_uhfgrad_ch2d_svp COMMAND ${_UHF_GPU} --check fd --gpu --case uhfgrad_ch2d_svp --coords 0:x 1:y 2:x)
+    add_test(NAME qm_gpu_uhf_fd_uksgrad_pbe_ch2d_svp COMMAND ${_UHF_GPU} --check fd --gpu --case uksgrad_pbe_ch2d_svp
+             --coords 0:x 1:y 2:x)
+    add_test(NAME qm_gpu_uhf_fd_uksgrad_b3lyp_ch3p_svp COMMAND ${_UHF_GPU} --check fd --gpu --case uksgrad_b3lyp_ch3p_svp)
+    set_tests_properties(qm_gpu_uhf_fd_uhfgrad_ch2d_svp qm_gpu_uhf_fd_uksgrad_pbe_ch2d_svp qm_gpu_uhf_fd_uksgrad_b3lyp_ch3p_svp
+                         PROPERTIES TIMEOUT 900 LABELS "qm_gpu_uhf" SKIP_RETURN_CODE 77)
     add_test(NAME qm_uhf_opt_hf COMMAND ${_UHF_CHECK} --check opt --case hf --curcuma $<TARGET_FILE:curcuma>)
     set_tests_properties(qm_uhf_opt_hf PROPERTIES TIMEOUT 900 LABELS "qm_uhf")
 

@@ -56,10 +56,20 @@
 // gradient the object (QMGpuXCSetup::fxc) also forms F_xc[D] and the P2-directional XC gradient with the second
 // derivatives of qm_xc_fxc_kernels.h: separate kernels (densityPairKernel, respRowKernel, respColKernel), so the
 // LDA/GGA/meta-GGA kernels and, without the flag, their block sizes are unchanged.
+//
+// Open-shell Kohn-Sham (Nov 2026, stage 6a; QMGpuXCSetup::spin): device version of qmxc::buildVxcSpin /
+// qmxc::buildXCGradientSpin (qm_xc_spin.cpp). Per block X_s = phi P_s (two DGEMMs), densitySpinKernel forms rho_s,
+// grad rho_s, sigma_aa/ab/bb and calls qmxc::kern::evaluatePointSpinTerms (qm_xc_spin_kernels.h, the CPU source), then
+//   V_xc,s    Y_s = (w v_rho_s / 2) phi + u_s . grad phi,  u_s = w (2 v_sigma_ss grad rho_s + v_sigma_ab grad rho_s'),
+//             W_s += phi^T Y_s (DGEMM), V_s = W_s + W_s^T
+//   gradient  Z_s = w v_rho_s phi + u_s . grad phi, ZP_s = Z_s P_s; gradColKernel per spin, gradRowSpinKernel sums the
+//             point part of both spins; the Becke weight derivative takes e_x + e_c per point.
+// Unscreened blocks only (as the CPU UKS path); separate kernels, so the closed-shell kernels are untouched.
 
 #include "../qm_gpu_xc_backend.h"
 #include "../qm_xc_fxc_kernels.h"
 #include "../qm_xc_kernels.h"
+#include "../qm_xc_spin_kernels.h"
 
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
@@ -764,6 +774,93 @@ __global__ void respColKernel(const double* __restrict__ ao, const double* __res
 
 inline unsigned g1(size_t n, int t = 256) { return (unsigned)((n + t - 1) / t); }
 
+/// Open shell (stage 6a): per point rho_s, grad rho_s (from X_s = phi P_s), the spin functional
+/// (qmxc::kern::evaluatePointSpinTerms) and the coefficient vectors of both spins.
+///   mode 0 (V_xc):     c0_s = w v_rho_s / 2, c_s = u_s          (Y_s = c0_s phi + c_s . grad phi, buildVxcSpin)
+///   mode 1 (gradient): c0_s = w v_rho_s,     c_s = u_s          (Z_s, buildXCGradientSpin), edens = e_x + e_c
+/// Points the functional skips get zero coefficients (as the CPU, which leaves them out). exw/ecw are w e (e per
+/// volume), ne = w (rho_a + rho_b). Claude Generated (Nov 2026).
+__global__ void densitySpinKernel(const double* __restrict__ ao, const double* __restrict__ Xa, const double* __restrict__ Xb,
+                                  int nbf, int B, int count, int begin, const double* __restrict__ wgt, DevTerms terms, int gga,
+                                  double rho_min, int mode, double* __restrict__ ca0, double* __restrict__ cax,
+                                  double* __restrict__ cay, double* __restrict__ caz, double* __restrict__ cb0,
+                                  double* __restrict__ cbx, double* __restrict__ cby, double* __restrict__ cbz,
+                                  double* __restrict__ exw, double* __restrict__ ecw, double* __restrict__ ne,
+                                  double* __restrict__ used, double* __restrict__ edens)
+{
+    const int q = blockIdx.x * blockDim.x + threadIdx.x;
+    if (q >= count) return;
+    const size_t plane = (size_t)nbf * B;
+    double ra = 0.0, rb = 0.0, ga[3] = { 0.0, 0.0, 0.0 }, gb[3] = { 0.0, 0.0, 0.0 };
+    for (int m = 0; m < nbf; ++m) {
+        const size_t i = (size_t)m * B + q;
+        const double xa = Xa[i], xb = Xb[i];
+        ra += ao[i] * xa;
+        rb += ao[i] * xb;
+        if (gga)
+            for (int k = 0; k < 3; ++k) {
+                ga[k] += ao[(k + 1) * plane + i] * xa;
+                gb[k] += ao[(k + 1) * plane + i] * xb;
+            }
+    }
+    for (int k = 0; k < 3; ++k) {
+        ga[k] *= 2.0;
+        gb[k] *= 2.0;
+    }
+    double saa = 0.0, sab = 0.0, sbb = 0.0;
+    if (gga) {
+        saa = ga[0] * ga[0] + ga[1] * ga[1] + ga[2] * ga[2];
+        sbb = gb[0] * gb[0] + gb[1] * gb[1] + gb[2] * gb[2];
+        sab = ga[0] * gb[0] + ga[1] * gb[1] + ga[2] * gb[2];
+    }
+    double ex = 0.0, ec = 0.0, v[5];
+    const bool ok = qmxc::kern::evaluatePointSpinTerms(terms.t, terms.n, gga != 0, rho_min, ra, rb, saa, sab, sbb, ex, ec, v);
+    const int p = begin + q;
+    const double w = wgt[p];
+    ne[p] = w * (ra + rb);
+    exw[p] = ok ? w * ex : 0.0;
+    ecw[p] = ok ? w * ec : 0.0;
+    used[p] = ok ? 1.0 : 0.0;
+    const double f0 = mode == 0 ? 0.5 : 1.0;
+    ca0[q] = ok ? f0 * w * v[0] : 0.0;
+    cb0[q] = ok ? f0 * w * v[1] : 0.0;
+    double ua[3] = { 0.0, 0.0, 0.0 }, ub[3] = { 0.0, 0.0, 0.0 };
+    if (ok && gga)
+        for (int k = 0; k < 3; ++k) {
+            ua[k] = w * (2.0 * v[2] * ga[k] + v[3] * gb[k]);
+            ub[k] = w * (2.0 * v[4] * gb[k] + v[3] * ga[k]);
+        }
+    cax[q] = ua[0];
+    cay[q] = ua[1];
+    caz[q] = ua[2];
+    cbx[q] = ub[0];
+    cby[q] = ub[1];
+    cbz[q] = ub[2];
+    if (mode == 1) edens[p] = ok ? ex + ec : 0.0;
+}
+
+/// Open shell (stage 6a): point part of both spins, spoint[(begin + q) 3 + k] = -2 sum_s sum_m T^s_k(q, m) (gradTerms of
+/// the closed-shell kernels per spin, alpha summed first as on the CPU). Claude Generated (Nov 2026).
+__global__ void gradRowSpinKernel(const double* __restrict__ ao, const double* __restrict__ ZPa, const double* __restrict__ Xa,
+                                  const double* __restrict__ ZPb, const double* __restrict__ Xb, int nbf, int B, int count,
+                                  int begin, int gga, const double* __restrict__ cax, const double* __restrict__ cay,
+                                  const double* __restrict__ caz, const double* __restrict__ cbx,
+                                  const double* __restrict__ cby, const double* __restrict__ cbz, double* __restrict__ spoint)
+{
+    const int q = blockIdx.x * blockDim.x + threadIdx.x;
+    if (q >= count) return;
+    const size_t plane = (size_t)nbf * B;
+    double sa[3] = { 0.0, 0.0, 0.0 }, sb[3] = { 0.0, 0.0, 0.0 };
+    for (int m = 0; m < nbf; ++m) {
+        double t[3];
+        gradTerms<false>(ao, ZPa, Xa, plane, (size_t)m * B + q, gga, cax[q], cay[q], caz[q], t, nullptr, 0.0);
+        for (int k = 0; k < 3; ++k) sa[k] += t[k];
+        gradTerms<false>(ao, ZPb, Xb, plane, (size_t)m * B + q, gga, cbx[q], cby[q], cbz[q], t, nullptr, 0.0);
+        for (int k = 0; k < 3; ++k) sb[k] += t[k];
+    }
+    for (int k = 0; k < 3; ++k) spoint[3 * (size_t)(begin + q) + k] = -2.0 * (sa[k] + sb[k]);
+}
+
 class QmGpuXCCuda final : public qmint::QMGpuXC {
 public:
     ~QmGpuXCCuda() override
@@ -783,7 +880,12 @@ public:
         m_stratmann = s.stratmann;
         m_mgga = s.mgga;
         m_fxc = s.fxc;
+        m_spin = s.spin;
         if (m_nbf <= 0 || m_npts <= 0 || m_na <= 0) { why = "empty grid or basis"; return false; }
+        if (m_spin && (m_mgga || m_fxc || s.screen_nblocks > 0)) {
+            why = "open-shell XC setup with a meta-GGA, the double-hybrid buffers or AO screening (not implemented)";
+            return false;
+        }
         if (m_mgga && !m_gga) { why = "meta-GGA setup without the GGA flag"; return false; }
         if (s.nterms <= 0 || s.nterms > kMaxTerms) { why = "functional with more than 8 terms"; return false; }
         if (s.max_ncomp > kMaxComp) { why = "shells above g (more than 15 cartesian components) not supported"; return false; }
@@ -845,8 +947,10 @@ public:
         const int nxp = m_mgga ? 4 : 1;  // planes of X: phi P (+ d_k phi P for a meta-GGA)
         // WP12 stage 3: with fxc the second density (nxp planes), the dZ plane and five more point vectors; without it
         // the expression (and with it the block size of LDA/GGA/meta-GGA) is the one of before
+        // stage 6a: with spin the beta X and ZP planes and four coefficient vectors more
         const double per_point = m_fxc ? 8.0 * ((double)ncol * (m_nder + 1 + 2 * nxp + nxp + 1) + (m_mgga ? 9.0 : 8.0) + 5.0)
-                                       : 8.0 * ((double)ncol * (m_nder + 1 + 2 * nxp) + (m_mgga ? 9.0 : 8.0));
+                               : m_spin ? 8.0 * ((double)ncol * (m_nder + 1 + 2 * nxp + 2) + 8.0 + 4.0)
+                                        : 8.0 * ((double)ncol * (m_nder + 1 + 2 * nxp) + (m_mgga ? 9.0 : 8.0));
         long long B = s.block_points > 0 ? s.block_points : (long long)(budget / per_point);
         B = std::min<long long>(B, ((long long)np + 127) / 128 * 128);
         if (s.block_points <= 0) B = std::min<long long>(B, 32768);
@@ -868,6 +972,10 @@ public:
             ok = alloc(&m_X2, plane * nxp) && alloc(&m_Y2, plane) && alloc(&m_P2, nb * nb) && alloc(&m_d0, (size_t)m_B)
                 && alloc(&m_dx, (size_t)m_B) && alloc(&m_dy, (size_t)m_B) && alloc(&m_dz, (size_t)m_B)
                 && (!m_mgga || alloc(&m_dt, (size_t)m_B));
+        if (ok && m_spin)  // stage 6a: beta density, its accumulator and V, X and ZP planes, coefficient vectors
+            ok = alloc(&m_Pb, nb * nb) && alloc(&m_Wb, nb * nb) && alloc(&m_Vb, nb * nb) && alloc(&m_Xb, plane)
+                && alloc(&m_ZPb, plane) && alloc(&m_b0, (size_t)m_B) && alloc(&m_bx, (size_t)m_B) && alloc(&m_by, (size_t)m_B)
+                && alloc(&m_bz, (size_t)m_B);
         if (ok && screened) {
             const size_t ms = (size_t)m_sub_max * m_sub_max;
             ok = alloc(&m_Ps, std::max<size_t>(1, ms)) && alloc(&m_Ws, std::max<size_t>(1, ms))
@@ -1145,6 +1253,97 @@ public:
         return cudaGetLastError() == cudaSuccess;
     }
 
+    // Stage 6a (Claude Generated, Nov 2026): spin V_xc, the device version of qmxc::buildVxcSpin (see the file header).
+    bool vxcSpin(const double* Pa, const double* Pb, double* Va, double* Vb, qmint::QMGpuXCScalars& out) override
+    {
+        if (!m_spin) return false;
+        const auto t0 = std::chrono::steady_clock::now();
+        const int n = m_nbf;
+        const size_t bytes = (size_t)n * n * sizeof(double);
+        if (cudaMemcpy(m_P, Pa, bytes, cudaMemcpyHostToDevice) != cudaSuccess
+            || cudaMemcpy(m_Pb, Pb, bytes, cudaMemcpyHostToDevice) != cudaSuccess)
+            return false;
+        const int deriv = m_gga ? 1 : 0;
+        const double one = 1.0, zero = 0.0;
+        for (int begin = 0; begin < m_npts; begin += m_B) {
+            const int count = std::min(m_B, m_npts - begin);
+            if (!spinDensity(begin, count, deriv, 0)) return false;
+            combineKernel<<<g1((size_t)m_B * n), 256>>>(m_ao, n, m_B, count, m_gga, m_c0, m_cx, m_cy, m_cz, m_Y);
+            if (cublasDgemm(m_cublas, CUBLAS_OP_T, CUBLAS_OP_N, n, n, count, &one, m_ao, m_B, m_Y, m_B, begin == 0 ? &zero : &one,
+                            m_W, n) != CUBLAS_STATUS_SUCCESS)
+                return false;
+            combineKernel<<<g1((size_t)m_B * n), 256>>>(m_ao, n, m_B, count, m_gga, m_b0, m_bx, m_by, m_bz, m_Y);
+            if (cublasDgemm(m_cublas, CUBLAS_OP_T, CUBLAS_OP_N, n, n, count, &one, m_ao, m_B, m_Y, m_B, begin == 0 ? &zero : &one,
+                            m_Wb, n) != CUBLAS_STATUS_SUCCESS)
+                return false;
+        }
+        symmetrizeKernel<<<g1((size_t)n * n), 256>>>(m_W, m_V, n);
+        symmetrizeKernel<<<g1((size_t)n * n), 256>>>(m_Wb, m_Vb, n);
+        if (!energySums(out)) return false;
+        if (cudaMemcpy(Va, m_V, bytes, cudaMemcpyDeviceToHost) != cudaSuccess
+            || cudaMemcpy(Vb, m_Vb, bytes, cudaMemcpyDeviceToHost) != cudaSuccess)
+            return false;
+        ++m_nvxc;
+        m_t_vxc += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        return cudaGetLastError() == cudaSuccess;
+    }
+
+    // Stage 6a (Claude Generated, Nov 2026): spin XC gradient, the device version of qmxc::buildXCGradientSpin plus the
+    // grid response (point part and Becke weight derivative of e_x + e_c), see the file header.
+    bool gradientSpin(const double* Pa, const double* Pb, bool response, double* g_basis, double* g_points,
+                      double* g_weights, long long& points_used) override
+    {
+        if (!m_spin) return false;
+        const auto t0 = std::chrono::steady_clock::now();
+        const int n = m_nbf;
+        const size_t bytes = (size_t)n * n * sizeof(double);
+        if (cudaMemcpy(m_P, Pa, bytes, cudaMemcpyHostToDevice) != cudaSuccess
+            || cudaMemcpy(m_Pb, Pb, bytes, cudaMemcpyHostToDevice) != cudaSuccess)
+            return false;
+        if (cudaMemsetAsync(m_gfun, 0, 3 * (size_t)n * sizeof(double), 0) != cudaSuccess || !clearPointArrays()) return false;
+        const int deriv = m_gga ? 2 : 1;
+        const double one = 1.0, zero = 0.0;
+        for (int begin = 0; begin < m_npts; begin += m_B) {
+            const int count = std::min(m_B, m_npts - begin);
+            if (!spinDensity(begin, count, deriv, 1)) return false;
+            combineKernel<<<g1((size_t)m_B * n), 256>>>(m_ao, n, m_B, count, m_gga, m_c0, m_cx, m_cy, m_cz, m_Y);
+            if (cublasDgemm(m_cublas, CUBLAS_OP_N, CUBLAS_OP_N, count, n, n, &one, m_Y, m_B, m_P, n, &zero, m_ZP, m_B)
+                != CUBLAS_STATUS_SUCCESS)
+                return false;
+            combineKernel<<<g1((size_t)m_B * n), 256>>>(m_ao, n, m_B, count, m_gga, m_b0, m_bx, m_by, m_bz, m_Y);
+            if (cublasDgemm(m_cublas, CUBLAS_OP_N, CUBLAS_OP_N, count, n, n, &one, m_Y, m_B, m_Pb, n, &zero, m_ZPb, m_B)
+                != CUBLAS_STATUS_SUCCESS)
+                return false;
+            gradRowSpinKernel<<<g1(count, 128), 128>>>(m_ao, m_ZP, m_X, m_ZPb, m_Xb, n, m_B, count, begin, m_gga, m_cx, m_cy, m_cz,
+                                                       m_bx, m_by, m_bz, m_spoint);
+            gradColKernel<false><<<n, 256>>>(m_ao, m_ZP, m_X, n, m_B, count, m_gga, m_cx, m_cy, m_cz, m_gfun, nullptr, nullptr,
+                                             nullptr);
+            gradColKernel<false><<<n, 256>>>(m_ao, m_ZPb, m_Xb, n, m_B, count, m_gga, m_bx, m_by, m_bz, m_gfun, nullptr, nullptr,
+                                             nullptr);
+        }
+        if (cudaGetLastError() != cudaSuccess) return false;
+        qmint::QMGpuXCScalars sc;
+        if (!energySums(sc)) return false;
+        points_used = sc.points_used;
+        std::vector<double> gfun(3 * (size_t)n);
+        if (cudaMemcpy(gfun.data(), m_gfun, gfun.size() * sizeof(double), cudaMemcpyDeviceToHost) != cudaSuccess) return false;
+        for (int k = 0; k < 3 * m_na; ++k) g_basis[k] = g_points[k] = g_weights[k] = 0.0;
+        for (int m = 0; m < n; ++m)
+            for (int k = 0; k < 3; ++k) g_basis[3 * m_bf_atom[m] + k] += -2.0 * gfun[3 * (size_t)m + k];
+        const auto t1 = std::chrono::steady_clock::now();
+        if (response) {
+            atomPointSumKernel<<<m_na, 256>>>(m_spoint, m_aoff, m_gpts);
+            if (cudaMemcpy(g_points, m_gpts, 3 * (size_t)m_na * sizeof(double), cudaMemcpyDeviceToHost) != cudaSuccess)
+                return false;
+            if (m_na >= 2 && !weightGradientDevice(g_weights)) return false;
+        }
+        const auto t2 = std::chrono::steady_clock::now();
+        m_t_grad += std::chrono::duration<double, std::milli>(t1 - t0).count();
+        m_t_wgrad += std::chrono::duration<double, std::milli>(t2 - t1).count();
+        ++m_ngrad;
+        return cudaGetLastError() == cudaSuccess;
+    }
+
     bool weightGradient(const double* f, double* g) override
     {
         const auto t0 = std::chrono::steady_clock::now();
@@ -1277,6 +1476,26 @@ private:
         densityXCKernel<<<g1(count, 128), 128>>>(m_ao, m_X, n, m_B, count, begin, m_w, m_terms, m_gga, m_rho_min, mode, m_c0,
                                                  m_cx, m_cy, m_cz, m_exw, m_ecw, m_ne, m_used, m_edens);
         profile(2);
+        return cudaGetLastError() == cudaSuccess;
+    }
+
+    /// Stage 6a: AO values of the block [begin, begin + count) (all functions), X = phi Pa (m_X), Xb = phi Pb (m_Xb),
+    /// densitySpinKernel into the alpha (m_c*) and beta (m_b*) coefficient vectors. Claude Generated (Nov 2026).
+    bool spinDensity(int begin, int count, int deriv, int mode)
+    {
+        const int n = m_nbf;
+        const double one = 1.0, zero = 0.0;
+        aoKernel<<<dim3(g1(count, 128), m_nshell), 128>>>(m_sh, m_pts, begin, count, deriv, n, m_B, m_ao, nullptr, nullptr,
+                                                          nullptr, nullptr, 0);
+        if (cudaGetLastError() != cudaSuccess) return false;
+        if (cublasDgemm(m_cublas, CUBLAS_OP_N, CUBLAS_OP_N, count, n, n, &one, m_ao, m_B, m_P, n, &zero, m_X, m_B)
+                != CUBLAS_STATUS_SUCCESS
+            || cublasDgemm(m_cublas, CUBLAS_OP_N, CUBLAS_OP_N, count, n, n, &one, m_ao, m_B, m_Pb, n, &zero, m_Xb, m_B)
+                != CUBLAS_STATUS_SUCCESS)
+            return false;
+        densitySpinKernel<<<g1(count, 128), 128>>>(m_ao, m_X, m_Xb, n, m_B, count, begin, m_w, m_terms, m_gga, m_rho_min, mode,
+                                                   m_c0, m_cx, m_cy, m_cz, m_b0, m_bx, m_by, m_bz, m_exw, m_ecw, m_ne, m_used,
+                                                   m_edens);
         return cudaGetLastError() == cudaSuccess;
     }
 
@@ -1456,6 +1675,10 @@ private:
     double *m_X2 = nullptr, *m_Y2 = nullptr, *m_P2 = nullptr, *m_P2s = nullptr, *m_d0 = nullptr, *m_dx = nullptr,
            *m_dy = nullptr, *m_dz = nullptr, *m_dt = nullptr;
     int m_nfxc = 0, m_nresp = 0;
+    // open shell (stage 6a): beta density, its W and V, X and ZP planes, coefficient vectors
+    int m_spin = 0;
+    double *m_Pb = nullptr, *m_Wb = nullptr, *m_Vb = nullptr, *m_Xb = nullptr, *m_ZPb = nullptr, *m_b0 = nullptr,
+           *m_bx = nullptr, *m_by = nullptr, *m_bz = nullptr;
     double m_t_fxc = 0.0, m_t_resp = 0.0;
     size_t m_bytes = 0;
     // AO screening (groups on the host, shell/column/function lists on the device)
@@ -1487,8 +1710,9 @@ void setWhyXC(char* why, int whylen, const std::string& s)
 // Device XC object (QMGpuXC*) for one geometry, or nullptr with a reason. Claude Generated (Oct 2026, GPU KS-DFT).
 // Renamed from _create_qm_xc with the changed vtable (weightGradient) and the appended screening fields, then from
 // _create_qm_xc_screen with the appended meta-GGA flag (WP11 stage 3), then from _create_qm_xc_mgga with the appended
-// fxc flag and the vtable entries fxc/responseGradient (WP12 stage 3): an old host never hands a short setup to it.
-extern "C" void* curcuma_cuda_create_qm_xc_fxc(const qmint::QMGpuXCSetup* s, int device, char* why, int whylen)
+// fxc flag and the vtable entries fxc/responseGradient (WP12 stage 3), then from _create_qm_xc_fxc with the appended
+// spin flag and the vtable entries vxcSpin/gradientSpin (stage 6a): an old host never hands a short setup to it.
+extern "C" void* curcuma_cuda_create_qm_xc_spin(const qmint::QMGpuXCSetup* s, int device, char* why, int whylen)
 {
     if (!s) { setWhyXC(why, whylen, "no setup"); return nullptr; }
     if (device >= 0 && cudaSetDevice(device) != cudaSuccess) { setWhyXC(why, whylen, "cudaSetDevice failed"); return nullptr; }

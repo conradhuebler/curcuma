@@ -80,6 +80,11 @@ struct QMGpuXCSetup {
     // on the grid, the directional coefficients) in the memory budget; 0 leaves the block sizes of LDA/GGA/meta-GGA
     // exactly as before, and the two calls then return false.
     int fxc = 0;
+    // Open-shell Kohn-Sham (Claude Generated, Nov 2026, stage 6a; appended, entry renamed to _create_qm_xc_spin): 1
+    // reserves the beta-spin buffers of vxcSpin() / gradientSpin() (second density, its V_xc accumulator, X and ZP
+    // planes, four coefficient vectors) in the memory budget. Needs screen_nblocks = 0 (the CPU UKS path has no AO
+    // screening either). 0 leaves every block size of before unchanged, and the two calls return false.
+    int spin = 0;
 };
 
 /// E_xc parts of one V_xc build (sums over the grid, as qmxc::XCResult).
@@ -127,6 +132,24 @@ public:
                                   double* g_weights, long long& points_used)
     {
         (void)P, (void)P2, (void)response, (void)g_basis, (void)g_points, (void)g_weights, (void)points_used;
+        return false;
+    }
+    /// Open shell (stage 6a): V_xc,alpha and V_xc,beta (n x n each, overwritten) and the scalars for the host spin
+    /// densities Pa, Pb (P_s = C_s,occ C_s,occ^T), the quantity of qmxc::buildVxcSpin with the point functional
+    /// qmxc::kern::evaluatePointSpinTerms (qm_xc_spin_kernels.h). ex/ec are energies (sum of w e, e per volume).
+    /// False without QMGpuXCSetup::spin or on a device error. Claude Generated (Nov 2026).
+    virtual bool vxcSpin(const double* Pa, const double* Pb, double* Va, double* Vb, QMGpuXCScalars& out)
+    {
+        (void)Pa, (void)Pb, (void)Va, (void)Vb, (void)out;
+        return false;
+    }
+    /// Open shell (stage 6a): nuclear XC gradient for the spin densities (Eh/Bohr, natoms x 3, overwritten), the
+    /// quantity of qmxc::buildXCGradientSpin (basis part, point part) plus with response the Becke weight derivative
+    /// of its energy density e_x + e_c (qmgrid::gridWeightGradient). Same preconditions as vxcSpin().
+    virtual bool gradientSpin(const double* Pa, const double* Pb, bool response, double* g_basis, double* g_points,
+                              double* g_weights, long long& points_used)
+    {
+        (void)Pa, (void)Pb, (void)response, (void)g_basis, (void)g_points, (void)g_weights, (void)points_used;
         return false;
     }
 };

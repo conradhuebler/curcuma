@@ -302,8 +302,16 @@ public:
     /// factor), i.e. by their bound on the J/K contribution (Claude Generated, Oct 2026).
     long build(const Matrix& P, Matrix& J, Matrix& K, int threads = 1, double thr = -1.0,
                bool prim_density = false) const;
+    /// Open shell (stage 6a, Claude Generated Nov 2026): J = J[Pa + Pb], Ka = K[Pa], Kb = K[Pb] from ONE pass over
+    /// the screened quartets; the density factor of the screen is max(|Pa|, |Pb|) per shell block, a superset of the
+    /// screen of build() for either density (the device QMGpuJK::buildSpin uses the same expression).
+    long buildSpin(const Matrix& Pa, const Matrix& Pb, Matrix& J, Matrix& Ka, Matrix& Kb, int threads = 1,
+                   double thr = -1.0, bool prim_density = false) const;
 
 private:
+    template <bool SPIN>
+    long buildImpl(const Matrix& P, const Matrix* P2, Matrix& J, Matrix& K, Matrix* K2, int threads, double thr,
+                   bool prim_density) const;
     struct Impl;
     std::shared_ptr<const Impl> m_impl;
     double m_screening = 0.0;

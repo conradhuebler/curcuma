@@ -873,7 +873,7 @@ private:
     int m_nalpha = 0, m_nbeta = 0;
     std::string m_closed_shell_only;         ///< requireClosedShell(): method name, empty = open shell allowed
     std::string m_spin_error;                ///< reason when the spin state was rejected (empty = fine)
-    mutable bool m_uhf_gpu_reported = false; ///< the qm_uhf GPU fallback is counted once per engine
+    mutable bool m_uhf_gpu_reported = false; ///< the qm_uhf_scf GPU fallback (host SCF loop) is counted once per engine
     Matrix m_density_a, m_density_b;         ///< converged spin densities P_s = C_s,occ C_s,occ^T
     Matrix m_fock_a, m_fock_b;               ///< converged spin Fock (KS) matrices
     Matrix m_mo_b;                           ///< beta orbitals (alpha: m_mo)
@@ -888,6 +888,16 @@ private:
     /// J[Pa + Pb], K[Pa], K[Pb] on every J/K path (stored tensor, integral-direct, RI-J, RI-JK); a pure density
     /// functional builds J only (Ka = Kb = 0).
     void buildJKSpin(const Matrix& Pa, const Matrix& Pb, Matrix& J, Matrix& Ka, Matrix& Kb) const;
+    /// Stage 6a: one device two-density build (QMGpuJK::buildSpin); false + counted fallback `tag` on a device error.
+    bool gpuBuildJKSpin(qmint::QMGpuJK* dev, const Matrix& Pa, const Matrix& Pb, Matrix& J, Matrix& Ka, Matrix& Kb,
+                        const char* tag) const;
+    /// Stage 6a: spin V_xc / E_xc on the device (QMGpuXC::vxcSpin); false (counted qm_xc fallback) -> CPU path.
+    bool gpuXCSpin(const Matrix& Pa, const Matrix& Pb, qmxc::XCResultSpin& out) const;
+    /// Stage 6a: device UHF/UKS gradient parts (1e Q-G8 with P_a + P_b and W_a + W_b, 2e Q-G7 computeUHF, spin XC);
+    /// each part false -> CPU for that part (counted). `parts`: "device"/"cpu" per part for the info line.
+    bool gpuGradientTwoElectronUHF(const qmint::EriGpuTables* tables, const std::string& why_tables,
+                                   const std::string& backend, const Matrix& Pac, const Matrix& Pbc, double kx,
+                                   Matrix& g2, std::string& info) const;
     /// Spin V_xc and E_xc (cached for the last density pair, as xcFor).
     const qmxc::XCResultSpin& xcForSpin(const Matrix& Pa, const Matrix& Pb) const;
     mutable Matrix m_xcs_last_Pa, m_xcs_last_Pb;

@@ -165,7 +165,7 @@ const std::string kAI = "native, AI-generated, machine-tested (not TESTED)";
 const std::string kExt = "external library; curcuma wrapper AI-generated";
 const std::string kQmRestr = "closed shell only (open-shell input, -spin > 0, is an error); elements H-Rn (built-in def2 sets, def2-ECP for Rb-Rn via -qm.ecp, ECP terms on the CPU)";
 // stage 5b (Nov 2026): hf, hf-3c, lda, pbe, b3lyp also run unrestricted
-const std::string kQmRestrOpen = "open shell (UHF/UKS) via -spin (unpaired electrons) or -qm.reference uhf, CPU only (-gpu: counted fallback qm_uhf), no ROHF; elements H-Rn (built-in def2 sets, def2-ECP for Rb-Rn via -qm.ecp, ECP terms on the CPU)";
+const std::string kQmRestrOpen = "open shell (UHF/UKS) via -spin (unpaired electrons) or -qm.reference uhf, no ROHF; -gpu cuda: J/K, V_xc and gradient on the device, SCF loop on the host (counted fallback qm_uhf_scf, -qm.gpu_scf off avoids it), no AO screening on the UKS path; elements H-Rn (built-in def2 sets, def2-ECP for Rb-Rn via -qm.ecp, ECP terms on the CPU)";
 
 const std::vector<std::string> kUlyssesOnly = { "ugfn2", "mndod", "rm1", "pm3pddg", "mndopddg", "pm3bp",
     "pm6-d3h4x", "am1-d3h4x", "pm3-d3h4x", "mndo-d3h4x", "mndod-d3h4x", "rm1-d3h4x", "pm3pddg-d3h4x", "mndopddg-d3h4x", "pm3bp-d3h4x",
@@ -223,7 +223,7 @@ const std::vector<MethodCatalogEntry> kCatalog = {
       { { "scan", "SCAN meta-GGA" }, { "tpss-d4", "+ native D4" }, { "scan-d4", "+ native D4" } } },
     { { "hf-3c", "hf3c" }, "native ab-initio QM", "native (HF3CMethod on QMEngine)", kAI, "analytic", "cuda (HF part; D3, gCP, SRB on the CPU)",
       "HF-3c composite: HF/MINIX + D3(BJ) + gCP + short-range basis correction (Sure, Grimme 2013).",
-      "closed shell, or open shell with UHF/MINIX (-spin > 0, CPU only; D3, gCP, SRB spin independent); elements H-Rn (MINIX and MINIX-ECP as ORCA 6.1 composes them, gCP/SRB via effective atomic numbers; "
+      "closed shell, or open shell with UHF/MINIX (-spin > 0, -gpu cuda as hf: SCF loop on the host; D3, gCP, SRB spin independent); elements H-Rn (MINIX and MINIX-ECP as ORCA 6.1 composes them, gCP/SRB via effective atomic numbers; "
       "compared with ORCA on 21 molecules up to Pb and Ce, see the doc); basis fixed to MINIX, -qm.ecp to MINIX-ECP, "
       "-qm.ri ignored (all warn)",
       "docs/NATIVE_QM_IMPLEMENTATION.md", "qm", { "qm_scf", "qm_cpu", "qm_gpu", "scf_all" },

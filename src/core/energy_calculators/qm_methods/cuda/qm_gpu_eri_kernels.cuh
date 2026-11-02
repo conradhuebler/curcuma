@@ -60,7 +60,12 @@ struct DevTables {
     const double *pp_p, *pp_P, *pp_schwarz;
     const long long* pp_E_off;
     const double* E;
-    const int *q_bra, *q_ket;  // Q-G2: screened canonical quartet list
+    // Q-G2: screened canonical quartet list. Stage 6a (open shell, Claude Generated Nov 2026): the integral-direct
+    // builder never reads the list, so the same two slots carry its beta density P2 and beta exchange accumulator K2
+    // (nullptr = closed shell). A union and not two new fields: a larger DevTables changed the NVVM code (FMA
+    // contraction) of the unchanged Q-G2 tensor kernels and with it the last bits of the stored device tensor.
+    union { const int* q_bra; const double* P2; };
+    union { const int* q_ket; double* K2; };
     const double* boys_f;
     int boys_ntab;
     double boys_dT, boys_Tmax;
@@ -73,6 +78,8 @@ struct DevTables {
     double *J, *K;                 // unsymmetrised accumulators Jt, Kt
     unsigned long long* counter;   // quartets computed in this build
     int prim_density;              // 1: primitive screen relative to the quartet's density factor (prim_thr / pq)
+    // Stage 6a, integral-direct UHF (K2 != nullptr): P = Pa, P2 = Pb, J digested with Pa + Pb (formed per element, the
+    // same sum as the host Pt), K = Ka, K2 = Kb, Pmax = max(|Pa|, |Pb|) per shell block.
 };
 
 /// Where the quartets of one launch come from.
@@ -177,6 +184,35 @@ __device__ inline double digestScale(int A, int B, int C, int D, int i, int j)
     return (A != B ? 2.0 : 1.0) * (C != D ? 2.0 : 1.0) * (i != j ? 2.0 : 1.0) / 8.0;
 }
 
+__device__ inline void digestBlockK(const double* v, const int dim[4], int oA, int oB, int oC, int oD, double scale,
+                                    const double* P, double* K, size_t n, int tid, int bs);
+
+/// J part of digestBlock; SPIN (stage 6a): density P + P2 per element (UHF Pa + Pb).
+template <bool SPIN>
+__device__ inline void digestBlockJ(const double* v, const int dim[4], int oA, int oB, int oC, int oD, double scale,
+                                    const DevTables& d, size_t n, int tid, int bs)
+{
+    const int d0 = dim[0], d1 = dim[1], d2 = dim[2], d3 = dim[3];
+    const double* P = d.P;
+    const double* P2 = d.P2;
+    auto PJ = [&](size_t k) { if constexpr (SPIN) return P[k] + P2[k]; else return P[k]; };
+    auto V = [&](int a, int b, int c, int e) { return v[((a * d1 + b) * d2 + c) * d3 + e]; };
+    for (int k = tid; k < d0 * d1; k += bs) {  // Jt_ab
+        const int a = k / d1, b = k % d1;
+        double s = 0.0;
+        for (int c = 0; c < d2; ++c)
+            for (int e = 0; e < d3; ++e) s += V(a, b, c, e) * PJ((oC + c) * n + oD + e);
+        atomicAdd(&d.J[(oA + a) * n + oB + b], 4.0 * scale * s);
+    }
+    for (int k = tid; k < d2 * d3; k += bs) {  // Jt_cd
+        const int c = k / d3, e = k % d3;
+        double s = 0.0;
+        for (int a = 0; a < d0; ++a)
+            for (int b = 0; b < d1; ++b) s += V(a, b, c, e) * PJ((oA + a) * n + oB + b);
+        atomicAdd(&d.J[(oC + c) * n + oD + e], 4.0 * scale * s);
+    }
+}
+
 /// Q-G3: contract one active-basis quartet block v (dims d0..d3, offsets oA..oD) with P into
 /// the unsymmetrised Jt, Kt of qmint::DirectJK (libint HF example scheme):
 ///   Jt_ab += 4 w P_cd,  Jt_cd += 4 w P_ab,
@@ -186,51 +222,48 @@ __device__ inline double digestScale(int A, int B, int C, int D, int i, int j)
 __device__ inline void digestBlock(const double* v, const int dim[4], int oA, int oB, int oC, int oD, double scale,
                                    const DevTables& d, int tid, int bs)
 {
-    const int d0 = dim[0], d1 = dim[1], d2 = dim[2], d3 = dim[3];
     const size_t n = (size_t)d.n_out;
-    const double* P = d.P;
+    if (d.K2)  // stage 6a: J from Pa + Pb
+        digestBlockJ<true>(v, dim, oA, oB, oC, oD, scale, d, n, tid, bs);
+    else
+        digestBlockJ<false>(v, dim, oA, oB, oC, oD, scale, d, n, tid, bs);
+    digestBlockK(v, dim, oA, oB, oC, oD, scale, d.P, d.K, n, tid, bs);
+    if (d.K2) digestBlockK(v, dim, oA, oB, oC, oD, scale, d.P2, d.K2, n, tid, bs);  // stage 6a: beta spin
+}
+
+/// K part of digestBlock for density P into K (the RHF code unchanged; stage 6a calls it once per spin).
+__device__ inline void digestBlockK(const double* v, const int dim[4], int oA, int oB, int oC, int oD, double scale,
+                                    const double* P, double* K, size_t n, int tid, int bs)
+{
+    const int d0 = dim[0], d1 = dim[1], d2 = dim[2], d3 = dim[3];
     auto V = [&](int a, int b, int c, int e) { return v[((a * d1 + b) * d2 + c) * d3 + e]; };
-    for (int k = tid; k < d0 * d1; k += bs) {  // Jt_ab
-        const int a = k / d1, b = k % d1;
-        double s = 0.0;
-        for (int c = 0; c < d2; ++c)
-            for (int e = 0; e < d3; ++e) s += V(a, b, c, e) * P[(oC + c) * n + oD + e];
-        atomicAdd(&d.J[(oA + a) * n + oB + b], 4.0 * scale * s);
-    }
-    for (int k = tid; k < d2 * d3; k += bs) {  // Jt_cd
-        const int c = k / d3, e = k % d3;
-        double s = 0.0;
-        for (int a = 0; a < d0; ++a)
-            for (int b = 0; b < d1; ++b) s += V(a, b, c, e) * P[(oA + a) * n + oB + b];
-        atomicAdd(&d.J[(oC + c) * n + oD + e], 4.0 * scale * s);
-    }
     for (int k = tid; k < d0 * d2; k += bs) {  // Kt_ac
         const int a = k / d2, c = k % d2;
         double s = 0.0;
         for (int b = 0; b < d1; ++b)
             for (int e = 0; e < d3; ++e) s += V(a, b, c, e) * P[(oB + b) * n + oD + e];
-        atomicAdd(&d.K[(oA + a) * n + oC + c], 2.0 * scale * s);
+        atomicAdd(&K[(oA + a) * n + oC + c], 2.0 * scale * s);
     }
     for (int k = tid; k < d1 * d3; k += bs) {  // Kt_bd
         const int b = k / d3, e = k % d3;
         double s = 0.0;
         for (int a = 0; a < d0; ++a)
             for (int c = 0; c < d2; ++c) s += V(a, b, c, e) * P[(oA + a) * n + oC + c];
-        atomicAdd(&d.K[(oB + b) * n + oD + e], 2.0 * scale * s);
+        atomicAdd(&K[(oB + b) * n + oD + e], 2.0 * scale * s);
     }
     for (int k = tid; k < d0 * d3; k += bs) {  // Kt_ad
         const int a = k / d3, e = k % d3;
         double s = 0.0;
         for (int b = 0; b < d1; ++b)
             for (int c = 0; c < d2; ++c) s += V(a, b, c, e) * P[(oB + b) * n + oC + c];
-        atomicAdd(&d.K[(oA + a) * n + oD + e], 2.0 * scale * s);
+        atomicAdd(&K[(oA + a) * n + oD + e], 2.0 * scale * s);
     }
     for (int k = tid; k < d1 * d2; k += bs) {  // Kt_bc
         const int b = k / d2, c = k % d2;
         double s = 0.0;
         for (int a = 0; a < d0; ++a)
             for (int e = 0; e < d3; ++e) s += V(a, b, c, e) * P[(oA + a) * n + oD + e];
-        atomicAdd(&d.K[(oB + b) * n + oC + c], 2.0 * scale * s);
+        atomicAdd(&K[(oB + b) * n + oC + c], 2.0 * scale * s);
     }
 }
 
@@ -470,36 +503,12 @@ __device__ inline void transformAxisReg(const double* in, double* out, const dou
             }
 }
 
-/// Q-G3 digest of a register block with compile-time dims (thread kernel); same contraction
-/// as digestBlock.
+/// K part of digestReg for density P into K (the RHF code unchanged; stage 6a calls it once per spin).
 template <int D0, int D1, int D2, int D3>
-__device__ inline void digestReg(const double* v, int oA, int oB, int oC, int oD, double scale, const DevTables& d)
+__device__ inline void digestRegK(const double* v, int oA, int oB, int oC, int oD, double scale, const double* P,
+                                  double* K, size_t n)
 {
-    const size_t n = (size_t)d.n_out;
-    const double* P = d.P;
 #define QG3_V(a, b, c, e) v[(((a) * D1 + (b)) * D2 + (c)) * D3 + (e)]
-#pragma unroll
-    for (int a = 0; a < D0; ++a)
-#pragma unroll
-        for (int b = 0; b < D1; ++b) {
-            double s = 0.0;
-#pragma unroll
-            for (int c = 0; c < D2; ++c)
-#pragma unroll
-                for (int e = 0; e < D3; ++e) s += QG3_V(a, b, c, e) * P[(oC + c) * n + oD + e];
-            atomicAdd(&d.J[(oA + a) * n + oB + b], 4.0 * scale * s);
-        }
-#pragma unroll
-    for (int c = 0; c < D2; ++c)
-#pragma unroll
-        for (int e = 0; e < D3; ++e) {
-            double s = 0.0;
-#pragma unroll
-            for (int a = 0; a < D0; ++a)
-#pragma unroll
-                for (int b = 0; b < D1; ++b) s += QG3_V(a, b, c, e) * P[(oA + a) * n + oB + b];
-            atomicAdd(&d.J[(oC + c) * n + oD + e], 4.0 * scale * s);
-        }
 #pragma unroll
     for (int a = 0; a < D0; ++a)
 #pragma unroll
@@ -509,7 +518,7 @@ __device__ inline void digestReg(const double* v, int oA, int oB, int oC, int oD
             for (int b = 0; b < D1; ++b)
 #pragma unroll
                 for (int e = 0; e < D3; ++e) s += QG3_V(a, b, c, e) * P[(oB + b) * n + oD + e];
-            atomicAdd(&d.K[(oA + a) * n + oC + c], 2.0 * scale * s);
+            atomicAdd(&K[(oA + a) * n + oC + c], 2.0 * scale * s);
         }
 #pragma unroll
     for (int b = 0; b < D1; ++b)
@@ -520,7 +529,7 @@ __device__ inline void digestReg(const double* v, int oA, int oB, int oC, int oD
             for (int a = 0; a < D0; ++a)
 #pragma unroll
                 for (int c = 0; c < D2; ++c) s += QG3_V(a, b, c, e) * P[(oA + a) * n + oC + c];
-            atomicAdd(&d.K[(oB + b) * n + oD + e], 2.0 * scale * s);
+            atomicAdd(&K[(oB + b) * n + oD + e], 2.0 * scale * s);
         }
 #pragma unroll
     for (int a = 0; a < D0; ++a)
@@ -531,7 +540,7 @@ __device__ inline void digestReg(const double* v, int oA, int oB, int oC, int oD
             for (int b = 0; b < D1; ++b)
 #pragma unroll
                 for (int c = 0; c < D2; ++c) s += QG3_V(a, b, c, e) * P[(oB + b) * n + oC + c];
-            atomicAdd(&d.K[(oA + a) * n + oD + e], 2.0 * scale * s);
+            atomicAdd(&K[(oA + a) * n + oD + e], 2.0 * scale * s);
         }
 #pragma unroll
     for (int b = 0; b < D1; ++b)
@@ -542,10 +551,60 @@ __device__ inline void digestReg(const double* v, int oA, int oB, int oC, int oD
             for (int a = 0; a < D0; ++a)
 #pragma unroll
                 for (int e = 0; e < D3; ++e) s += QG3_V(a, b, c, e) * P[(oA + a) * n + oD + e];
-            atomicAdd(&d.K[(oB + b) * n + oC + c], 2.0 * scale * s);
+            atomicAdd(&K[(oB + b) * n + oC + c], 2.0 * scale * s);
         }
 #undef QG3_V
 }
+
+/// J part of digestReg; SPIN (stage 6a): density P + P2 per element (UHF Pa + Pb).
+template <int D0, int D1, int D2, int D3, bool SPIN>
+__device__ inline void digestRegJ(const double* v, int oA, int oB, int oC, int oD, double scale, const DevTables& d,
+                                  size_t n)
+{
+    const double* P = d.P;
+    const double* P2 = d.P2;
+    auto PJ = [&](size_t k) { if constexpr (SPIN) return P[k] + P2[k]; else return P[k]; };
+#define QG3_V(a, b, c, e) v[(((a) * D1 + (b)) * D2 + (c)) * D3 + (e)]
+#pragma unroll
+    for (int a = 0; a < D0; ++a)
+#pragma unroll
+        for (int b = 0; b < D1; ++b) {
+            double s = 0.0;
+#pragma unroll
+            for (int c = 0; c < D2; ++c)
+#pragma unroll
+                for (int e = 0; e < D3; ++e) s += QG3_V(a, b, c, e) * PJ((oC + c) * n + oD + e);
+            atomicAdd(&d.J[(oA + a) * n + oB + b], 4.0 * scale * s);
+        }
+#pragma unroll
+    for (int c = 0; c < D2; ++c)
+#pragma unroll
+        for (int e = 0; e < D3; ++e) {
+            double s = 0.0;
+#pragma unroll
+            for (int a = 0; a < D0; ++a)
+#pragma unroll
+                for (int b = 0; b < D1; ++b) s += QG3_V(a, b, c, e) * PJ((oA + a) * n + oB + b);
+            atomicAdd(&d.J[(oC + c) * n + oD + e], 4.0 * scale * s);
+        }
+#undef QG3_V
+}
+
+/// Q-G3 digest of a register block with compile-time dims (thread kernel); same contraction
+/// as digestBlock.
+template <int D0, int D1, int D2, int D3>
+__device__ inline void digestReg(const double* v, int oA, int oB, int oC, int oD, double scale, const DevTables& d)
+{
+    const size_t n = (size_t)d.n_out;
+    if (d.K2)  // stage 6a: J from Pa + Pb
+        digestRegJ<D0, D1, D2, D3, true>(v, oA, oB, oC, oD, scale, d, n);
+    else
+        digestRegJ<D0, D1, D2, D3, false>(v, oA, oB, oC, oD, scale, d, n);
+    digestRegK<D0, D1, D2, D3>(v, oA, oB, oC, oD, scale, d.P, d.K, n);
+    if (d.K2) digestRegK<D0, D1, D2, D3>(v, oA, oB, oC, oD, scale, d.P2, d.K2, n);  // stage 6a: beta spin
+}
+
+
 
 template <int LA, int LB, int LC, int LD, bool SPH, bool DIRECT>
 __global__ void __launch_bounds__(64) eriThreadKernel(DevTables d, QSrc src, long long nq, double* __restrict__ out)

@@ -12,8 +12,8 @@
 
 // Claude Generated (Oct 2026, Q-G1..Q-G4 of docs/QM_GPU_ROADMAP.md): backend-free interface the
 // QMEngine drives a GPU through. The concrete classes live in a runtime plugin
-// (libcurcuma_cuda.so, entries curcuma_cuda_create_qm_jk / curcuma_cuda_create_qm_eri_jk /
-// curcuma_cuda_create_qm_direct_jk / curcuma_cuda_create_qm_scf_ks), so the core carries no CUDA symbol.
+// (libcurcuma_cuda.so, entries curcuma_cuda_create_qm_jk_spin / curcuma_cuda_create_qm_eri_jk_spin /
+// curcuma_cuda_create_qm_direct_jk_spin / curcuma_cuda_create_qm_scf_ks), so the core carries no CUDA symbol.
 namespace qmint {
 
 /// Coulomb/exchange builder on a device: either holding the stored ERI tensor (Q-G1/Q-G2) or
@@ -55,6 +55,16 @@ public:
     /// FP32:FP64 throughput ratio of the device (e.g. 64 on a GeForce RTX 5090, 2 on an HPC card);
     /// 0 = unknown. Used by -qm.gpu_eri_precision auto.
     virtual int fp32Ratio() const { return 0; }
+    /// Stage 6a (open shell, Claude Generated Nov 2026): J = J[Pa + Pb], Ka = K[Pa], Kb = K[Pb] (host arrays, n x n,
+    /// symmetrised as build()) from ONE pass over the integrals: the stored tensor is read once, the integral-direct
+    /// builder computes each shell quartet once and digests it into J (total density) and both K. The direct screen
+    /// takes max(|Pa|, |Pb|) per shell block (a superset of either single-density screen), as
+    /// qmint::DirectJK::buildSpin. FP64 only. False = unsupported or device error (caller: CPU).
+    /// Entries renamed with this vtable (_spin), see gpu_plugin.cpp.
+    virtual bool buildSpin(const double* /*Pa*/, const double* /*Pb*/, double* /*J*/, double* /*Ka*/, double* /*Kb*/)
+    {
+        return false;
+    }
 };
 
 /// Flat, pointer-only description of everything the device ERI kernel needs (Q-G2).

@@ -84,6 +84,8 @@ struct GradArgs {
     const double* Pmax;           // nshell x nshell
     double thr;                   // density-weighted screening threshold (0 = none)
     double kx;                    // exchange weight (1 = RHF, 0 = pure DFT, 0.2 = B3LYP; Oct 2026)
+    const double *Pa, *Pb;        // stage 6a (UHF): spin densities, nullptr = closed shell; P then holds Pa + Pb
+    const double* Smax;           // stage 6a: max(|Pa|, |Pb|) per shell block
     int natoms;
     double* grad;                 // natoms x 3
     unsigned long long* counter;
@@ -126,7 +128,12 @@ __device__ inline bool gradQuartet(const DevTables& d, const GradArgs& g, long l
     const int A = d.pr_A[i], B = d.pr_B[i], C = d.pr_A[j], D = d.pr_B[j];
     const int aA = g.sh_atom[A];
     if (aA == g.sh_atom[B] && aA == g.sh_atom[C] && aA == g.sh_atom[D]) return false;
-    if (g.thr > 0.0) {
+    if (g.thr > 0.0 && g.Pa) {  // stage 6a: bound of the UHF weight
+        const int ns = d.nshell;
+        const double bound = g.Pmax[A * ns + B] * g.Pmax[C * ns + D]
+            + g.kx * (g.Smax[A * ns + C] * g.Smax[B * ns + D] + g.Smax[A * ns + D] * g.Smax[B * ns + C]);
+        if (d.pr_schwarz[i] * d.pr_schwarz[j] * bound < g.thr) return false;
+    } else if (g.thr > 0.0) {
         const int ns = d.nshell;
         const double bound = g.kx == 1.0
             ? g.Pmax[A * ns + B] * g.Pmax[C * ns + D]
@@ -318,10 +325,15 @@ __device__ void quartetGrad(const DevTables& d, const GradArgs& g, int i, int j,
     // step 1: D_abcd = P_ab P_cd - kx/4 (P_ac P_bd + P_ad P_bc), the three branches of gradientTwoElectronImpl
     // (kx = 1: the RHF expression unchanged; kx = 0: Coulomb only; else scaled), Oct 2026
     const double kx = g.kx;
+    const double *Pa = g.Pa, *Pb = g.Pb;
     for (int e = lane; e < nq; e += GS) {
         const int ab = e / nCD, cd = e % nCD;
         const int m = oA + ab / nB, nn = oB + ab % nB, l = oC + cd / nD, sg = oD + cd % nD;
-        if (kx == 1.0)
+        if (Pa) {  // stage 6a: the UHF weight of qmint::gradientTwoElectronUHF, same expression order
+            const double kab = Pa[m * n + l] * Pa[nn * n + sg] + Pa[m * n + sg] * Pa[nn * n + l] + Pb[m * n + l] * Pb[nn * n + sg]
+                + Pb[m * n + sg] * Pb[nn * n + l];
+            Dq[e] = P[m * n + nn] * P[l * n + sg] - 0.5 * kx * kab;
+        } else if (kx == 1.0)
             Dq[e] = P[m * n + nn] * P[l * n + sg] - 0.25 * (P[m * n + l] * P[nn * n + sg] + P[m * n + sg] * P[nn * n + l]);
         else if (kx == 0.0)
             Dq[e] = P[m * n + nn] * P[l * n + sg];
@@ -420,6 +432,22 @@ __global__ void gradPmaxKernel(const double* __restrict__ P, const int* __restri
     Pmax[k] = m;
 }
 
+/// Stage 6a: Smax(A,B) = max(|Pa|, |Pb|) over the cartesian shell block (A, B).
+__global__ void gradSpinMaxKernel(const double* __restrict__ Pa, const double* __restrict__ Pb, const int* __restrict__ first,
+                                  const int* __restrict__ width, int ns, int n, double* __restrict__ Smax)
+{
+    const int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= ns * ns) return;
+    const int A = k / ns, B = k % ns;
+    double m = 0.0;
+    for (int a = 0; a < width[A]; ++a)
+        for (int b = 0; b < width[B]; ++b) {
+            const size_t e = (size_t)(first[A] + a) * n + first[B] + b;
+            m = fmax(m, fmax(fabs(Pa[e]), fabs(Pb[e])));
+        }
+    Smax[k] = m;
+}
+
 class QmGpuGrad2eCuda final : public qmint::QMGpuGrad2e {
 public:
     ~QmGpuGrad2eCuda() override
@@ -469,14 +497,34 @@ public:
 
     bool compute(const double* P, double threshold, double kx, double* grad) override
     {
+        return computeImpl(P, nullptr, nullptr, threshold, kx, grad);
+    }
+
+    // Stage 6a (Claude Generated, Nov 2026): UHF weight from the two spin densities; P = Pa + Pb (formed on the host,
+    // the sum qmint::gradientTwoElectronUHF forms), Smax for the screen.
+    bool computeUHF(const double* Pa, const double* Pb, double threshold, double kx, double* grad) override
+    {
+        const size_t n2 = (size_t)m_n * m_n;
+        if (!m_Pa && !(alloc(&m_Pa, n2) && alloc(&m_Pb, n2) && alloc(&m_Smax, (size_t)m_ns * m_ns))) return false;
+        std::vector<double> Pt(n2);
+        for (size_t k = 0; k < n2; ++k) Pt[k] = Pa[k] + Pb[k];
+        return computeImpl(Pt.data(), Pa, Pb, threshold, kx, grad);
+    }
+
+    bool computeImpl(const double* P, const double* Pa, const double* Pb, double threshold, double kx, double* grad)
+    {
         const auto t0 = std::chrono::steady_clock::now();
         const size_t n2 = (size_t)m_n * m_n;
         if (cudaMemcpy(m_P, P, n2 * sizeof(double), cudaMemcpyHostToDevice) != cudaSuccess) return false;
+        if (Pa && (cudaMemcpy(m_Pa, Pa, n2 * sizeof(double), cudaMemcpyHostToDevice) != cudaSuccess
+                   || cudaMemcpy(m_Pb, Pb, n2 * sizeof(double), cudaMemcpyHostToDevice) != cudaSuccess))
+            return false;
         cudaMemset(m_grad, 0, 3 * (size_t)m_natoms * sizeof(double));
         cudaMemset(m_counter, 0, sizeof(unsigned long long));
         cudaEventRecord(m_e0);
         const int nsn = m_ns * m_ns;
         gradPmaxKernel<<<(nsn + 127) / 128, 128>>>(m_P, m_d.sh_out_first, m_width, m_ns, m_n, m_Pmax);
+        if (Pa) gradSpinMaxKernel<<<(nsn + 127) / 128, 128>>>(m_Pa, m_Pb, m_d.sh_out_first, m_width, m_ns, m_n, m_Smax);
         cudaEventRecord(m_e1);
         for (auto& st : m_streams) cudaStreamWaitEvent(st, m_e1, 0);
 
@@ -488,6 +536,9 @@ public:
         g.Pmax = m_Pmax;
         g.thr = threshold;
         g.kx = kx;
+        g.Pa = Pa ? m_Pa : nullptr;
+        g.Pb = Pa ? m_Pb : nullptr;
+        g.Smax = Pa ? m_Smax : nullptr;
         g.natoms = m_natoms;
         g.grad = m_grad;
         g.counter = m_counter;
@@ -588,6 +639,7 @@ private:
     std::vector<long long> m_pc_off;
     int *m_pc_pairs = nullptr, *m_width = nullptr, *m_sh_atom = nullptr;
     double *m_pp_ea = nullptr, *m_pp_eb = nullptr, *m_P = nullptr, *m_Pmax = nullptr, *m_grad = nullptr;
+    double *m_Pa = nullptr, *m_Pb = nullptr, *m_Smax = nullptr;  // stage 6a (UHF), allocated by the first computeUHF()
     unsigned long long* m_counter = nullptr;
     cudaStream_t m_streams[kStreams] = {};
     cudaEvent_t m_e0 = nullptr, m_e1 = nullptr;
@@ -604,8 +656,9 @@ private:
 
 // 2e-gradient builder (QMGpuGrad2e*), or nullptr with a reason in `why`. `t` from
 // qmint::buildEriGradGpuTables (cartesian, raised Hermite tables). Claude Generated (Q-G7).
-// _kx (Oct 2026): compute() takes the exchange weight, entry renamed with the vtable.
-extern "C" void* curcuma_cuda_create_qm_grad2e_kx(const qmint::QMGpuEriTables* t, const qmint::QMGpuGradExtra* x, int device,
+// _kx (Oct 2026): compute() takes the exchange weight, entry renamed with the vtable; _uhf (Nov 2026, stage 6a):
+// computeUHF() appended to the vtable, renamed again.
+extern "C" void* curcuma_cuda_create_qm_grad2e_uhf(const qmint::QMGpuEriTables* t, const qmint::QMGpuGradExtra* x, int device,
                                                char* why, int whylen)
 {
     if (device >= 0 && cudaSetDevice(device) != cudaSuccess) { setWhy(why, whylen, "cudaSetDevice failed"); return nullptr; }

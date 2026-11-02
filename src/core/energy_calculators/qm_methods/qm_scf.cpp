@@ -1314,6 +1314,8 @@ bool QMEngine::ensureGpuXC() const
     // WP12 stage 3 (Oct 31 2026): double hybrids reserve the buffers of F_xc / the response gradient (gradient path);
     // every other functional keeps the setup, and so the block sizes, of before
     su.fxc = m_functional == QMFunctional::DoubleHybrid ? 1 : 0;
+    // stage 6a (Nov 2026): open shell reserves the beta-spin buffers; no AO screening on that path (as the CPU UKS)
+    su.spin = m_open_shell ? 1 : 0;
     su.rho_min = qmxc::kern::effectiveThreshold(m_xc.needsGradient(), m_xc_rho_threshold);
     su.atom_xyz = pos.data();
     su.inv_dist = inv_dist.data();
@@ -1321,7 +1323,7 @@ bool QMEngine::ensureGpuXC() const
     su.stratmann = stratmann ? 1 : 0;
     su.max_device_mb = m_gpu_xc_max_memory_mb;
     su.block_points = m_gpu_xc_block_points;
-    if (m_xc_screen.active()) {  // AO screening (Oct 2026): the host blocks and shell lists of the sorted grid
+    if (m_xc_screen.active() && !m_open_shell) {  // AO screening (Oct 2026): the host blocks and shell lists of the sorted grid
         su.screen_nblocks = m_xc_screen.nblocks();
         su.screen_begin = m_xc_screen.begin.data();
         su.screen_count = m_xc_screen.count.data();
@@ -1638,8 +1640,8 @@ bool QMEngine::useDirectSCF() const
 // counted (gpu_fallback): "qm_eri" for the device build, "qm_jk" for the J/K path.
 bool QMEngine::gpuRequested() const
 {
-    // stage 5b (Nov 2026): open shell has no device path; the qm_uhf fallback is counted in resolveSpinState
-    if (m_open_shell) return false;
+    // stage 6a (Nov 2026): open shell uses the device J/K, XC and gradient parts too (qm_uscf.cpp); the host SCF loop
+    // of UHF/UKS is counted there (qm_uhf_scf)
     return !(m_gpu == "none" || m_gpu == "cpu" || m_gpu.empty() || m_gpu_failed);
 }
 

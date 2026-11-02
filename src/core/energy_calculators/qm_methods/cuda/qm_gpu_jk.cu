@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -52,6 +53,47 @@ __global__ void jkKernel(const double* __restrict__ E, const double* __restrict_
     if (threadIdx.x == 0) {
         J[mn] = rj[0];
         K[mn] = rk[0];
+    }
+}
+
+/// Stage 6a (open shell, Claude Generated Nov 2026): one pass over the stored tensor for two spin densities,
+///   J_mn = sum_t E[(mn), t] Pt[t] (Pt = Pa + Pb),  Ka_mn = sum_ls E[m,l,n,s] Pa[l,s],  Kb_mn = (same with Pb).
+/// Same block/thread layout and reduction order as jkKernel; each tensor element is read once for three contractions.
+__global__ void jkSpinKernel(const double* __restrict__ E, const double* __restrict__ Pt, const double* __restrict__ Pa,
+                             const double* __restrict__ Pb, double* __restrict__ J, double* __restrict__ Ka,
+                             double* __restrict__ Kb, int n)
+{
+    const int mn = blockIdx.x;
+    const int m = mn / n, nu = mn % n;
+    const size_t n2 = (size_t)n * n;
+    const double* rowJ = E + (size_t)mn * n2;
+    const double* baseK = E + (size_t)m * n2 * n + (size_t)nu * n;
+
+    double sj = 0.0, ska = 0.0, skb = 0.0;
+    for (size_t t = threadIdx.x; t < n2; t += blockDim.x) {
+        const int l = (int)(t / n), s = (int)(t % n);
+        const double ek = baseK[(size_t)l * n2 + s];
+        sj += rowJ[t] * Pt[t];
+        ska += ek * Pa[t];
+        skb += ek * Pb[t];
+    }
+    __shared__ double rj[256], ra[256], rb[256];
+    rj[threadIdx.x] = sj;
+    ra[threadIdx.x] = ska;
+    rb[threadIdx.x] = skb;
+    __syncthreads();
+    for (int o = blockDim.x / 2; o > 0; o >>= 1) {
+        if (threadIdx.x < o) {
+            rj[threadIdx.x] += rj[threadIdx.x + o];
+            ra[threadIdx.x] += ra[threadIdx.x + o];
+            rb[threadIdx.x] += rb[threadIdx.x + o];
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        J[mn] = rj[0];
+        Ka[mn] = ra[0];
+        Kb[mn] = rb[0];
     }
 }
 
@@ -120,6 +162,29 @@ bool QmGpuJkCuda::buildDevice(const double* dP, double* dJ, double* dK)
     return cudaDeviceSynchronize() == cudaSuccess;
 }
 
+// Stage 6a (Claude Generated, Nov 2026): J[Pa + Pb], K[Pa], K[Pb] in one pass over the tensor (jkSpinKernel). Pt is
+// formed on the host (the same sum the CPU path hands to buildCoulomb). Spin buffers are allocated on first use.
+bool QmGpuJkCuda::buildSpin(const double* Pa, const double* Pb, double* J, double* Ka, double* Kb)
+{
+    if (!m_E) return false;
+    const size_t n2 = (size_t)m_n * m_n;
+    if (!m_S) {
+        if (cudaMalloc(&m_S, 4 * n2 * sizeof(double)) != cudaSuccess) { m_S = nullptr; return false; }
+    }
+    double *dPa = m_S, *dPb = m_S + n2, *dKa = m_S + 2 * n2, *dKb = m_S + 3 * n2;
+    std::vector<double> Pt(n2);
+    for (size_t k = 0; k < n2; ++k) Pt[k] = Pa[k] + Pb[k];
+    if (cudaMemcpy(m_P, Pt.data(), n2 * sizeof(double), cudaMemcpyHostToDevice) != cudaSuccess
+        || cudaMemcpy(dPa, Pa, n2 * sizeof(double), cudaMemcpyHostToDevice) != cudaSuccess
+        || cudaMemcpy(dPb, Pb, n2 * sizeof(double), cudaMemcpyHostToDevice) != cudaSuccess)
+        return false;
+    jkSpinKernel<<<(unsigned)n2, 256>>>(m_E, m_P, dPa, dPb, m_J, dKa, dKb, m_n);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    return cudaMemcpy(J, m_J, n2 * sizeof(double), cudaMemcpyDeviceToHost) == cudaSuccess
+        && cudaMemcpy(Ka, dKa, n2 * sizeof(double), cudaMemcpyDeviceToHost) == cudaSuccess
+        && cudaMemcpy(Kb, dKb, n2 * sizeof(double), cudaMemcpyDeviceToHost) == cudaSuccess;
+}
+
 bool QmGpuJkCuda::downloadERI(double* host) const
 {
     if (!m_E) return false;
@@ -129,13 +194,14 @@ bool QmGpuJkCuda::downloadERI(double* host) const
 
 void QmGpuJkCuda::release()
 {
-    cudaFree(m_E); cudaFree(m_P); cudaFree(m_J); cudaFree(m_K);
-    m_E = m_P = m_J = m_K = nullptr;
+    cudaFree(m_E); cudaFree(m_P); cudaFree(m_J); cudaFree(m_K); cudaFree(m_S);
+    m_E = m_P = m_J = m_K = m_S = nullptr;
 }
 
 } // namespace qmgpu
 
-extern "C" void* curcuma_cuda_create_qm_jk(const double* eri, int n, int device)
+// _spin (Nov 2026, stage 6a): QMGpuJK gained buildSpin(); entry renamed with the vtable (gpu_plugin.cpp).
+extern "C" void* curcuma_cuda_create_qm_jk_spin(const double* eri, int n, int device)
 {
     auto* b = new qmgpu::QmGpuJkCuda(eri, n, device);
     if (!b->ok()) { delete b; return nullptr; }

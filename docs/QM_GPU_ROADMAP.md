@@ -989,3 +989,90 @@ Not tested: other GPUs than the RTX 5090, ROCm/Vulkan (no entry point), molecule
 gradient above benzene on the device (n^4 Gamma upload), Stratmann partition, cartesian d, `-qm.xc_ao_threshold 0` with the
 new kernels, multi-GPU. Not implemented: the PT2 intermediates on the device, tau from the occupied orbitals (as for the
 meta-GGAs), FP32 phases.
+
+### 4.4 Open shell, UHF and UKS on the device (Nov 2026, stage 6a)
+
+> 🤖 AI-generated, ⚙️ machine-tested (RTX 5090 only, release build sm_75 PTX run through the JIT). Human production
+> testing pending.
+
+`-method hf|hf-3c|lda|pbe|b3lyp -spin <n> -gpu cuda` (UHF/UKS of [stage 5b](NATIVE_QM_IMPLEMENTATION.md#stage-5b-open-shell-uhf-and-uks-nov-2-2026)).
+Until stage 5b an open shell ran every part on the CPU (counted `qm_uhf`); `QMEngine::gpuRequested()` no longer excludes
+it and the counted key is gone.
+
+| part | device | how |
+|---|---|---|
+| J[Pa + Pb], K[Pa], K[Pb], stored tensor (Q-G1/Q-G2) | yes | `QMGpuJK::buildSpin`, `jkSpinKernel` (`cuda/qm_gpu_jk.cu`): every tensor element read once for the three contractions |
+| same, integral-direct (Q-G3) | yes | `QmGpuDirectJkCuda::buildSpin`: each screened quartet computed once and digested into J (Pa + Pb) and both K (`DevTables::P2/K2`); screen with max(\|Pa\|, \|Pb\|) per shell block (`pmaxSpinKernel`), the expression of the new CPU `qmint::DirectJK::buildSpin` (UHF on the CPU uses it too) |
+| RI-J / RI-JK | yes | two `buildJK` calls as in stage 5b, contractions on the device (`-qm.gpu_ri`); no two-density RI kernel |
+| V_xc,a, V_xc,b, E_xc | yes | `QMGpuXC::vxcSpin` (`densitySpinKernel`); point kernels ONCE in `qm_xc_spin_kernels.h` (host and device; moved unchanged from `qm_xc_spin.cpp`, CPU UKS bitwise as before); no AO screening (as the CPU UKS) |
+| 1e gradient (Q-G8) | yes | existing kernel with P = Pa + Pb and W = W_a + W_b |
+| 2e gradient (Q-G7) | yes | `QMGpuGrad2e::computeUHF`: D = Pt Pt - kx/2 sum_s (Ps Ps + Ps Ps), the expression and order of `qmint::gradientTwoElectronUHF`; screen bound Pt_AB Pt_CD + kx (S_AC S_BD + S_AD S_BC), S = max(\|Pa\|, \|Pb\|); kx = 0 (lda, pbe) goes through `compute(Pt, 0)` |
+| XC gradient incl. grid response | yes | `QMGpuXC::gradientSpin`: basis part per spin, point part of both spins (`gradRowSpinKernel`), Becke weight derivative of e_x + e_c |
+| SCF loop (DIIS/ADIIS, diagonalisation, densities, convergence test) | no | host loop of `runUSCF` with the device builds, counted `qm_uhf_scf` once per engine unless `-qm.gpu_scf off` (then chosen, not a fallback); `-gpu_strict true` exits 3 otherwise |
+| ECP gradient, gCP/SRB/D3 of hf-3c, RI 2-index metric part | no | host, as for RHF (not counted, as for RHF) |
+| f/g shells (def2-TZVP and larger) | no | counted `qm_eri`/`qm_grad`, as for RHF (stage 6b) |
+
+Why no device-resident UHF loop (stage 2 of the task): for the medium case below the host part of the loop (eigensolve
+of two Fock matrices, DIIS, densities) is 0.54 s of 2.39 s (HF) and 0.33 s of 4.81 s (B3LYP); the J/K and V_xc builds
+dominate and run on the device. A resident loop would need a two-spin version of `QMScfAccelerator`'s device inner
+products and of `qm_gpu_scf.cu`; not done.
+
+New seam members (appended, entries renamed with the vtables so an older plugin is refused, not called through a short
+vtable): `QMGpuJK::buildSpin` (`_create_qm_jk_spin`, `_create_qm_eri_jk_spin`, `_create_qm_direct_jk_spin`),
+`QMGpuXCSetup::spin` and `QMGpuXC::vxcSpin/gradientSpin` (`_create_qm_xc_spin`), `QMGpuGrad2e::computeUHF`
+(`_create_qm_grad2e_uhf`). **Trap:** the beta density and exchange pointers of the direct digest share the slots of the
+Q-G2 quartet list in a union. Two appended `DevTables` fields changed the NVVM code (FMA count) of 17 unchanged Q-G2
+`eriThreadKernel` instances (PTX diff of `qm_gpu_eri.cu`) and with it the closed-shell device tensor by 1.7e-13 Eh on
+benzene; with the union the closed-shell energies are bitwise again.
+
+GPU vs CPU (ctest `-L qm_gpu_uhf`, 18 tests, 9 s wall at -j4, 34 s test time; `dump_qm_energy --gpu cuda` against the CPU
+run of the same binary, `-qm.scf_threshold 1e-10`; gradients in Eh/Bohr; only `qm_uhf_scf` may be counted):
+
+| case | \|dE\| GPU - CPU | \|d<S^2>\| | max \|dg\| | GPU vs PySCF E / g |
+|---|---:|---:|---:|---:|
+| UHF CH2 triplet (stored / direct / RI-JK) | 1.4e-14 / 0 / 1.4e-14 | <= 4.4e-16 | <= 3.1e-15 | 2.8e-14 / 1.2e-12 |
+| UHF CH3 (distorted), O2 triplet, K atom | <= 5.7e-14 | <= 8.0e-15 | 4.4e-14 | <= 4.6e-13 / 7.9e-13 |
+| UKS pbe CH2, b3lyp CH3 (stored / direct), lda H2O+ | <= 2.8e-14 | <= 5.3e-15 | <= 3.6e-14 | <= 1.6e-11 / 4.6e-12 |
+| UKS b3lyp NH2 RI-JK, hf-3c CH3 | <= 2.8e-14 | <= 2.2e-15 | 2.6e-14 | 1.5e-11 / - |
+
+FD gate of the device path (4-point central differences of `-gpu cuda` energies, 0.005 Bohr, 3 coordinates each): UHF
+CH2 3.8e-11, UKS pbe CH2 2.4e-11, UKS b3lyp CH3 1.7e-10 Eh/Bohr.
+
+Medium case: caffeine radical cation (24 atoms, charge +1, `-spin 1`, def2-SVP, 246 functions, sg1 for B3LYP,
+`-qm.scf_threshold 1e-8`, CPU 8 threads `-gpu none` (integral-direct, the host does not hold the 29 GB tensor) vs
+`-gpu cuda` (the stored tensor fits the 32 GB card; `-qm.scf_direct on` for the device direct rows); one run each, wall
+time of the process; RTX 5090, 24-core host):
+
+| method | path | iterations | J/K(+V_xc) builds | wall energy | wall energy + gradient (2e / 1e / XC part) |
+|---|---|---:|---:|---:|---:|
+| UHF | CPU direct | 60 | 31.3 s | 32.7 s | 102.1 s (68.4 / 0.58 / - s) |
+| UHF | GPU stored, one pass | 60 | 1.60 s | 3.6 s | 5.6 s (1.91 / 0.076 / - s) |
+| UHF | GPU stored, two passes | 60 | 3.39 s | 5.4 s | - |
+| UHF | GPU direct, one pass | 60 | 5.45 s | 6.4 s | - |
+| UHF | GPU direct, two passes | 60 | 9.99 s | 11.1 s | - |
+| UKS b3lyp | CPU direct | 36 | 32.1 s | 33.6 s | 102.6 s (68.8 / 0.58 / 0.73 s) |
+| UKS b3lyp | GPU stored, one pass | 36 | 4.21 s | 6.1 s | 8.1 s (1.88 / 0.076 / 0.115 s) |
+| UKS b3lyp | GPU stored, two passes | 36 | 5.26 s | 7.0 s | - |
+| UKS b3lyp | GPU direct, one pass | 36 | 6.54 s | - | 9.5 s (1.88 / 0.075 / 0.115 s) |
+| UKS b3lyp | GPU direct, two passes | 36 | 9.31 s | 10.3 s | - |
+
+"Two passes" = `CURCUMA_QM_UHF_TWO_PASS=1` (diagnostic: one single-density `buildJK` per spin, the stage 5b scheme). The
+one-pass build is 2.1x (stored) and 1.8x (direct) faster for the J/K part of UHF; the direct one-pass build computes
+half the quartets (774.9e6 vs 1547.4e6 over the SCF). Differences on caffeine+: GPU stored vs CPU direct |dE| 9.3e-12
+(UHF) / 1.9e-11 (UKS) Eh, |d<S^2>| 3.9e-12 / 5.8e-13, max |dg| 2.3e-11 / 2.9e-11 Eh/Bohr (the CPU direct screen);
+GPU direct vs CPU direct UHF |dE| 0 in this run (bits schedule-dependent), UKS 1.4e-12 Eh, max |dg| 2.5e-11; one vs two
+passes <= 1.1e-12 Eh. Total speed-up energy + gradient: 18x (UHF), 13x (UKS b3lyp).
+
+Closed shell unchanged: 20 dumps (hf/b3lyp/pbe/lda/hf-3c/mp2, stored, direct, RI-JK, water/methanol/benzene, energies and
+gradients, CPU and `-gpu cuda`, 4 threads) against the binary of a4a23b5e: every CPU dump md5-identical, every GPU energy
+bit-identical; GPU gradients differ by <= 4.4e-14 Eh/Bohr, the size of their own run-to-run spread (atomics; 2.8e-14 on
+benzene with the old binary); integral-direct energies at 4 threads differ run to run in both binaries (host
+`omp critical` order, device atomics), CPU direct at 1 thread is md5-identical. `ctest -L qm_` 978/978 passed.
+
+Not tested: other GPUs than the RTX 5090, multi-GPU, ROCm and Vulkan (no open-shell entry points, untouched), molecules
+above caffeine+, `-md` with `-gpu cuda` on an open shell (`-opt` only one smoke run: b3lyp CH3 radical, sg1, converged in
+13 steps, last gradient norm 1.5e-5 Eh/Bohr; no ctest), f/g bases on
+the device (fallback), ECP open shells on the device (the ECP gradient stays host), `-qm.gpu_eri_precision` FP32 phases
+(the open-shell builds are FP64 only), `-qm.ri_mixed_precision` and the low-memory RI modes with UHF, the Stratmann
+partition. Not implemented: device-resident UHF/UKS loop, two-density RI-JK kernel, AO screening on the UKS path (CPU and
+device), incremental (dP) direct builds for UHF.

@@ -12,6 +12,8 @@
  * "grad <atom> gx gy gz" in Eh/Bohr (the EnergyCalculator contract is Eh/Angstrom; converted here with units.h).
  * --charge Q / --spin S (Nov 2026, stage 5b, test_cases/qm_uhf): molecular charge and unpaired electrons; an
  * unrestricted run also prints "s2 <S^2>".
+ * --gpu NAME (Nov 2026, stage 6a, test_cases/qm_uhf GPU tests): top-level "gpu" of the config (cuda, ...); every
+ * counted GPU fallback of the run is printed at the end as "fallback <category> <count>".
  *
  * VALUE is parsed as JSON when possible (true, 1e-10, ...), else taken as a string.
  *
@@ -19,6 +21,7 @@
  */
 #include "src/core/curcuma_logger.h"
 #include "src/core/energycalculator.h"
+#include "src/core/gpu_fallback.h"
 #include "src/core/molecule.h"
 #include "src/core/units.h"
 
@@ -38,6 +41,7 @@ int main(int argc, char** argv)
     bool gradient = false;
     int charge = 0, spin = 0;
     bool set_charge = false, set_spin = false;
+    std::string gpu;
     json qm = { { "scf_threshold", 1e-10 }, { "scf_max_iterations", 200 } };
     for (int i = 3; i < argc; ++i) {
         const std::string a = argv[i];
@@ -55,12 +59,15 @@ int main(int argc, char** argv)
         } else if (a == "--spin" && i + 1 < argc) {
             spin = std::stoi(argv[++i]);
             set_spin = true;
+        } else if (a == "--gpu" && i + 1 < argc) {
+            gpu = argv[++i];
         } else if (a == "--gradient") {
             gradient = true;
         }
     }
     CurcumaLogger::set_verbosity(verbosity);
     json config = { { "verbosity", verbosity }, { "threads", threads }, { "qm", qm } };
+    if (!gpu.empty()) config["gpu"] = gpu;
     curcuma::Molecule mol(xyz);
     if (set_charge) mol.setCharge(charge);  // only when given: the xyz comment may carry them
     if (set_spin) mol.setSpin(spin);
@@ -81,5 +88,6 @@ int main(int argc, char** argv)
         for (int i = 0; i < g.rows(); ++i)
             std::printf("grad %d %.17g %.17g %.17g\n", i, g(i, 0) * f, g(i, 1) * f, g(i, 2) * f);
     }
+    for (const auto& c : curcuma::gpuFallbackCounts()) std::printf("fallback %s %d\n", c.first.c_str(), c.second);
     return 0;
 }

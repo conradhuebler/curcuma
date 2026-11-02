@@ -16,8 +16,11 @@ Checks (--check):
   direct   -qm.scf_direct on equals the stored-tensor energy of a case to 1e-9 Eh (and gradient to 1e-8 Eh/Bohr)
   reject   open-shell input to a closed-shell-only method or a contradicting spin state is an error with a message
            (--case mp2|ri-mp2|ccsd|lmp2|b2plyp|tpss|scan|parity|rohf)
-  gpu      curcuma -sp -gpu cuda on an open-shell case finishes with the CPU energy (1e-10 Eh) and reports the counted
-           fallback qm_uhf; exit 77 (skip) without a usable CUDA plugin/device
+  gpu      stage 6a: dump_qm_energy --gpu cuda against the CPU run of the same case: energy |dE| <= 1e-9 Eh, <S^2>
+           1e-8, gradient max |dg| <= --gtol; the only counted fallback allowed is qm_uhf_scf (host SCF loop), so J/K,
+           V_xc and every gradient part ran on the device; --extra-qm adds -qm settings (e.g. scf_direct on)
+  --gpu    (with ref / fd) run the device path (dump_qm_energy --gpu cuda) and require the same fallback rule;
+           every GPU check exits 77 (skip) without a CUDA plugin next to the binary or without a CUDA device
   opt      curcuma -opt of the distorted CH3 radical with hf: exit 0, energy below the start, last gradient norm <= 1e-4
            Eh/Bohr, planar minimum (C within 0.01 A of the H3 plane)
 
@@ -42,8 +45,31 @@ def env_embedded():
     return e
 
 
-def run_dump(dump, xyz, method, qm, charge=0, spin=0, gradient=False, threads=1, expect_fail=False):
+GPU = {"on": False, "fallbacks": {}}
+ALLOWED_GPU_FALLBACKS = {"qm_uhf_scf"}  # the UHF/UKS SCF loop itself stays on the host (stage 6a)
+
+
+def gpu_available(a):
+    """CUDA plugin next to curcuma (CURCUMA_PLUGIN_DIR) and a device visible to nvidia-smi; else exit 77."""
+    pdir = a.plugin_dir or (os.path.dirname(a.curcuma) if a.curcuma else "")
+    ok = bool(pdir) and os.path.exists(os.path.join(pdir, "libcurcuma_cuda.so"))
+    if ok:
+        try:
+            ok = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True).returncode == 0
+        except OSError:
+            ok = False
+    if not ok:
+        print("skip: no CUDA plugin in %r or no CUDA device" % pdir)
+        sys.exit(77)
+    os.environ["CURCUMA_PLUGIN_DIR"] = pdir
+
+
+def run_dump(dump, xyz, method, qm, charge=0, spin=0, gradient=False, threads=1, expect_fail=False, gpu=None):
     cmd = [dump, xyz, method, "--charge", str(charge), "--spin", str(spin), "--threads", str(threads)]
+    if gpu is None:
+        gpu = GPU["on"]
+    if gpu:
+        cmd += ["--gpu", "cuda"]
     for k, v in qm.items():
         cmd += ["--qm", k, json.dumps(v) if not isinstance(v, str) else v]
     if gradient:
@@ -57,6 +83,9 @@ def run_dump(dump, xyz, method, qm, charge=0, spin=0, gradient=False, threads=1,
         print(out[-4000:])
         raise SystemExit("dump_qm_energy failed: " + " ".join(cmd))
     g = [[float(x) for x in l.split()[2:5]] for l in out.splitlines() if l.startswith("grad ")]
+    if gpu:
+        for fb in re.finditer(r"^fallback (\S+) (\d+)$", out, re.M):
+            GPU["fallbacks"][fb.group(1)] = GPU["fallbacks"].get(fb.group(1), 0) + int(fb.group(2))
     s2 = re.search(r"^s2 (\S+)$", out, re.M)
     return float(m.group(1)), g, (float(s2.group(1)) if s2 else None)
 
@@ -151,6 +180,8 @@ def check_ref(a):
         print("  gradient max |g - g_PySCF| = %.2e Eh/Bohr (limit %.1e)" % (dg, a.gtol))
         if len(g) != len(P["gradient"]) or dg > a.gtol:
             ok = False
+    if GPU["on"]:
+        check_gpu_fallbacks()
     if not ok:
         raise SystemExit("FAILED: %s outside the tolerance" % a.case)
 
@@ -181,7 +212,9 @@ def check_fd(a):
             diff = g[at][k] - fd
             worst = max(worst, abs(diff))
             print("%-30s atom %d %s analytic %+.10f FD %+.10f diff %+.2e" % (a.case, at, ax, g[at][k], fd, diff))
-    print("max |analytic - FD| = %.2e Eh/Bohr (limit %.1e)" % (worst, a.gtol))
+    print("max |analytic - FD| = %.2e Eh/Bohr (limit %.1e)%s" % (worst, a.gtol, " (device path)" if GPU["on"] else ""))
+    if GPU["on"]:
+        check_gpu_fallbacks()
     if worst > a.gtol:
         raise SystemExit("FAILED: FD gate")
 
@@ -243,32 +276,32 @@ def cli(curcuma, args, cwd):
     return p.returncode, re.sub(r"\x1b\[[0-9;]*m", "", p.stdout + p.stderr)
 
 
-def total_energy(out):
-    m = re.findall(r"total \S+ energy:\s+(-?\d+\.\d+)", out)
-    return float(m[-1]) if m else None
+def check_gpu_fallbacks():
+    bad = {k: v for k, v in GPU["fallbacks"].items() if k not in ALLOWED_GPU_FALLBACKS}
+    print("counted GPU fallbacks: %s" % (GPU["fallbacks"] or "none"))
+    if bad:
+        raise SystemExit("FAILED: device path fell back to the CPU: %s" % bad)
 
 
 def check_gpu(a):
     ref = load_case(a)
     xyz = os.path.join(TC, ref["xyz"])
-    args = ["-sp", xyz, "-method", ref["method"], "-no_bmt", "-verbosity", "1", "-spin", str(ref["spin"]),
-            "-charge", str(ref["charge"])]
-    for k, v in ref["qm"].items():
-        args += ["-qm." + k, str(v)]
-    with tempfile.TemporaryDirectory() as d:
-        rc, out = cli(a.curcuma, args + ["-gpu", "cuda"], d)
-        if "no GPU plugin" in out or ("plugin" in out and "not found" in out) or "no CUDA device" in out:
-            print(out[-2000:])
-            print("skip: no usable CUDA plugin/device")
-            sys.exit(77)
-        rc0, out0 = cli(a.curcuma, args, d)
-    e, e0 = total_energy(out), total_energy(out0)
-    print(out[-2500:])
-    if rc != 0 or e is None or e0 is None:
-        raise SystemExit("FAILED: -gpu cuda open-shell run did not finish (rc %d)" % rc)
-    print("CPU %.10f  -gpu cuda %.10f  diff %+.1e; fallback qm_uhf reported: %s" % (e0, e, e - e0, "qm_uhf" in out))
-    if abs(e - e0) > 1e-10 or "qm_uhf" not in out:
-        raise SystemExit("FAILED: open-shell -gpu run must equal the CPU and report the qm_uhf fallback")
+    qm = dict(ref["qm"], scf_threshold=1e-10)
+    for kv in a.extra_qm:
+        k, v = kv.split("=", 1)
+        qm[k] = json.loads(v) if v[:1].isdigit() or v in ("true", "false") else v
+    e0, g0, s0 = run_dump(a.dump, xyz, ref["method"], qm, ref["charge"], ref["spin"], ref["gradient"], a.threads, gpu=False)
+    e1, g1, s1 = run_dump(a.dump, xyz, ref["method"], qm, ref["charge"], ref["spin"], ref["gradient"], a.threads, gpu=True)
+    dg = maxdiff(g0, g1) if ref["gradient"] else 0.0
+    ds = abs(s1 - s0) if s0 is not None and s1 is not None else float("nan")
+    print("%-30s %s CPU %.12f GPU %.12f diff %+.2e  <S^2> diff %.1e  gradient max |GPU - CPU| %.2e Eh/Bohr" % (
+        a.case, " ".join(a.extra_qm), e0, e1, e1 - e0, ds, dg))
+    if "pyscf" in ref:
+        print("  GPU vs PySCF %+.2e Eh%s" % (e1 - ref["pyscf"]["energy"],
+              ("  gradient max |GPU - PySCF| %.2e" % maxdiff(g1, ref["pyscf"]["gradient"])) if ref["gradient"] else ""))
+    check_gpu_fallbacks()
+    if abs(e1 - e0) > 1e-9 or not ds <= 1e-8 or dg > a.gtol or len(g0) != len(g1):
+        raise SystemExit("FAILED: open-shell GPU result differs from the CPU")
 
 
 def check_opt(a):
@@ -311,7 +344,13 @@ def main():
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--coords", nargs="*", default=["0:x", "1:y", "2:z"])
     ap.add_argument("--reference", default=os.path.join(HERE, "reference.json"))
+    ap.add_argument("--gpu", action="store_true", help="ref/fd: run the CUDA path (stage 6a)")
+    ap.add_argument("--plugin-dir", default="", help="directory of libcurcuma_cuda.so (default: that of --curcuma)")
+    ap.add_argument("--extra-qm", nargs="*", default=[], help="gpu: extra -qm settings KEY=VALUE")
     a = ap.parse_args()
+    if a.gpu or a.check == "gpu":
+        gpu_available(a)
+        GPU["on"] = a.gpu
     {"kernel": check_kernel, "ref": check_ref, "fd": check_fd, "rhf": check_rhf, "direct": check_direct,
      "reject": check_reject, "gpu": check_gpu, "opt": check_opt}[a.check](a)
 

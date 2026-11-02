@@ -61,6 +61,27 @@ __global__ void pmaxKernel(const double* __restrict__ P, const int* __restrict__
     atomicMax(pall_bits, (unsigned long long)__double_as_longlong(m));
 }
 
+/// Stage 6a (open shell, Claude Generated Nov 2026): Pmax(A,B) = max(|Pa|, |Pb|) over the shell block, the screen of
+/// qmint::DirectJK::buildSpin (a superset of the screen of either density alone); Pall as in pmaxKernel.
+__global__ void pmaxSpinKernel(const double* __restrict__ Pa, const double* __restrict__ Pb, const int* __restrict__ first,
+                               const int* __restrict__ width, int ns, int n, double* __restrict__ Pmax,
+                               unsigned long long* __restrict__ pall_bits)
+{
+    const long long k = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= (long long)ns * ns) return;
+    const int A = (int)(k / ns), B = (int)(k % ns);
+    if (A > B) return;
+    double m = 0.0;
+    for (int a = 0; a < width[A]; ++a)
+        for (int b = 0; b < width[B]; ++b) {
+            const size_t e = (size_t)(first[A] + a) * n + first[B] + b;
+            m = fmax(m, fmax(fabs(Pa[e]), fabs(Pb[e])));
+        }
+    Pmax[(size_t)A * ns + B] = m;
+    Pmax[(size_t)B * ns + A] = m;
+    atomicMax(pall_bits, (unsigned long long)__double_as_longlong(m));
+}
+
 /// Q-G4: J = (Jt + Jt^T)/2, K = (Kt + Kt^T)/2 into separate output buffers (device side of the
 /// host loop in QmGpuDirectJkCuda::build). Claude Generated (Oct 2026).
 __global__ void symmetriseKernel(const double* __restrict__ Jt, const double* __restrict__ Kt,
@@ -351,6 +372,8 @@ public:
             && alloc(&m_counter, 1) && alloc(&m_pall, 1);
         if (!ok) { why = "device allocation / upload for the direct J/K failed"; return false; }
         m_d.P = m_P;
+        m_d.P2 = nullptr;  // stage 6a: the slots of the (unused) Q-G2 quartet list; nullptr = closed shell
+        m_d.K2 = nullptr;
         m_d.Pmax = m_Pmax;
         m_d.J = m_J;
         m_d.K = m_K;
@@ -394,6 +417,48 @@ public:
         m_last_quartets = (long long)cnt;
         ++m_builds;
         if (m_fp32) ++m_fp32_builds;
+        m_kernel_ms += kms;
+        m_total_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        return true;
+    }
+
+    // Stage 6a (Claude Generated, Nov 2026): J[Pa + Pb], K[Pa], K[Pb] from one quartet loop (see QMGpuJK::buildSpin).
+    // Every screened quartet is computed once and digested into J with Pt and into both K; the screen takes
+    // max(|Pa|, |Pb|) per shell block (pmaxSpinKernel). FP64 only; symmetrised on the host as build().
+    bool buildSpin(const double* Pa, const double* Pb, double* J, double* Ka, double* Kb) override
+    {
+        if (m_fp32) return false;
+        const auto t0 = std::chrono::steady_clock::now();
+        const size_t n2 = (size_t)m_n * m_n;
+        if (!m_Pb && !(alloc(&m_Pb, n2) && alloc(&m_Kb, n2))) return false;
+        if (cudaMemcpy(m_P, Pa, n2 * sizeof(double), cudaMemcpyHostToDevice) != cudaSuccess
+            || cudaMemcpy(m_Pb, Pb, n2 * sizeof(double), cudaMemcpyHostToDevice) != cudaSuccess)
+            return false;
+        m_d.P2 = m_Pb;
+        m_d.K2 = m_Kb;
+        float kms = 0.0f;
+        const bool ok = runKernels(kms);
+        m_d.P2 = nullptr;
+        m_d.K2 = nullptr;
+        if (!ok) return false;
+        unsigned long long cnt = 0;
+        if (cudaMemcpy(J, m_J, n2 * sizeof(double), cudaMemcpyDeviceToHost) != cudaSuccess
+            || cudaMemcpy(Ka, m_K, n2 * sizeof(double), cudaMemcpyDeviceToHost) != cudaSuccess
+            || cudaMemcpy(Kb, m_Kb, n2 * sizeof(double), cudaMemcpyDeviceToHost) != cudaSuccess
+            || cudaMemcpy(&cnt, m_counter, sizeof cnt, cudaMemcpyDeviceToHost) != cudaSuccess)
+            return false;
+        const int n = m_n;
+        for (int a = 0; a < n; ++a)
+            for (int b = a; b < n; ++b) {
+                const size_t ab = (size_t)a * n + b, ba = (size_t)b * n + a;
+                const double js = 0.5 * (J[ab] + J[ba]), kas = 0.5 * (Ka[ab] + Ka[ba]), kbs = 0.5 * (Kb[ab] + Kb[ba]);
+                J[ab] = J[ba] = js;
+                Ka[ab] = Ka[ba] = kas;
+                Kb[ab] = Kb[ba] = kbs;
+            }
+        m_last_quartets = (long long)cnt;
+        ++m_builds;
+        ++m_spin_builds;
         m_kernel_ms += kms;
         m_total_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         return true;
@@ -455,11 +520,15 @@ public:
         const size_t n2 = (size_t)m_n * m_n;
         cudaMemset(m_J, 0, n2 * sizeof(double));
         cudaMemset(m_K, 0, n2 * sizeof(double));
+        if (m_d.K2) cudaMemset(m_d.K2, 0, n2 * sizeof(double));  // stage 6a: beta exchange
         cudaMemset(m_counter, 0, sizeof(unsigned long long));
         cudaMemset(m_pall, 0, sizeof(unsigned long long));
         cudaEventRecord(m_e0);
         const long long nsn = (long long)m_ns * m_ns;
-        pmaxKernel<<<(unsigned)((nsn + 127) / 128), 128>>>(m_P, m_first, m_width, m_ns, m_n, m_Pmax, m_pall);
+        if (m_d.P2)
+            pmaxSpinKernel<<<(unsigned)((nsn + 127) / 128), 128>>>(m_P, m_d.P2, m_first, m_width, m_ns, m_n, m_Pmax, m_pall);
+        else
+            pmaxKernel<<<(unsigned)((nsn + 127) / 128), 128>>>(m_P, m_first, m_width, m_ns, m_n, m_Pmax, m_pall);
         unsigned long long pall_bits = 0;
         if (cudaMemcpy(&pall_bits, m_pall, sizeof pall_bits, cudaMemcpyDeviceToHost) != cudaSuccess) return false;
         double Pall;
@@ -595,6 +664,7 @@ public:
                       "launched %lld quartets, device memory %.1f MB",
                       m_builds, m_kernel_ms, m_total_ms, m_rows_ms, m_launched, m_bytes / 1.0e6);
         std::string out = buf;
+        if (m_spin_builds > 0) out += ", " + std::to_string(m_spin_builds) + " of them two-density (UHF) builds";
         if (m_fp32_builds > 0 || m_md32_tried) {
             std::snprintf(buf, sizeof buf, ", %d FP32 builds%s", m_fp32_builds,
                           m_md32_ok ? "" : (" (FP32 unavailable: " + m_md32_why + ")").c_str());
@@ -711,6 +781,8 @@ private:
     int* m_width = nullptr;
     int* m_first = nullptr;
     double *m_P = nullptr, *m_J = nullptr, *m_K = nullptr, *m_Pmax = nullptr;
+    double *m_Pb = nullptr, *m_Kb = nullptr;  // stage 6a: beta density, beta exchange
+    int m_spin_builds = 0;
     unsigned long long* m_counter = nullptr;
     cudaStream_t m_streams[kStreams] = {};
     cudaEvent_t m_e0 = nullptr, m_e1 = nullptr;
@@ -729,7 +801,7 @@ public:
 
 // Integral-direct J/K builder (QMGpuJK*), or nullptr with a reason in `why`. Device memory:
 // the shell/pair tables and 4 n^2 + nshell^2 doubles; no n^4 tensor. Claude Generated (Q-G3).
-extern "C" void* curcuma_cuda_create_qm_direct_jk(const qmint::QMGpuEriTables* t, int device, char* why, int whylen)
+extern "C" void* curcuma_cuda_create_qm_direct_jk_spin(const qmint::QMGpuEriTables* t, int device, char* why, int whylen)
 {
     if (device >= 0 && cudaSetDevice(device) != cudaSuccess) { setWhy(why, whylen, "cudaSetDevice failed"); return nullptr; }
     cudaFree(nullptr);  // context creation

@@ -49,7 +49,7 @@
 
 // Build the ERI tensor on the device and return a J/K builder that owns it (QMGpuJK*), or
 // nullptr with a reason in `why` (unsupported basis, out of device memory, CUDA error).
-extern "C" void* curcuma_cuda_create_qm_eri_jk(const qmint::QMGpuEriTables* t, int device, char* why, int whylen)
+extern "C" void* curcuma_cuda_create_qm_eri_jk_spin(const qmint::QMGpuEriTables* t, int device, char* why, int whylen)
 {
     using clk = std::chrono::steady_clock;
     auto ms = [](clk::time_point a, clk::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); };

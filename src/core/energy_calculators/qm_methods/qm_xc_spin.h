@@ -23,7 +23,8 @@
  * Not spin-polarised (open shell rejected with a message): the meta-GGAs TPSS/SCAN/B95 and P86 (double hybrids are
  * closed-shell only anyway).
  *
- * CPU only, no AO screening (every block uses every function; -qm.xc_ao_threshold is ignored by the open-shell path).
+ * No AO screening (every block uses every function; -qm.xc_ao_threshold is ignored by the open-shell path). The point
+ * kernels live in qm_xc_spin_kernels.h (host and device since stage 6a; the CUDA path is QMGpuXC::vxcSpin/gradientSpin).
  * Claude Generated (Nov 2026, stage 5b). AI-generated, machine-tested only.
  *
  * This program is free software under GPL-3.0

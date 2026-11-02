@@ -2369,13 +2369,20 @@ DirectJK::DirectJK(const std::vector<GTO::Orbital>& basis, double screening, con
 
 int DirectJK::n() const { return m_impl ? m_impl->out.n : 0; }
 
-long DirectJK::build(const Matrix& P, Matrix& J, Matrix& K, int threads, double thr_override, bool prim_density) const
+template <bool SPIN>
+long DirectJK::buildImpl(const Matrix& P, const Matrix* P2, Matrix& J, Matrix& K, Matrix* K2, int threads,
+                         double thr_override, bool prim_density) const
 {
     const int n = this->n();
     J = Matrix::Zero(n, n);
     K = Matrix::Zero(n, n);
+    if constexpr (SPIN) *K2 = Matrix::Zero(n, n);
     if (!m_impl || n == 0) return 0;
     const Impl& I = *m_impl;
+    // Stage 6a (open shell): J from PJ = P + P2, K from P, K2 from P2; screen with max(|P|, |P2|) per shell block
+    Matrix PJsum;
+    if constexpr (SPIN) PJsum = P + *P2;
+    const Matrix& PJ = SPIN ? PJsum : P;
     I.setup(threads);
     const int ns = (int)I.sh.size();
     const int np = (int)I.pairs.size();
@@ -2385,7 +2392,9 @@ long DirectJK::build(const Matrix& P, Matrix& J, Matrix& K, int threads, double 
     Eigen::MatrixXd Pmax = Eigen::MatrixXd::Zero(ns, ns);
     for (int A = 0; A < ns; ++A)
         for (int B = A; B < ns; ++B) {
-            const double m = P.block(o.first[A], o.first[B], o.width[A], o.width[B]).cwiseAbs().maxCoeff();
+            double m = P.block(o.first[A], o.first[B], o.width[A], o.width[B]).cwiseAbs().maxCoeff();
+            if constexpr (SPIN)
+                m = std::max(m, P2->block(o.first[A], o.first[B], o.width[A], o.width[B]).cwiseAbs().maxCoeff());
             Pmax(A, B) = Pmax(B, A) = m;
         }
     const double Pall = Pmax.maxCoeff();
@@ -2398,6 +2407,8 @@ long DirectJK::build(const Matrix& P, Matrix& J, Matrix& K, int threads, double 
 #endif
     {
         Matrix Jt = Matrix::Zero(n, n), Kt = Matrix::Zero(n, n);
+        Matrix K2t;
+        if constexpr (SPIN) K2t = Matrix::Zero(n, n);
         std::vector<double> buf, R, tmp;
         MDScratch mw;
         // Canonical quartets {i, j} found over the pairs sorted by Schwarz factor
@@ -2457,7 +2468,7 @@ long DirectJK::build(const Matrix& P, Matrix& J, Matrix& K, int threads, double 
                     const int ia = oA + a;
                     for (int b = 0; b < d[1]; ++b) {
                         const int ib = oB + b;
-                        const double Pab = P(ia, ib);
+                        const double Pab = PJ(ia, ib);
                         double jab = 0.0;
                         for (int c = 0; c < d[2]; ++c) {
                             const int ic = oC + c;
@@ -2468,7 +2479,7 @@ long DirectJK::build(const Matrix& P, Matrix& J, Matrix& K, int threads, double 
                                 const double w = scale * row[e];
                                 if (w == 0.0) continue;
                                 const int id = oD + e;
-                                jab += w * P(ic, id);
+                                jab += w * PJ(ic, id);
                                 Jt(ic, id) += 4.0 * w * Pab;
                                 kac += w * P(ib, id);
                                 kbc += w * P(ia, id);
@@ -2477,6 +2488,22 @@ long DirectJK::build(const Matrix& P, Matrix& J, Matrix& K, int threads, double 
                             }
                             Kt(ia, ic) += 2.0 * kac;
                             Kt(ib, ic) += 2.0 * kbc;
+                            if constexpr (SPIN) {  // the same digest of the beta density into K2
+                                const Matrix& Q = *P2;
+                                const double Qac = Q(ia, ic), Qbc = Q(ib, ic);
+                                double qac = 0.0, qbc = 0.0;
+                                for (int e = 0; e < d[3]; ++e) {
+                                    const double w = scale * row[e];
+                                    if (w == 0.0) continue;
+                                    const int id = oD + e;
+                                    qac += w * Q(ib, id);
+                                    qbc += w * Q(ia, id);
+                                    K2t(ib, id) += 2.0 * w * Qac;
+                                    K2t(ia, id) += 2.0 * w * Qbc;
+                                }
+                                K2t(ia, ic) += 2.0 * qac;
+                                K2t(ib, ic) += 2.0 * qbc;
+                            }
                         }
                         Jt(ia, ib) += 4.0 * jab;
                     }
@@ -2489,6 +2516,7 @@ long DirectJK::build(const Matrix& P, Matrix& J, Matrix& K, int threads, double 
         {
             J += Jt;
             K += Kt;
+            if constexpr (SPIN) *K2 += K2t;
         }
     }
     (void)threads;
@@ -2496,7 +2524,23 @@ long DirectJK::build(const Matrix& P, Matrix& J, Matrix& K, int threads, double 
     const Matrix Ksym = 0.5 * (K + K.transpose());
     J = Jsym;
     K = Ksym;
+    if constexpr (SPIN) {
+        const Matrix K2sym = 0.5 * (*K2 + K2->transpose());
+        *K2 = K2sym;
+    }
     return computed;
+}
+
+long DirectJK::build(const Matrix& P, Matrix& J, Matrix& K, int threads, double thr_override, bool prim_density) const
+{
+    return buildImpl<false>(P, nullptr, J, K, nullptr, threads, thr_override, prim_density);
+}
+
+// Stage 6a (Claude Generated, Nov 2026): open-shell J/K from one quartet loop (device: QMGpuJK::buildSpin).
+long DirectJK::buildSpin(const Matrix& Pa, const Matrix& Pb, Matrix& J, Matrix& Ka, Matrix& Kb, int threads,
+                         double thr_override, bool prim_density) const
+{
+    return buildImpl<true>(Pa, &Pb, J, Ka, &Kb, threads, thr_override, prim_density);
 }
 
 // J_munu = sum_{lam,sig} (mu nu | lam sig) P_lamsig: with the tensor stored as an

@@ -32,6 +32,8 @@ public:
     bool build(const double* P, double* J, double* K) override;
     /// Q-G4: P, J, K on the device (resident SCF loop); synchronous.
     bool buildDevice(const double* dP, double* dJ, double* dK) override;
+    /// Stage 6a: J[Pa + Pb], K[Pa], K[Pb] in one pass over the tensor (host arrays).
+    bool buildSpin(const double* Pa, const double* Pb, double* J, double* Ka, double* Kb) override;
     std::string name() const override { return m_name; }
     int n() const override { return m_n; }
     bool downloadERI(double* host) const override;
@@ -45,6 +47,7 @@ private:
     void release();
     int m_n;
     double *m_E = nullptr, *m_P = nullptr, *m_J = nullptr, *m_K = nullptr;
+    double* m_S = nullptr;  ///< stage 6a: Pa, Pb, Ka, Kb (4 n^2), allocated by the first buildSpin()
     std::string m_name = "cuda";
     std::string m_stats;
 };

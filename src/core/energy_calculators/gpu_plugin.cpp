@@ -196,13 +196,15 @@ std::unique_ptr<ComputationalMethod> createGfnff(const std::string& backend, con
     return std::unique_ptr<ComputationalMethod>(method);
 }
 
+// _spin (Nov 2026, stage 6a): QMGpuJK gained buildSpin(); the three J/K entries were renamed with the vtable, so an
+// older plugin is refused (counted CPU fallback) instead of being called through a shorter vtable.
 std::unique_ptr<qmint::QMGpuJK> createQmJK(const std::string& backend, const double* eri, int n, int device)
 {
     void* handle = pluginHandle(backend, /*quiet=*/true);
     if (!handle)
         return nullptr;
     using create_fn = void* (*)(const double*, int, int);
-    create_fn fn = resolveSymbol<create_fn>(handle, "curcuma_" + backend + "_create_qm_jk");
+    create_fn fn = resolveSymbol<create_fn>(handle, "curcuma_" + backend + "_create_qm_jk_spin");
     if (!fn)
         return nullptr;
     return std::unique_ptr<qmint::QMGpuJK>(static_cast<qmint::QMGpuJK*>(fn(eri, n, device)));
@@ -218,9 +220,9 @@ std::unique_ptr<qmint::QMGpuJK> createQmEriJK(const std::string& backend, const 
         return nullptr;
     }
     using create_fn = void* (*)(const qmint::QMGpuEriTables*, int, char*, int);
-    create_fn fn = resolveSymbol<create_fn>(handle, "curcuma_" + backend + "_create_qm_eri_jk");
+    create_fn fn = resolveSymbol<create_fn>(handle, "curcuma_" + backend + "_create_qm_eri_jk_spin");
     if (!fn) {
-        why = "plugin has no entry point curcuma_" + backend + "_create_qm_eri_jk";
+        why = "plugin has no entry point curcuma_" + backend + "_create_qm_eri_jk_spin";
         return nullptr;
     }
     char buf[512] = { 0 };
@@ -239,9 +241,9 @@ std::unique_ptr<qmint::QMGpuJK> createQmDirectJK(const std::string& backend, con
         return nullptr;
     }
     using create_fn = void* (*)(const qmint::QMGpuEriTables*, int, char*, int);
-    create_fn fn = resolveSymbol<create_fn>(handle, "curcuma_" + backend + "_create_qm_direct_jk");
+    create_fn fn = resolveSymbol<create_fn>(handle, "curcuma_" + backend + "_create_qm_direct_jk_spin");
     if (!fn) {
-        why = "plugin has no entry point curcuma_" + backend + "_create_qm_direct_jk";
+        why = "plugin has no entry point curcuma_" + backend + "_create_qm_direct_jk_spin";
         return nullptr;
     }
     char buf[512] = { 0 };
@@ -283,9 +285,10 @@ std::unique_ptr<qmint::QMGpuGrad2e> createQmGrad2e(const std::string& backend, c
     }
     using create_fn = void* (*)(const qmint::QMGpuEriTables*, const qmint::QMGpuGradExtra*, int, char*, int);
     // _kx (Oct 2026, GPU KS-DFT): compute() gained the exchange weight kx; renamed with the vtable (see createQmScf).
-    create_fn fn = resolveSymbol<create_fn>(handle, "curcuma_" + backend + "_create_qm_grad2e_kx");
+    // _uhf (Nov 2026, stage 6a): computeUHF() appended; renamed again with the vtable.
+    create_fn fn = resolveSymbol<create_fn>(handle, "curcuma_" + backend + "_create_qm_grad2e_uhf");
     if (!fn) {
-        why = "plugin has no entry point curcuma_" + backend + "_create_qm_grad2e_kx";
+        why = "plugin has no entry point curcuma_" + backend + "_create_qm_grad2e_uhf";
         return nullptr;
     }
     char buf[512] = { 0 };
@@ -304,9 +307,10 @@ std::unique_ptr<qmint::QMGpuXC> createQmXC(const std::string& backend, const qmi
         return nullptr;
     }
     using create_fn = void* (*)(const qmint::QMGpuXCSetup*, int, char*, int);
-    create_fn fn = resolveSymbol<create_fn>(handle, "curcuma_" + backend + "_create_qm_xc_fxc");
+    // _spin (Nov 2026, stage 6a): QMGpuXCSetup::spin appended, vtable gained vxcSpin/gradientSpin; renamed with them
+    create_fn fn = resolveSymbol<create_fn>(handle, "curcuma_" + backend + "_create_qm_xc_spin");
     if (!fn) {
-        why = "plugin has no entry point curcuma_" + backend + "_create_qm_xc_fxc";
+        why = "plugin has no entry point curcuma_" + backend + "_create_qm_xc_spin";
         return nullptr;
     }
     char buf[512] = { 0 };

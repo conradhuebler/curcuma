@@ -13,7 +13,9 @@
  * SCF driver (runUSCF): the RHF loop's building blocks (qm_scf_internal.h): Pulay DIIS / ADIIS with ONE coefficient
  * vector for both spins, error vector (e_a, e_b), e_s = X^T (F_s P_s S - S P_s F_s) X; the convergence test of
  * -qm.scf_convergence auto with |dE|, ||(e_a, e_b)||_F and ||(dP_a, dP_b)||_F. Every Fock build is a full J/K build
- * (no incremental integral-direct builds, no verified stop, no device loop: the open-shell path is CPU only).
+ * (no incremental integral-direct builds, no verified stop). Stage 6a (Nov 2026, -gpu cuda): J/K (one two-density
+ * pass, QMGpuJK::buildSpin), V_xc (QMGpuXC::vxcSpin) and the gradient parts run on the device; the loop itself (DIIS,
+ * diagonalisation, densities) stays on the host and is counted as GPU fallback qm_uhf_scf.
  *
  * Spin contamination (Szabo-Ostlund eq. 3.226 in this notation):
  *   <S^2> = S_z (S_z + 1) + n_beta - Tr(P_a S P_b S),   S_z = (n_alpha - n_beta) / 2.
@@ -32,7 +34,11 @@
 #include "qm_ri.h"
 #include "qm_scf_internal.h"
 
+#include "qm_gpu_grad_backend.h"
+#include "qm_gpu_xc_backend.h"
+
 #include "src/core/curcuma_logger.h"
+#include "src/core/energy_calculators/gpu_plugin.h"
 #include "src/core/gpu_fallback.h"
 #include "src/core/units.h"
 
@@ -43,6 +49,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 #include <string>
 #include <vector>
@@ -175,11 +182,6 @@ bool QMEngine::resolveSpinState()
     m_open_shell = open;
     m_nalpha = static_cast<int>((N + s) / 2);
     m_nbeta = static_cast<int>((N - s) / 2);
-    if (open && !(m_gpu == "none" || m_gpu == "cpu" || m_gpu.empty()) && !m_uhf_gpu_reported) {
-        // GPU stage 5b: no open-shell device path; every part runs on the CPU (gpuRequested() is false), counted once
-        m_uhf_gpu_reported = true;
-        curcuma::reportGpuFallback("qm_uhf", "open-shell UHF/UKS has no device path; SCF, J/K, XC and gradient on the CPU");
-    }
     return true;
 }
 
@@ -195,19 +197,100 @@ void QMEngine::buildJKSpin(const Matrix& Pa, const Matrix& Pb, Matrix& J, Matrix
         Kb = Ka;
         return;
     }
-    if (!riActive() && !useDirectSCF()) {
-        // stored host tensor: J once from the total density, K per spin
-        const qmint::ERITensor& eri = eriActive();
-        J = qmint::buildCoulomb(eri, Pa + Pb, m_threads);
-        Ka = qmint::buildExchange(eri, Pa, m_threads);
-        Kb = qmint::buildExchange(eri, Pb, m_threads);
+    // Diagnostic (stage 6a timing): CURCUMA_QM_UHF_TWO_PASS=1 forms J/K by two single-density builds (buildJK per
+    // spin) on every path, the stage 5b scheme for direct and RI, to measure what the one-pass builds save.
+    static const bool two_pass = [] {
+        const char* e = std::getenv("CURCUMA_QM_UHF_TWO_PASS");
+        return e && e[0] == '1';
+    }();
+    if (two_pass) {
+        Matrix Ja, Jb;
+        buildJK(Pa, Ja, Ka);
+        buildJK(Pb, Jb, Kb);
+        J = Ja + Jb;
         return;
     }
-    // integral-direct and RI: two builds, J is linear in P (J = J[Pa] + J[Pb])
+    if (!riActive() && !useDirectSCF()) {
+        // stage 6a: stored device tensor, one pass for J[Pa + Pb], K[Pa], K[Pb] (QMGpuJK::buildSpin)
+        if (ensureGpuJK() && gpuBuildJKSpin(m_gpu_jk.get(), Pa, Pb, J, Ka, Kb, "qm_jk")) return;
+        if (!useDirectSCF()) {  // re-evaluated: after a device failure the host may not hold the tensor
+            // stored host tensor: J once from the total density, K per spin
+            const qmint::ERITensor& eri = eriActive();
+            J = qmint::buildCoulomb(eri, Pa + Pb, m_threads);
+            Ka = qmint::buildExchange(eri, Pa, m_threads);
+            Kb = qmint::buildExchange(eri, Pb, m_threads);
+            return;
+        }
+    }
+    if (!riActive()) {
+        // stage 6a: integral-direct, one quartet loop for both spins (screen max(|Pa|, |Pb|)), device or CPU
+        if (gpuDirectAllowed() && ensureGpuDirect()) {
+            m_gpu_djk->setScreening(m_direct_thr_now >= 0.0 ? m_direct_thr_now : m_eri_screening, m_eri_prim_density);
+            m_gpu_djk->setFP32(false);
+            if (gpuBuildJKSpin(m_gpu_djk.get(), Pa, Pb, J, Ka, Kb, "qm_direct")) {
+                m_direct_quartets += m_gpu_djk->lastQuartets();
+                return;
+            }
+        }
+        if (!m_direct.ready())
+            m_direct = qmint::DirectJK(m_gto_basis, m_eri_screening, m_Q.size() != 0 ? &m_Q : nullptr);
+        m_direct_quartets += m_direct.buildSpin(Pa, Pb, J, Ka, Kb, m_threads, m_direct_thr_now, m_eri_prim_density);
+        return;
+    }
+    // RI-J / RI-JK: two builds, J is linear in P (J = J[Pa] + J[Pb]); the device RI contractions (-qm.gpu_ri) run
+    // inside buildJK as for RHF
     Matrix Ja, Jb;
     buildJK(Pa, Ja, Ka);
     buildJK(Pb, Jb, Kb);
     J = Ja + Jb;
+}
+
+// Stage 6a (Claude Generated, Nov 2026): one two-density device build (stored tensor or integral-direct builder);
+// false and a counted fallback `tag` on a device error (that builder is then dropped, as gpuBuildJK / gpuDirectBuild).
+bool QMEngine::gpuBuildJKSpin(qmint::QMGpuJK* dev, const Matrix& Pa, const Matrix& Pb, Matrix& J, Matrix& Ka,
+                              Matrix& Kb, const char* tag) const
+{
+    if (!dev) return false;
+    const int n = dev->n();
+    const Matrix A = Pa, B = Pb;  // row-major, contiguous
+    J = Matrix::Zero(n, n);
+    Ka = Matrix::Zero(n, n);
+    Kb = Matrix::Zero(n, n);
+    if (dev->buildSpin(A.data(), B.data(), J.data(), Ka.data(), Kb.data())) return true;
+    if (std::string(tag) == "qm_direct") {
+        m_gpu_direct_failed = true;
+        m_gpu_djk.reset();
+    } else {
+        m_gpu_failed = true;
+        m_gpu_jk.reset();
+    }
+    curcuma::reportGpuFallback(tag, "device two-density (UHF) J/K build failed");
+    return false;
+}
+
+// Stage 6a (Claude Generated, Nov 2026): V_xc,a, V_xc,b, E_xc on the device. False without the device XC (-gpu none,
+// -qm.gpu_xc off) or on a device error (counted qm_xc by gpuXCFailed; the CPU path runs from then on).
+bool QMEngine::gpuXCSpin(const Matrix& Pa, const Matrix& Pb, qmxc::XCResultSpin& out) const
+{
+    if (m_xc_frozen_grid || !ensureGpuXC()) return false;
+    const auto t0 = std::chrono::steady_clock::now();
+    const int n = m_nbf;
+    const Matrix A = Pa, B = Pb;  // row-major, contiguous (symmetric: same as column-major)
+    Matrix Va = Matrix::Zero(n, n), Vb = Matrix::Zero(n, n);
+    qmint::QMGpuXCScalars sc;
+    if (!m_gpu_xc_obj->vxcSpin(A.data(), B.data(), Va.data(), Vb.data(), sc)) {
+        gpuXCFailed("device spin V_xc (UKS) failed on " + m_gpu_xc_obj->name());
+        return false;
+    }
+    out.Va = Va;
+    out.Vb = Vb;
+    out.ex = sc.ex;
+    out.ec = sc.ec;
+    out.exc = sc.ex + sc.ec;
+    out.nelec = sc.nelec;
+    out.points_used = static_cast<long>(sc.points_used);
+    out.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    return true;
 }
 
 const qmxc::XCResultSpin& QMEngine::xcForSpin(const Matrix& Pa, const Matrix& Pb) const
@@ -223,7 +306,9 @@ const qmxc::XCResultSpin& QMEngine::xcForSpin(const Matrix& Pa, const Matrix& Pb
         m_xcs_last_valid = false;
         return m_xcs_last;
     }
-    qmxc::buildVxcSpin(m_xc_grid, m_xc_ao, Pa, Pb, m_xc, m_xc_rho_threshold, m_threads, m_xcs_last);
+    // stage 6a: device spin V_xc (QMGpuXC::vxcSpin) when the device XC is on, else (or after a device failure) CPU
+    if (!gpuXCSpin(Pa, Pb, m_xcs_last))
+        qmxc::buildVxcSpin(m_xc_grid, m_xc_ao, Pa, Pb, m_xc, m_xc_rho_threshold, m_threads, m_xcs_last);
     m_xcs_last_Pa = Pa;
     m_xcs_last_Pb = Pb;
     m_xcs_last_valid = true;
@@ -264,6 +349,13 @@ bool QMEngine::runUSCF()
     const bool direct = !ri_jk && useDirectSCF();
     if (direct) qmcite::directScf();
     if (m_scf_mode == "adiis") CitationRegistry::cite("adiis");
+    // stage 6a: J/K, V_xc and the gradient parts run on the device, the SCF loop itself (DIIS, diagonalisation,
+    // densities) on the host: counted once per engine unless the user chose the host loop (-qm.gpu_scf off)
+    if (gpuRequested() && m_gpu_scf != "off" && m_gpu_scf != "false" && !m_uhf_gpu_reported) {
+        m_uhf_gpu_reported = true;
+        curcuma::reportGpuFallback("qm_uhf_scf", "open-shell UHF/UKS SCF loop (DIIS, diagonalisation, density) on the "
+                                                 "host; J/K, V_xc and gradient on the device (-qm.gpu_scf off: host loop chosen)");
+    }
     m_ri_occ_factor = Eigen::MatrixXd();  // the RHF orbital factor does not belong to a spin density
     m_ri_occ_density = Matrix();
     m_direct_thr_now = -1.0;
@@ -470,12 +562,28 @@ bool QMEngine::computeGradientUHF()
     const bool ks = isKohnSham();
     const double kx = ks ? m_xc.exact_exchange : 1.0;
     const auto t0 = std::chrono::steady_clock::now();
-    Matrix g1 = qmint::gradientOneElectron(m_gto_basis, m_core_charges, posBohr, Pc, Wc, m_threads);
-    if (hasECP()) g1 += ecpGradient(Pc);
+    // stage 6a: device 1e (Q-G8, spin-summed P and W) and 2e (Q-G7 computeUHF) parts from one set of gradient tables,
+    // each with its own counted CPU fallback (qm_grad1e, qm_grad), as computeGradient for RHF
+    const bool ri = riActive();
+    const std::string be1 = gpuGradBackend(m_gpu_grad1e, "gpu_grad1e", "qm_grad1e", m_gpu_grad1e_failed);
+    const std::string be2 = ri ? std::string() : gpuGradBackend(m_gpu_grad, "gpu_grad", "qm_grad", m_gpu_grad_failed);
+    qmint::EriGpuTables tables;
+    std::string tab_why;
+    bool tables_ok = false;
+    if (!be1.empty() || !be2.empty()) tables_ok = qmint::buildEriGradGpuTables(m_gto_basis, m_eri_screening, tables, tab_why);
+    Matrix g1;
+    std::string info1 = "CPU";
+    const bool dev1 = !be1.empty()
+        && gpuGradientOneElectron(tables_ok ? &tables : nullptr, tab_why, be1, posBohr, Pc, Wc, g1, info1);
+    if (!dev1) {
+        info1 = "CPU";
+        g1 = qmint::gradientOneElectron(m_gto_basis, m_core_charges, posBohr, Pc, Wc, m_threads);
+    }
+    if (hasECP()) g1 += ecpGradient(Pc);  // ECP term, CPU on every path (as RHF)
     const auto t1 = std::chrono::steady_clock::now();
     Matrix g2;
     std::string info = "CPU";
-    if (riActive()) {
+    if (ri) {
         if (!riGradientTwoElectronUHF(Pac, Pbc, g2, info)) {
             m_gradient = Matrix::Zero(m_atomcount, 3);
             m_gradient_failed = true;
@@ -483,11 +591,13 @@ bool QMEngine::computeGradientUHF()
             CurcumaLogger::error("QM: " + m_gradient_error);
             return false;
         }
-    } else {
+    } else if (be2.empty() || !gpuGradientTwoElectronUHF(tables_ok ? &tables : nullptr, tab_why, be2, Pac, Pbc, kx, g2, info)) {
+        info = "CPU";
         g2 = qmint::gradientTwoElectronUHF(m_gto_basis, Pac, Pbc, kx, m_atomcount, m_threads);
     }
     const auto t2 = std::chrono::steady_clock::now();
     const Matrix gn = calculateCoreRepulsionGradient();
+    std::string info_xc;
     if (!ks) {
         m_gradient = g1 + g2 + gn;
         m_gradient_parts = { g1, g2, gn };
@@ -499,34 +609,101 @@ bool QMEngine::computeGradientUHF()
             m_gradient_error = "XC gradient failed: no DFT grid";
             return false;
         }
-        const std::vector<int> bf_atom = activeFunctionAtoms();
-        qmxc::XCGradient xg;
-        qmxc::buildXCGradientSpin(m_xc_grid, m_xc_ao, m_density_a, m_density_b, m_xc, m_xc_rho_threshold, m_threads,
-                                  bf_atom, m_atomcount, xg);
-        Matrix gresp = Matrix::Zero(m_atomcount, 3);
-        if (m_grid_response) {
-            std::string why;
-            if (m_xc_frozen_grid) why = "grid response with a frozen grid (validation hook) is undefined; use -qm.grid_response false";
-            Matrix gw = Matrix::Zero(m_atomcount, 3);
-            if (!why.empty() || !qmgrid::gridWeightGradient(m_atoms, posBohr, m_grid_options, m_xc_grid, xg.edens, gw, why,
-                                                            m_threads)) {
-                m_gradient = Matrix::Zero(m_atomcount, 3);
-                m_gradient_failed = true;
-                m_gradient_error = "XC gradient failed: " + why;
-                CurcumaLogger::error("QM: " + m_gradient_error);
-                return false;
+        // stage 6a: device spin XC gradient incl. the grid response (QMGpuXC::gradientSpin); CPU on failure (counted)
+        if (!m_xc_frozen_grid && ensureGpuXC()) {
+            const Matrix A = m_density_a, B = m_density_b;
+            Matrix gb = Matrix::Zero(m_atomcount, 3), gp = gb, gw = gb;
+            long long used = 0;
+            if (m_gpu_xc_obj->gradientSpin(A.data(), B.data(), m_grid_response, gb.data(), gp.data(), gw.data(), used)) {
+                const Matrix gresp = m_grid_response ? Matrix(gp + gw) : Matrix(Matrix::Zero(m_atomcount, 3));
+                m_gradient = g1 + g2 + gn + gb + gresp;
+                m_gradient_parts = { g1, g2, gn, gb, gresp };
+                info_xc = "on the device (" + m_gpu_xc_obj->name() + ")";
+            } else {
+                gpuXCFailed("device spin XC gradient (UKS) failed on " + m_gpu_xc_obj->name());
             }
-            gresp = xg.points + gw;
         }
-        m_gradient = g1 + g2 + gn + xg.basis + gresp;
-        m_gradient_parts = { g1, g2, gn, xg.basis, gresp };
+        if (info_xc.empty()) {
+            info_xc = "CPU";
+            const std::vector<int> bf_atom = activeFunctionAtoms();
+            qmxc::XCGradient xg;
+            qmxc::buildXCGradientSpin(m_xc_grid, m_xc_ao, m_density_a, m_density_b, m_xc, m_xc_rho_threshold, m_threads,
+                                      bf_atom, m_atomcount, xg);
+            Matrix gresp = Matrix::Zero(m_atomcount, 3);
+            if (m_grid_response) {
+                std::string why;
+                if (m_xc_frozen_grid)
+                    why = "grid response with a frozen grid (validation hook) is undefined; use -qm.grid_response false";
+                Matrix gw = Matrix::Zero(m_atomcount, 3);
+                if (!why.empty()
+                    || !qmgrid::gridWeightGradient(m_atoms, posBohr, m_grid_options, m_xc_grid, xg.edens, gw, why, m_threads)) {
+                    m_gradient = Matrix::Zero(m_atomcount, 3);
+                    m_gradient_failed = true;
+                    m_gradient_error = "XC gradient failed: " + why;
+                    CurcumaLogger::error("QM: " + m_gradient_error);
+                    return false;
+                }
+                gresp = xg.points + gw;
+            }
+            m_gradient = g1 + g2 + gn + xg.basis + gresp;
+            m_gradient_parts = { g1, g2, gn, xg.basis, gresp };
+        }
     }
+    if (const char* tr = std::getenv("CURCUMA_QM_SCF_TRACE"); tr && tr[0] == '1')
+        fmt::print(stderr, "QM gradient trace: uhf 1e={} 2e={} xc={}\n", dev1 ? "device" : "cpu",
+                   info.find("cuda") != std::string::npos || info.find("device") != std::string::npos ? "device" : "cpu",
+                   ks ? (info_xc == "CPU" ? "cpu" : "device") : "none");
     if (CurcumaLogger::get_verbosity() >= 2) {
         auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
-        CurcumaLogger::info(fmt::format("QM: analytic {} gradient |g| = {:.6e} Eh/Bohr (1e {:.1f} ms; 2e {:.1f} ms {}; {}{} threads, CPU)",
-                                        ks ? "UKS" : "UHF", m_gradient.norm(), ms(t0, t1), ms(t1, t2), info,
-                                        ks ? fmt::format("XC {:.1f} ms; ", ms(t2, std::chrono::steady_clock::now())) : std::string(),
+        CurcumaLogger::info(fmt::format("QM: analytic {} gradient |g| = {:.6e} Eh/Bohr (1e {:.1f} ms {}; 2e {:.1f} ms {}; {}{} threads)",
+                                        ks ? "UKS" : "UHF", m_gradient.norm(), ms(t0, t1), dev1 ? "on the device: " + info1 : "CPU",
+                                        ms(t1, t2), info,
+                                        ks ? fmt::format("XC {:.1f} ms {}; ", ms(t2, std::chrono::steady_clock::now()), info_xc)
+                                           : std::string(),
                                         m_threads));
+    }
+    return true;
+}
+
+// Stage 6a (Claude Generated, Nov 2026): UHF/UKS two-electron gradient on the device (Q-G7 computeUHF, the weight of
+// qmint::gradientTwoElectronUHF; kx = 0: Coulomb of Pa + Pb through compute()). Same tables, screen (eri_screening /
+// 100) and fallback (qm_grad) as gpuGradientTwoElectron; CURCUMA_QM_GPU_GRAD_CHECK=1 compares with the CPU.
+bool QMEngine::gpuGradientTwoElectronUHF(const qmint::EriGpuTables* tables, const std::string& why_tables,
+                                         const std::string& backend, const Matrix& Pac, const Matrix& Pbc, double kx,
+                                         Matrix& g2, std::string& info) const
+{
+    if (kx == 0.0) {
+        const bool ok = gpuGradientTwoElectron(tables, why_tables, backend, Matrix(Pac + Pbc), 0.0, g2, info);
+        if (ok) info = "on the device: " + info;
+        return ok;
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    std::string why = why_tables;
+    std::unique_ptr<qmint::QMGpuGrad2e> dev;
+    if (tables) {
+        qmint::QMGpuGradExtra extra;
+        extra.natoms = m_atomcount;
+        extra.sh_atom = tables->sh_atom.data();
+        extra.nprimpair = (int)tables->pp_ea.size();
+        extra.pp_ea = tables->pp_ea.data();
+        extra.pp_eb = tables->pp_eb.data();
+        dev = gpu_plugin::createQmGrad2e(backend, tables->view(), extra, m_gpu_device, why);
+    }
+    const auto t1 = std::chrono::steady_clock::now();
+    Matrix g = Matrix::Zero(m_atomcount, 3);
+    const Matrix A = Pac, B = Pbc;  // row-major, contiguous
+    if (!dev || !dev->computeUHF(A.data(), B.data(), m_eri_screening * 1.0e-2, kx, g.data())) {
+        m_gpu_grad_failed = true;
+        curcuma::reportGpuFallback("qm_grad", "device UHF 2e gradient " + std::string(dev ? "kernel failed" : "not possible: " + why));
+        return false;
+    }
+    g2 = g;
+    auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+    info = fmt::format("on the device: {} ({}; setup {:.1f} ms)", dev->name(), dev->stats(), ms(t0, t1));
+    if (const char* chk = std::getenv("CURCUMA_QM_GPU_GRAD_CHECK"); chk && chk[0] == '1') {
+        const Matrix gc = qmint::gradientTwoElectronUHF(m_gto_basis, Pac, Pbc, kx, m_atomcount, m_threads);
+        CurcumaLogger::result(fmt::format("QM GPU grad check: natoms={} max|dev-cpu|={:.3e} max|cpu|={:.3e} (UHF, kx {})",
+                                          m_atomcount, (g2 - gc).cwiseAbs().maxCoeff(), gc.cwiseAbs().maxCoeff(), kx));
     }
     return true;
 }

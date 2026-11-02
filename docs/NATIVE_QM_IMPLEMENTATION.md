@@ -630,8 +630,11 @@ AI-generated, machine-tested (no human production test). `hf`, `hf-3c`, `lda`, `
   D = Pt Pt - (kx/2) sum_s (Ps Ps + Ps Ps) (`qmint::gradientTwoElectronUHF`), RI: D(Pt, 0) + 1/2 sum_s [D(2Ps, kx) -
   D(2Ps, 0)] from the existing RI gradient (`riGradientForDensity`, five passes; RI-J: exact exchange per spin), UKS:
   spin XC basis part + grid response (point part and Becke weight derivative with the total energy density).
-- **GPU**: none. With `-gpu cuda` an open shell runs every part on the CPU (`gpuRequested()` is false) and the fallback
-  `qm_uhf` is counted once per engine (`-gpu_strict true` therefore stops).
+- **GPU** (stage 6a, Nov 2026): with `-gpu cuda` J/K (one two-density pass: stored tensor or integral-direct), RI
+  contractions, V_xc,s, the 1e/2e gradient and the XC gradient incl. grid response run on the device; the SCF loop stays
+  on the host (counted `qm_uhf_scf` unless `-qm.gpu_scf off`). The CPU integral-direct UHF build is one quartet loop for
+  both spins now too (`DirectJK::buildSpin`, screen max(|Pa|, |Pb|)). Measurements, seams and what stays on the CPU:
+  [QM_GPU_ROADMAP section 4.4](QM_GPU_ROADMAP.md#44-open-shell-uhf-and-uks-on-the-device-nov-2026-stage-6a).
 
 | check (ctest `-L "qm_uhf|qm_uks"`, `scripts/qm_uhf_reference.py`) | cases | max deviation |
 |---|---|---|
@@ -660,8 +663,8 @@ AI-generated, machine-tested (no human production test). `hf`, `hf-3c`, `lda`, `
 - Closed shell bitwise unchanged: 14 dumps (hf stored/direct, b3lyp, pbe RI-JK, hf RI-JK, b3lyp RI-J, hf-3c, mp2
   gradient, ri-mp2, HI def2-SVP/TZVP with ECP, tpss, b2plyp, ccsd) give md5-identical 17-digit energies and gradients
   against the binary built before the change.
-- Not tested / not implemented: ROHF; open-shell meta-GGAs, double hybrids, MP2/RI-MP2/LMP2/CCSD; any GPU path (CPU
-  fallback only); AO screening on the UKS path; broken-symmetry singlets (`-qm.uhf_guess_mix` only smoke-tested) and
+- Not tested / not implemented: ROHF; open-shell meta-GGAs, double hybrids, MP2/RI-MP2/LMP2/CCSD; GPU: see stage 6a
+  in QM_GPU_ROADMAP section 4.4 (RTX 5090 only, no device-resident UHF loop); AO screening on the UKS path; broken-symmetry singlets (`-qm.uhf_guess_mix` only smoke-tested) and
   convergence to the wrong state in general (the tests only compare the state PySCF and ORCA also reach); transition
   metal compounds beyond the Cu atom; charged open shell with an ECP; molecules larger than 5 atoms; `-md` and
   `-scf_extrapolation` with UHF (the density history is RHF only, so UHF warm-starts from the previous orbitals);

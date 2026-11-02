@@ -301,6 +301,8 @@ __device__ __forceinline__ void mdBody(const DevTables& d, const MdTables& m, in
     const int oA = d.sh_out_first[A], oB = d.sh_out_first[B], oC = d.sh_out_first[C] + c0, oD = d.sh_out_first[D] + e0;
     const double s4 = 4.0 * digestScale(A, B, C, D, i, j), s2 = 0.5 * s4;
 #define QG3MD_V(a, b, c, e) acc[((a) * nB + (b)) * NG + (c) * SD + (e)]
+    // J digest for an element accessor PJ (stage 6a: UHF uses Pa + Pb, formed per element as the host Pt)
+    auto jdigest = [&](auto PJ) {
 #pragma unroll
     for (int a = 0; a < nA; ++a)
 #pragma unroll
@@ -309,7 +311,7 @@ __device__ __forceinline__ void mdBody(const DevTables& d, const MdTables& m, in
 #pragma unroll
             for (int c = 0; c < SC; ++c)
 #pragma unroll
-                for (int e = 0; e < SD; ++e) s += QG3MD_V(a, b, c, e) * P[(oC + c) * n + oD + e];
+                for (int e = 0; e < SD; ++e) s += QG3MD_V(a, b, c, e) * PJ((oC + c) * n + oD + e);
             atomicAdd(&d.J[(oA + a) * n + oB + b], s4 * (double)s);
         }
 #pragma unroll
@@ -320,9 +322,22 @@ __device__ __forceinline__ void mdBody(const DevTables& d, const MdTables& m, in
 #pragma unroll
             for (int a = 0; a < nA; ++a)
 #pragma unroll
-                for (int b = 0; b < nB; ++b) s += QG3MD_V(a, b, c, e) * P[(oA + a) * n + oB + b];
+                for (int b = 0; b < nB; ++b) s += QG3MD_V(a, b, c, e) * PJ((oA + a) * n + oB + b);
             atomicAdd(&d.J[(oC + c) * n + oD + e], s4 * (double)s);
         }
+    };
+    if constexpr (F32) jdigest([&](size_t k) { return P[k]; });
+    else {
+        if (d.K2) {
+            const double* __restrict__ P2 = d.P2;
+            jdigest([&](size_t k) { return P[k] + P2[k]; });
+        } else {
+            jdigest([&](size_t k) { return P[k]; });
+        }
+    }
+    // K digest for one density (stage 6a: called a second time with the beta density into K2; FP32 builds are closed
+    // shell only)
+    auto kdigest = [&](const RT* __restrict__ Pk, double* __restrict__ Kk) {
 #pragma unroll
     for (int a = 0; a < nA; ++a)
 #pragma unroll
@@ -331,8 +346,8 @@ __device__ __forceinline__ void mdBody(const DevTables& d, const MdTables& m, in
 #pragma unroll
             for (int b = 0; b < nB; ++b)
 #pragma unroll
-                for (int e = 0; e < SD; ++e) s += QG3MD_V(a, b, c, e) * P[(oB + b) * n + oD + e];
-            atomicAdd(&d.K[(oA + a) * n + oC + c], s2 * (double)s);
+                for (int e = 0; e < SD; ++e) s += QG3MD_V(a, b, c, e) * Pk[(oB + b) * n + oD + e];
+            atomicAdd(&Kk[(oA + a) * n + oC + c], s2 * (double)s);
         }
 #pragma unroll
     for (int b = 0; b < nB; ++b)
@@ -342,8 +357,8 @@ __device__ __forceinline__ void mdBody(const DevTables& d, const MdTables& m, in
 #pragma unroll
             for (int a = 0; a < nA; ++a)
 #pragma unroll
-                for (int c = 0; c < SC; ++c) s += QG3MD_V(a, b, c, e) * P[(oA + a) * n + oC + c];
-            atomicAdd(&d.K[(oB + b) * n + oD + e], s2 * (double)s);
+                for (int c = 0; c < SC; ++c) s += QG3MD_V(a, b, c, e) * Pk[(oA + a) * n + oC + c];
+            atomicAdd(&Kk[(oB + b) * n + oD + e], s2 * (double)s);
         }
 #pragma unroll
     for (int a = 0; a < nA; ++a)
@@ -353,8 +368,8 @@ __device__ __forceinline__ void mdBody(const DevTables& d, const MdTables& m, in
 #pragma unroll
             for (int b = 0; b < nB; ++b)
 #pragma unroll
-                for (int c = 0; c < SC; ++c) s += QG3MD_V(a, b, c, e) * P[(oB + b) * n + oC + c];
-            atomicAdd(&d.K[(oA + a) * n + oD + e], s2 * (double)s);
+                for (int c = 0; c < SC; ++c) s += QG3MD_V(a, b, c, e) * Pk[(oB + b) * n + oC + c];
+            atomicAdd(&Kk[(oA + a) * n + oD + e], s2 * (double)s);
         }
 #pragma unroll
     for (int b = 0; b < nB; ++b)
@@ -364,9 +379,15 @@ __device__ __forceinline__ void mdBody(const DevTables& d, const MdTables& m, in
 #pragma unroll
             for (int a = 0; a < nA; ++a)
 #pragma unroll
-                for (int e = 0; e < SD; ++e) s += QG3MD_V(a, b, c, e) * P[(oA + a) * n + oD + e];
-            atomicAdd(&d.K[(oB + b) * n + oC + c], s2 * (double)s);
+                for (int e = 0; e < SD; ++e) s += QG3MD_V(a, b, c, e) * Pk[(oA + a) * n + oD + e];
+            atomicAdd(&Kk[(oB + b) * n + oC + c], s2 * (double)s);
         }
+    };
+    if constexpr (F32) kdigest(P, d.K);
+    else {
+        kdigest(d.P, d.K);
+        if (d.K2) kdigest(d.P2, d.K2);
+    }
 #undef QG3MD_V
 }
 

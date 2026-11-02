@@ -49,8 +49,18 @@ public:
     /// (0 = every quartet, as the CPU reference). False on a device error (caller: CPU fallback).
     /// kx (Claude Generated, Oct 2026, GPU KS-DFT): weight of the exchange part, D = P_mn P_ls - kx/4 (...), as
     /// qmint::gradientTwoElectronScaled; kx = 1 is the RHF expression (same code path), kx = 0 (LDA/PBE) drops the
-    /// exchange products and their screening term. Entry point curcuma_<backend>_create_qm_grad2e_kx.
+    /// exchange products and their screening term. Entry point curcuma_<backend>_create_qm_grad2e_kx (since stage 6a _uhf).
     virtual bool compute(const double* P, double threshold, double kx, double* grad) = 0;
+    /// Open shell (stage 6a, Claude Generated Nov 2026): UHF/UKS weight of qmint::gradientTwoElectronUHF,
+    ///   D_mnls = Pt_mn Pt_ls - kx/2 (Pa_ml Pa_ns + Pa_ms Pa_nl + Pb_ml Pb_ns + Pb_ms Pb_nl),  Pt = Pa + Pb,
+    /// in ONE pass over the derivative integrals (cartesian spin densities, row-major). Screen bound
+    /// Q_AB Q_CD (Pt_AB Pt_CD + kx (S_AC S_BD + S_AD S_BC)), S = max(|Pa|, |Pb|) per block. False = unsupported or
+    /// device error (caller: CPU). Entry renamed with this vtable (_create_qm_grad2e_uhf).
+    virtual bool computeUHF(const double* Pa, const double* Pb, double threshold, double kx, double* grad)
+    {
+        (void)Pa, (void)Pb, (void)threshold, (void)kx, (void)grad;
+        return false;
+    }
     /// Shell quartets evaluated in the last compute().
     virtual long long lastQuartets() const { return 0; }
     /// One ASCII line of device timings, empty if none.
