@@ -280,6 +280,10 @@ public:
     /// Number of detected halogen bonds (GFN-FF only); 0 elsewhere.
     int XBCount() const;
 
+    /// Claude Generated (Nov 2026, A6): the energy of the current molecule is periodic in its cell
+    /// (ComputationalMethod::hasPeriodicEnergy(); only native CPU GFN-FF with cell and coulomb_ewald).
+    bool hasPeriodicEnergy() const;
+
     /// WP-P1 (May 2026): per-phase CPU timing JSON from the last calculation.
     json LastPrepTiming() const;
 

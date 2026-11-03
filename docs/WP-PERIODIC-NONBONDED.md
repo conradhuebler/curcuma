@@ -1,20 +1,24 @@
 # WP: Periodic non-bonded interactions (minimum image)
 
-**Status: OPEN.** The periodic container (`wall_potential = pbc`, Sep 2026) relocates
-molecules geometrically but the energy is still non-periodic. The clearance test and
-the elastic-reflection fallback described below are a **stopgap**, not the intended
-solution, and this work package is what replaces them.
+**Status (2026-11-03, after A6): native CPU GFN-FF with an orthorhombic unit cell is periodic** (MIC in CN, D4,
+repulsion, bonded, HB/XB, topology; Ewald Coulomb and EEQ with `coulomb_ewald`, A1-B3, P1). With such a cell
+`wall_potential = pbc` in a box is the pure cell wrap, without clearance test or reflection (A6). The stopgap
+described below **stays** for everything that has no periodic energy: no cell, the spherical container, every other
+method (gfn1/gfn2, external xtb/tblite/Ulysses, UFF, QMDFF, CG) and GFN-FF with `coulomb_ewald false`. Open: GPU
+paths with a cell (CPU fallback), triclinic cells, NPT.
 
 ## What exists today
 
 `SimpleMD::wrapIntoContainer()` moves a whole fragment back into the container when
 its centre of mass leaves it: per axis for a box, to the antipodal point for a
 sphere. It exerts no force, so unlike the harmonic and logfermi walls it does not
-heat the system and does not do work on an escaping molecule.
+heat the system and does not do work on an escaping molecule. Since A6 it is skipped when the method reports a
+periodic energy and a cell is set (box container only); then `applyPeriodicBoundaryConditions()` alone wraps.
 
-## Why it needs a stopgap
+## Why it needs a stopgap (still true without a periodic energy)
 
-The GFN-FF energy has **no minimum-image convention**. `FFWorkspace`, the CN
+The text of this section describes the state before A2-B3 and still describes every case without a periodic
+energy (list above). The GFN-FF energy without a cell has **no minimum-image convention**. `FFWorkspace`, the CN
 calculator and the EEQ solver all use plain `r_ij = |x_i - x_j|`; only the unused
 legacy `ForceFieldThread` has MIC code. So a wrapped molecule does not continue its
 interactions across the boundary — it arrives at coordinates that, as far as the
@@ -64,7 +68,8 @@ periodic cell and the wrap becomes a pure bookkeeping operation.
    so bonds cannot form across the boundary today. It needs the same helper.
 6. **Then remove the stopgap**: with MIC in place the destination is never "occupied"
    in a meaningful sense, so the clearance test and the reflection fallback come out
-   of `wrapIntoContainer()` and it reduces to the wrap itself.
+   of `wrapIntoContainer()` and it reduces to the wrap itself. Done in A6 for the periodic case only (the container
+   wrap is skipped and the cell wrap remains); the stopgap stays for all methods without a periodic energy.
 
 ## Validation the finished version needs
 
@@ -962,3 +967,79 @@ three (n = 3 systems; the energy error is quadratic in the charge error and far 
   pcg) against -4.0e-5 with the binary before P1 (n = 1 each; trajectories differ through the r_cut change); D1 level met.
 - Not tested: charged or heavy-element boxes at the new r_cut beyond the ctest set, more than 5748 atoms, `ewald_kernel_cache_mb`
   fallback at production size (only the 60-atom bitwise check), relaxed liquids. Human production testing pending.
+
+## A6 wall_potential pbc with a periodic energy: the stopgap is skipped (2026-11-03, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+On `feature/bulk` (base `40461124`), CPU only.
+
+### Step 0: how the two wraps interacted (read from the code before the change)
+
+- Two independent mechanisms, both called after every integration step in this order: `applyPeriodicBoundaryConditions()`
+  (only with a cell, `m_has_pbc` from `Molecule::hasPBC()`; fragment COM into fractional [0,1), no clearance test, every
+  method) and then `wrapIntoContainer()` (only `wall_potential pbc`, `m_wall_wrap`; box per axis or sphere antipodal, with
+  clearance test `kWrapClearance` 1.8 A and reflection), at the end of `SimpleMD::Verlet()` and `SimpleMD::Rattle()`.
+- Box equal to the cell `[0, L)`: the cell wrap runs first, so the container wrap never finds a COM outside; the
+  stopgap could not fire (it still ran the O(N^2) fragment search whenever an atom of a straddling molecule was outside).
+- Box different from the cell (e.g. the auto-sized box, or `[-L/2, L/2)`): both wrap against each other. Measured in
+  ctest `pbc_md_wrap_pure` (d), GFN-FF with `coulomb_ewald false`, dimer across the face, 200 steps: 398 cell wraps and
+  400 container wraps, i.e. one fragment moved by +L and -L in every step.
+- Periodic energy: only the native CPU GFN-FF with a cell and `coulomb_ewald` (periodic Ewald EEQ active); the GPU
+  GFN-FF with a cell is replaced by the CPU method in `EnergyCalculator::setMolecule()` (`periodicCellNeedsCpu`); no
+  other method reads the cell (`grep` for MIC/`m_unit_cell` in `energy_calculators/`: GFN-FF files only, plus a copy
+  in `xtb_fragment_scf.cpp`).
+
+### Decision and change
+
+- **One source of truth**: `ComputationalMethod::hasPeriodicEnergy()` (default false), overridden by
+  `GFNFFComputationalMethod` (`hasPBC() && periodicEEQActive()`), forwarded by `EnergyCalculator::hasPeriodicEnergy()`.
+  A virtual on the method rather than a name comparison in SimpleMD, like `gfnffInstance()`/`requestsCpuFallback()`; it is
+  asked after `setMolecule()`, so the GPU-to-CPU swap has happened. A new virtual changes the `ComputationalMethod`
+  vtable: GPU plugins must be rebuilt from the same tree (always the case for in-tree builds).
+- **Periodic case** (`InitialiseWalls()`): box container + `wall_potential pbc` + cell + periodic energy sets
+  `m_wall_wrap_by_cell`; `wrapIntoContainer()` then returns at once, and the wrap is the existing cell wrap (one lattice
+  vector per fragment, no clearance test, no reflection). Chosen over a second wrap implementation in the container path:
+  one function, and the cell (not the container bounds) defines where the periodic images are. Bounds that differ from
+  `[0, L)` produce a warning that they are ignored. Log at verbosity 2 names the method.
+- **Everything else unchanged bit for bit**: no cell, a sphere, a method without periodic energy, `coulomb_ewald false`.
+  New: one warning at verbosity 1 per run (`wall_potential pbc: energy of method X is not periodic (...); wrap uses the
+  clearance/reflection fallback`), and with a cell but no container and a non-periodic method a warning that fragments are
+  wrapped without minimum image in the energy. Counters (`cellWrapCount()`, `containerWrapCount()`,
+  `containerRefusedCount()`, `containerReflectionCount()`, `wallWrapByCell()`) for tests; they do not touch the numbers.
+
+### Tests (`ctest -R pbc_md_wrap_pure`, `test_cases/unit/test_pbc_md_wrap_pure.cpp`, < 1 s)
+
+| part | setup | result |
+|---|---|---|
+| (a) source of truth | gfnff + cell / + `coulomb_ewald false` / no cell / uff + cell | true / false / false / false |
+| (b) pure wrap | registry water dimer split across the +x face of L = 44 Bohr (MIC O-O 2.8 A), drift +x, NVE 2 ps, dt 0.5 fs, COM removal off, box = cell | 2 cell wraps, 0 container wraps, 0 refused, 0 reflections; drift 9.4e-8 Eh/ps (fit over 2 ps), max-min 1.0e-5 Eh; max abs(P - P0) 1.7e-14 (abs(P0) 0.72) |
+| (c) fallback | uff / gfnff, no cell, water landing on a water | refused 20 / 1, reflections 4 / 1 |
+| (d) box != cell | `[-L/2, L/2)`, periodic / `coulomb_ewald false` | 1 cell wrap, no container action / 398 + 400 wraps (pre-A6 behaviour, kept) |
+
+(b) does **not** show that the old clearance test would have refused there: the smallest raw contact right after a wrap
+was 2.78 A (> 1.8 A). In the box = cell geometry the old code would not have refused either (cell wrap first, see Step 0);
+what changes there is that the container path is no longer entered. (n = 1 trajectory per part.)
+
+### Acceptance
+
+- No cell, no container: `-sp` energy (16 digits in the dump header) and `-dump_gradient` md5 of benzene, caffeine,
+  methyl-a-d-glucopyranoside, water8, hydronium-water2 (+1), urea-water197, peo201-water500 at 1 and 4 threads: 14/14
+  identical to the binary before A6.
+- `ctest -j1 -R 'gfnff|frag|eeq|simplemd|pbc|ewald|react|restart|md_'` (124 tests incl. the new one): 3 full runs; runs 2
+  and 3 (the last after the final build) 0 failed, 1 skipped (GPU); run 1 had one failure, `cli_gfnff_09_farfield_shortcut`
+  (MD part "two waters ... Epot series identical"), reproduced 1 of 15 in isolation. **Cause (not A6)**: the test runs
+  two MD jobs (`farfield_shortcut` true/false) without `-md.seed`; the default `seed -1` takes the wall clock in seconds
+  (`simplemd.cpp` `if (m_seed == -1)`, two sites), so two runs that straddle a second boundary start from different
+  velocities. `cli_simplemd_16_md_seed` asserts "runs without a seed are identical" with the same default and has the same
+  flake. Fix (not applied, test change): pass a fixed `-md.seed` in both tests, or drop that assertion of the seed test.
+- Not tested: `-gpu` with a cell (falls back to CPU, then periodic; not run), the RATTLE integrator with a cell,
+  CG systems with a cell, triclinic cells (refused by GFN-FF). Human production testing pending.
+
+### Options not implemented (behaviour changes, operator decision)
+
+1. **Box becomes the cell**: `wall_type rect` + `wall_potential pbc` without a cell sets `m_unit_cell` from the box (origin
+   shifted to 0) before the energy set-up, so GFN-FF runs periodically. Effort ~0.5 day (Molecule/Mol cell before
+   `EnergyCalculator::setMolecule`, origin shift of the coordinates; the A1 cutoff check then applies, e.g. the HB/XB
+   radius 21.2 Bohr needs L > 42.4 Bohr (22.4 A) with the defaults, not re-checked for every cutoff after A2-A3c). Risk: every existing `wall_potential pbc` run changes
+   energy (images interact), and small auto-sized boxes turn into a hard error.
+2. **Cell + non-periodic method**: skip the container wrap whenever a cell is set (removes the +L/-L ping-pong of (d)),
+   or refuse a cell for methods without periodic energy. Effort < 1 h each; changes trajectories of such runs.

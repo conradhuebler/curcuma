@@ -343,6 +343,14 @@ public:
      */
     double density() const;
 
+    /// Claude Generated (Nov 2026, A6): wrap bookkeeping (docs/WP-PERIODIC-NONBONDED.md A6). Cell wraps count
+    /// fragments moved by a lattice vector, container wraps/refusals/reflections the clearance fallback of
+    /// wall_potential pbc; wallWrapByCell() is true when the container wrap is the pure cell wrap.
+    long cellWrapCount() const { return m_cell_wraps; }
+    long containerWrapCount() const { return m_container_wraps; }
+    long containerRefusedCount() const { return m_container_refused; }
+    long containerReflectionCount() const { return m_container_reflections; }
+    bool wallWrapByCell() const { return m_wall_wrap_by_cell; }
     double potentialEnergy() const { return m_Epot; }
     double kineticEnergy() const { return m_Ekin; }
     double currentTemperature() const { return m_T; }
@@ -445,13 +453,18 @@ private:
      * cannot tile space, so a fragment leaving at r is placed at the antipodal point
      * the same distance inside the boundary; that is a container rule, not a lattice.
      *
-     * INCOMPLETE, and knowingly so: the GFN-FF energy has no minimum-image
-     * convention, so a wrapped fragment does not continue its interactions across
-     * the boundary and its destination can be genuinely occupied (measured: a wrap
-     * to 0.024 A, NaN one step later). Until the non-bonded terms are periodic this
-     * refuses a wrap into occupied space and reflects the fragment elastically
-     * instead. Contained and free of heating, but not periodic. The real fix is
-     * docs/WP-PERIODIC-NONBONDED.md.
+     * Two cases (Nov 2026, WP-PERIODIC-NONBONDED A6):
+     * - Box, unit cell set, and a periodic energy (EnergyCalculator::hasPeriodicEnergy(): native
+     *   CPU GFN-FF with coulomb_ewald): m_wall_wrap_by_cell, this function does nothing. The wrap
+     *   is the cell wrap of applyPeriodicBoundaryConditions() (fragment COM into [0,1) by a
+     *   lattice vector), with no clearance test and no reflection: the destination was already
+     *   a neighbour through its periodic image. The cell, not the container bounds, defines it.
+     * - Every other case (no cell, a sphere, or a method whose energy ignores the cell): the
+     *   energy has no minimum image, so a wrapped fragment does not continue its interactions
+     *   across the boundary and its destination can be genuinely occupied (measured: a wrap to
+     *   0.024 A, NaN one step later). The stopgap stays: a wrap into occupied space
+     *   (kWrapClearance) is refused and the fragment reflected elastically. Contained and free of
+     *   heating, but not periodic. A warning at verbosity 1 says so once per run.
      */
     void wrapIntoContainer();
     /*! \brief Claude Generated (Sep 2026): run one integration step, with optional step
@@ -648,6 +661,14 @@ private:
     bool m_run_prepared = false;         // true after prepareRun(), false after finalizeRun()
     bool m_run_aborted = false;          // mirrors former local `aborted` flag in start()
     bool m_wall_wrap = false;            ///< wall_potential=pbc: wrap instead of push (wrapIntoContainer)
+    /// Claude Generated (Nov 2026, A6): wall_potential=pbc in a box with a cell and a periodic energy
+    /// (EnergyCalculator::hasPeriodicEnergy()): the wrap is the cell wrap of applyPeriodicBoundaryConditions(),
+    /// wrapIntoContainer() does nothing (no clearance test, no reflection).
+    bool m_wall_wrap_by_cell = false;
+    long m_container_wraps = 0;          ///< A6: fragments wrapped by wrapIntoContainer() (fallback path)
+    long m_container_refused = 0;        ///< A6: wraps refused by the clearance test (fallback path)
+    long m_container_reflections = 0;    ///< A6: refused wraps answered with an elastic reflection
+    long m_cell_wraps = 0;               ///< A6: fragments moved by a lattice vector in applyPeriodicBoundaryConditions()
     StopReason m_stop_reason = StopReason::Running;  ///< see stopReason()
     std::vector<json> m_run_states;      // rescue states carried across step() calls
     json m_last_dump_state;              // K6 (Oct 2026): state of the last WriteGeometry() dump, -rescue only
@@ -966,7 +987,7 @@ private:
     // --- Wall Potentials ---
     PARAM(wall_type, String, "none", "Wall type: none|spheric|rect.", "Walls", {"wall"},
         "enum=none|spheric|rect")
-    PARAM(wall_potential, String, "harmonic", "Wall behaviour: logfermi|harmonic push escaping atoms back (and do work on them); pbc exerts no force and instead moves a whole molecule that left the container back in on the opposite side. pbc is a container, not a periodic cell: the energy has no minimum image, so interactions are not continued across the boundary and a molecule whose destination is occupied is reflected instead (see docs/WP-PERIODIC-NONBONDED.md).", "Walls", {},
+    PARAM(wall_potential, String, "harmonic", "Wall behaviour: logfermi|harmonic push escaping atoms back (and do work on them); pbc exerts no force and instead moves a whole molecule that left the container back in on the opposite side. Without a periodic energy pbc is a container, not a periodic cell: interactions are not continued across the boundary and a molecule whose destination is occupied is reflected instead. With a unit cell, a box and native CPU GFN-FF (coulomb_ewald) the energy is periodic and pbc is the plain cell wrap (no clearance test, no reflection; the cell, not the wall bounds, defines it). See docs/WP-PERIODIC-NONBONDED.md A6.", "Walls", {},
         "enum=logfermi|harmonic|pbc; requires=wall_type!=none")
     PARAM(wall_radius, Double, 0.0, "Radius for spherical wall (Å). Auto-sized if 0.", "Walls", {"wall_spheric_radius"},
         "unit=A; min=0; requires=wall_type=spheric")

@@ -182,7 +182,8 @@ The asymmetry is deliberate:
   keep colliding. Note that `pbc` is a container, not a periodic cell — the energy
   has no minimum-image convention, so interactions are not continued across the
   boundary and a molecule whose destination is occupied is reflected elastically
-  instead of wrapped. See `docs/WP-PERIODIC-NONBONDED.md`.
+  instead of wrapped. See `docs/WP-PERIODIC-NONBONDED.md`. Exception since A6 (Nov 2026): a box with a
+  unit cell and native CPU GFN-FF (`coulomb_ewald` on) is periodic, and there the wrap is the plain cell wrap.
 - Angles at a centre with more than 6 neighbours are skipped by the generator
   (pre-existing rule); transiently hypervalent atoms during an exchange are
   therefore under-described.

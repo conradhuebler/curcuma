@@ -137,7 +137,19 @@ public:
     /// Reason shown with the counted GPU fallback when requestsCpuFallback() is true (empty: the default
     /// charge-rule text). Claude Generated (Oct 2026).
     virtual std::string cpuFallbackReason() const { return std::string(); }
-    
+
+    /**
+     * @brief True if the energy of the current molecule is periodic in its unit cell (Claude Generated, Nov 2026).
+     *
+     * Periodic means: moving one molecule by a lattice vector leaves energy and forces unchanged, because
+     * every term uses minimum-image distances or an Ewald sum. Only then is wrapping a molecule back into
+     * the cell pure bookkeeping (SimpleMD, wall_potential pbc; docs/WP-PERIODIC-NONBONDED.md A6). Today
+     * this holds only for the native CPU GFN-FF with a cell and coulomb_ewald (periodic EEQ active). A GPU
+     * GFN-FF with a cell is replaced by the CPU method in EnergyCalculator::setMolecule() (periodicCellNeedsCpu),
+     * so it answers through that method. Default false: no other method reads the cell.
+     */
+    virtual bool hasPeriodicEnergy() const { return false; }
+
     /**
      * @brief Copy gradient into pre-allocated target (avoids heap allocation).
      *

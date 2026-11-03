@@ -225,6 +225,14 @@ int GFNFFComputationalMethod::getXBCount() const
     return m_gfnff ? static_cast<int>(m_gfnff->getLastXBonds().size()) : 0;
 }
 
+// Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A6): with a cell, D4, CN, repulsion, bonded terms and HB/XB use
+// minimum-image distances (A2-A4); Coulomb and EEQ are periodic only with coulomb_ewald (B2/B3). periodicEEQActive()
+// implies the cell and coulomb_ewald. coulomb_ewald false (plain distances in Coulomb/EEQ) is not periodic.
+bool GFNFFComputationalMethod::hasPeriodicEnergy() const
+{
+    return m_gfnff && m_gfnff->hasPBC() && m_gfnff->periodicEEQActive();
+}
+
 // WP-P1 (May 2026): expose the cached PrepTiming as JSON for MDDiagnosticsWriter
 json GFNFFComputationalMethod::getLastPrepTiming() const
 {

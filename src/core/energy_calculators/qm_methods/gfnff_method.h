@@ -83,6 +83,8 @@ public:
     /// Access underlying GFNFF for diagnostics (e.g. workspace dEdcn)
     GFNFF* getGFNFF() const { return m_gfnff.get(); }
     GFNFF* gfnffInstance() const override { return m_gfnff.get(); }
+    /// Claude Generated (Nov 2026, A6): cell set and the periodic Ewald EEQ/Coulomb active (all other terms use MIC).
+    bool hasPeriodicEnergy() const override;
 
 private:
     std::unique_ptr<GFNFF> m_gfnff;

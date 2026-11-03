@@ -1663,6 +1663,45 @@ void SimpleMD::InitialiseWalls()
             m_molecule.addBorderPoint(x0);
         }
     }
+    // Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A6): one decision, one source of truth. The energy is
+    // periodic only if the method says so after setMolecule() (EnergyCalculator::hasPeriodicEnergy(); a GPU
+    // GFN-FF with a cell has already fallen back to the CPU method there). Then a box container with
+    // wall_potential pbc needs no clearance test and no reflection: applyPeriodicBoundaryConditions() does the
+    // wrap (one lattice vector per fragment) and wrapIntoContainer() is skipped. A sphere has no lattice and
+    // keeps the container rule. Logging only below; the fallback path is unchanged bit for bit.
+    {
+        const bool periodic_energy = m_has_pbc && m_interface && m_interface->hasPeriodicEnergy();
+        m_wall_wrap_by_cell = m_wall_wrap && m_wall_type == 2 && periodic_energy;
+        if (m_wall_wrap_by_cell) {
+            const Eigen::Matrix3d cell = m_molecule.getUnitCell();
+            const double tol = 1e-6; // Angstrom
+            const bool box_is_cell = std::abs(m_wall_x_min) < tol && std::abs(m_wall_y_min) < tol && std::abs(m_wall_z_min) < tol
+                && std::abs(m_wall_x_max - cell(0, 0)) < tol && std::abs(m_wall_y_max - cell(1, 1)) < tol
+                && std::abs(m_wall_z_max - cell(2, 2)) < tol;
+            if (m_verbosity >= 1) {
+                CurcumaLogger::info(fmt::format("wall_potential pbc: energy of method {} is periodic in the unit cell; "
+                                                "the wrap is the cell wrap (no clearance test, no reflection)",
+                    m_method));
+                if (!box_is_cell)
+                    CurcumaLogger::warn(fmt::format(
+                        "wall_potential pbc: container bounds [{:.4f},{:.4f}] x [{:.4f},{:.4f}] x [{:.4f},{:.4f}] A differ from "
+                        "the unit cell [0,{:.4f}] x [0,{:.4f}] x [0,{:.4f}] A; the cell defines the periodicity, the bounds are ignored",
+                        m_wall_x_min, m_wall_x_max, m_wall_y_min, m_wall_y_max, m_wall_z_min, m_wall_z_max,
+                        cell(0, 0), cell(1, 1), cell(2, 2)));
+            }
+        } else if (m_wall_wrap && m_verbosity >= 1) {
+            CurcumaLogger::warn(fmt::format("wall_potential pbc: energy of method {} is not periodic{}; "
+                                            "wrap uses the clearance/reflection fallback",
+                m_method,
+                m_wall_type == 1 ? " (spherical container, no lattice)"
+                                 : (m_has_pbc ? " (the method ignores the unit cell)" : " (no unit cell)")));
+        } else if (m_has_pbc && !periodic_energy && m_verbosity >= 1) {
+            CurcumaLogger::warn(fmt::format("unit cell set, but the energy of method {} is not periodic: fragments are "
+                                            "wrapped into the cell without minimum image in the energy",
+                m_method));
+        }
+    }
+
     // Claude Generated: Store wall configuration info for PrintStatus() display
     // Claude Generated 2025: Wall Configuration
     m_wall_geometry = m_config.get<std::string>("wall_type");
@@ -3308,7 +3347,8 @@ void SimpleMD::AdjustRattleTolerance()
 // rationale and the limitation. Whole fragments are relocated, never single atoms.
 void SimpleMD::wrapIntoContainer()
 {
-    if (!m_wall_wrap)
+    // A6: with a cell and a periodic energy the cell wrap (applyPeriodicBoundaryConditions) is the wrap.
+    if (!m_wall_wrap || m_wall_wrap_by_cell)
         return;
 
     // Cheap O(N) gate: only pay for the fragment analysis when something actually
@@ -3412,6 +3452,7 @@ void SimpleMD::wrapIntoContainer()
         }
 
         if (!destination_free) {
+            ++m_container_refused;
             // Occupied: reflect the fragment elastically instead. Reversing the
             // outward component of its centre-of-mass velocity keeps it in the
             // container and conserves kinetic energy exactly, so this fallback does
@@ -3430,6 +3471,7 @@ void SimpleMD::wrapIntoContainer()
                     m_eigen_velocities(a, 2) -= 2.0 * vn * nz;
                 }
                 ++reflected;
+                ++m_container_reflections;
             }
             continue;
         }
@@ -3442,6 +3484,7 @@ void SimpleMD::wrapIntoContainer()
             m_eigen_geometry(a, 2) += dz;
         }
         ++wrapped;
+        ++m_container_wraps;
     }
 
     if (wrapped > 0)
@@ -3492,6 +3535,7 @@ void SimpleMD::applyPeriodicBoundaryConditions()
         masses[i] = Elements::AtomicMass[m_atomtype[i]];
 
     const int moved = PBCUtils::wrapFragmentsIntoCell(m_eigen_geometry, masses, fragments, cell, cell_inv);
+    m_cell_wraps += moved;
 
     // Update molecule geometry after PBC wrapping
     if (moved > 0)

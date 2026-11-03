@@ -991,6 +991,13 @@ int EnergyCalculator::XBCount() const
     return m_method ? m_method->getXBCount() : 0;
 }
 
+// Claude Generated (Nov 2026, A6): asked after setMolecule(), so a GPU GFN-FF with a cell has already been
+// replaced by the CPU method (periodicCellNeedsCpu) and answers through it.
+bool EnergyCalculator::hasPeriodicEnergy() const
+{
+    return m_method && m_method->hasPeriodicEnergy();
+}
+
 // WP-P1 (May 2026): per-phase timing forwarders for MDDiagnosticsWriter
 json EnergyCalculator::LastPrepTiming() const
 {

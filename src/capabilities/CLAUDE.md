@@ -39,6 +39,7 @@ Hessian, docking. Energies and gradients always come from `EnergyCalculator`. Do
 - BMT via `initializeBMT()`: md, hessian, qmdfffit, confsearch, confscan, confstat, dock, rmsd, polymerbuild; via `BMTUtils::`: sp, opt, analysis
 - Analysis files: `basename.general.csv`, `basename.NNN.<type>.csv`, `basename.<type>_statistics.csv`
 - Pure-CG MD (`Molecule::isCGSystem()`, all atoms CG): timestep x10, PBC wrapping, VTF trajectory (`cg_write_vtf`)
+- SimpleMD wraps twice per step: `applyPeriodicBoundaryConditions()` (cell) then `wrapIntoContainer()` (`wall_potential pbc`, clearance/reflection stopgap); the second is skipped only when `EnergyCalculator::hasPeriodicEnergy()` and a box (WP-PERIODIC-NONBONDED A6)
 
 ## Status
 
