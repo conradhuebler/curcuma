@@ -4,12 +4,17 @@
 // Vulkan implements the native-xTB backend only; GFN-FF compute shaders are not ported,
 // so the GFN-FF entry point reports that and returns nullptr (the core falls back to CPU).
 #include "src/core/curcuma_logger.h"
+#include "src/core/energy_calculators/gpu_plugin_abi.h"
 #include "../xtb_vulkan_method.h"     // XtbVulkanComputationalMethod
 #include "../xtb_native.h"            // curcuma::xtb::MethodType
 #include "json.hpp"
 #include "vk_context.h"
 
 #include <cstring>
+
+// Plugin ABI version (gpu_plugin_abi.h); the loader refuses this plugin if it differs from the executable's
+// (Claude Generated, Nov 2026, S0).
+CURCUMA_GPU_PLUGIN_DEFINE_ABI_VERSION(vulkan)
 
 extern "C" {
 

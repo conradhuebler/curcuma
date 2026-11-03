@@ -20,6 +20,7 @@
 // string so the boundary carries no C++ container layout. See gpu_plugin.h.
 
 #include "src/core/curcuma_logger.h"
+#include "src/core/energy_calculators/gpu_plugin_abi.h"
 #include "../gfnff_gpu_method.h"      // GFNFFGPUComputationalMethod (global namespace)
 #include "../xtb_gpu_method.h"        // XtbGpuComputationalMethod (global namespace)
 #include "../xtb_native.h"            // curcuma::xtb::MethodType
@@ -55,6 +56,10 @@ extern "C" {
 // Eigen alignment this plugin was compiled with; the loader compares it with the executable's
 // (Claude Generated, Oct 2026).
 int curcuma_cuda_eigen_align() { return EIGEN_MAX_ALIGN_BYTES; }
+
+// Plugin ABI version (gpu_plugin_abi.h); the loader refuses this plugin if it differs from the executable's
+// (Claude Generated, Nov 2026, S0).
+CURCUMA_GPU_PLUGIN_DEFINE_ABI_VERSION(cuda)
 
 int curcuma_cuda_device_count()
 {

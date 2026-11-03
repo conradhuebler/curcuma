@@ -156,6 +156,10 @@ public:
     GFNFF* gfnffInstance() const override { return m_gfnff.get(); }
     bool requestsCpuFallback() const override { return m_cpu_fallback_requested; }
     std::string cpuFallbackReason() const override { return m_cpu_fallback_reason; }
+    /// Claude Generated (Nov 2026, S0): the device path has no periodic energy (no Ewald, no periodic EEQ, MIC missing in
+    /// several kernels; scratchpad plan G0). Stated explicitly so that SimpleMD never wraps into the cell for a GPU
+    /// method. Stays false until stage S4 of the GPU port; setMolecule() refuses a cell anyway.
+    bool hasPeriodicEnergy() const override { return false; }
     /// Device index this method is pinned to (-1 = runtime default). Claude Generated (Sep 2026).
     int gpuDevice() const { return m_gpu_device; }
 
@@ -582,6 +586,18 @@ bool GFNFFGpuMethodImpl<Backend>::setMolecule(const Mol& mol)
         return false;
     }
 
+    // Claude Generated (Nov 2026, S0): defence in depth behind MethodFactory::periodicCellNeedsCpu(). EnergyCalculator and
+    // the delta-ML base swap a GPU GFN-FF with a cell for the CPU method before this call; any other caller that hands a
+    // periodic molecule to the device path would get a non-periodic energy without a message (no Ewald, no periodic
+    // EEQ, plain distances in several kernels and the multi-GPU EEQ split). Refuse until the port (stages S1-S4) is done.
+    if (mol.m_has_pbc) {
+        m_has_error = true;
+        m_error_message = "GFNFFGPUMethod: periodic cell set, but the GPU GFN-FF path has no periodic energy yet; "
+                          "use the CPU method (omit -gpu) for periodic systems";
+        CurcumaLogger::error(m_error_message);
+        return false;
+    }
+
     // Store atom types for GPU workspace (from mol, before InitialiseMolecule)
     m_atom_types = mol.m_atoms;
 
@@ -953,6 +969,12 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
                     curcuma::reportGpuFallback("-gpu_split_devices ignored in a batch worker");
                     devs.clear();
                 }
+            }
+            // Claude Generated (Nov 2026, S0): the multi-GPU Coulomb/EEQ split uses the non-periodic matrix columns; with
+            // a cell it must stay off (setMolecule() refuses a cell already, this is the second line).
+            if (devs.size() > 1 && m_gfnff->hasPBC()) {
+                CurcumaLogger::warn("gpu_split_devices: ignored with a periodic cell (the split EEQ/Coulomb is not periodic)");
+                devs.clear();
             }
             if (devs.size() > 1) {
                 m_gpu_workspace->setCoulombSplitDevices(devs, min_atoms);

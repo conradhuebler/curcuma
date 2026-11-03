@@ -16,7 +16,7 @@ Built by `.github/workflows/ccpp.yml` (AutomaticBuild), which calls `linux-gpu.y
 
 ## Using the GPU plugins
 
-1. Download the AppImage and the plugin archive of the **same level**. The loader compares the Eigen alignment (`curcuma_<backend>_eigen_align()`) and refuses a plugin of the other level with a warning, then runs on the CPU.
+1. Download the AppImage and the plugin archive of the **same level and the same release or CI run**. The loader compares the Eigen alignment (`curcuma_<backend>_eigen_align()`) and the plugin ABI version (`curcuma_<backend>_abi_version()`, Nov 2026) and refuses a plugin of another level or source state with a warning, then runs on the CPU. A plugin and an executable from different commits are not supported even when the version matches: build both from the same source tree ([GPU_PLUGIN_STARTUP.md](GPU_PLUGIN_STARTUP.md)).
 2. Unpack the plugin archive next to the AppImage: `tar -xzf curcuma-<v>-plugin-cuda-<level>.tar.gz --strip-components=1` (the archives have the top directory `curcuma-<level>/`; with the executable archive, unpack everything into one directory without the option).
 3. Run `./curcuma-<v>-<level>-x86_64.AppImage -sp mol.xyz -method gfn2 -gpu cuda` (or `-gpu rocm`).
 

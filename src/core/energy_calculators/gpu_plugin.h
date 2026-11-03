@@ -65,6 +65,22 @@ void* resolveEntryPoint(const std::string& backend, const std::string& symbol);
 /// USE_VULKAN for dispatch (Claude Generated, Sep 2026).
 bool available(const std::string& backend);
 
+/**
+ * @brief Version and variant check of a freshly loaded plugin, before any plugin object is created.
+ *
+ * Calls `curcuma_<backend>_abi_version()` (must equal CURCUMA_GPU_PLUGIN_ABI_VERSION, gpu_plugin_abi.h; a missing
+ * symbol counts as a mismatch) and `curcuma_<backend>_eigen_align()` (must equal EIGEN_MAX_ALIGN_BYTES when present).
+ * @param handle  dlopen/LoadLibrary handle
+ * @param path    file name for the message
+ * @return empty if the plugin may be used, else the reason (one sentence, names path, found and expected value)
+ * Claude Generated (Nov 2026, S0).
+ */
+std::string checkPluginCompatibility(void* handle, const std::string& backend, const std::string& path);
+
+/// Why libcurcuma_<backend>.so was loaded but refused by checkPluginCompatibility() (empty if it was not refused or
+/// is absent). Probes the plugin like available(). Claude Generated (Nov 2026, S0).
+std::string rejectionReason(const std::string& backend);
+
 /// The backend names the loader knows, in priority order.
 const std::vector<std::string>& knownBackends();
 

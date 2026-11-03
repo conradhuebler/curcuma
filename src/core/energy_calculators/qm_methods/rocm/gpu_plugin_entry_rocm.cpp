@@ -5,6 +5,7 @@
 // ComputationalMethod and hands back a raw pointer the core wraps in a unique_ptr;
 // the config crosses the ABI as a JSON string. See gpu_plugin.h.
 #include "src/core/curcuma_logger.h"
+#include "src/core/energy_calculators/gpu_plugin_abi.h"
 #include "../gfnff_hip_method.h"      // GFNFFHipComputationalMethod
 #include "../xtb_hip_method.h"        // XtbHipComputationalMethod
 #include "../xtb_native.h"            // curcuma::xtb::MethodType
@@ -69,6 +70,10 @@ extern "C" {
 // Eigen alignment this plugin was compiled with; the loader compares it with the executable's
 // (Claude Generated, Oct 2026).
 int curcuma_rocm_eigen_align() { return EIGEN_MAX_ALIGN_BYTES; }
+
+// Plugin ABI version (gpu_plugin_abi.h); the loader refuses this plugin if it differs from the executable's
+// (Claude Generated, Nov 2026, S0).
+CURCUMA_GPU_PLUGIN_DEFINE_ABI_VERSION(rocm)
 
 int curcuma_rocm_device_count()
 {

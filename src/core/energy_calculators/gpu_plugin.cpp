@@ -16,6 +16,7 @@
 // Claude Generated (Jul 2026): see gpu_plugin.h for the rationale (fast CPU startup).
 
 #include "gpu_plugin.h"
+#include "gpu_plugin_abi.h"
 
 #include "src/core/curcuma_logger.h"
 
@@ -28,6 +29,7 @@
 #include <windows.h>
 #else
 #include <dlfcn.h>
+#include <link.h>
 #include <limits.h>
 #include <unistd.h>
 #endif
@@ -46,12 +48,76 @@ std::mutex g_mutex;
 // attempt so we do not re-probe (and re-log) every call.
 std::map<std::string, void*> g_handles;
 void* const FAILED_SENTINEL = reinterpret_cast<void*>(1);
+// Claude Generated (Nov 2026, S0): why a plugin that did load was refused (ABI version, Eigen alignment), per backend.
+std::map<std::string, std::string> g_rejections;
 
 #ifdef _WIN32
 constexpr const char* kPluginExt = ".dll";
 #else
 constexpr const char* kPluginExt = ".so";
 #endif
+
+template <typename FnPtr>
+FnPtr resolveSymbol(void* handle, const std::string& name)
+{
+#ifdef _WIN32
+    return reinterpret_cast<FnPtr>(::GetProcAddress(reinterpret_cast<HMODULE>(handle), name.c_str()));
+#else
+    ::dlerror();  // clear
+    return reinterpret_cast<FnPtr>(::dlsym(handle, name.c_str()));
+#endif
+}
+
+// Claude Generated (Nov 2026, S0): the file a handle was loaded from (for the messages); `fallback` if unknown.
+std::string loadedPath(void* handle, const std::string& fallback)
+{
+#ifdef _WIN32
+    char buf[MAX_PATH];
+    const DWORD n = ::GetModuleFileNameA(reinterpret_cast<HMODULE>(handle), buf, sizeof(buf));
+    return (n > 0 && n < sizeof(buf)) ? std::string(buf, n) : fallback;
+#else
+    struct link_map* lm = nullptr;
+    if (::dlinfo(handle, RTLD_DI_LINKMAP, &lm) == 0 && lm && lm->l_name && *lm->l_name)
+        return std::string(lm->l_name);
+    return fallback;
+#endif
+}
+
+void closeHandle(void* handle)
+{
+#ifdef _WIN32
+    ::FreeLibrary(reinterpret_cast<HMODULE>(handle));
+#else
+    ::dlclose(handle);
+#endif
+}
+
+} // namespace
+
+// Claude Generated (Nov 2026, S0): see gpu_plugin.h. Runs before any plugin object is created; only C functions
+// returning int are called, so a plugin with a different C++ ABI is never touched beyond its static initialisers.
+std::string checkPluginCompatibility(void* handle, const std::string& backend, const std::string& path)
+{
+    using int_fn = int (*)();
+    const std::string abi_sym = "curcuma_" + backend + "_abi_version";
+    auto abi = resolveSymbol<int_fn>(handle, abi_sym);
+    if (!abi || abi() != CURCUMA_GPU_PLUGIN_ABI_VERSION) {
+        const std::string found = abi ? std::to_string(abi()) : std::string("none (symbol ") + abi_sym + " missing, built before Nov 2026)";
+        return "GPU plugin '" + path + "' has plugin ABI version " + found + ", this curcuma expects "
+            + std::to_string(CURCUMA_GPU_PLUGIN_ABI_VERSION)
+            + "; rebuild the GPU plugin from the same source tree as the curcuma executable";
+    }
+    // The plugin shares Eigen objects with this executable, so both must use the same
+    // EIGEN_MAX_ALIGN_BYTES (32 for AVX2, 64 for AVX512). Every plugin with the ABI symbol also has this one.
+    auto align = resolveSymbol<int_fn>(handle, "curcuma_" + backend + "_eigen_align");
+    if (align && align() != EIGEN_MAX_ALIGN_BYTES)
+        return "GPU plugin '" + path + "' was built for Eigen alignment " + std::to_string(align())
+            + ", this curcuma uses " + std::to_string(EIGEN_MAX_ALIGN_BYTES)
+            + " (plugin and executable need the same AVX variant)";
+    return std::string();
+}
+
+namespace {
 
 // Load libcurcuma_<backend>.{so,dll}, preferring the copy next to the curcuma executable (so
 // no LD_LIBRARY_PATH/PATH entry is required), then the default loader search path. On POSIX,
@@ -82,12 +148,21 @@ void* pluginHandle(const std::string& backend, bool quiet = false)
     if (!handle) {
         if (!quiet) CurcumaLogger::warn("GPU plugin '" + soname + "' could not be loaded (error "
                             + std::to_string(::GetLastError()) + "); falling back to CPU.");
+    } else {
+        const std::string reason = checkPluginCompatibility(handle, backend, loadedPath(handle, soname));
+        if (!reason.empty()) {
+            CurcumaLogger::warn(reason + ". Not using it; falling back to CPU.");
+            g_rejections[backend] = reason;
+            closeHandle(handle);
+            handle = nullptr;
+        }
     }
 #else
     // Search order (Claude Generated, Oct 2026): $CURCUMA_PLUGIN_DIR, the executable's
     // directory, the directory of the AppImage file ($APPIMAGE; inside an AppImage the
     // executable sits in a read-only mount), $XDG_DATA_HOME/curcuma/plugins, then the loader path.
     std::vector<std::string> dirs;
+    std::string tried_path = soname;
     if (const char* d = std::getenv("CURCUMA_PLUGIN_DIR"))
         if (*d) dirs.emplace_back(std::string(d) + "/");
     char buf[PATH_MAX];
@@ -111,8 +186,10 @@ void* pluginHandle(const std::string& backend, bool quiet = false)
         dirs.emplace_back(std::string(h) + "/.local/share/curcuma/plugins/");
     for (const auto& dir : dirs) {
         handle = ::dlopen((dir + soname).c_str(), RTLD_NOW | RTLD_GLOBAL);
-        if (handle)
+        if (handle) {
+            tried_path = dir + soname;
             break;
+        }
         // A file that exists but does not load is the useful error; remember the last one.
         if (!::access((dir + soname).c_str(), R_OK)) {
             const char* e = ::dlerror();
@@ -122,17 +199,17 @@ void* pluginHandle(const std::string& backend, bool quiet = false)
     if (!handle)
         handle = ::dlopen(soname.c_str(), RTLD_NOW | RTLD_GLOBAL);
 
-    // The plugin shares Eigen objects with this executable, so both must use the same
-    // EIGEN_MAX_ALIGN_BYTES (32 for AVX2, 64 for AVX512). A plugin without the symbol is
-    // accepted (older build).
+    // Claude Generated (Nov 2026, S0): ABI version and Eigen alignment, before any plugin object exists. A refused
+    // plugin is reported even on a quiet probe (available()): it is a build mismatch the user has to fix, and the
+    // cached failure would otherwise make every later message say "not present".
     if (handle) {
-        using align_fn = int (*)();
-        auto fn = reinterpret_cast<align_fn>(::dlsym(handle, ("curcuma_" + backend + "_eigen_align").c_str()));
-        if (fn && fn() != EIGEN_MAX_ALIGN_BYTES) {
-            loadError = "built for Eigen alignment " + std::to_string(fn()) + ", this curcuma uses "
-                + std::to_string(EIGEN_MAX_ALIGN_BYTES) + " (plugin and executable need the same AVX variant)";
-            ::dlclose(handle);
-            handle = nullptr;
+        const std::string reason = checkPluginCompatibility(handle, backend, loadedPath(handle, tried_path));
+        if (!reason.empty()) {
+            CurcumaLogger::warn(reason + ". Not using it; falling back to CPU.");
+            g_rejections[backend] = reason;
+            closeHandle(handle);
+            g_handles[soname] = FAILED_SENTINEL;
+            return nullptr;
         }
     }
 
@@ -146,17 +223,6 @@ void* pluginHandle(const std::string& backend, bool quiet = false)
 #endif
     g_handles[soname] = handle ? handle : FAILED_SENTINEL;
     return handle;
-}
-
-template <typename FnPtr>
-FnPtr resolveSymbol(void* handle, const std::string& name)
-{
-#ifdef _WIN32
-    return reinterpret_cast<FnPtr>(::GetProcAddress(reinterpret_cast<HMODULE>(handle), name.c_str()));
-#else
-    ::dlerror();  // clear
-    return reinterpret_cast<FnPtr>(::dlsym(handle, name.c_str()));
-#endif
 }
 
 } // namespace
@@ -257,6 +323,14 @@ json deviceInfo(const std::string& backend, int index)
     } catch (...) {
         return json::object();
     }
+}
+
+std::string rejectionReason(const std::string& backend)
+{
+    pluginHandle(backend, /*quiet=*/true);
+    std::lock_guard<std::mutex> lock(g_mutex);
+    auto it = g_rejections.find(backend);
+    return it == g_rejections.end() ? std::string() : it->second;
 }
 
 bool available(const std::string& backend)

@@ -1096,3 +1096,47 @@ container box different from the cell, fought the container wrap (+L/-L every st
   seed flakes of A6 did not occur, so their tests were left unchanged. `scripts/check_docs.py`: the 9 known errors only.
 - Not tested: `-gpu` with a cell, RATTLE with a cell, modes 2/3, a restart file with a cell (restart keeps `m_dof = 3N` as
   before, independent of A6b), CG with a cell. Human production testing pending.
+
+## S0 GPU safety net before the periodic GPU port: plugin ABI version, wrapper refuses a cell (2026-11-03, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+On `feature/bulk` (base `89945e40`). Stage S0 of the GPU port plan (G0, scratchpad). Problem: A6 put
+`ComputationalMethod::hasPeriodicEnergy()` in the middle of the vtable, so every GPU plugin built before A6 calls wrong
+slots in a newer executable, and the loader checked only the Eigen alignment.
+
+- **ABI version**: `CURCUMA_GPU_PLUGIN_ABI_VERSION` 1 in `src/core/energy_calculators/gpu_plugin_abi.h` (rules for raising
+  it are in the header); CUDA, ROCm and Vulkan entry files export `curcuma_<backend>_abi_version()`; the loader checks it
+  right after `dlopen` (`gpu_plugin::checkPluginCompatibility`), before any plugin object exists. Missing symbol or other
+  value: warning naming path, found and expected version and "rebuild the GPU plugin from the same source tree as the
+  curcuma executable", counted fallback (`GPU plugin built from another source state (ABI/variant check)`), CPU;
+  `-gpu_strict true` exits with 3. Details: [GPU_PLUGIN_STARTUP.md](GPU_PLUGIN_STARTUP.md).
+- **Wrapper** `GFNFFGpuMethodImpl<Backend>` (CUDA and ROCm): `hasPeriodicEnergy()` explicitly false (until S4);
+  `setMolecule()` with `m_has_pbc` returns false with an error message, as a second line behind
+  `MethodFactory::periodicCellNeedsCpu()`; the multi-GPU Coulomb/EEQ split is cleared with a cell (third line; not
+  reachable today because `setMolecule()` refuses first). All batch paths (`GpuDevicePool` workers) go through the same
+  `setMolecule()`.
+- **Native gfn1/gfn2 on the GPU** (`XtbGpuComputationalMethod`, `xtb_gpu_adapter.h`): no cell handling, like the CPU
+  `NativeXtbMethod` (reads no `m_has_pbc`, TODO "Periodisch, kleinere Punkte"); unchanged, a cell is silently ignored on
+  both. Vulkan has no GFN-FF.
+- **Accessor for S3**: `GFNFF::activeEwaldParameters()` (public, const, returns a copy of `m_ewald_params`; zeros without
+  Ewald). No caller yet.
+
+Tests:
+- `gpu_plugin_abi` (new, no GPU, stand-in plugins from `test_cases/unit/gpu_plugin_abi_stub/`): without the symbol and
+  with version 2 refused with path, found/expected version and the rebuild hint; version 1 accepted; Eigen alignment 8
+  refused; absent plugin is no rejection; 23/23 checks. `gpu_plugin_abi_cli` (new): stand-in `libcurcuma_cuda.so`
+  without version through `curcuma -sp -gpu cuda`: message, counted fallback, energy equal to the CPU run
+  (-2.618188272291070 Eh, water8); `-gpu_strict true` exit 3; right version: loaded, then "missing entry point" fallback.
+- CUDA (RTX 5080, CUDA 13.3, `-DCMAKE_CUDA_ARCHITECTURES=120`, fresh build directory outside the repo, `make -j6 curcuma
+  curcuma_cuda` 448 s, incremental 176 s): water8 without a cell GPU -2.618188272291102 vs CPU -2.618188272291070 Eh
+  (dE 3.2e-14), max |dG| 5.6e-15 Eh/A, two GPU runs md5-identical; with `unitcell 200 200 200`: warning, 1 counted
+  fallback, result md5-identical to the CPU run with the cell, `-gpu_strict true` exit 3; the real plugin with the
+  version symbol renamed in the binary: refused, CPU energy, strict exit 3; `gfnff_gpu_pbc_refuse` (new, CUDA only:
+  wrapper constructed directly, guard bypassed): cell refused with the message, no cell sets up, `hasPeriodicEnergy()`
+  false; `gfnff_gpu_builtin_molecules`, `pbc_gpu_guard`, `gpu_plugin_abi(_cli)` green in the CUDA build.
+- No cell, CPU: `-sp -dump_gradient` 7 structures x 1/4 threads 14/14 md5-identical to the binary before S0;
+  `ctest -j1 -R 'gfnff|frag|eeq|simplemd|pbc|ewald|react|restart|md_|gpu|plugin'` 129 tests, 0 failed, 2 skipped (GPU
+  tests without plugin, as before); the A6 seed flakes did not occur, so they were left unchanged.
+- Not tested: ROCm (no SDK here; the entry file and the wrapper change are compiled only in the CUDA build, the ROCm
+  entry file not at all), Vulkan plugin build, Windows, multi-GPU split with a cell (one GPU), an old CUDA plugin
+  actually built from a pre-A6 tree (the renamed-symbol copy stands in for it), GPU bitwise against the plugin before S0.
+  `libcurcuma_cuda_mgpu.so` (loaded by the CUDA plugin) has no version. Human production testing pending.

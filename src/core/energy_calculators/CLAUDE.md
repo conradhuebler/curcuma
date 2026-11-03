@@ -8,6 +8,7 @@ Every energy method behind one interface. `EnergyCalculator` (`src/core/energyca
 - `computational_method.h` - the abstract interface
 - `method_factory.{h,cpp}` - table-driven registry (`methodTable()`, one `MethodDescriptor` per family)
 - `gpu_plugin.{h,cpp}` - runtime `dlopen` loader for `libcurcuma_{cuda,rocm,vulkan}.so` ([docs/GPU_PLUGIN_STARTUP.md](../../../docs/GPU_PLUGIN_STARTUP.md))
+- `gpu_plugin_abi.h` - `CURCUMA_GPU_PLUGIN_ABI_VERSION`: raise it with every change to `ComputationalMethod`, the plugin C entry points or shared class layouts; the loader refuses a plugin with another value
 - `qm_methods/` - native xTB/EHT/NDDO and external QM wrappers (own CLAUDE.md)
 - `ff_methods/` - FFWorkspace engine, GFN-FF, UFF/QMDFF/CG (own CLAUDE.md)
 - `dispersion/` - D4 data, charge model and evaluator (own CLAUDE.md)

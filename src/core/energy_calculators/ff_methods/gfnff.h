@@ -2703,6 +2703,11 @@ public:
 
     // Claude Generated (April 2026): PBC accessors for GPU path
     bool hasPBC() const { return m_has_pbc; }
+    /// Claude Generated (Nov 2026, S0): copy of the Ewald parameters in force (alpha, r_cut, k_max in atomic units), as
+    /// fixed by configurePeriodicEwald() and shared by the EEQ matrix and the Coulomb energy; all zero when the Ewald
+    /// sum is inactive. For the GPU port (stage S3), so that host and device use the same parameters. Not to be
+    /// confused with the private ewaldParameters(), which recomputes them from the options.
+    curcuma::ewald::EwaldParameters activeEwaldParameters() const { return m_ewald_params; }
     Eigen::Matrix3d getUnitCellBohr() const {
         constexpr double ANG2BOHR = CurcumaUnit::Length::ANGSTROM_TO_BOHR;
         return m_unit_cell * ANG2BOHR;

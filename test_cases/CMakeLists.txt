@@ -547,6 +547,16 @@ if(USE_CUDA)
             PROPERTIES TIMEOUT 120 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;validation")
     endforeach()
 
+    # Claude Generated (Nov 2026, S0): the CUDA wrapper refuses a periodic cell even when the guard is bypassed
+    add_executable(test_gfnff_gpu_pbc_refuse unit/test_gfnff_gpu_pbc_refuse.cpp)
+    target_link_libraries(test_gfnff_gpu_pbc_refuse curcuma_core curcuma_cuda CUDA::cudart test_molecule_registry)
+    target_compile_definitions(test_gfnff_gpu_pbc_refuse PRIVATE USE_CUDA)
+    if(USE_PCH)
+        target_precompile_headers(test_gfnff_gpu_pbc_refuse REUSE_FROM curcuma_core)
+    endif()
+    add_test(NAME gfnff_gpu_pbc_refuse COMMAND test_gfnff_gpu_pbc_refuse WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    set_tests_properties(gfnff_gpu_pbc_refuse PROPERTIES TIMEOUT 120 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;pbc")
+
     # Claude Generated (March 2026): GPU analytical vs numerical gradient test
     add_executable(test_gpu_numgrad unit/test_gpu_numgrad.cpp)
     target_link_libraries(test_gpu_numgrad curcuma_core CUDA::cudart)
@@ -804,6 +814,42 @@ if(USE_PCH)
 endif()
 add_test(NAME pbc_gpu_guard COMMAND test_pbc_gpu_guard WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 set_tests_properties(pbc_gpu_guard PROPERTIES TIMEOUT 120 LABELS "pbc;gfnff;gpu")
+
+# GPU plugin ABI version check (S0, gpu_plugin_abi.h) - Claude Generated (Nov 2026). Runs without a GPU: stand-in
+# plugins (no GPU code) without the version symbol, with a wrong and with the right version, and with a wrong Eigen
+# alignment. Each lives in its own output directory so that no stand-in can ever sit next to the curcuma executable.
+if(NOT WIN32)
+    function(curcuma_abi_stub target backend outdir)
+        add_library(${target} SHARED unit/gpu_plugin_abi_stub/stub_plugin.cpp)
+        target_include_directories(${target} PRIVATE ${CMAKE_SOURCE_DIR} $<TARGET_PROPERTY:curcuma_core,INCLUDE_DIRECTORIES>)
+        target_compile_definitions(${target} PRIVATE STUB_BACKEND=${backend} ${ARGN})
+        set_target_properties(${target} PROPERTIES OUTPUT_NAME curcuma_${backend}
+            LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${outdir})
+    endfunction()
+    set(_abi_stub_dir abi_stub)
+    curcuma_abi_stub(abi_stub_none abitest_none ${_abi_stub_dir})
+    curcuma_abi_stub(abi_stub_wrong abitest_wrong ${_abi_stub_dir} "STUB_ABI=(CURCUMA_GPU_PLUGIN_ABI_VERSION+1)")
+    curcuma_abi_stub(abi_stub_ok abitest_ok ${_abi_stub_dir} "STUB_ABI=CURCUMA_GPU_PLUGIN_ABI_VERSION")
+    curcuma_abi_stub(abi_stub_align abitest_align ${_abi_stub_dir} "STUB_ABI=CURCUMA_GPU_PLUGIN_ABI_VERSION" STUB_ALIGN=8)
+    # Stand-ins named like the real CUDA plugin, for the CLI check (CURCUMA_PLUGIN_DIR selects one of them)
+    curcuma_abi_stub(abi_stub_cuda_old cuda abi_stub_cuda_old)
+    curcuma_abi_stub(abi_stub_cuda_ok cuda abi_stub_cuda_ok "STUB_ABI=CURCUMA_GPU_PLUGIN_ABI_VERSION")
+
+    add_executable(test_gpu_plugin_abi unit/test_gpu_plugin_abi.cpp)
+    target_link_libraries(test_gpu_plugin_abi curcuma_core ${CMAKE_DL_LIBS})
+    add_dependencies(test_gpu_plugin_abi abi_stub_none abi_stub_wrong abi_stub_ok abi_stub_align abi_stub_cuda_old abi_stub_cuda_ok)
+    if(USE_PCH)
+        target_precompile_headers(test_gpu_plugin_abi REUSE_FROM curcuma_core)
+    endif()
+    add_test(NAME gpu_plugin_abi COMMAND test_gpu_plugin_abi ${CMAKE_CURRENT_BINARY_DIR}/${_abi_stub_dir})
+    set_tests_properties(gpu_plugin_abi PROPERTIES TIMEOUT 60 LABELS "gpu;plugin")
+    add_test(NAME gpu_plugin_abi_cli
+        COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_gpu_plugin_abi_cli.sh $<TARGET_FILE:curcuma>
+                ${CMAKE_CURRENT_BINARY_DIR}/abi_stub_cuda_old ${CMAKE_CURRENT_BINARY_DIR}/abi_stub_cuda_ok
+                ${CMAKE_SOURCE_DIR}/test_cases/structures/clusters/water8-cluster.xyz
+                ${CMAKE_CURRENT_BINARY_DIR}/gpu_plugin_abi_cli_work)
+    set_tests_properties(gpu_plugin_abi_cli PROPERTIES TIMEOUT 120 LABELS "gpu;plugin")
+endif()
 
 # Streaming trajectory properties. Claude Generated 2026 - geometry worked out by hand.
 add_executable(test_trajprops test_trajprops.cpp)

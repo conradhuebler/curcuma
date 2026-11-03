@@ -41,6 +41,10 @@ using json = nlohmann::json;
  * - Error handling and status reporting
  * 
  * Claude Generated: Big-Bang refactoring of EnergyCalculator architecture
+ *
+ * ABI (Nov 2026, S0): GPU plugins derive from this class in a separately built .so. Any change to its virtual
+ * functions or members must raise CURCUMA_GPU_PLUGIN_ABI_VERSION in gpu_plugin_abi.h, so that an old plugin is
+ * refused instead of calling the wrong vtable slot.
  */
 class ComputationalMethod {
 public:

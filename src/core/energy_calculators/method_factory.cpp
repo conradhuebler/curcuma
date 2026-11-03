@@ -193,6 +193,14 @@ static std::string resolveGpuMode(const json& config, const char* label) {
         return "none";
     }
     if (!gpu_plugin::available(gpu_mode)) {
+        // Claude Generated (Nov 2026, S0): the plugin exists but was refused (ABI version or Eigen alignment differs
+        // from this executable); the loader has already printed why, so do not claim it is missing.
+        const std::string rejected = gpu_plugin::rejectionReason(gpu_mode);
+        if (!rejected.empty()) {
+            curcuma::reportGpuFallback(std::string(label) + ": GPU plugin built from another source state (ABI/variant check), "
+                                       "calculation on the CPU", rejected);
+            return "none";
+        }
         std::string upper = gpu_mode;
         std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
         CurcumaLogger::warn(std::string(label) + ": GPU acceleration requested (-gpu " + gpu_mode

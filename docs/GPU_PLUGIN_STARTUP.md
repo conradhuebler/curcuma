@@ -105,8 +105,21 @@ points, one `add_library(curcuma_<b> SHARED …)` block, and appending `"<b>"` t
 
 Linux search order for `libcurcuma_<backend>.so` (`gpu_plugin.cpp`, `pluginHandle`): `$CURCUMA_PLUGIN_DIR`, the executable's directory, the directory of the AppImage file (`$APPIMAGE`), `$XDG_DATA_HOME/curcuma/plugins` (else `~/.local/share/curcuma/plugins`), then the loader's default path. Windows is unchanged (executable directory, then default path).
 
-Plugin and executable share Eigen objects, so both need the same `EIGEN_MAX_ALIGN_BYTES` (AVX2 32, AVX512 64). Each plugin exports `curcuma_<backend>_eigen_align()`; the loader refuses a plugin whose value differs and falls back to the CPU with a warning. A plugin without the symbol is accepted.
+Plugin and executable share Eigen objects, so both need the same `EIGEN_MAX_ALIGN_BYTES` (AVX2 32, AVX512 64). Each plugin exports `curcuma_<backend>_eigen_align()`; the loader refuses a plugin whose value differs and falls back to the CPU with a warning. A plugin without the symbol is accepted (every plugin with the ABI version below has it).
 
 CI (`ci-variants.yml`) packs the executable and each plugin as separate archives per variant (`curcuma-linux-<isa>`, `curcuma-plugin-cuda-<isa>`, `curcuma-plugin-rocm-<isa>`, all with top directory `curcuma-<isa>/`). Vulkan is not packaged.
 
 AppImage (`ci-variants.yml`, step "AppImage"): built per ISA from the executable archive only (`curcuma-<isa>-x86_64.AppImage`), plugins are not inside and are found next to the `.AppImage` file. CI check on the AVX2 variant (runner without GPU): CUDA plugin archive unpacked beside the AppImage, `-gpu cuda -method gfn2` printed the GPU-fallback warning and no "could not be loaded" warning. Not checked: a run on a machine with a GPU, the AVX512 AppImage (runner lacks AVX512), starting the AppImage on another distribution.
+
+## Plugin ABI version (Nov 2026, S0)
+
+> 🤖 AI-generated, ⚙️ machine-tested (ctests `gpu_plugin_abi`, `gpu_plugin_abi_cli` with stand-in plugins, no GPU; CUDA run: WP-PERIODIC-NONBONDED.md S0).
+
+Plugin and executable exchange C++ objects (`ComputationalMethod` vtable, `GFNFF`, `Mol`, Eigen, json). A plugin built from another source state calls the wrong virtual function without any message; A6 (`hasPeriodicEnergy()` inserted in the middle of the `ComputationalMethod` vtable) made every older plugin such a case.
+
+- One constant `CURCUMA_GPU_PLUGIN_ABI_VERSION` in `src/core/energy_calculators/gpu_plugin_abi.h`, included by the loader and by all three entry files (`cuda/`, `rocm/`, `vulkan/gpu_plugin_entry_*.cpp`). Each plugin exports `extern "C" int curcuma_<backend>_abi_version()` (macro `CURCUMA_GPU_PLUGIN_DEFINE_ABI_VERSION(<backend>)`). Value 1 since S0; plugins without the symbol (built before Nov 2026) count as 0.
+- `pluginHandle()` calls `gpu_plugin::checkPluginCompatibility()` right after `dlopen`, before any `create_*` call: version first (missing symbol or other value = refused), then the Eigen alignment. A refused plugin is closed, cached as failed and reported even on the quiet `available()` probe; `gpu_plugin::rejectionReason(backend)` returns the text.
+- Message (verbosity >= 1): `GPU plugin '<path>' has plugin ABI version <found>, this curcuma expects <N>; rebuild the GPU plugin from the same source tree as the curcuma executable. Not using it; falling back to CPU.` (`<found>` is `none (symbol curcuma_<b>_abi_version missing, built before Nov 2026)` for an old plugin).
+- `resolveGpuMode()` (method factory) then counts the fallback `<label>: GPU plugin built from another source state (ABI/variant check), calculation on the CPU`; `-gpu_strict true` exits with code 3, otherwise the run continues on the CPU.
+- **Raise the version by one** with every change to what plugin and executable share: `ComputationalMethod` (virtuals added, removed, reordered, signatures, members), the `curcuma_<backend>_*` C entry points, the layout of classes used on both sides (`GFNFF` and its members, `FFWorkspace`, `Mol`, parameter structs), or compile definitions that change such layouts. When unsure, raise it.
+- Not covered: `libcurcuma_cuda_mgpu.so` (loaded by the CUDA plugin itself, no version), Windows (no plugin is built there; the check is compiled but never run).
