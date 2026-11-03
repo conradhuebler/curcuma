@@ -32,7 +32,8 @@
  *       momentum conserved;
  *   (c) UFF and GFN-FF without a cell, same container, a water whose wrap destination is
  *       occupied: the clearance/reflection fallback still runs (refusals and reflections > 0);
- *   (d) container bounds that differ from the cell: with a periodic energy only the cell wraps.
+ *   (d) container bounds that differ from the cell: with a periodic energy only the cell wraps; with
+ *       coulomb_ewald false only the container wraps (A6b: no cell wrap for a non-periodic energy).
  */
 
 #include "src/capabilities/simplemd.h"
@@ -352,6 +353,10 @@ int main()
         } else {
             check(!sim.wallWrapByCell(), "(d) fallback: coulomb_ewald false keeps the container path");
             check(sim.containerWrapCount() + sim.containerRefusedCount() > 0, "(d) fallback: the container path acts (pre-A6 behaviour)");
+            // A6b: a non-periodic energy is not wrapped into the cell, so the two wraps no longer fight
+            // (before A6b: 398 cell + 400 container wraps in 200 steps).
+            check(sim.cellWrapCount() == 0, "(d) fallback: no cell wrap for a non-periodic energy (A6b)");
+            check(sim.containerWrapCount() <= 2, "(d) fallback: no back-and-forth wrapping (A6b)");
         }
     }
 

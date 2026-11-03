@@ -4,8 +4,9 @@
 repulsion, bonded, HB/XB, topology; Ewald Coulomb and EEQ with `coulomb_ewald`, A1-B3, P1). With such a cell
 `wall_potential = pbc` in a box is the pure cell wrap, without clearance test or reflection (A6). The stopgap
 described below **stays** for everything that has no periodic energy: no cell, the spherical container, every other
-method (gfn1/gfn2, external xtb/tblite/Ulysses, UFF, QMDFF, CG) and GFN-FF with `coulomb_ewald false`. Open: GPU
-paths with a cell (CPU fallback), triclinic cells, NPT.
+method (gfn1/gfn2, external xtb/tblite/Ulysses, UFF, QMDFF, CG) and GFN-FF with `coulomb_ewald false`; for those a
+cell is not wrapped and the COM removal is the vacuum one (A6b, matrix there). Open: GPU paths with a cell (CPU
+fallback), triclinic cells, NPT.
 
 ## What exists today
 
@@ -1043,3 +1044,55 @@ what changes there is that the container path is no longer entered. (n = 1 traje
    energy (images interact), and small auto-sized boxes turn into a hard error.
 2. **Cell + non-periodic method**: skip the container wrap whenever a cell is set (removes the +L/-L ping-pong of (d)),
    or refuse a cell for methods without periodic energy. Effort < 1 h each; changes trajectories of such runs.
+   **Done differently in A6b**: the cell wrap is skipped instead (operator decision).
+
+## A6b a unit cell with a non-periodic method: no cell wrap, vacuum COM removal (2026-11-03, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+On `feature/bulk` (base `15e91ab0`), CPU only. Closes option 2 of A6 (operator decision): with a cell and a method whose
+energy does not read the cell (`hasPeriodicEnergy()` false: native gfn1/gfn2, xtb/tblite/Ulysses, uff, qmdff, cg, GFN-FF
+with `coulomb_ewald false`) `applyPeriodicBoundaryConditions()` is skipped. Reason: such an energy is translation invariant,
+so the wrap changes nothing physical, but it moves a fragment by L without a clearance test (overlap risk) and, with a
+container box different from the cell, fought the container wrap (+L/-L every step, A6 (d)).
+
+- **One flag**: `SimpleMD::m_periodic_energy = m_has_pbc && EnergyCalculator::hasPeriodicEnergy()`, set once in
+  `SimpleMD::Initialise()` right after `setMolecule()` (GPU-to-CPU swap done), read by `InitialiseWalls()` (A6 decision, no
+  second query), `InitConstrainedBonds()` (DOF), `applyPeriodicBoundaryConditions()` and `RemoveRotation()`.
+- **Callers of the cell wrap** (`grep`): only `SimpleMD::Verlet()` and `SimpleMD::Rattle()` (end of step, before
+  `wrapIntoContainer()`); no call at initialisation or restart, so the gate in the function covers every path.
+- **D1 consequence**: the D1 translation-only removal and -3 DOF were needed because wraps break angular momentum
+  conservation. Without a wrap the run is the vacuum run in a cell that nobody reads, L is conserved, so the vacuum
+  removal (translation + rotation, -6 DOF; -5 for 2 atoms, -3 for 1) applies again. Measured: uff/gfn2 + cell give the
+  E_tot series bitwise equal to the same run without a cell (below).
+- **Warning** at verbosity 1, once per run (`InitialiseWalls()`): `unit cell set but the energy of method X is not periodic:
+  coordinates are not wrapped into the cell` (replaces the A6 warning "fragments are wrapped ... without minimum image",
+  now also printed together with the `wall_potential pbc` fallback warning). The container wrap is unchanged.
+- Behaviour change also for pure-CG systems with a cell: the per-bead wrap is gone (the cg force field does not read the
+  cell either, `grep` for cell/MIC in `energy_calculators/`).
+
+| cell | periodic energy | cell wrap | container wrap (`wall_potential pbc`) | COM removal (mode 1) | DOF removed |
+|---|---|---|---|---|---|
+| no | (always false) | no | clearance/reflection fallback | translation + rotation | 6 |
+| yes | no (all but CPU GFN-FF + `coulomb_ewald`) | **no (A6b; before: yes)** | clearance/reflection fallback | **translation + rotation (A6b; before: translation)** | **6 (before: 3)** |
+| yes | yes | yes (fragment COM into [0,1)) | skipped in a box (A6), fallback in a sphere | translation only (D1) | 3 |
+
+### Tests
+
+- New ctest `pbc_md_nonperiodic_cell` (`test_cases/unit/test_pbc_md_nonperiodic_cell.cpp`, 0.1 s): (a) registry water dimer at
+  the origin, cell L = 44 Bohr ([0, L), so the dimer starts outside it), `wall_potential pbc` box [-L/2, L/2), fresh 300 K start
+  seed 7, NVE 200 steps of 0.5 fs, removal every 10 fs: uff and gfn2 each 0 cell wraps, 0 container actions, DOF 12 = 3N-6, and the
+  E_tot series **bitwise equal** to the run without a cell, so the drift is that of the vacuum reference (gfn2 9.6e-6 Eh/ps,
+  max-min 6.6e-5 Eh, n = 1); (b) uff, box = cell, dimer drifting through +x: 0 cell wraps, 2 container wraps; (c) gfnff + cell DOF
+  15 = 3N-3 (periodic), gfnff + cell + `coulomb_ewald false` DOF 12.
+- `pbc_md_wrap_pure` (d) fallback (`coulomb_ewald false`, box [-L/2, L/2)): 0 cell wraps, 2 container wraps in 200 steps
+  (A6: 398 + 400); two checks added. `pbc_md_com_removal` (gfnff, periodic) unchanged and green.
+- **Finding, not A6b**: uff NVE on the water dimer is not energy conserving at dt 0.5 fs, with or without a cell and with the
+  binary before A6b as well (CLI `-md -method uff`, `water-dimer.roo2.8`, seed 7: E_tot 0.009 -> 0.39 Eh in 100 fs, identical
+  table old/new). The uff part of the test therefore checks bitwise equality with vacuum, not a drift bound. Not root-caused.
+- No cell, bitwise vs the binary before A6b: `-sp -dump_gradient` (file md5 incl. the 16-digit energy line) on benzene, caffeine,
+  methyl-a-d-glucopyranoside, water8, hydronium-water2 (+1), urea-water197, peo201-water500 at 1 and 4 threads 14/14 identical;
+  `-md` gfnff 200 fs seed 7, 4 threads, caffeine and water8: energy table (without the wall-clock column) and trajectory (without
+  the version string) identical.
+- `ctest -j1 -R 'gfnff|frag|eeq|simplemd|pbc|ewald|react|restart|md_'`: 125 tests, 0 failed, 1 skipped (GPU), one run; the two
+  seed flakes of A6 did not occur, so their tests were left unchanged. `scripts/check_docs.py`: the 9 known errors only.
+- Not tested: `-gpu` with a cell, RATTLE with a cell, modes 2/3, a restart file with a cell (restart keeps `m_dof = 3N` as
+  before, independent of A6b), CG with a cell. Human production testing pending.

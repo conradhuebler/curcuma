@@ -38,8 +38,9 @@ Hessian, docking. Energies and gradients always come from `EnergyCalculator`. Do
 - `RMSDDriver` writes `<target>.rmsd.json` (rmsd, rmsd_raw, permutation, reference_xyz, reorder_xyz, file names) to BMT and CWD, also without reordering
 - BMT via `initializeBMT()`: md, hessian, qmdfffit, confsearch, confscan, confstat, dock, rmsd, polymerbuild; via `BMTUtils::`: sp, opt, analysis
 - Analysis files: `basename.general.csv`, `basename.NNN.<type>.csv`, `basename.<type>_statistics.csv`
-- Pure-CG MD (`Molecule::isCGSystem()`, all atoms CG): timestep x10, PBC wrapping, VTF trajectory (`cg_write_vtf`)
-- SimpleMD wraps twice per step: `applyPeriodicBoundaryConditions()` (cell) then `wrapIntoContainer()` (`wall_potential pbc`, clearance/reflection stopgap); the second is skipped only when `EnergyCalculator::hasPeriodicEnergy()` and a box (WP-PERIODIC-NONBONDED A6)
+- Pure-CG MD (`Molecule::isCGSystem()`, all atoms CG): timestep x10, VTF trajectory (no cell wrap since A6b: the cg energy does not read the cell) (`cg_write_vtf`)
+- SimpleMD wraps per step: `applyPeriodicBoundaryConditions()` (cell) only if `m_periodic_energy` (cell AND `EnergyCalculator::hasPeriodicEnergy()`, cached after `setMolecule`), then `wrapIntoContainer()` (`wall_potential pbc` stopgap), skipped with a periodic energy in a box (WP-PERIODIC-NONBONDED A6, A6b)
+- `m_periodic_energy` also selects the COM removal: translation only, -3 DOF; otherwise (no cell, or cell + non-periodic method) translation + rotation, -6 DOF (D1, A6b)
 
 ## Status
 

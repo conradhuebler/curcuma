@@ -1045,6 +1045,10 @@ bool SimpleMD::Initialise()
         CurcumaLogger::error("MD setup failed while setting the molecule: " + m_interface->ErrorMessage());
         return false;
     }
+    // Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A6b): asked once, here, after setMolecule(): a GPU
+    // GFN-FF with a cell has been replaced by the CPU method by now. Read by InitialiseWalls(), the DOF count
+    // (InitConstrainedBonds), applyPeriodicBoundaryConditions() and RemoveRotation().
+    m_periodic_energy = m_has_pbc && m_interface->hasPeriodicEnergy();
     // Energy-method-setup boundary (Claude Generated, Jun 2026): EnergyCalculator construction +
     // setMolecule (e.g. GFN-FF parameter generation) leaves the global CurcumaLogger verbosity
     // clamped to 0 (it captures/restores around an already-clamped level), so the remaining setup
@@ -1280,8 +1284,9 @@ void SimpleMD::InitConstrainedBonds()
             return 6;              // 3 trans + 3 rot (non-linear)
         };
         if (m_rmrottrans == 1) {
-            // With a cell RemoveRotation() removes the translation only (see there).
-            dof_com_removed = m_has_pbc ? 3 : dof_for_fragment(static_cast<size_t>(m_natoms));
+            // With a cell and a periodic energy RemoveRotation() removes the translation only (see there);
+            // a cell with a non-periodic energy (A6b: no wrap) is the vacuum case.
+            dof_com_removed = m_periodic_energy ? 3 : dof_for_fragment(static_cast<size_t>(m_natoms));
         } else {
             for (const auto& frag : m_molecule.GetFragments())
                 dof_com_removed += dof_for_fragment(frag.size());
@@ -1670,7 +1675,7 @@ void SimpleMD::InitialiseWalls()
     // wrap (one lattice vector per fragment) and wrapIntoContainer() is skipped. A sphere has no lattice and
     // keeps the container rule. Logging only below; the fallback path is unchanged bit for bit.
     {
-        const bool periodic_energy = m_has_pbc && m_interface && m_interface->hasPeriodicEnergy();
+        const bool periodic_energy = m_periodic_energy; // A6b: cached after setMolecule() in Initialise()
         m_wall_wrap_by_cell = m_wall_wrap && m_wall_type == 2 && periodic_energy;
         if (m_wall_wrap_by_cell) {
             const Eigen::Matrix3d cell = m_molecule.getUnitCell();
@@ -1695,9 +1700,13 @@ void SimpleMD::InitialiseWalls()
                 m_method,
                 m_wall_type == 1 ? " (spherical container, no lattice)"
                                  : (m_has_pbc ? " (the method ignores the unit cell)" : " (no unit cell)")));
-        } else if (m_has_pbc && !periodic_energy && m_verbosity >= 1) {
-            CurcumaLogger::warn(fmt::format("unit cell set, but the energy of method {} is not periodic: fragments are "
-                                            "wrapped into the cell without minimum image in the energy",
+        }
+        // A6b: with a cell and a non-periodic energy the cell wrap is skipped (the energy is translation
+        // invariant, a wrap only risks landing on another molecule), and the COM/rotation removal is the
+        // vacuum one (angular momentum is conserved without wraps). The container wrap above is unchanged.
+        if (m_has_pbc && !periodic_energy && m_verbosity >= 1) {
+            CurcumaLogger::warn(fmt::format("unit cell set but the energy of method {} is not periodic: coordinates "
+                                            "are not wrapped into the cell",
                 m_method));
         }
     }
@@ -3505,7 +3514,10 @@ void SimpleMD::wrapIntoContainer()
 // one fragment and nothing would ever be wrapped.
 void SimpleMD::applyPeriodicBoundaryConditions()
 {
-    if (!m_has_pbc) return;
+    // A6b (Nov 2026): only a periodic energy (cell AND EnergyCalculator::hasPeriodicEnergy()) is wrapped.
+    // For every other method the energy does not read the cell, so a wrap changes nothing but can put a
+    // fragment onto another one (no clearance test here); it also fought the container wrap (+L/-L per step).
+    if (!m_periodic_energy) return;
 
     const Eigen::Matrix3d cell = m_molecule.getUnitCell();
     const Eigen::Matrix3d cell_inv = m_molecule.getUnitCellInverse();
@@ -5371,8 +5383,10 @@ void SimpleMD::RemoveRotation()
     // remove_com_motion fs removed 1/2 L^T I^-1 L of kinetic energy each time: 60 H2O in
     // L = 44 Bohr lost 6e-3 Eh/ps in NVE, 8 H2O 3e-3 Eh/ps, nothing with the removal off.
     // In a periodic system only the translation is removed (DOF count: InitConstrainedBonds).
+    // A6b: "periodic" means cell AND periodic energy; with a cell and a non-periodic method nothing is
+    // wrapped, L is conserved as in vacuum, and the full removal runs.
     Position omega = { 0, 0, 0 };
-    if (m_natoms > 1 && !m_has_pbc) {
+    if (m_natoms > 1 && !m_periodic_energy) {
         Eigen::JacobiSVD<Geometry> svd(matrix, Eigen::ComputeFullU | Eigen::ComputeFullV);
         const double sv0 = svd.singularValues()(0);
         const double sv_tol = 1e-12 * std::max(sv0, 1e-300);

@@ -786,6 +786,15 @@ endif()
 add_test(NAME pbc_md_wrap_pure COMMAND test_pbc_md_wrap_pure WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 set_tests_properties(pbc_md_wrap_pure PROPERTIES TIMEOUT 300 LABELS "pbc;simplemd;gfnff")
 
+# Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A6b): a cell with a non-periodic method is not wrapped, vacuum COM removal
+add_executable(test_pbc_md_nonperiodic_cell unit/test_pbc_md_nonperiodic_cell.cpp)
+target_link_libraries(test_pbc_md_nonperiodic_cell curcuma_core test_molecule_registry)
+if(USE_PCH)
+    target_precompile_headers(test_pbc_md_nonperiodic_cell REUSE_FROM curcuma_core)
+endif()
+add_test(NAME pbc_md_nonperiodic_cell COMMAND test_pbc_md_nonperiodic_cell WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(pbc_md_nonperiodic_cell PROPERTIES TIMEOUT 300 LABELS "pbc;simplemd")
+
 # Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A3b): a periodic cell sends a GPU GFN-FF method to the CPU
 # (MethodFactory::periodicCellNeedsCpu); runs without a GPU, with a stand-in for the plugin wrapper.
 add_executable(test_pbc_gpu_guard unit/test_pbc_gpu_guard.cpp)

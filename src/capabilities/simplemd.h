@@ -351,6 +351,10 @@ public:
     long containerRefusedCount() const { return m_container_refused; }
     long containerReflectionCount() const { return m_container_reflections; }
     bool wallWrapByCell() const { return m_wall_wrap_by_cell; }
+    /// A6b: cell set and periodic energy; only then does applyPeriodicBoundaryConditions() wrap.
+    bool periodicEnergy() const { return m_periodic_energy; }
+    /// D1/A6b: degrees of freedom used for the temperature (after RATTLE and COM/rotation removal).
+    int degreesOfFreedom() const { return m_dof; }
     double potentialEnergy() const { return m_Epot; }
     double kineticEnergy() const { return m_Ekin; }
     double currentTemperature() const { return m_T; }
@@ -433,7 +437,9 @@ private:
     void PrintMatrix(const double* matrix) const;
 
     bool WriteGeometry();
-    void applyPeriodicBoundaryConditions();  // Claude Generated (Oct 2025): PBC wrapping
+    /// Claude Generated (Oct 2025): PBC wrapping. A6b (Nov 2026): a no-op unless m_periodic_energy (cell AND a
+    /// method whose energy reads the cell); a translation-invariant energy gains nothing from the wrap.
+    void applyPeriodicBoundaryConditions();
 
     /**
      * @brief Re-enter molecules that left the wall container on the opposite side.
@@ -669,6 +675,10 @@ private:
     long m_container_refused = 0;        ///< A6: wraps refused by the clearance test (fallback path)
     long m_container_reflections = 0;    ///< A6: refused wraps answered with an elastic reflection
     long m_cell_wraps = 0;               ///< A6: fragments moved by a lattice vector in applyPeriodicBoundaryConditions()
+    /// Claude Generated (Nov 2026, A6b): unit cell set AND EnergyCalculator::hasPeriodicEnergy(), asked once
+    /// after setMolecule() (GPU-to-CPU swap done). Gates the cell wrap and the D1 translation-only COM removal
+    /// (-3 DOF); false with a cell and a non-periodic method: no cell wrap, vacuum removal (-6 DOF).
+    bool m_periodic_energy = false;
     StopReason m_stop_reason = StopReason::Running;  ///< see stopReason()
     std::vector<json> m_run_states;      // rescue states carried across step() calls
     json m_last_dump_state;              // K6 (Oct 2026): state of the last WriteGeometry() dump, -rescue only
