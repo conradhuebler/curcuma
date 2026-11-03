@@ -1001,6 +1001,15 @@ EEQSolver::EEQSolver(const ConfigManager& config)
     m_matrix_rebuild_eps   = m_config.get<double>("eeq_matrix_rebuild_eps_bohr", 0.0);
     m_eeq_extrapolation    = m_config.get<std::string>("eeq_extrapolation", "none");
     m_eeq_extrap_order     = m_config.get<int>("eeq_extrapolation_order", 3);
+    m_ewald_precond        = m_config.get<std::string>("eeq_ewald_precond", "block");      // P1 (Nov 2026)
+    m_ewald_precond_block  = m_config.get<int>("eeq_ewald_precond_block", 32);
+    m_ewald_tol            = m_config.get<double>("eeq_ewald_tol", 1e-9);
+    m_ewald_extrapolation  = m_config.get<std::string>("eeq_ewald_extrapolation", "aspc");
+    m_ewald_extrap_order   = static_cast<int>(m_config.get<double>("eeq_ewald_extrapolation_order", 1.0));
+    if (m_ewald_extrapolation != "none" && m_ewald_extrapolation != "aspc" && m_ewald_extrapolation != "gauss")
+        throw std::runtime_error("EEQ: eeq_ewald_extrapolation must be none, aspc or gauss, not '" + m_ewald_extrapolation + "'");
+    if (m_ewald_precond != "block" && m_ewald_precond != "jacobi")
+        throw std::runtime_error("EEQ: eeq_ewald_precond must be 'block' or 'jacobi', not '" + m_ewald_precond + "'");
 
     // Initialize EEQ caching system
 
@@ -5392,35 +5401,45 @@ std::pair<int, int> periodicRange(int total, int t, int T)
 }
 
 struct PeriodicEEQOperator {
+    // P1 (Nov 2026): the geometry data (pair list, kernel K_ij per pair, phase table) live in an
+    // EwaldGeometryCache built once per geometry and shared with the workspace Coulomb; apply() is a gather over
+    // the stored kernel plus the reciprocal pass, no transcendental function per iteration.
     const curcuma::ewald::EwaldSum& ew;
-    Eigen::MatrixXd pos;                          ///< column-major N x 3 copy of the geometry (Bohr)
-    std::vector<std::pair<int, int>> pairs;       ///< minimum-image pairs within r_cut
-    curcuma::ewald::EwaldPhaseTable table;        ///< per-atom phase factors
+    const curcuma::ewald::EwaldGeometryCache& cache;
     const Vector& alp;                            ///< alpeeq_i (Bohr^2)
     Vector diag_local;                            ///< gam_i + sqrt(2/pi)/sqrt(alp_i)
     CxxThreadPool* pool;
     int T;
     int N;
+    mutable std::vector<double> t_real, t_recip;  // P1 profile, per worker CPU time
+    mutable double apply_wall = 0.0;
+    mutable int applies = 0;
 
-    PeriodicEEQOperator(const curcuma::ewald::EwaldSum& e, const Matrix& geometry_bohr, const Vector& alp_in,
+    PeriodicEEQOperator(const curcuma::ewald::EwaldSum& e, const curcuma::ewald::EwaldGeometryCache& c, const Vector& alp_in,
         const Vector& diag_in, CxxThreadPool* p, int threads)
-        : ew(e), pos(geometry_bohr), alp(alp_in), diag_local(diag_in), pool(p), N(static_cast<int>(geometry_bohr.rows()))
+        : ew(e), cache(c), alp(alp_in), diag_local(diag_in), pool(p), N(static_cast<int>(c.pos.rows()))
     {
         T = (p && threads > 1) ? threads : 1;
-        pairs = ew.realSpacePairs(pos);
-        table = ew.phaseTable(pos);
+        t_real.assign(T, 0.0);
+        t_recip.assign(T, 0.0);
     }
 
     /// A x, with A = Ewald matrix of the Gaussian charges + diag_local
     Vector apply(const Vector& x) const
     {
         std::vector<curcuma::ewald::EwaldResult> acc(T);
+        const auto tw = std::chrono::steady_clock::now();
         auto worker = [&](int t) {
             acc[t].potentials = Vector::Zero(N);
-            const auto [b, e] = periodicRange(static_cast<int>(pairs.size()), t, T);
-            ew.realSpaceRange(pos, x, pairs, b, e, &alp, false, true, acc[t]);
+            const auto t0 = std::chrono::steady_clock::now();
+            const auto [b, e] = periodicRange(static_cast<int>(cache.pairs.size()), t, T);
+            ew.realSpaceRangeCached(cache, x, b, e, false, true, acc[t]);
+            const auto t1 = std::chrono::steady_clock::now();
             const auto [kb, ke] = periodicRange(ew.numberOfKVectors(), t, T);
-            ew.reciprocalRange(table, x, kb, ke, false, true, acc[t]);
+            ew.reciprocalRange(cache.table, x, kb, ke, false, true, acc[t]);
+            const auto t2 = std::chrono::steady_clock::now();
+            t_real[t] += std::chrono::duration<double, std::milli>(t1 - t0).count();
+            t_recip[t] += std::chrono::duration<double, std::milli>(t2 - t1).count();
         };
         if (T > 1) {
             std::vector<std::future<void>> futures;
@@ -5441,10 +5460,136 @@ struct PeriodicEEQOperator {
         ew.selfAndBackground(x, &alp, true, tail);
         y += tail.potentials;
         y += diag_local.cwiseProduct(x);
+        apply_wall += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tw).count();
+        ++applies;
         return y;
     }
 
     Vector diagonal() const { return ew.diagonal(N, &alp) + diag_local; }
+};
+
+/*! \brief Block preconditioner of the periodic EEQ (P1, Claude Generated Nov 2026)
+ *
+ * M = block diagonal, one block per fragment (fragments above `max_block` atoms are cut into consecutive chunks of
+ * their atom list). Block entries are the non-periodic Gaussian EEQ matrix of the block's atoms at minimum-image
+ * distance, M_ij = erf(r/sqrt(alp_i + alp_j))/r, M_ii = gam_i + sqrt(2/pi)/sqrt(alp_i). Why this approximates the
+ * Ewald matrix: A_ew,ij = sum_n erf(g|r_ij+n|)/|r_ij+n| (regularised) = erf(g r)/r + Phi(r_ij) with Phi the smooth
+ * potential of the images and of the background, Phi(r) = Phi(0) + O(r^2/L^2) for r << L, and the diagonal carries
+ * the same constant Phi(0). A constant c 1 1^T inside a fragment block vanishes on the constraint space
+ * (sum_{i in f} v_i = 0), so for whole-fragment blocks M differs from the corresponding block of A only by
+ * O(r^2/L^2) terms. Blocks that are not positive definite (LLT fails) fall back to Jacobi with the exact diagonal.
+ * The constraint preconditioner of the CG, z = M^-1 r - M^-1 C^T (C M^-1 C^T)^-1 C M^-1 r, needs u = M^-1 1_f per
+ * fragment; since every block lies inside one fragment, C M^-1 C^T is diagonal (s_f = sum_{i in f} u_i).
+ * mode "jacobi" gives the B3 preconditioner (exact diagonal of A), bitwise.
+ */
+struct PeriodicBlockPreconditioner {
+    std::vector<int> block_start;   ///< offsets into atoms_of_block, size nblocks + 1
+    std::vector<int> atoms_of_block;
+    std::vector<int> inv_offset;    ///< offset of each block's inverse in inv
+    std::vector<double> inv;        ///< row-major b x b inverses
+    Vector u;                       ///< M^-1 1 restricted to each fragment
+    std::vector<double> sM;         ///< s_f = sum_{i in f} u_i
+    int jacobi_blocks = 0;          ///< blocks that fell back to the diagonal
+
+    PeriodicBlockPreconditioner(const std::string& mode, int max_block, const Matrix& geometry_bohr, const PBCUtils::OrthoCell& cell,
+        const Vector& alp, const Vector& diag_local, const Vector& diag_exact, const std::vector<int>& atom_frag, int nfrag)
+    {
+        const int N = static_cast<int>(alp.size());
+        // atoms grouped by fragment in index order, then cut into chunks
+        std::vector<std::vector<int>> frag_atoms(nfrag);
+        std::vector<int> lone;  // atoms without a fragment: own 1x1 block
+        for (int i = 0; i < N; ++i) {
+            if (atom_frag[i] >= 0)
+                frag_atoms[atom_frag[i]].push_back(i);
+            else
+                lone.push_back(i);
+        }
+        const int B = (mode == "jacobi") ? 1 : std::max(1, max_block);
+        block_start.push_back(0);
+        auto addBlock = [&](const std::vector<int>& list, size_t b, size_t e) {
+            for (size_t k = b; k < e; ++k)
+                atoms_of_block.push_back(list[k]);
+            block_start.push_back(static_cast<int>(atoms_of_block.size()));
+        };
+        for (const auto& list : frag_atoms) {
+            // equal chunks of at most B atoms
+            const size_t n = list.size();
+            if (n == 0)
+                continue;
+            const size_t nchunks = (n + B - 1) / B;
+            for (size_t c = 0; c < nchunks; ++c)
+                addBlock(list, n * c / nchunks, n * (c + 1) / nchunks);
+        }
+        for (int i : lone)
+            addBlock(std::vector<int>{ i }, 0, 1);
+
+        const int nb = static_cast<int>(block_start.size()) - 1;
+        inv_offset.resize(nb);
+        size_t total = 0;
+        for (int b = 0; b < nb; ++b) {
+            inv_offset[b] = static_cast<int>(total);
+            const size_t m = block_start[b + 1] - block_start[b];
+            total += m * m;
+        }
+        inv.assign(total, 0.0);
+        for (int b = 0; b < nb; ++b) {
+            const int m = block_start[b + 1] - block_start[b];
+            const int* at = &atoms_of_block[block_start[b]];
+            double* Binv = &inv[inv_offset[b]];
+            if (m == 1) {
+                Binv[0] = 1.0 / diag_exact(at[0]);
+                continue;
+            }
+            Eigen::MatrixXd Mb(m, m);
+            for (int a = 0; a < m; ++a) {
+                Mb(a, a) = diag_local(at[a]);
+                for (int c = 0; c < a; ++c) {
+                    const int i = at[a], j = at[c];
+                    double dx = geometry_bohr(j, 0) - geometry_bohr(i, 0), dy = geometry_bohr(j, 1) - geometry_bohr(i, 1),
+                           dz = geometry_bohr(j, 2) - geometry_bohr(i, 2);
+                    PBCUtils::applyMinimumImageOrtho(cell, dx, dy, dz);
+                    const double r = std::sqrt(dx * dx + dy * dy + dz * dz);
+                    Mb(a, c) = Mb(c, a) = std::erf(r / std::sqrt(alp(i) + alp(j))) / r;
+                }
+            }
+            Eigen::LLT<Eigen::MatrixXd> llt(Mb);
+            if (llt.info() != Eigen::Success) {
+                ++jacobi_blocks;
+                for (int a = 0; a < m; ++a)
+                    for (int c = 0; c < m; ++c)
+                        Binv[a * m + c] = (a == c) ? 1.0 / diag_exact(at[a]) : 0.0;
+                continue;
+            }
+            const Eigen::MatrixXd Mi = llt.solve(Eigen::MatrixXd::Identity(m, m));
+            for (int a = 0; a < m; ++a)
+                for (int c = 0; c < m; ++c)
+                    Binv[a * m + c] = 0.5 * (Mi(a, c) + Mi(c, a));
+        }
+        u = applyInverse(Vector::Ones(N));
+        sM.assign(nfrag, 0.0);
+        for (int i = 0; i < N; ++i)
+            if (atom_frag[i] >= 0)
+                sM[atom_frag[i]] += u(i);
+    }
+
+    /// M^-1 r (block by block)
+    Vector applyInverse(const Vector& r) const
+    {
+        Vector z(r.size());
+        const int nb = static_cast<int>(block_start.size()) - 1;
+        for (int b = 0; b < nb; ++b) {
+            const int m = block_start[b + 1] - block_start[b];
+            const int* at = &atoms_of_block[block_start[b]];
+            const double* Binv = &inv[inv_offset[b]];
+            for (int a = 0; a < m; ++a) {
+                double v = 0.0;
+                for (int c = 0; c < m; ++c)
+                    v += Binv[a * m + c] * r(at[c]);
+                z(at[a]) = v;
+            }
+        }
+        return z;
+    }
 };
 
 } // namespace
@@ -5455,6 +5600,9 @@ void EEQSolver::setPeriodicEwald(const PBCUtils::OrthoCell& cell, const curcuma:
     m_ewald_cell = cell;
     m_ewald_dense_max = dense_max_atoms;
     m_periodic_last_q.resize(0);
+    m_periodic_q_hist.clear();
+    if (m_ewald_cache)
+        m_ewald_cache->valid = false;  // P1: new parameters, new kernel values
 }
 
 Vector EEQSolver::calculateFinalChargesPeriodic(const std::vector<int>& atoms, const Matrix& geometry_bohr, int total_charge,
@@ -5519,11 +5667,30 @@ Vector EEQSolver::calculateFinalChargesPeriodic(const std::vector<int>& atoms, c
     if (method == EEQSolveMethod::PCG) {
         // ---- matrix-free projected conjugate gradient on the constraint null space ----
         m_periodic_path = "matrix-free pcg";
-        const PeriodicEEQOperator op(*m_ewald, geometry_bohr, alpha_corrected, diag_local, pool, T);
-        const Vector Minv = op.diagonal().cwiseInverse();
-        std::vector<double> sM(nfrag, 0.0);
-        for (int i = 0; i < natoms; ++i)
-            if (atom_frag[i] >= 0) sM[atom_frag[i]] += Minv(i);
+        // P1 (Nov 2026): geometry data once per geometry, shared with the workspace Coulomb of the same step
+        const auto t_setup = std::chrono::steady_clock::now();
+        if (!m_ewald_cache)
+            m_ewald_cache = std::make_shared<curcuma::ewald::EwaldGeometryCache>();
+        {
+            auto run = [pool](int nt, const std::function<void(int)>& f) {
+                std::vector<std::future<void>> futures;
+                futures.reserve(nt - 1);
+                for (int t = 1; t < nt; ++t)
+                    futures.push_back(pool->enqueue([&f, t]() { f(t); }));
+                f(0);
+                for (auto& fu : futures)
+                    fu.get();
+            };
+            const Eigen::MatrixXd pos = geometry_bohr;
+            m_ewald->buildGeometryCache(pos, &alpha_corrected, *m_ewald_cache, m_ewald_kernel_cap, T,
+                T > 1 ? curcuma::ewald::EwaldParallelFor(run) : curcuma::ewald::EwaldParallelFor());
+        }
+        const double setup_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_setup).count();
+        const PeriodicEEQOperator op(*m_ewald, *m_ewald_cache, alpha_corrected, diag_local, pool, T);
+        const auto t_pc = std::chrono::steady_clock::now();
+        const PeriodicBlockPreconditioner pc(m_ewald_precond, m_ewald_precond_block, geometry_bohr, m_ewald_cell,
+            alpha_corrected, diag_local, op.diagonal(), atom_frag, nfrag);
+        double precond_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_pc).count();
         // P v = v - sum_f (1_f . v / n_f) 1_f: orthogonal projection onto {C v = 0}
         auto project = [&](Vector& v) {
             std::vector<double> s(nfrag, 0.0);
@@ -5532,19 +5699,34 @@ Vector EEQSolver::calculateFinalChargesPeriodic(const std::vector<int>& atoms, c
             for (int i = 0; i < natoms; ++i)
                 if (atom_frag[i] >= 0) v(i) -= s[atom_frag[i]] / nfrag_atoms[atom_frag[i]];
         };
-        // Constraint preconditioner z = M^-1 r - M^-1 C^T (C M^-1 C^T)^-1 C M^-1 r (C z = 0 exactly)
+        // Constraint preconditioner z = M^-1 r - M^-1 C^T (C M^-1 C^T)^-1 C M^-1 r (C z = 0 exactly);
+        // M block diagonal inside fragments (PeriodicBlockPreconditioner), u = M^-1 1
         auto precondition = [&](const Vector& r) {
-            Vector z = Minv.cwiseProduct(r);
+            const auto tp = std::chrono::steady_clock::now();
+            Vector z = pc.applyInverse(r);
             std::vector<double> s(nfrag, 0.0);
             for (int i = 0; i < natoms; ++i)
                 if (atom_frag[i] >= 0) s[atom_frag[i]] += z(i);
             for (int i = 0; i < natoms; ++i)
-                if (atom_frag[i] >= 0) z(i) -= Minv(i) * s[atom_frag[i]] / sM[atom_frag[i]];
+                if (atom_frag[i] >= 0) z(i) -= pc.u(i) * s[atom_frag[i]] / pc.sM[atom_frag[i]];
+            precond_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tp).count();
             return z;
         };
-        // Start vector: the previous charges when they belong to this system, else uniform per fragment;
-        // in both cases the constraints are enforced exactly before the iteration starts.
+        // Start vector: the previous charges when they belong to this system (P1: or their extrapolation over the
+        // last steps, eeq_extrapolation aspc | gauss, weights summing to 1), else uniform per fragment; in every
+        // case the constraints are enforced exactly before the iteration starts.
         Vector q = (m_periodic_last_q.size() == natoms) ? m_periodic_last_q : Vector::Zero(natoms);
+        if (m_ewald_extrapolation != "none" && static_cast<int>(m_periodic_q_hist.size()) >= 2) {
+            const Eigen::VectorXd w = curcuma::extrapolation::weights(m_ewald_extrapolation, m_ewald_extrap_order,
+                static_cast<int>(m_periodic_q_hist.size()));
+            if (w.size() >= 2) {
+                Vector qe = Vector::Zero(natoms);
+                for (int j = 0; j < w.size(); ++j)
+                    qe += w(j) * m_periodic_q_hist[j];
+                if (qe.allFinite())
+                    q = qe;
+            }
+        }
         {
             std::vector<double> s(nfrag, 0.0);
             for (int i = 0; i < natoms; ++i)
@@ -5557,7 +5739,7 @@ Vector EEQSolver::calculateFinalChargesPeriodic(const std::vector<int>& atoms, c
         Vector z = precondition(r);
         Vector p = z;
         double rz = r.dot(z);
-        const double tol = m_ppcg_tol * (rhs.norm() + 1.0);
+        const double tol = m_ewald_tol * (rhs.norm() + 1.0);  // P1: own tolerance (eeq_ewald_tol)
         bool converged = false, breakdown = false;
         int it = 0;
         for (; it < m_ppcg_max_iter; ++it) {
@@ -5577,6 +5759,13 @@ Vector EEQSolver::calculateFinalChargesPeriodic(const std::vector<int>& atoms, c
         }
         if (r.norm() <= tol) converged = true;
         m_periodic_iters = it;
+        m_periodic_profile = PeriodicSolveProfile();
+        m_periodic_profile.setup_ms = setup_ms;
+        m_periodic_profile.precond_ms = precond_ms;
+        for (double v : op.t_real) m_periodic_profile.real_cpu_ms += v;
+        for (double v : op.t_recip) m_periodic_profile.recip_cpu_ms += v;
+        m_periodic_profile.apply_wall_ms = op.apply_wall;
+        m_periodic_profile.applies = op.applies;
         if (!converged) {
             const std::string why = breakdown ? "breakdown (A not positive definite on the constraint space)" : "no convergence";
             if (natoms <= 4 * m_ewald_dense_max) {
@@ -5668,7 +5857,7 @@ Vector EEQSolver::calculateFinalChargesPeriodic(const std::vector<int>& atoms, c
     if (CurcumaLogger::get_verbosity() >= 2) {
         Vector Aq;
         if (method == EEQSolveMethod::PCG) {
-            const PeriodicEEQOperator op(*m_ewald, geometry_bohr, alpha_corrected, diag_local, pool, T);
+            const PeriodicEEQOperator op(*m_ewald, *m_ewald_cache, alpha_corrected, diag_local, pool, T);
             Aq = op.apply(new_charges);
         } else {
             Aq = m_phase2_A.topLeftCorner(natoms, natoms) * new_charges;
@@ -5679,5 +5868,14 @@ Vector EEQSolver::calculateFinalChargesPeriodic(const std::vector<int>& atoms, c
     m_phase2_historically_implausible = false;
     m_last_successful_charges = new_charges;
     m_periodic_last_q = new_charges;
+    if (m_ewald_extrapolation != "none") {  // P1: history of the warm-start extrapolation
+        if (!m_periodic_q_hist.empty() && m_periodic_q_hist.front().size() != natoms)
+            m_periodic_q_hist.clear();
+        m_periodic_q_hist.push_front(new_charges);
+        const int maxlen = (m_ewald_extrapolation == "aspc") ? std::max(m_ewald_extrap_order + 2, 2)
+                                                              : std::min(2 * m_ewald_extrap_order + 2, 10);
+        while (static_cast<int>(m_periodic_q_hist.size()) > maxlen)
+            m_periodic_q_hist.pop_back();
+    }
     return new_charges;
 }

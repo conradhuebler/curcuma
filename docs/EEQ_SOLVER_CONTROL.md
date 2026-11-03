@@ -43,7 +43,7 @@ unchanged. The names then mean:
 |---|---|
 | `auto` | dense `cholesky` up to `eeq_ewald_dense_max_atoms` (1000) atoms, matrix-free `pcg` above |
 | `cholesky`, `lu`, `ldlt` | dense Ewald matrix (`EwaldSum::matrix`, O(N^2 N_k)), then the direct solve as without a cell |
-| `pcg` | matrix-free projected conjugate gradient: A x by `EwaldSum` potentials (real-space pairs and k vectors split over the pool), Jacobi preconditioner from the analytic diagonal, warm start from the previous charges, stop at `eeq_ppcg_tol` (relative, 1e-12), cap `eeq_ppcg_max_iter`; no convergence falls back to the dense solve for N <= 4 x `eeq_ewald_dense_max_atoms`, else error |
+| `pcg` | matrix-free projected conjugate gradient: A x by `EwaldSum` (stored real-space kernel gathered over the pair list, vectorised reciprocal pass, both split over the pool; geometry data built once per geometry and shared with the Coulomb energy, P1), preconditioner `eeq_ewald_precond` (`block`, default: per-fragment inverse of the non-periodic Gaussian EEQ block, chunks of at most `eeq_ewald_precond_block` = 32 atoms; `jacobi`: the B3 diagonal), start vector `eeq_ewald_extrapolation` (`aspc`, order `eeq_ewald_extrapolation_order` 1; `gauss`; `none` = previous charges), stop at `eeq_ewald_tol` (relative, default 1e-9 since P1; before P1 `eeq_ppcg_tol` 1e-12, which now only the non-periodic ppcg reads), cap `eeq_ppcg_max_iter`; no convergence falls back to the dense solve for N <= 4 x `eeq_ewald_dense_max_atoms`, else error |
 | `ppcg` | redirected to the matrix-free `pcg` with one warning (the local-inverse preconditioner has no periodic matrix) |
 | `batched` | error (drops the inter-fragment Coulomb) |
 
@@ -51,6 +51,10 @@ Not available with a cell and `coulomb_ewald`: `eeq_distance_cutoff`, `coulomb_r
 `eeq_matrix_rebuild_eps_bohr` (ignored: the matrix is rebuilt at every solve), the cached Cholesky factor (`eeq_refactor_eps_bohr`,
 ignored on the periodic path). `coulomb_ewald false` restores the plain-distance EEQ and Coulomb (not periodic, emergency exit).
 Verbosity 1 prints `EEQ solver (final charges): pcg [CPU, periodic Ewald matrix-free, N iterations]` or `cholesky [CPU, periodic Ewald dense]`.
+`ewald_kernel_cache_mb` (1024) caps the stored real-space kernel (16 bytes per pair; above it the kernel is evaluated per
+matrix-vector product, same numbers bit for bit). Measurements, tolerance table and the choice of 1e-9:
+[WP-PERIODIC-NONBONDED.md](WP-PERIODIC-NONBONDED.md), section P1. Measured there: the matrix-free pcg is ~12x faster than the
+dense solve at 900 atoms (7 vs 84 ms); the `auto` threshold `eeq_ewald_dense_max_atoms` 1000 was left unchanged (decision open, TODO.md).
 
 ## Parameters (module `gfnff`, category EEQ)
 

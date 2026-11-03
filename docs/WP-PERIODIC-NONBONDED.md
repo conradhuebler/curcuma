@@ -841,3 +841,124 @@ runs lose -5.9e-3..-9.6e-3 Eh/ps with the pre-fix binary, like the B3 runs that 
 Not covered: `-gpu` runs (the wrap and the removal are CPU code in SimpleMD, so the same fix applies, not run), modes 2/3 under a
 cell (per-fragment rotation removal takes rotational energy out of every molecule, with or without a cell; opt-in, unchanged),
 the spherical container (`wall_type spheric` has no lattice, `m_has_pbc` false: the full removal still runs there).
+
+## P1 CPU performance of the periodic EEQ and Ewald Coulomb (2026-11-03, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+On `feature/bulk` (base `a4587768`), CPU only. Harness: `test_pbc_eeq_ewald --perf-box <nwat> <L> <threads> [json]`
+(median of 3 `Calculation(true)` after a 1e-3 A move of one atom, warm start), `--perf-md <nwat> <L> <threads> <nsteps> <dt_fs>
+[json]` (velocity-Verlet NVE on the same random packing from 300 K, median over steps 6..20; **the packing is unrelaxed, so charges
+change by ~2e-2 e per 0.5 fs step: a hot, non-equilibrium system, n = 1 box per size**), `--tol-table`, `--write-box`. Boxes:
+970 H2O in L = 58 Bohr (2910 atoms) and 1916 H2O in L = 72.8 Bohr (5748 atoms), liquid density, 4 threads unless noted,
+nothing else running on the machine.
+
+### Step 0: profile before (B3 code, 2910 atoms, 4 threads, `Calculation(true)` 460 ms)
+
+EEQ pcg 388 ms = 16 operator calls (15 iterations + start residual) of 23.5 ms wall each; per call (1-thread run) real space
+31 ms (erfc/exp of 534k pairs every call) and reciprocal 53 ms (std::complex products of 14008 k vectors x 2910 atoms); pair
+list and phase table 11 ms, built twice per step (solver and workspace). Workspace Coulomb 123 ms CPU (real 33, recip 78,
+setup 11). Rest of the step ~45 ms. Thread scaling 1/2/4/8: 1576/848/460/318 ms.
+
+### What was changed
+
+1. **Shared geometry data** (`EwaldGeometryCache`, `EwaldSum::buildGeometryCache`): pair list, kernel K_ij = [erfc(a r) -
+   erfc(g_ij r)]/r and dK/dr per pair, phase table, built once per geometry by whoever sees it first (the EEQ solve) and reused
+   by the workspace (key: positions, alp, alpha/r_cut/k_max, compared bit for bit; GFNFF hands both the same object). The EEQ
+   matrix-vector product is a gather over the stored kernel. Bitwise the same numbers as the per-call kernel (one non-inlined
+   `pairKernel`; ctest (p1)). Cap `ewald_kernel_cache_mb` (1024 MB, 16 bytes per pair), above it the per-call kernel.
+   Memory: 21.7 MB at 2910 atoms (850k pairs), 94.9 MB at 5748 (2.36M pairs); peak RSS of the harness process 800 vs 731 MB
+   (no cell) at 2910, 2110 vs 2071 MB at 5748.
+2. **Reciprocal pass vectorised**: structure-of-arrays phase table (n-major cos/sin), real arithmetic, `omp simd` loops
+   (S(k) reduction reassociated, so bits differ from B3 at 1e-16 relative). 53 -> 15 ms per call at N_k 14008 (1 thread).
+3. **Pair search** with cells of edge r_cut/2 (125 neighbours) and threads over (cx, cy) columns, concatenated in order (same
+   list for every thread count): 5.7 -> 3.7 ms at 4 threads.
+4. **r_cut heuristic** (`GFNFF::ewaldParameters`): 15 -> 17.5 sqrt(L_min/40) (scan below).
+5. **Block preconditioner** (`eeq_ewald_precond block`, default): per fragment (chunks <= 32 atoms) the inverse of the
+   non-periodic Gaussian EEQ block erf(r/sqrt(alp_i+alp_j))/r at minimum-image distance (derivation in `eeq_solver.cpp`,
+   `PeriodicBlockPreconditioner`); `jacobi` restores B3. 15 -> 7 iterations (perf-box), 20.5 -> 11 (MD).
+6. **Own tolerance** `eeq_ewald_tol` 1e-9 (table below); `eeq_ppcg_tol` (1e-12) now only for the non-periodic ppcg.
+7. **Start vector** `eeq_ewald_extrapolation aspc`, order 1 (`curcuma::extrapolation::weights`, as `eeq_extrapolation` of the
+   non-periodic pcg): 7 -> 6 iterations in MD.
+
+### Time per step (ms, `Calculation(true)` wall, 4 threads; EEQ ms and pcg iterations in brackets)
+
+| stage | 2910 perf-box | 2910 MD | 5748 perf-box | 5748 MD |
+|---|---|---|---|---|
+| before (B3) | 460.9 (388.9, 15 it) | not measured in the harness; CLI `-md` 640 ms/step | 1205.7 (1012.0, 14 it) | - |
+| 1-3: shared data, stored kernel, SIMD reciprocal, pair search (Jacobi, 1e-12, r_cut 18.06 / 20.24) | 118.2 (79.7, 15) | - | 305.6 (208.1, 14) | - |
+| 4: r_cut 21.07 / 23.61 | 106.1 (69.2, 15) | 119.8 (82.0, 20.5) | 256.6 (165.3, 14) | 327.7 (225.9, 21) |
+| 5: block preconditioner | 80.4 (43.8, 7) | 92.8 (55.4, 11) | 216.8 (123.7, 8) | 237.8 (145.3, 11) |
+| 6: `eeq_ewald_tol` 1e-9 | 70.0 (33.1, 4) | 80.7 (42.6, 7) | 183.1 (90.3, 4) | 204.7 (114.2, 7) |
+| 7: aspc start (final defaults) | - | 77.5 (39.5, 6) | - | 200.9 (106.7, 6) |
+| no cell (reference) | 46.4 | - | 133.6 | - |
+
+CLI `-md` on the 2910-atom box (4 threads, dt 0.5 fs, difference of 20- and 40-step runs, median of 3): 640 -> 114 ms/step
+(no cell: 47 ms/step). The CLI step with a cell is ~37 ms longer than `Calculation(true)` in the harness (77.5 ms); that part is
+SimpleMD, not located here. Thread scaling after (MD, 2910 atoms) 1/2/4/8: 248/133/79/59 ms (perf-box: 230/123/70/48).
+
+### Stage 2 scan: r_cut with the stored kernel (MD, 6 pcg iterations per step, 4 threads)
+
+| 2910 atoms, L 58: r_cut | 15 | 18.06 | 21 | 24 |
+|---|---|---|---|---|
+| step (EEQ) ms | 102.2 (58.7) | 82.2 (42.1) | 77.4 (40.5) | 83.4 (47.0) |
+
+| 5748 atoms, L 72.8: r_cut | 17 | 20.24 | 23 | 26 |
+|---|---|---|---|---|
+| step (EEQ) ms | 270.4 (163.9) | 219.3 (118.8) | 199.8 (107.3) | 208.8 (114.9) |
+
+The optimum moves with the iteration count (more iterations favour larger r_cut: with 15 Jacobi iterations it was flat over
+21-27 Bohr at 2910 atoms); 17.5 sqrt(L/40) gives 21.07 / 23.61. Energies move by up to 1e-7 Eh over the scan (2910 atoms;
+`ewald_tolerance` 1e-8 is a per-term criterion), i.e. 3e-11 Eh per atom.
+
+### Tolerance table (pcg from a cold start, `eeq_ewald_tol` vs 1e-14; criterion fixed beforehand: max |dG| <= 1e-8 Eh/Bohr, |dE| <= 1e-9 Eh per atom)
+
+| tol | 50 H2O L 44: max abs dq / dE per atom / max abs dG | Q = +1 (64 atoms) | 970 H2O L 58 |
+|---|---|---|---|
+| 1e-6 | 5.8e-6 / 8.6e-13 / 1.2e-6 | 6.0e-6 / 3.6e-13 / 8.8e-7 | 7.1e-6 / 3.2e-13 / 1.2e-6 |
+| 1e-8 | 2.1e-9 / 5e-17 / 3.7e-10 | 2.3e-8 / 4e-17 / 4.2e-9 | 1.1e-7 / 3e-16 / **1.9e-8** |
+| 1e-9 | 2.1e-9 / 5e-17 / 3.7e-10 | 2.9e-10 / 4e-17 / 7.4e-11 | 1.2e-8 / 4e-16 / 1.9e-9 |
+| 1e-10 | 5.0e-11 / 2e-17 / 8.3e-12 | 2.9e-10 / 4e-17 / 7.4e-11 | 1.4e-9 / 8e-16 / 2.4e-10 |
+| 1e-12 | 9.1e-13 / 7e-17 / 1.7e-13 | 5.4e-12 / 1e-17 / 1.0e-12 | 3.2e-12 / 1e-16 / 4.9e-13 |
+
+(e, Eh, Eh/Bohr.) 1e-8 fails the gradient criterion on the 2910-atom box, 1e-9 is the largest tolerance that meets both on all
+three (n = 3 systems; the energy error is quadratic in the charge error and far below the limit everywhere). Not checked at
+5748 atoms (tol relative to |b| ~ sqrt(N)).
+
+### Discarded or not done
+
+- Larger extrapolation orders: aspc order 3 gave 7 -> 5-5.5 iterations in MD at 0.5 fs but 6.05 -> 6.65 on an irregular
+  steepest-descent sequence (n = 1 each); gauss order 2 7 -> 6-7. Order 1 was never worse in these samples (MD at 1 fs: 7 -> 6.9).
+  An earlier measurement with 1 iteration per step came from a harness bug (time step 1000x too small) and is void.
+- A preconditioner coupling neighbouring fragments (cluster blocks, localinv-like) was not tried: ~1 ms per pcg iteration left.
+- Faster erfc in the kernel build (39 of 56 ms set-up at 5748 atoms, 4 threads) and a Verlet skin for the pair list (17 ms)
+  were not done; the set-up is now the largest Ewald item (perf-box 5748: set-up 56 ms, 5 operator calls 38 ms wall = 7.7 ms
+  each, of which reciprocal 26.5 ms CPU per call; workspace Coulomb 43 ms CPU).
+- PME: not justified by the profile after stages 1-6 (reciprocal ~50 of 183 ms wall at 5748 atoms, set-up 56); kept as an
+  option for larger cells: O(N log N) with B-spline charge assignment, its own interpolation error to validate on forces,
+  estimated 1-2 weeks including tests.
+- `eeq_ewald_dense_max_atoms` (1000) unchanged: the matrix-free pcg is 7.2 vs 84 ms (dense) at 900 atoms and 1.5 vs 16 ms at
+  300 atoms, but the small-box ctests run the exact dense path at 1e-14-level thresholds; decision left to the operator.
+- **Found, not caused by P1, not fixed**: an explicit `-solve_method pcg` changes the energy of the 2910-atom box by 3.75e-6 Eh
+  against `auto` (which also runs the periodic pcg there), and cholesky vs pcg at 900 atoms differ by 5.4e-7 Eh, with angle,
+  dihedral and HB terms differing (1.5e-7, 5e-8, 4e-8 Eh): the solver name also selects a non-periodic EEQ solve inside the
+  topology set-up whose charges feed parameters. The same in the B3 binary (TODO.md).
+
+### Acceptance
+
+- (i) before vs after with defaults (CLI `-sp`, 4 threads): 50 H2O L 44 (dense) dE 2.6e-9 Eh (1.8e-11 per atom), max |dG|
+  3.4e-10 Eh/Bohr, max |dq| 9e-10 e; Q = +1 (64 atoms, dense) 8.6e-10 / 1.5e-10 / 6e-10; 970 H2O (pcg) 2.5e-8 Eh (8.6e-12 per
+  atom) / 1.8e-9 / 1.2e-8. With the old r_cut forced and `eeq_ewald_tol` 1e-14 the solver alone accounts for <= 1.5e-12 Eh/Bohr
+  (2910 atoms, before the r_cut change; the forced r_cut differs from the automatic one in the 4th decimal, which moves the
+  dense boxes by 1e-9 Eh).
+- (ii, vii) `ctest -j1 -R 'gfnff|frag|eeq|simplemd|pbc|ewald|react'`: 118 passed, 1 skipped (GPU), 0 failed, the same 119 tests.
+  Thresholds unchanged; `pbc_eeq_ewald` (a) and (e) set `eeq_ewald_tol` instead of `eeq_ppcg_tol` (the pcg they test now reads
+  it), and gained (p1) (stored == per-call kernel bitwise, shared data reused, 4-thread pair list == 1-thread list, block vs
+  Jacobi 1.6e-12 e, aspc vs plain start 1.6e-12 e) and an FD gate with the P1 defaults.
+- (iii) FD gate (20 H2O): dense Richardson 9.4e-11 Eh/A, pcg tol 1e-14 5.1e-11, **pcg with the P1 defaults (tol 1e-9) 7.5e-11**,
+  Q = +1 dense 9.3e-11 (limit 1e-8).
+- (iv) no cell: `-sp` energy (16 digits in the dump) and `-dump_gradient` md5 of the 7 structures at 1 and 4 threads: 14/14
+  identical to the binary before P1.
+- (v) 4 threads run to run: bitwise (energy, gradient, charges) on all three boxes.
+- (vi) NVE, 60 H2O in L = 44 Bohr, 1 ps from 300 K, dt 0.5 fs, 3 threads, fit 0.25-1 ps: -5.2e-5 Eh/ps (default dense and forced
+  pcg) against -4.0e-5 with the binary before P1 (n = 1 each; trajectories differ through the r_cut change); D1 level met.
+- Not tested: charged or heavy-element boxes at the new r_cut beyond the ctest set, more than 5748 atoms, `ewald_kernel_cache_mb`
+  fallback at production size (only the 60-atom bitwise check), relaxed liquids. Human production testing pending.

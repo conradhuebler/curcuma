@@ -160,12 +160,14 @@ struct FFAccumulator {
     /// Claude Generated (Nov 2026, B2): periodic Coulomb (Ewald) of this partition. Real and reciprocal
     /// energies for the term report; coulomb_potentials (dE_pair/dq_i, size N) only when requested.
     double ewald_real = 0.0, ewald_recip = 0.0;
+    double ewald_real_ms = 0.0, ewald_recip_ms = 0.0;  ///< P1 (Nov 2026): CPU time of the two Ewald parts in this partition
     Vector coulomb_potentials;
 
     void reset(int natoms, bool do_gradient, bool store_components, bool want_potentials = false) {
         energy.reset();
         timings.reset();
         ewald_real = ewald_recip = 0.0;
+        ewald_real_ms = ewald_recip_ms = 0.0;
         if (want_potentials) {
             if (coulomb_potentials.size() != natoms) coulomb_potentials.resize(natoms);
             coulomb_potentials.setZero();
@@ -368,6 +370,14 @@ public:
     /// ones last set by setEEQCharges(); the GFN-FF self-energy (TERM 2+3) is unchanged.
     void setEwald(const curcuma::ewald::EwaldParameters& p);
     void clearEwald() { m_ewald.reset(); m_coulomb_ewald = false; }
+    /// P1 (Nov 2026): geometry data shared with the EEQ solver (built by whoever sees a geometry first) and the cap
+    /// of its stored kernel arrays in bytes (above it the kernel is evaluated per call, as before P1).
+    void setEwaldGeometryCache(std::shared_ptr<curcuma::ewald::EwaldGeometryCache> cache, size_t kernel_cap_bytes)
+    {
+        m_ewald_cache = std::move(cache);
+        m_ewald_kernel_cap_bytes = kernel_cap_bytes;
+    }
+    const curcuma::ewald::EwaldGeometryCache* ewaldGeometryCache() const { return m_ewald_cache.get(); }
     bool ewaldActive() const { return m_coulomb_ewald && m_ewald != nullptr; }
     const curcuma::ewald::EwaldSum* ewald() const { return m_ewald.get(); }
     /// Also accumulate dE_pair/dq_i (periodic Coulomb pair energy only, for the periodic EEQ, B3).
@@ -377,8 +387,12 @@ public:
     /// Periodic Coulomb pair energy (real + reciprocal + self + background + Gaussian background) of the last calculate().
     double ewaldPairEnergy() const { return m_ewald_terms.total(); }
     const curcuma::ewald::EwaldEnergyTerms& ewaldTerms() const { return m_ewald_terms; }
-    /// Milliseconds of the per-step Ewald setup (real-space pair list, phase table) in the last calculate().
+    /// Milliseconds of the per-step Ewald setup (pair list, kernel values, phase table) in the last calculate(); ~0 when
+    /// the EEQ solver already built them for this geometry (P1 shared cache).
     double ewaldSetupMs() const { return m_ewald_setup_ms; }
+    /// P1 (Nov 2026): CPU-sum milliseconds of the Ewald real-space and reciprocal parts in the last calculate().
+    double ewaldRealMs() const { return m_ewald_real_ms; }
+    double ewaldRecipMs() const { return m_ewald_recip_ms; }
     /// Per-atom Coulomb self-energy inputs (setCoulombSelfEnergyParams order): tests copy them between instances.
     const Vector& coulombChiBase() const { return m_coul_chi_base; }
     const Vector& coulombGam() const { return m_coul_gam; }
@@ -549,12 +563,14 @@ private:
     std::unique_ptr<curcuma::ewald::EwaldSum> m_ewald;
     bool m_coulomb_ewald = false;
     bool m_want_coulomb_potentials = false;
-    Eigen::MatrixXd m_ewald_pos;                      ///< column-major copy of m_geometry for the ewald kernels
-    std::vector<std::pair<int, int>> m_ewald_pairs;   ///< real-space pairs of the current geometry (rebuilt per calculate)
-    curcuma::ewald::EwaldPhaseTable m_ewald_table;    ///< phase factors of the current geometry
+    /// P1 (Nov 2026): pair list, real-space kernel values and phase table of the current geometry, shared with the
+    /// periodic EEQ solver when GFNFF hands both the same object (setEwaldGeometryCache); else private.
+    std::shared_ptr<curcuma::ewald::EwaldGeometryCache> m_ewald_cache;
+    size_t m_ewald_kernel_cap_bytes = size_t(1024) << 20; ///< P1: memory cap of the stored kernel (ewald_kernel_cache_mb)
     curcuma::ewald::EwaldEnergyTerms m_ewald_terms;   ///< result split of the last calculate()
     Vector m_result_coulomb_potentials;
     double m_ewald_setup_ms = 0.0;
+    double m_ewald_real_ms = 0.0, m_ewald_recip_ms = 0.0;  ///< P1 profile, CPU sums over partitions
 
     // Term-enable flags
     bool m_dispersion_enabled = true;

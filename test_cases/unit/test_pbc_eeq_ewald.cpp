@@ -15,16 +15,20 @@
  * (d)  translation, atom-wise wrap (torn molecules) and 2x1x1 supercell: charges per atom, energy, gradient
  * (e)  THE GATE: analytic total gradient against central finite differences of the total energy with the charges
  *      re-solved at every displaced geometry (h = 1e-4 / 2e-4 Angstrom, Richardson), neutral and Q = +1, dense
- *      (exact) and pcg (eeq_ppcg_tol 1e-14) solver; limit 1e-7 Eh/Angstrom, 1e-8 after Richardson
+ *      (exact) and pcg (eeq_ewald_tol 1e-14) solver; limit 1e-7 Eh/Angstrom, 1e-8 after Richardson
  * (f)  MIC-only EEQ (minimum-image erf(g r)/r matrix, built here) against the Ewald EEQ on a 50-water box:
  *      largest charge deviation and the EEQ energy difference (the measurement planned as B1)
  * (g0) no cell: coulomb_ewald true (default) is bitwise what coulomb_ewald false gives
+ * (p1) P1: stored kernel == per-call kernel bitwise, solver and workspace share the geometry data, 4-thread pair
+ *      list == 1-thread list, block preconditioner and aspc start agree with Jacobi / plain start
  *
- * Mode `--perf-box <nwat> <L_bohr> [threads]` (not run by ctest): Calculation(true) wall time, EEQ solve time and
- * pcg iterations, Coulomb term time, with and without the cell. Water geometry: registry "H2O_dimer", moved rigidly.
+ * Mode `--perf-box <nwat> <L_bohr> [threads] [json]` (not run by ctest; json = one configuration only, P1): Calculation(true) wall time, EEQ solve time and
+ * pcg iterations, Coulomb term time, with and without the cell. `--perf-md <nwat> <L> <threads> <nsteps> <dt_fs> [json]` (P1):
+ * velocity-Verlet run on the same box, pcg iterations and times per step. `--write-box <nwat> <L> <file>`: the box as XYZ. Water geometry: registry "H2O_dimer", moved rigidly.
  * Exit 0 when every check passes.
  */
 #include "src/core/curcuma_logger.h"
+#include "src/core/elements.h"
 #include "src/core/energy_calculators/ff_methods/ewald.h"
 #include "src/core/energy_calculators/ff_methods/gfnff.h"
 #include "src/core/molecule.h"
@@ -209,7 +213,7 @@ static void testDenseVsPcg(const Mol& box, const char* label)
     const Run chol = runGFNFF(box, flags("cholesky"), true);
     const Run lu = runGFNFF(box, flags("lu"), true);
     json pcg = flags("pcg");
-    pcg["eeq_ppcg_tol"] = 1e-13;
+    pcg["eeq_ewald_tol"] = 1e-13; // P1: the periodic pcg has its own tolerance (eeq_ewald_tol)
     const Run cg = runGFNFF(box, pcg, true);
     if (!chol.ok || !lu.ok || !cg.ok) {
         check(false, "runs", 1, 0);
@@ -450,15 +454,18 @@ static void testFiniteDifferences(const Mol& box, const json& solver_flags, cons
 
 // ---------------------------------------------------------------------------------------------
 // (f) MIC-only EEQ against the Ewald EEQ (the measurement planned as B1)
-static void testMicOnlyEEQ(const Mol& box, const char* label)
+static void testMicOnlyEEQ(const Mol& box, const char* label, const char* solver = "cholesky")
 {
     std::printf("(f) MIC-only EEQ vs Ewald EEQ: %s (%d atoms, %.4f atoms/A^3)\n", label, box.m_number_atoms,
         box.m_number_atoms / std::pow(box.m_unit_cell(0, 0), 3));
-    const Run r = runGFNFF(box, flags("cholesky", 0.0, 0.0, 1e-12), false);
+    json fl = flags(solver, 0.0, 0.0, 1e-12);
+    fl["eeq_ewald_tol"] = 1e-14;  // P1: only read by the matrix-free path
+    const Run r = runGFNFF(box, fl, false);
     if (!r.ok) {
         check(false, "run", 1, 0);
         return;
     }
+    std::printf("  instance solver path '%s'\n", r.path.c_str());
     const FFWorkspace* ws = r.ff->getWorkspace();
     const int N = box.m_number_atoms;
     const Vector& alp = ws->coulombAlp();
@@ -523,6 +530,54 @@ static void testMicOnlyEEQ(const Mol& box, const char* label)
 
 // ---------------------------------------------------------------------------------------------
 // (g0) no cell: default (true) and false bitwise equal
+// ---------------------------------------------------------------------------------------------
+// (p1) P1 (Nov 2026): stored kernel == per-call kernel (bitwise), geometry data shared by solver and workspace,
+// block preconditioner == Jacobi and extrapolated start == plain start within the solver tolerance
+static void testP1Paths(const Mol& box, const char* label)
+{
+    std::printf("(p1) P1 solver paths: %s (%d atoms, charge %d)\n", label, box.m_number_atoms, box.m_charge);
+    json base = flags("pcg", 0.0, 0.0, 1e-10);
+    base["eeq_ewald_tol"] = 1e-13;
+    json nocache = base;
+    nocache["ewald_kernel_cache_mb"] = 0.0;
+    const Run a = runGFNFF(box, base, true), b = runGFNFF(box, nocache, true);
+    const auto* ca = a.ff->getWorkspace()->ewaldGeometryCache();
+    const auto* cb = b.ff->getWorkspace()->ewaldGeometryCache();
+    check(a.ok && b.ok && ca && cb && ca->hasKernel() && !cb->hasKernel(), "kernel stored with the default cap, not with cap 0", 0.0, 1e-300);
+    check(a.ok && b.ok && a.e_tot == b.e_tot && maxAbsDiff(a.q, b.q) == 0.0 && maxAbsDiff(a.grad, b.grad) == 0.0,
+        "stored kernel == per-call kernel: energy, charges, gradient bitwise", a.ok && b.ok ? std::abs(a.e_tot - b.e_tot) : 1.0, 1e-300);
+    check(a.ok && ca && ca->reuses >= 1, "workspace reused the solver's geometry data (cache reuses >= 1)", ca ? double(ca->reuses) : 0.0, 1.0);
+    // 4 threads: the same pair list as 1 thread (slabs concatenated in order); results to rounding
+    const Run t4 = runGFNFF(box, base, true, 4);
+    check(t4.ok && t4.ff->getWorkspace()->ewaldGeometryCache()->pairs == ca->pairs, "pair list of 4 threads == 1 thread", 0.0, 1e-300);
+    check(t4.ok && maxAbsDiff(t4.q, a.q) < 1e-12 && std::abs(t4.e_tot - a.e_tot) < 1e-11, "4 threads vs 1 thread: charges, energy",
+        t4.ok ? maxAbsDiff(t4.q, a.q) : 1.0, 1e-12);
+    json jac = base;
+    jac["eeq_ewald_precond"] = "jacobi";
+    const Run j = runGFNFF(box, jac, true);
+    std::printf("  pcg iterations: block %d, jacobi %d\n", a.iters, j.iters);
+    check(j.ok && maxAbsDiff(j.q, a.q) < 1e-10 && maxAbsDiff(j.grad, a.grad) < 1e-10, "block vs jacobi preconditioner: charges (e) and gradient",
+        j.ok ? std::max(maxAbsDiff(j.q, a.q), maxAbsDiff(j.grad, a.grad)) : 1.0, 1e-10);
+    // extrapolated start along a short displacement series: same charges as the plain start within the tolerance
+    json none = base;
+    none["eeq_ewald_extrapolation"] = "none";
+    Run e1 = runGFNFF(box, base, true), e0 = runGFNFF(box, none, true);
+    Geometry geom = box.m_geometry;
+    double dq = 0.0;
+    for (int k = 0; k < 4; ++k) {
+        for (int i = 0; i < box.m_number_atoms; ++i)
+            geom(i, 0) += 0.002 * std::sin(0.7 * i + k);
+        e1.ff->UpdateMolecule(geom);
+        e0.ff->UpdateMolecule(geom);
+        e1.ff->Calculation(true);
+        e0.ff->Calculation(true);
+        dq = std::max(dq, maxAbsDiff(e1.ff->Charges(), e0.ff->Charges()));
+    }
+    std::printf("  last step pcg iterations: aspc %d, none %d\n", e1.ff->eeqSolver()->lastPeriodicIterations(),
+        e0.ff->eeqSolver()->lastPeriodicIterations());
+    check(dq < 1e-10, "aspc start vs plain start over 4 displaced steps: max |dq| (e)", dq, 1e-10);
+}
+
 static void testNoCell()
 {
     std::printf("(g0) no cell: coulomb_ewald default == false bitwise\n");
@@ -558,22 +613,52 @@ static void perfOne(const Mol& mol, const json& f, int threads, const char* labe
         eeq[k] = r.ff->eeqSolver() ? r.ff->eeqSolver()->lastPeriodicSolveMs() : 0.0;
         iters = r.ff->eeqSolver() ? r.ff->eeqSolver()->lastPeriodicIterations() : 0;
     }
+    {
+        long kb = 0;
+        if (FILE* fp = std::fopen("/proc/self/status", "r")) {
+            char line[256];
+            while (std::fgets(line, sizeof(line), fp))
+                if (std::strncmp(line, "VmHWM:", 6) == 0)
+                    kb = std::atol(line + 6);
+            std::fclose(fp);
+        }
+        std::printf("    peak RSS so far (VmHWM) %.0f MB\n", kb / 1024.0);
+    }
     std::sort(wall, wall + 3);
     std::sort(coul, coul + 3);
     std::sort(eeq, eeq + 3);
-    if (ws->ewaldActive())
+    if (ws->ewaldActive()) {
         std::printf("  %-28s %d thr: r_cut %5.2f N_k %6d | EEQ %s %4d it %8.1f ms | Coulomb CPU-sum %8.1f ms | Calculation(true) wall %8.1f ms | E %.8f\n",
             label, threads, ws->ewald()->parameters().r_cut, ws->ewald()->numberOfKVectors(), r.path.c_str(), iters, eeq[1], coul[1], wall[1], r.e_tot);
+        // P1 profile of the last of the three calls (EEQ operator split, workspace Ewald split)
+        if (r.ff->eeqSolver()) {
+            const auto& pr = r.ff->eeqSolver()->lastPeriodicProfile();
+            std::printf("    profile EEQ: setup %.1f ms | %d operator calls, wall %.1f ms (real CPU %.1f, recip CPU %.1f) | precond %.1f ms\n",
+                pr.setup_ms, pr.applies, pr.apply_wall_ms, pr.real_cpu_ms, pr.recip_cpu_ms, pr.precond_ms);
+        }
+        std::printf("    profile workspace Ewald: setup %.1f ms | real CPU %.1f ms | recip CPU %.1f ms\n", ws->ewaldSetupMs(), ws->ewaldRealMs(), ws->ewaldRecipMs());
+        if (const auto* c = ws->ewaldGeometryCache())
+            std::printf("    geometry cache: %zu pairs, %.1f MB, kernel stored %s, last build %.1f ms (pairs %.1f, kernel %.1f, table %.1f), builds %ld, reuses %ld\n",
+                c->pairs.size(), c->bytes() / 1048576.0, c->hasKernel() ? "yes" : "no", c->build_ms, c->pairs_ms, c->kernel_ms, c->table_ms, c->builds, c->reuses);
+    }
     else
         std::printf("  %-28s %d thr: %22s | EEQ (non-periodic, not timed here) | Coulomb CPU-sum %8.1f ms | Calculation(true) wall %8.1f ms | E %.8f\n",
             label, threads, "plain", coul[1], wall[1], r.e_tot);
 }
 
-static void perfBox(int nwat, double L_bohr, int threads)
+static void perfBox(int nwat, double L_bohr, int threads, const json& extra = json::object())
 {
     const Mol box = waterBox(nwat, L_bohr, 20261107, {}, 1.7);
     std::printf("perf: random water box, %d atoms in L = %.1f Bohr (density %.4f atoms/A^3), %d threads\n", box.m_number_atoms, L_bohr,
         box.m_number_atoms / std::pow(L_bohr / A2B, 3), threads);
+    if (!extra.empty()) {
+        // P1 (Nov 2026): one configuration given as JSON (e.g. {"ewald_r_cut": 25, "eeq_ewald_tol": 1e-10})
+        json f = flags("pcg", 0.0, 0.0, 1e-8);
+        for (auto it = extra.begin(); it != extra.end(); ++it)
+            f[it.key()] = it.value();
+        perfOne(box, f, threads, extra.dump().c_str());
+        return;
+    }
     Mol nocell = box;
     nocell.m_has_pbc = false;
     perfOne(nocell, json::object(), threads, "no cell");
@@ -583,6 +668,128 @@ static void perfBox(int nwat, double L_bohr, int threads)
     perfOne(box, pcg25, threads, "cell, pcg, r_cut 25");
     if (box.m_number_atoms <= 1500)
         perfOne(box, flags("cholesky", 0.0, 0.0, 1e-8), threads, "cell, dense cholesky");
+}
+
+// P1 (Nov 2026): velocity-Verlet NVE run on the random box (atomic units), per-step EEQ iterations and times.
+// Not a production MD (no thermostat, no wrap, start from the unrelaxed packing at 300 K); it gives the iteration
+// counts of a real trajectory, which the single-atom perturbation of perfOne does not.
+static void perfMD(int nwat, double L_bohr, int threads, int nsteps, double dt_fs, const json& extra)
+{
+    const Mol box = waterBox(nwat, L_bohr, 20261107, {}, 1.7);
+    json f = flags("pcg", 0.0, 0.0, 1e-8);
+    bool sd = false; // "_sd": steepest-descent steps of random length instead of MD (an irregular geometry sequence)
+    int relax = 0;   // "_relax": steepest-descent steps (largest move 0.05 Bohr) before the run, not timed
+    for (auto it = extra.begin(); it != extra.end(); ++it) {
+        if (it.key() == "_sd") { sd = true; continue; }
+        if (it.key() == "_relax") { relax = it.value().get<int>(); continue; }
+        f[it.key()] = it.value();
+    }
+    Run r = runGFNFF(box, f, true, threads);
+    std::uniform_real_distribution<double> ustep(0.3, 1.5);
+    std::mt19937 rng_sd(11);
+    if (!r.ok) {
+        std::printf("perf-md: set-up failed\n");
+        return;
+    }
+    const int N = box.m_number_atoms;
+    const double dt = dt_fs / 0.024188843265857; // fs -> aut (1 aut = 0.0241888 fs)
+    Eigen::VectorXd m(N);
+    for (int i = 0; i < N; ++i)
+        m(i) = Elements::AtomicMass[box.m_atoms[i]] * 1822.888485;
+    std::mt19937 rng(7);
+    std::normal_distribution<double> gauss(0.0, 1.0);
+    const double kT = 300.0 * 3.166811563e-6; // Eh
+    Matrix x = box.m_geometry * A2B, v(N, 3);
+    for (int i = 0; i < N; ++i)
+        for (int a = 0; a < 3; ++a)
+            v(i, a) = gauss(rng) * std::sqrt(kT / m(i));
+    Matrix g = r.grad;
+    for (int k = 0; k < relax; ++k) {
+        x -= (0.05 / std::max(1e-12, g.cwiseAbs().maxCoeff())) * g;
+        r.ff->UpdateMolecule(Geometry(x / A2B));
+        r.ff->Calculation(true);
+        g = r.ff->Gradient();
+    }
+    std::vector<int> iters;
+    std::vector<double> eeq_ms, wall_ms, etot;
+    double e_pot = r.e_tot;
+    for (int step = 0; step < nsteps; ++step) {
+        if (sd) {
+            const double s_k = 0.02 * ustep(rng_sd) / std::max(1e-12, g.cwiseAbs().maxCoeff()); // largest move 0.006-0.03 Bohr
+            x -= s_k * g;
+        } else
+            for (int i = 0; i < N; ++i)
+                for (int a = 0; a < 3; ++a) {
+                    v(i, a) -= 0.5 * dt * g(i, a) / m(i);
+                    x(i, a) += dt * v(i, a);
+                }
+        r.ff->UpdateMolecule(Geometry(x / A2B));
+        const auto t0 = std::chrono::steady_clock::now();
+        e_pot = r.ff->Calculation(true);
+        wall_ms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+        g = r.ff->Gradient();
+        for (int i = 0; i < N; ++i)
+            for (int a = 0; a < 3; ++a)
+                v(i, a) -= 0.5 * dt * g(i, a) / m(i);
+        double ekin = 0.0;
+        for (int i = 0; i < N; ++i)
+            ekin += 0.5 * m(i) * v.row(i).squaredNorm();
+        etot.push_back(e_pot + ekin);
+        iters.push_back(r.ff->eeqSolver()->lastPeriodicIterations());
+        eeq_ms.push_back(r.ff->eeqSolver()->lastPeriodicSolveMs());
+    }
+    auto median = [](std::vector<double> a) { std::sort(a.begin(), a.end()); return a.empty() ? 0.0 : a[a.size() / 2]; };
+    const int skip = std::min(5, nsteps - 1);
+    std::vector<double> it_d(iters.begin() + skip, iters.end()), eeq_d(eeq_ms.begin() + skip, eeq_ms.end()),
+        wall_d(wall_ms.begin() + skip, wall_ms.end());
+    double it_mean = 0.0;
+    int it_max = 0;
+    for (double v_ : it_d) { it_mean += v_; it_max = std::max(it_max, int(v_)); }
+    it_mean /= std::max<size_t>(1, it_d.size());
+    std::printf("perf-md %s: %d atoms, %d threads, %d steps of %.2f fs | pcg iterations mean %.2f median %.0f max %d (steps %d..) | "
+                "EEQ median %.1f ms | Calculation(true) median %.1f ms | E_tot(end) - E_tot(1) %.3e Eh | E_pot(end) %.12f | q[0..2] %.12f %.12f %.12f\n",
+        extra.dump().c_str(), N, threads, nsteps, dt_fs, it_mean, median(it_d), it_max, skip + 1, median(eeq_d), median(wall_d),
+        etot.back() - etot.front(), e_pot, r.ff->Charges()(0), r.ff->Charges()(1), r.ff->Charges()(2));
+    std::printf("  iterations per step:");
+    for (int v_ : iters)
+        std::printf(" %d", v_);
+    std::printf("\n");
+}
+
+// P1 (Nov 2026): error of energy, gradient and charges against eeq_ewald_tol 1e-14 as a function of the tolerance,
+// fresh instance per run (cold start: uniform charges per fragment), matrix-free pcg.
+static void tolTable(const Mol& box, const char* label, int threads, const json& extra)
+{
+    std::printf("tol table: %s (%d atoms, charge %d), %d threads, %s\n", label, box.m_number_atoms, box.m_charge, threads, extra.dump().c_str());
+    auto run = [&](double tol) {
+        json f = flags("pcg", 0.0, 0.0, 1e-8);
+        for (auto it = extra.begin(); it != extra.end(); ++it)
+            f[it.key()] = it.value();
+        f["eeq_ewald_tol"] = tol;
+        return runGFNFF(box, f, true, threads);
+    };
+    const Run ref = run(1e-14);
+    std::printf("  ref tol 1e-14: %d iterations, E %.12f\n", ref.iters, ref.e_tot);
+    for (double tol : { 1e-4, 1e-6, 1e-8, 1e-9, 1e-10, 1e-11, 1e-12 }) {
+        const Run r = run(tol);
+        std::printf("  tol %.0e: %3d it | max|dq| %.2e e | dE %.2e Eh (%.2e per atom) | max|dG| %.2e Eh/Bohr\n", tol, r.iters,
+            maxAbsDiff(r.q, ref.q), r.e_tot - ref.e_tot, std::abs(r.e_tot - ref.e_tot) / box.m_number_atoms, maxAbsDiff(r.grad, ref.grad));
+    }
+}
+
+static void writeBox(int nwat, double L_bohr, const char* file, bool hydronium = false)
+{
+    // hydronium: the Q = +1 box of the ctest checks (H3O+(H2O)2 + nwat H2O, seed 20261106, minimum distance 2.6 A)
+    const Mol box = hydronium ? waterBox(nwat, L_bohr, 20261106, { registryMol("hydronium_water2", 1) })
+                              : waterBox(nwat, L_bohr, 20261107, {}, 1.7);
+    FILE* fp = std::fopen(file, "w");
+    if (!fp)
+        return;
+    const double L = L_bohr / A2B;
+    std::fprintf(fp, "%d\nunitcell %.10f %.10f %.10f\n", box.m_number_atoms, L, L, L);
+    for (int i = 0; i < box.m_number_atoms; ++i)
+        std::fprintf(fp, "%s %.10f %.10f %.10f\n", box.m_atoms[i] == 1 ? "H" : "O", box.m_geometry(i, 0), box.m_geometry(i, 1), box.m_geometry(i, 2));
+    std::fclose(fp);
 }
 
 static void supercellTerms(const Mol& box, const json& f, const char* label)
@@ -637,7 +844,7 @@ int main(int argc, char** argv)
         // MIC-only EEQ against the Ewald EEQ at a chosen size and density (random rigid packing, NOT an equilibrated liquid)
         char label[96];
         std::snprintf(label, sizeof(label), "%s H2O, L = %s Bohr, random packing", argv[2], argv[3]);
-        testMicOnlyEEQ(waterBox(std::atoi(argv[2]), std::atof(argv[3]), 20261107, {}, 1.7), label);
+        testMicOnlyEEQ(waterBox(std::atoi(argv[2]), std::atof(argv[3]), 20261107, {}, 1.7), label, argc > 4 ? argv[4] : "cholesky");
         return g_failures == 0 ? 0 : 1;
     }
     if (argc > 1 && std::strcmp(argv[1], "--supercell-terms") == 0) {
@@ -650,11 +857,50 @@ int main(int argc, char** argv)
         supercellTerms(box, flags("cholesky", 0.0, 0.0, 1e-12), "neutral 20 H2O");
         return 0;
     }
+    if (argc > 6 && std::strcmp(argv[1], "--perf-md") == 0) {
+        // --perf-md <nwat> <L_bohr> <threads> <nsteps> <dt_fs> [json]
+        perfMD(std::atoi(argv[2]), std::atof(argv[3]), std::atoi(argv[4]), std::atoi(argv[5]), std::atof(argv[6]),
+            argc > 7 ? json::parse(argv[7]) : json::object());
+        return 0;
+    }
+    if (argc > 1 && std::strcmp(argv[1], "--tol-table") == 0) {
+        const json extra = argc > 2 ? json::parse(argv[2]) : json::object();
+        tolTable(waterBox(50, 44.0, 20261109, {}, 2.4), "50 H2O, L = 44 Bohr", 4, extra);
+        tolTable(waterBox(18, 44.0, 20261106, { registryMol("hydronium_water2", 1) }), "H3O+ 2 H2O + 18 H2O, L = 44 Bohr (Q = +1)", 4, extra);
+        tolTable(waterBox(970, 58.0, 20261107, {}, 1.7), "970 H2O, L = 58 Bohr", 4, extra);
+        return 0;
+    }
+    if (argc > 5 && std::strcmp(argv[1], "--term-diff") == 0) {
+        // --term-diff <nwat> <L> <solverA> <solverB>: energy terms of two solver paths on the same box (P1 diagnosis)
+        const Mol box = waterBox(std::atoi(argv[2]), std::atof(argv[3]), 20261107, {}, 1.7);
+        json fa = flags(argv[4], 0.0, 0.0, 1e-8), fb = flags(argv[5], 0.0, 0.0, 1e-8);
+        fa["eeq_ewald_tol"] = fb["eeq_ewald_tol"] = 1e-14;
+        const Run a = runGFNFF(box, fa, false, 4), b = runGFNFF(box, fb, false, 4);
+        const auto& ea = a.ff->getWorkspace()->energyComponents();
+        const auto& eb = b.ff->getWorkspace()->energyComponents();
+        auto line = [&](const char* n, double x, double y) { std::printf("  %-14s %20.12f %20.12f %12.3e\n", n, x, y, x - y); };
+        line("total", a.e_tot, b.e_tot);
+        line("bond", ea.bond, eb.bond);
+        line("angle", ea.angle, eb.angle);
+        line("dihedral", ea.dihedral, eb.dihedral);
+        line("nonbonded_rep", ea.nonbonded_rep, eb.nonbonded_rep);
+        line("dispersion", ea.dispersion, eb.dispersion);
+        line("coulomb", ea.coulomb, eb.coulomb);
+        line("hbond", ea.hbond, eb.hbond);
+        std::printf("  max |dq| %.3e e, max |dCN| %.3e\n", maxAbsDiff(a.q, b.q), maxAbsDiff(a.ff->getLastCN(), b.ff->getLastCN()));
+        return 0;
+    }
+    if (argc > 4 && std::strcmp(argv[1], "--write-box") == 0) {
+        writeBox(std::atoi(argv[2]), std::atof(argv[3]), argv[4], argc > 5 && std::strcmp(argv[5], "q1") == 0);
+        return 0;
+    }
     if (argc > 3 && std::strcmp(argv[1], "--perf-box") == 0) {
-        perfBox(std::atoi(argv[2]), std::atof(argv[3]), argc > 4 ? std::atoi(argv[4]) : 4);
+        perfBox(std::atoi(argv[2]), std::atof(argv[3]), argc > 4 ? std::atoi(argv[4]) : 4, argc > 5 ? json::parse(argv[5]) : json::object());
         return 0;
     }
     testNoCell();
+    testP1Paths(waterBox(20, 44.0, 20261105), "20 H2O, L = 44 Bohr");
+    testP1Paths(waterBox(18, 44.0, 20261106, { registryMol("hydronium_water2", 1) }), "H3O+ 2 H2O + 18 H2O, L = 44 Bohr (Q = +1)");
     const Mol box = waterBox(20, 44.0, 20261105);
     const Mol charged = waterBox(18, 44.0, 20261106, { registryMol("hydronium_water2", 1) });
     testDenseVsPcg(box, "20 H2O, L = 44 Bohr");
@@ -672,8 +918,10 @@ int main(int argc, char** argv)
     testFiniteDifferences(box, flags("cholesky", 0.0, 0.0, 1e-12), "20 H2O, dense cholesky");
     {
         json pcg = flags("pcg", 0.0, 0.0, 1e-12);
-        pcg["eeq_ppcg_tol"] = 1e-14;
+        pcg["eeq_ewald_tol"] = 1e-14; // P1: eeq_ewald_tol (was eeq_ppcg_tol before P1)
         testFiniteDifferences(box, pcg, "20 H2O, matrix-free pcg (tol 1e-14)");
+        // P1: the gate with the matrix-free defaults (eeq_ewald_tol 1e-9, block preconditioner, aspc start)
+        testFiniteDifferences(box, flags("pcg", 0.0, 0.0, 1e-12), "20 H2O, matrix-free pcg, P1 defaults (tol 1e-9)");
     }
     testFiniteDifferences(charged, flags("cholesky", 0.0, 0.0, 1e-12), "H3O+ 2 H2O + 18 H2O (Q = +1), dense cholesky");
     testMicOnlyEEQ(waterBox(50, 44.0, 20261109, {}, 2.4), "50 H2O, L = 44 Bohr");

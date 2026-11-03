@@ -333,9 +333,23 @@ double FFWorkspace::calculate(bool gradient)
         if (m_coul_alp.size() != m_natoms || m_eeq_charges.size() != m_natoms)
             throw std::runtime_error("FFWorkspace: Ewald Coulomb needs per-atom alp and EEQ charges of size natoms");
         auto t0 = std::chrono::high_resolution_clock::now();
-        m_ewald_pos = m_geometry;  // one column-major copy for the ewald kernels (RowMajor workspace geometry)
-        m_ewald_pairs = m_ewald->realSpacePairs(m_ewald_pos);
-        m_ewald_table = m_ewald->phaseTable(m_ewald_pos);
+        // P1 (Nov 2026): built once per geometry; when the periodic EEQ solve of this step already built it for the
+        // same positions, widths and parameters (shared object, bitwise key), this is a lookup.
+        if (!m_ewald_cache)
+            m_ewald_cache = std::make_shared<curcuma::ewald::EwaldGeometryCache>();
+        const Eigen::MatrixXd pos = m_geometry;  // column-major copy (RowMajor workspace geometry)
+        auto run = [this](int T, const std::function<void(int)>& f) {
+            std::vector<std::future<void>> futures;
+            futures.reserve(T - 1);
+            for (int t = 1; t < T; ++t)
+                futures.push_back(m_pool->enqueue([&f, t]() { f(t); }));
+            f(0);
+            for (auto& fu : futures)
+                fu.get();
+        };
+        const int T = (m_pool && m_num_threads > 1) ? m_num_threads : 1;
+        m_ewald->buildGeometryCache(pos, &m_coul_alp, *m_ewald_cache, m_ewald_kernel_cap_bytes, T,
+            T > 1 ? curcuma::ewald::EwaldParallelFor(run) : curcuma::ewald::EwaldParallelFor());
         m_ewald_setup_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
     }
     const bool want_pot = ewald_now && m_want_coulomb_potentials;
@@ -373,6 +387,8 @@ double FFWorkspace::calculate(bool gradient)
         m_result_timings = m_accumulators[0].timings;  // Claude Generated (May 2026): per-term timing
         m_ewald_terms.real = m_accumulators[0].ewald_real;       // B2
         m_ewald_terms.reciprocal = m_accumulators[0].ewald_recip;
+        m_ewald_real_ms = m_accumulators[0].ewald_real_ms;
+        m_ewald_recip_ms = m_accumulators[0].ewald_recip_ms;
         if (want_pot)
             m_result_coulomb_potentials.swap(m_accumulators[0].coulomb_potentials);
         else
@@ -518,6 +534,8 @@ void FFWorkspace::reduce()
     m_result_timings = m_accumulators[0].timings;  // Claude Generated (May 2026)
     m_ewald_terms.real = m_accumulators[0].ewald_real;  // B2 (Nov 2026): fixed partition order, reproducible per thread count
     m_ewald_terms.reciprocal = m_accumulators[0].ewald_recip;
+    m_ewald_real_ms = m_accumulators[0].ewald_real_ms;
+    m_ewald_recip_ms = m_accumulators[0].ewald_recip_ms;
     m_result_coulomb_potentials = m_accumulators[0].coulomb_potentials;
     if (m_do_gradient) {
         m_result_gradient = m_accumulators[0].gradient;
@@ -542,6 +560,8 @@ void FFWorkspace::reduce()
         m_result_timings += m_accumulators[t].timings;  // Claude Generated (May 2026): CPU-sum
         m_ewald_terms.real += m_accumulators[t].ewald_real;
         m_ewald_terms.reciprocal += m_accumulators[t].ewald_recip;
+        m_ewald_real_ms += m_accumulators[t].ewald_real_ms;
+        m_ewald_recip_ms += m_accumulators[t].ewald_recip_ms;
         if (m_result_coulomb_potentials.size() == m_natoms && m_accumulators[t].coulomb_potentials.size() == m_natoms)
             m_result_coulomb_potentials += m_accumulators[t].coulomb_potentials;
         if (m_do_gradient) {

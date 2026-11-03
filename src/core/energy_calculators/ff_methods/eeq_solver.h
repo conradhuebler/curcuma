@@ -553,12 +553,30 @@ public:
      * Phase 1 is untouched (topological distances, no geometry between fragments).
      */
     void setPeriodicEwald(const PBCUtils::OrthoCell& cell, const curcuma::ewald::EwaldParameters& p, int dense_max_atoms);
-    void clearPeriodicEwald() { m_ewald.reset(); m_periodic_last_q.resize(0); }
+    void clearPeriodicEwald() { m_ewald.reset(); m_periodic_last_q.resize(0); m_periodic_q_hist.clear(); }
+    /// P1 (Nov 2026, Claude Generated): geometry data (pair list, kernel values, phase table) shared with the
+    /// workspace Coulomb (FFWorkspace::setEwaldGeometryCache), and the memory cap of the stored kernel in bytes.
+    void setEwaldGeometryCache(std::shared_ptr<curcuma::ewald::EwaldGeometryCache> cache, size_t kernel_cap_bytes)
+    {
+        m_ewald_cache = std::move(cache);
+        m_ewald_kernel_cap = kernel_cap_bytes;
+    }
     bool periodicEwaldActive() const { return m_ewald != nullptr; }
     /// Diagnostics of the last periodic Phase-2 solve: CG iterations (0 on the dense path), solve time, path name.
     int lastPeriodicIterations() const { return m_periodic_iters; }
     double lastPeriodicSolveMs() const { return m_periodic_solve_ms; }
     const std::string& lastPeriodicPath() const { return m_periodic_path; }
+    /// P1 (Nov 2026, Claude Generated): time split of the last matrix-free periodic solve (always recorded,
+    /// a few clock reads per operator call; printed at verbosity 3). CPU sums are over the pool workers.
+    struct PeriodicSolveProfile {
+        double setup_ms = 0.0;        ///< wall: geometry data (pair list, kernel values, phase table) or 0 on a cache hit
+        double real_cpu_ms = 0.0;     ///< CPU sum of the real-space gathers over all operator calls
+        double recip_cpu_ms = 0.0;    ///< CPU sum of the reciprocal-space passes over all operator calls
+        double apply_wall_ms = 0.0;   ///< wall of all operator calls
+        double precond_ms = 0.0;      ///< wall: preconditioner set-up and applications
+        int applies = 0;              ///< operator calls (iterations + start residual)
+    };
+    const PeriodicSolveProfile& lastPeriodicProfile() const { return m_periodic_profile; }
 
     /// WP-S3 (May 2026): effective Coulomb-matrix cutoff used by the
     /// sparsification (override wins, otherwise the ConfigManager value).
@@ -1197,6 +1215,15 @@ private:
     int    m_periodic_iters = 0;                        ///< CG iterations of the last periodic solve (0 = dense)
     double m_periodic_solve_ms = 0.0;                   ///< wall time of the last periodic solve (matrix/operator build + solve)
     std::string m_periodic_path;                        ///< "dense cholesky", "matrix-free pcg", ...
+    PeriodicSolveProfile m_periodic_profile;            ///< P1: time split of the last matrix-free solve
+    std::shared_ptr<curcuma::ewald::EwaldGeometryCache> m_ewald_cache; ///< P1: shared with the workspace (else private)
+    size_t m_ewald_kernel_cap = size_t(1024) << 20;     ///< P1: cap of the stored real-space kernel (bytes)
+    std::string m_ewald_precond = "block";              ///< P1: eeq_ewald_precond (block | jacobi)
+    int    m_ewald_precond_block = 32;                  ///< P1: eeq_ewald_precond_block, largest dense block (atoms)
+    std::deque<Vector> m_periodic_q_hist;               ///< P1: converged periodic charges, newest first (eeq_ewald_extrapolation)
+    double m_ewald_tol = 1e-9;                          ///< P1: eeq_ewald_tol (relative residual of the periodic pcg)
+    std::string m_ewald_extrapolation = "aspc";         ///< P1: eeq_ewald_extrapolation (none | aspc | gauss)
+    int    m_ewald_extrap_order = 1;                    ///< P1: eeq_ewald_extrapolation_order
     std::optional<EEQSolveMethod> m_method_override;    ///< dispatchSolve uses this instead of resolveMethod() when set
     std::string m_solver_line_suffix;                   ///< appended to the verbosity-1 solver line (periodic path)
     /// Phase-2 solve with the periodic Ewald matrix (dense or matrix-free); the arguments are the Phase-2

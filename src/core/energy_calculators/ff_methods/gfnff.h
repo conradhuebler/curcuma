@@ -302,6 +302,11 @@ PARAM(solve, String, "auto", "Older name of solve_method; a non-auto solve_metho
 PARAM(eeq_ppcg_min_atoms, Int, 500, "auto takes ppcg only from this many atoms on; smaller systems use the exact cholesky solve.", "EEQ", {})
 PARAM(eeq_ppcg_min_nfrag, Int, 1, "auto takes ppcg only with at least this many fragments. 0: auto never takes it; solve_method ppcg still runs it.", "EEQ", {})
 PARAM(eeq_ewald_dense_max_atoms, Int, 1000, "Periodic cell with coulomb_ewald: solve_method auto builds the dense Ewald EEQ matrix (cholesky) up to this many atoms and uses the matrix-free pcg (Jacobi, warm start) above. An explicit cholesky/lu/ldlt is always dense, pcg always matrix-free; ppcg is redirected to pcg, batched refused.", "EEQ", {})
+PARAM(eeq_ewald_precond, String, "block", "Periodic cell, matrix-free pcg (P1): preconditioner. block = per fragment (cut into chunks of at most eeq_ewald_precond_block atoms) the inverse of the non-periodic Gaussian EEQ block erf(r/sqrt(alp_i+alp_j))/r at minimum-image distance; jacobi = the exact diagonal of the Ewald matrix (the B3 choice).", "EEQ", {})
+PARAM(eeq_ewald_tol, Double, 1e-9, "Periodic cell, matrix-free pcg (P1): relative residual tolerance |P r| <= tol*(|b|+1) of the periodic EEQ solve (the non-periodic ppcg keeps eeq_ppcg_tol). 1e-9 is the largest tolerance with max gradient error <= 1e-8 Eh/Bohr and energy error <= 1e-9 Eh per atom against 1e-14 on the P1 test boxes (docs/WP-PERIODIC-NONBONDED.md, P1).", "EEQ", {})
+PARAM(eeq_ewald_extrapolation, String, "aspc", "Periodic cell, matrix-free pcg (P1): start vector from the converged charges of the last steps: aspc (Kolafa predictor, fixed-step MD), gauss (polynomial fit, irregular steps) or none (last charges, the B3 choice). The converged charges do not depend on it beyond eeq_ewald_tol.", "EEQ", {})
+PARAM(eeq_ewald_extrapolation_order, Int, 1, "Order of eeq_ewald_extrapolation: aspc k uses k+2 steps, gauss the polynomial degree.", "EEQ", {})
+PARAM(eeq_ewald_precond_block, Int, 32, "Periodic pcg with eeq_ewald_precond block: largest dense block in atoms; larger fragments are cut into consecutive chunks of their atom list.", "EEQ", {})
 PARAM(eeq_ppcg_tol, Double, 1e-12, "Relative residual tolerance of the CPU ppcg solve, |P r| <= tol*(|b|+1). The GPU ppcg uses pcg_tolerance as an absolute tolerance instead.", "EEQ", {})
 PARAM(eeq_ppcg_max_iter, Int, 500, "Iteration cap of ppcg on CPU and GPU; a CPU solve that does not converge uses the exact cholesky solve for that step.", "EEQ", {})
 PARAM(eeq_ppcg_precond, String, "localinv", "ppcg preconditioner: 'localinv' (sparse local inverse, fewer iterations, costs a build) or 'diag' (Jacobi). If localinv is not positive definite the solve uses diag with a warning.", "EEQ", {"ppcg_precond"})
@@ -388,7 +393,8 @@ PARAM(coulomb_r_cut, Double, 0.0, "Hard per-pair cutoff (Bohr) of the GFN-FF ele
 PARAM(coulomb_implicit, Bool, true, "CPU: evaluate the Coulomb pairs on the fly from per-atom data instead of storing an N^2/2 pair list; same energies. Not used with eeq_distance_cutoff > 0.", "Coulomb", {})
 PARAM(coulomb_ewald, Bool, true, "Periodic cell only (CPU): the GFN-FF Coulomb pair term q_i q_j erf(g_ij r)/r is summed over all periodic images by Ewald summation (point-charge Ewald plus the real-space Gaussian correction -erfc(g_ij r)/r, charged cells with neutralising background and Gaussian background term) and the Phase-2 EEQ charges are solved with the same Ewald matrix (B3), so energy, charges and gradient are consistent. No effect without a cell; incompatible with eeq_distance_cutoff, coulomb_r_cut and an implicit solvent. false = plain distances in Coulomb and EEQ (emergency exit, not periodic).", "Coulomb", {})
 PARAM(ewald_tolerance, Double, 1e-8, "coulomb_ewald: per-term tolerance eps that sets the splitting parameter alpha = sqrt(-ln eps)/r_cut and k_max = 2 alpha sqrt(-ln eps) (ewald.h). Overridden by ewald_alpha.", "Coulomb", {})
-PARAM(ewald_r_cut, Double, 0.0, "coulomb_ewald: real-space cutoff (Bohr) of the Ewald sum; 0 = automatic, min(L_min/2, max(15 sqrt(L_min/40), r_g)) with r_g = 6 sqrt(2 max alp_i) the radius beyond which every Gaussian correction erfc(g_ij r) is below 2e-17. The loop radius is max(ewald_r_cut, r_g) and must stay below L_min/2.", "Coulomb", {})
+PARAM(ewald_r_cut, Double, 0.0, "coulomb_ewald: real-space cutoff (Bohr) of the Ewald sum; 0 = automatic, min(L_min/2, max(17.5 sqrt(L_min/40), r_g)) (prefactor 15 before P1) with r_g = 6 sqrt(2 max alp_i) the radius beyond which every Gaussian correction erfc(g_ij r) is below 2e-17. The loop radius is max(ewald_r_cut, r_g) and must stay below L_min/2.", "Coulomb", {})
+PARAM(ewald_kernel_cache_mb, Double, 1024.0, "coulomb_ewald (P1): memory cap in MB of the real-space kernel values stored once per geometry (16 bytes per pair) and shared by the periodic EEQ iterations and the Coulomb energy; above it the kernel is evaluated in every matrix-vector product (slower, same numbers). 0 = never store.", "Coulomb", {})
 PARAM(ewald_alpha, Double, 0.0, "coulomb_ewald: splitting parameter alpha (1/Bohr); 0 = from ewald_tolerance and the cutoff. An explicit value keeps k_max = 2 alpha sqrt(-ln ewald_tolerance). For alpha-independence tests.", "Coulomb", {})
 PARAM(farfield_shortcut, Bool, true, "CPU Coulomb energy and EEQ matrix: use 1/r for erf(g r)/r where g r >= 6.5, where erf is exactly 1.0 in FP64. Bit-identical in the cases checked; false evaluates erf everywhere.", "Coulomb", {})
 // ---- Pair lists ----
@@ -1775,6 +1781,8 @@ private:
     /// Claude Generated (Nov 2026, B3): with a cell and coulomb_ewald, fix the Ewald parameters (m_ewald_params),
     /// check the incompatible options and hand the periodic matrix to the EEQ solver; clears it otherwise.
     void configurePeriodicEwald();
+    /// P1 (Nov 2026): ewald_kernel_cache_mb in bytes (cap of the stored real-space kernel)
+    size_t ewaldKernelCapBytes() const;
     /// Claude Generated (Nov 2026, A3c): evaluate the homogeneous D4 tail for the current CN weights and hand
     /// energy and dE/dCN to the workspace (clears it when dispersionTailActive() is false). Called right
     /// before m_workspace->calculate() in calculationSingle().
@@ -3191,6 +3199,8 @@ private:
     double m_ewald_tolerance = 1e-8;  ///< Nov 2026 (B2): PARAM ewald_tolerance
     double m_ewald_r_cut = 0.0;       ///< Nov 2026 (B2): PARAM ewald_r_cut, 0 = automatic
     double m_ewald_alpha = 0.0;       ///< Nov 2026 (B2): PARAM ewald_alpha, 0 = from the tolerance
+    double m_ewald_kernel_cache_mb = 1024.0;  ///< Nov 2026 (P1): PARAM ewald_kernel_cache_mb
+    std::shared_ptr<curcuma::ewald::EwaldGeometryCache> m_ewald_cache;  ///< Nov 2026 (P1): geometry data shared by the EEQ solver and the workspace
 
     // Claude Generated (April 2026): Timing for consolidated summary
     double m_param_gen_time_ms = 0.0;       ///< Parameter generation time (generateGFNFFParameterSet) for summary

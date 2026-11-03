@@ -21,6 +21,7 @@
 #include "ewald.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <complex>
 #include <stdexcept>
@@ -119,57 +120,77 @@ double gaussianCorrectionRadius(const Eigen::VectorXd& alp)
     return amax > 0.0 ? GAUSSIAN_CORRECTION_XMAX * std::sqrt(2.0 * amax) : 0.0;
 }
 
-// Claude Generated (Nov 2026): real-space pair list with linked cells (Allen & Tildesley, Sec. 5.3, from memory)
-std::vector<std::pair<int, int>> EwaldSum::realSpacePairs(const Eigen::MatrixXd& positions) const
-{
-    const int N = static_cast<int>(positions.rows());
-    const double rc2 = m_par.r_cut * m_par.r_cut;
-    std::vector<std::pair<int, int>> pairs;
+// Claude Generated (Nov 2026): real-space pair list with linked cells (Allen & Tildesley, Sec. 5.3, from memory).
+// P1 (Nov 2026): the search is split into T ranges of the (cx, cy) cell columns (all-pairs path: of the outer
+// atom index); range t writes its own list and the lists are concatenated in range order, so the result is the
+// serial list for every T.
+namespace {
+struct PairSearch {
+    const Eigen::MatrixXd& positions;
+    const PBCUtils::OrthoCell& cell;
+    double rc2;
+    int N;
+    int nc[3];
+    int m = 1;      ///< neighbour cells per direction (cell edge >= r_cut / m)
+    bool linked;
+    std::vector<std::vector<int>> members;
 
-    auto micDistance2 = [&](int i, int j) {
+    PairSearch(const Eigen::MatrixXd& pos, const PBCUtils::OrthoCell& c, double r_cut)
+        : positions(pos), cell(c), rc2(r_cut * r_cut), N(static_cast<int>(pos.rows()))
+    {
+        // Cells of edge >= r_cut/m: every partner within r_cut sits in the (2m+1)^3 surrounding cells. P1 (Nov 2026):
+        // m = 2 when every axis has >= 5 such cells (candidate volume 125 (r_cut/2)^3 instead of 27 r_cut^3, and
+        // more slabs for the threads), else m = 1 with >= 3 cells (B0), else all pairs (the neighbours would not be distinct).
+        for (int mm : { 2, 1 }) {
+            for (int a = 0; a < 3; ++a)
+                nc[a] = static_cast<int>(std::floor(cell.L[a] * mm / r_cut));
+            m = mm;
+            if (nc[0] >= 2 * mm + 1 && nc[1] >= 2 * mm + 1 && nc[2] >= 2 * mm + 1)
+                break;
+        }
+        linked = (nc[0] >= 2 * m + 1 && nc[1] >= 2 * m + 1 && nc[2] >= 2 * m + 1);
+        if (!linked)
+            return;
+        // Bin the atoms by their wrapped fractional coordinate.
+        members.resize(static_cast<size_t>(nc[0]) * nc[1] * nc[2]);
+        int cidx[3];
+        for (int i = 0; i < N; ++i) {
+            for (int a = 0; a < 3; ++a) {
+                double s = positions(i, a) * cell.inv_L[a];
+                s -= std::floor(s); // [0, 1)
+                cidx[a] = std::min(static_cast<int>(s * nc[a]), nc[a] - 1);
+            }
+            members[(cidx[0] * nc[1] + cidx[1]) * nc[2] + cidx[2]].push_back(i);
+        }
+    }
+    double micDistance2(int i, int j) const
+    {
         double dx = positions(j, 0) - positions(i, 0);
         double dy = positions(j, 1) - positions(i, 1);
         double dz = positions(j, 2) - positions(i, 2);
-        PBCUtils::applyMinimumImageOrtho(m_cell, dx, dy, dz);
+        PBCUtils::applyMinimumImageOrtho(cell, dx, dy, dz);
         return dx * dx + dy * dy + dz * dz;
-    };
-
-    // Cells of edge >= r_cut: every partner within r_cut sits in the 27 surrounding cells. With
-    // fewer than 3 cells along an axis the 27 neighbours are not distinct, so fall back to all pairs.
-    int nc[3];
-    for (int a = 0; a < 3; ++a)
-        nc[a] = static_cast<int>(std::floor(m_cell.L[a] / m_par.r_cut));
-    if (nc[0] < 3 || nc[1] < 3 || nc[2] < 3) {
-        for (int i = 0; i < N; ++i)
-            for (int j = i + 1; j < N; ++j)
-                if (micDistance2(i, j) < rc2)
-                    pairs.emplace_back(i, j);
-        return pairs;
     }
-
-    // Bin the atoms by their wrapped fractional coordinate.
-    const int ncell = nc[0] * nc[1] * nc[2];
-    std::vector<std::vector<int>> members(ncell);
-    std::vector<int> cell_of(N);
-    int cidx[3];
-    for (int i = 0; i < N; ++i) {
-        for (int a = 0; a < 3; ++a) {
-            double s = positions(i, a) * m_cell.inv_L[a];
-            s -= std::floor(s); // [0, 1)
-            cidx[a] = std::min(static_cast<int>(s * nc[a]), nc[a] - 1);
+    /// outer index: (cx, cy) column of cells, or the atom index i on the all-pairs path
+    int outerCount() const { return linked ? nc[0] * nc[1] : N; }
+    /// pairs of the outer range [o_begin, o_end), appended in serial order
+    void run(int o_begin, int o_end, std::vector<std::pair<int, int>>& pairs) const
+    {
+        if (!linked) {
+            for (int i = o_begin; i < o_end; ++i)
+                for (int j = i + 1; j < N; ++j)
+                    if (micDistance2(i, j) < rc2)
+                        pairs.emplace_back(i, j);
+            return;
         }
-        cell_of[i] = (cidx[0] * nc[1] + cidx[1]) * nc[2] + cidx[2];
-        members[cell_of[i]].push_back(i);
-    }
-
-    // Each unordered pair is seen from both of its cells; i < j keeps exactly one visit.
-    for (int cx = 0; cx < nc[0]; ++cx)
-        for (int cy = 0; cy < nc[1]; ++cy)
+        // Each unordered pair is seen from both of its cells; i < j keeps exactly one visit.
+        for (int o = o_begin; o < o_end; ++o) {
+            const int cx = o / nc[1], cy = o % nc[1];
             for (int cz = 0; cz < nc[2]; ++cz) {
                 const int c = (cx * nc[1] + cy) * nc[2] + cz;
-                for (int ox = -1; ox <= 1; ++ox)
-                    for (int oy = -1; oy <= 1; ++oy)
-                        for (int oz = -1; oz <= 1; ++oz) {
+                for (int ox = -m; ox <= m; ++ox)
+                    for (int oy = -m; oy <= m; ++oy)
+                        for (int oz = -m; oz <= m; ++oz) {
                             const int nx = (cx + ox + nc[0]) % nc[0];
                             const int ny = (cy + oy + nc[1]) % nc[1];
                             const int nz = (cz + oz + nc[2]) % nc[2];
@@ -180,6 +201,40 @@ std::vector<std::pair<int, int>> EwaldSum::realSpacePairs(const Eigen::MatrixXd&
                                         pairs.emplace_back(i, j);
                         }
             }
+        }
+    }
+};
+
+/// Real-space kernel of one pair: erfc(a r)/r, minus erfc(g r)/r for Gaussian charges with g r < XMAX, and dK/dr.
+/// One compiled function for the per-call and the cached path, so both give the same bits (P1): not inlined, so the
+/// compiler cannot contract (FMA) or vectorise it differently in the two loops.
+#if defined(__GNUC__)
+__attribute__((noinline))
+#endif
+double pairKernel(double r, double alpha, double alp_sum, bool gaussian, double& dK)
+{
+    static const double two_over_sqrt_pi = 2.0 / std::sqrt(kPi); // the same expression as before P1 (bitwise)
+    double K = EwaldSum::realSpaceKernel(r, alpha, dK);
+    if (gaussian) {
+        // erf(g r)/r = 1/r - erfc(g r)/r: the cloud pair is the point pair minus this term
+        const double g = 1.0 / std::sqrt(alp_sum);
+        const double x = g * r;
+        if (x < GAUSSIAN_CORRECTION_XMAX) {
+            const double erfc_g = std::erfc(x);
+            const double inv_r = 1.0 / r;
+            K -= erfc_g * inv_r;
+            dK += erfc_g * inv_r * inv_r + g * two_over_sqrt_pi * std::exp(-x * x) * inv_r;
+        }
+    }
+    return K;
+}
+} // namespace
+
+std::vector<std::pair<int, int>> EwaldSum::realSpacePairs(const Eigen::MatrixXd& positions) const
+{
+    const PairSearch search(positions, m_cell, m_par.r_cut);
+    std::vector<std::pair<int, int>> pairs;
+    search.run(0, search.outerCount(), pairs);
     return pairs;
 }
 
@@ -191,7 +246,6 @@ void EwaldSum::realSpaceRange(const Eigen::MatrixXd& positions, const Eigen::Vec
     bool want_gradient, bool want_potentials, EwaldResult& acc) const
 {
     const double alpha = m_par.alpha;
-    const double two_over_sqrt_pi = 2.0 / std::sqrt(kPi);
     for (int idx = begin; idx < end; ++idx) {
         const int i = pairs[idx].first, j = pairs[idx].second;
         double d[3] = { positions(j, 0) - positions(i, 0), positions(j, 1) - positions(i, 1),
@@ -199,18 +253,8 @@ void EwaldSum::realSpaceRange(const Eigen::MatrixXd& positions, const Eigen::Vec
         PBCUtils::applyMinimumImageOrtho(m_cell, d[0], d[1], d[2]);
         const double r = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
         double dK;
-        double K = realSpaceKernel(r, alpha, dK);
-        if (gaussian_alp) {
-            // erf(g r)/r = 1/r - erfc(g r)/r: the cloud pair is the point pair minus this term
-            const double g = 1.0 / std::sqrt((*gaussian_alp)(i) + (*gaussian_alp)(j));
-            const double x = g * r;
-            if (x < GAUSSIAN_CORRECTION_XMAX) {
-                const double erfc_g = std::erfc(x);
-                const double inv_r = 1.0 / r;
-                K -= erfc_g * inv_r;
-                dK += erfc_g * inv_r * inv_r + g * two_over_sqrt_pi * std::exp(-x * x) * inv_r;
-            }
-        }
+        const double K = pairKernel(r, alpha, gaussian_alp ? (*gaussian_alp)(i) + (*gaussian_alp)(j) : 0.0,
+            gaussian_alp != nullptr, dK);
         acc.terms.real += charges(i) * charges(j) * K;
         if (want_potentials) {
             acc.potentials(i) += charges(j) * K;
@@ -229,6 +273,7 @@ void EwaldSum::realSpaceRange(const Eigen::MatrixXd& positions, const Eigen::Vec
 
 // ---- 2a. Phase factors exp(i 2 pi n x_a / L_a) per atom and axis by the recursion
 // e^{i(n+1)t} = e^{int} e^{it}; negative n is the complex conjugate. Claude Generated (Nov 2026)
+// P1 (Nov 2026): stored as separate cos/sin arrays, n-major; the recursion is the same complex product as before.
 EwaldPhaseTable EwaldSum::phaseTable(const Eigen::MatrixXd& positions) const
 {
     const int N = static_cast<int>(positions.rows());
@@ -237,13 +282,20 @@ EwaldPhaseTable EwaldSum::phaseTable(const Eigen::MatrixXd& positions) const
     for (int a = 0; a < 3; ++a) {
         t.nmax[a] = m_nmax[a];
         const int nn = m_nmax[a] + 1;
-        t.table[a].assign(static_cast<size_t>(N) * nn, cplx(1.0, 0.0));
+        t.re[a].assign(static_cast<size_t>(N) * nn, 1.0);
+        t.im[a].assign(static_cast<size_t>(N) * nn, 0.0);
         for (int i = 0; i < N; ++i) {
             const double ph = 2.0 * kPi * positions(i, a) * m_cell.inv_L[a];
-            const cplx e1(std::cos(ph), std::sin(ph));
-            cplx* row = &t.table[a][static_cast<size_t>(i) * nn];
-            for (int n = 1; n < nn; ++n)
-                row[n] = row[n - 1] * e1;
+            const double c1 = std::cos(ph), s1 = std::sin(ph);
+            double c = 1.0, sn = 0.0;
+            for (int n = 1; n < nn; ++n) {
+                const double cn = c * c1 - sn * s1;
+                const double snn = c * s1 + sn * c1;
+                c = cn;
+                sn = snn;
+                t.re[a][static_cast<size_t>(n) * N + i] = c;
+                t.im[a][static_cast<size_t>(n) * N + i] = sn;
+            }
         }
     }
     return t;
@@ -251,42 +303,235 @@ EwaldPhaseTable EwaldSum::phaseTable(const Eigen::MatrixXd& positions) const
 
 // ---- 2b. Reciprocal space over the k vectors [k_begin, k_end). This loop (N_k x N complex products)
 // is the cost centre; the caller spreads the k range over threads. Claude Generated (Nov 2026)
+// P1 (Nov 2026): real arithmetic on the structure-of-arrays phase table, atom loops written for the compiler's
+// vectoriser (omp simd; the two reductions of S(k) are reassociated by it, so the bits differ from the scalar
+// complex loop of B0/B2 at the 1e-16 relative level). e_i = exp(i k.r_i) = exy_i * ez_i with exy refreshed only
+// when (n_x, n_y) changes (the k list runs n_z innermost).
 void EwaldSum::reciprocalRange(const EwaldPhaseTable& table, const Eigen::VectorXd& charges, int k_begin, int k_end,
     bool want_gradient, bool want_potentials, EwaldResult& acc) const
 {
     const int N = table.natoms;
-    auto phase = [&](int a, int i, int n) {
-        const cplx v = table.table[a][static_cast<size_t>(i) * (table.nmax[a] + 1) + std::abs(n)];
-        return n >= 0 ? v : std::conj(v);
-    };
-    std::vector<cplx> exy(N), eikr(N);
+    if (k_begin >= k_end || N == 0)
+        return;
+    std::vector<double> exr(N), exi(N), er(N), ei(N);
+    const double* q = charges.data();
+    double* pot = want_potentials ? acc.potentials.data() : nullptr;
+    double* gx = want_gradient ? acc.gradient.col(0).data() : nullptr;
+    double* gy = want_gradient ? acc.gradient.col(1).data() : nullptr;
+    double* gz = want_gradient ? acc.gradient.col(2).data() : nullptr;
+    double* pexr = exr.data();
+    double* pexi = exi.data();
+    double* per = er.data();
+    double* pei = ei.data();
     int last_nx = -1, last_ny = 0;
+    double e_rec = 0.0;
     for (int kidx = k_begin; kidx < k_end; ++kidx) {
         const KVector& kv = m_kvectors[kidx];
         if (kv.n[0] != last_nx || kv.n[1] != last_ny) {
-            for (int i = 0; i < N; ++i)
-                exy[i] = phase(0, i, kv.n[0]) * phase(1, i, kv.n[1]);
+            const size_t ox = static_cast<size_t>(std::abs(kv.n[0])) * N, oy = static_cast<size_t>(std::abs(kv.n[1])) * N;
+            const double* xr = table.re[0].data() + ox;
+            const double* xi = table.im[0].data() + ox;
+            const double* yr = table.re[1].data() + oy;
+            const double* yi = table.im[1].data() + oy;
+            const double sx = kv.n[0] >= 0 ? 1.0 : -1.0, sy = kv.n[1] >= 0 ? 1.0 : -1.0;
+#pragma omp simd
+            for (int i = 0; i < N; ++i) {
+                const double b = sx * xi[i], d = sy * yi[i];
+                pexr[i] = xr[i] * yr[i] - b * d;
+                pexi[i] = xr[i] * d + b * yr[i];
+            }
             last_nx = kv.n[0];
             last_ny = kv.n[1];
         }
-        cplx S(0.0, 0.0); // structure factor S(k) = sum_j q_j exp(i k.r_j)
+        const size_t oz = static_cast<size_t>(std::abs(kv.n[2])) * N;
+        const double* zr = table.re[2].data() + oz;
+        const double* zi = table.im[2].data() + oz;
+        const double sz = kv.n[2] >= 0 ? 1.0 : -1.0;
+        double Sr = 0.0, Si = 0.0; // structure factor S(k) = sum_j q_j exp(i k.r_j)
+#pragma omp simd reduction(+ : Sr, Si)
         for (int i = 0; i < N; ++i) {
-            eikr[i] = exy[i] * phase(2, i, kv.n[2]);
-            S += charges(i) * eikr[i];
+            const double zim = sz * zi[i];
+            const double a = pexr[i] * zr[i] - pexi[i] * zim;
+            const double b = pexr[i] * zim + pexi[i] * zr[i];
+            per[i] = a;
+            pei[i] = b;
+            Sr += q[i] * a;
+            Si += q[i] * b;
         }
-        acc.terms.reciprocal += kv.weight * std::norm(S); // weight already holds the -k partner
-        if (!want_potentials && !want_gradient)
-            continue;
-        for (int i = 0; i < N; ++i) {
-            // conj(e_i) S = [cos_i C + sin_i S_s] + i [cos_i S_s - sin_i C]
-            const cplx z = std::conj(eikr[i]) * S;
-            if (want_potentials)
-                acc.potentials(i) += 2.0 * kv.weight * z.real(); // d|S|^2/dq_i = 2 Re(conj(e_i) S)
-            if (want_gradient) {
-                const double g = 2.0 * kv.weight * charges(i) * z.imag(); // d|S|^2/dr_i = 2 q_i k Im(conj(e_i) S)
-                for (int a = 0; a < 3; ++a)
-                    acc.gradient(i, a) += g * kv.k[a];
+        e_rec += kv.weight * (Sr * Sr + Si * Si); // weight already holds the -k partner
+        if (pot) {
+            // d|S|^2/dq_i = 2 Re(conj(e_i) S) = 2 (e_r S_r + e_i S_i)
+            const double w2 = 2.0 * kv.weight;
+#pragma omp simd
+            for (int i = 0; i < N; ++i)
+                pot[i] += w2 * (per[i] * Sr + pei[i] * Si);
+        }
+        if (gx) {
+            // d|S|^2/dr_i = 2 q_i k Im(conj(e_i) S) = 2 q_i k (e_r S_i - e_i S_r)
+            const double w2 = 2.0 * kv.weight;
+            const double kx = kv.k[0], ky = kv.k[1], kz = kv.k[2];
+#pragma omp simd
+            for (int i = 0; i < N; ++i) {
+                const double g = w2 * q[i] * (per[i] * Si - pei[i] * Sr);
+                gx[i] += g * kx;
+                gy[i] += g * ky;
+                gz[i] += g * kz;
             }
+        }
+    }
+    acc.terms.reciprocal += e_rec;
+}
+
+// ---- P1 (Nov 2026): shared geometry data, Claude Generated
+size_t EwaldGeometryCache::bytes() const
+{
+    size_t b = pairs.capacity() * sizeof(std::pair<int, int>) + (kernel.capacity() + dkernel.capacity()) * sizeof(double);
+    for (int a = 0; a < 3; ++a)
+        b += (table.re[a].capacity() + table.im[a].capacity()) * sizeof(double);
+    return b;
+}
+
+bool EwaldSum::cacheValidFor(const EwaldGeometryCache& cache, const Eigen::MatrixXd& positions, const Eigen::VectorXd* gaussian_alp) const
+{
+    if (!cache.valid || cache.alpha != m_par.alpha || cache.r_cut != m_par.r_cut || cache.k_max != m_par.k_max)
+        return false;
+    if (cache.pos.rows() != positions.rows() || cache.pos.cols() != positions.cols())
+        return false;
+    if (gaussian_alp ? (cache.alp.size() != gaussian_alp->size()) : (cache.alp.size() != 0))
+        return false;
+    for (Eigen::Index c = 0; c < positions.cols(); ++c)
+        for (Eigen::Index r = 0; r < positions.rows(); ++r)
+            if (cache.pos(r, c) != positions(r, c))
+                return false;
+    if (gaussian_alp)
+        for (Eigen::Index i = 0; i < gaussian_alp->size(); ++i)
+            if (cache.alp(i) != (*gaussian_alp)(i))
+                return false;
+    return true;
+}
+
+bool EwaldSum::buildGeometryCache(const Eigen::MatrixXd& positions, const Eigen::VectorXd* gaussian_alp, EwaldGeometryCache& cache,
+    size_t max_kernel_bytes, int T, const EwaldParallelFor& run) const
+{
+    if (cacheValidFor(cache, positions, gaussian_alp)) {
+        ++cache.reuses;
+        return false;
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    if (T < 1 || !run)
+        T = 1;
+    auto parallel = [&](const std::function<void(int)>& f) {
+        if (T > 1)
+            run(T, f);
+        else
+            f(0);
+    };
+    cache.valid = false;
+    cache.pos = positions;
+    if (gaussian_alp)
+        cache.alp = *gaussian_alp;
+    else
+        cache.alp.resize(0);
+    cache.alpha = m_par.alpha;
+    cache.r_cut = m_par.r_cut;
+    cache.k_max = m_par.k_max;
+
+    // Pair list: slabs in parallel, concatenated in slab order (= the serial list)
+    const PairSearch search(cache.pos, m_cell, m_par.r_cut);
+    const int outer = search.outerCount();
+    std::vector<std::vector<std::pair<int, int>>> part(T);
+    parallel([&](int t) {
+        const int b = static_cast<int>(static_cast<long long>(outer) * t / T);
+        const int e = static_cast<int>(static_cast<long long>(outer) * (t + 1) / T);
+        search.run(b, e, part[t]);
+    });
+    size_t npairs = 0;
+    for (const auto& p : part)
+        npairs += p.size();
+    cache.pairs.clear();
+    cache.pairs.reserve(npairs);
+    for (const auto& p : part)
+        cache.pairs.insert(cache.pairs.end(), p.begin(), p.end());
+
+    const auto t1 = std::chrono::steady_clock::now();
+    cache.pairs_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    // Kernel values once per geometry, unless over the cap (then realSpaceRangeCached evaluates them per call)
+    const size_t kernel_bytes = 2 * sizeof(double) * npairs;
+    if (kernel_bytes <= max_kernel_bytes && npairs > 0) {
+        cache.kernel.resize(npairs);
+        cache.dkernel.resize(npairs);
+        const double alpha = m_par.alpha;
+        const Eigen::MatrixXd& P = cache.pos;
+        const Eigen::VectorXd* alp = gaussian_alp ? &cache.alp : nullptr;
+        parallel([&](int t) {
+            const size_t b = npairs * static_cast<size_t>(t) / T, e = npairs * static_cast<size_t>(t + 1) / T;
+            for (size_t idx = b; idx < e; ++idx) {
+                const int i = cache.pairs[idx].first, j = cache.pairs[idx].second;
+                double d[3] = { P(j, 0) - P(i, 0), P(j, 1) - P(i, 1), P(j, 2) - P(i, 2) };
+                PBCUtils::applyMinimumImageOrtho(m_cell, d[0], d[1], d[2]);
+                const double r = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+                double dK;
+                cache.kernel[idx] = pairKernel(r, alpha, alp ? (*alp)(i) + (*alp)(j) : 0.0, alp != nullptr, dK);
+                cache.dkernel[idx] = dK;
+            }
+        });
+    } else {
+        std::vector<double>().swap(cache.kernel);
+        std::vector<double>().swap(cache.dkernel);
+    }
+    const auto t2 = std::chrono::steady_clock::now();
+    cache.kernel_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
+    cache.table = phaseTable(cache.pos);
+    cache.table_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t2).count();
+    cache.valid = true;
+    ++cache.builds;
+    cache.build_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    return true;
+}
+
+void EwaldSum::realSpaceRangeCached(const EwaldGeometryCache& cache, const Eigen::VectorXd& charges, int begin, int end,
+    bool want_gradient, bool want_potentials, EwaldResult& acc) const
+{
+    if (!cache.hasKernel()) {
+        realSpaceRange(cache.pos, charges, cache.pairs, begin, end, cache.alp.size() ? &cache.alp : nullptr,
+            want_gradient, want_potentials, acc);
+        return;
+    }
+    const double* q = charges.data();
+    const double* K = cache.kernel.data();
+    const auto* pr = cache.pairs.data();
+    double e_real = 0.0;
+    if (!want_gradient) {
+        // EEQ matrix-vector product and energy: a gather over the stored kernel, no transcendental function
+        double* pot = want_potentials ? acc.potentials.data() : nullptr;
+        for (int idx = begin; idx < end; ++idx) {
+            const int i = pr[idx].first, j = pr[idx].second;
+            e_real += q[i] * q[j] * K[idx];
+            if (pot) {
+                pot[i] += q[j] * K[idx];
+                pot[j] += q[i] * K[idx];
+            }
+        }
+        acc.terms.real += e_real;
+        return;
+    }
+    const Eigen::MatrixXd& P = cache.pos;
+    const double* dK = cache.dkernel.data();
+    for (int idx = begin; idx < end; ++idx) {
+        const int i = pr[idx].first, j = pr[idx].second;
+        double d[3] = { P(j, 0) - P(i, 0), P(j, 1) - P(i, 1), P(j, 2) - P(i, 2) };
+        PBCUtils::applyMinimumImageOrtho(m_cell, d[0], d[1], d[2]);
+        const double r = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+        acc.terms.real += q[i] * q[j] * K[idx];
+        if (want_potentials) {
+            acc.potentials(i) += q[j] * K[idx];
+            acc.potentials(j) += q[i] * K[idx];
+        }
+        // d = r_j - r_i, so dr/dr_j = d/r and dr/dr_i = -d/r
+        const double f = q[i] * q[j] * dK[idx] / r;
+        for (int a = 0; a < 3; ++a) {
+            acc.gradient(i, a) -= f * d[a];
+            acc.gradient(j, a) += f * d[a];
         }
     }
 }
@@ -395,7 +640,8 @@ Eigen::MatrixXd EwaldSum::matrix(const Eigen::MatrixXd& positions, const Eigen::
     // updates); phases from the recursion table, not cos/sin per (k, atom). Lower triangle only, mirrored at the end.
     const EwaldPhaseTable tab = phaseTable(positions);
     auto phase = [&](int a, int i, int n) {
-        const cplx v = tab.table[a][static_cast<size_t>(i) * (tab.nmax[a] + 1) + std::abs(n)];
+        const size_t o = static_cast<size_t>(std::abs(n)) * N + i;
+        const cplx v(tab.re[a][o], tab.im[a][o]);
         return n >= 0 ? v : std::conj(v);
     };
     const int Nk = numberOfKVectors();

@@ -1174,7 +1174,8 @@ void FFWorkspace::calcCoulombEwald(int p)
 {
     auto& acc = m_accumulators[p];
     const int T = m_num_threads;
-    const auto [begin, end] = linearRange(static_cast<int>(m_ewald_pairs.size()), p, T);
+    const curcuma::ewald::EwaldGeometryCache& cache = *m_ewald_cache;  // built in calculate() for this geometry (P1)
+    const auto [begin, end] = linearRange(static_cast<int>(cache.pairs.size()), p, T);
     const auto [k_begin, k_end] = linearRange(m_ewald->numberOfKVectors(), p, T);
     if (begin == end && k_begin == k_end)
         return;
@@ -1189,9 +1190,13 @@ void FFWorkspace::calcCoulombEwald(int p)
     if (want_pot)
         res.potentials = Eigen::VectorXd::Zero(m_natoms);
 
-    m_ewald->realSpaceRange(m_ewald_pos, m_eeq_charges, m_ewald_pairs, begin, end, &m_coul_alp,
-        m_do_gradient, want_pot, res);
-    m_ewald->reciprocalRange(m_ewald_table, m_eeq_charges, k_begin, k_end, m_do_gradient, want_pot, res);
+    const auto t0 = std::chrono::steady_clock::now();
+    m_ewald->realSpaceRangeCached(cache, m_eeq_charges, begin, end, m_do_gradient, want_pot, res);
+    const auto t1 = std::chrono::steady_clock::now();
+    m_ewald->reciprocalRange(cache.table, m_eeq_charges, k_begin, k_end, m_do_gradient, want_pot, res);
+    const auto t2 = std::chrono::steady_clock::now();
+    acc.ewald_real_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
+    acc.ewald_recip_ms += std::chrono::duration<double, std::milli>(t2 - t1).count();
 
     acc.energy.coulomb += res.terms.real + res.terms.reciprocal;
     acc.ewald_real += res.terms.real;

@@ -657,6 +657,7 @@ GFNFF::GFNFF(const json& parameters)
     m_ewald_tolerance = m_parameters.value("ewald_tolerance", 1e-8);
     m_ewald_r_cut = m_parameters.value("ewald_r_cut", 0.0);
     m_ewald_alpha = m_parameters.value("ewald_alpha", 0.0);
+    m_ewald_kernel_cache_mb = m_parameters.value("ewald_kernel_cache_mb", 1024.0);  // P1 (Nov 2026); fallback == PARAM default
 
     // frag_charge_model (Claude Generated, Sep 24, 2026; ported to master Sep 27, 2026 - Known
     // Issue #31, docs/FRAG_CHARGE_MODEL.md): chemistry-aware, continuous fragment charge
@@ -789,7 +790,9 @@ void GFNFF::forwardEEQSolverParams(json& eeq_params) {
     // Claude Generated (Sep 2026): the projected-PCG switches too, so -gfnff.eeq_ppcg_* reaches
     // the CPU solver. The GPU reads min_nfrag/min_atoms/max_iter from the eeq_solver scope
     // first, then from gfnff; its tolerance is pcg_tolerance (absolute), not eeq_ppcg_tol.
-    for (const char* key : { "eeq_ppcg_min_nfrag", "eeq_ppcg_min_atoms", "eeq_ppcg_tol", "eeq_ppcg_max_iter" }) {
+    for (const char* key : { "eeq_ppcg_min_nfrag", "eeq_ppcg_min_atoms", "eeq_ppcg_tol", "eeq_ppcg_max_iter",
+             "eeq_ewald_precond", "eeq_ewald_precond_block", "eeq_ewald_tol", "eeq_ewald_extrapolation",
+             "eeq_ewald_extrapolation_order" }) {  // P1 (Nov 2026): periodic pcg preconditioner
         if (m_parameters.contains(key) && !eeq.contains(key))
             eeq[key] = m_parameters[key];
     }
@@ -4967,6 +4970,9 @@ bool GFNFF::initializeForceField()
             }
             const curcuma::ewald::EwaldParameters ep = m_ewald_params;
             m_workspace->setEwald(ep);
+            if (!m_ewald_cache)
+                m_ewald_cache = std::make_shared<curcuma::ewald::EwaldGeometryCache>();
+            m_workspace->setEwaldGeometryCache(m_ewald_cache, ewaldKernelCapBytes());  // P1: shared with the EEQ solver
             if (CurcumaLogger::get_verbosity() >= 1)
                 CurcumaLogger::info(fmt::format("GFN-FF Coulomb: Ewald sum (alpha {:.4f} 1/Bohr, r_cut {:.3f} Bohr, k_max {:.3f} 1/Bohr, "
                                                 "{} k vectors, Gaussian correction radius {:.3f} Bohr); EEQ charges periodic with the same matrix",
@@ -13482,8 +13488,17 @@ void GFNFF::configurePeriodicEwald()
         throw std::runtime_error(fmt::format("GFN-FF: Ewald real-space radius {:.4f} Bohr (max(ewald_r_cut, r_g = {:.4f})) "
                                              "is not below L_min/2 = {:.4f} Bohr", ep.r_cut, ewaldGaussianRadiusBohr(), half));
     m_ewald_params = ep;
-    if (m_eeq_solver)
+    // P1 (Nov 2026): one geometry-data object (pair list, kernel values, phase table) for the solver and the workspace
+    m_ewald_cache = std::make_shared<curcuma::ewald::EwaldGeometryCache>();
+    if (m_eeq_solver) {
         m_eeq_solver->setPeriodicEwald(m_cell_bohr_ortho, ep, m_eeq_ewald_dense_max);
+        m_eeq_solver->setEwaldGeometryCache(m_ewald_cache, ewaldKernelCapBytes());
+    }
+}
+
+size_t GFNFF::ewaldKernelCapBytes() const
+{
+    return m_ewald_kernel_cache_mb > 0.0 ? static_cast<size_t>(m_ewald_kernel_cache_mb * 1048576.0) : size_t(0);
 }
 
 double GFNFF::coulombRCutBohr() const
@@ -13521,11 +13536,13 @@ curcuma::ewald::EwaldParameters GFNFF::ewaldParameters() const
 {
     const double half = 0.5 * m_cell_bohr_ortho.minLength();
     const double r_g = ewaldGaussianRadiusBohr();
-    // Automatic cutoff: 15 sqrt(L_min / 40) Bohr (the B0 timing optimum was 15.1 / 17.1 / 20.4 Bohr at
-    // L = 40.7 / 58.7 / 73.9 Bohr, i.e. ~ sqrt(L)), never below r_g, never above L_min/2 (the EwaldSum
-    // constructor and the setup check refuse that).
+    // Automatic cutoff: 17.5 sqrt(L_min / 40) Bohr, never below r_g, never above L_min/2 (the EwaldSum
+    // constructor and the setup check refuse that). B0 found the optimum ~ sqrt(L) (15.1 / 17.1 / 20.4 Bohr at
+    // L = 40.7 / 58.7 / 73.9 Bohr, prefactor 15); P1 (Nov 2026) stores the real-space kernel once per geometry,
+    // which makes a real-space pair cheaper per EEQ iteration than a k vector, and moved the optimum of the MD step
+    // (water boxes, 4 threads, ~6 pcg iterations) to 21 Bohr at L = 58 and 23 Bohr at L = 72.8, i.e. prefactor 17.5.
     double r_cut = m_ewald_r_cut > 0.0 ? m_ewald_r_cut
-                                       : std::min(half, std::max(15.0 * std::sqrt(m_cell_bohr_ortho.minLength() / 40.0), r_g));
+                                       : std::min(half, std::max(17.5 * std::sqrt(m_cell_bohr_ortho.minLength() / 40.0), r_g));
     curcuma::ewald::EwaldParameters p = curcuma::ewald::chooseEwaldParameters(m_cell_bohr_ortho, m_ewald_tolerance, r_cut);
     if (m_ewald_alpha > 0.0) {
         p.alpha = m_ewald_alpha;

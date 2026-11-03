@@ -92,6 +92,7 @@
 #include <Eigen/Dense>
 
 #include <complex>
+#include <functional>
 #include <utility>
 #include <vector>
 
@@ -106,12 +107,45 @@ double gaussianCorrectionRadius(const Eigen::VectorXd& alp);
 
 /*! \brief Per-atom, per-axis phase factors exp(i 2 pi n x_a / L_a), n = 0..nmax - Claude Generated (Nov 2026, B2)
  * Built once per geometry (phaseTable), read by reciprocalRange() from any thread.
+ * P1 (Nov 2026): structure of arrays, n-major (re[a][n * natoms + i] = cos, im = sin), so that the atom loop
+ * of reciprocalRange() reads contiguous memory and vectorises; negative n is the complex conjugate.
  */
 struct EwaldPhaseTable {
     int natoms = 0;
     int nmax[3] = { 0, 0, 0 };
-    std::vector<std::complex<double>> table[3]; ///< [atom * (nmax+1) + n]
+    std::vector<double> re[3]; ///< [n * natoms + atom], n = 0..nmax: cos(2 pi n x_a / L_a)
+    std::vector<double> im[3]; ///< [n * natoms + atom]: sin(2 pi n x_a / L_a)
 };
+
+/*! \brief Geometry data of one Ewald evaluation, shared by every consumer of the same geometry - Claude Generated (Nov 2026, P1)
+ *
+ * The periodic EEQ applies the Ewald matrix 15-25 times per geometry (CG iterations) and the workspace evaluates
+ * the Coulomb energy and gradient once more at the same geometry. Everything that depends only on the geometry
+ * and the widths alp is built once here: the minimum-image pair list, the real-space kernel
+ * K_ij = erfc(a r)/r - erfc(g_ij r)/r and its derivative dK/dr per pair, and the phase table. The kernel arrays
+ * are left empty when they would exceed the memory cap (buildGeometryCache), and the range functions then
+ * evaluate the kernel per call as before. Lifetime: until the next geometry (validFor() compares positions,
+ * widths and the Ewald parameters bit for bit).
+ */
+struct EwaldGeometryCache {
+    Eigen::MatrixXd pos;                     ///< N x 3 positions (Bohr), column-major copy; part of the key
+    Eigen::VectorXd alp;                     ///< Gaussian widths (Bohr^2), empty = point charges; part of the key
+    double alpha = 0.0, r_cut = 0.0, k_max = 0.0; ///< Ewald parameters the data belong to; part of the key
+    std::vector<std::pair<int, int>> pairs;  ///< minimum-image pairs i < j with r < r_cut
+    std::vector<double> kernel;              ///< K_ij per pair (empty: over the memory cap, evaluated per call)
+    std::vector<double> dkernel;             ///< dK_ij/dr per pair (same length as kernel)
+    EwaldPhaseTable table;                   ///< phase factors of pos
+    bool valid = false;
+    double build_ms = 0.0;                   ///< wall time of the last build
+    double pairs_ms = 0.0, kernel_ms = 0.0, table_ms = 0.0; ///< its split (pair search, kernel values, phase table)
+    long builds = 0, reuses = 0;             ///< statistics (profile, tests)
+    bool hasKernel() const { return valid && kernel.size() == pairs.size() && !pairs.empty(); }
+    /// Bytes held by the pair list, kernel arrays and phase table
+    size_t bytes() const;
+};
+
+/// Parallel runner for the cache build: calls f(t) for t = 0 .. T-1 (any order, any thread) and returns when all are done.
+using EwaldParallelFor = std::function<void(int T, const std::function<void(int)>& f)>;
 
 /*! \brief Ewald parameters (atomic units) - Claude Generated (Nov 2026) */
 struct EwaldParameters {
@@ -222,6 +256,21 @@ public:
     /// Reciprocal terms of the k vectors [k_begin, k_end) (indices into the stored half-space list).
     void reciprocalRange(const EwaldPhaseTable& table, const Eigen::VectorXd& charges, int k_begin, int k_end,
         bool want_gradient, bool want_potentials, EwaldResult& acc) const;
+    /*! \brief P1: build (or keep) the shared geometry data for positions/gaussian_alp - Claude Generated (Nov 2026)
+     * Returns true when the cache was rebuilt, false when it already held this geometry. max_kernel_bytes caps the
+     * kernel arrays (16 bytes per pair); above it only the pair list and the phase table are stored. T > 1 with a
+     * runner splits the pair search (by linked-cell slabs, concatenated in slab order: the list is the same for every
+     * T) and the kernel evaluation (linear pair ranges).
+     */
+    bool buildGeometryCache(const Eigen::MatrixXd& positions, const Eigen::VectorXd* gaussian_alp, EwaldGeometryCache& cache,
+        size_t max_kernel_bytes, int T = 1, const EwaldParallelFor& run = nullptr) const;
+    /// True when cache holds the data of exactly these positions, widths and this sum's parameters.
+    bool cacheValidFor(const EwaldGeometryCache& cache, const Eigen::MatrixXd& positions, const Eigen::VectorXd* gaussian_alp) const;
+    /// realSpaceRange() over cache.pairs[begin, end) with the stored kernel (bitwise the same numbers as the per-call
+    /// kernel); falls back to realSpaceRange() when the kernel arrays are empty.
+    void realSpaceRangeCached(const EwaldGeometryCache& cache, const Eigen::VectorXd& charges, int begin, int end,
+        bool want_gradient, bool want_potentials, EwaldResult& acc) const;
+
     /// Self, neutralising background and (with gaussian_alp) the Gaussian background term; O(N), one call.
     void selfAndBackground(const Eigen::VectorXd& charges, const Eigen::VectorXd* gaussian_alp,
         bool want_potentials, EwaldResult& acc) const;
