@@ -122,8 +122,10 @@ struct QMGpuEriTables {
     double screening = 0.0;            ///< Schwarz / density-weighted threshold (-qm.eri_screening)
     const double* pr_schwarz = nullptr;  ///< per shell pair: sqrt(max |(ab|ab)|) (ShellPair::schwarz)
     /// Integral-direct only (built with list_quartets = false; q_bra/q_ket then empty):
-    /// shell pairs grouped by pair class k = LA*3 + LB (9 classes), CPU order inside a class.
-    const int* pc_off = nullptr;       ///< 10 offsets into pc_pairs
+    /// shell pairs grouped by pair class k = LA*cb + LB, CPU order inside a class; cb = 3 (9 classes) when
+    /// every shell is s/p/d, cb = 5 (25 classes) with f/g shells (stage 6b, Nov 2026; the plugin derives cb
+    /// from sh_L, qmgpu::pairClassBase, so this struct is unchanged).
+    const int* pc_off = nullptr;       ///< cb*cb + 1 offsets into pc_pairs
     const int* pc_pairs = nullptr;
 };
 

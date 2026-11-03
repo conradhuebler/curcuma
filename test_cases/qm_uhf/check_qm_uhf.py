@@ -191,6 +191,9 @@ def check_fd(a):
     xyz = os.path.join(TC, ref["xyz"])
     qm = dict(ref["qm"])
     qm["scf_threshold"] = 1e-11
+    for kv in a.extra_qm:  # stage 6b (Nov 2026): e.g. basis=def2-TZVP for the f-shell device path
+        k, v = kv.split("=", 1)
+        qm[k] = json.loads(v) if v[:1].isdigit() or v in ("true", "false") else v
     if ref["method"] == "hf-3c":
         qm.pop("basis", None)
     atoms = read_xyz(xyz)
@@ -346,7 +349,7 @@ def main():
     ap.add_argument("--reference", default=os.path.join(HERE, "reference.json"))
     ap.add_argument("--gpu", action="store_true", help="ref/fd: run the CUDA path (stage 6a)")
     ap.add_argument("--plugin-dir", default="", help="directory of libcurcuma_cuda.so (default: that of --curcuma)")
-    ap.add_argument("--extra-qm", nargs="*", default=[], help="gpu: extra -qm settings KEY=VALUE")
+    ap.add_argument("--extra-qm", nargs="*", default=[], help="gpu, fd: extra -qm settings KEY=VALUE")
     a = ap.parse_args()
     if a.gpu or a.check == "gpu":
         gpu_available(a)

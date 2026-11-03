@@ -35,7 +35,8 @@
 //   * the cartesian -> spherical 6d->5d transform is applied per quartet, one axis at a time;
 //   * output: Q-G2 writes each tensor element once (canonical orbit representative) and copies
 //     it to its 8 permutations; Q-G3 contracts the block with P into J and K (FP64 atomicAdd).
-// Limits: s, p, d shells (L <= 2), checked on the host; FP64 throughout.
+// Limits: s, p, d shells (L <= 2), checked on the host; FP64 throughout. Classes with f/g shells
+// (stage 6b, Nov 2026): qm_gpu_eri_generic.cu.
 
 #include "../qm_gpu_backend.h"
 
@@ -864,16 +865,20 @@ int ncompOf(int L) { return (L + 1) * (L + 2) / 2; }
 
 /// Upload the tables both modes share (shells, pairs, primitive pairs, Hermite E, Boys) and
 /// check the basis restrictions of the kernels. false + reason on failure.
-bool uploadCommonTables(const qmint::QMGpuEriTables* t, DevTables& d, std::vector<void*>& owned, std::string& why)
+/// maxL (stage 6b, Nov 2026): highest shell momentum the caller handles (2: s/p/d kernels only;
+/// 4: the caller runs the f/g classes through qm_gpu_eri_generic.cu or runtime-L gradient kernels).
+bool uploadCommonTables(const qmint::QMGpuEriTables* t, DevTables& d, std::vector<void*>& owned, std::string& why,
+                        int maxL = 2)
 {
     if (t->boys_ntaylor != kNTaylor) { why = "Boys table layout mismatch"; return false; }
     for (int s = 0; s < t->nshell; ++s)
-        if (t->sh_L[s] > 2 || t->sh_ncomp[s] != ncompOf(t->sh_L[s])) {
-            why = "shell with L > 2 (device kernel handles s, p, d)";
+        if (t->sh_L[s] > maxL || t->sh_ncomp[s] != ncompOf(t->sh_L[s])) {
+            why = maxL <= 2 ? "shell with L > 2 (device kernel handles s, p, d)" : "shell with L > 4 (device kernels handle s-g)";
             return false;
         }
     for (int s = 0; s < t->nshell; ++s)
-        if (t->sh_T_off[s] >= 0 && !(t->sh_L[s] == 2 && t->sh_out_width[s] == 5)) {
+        if (t->sh_T_off[s] >= 0 && !(t->sh_L[s] == 2 && t->sh_out_width[s] == 5)
+            && !(t->sh_L[s] >= 3 && t->sh_out_width[s] == 2 * t->sh_L[s] + 1)) {
             why = "unexpected spherical transform block";
             return false;
         }
@@ -918,6 +923,7 @@ bool threadKernelUsable(const qmint::QMGpuEriTables* t, bool& spherical)
     spherical = false;
     for (int sh = 0; sh < t->nshell; ++sh) {
         const int Ls = t->sh_L[sh];
+        if (Ls > 2) continue;  // stage 6b: f/g shells only appear in classes of the generic kernel
         for (int c = 0; c < t->sh_ncomp[sh]; ++c)
             for (int ax = 0; ax < 3; ++ax)
                 if (t->lmn[t->sh_lmn_off[sh] + 3 * c + ax] != cpow(Ls, c, ax)) order_ok = false;

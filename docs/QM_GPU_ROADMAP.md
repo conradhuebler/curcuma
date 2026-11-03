@@ -4,7 +4,8 @@
 > Sep 2026). Section 3 is a plan; stages Q-G1 to Q-G4, Q-G7 (2e gradient) and Q-G8 (1e gradient)
 > and Q-G5 (FP32 phase of the direct SCF and mixed-precision RI-JK) are implemented (Oct 2026, AI-generated,
 > machine-tested on one RTX 5090 only), Q-G6 (multi-GPU) is a proposal. Section 4: Kohn-Sham DFT on the GPU
-> (Oct 30 2026, AI-generated, machine-tested on one RTX 5090 only).
+> (Oct 30 2026, AI-generated, machine-tested on one RTX 5090 only); 4.4 open shell (stage 6a), 4.5 f and g shells
+> (stage 6b, Nov 2026).
 
 The native xTB GPU work ([SQM_GPU.md](SQM_GPU.md), [SQM_GPU_ROADMAP.md](SQM_GPU_ROADMAP.md),
 [SQM_PERFORMANCE.md](SQM_PERFORMANCE.md), [MULTI_GPU.md](MULTI_GPU.md)) produced a set of
@@ -1010,7 +1011,7 @@ it and the counted key is gone.
 | XC gradient incl. grid response | yes | `QMGpuXC::gradientSpin`: basis part per spin, point part of both spins (`gradRowSpinKernel`), Becke weight derivative of e_x + e_c |
 | SCF loop (DIIS/ADIIS, diagonalisation, densities, convergence test) | no | host loop of `runUSCF` with the device builds, counted `qm_uhf_scf` once per engine unless `-qm.gpu_scf off` (then chosen, not a fallback); `-gpu_strict true` exits 3 otherwise |
 | ECP gradient, gCP/SRB/D3 of hf-3c, RI 2-index metric part | no | host, as for RHF (not counted, as for RHF) |
-| f/g shells (def2-TZVP and larger) | no | counted `qm_eri`/`qm_grad`, as for RHF (stage 6b) |
+| f/g shells (def2-TZVP and larger) | yes (stage 6b) | until stage 6b counted `qm_eri`/`qm_grad`; section 4.5 |
 
 Why no device-resident UHF loop (stage 2 of the task): for the medium case below the host part of the loop (eigensolve
 of two Fock matrices, DIIS, densities) is 0.54 s of 2.39 s (HF) and 0.33 s of 4.81 s (B3LYP); the J/K and V_xc builds
@@ -1076,3 +1077,86 @@ the device (fallback), ECP open shells on the device (the ECP gradient stays hos
 (the open-shell builds are FP64 only), `-qm.ri_mixed_precision` and the low-memory RI modes with UHF, the Stratmann
 partition. Not implemented: device-resident UHF/UKS loop, two-density RI-JK kernel, AO screening on the UKS path (CPU and
 device), incremental (dP) direct builds for UHF.
+
+### 4.5 f and g shells on the device (Nov 2026, stage 6b)
+
+> 🤖 AI-generated, ⚙️ machine-tested (RTX 5090 only, release build sm_75 PTX through the JIT). Human production
+> testing pending.
+
+Until stage 6b `qmint::buildEriGpuTables` refused L > 2, so with def2-TZVP and larger every ERI, J/K and gradient part
+ran on the CPU. Survey at 592ba35c (`-gpu cuda`, `dump_qm_energy`, H2O/NH3/CH4 TZVP/QZVPP, caffeine TZVP, CH3 UHF TZVP,
+CH3I TZVP): counted fallbacks `qm_eri` (stored tensor, every SCF), `qm_direct` (`-qm.scf_direct on`), `qm_grad` and
+`qm_grad1e` (every gradient), `qm_mp2_grad` (mp2 gradient), `qm_ri_grad` (RI-JK/RI-J gradient and the RI-PT2 gradient of
+the double hybrids); RI-J/RI-JK contractions and XC already ran on the device (the RI tensor comes from the CPU, the
+device XC takes up to g). After stage 6b none of them is counted on these cases; what remains counted is not f/g
+specific: `qm_uhf_scf` (host UHF loop, stage 6a) and `qm_dh_grad_pt2` (host PT2 intermediates, WP12).
+
+| part | how (files) |
+|---|---|
+| tables | `buildEriGpuTables` takes L <= 4; pair classes `LA*cb + LB` with cb = 3 when every shell is s/p/d (the layout of before, unchanged) and cb = 5 with f/g shells; the plugin derives cb from `sh_L` (`qmgpu::pairClassBase`), so `QMGpuEriTables` and the entry names are unchanged |
+| ERI, stored tensor (Q-G2) and integral-direct J/K (Q-G3) | every class with an f or g shell: `cuda/qm_gpu_eri_generic.cu`, one runtime-L McMurchie-Davidson kernel in Hermite-matrix form (F tables of the active component pairs per primitive pair, contraction and spherical transform folded in, as `mdInit`; R^0 level by level in shared memory, degree-ordered simplex up to (gg\|gg)); one warp per quartet for the small classes, one block of 128 threads for the large ones; the pair with the higher L is put on the bra side (the ket Hermite step per primitive quartet stays small); ket sums and the quartet block in a per-group slot of global memory, so all f/g launches go to one stream; same `quartetOf` screen and primitive break as the s/p/d kernels; FP64 also in an FP32 phase (`-qm.gpu_eri_precision`: only the s/p/d classes run FP32) |
+| s/p/d classes in an f/g basis | unchanged kernels; `mdInit` skips f/g pairs and now accepts d transform entries <= 1e-14 outside the 5d pattern (the S-metric orthonormalisation leaves up to 9.6e-17 in def2-QZVPP, 1.7e-30 in caffeine def2-TZVP; exactly zero in def2-SVP); without that the integral-direct build fell back to the old hermite kernels (H2O QZVPP direct 8.7 s instead of 4.9 s) |
+| 2e gradient (Q-G7, RHF/KS/UHF) and MP2 2e gradient | the warp kernels were already runtime-L; changed: `sF` layout `sfSize(SFB)` (Boys + powers for L <= 17), f/g classes with much work per quartet run `grad2eBlockKernel` (one block per quartet, scratch in global memory); `qm_gpu_mp2_grad.cu` got the same edits (it is a copy) |
+| 2e gradient screen | `qmint::gpuGradScreen`: eri_screening / 100 for s/p/d (unchanged), / 1e4 with f/g shells: at / 100 CH4/def2-QZVP was 1.0e-10 Eh/Bohr from the unscreened CPU gradient (same density), at / 1e4 4.5e-13, for 0.8 % more quartets |
+| 1e gradient (Q-G8) | template on the Hermite order: `MAXL = 5` (s/p/d, code of before), `MAXL = 9` for f/g bases |
+| RI 3-index gradient | second instance of `riGrad3cKernel` (Ltot <= 13, orbital g raised + auxiliary g, one warp per block for shared memory); its own Boys table (the s/p/d one bit for bit as before); auxiliary h still refused |
+| ECP matrix and gradient | stay on the CPU (decision below) |
+
+Checks (`dump_qm_energy` GPU vs CPU of the same binary, 8 threads, `-qm.scf_threshold 1e-10`; gradients Eh/Bohr):
+
+| case | \|dE\| | max \|dg\| |
+|---|---:|---:|
+| HF H2O, NH3, CH4, HF with def2-TZVP, TZVPP, QZVP, QZVPP (16) | <= 1.9e-13 | <= 2.1e-12 (CH4 QZVP; the others <= 5.6e-13) |
+| pbe/b3lyp H2O TZVP, b3lyp H2O QZVP, pbe NH3 QZVPP | <= 1.4e-13 | <= 1.8e-13 |
+| integral-direct HF H2O TZVP/QZVP, b3lyp NH3 QZVP | <= 7.1e-14 | <= 4.6e-13 |
+| RI-JK HF H2O TZVP/QZVP, RI-J pbe H2O QZVP | <= 2.3e-13 | <= 1.1e-13 |
+| mp2 gradient H2O TZVP/QZVP, ri-mp2 H2O QZVPP, b2plyp gradient H2O TZVP | <= 1.9e-13 | <= 2.3e-13 |
+| UHF CH3, NH2, CH2 triplet TZVP, direct UHF CH2 QZVP, UKS b3lyp CH3 TZVP | <= 2.8e-14 | <= 5.0e-14 |
+| ECP + f: HF CH3I, HI, HgCl2 TZVP, b3lyp HI TZVP | <= 9.1e-13 | <= 7.9e-12 (HgCl2, \|g\| up to 24 in the parts) |
+| caffeine def2-TZVP HF / b3lyp (sg1), `-qm.scf_threshold 1e-8`, CPU direct vs GPU direct | 2.3e-13 / 2.5e-12 | 2.2e-10 / 2.2e-10 (SCF threshold) |
+
+Same density on both sides (`CURCUMA_QM_GPU_ERI_CHECK`, `_JK_CHECK`, `_GRAD_CHECK`, `_RI_GRAD_CHECK`): device tensor vs CPU
+`buildERI` element-wise <= 2.0e-14 (H2O QZVPP, CH4 QZVP, HgCl2 TZVP, H2O QZVP cartesian); direct J/K vs CPU `DirectJK`
+<= 2.1e-14 with the same quartet count; 2e gradient <= 6.8e-14 (H2O QZVP/QZVPP, cartesian, UHF CH2 TZVP), 4.4e-13 (CH4
+QZVP), 3.8e-12 (HgCl2, |g| up to 24); 1e gradient <= 7.9e-12 (HgCl2, |g| up to 47), else <= 6e-15; MP2 2e 7.3e-15; RI
+3-index 3.9e-14. The device tensor has exact zeros where the CPU has rounding-level values and vice versa
+(`zero_pattern_mismatch` 29932 of 1.9e8 elements for H2O QZVPP spherical, 0 in the cartesian basis); max difference
+1.7e-14. The 2e gradient numbers are with the f/g screen of `gpuGradScreen`; caffeine GPU 2e gradient 28 s in a run
+with the md kernels off and 42 s in the run of the table (same kernel code, not investigated; the CPU was busy with
+another 8-thread job in both). FD gate on the device path (4-point, 0.005 Bohr, ctest): HF H2O TZVP 2.5e-10, b3lyp H2O QZVP (g shells)
+1.8e-10, UHF CH2 TZVP 3.7e-11 Eh/Bohr; against PySCF: HF H2O QZVPP 5.4e-13 Eh / 5.6e-13 Eh/Bohr, b3lyp H2O QZVP 2.6e-12 Eh
+/ 9.2e-12 Eh/Bohr.
+
+Closed shell s/p/d unchanged: the 20 dumps of stage 6a (hf/b3lyp/pbe/lda/hf-3c/mp2, stored, direct, RI-JK, water/
+methanol/benzene, CPU and `-gpu cuda`, 4 threads) against the binary of 592ba35c (same build options): every CPU dump
+md5-identical except integral-direct at 4 threads (differs run to run in both binaries, 2.3e-13 Eh), every stored-path
+GPU energy bit-identical, GPU gradients within their own run-to-run spread (<= 1.4e-14 vs 1.4e-14 old vs old). Open
+shell (8 dumps of stage 6a): identical energies except O2/TZVP, which now runs its ERI on the device (5.7e-14 Eh). PTX
+is NOT a usable criterion here: compiling the unchanged 592ba35c `qm_gpu_eri.cu` twice gave 10 of 63 kernels with
+different PTX (3 with a different FP instruction sequence); the measured energies are the criterion.
+
+Timing (RTX 5090, 24-core host, wall time of the process incl. start-up):
+
+| case | CPU 1 thread | CPU 8 threads | GPU |
+|---|---:|---:|---:|
+| H2O def2-QZVPP (117 functions) HF energy, stored tensor | 3.85 s | 1.80 s | 1.28 s |
+| same, energy + gradient | 18.6 s | 3.92 s | 2.42 s (2e gradient 1.10 s) |
+| same, `-qm.scf_direct on` on the device | - | - | 4.9 s (generic f/g classes ~75 % of the direct kernels) |
+| caffeine def2-TZVP (494 functions) HF, integral-direct, SCF / 2e gradient / process | - | 129 s / 1147 s / 1287 s | 39 s / 42 s / 85 s |
+| caffeine def2-TZVP b3lyp (sg1), same | - | 157 s / 1132 s / 1302 s | 60 s / 34 s / 99 s |
+
+ECP on the device (task step 4, not done): CPU ECP matrix 98 ms (HgCl2 TZVP), 85 ms (CH3I), 38 ms (HI) on 1 thread; ECP
+gradient (1e part on the device minus its 10 ms) ~110 ms (HgCl2) and ~80 ms (CH3I) on 1 thread. The GPU runs of these
+molecules take 2.0-2.9 s in total with the 2e gradient 0.27-0.99 s on the device, so a device ECP would save at most ~9 %
+(HgCl2, 1 thread) and less with threads; not worth a device port of the projection code. Kept on the CPU.
+
+CPU f/g path (task step 5, not done): H2O def2-QZVPP HF energy 3.85 s and energy + gradient 18.6 s on 1 thread (generic
+`mdQuartet` for l_a + l_b > 4 and the general gradient path); no contained, bitwise-verifiable change was attempted.
+
+Not tested: other GPUs than the RTX 5090, multi-GPU, ROCm and Vulkan (no f/g kernels there, untouched), h orbital shells
+(the parser rejects them), auxiliary h in the RI gradient (refused, counted `qm_ri_grad`), FP32 phases of f/g classes
+(they run FP64), molecules larger than caffeine, `-opt`/`-md` with f/g bases on the GPU, the low-memory RI modes with
+f/g. Compile time (nvcc -ptx per TU, eight TUs in parallel, before / after): `qm_gpu_eri.cu` 832 / 825 s,
+`qm_gpu_direct.cu` 836 / 841 s, `qm_gpu_direct_md.cu` 271 / 280 s, `qm_gpu_direct_fp32.cu` 260 / 261 s, the gradient
+TUs below 2.1 s, new `qm_gpu_eri_generic.cu` 0.6 s: the generic kernel is runtime-L (no unrolled templates), the plugin
+build time is unchanged within noise.

@@ -36,8 +36,9 @@ struct MdTables {
 /// Build the F tables on the device from the uploaded tables d (needs t for the pair -> primitive
 /// map). false + reason if the basis is not supported (cartesian d, unexpected component order or
 /// transform pattern) or on a device error; the builder then keeps its old kernels.
+/// dropped (stage 6b): largest |T| entry outside the 5d pattern that was accepted as zero (<= 1e-14).
 bool mdInit(const qmint::QMGpuEriTables* t, const DevTables& d, MdTables& m, std::vector<void*>& owned,
-            std::string& why, size_t& bytes);
+            std::string& why, size_t& bytes, double* dropped = nullptr);
 
 /// Launch the thread-per-quartet kernel of class (LA LB | LC LD) on the quartets of src; false if
 /// this class has no instance (the caller uses its old kernel).

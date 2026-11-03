@@ -15,6 +15,12 @@ Checks (--check):
          measured <= 2.4e-10 on every case, largest on O z in every method, cause not analysed)
   gpu    curcuma -sp with -gpu cuda on an f basis: the run finishes, the energy equals the CPU run to 1e-9 Eh;
          exit 77 (skip) without a usable CUDA plugin/device
+  gpudev stage 6b (label qm_gpu_fg): dump_qm_energy --gpu cuda against the CPU run of the same binary (energy
+         |dE| <= 1e-9 Eh, gradient max |dg| <= --gtol); FAILS on any counted GPU fallback except those named in
+         --allow (the f/g device kernels must run: qm_eri, qm_direct, qm_grad, qm_grad1e, qm_mp2_grad, qm_ri_grad
+         are not allowed); --qm KEY=VALUE adds engine options; with --gpu also ref/fd run the device path
+         (same fallback rule). Exit 77 without libcurcuma_cuda.so next to dump_qm_energy (or CURCUMA_PLUGIN_DIR)
+         or without a CUDA device
 
 Claude Generated (Nov 2026).
 """
@@ -44,8 +50,37 @@ def qm_args(qm):
     return out
 
 
-def run_dump(dump, xyz, method, qm, gradient=False, threads=1):
+GPU = {"on": False, "fallbacks": {}, "allow": set()}  # stage 6b: device path of dump_qm_energy (--gpu)
+
+
+def gpu_available(a):
+    """libcurcuma_cuda.so in CURCUMA_PLUGIN_DIR or next to dump_qm_energy's build tree, and a CUDA device; else exit 77."""
+    cands = [os.environ.get("CURCUMA_PLUGIN_DIR", "")]
+    d = os.path.dirname(os.path.abspath(a.dump))
+    for _ in range(4):  # dump_qm_energy lives in <build>/test_cases/qm_basis_embed
+        cands.append(d)
+        d = os.path.dirname(d)
+    pdir = next((c for c in cands if c and os.path.exists(os.path.join(c, "libcurcuma_cuda.so"))), "")
+    ok = bool(pdir)
+    if ok:
+        try:
+            ok = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True).returncode == 0
+        except OSError:
+            ok = False
+    if not ok:
+        print("skip: no CUDA plugin found (%s) or no CUDA device" % cands)
+        sys.exit(77)
+    os.environ["CURCUMA_PLUGIN_DIR"] = pdir
+
+
+def run_dump(dump, xyz, method, qm, gradient=False, threads=1, gpu=None, charge=0, spin=0):
+    if gpu is None:
+        gpu = GPU["on"]
     cmd = [dump, xyz, method] + qm_args(qm) + ["--threads", str(threads)]
+    if charge or spin:
+        cmd += ["--charge", str(charge), "--spin", str(spin)]
+    if gpu:
+        cmd += ["--gpu", "cuda"]
     if gradient:
         cmd.append("--gradient")
     p = subprocess.run(cmd, capture_output=True, text=True, env=env_embedded())
@@ -55,7 +90,28 @@ def run_dump(dump, xyz, method, qm, gradient=False, threads=1):
         print(out[-4000:])
         raise SystemExit("dump_qm_energy failed: " + " ".join(cmd))
     g = [[float(x) for x in l.split()[2:5]] for l in out.splitlines() if l.startswith("grad ")]
+    if gpu:
+        for fb in re.finditer(r"^fallback (\S+) (\d+)$", out, re.M):
+            GPU["fallbacks"][fb.group(1)] = GPU["fallbacks"].get(fb.group(1), 0) + int(fb.group(2))
     return float(m.group(1)), g
+
+
+def check_gpu_fallbacks():
+    bad = {k: v for k, v in GPU["fallbacks"].items() if k not in GPU["allow"]}
+    print("counted GPU fallbacks: %s (allowed: %s)" % (GPU["fallbacks"] or "none", sorted(GPU["allow"]) or "none"))
+    if bad:
+        raise SystemExit("FAILED: device path fell back to the CPU: %s" % bad)
+
+
+def case_qm(a, ref):
+    qm = dict(ref["qm"])
+    for kv in a.qm:
+        k, v = kv.split("=", 1)
+        try:
+            qm[k] = json.loads(v)
+        except ValueError:
+            qm[k] = v
+    return qm
 
 
 def read_xyz(path):
@@ -74,7 +130,7 @@ def write_xyz(path, atoms):
 def check_ref(a):
     ref = json.load(open(a.reference))["cases"][a.case]
     xyz = os.path.join(TC, ref["xyz"])
-    qm = dict(ref["qm"])
+    qm = case_qm(a, ref)
     qm.setdefault("scf_threshold", 1e-10)
     e, g = run_dump(a.dump, xyz, ref["method"], qm, ref["gradient"], a.threads)
     ok = True
@@ -97,6 +153,8 @@ def check_ref(a):
         print("  gradient max |g - g_PySCF| = %.2e Eh/Bohr (limit %.1e)" % (dg, a.gtol))
         if len(g) != len(gr) or dg > a.gtol:
             ok = False
+    if GPU["on"]:
+        check_gpu_fallbacks()
     if not ok:
         raise SystemExit("FAILED: %s outside the tolerance" % a.case)
 
@@ -104,7 +162,7 @@ def check_ref(a):
 def check_fd(a):
     ref = json.load(open(a.reference))["cases"][a.case]
     xyz = os.path.join(TC, ref["xyz"])
-    qm = dict(ref["qm"])
+    qm = case_qm(a, ref)
     qm["scf_threshold"] = 1e-11 if "QZV" not in qm["basis"] else 1e-10
     atoms = read_xyz(xyz)
     _, g = run_dump(a.dump, xyz, ref["method"], qm, True, a.threads)
@@ -126,6 +184,8 @@ def check_fd(a):
             worst = max(worst, abs(diff))
             print("%-30s atom %d %s analytic %+.10f FD %+.10f diff %+.2e" % (a.case, at, ax, g[at][k], fd, diff))
     print("max |analytic - FD| = %.2e Eh/Bohr (limit %.1e)" % (worst, a.gtol))
+    if GPU["on"]:
+        check_gpu_fallbacks()
     if worst > a.gtol:
         raise SystemExit("FAILED: FD gate")
 
@@ -160,9 +220,29 @@ def check_gpu(a):
         raise SystemExit("FAILED: GPU energy differs from the CPU")
 
 
+def check_gpudev(a):
+    """Stage 6b: device path (dump_qm_energy --gpu cuda) against the CPU path of the same binary."""
+    ref = json.load(open(a.reference))["cases"][a.case]
+    xyz = os.path.join(TC, ref["xyz"])
+    qm = case_qm(a, ref)
+    qm.setdefault("scf_threshold", 1e-10)
+    grad = ref["gradient"] or a.gradient
+    ch, sp = ref.get("charge", 0), ref.get("spin", 0)
+    e0, g0 = run_dump(a.dump, xyz, ref["method"], qm, grad, a.threads, gpu=False, charge=ch, spin=sp)
+    e1, g1 = run_dump(a.dump, xyz, ref["method"], qm, grad, a.threads, gpu=True, charge=ch, spin=sp)
+    dg = max((abs(x - y) for r1, r2 in zip(g0, g1) for x, y in zip(r1, r2)), default=0.0)
+    print("%-30s %s CPU %.12f GPU %.12f diff %+.2e  gradient max |GPU - CPU| %.2e Eh/Bohr" % (
+        a.case, " ".join(a.qm), e0, e1, e1 - e0, dg))
+    if "pyscf" in ref:
+        print("  GPU vs PySCF %+.2e Eh" % (e1 - ref["pyscf"]["energy"]))
+    check_gpu_fallbacks()
+    if abs(e1 - e0) > 1e-9 or dg > a.gtol or len(g0) != len(g1):
+        raise SystemExit("FAILED: GPU result differs from the CPU")
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--check", required=True, choices=["ref", "fd", "gpu"])
+    ap.add_argument("--check", required=True, choices=["ref", "fd", "gpu", "gpudev"])
     ap.add_argument("--case", required=True)
     ap.add_argument("--dump")
     ap.add_argument("--curcuma")
@@ -172,10 +252,18 @@ def main():
     ap.add_argument("--coords", nargs="*", default=["0:z", "1:x", "1:z"])
     ap.add_argument("--reference", default=os.path.join(HERE, "reference.json"),
                     help="reference file (default: qm_fg/reference.json; test_cases/qm_ecp passes its own)")
+    ap.add_argument("--gpu", action="store_true", help="ref/fd: run the device path (stage 6b)")
+    ap.add_argument("--gradient", action="store_true", help="gpudev: also compare the gradient")
+    ap.add_argument("--allow", nargs="*", default=[], help="counted GPU fallbacks that may occur")
+    ap.add_argument("--qm", nargs="*", default=[], help="extra engine options KEY=VALUE")
     a = ap.parse_args()
     if a.gtol is None:
         a.gtol = 1e-8
-    {"ref": check_ref, "fd": check_fd, "gpu": check_gpu}[a.check](a)
+    if a.check == "gpudev" or a.gpu:
+        gpu_available(a)
+        GPU["on"] = a.check != "gpudev"
+        GPU["allow"] = set(a.allow)
+    {"ref": check_ref, "fd": check_fd, "gpu": check_gpu, "gpudev": check_gpudev}[a.check](a)
 
 
 if __name__ == "__main__":

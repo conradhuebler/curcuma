@@ -27,6 +27,7 @@ __global__ void mdBuildFKernel(DevTables d, const int* __restrict__ ppA, const i
     const int k = (int)(g / maxab), ab = (int)(g % maxab);
     const int A = ppA[k], B = ppB[k];
     const int ncA = d.sh_ncomp[A], ncB = d.sh_ncomp[B];
+    if (ncA > 6 || ncB > 6) return;  // stage 6b: f/g pairs have no md table (generic kernel, qm_gpu_eri_generic.cu)
     const int LA = ncA == 1 ? 0 : ncA == 3 ? 1 : 2, LB = ncB == 1 ? 0 : ncB == 3 ? 1 : 2;
     const int oa = nOut(LA), ob = nOut(LB);
     if (ab >= oa * ob) return;
@@ -65,21 +66,31 @@ __global__ void mdBuildFKernel(DevTables d, const int* __restrict__ ppA, const i
 namespace qmgpu {
 
 bool mdInit(const qmint::QMGpuEriTables* t, const DevTables& d, MdTables& m, std::vector<void*>& owned,
-            std::string& why, size_t& bytes)
+            std::string& why, size_t& bytes, double* dropped)
 {
     m = MdTables{};
     bytes = 0;
+    if (dropped) *dropped = 0.0;
     // component order (compile-time pattern) and 5d d shells with the transform pattern of inSupp
     for (int sh = 0; sh < t->nshell; ++sh) {
         const int Ls = t->sh_L[sh];
+        if (Ls > 2) continue;  // stage 6b: f/g shells are never in an md class
         for (int c = 0; c < t->sh_ncomp[sh]; ++c)
             for (int ax = 0; ax < 3; ++ax)
                 if (t->lmn[t->sh_lmn_off[sh] + 3 * c + ax] != cpow(Ls, c, ax)) { why = "component order"; return false; }
         if (Ls == 2) {
             if (t->sh_T_off[sh] < 0 || t->sh_out_width[sh] != 5) { why = "cartesian d shell"; return false; }
+            // Stage 6b (Nov 2026): the S-metric orthonormalisation of buildSphericalTransform leaves rounding-level
+            // entries outside the 5d pattern for some contracted d shells (seen in def2-TZVP/QZVPP; exactly zero in
+            // the s/p/d sets checked before). Up to 1e-14 they are accepted (the md kernels drop them, the generic and
+            // CPU kernels keep them); anything larger keeps the old kernels.
             for (int a = 0; a < 6; ++a)
-                for (int mm = 0; mm < 5; ++mm)
-                    if (t->T[t->sh_T_off[sh] + a * 5 + mm] != 0.0 && !inSupp(2, mm, a)) { why = "5d transform pattern"; return false; }
+                for (int mm = 0; mm < 5; ++mm) {
+                    const double v = std::fabs(t->T[t->sh_T_off[sh] + a * 5 + mm]);
+                    if (v == 0.0 || inSupp(2, mm, a)) continue;
+                    if (v > 1.0e-14) { why = "5d transform pattern"; return false; }
+                    if (dropped && v > *dropped) *dropped = v;
+                }
         } else if (t->sh_T_off[sh] >= 0) {
             why = "transform on an s/p shell";
             return false;
@@ -92,7 +103,7 @@ bool mdInit(const qmint::QMGpuEriTables* t, const DevTables& d, MdTables& m, std
     for (int i = 0; i < t->npair; ++i) {
         const int A = t->pr_A[i], B = t->pr_B[i];
         const int LA = t->sh_L[A], LB = t->sh_L[B];
-        const long long sz = (long long)nOut(LA) * nOut(LB) * nSim(LA + LB);
+        const long long sz = (LA > 2 || LB > 2) ? 0 : (long long)nOut(LA) * nOut(LB) * nSim(LA + LB);
         for (int k = t->pr_prim_off[i]; k < t->pr_prim_off[i] + t->pr_nprim[i]; ++k) {
             ppA[k] = A;
             ppB[k] = B;

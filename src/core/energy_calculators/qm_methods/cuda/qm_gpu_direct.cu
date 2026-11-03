@@ -29,6 +29,7 @@
 
 #include "qm_gpu_eri_kernels.cuh"
 #include "qm_gpu_direct_md.cuh"
+#include "qm_gpu_eri_generic.cuh"  // stage 6b: classes with f/g shells
 
 #include <cuda_runtime.h>
 
@@ -331,18 +332,22 @@ public:
     bool init(const qmint::QMGpuEriTables* t, int device, std::string& why)
     {
         if (!t->pc_off || !t->pr_schwarz) { why = "tables without pair classes (built with list_quartets)"; return false; }
-        if (!uploadCommonTables(t, m_d, m_owned, why)) return false;
+        if (!uploadCommonTables(t, m_d, m_owned, why, 4)) return false;
         m_n = t->n_out;
         m_ns = t->nshell;
+        // stage 6b (Claude Generated, Nov 2026): pair classes with base 5 and the generic kernel for f/g classes
+        m_cb = qmgpu::pairClassBase(t);
+        m_npc = m_cb * m_cb;
+        if (qmgpu::maxShellL(t) > 2 && !qmgpu::genInit(t, m_d, m_gen, m_owned, why)) return false;
         m_d.thr = t->screening;
         m_spherical = false;
         const char* tenv = std::getenv("CURCUMA_QM_GPU_ERI_BLOCK_ONLY");  // diagnostic: block kernel everywhere
         m_thread_ok = threadKernelUsable(t, m_spherical) && !(tenv && tenv[0] == '1');
-        m_pc_off.assign(t->pc_off, t->pc_off + 10);
+        m_pc_off.assign(t->pc_off, t->pc_off + m_npc + 1);
         // pairs of each class sorted by Schwarz factor, largest first (stable: CPU order among equals)
         m_sorted.assign(t->pc_pairs, t->pc_pairs + t->npair);
         m_sorted_q.resize((size_t)t->npair);
-        for (int X = 0; X < 9; ++X) {
+        for (int X = 0; X < m_npc; ++X) {
             std::stable_sort(m_sorted.begin() + m_pc_off[X], m_sorted.begin() + m_pc_off[X + 1],
                              [&](int a, int b) { return t->pr_schwarz[a] > t->pr_schwarz[b]; });
             for (long long k = m_pc_off[X]; k < m_pc_off[X + 1]; ++k) m_sorted_q[k] = t->pr_schwarz[m_sorted[k]];
@@ -359,7 +364,7 @@ public:
         m_md_all = !(menv && std::strcmp(menv, "large") == 0);
         if (!(menv && menv[0] == '0') && !m_block_only) {
             size_t mb = 0;
-            m_md_ok = qmgpu::mdInit(t, m_d, m_md, m_owned, m_md_why, mb);
+            m_md_ok = qmgpu::mdInit(t, m_d, m_md, m_owned, m_md_why, mb, &m_md_dropped);
             m_md_bytes = mb;
         } else {
             m_md_why = "disabled";
@@ -544,10 +549,10 @@ public:
         struct Launch { int X, Y; size_t row0; int nrow; long long nq; };
         std::vector<Launch> launches;
         long long launched = 0;
-        for (int X = 0; X < 9; ++X) {
+        for (int X = 0; X < m_npc; ++X) {
             const long long x0 = m_pc_off[X], nX = m_pc_off[X + 1] - x0;
             if (nX == 0) continue;
-            for (int Y = X; Y < 9; ++Y) {
+            for (int Y = X; Y < m_npc; ++Y) {
                 const long long y0 = m_pc_off[Y], nY = m_pc_off[Y + 1] - y0;
                 if (nY == 0) continue;
                 const double* qX = m_sorted_q.data() + x0;
@@ -599,10 +604,12 @@ public:
 
         int launch = 0;
         for (const Launch& L : launches) {
-            const int LA = L.X / 3, LB = L.X % 3, LC = L.Y / 3, LD = L.Y % 3;
+            const int LA = L.X / m_cb, LB = L.X % m_cb, LC = L.Y / m_cb, LD = L.Y % m_cb;
             const QSrc src{ 0, m_rows_dev_off + L.row0, m_rows_dev_bra + L.row0, m_rows_dev_ket0 + L.row0,
                             m_sorted_dev + m_pc_off[L.Y], L.nrow };
-            cudaStream_t st = m_profile ? (cudaStream_t)0 : m_streams[launch++ % kStreams];
+            const bool fg = LA > 2 || LB > 2 || LC > 2 || LD > 2;
+            // stage 6b: f/g classes share the generic kernel's scratch, so they all go to stream 0
+            cudaStream_t st = m_profile ? (cudaStream_t)0 : fg ? m_streams[0] : m_streams[launch++ % kStreams];
             unsigned long long c0 = 0;
             cudaEvent_t pe0 = nullptr, pe1 = nullptr;
             if (m_profile) {
@@ -614,6 +621,25 @@ public:
             }
             const bool small = ncomp(LA) * ncomp(LB) * ncomp(LC) * ncomp(LD) <= kThreadKernelMaxNC;
             bool md = false;
+            if (fg) {  // stage 6b: FP64 generic kernel (also in an FP32 phase: no FP32 f/g instances)
+                if (!qmgpu::genLaunch(LA, LB, LC, LD, m_d, m_gen, src, L.nq, true, nullptr, st)) return false;
+                if (m_profile) {
+                    cudaEventRecord(pe1, st);
+                    cudaEventSynchronize(pe1);
+                    float ms = 0.0f;
+                    cudaEventElapsedTime(&ms, pe0, pe1);
+                    unsigned long long c1 = 0;
+                    cudaMemcpy(&c1, m_counter, sizeof c1, cudaMemcpyDeviceToHost);
+                    ProfileEntry& e = m_prof[L.X * m_npc + L.Y + (m_fp32 ? kNpcMax * kNpcMax : 0)];
+                    e.ms += ms;
+                    e.launched += L.nq;
+                    e.computed += (long long)(c1 - c0);
+                    e.kind = 5;
+                    cudaEventDestroy(pe0);
+                    cudaEventDestroy(pe1);
+                }
+                continue;
+            }
             if (m_fp32 && m_fp32_check) {
                 if (pe0) { cudaEventDestroy(pe0); cudaEventDestroy(pe1); }
                 if (!checkFP32Class(L.X, L.Y, src, L.nq)) return false;
@@ -636,7 +662,7 @@ public:
                 cudaEventElapsedTime(&ms, pe0, pe1);
                 unsigned long long c1 = 0;
                 cudaMemcpy(&c1, m_counter, sizeof c1, cudaMemcpyDeviceToHost);
-                ProfileEntry& e = m_prof[L.X * 9 + L.Y + (m_fp32 ? 81 : 0)];
+                ProfileEntry& e = m_prof[L.X * m_npc + L.Y + (m_fp32 ? kNpcMax * kNpcMax : 0)];
                 e.ms += ms;
                 e.launched += L.nq;
                 e.computed += (long long)(c1 - c0);
@@ -672,28 +698,33 @@ public:
         }
         out += m_md_ok ? ", large classes: md kernels (Hermite tables " + std::to_string(m_md_bytes / 1000000) + " MB)"
                        : ", large classes: hermite block kernel (md: " + m_md_why + ")";
+        if (m_gen.scratch) out += ", f/g classes: generic kernel (" + std::to_string(m_gen.bytes / 1000000) + " MB)";
+        if (m_md_dropped > 0.0) {
+            std::snprintf(buf, sizeof buf, ", md: d transform entries <= %.1e outside the 5d pattern dropped", m_md_dropped);
+            out += buf;
+        }
         if (m_profile) {  // CURCUMA_QM_GPU_DIRECT_PROFILE=1: per pair class (serialised launches)
-            static const char* lab = "spd";
-            static const char* kinds[5] = { "hermite", "thread", "block", "md", "md-fp32" };
-            for (int k = 0; k < 162; ++k) {
+            static const char* lab = "spdfg";
+            static const char* kinds[6] = { "hermite", "thread", "block", "md", "md-fp32", "generic" };
+            for (int k = 0; k < 2 * kNpcMax * kNpcMax; ++k) {
                 const ProfileEntry& e = m_prof[k];
                 if (e.launched == 0) continue;
-                const int X = (k % 81) / 9, Y = k % 9;
+                const int X = (k % (kNpcMax * kNpcMax)) / m_npc, Y = k % m_npc;
                 std::snprintf(buf, sizeof buf, "\n  class (%c%c|%c%c) %s: %.1f ms, launched %lld, computed %lld, %.1f computed/us",
-                              lab[X / 3], lab[X % 3], lab[Y / 3], lab[Y % 3], kinds[e.kind], e.ms,
+                              lab[X / m_cb], lab[X % m_cb], lab[Y / m_cb], lab[Y % m_cb], kinds[e.kind], e.ms,
                               e.launched, e.computed, e.ms > 0 ? e.computed / (1000.0 * e.ms) : 0.0);
                 out += buf;
             }
         }
         if (m_fp32_check) {  // CURCUMA_QM_GPU_FP32_CHECK=1: FP32 - FP64 per class (max over builds)
-            static const char* lab = "spd";
-            for (int k = 0; k < 81; ++k) {
+            static const char* lab = "spdfg";
+            for (int k = 0; k < m_npc * m_npc; ++k) {
                 const CheckEntry& e = m_check[k];
                 if (e.builds == 0) continue;
-                const int X = k / 9, Y = k % 9;
+                const int X = k / m_npc, Y = k % m_npc;
                 std::snprintf(buf, sizeof buf,
                               "\n  FP32 check (%c%c|%c%c): %d builds, max|J| %.3e max|dJ| %.3e (rel %.1e), max|K| %.3e max|dK| %.3e (rel %.1e)",
-                              lab[X / 3], lab[X % 3], lab[Y / 3], lab[Y % 3], e.builds, e.j, e.dj, e.j > 0 ? e.dj / e.j : 0.0,
+                              lab[X / m_cb], lab[X % m_cb], lab[Y / m_cb], lab[Y % m_cb], e.builds, e.j, e.dj, e.j > 0 ? e.dj / e.j : 0.0,
                               e.k, e.dk, e.k > 0 ? e.dk / e.k : 0.0);
                 out += buf;
             }
@@ -715,7 +746,7 @@ private:
         cudaDeviceSynchronize();
         cudaMemset(m_chk_buf, 0, 4 * n2 * sizeof(double));
         cudaMemset(m_chk_max, 0, 4 * sizeof(unsigned long long));
-        const int LA = X / 3, LB = X % 3, LC = Y / 3, LD = Y % 3;
+        const int LA = X / m_cb, LB = X % m_cb, LC = Y / m_cb, LD = Y % m_cb;
         DevTables d64 = m_d;
         d64.J = J64; d64.K = K64; d64.counter = m_chk_cnt;
         DevTables d32 = m_d;
@@ -731,7 +762,7 @@ private:
         if (cudaMemcpy(mx, m_chk_max, sizeof mx, cudaMemcpyDeviceToHost) != cudaSuccess) return false;
         double v[4];
         std::memcpy(v, mx, sizeof v);
-        CheckEntry& e = m_check[X * 9 + Y];
+        CheckEntry& e = m_check[X * m_npc + Y];
         ++e.builds;
         e.j = std::max(e.j, v[0]); e.dj = std::max(e.dj, v[1]);
         e.k = std::max(e.k, v[2]); e.dk = std::max(e.dk, v[3]);
@@ -768,14 +799,18 @@ private:
     std::string m_md_why;
     size_t m_md_bytes = 0;
     struct ProfileEntry { double ms = 0.0; long long launched = 0, computed = 0; int kind = 0; };
-    ProfileEntry m_prof[162];  // 81 FP64 + 81 FP32 class pairs
+    static constexpr int kNpcMax = 25;  // pair classes with f/g shells (base 5)
+    ProfileEntry m_prof[2 * kNpcMax * kNpcMax];  // FP64 + FP32 class pairs
+    int m_cb = 3, m_npc = 9;                     // pair-class base and count (stage 6b)
+    qmgpu::GenTables m_gen{};                    // stage 6b: generic f/g kernel tables (empty for s/p/d)
+    double m_md_dropped = 0.0;                   // stage 6b: largest d transform entry outside the 5d pattern
     // Q-G5 FP32 phase
     bool m_fp32 = false, m_md32_ok = false, m_md32_tried = false, m_fp32_check = false;
     int m_fp32_ratio = 0, m_fp32_builds = 0;
     std::string m_md32_why;
     size_t m_md32_bytes = 0;
     struct CheckEntry { int builds = 0; double j = 0, dj = 0, k = 0, dk = 0; };
-    CheckEntry m_check[81];
+    CheckEntry m_check[kNpcMax * kNpcMax];
     double* m_chk_buf = nullptr;
     unsigned long long *m_chk_cnt = nullptr, *m_chk_max = nullptr;
     int* m_width = nullptr;

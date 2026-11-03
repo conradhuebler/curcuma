@@ -1124,7 +1124,9 @@ bool QMEngine::gpuGradientTwoElectron(const qmint::EriGpuTables* tables, const s
     // (the centre derivative brings factors 2 alpha), so the quartet screen runs two orders tighter
     // than the ERI screen: benzene/def2-SVP 2.6e-10 (1e-12) vs 6.2e-12 Eh/Bohr (1e-14) from the
     // unscreened CPU gradient, for 5 % more quartets. 0 keeps every quartet (as the CPU).
-    const double grad_thr = m_eri_screening * 1.0e-2;
+    // Stage 6b (Nov 2026): with f/g shells the bound is weaker still (CH4/def2-QZVP 1.0e-10 Eh/Bohr at 1e-14,
+    // 4.5e-13 at 1e-16, for 0.8 % more quartets and the same kernel time), so f/g bases screen at 1e-4.
+    const double grad_thr = qmint::gpuGradScreen(m_eri_screening, tables ? tables->maxL : 0);
     if (!dev || !dev->compute(P.data(), grad_thr, kx, g.data())) {
         m_gpu_grad_failed = true;
         curcuma::reportGpuFallback("qm_grad", "device 2e gradient " + std::string(dev ? "kernel failed" : "not possible: " + why));

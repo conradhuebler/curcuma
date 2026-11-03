@@ -70,6 +70,7 @@
 // CURCUMA_QM_GPU_GRAD_PROFILE=1 serialises the class launches and appends per-class times to stats().
 
 #include "qm_gpu_eri_kernels.cuh"   // DevTables, boysDev, uploadCommonTables, upload, setWhy (unchanged)
+#include "qm_gpu_eri_generic.cuh"   // stage 6b: maxShellL, pairClassBase
 #include "../qm_gpu_mp2_grad_backend.h"
 
 #include <cuda_runtime.h>
@@ -114,7 +115,8 @@ struct GradArgs {
 template <int GS>
 __device__ inline void gsync()
 {
-    if constexpr (GS > 1) __syncwarp();
+    if constexpr (GS > 32) __syncthreads();  // stage 6b: block per quartet (grad2eBlockKernel)
+    else if constexpr (GS > 1) __syncwarp();
 }
 
 /// Hermite index tables for degree <= L, built once per block. M[k] = (t,u,v) packed t|u<<8|v<<16,
@@ -154,8 +156,11 @@ __device__ inline bool gradQuartet(const DevTables& d, const GradArgs& g, long l
 /// R^0_{tuv} (t+u+v <= L, stored at map positions) of one primitive quartet (bra pair pb, ket pair
 /// pk), same recursion as buildR0Simplex (base (-2 rho)^n F_n(T), z before y before x). GS = 1:
 /// in place in Rw (higher degrees first); GS = 32: two level buffers Rw, Rw + NS, result in Rw.
-/// sF: F[0..L], (-2 rho)^n at sF + 10, W at sF + 20..22, prefactor at sF + 23.
-template <int GS>
+/// sF: F[0..L], (-2 rho)^n at sF + SFB, W at sF + 2 SFB..2 SFB+2, prefactor at sF + 2 SFB + 3 (sfSize).
+/// SFB = 10 (L <= 9: every s/p/d class, the layout of before); SFB = 20 for the f/g classes with L > 9
+/// (stage 6b, Nov 2026).
+__host__ __device__ constexpr int sfSize(int SFB) { return 2 * SFB + 4; }
+template <int GS, int SFB = 10>
 __device__ void buildR(const DevTables& d, int pb, int pk, int L, int NS, int lane, const int* M, const short* map,
                        double* Rw, double* sF)
 {
@@ -168,18 +173,18 @@ __device__ void buildR(const DevTables& d, int pb, int pk, int L, int NS, int la
         const double Wy = d.pp_P[3 * pb + 1] - d.pp_P[3 * pk + 1];
         const double Wz = d.pp_P[3 * pb + 2] - d.pp_P[3 * pk + 2];
         boysDev(L, rho * (Wx * Wx + Wy * Wy + Wz * Wz), sF, d);
-        double* bp = sF + 10;
+        double* bp = sF + SFB;
         bp[0] = 1.0;
         for (int m = 1; m <= L; ++m) bp[m] = bp[m - 1] * (-2.0 * rho);
-        sF[20] = Wx;
-        sF[21] = Wy;
-        sF[22] = Wz;
-        sF[23] = d.pref / (p * q * sqrt(p + q));
+        sF[2 * SFB] = Wx;
+        sF[2 * SFB + 1] = Wy;
+        sF[2 * SFB + 2] = Wz;
+        sF[2 * SFB + 3] = d.pref / (p * q * sqrt(p + q));
         if constexpr (GS > 1) Rw[(L & 1) * NS] = bp[L] * sF[L];
         else Rw[0] = bp[L] * sF[L];
     }
     gsync<GS>();
-    const double Wx = sF[20], Wy = sF[21], Wz = sF[22];
+    const double Wx = sF[2 * SFB], Wy = sF[2 * SFB + 1], Wz = sF[2 * SFB + 2];
     auto rec = [&](const double* c, int k) {
         const int tv = M[k];
         const int t = tv & 255, u = (tv >> 8) & 255, v = tv >> 16;
@@ -190,14 +195,14 @@ __device__ void buildR(const DevTables& d, int pb, int pk, int L, int NS, int la
     if constexpr (GS == 1) {
         for (int lv = L - 1; lv >= 0; --lv) {
             for (int k = nsimplex(L - lv) - 1; k >= 1; --k) Rw[k] = rec(Rw, k);  // reads lower degrees (level lv+1)
-            Rw[0] = sF[10 + lv] * sF[lv];
+            Rw[0] = sF[SFB + lv] * sF[lv];
         }
     } else {
         for (int lv = L - 1; lv >= 0; --lv) {
             const double* c = Rw + ((lv + 1) & 1) * NS;
             double* x = Rw + (lv & 1) * NS;
             const int top = nsimplex(L - lv);
-            for (int k = lane; k < top; k += GS) x[k] = (k == 0) ? sF[10 + lv] * sF[lv] : rec(c, k);
+            for (int k = lane; k < top; k += GS) x[k] = (k == 0) ? sF[SFB + lv] * sF[lv] : rec(c, k);
             gsync<GS>();
         }
     }
@@ -206,7 +211,7 @@ __device__ void buildR(const DevTables& d, int pb, int pk, int L, int NS, int la
 /// Bra-centre derivatives of one orientation (bra pair pi, ket pair pj), steps 2 and 3 of the
 /// header: acc[0..2] += sum D d(ab|cd)/dA_k, and with BOTH acc[3..5] += ... /dB_k (A, B = shells of
 /// pi). Dq holds D for (AB|CD) of the quartet as [ab][cd]; `transposed` = this orientation is (CD|AB).
-template <int GS, bool BOTH>
+template <int GS, bool BOTH, int SFB = 10>
 __device__ void orientationGrad(const DevTables& d, const GradArgs& g, int pi, int pj, const double* Dq, bool transposed,
                                 bool prim_mode, const int* M, const short* map, double* Rw, double* sF, double* Dket,
                                 int lane, double acc[6])
@@ -309,15 +314,16 @@ __device__ void orientationGrad(const DevTables& d, const GradArgs& g, int pi, i
         gsync<GS>();
         for (int ib = 0; ib < nbp; ++ib) {
             const int pb = pb0 + ib;
-            buildR<GS>(d, pb, pk, L, g.NS, lane, M, map, Rw, sF);
-            for (int e = lane; e < nBra * NSB1; e += GS) braEntry(pb, Rw, sF[23], Dket + (e / NSB1) * NSK, e / NSB1, e % NSB1);
+            buildR<GS, SFB>(d, pb, pk, L, g.NS, lane, M, map, Rw, sF);
+            for (int e = lane; e < nBra * NSB1; e += GS)
+                braEntry(pb, Rw, sF[2 * SFB + 3], Dket + (e / NSB1) * NSK, e / NSB1, e % NSB1);
         }
     }
 }
 
 /// d/dA, d/dB, d/dC (x,y,z each) of one canonical shell quartet, summed over its components with the
 /// density weights (before the degeneracy factor). Lane-partial sums for GS = 32.
-template <int GS>
+template <int GS, int SFB = 10>
 __device__ void quartetGrad(const DevTables& d, const GradArgs& g, int i, int j, const int* M, const short* map,
                             double* Rw, double* sF, double* Dq, double* Dket, int lane, double acc[9])
 {
@@ -342,8 +348,8 @@ __device__ void quartetGrad(const DevTables& d, const GradArgs& g, int i, int j,
     }
     gsync<GS>();
     double o1[6] = { 0, 0, 0, 0, 0, 0 }, o2[6] = { 0, 0, 0, 0, 0, 0 };
-    orientationGrad<GS, true>(d, g, i, j, Dq, false, g.prim1, M, map, Rw, sF, Dket, lane, o1);
-    orientationGrad<GS, false>(d, g, j, i, Dq, true, g.prim2, M, map, Rw, sF, Dket, lane, o2);
+    orientationGrad<GS, true, SFB>(d, g, i, j, Dq, false, g.prim1, M, map, Rw, sF, Dket, lane, o1);
+    orientationGrad<GS, false, SFB>(d, g, j, i, Dq, true, g.prim2, M, map, Rw, sF, Dket, lane, o2);
 #pragma unroll
     for (int k = 0; k < 6; ++k) acc[k] = o1[k];
 #pragma unroll
@@ -368,14 +374,22 @@ __device__ inline void scatterQuartet(const DevTables& d, const GradArgs& g, dou
     }
 }
 
-/// Dynamic shared memory: [shared gradient][per-warp scratch (warp kernel)][map][M].
+/// Dynamic shared memory: [shared gradient][per-warp scratch (warp kernel)][map][M]. GLOBAL (stage 6b, f/g
+/// classes whose per-warp scratch exceeds the shared budget): the per-warp scratch lives in gws (one slot of
+/// per_warp doubles per warp of the grid) and shared memory holds [shared gradient][map][M] only.
+template <bool GLOBAL = false>
 __device__ inline void blockSetup(const GradArgs& g, double* smem, int nwarp, double*& sgrad, double*& wbase,
-                                  short*& map, int*& M)
+                                  short*& map, int*& M, double* gws = nullptr)
 {
     const int s = g.L + 1, s3 = s * s * s;
     sgrad = smem;
     wbase = smem + (g.shared_grad ? 3 * g.natoms : 0);
-    map = reinterpret_cast<short*>(wbase + (size_t)nwarp * g.per_warp);
+    if constexpr (GLOBAL) {
+        map = reinterpret_cast<short*>(wbase);
+        wbase = gws + (size_t)blockIdx.x * nwarp * g.per_warp;
+    } else {
+        map = reinterpret_cast<short*>(wbase + (size_t)nwarp * g.per_warp);
+    }
     M = reinterpret_cast<int*>(map + ((s3 + 3) / 4) * 4);
     buildHermiteMaps(g.L, map, M);
     if (g.shared_grad)
@@ -392,6 +406,8 @@ __device__ inline void flushSharedGrad(const GradArgs& g, const double* sgrad)
 }
 
 /// One warp per shell quartet: R^n, D and Dket in shared memory, lanes over their entries.
+/// SFB (stage 6b, Nov 2026): sF layout of buildR; the s/p/d classes run <10>, the code of before.
+template <int SFB = 10>
 __global__ void __launch_bounds__(128) grad2eWarpKernel(DevTables d, GradArgs g)
 {
     extern __shared__ double gsm[];
@@ -399,10 +415,10 @@ __global__ void __launch_bounds__(128) grad2eWarpKernel(DevTables d, GradArgs g)
     double *sgrad, *wbase;
     short* map;
     int* M;
-    blockSetup(g, gsm, nwarp, sgrad, wbase, map, M);
+    blockSetup<false>(g, gsm, nwarp, sgrad, wbase, map, M);
     double* Rw = wbase + (size_t)warp * g.per_warp;  // 2 NS
-    double* sF = Rw + 2 * g.NS;                      // 24
-    double* Dq = sF + 24;                            // ndq
+    double* sF = Rw + 2 * g.NS;                      // sfSize(SFB)
+    double* Dq = sF + sfSize(SFB);                   // ndq
     double* Dket = Dq + g.ndq;                       // ndket
     const long long nw = (long long)gridDim.x * nwarp;
     for (long long q = (long long)blockIdx.x * nwarp + warp; q < g.nq; q += nw) {
@@ -410,11 +426,56 @@ __global__ void __launch_bounds__(128) grad2eWarpKernel(DevTables d, GradArgs g)
         if (!gradQuartet(d, g, q, i, j)) continue;  // uniform per warp
         if (lane == 0) atomicAdd(g.counter, 1ull);
         double acc[9];
-        quartetGrad<32>(d, g, i, j, M, map, Rw, sF, Dq, Dket, lane, acc);
+        quartetGrad<32, SFB>(d, g, i, j, M, map, Rw, sF, Dq, Dket, lane, acc);
 #pragma unroll
         for (int m = 0; m < 9; ++m)
             for (int off = 16; off > 0; off >>= 1) acc[m] += __shfl_down_sync(0xffffffffu, acc[m], off);
         if (lane == 0) scatterQuartet(d, g, sgrad, i, j, acc);
+    }
+    flushSharedGrad(g, sgrad);
+}
+
+/// Stage 6b (Claude Generated, Nov 2026): one BLOCK of kGradBS threads per shell quartet, for the f/g classes with a
+/// lot of work per quartet ((gg|gf) has 2-20 quartets in H2O/def2-QZVPP, one warp each left the card idle). The
+/// per-quartet scratch (R^n, sF, D, Dket) is one slot of per_warp doubles per block in global memory (gws), maps and
+/// the shared gradient stay in shared memory. Same routines as the warp kernel with GS = kGradBS (gsync =
+/// __syncthreads), block reduction of the 9 derivative components.
+constexpr int kGradBS = 128;
+template <int SFB>
+__global__ void __launch_bounds__(kGradBS) grad2eBlockKernel(DevTables d, GradArgs g, double* gws)
+{
+    extern __shared__ double gsm[];
+    __shared__ double sred[9][kGradBS / 32];
+    const int lane = threadIdx.x, warp = threadIdx.x / 32;
+    double *sgrad, *wbase;
+    short* map;
+    int* M;
+    blockSetup<true>(g, gsm, 1, sgrad, wbase, map, M, gws);
+    double* Rw = wbase;               // 2 NS
+    double* sF = Rw + 2 * g.NS;       // sfSize(SFB)
+    double* Dq = sF + sfSize(SFB);    // ndq
+    double* Dket = Dq + g.ndq;        // ndket
+    for (long long q = blockIdx.x; q < g.nq; q += gridDim.x) {
+        int i, j;
+        if (!gradQuartet(d, g, q, i, j)) continue;  // uniform per block
+        if (lane == 0) atomicAdd(g.counter, 1ull);
+        double acc[9];
+        quartetGrad<kGradBS, SFB>(d, g, i, j, M, map, Rw, sF, Dq, Dket, lane, acc);
+#pragma unroll
+        for (int m = 0; m < 9; ++m) {
+            for (int off = 16; off > 0; off >>= 1) acc[m] += __shfl_down_sync(0xffffffffu, acc[m], off);
+            if ((lane & 31) == 0) sred[m][warp] = acc[m];
+        }
+        __syncthreads();
+        if (lane == 0) {
+            double tot[9];
+            for (int m = 0; m < 9; ++m) {
+                tot[m] = 0.0;
+                for (int w = 0; w < kGradBS / 32; ++w) tot[m] += sred[m][w];
+            }
+            scatterQuartet(d, g, sgrad, i, j, tot);
+        }
+        __syncthreads();  // sred and the scratch are reused by the next quartet
     }
     flushSharedGrad(g, sgrad);
 }
@@ -448,13 +509,15 @@ public:
         if (!t->pc_off || !t->pr_schwarz) { why = "tables without pair classes"; return false; }
         if (t->n_T != 0) { why = "gradient tables must be cartesian (no 6d->5d transform)"; return false; }
         if (!x || x->nprimpair != t->nprimpair || x->natoms <= 0) { why = "gradient extra data inconsistent"; return false; }
-        if (!uploadCommonTables(t, m_d, m_owned, why)) return false;
+        if (!uploadCommonTables(t, m_d, m_owned, why, 4)) return false;  // stage 6b: up to g
         m_n = t->n_out;
         m_ns = t->nshell;
         m_natoms = x->natoms;
-        m_pc_off.assign(t->pc_off, t->pc_off + 10);
+        m_cb = qmgpu::pairClassBase(t);  // stage 6b: 3 (s/p/d) or 5 (f/g)
+        m_npc = m_cb * m_cb;
+        m_pc_off.assign(t->pc_off, t->pc_off + m_npc + 1);
         // largest number of primitive pairs of a shell pair, per pair class (primitive-mode Dket size)
-        for (int X = 0; X < 9; ++X) {
+        for (int X = 0; X < m_npc; ++X) {
             m_maxprim[X] = 0;
             for (int k = t->pc_off[X]; k < t->pc_off[X + 1]; ++k) m_maxprim[X] = std::max(m_maxprim[X], t->pr_nprim[t->pc_pairs[k]]);
         }
@@ -514,13 +577,13 @@ public:
         m_prof.clear();
         m_tprof = std::chrono::steady_clock::now();
         int launch = 0;
-        for (int X = 0; X < 9; ++X) {
+        for (int X = 0; X < m_npc; ++X) {
             const long long nX = m_pc_off[X + 1] - m_pc_off[X];
             if (nX == 0) continue;
-            for (int Y = 0; Y < 9; ++Y) {
+            for (int Y = 0; Y < m_npc; ++Y) {
                 const long long nY = m_pc_off[Y + 1] - m_pc_off[Y];
                 if (nY == 0) continue;
-                g.LA = X / 3; g.LB = X % 3; g.LC = Y / 3; g.LD = Y % 3;
+                g.LA = X / m_cb; g.LB = X % m_cb; g.LC = Y / m_cb; g.LD = Y % m_cb;
                 g.L = g.LA + g.LB + g.LC + g.LD + 1;
                 g.rb = m_pc_pairs + m_pc_off[X];
                 g.rk = m_pc_pairs + m_pc_off[Y];
@@ -537,18 +600,40 @@ public:
                 const int dk1 = nAB * nsimplex(g.LC + g.LD) * (g.prim1 ? m_maxprim[Y] : 1);
                 const int dk2 = nCD * nsimplex(g.LA + g.LB) * (g.prim2 ? m_maxprim[X] : 1);
                 g.ndket = std::max(dk1, dk2);
-                g.per_warp = 2 * g.NS + 24 + g.ndq + g.ndket;
+                const bool big_sf = g.L > 9;  // stage 6b: f/g classes beyond the 24-entry sF layout
+                g.per_warp = 2 * g.NS + sfSize(big_sf ? 20 : 10) + g.ndq + g.ndket;
                 const int s = g.L + 1, s3 = s * s * s;
                 const size_t maps = (size_t)((s3 + 3) / 4) * 4 * sizeof(short) + (size_t)g.NS * sizeof(int);
                 g.shared_grad = m_natoms <= kSharedGradMaxAtoms;
                 const size_t sgrad = g.shared_grad ? 3 * (size_t)m_natoms * sizeof(double) : 0;
-                cudaStream_t st = m_streams[launch++ % kStreams];
                 const long long maxBlocks = 8LL * m_sms;
                 const size_t warp_bytes = (size_t)g.per_warp * sizeof(double);
                 const int wpb = (int)std::min<size_t>(kMaxWarpsPerBlock, (kSharedBudget - sgrad - maps) / warp_bytes);
-                if (wpb < 1) return false;  // does not happen for s, p, d shells and contraction depth <= 30
-                const long long nb = std::min((g.nq + wpb - 1) / wpb, maxBlocks);
-                grad2eWarpKernel<<<(unsigned)nb, 32 * wpb, sgrad + maps + (size_t)wpb * warp_bytes, st>>>(m_d, g);
+                // stage 6b (Claude Generated, Nov 2026): f/g classes with much work per quartet (estimate: bra Hermite
+                // entries x ket Hermite simplex of both orientations), or whose per-warp scratch does not fit the shared
+                // budget, run one block per quartet with the scratch in global memory (one slot per block, shared by
+                // all such launches, so they all go to stream 0); every s/p/d class keeps the warp kernel of before
+                const bool fg = g.LA > 2 || g.LB > 2 || g.LC > 2 || g.LD > 2;
+                const long long work = (long long)e1 * nsimplex(g.LC + g.LD) + (long long)e2 * nsimplex(g.LA + g.LB);
+                if (wpb >= 1 && !(fg && work >= kBlockModeWork)) {
+                    cudaStream_t st = m_streams[launch++ % kStreams];
+                    const long long nb = std::min((g.nq + wpb - 1) / wpb, maxBlocks);
+                    if (!big_sf)
+                        grad2eWarpKernel<10><<<(unsigned)nb, 32 * wpb, sgrad + maps + (size_t)wpb * warp_bytes, st>>>(m_d, g);
+                    else
+                        grad2eWarpKernel<20><<<(unsigned)nb, 32 * wpb, sgrad + maps + (size_t)wpb * warp_bytes, st>>>(m_d, g);
+                } else {
+                    if (!fg || sgrad + maps > kSharedBudget) return false;
+                    const long long slots = std::max<long long>(1, std::min<long long>(
+                        8LL * m_sms, (long long)(kGlobalScratchBytes / warp_bytes)));
+                    if (!ensureScratch((size_t)slots * warp_bytes)) return false;
+                    const long long nb = std::min(g.nq, slots);
+                    cudaStream_t st = m_streams[0];
+                    if (!big_sf)
+                        grad2eBlockKernel<10><<<(unsigned)nb, kGradBS, sgrad + maps, st>>>(m_d, g, m_gws);
+                    else
+                        grad2eBlockKernel<20><<<(unsigned)nb, kGradBS, sgrad + maps, st>>>(m_d, g, m_gws);
+                }
                 if (cudaGetLastError() != cudaSuccess) return false;
                 if (prof) {
                     if (cudaDeviceSynchronize() != cudaSuccess) return false;
@@ -593,6 +678,27 @@ private:
         m_owned.push_back(*p);
         return true;
     }
+    /// Stage 6b: global per-warp scratch of the f/g classes, grown on demand (freed with m_owned).
+    bool ensureScratch(size_t bytes)
+    {
+        if (bytes <= m_gws_bytes) return true;
+        double* p = nullptr;
+        if (cudaMalloc(&p, bytes) != cudaSuccess) { cudaGetLastError(); return false; }
+        if (m_gws) {
+            cudaDeviceSynchronize();  // earlier launches may still read the old slots
+            cudaFree(m_gws);
+            m_owned.erase(std::remove(m_owned.begin(), m_owned.end(), (void*)m_gws), m_owned.end());
+        }
+        m_owned.push_back(p);
+        m_gws = p;
+        m_gws_bytes = bytes;
+        return true;
+    }
+    static constexpr size_t kGlobalScratchBytes = 256ull << 20;
+    static constexpr long long kBlockModeWork = 8192;  // per-quartet work above which an f/g class runs block-wise
+    double* m_gws = nullptr;
+    size_t m_gws_bytes = 0;
+    int m_cb = 3, m_npc = 9;
     static std::string fmt_class(const GradArgs& g, double ms)
     {
         char buf[128];
@@ -613,7 +719,7 @@ private:
     cudaStream_t m_streams[kStreams] = {};
     cudaEvent_t m_e0 = nullptr, m_e1 = nullptr;
     int m_n = 0, m_ns = 0, m_natoms = 0, m_sms = 16;
-    int m_maxprim[9] = {};
+    int m_maxprim[25] = {};
     long long m_last_quartets = 0;
     double m_kernel_ms = 0.0, m_total_ms = 0.0;
     size_t m_bytes = 0;

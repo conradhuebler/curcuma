@@ -19,7 +19,8 @@
 // summed in registers over all tasks, the auxiliary-centre part goes to global memory with atomicAdd
 // (order not deterministic: the last bits vary between runs, as for the other device gradients). Shared
 // memory per warp: R and its recursion buffer on the compact Hermite simplex t+u+v <= Ltot <= 9, G
-// (<= 15 aux components x 56). The host checks the angular momentum limits.
+// (<= 15 aux components x 56). The host checks the angular momentum limits. Stage 6b (Nov 2026): orbital f/g
+// bases run a second instance (Ltot <= 13, G 15 x 220, one warp per block).
 
 #include "../qm_gpu_ri_grad_backend.h"
 
@@ -34,12 +35,16 @@
 
 namespace {
 
+// Two instances of the kernel (stage 6b, Nov 2026; template parameters of riGrad3cKernel):
+//   s/p/d orbital basis: Ltot <= 9 (orbital d raised (2+2+1) + auxiliary g (4)), 4 warps per block (the code of before);
+//   f/g orbital basis:   Ltot <= 13 (orbital g raised (4+4+1) + auxiliary g), 1 warp per block (shared memory).
 constexpr int kMaxLtot = 9;                    // orbital d raised (2+2+1) + auxiliary g (4)
-constexpr int kS = kMaxLtot + 1;               // R cube edge
-constexpr int kNSimp = (kMaxLtot + 1) * (kMaxLtot + 2) * (kMaxLtot + 3) / 6;  // 220 Hermite indices t+u+v <= 9
 constexpr int kNSimpB = 56;                    // t+u+v <= 5 (bra: orbital d raised by one)
+constexpr int kMaxLtotFG = 13;                 // orbital g raised (4+4+1) + auxiliary g (4)
+constexpr int kNSimpBFG = 220;                 // t+u+v <= 9 (bra: orbital g raised by one)
 constexpr int kMaxNC = 15;                     // cartesian components of a g shell
 constexpr int kThreads = 128;
+__host__ __device__ constexpr int riSimplex(int L) { return (L + 1) * (L + 2) * (L + 3) / 6; }
 
 struct Dev {
     int natoms, nshell, aux_base, npairs;
@@ -61,7 +66,8 @@ struct Dev {
 // of F_mmax around the nearest grid point of a table (dT = 0.05, T < 36, built on the host in long
 // double by downward recursion), downward recursion to F_0; T >= 36: asymptotic F_0, upward recursion.
 constexpr double kBoysDT = 0.05, kBoysTmax = 36.0;
-constexpr int kBoysNTAB = kMaxLtot + 7;  // n = 0..kBoysNTAB tabulated
+__host__ __device__ constexpr int boysNtab(int maxLtot) { return maxLtot + 7; }  // n = 0..boysNtab tabulated
+template <int kBoysNTAB>
 __device__ void boysRI(int mmax, double T, double* F, const double* tab)
 {
     const double eT = exp(-T);
@@ -80,12 +86,14 @@ __device__ void boysRI(int mmax, double T, double* F, const double* tab)
     for (int m = mmax - 1; m >= 0; --m) F[m] = (2.0 * T * F[m + 1] + eT) / (2 * m + 1);
 }
 
-__global__ void __launch_bounds__(kThreads) riGrad3cKernel(Dev d, double* grad)
+template <int kMaxLtot, int kNSimpB, int kWarps>
+__global__ void __launch_bounds__(32 * kWarps) riGrad3cKernel(Dev d, double* grad)
 {
+    constexpr int kS = kMaxLtot + 1;                  // R cube edge
+    constexpr int kNSimp = riSimplex(kMaxLtot);       // Hermite indices t+u+v <= kMaxLtot
     const int k = blockIdx.x;
     const long long t0 = d.task_start[k], t1 = d.task_start[k + 1];
     if (t0 == t1) return;
-    constexpr int kWarps = kThreads / 32;
     // Hermite indices (t,u,v) with t+u+v <= 9 stored compactly, ordered by t+u+v (then t, u): the entries
     // with t+u+v <= m are a prefix of length sLev[m], for R (m = Ltot) and for G (m = LAB) alike.
     // Every warp works on its own task (auxiliary shell) with its own R, recursion buffer and G.
@@ -166,7 +174,7 @@ __global__ void __launch_bounds__(kThreads) riGrad3cKernel(Dev d, double* grad)
                 __syncwarp();
                 if (lane == 0) {
                     double F[kMaxLtot + 1];
-                    boysRI(Ltot, rho * (Wx * Wx + Wy * Wy + Wz * Wz), F, d.boys);
+                    boysRI<boysNtab(kMaxLtot)>(Ltot, rho * (Wx * Wx + Wy * Wy + Wz * Wz), F, d.boys);
                     double bp = 1.0;
                     for (int n = 0; n <= Ltot; ++n) {
                         wBF[n] = bp * F[n];
@@ -320,13 +328,17 @@ extern "C" int curcuma_cuda_qm_ri_grad(const qmint::QMGpuRIGradInput* in, double
 {
     if (!in || !grad || in->npairs <= 0) { setWhyRiGrad(why, whylen, "empty RI gradient input"); return 0; }
     if (device >= 0 && cudaSetDevice(device) != cudaSuccess) { setWhyRiGrad(why, whylen, "cudaSetDevice failed"); return 0; }
+    bool fg = false;  // stage 6b: orbital f/g shells -> the second kernel instance
     for (int s = 0; s < in->nshell; ++s) {
         const int L = in->sh_L[s];
-        if ((s < in->aux_base && L > 2) || L > 4 || in->sh_ncomp[s] > kMaxNC) {
-            setWhyRiGrad(why, whylen, "angular momentum above the device limit (orbital d, auxiliary g)");
+        if (s < in->aux_base && L > 2) fg = true;
+        if (L > 4 || in->sh_ncomp[s] > kMaxNC) {
+            setWhyRiGrad(why, whylen, "angular momentum above the device limit (orbital g, auxiliary g)");
             return 0;
         }
     }
+    const int maxLtot = fg ? kMaxLtotFG : kMaxLtot;
+    const int ntab = boysNtab(maxLtot);
     const auto t0 = std::chrono::steady_clock::now();
     std::vector<void*> owned;
     auto cleanup = [&]() {
@@ -341,19 +353,24 @@ extern "C" int curcuma_cuda_qm_ri_grad(const qmint::QMGpuRIGradInput* in, double
     const int nsh = in->nshell, naux = in->nshell - in->aux_base;
     double* dgrad = nullptr;
     std::vector<double> zero(3 * (size_t)in->natoms, 0.0);
-    static const std::vector<double> boys = [] {
-        // same construction as qm_integrals.cpp BoysTable: long-double downward recursion from far above
-        const int npts = (int)std::lround(kBoysTmax / kBoysDT) + 2, M = kBoysNTAB + 200;
-        std::vector<double> f((size_t)npts * (kBoysNTAB + 1));
+    // same construction as qm_integrals.cpp BoysTable: long-double downward recursion from far above; one table per
+    // kernel instance (the s/p/d table is the one of before, bit for bit)
+    auto makeBoys = [](int ntabB) {
+        const int npts = (int)std::lround(kBoysTmax / kBoysDT) + 2, M = ntabB + 200;
+        std::vector<double> f((size_t)npts * (ntabB + 1));
         std::vector<long double> G(M + 2);
         for (int i = 0; i < npts; ++i) {
             const long double T = (long double)i * kBoysDT, eT = expl(-T);
             G[M + 1] = 0.0L;
             for (int n = M; n >= 0; --n) G[n] = (2.0L * T * G[n + 1] + eT) / (2.0L * n + 1.0L);
-            for (int n = 0; n <= kBoysNTAB; ++n) f[(size_t)i * (kBoysNTAB + 1) + n] = (double)G[n];
+            for (int n = 0; n <= ntabB; ++n) f[(size_t)i * (ntabB + 1) + n] = (double)G[n];
         }
         return f;
-    }();
+    };
+    static const std::vector<double> boys_spd = makeBoys(boysNtab(kMaxLtot));
+    static const std::vector<double> boys_fg = makeBoys(boysNtab(kMaxLtotFG));
+    const std::vector<double>& boys = fg ? boys_fg : boys_spd;
+    (void)ntab;
     bool ok = upload(owned, &d.sh_L, in->sh_L, nsh) && upload(owned, &d.sh_atom, in->sh_atom, nsh)
         && upload(owned, &d.sh_ncomp, in->sh_ncomp, nsh) && upload(owned, &d.sh_lmn_off, in->sh_lmn_off, nsh)
         && upload(owned, &d.lmn, in->lmn, (size_t)in->nlmn) && upload(owned, &d.sh_nprim, in->sh_nprim, nsh)
@@ -375,10 +392,16 @@ extern "C" int curcuma_cuda_qm_ri_grad(const qmint::QMGpuRIGradInput* in, double
     // load the kernel module before the timed launch (lazy loading, and the PTX JIT on devices newer than
     // the compiled architectures, would otherwise be counted as kernel time)
     cudaFuncAttributes attr;
-    cudaFuncGetAttributes(&attr, riGrad3cKernel);
+    if (fg)
+        cudaFuncGetAttributes(&attr, riGrad3cKernel<kMaxLtotFG, kNSimpBFG, 1>);
+    else
+        cudaFuncGetAttributes(&attr, riGrad3cKernel<kMaxLtot, kNSimpB, kThreads / 32>);
     cudaDeviceSynchronize();
     const auto t1 = std::chrono::steady_clock::now();
-    riGrad3cKernel<<<in->npairs, kThreads>>>(d, dgrad);
+    if (fg)
+        riGrad3cKernel<kMaxLtotFG, kNSimpBFG, 1><<<in->npairs, 32>>>(d, dgrad);
+    else
+        riGrad3cKernel<kMaxLtot, kNSimpB, kThreads / 32><<<in->npairs, kThreads>>>(d, dgrad);
     cudaError_t e = cudaDeviceSynchronize();
     if (e == cudaSuccess) e = cudaGetLastError();
     if (e != cudaSuccess) {

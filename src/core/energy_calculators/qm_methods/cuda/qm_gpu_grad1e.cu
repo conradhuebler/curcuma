@@ -50,7 +50,8 @@
 // the device. Pairs are taken in pair-class order (shells sorted by L), so a warp mostly works on
 // one class. Accumulation per block in shared memory (FP64 shared atomics) up to 400 atoms, then
 // FP64 atomicAdd into the global gradient (last bits depend on the schedule). No screening (the CPU
-// 1e gradient has none). Limits: s, p, d shells (checked by uploadCommonTables), FP64 throughout.
+// 1e gradient has none). Limits: s-g shells (stage 6b, Nov 2026: instance MAXL = 9 for f/g bases, MAXL = 5 for s/p/d),
+// FP64 throughout.
 
 #include "qm_gpu_eri_kernels.cuh"   // DevTables, boysDev, uploadCommonTables, upload, setWhy (unchanged)
 #include "../qm_gpu_grad1e_backend.h"
@@ -66,8 +67,11 @@
 
 namespace {
 
+// Hermite order LA + LB + 1: 5 for two d shells (the s/p/d instance, code of before), 9 for two g shells (stage 6b,
+// Nov 2026: the kernels are templates on MAXL; a basis with f/g shells runs the MAXL = 9 instance)
 constexpr int kG1MaxL = 5;                 // LA + LB + 1 for two d shells
-constexpr int kG1NS = 56;                  // simplex size of degree <= 5
+constexpr int kG1MaxLfg = 9;               // LA + LB + 1 for two g shells
+__host__ __device__ constexpr int g1SimplexC(int L) { return L < 0 ? 0 : (L + 1) * (L + 2) * (L + 3) / 6; }
 constexpr int kG1SharedMaxAtoms = 400;     // 9.6 KB of shared memory; above: global atomics directly
 constexpr int kG1Block = 128;
 
@@ -94,12 +98,17 @@ struct G1Args {
 };
 
 __device__ inline int lOf(int ncomp) { return ncomp == 1 ? 0 : (ncomp == 3 ? 1 : 2); }
+/// stage 6b: any L <= 4 (ncomp = 1, 3, 6, 10, 15)
+__device__ inline int lOfFG(int ncomp) { return ncomp == 1 ? 0 : ncomp == 3 ? 1 : ncomp == 6 ? 2 : ncomp == 10 ? 3 : 4; }
+template <int MAXL>
+__device__ inline int lOfT(int ncomp) { if constexpr (MAXL <= kG1MaxL) return lOf(ncomp); else return lOfFG(ncomp); }
 
 /// R^0_tuv (t+u+v <= L) of the attraction integral for one primitive pair and one nucleus, in place
 /// in R (higher degrees first, as buildR<1> of the 2e gradient), base (2 pi / p) (-2p)^n F_n(T).
+template <int MAXL>
 __device__ void buildR1e(const DevTables& d, double p, double PCx, double PCy, double PCz, int L, double* R)
 {
-    double F[kG1MaxL + 1], base[kG1MaxL + 1];
+    double F[MAXL + 1], base[MAXL + 1];
     boysDev(L, p * (PCx * PCx + PCy * PCy + PCz * PCz), F, d);
     double fac = 2.0 * kPI / p;
     for (int n = 0; n <= L; ++n) {
@@ -127,11 +136,12 @@ __device__ void buildR1e(const DevTables& d, double p, double PCx, double PCy, d
 
 /// Attraction part of shell pair pi for nucleus C: gA += f sum P_ab d/dA <a|-Z_C/r_C|b>, gB likewise
 /// for the B centre (the operator part -(gA + gB) goes to C at the caller).
+template <int MAXL>
 __device__ void attractionPair(const DevTables& d, const G1Args& g, int pi, int C, double gA[3], double gB[3])
 {
     const int A = d.pr_A[pi], B = d.pr_B[pi];
     const int nA = d.sh_ncomp[A], nB = d.sh_ncomp[B];
-    const int LA = lOf(nA), LB = lOf(nB), L = LA + LB + 1;
+    const int LA = lOfT<MAXL>(nA), LB = lOfT<MAXL>(nB), L = LA + LB + 1;
     const int npA = d.sh_nprim[A], npB = d.sh_nprim[B];
     const double *cA = d.coef + d.sh_coef_off[A], *cB = d.coef + d.sh_coef_off[B];
     const int *lA = d.lmn + d.sh_lmn_off[A], *lB = d.lmn + d.sh_lmn_off[B];
@@ -140,13 +150,13 @@ __device__ void attractionPair(const DevTables& d, const G1Args& g, int pi, int 
     const int sI = LB + 2, sT = (LA + 2) * (LB + 2), sz = (LA + LB + 3) * sT;
     const double f = (A != B ? 2.0 : 1.0) * (-g.atom_Z[C]);
     const double Cx = g.atom_xyz[3 * C], Cy = g.atom_xyz[3 * C + 1], Cz = g.atom_xyz[3 * C + 2];
-    double R[kG1NS];
+    double R[g1SimplexC(MAXL)];
     for (int k = d.pr_prim_off[pi]; k < d.pr_prim_off[pi] + d.pr_nprim[pi]; ++k) {
         const double p = d.pp_p[k];
         const double a2 = 2.0 * g.pp_ea[k], b2 = 2.0 * g.pp_eb[k];
         const int ia = d.pp_ia[k], ib = d.pp_ib[k];
         const double* E = d.E + d.pp_E_off[k];
-        buildR1e(d, p, d.pp_P[3 * k] - Cx, d.pp_P[3 * k + 1] - Cy, d.pp_P[3 * k + 2] - Cz, L, R);
+        buildR1e<MAXL>(d, p, d.pp_P[3 * k] - Cx, d.pp_P[3 * k + 1] - Cy, d.pp_P[3 * k + 2] - Cz, L, R);
         for (int a = 0; a < nA; ++a)
             for (int b = 0; b < nB; ++b) {
                 const double w = f * g.P[(oA + a) * n + oB + b] * cA[a * npA + ia] * cB[b * npB + ib];
@@ -154,7 +164,7 @@ __device__ void attractionPair(const DevTables& d, const G1Args& g, int pi, int 
                 const int* la = lA + 3 * a;
                 const int* lb = lB + 3 * b;
                 // 1D Hermite coefficients per direction, t <= i+j+1 (E^{ij}_t = 0 for t > i+j)
-                double e[3][kG1MaxL + 1], da[3][kG1MaxL + 1], db[3][kG1MaxL + 1];
+                double e[3][MAXL + 1], da[3][MAXL + 1], db[3][MAXL + 1];
                 int nt[3], lab = 0;
                 for (int x = 0; x < 3; ++x) {
                     const double* Ex = E + x * sz;
@@ -193,11 +203,12 @@ __device__ void attractionPair(const DevTables& d, const G1Args& g, int pi, int 
 }
 
 /// Overlap and kinetic part of shell pair pi: X = f sum_ab [P_ab dT_ab/dA - W_ab dS_ab/dA].
+template <int MAXL>
 __device__ void overlapKineticPair(const DevTables& d, const G1Args& g, int pi, double X[3])
 {
     const int A = d.pr_A[pi], B = d.pr_B[pi];
     const int nA = d.sh_ncomp[A], nB = d.sh_ncomp[B];
-    const int LA = lOf(nA), LB = lOf(nB);
+    const int LA = lOfT<MAXL>(nA), LB = lOfT<MAXL>(nB);
     const int npA = d.sh_nprim[A], npB = d.sh_nprim[B];
     const double *cA = d.coef + d.sh_coef_off[A], *cB = d.coef + d.sh_coef_off[B];
     const int *lA = d.lmn + d.sh_lmn_off[A], *lB = d.lmn + d.sh_lmn_off[B];
@@ -252,6 +263,7 @@ __device__ void overlapKineticPair(const DevTables& d, const G1Args& g, int pi, 
 }
 
 /// One thread per (shell pair, slot); slot < natoms: attraction of nucleus slot, slot == natoms: S, T.
+template <int MAXL>
 __global__ void __launch_bounds__(kG1Block) grad1eKernel(DevTables d, G1Args g)
 {
     extern __shared__ double sgrad[];
@@ -268,7 +280,7 @@ __global__ void __launch_bounds__(kG1Block) grad1eKernel(DevTables d, G1Args g)
         if (slot == g.natoms) {
             if (aA == aB) continue;  // two-centre terms on one atom: no contribution
             double X[3] = { 0.0, 0.0, 0.0 };
-            overlapKineticPair(d, g, pi, X);
+            overlapKineticPair<MAXL>(d, g, pi, X);
             for (int x = 0; x < 3; ++x) {
                 atomicAdd(&dst[3 * aA + x], X[x]);
                 atomicAdd(&dst[3 * aB + x], -X[x]);
@@ -277,7 +289,7 @@ __global__ void __launch_bounds__(kG1Block) grad1eKernel(DevTables d, G1Args g)
             const int C = slot;
             if (aA == aB && aA == C) continue;  // basis and operator parts cancel
             double gA[3] = { 0.0, 0.0, 0.0 }, gB[3] = { 0.0, 0.0, 0.0 };
-            attractionPair(d, g, pi, C, gA, gB);
+            attractionPair<MAXL>(d, g, pi, C, gA, gB);
             for (int x = 0; x < 3; ++x) {
                 atomicAdd(&dst[3 * aA + x], gA[x]);
                 atomicAdd(&dst[3 * aB + x], gB[x]);
@@ -309,7 +321,10 @@ public:
             why = "1e gradient extra data inconsistent";
             return false;
         }
-        if (!uploadCommonTables(t, m_d, m_owned, why)) return false;  // also refuses L > 2
+        if (!uploadCommonTables(t, m_d, m_owned, why, 4)) return false;  // also refuses L > 4 (stage 6b: f/g)
+        int maxL = 0;
+        for (int s = 0; s < t->nshell; ++s) maxL = std::max(maxL, t->sh_L[s]);
+        m_fg = maxL > 2;
         m_n = t->n_out;
         m_natoms = x->base.natoms;
         m_npairs = t->npair;
@@ -358,7 +373,10 @@ public:
         const long long nb = std::min<long long>((total + kG1Block - 1) / kG1Block, 16LL * m_sms);
         const size_t shm = g.shared_grad ? 3 * (size_t)m_natoms * sizeof(double) : 0;
         cudaEventRecord(m_e0);
-        grad1eKernel<<<(unsigned)std::max<long long>(nb, 1), kG1Block, shm>>>(m_d, g);
+        if (m_fg)  // stage 6b: Hermite order up to 9
+            grad1eKernel<kG1MaxLfg><<<(unsigned)std::max<long long>(nb, 1), kG1Block, shm>>>(m_d, g);
+        else
+            grad1eKernel<kG1MaxL><<<(unsigned)std::max<long long>(nb, 1), kG1Block, shm>>>(m_d, g);
         if (cudaGetLastError() != cudaSuccess) return false;
         cudaEventRecord(m_e1);
         if (cudaEventSynchronize(m_e1) != cudaSuccess || cudaGetLastError() != cudaSuccess) return false;
@@ -397,6 +415,7 @@ private:
     double *m_P = nullptr, *m_W = nullptr, *m_grad = nullptr;
     cudaEvent_t m_e0 = nullptr, m_e1 = nullptr;
     int m_n = 0, m_natoms = 0, m_npairs = 0, m_sms = 16;
+    bool m_fg = false;  // stage 6b: basis with f/g shells
     double m_kernel_ms = 0.0, m_total_ms = 0.0;
     size_t m_bytes = 0;
     std::string m_name = "cuda";

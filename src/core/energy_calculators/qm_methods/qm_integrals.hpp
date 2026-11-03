@@ -256,8 +256,8 @@ struct EriGpuTables {
 };
 
 /// @brief Fill `out` for the device ERI build (same arguments as buildERI). Returns false
-/// (and leaves a reason in `why`) when the basis has angular momentum above d, which the
-/// device kernel does not handle. Claude Generated (Oct 2026, Q-G2).
+/// (and leaves a reason in `why`) when the basis has angular momentum above g (stage 6b, Nov 2026;
+/// before: above d), which the device kernels do not handle. Claude Generated (Oct 2026, Q-G2).
 /// `list_quartets` = false (Q-G3, integral-direct): the O(npair^2) list of Schwarz-screened
 /// quartets is not built; the device enumerates pair-class x pair-class rectangles instead and
 /// screens them with the density per build (as DirectJK). Memory then stays O(npair).
@@ -269,9 +269,15 @@ bool buildEriGpuTables(const std::vector<GTO::Orbital>& basis, double screening,
 /// list) with the Hermite tables of every primitive pair rebuilt one angular-momentum step
 /// higher on both shells (as makeShellPair(..., 1, 1) for gradientTwoElectron), plus the shell
 /// atoms and primitive exponents. Same shells, shell pairs, primitive-pair order and Schwarz
-/// factors as the device J/K tables. False (+ reason) for L > 2.
+/// factors as the device J/K tables. False (+ reason) for L > 4 (f/g since stage 6b, Nov 2026).
 bool buildEriGradGpuTables(const std::vector<GTO::Orbital>& basis, double screening, EriGpuTables& out,
                            std::string& why);
+
+/// @brief Density-weighted quartet threshold of the device 2e gradient (Q-G7): eri_screening / 100 for s/p/d bases
+/// (unchanged), / 1e4 when the basis has f/g shells (stage 6b, Nov 2026: the Schwarz bound of the undifferentiated
+/// quartet underestimates the derivative integrals more; CH4/def2-QZVP 1.0e-10 vs 4.5e-13 Eh/Bohr from the CPU).
+/// Claude Generated.
+inline double gpuGradScreen(double eri_screening, int maxL) { return eri_screening * (maxL > 2 ? 1.0e-4 : 1.0e-2); }
 
 /// @brief Boys function F_n(T) = int_0^1 t^(2n) exp(-T t^2) dt for n = 0..maxN.
 /// Grid (spacing 0.05) + 7-term Taylor + downward recurrence below T = 36, closed

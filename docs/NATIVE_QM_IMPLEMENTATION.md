@@ -456,9 +456,11 @@ LMP2 and the double hybrids. Fitting sets were already general in l (up to h for
   truncation error is 4.8e-4 Eh (1.6e-4 Eh/atom), larger than the 3.7e-6..2.4e-5 Eh/atom measured with def2-SVP.
 - SCF: def2-QZVP* on H2O has a ||dP|| noise floor of ~1e-11 (the stored-ERI SCF with -qm.scf_threshold 1e-12 does not
   converge in 200 iterations, 1e-10, the default, converges in 16).
-- GPU: the CUDA ERI/J/K, direct, 1e/2e gradient and RI gradient kernels stay s/p/d; with an f/g basis they refuse at
-  table build and the CPU runs them (counted fallbacks `qm_eri`, `qm_direct`, `qm_grad`, `qm_grad1e`, `qm_ri_grad`;
-  `-gpu_strict true` stops). The device XC AO kernel takes up to g (`kMaxComp` 10 -> 15).
+- GPU: until stage 6b the CUDA ERI/J/K, direct, 1e/2e gradient and RI gradient kernels were s/p/d only and an f/g basis
+  ran them on the CPU (counted fallbacks `qm_eri`, `qm_direct`, `qm_grad`, `qm_grad1e`, `qm_mp2_grad`, `qm_ri_grad`).
+  Since stage 6b (Nov 3, 2026) they take f and g shells on the device:
+  [QM_GPU_ROADMAP section 4.5](QM_GPU_ROADMAP.md#45-f-and-g-shells-on-the-device-nov-2026-stage-6b). The device XC
+  AO kernel takes up to g (`kMaxComp` 10 -> 15).
 - Not tested / not implemented: h and higher orbital shells (rejected by the parser), elements beyond Ne, ECP, open
   shell (the engine is closed-shell RHF/RKS only), SCAN and the other double hybrids with f/g (they run, no
   reference), LMP2 beyond the complete-space check, MP2/DH gradients with f/g only against the FD of curcuma's own energy, ORCA for the KS energies (only
@@ -498,7 +500,8 @@ basis; `def2-ECP` | `none`). Closed shell only, as before; hf-3c beyond Ne: stag
   an ECP (e.g. I: 18 - 14 = 4, as ORCA "NCore=8" and PySCF). Li and Be keep curcuma's 1s (ORCA/PySCF freeze nothing
   there; kept so H-Ne results do not change).
 - CUDA: the ECP matrix and gradient are CPU terms on every path (no fallback counted, nothing on the device to fall
-  back from); the device SCF loop uses H with the ECP inside; `-gpu cuda` energies equal the CPU (CH3I HF, HI B3LYP;
+  back from; kept on the CPU after timing them in stage 6b, QM_GPU_ROADMAP section 4.5); the device SCF loop uses H
+  with the ECP inside; `-gpu cuda` energies equal the CPU (CH3I HF, HI B3LYP;
   device 1e gradient vs CPU <= 1.4e-13 Eh/Bohr before the ECP term is added). RTX 5090 only.
 
 Checks (PySCF 2.14 / libxc 7.0.0, basis and ECP by PySCF name, Ce from curcuma's BSE text because PySCF's def2 library

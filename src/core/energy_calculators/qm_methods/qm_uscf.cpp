@@ -692,7 +692,8 @@ bool QMEngine::gpuGradientTwoElectronUHF(const qmint::EriGpuTables* tables, cons
     const auto t1 = std::chrono::steady_clock::now();
     Matrix g = Matrix::Zero(m_atomcount, 3);
     const Matrix A = Pac, B = Pbc;  // row-major, contiguous
-    if (!dev || !dev->computeUHF(A.data(), B.data(), m_eri_screening * 1.0e-2, kx, g.data())) {
+    if (!dev || !dev->computeUHF(A.data(), B.data(), qmint::gpuGradScreen(m_eri_screening, tables ? tables->maxL : 0), kx,
+                                 g.data())) {
         m_gpu_grad_failed = true;
         curcuma::reportGpuFallback("qm_grad", "device UHF 2e gradient " + std::string(dev ? "kernel failed" : "not possible: " + why));
         return false;

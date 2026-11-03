@@ -163,9 +163,9 @@ const std::map<std::string, std::set<std::string>> kLegacyKeys = {
 // ---------------------------------------------------------------------------------------------
 const std::string kAI = "native, AI-generated, machine-tested (not TESTED)";
 const std::string kExt = "external library; curcuma wrapper AI-generated";
-const std::string kQmRestr = "closed shell only (open-shell input, -spin > 0, is an error); elements H-Rn (built-in def2 sets, def2-ECP for Rb-Rn via -qm.ecp, ECP terms on the CPU)";
+const std::string kQmRestr = "closed shell only (open-shell input, -spin > 0, is an error); elements H-Rn (built-in def2 sets, def2-ECP for Rb-Rn via -qm.ecp, ECP terms on the CPU); s-g shells, on -gpu cuda also f/g in the ERI, J/K and gradient kernels (Nov 2026)";
 // stage 5b (Nov 2026): hf, hf-3c, lda, pbe, b3lyp also run unrestricted
-const std::string kQmRestrOpen = "open shell (UHF/UKS) via -spin (unpaired electrons) or -qm.reference uhf, no ROHF; -gpu cuda: J/K, V_xc and gradient on the device, SCF loop on the host (counted fallback qm_uhf_scf, -qm.gpu_scf off avoids it), no AO screening on the UKS path; elements H-Rn (built-in def2 sets, def2-ECP for Rb-Rn via -qm.ecp, ECP terms on the CPU)";
+const std::string kQmRestrOpen = "open shell (UHF/UKS) via -spin (unpaired electrons) or -qm.reference uhf, no ROHF; -gpu cuda: J/K, V_xc and gradient on the device, SCF loop on the host (counted fallback qm_uhf_scf, -qm.gpu_scf off avoids it), no AO screening on the UKS path; elements H-Rn (built-in def2 sets, def2-ECP for Rb-Rn via -qm.ecp, ECP terms on the CPU); s-g shells, on -gpu cuda also f/g in the ERI, J/K and gradient kernels (Nov 2026)";
 
 const std::vector<std::string> kUlyssesOnly = { "ugfn2", "mndod", "rm1", "pm3pddg", "mndopddg", "pm3bp",
     "pm6-d3h4x", "am1-d3h4x", "pm3-d3h4x", "mndo-d3h4x", "mndod-d3h4x", "rm1-d3h4x", "pm3pddg-d3h4x", "mndopddg-d3h4x", "pm3bp-d3h4x",

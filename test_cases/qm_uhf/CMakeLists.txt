@@ -71,6 +71,14 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME qm_gpu_uhf_fd_uksgrad_b3lyp_ch3p_svp COMMAND ${_UHF_GPU} --check fd --gpu --case uksgrad_b3lyp_ch3p_svp)
     set_tests_properties(qm_gpu_uhf_fd_uhfgrad_ch2d_svp qm_gpu_uhf_fd_uksgrad_pbe_ch2d_svp qm_gpu_uhf_fd_uksgrad_b3lyp_ch3p_svp
                          PROPERTIES TIMEOUT 900 LABELS "qm_gpu_uhf" SKIP_RETURN_CODE 77)
+    # stage 6b (Nov 2026): open shell with f shells (def2-TZVP) on the device, label qm_gpu_fg
+    add_test(NAME qm_gpu_fg_uhfgrad_ch2d_tzvp COMMAND ${_UHF_GPU} --check gpu --case uhfgrad_ch2d_svp --extra-qm basis=def2-TZVP)
+    add_test(NAME qm_gpu_fg_uksgrad_b3lyp_ch3p_tzvp COMMAND ${_UHF_GPU} --check gpu --case uksgrad_b3lyp_ch3p_svp
+             --extra-qm basis=def2-TZVP)
+    add_test(NAME qm_gpu_fg_fd_uhfgrad_ch2d_tzvp COMMAND ${_UHF_GPU} --check fd --gpu --case uhfgrad_ch2d_svp
+             --extra-qm basis=def2-TZVP --coords 0:x 1:y 2:x)
+    set_tests_properties(qm_gpu_fg_uhfgrad_ch2d_tzvp qm_gpu_fg_uksgrad_b3lyp_ch3p_tzvp qm_gpu_fg_fd_uhfgrad_ch2d_tzvp
+                         PROPERTIES TIMEOUT 900 LABELS "qm_gpu_fg;qm_gpu_uhf" SKIP_RETURN_CODE 77)
     add_test(NAME qm_uhf_opt_hf COMMAND ${_UHF_CHECK} --check opt --case hf --curcuma $<TARGET_FILE:curcuma>)
     set_tests_properties(qm_uhf_opt_hf PROPERTIES TIMEOUT 900 LABELS "qm_uhf")
 

@@ -245,7 +245,7 @@ Stand.
 ## 5. Funktionen und Refactoring (niedrige Priorität)
 
 - **Native QM, nächste Basis-Stufe** (Nov 2026): H-Rn mit s-g und def2-ECP laufen (Stufe 4), hf-3c H-Rn (Stufe 5a); offen:
-  ECP auf der GPU; otool_gcp-Gradientenfehler (He/Ne-Paare, Exponenten < 0.1) gegen ORCA-EnGrad nicht isoliert; CUDA-ERI/J/K/Gradient-Kerne für L > 2 (gezählter CPU-Fallback), `mdQuartetT` für l_a+l_b > 4; XeF2: PySCF weicht
+  ECP auf der GPU (gemessen: <= 9 % Gewinn, Stufe 6b, verworfen); otool_gcp-Gradientenfehler (He/Ne-Paare, Exponenten < 0.1) gegen ORCA-EnGrad nicht isoliert; f/g-Generic-Kern der CUDA-Direkt-J/K langsam (H2O QZVPP 75 % der Kernzeit, [6b](docs/QM_GPU_ROADMAP.md#45-f-and-g-shells-on-the-device-nov-2026-stage-6b)), RI-Gradient mit Aux-h auf der GPU, `mdQuartetT` für l_a+l_b > 4; XeF2: PySCF weicht
   1.6e-6 Eh von curcuma/ORCA ab, ungeklärt. [Stufe 4](docs/NATIVE_QM_IMPLEMENTATION.md#stage-4-elements-beyond-ne-and-def2-ecp-nov-1-2026)
 - **Native QM offene Schale, Rest** (2026-11-03, Stufen 5b/6a): UHF/UKS laufen (hf, hf-3c, lda, pbe, b3lyp; CUDA ohne SCF-Schleife); offen: device-residente
   UHF-Schleife (gezählt `qm_uhf_scf`), Zwei-Dichten-RI-JK-Kern, UKS mit AO-Screening, inkrementelle direkte Fock-Builds, ROHF, spinpolarisierte Meta-GGAs,

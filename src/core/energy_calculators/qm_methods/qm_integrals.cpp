@@ -2089,10 +2089,14 @@ bool buildEriGpuTables(const std::vector<GTO::Orbital>& basis, double screening,
     if (o.n == 0) { why = "empty basis"; return false; }
     const int ns = (int)sh.size();
     for (const EriShell& s : sh) t.maxL = std::max(t.maxL, s.L);
-    if (t.maxL > 2) {
-        why = "angular momentum L=" + std::to_string(t.maxL) + " (device kernel handles s, p, d)";
+    // Stage 6b (Nov 2026): f and g shells too (generic device kernels for their classes, s/p/d classes
+    // keep the compile-time kernels). Pair-class base 3 for L <= 2 (the layout of before, unchanged) and 5
+    // for f/g bases; the plugin derives the base from sh_L (qmgpu::pairClassBase).
+    if (t.maxL > 4) {
+        why = "angular momentum L=" + std::to_string(t.maxL) + " (device kernels handle s-g)";
         return false;
     }
+    const int cb = t.maxL <= 2 ? 3 : 5;
     if (BoysTable::NMAX < 4 * t.maxL) { why = "Boys table too short"; return false; }
 
     for (int A = 0; A < ns; ++A) {
@@ -2144,24 +2148,25 @@ bool buildEriGpuTables(const std::vector<GTO::Orbital>& basis, double screening,
     t.pref = 2.0 * std::pow(PI, 2.5);
     t.screening = screening;
 
-    // Q-G3 (Claude Generated, Oct 2026): shell pairs bucketed by pair class LA*3 + LB, CPU
-    // order inside a bucket. Integral-direct enumerates bucket x bucket on the device.
+    // Q-G3 (Claude Generated, Oct 2026): shell pairs bucketed by pair class LA*cb + LB (cb = 3 for
+    // s/p/d, 5 with f/g shells), CPU order inside a bucket. Integral-direct enumerates bucket x bucket.
     {
-        std::vector<int> cnt(9, 0);
-        for (int i = 0; i < np; ++i) ++cnt[sh[pairs[i].A].L * 3 + sh[pairs[i].B].L];
-        t.pc_off.assign(10, 0);
-        for (int k = 0; k < 9; ++k) t.pc_off[k + 1] = t.pc_off[k] + cnt[k];
+        const int npc = cb * cb;
+        std::vector<int> cnt(npc, 0);
+        for (int i = 0; i < np; ++i) ++cnt[sh[pairs[i].A].L * cb + sh[pairs[i].B].L];
+        t.pc_off.assign(npc + 1, 0);
+        for (int k = 0; k < npc; ++k) t.pc_off[k + 1] = t.pc_off[k] + cnt[k];
         std::vector<int> fillp(t.pc_off.begin(), t.pc_off.end() - 1);
         t.pc_pairs.resize(np);
-        for (int i = 0; i < np; ++i) t.pc_pairs[fillp[sh[pairs[i].A].L * 3 + sh[pairs[i].B].L]++] = i;
+        for (int i = 0; i < np; ++i) t.pc_pairs[fillp[sh[pairs[i].A].L * cb + sh[pairs[i].B].L]++] = i;
     }
     if (!list_quartets) return true;
 
     // Canonical quartets (i <= j) passing the shell-level Schwarz test, bucketed by
     // class (LA, LB, LC, LD); the order inside a bucket is the CPU loop order.
-    const int nkey = 81;  // L <= 2 per shell
+    const int nkey = cb * cb * cb * cb;  // 81 for L <= 2 per shell
     auto key = [&](int i, int j) {
-        return ((sh[pairs[i].A].L * 3 + sh[pairs[i].B].L) * 3 + sh[pairs[j].A].L) * 3 + sh[pairs[j].B].L;
+        return ((sh[pairs[i].A].L * cb + sh[pairs[i].B].L) * cb + sh[pairs[j].A].L) * cb + sh[pairs[j].B].L;
     };
     std::vector<long long> count(nkey, 0);
     for (int i = 0; i < np; ++i)
@@ -2186,10 +2191,10 @@ bool buildEriGpuTables(const std::vector<GTO::Orbital>& basis, double screening,
     for (int k = 0; k < nkey; ++k) {
         if (count[k] == 0) continue;
         t.class_off.push_back(start[k]);
-        t.class_L.push_back(k / 27);
-        t.class_L.push_back((k / 9) % 3);
-        t.class_L.push_back((k / 3) % 3);
-        t.class_L.push_back(k % 3);
+        t.class_L.push_back(k / (cb * cb * cb));
+        t.class_L.push_back((k / (cb * cb)) % cb);
+        t.class_L.push_back((k / cb) % cb);
+        t.class_L.push_back(k % cb);
     }
     t.class_off.push_back(total);
     return true;
