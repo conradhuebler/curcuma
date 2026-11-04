@@ -39,6 +39,7 @@ jobs:
       # Unpacked in a clean image: the tarball must carry everything it needs.
       - name: Smoke test in a clean system
         run: |
+          set -o pipefail
           mkdir -p smoke && tar -C smoke -xzf out/curcuma-linux-cpu.tar.gz
           docker run --rm -v "$PWD:/w" ubuntu:22.04 /w/smoke/curcuma-cpu/curcuma \
             -sp /w/test_cases/structures/medium/butane.anti.xyz -method gfnff 2>&1 | tail -n 15
@@ -73,11 +74,13 @@ jobs:
           make -j"$(sysctl -n hw.ncpu)" > make.log 2>&1 || { tail -n 80 make.log; exit 1; }
 
       - name: Smoke test
+        shell: bash
         run: ./build_mac/curcuma -sp test_cases/structures/medium/butane.anti.xyz -method gfnff 2>&1 | tail -n 15
 
       # Homebrew libraries are bundled so the binary also runs without Homebrew.
       - name: Package
         run: |
+          set -o pipefail
           mkdir -p pkg/curcuma-macos && cp build_mac/curcuma pkg/curcuma-macos/
           for i in 1 2 3; do
             for f in pkg/curcuma-macos/*; do

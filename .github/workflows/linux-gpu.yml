@@ -63,6 +63,7 @@ jobs:
       # fall back to the CPU. The AVX512 build is only run on a runner that has AVX512.
       - name: Smoke test in a clean system
         run: |
+          set -o pipefail
           mkdir -p smoke && for a in out/*.tar.gz; do tar -C smoke -xzf "$a"; done
           # Works without the CPU feature: only resolves the libraries, runs no curcuma code. The
           # driver libraries (libcuda, libnvidia-*) come from the user's system.
