@@ -310,12 +310,9 @@ if(UNIX) # dont work on windows systems, compilation fails unfortranatly ...
     )
 endif(UNIX)
 
-add_definitions("-DGIT_COMMIT_HASH=${GIT_COMMIT_HASH}")
-add_definitions("-DGIT_BRANCH=${GIT_BRANCH}")
-# Claude Generated (March 2026): Remove comma from RFC 2822 date — nvcc splits -D values at commas
+# Claude Generated (Nov 2026): the -DGIT_* compile definitions were removed (no source read them);
+# version.h.in carries the values. The comma is still dropped from the RFC 2822 date.
 string(REPLACE "," " " GIT_COMMIT_DATE "${GIT_COMMIT_DATE}")
-add_definitions("-DGIT_COMMIT_DATE=${GIT_COMMIT_DATE}")
-add_definitions("-DGIT_COMMIT_TAG=${GIT_COMMIT_TAG}")
 
 if(CMAKE_COMPILER_IS_GNUCXX)
     set (_UNIX  ON)
