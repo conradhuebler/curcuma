@@ -9,12 +9,12 @@ Core data structures and shared infrastructure. All energy methods live in
 |------|-------|
 | Molecule | `molecule.{h,cpp}` (atoms, geometry, charges, fragments, XYZ/JSON export), `xyz_comment_parser.*`, `fileiterator.*` (multi-XYZ iteration) |
 | Energy dispatch | `energycalculator.{h,cpp}`: one `std::unique_ptr<ComputationalMethod>` built by `MethodFactory::create()` |
-| Parameters | `parameter_macros.h` (PARAM blocks), `parameter_registry.*`, `config_manager.*`, `parameter_validation.h` |
+| Parameters | `parameter_macros.h` (PARAM blocks), `parameter_registry.*`, `config_manager.*` |
 | Logging, citations | `curcuma_logger.*`, `citation_database.*`, `citation_registry.*` |
 | Units, elements | `units.h` (`CurcumaUnit`, CODATA 2018), `elements.h`, `periodic_table.*` |
 | Numerics | `curcuma_eigen_config.h`, `blas_threads.h`, `math_compat.h`, `portable_{erf,exp,log,acos}.h`, `charge_extrapolation.h`, `intra_parallel_context.h` |
 | GPU infrastructure | `gpu_device_pool.*` (batch workers over GPUs), `gpu_fallback.*` (counts every CPU fallback) |
-| Other | `solvation/` (GBSA, solvent tables), `functional_groups.*`, `topology.h`, `hbonds.h`, `form_factors.h`, `pseudoff.*`, `imagewriter.hpp` |
+| Other | `solvation/` (GBSA, solvent tables), `functional_groups.*`, `topology.h`, `form_factors.h`, `pseudoff.*`, `imagewriter.hpp` |
 
 ## Parameter system
 

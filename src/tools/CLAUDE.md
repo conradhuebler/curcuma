@@ -25,13 +25,12 @@ measurement HUD and its live plots. Pinned by the `geometry_tools` ctest.
 | `pbc_utils.h` (`PBCUtils::`) | Lattice vectors from a,b,c,alpha,beta,gamma and back, minimum image, PBC distance, cell check |
 | `spatial_cell_list.h` | Cell list for O(N) neighbour queries, no PBC; build cost does not pay off below roughly 800 atoms |
 | `string_similarity.h` (`StringUtils::`) | Levenshtein distance for "Did you mean" method suggestions |
-| `trajectory_writer.{h,cpp}`, `trajectory_helpers.h` | TrajectoryWriter and its JSON schema helpers |
+| `trajectory_writer.{h,cpp}` | TrajectoryWriter |
 | `bmt_utils.{h,cpp}` (`BMTUtils::`) | BMT output directories |
 
 ## ✅ TrajectoryWriter
 
 - Formats `HumanTable`, `CSV`, `JSON`, `DAT`, `VTF`; single or multi-frame, plus statistics summaries (`TrajectoryStatistics`)
-- `trajectory_helpers.h` converts geometry-command results (bond, angle, torsion) into its JSON schema
 
 ## 🤖 BMT output directories (AI-generated, machine-tested; human production testing pending)
 
