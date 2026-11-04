@@ -68,6 +68,9 @@ struct GFNFFCudaBackend {
     static constexpr bool default_disp_pairs_on_device = true;
     /// Oct 2026: non-bonded repulsion list rebuilt on the device (generateNonbondedRepulsionOnGPU()).
     static constexpr bool has_device_repulsion_build = true;
+    /// Nov 2026 (S1): every local GFN-FF term, the device pair builders, the device H-bond detection and the D4
+    /// tail apply the minimum image of an orthorhombic cell (-gfnff.gpu_periodic, coulomb_ewald false only).
+    static constexpr bool has_periodic_local_terms = true;
 
     /// 0 = never route the EEQ to the CPU PCG; the device Schur paths handle nfrag>1.
     static constexpr int default_eeq_cpu_fragment_threshold = 0;

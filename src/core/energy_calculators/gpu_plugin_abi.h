@@ -34,11 +34,12 @@
 //  - compile definitions that change such layouts (both sides already share EIGEN_MAX_ALIGN_BYTES, checked separately).
 // When in doubt, raise it: the cost is one rebuild of the plugin, the cost of not raising it is undefined behaviour.
 //
-// History: 0 = plugins built before this check (no symbol); 1 = Nov 2026, after A6 (hasPeriodicEnergy in the vtable).
+// History: 0 = plugins built before this check (no symbol); 1 = Nov 2026, after A6 (hasPeriodicEnergy in the vtable);
+// 2 = Nov 2026, S1 (GFNFF gained the data member m_gpu_periodic; GFNFF is shared across the boundary).
 
 #pragma once
 
-#define CURCUMA_GPU_PLUGIN_ABI_VERSION 1
+#define CURCUMA_GPU_PLUGIN_ABI_VERSION 2
 
 /// Defines `extern "C" int curcuma_<backend>_abi_version()` in a plugin entry file (use at file scope).
 #define CURCUMA_GPU_PLUGIN_DEFINE_ABI_VERSION(backend)                                                                \

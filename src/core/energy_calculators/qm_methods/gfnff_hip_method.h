@@ -86,6 +86,9 @@ struct GFNFFRocmBackend {
     /// (FFWorkspaceHip::generateNonbondedRepulsionOnGPU, ordered row build with the gather CSR on the device);
     /// false keeps the staged host build (FFWorkspaceHip::updateRepulsion).
     static constexpr bool has_device_repulsion_build = true;
+    /// Nov 2026 (S1): the HIP kernels have not been given the minimum-image frames of S1 (stage S6); a periodic
+    /// cell is refused by the wrapper also with -gfnff.gpu_periodic true.
+    static constexpr bool has_periodic_local_terms = false;
 
     /// Deliverable 3 (Jun 2026): from 16 fragments on, the dense device Cholesky (O(N^3) plus a
     /// host Schur step over nfrag+1 columns) is not used. Oct 2026: there the device projected PCG

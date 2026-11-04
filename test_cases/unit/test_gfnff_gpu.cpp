@@ -70,6 +70,15 @@ int main(int argc, char* argv[])
                         // Path starts without "../" - relative to curcuma root, go up two dirs
                         xyz_file = "../../" + geo_path;
                     }
+#ifdef CURCUMA_SOURCE_DIR
+                    // Claude Generated (Nov 2026, S1): the relative forms above assume a build directory inside the
+                    // repository; from a build directory elsewhere resolve against the source root CMake passed in.
+                    if (!std::ifstream(xyz_file).good()) {
+                        std::string rel = geo_path;
+                        while (rel.size() >= 3 && rel.substr(0, 3) == "../") rel = rel.substr(3);
+                        xyz_file = std::string(CURCUMA_SOURCE_DIR) + "/" + rel;
+                    }
+#endif
                 }
             } catch (const std::exception& e) {
                 std::cerr << "Error parsing JSON file " << mol_file << ": " << e.what() << std::endl;

@@ -644,6 +644,19 @@ bool MethodFactory::periodicCellNeedsCpu(const Mol& mol, const ComputationalMeth
 {
     if (!mol.m_has_pbc || !isGpuGfnffMethod(method))
         return false;
+    // Claude Generated (Nov 2026, S1): opt-in release of the device path for the local terms. -gfnff.gpu_periodic true
+    // keeps the GPU only with coulomb_ewald false (the device Coulomb is a minimum-image pair sum, the periodic EEQ and
+    // the Ewald Coulomb on the device are stages S3/S4); with the default coulomb_ewald true the CPU computes.
+    if (const GFNFF* g = method.gfnffInstance(); g && g->gpuPeriodicRequested()) {
+        if (!g->coulombEwaldRequested())
+            return false;
+        CurcumaLogger::warn("periodic cell set with gpu_periodic: periodic Coulomb/EEQ on the GPU is not available yet (S3/S4), "
+                            "using CPU (-gfnff.coulomb_ewald false keeps the GPU with a minimum-image Coulomb)");
+        curcuma::reportGpuFallback("GFN-FF: periodic cell with gpu_periodic: periodic Coulomb/EEQ on the GPU is not available yet "
+                                   "(S3/S4), calculation on the CPU",
+                                   fmt::format("{} atoms", mol.m_number_atoms));
+        return true;
+    }
     CurcumaLogger::warn("periodic cell set: GPU path has no minimum image yet, using CPU");
     curcuma::reportGpuFallback("GFN-FF: periodic cell set, GPU path has no minimum image yet, calculation on the CPU",
                                fmt::format("{} atoms", mol.m_number_atoms));

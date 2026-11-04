@@ -217,6 +217,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_bonds(
 /// GFN-FF angle bending (cosine + distance damping)
 /// E = fc * (cos(theta) - cos(theta0))^2 * damp_ij * damp_jk
 /// Reference: Fortran gfnff_engrad.F90:857-916
+template <bool PBC>   // S1: false = former kernel, true = image frame of the cell
 __global__ GFNFF_KERNEL_BOUNDS void k_angles(
     int n,
     const int*    __restrict__ idx_i,
@@ -238,6 +239,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_angles(
 /// GFN-FF dihedral torsions (Fourier + distance damping, standard + extra)
 /// E = V * (1 + cos(n*(phi - phi0) + pi)) * damp
 /// Reference: Fortran gfnff_engrad.F90:1041-1122
+template <bool PBC>   // S1: false = former kernel, true = image frame of the cell
 __global__ GFNFF_KERNEL_BOUNDS void k_dihedrals(
     int n,
     const int*    __restrict__ idx_i,
@@ -263,6 +265,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_dihedrals(
 /// GFN-FF out-of-plane inversions
 /// E = fc * (1 - cos(omega)) * damp  or  fc * (cos(omega) - cos(omega0))^2 * damp
 /// Reference: Fortran gfnff_ini.f90 inversion potential
+template <bool PBC>   // S1: false = former kernel, true = image frame of the cell
 __global__ GFNFF_KERNEL_BOUNDS void k_inversions(
     int n,
     const int*    __restrict__ idx_i,
@@ -292,6 +295,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_inversions(
 
 /// Triple bond torsions: E = -erefhalf * cos(2φ) + erefhalf
 /// Reference: ff_workspace_gfnff.cpp:calcSTorsions, Fortran gfnff_engrad.F90:3454
+template <bool PBC>   // S1: false = former kernel, true = image frame of the cell
 __global__ GFNFF_KERNEL_BOUNDS void k_storsions(
     int n,
     const int*    __restrict__ idx_i,
@@ -387,6 +391,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_atm(
 
 /// Halogen bonds (3-body A-X...B): distance damped electrostatic
 /// Reference: ff_workspace_gfnff.cpp:calcHalogenBonds, Fortran rbxgfnff_eg
+template <bool PBC>   // S1: false = former kernel, true = image frame of the cell
 __global__ GFNFF_KERNEL_BOUNDS void k_xbonds(
     int n,
     const int*    __restrict__ idx_i,     ///< donor A
@@ -418,6 +423,7 @@ __global__ void k_gather_hb_charges(
 /// Reference: ff_workspace_gfnff.cpp:calcHydrogenBonds, Fortran abhgfnff_eg*
 /// e_triple (Claude Generated, Oct 2026): [n] energy of each triple (0 outside its cut-off), the value
 /// the block reduction adds to `energy`; nullptr = not recorded, no extra memory access.
+template <bool PBC>   // S1: false = former kernel, true = image frame of the cell
 __global__ GFNFF_KERNEL_BOUNDS void k_hbonds(
     int n,
     const int*    __restrict__ idx_i,     ///< donor A
@@ -638,6 +644,9 @@ __global__ void k_check_displacement(
 // Upload covalent radii table to GPU constant memory
 // ============================================================================
 void upload_rcov_d3(const double* rcov, int n);
+/// Claude Generated (Nov 2026, S1): cell (column-major, Bohr), its inverse and the PBC flag into the constant symbols
+/// d_lattice / d_lattice_inv / d_has_pbc of gfnff_kernels.cu; returns the CUDA status of the copies.
+cudaError_t gfnffUploadCell(const double* lattice_9, const double* lattice_inv_9, int has_pbc);
 
 // ============================================================================
 // Upload covalent radii table for HB/XB vdW radii to GPU constant memory
@@ -726,6 +735,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_build(
     const double* __restrict__ zeta_c,      ///< [86] zeta c per element
     double        a1,
     double        a2,
+    double        r_cut_eval,             ///< per-pair evaluation radius written to out_rcut (S1: dispersionRadiiBohr().eval)
     const int*    __restrict__ row_off,   ///< [N] exclusive scan of the per-row counts of pass 1
     int*          d_counter,              ///< [N] per-row fill counters (zeroed)
     int*          out_i,
@@ -1199,6 +1209,25 @@ __global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_hb_fill_neighbors(
 // Claude Generated (Oct 2026): fixed-point range / finiteness flag of the order-independent accumulators
 // (d_gfnff_fix_bad, gfnff_kernels.cu). Read-back queued on `stream` into a pinned int; reset after a bad step.
 void gfnffFixBadReadAsync(int* h_pinned, cudaStream_t stream);
+
+// Claude Generated (Nov 2026, S1): homogeneous long-range D4 tail (A3c) on the device, see gfnff_kernels.cu.
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_d4_tail_W(
+    int N, int K, const int* __restrict__ slot_of_atom, const int* __restrict__ nref_slot,
+    const double* __restrict__ zeta, const double* __restrict__ gw, double* __restrict__ W);
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_d4_tail_atoms(
+    int N, int K, const int* __restrict__ slot_of_atom, const int* __restrict__ slot_elem,
+    const int* __restrict__ nref_slot, const double* __restrict__ sqz_slot, const double* __restrict__ zeta,
+    const double* __restrict__ gw, const double* __restrict__ dgw, const double* __restrict__ c6_flat,
+    const double* __restrict__ W, double pref6, double pref8, int want_grad,
+    double* __restrict__ dEdcn, double* __restrict__ energy);
 void gfnffFixBadReset();
 
 #endif // USE_CUDA
+
+// Claude Generated (Nov 2026, S1): launch wrappers of the PBC-templated kernels above (defined in gfnff_kernels.cu).
+void launch_k_angles(bool pbc, dim3 grid, dim3 block, cudaStream_t stream, int n, const int* idx_i, const int* idx_j, const int* idx_k, const int* ati, const int* atj, const int* atk, const double* fc, const double* theta0, const double* cx, const double* cy, const double* cz, const double* rcov_d3, double* grad, double* energy);
+void launch_k_dihedrals(bool pbc, dim3 grid, dim3 block, cudaStream_t stream, int n, const int* idx_i, const int* idx_j, const int* idx_k, const int* idx_l, const int* ati, const int* atj, const int* atk, const int* atl, const double* V, const double* phi0, const double* n_period, const int* is_nci, const double* cx, const double* cy, const double* cz, const double* rcov_d3_unused, double* grad, double* energy);
+void launch_k_inversions(bool pbc, dim3 grid, dim3 block, cudaStream_t stream, int n, const int* idx_i, const int* idx_j, const int* idx_k, const int* idx_l, const int* ati, const int* atj, const int* atk, const int* atl, const double* fc, const double* omega0, const double* C0, const double* C1, const double* C2, const int* potential_type, const double* cx, const double* cy, const double* cz, double* grad, double* energy);
+void launch_k_storsions(bool pbc, dim3 grid, dim3 block, cudaStream_t stream, int n, const int* idx_i, const int* idx_j, const int* idx_k, const int* idx_l, const double* erefhalf, const double* cx, const double* cy, const double* cz, double* grad, double* energy);
+void launch_k_xbonds(bool pbc, dim3 grid, dim3 block, cudaStream_t stream, int n, const int* idx_i, const int* idx_j, const int* idx_k, const int* elem_A, const int* elem_B, const double* q_X, const double* q_B, const double* acidity_X, const double* r_cut, const double* cx, const double* cy, const double* cz, double* grad, double* energy);
+void launch_k_hbonds(bool pbc, dim3 grid, dim3 block, cudaStream_t stream, int n, const int* idx_i, const int* idx_j, const int* idx_k, const int* elem_A, const int* elem_B, const double* q_H, const double* q_A, const double* q_B, const double* basicity_A, const double* basicity_B, const double* acidity_A, const double* acidity_B, const double* r_cut, const int* case_type, const int* nb_B_offset, const int* nb_B_count, const int* nb_B_flat, const int* acceptor_parent, const int* nb_C_offset, const int* nb_C_count, const int* nb_C_flat, const double* repz_B, const double* cx, const double* cy, const double* cz, double* grad, double* energy, double* e_triple);

@@ -193,6 +193,31 @@ __device__ __forceinline__ void applyMIC(double& dx, double& dy, double& dz) {
     dz = d_lattice[2]*fx + d_lattice[5]*fy + d_lattice[8]*fz;
 }
 
+// Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED S1): local image frame of a bonded / HB / XB term, the
+// arithmetic of the CPU placeMinimumImage() / imageNear() (ff_workspace_gfnff.cpp): the image of atom `atom`
+// next to the reference point (rx, ry, rz) is ref + mic(x_atom - ref). Without a cell the position is copied
+// as it is (no "ref + (x - ref)" round trip), so the non-periodic kernels keep their bits.
+__device__ __forceinline__ void micPlace(const double* __restrict__ cx, const double* __restrict__ cy,
+                                         const double* __restrict__ cz, int atom,
+                                         double rx, double ry, double rz, double& x, double& y, double& z)
+{
+    if (!d_has_pbc) { x = cx[atom]; y = cy[atom]; z = cz[atom]; return; }
+    double dx = cx[atom] - rx, dy = cy[atom] - ry, dz = cz[atom] - rz;
+    applyMIC(dx, dy, dz);
+    x = rx + dx; y = ry + dy; z = rz + dz;
+}
+
+/// Four-atom chain a-b-c-d in slots 0..3: b at its position, a and c next to b, d next to c (placeChainOfFour()).
+__device__ __forceinline__ void micChainOfFour(const double* __restrict__ cx, const double* __restrict__ cy,
+                                               const double* __restrict__ cz, int a, int b, int c, int d,
+                                               double* lx, double* ly, double* lz)
+{
+    lx[1] = cx[b]; ly[1] = cy[b]; lz[1] = cz[b];
+    micPlace(cx, cy, cz, a, lx[1], ly[1], lz[1], lx[0], ly[0], lz[0]);
+    micPlace(cx, cy, cz, c, lx[1], ly[1], lz[1], lx[2], ly[2], lz[2]);
+    micPlace(cx, cy, cz, d, lx[2], ly[2], lz[2], lx[3], ly[3], lz[3]);
+}
+
 // ============================================================================
 // Utility kernel
 // ============================================================================
@@ -225,6 +250,7 @@ __global__ void k_check_displacement(
     double dx = cx[i] - rx[i];
     double dy = cy[i] - ry[i];
     double dz = cz[i] - rz[i];
+    applyMIC(dx, dy, dz);   // Nov 2026 (S1): a wrap by a lattice vector is no motion (CPU maxAtomDisplacement, A3b/A4a)
     if (dx*dx + dy*dy + dz*dz > threshold_sq)
         atomicOr(exceeded_flag, 1);
 }
@@ -881,6 +907,11 @@ __device__ double cos_angle_grad(
 // Reference: ff_workspace_gfnff.cpp:calcAngles (lines 205-271)
 // ============================================================================
 
+// Nov 2026 (S1): the local-term kernels are templates on PBC. The false instantiation keeps the former statements
+// verbatim (a rewrite through local arrays changed the FMA contraction of the bonded kernels by one fixed-point
+// quantum on urea197/peo201; the SASS of k_*<false> is compared against the pre-S1 plugin), the true instantiation
+// builds the CPU image frame. FFWorkspaceGPU launches k_*<true> only with an active cell.
+template <bool PBC>
 __global__ void k_angles(
     int n,
     const int*    __restrict__ idx_i,
@@ -911,14 +942,30 @@ __global__ void k_angles(
             double rcov_j = d_rcov_d3[zj] * scale;
             double rcov_k = d_rcov_d3[zk] * scale;
 
-            double dij_x = cx[i] - cx[j];
-            double dij_y = cy[i] - cy[j];
-            double dij_z = cz[i] - cz[j];
-            applyMIC(dij_x, dij_y, dij_z);
-            double dkj_x = cx[k] - cx[j];
-            double dkj_y = cy[k] - cy[j];
-            double dkj_z = cz[k] - cz[j];
-            applyMIC(dkj_x, dkj_y, dkj_z);
+            // Nov 2026 (S1, PBC): local image frame, i and k as the images next to the centre j (slots 0..2 =
+            // i, j, k; CPU calcAngles); the angle and its gradient read the frame too. Else: the former statements.
+            [[maybe_unused]] double lx[3], ly[3], lz[3];
+            double dij_x, dij_y, dij_z, dkj_x, dkj_y, dkj_z;
+            if constexpr (PBC) {
+                lx[1] = cx[j]; ly[1] = cy[j]; lz[1] = cz[j];
+                micPlace(cx, cy, cz, i, lx[1], ly[1], lz[1], lx[0], ly[0], lz[0]);
+                micPlace(cx, cy, cz, k, lx[1], ly[1], lz[1], lx[2], ly[2], lz[2]);
+                dij_x = lx[0] - lx[1];
+                dij_y = ly[0] - ly[1];
+                dij_z = lz[0] - lz[1];
+                dkj_x = lx[2] - lx[1];
+                dkj_y = ly[2] - ly[1];
+                dkj_z = lz[2] - lz[1];
+            } else {
+                dij_x = cx[i] - cx[j];
+                dij_y = cy[i] - cy[j];
+                dij_z = cz[i] - cz[j];
+                applyMIC(dij_x, dij_y, dij_z);
+                dkj_x = cx[k] - cx[j];
+                dkj_y = cy[k] - cy[j];
+                dkj_z = cz[k] - cz[j];
+                applyMIC(dkj_x, dkj_y, dkj_z);
+            }
 
             double r_ij_sq = dij_x*dij_x + dij_y*dij_y + dij_z*dij_z;
             double r_jk_sq = dkj_x*dkj_x + dkj_y*dkj_y + dkj_z*dkj_z;
@@ -941,10 +988,17 @@ __global__ void k_angles(
             double d_ri_x, d_ri_y, d_ri_z;
             double d_rk_x, d_rk_y, d_rk_z;
             double d_rj_x, d_rj_y, d_rj_z;
-            double cos_a = cos_angle_grad(cx, cy, cz, i, j, k,
-                                           d_ri_x, d_ri_y, d_ri_z,
-                                           d_rk_x, d_rk_y, d_rk_z,
-                                           d_rj_x, d_rj_y, d_rj_z, true);
+            double cos_a;
+            if constexpr (PBC)
+                cos_a = cos_angle_grad(lx, ly, lz, 0, 1, 2,
+                                       d_ri_x, d_ri_y, d_ri_z,
+                                       d_rk_x, d_rk_y, d_rk_z,
+                                       d_rj_x, d_rj_y, d_rj_z, true);
+            else
+                cos_a = cos_angle_grad(cx, cy, cz, i, j, k,
+                                       d_ri_x, d_ri_y, d_ri_z,
+                                       d_rk_x, d_rk_y, d_rk_z,
+                                       d_rj_x, d_rj_y, d_rj_z, true);
 
             const double pi = 3.14159265358979323846;
             double t0   = theta0[tid];
@@ -1114,6 +1168,7 @@ __device__ double dihedral_angle_grad(
 // Reference: ff_workspace_gfnff.cpp:calcDihedrals (lines 299-380)
 // ============================================================================
 
+template <bool PBC>
 __global__ void k_dihedrals(
     int n,
     const int*    __restrict__ idx_i,
@@ -1149,11 +1204,24 @@ __global__ void k_dihedrals(
 
             double atcutt = is_nci[tid] ? 0.305 : 0.505;
 
+            // Nov 2026 (S1, PBC): local image frame (slots 0..3 = i, j, k, l; placeChainOfFour of the CPU);
+            // every distance and vector below reads the frame. Else: the former statements on cx/cy/cz.
+            [[maybe_unused]] double lx[4], ly[4], lz[4];
+            if constexpr (PBC)
+                micChainOfFour(cx, cy, cz, ai, aj, ak, al, lx, ly, lz);
+
             auto sq_dist = [&](int a, int b) {
-                double dx = cx[b] - cx[a];
-                double dy = cy[b] - cy[a];
-                double dz = cz[b] - cz[a];
-                return dx*dx+dy*dy+dz*dz;
+                if constexpr (PBC) {
+                    double dx = lx[b] - lx[a];
+                    double dy = ly[b] - ly[a];
+                    double dz = lz[b] - lz[a];
+                    return dx*dx+dy*dy+dz*dz;
+                } else {
+                    double dx = cx[b] - cx[a];
+                    double dy = cy[b] - cy[a];
+                    double dz = cz[b] - cz[a];
+                    return dx*dx+dy*dy+dz*dz;
+                }
             };
 
             auto make_damp = [&](double r2_sq, double ra, double rb) {
@@ -1171,9 +1239,16 @@ __global__ void k_dihedrals(
                 return (r2_sq > 1e-8) ? -4.0*rr/(r2_sq*(1.0+rr)*(1.0+rr)) : 0.0;
             };
 
-            double rij2 = sq_dist(ai, aj);
-            double rjk2 = sq_dist(aj, ak);
-            double rkl2 = sq_dist(ak, al);
+            double rij2, rjk2, rkl2;
+            if constexpr (PBC) {
+                rij2 = sq_dist(0, 1);
+                rjk2 = sq_dist(1, 2);
+                rkl2 = sq_dist(2, 3);
+            } else {
+                rij2 = sq_dist(ai, aj);
+                rjk2 = sq_dist(aj, ak);
+                rkl2 = sq_dist(ak, al);
+            }
 
             double d_ij = make_damp(rij2, ri, rj);
             double d_jk = make_damp(rjk2, rj, rk);
@@ -1185,7 +1260,11 @@ __global__ void k_dihedrals(
             double d2_kl = make_damp2(rkl2, rk, rl);
 
             double derivate[4][3];
-            double phi = dihedral_angle_grad(cx, cy, cz, ai, aj, ak, al, derivate, true);
+            double phi;
+            if constexpr (PBC)
+                phi = dihedral_angle_grad(lx, ly, lz, 0, 1, 2, 3, derivate, true);
+            else
+                phi = dihedral_angle_grad(cx, cy, cz, ai, aj, ak, al, derivate, true);
 
             double c1    = n_period[tid] * (phi - phi0[tid]) + M_PI;
             double cos_c1 = cos(c1);
@@ -1204,19 +1283,25 @@ __global__ void k_dihedrals(
 
             // Gradient from damping: E_raw * d(damp)/d(rXY²) * rXY_vec
             {
-                double dx=cx[ai]-cx[aj], dy=cy[ai]-cy[aj], dz=cz[ai]-cz[aj];
+                double dx, dy, dz;
+                if constexpr (PBC) { dx=lx[0]-lx[1]; dy=ly[0]-ly[1]; dz=lz[0]-lz[1]; }
+                else               { dx=cx[ai]-cx[aj]; dy=cy[ai]-cy[aj]; dz=cz[ai]-cz[aj]; }
                 double fac = E_raw * d2_ij * d_jk * d_kl;
                 add_grad(grad, ai,  fac*dx,  fac*dy,  fac*dz);
                 add_grad(grad, aj, -fac*dx, -fac*dy, -fac*dz);
             }
             {
-                double dx=cx[aj]-cx[ak], dy=cy[aj]-cy[ak], dz=cz[aj]-cz[ak];
+                double dx, dy, dz;
+                if constexpr (PBC) { dx=lx[1]-lx[2]; dy=ly[1]-ly[2]; dz=lz[1]-lz[2]; }
+                else               { dx=cx[aj]-cx[ak]; dy=cy[aj]-cy[ak]; dz=cz[aj]-cz[ak]; }
                 double fac = E_raw * d_ij * d2_jk * d_kl;
                 add_grad(grad, aj,  fac*dx,  fac*dy,  fac*dz);
                 add_grad(grad, ak, -fac*dx, -fac*dy, -fac*dz);
             }
             {
-                double dx=cx[ak]-cx[al], dy=cy[ak]-cy[al], dz=cz[ak]-cz[al];
+                double dx, dy, dz;
+                if constexpr (PBC) { dx=lx[2]-lx[3]; dy=ly[2]-ly[3]; dz=lz[2]-lz[3]; }
+                else               { dx=cx[ak]-cx[al]; dy=cy[ak]-cy[al]; dz=cz[ak]-cz[al]; }
                 double fac = E_raw * d_ij * d_jk * d2_kl;
                 add_grad(grad, ak,  fac*dx,  fac*dy,  fac*dz);
                 add_grad(grad, al, -fac*dx, -fac*dy, -fac*dz);
@@ -1356,6 +1441,7 @@ __device__ double inversion_angle_grad(
 // Reference: ff_workspace_gfnff.cpp:calcInversions
 // ============================================================================
 
+template <bool PBC>
 __global__ void k_inversions(
     int n,
     const int*    __restrict__ idx_i,
@@ -1393,16 +1479,40 @@ __global__ void k_inversions(
         double rcov_2 = (zk >= 0 && zk < 87) ? d_rcov_d3[zk] * rcov_scale : 1.0 * rcov_scale;
         double rcov_3 = (zl >= 0 && zl < 87) ? d_rcov_d3[zl] * rcov_scale : 1.0 * rcov_scale;
 
+        // Nov 2026 (S1, PBC): local image frame, the centre i at its position and its three neighbours as the
+        // images next to it (slots 0..3 = i, j, k, l; CPU calcInversions). Else: the former statements.
+        [[maybe_unused]] double lx[4], ly[4], lz[4];
+        if constexpr (PBC) {
+            lx[0] = cx[i]; ly[0] = cy[i]; lz[0] = cz[i];
+            micPlace(cx, cy, cz, j, lx[0], ly[0], lz[0], lx[1], ly[1], lz[1]);
+            micPlace(cx, cy, cz, k, lx[0], ly[0], lz[0], lx[2], ly[2], lz[2]);
+            micPlace(cx, cy, cz, l, lx[0], ly[0], lz[0], lx[3], ly[3], lz[3]);
+        }
+
         auto sq_dist3 = [&](int a, int b) {
-            double dx = cx[b] - cx[a];
-            double dy = cy[b] - cy[a];
-            double dz = cz[b] - cz[a];
-            return dx*dx+dy*dy+dz*dz;
+            if constexpr (PBC) {
+                double dx = lx[b] - lx[a];
+                double dy = ly[b] - ly[a];
+                double dz = lz[b] - lz[a];
+                return dx*dx+dy*dy+dz*dz;
+            } else {
+                double dx = cx[b] - cx[a];
+                double dy = cy[b] - cy[a];
+                double dz = cz[b] - cz[a];
+                return dx*dx+dy*dy+dz*dz;
+            }
         };
 
-        double rij_sq = sq_dist3(j, i);
-        double rjk_sq = sq_dist3(j, k);
-        double rjl_sq = sq_dist3(j, l);
+        double rij_sq, rjk_sq, rjl_sq;
+        if constexpr (PBC) {
+            rij_sq = sq_dist3(1, 0);
+            rjk_sq = sq_dist3(1, 2);
+            rjl_sq = sq_dist3(1, 3);
+        } else {
+            rij_sq = sq_dist3(j, i);
+            rjk_sq = sq_dist3(j, k);
+            rjl_sq = sq_dist3(j, l);
+        }
 
         auto calc_damp = [&](double rsq, double ra, double rb) -> double {
             double sum = ra + rb;
@@ -1418,7 +1528,11 @@ __global__ void k_inversions(
         double damp    = damp_ij * damp_jk * damp_jl;
 
         double derivate[4][3];
-        double omega = inversion_angle_grad(cx, cy, cz, i, j, k, l, derivate, true);
+        double omega;
+        if constexpr (PBC)
+            omega = inversion_angle_grad(lx, ly, lz, 0, 1, 2, 3, derivate, true);
+        else
+            omega = inversion_angle_grad(cx, cy, cz, i, j, k, l, derivate, true);
         double cos_om  = cos(omega);
         double cos_om0 = cos(omega0[tid]);
 
@@ -1461,19 +1575,25 @@ __global__ void k_inversions(
         // Damping gradient: peripheral atom gets +fac*d, hub (j) gets -fac*d
         // Matches Fortran gfnff_engrad.F90:1382-1385 and CPU CalculateGFNFFInversionContribution
         {
-            double dx=cx[i]-cx[j], dy=cy[i]-cy[j], dz=cz[i]-cz[j];
+            double dx, dy, dz;
+            if constexpr (PBC) { dx=lx[0]-lx[1]; dy=ly[0]-ly[1]; dz=lz[0]-lz[1]; }
+            else               { dx=cx[i]-cx[j]; dy=cy[i]-cy[j]; dz=cz[i]-cz[j]; }
             double fac = E_raw * dd_ij * damp_jk * damp_jl;
             add_grad(grad, i,  fac*dx,  fac*dy,  fac*dz);
             add_grad(grad, j, -fac*dx, -fac*dy, -fac*dz);
         }
         {
-            double dx=cx[k]-cx[j], dy=cy[k]-cy[j], dz=cz[k]-cz[j];
+            double dx, dy, dz;
+            if constexpr (PBC) { dx=lx[2]-lx[1]; dy=ly[2]-ly[1]; dz=lz[2]-lz[1]; }
+            else               { dx=cx[k]-cx[j]; dy=cy[k]-cy[j]; dz=cz[k]-cz[j]; }
             double fac = E_raw * damp_ij * dd_jk * damp_jl;
             add_grad(grad, k,  fac*dx,  fac*dy,  fac*dz);
             add_grad(grad, j, -fac*dx, -fac*dy, -fac*dz);
         }
         {
-            double dx=cx[l]-cx[j], dy=cy[l]-cy[j], dz=cz[l]-cz[j];
+            double dx, dy, dz;
+            if constexpr (PBC) { dx=lx[3]-lx[1]; dy=ly[3]-ly[1]; dz=lz[3]-lz[1]; }
+            else               { dx=cx[l]-cx[j]; dy=cy[l]-cy[j]; dz=cz[l]-cz[j]; }
             double fac = E_raw * damp_ij * damp_jk * dd_jl;
             add_grad(grad, l,  fac*dx,  fac*dy,  fac*dz);
             add_grad(grad, j, -fac*dx, -fac*dy, -fac*dz);
@@ -1481,6 +1601,20 @@ __global__ void k_inversions(
     }
 
     blockReduceAddEnergy(local_E, energy);
+}
+
+// Claude Generated (Nov 2026, S1): the cell symbols live in this translation unit; a cudaMemcpyToSymbol on an
+// `extern __constant__` declaration in another unit failed (the error then surfaced in the next checked call of
+// the workspace set-up as cudaErrorInvalidDevice), so the upload is done here and its status returned.
+cudaError_t gfnffUploadCell(const double* lattice_9, const double* lattice_inv_9, int has_pbc)
+{
+    if (has_pbc) {
+        cudaError_t e = cudaMemcpyToSymbol(d_lattice, lattice_9, 9 * sizeof(double));
+        if (e != cudaSuccess) return e;
+        e = cudaMemcpyToSymbol(d_lattice_inv, lattice_inv_9, 9 * sizeof(double));
+        if (e != cudaSuccess) return e;
+    }
+    return cudaMemcpyToSymbol(d_has_pbc, &has_pbc, sizeof(int));
 }
 
 // ============================================================================
@@ -1555,6 +1689,7 @@ __device__ __forceinline__ double d_charge_scaling(double q, double st, double s
 // Reference: ff_workspace_gfnff.cpp:calcSTorsions (lines 611-648)
 // ============================================================================
 
+template <bool PBC>
 __global__ void k_storsions(
     int n,
     const int*    __restrict__ idx_i,
@@ -1574,8 +1709,16 @@ __global__ void k_storsions(
     if (tid < n) {
         int ai = idx_i[tid], aj = idx_j[tid], ak = idx_k[tid], al = idx_l[tid];
 
+        // Nov 2026 (S1, PBC): local image frame as in k_dihedrals (CPU calcSTorsions, placeChainOfFour)
         double derivate[4][3];
-        double phi = dihedral_angle_grad(cx, cy, cz, ai, aj, ak, al, derivate, true);
+        double phi;
+        if constexpr (PBC) {
+            double lx[4], ly[4], lz[4];
+            micChainOfFour(cx, cy, cz, ai, aj, ak, al, lx, ly, lz);
+            phi = dihedral_angle_grad(lx, ly, lz, 0, 1, 2, 3, derivate, true);
+        } else {
+            phi = dihedral_angle_grad(cx, cy, cz, ai, aj, ak, al, derivate, true);
+        }
 
         double eref = erefhalf[tid];
         local_E = -eref * cos(2.0 * phi) + eref;
@@ -1880,6 +2023,7 @@ __global__ void k_atm(
 // Reference: ff_workspace_gfnff.cpp:calcHalogenBonds (lines 1402-1510)
 // ============================================================================
 
+template <bool PBC>
 __global__ void k_xbonds(
     int n,
     const int*    __restrict__ idx_i,
@@ -1910,13 +2054,25 @@ __global__ void k_xbonds(
 
         int A = idx_i[tid], X = idx_j[tid], B = idx_k[tid];
 
-        double ax = cx[A], ay = cy[A], az = cz[A];
-        double xx = cx[X], xy = cy[X], xz = cz[X];
-        double bx = cx[B], by = cy[B], bz = cz[B];
-
-        double rAX_x = xx-ax, rAX_y = xy-ay, rAX_z = xz-az; applyMIC(rAX_x, rAX_y, rAX_z);
-        double rXB_x = bx-xx, rXB_y = by-xy, rXB_z = bz-xz; applyMIC(rXB_x, rXB_y, rXB_z);
-        double rAB_x = bx-ax, rAB_y = by-ay, rAB_z = bz-az; applyMIC(rAB_x, rAB_y, rAB_z);
+        // Nov 2026 (S1, PBC): local image frame anchored on X, A and B as the images next to X (CPU
+        // calcHalogenBonds, A4b). Else: the former statements (three minimum-image vectors).
+        double ax, ay, az, xx, xy, xz, bx, by, bz;
+        double rAX_x, rAX_y, rAX_z, rXB_x, rXB_y, rXB_z, rAB_x, rAB_y, rAB_z;
+        if constexpr (PBC) {
+            xx = cx[X]; xy = cy[X]; xz = cz[X];
+            micPlace(cx, cy, cz, A, xx, xy, xz, ax, ay, az);
+            micPlace(cx, cy, cz, B, xx, xy, xz, bx, by, bz);
+            rAX_x = xx-ax; rAX_y = xy-ay; rAX_z = xz-az;
+            rXB_x = bx-xx; rXB_y = by-xy; rXB_z = bz-xz;
+            rAB_x = bx-ax; rAB_y = by-ay; rAB_z = bz-az;
+        } else {
+            ax = cx[A]; ay = cy[A]; az = cz[A];
+            xx = cx[X]; xy = cy[X]; xz = cz[X];
+            bx = cx[B]; by = cy[B]; bz = cz[B];
+            rAX_x = xx-ax; rAX_y = xy-ay; rAX_z = xz-az; applyMIC(rAX_x, rAX_y, rAX_z);
+            rXB_x = bx-xx; rXB_y = by-xy; rXB_z = bz-xz; applyMIC(rXB_x, rXB_y, rXB_z);
+            rAB_x = bx-ax; rAB_y = by-ay; rAB_z = bz-az; applyMIC(rAB_x, rAB_y, rAB_z);
+        }
 
         double r2AX = rAX_x*rAX_x + rAX_y*rAX_y + rAX_z*rAX_z;
         double r2XB = rXB_x*rXB_x + rXB_y*rXB_y + rXB_z*rXB_z;
@@ -2162,6 +2318,7 @@ __global__ void k_gather_hb_charges(
     }
 }
 
+template <bool PBC>
 __global__ void k_hbonds(
     int n,
     const int*    __restrict__ idx_i,
@@ -2215,13 +2372,26 @@ __global__ void k_hbonds(
     int A = idx_i[tid], H = idx_j[tid], B = idx_k[tid];
     int ct = case_type[tid];
 
-    double ax = cx[A], ay = cy[A], az = cz[A];
-    double hx = cx[H], hy = cy[H], hz = cz[H];
-    double bx = cx[B], by = cy[B], bz = cz[B];
-
-    double rAH_x = hx-ax, rAH_y = hy-ay, rAH_z = hz-az; applyMIC(rAH_x, rAH_y, rAH_z);
-    double rHB_x = bx-hx, rHB_y = by-hy, rHB_z = bz-hz; applyMIC(rHB_x, rHB_y, rHB_z);
-    double rAB_x = bx-ax, rAB_y = by-ay, rAB_z = bz-az; applyMIC(rAB_x, rAB_y, rAB_z);
+    // Nov 2026 (S1, PBC): local image frame anchored on H (CPU calcHydrogenBonds, A4b): A and B as the images
+    // next to H, below the neighbours of B and the acceptor parent C next to B, the neighbours D of C next to C.
+    // Else: the former statements (three minimum-image vectors, neighbours read as they are).
+    double ax, ay, az, hx, hy, hz, bx, by, bz;
+    double rAH_x, rAH_y, rAH_z, rHB_x, rHB_y, rHB_z, rAB_x, rAB_y, rAB_z;
+    if constexpr (PBC) {
+        hx = cx[H]; hy = cy[H]; hz = cz[H];
+        micPlace(cx, cy, cz, A, hx, hy, hz, ax, ay, az);
+        micPlace(cx, cy, cz, B, hx, hy, hz, bx, by, bz);
+        rAH_x = hx-ax; rAH_y = hy-ay; rAH_z = hz-az;
+        rHB_x = bx-hx; rHB_y = by-hy; rHB_z = bz-hz;
+        rAB_x = bx-ax; rAB_y = by-ay; rAB_z = bz-az;
+    } else {
+        ax = cx[A]; ay = cy[A]; az = cz[A];
+        hx = cx[H]; hy = cy[H]; hz = cz[H];
+        bx = cx[B]; by = cy[B]; bz = cz[B];
+        rAH_x = hx-ax; rAH_y = hy-ay; rAH_z = hz-az; applyMIC(rAH_x, rAH_y, rAH_z);
+        rHB_x = bx-hx; rHB_y = by-hy; rHB_z = bz-hz; applyMIC(rHB_x, rHB_y, rHB_z);
+        rAB_x = bx-ax; rAB_y = by-ay; rAB_z = bz-az; applyMIC(rAB_x, rAB_y, rAB_z);
+    }
 
     double r2AH = rAH_x*rAH_x + rAH_y*rAH_y + rAH_z*rAH_z;
     double r2HB = rHB_x*rHB_x + rHB_y*rHB_y + rHB_z*rHB_z;
@@ -2265,7 +2435,9 @@ __global__ void k_hbonds(
         double hbnbcut_save = (eB + 1 == 7 && nb_cnt == 1) ? 2.0 : HB_NBCUT_D;
         for (int ni = 0; ni < nb_cnt; ++ni) {
             int nb = nb_B_flat[nb_off + ni];
-            double nbx = cx[nb], nby = cy[nb], nbz = cz[nb];
+            double nbx, nby, nbz;
+            if constexpr (PBC) micPlace(cx, cy, cz, nb, bx, by, bz, nbx, nby, nbz);   // neighbour next to B
+            else { nbx = cx[nb]; nby = cy[nb]; nbz = cz[nb]; }
             double dAnb_x = nbx-ax, dAnb_y = nby-ay, dAnb_z = nbz-az;
             double dBnb_x = nbx-bx, dBnb_y = nby-by, dBnb_z = nbz-bz;
             double r_Anb = sqrt(dAnb_x*dAnb_x + dAnb_y*dAnb_y + dAnb_z*dAnb_z);
@@ -2289,9 +2461,17 @@ __global__ void k_hbonds(
         if (nb_cnt > 0) {
             for (int ni = 0; ni < nb_cnt; ++ni) {
                 int nb = nb_B_flat[nb_off + ni];
-                lp_vx_c4 += cx[nb] - bx;
-                lp_vy_c4 += cy[nb] - by;
-                lp_vz_c4 += cz[nb] - bz;
+                if constexpr (PBC) {
+                    double nbx, nby, nbz;
+                    micPlace(cx, cy, cz, nb, bx, by, bz, nbx, nby, nbz);   // neighbour next to B
+                    lp_vx_c4 += nbx - bx;
+                    lp_vy_c4 += nby - by;
+                    lp_vz_c4 += nbz - bz;
+                } else {
+                    lp_vx_c4 += cx[nb] - bx;
+                    lp_vy_c4 += cy[nb] - by;
+                    lp_vz_c4 += cz[nb] - bz;
+                }
             }
             vnorm_c4 = sqrt(lp_vx_c4*lp_vx_c4 + lp_vy_c4*lp_vy_c4 + lp_vz_c4*lp_vz_c4);
             if (vnorm_c4 > 1e-10) {
@@ -2322,11 +2502,14 @@ __global__ void k_hbonds(
     double eangl = 1.0, etors = 1.0;
     if (ct == 3 && acceptor_parent[tid] >= 0) {
         int C_idx = acceptor_parent[tid];
-        int B_idx = B, H_idx = H;
+
+        // PBC: C next to B (frame); the D-B-C-H chain below reads slots 0..3 = D, B, C, H with D next to C
+        double C_x, C_y, C_z;
+        if constexpr (PBC) micPlace(cx, cy, cz, C_idx, bx, by, bz, C_x, C_y, C_z);
+        else { C_x = cx[C_idx]; C_y = cy[C_idx]; C_z = cz[C_idx]; }
 
         // eangl: angle bending H...B=C
         {
-            double C_x = cx[C_idx], C_y = cy[C_idx], C_z = cz[C_idx];
             double vab_x = C_x-bx, vab_y = C_y-by, vab_z = C_z-bz;
             double vcb_x = hx-bx, vcb_y = hy-by, vcb_z = hz-bz;
             double rab2a = vab_x*vab_x + vab_y*vab_y + vab_z*vab_z;
@@ -2355,10 +2538,17 @@ __global__ void k_hbonds(
         int nc_cnt = nb_C_count[tid];
         for (int ni = 0; ni < nc_cnt; ++ni) {
             int D_idx = nb_C_flat[nc_off + ni];
-            if (D_idx == B_idx) continue;
+            if (D_idx == B) continue;
 
             double derivate[4][3];
-            double phi = dihedral_angle_grad(cx, cy, cz, D_idx, B_idx, C_idx, H_idx, derivate, false);
+            double phi;
+            if constexpr (PBC) {
+                double tx[4] = { 0.0, bx, C_x, hx }, ty[4] = { 0.0, by, C_y, hy }, tz[4] = { 0.0, bz, C_z, hz };
+                micPlace(cx, cy, cz, D_idx, C_x, C_y, C_z, tx[0], ty[0], tz[0]);   // D next to C
+                phi = dihedral_angle_grad(tx, ty, tz, 0, 1, 2, 3, derivate, false);
+            } else {
+                phi = dihedral_angle_grad(cx, cy, cz, D_idx, B, C_idx, H, derivate, false);
+            }
 
             double tshift = TORS_HB_D;
             double fc_tors = (1.0 - tshift) / 2.0;
@@ -2456,7 +2646,9 @@ __global__ void k_hbonds(
             double hbnbcut_g = (eB + 1 == 7 && nb_cnt == 1) ? 2.0 : HB_NBCUT_D;
             for (int ni = 0; ni < nb_cnt; ++ni) {
                 int nb = nb_B_flat[nb_off + ni];
-                double nbx = cx[nb], nby = cy[nb], nbz = cz[nb];
+                double nbx, nby, nbz;
+                if constexpr (PBC) micPlace(cx, cy, cz, nb, bx, by, bz, nbx, nby, nbz);   // neighbour next to B (as above)
+                else { nbx = cx[nb]; nby = cy[nb]; nbz = cz[nb]; }
                 double dranb_x = ax-nbx, dranb_y = ay-nby, dranb_z = az-nbz;
                 double drbnb_x = bx-nbx, drbnb_y = by-nby, drbnb_z = bz-nbz;
                 double ranb = sqrt(dranb_x*dranb_x + dranb_y*dranb_y + dranb_z*dranb_z);
@@ -2493,8 +2685,10 @@ __global__ void k_hbonds(
         if (ct == 3 && acceptor_parent[tid] >= 0) {
             int C_idx = acceptor_parent[tid];
             double bterm_c3 = -rdamp * qhoutl * etors * acidity_A[tid] * basicity_B[tid] * Q_A * Q_B * global_scale;
-            // Angle gradient: H...B=C angle
-            double C_x = cx[C_idx], C_y = cy[C_idx], C_z = cz[C_idx];
+            // Angle gradient: H...B=C angle (PBC: C next to B, the frame of the energy part)
+            double C_x, C_y, C_z;
+            if constexpr (PBC) micPlace(cx, cy, cz, C_idx, bx, by, bz, C_x, C_y, C_z);
+            else { C_x = cx[C_idx]; C_y = cy[C_idx]; C_z = cz[C_idx]; }
             double vab_x = C_x-bx, vab_y = C_y-by, vab_z = C_z-bz;
             double vcb_x = hx-bx, vcb_y = hy-by, vcb_z = hz-bz;
             double rab2a = vab_x*vab_x + vab_y*vab_y + vab_z*vab_z;
@@ -2556,7 +2750,14 @@ __global__ void k_hbonds(
                 if (D_idx == B) continue;
 
                 double derivate[4][3];
-                double phi = dihedral_angle_grad(cx, cy, cz, D_idx, B, C_idx, H, derivate, true);
+                double phi;
+                if constexpr (PBC) {
+                    double tx[4] = { 0.0, bx, C_x, hx }, ty[4] = { 0.0, by, C_y, hy }, tz[4] = { 0.0, bz, C_z, hz };
+                    micPlace(cx, cy, cz, D_idx, C_x, C_y, C_z, tx[0], ty[0], tz[0]);   // D next to C
+                    phi = dihedral_angle_grad(tx, ty, tz, 0, 1, 2, 3, derivate, true);
+                } else {
+                    phi = dihedral_angle_grad(cx, cy, cz, D_idx, B, C_idx, H, derivate, true);
+                }
 
                 double tshift = TORS_HB_D;
                 double fc_tors = (1.0 - tshift) / 2.0;
@@ -3509,6 +3710,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_count(
     double dx = cx[i] - cx[j];
     double dy = cy[i] - cy[j];
     double dz = cz[i] - cz[j];
+    applyMIC(dx, dy, dz);   // Nov 2026 (S1): pair once at its minimum-image distance (host generator, A3b)
     double r2 = dx * dx + dy * dy + dz * dz;
     if (r2 > cutoff_sq) return;
 
@@ -3530,6 +3732,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_build(
     const double* __restrict__ zeta_c,
     double        a1,
     double        a2,
+    double        r_cut_eval,
     const int*    __restrict__ row_off,
     int*          d_counter,
     int*          out_i,
@@ -3555,6 +3758,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_build(
     double dx = cx[i] - cx[j];
     double dy = cy[i] - cy[j];
     double dz = cz[i] - cz[j];
+    applyMIC(dx, dy, dz);   // Nov 2026 (S1): same test as k_disp_pairs_count
     double r2 = dx * dx + dy * dy + dz * dz;
     if (r2 > cutoff_sq) return;
 
@@ -3598,7 +3802,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_build(
     out_r4r2[slot] = r4r2ij;
     out_r0sq[slot] = r0_sq;
     out_zeta[slot] = zsi * zsj;
-    out_rcut[slot] = 50.0;  // D4 pair-energy cutoff (struct default, matches host)
+    out_rcut[slot] = r_cut_eval;  // D4 pair-energy cutoff: GFNFF::dispersionRadiiBohr().eval (50 without a cell; S1)
 }
 
 // ---------------------------------------------------------------------------
@@ -3621,7 +3825,8 @@ __device__ inline bool repPairWanted(int N, int i, int j, const double* cx, cons
                                      double cutoff_sq, const RepDevTables& t)
 {
     if (!t.valid[i] || !t.valid[j]) return false;
-    const double dx = cx[i] - cx[j], dy = cy[i] - cy[j], dz = cz[i] - cz[j];
+    double dx = cx[i] - cx[j], dy = cy[i] - cy[j], dz = cz[i] - cz[j];
+    applyMIC(dx, dy, dz);   // Nov 2026 (S1): minimum-image build distance (host periodic SpatialCellList, A4a)
     if (dx * dx + dy * dy + dz * dz > cutoff_sq) return false;
     return repKeyFind(t.bond_keys, t.n_bond_keys, static_cast<long long>(i) * N + j) < 0;
 }
@@ -4295,7 +4500,8 @@ __device__ __forceinline__ bool d_hb_bonded(int a, int b, const int* __restrict_
 __device__ __forceinline__ double d_hb_dist2(const double* __restrict__ cx, const double* __restrict__ cy,
                                               const double* __restrict__ cz, int a, int b)
 {
-    const double dx = cx[a] - cx[b], dy = cy[a] - cy[b], dz = cz[a] - cz[b];
+    double dx = cx[a] - cx[b], dy = cy[a] - cy[b], dz = cz[a] - cz[b];
+    applyMIC(dx, dy, dz);   // Nov 2026 (S1): minimum-image search distances (host detection, A4b)
     return dx * dx + dy * dy + dz * dz;
 }
 
@@ -4305,9 +4511,13 @@ __device__ double d_hb_case1_strength(const double* __restrict__ cx, const doubl
                                        const double* __restrict__ bas, const double* __restrict__ aci,
                                        const double* __restrict__ q, int A, int H, int B, double thr)
 {
-    const double r_AH = sqrt(d_hb_dist2(cx, cy, cz, A, H));
-    const double r_HB = sqrt(d_hb_dist2(cx, cy, cz, H, B));
-    const double r_AB = sqrt(d_hb_dist2(cx, cy, cz, A, B));
+    // Nov 2026 (S1): the kernel frame of the host estimate, A and B as the images next to H
+    double ax, ay, az, bx, by, bz;
+    micPlace(cx, cy, cz, A, cx[H], cy[H], cz[H], ax, ay, az);
+    micPlace(cx, cy, cz, B, cx[H], cy[H], cz[H], bx, by, bz);
+    const double r_AH = sqrt((cx[H] - ax) * (cx[H] - ax) + (cy[H] - ay) * (cy[H] - ay) + (cz[H] - az) * (cz[H] - az));
+    const double r_HB = sqrt((bx - cx[H]) * (bx - cx[H]) + (by - cy[H]) * (by - cy[H]) + (bz - cz[H]) * (bz - cz[H]));
+    const double r_AB = sqrt((bx - ax) * (bx - ax) + (by - ay) * (by - ay) + (bz - az) * (bz - az));
     const double r_vdw = d_cov_radii[Z[A] - 1] + d_cov_radii[Z[B] - 1];
     // Upper bound first (case1StrengthDecision() of the host): no pow, rejects most candidates. Valid for
     // non-negative basicities and acidities; returns 0 when the bound is below the threshold.
@@ -4357,6 +4567,7 @@ __device__ __forceinline__ int d_hb_strength_decision_f(
     const int* __restrict__ Z, const double* __restrict__ bas, const double* __restrict__ aci,
     const double* __restrict__ q, int A, int H, int B, float thr)
 {
+    if (d_has_pbc) return 0;                   // Nov 2026 (S1): plain float coordinates carry no image; the double path decides
     const float ax = fx[H] - fx[A], ay = fy[H] - fy[A], az = fz[H] - fz[A];
     const float hx = fx[B] - fx[H], hy = fy[B] - fy[H], hz = fz[B] - fz[H];
     const float bx = fx[B] - fx[A], by = fy[B] - fy[A], bz = fz[B] - fz[A];
@@ -4469,12 +4680,14 @@ __global__ GFNFF_KERNEL_BOUNDS void k_hb_detect(
     const float f_reject = static_cast<float>(thr2) * 1.0001f;
     for (int hq = lane; hq < n_hyd; hq += 32) {
         const int H = hyd_list[hq];
-        const float hx = fx[H], hy = fy[H], hz = fz[H];
-        const float ax = hx - fxi, ay = hy - fyi, az = hz - fzi;
-        const float f_ih = ax * ax + ay * ay + az * az;
-        if (f_ih > f_reject) continue;
-        const float bx = hx - fxj, by = hy - fyj, bz = hz - fzj;
-        if (f_rab + f_ih + (bx * bx + by * by + bz * bz) > f_reject) continue;
+        if (!d_has_pbc) {   // Nov 2026 (S1): the float pre-filter has no image; with a cell the double test alone decides
+            const float hx = fx[H], hy = fy[H], hz = fz[H];
+            const float ax = hx - fxi, ay = hy - fyi, az = hz - fzi;
+            const float f_ih = ax * ax + ay * ay + az * az;
+            if (f_ih > f_reject) continue;
+            const float bx = hx - fxj, by = hy - fyj, bz = hz - fzj;
+            if (f_rab + f_ih + (bx * bx + by * by + bz * bz) > f_reject) continue;
+        }
         if (H == i) continue;                                  // forEachNeighbor excludes the query atom
         const double r_iH_sq = d_hb_dist2(cx, cy, cz, i, H);
         if (r_iH_sq > thr2) continue;                          // cell query radius sqrt(thr2)
@@ -4551,6 +4764,74 @@ __global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_hb_fill_neighbors(
     }
 }
 
+// ============================================================================
+// Homogeneous long-range D4 tail on the device (WP-PERIODIC-NONBONDED A3c, S1) - Claude Generated (Nov 2026)
+// Mirror of D4ParameterGenerator::homogeneousDispersionTail(): beyond the evaluation radius r_c every atom j
+// has images with density 1/V, so
+//   E_tail = pref6 * S6 + pref8 * S8,  pref6 = -(2 pi/V)/(3 r_c^3),  pref8 = -(2 pi/V) 2/(5 r_c^5),
+//   S6 = sum_ij zeta_i zeta_j C6_ij,  S8 = sum_ij zeta_i zeta_j (3 sqz_i sqz_j) C6_ij   (all ordered pairs, i = j too),
+// factorised per partner element slot s and reference b: W[s][b] = sum_{j in s} zeta_j w_j[b] (k_d4_tail_W, one
+// thread per (s, b), atoms in index order: deterministic), then per atom i (k_d4_tail_atoms, same loop order as
+// the CPU): c6sum_i = sum_s sum_a w_i[a] sum_b C6ref(Z_i,a; Z_s,b) W[s][b], dE/dCN_i = 2 zeta_i (pref6 d6 + pref8
+// r4 d8) with the weight derivatives in place of w_i[a]. The energy is summed per atom in fixed point
+// (blockReduceAddEnergy, slot E_DISP_TAIL), dE/dCN by fix_add into d_dEdcn before the CN chain rule. Differs
+// from the CPU by the summation order of S6/S8 only (per-atom partials instead of two running sums).
+// ============================================================================
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_d4_tail_W(
+    int N, int K, const int* __restrict__ slot_of_atom, const int* __restrict__ nref_slot,
+    const double* __restrict__ zeta, const double* __restrict__ gw, double* __restrict__ W)
+{
+    const int t = blockIdx.x * blockDim.x + threadIdx.x;   // t = s * D4_MAX_REF + b
+    if (t >= K * D4_MAX_REF) return;
+    const int s = t / D4_MAX_REF, b = t % D4_MAX_REF;
+    double acc = 0.0;
+    if (b < nref_slot[s])
+        for (int j = 0; j < N; ++j)
+            if (slot_of_atom[j] == s) acc += zeta[j] * gw[j * D4_MAX_REF + b];
+    W[t] = acc;
+}
+
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_d4_tail_atoms(
+    int N, int K, const int* __restrict__ slot_of_atom, const int* __restrict__ slot_elem,
+    const int* __restrict__ nref_slot, const double* __restrict__ sqz_slot, const double* __restrict__ zeta,
+    const double* __restrict__ gw, const double* __restrict__ dgw, const double* __restrict__ c6_flat,
+    const double* __restrict__ W, double pref6, double pref8, int want_grad,
+    double* __restrict__ dEdcn, double* __restrict__ energy)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    double local_E = 0.0;
+    if (i < N) {
+        const int si = slot_of_atom[i];
+        const int ei = slot_elem[si] - 1;
+        const int na = nref_slot[si];
+        double c6sum = 0.0, c8sum = 0.0, d6sum = 0.0, d8sum = 0.0;
+        for (int s = 0; s < K; ++s) {
+            const size_t base = static_cast<size_t>(ei) * D4_MAX_ELEM * D4_MAX_REF * D4_MAX_REF
+                              + static_cast<size_t>(slot_elem[s] - 1) * D4_MAX_REF * D4_MAX_REF;
+            const double* Ws = W + s * D4_MAX_REF;
+            const int nb = nref_slot[s];
+            double c = 0.0, d = 0.0;
+            for (int a = 0; a < na; ++a) {
+                double h = 0.0;
+                const double* row = c6_flat + base + static_cast<size_t>(a) * D4_MAX_REF;
+                for (int b = 0; b < nb; ++b) h += row[b] * Ws[b];
+                c += gw[i * D4_MAX_REF + a] * h;
+                if (want_grad) d += dgw[i * D4_MAX_REF + a] * h;
+            }
+            c6sum += c;
+            c8sum += sqz_slot[s] * c;
+            d6sum += d;
+            d8sum += sqz_slot[s] * d;
+        }
+        const double zi = zeta[i];
+        const double r4 = 3.0 * sqz_slot[si];
+        local_E = pref6 * (zi * c6sum) + pref8 * (zi * r4 * c8sum);
+        if (want_grad)
+            fix_add(&dEdcn[i], 2.0 * zi * (pref6 * d6sum + pref8 * r4 * d8sum), GFNFF_FIX_FORCE);
+    }
+    blockReduceAddEnergy(local_E, energy);
+}
+
 // Claude Generated (Oct 2026): host access to d_gfnff_fix_bad, which lives in this translation unit only.
 void gfnffFixBadReadAsync(int* h_pinned, cudaStream_t stream)
 {
@@ -4563,3 +4844,45 @@ void gfnffFixBadReset()
     cudaMemcpyToSymbol(d_gfnff_fix_bad, &zero, sizeof(int));
 }
 
+
+
+// ============================================================================
+// Claude Generated (Nov 2026, S1): host launch wrappers of the PBC-templated local-term kernels. The templates are
+// instantiated here (nvcc gives the host stubs of template kernels hidden visibility, so another translation unit
+// cannot launch them); pbc false launches the former kernel, true the image-frame variant.
+// ============================================================================
+void launch_k_angles(bool pbc, dim3 grid, dim3 block, cudaStream_t stream, int n, const int* idx_i, const int* idx_j, const int* idx_k, const int* ati, const int* atj, const int* atk, const double* fc, const double* theta0, const double* cx, const double* cy, const double* cz, const double* rcov_d3, double* grad, double* energy)
+{
+    if (pbc) k_angles<true><<<grid, block, 0, stream>>>(n, idx_i, idx_j, idx_k, ati, atj, atk, fc, theta0, cx, cy, cz, rcov_d3, grad, energy);
+    else     k_angles<false><<<grid, block, 0, stream>>>(n, idx_i, idx_j, idx_k, ati, atj, atk, fc, theta0, cx, cy, cz, rcov_d3, grad, energy);
+}
+
+void launch_k_dihedrals(bool pbc, dim3 grid, dim3 block, cudaStream_t stream, int n, const int* idx_i, const int* idx_j, const int* idx_k, const int* idx_l, const int* ati, const int* atj, const int* atk, const int* atl, const double* V, const double* phi0, const double* n_period, const int* is_nci, const double* cx, const double* cy, const double* cz, const double* rcov_d3_unused, double* grad, double* energy)
+{
+    if (pbc) k_dihedrals<true><<<grid, block, 0, stream>>>(n, idx_i, idx_j, idx_k, idx_l, ati, atj, atk, atl, V, phi0, n_period, is_nci, cx, cy, cz, rcov_d3_unused, grad, energy);
+    else     k_dihedrals<false><<<grid, block, 0, stream>>>(n, idx_i, idx_j, idx_k, idx_l, ati, atj, atk, atl, V, phi0, n_period, is_nci, cx, cy, cz, rcov_d3_unused, grad, energy);
+}
+
+void launch_k_inversions(bool pbc, dim3 grid, dim3 block, cudaStream_t stream, int n, const int* idx_i, const int* idx_j, const int* idx_k, const int* idx_l, const int* ati, const int* atj, const int* atk, const int* atl, const double* fc, const double* omega0, const double* C0, const double* C1, const double* C2, const int* potential_type, const double* cx, const double* cy, const double* cz, double* grad, double* energy)
+{
+    if (pbc) k_inversions<true><<<grid, block, 0, stream>>>(n, idx_i, idx_j, idx_k, idx_l, ati, atj, atk, atl, fc, omega0, C0, C1, C2, potential_type, cx, cy, cz, grad, energy);
+    else     k_inversions<false><<<grid, block, 0, stream>>>(n, idx_i, idx_j, idx_k, idx_l, ati, atj, atk, atl, fc, omega0, C0, C1, C2, potential_type, cx, cy, cz, grad, energy);
+}
+
+void launch_k_storsions(bool pbc, dim3 grid, dim3 block, cudaStream_t stream, int n, const int* idx_i, const int* idx_j, const int* idx_k, const int* idx_l, const double* erefhalf, const double* cx, const double* cy, const double* cz, double* grad, double* energy)
+{
+    if (pbc) k_storsions<true><<<grid, block, 0, stream>>>(n, idx_i, idx_j, idx_k, idx_l, erefhalf, cx, cy, cz, grad, energy);
+    else     k_storsions<false><<<grid, block, 0, stream>>>(n, idx_i, idx_j, idx_k, idx_l, erefhalf, cx, cy, cz, grad, energy);
+}
+
+void launch_k_xbonds(bool pbc, dim3 grid, dim3 block, cudaStream_t stream, int n, const int* idx_i, const int* idx_j, const int* idx_k, const int* elem_A, const int* elem_B, const double* q_X, const double* q_B, const double* acidity_X, const double* r_cut, const double* cx, const double* cy, const double* cz, double* grad, double* energy)
+{
+    if (pbc) k_xbonds<true><<<grid, block, 0, stream>>>(n, idx_i, idx_j, idx_k, elem_A, elem_B, q_X, q_B, acidity_X, r_cut, cx, cy, cz, grad, energy);
+    else     k_xbonds<false><<<grid, block, 0, stream>>>(n, idx_i, idx_j, idx_k, elem_A, elem_B, q_X, q_B, acidity_X, r_cut, cx, cy, cz, grad, energy);
+}
+
+void launch_k_hbonds(bool pbc, dim3 grid, dim3 block, cudaStream_t stream, int n, const int* idx_i, const int* idx_j, const int* idx_k, const int* elem_A, const int* elem_B, const double* q_H, const double* q_A, const double* q_B, const double* basicity_A, const double* basicity_B, const double* acidity_A, const double* acidity_B, const double* r_cut, const int* case_type, const int* nb_B_offset, const int* nb_B_count, const int* nb_B_flat, const int* acceptor_parent, const int* nb_C_offset, const int* nb_C_count, const int* nb_C_flat, const double* repz_B, const double* cx, const double* cy, const double* cz, double* grad, double* energy, double* e_triple)
+{
+    if (pbc) k_hbonds<true><<<grid, block, 0, stream>>>(n, idx_i, idx_j, idx_k, elem_A, elem_B, q_H, q_A, q_B, basicity_A, basicity_B, acidity_A, acidity_B, r_cut, case_type, nb_B_offset, nb_B_count, nb_B_flat, acceptor_parent, nb_C_offset, nb_C_count, nb_C_flat, repz_B, cx, cy, cz, grad, energy, e_triple);
+    else     k_hbonds<false><<<grid, block, 0, stream>>>(n, idx_i, idx_j, idx_k, elem_A, elem_B, q_H, q_A, q_B, basicity_A, basicity_B, acidity_A, acidity_B, r_cut, case_type, nb_B_offset, nb_B_count, nb_B_flat, acceptor_parent, nb_C_offset, nb_C_count, nb_C_flat, repz_B, cx, cy, cz, grad, energy, e_triple);
+}

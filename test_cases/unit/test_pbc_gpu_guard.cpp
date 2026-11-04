@@ -49,9 +49,9 @@ static void check(bool ok, const std::string& what)
 /// Stand-in for a GPU method: answers gfnffInstance() like the plugin wrapper, or nullptr (other methods).
 class FakeMethod : public ComputationalMethod {
 public:
-    explicit FakeMethod(bool with_gfnff)
+    explicit FakeMethod(bool with_gfnff, const json& params = json::object())
     {
-        if (with_gfnff) m_gfnff = std::make_unique<GFNFF>(json::object());
+        if (with_gfnff) m_gfnff = std::make_unique<GFNFF>(params);
     }
     GFNFF* gfnffInstance() const override { return m_gfnff.get(); }
     bool setMolecule(const Mol&) override { return true; }
@@ -112,6 +112,14 @@ int main()
     check(!MethodFactory::periodicCellNeedsCpu(periodic, other), "(d) method without GFNFF: no fallback");
     check(periodicCount() == 1, "(c,d) still one fallback");
 
+    // S1 (Nov 2026): the opt-in -gfnff.gpu_periodic releases the device only with coulomb_ewald false
+    FakeMethod opt_ewald(true, json{ { "gpu_periodic", true } });
+    check(MethodFactory::periodicCellNeedsCpu(periodic, opt_ewald), "(g) gpu_periodic with coulomb_ewald (default): fallback (S3/S4)");
+    check(periodicCount() == 2, "(g) counted as a periodic-cell fallback");
+    FakeMethod opt_mic(true, json{ { "gpu_periodic", true }, { "coulomb_ewald", false } });
+    check(!MethodFactory::periodicCellNeedsCpu(periodic, opt_mic), "(h) gpu_periodic with coulomb_ewald false: no fallback");
+    check(periodicCount() == 2, "(h) nothing counted");
+
     // (e) strict mode in a forked child (reportGpuFallback exits the process)
     std::fflush(stdout);
     const pid_t pid = fork();
@@ -137,7 +145,7 @@ int main()
     const double e_gpu = gpu_req.CalculateEnergy(false);
     check(!ref.Error() && !gpu_req.Error(), "(f) both calculators ran");
     check(std::isfinite(e_ref) && e_ref == e_gpu, "(f) -gpu cuda without plugin, cell: CPU energy");
-    check(periodicCount() == 1, "(f) no periodic-cell fallback when the factory already chose the CPU");
+    check(periodicCount() == 2, "(f) no periodic-cell fallback when the factory already chose the CPU");
 
     if (g_failures == 0)
         std::printf("pbc_gpu_guard: all checks passed\n");

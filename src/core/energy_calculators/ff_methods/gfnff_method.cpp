@@ -653,6 +653,8 @@ GFNFF::GFNFF(const json& parameters)
     // Nov 2026 (B2): fallbacks == PARAM defaults of coulomb_ewald, ewald_tolerance, ewald_r_cut, ewald_alpha
     // (gfnff.h); no effect without a cell
     m_coulomb_ewald = m_parameters.value("coulomb_ewald", true);   // B3: default true (periodic EEQ + Coulomb)
+    // Nov 2026 (S1): fallback == PARAM default of gpu_periodic (gfnff.h); read by the GPU wrapper and the guard
+    m_gpu_periodic = m_parameters.value("gpu_periodic", false);
     m_eeq_ewald_dense_max = m_parameters.value("eeq_ewald_dense_max_atoms", 1000);
     m_ewald_tolerance = m_parameters.value("ewald_tolerance", 1e-8);
     m_ewald_r_cut = m_parameters.value("ewald_r_cut", 0.0);
@@ -2174,6 +2176,10 @@ GFNFF::HBDetectInputs GFNFF::prepareHBDetectInputs(const Vector& charges) const
             Vector r_i = m_geometry_bohr.row(i);
             Vector v1 = Vector(m_geometry_bohr.row(n1)) - r_i;
             Vector v2 = Vector(m_geometry_bohr.row(n2)) - r_i;
+            if (m_cell_bohr_ortho.active) {  // Nov 2026 (S1): the carbene angle as in detectHydrogenBondsNative (A4b)
+                PBCUtils::applyMinimumImageOrtho(m_cell_bohr_ortho, v1(0), v1(1), v1(2));
+                PBCUtils::applyMinimumImageOrtho(m_cell_bohr_ortho, v2(0), v2(1), v2(2));
+            }
             double cos_phi = v1.dot(v2) / (v1.norm() * v2.norm());
             double phi_deg = curcuma_acos(std::clamp(cos_phi, -1.0, 1.0)) * 180.0 / M_PI;
             if (phi_deg < 150.0 && charges[i] > -0.4) in.basicity[i] = 1.46;

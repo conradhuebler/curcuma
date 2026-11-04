@@ -521,7 +521,9 @@ if(USE_CUDA)
     # plugin); the test links the plugin directly for the GFNFFGPUComputationalMethod
     # typeinfo it dynamic_casts to.
     target_link_libraries(test_gfnff_gpu curcuma_core curcuma_cuda CUDA::cudart)
-    target_compile_definitions(test_gfnff_gpu PRIVATE USE_CUDA)
+    # S1 (Nov 2026): source root for the geometry_file paths of the .ref.json files (they are relative to a build
+    # directory inside the repository; a build directory elsewhere found no structure).
+    target_compile_definitions(test_gfnff_gpu PRIVATE USE_CUDA CURCUMA_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
     if(USE_PCH)
         target_precompile_headers(test_gfnff_gpu REUSE_FROM curcuma_core)
@@ -556,6 +558,24 @@ if(USE_CUDA)
     endif()
     add_test(NAME gfnff_gpu_pbc_refuse COMMAND test_gfnff_gpu_pbc_refuse WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
     set_tests_properties(gfnff_gpu_pbc_refuse PROPERTIES TIMEOUT 120 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;pbc")
+endif()
+
+# Claude Generated (Nov 2026, S1): local GFN-FF terms with a cell on the CUDA device against the CPU, term by term
+# (pbc_* structures, invariance, supercell, FD, Verlet wrap, bitwise). Built in every configuration; without CUDA
+# the program returns 77 (ctest "skipped").
+add_executable(test_gfnff_gpu_pbc_terms unit/test_gfnff_gpu_pbc_terms.cpp)
+target_link_libraries(test_gfnff_gpu_pbc_terms curcuma_core test_molecule_registry)
+if(USE_CUDA)
+    target_link_libraries(test_gfnff_gpu_pbc_terms curcuma_cuda CUDA::cudart)
+    target_compile_definitions(test_gfnff_gpu_pbc_terms PRIVATE USE_CUDA)
+endif()
+if(USE_PCH)
+    target_precompile_headers(test_gfnff_gpu_pbc_terms REUSE_FROM curcuma_core)
+endif()
+add_test(NAME gfnff_gpu_pbc_terms COMMAND test_gfnff_gpu_pbc_terms WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(gfnff_gpu_pbc_terms PROPERTIES TIMEOUT 900 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;pbc" SKIP_RETURN_CODE 77)
+
+if(USE_CUDA)
 
     # Claude Generated (March 2026): GPU analytical vs numerical gradient test
     add_executable(test_gpu_numgrad unit/test_gpu_numgrad.cpp)

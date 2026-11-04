@@ -1140,3 +1140,94 @@ Tests:
   entry file not at all), Vulkan plugin build, Windows, multi-GPU split with a cell (one GPU), an old CUDA plugin
   actually built from a pre-A6 tree (the renamed-symbol copy stands in for it), GPU bitwise against the plugin before S0.
   `libcurcuma_cuda_mgpu.so` (loaded by the CUDA plugin) has no version. Human production testing pending.
+
+## S1 local GFN-FF terms with a cell on the CUDA device (2026-11-04, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+On `feature/bulk` (base `77eac176`). Stage S1 of the GPU plan (G0): every local term, the device pair builders, the
+device H-bond detection and the D4 tail apply the minimum image of an orthorhombic cell on the device. **Released
+only behind `-gfnff.gpu_periodic true` (PARAM, default false, fallback in `GFNFF::GFNFF(const json&)`) and only with
+`coulomb_ewald false`**: the device Coulomb is still the minimum-image pair sum of April 2026 (not Ewald) and the device
+EEQ non-periodic (S3/S4). `MethodFactory::periodicCellNeedsCpu()` keeps the CPU for `gpu_periodic false` (message as
+before) and for `gpu_periodic true` with `coulomb_ewald true` ("periodic Coulomb/EEQ on the GPU is not available yet
+(S3/S4)", counted fallback); the wrapper's `setMolecule()` refuses the same cases and every non-CUDA backend
+(`Backend::has_periodic_local_terms`, true for CUDA, false for ROCm). `hasPeriodicEnergy()` stays false, so SimpleMD
+keeps the A6b vacuum treatment (no cell wrap) with the GPU.
+
+- **Kernels (`cuda/gfnff_kernels.cu`)**: `micPlace()` / `micChainOfFour()` are the arithmetic of the CPU
+  `placeMinimumImage()` / `imageNear()` (ref + mic(x - ref)); without a cell they copy the position, so the non-periodic
+  kernels keep their expressions. `k_angles` (i, k next to j; the angle and its gradient were still plain), `k_dihedrals`
+  and `k_storsions` (chain of four), `k_inversions` (three neighbours next to the centre), `k_hbonds` (frame on H: A, B
+  next to H, neighbours of B and the acceptor parent C next to B, D next to C for the D-B-C-H torsions, lone-pair vector
+  from the frame), `k_xbonds` (frame on X), `k_check_displacement` (minimum-image displacement, so a wrap triggers no
+  topology or CN-list rebuild), `k_disp_pairs_count/_build` (minimum-image distance, per-pair `r_cut` =
+  `GFNFF::dispersionRadiiBohr().eval` instead of the literal 50, build radius `.build`), `repPairWanted()` (minimum
+  image), `d_hb_dist2()` / `d_hb_case1_strength()` (minimum image, kernel frame as `estimateHBStrengthCase1`); the FP32
+  pre-filters of `k_hb_detect` / `d_hb_strength_decision_f` carry no image and are skipped with a cell (the double test
+  decides, as on the host). The FP32 `k_xbonds_mixed` has no frame: with a cell the FP64 kernel runs. Host side:
+  `prepareHBDetectInputs()` takes the carbene angle as minimum image (A4b said "still plain").
+- **D4 tail (A3c) on the device**: `k_d4_tail_W` (one thread per element slot and reference, atoms in index order:
+  deterministic) and `k_d4_tail_atoms` (per atom, the CPU loop order; energy per atom in fixed point into the new slot
+  `E_DISP_TAIL`, dE/dCN by `fix_add` into `d_dEdcn` before the CN chain rule), launched in
+  `launchChargeDependentAndFinish()` on the main stream after the Gaussian weights of the step. Tables from
+  `FFWorkspaceGPU::setDispersionTail()` (zeta from `D4ParameterGenerator::atomZeta()`, radius and volume from the host
+  `GFNFF`), set in `initGPUWorkspace()`. Differs from the CPU in the summation order of S6/S8 only.
+- **Cell upload**: a `cudaMemcpyToSymbol` through the `extern __constant__` declarations of `ff_workspace_gpu.cu` failed
+  silently (the error surfaced as `cudaErrorInvalidDevice` in the next checked call of the set-up, and `d_has_pbc` stayed
+  0): the symbols are now written by `gfnffUploadCell()` in `gfnff_kernels.cu` with the status checked. The symbols are
+  one state per device for the process, so `uploadCellToDevice()` sets them (also "no cell") before the set-up pair
+  build and at every step; unchanged values are not re-copied.
+- **Parity fixes of diagnostic switches found on the way**: `coulomb false` on the CPU kept the self term and TERM 1b
+  (water8: +0.706 Eh, gradient 4.5e-3 Eh/A against the GPU, which skips both); now both are off with the switch
+  (`FFWorkspace::postProcess`). `hbond false` on the GPU left the XB kernel running (the CPU switches HB and XB
+  together); now gated alike. Still asymmetric: `hbond false` on the GPU keeps the HB-CN modulation of the X-H bonds,
+  the CPU drops it with the detection (urea197: 6.5e-3 Eh/A; TODO.md). Defaults are untouched.
+- **ABI**: `GFNFF` gained `m_gpu_periodic`, so `CURCUMA_GPU_PLUGIN_ABI_VERSION` is 2 (plugins must be rebuilt).
+
+Tests (`gfnff_gpu_pbc_terms`, CUDA; returns 77 = skipped without CUDA; `coulomb false`, `coulomb_ewald false`,
+`gpu_periodic true`, `hb_update_force_every 1`, 44 Bohr cube; thresholds fixed beforehand: 1e-11 Eh per term, 1e-12
+Eh/A for the gradient): water dimer, caffeine, hydronium-water2 (+1, `frag_charge_model reference`), acetic acid dimer,
+acetic dimer + F-I...pyridine composite, 40 and 60 random waters (the 60-water box also with
+`nb_cell_list_min_atoms 0`: device repulsion build, cell-list HB branch); states cell centre, shifted by (L,-L,2L),
+fragments by different lattice vectors, corner, torn per atom (also initialised torn, A4c), 2x1x1 supercell.
+- GPU vs CPU over all 8 systems x 5 states (+ dispersion off / repulsion off at centre and torn): worst term 2.2e-13 Eh
+  (disp_tail; bond 7.1e-14, angle 4.2e-14, bonded repulsion 1.0e-13, non-bonded 8.6e-14, dispersion 7.8e-15, HB 3.1e-14,
+  XB 2.6e-15, batm 1.9e-14, dihedral 3.1e-15, inversion 7.7e-16; no structure has sTors), worst gradient 1.5e-13 Eh/A;
+  isolated dispersion / repulsion gradients <= 4.3e-15; HB triple counts equal (caffeine 358, composite 550, 60 waters 1468).
+- GPU invariance between the states: terms <= 1e-11, gradient <= 1e-12 (BATM has no minimum image on either side, A3b,
+  so its term and, where present, the gradient are left out of the invariance check; GPU == CPU holds for them).
+- 2x1x1 supercell (intact molecules, neutral systems): every term = 2 x cell within 5.7e-14 Eh, per-atom gradient
+  3.3e-14 Eh/A, HB counts doubled. (Hydronium is excluded: the reference charge rule puts the net charge on the first fragment.)
+- FD of the GPU energy on the torn geometries (8 atoms nearest a face, h 2e-4 / 1e-4 A): caffeine 8.5e-8 -> 2.1e-8,
+  Richardson 1.9e-10; composite 3.1e-8 -> 8.0e-9, 2.2e-10; 40 waters (4 atoms) 9.8e-8 -> 2.4e-8, 1.7e-9 Eh/A.
+- Verlet: a wrap of one molecule by +L rebuilds no D4 / repulsion list (device-built, cell list), dE 3.6e-15, dG 2.9e-15;
+  a 1.5 A move rebuilds. Two device instances on the torn 60-water box and the composite: energy and gradient bitwise.
+- CLI (water8 in a 25 A cube): `-gpu cuda` alone -> CPU as before; with `gpu_periodic` alone -> S3/S4 fallback, result
+  identical to the CPU run; with `coulomb_ewald false`: `coulomb false` GPU vs CPU dE 5.1e-14 Eh, full GPU run twice and
+  once next to a concurrent GPU MD: md5-identical. `gfnff_gpu_pbc_refuse` extended ((d) refusal with the S3/S4 text,
+  (e) accepted with `coulomb_ewald false`, 200 A cube = no cell), `pbc_gpu_guard` extended (g, h).
+- CUDA build: `ctest -R 'gpu|plugin|pbc'` 168 of 168 pass (3 skipped: split, scope-flags, deltaml). The 17
+  `gfnff_gpu_vs_cpu_*` had failed with "File not found: ../../test_cases/structures/..." because this build directory
+  lies outside the repository (their reference JSON files carry repository-relative paths); `test_gfnff_gpu` now falls
+  back to `CURCUMA_SOURCE_DIR` (CMake) when the relative form does not exist (caffeine 2.3e-14 Eh, 1.5e-13 Eh/Bohr).
+  CPU build: `ctest -j1 -R 'gfnff|frag|eeq|simplemd|pbc|ewald|react|restart|md_|gpu|plugin'` 130 of 130 (2 skipped);
+  `pbc_gpu_guard` has two more checks.
+- Without a cell: CPU `-sp -dump_gradient` 7 structures x 1/4 threads 14/14 md5-identical to the binary before S1. GPU
+  (plugin + executable saved before S1, each structure run twice): energies (18 digits) and gradient dumps md5-identical
+  14/14. **Bisection of a first attempt** (the kernels read the frame through local arrays, plain copies without a
+  cell): urea197 and peo201-water500 differed on one N atom by one fixed-point quantum (4.2e-16 Eh/A), with HB,
+  dispersion, repulsion and Coulomb switched off as well, so in the bonded kernels. `cuobjdump -sass` of the two plugins
+  showed every kernel not touched by S1 byte-identical and the rewritten bonded kernels with another instruction mix
+  (k_inversions DFMA 248 -> 284, DMUL 347 -> 365, DADD 78 -> 96; k_dihedrals 262/360/99 -> 298/378/125; k_angles
+  198/159/54 -> 194/157/66; k_storsions 204/197/45 -> 240/215/72): the compiler contracted the array-based expressions
+  into other fused multiply-adds, which rounds differently. Fix: the six local-term kernels are templates on PBC; the
+  `false` instantiation keeps the former statements verbatim (`if constexpr` at each divergence point, launch through
+  `launch_k_*()` in `gfnff_kernels.cu`, because nvcc gives the host stubs of template kernels hidden visibility), the
+  `true` instantiation builds the frames. The SASS of `k_angles/k_dihedrals/k_inversions/k_storsions/k_xbonds/k_hbonds<false>`
+  is instruction-for-instruction identical to the pre-S1 kernels (6626/12498/11762/7330/7250/33714 instructions); the
+  kernels that still differ in SASS are the ones whose cell-less behaviour is a decision, not a sum (`k_hb_detect`,
+  `k_hb_ab_pairs`, `k_rep_pairs_*`, `k_disp_pairs_*`, `k_check_displacement`).
+- Not tested: timing (none measured), MD with a cell on the GPU (SimpleMD treats the GPU run as non-periodic, A6b),
+  ROCm (refuses; kernels untouched), Vulkan, multi-GPU split (one card), charged multi-fragment systems under the
+  ensemble charge model (CPU fallback as before), sTors and extra torsions under a cell (no structure), case-4 H-bonds,
+  `topology_mode auto` / react on the device with a cell, systems with more than one element class in the tail beyond
+  H/C/N/O/F/I. Human production testing pending.

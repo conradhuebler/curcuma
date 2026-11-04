@@ -418,6 +418,8 @@ private:
     /// current CN + Gaussian weights (factored out of initGPUWorkspace() so the skin-triggered
     /// rebuild of GFNFF::updateDispersionPairsIfNeeded() can repeat it).
     void buildDispersionPairsOnDevice();
+    /// Claude Generated (Nov 2026, S1): cell (or the "no cell" state) into the device constant memory.
+    void uploadCellToDevice();
     /// Claude Generated (Oct 2026): compare the device H-bond list with detectHydrogenBondsNative() (sets, case 1
     /// with A < B); prints a summary to stderr and warns on a difference (-gfnff.gpu_hb_detect_verify).
     void verifyDeviceHBList(const std::vector<int>& di, const std::vector<int>& dj, const std::vector<int>& dk,
@@ -590,12 +592,30 @@ bool GFNFFGpuMethodImpl<Backend>::setMolecule(const Mol& mol)
     // the delta-ML base swap a GPU GFN-FF with a cell for the CPU method before this call; any other caller that hands a
     // periodic molecule to the device path would get a non-periodic energy without a message (no Ewald, no periodic
     // EEQ, plain distances in several kernels and the multi-GPU EEQ split). Refuse until the port (stages S1-S4) is done.
+    // Nov 2026 (S1): released only behind -gfnff.gpu_periodic true, with coulomb_ewald false and on a backend whose
+    // kernels carry the minimum-image frames (CUDA). The device Coulomb is then a minimum-image pair sum (not the
+    // Ewald sum of the CPU), the EEQ non-periodic; the local terms (CN, D4 + tail, repulsion, bonded, HB/XB) are
+    // periodic. hasPeriodicEnergy() stays false until S4.
     if (mol.m_has_pbc) {
-        m_has_error = true;
-        m_error_message = "GFNFFGPUMethod: periodic cell set, but the GPU GFN-FF path has no periodic energy yet; "
-                          "use the CPU method (omit -gpu) for periodic systems";
-        CurcumaLogger::error(m_error_message);
-        return false;
+        const bool opt_in = m_gfnff->gpuPeriodicRequested();
+        const bool ewald = m_gfnff->coulombEwaldRequested();
+        if (!opt_in || ewald || !Backend::has_periodic_local_terms) {
+            m_has_error = true;
+            if (!opt_in)
+                m_error_message = "GFNFFGPUMethod: periodic cell set, but the GPU GFN-FF path has no periodic energy yet; "
+                                  "use the CPU method (omit -gpu) for periodic systems (-gfnff.gpu_periodic true releases "
+                                  "the local terms on CUDA with coulomb_ewald false)";
+            else if (!Backend::has_periodic_local_terms)
+                m_error_message = std::string("GFNFFGPUMethod: gpu_periodic is available on CUDA only (S1), not on ")
+                                  + Backend::name + "; use the CPU method (omit -gpu) for periodic systems";
+            else
+                m_error_message = "GFNFFGPUMethod: periodic Coulomb/EEQ on the GPU is not available yet (S3/S4); "
+                                  "use the CPU method, or -gfnff.coulomb_ewald false for a minimum-image Coulomb on the GPU";
+            CurcumaLogger::error(m_error_message);
+            return false;
+        }
+        CurcumaLogger::warn("GFN-FF GPU with a periodic cell (gpu_periodic, S1): local terms with the minimum image; "
+                            "the Coulomb term is a minimum-image pair sum and the EEQ is non-periodic (coulomb_ewald false)");
     }
 
     // Store atom types for GPU workspace (from mol, before InitialiseMolecule)
@@ -921,9 +941,30 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
             // the gather CSR. See docs/GFNFF_PERFORMANCE_LEVERS.md.
             if (m_disp_pairs_requested) {
                 m_disp_pairs_on_device = true;
+                uploadCellToDevice();   // S1: the device pair build applies the minimum image of the cell
                 buildDispersionPairsOnDevice();
                 if (CurcumaLogger::get_verbosity() >= 1)
                     CurcumaLogger::info("GFN-FF GPU: D4 dispersion pair list built on device (gpu_disp_pairs_on_device)");
+            }
+            // Claude Generated (Nov 2026, S1): homogeneous D4 tail (A3c) on the device, with the radii and zeta of the
+            // host set-up (one source: GFNFF::dispersionRadiiBohr(), D4ParameterGenerator::atomZeta()).
+            if constexpr (Backend::has_periodic_local_terms) {
+                const bool tail = m_gfnff->dispersionTailActive();
+                std::vector<double> zeta = d4->atomZeta();
+                if (tail && static_cast<int>(zeta.size()) != static_cast<int>(m_atom_types.size())) {
+                    // the generator skipped its pair loop before zeta was recorded: the same rule from the topology charges
+                    const Vector& tq = m_gfnff->getTopologyInfo().topology_charges;
+                    zeta.assign(m_atom_types.size(), 1.0);
+                    for (size_t i = 0; i < m_atom_types.size(); ++i)
+                        zeta[i] = GFNFFParameters::zetaChargeScale(m_atom_types[i],
+                                                                   i < static_cast<size_t>(tq.size()) ? tq(i) : 0.0);
+                }
+                std::vector<double> sqz(118, 0.0);
+                for (int z = 1; z <= 118; ++z) sqz[z - 1] = d4->getSqrtZr4r2(z);
+                const Eigen::Matrix3d cell = m_gfnff->getUnitCellBohr();
+                const double V = tail ? cell(0, 0) * cell(1, 1) * cell(2, 2) : 0.0;
+                m_gpu_workspace->setDispersionTail(tail, m_gfnff->dispersionRadiiBohr().eval, V, zeta, m_atom_types,
+                                                   sqz, d4->getRefN());
             }
         }
 
@@ -1109,12 +1150,9 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
     const int N = static_cast<int>(m_atom_types.size());
     const GeoGradMatrix& geom_bohr = m_gfnff->getGeometryBohr();
 
-    // Claude Generated (April 2026): Upload PBC unit cell to GPU constant memory
-    if (m_gfnff->hasPBC()) {
-        Eigen::Matrix3d cell_bohr = m_gfnff->getUnitCellBohr();
-        Eigen::Matrix3d cell_bohr_inv = cell_bohr.inverse();
-        m_gpu_workspace->setUnitCell(cell_bohr.data(), cell_bohr_inv.data(), true);
-    }
+    // Claude Generated (April 2026): Upload PBC unit cell to GPU constant memory (S1: every step, also the
+    // "no cell" state, because the symbols are process-wide per device; unchanged values are not re-copied)
+    uploadCellToDevice();
 
     // --- Step 0: GPU topology displacement check (Claude Generated March 2026) ---
     // Runs on GPU where coords already live. Result fed to GFNFF::needsFullTopologyUpdate()
@@ -2823,9 +2861,29 @@ void GFNFFGpuMethodImpl<Backend>::buildDispersionPairsOnDevice()
     for (int z = 1; z <= 118; ++z) sqrtzr4r2[z - 1] = d4->getSqrtZr4r2(z);
     const Vector& tc = m_gfnff->getTopologyInfo().topology_charges;
     std::vector<double> topo_q(tc.data(), tc.data() + tc.size());
-    // GFN-FF D4: a1=0.58, a2=4.80, 60 Bohr cutoff (matches the host generator).
-    m_gpu_workspace->generateDispersionPairListOnGPU(gw_flat, sqrtzr4r2, topo_q, 0.58, 4.80,
-                                                     D4ParameterGenerator::PAIR_BUILD_CUTOFF_BOHR);
+    // GFN-FF D4: a1=0.58, a2=4.80; build and evaluation radii from the one source GFNFF::dispersionRadiiBohr()
+    // (60 / 50 Bohr without a cell and without a user cutoff; capped below L_min/2 with a cell, A3b/S1).
+    const auto rad = m_gfnff->dispersionRadiiBohr();
+    if constexpr (Backend::has_periodic_local_terms)
+        m_gpu_workspace->generateDispersionPairListOnGPU(gw_flat, sqrtzr4r2, topo_q, 0.58, 4.80, rad.build, rad.eval);
+    else
+        m_gpu_workspace->generateDispersionPairListOnGPU(gw_flat, sqrtzr4r2, topo_q, 0.58, 4.80, rad.build);
+}
+
+template <class Backend>
+void GFNFFGpuMethodImpl<Backend>::uploadCellToDevice()
+{
+    // Claude Generated (Nov 2026, S1): the cell (Bohr, column-major) and its Eigen inverse, as the CPU
+    // PBCUtils::makeOrthoCell() derives inv_L (A1); has_pbc false clears a state left by another workspace.
+    if (!m_gpu_workspace) return;
+    if (m_gfnff->hasPBC()) {
+        const Eigen::Matrix3d cell_bohr = m_gfnff->getUnitCellBohr();
+        const Eigen::Matrix3d cell_bohr_inv = cell_bohr.inverse();
+        m_gpu_workspace->setUnitCell(cell_bohr.data(), cell_bohr_inv.data(), true);
+    } else {
+        const Eigen::Matrix3d id = Eigen::Matrix3d::Identity();
+        m_gpu_workspace->setUnitCell(id.data(), id.data(), false);
+    }
 }
 
 #endif // USE_CUDA || USE_ROCM

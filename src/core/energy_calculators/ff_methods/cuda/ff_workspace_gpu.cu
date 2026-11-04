@@ -34,6 +34,7 @@
 #include <cmath>
 #include <cstring>
 #include <algorithm>
+#include <mutex>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -49,11 +50,8 @@
 // global.h: Vector = Eigen::VectorXd
 // global.h: SpMatrix = Eigen::SparseMatrix<double>
 
-// Claude Generated (April 2026): Extern declarations for PBC constant memory symbols
-// defined in gfnff_kernels.cu (same device link unit)
-extern __constant__ double d_lattice[9];
-extern __constant__ double d_lattice_inv[9];
-extern __constant__ int    d_has_pbc;
+// The PBC constant symbols (d_lattice, d_lattice_inv, d_has_pbc) are defined in gfnff_kernels.cu and written
+// through gfnffUploadCell() there (S1, Nov 2026).
 
 // ============================================================================
 // GFN-FF covalent radii for the CN and the angle/dihedral distance damping.
@@ -810,9 +808,17 @@ struct FFWorkspaceGPUImpl {
         E_DISP = 0, E_BREP = 1, E_NBREP = 2, E_COUL = 3, E_BOND = 4,
         E_ANGLE = 5, E_DIHED = 6, E_INV = 7, E_STORS = 8, E_BATM = 9,
         E_ATM = 10, E_XBOND = 11, E_HBOND = 12, E_COUL_SELF = 13,
-        N_ENERGY_SLOTS = 14
+        E_DISP_TAIL = 14,   ///< Nov 2026 (S1): homogeneous D4 tail (periodic cell only)
+        N_ENERGY_SLOTS = 15
     };
     CudaBuffer<double> d_energies;      ///< [N_ENERGY_SLOTS] all per-term energies
+
+    // Nov 2026 (S1): homogeneous D4 tail (setDispersionTail): per-atom element slot, per-slot tables, W[K*MAX_REF]
+    bool               tail_active = false;
+    int                tail_K = 0;
+    double             tail_pref6 = 0.0, tail_pref8 = 0.0;
+    CudaBuffer<int>    d_tail_slot_of_atom, d_tail_slot_elem, d_tail_nref;
+    CudaBuffer<double> d_tail_sqz, d_tail_zeta, d_tail_W;
 
     // Phase 2: GPU dc6dcn per-pair computation (Claude Generated March 2026)
     // Gaussian weights and C6 reference table for on-GPU dc6dcn computation.
@@ -2493,11 +2499,83 @@ void FFWorkspaceGPU::setCoulombEnabled(bool v)      { m_coulomb_enabled = v; }
 /// Zero overhead when has_pbc==false because applyMIC() returns immediately.
 void FFWorkspaceGPU::setUnitCell(const double* cell_bohr_9, const double* cell_bohr_inv_9, bool has_pbc)
 {
-    cudaMemcpyToSymbol(d_lattice,     cell_bohr_9,     9 * sizeof(double));
-    cudaMemcpyToSymbol(d_lattice_inv, cell_bohr_inv_9, 9 * sizeof(double));
-    int flag = has_pbc ? 1 : 0;
-    cudaMemcpyToSymbol(d_has_pbc, &flag, sizeof(int));
+    // Claude Generated (Nov 2026, S1): the constant symbols are one state per device for the whole process; two
+    // workspaces (one with a cell, one without) must not inherit each other's state, so every workspace sets them
+    // before each step. The copy is skipped while the device state is already the requested one (no per-step cost
+    // for the non-periodic path).
+    struct CellState { int device = -1; int flag = -1; double L[9] = {}; double Linv[9] = {}; };
+    static CellState s_last[16];
+    static std::mutex s_mutex;
+    const int flag = has_pbc ? 1 : 0;
+    int dev = 0;
+    cudaGetDevice(&dev);
+    CellState* st = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(s_mutex);
+        for (auto& c : s_last)
+            if (c.device == dev) { st = &c; break; }
+        if (!st)
+            for (auto& c : s_last)
+                if (c.device < 0) { st = &c; st->device = dev; break; }
+        bool same = st && st->flag == flag;
+        if (same && has_pbc)
+            same = std::memcmp(st->L, cell_bohr_9, 9 * sizeof(double)) == 0
+                && std::memcmp(st->Linv, cell_bohr_inv_9, 9 * sizeof(double)) == 0;
+        if (!same) {
+            checkCuda(gfnffUploadCell(cell_bohr_9, cell_bohr_inv_9, flag), "setUnitCell: cell symbols upload");
+            if (st) {
+                st->flag = flag;
+                if (has_pbc) {
+                    std::memcpy(st->L, cell_bohr_9, 9 * sizeof(double));
+                    std::memcpy(st->Linv, cell_bohr_inv_9, 9 * sizeof(double));
+                }
+            }
+        }
+    }
     m_impl->pbc_active = has_pbc;   // the Coulomb split runs without PBC only (helpers have no cell)
+}
+
+void FFWorkspaceGPU::setDispersionTail(bool active, double rc_bohr, double volume_bohr3,
+                                       const std::vector<double>& zeta_atom, const std::vector<int>& atom_types,
+                                       const std::vector<double>& sqrtzr4r2, const std::vector<int>& refn)
+{
+    // Claude Generated (Nov 2026, S1): tables of k_d4_tail_W / k_d4_tail_atoms, the slot layout of
+    // D4ParameterGenerator::homogeneousDispersionTail() (elements in order of first appearance).
+    auto& impl = *m_impl;
+    const int N = m_natoms;
+    impl.tail_active = false;
+    if (!active || N <= 0 || !(rc_bohr > 0.0) || !(volume_bohr3 > 0.0)
+        || static_cast<int>(zeta_atom.size()) != N || static_cast<int>(atom_types.size()) != N)
+        return;
+    std::vector<int> slot_of_atom(N), slot_elem;
+    std::vector<int> slot(D4_MAX_ELEM + 1, -1);
+    for (int i = 0; i < N; ++i) {
+        const int Z = atom_types[i];
+        if (Z < 1 || Z > D4_MAX_ELEM) return;   // the pair list skips such atoms; the tail stays off, as on the CPU
+        if (slot[Z] < 0) { slot[Z] = static_cast<int>(slot_elem.size()); slot_elem.push_back(Z); }
+        slot_of_atom[i] = slot[Z];
+    }
+    const int K = static_cast<int>(slot_elem.size());
+    std::vector<int> nref(K);
+    std::vector<double> sqz(K);
+    for (int s = 0; s < K; ++s) {
+        const int e = slot_elem[s] - 1;
+        nref[s] = std::min<int>(e < static_cast<int>(refn.size()) ? refn[e] : 0, D4_MAX_REF);
+        sqz[s] = e < static_cast<int>(sqrtzr4r2.size()) ? sqrtzr4r2[e] : 0.0;
+    }
+    impl.d_tail_slot_of_atom.upload(slot_of_atom.data(), N);
+    impl.d_tail_slot_elem.upload(slot_elem.data(), K);
+    impl.d_tail_nref.upload(nref.data(), K);
+    impl.d_tail_sqz.upload(sqz.data(), K);
+    impl.d_tail_zeta.upload(zeta_atom.data(), N);
+    if (impl.d_tail_W.n < K * D4_MAX_REF) impl.d_tail_W.alloc(K * D4_MAX_REF);
+    const double pi = 3.14159265358979323846;
+    const double rc3 = rc_bohr * rc_bohr * rc_bohr;
+    const double rc5 = rc3 * rc_bohr * rc_bohr;
+    impl.tail_pref6 = -(2.0 * pi / volume_bohr3) / (3.0 * rc3);
+    impl.tail_pref8 = -(2.0 * pi / volume_bohr3) * 2.0 / (5.0 * rc5);
+    impl.tail_K = K;
+    impl.tail_active = true;
 }
 
 // ============================================================================
@@ -2641,7 +2719,7 @@ void FFWorkspaceGPU::generateDispersionPairListOnGPU(
     const std::vector<double>& gw_flat,
     const std::vector<double>& sqrtzr4r2,
     const std::vector<double>& topo_charges,
-    double a1, double a2, double cutoff_bohr)
+    double a1, double a2, double cutoff_bohr, double r_cut_eval_bohr)
 {
     auto& impl = *m_impl;
     ++impl.disp_gen;
@@ -2722,7 +2800,7 @@ void FFWorkspaceGPU::generateDispersionPairListOnGPU(
         impl.d_gw.ptr, impl.d_c6_flat.ptr,
         impl.d_sqrtzr4r2.ptr, impl.d_topo_q.ptr,
         impl.d_zeta_zeff.ptr, impl.d_zeta_c.ptr,
-        a1, a2,
+        a1, a2, r_cut_eval_bohr,
         impl.d_disp_row_off.ptr,
         impl.d_disp_pair_counter.ptr,
         impl.disp.idx_i.ptr, impl.disp.idx_j.ptr,
@@ -3344,7 +3422,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
         LaunchConfig cfg = getLaunchConfig(impl.angles.n, m_block_size);
-        k_angles<<<cfg.gridSize, cfg.blockSize, 0, sB>>>(
+        launch_k_angles(impl.pbc_active, cfg.gridSize, cfg.blockSize, sB,
             impl.angles.n,
             impl.angles.idx_i.ptr,  impl.angles.idx_j.ptr,  impl.angles.idx_k.ptr,
             impl.angles.ati.ptr,    impl.angles.atj.ptr,    impl.angles.atk.ptr,
@@ -3363,7 +3441,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
         LaunchConfig cfg = getLaunchConfig(impl.dihedrals.n, m_block_size);
-        k_dihedrals<<<cfg.gridSize, cfg.blockSize, 0, sB>>>(
+        launch_k_dihedrals(impl.pbc_active, cfg.gridSize, cfg.blockSize, sB,
             impl.dihedrals.n,
             impl.dihedrals.idx_i.ptr, impl.dihedrals.idx_j.ptr,
             impl.dihedrals.idx_k.ptr, impl.dihedrals.idx_l.ptr,
@@ -3383,7 +3461,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
         LaunchConfig cfg = getLaunchConfig(impl.inversions.n, m_block_size);
-        k_inversions<<<cfg.gridSize, cfg.blockSize, 0, sB>>>(
+        launch_k_inversions(impl.pbc_active, cfg.gridSize, cfg.blockSize, sB,
             impl.inversions.n,
             impl.inversions.idx_i.ptr, impl.inversions.idx_j.ptr,
             impl.inversions.idx_k.ptr, impl.inversions.idx_l.ptr,
@@ -3401,7 +3479,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
         LaunchConfig cfg = getLaunchConfig(impl.storsions.n, m_block_size);
-        k_storsions<<<cfg.gridSize, cfg.blockSize, 0, sB>>>(
+        launch_k_storsions(impl.pbc_active, cfg.gridSize, cfg.blockSize, sB,
             impl.storsions.n,
             impl.storsions.idx_i.ptr, impl.storsions.idx_j.ptr,
             impl.storsions.idx_k.ptr, impl.storsions.idx_l.ptr,
@@ -3482,10 +3560,12 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
             impl.d_grad.ptr,
             &impl.d_energies.ptr[impl.E_ATM]);
     }
-    {
+    // Nov 2026 (S1): the XB term follows the hbond switch, as in the CPU workspace (`hbond false` covers HB and XB);
+    // the FP32 variant has no image frame, so a cell takes the FP64 kernel.
+    if (m_hbond_enabled) {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
         LaunchConfig cfg = getLaunchConfig(impl.xbonds.n, m_block_size);
-        if (impl.use_mixed_precision) {
+        if (impl.use_mixed_precision && !impl.pbc_active) {
             k_xbonds_mixed<<<cfg.gridSize, cfg.blockSize, 0, sC>>>(
                 impl.xbonds.n,
                 impl.xbonds.idx_i.ptr, impl.xbonds.idx_j.ptr, impl.xbonds.idx_k.ptr,
@@ -3498,7 +3578,8 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
                 impl.d_grad.ptr,
                 &impl.d_energies.ptr[impl.E_XBOND]);
         } else {
-            k_xbonds<<<cfg.gridSize, cfg.blockSize, 0, sC>>>(
+            launch_k_xbonds(impl.pbc_active, cfg.gridSize, cfg.blockSize, sC,   // S1: image frames only with a cell
+                
                 impl.xbonds.n,
                 impl.xbonds.idx_i.ptr, impl.xbonds.idx_j.ptr, impl.xbonds.idx_k.ptr,
                 impl.xbonds.elem_A.ptr, impl.xbonds.elem_B.ptr,
@@ -3514,7 +3595,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     if (m_hbond_enabled) {
         // Phase 8: hbonds.n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
         LaunchConfig cfg = getLaunchConfig(impl.hbonds.n, m_block_size);
-        k_hbonds<<<cfg.gridSize, cfg.blockSize, 0, sC>>>(
+        launch_k_hbonds(impl.pbc_active, cfg.gridSize, cfg.blockSize, sC,
             impl.hbonds.n,
             impl.hbonds.idx_i.ptr, impl.hbonds.idx_j.ptr, impl.hbonds.idx_k.ptr,
             impl.hbonds.elem_A.ptr, impl.hbonds.elem_B.ptr,
@@ -3777,6 +3858,23 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
         k_fix_to_double<<<(N + 255) / 256, 256, 0, stream>>>(N, impl.d_dEdcn.ptr, 1.0 / GFNFF_FIX_FORCE);
         dEdcn_converted = true;
     };
+    // Claude Generated (Nov 2026, S1): homogeneous D4 tail (periodic cell): energy slot E_DISP_TAIL and its dE/dCN
+    // (fixed point into d_dEdcn, before the conversion). Reads the Gaussian weights of this step (d_gw / d_dgw,
+    // computeGaussianWeightsOnGPU on this stream), so it runs here on the main stream. With frozen CN the weights
+    // are those of the last CN update, like the pair term.
+    if (impl.tail_active && m_dispersion_enabled && impl.dc6dcn_gpu_ready && impl.d_gw.ptr && impl.d_dgw.ptr) {
+        LaunchConfig cfg_w = getLaunchConfigLight(impl.tail_K * D4_MAX_REF, m_block_size);
+        k_d4_tail_W<<<cfg_w.gridSize, cfg_w.blockSize, 0, stream>>>(
+            N, impl.tail_K, impl.d_tail_slot_of_atom.ptr, impl.d_tail_nref.ptr, impl.d_tail_zeta.ptr,
+            impl.d_gw.ptr, impl.d_tail_W.ptr);
+        LaunchConfig cfg_a = getLaunchConfigLight(N, m_block_size);
+        k_d4_tail_atoms<<<cfg_a.gridSize, cfg_a.blockSize, 0, stream>>>(
+            N, impl.tail_K, impl.d_tail_slot_of_atom.ptr, impl.d_tail_slot_elem.ptr, impl.d_tail_nref.ptr,
+            impl.d_tail_sqz.ptr, impl.d_tail_zeta.ptr, impl.d_gw.ptr, impl.d_dgw.ptr, impl.d_c6_flat.ptr,
+            impl.d_tail_W.ptr, impl.tail_pref6, impl.tail_pref8, gradient ? 1 : 0,
+            impl.d_dEdcn.ptr, &impl.d_energies.ptr[impl.E_DISP_TAIL]);
+        checkCuda(cudaGetLastError(), "k_d4_tail launch");
+    }
     if (m_coulomb_enabled && impl.coul_self_on_gpu) {
         // Wait for pairwise+bonded streams (dEdcn dependency for qtmp subtraction).
         // event_p2_pairwise: Phase-2-dedicated — always wait (records k_coulomb completion).
@@ -4033,6 +4131,7 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     const double e_xbond     = m_h_energies[impl.E_XBOND];
     const double e_hbond     = m_h_energies[impl.E_HBOND];
     const double e_coul_self = m_h_energies[impl.E_COUL_SELF];
+    const double e_disp_tail = m_h_energies[impl.E_DISP_TAIL];   // S1: 0 without a cell
 
     // Copy gradient from pinned buffer to Eigen matrix
     if (gradient) {
@@ -4153,6 +4252,7 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     m_result_energy.atm           = e_atm;
     m_result_energy.xbond         = e_xbond;
     m_result_energy.hbond         = e_hbond;
+    m_result_energy.disp_tail     = e_disp_tail;
 
     // GPU ENERGY TERMS (verbosity >= 3)
     if (m_verbosity >= 3) {
@@ -4384,6 +4484,11 @@ const Vector& FFWorkspaceGPU::dEdcnTotal() const
 int FFWorkspaceGPU::dispersionCount() const
 {
     return m_impl ? m_impl->disp.n : 0;
+}
+
+int FFWorkspaceGPU::hbondCount() const
+{
+    return m_impl ? m_impl->hbonds.n : 0;
 }
 
 int FFWorkspaceGPU::bondCount() const

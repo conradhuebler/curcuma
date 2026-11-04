@@ -426,6 +426,7 @@ PARAM(gpu_staged_list_upload, Bool, true, "GPU MD: convert rebuilt pair lists on
 PARAM(gpu_coulomb_implicit, Bool, true, "GPU: enumerate the Coulomb pairs on the device instead of uploading an N^2/2 host list. Not used with eeq_distance_cutoff > 0.", "GPU", {})
 PARAM(gpu_disp_pairs_on_device, Bool, true, "GPU: build the D4 dispersion pair list on the device, in the host order. false builds it on the host.", "GPU", {})
 PARAM(gpu_rep_pairs_on_device, Bool, true, "GPU: rebuild the repulsion pair list on the device when the skin rule fires; only for distance-filtered lists (nb_cell_list_min_atoms). false builds it on the host.", "GPU", {})
+PARAM(gpu_periodic, Bool, false, "CUDA GFN-FF with a periodic cell (opt-in, stage S1 of the GPU port): run the local terms (CN, D4 pair term and tail, repulsion, bonded terms, HB/XB) on the device with the minimum image. Only with coulomb_ewald false (the device Coulomb is a minimum-image sum, not Ewald; the periodic EEQ/Ewald Coulomb arrive with S3/S4); with coulomb_ewald true (default) the run falls back to the CPU as before. false = every periodic cell runs on the CPU.", "GPU", {})
 PARAM(eeq_mixed_precision, Bool, false, "GPU EEQ: factor the matrix in FP32 and refine to FP64 accuracy, for FP64-weak cards. Opt-in; few-fragment paths only.", "GPU", {})
 PARAM(eeq_mixed_precision_iters, Int, 2, "Refinement steps of eeq_mixed_precision, at least 1.", "GPU", {})
 PARAM(gpu_block_jacobi_max_frag_atoms, Int, 300, "GPU pcg: fragments larger than this get the diagonal instead of the dense block-Jacobi preconditioner, whose build grows steeply with size. See EEQ_SOLVER_CONTROL.md.", "GPU", {})
@@ -1450,6 +1451,11 @@ public:
     // Periodic Coulomb by Ewald summation (Claude Generated, Nov 2026, WP-PERIODIC-NONBONDED B2)
     /// true when a cell is active and coulomb_ewald is set: the workspace sums the Coulomb pair term by Ewald.
     bool coulombEwaldActive() const { return m_cell_bohr_ortho.active && m_coulomb_ewald; }
+    /// Claude Generated (Nov 2026, S1): the coulomb_ewald option as read from the parameters (before any cell is
+    /// known); MethodFactory::periodicCellNeedsCpu() and the GPU wrapper decide the periodic GPU release with it.
+    bool coulombEwaldRequested() const { return m_coulomb_ewald; }
+    /// Claude Generated (Nov 2026, S1): PARAM gpu_periodic (opt-in for the CUDA GFN-FF path with a cell).
+    bool gpuPeriodicRequested() const { return m_gpu_periodic; }
     /// true when the Phase-2 EEQ runs with the periodic Ewald matrix (cell and coulomb_ewald).
     bool periodicEEQActive() const;
     /// dE_pair/dq_i of the periodic Coulomb pair energy (fixed charges) after Calculation() with
@@ -3199,6 +3205,7 @@ private:
     bool m_print_timing = true;     ///< Print init timing summary at verbosity >= 1
     bool m_dispersion_tail = true;  ///< Nov 2026 (A3c): PARAM dispersion_tail (periodic cell only)
     bool m_coulomb_ewald = true;    ///< Nov 2026 (B2/B3): PARAM coulomb_ewald (periodic cell only; default true since B3)
+    bool m_gpu_periodic = false;    ///< Nov 2026 (S1): PARAM gpu_periodic (CUDA GFN-FF with a cell, opt-in; ABI version 2)
     curcuma::ewald::EwaldParameters m_ewald_params;  ///< Nov 2026 (B3): parameters shared by the EEQ matrix and the Coulomb energy, set in configurePeriodicEwald()
     int m_eeq_ewald_dense_max = 1000;  ///< Nov 2026 (B3): PARAM eeq_ewald_dense_max_atoms
     double m_ewald_tolerance = 1e-8;  ///< Nov 2026 (B2): PARAM ewald_tolerance

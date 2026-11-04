@@ -430,7 +430,24 @@ public:
     void generateDispersionPairListOnGPU(const std::vector<double>& gw_flat,
                                          const std::vector<double>& sqrtzr4r2,
                                          const std::vector<double>& topo_charges,
-                                         double a1, double a2, double cutoff_bohr);
+                                         double a1, double a2, double cutoff_bohr,
+                                         double r_cut_eval_bohr = 50.0);   ///< S1: per-pair evaluation radius (GFNFF::dispersionRadiiBohr().eval)
+
+    /**
+     * @brief Claude Generated (Nov 2026, S1): homogeneous long-range D4 tail beyond the evaluation radius
+     * (WP-PERIODIC-NONBONDED A3c, D4ParameterGenerator::homogeneousDispersionTail()) evaluated on the device from the
+     * current Gaussian weights; energy into FFEnergyComponents::disp_tail, dE/dCN into the CN chain rule.
+     * @param active     false clears the tail (no kernel, disp_tail 0)
+     * @param rc_bohr    evaluation radius of the pair term (< L_min/2)
+     * @param volume_bohr3 cell volume
+     * @param zeta_atom  [N] charge scaling zeta_i of the pair-list build (D4ParameterGenerator::atomZeta())
+     * @param atom_types [N] element numbers
+     * @param sqrtzr4r2  [118] sqrt(Z r4/r2) per element (D4ParameterGenerator::getSqrtZr4r2)
+     * @param refn       per element number of references (D4ParameterGenerator::getRefN())
+     */
+    void setDispersionTail(bool active, double rc_bohr, double volume_bohr3,
+                           const std::vector<double>& zeta_atom, const std::vector<int>& atom_types,
+                           const std::vector<double>& sqrtzr4r2, const std::vector<int>& refn);
 
     // =========================================================================
     // Term enable flags (match FFWorkspace API)
@@ -446,6 +463,8 @@ public:
 
     /// Claude Generated (April 2026): Set unit cell for PBC minimum image convention.
     /// cell_bohr: 3×3 matrix (column-major, in Bohr). Uploads to GPU constant memory.
+    /// S1 (Nov 2026): the constant symbols are per device and process-wide, so the call is made before every
+    /// use (set-up and each step, also with has_pbc false); unchanged values are not re-uploaded.
     void setUnitCell(const double* cell_bohr_9, const double* cell_bohr_inv_9, bool has_pbc);
 
     /// Set verbosity for diagnostic snapshot downloads (only >= 3 triggers snapshot D2H)
@@ -596,6 +615,8 @@ public:
 
     /// Number of bond pairs uploaded to GPU
     int bondCount() const;
+    /// Claude Generated (Nov 2026, S1): number of H-bond triples currently on the device (host or device detection).
+    int hbondCount() const;
 
     /// DEPRECATED: use getDeviceXPtr/YPtr/ZPtr() instead.
     /// Returns nullptr — coords are now in SoA layout (Phase 10, March 2026).

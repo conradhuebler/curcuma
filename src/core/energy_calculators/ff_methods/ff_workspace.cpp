@@ -595,7 +595,9 @@ void FFWorkspace::postProcess(bool gradient)
     // Reference: Fortran gfnff_engrad.F90:1678-1679
     // =========================================================================
     auto t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
-    if (m_coul_gam.size() == m_natoms && m_eeq_charges.size() == m_natoms) {
+    // Nov 2026 (S1): `coulomb false` switches the whole Coulomb term off, the self term and TERM 1b included, as the
+    // GPU workspace does (before, the CPU kept +0.71 Eh of self energy on water8 and the two sides disagreed).
+    if (m_coulomb_enabled && m_coul_gam.size() == m_natoms && m_eeq_charges.size() == m_natoms) {
         const double sqrt_2_over_pi = 0.797884560802865;
         const bool has_cn = (m_cn.size() == m_natoms);
         double E_en = 0.0, E_self = 0.0;
@@ -670,7 +672,8 @@ void FFWorkspace::postProcess(bool gradient)
 
         // Compute TERM 1b qtmp
         Vector qtmp = Vector::Zero(m_natoms);
-        bool has_term1b = (m_eeq_charges.size() == m_natoms &&
+        bool has_term1b = (m_coulomb_enabled &&   // S1: off with `coulomb false`, as the GPU postprocess
+                          m_eeq_charges.size() == m_natoms &&
                           m_cnf.size() == m_natoms &&
                           m_cn.size() == m_natoms);
         if (has_term1b) {
