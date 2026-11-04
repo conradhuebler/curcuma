@@ -733,7 +733,11 @@ json CLI2Json(int argc, char** argv)
         {"rmsd", "rmsd"},
         {"analysis", "analysis"},
         {"hessian", "hessian"},
-        {"casino", "casino"}
+        {"casino", "casino"},
+        // Claude Generated (Nov 2026): the classes read modules "docking"/"trajectoryanalysis",
+        // the CLI keywords are -dock/-traj; without the mapping their flags were never routed.
+        {"dock", "docking"},
+        {"traj", "trajectoryanalysis"}
     };
 
     // Get actual module name (for ConfigManager)
@@ -741,6 +745,16 @@ json CLI2Json(int argc, char** argv)
     if (keyword_to_module.count(keyword) > 0) {
         module_name = keyword_to_module[keyword];
     }
+
+    auto isStrictNumber = [](const std::string& s) -> bool {
+        try {
+            size_t pos = 0;
+            std::stod(s, &pos);
+            return pos == s.size();
+        } catch (const std::exception&) {
+            return false;
+        }
+    };
 
     // Claude Generated (Jul 2026, F2): a token starting with '-' followed by a digit or '.'
     // is a negative NUMBER value (e.g. "-charge -1", "-threshold -1e-6"), not a flag. The
@@ -853,11 +867,10 @@ json CLI2Json(int argc, char** argv)
                     isNumber = false;
                 }
                 if (!isVector) {
-                    try {
-                        // std::cout << "stod: " << std::stod(next) << std::endl;
-                        std::stod(next);
-
-                    } catch (const std::invalid_argument&) {
+                    // Claude Generated (Nov 2026): strict number check. std::stod accepts numeric
+                    // prefixes ("2026run.json" -> 2026, "1abc.log" -> 1) and throws out_of_range
+                    // for "1e999"; only a token consumed completely by stod is a number.
+                    if (!isStrictNumber(next)) {
                         isNumber = false;
                         isVector = true;
                     }
@@ -2243,8 +2256,9 @@ int executeDocking(const json& controller, int argc, char** argv) {
 
     // Claude Generated (May 2026): Extract host filename for BMT directory naming
     std::string dock_basename;
-    if (controller.contains("dock") && controller["dock"].contains("host")) {
-        dock_basename = controller["dock"]["host"].get<std::string>();
+    if (controller.contains("docking") && controller["docking"].contains("host")
+        && controller["docking"]["host"].is_string()) {
+        dock_basename = controller["docking"]["host"].get<std::string>();
     }
     if (!dock_basename.empty()) {
         initializeBMT(docking, dock_basename, "dock", controller);
