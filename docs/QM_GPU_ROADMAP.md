@@ -5,7 +5,7 @@
 > and Q-G5 (FP32 phase of the direct SCF and mixed-precision RI-JK) are implemented (Oct 2026, AI-generated,
 > machine-tested on one RTX 5090 only), Q-G6 (multi-GPU) is a proposal. Section 4: Kohn-Sham DFT on the GPU
 > (Oct 30 2026, AI-generated, machine-tested on one RTX 5090 only); 4.4 open shell (stage 6a), 4.5 f and g shells
-> (stage 6b, Nov 2026).
+> (stage 6b, Nov 2026), 4.6 ECP matrix and ECP gradient (Nov 2026).
 
 The native xTB GPU work ([SQM_GPU.md](SQM_GPU.md), [SQM_GPU_ROADMAP.md](SQM_GPU_ROADMAP.md),
 [SQM_PERFORMANCE.md](SQM_PERFORMANCE.md), [MULTI_GPU.md](MULTI_GPU.md)) produced a set of
@@ -1010,7 +1010,7 @@ it and the counted key is gone.
 | 2e gradient (Q-G7) | yes | `QMGpuGrad2e::computeUHF`: D = Pt Pt - kx/2 sum_s (Ps Ps + Ps Ps), the expression and order of `qmint::gradientTwoElectronUHF`; screen bound Pt_AB Pt_CD + kx (S_AC S_BD + S_AD S_BC), S = max(\|Pa\|, \|Pb\|); kx = 0 (lda, pbe) goes through `compute(Pt, 0)` |
 | XC gradient incl. grid response | yes | `QMGpuXC::gradientSpin`: basis part per spin, point part of both spins (`gradRowSpinKernel`), Becke weight derivative of e_x + e_c |
 | SCF loop (DIIS/ADIIS, diagonalisation, densities, convergence test) | no | host loop of `runUSCF` with the device builds, counted `qm_uhf_scf` once per engine unless `-qm.gpu_scf off` (then chosen, not a fallback); `-gpu_strict true` exits 3 otherwise |
-| ECP gradient, gCP/SRB/D3 of hf-3c, RI 2-index metric part | no | host, as for RHF (not counted, as for RHF) |
+| gCP/SRB/D3 of hf-3c, RI 2-index metric part | no | host, as for RHF (not counted, as for RHF); the ECP gradient runs on the device since section 4.6 |
 | f/g shells (def2-TZVP and larger) | yes (stage 6b) | until stage 6b counted `qm_eri`/`qm_grad`; section 4.5 |
 
 Why no device-resident UHF loop (stage 2 of the task): for the medium case below the host part of the loop (eigensolve
@@ -1100,7 +1100,7 @@ specific: `qm_uhf_scf` (host UHF loop, stage 6a) and `qm_dh_grad_pt2` (host PT2 
 | 2e gradient screen | `qmint::gpuGradScreen`: eri_screening / 100 for s/p/d (unchanged), / 1e4 with f/g shells: at / 100 CH4/def2-QZVP was 1.0e-10 Eh/Bohr from the unscreened CPU gradient (same density), at / 1e4 4.5e-13, for 0.8 % more quartets |
 | 1e gradient (Q-G8) | template on the Hermite order: `MAXL = 5` (s/p/d, code of before), `MAXL = 9` for f/g bases |
 | RI 3-index gradient | second instance of `riGrad3cKernel` (Ltot <= 13, orbital g raised + auxiliary g, one warp per block for shared memory); its own Boys table (the s/p/d one bit for bit as before); auxiliary h still refused |
-| ECP matrix and gradient | stay on the CPU (decision below) |
+| ECP matrix and gradient | stayed on the CPU in stage 6b (decision below), on the device since section 4.6 |
 
 Checks (`dump_qm_energy` GPU vs CPU of the same binary, 8 threads, `-qm.scf_threshold 1e-10`; gradients Eh/Bohr):
 
@@ -1148,7 +1148,8 @@ Timing (RTX 5090, 24-core host, wall time of the process incl. start-up):
 ECP on the device (task step 4, not done): CPU ECP matrix 98 ms (HgCl2 TZVP), 85 ms (CH3I), 38 ms (HI) on 1 thread; ECP
 gradient (1e part on the device minus its 10 ms) ~110 ms (HgCl2) and ~80 ms (CH3I) on 1 thread. The GPU runs of these
 molecules take 2.0-2.9 s in total with the 2e gradient 0.27-0.99 s on the device, so a device ECP would save at most ~9 %
-(HgCl2, 1 thread) and less with threads; not worth a device port of the projection code. Kept on the CPU.
+(HgCl2, 1 thread) and less with threads; not worth a device port of the projection code. Kept on the CPU. Revised in
+section 4.6: the CPU ECP cost grows with (ECP centres) x (functions)^2 and reaches 57 % of the run for SnI4 def2-TZVP.
 
 CPU f/g path (task step 5, not done): H2O def2-QZVPP HF energy 3.85 s and energy + gradient 18.6 s on 1 thread (generic
 `mdQuartet` for l_a + l_b > 4 and the general gradient path); no contained, bitwise-verifiable change was attempted.
@@ -1160,3 +1161,86 @@ f/g. Compile time (nvcc -ptx per TU, eight TUs in parallel, before / after): `qm
 `qm_gpu_direct.cu` 836 / 841 s, `qm_gpu_direct_md.cu` 271 / 280 s, `qm_gpu_direct_fp32.cu` 260 / 261 s, the gradient
 TUs below 2.1 s, new `qm_gpu_eri_generic.cu` 0.6 s: the generic kernel is runtime-L (no unrolled templates), the plugin
 build time is unchanged within noise.
+
+### 4.6 ECP matrix and ECP gradient on the device (Nov 2026)
+
+> 🤖 AI-generated, ⚙️ machine-tested (RTX 5090 only, release build sm_75 PTX through the JIT). Human production
+> testing pending.
+
+Why (measured before the port, `-gpu cuda`, 8 threads, CPU ECP = `-qm.gpu_ecp off`, HF energy + gradient,
+`dump_qm_energy`, medians of 3): the CPU ECP cost grows with (ECP centres) x (Cartesian functions)^2 (one
+nf x nf x (2l+1) n_r GEMM per centre and order, plus the projections), so the small molecules of stage 6b hide it:
+
+| case (functions) | CPU ECP matrix / gradient | device ECP matrix / gradient | process wall, CPU ECP / device ECP |
+|---|---:|---:|---:|
+| HI TZVP (56) | 74 / 84 ms | 282 / 24 ms | 2.13 / 2.09 s |
+| CH3I TZVP (99) | 182 / 190 ms | 270 / 26 ms | 3.15 / 2.82 s |
+| HgCl2 TZVP (117) | 111 / 118 ms | 393 / 6 ms | 2.33 / 2.48 s |
+| Hg(CH3)2 TZVP (141) | 177 / 187 ms | 441 / 6 ms | 2.37 / 2.42 s |
+| SnI4 TZVP (250, 5 ECP centres) | 7300 / 8349 ms | 356 / 188 ms | 27.45 / 11.92 s |
+| C6I6 SVP (240, 6 centres) | 2576 / 2704 ms | 332 / 157 ms | 13.30 / 8.17 s |
+| C6I5COOH SVP (261, 5 centres) | 2561 / 2628 ms | 323 / 133 ms | 16.15 / 11.19 s |
+| C6I6 TZVP (486, 6 centres) | 42663 / 40519 ms | 528 / 367 ms | 214.6 / 148.1 s |
+
+The device matrix time contains the CUDA context creation and the first cuBLAS use (~0.2-0.25 s): the ECP matrix is
+the first device work of a run, before the SCF; the wall times show that this cost moved, it is not added. With one
+ECP atom and < 150 functions the device ECP is neutral (+-0.15 s); with several ECP centres and 250+ functions it
+removes 30-60 % of the run. SnI4, C6I6, C6I5COOH and Hg(CH3)2 are hand-built test geometries (scratch, not in the
+structure library; ideal Td/linear, I substituted for H at 2.10 A), used for timing only.
+
+| part | where | how |
+|---|---|---|
+| radial-order loop, acceptance test, angular tables T (Lebedev) | host | `qm_ecp.cpp` `buildECPDevice` / `gradientECPDevice`; tables per (atom, centre) with the atom's largest power, D from its first function, exactly as `projections()` of the CPU path; OpenMP over atoms |
+| local part <a\|U_L\|b> and its gradient | device | `ecpLocalKernel` (one thread per pair), `ecpLocalGradKernel` + fixed-order row sums |
+| radial factors e^(-alpha (r-d)^2) e^-x i_lambda(x) | device | `ecpRadialKernel`, one slot per unique (atom, exponent) as `radialFor` |
+| projections F_f,lm(r_k) | device | `ecpProjKernel`, one thread per (function, point), 25 accumulators; (-D)^e by products, binomials from a table |
+| V = FW F^T, X = P FW, G = sum dF X | device | `cublasDgemm` (handle cached per device), `ecpGradDotKernel` + `ecpGradSumKernel` (fixed split order, no atomics) |
+| building blocks | both | `qm_ecp_kernels.h` (Bessel series, binomial, Gaussian moment, three-centre overlap, radial point, monomial index), moved from `qm_ecp.cpp` unchanged: CPU ECP dumps md5-identical to the pre-change binary where the order did not change |
+
+Radial points are processed in chunks whose size follows from the dimensions only (2^26 doubles for R, F, FW, X), so
+the summation order does not depend on free memory; device results are reproducible run to run. Entry
+`curcuma_cuda_create_qm_ecp_v1`; `QMGpuEcpSetup`/`QMGpuEcpCentre` carry their size, the plugin refuses a mismatch.
+Every device failure is counted as `qm_ecp` and switches the engine to the CPU ECP (`-gpu_strict true` exits). Limits:
+projectors l < 5 (s-g, the lanthanides' h local channel), Cartesian powers <= 6 (g shells + one derivative).
+
+**Radial order (the design question of the task).** The energy accepts the order whose change max|V_L - V_(L-1)| is
+below max(radial_tol, floor_rel max|V|) and the gradient reuses it (`m_ecp_levels`). With the old floor_rel 2e-15 the
+accepted change was itself rounding noise (HI TZVP: 3.1e-13 against a threshold of 4.5e-13, 11 ulp of max|V|); the
+device could not reproduce such decisions, and the pre-change binary of this build (AVX512, native) fails CeF4
+def2-SVP at every thread count (change stalls at 1.65e-12 > 1.06e-12 up to 8191 points; stage 4 recorded a stall at
+2e-13 with its build). Change: floor_rel = 1e-14 (`EcpOptions::floor_rel`, `acceptTolerance`, CPU and device). Orders
+that moved (CPU, HF, against the pre-change binary): HgCl2 SVP 2047 -> 1023, HgCl2 TZVP 2047 -> 1023, XeF2 TZVP 4095 ->
+2047, PbH4 TZVP 2047 -> 1023, Hg(CH3)2 TZVP 2047 -> 1023; energy changes <= 1.4e-12 Eh; HI, CH3I, CsI, XeF2 SVP,
+PbH4 SVP, SnI4 SVP unchanged (bitwise). CeF4 SVP runs again (4095). Then the device decides with the same test on its
+own matrices, except inside a safety band |change - threshold| <= 1e-15 + 3e-15 max|V|: there that centre's CPU loop
+runs from the order before (each test depends on two neighbouring orders only), so the accepted order is always the
+CPU's. Measured device-vs-CPU difference of the change: <= 8.8e-16 max|V| (17 molecule/basis cases, 78 order pairs);
+band hits: HgCl2 TZVP and Hg(CH3)2 TZVP (Hg's change at 1023 points lies 12 % below the threshold), none in the other
+cases. Not chosen: a CPU probe deciding the order (it needs the two most expensive orders, ~75 % of the CPU loop).
+
+Checks (`check_qm_gpu_ecp.py`: device vs CPU of the same binary, same density; `CURCUMA_QM_GPU_ECP_CHECK=1`):
+
+| case | ECP matrix max\|dV\| (max\|V\|) | orders | ECP gradient max\|dg\| | dE, max\|dg\| total |
+|---|---:|---|---:|---:|
+| HF HI-tilted TZVP | 3.2e-14 (199) | equal | 1.7e-17 | 1.7e-13 Eh, 4.5e-14 |
+| HF HgCl2 TZVP | 2.8e-14 (182) | equal (CPU-ordered) | 1.4e-17 | 4.6e-13 Eh, 7.9e-12 |
+| b3lyp HI-tilted SVP | 2.8e-14 (25) | equal | 6.9e-18 | 5.7e-14 Eh, 2.0e-14 |
+| HF CH3I, CsI, XeF2, PbH4 SVP | <= 4.3e-14 | equal | <= 7.4e-17 | <= 2.3e-13 Eh, <= 4.6e-12 |
+| HF CeF4 SVP (l_proj 5) | 8.5e-14 (528) | equal | 3.8e-17 | 2.7e-12 Eh, 4.7e-13 |
+| UHF HI+ doublet SVP | 2.8e-14 (25) | equal | 3.8e-17 | 1.1e-13 Eh, 2.6e-14 |
+| SnI4 TZVP (5 centres) | 6.5e-14 (199) | equal | 2.2e-16 | - |
+
+Gradients in Eh/Bohr. With (-D)^e formed by repeated products (an intermediate kernel version) CH3I, CsI, XeF2 and
+Hg(CH3)2 def2-TZVP gave 1.1e-13 to 2.0e-13 (max|V| 182-206, i.e. <= 1e-15 relative); the final kernel uses pow as
+the CPU and was NOT re-run on the device (the card was occupied by another process at the end of the work), nor were
+the final safety band (3e-15 max|V|, chosen from the measured 8.8e-16) and the partial CPU loop: `ctest -L qm_gpu_ecp`
+must be run once on the final build. FD gate of the assembled device gradient (4-point, 0.005 Bohr, `check_qm_fg.py --check fd
+--gpu`, no counted `qm_ecp`): HF HI TZVP 5.8e-11, b3lyp HI TZVP 4.0e-11, HF HgCl2 TZVP 1.1e-10, b3lyp HgCl2 TZVP
+1.3e-10, UHF HI+ SVP 5.9e-11 Eh/Bohr. ctest `-L qm_gpu_ecp` (14 tests, 77 = skip without CUDA plugin/device; fails on a
+counted `qm_ecp`); CPU `-L "qm_z|qm_ecp"` 29/29 with the new floor.
+
+Not tested / not done: other GPUs than the RTX 5090, ROCm and Vulkan (no ECP kernels there), multi-GPU, `-opt`/`-md`
+with ECP on the GPU, ECP molecules larger than C6I6 TZVP (486 functions), elements whose def2-ECP has l_proj 5 other
+than Ce, MINIX-ECP (hf-3c) on the device (same code path, not compared separately), the per-element ECP of the atomic
+guess (`qm_scf.cpp`, stays CPU, cached per element), the device path for MP2 and double-hybrid gradients with ECP (same
+`ecpGradient` call, not compared). The angular tables stay on the host (0.1-0.9 ms per run measured).

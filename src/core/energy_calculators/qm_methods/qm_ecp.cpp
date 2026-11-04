@@ -16,12 +16,14 @@
 
 #include "qm_ecp.h"
 
+#include "qm_ecp_kernels.h"
 #include "qm_grid.h"
 
 #include <fmt/format.h>
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
@@ -32,8 +34,8 @@
 namespace qmecp {
 
 namespace {
-constexpr double kPi = 3.14159265358979323846;
-constexpr double kExpCut = 46.0;  // e^-46 ~ 1e-20: terms below are dropped
+using kern::kPi;
+using kern::kExpCut;  // e^-46 ~ 1e-20: terms below are dropped
 
 std::string lower(std::string s)
 {
@@ -142,48 +144,11 @@ bool parseTurbomoleECP(const std::string& block, ElementECP& out, std::string& w
 
 namespace {
 
-// e^(-x) i_l(x), l = 0..lmax (modified spherical Bessel function of the first kind, scaled). Series for x <= 50
-// (positive terms, no cancellation), the exact finite form above:
-//   i_l(x) = 1/(2x) [ e^x sum_k (-1)^k a_k (2x)^-k + (-1)^(l+1) e^-x sum_k a_k (2x)^-k ],  a_k = (l+k)!/(k!(l-k)!)
-void scaledBessel(double x, int lmax, double* out)
-{
-    if (x < 1.0e-14) {
-        out[0] = 1.0;
-        for (int l = 1; l <= lmax; ++l) out[l] = 0.0;
-        return;
-    }
-    if (x <= 50.0) {
-        const double ex = std::exp(-x), h = 0.5 * x * x;
-        double xl = 1.0, df = 1.0;  // x^l, (2l+1)!!
-        for (int l = 0; l <= lmax; ++l) {
-            if (l > 0) {
-                xl *= x;
-                df *= (2 * l + 1);
-            }
-            double t = xl / df, s = t;
-            for (int k = 0; k < 2000; ++k) {
-                t *= h / ((k + 1.0) * (2.0 * l + 2.0 * k + 3.0));
-                s += t;
-                if (t < 1.0e-17 * s) break;
-            }
-            out[l] = ex * s;
-        }
-        return;
-    }
-    const double e2 = std::exp(-2.0 * x), inv = 1.0 / (2.0 * x);
-    for (int l = 0; l <= lmax; ++l) {
-        double s1 = 0.0, s2 = 0.0, a = 1.0, p = 1.0;  // a_k, (2x)^-k
-        for (int k = 0; k <= l; ++k) {
-            if (k > 0) {
-                a *= (double)(l + k) * (l - k + 1) / k;
-                p *= inv;
-            }
-            s1 += ((k & 1) ? -a : a) * p;
-            s2 += a * p;
-        }
-        out[l] = inv * (s1 + ((l & 1) ? 1.0 : -1.0) * e2 * s2);
-    }
-}
+using kern::scaledBessel;
+using kern::binom;
+using kern::gaussMoment;
+using kern::threeCentreOverlap;
+using Term = kern::Prim;
 
 void legendre(double t, int lmax, double* P)
 {
@@ -307,22 +272,13 @@ void radialGrid(int n, std::vector<double>& r, std::vector<double>& w)
 {
     r.resize(n);
     w.resize(n);
-    const double ln2 = std::log(2.0);
-    for (int i = 1; i <= n; ++i) {
-        const double th = i * kPi / (n + 1), x = std::cos(th);
-        r[i - 1] = std::log(2.0 / (1.0 - x)) / ln2;
-        w[i - 1] = kPi / (n + 1) * std::sin(th) / ((1.0 - x) * ln2);
-    }
+    for (int i = 1; i <= n; ++i) kern::radialPoint(i, n, r[i - 1], w[i - 1]);
 }
 
 // =====================================================================================================
 // 3. Functions: sum of cartesian primitives c (x-Ax)^a (y-Ay)^b (z-Az)^c exp(-alpha |r-A|^2) on one centre
 // =====================================================================================================
 
-struct Term {
-    double c, alpha;
-    int p[3];
-};
 struct Fn {
     int atom;
     double A[3];
@@ -368,51 +324,9 @@ Fn derivativeFunction(const Fn& f, int d)
     return g;
 }
 
-double binom(int n, int k)
-{
-    double b = 1.0;
-    for (int i = 1; i <= k; ++i) b = b * (n - k + i) / i;
-    return b;
-}
-
 // =====================================================================================================
 // 4. Local part: <a| sum_k c_k exp(-zeta_k r_C^2) |b>, analytic three-centre overlap
 // =====================================================================================================
-
-double gaussMoment(int k, double g)  // int t^k exp(-g t^2) dt over R
-{
-    if (k & 1) return 0.0;
-    double df = 1.0;
-    for (int i = k - 1; i > 1; i -= 2) df *= i;
-    return df / std::pow(2.0 * g, k / 2) * std::sqrt(kPi / g);
-}
-
-double threeCentreOverlap(const Term& a, const double* A, const Term& b, const double* B, double zeta, const double* C)
-{
-    const double g = a.alpha + b.alpha + zeta;
-    double ab2 = 0, ac2 = 0, bc2 = 0, Q[3];
-    for (int d = 0; d < 3; ++d) {
-        ab2 += (A[d] - B[d]) * (A[d] - B[d]);
-        ac2 += (A[d] - C[d]) * (A[d] - C[d]);
-        bc2 += (B[d] - C[d]) * (B[d] - C[d]);
-        Q[d] = (a.alpha * A[d] + b.alpha * B[d] + zeta * C[d]) / g;
-    }
-    const double ex = (a.alpha * b.alpha * ab2 + a.alpha * zeta * ac2 + b.alpha * zeta * bc2) / g;
-    if (ex > kExpCut) return 0.0;
-    double v = std::exp(-ex);
-    for (int d = 0; d < 3; ++d) {
-        double s = 0.0;
-        const double qa = Q[d] - A[d], qb = Q[d] - B[d];
-        for (int i = 0; i <= a.p[d]; ++i)
-            for (int j = 0; j <= b.p[d]; ++j) {
-                if ((i + j) & 1) continue;
-                s += binom(a.p[d], i) * binom(b.p[d], j) * std::pow(qa, a.p[d] - i) * std::pow(qb, b.p[d] - j) *
-                     gaussMoment(i + j, g);
-            }
-        v *= s;
-    }
-    return v;
-}
 
 double localElement(const Fn& a, const Fn& b, const EcpCentre& c)
 {
@@ -590,6 +504,41 @@ SemiLocalResult semilocal(const std::vector<Fn>& fns, const std::vector<std::arr
     return res;
 }
 
+// Acceptance threshold of the order loop (CPU and device path): the change between two orders must be below
+// radial_tol or the rounding floor of the block, floor_rel * max|V|. Nov 2026: floor_rel 2e-15 -> 1e-14. At 2e-15 the
+// accepted change was itself rounding noise (HI def2-TZVP: max|V| 223 Eh, threshold 4.5e-13, accepted change 3.1e-13
+// at 2047 points, i.e. 11 ulp of max|V|), so whether an order passed depended on the summation order of the GEMM; the
+// device could not reproduce the CPU decision. 1e-14 max|V| (~45 ulp) lies above that noise; CeF4 def2-SVP (max|V|
+// 528 Eh) stalls at 2e-13 from 4095 points on, below the new floor 5.3e-12.
+double acceptTolerance(const EcpOptions& opt, double maxV) { return std::max(opt.radial_tol, opt.floor_rel * maxV); }
+
+// Quadrature-order loop of one centre on the CPU: semi-local matrix at the accepted order in `Vsemi`, the order in
+// `level`. Shared by buildECP and the device path, which starts it at `start_level` = (order of a test inside the
+// safety band) - 1: every test is a function of two neighbouring orders only, so this gives the decisions of the full
+// loop for all orders from there on (the device decided the earlier ones outside the band).
+bool orderLoopCPU(const std::vector<Fn>& fns, const EcpCentre& c, const EcpOptions& opt, Matrix& Vsemi, int& level,
+                  std::string& why, int start_level = -1)
+{
+    Matrix prev;
+    for (int lev = std::max(opt.min_level, start_level); lev <= opt.max_level; ++lev) {
+        const int npts = (1 << lev) - 1;
+        Matrix cur = semilocal(fns, nullptr, nullptr, c, npts, opt.threads).V;
+        if (std::getenv("CURCUMA_QM_ECP_DEBUG") && prev.size() != 0)
+            fmt::print("ECP centre {} level {} npts {} max|dV| {:.3e} max|V| {:.3e}\n", c.atom + 1, lev, npts,
+                       (cur - prev).cwiseAbs().maxCoeff(), cur.cwiseAbs().maxCoeff());
+        const double floor_tol = acceptTolerance(opt, cur.cwiseAbs().maxCoeff());
+        if (prev.size() != 0 && (cur - prev).cwiseAbs().maxCoeff() < floor_tol) {
+            Vsemi = std::move(cur);
+            level = lev;
+            return true;
+        }
+        prev = std::move(cur);
+    }
+    why = fmt::format("ECP: radial quadrature of atom {} not converged to {:.1e} with {} points", c.atom + 1,
+                      opt.radial_tol, (1 << opt.max_level) - 1);
+    return false;
+}
+
 }  // namespace
 
 // =====================================================================================================
@@ -617,30 +566,9 @@ bool buildECP(const std::vector<GTO::Orbital>& basis, const std::vector<EcpCentr
                 }
         }
         // semi-local part, quadrature order doubled until converged
-        Matrix prev;
-        bool ok = false;
-        for (int lev = opt.min_level; lev <= opt.max_level; ++lev) {
-            const int npts = (1 << lev) - 1;
-            Matrix cur = semilocal(fns, nullptr, nullptr, c, npts, opt.threads).V;
-            if (std::getenv("CURCUMA_QM_ECP_DEBUG") && prev.size() != 0)
-                fmt::print("ECP centre {} level {} npts {} max|dV| {:.3e} max|V| {:.3e}\n", c.atom + 1, lev, npts,
-                           (cur - prev).cwiseAbs().maxCoeff(), cur.cwiseAbs().maxCoeff());
-            // accept when the change is below radial_tol or the double-precision floor of the block (2e-15 max|V|;
-            // CeF4 def2-SVP: max|V| 528 Eh, the change stalls at 2e-13 from 4095 points on)
-            const double floor_tol = std::max(opt.radial_tol, 2.0e-15 * cur.cwiseAbs().maxCoeff());
-            if (prev.size() != 0 && (cur - prev).cwiseAbs().maxCoeff() < floor_tol) {
-                V += cur;
-                levels.level[ci] = lev;
-                ok = true;
-                break;
-            }
-            prev = std::move(cur);
-        }
-        if (!ok) {
-            why = fmt::format("ECP: radial quadrature of atom {} not converged to {:.1e} with {} points", c.atom + 1,
-                              opt.radial_tol, (1 << opt.max_level) - 1);
-            return false;
-        }
+        Matrix cur;
+        if (!orderLoopCPU(fns, c, opt, cur, levels.level[ci], why)) return false;
+        V += cur;
     }
     return true;
 }
@@ -687,6 +615,299 @@ Matrix gradientECP(const std::vector<GTO::Orbital>& basis, const std::vector<Ecp
             }
     }
     return g;
+}
+
+// =====================================================================================================
+// 7. Device path (Claude Generated, Nov 2026): heavy parts on a QMGpuECP (cuda/qm_gpu_ecp.cu), order loop here
+// =====================================================================================================
+
+QMGpuEcpSetup EcpDeviceFunctions::view() const
+{
+    QMGpuEcpSetup s;
+    s.nbasis = nbasis;
+    s.nfn = nfn;
+    s.fn_atom = fn_atom.data();
+    s.fn_term = fn_term.data();
+    s.nterm = (int)term_c.size();
+    s.term_c = term_c.data();
+    s.term_alpha = term_alpha.data();
+    s.term_p = term_p.data();
+    s.term_slot = term_slot.data();
+    s.nslot = (int)slot_alpha.size();
+    s.slot_atom = slot_atom.data();
+    s.slot_alpha = slot_alpha.data();
+    s.natoms = natoms;
+    s.fn_xyz = fn_xyz.data();
+    return s;
+}
+
+EcpDeviceFunctions deviceFunctions(const std::vector<GTO::Orbital>& basis, int natoms, bool gradient)
+{
+    EcpDeviceFunctions d;
+    const int n = (int)basis.size();
+    d.nbasis = n;
+    d.natoms = natoms;
+    std::vector<Fn> all;
+    all.reserve(gradient ? 4 * (size_t)n : (size_t)n);
+    for (int i = 0; i < n; ++i) all.push_back(basisFunction(basis[i]));
+    if (gradient)
+        for (int i = 0; i < n; ++i)
+            for (int k = 0; k < 3; ++k) all.push_back(derivativeFunction(all[i], k));
+    d.nfn = (int)all.size();
+    std::map<std::pair<int, double>, int> slots;  // radial slot per (atom, exponent), as radialFor of the CPU
+    d.fn_term.push_back(0);
+    for (const Fn& f : all) {
+        d.fn_atom.push_back(f.atom);
+        for (int k = 0; k < 3; ++k) d.fn_xyz.push_back(f.A[k]);
+        for (const Term& t : f.terms) {
+            d.term_c.push_back(t.c);
+            d.term_alpha.push_back(t.alpha);
+            for (int k = 0; k < 3; ++k) d.term_p.push_back(t.p[k]);
+            auto key = std::make_pair(f.atom, t.alpha);
+            auto it = slots.find(key);
+            if (it == slots.end()) {
+                it = slots.emplace(key, (int)d.slot_alpha.size()).first;
+                d.slot_atom.push_back(f.atom);
+                d.slot_alpha.push_back(t.alpha);
+            }
+            d.term_slot.push_back(it->second);
+        }
+        d.fn_term.push_back((int)d.term_c.size());
+    }
+    return d;
+}
+
+namespace {
+
+// Host arrays behind one QMGpuEcpCentre: channels and the angular tables of every atom that carries functions,
+// with the atom's largest power over ITS function list (basis functions, plus derivative functions for a gradient
+// object) and D from its first function, exactly as projections() of the CPU path builds them.
+struct DeviceCentre {
+    std::vector<double> local_coef, local_zeta, semi_coef, semi_zeta, atom_D, atom_d, T;
+    std::vector<int> semi_off, ang_nmax;
+    std::vector<long long> ang_off;
+    QMGpuEcpCentre view;
+};
+
+void makeDeviceCentre(const EcpDeviceFunctions& F, const EcpCentre& c, bool semilocal_on, int threads, DeviceCentre& dc)
+{
+    const ElementECP& e = *c.ecp;
+    const int lproj = semilocal_on ? e.lmax : 0;
+    for (const auto& t : e.local) {
+        dc.local_coef.push_back(t.coef);
+        dc.local_zeta.push_back(t.zeta);
+    }
+    dc.semi_off.push_back(0);
+    for (int l = 0; l < lproj; ++l) {
+        for (const auto& t : e.semilocal[l]) {
+            dc.semi_coef.push_back(t.coef);
+            dc.semi_zeta.push_back(t.zeta);
+        }
+        dc.semi_off.push_back((int)dc.semi_coef.size());
+    }
+    const int na = F.natoms;
+    dc.atom_D.assign(3 * (size_t)na, 0.0);
+    dc.atom_d.assign(na, 0.0);
+    dc.ang_off.assign(na, -1);
+    dc.ang_nmax.assign(na, 0);
+    std::vector<int> first(na, -1);
+    for (int f = 0; f < F.nfn; ++f) {
+        const int a = F.fn_atom[f];
+        if (first[a] < 0) first[a] = f;
+        for (int t = F.fn_term[f]; t < F.fn_term[f + 1]; ++t)
+            dc.ang_nmax[a] = std::max(dc.ang_nmax[a], F.term_p[3 * t] + F.term_p[3 * t + 1] + F.term_p[3 * t + 2]);
+    }
+    std::vector<int> atoms;
+    for (int a = 0; a < na; ++a)
+        if (first[a] >= 0) {
+            atoms.push_back(a);
+            const double* A = &F.fn_xyz[3 * (size_t)first[a]];
+            const double D[3] = { A[0] - c.x, A[1] - c.y, A[2] - c.z };
+            for (int k = 0; k < 3; ++k) dc.atom_D[3 * (size_t)a + k] = D[k];
+            dc.atom_d[a] = std::sqrt(D[0] * D[0] + D[1] * D[1] + D[2] * D[2]);
+        }
+    if (lproj > 0) {
+        std::vector<std::vector<double>> tabs(atoms.size());
+#pragma omp parallel for schedule(dynamic, 1) num_threads(threads > 0 ? threads : 1)
+        for (int k = 0; k < (int)atoms.size(); ++k) {
+            const int a = atoms[k];
+            const double D[3] = { dc.atom_D[3 * (size_t)a], dc.atom_D[3 * (size_t)a + 1], dc.atom_D[3 * (size_t)a + 2] };
+            tabs[k] = angularTable(dc.ang_nmax[a], lproj, D).T;
+        }
+        for (size_t k = 0; k < atoms.size(); ++k) {
+            dc.ang_off[atoms[k]] = (long long)dc.T.size();
+            dc.T.insert(dc.T.end(), tabs[k].begin(), tabs[k].end());
+        }
+    } else
+        for (int a : atoms) dc.ang_off[a] = 0;
+    if (dc.T.empty()) dc.T.push_back(0.0);
+    QMGpuEcpCentre& v = dc.view;
+    v.C[0] = c.x;
+    v.C[1] = c.y;
+    v.C[2] = c.z;
+    v.nlocal = (int)dc.local_coef.size();
+    v.local_coef = dc.local_coef.data();
+    v.local_zeta = dc.local_zeta.data();
+    v.lproj = lproj;
+    v.semi_off = dc.semi_off.data();
+    v.semi_coef = dc.semi_coef.data();
+    v.semi_zeta = dc.semi_zeta.data();
+    v.rcut = semilocalCutoff(e);
+    v.atom_D = dc.atom_D.data();
+    v.atom_d = dc.atom_d.data();
+    v.ang_off = dc.ang_off.data();
+    v.ang_nmax = dc.ang_nmax.data();
+    v.ang_T = dc.T.data();
+    v.ang_size = (long long)dc.T.size();
+}
+
+bool anySemilocal(const ElementECP& e)
+{
+    for (const auto& ch : e.semilocal)
+        if (!ch.empty()) return true;
+    return false;
+}
+
+int atomCount(const std::vector<GTO::Orbital>& basis, const std::vector<EcpCentre>& centres)
+{
+    int na = 0;
+    for (const auto& o : basis) na = std::max(na, o.atom + 1);
+    for (const auto& c : centres) na = std::max(na, c.atom + 1);
+    return na;
+}
+
+// Order-test safety band: the device matrices differ from the CPU ones by rounding, so the change max|cur - prev| of
+// both sides differs too (measured <= 8.8e-16 max|V| over 17 molecules and 78 order pairs, docs/QM_GPU_ROADMAP.md
+// 4.6). A change within this band (3.4x that) of the threshold could be accepted on one side and refused on the other;
+// that centre then runs the CPU loop from the order before, so the accepted order is always the one buildECP chooses.
+double orderMargin(double maxV) { return 1.0e-15 + 3.0e-15 * maxV; }
+
+}  // namespace
+
+bool buildECPDevice(const std::vector<GTO::Orbital>& basis, const std::vector<EcpCentre>& centres, const EcpOptions& opt,
+                    QMGpuECP& dev, Matrix& V, EcpLevels& levels, EcpDeviceStats& stats, std::string& why)
+{
+    const int n = (int)basis.size();
+    V = Matrix::Zero(n, n);
+    levels.level.assign(centres.size(), 0);
+    const EcpDeviceFunctions F = deviceFunctions(basis, atomCount(basis, centres), false);
+    std::vector<Fn> fns;  // CPU functions, only for a centre whose order test lands in the safety band
+    Matrix buf(n, n);
+    for (size_t ci = 0; ci < centres.size(); ++ci) {
+        const EcpCentre& c = centres[ci];
+        const bool any = anySemilocal(*c.ecp);
+        ++stats.centres;
+        const auto t0 = std::chrono::steady_clock::now();
+        DeviceCentre dc;
+        try {
+            makeDeviceCentre(F, c, any, opt.threads, dc);
+        } catch (const std::exception& ex) {
+            why = ex.what();
+            return false;
+        }
+        stats.host_tables_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        if (!dev.setCentre(dc.view)) {
+            why = "device ECP centre upload failed";
+            return false;
+        }
+        if (!c.ecp->local.empty()) {
+            if (!dev.local(buf.data())) {
+                why = "device ECP local part failed";
+                return false;
+            }
+            V += buf;
+        }
+        Matrix prev;
+        bool ok = false, band = false;
+        int band_level = 0;
+        for (int lev = opt.min_level; lev <= opt.max_level; ++lev) {
+            const int npts = (1 << lev) - 1;
+            Matrix cur = Matrix::Zero(n, n);
+            if (any && !dev.semilocal(npts, cur.data())) {
+                why = "device ECP semi-local part failed";
+                return false;
+            }
+            if (prev.size() != 0) {
+                const double dd = (cur - prev).cwiseAbs().maxCoeff(), mx = cur.cwiseAbs().maxCoeff();
+                if (std::getenv("CURCUMA_QM_ECP_DEBUG"))
+                    fmt::print("ECP device centre {} level {} npts {} max|dV| {:.3e} max|V| {:.3e}\n", c.atom + 1, lev,
+                               npts, dd, mx);
+                const double floor_tol = acceptTolerance(opt, mx);
+                stats.max_order_margin = std::max(stats.max_order_margin, orderMargin(mx));
+                if (std::abs(dd - floor_tol) <= orderMargin(mx)) {
+                    band = true;
+                    band_level = lev;
+                    break;
+                }
+                if (dd < floor_tol) {
+                    V += cur;
+                    levels.level[ci] = lev;
+                    ok = true;
+                    break;
+                }
+            }
+            prev = std::move(cur);
+        }
+        if (band) {
+            if (fns.empty())
+                for (const auto& o : basis) fns.push_back(basisFunction(o));
+            Matrix cur;
+            if (!orderLoopCPU(fns, c, opt, cur, levels.level[ci], why, band_level - 1)) return false;
+            V += cur;
+            ++stats.cpu_order_centres;
+            ok = true;
+        }
+        if (!ok) {
+            why = fmt::format("ECP: radial quadrature of atom {} not converged to {:.1e} with {} points", c.atom + 1,
+                              opt.radial_tol, (1 << opt.max_level) - 1);
+            return false;
+        }
+    }
+    return true;
+}
+
+bool gradientECPDevice(const std::vector<GTO::Orbital>& basis, const std::vector<EcpCentre>& centres, const Matrix& P,
+                       int natoms, const EcpOptions& opt, const EcpLevels& levels, QMGpuECP& dev, Matrix& g,
+                       EcpDeviceStats& stats, std::string& why)
+{
+    const int n = (int)basis.size();
+    g = Matrix::Zero(natoms, 3);
+    if (centres.empty()) return true;
+    const EcpDeviceFunctions F = deviceFunctions(basis, std::max(natoms, atomCount(basis, centres)), true);
+    const Matrix Pr = P;  // row-major, contiguous
+    Matrix G(n, 3);
+    for (size_t ci = 0; ci < centres.size(); ++ci) {
+        const EcpCentre& c = centres[ci];
+        ++stats.centres;
+        int lev = ci < levels.level.size() ? levels.level[ci] : 0;
+        if (lev <= 0) {  // as gradientECP: converge the order of this centre first (CPU)
+            EcpLevels tmp;
+            Matrix Vtmp;
+            std::string w;
+            buildECP(basis, { c }, opt, Vtmp, tmp, w);
+            lev = tmp.level.empty() || tmp.level[0] <= 0 ? opt.max_level : tmp.level[0];
+        }
+        const auto t0 = std::chrono::steady_clock::now();
+        DeviceCentre dc;
+        try {
+            makeDeviceCentre(F, c, anySemilocal(*c.ecp), opt.threads, dc);
+        } catch (const std::exception& ex) {
+            why = ex.what();
+            return false;
+        }
+        stats.host_tables_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        if (!dev.setCentre(dc.view) || !dev.gradient((1 << lev) - 1, Pr.data(), G.data())) {
+            why = "device ECP gradient failed";
+            return false;
+        }
+        // dE/dA(a) = 2 G(a); the centre C takes -2 G(a) (translational invariance), the order of gradientECP
+        for (int i = 0; i < n; ++i)
+            for (int d = 0; d < 3; ++d) {
+                g(basis[i].atom, d) += 2.0 * G(i, d);
+                g(c.atom, d) -= 2.0 * G(i, d);
+            }
+    }
+    return true;
 }
 
 }  // namespace qmecp

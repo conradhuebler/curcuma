@@ -39,6 +39,7 @@
 #include "qm_methods/qm_gpu_grad_backend.h"  // qmint::QMGpuGrad2e (Q-G7)
 #include "qm_methods/qm_gpu_mp2_grad_backend.h"  // qmint::QMGpuMP2Grad2e (MP2 gradient)
 #include "qm_methods/qm_gpu_grad1e_backend.h"  // qmint::QMGpuGrad1e (Q-G8)
+#include "qm_methods/qm_gpu_ecp_backend.h"     // qmecp::QMGpuECP (ECP on the device, Nov 2026)
 #include "qm_methods/qm_gpu_ri_backend.h"  // qmint::QMGpuRI (WP10)
 #include "qm_methods/qm_gpu_ri_lowmem_backend.h"  // qmint::QMGpuRILowMem, QMGpuRIYSolver (WP10 low memory)
 #include "qm_methods/qm_gpu_mp2_backend.h"  // qmint::QMGpuMP2Input/Output (WP11)
@@ -131,6 +132,14 @@ std::unique_ptr<qmint::QMGpuMP2Grad2e> createQmMp2Grad2e(const std::string& back
  */
 std::unique_ptr<qmint::QMGpuGrad1e> createQmGrad1e(const std::string& backend, const qmint::QMGpuEriTables& tables,
                                                    const qmint::QMGpuGrad1eExtra& extra, int device, std::string& why);
+
+/**
+ * @brief ECP matrix / gradient device object (entry curcuma_<backend>_create_qm_ecp_v1) for the functions of
+ * `setup` (qmecp::deviceFunctions); nullptr with `why` when the plugin, the entry or the layout check fails.
+ * Claude Generated (Nov 2026).
+ */
+std::unique_ptr<qmecp::QMGpuECP> createQmECP(const std::string& backend, const qmecp::QMGpuEcpSetup& setup, int device,
+                                             std::string& why);
 
 /**
  * Native-QM density-fitting contractions (WP10): uploads the fitted 3-index tensor T (nfit x n(n+1)/2,

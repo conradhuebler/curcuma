@@ -171,7 +171,9 @@ def check_fd(a):
     qm = case_qm(a, ref)
     qm["scf_threshold"] = 1e-11 if "QZV" not in qm["basis"] else 1e-10
     atoms = read_xyz(xyz)
-    _, g = run_dump(a.dump, xyz, ref["method"], qm, True, a.threads)
+    method = a.method or ref["method"]  # Nov 2026 (qm_gpu_ecp): method / charge / spin overrides for the FD gate
+    ch, sp = ref.get("charge", 0) if a.charge is None else a.charge, ref.get("spin", 0) if a.spin is None else a.spin
+    _, g = run_dump(a.dump, xyz, method, qm, True, a.threads, charge=ch, spin=sp)
     h = 0.005  # Bohr
     worst = 0.0
     with tempfile.TemporaryDirectory() as d:
@@ -184,7 +186,7 @@ def check_fd(a):
                 disp[at][1 + k] += s * h * BOHR
                 p = os.path.join(d, "d.xyz")
                 write_xyz(p, disp)
-                es[s], _ = run_dump(a.dump, p, ref["method"], qm, False, a.threads)
+                es[s], _ = run_dump(a.dump, p, method, qm, False, a.threads, charge=ch, spin=sp)
             fd = (es[-2] - 8 * es[-1] + 8 * es[1] - es[2]) / (12 * h)
             diff = g[at][k] - fd
             worst = max(worst, abs(diff))
@@ -291,6 +293,9 @@ def main():
     ap.add_argument("--gradient", action="store_true", help="gpudev: also compare the gradient")
     ap.add_argument("--allow", nargs="*", default=[], help="counted GPU fallbacks that may occur")
     ap.add_argument("--qm", nargs="*", default=[], help="extra engine options KEY=VALUE")
+    ap.add_argument("--method", default=None, help="fd: method instead of the case's (Nov 2026)")
+    ap.add_argument("--charge", type=int, default=None, help="fd: molecular charge instead of the case's")
+    ap.add_argument("--spin", type=int, default=None, help="fd: unpaired electrons instead of the case's")
     a = ap.parse_args()
     if a.gtol is None:
         a.gtol = 1e-11 if a.check == "kernel" else 1e-8

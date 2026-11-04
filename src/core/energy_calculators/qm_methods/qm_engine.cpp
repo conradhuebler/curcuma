@@ -189,6 +189,13 @@ QMEngine::QMEngine(QMFunctional functional, const json& config)
         else if (config["gpu_grad1e"].is_string())
             m_gpu_grad1e = config["gpu_grad1e"].get<std::string>();
     }
+    if (config.contains("gpu_ecp")) {
+        // Accept a CLI boolean too (-qm.gpu_ecp true/false). Claude Generated (Nov 2026).
+        if (config["gpu_ecp"].is_boolean())
+            m_gpu_ecp = config["gpu_ecp"].get<bool>() ? "on" : "off";
+        else if (config["gpu_ecp"].is_string())
+            m_gpu_ecp = config["gpu_ecp"].get<std::string>();
+    }
     if (config.contains("gpu_xc")) {
         // Accept a CLI boolean too (-qm.gpu_xc true/false). Claude Generated (Oct 2026, GPU KS-DFT).
         if (config["gpu_xc"].is_boolean())
@@ -580,9 +587,92 @@ bool QMEngine::setupECP()
 Matrix QMEngine::ecpGradient(const Matrix& Pc) const
 {
     if (m_ecp_centres.empty()) return Matrix::Zero(m_atomcount, 3);
+    const auto t0 = std::chrono::steady_clock::now();
+    Matrix g;
+    const bool dev = gpuGradientECP(Pc, g);
+    if (!dev) {
+        qmecp::EcpOptions eo;
+        eo.threads = std::max(1, m_threads);
+        g = qmecp::gradientECP(m_gto_basis, m_ecp_centres, Pc, m_atomcount, eo, m_ecp_levels);
+    }
+    if (const char* tr = std::getenv("CURCUMA_QM_SCF_TRACE"); tr && tr[0] == '1')
+        fmt::print(stderr, "QM ECP gradient trace: {} ecp_ms={:.1f}{}\n", dev ? "device" : "cpu",
+                   std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(),
+                   dev ? " (" + m_gpu_ecp_info + ")" : std::string());
+    return g;
+}
+
+// Claude Generated (Nov 2026): ECP matrix / gradient on the device (cuda/qm_gpu_ecp.cu through the seam
+// qm_gpu_ecp_backend.h). The order loop and its acceptance test stay in qm_ecp.cpp (buildECPDevice), so the accepted
+// radial orders are the CPU ones (centres whose change lies in the safety band run the CPU loop). Every failure is
+// counted as qm_ecp and switches this engine to the CPU ECP. CURCUMA_QM_GPU_ECP_CHECK=1 also runs the CPU path and
+// prints one comparison line (test_cases/qm_ecp/check_qm_gpu_ecp.py parses it).
+bool QMEngine::gpuBuildECP(Matrix& Vecp)
+{
+    m_gpu_ecp_info.clear();
+    const std::string backend = gpuGradBackend(m_gpu_ecp, "gpu_ecp", "qm_ecp", m_gpu_ecp_failed);
+    if (backend.empty()) return false;
+    const auto t0 = std::chrono::steady_clock::now();
     qmecp::EcpOptions eo;
     eo.threads = std::max(1, m_threads);
-    return qmecp::gradientECP(m_gto_basis, m_ecp_centres, Pc, m_atomcount, eo, m_ecp_levels);
+    const qmecp::EcpDeviceFunctions F = qmecp::deviceFunctions(m_gto_basis, m_atomcount, false);
+    std::string why;
+    auto dev = gpu_plugin::createQmECP(backend, F.view(), m_gpu_device, why);
+    qmecp::EcpLevels lv;
+    qmecp::EcpDeviceStats st;
+    Matrix V;
+    if (!dev || !qmecp::buildECPDevice(m_gto_basis, m_ecp_centres, eo, *dev, V, lv, st, why)) {
+        m_gpu_ecp_failed = true;
+        curcuma::reportGpuFallback("qm_ecp", "device ECP matrix " + std::string(dev ? "failed: " : "not possible: ") + why);
+        return false;
+    }
+    const double dev_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    m_gpu_ecp_info = fmt::format("device {} ({}; host tables {:.1f} ms; {} of {} centres ordered on the CPU)", dev->name(),
+                                 dev->stats(), st.host_tables_ms, st.cpu_order_centres, st.centres);
+    if (const char* chk = std::getenv("CURCUMA_QM_GPU_ECP_CHECK"); chk && chk[0] == '1') {
+        const auto c0 = std::chrono::steady_clock::now();
+        Matrix Vc;
+        qmecp::EcpLevels lc;
+        std::string w;
+        qmecp::buildECP(m_gto_basis, m_ecp_centres, eo, Vc, lc, w);
+        const double cpu_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - c0).count();
+        fmt::print(stderr,
+            "QM GPU ECP check: centres={} max|dev-cpu|={:.3e} max|cpu|={:.3e} orders_equal={} cpu_ordered={} dev_ms={:.1f} cpu_ms={:.1f}\n",
+            m_ecp_centres.size(), (V - Vc).cwiseAbs().maxCoeff(), Vc.cwiseAbs().maxCoeff(),
+            lv.level == lc.level ? 1 : 0, st.cpu_order_centres, dev_ms, cpu_ms);
+    }
+    Vecp = std::move(V);
+    m_ecp_levels = lv;
+    return true;
+}
+
+bool QMEngine::gpuGradientECP(const Matrix& Pc, Matrix& g) const
+{
+    m_gpu_ecp_info.clear();
+    const std::string backend = gpuGradBackend(m_gpu_ecp, "gpu_ecp", "qm_ecp", m_gpu_ecp_failed);
+    if (backend.empty()) return false;
+    const auto t0 = std::chrono::steady_clock::now();
+    qmecp::EcpOptions eo;
+    eo.threads = std::max(1, m_threads);
+    const qmecp::EcpDeviceFunctions F = qmecp::deviceFunctions(m_gto_basis, m_atomcount, true);
+    std::string why;
+    auto dev = gpu_plugin::createQmECP(backend, F.view(), m_gpu_device, why);
+    qmecp::EcpDeviceStats st;
+    if (!dev || !qmecp::gradientECPDevice(m_gto_basis, m_ecp_centres, Pc, m_atomcount, eo, m_ecp_levels, *dev, g, st, why)) {
+        m_gpu_ecp_failed = true;
+        curcuma::reportGpuFallback("qm_ecp", "device ECP gradient " + std::string(dev ? "failed: " : "not possible: ") + why);
+        return false;
+    }
+    const double dev_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    m_gpu_ecp_info = fmt::format("device {} ({}; host tables {:.1f} ms)", dev->name(), dev->stats(), st.host_tables_ms);
+    if (const char* chk = std::getenv("CURCUMA_QM_GPU_ECP_CHECK"); chk && chk[0] == '1') {
+        const auto c0 = std::chrono::steady_clock::now();
+        const Matrix gc = qmecp::gradientECP(m_gto_basis, m_ecp_centres, Pc, m_atomcount, eo, m_ecp_levels);
+        const double cpu_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - c0).count();
+        fmt::print(stderr, "QM GPU ECP gradient check: max|dev-cpu|={:.3e} max|cpu|={:.3e} dev_ms={:.1f} cpu_ms={:.1f}\n",
+                   (g - gc).cwiseAbs().maxCoeff(), gc.cwiseAbs().maxCoeff(), dev_ms, cpu_ms);
+    }
+    return true;
 }
 
 // Claude Generated (Nov 2026): chemical (noble-gas) frozen core minus the orbitals an ECP removed already, the
@@ -838,14 +928,16 @@ void QMEngine::buildOneElectronIntegrals()
         Matrix Vecp;
         std::string why;
         const auto te0 = std::chrono::steady_clock::now();
-        if (!qmecp::buildECP(m_gto_basis, m_ecp_centres, eo, Vecp, m_ecp_levels, why)) throw std::runtime_error(why);
+        if (!gpuBuildECP(Vecp) && !qmecp::buildECP(m_gto_basis, m_ecp_centres, eo, Vecp, m_ecp_levels, why))
+            throw std::runtime_error(why);
         Vcart += Vecp;
         if (CurcumaLogger::get_verbosity() >= 3) {
             std::string lv;
             for (int l : m_ecp_levels.level) lv += (lv.empty() ? "" : ",") + std::to_string((1 << l) - 1);
-            CurcumaLogger::info(fmt::format("QM: ECP matrix for {} centres in {:.1f} ms (radial points {})",
+            CurcumaLogger::info(fmt::format("QM: ECP matrix for {} centres in {:.1f} ms (radial points {}; {})",
                                             m_ecp_centres.size(),
-                                            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - te0).count(), lv));
+                                            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - te0).count(), lv,
+                                            m_gpu_ecp_info.empty() ? std::string("CPU") : m_gpu_ecp_info));
         }
     }
     const Matrix Hcart = Tcart + Vcart;

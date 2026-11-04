@@ -583,7 +583,9 @@ basis; `def2-ECP` | `none`). Closed shell only, as before; hf-3c beyond Ne: stag
   function onto the ECP centre: binomial shift to C, exp(2 alpha D r cos g) = sum (2 lambda + 1) i_lambda P_lambda, the
   angular integrals of monomial x P_lambda x Y_lm EXACT with a Lebedev grid of degree 2 (n + l), the radial integral by
   Gauss-Chebyshev (2nd kind) on r = ln(2/(1-x))/ln 2 with 2^k - 1 points, k doubled from 7 until max|dV| <
-  max(1e-13, 2e-15 max|V|) (`CURCUMA_QM_ECP_DEBUG=1` prints each order; HI/XeF2 accept 2047 points, CeF4 4095;
+  max(1e-13, 1e-14 max|V|) (Nov 2026: was 2e-15 max|V|, inside the GEMM rounding noise, see
+  [QM_GPU_ROADMAP 4.6](QM_GPU_ROADMAP.md#46-ecp-matrix-and-ecp-gradient-on-the-device-nov-2026); `CURCUMA_QM_ECP_DEBUG=1`
+  prints each order; HI/XeF2 SVP accept 2047 points, HgCl2 1023, CeF4 4095;
   energies unchanged to 1e-14 Eh when the radial map is scaled by 0.5, 2 or 3). Only the r^0 terms (n = 2) of def2-ECP
   are implemented; other powers are rejected by the parser. Scheme: Flores-Moreno et al., J. Comput. Chem. 27, 1009
   (2006); McMurchie, Davidson, J. Comput. Phys. 44, 289 (1981).
@@ -595,10 +597,10 @@ basis; `def2-ECP` | `none`). Closed shell only, as before; hf-3c beyond Ne: stag
   to PySCF `chemcore_atm`: Na-Mg 1, Al-Zn 5, Ga-Sr 9, Y-Cd 14, In-Yb 18, Lu-Hg 23, Tl-No 34 orbitals, minus n_core/2 of
   an ECP (e.g. I: 18 - 14 = 4, as ORCA "NCore=8" and PySCF). Li and Be keep curcuma's 1s (ORCA/PySCF freeze nothing
   there; kept so H-Ne results do not change).
-- CUDA: the ECP matrix and gradient are CPU terms on every path (no fallback counted, nothing on the device to fall
-  back from; kept on the CPU after timing them in stage 6b, QM_GPU_ROADMAP section 4.5); the device SCF loop uses H
-  with the ECP inside; `-gpu cuda` energies equal the CPU (CH3I HF, HI B3LYP;
-  device 1e gradient vs CPU <= 1.4e-13 Eh/Bohr before the ECP term is added). RTX 5090 only.
+- CUDA (Nov 2026, `-qm.gpu_ecp auto|on|off`): ECP matrix and gradient on the device (`cuda/qm_gpu_ecp.cu`), the
+  order loop and its test on the host, so the order is the CPU's; device vs CPU matrix <= 8.5e-14 Eh, ECP gradient
+  <= 2.2e-16 Eh/Bohr; SnI4 TZVP run 27.5 -> 11.9 s; failures counted `qm_ecp`;
+  [QM_GPU_ROADMAP 4.6](QM_GPU_ROADMAP.md#46-ecp-matrix-and-ecp-gradient-on-the-device-nov-2026). RTX 5090 only.
 
 Checks (PySCF 2.14 / libxc 7.0.0, basis and ECP by PySCF name, Ce from curcuma's BSE text because PySCF's def2 library
 has no lanthanides; ORCA 6.1.0 `! RHF <basis> NoRI VeryTightSCF`; constructed geometries in `test_cases/structures`):
@@ -634,7 +636,7 @@ has no lanthanides; ORCA 6.1.0 `! RHF <basis> NoRI VeryTightSCF`; constructed ge
   HF energy 41 s on 1 thread; CeF4 def2-TZVP HF 29 s on 4 threads.
 - Not tested / not implemented: open shell (the engine is closed-shell only; most free heavy atoms and many TM
   compounds are open shell); h orbital shells; ECP terms with r^(n-2), n != 2 (not in def2-ECP, rejected); ECP
-  integrals or gradient on the GPU (CPU terms); relativistic effects beyond the scalar-relativistic ECP (no spin-orbit
+  on ROCm/Vulkan (CUDA only, QM_GPU_ROADMAP 4.6); relativistic effects beyond the scalar-relativistic ECP (no spin-orbit
   ECP, no DKH/ZORA for the all-electron 4th row); elements beyond Rn; ghost atoms and point charges; large systems
   (largest case: TiCl4 TZVP 193 functions, CeF4 TZVP); 3d compounds other than closed-shell ZnCl2, TiCl4, CuCl, the
   other lanthanides (only Ce, L = 5 path) and La; LMP2 and the D4 term with heavy elements (they run, no reference);

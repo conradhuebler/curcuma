@@ -151,6 +151,10 @@ BEGIN_PARAMETER_DEFINITION(qm)
     PARAM(gpu_grad1e, String, "auto",
           "With -gpu cuda|auto, one-electron part of the analytic RHF gradient on the device (Q-G8: overlap, kinetic and nuclear-attraction derivative integrals, basis and Hellmann-Feynman parts, contracted with the density and the energy-weighted density; reads the same device tables as the two-electron part). auto | on (device whenever -gpu is active) | off (CPU). The nuclear repulsion gradient stays on the host. Any device error falls back to the CPU and is counted as qm_grad1e.",
           "Performance", {})
+    // Claude Generated (Nov 2026): ECP matrix and ECP gradient on the device, cuda/qm_gpu_ecp.cu
+    PARAM(gpu_ecp, String, "auto",
+          "With -gpu cuda, the def2-ECP matrix and the ECP gradient on the device (local three-centre overlaps, radial factors, angular projections and the weighted contractions at one quadrature order; the order loop, its acceptance test and the angular tables stay on the host, so the radial order is the one of the CPU path). auto | on (same as auto) | off (CPU). Any device error falls back to the CPU and is counted as qm_ecp.",
+          "Performance", {})
     // GPU KS-DFT (Claude Generated, Oct 2026): exchange-correlation on the device, cuda/qm_gpu_xc.cu
     PARAM(gpu_xc, String, "auto",
           "With -gpu cuda, Kohn-Sham exchange-correlation on the device (lda/pbe/b3lyp): the molecular grid is uploaded once per geometry, AO values (with first and second derivatives), density, functional (the same point kernels as the CPU, qm_xc_kernels.h), V_xc, E_xc and the XC nuclear gradient incl. the grid response run on the device in streamed blocks of grid points; with it the device-resident SCF loop (gpu_scf) also runs Kohn-Sham. auto | on (same as auto; a failure is counted) | off (CPU XC). Any device error or too little device memory falls back to the CPU and is counted as qm_xc.",
@@ -641,6 +645,14 @@ private:
     // Q-G8 (Oct 2026): one-electron gradient on the device (-qm.gpu_grad1e auto|on|off).
     std::string m_gpu_grad1e = "auto";
     mutable bool m_gpu_grad1e_failed = false;  // device 1e gradient failed once: CPU from then on
+    // ECP on the device (Claude Generated, Nov 2026, -qm.gpu_ecp auto|on|off); a failure sets m_gpu_ecp_failed.
+    std::string m_gpu_ecp = "auto";
+    mutable bool m_gpu_ecp_failed = false;
+    mutable std::string m_gpu_ecp_info;  // last device ECP log text (matrix / gradient)
+    /// ECP matrix of the current geometry on the device; false = not done (counted as qm_ecp unless the mode is off).
+    bool gpuBuildECP(Matrix& Vecp);
+    /// ECP gradient on the device; false = not done (counted as qm_ecp unless the mode is off).
+    bool gpuGradientECP(const Matrix& Pc, Matrix& g) const;
     // GPU KS-DFT (Claude Generated, Oct 2026): device exchange-correlation (-qm.gpu_xc auto|on|off). One object per
     // geometry (grid resident), dropped in invalidateXC(); a failure sets m_gpu_xc_failed (CPU XC from then on).
     std::string m_gpu_xc = "auto";

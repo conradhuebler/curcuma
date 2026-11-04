@@ -25,7 +25,7 @@
  *     (1981); Flores-Moreno et al., J. Comput. Chem. 27, 1009 (2006), half-numerical scheme). T is a polynomial
  *     integral, done EXACTLY with a Lebedev grid of sufficient degree; the radial integral is a Gauss-Chebyshev
  *     (2nd kind) quadrature on r = ln(2/(1-x))/ln 2 whose order (2^k - 1 points) is doubled until the matrix changes
- *     by less than max(`radial_tol` = 1e-13 Eh, 2e-15 max|V|); CURCUMA_QM_ECP_DEBUG=1 prints the change per order.
+ *     by less than max(`radial_tol` = 1e-13 Eh, 1e-14 max|V|); CURCUMA_QM_ECP_DEBUG=1 prints the change per order.
  *   gradient: derivative functions d phi/dA = 2 alpha phi(a+1) - a phi(a-1) through the same code; the ECP centre
  *     by translational invariance, dV/dC = -(dV/dA + dV/dB); the quadrature grid moves with C, so the gradient is
  *     the exact derivative of the quadrature energy at a fixed order.
@@ -35,6 +35,7 @@
 
 #include "src/core/global.h"
 #include "GTOIntegrals.hpp"
+#include "qm_gpu_ecp_backend.h"  // device seam (CUDA-free interface), Nov 2026
 
 #include <string>
 #include <vector>
@@ -71,7 +72,8 @@ struct EcpCentre {
 
 struct EcpOptions {
     double radial_tol = 1.0e-13;  ///< max |dV| between two quadrature orders to accept the finer one (Eh); the
-                                  ///< rounding floor 2e-15 max|V| is accepted too
+                                  ///< rounding floor floor_rel max|V| is accepted too
+    double floor_rel = 1.0e-14;   ///< rounding floor relative to max|V| (Nov 2026: was 2e-15, inside the GEMM noise)
     int min_level = 7;            ///< first order 2^level - 1 radial points
     int max_level = 13;           ///< last order tried (8191 points); not converged there is an error
     int threads = 1;
@@ -93,5 +95,41 @@ bool buildECP(const std::vector<GTO::Orbital>& basis, const std::vector<EcpCentr
 /// same geometry (empty: converge again).
 Matrix gradientECP(const std::vector<GTO::Orbital>& basis, const std::vector<EcpCentre>& centres, const Matrix& P,
                    int natoms, const EcpOptions& opt, const EcpLevels& levels);
+
+// ---------------------------------------------------------------------------------------------------------------
+// Device path (Claude Generated, Nov 2026; seam qm_gpu_ecp_backend.h, kernels cuda/qm_gpu_ecp.cu). The host keeps
+// the order loop, its acceptance test and the angular tables; the device object computes the local matrix, the
+// semi-local matrix at one order and the gradient pieces. Same quantities as buildECP / gradientECP.
+// ---------------------------------------------------------------------------------------------------------------
+
+/// Host arrays behind a QMGpuEcpSetup: the functions of `basis` (and with `gradient` their centre derivatives).
+struct EcpDeviceFunctions {
+    std::vector<int> fn_atom, fn_term, term_p, term_slot, slot_atom;
+    std::vector<double> fn_xyz, term_c, term_alpha, slot_alpha;
+    int nbasis = 0, nfn = 0, natoms = 0;
+    QMGpuEcpSetup view() const;
+};
+EcpDeviceFunctions deviceFunctions(const std::vector<GTO::Orbital>& basis, int natoms, bool gradient);
+
+/// What the device path did (for the log line and the tests).
+struct EcpDeviceStats {
+    int centres = 0;
+    int cpu_order_centres = 0;   ///< centres whose order test was too close to the threshold: CPU loop used
+    double host_tables_ms = 0.0; ///< angular tables on the host
+    double max_order_margin = 0.0;
+};
+
+/// buildECP with the heavy parts on `dev` (created from deviceFunctions(basis, natoms, false)). The order of each
+/// centre is accepted with the CPU test on the device matrices; when the change lies within `order_margin` of the
+/// threshold, that centre's semi-local loop runs on the CPU (so the order is the CPU's). False with `why` on a device
+/// error (the caller falls back to buildECP) or a quadrature that did not converge.
+bool buildECPDevice(const std::vector<GTO::Orbital>& basis, const std::vector<EcpCentre>& centres, const EcpOptions& opt,
+                    QMGpuECP& dev, Matrix& V, EcpLevels& levels, EcpDeviceStats& stats, std::string& why);
+
+/// gradientECP with the heavy parts on `dev` (created from deviceFunctions(basis, natoms, true)); the orders come
+/// from `levels` (missing ones are converged on the CPU first, as gradientECP does). False on a device error.
+bool gradientECPDevice(const std::vector<GTO::Orbital>& basis, const std::vector<EcpCentre>& centres, const Matrix& P,
+                       int natoms, const EcpOptions& opt, const EcpLevels& levels, QMGpuECP& dev, Matrix& g,
+                       EcpDeviceStats& stats, std::string& why);
 
 }  // namespace qmecp

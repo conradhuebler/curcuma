@@ -361,6 +361,28 @@ std::unique_ptr<qmint::QMGpuGrad1e> createQmGrad1e(const std::string& backend, c
     return std::unique_ptr<qmint::QMGpuGrad1e>(static_cast<qmint::QMGpuGrad1e*>(p));
 }
 
+// Claude Generated (Nov 2026): ECP matrix and gradient on the device. The struct size travels with the call (layout
+// check in the plugin); _v1 changes with the QMGpuECP vtable.
+std::unique_ptr<qmecp::QMGpuECP> createQmECP(const std::string& backend, const qmecp::QMGpuEcpSetup& setup, int device,
+                                             std::string& why)
+{
+    void* handle = pluginHandle(backend, /*quiet=*/true);
+    if (!handle) {
+        why = "plugin libcurcuma_" + backend + ".so not loadable";
+        return nullptr;
+    }
+    using create_fn = void* (*)(const qmecp::QMGpuEcpSetup*, int, int, char*, int);
+    create_fn fn = resolveSymbol<create_fn>(handle, "curcuma_" + backend + "_create_qm_ecp_v1");
+    if (!fn) {
+        why = "plugin has no entry point curcuma_" + backend + "_create_qm_ecp_v1";
+        return nullptr;
+    }
+    char buf[512] = { 0 };
+    void* p = fn(&setup, (int)sizeof(qmecp::QMGpuEcpSetup), device, buf, (int)sizeof buf);
+    if (!p) why = buf;
+    return std::unique_ptr<qmecp::QMGpuECP>(static_cast<qmecp::QMGpuECP*>(p));
+}
+
 // Claude Generated (Oct 2026, WP10): density-fitting (RI) contractions on the device.
 std::unique_ptr<qmint::QMGpuRI> createQmRI(const std::string& backend, const double* T, int nfit, int n, int device,
                                            std::string& why)
