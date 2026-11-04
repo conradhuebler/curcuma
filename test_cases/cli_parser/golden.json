@@ -1,0 +1,367 @@
+[
+ {
+  "argv": [
+   "-sp",
+   "w.xyz",
+   "-method",
+   "gfn2"
+  ],
+  "controller": {
+   "global": {
+    "method": "gfn2"
+   },
+   "method": "gfn2",
+   "opt": {
+    "method": "gfn2"
+   },
+   "sp": {
+    "method": "gfn2"
+   }
+  }
+ },
+ {
+  "argv": [
+   "-sp",
+   "w.xyz",
+   "-max_iterations",
+   "3",
+   "-method",
+   "gfn2"
+  ],
+  "controller": {
+   "global": {
+    "method": "gfn2"
+   },
+   "method": "gfn2",
+   "opt": {
+    "max_iterations": 3.0,
+    "method": "gfn2"
+   },
+   "sp": {
+    "max_iterations": 3.0,
+    "method": "gfn2"
+   }
+  }
+ },
+ {
+  "argv": [
+   "-sp",
+   "w.xyz",
+   "-gfnff.cn_cutoff_bohr",
+   "5.5",
+   "-cn_cutoff_bohr",
+   "6"
+  ],
+  "controller": {
+   "gfnff": {
+    "cn_cutoff_bohr": 6.0
+   },
+   "opt": {},
+   "sp": {}
+  }
+ },
+ {
+  "argv": [
+   "-sp",
+   "w.xyz",
+   "-charge",
+   "-1",
+   "-spin",
+   "1"
+  ],
+  "controller": {
+   "charge": -1.0,
+   "global": {
+    "charge": -1.0,
+    "spin": 1.0
+   },
+   "opt": {
+    "charge": -1.0,
+    "spin": 1.0
+   },
+   "sp": {
+    "charge": -1.0,
+    "spin": 1.0
+   },
+   "spin": 1.0
+  }
+ },
+ {
+  "argv": [
+   "-sp",
+   "w.xyz",
+   "-verbose"
+  ],
+  "controller": {
+   "global": {
+    "verbosity": 3
+   },
+   "opt": {
+    "verbosity": 3
+   },
+   "sp": {
+    "verbosity": 3
+   },
+   "verbosity": 3
+  }
+ },
+ {
+  "argv": [
+   "-sp",
+   "w.xyz",
+   "-threads",
+   "4",
+   "5"
+  ],
+  "controller": {
+   "global": {
+    "threads": 4.0
+   },
+   "opt": {
+    "threads": 4.0
+   },
+   "sp": {
+    "threads": 4.0
+   },
+   "threads": 4.0
+  }
+ },
+ {
+  "argv": [
+   "-opt",
+   "w.xyz",
+   "-write_trajectory",
+   "0"
+  ],
+  "controller": {
+   "opt": {
+    "write_trajectory": 0.0
+   }
+  }
+ },
+ {
+  "argv": [
+   "-md",
+   "w.xyz",
+   "-temperature",
+   "400",
+   "-max_time",
+   "10"
+  ],
+  "controller": {
+   "md": {
+    "max_time": 10.0,
+    "temperature": 400.0
+   },
+   "simplemd": {
+    "max_time": 10.0,
+    "temperature": 400.0
+   }
+  }
+ },
+ {
+  "argv": [
+   "-confscan",
+   "c.xyz",
+   "-method",
+   "gfn2"
+  ],
+  "controller": {
+   "confscan": {
+    "method": "gfn2"
+   },
+   "global": {
+    "method": "gfn2"
+   },
+   "method": "gfn2"
+  }
+ },
+ {
+  "argv": [
+   "-confsearch",
+   "w.xyz",
+   "-temperature",
+   "400"
+  ],
+  "controller": {
+   "confsearch": {
+    "temperature": 400.0
+   }
+  }
+ },
+ {
+  "argv": [
+   "-casino",
+   "w.xyz",
+   "-temperature",
+   "400"
+  ],
+  "controller": {
+   "casino": {
+    "temperature": 400.0
+   }
+  }
+ },
+ {
+  "argv": [
+   "-hessian",
+   "w.xyz",
+   "-method",
+   "gfn2",
+   "-electronic_temperature",
+   "500"
+  ],
+  "controller": {
+   "global": {
+    "method": "gfn2"
+   },
+   "hessian": {
+    "method": "gfn2"
+   },
+   "method": "gfn2",
+   "xtb": {
+    "electronic_temperature": 500.0
+   }
+  }
+ },
+ {
+  "argv": [
+   "-rmsdtraj",
+   "t.xyz",
+   "-rmsd",
+   "0.5",
+   "-heavy"
+  ],
+  "controller": {
+   "rmsdtraj": {
+    "heavy": true,
+    "rmsd": 0.5
+   }
+  }
+ },
+ {
+  "argv": [
+   "-traj",
+   "t.xyz",
+   "-stride",
+   "5"
+  ],
+  "controller": {
+   "traj": {
+    "stride": 5.0
+   },
+   "trajectoryanalysis": {
+    "stride": 5.0
+   }
+  }
+ },
+ {
+  "argv": [
+   "-dock",
+   "-host",
+   "A.xyz",
+   "-guest",
+   "B.xyz",
+   "-step_x",
+   "4"
+  ],
+  "controller": {
+   "dock": {
+    "guest": "B.xyz",
+    "host": "A.xyz",
+    "step_x": 4.0
+   },
+   "docking": {
+    "guest": "B.xyz",
+    "host": "A.xyz",
+    "step_x": 4.0
+   }
+  }
+ },
+ {
+  "argv": [
+   "-sp",
+   "w.xyz",
+   "-temprature",
+   "400"
+  ],
+  "controller": {
+   "opt": {
+    "temprature": 400.0
+   },
+   "sp": {
+    "temprature": 400.0
+   }
+  }
+ },
+ {
+  "argv": [
+   "-sp",
+   "w.xyz",
+   "-export_run",
+   "2026run.json"
+  ],
+  "controller": {
+   "export_run": "2026run.json",
+   "global": {
+    "export_run": "2026run.json"
+   },
+   "opt": {
+    "export_run": "2026run.json"
+   },
+   "sp": {
+    "export_run": "2026run.json"
+   }
+  }
+ },
+ {
+  "argv": [
+   "-sp",
+   "w.xyz",
+   "-bak",
+   "1abc.log",
+   "-bak",
+   "x.log"
+  ],
+  "controller": {
+   "bak": [
+    "1abc.log",
+    "x.log"
+   ],
+   "global": {
+    "bak": [
+     "1abc.log",
+     "x.log"
+    ]
+   },
+   "opt": {
+    "bak": [
+     "1abc.log",
+     "x.log"
+    ]
+   },
+   "sp": {
+    "bak": [
+     "1abc.log",
+     "x.log"
+    ]
+   }
+  }
+ },
+ {
+  "argv": [
+   "-sp",
+   "w.xyz",
+   "-threshold",
+   "-1e-6"
+  ],
+  "controller": {
+   "opt": {
+    "threshold": -1e-06
+   },
+   "sp": {
+    "threshold": -1e-06
+   }
+  }
+ }
+]

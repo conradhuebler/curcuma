@@ -731,3 +731,9 @@ if(Python3_Interpreter_FOUND)
     set_tests_properties(xtb_library_energies
         PROPERTIES TIMEOUT 900 LABELS "gfnff;sqm;xtb_reference")
 endif()
+
+# Claude Generated (Nov 2026): golden test for CLI2Json routing (docs/debt_2026-11/PARAMS.md, step 0)
+add_executable(cli_parser_test cli_parser/cli_parser_test.cpp)
+target_link_libraries(cli_parser_test curcuma_core)
+add_test(NAME cli_parser_golden COMMAND cli_parser_test ${CMAKE_CURRENT_SOURCE_DIR}/cli_parser/golden.json)
+set_tests_properties(cli_parser_golden PROPERTIES LABELS "unit;routing")
