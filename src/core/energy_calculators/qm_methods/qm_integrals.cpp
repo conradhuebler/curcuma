@@ -17,6 +17,7 @@
 #include <climits>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -1709,6 +1710,64 @@ MDPair makeMDPair(const std::vector<EriShell>& sh, const ShellOutput& o, const S
     return m;
 }
 
+/// C[m x n] = A[m x k] B[k x n] (row-major, leading dimensions lda, ldb, ldc), C overwritten. Register
+/// blocked 4 x 8 (the block accumulators stay in registers over k); fixed summation order (k ascending), so
+/// the result does not depend on the thread count.
+void smallGemm(int m, int n, int kk, const double* A, int lda, const double* B, int ldb, double* C, int ldc)
+{
+    int i = 0;
+    for (; i + 4 <= m; i += 4) {
+        int j = 0;
+        for (; j + 8 <= n; j += 8) {
+            double acc[4][8] = {};
+            for (int k = 0; k < kk; ++k) {
+                const double* b = B + (size_t)k * ldb + j;
+                const double a0 = A[(size_t)i * lda + k], a1 = A[(size_t)(i + 1) * lda + k];
+                const double a2 = A[(size_t)(i + 2) * lda + k], a3 = A[(size_t)(i + 3) * lda + k];
+                for (int v = 0; v < 8; ++v) {
+                    acc[0][v] += a0 * b[v];
+                    acc[1][v] += a1 * b[v];
+                    acc[2][v] += a2 * b[v];
+                    acc[3][v] += a3 * b[v];
+                }
+            }
+            for (int r = 0; r < 4; ++r)
+                for (int v = 0; v < 8; ++v) C[(size_t)(i + r) * ldc + j + v] = acc[r][v];
+        }
+        for (; j < n; ++j) {
+            double a0 = 0.0, a1 = 0.0, a2 = 0.0, a3 = 0.0;
+            for (int k = 0; k < kk; ++k) {
+                const double b = B[(size_t)k * ldb + j];
+                a0 += A[(size_t)i * lda + k] * b;
+                a1 += A[(size_t)(i + 1) * lda + k] * b;
+                a2 += A[(size_t)(i + 2) * lda + k] * b;
+                a3 += A[(size_t)(i + 3) * lda + k] * b;
+            }
+            C[(size_t)i * ldc + j] = a0;
+            C[(size_t)(i + 1) * ldc + j] = a1;
+            C[(size_t)(i + 2) * ldc + j] = a2;
+            C[(size_t)(i + 3) * ldc + j] = a3;
+        }
+    }
+    for (; i < m; ++i) {
+        int j = 0;
+        for (; j + 8 <= n; j += 8) {
+            double acc[8] = {};
+            for (int k = 0; k < kk; ++k) {
+                const double* b = B + (size_t)k * ldb + j;
+                const double a = A[(size_t)i * lda + k];
+                for (int v = 0; v < 8; ++v) acc[v] += a * b[v];
+            }
+            for (int v = 0; v < 8; ++v) C[(size_t)i * ldc + j + v] = acc[v];
+        }
+        for (; j < n; ++j) {
+            double a0 = 0.0;
+            for (int k = 0; k < kk; ++k) a0 += A[(size_t)i * lda + k] * B[(size_t)k * ldb + j];
+            C[(size_t)i * ldc + j] = a0;
+        }
+    }
+}
+
 /// Per-thread scratch of mdQuartet (no allocation in the quartet loop).
 struct MDScratch {
     std::vector<double> F, R, tmpR, G, r, tmp;
@@ -2602,6 +2661,152 @@ Matrix buildExchange(const ERITensor& eri, const Matrix& P, int threads)
     return K;
 }
 
+// y[nu] += sum_sig B[nu][sig] x[sig] for a row-major n x n block, with the arithmetic of the reference BLAS DGEMV
+// that Eigen calls for `acc += B * x` (EIGEN_USE_BLAS, netlib libblas): per output element temp = 0, temp = temp +
+// B[nu][sig] x[sig] in sig order with a rounded product and a rounded sum (no FMA), then y[nu] = y[nu] + temp. Eight
+// rows run as independent chains (the reference loop is one latency-bound chain), so the values are those of the
+// library call bit for bit while the block is processed several times faster (Claude Generated, Nov 2026). Under a
+// different BLAS (OpenBLAS, MKL) the old path had that library's summation order instead; only the last bits differ.
+#if defined(__GNUC__) && !defined(__clang__)
+__attribute__((optimize("fp-contract=off")))
+#endif
+static void gemvRowsSequential(const double* B, int n, const double* x, double* y)
+{
+#if defined(__clang__)
+#pragma STDC FP_CONTRACT OFF
+#endif
+    int nu = 0;
+    for (; nu + 8 <= n; nu += 8) {
+        double t[8] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+        const double* b = B + (size_t)nu * n;
+        for (int sig = 0; sig < n; ++sig) {
+            const double xs = x[sig];
+            for (int r = 0; r < 8; ++r) {
+                const double prod = b[(size_t)r * n + sig] * xs;
+                t[r] = t[r] + prod;
+            }
+        }
+        for (int r = 0; r < 8; ++r) y[nu + r] = y[nu + r] + t[r];
+    }
+    for (; nu < n; ++nu) {
+        double t = 0.0;
+        const double* b = B + (size_t)nu * n;
+        for (int sig = 0; sig < n; ++sig) {
+            const double prod = b[sig] * x[sig];
+            t = t + prod;
+        }
+        y[nu] = y[nu] + t;
+    }
+}
+
+/// True when gemvRowsSequential reproduces `acc += B * x` of this build bit for bit (checked once on a random block;
+/// false under a BLAS with another summation order, then the Eigen call is used). Claude Generated (Nov 2026).
+static bool gemvSequentialMatchesEigen()
+{
+    static const bool ok = [] {
+        using RowMat = Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+        for (const int n : { 7, 37, 64, 129 }) {
+            RowMat B(n, n);
+            Eigen::VectorXd x(n), y0(n), y1;
+            uint64_t s = 0x9E3779B97F4A7C15ull + (uint64_t)n;
+            auto rnd = [&s]() {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                return (double)(s >> 11) * (1.0 / 9007199254740992.0) - 0.5;
+            };
+            for (int i = 0; i < n; ++i) {
+                x(i) = rnd();
+                y0(i) = rnd();
+                for (int j = 0; j < n; ++j) B(i, j) = rnd() * (1.0 + j);
+            }
+            y1 = y0;
+            const Eigen::Map<const RowMat> Bm(B.data(), n, n);
+            y0.noalias() += Bm * x;
+            gemvRowsSequential(B.data(), n, x.data(), y1.data());
+            for (int i = 0; i < n; ++i)
+                if (std::memcmp(&y0(i), &y1(i), sizeof(double)) != 0) return false;
+        }
+        return true;
+    }();
+    return ok;
+}
+
+// J and K from ONE pass over the stored tensor (Claude Generated, Nov 2026). For fixed (mu, lam) the n x n block
+// B = (mu lam | . .) is J(mu, lam) = B . P (the dot of buildCoulomb's row (mu, lam)) and the GEMV term of K.row(mu)
+// in buildExchange. Both use the same Eigen expressions on the same data in the same order, so J and K equal the two
+// separate calls bit for bit; the block is read from memory once instead of twice (the stored-tensor Fock build is
+// memory bound: H2O/def2-QZVPP, 1.5 GB tensor).
+void buildCoulombExchange(const ERITensor& eri, const Matrix& P, Matrix& J, Matrix& K, int threads)
+{
+    const int n = eri.n();
+    if (n < 32) threads = 1;  // as buildCoulomb / buildExchange
+    J = Matrix::Zero(n, n);
+    K = Matrix::Zero(n, n);
+    const Matrix Pc = P;
+    const Eigen::Map<const Eigen::VectorXd> pvec(Pc.data(), (Eigen::Index)n * n);
+    const double* base = eri.data();
+    using RowMat = Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+    const bool seq = gemvSequentialMatchesEigen();
+#ifdef _OPENMP
+#pragma omp parallel for num_threads(threads > 0 ? threads : 1) schedule(static)
+#endif
+    for (int mu = 0; mu < n; ++mu) {
+        Eigen::VectorXd acc = Eigen::VectorXd::Zero(n);
+        for (int lam = 0; lam < n; ++lam) {
+            const double* blk = base + ((size_t)mu * n + lam) * n * n;
+            const Eigen::Map<const Eigen::VectorXd> row(blk, (Eigen::Index)n * n);
+            J(mu, lam) = row.dot(pvec);
+            if (seq)
+                gemvRowsSequential(blk, n, Pc.data() + (size_t)lam * n, acc.data());
+            else {
+                const Eigen::Map<const RowMat> B(blk, n, n);
+                acc.noalias() += B * Pc.row(lam).transpose();
+            }
+        }
+        K.row(mu) = acc.transpose();
+    }
+    (void)threads;
+}
+
+void buildCoulombExchangeSpin(const ERITensor& eri, const Matrix& Pa, const Matrix& Pb, Matrix& J, Matrix& Ka, Matrix& Kb,
+                              int threads)
+{
+    const int n = eri.n();
+    if (n < 32) threads = 1;
+    J = Matrix::Zero(n, n);
+    Ka = Matrix::Zero(n, n);
+    Kb = Matrix::Zero(n, n);
+    const Matrix Pt = Pa + Pb;  // the argument buildCoulomb(eri, Pa + Pb) receives
+    const Matrix Pac = Pa, Pbc = Pb;
+    const Eigen::Map<const Eigen::VectorXd> pvec(Pt.data(), (Eigen::Index)n * n);
+    const double* base = eri.data();
+    using RowMat = Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+    const bool seq = gemvSequentialMatchesEigen();
+#ifdef _OPENMP
+#pragma omp parallel for num_threads(threads > 0 ? threads : 1) schedule(static)
+#endif
+    for (int mu = 0; mu < n; ++mu) {
+        Eigen::VectorXd acca = Eigen::VectorXd::Zero(n), accb = Eigen::VectorXd::Zero(n);
+        for (int lam = 0; lam < n; ++lam) {
+            const double* blk = base + ((size_t)mu * n + lam) * n * n;
+            const Eigen::Map<const Eigen::VectorXd> row(blk, (Eigen::Index)n * n);
+            J(mu, lam) = row.dot(pvec);
+            if (seq) {
+                gemvRowsSequential(blk, n, Pac.data() + (size_t)lam * n, acca.data());
+                gemvRowsSequential(blk, n, Pbc.data() + (size_t)lam * n, accb.data());
+            } else {
+                const Eigen::Map<const RowMat> B(blk, n, n);
+                acca.noalias() += B * Pac.row(lam).transpose();
+                accb.noalias() += B * Pbc.row(lam).transpose();
+            }
+        }
+        Ka.row(mu) = acca.transpose();
+        Kb.row(mu) = accb.transpose();
+    }
+    (void)threads;
+}
+
 // 4-index transform ERI_sph[i,j,k,l] = sum Q[a,i] Q[b,j] Q[c,k] Q[d,l] ERI[a,b,c,d]
 // as four one-index transforms (O(n^5) instead of the O(n^8) direct sum), each
 // using only the nonzeros of Q. Q is block-diagonal per shell -- s and p columns
@@ -2909,6 +3114,406 @@ void quartetGradient(const std::vector<EriShell>& sh, const ShellPair& bra, cons
     }
 }
 
+// ---------------------------------------------------------------------------
+// Hermite-matrix form of the two-electron gradient kernel (Claude Generated, Nov 2026)
+//
+// quartetGradient above is the readable reference: per primitive quartet it rebuilds the ket Hermite sums
+// h(t,u,v) for every ket power combination a derivative can reach and evaluates each derivative component
+// by short scalar loops. That was ~45x the cost of the energy kernel per quartet (H2O/def2-QZVPP: 55 Gcycles
+// of gradient against 1.2 Gcycles for the whole ERI build). The same derivative sum is evaluated here as
+// small matrix products in Hermite space (smallGemm), the idea of mdQuartet for the energy:
+//
+//   d/dA_x g_a = 2 alpha g_(a+1x) - a_x g_(a-1x)  in E form:
+//   EA_x[ab][h'] = c_a c_b (2 alpha E^x_t(a_x+1, b_x) - a_x E^x_t(a_x-1, b_x)) E^y_u E^z_v,  h' in simplex(LAB+1)
+//   E0[ab][h]    = c_a c_b E^x_t E^y_u E^z_v,                                              h  in simplex(LAB)
+//
+// built once per primitive pair (makeGradMDPair, raised Hermite tables of makeShellPair(..., 1, 1)). With
+// the quartet weights D[ab][cd] (in the basis of the tables: active/spherical when the engine is, the
+// transform folded into E0/EA as in makeMDPair), per shell quartet and ket primitive pair Y[ab][k] = sum_cd
+// D[ab][cd] E0^cd[cd][k], per bra primitive pair Y'[cd][h] = sum_ab D[ab][cd] E0^ab[ab][h], and per
+// primitive quartet (R carries the prefactor 2 pi^(5/2) / (p q sqrt(p+q)), (-1)^|k| on the ket index):
+//
+//   M [ab][h'] = sum_k (-1)^|k| Y [ab][k] R[h'+k]      h' in simplex(LAB+1)
+//   M'[cd][k'] = (-1)^|k'| sum_h Y'[cd][h] R[h+k']     k' in simplex(LCD+1)
+//   dA_x = sum EA^ab_x o M,   dC_x = sum EA^cd_x o M'
+//   dA_x + dB_x = sum_ab sum_h E0^ab[ab][h] M[ab][h+1x]   (bra translation: d/dP of the Hermite Gaussian
+//                                                           raises its index, E depends on A-B only)
+//   dD = -(dA + dB + dC)                                   (translational invariance, in the driver)
+//
+// Only the order of the sums differs from quartetGradient, so the values agree to rounding (f/g bases take
+// this kernel by default; s/p/d bases keep quartetGradient, bit for bit; CURCUMA_QM_GRAD_KERNEL=md|reference
+// overrides, comparison only).
+// ---------------------------------------------------------------------------
+
+/// One shell pair of the gradient kernel: per primitive pair (sorted by its Schwarz factor when the
+/// screening pairs are given) the exponent alpha of the first shell, p, P, Schwarz factor and E0 / EA.
+struct GradMDPair {
+    int A = 0, B = 0;
+    int LAB = 0, nab = 0, nh0 = 0, nh1 = 0;
+    bool tabled = false;
+    std::vector<double> p, ip, Px, Py, Pz, schwarz;
+    std::vector<double> E0;  ///< [prim][ab][nh0]
+    std::vector<double> EA;  ///< [prim][x][ab][nh1], derivative on the first shell of the pair
+    ~GradMDPair();
+};
+GradMDPair::~GradMDPair() = default;
+
+/// Index of the Hermite triple (t,u,v) in hermiteSimplex(L) order, as a (L+1)^3 lookup (cached, L <= 17).
+const std::vector<int>& hermiteIndex(int L)
+{
+    static const std::vector<std::vector<int>> table = [] {
+        std::vector<std::vector<int>> tab(18);
+        for (int l = 0; l <= 17; ++l) {
+            const int s = l + 1;
+            tab[l].assign((size_t)s * s * s, -1);
+            int k = 0;
+            for (int t = 0; t <= l; ++t)
+                for (int u = 0; u <= l - t; ++u)
+                    for (int v = 0; v <= l - t - u; ++v) tab[l][((size_t)t * s + u) * s + v] = k++;
+        }
+        return tab;
+    }();
+    return table[L];
+}
+
+/// rows (a, b) of a [nA*nB][len] block -> rows (a', b') = sum T_A[a][a'] T_B[b][b'] of [wA*wB][len] (T = nullptr:
+/// identity). The cartesian -> active transform of makeMDPair, applied to the gradient tables.
+void transformPairRows(const double* in, int nA, int nB, const Eigen::MatrixXd* TA, const Eigen::MatrixXd* TB, size_t len,
+                       double* out)
+{
+    const int wA = TA ? (int)TA->cols() : nA, wB = TB ? (int)TB->cols() : nB;
+    std::vector<double> mid((size_t)wA * nB * len, 0.0);
+    for (int a2 = 0; a2 < wA; ++a2)
+        for (int a = 0; a < nA; ++a) {
+            const double t = TA ? (*TA)(a, a2) : (a == a2 ? 1.0 : 0.0);
+            if (t == 0.0) continue;
+            for (int b = 0; b < nB; ++b) {
+                const double* x = in + ((size_t)a * nB + b) * len;
+                double* y = &mid[((size_t)a2 * nB + b) * len];
+                for (size_t h = 0; h < len; ++h) y[h] += t * x[h];
+            }
+        }
+    for (size_t z = 0; z < (size_t)wA * wB * len; ++z) out[z] = 0.0;
+    for (int a2 = 0; a2 < wA; ++a2)
+        for (int b2 = 0; b2 < wB; ++b2) {
+            double* y = out + ((size_t)a2 * wB + b2) * len;
+            for (int b = 0; b < nB; ++b) {
+                const double t = TB ? (*TB)(b, b2) : (b == b2 ? 1.0 : 0.0);
+                if (t == 0.0) continue;
+                const double* x = &mid[((size_t)a2 * nB + b) * len];
+                for (size_t h = 0; h < len; ++h) y[h] += t * x[h];
+            }
+        }
+}
+
+/// E0 and EA of every primitive pair of `rp` (raised tables, makeShellPair(sh, A, B, 1, 1)); primitive order
+/// and Schwarz factors from `sorted` (makeScreeningPairs) when given, else the order of rp. Cartesian, or in the
+/// active (spherical) basis of `so` when given: the transform folded in as in makeMDPair, so the quartet weights
+/// are then the active-basis D (Nov 2026: 49 instead of 100 components for an f pair, 81 instead of 225 for g).
+GradMDPair makeGradMDPair(const std::vector<EriShell>& sh, const ShellPair& rp, const ShellPair* sorted,
+                          const ShellOutput* so = nullptr)
+{
+    GradMDPair g;
+    g.A = rp.A;
+    g.B = rp.B;
+    const EriShell& A = sh[rp.A];
+    const EriShell& B = sh[rp.B];
+    const int nA = (int)A.lmn.size(), nB = (int)B.lmn.size();
+    g.LAB = A.L + B.L;
+    g.nab = nA * nB;
+    const auto& h0 = hermiteSimplex(g.LAB);
+    const auto& h1 = hermiteSimplex(g.LAB + 1);
+    g.nh0 = (int)h0.size();
+    g.nh1 = (int)h1.size();
+    g.tabled = true;
+    const int sT = (A.L + 2) * (B.L + 2), sI = B.L + 2;  // raised table strides [t][i][j]
+    // primitive order: that of the sorted screening pair (same (ia, ib) set: both skip K == 0)
+    std::vector<const PrimPair*> order;
+    std::vector<double> sch;
+    if (sorted) {
+        for (const PrimPair& s : sorted->prims)
+            for (const PrimPair& r : rp.prims)
+                if (r.ia == s.ia && r.ib == s.ib) {
+                    order.push_back(&r);
+                    sch.push_back(s.schwarz);
+                    break;
+                }
+    }
+    if (order.size() != rp.prims.size()) {
+        order.clear();
+        sch.clear();
+        for (const PrimPair& r : rp.prims) {
+            order.push_back(&r);
+            sch.push_back(0.0);
+        }
+    }
+    const size_t np = order.size();
+    g.E0.assign(np * g.nab * g.nh0, 0.0);
+    g.EA.assign(np * 3 * g.nab * g.nh1, 0.0);
+    for (size_t ip = 0; ip < np; ++ip) {
+        const PrimPair& pp = *order[ip];
+        g.p.push_back(pp.p);
+        g.ip.push_back(1.0 / pp.p);
+        g.Px.push_back(pp.Px);
+        g.Py.push_back(pp.Py);
+        g.Pz.push_back(pp.Pz);
+        g.schwarz.push_back(sch[ip]);
+        const double alpha = A.exps[pp.ia];
+        const std::vector<double>* Ed[3] = { &pp.Ex, &pp.Ey, &pp.Ez };
+        auto E1 = [&](int dir, int t, int i, int j) -> double {
+            if (i < 0 || t > i + j) return 0.0;
+            return (*Ed[dir])[t * sT + i * sI + j];
+        };
+        for (int a = 0; a < nA; ++a) {
+            const auto& la = A.lmn[a];
+            for (int b = 0; b < nB; ++b) {
+                const auto& lb = B.lmn[b];
+                const double cab = A.coef[a][pp.ia] * B.coef[b][pp.ib];
+                const int ab = a * nB + b;
+                double* e0 = &g.E0[(ip * g.nab + ab) * g.nh0];
+                for (int h = 0; h < g.nh0; ++h) {
+                    const int t = h0[h][0], u = h0[h][1], v = h0[h][2];
+                    e0[h] = cab * E1(0, t, la[0], lb[0]) * E1(1, u, la[1], lb[1]) * E1(2, v, la[2], lb[2]);
+                }
+                for (int x = 0; x < 3; ++x) {
+                    double* ea = &g.EA[((ip * 3 + x) * g.nab + ab) * g.nh1];
+                    for (int h = 0; h < g.nh1; ++h) {
+                        const int tuv[3] = { h1[h][0], h1[h][1], h1[h][2] };
+                        double f = cab;
+                        for (int dir = 0; dir < 3 && f != 0.0; ++dir) {
+                            if (dir == x) {
+                                const double up = 2.0 * alpha * E1(dir, tuv[dir], la[dir] + 1, lb[dir]);
+                                const double dn = la[dir] > 0 ? la[dir] * E1(dir, tuv[dir], la[dir] - 1, lb[dir]) : 0.0;
+                                f *= up - dn;
+                            } else
+                                f *= E1(dir, tuv[dir], la[dir], lb[dir]);
+                        }
+                        ea[h] = f;
+                    }
+                }
+            }
+        }
+    }
+    if (so && so->spherical && (!so->identity[rp.A] || !so->identity[rp.B])) {
+        const Eigen::MatrixXd* TA = so->identity[rp.A] ? nullptr : &so->T[rp.A];
+        const Eigen::MatrixXd* TB = so->identity[rp.B] ? nullptr : &so->T[rp.B];
+        const int nab2 = so->width[rp.A] * so->width[rp.B];
+        std::vector<double> E0s(np * nab2 * g.nh0), EAs(np * 3 * nab2 * g.nh1);
+        for (size_t ip = 0; ip < np; ++ip) {
+            transformPairRows(&g.E0[ip * g.nab * g.nh0], nA, nB, TA, TB, g.nh0, &E0s[ip * nab2 * g.nh0]);
+            for (int x = 0; x < 3; ++x)
+                transformPairRows(&g.EA[(ip * 3 + x) * g.nab * g.nh1], nA, nB, TA, TB, g.nh1,
+                                  &EAs[(ip * 3 + x) * nab2 * g.nh1]);
+        }
+        g.E0.swap(E0s);
+        g.EA.swap(EAs);
+        g.nab = nab2;
+    }
+    return g;
+}
+
+/// out[x] = sum_z a_x[z] m[z] for x = 0..NX-1 (a_x = a + x * stride): m is loaded once for all NX rows; n >= 16 with
+/// four fixed partial sums per row (vectorisable), else one. Fixed order, so independent of the thread count.
+template <int NX>
+void dotN(const double* a, size_t stride, const double* m, size_t n, double* out)
+{
+    if (n < 16) {
+        for (int x = 0; x < NX; ++x) out[x] = 0.0;
+        for (size_t z = 0; z < n; ++z) {
+            const double mz = m[z];
+            for (int x = 0; x < NX; ++x) out[x] += a[x * stride + z] * mz;
+        }
+        return;
+    }
+    double s[NX][4] = {};
+    size_t z = 0;
+    for (; z + 4 <= n; z += 4)
+        for (int x = 0; x < NX; ++x)
+            for (int v = 0; v < 4; ++v) s[x][v] += a[x * stride + z + v] * m[z + v];
+    for (int x = 0; x < NX; ++x) {
+        double r = 0.0;
+        for (size_t t = z; t < n; ++t) r += a[x * stride + t] * m[t];
+        out[x] = ((s[x][0] + s[x][1]) + (s[x][2] + s[x][3])) + r;
+    }
+}
+
+/// max |d[z]| (four partial maxima).
+double absMax(const double* d, size_t n)
+{
+    double m[4] = { 0.0, 0.0, 0.0, 0.0 };
+    size_t z = 0;
+    for (; z + 4 <= n; z += 4)
+        for (int v = 0; v < 4; ++v) m[v] = std::max(m[v], std::abs(d[z + v]));
+    for (; z < n; ++z) m[0] = std::max(m[0], std::abs(d[z]));
+    return std::max(std::max(m[0], m[1]), std::max(m[2], m[3]));
+}
+
+/// Per-thread scratch of quartetGradientMD.
+struct GradMDScratch {
+    std::vector<double> Y, Yp, Rm, Rn, M, Mp, R, Rl, F, Dt, EP;
+    ~GradMDScratch();
+};
+
+/// R-box offsets of the four Hermite simplices of a gradient class (LAB, LCD), the ket signs and the h -> h + 1x map
+/// into simplex(LAB+1); built once for LAB, LCD <= 8 (g shells).
+struct GradOffsets {
+    std::vector<int> offA0, offA1, offC0, offC1, shift;
+    std::vector<double> sgnC0, sgnC1;
+};
+const GradOffsets& gradOffsets(int LAB, int LCD)
+{
+    static const std::vector<GradOffsets> table = [] {
+        std::vector<GradOffsets> tab(81);
+        for (int la = 0; la <= 8; ++la)
+            for (int lc = 0; lc <= 8; ++lc) {
+                GradOffsets& o = tab[la * 9 + lc];
+                const int s = la + lc + 2;
+                auto off = [s](const std::array<int, 3>& h) { return (h[0] * s + h[1]) * s + h[2]; };
+                auto sgn = [](const std::array<int, 3>& h) { return ((h[0] + h[1] + h[2]) & 1) ? -1.0 : 1.0; };
+                for (const auto& h : hermiteSimplex(la)) o.offA0.push_back(off(h));
+                for (const auto& h : hermiteSimplex(la + 1)) o.offA1.push_back(off(h));
+                for (const auto& h : hermiteSimplex(lc)) {
+                    o.offC0.push_back(off(h));
+                    o.sgnC0.push_back(sgn(h));
+                }
+                for (const auto& h : hermiteSimplex(lc + 1)) {
+                    o.offC1.push_back(off(h));
+                    o.sgnC1.push_back(sgn(h));
+                }
+                const std::vector<int>& ix1 = hermiteIndex(la + 1);
+                const int s1 = la + 2;
+                const auto& h0 = hermiteSimplex(la);
+                const int nh0 = (int)h0.size();
+                o.shift.resize((size_t)3 * nh0);
+                for (int h = 0; h < nh0; ++h) {
+                    const int t = h0[h][0], u = h0[h][1], v = h0[h][2];
+                    o.shift[h] = ix1[((size_t)(t + 1) * s1 + u) * s1 + v];
+                    o.shift[nh0 + h] = ix1[((size_t)t * s1 + u + 1) * s1 + v];
+                    o.shift[2 * nh0 + h] = ix1[((size_t)t * s1 + u) * s1 + v + 1];
+                }
+            }
+        return tab;
+    }();
+    return table[LAB * 9 + LCD];
+}
+GradMDScratch::~GradMDScratch() = default;
+
+/// d/dA, d/dA + d/dB (bra translation gP) and d/dC of sum D (ab|cd) for one canonical shell quartet (see the block
+/// comment above); d/dB = gP - gA, d/dD = -(gP + gC). Dq: [ab][cd] weights in the basis of the tables (layout of
+/// quartetGradient). Primitive quartets with schwarz_b schwarz_k max|D| < prim_thr are skipped (0: every one).
+/// gP is returned instead of d/dB because a pair on one atom needs only the sum: for tight shells d/dA and d/dB are
+/// large and nearly opposite, and adding them would cost digits (methanol/def2-TZVP: 3e-13 Eh/Bohr).
+void quartetGradientMD(const GradMDPair& bra, const GradMDPair& ket, const double* Dq, double prim_thr, double gA[3],
+                       double gP[3], double gC[3], GradMDScratch& w)
+{
+    for (int k = 0; k < 3; ++k) gA[k] = gP[k] = gC[k] = 0.0;
+    const int LAB = bra.LAB, LCD = ket.LAB;
+    const int Lt = LAB + LCD + 1, s = Lt + 1;
+    const int nab = bra.nab, ncd = ket.nab;
+    const int nh0 = bra.nh0, nh1 = bra.nh1, nk0 = ket.nh0, nk1 = ket.nh1;
+    const GradOffsets& O = gradOffsets(LAB, LCD);
+    const double dmax = absMax(Dq, (size_t)nab * ncd);
+    if (dmax == 0.0) return;
+    const int npb = (int)bra.p.size(), npk = (int)ket.p.size();
+    // Y[ik] = D (nab x ncd) E0^cd[ik] (ncd x nk0), the ket Hermite sign folded in
+    w.Y.resize((size_t)npk * nab * nk0);
+    for (int ik = 0; ik < npk; ++ik) {
+        double* Y = &w.Y[(size_t)ik * nab * nk0];
+        smallGemm(nab, nk0, ncd, Dq, ncd, &ket.E0[(size_t)ik * ncd * nk0], nk0, Y, nk0);
+        for (int ab = 0; ab < nab; ++ab)
+            for (int k = 0; k < nk0; ++k) Y[(size_t)ab * nk0 + k] *= O.sgnC0[k];
+    }
+    // D^T for Y' = D^T (ncd x nab) E0^ab (nab x nh0)
+    w.Dt.resize((size_t)ncd * nab);
+    for (int ab = 0; ab < nab; ++ab)
+        for (int cd = 0; cd < ncd; ++cd) w.Dt[(size_t)cd * nab + ab] = Dq[(size_t)ab * ncd + cd];
+    w.Yp.resize((size_t)ncd * nh0);
+    w.Rm.resize((size_t)nk0 * nh1);
+    w.Rn.resize((size_t)nh0 * nk1);
+    w.M.resize((size_t)nab * nh1);
+    w.Mp.resize((size_t)ncd * nk1);
+    w.R.resize((size_t)s * s * s);
+    w.Rl.resize((size_t)s * s * s);
+    w.F.resize(Lt + 1);
+    static const double pref0 = 2.0 * std::pow(PI, 2.5);
+    const double ket_max = npk ? ket.schwarz[0] : 0.0;
+    for (int ib = 0; ib < npb; ++ib) {
+        if (prim_thr > 0.0 && bra.schwarz[ib] * ket_max * dmax < prim_thr) break;
+        const double* E0b = &bra.E0[(size_t)ib * nab * nh0];
+        smallGemm(ncd, nh0, nab, w.Dt.data(), nab, E0b, nh0, w.Yp.data(), nh0);
+        // rows 0-2: EA_x of this bra primitive pair; rows 3-5: EP_x[ab][h + 1x] = E0[ab][h] in the simplex(LAB+1)
+        // layout of M (the bra translation as a contiguous dot); one pass over M for all six
+        const size_t nm = (size_t)nab * nh1;
+        w.EP.assign(6 * nm, 0.0);
+        std::copy(&bra.EA[(size_t)ib * 3 * nm], &bra.EA[(size_t)(ib + 1) * 3 * nm], w.EP.begin());
+        for (int x = 0; x < 3; ++x)
+            for (int ab = 0; ab < nab; ++ab) {
+                const double* e0 = E0b + (size_t)ab * nh0;
+                double* ep = &w.EP[((size_t)(3 + x) * nab + ab) * nh1];
+                const int* sh = &O.shift[(size_t)x * nh0];
+                for (int h = 0; h < nh0; ++h) ep[sh[h]] = e0[h];
+            }
+        const double p = bra.p[ib], ipb = bra.ip[ib];
+        for (int ik = 0; ik < npk; ++ik) {
+            if (prim_thr > 0.0 && bra.schwarz[ib] * ket.schwarz[ik] * dmax < prim_thr) break;
+            const double q = ket.p[ik];
+            const double inv = 1.0 / (p + q);
+            const double rho = p * q * inv;
+            const double Wx = bra.Px[ib] - ket.Px[ik], Wy = bra.Py[ib] - ket.Py[ik], Wz = bra.Pz[ib] - ket.Pz[ik];
+            double* F = w.F.data();
+            boysFast(Lt, rho * (Wx * Wx + Wy * Wy + Wz * Wz), F);
+            const double pref = pref0 * ipb * ket.ip[ik] * std::sqrt(inv);
+            for (int n = 0; n <= Lt; ++n) F[n] *= pref;
+            buildR0Raw(Lt, Wx, Wy, Wz, rho, F, w.R.data(), w.Rl.data());
+            const double* R = w.R.data();
+            // M = Y[ik] Rm,  Rm[k][h'] = R[h' + k]
+            for (int k = 0; k < nk0; ++k) {
+                const double* Rk = R + O.offC0[k];
+                double* row = &w.Rm[(size_t)k * nh1];
+                for (int h = 0; h < nh1; ++h) row[h] = Rk[O.offA1[h]];
+            }
+            smallGemm(nab, nh1, nk0, &w.Y[(size_t)ik * nab * nk0], nk0, w.Rm.data(), nh1, w.M.data(), nh1);
+            // M' = Y' Rn,  Rn[h][k'] = (-1)^|k'| R[h + k']
+            for (int h = 0; h < nh0; ++h) {
+                const double* Rh = R + O.offA0[h];
+                double* row = &w.Rn[(size_t)h * nk1];
+                for (int k = 0; k < nk1; ++k) row[k] = O.sgnC1[k] * Rh[O.offC1[k]];
+            }
+            smallGemm(ncd, nk1, nh0, w.Yp.data(), nh0, w.Rn.data(), nk1, w.Mp.data(), nk1);
+            const double* M = w.M.data();
+            const double* Mp = w.Mp.data();
+            const size_t nmp = (size_t)ncd * nk1;
+            double dap[6], dc[3];
+            dotN<6>(w.EP.data(), nm, M, nm, dap);
+            dotN<3>(&ket.EA[(size_t)ik * 3 * nmp], nmp, Mp, nmp, dc);
+            for (int x = 0; x < 3; ++x) {
+                gA[x] += dap[x];
+                gP[x] += dap[3 + x];
+                gC[x] += dc[x];
+            }
+        }
+    }
+}
+
+/// Gradient kernel policy (Claude Generated, Nov 2026): quartetGradientMD for bases with f or g shells,
+/// quartetGradient (unchanged bits) for s/p/d bases. CURCUMA_QM_GRAD_KERNEL=md | reference forces one kernel
+/// for every basis (comparison only).
+bool useGradientMD(const std::vector<EriShell>& sh)
+{
+    static const int forced = [] {
+        const char* e = std::getenv("CURCUMA_QM_GRAD_KERNEL");
+        if (e == nullptr) return 0;
+        const std::string v(e);
+        if (v == "md") return 1;
+        if (v == "reference") return -1;
+        return 0;
+    }();
+    if (forced != 0) return forced > 0;
+    for (const EriShell& s : sh)
+        if (s.L >= 3) return true;
+    return false;
+}
+
 }  // namespace
 
 // 1/2 sum D (mn|ls)^X over canonical shell quartets only (as in buildERI), each
@@ -2976,12 +3581,188 @@ Matrix gradientTwoElectronDriver(const std::vector<GTO::Orbital>& basis, const s
     return grad;
 }
 
+/// Driver of the Hermite-matrix gradient kernel (Claude Generated, Nov 2026): the canonical-quartet loop of
+/// gradientTwoElectronDriver (same quartets, weights, fixed round-robin chunks added in chunk order, so 1 and N
+/// threads give the same bits) with quartetGradientMD, plus the density-weighted quartet screen of the device
+/// gradient: with screening > 0 a quartet is skipped when Q_AB Q_CD |D|max < gpuGradScreen(screening, 3)
+/// (= screening * 1e-4; Q = Schwarz factors of makeScreeningPairs), |D|max from `bound(A,B,C,D)` before the
+/// fill when the caller has one (density-matrix bound), else from the filled weights. Primitive quartets below
+/// 1e-3 of that threshold are skipped as in the energy kernel. screening = 0: every quartet (exact).
+/// so != nullptr (spherical): the tables carry the cartesian -> active transform and `fill_act` gives the weights in the
+/// active basis (widths so->width); `fill` (cartesian) only serves quartets with an untabled pair (quartetGradient).
+template <class Fill, class FillAct, class Bound>
+Matrix gradientTwoElectronDriverMD(const std::vector<GTO::Orbital>& basis, const std::vector<EriShell>& sh,
+                                   int natoms, int threads, double screening, const ShellOutput* so, Fill fill,
+                                   FillAct fill_act, Bound bound, bool has_bound)
+{
+    Matrix grad = Matrix::Zero(natoms, 3);
+    const int ns = (int)sh.size();
+    std::vector<int> atomOf(ns);
+    for (int s = 0; s < ns; ++s) atomOf[s] = basis[sh[s].first].atom;
+    std::vector<ShellPair> pairs;
+    pairs.reserve((size_t)ns * (ns + 1) / 2);
+    for (int A = 0; A < ns; ++A)
+        for (int B = A; B < ns; ++B) {
+            pairs.emplace_back();
+            pairs.back().A = A;
+            pairs.back().B = B;
+        }
+    const int np = (int)pairs.size();
+    const double thr = screening > 0.0 ? gpuGradScreen(screening, 3) : 0.0;
+    const double prim_thr = thr * 1.0e-3;
+    std::vector<ShellPair> spairs;  // Schwarz factors (pair and primitive level), same pair order
+    if (thr > 0.0) spairs = makeScreeningPairs(sh, threads);
+    double qmax = 0.0;
+    for (const ShellPair& sp : spairs) qmax = std::max(qmax, sp.schwarz);
+    std::vector<GradMDPair> md(np);
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 16) num_threads(threads > 0 ? threads : 1)
+#endif
+    for (int i = 0; i < np; ++i) {
+        pairs[i] = makeShellPair(sh, pairs[i].A, pairs[i].B, 1, 1);
+        // tables only for pairs that can pass the screen (margin 1e-6 as makeMDPairs: any |D| up to 1e6);
+        // a quartet with an untabled pair takes quartetGradient, so the result never depends on this cut
+        if (thr > 0.0 && spairs[i].schwarz * qmax < thr * 1.0e-6) continue;
+        md[i] = makeGradMDPair(sh, pairs[i], thr > 0.0 ? &spairs[i] : nullptr, so);
+    }
+    const int nchunk = std::max(1, std::min(256, np));
+    std::vector<Matrix> gchunk(nchunk, Matrix::Zero(natoms, 3));
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 1) num_threads(threads > 0 ? threads : 1)
+#endif
+    for (int ch = 0; ch < nchunk; ++ch) {
+        Matrix& g = gchunk[ch];
+        std::vector<double> Dq;
+        GradMDScratch w;
+        for (int i = ch; i < np; i += nchunk) {
+            const ShellPair& bra = pairs[i];
+            const double qi = thr > 0.0 ? spairs[i].schwarz : 0.0;
+            for (int j = i; j < np; ++j) {
+                const ShellPair& ket = pairs[j];
+                const int at[4] = { atomOf[bra.A], atomOf[bra.B], atomOf[ket.A], atomOf[ket.B] };
+                if (at[0] == at[1] && at[0] == at[2] && at[0] == at[3]) continue;
+                double qq = 0.0;
+                if (thr > 0.0) {
+                    qq = qi * spairs[j].schwarz;
+                    if (has_bound && qq * bound(bra.A, bra.B, ket.A, ket.B) < thr) continue;
+                }
+                const bool tabled = md[i].tabled && md[j].tabled;
+                if (tabled)
+                    fill_act(bra.A, bra.B, ket.A, ket.B, Dq);
+                else
+                    fill(bra.A, bra.B, ket.A, ket.B, Dq);
+                if (thr > 0.0 && !has_bound) {
+                    if (qq * absMax(Dq.data(), Dq.size()) < thr) continue;
+                }
+                const double f = 0.5 * (bra.A != bra.B ? 2.0 : 1.0) * (ket.A != ket.B ? 2.0 : 1.0)
+                               * (i != j ? 2.0 : 1.0);
+                double gA[3], gB[3], gC[3];
+                if (tabled) {
+                    double gP[3];
+                    quartetGradientMD(md[i], md[j], Dq.data(), prim_thr, gA, gP, gC, w);
+                    // per atom: a pair on one atom gets the pair translation (bra gP, ket -gP) as a whole
+                    for (int k = 0; k < 3; ++k) {
+                        if (at[0] == at[1])
+                            g(at[0], k) += f * gP[k];
+                        else {
+                            g(at[0], k) += f * gA[k];
+                            g(at[1], k) += f * (gP[k] - gA[k]);
+                        }
+                        if (at[2] == at[3])
+                            g(at[2], k) -= f * gP[k];
+                        else {
+                            g(at[2], k) += f * gC[k];
+                            g(at[3], k) -= f * (gP[k] + gC[k]);
+                        }
+                    }
+                    continue;
+                }
+                quartetGradient(sh, bra, ket, Dq, gA, gB, gC);
+                for (int k = 0; k < 3; ++k) {
+                    g(at[0], k) += f * gA[k];
+                    g(at[1], k) += f * gB[k];
+                    g(at[2], k) += f * gC[k];
+                    g(at[3], k) -= f * (gA[k] + gB[k] + gC[k]);
+                }
+            }
+        }
+    }
+    for (int ch = 0; ch < nchunk; ++ch) grad += gchunk[ch];
+    (void)threads;
+    return grad;
+}
+
+/// Where the shells sit in the basis of the MD gradient kernel: cartesian (so = nullptr) or the active basis of so.
+struct KernelBasis {
+    const ShellOutput* so = nullptr;  ///< nullptr: cartesian
+    ShellOutput own;
+    std::vector<int> first, width;
+    ~KernelBasis();
+};
+KernelBasis::~KernelBasis() = default;
+
+/// Kernel basis of a gradient call: the active (spherical) basis of Q when Q holds a transform, else cartesian.
+void makeKernelBasis(const std::vector<EriShell>& sh, int ncart, const Matrix* Q, KernelBasis& kb)
+{
+    const int ns = (int)sh.size();
+    kb.first.resize(ns);
+    kb.width.resize(ns);
+    if (Q && Q->size() != 0) {
+        kb.own = makeShellOutput(sh, ncart, Q);
+        kb.so = &kb.own;
+        kb.first = kb.own.first;
+        kb.width = kb.own.width;
+        return;
+    }
+    for (int s = 0; s < ns; ++s) {
+        kb.first[s] = sh[s].first;
+        kb.width[s] = (int)sh[s].lmn.size();
+    }
+}
+
+/// Active-basis density from the cartesian one, Pc = Q P Q^T  ->  P = Q+ Pc Q+^T with Q+ = (T^T T)^-1 T^T per shell
+/// (Q is block-diagonal per shell with full column rank; exact up to rounding). Cartesian kernel basis: Pc itself.
+Matrix kernelDensity(const std::vector<EriShell>& sh, const KernelBasis& kb, const Matrix& Pc)
+{
+    if (!kb.so) return Pc;
+    const ShellOutput& so = *kb.so;
+    const int ns = (int)sh.size(), ncart = (int)Pc.rows();
+    Matrix Qp = Matrix::Zero(so.n, ncart);
+    for (int s = 0; s < ns; ++s) {
+        const int nc = (int)sh[s].lmn.size();
+        if (so.identity[s]) {
+            for (int a = 0; a < nc; ++a) Qp(so.first[s] + a, sh[s].first + a) = 1.0;
+            continue;
+        }
+        const Eigen::MatrixXd& T = so.T[s];  // nc x width
+        const Eigen::MatrixXd Tp = (T.transpose() * T).inverse() * T.transpose();
+        for (int a = 0; a < so.width[s]; ++a)
+            for (int b = 0; b < nc; ++b) Qp(so.first[s] + a, sh[s].first + b) = Tp(a, b);
+    }
+    const Matrix X = Qp * Pc;
+    return X * Qp.transpose();
+}
+
+/// Shell-block maxima |P| (blocks first/width of the kernel basis) for the density bounds of the MD driver.
+Eigen::MatrixXd shellBlockMax(const KernelBasis& kb, const Matrix& P)
+{
+    const int ns = (int)kb.first.size();
+    Eigen::MatrixXd m = Eigen::MatrixXd::Zero(ns, ns);
+    for (int A = 0; A < ns; ++A)
+        for (int B = A; B < ns; ++B) {
+            const double v = P.block(kb.first[A], kb.first[B], kb.width[A], kb.width[B]).cwiseAbs().maxCoeff();
+            m(A, B) = m(B, A) = v;
+        }
+    return m;
+}
+
 // gradientTwoElectron (exchange_only = false, the WP8 expression unchanged) and gradientTwoElectronExchange
 // (Claude Generated, Oct 2026, RI-J gradient: only the exchange part D = -1/4 (P_ml P_ns + P_ms P_nl)).
 // WP8 KS (Oct 2026): kx scales the exchange part (a_x of a hybrid, 0 for LDA/GGA); kx = 1 keeps the HF expression
 // bit for bit.
 Matrix gradientTwoElectronImpl(const std::vector<GTO::Orbital>& basis, const Matrix& P,
-                               int natoms, int threads, bool exchange_only, double kx = 1.0)
+                               int natoms, int threads, bool exchange_only, double kx, double screening,
+                               const Matrix* Q = nullptr)
 {
     if (basis.empty()) return Matrix::Zero(natoms, 3);
     const std::vector<EriShell> sh = groupShells(basis);
@@ -3010,6 +3791,32 @@ Matrix gradientTwoElectronImpl(const std::vector<GTO::Orbital>& basis, const Mat
                                 P(m, n) * P(l, s) - 0.25 * kx * (P(m, l) * P(n, s) + P(m, s) * P(n, l));
                     }
     };
+    if (useGradientMD(sh)) {  // f/g bases (Nov 2026): Hermite-matrix kernel, active basis, density-weighted screen
+        KernelBasis kb;
+        makeKernelBasis(sh, (int)basis.size(), Q, kb);
+        const Matrix Pk = kernelDensity(sh, kb, P);
+        // the weights of `fill` in the kernel basis (same expression, active indices)
+        const double fj = exchange_only ? 0.0 : 1.0, fk = exchange_only ? 0.25 : 0.25 * kx;
+        auto fill_act = [&](int sA, int sB, int sC, int sD, std::vector<double>& Dq) {
+            const int fA = kb.first[sA], fB = kb.first[sB], fC = kb.first[sC], fD = kb.first[sD];
+            const int nA = kb.width[sA], nB = kb.width[sB], nC = kb.width[sC], nD = kb.width[sD];
+            Dq.resize((size_t)nA * nB * nC * nD);
+            for (int a = 0; a < nA; ++a)
+                for (int b = 0; b < nB; ++b)
+                    for (int c = 0; c < nC; ++c)
+                        for (int d = 0; d < nD; ++d) {
+                            const int m = fA + a, n = fB + b, l = fC + c, s = fD + d;
+                            Dq[((size_t)(a * nB + b) * nC + c) * nD + d] =
+                                fj * Pk(m, n) * Pk(l, s) - fk * (Pk(m, l) * Pk(n, s) + Pk(m, s) * Pk(n, l));
+                        }
+        };
+        const Eigen::MatrixXd Pm = shellBlockMax(kb, Pk);
+        const double cj = exchange_only ? 0.0 : 1.0, ck = 0.25 * (exchange_only ? 1.0 : std::abs(kx));
+        auto bound = [&](int A, int B, int C, int D) {
+            return cj * Pm(A, B) * Pm(C, D) + ck * (Pm(A, C) * Pm(B, D) + Pm(A, D) * Pm(B, C));
+        };
+        return gradientTwoElectronDriverMD(basis, sh, natoms, threads, screening, kb.so, fill, fill_act, bound, true);
+    }
     return gradientTwoElectronDriver(basis, sh, natoms, threads, fill);
 }
 
@@ -3018,22 +3825,29 @@ Matrix gradientTwoElectronImpl(const std::vector<GTO::Orbital>& basis, const Mat
 Matrix gradientTwoElectron(const std::vector<GTO::Orbital>& basis, const Matrix& P,
                            int natoms, int threads)
 {
-    return gradientTwoElectronImpl(basis, P, natoms, threads, false);
+    return gradientTwoElectronImpl(basis, P, natoms, threads, false, 1.0, 0.0);
+}
+
+// Declared in qm_ri.h (Nov 2026): the same with the screen of the Hermite-matrix kernel (f/g bases only).
+Matrix gradientTwoElectron(const std::vector<GTO::Orbital>& basis, const Matrix& P, int natoms, int threads,
+                           double screening, const Matrix* Q)
+{
+    return gradientTwoElectronImpl(basis, P, natoms, threads, false, 1.0, screening, Q);
 }
 
 // Declared in qm_ri.h (qm_integrals.hpp is included by the CUDA kernel units; a change there would
 // rebuild them). Claude Generated (Oct 2026, RI-J gradient).
 Matrix gradientTwoElectronExchange(const std::vector<GTO::Orbital>& basis, const Matrix& P,
-                                   int natoms, int threads)
+                                   int natoms, int threads, double screening, const Matrix* Q)
 {
-    return gradientTwoElectronImpl(basis, P, natoms, threads, true);
+    return gradientTwoElectronImpl(basis, P, natoms, threads, true, 1.0, screening, Q);
 }
 
 // Declared in qm_ri.h (same reason). Claude Generated (Oct 2026, WP8 Kohn-Sham gradient).
 Matrix gradientTwoElectronScaled(const std::vector<GTO::Orbital>& basis, const Matrix& P, double kx,
-                                 int natoms, int threads)
+                                 int natoms, int threads, double screening, const Matrix* Q)
 {
-    return gradientTwoElectronImpl(basis, P, natoms, threads, false, kx);
+    return gradientTwoElectronImpl(basis, P, natoms, threads, false, kx, screening, Q);
 }
 
 // Declared in qm_ri.h (same reason). Claude Generated (Nov 2026, stage 5b): UHF/UKS two-electron gradient,
@@ -3041,7 +3855,7 @@ Matrix gradientTwoElectronScaled(const std::vector<GTO::Orbital>& basis, const M
 //   D   = Pt_mn Pt_ls - (kx/2) sum_s (Ps_ml Ps_ns + Ps_ms Ps_nl)
 // (Pa = Pb = P/2 gives the RHF weight of gradientTwoElectronScaled). Same canonical-quartet driver.
 Matrix gradientTwoElectronUHF(const std::vector<GTO::Orbital>& basis, const Matrix& Pa, const Matrix& Pb, double kx,
-                              int natoms, int threads)
+                              int natoms, int threads, double screening, const Matrix* Q)
 {
     if (basis.empty()) return Matrix::Zero(natoms, 3);
     const std::vector<EriShell> sh = groupShells(basis);
@@ -3063,6 +3877,33 @@ Matrix gradientTwoElectronUHF(const std::vector<GTO::Orbital>& basis, const Matr
                         Dq[((size_t)(a * nB + b) * nC + c) * nD + d] = Pt(m, n) * Pt(l, s) - 0.5 * kx * kab;
                     }
     };
+    if (useGradientMD(sh)) {  // f/g bases: bound Pt Pt + |kx| (S S + S S), S = max(|Pa|, |Pb|) (as the device)
+        KernelBasis kb;
+        makeKernelBasis(sh, (int)basis.size(), Q, kb);
+        const Matrix Ak = kernelDensity(sh, kb, Pa), Bk = kernelDensity(sh, kb, Pb);
+        const Matrix Tk = Ak + Bk;
+        auto fill_act = [&](int sA, int sB, int sC, int sD, std::vector<double>& Dq) {
+            const int fA = kb.first[sA], fB = kb.first[sB], fC = kb.first[sC], fD = kb.first[sD];
+            const int nA = kb.width[sA], nB = kb.width[sB], nC = kb.width[sC], nD = kb.width[sD];
+            Dq.resize((size_t)nA * nB * nC * nD);
+            for (int a = 0; a < nA; ++a)
+                for (int b = 0; b < nB; ++b)
+                    for (int c = 0; c < nC; ++c)
+                        for (int d = 0; d < nD; ++d) {
+                            const int m = fA + a, n = fB + b, l = fC + c, s = fD + d;
+                            const double kab = Ak(m, l) * Ak(n, s) + Ak(m, s) * Ak(n, l) + Bk(m, l) * Bk(n, s)
+                                + Bk(m, s) * Bk(n, l);
+                            Dq[((size_t)(a * nB + b) * nC + c) * nD + d] = Tk(m, n) * Tk(l, s) - 0.5 * kx * kab;
+                        }
+        };
+        const Eigen::MatrixXd Pm = shellBlockMax(kb, Tk);
+        const Eigen::MatrixXd Sm = shellBlockMax(kb, Ak).cwiseMax(shellBlockMax(kb, Bk));
+        const double ak = std::abs(kx);
+        auto bound = [&](int A, int B, int C, int D) {
+            return Pm(A, B) * Pm(C, D) + ak * (Sm(A, C) * Sm(B, D) + Sm(A, D) * Sm(B, C));
+        };
+        return gradientTwoElectronDriverMD(basis, sh, natoms, threads, screening, kb.so, fill, fill_act, bound, true);
+    }
     return gradientTwoElectronDriver(basis, sh, natoms, threads, fill);
 }
 
@@ -3072,7 +3913,7 @@ Matrix gradientTwoElectronUHF(const std::vector<GTO::Orbital>& basis, const Matr
 //   + Dns, the non-separable MP2 part, given in the ACTIVE basis and taken to the cartesian one per
 //     shell quartet with the transposed blocks of Q (Gamma_cart = Q Gamma_act Q^T on every index).
 Matrix gradientTwoElectronMP2(const std::vector<GTO::Orbital>& basis, const Matrix& P, const Matrix& P2,
-                              const double* Dns, const Matrix* Q, int natoms, int threads)
+                              const double* Dns, const Matrix* Q, int natoms, int threads, double screening)
 {
     if (basis.empty()) return Matrix::Zero(natoms, 3);
     const std::vector<EriShell> sh = groupShells(basis);
@@ -3115,6 +3956,31 @@ Matrix gradientTwoElectronMP2(const std::vector<GTO::Orbital>& basis, const Matr
                                 + blk[idx];
                     }
     };
+    auto nobound = [](int, int, int, int) { return 0.0; };
+    if (useGradientMD(sh)) {  // f/g bases: active-basis weights (Dns read directly), screen on the filled weights
+        KernelBasis kb;
+        makeKernelBasis(sh, (int)basis.size(), Q, kb);
+        const Matrix Pk = kernelDensity(sh, kb, P), P2k = kernelDensity(sh, kb, P2);
+        const int nk = (int)Pk.rows();
+        auto fill_act = [&](int sA, int sB, int sC, int sD, std::vector<double>& Dq) {
+            const int fA = kb.first[sA], fB = kb.first[sB], fC = kb.first[sC], fD = kb.first[sD];
+            const int nA = kb.width[sA], nB = kb.width[sB], nC = kb.width[sC], nD = kb.width[sD];
+            Dq.resize((size_t)nA * nB * nC * nD);
+            for (int a = 0; a < nA; ++a)
+                for (int b = 0; b < nB; ++b)
+                    for (int c = 0; c < nC; ++c)
+                        for (int e = 0; e < nD; ++e) {
+                            const int m = fA + a, n = fB + b, l = fC + c, s = fD + e;
+                            const size_t idx = ((size_t)(a * nB + b) * nC + c) * nD + e;
+                            Dq[idx] = Pk(m, n) * Pk(l, s) - 0.25 * (Pk(m, l) * Pk(n, s) + Pk(m, s) * Pk(n, l))
+                                    + (P2k(m, n) * Pk(l, s) + Pk(m, n) * P2k(l, s))
+                                    - 0.25 * (P2k(m, l) * Pk(n, s) + Pk(m, l) * P2k(n, s) + P2k(m, s) * Pk(n, l)
+                                              + Pk(m, s) * P2k(n, l))
+                                    + Dns[(((size_t)m * nk + n) * nk + l) * nk + s];
+                        }
+        };
+        return gradientTwoElectronDriverMD(basis, sh, natoms, threads, screening, kb.so, fill, fill_act, nobound, false);
+    }
     return gradientTwoElectronDriver(basis, sh, natoms, threads, fill);
 }
 
@@ -3122,7 +3988,8 @@ Matrix gradientTwoElectronMP2(const std::vector<GTO::Orbital>& basis, const Matr
 // The PT2 part (Dns optional); with include_ks also the KS part P x P of gradientTwoElectronScaled, so that
 // computeDoubleHybridGradient needs one pass over the derivative integrals (Oct 31 2026, saves the second pass).
 Matrix gradientTwoElectronDHPT2(const std::vector<GTO::Orbital>& basis, const Matrix& P, const Matrix& P2,
-                                const double* Dns, const Matrix* Q, double kx, int natoms, int threads, bool include_ks)
+                                const double* Dns, const Matrix* Q, double kx, int natoms, int threads, bool include_ks,
+                                double screening)
 {
     if (basis.empty()) return Matrix::Zero(natoms, 3);
     const std::vector<EriShell> sh = groupShells(basis);
@@ -3169,6 +4036,33 @@ Matrix gradientTwoElectronDHPT2(const std::vector<GTO::Orbital>& basis, const Ma
                             : pt2;
                     }
     };
+    auto nobound = [](int, int, int, int) { return 0.0; };
+    if (useGradientMD(sh)) {  // f/g bases: active-basis weights (Dns read directly), screen on the filled weights
+        KernelBasis kb;
+        makeKernelBasis(sh, (int)basis.size(), Q, kb);
+        const Matrix Pk = kernelDensity(sh, kb, P), P2k = kernelDensity(sh, kb, P2);
+        const int nk = (int)Pk.rows();
+        auto fill_act = [&](int sA, int sB, int sC, int sD, std::vector<double>& Dq) {
+            const int fA = kb.first[sA], fB = kb.first[sB], fC = kb.first[sC], fD = kb.first[sD];
+            const int nA = kb.width[sA], nB = kb.width[sB], nC = kb.width[sC], nD = kb.width[sD];
+            Dq.resize((size_t)nA * nB * nC * nD);
+            for (int a = 0; a < nA; ++a)
+                for (int b = 0; b < nB; ++b)
+                    for (int c = 0; c < nC; ++c)
+                        for (int e = 0; e < nD; ++e) {
+                            const int m = fA + a, n = fB + b, l = fC + c, s = fD + e;
+                            const size_t idx = ((size_t)(a * nB + b) * nC + c) * nD + e;
+                            const double pt2 = (P2k(m, n) * Pk(l, s) + Pk(m, n) * P2k(l, s))
+                                - 0.25 * kx * (P2k(m, l) * Pk(n, s) + Pk(m, l) * P2k(n, s) + P2k(m, s) * Pk(n, l)
+                                               + Pk(m, s) * P2k(n, l))
+                                + (Dns ? Dns[(((size_t)m * nk + n) * nk + l) * nk + s] : 0.0);
+                            Dq[idx] = include_ks
+                                ? (Pk(m, n) * Pk(l, s) - 0.25 * kx * (Pk(m, l) * Pk(n, s) + Pk(m, s) * Pk(n, l))) + pt2
+                                : pt2;
+                        }
+        };
+        return gradientTwoElectronDriverMD(basis, sh, natoms, threads, screening, kb.so, fill, fill_act, nobound, false);
+    }
     return gradientTwoElectronDriver(basis, sh, natoms, threads, fill);
 }
 

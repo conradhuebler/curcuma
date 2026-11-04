@@ -208,7 +208,7 @@ void QMEngine::dhPT2ForcesDevice(const Matrix& posBohr, const Matrix& Pc, const 
     }
     if (!on_device2)
         g2 = qmint::gradientTwoElectronDHPT2(m_gto_basis, Pc, P2c, Gamma, Qp, m_xc.exact_exchange, m_atomcount, m_threads,
-                                             ks2e_deferred);
+                                             ks2e_deferred, m_eri_screening);
     bool on_device3 = false;
     if (ri) {
         // RI-PT2 3-index part (the quantity of RIJK::threeIndexGradient); the 2-index metric part stays on the host

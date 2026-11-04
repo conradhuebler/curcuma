@@ -1033,7 +1033,9 @@ Matrix QMEngine::buildAtomicHFGuess() const
             Eigen::MatrixXd Pold = Pa;
             for (int it2 = 0; it2 < 200; ++it2) {
                 const Matrix Pr(Pa);
-                const Matrix Fa = Ha + qmint::buildCoulomb(eri, Pr, 1) - 0.5 * qmint::buildExchange(eri, Pr, 1);
+                Matrix Jg, Kg;  // one tensor pass, the bits of buildCoulomb + buildExchange (Nov 2026)
+                qmint::buildCoulombExchange(eri, Pr, Jg, Kg, 1);
+                const Matrix Fa = Ha + Jg - 0.5 * Kg;
                 Eigen::GeneralizedSelfAdjointEigenSolver<Eigen::MatrixXd> ges(Eigen::MatrixXd(Fa), Scol);
                 if (ges.info() != Eigen::Success) break;
                 const Eigen::VectorXd e = ges.eigenvalues();
@@ -1912,8 +1914,7 @@ void QMEngine::buildJKExact(const Matrix& P, Matrix& J, Matrix& K) const
         // re-evaluated: after a device failure the host may not be allowed to hold the tensor
         if (!useDirectSCF()) {
             const qmint::ERITensor& eri = eriActive();
-            J = qmint::buildCoulomb(eri, P, m_threads);
-            K = qmint::buildExchange(eri, P, m_threads);
+            qmint::buildCoulombExchange(eri, P, J, K, m_threads);  // one tensor pass, bits of the two calls (Nov 2026)
             return;
         }
     }

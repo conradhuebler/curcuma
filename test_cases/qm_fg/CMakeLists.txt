@@ -4,6 +4,8 @@
 # reference.json, written by scripts/qm_fg_reference.py (PySCF 2.14 / libxc 7.0.0 and ORCA 6.1.0, settings there):
 #   qm_fg_ref_<case>   energy vs PySCF 1e-8 Eh (and ORCA 1e-8 Eh where stored, RI-MP2 2e-8), gradient vs PySCF 1e-8 Eh/Bohr
 #   qm_fg_fd_<case>    analytic gradient vs a 4-point central difference of curcuma's own energies (1e-8 Eh/Bohr)
+#   qm_fg_kernel_<case> Hermite-matrix 2e gradient kernel vs the reference kernel (1e-11 Eh/Bohr, Nov 2026)
+#   qm_fg_threads_<case> f/g gradient at 1 and 4 threads bit for bit (Nov 2026)
 #   qm_fg_gpu_<case>   -gpu cuda run finishes with the CPU energy; 77 = skip without CUDA
 #   qm_gpu_fg_*        stage 6b (label qm_gpu_fg): dump_qm_energy --gpu cuda vs the CPU (energy 1e-9 Eh, gradient 1e-10
 #                      Eh/Bohr) and FD gate / PySCF reference on the device path; fail on any counted fallback of the f/g
@@ -27,6 +29,16 @@ if(Python3_Interpreter_FOUND)
                   mp2_H2O_def2-TZVP b2plyp_H2O_def2-TZVP_sg1)
         add_test(NAME qm_fg_fd_${_case} COMMAND ${_FG_CHECK} --check fd --case ${_case})
         set_tests_properties(qm_fg_fd_${_case} PROPERTIES TIMEOUT 900 LABELS "qm_fg")
+    endforeach()
+    # Nov 2026: Hermite-matrix 2e gradient kernel (default for f/g) vs the reference kernel, and 1 vs 4 threads bitwise
+    foreach(_case hfgrad_H2O_def2-TZVP hfgrad_NH3_def2-TZVPD b3lypgrad_H2O_def2-TZVP_sg1 hf_H2O_def2-QZVPP
+                  mp2_H2O_def2-TZVP b2plyp_H2O_def2-TZVP_sg1)
+        add_test(NAME qm_fg_kernel_${_case} COMMAND ${_FG_CHECK} --check kernel --case ${_case})
+        set_tests_properties(qm_fg_kernel_${_case} PROPERTIES TIMEOUT 600 LABELS "qm_fg")
+    endforeach()
+    foreach(_case hfgrad_H2O_def2-TZVP hfgrad_NH3_def2-TZVPD b3lypgrad_H2O_def2-TZVP_sg1)
+        add_test(NAME qm_fg_threads_${_case} COMMAND ${_FG_CHECK} --check threads --case ${_case})
+        set_tests_properties(qm_fg_threads_${_case} PROPERTIES TIMEOUT 600 LABELS "qm_fg")
     endforeach()
     foreach(_case hf_H2O_def2-TZVP b3lyp_H2O_def2-TZVP_sg1)
         add_test(NAME qm_fg_gpu_${_case} COMMAND ${_FG_CHECK} --check gpu --case ${_case} --curcuma $<TARGET_FILE:curcuma>)

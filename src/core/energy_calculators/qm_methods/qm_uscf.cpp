@@ -216,9 +216,7 @@ void QMEngine::buildJKSpin(const Matrix& Pa, const Matrix& Pb, Matrix& J, Matrix
         if (!useDirectSCF()) {  // re-evaluated: after a device failure the host may not hold the tensor
             // stored host tensor: J once from the total density, K per spin
             const qmint::ERITensor& eri = eriActive();
-            J = qmint::buildCoulomb(eri, Pa + Pb, m_threads);
-            Ka = qmint::buildExchange(eri, Pa, m_threads);
-            Kb = qmint::buildExchange(eri, Pb, m_threads);
+            qmint::buildCoulombExchangeSpin(eri, Pa, Pb, J, Ka, Kb, m_threads);  // one pass, bits of the 3 calls (Nov 2026)
             return;
         }
     }
@@ -593,7 +591,8 @@ bool QMEngine::computeGradientUHF()
         }
     } else if (be2.empty() || !gpuGradientTwoElectronUHF(tables_ok ? &tables : nullptr, tab_why, be2, Pac, Pbc, kx, g2, info)) {
         info = "CPU";
-        g2 = qmint::gradientTwoElectronUHF(m_gto_basis, Pac, Pbc, kx, m_atomcount, m_threads);
+        g2 = qmint::gradientTwoElectronUHF(m_gto_basis, Pac, Pbc, kx, m_atomcount, m_threads, m_eri_screening,
+                                           m_Q.size() != 0 ? &m_Q : nullptr);
     }
     const auto t2 = std::chrono::steady_clock::now();
     const Matrix gn = calculateCoreRepulsionGradient();

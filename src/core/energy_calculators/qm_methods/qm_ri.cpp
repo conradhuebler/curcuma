@@ -3050,9 +3050,11 @@ bool QMEngine::riGradientTwoElectron(const Matrix& Pc, Matrix& g2, std::string& 
     if (m_ri_mode == "j" && kx != 0.0) {
         const auto tk = std::chrono::steady_clock::now();
         if (kx == 1.0)
-            g += qmint::gradientTwoElectronExchange(m_gto_basis, Pc, m_atomcount, m_threads);
+            g += qmint::gradientTwoElectronExchange(m_gto_basis, Pc, m_atomcount, m_threads, m_eri_screening,
+                                                    m_Q.size() != 0 ? &m_Q : nullptr);
         else
-            g += kx * qmint::gradientTwoElectronExchange(m_gto_basis, Pc, m_atomcount, m_threads);
+            g += kx * qmint::gradientTwoElectronExchange(m_gto_basis, Pc, m_atomcount, m_threads, m_eri_screening,
+                                                         m_Q.size() != 0 ? &m_Q : nullptr);
         info += fmt::format(", exact exchange {:.1f} ms", msGlue(tk));
     }
     g2 = g;
@@ -3083,8 +3085,9 @@ bool QMEngine::riGradientTwoElectronUHF(const Matrix& Pac, const Matrix& Pbc, Ma
     }
     if (m_ri_mode == "j") {
         // exact exchange part only: UHF weight minus its Coulomb part
-        const Matrix gx = qmint::gradientTwoElectronUHF(m_gto_basis, Pac, Pbc, kx, m_atomcount, m_threads)
-            - qmint::gradientTwoElectronUHF(m_gto_basis, Pac, Pbc, 0.0, m_atomcount, m_threads);
+        const Matrix* Qs = m_Q.size() != 0 ? &m_Q : nullptr;
+        const Matrix gx = qmint::gradientTwoElectronUHF(m_gto_basis, Pac, Pbc, kx, m_atomcount, m_threads, m_eri_screening, Qs)
+            - qmint::gradientTwoElectronUHF(m_gto_basis, Pac, Pbc, 0.0, m_atomcount, m_threads, m_eri_screening, Qs);
         g2 = g + gx;
         info += ", exact exchange per spin";
         return true;

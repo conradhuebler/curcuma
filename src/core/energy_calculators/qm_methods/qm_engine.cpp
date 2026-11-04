@@ -1025,8 +1025,10 @@ bool QMEngine::computeGradient(bool defer_cpu_two_electron, bool& two_electron_d
             g2 = Matrix::Zero(m_atomcount, 3);  // formed by the caller in its own pass (double hybrids)
             two_electron_deferred = true;
         } else if (!on_device)
-            g2 = ks ? qmint::gradientTwoElectronScaled(m_gto_basis, Pc, kx, m_atomcount, m_threads)
-                    : qmint::gradientTwoElectron(m_gto_basis, Pc, m_atomcount, m_threads);
+            g2 = ks ? qmint::gradientTwoElectronScaled(m_gto_basis, Pc, kx, m_atomcount, m_threads, m_eri_screening,
+                                                       m_Q.size() != 0 ? &m_Q : nullptr)
+                    : qmint::gradientTwoElectron(m_gto_basis, Pc, m_atomcount, m_threads, m_eri_screening,
+                                                 m_Q.size() != 0 ? &m_Q : nullptr);
     }
     const auto t2 = std::chrono::steady_clock::now();
     const Matrix gn = calculateCoreRepulsionGradient();

@@ -84,6 +84,7 @@
 #include "qm_citations.h"
 #include "qm_engine.h"
 #include "qm_mp2.h"
+#include "qm_ri.h"  // qmint::buildCoulombExchange (Nov 2026)
 
 #include "src/core/curcuma_logger.h"
 #include "src/core/energy_calculators/gpu_plugin.h"
@@ -418,8 +419,7 @@ Matrix QMEngine::mp2G4(const Matrix& X_mo, const qmint::ERITensor* eri) const
     const Matrix Xao = m_mo * X_mo * m_mo.transpose();
     Matrix J, K;
     if (eri) {
-        J = qmint::buildCoulomb(*eri, Xao, m_threads);
-        K = qmint::buildExchange(*eri, Xao, m_threads);
+        qmint::buildCoulombExchange(*eri, Xao, J, K, m_threads);  // one tensor pass, same bits (Nov 2026)
     } else {
         buildJKExact(Xao, J, K);
     }
@@ -701,7 +701,7 @@ bool QMEngine::computeMP2Gradient(const qmint::MP2Options& opt, double c_os, dou
     if (!on_device2 || (std::getenv("CURCUMA_QM_GPU_GRAD_CHECK") && std::getenv("CURCUMA_QM_GPU_GRAD_CHECK")[0] == '1')) {
         const auto tcpu = std::chrono::steady_clock::now();
         const Matrix gc = qmint::gradientTwoElectronMP2(m_gto_basis, Pc, P2c, Gamma, m_Q.size() != 0 ? &m_Q : nullptr,
-                                                        m_atomcount, m_threads);
+                                                        m_atomcount, m_threads, m_eri_screening);
         if (on_device2) {
             // CURCUMA_QM_GPU_GRAD_CHECK=1: one comparison line (parsed by test_cases/qm_mp2/check_mp2_gradient.py)
             const Eigen::RowVector3d sd = g2.colwise().sum();

@@ -108,8 +108,7 @@ Matrix QMEngine::dhG4(const Matrix& X_mo, const qmint::ERITensor* eri, bool& ok)
     const Matrix Xao = m_mo * X_mo * m_mo.transpose();
     Matrix J, K;
     if (eri) {
-        J = qmint::buildCoulomb(*eri, Xao, m_threads);
-        K = qmint::buildExchange(*eri, Xao, m_threads);
+        qmint::buildCoulombExchange(*eri, Xao, J, K, m_threads);  // one tensor pass, same bits (Nov 2026)
     } else {
         // Claude Generated (Oct 31 2026): the integral-direct builders (host DirectJK, device Q-G3) skip a quartet when
         // Q_AB Q_CD max|X| < eri_screening, an ABSOLUTE bound, so J/K(X) are not homogeneous in X: for the small
@@ -420,7 +419,8 @@ bool QMEngine::computeDoubleHybridGradient(const qmint::MP2Options& opt, double 
         if (!ks2e_deferred) return;
         Matrix Pc0 = m_density;
         if (m_Q.size() != 0) Pc0 = m_Q * m_density * m_Q.transpose();
-        const Matrix g2ks = qmint::gradientTwoElectronScaled(m_gto_basis, Pc0, m_xc.exact_exchange, m_atomcount, m_threads);
+        const Matrix g2ks = qmint::gradientTwoElectronScaled(m_gto_basis, Pc0, m_xc.exact_exchange, m_atomcount, m_threads,
+                                                             m_eri_screening, m_Q.size() != 0 ? &m_Q : nullptr);
         gKS += g2ks;
         parts[1] += g2ks;
         m_gradient = gKS;
@@ -630,7 +630,7 @@ bool QMEngine::computeDoubleHybridGradient(const qmint::MP2Options& opt, double 
     // derivatives below are other integrals ((mn|P)^X, (P|Q)^X) and cannot join this pass; the KS SCF of a double
     // hybrid is exact (riActive() is an error above), so there is no KS 3-index pass to merge them with.
     Matrix g2 = qmint::gradientTwoElectronDHPT2(m_gto_basis, Pc, P2c, GammaBuf ? GammaBuf.get() : nullptr, Qp,
-                                                m_xc.exact_exchange, m_atomcount, m_threads, ks2e_deferred);
+                                                m_xc.exact_exchange, m_atomcount, m_threads, ks2e_deferred, m_eri_screening);
     if (ri) g2 += ri->threeIndexGradient(m_gto_basis, Qp, Eigen::VectorXd(), m_density, G3, m_atomcount)
                 - ri->metricGradient(M2, m_atomcount);
     res.t_grad_deriv2e_ms = msSince(t_2e0);

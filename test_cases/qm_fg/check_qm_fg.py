@@ -21,6 +21,10 @@ Checks (--check):
          are not allowed); --qm KEY=VALUE adds engine options; with --gpu also ref/fd run the device path
          (same fallback rule). Exit 77 without libcurcuma_cuda.so next to dump_qm_energy (or CURCUMA_PLUGIN_DIR)
          or without a CUDA device
+  kernel two-electron gradient kernels (Nov 2026): the Hermite-matrix kernel that f/g bases use by default against
+         the reference kernel quartetGradient (CURCUMA_QM_GRAD_KERNEL=reference), same binary and threads, so the
+         same SCF; max |dg| <= --gtol (default 1e-11 Eh/Bohr), energies equal bit for bit
+  threads the default (f/g) gradient with 1 and --threads threads: energy and gradient bit for bit equal
 
 Claude Generated (Nov 2026).
 """
@@ -73,7 +77,7 @@ def gpu_available(a):
     os.environ["CURCUMA_PLUGIN_DIR"] = pdir
 
 
-def run_dump(dump, xyz, method, qm, gradient=False, threads=1, gpu=None, charge=0, spin=0):
+def run_dump(dump, xyz, method, qm, gradient=False, threads=1, gpu=None, charge=0, spin=0, env_extra=None):
     if gpu is None:
         gpu = GPU["on"]
     cmd = [dump, xyz, method] + qm_args(qm) + ["--threads", str(threads)]
@@ -83,7 +87,9 @@ def run_dump(dump, xyz, method, qm, gradient=False, threads=1, gpu=None, charge=
         cmd += ["--gpu", "cuda"]
     if gradient:
         cmd.append("--gradient")
-    p = subprocess.run(cmd, capture_output=True, text=True, env=env_embedded())
+    env = env_embedded()
+    env.update(env_extra or {})
+    p = subprocess.run(cmd, capture_output=True, text=True, env=env)
     out = p.stdout + p.stderr
     m = re.search(r"^energy (\S+)$", out, re.M)
     if p.returncode != 0 or not m:
@@ -240,9 +246,38 @@ def check_gpudev(a):
         raise SystemExit("FAILED: GPU result differs from the CPU")
 
 
+def check_kernel(a):
+    """Nov 2026: Hermite-matrix 2e gradient kernel (default for f/g) vs the reference kernel on the same SCF."""
+    ref = json.load(open(a.reference))["cases"][a.case]
+    xyz = os.path.join(TC, ref["xyz"])
+    qm = case_qm(a, ref)
+    qm.setdefault("scf_threshold", 1e-10)
+    e0, g0 = run_dump(a.dump, xyz, ref["method"], qm, True, a.threads, env_extra={"CURCUMA_QM_GRAD_KERNEL": "reference"})
+    e1, g1 = run_dump(a.dump, xyz, ref["method"], qm, True, a.threads)
+    dg = max(abs(x - y) for r1, r2 in zip(g0, g1) for x, y in zip(r1, r2))
+    print("%-30s E %.12f / %.12f  gradient max |md - reference| %.2e Eh/Bohr (limit %.1e)" % (a.case, e0, e1, dg, a.gtol))
+    if e0 != e1 or len(g0) != len(g1) or dg > a.gtol:
+        raise SystemExit("FAILED: gradient kernels differ")
+
+
+def check_threads(a):
+    """Nov 2026: the default gradient (f/g: Hermite-matrix kernel, fixed chunks) is the same at 1 and N threads."""
+    ref = json.load(open(a.reference))["cases"][a.case]
+    xyz = os.path.join(TC, ref["xyz"])
+    qm = case_qm(a, ref)
+    qm.setdefault("scf_threshold", 1e-10)
+    e0, g0 = run_dump(a.dump, xyz, ref["method"], qm, True, 1)
+    e1, g1 = run_dump(a.dump, xyz, ref["method"], qm, True, a.threads)
+    same = e0 == e1 and g0 == g1
+    print("%-30s 1 vs %d threads: E %.17g / %.17g, gradient %s" % (a.case, a.threads, e0, e1,
+                                                                  "identical" if same else "DIFFERENT"))
+    if not same:
+        raise SystemExit("FAILED: result depends on the thread count")
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--check", required=True, choices=["ref", "fd", "gpu", "gpudev"])
+    ap.add_argument("--check", required=True, choices=["ref", "fd", "gpu", "gpudev", "kernel", "threads"])
     ap.add_argument("--case", required=True)
     ap.add_argument("--dump")
     ap.add_argument("--curcuma")
@@ -258,12 +293,13 @@ def main():
     ap.add_argument("--qm", nargs="*", default=[], help="extra engine options KEY=VALUE")
     a = ap.parse_args()
     if a.gtol is None:
-        a.gtol = 1e-8
+        a.gtol = 1e-11 if a.check == "kernel" else 1e-8
     if a.check == "gpudev" or a.gpu:
         gpu_available(a)
         GPU["on"] = a.check != "gpudev"
         GPU["allow"] = set(a.allow)
-    {"ref": check_ref, "fd": check_fd, "gpu": check_gpu, "gpudev": check_gpudev}[a.check](a)
+    {"ref": check_ref, "fd": check_fd, "gpu": check_gpu, "gpudev": check_gpudev, "kernel": check_kernel,
+     "threads": check_threads}[a.check](a)
 
 
 if __name__ == "__main__":

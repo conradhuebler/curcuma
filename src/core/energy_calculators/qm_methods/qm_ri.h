@@ -391,17 +391,36 @@ namespace qmint {
 /// gradient (Eh/Bohr): the same canonical-quartet kernel as gradientTwoElectron. Used by the RI-J
 /// gradient (Coulomb fitted, exchange exact). Defined in qm_integrals.cpp; declared here so that
 /// qm_integrals.hpp (included by the CUDA kernel units) stays untouched. Claude Generated (Oct 2026).
-Matrix gradientTwoElectronExchange(const std::vector<GTO::Orbital>& basis, const Matrix& P, int natoms, int threads = 1);
+Matrix gradientTwoElectronExchange(const std::vector<GTO::Orbital>& basis, const Matrix& P, int natoms, int threads = 1,
+                                   double screening = 0.0, const Matrix* Q = nullptr);
+/// @brief J = buildCoulomb(eri, P) and K = buildExchange(eri, P) from one pass over the stored tensor, bit for bit the
+/// values of the two calls (same expressions per (mu, lam) block; K through gemvRowsSequential, the DGEMV arithmetic
+/// of the reference BLAS in eight independent chains, used only when a start-up check finds it bitwise equal to the
+/// Eigen/BLAS call of this build). Declared here so that qm_integrals.hpp stays untouched. Claude Generated (Nov 2026).
+class ERITensor;
+void buildCoulombExchange(const ERITensor& eri, const Matrix& P, Matrix& J, Matrix& K, int threads = 1);
+/// @brief Open shell: J = buildCoulomb(eri, Pa + Pb), Ka = buildExchange(eri, Pa), Kb = buildExchange(eri, Pb) from one
+/// tensor pass, bit for bit the three calls. Claude Generated (Nov 2026).
+void buildCoulombExchangeSpin(const ERITensor& eri, const Matrix& Pa, const Matrix& Pb, Matrix& J, Matrix& Ka, Matrix& Kb,
+                              int threads = 1);
+/// @brief gradientTwoElectron with the quartet screen of the Hermite-matrix kernel (Nov 2026): f/g bases skip quartets
+/// with Q_AB Q_CD |D|max < screening * 1e-4 (the threshold of the device gradient, qmint::gpuGradScreen); s/p/d bases
+/// and screening = 0 compute every quartet. The same `screening` argument (pass -qm.eri_screening) on the functions
+/// below. Q (the cartesian -> spherical transform of the engine, nullptr or empty = cartesian basis): the f/g kernel then
+/// works in the active basis (fewer components; P stays the CARTESIAN density). Declared here so that qm_integrals.hpp
+/// stays untouched. Claude Generated.
+Matrix gradientTwoElectron(const std::vector<GTO::Orbital>& basis, const Matrix& P, int natoms, int threads,
+                           double screening, const Matrix* Q = nullptr);
 /// @brief Exact two-electron gradient of a Kohn-Sham energy (Eh/Bohr): Coulomb part plus kx times the exchange part,
 /// D = P_mn P_ls - (kx/4) (P_ml P_ns + P_ms P_nl); kx = a_x of a hybrid (0.2 for B3LYP), 0 for LDA/GGA, 1 = the RHF
 /// gradientTwoElectron. Same kernel. Claude Generated (Oct 2026, WP8).
 Matrix gradientTwoElectronScaled(const std::vector<GTO::Orbital>& basis, const Matrix& P, double kx, int natoms,
-                                 int threads = 1);
+                                 int threads = 1, double screening = 0.0, const Matrix* Q = nullptr);
 /// @brief Exact two-electron gradient of an unrestricted (UHF/UKS) energy (Eh/Bohr), cartesian spin densities Pa, Pb:
 /// D = Pt_mn Pt_ls - (kx/2) sum_s (Ps_ml Ps_ns + Ps_ms Ps_nl), Pt = Pa + Pb; kx = 1 for UHF, a_x for UKS. Same kernel as
 /// gradientTwoElectron (Pa = Pb = P/2 is the RHF weight). Claude Generated (Nov 2026, stage 5b).
 Matrix gradientTwoElectronUHF(const std::vector<GTO::Orbital>& basis, const Matrix& Pa, const Matrix& Pb, double kx,
-                              int natoms, int threads = 1);
+                              int natoms, int threads = 1, double screening = 0.0, const Matrix* Q = nullptr);
 /// @brief PT2 part of the double-hybrid two-electron gradient (Eh/Bohr; WP12 stage 2, Claude Generated, Oct 2026):
 /// 1/2 sum D2 (mn|ls)^X with the separable P2 x P part, exchange scaled by kx = a_x,
 ///   D2 = P2_mn P_ls + P_mn P2_ls - (kx/4)(P2_ml P_ns + P_ml P2_ns + P2_ms P_nl + P_ms P2_nl) + Dns,
@@ -412,5 +431,5 @@ Matrix gradientTwoElectronUHF(const std::vector<GTO::Orbital>& basis, const Matr
 /// of two (the integral derivatives dominate; the result equals the sum of the two passes up to rounding).
 Matrix gradientTwoElectronDHPT2(const std::vector<GTO::Orbital>& basis, const Matrix& P, const Matrix& P2,
                                 const double* Dns, const Matrix* Q, double kx, int natoms, int threads = 1,
-                                bool include_ks = false);
+                                bool include_ks = false, double screening = 0.0);
 }  // namespace qmint

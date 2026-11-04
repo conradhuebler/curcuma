@@ -180,6 +180,6 @@ void mp2ActiveToCartesian(const double* in, const Matrix& Q, std::unique_ptr<dou
 /// quartet (Q = nullptr or empty: active = cartesian). Implemented in qm_integrals.cpp (declared here so that
 /// qm_integrals.hpp, included by the CUDA units, stays untouched). Claude Generated (Oct 2026).
 Matrix gradientTwoElectronMP2(const std::vector<GTO::Orbital>& basis, const Matrix& P, const Matrix& P2,
-                              const double* Dns, const Matrix* Q, int natoms, int threads = 1);
+                              const double* Dns, const Matrix* Q, int natoms, int threads = 1, double screening = 0.0);
 
 }  // namespace qmint

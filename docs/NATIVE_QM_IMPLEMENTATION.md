@@ -354,6 +354,101 @@ CPUs than the Core Ultra 9 285K, Clang/MSVC builds (the unroll/always_inline mac
 attributes). The gradient kernels (`quartetGradient`) are unchanged. Timings against ORCA/PySCF:
 [QM_TIMING_ORCA_PYSCF_2026-10.md](QM_TIMING_ORCA_PYSCF_2026-10.md), section "After the CPU kernel work".
 
+## CPU f/g speed (Nov 4, 2026)
+
+> 🤖 AI-generated, ⚙️ machine-tested. Human production test pending.
+
+Profile before the change (1c43f574, own cycle counters per quartet class, 1 thread, H2O/def2-QZVPP HF energy +
+gradient, 18.9 s): the 2e gradient was 78 % of the run, 55 Gcycles against 1.2 Gcycles for the whole stored ERI build;
+`quartetGradient` spent 34.8 Gcycles in the derivative sums (`val`, scalar loops per component), 18.8 in the ket Hermite
+sums per ket power, 0.5 in Boys + R; s/p/d classes alone were 21.7 Gcycles, so the gradient kernel was slow for every
+class and had no screen (all npair^2/2 quartets; the SCF has Schwarz + density screening and `mdQuartetT`). That is why
+the caffeine/def2-TZVP 2e gradient (1077 s, 8 threads) was 12x its SCF (87 s), a larger ratio than with def2-SVP: the
+cost of `quartetGradient` per quartet grows steeply with L. The energy: 2.6 s of 4.0 s were the 16 stored-tensor J/K builds
+(memory bound, K in the reference BLAS DGEMV), 0.8 s the ERI build (f/g classes 0.71 of 1.2 Gcycles, of that bra step
+0.40, ket step 0.18, R 0.08, Boys 0.007), plus ~0.5 s (perf share) of J/K in the atomic guess.
+
+What changed (`qm_integrals.cpp`; the 2e gradient callers pass `-qm.eri_screening` and the spherical transform Q):
+
+- **2e gradient kernel for f/g bases** (`quartetGradientMD`, `gradientTwoElectronDriverMD`): the derivative sum as small
+  matrix products in Hermite space. Per primitive pair E0[ab][h] and EA_x[ab][h'] (d/dA, h' on simplex(LAB+1)) with
+  contraction and the cartesian -> active transform folded in (`makeGradMDPair`), so the weights D are active-basis
+  (49 instead of 100 components for an f pair, 81 instead of 225 for g); per ket primitive Y = D E0^cd, per bra primitive
+  Y' = D^T E0^ab, per primitive quartet M = Y R, M' = Y' R (`smallGemm`, 4 x 8 register blocks); dA = EA o M, dA + dB =
+  E0 o M shifted by 1x (bra translation), dC = EA^cd o M', dD by translational invariance. A pair on one atom gets the
+  translation term as a whole (no cancellation of the large tight-shell dA, dB). Screen as the device gradient: quartet
+  skipped when Q_AB Q_CD |D|max < `gpuGradScreen(eri_screening, 3)` = eri_screening * 1e-4 (density bound before the
+  fill for RHF/KS/UHF, filled weights for MP2/DH), primitive quartets below 1e-3 of that; `-qm.eri_screening 0` computes
+  every quartet. Fixed round-robin chunks as before (1 and N threads bitwise).
+- **Policy**: bases with an f or g shell take the new kernel for every class; s/p/d-only bases keep `quartetGradient`
+  bit for bit (`useGradientMD`; `CURCUMA_QM_GRAD_KERNEL=md|reference` forces one, comparison only).
+- **Energy kernel, f/g classes** (generic `mdQuartet`): tried as `smallGemm` products (ket step G += E^cd Rs, bra step
+  out += E^ab G^T) and reverted: 10 % more samples in the f/g part of a methanol/def2-TZVP direct SCF, because the axpy
+  form skips the zero entries of the spherical E^cd (5d/7f/9g folding) and the matrices are small; `mdQuartet` and all
+  `mdQuartetT` are unchanged, so the energy kernels give the old bits for every basis.
+- **Stored-tensor J/K** (`buildCoulombExchange`, `buildCoulombExchangeSpin`; SCF, UHF, atomic guess, MP2/DH Z-vector):
+  J and K from one pass over each (mu lam| block; same Eigen expressions, so the bits of the separate calls; K through
+  `gemvRowsSequential` (the reference-BLAS DGEMV arithmetic in eight independent chains, no FMA) only when a start-up
+  check on random blocks finds it bitwise equal to the Eigen/BLAS call of the build, else the Eigen call).
+- Compile time of `qm_integrals.cpp` (GCC, Release, -march=native, this machine): 14.3 s -> 20.4 s on a quiet machine
+  (21.9 -> 27.6 s under load).
+
+Timings (Core Ultra 9 285K, shared machine, median of 3 alternating runs with the baseline built from 1c43f574 with the
+same options, `dump_qm_energy`, HF, SCF threshold 1e-10 of the dumper unless noted):
+
+| case | before | after |
+|---|---|---|
+| H2O def2-QZVPP energy, 1 thread | 4.00 s (SCF loop 2.56 s, ERI 0.78 s) | 2.76 s (1.56 s, 0.78 s), energy bit for bit |
+| H2O def2-QZVPP energy + gradient, 1 thread | 18.97 s (2e gradient 14.71 s) | 4.17 s (1.17 s) |
+| H2O def2-QZVPP energy, 8 threads | 1.94 s (SCF loop 1.10 s) | 1.14 s (0.51 s) |
+| H2O def2-QZVPP energy + gradient, 8 threads | 4.01 s (2e 2.03 s) | 1.35 s (0.17 s) |
+| CH4 / NH3 def2-TZVP energy + gradient, 1 thread (*) | 0.91 / 0.63 s (2e 646 / 405 ms) | 0.31 / 0.23 s (103 / 63 ms) |
+| caffeine def2-TZVP SCF, 8 threads (`-qm.scf_threshold 1e-4`, 15 iterations, direct) | 78.8 s | 78.5 s (unchanged code) |
+| caffeine def2-TZVP SCF + gradient, 8 threads (19 iterations) | 1176 s (2e 1077 s; 1 run) | 143.6 s (2e 45.9 s) |
+| benzene def2-SVP (s/p/d) energy + gradient, 8 threads (*) | 4.59 s (SCF loop 1.19 s, 2e 2.99 s) | 3.87 s (0.55 s, 2.96 s), bits unchanged |
+| benzene def2-SVP (s/p/d) energy + gradient, 1 thread (*) | 25.75 s (SCF loop 2.79 s, 2e 21.59 s) | 24.54 s (1.66 s, 21.57 s), bits unchanged |
+| benzene def2-SVP with `CURCUMA_QM_GRAD_KERNEL=md` (s/p/d on the new kernel, opt-in), 2e gradient | 2.96 s (8 thr.) / 21.6 s (1 thr.) | 0.26 s / 1.90 s; max \|dg\| vs `quartetGradient` 4.8e-14 Eh/Bohr |
+
+(*) measured with the intermediate build that had the GEMM form of `mdQuartet` (reverted, see above); gradient and
+stored J/K code identical to the final one.
+
+Effect on the other paths: integral-direct J/K (`DirectJK`): unchanged; in the caffeine/def2-TZVP SCF (8 threads) the
+s/p/d classes (`mdQuartetT`, ~55 % of the samples), the J/K digestion (~17 %) and the f/g classes (~20 %) share the
+time. `buildERI` (stored tensor): unchanged (0.78 s before and after; in the baseline profile the 8-fold scatter `set8`
+took more than the f/g kernel). RI: the 3-index build and RI gradient are not f/g-cost-relevant at these sizes
+(H2O/def2-QZVPP RI-JK, baseline: setup 3-index 47 ms, RI gradient 3-index part 98 ms) and were not changed; the RI-J
+exchange gradient (`gradientTwoElectronExchange`) takes the new kernel. MP2/RI-MP2 transformations: not integral
+kernels, not changed (the MP2 2e gradient and the DH PT2 2e part take the new kernel, the MP2/DH Z-vector J/K the fused
+stored pass).
+
+Checks:
+
+- s/p/d bitwise: 27 runs (hf, hf-3c, lda, pbe, b3lyp, tpss, scan, RI-J, RI-JK, b3lyp RI-J, mp2 + gradient, ri-mp2, ccsd,
+  lmp2, b2plyp + gradient, dsd-pbep86, uhf stored/direct/RI-J, uks pbe/b3lyp, hf-3c open shell, cartesian d, def2-SVPD;
+  gradients where available) with 1 thread: all energies and gradients md5-identical to 1c43f574. With 4 threads 24/27
+  identical; the three integral-direct cases differ in the last bits also between two runs of the baseline itself (J/K
+  merged under `omp critical` in arrival order), so they are not a regression.
+- f/g vs the old path (20 runs, 4 threads, hf/b3lyp/tpss/pbe RI-J/RI-JK/b3lyp RI-J/mp2/ri-mp2/ccsd/b2plyp/uhf/uks, TZVP..QZVPP,
+  cartesian, direct): every energy of a stored-tensor or RI run bit for bit the old one (the energy kernels are
+  unchanged); integral-direct runs within their run-to-run noise (<= 2.0e-13 Eh); gradients <= 1.4e-15 Eh/Bohr except
+  methanol/def2-TZVP 3.8e-13 and integral-direct H2O/def2-QZVPP 2.7e-13 Eh/Bohr.
+  Same SCF, kernel only (`CURCUMA_QM_GRAD_KERNEL=reference` vs default): H2O/NH3 cases <= 1.3e-15 Eh/Bohr, methanol
+  def2-TZVP 3.8e-13 Eh/Bohr (3.3e-13 also without the screen: rounding of the large tight-shell terms, which of the two
+  kernels is closer to the exact value was not determined), caffeine/def2-TZVP 2e part 1.2e-12 Eh/Bohr on a 2e
+  gradient of magnitude 29 Eh/Bohr (relative 4e-14).
+- `ctest -L qm` (973 tests, CPU build): all pass except four that fail identically with the 1c43f574 binary
+  (`qm_hf3c_z_ref_CeF4`, `qm_ecp_ref_hf_cef4_def2-SVP`: ECP radial quadrature of Ce not converged; two
+  `cli_confsearch_*` that look for `release/curcuma`). New: `qm_fg_kernel_*` (6, new vs reference kernel <= 1e-11),
+  `qm_fg_threads_*` (3, 1 vs 4 threads bitwise).
+- Not tested: CUDA build and the device paths (the GPU tables and the quartet set of the energy screen are unchanged, the
+  `-gpu cuda` gradient check paths still call the CPU gradient without the screen), other CPUs and compilers, an
+  OpenBLAS/MKL build (there the start-up check decides; if it fails the Eigen path keeps the old bits), elements beyond
+  Ne with f/g (CeF4 fails before the gradient), molecules larger than caffeine, the FD gate on systems larger than the
+  qm_fg cases (the ctest FD gates pass), open-shell f/g only on CH2/def2-TZVP.
+- Not done: faster s/p/d classes or digestion in the direct SCF (they would change s/p/d bits), the s/p/d gradient on the
+  new kernel by default (decision in TODO.md), a sort-and-break enumeration of the gradient quartet loop, caching of the
+  Schwarz pairs between the SCF and the gradient (computed twice), RI 3-index kernels.
+
 ## SCF convergence test (Oct 25, 2026)
 
 Default `-qm.scf_convergence auto`: energy change < `scf_energy_threshold` (1e-8 Eh) AND orbital gradient
@@ -426,7 +521,8 @@ LMP2 and the double hybrids. Fitting sets were already general in l (up to h for
   its old order); `createGTOFromBasis` emits them; `qmint::higherShellSphericalColumns` (`qm_spherical_fg.cpp`) gives
   the 2l+1 real solid harmonics (Schlegel-Frisch formula, order m = 0, +1, -1, ...), orthonormalised in the shell's
   overlap block like d. The McMurchie-Davidson ERI, 1e, gradient, RI and grid AO kernels were already general in l;
-  pairs with l_a + l_b > 4 take the generic `mdQuartet` (the templated fast path covers s/p/d).
+  pairs with l_a + l_b > 4 take the generic `mdQuartet` (the templated fast path covers s/p/d); since Nov 4 2026 f/g
+  bases have their own 2e gradient kernel and `mdQuartet` runs as small GEMMs ([CPU f/g speed](#cpu-fg-speed-nov-4-2026)).
 - s/p/d regression against 9bcac826 (24 cases, hf/hf-3c/lda/pbe/b3lyp/tpss/scan/RI-J/RI-JK/mp2/ri-mp2/ccsd/lmp2/b2plyp/
   dsd-pbep86, stored and direct SCF, cartesian d): all energies bitwise identical; 9 of 17 gradients differ in the last
   bits, <= 3.4e-15 Eh/Angstrom (gradient magnitudes 1e-3..0.2). Cause (checked by compiling the old `qm_integrals.cpp` with the new `GTOIntegrals.hpp`):
@@ -890,7 +986,7 @@ testing against an external 2e reference (ORCA/xcDFT/libint) is pending.
 | `src/core/energy_calculators/qm_methods/qm_engine.h/.cpp` | `QMFunctional` enum, `qm` PARAM block, `QMEngine : public QMDriver` (basis, 1e integrals, lazy ERI, geometry updates) |
 | `src/core/energy_calculators/qm_methods/qm_scf.cpp` | closed-shell RHF SCF (SAD/H0 guess, DIIS), Fock build, active-basis ERI |
 | `src/core/energy_calculators/qm_methods/qm_uscf.cpp`, `qm_scf_internal.h`, `qm_xc_spin.{h,cpp}` | open shell (stage 5b): UHF/UKS SCF, gradient, spin-polarised XC; SCF pieces shared with `qm_scf.cpp` |
-| `src/core/energy_calculators/qm_methods/qm_integrals.hpp/.cpp` | 1e kernels, shell-quartet-blocked MD ERI (reference `shellQuartet`, Hermite-matrix `mdQuartetT` used by the SCF; Schwarz, OpenMP, on-the-fly 5d), J/K, spherical transforms (`namespace qmint`) |
+| `src/core/energy_calculators/qm_methods/qm_integrals.hpp/.cpp` | 1e kernels, shell-quartet-blocked MD ERI (reference `shellQuartet`, Hermite-matrix `mdQuartetT` used by the SCF; Schwarz, OpenMP, on-the-fly 5d), J/K (`buildCoulombExchange`), 2e gradient (`quartetGradient`, f/g bases `quartetGradientMD`), spherical transforms (`namespace qmint`) |
 | `src/core/energy_calculators/qm_methods/qm_method.h/.cpp` | `QMMethod : public ComputationalMethod` wrapper, `engineConfig()` scope merge |
 | `src/core/energy_calculators/qm_methods/hf3c_method.h/.cpp` | `HF3CMethod`: HF/MINIX + D3(BJ) + gCP + SRB |
 | `src/core/energy_calculators/qm_methods/gcp.h/.cpp` | gCP + SRB energy and gradient (simple-dftd3 port, H-Ne) |
