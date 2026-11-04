@@ -19,6 +19,7 @@
 
 #include "config_manager.h"
 #include "parameter_registry.h"
+#include "curcuma_logger.h"
 #include "global.h"  // For MergeJson
 #include <algorithm>
 #include <cctype>
@@ -88,7 +89,7 @@ ConfigManager::ConfigManager(const std::string& module, const json& user_input)
         std::string user_key_lower = user_key;
         std::transform(user_key_lower.begin(), user_key_lower.end(),
                       user_key_lower.begin(), ::tolower);
-        // Claude Generated (Jun 2026): canonicalize hyphens to underscores for matching
+        // Claude Generated (Jun 2026): hyphens are removed before matching
         user_key_lower.erase(std::remove(user_key_lower.begin(), user_key_lower.end(), '-'), user_key_lower.end());
 
         // First, try alias resolution (case-insensitive)
@@ -110,7 +111,7 @@ ConfigManager::ConfigManager(const std::string& module, const json& user_input)
             std::string def_key_lower = def_key;
             std::transform(def_key_lower.begin(), def_key_lower.end(),
                           def_key_lower.begin(), ::tolower);
-            // Claude Generated (Jun 2026): canonicalize hyphens to underscores for matching
+            // Claude Generated (Jun 2026): hyphens are removed before matching
             def_key_lower.erase(std::remove(def_key_lower.begin(), def_key_lower.end(), '-'), def_key_lower.end());
 
             if (user_key_lower == def_key_lower) {
@@ -263,7 +264,7 @@ ConfigManager::ConfigManager(const std::vector<std::string>& modules, const json
             std::string user_key_lower = user_key;
             std::transform(user_key_lower.begin(), user_key_lower.end(),
                           user_key_lower.begin(), ::tolower);
-            // Claude Generated (Jun 2026): canonicalize hyphens to underscores for matching
+            // Claude Generated (Jun 2026): hyphens are removed before matching
             user_key_lower.erase(std::remove(user_key_lower.begin(), user_key_lower.end(), '-'), user_key_lower.end());
 
             // Try alias resolution
@@ -284,7 +285,7 @@ ConfigManager::ConfigManager(const std::vector<std::string>& modules, const json
                 std::string def_key_lower = def_key;
                 std::transform(def_key_lower.begin(), def_key_lower.end(),
                               def_key_lower.begin(), ::tolower);
-                // Claude Generated (Jun 2026): canonicalize hyphens to underscores for matching
+                // Claude Generated (Jun 2026): hyphens are removed before matching
                 def_key_lower.erase(std::remove(def_key_lower.begin(), def_key_lower.end(), '-'), def_key_lower.end());
 
                 if (user_key_lower == def_key_lower) {
@@ -400,7 +401,7 @@ json ConfigManager::findKey(const std::string& key) const
     // First try: Exact case-insensitive match
     std::string key_lower = key;
     std::transform(key_lower.begin(), key_lower.end(), key_lower.begin(), ::tolower);
-    // Claude Generated (Jun 2026): canonicalize hyphens to underscores for matching
+    // Claude Generated (Jun 2026): hyphens are removed before matching
     key_lower.erase(std::remove(key_lower.begin(), key_lower.end(), '-'), key_lower.end());
 
     for (const auto& item : m_config.items()) {
@@ -433,11 +434,8 @@ json ConfigManager::findKey(const std::string& key) const
             config_key_lower.erase(std::remove(config_key_lower.begin(), config_key_lower.end(), '-'), config_key_lower.end());
 
             if (prefixed_key_lower == config_key_lower) {
-                #ifndef DEBUG_CONFIG_MANAGER
-                std::cerr << "[ConfigManager WARNING] Parameter '" << key
-                          << "' found via prefix fallback as '" << config_key
-                          << "'. Consider using flat structure." << std::endl;
-                #endif
+                CurcumaLogger::warn("ConfigManager: parameter '" + key + "' found via prefix fallback as '"
+                                    + config_key + "'. Consider using flat structure.");
                 return item.value();
             }
         }
@@ -458,11 +456,8 @@ json ConfigManager::findKey(const std::string& key) const
                           nested_key_lower.begin(), ::tolower);
 
             if (key_lower_nested == nested_key_lower) {
-                #ifndef DEBUG_CONFIG_MANAGER
-                std::cerr << "[ConfigManager WARNING] Parameter '" << key
-                          << "' found in nested object config[\"" << m_module << "\"][\""
-                          << nested_key << "\"]. Consider flattening JSON structure." << std::endl;
-                #endif
+                CurcumaLogger::warn("ConfigManager: parameter '" + key + "' found in nested object config[\""
+                                    + m_module + "\"][\"" + nested_key + "\"]. Consider flattening JSON structure.");
                 return nested_item.value();
             }
         }

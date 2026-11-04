@@ -451,7 +451,10 @@ bool ANCOptimizer::InitializeOptimizerInternal() {
     loadANCParameters(m_configuration);
 
     // Set optimization level (affects thresholds)
-    int opt_level = m_configuration.value("optimization_level", 0); // 0 = normal
+    // Claude Generated (Nov 2026): the registered PARAM is opt_level; optimization_level stays readable.
+    int opt_level = m_configuration.value("opt_level", m_configuration.value("optimization_level", 0)); // 0 = normal
+    // Claude Generated (Nov 2026): anc_lbfgs_history was registered but never read.
+    m_anc_lbfgs_history = std::max(1, m_configuration.value("anc_lbfgs_history", m_anc_lbfgs_history));
     setOptimizationLevel(opt_level);
 
     // Check if molecule is linear

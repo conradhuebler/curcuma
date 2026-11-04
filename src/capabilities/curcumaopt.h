@@ -34,27 +34,6 @@
 
 class CurcumaOpt;
 
-// Claude Generated (October 2025): Replace static JSON with ParameterRegistry
-// This ensures consistency with the parameter definitions above and enables
-// automatic help generation, validation, and JSON export/import capabilities
-inline json getCurcumaOptJson() {
-    return ParameterRegistry::getInstance().getDefaultJson("opt");
-}
-
-// Legacy static reference for backward compatibility - Claude Generated
-// NOTE: This creates the JSON on first access, so it's safe for initialization order
-#define CurcumaOptJson getCurcumaOptJson()
-
-const json OptJsonPrivate{
-    { "writeXYZ", false },
-    { "printOutput", true },
-    { "dE", 0.1 },
-    { "dRMSD", 0.01 },
-    { "GFN", 2 },
-    { "MaxIter", 2000 },
-    { "LBFGS_eps", 1e-5 }
-};
-
 // ============================================================================
 // Parameter Registry Integration - Claude Generated (October 2025)
 // ============================================================================

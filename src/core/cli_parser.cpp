@@ -129,7 +129,7 @@ json CLI2Json(int argc, char** argv)
     // -opt_method to polymerbuild and -thermostat to simplemd without any diagnostic.
     std::set<std::string> scope_modules(MethodFactory::methodParameterScopes().begin(),
                                         MethodFactory::methodParameterScopes().end());
-    scope_modules.insert({"ripser", "rmsd", "ancopt", "modern_optimizer", "native_lbfgs"});
+    scope_modules.insert({"ripser", "rmsd", "ancopt", "native_lbfgs"});
 
     // Claude Generated (October 2025): CLI keyword to module name mapping
     // Maps command-line keywords (e.g., -md) to actual module names (e.g., simplemd)
