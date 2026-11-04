@@ -3141,8 +3141,8 @@ void quartetGradient(const std::vector<EriShell>& sh, const ShellPair& bra, cons
 //   dD = -(dA + dB + dC)                                   (translational invariance, in the driver)
 //
 // Only the order of the sums differs from quartetGradient, so the values agree to rounding (f/g bases take
-// this kernel by default; s/p/d bases keep quartetGradient, bit for bit; CURCUMA_QM_GRAD_KERNEL=md|reference
-// overrides, comparison only).
+// this kernel for every basis since Nov 4 2026; CURCUMA_QM_GRAD_KERNEL=reference selects the old
+// quartetGradient, comparison only).
 // ---------------------------------------------------------------------------
 
 /// One shell pair of the gradient kernel: per primitive pair (sorted by its Schwarz factor when the
@@ -3495,9 +3495,9 @@ void quartetGradientMD(const GradMDPair& bra, const GradMDPair& ket, const doubl
     }
 }
 
-/// Gradient kernel policy (Claude Generated, Nov 2026): quartetGradientMD for bases with f or g shells,
-/// quartetGradient (unchanged bits) for s/p/d bases. CURCUMA_QM_GRAD_KERNEL=md | reference forces one kernel
-/// for every basis (comparison only).
+/// Gradient kernel policy (Claude Generated, Nov 2026): quartetGradientMD for every basis (s/p/d too since
+/// Nov 4 2026, ~11x faster, last bits differ from quartetGradient). CURCUMA_QM_GRAD_KERNEL=reference selects
+/// quartetGradient for every basis, =md the default (comparison only).
 bool useGradientMD(const std::vector<EriShell>& sh)
 {
     static const int forced = [] {
@@ -3509,9 +3509,8 @@ bool useGradientMD(const std::vector<EriShell>& sh)
         return 0;
     }();
     if (forced != 0) return forced > 0;
-    for (const EriShell& s : sh)
-        if (s.L >= 3) return true;
-    return false;
+    (void)sh;
+    return true;
 }
 
 }  // namespace

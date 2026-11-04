@@ -380,8 +380,9 @@ What changed (`qm_integrals.cpp`; the 2e gradient callers pass `-qm.eri_screenin
   skipped when Q_AB Q_CD |D|max < `gpuGradScreen(eri_screening, 3)` = eri_screening * 1e-4 (density bound before the
   fill for RHF/KS/UHF, filled weights for MP2/DH), primitive quartets below 1e-3 of that; `-qm.eri_screening 0` computes
   every quartet. Fixed round-robin chunks as before (1 and N threads bitwise).
-- **Policy**: bases with an f or g shell take the new kernel for every class; s/p/d-only bases keep `quartetGradient`
-  bit for bit (`useGradientMD`; `CURCUMA_QM_GRAD_KERNEL=md|reference` forces one, comparison only).
+- **Policy**: every basis takes the new kernel (s/p/d-only bases too since Nov 4 2026; their last bits differ from
+  `quartetGradient`, max |dg| 4.8e-14 Eh/Bohr on benzene); `CURCUMA_QM_GRAD_KERNEL=reference` selects the old kernel
+  (`useGradientMD`, comparison only).
 - **Energy kernel, f/g classes** (generic `mdQuartet`): tried as `smallGemm` products (ket step G += E^cd Rs, bra step
   out += E^ab G^T) and reverted: 10 % more samples in the f/g part of a methanol/def2-TZVP direct SCF, because the axpy
   form skips the zero entries of the spherical E^cd (5d/7f/9g folding) and the matrices are small; `mdQuartet` and all
@@ -407,7 +408,7 @@ same options, `dump_qm_energy`, HF, SCF threshold 1e-10 of the dumper unless not
 | caffeine def2-TZVP SCF + gradient, 8 threads (19 iterations) | 1176 s (2e 1077 s; 1 run) | 143.6 s (2e 45.9 s) |
 | benzene def2-SVP (s/p/d) energy + gradient, 8 threads (*) | 4.59 s (SCF loop 1.19 s, 2e 2.99 s) | 3.87 s (0.55 s, 2.96 s), bits unchanged |
 | benzene def2-SVP (s/p/d) energy + gradient, 1 thread (*) | 25.75 s (SCF loop 2.79 s, 2e 21.59 s) | 24.54 s (1.66 s, 21.57 s), bits unchanged |
-| benzene def2-SVP with `CURCUMA_QM_GRAD_KERNEL=md` (s/p/d on the new kernel, opt-in), 2e gradient | 2.96 s (8 thr.) / 21.6 s (1 thr.) | 0.26 s / 1.90 s; max \|dg\| vs `quartetGradient` 4.8e-14 Eh/Bohr |
+| benzene def2-SVP with `CURCUMA_QM_GRAD_KERNEL=md` (s/p/d on the new kernel, default since Nov 4 2026), 2e gradient | 2.96 s (8 thr.) / 21.6 s (1 thr.) | 0.26 s / 1.90 s; max \|dg\| vs `quartetGradient` 4.8e-14 Eh/Bohr |
 
 (*) measured with the intermediate build that had the GEMM form of `mdQuartet` (reverted, see above); gradient and
 stored J/K code identical to the final one.

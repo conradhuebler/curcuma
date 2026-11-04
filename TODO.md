@@ -283,8 +283,6 @@ Code-gebundene Entscheidungen, die bei Ihnen liegen. Fachliche Fragen und Projek
   `revdsd-pbep86-d4` nimmt a2 4,201 (Paper), ORCA 4,2014 (bis 2,4e-6 Eh); VWN5-Satz von Mehta (s6 0,5850, a1 0,370, a2 4,183) anlegen? [WP12](docs/DFT_ROADMAP/WP12_doppelhybride.md)
 - Doppelhybrid-Gradient auf der GPU (WP12 Stufe 3): die Host-PT2-Zwischengrößen zählen als Fallback `qm_dh_grad_pt2`, der MP2-Gradient
   zählt seine Host-Amplituden nicht; zählen lassen (heute: `-gpu_strict true` + DH-Gradient = Exit 3) oder wie MP2 behandeln? [WP12](docs/DFT_ROADMAP/WP12_doppelhybride.md)
-- Native QM, 2e-Gradient (Nov 2026): s/p/d-Basen behalten den alten Kern `quartetGradient` (bitgleich), der neue Hermite-Matrix-Kern
-  mit Dichte-Schirmung ist dort per `CURCUMA_QM_GRAD_KERNEL=md` etwa 11x schneller (Benzol/def2-SVP, 2e-Teil 2,96 -> 0,26 s bei 8 Threads, 21,6 -> 1,9 s bei 1 Thread; max |dg| 4,8e-14 Eh/Bohr), ändert aber die letzten Bits; Vorgabe für s/p/d umstellen? [CPU f/g](docs/NATIVE_QM_IMPLEMENTATION.md#cpu-fg-speed-nov-4-2026)
 - `shouldUpdateHBXB()` korrigieren und damit von der Fortran-Referenz abweichen, oder als Referenzeigenschaft belassen?
 - UFF-/QMDFF-Gradient reparieren (Stand: "erstmal nicht")?
 - GPU-Bitgleichheit angehen (Sammel-Kernel statt `atomicAdd`) oder bei Ensemblevergleichen bleiben?
