@@ -1277,6 +1277,8 @@ public:
     bool dispersionTailActive() const;
     /// Claude Generated (Nov 2026, A3b): number of D4 pair-list rebuilds since set-up (diagnostic, tests)
     long dispersionRebuildCount() const { return m_disp_rebuild_count; }
+    /// Claude Generated (Nov 2026, N2): number of updateCell() calls on this instance (diagnostic, tests)
+    int cellUpdateCount() const { return m_cell_update_count; }
     /// Claude Generated (Nov 2026, A4a): number of non-bonded repulsion list rebuilds since set-up (diagnostic, tests)
     long repulsionRebuildCount() const { return m_rep_rebuild_count; }
 
@@ -2707,6 +2709,35 @@ public:
     double cellVolumeBohr3() const;
 
     /**
+     * @brief Change the periodic cell of an initialised instance between two energy calls (barostat) - Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED N2)
+     *
+     * The caller scales the atom positions itself (SimpleMD: all positions by mu, then this call with the cell
+     * scaled by mu; the next UpdateMolecule()/Calculation() sees both). Keeps consistent: m_unit_cell (A),
+     * m_cell_bohr_ortho, the workspace cell, the Ewald sums of the workspace and of the EEQ solver (new lattice
+     * and k vectors at the FIXED alpha, r_cut and k_max of m_ewald_params; n_max per axis follows L), the shared
+     * Ewald geometry data (invalidated), the D4 generator cell, the D4 tail (reads the cell per call), and every
+     * pair list / HB-XB detection (forced rebuild at the next Calculation(), see m_lists_rebuild_pending). The
+     * topology, its charges and the EEQ warm-start history are kept. Every active cutoff is checked against the
+     * new L_min/2 first; a violated check leaves the instance unchanged and throws std::runtime_error with the
+     * cutoff name, its value and L_min/2 in Bohr.
+     */
+    void updateCell(const Eigen::Matrix3d& cell_angstrom);
+    /**
+     * @brief Freeze every evaluation radius at an absolute value before the cell starts to change - Claude Generated (Nov 2026, N2)
+     *
+     * The atomic virial (N1) is the strain derivative at fixed cutoff radii, so a barostat must not let the D4
+     * evaluation radius follow L/2 (dispersionRadiiBohr() without a user cutoff). The frozen D4 radius is
+     * min(current, nextafter(L_min/2 (1 + density_gain)^(-1/3))) so that the density may rise by density_gain
+     * before the D4 radius alone would stop the run (the part beyond it is covered by the homogeneous tail, A3c);
+     * repulsion (20), HB/XB search radii and the Ewald r_cut (m_ewald_params) are absolute already. Forces a pair
+     * list rebuild (the stamped per-pair r_cut changes). Throws without a cell or before the set-up.
+     */
+    void freezeCutoffsForCellChanges(double density_gain = 0.15);
+    bool cutoffsFrozen() const { return m_cutoffs_frozen; }
+    /// N2: the largest active cutoff (Bohr) and its name: the cell must keep L_min > 2 x this value.
+    std::pair<std::string, double> largestActiveCutoffBohr() const;
+
+    /**
      * @brief Get Coulomb electrostatic energy component
      * @return Electrostatic energy or 0 if not calculated
      */
@@ -3224,6 +3255,10 @@ private:
     bool m_print_timing = true;     ///< Print init timing summary at verbosity >= 1
     bool m_dispersion_tail = true;  ///< Nov 2026 (A3c): PARAM dispersion_tail (periodic cell only)
     bool m_want_virial = false;     ///< Nov 2026 (N1): atomic virial requested (setWantVirial)
+    bool m_cutoffs_frozen = false;  ///< Nov 2026 (N2): dispersionRadiiBohr() returns m_frozen_d4 (freezeCutoffsForCellChanges)
+    D4RadiiBohr m_frozen_d4;        ///< Nov 2026 (N2): the frozen D4 radii
+    bool m_lists_rebuild_pending = false;  ///< Nov 2026 (N2): rebuild every pair list and the HB/XB lists at the next Calculation() (set by updateCell / freeze, cleared in calculationSingle)
+    int m_cell_update_count = 0;    ///< Nov 2026 (N2): number of updateCell() calls (diagnostic, tests)
     bool m_atm_enabled_for_virial_check() const;  ///< N1: dispersion_atm read for virialUnavailableReason()
     bool m_coulomb_ewald = true;    ///< Nov 2026 (B2/B3): PARAM coulomb_ewald (periodic cell only; default true since B3)
     bool m_gpu_periodic = false;    ///< Nov 2026 (S1): PARAM gpu_periodic (CUDA GFN-FF with a cell, opt-in; ABI version 2)

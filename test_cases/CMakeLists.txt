@@ -305,6 +305,21 @@ add_test(NAME test_orca_interface
          COMMAND test_orca_interface)
 set_tests_properties(test_orca_interface PROPERTIES TIMEOUT 30 LABELS "orca;unit")
 
+# Claude Generated (Nov 2026): "unitcell a b c" without angles gives a 90/90/90 cell,
+# "unitcell abc" gives no cell and a warning (both on the stdout checked below).
+add_executable(test_xyz_comment_unitcell
+        unit/test_xyz_comment_unitcell.cpp)
+target_link_libraries(test_xyz_comment_unitcell curcuma_core test_molecule_registry)
+if(USE_PCH)
+        target_precompile_headers(test_xyz_comment_unitcell REUSE_FROM curcuma_core)
+endif()
+file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/xyz_comment_unitcell)
+add_test(NAME xyz_comment_unitcell
+         COMMAND test_xyz_comment_unitcell ${CMAKE_CURRENT_BINARY_DIR}/xyz_comment_unitcell)
+# PASS_REGULAR_EXPRESSION replaces the exit-code check: the success line is printed only on exit 0
+set_tests_properties(xyz_comment_unitcell PROPERTIES TIMEOUT 30 LABELS "unit;pbc"
+    PASS_REGULAR_EXPRESSION "no cell was read[^\n]*unitcell abc.*ALL 6 CHECKS PASSED")
+
 # Claude Generated (May 2026, WP-D Stage B): fast_exp_neg_sq_block unit test
 add_executable(test_fast_exp
         unit/test_fast_exp.cpp)
@@ -810,6 +825,27 @@ if(USE_PCH)
 endif()
 add_test(NAME pbc_hbond COMMAND test_pbc_hbond WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 set_tests_properties(pbc_hbond PROPERTIES TIMEOUT 300 LABELS "pbc;gfnff")
+
+# Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED N2): barostat cell update (updated instance == fresh instance),
+# cutoff-limit abort with restart file, restart with cell and barostat state
+add_executable(test_pbc_npt unit/test_pbc_npt.cpp)
+target_link_libraries(test_pbc_npt curcuma_core test_molecule_registry)
+if(USE_PCH)
+    target_precompile_headers(test_pbc_npt REUSE_FROM curcuma_core)
+endif()
+add_test(NAME pbc_npt_cell_update COMMAND test_pbc_npt WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(pbc_npt_cell_update PROPERTIES TIMEOUT 600 LABELS "pbc;simplemd;gfnff;ewald")
+# N2: NPT ideal gas (64 Ne, CSVR 300 K): crescale <V> = (N+1) kT/P0 with relative variance 1/(N+1), berendsen
+# <V> = (dof/3) kT/P0 with suppressed fluctuations; 200 ps each (~60 s), block statistics
+add_executable(test_pbc_npt_idealgas unit/test_pbc_npt_idealgas.cpp)
+target_link_libraries(test_pbc_npt_idealgas curcuma_core)
+if(USE_PCH)
+    target_precompile_headers(test_pbc_npt_idealgas REUSE_FROM curcuma_core)
+endif()
+add_test(NAME pbc_npt_idealgas_crescale COMMAND test_pbc_npt_idealgas crescale 200 WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(pbc_npt_idealgas_crescale PROPERTIES TIMEOUT 1800 LABELS "pbc;simplemd;gfnff;ewald")
+add_test(NAME pbc_npt_idealgas_berendsen COMMAND test_pbc_npt_idealgas berendsen 200 WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(pbc_npt_idealgas_berendsen PROPERTIES TIMEOUT 1800 LABELS "pbc;simplemd;gfnff;ewald")
 
 # Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A4c): periodic topology generation, reactive scan, cache key
 add_executable(test_pbc_topology unit/test_pbc_topology.cpp)

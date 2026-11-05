@@ -2045,7 +2045,8 @@ bool GFNFF::hbxbRefreshDue()
     // Task #11 (Jun 2026): optional periodic forced rebuild for continuous MD where
     // near-threshold pairs must be re-classified faster than the RMSD trigger fires.
     const int force_every = m_parameters.value("hb_update_force_every", 10);
-    const bool force_update = (force_every > 0) && (m_hbxb_update_calls % force_every == 0);
+    // N2 (Nov 2026): a changed cell forces the re-detection (minimum-image distances changed with it)
+    const bool force_update = m_lists_rebuild_pending || ((force_every > 0) && (m_hbxb_update_calls % force_every == 0));
     ++m_hbxb_update_calls;
 
     if (!force_update) {
@@ -2339,6 +2340,8 @@ void GFNFF::updateNonbondedRepulsionIfNeeded(FFWorkspace* extra_ws)
         const int rebuild_every = std::max(1, m_parameters.value("nonbonded_rebuild_every", 1));
         do_rebuild = (m_nb_rep_update_calls % rebuild_every) == 0;
     }
+    if (m_lists_rebuild_pending)  // N2 (Nov 2026): the cell changed; the skin argument does not cover a changed lattice
+        do_rebuild = true;
     ++m_nb_rep_update_calls;
     if (!do_rebuild)
         return;
@@ -2548,6 +2551,8 @@ void GFNFF::updateDispersionPairsIfNeeded(FFWorkspace* extra_ws)
         const int rebuild_every = std::max(1, m_parameters.value("nonbonded_rebuild_every", 1));
         do_rebuild = (m_disp_update_calls % rebuild_every) == 0;
     }
+    if (m_lists_rebuild_pending)  // N2 (Nov 2026): the cell (or the frozen evaluation radius) changed
+        do_rebuild = true;
     ++m_disp_update_calls;
     if (!do_rebuild)
         return;
@@ -3044,6 +3049,8 @@ void GFNFF::updateReactiveTopologyIfNeeded()
     ++m_react_calls;
 
     bool scan = (m_react_check_every > 0) && (m_react_calls % m_react_check_every == 0);
+    if (m_lists_rebuild_pending)  // N2: the cell changed, scan at the new minimum-image distances
+        scan = true;
     if (!scan && m_react_check_disp > 0.0
         && m_react_ref_geometry.rows() == m_geometry_bohr.rows()) {
         // Nov 2026 (A4c): minimum-image displacement, so a fragment wrap by SimpleMD triggers no scan
@@ -3280,6 +3287,7 @@ double GFNFF::calculationSingle(bool gradient)
     // Same refresh for the explicit Coulomb list, which exists only with eeq_distance_cutoff > 0
     // (Claude Generated, Sep 2026) — see updateCoulombPairsIfNeeded().
     updateCoulombPairsIfNeeded(nullptr);
+    m_lists_rebuild_pending = false;  // N2: every list above was rebuilt for the current cell
 
     // Claude Generated (Feb 21, 2026): Enable per-component gradient storage for invariance diagnosis
     // Apr 2026: enabled unconditionally when gradient is requested so the NaN trap below
@@ -13184,6 +13192,8 @@ GFNFF::D4RadiiBohr GFNFF::dispersionRadiiBohr() const
 {
     // Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A3b): the only place where the D4 build
     // and evaluation radii are derived (see gfnff.h). Without a cell the former expressions.
+    if (m_cutoffs_frozen)  // Nov 2026 (N2): absolute radii while the cell changes (freezeCutoffsForCellChanges)
+        return m_frozen_d4;
     D4RadiiBohr r;
     r.build = D4ParameterGenerator::PAIR_BUILD_CUTOFF_BOHR;
     r.eval = D4ParameterGenerator::PAIR_EVAL_CUTOFF_BOHR;
@@ -13360,9 +13370,12 @@ std::vector<std::pair<std::string, double>> GFNFF::activeCutoffsBohr() const
     // Nov 2026 (B2): Ewald real-space loop radius max(ewald_r_cut, r_g). At configurePeriodicCell() the
     // topology does not exist yet, so r_g comes from the element table (alpha^2, no charge correction);
     // the final value with the charge-corrected alpeeq is checked again when the workspace is set up.
+    // Nov 2026 (N2): once configurePeriodicEwald() has fixed the parameters, the fixed r_cut is the one in use
+    // (a barostat changes L at fixed r_cut; ewaldParameters() would re-derive a radius that follows L).
     if (m_has_pbc && m_coulomb_ewald)
-        cut.emplace_back("Ewald real-space radius max(ewald_r_cut, r_g = 6 sqrt(2 max alp)) (coulomb_ewald)",
-            ewaldParameters().r_cut);
+        cut.emplace_back(m_ewald_params.r_cut > 0.0 ? "Ewald real-space radius (fixed at the set-up, coulomb_ewald)"
+                                                    : "Ewald real-space radius max(ewald_r_cut, r_g = 6 sqrt(2 max alp)) (coulomb_ewald)",
+            m_ewald_params.r_cut > 0.0 ? m_ewald_params.r_cut : ewaldParameters().r_cut);
 
     // Reactive bond scan (detectReactiveBondChanges): break_factor * (rcov_i + rcov_j) * fat_i * fat_j,
     // largest over the element pairs present.
@@ -13437,6 +13450,9 @@ void GFNFF::configurePeriodicCell()
     // A2 in the CN, A3b/c D4 pair term and tail, A4a repulsion and bonded terms, A4b HB/XB, A4c topology
     // build and reactive scan, B2/B3 Coulomb and Phase-2 EEQ by Ewald summation (coulomb_ewald); ATM/BATM still use plain distances.
     m_cell_bohr_ortho = PBCUtils::OrthoCell();
+    m_ewald_params = curcuma::ewald::EwaldParameters();  // N2: activeCutoffsBohr() must not read a stale r_cut of a reused instance
+    m_cutoffs_frozen = false;                            // N2: a re-initialised instance starts with the automatic radii
+    m_lists_rebuild_pending = false;
     if (!m_has_pbc)
         return;
     std::string error;
@@ -13531,6 +13547,98 @@ const FFVirialComponents* GFNFF::virialComponents() const
 double GFNFF::cellVolumeBohr3() const
 {
     return m_cell_bohr_ortho.active ? m_cell_bohr_ortho.L[0] * m_cell_bohr_ortho.L[1] * m_cell_bohr_ortho.L[2] : 0.0;
+}
+
+// Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED N2): see gfnff.h
+std::pair<std::string, double> GFNFF::largestActiveCutoffBohr() const
+{
+    std::pair<std::string, double> best{ "", 0.0 };
+    for (const auto& c : activeCutoffsBohr())
+        if (c.second > best.second)
+            best = c;
+    return best;
+}
+
+void GFNFF::freezeCutoffsForCellChanges(double density_gain)
+{
+    if (!m_initialized || !m_workspace)
+        throw std::runtime_error("GFN-FF: freezeCutoffsForCellChanges() before the set-up");
+    if (!m_has_pbc || !m_cell_bohr_ortho.active)
+        throw std::runtime_error("GFN-FF: freezeCutoffsForCellChanges() needs a periodic cell");
+    D4RadiiBohr r = dispersionRadiiBohr();  // the automatic (or user) radii of the start cell
+    if (!r.user_cutoff) {
+        // The start cell allows a density gain of `density_gain` before the D4 radius alone stops the run:
+        // L_min(1 + g)^(-1/3) / 2 > r_eval. For the 432-water box of the W1 project (L0 = 44.39 Bohr, g = 0.15)
+        // this gives 21.19 Bohr, just below the HB/XB search radius 21.21 Bohr (hbthr2 = 450 Bohr^2), so the HB
+        // search radius stays the limiter at L_min > 42.43 Bohr (density +12.9 %). The pair term then ends at
+        // 21.2 instead of 22.2 Bohr; the homogeneous tail (A3c) covers the difference (its r_c dependence at
+        // these radii is far below the pair term's, A3c table).
+        const double half = 0.5 * m_cell_bohr_ortho.minLength();
+        const double allowed = std::nextafter(half * std::cbrt(1.0 / (1.0 + std::max(0.0, density_gain))), 0.0);
+        if (r.eval > allowed) {
+            r.eval = allowed;
+            r.build = std::min(r.build, r.eval + (D4ParameterGenerator::PAIR_BUILD_CUTOFF_BOHR - D4ParameterGenerator::PAIR_EVAL_CUTOFF_BOHR));
+            r.capped = true;
+        }
+    }
+    m_frozen_d4 = r;
+    m_cutoffs_frozen = true;
+    if (m_d4_generator)
+        m_d4_generator->setPeriodicCell(m_cell_bohr_ortho, r.build);
+    m_lists_rebuild_pending = true;  // the per-pair r_cut stamp of the D4 list follows the frozen radius
+    m_last_eeq_geometry.resize(0, 0);
+    if (m_hb_reference)
+        m_hb_reference->needs_update = true;
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        const auto big = largestActiveCutoffBohr();
+        CurcumaLogger::info(fmt::format("GFN-FF: cutoffs frozen for cell changes: D4 evaluation radius {:.4f} Bohr (list {:.4f}), "
+                                        "Ewald r_cut {:.4f}, largest cutoff {:.4f} Bohr ({}); the cell must keep L_min > {:.4f} Bohr",
+            r.eval, r.build, m_ewald_params.r_cut, big.second, big.first, 2.0 * big.second));
+    }
+}
+
+void GFNFF::updateCell(const Eigen::Matrix3d& cell_angstrom)
+{
+    if (!m_initialized || !m_workspace)
+        throw std::runtime_error("GFN-FF: updateCell() before the set-up");
+    if (!m_has_pbc || !m_cell_bohr_ortho.active)
+        throw std::runtime_error("GFN-FF: updateCell() needs an instance set up with a periodic cell");
+    std::string error;
+    const PBCUtils::OrthoCell cell = PBCUtils::makeOrthoCell(cell_angstrom * CurcumaUnit::Length::ANGSTROM_TO_BOHR, error);
+    if (!cell.active)
+        throw std::runtime_error("GFN-FF: updateCell: " + error);
+    const PBCUtils::OrthoCell old_cell = m_cell_bohr_ortho;
+    const Eigen::Matrix3d old_cell_ang = m_unit_cell;
+    m_cell_bohr_ortho = cell;
+    m_unit_cell = cell_angstrom;
+    // Every active cutoff (frozen D4 radius, repulsion 20, HB/XB search radii, XB 20, the fixed Ewald r_cut, CN
+    // range, reactive scan) against the new L_min/2; nothing is changed when one fails.
+    error = PBCUtils::checkCutoffsAgainstCell(cell, activeCutoffsBohr(), "Bohr");
+    if (!error.empty()) {
+        m_cell_bohr_ortho = old_cell;
+        m_unit_cell = old_cell_ang;
+        throw std::runtime_error("GFN-FF: updateCell: " + error);
+    }
+    m_workspace->setPeriodicCell(cell);
+    if (coulombEwaldActive()) {
+        // New lattice vectors, volume and k vectors (n_max per axis from k_max and L) at the fixed alpha, r_cut
+        // and k_max of the set-up, for the Coulomb energy and the EEQ matrix alike (B3: one parameter set).
+        m_workspace->setEwald(m_ewald_params);
+        if (m_eeq_solver)
+            m_eeq_solver->updatePeriodicCell(cell);
+        if (m_ewald_cache)
+            m_ewald_cache->valid = false;  // P1: pair list, kernel and phase table of the old lattice
+    }
+    if (m_d4_generator)
+        m_d4_generator->setPeriodicCell(cell, dispersionRadiiBohr().build);
+    m_lists_rebuild_pending = true;      // D4, repulsion, Coulomb-cutoff lists, HB/XB detection, reactive scan
+    m_last_eeq_geometry.resize(0, 0);    // the charges belong to the old lattice even at unchanged positions
+    if (m_hb_reference)
+        m_hb_reference->needs_update = true;
+    ++m_cell_update_count;
+    if (CurcumaLogger::get_verbosity() >= 3)
+        CurcumaLogger::info(fmt::format("GFN-FF: cell updated to {:.6f} x {:.6f} x {:.6f} Bohr (update {})",
+            cell.L[0], cell.L[1], cell.L[2], m_cell_update_count));
 }
 
 // Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED B3): one set of Ewald parameters for the EEQ matrix and the

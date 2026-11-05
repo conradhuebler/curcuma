@@ -5605,6 +5605,17 @@ void EEQSolver::setPeriodicEwald(const PBCUtils::OrthoCell& cell, const curcuma:
         m_ewald_cache->valid = false;  // P1: new parameters, new kernel values
 }
 
+// Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED N2)
+void EEQSolver::updatePeriodicCell(const PBCUtils::OrthoCell& cell)
+{
+    if (!m_ewald)
+        throw std::runtime_error("EEQSolver::updatePeriodicCell: no periodic Ewald matrix set (setPeriodicEwald)");
+    m_ewald = std::make_unique<curcuma::ewald::EwaldSum>(cell, m_ewald->parameters());  // throws for r_cut > L_min/2
+    m_ewald_cell = cell;
+    if (m_ewald_cache)
+        m_ewald_cache->valid = false;  // P1: the pair list, kernel and phase table belong to the old lattice
+}
+
 Vector EEQSolver::calculateFinalChargesPeriodic(const std::vector<int>& atoms, const Matrix& geometry_bohr, int total_charge,
     const Vector& topology_charges, const Vector& cn, const std::optional<TopologyInput>& topology,
     const Vector& chi_corrected, const Vector& gam_corrected, const Vector& alpha_corrected,

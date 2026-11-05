@@ -554,6 +554,9 @@ public:
      */
     void setPeriodicEwald(const PBCUtils::OrthoCell& cell, const curcuma::ewald::EwaldParameters& p, int dense_max_atoms);
     void clearPeriodicEwald() { m_ewald.reset(); m_periodic_last_q.resize(0); m_periodic_q_hist.clear(); }
+    /// Claude Generated (Nov 2026, N2): new cell at the same alpha, r_cut and k_max (barostat); the warm-start history
+    /// (start values only) is kept, the shared geometry data are invalidated. Throws unless setPeriodicEwald() was called.
+    void updatePeriodicCell(const PBCUtils::OrthoCell& cell);
     /// P1 (Nov 2026, Claude Generated): geometry data (pair list, kernel values, phase table) shared with the
     /// workspace Coulomb (FFWorkspace::setEwaldGeometryCache), and the memory cap of the stored kernel in bytes.
     void setEwaldGeometryCache(std::shared_ptr<curcuma::ewald::EwaldGeometryCache> cache, size_t kernel_cap_bytes)

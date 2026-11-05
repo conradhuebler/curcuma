@@ -6,6 +6,7 @@
 
 #include "xyz_comment_parser.h"
 #include "molecule.h"
+#include "curcuma_logger.h"
 #include "src/tools/general.h"
 #include "src/tools/pbc_utils.h"
 
@@ -43,27 +44,45 @@ bool XYZCommentParser::parseComment(const std::string& comment, Molecule& mol)
         }
 
         // Need at least a, b, c (3 values after keyword)
+        bool cell_set = false;
         if (start_idx > 0 && tokens.size() >= start_idx + 3) {
             try {
                 double a = std::stod(tokens[start_idx]);
                 double b = std::stod(tokens[start_idx + 1]);
                 double c = std::stod(tokens[start_idx + 2]);
 
-                // Angles optional (default: 90° orthorhombic)
+                // Angles optional (default: 90 deg, orthorhombic).
+                // Claude Generated (Nov 2026): if the three tokens after a b c are not all
+                // numeric (missing, or free text such as "unitcell 10 10 10 water box"),
+                // keep 90 90 90 and accept the cell instead of discarding it.
                 double alpha = 90.0, beta = 90.0, gamma = 90.0;
                 if (tokens.size() >= start_idx + 6) {
-                    alpha = std::stod(tokens[start_idx + 3]);
-                    beta = std::stod(tokens[start_idx + 4]);
-                    gamma = std::stod(tokens[start_idx + 5]);
+                    try {
+                        double al = std::stod(tokens[start_idx + 3]);
+                        double be = std::stod(tokens[start_idx + 4]);
+                        double ga = std::stod(tokens[start_idx + 5]);
+                        alpha = al;
+                        beta = be;
+                        gamma = ga;
+                    } catch (const std::exception&) {
+                        // not three numeric angles: orthorhombic default stays
+                    }
                 }
 
                 // Build lattice vectors and enable PBC
                 Eigen::Matrix3d cell = PBCUtils::buildLatticeVectors(a, b, c, alpha, beta, gamma);
                 mol.setUnitCell(cell, true);
+                cell_set = true;
 
-            } catch (const std::invalid_argument&) {
-                // Malformed lattice parameters - ignore and continue with other parsing
+            } catch (const std::exception&) {
+                // Malformed lattice parameters (invalid_argument/out_of_range) - no cell,
+                // continue with other parsing
             }
+        }
+        // Claude Generated (Nov 2026): say so when a cell keyword yields no cell
+        if (!cell_set) {
+            CurcumaLogger::warn("XYZ comment mentions 'unitcell'/'lattice' but no cell was read "
+                                "(expected '<keyword> a b c [alpha beta gamma]'): " + comment);
         }
     }
 

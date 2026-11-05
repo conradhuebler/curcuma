@@ -284,6 +284,13 @@ public:
     /// (ComputationalMethod::hasPeriodicEnergy(); only native CPU GFN-FF with cell and coulomb_ewald).
     bool hasPeriodicEnergy() const;
 
+    /// Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED N2): change the unit cell (Angstrom, lattice vectors as
+    /// rows/columns as in Mol::m_unit_cell) of the current molecule between two energy calls; the caller scales the
+    /// positions itself (barostat). Only the periodic native CPU GFN-FF energy supports it (GFNFF::updateCell, which
+    /// keeps the Ewald sums, pair lists and caches consistent); throws std::runtime_error otherwise, and when the
+    /// new cell is too small for a cutoff (the instance is then unchanged).
+    void setUnitCell(const Eigen::Matrix3d& cell_angstrom);
+
     /// WP-P1 (May 2026): per-phase CPU timing JSON from the last calculation.
     json LastPrepTiming() const;
 

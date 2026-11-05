@@ -504,6 +504,12 @@ void SimpleMD::LoadControlJson()
     // Claude Generated 2025: RATTLE Parameters
     m_rm_COM = m_config.get<double>("remove_com_motion");
     m_compute_pressure = m_config.get<bool>("compute_pressure");  // Nov 2026 (N1); no effect without a cell
+    // Nov 2026 (N2): barostat (type resolved and checked in setupBarostat(), after the energy set-up)
+    m_barostat = m_config.get<std::string>("barostat");
+    m_pressure0_bar = m_config.get<double>("pressure");
+    m_tau_p = m_config.get<double>("tau_p");
+    m_compressibility = m_config.get<double>("compressibility");
+    m_pcoupl_interval = std::max(1, m_config.get<int>("pcoupl_interval"));
     int rattle = m_config.get<int>("rattle");
 
     m_rattle_maxiter = m_config.get<int>("rattle_max_iterations");
@@ -1063,6 +1069,26 @@ bool SimpleMD::Initialise()
     // Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED N1): instantaneous pressure from the atomic virial. Needs a
     // cell with the periodic CPU GFN-FF energy; RATTLE is refused (the constraint force virial is not implemented),
     // as is the per-step EnergyCalculator mode (cleanenergy: a fresh instance per step carries no virial request).
+    // Nov 2026 (N2): a barostat needs the pressure; its own checks follow after the pressure set-up.
+    const std::string barostat_lc = [this] { std::string s = m_barostat; std::transform(s.begin(), s.end(), s.begin(), ::tolower); return s; }();
+    if (barostat_lc == "none" || barostat_lc.empty()) {
+        m_barostat_type = BarostatType::None;
+    } else if (barostat_lc == "berendsen") {
+        m_barostat_type = BarostatType::Berendsen;
+    } else if (barostat_lc == "crescale" || barostat_lc == "c-rescale") {
+        m_barostat_type = BarostatType::CRescale;
+    } else {
+        CurcumaLogger::error("barostat: unknown type '" + m_barostat + "' (none | berendsen | crescale)");
+        return false;
+    }
+    const char* pressure_user = m_barostat_type != BarostatType::None ? "barostat" : "compute_pressure";
+    if (m_barostat_type != BarostatType::None) {
+        if (!m_has_pbc) {
+            CurcumaLogger::error("barostat: no unit cell set (add 'unitcell a b c [alpha beta gamma]' to the XYZ comment line)");
+            return false;
+        }
+        m_compute_pressure = true;
+    }
     if (m_compute_pressure && !m_has_pbc) {
         if (m_verbosity >= 1)
             CurcumaLogger::warn("compute_pressure: no unit cell set, no pressure is computed");
@@ -1070,26 +1096,27 @@ bool SimpleMD::Initialise()
     }
     if (m_compute_pressure) {
         if (m_rattle) {
-            CurcumaLogger::error("compute_pressure: pressure with constraints not implemented (rattle)");
+            CurcumaLogger::error(fmt::format("{}: pressure with constraints not implemented (rattle)", pressure_user));
             return false;
         }
         if (m_config.get<bool>("cleanenergy", false)) {
-            CurcumaLogger::error("compute_pressure: not available with cleanenergy (per-step energy calculator)");
+            CurcumaLogger::error(fmt::format("{}: not available with cleanenergy (per-step energy calculator)", pressure_user));
             return false;
         }
         GFNFF* gfnff = m_interface->Interface() ? m_interface->Interface()->gfnffInstance() : nullptr;
         if (!m_periodic_energy || !gfnff) {
-            CurcumaLogger::error("compute_pressure: needs the periodic native CPU GFN-FF energy (method gfnff with a unit cell and coulomb_ewald)");
+            CurcumaLogger::error(fmt::format("{}: needs the periodic native CPU GFN-FF energy (method gfnff with a unit cell and coulomb_ewald)", pressure_user));
             return false;
         }
         try {
             gfnff->setWantVirial(true);
         } catch (const std::exception& e) {
-            CurcumaLogger::error(std::string("compute_pressure: ") + e.what());
+            CurcumaLogger::error(fmt::format("{}: {}", pressure_user, e.what()));
             return false;
         }
         const Eigen::Matrix3d cell = m_molecule.getUnitCell();
         m_cell_volume_ang3 = std::abs(cell.determinant());
+        m_cell_edge_ang = std::min({ cell.row(0).norm(), cell.row(1).norm(), cell.row(2).norm() });
         m_total_mass_amu = 0.0;
         for (int i = 0; i < m_natoms; ++i)
             m_total_mass_amu += Elements::AtomicMass[m_atomtype[i]];
@@ -1098,6 +1125,8 @@ bool SimpleMD::Initialise()
                 m_cell_volume_ang3, m_total_mass_amu,
                 CurcumaUnit::Pressure::amu_per_angstrom3_to_gcm3(m_total_mass_amu, m_cell_volume_ang3)));
     }
+    if (m_barostat_type != BarostatType::None && !setupBarostat())
+        return false;
     // Iterative mode: raise SCF display threshold by one level so system verbosity
     // controls output (silent at default=1, visible at -v 2). Claude Generated.
     m_interface->setIterativeMode(true);
@@ -1851,6 +1880,25 @@ nlohmann::json SimpleMD::WriteRestartInformation()
     restart["average_Etot"] = m_aver_Etot;
     restart["average_Virial"] = m_average_virial_correction;
     restart["average_Wall"] = m_average_wall_potential;
+    // Nov 2026 (N2): cell and barostat state (the cell of the molecule, also without a barostat when one is set)
+    if (m_has_pbc) {
+        const Eigen::Matrix3d cell = m_molecule.getUnitCell();
+        json c = json::array();
+        for (int r = 0; r < 3; ++r)
+            for (int k = 0; k < 3; ++k)
+                c.push_back(cell(r, k));
+        restart["cell"] = c;
+    }
+    if (m_barostat_type != BarostatType::None) {
+        restart["barostat"] = m_barostat;
+        restart["pressure"] = m_pressure0_bar;
+        restart["tau_p"] = m_tau_p;
+        restart["compressibility"] = m_compressibility;
+        restart["pcoupl_interval"] = m_pcoupl_interval;
+        restart["pcoupl_calls"] = m_pcoupl_calls;
+        restart["pcoupl_events"] = m_pcoupl_events;
+        restart["average_P"] = m_aver_pressure_bar;
+    }
 
     restart["rattle"] = m_rattle;
     restart["rattle_maxiter"] = m_rattle_maxiter;
@@ -1966,8 +2014,13 @@ bool SimpleMD::LoadRestartInformation()
     return true;
 };
 
-bool SimpleMD::LoadRestartInformation(const json& state)
+bool SimpleMD::LoadRestartInformation(const json& state_in)
 {
+    // Claude Generated (Nov 2026): the reads below are state["key"] inside try/catch(type_error), which only works on a
+    // NON-const json: a missing key then yields null and the conversion throws. On a const json, operator[] with a missing
+    // key is undefined behaviour (it dereferences end()): hand-written restart files without e.g. "thermostat" crashed
+    // at random (about 1 run in 20). Work on a local copy.
+    json state = state_in;
     // Claude Generated 2025: Validate restart data before parsing
     auto validation = validateRestartData(state,
         {"method", "geometry", "velocities"},  // required fields
@@ -2043,6 +2096,24 @@ bool SimpleMD::LoadRestartInformation(const json& state)
     try {
         m_average_wall_potential = state["average_Wall"];
     } catch ([[maybe_unused]] json::type_error& e) {
+    }
+    // Nov 2026 (N2): the cell of the saved state (a barostat run changes it) and the barostat state
+    if (state.contains("cell") && state["cell"].is_array() && state["cell"].size() == 9) {
+        Eigen::Matrix3d cell;
+        for (int r = 0; r < 3; ++r)
+            for (int k = 0; k < 3; ++k)
+                cell(r, k) = state["cell"][3 * r + k].get<double>();
+        m_molecule.setUnitCell(cell, true);
+    }
+    if (state.contains("barostat") && state["barostat"].is_string()) {
+        m_barostat = state["barostat"].get<std::string>();
+        m_pressure0_bar = state.value("pressure", m_pressure0_bar);
+        m_tau_p = state.value("tau_p", m_tau_p);
+        m_compressibility = state.value("compressibility", m_compressibility);
+        m_pcoupl_interval = std::max(1, state.value("pcoupl_interval", m_pcoupl_interval));
+        m_pcoupl_calls = state.value("pcoupl_calls", 0L);
+        m_pcoupl_events = state.value("pcoupl_events", 0L);
+        m_aver_pressure_bar = state.value("average_P", 0.0);
     }
 
     try {
@@ -2438,6 +2509,10 @@ void SimpleMD::prepareRun()
         if (m_compute_pressure) {  // N1 (Nov 2026): instantaneous pressure, its running mean, cell volume, mass density
             header += fmt::format(" {: ^15} {: ^15} {: ^15} {: ^15}", "P", "<P>", "V", "rho");
             units  += fmt::format(" {: ^15} {: ^15} {: ^15} {: ^15}", "bar", "bar", "A^3", "g/cm^3");
+        }
+        if (m_barostat_type != BarostatType::None) {  // N2 (Nov 2026): shortest cell edge
+            header += fmt::format(" {: ^15}", "L");
+            units  += fmt::format(" {: ^15}", "A");
         }
         if (m_rmsd_mtd) {
             header += fmt::format(" {: ^15}", "nBias");
@@ -2916,6 +2991,18 @@ bool SimpleMD::step()
     }
     m_last_integrator_ms = integrator_ms;
     AverageQuantities();
+
+    // Nov 2026 (N2): pressure coupling after the full step (positions x_{n+1}, their forces and virial, the
+    // velocities after the thermostat; P of this step is in m_pressure_bar). Scales cell and positions
+    // together; the next step's first half-kick uses the forces of the unscaled x_{n+1} (see applyBarostat()).
+    if (m_barostat_type != BarostatType::None && !m_unstable) {
+        ++m_pcoupl_calls;
+        if (m_pcoupl_calls % m_pcoupl_interval == 0 && !applyBarostat()) {
+            m_run_aborted = true;
+            m_stop_reason = StopReason::CellLimit;
+            return false;
+        }
+    }
 
     // Claude Generated (Jun 2026): ConfSearch robustness gates (opt-in, default off).
     // Both set m_run_aborted (like the stop-file path) so finalizeRun() still runs and
@@ -5558,6 +5645,8 @@ void SimpleMD::PrintStatus() const
         if (m_compute_pressure)  // N1 (Nov 2026)
             line += fmt::format(" {: ^15.2f} {: ^15.2f} {: ^15.3f} {: ^15.5f}", m_pressure_bar, m_aver_pressure_bar,
                 m_cell_volume_ang3, m_density_gcm3);
+        if (m_barostat_type != BarostatType::None)  // N2 (Nov 2026): shortest cell edge
+            line += fmt::format(" {: ^15.5f}", m_cell_edge_ang);
         if (m_rmsd_mtd)
             line += fmt::format(" {: ^15}", m_bias_structure_count);
         else if (m_writeUnique)
@@ -5677,6 +5766,173 @@ void SimpleMD::AverageQuantities()
     }
 }
 
+// Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED N2): barostat set-up after the energy set-up (m_compute_pressure
+// is on and the virial request accepted by now).
+bool SimpleMD::setupBarostat()
+{
+    if (m_defaults.value("gpu", std::string("none")) != "none" || m_config.get<std::string>("gpu", "none") != "none") {
+        CurcumaLogger::error("barostat: not available with -gpu (the GPU hybrid carries no atomic virial and no cell update); run on the CPU");
+        return false;
+    }
+    if (m_wall_type != 0) {
+        CurcumaLogger::error("barostat: not available together with a wall potential (the walls do not scale with the cell)");
+        return false;
+    }
+    if (m_tau_p <= 0.0 || m_compressibility <= 0.0) {
+        CurcumaLogger::error("barostat: tau_p and compressibility must be positive");
+        return false;
+    }
+    GFNFF* gfnff = m_interface->Interface() ? m_interface->Interface()->gfnffInstance() : nullptr;
+    if (!gfnff) {
+        CurcumaLogger::error("barostat: needs the periodic native CPU GFN-FF energy");
+        return false;
+    }
+    try {
+        gfnff->freezeCutoffsForCellChanges(0.15);
+    } catch (const std::exception& e) {
+        CurcumaLogger::error(std::string("barostat: ") + e.what());
+        return false;
+    }
+    if (m_barostat_type == BarostatType::CRescale) {
+        CitationRegistry::cite("crescale");
+        auto thermo_it = thermostat_map.find(m_thermostat);
+        if (thermo_it != thermostat_map.end() && thermo_it->second == ThermostatType::None && m_verbosity >= 1)
+            CurcumaLogger::warn("barostat crescale without a thermostat: the stochastic cell rescaling samples the "
+                                "isothermal-isobaric ensemble only together with a thermostat (NVE + barostat is not an ensemble)");
+    } else {
+        CitationRegistry::cite("berendsen");
+    }
+    if (m_verbosity >= 1) {
+        const auto big = gfnff->largestActiveCutoffBohr();
+        CurcumaLogger::info(fmt::format("barostat {}: P0 {:.5f} bar, tau_p {:.1f} fs, compressibility {:.3e} 1/bar, every {} steps "
+                                        "(coupling time step {:.2f} fs); cell edge {:.4f} A, limit L_min > {:.4f} A ({})",
+            m_barostat_type == BarostatType::CRescale ? "crescale" : "berendsen", m_pressure0_bar, m_tau_p, m_compressibility,
+            m_pcoupl_interval, m_pcoupl_interval * m_dT, m_cell_edge_ang,
+            2.0 * big.second * CurcumaUnit::Length::BOHR_TO_ANGSTROM, big.first));
+    }
+    return true;
+}
+
+/* Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED N2): isotropic pressure coupling.
+ *
+ * Both barostats act on the logarithmic volume strain eps = d ln V every N = pcoupl_interval steps with the
+ * coupling time step Dt = N dt, using the full instantaneous pressure of the step just finished,
+ *     P = (2 K + tr Xi) / (3 V)      (K: kinetic energy of all atoms after the thermostat, Xi: atomic virial of
+ *                                      the periodic GFN-FF energy at the positions of this step, N1),
+ * then scale the cell edges and EVERY atom position about the origin by mu = exp(eps/3) (atomic scaling,
+ * consistent with the atomic virial Xi = -dE/d(strain) at fixed fractional coordinates of every atom).
+ *
+ * Berendsen (Berendsen, Postma, van Gunsteren, DiNola, Haak, J. Chem. Phys. 81, 3684 (1984), eq. 32-33):
+ *     mu^3 = 1 - (Dt / tau_p) beta (P0 - P)
+ * with the isothermal compressibility beta (1/bar), target P0; velocities unchanged. Weak coupling: the volume
+ * relaxes with tau_p but its fluctuations are suppressed (no ensemble).
+ *
+ * Stochastic cell rescaling, "C-rescale" (Bernetti and Bussi, J. Chem. Phys. 153, 114107 (2020), arXiv:2006.09250;
+ * the isotropic equations as written here are taken from the WP order and from memory, NOT checked against the
+ * paper's text -- the one web search allowed for this work did not return them; they agree with the GROMACS
+ * implementation as remembered):
+ *     d eps = -(beta / tau_p) (P0 - P) dt  +  sqrt(2 kB T beta / (V tau_p)) dW,      eps = ln V,
+ * integrated over Dt with the Wiener increment dW = sqrt(Dt) xi, xi ~ N(0, 1) from the seeded MD generator
+ * (reproducible with -seed; drawn after the thermostat's numbers of the same step); T is the thermostat target
+ * temperature. Positions scale by exp(eps/3), momenta (velocities) by exp(-eps/3). The volume-dependent noise
+ * (Ito form) gives the stationary density V exp(-beta_T (H + P0 V)) in (r, p, eps), i.e. exp(-beta_T (H + P0 V))
+ * in (r, p, V): the isothermal-isobaric ensemble, whose ideal-gas limit is <V> = (N + 1) kB T / P0 with the
+ * relative variance 1/(N + 1) (checked in ctest pbc_npt_idealgas). The first-order Berendsen drift and the
+ * noise are both O(Dt): one Euler-Maruyama step per coupling.
+ *
+ * Placement in the velocity-Verlet step (both barostats): kick - drift - force(x_{n+1}) - kick - thermostat -
+ * barostat. The forces kept for the first half-kick of the next step are those of the unscaled x_{n+1}; the
+ * cell and the positions are scaled by the same mu (|mu - 1| ~ 1e-4 per coupling at the default settings), so
+ * the error of using them at mu x_{n+1} is of the order of the Berendsen scheme itself (as in GROMACS, which
+ * does not recompute the forces after the scaling either). No extra energy evaluation, and without a barostat
+ * the step is bitwise the N1 step.
+ *
+ * Units: positions and cell in Angstrom, K in Eh, P in bar; kB T beta / V = au_to_bar(kB T) [bar Bohr^3] x beta
+ * [1/bar] / V [Bohr^3] is dimensionless.
+ */
+bool SimpleMD::applyBarostat()
+{
+    const double dt_p = m_pcoupl_interval * m_dT;  // fs, same unit as tau_p
+    const double P = m_pressure_bar;               // bar, this step (AverageQuantities())
+    double mu = 1.0, eps = 0.0;
+    bool scale_velocities = false;
+    if (m_barostat_type == BarostatType::Berendsen) {
+        const double mu3 = 1.0 - (dt_p / m_tau_p) * m_compressibility * (m_pressure0_bar - P);
+        if (!(mu3 > 0.0) || !std::isfinite(mu3)) {
+            CurcumaLogger::error(fmt::format("barostat berendsen: mu^3 = {:.4e} at step {} (P = {:.2f} bar): the coupling is too strong "
+                                             "for this pressure; raise tau_p or lower compressibility", mu3, m_step, P));
+            m_unstable = true;
+            return false;
+        }
+        mu = std::cbrt(mu3);
+        eps = 3.0 * std::log(mu);
+    } else {
+        const double v_bohr3 = m_cell_volume_ang3 / CurcumaUnit::Length::BOHR3_TO_ANGSTROM3;
+        const double kT_bar_bohr3 = CurcumaUnit::Pressure::au_to_bar(kb_Eh * m_T0);  // kB T as pressure x volume
+        const double drift = -(m_compressibility / m_tau_p) * (m_pressure0_bar - P) * dt_p;
+        const double noise = std::sqrt(2.0 * kT_bar_bohr3 * m_compressibility * dt_p / (v_bohr3 * m_tau_p)) * m_baro_norm(m_rng);
+        eps = drift + noise;
+        if (!std::isfinite(eps)) {
+            CurcumaLogger::error(fmt::format("barostat crescale: non-finite strain at step {} (P = {:.2f} bar)", m_step, P));
+            m_unstable = true;
+            return false;
+        }
+        mu = std::exp(eps / 3.0);
+        scale_velocities = true;
+    }
+
+    const Eigen::Matrix3d old_cell = m_molecule.getUnitCell();
+    const Eigen::Matrix3d new_cell = old_cell * mu;
+    m_eigen_geometry *= mu;  // every atom about the origin (a lattice point): fixed fractional coordinates
+    try {
+        m_interface->setUnitCell(new_cell);  // GFNFF::updateCell: cutoff check, Ewald lattice, lists, caches
+    } catch (const std::exception& e) {
+        // The last valid state is the unscaled one: restore it, save it, stop.
+        m_eigen_geometry /= mu;
+        m_molecule.setGeometry(m_eigen_geometry);
+        const double l_new = std::min({ new_cell.row(0).norm(), new_cell.row(1).norm(), new_cell.row(2).norm() }) * CurcumaUnit::Length::ANGSTROM_TO_BOHR;
+        GFNFF* gfnff = m_interface->Interface() ? m_interface->Interface()->gfnffInstance() : nullptr;
+        const auto big = gfnff ? gfnff->largestActiveCutoffBohr() : std::pair<std::string, double>{ "", 0.0 };
+        const std::string restart_name = snapshotPath(Basename() + ".npt_limit.json");
+        {
+            std::ofstream restart_file(restart_name);
+            json restart;
+            restart[MethodName()[0]] = WriteRestartInformation();
+            restart_file << restart << std::endl;
+        }
+        CurcumaLogger::error(fmt::format("NPT: cell shrank below the cutoff limit L={:.4f} Bohr (needs > {:.4f} Bohr, {}) at step {} "
+                                         "(t = {:.2f} fs, mu = {:.6f}, P = {:.2f} bar); restart written: {}. Reason: {}",
+            l_new, 2.0 * big.second, big.first, m_step, m_currentStep, mu, P, restart_name, e.what()));
+        return false;
+    }
+    m_molecule.setUnitCell(new_cell, true);
+    m_molecule.setGeometry(m_eigen_geometry);
+    if (scale_velocities) {
+        m_eigen_velocities /= mu;
+        EKin();  // K and T of the scaled momenta (the status line and <Ekin> of this step show the scaled values)
+        m_ekin_pre_thermostat = m_Ekin;
+    }
+    m_cell_volume_ang3 = std::abs(new_cell.determinant());
+    m_cell_edge_ang = std::min({ new_cell.row(0).norm(), new_cell.row(1).norm(), new_cell.row(2).norm() });
+    m_density_gcm3 = CurcumaUnit::Pressure::amu_per_angstrom3_to_gcm3(m_total_mass_amu, m_cell_volume_ang3);
+    m_last_cell_scale = mu;
+    ++m_pcoupl_events;
+    if (m_verbosity >= 3)
+        CurcumaLogger::info(fmt::format("barostat: step {} P {:.2f} bar, eps {:+.3e}, mu {:.6f}, L {:.5f} A, V {:.3f} A^3, rho {:.5f} g/cm^3",
+            m_step, P, eps, mu, m_cell_edge_ang, m_cell_volume_ang3, m_density_gcm3));
+    return true;
+}
+
+std::string SimpleMD::trajectoryComment() const
+{
+    std::string c = m_molecule.Header();
+    while (!c.empty() && (c.back() == '\n' || c.back() == '\r'))
+        c.pop_back();
+    const Eigen::Matrix3d cell = m_molecule.getUnitCell();
+    c += fmt::format(" unitcell {:.6f} {:.6f} {:.6f} 90.0 90.0 90.0", cell.row(0).norm(), cell.row(1).norm(), cell.row(2).norm());
+    return c;
+}
+
 // Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED N1)
 void SimpleMD::readVirial()
 {
@@ -5713,7 +5969,10 @@ bool SimpleMD::WriteGeometry()
     if (m_writeXYZ) {
         m_molecule.setEnergy(m_Epot);
         m_molecule.setName(std::to_string(m_currentStep));
-        m_molecule.appendXYZFile(outputPath(Basename() + ".trj.xyz"));
+        if (m_barostat_type != BarostatType::None)  // N2: the frame carries its cell (it changes along the run)
+            m_molecule.appendXYZFile(outputPath(Basename() + ".trj.xyz"), trajectoryComment());
+        else
+            m_molecule.appendXYZFile(outputPath(Basename() + ".trj.xyz"));
     }
     if (m_writeUnique) {
         if (m_unqiue->CheckMolecule(new Molecule(m_molecule))) {

@@ -274,7 +274,8 @@ public:
         Unstable,    ///< NaN/Inf in gradient, velocities or energy
         EpotAbort,   ///< epot_abort: the mean potential energy left its window
         TempAbort,   ///< temp_abort: the mean temperature ran away from the target
-        TopoCheck    ///< topo_check: the molecule broke into more fragments than it started with
+        TopoCheck,   ///< topo_check: the molecule broke into more fragments than it started with
+        CellLimit    ///< N2: the barostat shrank the cell below the frozen cutoff limit (restart written)
     };
 
     /// Why the run ended. Meaningful once step() has returned false.
@@ -347,6 +348,16 @@ public:
     /// fragments moved by a lattice vector, container wraps/refusals/reflections the clearance fallback of
     /// wall_potential pbc; wallWrapByCell() is true when the container wrap is the pure cell wrap.
     long cellWrapCount() const { return m_cell_wraps; }
+    /// Claude Generated (Nov 2026, N2): barostat state for tests and callers (values of the last step)
+    double cellVolumeAng3() const { return m_cell_volume_ang3; }
+    double pressureBar() const { return m_pressure_bar; }
+    double virialTraceEh() const { return m_virial_trace_eh; }
+    double densityGcm3() const { return m_density_gcm3; }
+    Eigen::Matrix3d unitCell() const { return m_molecule.getUnitCell(); }
+    long barostatEvents() const { return m_pcoupl_events; }
+    double lastCellScale() const { return m_last_cell_scale; }
+    /// The restart state (what the restart files hold under "MD"), for tests and embedding callers.
+    nlohmann::json restartState() { return WriteRestartInformation(); }
     long containerWrapCount() const { return m_container_wraps; }
     long containerRefusedCount() const { return m_container_refused; }
     long containerReflectionCount() const { return m_container_reflections; }
@@ -755,6 +766,26 @@ private:
     double m_density_gcm3 = 0.0;
     /// Read tr Xi from the GFN-FF instance after an energy call; throws when no virial was produced (GPU path).
     void readVirial();
+    /// Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED N2): isotropic barostat (Berendsen / stochastic cell rescaling)
+    enum class BarostatType { None, Berendsen, CRescale };
+    BarostatType m_barostat_type = BarostatType::None;
+    std::string m_barostat = "none";
+    double m_pressure0_bar = 1.01325;    ///< target pressure (bar)
+    double m_tau_p = 1000.0;             ///< coupling time (fs)
+    double m_compressibility = 4.5e-5;   ///< isothermal compressibility (1/bar)
+    int m_pcoupl_interval = 10;          ///< the barostat acts every N steps with the time step N dt
+    long m_pcoupl_calls = 0;             ///< steps counted towards the interval (restart-persistent)
+    long m_pcoupl_events = 0;            ///< cell changes applied
+    double m_last_cell_scale = 1.0;      ///< mu of the last cell change
+    double m_cell_edge_ang = 0.0;        ///< shortest cell edge (A), status line
+    std::normal_distribution<double> m_baro_norm{ 0.0, 1.0 };  ///< crescale noise, drawn from m_rng (seeded, reproducible)
+    /// One pressure-coupling step at the end of an MD step: scales cell and positions (crescale: velocities too) and
+    /// updates the energy calculator; false when the cell shrank below the cutoff limit (restart written, run aborted).
+    bool applyBarostat();
+    /// Checks of the barostat set-up after setMolecule(); false with the error printed.
+    bool setupBarostat();
+    /// Comment line of a trajectory frame with the cell (`unitcell a b c 90.0 90.0 90.0`) when a barostat runs.
+    std::string trajectoryComment() const;
     // Claude Generated (Sep 2026): Gyrationsradius-Bias, siehe ApplyGyrationBias()
     bool m_gyration_bias = false, m_gyration_one_sided = true, m_gyration_heavy_only = true;
     double m_gyration_target = -1.0, m_gyration_force = 0.1, m_gyration_potential = 0.0;
@@ -1020,6 +1051,17 @@ private:
     PARAM(write_restart_frequency, Int, 1000, "Write restart file every N steps.", "Restart", {"writerestart"})
     PARAM(no_restart, Bool, false, "Disable automatic loading from restart files.", "Restart", {"norestart"})
     PARAM(compute_pressure, Bool, false, "With a unit cell and the periodic CPU GFN-FF energy (coulomb_ewald): compute the atomic virial Xi = -dE/d(strain) with every step and print the instantaneous pressure P = (2 Ekin + tr Xi)/(3 V) in bar, the cell volume (A^3) and the mass density (g/cm^3) as extra columns. No effect without a cell. Refused with RATTLE (constraint virial not implemented), with a GPU-evaluated energy, the ensemble charge model or an implicit solvent. See docs/WP-PERIODIC-NONBONDED.md N1.", "Output", {})
+
+    // --- Barostat (Claude Generated, Nov 2026, WP-PERIODIC-NONBONDED N2) ---
+    PARAM(barostat, String, "none", "Isotropic barostat for a unit cell with the periodic CPU GFN-FF energy (method gfnff, coulomb_ewald): none | berendsen (Berendsen et al. 1984: weak coupling, mu^3 = 1 - (N dt/tau_p) beta (P0 - P), suppresses the volume fluctuations) | crescale (stochastic cell rescaling, Bernetti and Bussi 2020: Berendsen drift plus the noise sqrt(2 kB T beta N dt/(V tau_p)) dW on ln V, samples the NPT volume distribution; meant for use with a thermostat). Every pcoupl_interval steps the cell and all atom positions are scaled by mu (crescale also the velocities by 1/mu), using the full instantaneous pressure P = (2 Ekin + tr Xi)/(3 V) of that step (compute_pressure is switched on). The evaluation radii of the force field are frozen at absolute values when the run starts (D4 radius chosen so that the density may rise by 15 percent); when the cell shrinks below one of them the run stops with a restart file of the last valid state. Refused with RATTLE, cleanenergy, a GPU energy, walls, a non-periodic energy or without a cell. Pressure, volume, density and cell edge are printed, the restart file carries cell and barostat state, the trajectory comment line carries `unitcell a b c 90.0 90.0 90.0`. See docs/NPT.md.", "Barostat", {})
+    PARAM(pressure, Double, 1.01325, "Target pressure of the barostat in bar (1 atm = 1.01325 bar).", "Barostat", {},
+        "unit=bar")
+    PARAM(tau_p, Double, 1000.0, "Pressure coupling time constant in fs: the relaxation time of the volume (Berendsen) or of the cell-rescaling process (crescale).", "Barostat", {},
+        "unit=fs; min=0")
+    PARAM(compressibility, Double, 4.5e-5, "Isothermal compressibility beta used by the barostat, in 1/bar (liquid water at 300 K: 4.5e-5; it sets the strength of the coupling, not the result).", "Barostat", {},
+        "unit=1/bar; min=0")
+    PARAM(pcoupl_interval, Int, 10, "Apply the barostat every N MD steps; the coupling time step is N x dt (the pair lists and HB/XB lists of the force field are rebuilt at every cell change).", "Barostat", {},
+        "min=1")
 
     // --- RATTLE Constraints ---
     PARAM(rattle, Int, 0, "RATTLE constraint algorithm (0:off, 1:on, 2:H-only). Not available with gfnff topology_mode=react (constraints are frozen at initialisation).", "RATTLE", {})

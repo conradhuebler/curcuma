@@ -21,6 +21,7 @@
 #include "energycalculator.h"
 #include "src/core/gpu_fallback.h"
 #include "energy_calculators/ff_methods/forcefield_method.h"
+#include "energy_calculators/ff_methods/gfnff.h"  // N2: GFNFF::updateCell in setUnitCell()
 #include "gpu_device_pool.h"
 #include "energy_calculators/gpu_plugin.h"
 #include "src/tools/general.h"
@@ -996,6 +997,17 @@ int EnergyCalculator::XBCount() const
 bool EnergyCalculator::hasPeriodicEnergy() const
 {
     return m_method && m_method->hasPeriodicEnergy();
+}
+
+// Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED N2)
+void EnergyCalculator::setUnitCell(const Eigen::Matrix3d& cell_angstrom)
+{
+    GFNFF* ff = m_method ? m_method->gfnffInstance() : nullptr;
+    if (!ff || !hasPeriodicEnergy())
+        throw std::runtime_error("EnergyCalculator::setUnitCell: only the periodic native CPU GFN-FF energy "
+                                 "(method gfnff with a unit cell and coulomb_ewald) can change its cell");
+    ff->updateCell(cell_angstrom);  // throws (instance unchanged) when a cutoff no longer fits below L_min/2
+    m_mol.m_unit_cell = cell_angstrom;
 }
 
 // WP-P1 (May 2026): per-phase timing forwarders for MDDiagnosticsWriter

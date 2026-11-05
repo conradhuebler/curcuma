@@ -617,8 +617,15 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosit
         // Restore global verbosity before final reporting
         CurcumaLogger::set_verbosity(saved_global_verbosity);
 
-        // Build convergence report from last step metrics
-        std::string convergence_report = formatConvergenceReport(energy_change_kjmol, rmsd_change, gradient_norm);
+        // Build convergence report from last step metrics.
+        // Claude Generated (Nov 2026), display only: the loop-local gradient_norm is set only
+        // after an accepted step, so a run that stopped before one (zero step / line search
+        // below min_step at iteration 1, non-finite first step) printed "gradient_norm=0 [OK]".
+        // Report the norm at the last accepted structure (the input if none was accepted) -
+        // the same value as result.final_gradient_norm - and say whether the run converged.
+        std::string convergence_report = fmt::format("status={}: {}",
+            m_converged ? "CONVERGED" : "NOT CONVERGED",
+            formatConvergenceReport(energy_change_kjmol, rmsd_change, m_current_gradient.norm()));
 
         // Final reporting — only at verbosity >= 2 to avoid spam in batch optimizations
         if (verbosity >= 2) {

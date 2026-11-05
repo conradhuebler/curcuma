@@ -95,6 +95,7 @@ add_cli_test(curcumaopt 05_alias_singlepoint)
 add_cli_test(curcumaopt 06_opth_only)
 add_cli_test(curcumaopt 07_opt_multixyz)
 set_tests_properties(cli_curcumaopt_07_opt_multixyz PROPERTIES TIMEOUT 300 LABELS "curcumaopt;gfnff;multixyz")
+add_cli_test(curcumaopt 08_not_converged_report)
 
 # =============================================================================
 # GFN-FF Tests (2 scenarios)

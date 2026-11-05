@@ -1602,3 +1602,147 @@ dispersion -68, HB -41 bar. 20 H2O: 606 bar (virial part). Numbers reported, not
   cells (refused by GFN-FF), `topology_mode react` with the virial (the react rebuild swaps the workspace lists; the
   virial flag survives `rebuildInteractionLists`, not run), the kinetic contribution with COM removal (K includes all
   atoms, the 3 removed DOF are not corrected). Human production testing pending.
+
+## N2 isotropic barostat for the periodic GFN-FF: Berendsen and stochastic cell rescaling (2026-11-05, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+On `feature/bulk` (base `a26b82da`), CPU only. Goal: NPT runs of water boxes (W1 project, `Versuchsplan.md`). User page:
+[NPT.md](NPT.md). Parameters (module `simplemd`): `barostat` none | berendsen | crescale, `pressure` 1.01325 bar, `tau_p`
+1000 fs, `compressibility` 4.5e-5 1/bar, `pcoupl_interval` 10. A barostat switches `compute_pressure` on; refused with
+RATTLE, `cleanenergy`, `-gpu`, a wall potential, a non-periodic energy or no cell; crescale without a thermostat warns.
+
+### Equations (code comment at `SimpleMD::applyBarostat`)
+
+- Coupling every N = `pcoupl_interval` steps with Dt = N dt from the full instantaneous pressure of the step just finished,
+  P = (2 K + tr Xi)/(3 V) (K after the thermostat, Xi at x_{n+1}); cell edges and EVERY atom position scaled by mu about
+  the origin (fixed fractional coordinates, the strain of the N1 virial).
+- Berendsen (J. Chem. Phys. 81, 3684 (1984)): mu^3 = 1 - (Dt/tau_p) beta (P0 - P); velocities unchanged.
+- C-rescale (Bernetti, Bussi, J. Chem. Phys. 153, 114107 (2020), arXiv:2006.09250): d ln V = -(beta/tau_p)(P0 - P) dt +
+  sqrt(2 kB T beta/(V tau_p)) dW, one Euler-Maruyama step per coupling (dW = sqrt(Dt) xi, xi ~ N(0,1) from the seeded MD
+  generator `m_rng`, drawn after the thermostat's numbers of the same step: reproducible with `-seed`; T = thermostat
+  target), positions x exp(eps/3), velocities x exp(-eps/3). **The isotropic equations are those of the work order and
+  of memory, NOT checked against the paper's text: the one web search allowed returned the paper (journal, volume,
+  article, arXiv id) but not its equations.** Stationary density (Ito noise ~ 1/V): V exp(-(H + P0 V)/kT) in (r, p, eps),
+  i.e. exp(-(H + P0 V)/kT) in (r, p, V). Ideal gas with dof thermostatted momentum components: rho(V) ~ V^(dof/3)
+  exp(-P0 V/kT), <V> = N_eff kT/P0, <dV^2>/<V>^2 = 1/N_eff with N_eff = dof/3 + 1 (the paper's N + 1 for dof = 3N;
+  curcuma's periodic DOF count is 3N - 3, D1, so N_eff = N here).
+- Placement in velocity Verlet: kick - drift - force(x_{n+1}) - kick - thermostat - barostat. The forces kept for the
+  next first half-kick are those of the unscaled x_{n+1} (as GROMACS does; |mu - 1| ~ 1e-4 per coupling at the
+  defaults): no extra energy evaluation, and without a barostat the step is bitwise the N1 step (checks below).
+
+### Cell update (`EnergyCalculator::setUnitCell` -> `GFNFF::updateCell`)
+
+Between two energy calls, in this order: (1) new `PBCUtils::OrthoCell` from the cell in A (orthorhombic check); (2) every
+active cutoff against the new L_min/2 (`activeCutoffsBohr()`, which now reports the Ewald r_cut fixed at the set-up
+instead of re-deriving one from L); a failure restores the old cell and throws; (3) `m_unit_cell` (A), `m_cell_bohr_ortho`,
+`FFWorkspace::setPeriodicCell`; (4) `FFWorkspace::setEwald(m_ewald_params)` and `EEQSolver::updatePeriodicCell(cell)`: new
+`EwaldSum` objects (lattice vectors, volume, k vectors with n_max per axis from the FIXED k_max and the new L; alpha and
+r_cut fixed), the shared `EwaldGeometryCache` invalidated (pair list, stored kernel, phase table belong to the old
+lattice), the EEQ warm-start history (`m_periodic_q_hist`, aspc start values) kept; (5) `D4ParameterGenerator::
+setPeriodicCell` with the (frozen) build radius; the D4 tail reads V and the frozen r_c per call; (6) `m_lists_rebuild_
+pending`: the D4 list, the distance-filtered repulsion list, the cutoff Coulomb list, the HB/XB detection and the
+reactive scan are rebuilt at the next `Calculation()` (the Verlet-skin argument of A3b/A4a bounds pair-distance changes
+by atom displacements at a fixed lattice; a changed lattice moves image distances by n (L' - L), which no skin covers, so
+the simple and correct choice is the rebuild; cost below); `m_last_eeq_geometry` cleared, `m_hb_reference->needs_update`.
+The topology, its Phase-1 charges and the `.topo.json` fingerprint (start cell) are untouched. `cellUpdateCount()`.
+
+### Frozen cutoffs (`GFNFF::freezeCutoffsForCellChanges`, called by SimpleMD at the barostat set-up)
+
+The N1 virial is the strain derivative at fixed radii. Frozen: the D4 evaluation radius at min(current,
+nextafter(L_min/2 (1.15)^(-1/3))), list radius eval + 10 (so that the density may rise by 15 % before the D4 radius
+alone would stop the run; the tail covers the part beyond r_c, A3c), `dispersionRadiiBohr()` then returns the frozen
+values and the D4 list is rebuilt once (the per-pair `r_cut` stamp). Absolute already: Ewald r_cut (`m_ewald_params`),
+repulsion 20, HB/XB search radii sqrt(hbthr1/2) = 15.8 / 21.21 Bohr, XB 20. W1 boxes (432 H2O, L0 = 44.39 Bohr): D4
+radius 21.19 Bohr (< 21.21), the HB/XB search radius stays the limiter: L_min > 42.43 Bohr, density +12.9 %. A
+violated check at a coupling: `[ERROR] NPT: cell shrank below the cutoff limit L=... Bohr (needs > ... Bohr, <cutoff>) at
+step ... (t, mu, P); restart written: <basename>.npt_limit.json. Reason: ...`, the unscaled state is restored and saved,
+`StopReason::CellLimit`, `finalizeRun()` runs. An explicit `dispersion_cutoff_bohr` is kept as given.
+
+### Output, restart, trajectory
+
+Status line: N1's P, <P>, V, rho plus `L` (shortest edge, A) with a barostat. Restart: `cell` (9 numbers, A; also with
+`compute_pressure` alone), `barostat`, `pressure`, `tau_p`, `compressibility`, `pcoupl_interval`, `pcoupl_calls`,
+`pcoupl_events`, `average_P`; a loaded restart sets the molecule's cell before the energy set-up and the barostat state
+(the file overrides the CLI as for the thermostat). Trajectory frames: `... unitcell a b c 90.0 90.0 90.0` appended to the
+comment line, only with a barostat (without one the trajectory stays md5-identical to N1; operator decision whether every
+periodic MD should write it); a frame read back gives the cell (`-sp` on the last frame of the crescale run: periodic cell
+44.5195 Bohr = 23.5587 A).
+
+### Tests (`ctest -R pbc_npt`)
+
+- **(c) `pbc_npt_cell_update`** (`test_cases/unit/test_pbc_npt.cpp`, 20 waters random-packed in L = 44 Bohr, `ewald_alpha`
+  0.32, `ewald_r_cut` 19, `ewald_tolerance` 1e-10, dense EEQ): frozen D4 radius 20.998587 Bohr = 22 (1.15)^(-1/3);
+  instance A at the start == fresh instance with `dispersion_cutoff_bohr` = that value: dE 0, max|dG| 0, d tr Xi 0.
+  A scaled by mu = 1.001 (`updateCell` + `UpdateMolecule`) vs a fresh instance on the scaled structure (same alpha, r_cut,
+  k_max): **dE 0.0 Eh, max|dG| 0.0 Eh/Bohr, d tr Xi 0.0 Eh** (E -6.544991750852 vs start -6.544081495695; tr Xi 0.876717245);
+  round trip to mu = 1: 0 against the start; a cell of 39.6 Bohr refused (four cutoffs named) with the instance unchanged;
+  4 threads after the update vs 1 thread: dE 6e-15, max|dG| 1e-15.
+- **(d) limit abort** (same test, 20 waters, Berendsen P0 = 2e5 bar, tau_p 100 fs, every step, dt 0.5: mu = 0.985 per
+  step): stop at step 2 with `NPT: cell shrank below the cutoff limit L=42.0454 Bohr (needs > 42.4264 Bohr, HB A-H-B / XB
+  A-B search radius sqrt(hbthr2))`, `StopReason::CellLimit`, kept cell 42.6832 Bohr (the last valid one),
+  `pbc_npt_limit.snapshots/pbc_npt_limit.npt_limit.json` with `cell` and `barostat`.
+- **(e) restart** (same test, crescale, every 2nd step): 40 steps = 20 cell changes (L 23.2838 -> 23.319076 A); a new
+  SimpleMD from the saved state carries that cell and `pcoupl_events` 20, 20 more steps give 30 and a moved cell.
+- **(a) `pbc_npt_idealgas_crescale` / `_berendsen`** (`test_pbc_npt_idealgas.cpp`, 64 Ne on a 4^3 lattice in L = 200
+  Bohr, CSVR 300 K tau 100 fs, dt 1 fs, coupling every step, compressibility 1/P0, P0 = 65 kT/V0 = 2.2710 bar,
+  `ewald_r_cut` 60, `ewald_tolerance` 1e-4, matrix-free pcg, `dispersion_cutoff_bohr` 40; E_pot of the lattice -1.1e-7 Eh;
+  200 ps, 5 ps equilibration, 99 blocks of 2 ps; dof = 189, N_eff = 64): crescale (tau_p 50 fs) **<V> = 64.29 +- 0.28
+  kT/P0** (block SE 0.44 %; N_eff = 64: 1.0 SE; the paper's N + 1 = 65 would be 2.5 SE off, the Berendsen value 63
+  4.6 SE), **relative variance 0.01502 = 0.961/N_eff**, <P_virial> 5.8e-3 bar = 0.25 % of P0 (collisions: second virial
+  coefficient; at L = 120 Bohr it was 1.1 %, and a 3.4 sigma volume excursion there hit the D4 limit L > 100 Bohr after
+  75 ps: a legitimate NPT fluctuation, hence the larger box with fixed radii). Berendsen (tau_p 100 fs): <V> = 63.55 +-
+  0.28 kT/P0 (expected (dof/3)(1 + var) = 63.46, 0.3 SE; <P> = 2.2707 vs P0 2.2710 bar), relative variance 0.00736 =
+  0.471/N_eff (what is left is the thermal noise of the kinetic pressure integrated over tau_p: ~ tau_corr/(2 tau_p));
+  with tau_p 200 fs (the ctest setting) <V> = 63.56 +- 0.28 kT/P0 (expected 63.34, 0.8 SE), relative variance 0.00543 =
+  0.348/N_eff, <P> 2.2706 bar. 205000 steps take ~60 s per test (0.3 ms per step; n = 1 run per setting, seed 7).
+- **(f) bitwise** (binary saved before N2): no cell, `-sp -dump_gradient` energy (16 digits) and gradient md5 on benzene,
+  caffeine, methyl-a-d-glucopyranoside, water8, hydronium-water2 (+1), urea-water197, peo201-water500 at 1 and 4 threads:
+  14/14 identical. With a cell, no barostat: `-sp -dump_gradient` of box60 (180 atoms, L 44 Bohr) and box970 (2910 atoms)
+  identical; `-md` 100 steps (dt 0.5, seed 7, 4 threads): energy table (13 columns), trajectory (comment lines removed:
+  they carry the git tag) and last frame md5 identical for both boxes.
+- **(g)** CPU `ctest -R 'gfnff|frag|eeq|simplemd|pbc|ewald|react|restart|md_|gpu|plugin|molecule|xyz|parser|curcumaopt' -j1`:
+  147 run, 100 % passed (148 listed: 4 skipped GPU, 1 disabled), incl. the 3 new `pbc_npt_*`, `xyz_comment_unitcell`,
+  `cli_curcumaopt_08_not_converged_report`; `scripts/check_docs.py`: the 9 known errors only (`docs/NPT.md` marked
+  intent-to-add, `git add -N`, nothing committed).
+- XYZ parser and `-opt` display fix (separate parts of the order): ctests `xyz_comment_unitcell`,
+  `cli_curcumaopt_08_not_converged_report` (AIChangelog.md).
+
+### (b) 432-water box (W1 `box432_s1.xyz`, 1296 atoms, L0 23.4905 A = 44.39 Bohr, 0.997 g/cm^3)
+
+1 ps CSVR heat-up (NVT, T 298.15, tau 100 fs, dt 0.5, seed 7; the TIP3P-like packing relaxes: T 298 -> 474 K at 0.2 ps,
+351 K at 1 ps, P 23874 bar at step 0, -5432 at 0.2 ps, 1360 at 1 ps), then 2 ps from its restart file: NVT with
+`compute_pressure`, Berendsen NPT, C-rescale NPT (P0 1.01325 bar, tau_p 1000 fs, beta 4.5e-5, every 10 steps), 4 threads.
+Both NPT runs finish without an error; the cell moves smoothly: Berendsen L 23.5224 -> 23.5927 A (max |dL| per 100 steps
+0.026 A), rho 0.9929 -> 0.9841 g/cm^3, <P> over the 2 ps 6 bar (std 545, last ps 129); C-rescale L 23.4932 -> 23.5587 A
+(max |dL| per 100 steps 0.085 A), rho 0.9967 -> 0.9884, <P> 395 bar (std 1452, last ps 128); NVT reference <P> of the
+same 2 ps -208 bar (instantaneous -1440 .. +1270). E_pot still falls in all three runs (-146.87 -> -147.44 / -147.60 /
+-147.56 Eh) and T is at 300-320 K: **the box is relaxing, not equilibrated; the densities are not a result** (the W1
+protocol equilibrates 10 ps before 20 ps production). Excerpt (t ps, Epot Eh, T K, P bar, rho g/cm^3, L A):
+
+| run | 1.0 | 1.7 | 2.1 | 2.5 | 2.9-3.0 |
+|---|---|---|---|---|---|
+| NVT | -146.872, 343, 1270, 0.9970 | -147.26 (1.6), 309, -678 | -147.44 (2.0), 300, -584 | -147.47, 309, -373 | -147.61 (2.8), 308, -1277 |
+| Berendsen | same start | -147.351, 307, 55, 0.9865, 23.574 | -147.468, 304, 107, 0.9912, 23.536 | -147.52 (2.6), 314, -1071, 0.9875, 23.566 | -147.600, 302, 183, 0.9849, 23.587 |
+| C-rescale | same start | -147.257, 308, 2358, 0.9955, 23.502 | -147.409, 320, -1412, 0.9890, 23.554 | -147.456, 302, 1350, 0.9904, 23.542 | -147.557, 309, 2170, 0.9884, 23.559 |
+
+Time per step (4 threads, difference of the 4000- and 2000-step runs from the same restart, 3 repetitions):
+
+| run (3 runs in parallel on a 32-core machine, with other work) | per step (ms), 3 repetitions | median |
+|---|---|---|
+| NVT + `compute_pressure` | 44.2 / 43.2 / 40.5 | 43.2 |
+| Berendsen, every 10 steps | 46.7 / 46.4 / 43.4 | 46.4 |
+| C-rescale, every 10 steps | 46.8 / 46.0 / 43.3 | 46.0 |
+
+The barostat costs +3 ms per step (+7 %): the forced rebuild of the D4 list, the repulsion list and the HB/XB detection
+at every 10th step (the HB/XB refresh runs every 10 steps anyway, `hb_update_force_every`), the new Ewald lattice (k
+vectors, cache rebuild: the EEQ pcg starts from the kept history) and the scaling itself (O(N)). The three repetitions
+vary by 10 % (shared machine), the +3 ms is consistent across them (n = 3 per mode).
+
+### Not done / not tested
+
+- The C-rescale equations against the paper's text (above); anisotropic or semi-isotropic coupling; a molecular
+  (COM-based) virial and scaling; the constraint virial (RATTLE refused, so NPT production runs without constraints);
+  the GPU hybrid (refused); `topology_mode react` with a barostat (scan forced at every cell change, not run); charged
+  boxes; a liquid at equilibrium (only 2 ps of a relaxing packing); boxes above 1296 atoms with a barostat; restart
+  files with a barostat and RATTLE. The forced list rebuild at every coupling could be replaced by a skin that budgets
+  the strain (|mu - 1| L sqrt(3)/2 per coupling) if the rebuild cost matters at `pcoupl_interval` 1. Plugin ABI 4: the
+  CUDA plugin must be rebuilt (not built here). Human production testing pending.

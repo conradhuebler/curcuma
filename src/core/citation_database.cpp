@@ -917,6 +917,24 @@ const std::unordered_map<std::string, CitationData>& database()
             "}"
         }},
 
+        // Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED N2): stochastic cell rescaling barostat. Journal, volume,
+        // article number and arXiv id from the one web search of that work; the DOI is the standard JCP form of the
+        // article number and was not opened.
+        { "crescale", {
+            "Stochastic cell rescaling barostat (Bernetti and Bussi 2020)",
+            "Bernetti, M.; Bussi, G., J. Chem. Phys. 2020, 153, 114107 (DOI: 10.1063/5.0020514; arXiv:2006.09250)",
+            "bernetti2020crescale",
+            "@article{bernetti2020crescale,\n"
+            "  author = {Bernetti, Mattia and Bussi, Giovanni},\n"
+            "  title = {Pressure control using stochastic cell rescaling},\n"
+            "  journal = {J. Chem. Phys.},\n"
+            "  year = {2020},\n"
+            "  volume = {153},\n"
+            "  pages = {114107},\n"
+            "  doi = {10.1063/5.0020514}\n"
+            "}"
+        }},
+
         // === Trajectory properties (Claude Generated, Oct 2026) ===
         // TODO(verify references): the entries below (flyvbjerg1989 ... min2015pdmaema) were written down by the AI
         // from memory and have NOT been checked against the papers; check authors, volume, pages and DOI.
