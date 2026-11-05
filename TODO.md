@@ -178,6 +178,9 @@ Code-gebundene Entscheidungen, die bei Ihnen liegen. Fachliche Fragen und Projek
 - Vault, Projektstatus: `Projekte/curcuma rev-gfnff`, `curcuma GPU-Backends`, `curcuma MD-Stabilität großer Systeme`, `curcuma ConfSearch Weiterentwicklung`,
   `curcuma GFN-FF Transitionsmetalle (MOR41)`, `curcuma Reaktives GFN-FF (react-Topologie)`, `curcuma Konformerenfilter (reorder_paper)`.
 
+- **Diagnose-Dateien ohne `outputPath()`** (2026-11-05, [docs/debt_2026-11/CODE.md](docs/debt_2026-11/CODE.md)): `gfnff_diag_charges.json` (`gfnff_method.cpp`), `gfnff_diag_d4.json` (`d4param_generator.cpp`), `charges_dump_N*.json` (`eeq_solver.cpp`) landen im CWD; die Klassen kennen das BMT-Verzeichnis nicht. Entscheidung offen: prozessweites Ausgabeverzeichnis in `BMTUtils` oder Parameter `output_dir`.
+- **Parameter-Routing vereinheitlichen** (2026-11-05, [docs/debt_2026-11/PARAMS.md](docs/debt_2026-11/PARAMS.md)): Schritte 4-9 offen (Registry-Defaults in Numerik, `global`-Modul, ConfigManager ohne Fallbacks); Golden-Test `cli_parser_golden` vorhanden.
+
 ## 7. Löschkandidaten
 
 Am 2026-10-01 auf dem Branch `fix/remove-dead-code` entfernt: curcumaopt.cpp, `native_lbfgs_optimizer.*`, `optimisation/modern_optimizer_simple.*`, munkress_2.h,
