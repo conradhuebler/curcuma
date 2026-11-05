@@ -2340,10 +2340,10 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
 
     } catch (const std::exception& e) {
         CurcumaLogger::error(fmt::format(
-            "GFNFFGPU calculateEnergy EXCEPTION: {} — rethrowing", e.what()));
+            "GFNFFGPU calculateEnergy EXCEPTION: {} - rethrowing", e.what()));
         throw;
     } catch (...) {
-        CurcumaLogger::error("GFNFFGPU calculateEnergy: unknown exception — rethrowing");
+        CurcumaLogger::error("GFNFFGPU calculateEnergy: unknown exception - rethrowing");
         throw;
     }
 }

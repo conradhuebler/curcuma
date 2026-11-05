@@ -349,7 +349,7 @@ double FragmentScfDriver::runDivideConquer(bool gradient)
     m_gradient = Matrix::Zero(nat, 3);
     if (gradient) {
         m_has_error = true;
-        m_error_message = "large_system_mode=dc is energy-only — no gradient/forces; "
+        m_error_message = "large_system_mode=dc is energy-only - no gradient/forces; "
                           "use large_system_mode=none (or fragments) for -opt/-md";
         CurcumaLogger::error(m_error_message);
         return E;
@@ -391,7 +391,7 @@ double FragmentScfDriver::runSparse(bool gradient)
 
     // The engine returns exactly 0.0 only when it declined (open shell) — fall back.
     if (E == 0.0 && !converged) {
-        CurcumaLogger::warn("large_system_mode=sparse unavailable for this system — running dense instead");
+        CurcumaLogger::warn("large_system_mode=sparse unavailable for this system - running dense instead");
         return runDense(gradient);
     }
 
@@ -408,7 +408,7 @@ double FragmentScfDriver::runSparse(bool gradient)
     m_gradient = Matrix::Zero(nat, 3);
     if (gradient) {
         m_has_error = true;
-        m_error_message = "large_system_mode=sparse is energy-only — no gradient/forces; "
+        m_error_message = "large_system_mode=sparse is energy-only - no gradient/forces; "
                           "use large_system_mode=none for -opt/-md";
         CurcumaLogger::error(m_error_message);
         return E;

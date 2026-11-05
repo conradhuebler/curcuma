@@ -423,7 +423,7 @@ void D3ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
 
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::success(fmt::format("D3 parameter generation completed in {:.2f} ms", t_total_ms));
-        CurcumaLogger::info(fmt::format("  └─ Breakdown: CN={:.1f}ms, Weights={:.1f}ms, C6Interp={:.1f}ms, ATM={:.1f}ms",
+        CurcumaLogger::info(fmt::format("  +- Breakdown: CN={:.1f}ms, Weights={:.1f}ms, C6Interp={:.1f}ms, ATM={:.1f}ms",
             t_cn_ms, t_weights_ms, t_pairs_ms, t_atm_triples_ms));
     }
 }
@@ -495,8 +495,8 @@ double D3ParameterGenerator::getC6(int atom_i, int atom_j, int ref_i, int ref_j)
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("getC6: pair_index=" + std::to_string(pair_index) +
-                           " ref_i=" + std::to_string(ref_i) + " → " + std::to_string(ref_i_final) +
-                           " ref_j=" + std::to_string(ref_j) + " → " + std::to_string(ref_j_final) +
+                           " ref_i=" + std::to_string(ref_i) + " -> " + std::to_string(ref_i_final) +
+                           " ref_j=" + std::to_string(ref_j) + " -> " + std::to_string(ref_j_final) +
                            " swap=" + std::string(elem_i <= elem_j ? "YES" : "NO"));
     }
 
@@ -729,7 +729,7 @@ double D3ParameterGenerator::interpolateC6(int elem_i, int elem_j, size_t atom_i
                            "): atoms=(" + std::to_string(atom_idx_i) + "," + std::to_string(atom_idx_j) +
                            "), CN=(" + std::to_string(m_cached_cn[atom_idx_i]) + "," +
                            std::to_string(m_cached_cn[atom_idx_j]) +
-                           ") → C6=" + std::to_string(c6_interpolated));
+                           ") -> C6=" + std::to_string(c6_interpolated));
     }
 
     return c6_interpolated;

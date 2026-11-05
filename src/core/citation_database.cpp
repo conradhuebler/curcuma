@@ -15,12 +15,12 @@ const std::unordered_map<std::string, CitationData>& database()
     static const std::unordered_map<std::string, CitationData> db = {
         // === Curcuma itself ===
         { "curcuma", {
-            "Curcuma — Molecular Modelling Toolkit",
+            "Curcuma - Molecular Modelling Toolkit",
             "Hübler, C. Curcuma (DOI: 10.5281/zenodo.4302722)",
             "huebler2020curcuma",
             "@misc{huebler2020curcuma,\n"
             "  author = {Hübler, Conrad},\n"
-            "  title = {Curcuma — Simple Molecular Modelling Tool},\n"
+            "  title = {Curcuma - Simple Molecular Modelling Tool},\n"
             "  year = {2020},\n"
             "  doi = {10.5281/zenodo.4302722},\n"
             "  url = {https://github.com/conradhuebler/curcuma}\n"
@@ -98,7 +98,7 @@ const std::unordered_map<std::string, CitationData>& database()
 
         { "ipea1", {
             "Ionization Potential Extended Tight-Binding (Asgeirsson et al. 2017)",
-            "Asgeirsson, V. et al., Chem. Sci. 2017, 8, 4879–4895 (DOI: 10.1039/C7SC00601B)",
+            "Asgeirsson, V. et al., Chem. Sci. 2017, 8, 4879-4895 (DOI: 10.1039/C7SC00601B)",
             "asgeirsson2017ipea1",
             "@article{asgeirsson2017ipea1,\n"
             "  author = {Ásgeirsson, Vilhjálmur and Bauer, Christoph A. and Grimme, Stefan},\n"
@@ -126,7 +126,7 @@ const std::unordered_map<std::string, CitationData>& database()
 
         { "eht", {
             "Extended Huckel Theory (Hoffmann 1963)",
-            "Hoffmann, R. J. Chem. Phys. 1963, 39, 1397–1412 (DOI: 10.1063/1.1734456)",
+            "Hoffmann, R. J. Chem. Phys. 1963, 39, 1397-1412 (DOI: 10.1063/1.1734456)",
             "hoffmann1963eht",
             "@article{hoffmann1963eht,\n"
             "  author = {Hoffmann, Roald},\n"
@@ -145,7 +145,7 @@ const std::unordered_map<std::string, CitationData>& database()
             "ulysses",
             "@software{ulysses,\n"
             "  author = {siriius},\n"
-            "  title = {Ulysses — Semi-empirical quantum chemistry library},\n"
+            "  title = {Ulysses - Semi-empirical quantum chemistry library},\n"
             "  year = {2024},\n"
             "  url = {https://gitlab.com/siriius/ulysses},\n"
             "  note = {Provides PM3, AM1, MNDO, MNDO/d, PM6, RM1, PDDG/PM3, PDDG/MNDO, and GFN2-xTB}\n"
@@ -155,7 +155,7 @@ const std::unordered_map<std::string, CitationData>& database()
         // === Semi-empirical methods (cited as sub-references of "ulysses") ===
         { "pm6", {
             "Parametric Method 6 (Stewart 2007)",
-            "Stewart, J. J. P. J. Mol. Model. 2007, 13, 1173–1213 (DOI: 10.1007/s00894-007-0233-4)",
+            "Stewart, J. J. P. J. Mol. Model. 2007, 13, 1173-1213 (DOI: 10.1007/s00894-007-0233-4)",
             "stewart2007pm6",
             "@article{stewart2007pm6,\n"
             "  author = {Stewart, James J. P.},\n"
@@ -170,7 +170,7 @@ const std::unordered_map<std::string, CitationData>& database()
 
         { "pm3", {
             "Parametric Method 3 (Stewart 1989)",
-            "Stewart, J. J. P. J. Comput. Chem. 1989, 10, 209–264 (DOI: 10.1002/jcc.540100208, 10.1002/jcc.540100209)",
+            "Stewart, J. J. P. J. Comput. Chem. 1989, 10, 209-264 (DOI: 10.1002/jcc.540100208, 10.1002/jcc.540100209)",
             "stewart1989pm3",
             "@article{stewart1989pm3a,\n"
             "  author = {Stewart, James J. P.},\n"
@@ -194,7 +194,7 @@ const std::unordered_map<std::string, CitationData>& database()
 
         { "am1", {
             "Austin Model 1 (Dewar et al. 1985)",
-            "Dewar, M. J. S. et al., J. Am. Chem. Soc. 1985, 107, 3902–3909 (DOI: 10.1021/ja00299a024)",
+            "Dewar, M. J. S. et al., J. Am. Chem. Soc. 1985, 107, 3902-3909 (DOI: 10.1021/ja00299a024)",
             "dewar1985am1",
             "@article{dewar1985am1,\n"
             "  author = {Dewar, Michael J. S. and Zoebisch, Eve G. and Healy, Eamonn F.\n"
@@ -210,7 +210,7 @@ const std::unordered_map<std::string, CitationData>& database()
 
         { "mndo", {
             "Modified Neglect of Diatomic Overlap (Dewar & Thiel 1977)",
-            "Dewar, M. J. S.; Thiel, W. J. Am. Chem. Soc. 1977, 99, 4899–4907 (DOI: 10.1021/ja00457a004)",
+            "Dewar, M. J. S.; Thiel, W. J. Am. Chem. Soc. 1977, 99, 4899-4907 (DOI: 10.1021/ja00457a004)",
             "dewar1977mndo",
             "@article{dewar1977mndo,\n"
             "  author = {Dewar, Michael J. S. and Thiel, Walter},\n"
@@ -225,7 +225,7 @@ const std::unordered_map<std::string, CitationData>& database()
 
         { "mndod", {
             "MNDO with d Orbitals (Thiel & Voityuk 1996)",
-            "Thiel, W.; Voityuk, A. A. J. Phys. Chem. 1996, 100, 616–626 (DOI: 10.1021/jp952148o)",
+            "Thiel, W.; Voityuk, A. A. J. Phys. Chem. 1996, 100, 616-626 (DOI: 10.1021/jp952148o)",
             "thiel1996mndod",
             "@article{thiel1996mndod,\n"
             "  author = {Thiel, Walter and Voityuk, Alexander A.},\n"
@@ -240,7 +240,7 @@ const std::unordered_map<std::string, CitationData>& database()
 
         { "rm1", {
             "Recife Model 1 (Rocha et al. 2006)",
-            "Rocha, G. B. et al., J. Comput. Chem. 2006, 27, 1101–1111 (DOI: 10.1002/jcc.20425)",
+            "Rocha, G. B. et al., J. Comput. Chem. 2006, 27, 1101-1111 (DOI: 10.1002/jcc.20425)",
             "rocha2006rm1",
             "@article{rocha2006rm1,\n"
             "  author = {Rocha, Gerd B. and Freire, Ricardo O. and Simas, Alfredo M.\n"
@@ -256,7 +256,7 @@ const std::unordered_map<std::string, CitationData>& database()
 
         { "pm3pddg", {
             "Pairwise Distance Directed Gaussian / PM3 (Repasky et al. 2002)",
-            "Repasky, M. P. et al., J. Comput. Chem. 2002, 23, 1601–1622 (DOI: 10.1002/jcc.10162)",
+            "Repasky, M. P. et al., J. Comput. Chem. 2002, 23, 1601-1622 (DOI: 10.1002/jcc.10162)",
             "repasky2002pddg",
             "@article{repasky2002pddg,\n"
             "  author = {Repasky, Matthew P. and Chandrasekhar, Jayaraman\n"
@@ -272,7 +272,7 @@ const std::unordered_map<std::string, CitationData>& database()
 
         { "mndopddg", {
             "Pairwise Distance Directed Gaussian / MNDO (Repasky et al. 2002)",
-            "Repasky, M. P. et al., J. Comput. Chem. 2002, 23, 1601–1622 (DOI: 10.1002/jcc.10162)",
+            "Repasky, M. P. et al., J. Comput. Chem. 2002, 23, 1601-1622 (DOI: 10.1002/jcc.10162)",
             "repasky2002pddg",
             "@article{repasky2002pddg,\n"
             "  author = {Repasky, Matthew P. and Chandrasekhar, Jayaraman\n"
@@ -308,7 +308,7 @@ const std::unordered_map<std::string, CitationData>& database()
             "ehlert2022sdftd3",
             "@software{ehlert2022sdftd3,\n"
             "  author = {Ehlert, Sebastian and Grimme, Stefan},\n"
-            "  title = {s-dftd3 — Simple reimplementation of the {DFT-D3} method},\n"
+            "  title = {s-dftd3 - Simple reimplementation of the {DFT-D3} method},\n"
             "  year = {2022},\n"
             "  url = {https://github.com/dftd3/simple-dftd3}\n"
             "}"
@@ -359,7 +359,7 @@ const std::unordered_map<std::string, CitationData>& database()
             "ehlert2024dftd4",
             "@software{ehlert2024dftd4,\n"
             "  author = {Ehlert, Sebastian and Grimme, Stefan},\n"
-            "  title = {dftd4 — Generally applicable atomic-charge dependent London dispersion correction},\n"
+            "  title = {dftd4 - Generally applicable atomic-charge dependent London dispersion correction},\n"
             "  year = {2024},\n"
             "  doi = {10.5281/zenodo.11614401},\n"
             "  url = {https://github.com/dftd4/dftd4}\n"
@@ -384,7 +384,7 @@ const std::unordered_map<std::string, CitationData>& database()
         // === GFN-FF sub-references ===
         { "eeq", {
             "Electronegativity Equalization Method (Mortier, Ghosh, Shankar 1986)",
-            "Mortier, W. J.; Ghosh, S. K.; Shankar, S. J. Am. Chem. Soc. 1986, 108, 4315–4320 (DOI: 10.1021/ja00275a013)",
+            "Mortier, W. J.; Ghosh, S. K.; Shankar, S. J. Am. Chem. Soc. 1986, 108, 4315-4320 (DOI: 10.1021/ja00275a013)",
             "mortier1986eeq",
             "@article{mortier1986eeq,\n"
             "  author = {Mortier, Wilfried J. and Ghosh, Swapan K. and Shankar, Sambasivarao},\n"
@@ -426,7 +426,7 @@ const std::unordered_map<std::string, CitationData>& database()
 
         { "ghosh_islam", {
             "Chemical Hardness Parameters (Ghosh & Islam 2011)",
-            "Ghosh, D. C.; Islam, N. Int. J. Quantum Chem. 2011, 111, 40–51 (DOI: 10.1002/qua.22415)",
+            "Ghosh, D. C.; Islam, N. Int. J. Quantum Chem. 2011, 111, 40-51 (DOI: 10.1002/qua.22415)",
             "ghosh2011hardness",
             "@article{ghosh2011hardness,\n"
             "  author = {Ghosh, Dulal C. and Islam, Nazmul},\n"
@@ -490,7 +490,7 @@ const std::unordered_map<std::string, CitationData>& database()
 
         { "casimir_polder", {
             "Casimir-Polder Integration (Casimir & Polder 1948)",
-            "Casimir, H. B. G.; Polder, D. Phys. Rev. 1948, 73, 360–372 (DOI: 10.1103/PhysRev.73.360)",
+            "Casimir, H. B. G.; Polder, D. Phys. Rev. 1948, 73, 360-372 (DOI: 10.1103/PhysRev.73.360)",
             "casimir1948cp",
             "@article{casimir1948cp,\n"
             "  author = {Casimir, H. B. G. and Polder, D.},\n"
@@ -505,7 +505,7 @@ const std::unordered_map<std::string, CitationData>& database()
 
         { "alpb", {
             "Analytical Linearized Poisson-Boltzmann Solvation (Ehlert, Stahn, Spicher, Grimme 2021)",
-            "Ehlert, S.; Stahn, M.; Spicher, S.; Grimme, S. J. Chem. Theory Comput. 2021, 17, 4250–4261 (DOI: 10.1021/acs.jctc.1c00471)",
+            "Ehlert, S.; Stahn, M.; Spicher, S.; Grimme, S. J. Chem. Theory Comput. 2021, 17, 4250-4261 (DOI: 10.1021/acs.jctc.1c00471)",
             "ehlert2021alpb",
             "@article{ehlert2021alpb,\n"
             "  author = {Ehlert, Sebastian and Stahn, Marcel and Spicher, Sebastian\n"
@@ -521,7 +521,7 @@ const std::unordered_map<std::string, CitationData>& database()
 
         { "lebedev", {
             "Angular Quadrature Grid (Lebedev & Laikov 1999)",
-            "Lebedev, V. I.; Laikov, D. N. Doklady Mathematics 1999, 59, 477–481",
+            "Lebedev, V. I.; Laikov, D. N. Doklady Mathematics 1999, 59, 477-481",
             "lebedev1999grid",
             "@article{lebedev1999grid,\n"
             "  author = {Lebedev, V. I. and Laikov, D. N.},\n"
@@ -535,7 +535,7 @@ const std::unordered_map<std::string, CitationData>& database()
 
         { "still_gb", {
             "Generalized Born Model (Still et al. 1990)",
-            "Still, W. C. et al., J. Am. Chem. Soc. 1990, 112, 6127–6129 (DOI: 10.1021/ja00172a038)",
+            "Still, W. C. et al., J. Am. Chem. Soc. 1990, 112, 6127-6129 (DOI: 10.1021/ja00172a038)",
             "still1990gb",
             "@article{still1990gb,\n"
             "  author = {Still, W. Clark and Tempczyk, Anna and Hawley, Ronald C.\n"
@@ -551,7 +551,7 @@ const std::unordered_map<std::string, CitationData>& database()
 
         { "p16", {
             "P16 Kernel (Lange & Herbert 2012)",
-            "Lange, A. W.; Herbert, J. M. J. Chem. Theory Comput. 2012, 8, 1999–2011 (DOI: 10.1021/ct300111m)",
+            "Lange, A. W.; Herbert, J. M. J. Chem. Theory Comput. 2012, 8, 1999-2011 (DOI: 10.1021/ct300111m)",
             "lange2012p16",
             "@article{lange2012p16,\n"
             "  author = {Lange, Adrian W. and Herbert, John M.},\n"
@@ -566,7 +566,7 @@ const std::unordered_map<std::string, CitationData>& database()
 
         { "cpcm_x", {
             "CPCM-X / ddCOSMO Implicit Solvation (Stahn, Ehlert, Grimme 2023)",
-            "Stahn, M.; Ehlert, S.; Grimme, S. J. Phys. Chem. A 2023, 127, 7036–7043 (DOI: 10.1021/acs.jpca.3c04382)",
+            "Stahn, M.; Ehlert, S.; Grimme, S. J. Phys. Chem. A 2023, 127, 7036-7043 (DOI: 10.1021/acs.jpca.3c04382)",
             "stahn2023cpcmx",
             "@article{stahn2023cpcmx,\n"
             "  author = {Stahn, Marcel and Ehlert, Sebastian and Grimme, Stefan},\n"
@@ -582,7 +582,7 @@ const std::unordered_map<std::string, CitationData>& database()
 
         { "obc2", {
             "Onufriev-Bashford-Case Born Radii Model (Onufriev, Bashford, Case 2004)",
-            "Onufriev, A.; Bashford, D.; Case, D. A. Proteins 2004, 55, 383–394 (DOI: 10.1002/prot.20033)",
+            "Onufriev, A.; Bashford, D.; Case, D. A. Proteins 2004, 55, 383-394 (DOI: 10.1002/prot.20033)",
             "onufriev2004obc2",
             "@article{onufriev2004obc2,\n"
             "  author = {Onufriev, Alexey and Bashford, Donald and Case, David A.},\n"
@@ -598,7 +598,7 @@ const std::unordered_map<std::string, CitationData>& database()
         // === Force Fields ===
         { "gfnff", {
             "GFN-FF Force Field (Spicher & Grimme 2020)",
-            "Spicher, S.; Grimme, S. Angew. Chem. Int. Ed. 2020, 59, 15665–15673 (DOI: 10.1002/anie.202004239)",
+            "Spicher, S.; Grimme, S. Angew. Chem. Int. Ed. 2020, 59, 15665-15673 (DOI: 10.1002/anie.202004239)",
             "spicher2020gfnff",
             "@article{spicher2020gfnff,\n"
             "  author = {Spicher, Sebastian and Grimme, Stefan},\n"
@@ -617,7 +617,7 @@ const std::unordered_map<std::string, CitationData>& database()
             "pracht2024gfnff",
             "@software{pracht2024gfnff,\n"
             "  author = {Pracht, Philipp and Grimme, Stefan and Spicher, Sebastian},\n"
-            "  title = {{GFN-FF} — General Force Field Fortran implementation},\n"
+            "  title = {{GFN-FF} - General Force Field Fortran implementation},\n"
             "  year = {2024},\n"
             "  url = {https://github.com/pprcht/gfnff}\n"
             "}"
@@ -625,7 +625,7 @@ const std::unordered_map<std::string, CitationData>& database()
 
         { "uff", {
             "Universal Force Field (Rappe et al. 1992)",
-            "Rappe, A. K. et al., J. Am. Chem. Soc. 1992, 114, 10024–10035 (DOI: 10.1021/ja00051a040)",
+            "Rappe, A. K. et al., J. Am. Chem. Soc. 1992, 114, 10024-10035 (DOI: 10.1021/ja00051a040)",
             "rappe1992uff",
             "@article{rappe1992uff,\n"
             "  author = {Rappe, Anthony K. and Casewit, C. J. and Colwell, K. S.\n"
@@ -641,7 +641,7 @@ const std::unordered_map<std::string, CitationData>& database()
 
         { "qmdff", {
             "Quantum Mechanically Derived Force Field (Grimme 2014)",
-            "Grimme, S. J. Chem. Theory Comput. 2014, 10, 4497–4514 (DOI: 10.1021/ct500573f)",
+            "Grimme, S. J. Chem. Theory Comput. 2014, 10, 4497-4514 (DOI: 10.1021/ct500573f)",
             "grimme2014qmdff",
             "@article{grimme2014qmdff,\n"
             "  author = {Grimme, Stefan},\n"
@@ -711,7 +711,7 @@ const std::unordered_map<std::string, CitationData>& database()
 
         { "lindh", {
             "Model Hessian for ANC Generation (Lindh et al. 1995)",
-            "Lindh, R. et al., Chem. Phys. Lett. 1995, 241, 423–428 (DOI: 10.1016/0009-2614(95)00646-L)",
+            "Lindh, R. et al., Chem. Phys. Lett. 1995, 241, 423-428 (DOI: 10.1016/0009-2614(95)00646-L)",
             "lindh1995hmf",
             "@article{lindh1995hmf,\n"
             "  author = {Lindh, Roland and Bernhardsson, Anders and Karlstrom, Gunnar\n"
@@ -727,7 +727,7 @@ const std::unordered_map<std::string, CitationData>& database()
 
         { "lanczos", {
             "Lanczos Algorithm for Eigenvalue Problems (Lanczos 1950)",
-            "Lanczos, C. J. Res. Natl. Bur. Stand. 1950, 45, 255–282 (DOI: 10.6028/jres.045.026)",
+            "Lanczos, C. J. Res. Natl. Bur. Stand. 1950, 45, 255-282 (DOI: 10.6028/jres.045.026)",
             "lanczos1950",
             "@article{lanczos1950,\n"
             "  author = {Lanczos, Cornelius},\n"
@@ -742,7 +742,7 @@ const std::unordered_map<std::string, CitationData>& database()
 
         { "diis", {
             "Direct Inversion in the Iterative Subspace (Pulay 1980)",
-            "Pulay, P. Chem. Phys. Lett. 1980, 73, 393–398 (DOI: 10.1016/0009-2614(80)80396-4)",
+            "Pulay, P. Chem. Phys. Lett. 1980, 73, 393-398 (DOI: 10.1016/0009-2614(80)80396-4)",
             "pulay1980diis",
             "@article{pulay1980diis,\n"
             "  author = {Pulay, Peter},\n"
@@ -757,7 +757,7 @@ const std::unordered_map<std::string, CitationData>& database()
 
         { "gdiis", {
             "Geometry Direct Inversion in the Iterative Subspace (Csaszar & Pulay 1984)",
-            "Csaszar, P.; Pulay, P. J. Mol. Struct. 1984, 114, 31–34 (DOI: 10.1016/S0022-2860(84)87198-7)",
+            "Csaszar, P.; Pulay, P. J. Mol. Struct. 1984, 114, 31-34 (DOI: 10.1016/S0022-2860(84)87198-7)",
             "csaszar1984gdiis",
             "@article{csaszar1984gdiis,\n"
             "  author = {Cs{\\'a}sz{\\'a}r, P{\\'a}l and Pulay, P{\\'e}ter},\n"
@@ -799,7 +799,7 @@ const std::unordered_map<std::string, CitationData>& database()
         // === Molecular alignment ===
         { "molalign", {
             "Near-Congruence Molecular Alignment (Vasquez-Perez et al. 2023)",
-            "Vásquez-Pérez, J. M. et al., J. Chem. Inf. Model. 2023, 63, 1157–1165 (DOI: 10.1021/acs.jcim.2c01187)",
+            "Vásquez-Pérez, J. M. et al., J. Chem. Inf. Model. 2023, 63, 1157-1165 (DOI: 10.1021/acs.jcim.2c01187)",
             "vasquezperez2023molalign",
             "@article{vasquezperez2023molalign,\n"
             "  author = {V{\\'a}squez-P{\\'e}rez, Jos{\\'e} Manuel and Z{\\'a}rate-Hern{\\'a}ndez, Luis {\\'A}ngel\n"
@@ -848,7 +848,7 @@ const std::unordered_map<std::string, CitationData>& database()
 
         { "berendsen", {
             "Berendsen Thermostat (Berendsen et al. 1984)",
-            "Berendsen, H. J. C. et al., J. Chem. Phys. 1984, 81, 3684–3690 (DOI: 10.1063/1.448118)",
+            "Berendsen, H. J. C. et al., J. Chem. Phys. 1984, 81, 3684-3690 (DOI: 10.1063/1.448118)",
             "berendsen1984thermostat",
             "@article{berendsen1984thermostat,\n"
             "  author = {Berendsen, H. J. C. and Postma, J. P. M. and van Gunsteren, W. F.\n"
@@ -911,7 +911,7 @@ const std::unordered_map<std::string, CitationData>& database()
         // Claude Generated (June 2026).
         { "aspc", {
             "Always Stable Predictor-Corrector charge extrapolation (Kolafa 2004)",
-            "Kolafa, J. J. Comput. Chem. 2004, 25, 335–342 (DOI: 10.1002/jcc.10385)",
+            "Kolafa, J. J. Comput. Chem. 2004, 25, 335-342 (DOI: 10.1002/jcc.10385)",
             "kolafa2004aspc",
             "@article{kolafa2004aspc,\n"
             "  author = {Kolafa, Jiri},\n"
@@ -927,7 +927,7 @@ const std::unordered_map<std::string, CitationData>& database()
 
         { "density_extrapolation", {
             "Least-squares (polynomial) SCF density/charge extrapolation (Pulay & Fogarasi 2004)",
-            "Pulay, P.; Fogarasi, G. Chem. Phys. Lett. 2004, 386, 272–278 (DOI: 10.1016/j.cplett.2004.01.069)",
+            "Pulay, P.; Fogarasi, G. Chem. Phys. Lett. 2004, 386, 272-278 (DOI: 10.1016/j.cplett.2004.01.069)",
             "pulay2004fockdynamics",
             "@article{pulay2004fockdynamics,\n"
             "  author = {Pulay, Peter and Fogarasi, Geza},\n"

@@ -120,9 +120,9 @@ public:
             int total = total_by_system[system];
             bool system_passed = (passed == total);
             if (system_passed) {
-                std::cout << "✅ " << system << ": " << passed << "/" << total << " tests passed" << std::endl;
+                std::cout << "[OK] " << system << ": " << passed << "/" << total << " tests passed" << std::endl;
             } else {
-                std::cout << "❌ " << system << ": " << passed << "/" << total << " tests passed" << std::endl;
+                std::cout << "[FAIL] " << system << ": " << passed << "/" << total << " tests passed" << std::endl;
                 all_passed = false;
             }
         }
@@ -157,9 +157,9 @@ public:
                       << std::setw(12) << std::scientific << result.relative_error;
 
             if (result.passed) {
-                std::cout << "  ✅ PASS" << std::endl;
+                std::cout << "  [OK] PASS" << std::endl;
             } else {
-                std::cout << "  ❌ FAIL" << std::endl;
+                std::cout << "  [FAIL] FAIL" << std::endl;
             }
         }
         std::cout << std::defaultfloat << std::endl;

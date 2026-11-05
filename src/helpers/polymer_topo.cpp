@@ -664,7 +664,7 @@ int main()
 
         // Visualisiere
         analyzer.visualizePolymerTopology(type, metrics);
-        std::cout << "  → Visualisierungen erstellt: " << type << "_*.png\n\n";
+        std::cout << "  -> Visualisierungen erstellt: " << type << "_*.png\n\n";
     }
 
     std::cout << "Analyse-Empfehlungen:\n";

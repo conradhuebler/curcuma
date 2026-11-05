@@ -542,7 +542,7 @@ bool ForceFieldMethod::generateParametersIfNeeded(const Mol& mol) {
 
     if (m_forcefield->tryLoadAutoParameters(m_method_name)) {
         if (CurcumaLogger::get_verbosity() >= 1) {
-            CurcumaLogger::success("✅ Loaded parameters from cache - skipping generation");
+            CurcumaLogger::success("[OK] Loaded parameters from cache - skipping generation");
         }
         return true;
     }

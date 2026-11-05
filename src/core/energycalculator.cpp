@@ -508,7 +508,7 @@ double EnergyCalculator::CalculateEnergy(bool gradient)
         if (energy_nan) {
             m_containsNaN = true;
             CurcumaLogger::error(fmt::format(
-                "NaN/Inf in {} energy — returning 0.0",
+                "NaN/Inf in {} energy - returning 0.0",
                 m_method_name));
             handleMethodError("NaN values detected in energy");
             return 0.0;
@@ -516,7 +516,7 @@ double EnergyCalculator::CalculateEnergy(bool gradient)
         if (grad_nan) {
             m_containsNaN = true;
             CurcumaLogger::error(fmt::format(
-                "NaN/Inf in {} gradient — energy {:.8f} Eh is finite and returned, "
+                "NaN/Inf in {} gradient - energy {:.8f} Eh is finite and returned, "
                 "but the gradient is invalid (optimization/MD should abort or restart)",
                 m_method_name, m_energy));
             // Do NOT substitute 0.0 for a valid energy. Mark error state so callers

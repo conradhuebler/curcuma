@@ -432,7 +432,7 @@ std::unique_ptr<ComputationalMethod> createNativeGfnff(const std::string& method
     if (method == "gfnff-fast") {
         gfnff_config["static_charges"] = true;
         gfnff_config["static_cn"] = true;
-        CurcumaLogger::warn("Method 'gfnff-fast': NON-POLARIZING fast GFN-FF — EEQ charges and "
+        CurcumaLogger::warn("Method 'gfnff-fast': NON-POLARIZING fast GFN-FF - EEQ charges and "
             "CN/D4 are frozen after the first geometry for speed. Valid for equilibrium dynamics "
             "/ relaxation of pre-equilibrated systems only; NOT for charge transfer, ionic "
             "dynamics, large conformational change, or reactions. See docs/GFNFF_FAST_WP.md.");

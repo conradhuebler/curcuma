@@ -822,7 +822,7 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
 
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::success(fmt::format("D4 parameter generation completed in {:.2f} ms", t_total_ms));
-        CurcumaLogger::info(fmt::format("  └─ Breakdown: CN={:.1f}ms, EEQ={:.1f}ms, Weights={:.1f}ms, C6Interp={:.1f}ms",
+        CurcumaLogger::info(fmt::format("  +- Breakdown: CN={:.1f}ms, EEQ={:.1f}ms, Weights={:.1f}ms, C6Interp={:.1f}ms",
             t_cn_ms, t_eeq_ms, t_weights_ms, t_pairs_ms));
     }
 }

@@ -401,7 +401,7 @@ void RMSDDriver::LoadAtomSelectionParameters()
         if (m_verbosity >= 2) {
             CurcumaLogger::info("Aligning molecules using specified atoms:");
             for (int i = 0; i < m_reference_atoms.size(); ++i) {
-                CurcumaLogger::info_fmt("  Reference atom {} ↔ Target atom {}",
+                CurcumaLogger::info_fmt("  Reference atom {} <-> Target atom {}",
                     m_reference_atoms[i], m_target_atoms[i]);
             }
         }

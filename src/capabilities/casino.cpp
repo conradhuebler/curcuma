@@ -909,11 +909,11 @@ void Casino::printHelp() const
     std::cout << "- XYZ, VTF, MOL2, SDF, PDB (molecular structures)" << std::endl;
     std::cout << "- JSON (Curcuma native), SCNP/molsim (auto-converted)" << std::endl;
     std::cout << "\nSCNP Parameter Mapping (common parameters):" << std::endl;
-    std::cout << "  txtitle    → simulation_title  (descriptive title)" << std::endl;
-    std::cout << "  temp       → temperature        (temperature in K)" << std::endl;
-    std::cout << "  nstep1     → steps              (number of MC steps)" << std::endl;
-    std::cout << "  nfreq      → output_frequency   (trajectory output frequency)" << std::endl;
-    std::cout << "  seed       → seed               (random number seed)" << std::endl;
+    std::cout << "  txtitle    -> simulation_title  (descriptive title)" << std::endl;
+    std::cout << "  temp       -> temperature        (temperature in K)" << std::endl;
+    std::cout << "  nstep1     -> steps              (number of MC steps)" << std::endl;
+    std::cout << "  nfreq      -> output_frequency   (trajectory output frequency)" << std::endl;
+    std::cout << "  seed       -> seed               (random number seed)" << std::endl;
 }
 
 nlohmann::json Casino::WriteRestartInformation()

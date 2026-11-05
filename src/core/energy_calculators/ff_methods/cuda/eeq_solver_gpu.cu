@@ -1997,7 +1997,7 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUPCG(
             CurcumaLogger::info("EEQ GPU PCG: block-Jacobi preconditioner active");
         } else if (nfrag >= 2) {
             CurcumaLogger::info(fmt::format(
-                "EEQ GPU PCG: block-Jacobi skipped (nfrag={}, max_frag_N={}) — "
+                "EEQ GPU PCG: block-Jacobi skipped (nfrag={}, max_frag_N={}) - "
                 "using diagonal Jacobi (gpu_block_jacobi_max_nfrag={}, "
                 "gpu_block_jacobi_max_frag_atoms={})",
                 nfrag, impl.m_max_frag_N, block_jacobi_max_nfrag, block_jacobi_max_frag_atoms));

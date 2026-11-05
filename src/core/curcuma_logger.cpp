@@ -175,17 +175,17 @@ void CurcumaLogger::initCitationRegistry()
     // every method cited in any phase is printed at the end.
     std::call_once(g_citation_registry_once, []() {
     m_citation_registry = {
-        {"gfnff",   "GFN-FF: Spicher & Grimme, Angew. Chem. Int. Ed. 59, 15665 (2020) — doi:10.1002/anie.202004239"},
-        {"d4",      "D4: Caldeweyher et al., J. Chem. Phys. 150, 154122 (2019) — doi:10.1063/1.5090222"},
-        {"gfn2xtb", "GFN2-xTB: Bannwarth et al., J. Chem. Theory Comput. 15, 1652 (2019) — doi:10.1021/acs.jctc.8b01176"},
-        {"tblite",  "TBLite: Ehlert, S. TBLite library — doi:10.5281/zenodo.7511769, https://github.com/tblite/tblite"},
-        {"uff",     "UFF: Rappe et al., J. Am. Chem. Soc. 114, 10024 (1992) — doi:10.1021/ja00051a040"},
-        {"eht",     "EHT: Hoffmann, J. Chem. Phys. 39, 1397 (1963) — doi:10.1063/1.1734456"},
+        {"gfnff",   "GFN-FF: Spicher & Grimme, Angew. Chem. Int. Ed. 59, 15665 (2020) - doi:10.1002/anie.202004239"},
+        {"d4",      "D4: Caldeweyher et al., J. Chem. Phys. 150, 154122 (2019) - doi:10.1063/1.5090222"},
+        {"gfn2xtb", "GFN2-xTB: Bannwarth et al., J. Chem. Theory Comput. 15, 1652 (2019) - doi:10.1021/acs.jctc.8b01176"},
+        {"tblite",  "TBLite: Ehlert, S. TBLite library - doi:10.5281/zenodo.7511769, https://github.com/tblite/tblite"},
+        {"uff",     "UFF: Rappe et al., J. Am. Chem. Soc. 114, 10024 (1992) - doi:10.1021/ja00051a040"},
+        {"eht",     "EHT: Hoffmann, J. Chem. Phys. 39, 1397 (1963) - doi:10.1063/1.1734456"},
         {"lbfgs",   "L-BFGS: Nocedal & Wright, Numerical Optimization (2006), Chapter 7"},
         {"diis",    "DIIS: Pulay, Chem. Phys. Lett. 73, 393 (1980)"},
         {"rfo",     "RFO: Banerjee et al., J. Phys. Chem. 89, 52 (1985)"},
-        {"molalign","Molalign: J. Chem. Inf. Model. 2023, 63, 1157 — doi:10.1021/acs.jcim.2c01187"},
-        {"d3",      "D3: Grimme et al., J. Chem. Phys. 132, 154104 (2010) — doi:10.1063/1.3382344"},
+        {"molalign","Molalign: J. Chem. Inf. Model. 2023, 63, 1157 - doi:10.1021/acs.jcim.2c01187"},
+        {"d3",      "D3: Grimme et al., J. Chem. Phys. 132, 154104 (2010) - doi:10.1063/1.3382344"},
         {"curcuma", "Curcuma: doi:10.5281/zenodo.4302722"},
     };
     m_used_citations.clear();
@@ -227,15 +227,15 @@ void CurcumaLogger::printCitations()
     if (m_used_citations.empty()) return;
 
     fmt::print("\n");
-    log_colored(fmt::color::green, "", "═══════════════════════════════════════════════════════════════");
+    log_colored(fmt::color::green, "", "===============================================================");
     log_colored(fmt::color::green, "", "  Please cite the following references for methods used in this run:");
-    log_colored(fmt::color::green, "", "═══════════════════════════════════════════════════════════════");
+    log_colored(fmt::color::green, "", "===============================================================");
     for (const auto& key : m_used_citations) {
         auto it = m_citation_registry.find(key);
         std::string display = (it != m_citation_registry.end()) ? it->second : key;
         log_colored(fmt::color::green, "  [CITE]  ", display);
     }
-    log_colored(fmt::color::green, "", "═══════════════════════════════════════════════════════════════\n");
+    log_colored(fmt::color::green, "", "===============================================================\n");
 }
 
 void CurcumaLogger::param(const std::string& key, const std::string& value)

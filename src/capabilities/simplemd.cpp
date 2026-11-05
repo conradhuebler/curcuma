@@ -683,7 +683,7 @@ bool SimpleMD::Initialise()
             int verbosity_ts = m_config.get<int>("verbosity", 0);
             if (verbosity_ts >= 1) {
                 CurcumaLogger::success("CG timestep scaling applied: "
-                                      + std::to_string(orig_dt) + " fs → "
+                                      + std::to_string(orig_dt) + " fs -> "
                                       + std::to_string(m_dT) + " fs");
             }
         }
@@ -2061,7 +2061,7 @@ void SimpleMD::prepareRun()
     if (m_md_diagnostics) {
         m_diag_writer = std::make_unique<MDDiagnosticsWriter>(Basename() + ".diag.jsonl");
         if (!m_diag_writer->isOpen()) {
-            CurcumaLogger::warn("MD diagnostics requested but JSONL file could not be opened — disabled");
+            CurcumaLogger::warn("MD diagnostics requested but JSONL file could not be opened - disabled");
             m_md_diagnostics = false;
             m_diag_writer.reset();
         }

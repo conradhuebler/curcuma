@@ -145,7 +145,7 @@ void printGFNFFEnergyReport(const GFNFFEnergyReport& r)
     CurcumaLogger::result(fmt::format(
         "  {:<22} {:>16}    {:>6}    {:>6}",
         "Component", "Energy (Eh)", "CPU ms", "GPU ms"));
-    CurcumaLogger::result("  ─────────────────────────────────────────────────────────────────");
+    CurcumaLogger::result("  -----------------------------------------------------------------");
     CurcumaLogger::result("  Bonded:");
     row("Bond",                r.bond,         r.t_bond);
     row("Angle",               r.angle,        r.t_angle);
@@ -180,7 +180,7 @@ void printGFNFFEnergyReport(const GFNFFEnergyReport& r)
     row("X-bonds",             r.xbond,        r.t_xbond);
     row("ATM (3-body)",        r.atm,          r.t_atm);
     row("BATM",                r.batm,         r.t_batm);
-    CurcumaLogger::result("  ═════════════════════════════════════════════════════════════════");
+    CurcumaLogger::result("  =================================================================");
     CurcumaLogger::result(fmt::format("  {:<22} {:>+16.10f}", "Total", r.total));
     if (r.gradient_norm >= 0.0) {
         CurcumaLogger::result(fmt::format(
@@ -227,7 +227,7 @@ void printGFNFFEnergyReport(const GFNFFEnergyReport& r)
             phase_row("Phase 2: Coulomb + DMA (GPU)", r.t_gpu_phase2, -1.0, r.t_gpu_phase2);
     }
 
-    CurcumaLogger::result("  ═════════════════════════════════════════════════════════════════");
+    CurcumaLogger::result("  =================================================================");
     // Init cost of setMolecule(), measured once there. Sep 2026 (Claude Generated): it used to be
     // printed and ADDED to "Total energy call" on every call - on polymer_2x a stale 498 ms per
     // MD step that never happened (24 s run for 30 steps, not 30 x 680 ms). Labelled one-time now.
@@ -275,7 +275,7 @@ void printGFNFFParamGenReport(const GFNFFParamGenReport& r)
         "GFN-FF Parameter Generation [N={} atoms, {} threads, backend={}{}]",
         r.n_atoms, r.n_threads, backend_str,
         r.topology_cached ? ", topo cached" : ""));
-    CurcumaLogger::result("  ─────────────────────────────────────────────────────────────────");
+    CurcumaLogger::result("  -----------------------------------------------------------------");
     CurcumaLogger::result("  Topology:");
     row("Distance matrix",              r.t_distance_matrix);
     row("CN + hybridization + rings",   r.t_cn_hyb_pi_rings);
@@ -306,7 +306,7 @@ void printGFNFFParamGenReport(const GFNFFParamGenReport& r)
     row("Bond-HB cross-reference",       r.t_crossref);
 
     if (r.t_parallel_block_wall >= 0.0) {
-        CurcumaLogger::result("  ─────────────────────────────────────────────────────────────────");
+        CurcumaLogger::result("  -----------------------------------------------------------------");
         CurcumaLogger::result(fmt::format(
             "  Parallel block ({}, {} threads)  wall={:>7.1f}  cpu-sum={:>7.1f}",
             backend_str, r.n_threads, r.t_parallel_block_wall, r.t_parallel_block_cpu_sum));
@@ -319,7 +319,7 @@ void printGFNFFParamGenReport(const GFNFFParamGenReport& r)
         }
     }
 
-    CurcumaLogger::result("  ═════════════════════════════════════════════════════════════════");
+    CurcumaLogger::result("  =================================================================");
     CurcumaLogger::result(fmt::format(
         "  {:<32}  {} ms", "Total parameter generation", fmt_t(r.t_param_gen_total)));
     CurcumaLogger::result("");
@@ -688,7 +688,7 @@ GFNFF::GFNFF(const json& parameters)
         CurcumaLogger::warn(fmt::format(
             "GFN-FF Static-Mode active: static_charges={}, static_cn={}. "
             "Initial CN/charges will be reused for all subsequent calls. "
-            "Recommended only for equilibrium dynamics — invalid for reactions or large conformational moves.",
+            "Recommended only for equilibrium dynamics - invalid for reactions or large conformational moves.",
             m_static_charges, m_static_cn));
     }
 }
@@ -819,7 +819,7 @@ void GFNFF::applyEEQCutoffAutoIfRequested()
         m_eeq_cutoff_auto_active = false;
         if (CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::info(fmt::format(
-                "EEQ cutoff auto: keeping 0.0 (nfrag={}, max|q|={:.3f} e — not neutral/single)",
+                "EEQ cutoff auto: keeping 0.0 (nfrag={}, max|q|={:.3f} e - not neutral/single)",
                 nfrag, max_abs_charge));
         }
     }
@@ -1106,7 +1106,7 @@ const GFNFF::TopologyInfo& GFNFF::getCachedTopology() const {
         }
         // Static-Mode (WP-S1): warn but do NOT invalidate captured CN/charges — user override.
         if ((m_static_charges || m_static_cn) && m_static_state_captured) {
-            CurcumaLogger::warn("Static-mode: topology re-initialised but cached CN/charges remain frozen — results may diverge");
+            CurcumaLogger::warn("Static-mode: topology re-initialised but cached CN/charges remain frozen - results may diverge");
         }
         // WP-EEQ-Cache: drop stale LLT before Phase 2 rebuilds A with new dxi/dgam.
         // WP-EEQ-Matrix-Cache: same trigger — A_nn off-diag cache is also stale once
@@ -2033,8 +2033,8 @@ void GFNFF::updateHBXBIfNeeded(FFWorkspace* extra_ws)
     // Verbose output at level 2
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info("GFNFF: RMSD-based re-evaluation triggered");
-        CurcumaLogger::param("HB pairs", fmt::format("{} → {}", old_hb_count, m_hb_reference->nhb_count));
-        CurcumaLogger::param("XB pairs", fmt::format("{} → {}", old_xb_count, m_hb_reference->nxb_count));
+        CurcumaLogger::param("HB pairs", fmt::format("{} -> {}", old_hb_count, m_hb_reference->nhb_count));
+        CurcumaLogger::param("XB pairs", fmt::format("{} -> {}", old_xb_count, m_hb_reference->nxb_count));
         CurcumaLogger::param("Dispersion pairs", std::to_string(old_disp_count) + " (static)");
     }
 }
@@ -2272,9 +2272,9 @@ void GFNFF::updateNonbondedRepulsionIfNeeded(FFWorkspace* extra_ws)
             CurcumaLogger::param("max displacement since last build",
                 fmt::format("{:.3f} Bohr (half-skin {:.3f} Bohr)", max_disp, 0.5 * skin));
         CurcumaLogger::param("bonded repulsion pairs",
-            fmt::format("{} → {}", old_bonded_count, m_last_bonded_reps.size()));
+            fmt::format("{} -> {}", old_bonded_count, m_last_bonded_reps.size()));
         CurcumaLogger::param("non-bonded repulsion pairs",
-            fmt::format("{} → {}", old_nonbonded_count, m_last_nonbonded_reps.size()));
+            fmt::format("{} -> {}", old_nonbonded_count, m_last_nonbonded_reps.size()));
         CurcumaLogger::param("rebuild time", fmt::format("{:.3f} ms", duration.count() / 1000.0));
     }
 }
@@ -3094,7 +3094,7 @@ double GFNFF::calculationSingle(bool gradient)
         // to a specific energy term. This is the diagnostic path for opt failures
         // on large systems (e.g. 1410-atom polymer) where SP/MD succeed.
         if (!m_gradient.allFinite()) {
-            CurcumaLogger::error("GFN-FF: combined gradient contains NaN/Inf — scanning per-term contributions");
+            CurcumaLogger::error("GFN-FF: combined gradient contains NaN/Inf - scanning per-term contributions");
             if (!m_charges.allFinite()) {
                 CurcumaLogger::error("GFN-FF: m_charges (EEQ Phase-2) contains NaN/Inf");
             }
@@ -3271,7 +3271,7 @@ double GFNFF::calculationSingle(bool gradient)
         if (seq_frac > 0 && t_calc > 0) {
             double parallel_headroom = 100.0 * seq_frac / t_calc;
             CurcumaLogger::result(fmt::format(
-                "  Sequential fraction: {:.1f}% of calculation — overlap potential: ~{:.1f}%",
+                "  Sequential fraction: {:.1f}% of calculation - overlap potential: ~{:.1f}%",
                 parallel_headroom, parallel_headroom));
         }
     }
@@ -4007,7 +4007,7 @@ bool GFNFF::initializeForceField()
             std::string("40.00 Bohr  (hardcoded, topology-init + per-step CN derivatives)"));
         CurcumaLogger::param("  eeq_distance_cutoff",
             fmt::format("{:.2f} Bohr  ({})", eeq_cut,
-                eeq_cut > 0.0 ? "OPT-IN — Hellmann-Feynman risk if inconsistent across sites"
+                eeq_cut > 0.0 ? "OPT-IN - Hellmann-Feynman risk if inconsistent across sites"
                               : "0 = full Coulomb (matches Fortran goed_gfnff)"));
         CurcumaLogger::param("  coulomb_pair_r_cut",
             std::string("100.00 Bohr  (per-pair, hardcoded; effective no-cutoff for typical chemistry)"));
@@ -4624,7 +4624,7 @@ double GFNFF::getCovalentRadius(int atomic_number) const
         return covalent_radii[atomic_number - 1] * CurcumaUnit::Length::ANGSTROM_TO_BOHR;
     } else {
         // Fallback for unknown elements (convert to Bohr)
-        CurcumaLogger::warn(fmt::format("No covalent radius for element {}, using default 1.0 Å → Bohr", atomic_number));
+        CurcumaLogger::warn(fmt::format("No covalent radius for element {}, using default 1.0 Å -> Bohr", atomic_number));
         return 1.0 * CurcumaUnit::Length::ANGSTROM_TO_BOHR;
     }
 }
@@ -6310,7 +6310,7 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
 
                             if (CurcumaLogger::get_verbosity() >= 3) {
                                 CurcumaLogger::result(fmt::format(
-                                    "  N angle {}-{}-{}: pbo({},{})={:.3f}, pbo({},{})={:.3f} → sumppi={:.3f} → f2={:.3f}",
+                                    "  N angle {}-{}-{}: pbo({},{})={:.3f}, pbo({},{})={:.3f} -> sumppi={:.3f} -> f2={:.3f}",
                                     atom_i, atom_j, atom_k,
                                     atom_j, atom_i, topo_info.pi_bond_orders[idx_ji],
                                     atom_j, atom_k, topo_info.pi_bond_orders[idx_jk],
@@ -8868,7 +8868,7 @@ std::vector<double> GFNFF::calculatePiBondOrders(
 
         if (CurcumaLogger::get_verbosity() >= 3 && pbo > 0.0) {
             CurcumaLogger::result(fmt::format(
-                "  Bond {}-{}: hyb({},{}) pi({},{}) → pbo={:.2f} [idx={}]",
+                "  Bond {}-{}: hyb({},{}) pi({},{}) -> pbo={:.2f} [idx={}]",
                 atom_i, atom_j, hyb_i, hyb_j, pi_i, pi_j, pbo, idx));
         }
     }
@@ -10834,10 +10834,10 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
                             // ConfSearch reuses the topology cache on every child MD/opt, so at verbosity 1
                             // this flooded stdout with one [OK] line per reused structure. Demoted to info.
                             if (topology_from_cache && CurcumaLogger::get_verbosity() >= 2) {
-                                CurcumaLogger::info(fmt::format("Topology cache hit — skipping Phase 1 EEQ ({})", topo_file));
+                                CurcumaLogger::info(fmt::format("Topology cache hit - skipping Phase 1 EEQ ({})", topo_file));
                             }
                         } else if (CurcumaLogger::get_verbosity() >= 2) {
-                            CurcumaLogger::warn("Topology cache fingerprint mismatch — recalculating");
+                            CurcumaLogger::warn("Topology cache fingerprint mismatch - recalculating");
                         }
                     }
                 } catch (const std::exception& e) {

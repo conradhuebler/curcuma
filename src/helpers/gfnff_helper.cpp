@@ -68,7 +68,7 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    std::cout << "   ✓ GFN-FF calculator initialized successfully" << std::endl;
+    std::cout << "   [OK] GFN-FF calculator initialized successfully" << std::endl;
     std::cout << "   Calculator pointer: " << calculator.ptr << std::endl;
     std::cout << std::endl;
 
@@ -85,7 +85,7 @@ int main(int argc, char** argv)
     std::cout << "   I/O Status: " << iostat << std::endl;
 
     if (iostat == 0) {
-        std::cout << "   ✓ Calculation completed successfully" << std::endl;
+        std::cout << "   [OK] Calculation completed successfully" << std::endl;
         std::cout << "   Energy: " << energy << " Hartree" << std::endl;
         std::cout << "   Gradient:" << std::endl;
         for (int i = 0; i < natoms; ++i) {
@@ -102,7 +102,7 @@ int main(int argc, char** argv)
     std::cout << std::endl;
     std::cout << "4. Cleanup..." << std::endl;
     c_gfnff_calculator_deallocate(&calculator);
-    std::cout << "   ✓ GFN-FF calculator deallocated" << std::endl;
+    std::cout << "   [OK] GFN-FF calculator deallocated" << std::endl;
 
     std::cout << std::endl;
     std::cout << "=== External GFN-FF Test Completed ===" << std::endl;

@@ -866,7 +866,7 @@ double ForceField::Calculate(bool gradient)
     // rebuild it here if interaction lists exist without one.
     if (!m_workspace && !m_bonds.empty()) {
         CurcumaLogger::warn(fmt::format(
-            "UFF/QMDFF workspace not initialized for method '{}' — rebuilding", m_method));
+            "UFF/QMDFF workspace not initialized for method '{}' - rebuilding", m_method));
         buildWorkspace();
     }
 

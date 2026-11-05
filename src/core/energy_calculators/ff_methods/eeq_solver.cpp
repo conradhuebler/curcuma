@@ -680,11 +680,11 @@ static inline int detectElementSpecificHybridization(int Z, double cn,
                         if (angle_sum_deg > 355.0) {
                             hyb = 2; // sp2 (aromatic/planar)
                             if (atom_index < 5) {
-                                CurcumaLogger::info(fmt::format("    → sp2 (aromatic/planar)"));
+                                CurcumaLogger::info(fmt::format("    -> sp2 (aromatic/planar)"));
                             }
                         } else {
                             if (atom_index < 5) {
-                                CurcumaLogger::info(fmt::format("    → sp3 (tetrahedral)"));
+                                CurcumaLogger::info(fmt::format("    -> sp3 (tetrahedral)"));
                             }
                         }
                     }
@@ -1166,7 +1166,7 @@ Vector EEQSolver::calculateCharges(
     // Claude Generated (April 2026): skip_phase2 option — bypass Phase 2 entirely
     if (m_skip_phase2) {
         if (m_verbosity >= 1) {
-            CurcumaLogger::warn("EEQSolver: skip_phase2=true — bypassing Phase 2 refinement, using Phase 1 topology charges");
+            CurcumaLogger::warn("EEQSolver: skip_phase2=true - bypassing Phase 2 refinement, using Phase 1 topology charges");
         }
         return topology_charges;
     }
@@ -3706,7 +3706,7 @@ Vector EEQSolver::calculateFinalCharges(
     // Claude Generated (April 2026): skip_phase2 option — bypass Phase 2 entirely
     if (m_skip_phase2) {
         if (m_verbosity >= 1) {
-            CurcumaLogger::warn("EEQSolver: skip_phase2=true — bypassing Phase 2 refinement, using Phase 1 topology charges");
+            CurcumaLogger::warn("EEQSolver: skip_phase2=true - bypassing Phase 2 refinement, using Phase 1 topology charges");
         }
         return topology_charges;
     }
@@ -4385,7 +4385,7 @@ Vector EEQSolver::calculateFinalCharges(
                 return m_last_successful_charges;
             }
             CurcumaLogger::warn(fmt::format(
-                "EEQ Phase 2: all solvers failed for N={}, no valid prior charges — using Phase 1 topology charges",
+                "EEQ Phase 2: all solvers failed for N={}, no valid prior charges - using Phase 1 topology charges",
                 natoms));
             // Claude Generated (Apr 2026): Remember that Phase 2 is garbage for this system.
             m_phase2_historically_implausible = true;
@@ -4419,7 +4419,7 @@ Vector EEQSolver::calculateFinalCharges(
                 CurcumaLogger::warn("EEQ Phase 2: invalid solution, using last successful charges as fallback");
                 return m_last_successful_charges;
             }
-            CurcumaLogger::warn("EEQ Phase 2: invalid solution, no valid prior charges — using Phase 1 topology charges");
+            CurcumaLogger::warn("EEQ Phase 2: invalid solution, no valid prior charges - using Phase 1 topology charges");
             // Claude Generated (Apr 2026): Remember that Phase 2 is garbage for this system.
             m_phase2_historically_implausible = true;
             m_phase2_implausible_natoms = natoms;

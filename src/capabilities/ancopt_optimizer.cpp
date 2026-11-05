@@ -175,7 +175,7 @@ bool ANCCoordinates::generateANC(const Matrix& cartesian_hessian, const Vector& 
             if (nfound < nvar) thr *= 0.1;
         }
         if (nfound < nvar) {
-            CurcumaLogger::warn_fmt("ANC: only {} of {} modes found — using available", nfound, nvar);
+            CurcumaLogger::warn_fmt("ANC: only {} of {} modes found - using available", nfound, nvar);
         }
         // Modes are in descending eigenvalue order; reverse to ascending (XTB sort())
         // Reverse columns of B and diagonal of hess
@@ -351,7 +351,7 @@ bool ANCCoordinates::generateANCLanczos(const Matrix& H, const Vector& xyz,
     auto t_end = clk::now();
     double elapsed = std::chrono::duration<double>(t_end - t_start).count();
     CurcumaLogger::success_fmt(
-        "ANC generated (Lanczos, n3={}, k={}, m={}) in {:.2f}s — top {} modes used",
+        "ANC generated (Lanczos, n3={}, k={}, m={}) in {:.2f}s - top {} modes used",
         n3, k_target, m_actual, elapsed, nfound);
     return true;
 }
@@ -502,22 +502,22 @@ bool ANCOptimizer::InitializeOptimizerInternal() {
         nvar = k_max;
         const char* step_method = (k_max > lbfgs_xl_thr) ? "L-BFGS (Tier XL)" : "BFGS+RF (Tier L)";
         if (m_context.verbosity >= 1)
-            fmt::print("ANCOpt: {} atoms, n3={} (Tier L) — Lanczos ANC, nvar capped at {}/{}, step: {}\n"
+            fmt::print("ANCOpt: {} atoms, n3={} (Tier L) - Lanczos ANC, nvar capped at {}/{}, step: {}\n"
                        "  For large-system minima, -optimizer lbfgspp is typically faster.\n",
                        atom_count, n3_total, k_max, nvar_full, step_method);
     } else if (nvar > lbfgs_xl_thr) {
         if (m_context.verbosity >= 1)
-            fmt::print("ANCOpt: {} atoms, nvar={} (Tier XL) — L-BFGS in ANC subspace, {} history pairs.\n"
+            fmt::print("ANCOpt: {} atoms, nvar={} (Tier XL) - L-BFGS in ANC subspace, {} history pairs.\n"
                        "  RF mode-following disabled. TS searches not supported at this size.\n",
                        atom_count, nvar, m_anc_lbfgs_history);
     } else if (nvar > 1000) {
         double mb_est = (static_cast<double>(nvar) * nvar * 8.0) / (1024.0 * 1024.0);
         if (m_context.verbosity >= 1)
-            fmt::print("ANCOpt: {} atoms, nvar={} (Tier M) — full eigendecomp, ~{:.0f} MB, may take ~1 min setup.\n",
+            fmt::print("ANCOpt: {} atoms, nvar={} (Tier M) - full eigendecomp, ~{:.0f} MB, may take ~1 min setup.\n",
                        atom_count, nvar, mb_est);
     } else {
         if (m_context.verbosity >= 2)
-            fmt::print("ANCOpt: {} atoms, nvar={} (Tier S) — full eigendecomp + RF.\n",
+            fmt::print("ANCOpt: {} atoms, nvar={} (Tier S) - full eigendecomp + RF.\n",
                        atom_count, nvar);
     }
 
