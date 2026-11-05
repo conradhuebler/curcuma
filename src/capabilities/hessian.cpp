@@ -20,6 +20,7 @@
 
 #include <Eigen/Dense>
 #include <algorithm>
+#include <chrono>
 #include <iomanip>
 #include <memory>
 #include <sstream>
@@ -31,6 +32,8 @@
 #include "src/core/energy_calculators/method_factory.h"
 #include "src/core/intra_parallel_context.h"
 #include "src/core/gpu_device_pool.h"
+#include "src/core/energy_calculators/qm_methods/qm_hessian.h"
+#include "src/core/energy_calculators/qm_methods/qm_method.h"
 
 #include "hessian.h"
 
@@ -292,6 +295,9 @@ void Hessian::LoadControlJson()
     m_hess = m_controller.value("hess", 1);
     m_method = m_controller.value("method", std::string("gfnff"));
     m_threads = m_controller.value("threads", 1);
+    m_analytic = m_controller.value("analytic", false);
+    m_cphf_threshold = m_controller.value("cphf_threshold", 1e-10);
+    m_cphf_max_iterations = m_controller.value("cphf_max_iterations", 100);
 
     // Ensure method and threads are in m_controller for downstream code (HessianThread, etc.)
     m_controller["method"] = m_method;
@@ -387,7 +393,9 @@ void Hessian::start()
     }
     if (m_hess_calc) {
 
-        if (m_hess == 1) {
+        if (m_analytic && CalculateHessianAnalytic()) {
+            // analytic RHF Hessian (Nov 2026); m_hessian is in Eh/Angstrom^2 like the numerical paths
+        } else if (m_hess == 1) {
             CalculateHessianThreaded();
         } else if (m_hess == 2) {
             CalculateHessianNumerical();
@@ -709,6 +717,67 @@ void Hessian::CalculateHessianThreaded()
             CurcumaLogger::warn("Significant Hessian asymmetry detected - may indicate numerical issues");
         }
     }
+}
+
+/**
+ * @brief Analytic Hessian for -method hf (closed-shell RHF), Claude Generated (Nov 2026)
+ *
+ * One SCF with gradient at the reference geometry (tight orbital convergence), then
+ * QMEngine::computeHessian: second-derivative integrals contracted with the density plus the orbital response
+ * from the coupled-perturbed HF equations (Pople et al. 1979; derivation in qm_hessian.cpp and
+ * docs/QM_HF_HESSIAN.md). The engine returns Eh/Bohr^2; this class keeps m_hessian in Eh/Angstrom^2 (the unit of
+ * the finite-difference paths, converted by ConvertHessian), hence the division by au^2 (au = Bohr in Angstrom).
+ * @return false when the method is not hf or the analytic code refuses the case; the caller then runs the
+ *         numerical Hessian.
+ */
+bool Hessian::CalculateHessianAnalytic()
+{
+    std::string method_lc = m_method;
+    std::transform(method_lc.begin(), method_lc.end(), method_lc.begin(), ::tolower);
+    if (method_lc != "hf") {
+        CurcumaLogger::warn("-hessian.analytic: available for -method hf only, not '" + m_method
+                            + "'; using the numerical Hessian");
+        return false;
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    EnergyCalculator energy(m_method, m_controller);
+    energy.setVerbosity(0);
+    energy.setParameter(m_parameter);
+    energy.setMolecule(m_molecule.getMolInfo());
+    energy.CalculateEnergy(true);
+    CurcumaLogger::set_verbosity(m_verbosity);
+    if (energy.Error()) {
+        CurcumaLogger::warn("-hessian.analytic: reference calculation failed (" + energy.ErrorMessage()
+                            + "); using the numerical Hessian");
+        return false;
+    }
+    auto* qm = dynamic_cast<QMMethod*>(energy.Interface());
+    if (!qm || !qm->engine()) {
+        CurcumaLogger::warn("-hessian.analytic: method object is not the native QM engine; using the numerical Hessian");
+        return false;
+    }
+    qmhess::HessianOptions opt;
+    opt.cphf_threshold = m_cphf_threshold;
+    opt.cphf_max_iterations = m_cphf_max_iterations;
+    qmhess::HessianInfo info;
+    Matrix hb;
+    if (!qm->engine()->computeHessian(opt, hb, info)) {
+        CurcumaLogger::warn(info.error + "; using the numerical Hessian");
+        return false;
+    }
+    const double au = CurcumaUnit::Legacy::au;
+    m_hessian = hb / (au * au);  // Eh/Bohr^2 -> Eh/Angstrom^2
+    const double t_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    if (m_verbosity >= 1) {
+        CurcumaLogger::result(fmt::format("Analytic RHF Hessian (closed shell, CPHF): {:.1f} ms", t_ms));
+        CurcumaLogger::param("CPHF iterations (max over 3N)", std::to_string(info.cphf_iterations));
+        CurcumaLogger::param("CPHF max residual", fmt::format("{:.2e} Eh", info.cphf_residual));
+        CurcumaLogger::param("Response J/K builds", std::to_string(info.jk_builds));
+        CurcumaLogger::param("Maximum asymmetry", fmt::format("{:.2e} Eh/Bohr^2 (before symmetrisation)", info.max_asymmetry));
+        CurcumaLogger::param("Time", fmt::format("{:.1f} ms (SCF + gradient + Hessian; 1e {:.1f}, 2e {:.1f}, CPHF {:.1f})",
+                                                  t_ms, info.t_1e_ms, info.t_2e_ms, info.t_cphf_ms));
+    }
+    return true;
 }
 
 void Hessian::CalculateHessianNumerical()

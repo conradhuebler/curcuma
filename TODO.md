@@ -244,6 +244,9 @@ Stand.
 
 ## 5. Funktionen und Refactoring (niedrige Priorität)
 
+- **Analytische RHF-Hessesche, Rest** (2026-11-05, `-hessian.analytic`, nur `hf` geschlossenschalig): offen UHF, Kohn-Sham (f_xc, Gitterantwort), hf-3c (D3/gCP/SRB),
+  ECP, RI, g-Schalen, GPU; 2e-Ableitungsteil ungescreent O(N^4) (Dimethylether TZVP: 100 von 155 s); keine Hessian-Datei; K-Kr ungetestet; Entscheidung, ob `analytic` für `hf` Default wird. [docs/QM_HF_HESSIAN.md](docs/QM_HF_HESSIAN.md)
+
 - **Native QM, nächste Basis-Stufe** (Nov 2026): H-Rn mit s-g und def2-ECP laufen (Stufe 4), hf-3c H-Rn (Stufe 5a); offen:
   ECP auf ROCm/Vulkan und das Atom-ECP der Startdichte (CUDA-ECP seit Nov 4 2026, [4.6](docs/QM_GPU_ROADMAP.md#46-ecp-matrix-and-ecp-gradient-on-the-device-nov-2026); Hg-TZVP liegt im Sicherheitsband, CPU-Ordnung); otool_gcp-Gradientenfehler (He/Ne-Paare, Exponenten < 0.1) gegen ORCA-EnGrad nicht isoliert; f/g-Generic-Kern der CUDA-Direkt-J/K langsam (H2O QZVPP 75 % der Kernzeit, [6b](docs/QM_GPU_ROADMAP.md#45-f-and-g-shells-on-the-device-nov-2026-stage-6b)), RI-Gradient mit Aux-h auf der GPU; CPU-f/g-Rest (Nov 2026, [CPU f/g](docs/NATIVE_QM_IMPLEMENTATION.md#cpu-fg-speed-nov-4-2026)): SCF-Digest der direkten J/K und die s/p/d-Klassen dominieren das Koffein-TZVP-SCF, unverändert (Bitgleichheit); XeF2: PySCF weicht
   1.6e-6 Eh von curcuma/ORCA ab, ungeklärt. [Stufe 4](docs/NATIVE_QM_IMPLEMENTATION.md#stage-4-elements-beyond-ne-and-def2-ecp-nov-1-2026)

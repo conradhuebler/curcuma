@@ -760,6 +760,8 @@ add_subdirectory(qm_hf3c)
 
 # Native HF / HF-3c analytic gradient vs FD + PySCF (+ simple-dftd3). Sep 2026.
 add_subdirectory(qm_grad)
+# Native HF analytic Hessian vs FD of the analytic gradient + PySCF. Nov 2026.
+add_subdirectory(qm_hessian)
 add_subdirectory(qm_gpu)
 # Native HF with density fitting (RI-J / RI-JK, WP10) vs PySCF + ORCA. Oct 2026.
 add_subdirectory(qm_ri)

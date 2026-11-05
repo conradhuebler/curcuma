@@ -59,6 +59,10 @@ struct CCSDResult;
 struct LMP2Options;  // WP15, qm_lmp2.h
 struct LMP2Result;
 }
+namespace qmhess {
+struct HessianOptions;  // qm_hessian.h (analytic RHF Hessian, Nov 2026)
+struct HessianInfo;
+}
 
 /**
  * @brief Electronic-structure level selector (set by the method name, not a parameter)
@@ -491,6 +495,10 @@ public:
     /// WP15 (Claude Generated, Oct 2026): local PNO-based RI-MP2 (closed shell, energy only) on the converged RHF of
     /// the last Calculation() (any SCF, exact or RI). Implemented in qm_lmp2.cpp. False on error.
     bool computeLMP2(const qmint::LMP2Options& opt, qmint::LMP2Result& res);
+    /// Analytic RHF Hessian (Claude Generated, Nov 2026): second nuclear derivatives of the converged closed-shell HF
+    /// energy of the last Calculation() (skeleton integrals + CPHF response), 3N x 3N in Eh/BOHR^2 (mass independent,
+    /// cartesian). CPU, exact integrals, all-electron, s-f shells; false + info.error otherwise. qm_hessian.cpp.
+    bool computeHessian(const qmhess::HessianOptions& opt, Matrix& hessian_bohr, qmhess::HessianInfo& info);
 
 private:
     // Method identity
