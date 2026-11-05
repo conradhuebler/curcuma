@@ -1254,6 +1254,22 @@ const std::unordered_map<std::string, CitationData>& database()
             "}"
         }},
 
+        // Claude Generated (Nov 2026): seminumerical exchange (-qm.exchange_method cosx)
+        { "cosx_neese2009", {
+            "Chain-of-spheres seminumerical exchange (COSX / RIJCOSX; Neese, Wennmohs, Hansen, Becker 2009), -qm.exchange_method cosx",
+            "Neese, F.; Wennmohs, F.; Hansen, A.; Becker, U. Chem. Phys. 2009, 356, 98-109 (DOI: 10.1016/j.chemphys.2008.10.036)",
+            "neese2009cosx",
+            "@article{neese2009cosx,\n"
+            "  author = {Neese, Frank and Wennmohs, Frank and Hansen, Andreas and Becker, Ute},\n"
+            "  title = {Efficient, approximate and parallel {H}artree--{F}ock and hybrid {DFT} calculations. {A} 'chain-of-spheres' algorithm for the {H}artree--{F}ock exchange},\n"
+            "  journal = {Chem. Phys.},\n"
+            "  year = {2009},\n"
+            "  volume = {356},\n"
+            "  pages = {98--109},\n"
+            "  doi = {10.1016/j.chemphys.2008.10.036}\n"
+            "}"
+        }},
+
         { "def2_jkfit", {
             "def2/JK exchange fitting basis (def2-universal-JKFIT; Weigend 2008), used for RI-JK and as RI-MP2 fitting basis",
             "Weigend, F. J. Comput. Chem. 2008, 29, 167-175 (DOI: 10.1002/jcc.20702)",

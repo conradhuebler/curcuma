@@ -905,6 +905,7 @@ bool QMEngine::computeHessian(const qmhess::HessianOptions& opt, Matrix& hessian
     if (m_open_shell) return refuse("open shell (UHF) is not implemented");
     if (hasECP()) return refuse("effective core potentials are not implemented (use an all-electron basis)");
     if (riActive()) return refuse("density fitting (-qm.ri) is not implemented, use -qm.ri off");
+    if (cosxActive()) return refuse("-qm.exchange_method cosx is not implemented, use -qm.exchange_method exact");
     if (!m_scf_ready || !m_scf_converged) return refuse("needs a converged SCF of this geometry");
     const int Lmax = qmhess::maxAngularMomentum(m_gto_basis);
     if (Lmax > 3) return refuse("g and higher shells are not validated (s, p, d, f only)");

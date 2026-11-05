@@ -239,6 +239,10 @@ std::shared_ptr<qmri::RIJK> QMEngine::correlationRI(const std::string& file, std
 bool QMEngine::computeRIMP2(const qmint::MP2Options& opt, qmint::MP2Result& res)
 {
     res = qmint::MP2Result();
+    if (cosxActive()) {  // Nov 2026: correlated methods need the exact-exchange reference
+        CurcumaLogger::error("QM: RI-MP2 is not implemented with -qm.exchange_method cosx (use -qm.exchange_method exact)");
+        return false;
+    }
     if (m_open_shell) {  // stage 5b (Nov 2026): closed-shell formulas (n_occ = N/2) only
         CurcumaLogger::error("QM: RI-MP2 needs a closed-shell RHF/RKS reference; the last SCF was unrestricted (open shell)");
         return false;

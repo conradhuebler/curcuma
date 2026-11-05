@@ -715,6 +715,10 @@ void ccsdSolve(const CCSDIntegrals& I, const CCSDOptions& opt, int threads, CCSD
 bool QMEngine::computeCCSD(const qmint::CCSDOptions& opt, qmint::CCSDResult& res)
 {
     res = qmint::CCSDResult();
+    if (cosxActive()) {  // Nov 2026: correlated methods need the exact-exchange reference
+        CurcumaLogger::error("QM: CCSD is not implemented with -qm.exchange_method cosx (use -qm.exchange_method exact)");
+        return false;
+    }
     if (m_open_shell) {  // stage 5b (Nov 2026): closed-shell formulas (n_occ = N/2) only
         CurcumaLogger::error("QM: CCSD needs a closed-shell RHF/RKS reference; the last SCF was unrestricted (open shell)");
         return false;

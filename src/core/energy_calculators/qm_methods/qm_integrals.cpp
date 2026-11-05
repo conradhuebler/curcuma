@@ -10,6 +10,7 @@
  */
 
 #include "qm_integrals.hpp"
+#include "qm_cosx.h"  // GridPotentialIntegrals (COSX, Nov 2026)
 
 #include <algorithm>
 #include <array>
@@ -2080,6 +2081,262 @@ std::vector<MDPair> makeMDPairs(const std::vector<EriShell>& sh, const ShellOutp
 }
 
 }  // namespace
+
+// ---------------------------------------------------------------------------
+// Potential integrals of basis-function pairs at grid points (COSX, Claude Generated Nov 2026)
+//
+//   A_ab(C) = (a | 1/|r - C| | b) = sum_k (2 pi / p_k) sum_h E_k[ab][h] R_h(p_k, P_k - C)
+//
+// (Helgaker 9.9.32, the nuclear-attraction integral of a unit charge at C) on the Hermite matrices E_k[ab][h] of
+// makeMDPair (contraction coefficients and the spherical transform folded in, active basis), R from the Boys
+// function (boysRaw) and the recursion buildR0Raw with rho = p. Declared in qm_cosx.h (qm_integrals.hpp untouched).
+// ---------------------------------------------------------------------------
+
+/// buildR0Raw with the compile-time recursion of buildR0T for L <= 8 (same operations, same order).
+static void buildR0Dispatch(int L, double Wx, double Wy, double Wz, double rho, const double* F, double* R0, double* lvl)
+{
+    switch (L) {
+    case 0: R0[0] = F[0]; return;
+    case 1: buildR0T<1>(Wx, Wy, Wz, rho, F, R0, lvl); return;
+    case 2: buildR0T<2>(Wx, Wy, Wz, rho, F, R0, lvl); return;
+    case 3: buildR0T<3>(Wx, Wy, Wz, rho, F, R0, lvl); return;
+    case 4: buildR0T<4>(Wx, Wy, Wz, rho, F, R0, lvl); return;
+    case 5: buildR0T<5>(Wx, Wy, Wz, rho, F, R0, lvl); return;
+    case 6: buildR0T<6>(Wx, Wy, Wz, rho, F, R0, lvl); return;
+    case 7: buildR0T<7>(Wx, Wy, Wz, rho, F, R0, lvl); return;
+    case 8: buildR0T<8>(Wx, Wy, Wz, rho, F, R0, lvl); return;
+    default: buildR0Raw(L, Wx, Wy, Wz, rho, F, R0, lvl);
+    }
+}
+
+struct GridPotentialIntegrals::Impl {
+    struct Pair {
+        int A = 0, B = 0;
+        MDPair md;
+        double bound = 0.0;
+        bool one_centre = false;   ///< every primitive pair has the same centre P (both shells on one atom)
+        double pmin = 0.0;         ///< smallest composite exponent
+        std::vector<double> kbound;  ///< per primitive pair: its share of `bound`
+        std::vector<double> Efar;  ///< one_centre: sum_k (pi/p_k)^(3/2) E_k[ab][h] (far-field multipole table)
+        ~Pair();
+    };
+    std::vector<EriShell> sh;
+    ShellOutput o;
+    std::vector<Pair> pairs;
+    std::vector<std::vector<int>> hoff;  ///< per LAB: R0 box offsets of hermiteSimplex(LAB)
+    int maxL = 0;
+    Impl(const std::vector<GTO::Orbital>& basis, const Matrix& Q)
+        : sh(groupShells(basis)), o(makeShellOutput(sh, (int)basis.size(), Q.size() != 0 ? &Q : nullptr)) {}
+    ~Impl();
+};
+GridPotentialIntegrals::Impl::Pair::~Pair() = default;
+GridPotentialIntegrals::Impl::~Impl() = default;
+
+GridPotentialIntegrals::GridPotentialIntegrals() = default;
+GridPotentialIntegrals::GridPotentialIntegrals(const GridPotentialIntegrals&) = default;
+GridPotentialIntegrals& GridPotentialIntegrals::operator=(const GridPotentialIntegrals&) = default;
+GridPotentialIntegrals::~GridPotentialIntegrals() = default;
+
+GridPotentialIntegrals::GridPotentialIntegrals(const std::vector<GTO::Orbital>& basis, const Matrix& Q,
+                                               double pair_threshold)
+{
+    auto impl = std::make_shared<Impl>(basis, Q);
+    const int ns = (int)impl->sh.size();
+    for (const EriShell& s : impl->sh) impl->maxL = std::max(impl->maxL, s.L);
+    impl->hoff.resize(2 * impl->maxL + 1);
+    for (int L = 0; L <= 2 * impl->maxL; ++L) {
+        const int s = L + 1;
+        for (const auto& h : hermiteSimplex(L)) impl->hoff[L].push_back((h[0] * s + h[1]) * s + h[2]);
+    }
+    std::vector<Impl::Pair> all((size_t)ns * (ns + 1) / 2);
+    {
+        size_t k = 0;
+        for (int A = 0; A < ns; ++A)
+            for (int B = A; B < ns; ++B, ++k) {
+                all[k].A = A;
+                all[k].B = B;
+            }
+    }
+    const int np = (int)all.size();
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 32)
+#endif
+    for (int i = 0; i < np; ++i) {
+        Impl::Pair& pr = all[i];
+        const ShellPair sp = makeShellPair(impl->sh, pr.A, pr.B);
+        if (sp.prims.empty()) continue;
+        pr.md = makeMDPair(impl->sh, impl->o, sp);
+        const auto& hs = hermiteSimplex(pr.md.LAB);
+        double b = 0.0;
+        pr.kbound.assign(pr.md.p.size(), 0.0);
+        for (size_t k = 0; k < pr.md.p.size(); ++k) {
+            const double p = pr.md.p[k];
+            const double* E = &pr.md.E[k * (size_t)pr.md.nout * pr.md.nh];
+            double mx = 0.0;
+            for (int ab = 0; ab < pr.md.nout; ++ab) {
+                double s = 0.0;
+                for (int h = 0; h < pr.md.nh; ++h)
+                    s += std::abs(E[(size_t)ab * pr.md.nh + h]) * std::pow(2.0 * p, 0.5 * (hs[h][0] + hs[h][1] + hs[h][2]));
+                mx = std::max(mx, s);
+            }
+            pr.kbound[k] = 2.0 * PI / p * mx;
+            b += pr.kbound[k];
+        }
+        pr.bound = b;
+        // far field (Claude Generated, Nov 2026): for p r^2 above farT(L) the Boys function is its asymptote
+        // F_n = (2n-1)!! sqrt(pi) / (2^(n+1) T^(n+1/2)), so (2 pi / p) R_h(p, W) = (pi/p)^(3/2) d^h (1/|W|): the same
+        // for every primitive of a one-centre pair, whose tables then merge into one
+        pr.pmin = *std::min_element(pr.md.p.begin(), pr.md.p.end());
+        const auto& A = impl->sh[pr.A];
+        const auto& B = impl->sh[pr.B];
+        pr.one_centre = A.x == B.x && A.y == B.y && A.z == B.z;
+        if (pr.one_centre) {
+            pr.Efar.assign((size_t)pr.md.nout * pr.md.nh, 0.0);
+            for (size_t k = 0; k < pr.md.p.size(); ++k) {
+                const double f = std::pow(PI / pr.md.p[k], 1.5);
+                const double* E = &pr.md.E[k * (size_t)pr.md.nout * pr.md.nh];
+                for (size_t x = 0; x < pr.Efar.size(); ++x) pr.Efar[x] += f * E[x];
+            }
+        }
+    }
+    for (Impl::Pair& pr : all)
+        if (pr.md.nout > 0 && pr.bound >= pair_threshold) impl->pairs.push_back(std::move(pr));
+    m_impl = impl;
+}
+
+int GridPotentialIntegrals::n() const { return m_impl ? m_impl->o.n : 0; }
+int GridPotentialIntegrals::npairs() const { return m_impl ? (int)m_impl->pairs.size() : 0; }
+
+long long GridPotentialIntegrals::contract(const double* xyz, int np, const double* F, int ldf, double* G, int ldg,
+                                           double thr) const
+{
+    if (!m_impl || np <= 0) return 0;
+    using RowMat = Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+    const Impl& I = *m_impl;
+    const int ns = (int)I.sh.size();
+    // largest |F| of every shell at every point (the screen)
+    std::vector<double> fmax((size_t)np * ns, 0.0), fblk(ns, 0.0);
+    for (int p = 0; p < np; ++p)
+        for (int A = 0; A < ns; ++A) {
+            const double* f = F + (size_t)p * ldf + I.o.first[A];
+            double m = 0.0;
+            for (int a = 0; a < I.o.width[A]; ++a) m = std::max(m, std::abs(f[a]));
+            fmax[(size_t)p * ns + A] = m;
+            fblk[A] = std::max(fblk[A], m);
+        }
+    const int Lbox = 2 * I.maxL + 1;
+    std::vector<double> R0((size_t)Lbox * Lbox * Lbox), lvl(R0.size()), Fb(Lbox + 1);
+    std::vector<int> near, far;
+    RowMat Rn, Rf, Vals;
+    // T above which exp(-T) is dropped from the Boys recursion: relative error of F_n ~ e^-T (2T)^n / (2n-1)!!,
+    // below 1e-14 for n <= 8 at 40 + 4n (Claude Generated, Nov 2026)
+    auto farT = [](int L) { return 40.0 + 4.0 * L; };
+    long long evals = 0;
+    for (const Impl::Pair& pr : I.pairs) {
+        const int A = pr.A, B = pr.B;
+        if (thr > 0.0 && pr.bound * std::max(fblk[A], fblk[B]) < thr) continue;
+        const MDPair& md = pr.md;
+        const int L = md.LAB, nh = md.nh, nab = md.nout;
+        const int wA = I.o.width[A], wB = I.o.width[B], fa = I.o.first[A], fb = I.o.first[B];
+        const int* off = I.hoff[L].data();
+        const int nk = (int)md.p.size();
+        const double Tf = farT(L);
+        // points of this pair: skipped (screen), far (one-centre multipole) or near (primitive by primitive)
+        near.clear();
+        far.clear();
+        for (int p = 0; p < np; ++p) {
+            if (thr > 0.0 && pr.bound * std::max(fmax[(size_t)p * ns + A], fmax[(size_t)p * ns + B]) < thr) continue;
+            if (pr.one_centre) {
+                const double Wx = md.Px[0] - xyz[3 * p], Wy = md.Py[0] - xyz[3 * p + 1], Wz = md.Pz[0] - xyz[3 * p + 2];
+                if (pr.pmin * (Wx * Wx + Wy * Wy + Wz * Wz) > Tf) {
+                    far.push_back(p);
+                    continue;
+                }
+            }
+            near.push_back(p);
+        }
+        const int mn = (int)near.size(), mf = (int)far.size();
+        if (mn + mf == 0) continue;
+        evals += mn + mf;
+        // order of the rows of Vals: near points, then far points
+        Vals.setZero(mn + mf, nab);
+        if (mf > 0) {
+            // all primitives far: derivatives of 1/|W| (base (-1)^n (2n-1)!! / r^(2n+1), recursion with b = 1)
+            Rf.resize(mf, nh);
+            for (int i = 0; i < mf; ++i) {
+                const int p = far[i];
+                const double Wx = md.Px[0] - xyz[3 * p], Wy = md.Py[0] - xyz[3 * p + 1], Wz = md.Pz[0] - xyz[3 * p + 2];
+                const double ir2 = 1.0 / (Wx * Wx + Wy * Wy + Wz * Wz);
+                Fb[0] = std::sqrt(ir2);
+                for (int n = 1; n <= L; ++n) Fb[n] = -(2.0 * n - 1.0) * ir2 * Fb[n - 1];
+                buildR0Dispatch(L, Wx, Wy, Wz, -0.5, Fb.data(), R0.data(), lvl.data());
+                for (int h = 0; h < nh; ++h) Rf(i, h) = R0[off[h]];
+            }
+            const Eigen::Map<const RowMat> Ef(pr.Efar.data(), nab, nh);
+            Vals.bottomRows(mf).noalias() = Rf * Ef.transpose();
+        }
+        if (mn > 0) {
+            Rn.resize(mn, nh);
+            const double fpair = std::max(fblk[A], fblk[B]);
+            for (int k = 0; k < nk; ++k) {
+                if (thr > 0.0 && pr.kbound[k] * fpair < thr) continue;  // the pair screen applied to one primitive pair
+                const double pk = md.p[k];
+                const double pref = 2.0 * PI * md.ip[k];
+                for (int i = 0; i < mn; ++i) {
+                    const int p = near[i];
+                    const double Wx = md.Px[k] - xyz[3 * p], Wy = md.Py[k] - xyz[3 * p + 1], Wz = md.Pz[k] - xyz[3 * p + 2];
+                    const double T = pk * (Wx * Wx + Wy * Wy + Wz * Wz);
+                    if (T > Tf) {
+                        const double iT = 1.0 / T;
+                        Fb[0] = 0.5 * std::sqrt(PI * iT);
+                        for (int n = 0; n < L; ++n) Fb[n + 1] = (2.0 * n + 1.0) * 0.5 * iT * Fb[n];
+                    } else {
+                        boysFast(L, T, Fb.data());
+                    }
+                    for (int n = 0; n <= L; ++n) Fb[n] *= pref;
+                    buildR0Dispatch(L, Wx, Wy, Wz, pk, Fb.data(), R0.data(), lvl.data());
+                    for (int h = 0; h < nh; ++h) Rn(i, h) = R0[off[h]];
+                }
+                const Eigen::Map<const RowMat> Ek(&md.E[(size_t)k * nab * nh], nab, nh);
+                Vals.topRows(mn).noalias() += Rn * Ek.transpose();
+            }
+        }
+        // G_pa += sum_b A_ab F_pb;  G_pb += sum_a A_ab F_pa (A != B)
+        for (int i = 0; i < mn + mf; ++i) {
+            const int p = i < mn ? near[i] : far[i - mn];
+            const double* v = Vals.data() + (size_t)i * nab;
+            const double* Fp = F + (size_t)p * ldf;
+            double* Gp = G + (size_t)p * ldg;
+            for (int a = 0; a < wA; ++a) {
+                double acc = 0.0;
+                const double fA = Fp[fa + a];
+                for (int b = 0; b < wB; ++b) {
+                    const double x = v[(size_t)a * wB + b];
+                    acc += x * Fp[fb + b];
+                    if (A != B) Gp[fb + b] += x * fA;
+                }
+                Gp[fa + a] += acc;
+            }
+        }
+    }
+    return evals;
+}
+
+Matrix GridPotentialIntegrals::potentialMatrix(double x, double y, double z) const
+{
+    const int nb = n();
+    Matrix M = Matrix::Zero(nb, nb);
+    const double xyz[3] = { x, y, z };
+    std::vector<double> F(nb), G(nb);
+    for (int l = 0; l < nb; ++l) {
+        std::fill(F.begin(), F.end(), 0.0);
+        std::fill(G.begin(), G.end(), 0.0);
+        F[l] = 1.0;
+        contract(xyz, 1, F.data(), nb, G.data(), nb, 0.0);
+        for (int m = 0; m < nb; ++m) M(m, l) = G[m];
+    }
+    return M;
+}
 
 ERITensor buildERI(const std::vector<GTO::Orbital>& basis, int threads, double screening,
                    const Matrix* Q)

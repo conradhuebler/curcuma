@@ -430,6 +430,10 @@ Matrix QMEngine::mp2G4(const Matrix& X_mo, const qmint::ERITensor* eri) const
 bool QMEngine::computeMP2Gradient(const qmint::MP2Options& opt, double c_os, double c_ss, qmint::MP2Result& res)
 {
     res = qmint::MP2Result();
+    if (cosxActive()) {  // Nov 2026: correlated methods need the exact-exchange reference
+        CurcumaLogger::error("QM: MP2 gradient is not implemented with -qm.exchange_method cosx (use -qm.exchange_method exact)");
+        return false;
+    }
     if (m_open_shell) {  // stage 5b (Nov 2026): closed-shell formulas (n_occ = N/2) only
         CurcumaLogger::error("QM: MP2 gradient needs a closed-shell RHF/RKS reference; the last SCF was unrestricted (open shell)");
         return false;

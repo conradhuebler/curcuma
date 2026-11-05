@@ -40,6 +40,12 @@ HF3CMethod::HF3CMethod(const json& config)
     if (ri != "off" && ri != "false" && CurcumaLogger::get_verbosity() >= 1)
         CurcumaLogger::warn("hf-3c: -qm.ri " + ri + " ignored -- HF-3c uses exact integrals (use -method hf for RI)");
     engine_config["ri"] = "off";
+    // Claude Generated (Nov 2026): HF-3c keeps the exact exchange as well (COSX is a variant of -method hf)
+    if (engine_config.contains("exchange_method") && engine_config["exchange_method"].is_string()
+        && engine_config["exchange_method"].get<std::string>() != "exact" && CurcumaLogger::get_verbosity() >= 1)
+        CurcumaLogger::warn("hf-3c: -qm.exchange_method " + engine_config["exchange_method"].get<std::string>()
+                            + " ignored -- HF-3c uses exact exchange (use -method hf for COSX)");
+    engine_config["exchange_method"] = "exact";
     // Stage 5a (Claude Generated, Nov 2026): Rb-Rn need the MINIX-ECP (ORCA 6.1's MINIX ECPs, large core for In-Xe
     // and Tl-At); another -qm.ecp is a different method.
     const std::string ecp = engine_config.contains("ecp") && engine_config["ecp"].is_string() ? engine_config["ecp"].get<std::string>() : "auto";

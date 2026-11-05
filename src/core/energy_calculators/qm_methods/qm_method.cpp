@@ -134,6 +134,10 @@ double QMMethod::calculateEnergy(bool gradient)
         // Claude Generated (Oct 2026, WP10): no energy without the fit the user asked for.
         m_has_error = true;
         m_error_message = "density fitting (-qm.ri " + m_engine->riMode() + ") setup failed, see the error above";
+    } else if (m_engine->cosxFailed()) {
+        // Claude Generated (Nov 2026): refused or failed -qm.exchange_method cosx, no exact-exchange energy under its label
+        m_has_error = true;
+        m_error_message = m_engine->cosxError();
     } else if (m_engine->xcSetupFailed()) {
         // Claude Generated (Oct 2026, WP5): no LDA/PBE/B3LYP energy without its grid
         m_has_error = true;

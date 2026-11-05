@@ -3390,6 +3390,10 @@ void QMEngine::riDump(const std::string& prefix) const
 // no time for HF; it is the Coulomb part a pure functional would need). RI-JK: both from the fit.
 void QMEngine::buildJK(const Matrix& P, Matrix& J, Matrix& K) const
 {
+    if (cosxActive()) {  // Nov 2026: seminumerical exchange, J from RI-J or the exact CPU path (qm_cosx.cpp)
+        buildJKCosx(P, J, K, true);
+        return;
+    }
     if (!riActive()) {
         buildJKExact(P, J, K);
         return;

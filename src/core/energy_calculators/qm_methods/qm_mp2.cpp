@@ -229,6 +229,10 @@ const double* QMEngine::mp2HostTensor(const qmint::MP2Options& opt, qmint::MP2Re
 bool QMEngine::computeMP2(const qmint::MP2Options& opt, qmint::MP2Result& res)
 {
     res = qmint::MP2Result();
+    if (cosxActive()) {  // Nov 2026: correlated methods need the exact-exchange reference
+        CurcumaLogger::error("QM: MP2 is not implemented with -qm.exchange_method cosx (use -qm.exchange_method exact)");
+        return false;
+    }
     if (m_open_shell) {  // stage 5b (Nov 2026): closed-shell formulas (n_occ = N/2) only
         CurcumaLogger::error("QM: MP2 needs a closed-shell RHF/RKS reference; the last SCF was unrestricted (open shell)");
         return false;

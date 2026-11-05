@@ -368,15 +368,19 @@ bool QMEngine::runSCF()
     // neither (no 4-index tensor, full builds only); RI-J keeps the exact path for the exchange.
     const bool ri_jk = riActive() && m_ri_mode == "jk";
     if (riActive() && !ensureRI()) return false;
+    // COSX (Nov 2026): RIJCOSX needs no 4-index quantity; COSX with exact J keeps the CPU tensor / direct path for J
+    const bool cosx = cosxActive();
+    const bool no_exact = ri_jk || (cosx && riActive());
+    if (cosx && !ensureCosx()) return false;
     // WP5: Kohn-Sham functional -> grid of this geometry (built once, cached until the geometry changes)
     if (isKohnSham()) {
         if (!ensureXCGrid()) return false;
         qmcite::kohnSham(m_xc, m_grid_options.radial == "treutler");
     }
-    const bool direct = !ri_jk && useDirectSCF();
+    const bool direct = !no_exact && useDirectSCF();
     if (direct) qmcite::directScf();
     if (m_scf_mode == "adiis") CitationRegistry::cite("adiis");
-    if (!ri_jk && !direct && !ensureGpuJK()) {  // KS: J only, from the same tensor
+    if (!no_exact && !direct && (cosx || !ensureGpuJK())) {  // KS: J only, from the same tensor
         const qmint::ERITensor& eri = eriActive();  // builds (and caches) on first call
         if (eri.n() != n) {
             CurcumaLogger::error(fmt::format(
@@ -403,7 +407,7 @@ bool QMEngine::runSCF()
     // KS (WP5): the device loop needs V_xc on the device (GPU KS-DFT, Oct 2026: -qm.gpu_xc); without it the host
     // loop runs (J/K and V_xc may still come from the device).
     // Level shift (Nov 2026): host loop only; the device loop is skipped and counted (as its other fallbacks)
-    const bool device_loop_wanted = !riActive() && gpuRequested() && m_gpu_scf != "off" && m_gpu_scf != "false"
+    const bool device_loop_wanted = !riActive() && !cosx && gpuRequested() && m_gpu_scf != "off" && m_gpu_scf != "false"
         && !m_gpu_scf_failed;
     if (device_loop_wanted && m_scf_level_shift > 0.0)
         curcuma::reportGpuFallback("qm_scf", "-qm.scf_level_shift runs in the host SCF loop only");
@@ -1226,6 +1230,7 @@ void QMEngine::invalidateXC() const
     m_xc_last_P = Matrix();
     m_xc_failed = false;
     m_xcs_last_valid = false;  // stage 5b: spin V_xc cache
+    invalidateCosx();          // Nov 2026: the COSX grid belongs to the old geometry
 }
 
 bool QMEngine::ensureXCGrid() const

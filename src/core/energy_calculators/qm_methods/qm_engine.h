@@ -41,6 +41,7 @@
 #include "qm_xc.h"           // qmxc exchange-correlation functionals and V_xc (WP5)
 #include "qm_xc_spin.h"      // spin-polarised XC for UHF/UKS (stage 5b, Nov 2026)
 #include "qm_ecp.h"          // qmecp semi-local ECP integrals (Nov 2026)
+#include "qm_cosx.h"         // qmcosx seminumerical exchange options (Nov 2026)
 #include <map>
 #include "qm_driver.h"
 
@@ -49,6 +50,9 @@
 
 namespace qmri {
 class RIJK;  // qm_ri.h (WP10 density fitting)
+}
+namespace qmcosx {
+class SeminumericalExchange;  // qm_cosx.h (COSX, Nov 2026)
 }
 namespace qmint {
 class QMGpuRI;  // qm_gpu_ri_backend.h
@@ -216,6 +220,19 @@ BEGIN_PARAMETER_DEFINITION(qm)
     PARAM(ri_fit_radius, Double, 0.0,
           "RI-JK local fitting (an APPROXIMATION with a measured error, docs WP10): 0 = exact global fit (default) | R > 0 = each occupied (Cholesky-localised) orbital fits its exchange densities only with the auxiliary functions on atoms within R Bohr of its centre (robust Dunlap fit, as the LMP2 local fit); J keeps the global fit. Changes energies by the fit-domain error; an RI gradient with R > 0 is an error.",
           "DensityFitting", {})
+    // Seminumerical exchange (Claude Generated, Nov 2026): chain-of-spheres COSX / RIJCOSX, implementation in qm_cosx.cpp
+    PARAM(exchange_method, String, "exact",
+          "Exchange matrix K of hf and the hybrid b3lyp: exact (analytic four-centre integrals, or the fit of -qm.ri jk; the reference) | cosx (seminumerical chain-of-spheres exchange, Neese et al. 2009: first electron on the grid -qm.cosx_grid, second analytic; with -qm.ri j this is RIJCOSX). An APPROXIMATION with a grid error of about 1e-5..1e-4 Eh (docs/QM_COSX.md). Closed shell, CPU only, energy only: an analytic gradient, -opt, open shell, ECPs, -qm.ri jk, -qm.scf_stability and the correlated methods are refused; -gpu is a counted fallback (qm_cosx). Ignored (warning) by functionals without exact exchange.",
+          "Exchange", {})
+    PARAM(cosx_grid, String, "35x110",
+          "-qm.exchange_method cosx: grid of the numerical integration (radial x Lebedev per atom, unpruned, with the radial scheme, partition and size adjustment of -qm.grid_radial/-qm.grid_partition/-qm.grid_radii_adjust), e.g. 25x50, 35x110, 50x194. Coarser = faster and less accurate; errors per grid in docs/QM_COSX.md.",
+          "Exchange", {})
+    PARAM(cosx_fit_overlap, Bool, true,
+          "-qm.exchange_method cosx: overlap fitting (Neese 2009 sec. 2.3): the density is multiplied by S~^-1 S (S~ the overlap of the basis on the COSX grid), so the quadrature reproduces the analytic overlap; reduces the grid error by one to two orders. false = plain quadrature.",
+          "Exchange", {})
+    PARAM(cosx_threshold, Double, 1.0e-11,
+          "-qm.exchange_method cosx: a shell pair is skipped at a grid point when its potential bound times the largest |F| (w phi P) of its shells there is below this value (0 = every pair at every point). AO values per block are screened with -qm.xc_ao_threshold.",
+          "Exchange", {})
     // Oct 27 2026: scf_max_iterations, scf_threshold, scf_mode, scf_diis_start, scf_diis_subspace, scf_damping and
     // scf_allow_unconverged are also read from the shared module "scf" (scf_parameters.h; -scf_threshold,
     // -scf.scf_threshold); precedence -qm.<name> > -scf.<name> > the defaults below (QMMethod::engineConfig).
@@ -833,7 +850,24 @@ public:
     const std::string& riMode() const { return m_ri_mode; }
     /// True when the RI setup for the current geometry failed (aux basis, memory limit, metric).
     bool riSetupFailed() const { return riActive() && m_ri_failed; }
+    /// COSX (Claude Generated, Nov 2026, qm_cosx.cpp): -qm.exchange_method cosx was asked for / is in use (the
+    /// functional has exact exchange); a refused or failed COSX setup is an error, never an exact-exchange result.
+    bool cosxRequested() const;
+    bool cosxActive() const;
+    bool cosxFailed() const { return !m_cosx_error.empty() || (cosxActive() && m_cosx_failed); }
+    std::string cosxError() const { return m_cosx_error.empty() ? std::string("COSX exchange setup failed, see the error above") : m_cosx_error; }
 private:
+    std::string m_exchange_method = "exact";  ///< -qm.exchange_method exact | cosx
+    qmcosx::CosxOptions m_cosx_opt;
+    std::string m_cosx_error;                 ///< refusal of the configuration (cosxValidate)
+    mutable std::shared_ptr<qmcosx::SeminumericalExchange> m_cosx;
+    mutable bool m_cosx_failed = false;
+    void readCosxConfig(const json& config);
+    bool cosxValidate();
+    void invalidateCosx() const;
+    bool ensureCosx() const;
+    void buildJKCosx(const Matrix& P, Matrix& J, Matrix& K, bool need_k) const;
+    void cosxReport() const;
     // Energy components for the HF run (Hartree). E_elec = 0.5 Tr(P(H+F)).
     double m_e_elec = 0.0;
     double m_et = 0.0, m_ev = 0.0, m_ej = 0.0, m_ex = 0.0;

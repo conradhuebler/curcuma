@@ -379,6 +379,7 @@ QMEngine::QMEngine(QMFunctional functional, const json& config)
     if (config.contains("eri_max_memory_mb") && config["eri_max_memory_mb"].is_number())
         m_eri_max_memory_mb = config["eri_max_memory_mb"].get<double>();
     readRIConfig(config);  // WP10 -qm.ri* (qm_ri.cpp)
+    readCosxConfig(config);  // Nov 2026 -qm.exchange_method / -qm.cosx_* (qm_cosx.cpp)
     // stage 5b (Claude Generated, Nov 2026): open-shell reference
     if (config.contains("reference") && config["reference"].is_string()) {
         m_reference = config["reference"].get<std::string>();
@@ -788,6 +789,19 @@ double QMEngine::Calculation(bool gradient)
         }
         return m_total_energy;
     }
+    // COSX (Nov 2026, qm_cosx.cpp): a refused configuration is an error, never an exact-exchange result
+    if (!cosxValidate()) {
+        CurcumaLogger::error("QM: " + m_cosx_error);
+        m_total_energy = std::numeric_limits<double>::quiet_NaN();
+        m_scf_converged = false;
+        m_scf_ready = false;
+        if (gradient) {
+            m_gradient = Matrix::Zero(m_atomcount, 3);
+            m_gradient_failed = true;
+            m_gradient_error = m_cosx_error;
+        }
+        return m_total_energy;
+    }
     // -qm.scf_stability follow (Nov 2026): a geometry whose RHF -> UHF instability was followed stays unrestricted
     if (!m_open_shell && m_broken_symmetry_serial == m_geom_serial && m_reference == "auto") m_open_shell = true;
 
@@ -806,7 +820,7 @@ double QMEngine::Calculation(bool gradient)
         m_stability_report = json::object();
         if (ok && m_scf_stability != "off") ok = runStabilityAnalysis();  // Nov 2026, qm_stability.cpp
         m_scf_ready = true;
-        if (!ok && !riSetupFailed()) {  // WP10: a failed RI setup has reported its own error
+        if (!ok && !riSetupFailed() && !cosxFailed()) {  // WP10: a failed RI setup has reported its own error
             // Oct 27 2026: master's rule (SCF_MODES.md "Failure handling"): the wrappers turn this into an error
             // unless -scf_allow_unconverged true, which keeps the energy of the last density with a warning.
             if (m_scf_allow_unconverged)
@@ -818,6 +832,7 @@ double QMEngine::Calculation(bool gradient)
                     "QM {} SCF did not converge in {} iterations", scfLabel(m_functional), m_scf_max_iter));
         }
         if (riActive()) riReport();
+        if (cosxActive()) cosxReport();
     }
     m_total_energy = m_e_elec + e_nn;
 
@@ -854,6 +869,8 @@ double QMEngine::Calculation(bool gradient)
             : m_ri_mode == "j"             ? (isKohnSham() && !pure_dft ? " RI-J (exact K)" : " RI-J")
             : pure_dft                     ? " RI-J (JK aux)"
                                            : " RI-JK";
+        // COSX (Nov 2026): the exchange of hf/hybrids comes from the seminumerical grid
+        const std::string cosx_label = cosxActive() ? std::string(" COSX(") + m_cosx_opt.grid + (m_cosx_opt.fit_overlap ? ", fit)" : ", no fit)") : std::string();
         // stage 5b: open shell names the reference and the spin occupation
         const std::string spin_label = m_open_shell
             ? fmt::format(" (unrestricted, n_alpha {}, n_beta {}{})", m_nalpha, m_nbeta,
@@ -861,11 +878,11 @@ double QMEngine::Calculation(bool gradient)
             : std::string();
         if (isKohnSham())
             CurcumaLogger::result(fmt::format("native QM -- {}{} {}/{}{} grid {} SCF {} ({} iterations){}",
-                m_open_shell ? "U" : "", scfLabel(m_functional), m_xc.label(), m_basis_name, ri_label, m_grid_options.level,
+                m_open_shell ? "U" : "", scfLabel(m_functional), m_xc.label(), m_basis_name, std::string(ri_label) + cosx_label, m_grid_options.level,
                 m_scf_converged ? "converged" : "NOT converged", m_scf_iterations, spin_label));
         else
             CurcumaLogger::result(fmt::format("native QM -- {}HF/{}{} SCF {} ({} iterations){}",
-                m_open_shell ? "U" : "", m_basis_name, ri_label, m_scf_converged ? "converged" : "NOT converged",
+                m_open_shell ? "U" : "", m_basis_name, std::string(ri_label) + cosx_label, m_scf_converged ? "converged" : "NOT converged",
                 m_scf_iterations, spin_label));
         if (m_scf_converged && CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::param("E_elec", fmt::format("{:.10f} Eh", m_e_elec));
@@ -1084,6 +1101,15 @@ Matrix QMEngine::calculateCoreRepulsionGradient() const
 bool QMEngine::computeGradient(bool defer_cpu_two_electron, bool& two_electron_deferred)
 {
     two_electron_deferred = false;
+    if (cosxActive()) {
+        // COSX (Nov 2026): no analytic gradient of the seminumerical exchange energy; never the exact-exchange one
+        m_gradient = Matrix::Zero(m_atomcount, 3);
+        m_gradient_failed = true;
+        m_gradient_error = "analytic gradient not implemented for -qm.exchange_method cosx (energy only; use "
+                           "-qm.exchange_method exact or -qm.ri jk for -opt/-md/gradients)";
+        CurcumaLogger::error("QM: " + m_gradient_error);
+        return false;
+    }
     const int n_occ = m_num_electrons / 2;
     Matrix W = Matrix::Zero(m_nbf, m_nbf);
     for (int i = 0; i < n_occ; ++i)

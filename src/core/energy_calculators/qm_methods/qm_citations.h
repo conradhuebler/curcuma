@@ -120,6 +120,9 @@ inline void uhf(bool kohn_sham)
     if (kohn_sham) CitationRegistry::cite("uks_finite_basis");
 }
 
+/// Seminumerical (chain-of-spheres) exchange, -qm.exchange_method cosx (Claude Generated, Nov 2026).
+inline void cosx() { CitationRegistry::cite("cosx_neese2009"); }
+
 /// Integral-direct SCF with Schwarz / density-weighted screening.
 inline void directScf()
 {
