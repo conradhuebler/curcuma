@@ -1,0 +1,14 @@
+{
+  "_comment": "PySCF 2.14.0 RHF/RKS whose exchange matrix is the COSX expression of qm_cosx.h on curcuma's own grid (CURCUMA_QM_COSX_DUMP; points and weights of -qm.cosx_grid, sorted into blocks), AO values from mol.eval_gto, potential integrals from libcint int1e_grids, overlap fit proj = solve(S~, S) (as PySCF sgx fit_ovlp), K symmetrised; exact J; B3LYP = xc b3lyp5 on atom_grid (50, 194), prune None (= curcuma -qm.grid sg1); conv_tol 1e-12. Script: docs/QM_COSX.md (pyscf_cosx.py). curcuma ran with -qm.scf_threshold 1e-10 and default -qm.cosx_threshold 1e-11 (the screen moves energies by <= 1.5e-9 Eh). Claude Generated (Nov 2026).",
+  "cases": {
+    "h2o_hf_svp":        { "xyz": "../structures/small/water.xyz", "method": "hf", "basis": "def2-SVP", "grid": "35x110",
+                           "pyscf_cosx": -75.96100662299202, "pyscf_exact": -75.9610089575692 },
+    "nh3_b3lyp_svp":     { "xyz": "../qm_1e/NH3.xyz", "method": "b3lyp", "basis": "def2-SVP", "grid": "25x86",
+                           "pyscf_cosx": -56.469292999823296, "pyscf_exact": -56.46928966433305 },
+    "ch2o_hf_svp_nofit": { "xyz": "../qm_grad/formaldehyde_distorted.xyz", "method": "hf", "basis": "def2-SVP", "grid": "20x50",
+                           "flags": "-qm.cosx_fit_overlap false",
+                           "pyscf_cosx": -113.76991498025647, "pyscf_exact": -113.77033031428134 },
+    "ch4_hf_tzvp":       { "xyz": "../structures/small/methane.xyz", "method": "hf", "basis": "def2-TZVP", "grid": "25x86",
+                           "pyscf_cosx": -40.21310465797943, "pyscf_exact": -40.21310267864668 }
+  }
+}
