@@ -249,6 +249,39 @@ struct ScfConvergence {
     }
 };
 
+/**
+ * @brief Level shift of the native HF/KS SCF (-qm.scf_level_shift b > 0; V. R. Saunders, I. H. Hillier,
+ * Int. J. Quantum Chem. 7, 699 (1973)). Claude Generated (Nov 2026).
+ *
+ * The matrix diagonalised in one iteration is F' = F + b (S - w S P S) with P the density F was built from (w = 1/2
+ * for the spin-summed closed-shell P, 1 for a spin density). In the Lowdin basis S - w S P S is the projector onto the
+ * virtual space of P, so the virtual orbitals of the current density move up by b and the occupied-virtual rotation of
+ * a step shrinks from about g / (e_a - e_i) to g / (e_a - e_i + b): a damped, more robust SCF. At a fixed point P
+ * commutes with F' and therefore with F, so the fixed point is the unshifted SCF solution. The DIIS error, the energy
+ * and every convergence test use the unshifted F; the shift is removed when the orbital gradient falls below `off`
+ * (> 0). When a shifted iteration meets every convergence test, the loop diagonalises the unshifted (extrapolated) F
+ * of that iteration once more and returns those orbitals, orbital energies and that density, i.e. the same rule as the
+ * run without shift (a further unshifted loop was tried first: plain undamped Roothaan steps can leave a converged
+ * point again, ozone/def2-SVP did not reconverge).
+ */
+struct ScfLevelShift {
+    double b = 0.0, off = 0.0;
+    bool on = false;
+    ScfLevelShift(double shift, double off_grad) : b(shift), off(off_grad), on(shift > 0.0) {}
+    /// After the convergence measures of this Fock build: early removal below the gradient threshold.
+    void observe(double grad)
+    {
+        if (on && off > 0.0 && grad < off) on = false;
+    }
+    /// F + b (S - w S P S).
+    Matrix apply(const Matrix& F, const Matrix& S, const Matrix& P, double w, int threads) const
+    {
+        const Eigen::MatrixXd Sc(S), Pc(P);
+        const Eigen::MatrixXd SPS = gemmThreaded(gemmThreaded(Sc, false, Pc, threads), false, Sc, threads);
+        return F + Matrix(b * (Sc - w * SPS));
+    }
+};
+
 ScfConvergence makeConvergence(bool density_only, double thr_dP, double thr_E, double thr_G)
 {
     ScfConvergence c;

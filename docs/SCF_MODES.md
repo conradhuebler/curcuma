@@ -93,7 +93,7 @@ the same flags with `-qm.<name>` as its method scope: registry `qm` defaults < t
 | `-scf_max_iterations` (`-max_iterations`, `-SCFmaxiter`) | `150` | `100` | `100` | Iteration limit; tblite/xtb/Ulysses map it onto their `max_iterations` (default 100). |
 | `-scf_damping` | `0.4` | `0.6` | `0.5`, mode `plain` only | Fraction of the new charges (gfn) or density (NDDO, HF) per step: `P = d*P_new + (1-d)*P_old`; tblite maps it onto `damping`. |
 | `-scf_allow_unconverged` | `false` | `false` | `false` (hf, hf-3c energies; gradients and mp2/ccsd/lmp2 still fail) | Accept an SCF that hit the iteration limit (warning + last energy) instead of failing. |
-| `-scf_mode` | `broyden` | `diis` | `diis` | gfn: broyden, diis, plain, level-shift; NDDO: diis or plain; HF: diis, adiis, plain (other names are an error for NDDO and HF). |
+| `-scf_mode` | `broyden` | `diis` | `diis` | gfn: broyden, diis, plain, level-shift; NDDO: diis or plain; HF: diis, adiis, plain, level-shift (= diis + `-qm.scf_level_shift`; other names are an error for NDDO and HF). |
 | `-scf_diis_start` (`-diis_start`) | `5` | `3` | `1` (0-based first DIIS iteration) | Damped iterations before DIIS (gfn: modes diis and level-shift). |
 | `-scf_diis_subspace` (`-diis_subspace`) | `6` | `8` | `8` | DIIS history depth. |
 

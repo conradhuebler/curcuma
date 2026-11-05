@@ -412,6 +412,9 @@ bool QMEngine::runUSCF()
         return std::make_pair(J, std::make_pair(Ka, Kb));
     };
 
+    // Level shift (Claude Generated, Nov 2026; -qm.scf_level_shift): F_s + b (S - S P_s S) per spin, ScfLevelShift
+    ScfLevelShift lshift(m_scf_level_shift, m_scf_level_shift_off);
+
     Matrix Ca, Cb;
     Vector eps_a, eps_b;
     for (int iter = 0; iter < m_scf_max_iter; ++iter) {
@@ -444,6 +447,15 @@ bool QMEngine::runUSCF()
                                   + spinOrbitalGradient(Fb, Pb, m_S, m_X, m_threads).squaredNorm());
         }
         conv.observe(E, grad_norm);
+        if ((use_diis && iter >= m_diis_start) || !conv.density_only) lshift.observe(conv.grad);
+        const bool shifted_now = lshift.on;
+        Matrix Fa_unshifted, Fb_unshifted;  // for the final unshifted diagonalisation
+        if (shifted_now) {  // DIIS error and energy above come from the unshifted F_a, F_b
+            Fa_unshifted = Fa_use;
+            Fb_unshifted = Fb_use;
+            Fa_use = lshift.apply(Fa_use, m_S, Pa, 1.0, m_threads);
+            Fb_use = lshift.apply(Fb_use, m_S, Pb, 1.0, m_threads);
+        }
 
         const auto t_e0 = std::chrono::steady_clock::now();
         if (!solveFock(Fa_use, Ca, eps_a) || !solveFock(Fb_use, Cb, eps_b)) {
@@ -459,22 +471,37 @@ bool QMEngine::runUSCF()
         const double delta_P = std::sqrt((Pa_new - Pa).squaredNorm() + (Pb_new - Pb).squaredNorm());
 
         if (CurcumaLogger::get_verbosity() >= 1)
-            CurcumaLogger::result(fmt::format("UHF iter {:3d}: E_elec = {:.10f} Eh, dE = {:.2e}, |g| = {:.2e}, dP = {:.3e}",
+            CurcumaLogger::result(fmt::format("UHF iter {:3d}: E_elec = {:.10f} Eh, dE = {:.2e}, |g| = {:.2e}, dP = {:.3e}{}",
                                               iter + 1, conv.e_prev, conv.have_prev && iter > 0 ? conv.dE : 0.0,
-                                              conv.grad, delta_P));
+                                              conv.grad, delta_P,
+                                              shifted_now ? fmt::format(", level shift {:.2f}", lshift.b) : std::string()));
         if (conv.converged(delta_P)) {
+            Matrix Pa_fin = Pa_new, Pb_fin = Pb_new;
+            if (shifted_now) {  // ScfLevelShift: orbitals, orbital energies and densities from the unshifted F_a, F_b
+                if (!solveFock(Fa_unshifted, Ca, eps_a) || !solveFock(Fb_unshifted, Cb, eps_b)) {
+                    CurcumaLogger::error(fmt::format("QM UHF: diagonalization failed at iteration {}", iter + 1));
+                    return false;
+                }
+                Pa_fin = spinDensity(Ca, na, m_threads);
+                Pb_fin = spinDensity(Cb, nb, m_threads);
+                if (CurcumaLogger::get_verbosity() >= 2)
+                    CurcumaLogger::info(fmt::format("QM: level shift {:.3f} Eh: converged; final orbitals from the "
+                                                    "unshifted Fock matrices", lshift.b));
+            }
+            const Matrix& Pa_new_f = Pa_fin;
+            const Matrix& Pb_new_f = Pb_fin;
             m_scf_last_dE = conv.dE;
             m_scf_last_grad = conv.grad;
             // final full build of the converged densities: Fock matrices and energy parts
             Matrix Fa_f, Fb_f;
             double E_f = 0.0;
-            auto jk = fockPair(Pa_new, Pb_new, Fa_f, Fb_f, E_f);
+            auto jk = fockPair(Pa_new_f, Pb_new_f, Fa_f, Fb_f, E_f);
             const Matrix& J = jk.first;
             const Matrix& Ka = jk.second.first;
             const Matrix& Kb = jk.second.second;
-            m_density_a = Pa_new;
-            m_density_b = Pb_new;
-            m_density = Pa_new + Pb_new;
+            m_density_a = Pa_new_f;
+            m_density_b = Pb_new_f;
+            m_density = Pa_new_f + Pb_new_f;
             m_fock_a = Fa_f;
             m_fock_b = Fb_f;
             m_fock = Fa_f;
@@ -483,10 +510,10 @@ bool QMEngine::runUSCF()
             m_et = m_density.cwiseProduct(m_T).sum();
             m_ev = m_density.cwiseProduct(m_V).sum();
             m_ej = 0.5 * m_density.cwiseProduct(J).sum();
-            m_ex = -0.5 * ax * (Pa_new.cwiseProduct(Ka).sum() + Pb_new.cwiseProduct(Kb).sum());
+            m_ex = -0.5 * ax * (Pa_new_f.cwiseProduct(Ka).sum() + Pb_new_f.cwiseProduct(Kb).sum());
             m_e_elec = E_f;
             if (ks) {
-                const qmxc::XCResultSpin& xc = xcForSpin(Pa_new, Pb_new);
+                const qmxc::XCResultSpin& xc = xcForSpin(Pa_new_f, Pb_new_f);
                 m_exc = xc.exc;
                 m_exc_x = xc.ex;
                 m_exc_c = xc.ec;
@@ -501,7 +528,7 @@ bool QMEngine::runUSCF()
             m_warm_atoms = m_atoms;
             const double sz = 0.5 * (na - nb);
             m_s2_exact = sz * (sz + 1.0);
-            const Matrix PaS = Pa_new * m_S, PbS = Pb_new * m_S;
+            const Matrix PaS = Pa_new_f * m_S, PbS = Pb_new_f * m_S;
             m_s2 = m_s2_exact + nb - PaS.cwiseProduct(PbS.transpose()).sum();
             if (const char* tr = std::getenv("CURCUMA_QM_SCF_TRACE"); tr && tr[0] == '1')
                 fmt::print(stderr, "QM SCF trace: loop=host-uhf n={} iterations={} start={} E_elec={:.10f}\n", m_nbf,

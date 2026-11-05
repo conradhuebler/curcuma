@@ -781,6 +781,7 @@ add_subdirectory(qm_basis_embed)  # Claude Generated (Nov 2026): embedded def2/M
 add_subdirectory(qm_fg)  # Claude Generated (Nov 2026): f/g shells (def2-TZVP*/QZVP*) vs PySCF and ORCA, FD gate
 add_subdirectory(qm_ecp)  # Claude Generated (Nov 2026): Na-Rn, def2-ECP vs PySCF and ORCA, FD gate (labels qm_z, qm_ecp)
 add_subdirectory(qm_uhf)  # Claude Generated (Nov 2026, stage 5b): UHF/UKS vs PySCF and ORCA, FD gate (labels qm_uhf, qm_uks)
+add_subdirectory(qm_stability)  # Claude Generated (Nov 2026): SCF level shift and wavefunction stability analysis (label qm_stability)
 # Claude Generated (Oct 2026): property tests generated from the structure library (test_cases/struct_test_policy.json):
 # translation/rotation/permutation invariance, sum of forces and torque, finite-difference gradient, repeat and thread
 # independence, CPU against CUDA. The selection is made by scripts/gen_struct_tests.py at configure time.

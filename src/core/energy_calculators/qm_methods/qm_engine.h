@@ -235,7 +235,14 @@ BEGIN_PARAMETER_DEFINITION(qm)
           "scf_convergence auto: the same norm for runs whose result is first order in the orbital error: analytic nuclear gradients (-opt, -md, -gradient, hf-3c gradients) and the correlation methods mp2/ri-mp2/lmp2/ccsd. An energy-only SCF of the same geometry is continued from its density when such a result is requested later.",
           "SCF", {})
     PARAM(scf_mode, String, "diis",
-          "SCF convergence driver: diis (Pulay DIIS, orthonormal-basis commutator) | adiis (ADIIS far from convergence, blended into DIIS; Hu/Yang 2010, Garza/Scuseria 2012) | plain (density damping only, scf_damping). Any other name (broyden, level-shift: gfn1/gfn2 only) is an error. Also set by the shared -scf_mode (its 'auto' keeps diis).",
+          "SCF convergence driver: diis (Pulay DIIS, orthonormal-basis commutator) | adiis (ADIIS far from convergence, blended into DIIS; Hu/Yang 2010, Garza/Scuseria 2012) | plain (density damping only, scf_damping) | level-shift (= diis with scf_level_shift, 0.2 Eh if scf_level_shift is 0). Any other name (broyden: gfn1/gfn2 only) is an error. Also set by the shared -scf_mode (its 'auto' keeps diis).",
+          "SCF", {})
+    // Claude Generated (Nov 2026): level shift of the native HF/KS SCF (closed and open shell), host loop only
+    PARAM(scf_level_shift, Double, 0.0,
+          "Level shift b (Eh) of the native HF/KS SCF (Saunders/Hillier 1973): the matrix diagonalised in an iteration is F + b (S - S P_s S) (closed shell: S - 1/2 S P S), which raises the virtual orbitals of the current density by b and damps occupied-virtual rotations (robust for small-gap or oscillating SCFs, slower near convergence). The DIIS error, the energy and every convergence test use the unshifted F; when a shifted iteration meets every test, the returned orbitals, orbital energies and density come from one more diagonalisation of the unshifted (extrapolated) F of that iteration, so the converged result does not depend on b beyond the SCF thresholds. 0 = off (default, bitwise the SCF without it). Combines with diis/adiis/plain. Host SCF loop only: with -gpu the device-resident RHF loop is skipped (counted fallback qm_scf).",
+          "SCF", {})
+    PARAM(scf_level_shift_off, Double, 0.0,
+          "scf_level_shift: orbital-gradient norm ||X^T (F P S - S P F) X||_F below which the shift is removed early (e.g. 1e-3). 0 = keep the shift until convergence (the final orbitals are then those of the unshifted F).",
           "SCF", {})
     // Oct 27 2026: renamed from diis_start / diis_subspace (kept as aliases) -- flat -diis_start belongs to the optimiser
     PARAM(scf_diis_start, Int, 1,
@@ -582,6 +589,9 @@ private:
     mutable bool m_scf_continue = false;      // next SCF starts from m_density (tightening a converged SCF)
     mutable double m_scf_last_dE = 0.0, m_scf_last_grad = 0.0;  // of the converged iteration (report)
     std::string m_scf_mode = "diis";         // diis | adiis | plain
+    // Claude Generated (Nov 2026): level shift (-qm.scf_level_shift, 0 = off) and stability analysis (-qm.scf_stability)
+    double m_scf_level_shift = 0.0;          // b (Eh) added to the virtual space of the diagonalised Fock matrix
+    double m_scf_level_shift_off = 0.0;      // orbital gradient below which the shift is removed (0: at convergence)
     std::string m_scf_guess = "atom";        // sad | atom | h0
     double m_scf_early_screening = 1.0e-10;      // > 0: J/K screening threshold of the early direct SCF
     double m_scf_early_switch = 1.0e-3;      // ||dP|| that ends the early phase

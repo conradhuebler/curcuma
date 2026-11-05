@@ -68,7 +68,7 @@ const std::vector<std::string> kQmScf = { "scf_max_iterations", "scf_threshold",
                                           "scf_diis_start", "scf_diis_subspace", "scf_damping", "scf_allow_unconverged",
                                           "scf_guess", "scf_early_screening", "scf_early_switch", "scf_warm_start",
                                           "scf_extrapolation", "scf_extrapolation_order", "scf_verified_stop", "reference",
-                                          "uhf_guess_mix" };
+                                          "uhf_guess_mix", "scf_level_shift", "scf_level_shift_off" };
 
 std::vector<std::string> without(std::vector<std::string> v, const std::string& name)
 {
@@ -314,7 +314,7 @@ const std::vector<ScfKnobRow> kKnobs = {
     { "scf_threshold", { "max|dq_shell|, 1e-5", "||dP||_F, 1e-6", "||dP||_F, 1e-4 (one of 3 tests, -qm.scf_convergence)",
                          "as hf", "as hf", "not supported (warning)", "not supported (warning)", "n/a (warning)" } },
     { "scf_max_iterations", { "150", "100", "100", "100", "100", "-> max_iterations", "-> max_iterations", "n/a (warning)" } },
-    { "scf_mode", { "auto=broyden; diis|plain|level-shift", "auto=diis; plain; else error", "auto=diis; adiis|plain; else error",
+    { "scf_mode", { "auto=broyden; diis|plain|level-shift", "auto=diis; plain; else error", "auto=diis; adiis|plain|level-shift; else error",
                     "as hf", "as hf", "not supported", "not supported", "n/a" } },
     { "scf_damping", { "charge mixing, 0.4", "density, 0.6", "differs: scf_mode plain only, 0.5", "as hf", "as hf",
                        "-> tblite.damping (TBLite only)", "not supported", "n/a" } },

@@ -402,8 +402,12 @@ bool QMEngine::runSCF()
     // device error, then the host loop below runs from the same start density.
     // KS (WP5): the device loop needs V_xc on the device (GPU KS-DFT, Oct 2026: -qm.gpu_xc); without it the host
     // loop runs (J/K and V_xc may still come from the device).
-    if (!riActive() && gpuRequested() && m_gpu_scf != "off" && m_gpu_scf != "false" && !m_gpu_scf_failed
-        && (!isKohnSham() || ensureGpuXC())) {
+    // Level shift (Nov 2026): host loop only; the device loop is skipped and counted (as its other fallbacks)
+    const bool device_loop_wanted = !riActive() && gpuRequested() && m_gpu_scf != "off" && m_gpu_scf != "false"
+        && !m_gpu_scf_failed;
+    if (device_loop_wanted && m_scf_level_shift > 0.0)
+        curcuma::reportGpuFallback("qm_scf", "-qm.scf_level_shift runs in the host SCF loop only");
+    if (device_loop_wanted && m_scf_level_shift <= 0.0 && (!isKohnSham() || ensureGpuXC())) {
         const Matrix guess = m_density;
         const int r = runSCFDevice(n_occ, direct, use_diis, damping);
         if (r >= 0) return r == 1;
@@ -432,6 +436,10 @@ bool QMEngine::runSCF()
     DirectFockCadence cadence(direct, useEarlyScreening(), useGpuFP32Phase(direct));
     // Verified stop (Claude Generated, Oct 27 2026; -qm.scf_verified_stop): see ScfVerifiedStop.
     ScfVerifiedStop vstop(m_scf_verified_stop && use_diis && !conv.density_only && !m_scf_tight_now && m_ri_mp_stage == 0);
+    // Level shift (Claude Generated, Nov 2026; -qm.scf_level_shift): see ScfLevelShift. `shifted_prev`: the current
+    // density came from a shifted diagonalisation (its orbitals C_prev are then not those of F, no verified stop).
+    ScfLevelShift lshift(m_scf_level_shift, m_scf_level_shift_off);
+    bool shifted_prev = false;
     auto fockFromDensity = [&](const Matrix& P) -> Matrix {
         const bool full = cadence.nextFull() || vstop.force_full;
         vstop.force_full = false;
@@ -494,7 +502,8 @@ bool QMEngine::runSCF()
 
         // Verified stop: this full build of P_n meets every condition -> P_n, F(P_n) and the orbitals C_(n-1)
         // that P_n was built from are the result; no further diagonalisation and no final build.
-        if (vstop.accept(conv, cadence.since_full == 0 && !cadence.early && !cadence.fp32 && !riLowPrecision())) {
+        if (!shifted_prev
+            && vstop.accept(conv, cadence.since_full == 0 && !cadence.early && !cadence.fp32 && !riLowPrecision())) {
             m_scf_last_dE = conv.dE;
             m_scf_last_grad = conv.grad;
             m_direct_thr_now = -1.0;
@@ -503,6 +512,16 @@ bool QMEngine::runSCF()
                                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_scf0).count(),
                                t_fock_ms, t_eig_ms, std::string(), &J_acc, &K_acc);
             return true;
+        }
+
+        // Level shift: F_use + b (S - 1/2 S P S) on the (extrapolated) Fock matrix that is diagonalised; the DIIS
+        // error and the energy above came from the unshifted F.
+        if ((use_diis && iter >= m_diis_start) || !conv.density_only) lshift.observe(conv.grad);  // grad_norm was formed
+        const bool shifted_now = lshift.on;
+        Matrix fock_unshifted;  // kept for the final unshifted diagonalisation
+        if (shifted_now) {
+            fock_unshifted = fock_use;
+            fock_use = lshift.apply(fock_use, m_S, m_density, 0.5, m_threads);
         }
 
         // Solve F C = S C eps (Lowdin-reduced standard problem).
@@ -538,12 +557,29 @@ bool QMEngine::runSCF()
         }
 
         if (CurcumaLogger::get_verbosity() >= 1)  // one line per iteration from level 1 on (was level 3)
-            CurcumaLogger::result(fmt::format("SCF iter {:3d}: E_elec = {:.10f} Eh, dE = {:.2e}, |g| = {:.2e}, dP = {:.3e}",
+            CurcumaLogger::result(fmt::format("SCF iter {:3d}: E_elec = {:.10f} Eh, dE = {:.2e}, |g| = {:.2e}, dP = {:.3e}{}",
                                               iter + 1, conv.e_prev, conv.have_prev && iter > 0 ? conv.dE : 0.0,
-                                              conv.grad, delta_P));
+                                              conv.grad, delta_P,
+                                              shifted_now ? fmt::format(", level shift {:.2f}", lshift.b) : std::string()));
 
         // Never converged on an FP32 RI build (mixed precision): the FP32 noise floor is not the FP64 fixed point
         if (conv.converged(delta_P) && !cadence.early && !cadence.fp32 && !riLowPrecision()) {
+            if (shifted_now) {
+                // Level shift (ScfLevelShift): the returned orbitals, orbital energies and density come from the
+                // unshifted (extrapolated) Fock matrix of this iteration, as in the run without shift.
+                if (!solveFock(fock_unshifted, C, eps)) {
+                    CurcumaLogger::error(fmt::format("QM SCF: diagonalization failed at iteration {}", iter + 1));
+                    return false;
+                }
+                density_new = buildDensity(C, n_occ);
+                if (riActive() && m_ri_mode == "jk") {
+                    m_ri_occ_factor = std::sqrt(2.0) * Eigen::MatrixXd(C.leftCols(n_occ));
+                    m_ri_occ_density = density_new;
+                }
+                if (CurcumaLogger::get_verbosity() >= 2)
+                    CurcumaLogger::info(fmt::format("QM: level shift {:.3f} Eh: converged; final orbitals from the "
+                                                    "unshifted Fock matrix", lshift.b));
+            }
             m_scf_last_dE = conv.dE;
             m_scf_last_grad = conv.grad;
             riRequestExactBuild();  // mixed-precision RI: the final J/K build is exact FP64
@@ -575,6 +611,7 @@ bool QMEngine::runSCF()
         vstop.afterStep(conv, delta_P, direct && !cadence.early && !cadence.fp32 && !riLowPrecision());
         vstop.C_prev = std::move(C);
         vstop.eps_prev = std::move(eps);
+        shifted_prev = shifted_now;
 
         // Density update: damped (plain) or direct (diis -- the extrapolation
         // already smoothed the Fock). Reuses NDDO's update form.

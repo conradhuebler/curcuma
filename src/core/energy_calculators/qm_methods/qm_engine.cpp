@@ -244,13 +244,27 @@ QMEngine::QMEngine(QMFunctional functional, const json& config)
         std::transform(m_scf_mode.begin(), m_scf_mode.end(), m_scf_mode.begin(), ::tolower);
         if (m_scf_mode == "auto")
             m_scf_mode = "diis";  // the shared scf module's "method default" marker
-        // Oct 27 2026: an SCF mode of another solver (broyden, level-shift: gfn1/gfn2) is an error, as for NDDO,
+        // Nov 2026: level-shift (names of the xtb parser) = DIIS plus -qm.scf_level_shift (0.2 Eh if that is 0)
+        const bool level_shift_mode = m_scf_mode == "level-shift" || m_scf_mode == "levelshift"
+            || m_scf_mode == "level_shift" || m_scf_mode == "ls";
+        if (level_shift_mode) m_scf_mode = "diis";
+        // Oct 27 2026: an SCF mode of another solver (broyden: gfn1/gfn2) is an error, as for NDDO,
         // instead of a warning at run time and silent DIIS.
         if (m_scf_mode != "diis" && m_scf_mode != "adiis" && m_scf_mode != "plain")
             throw std::invalid_argument(fmt::format(
-                "scf_mode '{}' is not available for native HF ({}); use diis, adiis or plain",
+                "scf_mode '{}' is not available for native HF ({}); use diis, adiis, plain or level-shift",
                 config["scf_mode"].get<std::string>(), functionalName(m_functional)));
+        if (level_shift_mode) m_scf_level_shift = 0.2;  // overwritten below by an explicit scf_level_shift > 0
     }
+    // Claude Generated (Nov 2026): level shift of the host SCF loops (qm_scf.cpp, qm_uscf.cpp; ScfLevelShift)
+    if (config.contains("scf_level_shift") && config["scf_level_shift"].is_number()) {
+        const double b = config["scf_level_shift"].get<double>();
+        if (!(b >= 0.0) || !std::isfinite(b))
+            throw std::invalid_argument(fmt::format("scf_level_shift {} must be >= 0 (Eh)", b));
+        if (b > 0.0) m_scf_level_shift = b;  // 0 (the registry default) keeps off, or 0.2 of scf_mode level-shift
+    }
+    if (config.contains("scf_level_shift_off") && config["scf_level_shift_off"].is_number())
+        m_scf_level_shift_off = std::max(0.0, config["scf_level_shift_off"].get<double>());
     if (config.contains("scf_damping") && config["scf_damping"].is_number()) {
         const double d = config["scf_damping"].get<double>();
         if (!(d > 0.0 && d <= 1.0))

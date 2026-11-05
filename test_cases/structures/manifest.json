@@ -864,6 +864,24 @@
    "description": "comment line: H2 equilibrium bond length 0.741 A"
   },
   {
+   "id": "dihydrogen.r2.0",
+   "class": "small",
+   "file": "small/dihydrogen.r2.0.xyz",
+   "format": "xyz",
+   "formula": "H2",
+   "natoms": 2,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "non-equilibrium",
+   "size_bytes": 124,
+   "sha256": "ff4e24636492ddd777883ee433688c86446d69d1ee43037e87b795ab2f38f222",
+   "provenance": {
+    "kind": "constructed",
+    "description": "H2 at 2.000 A (equilibrium 0.741 A): RHF -> UHF unstable, stability test"
+   }
+  },
+  {
    "id": "dimethyl-ether",
    "class": "small",
    "file": "small/dimethyl-ether.xyz",
@@ -929,6 +947,24 @@
     "version": "0.0.209-2-g7e38f75",
     "description": "N2, N-N 1.0983 A (experiment 1.0977 A); former test_cases/molecules/dimers/NN.xyz; method of the Curcuma run not recorded",
     "energy_eh": -5.763935
+   }
+  },
+  {
+   "id": "dinitrogen.r2.0",
+   "class": "small",
+   "file": "small/dinitrogen.r2.0.xyz",
+   "format": "xyz",
+   "formula": "N2",
+   "natoms": 2,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "non-equilibrium",
+   "size_bytes": 124,
+   "sha256": "5b4ecd41b41e71c38de097825f7c625c6b809687fffc72f200084f98e823d7fd",
+   "provenance": {
+    "kind": "constructed",
+    "description": "N2 at 2.000 A (equilibrium 1.098 A): stretched triple bond, difficult SCF and stability test"
    }
   },
   {
@@ -3010,6 +3046,24 @@
     "h2o"
    ],
    "description": "comment line: water C2v, r(OH)=0.9572 A"
+  },
+  {
+   "id": "water.r1.8",
+   "class": "small",
+   "file": "small/water.r1.8.xyz",
+   "format": "xyz",
+   "formula": "H2O",
+   "natoms": 3,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "non-equilibrium",
+   "size_bytes": 149,
+   "sha256": "32c63f79ca821eb24bf762c047272c4995c17903470938a17f4f397647ae1076",
+   "provenance": {
+    "kind": "constructed",
+    "description": "water with both O-H at 1.800 A, angle of small/water (104.5 deg): stretched bonds, stability and level-shift test"
+   }
   },
   {
    "id": "water8-cluster",

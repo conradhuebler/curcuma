@@ -45,7 +45,7 @@ Flat flags of module `scf` (`scf_parameters.h`); `-scf_guess`, `-scf_extrapolati
 |---|---|---|---|---|---|---|---|---|
 | `scf_threshold` | max\|dq_shell\|, 1e-5 | \|\|dP\|\|_F, 1e-6 | \|\|dP\|\|_F, 1e-4 (one of 3 tests, -qm.scf_convergence) | as hf | as hf | not supported (warning) | not supported (warning) | n/a (warning) |
 | `scf_max_iterations` | 150 | 100 | 100 | 100 | 100 | -> max_iterations | -> max_iterations | n/a (warning) |
-| `scf_mode` | auto=broyden; diis\|plain\|level-shift | auto=diis; plain; else error | auto=diis; adiis\|plain; else error | as hf | as hf | not supported | not supported | n/a |
+| `scf_mode` | auto=broyden; diis\|plain\|level-shift | auto=diis; plain; else error | auto=diis; adiis\|plain\|level-shift; else error | as hf | as hf | not supported | not supported | n/a |
 | `scf_damping` | charge mixing, 0.4 | density, 0.6 | differs: scf_mode plain only, 0.5 | as hf | as hf | -> tblite.damping (TBLite only) | not supported | n/a |
 | `scf_diis_start` | 5 (diis, level-shift) | 3 | 1 (0-based) | as hf | as hf | not supported | not supported | n/a |
 | `scf_diis_subspace` | 6 | 8 | 8 | as hf | as hf | not supported | not supported | n/a |
