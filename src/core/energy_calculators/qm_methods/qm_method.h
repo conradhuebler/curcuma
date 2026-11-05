@@ -65,6 +65,9 @@ public:
      */
     static json engineConfig(const json& config);
 
+    /// The native engine (Claude Generated, Nov 2026): the -hessian capability calls QMEngine::computeHessian on it.
+    QMEngine* engine() const { return m_engine.get(); }
+
 private:
     std::unique_ptr<QMEngine> m_engine;
     Mol m_molecule;
