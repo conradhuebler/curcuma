@@ -355,6 +355,11 @@ public:
     bool periodicEnergy() const { return m_periodic_energy; }
     /// D1/A6b: degrees of freedom used for the temperature (after RATTLE and COM/rotation removal).
     int degreesOfFreedom() const { return m_dof; }
+    /// M1 (Nov 2026): RATTLE bookkeeping for tests: 1-2 and 1-3 constraints, input bonds across a cell face
+    /// (bonded by minimum image only, left unconstrained, see InitConstrainedBonds()).
+    int rattleBondConstraints() const { return static_cast<int>(m_bond_constrained.size()); }
+    int rattleAngleConstraints() const { return static_cast<int>(m_bond_13_constrained.size()); }
+    int rattleCrossingBonds() const { return m_rattle_crossing_bonds; }
     double potentialEnergy() const { return m_Epot; }
     double kineticEnergy() const { return m_Ekin; }
     double currentTemperature() const { return m_T; }
@@ -824,6 +829,7 @@ private:
     double m_rattle_max_err_12 = 0;  // worst 1-2 constraint error this interval
     double m_rattle_max_err_13 = 0;  // worst 1-3 constraint error this interval
     int m_rattle_constrained_atoms = 0; // atoms involved in constraints
+    int m_rattle_crossing_bonds = 0; // M1: input bonds across a cell face, not constrained
     std::vector<double> m_collected_dipole;
     Matrix m_topo_initial;
     std::vector<Molecule*> m_unique_structures;
@@ -861,6 +867,25 @@ private:
     double m_last_ff_ms = 0.0;     ///< wall-clock of last m_interface->CalculateEnergy()
     double m_last_hbxb_ms = 0.0;   ///< placeholder; HBXB-update lives inside Calculation() and is hard to isolate
     double m_last_integrator_ms = 0.0;  ///< wall-clock of last Integrator() call in step()
+
+    /* M1 (Nov 2026, Claude Generated): per-step phase profile of SimpleMD::step(), switched on by the
+     * environment variable CURCUMA_MD_STEPPHASE=1 (read once in Initialise()); one "MDPHASE" line per step
+     * on stderr, ms per item. Off: one bool test per item, no clock read. Never changes a number. */
+    bool m_stepphase = false;
+    struct StepPhaseTimes {
+        double com = 0, kick1 = 0, geom = 0, energy = 0, grad = 0, bias = 0, kick2 = 0, thermo = 0,
+               wrap = 0, frag = 0, container = 0, after = 0, total = 0;
+    } m_phase;
+    std::chrono::steady_clock::time_point m_phase_mark;
+    /// Adds the wall time since the last mark to \p slot and sets a new mark (no-op unless m_stepphase).
+    void phaseLap(double& slot)
+    {
+        if (!m_stepphase)
+            return;
+        const auto now = std::chrono::steady_clock::now();
+        slot += std::chrono::duration<double, std::milli>(now - m_phase_mark).count();
+        m_phase_mark = now;
+    }
 
     int m_mtd_dT = -1;
     int m_seed = -1;

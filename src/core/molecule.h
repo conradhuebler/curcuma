@@ -325,6 +325,10 @@ class Molecule
        */
       std::vector<std::vector<int>> GetFragments(double scaling) const;
       inline std::vector<std::vector<int>> GetFragments() const { return GetFragments(m_scaling); }
+      /// M1 (Nov 2026): GetFragments() uses a cell grid from this atom count on (default 256); the result is
+      /// identical to the all-pairs scan. Setter for tests (INT_MAX = always the all-pairs scan). Claude Generated
+      static int fragmentCellListMinAtoms();
+      static void setFragmentCellListMinAtoms(int n);
 
       inline void setName(const std::string& name) { m_name = name; }
 
@@ -358,6 +362,7 @@ class Molecule
       void AnalyseIntermoleculeDistance() const;
 
       inline void setScaling(double scaling) { m_scaling = scaling; }
+      inline double getScaling() const { return m_scaling; } ///< bond threshold factor of GetFragments() (Claude Generated)
 
       // Claude Generated: Periodic Boundary Conditions accessors
       inline bool hasPBC() const { return m_has_pbc; }
@@ -475,6 +480,9 @@ private:
     // Claude Generated: Cache invalidation helper
     // Called automatically when geometry or topology changes
     // TODO: Replace with granular cache system (CacheType enum)
+    /// M1 (Nov 2026): cell-grid variant of the GetFragments() search; false = not applicable. Claude Generated
+    bool fragmentsByCellList(std::multimap<double, std::vector<int>>& ordered_list) const;
+
     void invalidateCaches() const
     {
         m_dirty = true;

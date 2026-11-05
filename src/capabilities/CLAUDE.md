@@ -41,6 +41,8 @@ Hessian, docking. Energies and gradients always come from `EnergyCalculator`. Do
 - Pure-CG MD (`Molecule::isCGSystem()`, all atoms CG): timestep x10, VTF trajectory (no cell wrap since A6b: the cg energy does not read the cell) (`cg_write_vtf`)
 - SimpleMD wraps per step: `applyPeriodicBoundaryConditions()` (cell) only if `m_periodic_energy` (cell AND `EnergyCalculator::hasPeriodicEnergy()`, cached after `setMolecule`), then `wrapIntoContainer()` (`wall_potential pbc` stopgap), skipped with a periodic energy in a box (WP-PERIODIC-NONBONDED A6, A6b)
 - `m_periodic_energy` also selects the COM removal: translation only, -3 DOF; otherwise (no cell, or cell + non-periodic method) translation + rotation, -6 DOF (D1, A6b)
+- Per-step phase profile of SimpleMD: env `CURCUMA_MD_STEPPHASE=1`, one `MDPHASE` line per step on stderr (WP-PERIODIC-NONBONDED M1)
+- RATTLE uses raw distances (list and loops): valid through cell wraps (whole fragments move), but an input bond across a face stays unconstrained (warned, `rattleCrossingBonds()`); the 1-3 list only finds i > j > k chains (M1, TODO.md)
 
 ## Status
 

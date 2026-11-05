@@ -1340,3 +1340,129 @@ and after), GPU MD steps on which a refresh fires now use the current list, as t
   cell on the device, ALPB with a cell (refused by B3), heavy-element boxes near the `r_g < L/2` limit, more than 5748
   atoms, `ewald_kernel_cache_mb` fallback at production size, an energy-only MD (`calculateEnergy(false)` is covered
   only by the FD gate), NPT. Human production testing pending.
+
+## M1 SimpleMD step profile with a cell; RATTLE with a cell (2026-11-05, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+On `feature/bulk` (base `5adb1ca1`). Locates the per-step SimpleMD cost outside the energy call that S2 measured (31 / 120 ms at
+2910 / 5748 atoms) and checks RATTLE with a cell.
+
+### Profile method
+
+`CURCUMA_MD_STEPPHASE=1` (new, environment only, read once in `LoadControlJson()`; off = one bool test per item, no clock read,
+no number changes) prints one `MDPHASE` line per step on stderr: `com` (COM/rotation removal), `kick1` (first half kick, drift,
+NaN checks), `geom` (`EnergyCalculator::updateGeometry`), `energy` (`CalculateEnergy(true)`), `grad` (gradient copy, NaN check),
+`bias` (walls, external potentials, Rg bias, restraints), `kick2` (second half kick), `thermo` (thermostat + `EKin()`), `wrap`
+(cell wrap without the fragment search), `frag` (`setGeometry` + `GetFragments()` inside the wrap), `container`
+(`wrapIntoContainer()`), `after` (averages, aborts, output, restart, status line, CheckStop). Boxes of P1/S2 (970 H2O L 58 Bohr,
+1916 H2O L 72.8 Bohr), the same coordinates without a cell as vacuum reference, CLI `-md`, dt 0.5 fs, 4 threads, seed 7, 40
+steps, median over steps 6..40, median of 3 repetitions; GPU = S2 hybrid on the RTX 5080 (`-gpu cuda -gfnff.gpu_periodic true`).
+
+### Time per step (ms; all items not listed are <= 0.03 ms)
+
+| run | energy | frag | rest of the step | step total |
+|---|---|---|---|---|
+| 2910 cell CPU, before | 77.6 | **29.5** | 0.1 | 107.8 |
+| 2910 cell CPU, after | 79.4 | 1.2 | 0.1 | 80.6 |
+| 2910 no cell CPU (before = after) | 45.5 | 0 | 0.05 | 45.5 |
+| 2910 cell GPU hybrid, after | 48.8 | 1.2 | 0.1 | 50.1 |
+| 5748 cell CPU, before | 198.0 | **113.5** | 0.1 | 313.9 |
+| 5748 cell CPU, after | 200.4 | 2.3 | 0.1 | 202.9 |
+| 5748 no cell CPU (before = after) | 147.6 | 0 | 0.05 | 147.7 |
+| 5748 cell GPU hybrid, after | 122.9 | 2.3 | 0.1 | 125.5 |
+
+The whole cell-specific SimpleMD cost was `Molecule::GetFragments()` in `applyPeriodicBoundaryConditions()`: in a liquid some
+molecule always straddles a face, so the O(N) gate never skipped it, and the search was an all-pairs breadth-first scan over a
+`std::vector` with `erase` (O(N^2) minimum-image distances, 113.5 / 29.5 = 3.85 for 1.98x the atoms). Verlet, thermostat, COM
+removal (O(N), not due in 40 steps), copies, output: each <= 0.03 ms. Wall clock of the CLI (difference of 40- and 20-step
+runs, median of 3; GPU "before" = executable before M1 with the current plugin):
+
+| box | CPU before / after | GPU hybrid before / after |
+|---|---|---|
+| 2910 | 113.9 / 85.9 | 80.8 / 53.7 |
+| 5748 | 324.6 / 212.0 | 246.7 / 134.6 |
+
+The wall clock equals the mean (not the median) of `total` over the same steps (86.5 / 214.0 / 53.5 / 134.7 ms): the 3-9 ms
+between table and wall clock are steps with a slower energy call (HB/XB list refresh), not SimpleMD. SimpleMD outside the energy
+call is now 1.3 / 2.4 ms. The GPU hybrid gain against the CPU rises from 1.41x / 1.32x to 1.60x / 1.58x.
+
+### What was changed (no number moves)
+
+- `Molecule::GetFragments()` takes from `Molecule::fragmentCellListMinAtoms()` atoms on (256, setter for tests) the candidate
+  partners from a cell grid (`Molecule::fragmentsByCellList()`): wrapped fractional coordinates with a cell, Cartesian bins without,
+  bin edge >= 1.001 x 2 max(r_cov) x scaling, bin count capped at 8N+64 (larger bins), fewer than 3 bins on a periodic axis =
+  the old scan. Same seed order, same member order, the accepted partners of one member sorted by index, the same
+  `CalculateDistance(PBC)(u, v)` call and threshold expression, the same mass sum order (the seed mass is still left out of the
+  ordering key), so fragments, their order and `FragmentMass()` are bitwise those of the scan (completeness argument in the code
+  comment). It speeds up every `GetFragments()` caller above 256 atoms (wrap, container wrap, topo check, DOF set-up).
+- `CURCUMA_MD_STEPPHASE` profile (above). `Molecule::getScaling()` accessor.
+
+### Checks
+
+- ctest `molecule_fragments_celllist` (new, 0.1 s): grid == scan bitwise (fragments, order, masses) on 300-water boxes at liquid
+  density with molecules shifted by lattice vectors and single atoms torn across faces (10 seeds, with and without the cell),
+  two triclinic cells, a dense random gas of caffeine atoms (merged chains, 3 seeds, with and without the cell), a 5 A cell (scan
+  fallback), 300 waters over 5000 A and one atom 3.7e5 A away (bin cap); 970 waters: scan 35.9 ms, grid 1.15 ms.
+- No cell, bitwise against the executable before M1: `-sp -dump_gradient` 7 structures x 1/4 threads 14/14 md5 identical;
+  gfnff `-md` 200 steps dt 0.5 fs seed 7, 4 threads, caffeine and water8: energy table (13 columns, without the two timing
+  columns) and trajectory (without the version line) md5 identical, last frame identical.
+- With a cell, bitwise against the executable before M1: `-sp -dump_gradient` of the 2910-atom box and box60 md5 identical;
+  `-md` box60 200 steps (180 atoms, old path), box60 with `-rattle 2`, and the 2910-atom box 100 steps (new grid path, 939
+  fragments): table, trajectory and last frame md5 identical (so the energies agree exactly, not only to 1e-12 Eh).
+- CPU `ctest -R 'gfnff|frag|eeq|simplemd|pbc|ewald|react|restart|md_|gpu|plugin' -j1`: 133 of 133 passed (4 skipped: GPU),
+  incl. the two new tests; the A6 seed flakes did not occur, so their tests were left unchanged. CUDA build (`build_cuda_bulk`,
+  full `make`) `ctest -R 'gpu|plugin|pbc'`: 170 of 170 passed (3 skipped as in S1/S2: split, scope-flags, deltaml). ABI version
+  unchanged (no layout of a plugin-facing class touched; `make` relinked the plugin).
+
+### Not changed, recommended (each changes numbers or behaviour)
+
+- The remaining 1.2 / 2.3 ms are the grid search every step. Re-using the fragments while no atom moved more than a skin since the
+  last search would remove it, but makes the wrap depend on a history (a reactive merge within the skin would be seen later).
+- `InitConstrainedBonds()` calls `Molecule::DistanceMatrix()`: two dense N x N matrices (2 x 68 MB at 2910 atoms, 2 x 264 MB at
+  5748) and an O(N^2) loop at set-up; a neighbour-list bond search would give the same list (not measured, set-up only).
+
+### RATTLE with a cell (CPU periodic GFN-FF, `coulomb_ewald` on)
+
+(a) **Constraint pairs across a wrap.** The constraint list is built from raw distances (`simplemd.cpp:1234` `DistanceMatrix()`,
+raw norm, `molecule.cpp:2284` `<=`; reference length `simplemd.cpp:1246` `CalculateDistance`, raw) and `Rattle()` evaluates raw
+coordinate differences (`simplemd.cpp:3951`/`3960` 1-2 position stage, `4009`/`4018` 1-3, `4153`/`4159` and `4188`/`4194` velocity
+stage). The cell wrap moves whole fragments, and a constrained pair is always in one fragment (its length stays below the
+fragment threshold), so the raw differences stay valid: 60 H2O L 44 Bohr, `-rattle 2`, dt 1 fs, 2 ps, 165 / 167 molecule wraps
+(seeds 7 / 11, counted every 10 steps): max |d^2 - d0^2| over all O-H pairs and frames 1.02e-4 A^2 (= `rattle_tol_12` 1e-4), equal to
+the vacuum run; longest raw O-H 0.9635 A. **Limitation found**: a bond that already crosses a face in the input (atom wrapped alone)
+is bonded for GFN-FF and the fragment search (minimum image) but not for RATTLE, so it is silently unconstrained for the whole run
+and the DOF count treats it as free. Now detected and warned at set-up (`rattleCrossingBonds()`, verbosity 1); the list is unchanged.
+The P1/S2 boxes and box60 have no such bond (checked: O-H count raw = minimum image).
+
+(b) **NVE**, box60 (60 H2O, L 44 Bohr), fresh 300 K start, no thermostat, 2 ps, drift = linear fit of E_tot over the last 1.5 ps,
+4 threads, n = 2 seeds (7 / 11):
+
+| run | drift (Eh/ps) | E_tot max-min (Eh) |
+|---|---|---|
+| Verlet dt 0.5, cell / vacuum | -2.8e-5, -2.1e-5 / -1.7e-5, -3.6e-5 | 1.4e-3, 1.6e-3 / 1.4e-3, 1.6e-3 |
+| Verlet dt 1.0, cell / vacuum | -1.1e-4, -1.3e-4 / -7.3e-5, -1.1e-4 | 6.2e-3, 7.2e-3 / 6.2e-3, 7.3e-3 |
+| `-rattle 2` (= `-rattle 1` for water: same 120 O-H constraints, bitwise the same run) dt 1.0, cell / vacuum | -2.1e-5, -5.5e-5 / -3.1e-5, +1.3e-5 | 6.2e-4, 4.7e-4 / 4.9e-4, 4.1e-4 |
+| same, GPU hybrid, cell | -2.2e-5, -5.9e-5 | 6.1e-4, 4.9e-4 |
+| rigid water (`-rattle 1 -rattle_13 true`, atoms reordered H-O-H, 180 constraints) dt 1.0, cell / vacuum | -4.3e-4, -5.2e-4 / -2.6e-4, -2.5e-4 | 1.3e-3, 1.3e-3 / 8.6e-4, 8.7e-4 |
+| rigid water, `rattle_tol_12` = `rattle_tol_13` = 1e-7, seed 7, cell / vacuum | +2.6e-6 / +1.1e-5 | 1.6e-4 / 1.2e-4 |
+
+RATTLE on O-H at 1 fs conserves energy as well as Verlet at 0.5 fs, with and without the cell (drift within the n = 2 spread of
+the vacuum runs). The rigid-water loss is the default tolerance (`rattle_tol_13` 1e-3 A^2), not the cell: with 1e-7 it drops 100x
+(n = 1). **Second limitation found**: the 1-3 list (`simplemd.cpp:1251`, `for (int k = 0; k < j; ++k)` inside `j < i`) only finds
+chains i-j-k with i > j > k, so H-O-H with O first in the file gets 0 of 60 angle constraints (`-rattle_13 true` silently does
+nothing on the P1/S2 boxes and the registry water); a fix changes every `rattle_13` run (TODO.md).
+
+(c) **DOF**: 3N - N_c - 3 with the cell (translation only, D1) and 3N - N_c - 6 without: box60 417 / 414, rigid water 357; ctest
+checks 53 / 50 on 8 waters.
+
+(d) **GPU hybrid** (`-gpu cuda -gfnff.gpu_periodic true -rattle 2`, hybrid confirmed by the `EEQ GPU Phase 2: periodic hybrid` line
+and `STEPPHASE`): same constraint result through the wraps (max |d^2 - d0^2| 1.02e-4 A^2, 166 / 172 wraps), DOF 417, NVE in the table
+above. RATTLE is host code, so nothing GPU-specific is expected beyond the energy.
+
+ctest `pbc_md_rattle` (new, 0.4 s): 8 registry waters in L 44 Bohr, 6 placed 0.02 A inside a face, gfnff periodic, `-rattle 2`, dt 1
+fs, 400 steps: 6 wraps, O-H constraints within 2 x `rattle_tol_12` in raw coordinates in every step, drift -9.7e-6 / -1.4e-5 Eh/ps and
+max-min 7.1e-5 / 6.9e-5 Eh (cell / vacuum; gate |drift| < 2e-4, max-min < 5 x vacuum + 2e-5), DOF 53 / 50; rattle 1 + rattle_13:
+DOF follows the applied constraints (16 + 0, the defect above); torn input: 15 constraints, 1 crossing bond, DOF 54.
+
+Not tested: triclinic cells with RATTLE (GFN-FF refuses them), RATTLE with `topology_mode react` (refused by the PARAM text),
+restart files with RATTLE and a cell, molecules other than water, more than 180 atoms with RATTLE, ROCm. Human production testing
+pending.

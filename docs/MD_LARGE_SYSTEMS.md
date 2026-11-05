@@ -476,6 +476,16 @@ time, dt 0.5 fs, n = 1 per row (water droplet: 300 H2O, 900 atoms, GFN-FF, wall,
 - Fixed binary over 50 ps (900 atoms): RssAnon stays within 178-241 MB (CSVR) and 189-228 MB (none) with no trend;
   the short-run residuals of 1-3 MB/ps are warm-up. Not measured: runs beyond 50 ps, systems beyond 3071 atoms.
 
+## Where the SimpleMD step time goes (M1, Nov 2026)
+
+`CURCUMA_MD_STEPPHASE=1` prints one `MDPHASE` line per step on stderr (ms per item: COM removal, half kicks, geometry copy,
+energy call, gradient copy, bias/walls, thermostat, cell wrap, fragment search, container wrap, output). Measured on liquid
+water boxes (2910 / 5748 atoms, dt 0.5 fs, 4 threads, [WP-PERIODIC-NONBONDED.md](WP-PERIODIC-NONBONDED.md) M1): everything
+except the energy call is <= 0.03 ms per item without a cell. With a cell the fragment search of the cell wrap
+(`Molecule::GetFragments()`, all-pairs scan) took 29.5 / 113.5 ms per step; since M1 it uses a cell grid above 256 atoms
+(bitwise the same fragments) and takes 1.2 / 2.3 ms. polymer_2x (no cell) never ran that search unless an atom left a
+`wall_potential pbc` container; this page's numbers are not affected.
+
 ## What was not tested
 
 - Longer than 500 fs, and no production trajectory - these runs answer "does it stay at the

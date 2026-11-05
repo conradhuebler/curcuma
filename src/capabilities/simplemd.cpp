@@ -494,6 +494,8 @@ void SimpleMD::LoadControlJson()
     m_md_diagnostics = m_config.get<bool>("md_diagnostics");
     // WP-P1 (May 2026): per-phase wall-clock timing in the JSONL records
     m_md_diagnostics_timing = m_config.get<bool>("md_diagnostics_timing");
+    // M1 (Nov 2026): per-step phase profile on stderr (diagnostic only, see simplemd.h)
+    m_stepphase = std::getenv("CURCUMA_MD_STEPPHASE") != nullptr;
 
     // Claude Generated (Oct 2026): hydrogen-bond log, off unless asked for
     m_hb_log_frequency = m_config.get<int>("hb_log_frequency");
@@ -1259,6 +1261,38 @@ void SimpleMD::InitConstrainedBonds()
                 }
                 }
             }
+        // M1 (Nov 2026, Claude Generated): the constraint list above is built from RAW distances
+        // (DistanceMatrix, CalculateDistance) and Rattle() evaluates raw coordinate differences. The cell
+        // wrap moves whole fragments, so a molecule that is whole at the start stays whole and its
+        // constraints stay valid. A bond that already crosses a cell face in the INPUT (one atom wrapped
+        // alone) is bonded for the periodic energy and for the fragment search (minimum image) but is
+        // silently left unconstrained here, and stays torn for the whole run. Diagnostic only: count such
+        // bonds and warn; nothing changes the constraint list (unwrapping the input is the user's fix).
+        if (m_periodic_energy) {
+            int crossing = 0;
+            for (const auto& frag : m_molecule.GetFragments()) {
+                for (std::size_t a = 0; a < frag.size(); ++a) {
+                    for (std::size_t b = 0; b < a; ++b) {
+                        const int i = std::max(frag[a], frag[b]), j = std::min(frag[a], frag[b]);
+                        if (m.second(i, j))
+                            continue;
+                        if (m_rattle == 2 && m_molecule.Atom(i).first != 1 && m_molecule.Atom(j).first != 1)
+                            continue;
+                        const double cutoff = (Elements::CovalentRadius[m_molecule.Atom(i).first]
+                                                  + Elements::CovalentRadius[m_molecule.Atom(j).first])
+                            * m_molecule.getScaling();
+                        if (m_molecule.CalculateDistancePBC(i, j) <= cutoff)
+                            ++crossing;
+                    }
+                }
+            }
+            m_rattle_crossing_bonds = crossing;
+            if (crossing > 0)
+                CurcumaLogger::warn(fmt::format("RATTLE with a cell: {} bond(s) cross a cell face in the input geometry "
+                                                "(bonded by minimum image, not by raw distance) and are NOT constrained; "
+                                                "make the molecules whole in the input (unwrap) before using -rattle",
+                    crossing));
+        }
     }
 
     // Step 1: subtract RATTLE constraints (each bond/angle constraint = 1 DOF)
@@ -2782,6 +2816,11 @@ bool SimpleMD::step()
     }
 
     auto step0 = std::chrono::system_clock::now();
+    if (m_stepphase) {
+        m_phase = StepPhaseTimes();
+        m_phase_mark = std::chrono::steady_clock::now();
+    }
+    const auto phase_step0 = m_phase_mark;
 
     if (CheckStop() == true) {
         TriggerWriteRestart();
@@ -2808,6 +2847,7 @@ bool SimpleMD::step()
     // integrator/thermostat runs this step, so the thermostat tracks the updated m_T0.
     // No-op unless temp_ramp is enabled; a live setTargetTemperature() overrides it.
     UpdateTemperatureRamp();
+    phaseLap(m_phase.after);  // CheckStop, external forces, ramp
 
     if (m_rm_COM_step > 0 && m_step % m_rm_COM_step == 0) {
         if (m_rmrottrans == 1)
@@ -2819,6 +2859,7 @@ bool SimpleMD::step()
             RemoveRotation();
         }
     }
+    phaseLap(m_phase.com);
 
     // WP-P1 (May 2026): wall-clock the integrator step for MD diagnostics
     double integrator_ms = 0.0;
@@ -3099,6 +3140,16 @@ bool SimpleMD::step()
         if (m_verbosity >= 1)
             fmt::print(fg(fmt::color::salmon) | fmt::emphasis::bold, "Nothing really helps");
         return false;
+    }
+    if (m_stepphase) {
+        phaseLap(m_phase.after);  // averages, aborts, output, restart, status line
+        m_phase.total = std::chrono::duration<double, std::milli>(m_phase_mark - phase_step0).count();
+        const StepPhaseTimes& p = m_phase;
+        fmt::print(stderr,
+            "MDPHASE step={} com={:.3f} kick1={:.3f} geom={:.3f} energy={:.3f} grad={:.3f} bias={:.3f} kick2={:.3f} "
+            "thermo={:.3f} wrap={:.3f} frag={:.3f} container={:.3f} after={:.3f} total={:.3f}\n",
+            m_step, p.com, p.kick1, p.geom, p.energy, p.grad, p.bias, p.kick2, p.thermo, p.wrap, p.frag,
+            p.container, p.after, p.total);
     }
     m_step++;
     m_currentStep += m_dT;
@@ -3539,8 +3590,10 @@ void SimpleMD::applyPeriodicBoundaryConditions()
             fragments[i] = { i };
     } else {
         // Fragments from the CURRENT geometry (reactive runs combine and split molecules).
+        phaseLap(m_phase.wrap);
         m_molecule.setGeometry(m_eigen_geometry);
         fragments = m_molecule.GetFragments();
+        phaseLap(m_phase.frag);
     }
     std::vector<double> masses(m_natoms);
     for (int i = 0; i < m_natoms; ++i)
@@ -3773,6 +3826,7 @@ void SimpleMD::Verlet()
     ekin *= 0.5;
     m_T = 2.0 * ekin / (kb_Eh * m_dof);
     m_Ekin = ekin;
+    phaseLap(m_phase.kick1);
     // Thermostat NOT applied here — half-step velocities not representative.
     // Apply thermostat only after full velocity update (second half-step).
     m_Epot = Energy();
@@ -3809,6 +3863,7 @@ void SimpleMD::Verlet()
     m_gyration_potential = ApplyGyrationBias();
     m_rg_flood_potential = ApplyRgFlood();
     m_restraint_potential = ApplyDistanceRestraints();
+    phaseLap(m_phase.bias);
     ekin = 0.0;
 
     for (int i = 0; i < m_natoms; ++i) {
@@ -3827,12 +3882,16 @@ void SimpleMD::Verlet()
     m_T = T;
     m_Ekin = ekin;
     m_ekin_pre_thermostat = ekin;  // Claude Generated (Sep 2026): step-rejection reference
+    phaseLap(m_phase.kick2);
     ApplyThermostat();
     EKin();
+    phaseLap(m_phase.thermo);
 
     // Claude Generated (Oct 2025): Apply PBC wrapping after integration step
     applyPeriodicBoundaryConditions();
+    phaseLap(m_phase.wrap);
     wrapIntoContainer();
+    phaseLap(m_phase.container);
 }
 
 void SimpleMD::Rattle()
@@ -4195,12 +4254,16 @@ void SimpleMD::Rattle()
     m_T = T;
     m_Ekin = ekin;
     m_ekin_pre_thermostat = ekin;  // Claude Generated (Sep 2026): step-rejection reference
+    phaseLap(m_phase.kick2);
     ApplyThermostat();
     EKin();
+    phaseLap(m_phase.thermo);
 
     // Claude Generated (Oct 2025): Apply PBC wrapping after integration step
     applyPeriodicBoundaryConditions();
+    phaseLap(m_phase.wrap);
     wrapIntoContainer();
+    phaseLap(m_phase.container);
 }
 
 // Claude Generated (Jul 2026): Milestone 2 held-force wrapper, called every step. The expensive bias
@@ -5498,13 +5561,16 @@ double SimpleMD::CleanEnergy()
 
 double SimpleMD::FastEnergy()
 {
+    phaseLap(m_phase.after);  // RATTLE/other work before the call (Verlet: nothing)
     m_interface->updateGeometry(m_eigen_geometry);
+    phaseLap(m_phase.geom);
 
     // WP-P1 (May 2026): wall-clock the FF call for MD diagnostics
     auto t_ff_start = std::chrono::high_resolution_clock::now();
     const double Energy = m_interface->CalculateEnergy(true);
     auto t_ff_end = std::chrono::high_resolution_clock::now();
     m_last_ff_ms = std::chrono::duration<double, std::milli>(t_ff_end - t_ff_start).count();
+    phaseLap(m_phase.energy);
     m_eigen_gradient = m_interface->Gradient();
 
     // Claude Generated (Feb 2026): Gradient sanity check for MD stability
@@ -5515,6 +5581,7 @@ double SimpleMD::FastEnergy()
             return Energy;
         }
     }
+    phaseLap(m_phase.grad);
 
     if (m_dipole && m_method == "gfn2") {
         m_molecule.setDipole(m_interface->Dipole()*au);// in eA

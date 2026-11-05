@@ -42,6 +42,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -1877,6 +1878,15 @@ std::vector<std::vector<int>> Molecule::GetFragments(double scaling) const
 
     m_fragments.clear();
 
+    // M1 (Nov 2026, Claude Generated): from fragmentCellListMinAtoms() atoms on, the same breadth-first
+    // search with the candidate partners taken from a cell grid instead of the list of all remaining
+    // atoms (the loop below is O(N^2): 29 ms per MD step at 2910 atoms, 114 ms at 5748, WP-PERIODIC-NONBONDED
+    // M1). Same distance call, same threshold expression, same join order, same mass sum, so the
+    // fragments and their order are identical (ctest molecule_fragments_celllist).
+    if (static_cast<int>(m_atoms.size()) >= fragmentCellListMinAtoms() && fragmentsByCellList(ordered_list)) {
+        atoms.clear();
+    }
+
     while (atoms.size()) {
         fragment.push_back(atoms.at(0));
         atoms.erase(atoms.begin());
@@ -1921,6 +1931,164 @@ std::vector<std::vector<int>> Molecule::GetFragments(double scaling) const
 
     m_dirty = false;
     return m_fragments;
+}
+
+// M1 (Nov 2026, Claude Generated): switch between the all-pairs scan and the cell grid in GetFragments().
+static std::atomic<int> s_fragment_celllist_min_atoms{ 256 };
+
+int Molecule::fragmentCellListMinAtoms() { return s_fragment_celllist_min_atoms.load(std::memory_order_relaxed); }
+void Molecule::setFragmentCellListMinAtoms(int n) { s_fragment_celllist_min_atoms.store(n, std::memory_order_relaxed); }
+
+/* M1 (Nov 2026, Claude Generated): breadth-first fragment search of GetFragments() with candidate partners
+ * from a cell grid. Exactness argument (the result must equal the all-pairs loop bit for bit):
+ *  - The all-pairs loop takes the smallest unassigned atom as seed and, for every member u in join order,
+ *    appends all unassigned atoms v with dist(u, v) < (r_cov(u) + r_cov(v)) * scaling in increasing index
+ *    order. Here: same seed, same member order, the accepted v of one u sorted by index, the same
+ *    CalculateDistance(PBC)(u, v) call and threshold expression, the mass summed in the same order (the
+ *    seed is not counted, as in the loop; the key only orders the multimap).
+ *  - Completeness: every pair the loop accepts has dist < r_c = 2 max(r_cov) * scaling. Without a cell, bins
+ *    of edge >= 1.001 r_c in Cartesian space: such a pair lies in the same or an adjacent bin. With a cell,
+ *    the loop's minimum-image vector r' = r - cell * round(cell_inv * r) has fractional components
+ *    |f_a| = |row_a(cell_inv) . r'| <= |r'| |row_a(cell_inv)|, so bins of fractional width >= 1.001 r_c
+ *    |row_a(cell_inv)| over the wrapped coordinates cell_inv * x mod 1 contain the pair in the same or an
+ *    adjacent bin (periodic in the bin index). Fewer than 3 bins on an axis: returns false (all-pairs loop).
+ *  - Bins may be larger than this (cap on the bin count); that only adds candidates the exact test rejects.
+ * Returns false (nothing done) when the grid would not help; the caller then runs the all-pairs loop. */
+bool Molecule::fragmentsByCellList(std::multimap<double, std::vector<int>>& ordered_list) const
+{
+    const int n = static_cast<int>(m_atoms.size());
+    if (n == 0)
+        return false;
+    double rmax = 0.0;
+    for (int i = 0; i < n; ++i)
+        rmax = std::max(rmax, Elements::CovalentRadius[m_atoms[i]]);
+    const double rc = 2.0 * rmax * m_scaling;
+    if (!(rc > 0.0) || !std::isfinite(rc))
+        return false;
+    const long max_bins = 8L * n + 64;
+
+    std::array<int, 3> nb = { 1, 1, 1 };
+    std::vector<std::array<double, 3>> u(n); // bin coordinate in units of bins (before floor)
+    if (m_has_pbc) {
+        const Eigen::Matrix3d cell_inv = getUnitCellInverse();
+        for (int a = 0; a < 3; ++a) {
+            const double fcut = 1.001 * rc * cell_inv.row(a).norm();
+            if (!(fcut > 0.0) || !std::isfinite(fcut))
+                return false;
+            const double nbd = std::floor(1.0 / fcut);
+            if (nbd < 3.0)
+                return false;
+            nb[a] = static_cast<int>(std::min(nbd, 1024.0));
+        }
+        while (static_cast<long>(nb[0]) * nb[1] * nb[2] > max_bins) {
+            for (int a = 0; a < 3; ++a)
+                nb[a] = std::max(3, nb[a] / 2);
+            if (nb[0] == 3 && nb[1] == 3 && nb[2] == 3)
+                break;
+        }
+        for (int i = 0; i < n; ++i) {
+            const Eigen::Vector3d f = cell_inv * Eigen::Vector3d(m_geometry(i, 0), m_geometry(i, 1), m_geometry(i, 2));
+            for (int a = 0; a < 3; ++a) {
+                double w = f(a) - std::floor(f(a));
+                if (!std::isfinite(w))
+                    return false;
+                u[i][a] = w * nb[a];
+            }
+        }
+    } else {
+        Eigen::Vector3d lo = m_geometry.row(0).transpose(), hi = lo;
+        for (int i = 1; i < n; ++i)
+            for (int a = 0; a < 3; ++a) {
+                lo(a) = std::min(lo(a), m_geometry(i, a));
+                hi(a) = std::max(hi(a), m_geometry(i, a));
+            }
+        if (!lo.allFinite() || !hi.allFinite())
+            return false;
+        double edge = 1.001 * rc;
+        for (;;) {
+            long total = 1;
+            for (int a = 0; a < 3; ++a) {
+                nb[a] = static_cast<int>(std::min(std::floor((hi(a) - lo(a)) / edge) + 1.0, 1e6));
+                total *= nb[a];
+            }
+            if (total <= max_bins)
+                break;
+            edge *= 2.0;
+        }
+        for (int i = 0; i < n; ++i)
+            for (int a = 0; a < 3; ++a)
+                u[i][a] = (m_geometry(i, a) - lo(a)) / edge;
+    }
+
+    // bins in CSR form, atoms inside a bin in index order
+    std::vector<int> bin_of(n);
+    const long nbins = static_cast<long>(nb[0]) * nb[1] * nb[2];
+    std::vector<int> bin_start(nbins + 1, 0);
+    std::vector<std::array<int, 3>> bidx(n);
+    for (int i = 0; i < n; ++i) {
+        for (int a = 0; a < 3; ++a)
+            bidx[i][a] = std::min(std::max(static_cast<int>(std::floor(u[i][a])), 0), nb[a] - 1);
+        bin_of[i] = (bidx[i][0] * nb[1] + bidx[i][1]) * nb[2] + bidx[i][2];
+        ++bin_start[bin_of[i] + 1];
+    }
+    for (long b = 0; b < nbins; ++b)
+        bin_start[b + 1] += bin_start[b];
+    std::vector<int> bin_atoms(n), fill(bin_start.begin(), bin_start.end() - 1);
+    for (int i = 0; i < n; ++i)
+        bin_atoms[fill[bin_of[i]]++] = i;
+
+    std::vector<char> assigned(n, 0);
+    std::vector<int> fragment, accepted;
+    int next_seed = 0;
+    while (true) {
+        while (next_seed < n && assigned[next_seed])
+            ++next_seed;
+        if (next_seed >= n)
+            break;
+        fragment.clear();
+        fragment.push_back(next_seed);
+        assigned[next_seed] = 1;
+        double mass = 0;
+        for (std::size_t k = 0; k < fragment.size(); ++k) {
+            const int a = fragment[k];
+            accepted.clear();
+            for (int dx = -1; dx <= 1; ++dx) {
+                int bx = bidx[a][0] + dx;
+                if (m_has_pbc) bx = (bx + nb[0]) % nb[0];
+                else if (bx < 0 || bx >= nb[0]) continue;
+                // with 3 bins on a periodic axis, -1 and +1 are different bins; with fewer we returned above
+                for (int dy = -1; dy <= 1; ++dy) {
+                    int by = bidx[a][1] + dy;
+                    if (m_has_pbc) by = (by + nb[1]) % nb[1];
+                    else if (by < 0 || by >= nb[1]) continue;
+                    for (int dz = -1; dz <= 1; ++dz) {
+                        int bz = bidx[a][2] + dz;
+                        if (m_has_pbc) bz = (bz + nb[2]) % nb[2];
+                        else if (bz < 0 || bz >= nb[2]) continue;
+                        const int b = (bx * nb[1] + by) * nb[2] + bz;
+                        for (int p = bin_start[b]; p < bin_start[b + 1]; ++p) {
+                            const int c = bin_atoms[p];
+                            if (assigned[c])
+                                continue;
+                            const double distance = m_has_pbc ? CalculateDistancePBC(a, c) : CalculateDistance(a, c);
+                            if (distance < (Elements::CovalentRadius[Atom(a).first] + Elements::CovalentRadius[Atom(c).first]) * m_scaling)
+                                accepted.push_back(c);
+                        }
+                    }
+                }
+            }
+            std::sort(accepted.begin(), accepted.end());
+            for (int c : accepted) {
+                assigned[c] = 1;
+                fragment.push_back(c);
+                mass += Elements::AtomicMass[Atom(c).first];
+            }
+        }
+        std::sort(fragment.begin(), fragment.end());
+        mass *= -1;
+        ordered_list.insert(std::pair<double, std::vector<int>>(mass, fragment));
+    }
+    return true;
 }
 
 void Molecule::InitialiseConnectedMass(double scaling, bool protons)
