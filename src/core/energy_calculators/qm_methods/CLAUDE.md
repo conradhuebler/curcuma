@@ -1,8 +1,7 @@
 # CLAUDE.md - Quantum Methods Directory
 
 Quantum-mechanical and semi-empirical method implementations and the `ComputationalMethod` wrappers around them.
-The former long version (status log of 2025 and 2026, per-feature performance records, old verbosity text) is kept in
-[docs/archive/QM_METHODS_NOTES_2026-10.md](../../../../docs/archive/QM_METHODS_NOTES_2026-10.md), with a list of the statements in it that are out of date.
+The former long version (status log of 2025 and 2026, per-feature performance records, old verbosity text) is kept in [docs/archive/QM_METHODS_NOTES_2026-10.md](../../../../docs/archive/QM_METHODS_NOTES_2026-10.md), with a list of the statements in it that are out of date.
 Detailed architecture: `QM_ARCHITECTURE.md` in this directory and [docs/SQM_VALIDATION.md](../../../../docs/SQM_VALIDATION.md).
 > ⚠️ **All native methods here are 🤖 AI-implemented and ⚙️ machine-tested only. None is ✅ TESTED.**
 ## Layout
