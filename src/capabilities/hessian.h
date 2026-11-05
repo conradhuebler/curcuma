@@ -48,6 +48,16 @@ MODULE_INFO("Hessian, vibrational frequencies and thermochemistry.", "Calculatio
     PARAM(freq_scale, Double, 1.0, "Scaling factor for frequencies.", "Analysis", {})
     PARAM(thermo, Double, 298.15, "Temperature for thermodynamic properties (K).", "Analysis", {})
     PARAM(freq_cutoff, Double, 50.0, "Cutoff for printing frequencies (cm^-1).", "Analysis", {})
+    // Claude Generated (Nov 2026): analytic RHF Hessian, src/core/energy_calculators/qm_methods/qm_hessian.cpp
+    PARAM(analytic, Bool, false,
+          "Analytic Hessian instead of finite differences of gradients. Available for -method hf only (closed-shell RHF, exact integrals, all-electron basis with s-f shells, CPU; second-derivative integrals + coupled-perturbed HF). Any other method, or a case the analytic code refuses (open shell, ECP, -qm.ri, g shells, unconverged SCF or CPHF), falls back to the numerical Hessian with a warning. AI-generated, machine-tested only: docs/QM_HF_HESSIAN.md.",
+          "Algorithm", {})
+    PARAM(cphf_threshold, Double, 1.0e-10,
+          "analytic: convergence threshold of the coupled-perturbed HF equations, largest |residual| (Eh) of every one of the 3N perturbations.",
+          "Algorithm", {})
+    PARAM(cphf_max_iterations, Int, 100,
+          "analytic: largest number of preconditioned conjugate-gradient iterations per CPHF perturbation; not converged = fallback to the numerical Hessian.",
+          "Algorithm", {})
 END_PARAMETER_DEFINITION
 
 template <typename Vector>
@@ -175,6 +185,8 @@ private:
     void CalculateHessianNumerical();
     void CalculateHessianSemiNumerical();
     void CalculateHessianThreaded();
+    /// Analytic RHF Hessian for -method hf (Claude Generated, Nov 2026); false = not available, caller falls back.
+    bool CalculateHessianAnalytic();
 
     void FiniteDiffHess();
     std::function<double(double)> m_scale_functions;
@@ -195,6 +207,9 @@ private:
     double m_freq_scale = 1, m_thermo = 298.5, m_freq_cutoff = 50;
     double m_finite_diff_step = 5e-3; // Finite difference step size (Bohr)
     bool m_hess_calc = true, m_hess_write = false, m_hess_read = false;
+    bool m_analytic = false;          // -hessian.analytic (hf only)
+    double m_cphf_threshold = 1e-10;  // -hessian.cphf_threshold
+    int m_cphf_max_iterations = 100;  // -hessian.cphf_max_iterations
     int m_hess = 1;
     int m_verbosity = 1; // CurcumaLogger verbosity level
     std::string m_read_file = "none", m_write_file = "none", m_read_xyz = "none";
