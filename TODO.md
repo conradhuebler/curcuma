@@ -198,6 +198,8 @@ Stand.
 - **Natives RHF, Fragment-Startdichte für Cluster** (2026-10-27): Gegenstück zu `-scf_guess fragments` der GFN-Methoden (Blockdichte einzeln konvergierter Moleküle);
   nicht umgesetzt, Nutzen an Wasser/Harnstoff-Clustern ungemessen. [docs/QM_SHARED_SCF_INFRA_2026-10-27.md](docs/QM_SHARED_SCF_INFRA_2026-10-27.md)
 
+- **Native QM COSX/RIJCOSX** (2026-11-05, [docs/QM_COSX.md](docs/QM_COSX.md)): auf 4 Kernen nie schneller als exaktes direct-J/K oder RI-JK (bis C16H34/TZVP); offen: gepruntes Gitter, Fernfeld für Zweizentren-Paare, analytischer Gradient
+  (Gitterableitung, Überlappungsfit nicht variationell), offene Schale; ohne diese bleibt die Option nur ein Mess-/Lehrpfad.
 - **Native LDA/PBE (WP5/WP6): J-only-Weg für integral-direct** (2026-10-30, [WP5](docs/DFT_ROADMAP/WP5_lda_vwn5.md)): `-method lda`/`pbe` mit `-qm.scf_direct on` bzw. Device-Tensor berechnet K mit und verwirft es; ein J-Digest mit eigenem Screening fehlt (CPU und GPU); auch der 2e-Gradient (kx = 0) lässt nur die K-Produkte weg.
 - **KS-DFT auf der GPU, offen** (2026-10-30, [QM_GPU_ROADMAP Abschnitt 4](docs/QM_GPU_ROADMAP.md#4-kohn-sham-dft-on-the-gpu-oct-2026)): FP32-Phase (`-qm.gpu_eri_precision auto`) kostet bei KS direct +2 Iterationen (Koffein);
   Becke-Gewichtsableitung O(npts natoms^2) (CPU und GPU) dominiert ab ~60 Atomen den XC-Gradienten (Nachbarlisten nur mit Stratmann exakt); nur RTX 5090 getestet, ROCm (`qm_xc_kernels.h` hipcc-tauglich) nicht gebaut;
