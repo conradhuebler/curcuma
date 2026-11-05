@@ -244,6 +244,13 @@ BEGIN_PARAMETER_DEFINITION(qm)
     PARAM(scf_level_shift_off, Double, 0.0,
           "scf_level_shift: orbital-gradient norm ||X^T (F P S - S P F) X||_F below which the shift is removed early (e.g. 1e-3). 0 = keep the shift until convergence (the final orbitals are then those of the unshifted F).",
           "SCF", {})
+    // Claude Generated (Nov 2026): wavefunction stability analysis after convergence (qm_stability.cpp)
+    PARAM(scf_stability, String, "off",
+          "Wavefunction stability analysis of the converged native HF/KS SCF: off (default) | check (lowest eigenvalue of the real orbital Hessian (A + B) by a Davidson solve over the virtual x occupied rotations, one J/K build per step: RHF/RKS -> RHF/RKS (singlet) and RHF/RKS -> UHF/UKS (triplet) for a closed shell, UHF/UKS -> UHF/UKS (internal) for an unrestricted SCF; a warning when one is below -1e-5 Eh) | follow (as check, then rotate the orbitals along the unstable mode by exp(K) with the unit-norm eigenvector, as PySCF, re-run the SCF from that density and check again, at most scf_stability_max_follow times; the new solution is kept only if its energy is lower; an RHF -> UHF instability switches this geometry to UHF/UKS, only with -qm.reference auto and a method that allows open shell). KS response: singlet exact (F_xc), triplet and UKS a central difference of the spin V_xc; meta-GGA triplet/UKS not available. Not checked: real -> complex instabilities, RHF -> GHF. Eigenvalues in Eh, of (A + B) (the RHF energy Hessian is 4 (A + B)); reported in the energy decomposition (stability).",
+          "SCF", {})
+    PARAM(scf_stability_max_follow, Int, 3,
+          "scf_stability follow: largest number of rotate-and-re-run cycles per geometry.",
+          "SCF", {})
     // Oct 27 2026: renamed from diis_start / diis_subspace (kept as aliases) -- flat -diis_start belongs to the optimiser
     PARAM(scf_diis_start, Int, 1,
           "SCF iteration (0-based) from which DIIS/ADIIS extrapolates; 1 = from the second Fock matrix on. Was diis_start (alias); the flat -diis_start belongs to the geometry optimiser, use -scf_diis_start or -qm.scf_diis_start.",
@@ -377,6 +384,8 @@ public:
     // --- Open shell (stage 5b, Claude Generated Nov 2026; qm_uscf.cpp) ---
     /// True when the current molecule runs unrestricted (UHF/UKS): -spin > 0, or -qm.reference uhf.
     bool isOpenShell() const { return m_open_shell; }
+    /// Result of the last -qm.scf_stability analysis (empty object when off). Claude Generated (Nov 2026).
+    const json& stabilityReport() const { return m_stability_report; }
     int nAlpha() const { return m_nalpha; }
     int nBeta() const { return m_nbeta; }
     /// <S^2> of the last converged UHF/UKS determinant and the exact value S(S+1), S = (n_alpha - n_beta)/2.
@@ -592,6 +601,17 @@ private:
     // Claude Generated (Nov 2026): level shift (-qm.scf_level_shift, 0 = off) and stability analysis (-qm.scf_stability)
     double m_scf_level_shift = 0.0;          // b (Eh) added to the virtual space of the diagonalised Fock matrix
     double m_scf_level_shift_off = 0.0;      // orbital gradient below which the shift is removed (0: at convergence)
+    std::string m_scf_stability = "off";     // off | check | follow (qm_stability.cpp)
+    int m_scf_stability_max_follow = 3;
+    json m_stability_report;                 // last analysis (energy decomposition "stability")
+    long m_broken_symmetry_serial = -1;      // geometry whose RHF -> UHF instability was followed (stays UHF/UKS)
+    /// -qm.scf_stability check|follow on the converged SCF; false if a re-run SCF failed.
+    bool runStabilityAnalysis();
+    /// Lowest eigenvalue of (A + B): kind 0 RHF singlet, 1 RHF -> UHF triplet, 2 UHF internal; `vec` its eigenvector.
+    double stabilityLowest(int kind, Eigen::VectorXd& vec, std::string& info) const;
+    /// d/dt V_xc,s[Pa + t Da, Pb + t Db] at t = 0 as a central difference of the spin V_xc (CPU).
+    void xcResponseSpinFD(const Matrix& Pa, const Matrix& Pb, const Matrix& Da, const Matrix& Db, Matrix& dVa,
+                          Matrix& dVb) const;
     std::string m_scf_guess = "atom";        // sad | atom | h0
     double m_scf_early_screening = 1.0e-10;      // > 0: J/K screening threshold of the early direct SCF
     double m_scf_early_switch = 1.0e-3;      // ||dP|| that ends the early phase

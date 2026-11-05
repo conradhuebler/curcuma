@@ -68,7 +68,8 @@ const std::vector<std::string> kQmScf = { "scf_max_iterations", "scf_threshold",
                                           "scf_diis_start", "scf_diis_subspace", "scf_damping", "scf_allow_unconverged",
                                           "scf_guess", "scf_early_screening", "scf_early_switch", "scf_warm_start",
                                           "scf_extrapolation", "scf_extrapolation_order", "scf_verified_stop", "reference",
-                                          "uhf_guess_mix", "scf_level_shift", "scf_level_shift_off" };
+                                          "uhf_guess_mix", "scf_level_shift", "scf_level_shift_off",
+                                          "scf_stability", "scf_stability_max_follow" };
 
 std::vector<std::string> without(std::vector<std::string> v, const std::string& name)
 {

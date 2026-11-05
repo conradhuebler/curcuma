@@ -265,6 +265,15 @@ QMEngine::QMEngine(QMFunctional functional, const json& config)
     }
     if (config.contains("scf_level_shift_off") && config["scf_level_shift_off"].is_number())
         m_scf_level_shift_off = std::max(0.0, config["scf_level_shift_off"].get<double>());
+    // Claude Generated (Nov 2026): stability analysis (qm_stability.cpp)
+    if (config.contains("scf_stability") && config["scf_stability"].is_string()) {
+        m_scf_stability = config["scf_stability"].get<std::string>();
+        std::transform(m_scf_stability.begin(), m_scf_stability.end(), m_scf_stability.begin(), ::tolower);
+        if (m_scf_stability != "off" && m_scf_stability != "check" && m_scf_stability != "follow")
+            throw std::invalid_argument(fmt::format("scf_stability '{}' is unknown; use off, check or follow", m_scf_stability));
+    }
+    if (config.contains("scf_stability_max_follow") && config["scf_stability_max_follow"].is_number())
+        m_scf_stability_max_follow = std::max(0, static_cast<int>(std::lround(config["scf_stability_max_follow"].get<double>())));
     if (config.contains("scf_damping") && config["scf_damping"].is_number()) {
         const double d = config["scf_damping"].get<double>();
         if (!(d > 0.0 && d <= 1.0))
@@ -744,6 +753,7 @@ void QMEngine::resetForNewMolecule()
     m_warm_atoms.clear();
     m_dens_hist.clear();
     m_dens_hist_serial = -1;
+    m_broken_symmetry_serial = -1;
 }
 
 double QMEngine::Calculation(bool gradient)
@@ -778,6 +788,8 @@ double QMEngine::Calculation(bool gradient)
         }
         return m_total_energy;
     }
+    // -qm.scf_stability follow (Nov 2026): a geometry whose RHF -> UHF instability was followed stays unrestricted
+    if (!m_open_shell && m_broken_symmetry_serial == m_geom_serial && m_reference == "auto") m_open_shell = true;
 
     // --- HF: real closed-shell SCF (WP3) ---
     // Claude Generated (Oct 25 2026): an analytic gradient (or a correlated method, setTightOrbitals) needs the
@@ -789,8 +801,10 @@ double QMEngine::Calculation(bool gradient)
         m_scf_tight_now = want_tight;
         m_scf_continue = continue_tight;
         m_scf_tight_done = false;
-        const bool ok = m_open_shell ? runUSCF() : runSCF();  // stage 5b: UHF/UKS in qm_uscf.cpp
+        bool ok = m_open_shell ? runUSCF() : runSCF();  // stage 5b: UHF/UKS in qm_uscf.cpp
         m_scf_continue = false;
+        m_stability_report = json::object();
+        if (ok && m_scf_stability != "off") ok = runStabilityAnalysis();  // Nov 2026, qm_stability.cpp
         m_scf_ready = true;
         if (!ok && !riSetupFailed()) {  // WP10: a failed RI setup has reported its own error
             // Oct 27 2026: master's rule (SCF_MODES.md "Failure handling"): the wrappers turn this into an error

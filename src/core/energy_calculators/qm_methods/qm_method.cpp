@@ -236,6 +236,7 @@ json QMMethod::getEnergyDecomposition() const
         decomp["s2"] = m_engine->spinSquared();
         decomp["s2_exact"] = m_engine->spinSquaredExact();
     }
+    if (!m_engine->stabilityReport().empty()) decomp["stability"] = m_engine->stabilityReport();  // -qm.scf_stability
     if (m_d4) {
         decomp["dispersion"] = m_e_disp;  // WP12 stage 4; nuclear_repulsion above then holds E_nn + E_disp
         if (decomp.contains("nuclear_repulsion")) decomp["nuclear_repulsion"] = decomp["nuclear_repulsion"].get<double>() - m_e_disp;

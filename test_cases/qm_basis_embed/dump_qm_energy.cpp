@@ -14,6 +14,8 @@
  * unrestricted run also prints "s2 <S^2>".
  * --gpu NAME (Nov 2026, stage 6a, test_cases/qm_uhf GPU tests): top-level "gpu" of the config (cuda, ...); every
  * counted GPU fallback of the run is printed at the end as "fallback <category> <count>".
+ * -qm.scf_stability (Nov 2026, test_cases/qm_stability): the energy decomposition's "stability" report is printed as
+ * "stability <key> <value>" (eigenvalues rhf_rhf/rhf_uhf/uhf_uhf in Eh, stable 1/0, followed count).
  *
  * VALUE is parsed as JSON when possible (true, 1e-10, ...), else taken as a string.
  *
@@ -82,6 +84,11 @@ int main(int argc, char** argv)
     std::printf("\nenergy %.17g\n", e);  // own line: the logger may leave a colour code on the current one
     const json dec = calc.getEnergyDecomposition();
     if (dec.contains("s2") && dec["s2"].is_number()) std::printf("s2 %.17g\n", dec["s2"].get<double>());
+    if (dec.contains("stability") && dec["stability"].is_object())  // -qm.scf_stability (Nov 2026): "stability <key> <value>"
+        for (auto it = dec["stability"].begin(); it != dec["stability"].end(); ++it)
+            if (it.value().is_number() || it.value().is_boolean())
+                std::printf("stability %s %.17g\n", it.key().c_str(),
+                            it.value().is_boolean() ? (it.value().get<bool>() ? 1.0 : 0.0) : it.value().get<double>());
     if (gradient) {
         const Matrix& g = calc.Gradient();  // Eh/Angstrom
         const double f = 1.0 / CurcumaUnit::Length::angstrom_to_bohr(1.0);  // -> Eh/Bohr

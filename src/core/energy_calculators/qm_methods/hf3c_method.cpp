@@ -168,5 +168,6 @@ json HF3CMethod::getEnergyDecomposition() const
     decomp["srb"] = m_e_srb;
     decomp["total"] = m_e_total;
     if (m_engine->isOpenShell() && m_engine->scfConverged()) decomp["s2"] = m_engine->spinSquared();  // stage 5b
+    if (!m_engine->stabilityReport().empty()) decomp["stability"] = m_engine->stabilityReport();  // -qm.scf_stability
     return decomp;
 }

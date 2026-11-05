@@ -9,6 +9,7 @@ Checks (--check):
   shift   -qm.scf_level_shift --shift: the converged energy (and with --gradient the analytic gradient) equals the run
           without shift (|dE| <= 1e-9 Eh, max |dg| <= 1e-8 Eh/Bohr); --extra adds -qm settings to both runs
           (e.g. scf_mode=plain); --expect-unconverged-without: the run without shift must fail (a case that needs it)
+  --threads N (ref, follow): threads of dump_qm_energy (the KS cases use 4: the 1-thread V_xc is slow on this grid)
 
 Claude Generated (Nov 2026).
 """
@@ -23,9 +24,9 @@ TC = os.path.normpath(os.path.join(HERE, ".."))
 GRID = {"grid": "sg1", "vwn_variant": "vwn5"}
 
 
-def run(dump, case, qm, gradient=False, expect_fail=False):
+def run(dump, case, qm, gradient=False, expect_fail=False, threads=1):
     cmd = [dump, os.path.join(TC, case["xyz"]), case["method"], "--charge", str(case["charge"]), "--spin",
-           str(case["spin"]), "--threads", "1"]
+           str(case["spin"]), "--threads", str(threads)]
     q = {"basis": case["basis"], "scf_guess": "atom"}
     if case["reference"] == "uhf":
         q["reference"] = "uhf"
@@ -68,6 +69,7 @@ def main():
     ap.add_argument("--gradient", action="store_true")
     ap.add_argument("--extra", nargs="*", default=[])
     ap.add_argument("--expect-unconverged-without", action="store_true")
+    ap.add_argument("--threads", type=int, default=1)
     a = ap.parse_args()
     with open(os.path.join(HERE, "reference.json")) as f:
         ref = json.load(f)["cases"][a.case]
@@ -80,7 +82,7 @@ def main():
             extra[k] = v
     ok = True
     if a.check == "ref":
-        r = run(a.dump, ref, dict(extra, scf_stability="check"))
+        r = run(a.dump, ref, dict(extra, scf_stability="check"), threads=a.threads)
         dE = r["energy"] - ref["energy"]
         print("energy %.12f  pyscf %.12f  dE %.2e" % (r["energy"], ref["energy"], dE))
         ok &= abs(dE) <= 1e-8
@@ -95,7 +97,7 @@ def main():
             print("%s %.10f  pyscf dense %.10f  d %.2e (tol %.0e)" % (key, r["stability"][key], ref[key], d, a.tol))
             ok &= abs(d) <= a.tol
     elif a.check == "follow":
-        r = run(a.dump, ref, dict(extra, scf_stability="follow"))
+        r = run(a.dump, ref, dict(extra, scf_stability="follow"), threads=a.threads)
         dE = r["energy"] - ref["followed_energy"]
         print("followed energy %.12f  pyscf %.12f  dE %.2e" % (r["energy"], ref["followed_energy"], dE))
         ok &= abs(dE) <= 1e-7
