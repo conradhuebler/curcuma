@@ -503,6 +503,7 @@ void SimpleMD::LoadControlJson()
 
     // Claude Generated 2025: RATTLE Parameters
     m_rm_COM = m_config.get<double>("remove_com_motion");
+    m_compute_pressure = m_config.get<bool>("compute_pressure");  // Nov 2026 (N1); no effect without a cell
     int rattle = m_config.get<int>("rattle");
 
     m_rattle_maxiter = m_config.get<int>("rattle_max_iterations");
@@ -1059,6 +1060,44 @@ bool SimpleMD::Initialise()
     // level here. (A deeper fix would stop the EnergyCalculator setup path leaking 0 in the first
     // place.)
     CurcumaLogger::set_verbosity(m_verbosity);
+    // Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED N1): instantaneous pressure from the atomic virial. Needs a
+    // cell with the periodic CPU GFN-FF energy; RATTLE is refused (the constraint force virial is not implemented),
+    // as is the per-step EnergyCalculator mode (cleanenergy: a fresh instance per step carries no virial request).
+    if (m_compute_pressure && !m_has_pbc) {
+        if (m_verbosity >= 1)
+            CurcumaLogger::warn("compute_pressure: no unit cell set, no pressure is computed");
+        m_compute_pressure = false;
+    }
+    if (m_compute_pressure) {
+        if (m_rattle) {
+            CurcumaLogger::error("compute_pressure: pressure with constraints not implemented (rattle)");
+            return false;
+        }
+        if (m_config.get<bool>("cleanenergy", false)) {
+            CurcumaLogger::error("compute_pressure: not available with cleanenergy (per-step energy calculator)");
+            return false;
+        }
+        GFNFF* gfnff = m_interface->Interface() ? m_interface->Interface()->gfnffInstance() : nullptr;
+        if (!m_periodic_energy || !gfnff) {
+            CurcumaLogger::error("compute_pressure: needs the periodic native CPU GFN-FF energy (method gfnff with a unit cell and coulomb_ewald)");
+            return false;
+        }
+        try {
+            gfnff->setWantVirial(true);
+        } catch (const std::exception& e) {
+            CurcumaLogger::error(std::string("compute_pressure: ") + e.what());
+            return false;
+        }
+        const Eigen::Matrix3d cell = m_molecule.getUnitCell();
+        m_cell_volume_ang3 = std::abs(cell.determinant());
+        m_total_mass_amu = 0.0;
+        for (int i = 0; i < m_natoms; ++i)
+            m_total_mass_amu += Elements::AtomicMass[m_atomtype[i]];
+        if (m_verbosity >= 1)
+            CurcumaLogger::info(fmt::format("compute_pressure: atomic virial of the periodic GFN-FF energy; V = {:.3f} A^3, mass {:.3f} amu, density {:.4f} g/cm^3",
+                m_cell_volume_ang3, m_total_mass_amu,
+                CurcumaUnit::Pressure::amu_per_angstrom3_to_gcm3(m_total_mass_amu, m_cell_volume_ang3)));
+    }
     // Iterative mode: raise SCF display threshold by one level so system verbosity
     // controls output (silent at default=1, visible at -v 2). Claude Generated.
     m_interface->setIterativeMode(true);
@@ -2395,6 +2434,10 @@ void SimpleMD::prepareRun()
         if (m_dipole) {
             header += fmt::format(" {: ^15}", "Dipole");
             units  += fmt::format(" {: ^15}", "Debye");
+        }
+        if (m_compute_pressure) {  // N1 (Nov 2026): instantaneous pressure, its running mean, cell volume, mass density
+            header += fmt::format(" {: ^15} {: ^15} {: ^15} {: ^15}", "P", "<P>", "V", "rho");
+            units  += fmt::format(" {: ^15} {: ^15} {: ^15} {: ^15}", "bar", "bar", "A^3", "g/cm^3");
         }
         if (m_rmsd_mtd) {
             header += fmt::format(" {: ^15}", "nBias");
@@ -5512,6 +5555,9 @@ void SimpleMD::PrintStatus() const
             remaining, m_time_step / 1000.0);
         if (m_dipole)
             line += fmt::format(" {: ^15f}", m_aver_dipol_linear * 2.5418 * 3.3356);
+        if (m_compute_pressure)  // N1 (Nov 2026)
+            line += fmt::format(" {: ^15.2f} {: ^15.2f} {: ^15.3f} {: ^15.5f}", m_pressure_bar, m_aver_pressure_bar,
+                m_cell_volume_ang3, m_density_gcm3);
         if (m_rmsd_mtd)
             line += fmt::format(" {: ^15}", m_bias_structure_count);
         else if (m_writeUnique)
@@ -5571,6 +5617,8 @@ double SimpleMD::FastEnergy()
     auto t_ff_end = std::chrono::high_resolution_clock::now();
     m_last_ff_ms = std::chrono::duration<double, std::milli>(t_ff_end - t_ff_start).count();
     phaseLap(m_phase.energy);
+    if (m_compute_pressure)
+        readVirial();  // N1 (Nov 2026)
     m_eigen_gradient = m_interface->Gradient();
 
     // Claude Generated (Feb 2026): Gradient sanity check for MD stability
@@ -5620,6 +5668,23 @@ void SimpleMD::AverageQuantities()
     }
     m_average_wall_potential = (m_wall_potential + (m_currentStep)*m_average_wall_potential) / (m_currentStep + 1);
     m_average_virial_correction = (m_virial_correction + (m_currentStep)*m_average_virial_correction) / (m_currentStep + 1);
+    if (m_compute_pressure) {
+        // N1 (Nov 2026): P = (2 K + tr Xi) / (3 V), K = m_Ekin (Eh, all atoms), Xi in Eh, V in Bohr^3; printed in bar
+        const double v_bohr3 = m_cell_volume_ang3 / CurcumaUnit::Length::BOHR3_TO_ANGSTROM3;
+        m_pressure_bar = CurcumaUnit::Pressure::au_to_bar((2.0 * m_Ekin + m_virial_trace_eh) / (3.0 * v_bohr3));
+        m_aver_pressure_bar = (m_pressure_bar + (m_currentStep)*m_aver_pressure_bar) / (m_currentStep + 1);
+        m_density_gcm3 = CurcumaUnit::Pressure::amu_per_angstrom3_to_gcm3(m_total_mass_amu, m_cell_volume_ang3);
+    }
+}
+
+// Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED N1)
+void SimpleMD::readVirial()
+{
+    GFNFF* gfnff = (m_interface && m_interface->Interface()) ? m_interface->Interface()->gfnffInstance() : nullptr;
+    if (!gfnff || !gfnff->virialValid())
+        throw std::runtime_error("compute_pressure: the energy of this step carries no atomic virial (the energy was not evaluated "
+                                 "by the CPU GFN-FF workspace, e.g. a GPU path); run without -gpu or without compute_pressure");
+    m_virial_trace_eh = gfnff->virial().trace();
 }
 
 bool SimpleMD::WriteGeometry()

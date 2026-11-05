@@ -746,6 +746,15 @@ private:
     double m_wall_spheric_radius = 6, m_wall_temp = 298.15, m_wall_beta = 6;
     double m_wall_x_min = 0, m_wall_x_max = 0, m_wall_y_min = 0, m_wall_y_max = 0, m_wall_z_min = 0, m_wall_z_max = 0;
     double m_wall_potential = 0, m_average_wall_potential = 0;
+    /// Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED N1): instantaneous pressure from the atomic virial (compute_pressure)
+    bool m_compute_pressure = false;
+    double m_virial_trace_eh = 0.0;      ///< tr Xi of the last energy call (Eh)
+    double m_cell_volume_ang3 = 0.0;     ///< orthorhombic cell volume (A^3), set in Initialise()
+    double m_total_mass_amu = 0.0;       ///< sum of the atom masses (amu), set in Initialise()
+    double m_pressure_bar = 0.0, m_aver_pressure_bar = 0.0;
+    double m_density_gcm3 = 0.0;
+    /// Read tr Xi from the GFN-FF instance after an energy call; throws when no virial was produced (GPU path).
+    void readVirial();
     // Claude Generated (Sep 2026): Gyrationsradius-Bias, siehe ApplyGyrationBias()
     bool m_gyration_bias = false, m_gyration_one_sided = true, m_gyration_heavy_only = true;
     double m_gyration_target = -1.0, m_gyration_force = 0.1, m_gyration_potential = 0.0;
@@ -1010,6 +1019,7 @@ private:
     PARAM(restart_file, String, "none", "Restart file to load initial state from.", "Restart", {"initfile"})
     PARAM(write_restart_frequency, Int, 1000, "Write restart file every N steps.", "Restart", {"writerestart"})
     PARAM(no_restart, Bool, false, "Disable automatic loading from restart files.", "Restart", {"norestart"})
+    PARAM(compute_pressure, Bool, false, "With a unit cell and the periodic CPU GFN-FF energy (coulomb_ewald): compute the atomic virial Xi = -dE/d(strain) with every step and print the instantaneous pressure P = (2 Ekin + tr Xi)/(3 V) in bar, the cell volume (A^3) and the mass density (g/cm^3) as extra columns. No effect without a cell. Refused with RATTLE (constraint virial not implemented), with a GPU-evaluated energy, the ensemble charge model or an implicit solvent. See docs/WP-PERIODIC-NONBONDED.md N1.", "Output", {})
 
     // --- RATTLE Constraints ---
     PARAM(rattle, Int, 0, "RATTLE constraint algorithm (0:off, 1:on, 2:H-only). Not available with gfnff topology_mode=react (constraints are frozen at initialisation).", "RATTLE", {})

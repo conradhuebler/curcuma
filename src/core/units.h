@@ -148,6 +148,7 @@ namespace Length {
     }
     constexpr double BOHR_TO_METER = 5.29177210903e-11;
     constexpr double ANGSTROM_TO_METER = 1.0e-10;
+    constexpr double BOHR3_TO_ANGSTROM3 = BOHR_TO_ANGSTROM * BOHR_TO_ANGSTROM * BOHR_TO_ANGSTROM;
 
     // Length conversions
     inline constexpr double bohr_to_angstrom(double bohr) { return bohr * BOHR_TO_ANGSTROM; }
@@ -156,6 +157,21 @@ namespace Length {
     inline constexpr double angstrom_to_meter(double ang) { return ang * ANGSTROM_TO_METER; }
     inline constexpr double bohr_to_nm(double bohr) { return bohr * BOHR_TO_ANGSTROM * 0.1; }
     inline constexpr double angstrom_to_nm(double ang) { return ang * 0.1; }
+}
+
+// Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED N1): pressure of a periodic cell, atomic units Eh/Bohr^3
+namespace Pressure {
+    constexpr double HARTREE_TO_JOULE = 4.3597447222071e-18;  // CODATA 2018
+    /// 1 Eh/Bohr^3 = 4.3597447222071e-18 J / (5.29177210903e-11 m)^3 = 2.9421016e13 Pa
+    constexpr double HARTREE_PER_BOHR3_TO_PASCAL = HARTREE_TO_JOULE
+        / (Length::BOHR_TO_METER * Length::BOHR_TO_METER * Length::BOHR_TO_METER);
+    constexpr double HARTREE_PER_BOHR3_TO_BAR = HARTREE_PER_BOHR3_TO_PASCAL * 1.0e-5;  // 2.9421016e8 bar
+    inline constexpr double au_to_bar(double p_au) { return p_au * HARTREE_PER_BOHR3_TO_BAR; }
+    /// Mass density from a total mass in amu and a volume in Angstrom^3: amu / A^3 -> g/cm^3 (1 amu = 1.66053906660e-24 g, 1 A^3 = 1e-24 cm^3)
+    inline constexpr double amu_per_angstrom3_to_gcm3(double m_amu, double v_ang3)
+    {
+        return m_amu * (Constants::ATOMIC_MASS_UNIT * 1.0e3) / (v_ang3 * 1.0e-24);
+    }
 }
 
 namespace Time {

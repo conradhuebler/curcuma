@@ -3177,6 +3177,11 @@ double GFNFF::Calculation(bool gradient)
     // the charge variants are blended on top of it. Nothing below changes when the model is off.
     m_frag_blend_valid = false;
     m_frag_last_nvariants = 0;
+    if (m_want_virial && gradient && m_initialized) {  // N1: requested before the set-up; decided now
+        const std::string why = virialUnavailableReason();
+        if (!why.empty())
+            throw std::runtime_error("GFN-FF: the atomic virial is not available: " + why);
+    }
     const double e_master = calculationSingle(gradient);
     if (m_frag_ensemble && !m_frag_is_variant && m_charge != 0 && m_initialized)
         return fragEnsembleBlend(gradient, e_master);
@@ -4949,6 +4954,7 @@ bool GFNFF::initializeForceField()
         m_workspace->setFarfieldShortcut(m_parameters.value("farfield_shortcut", true));  // Oct 2026; fallback = PARAM default
         m_workspace->setCnZeroGuard(cnZeroGuardEffective());                               // Oct 2026; PARAM (fallback false = reference) or a fragment-charge override (Oct 31, 2026)
         m_workspace->setPeriodicCell(m_cell_bohr_ortho);                                   // Nov 2026: read by the D4 (A3b), repulsion and bonded-term (A4a) kernels; inactive without a cell
+        m_workspace->setWantVirial(m_want_virial);                                         // Nov 2026 (N1): requested before the set-up
         if (coulombEwaldActive()) {
             // Nov 2026 (B2): periodic Coulomb pair term by Ewald summation (FFWorkspace::calcCoulombEwald).
             // B3: the SAME parameters as the EEQ solver's matrix (m_ewald_params, configurePeriodicEwald), so the
@@ -13409,7 +13415,7 @@ void GFNFF::updateDispersionTail(bool gradient)
     // (including its P1a CN-change threshold and the static-CN mode); dE/dCN from the weight derivatives
     // that updateCNValuesForGradient() built for this CN. Diagnostic calls of m_workspace->calculate()
     // outside calculationSingle() (react dE_jump, NumGradFixedCharges) keep the last tail.
-    // Virial / NPT (not implemented): dE_tail/dV = -E_tail/V at fixed r_c.
+    // Virial (N1, Nov 2026): at fixed r_c E_tail ~ 1/V, so Xi_ab = E_tail delta_ab (FFWorkspace::postProcessVirial).
     if (!m_workspace)
         return;
     if (!dispersionTailActive()) {
@@ -13470,6 +13476,61 @@ void GFNFF::configurePeriodicCell()
 bool GFNFF::periodicEEQActive() const
 {
     return coulombEwaldActive() && m_eeq_solver && m_eeq_solver->periodicEwaldActive();
+}
+
+// Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED N1): atomic virial of the periodic energy, see FFWorkspace
+std::string GFNFF::virialUnavailableReason() const
+{
+    if (!m_cell_bohr_ortho.active)
+        return "no periodic cell";
+    if (!m_initialized || !m_workspace)
+        return "";  // decided when the instance is initialised
+    if (!periodicEEQActive())
+        return "the Coulomb term and the EEQ are not periodic (coulomb_ewald false)";
+    if (m_frag_ensemble && m_charge != 0)
+        return "frag_charge_model ensemble blends several charge variants (use frag_charge_model reference)";
+    if (m_solvation)
+        return "an implicit solvent is set";
+    if (m_atm_enabled_for_virial_check())
+        return "the three-body ATM term has no minimum image (dispersion_atm)";
+    return "";
+}
+
+bool GFNFF::m_atm_enabled_for_virial_check() const
+{
+    return m_parameters.value("dispersion_atm", false);
+}
+
+void GFNFF::setWantVirial(bool v)
+{
+    if (v && m_initialized) {
+        const std::string why = virialUnavailableReason();
+        if (!why.empty())
+            throw std::runtime_error("GFN-FF: the atomic virial is not available: " + why);
+    }
+    m_want_virial = v;
+    if (m_workspace)
+        m_workspace->setWantVirial(v);
+}
+
+bool GFNFF::virialValid() const
+{
+    return m_want_virial && m_workspace && m_workspace->virialValid() && m_cell_bohr_ortho.active;
+}
+
+Eigen::Matrix3d GFNFF::virial() const
+{
+    return virialValid() ? m_workspace->virial() : Eigen::Matrix3d::Zero();
+}
+
+const FFVirialComponents* GFNFF::virialComponents() const
+{
+    return virialValid() ? &m_workspace->virialComponents() : nullptr;
+}
+
+double GFNFF::cellVolumeBohr3() const
+{
+    return m_cell_bohr_ortho.active ? m_cell_bohr_ortho.L[0] * m_cell_bohr_ortho.L[1] * m_cell_bohr_ortho.L[2] : 0.0;
 }
 
 // Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED B3): one set of Ewald parameters for the EEQ matrix and the

@@ -350,6 +350,7 @@ double FFWorkspace::evaluateEwaldCoulomb(const Matrix& geometry_bohr, const Vect
     }
     for (int t = 0; t < m_num_threads; ++t)
         m_accumulators[t].reset(m_natoms, gradient, /*store_components=*/false, /*want_potentials=*/false);
+    m_virial_valid = false;  // N1: the hybrid result holds no atomic virial of the local terms
     if (m_num_threads == 1 || !m_pool) {
         calcCoulombEwald(0);
     } else {
@@ -428,6 +429,11 @@ double FFWorkspace::calculate(bool gradient)
         m_ewald_setup_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
     }
     const bool want_pot = ewald_now && m_want_coulomb_potentials;
+    // N1 (Nov 2026): the atomic virial is a by-product of the gradient kernels (virial instantiations)
+    const bool want_virial = m_want_virial && gradient && m_method_type == FFMethodType::GFN_FF;
+    m_virial_valid = false;
+    if (want_virial)
+        m_result_virial.reset();
 
     // Select execute function based on method type
     auto executeMethod = [this](int t) {
@@ -454,7 +460,7 @@ double FFWorkspace::calculate(bool gradient)
     auto t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
     if (m_num_threads == 1) {
         // T=1: Direct call, zero pool overhead
-        m_accumulators[0].reset(m_natoms, gradient, m_store_components, want_pot);
+        m_accumulators[0].reset(m_natoms, gradient, m_store_components, want_pot, want_virial);
         executeMethod(0);
 
         // acc[0] IS the result — zero-copy swap
@@ -464,6 +470,8 @@ double FFWorkspace::calculate(bool gradient)
         m_ewald_terms.reciprocal = m_accumulators[0].ewald_recip;
         m_ewald_real_ms = m_accumulators[0].ewald_real_ms;
         m_ewald_recip_ms = m_accumulators[0].ewald_recip_ms;
+        if (want_virial)
+            m_result_virial = m_accumulators[0].virial;  // N1
         if (want_pot)
             m_result_coulomb_potentials.swap(m_accumulators[0].coulomb_potentials);
         else
@@ -488,7 +496,7 @@ double FFWorkspace::calculate(bool gradient)
     } else {
         // T>1: Pool + barrier
         for (int t = 0; t < m_num_threads; ++t)
-            m_accumulators[t].reset(m_natoms, gradient, m_store_components, want_pot);
+            m_accumulators[t].reset(m_natoms, gradient, m_store_components, want_pot, want_virial);
 
         std::vector<std::future<void>> futures;
         futures.reserve(m_num_threads - 1);
@@ -512,6 +520,7 @@ double FFWorkspace::calculate(bool gradient)
     if (do_timing) {
         t_post = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
     }
+    m_virial_valid = want_virial;  // N1: components summed in reduce()/the T=1 copy, remainder in postProcess()
 
     // CPU ENERGY TERMS (verbosity >= 3)
     if (CurcumaLogger::get_verbosity() >= 3) {
@@ -612,6 +621,9 @@ void FFWorkspace::reduce()
     m_ewald_real_ms = m_accumulators[0].ewald_real_ms;
     m_ewald_recip_ms = m_accumulators[0].ewald_recip_ms;
     m_result_coulomb_potentials = m_accumulators[0].coulomb_potentials;
+    const bool virial = m_want_virial && m_do_gradient && m_method_type == FFMethodType::GFN_FF;  // N1
+    if (virial)
+        m_result_virial = m_accumulators[0].virial;
     if (m_do_gradient) {
         m_result_gradient = m_accumulators[0].gradient;
         m_dEdcn_total = m_accumulators[0].dEdcn;
@@ -639,6 +651,8 @@ void FFWorkspace::reduce()
         m_ewald_recip_ms += m_accumulators[t].ewald_recip_ms;
         if (m_result_coulomb_potentials.size() == m_natoms && m_accumulators[t].coulomb_potentials.size() == m_natoms)
             m_result_coulomb_potentials += m_accumulators[t].coulomb_potentials;
+        if (virial)
+            m_result_virial += m_accumulators[t].virial;  // N1, partition order
         if (m_do_gradient) {
             m_result_gradient += m_accumulators[t].gradient;
             m_dEdcn_total += m_accumulators[t].dEdcn;
@@ -796,6 +810,11 @@ void FFWorkspace::postProcess(bool gradient)
             if (has_term1b)
                 m_dcn.applyAdd(qtmp, m_result_grad_coulomb, -1.0);
         }
+        // N1 (Nov 2026): the CN chain rule, the Ewald background and the D4 tail parts of the atomic virial
+        if (m_want_virial && m_method_type == FFMethodType::GFN_FF)
+            postProcessVirial(has_term1b, qtmp, tail_cn);
+    } else if (gradient && m_want_virial && m_method_type == FFMethodType::GFN_FF) {
+        postProcessVirial(false, Vector(), false);  // no CN derivative store: background and tail only
     }
     // CPU POST-CN GRADIENT (verbosity >= 3)
     if (gradient) {
@@ -825,4 +844,50 @@ void FFWorkspace::postProcess(bool gradient)
         }
     }
 
+}
+
+// ============================================================================
+// Atomic virial: the parts that are not a kernel sum (Claude Generated, Nov 2026, WP-PERIODIC-NONBONDED N1)
+//
+// CN chain rule: the gradient of every CN-dependent term is G_i += sum_j v_j dCN_j/dx_i (CNDerivStore::applyAdd,
+// entries (i, j, c) with c = dCN_j/dx_i times dlogCN/dcn, plus the diagonal dCN_j/dx_j = -sum_i c). Under a strain
+// the pair vector d = x_i - x_j (minimum image, the one the derivative was built with) scales affinely, so
+//   Xi_ab -= sum_entries v_j d_a c_b
+// (the diagonal entry is the negative row sum and drops out, as the frame origin of every term does). v is the
+// same dEdcn_combined that the gradient uses, split as the gradient components are: bond (dr0/dCN), dispersion
+// (dC6/dCN and the D4 tail), Coulomb (TERM 1b, -qtmp).
+// Ewald background terms ~ 1/V: Xi_ab = (E_bg + E_gbg) delta_ab; the self term is strain-independent.
+// D4 tail at fixed r_c (A3c): E_tail ~ 1/V, so Xi_ab = E_tail delta_ab; its dE/dCN is in the chain rule above.
+// ============================================================================
+void FFWorkspace::postProcessVirial(bool has_term1b, const Vector& qtmp, bool tail_cn)
+{
+    if (ewaldActive() && m_coulomb_enabled)
+        m_result_virial.coulomb_bg += curcuma::ewald::EwaldSum::backgroundVirial(m_ewald_terms);
+    if (m_disp_tail_active)
+        m_result_virial.disp_tail += m_disp_tail_energy * Eigen::Matrix3d::Identity();
+    if (m_dcn.empty() || m_dcn.natoms != m_natoms || m_dEdcn_total.size() != m_natoms)
+        return;
+    const bool pbc = m_cell_bohr.active;
+    Vector v_bond = m_dEdcn_bond_total;
+    Vector v_disp = m_dEdcn_total - m_dEdcn_bond_total;
+    if (tail_cn)
+        v_disp += m_disp_tail_dEdcn;
+    Vector v_coul = has_term1b ? Vector(-qtmp) : Vector(Vector::Zero(m_natoms));
+    Eigen::Matrix3d xb = Eigen::Matrix3d::Zero(), xd = Eigen::Matrix3d::Zero(), xc = Eigen::Matrix3d::Zero();
+    for (const auto& e : m_dcn.pairs) {
+        double d0 = m_geometry(e.i, 0) - m_geometry(e.j, 0);
+        double d1 = m_geometry(e.i, 1) - m_geometry(e.j, 1);
+        double d2 = m_geometry(e.i, 2) - m_geometry(e.j, 2);
+        if (pbc)
+            PBCUtils::applyMinimumImageOrtho(m_cell_bohr, d0, d1, d2);
+        const Eigen::Vector3d d(d0, d1, d2);
+        const Eigen::Vector3d c(e.cx, e.cy, e.cz);
+        const Eigen::Matrix3d outer = d * c.transpose();
+        xb -= v_bond(e.j) * outer;
+        xd -= v_disp(e.j) * outer;
+        xc -= v_coul(e.j) * outer;
+    }
+    m_result_virial.cn_bond += xb;
+    m_result_virial.cn_dispersion += xd;
+    m_result_virial.cn_coulomb += xc;
 }

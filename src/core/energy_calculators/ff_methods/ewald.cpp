@@ -536,6 +536,87 @@ void EwaldSum::realSpaceRangeCached(const EwaldGeometryCache& cache, const Eigen
     }
 }
 
+// ---- Atomic virial (Claude Generated, Nov 2026, WP-PERIODIC-NONBONDED N1)
+// Strain eps_ab (symmetric) at fixed fractional coordinates: r -> (1 + eps) r for every pair vector, V -> V (1 + tr eps),
+// and k -> (1 - eps) k (k = 2 pi n / L stays conjugate to the scaled lattice, so k.r is invariant). Xi_ab = -dE/d(eps_ab).
+//  Real space: E_pair = q_i q_j K(r), dr/d(eps_ab) = d_a d_b / r, so Xi_ab -= q_i q_j K'(r) d_a d_b / r.
+//  Reciprocal: E_k = w_k |S(k)|^2 with w_k = (4 pi/V) exp(-k^2/(4 a^2)) / k^2 and |S|^2 strain-independent;
+//    d(k^2)/d(eps_ab) = -2 k_a k_b and dV/d(eps_ab) = V delta_ab give
+//    d ln w_k / d(eps_ab) = -delta_ab + 2 k_a k_b (1/k^2 + 1/(4 a^2)),  Xi_ab += E_k [delta_ab - 2 k_a k_b (1/k^2 + 1/(4 a^2))].
+//    Trace: Xi += E_k [1 - k^2/(2 a^2)] (the B0 note "E_k [1 - 2 k_a^2 (1/k^2 + 1/(4 a^2))]" per axis is this tensor's
+//    diagonal). Alpha is held fixed (the energy does not depend on it beyond the tolerance).
+//  Self: -(a/sqrt pi) sum q^2, no strain dependence. Background -pi Q^2/(2 a^2 V) and Gaussian background
+//    (pi Q/V) sum q alp: both ~ 1/V, so Xi_ab = E delta_ab (backgroundVirial).
+void EwaldSum::realSpaceVirialRange(const EwaldGeometryCache& cache, const Eigen::VectorXd& charges, int begin, int end,
+    Eigen::Matrix3d& virial) const
+{
+    const Eigen::MatrixXd& P = cache.pos;
+    const bool stored = cache.hasKernel();
+    const Eigen::VectorXd* alp = cache.alp.size() ? &cache.alp : nullptr;
+    const double alpha = m_par.alpha;
+    Eigen::Matrix3d xi = Eigen::Matrix3d::Zero();
+    for (int idx = begin; idx < end; ++idx) {
+        const int i = cache.pairs[idx].first, j = cache.pairs[idx].second;
+        double d[3] = { P(j, 0) - P(i, 0), P(j, 1) - P(i, 1), P(j, 2) - P(i, 2) };
+        PBCUtils::applyMinimumImageOrtho(m_cell, d[0], d[1], d[2]);
+        const double r = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+        double dK;
+        if (stored) {
+            dK = cache.dkernel[idx];
+        } else {
+            pairKernel(r, alpha, alp ? (*alp)(i) + (*alp)(j) : 0.0, alp != nullptr, dK);
+        }
+        const double f = -charges(i) * charges(j) * dK / r;
+        for (int a = 0; a < 3; ++a)
+            for (int b = 0; b < 3; ++b)
+                xi(a, b) += f * d[a] * d[b];
+    }
+    virial += xi;
+}
+
+void EwaldSum::reciprocalVirialRange(const EwaldPhaseTable& table, const Eigen::VectorXd& charges, int k_begin, int k_end,
+    Eigen::Matrix3d& virial) const
+{
+    const int N = table.natoms;
+    if (k_begin >= k_end || N == 0)
+        return;
+    std::vector<double> exr(N), exi(N);
+    const double* q = charges.data();
+    int last_nx = -1, last_ny = 0;
+    const double inv_4a2 = 1.0 / (4.0 * m_par.alpha * m_par.alpha);
+    Eigen::Matrix3d xi = Eigen::Matrix3d::Zero();
+    for (int kidx = k_begin; kidx < k_end; ++kidx) {
+        const KVector& kv = m_kvectors[kidx];
+        if (kv.n[0] != last_nx || kv.n[1] != last_ny) {
+            const size_t ox = static_cast<size_t>(std::abs(kv.n[0])) * N, oy = static_cast<size_t>(std::abs(kv.n[1])) * N;
+            const double sx = kv.n[0] >= 0 ? 1.0 : -1.0, sy = kv.n[1] >= 0 ? 1.0 : -1.0;
+            for (int i = 0; i < N; ++i) {
+                const double xr = table.re[0][ox + i], b = sx * table.im[0][ox + i];
+                const double yr = table.re[1][oy + i], dd = sy * table.im[1][oy + i];
+                exr[i] = xr * yr - b * dd;
+                exi[i] = xr * dd + b * yr;
+            }
+            last_nx = kv.n[0];
+            last_ny = kv.n[1];
+        }
+        const size_t oz = static_cast<size_t>(std::abs(kv.n[2])) * N;
+        const double sz = kv.n[2] >= 0 ? 1.0 : -1.0;
+        double Sr = 0.0, Si = 0.0;
+        for (int i = 0; i < N; ++i) {
+            const double zr = table.re[2][oz + i], zim = sz * table.im[2][oz + i];
+            Sr += q[i] * (exr[i] * zr - exi[i] * zim);
+            Si += q[i] * (exr[i] * zim + exi[i] * zr);
+        }
+        const double ek = kv.weight * (Sr * Sr + Si * Si);
+        const double k2 = kv.k[0] * kv.k[0] + kv.k[1] * kv.k[1] + kv.k[2] * kv.k[2];
+        const double c = 2.0 * (1.0 / k2 + inv_4a2);
+        for (int a = 0; a < 3; ++a)
+            for (int b = 0; b < 3; ++b)
+                xi(a, b) += ek * ((a == b ? 1.0 : 0.0) - c * kv.k[a] * kv.k[b]);
+    }
+    virial += xi;
+}
+
 // ---- 3. Self energy: each Gaussian screening cloud interacts with its own point charge in step 2.
 // ---- 4. Neutralising background for a charged cell (Q != 0); B2: plus the Gaussian background
 //         (pi Q/V) sum_i q_i alp_i (derivation in ewald.h). Claude Generated (Nov 2026)

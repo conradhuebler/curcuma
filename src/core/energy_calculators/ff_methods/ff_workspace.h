@@ -104,6 +104,52 @@ struct FFEnergyComponents {
 };
 
 /**
+ * @brief Atomic virial tensor of the GFN-FF energy per term (Claude Generated, Nov 2026, WP-PERIODIC-NONBONDED N1)
+ *
+ * Xi_ab = -dE/d(eps_ab) under an affine strain of the cell AND all atoms at fixed fractional coordinates
+ * (atomic virial: molecules are deformed with the cell). Each kernel contracts the positions it actually used
+ * (its local minimum-image frame, see placeMinimumImage) with the gradient rows it wrote: Xi_ab -= x_a G_b, summed
+ * over the atoms of the term; the sum of a term's gradient rows is zero, so the frame origin drops out. Pair terms
+ * give Xi_ab -= d_a G_{j,b} with d = x_j - x_i (minimum image). The parts that are not a kernel sum (CN chain rule,
+ * Ewald background terms, D4 tail) are added in postProcess(). Units: Eh. Only filled when setWantVirial(true);
+ * the default path does not read or write it (kernels are instantiated without the virial code).
+ */
+struct FFVirialComponents {
+    Eigen::Matrix3d bond, angle, dihedral, inversion, stors;
+    Eigen::Matrix3d dispersion;   ///< D4 (and D3) pair kernel
+    Eigen::Matrix3d disp_tail;    ///< homogeneous tail: E_tail * I (fixed r_c, E_tail ~ 1/V)
+    Eigen::Matrix3d repulsion;    ///< bonded + non-bonded repulsion
+    Eigen::Matrix3d coulomb;      ///< Coulomb pair term (plain, or Ewald real + reciprocal)
+    Eigen::Matrix3d coulomb_bg;   ///< Ewald neutralising and Gaussian background: (E_bg + E_gbg) * I
+    Eigen::Matrix3d hbond, xbond, batm, atm;
+    Eigen::Matrix3d cn_bond, cn_dispersion, cn_coulomb; ///< CN chain rule, attributed as the gradient components are
+
+    void reset()
+    {
+        for (Eigen::Matrix3d* m : { &bond, &angle, &dihedral, &inversion, &stors, &dispersion, &disp_tail, &repulsion,
+                 &coulomb, &coulomb_bg, &hbond, &xbond, &batm, &atm, &cn_bond, &cn_dispersion, &cn_coulomb })
+            m->setZero();
+    }
+    FFVirialComponents& operator+=(const FFVirialComponents& o)
+    {
+        bond += o.bond; angle += o.angle; dihedral += o.dihedral; inversion += o.inversion; stors += o.stors;
+        dispersion += o.dispersion; disp_tail += o.disp_tail; repulsion += o.repulsion;
+        coulomb += o.coulomb; coulomb_bg += o.coulomb_bg; hbond += o.hbond; xbond += o.xbond;
+        batm += o.batm; atm += o.atm; cn_bond += o.cn_bond; cn_dispersion += o.cn_dispersion; cn_coulomb += o.cn_coulomb;
+        return *this;
+    }
+    /// Per-energy-term totals (kernel part plus its CN chain-rule part), matching the FFEnergyComponents fields
+    Eigen::Matrix3d bondTotal() const { return bond + cn_bond; }
+    Eigen::Matrix3d dispersionTotal() const { return dispersion + disp_tail + cn_dispersion; }
+    Eigen::Matrix3d coulombTotal() const { return coulomb + coulomb_bg + cn_coulomb; }
+    Eigen::Matrix3d total() const
+    {
+        return bondTotal() + angle + dihedral + inversion + stors + dispersionTotal() + repulsion + coulombTotal()
+            + hbond + xbond + batm + atm;
+    }
+};
+
+/**
  * @brief Per-term timing for FF energy calculation (CPU-sum across threads)
  *
  * Claude Generated (May 2026): Tracks ms spent in each calc* function.
@@ -162,12 +208,16 @@ struct FFAccumulator {
     double ewald_real = 0.0, ewald_recip = 0.0;
     double ewald_real_ms = 0.0, ewald_recip_ms = 0.0;  ///< P1 (Nov 2026): CPU time of the two Ewald parts in this partition
     Vector coulomb_potentials;
+    /// N1 (Nov 2026): atomic virial of this partition; written only by the VIRIAL kernel instantiations
+    FFVirialComponents virial;
 
-    void reset(int natoms, bool do_gradient, bool store_components, bool want_potentials = false) {
+    void reset(int natoms, bool do_gradient, bool store_components, bool want_potentials = false, bool want_virial = false) {
         energy.reset();
         timings.reset();
         ewald_real = ewald_recip = 0.0;
         ewald_real_ms = ewald_recip_ms = 0.0;
+        if (want_virial)
+            virial.reset();
         if (want_potentials) {
             if (coulomb_potentials.size() != natoms) coulomb_potentials.resize(natoms);
             coulomb_potentials.setZero();
@@ -404,6 +454,19 @@ public:
      * \return E_pair (Eh). Throws without setEwald() or without per-atom alp. */
     double evaluateEwaldCoulomb(const Matrix& geometry_bohr, const Vector& charges, bool gradient,
                                 Matrix* gradient_out, curcuma::ewald::EwaldEnergyTerms* terms_out);
+    // === Atomic virial (Claude Generated, Nov 2026, WP-PERIODIC-NONBONDED N1) ===
+    /// Request the virial tensor Xi_ab = -dE/d(eps_ab) (Eh) with every gradient evaluation. Off (default): every
+    /// kernel runs its non-virial instantiation and nothing here costs anything. Meaningful only for GFN-FF with a
+    /// periodic cell (the minimum-image frames define the atomic virial); without a cell the sum is the plain
+    /// -sum_a x_a . G_a of the cluster, which is reported but not used.
+    void setWantVirial(bool v) { m_want_virial = v; }
+    bool wantVirial() const { return m_want_virial; }
+    /// True after calculate(true) with the virial requested; evaluateEwaldCoulomb() (GPU hybrid) clears it.
+    bool virialValid() const { return m_virial_valid; }
+    /// Xi (3x3, Eh) of the last calculate(true): sum of all components (definition at FFVirialComponents).
+    Eigen::Matrix3d virial() const { return m_result_virial.total(); }
+    const FFVirialComponents& virialComponents() const { return m_result_virial; }
+
     /// Per-atom Coulomb self-energy inputs (setCoulombSelfEnergyParams order): tests copy them between instances.
     const Vector& coulombChiBase() const { return m_coul_chi_base; }
     const Vector& coulombGam() const { return m_coul_gam; }
@@ -582,6 +645,10 @@ private:
     Vector m_result_coulomb_potentials;
     double m_ewald_setup_ms = 0.0;
     double m_ewald_real_ms = 0.0, m_ewald_recip_ms = 0.0;  ///< P1 profile, CPU sums over partitions
+    /// N1 (Nov 2026): atomic virial requested / result of the last calculate(true) / result is from a full calculate()
+    bool m_want_virial = false;
+    bool m_virial_valid = false;
+    FFVirialComponents m_result_virial;
 
     // Term-enable flags
     bool m_dispersion_enabled = true;
@@ -647,6 +714,9 @@ private:
     void reduce();
 
     // === GFN-FF energy term calculators (ported from ForceFieldThread) ===
+    // N1 (Nov 2026): each kernel is a template on VIRIAL; the false instantiation is the former kernel statement for
+    // statement (if constexpr blocks discarded), the true one also contracts frame positions with gradient rows.
+    // The non-template name dispatches on m_want_virial outside the loops.
     void calcBonds(int p);
     void calcAngles(int p);
     void calcDihedrals(int p);
@@ -666,6 +736,24 @@ private:
     void calcATMGradient(int p);
     void calcBATM(int p);
     void computeHBCoordinationNumbers(int p);
+    template <bool VIRIAL> void calcBondsImpl(int p);
+    template <bool VIRIAL> void calcAnglesImpl(int p);
+    template <bool VIRIAL> void calcDihedralsImpl(int p);
+    template <bool VIRIAL> void calcExtraTorsionsImpl(int p);
+    template <bool VIRIAL> void calcInversionsImpl(int p);
+    template <bool VIRIAL> void calcSTorsionsImpl(int p);
+    template <bool VIRIAL> void calcDispersionImpl(int p);
+    template <bool VIRIAL> void calcD4DispersionImpl(int p);
+    template <bool VIRIAL> void calcBondedRepulsionImpl(int p);
+    template <bool VIRIAL> void calcNonbondedRepulsionImpl(int p);
+    template <bool VIRIAL> void calcCoulombImpl(int p);
+    template <bool VIRIAL> void calcCoulombEwaldImpl(int p);
+    template <bool VIRIAL> void calcHydrogenBondsImpl(int p);
+    template <bool VIRIAL> void calcHalogenBondsImpl(int p);
+    template <bool VIRIAL> void calcATMGradientImpl(int p);
+    template <bool VIRIAL> void calcBATMImpl(int p);
+    /// N1: CN chain rule, Ewald background and D4 tail parts of the virial (postProcess, gradient calls only)
+    void postProcessVirial(bool has_term1b, const Vector& qtmp, bool tail_cn);
 
     // === UFF/QMDFF energy term calculators (Claude Generated March 2026) ===
     void calcUFFBonds(int p);

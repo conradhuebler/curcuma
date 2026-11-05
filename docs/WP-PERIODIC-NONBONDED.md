@@ -1,12 +1,13 @@
 # WP: Periodic non-bonded interactions (minimum image)
 
-**Status (2026-11-03, after A6): native CPU GFN-FF with an orthorhombic unit cell is periodic** (MIC in CN, D4,
-repulsion, bonded, HB/XB, topology; Ewald Coulomb and EEQ with `coulomb_ewald`, A1-B3, P1). With such a cell
+**Status (2026-11-05, after N1): native CPU GFN-FF with an orthorhombic unit cell is periodic** (MIC in CN, D4,
+repulsion, bonded, HB/XB, topology; Ewald Coulomb and EEQ with `coulomb_ewald`, A1-B3, P1) **and has an analytic
+atomic virial / instantaneous pressure** (N1, `-md -compute_pressure true`). With such a cell
 `wall_potential = pbc` in a box is the pure cell wrap, without clearance test or reflection (A6). The stopgap
 described below **stays** for everything that has no periodic energy: no cell, the spherical container, every other
 method (gfn1/gfn2, external xtb/tblite/Ulysses, UFF, QMDFF, CG) and GFN-FF with `coulomb_ewald false`; for those a
-cell is not wrapped and the COM removal is the vacuum one (A6b, matrix there). Open: GPU paths with a cell (CPU
-fallback), triclinic cells, NPT.
+cell is not wrapped and the COM removal is the vacuum one (A6b, matrix there). Open: GPU paths with a cell (S2 hybrid
+opt-in, no virial there), triclinic cells, the barostat (N2).
 
 ## What exists today
 
@@ -486,9 +487,9 @@ water (0.1003 / A^3), scan of 8 r_cut values from 8 Bohr to L/2:
 Scaling exponent 1.54 (1000 to 6000 and 3000 to 6000), as expected for O(N^1.5) with optimal alpha. The k loop in
 `EwaldSum::evaluate` (N_k x N complex products) is the place to parallelise (over k with per-thread S, or over atoms).
 
-- **Virial (derived here, not implemented, not tested)**: diagonal strain of an orthorhombic box, W_aa = -dE/d eps_aa:
+- **Virial (derived here; implemented and FD-tested in N1, 2026-11-05)**: diagonal strain of an orthorhombic box, W_aa = -dE/d eps_aa:
   real `-sum_pairs q_i q_j K'(r) d_a^2 / r`; reciprocal per k `E_k [1 - 2 k_a^2 (1/k^2 + 1/(4a^2))]`; self 0;
-  background `E_bg`. Needed for block C (NPT).
+  background `E_bg`. The full tensor and its check are in section N1.
 - **Not implemented**: PME/particle mesh, triclinic cells, virial/pressure, vacuum (dipole) boundary term, slab
   correction, threading, cached geometry between calls.
 - **Not tested**: very small cells with r_cut far below the nearest pair distances, a few close pairs (r << 1 Bohr),
@@ -1466,3 +1467,138 @@ DOF follows the applied constraints (16 + 0, the defect above); torn input: 15 c
 Not tested: triclinic cells with RATTLE (GFN-FF refuses them), RATTLE with `topology_mode react` (refused by the PARAM text),
 restart files with RATTLE and a cell, molecules other than water, more than 180 atoms with RATTLE, ROCm. Human production testing
 pending.
+
+## N1 atomic virial and instantaneous pressure of the periodic GFN-FF energy (2026-11-05, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+On `feature/bulk` (base `71761fad`), CPU only. Prerequisite for a barostat (N2, not part of this); no cell changes here.
+
+### Definition and formulas
+
+- **Atomic virial** `Xi_ab = -dE/d(eps_ab)` under an affine strain of the cell AND of every atom at fixed fractional
+  coordinates (molecules are deformed with the cell, no molecular/COM correction). Isotropic pressure
+  `P = (2 K + tr Xi) / (3 V)` with K the kinetic energy of all atoms and V the orthorhombic cell volume; atomic units
+  Eh, Bohr, Eh/Bohr^3; `1 Eh/Bohr^3 = 2.94210157e13 Pa = 2.94210157e8 bar` (CODATA 2018, `CurcumaUnit::Pressure`,
+  checked in the test to 1e-8). The full 3x3 tensor is accumulated (as cheap as the trace); SimpleMD uses the trace.
+- **Rule for every kernel** (`ff_workspace_gfnff.cpp`, `VirialTermRows`, `virialPair`): a term evaluated at the positions
+  `x_a^frame` of its local minimum-image frame (A4a/A4b; plain positions without a cell) gives
+  `Xi_ab -= sum_a x_{a,a}^frame G_{a,b}` with the gradient rows G the term wrote; the row sum of one term is zero, so the
+  frame origin drops out (positions are taken relative to the first atom of the term). Pair terms:
+  `Xi_ab -= d_a G_{i,b}` with `d = x_i - x_j` as the kernel formed it (minimum image). Applied to bonds (incl. the
+  HB-CN modulation, frame B next to H), angles, torsions (incl. extra torsions), inversions, sTors, D4 pair term, bonded
+  and non-bonded repulsion, HB (frame on H: A, B, neighbours of B, C and D as the kernel images them; an atom in two
+  roles is counted once), XB (frame on X), BATM and ATM (plain positions, as their energies), plain Coulomb (cluster).
+- **CN chain rule** (`FFWorkspace::postProcessVirial`): the gradient `G_i += sum_j v_j dCN_j/dx_i` from the
+  `CNDerivStore` pair entries (i, j, c) gives `Xi_ab -= sum_entries v_j d_a c_b` with `d = x_i - x_j` (minimum image, the
+  vector the derivative was built with); the diagonal entry is the negative row sum and drops out. `v` is the same
+  `dEdcn_combined` as in the gradient, split as the gradient components: bond (dr0/dCN), dispersion (dC6/dCN of the D4
+  pair term and the D4 tail), Coulomb (TERM 1b, chi(CN), `-qtmp`).
+- **Coulomb by Ewald** (`EwaldSum::realSpaceVirialRange`, `reciprocalVirialRange`, `backgroundVirial`; derivation in
+  `ewald.cpp`): strain at fixed fractional coordinates scales every pair vector by (1 + eps), V by (1 + tr eps) and
+  k by (1 - eps) (k.r invariant). Real space `Xi_ab -= q_i q_j K'(r) d_a d_b / r` with the stored P1 kernel derivative
+  (point kernel minus the Gaussian correction). Reciprocal: `E_k = w_k |S(k)|^2`, `w_k = (4 pi/V) exp(-k^2/4a^2)/k^2`,
+  `d(k^2)/d(eps_ab) = -2 k_a k_b`, `dV/d(eps_ab) = V delta_ab`, hence
+  `Xi_ab += sum_k E_k [delta_ab - 2 k_a k_b (1/k^2 + 1/(4 a^2))]`, trace `sum_k E_k [1 - k^2/(2 a^2)]` (the B0 note per
+  axis is this tensor's diagonal; sign and factors confirmed by the FD gate below). Self term `-(a/sqrt pi) sum q^2`: 0.
+  Background `-pi Q^2/(2 a^2 V)` and Gaussian background `(pi Q/V) sum q alp` are ~ 1/V: `Xi_ab = E delta_ab`, trace 3E.
+  Charges are fixed (Hellmann-Feynman: the Phase-2 charges are stationary with the constraints, B3), alpha is fixed.
+- **D4 tail** (A3c) at fixed absolute r_c: `E_tail ~ 1/V`, so `Xi_ab = E_tail delta_ab` (trace 3 E_tail), plus its dE/dCN
+  through the chain rule. Note: with the default `dispersion_cutoff_bohr` 0 the evaluation radius is `nextafter(L_min/2)`
+  and would follow a strain; the energy the virial belongs to is the one with r_c held fixed (the test sets an absolute
+  cutoff; a barostat must either hold r_c fixed or differentiate r_c(L) as well).
+- **Not in the virial**: the ensemble charge blend (`frag_charge_model ensemble`, geometry-dependent window weights),
+  ALPB, ATM (no minimum image): `GFNFF::setWantVirial(true)` refuses them with the reason; without a cell or with
+  `coulomb_ewald false` likewise. The GPU hybrid (S2) evaluates the local terms on the device and produces no virial
+  (`virialValid()` false).
+
+### Implementation
+
+- Every GFN-FF kernel of `FFWorkspace` is a `template <bool VIRIAL>` (`calc*Impl`); the non-template name dispatches on
+  `setWantVirial()` outside the loops. The `false` instantiation is the former kernel statement for statement (`if
+  constexpr` blocks discarded, the row recorder is an empty struct there), the `true` one records the accumulator rows
+  of the term's atoms before the writes and contracts the difference afterwards. Per-partition `FFVirialComponents`
+  (per term, plus `cn_bond/cn_dispersion/cn_coulomb`, `coulomb_bg`, `disp_tail`), reduced in partition order; the Ewald
+  virial as separate passes over the same pair/k ranges (the energy/gradient loops of P1 are untouched).
+- `GFNFF::setWantVirial()`, `virial()` (3x3, Eh), `virialComponents()`, `virialValid()`, `cellVolumeBohr3()`;
+  `FFWorkspace::evaluateEwaldCoulomb()` (hybrid) clears `virialValid()`. Plugin ABI version 3 (GFNFF, FFWorkspace and
+  FFAccumulator gained members; CUDA plugins must be rebuilt, not done here).
+- **SimpleMD** `-compute_pressure true` (PARAM, default false, no effect without a cell): after each `FastEnergy()`
+  `readVirial()` takes tr Xi from `gfnffInstance()`; `AverageQuantities()` forms `P = (2 Ekin + tr Xi)/(3 V)` in bar;
+  the status line gains the columns `P`, `<P>` (bar), `V` (A^3), `rho` (g/cm^3, from the atom masses). Refused at
+  set-up with RATTLE ("pressure with constraints not implemented"), with `cleanenergy`, with a non-periodic energy; a
+  GPU-evaluated energy throws at the first step ("the energy of this step carries no atomic virial"). With
+  `-gpu cuda` and a cell without `gpu_periodic` the A3b/S0 guards already run the CPU method, so the pressure works
+  (counted fallback as before).
+
+### Tests (`ctest -R pbc_virial`, `test_cases/unit/test_pbc_virial.cpp`)
+
+Protocol fixed before the first run: Ewald `alpha` 0.32, `r_cut` 19, `ewald_tolerance` 1e-14 (k set converged far below
+the FD noise, no parameter follows L), `dispersion_cutoff_bohr` 20 (absolute r_c), `hb_update_force_every` 1,
+`hb_min_pair_energy_eh` 0, `eeq_ewald_tol` 1e-14 (dense EEQ below 1000 atoms anyway), `frag_charge_model reference`,
+L = 44 Bohr. FD: `Xi_FD = -[E(+eps) - E(-eps)]/(2 eps)` with `L -> L(1+eps)`, `x -> x(1+eps)` for every atom, a fresh
+instance per strained geometry (topology, lists and charges re-derived), eps = 1e-5 and 2e-5 (Richardson). Criterion
+`|Xi_an - Xi_FD(1e-5)| / max(|Xi_FD|, 1e-6 Eh) <= 1e-6` per term and total. Per term means per energy component
+(there are no bond/angle/torsion switches in GFN-FF; dispersion/repulsion/hbond/coulomb switches exist but are not
+needed: each component energy is a function of the geometry on its own, and the Coulomb component is the EEQ
+functional, so its FD with re-solved charges is the fixed-charge derivative). Cutoff events: the number of pairs within
+20 Bohr (D4 and repulsion radius), HB and XB triples is counted at every point of the stencil; in all five systems
+they were constant (736/826/276/390 pairs, 163/255/358/550 triples, 3 XB), so no cutoff-jump contribution entered
+any FD value here (a pair crossing r_c = 20 Bohr under eps = 2e-5 would need a pair within 4e-4 Bohr of it; the D4
+pair energy there is ~1e-7 Eh, i.e. a jump of ~5e-3 Eh in Xi_FD if it happened).
+
+| term | 20 H2O (60 atoms) | 60 H2O (180, 4 threads) | H3O+(H2O)2 + 18 H2O, Q=+1 | caffeine | acetic dimer + F-I...pyridine |
+|---|---|---|---|---|---|
+| bond (+ dr0/dCN, HB-CN) | 4.9e-10 (Xi -2.62) | 4.6e-10 (-7.86) | 5.2e-10 (-2.74) | 9.1e-10 (-2.97) | 4.0e-10 (-3.22) |
+| angle | 1.8e-11 (0.022) | 2.0e-11 (0.067) | 4.2e-10 (0.036) | 2.1e-10 (0.062) | 6.9e-11 (0.122) |
+| dihedral (+ extra) | 0 | 0 | 0 | 1.7e-9 (8.6e-3) | 1.8e-9 (0.077) |
+| inversion | 0 | 0 | 0 | 0 (none) | 1.4e-9 (0.020) |
+| sTors | 0 (none in any system) | 0 | 0 | 0 | 0 |
+| dispersion pair + tail (+ dC6/dCN) | 4.3e-10 (-4.1e-3) | 2.5e-10 (-0.059) | 4.3e-10 (-5.0e-3) | 2.2e-9 (-0.019) | 2.7e-10 (-0.020) |
+| repulsion (bonded + non-bonded) | 1.5e-9 (5.91) | 1.5e-9 (17.8) | 1.5e-9 (6.50) | 1.8e-9 (3.18) | 1.7e-9 (3.38) |
+| Coulomb (Ewald pair + bg + self + TERM 1b) | 1.7e-10 (-2.78) | 3.0e-10 (-8.41) | 6.9e-11 (-2.93) | 2.0e-9 (-0.144) | 4.2e-10 (-0.397) |
+| hbond | 3.3e-10 (-2.6e-3) | 5.2e-10 (-0.035) | 1.1e-9 (0.046) | 7.1e-11 (-2.6e-7) | 1.8e-9 (0.021) |
+| xbond | 0 | 0 | 0 | 0 | 2.7e-9 (-2.2e-3) |
+| batm | 0 | 0 | 0 | 1.8e-9 (-0.010) | 1.8e-9 (-0.038) |
+| **total** (eps 1e-5 / Richardson) | 1.3e-8 / 8.6e-11 (0.527) | 1.4e-8 / 8.0e-10 (1.479) | 8.9e-9 / 2.7e-10 (0.905) | 8.6e-8 / 3.0e-9 (0.102) | 1.5e-7 / 6.8e-9 (-0.050) |
+
+Relative deviation at eps = 1e-5 (tr Xi in Eh in brackets). The per-term values are 1e-9-level: the FD truncation
+of a ~3 Eh term at eps = 1e-5 (Richardson brings every term to <= 1.1e-9). The totals are worse in relative terms
+because tr Xi_total is a small difference of bond/repulsion/Coulomb traces of 3-18 Eh (composite: -0.050 from +-3.4),
+and Richardson reduces them 20-30x, so the residual is truncation, not a missing term. Every tensor is symmetric to
+<= 9.4e-16 Eh. (b) 20 H2O: translation by (L,-L,2L) plus an arbitrary shift 1.2e-13 rel (components 2.6e-14 abs),
+atom-wise wrap (5 coordinates moved) 2.5e-14, 2x1x1 supercell = 2 x cell 1.9e-13 rel (components 9.4e-14), 4 vs 1
+threads 9.9e-14. (c) with a cell the gradient and the energy with the virial requested are bitwise those without;
+without a cell and with `coulomb_ewald false` the request is refused with the reason. (d) 60 H2O random packing in
+L = 44 Bohr (0.142 g/cm^3, not equilibrated, not a liquid): tr Xi = 1.479 Eh, virial pressure 1702.5 bar, kinetic
+part at 300 K (3N-3 DOF) 587.4 bar, sum 2290 bar; per term: repulsion +20465, bond -9051, Coulomb -9679, angle +77,
+dispersion -68, HB -41 bar. 20 H2O: 606 bar (virial part). Numbers reported, not assessed.
+
+### CLI, cost, bitwise checks
+
+- `-md -compute_pressure true` on the D1 box60 (60 H2O, L 44 Bohr, 0.142 g/cm^3, 4 threads, dt 0.5 fs): columns `P <P> V rho`
+  = `2375.75 2375.75 12622.966 0.14219` at step 0 (virial part 1769 bar at step 2, kinetic 2 K/(3V) ~ 600 bar at 298 K),
+  swinging between -1580 and +1777 bar over the first 10 fs of an unrelaxed packing. The P1/S2 box of 970 H2O in
+  L 58 Bohr (2910 atoms, 1.004 g/cm^3, random rigid packing at 1.7 A, NOT a liquid): P = 45361 bar at step 0, -7700
+  at 5 fs, +30592 at 10 fs (T 298 -> 728 K: the packing is relaxing). Numbers reported, not assessed.
+- Cost: CLI MD step on the 2910-atom box (4 threads, difference of 40- and 20-step runs, 3 repetitions, median):
+  87.8 ms without and 92.9 ms with `compute_pressure` (+5.1 ms = the Ewald virial passes (real + reciprocal, the
+  reciprocal one re-forms S(k) per k) and the row recorders of the local terms; the pair/k loops of the energy are
+  untouched). With `compute_pressure false` the kernels run their non-virial instantiations: zero cost.
+- `-gpu cuda` with a cell and `compute_pressure`: the A3b/S0 guards keep the CPU method (no plugin present here:
+  "GPU plugin not present, calculation on the CPU", counted fallback), pressure columns as on the CPU (1769 bar at
+  step 2, equal to the CPU run). The hybrid path (`gpu_periodic`, plugin present) was NOT run (no CUDA plugin built
+  from this tree); by construction it throws at the first step ("the energy of this step carries no atomic virial").
+  `-rattle 2 -compute_pressure true`: `[ERROR] compute_pressure: pressure with constraints not implemented (rattle)`,
+  exit 1. No cell: a verbosity-1 warning, the run continues with the 15 standard columns.
+- **Bitwise** (binary saved before N1): no cell, `-sp -dump_gradient` md5 of benzene, caffeine,
+  methyl-a-d-glucopyranoside, water8, hydronium-water2 (+1), urea-water197, peo201-water500 at 1 and 4 threads
+  14/14 identical (the `false` template instantiations); with a cell and the default `compute_pressure false`:
+  `-sp -dump_gradient` of box60 and the 2910-atom box md5 identical, `-md` 200 steps box60 (also with `-rattle 2`)
+  and 100 steps 2910-atom box: energy table, trajectory and last frame md5 identical; no-cell MD caffeine/water8
+  200 steps identical.
+- `scripts/check_docs.py`: the 9 known errors only. CPU `ctest -j1 -R 'gfnff|frag|eeq|simplemd|pbc|ewald|react|restart|md_|gpu|plugin|molecule'`:
+  135 tests, 131 passed, 4 skipped (GPU), 0 failed; `pbc_virial` 1.3 s (dense EEQ, 5 systems).
+- **Not tested**: the GPU hybrid with the virial request (see above), sTors under a cell (no structure), HB case 4,
+  charged boxes under the ensemble model (refused), the pressure during a long MD (only 20 steps here), triclinic
+  cells (refused by GFN-FF), `topology_mode react` with the virial (the react rebuild swaps the workspace lists; the
+  virial flag survives `rebuildInteractionLists`, not run), the kinetic contribution with COM removal (K includes all
+  atoms, the 3 removed DOF are not corrected). Human production testing pending.

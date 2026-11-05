@@ -2687,6 +2687,25 @@ public:
     /// Claude Generated (Nov 2026, A3c): homogeneous long-range D4 tail (0 without a cell or with dispersion_tail false)
     double DispersionTailEnergy() const;
 
+    // === Atomic virial (Claude Generated, Nov 2026, WP-PERIODIC-NONBONDED N1) ===
+    /// Request Xi_ab = -dE/d(eps_ab) (Eh; affine strain of cell and atoms at fixed fractional coordinates) with every
+    /// gradient call. Available for the periodic CPU path only: a cell with the Ewald Coulomb/EEQ (coulomb_ewald),
+    /// no ensemble charge blend, no implicit solvent, no ATM; otherwise throws (initialised instance) or the first
+    /// Calculation() does. Off by default: the kernels then run their non-virial instantiations.
+    void setWantVirial(bool v);
+    bool wantVirial() const { return m_want_virial; }
+    /// Empty when the virial can be computed on this instance, else the reason (for callers that want to report it).
+    std::string virialUnavailableReason() const;
+    /// True when the last Calculation(true) produced the virial on the CPU workspace (false: not requested, no cell,
+    /// energy-only call, or the GPU hybrid that evaluates the local terms elsewhere).
+    bool virialValid() const;
+    /// Xi (3x3, Eh) of the last gradient call; zero unless virialValid(). Pressure: P = (2 K + tr Xi) / (3 V).
+    Eigen::Matrix3d virial() const;
+    /// Per-term split of the same tensor (nullptr unless virialValid()).
+    const FFVirialComponents* virialComponents() const;
+    /// Volume of the orthorhombic cell in Bohr^3 (0 without a cell).
+    double cellVolumeBohr3() const;
+
     /**
      * @brief Get Coulomb electrostatic energy component
      * @return Electrostatic energy or 0 if not calculated
@@ -3204,6 +3223,8 @@ private:
     bool m_implicit_coulomb_pairs = false; ///< GPU enumerates Coulomb pairs; skip host list
     bool m_print_timing = true;     ///< Print init timing summary at verbosity >= 1
     bool m_dispersion_tail = true;  ///< Nov 2026 (A3c): PARAM dispersion_tail (periodic cell only)
+    bool m_want_virial = false;     ///< Nov 2026 (N1): atomic virial requested (setWantVirial)
+    bool m_atm_enabled_for_virial_check() const;  ///< N1: dispersion_atm read for virialUnavailableReason()
     bool m_coulomb_ewald = true;    ///< Nov 2026 (B2/B3): PARAM coulomb_ewald (periodic cell only; default true since B3)
     bool m_gpu_periodic = false;    ///< Nov 2026 (S1): PARAM gpu_periodic (CUDA GFN-FF with a cell, opt-in; ABI version 2)
     curcuma::ewald::EwaldParameters m_ewald_params;  ///< Nov 2026 (B3): parameters shared by the EEQ matrix and the Coulomb energy, set in configurePeriodicEwald()

@@ -149,11 +149,63 @@ static inline void placeChainOfFour(const PBCUtils::OrthoCell& cell, const GeoGr
 }
 
 // ============================================================================
+// Atomic virial of one term (Claude Generated, Nov 2026, WP-PERIODIC-NONBONDED N1)
+//
+// Xi_ab = -dE/d(eps_ab) at fixed fractional coordinates. For a term whose energy depends on the positions
+// x_a^frame it was evaluated with (the kernel's image frame; plain positions without a cell), a strain moves every
+// frame position affinely, so dE_term/d(eps_ab) = sum_a x_{a,a}^frame G_{a,b}, i.e. Xi_ab -= x_a G_b over the
+// atoms of the term with the gradient rows G the term wrote. The row sum of one term is zero (translation
+// invariance), so the origin of the frame drops out; positions are taken relative to the first atom to keep the
+// products small. VirialTermRows records the accumulator rows before the term and reads the difference after it,
+// so every write site of a kernel is covered without touching the kernel's arithmetic. An atom listed twice (an
+// HB neighbour of B that is also the donor A) is counted once with its first frame position; the frames agree
+// there (A4b closure). Pair kernels use virialPair(): Xi_ab -= d_a G_{i,b} with d = x_i - x_j (minimum image).
+// ============================================================================
+struct VirialTermRows {
+    struct Entry {
+        int atom;
+        Eigen::Vector3d pos;
+        Eigen::RowVector3d before;
+    };
+    std::vector<Entry> e;
+    void begin() { e.clear(); }
+    void add(int atom, const Eigen::Vector3d& pos, const GeoGradMatrix& grad)
+    {
+        for (const Entry& x : e)
+            if (x.atom == atom)
+                return;
+        e.push_back({ atom, pos, grad.row(atom) });
+    }
+    void finish(const GeoGradMatrix& grad, Eigen::Matrix3d& xi) const
+    {
+        if (e.empty())
+            return;
+        const Eigen::Vector3d origin = e[0].pos;
+        for (const Entry& x : e) {
+            const Eigen::RowVector3d dG = grad.row(x.atom) - x.before;
+            xi.noalias() -= (x.pos - origin) * dG;
+        }
+    }
+};
+
+/// Xi_ab -= d_a G_b for a pair term: d = x_i - x_j as the kernel formed it, G = gradient row added to atom i (atom j gets -G).
+static inline void virialPair(Eigen::Matrix3d& xi, const Eigen::Vector3d& d_ij, const Eigen::Vector3d& grad_i)
+{
+    xi.noalias() -= d_ij * grad_i.transpose();
+}
+
+/// The row recorder exists only in the VIRIAL instantiation; the other gets an empty struct (no object, no code).
+struct NoVirialRows { };
+template <bool V> struct VirialRowsOf { using type = NoVirialRows; };
+template <> struct VirialRowsOf<true> { using type = VirialTermRows; };
+
+// ============================================================================
 // Bond Stretching (GFN-FF exponential potential)
 // Reference: Fortran gfnff_engrad.F90:675-721
 // ============================================================================
 
-void FFWorkspace::calcBonds(int p)
+template <bool VIRIAL>
+void FFWorkspace::calcBondsImpl(int p)
 {
     auto& acc = m_accumulators[p];
     auto [begin, end] = m_partitions[p].bonds;
@@ -211,6 +263,11 @@ void FFWorkspace::calcBonds(int p)
             double dEdr = -2.0 * alpha * dr * energy;
             acc.gradient.row(bond.i) += dEdr * derivate.row(0);
             acc.gradient.row(bond.j) += dEdr * derivate.row(1);
+            if constexpr (VIRIAL) {  // N1: d = x_i - x_j (frame), G_i = dEdr * derivate.row(0)
+                const Eigen::Vector3d d(vi(0) - vj(0), vi(1) - vj(1), vi(2) - vj(2));
+                const Eigen::Vector3d gi = dEdr * Eigen::Vector3d(derivate(0, 0), derivate(0, 1), derivate(0, 2));
+                virialPair(acc.virial.bond, d, gi);
+            }
 
             // HB alpha-modulation chain-rule gradient
             if (bond.nr_hb >= 1) {
@@ -222,6 +279,14 @@ void FFWorkspace::calcBonds(int p)
                         const auto& hbg = m_hb_grad_entries[m_hb_grad_list[k]];
                         acc.gradient.row(H) += zz * hbg.dCN_dH.transpose();
                         acc.gradient.row(hbg.B_atom) += zz * hbg.dCN_dB.transpose();
+                        if constexpr (VIRIAL) {  // N1: B as the image next to H (computeHBCoordinationNumbers); G_B = zz dCN_dB
+                            double d0 = m_geometry(hbg.B_atom, 0) - m_geometry(H, 0);
+                            double d1 = m_geometry(hbg.B_atom, 1) - m_geometry(H, 1);
+                            double d2 = m_geometry(hbg.B_atom, 2) - m_geometry(H, 2);
+                            if (pbc)
+                                PBCUtils::applyMinimumImageOrtho(m_cell_bohr, d0, d1, d2);
+                            virialPair(acc.virial.bond, Eigen::Vector3d(d0, d1, d2), Eigen::Vector3d(zz * hbg.dCN_dB));
+                        }
                     }
                 }
             }
@@ -246,7 +311,8 @@ void FFWorkspace::calcBonds(int p)
 // Reference: Fortran gfnff_engrad.F90:857-916
 // ============================================================================
 
-void FFWorkspace::calcAngles(int p)
+template <bool VIRIAL>
+void FFWorkspace::calcAnglesImpl(int p)
 {
     auto& acc = m_accumulators[p];
     auto [begin, end] = m_partitions[p].angles;
@@ -271,6 +337,7 @@ void FFWorkspace::calcAngles(int p)
     GeoGradMatrix loc;
     if (pbc) loc.resize(3, 3);
     const GeoGradMatrix& G = pbc ? loc : m_geometry;
+    typename VirialRowsOf<VIRIAL>::type rows;  // N1
 
     for (int idx = begin; idx < end; ++idx) {
         const auto& angle = m_angles[idx];
@@ -341,9 +408,17 @@ void FFWorkspace::calcAngles(int p)
             Vector grad_j = dedtheta * damp * Vector(derivate.row(1));
             Vector grad_k = dedtheta * damp * Vector(derivate.row(2));
 
+            if constexpr (VIRIAL) {  // N1: frame positions i, j, k against the rows written below
+                rows.begin();
+                rows.add(angle.i, Eigen::Vector3d(i.transpose()), acc.gradient);
+                rows.add(angle.j, Eigen::Vector3d(j.transpose()), acc.gradient);
+                rows.add(angle.k, Eigen::Vector3d(k.transpose()), acc.gradient);
+            }
             acc.gradient.row(angle.i) += (grad_i + term1).transpose();
             acc.gradient.row(angle.j) += (grad_j - term1 - term2).transpose();
             acc.gradient.row(angle.k) += (grad_k + term2).transpose();
+            if constexpr (VIRIAL)
+                rows.finish(acc.gradient, acc.virial.angle);
         }
     }
 
@@ -356,7 +431,8 @@ void FFWorkspace::calcAngles(int p)
 // Reference: Fortran gfnff_engrad.F90:1041-1122
 // ============================================================================
 
-void FFWorkspace::calcDihedrals(int p)
+template <bool VIRIAL>
+void FFWorkspace::calcDihedralsImpl(int p)
 {
     auto& acc = m_accumulators[p];
     auto [begin, end] = m_partitions[p].dihedrals;
@@ -378,6 +454,7 @@ void FFWorkspace::calcDihedrals(int p)
     GeoGradMatrix loc;
     if (pbc) loc.resize(4, 3);
     const GeoGradMatrix& G = pbc ? loc : m_geometry;
+    typename VirialRowsOf<VIRIAL>::type rows;  // N1
 
     for (int idx = begin; idx < end; ++idx) {
         const auto& dih = m_dihedrals[idx];
@@ -438,6 +515,13 @@ void FFWorkspace::calcDihedrals(int p)
         if (m_do_gradient) {
             double dEdphi = -V * n * std::sin(c1) * damp;
 
+            if constexpr (VIRIAL) {  // N1
+                rows.begin();
+                rows.add(dih.i, ri, acc.gradient);
+                rows.add(dih.j, rj, acc.gradient);
+                rows.add(dih.k, rk, acc.gradient);
+                rows.add(dih.l, rl, acc.gradient);
+            }
             // derivate.row() is 1×3: no .transpose() needed for row() +=
             acc.gradient.row(dih.i) += dEdphi * derivate.row(0);
             acc.gradient.row(dih.j) += dEdphi * derivate.row(1);
@@ -462,6 +546,8 @@ void FFWorkspace::calcDihedrals(int p)
             acc.gradient.row(dih.j) += (-t1 + t2).transpose();
             acc.gradient.row(dih.k) += (-t2 + t3).transpose();
             acc.gradient.row(dih.l) += (-t3).transpose();
+            if constexpr (VIRIAL)
+                rows.finish(acc.gradient, acc.virial.dihedral);
         }
     }
 
@@ -473,7 +559,8 @@ void FFWorkspace::calcDihedrals(int p)
 // Extra Torsions (sp3-sp3 gauche, same formula)
 // ============================================================================
 
-void FFWorkspace::calcExtraTorsions(int p)
+template <bool VIRIAL>
+void FFWorkspace::calcExtraTorsionsImpl(int p)
 {
     auto& acc = m_accumulators[p];
     auto [begin, end] = m_partitions[p].extra_dihedrals;
@@ -496,6 +583,7 @@ void FFWorkspace::calcExtraTorsions(int p)
     GeoGradMatrix loc;
     if (pbc) loc.resize(4, 3);
     const GeoGradMatrix& G = pbc ? loc : m_geometry;
+    typename VirialRowsOf<VIRIAL>::type rows;  // N1
 
     for (int idx = begin; idx < end; ++idx) {
         const auto& dih = m_extra_dihedrals[idx];
@@ -553,6 +641,13 @@ void FFWorkspace::calcExtraTorsions(int p)
             double damp_kl = 1.0 / (1.0 + rr_kl);
 
             double dEdphi = -V * n * std::sin(c1) * damp;
+            if constexpr (VIRIAL) {  // N1
+                rows.begin();
+                rows.add(dih.i, ri, acc.gradient);
+                rows.add(dih.j, rj, acc.gradient);
+                rows.add(dih.k, rk, acc.gradient);
+                rows.add(dih.l, rl, acc.gradient);
+            }
             // derivate.row() is 1×3: no .transpose() needed for row() +=
             acc.gradient.row(dih.i) += dEdphi * derivate.row(0);
             acc.gradient.row(dih.j) += dEdphi * derivate.row(1);
@@ -572,6 +667,8 @@ void FFWorkspace::calcExtraTorsions(int p)
             acc.gradient.row(dih.j) += (-t1 + t2).transpose();
             acc.gradient.row(dih.k) += (-t2 + t3).transpose();
             acc.gradient.row(dih.l) += (-t3).transpose();
+            if constexpr (VIRIAL)
+                rows.finish(acc.gradient, acc.virial.dihedral);
         }
     }
 
@@ -585,7 +682,8 @@ void FFWorkspace::calcExtraTorsions(int p)
 // Uses domegadr analytical derivatives from gfnff_inversions.cpp
 // ============================================================================
 
-void FFWorkspace::calcInversions(int p)
+template <bool VIRIAL>
+void FFWorkspace::calcInversionsImpl(int p)
 {
     // Claude Generated (Mar 2026): Complete inversion with gradient
     // Ported from ForceFieldThread::CalculateGFNFFInversionContribution
@@ -626,6 +724,7 @@ void FFWorkspace::calcInversions(int p)
     GeoGradMatrix loc;
     if (pbc) loc.resize(4, 3);
     const GeoGradMatrix& G = pbc ? loc : m_geometry;
+    typename VirialRowsOf<VIRIAL>::type rows;  // N1
 
     for (int idx = begin; idx < end; ++idx) {
         const auto& inv = m_inversions[idx];
@@ -684,6 +783,13 @@ void FFWorkspace::calcInversions(int p)
         acc.energy.inversion += et * damp;
 
         if (m_do_gradient) {
+            if constexpr (VIRIAL) {  // N1
+                rows.begin();
+                rows.add(inv.i, r_center, acc.gradient);
+                rows.add(inv.j, r_nb1, acc.gradient);
+                rows.add(inv.k, r_nb2, acc.gradient);
+                rows.add(inv.l, r_nb3, acc.gradient);
+            }
             // PART 1: Omega derivative
             // Note: derivate.row() is 1×3; no transpose needed for row() += row()
             acc.gradient.row(inv.i) += dEdomega * derivate.row(0);
@@ -711,6 +817,8 @@ void FFWorkspace::calcInversions(int p)
             acc.gradient.row(inv.j) += (term1 + term2 + term3).transpose();
             acc.gradient.row(inv.k) -= term2.transpose();
             acc.gradient.row(inv.l) -= term3.transpose();
+            if constexpr (VIRIAL)
+                rows.finish(acc.gradient, acc.virial.inversion);
         }
     }
 
@@ -723,7 +831,8 @@ void FFWorkspace::calcInversions(int p)
 // Reference: Fortran gfnff_engrad.F90:3454
 // ============================================================================
 
-void FFWorkspace::calcSTorsions(int p)
+template <bool VIRIAL>
+void FFWorkspace::calcSTorsionsImpl(int p)
 {
     auto& acc = m_accumulators[p];
     auto [begin, end] = m_partitions[p].storsions;
@@ -739,6 +848,7 @@ void FFWorkspace::calcSTorsions(int p)
     GeoGradMatrix loc;
     if (pbc) loc.resize(4, 3);
     const GeoGradMatrix& G = pbc ? loc : m_geometry;
+    typename VirialRowsOf<VIRIAL>::type rows;  // N1
 
     for (int idx = begin; idx < end; ++idx) {
         const auto& stor = m_storsions[idx];
@@ -762,11 +872,20 @@ void FFWorkspace::calcSTorsions(int p)
 
         if (m_do_gradient) {
             double dEdphi = 2.0 * erefhalf * std::sin(2.0 * phi);
+            if constexpr (VIRIAL) {  // N1
+                rows.begin();
+                rows.add(stor.i, Eigen::Vector3d(G.row(si).transpose()), acc.gradient);
+                rows.add(stor.j, Eigen::Vector3d(G.row(sj).transpose()), acc.gradient);
+                rows.add(stor.k, Eigen::Vector3d(G.row(sk).transpose()), acc.gradient);
+                rows.add(stor.l, Eigen::Vector3d(G.row(sl).transpose()), acc.gradient);
+            }
             // derivate.row() is 1×3: no .transpose() needed for row() +=
             acc.gradient.row(stor.i) += dEdphi * derivate.row(0);
             acc.gradient.row(stor.j) += dEdphi * derivate.row(1);
             acc.gradient.row(stor.k) += dEdphi * derivate.row(2);
             acc.gradient.row(stor.l) += dEdphi * derivate.row(3);
+            if constexpr (VIRIAL)
+                rows.finish(acc.gradient, acc.virial.stors);
         }
     }
 
@@ -780,7 +899,8 @@ void FFWorkspace::calcSTorsions(int p)
 // Reference: gfnff_gdisp0.f90:365-377
 // ============================================================================
 
-void FFWorkspace::calcDispersion(int p)
+template <bool VIRIAL>
+void FFWorkspace::calcDispersionImpl(int p)
 {
     auto& acc = m_accumulators[p];
     auto [begin, end] = m_partitions[p].dispersions;
@@ -823,6 +943,8 @@ void FFWorkspace::calcDispersion(int p)
             Eigen::Vector3d grad = dEdr * rij_vec / rij;
             acc.gradient.row(disp.i) += grad.transpose();
             acc.gradient.row(disp.j) -= grad.transpose();
+            if constexpr (VIRIAL)
+                virialPair(acc.virial.dispersion, rij_vec, grad);  // N1
 
             // dc6dcn chain-rule (Oct 2026: per-pair lookup; a pair outside the D4 list had a
             // zero matrix cell, and subtracting 0 left dEdcn unchanged, so it is skipped)
@@ -844,7 +966,8 @@ void FFWorkspace::calcDispersion(int p)
 // Reference: gfnff_gdisp0.f90:365-377
 // ============================================================================
 
-void FFWorkspace::calcD4Dispersion(int p)
+template <bool VIRIAL>
+void FFWorkspace::calcD4DispersionImpl(int p)
 {
     auto& acc = m_accumulators[p];
     auto [begin, end] = m_partitions[p].d4_dispersions;
@@ -906,6 +1029,8 @@ void FFWorkspace::calcD4Dispersion(int p)
             Eigen::Vector3d grad = dEdr * rij_vec / rij;
             acc.gradient.row(disp.i) += grad.transpose();
             acc.gradient.row(disp.j) -= grad.transpose();
+            if constexpr (VIRIAL)
+                virialPair(acc.virial.dispersion, rij_vec, grad);  // N1: minimum-image d, CN part in postProcess
 
             // dc6dcn chain-rule, per-pair lookup (see calcDispersion); fused: computed here.
             // Every pair of the workspace list is in the generator's list, so the lookup of
@@ -939,7 +1064,8 @@ void FFWorkspace::calcD4Dispersion(int p)
 // Reference: Fortran gfnff_engrad.F90:467-495
 // ============================================================================
 
-void FFWorkspace::calcBondedRepulsion(int p)
+template <bool VIRIAL>
+void FFWorkspace::calcBondedRepulsionImpl(int p)
 {
     auto& acc = m_accumulators[p];
     auto [begin, end] = m_partitions[p].bonded_reps;
@@ -972,6 +1098,8 @@ void FFWorkspace::calcBondedRepulsion(int p)
             Eigen::Vector3d grad = dEdr * rij_vec / rij;
             acc.gradient.row(rep.i) += grad.transpose();
             acc.gradient.row(rep.j) -= grad.transpose();
+            if constexpr (VIRIAL)
+                virialPair(acc.virial.repulsion, rij_vec, grad);  // N1
         }
     }
 
@@ -984,7 +1112,8 @@ void FFWorkspace::calcBondedRepulsion(int p)
 // Reference: Fortran gfnff_engrad.F90:255-276
 // ============================================================================
 
-void FFWorkspace::calcNonbondedRepulsion(int p)
+template <bool VIRIAL>
+void FFWorkspace::calcNonbondedRepulsionImpl(int p)
 {
     auto& acc = m_accumulators[p];
     auto [begin, end] = m_partitions[p].nonbonded_reps;
@@ -1016,6 +1145,8 @@ void FFWorkspace::calcNonbondedRepulsion(int p)
             Eigen::Vector3d grad = dEdr * rij_vec / rij;
             acc.gradient.row(rep.i) += grad.transpose();
             acc.gradient.row(rep.j) -= grad.transpose();
+            if constexpr (VIRIAL)
+                virialPair(acc.virial.repulsion, rij_vec, grad);  // N1
         }
     }
 }
@@ -1035,7 +1166,8 @@ void FFWorkspace::calcNonbondedRepulsion(int p)
 static constexpr double COULOMB_FARFIELD_GAMMA_R = 6.5;
 static constexpr double COULOMB_FARFIELD_X2 = COULOMB_FARFIELD_GAMMA_R * COULOMB_FARFIELD_GAMMA_R;  // 42.25
 
-void FFWorkspace::calcCoulomb(int p)
+template <bool VIRIAL>
+void FFWorkspace::calcCoulombImpl(int p)
 {
     auto& acc = m_accumulators[p];
     auto [begin, end] = m_partitions[p].coulombs;
@@ -1081,6 +1213,8 @@ void FFWorkspace::calcCoulomb(int p)
                             const Eigen::Vector3d grad = dEdr_pair * rij_vec / rij;
                             acc.gradient.row(i) += grad.transpose();
                             acc.gradient.row(j) -= grad.transpose();
+                            if constexpr (VIRIAL)
+                                virialPair(acc.virial.coulomb, rij_vec, grad);  // N1 (plain distances: cluster virial)
                         }
                         continue;
                     }
@@ -1099,6 +1233,8 @@ void FFWorkspace::calcCoulomb(int p)
                         const Eigen::Vector3d grad = dEdr_pair * rij_vec / rij;
                         acc.gradient.row(i) += grad.transpose();
                         acc.gradient.row(j) -= grad.transpose();
+                        if constexpr (VIRIAL)
+                            virialPair(acc.virial.coulomb, rij_vec, grad);  // N1
                     }
                 }
             }
@@ -1138,6 +1274,8 @@ void FFWorkspace::calcCoulomb(int p)
                 Eigen::Vector3d grad = dEdr_pair * rij_vec / rij;
                 acc.gradient.row(coul.i) += grad.transpose();
                 acc.gradient.row(coul.j) -= grad.transpose();
+                if constexpr (VIRIAL)
+                    virialPair(acc.virial.coulomb, rij_vec, grad);  // N1
             }
             continue;
         }
@@ -1154,6 +1292,8 @@ void FFWorkspace::calcCoulomb(int p)
             Eigen::Vector3d grad = dEdr_pair * rij_vec / rij;
             acc.gradient.row(coul.i) += grad.transpose();
             acc.gradient.row(coul.j) -= grad.transpose();
+            if constexpr (VIRIAL)
+                virialPair(acc.virial.coulomb, rij_vec, grad);  // N1
         }
     }
 
@@ -1170,7 +1310,8 @@ void FFWorkspace::calcCoulomb(int p)
 // fixed thread count is reproducible. Self, background and Gaussian background terms: postProcess().
 // Charges: m_eeq_charges (fixed during the step, the non-periodic EEQ until B3); alp: m_coul_alp (alpeeq).
 // ============================================================================
-void FFWorkspace::calcCoulombEwald(int p)
+template <bool VIRIAL>
+void FFWorkspace::calcCoulombEwaldImpl(int p)
 {
     auto& acc = m_accumulators[p];
     const int T = m_num_threads;
@@ -1205,6 +1346,14 @@ void FFWorkspace::calcCoulombEwald(int p)
         acc.gradient += res.gradient;
     if (want_pot)
         acc.coulomb_potentials += res.potentials;
+    if constexpr (VIRIAL) {
+        // N1 (Nov 2026): separate passes over the same pair and k ranges (ewald.cpp, derivation there); the
+        // self term is strain-independent, the background terms are added in postProcess().
+        if (m_do_gradient) {
+            m_ewald->realSpaceVirialRange(cache, m_eeq_charges, begin, end, acc.virial.coulomb);
+            m_ewald->reciprocalVirialRange(cache.table, m_eeq_charges, k_begin, k_end, acc.virial.coulomb);
+        }
+    }
 
     if (acc.has_components && m_do_gradient)
         acc.grad_coulomb += (acc.gradient - grad_before);
@@ -1222,7 +1371,8 @@ void FFWorkspace::calcCoulombEwald(int p)
 // Reference: gfnff_engrad.F90 - abhgfnff_eg1, abhgfnff_eg2new, abhgfnff_eg3
 // ============================================================================
 
-void FFWorkspace::calcHydrogenBonds(int p)
+template <bool VIRIAL>
+void FFWorkspace::calcHydrogenBondsImpl(int p)
 {
     auto& acc = m_accumulators[p];
     auto [begin, end] = m_partitions[p].hbonds;
@@ -1250,6 +1400,7 @@ void FFWorkspace::calcHydrogenBonds(int p)
         PBCUtils::applyMinimumImageOrtho(m_cell_bohr, d0, d1, d2);
         return Eigen::Vector3d(ref(0) + d0, ref(1) + d1, ref(2) + d2);
     };
+    typename VirialRowsOf<VIRIAL>::type rows;  // N1
 
     for (int idx = begin; idx < end; ++idx) {
         const auto& hb = m_hbonds[idx];
@@ -1479,6 +1630,21 @@ void FFWorkspace::calcHydrogenBonds(int p)
         // Claude Generated (Mar 2026): Complete port from ForceFieldThread
         // Reference: gfnff_engrad.F90 - abhgfnff_eg1/eg2new/eg2_rnr/eg3
         if (m_do_gradient) {
+            if constexpr (VIRIAL) {  // N1: every atom a gradient row below can reach, at its frame position
+                rows.begin();
+                rows.add(hb.i, pos_A, acc.gradient);
+                rows.add(hb.j, pos_H, acc.gradient);
+                rows.add(hb.k, pos_B, acc.gradient);
+                for (int nb : hb.neighbors_B)
+                    rows.add(nb, imageNear(nb, pos_B), acc.gradient);
+                if (hb.case_type == 3 && hb.acceptor_parent_index != -1) {
+                    const Eigen::Vector3d pc = imageNear(hb.acceptor_parent_index, pos_B);
+                    rows.add(hb.acceptor_parent_index, pc, acc.gradient);
+                    for (int D_idx : hb.neighbors_C)
+                        if (D_idx != hb.k)
+                            rows.add(D_idx, imageNear(D_idx, pc), acc.gradient);
+                }
+            }
             // Fortran convention distance vectors (all in Bohr)
             Eigen::Vector3d drab = pos_A - pos_B;  // A - B
             Eigen::Vector3d drah = pos_A - pos_H;  // A - H
@@ -1714,6 +1880,8 @@ void FFWorkspace::calcHydrogenBonds(int p)
             acc.gradient.row(hb.i) += ga.transpose();
             acc.gradient.row(hb.k) += gb.transpose();
             acc.gradient.row(hb.j) += gh.transpose();
+            if constexpr (VIRIAL)
+                rows.finish(acc.gradient, acc.virial.hbond);  // N1 (the expo > 15 'continue' above wrote no row: 0)
         }
     }
 
@@ -1726,7 +1894,8 @@ void FFWorkspace::calcHydrogenBonds(int p)
 // Reference: gfnff_engrad.F90 - rbxgfnff_eg
 // ============================================================================
 
-void FFWorkspace::calcHalogenBonds(int p)
+template <bool VIRIAL>
+void FFWorkspace::calcHalogenBondsImpl(int p)
 {
     auto& acc = m_accumulators[p];
     auto [begin, end] = m_partitions[p].xbonds;
@@ -1846,6 +2015,10 @@ void FFWorkspace::calcHalogenBonds(int p)
             acc.gradient.row(xb.i) += grad_A.transpose();
             acc.gradient.row(xb.j) += grad_X.transpose();
             acc.gradient.row(xb.k) += grad_B.transpose();
+            if constexpr (VIRIAL) {  // N1: frame anchored on X; grad_X = -(grad_A + grad_B)
+                virialPair(acc.virial.xbond, Eigen::Vector3d(pos_A - pos_X), grad_A);
+                virialPair(acc.virial.xbond, Eigen::Vector3d(pos_B - pos_X), grad_B);
+            }
         }
     }
 
@@ -1920,7 +2093,8 @@ void FFWorkspace::calcATM(int p)
 // Reference: external/cpp-d4/src/damping/atm.cpp:141-289
 // ============================================================================
 
-void FFWorkspace::calcATMGradient(int p)
+template <bool VIRIAL>
+void FFWorkspace::calcATMGradientImpl(int p)
 {
     auto& acc = m_accumulators[p];
     auto [begin, end] = m_partitions[p].atm_triples;
@@ -1990,6 +2164,10 @@ void FFWorkspace::calcATMGradient(int p)
         acc.gradient.row(triple.i) += -(dgij + dgik);
         acc.gradient.row(triple.j) += (dgij - dgjk);
         acc.gradient.row(triple.k) += (dgik + dgjk);
+        if constexpr (VIRIAL) {  // N1: plain positions (ATM has no minimum image, A3b); Xi -= sum x G with origin i
+            virialPair(acc.virial.atm, rij_vec, Eigen::Vector3d(dgij - dgjk));
+            virialPair(acc.virial.atm, rik_vec, Eigen::Vector3d(dgik + dgjk));
+        }
     }
 }
 
@@ -1998,7 +2176,8 @@ void FFWorkspace::calcATMGradient(int p)
 // Reference: gfnff_engrad.F90:3267-3334 (batmgfnff_eg)
 // ============================================================================
 
-void FFWorkspace::calcBATM(int p)
+template <bool VIRIAL>
+void FFWorkspace::calcBATMImpl(int p)
 {
     auto& acc = m_accumulators[p];
     auto [begin, end] = m_partitions[p].batm_triples;
@@ -2067,9 +2246,130 @@ void FFWorkspace::calcBATM(int p)
             acc.gradient.row(batm.j) += (-dgij + dgjk);
             acc.gradient.row(batm.k) += (-dgik - dgjk);
             acc.gradient.row(batm.i) += (dgij + dgik);
+            if constexpr (VIRIAL) {  // N1: plain positions (BATM has no minimum image, A3b); origin at i
+                virialPair(acc.virial.batm, rij_vec, Eigen::Vector3d(-dgij + dgjk));
+                virialPair(acc.virial.batm, rik_vec, Eigen::Vector3d(-dgik - dgjk));
+            }
         }
     }
 
     if (acc.has_components && m_do_gradient)
         acc.grad_batm += (acc.gradient - grad_before);
+}
+
+// ============================================================================
+// N1 (Nov 2026): dispatch on the virial request outside the loops; the false instantiation is the
+// former kernel, the true one also accumulates the atomic virial (ff_workspace.h, FFVirialComponents).
+// ============================================================================
+void FFWorkspace::calcBonds(int p)
+{
+    if (m_want_virial)
+        calcBondsImpl<true>(p);
+    else
+        calcBondsImpl<false>(p);
+}
+void FFWorkspace::calcAngles(int p)
+{
+    if (m_want_virial)
+        calcAnglesImpl<true>(p);
+    else
+        calcAnglesImpl<false>(p);
+}
+void FFWorkspace::calcDihedrals(int p)
+{
+    if (m_want_virial)
+        calcDihedralsImpl<true>(p);
+    else
+        calcDihedralsImpl<false>(p);
+}
+void FFWorkspace::calcExtraTorsions(int p)
+{
+    if (m_want_virial)
+        calcExtraTorsionsImpl<true>(p);
+    else
+        calcExtraTorsionsImpl<false>(p);
+}
+void FFWorkspace::calcInversions(int p)
+{
+    if (m_want_virial)
+        calcInversionsImpl<true>(p);
+    else
+        calcInversionsImpl<false>(p);
+}
+void FFWorkspace::calcSTorsions(int p)
+{
+    if (m_want_virial)
+        calcSTorsionsImpl<true>(p);
+    else
+        calcSTorsionsImpl<false>(p);
+}
+void FFWorkspace::calcDispersion(int p)
+{
+    if (m_want_virial)
+        calcDispersionImpl<true>(p);
+    else
+        calcDispersionImpl<false>(p);
+}
+void FFWorkspace::calcD4Dispersion(int p)
+{
+    if (m_want_virial)
+        calcD4DispersionImpl<true>(p);
+    else
+        calcD4DispersionImpl<false>(p);
+}
+void FFWorkspace::calcBondedRepulsion(int p)
+{
+    if (m_want_virial)
+        calcBondedRepulsionImpl<true>(p);
+    else
+        calcBondedRepulsionImpl<false>(p);
+}
+void FFWorkspace::calcNonbondedRepulsion(int p)
+{
+    if (m_want_virial)
+        calcNonbondedRepulsionImpl<true>(p);
+    else
+        calcNonbondedRepulsionImpl<false>(p);
+}
+void FFWorkspace::calcCoulomb(int p)
+{
+    if (m_want_virial)
+        calcCoulombImpl<true>(p);
+    else
+        calcCoulombImpl<false>(p);
+}
+void FFWorkspace::calcCoulombEwald(int p)
+{
+    if (m_want_virial)
+        calcCoulombEwaldImpl<true>(p);
+    else
+        calcCoulombEwaldImpl<false>(p);
+}
+void FFWorkspace::calcHydrogenBonds(int p)
+{
+    if (m_want_virial)
+        calcHydrogenBondsImpl<true>(p);
+    else
+        calcHydrogenBondsImpl<false>(p);
+}
+void FFWorkspace::calcHalogenBonds(int p)
+{
+    if (m_want_virial)
+        calcHalogenBondsImpl<true>(p);
+    else
+        calcHalogenBondsImpl<false>(p);
+}
+void FFWorkspace::calcATMGradient(int p)
+{
+    if (m_want_virial)
+        calcATMGradientImpl<true>(p);
+    else
+        calcATMGradientImpl<false>(p);
+}
+void FFWorkspace::calcBATM(int p)
+{
+    if (m_want_virial)
+        calcBATMImpl<true>(p);
+    else
+        calcBATMImpl<false>(p);
 }

@@ -35,11 +35,12 @@
 // When in doubt, raise it: the cost is one rebuild of the plugin, the cost of not raising it is undefined behaviour.
 //
 // History: 0 = plugins built before this check (no symbol); 1 = Nov 2026, after A6 (hasPeriodicEnergy in the vtable);
-// 2 = Nov 2026, S1 (GFNFF gained the data member m_gpu_periodic; GFNFF is shared across the boundary).
+// 2 = Nov 2026, S1 (GFNFF gained the data member m_gpu_periodic; GFNFF is shared across the boundary);
+// 3 = Nov 2026, N1 (GFNFF gained m_want_virial; FFWorkspace and FFAccumulator gained the virial members).
 
 #pragma once
 
-#define CURCUMA_GPU_PLUGIN_ABI_VERSION 2
+#define CURCUMA_GPU_PLUGIN_ABI_VERSION 3
 
 /// Defines `extern "C" int curcuma_<backend>_abi_version()` in a plugin entry file (use at file scope).
 #define CURCUMA_GPU_PLUGIN_DEFINE_ABI_VERSION(backend)                                                                \

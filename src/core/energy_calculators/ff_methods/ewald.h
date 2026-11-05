@@ -79,10 +79,11 @@
  * gaussianCorrectionRadius(alp) = XMAX / g_min, g_min = 1/sqrt(2 max_i alp_i), and stay below L_min/2.
  * Derivation and tests: docs/WP-PERIODIC-NONBONDED.md, section B2.
  *
- * Not implemented: PME/particle-mesh (cost here is O(N^1.5) at best), triclinic cells, the
- * virial/pressure tensor, the dipole (vacuum) boundary term, slab correction. Threading is done by the
- * caller over the range functions (FFWorkspace, per-partition accumulators, deterministic order).
- * A virial formula for diagonal strain (derived, untested) is in docs/WP-PERIODIC-NONBONDED.md, section B0.
+ * Not implemented: PME/particle-mesh (cost here is O(N^1.5) at best), triclinic cells, the dipole (vacuum)
+ * boundary term, slab correction. Threading is done by the caller over the range functions (FFWorkspace,
+ * per-partition accumulators, deterministic order). The atomic virial of the sum (N1, Nov 2026) is in
+ * realSpaceVirialRange() / reciprocalVirialRange() / backgroundVirial(), derivation in ewald.cpp, FD-tested
+ * in ctest pbc_virial (docs/WP-PERIODIC-NONBONDED.md, section N1).
  */
 
 #pragma once
@@ -274,6 +275,20 @@ public:
     /// Self, neutralising background and (with gaussian_alp) the Gaussian background term; O(N), one call.
     void selfAndBackground(const Eigen::VectorXd& charges, const Eigen::VectorXd* gaussian_alp,
         bool want_potentials, EwaldResult& acc) const;
+
+    // ---- Atomic virial Xi_ab = -dE/d(eps_ab) at fixed fractional coordinates (Claude Generated, Nov 2026, N1).
+    // Separate passes, so the energy/gradient loops above stay as they are. Derivation in ewald.cpp.
+    /// Real space over cache.pairs[begin, end): Xi_ab -= q_i q_j (dK/dr / r) d_a d_b (stored dK, else per call).
+    void realSpaceVirialRange(const EwaldGeometryCache& cache, const Eigen::VectorXd& charges, int begin, int end,
+        Eigen::Matrix3d& virial) const;
+    /// Reciprocal space over [k_begin, k_end): Xi_ab += E_k [delta_ab - 2 k_a k_b (1/k^2 + 1/(4 a^2))], E_k = w_k |S(k)|^2.
+    void reciprocalVirialRange(const EwaldPhaseTable& table, const Eigen::VectorXd& charges, int k_begin, int k_end,
+        Eigen::Matrix3d& virial) const;
+    /// Background terms: E_bg and E_gbg are proportional to 1/V, so Xi_ab = (E_bg + E_gbg) delta_ab; the self term is 0.
+    static Eigen::Matrix3d backgroundVirial(const EwaldEnergyTerms& terms)
+    {
+        return (terms.background + terms.gaussian_background) * Eigen::Matrix3d::Identity();
+    }
 
     const EwaldParameters& parameters() const { return m_par; }
     int numberOfKVectors() const { return static_cast<int>(m_kvectors.size()); }

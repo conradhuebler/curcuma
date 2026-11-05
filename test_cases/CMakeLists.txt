@@ -783,6 +783,16 @@ endif()
 add_test(NAME pbc_eeq_ewald COMMAND test_pbc_eeq_ewald WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 set_tests_properties(pbc_eeq_ewald PROPERTIES TIMEOUT 900 LABELS "pbc;gfnff;ewald;eeq")
 
+# Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED N1): atomic virial of the periodic GFN-FF energy against central
+# finite differences under an affine strain (term by term and total), invariances, gradient unchanged, pressure in bar.
+add_executable(test_pbc_virial unit/test_pbc_virial.cpp)
+target_link_libraries(test_pbc_virial curcuma_core test_molecule_registry)
+if(USE_PCH)
+    target_precompile_headers(test_pbc_virial REUSE_FROM curcuma_core)
+endif()
+add_test(NAME pbc_virial COMMAND test_pbc_virial WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(pbc_virial PROPERTIES TIMEOUT 1800 LABELS "pbc;gfnff;ewald")
+
 # Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A4a): periodic repulsion and bonded terms (minimum image)
 add_executable(test_pbc_bonded_repulsion unit/test_pbc_bonded_repulsion.cpp)
 target_link_libraries(test_pbc_bonded_repulsion curcuma_core test_molecule_registry)
