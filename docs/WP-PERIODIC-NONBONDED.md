@@ -1231,3 +1231,112 @@ fragments by different lattice vectors, corner, torn per atom (also initialised 
   ensemble charge model (CPU fallback as before), sTors and extra torsions under a cell (no structure), case-4 H-bonds,
   `topology_mode auto` / react on the device with a cell, systems with more than one element class in the tail beyond
   H/C/N/O/F/I. Human production testing pending.
+
+## S2 CUDA periodic hybrid: local terms on the device, periodic EEQ and Ewald Coulomb on the host (2026-11-04, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+On `feature/bulk` (base `8ee4f638`). Stage S2 = variant A' of the GPU plan (G0): the first release of `-gpu cuda` with a
+cell and the default `coulomb_ewald true`, behind `-gfnff.gpu_periodic true` (PARAM default false). The result is the
+periodic energy of the CPU path (`hasPeriodicEnergy()` true, so SimpleMD wraps into the cell, A6/D1). Device Ewald
+(S3) and device periodic EEQ (S4) are not part of it; `coulomb_ewald false` keeps the S1 behaviour (minimum-image
+Coulomb on the device, non-periodic EEQ, `hasPeriodicEnergy()` false); ROCm/Vulkan refuse as before.
+
+### Architecture of the seam
+
+- **Charges**: the device computes the CN (S1 minimum image, `k_cn_compute`); the wrapper takes the existing
+  `eeqCpuFragmentRoute()` (CN download, `GFNFF::prepareCNAndEEQ(gradient, gpu_only, &cn, skip_eeq=false)`, charges
+  up): with a cell and `coulomb_ewald` the host `EEQSolver` is already periodic (`calculateFinalChargesPeriodic`,
+  B3/P1: dense below `eeq_ewald_dense_max_atoms`, block-preconditioned pcg with aspc warm start and `eeq_ewald_tol`
+  above). Nothing new on this path; the device EEQ solvers are never entered with a cell (also not the
+  first-step `isFragmentTopoValid()` branch).
+- **Coulomb**: `FFWorkspaceGPU::setCoulombPairOnDevice(false)` skips the device pair kernels (`k_coulomb_tiles` /
+  `k_coulomb_implicit` / `k_coulomb`) only; `k_coulomb_postprocess` (self term `-q chi(CN) + 1/2 q^2 (gam +
+  sqrt(2/pi)/sqrt(alp))` = TERM 2+3, and TERM 1b `qtmp` into the CN chain rule) stays on the device, because the CPU
+  keeps exactly these in `postProcess()` while `calcCoulombEwald()` holds only the pair part (`ff_workspace.cpp`
+  `postProcess`, `ff_workspace_gfnff.cpp:1173`): the split is the same on both sides, nothing is counted twice or
+  missed. The host side is the new `FFWorkspace::evaluateEwaldCoulomb(geometry_bohr, charges, gradient, &grad, &terms)`:
+  the B2 code (`calcCoulombEwald` per partition over the pool, reduced in partition order, `selfAndBackground`), on
+  the P1 geometry cache that the EEQ solve of the same step just built (same positions, widths and parameters bit for
+  bit, so the pair list, kernel and phase table are reused, no second build). Energy in Eh and gradient in Eh/Bohr are
+  added to the device result in the wrapper (`m_last_energy`, `m_cached_gradient` before the `/au` of the accessors).
+  The Ewald pair part is CN-independent at fixed charges and the charges are stationary (B3), so no dE/dCN or dE/dq
+  term crosses the seam.
+- **Gating**: `MethodFactory::periodicCellNeedsCpu()` keeps the GPU for every `gpu_periodic true` run (the S1 "S3/S4"
+  fallback is gone); the wrapper's `setMolecule()` refuses a cell without the opt-in and on a backend without
+  `has_periodic_local_terms`, checks after `InitialiseMolecule()` that the host periodic EEQ and the workspace Ewald
+  are set up, and switches the device pair Coulomb off (set in `initGPUWorkspace()`, so a react-topology rebuild of
+  the workspace keeps it off; react with a cell on the device is otherwise untested). `hasPeriodicEnergy()` = hybrid
+  active. No change to
+  `ComputationalMethod`, the plugin entry points or a shared class layout (`FFWorkspace` gained a method, no member;
+  the new flag lives in the plugin-only `FFWorkspaceGPU`): ABI version stays 2.
+- Diagnostics: `CURCUMA_GFNFF_STEPPHASE=1` prints `ewald=` (host Ewald ms) next to `eeq=`; `getLastPrepTiming()`
+  has `gpu_host_ewald`; `getEnergyDecomposition()` adds `Coulomb_host_ewald(_real/_reciprocal)`; the verbosity-2 report
+  shows the Coulomb term as device self term + host Ewald.
+
+### Acceptance (thresholds fixed beforehand; ctest `gfnff_gpu_pbc_hybrid`, CUDA only, 77 = skipped without CUDA)
+
+Boxes as in `pbc_eeq_ewald` (rigid random packings): 50 H2O L 44 (dense), H3O+(H2O)2 + 18 H2O Q = +1 L 44 (dense,
+`frag_charge_model reference` on both sides, else the wrapper asks for the CPU), 970 H2O L 58 (2910 atoms, pcg, 4
+threads); each at the input geometry (both sides reuse the charges of the set-up solve) and at a geometry with every
+atom moved by up to 0.005 A (per-step solve, device CN on the GPU).
+
+| check | result |
+|---|---|
+| (i) GPU hybrid vs CPU, default tolerance | charges <= 8.9e-16 e (bitwise at the input geometry), energy 50 H2O 3.2e-13 / 7.8e-14 Eh, Q = +1 7.0e-14 / 0, 970 H2O 2.7e-12 / 2.4e-12 Eh (limits 1e-12 e, 1e-9 Eh) |
+| (i) `eeq_ewald_tol` 1e-14 on both sides | energy <= 2.6e-12 Eh, gradient <= 4.1e-14 Eh/A, host Ewald pair part <= 3.6e-15 Eh (limits 1e-11 Eh, 1e-12 Eh/A) |
+| (ii) FD gate, hybrid total gradient vs central FD of the total energy with re-solved charges, h 2e-4 / 1e-4 A, 6 atoms nearest a face | 20 H2O: 8.3e-8 -> 2.1e-8 (ratio 3.95), Richardson 6.0e-10 Eh/A; Q = +1: 7.9e-8 -> 2.0e-8, Richardson 7.9e-10 (limit 1e-8; CPU B3 (e): 5.8e-11..1.1e-10) |
+| (iii) invariances of the hybrid (20 H2O, Q = +1): translation (L,-L,2L), atom-wise wrap (on the same instance and initialised torn), 2x1x1 supercell (neutral) | charges <= 7.8e-15 e, energy <= 3.2e-14 Eh (supercell = 2 x cell), per-atom gradient <= 1.9e-14 Eh/A |
+| (iv) two hybrid instances, two steps each (second from the aspc warm start), 1 and 4 threads | energy, gradient and charges bit for bit |
+| CLI, 50 H2O L 44, 4 threads | hybrid vs CPU periodic dE 1.4e-13 Eh, max dG 1.7e-14 Eh/A; two hybrid runs and one next to a concurrent GPU MD: `-dump_gradient` md5 identical; `-gpu cuda` without the opt-in: CPU fallback, md5 equal to the CPU run; `coulomb_ewald false` (S1): dE 1.0e-3 Eh (minimum-image Coulomb, as expected) |
+| (vi) without a cell, plugin and executable before S2 vs after | GPU `-sp -dump_gradient` 7 structures x 2 runs 14/14 md5 identical; CPU 7 structures x 1/4 threads 14/14 md5 identical (no kernel touched) |
+| (vii) ctest | CUDA build `-R 'gpu|plugin|pbc'` 169 of 169 pass (3 skipped as in S1: split, scope-flags, deltaml), before and after the HB-CN fix below; CPU `release/` `-j1 -R 'gfnff|frag|eeq|simplemd|pbc|ewald|react|restart|md_|gpu|plugin'` 131 of 131 (4 skipped: GPU) |
+| (viii) guards | `pbc_gpu_guard` (g) and `gfnff_gpu_pbc_refuse` (d) changed on purpose: `gpu_periodic` with the default `coulomb_ewald` is accepted (hybrid, `hasPeriodicEnergy()` true) instead of the S1 "S3/S4" refusal; the default (no opt-in) and ROCm paths are unchanged |
+
+(v) NVE, 60 H2O in L 44 Bohr (the D1 box60), dt 0.5 fs, CSVR 300 K 1 ps then NVE 2 ps from the edited restart file
+(D1 protocol), 4 threads, n = 2 seeds each (drift = linear fit over the last 1.5 ps):
+
+| run | drift (Eh/ps) | E_tot max-min (Eh) | E_tot std (Eh) | E(end)-E(0) (Eh) | <T> (K) |
+|---|---|---|---|---|---|
+| CPU periodic, seed 7 / 11 | -7.9e-5 / -1.1e-4 | 4.5e-4 / 5.2e-4 | 8.2e-5 / 9.4e-5 | -1.1e-4 / -1.1e-4 | 372 / 383 |
+| GPU hybrid, seed 7 / 11 (after the HB-CN fix below) | -3.9e-5 / -7.5e-5 | 4.1e-4 / 5.2e-4 | 8.3e-5 / 9.5e-5 | -5.5e-5 / -1.1e-4 | 371 / 378 |
+| GPU hybrid, seed 7 / 11 (before the fix, kept as evidence) | -2.7e-5 / -1.1e-4 | 1.8e-3 / 2.2e-3 | 1.1e-4 / 1.5e-4 | -1.5e-3 / -2.1e-3 | 377 / 385 |
+
+The hybrid conserves energy at the CPU level (D1: -5e-5..-8.5e-5 Eh/ps with this protocol); the CSVR phases of the CPU
+and GPU runs start identically and separate chaotically (end states differ by up to 0.16 A/fs in the velocities after
+1 ps), so the NVE phases are n = 2 independent samples per side, not the same trajectory. The hybrid runs wrapped into
+the cell (`hasPeriodicEnergy()` true, A6/D1 path) with no GPU fallback.
+
+### Time per MD step (ms, CLI `-md`, dt 0.5 fs, 4 host threads, difference of 40- and 20-step runs, 3 repetitions; RTX 5080, nothing else running)
+
+| box | CPU periodic | GPU hybrid | gain | hybrid `calculateEnergy()` median (ms): total / host EEQ / host Ewald / device finish |
+|---|---|---|---|---|
+| 970 H2O, 2910 atoms, L 58 | 113.8 / 114.9 / 116.3 | 76.0 / 78.7 / 80.0 | 1.46x | 47.2 / 42.2 (pcg) / 4.0 / 0.5 |
+| 1916 H2O, 5748 atoms, L 72.8 | 324.5 / 324.9 / 323.7 | 240.2 / 240.4 / 243.6 | 1.35x | 121.2 / 107.1 / 11.1 / 1.0 |
+
+The G0 estimate (~1.5x) holds, for the reason G0 gave: the step is the host EEQ (89 % of the energy call), the host
+Ewald pair term (8 %) and the device work that is hidden behind the CN download and the host solve. The CPU numbers
+here are the CLI step (P1 measured 114 ms/step CLI at 2910 atoms, 77.5 ms for `Calculation(true)` in the harness);
+the hybrid energy call is 47 / 121 ms, the CLI step 78 / 241 ms, so SimpleMD spends 31 ms (2910) and 120 ms (5748)
+per step outside the energy call, growing like ~N^1.7 (P1 noted 37 ms at 2910 atoms, not located; with the hybrid it is
+now the second-largest item and the first thing to look at before S3/S4).
+
+### Finding on the way (GPU path, not S2-specific, fixed)
+
+The first GPU NVE runs (restart protocol) lost 1.6e-3 / 1.8e-3 Eh between step 0 and step 1 while the CPU runs did not
+(E_tot max-min 1.8e-3 / 2.2e-3 against 4.5e-4 / 5.2e-4 Eh, drift fits of the last 1.5 ps fine). Term diff of a two-step
+restart (verbosity 2): only the bond term, +1.56e-3 Eh at step 0 (GPU -16.0736371, CPU -16.0752005 Eh), equal from step
+1; a fresh `-sp` on the restart geometry agrees to 1e-13 Eh; the same offset with `coulomb_ewald false` (S1 path), so
+not the seam. Cause: the wrapper computed the per-bond HB coordination numbers (`computeBondHBCN`, Step 2b) BEFORE the
+HB/XB refresh of the step (Step 2c, which uploads the new HB alpha pairs and bond metadata); on every refresh step the
+X-H bond modulation used the previous list (the CPU computes it in `calculate()` after `updateHBXBIfNeeded()`). On a
+restart the first geometry is 1 ps away from the set-up lists, hence the visible step. Fixed by moving Step 2b behind
+Step 2c; a single point is unchanged (no refresh at step 0: no-cell 14/14 md5 identical, CUDA ctest 169/169 before
+and after), GPU MD steps on which a refresh fires now use the current list, as the CPU does.
+
+### Not done / not tested
+
+- Not part of S2: Ewald and periodic EEQ on the device (S3/S4), ROCm/Vulkan (refuse), the multi-GPU split (off with a
+  cell), a Verlet skin for the host Ewald pair list, the SimpleMD per-step overhead above.
+- Not tested: charged boxes under the ensemble charge model (CPU fallback as before), `topology_mode auto`/react with a
+  cell on the device, ALPB with a cell (refused by B3), heavy-element boxes near the `r_g < L/2` limit, more than 5748
+  atoms, `ewald_kernel_cache_mb` fallback at production size, an energy-only MD (`calculateEnergy(false)` is covered
+  only by the FD gate), NPT. Human production testing pending.

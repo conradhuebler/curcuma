@@ -460,6 +460,11 @@ public:
     void setHBondEnabled(bool v);
     void setRepulsionEnabled(bool v);
     void setCoulombEnabled(bool v);
+    /// Claude Generated (Nov 2026, S2): false = skip the device Coulomb PAIR kernels (k_coulomb_tiles / _implicit /
+    /// k_coulomb) only; the self term and TERM 1b (k_coulomb_postprocess) stay. The GPU hybrid with a cell then adds
+    /// the host Ewald pair energy and gradient (FFWorkspace::evaluateEwaldCoulomb). Default true.
+    void setCoulombPairOnDevice(bool v) { m_coulomb_pair_on_device = v; }
+    bool coulombPairOnDevice() const { return m_coulomb_pair_on_device; }
 
     /// Claude Generated (April 2026): Set unit cell for PBC minimum image convention.
     /// cell_bohr: 3×3 matrix (column-major, in Bohr). Uploads to GPU constant memory.
@@ -780,6 +785,7 @@ private:
     bool m_hbond_enabled      = true;
     bool m_repulsion_enabled  = true;
     bool m_coulomb_enabled    = true;
+    bool m_coulomb_pair_on_device = true;   ///< S2 (Nov 2026): device pair Coulomb; false in the periodic hybrid (host Ewald)
     int  m_verbosity          = 0;
 
     // G3a (Apr 2026): GPU kernel block size override (0 = adaptive default)

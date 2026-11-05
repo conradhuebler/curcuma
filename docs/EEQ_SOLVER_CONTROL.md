@@ -51,6 +51,9 @@ Not available with a cell and `coulomb_ewald`: `eeq_distance_cutoff`, `coulomb_r
 `eeq_matrix_rebuild_eps_bohr` (ignored: the matrix is rebuilt at every solve), the cached Cholesky factor (`eeq_refactor_eps_bohr`,
 ignored on the periodic path). `coulomb_ewald false` restores the plain-distance EEQ and Coulomb (not periodic, emergency exit).
 Verbosity 1 prints `EEQ solver (final charges): pcg [CPU, periodic Ewald matrix-free, N iterations]` or `cholesky [CPU, periodic Ewald dense]`.
+`-gpu cuda` with a cell and `-gfnff.gpu_periodic true` (S2 hybrid, Nov 2026): the same host solver runs with the CN computed on the
+device; every option of this section applies unchanged, the device EEQ solvers (`gpu_eeq_*`) are not used with a cell
+([WP-PERIODIC-NONBONDED.md](WP-PERIODIC-NONBONDED.md), section S2).
 `ewald_kernel_cache_mb` (1024) caps the stored real-space kernel (16 bytes per pair; above it the kernel is evaluated per
 matrix-vector product, same numbers bit for bit). Measurements, tolerance table and the choice of 1e-9:
 [WP-PERIODIC-NONBONDED.md](WP-PERIODIC-NONBONDED.md), section P1. Measured there: the matrix-free pcg is ~12x faster than the

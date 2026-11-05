@@ -315,6 +315,81 @@ void FFWorkspace::setEwald(const curcuma::ewald::EwaldParameters& p)
     m_coulomb_ewald = true;
 }
 
+// Claude Generated (Nov 2026, S2): the Ewald pair part alone, for the GPU hybrid (see ff_workspace.h)
+double FFWorkspace::evaluateEwaldCoulomb(const Matrix& geometry_bohr, const Vector& charges, bool gradient,
+                                         Matrix* gradient_out, curcuma::ewald::EwaldEnergyTerms* terms_out)
+{
+    if (!ewaldActive() || m_method_type != FFMethodType::GFN_FF)
+        throw std::runtime_error("FFWorkspace::evaluateEwaldCoulomb: Ewald sum not set up (setEwald)");
+    if (geometry_bohr.rows() != m_natoms || m_coul_alp.size() != m_natoms || charges.size() != m_natoms)
+        throw std::runtime_error("FFWorkspace::evaluateEwaldCoulomb: geometry, alp and charges must have natoms rows");
+    m_geometry = geometry_bohr;
+    m_eeq_charges = charges;
+    m_do_gradient = gradient;
+    m_ewald_terms = curcuma::ewald::EwaldEnergyTerms();
+    m_ewald_setup_ms = 0.0;
+    {
+        // the same build (or lookup, when the periodic EEQ solve of this step built it) as in calculate()
+        auto t0 = std::chrono::high_resolution_clock::now();
+        if (!m_ewald_cache)
+            m_ewald_cache = std::make_shared<curcuma::ewald::EwaldGeometryCache>();
+        const Eigen::MatrixXd pos = m_geometry;
+        auto run = [this](int T, const std::function<void(int)>& f) {
+            std::vector<std::future<void>> futures;
+            futures.reserve(T - 1);
+            for (int t = 1; t < T; ++t)
+                futures.push_back(m_pool->enqueue([&f, t]() { f(t); }));
+            f(0);
+            for (auto& fu : futures)
+                fu.get();
+        };
+        const int T = (m_pool && m_num_threads > 1) ? m_num_threads : 1;
+        m_ewald->buildGeometryCache(pos, &m_coul_alp, *m_ewald_cache, m_ewald_kernel_cap_bytes, T,
+            T > 1 ? curcuma::ewald::EwaldParallelFor(run) : curcuma::ewald::EwaldParallelFor());
+        m_ewald_setup_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
+    }
+    for (int t = 0; t < m_num_threads; ++t)
+        m_accumulators[t].reset(m_natoms, gradient, /*store_components=*/false, /*want_potentials=*/false);
+    if (m_num_threads == 1 || !m_pool) {
+        calcCoulombEwald(0);
+    } else {
+        std::vector<std::future<void>> futures;
+        futures.reserve(m_num_threads - 1);
+        for (int t = 1; t < m_num_threads; ++t)
+            futures.push_back(m_pool->enqueue([this, t]() { calcCoulombEwald(t); }));
+        calcCoulombEwald(0);
+        for (auto& f : futures)
+            f.get();
+    }
+    // partition order, as reduce()
+    double e_pair = 0.0;
+    m_ewald_real_ms = m_ewald_recip_ms = 0.0;
+    if (gradient && gradient_out) {
+        if (gradient_out->rows() != m_natoms || gradient_out->cols() != 3)
+            gradient_out->resize(m_natoms, 3);
+        gradient_out->setZero();
+    }
+    for (int t = 0; t < m_num_threads; ++t) {
+        const auto& acc = m_accumulators[t];
+        e_pair += acc.energy.coulomb;
+        m_ewald_terms.real += acc.ewald_real;
+        m_ewald_terms.reciprocal += acc.ewald_recip;
+        m_ewald_real_ms += acc.ewald_real_ms;
+        m_ewald_recip_ms += acc.ewald_recip_ms;
+        if (gradient && gradient_out)
+            *gradient_out += acc.gradient;
+    }
+    curcuma::ewald::EwaldResult tail;
+    m_ewald->selfAndBackground(m_eeq_charges, &m_coul_alp, /*want_potentials=*/false, tail);
+    m_ewald_terms.self = tail.terms.self;
+    m_ewald_terms.background = tail.terms.background;
+    m_ewald_terms.gaussian_background = tail.terms.gaussian_background;
+    e_pair += tail.terms.self + tail.terms.background + tail.terms.gaussian_background;
+    if (terms_out)
+        *terms_out = m_ewald_terms;
+    return e_pair;
+}
+
 double FFWorkspace::calculate(bool gradient)
 {
     const bool do_timing = (CurcumaLogger::get_verbosity() >= 2);

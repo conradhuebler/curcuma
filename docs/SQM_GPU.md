@@ -224,6 +224,11 @@ FP32→FP64 decision) — only then does the latency region actually shrink.
 
 ## Notes / limits
 
+- **Periodic cell (Nov 2026)**: native gfn1/gfn2 read no cell on the CPU nor on the GPU (a `unitcell` line is silently
+  ignored). GFN-FF with a cell runs on the CPU unless `-gfnff.gpu_periodic true` is given; then CUDA computes the local
+  terms with the minimum image and, with the default `coulomb_ewald`, the periodic EEQ and the Ewald Coulomb stay on the
+  host (S2 hybrid, [WP-PERIODIC-NONBONDED.md](WP-PERIODIC-NONBONDED.md) S1/S2; ROCm refuses a cell).
+
 - **`-scf_precond frag` (Oct 2026, AI-generated, machine-tested only)**: the fully device-resident GFN2 loop applies the fragment Broyden seed M on the device (one CUDA block per fragment block, guard on ||F||_2); ROCm, Vulkan, the host-driven CUDA loop and a multi-GPU SCF split ignore the switch with a warning. Measurements: [SCF_PRECOND.md](SCF_PRECOND.md#gpu-cuda-resident-loop).
 - Plugin rebuild (Oct 2026): the `GpuScfBackend` interface gained virtual methods (`supportsResidentPreconditioner`, `residentSetPreconditioner`, ...) inserted before `residentScfStep`; the plugin loader checks no ABI version, so rebuild `libcurcuma_cuda`/`_rocm`/`_vulkan` together with the executable.
 - **Implicit solvation (ALPB/GBSA) on GPU (WP4a+WP4b, 2026-06-07)**: `-xtb.solvent`

@@ -393,6 +393,17 @@ public:
     /// P1 (Nov 2026): CPU-sum milliseconds of the Ewald real-space and reciprocal parts in the last calculate().
     double ewaldRealMs() const { return m_ewald_real_ms; }
     double ewaldRecipMs() const { return m_ewald_recip_ms; }
+    /*! \brief Claude Generated (Nov 2026, S2): the periodic Coulomb pair energy alone (real + reciprocal + self +
+     * background + Gaussian background) and, on request, its gradient at fixed charges, with no other term.
+     * The GPU hybrid (local terms on the device, EEQ and Ewald on the host) adds this to the device result.
+     * Same code as calculate(): the shared geometry cache (P1), calcCoulombEwald() per partition over the pool,
+     * reduced in partition order (reproducible at a fixed thread count), selfAndBackground() of postProcess().
+     * The GFN-FF self term (TERM 2+3) and TERM 1b are NOT included (they stay on the device, k_coulomb_postprocess).
+     * \param geometry_bohr N x 3 positions (Bohr); \param charges EEQ charges (e); \param gradient also dE/dr
+     * \param gradient_out receives N x 3 Eh/Bohr when gradient is set (resized); \param terms_out the split (may be null)
+     * \return E_pair (Eh). Throws without setEwald() or without per-atom alp. */
+    double evaluateEwaldCoulomb(const Matrix& geometry_bohr, const Vector& charges, bool gradient,
+                                Matrix* gradient_out, curcuma::ewald::EwaldEnergyTerms* terms_out);
     /// Per-atom Coulomb self-energy inputs (setCoulombSelfEnergyParams order): tests copy them between instances.
     const Vector& coulombChiBase() const { return m_coul_chi_base; }
     const Vector& coulombGam() const { return m_coul_gam; }

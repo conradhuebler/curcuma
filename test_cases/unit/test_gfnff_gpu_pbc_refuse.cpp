@@ -52,14 +52,18 @@ int main()
     check(std::isfinite(e) && e < 0.0, "(c) finite energy without a cell: " + std::to_string(e));
     check(!normal.hasPeriodicEnergy(), "(a) hasPeriodicEnergy() false after set-up");
 
-    // S1 (Nov 2026): the opt-in. gpu_periodic alone (coulomb_ewald default true) is still refused, with the S3/S4
-    // message; gpu_periodic with coulomb_ewald false sets up, computes and keeps hasPeriodicEnergy() false.
+    // S1/S2 (Nov 2026): the opt-in. gpu_periodic alone (coulomb_ewald default true) is the S2 hybrid: accepted, host
+    // periodic EEQ + Ewald, hasPeriodicEnergy() true (S1 refused it with "S3/S4"); gpu_periodic with coulomb_ewald
+    // false sets up, computes and keeps hasPeriodicEnergy() false.
     json opt = json::object();
     opt["gpu_periodic"] = true;
     GFNFFGPUComputationalMethod ewald("gfnff", opt);
-    check(!ewald.setMolecule(periodic), "(d) gpu_periodic with coulomb_ewald (default): setMolecule() refused");
-    check(ewald.hasError() && ewald.getErrorMessage().find("S3/S4") != std::string::npos,
-        "(d) message names the missing periodic Coulomb/EEQ (S3/S4): " + ewald.getErrorMessage());
+    check(ewald.setMolecule(periodic), "(d) gpu_periodic with coulomb_ewald (default): setMolecule() accepted (S2 hybrid)");
+    check(!ewald.hasError() && ewald.periodicHybridActive() && ewald.hasPeriodicEnergy(),
+        "(d) hybrid active, hasPeriodicEnergy() true: " + ewald.getErrorMessage());
+    const double e_hyb = ewald.calculateEnergy(true);
+    check(std::isfinite(e_hyb) && e_hyb < 0.0 && ewald.hostEwaldEnergy() != 0.0,
+        "(d) finite hybrid energy with a host Ewald part: " + std::to_string(e_hyb) + " (Ewald " + std::to_string(ewald.hostEwaldEnergy()) + ")");
     opt["coulomb_ewald"] = false;
     GFNFFGPUComputationalMethod released("gfnff", opt);
     check(released.setMolecule(periodic), "(e) gpu_periodic with coulomb_ewald false: setMolecule() accepted");

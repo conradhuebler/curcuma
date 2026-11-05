@@ -194,7 +194,7 @@ and division after the unchanged cutoff test), `k_coulomb` (sqrt and division), 
   iterations unchanged (16). Kernel times (CUPTI): `k_coulomb_tiles` 11.2 -> 2.4 ms (3.7 ms with sqrt and
   division instead of rsqrt), `k_eeq_build_matrix` 6.6 -> 2.8 ms. 99.9 % of the pairs are far-field there.
 - Not checked: periodic cells (a `unitcell` comment did not change the -sp energy, so the PBC path was
-  not exercised) (since Nov 2026 a cell sends GPU GFN-FF to the CPU, [WP-PERIODIC-NONBONDED.md](WP-PERIODIC-NONBONDED.md) A3b; S1 releases the local terms on CUDA behind `-gfnff.gpu_periodic true` with `coulomb_ewald false` only, no timing measured), multi-GPU, other GPUs than the RTX 5080 (FP64 at 1/64; on an FP64-strong card the gain is smaller).
+  not exercised) (since Nov 2026 a cell sends GPU GFN-FF to the CPU unless `-gfnff.gpu_periodic true` is given, [WP-PERIODIC-NONBONDED.md](WP-PERIODIC-NONBONDED.md) A3b/S1/S2: then the local terms run on the CUDA device and, with the default `coulomb_ewald`, the periodic EEQ and the Ewald Coulomb on the host (S2 hybrid; the host EEQ dominates the step, MD step 114 -> 78 ms at 2910 atoms and 324 -> 241 ms at 5748, 1.35-1.46x, numbers in S2)), multi-GPU, other GPUs than the RTX 5080 (FP64 at 1/64; on an FP64-strong card the gain is smaller).
 
 | Option | Default | Effect / when to change |
 |---|---|---|

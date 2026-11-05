@@ -3795,7 +3795,9 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     }
 
     // k_coulomb (needs EEQ charges)
-    if (m_coulomb_enabled && impl.coulomb_implicit) {
+    // S2 (Nov 2026): the periodic hybrid skips the device pair sum (m_coulomb_pair_on_device false): the host adds the
+    // Ewald pair energy and gradient at these charges; self term and TERM 1b below stay on the device.
+    if (m_coulomb_enabled && m_coulomb_pair_on_device && impl.coulomb_implicit) {
         // Claude Generated (Sep 2026): each pair once (k_coulomb_tiles); the row-wise kernel
         // evaluated every pair twice. CURCUMA_GFNFF_COULOMB_ROWWISE=1 selects the old kernel.
         static const bool rowwise = [] {
@@ -3821,7 +3823,7 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
             }
             checkCuda(cudaGetLastError(), "k_coulomb_tiles launch");
         }
-    } else if (m_coulomb_enabled && impl.coulomb.n > 0) {
+    } else if (m_coulomb_enabled && m_coulomb_pair_on_device && impl.coulomb.n > 0) {
         LaunchConfig cfg = getLaunchConfig(impl.coulomb.n, m_block_size);
         k_coulomb<<<cfg.gridSize, cfg.blockSize, 0, impl.stream_pairwise>>>(
             impl.coulomb.n,

@@ -156,10 +156,16 @@ public:
     GFNFF* gfnffInstance() const override { return m_gfnff.get(); }
     bool requestsCpuFallback() const override { return m_cpu_fallback_requested; }
     std::string cpuFallbackReason() const override { return m_cpu_fallback_reason; }
-    /// Claude Generated (Nov 2026, S0): the device path has no periodic energy (no Ewald, no periodic EEQ, MIC missing in
-    /// several kernels; scratchpad plan G0). Stated explicitly so that SimpleMD never wraps into the cell for a GPU
-    /// method. Stays false until stage S4 of the GPU port; setMolecule() refuses a cell anyway.
-    bool hasPeriodicEnergy() const override { return false; }
+    /// Claude Generated (Nov 2026, S0/S2): true only in the periodic hybrid (S2: cell, gpu_periodic, coulomb_ewald, CUDA):
+    /// local terms with the minimum image on the device, periodic EEQ and Ewald Coulomb on the host, so the energy is the
+    /// periodic one of the CPU path and SimpleMD wraps into the cell (A6). With coulomb_ewald false (S1: minimum-image
+    /// Coulomb, non-periodic EEQ) and without a cell it is false.
+    bool hasPeriodicEnergy() const override { return m_periodic_hybrid; }
+    /// S2: true while the periodic hybrid is active (tests, diagnostics).
+    bool periodicHybridActive() const { return m_periodic_hybrid; }
+    /// S2: host Ewald pair energy (Eh) of the last step and its split; zero outside the hybrid.
+    double hostEwaldEnergy() const { return m_host_ewald_energy; }
+    const curcuma::ewald::EwaldEnergyTerms& hostEwaldTerms() const { return m_host_ewald_terms; }
     /// Device index this method is pinned to (-1 = runtime default). Claude Generated (Sep 2026).
     int gpuDevice() const { return m_gpu_device; }
 
@@ -213,6 +219,14 @@ private:
     double           m_last_energy   = 0.0;
     double           m_gpu_upload_time_ms = 0.0;
     Matrix           m_cached_gradient; ///< Cached gradient (copied from GPU workspace after calculate)
+    // Claude Generated (Nov 2026, S2): periodic hybrid state. The device computes every local term with the minimum
+    // image (S1) plus the Coulomb self term and TERM 1b; the host GFNFF solves the periodic EEQ (Ewald matrix, P1
+    // pcg, warm start) through eeqCpuFragmentRoute() and FFWorkspace::evaluateEwaldCoulomb() gives the Ewald pair
+    // energy and gradient at those charges (Eh, Eh/Bohr), added to the device result here.
+    bool             m_periodic_hybrid = false;
+    double           m_host_ewald_energy = 0.0;
+    Matrix           m_host_ewald_grad;      ///< N x 3, Eh/Bohr (the device gradient unit); pre-allocated
+    curcuma::ewald::EwaldEnergyTerms m_host_ewald_terms;
 
     // Claude Generated (Sep 2026): GPU-path per-phase wall-clock breakdown, so
     // getLastPrepTiming() reports real numbers instead of the CPU PrepTiming's zeros
@@ -242,6 +256,7 @@ private:
         double coul_update = 0.0;     ///< Coulomb pair-list refresh (step 2e)
         double launch = 0.0;          ///< charge-independent GPU kernel launch overhead
         double eeq_solve = 0.0;       ///< EEQ Phase 2 solve — GPU Schur/PCG or CPU fallback
+        double host_ewald = 0.0;      ///< S2 (Nov 2026): host Ewald Coulomb pair energy + gradient (periodic hybrid only)
         double coulomb_postprocess = 0.0; ///< Coulomb kernel + postprocess + D2H download
         double total = 0.0;           ///< calculateEnergy() wall time (excl. topology/paramgen)
     } m_last_gpu_prep_timing;
@@ -592,30 +607,37 @@ bool GFNFFGpuMethodImpl<Backend>::setMolecule(const Mol& mol)
     // the delta-ML base swap a GPU GFN-FF with a cell for the CPU method before this call; any other caller that hands a
     // periodic molecule to the device path would get a non-periodic energy without a message (no Ewald, no periodic
     // EEQ, plain distances in several kernels and the multi-GPU EEQ split). Refuse until the port (stages S1-S4) is done.
-    // Nov 2026 (S1): released only behind -gfnff.gpu_periodic true, with coulomb_ewald false and on a backend whose
-    // kernels carry the minimum-image frames (CUDA). The device Coulomb is then a minimum-image pair sum (not the
-    // Ewald sum of the CPU), the EEQ non-periodic; the local terms (CN, D4 + tail, repulsion, bonded, HB/XB) are
-    // periodic. hasPeriodicEnergy() stays false until S4.
+    // Nov 2026 (S1): released only behind -gfnff.gpu_periodic true on a backend whose kernels carry the minimum-image
+    // frames (CUDA). With coulomb_ewald false the device Coulomb is a minimum-image pair sum (not the Ewald sum of the
+    // CPU) and the EEQ non-periodic; the local terms (CN, D4 + tail, repulsion, bonded, HB/XB) are periodic.
+    // Nov 2026 (S2): with coulomb_ewald true (the default) the periodic HYBRID: local terms on the device, periodic EEQ
+    // (Ewald matrix, P1 pcg) and the Ewald Coulomb pair term on the host; hasPeriodicEnergy() is then true. The device
+    // Ewald (S3) and the device periodic EEQ (S4) are not there yet.
+    m_periodic_hybrid = false;
     if (mol.m_has_pbc) {
         const bool opt_in = m_gfnff->gpuPeriodicRequested();
         const bool ewald = m_gfnff->coulombEwaldRequested();
-        if (!opt_in || ewald || !Backend::has_periodic_local_terms) {
+        if (!opt_in || !Backend::has_periodic_local_terms) {
             m_has_error = true;
             if (!opt_in)
-                m_error_message = "GFNFFGPUMethod: periodic cell set, but the GPU GFN-FF path has no periodic energy yet; "
-                                  "use the CPU method (omit -gpu) for periodic systems (-gfnff.gpu_periodic true releases "
-                                  "the local terms on CUDA with coulomb_ewald false)";
-            else if (!Backend::has_periodic_local_terms)
-                m_error_message = std::string("GFNFFGPUMethod: gpu_periodic is available on CUDA only (S1), not on ")
-                                  + Backend::name + "; use the CPU method (omit -gpu) for periodic systems";
+                m_error_message = "GFNFFGPUMethod: periodic cell set, but the GPU GFN-FF path is released only with "
+                                  "-gfnff.gpu_periodic true (CUDA: local terms on the device, periodic EEQ and Ewald Coulomb "
+                                  "on the host); use the CPU method (omit -gpu) for periodic systems";
             else
-                m_error_message = "GFNFFGPUMethod: periodic Coulomb/EEQ on the GPU is not available yet (S3/S4); "
-                                  "use the CPU method, or -gfnff.coulomb_ewald false for a minimum-image Coulomb on the GPU";
+                m_error_message = std::string("GFNFFGPUMethod: gpu_periodic is available on CUDA only (S1/S2), not on ")
+                                  + Backend::name + "; use the CPU method (omit -gpu) for periodic systems";
             CurcumaLogger::error(m_error_message);
             return false;
         }
-        CurcumaLogger::warn("GFN-FF GPU with a periodic cell (gpu_periodic, S1): local terms with the minimum image; "
-                            "the Coulomb term is a minimum-image pair sum and the EEQ is non-periodic (coulomb_ewald false)");
+        if (ewald) {
+            m_periodic_hybrid = true;
+            if (CurcumaLogger::get_verbosity() >= 1)
+                CurcumaLogger::info("GFN-FF GPU with a periodic cell (gpu_periodic, S2 hybrid): local terms with the minimum image "
+                                    "on the device; periodic EEQ (Ewald matrix) and the Ewald Coulomb pair term on the host");
+        } else {
+            CurcumaLogger::warn("GFN-FF GPU with a periodic cell (gpu_periodic, S1): local terms with the minimum image; "
+                                "the Coulomb term is a minimum-image pair sum and the EEQ is non-periodic (coulomb_ewald false)");
+        }
     }
 
     // Store atom types for GPU workspace (from mol, before InitialiseMolecule)
@@ -665,6 +687,22 @@ bool GFNFFGpuMethodImpl<Backend>::setMolecule(const Mol& mol)
     // Upload parameters to GPU + create CPU residual
     if (!initGPUWorkspace()) {
         return false;
+    }
+    // Claude Generated (Nov 2026, S2): the periodic hybrid needs the host Ewald set-up (EEQ solver with the Ewald
+    // matrix, FFWorkspace::setEwald with the same parameters, built in InitialiseMolecule as on the CPU); the device
+    // then skips its pair Coulomb. Both are checked here rather than assumed.
+    if constexpr (Backend::has_periodic_local_terms) {
+        if (m_periodic_hybrid) {
+            FFWorkspace* ws = m_gfnff->getWorkspace();
+            if (!m_gfnff->periodicEEQActive() || !ws || !ws->ewaldActive()) {
+                m_has_error = true;
+                m_error_message = "GFNFFGPUMethod: periodic hybrid requested, but the host periodic EEQ/Ewald set-up is not active";
+                CurcumaLogger::error(m_error_message);
+                return false;
+            }
+            m_gpu_workspace->setCoulombPairOnDevice(false);
+            m_host_ewald_grad = Matrix::Zero(static_cast<int>(m_atom_types.size()), 3);
+        }
     }
 
     // Oct 2026: from here on the non-bonded repulsion list is rebuilt on the device (default on for CUDA,
@@ -1069,6 +1107,13 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
                 "gfnff-gpu: GPU workspace ready ({} atoms, {} bonds, {} disp pairs, GPU EEQ enabled)",
                 natoms, m_gpu_workspace->bondCount(), m_gpu_workspace->dispersionCount()));
         }
+        // Claude Generated (Nov 2026, S2): set here, not only in setMolecule(), because a react-topology rebuild
+        // (calculateEnergy) constructs a fresh workspace through this function; without it the device pair Coulomb
+        // would run next to the host Ewald term (double count). m_periodic_hybrid is fixed before InitialiseMolecule().
+        if constexpr (Backend::has_periodic_local_terms) {
+            if (m_periodic_hybrid)
+                m_gpu_workspace->setCoulombPairOnDevice(false);
+        }
 
         return true;
 
@@ -1248,16 +1293,14 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
     }
     auto t_dlogdcn_end = std::chrono::high_resolution_clock::now();
 
-    // --- Step 2b: Compute per-bond HB coordination numbers ---
-    // Claude Generated (Apr 2026): HB CN computed entirely on GPU via two-pass kernel.
-    // Replaces CPU loop over bond_hb_data (O(n_hb_pairs) erf() evaluations).
-    auto t_hb_cn_start = std::chrono::high_resolution_clock::now();
-    if (m_gpu_params && !m_gpu_params->bond_hb_data.empty()) {
-        m_gpu_workspace->computeBondHBCN();
-    }
-    auto t_hb_cn_end = std::chrono::high_resolution_clock::now();
-
     // --- Step 2c: Dynamic HB/XB re-detection (must happen before kernel launch) ---
+    // Nov 2026 (S2 finding): Step 2b (per-bond HB coordination numbers) used to run BEFORE this refresh, so on every
+    // step on which the HB/XB lists were rebuilt the HB CN of the X-H bonds (k_hb_cn_per_atom over the HB alpha pairs,
+    // updateHBAlphaPairs below) was still that of the previous list; the CPU computes it in calculate() after
+    // updateHBXBIfNeeded(). Harmless-looking during a normal MD (one stale step per refresh), but on an MD restart
+    // whose first geometry lies 1 ps away from the set-up geometry the first step carried +1.6e-3 Eh in the bond term
+    // (60 H2O in a 44 Bohr cell, CPU -16.0752005 vs GPU -16.0736371 Eh, forces consistent only from step 2). Step 2b
+    // now follows the refresh (below), as on the CPU. A single point is unchanged (no refresh fires at step 0).
     auto t_hbxb_start = std::chrono::high_resolution_clock::now();
     // CURCUMA_GFNFF_STEPPHASE=1: sub-timers of a fired refresh (stderr), Claude Generated (Oct 2026)
     static const bool hb_phase_log = [] { const char* e = std::getenv("CURCUMA_GFNFF_STEPPHASE"); return e && *e && std::string(e) != "0"; }();
@@ -1345,6 +1388,15 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
     }
     auto t_hbxb_end = std::chrono::high_resolution_clock::now();
     gap_t = t_hbxb_end;
+
+    // --- Step 2b: Compute per-bond HB coordination numbers (after the HB/XB refresh, see Step 2c) ---
+    // Claude Generated (Apr 2026): HB CN computed entirely on GPU via two-pass kernel.
+    // Replaces CPU loop over bond_hb_data (O(n_hb_pairs) erf() evaluations).
+    auto t_hb_cn_start = std::chrono::high_resolution_clock::now();
+    if (m_gpu_params && !m_gpu_params->bond_hb_data.empty()) {
+        m_gpu_workspace->computeBondHBCN();
+    }
+    auto t_hb_cn_end = std::chrono::high_resolution_clock::now();
 
     // --- Step 2d: Periodic non-bonded repulsion pair-list refresh ---
     // Claude Generated (Sep 2026): the repulsion pair list is otherwise built ONCE from a
@@ -1501,7 +1553,8 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
     // consumer of CN remains after WP5-B+C. finalizeCNForCPU + prepareCNAndEEQ are
     // kept only for fallback branches that still need CPU-side CN/EEQ.
     // WP6 (May 2026): nfrag > 1 with valid fragment topology also skips CPU path.
-    if (m_skip_phase2 || (m_eeq_nfrag != 1 && !m_eeq_gpu->isFragmentTopoValid())) {
+    // S2: the periodic hybrid always takes eeqCpuFragmentRoute() below (CN download + host solve there).
+    if (!m_periodic_hybrid && (m_skip_phase2 || (m_eeq_nfrag != 1 && !m_eeq_gpu->isFragmentTopoValid()))) {
         m_gpu_workspace->finalizeCNForCPU(m_gpu_cn_final);
         m_gfnff->prepareCNAndEEQ(gradient, /*gpu_only=*/true, &m_gpu_cn_final, /*skip_eeq=*/true);
     }
@@ -1597,6 +1650,15 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
         }
         charges = m_gfnff->getLastCharges();
         m_gpu_workspace->setEEQCharges(charges);
+    } else if (m_periodic_hybrid) {
+        // Claude Generated (Nov 2026, S2): periodic cell with coulomb_ewald on CUDA. The device EEQ is non-periodic
+        // (dense Gaussian matrix at plain distances), so the charges come from the host periodic solve
+        // (EEQSolver::calculateFinalChargesPeriodic through prepareCNAndEEQ: Ewald matrix, block-preconditioned pcg,
+        // aspc warm start, eeq_ewald_tol) with the CN of the device, exactly the CPU path; uploaded like the
+        // many-fragment CPU route. The same charges feed the host Ewald pair term below.
+        if (CurcumaLogger::get_verbosity() >= 2)
+            CurcumaLogger::info("EEQ GPU Phase 2: periodic hybrid - host periodic EEQ (Ewald matrix) with the device CN");
+        eeqCpuFragmentRoute();
     } else if (many_frag_cpu_route && !many_frag_device_ppcg) {
         // Deliverable 3 (Jun 2026), ROCm only (threshold 0 on CUDA): high fragment count
         // (solvent box) and the solver does not resolve to ppcg (or the threshold was given
@@ -2253,9 +2315,25 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
 
     auto t_eeq_end = std::chrono::high_resolution_clock::now();
 
+    // Claude Generated (Nov 2026, S2): periodic hybrid - the Ewald Coulomb pair term (real + reciprocal + self +
+    // background + Gaussian background, B2) at the host charges, energy in Eh and gradient in Eh/Bohr, the units of the
+    // device result. The device skips its pair Coulomb (setCoulombPairOnDevice(false)); its self term (TERM 2+3) and
+    // TERM 1b (chi(CN) through the CN chain rule) stay there, so nothing is counted twice or not at all: the CPU
+    // workspace splits the same way (calcCoulombEwald | postProcess). The P1 geometry cache built by the EEQ solve of
+    // this step is reused (same positions, widths, parameters). Charges are fixed here (Hellmann-Feynman, B3).
+    m_host_ewald_energy = 0.0;
+    if (m_periodic_hybrid) {
+        FFWorkspace* ws = m_gfnff->getWorkspace();
+        m_host_ewald_energy = ws->evaluateEwaldCoulomb(geom_bohr, charges, gradient,
+                                                       gradient ? &m_host_ewald_grad : nullptr, &m_host_ewald_terms);
+    }
+    auto t_ewald_end = std::chrono::high_resolution_clock::now();
+
     // === Finish: Coulomb + postprocess + download ===
     // Note: setEEQCharges / setEEQDeviceCharges already called above per path.
     m_last_energy = m_gpu_workspace->launchChargeDependentAndFinish(gradient);
+    if (m_periodic_hybrid)
+        m_last_energy += m_host_ewald_energy;
 
     // Claude Generated (Sep 2026): say once which parts of the multi-GPU split ran (or why not).
     if constexpr (Backend::has_multi_gpu_split) {
@@ -2293,11 +2371,12 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
     // skip_eeq=true, so its own eeq_solve timer never fires).
     m_last_gpu_prep_timing.cn        = std::chrono::duration<double, std::milli>(t_cn_end - t_cn_start).count();
     m_last_gpu_prep_timing.dlogdcn   = std::chrono::duration<double, std::milli>(t_dlogdcn_end - t_cn_end).count();
-    m_last_gpu_prep_timing.hb_cn     = std::chrono::duration<double, std::milli>(t_hb_cn_end - t_dlogdcn_end).count();
+    m_last_gpu_prep_timing.hb_cn     = std::chrono::duration<double, std::milli>(t_hb_cn_end - t_hb_cn_start).count();
     m_last_gpu_prep_timing.hbxb      = std::chrono::duration<double, std::milli>(t_hbxb_end - t_hbxb_start).count();
     m_last_gpu_prep_timing.launch    = std::chrono::duration<double, std::milli>(t_launch_end - t_prep_end).count();
     m_last_gpu_prep_timing.eeq_solve = std::chrono::duration<double, std::milli>(t_eeq_end - t_launch_end).count();
-    m_last_gpu_prep_timing.coulomb_postprocess = std::chrono::duration<double, std::milli>(t4 - t_eeq_end).count();
+    m_last_gpu_prep_timing.host_ewald = std::chrono::duration<double, std::milli>(t_ewald_end - t_eeq_end).count();
+    m_last_gpu_prep_timing.coulomb_postprocess = std::chrono::duration<double, std::milli>(t4 - t_ewald_end).count();
     m_last_gpu_prep_timing.total     = std::chrono::duration<double, std::milli>(t4 - t0).count();
 
     ++m_calc_count;
@@ -2311,9 +2390,9 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
         }();
         if (phase_log) {
             const auto& T = m_last_gpu_prep_timing;
-            fmt::print(stderr, "STEPPHASE {} grad={} cn={:.2f} dlogdcn={:.2f} hb_cn={:.2f} hbxb={:.2f}{} launch={:.2f} eeq={:.2f} coul={:.2f} total={:.2f}\n",
+            fmt::print(stderr, "STEPPHASE {} grad={} cn={:.2f} dlogdcn={:.2f} hb_cn={:.2f} hbxb={:.2f}{} launch={:.2f} eeq={:.2f} ewald={:.2f} coul={:.2f} total={:.2f}\n",
                        m_calc_count, gradient ? 1 : 0, T.cn, T.dlogdcn, T.hb_cn, T.hbxb, hbxb_updated ? "[F]" : "",
-                       T.launch, T.eeq_solve, T.coulomb_postprocess, T.total);
+                       T.launch, T.eeq_solve, T.host_ewald, T.coulomb_postprocess, T.total);
         }
     }
 
@@ -2322,11 +2401,11 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
         // Fix (May 2026): t_hbxb now measures actual updateHBXBIfNeeded duration (was ≈0).
         double t_gpu_cn    = std::chrono::duration<double, std::milli>(t_cn_end - t_cn_start).count();
         double t_dlogdcn   = std::chrono::duration<double, std::milli>(t_dlogdcn_end - t_cn_end).count();
-        double t_hb_cn     = std::chrono::duration<double, std::milli>(t_hb_cn_end - t_dlogdcn_end).count();
+        double t_hb_cn     = std::chrono::duration<double, std::milli>(t_hb_cn_end - t_hb_cn_start).count();
         double t_hbxb      = std::chrono::duration<double, std::milli>(t_hbxb_end - t_hbxb_start).count();
         double t_launch    = std::chrono::duration<double, std::milli>(t_launch_end - t_prep_end).count();
         double t_cpu_eeq   = std::chrono::duration<double, std::milli>(t_eeq_end - t_launch_end).count();
-        double t_coulomb   = std::chrono::duration<double, std::milli>(t4 - t_eeq_end).count();
+        double t_coulomb   = std::chrono::duration<double, std::milli>(t4 - t_ewald_end).count();
         double t_calc      = std::chrono::duration<double, std::milli>(t4 - t0).count();
         double t_init      = m_gfnff->getTopologyTimeMs() + m_gfnff->getParamGenTimeMs();
         double t_wall      = t_calc + t_init;
@@ -2344,6 +2423,9 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
             hbxb_updated ? "[fired]" : "       ", t_hbxb, pct(t_hbxb)));
         CurcumaLogger::result(fmt::format("  GPU kernel launch overhead     {:>10.1f}  {:>5.1f}%", t_launch, pct(t_launch)));
         CurcumaLogger::result(fmt::format("  CPU EEQ (parallel to GPU)      {:>10.1f}  {:>5.1f}%", t_cpu_eeq, pct(t_cpu_eeq)));
+        if (m_periodic_hybrid)
+            CurcumaLogger::result(fmt::format("  Host Ewald Coulomb (S2)        {:>10.1f}  {:>5.1f}%", m_last_gpu_prep_timing.host_ewald,
+                                              pct(m_last_gpu_prep_timing.host_ewald)));
         CurcumaLogger::result(fmt::format("  Coulomb + postprocess + DMA    {:>10.1f}  {:>5.1f}%", t_coulomb, pct(t_coulomb)));
         CurcumaLogger::result("  --------------------------------------------------");
         CurcumaLogger::result(fmt::format("  Calculation Total              {:>10.1f}  {:>5.1f}%", t_calc, pct(t_calc)));
@@ -2375,7 +2457,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
         rep.dispersion    = comp.dispersion;
         rep.bonded_rep    = comp.bonded_rep;
         rep.nonbonded_rep = comp.nonbonded_rep;
-        rep.coulomb       = comp.coulomb;
+        rep.coulomb       = comp.coulomb + m_host_ewald_energy;   // S2: device self term + host Ewald pair term
         rep.hbond         = comp.hbond;
         rep.xbond         = comp.xbond;
         rep.atm           = comp.atm;
@@ -2402,7 +2484,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
         // Phase summary — repurpose the locally-measured GPU phase wall-clocks
         double t_gpu_cn_ms   = std::chrono::duration<double, std::milli>(t_cn_end - t_cn_start).count();
         double t_cpu_eeq_ms  = std::chrono::duration<double, std::milli>(t_eeq_end - t_launch_end).count();
-        double t_phase2_ms   = std::chrono::duration<double, std::milli>(t4 - t_eeq_end).count();
+        double t_phase2_ms   = std::chrono::duration<double, std::milli>(t4 - t_ewald_end).count();
         double t_calc_ms     = std::chrono::duration<double, std::milli>(t4 - t0).count();
 
         rep.t_gpu_cn           = t_gpu_cn_ms;
@@ -2437,6 +2519,9 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
             std::memcpy(m_cached_gradient.data(), gpu_grad.data(),
                         gpu_grad.rows() * gpu_grad.cols() * sizeof(double));
         }
+        // S2: host Ewald pair gradient (Eh/Bohr, like the device gradient) on top; both accessors convert to Eh/A
+        if (m_periodic_hybrid && m_host_ewald_grad.rows() == m_cached_gradient.rows())
+            m_cached_gradient += m_host_ewald_grad;
     }
 
     return m_last_energy;
@@ -2719,6 +2804,11 @@ json GFNFFGpuMethodImpl<Backend>::getEnergyDecomposition() const
 {
     json energy_json;
     energy_json["GPU_Total"]  = m_last_energy;
+    if (m_periodic_hybrid) {   // S2: the host Ewald pair term inside GPU_Total
+        energy_json["Coulomb_host_ewald"] = m_host_ewald_energy;
+        energy_json["Coulomb_host_ewald_real"] = m_host_ewald_terms.real;
+        energy_json["Coulomb_host_ewald_reciprocal"] = m_host_ewald_terms.reciprocal;
+    }
     return energy_json;
 }
 
@@ -2753,6 +2843,7 @@ json GFNFFGpuMethodImpl<Backend>::getLastPrepTiming() const
         {"total",       g.total},            // full calculateEnergy() wall time (GPU step == "prep")
         // GPU-only sub-phases with no CPU-path analogue (additive; harmless for any
         // consumer that only reads the fields above).
+        {"gpu_host_ewald",          g.host_ewald},   // S2: host Ewald Coulomb (periodic hybrid), else 0
         {"gpu_dlogdcn",             g.dlogdcn},
         {"gpu_hb_cn",               g.hb_cn},
         {"gpu_hbxb_update",         g.hbxb},

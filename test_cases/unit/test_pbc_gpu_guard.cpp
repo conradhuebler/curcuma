@@ -112,13 +112,14 @@ int main()
     check(!MethodFactory::periodicCellNeedsCpu(periodic, other), "(d) method without GFNFF: no fallback");
     check(periodicCount() == 1, "(c,d) still one fallback");
 
-    // S1 (Nov 2026): the opt-in -gfnff.gpu_periodic releases the device only with coulomb_ewald false
+    // S1/S2 (Nov 2026): the opt-in -gfnff.gpu_periodic releases the device: with coulomb_ewald (default) as the S2
+    // hybrid (S1 refused it with "S3/S4" and counted a fallback), with coulomb_ewald false as the S1 minimum-image path
     FakeMethod opt_ewald(true, json{ { "gpu_periodic", true } });
-    check(MethodFactory::periodicCellNeedsCpu(periodic, opt_ewald), "(g) gpu_periodic with coulomb_ewald (default): fallback (S3/S4)");
-    check(periodicCount() == 2, "(g) counted as a periodic-cell fallback");
+    check(!MethodFactory::periodicCellNeedsCpu(periodic, opt_ewald), "(g) gpu_periodic with coulomb_ewald (default): no fallback (S2 hybrid)");
+    check(periodicCount() == 1, "(g) nothing counted");
     FakeMethod opt_mic(true, json{ { "gpu_periodic", true }, { "coulomb_ewald", false } });
     check(!MethodFactory::periodicCellNeedsCpu(periodic, opt_mic), "(h) gpu_periodic with coulomb_ewald false: no fallback");
-    check(periodicCount() == 2, "(h) nothing counted");
+    check(periodicCount() == 1, "(h) nothing counted");
 
     // (e) strict mode in a forked child (reportGpuFallback exits the process)
     std::fflush(stdout);
@@ -145,7 +146,7 @@ int main()
     const double e_gpu = gpu_req.CalculateEnergy(false);
     check(!ref.Error() && !gpu_req.Error(), "(f) both calculators ran");
     check(std::isfinite(e_ref) && e_ref == e_gpu, "(f) -gpu cuda without plugin, cell: CPU energy");
-    check(periodicCount() == 2, "(f) no periodic-cell fallback when the factory already chose the CPU");
+    check(periodicCount() == 1, "(f) no periodic-cell fallback when the factory already chose the CPU");
 
     if (g_failures == 0)
         std::printf("pbc_gpu_guard: all checks passed\n");
