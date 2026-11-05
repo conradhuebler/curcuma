@@ -10,7 +10,7 @@
 #                                 matrix (HF 1e-6 Eh; KS 1e-7 Eh: singlet exact F_xc, triplet/UKS a central difference
 #                                 of V_xc; measured 1e-8 on H2, 2e-10 on O3)
 #   qm_stability_follow_<case>    -qm.scf_stability follow: energy (1e-7 Eh) and <S^2> (1e-4) of the followed solution vs
-#                                 PySCF stability() + SCF, final analysis stable
+#                                 PySCF stability() + SCF (ozone: PySCF from the unit exp(K) start), final analysis stable
 # Run:  ctest -L qm_stability --output-on-failure
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
@@ -45,4 +45,10 @@ if(Python3_Interpreter_FOUND)
         add_test(NAME qm_stability_follow_${_case} COMMAND ${_STAB} --check follow --case ${_case} --threads 2)
         set_tests_properties(qm_stability_follow_${_case} PROPERTIES TIMEOUT 600 LABELS "qm_stability")
     endforeach()
+    # ozone RHF -> UHF/UKS (Nov 5 2026): reference = PySCF UHF/UKS from the same unit-norm exp(K) start (followed_unit);
+    # PySCF's own stability() rotation returns to the RKS solution for B3LYP
+    add_test(NAME qm_stability_follow_o3_hf COMMAND ${_STAB} --check follow --case o3_hf --threads 2 --followed-key followed_unit)
+    add_test(NAME qm_stability_follow_o3_b3lyp COMMAND ${_STAB} --check follow --case o3_b3lyp --threads 4
+             --followed-key followed_unit)
+    set_tests_properties(qm_stability_follow_o3_hf qm_stability_follow_o3_b3lyp PROPERTIES TIMEOUT 600 LABELS "qm_stability")
 endif()

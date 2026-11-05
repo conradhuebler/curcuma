@@ -59,12 +59,17 @@ in this test set, so the benefit for DIIS runs is not demonstrated.
   is followed before a triplet one. RHF -> UHF switches the geometry to UHF/UKS (alpha +v, beta -v; it stays
   unrestricted for later SCFs of the same geometry, `m_broken_symmetry_serial`); refused with `-qm.reference rhf`, for
   closed-shell-only wrappers (mp2, ri-mp2, lmp2, ccsd, double hybrids) and meta-GGAs.
-- Report: energy decomposition `stability` (`rhf_rhf`, `rhf_uhf`, `uhf_uhf`, `stable`, `followed`), printed by
-  `dump_qm_energy` as `stability <key> <value>`. Convention: eigenvalues of (A + B) in Eh; the RHF energy Hessian is
+- Report: energy decomposition `stability`, printed by `dump_qm_energy` as `stability <key> <value>`: `rhf_rhf`,
+  `rhf_uhf`, `uhf_uhf` and `<key>_converged` (Davidson) of the FINAL solution, `initial_<key>` of the first analysis,
+  `stable`, `followed` (Nov 5 fix: values of an earlier, followed solution used to stay next to `stable`). A Davidson
+  solve that does not converge (60 iterations, residual 1e-6) is a warning; its value is an upper bound. Convention: eigenvalues of (A + B) in Eh; the RHF energy Hessian is
   4 (A + B). PySCF's `stability()` prints its own scaling; the comparison below uses a dense matrix of this convention.
 
 Reference: `scripts/qm_stability_reference.py` (PySCF 2.14, dense (A + B) from PySCF's UHF response function with
-exact f_xc, `numpy.linalg.eigvalsh`; followed solution from PySCF `stability()` + SCF), `test_cases/qm_stability/reference.json`.
+exact f_xc, `numpy.linalg.eigh`; followed solution from PySCF `stability()` + SCF, for RHF -> UHF also
+`followed_unit_*` from curcuma's start, unit-norm exp(K)), `test_cases/qm_stability/reference.json`. Independent of
+that dense matrix: PySCF's `newton_ah.gen_g_hop_rhf` Hessian (dense) has lowest eigenvalue 2 x `rhf_rhf` on H2, water,
+water 1.8 A, ozone, N2 (e.g. N2 -0.3836672132 / 2 = -0.1918336066).
 def2-SVP, B3LYP = B3LYP5 on curcuma's sg1 grid. d = curcuma - PySCF (Eh).
 
 | case | E | rhf_rhf / uhf_uhf | d | rhf_uhf | d |
@@ -82,7 +87,11 @@ def2-SVP, B3LYP = B3LYP5 on curcuma's sg1 grid. d = curcuma - PySCF (Eh).
 
 Followed solutions (`follow`) vs PySCF: H2 2.0 A HF -1.002773459950 Eh (dE 2e-15, <S^2> 0.90437376 both), H2 with
 `-qm.reference uhf` (UHF internal) the same, water 1.8 A HF -75.725117786072 (dE -7e-14, <S^2> 1.67223202), H2
-B3LYP -1.012098168967 (dE 5.7e-11, <S^2> 0.69845775). FD gate of the assembled surface after following (water 1.8 A,
+B3LYP -1.012098168967 (dE 5.7e-11, <S^2> 0.69845775); ozone HF -224.142171083472 (dE -5.7e-14, <S^2> 0.89289086),
+ozone B3LYP -225.139930993513 (UKS, <S^2> 0.19430292, 8.4e-4 Eh below RKS; PySCF from the same unit exp(K) start
+-225.139930993529, dE 1.6e-11). PySCF's own `stability()` + UKS returns to the RKS solution for ozone/B3LYP (its rotation
+is too small; a PySCF scan of the start amplitude t: t = 0.1 stays RKS, t = 0.3 ... 1.5 reach -225.139930993529), so its
+`followed_energy` there is the RKS energy and the ctest uses `followed_unit_energy`. FD gate of the assembled surface after following (water 1.8 A,
 HF, UHF after the RHF -> UHF switch, 4-point central difference of `-sp` energies with follow, 9 coordinates): max
 3.2e-11 Eh/Bohr; level shift CH3 UHF b = 0.5: max 2.0e-10 Eh/Bohr.
 
@@ -91,27 +100,41 @@ Other observations: N2 at 2.0 A from the atom guess follows singlet -> triplet -
 following only the external mode reaches another UHF minimum, -108.562699 Eh. Which solution following reaches depends
 on the route; this case is not a ctest. RI-JK (H2 2.0 A): eigenvalues of the RI operator (0.388971 / -0.229505 vs
 exact 0.388976 / -0.229587); no external RI reference. Integral-direct J/K gives the stored-tensor values to 4e-16.
-Ozone B3LYP at 1 thread: 4.3 min for the two operators (22 products; each V_xc build takes ~3 s at 1 thread on this
-grid, 2.5 s for the whole run at 4 threads), so the KS ctests run with 4 threads.
+Ozone B3LYP `check`: 1.3-1.8 s for the whole run at 4 threads (Nov 5 2026, re-measured; an earlier 1-thread figure of
+4.3 min was not re-measured). Level shift: the commutator F'PS - SPF' of the shifted matrix equals that of F for an
+idempotent P (S - 1/2 S P S commutes with P), so the shift changes the DIIS extrapolation and the diagonalisation only.
 
 ## Verification
 
-- Bitwise with both options off: 13 runs (hf/b3lyp/pbe RI-JK, energy-only and gradient, plain mode, integral-direct,
-  UHF/UKS, `-qm.reference uhf` singlet, hf-3c; 1 thread) through `dump_qm_energy` with `CURCUMA_QM_SCF_TRACE=1`:
-  energies and gradients at 17 digits plus iteration counts, md5 `24099b0562288ceb312959214c9c6167` for the baseline
-  binary (029a72e), stage A and stage B. Densities themselves were not dumped (the gradient at 17 digits stands in).
-- `ctest -L qm_stability` (21 tests), `qm_1e|qm_2e|qm_grad|qm|qm_uhf|qm_uks|qm_b3lyp|qm_lda|qm_pbe|qm_dft_grad` after
-  stage A: 273/277, the 4 failures were timeouts (`qm_lmp2_exact_threads1_acetic_acid_dimer_fc` 900 s,
-  `qm_dft_opt_formaldehyde_distorted_{lda,pbe,b3lyp}` 1800 s) while another job loaded the 4-core machine; those code
-  paths run with both options off, where the md5 check shows identical results. After stage B (all QM test binaries
-  rebuilt): `ctest -L "qm_1e|qm_2e|qm_grad|qm_uhf|qm_uks|qm_b3lyp|qm_stability"` 151/151 and `method_catalog_*` 2/2.
-- The three new library structures add 15 generated `structinv_*`/`structcomp_*` tests (gfn1, gfn2, gfnff): 15/15. In
-  this CPU build no structinv test runs a native ab-initio method.
+Re-run Nov 5 2026 by a second session (the first session's logs were lost in a container restart; its numbers are
+not reproduced here). 4-vCPU container, 15 GB RAM, no GPU, CPU build `release/` (USE_CUDA off).
+
+- Bitwise with both options off: 11 runs through `dump_qm_energy --gradient --verbosity 1 --threads 1` with
+  `CURCUMA_QM_SCF_TRACE=1` (water hf, b3lyp, hf integral-direct, hf `scf_mode plain`, hf RI-JK, hf-3c; CH3 UHF and UKS;
+  stretched H2 2.0 A, N2 2.0 A, water 1.8 A hf): energy and gradient at 17 digits, every SCF iteration line (E_elec,
+  dE, |g|, dP) and the iteration count; md5 of each file identical between a 029a72e build (separate worktree) and
+  feature/qm with the fixes below, also with `-qm.scf_level_shift 0 -qm.scf_stability off` given explicitly.
+  Densities are not dumped; the per-iteration dP and the gradient stand in.
+- Level shift on vs off (same 11 runs): b = 0.5: |dE| <= 5.7e-14 Eh, max |dg| <= 5.3e-12 Eh/Bohr, iterations up
+  (water 15 -> 26, water 1.8 A 17 -> 41, N2 2.0 A 14 -> 22, H2 2.0 A 6 -> 20, plain 64 -> 102); b = 0.2 with
+  `scf_level_shift_off 1e-2`: |dE| <= 5.7e-14, max |dg| <= 7.9e-13, iterations unchanged except plain 64 -> 66, CH3 18 -> 19.
+- FD gate (central difference at +-h and +-2h, h = 1e-3 A, of `dump_qm_energy` energies vs `--gradient`, scf_threshold 1e-10):
+  water 1.8 A HF with `follow` (UHF after the switch) 8.7e-11 Eh/Bohr; CH3 UHF b = 0.5 4.6e-11; ozone B3LYP with
+  `follow` (UKS) 1.1e-10.
+- `ctest -L "qm_1e|qm_2e|qm_grad|qm_stability"` 64/64 (23 qm_stability), `ctest -R method_catalog` 2/2.
+- PySCF 2.14 (venv): `scripts/qm_stability_reference.py` reproduced every stored value of the first session bitwise
+  (1 thread); the regenerated file differs only in the new `followed_unit_*` keys and in the last digits (<= 1.1e-14)
+  from `eigh` instead of `eigvalsh`.
+- A full `make` in `release/` does not fit this container (about 40 GB usable disk, every test executable is
+  0.2-0.65 GB): the build stopped at the link step of unrelated tests (`No space left on device`, later an OOM kill
+  of cc1plus); `curcuma_core` and the targets above were built with exit status 0.
 
 ## Not tested / not implemented
 
 - Not tested: the device loops (no GPU in the container: the counted `qm_scf` fallback with level shift was never
-  run), ROCm/Vulkan, molecules beyond 3 heavy atoms, other bases than def2-SVP/MINIX, charged systems, RI-JK against
+  run; with `--gpu cuda` and no plugin the J/K fallback `qm_jk` fires first and the device loop is never reached;
+  the `qm_scf` count is also emitted for KS runs without device XC, where the device loop would not have run either),
+  ctest labels qm_uhf/qm_uks/qm_b3lyp/qm_dft_grad/qm_lmp2 in the Nov 5 re-run (their executables were not rebuilt), ROCm/Vulkan, molecules beyond 3 heavy atoms, other bases than def2-SVP/MINIX, charged systems, RI-JK against
   an external reference, meta-GGA singlet operator against PySCF, `-opt`/`-md` with `follow` (each geometry would be
   analysed and followed again), level shift with RI mixed precision or integral-direct incremental builds.
 - Not implemented: real -> complex and RHF/UHF -> GHF instabilities, a spin-resolved analytic f_xc (UKS/triplet use a
@@ -131,3 +154,12 @@ the benefit is for cases DIIS cannot converge, of which this test set had none (
 Open points before implementing: UKS needs the spin f_xc (the central difference is too noisy for a Newton solver
 near 1e-8), the incremental integral-direct builds and RI mixed precision assume the DIIS loop, the device loop would
 stay out. Realistic for HF/RKS on the CPU; not started.
+
+Hook points (checked Nov 5 2026 against the code): in `runSCF` (`qm_scf.cpp`) after `conv.observe(...)`, where the
+level shift sits now: once ||g|| is below a switch threshold, replace `solveFock(fock_use)` + `buildDensity` by a
+micro-iteration on the current orbitals (`vstop.C_prev`) with the operator of `stabilityLowest` kind 0 (needs C and F
+in the MO basis of the current density, and a gradient vector g = C_v^T F C_o, not the AO commutator), then
+`rotateOrbitals` and the density from it. Same in `runUSCF` with kind 2. `ScfVerifiedStop`, `DirectFockCadence` (incremental builds; Newton products
+need full builds of D, which `buildJK` already does) and the device loop (`runSCFDevice`, skipped as for the level
+shift) are the places that would have to opt out. The Davidson in `qm_stability.cpp` would need a linear-solve or
+augmented-Hessian variant; the operator itself is reusable as is.

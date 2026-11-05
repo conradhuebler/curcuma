@@ -10,6 +10,8 @@ Checks (--check):
           without shift (|dE| <= 1e-9 Eh, max |dg| <= 1e-8 Eh/Bohr); --extra adds -qm settings to both runs
           (e.g. scf_mode=plain); --expect-unconverged-without: the run without shift must fail (a case that needs it)
   --threads N (ref, follow): threads of dump_qm_energy (the KS cases use 4: the 1-thread V_xc is slow on this grid)
+  --followed-key K (follow): reference key prefix, followed (PySCF stability() route, default) or followed_unit
+          (UHF/UKS started from curcuma's unit-norm exp(K) rotation; ozone, where PySCF's own route stays restricted)
 
 Claude Generated (Nov 2026).
 """
@@ -70,6 +72,7 @@ def main():
     ap.add_argument("--extra", nargs="*", default=[])
     ap.add_argument("--expect-unconverged-without", action="store_true")
     ap.add_argument("--threads", type=int, default=1)
+    ap.add_argument("--followed-key", default="followed", choices=["followed", "followed_unit"])
     a = ap.parse_args()
     with open(os.path.join(HERE, "reference.json")) as f:
         ref = json.load(f)["cases"][a.case]
@@ -98,12 +101,13 @@ def main():
             ok &= abs(d) <= a.tol
     elif a.check == "follow":
         r = run(a.dump, ref, dict(extra, scf_stability="follow"), threads=a.threads)
-        dE = r["energy"] - ref["followed_energy"]
-        print("followed energy %.12f  pyscf %.12f  dE %.2e" % (r["energy"], ref["followed_energy"], dE))
+        fk = a.followed_key
+        dE = r["energy"] - ref[fk + "_energy"]
+        print("followed energy %.12f  pyscf (%s) %.12f  dE %.2e" % (r["energy"], fk, ref[fk + "_energy"], dE))
         ok &= abs(dE) <= 1e-7
         s2 = r.get("s2", 0.0)
-        print("<S^2> %.8f  pyscf %.8f" % (s2, ref["followed_s2"]))
-        ok &= abs(s2 - ref["followed_s2"]) <= 1e-4
+        print("<S^2> %.8f  pyscf %.8f" % (s2, ref[fk + "_s2"]))
+        ok &= abs(s2 - ref[fk + "_s2"]) <= 1e-4
         last = [v for k, v in r["stability"].items() if k in ("rhf_rhf", "rhf_uhf", "uhf_uhf")]
         print("stability values after following:", r["stability"])
         ok &= r["stability"].get("stable", 0.0) == 1.0 and r["stability"].get("followed", 0.0) >= 1.0

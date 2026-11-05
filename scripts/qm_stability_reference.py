@@ -12,7 +12,9 @@ DENSE, column by column, from PySCF's UHF response function (exact f_xc, no fini
 
 Stored: energy, the lowest eigenvalue of each operator (numpy eigh of the symmetrised dense matrix), PySCF's own
 stability() verdict, and for an unstable case the energy PySCF reaches by following (stability() rotation + SCF, at
-most three times; RHF -> UHF continues as UHF from the rotated orbitals).
+most three times; RHF -> UHF continues as UHF from the rotated orbitals). RHF -> UHF also stores followed_unit_energy/
+_s2: UHF/UKS from alpha C exp(+v), beta C exp(-v) with the unit-norm dense triplet eigenvector v, the start of
+curcuma's follow (PySCF's own rotation does not leave the RKS solution of ozone/B3LYP).
 
 Usage: <venv with pyscf>/bin/python scripts/qm_stability_reference.py [--only CASE ...]
 
@@ -23,6 +25,7 @@ import json
 import os
 
 import numpy as np
+import scipy.linalg
 import pyscf
 from pyscf import dft, gto, scf
 from pyscf.dft import gen_grid, radi
@@ -83,8 +86,9 @@ def make_mf(mol, method, ref):
     return mf
 
 
-def dense_lowest(mfu, Ca, Cb, Fa, Fb, na, nb, mode):
-    """Lowest eigenvalue of curcuma's (A + B), mode singlet | triplet | uhf, from the UHF response of mfu."""
+def dense_lowest(mfu, Ca, Cb, Fa, Fb, na, nb, mode, want_vector=False):
+    """Lowest eigenvalue of curcuma's (A + B), mode singlet | triplet | uhf, from the UHF response of mfu
+    (with want_vector: also its unit-norm eigenvector, virtual x occupied, column-major)."""
     vind = mfu.gen_response(mo_coeff=(Ca, Cb), mo_occ=mfu.mo_occ, hermi=1)
     blocks = []
     for C, F, no in ((Ca, Fa, na), (Cb, Fb, nb)):
@@ -118,7 +122,19 @@ def dense_lowest(mfu, Ca, Cb, Fa, Fb, na, nb, mode):
         else:
             M[:, k] = out[0].ravel(order="F")
     M = 0.5 * (M + M.T)
-    return float(np.linalg.eigvalsh(M)[0])
+    w, U = np.linalg.eigh(M)
+    if want_vector:
+        return float(w[0]), U[:, 0]
+    return float(w[0])
+
+
+def rotate(C, no, x):
+    """C exp(K), K_ai = -K_ia = x_ai (x: nvir x nocc), the rotation of curcuma's follow (qm_stability.cpp)."""
+    n = C.shape[1]
+    K = np.zeros((n, n))
+    K[no:, :no] = x
+    K[:no, no:] = -x.T
+    return C @ scipy.linalg.expm(K)
 
 
 def run_case(cid):
@@ -135,7 +151,7 @@ def run_case(cid):
         C, F = mf.mo_coeff, mf.get_fock()
         no = mol.nelectron // 2
         res["rhf_rhf"] = dense_lowest(mfu, C, C, F, F, no, no, "singlet")
-        res["rhf_uhf"] = dense_lowest(mfu, C, C, F, F, no, no, "triplet")
+        res["rhf_uhf"], v_trip = dense_lowest(mfu, C, C, F, F, no, no, "triplet", want_vector=True)
         st = mf.stability(external=True, return_status=True)
         res["pyscf_stable_internal"] = bool(st[2])
         res["pyscf_stable_external"] = bool(st[3])
@@ -151,6 +167,16 @@ def run_case(cid):
                     break
             res["followed_energy"] = float(mu.e_tot)
             res["followed_s2"] = float(mu.spin_square()[0])
+            # Nov 5 2026: PySCF's stability() rotation is too small for ozone/B3LYP: the UKS returns to the RKS
+            # solution although the triplet eigenvalue is -0.016 Eh. Second route as curcuma: alpha C exp(+v),
+            # beta C exp(-v) with the unit-norm dense triplet eigenvector, then UKS/UHF.
+            x = v_trip.reshape(C.shape[1] - no, no, order="F")
+            mu2 = make_mf(mol, method, "uhf")
+            occ = (mfu.mo_occ[0], mfu.mo_occ[1])
+            mu2.kernel(dm0=mu2.make_rdm1((rotate(C, no, x), rotate(C, no, -x)), occ))
+            assert mu2.converged, cid
+            res["followed_unit_energy"] = float(mu2.e_tot)
+            res["followed_unit_s2"] = float(mu2.spin_square()[0])
     else:
         Fa, Fb = mf.get_fock()
         Ca, Cb = mf.mo_coeff

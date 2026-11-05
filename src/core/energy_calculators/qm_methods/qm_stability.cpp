@@ -33,7 +33,6 @@
  */
 
 #include "qm_engine.h"
-#include "qm_scf_internal.h"
 #include "qm_xc_fxc.h"
 #include "qm_xc_spin.h"
 
@@ -209,7 +208,7 @@ void QMEngine::xcResponseSpinFD(const Matrix& Pa, const Matrix& Pb, const Matrix
 // Claude Generated (Nov 2026): kind 0 = RHF -> RHF (real singlet), 1 = RHF -> UHF (real triplet), 2 = UHF -> UHF
 // (real internal). Returns the eigenvalue in Eh; `vec` is the eigenvector (layout: virtual x occupied, column-major,
 // UHF: alpha block then beta block), `info` a short ASCII description of the solve.
-double QMEngine::stabilityLowest(int kind, Eigen::VectorXd& vec, std::string& info) const
+double QMEngine::stabilityLowest(int kind, Eigen::VectorXd& vec, std::string& info, bool& converged) const
 {
     const bool ks = isKohnSham();
     const double ax = ks ? m_xc.exact_exchange : 1.0;
@@ -315,6 +314,7 @@ double QMEngine::stabilityLowest(int kind, Eigen::VectorXd& vec, std::string& in
     const auto t0 = std::chrono::steady_clock::now();
     const DavidsonResult r = davidsonLowest(op, diag, 1.0e-6, 60);
     vec = r.vector;
+    converged = r.converged;
     info = fmt::format("{} Davidson iterations, {} operator products, residual {:.1e}{}, {:.1f} ms", r.iterations,
                        r.products, r.residual, r.converged ? "" : " (NOT converged)",
                        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
@@ -352,11 +352,23 @@ bool QMEngine::runStabilityAnalysis()
             kinds = { 0 };
         int unstable_kind = -1;
         Eigen::VectorXd unstable_vec;
+        // Nov 5 2026: the eigenvalue keys describe the FINAL solution; a value of an earlier (followed) solution would
+        // sit next to "stable": true. The first analysis is kept as initial_<key>.
+        for (const char* k : keys) {
+            m_stability_report.erase(k);
+            m_stability_report.erase(std::string(k) + "_converged");
+        }
         for (int kind : kinds) {
             Eigen::VectorXd v;
             std::string info;
-            const double lam = stabilityLowest(kind, v, info);
+            bool dav_converged = false;
+            const double lam = stabilityLowest(kind, v, info, dav_converged);
             m_stability_report[keys[kind]] = lam;
+            m_stability_report[std::string(keys[kind]) + "_converged"] = dav_converged;
+            if (cycle == 0) m_stability_report[std::string("initial_") + keys[kind]] = lam;
+            if (!dav_converged && CurcumaLogger::get_verbosity() >= 1)
+                CurcumaLogger::warn(fmt::format("QM stability {}: Davidson solve not converged ({}); the eigenvalue is an "
+                                                "upper bound", ks ? names_ks[kind] : names[kind], info));
             const bool unstable = std::isfinite(lam) && lam < kStabilityThreshold;
             if (CurcumaLogger::get_verbosity() >= 1) {
                 const std::string txt = fmt::format("QM stability {}: lowest eigenvalue of (A + B) {:.8f} Eh ({}){}",

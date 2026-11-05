@@ -608,7 +608,7 @@ private:
     /// -qm.scf_stability check|follow on the converged SCF; false if a re-run SCF failed.
     bool runStabilityAnalysis();
     /// Lowest eigenvalue of (A + B): kind 0 RHF singlet, 1 RHF -> UHF triplet, 2 UHF internal; `vec` its eigenvector.
-    double stabilityLowest(int kind, Eigen::VectorXd& vec, std::string& info) const;
+    double stabilityLowest(int kind, Eigen::VectorXd& vec, std::string& info, bool& converged) const;
     /// d/dt V_xc,s[Pa + t Da, Pb + t Db] at t = 0 as a central difference of the spin V_xc (CPU).
     void xcResponseSpinFD(const Matrix& Pa, const Matrix& Pb, const Matrix& Da, const Matrix& Db, Matrix& dVa,
                           Matrix& dVb) const;

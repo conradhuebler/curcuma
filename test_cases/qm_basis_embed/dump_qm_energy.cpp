@@ -15,7 +15,8 @@
  * --gpu NAME (Nov 2026, stage 6a, test_cases/qm_uhf GPU tests): top-level "gpu" of the config (cuda, ...); every
  * counted GPU fallback of the run is printed at the end as "fallback <category> <count>".
  * -qm.scf_stability (Nov 2026, test_cases/qm_stability): the energy decomposition's "stability" report is printed as
- * "stability <key> <value>" (eigenvalues rhf_rhf/rhf_uhf/uhf_uhf in Eh, stable 1/0, followed count).
+ * "stability <key> <value>" (eigenvalues rhf_rhf/rhf_uhf/uhf_uhf in Eh of the final solution, initial_<key> of the
+ * first analysis, <key>_converged 1/0, stable 1/0, followed count).
  *
  * VALUE is parsed as JSON when possible (true, 1e-10, ...), else taken as a string.
  *
