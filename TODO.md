@@ -191,7 +191,8 @@ Offen, Aufrufer vor dem Löschen erneut suchen:
 - `src/capabilities/curcumaopt.h`: hält den PARAM-Block des Moduls `opt` (28 Parameter); die Klasse `CurcumaOpt` ist ohne Implementierung. Die Parameter müssen erst in ein anderes Header umziehen.
 - `src/capabilities/rmsd/rmsd_costmatrix.*`, `rmsd_assignment.*` (`CostMatrixCalculator`, `MunkresAssignmentSolver`): kompiliert und von `rmsd_strategies.h` eingebunden, die Klassen selbst werden nirgends aufgerufen. Entscheidung nötig, ob die Strategien sie künftig nutzen sollen.
 - dc6dcn-Skip-Pruefung (`FFWorkspaceGPU::shouldSkipDc6dcn()` in `cuda/ff_workspace_gpu.h`, hat keinen Aufrufer; ROCm fuehrt sie mit `CURCUMA_ROCM_LEAN_STEP=0` noch aus).
-- `test_cases/cli/*/run_test.sh` (24 getrackte Dateien) enthalten `PROJECT_ROOT='/home/conrad/src/claude_curcuma/...'`; ctest prüft damit nicht dieses Checkout. Generator suchen, Pfad relativ machen.
+- `test_cases/cli/*/run_test.sh` (81 getrackte Dateien) sind erzeugte Kopien mit altem `PROJECT_ROOT` (`claude_curcuma`); ctest benutzt die im Build erzeugten. Prüfen, ob sie aus git entfernt werden können (`.gitignore`).
+- `xtb_cpscf` schlägt fehl (Gruppe C: H2 response 8.2e-5 gegen 1e-6, H2O/HCN isolation 1.7e-4/2.9e-4 gegen 1.5e-4); identisch im Stand vor dem Debt-Branch.
 - `src/helpers/`: `imagewrite.cpp`, `storage_bench.cpp`, `polymer_topo.cpp`, `gfnff_term_validator.cpp` ohne CMake-Target (eigenständige `main()`-Programme).
 - PARAM `gfnff.accuracy` (loose|normal|medium|high) bleibt: kein Leser bis jetzt, soll mit den Genauigkeitsprofilen (Eintrag oben) eine Bedeutung bekommen. Nicht entfernen; der Hilfetext sagt bis dahin "no effect".
 
