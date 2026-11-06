@@ -64,6 +64,7 @@
 #include <cstring>
 #if defined(__x86_64__) && defined(__SSE2__)
 #include <immintrin.h>  // _mm_stream_si64 / _mm_sfence (non-temporal stores in the Phase-2 matrix build)
+#include "src/core/output_symbols.h"
 #endif
 
 using namespace GFNFFParameters;  // Access to chi_eeq, gam_eeq, alpha_eeq, cnf_eeq
@@ -670,7 +671,7 @@ static inline int detectElementSpecificHybridization(int Z, double cn,
 
                         // DEBUG: Log angle sum for first few nitrogen atoms
                         if (atom_index < 5) {
-                            CurcumaLogger::info(fmt::format("  N atom {}: angle_sum = {:.2f} deg (neighbors: {}, {}, {})",
+                            CurcumaLogger::info(fmt::format("  N atom {}: angle_sum = {:.2f}" SYM_DEG " (neighbors: {}, {}, {})",
                                               atom_index, angle_sum_deg,
                                               neighbors[0], neighbors[1], neighbors[2]));
                         }

@@ -23,6 +23,7 @@
 #include "src/global_config.h"
 
 #include "confstat.h"
+#include "src/core/output_symbols.h"
 
 ConfStat::ConfStat(const json& controller, bool silent)
     : CurcumaMethod(ConfStatJson, controller, silent)
@@ -261,7 +262,7 @@ void ConfStat::printPopulationDistribution() const
     CurcumaLogger::info("");
     CurcumaLogger::info("Population ranges:");
     for (size_t i = 0; i < ranges.size(); ++i) {
-        CurcumaLogger::info(fmt::format("Conformers with population >= {:5.1f}%: {:3d}",
+        CurcumaLogger::info(fmt::format("Conformers with population " SYM_GE " {:5.1f}%: {:3d}",
             ranges[i], range_counts[i]));
     }
 

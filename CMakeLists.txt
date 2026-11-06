@@ -107,6 +107,12 @@ set(CURCUMA_DEBUG_LEVEL 2 CACHE STRING "Debug verbosity level 0-3")
 option(USE_PCH
     "Enable Precompiled Headers for faster compilation" ON)
 
+option(CURCUMA_UNICODE_OUTPUT
+    "Print Unicode symbols (Angstrom sign, sigma, degree, ...) instead of their ASCII spelling; see src/core/output_symbols.h" OFF)
+if(CURCUMA_UNICODE_OUTPUT)
+    add_compile_definitions(CURCUMA_UNICODE_OUTPUT)
+endif()
+
 option(USE_CUDA
     "Build the CUDA GPU plugin libcurcuma_cuda.so (gfnff + gfn1/gfn2 -gpu cuda, requires CUDA toolkit)" OFF)
 

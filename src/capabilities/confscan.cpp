@@ -49,6 +49,7 @@
 using json = nlohmann::json;
 
 #include "confscan.h"
+#include "src/core/output_symbols.h"
 
 template <typename T>
 std::string to_string_with_precision(const T a_value, const int n = 2)
@@ -1175,8 +1176,8 @@ void ConfScan::start()
         energy << "set terminal pngcairo  transparent size 600*scale,400*scale transparent font \"Noto Sans\" fontscale scale linewidth scale pointscale scale" << std::endl;
         energy << "set encoding utf8" << std::endl;
         energy << "set output '" << m_result_basename << ".energy.png'" << std::endl;
-        energy << "set xlabel \"RMSD [Angstrom]\"" << std::endl;
-        energy << "set ylabel \"Energy DeltaE [kJ/mol]\"" << std::endl;
+        energy << "set xlabel \"RMSD [Å]\"" << std::endl;
+        energy << "set ylabel \"Energy " SYM_DELTA "E [kJ/mol]\"" << std::endl;
         energy << "set key left horizontal  font \"Helvetica, 10\" maxrows 1 outside" << std::endl;
         energy << "plot '" << m_result_basename << ".param.dat' using 1:2 pt 10 ps 0.5 lt rgb \"grey\" title \"Parametrisation\", '" << m_result_basename << ".param.skip.dat' using 1:2 pt 10 ps 0.1 lt rgb \"blue\" title \"Reorder skipped\", '" << m_result_basename << ".param.perf.dat' using 1:2 pt 10 ps 0.1 lt rgb \"yellow\" title \"Reorder performed\", '" << m_result_basename << ".param.success.dat' using 2:3 pt 10 ps 0.5 lt rgb \"red\" title \"Reorder successful\", '" << m_result_basename << ".param.limit.dat' using 1:2 with linespoints linestyle 1 notitle" << std::endl;
         energy.close();
@@ -1186,8 +1187,8 @@ void ConfScan::start()
         ripser << "scale = 4063.0/800.0" << std::endl;
         ripser << "set terminal pngcairo  transparent size 600*scale,400*scale transparent font \"Noto Sans\" fontscale scale linewidth scale pointscale scale" << std::endl;
         ripser << "set encoding utf8" << std::endl;
-        ripser << "set xlabel \"RMSD [Angstrom]\"" << std::endl;
-        ripser << "set ylabel \"DeltaH\"" << std::endl;
+        ripser << "set xlabel \"RMSD [Å]\"" << std::endl;
+        ripser << "set ylabel \"" SYM_DELTA "H\"" << std::endl;
         ripser << "set output '" << m_result_basename << ".ripser.png'" << std::endl;
         ripser << "set key left horizontal  font \"Helvetica, 10\" maxrows 1 outside" << std::endl;
         ripser << "plot '" << m_result_basename << ".param.dat' using 1:3 pt 10 ps 0.5 lt rgb \"grey\" title \"Parametrisation\", '" << m_result_basename << ".param.skip.dat' using 1:3 pt 10 ps 0.1 lt rgb \"blue\" title \"Reorder skipped\", '" << m_result_basename << ".param.perf.dat' using 1:3 pt 10 ps 0.1 lt rgb \"yellow\" title \"Reorder performed\",  '" << m_result_basename << ".param.success.dat' using 2:4 pt 10 ps 0.5 lt rgb \"red\" title \"Reorder successful\", '" << m_result_basename << ".param.limit.dat' using 1:3 with linespoints linestyle 1 notitle" << std::endl;
@@ -1198,8 +1199,8 @@ void ConfScan::start()
         rotational << "scale = 4063.0/800.0" << std::endl;
         rotational << "set terminal pngcairo  transparent size 600*scale,400*scale transparent font \"Noto Sans\" fontscale scale linewidth scale pointscale scale" << std::endl;
         rotational << "set encoding utf8" << std::endl;
-        rotational << "set xlabel \"RMSD [Angstrom]\"" << std::endl;
-        rotational << "set ylabel \"DeltaI [MHz]\"" << std::endl;
+        rotational << "set xlabel \"RMSD [Å]\"" << std::endl;
+        rotational << "set ylabel \"" SYM_DELTA "I [MHz]\"" << std::endl;
         rotational << "set output '" << m_result_basename << ".rotational.png'" << std::endl;
         rotational << "set key left horizontal  font \"Helvetica, 10\" maxrows 1 outside" << std::endl;
         rotational << "plot '" << m_result_basename << ".param.dat' using 1:4 pt 10 ps 0.5 lt rgb \"grey\" title \"Parametrisation\", '" << m_result_basename << ".param.skip.dat' using 1:4 pt 10 ps 0.1 lt rgb \"blue\" title \"Reorder skipped\", '" << m_result_basename << ".param.perf.dat' using 1:4 pt 10 ps 0.1 lt rgb \"yellow\" title \"Reorder performed\",  '" << m_result_basename << ".param.success.dat' using 2:5 pt 10 ps 0.5 lt rgb \"red\" title \"Reorder successful\", '" << m_result_basename << ".param.limit.dat' using 1:4 with linespoints linestyle 1 notitle" << std::endl;
@@ -1392,10 +1393,10 @@ void ConfScan::CheckOnly(double sLE, double sLI, double sLH)
     CurcumaLogger::set_verbosity(m_verbosity);
     if (!m_rmsd_set) {
         m_rmsd_threshold *= m_getrmsd_scale; // apply user-defined scale factor (default 1.1)
-        CurcumaLogger::result_fmt("RMSD threshold set to {:.6f} Angstrom (scale={:.2f})", m_rmsd_threshold, m_getrmsd_scale);
+        CurcumaLogger::result_fmt("RMSD threshold set to {:.6f} Å (scale={:.2f})", m_rmsd_threshold, m_getrmsd_scale);
         constexpr double kDefaultRMSDThreshold = 0.9; // PARAM(rmsd, Double, 0.9, ...) default, confscan.h
         if (m_rmsd_threshold > kDefaultRMSDThreshold)
-            CurcumaLogger::warn_fmt("Dynamically determined RMSD threshold ({:.6f} Angstrom) exceeds the default {:.2f} Angstrom - filtering will be looser than usual", m_rmsd_threshold, kDefaultRMSDThreshold);
+            CurcumaLogger::warn_fmt("Dynamically determined RMSD threshold ({:.6f} Å) exceeds the default {:.2f} Å - filtering will be looser than usual", m_rmsd_threshold, kDefaultRMSDThreshold);
         for (const auto& i : m_listThresh) {
             if (i.first > m_getrmsd_thresh)
                 break;

@@ -27,6 +27,7 @@
 #include <cmath>
 #include <numeric>
 #include <iomanip>
+#include "src/core/output_symbols.h"
 
 TrajectoryAnalysis::TrajectoryAnalysis(const json& controller, bool silent)
     : TrajectoryAnalysis(ConfigManager("trajectoryanalysis", controller), silent)
@@ -159,12 +160,12 @@ void TrajectoryAnalysis::start()
         if (!pbc_logged && mol.hasPBC() && CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::info("Detected periodic boundary conditions in trajectory");
             auto params = PBCUtils::getLatticeParameters(mol.getUnitCell());
-            CurcumaLogger::param("lattice_a", fmt::format("{:.4f} Angstrom", params[0]));
-            CurcumaLogger::param("lattice_b", fmt::format("{:.4f} Angstrom", params[1]));
-            CurcumaLogger::param("lattice_c", fmt::format("{:.4f} Angstrom", params[2]));
-            CurcumaLogger::param("lattice_alpha", fmt::format("{:.2f} deg", params[3]));
-            CurcumaLogger::param("lattice_beta", fmt::format("{:.2f} deg", params[4]));
-            CurcumaLogger::param("lattice_gamma", fmt::format("{:.2f} deg", params[5]));
+            CurcumaLogger::param("lattice_a", fmt::format("{:.4f} Å", params[0]));
+            CurcumaLogger::param("lattice_b", fmt::format("{:.4f} Å", params[1]));
+            CurcumaLogger::param("lattice_c", fmt::format("{:.4f} Å", params[2]));
+            CurcumaLogger::param("lattice_alpha", fmt::format("{:.2f}" SYM_DEG, params[3]));
+            CurcumaLogger::param("lattice_beta", fmt::format("{:.2f}" SYM_DEG, params[4]));
+            CurcumaLogger::param("lattice_gamma", fmt::format("{:.2f}" SYM_DEG, params[5]));
             pbc_logged = true;
         }
 
@@ -573,7 +574,7 @@ void TrajectoryAnalysis::outputResults()
         if (!m_gyration_radius_series.empty()) {
             summary["sections"].push_back({
                 {"name", "Gyration Radius"},
-                {"unit", "Angstrom"},
+                {"unit", "Å"},
                 {"statistics", {
                     {"mean", m_gyration_stats.getMean("gyration_radius")},
                     {"std_dev", m_gyration_stats.getStdDev("gyration_radius")},
@@ -587,7 +588,7 @@ void TrajectoryAnalysis::outputResults()
         if (!m_end_to_end_series.empty()) {
             summary["sections"].push_back({
                 {"name", "End-to-End Distance"},
-                {"unit", "Angstrom"},
+                {"unit", "Å"},
                 {"statistics", {
                     {"mean", m_end_to_end_stats.getMean("end_to_end")},
                     {"std_dev", m_end_to_end_stats.getStdDev("end_to_end")},
@@ -601,7 +602,7 @@ void TrajectoryAnalysis::outputResults()
         if (!m_rout_series.empty()) {
             summary["sections"].push_back({
                 {"name", "Rout"},
-                {"unit", "Angstrom"},
+                {"unit", "Å"},
                 {"statistics", {
                     {"mean", m_rout_stats.getMean("rout")},
                     {"std_dev", m_rout_stats.getStdDev("rout")},

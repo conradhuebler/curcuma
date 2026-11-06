@@ -28,6 +28,7 @@
 #include <mutex>  // Claude Generated (Jun 2026): std::call_once guard for shared global D4 tables
 #include <omp.h>  // Claude Generated (February 2026): Phase 3 - OpenMP parallelization
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
+#include "src/core/output_symbols.h"
 
 // External declarations from d4_reference_cn_fortran.cpp (Fortran dftd3param.f90 - January 2026)
 // CRITICAL FIX: Use Fortran reference CN data (matches dftd3param.f90) instead of cpp-d4 data
@@ -270,10 +271,10 @@ void D4ParameterGenerator::calculateFrequencyDependentPolarizabilities()
 
         // Print validation for H and C
         if (m_refn.size() > 0) {
-            CurcumaLogger::result(fmt::format("  H (Z=1) alpha_0[0] = {:.4f}", m_integrated_alpha[0][0]));
+            CurcumaLogger::result(fmt::format("  H (Z=1) " SYM_ALPHA "_0[0] = {:.4f}", m_integrated_alpha[0][0]));
         }
         if (m_refn.size() > 5) {
-            CurcumaLogger::result(fmt::format("  C (Z=6) alpha_0[0] = {:.4f}", m_integrated_alpha[5][0]));
+            CurcumaLogger::result(fmt::format("  C (Z=6) " SYM_ALPHA "_0[0] = {:.4f}", m_integrated_alpha[5][0]));
         }
 
         CurcumaLogger::warn("D4: Using simplified alpha_iw for H and C only (Phase 2.2: full extraction)");
@@ -411,7 +412,7 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
     double t_weights_ms = std::chrono::duration<double, std::milli>(t_weights_end - t_weights_start).count();
 
     if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::info(fmt::format("D4: Weight pre-computation took {:.2f} ms ({} atoms x avg {} refs)",
+        CurcumaLogger::info(fmt::format("D4: Weight pre-computation took {:.2f} ms ({} atoms " SYM_TIMES " avg {} refs)",
             t_weights_ms, m_atoms.size(), m_gaussian_weights.empty() ? 0 : m_gaussian_weights[0].size()));
     }
 

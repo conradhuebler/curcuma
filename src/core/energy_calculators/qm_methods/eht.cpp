@@ -46,6 +46,7 @@
 #include "eht_parameters.h"
 
 #include "json.hpp"
+#include "src/core/output_symbols.h"
 
 EHT::EHT()
     : m_K(EHTParams::ParameterDatabase::getWolfsbergHelmholzConstant())
@@ -126,7 +127,7 @@ Basisset EHT::MakeBasis()
                 break;
             }
 
-            std::string orbital_info = fmt::format("{}:{}{}-{} (zeta={:.3f}, VSIP={:.2f} eV)",
+            std::string orbital_info = fmt::format("{}:{}{}-{} (" SYM_ZETA "={:.3f}, VSIP={:.2f} eV)",
                 i + 1,
                 EHTParams::ParameterDatabase::getElementSymbol(m_atoms[orb.atom]),
                 orb.atom + 1,
@@ -173,7 +174,7 @@ double EHT::Calculation(bool gradient)
 
     // Level 1+: Starting calculation
     if (CurcumaLogger::get_verbosity() >= 1) {
-        CurcumaLogger::info("Starting Extended Hueckel Theory calculation");
+        CurcumaLogger::info("Starting Extended Hückel Theory calculation");
     }
 
     // Level 2+: Molecular parameters
@@ -411,7 +412,7 @@ void EHT::printOrbitalAnalysis(int num_orbitals_around_gap) const
         return;
     }
 
-    CurcumaLogger::info("=== Extended Hueckel Theory Orbital Analysis ===");
+    CurcumaLogger::info("=== Extended Hückel Theory Orbital Analysis ===");
     CurcumaLogger::param("total_electrons", m_num_electrons);
     CurcumaLogger::param("total_orbitals", static_cast<int>(m_energies.size()));
     CurcumaLogger::param("K_constant", fmt::format("{:.4f}", m_K));

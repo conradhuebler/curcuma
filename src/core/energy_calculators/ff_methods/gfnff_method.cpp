@@ -101,6 +101,7 @@ struct SetupScope {
 
 #include <fmt/format.h>
 #include "src/tools/spatial_cell_list.h"  // Claude Generated (Apr 2026): O(N) neighbor queries for HB/XB
+#include "src/core/output_symbols.h"
 
 // Claude Generated (January 2026): Helper function for transition metal detection
 static inline bool is_transition_metal(int Z) {
@@ -2943,7 +2944,7 @@ double GFNFF::calculationSingle(bool gradient)
             double rotation_error = total_torque.norm();
 
             CurcumaLogger::param("translation_invariance", fmt::format("{:.2e} Eh/Bohr", translation_error));
-            CurcumaLogger::param("rotation_invariance", fmt::format("{:.2e} Eh*Bohr/Bohr", rotation_error));
+            CurcumaLogger::param("rotation_invariance", fmt::format("{:.2e} Eh" SYM_CDOT "Bohr/Bohr", rotation_error));
 
             if (translation_error > 1e-8 || rotation_error > 1e-8) {
                 CurcumaLogger::warn("Gradient invariance violation detected!");
@@ -2952,7 +2953,7 @@ double GFNFF::calculationSingle(bool gradient)
                                                     total_force(0), total_force(1), total_force(2)));
                 }
                 if (rotation_error > 1e-8) {
-                    CurcumaLogger::info(fmt::format("  Total torque: ({:.2e}, {:.2e}, {:.2e}) Eh*Bohr",
+                    CurcumaLogger::info(fmt::format("  Total torque: ({:.2e}, {:.2e}, {:.2e}) Eh" SYM_CDOT "Bohr",
                                                     total_torque(0), total_torque(1), total_torque(2)));
                 }
 
@@ -2963,10 +2964,10 @@ double GFNFF::calculationSingle(bool gradient)
                     if (comp.rows() == 0) return;
                     double err = comp.colwise().sum().norm();
                     if (err > 1e-8) {
-                        CurcumaLogger::warn(fmt::format("  [INVARIANCE] {} |Sum F| = {:.2e} Eh/Bohr  <<< VIOLATED",
+                        CurcumaLogger::warn(fmt::format("  [INVARIANCE] {} |" SYM_SUM " F| = {:.2e} Eh/Bohr  <<< VIOLATED",
                                                         name, err));
                     } else {
-                        CurcumaLogger::info(fmt::format("  [invariance] {} |Sum F| = {:.2e} Eh/Bohr  OK",
+                        CurcumaLogger::info(fmt::format("  [invariance] {} |" SYM_SUM " F| = {:.2e} Eh/Bohr  OK",
                                                         name, err));
                     }
                 };
@@ -4297,7 +4298,7 @@ double GFNFF::getCovalentRadius(int atomic_number) const
         return covalent_radii[atomic_number - 1] * CurcumaUnit::Length::ANGSTROM_TO_BOHR;
     } else {
         // Fallback for unknown elements (convert to Bohr)
-        CurcumaLogger::warn(fmt::format("No covalent radius for element {}, using default 1.0 Angstrom -> Bohr", atomic_number));
+        CurcumaLogger::warn(fmt::format("No covalent radius for element {}, using default 1.0 Å -> Bohr", atomic_number));
         return 1.0 * CurcumaUnit::Length::ANGSTROM_TO_BOHR;
     }
 }
@@ -4477,7 +4478,7 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     double ff = 1.0 - k1 * en_diff - k2 * en_diff * en_diff;
 
     if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info(fmt::format("RAB_TRANSFORM: EN1(rab)={:.8f}, EN2(rab)={:.8f}, |DeltaEN|={:.8f}", en1, en2, en_diff));
+        CurcumaLogger::info(fmt::format("RAB_TRANSFORM: EN1(rab)={:.8f}, EN2(rab)={:.8f}, |" SYM_DELTA "EN|={:.8f}", en1, en2, en_diff));
         CurcumaLogger::info(fmt::format("RAB_TRANSFORM: k1={:.8f}, k2={:.8f}, ff={:.8f}", k1, k2, ff));
     }
 
@@ -5409,7 +5410,7 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     if ((is_H_bond || is_CO_bond) && CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info(fmt::format("=== ALPHA DEBUG: Bond {}-{} (Z{}={}, Z{}={}) ===",
                                          atom1, atom2, atom1, z1, atom2, z2));
-        CurcumaLogger::info(fmt::format("  EN (param%en): en_alpha1={:.8f}, en_alpha2={:.8f}, |DeltaEN|={:.8f}",
+        CurcumaLogger::info(fmt::format("  EN (param%en): en_alpha1={:.8f}, en_alpha2={:.8f}, |" SYM_DELTA "EN|={:.8f}",
                                          en_alpha1, en_alpha2, en_diff_alpha));
         CurcumaLogger::info(fmt::format("  Constants: srb1={:.10f}, srb2={:.10f}, srb3={:.10f}",
                                          srb1, srb2, srb3));
@@ -5417,7 +5418,7 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
                                          fsrb2, srb2, mtyp1, mtyp2));
         CurcumaLogger::info(fmt::format("  Bstrength: {:.10f} (hyb1={}, hyb2={})",
                                          bstrength, hyb1, hyb2));
-        CurcumaLogger::info(fmt::format("  Terms: term1=fsrb2*DeltaEN^2={:.10f}, term2=srb3*bstr={:.10f}",
+        CurcumaLogger::info(fmt::format("  Terms: term1=fsrb2*" SYM_DELTA "EN" SYM_SQ "={:.10f}, term2=srb3*bstr={:.10f}",
                                          alpha_term1, alpha_term2));
         CurcumaLogger::info(fmt::format("  Sum: 1.0 + {:.10f} + {:.10f} = {:.10f}",
                                          alpha_term1, alpha_term2, alpha_sum));
@@ -5489,7 +5490,7 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
         CurcumaLogger::info(fmt::format("  fcn          = {:.6f}", fcn));
         CurcumaLogger::info(fmt::format("  full_product = {:.6f}", full_product));
         CurcumaLogger::info(fmt::format("  k_b (final)  = {:.6f} Eh", params.force_constant));
-        CurcumaLogger::info(fmt::format("  r0           = {:.6f} Bohr ({:.4f} Angstrom)", params.equilibrium_distance,
+        CurcumaLogger::info(fmt::format("  r0           = {:.6f} Bohr ({:.4f} Å)", params.equilibrium_distance,
                                          params.equilibrium_distance * CurcumaUnit::Length::bohr_radius_or_legacy(0.529177)));
         CurcumaLogger::info(fmt::format("  alpha        = {:.6f}", params.alpha));
         // Compare with Fortran reference for first C-C bond
@@ -5991,7 +5992,7 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
                             }
                         } else {
                             CurcumaLogger::warn(fmt::format(
-                                "pi-bond order index out of bounds for angle {}-{}-{}",
+                                SYM_PI "-bond order index out of bounds for angle {}-{}-{}",
                                 atom_i, atom_j, atom_k));
                             f2 = 1.0;  // Fallback
                         }
@@ -7565,13 +7566,13 @@ Vector GFNFF::calculateEEQCharges(const Vector& cn, const std::vector<int>& hyb,
         CurcumaLogger::info("Eigenvalue spectrum:");
         int n_show = std::min(5, (int)eigenvalues.size());
         for (int i = 0; i < n_show; ++i) {
-            CurcumaLogger::param(fmt::format("lambda[{}]", i), fmt::format("{:.6e}", eigenvalues[i]));
+            CurcumaLogger::param(fmt::format(SYM_LAMBDA "[{}]", i), fmt::format("{:.6e}", eigenvalues[i]));
         }
         if (eigenvalues.size() > 10) {
             CurcumaLogger::param("...", fmt::format("({} more eigenvalues)", eigenvalues.size() - 10));
         }
         for (int i = std::max(n_show, (int)eigenvalues.size() - 5); i < eigenvalues.size(); ++i) {
-            CurcumaLogger::param(fmt::format("lambda[{}]", i), fmt::format("{:.6e}", eigenvalues[i]));
+            CurcumaLogger::param(fmt::format(SYM_LAMBDA "[{}]", i), fmt::format("{:.6e}", eigenvalues[i]));
         }
     }
 
@@ -7675,7 +7676,7 @@ Vector GFNFF::calculateEEQCharges(const Vector& cn, const std::vector<int>& hyb,
         for (int i = 0; i < n; ++i) {
             EEQParameters params = getEEQParameters(m_atoms[i]);
             CurcumaLogger::param(fmt::format("atom_{}_Z{}", i, m_atoms[i]),
-                fmt::format("q={:.6f}, chi={:.6f}, gamma={:.6f}, alpha={:.6f}, CN={:.3f}",
+                fmt::format("q={:.6f}, " SYM_CHI "={:.6f}, " SYM_GAMMA "={:.6f}, " SYM_ALPHA "={:.6f}, CN={:.3f}",
                     charges[i], params.chi, params.gam, params.alp, cn[i]));
         }
         CurcumaLogger::param("total_charge", fmt::format("{:.6f}", total_charge_actual));
@@ -8429,7 +8430,7 @@ std::vector<double> GFNFF::calculatePiBondOrders(
     // ========================================================================
     if (m_use_full_huckel && m_huckel_solver && !charges.empty() && geometry_bohr.size() > 0) {
         if (CurcumaLogger::get_verbosity() >= 2) {
-            CurcumaLogger::info("Using full iterative Hueckel calculation for pi-bond orders");
+            CurcumaLogger::info("Using full iterative Hückel calculation for " SYM_PI "-bond orders");
         }
 
         // itag drives the FT-HMO π-electron count (carbene C=itag 1 → 0 electrons,
@@ -8467,13 +8468,13 @@ std::vector<double> GFNFF::calculatePiBondOrders(
                 if (std::abs(pbo) > 0.01) nonzero++;
             }
             CurcumaLogger::success(fmt::format(
-                "Full Hueckel: {}/{} non-zero pi-bond orders",
+                "Full Hückel: {}/{} non-zero " SYM_PI "-bond orders",
                 nonzero, bond_list.size()));
         }
 
         // DEBUG: Show first few pibo values (Claude Generated Jan 15, 2026)
         if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info("=== Full Hueckel: First 10 pibo values ===");
+            CurcumaLogger::info("=== Full Hückel: First 10 pibo values ===");
             for (size_t k = 0; k < std::min(size_t(10), pi_bond_orders.size()); k++) {
                 if (std::abs(pi_bond_orders[k]) > 1e-6) {
                     CurcumaLogger::info(fmt::format("  pibo[{}] = {:.6f}", k, pi_bond_orders[k]));
@@ -8488,7 +8489,7 @@ std::vector<double> GFNFF::calculatePiBondOrders(
     // Simplified approximation (fallback mode)
     // ========================================================================
     if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::info("Using simplified approximation for pi-bond orders");
+        CurcumaLogger::info("Using simplified approximation for " SYM_PI "-bond orders");
     }
 
     std::vector<double> pi_bond_orders(max_index, 0.0);
@@ -8552,7 +8553,7 @@ std::vector<double> GFNFF::calculatePiBondOrders(
             if (pbo > 0.0) nonzero++;
         }
         CurcumaLogger::success(fmt::format(
-            "Simplified approx: {}/{} non-zero pi-bond orders",
+            "Simplified approx: {}/{} non-zero " SYM_PI "-bond orders",
             nonzero, pi_bond_orders.size()));
     }
 
@@ -10803,7 +10804,7 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     // MOVED HERE: Requires EEQ charges for charge-dependent diagonal elements
     // Used in nitrogen angle f2 calculation: f2 = 1.0 - sumppi*0.7
     if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info("Phase 2C: Calculating pi-bond orders (full Hueckel)");
+        CurcumaLogger::info("Phase 2C: Calculating " SYM_PI "-bond orders (full Hückel)");
     }
 
     // Convert charges to std::vector for HuckelSolver interface

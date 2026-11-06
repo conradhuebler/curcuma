@@ -4,6 +4,7 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include "src/core/output_symbols.h"
 
 /* Integrals for Gaussian Type Orbitals */
 namespace GTO {
@@ -176,7 +177,7 @@ static inline double calculateOverlap(const Orbital& orb1, const Orbital& orb2)
     std::cout << "Calculating GTO overlap between orbitals at positions: "
               << "(" << orb1.x << "," << orb1.y << "," << orb1.z << ") and "
               << "(" << orb2.x << "," << orb2.y << "," << orb2.z << ")"
-              << " with R^2 = " << R2 << std::endl;
+              << " with R" SYM_SQ " = " << R2 << std::endl;
 
     // Special case for identical orbitals at the same center
     if (R2 < 1e-10 && orb1.type == orb2.type && orb1.exponents.size() == orb2.exponents.size()) {

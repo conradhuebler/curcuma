@@ -283,14 +283,14 @@ private:  // Private member variables - Claude Generated 2026
 
     // Scattering analysis options - Claude Generated 2025
     PARAM(scattering_enable, Bool, false, "Enable P(q)/S(q) scattering analysis", "Scattering", {})
-    PARAM(scattering_q_min, Double, 0.01, "Minimum q value (1/Angstrom)", "Scattering", {"qmin"})
-    PARAM(scattering_q_max, Double, 2.0, "Maximum q value (1/Angstrom)", "Scattering", {"qmax"})
+    PARAM(scattering_q_min, Double, 0.01, "Minimum q value (Å^-1)", "Scattering", {"qmin"})
+    PARAM(scattering_q_max, Double, 2.0, "Maximum q value (Å^-1)", "Scattering", {"qmax"})
     PARAM(scattering_q_steps, Int, 100, "Number of q points", "Scattering", {"qsteps"})
     PARAM(scattering_q_spacing, String, "log", "Q-spacing mode: log|linear", "Scattering", {"qspacing"},
         "enum=log|linear")
     PARAM(scattering_form_factor, String, "auto", "Form factor type: auto|cromer_mann|cg_sphere", "Scattering", {"ff"},
         "enum=auto|cromer_mann|cg_sphere")
-    PARAM(scattering_cg_radius, Double, 3.0, "CG bead radius for sphere form factor (Angstrom)", "Scattering Advanced", {})
+    PARAM(scattering_cg_radius, Double, 3.0, "CG bead radius for sphere form factor (Å)", "Scattering Advanced", {})
     PARAM(scattering_angular_samples, Int, 50, "Angular samples for S(q) spherical averaging", "Scattering Advanced", {})
 
     // Per-frame scattering file output options - Claude Generated 2026
@@ -304,14 +304,14 @@ private:  // Private member variables - Claude Generated 2026
 
     // Radial distribution function options - Claude Generated 2025
     PARAM(rdf_enable, Bool, false, "Enable g(r) radial distribution function calculation", "RDF", {})
-    PARAM(rdf_r_max, Double, 15.0, "Maximum r for g(r) (Angstrom)", "RDF", {"rmax"})
-    PARAM(rdf_bin_width, Double, 0.05, "Histogram bin width (Angstrom)", "RDF", {"dr"})
+    PARAM(rdf_r_max, Double, 15.0, "Maximum r for g(r) (Å)", "RDF", {"rmax"})
+    PARAM(rdf_bin_width, Double, 0.05, "Histogram bin width (Å)", "RDF", {"dr"})
     PARAM(rdf_coordination_shells, Bool, false, "Calculate running coordination number n(r)", "RDF", {})
 
     // Shape descriptor options - Claude Generated 2025
     PARAM(shape_asphericity, Bool, false, "Calculate asphericity descriptor (b = lambda3 - 0.5(lambda1+lambda2))", "Shape", {})
     PARAM(shape_acylindricity, Bool, false, "Calculate acylindricity descriptor (c = lambda2 - lambda1)", "Shape", {})
-    PARAM(shape_anisotropy, Bool, false, "Calculate relative shape anisotropy (kappa^2)", "Shape", {})
+    PARAM(shape_anisotropy, Bool, false, "Calculate relative shape anisotropy (kappa^2^2)", "Shape", {})
 
     END_PARAMETER_DEFINITION
     // ^^^^^^^^^^^^ PARAMETER DEFINITION BLOCK ^^^^^^^^^^^^

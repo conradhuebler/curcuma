@@ -55,6 +55,7 @@
 #include <set>
 #include <map>
 #include <chrono>  // Claude Generated (February 2026): For torsion generation timing
+#include "src/core/output_symbols.h"
 
 using namespace GFNFFParameters;
 
@@ -684,7 +685,7 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
     if (hyb_i == 5 || hyb_l == 5) {
         fkl *= 1.5;
         if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info("  fkl hypervalent enhancement: x1.5");
+            CurcumaLogger::info("  fkl hypervalent enhancement: " SYM_TIMES "1.5");
         }
     }
 
@@ -849,7 +850,7 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
                     if (z_i > 10 && !is_in_pi_fr(i_atom_idx, z_i)) {
                         f2 *= 1.3;
                         if (CurcumaLogger::get_verbosity() >= 3) {
-                            CurcumaLogger::info(fmt::format("  Heavy non-pi outer atom {} (Z={}): f2 x1.3", i_atom_idx, z_i));
+                            CurcumaLogger::info(fmt::format("  Heavy non-pi outer atom {} (Z={}): f2 " SYM_TIMES "1.3", i_atom_idx, z_i));
                         }
                     }
 
@@ -857,7 +858,7 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
                     if (z_l > 10 && !is_in_pi_fr(l_atom_idx, z_l)) {
                         f2 *= 1.3;
                         if (CurcumaLogger::get_verbosity() >= 3) {
-                            CurcumaLogger::info(fmt::format("  Heavy non-pi outer atom {} (Z={}): f2 x1.3", l_atom_idx, z_l));
+                            CurcumaLogger::info(fmt::format("  Heavy non-pi outer atom {} (Z={}): f2 " SYM_TIMES "1.3", l_atom_idx, z_l));
                         }
                     }
 
@@ -1134,7 +1135,7 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
 
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::info(fmt::format(
-                "  Ring torsion {}-{}-{}-{}: bond_type={}, n={}, phi0={:.1f} deg, rings4={}",
+                "  Ring torsion {}-{}-{}-{}: bond_type={}, n={}, phi0={:.1f}" SYM_DEG ", rings4={}",
                 i_atom_idx, j_atom_idx, k_atom_idx, l_atom_idx,
                 bond_type, params.periodicity, params.phase_shift * 180.0 / M_PI, rings4));
         }
@@ -1809,7 +1810,7 @@ std::pair<std::vector<Dihedral>, std::vector<Dihedral>> GFNFF::generateTorsionsN
             for (const auto& t : dihedrals) {
                 if (count >= 20) break;
                 CurcumaLogger::info(fmt::format(
-                    "  Torsion {}-{}-{}-{}: V={:.6f} Eh, n={:.0f}, phi0={:.2f} deg",
+                    "  Torsion {}-{}-{}-{}: V={:.6f} Eh, n={:.0f}, phi0={:.2f}" SYM_DEG,
                     t.i, t.j, t.k, t.l, t.V, static_cast<double>(t.n), t.phi0 * 180.0 / M_PI));
                 count++;
             }

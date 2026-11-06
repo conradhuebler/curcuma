@@ -33,6 +33,7 @@
 #include "src/core/gpu_device_pool.h"
 
 #include "hessian.h"
+#include "src/core/output_symbols.h"
 
 HessianThread::HessianThread(const json& controller, int i, int j, int xi, int xj, bool fullnumerical)
     : m_controller(controller)
@@ -557,7 +558,7 @@ Vector Hessian::ConvertHessian(Matrix& hessian)
 void Hessian::PrintVibrationsPlain(const Vector& eigenvalues)
 {
     Vector eigval = eigenvalues.cwiseSqrt();
-    CurcumaLogger::success("\nVibrational Frequencies (cm^-1):");
+    CurcumaLogger::success("\nVibrational Frequencies (cm" SYM_INV "):");
 
     std::ostringstream freq_output;
     for (int i = 0; i < m_molecule.AtomCount() * 3; ++i) {
@@ -571,7 +572,7 @@ void Hessian::PrintVibrationsPlain(const Vector& eigenvalues)
 void Hessian::PrintVibrations(Vector& eigenvalues, const Vector& projected)
 {
     Vector eigval = eigenvalues.cwiseSqrt();
-    CurcumaLogger::success("\nVibrational Frequencies (cm^-1):");
+    CurcumaLogger::success("\nVibrational Frequencies (cm" SYM_INV "):");
 
     if (m_verbosity >= 2) {
         CurcumaLogger::info("Legend: (i)=imaginary, (*)=negative/zero eigenvalue, unmarked=normal mode");
@@ -624,7 +625,7 @@ void Hessian::CalculateHessianThreaded()
         CurcumaLogger::info("Starting Hessian calculation using method: " + m_method);
         CurcumaLogger::param("Calculation method", (m_hess == 1 ? "Threaded seminumerical" : (m_hess == 2 ? "Full numerical" : "Seminumerical")));
         CurcumaLogger::param("Number of threads", std::to_string(m_threads));
-        CurcumaLogger::param("Finite difference step", std::to_string(m_finite_diff_step) + " Bohr (" + std::to_string(m_finite_diff_step * CurcumaUnit::Length::BOHR_TO_ANGSTROM) + " Angstrom)");
+        CurcumaLogger::param("Finite difference step", std::to_string(m_finite_diff_step) + " Bohr (" + std::to_string(m_finite_diff_step * CurcumaUnit::Length::BOHR_TO_ANGSTROM) + " Å)");
     }
 
     std::vector<int> atoms;
@@ -700,7 +701,7 @@ void Hessian::CalculateHessianThreaded()
 
     // Report symmetry analysis
     if (m_verbosity >= 2) {
-        CurcumaLogger::param("Maximum asymmetry", std::to_string(max_asymmetry) + " Eh/Bohr^2");
+        CurcumaLogger::param("Maximum asymmetry", std::to_string(max_asymmetry) + " Eh/Bohr" SYM_SQ);
         if (asymmetric_elements > 0) {
             CurcumaLogger::param("Asymmetric elements", std::to_string(asymmetric_elements));
         }
@@ -813,7 +814,7 @@ void Hessian::CalculateHessianSemiNumerical()
 
     // Report symmetry for seminumerical method
     if (m_verbosity >= 2) {
-        CurcumaLogger::param("Matrix symmetry check", "Max asymmetry: " + std::to_string(max_asymmetry) + " Eh/Bohr^2");
+        CurcumaLogger::param("Matrix symmetry check", "Max asymmetry: " + std::to_string(max_asymmetry) + " Eh/Bohr" SYM_SQ);
     }
     delete pool;
 }
