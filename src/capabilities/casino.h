@@ -116,12 +116,7 @@ static const json CasinoJson = {
     { "metadynamics", false },             // Enable metadynamics
     { "verbose", true },                   // Detailed output
     // Restart and checkpointing options - Claude Generated
-    { "auto_restart", false },             // Automatically detect and load restart files
-    { "checkpoint_frequency", 1000 },      // Steps between checkpoints
     { "checkpoint_file", "casino_checkpoint.json" }, // Checkpoint filename
-    { "max_checkpoints", 5 },              // Keep last N checkpoints
-    { "append_trajectory", true },         // Append to existing trajectory on restart
-    { "checkpoint_on_signal", true }       // Checkpoint on SIGTERM/SIGINT
 };
 
 /*! \brief Casino - Monte Carlo simulation for molecular systems - Claude Generated
@@ -179,36 +174,14 @@ public:
     void ReadControlFile() override {}
     void LoadControlJson() override {}
 
-    // ===== Restart System Methods - Claude Generated =====
-    /*! \brief Perform automatic checkpoint during simulation */
-    void performCheckpoint();
-
-    /*! \brief Detect and load restart files automatically */
-    bool detectAndLoadRestart();
-
     /*! \brief Validate restart file integrity */
     bool validateRestartFile(const std::string& filename);
-
-    /*! \brief Load restart data from specific file */
-    bool loadFromRestartFile(const std::string& filename);
-
-    /*! \brief Handle trajectory file continuation on restart */
-    void handleTrajectoryRestart();
-
-    /*! \brief Setup signal handlers for graceful shutdown */
-    void setupSignalHandlers();
 
     /*! \brief Export CG particle shapes to JSON */
     json exportCGShapes() const;
 
     /*! \brief Load CG particle shapes from JSON */
     void loadCGShapes(const json& cg_data);
-
-    /*! \brief Print restart system help */
-    void printRestartHelp() const;
-
-    /*! \brief Clean up old checkpoint files based on max_checkpoints setting */
-    void cleanupOldCheckpoints();
 
 private:
     /*! \brief Initialize Monte Carlo simulation */
@@ -309,12 +282,7 @@ private:
     MoveType m_current_move_type;
 
     // Restart and checkpointing parameters - Claude Generated
-    bool m_auto_restart;
-    int m_checkpoint_frequency;
     std::string m_checkpoint_file;
-    int m_max_checkpoints;
-    bool m_append_trajectory;
-    bool m_checkpoint_on_signal;
 
     // Random number generation
     std::mt19937 m_rng;

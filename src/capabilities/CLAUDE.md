@@ -25,7 +25,7 @@ Hessian, docking. Energies and gradients always come from `EnergyCalculator`. Do
 
 ## Invariants and traps
 
-- `-opt` PARAMs live in `curcumaopt.h` although `CurcumaOpt` is not built: the registry is generated from every header (`GLOB_RECURSE`), built or not
+- `-opt` PARAMs live in `curcumaopt.h`, which holds nothing else and is included nowhere: the registry is generated from every header (`GLOB_RECURSE`), built or not
 - `-optimizer auto` (default) always means LBFGSpp; `selectOptimalOptimizer()` has no caller. `lbfgs` is the native L-BFGS; unknown names fall back to LBFGSpp
 - `OptimizerDriver` owns loop, convergence and output; every abort returns the last accepted structure, which `-opt` writes even if not converged
 - `stall_steps`/`stall_rmsd` (20 / 1e-6 A) end a frozen run as "No progress"; a zero step counts as converged only if the driver criteria hold

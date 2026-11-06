@@ -518,3 +518,4 @@ below. If it needs measurements or a derivation, write them into the matching `d
 - 23 commented-out code blocks (>= 4 code lines) deleted in 15 files, -290 lines; two deliberate switch-offs kept (`simplemd.cpp` ramp re-entry, `rmsdtraj.cpp` pairwise); MOR41 uff/gfnff identical (docs/debt_2026-11/CODE.md L2)
 - 193 `//`-commented code lines deleted in 40 files (full-line, code-shaped, no hint comment nearby); GPU sources not touched; MOR41 uff/gfnff identical, full build green (docs/debt_2026-11/CODE.md L2)
 - 4 helper programs without CMake target deleted (imagewrite, storage_bench, polymer_topo, gfnff_term_validator; Nov 6, 2026; docs/debt_2026-11/CODE.md)
+- curcumaopt.h reduced to the `opt` PARAM block (generated registry byte-identical); unwired Casino checkpoint/restart functions and their five never-read options deleted, -195 lines (Nov 6, 2026; docs/debt_2026-11/CODE.md S2, S10)
