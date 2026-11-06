@@ -464,4 +464,4 @@ Internally stored as:
 - Parser: `scripts/param_parser/main.cpp`
 - Macros: `src/core/parameter_macros.h`
 - Example: `src/capabilities/analysis.h`
-- Migration Guide: [PARAMETER_MIGRATION_GUIDE.md](PARAMETER_MIGRATION_GUIDE.md)
+- Migration Guide: [PARAMETER_MIGRATION_GUIDE.md](archive/PARAMETER_MIGRATION_GUIDE.md)

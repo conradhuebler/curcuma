@@ -166,9 +166,6 @@ public:
     void GenerateD3Parameters();
     void GenerateD4Parameters();
 
-    // Claude Generated (December 19, 2025): UFF-D3 hybrid method
-    json GenerateUFFD3Parameters();
-
     // Claude Generated (December 21, 2025): D3-only dispersion method
     json GenerateD3OnlyParameters(const std::string& preset = "pbe0");
 

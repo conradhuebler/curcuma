@@ -392,4 +392,4 @@ The implementation is ready for production use while remaining an excellent educ
 
 ---
 
-**For comprehensive implementation roadmap**, see [GFNFF_IMPLEMENTATION_HUB.md](GFNFF_IMPLEMENTATION_HUB.md)
+**For comprehensive implementation roadmap**, see [GFNFF_IMPLEMENTATION_HUB.md](../GFNFF_IMPLEMENTATION_HUB.md)

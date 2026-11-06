@@ -4382,18 +4382,6 @@ void SimpleMD::EvaluateBias(bool do_deposit)
     m_mtd_time += m_time;
 }
 
-void SimpleMD::Rattle_Verlet_First(double* coord, double* grad)
-{
-}
-
-void SimpleMD::Rattle_Constrain_First(double* coord, double* grad)
-{
-}
-
-void SimpleMD::Rattle_Verlet_Second(double* coord, double* grad)
-{
-}
-
 double SimpleMD::ApplySphericLogFermiWalls()
 {
     double potential = 0;

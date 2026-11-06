@@ -554,43 +554,6 @@ void ForceField::setD3DispersionPairs(const json& pairs)
     }
 }
 
-void ForceField::setESPs(const json& esps)
-{
-    m_EQs.clear();
-    for (int i = 0; i < esps.size(); ++i) {
-        json esp = esps[i].get<json>();
-        EQ v;
-        v.type = esp["type"];
-
-        v.i = esp["i"];
-        v.j = esp["j"];
-        v.q_i = esp["q_i"];
-        v.q_j = esp["q_j"];
-        v.epsilon = esp["epsilon"];
-
-        m_EQs.push_back(v);
-    }
-}
-
-Eigen::MatrixXd ForceField::NumGrad()
-{
-    Eigen::MatrixXd gradient = Eigen::MatrixXd::Zero(m_natoms, 3);
-
-    double dx = 1e-6; // m_d;
-    double E1, E2;
-    for (int i = 0; i < m_natoms; ++i) {
-        for (int j = 0; j < 3; ++j) {
-            m_geometry(i, j) += dx;
-            E1 = Calculate(false);
-            m_geometry(i, j) -= 2 * dx;
-            E2 = Calculate(false);
-            gradient(i, j) = (E1 - E2) / (2 * dx);
-            m_geometry(i, j) += dx;
-        }
-    }
-    return gradient;
-}
-
 bool ForceField::saveParametersToFile(const std::string& filename) const
 {
     try {

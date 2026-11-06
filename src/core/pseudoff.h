@@ -27,11 +27,6 @@
 
 class PseudoFF {
 public:
-    PseudoFF();
-
-    /*! \brief Calculate the LennardJones Potential between two molecules */
-    static double LennardJones(const Molecule& a, const Molecule& b);
-
     inline static double LJPotential(double distance, double vdW_A, double vdW_B)
     {
         const double potenz = pow((vdW_A + vdW_B) / (distance), 6);

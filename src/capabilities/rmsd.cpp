@@ -1317,29 +1317,12 @@ std::vector<int> RMSDDriver::SolveCostMatrix(Matrix& distance)
     double difference = distance.cwiseAbs().sum();
     int iter = 0;
     for (iter = 0; iter < 10 && difference != 0; ++iter) {
-        bool use_c = false;
-        int dim = distance.rows();
-        if (use_c) {
-            double* table = new double[dim * dim];
-            for (int i = 0; i < dim; ++i) {
-                for (int j = 0; j < dim; ++j) {
-                    table[i * dim + j] = distance(i, j);
-                }
-            }
-            int* order = new int[dim];
-            assign(dim, table, order);
-            for (int i = 0; i < dim; ++i)
-                new_order[i] = order[i];
-            delete[] table;
-            delete[] order;
-        } else {
-            auto result = MunkressAssign(distance);
-            for (int i = 0; i < result.cols(); ++i) {
-                for (int j = 0; j < result.rows(); ++j) {
-                    if (result(i, j) == 1) {
-                        new_order[i] = j;
-                        break;
-                    }
+        auto result = MunkressAssign(distance);
+        for (int i = 0; i < result.cols(); ++i) {
+            for (int j = 0; j < result.rows(); ++j) {
+                if (result(i, j) == 1) {
+                    new_order[i] = j;
+                    break;
                 }
             }
         }

@@ -52,7 +52,7 @@ Each item was a real defect; evidence in [docs/KNOWN_ISSUES_ARCHIVE.md](../../..
 - ROCm (Oct 2026): the gradient-mode dispersion is the fused gather `k_dispersion_gather_uv` (C6 and dC6/dCN per edge from per-atom u/v vectors, no `k_dc6dcn_per_pair`); `CURCUMA_ROCM_DISP_FUSED=0` selects the unfused path.
 - GPU `k_dispersion` reads no EEQ charge (`zetac6` holds the Phase-1 topology charges, C6/dC6dCN come from the CN); since K2 (Oct 2026) it runs right after `dc6dcn`, parallel to the EEQ solve.
 - GFN-FF dispersion follows the reference: D4 C6 from Casimir-Polder integration with CN-only Gaussian weights and the modified BJ damping of `gfnff_gdisp0.f90`, not standard D3/D4 (`../dispersion/d4param_generator.cpp`). The three-body ATM term is not in the reference and is off by default (`dispersion_atm`).
-- `uff-d3`: `ForceFieldGenerator::GenerateUFFD3Parameters()` merges UFF terms with the D3 pair list.
+- `uff-d3`: D3 pairs are added to the UFF terms when `ForceField` loads its parameters (not validated).
 - A shared CN utility exists (`cn_calculator.h`); `D3ParameterGenerator` and `EEQSolver` still have their own CN routines.
 
 ## Open items

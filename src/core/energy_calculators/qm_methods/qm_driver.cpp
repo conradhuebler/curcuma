@@ -32,7 +32,6 @@
 
 #include "GTOIntegrals.hpp"
 #include "STOIntegrals.hpp"
-#include "basissetparser.hpp"
 
 #include "json.hpp"
 

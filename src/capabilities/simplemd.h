@@ -445,9 +445,6 @@ private:
     void ApplyHeldBias();               // apply held + smoothstep-interpolated bias force every step
     bool gapGuardTriggered();           // Milestone 2: walker moved > r_dep since the last force eval
 
-    void Rattle_Verlet_First(double* coord, double* grad);
-    void Rattle_Constrain_First(double* coord, double* grad);
-    void Rattle_Verlet_Second(double* coord, double* grad);
     void Rattle_Constrain_Second(double* coord, double* grad);
 
     void AdjustRattleTolerance();

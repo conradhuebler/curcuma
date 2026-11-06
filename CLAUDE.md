@@ -186,9 +186,9 @@ Older (2025) work: `AIChangelog.md` and git history.
 
 ##### **Method Resolution (New)**
 ```cpp
-// New MethodFactory system (replaces old SwitchMethod)
+// MethodFactory system (replaces old SwitchMethod)
 std::unique_ptr<ComputationalMethod> method = 
-    MethodFactory::createMethod("gfn2", config);
+    MethodFactory::create("gfn2", config);
 double energy = method->calculateEnergy();
 ```
 
@@ -197,12 +197,12 @@ double energy = method->calculateEnergy();
 - **xtb-gfn1/xtb-gfn2**: External GFN — TBLite (USE_TBLITE) → XTB binary (USE_XTB), like `xtb-gfnff`
 - **tblite-gfn1/tblite-gfn2**: TBLite explicitly (forces that backend)
 - **eht**: Native only (always available, no dependencies)
-- **pm3**: Native only (H, C, N, O supported, no dependencies)
+- **pm3**: Native only (30 elements, `getPM3Params()` in `nddo_params.cpp`; no dependencies)
 - **uff/qmdff**: ForceField wrapper with parameter generation
-- **gfnff**: Native C++ GFN-FF (always available, ✅ **COMPLETE**)
+- **gfnff**: Native C++ GFN-FF (always available; 🤖 AI-implemented, ⚙️ machine-tested, see the method table)
 - **xtb-gfnff**: Fortran/XTB GFN-FF — ExternalGFNFF (USE_GFNFF) → XTB (USE_XTB)
 
-#### Force Field System (`src/core/forcefield.h/cpp`)
+#### Force Field System (`src/core/energy_calculators/ff_methods/forcefield.h/cpp`)
 Modern force field engine with:
 - **Threading** via the single `FFWorkspace` engine (the legacy `ForceFieldThread` engine was removed Sep 2026)
 - **Universal parameter caching** - automatic save/load as JSON
@@ -212,12 +212,12 @@ Modern force field engine with:
 #### QM Interface (`src/core/energy_calculators/qm_methods/interface/abstract_interface.h`)
 Unified interface for all quantum mechanical methods:
 ```cpp
-class QMInterface {
-    virtual bool InitialiseMolecule() = 0;
-    virtual double Calculation(bool gradient, bool verbose) = 0;
-    virtual bool hasGradient() const = 0;
-    virtual Vector Charges() const = 0;
-    virtual Vector BondOrders() const = 0;
+class QMInterface {  // abstract_interface.h; only Calculation() is pure
+    virtual bool InitialiseMolecule(...);          // several overloads
+    virtual double Calculation(bool gradient = false) = 0;
+    virtual Vector Charges() const;                // default: empty
+    virtual Vector BondOrders() const;             // default: empty
+    virtual bool hasGradient() const;              // default: false
 };
 ```
 
@@ -393,11 +393,11 @@ before committing, or enable the hook with `git config core.hooksPath scripts/gi
 - **Educational**: Clear naming and comprehensive documentation
 - **Migration**: Replace scattered constants with centralized functions
 
-### JSON Controller System (`src/main.cpp`, CLI2Json)
+### JSON Controller System (`src/core/cli_parser.cpp`, CLI2Json; golden test `cli_parser_golden`)
 - **Consistent Parameter Passing**: All methods use `controller["methodname"]` subdocuments
-- **Examples**: `Hessian(controller["hessian"])`, `QMDFFFit(controller["qmdfffit"])`, `ModernOptimizer(..., controller["opt"])`
+- **Examples**: `ConfigManager("hessian", controller)` (`hessian.cpp`), `ConfigManager("docking", controller)` (`docking.cpp`)
 - **CLI Arguments**: Automatically split into controller subdocuments via `CLI2Json()`
-- **Structure**: `controller[keyword][parameter]` - e.g. `controller["opt"]["verbosity"]`, `controller["hessian"]["MaxIter"]`
+- **Structure**: `controller[keyword][parameter]` - e.g. `controller["opt"]["verbosity"]`, `controller["hessian"]["finite_diff_step"]`
 - **Global Parameters**: `verbosity`, `threads`, `method`, `gpu` are additionally duplicated at top-level
 - **Flat-flag auto-routing (2026)**: Any registered PARAM is reachable by its flat name (`-cn_cutoff_bohr 5.5` routes to `controller["gfnff"]["cn_cutoff_bohr"]` because the registry records ownership). Same-name in the active command's module wins; several owners and none matching the command: routed to the module of the selected `-method` if it owns the name (`MethodFactory::parameterScopeForMethod`, test `cli_sqm_15`), else warn and stay. Dotted form `-<module>.<param>` always works for disambiguation. Unregistered/legacy flags stay in the command module (unchanged).
 - **JSON round-trip (2026)**: `-export_run file.json` writes the resolved controller plus `_command`, `_input`, and full registry defaults for every touched module. `-import_config file.json` performs a recursive deep merge (CLI wins at every depth). Invoking `curcuma -import_config run.json` reads `_command`/`_input` from the JSON, so the file alone is enough to replay a run. See [docs/CLI_ROUND_TRIP.md](docs/CLI_ROUND_TRIP.md).

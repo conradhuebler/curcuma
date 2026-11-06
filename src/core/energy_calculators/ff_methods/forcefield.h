@@ -99,8 +99,6 @@ public:
     static std::string generateParameterFileName(const std::string& geometry_file);
     void setParameterCaching(bool enable) { m_enable_caching = enable; }
 
-    Eigen::MatrixXd NumGrad();
-
     // Claude Generated: Parameter analysis functionality
     void printParameterSummary() const;
 
@@ -116,8 +114,6 @@ private:
     void setDihedrals(const json& dihedrals);
     void setInversions(const json& inversions);
     void setvdWs(const json& vdws);
-    void setESPs(const json& esps);
-
     /// Claude Generated (Sep 2026): parse "d3_dispersion_pairs" (D3ParameterGenerator output,
     /// forwarded by ForceFieldGenerator for uff-d3) into the GFNFFDispersion pair layout that
     /// FFWorkspace evaluates with dispersion_method = "d3".
