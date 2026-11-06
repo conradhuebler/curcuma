@@ -501,7 +501,6 @@ bool ConfScan::openFile()
     FileIterator file(Filename());
     int calcH = 0;
     int calcI = 0;
-    // std::cout << m_looseThresh <<" "<<int((m_looseThresh & 1) == 1) << " " << int((m_looseThresh & 2) == 2) << std::endl;
 
     // Claude Generated (June 2026): tell the user about the (potentially long) descriptor pass
     // at verbosity 1 - it runs before the scan and was previously silent. Sync the global logger
@@ -616,7 +615,6 @@ bool ConfScan::openFile()
                 mol->CalculateRotationalConstants();
             auto ripser = std::chrono::system_clock::now();
 
-            // diagram.setDimension(2);
             if ((m_looseThresh & 2) == 2) {
                 diagram.setDistanceMatrix(mol->LowerDistanceVector());
                 mol->setPersisentImage(diagram.generateImage(diagram.generatePairs()));
@@ -984,9 +982,6 @@ void ConfScan::start()
         if (m_analyse) {
             WriteDotFile(outputPath(m_result_basename + ".initial.dot"), m_first_content);
         }
-        // m_sLE[0] = 1;
-        // m_sLI[0] = 1;
-        // m_sLH[0] = 1;
         if (m_analyse) {
             m_collective_content = "edge [color=green];\n";
             for (auto node : m_nodes)
@@ -1327,8 +1322,6 @@ void ConfScan::CheckOnly(double sLE, double sLI, double sLH)
 
             } else {
                 if (!m_mapped) {
-                    //    m_dLI = std::max(m_dLI, t->DI() * (t->RMSD() <= (sLI * m_rmsd_threshold)));
-                    //    m_dLH = std::max(m_dLH, t->DH() * (t->RMSD() <= (sLH * m_rmsd_threshold)));
                     //    m_dLE = std::max(m_dLE, (std::abs(t->Reference()->Energy() - mol1->Energy()) * 2625.5) * (t->RMSD() <= (sLE * m_rmsd_threshold)));
                 }
 
@@ -1418,7 +1411,6 @@ void ConfScan::CheckOnly(double sLE, double sLI, double sLH)
         m_dLI = std::max(m_dLI, i.second[2]);
         m_dLH = std::max(m_dLH, i.second[1]);
         m_dLE = std::max(m_dLE, i.second[0]);
-        // std::cout << i.first << " " << i.second[0] << " " << i.second[1] << " " << i.second[2] << std::endl;
     }
 
     m_rmsd_set = true;
@@ -1640,7 +1632,6 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
 
             if (m_RMSDmethod.compare("molalign") != 0 || m_threads != 1) {
                 // if (m_threads > 2)
-                //     p->StaticPool();
                 p->StartAndWait();
             } else {
                 for (auto* t : threads) {
@@ -1812,7 +1803,6 @@ ConfScanThread* ConfScan::addThread(const Molecule* reference, const json& confi
     thread->setRefineReuse(m_refine_reuse);
     m_energies.push_back(reference->Energy());
 
-    // thread->setVerbose(false);
     return thread;
 }
 
@@ -1862,7 +1852,6 @@ void ConfScan::Finalise()
             std::string content = "\"" + molecule->Name() + "\" [shape=box, label=\"" + molecule->Name() + "\\n" + to_string_with_precision(difference) + " kJ/mol\", fontcolor=\"orange\", fontname=\"times-bold\",id=\"" + molecule->Name() + "\"];\n";
             content_after += content;
             if (std::find(m_nodes_list.begin(), m_nodes_list.end(), molecule->Name()) != m_nodes_list.end()) {
-                //    std::cout << molecule->Name() << " inside ";
             } else {
                 std::string content = "\"" + molecule->Name() + "\";\n";
                 m_collective_content += content;

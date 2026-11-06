@@ -90,7 +90,6 @@ CurcumaMethod::CurcumaMethod(const json& defaults, const json& controller, bool 
     CurcumaLogger::set_verbosity(m_verbosity);
     CurcumaLogger::initCitationRegistry();
 
-    // m_curcuma_progress.open("curcuma_progress", std::ios::out);
 }
 
 // New verbosity constructor - Claude Generated
@@ -137,7 +136,6 @@ CurcumaMethod::CurcumaMethod(const json& defaults, const json& controller, int v
     CurcumaLogger::set_verbosity(m_verbosity);
     CurcumaLogger::initCitationRegistry();
 
-    //m_curcuma_progress.open("curcuma_progress", std::ios::out);
 }
 
 CurcumaMethod::~CurcumaMethod()

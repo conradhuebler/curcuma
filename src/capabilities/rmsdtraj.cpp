@@ -151,10 +151,7 @@ bool RMSDTraj::Initialise()
     }
     std::ifstream input(Filename());
     std::vector<std::string> lines;
-    //    int atoms = 0, atoms2 = 0;
     m_currentIndex = 0;
-    //  int i = 0;
-    //    int molecule = 0;
     std::ifstream inFile(Filename());
     m_max_lines = std::count(std::istreambuf_iterator<char>(inFile),
         std::istreambuf_iterator<char>(), '\n');
@@ -279,7 +276,6 @@ void RMSDTraj::ProcessSingleFile()
 bool RMSDTraj::CheckMolecule(Molecule* molecule)
 {
     bool result = false;
-    // std::cout << molecule->Atom(0).second.transpose() << std::endl << std::endl;
 
     double energy = molecule->Energy();
     // Note: m_currentIndex removed - using structures_processed for progress instead
@@ -288,7 +284,6 @@ bool RMSDTraj::CheckMolecule(Molecule* molecule)
         if (m_writeUnique) {
             molecule->Center();
             molecule->appendXYZFile(m_outfile + ".unique.xyz");
-            // std::cout << "First structure added!" << std::endl;
             result = true;
         }
         m_stored_structures.push_back(new Molecule(molecule));
@@ -339,17 +334,13 @@ bool RMSDTraj::CheckMolecule(Molecule* molecule)
         double first_rmsd = m_driver->RMSD();
         if (m_writeUnique) {
             bool perform_rmsd = true;
-            //  std::cout << std::endl;
             for (std::size_t mols = m_stored_structures.size() - 1; mols >= 0 && perform_rmsd && mols <= m_stored_structures.size(); --mols) {
-                // m_driver->clear();
                 m_driver->setReference(*m_stored_structures[mols]);
                 m_driver->setTarget(*molecule);
-                // std::cout << molecule->Atom(0).second.transpose() << " " << m_stored_structures[mols]->Atom(0).second.transpose() << std::endl;
                 m_driver->start();
 
                 rmsd_results.push_back(m_driver->RMSD());
                 perform_rmsd = m_driver->RMSD() > m_rmsd_threshold;
-                //  std::cout << m_driver->RMSD() << " ";
             }
             perform_rmsd = first_rmsd > m_rmsd_threshold && perform_rmsd;
             rmsd_results.push_back(first_rmsd);
@@ -358,7 +349,6 @@ bool RMSDTraj::CheckMolecule(Molecule* molecule)
                 molecule->LoadMolecule(m_driver->TargetAlignedReference());
                 m_stored_structures.push_back(new Molecule(molecule));
                 molecule->appendXYZFile(m_outfile + ".unique.xyz");
-                //                std::cout << "New structure added ... ( " << m_stored_structures.size() << "). " << /*  int(m_currentIndex / double(m_max_lines) * 100) << " % done ...!" << */ std::endl;
                 result = true;
             }
         }
@@ -372,10 +362,7 @@ bool RMSDTraj::CheckMolecule(Molecule* molecule)
         */
     }
     m_driver->clear();
-    // i = -1;
-    // mol = Molecule(atoms, 0);
     molecule++;
-    // mol.setName(std::to_string(molecule));
     if (m_pairwise) {
         /*
         mol_2 = Molecule(atoms, 0);
@@ -420,7 +407,6 @@ void RMSDTraj::CompareTrajectories()
         Molecule* mol1 = new Molecule(file1.Next());
         Molecule* mol2 = new Molecule(file2.Next());
 
-        //   std::cout << molecule->Atom(0).second.transpose() << std::endl;
         m_driver->setReference(*mol1);
         m_driver->setTarget(*mol2);
         m_driver->start();

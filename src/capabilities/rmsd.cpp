@@ -352,7 +352,6 @@ void RMSDDriver::LoadFileOrderParameters()
             file.close();
 
             // Parse den Inhalt der Datei
-            // m_reorder_rules = Tools::ParseStringToVector(fileContent);
             std::vector<int> vector = Tools::String2Vector(fileContent);
 #ifdef CURCUMA_DEBUG
             if (m_verbosity >= 3)
@@ -876,10 +875,8 @@ void RMSDDriver::CheckTopology()
         for (int j = 1; j <= 10; ++j) {
             target_geometry += step;
             tar.setGeometry(target_geometry);
-            // tar.appendXYZFile(std::to_string(index) + ".test.xyz");
             topo += CompareTopoMatrix(reference_matrix, tar.DistanceMatrix().second);
         }
-        // ref.appendXYZFile(std::to_string(index) + ".test.xyz");
 
 #ifdef CURCUMA_DEBUG
         if (m_verbosity >= 3)
@@ -1026,9 +1023,7 @@ void RMSDDriver::ReorderMolecule()
     Eigen::Matrix3d rotation = R.first;
 
     auto initial_costmatrix = MakeCostMatrix(OptimiseRotation(rotation));
-    // std::cout << initial_costmatrix.first << std::endl;
     //  if (m_method == 4)
-    //      blob.first = 1;
     // Claude Generated - Clean enum-based strategy selection for ALL methods
     AlignmentMethod method = static_cast<AlignmentMethod>(m_method);
 
@@ -1222,7 +1217,6 @@ std::pair<double, Matrix> RMSDDriver::MakeCostMatrix(const std::vector<int>& ref
     Geometry cached_reference = m_reference_centered.getGeometry();
     Geometry cached_target = m_target_centered.getGeometry();
 
-    //  Eigen::MatrixXd tar = cached_target.transpose();
 
     Geometry rotated = cached_target * R;
 

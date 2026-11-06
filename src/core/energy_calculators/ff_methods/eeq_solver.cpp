@@ -4098,7 +4098,6 @@ Vector EEQSolver::calculateFinalCharges(
         } else {
             // Claude Generated (Oct 2026): tiled build of the N x N Coulomb block.
             // The lower triangle is cut into TILE x TILE tiles (I >= J). Each element
-            // A_ij = erf(r_ij / sqrt(alpha_i + alpha_j)) / r_ij (far field: 1 / r_ij; cutoff: 0;
             // diagonal: gam_i + sqrt(2/pi) / sqrt(alpha_i)) is computed once, with the same
             // expression and inputs as the former row loop, into a thread-local tile buffer;
             // the tile is then stored row by row to A(i, J-block) and, transposed, to

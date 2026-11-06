@@ -240,7 +240,6 @@ std::vector<json> BiasThread::getBias() const
     std::vector<json> bias(m_biased_structures.size());
     for (int i = 0; i < m_biased_structures.size(); ++i) {
         json current;
-        // current["geometry"] = Tools::Matrix2String(m_biased_structures[i].geometry);
         current["time"] = m_biased_structures[i].time;
         current["rmsd_reference"] = m_biased_structures[i].rmsd_reference;
         current["energy"] = m_biased_structures[i].energy;
@@ -470,7 +469,6 @@ void SimpleMD::LoadControlJson()
         m_rattle_12 = m_config.get<bool>("rattle_12");
         m_rattle_13 = m_config.get<bool>("rattle_13");
 
-        // m_coupling = m_dT;
         m_rattle = m_config.get<int>("rattle");
         if (m_verbosity >= 1) {
             CurcumaLogger::raw("Using rattle to constrain bonds!");
@@ -777,7 +775,6 @@ bool SimpleMD::Initialise()
     m_rt_velo = std::vector<double>(3 * m_natoms, 0);
     /* */
 
-    //m_gradient = std::vector<double>(3 * m_natoms, 0);
     m_virial = std::vector<double>(3 * m_natoms, 0);
     m_atom_temp = std::vector<std::vector<double>>(m_natoms);
     if(m_opt)
@@ -801,7 +798,6 @@ bool SimpleMD::Initialise()
         m_atomtype[i] = m_molecule.Atom(i).first;
         if (!m_restart) {
             Position pos = m_molecule.Atom(i).second;
-            // std::cout << pos << std::endl;
             m_eigen_geometry.data()[3 * i + 0] = pos(0);
             m_eigen_geometry.data()[3 * i + 1] = pos(1);
             m_eigen_geometry.data()[3 * i + 2] = pos(2);
@@ -848,8 +844,6 @@ bool SimpleMD::Initialise()
             m_eigen_inv_masses(3*i + 2) = 1 / (Elements::AtomicMass[m_atomtype[i]]);    
         }
     }
-    // std::cout << m_eigen_geometry << std::endl;
-    // std::cout << m_eigen_masses << std::endl;
     m_molecule.setCharge(m_charge);
     m_molecule.setSpin(m_spin);
     // Claude Generated (October 2025 - FIXED): Use controller["simplemd"] like CurcumaOpt uses controller["opt"]
@@ -965,7 +959,6 @@ bool SimpleMD::Initialise()
         for (int i = 0; i < m_chain_length; ++i) {
             m_xi[i] = pow(10.0, static_cast<double>(i)) - 1;
             m_Q[i] = pow(10, i) * kb_Eh * m_T0 * m_dof * 100;
-            // std::cout << m_xi[i] << "  " << m_Q[i] << std::endl;
         }
         m_eta = 0.0;
     }
@@ -986,7 +979,6 @@ bool SimpleMD::Initialise()
 
         for(auto i : m_rmsd_indicies)
         {
-            // std::cout << i << " ";
             m_rmsd_mtd_molecule.addPair(m_molecule.Atom(i));
         }
         m_rmsd_fragment_count = m_rmsd_mtd_molecule.GetFragments().size();
@@ -1556,7 +1548,6 @@ nlohmann::json SimpleMD::WriteRestartInformation()
 
     restart["rattle"] = m_rattle;
     restart["rattle_maxiter"] = m_rattle_maxiter;
-    // restart["rattle_dynamic_tol"] = m_rattle_toler;
     restart["rattle_dynamic_tol_iter"] = m_rattle_dynamic_tol_iter;
 
     restart["coupling"] = m_coupling;
@@ -3038,7 +3029,6 @@ void SimpleMD::AdjustRattleTolerance()
 {
     m_aver_rattle_Temp /= static_cast<double>(m_rattle_counter);
 
-    // std::pair<double, double> pair(m_rattle_tolerance, m_aver_Temp);
 
     if (m_aver_rattle_Temp > m_T0)
         m_rattle_tol_12 -= 0.01;
@@ -3424,7 +3414,6 @@ void SimpleMD::Verlet()
     const double dt = m_dT * CurcumaUnit::Constants::FS_TO_MD_TIME;
     const double dt2 = dt * dt;
     double ekin = 0;
-    //std::cout << m_eigen_inv_masses << std::endl;
     for (int i = 0; i < m_natoms; ++i) {
         m_eigen_geometry.data()[3 * i + 0] = m_eigen_geometry.data()[3 * i + 0] + dt * m_eigen_velocities.data()[3 * i + 0] - 0.5 * m_eigen_gradient.data()[3 * i + 0] * m_eigen_inv_masses.data()[3 * i + 0] * dt2;
         m_eigen_geometry.data()[3 * i + 1] = m_eigen_geometry.data()[3 * i + 1] + dt * m_eigen_velocities.data()[3 * i + 1] - 0.5 * m_eigen_gradient.data()[3 * i + 1] * m_eigen_inv_masses.data()[3 * i + 1] * dt2;
@@ -3490,9 +3479,6 @@ void SimpleMD::Verlet()
         m_eigen_velocities.data()[3 * i + 2] -= 0.5 * dt * m_eigen_gradient.data()[3 * i + 2] * m_eigen_inv_masses.data()[3 * i + 2];
 
         ekin += m_eigen_masses.data()[3 * i] * (m_eigen_velocities.data()[3 * i] * m_eigen_velocities.data()[3 * i] + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1] + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]);
-        //m_gradient[3 * i + 0] = m_eigen_gradient.data()[3 * i + 0];
-        //m_gradient[3 * i + 1] = m_eigen_gradient.data()[3 * i + 1];
-        //m_gradient[3 * i + 2] = m_eigen_gradient.data()[3 * i + 2];
     }
     ekin *= 0.5;
     double T = 2.0 * ekin / (kb_Eh * m_dof);
@@ -3736,9 +3722,6 @@ void SimpleMD::Rattle()
         m_eigen_velocities.data()[3 * i + 1] -= 0.5 * dt * m_eigen_gradient.data()[3 * i + 1] * m_eigen_inv_masses.data()[3 * i + 1];
         m_eigen_velocities.data()[3 * i + 2] -= 0.5 * dt * m_eigen_gradient.data()[3 * i + 2] * m_eigen_inv_masses.data()[3 * i + 2];
 
-        //m_gradient[3 * i + 0] = m_eigen_gradient.data()[3 * i + 0];
-        //m_gradient[3 * i + 1] = m_eigen_gradient.data()[3 * i + 1];
-        //m_gradient[3 * i + 2] = m_eigen_gradient.data()[3 * i + 2];
     }
     m_virial_correction = 0;
     iter = 0;
@@ -4313,7 +4296,6 @@ void SimpleMD::EvaluateBias(bool do_deposit)
         m_bias_pool->setActiveThreadCount(m_threads);
         m_bias_pool->StaticPool();
         m_bias_pool->StartAndWait();
-        // m_bias_pool->setWakeUp(m_bias_pool->WakeUp() / 2);
 
         for (auto & m_bias_thread : m_bias_threads) {
             if (m_bias_thread->getReturnValue() == 1) {
@@ -4391,8 +4373,6 @@ double SimpleMD::ApplySphericLogFermiWalls()
             exp_expr = exp(beta_arg);
         }
         double curr_pot = kbT * log(1 + exp_expr);
-        // counter += distance > m_wall_radius;
-        // std::cout << m_wall_beta*m_eigen_geometry.data()[3 * i + 0]*exp_expr/(distance*(1-exp_expr)) << " ";
         // Claude Generated 2026: fx/fy/fz are dV/dr (the gradient of V = kbT·log(1+exp(β(s-R)))
         // projected radially: dV/dx = kbT·β·exp/(1+exp)·(x/s)). m_eigen_gradient holds dE/dr
         // (force = -gradient), so the wall gradient must be ADDED. The previous `gradient -= fx`
@@ -4416,7 +4396,6 @@ double SimpleMD::ApplySphericLogFermiWalls()
         if (distance > m_wall_spheric_radius)
             counter++;
 
-        // std::cout << distance << " ";
         potential += curr_pot;
     }
 
@@ -4434,7 +4413,6 @@ double SimpleMD::ApplySphericLogFermiWalls()
     }
 
     return potential;
-    // std::cout << potential*kbT << std::endl;
 }
 
 double SimpleMD::ApplyRectLogFermiWalls()
@@ -4456,13 +4434,8 @@ double SimpleMD::ApplyRectLogFermiWalls()
 
         double curr_pot = kbT * (log(1 + exp_expr_xl) + log(1 + exp_expr_xu) + log(1 + exp_expr_yl) + log(1 + exp_expr_yu) + log(1 + exp_expr_zl) + log(1 + exp_expr_zu));
         counter += (m_eigen_geometry.data()[3 * i + 0] - m_wall_x_min) < 0 || (m_wall_x_max - m_eigen_geometry.data()[3 * i + 0]) < 0 || (m_eigen_geometry.data()[3 * i + 1] - m_wall_y_min) < 0 || (m_wall_y_max - m_eigen_geometry.data()[3 * i + 1]) < 0 || (m_eigen_geometry.data()[3 * i + 2] - m_wall_z_min) < 0 || (m_wall_z_max - m_eigen_geometry.data()[3 * i + 2]) < 0;
-        // std::cout << i << " " << counter << std::endl;
 
-        // std::cout << m_wall_beta*m_eigen_geometry.data()[3 * i + 0]*exp_expr/(distance*(1-exp_expr)) << " ";
         if (i == 81) {
-            //    std::cout << std::endl;
-            //    std::cout << m_eigen_geometry.data()[3 * i + 0] << " " << m_eigen_geometry.data()[3 * i + 1] << " " << m_eigen_geometry.data()[3 * i + 2] << std::endl;
-            //    std::cout << m_eigen_gradient.data()[3 * i + 0] << " " << m_eigen_gradient.data()[3 * i + 1] << " " <<m_eigen_gradient.data()[3 * i + 2] << std::endl;
         }
         // Claude Generated: Fix rectangular log-Fermi forces - correct denominator (1 + exp) for derivative
         double fx = kbT * b * (exp_expr_xu / (1 + exp_expr_xu) - exp_expr_xl / (1 + exp_expr_xl));
@@ -4477,9 +4450,7 @@ double SimpleMD::ApplyRectLogFermiWalls()
         sum_grad += std::abs(fx) + std::abs(fy) + std::abs(fz);
         // if( i == 81)
         {
-            // std::cout << i << " " <<m_eigen_gradient.data()[3 * i + 0] << " " << m_eigen_gradient.data()[3 * i + 1] << " " <<m_eigen_gradient.data()[3 * i + 2] << std::endl;
         }
-        // std::cout << distance << " ";
         potential += curr_pot;
     }
 
@@ -4497,7 +4468,6 @@ double SimpleMD::ApplyRectLogFermiWalls()
     }
 
     return potential;
-    // std::cout << potential*kbT << std::endl;
 }
 
 double SimpleMD::ApplySphericHarmonicWalls()
@@ -4525,7 +4495,6 @@ double SimpleMD::ApplySphericHarmonicWalls()
         // Claude Generated: Track wall force magnitude
         sum_grad += std::sqrt(dx * dx + dy * dy + dz * dz);
 
-        // std::cout << distance << " ";
         potential += curr_pot;
     }
 
@@ -4543,7 +4512,6 @@ double SimpleMD::ApplySphericHarmonicWalls()
     }
 
     return potential;
-    // std::cout << potential*kbT << std::endl;
 }
 
 double SimpleMD::ApplyRectHarmonicWalls()
@@ -4567,7 +4535,6 @@ double SimpleMD::ApplyRectHarmonicWalls()
         int out = (m_eigen_geometry.data()[3 * i + 0] - m_wall_x_min) < 0 || (m_wall_x_max - m_eigen_geometry.data()[3 * i + 0]) < 0 || (m_eigen_geometry.data()[3 * i + 1] - m_wall_y_min) < 0 || (m_wall_y_max - m_eigen_geometry.data()[3 * i + 1]) < 0 || (m_eigen_geometry.data()[3 * i + 2] - m_wall_z_min) < 0 || (m_wall_z_max - m_eigen_geometry.data()[3 * i + 2]) < 0;
         counter += out;
 
-        // std::cout << i << " " << counter << std::endl;
 
         // Claude Generated 2026: Correct harmonic wall gradient.
         // m_eigen_gradient holds dE/dr (the integrator does v -= ½·dT·grad/m,
@@ -4605,7 +4572,6 @@ double SimpleMD::ApplyRectHarmonicWalls()
     }
 
     return potential;
-    // std::cout << potential*kbT << std::endl;
 }
 
 void SimpleMD::RemoveRotations()
@@ -4843,7 +4809,6 @@ void SimpleMD::PrintStatus() const
             m_rattle_max_err_12, m_rattle_max_err_13, m_rattle_max_err_count));
     }
 
-    //std::cout << m_mtd_time << " " << m_loop_time << std::endl;
 }
 
 void SimpleMD::PrintMatrix(const double* matrix) const
@@ -4928,7 +4893,6 @@ void SimpleMD::AverageQuantities()
     m_aver_Ekin = (m_Ekin + (m_currentStep)*m_aver_Ekin) / (m_currentStep + 1);
     m_aver_Etot = (m_Etot + (m_currentStep)*m_aver_Etot) / (m_currentStep + 1);
     if (m_dipole) {
-        //m_aver_dipol = (m_curr_dipoles + (m_currentStep)*m_aver_dipol) / (m_currentStep + 1);
     }
     m_average_wall_potential = (m_wall_potential + (m_currentStep)*m_average_wall_potential) / (m_currentStep + 1);
     m_average_virial_correction = (m_virial_correction + (m_currentStep)*m_average_virial_correction) / (m_currentStep + 1);

@@ -456,5 +456,4 @@ void analyzeMemoryUsage()
 int main()
 {
     benchmarkParameterAccess();
-    // analyzeMemoryUsage();
 }

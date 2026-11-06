@@ -260,7 +260,6 @@ public:
     inline std::string NamePattern(int index) const { return "#" + std::to_string(index); }
 
     std::vector<Molecule*> Result() const { return m_result; }
-    // std::vector<Molecule*> Failed() const { return m_failed; }
 
     void ParametriseRotationalCutoffs();
 

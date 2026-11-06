@@ -170,7 +170,6 @@ inline bool isDouble(const std::string& input)
         isD = false;
     }
     return isD;
-    // return std::all_of(input.begin(), input.end(), ::isdigit);
 }
 
 inline bool StringContains(const std::string& string, const std::string& search)
@@ -342,8 +341,6 @@ inline std::string Geometry2String(const Geometry& matrix)
     for (int j = 0; j < matrix.rows(); ++j)
         for (int i = 0; i < matrix.cols(); ++i) 
             result += std::to_string(matrix(j,i)) + "|";
-    //    }
-    //    result += "|";
 
     result.pop_back();
     result.pop_back();

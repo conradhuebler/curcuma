@@ -565,7 +565,6 @@ private:
     double m_adaptive_hot_factor = 10.0;
     std::deque<double> m_hot_history;   ///< hottest-atom ratio of the accepted steps
     int m_adaptive_local_rejections = 0;  ///< rejections the local channel alone triggered
-//    std::vector<double> m_current_geometry, m_mass, m_velocities, m_gradient, m_rmass, m_virial, m_gradient_bias, m_scaling_vector_linear, m_scaling_vector_nonlinear, m_rt_geom_1, m_rt_geom_2, m_rt_velo;
     std::vector<double>  m_virial, m_gradient_bias, m_scaling_vector_linear, m_scaling_vector_nonlinear, m_rt_geom_1, m_rt_geom_2, m_rt_velo;
 
     std::vector<Position> m_curr_dipoles;

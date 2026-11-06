@@ -58,5 +58,4 @@ private:
     int m_SCFmaxiter;
     double m_energy;
     Geometry m_gradient;
-    // Vector m_charges, m_dipole, m_orbital_energies;
 };

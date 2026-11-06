@@ -401,7 +401,6 @@ void XTB::calculateGradient()
                                 double dD_dA[3][3], dQ_dA[3][6];
                                 if (dpair) {
                                     // Transformed integral values come from the stored
-                                    // m_dp_int/m_qp_int (origin at column atom = jat);
                                     // their A-gradients from the d block (X-I1).
                                     for (int k = 0; k < 3; ++k) D_mp[k] = m_dp_int[k](mu, nu);
                                     for (int q = 0; q < 6; ++q) Q_mp[q] = m_qp_int[q](mu, nu);

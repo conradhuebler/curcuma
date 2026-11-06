@@ -114,7 +114,6 @@ struct MyFCFunctor : FCFunctor<double> {
             }
                 }
 
-                // std::cout << index << " " << fvec.size()<< " " << diff << " ";
                 return 0;
     }
 
@@ -180,7 +179,6 @@ inline Vector OptimiseFC(const Molecule& molecule, const Matrix& hessian, const 
         std::cout << "Norm " << (old_param - parameter).norm() << std::endl;
         if ((old_param - parameter).norm() < 1e-12)
             break;
-        // std::cout << parameter.transpose() << std::endl;
         old_param = parameter;
     }
 

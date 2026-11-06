@@ -120,9 +120,7 @@ public:
     }
 
 private:
-    //  int m_iter = 0;
     int m_atoms = 0;
-    //  int n;
     int m_method = 2;
     std::vector<int> m_constrains;
     EnergyCalculator* m_interface;

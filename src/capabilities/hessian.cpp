@@ -407,7 +407,6 @@ void Hessian::start()
 
     m_frequencies = ConvertHessian(m_hessian);
 
-    // PrintVibrationsPlain(eigenvalues);
 
     auto hessian2 = ProjectHessian(m_hessian);
     auto projected = ConvertHessian(hessian2);

@@ -223,7 +223,6 @@ void Molecule::Initialise(const int* attyp, const double* coord, const int natom
         m_geometry(i, 1) = coord[3 * i + 1];
         m_geometry(i, 2) = coord[3 * i + 2];
 
-        // m_geometry.push_back({ coord[3 * i], coord[3 * i + 1], coord[3 * i + 2] });
         m_atoms.push_back(attyp[i]);
 
         m_mass += Elements::AtomicMass[attyp[i]];
@@ -346,11 +345,9 @@ void Molecule::InitialiseEmptyGeometry(int atoms)
 bool Molecule::addPair(const std::pair<int, Position>& atom)
 {
     bool exist = true;
-    // const std::array<double, 3> at = { atom.second(0),  atom.second(1),  atom.second(2)};
     m_geometry.conservativeResize(m_geometry.rows() + 1, 3);
     m_geometry.row(m_geometry.rows() - 1) = atom.second;
 
-    // m_geometry.push_back({ atom.second(0), atom.second(1), atom.second(2) });
     m_atoms.push_back(atom.first);
     m_mass += Elements::AtomicMass[atom.first];
 
@@ -1121,16 +1118,13 @@ Position Molecule::CalculateDipoleMoment(const Vector& scaling, const bool bond)
                 if (i == j)
                     continue;
                 double revr = 1 / (m_geometry.row(i) - m_geometry.row(j)).norm();
-                // std::cout << m_charges[i] *revr *  scale << " ";
 
                 dipole(0) -= m_charges[i] * revr * scale;
                 dipole(1) -= m_charges[i] * revr * scale;
                 dipole(2) -= m_charges[i] * revr * scale;
             }
-            // std::cout << scale << " ";
         }
     }
-    // std::cout << std::endl;
     return dipole;
 }
 
@@ -1159,16 +1153,13 @@ Position Molecule::CalculateDipoleMoment(const std::vector<double>& scaling, con
                 if (i == j)
                     continue;
                 double revr = 1 / (m_geometry.row(i) - m_geometry.row(j)).norm();
-                // std::cout << m_charges[i] *revr *  scale << " ";
 
                 dipole(0) -= m_charges[i] * revr * scale;
                 dipole(1) -= m_charges[i] * revr * scale;
                 dipole(2) -= m_charges[i] * revr * scale;
             }
-            // std::cout << scale << " ";
         }
     }
-    // std::cout << std::endl;
     return dipole;
 }
 
@@ -1230,10 +1221,7 @@ std::pair<double, double> Molecule::GyrationRadiusPBC(double hmass, bool protons
 
         // Apply PBC if active - Claude Generated (Oct 2025): Use cached inverse
         if (m_has_pbc) {
-            //std::cout << "Applying PBC for atom " << i << std::endl;
-            //std::cout << "old distance: " << atom_pos.norm() << " ";
             atom_pos = PBCUtils::applyMinimumImage(atom_pos, m_unit_cell, cell_inv);
-            //std::cout << "  --  new distance" << atom_pos.norm() << std::endl;
         }
         Eigen::Vector3d r = atom_pos - com;
 
@@ -1514,7 +1502,6 @@ void Molecule::appendXYZFile(const std::string& filename) const
     }
     std::ofstream input;
     input.open(filename, std::ios_base::app);
-    //std::cout << output << std::endl;
     input << output;
     input.close();
 }
@@ -1538,7 +1525,6 @@ void Molecule::appendDipoleFile(const std::string& filename) const
     }
     std::ofstream input;
     input.open(filename, std::ios_base::app);
-    // std::cout << output << std::endl;
     input << output;
     input.close();
 }
@@ -1632,11 +1618,9 @@ std::vector<int> Molecule::BoundHydrogens(int atom, double scaling) const
         return result;
 
     for (int i = 0; i < AtomCount(); ++i) {
-        // std::cout << Atom(i).first << std::endl;
         if (atom == i || Atom(i).first != 1)
             continue;
         double distance = CalculateDistance(i, atom);
-        // std::cout << i << " " << atom << " " << distance << std::endl;
         if (distance < (Elements::CovalentRadius[Atom(atom).first] + Elements::CovalentRadius[1]) * scaling)
             result.push_back(i);
     }
@@ -1801,19 +1785,15 @@ std::vector<std::vector<int>> Molecule::GetFragments(double scaling) const
                 double distance = m_has_pbc ?
                     CalculateDistancePBC(fragment[i], atoms[j]) :
                     CalculateDistance(fragment[i], atoms[j]);
-                //std::cout << "Fragment No: " << m_fragments.size() + 1 << " ("<< fragment.size() <<")  ##  Atom " << fragment[i] << " (Index " << i << ") and Atom " << atoms[j] << " - Distance: " << distance << " Thresh " << (Elements::CovalentRadius[Atom(fragment[i]).first] + Elements::CovalentRadius[Atom(atoms[j]).first]);
                 if (distance < (Elements::CovalentRadius[Atom(fragment[i]).first] + Elements::CovalentRadius[Atom(atoms[j]).first]) * m_scaling) {
-                    //std::cout << " ... taken " << std::endl;
                     fragment.push_back(atoms.at(j));
                     mass += Elements::AtomicMass[Atom(atoms.at(j)).first];
                     atoms.erase(atoms.begin() + j);
                     --j; // We have to decrease the atom vector counter since it got one element removed and we dont want to skip single elements
                 } //else
-                //   std::cout  << std::endl;
             }
         }
         std::sort(fragment.begin(), fragment.end());
-        //m_fragments.push_back(fragment);
         mass *= -1; // I think, that is an easy way to ***
         ordered_list.insert(std::pair<double, std::vector<int>>(mass, fragment));
         fragment.clear();

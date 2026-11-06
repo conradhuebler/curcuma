@@ -491,18 +491,15 @@ public:
             * Eigen::AngleAxisd(x[1], Eigen::Vector3d::UnitY())
             * Eigen::AngleAxisd(x[2], Eigen::Vector3d::UnitZ());
 
-        // Eigen::MatrixXd tar = m_target.transpose();
 
         // Geometry rotated = tar.transpose() * n;
         double fx = 0.0;
         double dx = 1e-5;
 
         auto result = RMSDDriver::MakeCostMatrix(m_reference, m_target * n, m_reference_atoms, m_target_atoms, m_costmatrix);
-        // std::cout << result.first << std::endl;
         Eigen::VectorXd tmp = x;
         for (int i = 0; i < 3; ++i) {
             tmp[i] += dx;
-            // std::cout << tmp.transpose() << std::endl;
             Eigen::Matrix3d n;
             n = Eigen::AngleAxisd(tmp[0], Eigen::Vector3d::UnitX())
                 * Eigen::AngleAxisd(tmp[1], Eigen::Vector3d::UnitY())
@@ -513,16 +510,13 @@ public:
             auto p = RMSDDriver::MakeCostMatrix(m_reference, m_target * n, m_reference_atoms, m_target_atoms, m_costmatrix).first;
 
             tmp[i] -= 2 * dx;
-            // std::cout << tmp.transpose() << std::endl;
 
             n = Eigen::AngleAxisd(tmp[0], Eigen::Vector3d::UnitX())
                 * Eigen::AngleAxisd(tmp[1], Eigen::Vector3d::UnitY())
                 * Eigen::AngleAxisd(tmp[2], Eigen::Vector3d::UnitZ());
 
-            // rotated = tar.transpose() * n;
 
             auto m = RMSDDriver::MakeCostMatrix(m_reference, m_target * n, m_reference_atoms, m_target_atoms, m_costmatrix).first;
-            // std::cout << p << " " << m << " " << (p-m)/(2*dx) << std::endl << std::endl;
             grad[i] = (p - m) / (2 * dx);
         }
 

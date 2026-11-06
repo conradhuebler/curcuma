@@ -44,10 +44,8 @@ inline std::vector<std::vector<int>> FindRings(const std::vector<std::vector<int
         bool loop = true;
         std::vector<int> bonded = stored_bonds[i];
         std::vector<int> knots, outer;
-        // std::vector< std::pair<int, std::vector<int> > > mknots;
         std::vector<std::vector<int>> stash;
         stash.push_back(std::vector<int>{ i });
-        // done.push_back(std::vector<int>());
         int index = -1;
         while (stash.size() && done.size() < storage * atoms) { // this is just a hack ...
             for (auto tmp : knots) {
@@ -62,7 +60,6 @@ inline std::vector<std::vector<int>> FindRings(const std::vector<std::vector<int
                     std::vector<int> vacant;
                     bool close_ring = false;
                     for (int atom : bonded) {
-                        // std::cout << atom << " " << stash[s][stash[s].size() - 2] << std::endl;
                         // Claude Fix 2025-10-19: Prevent out-of-bounds access when stash[s].size() < 2
                         // stash[s] starts with size 1 (line 56), so size()-2 would be -1 (18446744073709551615 unsigned)
                         if (stash[s].size() >= 2 && stash[s][stash[s].size() - 2] == atom)
@@ -123,13 +120,10 @@ inline std::vector<std::vector<int>> FindRings(const std::vector<std::vector<int
                             for (int a : stash[s]) {
                                 if (stash[s].size() < maxsize)
                                     done.push_back(a);
-                                // std::cout << a << " ";
                             }
-                            // std::cout << std::endl;
                             stash.erase(stash.begin() + s);
                         } else {
                             //    for (int a : stash[s])
-                            //        done.push_back(a);
                             stash.erase(stash.begin() + s);
                         }
                     } else if (vacant.size() == 1)
@@ -139,13 +133,10 @@ inline std::vector<std::vector<int>> FindRings(const std::vector<std::vector<int
                         stash.erase(stash.begin() + s);
                         if (currentstash.size() > maxsize)
                             break;
-                        // auto currdone = done[s];
-                        // done.erase(done.begin() + s);
                         knots.push_back(outeratom);
                         for (int atom : vacant) {
                             stash.push_back(currentstash);
                             stash[stash.size() - 1].push_back(atom);
-                            //  done.push_back(currdone);
                         }
                     }
                 }
@@ -153,11 +144,7 @@ inline std::vector<std::vector<int>> FindRings(const std::vector<std::vector<int
         }
     }
     for (auto a : identified_rings) {
-        // if (a.size() < 10) {
         // for (auto i : a)
-        //    std::cout << i << " ";
-        // std::cout << std::endl;
-        //}
     }
     return identified_rings;
 }

@@ -266,7 +266,6 @@ json CLI2Json(int argc, char** argv)
                 ++i;
             } else {
                 std::string next = argv[i + 1];
-                //       std::cout << "next: " << next << std::endl;
 
                 bool isNumber = true;
                 bool isVector = next.find("|") != std::string::npos || next.find(",") != std::string::npos || next.find(":") != std::string::npos;
@@ -326,7 +325,6 @@ json CLI2Json(int argc, char** argv)
                         setNestedJsonValue(key, current, std::stod(next));
                     }
                 } else if (isVector) {
-                    //        std::cout << next << std::endl;
                     if (current == "bak" && key.contains("bak")) {
                         if (key["bak"].is_array()) {
                             key["bak"].push_back(next);
@@ -484,7 +482,6 @@ json CLI2Json(int argc, char** argv)
             }
         } else if (is_nested_object && param_name != keyword) {
             // Handle nested structure for OTHER modules (not this command's keyword)
-            // param_name = "rmsd", param_value = {"method": "subspace"}
             //
             // Claude Generated (Jul 2026): map CLI keywords to module names here too. Because
             // setNestedJsonValue() already split "md.rmsd_mtd" into key["md"]["rmsd_mtd"], this

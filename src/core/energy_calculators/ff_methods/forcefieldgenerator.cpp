@@ -217,7 +217,6 @@ void ForceFieldGenerator::Generate(const std::vector<std::pair<int, int>>& forme
     }
     AssignUffAtomTypes();
     // if (m_rings)
-    // std::cout << "Crude ring finding method ... " << std::endl;
     int maxsize = m_atom_types.size();
     int maxcache = m_atom_types.size();
     if (m_atom_types.size() > 1000)
@@ -660,7 +659,6 @@ void ForceFieldGenerator::setInversions()
 
 void ForceFieldGenerator::setNCI()
 {
-    // std::vector<double> charges = m_mol.m_partial_charges // m_molecule.getPartialCharges();
     double q_thresh = 1e-5;
     for (int i = 0; i < m_atom_types.size(); ++i) {
         for (int j = i + 1; j < m_atom_types.size(); ++j) {

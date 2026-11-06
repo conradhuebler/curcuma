@@ -243,7 +243,6 @@ bool ANCCoordinates::generateANCLanczos(const Matrix& H, const Vector& xyz,
     int m_actual = 0;
 
     for (int j = 0; j < m; ++j) {
-        // w = H * v_j - beta_{j-1} * v_{j-1}
         w.noalias() = H * V.col(j);
         if (j > 0) w.noalias() -= beta_prev * v_prev;
 
