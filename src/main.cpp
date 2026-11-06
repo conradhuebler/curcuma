@@ -1816,6 +1816,19 @@ int executeCasino(const json& controller, int argc, char** argv) {
     // Claude Generated 2025: Apply parameter merging to fix JSON null issues
     json casino_defaults = ParameterRegistry::getInstance().getDefaultJson("casino");
     json casino_config = MergeJson(casino_defaults, controller.contains("casino") ? controller["casino"] : json{});
+    // Method scopes (-gfnff.*, -xtb.*, -scf.*, ...) and the global threads/gpu keys live beside
+    // controller["casino"]; Casino hands this json to its EnergyCalculator, so they must be copied in.
+    for (const std::string& scope : MethodFactory::methodParameterScopes()) {
+        if (controller.contains(scope) && controller[scope].is_object())
+            casino_config[scope] = controller[scope];
+    }
+    for (const char* key : { "threads", "gpu" }) {
+        if (!casino_config.contains(key) && controller.contains(key))
+            casino_config[key] = controller[key];
+    }
+    // Global -verbosity applies unless -casino.verbosity was given (module default 2 otherwise).
+    if (controller.contains("verbosity") && !(controller.contains("casino") && controller["casino"].contains("verbosity")))
+        casino_config["verbosity"] = controller["verbosity"];
 
     auto* casino = new Casino(casino_config, false);
     casino->setFileName(argv[2]);
@@ -1857,6 +1870,9 @@ int executeRMSDTraj(const json& controller, int argc, char** argv) {
     if (controller.contains("rmsdtraj") && !controller["rmsdtraj"].is_null()) {
         rmsdtraj_config = MergeJson(rmsdtraj_config, controller["rmsdtraj"]);
     }
+    // Global -verbosity applies unless -rmsdtraj.verbosity was given.
+    if (controller.contains("verbosity") && !(controller.contains("rmsdtraj") && controller["rmsdtraj"].contains("verbosity")))
+        rmsdtraj_config["verbosity"] = controller["verbosity"];
 
     RMSDTraj traj(rmsdtraj_config, false);
     traj.setFile(argv[2]);
@@ -2618,6 +2634,16 @@ int main(int argc, char **argv) {
             }
         }
         for (const auto& mod : touched_modules) {
+            // Write canonical names only: an alias key next to the canonical default would be
+            // overwritten by that default when the file is replayed (key order is alphabetical).
+            if (export_config.contains(mod) && export_config[mod].is_object()) {
+                json canonical_keys = json::object();
+                for (auto& [key, value] : export_config[mod].items()) {
+                    const std::string canon = param_registry.resolveAlias(mod, key);
+                    canonical_keys[(canon.empty() || value.is_object()) ? key : canon] = value;
+                }
+                export_config[mod] = canonical_keys;
+            }
             json defaults = param_registry.getDefaultJson(mod);
             if (!export_config.contains(mod) || !export_config[mod].is_object()) {
                 export_config[mod] = json::object();

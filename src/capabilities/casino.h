@@ -43,6 +43,7 @@ MODULE_INFO("Monte Carlo sampling of conformational space.", "Dynamics", {"casin
 
     // Output options
     PARAM(output_file, String, "casino_trajectory.xyz", "Trajectory output file", "Output", {})
+    PARAM(checkpoint_file, String, "casino_checkpoint.json", "Restart file read by LoadRestartInformation().", "Output", {})
     PARAM(output_frequency, Int, 100, "Trajectory output frequency", "Output", {})
     PARAM(energy_frequency, Int, 10, "Energy output frequency", "Output", {})
 
@@ -93,30 +94,6 @@ struct CGParticleShape {
 
     CGParticleShape() : radii(1.0, 1.0, 1.0), orientation(0.0, 0.0, 0.0), type(SPHERE) {}
     bool isSpherical() const { return std::abs(radii[0] - radii[1]) < 1e-6 && std::abs(radii[1] - radii[2]) < 1e-6; }
-};
-
-// Default configuration for Casino Monte Carlo simulation - Claude Generated
-static const json CasinoJson = {
-    { "steps", 10000 },                    // Number of MC steps
-    { "temperature", 300.0 },              // Temperature in Kelvin
-    { "step_size", 0.1 },                  // Maximum displacement per move (Angstrom)
-    { "seed", 42 },                        // Random seed for reproducibility
-    { "output_frequency", 100 },           // Frequency for trajectory output
-    { "energy_frequency", 10 },            // Frequency for energy output
-    { "output_file", "casino_trajectory.xyz" }, // Output trajectory file
-    { "move_type", "mixed" },              // Move type: "translation", "rotation", "orientational", "pivot", "mixed"
-    { "move_strategy", "single_atom" },    // Move strategy: "all_atoms", "single_atom", "cg_aware", "chain_segment", "mixed_strategy"
-    { "acceptance_target", 0.5 },          // Target acceptance ratio
-    { "adaptive_step", true },             // Adaptive step size adjustment
-    { "pivot_moves", false },              // Enable pivot moves for polymer chains
-    { "orientational_moves", false },      // Enable orientational moves for CG particles
-    { "local_energy_updates", true },      // Use local energy updates for efficiency
-    { "bias_potential", false },           // Enable bias potential
-    { "umbrella_sampling", false },        // Enable umbrella sampling
-    { "metadynamics", false },             // Enable metadynamics
-    { "verbose", true },                   // Detailed output
-    // Restart and checkpointing options - Claude Generated
-    { "checkpoint_file", "casino_checkpoint.json" }, // Checkpoint filename
 };
 
 /*! \brief Casino - Monte Carlo simulation for molecular systems - Claude Generated

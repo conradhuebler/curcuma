@@ -438,7 +438,7 @@ private:
     PARAM(method, String, "subspace", "Alignment method: subspace (default, recommended)|inertia (recommended)|template|dtemplate|incr (legacy)|molalign (external)|hungarian|predefined.", "Method", {"RMSDmethod", "rmsdmethod"},
         "tier=primary; enum=subspace|inertia|template|dtemplate|incr|molalign|hungarian|predefined")
     PARAM(limit, Int, 0, "Limit for subspace and dtemplate methods.", "Method", {})
-    PARAM(element, String, "7", "Element(s) for template methods (e.g., \"7,8\").", "Method", {"Element"})
+    PARAM(element, String, "7", "Element(s) for template methods (e.g., \"7,8\").", "Method", {})
     PARAM(order_file, String, "", "Path to a file with a predefined atom order.", "Method", {"order"})
 
     // --- Cost Matrix & Kuhn-Munkres ---

@@ -446,19 +446,19 @@ void XTB::calculateGradient()
                                     }
 
                                     // -- Quadrupole contributions --
-                                    // d(qp_iat) = d(qp_jat) + traceless(Δqraw)
-                                    // Δqraw[q] = origin-shift correction for iat-origin quad
-                                    double Δqraw[6];
+                                    // d(qp_iat) = d(qp_jat) + traceless(dq_raw)
+                                    // dq_raw[q] = origin-shift correction for iat-origin quad
+                                    double dq_raw[6];
                                     for (int q = 0; q < 6; ++q) {
                                         const int a = qa6[q], b = qb6[q];
                                         // derivative of (ΔR[b]*D_mp[a] + ΔR[a]*D_mp[b] + ΔR[a]*ΔR[b]*S)
                                         // w.r.t. Riat_l  (dΔR[k]/dRiat_l = -δ_{kl})
-                                        Δqraw[q] = -(b==l ? D_mp[a] : 0.0) + dR[b]*dD_dA[l][a]
+                                        dq_raw[q] = -(b==l ? D_mp[a] : 0.0) + dR[b]*dD_dA[l][a]
                                                  - (a==l ? D_mp[b] : 0.0) + dR[a]*dD_dA[l][b]
                                                  + (-(a==l ? dR[b] : 0.0) - (b==l ? dR[a] : 0.0))*Smn
                                                  + dR[a]*dR[b]*dS[l];
                                     }
-                                    const double dtr_c = 0.5*(Δqraw[0] + Δqraw[2] + Δqraw[5]);
+                                    const double dtr_c = 0.5*(dq_raw[0] + dq_raw[2] + dq_raw[5]);
 
                                     for (int q = 0; q < 6; ++q) {
                                         const bool is_diag = (qa6[q] == qb6[q]);
@@ -466,7 +466,7 @@ void XTB::calculateGradient()
                                         term += dQ_dA[l][q] * m_pot.v_qp(q, jat);
                                         // d(qp_iat[q])/dRiat_l · v_qp(iat)
                                         const double dQiat = dQ_dA[l][q]
-                                                           + 1.5*Δqraw[q]
+                                                           + 1.5*dq_raw[q]
                                                            - (is_diag ? dtr_c : 0.0);
                                         term += dQiat * m_pot.v_qp(q, iat);
                                     }

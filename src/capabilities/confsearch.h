@@ -257,13 +257,13 @@ private:
 
     // --- System ---
     PARAM(charge, Int, 0, "Total charge of the system. Applied to every MD run, every optimisation and every ConfScan energy.", "System", {})
-    PARAM(spin, Int, 0, "Total spin of the system.", "System", {"Spin"})
+    PARAM(spin, Int, 0, "Total spin of the system.", "System", {})
     PARAM(threads, Int, 1, "Number of ConfSearch cycles run in parallel. Each child MD or optimisation then runs single-threaded.", "System", {})
 
     // --- Search Schedule ---
-    PARAM(startT, Double, 600.0, "Temperature of the first exploration cycle in Kelvin.", "Schedule", {})
-    PARAM(endT, Double, 300.0, "Temperature of the last exploration cycle in Kelvin.", "Schedule", {})
-    PARAM(deltaT, Double, 50.0, "Temperature decrement between cycles in Kelvin.", "Schedule", {})
+    PARAM(start_temperature, Double, 600.0, "Temperature of the first exploration cycle in Kelvin.", "Schedule", {"startT"})
+    PARAM(end_temperature, Double, 300.0, "Temperature of the last exploration cycle in Kelvin.", "Schedule", {"endT"})
+    PARAM(delta_temperature, Double, 50.0, "Temperature decrement between cycles in Kelvin.", "Schedule", {"deltaT"})
     PARAM(repeat, Int, 4, "Independent MD runs started from every seed structure per cycle.", "Schedule", {})
     PARAM(time, Double, 2000.0, "Length of each MD run in femtoseconds.", "Schedule", {"max_time", "MaxTime"})
 

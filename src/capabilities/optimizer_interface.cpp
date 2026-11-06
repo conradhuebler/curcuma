@@ -45,7 +45,8 @@ const json OptimizerInterfaceJson{
     { "method", "lbfgspp" },
     { "optimizer_type", "lbfgspp" },
 
-    // LBFGS-specific parameters (can be overridden by specific strategies)
+    // LBFGS-specific parameters. Values equal the registry module "opt" (curcumaopt.h):
+    // this literal cannot read the registry (static initialisation order), so keep both in step.
     { "lbfgs_m", 2000 },
     { "lbfgs_eps_abs", 1e-5 },
     { "lbfgs_eps_rel", 1e-5 },
@@ -53,7 +54,7 @@ const json OptimizerInterfaceJson{
     { "lbfgs_delta", 0 },
     { "lbfgs_line_search", 3 },
     { "lbfgs_max_line_search", 20 },
-    { "lbfgs_min_step", 1e-20 },
+    { "lbfgs_min_step", 1e-4 },
     { "lbfgs_max_step", 1e20 },
     { "lbfgs_ftol", 1e-4 },
     { "lbfgs_wolfe", 0.9 },

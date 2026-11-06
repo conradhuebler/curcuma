@@ -30,7 +30,7 @@
 #include <iomanip>
 
 Casino::Casino(const json& controller, bool silent)
-    : CurcumaMethod(CasinoJson, controller, silent)
+    : CurcumaMethod(ParameterRegistry::getInstance().getDefaultJson("casino"), controller, silent)
     , m_energy_calculator(nullptr)
     , m_current_step(0)
     , m_total_moves(0)
@@ -41,7 +41,8 @@ Casino::Casino(const json& controller, bool silent)
     , m_scnp_parser(silent)
 {
     UpdateController(controller);
-    m_config = MergeJson(CasinoJson, controller);
+    m_config = MergeJson(ParameterRegistry::getInstance().getDefaultJson("casino"), controller);
+    m_checkpoint_file = Json2KeyWord<std::string>(m_config, "checkpoint_file");
 
     // Extract simulation parameters
     m_total_steps = Json2KeyWord<int>(m_config, "steps");
