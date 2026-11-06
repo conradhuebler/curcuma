@@ -16,6 +16,7 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "src/tools/bmt_utils.h"
 #include "gfnff.h"
 #include "src/core/energy_calculators/ff_methods/gfnff_par.h"
 #include "src/core/curcuma_logger.h"
@@ -10770,11 +10771,12 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
                     }
                     diag["energy_charges"] = atoms_q;
 
-                    std::ofstream diag_file("gfnff_diag_charges.json");
+                    const std::string diag_path = BMTUtils::processOutputPath("gfnff_diag_charges.json");
+                    std::ofstream diag_file(diag_path);
                     if (diag_file.is_open()) {
                         diag_file << diag.dump(2) << std::endl;
                         diag_file.close();
-                        CurcumaLogger::info("Wrote topology charge diagnostics to gfnff_diag_charges.json");
+                        CurcumaLogger::info_fmt("Wrote topology charge diagnostics to {}", diag_path);
                     }
                 }
             }

@@ -1221,7 +1221,7 @@ void ConfScan::start()
         data["x4"] = i.dIc;
         data["x5"] = i.dH;
         data["X1"] = Tools::Matrix2String(i.dHM);
-        std::ofstream restart_file("confscan_saved_" + std::to_string(index) + ".json");
+        std::ofstream restart_file(outputPath("confscan_saved_" + std::to_string(index) + ".json"));
         restart_file << data;
         index++;
     }

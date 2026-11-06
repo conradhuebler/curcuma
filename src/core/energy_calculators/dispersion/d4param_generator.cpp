@@ -6,6 +6,7 @@
  * December 25, 2025: Complete alphaiw (polarizability) data integration
  */
 
+#include "src/tools/bmt_utils.h"
 #include "src/core/units.h"
 #include "d4param_generator.h"
 #include "d4_charge_scaling.h"  // shared exact dftd4 zeta (AP6b)
@@ -633,11 +634,12 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
             }
             diag["atoms"] = atoms;
 
-            std::ofstream diag_file("gfnff_diag_d4.json");
+            const std::string diag_path = BMTUtils::processOutputPath("gfnff_diag_d4.json");
+            std::ofstream diag_file(diag_path);
             if (diag_file.is_open()) {
                 diag_file << diag.dump(2) << std::endl;
                 diag_file.close();
-                CurcumaLogger::info("Wrote D4 dispersion diagnostics to gfnff_diag_d4.json");
+                CurcumaLogger::info_fmt("Wrote D4 dispersion diagnostics to {}", diag_path);
             }
         }
     }

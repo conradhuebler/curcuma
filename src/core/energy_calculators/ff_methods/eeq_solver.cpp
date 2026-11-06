@@ -33,6 +33,7 @@
 #endif
 #endif
 
+#include "src/tools/bmt_utils.h"
 #include "eeq_solver.h"
 #include "gfnff_par.h"  // EEQ parameters (chi_eeq, gam_eeq, alpha_eeq, cnf_eeq)
 #include "cn_calculator.h"  // Shared CN calculation utility
@@ -4526,7 +4527,7 @@ Vector EEQSolver::calculateFinalCharges(
                     atom["q_phase2"] = new_charges(i);
                     dump["atoms"].push_back(atom);
                 }
-                std::string fname = fmt::format("charges_dump_N{}.json", natoms);
+                std::string fname = BMTUtils::processOutputPath(fmt::format("charges_dump_N{}.json", natoms));
                 std::ofstream ofs(fname);
                 ofs << dump.dump(2) << std::endl;
                 CurcumaLogger::info(fmt::format("EEQ: Charge dump saved to {}", fname));
