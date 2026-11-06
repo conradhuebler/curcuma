@@ -107,7 +107,7 @@ void D3ParameterGenerator::initializeReferenceData()
     // Declared in d3_reference_data.h (const std::array, .rodata — no static-init cost).
 
     if (reference_cn_data_complete.size() < 721) {  // Need 103 elements × 7 references = 721
-        CurcumaLogger::error("Reference CN data insufficient: expected ≥721, got " +
+        CurcumaLogger::error("Reference CN data insufficient: expected >=721, got " +
                              std::to_string(reference_cn_data_complete.size()));
         return;
     }
@@ -248,7 +248,7 @@ void D3ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
     double t_weights_ms = std::chrono::duration<double, std::milli>(t_weights_end - t_weights_start).count();
 
     if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::info(fmt::format("D3: Weight pre-computation took {:.2f} ms ({} atoms × avg {} refs)",
+        CurcumaLogger::info(fmt::format("D3: Weight pre-computation took {:.2f} ms ({} atoms x avg {} refs)",
             t_weights_ms, m_atoms.size(), m_gaussian_weights.empty() ? 0 : m_gaussian_weights[0].size()));
     }
 
@@ -966,7 +966,7 @@ double D3ParameterGenerator::getTotalEnergy() const
 
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::info("  Pair " + std::to_string(i) + "-" + std::to_string(j) +
-                               ": r=" + std::to_string(r) + " Å, E=" + std::to_string(e6 + e8) + " Eh");
+                               ": r=" + std::to_string(r) + " Angstrom, E=" + std::to_string(e6 + e8) + " Eh");
         }
     }
 

@@ -357,7 +357,7 @@ Matrix NativeXtbMethod::getGradient() const
 
     Matrix grad = m_xtb->Gradient();
     if (CurcumaLogger::get_verbosity() >= 3)
-        CurcumaLogger::param("native_xtb_gradient_norm", fmt::format("{:.6e} Eh/Å", grad.norm()));
+        CurcumaLogger::param("native_xtb_gradient_norm", fmt::format("{:.6e} Eh/Angstrom", grad.norm()));
     return grad;
 }
 

@@ -44,7 +44,7 @@ using json = nlohmann::json;
 BEGIN_PARAMETER_DEFINITION(rmsdtraj)
 MODULE_INFO("RMSD along a trajectory, and extraction of distinct structures from it.", "Analysis", {"rmsdtraj"})
     PARAM(heavy_only, Bool, false, "Use only heavy atoms.", "RMSD", {"heavy"})
-    PARAM(rmsd_threshold, Double, 1.5, "RMSD threshold for clustering (Å).", "RMSD", {"rmsd"})
+    PARAM(rmsd_threshold, Double, 1.5, "RMSD threshold for clustering (Angstrom).", "RMSD", {"rmsd"})
     PARAM(reference, String, "none", "Reference structure file.", "Input", {})
     PARAM(second_trajectory, String, "none", "Second trajectory file for comparison.", "Input", {"second"})
     PARAM(write_unique, Bool, false, "Write unique conformers to file.", "Output", {"writeUnique"})

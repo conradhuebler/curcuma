@@ -813,7 +813,7 @@ private:
         "unit=fs; min=0")
     PARAM(andersen_probability, Double, 0.001, "Andersen thermostat collision probability.", "Thermostat", {},
         "min=0; max=1")
-    PARAM(chain_length, Int, 3, "Chain length for Nosé-Hoover thermostat.", "Thermostat", {"chainlength"},
+    PARAM(chain_length, Int, 3, "Chain length for Nose-Hoover thermostat.", "Thermostat", {"chainlength"},
         "min=1")
 
     // --- System Control ---
@@ -859,23 +859,23 @@ private:
         "enum=none|spheric|rect")
     PARAM(wall_potential, String, "harmonic", "Wall behaviour: logfermi|harmonic push escaping atoms back (and do work on them); pbc exerts no force and instead moves a whole molecule that left the container back in on the opposite side. pbc is a container, not a periodic cell: the energy has no minimum image, so interactions are not continued across the boundary and a molecule whose destination is occupied is reflected instead (see docs/WP-PERIODIC-NONBONDED.md).", "Walls", {},
         "enum=logfermi|harmonic|pbc; requires=wall_type!=none")
-    PARAM(wall_radius, Double, 0.0, "Radius for spherical wall (Å). Auto-sized if 0.", "Walls", {"wall_spheric_radius"},
+    PARAM(wall_radius, Double, 0.0, "Radius for spherical wall (Angstrom). Auto-sized if 0.", "Walls", {"wall_spheric_radius"},
         "unit=A; min=0; requires=wall_type=spheric")
     PARAM(wall_temp, Double, 298.15, "Wall temperature/strength in K.", "Walls", {},
         "unit=K; min=0; requires=wall_type!=none")
     PARAM(wall_beta, Double, 6.0, "Steepness parameter for wall potential.", "Walls", {},
         "min=0; requires=wall_type!=none")
-    PARAM(wall_x_min, Double, 0.0, "Min x-boundary for rectangular wall (Å).", "Walls", {},
+    PARAM(wall_x_min, Double, 0.0, "Min x-boundary for rectangular wall (Angstrom).", "Walls", {},
         "unit=A; requires=wall_type=rect")
-    PARAM(wall_x_max, Double, 0.0, "Max x-boundary for rectangular wall (Å).", "Walls", {},
+    PARAM(wall_x_max, Double, 0.0, "Max x-boundary for rectangular wall (Angstrom).", "Walls", {},
         "unit=A; requires=wall_type=rect")
-    PARAM(wall_y_min, Double, 0.0, "Min y-boundary for rectangular wall (Å).", "Walls", {},
+    PARAM(wall_y_min, Double, 0.0, "Min y-boundary for rectangular wall (Angstrom).", "Walls", {},
         "unit=A; requires=wall_type=rect")
-    PARAM(wall_y_max, Double, 0.0, "Max y-boundary for rectangular wall (Å).", "Walls", {},
+    PARAM(wall_y_max, Double, 0.0, "Max y-boundary for rectangular wall (Angstrom).", "Walls", {},
         "unit=A; requires=wall_type=rect")
-    PARAM(wall_z_min, Double, 0.0, "Min z-boundary for rectangular wall (Å).", "Walls", {},
+    PARAM(wall_z_min, Double, 0.0, "Min z-boundary for rectangular wall (Angstrom).", "Walls", {},
         "unit=A; requires=wall_type=rect")
-    PARAM(wall_z_max, Double, 0.0, "Max z-boundary for rectangular wall (Å).", "Walls", {},
+    PARAM(wall_z_max, Double, 0.0, "Max z-boundary for rectangular wall (Angstrom).", "Walls", {},
         "unit=A; requires=wall_type=rect")
 
     // --- Metadynamics (PLUMED) ---

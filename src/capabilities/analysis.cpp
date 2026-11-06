@@ -382,12 +382,12 @@ void UnifiedAnalysis::start()
         if (it != frames.end() && it->second.hasPBC() && CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::info("Detected periodic boundary conditions");
             auto params = PBCUtils::getLatticeParameters(it->second.getUnitCell());
-            CurcumaLogger::param("lattice_a", fmt::format("{:.4f} Å", params[0]));
-            CurcumaLogger::param("lattice_b", fmt::format("{:.4f} Å", params[1]));
-            CurcumaLogger::param("lattice_c", fmt::format("{:.4f} Å", params[2]));
-            CurcumaLogger::param("lattice_alpha", fmt::format("{:.2f}°", params[3]));
-            CurcumaLogger::param("lattice_beta", fmt::format("{:.2f}°", params[4]));
-            CurcumaLogger::param("lattice_gamma", fmt::format("{:.2f}°", params[5]));
+            CurcumaLogger::param("lattice_a", fmt::format("{:.4f} Angstrom", params[0]));
+            CurcumaLogger::param("lattice_b", fmt::format("{:.4f} Angstrom", params[1]));
+            CurcumaLogger::param("lattice_c", fmt::format("{:.4f} Angstrom", params[2]));
+            CurcumaLogger::param("lattice_alpha", fmt::format("{:.2f} deg", params[3]));
+            CurcumaLogger::param("lattice_beta", fmt::format("{:.2f} deg", params[4]));
+            CurcumaLogger::param("lattice_gamma", fmt::format("{:.2f} deg", params[5]));
         }
     }
 
@@ -1051,7 +1051,7 @@ json UnifiedAnalysis::calculateTopologicalProperties(const Molecule& mol)
 
                             // Additional details
                             if (selected_indices.size() > 1 && max_dist > 0.0) {
-                                CurcumaLogger::info_fmt("  Elements: {} | Spatial extent: {:.2f} Å",
+                                CurcumaLogger::info_fmt("  Elements: {} | Spatial extent: {:.2f} Angstrom",
                                                       elements_str, max_dist);
                             } else if (selected_indices.size() == 1) {
                                 CurcumaLogger::info_fmt("  Single atom: {} at index {}",
@@ -1320,13 +1320,13 @@ void UnifiedAnalysis::outputResults(const json& results)
             CurcumaLogger::info("Geometric Properties:");
 
             const auto& gyr = geom["gyration_radius"];
-            CurcumaLogger::info_fmt("  Gyration radius: {:.3f} Å (unweighted)",
+            CurcumaLogger::info_fmt("  Gyration radius: {:.3f} Angstrom (unweighted)",
                 gyr["unweighted"].get<double>());
-            CurcumaLogger::info_fmt("                   {:.3f} Å (mass-weighted)",
+            CurcumaLogger::info_fmt("                   {:.3f} Angstrom (mass-weighted)",
                 gyr["mass_weighted"].get<double>());
 
             const auto& com = geom["center_of_mass"];
-            CurcumaLogger::info_fmt("  Center of mass: ({:.3f}, {:.3f}, {:.3f}) Å",
+            CurcumaLogger::info_fmt("  Center of mass: ({:.3f}, {:.3f}, {:.3f}) Angstrom",
                 com[0].get<double>(), com[1].get<double>(), com[2].get<double>());
         }
 
@@ -1336,12 +1336,12 @@ void UnifiedAnalysis::outputResults(const json& results)
             CurcumaLogger::info("Polymer/Chain Properties:");
 
             if (polymer.contains("end_to_end_distance") && !polymer["end_to_end_distance"].is_null()) {
-                CurcumaLogger::info_fmt("  End-to-end distance: {:.3f} Å",
+                CurcumaLogger::info_fmt("  End-to-end distance: {:.3f} Angstrom",
                     polymer["end_to_end_distance"].get<double>());
             }
 
             if (polymer.contains("rout") && !polymer["rout"].is_null()) {
-                CurcumaLogger::info_fmt("  Rout (COM to outermost): {:.3f} Å",
+                CurcumaLogger::info_fmt("  Rout (COM to outermost): {:.3f} Angstrom",
                     polymer["rout"].get<double>());
             }
         }
@@ -1614,7 +1614,7 @@ json UnifiedAnalysis::calculateScatteringProperties(const Molecule& mol)
                 double exponent = static_cast<double>(i) / std::max(1, q_steps - 1);
                 q_values.push_back(q_min * std::exp(exponent * log_ratio));
             }
-            CurcumaLogger::info_fmt("Using logarithmic q-spacing ({} points from {} to {} Å⁻¹)",
+            CurcumaLogger::info_fmt("Using logarithmic q-spacing ({} points from {} to {} 1/Angstrom)",
                                     q_steps, q_min, q_max);
         }
     }
@@ -1627,7 +1627,7 @@ json UnifiedAnalysis::calculateScatteringProperties(const Molecule& mol)
             q_values.push_back(q_min + i * q_step);
         }
         if (q_spacing == "linear") {
-            CurcumaLogger::info_fmt("Using linear q-spacing ({} points from {} to {} Å⁻¹)",
+            CurcumaLogger::info_fmt("Using linear q-spacing ({} points from {} to {} 1/Angstrom)",
                                     q_steps, q_min, q_max);
         }
     }

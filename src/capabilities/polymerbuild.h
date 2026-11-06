@@ -500,7 +500,7 @@ private:
 
     // LM placement hardening — Claude Generated 2026
     PARAM(lm_k_bond, Double, 100000.0, "Bond-length constraint weight for fragment placement LM", "Refinement", {})
-    PARAM(lm_bond_tolerance, Double, 0.1, "Warn if LM bond length exceeds target by more than this (Å)", "Refinement", {})
+    PARAM(lm_bond_tolerance, Double, 0.1, "Warn if LM bond length exceeds target by more than this (Angstrom)", "Refinement", {})
     PARAM(lm_retry_on_stretch, Bool, true, "Retry LM with alternative initial guess when bond is overstretched", "Refinement", {})
     PARAM(lm_contract_bond, Bool, false, "Contract overstretched LM bond by sliding fragment along anchor axis before assembly", "Refinement", {})
 
@@ -515,7 +515,7 @@ private:
     // Balanced displacement (persistent bond restoration) — Claude Generated 2026
     PARAM(balance_enabled, Bool, true, "Enable balanced displacement: pull stretched bonds and push clashes in one pass", "Refinement", {})
     PARAM(balance_max_steps, Int, 300, "Max iterations for balanced displacement", "Refinement", {})
-    PARAM(balance_max_displacement, Double, 0.05, "Max atom displacement per balanced step [Å]", "Refinement", {})
+    PARAM(balance_max_displacement, Double, 0.05, "Max atom displacement per balanced step [Angstrom]", "Refinement", {})
     PARAM(balance_stretch_factor, Double, 1.3, "Threshold factor for stretched-bond detection: r > f*(r_cov_i+r_cov_j)", "Refinement", {})
     PARAM(balance_k_attr, Double, 4.0, "Attractive weight for stretched bonds (vs. k_rep=4.0 for clashes)", "Refinement", {})
 

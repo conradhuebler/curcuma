@@ -312,7 +312,7 @@ void Molecule::printFragmente()
 
     CurcumaLogger::header("Fragment Analysis");
     Position center = Centroid();
-    CurcumaLogger::info_fmt("Center: [{:.5f}, {:.5f}, {:.5f}] Å", center(0), center(1), center(2));
+    CurcumaLogger::info_fmt("Center: [{:.5f}, {:.5f}, {:.5f}] Angstrom", center(0), center(1), center(2));
     CurcumaLogger::param("fragments", static_cast<int>(GetFragments().size()));
     CurcumaLogger::param("Ia (rotational const)", Ia());
     CurcumaLogger::param("Ib (rotational const)", Ib());
@@ -1732,7 +1732,7 @@ void Molecule::PrintConnectivitiy(double scaling) const
                 if (Atom(j).first == 1) {
                     double distance = CalculateDistance(i, j);
                     if (distance < (Elements::CovalentRadius[Atom(i).first] + Elements::CovalentRadius[Atom(j).first]) * scaling)
-                        CurcumaLogger::info_fmt("Bond: Atom {} - Atom {}: Distance = {:.4f} Å (Cov Rad Sum: {:.3f} Å)", i, j, distance, (Elements::CovalentRadius[Atom(i).first] + Elements::CovalentRadius[Atom(j).first]));
+                        CurcumaLogger::info_fmt("Bond: Atom {} - Atom {}: Distance = {:.4f} Angstrom (Cov Rad Sum: {:.3f} Angstrom)", i, j, distance, (Elements::CovalentRadius[Atom(i).first] + Elements::CovalentRadius[Atom(j).first]));
                 }
             }
         }
@@ -1749,7 +1749,7 @@ void Molecule::AnalyseIntermoleculeDistance() const
                     double distance = CalculateDistance(a, b);
                     if (distance < cutoff) {
                         if (Atom(a).first == 1 && Atom(b).first != 1 || Atom(a).first != 1 && Atom(b).first == 1)
-                            CurcumaLogger::info_fmt("Intermolecular contact: {:.6f} Å - Atom {}({}) to Atom {}({})", distance, a, Elements::ElementAbbr[Atom(a).first], b, Elements::ElementAbbr[Atom(b).first]);
+                            CurcumaLogger::info_fmt("Intermolecular contact: {:.6f} Angstrom - Atom {}({}) to Atom {}({})", distance, a, Elements::ElementAbbr[Atom(a).first], b, Elements::ElementAbbr[Atom(b).first]);
                     }
                 }
             }

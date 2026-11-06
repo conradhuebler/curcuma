@@ -175,7 +175,7 @@ public:
     static void printMatrixInfo(const Eigen::MatrixBase<Derived>& matrix,
                                const std::string& name = "Matrix") {
         std::cout << name << " Info:\n";
-        std::cout << "  Größe: " << matrix.rows() << "x" << matrix.cols() << "\n";
+        std::cout << "  Groesse: " << matrix.rows() << "x" << matrix.cols() << "\n";
         std::cout << "  Min: " << matrix.minCoeff() << "\n";
         std::cout << "  Max: " << matrix.maxCoeff() << "\n";
         std::cout << "  Mean: " << matrix.mean() << "\n";

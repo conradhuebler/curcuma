@@ -241,7 +241,7 @@ namespace Format {
     {
         double angstrom = Length::bohr_to_angstrom(bohr);
         if (angstrom < 100.0) {
-            return std::to_string(angstrom) + " Å";
+            return std::to_string(angstrom) + " Angstrom";
         } else {
             return std::to_string(Length::bohr_to_nm(bohr)) + " nm";
         }

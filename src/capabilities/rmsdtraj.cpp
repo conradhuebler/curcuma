@@ -80,7 +80,7 @@ bool RMSDTraj::Initialise()
     CurcumaLogger::param("Input trajectory", Filename());
     CurcumaLogger::param("Write conformers", m_writeUnique ? "Yes" : "No");
     if (m_writeUnique) {
-        CurcumaLogger::param("RMSD threshold", fmt::format("{:.3f} Å", m_rmsd_threshold));
+        CurcumaLogger::param("RMSD threshold", fmt::format("{:.3f} Angstrom", m_rmsd_threshold));
     }
     CurcumaLogger::param("Write RMSD data", m_writeRMSD ? "Yes" : "No");
     CurcumaLogger::param("Write aligned structures", m_writeAligned ? "Yes" : "No");
@@ -413,7 +413,7 @@ void RMSDTraj::CompareTrajectories()
 
         double rmsd = m_driver->RMSD();
         m_rmsd_vector.push_back(rmsd);
-        CurcumaLogger::info_fmt("RMSD: {:.6f} Å", rmsd);
+        CurcumaLogger::info_fmt("RMSD: {:.6f} Angstrom", rmsd);
         delete mol1;
         delete mol2;
         if (CheckStop())
@@ -473,7 +473,7 @@ void RMSDTraj::PostAnalyse()
 
     summary["sections"].push_back({
         {"name", "RMSD"},
-        {"unit", "Å"},
+        {"unit", "Angstrom"},
         {"statistics", {
             {"mean", rmsd_mean},
             {"std_dev", rmsd_std},

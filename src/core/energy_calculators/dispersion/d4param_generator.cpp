@@ -270,10 +270,10 @@ void D4ParameterGenerator::calculateFrequencyDependentPolarizabilities()
 
         // Print validation for H and C
         if (m_refn.size() > 0) {
-            CurcumaLogger::result(fmt::format("  H (Z=1) α_0[0] = {:.4f}", m_integrated_alpha[0][0]));
+            CurcumaLogger::result(fmt::format("  H (Z=1) alpha_0[0] = {:.4f}", m_integrated_alpha[0][0]));
         }
         if (m_refn.size() > 5) {
-            CurcumaLogger::result(fmt::format("  C (Z=6) α_0[0] = {:.4f}", m_integrated_alpha[5][0]));
+            CurcumaLogger::result(fmt::format("  C (Z=6) alpha_0[0] = {:.4f}", m_integrated_alpha[5][0]));
         }
 
         CurcumaLogger::warn("D4: Using simplified alpha_iw for H and C only (Phase 2.2: full extraction)");
@@ -411,7 +411,7 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
     double t_weights_ms = std::chrono::duration<double, std::milli>(t_weights_end - t_weights_start).count();
 
     if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::info(fmt::format("D4: Weight pre-computation took {:.2f} ms ({} atoms × avg {} refs)",
+        CurcumaLogger::info(fmt::format("D4: Weight pre-computation took {:.2f} ms ({} atoms x avg {} refs)",
             t_weights_ms, m_atoms.size(), m_gaussian_weights.empty() ? 0 : m_gaussian_weights[0].size()));
     }
 

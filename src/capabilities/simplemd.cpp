@@ -586,9 +586,9 @@ void SimpleMD::printHelp() const
               << "  curcuma -md input.xyz -max_time 10000 -temperature 300 -thermostat csvr\n"
               << "  curcuma -md input.xyz -method gfn2 -wall_type spheric -wall_radius 10.0\n\n"
               << "Usage Tips:\n"
-              << "- For stable dynamics, use time_step ≤ 1.0 fs\n"
+              << "- For stable dynamics, use time_step <= 1.0 fs\n"
               << "- The Berendsen thermostat is efficient but doesn't sample canonical ensemble\n"
-              << "- For proper NVT sampling, use CSVR or Nosé-Hoover thermostats\n"
+              << "- For proper NVT sampling, use CSVR or Nose-Hoover thermostats\n"
               << "- RATTLE constraints allow larger timesteps for bonds involving H atoms\n"
               << "- Wall potentials prevent molecules from drifting too far\n"
               << "- Metadynamics helps explore conformational space efficiently\n"
@@ -694,7 +694,7 @@ bool SimpleMD::Initialise()
             CurcumaLogger::param("Periodic Boundary Conditions",
                                "enabled (box: " + std::to_string(cell(0,0)) + " x " +
                                std::to_string(cell(1,1)) + " x " +
-                               std::to_string(cell(2,2)) + " Å³)");
+                               std::to_string(cell(2,2)) + " Angstrom^3)");
         }
     }
 
@@ -1501,18 +1501,18 @@ void SimpleMD::InitialiseWalls()
         std::cout << "\n";
 
         if (m_wall_geometry == "spheric") {
-            std::cout << "Radius: " << m_wall_spheric_radius << " Å";
+            std::cout << "Radius: " << m_wall_spheric_radius << " Angstrom";
             if (m_molecular_density > 0) {
-                std::cout << " | Density: " << m_molecular_density * 1e3 << " molecules/nm³";
+                std::cout << " | Density: " << m_molecular_density * 1e3 << " molecules/nm^3";
             }
         } else if (m_wall_geometry == "rect") {
             double volume = (m_wall_x_max - m_wall_x_min) * (m_wall_y_max - m_wall_y_min) * (m_wall_z_max - m_wall_z_min);
             std::cout << "Bounds: [" << m_wall_x_min << "," << m_wall_x_max << "] x ["
                       << m_wall_y_min << "," << m_wall_y_max << "] x ["
-                      << m_wall_z_min << "," << m_wall_z_max << "] Å";
-            std::cout << " | Vol: " << volume << " Å³";
+                      << m_wall_z_min << "," << m_wall_z_max << "] Angstrom";
+            std::cout << " | Vol: " << volume << " Angstrom^3";
             if (m_molecular_density > 0) {
-                std::cout << " | Density: " << m_molecular_density * 1e3 << " molecules/nm³";
+                std::cout << " | Density: " << m_molecular_density * 1e3 << " molecules/nm^3";
             }
         }
 
@@ -1998,7 +1998,7 @@ void SimpleMD::prepareRun()
             break;
         case ThermostatType::NoseHover:
             if (m_verbosity >= 1)
-                fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nUsing Nosé-Hoover-Chain Thermostat\n ... \n\n");
+                fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nUsing Nose-Hoover-Chain Thermostat\n ... \n\n");
             ThermostatFunction = [this] { NoseHover(); };
             break;
         case ThermostatType::None:

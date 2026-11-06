@@ -670,7 +670,7 @@ static inline int detectElementSpecificHybridization(int Z, double cn,
 
                         // DEBUG: Log angle sum for first few nitrogen atoms
                         if (atom_index < 5) {
-                            CurcumaLogger::info(fmt::format("  N atom {}: angle_sum = {:.2f}° (neighbors: {}, {}, {})",
+                            CurcumaLogger::info(fmt::format("  N atom {}: angle_sum = {:.2f} deg (neighbors: {}, {}, {})",
                                               atom_index, angle_sum_deg,
                                               neighbors[0], neighbors[1], neighbors[2]));
                         }

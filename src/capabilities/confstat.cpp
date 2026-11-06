@@ -261,7 +261,7 @@ void ConfStat::printPopulationDistribution() const
     CurcumaLogger::info("");
     CurcumaLogger::info("Population ranges:");
     for (size_t i = 0; i < ranges.size(); ++i) {
-        CurcumaLogger::info(fmt::format("Conformers with population ≥ {:5.1f}%: {:3d}",
+        CurcumaLogger::info(fmt::format("Conformers with population >= {:5.1f}%: {:3d}",
             ranges[i], range_counts[i]));
     }
 

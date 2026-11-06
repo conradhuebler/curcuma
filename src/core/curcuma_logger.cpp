@@ -450,7 +450,7 @@ void CurcumaLogger::length(double value_bohr, const std::string& label)
 {
     if (effective_verbosity() >= 2) {
         log_colored(fmt::color::cornflower_blue, "[LENGTH]",
-            fmt::format("{}: {:.4f} Å", label, bohr_to_angstrom(value_bohr)));
+            fmt::format("{}: {:.4f} Angstrom", label, bohr_to_angstrom(value_bohr)));
     }
 }
 
@@ -599,7 +599,7 @@ std::string CurcumaLogger::format_energy_relative(double eh_diff)
     } else if (abs_diff > 1e-6) {
         return fmt::format("{:.1f} meV", hartree_to_ev(eh_diff) * 1000.0);
     } else {
-        return fmt::format("{:.0f} cm⁻¹", hartree_to_wavenumber(eh_diff));
+        return fmt::format("{:.0f} cm^-1", hartree_to_wavenumber(eh_diff));
     }
 }
 

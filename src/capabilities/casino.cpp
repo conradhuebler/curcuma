@@ -104,7 +104,7 @@ Casino::Casino(const json& controller, bool silent)
     if (!silent) {
         CurcumaLogger::info_fmt("Monte Carlo simulation initialized with {} steps", m_total_steps);
         CurcumaLogger::info_fmt("Temperature: {:.1f} K", m_temperature);
-        CurcumaLogger::info_fmt("Initial step size: {:.3f} Å", m_step_size);
+        CurcumaLogger::info_fmt("Initial step size: {:.3f} Angstrom", m_step_size);
         CurcumaLogger::info_fmt("Move strategy: {}", m_move_strategy);
         if (m_local_energy_updates) {
             CurcumaLogger::info("Local energy updates enabled for efficiency");
@@ -843,7 +843,7 @@ void Casino::updateStepSize()
     m_orientational_step_size = std::max(0.001, std::min(m_orientational_step_size, 0.5)); // Radians
 
     if (m_verbosity >= 3) {  // Debug level output
-        CurcumaLogger::info_fmt("Step {} | Acceptance: {:.3f} | Translation: {:.3f} Å | Orientation: {:.3f} rad",
+        CurcumaLogger::info_fmt("Step {} | Acceptance: {:.3f} | Translation: {:.3f} Angstrom | Orientation: {:.3f} rad",
                               m_current_step, current_acceptance, m_single_atom_step_size, m_orientational_step_size);
     }
 }

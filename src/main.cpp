@@ -249,14 +249,14 @@ int executeBond(const json& controller, int argc, char** argv)
         } else { // human
             std::cout << "Bond Length Calculation:" << std::endl;
             std::cout << "  Atoms: " << atom1 << "-" << atom2 << std::endl;
-            std::cout << "  Distance: " << std::fixed << std::setprecision(6) << distances[0] << " Å" << std::endl;
+            std::cout << "  Distance: " << std::fixed << std::setprecision(6) << distances[0] << " Angstrom" << std::endl;
         }
     } else {
         // Multiple frames - use TrajectoryWriter (Phase 5 refactoring)
         json trajectory_data = TrajectoryWriter::createTrajectoryJSON(
             distances,
             "bond_length",
-            "Ångström",
+            "Angstrom",
             stats
         );
 
@@ -279,7 +279,7 @@ int executeBond(const json& controller, int argc, char** argv)
             // Use original inline formatting for CSV and human formats
             // (maintaining compatibility while JSON uses trajectory framework)
             if (format == "csv") {
-                std::cout << "frame,bond_length,<bond_length>,σ(bond_length)" << std::endl;
+                std::cout << "frame,bond_length,<bond_length>,sigma(bond_length)" << std::endl;
                 double mean = stats.getMean("bond_length");
                 double std_dev = stats.getStdDev("bond_length");
                 for (size_t i = 0; i < distances.size(); ++i) {
@@ -293,7 +293,7 @@ int executeBond(const json& controller, int argc, char** argv)
 
                 // Header (original inline code)
                 std::cout << std::setw(8) << "# Frame" << std::setw(15) << "bond_length"
-                         << std::setw(15) << "<bond_length>" << std::setw(15) << "σ(bond_length)" << std::endl;
+                         << std::setw(15) << "<bond_length>" << std::setw(15) << "sigma(bond_length)" << std::endl;
 
                 // Data rows (original inline code)
                 for (size_t i = 0; i < distances.size(); ++i) {
@@ -307,10 +307,10 @@ int executeBond(const json& controller, int argc, char** argv)
                 double mean = stats.getMean("bond_length");
                 double std_dev = stats.getStdDev("bond_length");
                 std::cout << std::endl << "Statistics:" << std::endl;
-                std::cout << "  Mean: " << std::fixed << std::setprecision(6) << mean << " Å" << std::endl;
-                std::cout << "  StdDev: " << std_dev << " Å" << std::endl;
-                std::cout << "  Min: " << *std::min_element(distances.begin(), distances.end()) << " Å" << std::endl;
-                std::cout << "  Max: " << *std::max_element(distances.begin(), distances.end()) << " Å" << std::endl;
+                std::cout << "  Mean: " << std::fixed << std::setprecision(6) << mean << " Angstrom" << std::endl;
+                std::cout << "  StdDev: " << std_dev << " Angstrom" << std::endl;
+                std::cout << "  Min: " << *std::min_element(distances.begin(), distances.end()) << " Angstrom" << std::endl;
+                std::cout << "  Max: " << *std::max_element(distances.begin(), distances.end()) << " Angstrom" << std::endl;
             }
         }
     }
@@ -321,7 +321,7 @@ int executeBond(const json& controller, int argc, char** argv)
 // Claude Generated helper: Convert angles from radians based on unit
 double convertAngle(double radians, const std::string& unit)
 {
-    if (unit == "degrees" || unit == "deg" || unit == "°") {
+    if (unit == "degrees" || unit == "deg" || unit == " deg") {
         return radians * 180.0 / M_PI;
     }
     return radians;  // Return radians
@@ -330,7 +330,7 @@ double convertAngle(double radians, const std::string& unit)
 // Claude Generated helper: Get angle unit string
 std::string getAngleUnitString(const std::string& unit)
 {
-    if (unit == "degrees" || unit == "deg" || unit == "°") {
+    if (unit == "degrees" || unit == "deg" || unit == " deg") {
         return "degrees";
     }
     return "radians";
@@ -438,7 +438,7 @@ int executeAngle(const json& controller, int argc, char** argv)
             // Use original inline formatting for CSV and human formats
             // (maintaining compatibility while JSON uses trajectory framework)
             if (format == "csv") {
-                std::cout << "frame,bond_angle,<bond_angle>,σ(bond_angle)" << std::endl;
+                std::cout << "frame,bond_angle,<bond_angle>,sigma(bond_angle)" << std::endl;
                 double mean = stats.getMean("bond_angle");
                 double std_dev = stats.getStdDev("bond_angle");
                 for (size_t i = 0; i < angles.size(); ++i) {
@@ -452,7 +452,7 @@ int executeAngle(const json& controller, int argc, char** argv)
 
                 // Header (original inline code)
                 std::cout << std::setw(8) << "# Frame" << std::setw(15) << "bond_angle"
-                         << std::setw(15) << "<bond_angle>" << std::setw(15) << "σ(bond_angle)" << std::endl;
+                         << std::setw(15) << "<bond_angle>" << std::setw(15) << "sigma(bond_angle)" << std::endl;
 
                 // Data rows (original inline code)
                 for (size_t i = 0; i < angles.size(); ++i) {
@@ -580,7 +580,7 @@ int executeTorsion(const json& controller, int argc, char** argv)
             // Use original inline formatting for CSV and human formats
             // (maintaining compatibility while JSON uses trajectory framework)
             if (format == "csv") {
-                std::cout << "frame,dihedral,<dihedral>,σ(dihedral)" << std::endl;
+                std::cout << "frame,dihedral,<dihedral>,sigma(dihedral)" << std::endl;
                 double mean = stats.getMean("dihedral");
                 double std_dev = stats.getStdDev("dihedral");
                 for (size_t i = 0; i < dihedrals.size(); ++i) {
@@ -594,7 +594,7 @@ int executeTorsion(const json& controller, int argc, char** argv)
 
                 // Header (original inline code)
                 std::cout << std::setw(8) << "# Frame" << std::setw(15) << "dihedral"
-                         << std::setw(15) << "<dihedral>" << std::setw(15) << "σ(dihedral)" << std::endl;
+                         << std::setw(15) << "<dihedral>" << std::setw(15) << "sigma(dihedral)" << std::endl;
 
                 // Data rows (original inline code)
                 for (size_t i = 0; i < dihedrals.size(); ++i) {
@@ -690,7 +690,7 @@ int executeCompare(const json& controller, int argc, char** argv) {
         driver.setReference(molecule1);
         driver.setTarget(molecule2);
         driver.start();
-        std::cout << "RMSD: " << driver.RMSD() << " Å" << std::endl;
+        std::cout << "RMSD: " << driver.RMSD() << " Angstrom" << std::endl;
     } else if (metric == "inertia") {
         molecule1.CalculateRotationalConstants();
         molecule2.CalculateRotationalConstants();
@@ -1073,7 +1073,7 @@ int executeCentroid(const json& controller, int argc, char** argv) {
         if (!atoms.empty()) centroid /= static_cast<double>(atoms.size());
 
         std::cout << "Centroid (" << atoms_str << "): "
-                  << centroid.transpose() << " Å" << std::endl;
+                  << centroid.transpose() << " Angstrom" << std::endl;
     }
     return 0;
 }
@@ -1115,7 +1115,7 @@ int executeDistance(const json& controller, int argc, char** argv) {
         Molecule mol = file.Next();
         if (A.size() == 1 && B.size() == 1) {
             std::cout << "Distance (" << A[0] << "-" << B[0] << "): "
-                      << mol.CalculateDistance(A[0] - 1, B[0] - 1) << " Å" << std::endl;
+                      << mol.CalculateDistance(A[0] - 1, B[0] - 1) << " Angstrom" << std::endl;
         } else {
             // Handle multiple atoms (centroid distance)
             Eigen::Vector3d posA = Eigen::Vector3d::Zero();
@@ -1126,7 +1126,7 @@ int executeDistance(const json& controller, int argc, char** argv) {
             for (int i : B) posB += mol.getGeometry().row(i - 1);
             if (!B.empty()) posB /= static_cast<double>(B.size());
 
-            std::cout << "Centroid Distance: " << (posA - posB).norm() << " Å" << std::endl;
+            std::cout << "Centroid Distance: " << (posA - posB).norm() << " Angstrom" << std::endl;
         }
     }
     return 0;
