@@ -117,13 +117,6 @@ struct MyFCFunctor : FCFunctor<double> {
                 return 0;
     }
 
-    void Controller(const json& controller)
-    {
-        // Claude Generated: Replace static HessianJson with ParameterRegistry
-        json hessian_defaults = ParameterRegistry::getInstance().getDefaultJson("hessian");
-        m_controller = MergeJson(hessian_defaults, m_controller);
-        m_controller["method"] = "uff";
-    }
 
     int no_parameter;
     int no_points;

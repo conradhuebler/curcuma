@@ -601,17 +601,6 @@ public:
         // Atomic charges (EEQ)
         Eigen::VectorXd charges;  ///< Phase-2 EEQ charges
 
-        /**
-         * @brief Export to JSON for serialization
-         * @return JSON object with all energy components
-         */
-        json toJSON() const;
-
-        /**
-         * @brief Import from JSON for restart
-         * @param j JSON object with results
-         */
-        void fromJSON(const json& j);
     };
 
     /**

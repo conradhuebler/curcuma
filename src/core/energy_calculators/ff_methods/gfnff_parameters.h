@@ -300,8 +300,6 @@ struct GFNFFBatmTriple {
  *   GFNFFParameterSet params = generateGFNFFParameterSet();
  *   // In ForceField: consume directly (no JSON round-trip)
  *   m_forcefield->setGFNFFParameters(params);
- *   // For disk cache: serialize when needed
- *   json j = params.toJSON();
  */
 struct GFNFFParameterSet {
     // Bonded terms (use generic structs from ff_terms.h)
@@ -359,18 +357,6 @@ struct GFNFFParameterSet {
     bool repulsion_enabled = true;
     bool coulomb_enabled = true;
 
-    /**
-     * @brief Serialize to JSON for file-based parameter caching
-     * @return JSON object with all parameters
-     */
-    json toJSON() const;
-
-    /**
-     * @brief Deserialize from JSON (for loading cached parameters from disk)
-     * @param j JSON object with parameters
-     * @return GFNFFParameterSet
-     */
-    static GFNFFParameterSet fromJSON(const json& j);
 };
 
 /// Alias for backward compatibility — GFNFFParameterSet IS ForceFieldParameterSet
