@@ -48,7 +48,7 @@ namespace Files {
 
 inline StringList SplitString(const std::string& string, const char* delim)
 {
-#pragma message("Has to be removed, as it is redudant")
+// Has to be removed, as it is redudant
     StringList elements;
     std::string element;
     for (const char& c : string) {

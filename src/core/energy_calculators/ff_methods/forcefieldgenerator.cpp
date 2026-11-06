@@ -543,7 +543,7 @@ void ForceFieldGenerator::setAngles()
         m_angles[index]["C0"] = C0;
         m_angles[index]["C1"] = C1;
         m_angles[index]["C2"] = C2;
-#pragma message("TODO: Check UFF angle bending")
+// TODO: Check UFF angle bending
         Eigen::Vector3d rij = m_geometry.row(i) - m_geometry.row(j);
         Eigen::Vector3d nij = rij.normalized();
         Eigen::Vector3d rkj = m_geometry.row(k) - m_geometry.row(j);
@@ -653,7 +653,7 @@ void ForceFieldGenerator::setInversions()
         double f = pi / 180.0;
         double kijkl = 0;
 
-#pragma message("TODO: Check UFF inversion")
+// TODO: Check UFF inversion
         if (6 <= m_mol.m_atoms[i] && m_mol.m_atoms[i] <= 8) {
             C0 = 1.0;
             C1 = -1.0;
@@ -812,7 +812,7 @@ void ForceFieldGenerator::AssignUffAtomTypes()
             m_atom_types[i] = 27;
             break;
         case 15: // P
-#pragma message("maybe add organometallic phosphorous (28)")
+// maybe add organometallic phosphorous (28)
             m_atom_types[i] = 29;
             break;
         case 16: // S
@@ -820,7 +820,7 @@ void ForceFieldGenerator::AssignUffAtomTypes()
                 m_atom_types[i] = 31;
             else // ok, currently we do not discriminate between SO2 and SO3, just because there is H2SO3 and H2SO4
                 m_atom_types[i] = 32;
-#pragma message("we have to add organic S")
+// we have to add organic S
             break;
         case 17: // Cl
             m_atom_types[i] = 36;

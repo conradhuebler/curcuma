@@ -429,7 +429,6 @@ void ConfScan::LoadControlJson()
             CurcumaLogger::info("Early break in reorder part is enabled");
 
     // RMSD Element handling (simplified with ConfigManager - Claude Generated 2025)
-    // No more try-catch needed! #pragma message removed!
     m_rmsd_element_templates = m_config.get<std::string>("rmsd.element", "7");  // Default to nitrogen
     if (!m_rmsd_element_templates.empty() && m_rmsd_element_templates != "0") {
         if (m_rmsd_element_templates.find(',') != std::string::npos) {

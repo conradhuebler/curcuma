@@ -4830,7 +4830,7 @@ void SimpleMD::PrintStatus() const
         remaining = tmp;
     else
         remaining = (m_maxtime - m_currentStep) * duration;
-#pragma message("awfull, fix it ")
+// awfull, fix it 
     // Claude Generated (May 2026): unified MD step printout — matches the header above.
     // Base 15 columns always present (Time, energies, T, wall, virial, remaining, dt).
     // Optional appendix columns: Dipole (when -dipole), nUnique (when -writeUnique).

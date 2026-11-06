@@ -85,7 +85,7 @@ void ForceField::UpdateGeometry(const Matrix& geometry)
 
 void ForceField::UpdateGeometry(const double* coord)
 {
-#pragma message("replace with raw data")
+// replace with raw data
     for (int i = 0; i < m_natoms; ++i) {
         m_geometry(i, 0) = coord[3 * i + 0];
         m_geometry(i, 1) = coord[3 * i + 1];
@@ -95,7 +95,7 @@ void ForceField::UpdateGeometry(const double* coord)
 
 void ForceField::UpdateGeometry(const std::vector<std::array<double, 3>>& geometry)
 {
-#pragma message("replace with raw data")
+// replace with raw data
     for (int i = 0; i < m_natoms; ++i) {
         m_geometry(i, 0) = geometry[i][0];
         m_geometry(i, 1) = geometry[i][1];

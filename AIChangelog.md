@@ -514,3 +514,4 @@ below. If it needs measurements or a derivation, write them into the matching `d
 - Debt cleanup round 1 (Nov 5, 2026): CLI2Json moved to src/core/cli_parser.{h,cpp} with golden test cli_parser_golden, -DGIT_* defines removed, 723 decorative Unicode chars in output strings replaced, ancopt opt_level/anc_lbfgs_history read; gfnff butane energy unchanged (-1.95051416 Eh)
 - Dead GFNFF members removed (Nov 6, 2026): 12 functions without callers, -1164 lines; gfnff energies of MOR41 and GMTKN55 identical to master binary (docs/debt_2026-11/README.md)
 - Second dead-code batch and doc link fixes (Nov 6, 2026): force-field helpers, Rattle stubs, RMSD use_c branch; MOR41 uff/gfnff identical to same-config parent build (docs/debt_2026-11/README.md)
+- CMake duplicate source entries and misleading PCH messages removed, 11 `#pragma message` turned into comments (Nov 6, 2026; docs/debt_2026-11/CODE.md S12, S14)

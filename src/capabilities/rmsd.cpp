@@ -484,7 +484,7 @@ void RMSDDriver::setMatchingAtoms(const std::vector<int>& reference_atoms, const
 {
     m_reference_atoms = reference_atoms;
     m_target_atoms = target_atoms;
-#pragma message("TODO: remove notreorder in the future")
+// TODO: remove notreorder in the future
     m_noreorder = true;
 }
 

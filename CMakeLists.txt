@@ -505,7 +505,6 @@ set(curcuma_core_SRC
         src/capabilities/shared_bias_pool.cpp
         src/capabilities/confstat.cpp
         src/capabilities/docking.cpp
-        src/capabilities/analysenciplot.cpp
         src/capabilities/nebdocking.cpp
         src/capabilities/pairmapper.cpp
         src/capabilities/rmsd.cpp
@@ -624,7 +623,6 @@ set(curcuma_cap_SRC
         src/capabilities/shared_bias_pool.cpp
         src/capabilities/confstat.cpp
         src/capabilities/docking.cpp
-        src/capabilities/analysenciplot.cpp
         src/capabilities/nebdocking.cpp
         src/capabilities/pairmapper.cpp
         src/capabilities/rmsd.cpp
@@ -707,15 +705,6 @@ if(USE_PCH)
 
     message(STATUS "Precompiled headers enabled for curcuma_core")
     
-    # Additional PCH configuration for Ulysses-heavy builds
-    if(USE_ULYSSES)
-        message(STATUS "Ulysses PCH module enabled - significant compilation speedup expected")
-    endif()
-    
-    # Additional PCH configuration for external libraries
-    if(USE_D3 OR USE_D4)
-        message(STATUS "DFT dispersion correction PCH modules enabled")
-    endif()
 endif()
 
 # Claude Generated 2026 - km (Kuhn-Munkres/Hungarian assignment, c_code/hungarian.c)
@@ -760,7 +749,6 @@ add_executable(curcuma
 
 # Enable precompiled headers for main executable
 if(USE_PCH)
-    target_precompile_headers(curcuma REUSE_FROM curcuma_core)
     target_precompile_headers(curcuma REUSE_FROM curcuma_cap)
 
 endif()
