@@ -191,7 +191,7 @@ Offen, Aufrufer vor dem Löschen erneut suchen:
 - `src/capabilities/curcumaopt.h`: hält den PARAM-Block des Moduls `opt` (28 Parameter); die Klasse `CurcumaOpt` ist ohne Implementierung. Die Parameter müssen erst in ein anderes Header umziehen.
 - `src/capabilities/rmsd/rmsd_costmatrix.*`, `rmsd_assignment.*` (`CostMatrixCalculator`, `MunkresAssignmentSolver`): kompiliert und von `rmsd_strategies.h` eingebunden, die Klassen selbst werden nirgends aufgerufen. Entscheidung nötig, ob die Strategien sie künftig nutzen sollen.
 - dc6dcn-Skip-Pruefung (`FFWorkspaceGPU::shouldSkipDc6dcn()` in `cuda/ff_workspace_gpu.h`, hat keinen Aufrufer; ROCm fuehrt sie mit `CURCUMA_ROCM_LEAN_STEP=0` noch aus).
-- `main.cpp` führt `modern_optimizer` noch in der Liste der Scope-Module; das Modul existiert nicht mehr.
+- `test_cases/cli/*/run_test.sh` (24 getrackte Dateien) enthalten `PROJECT_ROOT='/home/conrad/src/claude_curcuma/...'`; ctest prüft damit nicht dieses Checkout. Generator suchen, Pfad relativ machen.
 - `src/helpers/`: `imagewrite.cpp`, `storage_bench.cpp`, `polymer_topo.cpp`, `gfnff_term_validator.cpp` ohne CMake-Target (eigenständige `main()`-Programme).
 - PARAM `gfnff.accuracy` (loose|normal|medium|high) bleibt: kein Leser bis jetzt, soll mit den Genauigkeitsprofilen (Eintrag oben) eine Bedeutung bekommen. Nicht entfernen; der Hilfetext sagt bis dahin "no effect".
 
