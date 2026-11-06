@@ -771,14 +771,6 @@ void GFNFF::forwardEEQSolverParams(json& eeq_params) {
         eeq["farfield_shortcut"] = m_parameters["farfield_shortcut"];
 }
 
-double GFNFF::getEEQDistanceCutoff() const {
-    // WP-C (May 2026): Default changed from 30.0 → 0.0 to match Fortran goed_gfnff
-    // (full Coulomb in EEQ matrix). The previous 30.0 default was a non-Fortran
-    // approximation that violated Hellmann-Feynman vs the full Coulomb energy.
-    // Canonical PARAM definition lives in eeq_solver.h:965.
-    return m_parameters.value("eeq_distance_cutoff", 0.0);
-}
-
 // WP-S3 (May 2026): apply eeq_distance_cutoff_auto heuristic after Phase-1.
 // Sets EEQSolver cutoff to 30 Bohr when topology yields nfrag==1 and Phase-1
 // charges remain weakly polar (max|q| < 0.5 e). Otherwise clears any override.
@@ -11564,42 +11556,6 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     return topo_info;
 }
 
-GFNFF::EEQParameters GFNFF::getEEQParameters(int atom_idx, const TopologyInfo& topo_info) const
-{
-    EEQParameters params;
-
-    int z = m_atoms[atom_idx];
-
-    // Get base EEQ parameters from canonical arrays in gfnff_par.h
-    // Reference: gfnff_param.f90 chi/gam/alp/cnf_angewChem2020 (Spicher, Grimme 2020)
-    if (z >= 1 && z <= static_cast<int>(GFNFFParameters::chi_eeq.size())) {
-        params.chi = GFNFFParameters::chi_eeq[z - 1];
-        params.gam = GFNFFParameters::gam_eeq[z - 1];
-        // CRITICAL FIX (Nov 2025): alp must be SQUARED (gfnff_ini.f90:420)
-        double alp_raw = GFNFFParameters::alpha_eeq[z - 1];
-        params.alp = alp_raw * alp_raw;  // Fortran: topo%alpeeq(i) = param%alp(ati)**2
-        params.cnf = (z <= static_cast<int>(GFNFFParameters::cnf_eeq.size()))
-                         ? GFNFFParameters::cnf_eeq[z - 1] : 0.0;
-    } else {
-        // Fallback values
-        params.chi = 1.0;
-        params.gam = 0.5;
-        params.alp = 5.0 * 5.0;  // SQUARED! Fallback for undefined elements
-        params.cnf = 0.0;
-    }
-
-    // TODO: Add environment-dependent corrections (dxi, dgam)
-    // This should include:
-    // - Coordination number corrections
-    // - Hybridization corrections
-    // - Ring corrections
-    // - Charge corrections
-
-    params.xi_corr = 0.0; // TODO: Calculate environment correction
-
-    return params;
-}
-
 // ============================================================================
 // Phase 4.2: GFN-FF Pairwise Non-Bonded Parameter Generation (Claude Generated 2025)
 // ============================================================================
@@ -12256,60 +12212,6 @@ bool GFNFF::repulsionListIsDistanceFiltered() const
     return threshold == 0 || m_atomcount >= threshold;
 }
 
-ConfigManager GFNFF::extractDispersionConfig(const std::string& method) const
-{
-    // TODO Might me obsolete once D3 and D4 Params are fully integrated, or check method validity
-
-    /**
-     * @brief Extract D3/D4 configuration parameters from main GFN-FF config
-     *
-     * Creates a ConfigManager for D3ParameterGenerator or D4ParameterGenerator
-     * by extracting relevant parameters from the main m_parameters JSON.
-     *
-     * Parameter sources (priority order):
-     * 1. Method-specific overrides: m_parameters["d3_s6"], m_parameters["d4_s8"], etc.
-     * 2. GFN-FF defaults for the method
-     *
-     * Claude Generated (December 2025): Configuration extraction helper
-     */
-
-    json disp_config;
-
-    if (method == "d3") {
-        // D3 parameters with GFN-FF defaults (Spicher/Grimme, J. Chem. Theory Comput. 2020)
-        disp_config["d3_s6"] = m_parameters.value("d3_s6", 1.0);
-        disp_config["d3_s8"] = m_parameters.value("d3_s8", 2.85);  // GFN-FF D3-BJ default
-        disp_config["d3_a1"] = m_parameters.value("d3_a1", 0.80);  // GFN-FF D3-BJ damping
-        disp_config["d3_a2"] = m_parameters.value("d3_a2", 4.60);  // GFN-FF D3-BJ damping (Bohr)
-        disp_config["d3_s9"] = 0.0;  // Claude Generated (Jan 17, 2026): GFN-FF uses bonded batm, not D3 ATM
-        disp_config["d3_alp"] = m_parameters.value("d3_alp", 14.0);
-        disp_config["cutoff_radius"] = m_parameters.value("dispersion_cutoff", 95.0);
-
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::param("D3_s6", disp_config["d3_s6"].get<double>());
-            CurcumaLogger::param("D3_s8", disp_config["d3_s8"].get<double>());
-        }
-
-    } else if (method == "d4") {
-        // D4 parameters with GFN-FF defaults
-        disp_config["d4_s6"] = m_parameters.value("d4_s6", 1.0);
-        disp_config["d4_s8"] = m_parameters.value("d4_s8", 1.0);  // GFN-FF D4 (Spicher/Grimme 2020)
-        disp_config["d4_a1"] = m_parameters.value("d4_a1", 0.44); // GFN-FF D4
-        disp_config["d4_a2"] = m_parameters.value("d4_a2", 4.60); // GFN-FF D4 (Bohr)
-        disp_config["d4_alp"] = m_parameters.value("d4_alp", 14.0);
-        disp_config["d4_s10"] = m_parameters.value("d4_s10", 0.0);  // Higher-order terms typically off
-        disp_config["d4_s12"] = m_parameters.value("d4_s12", 0.0);
-        disp_config["cutoff_radius"] = m_parameters.value("dispersion_cutoff", 95.0);
-
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::param("D4_s6", disp_config["d4_s6"].get<double>());
-            CurcumaLogger::param("D4_s8", disp_config["d4_s8"].get<double>());
-        }
-    }
-
-    return ConfigManager(method + "param", disp_config);
-}
-
 // Energy component getters (FFWorkspace is the only GFN-FF engine).
 // frag_charge_model ensemble (Sep 2026): when the variant blend is active the components are the
 // same weighted sum as the energy (sum of the components == total), not the master's own workspace.
@@ -12396,95 +12298,6 @@ void GFNFF::setCharges(const Vector& charges) {
 // =================================================================================
 // TWO-PHASE EEQ IMPLEMENTATION (Claude Generated November 2025, Session 5)
 // =================================================================================
-
-/**
- * @brief Phase 1: Calculate topology-aware base charges (qa) via EEQ
- *
- * Solves the linear EEQ system with coordination-dependent electronegativity
- * and hardness parameters to get base charges.
- *
- * Claude Generated (November 2025): Complete two-phase EEQ implementation
- * Reference: angewChem 2020 GFN-FF publication
- */
-bool GFNFF::calculateTopologyCharges(TopologyInfo& topo_info) const
-{
-    // REFACTORED (Dec 2025 - Phase 3): Delegate to standalone EEQSolver
-    // Old implementation (lines 4024-4201) replaced with simple delegation
-    //
-    // UPDATED (Dec 2025): Now passes topology information for Floyd-Warshall topological distances
-    // This fixes the 4-5× charge overestimation bug (geometric vs topological distances)
-
-    if (m_atomcount <= 0) {
-        CurcumaLogger::error("calculateTopologyCharges: No atoms initialized");
-        return false;
-    }
-
-    // Initialize coordination numbers if not already present
-    if (topo_info.coordination_numbers.size() != m_atomcount) {
-        // Phase 2C: Migrate to shared CNCalculator for GFN-FF CN calculation
-        auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
-        topo_info.coordination_numbers = Eigen::Map<Vector>(cn_vec.data(), cn_vec.size());
-        if (topo_info.coordination_numbers.size() != m_atomcount) {
-            CurcumaLogger::error("calculateTopologyCharges: Failed to calculate CN");
-            return false;
-        }
-    }
-
-    // Build EEQSolver::TopologyInput from GFNFF data (Dec 2025 - Floyd-Warshall fix)
-    EEQSolver::TopologyInput eeq_topology;
-
-    // 1. Extract neighbor lists from TopologyInfo
-    // These are bond connectivity lists needed for shortest path computation
-    eeq_topology.neighbor_lists = topo_info.neighbor_lists;
-
-    // 2. Extract covalent radii for Floyd-Warshall topological distances
-    // CRITICAL FIX (Mar 2026): Use Pyykko covalent radii (param%rad), NOT D3 radii
-    // Fortran: gfnff_ini.f90:438 uses param%rad (Pyykko radii in Angstrom)
-    eeq_topology.covalent_radii.resize(m_atomcount);
-    for (int i = 0; i < m_atomcount; ++i) {
-        int z = m_atoms[i];
-        if (z > 0 && z <= static_cast<int>(GFNFFParameters::covalent_radii.size())) {
-            eeq_topology.covalent_radii[i] = GFNFFParameters::covalent_radii[z - 1];  // Pyykko in Å
-        } else {
-            eeq_topology.covalent_radii[i] = 0.75;
-            CurcumaLogger::warn(fmt::format(
-                "GFNFF::calculateTopologyCharges: Unknown atomic number {} (using default covalent radius 0.75 Å)", z));
-        }
-    }
-
-    // 3. Pass topology to EEQSolver for Floyd-Warshall topological distances
-    // CRITICAL FIX (Jan 29, 2026): Enable dxi corrections in Phase 1 to match Fortran goedeckera
-    // Reference: Fortran gfnff_ini.f90:377-402 applies dxi corrections BEFORE Phase 1 EEQ solve
-    // - Ether oxygens (nh=0): dxi = 0
-    // - Hydroxyl oxygens (nh=1): dxi = -0.005
-    // This was incorrectly disabled, causing 0.0025 e charge error per hydroxyl oxygen
-    // and cumulative Coulomb energy errors of ~26 mEh for triose (66 atoms).
-    // Claude Generated (WP2, May 2026): forward pool + thread count
-    auto* pool_topo = threadPool();
-    if (pool_topo) pool_topo->setActiveThreadCount(m_threads);
-    topo_info.topology_charges = m_eeq_solver->calculateTopologyCharges(
-        m_atoms,
-        m_geometry_bohr,
-        m_charge,
-        topo_info.coordination_numbers,
-        eeq_topology,  // NEW: Pass topology for Floyd-Warshall (Dec 2025)
-        true,  // RESTORED (Jan 29, 2026): Enable dxi corrections to match Fortran goedeckera
-        pool_topo,
-        m_threads
-    );
-
-    if (topo_info.topology_charges.size() != m_atomcount) {
-        CurcumaLogger::error("calculateTopologyCharges: EEQSolver failed");
-        return false;
-    }
-
-    if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::info("calculateTopologyCharges: Delegated to EEQSolver with Floyd-Warshall topological distances");
-    }
-
-    return true;
-}
-
 
 // DEPRECATED (Dec 2025 - Phase 3): Old calculateTopologyCharges implementation (170 lines)
 // removed and replaced with delegation to EEQSolver above.
@@ -12709,100 +12522,6 @@ bool GFNFF::calculateAlpeeq(TopologyInfo& topo_info) const
             std::cout << fmt::format("    Atom {} (Z={}): qa={:.6f}, alpeeq={:.6f}",
                                     i, z_i, qa, topo_info.alpeeq(i)) << std::endl;
         }
-    }
-
-    return true;
-}
-
-/**
- * @brief Phase 2: Calculate final refined charges by solving corrected EEQ
- *
- * FIXED (Session 8, December 2025): Uses AUGMENTED SYSTEM (n+1 x n+1)
- * with correct EEQ matrix formula matching Fortran goedeckera reference.
- *
- * Iteratively solves EEQ with dxi, dgam, dalpha corrections applied,
- * refining the charges to account for environmental effects.
- *
- * Critical fixes from Session 8:
- * 1. Use augmented system (n+1 rows/cols) like Phase 1
- * 2. Diagonal: gam + sqrt(2/π)/sqrt(α) [NOT -1/(2*gam)]
- * 3. Off-diagonal: erf(γij*r)/r [NOT bare 1/r]
- * 4. chi uses NEGATIVE sign: -chi [NOT +chi]
- * 5. Apply dalpha to alpha parameters [NOT ignored]
- *
- * Claude Generated (November 2025): Initial version
- * Fixed (December 2025, Session 8): Bugs #1-5 corrected
- */
-bool GFNFF::calculateFinalCharges(TopologyInfo& topo_info, int max_iterations,
-                                   double convergence_threshold) const
-{
-    if (m_atomcount <= 0) {
-        CurcumaLogger::error("calculateFinalCharges: No atoms initialized");
-        return false;
-    }
-
-    if (topo_info.topology_charges.size() != m_atomcount) {
-        CurcumaLogger::error("calculateFinalCharges: topology_charges not yet calculated");
-        return false;
-    }
-
-    if (topo_info.dxi.size() != m_atomcount) {
-        CurcumaLogger::error("calculateFinalCharges: dxi corrections not calculated");
-        return false;
-    }
-
-    if (topo_info.dalpha.size() != m_atomcount) {
-        CurcumaLogger::error("calculateFinalCharges: dalpha corrections not calculated");
-        return false;
-    }
-
-    // Build EEQSolver::TopologyInput from GFNFF data for Phase 2
-    // This enables integer neighbor count usage in CNF calculation (Jan 2026 fix)
-    EEQSolver::TopologyInput eeq_topology;
-
-    // 1. Extract neighbor lists from TopologyInfo (already computed)
-    eeq_topology.neighbor_lists = topo_info.neighbor_lists;
-
-    // 2. Extract covalent radii for Floyd-Warshall topological distances
-    // CRITICAL FIX (Mar 2026): Use Pyykko covalent radii (param%rad), NOT D3 radii
-    // Fortran: gfnff_ini.f90:438 uses param%rad (Pyykko radii in Angstrom)
-    eeq_topology.covalent_radii.resize(m_atomcount);
-    for (int i = 0; i < m_atomcount; ++i) {
-        int z = m_atoms[i];
-        if (z >= 1 && z <= static_cast<int>(GFNFFParameters::covalent_radii.size())) {
-            eeq_topology.covalent_radii[i] = GFNFFParameters::covalent_radii[z - 1];  // Pyykko in Å
-        } else {
-            eeq_topology.covalent_radii[i] = 0.75;
-            CurcumaLogger::warn(fmt::format("calculateFinalCharges: Unknown atomic number {} (using default covalent radius 0.75 Å)", z));
-        }
-    }
-
-
-    // Delegate to EEQSolver for Phase 2 refinement
-    // Claude Generated (WP2, May 2026): forward pool + thread count
-    auto* pool_final = threadPool();
-    if (pool_final) pool_final->setActiveThreadCount(m_threads);
-    topo_info.eeq_charges = m_eeq_solver->calculateFinalCharges(
-        m_atoms,
-        m_geometry_bohr,
-        m_charge,
-        topo_info.topology_charges,
-        topo_info.coordination_numbers,
-        topo_info.hybridization,
-        eeq_topology,
-        true, // ENABLE corrections to match Fortran goed_gfnff (dxi, dgam)
-        topo_info.alpeeq, // Pass charge-dependent alpha (alpeeq) from Phase 1B
-        pool_final,
-        m_threads
-    );
-
-    if (topo_info.eeq_charges.size() != m_atomcount) {
-        CurcumaLogger::error("calculateFinalCharges: EEQSolver failed");
-        return false;
-    }
-
-    if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::info("calculateFinalCharges: Delegated to EEQSolver (Phase 3)");
     }
 
     return true;
@@ -13045,16 +12764,4 @@ Matrix GFNFF::NumGrad(double dx)
     }
 
     return numgrad;
-}
-
-// Claude Generated (Apr 2026): P1a — Delegate CN-change threshold check to D4ParameterGenerator
-bool GFNFF::canSkipD4GaussianWeightsUpdate(const std::vector<double>& cn) const
-{
-    if (!m_d4_generator) return false;
-    return m_d4_generator->canSkipGaussianWeightsUpdate(cn);
-}
-
-void GFNFF::recordD4CNValues(const std::vector<double>& cn)
-{
-    if (m_d4_generator) m_d4_generator->recordCNValues(cn);
 }
