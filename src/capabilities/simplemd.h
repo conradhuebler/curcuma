@@ -88,12 +88,6 @@ public:
             colvarfile << "#m_currentStep  rmsd  bias_energy   counter  factor" << std::endl;
             colvarfile.close();
         }
-        /*
-                std::ofstream hillsfile;
-                hillsfile.open("HILLS_" + std::to_string(index));
-                hillsfile << "#m_currentStep  rmsd  bias_energy   counter  factor" << std::endl;
-                hillsfile.close();
-         */
     }
 
     inline void addGeometry(const Geometry& geometry, const json& bias)

@@ -88,19 +88,6 @@ Molecule::Molecule(const Molecule& other)
     m_hbond_cutoff = other.m_hbond_cutoff;
     m_dirty = other.m_dirty;
 }
-/*
-Molecule& Molecule::operator=(const Molecule& other)
-{
-    m_geometry = other.m_geometry;
-    m_charge = other.m_charge;
-    m_fragments = other.m_fragments;
-    m_atoms = other.m_atoms;
-    m_name = other.m_name;
-    m_energy = other.m_energy;
-    m_spin = other.m_spin;
-    return *this;
-}
-*/
 Molecule::Molecule(const Molecule* other)
 {
     m_geometry = other->m_geometry;
@@ -126,19 +113,6 @@ Molecule::Molecule(const Molecule* other)
     m_hbond_cutoff = other->m_hbond_cutoff;
     m_dirty = other->m_dirty;
 }
-/*
-Molecule& Molecule::operator=(const Molecule* other)
-{
-    m_geometry = other->m_geometry;
-    m_charge = other->m_charge;
-    m_fragments = other->m_fragments;
-    m_atoms = other->m_atoms;
-    m_name = other->m_name;
-    m_energy = other->m_energy;
-    m_spin = other->m_spin;
-    return *this;
-}
-*/
 Molecule::Molecule(const Mol& other)
 {
     setXYZComment(other.m_commentline);
@@ -169,39 +143,6 @@ Molecule::Molecule(const Mol* other)
 
 Molecule::Molecule(const std::string& file)
 {
-    /*
-    std::vector<std::string> lines;
-    int atoms = 0;
-    int index = 0;
-    int i = 0;
-    bool xyzfile = std::string(file).find(".xyz") != std::string::npos || std::string(file).find(".trj") != std::string::npos;
-    if (xyzfile) {
-        auto m_file = new std::ifstream(file);
-        for (std::string line; getline(*m_file, line);) {
-            if (index == 0 && xyzfile) {
-                try {
-                    atoms = stoi(line);
-                } catch (const std::invalid_argument& arg) {
-                    atoms = 0;
-                }
-                InitialiseEmptyGeometry(atoms);
-            }
-            if (xyzfile) {
-                if (i == 1)
-                    setXYZComment(line);
-                if (i > 1) {
-                    setXYZ(line, i - 2);
-                }
-                if (i - 1 == atoms) {
-                    break;
-                }
-                ++i;
-            } else {
-                setAtom(line, i);
-            }
-            index++;
-        }
-    }*/
     LoadMolecule(Files::LoadFile(file));
 }
 
@@ -399,13 +340,6 @@ void Molecule::printAtom(int i) const
 void Molecule::InitialiseEmptyGeometry(int atoms)
 {
     m_geometry = Eigen::MatrixXd::Zero(atoms, 3);
-    /*
-    for (int i = 0; i < atoms; i++) {
-        std::array<double, 3> atom = { 0, 0, 0 };
-        //m_geometry.push_back(atom);
-        m_geometry.conservativeResize(m_geometry.rows() +  1, m_geometry.cols());
-        m_geometry.row(m_geometry.rows() -  1) = Eigen::Vector3d(vector[0], vector[1], vector[2]);
-    }*/
     invalidateCaches();
 }
 

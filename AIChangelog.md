@@ -515,3 +515,4 @@ below. If it needs measurements or a derivation, write them into the matching `d
 - Dead GFNFF members removed (Nov 6, 2026): 12 functions without callers, -1164 lines; gfnff energies of MOR41 and GMTKN55 identical to master binary (docs/debt_2026-11/README.md)
 - Second dead-code batch and doc link fixes (Nov 6, 2026): force-field helpers, Rattle stubs, RMSD use_c branch; MOR41 uff/gfnff identical to same-config parent build (docs/debt_2026-11/README.md)
 - CMake duplicate source entries and misleading PCH messages removed, 11 `#pragma message` turned into comments (Nov 6, 2026; docs/debt_2026-11/CODE.md S12, S14)
+- 23 commented-out code blocks (>= 4 code lines) deleted in 15 files, -290 lines; two deliberate switch-offs kept (`simplemd.cpp` ramp re-entry, `rmsdtraj.cpp` pairwise); MOR41 uff/gfnff identical (docs/debt_2026-11/CODE.md L2)

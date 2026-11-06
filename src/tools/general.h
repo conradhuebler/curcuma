@@ -170,16 +170,6 @@ inline bool isDouble(const std::string& input)
         isD = false;
     }
     return isD;
-    /*
-    const char* delim = ".";
-    StringList list = SplitString(input, delim);
-    if (list.size() != 2)
-        return false;
-
-    bool left = isInt(list[0]);
-    bool right = isInt(list[1]);
-    return left && right;
-    */
     // return std::all_of(input.begin(), input.end(), ::isdigit);
 }
 

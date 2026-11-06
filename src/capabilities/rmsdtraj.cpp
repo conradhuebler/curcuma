@@ -299,13 +299,6 @@ bool RMSDTraj::CheckMolecule(Molecule* molecule)
         // Correct: m_initial should ALWAYS be the first structure
         m_initial = molecule;
         m_previous = m_stored_structures[0];
-        /*
-        for (std::size_t i = 0; i < mol.GetFragments().size(); ++i)
-            if (mol.getGeometryByFragment(i).rows() == atoms_target) {
-                driver->setFragmentTarget(i);
-                driver->setPartialRMSD(true);
-            }
-            */
     }
     m_driver->setScaling(1.3);
     if (m_pairwise == false) {

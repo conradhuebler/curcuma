@@ -134,15 +134,6 @@ bool XTBInterface::InitialiseMolecule()
     m_gradient = Matrix::Zero(m_atomcount, 3);
 
     m_xtb_mol = xtb_newMolecule(m_env, &m_atomcount, m_attyp, m_coord, &charge, &spin, NULL, NULL);
-    /*
-        char *error;
-        int buffer;
-        xtb_getError(m_env, &error, &buffer);
-        if (error != NULL) {
-            std::cerr << "[Error] " << error << std::endl;
-            return false;
-        }
-    */
     m_initialised = true;
     return m_initialised;
 }

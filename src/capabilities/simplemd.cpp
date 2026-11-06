@@ -3674,17 +3674,6 @@ void SimpleMD::Rattle()
                 m_eigen_velocities.data()[3 * j + 2] -= dz * lambda * 0.5 * m_eigen_inv_masses.data()[3 * j] * m_dT_inverse;
             }
         }
-        /*
-                Geometry geometry = m_molecule.getGeometry();
-                for (int i = 0; i < m_natoms; ++i) {
-                    geometry(i, 0) = m_rt_geom_1[3 * i + 0];
-                    geometry(i, 1) = m_rt_geom_1[3 * i + 1];
-                    geometry(i, 2) = m_rt_geom_1[3 * i + 2];
-                }
-                m_molecule.setGeometry(geometry);
-
-                m_molecule.appendXYZFile(outputPath(Basename() + ".rattle.trj.xyz"));
-        */
         if (active == 0)
             break;
     }
@@ -4536,12 +4525,6 @@ double SimpleMD::ApplySphericHarmonicWalls()
         // Claude Generated: Track wall force magnitude
         sum_grad += std::sqrt(dx * dx + dy * dy + dz * dz);
 
-        /*
-        if(out)
-        {
-            CurcumaLogger::raw(m_eigen_geometry.data()[3 * i + 0], " ", m_eigen_geometry.data()[3 * i + 1], " ", m_eigen_geometry.data()[3 * i + 2]);
-            CurcumaLogger::raw(dx, " ", dy, " ", dz);
-        }*/
         // std::cout << distance << " ";
         potential += curr_pot;
     }
@@ -4603,11 +4586,6 @@ double SimpleMD::ApplyRectHarmonicWalls()
         m_eigen_gradient.data()[3 * i + 0] += dx;
         m_eigen_gradient.data()[3 * i + 1] += dy;
         m_eigen_gradient.data()[3 * i + 2] += dz;
-        /* if(out)
-         {
-             CurcumaLogger::raw(m_eigen_geometry.data()[3 * i + 0], " ", m_eigen_geometry.data()[3 * i + 1], " ", m_eigen_geometry.data()[3 * i + 2]);
-             CurcumaLogger::raw(dx, " ", dy, " ", dz);
-         }*/
         sum_grad += std::abs(dx) + std::abs(dy) + std::abs(dz);
 
         potential += curr_pot;

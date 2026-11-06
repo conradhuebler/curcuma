@@ -669,24 +669,5 @@ inline Molecule LoadMol(const std::string& filename)
         return Molecule();
     }
 }
-/*
-inline void xyz2allxyz(const std::string& xyzfile)
-{
-    std::string allxyz = xyzfile;
-    allxyz.erase(allxyz.end() - 3, allxyz.end());
-
-    std::ofstream input;
-    input.open(allxyz + "allxyz", std::ios_base::app);
-    FileIterator file(xyzfile);
-    while (!file.AtEnd()) {
-        Molecule mol = file.Next();
-        input << mol.XYZString();
-        if (!file.AtEnd())
-            input << ">" << std::endl;
-    }
-    //input << "\n";
-    input.close();
-}
-*/
 
 }

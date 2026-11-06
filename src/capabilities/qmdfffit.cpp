@@ -258,12 +258,6 @@ void QMDFFFit::start()
 
         // std::cout << he2.getHessian() << std::endl;
     }
-    /*
-        std::cout << "Eigenvectors" << std::endl;
-        std::cout << hessian.Frequencies().transpose() << std::endl;
-        qmdff_init["variable"] = true;
-        qmdff_init["const"] = true;
-    */
     Hessian he2(qmdff_init, false);
     parameter = prm;
     parameter["bonds"] = bonds;
@@ -278,12 +272,3 @@ void QMDFFFit::start()
     parameterfile << parameter;
 }
 
-/*
-void QMDFFFit::FitDihedrals(json &dihedrals)
-{
-    for(int i = 0; i < dihedrals.size(); ++i)
-    {
-        std::cout << dihedrals[i] << std::endl;
-    }
-}
-*/

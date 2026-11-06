@@ -915,15 +915,4 @@ private:
             return false;
         }
     }
-    // Placeholder for future GPU-based implementation
-    /*
-    bool gpuDiagonalize(const Matrix& matrix, Eigen::VectorXd& eigenvalues, Matrix& eigenvectors) {
-        // This is a placeholder for future GPU-based implementation
-        // Current implementation is CPU-only
-        if (m_debug) {
-            std::cerr << "GPU diagonalization not implemented yet" << std::endl;
-        }
-        return false;
-    }
-    */
 };

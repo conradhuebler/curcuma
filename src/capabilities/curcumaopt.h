@@ -221,20 +221,6 @@ public:
         m_mol_set = false;
         m_mols_set = true;
     }
-    /*
-    inline void setBaseName()
-    {
-        //m_basename = basename;
-
-        std::ofstream tfile1;
-        tfile1.open(Optfile());
-        tfile1.close();
-
-        std::ofstream tfile2;
-        tfile2.open(Trjfile());
-        tfile2.close();
-    }
-*/
 
     inline std::string Optfile() const { return outputPath(Basename() + ".opt.xyz"); }
     inline std::string Trjfile() const { return outputPath(Basename() + ".trj.xyz"); }

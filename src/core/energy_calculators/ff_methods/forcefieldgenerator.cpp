@@ -550,44 +550,6 @@ void ForceFieldGenerator::setAngles()
         Eigen::Vector3d nkj = rkj.normalized();
         double costheta = nij.dot(nkj);
         m_angles[index]["theta0_ijk"] = acos(costheta); // m_molecule.CalculateAngle(i, j, k) / f; // UFF::AngleBending(m_geometry.row(j), m_geometry.row(i), m_geometry.row(k), derivate, false);
-        /*
-                    if(std::find(m_qmdff_methods.begin(), m_qmdff_methods.end(), m_method) != m_qmdff_methods.end())
-                    {
-                        json uffbond = BondJson;
-
-                        uffbond["i"] = i;
-                        uffbond["j"] = k;
-                        uffbond["k"] = k;
-
-                        uffbond["type"] = m_ff_type;
-
-                        r0_ij = m_distance(i, j);
-                        r0_ik = m_distance(i, k);
-
-                        uffbond["r0_ij"] = r0_ik;
-                        uffbond["r0_ik"] = r0_ik;
-
-
-                        uffbond["fc"] = 0.01;
-                        double exp =ka13 + kb13* ka(atom_types[i]) * ka(atom_types[k]);
-                        bool found = false;
-                        for(const auto &ring : m_identified_rings)
-                        {
-                            for(const auto &atom : ring)
-                            {
-                                if((atom == i || atom == j || atom == k) && !found)
-                                {
-                                    exp += k13r;
-                                    found = true;
-                                }
-                            }
-                        }
-                       // exp /= 3.0;
-                        uffbond["exponent"] = exp;
-                        uffbond["distance"] = 2;
-                        m_bonds.push_back(uffbond);
-                    }
-    */
     }
 }
 
@@ -727,23 +689,6 @@ void ForceFieldGenerator::setNCI()
             m_esps.push_back(esp);
         }
     }
-    /*
-    for(int i = 0; i < m_1_4_charges.size(); ++i)
-    {
-        for(const auto j : m_1_4_charges[i])
-        {
-            if(i == j)
-                continue;
-            json esp = EQJson;
-            esp["i"] = i;
-            esp["j"] = j;
-            esp["q_i"] = charges[i];
-            esp["q_j"] = charges[j];
-            esp["epsilon"] = 0.85;
-            m_esps.push_back(esp);
-        }
-    }
-*/
 }
 
 void ForceFieldGenerator::AssignUffAtomTypes()

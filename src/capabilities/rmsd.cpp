@@ -124,17 +124,6 @@ int RMSDThread::execute()
             found_none = false;
             Molecule target_local(target);
             if (target_local.addPair(m_target.Atom(j))) {
-                /*
-                //const auto t = RMSDFunctions::getAligned(m_reference, GeometryTools::TranslateGeometry(target_local.getGeometry(), target_local.Centroid(true), Position{ 0, 0, 0 }), 1);
-                const auto t = RMSDFunctions::getAligned(m_reference, target_local.getGeometry(), 1);
-                double value = 0;
-                if(!m_topo)
-                    value = RMSDFunctions::getRMSD(m_reference, t);
-                else{
-                    Matrix target_topo = target_local.DistanceMatrix().second;
-                    value = (target_topo - m_reference_topology).cwiseAbs().sum();
-                }
-                */
                 double value = m_evaluator(target_local);
                 m_calculations++;
                 if (target_local.AtomCount() <= m_target.AtomCount()) {
@@ -896,11 +885,6 @@ void RMSDDriver::CheckTopology()
         if (m_verbosity >= 3)
             CurcumaLogger::debug(2, fmt::format("Topology check {}: RMSD={:.6f}, TopoInit={}, TopoStep={}", index, rmsd, topo0, topo));
 #endif
-        /*  if (topo < best_topo) {
-              best_topo = topo;
-              best_rule = rule;
-              best_index = index;
-          }*/
     }
     /*
     if(index > 1)

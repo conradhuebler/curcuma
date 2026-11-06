@@ -45,13 +45,6 @@ inline std::vector<std::vector<int>> FindRings(const std::vector<std::vector<int
         std::vector<int> bonded = stored_bonds[i];
         std::vector<int> knots, outer;
         // std::vector< std::pair<int, std::vector<int> > > mknots;
-        /*
-        for (int atom : bonded) {
-            if (stored_bonds[atom].size() == 1)
-                done.push_back(atom);
-            knots.push_back(atom);
-            outer.push_back(atom);
-        }*/
         std::vector<std::vector<int>> stash;
         stash.push_back(std::vector<int>{ i });
         // done.push_back(std::vector<int>());
