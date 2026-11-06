@@ -95,7 +95,6 @@ public:
     Vector         getCharges() const              { return m_charges; }
     nlohmann::json getEnergyDecomposition() const  { return m_decomp; }
     bool           converged() const               { return m_converged; }
-    int            numFragments() const            { return m_num_fragments; }
 
     void setIntraThreads(int n) { m_intra_threads = (n < 1) ? 1 : n; }
 

@@ -473,8 +473,6 @@ public:
                                        const std::vector<std::vector<int>>& fragment_atoms,
                                        const std::function<double(int, int)>& A_elem);
 
-    /// Last batched-error estimate of this solver (Eh), -1 when none was made. Claude Generated (Oct 2026).
-    double lastBatchedErrorEstimate() const { return m_last_batched_error; }
 
     /**
      * @brief Resolve the requested method to the one that runs. Claude Generated (Oct 2026).
@@ -883,9 +881,6 @@ public:
         double radius_bohr, double ext_bohr, CxxThreadPool* pool, int num_threads,
         bool want_dense_S_inverse = false);
 
-    /// Statistics of the local-inverse preconditioner (test and benchmark hooks).
-    long localInverseBuilds() const { return m_localinv_builds; }
-    long localInverseBuildFailures() const { return m_localinv_build_failures; }
     long localInverseRuntimeFallbacks() const { return m_localinv_runtime_fallbacks; }
 
 private:

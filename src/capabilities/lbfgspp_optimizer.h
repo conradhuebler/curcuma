@@ -40,9 +40,6 @@ public:
     // LBFGSpp required interface
     double operator()(const VectorXd& x, VectorXd& grad);
 
-    // State accessors
-    double getLastEnergy() const { return m_last_energy; }
-    Vector getLastParameters() const { return m_last_parameters; }
     bool hasError() const { return m_error; }
     void clearError() { m_error = false; }
 
@@ -142,20 +139,6 @@ public:
 
     json GetDefaultConfiguration() const;
 
-    // Configuration accessors
-    void setMemoryParameter(int m) { m_lbfgs_m = m; }
-    void setConvergenceParameters(double eps_abs, double eps_rel)
-    {
-        m_lbfgs_eps_abs = eps_abs;
-        m_lbfgs_eps_rel = eps_rel;
-    }
-    void setLineSearchParameters(int algorithm, int max_trials, double ftol, double wolfe)
-    {
-        m_lbfgs_line_search = algorithm;
-        m_lbfgs_max_line_search = max_trials;
-        m_lbfgs_ftol = ftol;
-        m_lbfgs_wolfe = wolfe;
-    }
 };
 
 } // namespace Optimization

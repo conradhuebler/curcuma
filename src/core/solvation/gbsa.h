@@ -104,38 +104,9 @@ public:
         std::vector<std::array<double, 3>>& gradients
     );
 
-    /**
-     * @brief Get Born radii for each atom
-     *
-     * Returns effective Born radii after last energy calculation.
-     * Useful for analysis and debugging.
-     *
-     * @return Vector of Born radii in Angstrom
-     */
-    const std::vector<double>& getBornRadii() const { return m_born_radii; }
 
-    /**
-     * @brief Get solvent-accessible surface areas
-     *
-     * Returns SASA for each atom after last energy calculation.
-     *
-     * @return Vector of SASA values in Angstrom²
-     */
-    const std::vector<double>& getSASA() const { return m_sasa; }
 
-    /**
-     * @brief Get GB energy contribution
-     *
-     * @return Generalized Born energy in Hartree
-     */
-    double getGBEnergy() const { return m_energy_gb; }
 
-    /**
-     * @brief Get surface area energy contribution
-     *
-     * @return Surface area energy (γ·SASA) in Hartree
-     */
-    double getSAEnergy() const { return m_energy_sa; }
 
 private:
     // Solvent properties

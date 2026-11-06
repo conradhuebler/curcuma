@@ -173,8 +173,6 @@ private:
     double UFFBondRestLength(int i, int j, double order);
     void AssignUffAtomTypes();
 
-    // Phase 3 LITE: GFN-FF parameter generation (Claude Generated Nov 2025)
-    void GenerateGFNFF();
 
     void setBonds(const TContainer& bonds);
     void setAngles();
@@ -190,7 +188,6 @@ private:
     json vdWs() const;
     json ESPs() const;
 
-    json writeUFF();
 
     Mol m_mol;
     int m_atoms;

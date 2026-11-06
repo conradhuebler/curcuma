@@ -61,9 +61,6 @@ void ANCCoordinates::allocate(int natoms, int num_vars, double h_low, double h_m
     initialized = true;
 }
 
-void ANCCoordinates::deallocate() {
-    initialized = false;
-}
 
 bool ANCCoordinates::generateANC(const Matrix& cartesian_hessian, const Vector& xyz, bool is_linear) {
     if (!initialized) {

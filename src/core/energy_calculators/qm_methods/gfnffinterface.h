@@ -57,7 +57,6 @@ public:
     Geometry Gradient() const override;
     bool hasGradient() const override { return true; }
 
-    void SetLogLevel(int level) { (void)level; } // Suppress unused parameter warning
     double Energy() const { return m_energy; }
 
 private:

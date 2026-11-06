@@ -71,7 +71,6 @@ struct ANCCoordinates {
 
     // Methods
     void allocate(int natoms, int num_vars, double h_low, double h_max);
-    void deallocate();
 
     // Generate ANC from model Hessian
     bool generateANC(const Matrix& cartesian_hessian, const Vector& xyz, bool is_linear);
@@ -348,17 +347,6 @@ public:
 
     json GetDefaultConfiguration() const;
 
-    // Configuration setters
-    void setMaxDisplacement(double maxd) { m_maxdispl = maxd; }
-    void setFrequencyCutoffs(double hlow, double hmax) {
-        m_hlow = hlow;
-        m_hmax = hmax;
-    }
-    void setMicroIterations(int micro) { m_maxmicro = micro; }
-    void setHessianUpdate(HessianUpdate method) { m_hessian_update = method; }
-    void setModelHessianType(ModelHessianParameters::Type type) {
-        m_model_hess_params.model = type;
-    }
 
     // vvvvvvvvvvvv PARAMETER DEFINITION BLOCK vvvvvvvvvvvv
     BEGIN_PARAMETER_DEFINITION(ancopt)

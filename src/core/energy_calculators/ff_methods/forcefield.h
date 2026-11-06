@@ -82,7 +82,6 @@ public:
     inline double VdWEnergy() const { return m_vdw_energy; }
     inline double RepulsionEnergy() const { return m_rep_energy; }
     inline double DispersionEnergy() const { return m_dispersion_energy; }
-    inline double D3Energy() const { return m_d3_energy; }  // Claude Generated (Jan 2, 2026): D3 dispersion energy (uff-d3)
 
     void setParameter(const json& parameter);
     void setParameterFile(const std::string& file);
