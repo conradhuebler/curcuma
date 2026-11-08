@@ -459,6 +459,29 @@ Until such a set exists, the react mode demonstrates machinery rather than energ
 the documentation says so in those words. Producing that set is the prerequisite for every
 entry above, because none of them can be shown to have improved anything without it.
 
+## Diagnostic switches (no deviation by default)
+
+### 19. `hb_scale` (diagnostic switch)
+
+`-gfnff.hb_scale s` (PARAM, default 1.0 = reference; added Nov 8, 2026, 🤖 AI-generated, ⚙️ machine-tested) multiplies the
+hydrogen-bond term by `s`: E_HB of all four cases and its per-case split, the HB gradient rows, the HB virial component
+and the recorded per-triple energies (`FFWorkspace::calcHydrogenBondsScaled`: the unchanged kernel runs, then its
+contribution to the partition accumulator is multiplied). **Not scaled**: the HB detection (same triples, the
+`hb_min_pair_energy_eh` filter sees the unscaled E_HB), the HB-CN modulation of the X-H bond strength (`calcBonds`, part
+of the bond energy: 3.4e-4 Eh in a water dimer, i.e. 0.21 kcal/mol of 'H-bond strength' that `hb_scale` does not touch),
+halogen bonds. The EEQ charges do not depend on the HB term (bitwise equal for every `s`, ctest `gfnff_hb_scale`).
+Purpose: sensitivity of the periodic water density on the H-bond strength; it is not a reparametrisation.
+- `s = 1.0` runs the former kernel (no changed expression): -sp energy and `-dump_gradient` md5 bitwise on 7 structures x 1/4 threads.
+- CPU only: with `-gpu` and `s != 1` the run falls back to the CPU (counted, `-gpu_strict` stops; `createNativeGfnff`).
+  The branch is not run-tested: no plugin of ABI version 5 was built (the ABI rose to 5 with `FFWorkspace::m_hb_scale`).
+- ctest `gfnff_hb_scale`: E_HB(s) = s E_HB(1) to 1e-12 (s = 0, 0.5, 1.5, 2; dimer, 20-water cluster, sparse box, cluster
+  in a cell), other terms and charges bitwise unchanged, FD gradient (Richardson, 1e-6) and FD virial (1e-6) at s = 1.5.
+- `hb_scale 0` vs `hbond false`: equal except the bond term (the HB-CN modulation stays with `hb_scale 0`) and XB
+  (`hbond false` also drops halogen bonds).
+- Gas-phase cost (water dimer, both partners optimised with the same `s`; monomer unaffected): E_bind = -5.74 / -6.36 /
+  -6.67 / -7.14 / -7.92 / -9.50 kcal/mol for s = 0.8 / 1.0 / 1.1 / 1.25 / 1.5 / 2.0 (R_OO 2.942 -> 2.927 A). The
+  reference binding energy of the water dimer (about -5 kcal/mol, from memory) is still to be sourced.
+
 ## How to add to this list
 
 An entry belongs here when an **external** reference (r²SCAN-3c, GFN2, DLPNO, experiment)

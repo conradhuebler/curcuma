@@ -448,7 +448,18 @@ std::unique_ptr<ComputationalMethod> createNativeGfnff(const std::string& method
     }
     const std::string gpu = resolveGpuMode(gfnff_config, "GFN-FF");
     fixEEQSolverChoice(gfnff_config, gpu);
-    if (gpu != "none") {
+    // Claude Generated (Nov 2026): the diagnostic hb_scale exists only in the CPU kernel (FFWorkspace::calcHydrogenBonds);
+    // the GPU kernels would ignore it, so any value other than 1.0 runs on the CPU (counted fallback, -gpu_strict stops).
+    double hb_scale = 1.0;
+    if (gfnff_config.contains("gfnff") && gfnff_config["gfnff"].is_object() && gfnff_config["gfnff"].contains("hb_scale")
+        && gfnff_config["gfnff"]["hb_scale"].is_number())
+        hb_scale = gfnff_config["gfnff"]["hb_scale"].get<double>();
+    else if (gfnff_config.contains("hb_scale") && gfnff_config["hb_scale"].is_number())
+        hb_scale = gfnff_config["hb_scale"].get<double>();
+    if (gpu != "none" && hb_scale != 1.0) {
+        CurcumaLogger::warn(fmt::format("GFN-FF: hb_scale = {} is implemented on the CPU only; using CPU", hb_scale));
+        curcuma::reportGpuFallback("GFN-FF: hb_scale != 1 is not applied by the GPU path, calculation on the CPU", gpu);
+    } else if (gpu != "none") {
         CurcumaLogger::info("GFN-FF: using GPU acceleration (" + gpu + ")");
         if (auto m = gpu_plugin::createGfnff(gpu, gfnff_config))
             return m;   // the plugin logs why when it declines (e.g. Vulkan: shaders not ported)

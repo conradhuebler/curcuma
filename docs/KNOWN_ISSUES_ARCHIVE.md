@@ -110,6 +110,7 @@ the CLI section of `CLAUDE.md`).
 | `-gfnff.dispersion_atm true` | off | bonded-triple D4 ATM term (not in the reference) | #34 |
 | `-gfnff.hh_repulsion_bpair false` | on | BFS distance for H...H repulsion | #34 |
 | `-gfnff.dispersion_c6_update false` | on | D4 C6 frozen at setup | #32 #33 |
+| `-gfnff.hb_scale s` | 1.0 | diagnostic factor on the HB term (energy, gradient, virial; not the HB-CN bond modulation), CPU only | REV_GFNFF_TODO #19 |
 | `-gfnff.gpu_coulomb_implicit false` | on | ROCm workaround for the missing Coulomb term | #37 |
 | `-gfnff.cn_zero_guard true` | off (reference) | TERM 1b chain-rule term 0 at CN = 0: gradient only, energy unchanged; CUDA on the device, ROCm falls back to the CPU method | #43 |
 | `-DUSE_PORTABLE_MATH=ON` | off | fdlibm-derived `erf`/`acos`/`exp`/`log` | #7 |

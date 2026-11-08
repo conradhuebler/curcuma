@@ -2347,10 +2347,58 @@ void FFWorkspace::calcCoulombEwald(int p)
 }
 void FFWorkspace::calcHydrogenBonds(int p)
 {
+    if (m_hb_scale != 1.0) {  // hb_scale diagnostic (Nov 2026): the 1.0 path below stays the former code
+        calcHydrogenBondsScaled(p);
+        return;
+    }
     if (m_want_virial)
         calcHydrogenBondsImpl<true>(p);
     else
         calcHydrogenBondsImpl<false>(p);
+}
+
+// hb_scale (Claude Generated, Nov 2026): diagnostic factor s on the hydrogen-bond term, not part of the
+// reference (gfnff_engrad.F90 has no such factor). The unchanged kernel runs first; then everything it added
+// to this partition's accumulator is multiplied by s: E_HB and its per-case split, the gradient rows (also the
+// grad_hb component), the HB virial component and the recorded per-triple energies. E_HB is linear in the
+// prefactor, so this is exactly the energy s * E_HB with its consistent gradient and virial. Not touched: the HB
+// detection (same triples, pair-energy filter on the unscaled E_HB), the HB-CN modulation of the X-H bond
+// strength (calcBonds, bond energy and its CN chain rule), the halogen bonds, the counts.
+void FFWorkspace::calcHydrogenBondsScaled(int p)
+{
+    auto& acc = m_accumulators[p];
+    const double s = m_hb_scale;
+    const FFEnergyComponents e0 = acc.energy;
+    const bool grad = m_do_gradient;
+    GeoGradMatrix g0, ghb0;
+    if (grad) {
+        g0 = acc.gradient;
+        if (acc.has_components)
+            ghb0 = acc.grad_hb;
+    }
+    const Eigen::Matrix3d xi0 = acc.virial.hbond;
+
+    if (m_want_virial)
+        calcHydrogenBondsImpl<true>(p);
+    else
+        calcHydrogenBondsImpl<false>(p);
+
+    acc.energy.hbond = e0.hbond + s * (acc.energy.hbond - e0.hbond);
+    acc.energy.hbond_case1 = e0.hbond_case1 + s * (acc.energy.hbond_case1 - e0.hbond_case1);
+    acc.energy.hbond_case2 = e0.hbond_case2 + s * (acc.energy.hbond_case2 - e0.hbond_case2);
+    acc.energy.hbond_case3 = e0.hbond_case3 + s * (acc.energy.hbond_case3 - e0.hbond_case3);
+    acc.energy.hbond_case4 = e0.hbond_case4 + s * (acc.energy.hbond_case4 - e0.hbond_case4);
+    if (grad) {
+        acc.gradient = g0 + s * (acc.gradient - g0);
+        if (acc.has_components)
+            acc.grad_hb = ghb0 + s * (acc.grad_hb - ghb0);
+    }
+    if (m_want_virial)
+        acc.virial.hbond = xi0 + s * (acc.virial.hbond - xi0);
+    auto [begin, end] = m_partitions[p].hbonds;
+    if (m_record_hb_energies)
+        for (int idx = begin; idx < end && idx < static_cast<int>(m_hb_triple_energy.size()); ++idx)
+            m_hb_triple_energy[idx] *= s;
 }
 void FFWorkspace::calcHalogenBonds(int p)
 {

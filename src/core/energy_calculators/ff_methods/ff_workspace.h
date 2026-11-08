@@ -597,6 +597,15 @@ public:
     void setRecordHBondEnergies(bool on);
     bool recordsHBondEnergies() const { return m_record_hb_energies; }
 
+    /// Diagnostic factor on the hydrogen-bond term (PARAM gfnff.hb_scale, Claude Generated Nov 2026).
+    /// Scales E_HB (all four cases and the per-case split), its gradient rows, its virial component and the
+    /// recorded per-triple energies of calcHydrogenBonds() by s. Not scaled: the HB detection (same triples,
+    /// unscaled pair-energy filter), the HB-CN modulation of the X-H bond strength (bond term), halogen bonds.
+    /// 1.0 (default, the reference) runs the unchanged kernel; any other value goes through
+    /// calcHydrogenBondsScaled() and deviates from the reference parametrisation.
+    void setHBScale(double s) { m_hb_scale = s; }
+    double hbScale() const { return m_hb_scale; }
+
     /// Energy of each triple of the list from the last evaluation, in list order. Empty unless
     /// recording was on before that evaluation and the list has not changed since.
     std::vector<GFNFFHBondEnergy> hydrogenBondEnergies() const;
@@ -671,6 +680,7 @@ private:
     std::vector<GFNFFCoulomb> m_coulombs;
     std::vector<GFNFFHydrogenBond> m_hbonds;
     bool m_record_hb_energies = false;
+    double m_hb_scale = 1.0;                  ///< hb_scale diagnostic factor (setHBScale); 1.0 = reference, plugin ABI 5
     std::vector<double> m_hb_triple_energy;   ///< per triple of m_hbonds, Eh; filled by calcHydrogenBonds when recording
     std::vector<GFNFFHalogenBond> m_xbonds;
     std::vector<ATMTriple> m_atm_triples;
@@ -749,6 +759,7 @@ private:
     template <bool VIRIAL> void calcCoulombImpl(int p);
     template <bool VIRIAL> void calcCoulombEwaldImpl(int p);
     template <bool VIRIAL> void calcHydrogenBondsImpl(int p);
+    void calcHydrogenBondsScaled(int p);  ///< hb_scale != 1: the unchanged kernel, then its contributions times s
     template <bool VIRIAL> void calcHalogenBondsImpl(int p);
     template <bool VIRIAL> void calcATMGradientImpl(int p);
     template <bool VIRIAL> void calcBATMImpl(int p);

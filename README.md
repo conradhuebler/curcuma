@@ -174,6 +174,8 @@ optimisation, MD and ConfSearch (examples, options, convergence rules) are in
 ### Parameters, JSON, reproducible runs
 
 Any parameter can be given as a flat flag (`-cn_cutoff_bohr 5.5`) or scoped (`-gfnff.cn_cutoff_bohr 5.5`).
+Diagnostic GFN-FF switch: `-gfnff.hb_scale s` multiplies the hydrogen-bond term (default 1.0 = the reference; CPU only),
+[docs/REV_GFNFF_TODO.md](docs/REV_GFNFF_TODO.md) #19.
 `-export-config <module>` prints a module's defaults as JSON to the standard output (the program banner
 precedes the JSON in the build checked on 2026-10-01, so remove the lines before the first `{` when saving it).
 

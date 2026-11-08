@@ -4963,6 +4963,17 @@ bool GFNFF::initializeForceField()
         m_workspace->setCnZeroGuard(cnZeroGuardEffective());                               // Oct 2026; PARAM (fallback false = reference) or a fragment-charge override (Oct 31, 2026)
         m_workspace->setPeriodicCell(m_cell_bohr_ortho);                                   // Nov 2026: read by the D4 (A3b), repulsion and bonded-term (A4a) kernels; inactive without a cell
         m_workspace->setWantVirial(m_want_virial);                                         // Nov 2026 (N1): requested before the set-up
+        {
+            // hb_scale (Claude Generated, Nov 2026): diagnostic factor on the HB term (FFWorkspace::setHBScale);
+            // fallback 1.0 = PARAM default = reference. Detection and the HB-CN bond modulation stay unscaled.
+            const double hb_scale = m_parameters.value("hb_scale", 1.0);
+            if (!std::isfinite(hb_scale))
+                throw std::runtime_error("GFN-FF: hb_scale must be a finite number");
+            if (hb_scale != 1.0 && CurcumaLogger::get_verbosity() >= 1)
+                CurcumaLogger::warn(fmt::format("GFN-FF: hb_scale = {} multiplies the hydrogen-bond energy, gradient and virial "
+                                                "(diagnostic, deviates from the reference parametrisation)", hb_scale));
+            m_workspace->setHBScale(hb_scale);
+        }
         if (coulombEwaldActive()) {
             // Nov 2026 (B2): periodic Coulomb pair term by Ewald summation (FFWorkspace::calcCoulombEwald).
             // B3: the SAME parameters as the EEQ solver's matrix (m_ewald_params, configurePeriodicEwald), so the
