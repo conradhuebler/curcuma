@@ -43,9 +43,9 @@ D3ParameterGenerator::D3ParameterGenerator(const ConfigManager& config)
 {
     // Phase 3.2: Parameter validation (Claude Generated)
     double s6 = m_config.get<double>("d3_s6", 1.0);
-    double s8 = m_config.get<double>("d3_s8", 1.0);
-    double a1 = m_config.get<double>("d3_a1", 0.4);
-    double a2 = m_config.get<double>("d3_a2", 4.0);
+    double s8 = m_config.get<double>("d3_s8", 2.0);
+    double a1 = m_config.get<double>("d3_a1", 0.58);
+    double a2 = m_config.get<double>("d3_a2", 4.80);
 
     // Validate scaling factors (must be non-negative)
     if (s6 < 0.0 || s8 < 0.0) {
@@ -259,9 +259,9 @@ void D3ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
 
     // Get global scaling factors from config
     double s6 = m_config.get<double>("d3_s6", 1.0);
-    double s8 = m_config.get<double>("d3_s8", 1.0);
-    double a1 = m_config.get<double>("d3_a1", 0.4);
-    double a2 = m_config.get<double>("d3_a2", 4.0);
+    double s8 = m_config.get<double>("d3_s8", 2.0);
+    double a1 = m_config.get<double>("d3_a1", 0.58);
+    double a2 = m_config.get<double>("d3_a2", 4.80);
 
     int num_pairs = 0;
     for (size_t i = 0; i < m_atoms.size(); ++i) {
@@ -332,8 +332,8 @@ void D3ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
 
     // Add Becke-Johnson damping parameters
     m_parameters["d3_damping"] = {
-        {"a1", m_config.get<double>("d3_a1", 0.4)},
-        {"a2", m_config.get<double>("d3_a2", 4.0)},
+        {"a1", m_config.get<double>("d3_a1", 0.58)},
+        {"a2", m_config.get<double>("d3_a2", 4.80)},
         {"alp", m_config.get<double>("d3_alp", 14.0)}
     };
 
@@ -347,8 +347,8 @@ void D3ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
 
     if (m_config.get<double>("d3_s9", 0.0) > 1e-10) {
         double s9 = m_config.get<double>("d3_s9", 1.0);
-        double a1 = m_config.get<double>("d3_a1", 0.40);
-        double a2 = m_config.get<double>("d3_a2", 4.20);
+        double a1 = m_config.get<double>("d3_a1", 0.58);
+        double a2 = m_config.get<double>("d3_a2", 4.80);
         double alp = m_config.get<double>("d3_alp", 14.0);
 
         int n_atoms = static_cast<int>(m_atoms.size());
@@ -923,10 +923,10 @@ double D3ParameterGenerator::getTotalEnergy() const
     double energy = 0.0;
 
     // Get damping parameters and scaling factors from config
-    double a1 = m_config.get<double>("d3_a1", 0.4);
-    double a2 = m_config.get<double>("d3_a2", 4.0);
+    double a1 = m_config.get<double>("d3_a1", 0.58);
+    double a2 = m_config.get<double>("d3_a2", 4.80);
     double s6 = m_config.get<double>("d3_s6", 1.0);
-    double s8 = m_config.get<double>("d3_s8", 1.0);
+    double s8 = m_config.get<double>("d3_s8", 2.0);
 
     const auto& pairs = m_parameters["d3_dispersion_pairs"];
 
@@ -1093,9 +1093,9 @@ D3ParameterGenerator::DeviceTables D3ParameterGenerator::buildDeviceTables(const
 {
     DeviceTables t;
     t.s6 = m_config.get<double>("d3_s6", 1.0);
-    t.s8 = m_config.get<double>("d3_s8", 1.0);
-    t.a1 = m_config.get<double>("d3_a1", 0.4);
-    t.a2 = m_config.get<double>("d3_a2", 4.0);
+    t.s8 = m_config.get<double>("d3_s8", 2.0);
+    t.a1 = m_config.get<double>("d3_a1", 0.58);
+    t.a2 = m_config.get<double>("d3_a2", 4.80);
     t.nref.assign(MAX_ELEM, 0);
     t.refcn.assign(static_cast<size_t>(MAX_ELEM) * MAX_REF, 0.0);
     for (int z = 1; z <= MAX_ELEM; ++z) {
@@ -1159,10 +1159,10 @@ double D3ParameterGenerator::getEnergyAndGradient(bool need_gradient,
     const double au = CurcumaUnit::Length::angstrom_to_bohr_or_legacy(1.88972612546);  // Angstrom -> Bohr
     const size_t n = m_atoms.size();
 
-    double a1 = m_config.get<double>("d3_a1", 0.4);
-    double a2 = m_config.get<double>("d3_a2", 4.0);
+    double a1 = m_config.get<double>("d3_a1", 0.58);
+    double a2 = m_config.get<double>("d3_a2", 4.80);
     double s6 = m_config.get<double>("d3_s6", 1.0);
-    double s8 = m_config.get<double>("d3_s8", 1.0);
+    double s8 = m_config.get<double>("d3_s8", 2.0);
 
     double energy = 0.0;
 

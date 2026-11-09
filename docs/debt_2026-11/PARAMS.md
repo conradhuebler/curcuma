@@ -92,6 +92,7 @@ Commit `c3f570f` (2026-10-31), clean tree. Read-only analysis, no repo file chan
     (`native_xtb_method.h:32`) and the main path (`native_xtb_method.cpp:86,105`) use `"mulliken"`, and the comment says
     "Mirror NativeXtbMethod::applyConfig". So gradients from `-large_system_mode fragments` use a different D4
     q-response than the normal path unless the user sets it. [read, not run]
+  - [Nov 9, 2026: the literal fallbacks of `d3param_generator.cpp` now equal the PARAM defaults 2.0/0.58/4.80; the CLI `uff-d3` path never reached them (energies identical before and after on water8 and benzoic acid), so only the GPU table path `:1096` and direct callers could differ, not run.]
   - `D3ParameterGenerator` reads with fallbacks `d3_s8 1.0, a1 0.4, a2 4.0` (`d3param_generator.cpp:43-46`, and 7 more
     sites with variants `0.40/4.20`, `0.44/4.60`). The PARAMs are `2.0/0.58/4.80` (`d3param_generator.h:36-43`). Which
     one wins depends on whether the caller's `ConfigManager` was built for module `d3param`. GFN-FF itself uses
