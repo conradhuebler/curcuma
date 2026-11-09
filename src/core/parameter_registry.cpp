@@ -1,4 +1,6 @@
 #include "parameter_registry.h"
+
+#include <set>
 #include <algorithm>
 #include <iomanip>
 #include <iostream>
@@ -101,6 +103,50 @@ void ParameterRegistry::coerceBoolParameters(nlohmann::json& controller) const
                 value = (value.get<double>() != 0.0);
         }
     }
+}
+
+std::vector<std::string> ParameterRegistry::checkAnnotations(const nlohmann::json& controller) const
+{
+    std::vector<std::string> messages;
+    if (!controller.is_object())
+        return messages;
+    std::set<std::string> seen;
+    auto lower = [](std::string t) {
+        std::transform(t.begin(), t.end(), t.begin(), ::tolower);
+        return t;
+    };
+    for (const auto& [module, params] : controller.items()) {
+        if (!params.is_object())
+            continue;
+        for (const auto& [key, value] : params.items()) {
+            const std::string canonical = resolveAlias(module, key);
+            const ParameterDefinition* def = canonical.empty() ? nullptr : findDefinition(module, canonical);
+            if (!def || !seen.insert(def->module + "." + def->name).second)
+                continue;
+            if (!def->allowed.empty() && value.is_string()) {
+                const std::string given = lower(value.get<std::string>());
+                bool ok = false;
+                std::string list;
+                for (const auto& a : def->allowed) {
+                    ok = ok || lower(a) == given;
+                    list += (list.empty() ? "" : "|") + a;
+                }
+                if (!ok)
+                    messages.push_back("Value '" + value.get<std::string>() + "' of -" + key + " (module " + def->module
+                        + ") is not one of " + list);
+            }
+            if (value.is_number() && (def->hasMinimum || def->hasMaximum)) {
+                const double v = value.get<double>();
+                if (def->hasMinimum && v < def->minimum)
+                    messages.push_back("Value " + std::to_string(v) + " of -" + key + " (module " + def->module
+                        + ") is below the minimum " + std::to_string(def->minimum));
+                else if (def->hasMaximum && v > def->maximum)
+                    messages.push_back("Value " + std::to_string(v) + " of -" + key + " (module " + def->module
+                        + ") is above the maximum " + std::to_string(def->maximum));
+            }
+        }
+    }
+    return messages;
 }
 
 std::vector<ParameterDefinition> ParameterRegistry::getForModule(const std::string& module) const

@@ -2594,6 +2594,11 @@ int main(int argc, char **argv) {
         }
     }
 
+    // Claude Generated (Nov 2026, docs/debt_2026-11/PARAMS.md L4): enum/min/max annotations of the
+    // PARAMs were only printed by -help-module. A value outside them is reported; the run goes on.
+    for (const std::string& message : ParameterRegistry::getInstance().checkAnnotations(controller))
+        CurcumaLogger::warn(message);
+
     // Claude Generated (Nov 2026): `-write_trajectory 0|1` and other numeric flags of Bool parameters
     // arrive as numbers; make them booleans before any capability reads them.
     ParameterRegistry::getInstance().coerceBoolParameters(controller);

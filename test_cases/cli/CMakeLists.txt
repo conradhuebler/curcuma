@@ -276,6 +276,7 @@ add_cli_test(routing 02_roundtrip_replay)
 add_cli_test(routing 03_confsearch_param_routing)   # ConfSearch registry migration guard
 add_cli_test(routing 04_numeric_bool_flags)          # -write_trajectory 0|1 and other numeric Bool flags (Nov 2026)
 add_cli_test(routing 05_unknown_key_warning)         # unknown flags are reported, known ones are not (Nov 2026)
+add_cli_test(routing 06_annotation_warning)           # enum/min/max violations are reported (Nov 2026)
 
 # =============================================================================
 # Error Handling Tests (6 scenarios) - Phase 1-2 Implementation

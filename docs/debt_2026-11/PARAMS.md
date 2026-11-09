@@ -224,6 +224,7 @@ Commit `c3f570f` (2026-10-31), clean tree. Read-only analysis, no repo file chan
     constructed key was not ruled out].
   - The 15 `analysis.topological_*` hits are false positives: they are read as `"topological.x"` and depend on
     `findKey`'s dot-to-underscore fallback (`config_manager.cpp:520-538`), another hidden mapping.
+- [Nov 9, 2026: `ParameterRegistry::checkAnnotations()` reports a value outside `enum=`, `min=` or `max=` once per parameter, as a warning after `-import_config`; enumerations compare case-insensitively; nothing is rejected or clamped. 33 parameters carry such annotations. Full ctest: two messages, both from error-path tests with a deliberately invalid RMSD method. Test `cli_routing_06_annotation_warning`. Not checked: values read only inside a capability (not in the controller), `unit=`.]
 - **L4 PARAM annotations are not enforced.** 18 PARAMs declare `enum=`, 16 `min/max`, 15 `unit`. They are used only by
   `printHelp`. `parameter_validation.h` (`ParamValidation::*`) has no include and no caller; it is dead code, yet it is
   listed in `src/core/CLAUDE.md:12`.
