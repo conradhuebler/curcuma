@@ -34,6 +34,7 @@ Commit `c3f570f` (2026-10-31), clean tree. Read-only analysis, no repo file chan
   mandatory BMT rule. That part is [read].
 
 **H2. A global `-method` overwrites `rmsd.method` inside ConfScan.** [run]
+- Status (Nov 9, 2026): not changed. In `confscan` and `rmsd` the parameter `method` is the alignment method by design (`confscan.h:382`, `rmsd.h:438`), so `-confscan ... -method template` is intended use. Keeping the global `method` out of both modules (tried in `config_manager.cpp`) moved the ctests `confscan_template` (14 instead of 15 accepted) and `cli_confscan_05`, so ConfScan depends on that fill. The energy method of ConfScan is `energy_method`, which is not a PARAM.
 - `curcuma -confscan c.xyz -method gfn2` gives `rmsd.method = "gfn2"`.
 - Cause: `CLI2Json` copies global values into `controller["global"]` (`main.cpp:1119-1122`). The multi-module
   `ConfigManager` then fills **every** module from `global` for each key the module does not set itself
@@ -58,6 +59,7 @@ Commit `c3f570f` (2026-10-31), clean tree. Read-only analysis, no repo file chan
 - The final `else` branch (`main.cpp:917-927`) is unreachable.
 
 **H4. `-opt ... -write_trajectory 0`, the form shown in the `-opt` help text, aborts the optimisation.** [read + nlohmann behaviour run]
+- Status (Nov 9, 2026): fixed by `ParameterRegistry::coerceBoolParameters()` (called in `main.cpp` after `-import_config`); `-write_trajectory 1` aborted as well. Test `cli_routing_04_numeric_bool_flags`. Still open: no `.trj.xyz` appears for `-write_trajectory 1` in `-opt` (with and without `-no_bmt`), not investigated.
 - The help prints `-write_trajectory <0|1>` (`main.cpp:1999`). The CLI stores 0.0, and `MergeJson` passes it through.
 - `OptimizationDispatcher::optimizeStructure` calls `merged_config.value("write_trajectory", true)`
   (`optimizer_factory.cpp:295`). nlohmann throws `type_error.302` "type must be boolean, but is number" (confirmed in

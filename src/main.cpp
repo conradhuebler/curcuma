@@ -2564,6 +2564,10 @@ int main(int argc, char **argv) {
         std::cout << "Loaded configuration from: " << config_file << std::endl;
     }
 
+    // Claude Generated (Nov 2026): `-write_trajectory 0|1` and other numeric flags of Bool parameters
+    // arrive as numbers; make them booleans before any capability reads them.
+    ParameterRegistry::getInstance().coerceBoolParameters(controller);
+
     // Claude Generated (Sep 2026, multi-GPU case A): one process-wide pool of GPU device slots
     // for molecule-level batch workers (-gpu_devices, -gpu_workers_per_device). No-op for CPU
     // runs and for a single visible device without explicit pool flags.

@@ -85,6 +85,24 @@ const ParameterDefinition* ParameterRegistry::findDefinition(const std::string& 
     return nullptr;
 }
 
+void ParameterRegistry::coerceBoolParameters(nlohmann::json& controller) const
+{
+    if (!controller.is_object())
+        return;
+    for (auto& [module, params] : controller.items()) {
+        if (!params.is_object())
+            continue;
+        for (auto& [key, value] : params.items()) {
+            if (!value.is_number())
+                continue;
+            const std::string canonical = resolveAlias(module, key);
+            const ParameterDefinition* def = canonical.empty() ? nullptr : findDefinition(module, canonical);
+            if (def && def->type == ParamType::Bool)
+                value = (value.get<double>() != 0.0);
+        }
+    }
+}
+
 std::vector<ParameterDefinition> ParameterRegistry::getForModule(const std::string& module) const
 {
     auto it = registry.find(module);
