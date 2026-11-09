@@ -113,11 +113,18 @@ struct FFEnergyComponents {
  * give Xi_ab -= d_a G_{j,b} with d = x_j - x_i (minimum image). The parts that are not a kernel sum (CN chain rule,
  * Ewald background terms, D4 tail) are added in postProcess(). Units: Eh. Only filled when setWantVirial(true);
  * the default path does not read or write it (kernels are instantiated without the virial code).
+ *
+ * V-LRC (Nov 2026): `tail_lrc` is NOT part of -dE/d(eps) of the model energy. It is the classical long-range
+ * pressure correction of the pairs that cross the sharp D4 evaluation radius r_c under a strain (statistical
+ * estimator for g(r) = 1 beyond r_c, derivation at FFWorkspace::postProcessVirial). total() stays the model
+ * derivative (finite-difference gate pbc_virial); pressureTotal() = total() + tail_lrc is what the reported
+ * pressure uses (tail_lrc is zero with pressure_lrc false).
  */
 struct FFVirialComponents {
     Eigen::Matrix3d bond, angle, dihedral, inversion, stors;
     Eigen::Matrix3d dispersion;   ///< D4 (and D3) pair kernel
     Eigen::Matrix3d disp_tail;    ///< homogeneous tail: E_tail * I (fixed r_c, E_tail ~ 1/V)
+    Eigen::Matrix3d tail_lrc;     ///< V-LRC: (3 E6_tail + 5 E8_tail)/3 * I, crossing-pair correction (not a model derivative)
     Eigen::Matrix3d repulsion;    ///< bonded + non-bonded repulsion
     Eigen::Matrix3d coulomb;      ///< Coulomb pair term (plain, or Ewald real + reciprocal)
     Eigen::Matrix3d coulomb_bg;   ///< Ewald neutralising and Gaussian background: (E_bg + E_gbg) * I
@@ -126,14 +133,14 @@ struct FFVirialComponents {
 
     void reset()
     {
-        for (Eigen::Matrix3d* m : { &bond, &angle, &dihedral, &inversion, &stors, &dispersion, &disp_tail, &repulsion,
-                 &coulomb, &coulomb_bg, &hbond, &xbond, &batm, &atm, &cn_bond, &cn_dispersion, &cn_coulomb })
+        for (Eigen::Matrix3d* m : { &bond, &angle, &dihedral, &inversion, &stors, &dispersion, &disp_tail, &tail_lrc,
+                 &repulsion, &coulomb, &coulomb_bg, &hbond, &xbond, &batm, &atm, &cn_bond, &cn_dispersion, &cn_coulomb })
             m->setZero();
     }
     FFVirialComponents& operator+=(const FFVirialComponents& o)
     {
         bond += o.bond; angle += o.angle; dihedral += o.dihedral; inversion += o.inversion; stors += o.stors;
-        dispersion += o.dispersion; disp_tail += o.disp_tail; repulsion += o.repulsion;
+        dispersion += o.dispersion; disp_tail += o.disp_tail; tail_lrc += o.tail_lrc; repulsion += o.repulsion;
         coulomb += o.coulomb; coulomb_bg += o.coulomb_bg; hbond += o.hbond; xbond += o.xbond;
         batm += o.batm; atm += o.atm; cn_bond += o.cn_bond; cn_dispersion += o.cn_dispersion; cn_coulomb += o.cn_coulomb;
         return *this;
@@ -142,11 +149,14 @@ struct FFVirialComponents {
     Eigen::Matrix3d bondTotal() const { return bond + cn_bond; }
     Eigen::Matrix3d dispersionTotal() const { return dispersion + disp_tail + cn_dispersion; }
     Eigen::Matrix3d coulombTotal() const { return coulomb + coulomb_bg + cn_coulomb; }
+    /// -dE/d(eps) of the model energy (sum of the terms above; tail_lrc NOT included)
     Eigen::Matrix3d total() const
     {
         return bondTotal() + angle + dihedral + inversion + stors + dispersionTotal() + repulsion + coulombTotal()
             + hbond + xbond + batm + atm;
     }
+    /// V-LRC: the virial of the reported pressure, total() + tail_lrc (bitwise total() when tail_lrc is zero)
+    Eigen::Matrix3d pressureTotal() const { return total() + tail_lrc; }
 };
 
 /**
@@ -352,18 +362,28 @@ public:
     /// postProcess() stores the energy as FFEnergyComponents::disp_tail and adds dEdcn to the CN chain
     /// rule (gradient calls only, dEdcn of size natoms). clearDispersionTail(): no tail (no cell, switched
     /// off); every following calculate() is then bitwise what it was without this term.
-    void setDispersionTail(double energy, const Vector& dEdcn)
+    /// V-LRC (Nov 2026): e6/e8 are the C6 and C8 parts of `energy` (E6_tail + E8_tail = energy up to rounding);
+    /// `pressure_lrc` true fills FFVirialComponents::tail_lrc = (3 e6 + 5 e8)/3 * I in postProcessVirial().
+    void setDispersionTail(double energy, const Vector& dEdcn, double e6 = 0.0, double e8 = 0.0, bool pressure_lrc = false)
     {
         m_disp_tail_active = true;
         m_disp_tail_energy = energy;
         m_disp_tail_dEdcn = dEdcn;
+        m_disp_tail_e6 = e6;
+        m_disp_tail_e8 = e8;
+        m_disp_tail_lrc = pressure_lrc;
     }
     void clearDispersionTail()
     {
         m_disp_tail_active = false;
         m_disp_tail_energy = 0.0;
         m_disp_tail_dEdcn.resize(0);
+        m_disp_tail_e6 = m_disp_tail_e8 = 0.0;
+        m_disp_tail_lrc = false;
     }
+    /// V-LRC: the C6 and C8 parts of the last tail energy (0 without a tail), for tests and reports
+    double dispersionTailE6() const { return m_disp_tail_active ? m_disp_tail_e6 : 0.0; }
+    double dispersionTailE8() const { return m_disp_tail_active ? m_disp_tail_e8 : 0.0; }
 
     /// Set baseline energy (e0 from parameter set)
     void setE0(double e0) { m_e0 = e0; }
@@ -463,8 +483,11 @@ public:
     bool wantVirial() const { return m_want_virial; }
     /// True after calculate(true) with the virial requested; evaluateEwaldCoulomb() (GPU hybrid) clears it.
     bool virialValid() const { return m_virial_valid; }
-    /// Xi (3x3, Eh) of the last calculate(true): sum of all components (definition at FFVirialComponents).
-    Eigen::Matrix3d virial() const { return m_result_virial.total(); }
+    /// Xi (3x3, Eh) of the last calculate(true) for the reported pressure: the model derivative plus the V-LRC
+    /// crossing-pair correction (FFVirialComponents::pressureTotal; equal to modelVirial() with pressure_lrc false).
+    Eigen::Matrix3d virial() const { return m_result_virial.pressureTotal(); }
+    /// -dE/d(eps) of the model energy alone (FFVirialComponents::total), the quantity the FD gate checks
+    Eigen::Matrix3d modelVirial() const { return m_result_virial.total(); }
     const FFVirialComponents& virialComponents() const { return m_result_virial; }
 
     /// Per-atom Coulomb self-energy inputs (setCoulombSelfEnergyParams order): tests copy them between instances.
@@ -627,6 +650,9 @@ private:
     bool m_disp_tail_active = false;  // Claude Generated (Nov 2026, A3c), see setDispersionTail()
     double m_disp_tail_energy = 0.0;
     Vector m_disp_tail_dEdcn;
+    double m_disp_tail_e6 = 0.0;    // V-LRC (Nov 2026): C6 and C8 parts of m_disp_tail_energy
+    double m_disp_tail_e8 = 0.0;
+    bool m_disp_tail_lrc = false;   // V-LRC: PARAM gfnff.pressure_lrc, fills virial.tail_lrc
     double m_e0 = 0.0;
 
     // Coulomb self-energy parameters (O(N), extracted at init)

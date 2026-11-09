@@ -482,6 +482,62 @@ Purpose: sensitivity of the periodic water density on the H-bond strength; it is
   -6.67 / -7.14 / -7.92 / -9.50 kcal/mol for s = 0.8 / 1.0 / 1.1 / 1.25 / 1.5 / 2.0 (R_OO 2.942 -> 2.927 A). The
   reference binding energy of the water dimer (about -5 kcal/mol, from memory) is still to be sourced.
 
+### 20. Liquid water: density +2.5 % to +2.8 %, weakly tetrahedral structure, gas-phase dimer overbound (candidate, reference values still to be sourced)
+
+Source: the water-density experiment of Nov 2026 (`/m2scratch/conrad/Projekte/2026/GFN-FF-Wasser/`, plan, criteria and all
+runs there; curcuma `feature/bulk` 1fd0ba15, 🤖 AI-generated, ⚙️ machine-tested, **not** human production tested). This is
+a **candidate** entry: the experimental and high-level reference numbers below are from memory and must be sourced before
+this counts as "reference demonstrably wrong".
+- NPT (Berendsen and C-rescale, 298 K, 1 bar, periodic boxes of 432 to 3456 H2O, Ewald, 13 matrix runs): density 1.0215 to
+  1.0247 g/cm^3 depending on the analysis window (scatter between runs 0.003), i.e. +2.5 % to +2.8 % against 0.997 (memory).
+  No run satisfies the strict equilibrium criterion K7 reliably (3 of 20 in the 40 ps window): about 1 % systematic uncertainty.
+- Structure (boxes): g_OO first maximum 2.92 A, height 2.97 (experiment about 2.8 A, 2.75 to 2.8), first minimum 3.83 to
+  3.93 A (experiment about 3.3 to 3.4 A), coordination number to the minimum 7.6 to 8.0 (about 4.5), 3.63 H-bonds per molecule
+  (criterion O...O < 3.5 A, angle < 30 deg). Reading: a denser, less tetrahedral liquid (hypothesis, not tested by an order parameter).
+- Gas phase: water dimer E_bind = -6.36 kcal/mol, R_OO = 2.938 A (reference about -5 kcal/mol and 2.91 A, memory): already
+  overbound at `hb_scale 1`. Scaling the H-bond term (entry 19) therefore worsens the gas phase for s > 1; the liquid sensitivity
+  series (s = 0.8 to 2.0) is running and will be added here.
+- Ruled out as the cause of the 2.8 %: cutoffs (D4 radii frozen per box 21 to 42 Bohr: at most 0.3 %), the HB/XB list refresh
+  interval (entry 21: +0.16 %, 1.3 sigma), box size in the first window, barostat type.
+- Droplets (no periodic boundary, soft wall): central density 1.055 to 1.08 g/cm^3, consistent with the Laplace pressure of a
+  real water droplet (700 to 1200 bar for R = 19 to 12 A, gamma = 72 mN/m from memory) on top of the box density; **not** an
+  extra defect. Pressure series of the box (P10): kappa_T(GFN-FF) = 6.3e-5 +- 0.4e-5 1/bar (water about 4.5e-5, memory), curve not smooth; Laplace inversion of the 12
+  droplet runs gives gamma = 54 +- 10 mN/m (water 72, memory; 512 and 1024 H2O: 56, equal within 1.3 %; 256 H2O: 42 +- 17; the pre-registered 20 % agreement over all three sizes is not met).
+  Do not compare droplet and box densities directly.
+
+### 21. HB/XB candidate lists make the potential-energy surface discontinuous at liquid density (candidate)
+
+NVE energy drift of 432 H2O at liquid density with the default list handling (forced rebuild every 10 calls,
+`hb_min_pair_energy_eh` 1e-9): -6.9e-4 Eh/ps (6 runs, all between -7.4e-4 and -6.4e-4); with a rebuild every call and no
+energy filter (`-hb_update_force_every 1 -hb_min_pair_energy_eh 0`): -2.6e-5 Eh/ps (4 runs, -1.25e-4 to +2.2e-5): a factor
+of about 25. The thermostat/barostat hide the sink; density (+0.16 %, 1.3 sigma) and structure did not change measurably.
+The reference also rebuilds its lists only by a displacement trigger (a known flaw: the trigger is off by sqrt(natoms),
+`shouldUpdateHBXB`), so the same discontinuity is expected there. A smooth H-bond term without a candidate-list threshold
+(or a list that is exact by construction) would remove it; the extra cost per step of the exact list is not quantified here.
+Detail: `docs/WP-PERIODIC-NONBONDED.md` D1 and the plan of the experiment folder (P7).
+
+- Liquid sensitivity (Nov 8, 2026, box of 432 H2O, NPT 298 K 1 bar, 2 runs per s, 6 runs at s = 1): density 1.003 / 1.022 / 1.031 / 1.028 / 1.066 / 1.053 g/cm^3 for
+  s = 0.8 / 1.0 / 1.1 / 1.25 / 1.5 / 2.0 (scatter between runs 0.002 to 0.005): the density **rises** with the H-bond strength (about +0.1 per unit s),
+  the direct attraction outweighs the opening of the network. First g_OO maximum height 2.79 / 2.99 / 3.07 / 3.22 / 3.38 / 3.85 (experiment
+  2.75 to 2.8, memory); its position (2.89 to 2.93 A) and the coordination number (6.6 to 7.6) hardly change. s = 0.8 gives the density
+  closest to the experiment (0.997, memory) and, in the gas phase, the dimer closest to the reference (-5.74 against about -5 kcal/mol): both point to s < 1.
+  Not tested: any other observable (WATER27, S66 H-bond subset, ion-water clusters); the HB parameters of GFN-FF were fitted
+  against broad sets, so s < 1 may cost accuracy elsewhere. Linear extrapolation of the density crosses 0.997 near s = 0.74 (an extrapolation).
+
+- Reference data test of `hb_scale` (Nov 9, 2026; GMTKN55 geometries and reference energies from the local ORCA 6 dataset files, 14 subsets, 402 reactions,
+  s = 1.1 / 1.0 / 0.9 / 0.8 / 0.7, single points on the data-set geometries; WTMAD-2 not computed, weights not in the files; `05_referenztest/` of the
+  experiment folder): controls without H-bonds (ADIM6, RG18, ACONF, DARC) are bitwise equal for every s. MAD in kcal/mol, s = 1.0 -> 0.8: WATER27 21.4 -> 25.8,
+  AHB21 10.3 -> 10.7, CARBHB12 3.30 -> 3.49, BUT14DIOL 1.15 -> 1.39, S66 0.81 -> 0.85, HEAVY28 0.77 -> 0.81, IL16 71.6 -> 71.7; better only SCONF
+  2.24 -> 1.93 and Amino20x4 1.59 -> 1.54. All sets except WATER27 pooled (n = 375): 9.634 -> 9.688. Neutral water clusters, GFN-FF-relaxed
+  (14 clusters, MAD): s = 1.0 3.85, s = 0.8 11.56, s = 1.1 2.24 (best); dimer overbound (+1.39 at s = 1, +0.77 at s = 0.8), from the trimer
+  on **underbound** (20-mers -2.5 to -13.7 at s = 1, -21.1 to -32.1 at s = 0.8; single points on the data-set geometries -24 to -33 at s = 1). Ion clusters: 10
+  of 11 with H3O+ or OH- get 1.0 to 4.5 kcal/mol worse at s = 0.8. Reading: the better liquid density and dimer at s = 0.8 are not
+  better physics but a compensation; the pattern "dimer overbound, larger clusters underbound" points to **missing cooperativity** (hypothesis,
+  not tested) rather than a wrong global H-bond strength. The liquid wants s < 1 (density, peak height), the gas-phase clusters want s > 1: a single factor cannot fix both.
+- Side finding: the default `frag_charge_model` changed since Sep 2026; H3O+(H2O)2 binding energy -42.2 kcal/mol with the default (ensemble) and +63.5 with
+  `-gfnff.frag_charge_model reference` (reproduces the magnitude of the September WATER27 run); the charged WATER27 rows of `reactions_cur_gfnff.csv` (Sep) are
+  reference-model values.
+
 ## How to add to this list
 
 An entry belongs here when an **external** reference (r²SCAN-3c, GFN2, DLPNO, experiment)

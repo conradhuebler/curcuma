@@ -43,7 +43,7 @@ re-measure them.
 
 **Limits you should know.**
 - GFN-FF is a force field. On the 41 MOR41 reactions it is 60 to 70 kcal/mol away from DLPNO-CCSD(T) in mean absolute deviation (GFN2: about 12). Port fidelity to the reference is high; the reference itself is not accurate for reaction energies of metal complexes.
-- GFN-FF has no periodic boundary conditions.
+- GFN-FF periodic boundary conditions (orthorhombic cell from a `unitcell a b c 90 90 90` comment line, CPU; `-gpu cuda` only as an opt-in hybrid with `-gfnff.gpu_periodic true`) with Ewald electrostatics, pressure and Berendsen/C-rescale barostats (`-barostat`): 🤖 AI-implemented, machine-tested only, not human-tested; see [docs/WP-PERIODIC-NONBONDED.md](docs/WP-PERIODIC-NONBONDED.md) and [docs/NPT.md](docs/NPT.md). Other methods ignore a unit cell.
 - Open-shell systems work for `gfn1`/`gfn2` (`-spin N`, N = number of unpaired electrons).
 - GPU backends (`-gpu cuda|rocm|vulkan`) are optional and off by default. CUDA has been run on an NVIDIA H200, RTX 5090, RTX 5080, RTX A4500 and GTX 1660; ROCm on a Radeon 890M (gfx1150) only, so the ROCm plugin build is unverified on other setups; Vulkan is opt-in and brings no speed-up. A GPU run that falls back to the CPU says so after the run (`-gpu_strict true` stops instead).
 - Results of the native methods can differ in the last digits from tblite/xtb in documented places (`-xtb.sto6g_legacy_4sp`, `-xtb.d4_atm_cutoff 40.0` reproduce xtb's choices).
@@ -176,6 +176,9 @@ optimisation, MD and ConfSearch (examples, options, convergence rules) are in
 Any parameter can be given as a flat flag (`-cn_cutoff_bohr 5.5`) or scoped (`-gfnff.cn_cutoff_bohr 5.5`).
 Diagnostic GFN-FF switch: `-gfnff.hb_scale s` multiplies the hydrogen-bond term (default 1.0 = the reference; CPU only),
 [docs/REV_GFNFF_TODO.md](docs/REV_GFNFF_TODO.md) #19.
+Periodic GFN-FF pressure (`-md -compute_pressure true`, barostats): `-gfnff.pressure_lrc` (default true) adds the
+long-range correction of the D4 pairs crossing the evaluation radius; `false` restores the earlier pressure,
+[docs/NPT.md](docs/NPT.md).
 `-export-config <module>` prints a module's defaults as JSON to the standard output (the program banner
 precedes the JSON in the build checked on 2026-10-01, so remove the lines before the first `{` when saving it).
 

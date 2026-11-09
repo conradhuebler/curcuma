@@ -808,6 +808,16 @@ endif()
 add_test(NAME pbc_virial COMMAND test_pbc_virial WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 set_tests_properties(pbc_virial PROPERTIES TIMEOUT 1800 LABELS "pbc;gfnff;ewald")
 
+# Claude Generated (Nov 2026, V-LRC): long-range pressure correction of the D4 tail (component tail_lrc), water boxes
+# and the r_c independence of the corrected pressure for 800 uncorrelated Ne atoms
+add_executable(test_pbc_virial_lrc unit/test_pbc_virial_lrc.cpp)
+target_link_libraries(test_pbc_virial_lrc curcuma_core test_molecule_registry)
+if(USE_PCH)
+    target_precompile_headers(test_pbc_virial_lrc REUSE_FROM curcuma_core)
+endif()
+add_test(NAME pbc_virial_lrc COMMAND test_pbc_virial_lrc WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(pbc_virial_lrc PROPERTIES TIMEOUT 1800 LABELS "pbc;gfnff;ewald")
+
 # Claude Generated (Nov 2026, S-HB): diagnostic factor gfnff.hb_scale on the HB term (energy, gradient FD, virial FD, vs hbond false)
 add_executable(test_gfnff_hb_scale unit/test_gfnff_hb_scale.cpp)
 target_link_libraries(test_gfnff_hb_scale curcuma_core test_molecule_registry)

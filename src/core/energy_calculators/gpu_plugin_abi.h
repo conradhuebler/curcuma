@@ -38,11 +38,12 @@
 // 2 = Nov 2026, S1 (GFNFF gained the data member m_gpu_periodic; GFNFF is shared across the boundary);
 // 3 = Nov 2026, N1 (GFNFF gained m_want_virial; FFWorkspace and FFAccumulator gained the virial members);
 // 4 = Nov 2026, N2 (GFNFF gained m_cutoffs_frozen, m_frozen_d4, m_lists_rebuild_pending, m_cell_update_count);
-// 5 = Nov 2026, S-HB (FFWorkspace gained m_hb_scale, the diagnostic hb_scale factor).
+// 5 = Nov 2026, S-HB (FFWorkspace gained m_hb_scale, the diagnostic hb_scale factor);
+// 6 = Nov 2026, V-LRC (FFVirialComponents gained tail_lrc; FFWorkspace gained m_disp_tail_e6/e8/lrc; GFNFF m_pressure_lrc).
 
 #pragma once
 
-#define CURCUMA_GPU_PLUGIN_ABI_VERSION 5
+#define CURCUMA_GPU_PLUGIN_ABI_VERSION 6
 
 /// Defines `extern "C" int curcuma_<backend>_abi_version()` in a plugin entry file (use at file scope).
 #define CURCUMA_GPU_PLUGIN_DEFINE_ABI_VERSION(backend)                                                                \

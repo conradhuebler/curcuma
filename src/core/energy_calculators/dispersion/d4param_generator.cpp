@@ -2169,7 +2169,8 @@ void D4ParameterGenerator::fusedBuildView()
 //   and the two partial derivatives are equal because C6ref(Z,a;Z,b) = C6ref(Z,b;Z,a)),
 //   dC6_kj/dCN_k = sum_a dw_k[a] sum_b C6ref(Z_k,a; Z_j,b) w_j[b]  ->  D_kZ like C_kZ with dw_k.
 // zeta is fixed (topology charges), so there is no dq term. The volume derivative (virial, NPT)
-// is dE_tail/dV = -E_tail/V at fixed r_c; not implemented here (no barostat uses it yet).
+// is dE_tail/dV = -E_tail/V at fixed r_c (virial: FFWorkspace::postProcessVirial, N1; the pressure adds the
+// crossing-pair correction 3 E6 + 5 E8 there, V-LRC).
 double D4ParameterGenerator::homogeneousTailFromSums(double s6, double s8, double rc_bohr, double volume_bohr3)
 {
     const double pi = 3.14159265358979323846;

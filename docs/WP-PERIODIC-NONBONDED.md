@@ -1505,6 +1505,7 @@ On `feature/bulk` (base `71761fad`), CPU only. Prerequisite for a barostat (N2, 
   through the chain rule. Note: with the default `dispersion_cutoff_bohr` 0 the evaluation radius is `nextafter(L_min/2)`
   and would follow a strain; the energy the virial belongs to is the one with r_c held fixed (the test sets an absolute
   cutoff; a barostat must either hold r_c fixed or differentiate r_c(L) as well).
+  The reported pressure adds the crossing-pair correction 3 E6 + 5 E8 since V-LRC (section below, `pressure_lrc`).
 - **Not in the virial**: the ensemble charge blend (`frag_charge_model ensemble`, geometry-dependent window weights),
   ALPB, ATM (no minimum image): `GFNFF::setWantVirial(true)` refuses them with the reason; without a cell or with
   `coulomb_ewald false` likewise. The GPU hybrid (S2) evaluates the local terms on the device and produces no virial
@@ -1746,3 +1747,72 @@ vary by 10 % (shared machine), the +3 ms is consistent across them (n = 3 per mo
   files with a barostat and RATTLE. The forced list rebuild at every coupling could be replaced by a skin that budgets
   the strain (|mu - 1| L sqrt(3)/2 per coupling) if the rebuild cost matters at `pcoupl_interval` 1. Plugin ABI 4: the
   CUDA plugin must be rebuilt (not built here). Human production testing pending.
+
+## V-LRC long-range pressure correction of the D4 tail (2026-11-09, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+On `feature/bulk` (base `0351a245`), CPU only. Trigger: the P1 cutoff scan of the W1 water project (project folder
+`03_auswertung/cutoff_scan/BERICHT.md`): with the tail the pressure still followed `dP(r_c) = c + A r_c^-3.15`, with an
+amplitude about equal to the tail's own pressure; without the tail about twice that.
+
+### Derivation (code comment at `FFWorkspace::postProcessVirial`)
+
+One pair class `u(r) = -C_n r^-n`, N atoms, rho = N/V, g(r) = 1 beyond the sharp radius r_c:
+- energy tail `E_n = (N rho/2) int_rc^inf 4 pi r^2 u dr = -2 pi N rho C_n / ((n-3) r_c^(n-3))` (the A3c formula),
+- virial tail `W_n = -(N rho/2) int 4 pi r^2 r u'(r) dr = n E_n` (since `r u' = -n u`), pressure `P_n = (n/3) E_n / V`.
+This is the classical long-range (tail) correction of the virial pressure for a truncated pair potential (as in Allen and
+Tildesley, Computer Simulation of Liquids, long-range corrections; checked here against their Lennard-Jones forms: the
+r^-6 parts of E_lrc and P_lrc follow from the two lines above with C_6 = 4 eps sigma^6).
+The N1 virial differentiates the model energy at a fixed pair set: `E_n ~ 1/V`, tr Xi = 3 E_n, i.e. `P = E_n/V`, factor 1
+instead of n/3. The difference `(n-3)/3 E_n/V = -(2 pi/3) rho^2 r_c^3 u(r_c)` is the impulsive term of the pairs that cross
+r_c under a strain (energy jump u(r_c) each); a finite-difference strain at constant pair count (the N1 gate) cannot see it.
+With the two D4 tail parts (C6, n = 6; C8, n = 8): **tr Xi_lrc = 3 E6_tail + 5 E8_tail** (the order's derivation is
+confirmed, factors 2 and 8/3 of the full tail pressure instead of 1). The kernel is a hard cutoff (`rij > disp.r_cut`:
+skip), so the crossing term exists. Approximations: g(r) = 1 beyond r_c and the large-r form of the damping (as E_tail,
+error <= (1/3)(R0/r_c)^6 relative); a statistical estimator, not a derivative of the model energy.
+
+### Implementation
+
+- `FFVirialComponents::tail_lrc = (3 E6 + 5 E8)/3 * I`; `total()` unchanged (model derivative), `pressureTotal()` =
+  `total() + tail_lrc`; `FFWorkspace::virial()` (and with it `GFNFF::virial()`, SimpleMD's P column, the barostat) returns
+  `pressureTotal()`, `FFWorkspace::modelVirial()` the model part. E6/E8 from the same sums S6/S8 as the tail energy
+  (`homogeneousTailFromSums`), passed with `setDispersionTail(e, dEdcn, e6, e8, pressure_lrc)`; `dispersionTailE6/E8()`.
+- PARAM `gfnff.pressure_lrc` (Bool, default true, category Dispersion; constructor fallback true). false: tail_lrc = 0,
+  pressure as N1/N2 (bitwise). Only with `dispersion_tail` on; no effect on energies, forces or without a cell. The C8 part,
+  dE_tail/dCN and the CN chain rule are unchanged. Plugin ABI 5 -> 6 (`gpu_plugin_abi.h`; the GPU hybrid has no virial).
+
+### Numbers
+
+- Estimate: water at 1.026 g/cm^3 (432 box, rho_mol 5.08e-3 Bohr^-3), <zeta_i zeta_j C6> per molecule pair 40 au (from
+  E_tail -0.01992 Eh at r_c 21.00 Bohr, V 84990 Bohr^3): E6/V = -(2 pi/3) rho^2 <C6>/r_c^3 = -69.0 / -34.7 / -17.1 / -8.7 bar
+  at r_c 21.0 / 26.4 / 33.4 / 41.9 Bohr; P1 "tail off" +67.2 / +33.2 / +16.4 / +8.2 bar and the P1 fit P(inf) - P(ref)
+  -70.0 / -34.0 / -16.4 / -8.0 bar. Measured shift of P at the matrix radius (new binary, lrc true - false, 5 frames):
+  -70.6 / -34.3 / -16.8 bar (432 / 864 / 1728); C8 share of E_tail 4-5 % (water boxes in the test).
+- Density effect of the old estimator (linear, kappa_T 4.5e-5 /bar, barostat setting): NPT densities with the matrix radii
+  were 0.32 / 0.15 / 0.08 / 0.04 % too low (432 / 864 / 1728 / 3456; 3456 from the P1 fit).
+
+### Tests (thresholds fixed before the runs)
+
+- (a) `pbc_virial` (FD gate against `total()`) unchanged and passing with the default `pressure_lrc true`.
+- (b) ctest `pbc_virial_lrc`: 20/60 H2O in L = 44 Bohr (r_c 20 and default L/2): E6 + E8 = E_tail (0 rel), tr tail_lrc =
+  3 E6 + 5 E8 (0 rel), isotropic, `virial()` = `total()` + tail_lrc (8e-17), pressure_lrc false: tail_lrc 0 and virial()
+  == total() bitwise, model components bitwise equal; E6/E8 from E_tail at r_c 15 and 20 (two-radius fit) 4e-16 / 4e-15.
+- (c) same test, 800 Ne (random, d_min 5 Bohr, L 70 Bohr, rho 2.33e-3 Bohr^-3, 5 configurations, fixed Ewald): paired
+  dP(r_c) - dP(30) model +6.17 / +2.02 / +0.61 bar, with lrc -0.12 / -0.013 / -0.004 bar (r_c 15 / 20 / 25, SE 0.02 /
+  0.004 / 0.001); ratio at 20 Bohr 0.006 (criterion <= 0.2); max |q| 4e-14 e, |E_coul| 5e-13 Eh. The -0.12 bar at 15 Bohr
+  is of the size of the damping and d_min-correlation error (not separated).
+- (d) cutoff scan, project folder `03_auswertung/cutoff_scan_lrc/` (script `cutoff_scan_lrc.py`, P1 protocol, 5 frames,
+  paired against the matrix radius): dP over 21..27 Bohr with lrc 0.15 bar (864), 0.14 bar (1728) against 37.7 / 38.1 bar
+  without (ratio 0.004, criterion <= 0.30). 432 (L/2 22 Bohr: 24 and 27 Bohr not admissible, cell check aborts; 1728 run
+  instead as the second box): over 15..21.48 3.4 bar against 137 bar (0.025). With lrc the residual is -3.4 to -3.6 bar
+  at 15 Bohr and <= 0.4 bar from 18 Bohr on in all three boxes. `pressure_lrc false` reproduces the old scan exactly
+  (P 0.000 bar, E_tot 0 Eh, 85 runs).
+- (e) without `compute_pressure`: `-sp` energy and `-dump_gradient` md5 of the 7 structures at 1 and 4 threads 14/14
+  identical to the HEAD binary; `-md` box60 100 fs with a cell: table (timing columns excluded) and trajectory coordinates
+  identical; with `compute_pressure` / Berendsen (432 box, 40 steps) and `pressure_lrc false` identical incl. P, V and the
+  final restart file; with lrc true P (and the NPT cell) differ as intended.
+- (f) CPU `ctest -R 'gfnff|frag|eeq|simplemd|pbc|ewald|react|restart|md_|gpu|plugin|molecule|xyz|parser|curcumaopt' -j1`:
+  "100 % tests passed out of 149" (4 GPU tests skipped, 1 disabled), incl. `pbc_virial` and `pbc_virial_lrc` (16 s);
+  `scripts/check_docs.py`: the 9 known errors only.
+- **Not tested**: liquids other than water and the Ne gas, charged boxes, NPT production runs with the correction (the
+  density effect above is the linear estimate), the GPU hybrid (no virial), the CUDA plugin at ABI 6 (not built). No
+  crossing term exists for the other sharp radii (HB/XB 21.2, repulsion 20 Bohr). Human production testing pending.

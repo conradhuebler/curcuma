@@ -858,6 +858,20 @@ void FFWorkspace::postProcess(bool gradient)
 // (dC6/dCN and the D4 tail), Coulomb (TERM 1b, -qtmp).
 // Ewald background terms ~ 1/V: Xi_ab = (E_bg + E_gbg) delta_ab; the self term is strain-independent.
 // D4 tail at fixed r_c (A3c): E_tail ~ 1/V, so Xi_ab = E_tail delta_ab; its dE/dCN is in the chain rule above.
+//
+// V-LRC long-range pressure correction (Claude Generated, Nov 2026; the classical tail correction of the virial
+// pressure for a truncated pair potential, e.g. Allen and Tildesley, Computer Simulation of Liquids, section on
+// long-range corrections). For one pair class u(r) = -C_n r^-n, N atoms, rho = N/V, g(r) = 1 beyond r_c:
+//   energy tail    E_n = (N rho/2) int_rc^inf 4 pi r^2 u dr       = -2 pi N rho C_n / ((n-3) r_c^(n-3))
+//   virial tail    W_n = -(N rho/2) int_rc^inf 4 pi r^2 r u'(r) dr = n E_n   (r u' = -n u)
+//   pressure       P_n = W_n / (3V) = (n/3) E_n / V.
+// The model derivative above (fixed r_c, fixed pair set: E_n ~ 1/V) gives E_n/V, factor 1 instead of n/3. The
+// missing (n-3)/3 E_n/V is the impulsive term of the pairs that cross the sharp radius r_c under the strain
+// (energy jump u(r_c) per crossing pair; it equals -(2 pi/3) rho^2 r_c^3 u(r_c) for g = 1). A finite-difference
+// strain at constant pair count does not see it. Trace of the correction: (n-3) E_n, i.e. with the two parts of
+// the D4 tail (C6: n = 6, C8: n = 8)  tr Xi_lrc = 3 E6_tail + 5 E8_tail, isotropic Xi_lrc = tr/3 * I.
+// This is a statistical estimator in the homogeneous approximation (g = 1 beyond r_c, large-r form of the damping
+// as the tail energy), NOT a derivative of the model energy; kept in its own component tail_lrc.
 // ============================================================================
 void FFWorkspace::postProcessVirial(bool has_term1b, const Vector& qtmp, bool tail_cn)
 {
@@ -865,6 +879,8 @@ void FFWorkspace::postProcessVirial(bool has_term1b, const Vector& qtmp, bool ta
         m_result_virial.coulomb_bg += curcuma::ewald::EwaldSum::backgroundVirial(m_ewald_terms);
     if (m_disp_tail_active)
         m_result_virial.disp_tail += m_disp_tail_energy * Eigen::Matrix3d::Identity();
+    if (m_disp_tail_active && m_disp_tail_lrc)
+        m_result_virial.tail_lrc += ((3.0 * m_disp_tail_e6 + 5.0 * m_disp_tail_e8) / 3.0) * Eigen::Matrix3d::Identity();
     if (m_dcn.empty() || m_dcn.natoms != m_natoms || m_dEdcn_total.size() != m_natoms)
         return;
     const bool pbc = m_cell_bohr.active;

@@ -386,6 +386,7 @@ PARAM(hb_parallel_min_pairs, Int, 500, "Run the H-bond detection on the thread p
 // ---- Dispersion ----
 PARAM(dispersion_cutoff_bohr, Double, 0.0, "Cutoff (Bohr) of the D4 dispersion pair list; 0 keeps all pairs, as the reference. A cutoff also widens the CN-derivative range to match. With a periodic cell, 0 reduces the 50 Bohr evaluation radius to just below L_min/2 (the part beyond it is added by dispersion_tail); an explicit value must be below L_min/2.", "Dispersion", {})
 PARAM(dispersion_tail, Bool, true, "Periodic cell only: add the long-range D4 tail beyond the evaluation radius for homogeneous density (g(r) = 1), from the current CN, with its force through dE/dCN; reported as 'Dispersion tail'. No effect without a cell. false leaves the pair term cut at the evaluation radius.", "Dispersion", {})
+PARAM(pressure_lrc, Bool, true, "Periodic cell with dispersion_tail only: the reported pressure (MD column P, barostat) adds the long-range correction of the D4 pairs crossing the evaluation radius, tr Xi_lrc = 3 E6_tail + 5 E8_tail (homogeneous estimator g(r) = 1, not a derivative of the model energy). false: pressure from the model-energy derivative alone (behaviour before Nov 9, 2026). No effect on energies and forces.", "Dispersion", {})
 PARAM(dispersion_c6_update, Bool, true, "Recompute the D4 pair C6 from the current CN at each new geometry, so MD and optimisation agree with single points. false keeps C6 of the setup geometry.", "Dispersion", {})
 PARAM(disp_c6_fused, Bool, true, "CPU: evaluate each D4 pair's C6 and dC6/dCN inside the dispersion energy loop instead of storing them per pair every step (same values bit for bit, less memory traffic). false for the stored per-pair path.", "Dispersion", {})
 PARAM(disp_half_contraction, Bool, true, "Faster per-atom contraction for the D4 C6 and dC6/dCN; it changes the summation order (energies agree to about 1e-10 Eh). false for the plain contraction.", "Dispersion", {})
@@ -3255,6 +3256,7 @@ private:
     bool m_implicit_coulomb_pairs = false; ///< GPU enumerates Coulomb pairs; skip host list
     bool m_print_timing = true;     ///< Print init timing summary at verbosity >= 1
     bool m_dispersion_tail = true;  ///< Nov 2026 (A3c): PARAM dispersion_tail (periodic cell only)
+    bool m_pressure_lrc = true;     ///< Nov 2026 (V-LRC): PARAM pressure_lrc (virial component tail_lrc)
     bool m_want_virial = false;     ///< Nov 2026 (N1): atomic virial requested (setWantVirial)
     bool m_cutoffs_frozen = false;  ///< Nov 2026 (N2): dispersionRadiiBohr() returns m_frozen_d4 (freezeCutoffsForCellChanges)
     D4RadiiBohr m_frozen_d4;        ///< Nov 2026 (N2): the frozen D4 radii

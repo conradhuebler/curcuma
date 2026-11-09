@@ -18,6 +18,7 @@ step just finished, `P = (2 Ekin + tr Xi) / (3 V)`. Isotropic only; cubic and or
 | `tau_p` | 1000 fs | coupling time |
 | `compressibility` | 4.5e-5 1/bar | isothermal compressibility beta (water at 300 K); sets the coupling strength, not the result |
 | `pcoupl_interval` | 10 | the barostat acts every N steps with the time step N dt |
+| `gfnff.pressure_lrc` | true | add the long-range correction of the D4 pairs crossing the evaluation radius to the pressure (below) |
 
 A barostat switches `compute_pressure` on: the status line gains `P`, `<P>` (bar), `V` (A^3), `rho` (g/cm^3) and `L`
 (shortest cell edge, A); the restart files carry `cell` (9 numbers, A), the barostat parameters, the step counter of
@@ -30,6 +31,21 @@ curcuma -md box432.xyz -method gfnff -threads 4 -restart_file heat.final.json \
 curcuma -md box432.xyz -method gfnff -thermostat csvr -coupling 100 -T 298.15 -dt 0.5 -max_time 20000 \
         -barostat crescale -tau_p 1000 -seed 7
 ```
+
+## Pressure: long-range correction of the D4 tail (V-LRC, Nov 9, 2026)
+
+The virial `Xi` of N1 is the strain derivative of the model energy at a fixed pair set; for the homogeneous D4 tail that
+gives `tr Xi_tail = 3 E_tail`. The pressure of the untruncated pair potential (g(r) = 1 beyond r_c) needs
+`6 E6_tail + 8 E8_tail`; the difference `3 E6_tail + 5 E8_tail` is the impulsive term of the pairs crossing the sharp
+radius r_c (classical long-range pressure correction). With `pressure_lrc true` (default) `P`, `<P>` and the barostat
+use it; `pressure_lrc false` gives the N1/N2 pressure bitwise. Energies and forces are not affected. Water at the W1
+matrix radii: -70.6 / -34.3 / -16.8 bar (432 / 864 / 1728 waters; 3456: about -8 bar from the P1 fit). Derivation and
+tests: [WP-PERIODIC-NONBONDED.md](WP-PERIODIC-NONBONDED.md) section V-LRC.
+
+**Runs made before the correction** (binaries up to `0351a245`, W1 project: the run matrix, P1, P7, P8, P2, P10) used
+the old estimator: their pressure is too high by the amounts above, and their NPT densities are too low by about
+0.32 / 0.15 / 0.07 / 0.04 % (432 / 864 / 1728 / 3456 waters; linear estimate with kappa_T = 4.5e-5 /bar from the cutoff
+scan, not an NPT rerun). Droplet runs without a cell are not affected.
 
 ## Equations (`SimpleMD::applyBarostat`, the code comment carries the derivation)
 

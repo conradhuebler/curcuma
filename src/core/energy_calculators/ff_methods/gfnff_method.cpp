@@ -650,6 +650,8 @@ GFNFF::GFNFF(const json& parameters)
     m_print_timing = m_parameters.value("print_timing", true);
     // Nov 2026 (A3c): fallback == PARAM default of dispersion_tail (gfnff.h); no effect without a cell
     m_dispersion_tail = m_parameters.value("dispersion_tail", true);
+    // Nov 2026 (V-LRC): fallback == PARAM default of pressure_lrc (gfnff.h); only the reported pressure changes
+    m_pressure_lrc = m_parameters.value("pressure_lrc", true);
     // Nov 2026 (B2): fallbacks == PARAM defaults of coulomb_ewald, ewald_tolerance, ewald_r_cut, ewald_alpha
     // (gfnff.h); no effect without a cell
     m_coulomb_ewald = m_parameters.value("coulomb_ewald", true);   // B3: default true (periodic EEQ + Coulomb)
@@ -13440,6 +13442,7 @@ void GFNFF::updateDispersionTail(bool gradient)
     // that updateCNValuesForGradient() built for this CN. Diagnostic calls of m_workspace->calculate()
     // outside calculationSingle() (react dE_jump, NumGradFixedCharges) keep the last tail.
     // Virial (N1, Nov 2026): at fixed r_c E_tail ~ 1/V, so Xi_ab = E_tail delta_ab (FFWorkspace::postProcessVirial).
+    // Pressure (V-LRC, Nov 2026): plus the crossing-pair correction tr = 3 E6 + 5 E8 with pressure_lrc (same place).
     if (!m_workspace)
         return;
     if (!dispersionTailActive()) {
@@ -13451,8 +13454,14 @@ void GFNFF::updateDispersionTail(bool gradient)
     Vector dEdcn;
     if (gradient)
         dEdcn = Vector::Zero(m_atomcount);
-    const double e = m_d4_generator->homogeneousDispersionTail(rc, V, gradient ? &dEdcn : nullptr);
-    m_workspace->setDispersionTail(e, dEdcn);
+    double s6 = 0.0, s8 = 0.0;
+    const double e = m_d4_generator->homogeneousDispersionTail(rc, V, gradient ? &dEdcn : nullptr, &s6, &s8);
+    // V-LRC (Nov 2026): the C6 and C8 parts of the same formula (D4ParameterGenerator::homogeneousTailFromSums),
+    // E6 = -(2 pi/V) S6/(3 r_c^3), E8 = -(2 pi/V) 2 S8/(5 r_c^5); they enter only the virial component tail_lrc
+    // (FFWorkspace::postProcessVirial), the energy stays e.
+    const double e6 = D4ParameterGenerator::homogeneousTailFromSums(s6, 0.0, rc, V);
+    const double e8 = D4ParameterGenerator::homogeneousTailFromSums(0.0, s8, rc, V);
+    m_workspace->setDispersionTail(e, dEdcn, e6, e8, m_pressure_lrc);
 }
 
 void GFNFF::configurePeriodicCell()
