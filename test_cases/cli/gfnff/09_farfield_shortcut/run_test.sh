@@ -64,7 +64,10 @@ def md(src, charge, flag, extra):
     try:
         cmd = [B, "-md", "m.xyz", "-method", "gfnff", "-charge", str(charge), "-threads", "2", "-no_bmt",
                "-gfnff.cache_topology", "false", "-gfnff.farfield_shortcut", flag, "-max_time", "3",
-               "-md_diagnostics", "true", "-dump_frequency", "1"] + extra
+               "-md_diagnostics", "true", "-dump_frequency", "1",
+               # seed fixed (Nov 2026, F-MD): the default -md.seed -1 is the clock in seconds; a second boundary between
+               # the two runs gave different start velocities (flaky, about 1 run in 15)
+               "-md.seed", "1"] + extra
         p = subprocess.run(cmd, cwd=d, capture_output=True, text=True, timeout=600)
         ep = []
         fn = os.path.join(d, "m.diag.jsonl")

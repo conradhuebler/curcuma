@@ -1816,3 +1816,61 @@ error <= (1/3)(R0/r_c)^6 relative); a statistical estimator, not a derivative of
 - **Not tested**: liquids other than water and the Ne gas, charged boxes, NPT production runs with the correction (the
   density effect above is the linear estimate), the GPU hybrid (no virial), the CUDA plugin at ABI 6 (not built). No
   crossing term exists for the other sharp radii (HB/XB 21.2, repulsion 20 Bohr). Human production testing pending.
+
+## F-MD four SimpleMD defects from the matrix and pilot runs: print_frequency, restart seed, restart DOF, seed flakes (2026-11-09, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+On `feature/bulk` (base `46c35811`), CPU only, all in `src/capabilities/simplemd.cpp/.h`. New ctests
+`simplemd_print_frequency` and `simplemd_restart_state` (`test_cases/unit/test_simplemd_fmd.cpp`), both red with the
+sources of `46c35811` (SIGFPE, exit 136; 5 of 16 checks) and green after the fix.
+
+1. **`-print_frequency 0.5` ended with SIGFPE.** The PARAM was `Int` and read with `get<int>`: 0.5 became 0, used as
+   the modulus in `static_cast<int>(m_step * m_dT) % m_print` (old line ~3244). print_frequency is a time in fs (as the
+   test always treated it; the help said "steps"). Fix: PARAM `Double`, `m_print` double, test in `printDue()`; a value
+   <= 0 prints every step, a fractional one prints when `floor(step*dt / freq)` changes, an integer one keeps the old
+   test unchanged.
+2. **Repeated table rows at dt < 1 fs: not fixed.** The test truncates the time, so with dt 0.5 fs the steps 100 and
+   101 both print the 50 fs row (and step 1 a row at 0.5 fs). A variant that kept only the first step per truncated time
+   was built and ran: rows and values otherwise identical, but `gfnff_d4_fused_c6` (`check_d4_fused_c6.py`) counts at
+   least 20 rows for 20 steps of 0.5 fs with `print_frequency 1`, i.e. it relies on one row per step, and failed. Per the
+   rule "existing tests must not change" integer frequencies keep the old test exactly; the project parsers read the
+   50 fs grid and tolerate the repeats. A fix needs that test adapted (operator decision).
+3. **After a restart the generator was not seeded.** `seedRandomEngine()` was only called from `InitVelocities()`, which
+   a restart skips: every restarted run drew the default-constructed `mt19937` sequence (CSVR, Andersen, C-rescale noise
+   identical for every repetition; seeds 202 and 303 bit-identical). Fix (`Initialise()`, after the restart load): an
+   explicit `-seed` (in the `simplemd`/`global` scope or flat, detected in the constructor) wins over the file's `seed`;
+   without `-seed` the file's value is used (note: the stored value is the start seed plus one per CSVR call, so a
+   continuation draws a new stream); `-seed -1` (clock) and `0` resolve as before; then `seedRandomEngine()` (seed and
+   restart geometry). Test: CSVR, 20 steps after the restart: 202 vs 303 differ (max dEkin 2.3e-2 Eh), 202 twice and
+   "no -seed" twice identical, "no -seed" == `-seed <file value>`.
+4. **After a restart m_dof was 3N.** `InitConstrainedBonds()` (the only DOF count) was skipped on restart. The count is
+   now `countDegreesOfFreedom()` (split off unchanged) and also runs after a restart, with the constraint list loaded from
+   the file (not rebuilt; RATTLE in the file without a list warns). Test, water dimer, DOF fresh / after restart: vacuum
+   uff 12/12 (before 18), cell + GFN-FF 15/15 (before 18), RATTLE 8/8 (before 18), cell + uff 12/12 (before 18).
+5. **Seed flakes**: `cli_gfnff_09_farfield_shortcut` (MD part) and `cli_simplemd_16_md_seed` ("no seed" pair) ran
+   without `-md.seed`; they now use `-md.seed 1` and `-md.seed 0`. The default of `-md.seed` (-1) is unchanged.
+
+**Runs made before this fix** (frozen matrix binaries keep all four defects): fresh starts are not affected by 3 and
+4. A run continued with `-restart_file` and **no thermostat or barostat** (the `e_nve` restarts) has the same
+trajectory as after the fix (DOF and the generator only enter thermostats, barostat noise and `adaptive_step`); only
+the printed T and <T> are too low by the factor (3N - n_removed - n_constraints)/3N (box: 3/3N, e.g. -0.08 %), P is
+not affected (Ekin enters directly). A restarted run **with** CSVR/Berendsen/Nose-Hoover regulated to a kinetic energy
+too high by 3N/(3N - removed - constraints) (box +0.08 %, droplet about +1 %), and with CSVR/Andersen/C-rescale its
+noise was the same for every repetition and every seed: such repetitions are not independent samples.
+
+Checks: without restart and with integer print frequency bitwise unchanged: `-sp -dump_gradient` (16-digit energy line
+and md5) on the 7 structures at 1 and 4 threads 14/14; `-md` caffeine and water8 gfnff, 200 steps of 1 fs, seed 7:
+trajectory identical apart from the version string, final restart file byte-identical, table rows identical (with
+`-print_frequency 50` and with the default 1000); dt 0.5 fs with `-print_frequency 2`: the same rows as before.
+CLI restart (water8, CSVR, MaxTime edited to 40 fs): `-seed 202` twice and `-md.seed 202` identical, `-seed 303`
+different, no `-seed` twice identical; DOF after the restart 66 = 3N-6. `ctest -R 'gfnff|frag|eeq|simplemd|pbc|ewald|
+react|restart|md_|gpu|plugin|molecule|xyz|parser|curcumaopt' -j1`: "100 % tests passed out of 152" (4 GPU skipped, 1
+disabled); `cli_gfnff_09_farfield_shortcut` and `cli_simplemd_16_md_seed` 30 times each, 0 failures; `check_docs.py`:
+the 9 known errors only.
+- **Trap met on the way**: the first build declared `PARAM(print_frequency, Double, 1000, ...)`; the registry stores the
+  literal as `int`, `getDefaultJson()` skips a default whose `std::any` cast fails, and every MD without an explicit
+  `-print_frequency` threw `ConfigManager: Parameter 'print_frequency' not found` (23 ctests red). A `Double` PARAM needs
+  `1000.0`. The new unit test sets the flag explicitly and could not see it; the CLI ctests did.
+- **Not changed**: the other restart fields still override the CLI (`thermostat`, `dT`, `MaxTime`, `T`; TODO "MD-Restart:
+  Datei schlaegt CLI"); a RATTLE restart takes its constraint list from the file; `dump_frequency 0` and the other step
+  moduli are not guarded. Not tested: Nose-Hoover after a restart, remove_com_mode 2/3 after a restart, GPU MD. Human
+  production testing pending.

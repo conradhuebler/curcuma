@@ -10,7 +10,8 @@
 # MD diagnostics file:
 #   - the same seed twice gives identical diagnostics
 #   - two different seeds give different diagnostics
-#   - two runs without a seed give identical diagnostics (legacy behaviour)
+#   - two runs with -md.seed 0 (seed from atom count and T0) give identical diagnostics (the clock default -1
+#     is not reproducible and is not tested here)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../../test_utils.sh"
@@ -35,8 +36,11 @@ main() {
     out_a=$(md_digest run_s21a -md.seed 21)
     out_b=$(md_digest run_s21b -md.seed 21)
     out_c=$(md_digest run_s22 -md.seed 22)
-    out_d=$(md_digest run_n1)
-    out_e=$(md_digest run_n2)
+    # Nov 2026 (F-MD): "without a seed" ran with the default -md.seed -1 = the clock in seconds and failed when a
+    # second boundary fell between the two runs (about 1 in 15). Seed 0 (derived from atom count and T0) is the
+    # deterministic default-like case and keeps this check reproducible.
+    out_d=$(md_digest run_n1 -md.seed 0)
+    out_e=$(md_digest run_n2 -md.seed 0)
 
     assert_equals "0" "$(echo "$out_a" | head -1)" "MD with -md.seed 21 exits cleanly"
     local da db dc dd de
@@ -47,7 +51,7 @@ main() {
     assert_equals "$da" "$db" "same seed twice gives identical diagnostics"
     assert_equals "different" "$([ "$da" != "$dc" ] && echo different || echo equal)" \
         "seeds 21 and 22 give different diagnostics"
-    assert_equals "$dd" "$de" "runs without a seed are identical (legacy fixed velocities)"
+    assert_equals "$dd" "$de" "two runs with -md.seed 0 are identical"
 
     print_test_summary
 }

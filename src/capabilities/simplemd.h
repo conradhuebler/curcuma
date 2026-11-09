@@ -447,6 +447,17 @@ private:
      * geometry is in place. */
     void seedRandomEngine();
 
+    /* Claude Generated (Nov 2026, F-MD): true when the status line of step m_step is due. print_frequency is a
+     * time in fs. Integer frequencies keep the old test int(step*dt) % freq == 0 (with dt < 1 fs two steps share
+     * a truncated time and both print, left as is); fractional ones print when floor(step*dt / freq) changes;
+     * a value <= 0 prints every step (before: modulus by 0, SIGFPE). */
+    bool printDue() const;
+
+    /* Claude Generated (Nov 2026, F-MD): the DOF bookkeeping of InitConstrainedBonds() (RATTLE constraints,
+     * COM/rotation removal per the D1/A6b matrix), split off so that a restarted run counts with the same
+     * rules as a fresh one. Starts from 3N; reads m_bond_constrained/m_bond_13_constrained as they are. */
+    void countDegreesOfFreedom(int total_bonds);
+
     double FastEnergy();
     double CleanEnergy();
 
@@ -608,7 +619,8 @@ private:
     int m_hmass = 1;
     double m_single_step = 1;
     double m_dT = 0.5, m_currentStep = 0, m_maxtime = 1000;
-    int m_spin = 0, m_charge = 0, m_print = 100;
+    int m_spin = 0, m_charge = 0;
+    double m_print = 100; ///< print_frequency in fs (F-MD, Nov 2026: was an int, 0.5 became 0 and a divisor -> SIGFPE)
     double m_T0 = 298.15, m_aver_Temp = 0, m_aver_rattle_Temp = 0, m_rmsd = 1.5;
     // Claude Generated (Jun 2026): initial velocity sampling temperature. Set to
     // -1 in the constructor and resolved against m_T0 in performMolecularDynamics
@@ -929,6 +941,9 @@ private:
 
     int m_mtd_dT = -1;
     int m_seed = -1;
+    /// Claude Generated (Nov 2026, F-MD): -seed was given by the caller (controller simplemd/global/flat key);
+    /// then it wins over the seed stored in a restart file. Set in the constructor.
+    bool m_seed_user_set = false;
     /* Claude Generated (Sep 2026): THE random source of this MD instance. Before, every
      * stochastic site held its own function-local `static` engine: InitVelocities and Andersen
      * used a default-constructed (i.e. fixed-seed) engine, CSVR a random_device-seeded one, and
@@ -1007,7 +1022,7 @@ private:
         "tier=primary")
     PARAM(spin, Int, 0, "Total spin multiplicity of the system (0=singlet, 1=doublet).", "Basic", {"Spin"},
         "tier=primary")
-    PARAM(seed, Int, -1, "Random seed (-1: time, 0: auto).", "Basic", {})
+    PARAM(seed, Int, -1, "Random seed (-1: time in seconds, 0: from atom count and T0). The generator is seeded from the seed and the start geometry. After a restart (-restart_file or curcuma_restart*.json) an explicit -seed wins over the seed stored in the file; without -seed the stored one is used (docs/WP-PERIODIC-NONBONDED.md F-MD).", "Basic", {})
     PARAM(threads, Int, 1, "Number of parallel threads.", "Basic", {},
         "min=1")
 
@@ -1044,7 +1059,7 @@ private:
 
     // --- Output & Restart ---
     PARAM(dump_frequency, Int, 50, "Save coordinates every N steps.", "Output", {"dump"})
-    PARAM(print_frequency, Int, 1000, "Print status every N steps.", "Output", {"print"})
+    PARAM(print_frequency, Double, 1000.0, "Print the status line every N fs of simulated time (not steps; fractional values such as 0.5 are allowed). At most one line per step; with dt < 1 fs and an integer value every step whose truncated time is a multiple prints (dt 0.5: two rows per grid time). A value <= 0 prints every step.", "Output", {"print"})
     PARAM(write_xyz, Bool, true, "Write trajectory to XYZ file.", "Output", {"writeXYZ"})
     PARAM(write_initial_state, Bool, false, "Write initial conditions to a .init.json file.", "Output", {"writeinit"})
     PARAM(restart_file, String, "none", "Restart file to load initial state from.", "Restart", {"initfile"})

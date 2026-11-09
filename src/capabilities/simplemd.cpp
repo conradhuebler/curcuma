@@ -266,6 +266,22 @@ SimpleMD::SimpleMD(const json& controller, const bool silent)
     , m_config("simplemd", controller)  // Claude Generated - ConfigManager initialization
 {
     UpdateController(controller);  // This calls LoadControlJson() internally
+    // Claude Generated (Nov 2026, F-MD): was -seed given? Same sources as ConfigManager("simplemd", ...):
+    // the module object, "global", flat top-level keys (case-insensitive). The registry default (-1) is
+    // indistinguishable from an explicit -1 by value, so the controller is asked, not m_seed.
+    auto has_seed = [](const json& obj) {
+        if (!obj.is_object())
+            return false;
+        for (const auto& item : obj.items()) {
+            std::string k = item.key();
+            std::transform(k.begin(), k.end(), k.begin(), ::tolower);
+            if (k == "seed" && !item.value().is_object())
+                return true;
+        }
+        return false;
+    };
+    m_seed_user_set = (controller.contains("simplemd") && has_seed(controller["simplemd"]))
+        || (controller.contains("global") && has_seed(controller["global"])) || has_seed(controller);
 }
 
 SimpleMD::~SimpleMD()
@@ -318,7 +334,7 @@ void SimpleMD::LoadControlJson()
     m_nocenter = m_config.get<bool>("no_center");
     m_COM = m_config.get<bool>("use_com");
     m_dump = m_config.get<int>("dump_frequency");
-    m_print = m_config.get<int>("print_frequency");
+    m_print = m_config.get<double>("print_frequency"); // fs; double since F-MD (Nov 2026), see printDue()
     m_max_top_diff = m_config.get<int>("MaxTopoDiff", 15);  // Not in PARAM block, using default
     m_seed = m_config.get<int>("seed");
     m_threads = m_config.get<int>("threads");
@@ -731,6 +747,7 @@ bool SimpleMD::Initialise()
         m_seed = m_natoms * m_T0;
     if (m_verbosity >= 1)
         CurcumaLogger::raw("Random seed is ", m_seed);
+    const int seed_before_restart = m_seed; // F-MD: the resolved CLI/default seed, see after the restart load
     // Claude Generated (Sep 2026): the engine that was seeded here was a function-local static
     // nothing else ever used -- every stochastic site had its own, unseeded one. m_rng replaces
     // all of them and is seeded in seedRandomEngine() once the geometry is in place.
@@ -757,6 +774,17 @@ bool SimpleMD::Initialise()
 
     } else if (!m_restart && !m_norestart)
         LoadRestartInformation();
+
+    // Claude Generated (Nov 2026, F-MD): LoadRestartInformation() takes "seed" from the file. An explicit -seed
+    // wins over it (a repetition of a restart with another realisation of the thermostat noise); without -seed
+    // the file's seed stays; a file without "seed" keeps the CLI/default one. The engine itself is seeded
+    // below, where a fresh run calls InitVelocities() (before Nov 2026 it was not seeded at all after a restart:
+    // every repetition drew the same default-constructed mt19937 sequence, whatever -seed said).
+    if (m_restart && m_seed_user_set && m_seed != seed_before_restart) {
+        if (m_verbosity >= 1)
+            CurcumaLogger::raw("Restart: seed ", m_seed, " of the restart file replaced by -seed ", seed_before_restart);
+        m_seed = seed_before_restart;
+    }
 
     if (m_molecule.AtomCount() == 0)
         return false;
@@ -1148,7 +1176,16 @@ bool SimpleMD::Initialise()
     }
     m_dof = 3 * m_natoms;
     InitialiseWalls();
-    if (!m_restart) {
+    if (m_restart) {
+        // Claude Generated (Nov 2026, F-MD): a restart skipped InitConstrainedBonds(), so m_dof stayed 3N (no
+        // COM/rotation and no constraint correction): reported and regulated T were off by 3/(3N-3) or
+        // 6/(3N-6) (box 0.08 %, droplet 1 %). The constraint list comes from the file (not rebuilt from the
+        // restart geometry); the count uses the same rules as a fresh start. Then seed m_rng (see above).
+        if (m_rattle && m_bond_constrained.empty() && m_bond_13_constrained.empty())
+            CurcumaLogger::warn("Restart with RATTLE: the restart state holds no constraints, RATTLE constrains nothing");
+        countDegreesOfFreedom(-1);
+        seedRandomEngine();
+    } else {
 
         InitConstrainedBonds();
         InitVelocities(m_scale_velo);
@@ -1363,6 +1400,14 @@ void SimpleMD::InitConstrainedBonds()
         }
     }
 
+    countDegreesOfFreedom(total_bonds);
+}
+
+void SimpleMD::countDegreesOfFreedom(int total_bonds)
+{
+    // Claude Generated (Nov 2026, F-MD): split off InitConstrainedBonds() unchanged; total_bonds < 0 = unknown
+    // (restart: the topology was not scanned), only used in the report.
+    m_dof = 3 * m_natoms;
     // Step 1: subtract RATTLE constraints (each bond/angle constraint = 1 DOF)
     int n_constraints = static_cast<int>(m_bond_constrained.size() + m_bond_13_constrained.size());
     const int total_dof = m_dof; // 3N before any correction
@@ -1400,7 +1445,8 @@ void SimpleMD::InitConstrainedBonds()
     // Report
     if (m_rattle) {
         CurcumaLogger::result_fmt("RATTLE: {} constraints | {} of {} 1-2 bonds{} + {} 1-3 angles | DOF {} -> {} ({:+d})",
-            n_constraints, m_bond_constrained.size(), total_bonds, m_rattle == 2 ? " (X-H only)" : "",
+            n_constraints, m_bond_constrained.size(), total_bonds < 0 ? std::string("?") : std::to_string(total_bonds),
+            m_rattle == 2 ? " (X-H only)" : "",
             m_bond_13_constrained.size(), total_dof, dof_after_rattle, dof_after_rattle - total_dof);
         if (CurcumaLogger::get_verbosity() >= 3) {
             if (!m_bond_constrained.empty()) {
@@ -1433,6 +1479,23 @@ void SimpleMD::InitConstrainedBonds()
             m_rmrottrans, dof_com_removed, m_dof);
     else if (!m_rattle)
         CurcumaLogger::result_fmt("{} degrees of freedom (no constraints)", m_dof);
+}
+
+bool SimpleMD::printDue() const
+{
+    if (m_step == 0)
+        return false;
+    if (m_print <= 0)
+        return true; // every step (before F-MD: integer modulus by 0, SIGFPE)
+    const int p = static_cast<int>(m_print);
+    if (static_cast<double>(p) == m_print) {
+        // integer fs: the pre-F-MD test unchanged. With dt < 1 fs it prints a grid time on every step whose truncated
+        // time equals it (dt 0.5: steps 100 and 101 both give the 50 fs row). Kept on purpose: gfnff_d4_fused_c6
+        // counts one row per step at dt 0.5 / print 1 and the project parsers tolerate the repeats (F-MD item 2).
+        return static_cast<int>(m_step * m_dT) % p == 0;
+    }
+    // fractional fs: print when the step enters a new grid interval [k p, (k+1) p)
+    return std::floor(m_step * m_dT / m_print) != std::floor((m_step - 1) * m_dT / m_print);
 }
 
 void SimpleMD::seedRandomEngine()
@@ -3241,7 +3304,7 @@ bool SimpleMD::step()
         restart[MethodName()[0]] = WriteRestartInformation();
         restart_file << restart << std::endl;
     }
-    if ((m_step && static_cast<int>(m_step * m_dT) % m_print == 0)) {
+    if (printDue()) {
         m_Etot = m_Epot + m_Ekin;
         PrintStatus();
         // Reset RATTLE diagnostics after printing

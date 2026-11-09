@@ -914,6 +914,17 @@ endif()
 add_test(NAME pbc_md_nonperiodic_cell COMMAND test_pbc_md_nonperiodic_cell WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 set_tests_properties(pbc_md_nonperiodic_cell PROPERTIES TIMEOUT 300 LABELS "pbc;simplemd")
 
+# Claude Generated (Nov 2026, F-MD): print_frequency in fs (no SIGFPE, no repeated rows); seed and DOF after a restart
+add_executable(test_simplemd_fmd unit/test_simplemd_fmd.cpp)
+target_link_libraries(test_simplemd_fmd curcuma_core test_molecule_registry)
+if(USE_PCH)
+    target_precompile_headers(test_simplemd_fmd REUSE_FROM curcuma_core)
+endif()
+add_test(NAME simplemd_print_frequency COMMAND test_simplemd_fmd print WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(simplemd_print_frequency PROPERTIES TIMEOUT 300 LABELS "simplemd")
+add_test(NAME simplemd_restart_state COMMAND test_simplemd_fmd restart WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(simplemd_restart_state PROPERTIES TIMEOUT 300 LABELS "simplemd;pbc;gfnff")
+
 # Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED M1): RATTLE with a cell (constraints through wraps, DOF, torn input)
 add_executable(test_pbc_md_rattle unit/test_pbc_md_rattle.cpp)
 target_link_libraries(test_pbc_md_rattle curcuma_core test_molecule_registry)
