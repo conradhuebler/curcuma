@@ -9,6 +9,7 @@
  *  - key present, convertible       -> the converted value (an integral double read as int)
  */
 #include "src/core/config_manager.h"
+#include "src/core/key_normalize.h"
 #include "src/core/parameter_registry.h"
 #include "generated/parameter_registry.h"
 
@@ -65,6 +66,12 @@ int main()
     }
     CHECK(missing_plain, "a missing key throws a plain runtime_error");
     CHECK(config.get<int>("no_such_parameter_at_all", 5) == 5, "a missing key returns the default");
+
+    // key normalisation: lower case, hyphens removed, underscores kept
+    CHECK(curcuma::normalizeKey("Max-Iter") == "maxiter", "Max-Iter normalises to maxiter");
+    CHECK(curcuma::normalizeKey("max_iter") == "max_iter", "underscores are kept");
+    CHECK(curcuma::normalizeKey("max_iter") != curcuma::normalizeKey("maxiter"), "max_iter and maxiter stay different keys");
+    CHECK(config.get<int>("MAX_ITERATIONS") == 12, "key lookup ignores case");
 
     std::cout << (g_failed ? "FAILED" : "all checks passed") << "\n";
     return g_failed ? 1 : 0;

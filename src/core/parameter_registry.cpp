@@ -1,4 +1,5 @@
 #include "parameter_registry.h"
+#include "src/core/key_normalize.h"
 
 #include <set>
 #include <algorithm>
@@ -46,9 +47,7 @@ void ParameterRegistry::addDefinition(const std::string& module, ParameterDefini
     // Used by findOwnerModules to auto-route flat CLI flags.
     auto add_owner = [&](const std::string& key) {
         std::string lower = key;
-        std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-        // Claude Generated (Jun 2026): canonicalize hyphens to underscores
-        lower.erase(std::remove(lower.begin(), lower.end(), '-'), lower.end());
+        lower = curcuma::normalizeKey(lower);
         auto& mods = name_to_modules_map[lower];
         if (std::find(mods.begin(), mods.end(), module) == mods.end()) {
             mods.push_back(module);
@@ -463,9 +462,7 @@ bool ParameterRegistry::validateRegistry() const
 std::vector<std::string> ParameterRegistry::findOwnerModules(const std::string& param_name) const
 {
     std::string lower = param_name;
-    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-    // Claude Generated (Jun 2026): canonicalize hyphens to underscores for matching
-    lower.erase(std::remove(lower.begin(), lower.end(), '-'), lower.end());
+    lower = curcuma::normalizeKey(lower);
     auto it = name_to_modules_map.find(lower);
     if (it == name_to_modules_map.end()) {
         return {};
@@ -490,14 +487,11 @@ std::string ParameterRegistry::resolveAlias(const std::string& module_name, cons
 
     // Try case-insensitive match (slower path for backward compatibility)
     std::string alias_lower = alias;
-    std::transform(alias_lower.begin(), alias_lower.end(), alias_lower.begin(), ::tolower);
-    // Claude Generated (Jun 2026): canonicalize hyphens to underscores for matching
-    alias_lower.erase(std::remove(alias_lower.begin(), alias_lower.end(), '-'), alias_lower.end());
+    alias_lower = curcuma::normalizeKey(alias_lower);
 
     for (const auto& entry : module_it->second) {
         std::string entry_key_lower = entry.first;
-        std::transform(entry_key_lower.begin(), entry_key_lower.end(), entry_key_lower.begin(), ::tolower);
-        entry_key_lower.erase(std::remove(entry_key_lower.begin(), entry_key_lower.end(), '-'), entry_key_lower.end());
+        entry_key_lower = curcuma::normalizeKey(entry_key_lower);
 
         if (alias_lower == entry_key_lower) {
             return entry.second; // Return canonical name

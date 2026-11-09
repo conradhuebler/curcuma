@@ -183,6 +183,7 @@ Commit `c3f570f` (2026-10-31), clean tree. Read-only analysis, no repo file chan
   used.
 
 **M7. Key normalisation is re-implemented about 30 times, with different rules.**
+- Status (Nov 10, 2026): the 17 places in `global.h`, `parameter_registry.cpp`, `config_manager.cpp` and `method_factory.cpp` that lower-cased a key and removed its hyphens now call `curcuma::normalizeKey()` (`src/core/key_normalize.h`); behaviour unchanged. The comments that said "hyphens to underscores" were wrong and are gone. Not unified: comparisons that lower-case without removing hyphens (about 12 `tolower` sites in the same files, `cli_parser.cpp`).
 - `::tolower` transforms: 20 in `config_manager.cpp`, 2 in `config_manager.h`, 4 in `parameter_registry.cpp`, 4 in
   `global.h`, 8 in `method_factory.cpp`. Hyphen removal happens at only 17 of those sites.
 - `ConfigManager::getFromModule` (`config_manager.h:249-261`), the nested and dot-notation paths of `findKey`

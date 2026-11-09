@@ -20,6 +20,7 @@
 #include "src/tools/string_similarity.h"
 
 #include "method_factory.h"
+#include "src/core/key_normalize.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/parameter_registry.h"
 #include "src/core/gpu_fallback.h"
@@ -619,8 +620,7 @@ void MethodFactory::applySharedScfScope(json& config, const std::string& method_
     std::transform(m.begin(), m.end(), m.begin(), ::tolower);
     auto& reg = ParameterRegistry::getInstance();
     auto lower = [](std::string s) {
-        std::transform(s.begin(), s.end(), s.begin(), ::tolower);
-        s.erase(std::remove(s.begin(), s.end(), '-'), s.end());
+        s = curcuma::normalizeKey(s);
         return s;
     };
 
