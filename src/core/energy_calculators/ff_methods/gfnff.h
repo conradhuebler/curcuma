@@ -417,6 +417,13 @@ PARAM(rocm_dc6dcn_tables, Bool, false, "ROCm: per-pair C6 and dC6/dCN from per-a
 PARAM(rocm_device_schur, Bool, true, "ROCm: do the Schur step of the dense EEQ solve on the device, so only nfrag + nfrag^2 numbers reach the host. false does it on the host.", "GPU", {})
 PARAM(rocm_fixed_point, Bool, true, "ROCm: sum forces, dE/dCN, energies and CN in 64-bit fixed point, so repeated runs are bitwise identical. false uses FP64 atomics.", "GPU", {})
 PARAM(eeq_rocm_cpu_fragment_threshold, Int, 16, "ROCm: from this fragment count on, a stalled device EEQ falls back to the CPU; giving the key explicitly forces the exact CPU EEQ there. 0 = always the device.", "GPU", {})
+PARAM(dispersion, Bool, true, "Include the D4 dispersion term (GFN-FF uses D4, Spicher & Grimme 2020). false switches it off.", "Terms", {})
+PARAM(hbond, Bool, true, "Include the hydrogen-bond term. false switches it off.", "Terms", {})
+PARAM(repulsion, Bool, true, "Include the bonded and non-bonded repulsion term. false switches it off.", "Terms", {})
+PARAM(coulomb, Bool, true, "Include the Coulomb term. false switches it off.", "Terms", {})
+PARAM(use_simplified_pbo, Bool, false, "Use the simplified pi bond order instead of the full Hueckel treatment.", "Topology", {})
+PARAM(cache_topology, Bool, true, "Store the Phase-1 topology in <input>.topo.json and reuse it. false recomputes it every run.", "Topology", {})
+PARAM(print_timing, Bool, true, "Print the initialisation timing at verbosity >= 1.", "Output", {})
 END_PARAMETER_DEFINITION
 
 class GFNFF {

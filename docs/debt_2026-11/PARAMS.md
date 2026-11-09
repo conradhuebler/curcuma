@@ -103,6 +103,7 @@ Commit `c3f570f` (2026-10-31), clean tree. Read-only analysis, no repo file chan
   - `simplemd.cpp:907`: `topology_mode` fallback `"auto"`, the GFN-FF PARAM and constructor say `"constant"`
     (`gfnff_method.cpp:582,605`). This only gates the RATTLE refusal, which is therefore skipped when the scope is
     missing.
+- [Nov 9, 2026: all 89 literal fallbacks of registered keys equal their PARAM default (test `gfnff_param_fallbacks`); the seven unregistered switches `dispersion`, `hbond`, `repulsion`, `coulomb`, `use_simplified_pbo`, `cache_topology`, `print_timing` are PARAMs now, so the flat flags (`-dispersion false`) work; `threads` and `method` stay global, `hb_cell_list_min_atoms` is an alias of `nb_cell_list_min_atoms`. MOR41 gfnff 95/95 unchanged.]
 - GFN-FF: `gfnff_method.cpp` has 143 fallback reads of 96 keys. 47 keys duplicate a `gfnff` PARAM default by hand.
   49 keys are not registered at all, among them `dispersion`, `hbond`, `coulomb`, `repulsion`, `use_simplified_pbo`,
   `hb_cell_list_min_atoms`, `cache_topology`, `print_timing`, `threads`. Those have no help, no flat routing and no

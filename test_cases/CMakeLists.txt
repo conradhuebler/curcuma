@@ -732,6 +732,13 @@ if(Python3_Interpreter_FOUND)
         PROPERTIES TIMEOUT 900 LABELS "gfnff;sqm;xtb_reference")
 endif()
 
+# Claude Generated (Nov 2026): literal fallbacks of gfnff_method.cpp equal the gfnff PARAM defaults
+# (docs/debt_2026-11/PARAMS.md H6). Reads the sources only.
+add_test(NAME gfnff_param_fallbacks
+         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_gfnff_fallbacks.py ${PROJECT_SOURCE_DIR})
+set_tests_properties(gfnff_param_fallbacks PROPERTIES TIMEOUT 60 LABELS "gfnff;routing")
+
+
 # Claude Generated (Nov 2026): golden test for CLI2Json routing (docs/debt_2026-11/PARAMS.md, step 0)
 add_executable(cli_parser_test cli_parser/cli_parser_test.cpp)
 target_link_libraries(cli_parser_test curcuma_core)

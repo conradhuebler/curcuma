@@ -413,7 +413,7 @@ Learned during the Jul - Sep 2026 GFN-FF / xTB validation (evidence per item in
 - **Characterise a set by every structure, never a sample** (#23, #24).
 - **Caches fake results.** `gmtkn55_compare.py` reuses `_run/energies.json` (drop the keys or `--recompute`); GFN-FF writes `<basename>.topo.json` next to the input, so delete it before re-measuring and use a fresh directory per structure when file names repeat (#11, #28). Cache keys must carry every input the content depends on (#21c).
 - **Check that the build happened.** Test `make`'s exit status, not a grep for "error"; a changed default argument in a header may not trigger a rebuild (#15, #30).
-- **Hardcoded fallbacks are the defaults** for `GFNFF::GFNFF(const json&)`: changing a PARAM default in `gfnff.h` alone has no runtime effect (#31).
+- **Hardcoded fallbacks are the defaults** for `GFNFF::GFNFF(const json&)`: changing a PARAM default in `gfnff.h` alone has no runtime effect (#31). Test `gfnff_param_fallbacks` fails when a literal fallback and its PARAM default differ.
 - **Element-indexed tables: check the length first.** Three 15-entry-short tables were undefined behaviour for Z >= 72 (#22).
 - **No numerical path may depend on the print level** (#38) or on atom order (#34); per-structure benchmarks cannot see reused-calculator bugs (#32).
 - **Gradients**: validate against a central finite difference of curcuma's own energy with Angstrom displacements (`gradient_unit_contract`); the `getGradient()` contract is Eh/Angstrom (#28). A converged SCF criterion must cover everything the mixer mixes (#29).
