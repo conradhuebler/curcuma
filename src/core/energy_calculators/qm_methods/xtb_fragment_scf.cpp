@@ -51,12 +51,12 @@ FragmentScfDriver::FragmentScfDriver(MethodType method, const json& config)
 void FragmentScfDriver::configureXtb(XTB& xtb) const
 {
     // D4 charge-response source (no-op for GFN1/D3). Mirror NativeXtbMethod::applyConfig.
-    std::string d4src = "eeq";
+    std::string d4src = "mulliken";
     if (m_config.contains("xtb") && m_config["xtb"].is_object()
         && m_config["xtb"].contains("d4_charge_source"))
         d4src = m_config["xtb"]["d4_charge_source"].get<std::string>();
     else
-        d4src = m_config.value("d4_charge_source", std::string("eeq"));
+        d4src = m_config.value("d4_charge_source", std::string("mulliken"));
     xtb.setD4ChargeSource(d4src);
 
     // SCF-convergence settings (mode/guess/damping/DIIS/level-shift/eigensolver).

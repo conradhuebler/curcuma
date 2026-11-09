@@ -88,7 +88,7 @@ Commit `c3f570f` (2026-10-31), clean tree. Read-only analysis, no repo file chan
 - 736 `value(key, default)` / `get<T>(key, default)` calls in `src/`; 665 have a literal default. 67 of those differ
   from every registry default of the same name. Most are deliberate "not given" sentinels (confsearch `-1.0`). The
   substantive ones:
-  - `FragmentScfDriver::configureXtb` defaults `d4_charge_source` to `"eeq"` (`xtb_fragment_scf.cpp:54,58`). The PARAM
+  - `FragmentScfDriver::configureXtb` defaults `d4_charge_source` to `"eeq"` (`xtb_fragment_scf.cpp:54,58`). [Fixed Nov 9, 2026: fallback is `"mulliken"`; the CLI path never reached it because the registry merge supplies the value, gradient norm of `-large_system_mode fragments` identical before and after on water8, GFN2.] The PARAM
     (`native_xtb_method.h:32`) and the main path (`native_xtb_method.cpp:86,105`) use `"mulliken"`, and the comment says
     "Mirror NativeXtbMethod::applyConfig". So gradients from `-large_system_mode fragments` use a different D4
     q-response than the normal path unless the user sets it. [read, not run]
