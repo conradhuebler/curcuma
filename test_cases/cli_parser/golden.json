@@ -13,9 +13,6 @@
    "method": "gfn2",
    "opt": {
     "method": "gfn2"
-   },
-   "sp": {
-    "method": "gfn2"
    }
   }
  },
@@ -36,10 +33,6 @@
    "opt": {
     "max_iterations": 3.0,
     "method": "gfn2"
-   },
-   "sp": {
-    "max_iterations": 3.0,
-    "method": "gfn2"
    }
   }
  },
@@ -56,8 +49,7 @@
    "gfnff": {
     "cn_cutoff_bohr": 6.0
    },
-   "opt": {},
-   "sp": {}
+   "opt": {}
   }
  },
  {
@@ -79,10 +71,6 @@
     "charge": -1.0,
     "spin": 1.0
    },
-   "sp": {
-    "charge": -1.0,
-    "spin": 1.0
-   },
    "spin": 1.0
   }
  },
@@ -97,9 +85,6 @@
     "verbosity": 3
    },
    "opt": {
-    "verbosity": 3
-   },
-   "sp": {
     "verbosity": 3
    },
    "verbosity": 3
@@ -118,9 +103,6 @@
     "threads": 4.0
    },
    "opt": {
-    "threads": 4.0
-   },
-   "sp": {
     "threads": 4.0
    },
    "threads": 4.0
@@ -149,10 +131,6 @@
    "10"
   ],
   "controller": {
-   "md": {
-    "max_time": 10.0,
-    "temperature": 400.0
-   },
    "simplemd": {
     "max_time": 10.0,
     "temperature": 400.0
@@ -247,9 +225,6 @@
    "5"
   ],
   "controller": {
-   "traj": {
-    "stride": 5.0
-   },
    "trajectoryanalysis": {
     "stride": 5.0
    }
@@ -266,11 +241,6 @@
    "4"
   ],
   "controller": {
-   "dock": {
-    "guest": "B.xyz",
-    "host": "A.xyz",
-    "step_x": 4.0
-   },
    "docking": {
     "guest": "B.xyz",
     "host": "A.xyz",
@@ -288,9 +258,6 @@
   "controller": {
    "opt": {
     "temprature": 400.0
-   },
-   "sp": {
-    "temprature": 400.0
    }
   }
  },
@@ -307,9 +274,6 @@
     "export_run": "2026run.json"
    },
    "opt": {
-    "export_run": "2026run.json"
-   },
-   "sp": {
     "export_run": "2026run.json"
    }
   }
@@ -339,12 +303,6 @@
      "1abc.log",
      "x.log"
     ]
-   },
-   "sp": {
-    "bak": [
-     "1abc.log",
-     "x.log"
-    ]
    }
   }
  },
@@ -357,9 +315,6 @@
   ],
   "controller": {
    "opt": {
-    "threshold": -1e-06
-   },
-   "sp": {
     "threshold": -1e-06
    }
   }

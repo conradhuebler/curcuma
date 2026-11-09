@@ -135,6 +135,7 @@ Commit `c3f570f` (2026-10-31), clean tree. Read-only analysis, no repo file chan
   `canonicalModule` [run].
 
 **M3. Global parameters exist in up to four copies, and the list is hand-kept outside the registry.**
+- Status (Nov 9, 2026): the list is the registry module `global` (`src/core/global_params.h`, 24 PARAMs with help and type, `-help-module global`); `CLI2Json` reads its names from the registry and fails if the module is empty. The module is left out of the `-export_run` default merge, because the GPU flags are read as "given or not". The `controller[keyword]` copy (`sp`, `md`, `dock`, `traj`) is gone (no reader; golden file regenerated, full ctest unchanged). Open: the other copies stay, because 158 sites read the globals from `controller[...]`, `m_controller` or the module scope; `confsearch.cpp:105` and `simplemd.cpp:869` still copy `global` by hand; `verbosity`, `threads`, `method`, `charge`, `spin` still carry a different default in several module PARAMs.
 - 21 names in `global_params` (`main.cpp:695-712`). 14 of them (all `gpu*`, `no_bmt`, `bak`, `noprogress`,
   `export_run`, `import_config`) are registered nowhere: no help text, no type, no export default.
 - The other 5 (`verbosity`, `threads`, `method`, `charge`, `spin`) are also registered as ordinary PARAMs in 5-9

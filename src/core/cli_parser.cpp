@@ -30,6 +30,7 @@
 #include <map>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -91,34 +92,17 @@ json CLI2Json(int argc, char** argv)
     std::string keyword = argv[1];
     keyword.erase(0, 1);
 
-    // Claude Generated (October 2025): Global parameters that should be accessible
-    // both at top level (controller[param]) and module level (controller[module][param])
-    // ENHANCED: Added "method" to support global energy method specification
-    // Claude Generated (March 2026): Added "gpu" for GPU acceleration control.
-    //   -gpu <backend>: none (default, CPU) | cuda | rocm | vulkan. ("auto" was removed Oct 26, 2026: warning, CPU.)
-    //   Applies to gfn1/gfn2 (USE_*_XTB builds) and gfnff (USE_* builds); an explicit
-    //   backend not compiled in warns and falls back to CPU.
-    // Claude Generated (Jul 2026): Added "charge","spin" — molecular charge/spin must reach
-    // top-level controller["charge"] so -sp/-opt can apply them to the molecule
-    // (setCharge reads controller["charge"], not the command-module namespace).
-    std::set<std::string> global_params = {
-        "verbosity", "threads", "method", "gpu",  // energy_method and gpu apply to all capabilities
-        "gpu_device",   // Claude Generated (Sep 2026, multi-GPU): device index for -gpu (see docs/MULTI_GPU.md)
-        "gpu_devices", "gpu_workers_per_device",  // batch workers spread over these devices
-        "gpu_strict",   // Claude Generated (Sep 2026): any GPU fallback ends the run (exit 3), see src/core/gpu_fallback.h
-        "gpu_memory_check",  // native gfn1/gfn2 GPU: refuse a basis that does not fit (default true)
-        "gpu_sparse_integrals",  // native gfn1/gfn2 GPU: screened S/H0/multipole storage auto|on|off
-        // Claude Generated (Sep 2026, multi-GPU step 3): multi-GPU eigensolve (docs/GPU_TUNING.md)
-        "gpu_eigensolver_devices", "gpu_eigensolver_backend", "gpu_eigensolver_block",
-        "gpu_eigensolver_min_nao", "gpu_eigensolver_fp32", "gpu_eigensolver_verify",
-        "gpu_density_devices", "gpu_density_min_nao",  // split the pattern density (docs/GPU_TUNING.md)
-        "charge", "spin",  // molecular charge/spin (top-level, not module-scoped)
-        "export_run", // Export current run configuration
-        "import_config", // Import custom configuration
-        "bak",   // Files to copy back from BMT output directory to CWD
-        "no_bmt", // Disable BMT output directory (legacy: write to CWD)
-        "noprogress" // Disable live progress bars globally (e.g. when redirecting to a file)
-    };
+    // Claude Generated (Nov 2026): global parameters (verbosity, threads, method, charge, spin,
+    // gpu*, export_run, import_config, bak, no_bmt, noprogress) are copied to controller[param]
+    // and controller["global"][param]; the list is the registry module "global"
+    // (src/core/global_params.h). -charge/-spin must reach the top level because setCharge reads
+    // controller["charge"], not the command-module scope.
+    std::set<std::string> global_params;
+    for (const auto& def : ParameterRegistry::getInstance().getForModule("global"))
+        global_params.insert(def.name);
+    if (global_params.empty())
+        throw std::runtime_error("CLI2Json: parameter registry module 'global' is empty "
+                                 "(initialize_generated_registry() must run first)");
 
     // Claude Generated (Jul 2026): modules that are sub-scopes of a calculation rather than
     // commands in their own right. Auto-routing a flat flag into one of these is the intended,
@@ -525,9 +509,7 @@ json CLI2Json(int argc, char** argv)
     // Some tests use "-md.max_time" which creates controller["md"],
     // but we now route to controller["simplemd"] via module_name
     // Store under both for compatibility
-    if (module_name != keyword) {
-        controller[keyword] = key;  // Also keep the old keyword for backward compat
-    }
+    // (controller[keyword] duplicate removed Nov 2026: no reader of "md"/"sp"/"dock"/"traj" scopes)
 
     // Merge module-specific parameters at top level
     for (auto& [mod_name, module_config] : module_params.items()) {

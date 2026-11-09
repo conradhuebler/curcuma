@@ -2631,7 +2631,9 @@ int main(int argc, char **argv) {
         auto& param_registry = ParameterRegistry::getInstance();
         std::set<std::string> touched_modules;
         for (auto it = export_config.begin(); it != export_config.end(); ++it) {
-            if (it.value().is_object() && !param_registry.getForModule(it.key()).empty()) {
+            // "global" is left out: its registry defaults are documentation, and flags such as
+            // gpu_devices are read as "given or not", so an exported default would become a user value.
+            if (it.key() != "global" && it.value().is_object() && !param_registry.getForModule(it.key()).empty()) {
                 touched_modules.insert(it.key());
             }
         }
