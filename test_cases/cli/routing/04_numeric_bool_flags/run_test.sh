@@ -38,12 +38,22 @@ for v in 0 1 true false; do
     check "-opt -write_trajectory $v optimises (exit 0, water.opt.xyz written)" $r
 done
 
+# The trajectory file follows the flag
+rm -f water.trj.xyz
+"$CURCUMA" -opt water.xyz -method gfnff -write_trajectory 1 -no_bmt > /dev/null 2>&1
+[ -s water.trj.xyz ] && r=0 || r=1
+check "-write_trajectory 1 writes water.trj.xyz" $r
+rm -f water.trj.xyz
+"$CURCUMA" -opt water.xyz -method gfnff -write_trajectory 0 -no_bmt > /dev/null 2>&1
+[ ! -e water.trj.xyz ] && r=0 || r=1
+check "-write_trajectory 0 writes no trajectory" $r
+
 "$CURCUMA" -opt water.xyz -method gfnff -write_trajectory 0 -export_run wt.json -no_bmt > /dev/null 2>&1 || true
 got=$(python3 -c "import json; print(json.load(open('wt.json'))['opt']['write_trajectory'])" 2>/dev/null || echo PYTHON_ERROR)
 [ "$got" = "False" ] && r=0 || r=1
 check "-write_trajectory 0 is exported as boolean false (got '$got')" $r
 
-rm -f h4_*.log wt.json water.opt.xyz water*.topo.json water.param.json curcuma_citations.bib
+rm -f h4_*.log wt.json water.opt.xyz water.trj.xyz water*.topo.json water.param.json curcuma_citations.bib
 rm -rf water.opt.*
 
 echo

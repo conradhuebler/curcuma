@@ -170,6 +170,11 @@ OptimizationContext OptimizationContext::fromJson(const json& config, EnergyCalc
             context.write_trajectory = (config["write_trajectory"].get<int>() != 0);
     }
 
+    // Claude Generated (Nov 2026): file name of the .trj.xyz written when write_trajectory is on.
+    // -opt passes it through outputPath(); without it no trajectory file is written.
+    if (config.contains("trajectory_file") && config["trajectory_file"].is_string())
+        context.trajectory_filename = config["trajectory_file"].get<std::string>();
+
     // Handle both legacy verbose and new verbosity parameters for backward compatibility
     if (config.contains("verbosity")) {
         context.verbosity = config["verbosity"].get<int>();

@@ -59,7 +59,7 @@ Commit `c3f570f` (2026-10-31), clean tree. Read-only analysis, no repo file chan
 - The final `else` branch (`main.cpp:917-927`) is unreachable.
 
 **H4. `-opt ... -write_trajectory 0`, the form shown in the `-opt` help text, aborts the optimisation.** [read + nlohmann behaviour run]
-- Status (Nov 9, 2026): fixed by `ParameterRegistry::coerceBoolParameters()` (called in `main.cpp` after `-import_config`); `-write_trajectory 1` aborted as well. Test `cli_routing_04_numeric_bool_flags`. Still open: no `.trj.xyz` appears for `-write_trajectory 1` in `-opt` (with and without `-no_bmt`), not investigated.
+- Status (Nov 9, 2026): fixed by `ParameterRegistry::coerceBoolParameters()` (called in `main.cpp` after `-import_config`); `-write_trajectory 1` aborted as well. Test `cli_routing_04_numeric_bool_flags`. The `.trj.xyz` was never written either, because nothing gave the driver a file name; the single-structure `-opt` path now passes `trajectory_file` (through `BMTUtils::outputPath`), so the default `-write_trajectory 1` writes `<basename>.trj.xyz`. Multi-structure `-opt` still writes none.
 - The help prints `-write_trajectory <0|1>` (`main.cpp:1999`). The CLI stores 0.0, and `MergeJson` passes it through.
 - `OptimizationDispatcher::optimizeStructure` calls `merged_config.value("write_trajectory", true)`
   (`optimizer_factory.cpp:295`). nlohmann throws `type_error.302` "type must be boolean, but is number" (confirmed in

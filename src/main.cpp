@@ -1581,6 +1581,10 @@ int executeOptimization(const json& controller, int argc, char** argv) {
 
         if (molecules.size() == 1) {
             // Single-structure path: preserve exact existing behavior
+            // write_trajectory (default true) asks for <basename>.trj.xyz; the driver wrote none
+            // before because nothing gave it a file name.
+            if (opt_config.value("write_trajectory", true))
+                opt_config["trajectory_file"] = BMTUtils::outputPath(bmt_dir, basename + ".trj.xyz");
             auto result = Optimization::OptimizationDispatcher::optimizeStructure(
                 &molecules[0], opt_type, &energy_calc, opt_config);
 
