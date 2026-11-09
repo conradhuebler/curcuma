@@ -17,7 +17,7 @@ Stand.
 - **SCF-Modul `scf` bei tblite/xtb/Ulysses nicht gelaufen** (2026-10-26): Abbildung auf `max_iterations`/`damping` nur per `-verbosity 3` gesehen, die
   TBLite-Änderung (GFN2-Anhebung auf 150/0.6 nur ohne Nutzerwert) nur syntaxgeprüft; kein Provider in `release/`. `-hessian` endet mit 0, wenn ein
   Verschiebungs-SCF scheitert (pm3, `-scf_max_iterations 3`), nicht untersucht. [docs/SCF_MODES.md](docs/SCF_MODES.md)
-- **Offene Schalen über die CLI: Aliase und ctest fehlen** (2026-10-11): `-multi`, `-multiplicity`, `-uhf`, `-xtb.spin` werden still ignoriert; Zeile 2 "Ladung Multiplizität" der ORCA-xyz wird nicht gelesen;
+- **Offene Schalen über die CLI: Aliase und ctest fehlen** (2026-10-11): `-multi`, `-multiplicity`, `-uhf`, `-xtb.spin` werden ignoriert (seit 2026-11-09 mit der Warnung "is unknown"); Zeile 2 "Ladung Multiplizität" der ORCA-xyz wird nicht gelesen;
   ungerade Elektronenzahl ohne `-spin` besetzt fraktional (tblite), xtb nimmt ein Dublett (Entscheidung offen); es gibt keinen ctest für `-spin` (Known Issue #9). Flag mit Leerzeichen und Paritätswiderspruch
   sind seit 2026-10-11 Fehler bzw. Warnung (`CLI2Json`, `buildReferenceOccupations`). Vault: Labor `curcuma GFN2-SCF-Vorkonditionierung`, Schritt 13.
 - **GFN-FF-Energie hängt von der Atomnummerierung ab** (911 von 2557 Strukturen, bis 237 kcal/mol bei geladenen Mehrfragment-Systemen;

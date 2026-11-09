@@ -120,6 +120,7 @@ Commit `c3f570f` (2026-10-31), clean tree. Read-only analysis, no repo file chan
 ### Severity MEDIUM: inconsistency that will cause the next H-class bug
 
 **M1. Unknown or misspelled keys are accepted silently at every layer.** [run]
+- Status (Nov 9, 2026): `main.cpp` warns once per key that no registry module knows (parameter or alias), after `-import_config`; nothing is dropped or rejected. Silent exceptions, because code reads them without a PARAM: `gradient`, `dump_gradient` and 12 SimpleMD legacy names. Over the full ctest run no registered flag was reported; keys that exist in another module than the one they landed in (`xtb.diis_start`, `-electronic_temperature` under `-sp`) are not reported. Test `cli_routing_05_unknown_key_warning`. Not done: `ConfigManager` still adds unknown keys, positional tokens after a flag value are still dropped.
 - `-sp w.xyz -temprature 400` gives `{"opt":{"temprature":400}}` without a message.
 - `ConfigManager` adds unknown keys as new entries (`config_manager.cpp:127-133`, `300-306`); `has("temprature")` is
   true.

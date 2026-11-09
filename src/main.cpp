@@ -2568,6 +2568,32 @@ int main(int argc, char **argv) {
         std::cout << "Loaded configuration from: " << config_file << std::endl;
     }
 
+    // Claude Generated (Nov 2026, docs/debt_2026-11/PARAMS.md M1): a key that no registry module
+    // knows, neither as parameter nor as alias, is reported once. Nothing is dropped: a typo such
+    // as -temprature was silently ignored before. Keys that code reads without a PARAM stay quiet:
+    // -sp reads gradient and dump_gradient directly, and the SimpleMD names below are left
+    // unregistered on purpose (see the comment in confsearch.h).
+    {
+        static const std::set<std::string> read_without_param = {
+            "gradient", "dump_gradient",
+            "unique", "rescue", "respa", "dipole", "cleanenergy", "MaxTopoDiff", "impuls_scaling",
+            "rattle_tolerance", "printOutput", "wall_xl", "wall_yl", "wall_zl"
+        };
+        auto& registry = ParameterRegistry::getInstance();
+        std::set<std::string> reported;
+        for (auto& [scope, params] : controller.items()) {
+            if (scope == "global" || !params.is_object() || registry.getForModule(scope).empty())
+                continue;
+            for (auto& [key, value] : params.items()) {
+                if (value.is_object() || read_without_param.count(key) || !registry.findOwnerModules(key).empty())
+                    continue;
+                if (reported.insert(key).second)
+                    CurcumaLogger::warn_fmt("Parameter '{}' is unknown (not a parameter or alias of any module; misspelled? -help-module {} lists the parameters of the command)",
+                        key, scope);
+            }
+        }
+    }
+
     // Claude Generated (Nov 2026): `-write_trajectory 0|1` and other numeric flags of Bool parameters
     // arrive as numbers; make them booleans before any capability reads them.
     ParameterRegistry::getInstance().coerceBoolParameters(controller);
