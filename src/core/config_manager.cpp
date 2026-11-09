@@ -24,8 +24,20 @@
 #include <algorithm>
 #include <cctype>
 #include <stdexcept>
+#include <set>
+#include <mutex>
 
 // Claude Generated 2025: Modern configuration manager for Curcuma capabilities
+
+// Claude Generated (Nov 2026): reported once per message, see ConfigManager::get(key, default)
+void reportConfigTypeError(const std::string& message)
+{
+    static std::mutex mutex;
+    static std::set<std::string> reported;
+    std::lock_guard<std::mutex> lock(mutex);
+    if (reported.insert(message).second)
+        CurcumaLogger::warn(message + "; using the default value");
+}
 
 // Single-Module Constructor
 ConfigManager::ConfigManager(const std::string& module, const json& user_input)

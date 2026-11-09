@@ -2718,7 +2718,15 @@ int main(int argc, char **argv) {
     // Try structured dispatch first - Claude Generated
     auto it = CAPABILITY_REGISTRY.find(command);
     if (it != CAPABILITY_REGISTRY.end()) {
-        int result = it->second.handler(controller, argc, argv);
+        int result = 1;
+        try {
+            result = it->second.handler(controller, argc, argv);
+        } catch (const ConfigTypeError& e) {
+            // Claude Generated (Nov 2026): a parameter value of the wrong type (-max_time abc)
+            // ended in std::terminate with the message "not found"; now the cause and exit code 1.
+            CurcumaLogger::error(e.what());
+            return 1;
+        }
         curcuma::printGpuFallbackSummary();
         return result;
     }

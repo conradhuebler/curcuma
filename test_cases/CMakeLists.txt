@@ -739,6 +739,13 @@ add_test(NAME gfnff_param_fallbacks
 set_tests_properties(gfnff_param_fallbacks PROPERTIES TIMEOUT 60 LABELS "gfnff;routing")
 
 
+# Claude Generated (Nov 2026): ConfigManager::get separates a missing key from a value of the wrong
+# type (docs/debt_2026-11/PARAMS.md M8)
+add_executable(config_manager_types_test unit/config_manager_types_test.cpp)
+target_link_libraries(config_manager_types_test curcuma_core)
+add_test(NAME config_manager_types COMMAND config_manager_types_test)
+set_tests_properties(config_manager_types PROPERTIES TIMEOUT 60 LABELS "unit;routing")
+
 # Claude Generated (Nov 2026): golden test for CLI2Json routing (docs/debt_2026-11/PARAMS.md, step 0)
 add_executable(cli_parser_test cli_parser/cli_parser_test.cpp)
 target_link_libraries(cli_parser_test curcuma_core)

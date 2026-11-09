@@ -194,6 +194,7 @@ Commit `c3f570f` (2026-10-31), clean tree. Read-only analysis, no repo file chan
   Its warnings go to `std::cerr` under an inverted `#ifndef DEBUG_CONFIG_MANAGER` (`config_manager.cpp:436,461`).
 
 **M8. `ConfigManager::get<T>(key, default)` swallows every exception.**
+- Status (Nov 9, 2026): a present value of the wrong type throws `ConfigTypeError` (key, value and JSON type in the message) from `get<T>(key)`; `get<T>(key, default)` warns once per message and still returns the default; a missing key stays a plain `std::runtime_error` / the default. `main.cpp` catches `ConfigTypeError` around the command handler (message and exit code 1 instead of `terminate`). Test `config_manager_types`. Over the full ctest run no warning appeared, so no existing test path hits it. Not changed: `getFromModule`, `findKey` fallbacks and the `std::cerr` warnings (M7).
 - `config_manager.h:268-274`. A wrong JSON type (for example a bool stored as 0.0) is reported as "not found" and
   replaced by the literal default [run: `E throws: ... not found`].
 
