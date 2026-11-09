@@ -448,17 +448,24 @@ std::unique_ptr<ComputationalMethod> createNativeGfnff(const std::string& method
     }
     const std::string gpu = resolveGpuMode(gfnff_config, "GFN-FF");
     fixEEQSolverChoice(gfnff_config, gpu);
-    // Claude Generated (Nov 2026): the diagnostic hb_scale exists only in the CPU kernel (FFWorkspace::calcHydrogenBonds);
-    // the GPU kernels would ignore it, so any value other than 1.0 runs on the CPU (counted fallback, -gpu_strict stops).
-    double hb_scale = 1.0;
-    if (gfnff_config.contains("gfnff") && gfnff_config["gfnff"].is_object() && gfnff_config["gfnff"].contains("hb_scale")
-        && gfnff_config["gfnff"]["hb_scale"].is_number())
-        hb_scale = gfnff_config["gfnff"]["hb_scale"].get<double>();
-    else if (gfnff_config.contains("hb_scale") && gfnff_config["hb_scale"].is_number())
-        hb_scale = gfnff_config["hb_scale"].get<double>();
-    if (gpu != "none" && hb_scale != 1.0) {
-        CurcumaLogger::warn(fmt::format("GFN-FF: hb_scale = {} is implemented on the CPU only; using CPU", hb_scale));
-        curcuma::reportGpuFallback("GFN-FF: hb_scale != 1 is not applied by the GPU path, calculation on the CPU", gpu);
+    // Claude Generated (Nov 2026): the diagnostic factors hb_scale, repulsion_scale, dispersion_scale and coulomb_scale
+    // exist only in the CPU workspace (FFWorkspace::calcHydrogenBondsScaled, calcTermScaled, postProcess); the GPU kernels
+    // would ignore them, so any value other than 1.0 runs on the CPU (counted fallback, -gpu_strict stops).
+    auto scaleFactor = [&gfnff_config](const char* key) {
+        if (gfnff_config.contains("gfnff") && gfnff_config["gfnff"].is_object() && gfnff_config["gfnff"].contains(key)
+            && gfnff_config["gfnff"][key].is_number())
+            return gfnff_config["gfnff"][key].get<double>();
+        if (gfnff_config.contains(key) && gfnff_config[key].is_number())
+            return gfnff_config[key].get<double>();
+        return 1.0;
+    };
+    std::string cpu_only_scale;
+    for (const char* key : { "hb_scale", "repulsion_scale", "dispersion_scale", "coulomb_scale" })
+        if (scaleFactor(key) != 1.0)
+            cpu_only_scale += (cpu_only_scale.empty() ? "" : ", ") + fmt::format("{} = {}", key, scaleFactor(key));
+    if (gpu != "none" && !cpu_only_scale.empty()) {
+        CurcumaLogger::warn("GFN-FF: " + cpu_only_scale + " is implemented on the CPU only; using CPU");
+        curcuma::reportGpuFallback("GFN-FF: a term-scale factor != 1 (" + cpu_only_scale + ") is not applied by the GPU path, calculation on the CPU", gpu);
     } else if (gpu != "none") {
         CurcumaLogger::info("GFN-FF: using GPU acceleration (" + gpu + ")");
         if (auto m = gpu_plugin::createGfnff(gpu, gfnff_config))

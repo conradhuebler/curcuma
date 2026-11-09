@@ -174,8 +174,9 @@ optimisation, MD and ConfSearch (examples, options, convergence rules) are in
 ### Parameters, JSON, reproducible runs
 
 Any parameter can be given as a flat flag (`-cn_cutoff_bohr 5.5`) or scoped (`-gfnff.cn_cutoff_bohr 5.5`).
-Diagnostic GFN-FF switch: `-gfnff.hb_scale s` multiplies the hydrogen-bond term (default 1.0 = the reference; CPU only),
-[docs/REV_GFNFF_TODO.md](docs/REV_GFNFF_TODO.md) #19.
+Diagnostic GFN-FF switches: `-gfnff.hb_scale s` multiplies the hydrogen-bond term, `-gfnff.repulsion_scale`,
+`-gfnff.dispersion_scale` and `-gfnff.coulomb_scale` the repulsion, D4 dispersion and electrostatic terms (default 1.0 = the
+reference; CPU only), [docs/REV_GFNFF_TODO.md](docs/REV_GFNFF_TODO.md) #19.
 Periodic GFN-FF pressure (`-md -compute_pressure true`, barostats): `-gfnff.pressure_lrc` (default true) adds the
 long-range correction of the D4 pairs crossing the evaluation radius; `false` restores the earlier pressure,
 [docs/NPT.md](docs/NPT.md).

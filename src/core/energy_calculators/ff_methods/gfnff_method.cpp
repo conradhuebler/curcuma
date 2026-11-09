@@ -4976,6 +4976,28 @@ bool GFNFF::initializeForceField()
                                                 "(diagnostic, deviates from the reference parametrisation)", hb_scale));
             m_workspace->setHBScale(hb_scale);
         }
+        {
+            // term-scale switches (Claude Generated, Nov 2026): diagnostic factors on the repulsion, the D4 dispersion
+            // (pair term and tail) and the whole Coulomb component (FFWorkspace::setRepulsionScale, ...); fallbacks
+            // 1.0 = PARAM defaults = reference. The EEQ charges are not changed by coulomb_scale (same minimum).
+            const double rep_s = m_parameters.value("repulsion_scale", 1.0);
+            const double disp_s = m_parameters.value("dispersion_scale", 1.0);
+            const double coul_s = m_parameters.value("coulomb_scale", 1.0);
+            for (auto [name, v] : { std::pair<const char*, double>{ "repulsion_scale", rep_s }, { "dispersion_scale", disp_s },
+                     { "coulomb_scale", coul_s } }) {
+                if (!std::isfinite(v))
+                    throw std::runtime_error(fmt::format("GFN-FF: {} must be a finite number", name));
+                if (v != 1.0 && CurcumaLogger::get_verbosity() >= 1)
+                    CurcumaLogger::warn(fmt::format("GFN-FF: {} = {} multiplies that energy term with its gradient and virial "
+                                                    "(diagnostic, deviates from the reference parametrisation)", name, v));
+            }
+            // ALPB: the charges minimise E_coul + E_Born; scaling only E_coul would break the Hellmann-Feynman gradient
+            if (coul_s != 1.0 && !m_solvent.empty() && m_solvent != "none")
+                throw std::runtime_error("GFN-FF: coulomb_scale != 1 is not supported with an implicit solvent");
+            m_workspace->setRepulsionScale(rep_s);
+            m_workspace->setDispersionScale(disp_s);
+            m_workspace->setCoulombScale(coul_s);
+        }
         if (coulombEwaldActive()) {
             // Nov 2026 (B2): periodic Coulomb pair term by Ewald summation (FFWorkspace::calcCoulombEwald).
             // B3: the SAME parameters as the EEQ solver's matrix (m_ewald_params, configurePeriodicEwald), so the

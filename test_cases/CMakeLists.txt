@@ -827,6 +827,16 @@ endif()
 add_test(NAME gfnff_hb_scale COMMAND test_gfnff_hb_scale WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 set_tests_properties(gfnff_hb_scale PROPERTIES TIMEOUT 1200 LABELS "gfnff;pbc;hbond")
 
+# Claude Generated (Nov 2026, T-SCALE): diagnostic factors gfnff.repulsion_scale, dispersion_scale, coulomb_scale
+# (energy linearity, charges unchanged, gradient FD with charges solved anew, virial FD, pressure_lrc on/off)
+add_executable(test_gfnff_term_scale unit/test_gfnff_term_scale.cpp)
+target_link_libraries(test_gfnff_term_scale curcuma_core test_molecule_registry)
+if(USE_PCH)
+    target_precompile_headers(test_gfnff_term_scale REUSE_FROM curcuma_core)
+endif()
+add_test(NAME gfnff_term_scale COMMAND test_gfnff_term_scale WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(gfnff_term_scale PROPERTIES TIMEOUT 3600 LABELS "gfnff;pbc")
+
 # Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A4a): periodic repulsion and bonded terms (minimum image)
 add_executable(test_pbc_bonded_repulsion unit/test_pbc_bonded_repulsion.cpp)
 target_link_libraries(test_pbc_bonded_repulsion curcuma_core test_molecule_registry)

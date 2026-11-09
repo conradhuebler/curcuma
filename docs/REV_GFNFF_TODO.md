@@ -482,6 +482,32 @@ Purpose: sensitivity of the periodic water density on the H-bond strength; it is
   -6.67 / -7.14 / -7.92 / -9.50 kcal/mol for s = 0.8 / 1.0 / 1.1 / 1.25 / 1.5 / 2.0 (R_OO 2.942 -> 2.927 A). The
   reference binding energy of the water dimer (about -5 kcal/mol, from memory) is still to be sourced.
 
+**Term-scale diagnostic switches** (Nov 9, 2026, 🤖 AI-generated, ⚙️ machine-tested; same scheme as `hb_scale`): `-gfnff.repulsion_scale s`
+(bonded and non-bonded repulsion), `-gfnff.dispersion_scale s` (D4/D3 pair term with its dC6/dCN force and, with a cell, the
+homogeneous tail: E6 and E8, its dE/dCN, `virial.disp_tail` and the `pressure_lrc` component `tail_lrc`; works without a cell too;
+ATM and BATM are **not** scaled) and `-gfnff.coulomb_scale s` (the whole electrostatic component, i.e. the functional the EEQ
+minimises: pair term or Ewald real/reciprocal, self term -q chi + q^2/2 (gam + sqrt(2/pi)/sqrt(alp)), Ewald self, background and
+Gaussian background, TERM 1b chi(CN) chain rule, their virial parts). Default 1.0 = reference; `FFWorkspace::calcTermScaled` runs
+the unchanged kernel and multiplies its accumulator contribution (energy, gradient rows, gradient component, dE/dCN, virial);
+the tail is scaled in `setDispersionTail`, the Coulomb self/background/TERM 1b in `postProcess`. Purpose: which term sets the
+first shell of the liquid (entry 20; `hb_scale` does not move the g_OO position or the coordination number).
+- EEQ charges: unchanged by `coulomb_scale` (bitwise, ctest): s E_EEQ(q) has the same constrained minimum, so the fixed-charge
+  gradient times s is still the full gradient (Hellmann-Feynman). Checked: FD of the total energy with charges solved anew at
+  s = 1.5 agrees with the analytic gradient to 1.4e-11 / 1.6e-10 / 1.1e-10 Eh/A (dimer, 20-water cluster, cluster in a cell);
+  the charge response plays no role. Refused with an implicit solvent (the charges then minimise E_coul + E_Born).
+- `s = 1.0` runs the former code (dispatch `if (s != 1.0)` before it, no changed expression): -sp energy (16 digits) and
+  `-dump_gradient` md5 identical to the V-LRC binary on 7 structures x 1/4 threads (14/14, also with the three flags given as 1.0);
+  100-step NPT MD of the 432-water box identical (restart JSON md5, trajectory coordinates and table).
+- ctest `gfnff_term_scale` (195 checks, 18 s): E_term(s) = s E_term(1) to 1e-12 (s = 0, 0.5, 1.5; dimer, 20-water cluster, cluster
+  in a cell with Ewald), dispersion pair/tail/E6/E8 and bonded/non-bonded repulsion separately, other terms and charges bitwise;
+  FD gradient (Richardson <= 1e-8 Eh/A, measured <= 1.6e-10) at s = 1.5; virial Xi_term(1.5) = 1.5 Xi_term(1) (1e-12), FD gate of
+  term and model total (1e-6, measured <= 1.6e-8), `dispersion_scale` with `pressure_lrc` true and false (tail_lrc scales, model
+  components bitwise equal). The other virial components agree to <= 2.3e-13 relative, not bitwise: the HB kernel (after the
+  scaled ones) extracts its virial from differences of the accumulated gradient rows, whose base value changes (energies and
+  gradients of the other terms stay bitwise).
+- CPU only: with `-gpu` and any factor != 1 the run falls back to the CPU (counted; `createNativeGfnff`); not run-tested (no
+  plugin of ABI 7 built). `FFWorkspace::evaluateEwaldCoulomb` (GPU hybrid seam) does not apply `coulomb_scale`.
+
 ### 20. Liquid water: density +2.5 % to +2.8 %, weakly tetrahedral structure, gas-phase dimer overbound (candidate, reference values still to be sourced)
 
 Source: the water-density experiment of Nov 2026 (`/m2scratch/conrad/Projekte/2026/GFN-FF-Wasser/`, plan, criteria and all

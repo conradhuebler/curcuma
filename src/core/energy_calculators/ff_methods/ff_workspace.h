@@ -372,6 +372,12 @@ public:
         m_disp_tail_e6 = e6;
         m_disp_tail_e8 = e8;
         m_disp_tail_lrc = pressure_lrc;
+        if (m_dispersion_scale != 1.0) {  // dispersion_scale diagnostic (Nov 2026): the 1.0 path above is the former code
+            m_disp_tail_energy *= m_dispersion_scale;
+            m_disp_tail_dEdcn *= m_dispersion_scale;
+            m_disp_tail_e6 *= m_dispersion_scale;
+            m_disp_tail_e8 *= m_dispersion_scale;
+        }
     }
     void clearDispersionTail()
     {
@@ -629,6 +635,25 @@ public:
     void setHBScale(double s) { m_hb_scale = s; }
     double hbScale() const { return m_hb_scale; }
 
+    /// Diagnostic factors on three further GFN-FF terms (PARAMs gfnff.repulsion_scale, dispersion_scale,
+    /// coulomb_scale; Claude Generated Nov 2026, "term-scale" switches, docs/REV_GFNFF_TODO.md #19). Same scheme as
+    /// hb_scale: 1.0 (default, the reference) runs the unchanged kernels; any other value runs the unchanged kernel
+    /// and multiplies its contribution to the partition accumulator by s (calcTermScaled).
+    ///  - repulsion: bonded and non-bonded repulsion (energies, gradient, grad_repulsion, virial.repulsion).
+    ///  - dispersion: D4 (and D3) pair term with its dE/dCN, plus the homogeneous tail (energy, dE/dCN, E6/E8 and so
+    ///    virial.disp_tail and virial.tail_lrc, scaled in setDispersionTail). The ATM three-body term and BATM are not scaled.
+    ///  - coulomb: the whole electrostatic component (pair or Ewald real/reciprocal, GFN-FF self term -q chi + q^2/2
+    ///    (gam + ...), Ewald self/background/Gaussian background, TERM 1b chi(CN) chain rule, their virial parts,
+    ///    the reported Ewald split and the pair potentials). The EEQ charges are NOT changed: s E_EEQ(q) has the same
+    ///    constrained minimum, so the fixed-charge gradient times s is still the full gradient.
+    /// Call before the first calculate() (the tail is scaled when GFNFF sets it).
+    void setRepulsionScale(double s) { m_repulsion_scale = s; }
+    void setDispersionScale(double s) { m_dispersion_scale = s; }
+    void setCoulombScale(double s) { m_coulomb_scale = s; }
+    double repulsionScale() const { return m_repulsion_scale; }
+    double dispersionScale() const { return m_dispersion_scale; }
+    double coulombScale() const { return m_coulomb_scale; }
+
     /// Energy of each triple of the list from the last evaluation, in list order. Empty unless
     /// recording was on before that evaluation and the list has not changed since.
     std::vector<GFNFFHBondEnergy> hydrogenBondEnergies() const;
@@ -707,6 +732,9 @@ private:
     std::vector<GFNFFHydrogenBond> m_hbonds;
     bool m_record_hb_energies = false;
     double m_hb_scale = 1.0;                  ///< hb_scale diagnostic factor (setHBScale); 1.0 = reference, plugin ABI 5
+    double m_repulsion_scale = 1.0;           ///< term-scale diagnostic factors (setRepulsionScale, ...); 1.0 = reference, plugin ABI 7
+    double m_dispersion_scale = 1.0;
+    double m_coulomb_scale = 1.0;
     std::vector<double> m_hb_triple_energy;   ///< per triple of m_hbonds, Eh; filled by calcHydrogenBonds when recording
     std::vector<GFNFFHalogenBond> m_xbonds;
     std::vector<ATMTriple> m_atm_triples;
@@ -786,6 +814,10 @@ private:
     template <bool VIRIAL> void calcCoulombEwaldImpl(int p);
     template <bool VIRIAL> void calcHydrogenBondsImpl(int p);
     void calcHydrogenBondsScaled(int p);  ///< hb_scale != 1: the unchanged kernel, then its contributions times s
+    enum class ScaledTerm { Repulsion, Dispersion, Coulomb };
+    /// term-scale != 1 (Nov 2026): runs `kernel` (the unchanged calc*Impl), then multiplies what it added to the
+    /// accumulator of partition p (fields of `term`) by s
+    void calcTermScaled(int p, ScaledTerm term, double s, const std::function<void()>& kernel);
     template <bool VIRIAL> void calcHalogenBondsImpl(int p);
     template <bool VIRIAL> void calcATMGradientImpl(int p);
     template <bool VIRIAL> void calcBATMImpl(int p);

@@ -2305,6 +2305,15 @@ void FFWorkspace::calcSTorsions(int p)
 }
 void FFWorkspace::calcDispersion(int p)
 {
+    if (m_dispersion_scale != 1.0) {  // term-scale diagnostic (Nov 2026): the 1.0 path below stays the former code
+        calcTermScaled(p, ScaledTerm::Dispersion, m_dispersion_scale, [this, p]() {
+            if (m_want_virial)
+                calcDispersionImpl<true>(p);
+            else
+                calcDispersionImpl<false>(p);
+        });
+        return;
+    }
     if (m_want_virial)
         calcDispersionImpl<true>(p);
     else
@@ -2312,6 +2321,15 @@ void FFWorkspace::calcDispersion(int p)
 }
 void FFWorkspace::calcD4Dispersion(int p)
 {
+    if (m_dispersion_scale != 1.0) {  // term-scale diagnostic (Nov 2026): the 1.0 path below stays the former code
+        calcTermScaled(p, ScaledTerm::Dispersion, m_dispersion_scale, [this, p]() {
+            if (m_want_virial)
+                calcD4DispersionImpl<true>(p);
+            else
+                calcD4DispersionImpl<false>(p);
+        });
+        return;
+    }
     if (m_want_virial)
         calcD4DispersionImpl<true>(p);
     else
@@ -2319,6 +2337,15 @@ void FFWorkspace::calcD4Dispersion(int p)
 }
 void FFWorkspace::calcBondedRepulsion(int p)
 {
+    if (m_repulsion_scale != 1.0) {  // term-scale diagnostic (Nov 2026): the 1.0 path below stays the former code
+        calcTermScaled(p, ScaledTerm::Repulsion, m_repulsion_scale, [this, p]() {
+            if (m_want_virial)
+                calcBondedRepulsionImpl<true>(p);
+            else
+                calcBondedRepulsionImpl<false>(p);
+        });
+        return;
+    }
     if (m_want_virial)
         calcBondedRepulsionImpl<true>(p);
     else
@@ -2326,6 +2353,15 @@ void FFWorkspace::calcBondedRepulsion(int p)
 }
 void FFWorkspace::calcNonbondedRepulsion(int p)
 {
+    if (m_repulsion_scale != 1.0) {  // term-scale diagnostic (Nov 2026): the 1.0 path below stays the former code
+        calcTermScaled(p, ScaledTerm::Repulsion, m_repulsion_scale, [this, p]() {
+            if (m_want_virial)
+                calcNonbondedRepulsionImpl<true>(p);
+            else
+                calcNonbondedRepulsionImpl<false>(p);
+        });
+        return;
+    }
     if (m_want_virial)
         calcNonbondedRepulsionImpl<true>(p);
     else
@@ -2333,6 +2369,15 @@ void FFWorkspace::calcNonbondedRepulsion(int p)
 }
 void FFWorkspace::calcCoulomb(int p)
 {
+    if (m_coulomb_scale != 1.0) {  // term-scale diagnostic (Nov 2026): the 1.0 path below stays the former code
+        calcTermScaled(p, ScaledTerm::Coulomb, m_coulomb_scale, [this, p]() {
+            if (m_want_virial)
+                calcCoulombImpl<true>(p);
+            else
+                calcCoulombImpl<false>(p);
+        });
+        return;
+    }
     if (m_want_virial)
         calcCoulombImpl<true>(p);
     else
@@ -2340,6 +2385,15 @@ void FFWorkspace::calcCoulomb(int p)
 }
 void FFWorkspace::calcCoulombEwald(int p)
 {
+    if (m_coulomb_scale != 1.0) {  // term-scale diagnostic (Nov 2026): the 1.0 path below stays the former code
+        calcTermScaled(p, ScaledTerm::Coulomb, m_coulomb_scale, [this, p]() {
+            if (m_want_virial)
+                calcCoulombEwaldImpl<true>(p);
+            else
+                calcCoulombEwaldImpl<false>(p);
+        });
+        return;
+    }
     if (m_want_virial)
         calcCoulombEwaldImpl<true>(p);
     else
@@ -2400,6 +2454,80 @@ void FFWorkspace::calcHydrogenBondsScaled(int p)
         for (int idx = begin; idx < end && idx < static_cast<int>(m_hb_triple_energy.size()); ++idx)
             m_hb_triple_energy[idx] *= s;
 }
+// term-scale switches (Claude Generated, Nov 2026): diagnostic factors repulsion_scale, dispersion_scale and
+// coulomb_scale, not part of the reference. Same scheme as calcHydrogenBondsScaled: the unchanged kernel runs, then
+// everything it added to this partition's accumulator for its term is multiplied by s (energy fields, gradient
+// rows, the per-term gradient component, the dE/dCN of the dispersion kernels, the term's virial component; for the
+// Coulomb kernels also the Ewald real/reciprocal split and the pair potentials dE/dq). Every term is linear in its
+// prefactor, so this is exactly s * E_term with its consistent gradient and virial. The parts outside the kernels
+// are scaled where they are formed: the D4 tail in setDispersionTail(), the Coulomb self term, the Ewald
+// self/background terms and TERM 1b in postProcess().
+void FFWorkspace::calcTermScaled(int p, ScaledTerm term, double s, const std::function<void()>& kernel)
+{
+    auto& acc = m_accumulators[p];
+    const FFEnergyComponents e0 = acc.energy;
+    const bool grad = m_do_gradient;
+    GeoGradMatrix* comp = nullptr;
+    Eigen::Matrix3d* xi = nullptr;
+    switch (term) {
+    case ScaledTerm::Repulsion:
+        comp = &acc.grad_repulsion;
+        xi = &acc.virial.repulsion;
+        break;
+    case ScaledTerm::Dispersion:
+        comp = &acc.grad_dispersion;
+        xi = &acc.virial.dispersion;
+        break;
+    case ScaledTerm::Coulomb:
+        comp = &acc.grad_coulomb;
+        xi = &acc.virial.coulomb;
+        break;
+    }
+    GeoGradMatrix g0, gc0;
+    Vector dcn0, pot0;
+    if (grad) {
+        g0 = acc.gradient;
+        if (acc.has_components)
+            gc0 = *comp;
+        if (term == ScaledTerm::Dispersion)
+            dcn0 = acc.dEdcn;
+    }
+    const Eigen::Matrix3d xi0 = *xi;
+    const double er0 = acc.ewald_real, ek0 = acc.ewald_recip;
+    const bool pot = term == ScaledTerm::Coulomb && acc.coulomb_potentials.size() == m_natoms;
+    if (pot)
+        pot0 = acc.coulomb_potentials;
+
+    kernel();
+
+    auto sc = [s](double& x, double x0) { x = x0 + s * (x - x0); };
+    switch (term) {
+    case ScaledTerm::Repulsion:
+        sc(acc.energy.bonded_rep, e0.bonded_rep);
+        sc(acc.energy.nonbonded_rep, e0.nonbonded_rep);
+        break;
+    case ScaledTerm::Dispersion:
+        sc(acc.energy.dispersion, e0.dispersion);
+        break;
+    case ScaledTerm::Coulomb:
+        sc(acc.energy.coulomb, e0.coulomb);
+        sc(acc.ewald_real, er0);
+        sc(acc.ewald_recip, ek0);
+        if (pot)
+            acc.coulomb_potentials = pot0 + s * (acc.coulomb_potentials - pot0);
+        break;
+    }
+    if (grad) {
+        acc.gradient = g0 + s * (acc.gradient - g0);
+        if (acc.has_components)
+            *comp = gc0 + s * (*comp - gc0);
+        if (term == ScaledTerm::Dispersion)
+            acc.dEdcn = dcn0 + s * (acc.dEdcn - dcn0);
+    }
+    if (m_want_virial)
+        *xi = xi0 + s * (*xi - xi0);
+}
+
 void FFWorkspace::calcHalogenBonds(int p)
 {
     if (m_want_virial)

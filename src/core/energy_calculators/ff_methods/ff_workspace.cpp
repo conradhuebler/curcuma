@@ -704,7 +704,12 @@ void FFWorkspace::postProcess(bool gradient)
             E_en -= q * chi;
             E_self += 0.5 * q * q * (m_coul_gam(i) + sqrt_2_over_pi / std::sqrt(m_coul_alp(i)));
         }
-        m_result_energy.coulomb += E_en + E_self;
+        if (m_coulomb_scale != 1.0) {  // coulomb_scale diagnostic (Nov 2026): the else branch is the former code
+            E_en *= m_coulomb_scale;
+            E_self *= m_coulomb_scale;
+            m_result_energy.coulomb += E_en + E_self;
+        } else
+            m_result_energy.coulomb += E_en + E_self;
 
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::info(fmt::format("  Coulomb self-energy (workspace): EN={:+.12f}, Self={:+.12f} Eh", E_en, E_self));
@@ -720,6 +725,13 @@ void FFWorkspace::postProcess(bool gradient)
         if (want_pot)
             tail.potentials = Eigen::VectorXd::Zero(m_natoms);
         m_ewald->selfAndBackground(m_eeq_charges, &m_coul_alp, want_pot, tail);
+        if (m_coulomb_scale != 1.0) {  // coulomb_scale (Nov 2026); also scales the background virial built from these
+            tail.terms.self *= m_coulomb_scale;
+            tail.terms.background *= m_coulomb_scale;
+            tail.terms.gaussian_background *= m_coulomb_scale;
+            if (want_pot)
+                tail.potentials *= m_coulomb_scale;
+        }
         m_ewald_terms.self = tail.terms.self;
         m_ewald_terms.background = tail.terms.background;
         m_ewald_terms.gaussian_background = tail.terms.gaussian_background;
@@ -780,6 +792,8 @@ void FFWorkspace::postProcess(bool gradient)
                 }
                 qtmp(i) = m_eeq_charges(i) * m_cnf(i) / (2.0 * std::sqrt(cn_i) + 1e-16);
             }
+            if (m_coulomb_scale != 1.0)  // coulomb_scale (Nov 2026): TERM 1b is d(s E_coul)/dCN; gradient and cn_coulomb virial
+                qtmp *= m_coulomb_scale;
         }
 
         // Combined matvec: gradient += dcn * (dEdcn_total - qtmp)

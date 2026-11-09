@@ -111,6 +111,7 @@ the CLI section of `CLAUDE.md`).
 | `-gfnff.hh_repulsion_bpair false` | on | BFS distance for H...H repulsion | #34 |
 | `-gfnff.dispersion_c6_update false` | on | D4 C6 frozen at setup | #32 #33 |
 | `-gfnff.hb_scale s` | 1.0 | diagnostic factor on the HB term (energy, gradient, virial; not the HB-CN bond modulation), CPU only | REV_GFNFF_TODO #19 |
+| `-gfnff.repulsion_scale s`, `dispersion_scale s`, `coulomb_scale s` | 1.0 | diagnostic factors on repulsion, D4 dispersion (pair + tail, not ATM), whole Coulomb component (charges unchanged); CPU only | REV_GFNFF_TODO #19 |
 | `-gfnff.gpu_coulomb_implicit false` | on | ROCm workaround for the missing Coulomb term | #37 |
 | `-gfnff.cn_zero_guard true` | off (reference) | TERM 1b chain-rule term 0 at CN = 0: gradient only, energy unchanged; CUDA on the device, ROCm falls back to the CPU method | #43 |
 | `-DUSE_PORTABLE_MATH=ON` | off | fdlibm-derived `erf`/`acos`/`exp`/`log` | #7 |
