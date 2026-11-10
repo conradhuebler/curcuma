@@ -347,8 +347,6 @@ json CLI2Json(int argc, char** argv)
                 continue;
             if (it.value().is_object())
                 continue;
-            if (pname.find('.') != std::string::npos)
-                continue;
 
             auto owners = ParameterRegistry::getInstance().findOwnerModules(pname);
             if (owners.empty())
@@ -418,8 +416,11 @@ json CLI2Json(int argc, char** argv)
         for (auto& [mod, params] : reroute_targets.items()) {
             if (!key.contains(mod) || !key[mod].is_object())
                 key[mod] = json::object();
+            // Claude Generated (Nov 2026, PARAMS.md L6): the dotted form -<module>.<name> is the more
+            // specific one and wins over the flat -<name>, whichever comes first on the command line.
             for (auto& [pname, pval] : params.items())
-                key[mod][pname] = pval;
+                if (!key[mod].contains(pname))
+                    key[mod][pname] = pval;
         }
     }
 
@@ -430,41 +431,14 @@ json CLI2Json(int argc, char** argv)
 
     for (auto& [param_name, param_value] : key.items()) {
         // Claude Generated 2025: Check if this is a module-specific parameter
-        // Could be either:
-        // 1. Flat key with dots: "rmsd.method" (stored as param_name contains dot)
-        // 2. Nested structure: setNestedJsonValue already created key["rmsd"]["method"]
-        //    so param_name = "rmsd" and param_value = {"method": "subspace"}
+        // A dotted flag ("rmsd.method") was already split by setNestedJsonValue into
+        // key["rmsd"]["method"], so the module parameters arrive here as nested objects.
 
-        bool is_flat_dotted = param_name.find('.') != std::string::npos;
         bool is_nested_object = param_value.is_object();
 
-        if (is_flat_dotted) {
-            // Handle flat dot notation: "rmsd.method" or "-md.max_time"
-            size_t dot_pos = param_name.find('.');
-            std::string module_name = param_name.substr(0, dot_pos);
-            std::string param_key = param_name.substr(dot_pos + 1);
-
-            if (module_name != keyword) {
-                // Claude Generated (October 2025 - CRITICAL FIX): Map keywords to actual module names
-                // e.g., "-md.max_time" has module_name="md" from Punkt-notation,
-                // but must be routed to module_params["simplemd"] (the actual module)
-                std::string target_module = module_name;
-                if (keyword_to_module.count(module_name) > 0) {
-                    target_module = keyword_to_module[module_name];
-                }
-                if (!module_params.contains(target_module)) {
-                    module_params[target_module] = json::object();
-                }
-                setNestedJsonValue(module_params[target_module], param_key, param_value);
-                keys_to_remove.push_back(param_name);
-            } else {
-                // Claude Generated (October 2025 - CRITICAL FIX): Handle "-keyword.param" (e.g., "-md.max_time")
-                // These should be FLAT in controller["simplemd"], not nested as key["md"]["max_time"]
-                // Extract directly to top level to avoid double-nesting
-                setNestedJsonValue(key, param_key, param_value);
-                keys_to_remove.push_back(param_name);
-            }
-        } else if (is_nested_object && param_name != keyword) {
+        // (A flat "a.b" key never reaches this point: setNestedJsonValue splits dotted names while the
+        // arguments are read, so the former is_flat_dotted branch was unreachable.)
+        if (is_nested_object && param_name != keyword) {
             // Handle nested structure for OTHER modules (not this command's keyword)
             //
             // Claude Generated (Jul 2026): map CLI keywords to module names here too. Because

@@ -47,7 +47,23 @@
   ],
   "controller": {
    "gfnff": {
-    "cn_cutoff_bohr": 6.0
+    "cn_cutoff_bohr": 5.5
+   },
+   "opt": {}
+  }
+ },
+ {
+  "argv": [
+   "-sp",
+   "w.xyz",
+   "-cn_cutoff_bohr",
+   "6",
+   "-gfnff.cn_cutoff_bohr",
+   "5.5"
+  ],
+  "controller": {
+   "gfnff": {
+    "cn_cutoff_bohr": 5.5
    },
    "opt": {}
   }
@@ -316,6 +332,87 @@
   "controller": {
    "opt": {
     "threshold": -1e-06
+   }
+  }
+ },
+ {
+  "argv": [
+   "-md",
+   "w.xyz",
+   "-md.max_time",
+   "10",
+   "-simplemd.temperature",
+   "350"
+  ],
+  "controller": {
+   "simplemd": {
+    "max_time": 10.0,
+    "temperature": 350.0
+   }
+  }
+ },
+ {
+  "argv": [
+   "-sp",
+   "w.xyz",
+   "-md.thermostat",
+   "berendsen"
+  ],
+  "controller": {
+   "opt": {},
+   "simplemd": {
+    "thermostat": "berendsen"
+   }
+  }
+ },
+ {
+  "argv": [
+   "-confscan",
+   "c.xyz",
+   "-rmsd.method",
+   "inertia",
+   "-confscan.threads",
+   "4",
+   "-threads",
+   "2"
+  ],
+  "controller": {
+   "confscan": {
+    "threads": 2.0
+   },
+   "global": {
+    "threads": 2.0
+   },
+   "rmsd": {
+    "method": "inertia"
+   },
+   "threads": 2.0
+  }
+ },
+ {
+  "argv": [
+   "-sp",
+   "w.xyz",
+   "-method",
+   "gfnff",
+   "-gfnff.dispersion",
+   "false",
+   "-xtb.diis_start",
+   "3"
+  ],
+  "controller": {
+   "gfnff": {
+    "dispersion": false
+   },
+   "global": {
+    "method": "gfnff"
+   },
+   "method": "gfnff",
+   "opt": {
+    "method": "gfnff"
+   },
+   "xtb": {
+    "diis_start": 3.0
    }
   }
  }

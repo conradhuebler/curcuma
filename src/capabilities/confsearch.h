@@ -257,7 +257,7 @@ private:
 
     // --- System ---
     PARAM(charge, Int, 0, "Total charge of the system. Applied to every MD run, every optimisation and every ConfScan energy.", "System", {})
-    PARAM(spin, Int, 0, "Total spin of the system.", "System", {})
+    PARAM(spin, Int, 0, "Number of unpaired electrons (multiplicity - 1) of the system.", "System", {})
     PARAM(threads, Int, 1, "Number of ConfSearch cycles run in parallel. Each child MD or optimisation then runs single-threaded.", "System", {})
 
     // --- Search Schedule ---

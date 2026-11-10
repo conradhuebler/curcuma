@@ -21,6 +21,7 @@ static const std::vector<std::vector<std::string>> kCases = {
     { "-sp", "w.xyz", "-method", "gfn2" },
     { "-sp", "w.xyz", "-max_iterations", "3", "-method", "gfn2" },
     { "-sp", "w.xyz", "-gfnff.cn_cutoff_bohr", "5.5", "-cn_cutoff_bohr", "6" },
+    { "-sp", "w.xyz", "-cn_cutoff_bohr", "6", "-gfnff.cn_cutoff_bohr", "5.5" }, // dotted wins in either order
     { "-sp", "w.xyz", "-charge", "-1", "-spin", "1" },
     { "-sp", "w.xyz", "-verbose" },
     { "-sp", "w.xyz", "-threads", "4", "5" },
@@ -37,6 +38,10 @@ static const std::vector<std::vector<std::string>> kCases = {
     { "-sp", "w.xyz", "-export_run", "2026run.json" }, // numeric prefix stays a string
     { "-sp", "w.xyz", "-bak", "1abc.log", "-bak", "x.log" },
     { "-sp", "w.xyz", "-threshold", "-1e-6" },
+    { "-md", "w.xyz", "-md.max_time", "10", "-simplemd.temperature", "350" }, // dotted forms of the command's own module
+    { "-sp", "w.xyz", "-md.thermostat", "berendsen" }, // dotted form of another command's keyword
+    { "-confscan", "c.xyz", "-rmsd.method", "inertia", "-confscan.threads", "4", "-threads", "2" },
+    { "-sp", "w.xyz", "-method", "gfnff", "-gfnff.dispersion", "false", "-xtb.diis_start", "3" },
 };
 
 int main(int argc, char** argv)

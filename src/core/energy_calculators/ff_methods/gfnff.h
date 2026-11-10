@@ -2531,7 +2531,7 @@ private:
     GeoGradMatrix m_gradient; ///< Gradient in Hartree/Bohr — WP-G: RowMajor
     std::vector<int> m_atoms; ///< Atomic numbers (Z values)
     int m_charge = 0; ///< Total molecular charge
-    int m_spin = 0; ///< Spin multiplicity
+    int m_spin = 0; ///< Unpaired electrons (multiplicity - 1), as Molecule::Spin()
 
     // GFN-FF specific
     json m_parameters; ///< GFN-FF parameters

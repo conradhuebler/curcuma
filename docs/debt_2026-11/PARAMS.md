@@ -200,6 +200,7 @@ Commit `c3f570f` (2026-10-31), clean tree. Read-only analysis, no repo file chan
   replaced by the literal default [run: `E throws: ... not found`].
 
 **M9. The sub-scope lists are maintained in three places and contain dead entries.**
+- Status (Nov 10, 2026): the lists are one (`MethodFactory::methodParameterScopes()`, read by `cli_parser.cpp`, `main.cpp`, `energycalculator.cpp`, `simplemd.cpp`, `confsearch.cpp`, `hessian.cpp`); `modern_optimizer` is gone. Left on purpose: `uff`, `qmdff`, `eht` (not productive yet) and `eeq_solver` (merged into `gfnff`, still a JSON scope). `d3` and `d4` have no registry module and no reader as scopes; harmless, not removed.
 - `MethodFactory::methodParameterScopes()` (`method_factory.cpp:568-573`) lists `uff`, `qmdff`, `eht`, `d3`, `d4`;
   no registry module has those names.
 - `scope_modules` in `CLI2Json` (`main.cpp:721-723`) adds `modern_optimizer`, which does not exist.
@@ -230,6 +231,7 @@ Commit `c3f570f` (2026-10-31), clean tree. Read-only analysis, no repo file chan
 - **L4 PARAM annotations are not enforced.** 18 PARAMs declare `enum=`, 16 `min/max`, 15 `unit`. They are used only by
   `printHelp`. `parameter_validation.h` (`ParamValidation::*`) has no include and no caller; it is dead code, yet it is
   listed in `src/core/CLAUDE.md:12`.
+- [L5 fixed Nov 10, 2026: the `is_flat_dotted` branch and the `pname.find('.')` check are removed; golden file extended by four dotted cases first, 23 of 23 unchanged. L6 fixed the same day: the dotted `-<module>.<name>` wins over the flat `-<name>` in either order (golden case 2 changed from 6.0 to 5.5, one case added). L7: `-export_run` skips `global` and the keyword copies; `eeq_solver` still gets no defaults on purpose, since the module's parameters live in `gfnff`.]
 - **L5 Dead code in `CLI2Json`.** `setNestedJsonValue` always splits dotted keys, so `key` never holds a flat
   `"a.b"` name. The `is_flat_dotted` branch (`main.cpp:1034-1062`) and the `pname.find('.')` check (`:946`) are
   unreachable [read].
@@ -238,6 +240,7 @@ Commit `c3f570f` (2026-10-31), clean tree. Read-only analysis, no repo file chan
 - **L7 `-export_run`** detects touched modules with `getForModule(it.key())`, without `canonicalModule`
   (`main.cpp:3107`), so `eeq_solver` gets no defaults (documented in PARAMETER_SYSTEM.md). It also exports `global`
   and `controller[keyword]` duplicates.
+- [Nov 10, 2026: `PARAMETER_SYSTEM.md` migration table replaced by a pointer to `-list_modules`; `PARAMETER_FLOW_ARCHITECTURE.md` names `cli_parser.cpp` and states the real matching rule (`-MaxIterations` does not set `max_iterations`, checked with `-export_run`); `-export-config`/`-import-config` are accepted spellings and stay.]
 - **L8 Stale documentation.**
   - The `PARAMETER_SYSTEM.md` "Migration Status" table (`:413-421`) says casino/simplemd/opt/confscan/hessian/rmsd are
     "Pending"; all are registered.

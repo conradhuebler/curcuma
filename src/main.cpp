@@ -1481,7 +1481,7 @@ int executeOptimization(const json& controller, int argc, char** argv) {
         fmt::print("  NOTE: lbfgs, diis, rfo are AI-generated and not yet tested/approved.\n");
         fmt::print("        Use lbfgspp or ancopt for production calculations.\n");
         fmt::print("  -charge <n>          Molecular charge (default: 0)\n");
-        fmt::print("  -spin <n>            Spin multiplicity (default: 0)\n");
+        fmt::print("  -spin <n>            Unpaired electrons, multiplicity - 1 (default: 0)\n");
         fmt::print("  -threads <n>         Parallel threads (default: 1)\n");
         fmt::print("  -verbosity <n>       Output level: 0=silent, 1=table, 2=detailed, 3=debug (default: 1)\n\n");
         fmt::print("Convergence:\n");

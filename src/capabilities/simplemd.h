@@ -800,7 +800,7 @@ private:
         "tier=primary; unit=fs; min=0")
     PARAM(charge, Int, 0, "Total charge of the system.", "Basic", {},
         "tier=primary")
-    PARAM(spin, Int, 0, "Total spin multiplicity of the system (0=singlet, 1=doublet).", "Basic", {"Spin"},
+    PARAM(spin, Int, 0, "Number of unpaired electrons (multiplicity - 1): 0 closed shell, 1 doublet, 2 triplet.", "Basic", {"Spin"},
         "tier=primary")
     PARAM(seed, Int, -1, "Random seed (-1: time, 0: auto).", "Basic", {})
     PARAM(threads, Int, 1, "Number of parallel threads.", "Basic", {},

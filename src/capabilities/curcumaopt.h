@@ -40,7 +40,7 @@ namespace {
         "min=1")
     PARAM(charge, Int, 0, "Total molecular charge", "Basic", { "Charge" },
         "tier=primary")
-    PARAM(spin, Int, 0, "Spin multiplicity", "Basic", { "Spin" },
+    PARAM(spin, Int, 0, "Number of unpaired electrons (multiplicity - 1): 0 closed shell, 1 doublet, 2 triplet", "Basic", { "Spin" },
         "tier=primary")
     PARAM(verbosity, Int, 1, "Output level: 0=silent, 1=table, 2=detailed, 3=debug", "Basic", { "verbose" })
 

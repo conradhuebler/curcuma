@@ -410,15 +410,10 @@ Internally stored as:
 
 ## Migration Status
 
-| Module | Status | Parameter Count | Notes |
-|--------|--------|----------------|-------|
-| analysis | ✅ Complete | 25 | Proof-of-concept, tested |
-| casino | ⏳ Pending | ~14 | Monte Carlo simulation |
-| simplemd | ⏳ Pending | ~20 | Molecular dynamics |
-| opt | ⏳ Pending | ~15 | Geometry optimization |
-| confscan | ⏳ Pending | ~12 | Conformational scanning |
-| hessian | ⏳ Pending | ~10 | Second derivatives |
-| rmsd | ⏳ Pending | ~15 | Structure comparison |
+Every capability module is registered (`curcuma -list_modules` prints the modules with their parameter counts;
+`curcuma -help-module <module>` prints the parameters). Two modules are not PARAM blocks of a capability: `global`
+(`src/core/global_params.h`, the names every command accepts) and the method scopes such as `gfnff`, `xtb` and `scf`.
+Capabilities that still read some keys without a PARAM are listed in `docs/debt_2026-11/PARAMS.md`.
 
 ## Troubleshooting
 
