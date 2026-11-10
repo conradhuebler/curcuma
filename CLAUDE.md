@@ -205,7 +205,7 @@ double energy = method->calculateEnergy();
 - **eht**: Native only (always available, no dependencies)
 - **pm3**: Native only (H, C, N, O supported, no dependencies)
 - **uff/qmdff**: ForceField wrapper with parameter generation
-- **gfnff**: Native C++ GFN-FF (always available, ✅ **COMPLETE**)
+- **gfnff**: Native C++ GFN-FF (always available, AI-implemented, machine-tested)
 - **xtb-gfnff**: Fortran/XTB GFN-FF — ExternalGFNFF (USE_GFNFF) → XTB (USE_XTB)
 
 #### Force Field System (`src/core/forcefield.h/cpp`)
@@ -368,8 +368,6 @@ before committing, or enable the hook with `git config core.hooksPath scripts/gi
 ## Standards
 
 ### Universal Logging System (`src/core/curcuma_logger.h/.cpp`)
-**✅ FULLY IMPLEMENTED** across all computational methods
-
 #### **Verbosity Levels**
 - **Level 0**: **Silent Mode** - Zero output (critical for optimization/MD)
 - **Level 1**: **Minimal Results** - Final energies, convergence status
