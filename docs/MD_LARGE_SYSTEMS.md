@@ -451,6 +451,31 @@ mostly the 1500 waters rearranging. It has not converged.
 > writes `result.final_molecule`; if you have `.opt.xyz` files from before that, check them
 > against their input before trusting them.
 
+## Peak RSS grew with the run length (fixed Oct 2026)
+
+The 100 ps probe run (3071 atoms, [PDMAEMA_PROBE_100PS_2026-10.md](PDMAEMA_PROBE_100PS_2026-10.md)) peaked at 2.0 / 2.6 /
+6.8-7.5 GB for 10 / 20 / 100 ps. Cause: `SimpleMD::CSVR()` appended one double per atom per step to `m_atom_temp`,
+a member nothing read (since 2024). Removed. Measured with `/proc/<pid>/status` every 5 s, slope of RssAnon over MD
+time, dt 0.5 fs, n = 1 per row (water droplet: 300 H2O, 900 atoms, GFN-FF, wall, 2 threads, 6-10 ps):
+
+| variant (old binary) | MB/ps | B/atom/step |
+|---|---|---|
+| CSVR (base) / dump x0.1 / dump x10 / no trajectory | 17.2 / 21.9 / 24.5 / 20.8 | 10-14 |
+| no wall / groups + cn_zero_guard (energies identical to no groups on pure water) / topology auto / 1 thread | 22.3 / 21.1 / 26.0 / 19.0 | 11-15 |
+| thermostat none / berendsen | 0.8 / 1.8 | 0.5 / 1.0 |
+| **fixed binary**: CSVR 20 ps / groups 6 ps | 1.7 (0.9 for t > 10 ps) / 2.7 | 1.0 / 1.6 |
+| **fixed binary**, 50 ps: CSVR / none (fit 5-50 ps) | 0.5 / -0.5 | 0.3 / -0.3 |
+| probe system, 3071 atoms, probe flags, 4 threads, 2 ps: old / fixed | 57.9 / 5.3 | 9.9 / 0.9 |
+
+- Growth follows steps x atoms with CSVR only, not frames, wall, groups, topology mode or threads. 8 B are stored per
+  atom and step; the measured 10-15 B include allocator slack from the doubling vectors.
+- The old slope reproduces the probe: 57.9 MB/ps x 100 ps = 5.8 GB on top of 1.3 GB. Estimate (not run): with the old
+  code 1 ns at dt 0.5 fs needed 50-90 GB more at 3000 atoms, 0.5-0.9 TB at 30 000 atoms.
+- Fixed binary: trajectory, md.log rows (all physical columns) and final state byte-identical to the old one
+  (2 ps, 1 thread, water with and without the group file; probe system 2 ps, 4 threads).
+- Fixed binary over 50 ps (900 atoms): RssAnon stays within 178-241 MB (CSVR) and 189-228 MB (none) with no trend;
+  the short-run residuals of 1-3 MB/ps are warm-up. Not measured: runs beyond 50 ps, systems beyond 3071 atoms.
+
 ## What was not tested
 
 - Longer than 500 fs, and no production trajectory - these runs answer "does it stay at the

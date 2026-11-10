@@ -31,6 +31,7 @@
 #include "src/core/units.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/math_compat.h"
+#include "src/core/energy_calculators/dispersion/d4_pair_c6.h"  // fused D4 pair C6 (Oct 2026)
 
 #include <fmt/core.h>
 #include <fmt/format.h>
@@ -740,6 +741,13 @@ void FFWorkspace::calcD4Dispersion(int p)
 
     // Pair-list position hint for the dc6dcn lookup (see calcDispersion).
     std::size_t dc6_hint = static_cast<std::size_t>(begin);
+    // Claude Generated (Oct 2026): fused C6 - with a view, C6 and dC6/dCN of each pair are
+    // evaluated here from per-atom data (same operations as D4ParameterGenerator's
+    // getChargeWeightedC6 / computeDC6DCN, see d4_pair_c6.h) instead of read from the pair
+    // list, which the generator then no longer rewrites every step. Pairs beyond r_cut are
+    // skipped before any C6 work.
+    const D4FusedC6View* fv = m_d4_fused_c6;
+    constexpr int NREF = 7;  // D4ParameterGenerator::MAX_REF, row length of the view arrays
     for (int idx = begin; idx < end; ++idx) {
         const auto& disp = m_d4_dispersions[idx];
 
@@ -759,22 +767,42 @@ void FFWorkspace::calcD4Dispersion(int p)
         double t8 = 1.0 / (r8 + r0_8);
 
         double disp_sum = t6 + 2.0 * disp.r4r2ij * t8;
-        double pair_energy = -disp.C6 * disp_sum * disp.zetac6;
+        // C6(i,j) = sum_b g_i[Z_j][b] w_j[b] (fused) or the value stored in the pair
+        size_t g_row = 0;
+        double C6 = disp.C6;
+        if (fv) {
+            g_row = (static_cast<size_t>(disp.i) * fv->K + fv->slot[disp.j]) * NREF;
+            C6 = D4PairC6::c6(fv->g + g_row, fv->w + static_cast<size_t>(disp.j) * NREF, fv->nb[disp.j]);
+        }
+        double pair_energy = -C6 * disp_sum * disp.zetac6;
         acc.energy.dispersion += pair_energy;
 
         if (m_do_gradient) {
             double d6 = -6.0 * r2 * r2 * t6 * t6;
             double d8 = -8.0 * r2 * r2 * r2 * t8 * t8;
             double ddisp_dr2 = d6 + 2.0 * disp.r4r2ij * d8;
-            double dEdr = -disp.C6 * disp.zetac6 * ddisp_dr2 * rij;
+            double dEdr = -C6 * disp.zetac6 * ddisp_dr2 * rij;
 
             Eigen::Vector3d grad = dEdr * rij_vec / rij;
             acc.gradient.row(disp.i) += grad.transpose();
             acc.gradient.row(disp.j) -= grad.transpose();
 
-            // dc6dcn chain-rule, per-pair lookup (see calcDispersion)
+            // dc6dcn chain-rule, per-pair lookup (see calcDispersion); fused: computed here.
+            // Every pair of the workspace list is in the generator's list, so the lookup of
+            // the unfused path always succeeds once the pointer is set.
             double dc6_di, dc6_dj;
-            if (m_dc6dcn_ptr && m_dc6dcn_ptr->lookup(disp.i, disp.j, dc6_hint, dc6_di, dc6_dj)) {
+            bool have_dc6 = false;
+            if (fv) {
+                if (m_dc6dcn_ptr) {
+                    const size_t jw = static_cast<size_t>(disp.j) * NREF;
+                    D4PairC6::dc6dcn(fv->g_d + g_row, fv->dg_d + g_row, fv->w_d + jw, fv->dw_d + jw,
+                                     fv->nb_d[disp.j], dc6_di, dc6_dj);
+                    have_dc6 = true;
+                }
+            } else {
+                have_dc6 = m_dc6dcn_ptr && m_dc6dcn_ptr->lookup(disp.i, disp.j, dc6_hint, dc6_di, dc6_dj);
+            }
+            if (have_dc6) {
                 double disp_value = disp_sum * disp.zetac6;
                 acc.dEdcn(disp.i) -= dc6_di * disp_value;
                 acc.dEdcn(disp.j) -= dc6_dj * disp_value;
@@ -1027,6 +1055,10 @@ void FFWorkspace::calcHydrogenBonds(int p)
 
     for (int idx = begin; idx < end; ++idx) {
         const auto& hb = m_hbonds[idx];
+        // Partitions own disjoint index ranges, so writing slot idx needs no lock.
+        const bool record = m_record_hb_energies && idx < static_cast<int>(m_hb_triple_energy.size());
+        if (record)
+            m_hb_triple_energy[idx] = 0.0;
 
         Eigen::Vector3d pos_A = m_geometry.row(hb.i).transpose();
         Eigen::Vector3d pos_H = m_geometry.row(hb.j).transpose();
@@ -1226,6 +1258,8 @@ void FFWorkspace::calcHydrogenBonds(int p)
             E_HB = -bas * aci * rdamp * qhoutl;
         }
         acc.energy.hbond += E_HB;
+        if (record)
+            m_hb_triple_energy[idx] = E_HB;
 
         static const bool hb_dump = (std::getenv("CURCUMA_HB_DUMP") != nullptr);  // once, not per triple
         if (hb_dump && std::abs(E_HB) > 1e-13) {

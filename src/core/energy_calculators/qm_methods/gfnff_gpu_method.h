@@ -57,6 +57,9 @@ struct GFNFFCudaBackend {
     /// K2/K3 (Oct 2026): dispersion and the device EEQ solve overlap dc6dcn on own streams
     /// (recordEEQInputsReady(), launchDispersionGradientEarly(), EEQ setInputReadyEvent()).
     static constexpr bool has_stream_overlap = true;
+    /// Claude Generated (Oct 2026): -gfnff.charge_groups and -gfnff.cn_zero_guard run on the device (measured on
+    /// CUDA, RTX 5080); false = the wrapper asks for the CPU method (requestsCpuFallback()).
+    static constexpr bool has_charge_groups_cn_guard = true;
     /// Oct 2026: staged pinned upload of rebuilt pair lists (setStagedListUpload()).
     static constexpr bool has_staged_list_upload = true;
     /// Oct 2026: device-side H-bond detection (FFWorkspaceGPU::detectHBondsOnDevice()).

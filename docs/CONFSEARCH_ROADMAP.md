@@ -20,6 +20,17 @@ All features below are 🤖 AI-generated, ⚙️ machine-tested only — **human
   plain Verlet with 0 constraints despite being documented and handled by `InitConstrainedBonds`.
   Now `rattle == 1 || rattle == 2`. Cleaned up the constraint printout (summary + element-labelled
   per-bond list).
+- **RATTLE inter-fragment freeze fix (Jul 2026)**: `SimpleMD::Rattle()` ran an unconditional
+  per-fragment `RemoveRotations()` at the end of every constrained step, zeroing each fragment's
+  linear + angular momentum. Since Phase A switches RATTLE on for every cycle at
+  `T >= rattle_threshold_temp`, the RMSD-MTD bias could not separate/rearrange fragments in any
+  multi-fragment system — it accelerated them and the removal threw that momentum away in the same
+  step. Removed (COM/rotation removal belongs to the main loop, `remove_com_motion`/`remove_com_mode`).
+  A/B acetic-acid dimer, 3 ps, `-rattle 2`: fragment-COM span 0.43 → 2.17 A, 44 → 127 hills;
+  single-fragment runs unchanged. Test: `cli_simplemd_15_rattle_mtd_fragments`.
+- **RMSD-aware seeding (Jul 2026)**: `seed_selection=diverse` (default) requires `seed_min_rmsd`
+  spacing between the seeds of a cycle instead of taking the `seed_rank` lowest energies; relaxes
+  the spacing when too few distinct basins exist. See [CONFSEARCH_SEEDING.md](CONFSEARCH_SEEDING.md).
 
 ## Open TODOs / Roadmap
 
@@ -95,12 +106,43 @@ the COLVAR energy, not the force. So each run inherits a taller, non-conservativ
 out-paces the thermostat → `<T>` climbs run-by-run until a NaN blow-up (baseline triose: 552→596
 →654→explode).
 
+> **Status correction (Aug 6, 2026).** The two defaults described below as "ON by default for
+> ConfSearch" are **OFF** today — they were flipped when the strided (soft-counter) scheme came in,
+> on the expectation that it bounds the growth on its own. Measured, it does not once `k` is raised
+> above the default 0.01: with `-rmsd_mtd_k 0.05 … 0.1` and 50 ps per repetition the tallest hill
+> reached **2–98 Eh** (5000–257000 kJ/mol) against a conformer energy spread of 0.03 Eh. From cycle
+> 2 on, every MD started at the centre of that mountain and the molecule was torn apart within
+> 10–20 fs: four production runs of a 107-atom peptide were effectively single-cycle runs, six of
+> seven cycles produced nothing, and 72–99 % of the bias pool were fragments. Three guards now make
+> this visible and stop the pool from poisoning itself (fragment gate before the deposit, geometry
+> sanity abort, a loud warning naming the tallest hill when a phase hands on nothing) — they do not
+> bound the height. `-rmsd_mtd_max_height` does, and whether it should default to something finite
+> is still open.
+>
+> Reproduced end to end: same command line, 3 ps per repetition, cycle 2 before the guards
+> 30–36 % fragments in the pool and "every MD snapshot changed its topology"; after them 419 pool
+> structures, **0.0 % fragments**, 40 deposits refused, and the warning naming `W = 2.04 Eh at
+> k = 0.050`.
+>
+> **The counter cap is NOT the lever (measured Aug 7, 2026).** Four otherwise identical runs at
+> `k = 0.05` differing only in `-rmsd_mtd_max_height` (none / 1 / 3 / 10) all lose the first
+> repetition of cycle 2 (snapshots `0/0/88`, `0/13/181`, `0/0/124`, `0/0/101`; 19–53 deposits
+> refused as fragmented in each). Reason: the walker feels the SUM in `V = Σ k n_i exp(-α R²)`, and
+> a dense inherited pool puts dozens of hills inside one Gaussian width — a hill capped at one
+> visit still weighs 131 kJ/mol at `k = 0.05`, twenty of them are a Hartree again. The bound
+> belongs on `n_overlap · k · n_max ≲ ΔE(conformers)`, and since `n_overlap` is not known in
+> advance, **`k` is the parameter that matters** — the cap is an emergency brake, not a design
+> quantity. Control: the same schedule at the default `k = 0.01` passes cycle 2 with 660 snapshots
+> where `k = 0.05` produced none. Corollary: a bias parameter measured on a SINGLE temperature
+> stage (as in the α/k sweep) does not carry over to a multi-cycle run, because no pool accumulates
+> there.
+
 **Implemented controls:**
-- `rmsd_mtd_freeze_inherited` (Bool) — **ON by default for ConfSearch**: freeze the heights of
+- `rmsd_mtd_freeze_inherited` (Bool) — was ON by default for ConfSearch, now OFF (see above): freeze the heights of
   structures present at a run's start (snapshot in `prepareRun()`); only this run's own deposits grow
   (and inherited ones are not bumped). Bounds the cross-run escalation while keeping geometry sharing.
-- `temp_abort` + `temp_abort_factor`(1.5) + `temp_abort_delta`(300 K) — **ON by default for
-  ConfSearch**: abort an MD run when the running-mean `<T>` runs away from the target (mirrors
+- `temp_abort` + `temp_abort_factor`(1.5) + `temp_abort_delta`(300 K) — was ON by default for
+  ConfSearch, now OFF (see above): abort an MD run when the running-mean `<T>` runs away from the target (mirrors
   `epot_abort`; either threshold trips, `<=0` disables one). Safety net that catches a runaway run.
 - `rmsd_mtd_max_height` (Int, 0=unbounded) — opt-in: cap the counter in the force,
   `W_i = k·min(counter_i, cap)`. Tightest temperature (triose cap=3 holds `<T>`~500–525 K) but
@@ -126,6 +168,103 @@ the swallowed `warn_fmt`.
 (coupling `k`↔`alpha`, total-force capping, or a true well-tempered force damping) is not yet
 addressed — the caps/abort above bound the cross-run heating and provide a safety net, but a
 single run with an over-wide hill can still spike. 🤖 AI-generated, ⚙️ machine-tested only.
+
+### 5. Genetic structure crossing (GC) — implemented as `-crossover_max` (ConfGen, Aug 2026), never run in production
+
+> Status correction (Sep 2026): the paragraph below predates `ConfGen::generateCrossoverProposals`
+> (`-crossover_max`, default 0, `-crossover_window` 6), which transfers a connected window of torsions
+> from one ensemble member into another. It is reachable from ConfSearch through the forwarded
+> `controller["confgen"]` settings but has never been switched on in a production run, and the
+> measurement that motivated it (deep torsion vectors do not survive the free optimisation) speaks
+> against expecting much. The torsion recombination itself is already a crossing with the ensemble as
+> donor.
+ConfSearch is MTD-only: every new structure comes from a biased MD trajectory. CREST's default
+workflow (iMTD-**GC**) adds a purely geometric, energy-free step after the MTD phase: pairs of
+conformers from the current ensemble are "crossed" by exchanging their internal coordinates
+(dihedrals of the rotatable bonds / Z-matrix entries), the offspring are optimised and the unique
+survivors enter the ensemble. It combines local changes that were found independently (conformer A
+has the good ring pucker, conformer B the good side-chain rotation → the child has both) at the cost
+of a geometry optimisation, without any MD time. curcuma has **no equivalent**; there is no genetic,
+crossover or mating step anywhere in the codebase. A port would fit as a phase between the ConfScan
+dedup and the cumulative pool: enumerate rotatable bonds (topology is available), build offspring
+dihedral sets from the accepted conformers, optimise at `md_method`, and feed survivors into the
+ConfScan filter + the shared bias pool. Open questions: pair-selection policy, how many offspring per
+pair, and whether the crossing should respect the symmetry permutations already cached.
+
+### 6. Open bugs found Jul 26, 2026 (see docs/CONFSEARCH_PROPOSALS.md handover for detail)
+- **`topology_mode=auto` global default**: reproduces a 1312 kJ/mol energy/geometry mismatch in plain
+  `-opt`; only ConfSearch children were switched to `constant`.
+- **Uninitialised access in `GFNFF::getGFNFFBondParameters`**: TRIGGER IDENTIFIED (Aug 1, 2026). It fires on
+  repeated force-field re-initialisation: `OptimizerDriver::Initialize()` called `setMolecule()` for every
+  structure, so a caller optimising many geometries of ONE molecule through one shared calculator (ConfGen)
+  re-entered the parameter generation once per proposal and segfaulted reproducibly in `cli_confgen_02`.
+  Worked around with the opt-in `reuse_calculator` (coordinates only). The underlying wild pointer in the
+  parameter generation is still unexplained -- ASAN still pending.
+- **`ecomp_*` tests**: must be checked against the pre-`24c9b8d` state (the `Repulsion` term was added
+  to the decomposition they compare).
+- **P0 dihedral restraint** is the pending lever for the recombination phase (72 % clash loss).
+
+### 7. Cumulative bias pool tears the molecule apart — MEASURED Aug 1, 2026 (open)
+Measured on WEKLQ (107 atoms, C34H55N11O7), full 5-cycle dual run, 20 ps/MD, `alpha 0.5`, `k 0.01`,
+14 threads (`scratchpad/weklq/x_t20`):
+- New surviving snapshots per cycle: **62 / 1 / 0 / 0 / 0**. From cycle 3 on, *every* newly deposited
+  pool structure fails the topology gate (152/152, 434/434, 530/562). Cycles 3-5 = 54 MD runs, 1060
+  deposits, **zero** contribution, **56 % of the total runtime**.
+- Cause: all 434 rejects of cycle 4 miss **exactly one and the same bond** (N38-C39, amide N-Calpha,
+  1.462 A in the reference); the fragments end up a median **234 A** apart (max 448 A) at only
+  **+557 kJ/mol** GFN-FF. The RMSD bias saturates the intact conformational space and then buys its
+  reward the cheap way: a departing fragment adds unbounded RMSD for one bond energy.
+- Runtime split of that run (3730 s): MD 6.8 %, topology gate + repair 8.1 %, GFN-FF opt 0.6 %,
+  ConfScan dedup 20.7 %, **GFN2 re-opt 60.9 %**, initial/final 2.9 %. The Phase-3b re-optimisation
+  repeats on the *identical* 52 structures in cycles 1-4 (energies equal to every printed digit).
+- Levers: bound/reset the hill pool per cycle (`rmsd_mtd_max_gaussians` is per-run, not per-search);
+  keep bond lengths in range inside the MD instead of filtering afterwards; use "new survivors per
+  cycle" as a stagnation criterion (detects stagnation, not completeness); skip Phase 3b when the
+  accepted ensemble is unchanged.
+
+### 8. Densification chain (`-refine_md_chain`) — BUILT (Sep 2026), default OFF, A/B open
+
+> Implemented as described below: after a repetition whose densification products entered the seed
+> window, the loop re-enters the same repetition index as a chain round (file tag `_c<k>`), skips the
+> exploration MD, densifies the unrefined top candidates of the updated pool, and stops when a round
+> is dry or `-refine_md_chain_max` (4) is reached; never after the last repetition of a stage; chain
+> rounds do not count for the stage-saturation rule. Verified mechanically on the 14-atom smoke molecule
+> (4 chain rounds, one new pool member each, files tagged, 23/23 ctests). The lever ranking behind it is
+> in [CONFSEARCH_LEVERS.md](CONFSEARCH_LEVERS.md).
+
+Where it comes from: the record chain of WEKLQ (`kette_README.md`) is, from its second link on, a
+sequence of 0.34-1.06 A steps, each taken from the current best seed in the NEXT repetition
+(550 K r3 -> 500 K r4 -> r5 -> 450 K r2, t = 50-160 fs). `repeat 5` gave four re-seedings per stage;
+the hybrid runs with `repeat 2` got one, and `refine_md_once` blocks a second densification pass from
+the same seed inside a stage. Hybrid v2 ended 0.94 A (rank 6, +27 kJ/mol) and 1.51 A (rank 4, +21) from
+the record basin with three repetitions left in which each seed was allowed exactly one pass.
+Densification and exploration yield the same number of top-50 hits per gfn2 optimisation (1.50 % vs
+1.41 %, hybrid v2), but densification supplies the depth inside a found basin (5 of the top 10, the
+best) while exploration supplies regions.
+
+Mechanism: after RELAX/REDUCE of a repetition, if the densification products changed the pool inside
+the seed window (new best on the ranking surface, or a new structure inside `seed_energy_window` that is
+not its own seed), run another densification round from the updated top seeds immediately -- no
+exploration MD in between -- until a round is dry or `refine_md_chain_max` (4) is reached. The chain
+replaces exploration rounds, it does not come on top; one round costs about 180 optimisation
+equivalents (10 seeds x 200 gfn2 gradients + ~16 optimisations per seed, measured on v2).
+
+A/B at equal gfn2 budget (optimisations + MD steps/100, logged): A hybrid v2 as run; B v2 + chain;
+C gfn2/gfn2 `repeat 2`; three seeds each; read-outs best, n <= 20 kJ/mol, min heavy-atom RMSD to the
+record, chain length of the best's provenance. Second molecule `test_cases/molecules/larger/triose.xyz`.
+Refuted if B is not better than A at equal budget -- then the gap is seed selection, not the number
+of re-seedings.
+
+### 9. Equal-budget status of the cheap-explore question (Sep 2026)
+
+The claim that gfnff exploration with a gfn2 funnel loses by ~50 kJ/mol compared runs with the funnel on
+gfnff (`relax_pes md`, 2149-4615 gfn2 optimisations, repeat 3-5) against the record run with 4.7-6.4 times
+the budget. At equal `repeat 2` and 1000 fs: gfn2/gfn2 {-1.3, +6.4, +11.4} (n = 3) vs hybrid {+0.6, +8.7}
+(n = 2), budgets within a factor 1.3 -- no difference resolvable. The hybrids reach the record's
+H-bond-motif region as often as the gfn2 runs (5.7 % of hybrid v2's conformers carry >= 3 of the 6 motif
+bridges vs 2.3 % of the record run before its record cycle); what differs is the depth inside the region
+(+21…+27 vs -14.5). Pure gfnff pools still do not contain the gfn2 basin (n = 3 full re-optimisations,
+0 of ~1000 within 20 kJ/mol). A repeat-5 hybrid with >= 10 000 gfn2 optimisations has not been run.
 
 ## Verification anchors
 - Bit-identity of the Phase-B MTD refactor (perms off): byte-identical `.mtd.xyz`/`.bias.xyz` vs the

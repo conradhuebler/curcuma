@@ -2,7 +2,7 @@
 
 User-facing commands built on `src/core`: optimisation, MD, conformer search and scan, RMSD, trajectory analysis,
 Hessian, docking. Energies and gradients always come from `EnergyCalculator`. Docs: [CONFSEARCH_DUAL_METHOD](../../docs/CONFSEARCH_DUAL_METHOD.md),
-[CONFSEARCH_RESTART](../../docs/CONFSEARCH_RESTART.md), [CONFSEARCH_ROADMAP](../../docs/CONFSEARCH_ROADMAP.md), BMT in [../tools/CLAUDE.md](../tools/CLAUDE.md).
+[CONFSEARCH_RESTART](../../docs/CONFSEARCH_RESTART.md), [CONFSEARCH_DEVELOPMENT_NOTES](../../docs/CONFSEARCH_DEVELOPMENT_NOTES.md) (detail bullets), [CONFSEARCH_POTENTIAL_REVIEW](../../docs/CONFSEARCH_POTENTIAL_REVIEW.md), [CONFSEARCH_ROADMAP](../../docs/CONFSEARCH_ROADMAP.md), BMT in [../tools/CLAUDE.md](../tools/CLAUDE.md).
 
 ## Layout and ownership
 
@@ -29,9 +29,11 @@ Hessian, docking. Energies and gradients always come from `EnergyCalculator`. Do
 
 ## Invariants and traps
 
+- Distance/dihedral restraints (`optimisation/geometry_restraints.h`) add their gradient in Eh/Angstrom, like `EnergyCalculator::Gradient()`; a Bohr factor makes the LBFGS line search stop with "zero step" (#39, test `test_geometry_restraints`). The driver's `evaluateEnergyAndGradient` already contains the restraints, so a primed evaluation must not add them again.
 - `-opt` PARAMs live in `curcumaopt.h` although `CurcumaOpt` is not built: the registry is generated from every header (`GLOB_RECURSE`), built or not
 - `-optimizer auto` (default) always means LBFGSpp; `selectOptimalOptimizer()` has no caller. `lbfgs` is the native L-BFGS; unknown names fall back to LBFGSpp
 - `OptimizerDriver` owns loop, convergence and output; every abort returns the last accepted structure, which `-opt` writes even if not converged
+- LBFGSpp runs with a copy of its backtracking line search (`lbfgspp_capped_linesearch.h`, `external/LBFGSpp` is untracked): `-lbfgs_max_atom_step` caps one atom's step, 0 = off ([docs](../../docs/LBFGS_ATOM_STEP_CAP.md))
 - `stall_steps`/`stall_rmsd` (20 / 1e-6 A) end a frozen run as "No progress"; a zero step counts as converged only if the driver criteria hold
 - Multi-XYZ `-opt -threads N`: one `CxxThreadPool` worker and `EnergyCalculator` per frame, logger silenced, then an input-order summary (`optimizeBatch`)
 - ConfSearch registers its flags (71 PARAMs) so the auto-router leaves them alone; `-T` is not one (`-startT`/`-endT`); unregistered SimpleMD keys: `confsearch.h:241-244`

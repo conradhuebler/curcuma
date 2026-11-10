@@ -12,6 +12,7 @@ Python re-implementations of GFN-FF terms. None of them is registered in `ctest`
 | `ulysses_helper.cpp` | `ulysses_helper` | `USE_ULYSSES` (no `HELPERS` gate) |
 | `xtb_helper.cpp`, `tblite_helper.cpp`, `gfnff_helper.cpp`, `dftd3_helper.cpp`, `dftd4_helper.cpp` | same name | `HELPERS` plus `USE_XTB` / `USE_TBLITE` / `USE_GFNFF` / `USE_D3` / `USE_D4` |
 | (removed 2026-10-01) | | cli_test.cpp and gfnff_test.cpp included headers that no longer exist and had no target |
+| `ml_barcode_ablation.cpp` | `ml_barcode_ablation` | always; energy-only experiment: local Vietoris-Rips barcode features vs ACSF on an `-activelearn` dataset JSON (AI-generated, machine-tested only) |
 | `imagewrite.cpp`, `storage_bench.cpp`, `polymer_topo.cpp`, `gfnff_term_validator.cpp` | none | never; standalone `main()` programs (Eigen image writer, parameter-lookup storage benchmark, matrix topology analysis, GFN-FF term check) |
 | `gfnff_reference_validator.py`, `gfnff_term_validator.py`, `validate_ch3oh.py` | - | Python scripts re-implementing GFN-FF formulas from the Fortran reference |
 

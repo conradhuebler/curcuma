@@ -21,6 +21,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -1495,6 +1496,26 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
         cached = m_all_structures;
     else
         cached = m_stored_structures;
+
+    // Claude Generated (Jul 2026): energy ordering is an INVARIANT of every pass, not an accident.
+    //
+    // ConfScan never calls std::sort -- the ordering comes from m_ordered_list, a
+    // std::multimap<double,int> keyed on the energy (openFile), which CheckOnly iterates. Everything
+    // downstream inherits that order. Verified on a deliberately shuffled 44-conformer ensemble: the
+    // written .accepted.xyz comes out strictly ascending in energy.
+    // Re-establishing the order here costs one multimap build per pass and makes the property local
+    // and checkable instead of a chain of inherited assumptions -- several places depend on it
+    // (m_lowest_energy is taken from the FIRST structure of a pass, the energy cutoff and m_maxrank
+    // are applied while walking the list).
+    {
+        std::multimap<double, Molecule*> ordered;
+        for (Molecule* mol : cached)
+            ordered.insert(std::pair<double, Molecule*>(mol->Energy(), mol));
+        cached.clear();
+        cached.reserve(ordered.size());
+        for (const auto& entry : ordered)
+            cached.push_back(entry.second);
+    }
     m_maxmol = cached.size();
 
     m_result = m_previously_accepted;
@@ -1546,9 +1567,25 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
         m_current_energy = mol1->Energy();
         m_dE = (m_current_energy - m_lowest_energy) * 2625.5;
         if (m_dE > m_energy_cutoff && m_energy_cutoff != -1) {
+            // Claude Generated (Jul 2026): SKIP this structure, do not abort the pass.
+            //
+            // This used to `break`. CORRECTION to the earlier note here, which claimed "ConfScan
+            // sorts nowhere: structures are processed in file order": that is wrong. The list IS
+            // energy-ascending -- m_ordered_list is a std::multimap keyed on the energy and the
+            // ordering is re-established at the top of this function (verified on a shuffled
+            // ensemble). So `break` and `continue` accept the same set here.
+            // `continue` is kept anyway: it is robust against a future pass handing over an
+            // unordered list, it matches the identical criterion at the write-out site
+            // (WriteAcceptedStructures), and the cost is one skipped comparison per structure.
+            // What actually caused the observed "Processed: 1 / 200" / "1 unique conformer(s) of
+            // 482" was a single artefact structure with a corrupt (far too low) energy acting as
+            // m_lowest_energy -- the GFN-FF topology-cache drift, fixed separately.
             if (m_verbosity >= 1)
-                CurcumaLogger::warn_fmt("Energy of {} is {:.2f} kJ/mol, above cutoff of {:.2f} kJ/mol, skipping", mol1->Name(), m_current_energy, m_energy_cutoff);
-            break;
+                CurcumaLogger::warn_fmt("Energy of {} is {:.2f} kJ/mol above the lowest structure, "
+                                        "cutoff is {:.2f} kJ/mol -- structure skipped",
+                    mol1->Name(), m_dE, m_energy_cutoff);
+            m_rejected++;
+            continue;
         }
         bool keep_molecule = true;
         bool reorder = false;
@@ -1847,7 +1884,16 @@ void ConfScan::Finalise()
     int i = 0;
     m_collective_content += "subgraph cluster_bevor {\nrank = same;\nstyle= invis;\n";
     std::string content_after;
-    for (const auto molecule : m_stored_structures) {
+    // Claude Generated (Jul 2026): write the accepted ensemble strictly energy-ascending. The
+    // container does the sorting (std::multimap keyed on the energy) -- ConfScan contains no
+    // std::sort and does not need one. In practice m_stored_structures already arrives in this
+    // order (it descends from m_ordered_list); building the map makes the guarantee local to the
+    // write-out, which also fixes the meaning of m_maxrank (i counts ENERGY rank, not file rank).
+    std::multimap<double, Molecule*> accepted_ordered;
+    for (const auto molecule : m_stored_structures)
+        accepted_ordered.insert(std::pair<double, Molecule*>(molecule->Energy(), molecule));
+    for (const auto& entry : accepted_ordered) {
+        Molecule* molecule = entry.second;
         double difference = abs(molecule->Energy() - m_lowest_energy) * 2625.5;
         if (i >= m_maxrank && m_maxrank != -1) {
             molecule->appendXYZFile(m_rejected_filename);

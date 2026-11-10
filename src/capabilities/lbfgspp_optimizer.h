@@ -20,6 +20,7 @@
 #pragma once
 
 #include "optimizer_driver.h"
+#include "lbfgspp_capped_linesearch.h"
 #include <LBFGS.h>
 #include <LBFGSB.h>
 
@@ -52,6 +53,12 @@ public:
     // the optimizer's lifetime; a zeroed/empty bias is a no-op.
     void bindExternalForces(const Vector* forces) { m_external_forces = forces; }
 
+    /* Claude Generated (Jul 2026): bind the context's harmonic dihedral restraints so they reach
+     * LBFGSpp's INTERNAL line-search evaluations -- the same reason bindExternalForces exists.
+     * Restraining outside the objective would let the line search undo the restraint. Pointer must
+     * outlive the optimizer; nullptr / empty is a no-op. */
+    void bindRestraints(const GeometryRestraints* restraints) { m_restraints = restraints; }
+
     /**
      * @brief Hand over an energy/gradient the driver already computed at x (Claude Generated,
      *        Sep 29, 2026). The next call with exactly these coordinates returns them instead of
@@ -73,6 +80,7 @@ private:
     EnergyCalculator* m_energy_calculator;
     Molecule* m_molecule;
     std::vector<int> m_constraints;
+    const GeometryRestraints* m_restraints = nullptr;
     bool m_use_numerical_gradient = false;
     double m_numerical_gradient_step = 1e-5;
     const Vector* m_external_forces = nullptr;  // Claude Generated 2026 - interactive grab bias
@@ -102,11 +110,13 @@ private:
     int m_lbfgs_max_line_search = 20; // Maximum line search trials
     double m_lbfgs_min_step = 1e-20; // Minimum step length
     double m_lbfgs_max_step = 1e20; // Maximum step length
+    double m_lbfgs_max_atom_step = -1.0; // Largest displacement of one atom per step in Angstrom; 0 = off, < 0 = auto (0.2 A from lbfgs_atom_step_auto_natoms atoms on)
+    int m_lbfgs_atom_step_auto_natoms = 2000; // Atom count from which the auto setting caps the step
     double m_lbfgs_ftol = 1e-4; // Function tolerance for line search
     double m_lbfgs_wolfe = 0.9; // Wolfe condition parameter
 
-    // LBFGSpp objects - use LineSearchBacktracking like legacy CurcumaOpt
-    std::unique_ptr<LBFGSSolver<double, LineSearchBacktracking>> m_solver;
+    // LBFGSpp objects - LineSearchBacktracking like legacy CurcumaOpt, plus the optional per-atom step cap
+    std::unique_ptr<LBFGSSolver<double, LineSearchBacktrackingCapped>> m_solver;
     std::unique_ptr<LBFGSParam<double>> m_param;
     std::unique_ptr<LBFGSppObjectiveFunction> m_objective;
 

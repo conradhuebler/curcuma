@@ -205,7 +205,7 @@ FetchContent_Declare(CxxThreadPool
 # ripser: header-only, no CMakeLists.txt at root — use Populate to avoid add_subdirectory
 FetchContent_Declare(ripser
     GIT_REPOSITORY https://github.com/conradhuebler/ripser
-    GIT_TAG        dcb13c22db2017ef80e68bdf9bed6ec3b77ad70d
+    GIT_TAG        5512434c08ffa81a1dda3d1e32206bccc40206b1
     SOURCE_DIR     ${CMAKE_SOURCE_DIR}/external/ripser
 )
 # cpp-d4: headers always needed, library only when USE_D4=ON
@@ -256,6 +256,34 @@ foreach(_fc_dep LBFGSpp CxxThreadPool ripser cpp-d4)
         FetchContent_Populate(${_fc_dep})
     endif()
 endforeach()
+
+# Claude Generated (Jul 2026): repair a dangling-reference bug in the fetched ripser header.
+#
+# ripser.h declares its simplex enumerators as FUNCTION-LOCAL STATICS:
+#     static simplex_boundary_enumerator facets(0, *this);
+#     static simplex_coboundary_enumerator cofacets(*this);
+# Both enumerators store `const ripser& parent` and `const binomial_coeff_table&`. A function-local
+# static is constructed on the FIRST call and never again, so from the second ripser instance in a
+# process onwards these references point at a DESTROYED object -- `parent.n` and the binomial table
+# are read from freed memory. curcuma builds one ripser instance per structure (ConfScan's
+# persistent-diagram descriptor), so this is hit constantly; it usually goes unnoticed because a
+# fresh instance often lands on the same heap address, and it segfaults as soon as the allocation
+# pattern changes between two ConfScan runs (reproduced: ConfSearch with two ConfScan passes in one
+# cycle crashed in compute_dim_0_pairs; removing `static` fixes it, 0/0 crashes afterwards).
+#
+# The fix belongs upstream in https://github.com/conradhuebler/ripser -- once it is pushed there and
+# the GIT_TAG above is bumped, this step becomes a silent no-op (it only rewrites what it finds).
+set(_ripser_header ${CMAKE_SOURCE_DIR}/external/ripser/ripser.h)
+if(EXISTS ${_ripser_header})
+    file(READ ${_ripser_header} _ripser_src)
+    string(FIND "${_ripser_src}" "static simplex_" _ripser_static_pos)
+    if(NOT _ripser_static_pos EQUAL -1)
+        string(REPLACE "static simplex_boundary_enumerator" "simplex_boundary_enumerator" _ripser_src "${_ripser_src}")
+        string(REPLACE "static simplex_coboundary_enumerator" "simplex_coboundary_enumerator" _ripser_src "${_ripser_src}")
+        file(WRITE ${_ripser_header} "${_ripser_src}")
+        message(STATUS "ripser: removed function-local static simplex enumerators (dangling reference across instances)")
+    endif()
+endif()
 
 set(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
 
@@ -506,7 +534,10 @@ set(curcuma_core_SRC
         src/capabilities/confscan.cpp
         src/capabilities/confsearch.cpp
         src/capabilities/shared_bias_pool.cpp
+        src/capabilities/torsion_space.cpp
+        src/capabilities/confgen.cpp
         src/capabilities/confstat.cpp
+        src/capabilities/activelearn.cpp
         src/capabilities/docking.cpp
         src/capabilities/analysenciplot.cpp
         src/capabilities/nebdocking.cpp
@@ -518,6 +549,8 @@ set(curcuma_core_SRC
         src/capabilities/rmsdtraj.cpp
         src/capabilities/external_potentials.cpp
         src/capabilities/measurement.cpp
+        src/capabilities/ionize.cpp
+        src/capabilities/trajprops.cpp
         src/tools/cif.cpp
         src/capabilities/simplemd.cpp
         src/capabilities/nebmd.cpp
@@ -602,6 +635,12 @@ set(curcuma_core_SRC
         src/core/curcuma_logger.cpp
         src/core/citation_database.cpp
         src/core/citation_registry.cpp
+        # Delta-ML: descriptor, dataset and sparse kernel-ridge regression
+        src/core/ml/descriptor.cpp
+        src/core/ml/ml_dataset.cpp
+        src/core/ml/krr_model.cpp
+        src/core/ml/ml_gpu.cpp
+        src/core/energy_calculators/ml_methods/deltaml_method.cpp
         src/tools/formats.h
         src/tools/geometry.h
         src/tools/general.h
@@ -627,6 +666,8 @@ set(curcuma_cap_SRC
         src/capabilities/confscan.cpp
         src/capabilities/confsearch.cpp
         src/capabilities/shared_bias_pool.cpp
+        src/capabilities/torsion_space.cpp
+        src/capabilities/confgen.cpp
         src/capabilities/confstat.cpp
         src/capabilities/docking.cpp
         src/capabilities/analysenciplot.cpp
@@ -639,6 +680,8 @@ set(curcuma_cap_SRC
         src/capabilities/rmsdtraj.cpp
         src/capabilities/external_potentials.cpp
         src/capabilities/measurement.cpp
+        src/capabilities/ionize.cpp
+        src/capabilities/trajprops.cpp
         src/tools/cif.cpp
         src/capabilities/simplemd.cpp
         src/capabilities/nebmd.cpp
@@ -1126,7 +1169,9 @@ if(USE_CUDA)
     add_library(curcuma_cuda SHARED
         ${CUDA_SOURCES}
         src/core/energy_calculators/qm_methods/xtb_gpu_method.cpp
-        src/core/energy_calculators/qm_methods/cuda/gpu_plugin_entry_cuda.cpp)
+        src/core/energy_calculators/qm_methods/cuda/gpu_plugin_entry_cuda.cpp
+        # Delta-ML: descriptor, kernel, forces and the fit's design block on the device
+        src/core/ml/cuda/ml_model_cuda.cu)
     target_include_directories(curcuma_cuda PRIVATE ${PROJECT_SOURCE_DIR})
     target_link_libraries(curcuma_cuda PRIVATE CUDA::cudart CUDA::cusolver CUDA::cublas)
     target_sources(curcuma_cuda PRIVATE
@@ -1549,6 +1594,11 @@ endif(WIN32)
 target_link_libraries(curcuma fmt::fmt-header-only)
 
 target_link_libraries(curcuma curcuma_core)
+
+# Claude Generated (Oct 2026): energy-only ablation, local persistent-homology features vs ACSF
+# (src/helpers/ml_barcode_ablation.cpp). Experiment helper, not registered in ctest.
+add_executable(ml_barcode_ablation src/helpers/ml_barcode_ablation.cpp)
+target_link_libraries(ml_barcode_ablation curcuma_cap curcuma_core curcuma_cap)
 
 # Claude Generated (May 2026, ICX + USE_GFNFF OpenMP fix): when both Intel ICX (libiomp5)
 # and gfortran-built gfnff-lib (libgomp DT_NEEDED) end up in the same binary, the two

@@ -113,8 +113,10 @@ enum class EEQSolveMethod {
  * (screening by the hardness diagonal). For each atom i: E_i = atoms within R_ext of i, invert
  * the dense block A[E_i,E_i] (here: Cholesky + one solve for the column of i), keep the entries
  * of row i with r_ij <= R. G_ij = (Gl_ij + Gl_ji)/2. Symmetrising does not guarantee
- * definiteness, so G is checked with a sparse Cholesky; S is factorised the same way. Any
- * failure (or rz <= 0 / pAp <= 0 during the CG) means Jacobi is used instead - never a wrong M.
+ * definiteness. The GPU host build checks G with a sparse Cholesky; the CPU solver (Oct 2026)
+ * skips that serial check and guards the CG instead: rz <= 0, pAp <= 0, no convergence, or a true
+ * residual above 10 x tol after the first solve of a new build each mean Jacobi is used until the
+ * next rebuild. S is always factorised (failure: Jacobi). A converged result is exact for any G.
  *
  * Cost: build O(N n_ext^3 / 3) with n_ext ~ atoms within R_ext (independent per atom, parallel,
  * the result does not depend on the thread count); per CG iteration two sparse products and
@@ -122,6 +124,7 @@ enum class EEQSolveMethod {
  */
 struct LocalInversePreconditioner {
     bool ok = false;           ///< false: build failed (G or S not SPD) - use Jacobi
+    bool verified = false;     ///< Claude Generated (Oct 2026): first solve with this build passed the true-residual check
     std::string why;           ///< reason of a failed build
     int natoms = 0;
     int nfrag = 0;
@@ -135,7 +138,7 @@ struct LocalInversePreconditioner {
     double mean_block = 0.0;   ///< mean dense block size n_ext
     double build_ms = 0.0;
     double blocks_ms = 0.0;    ///< part of build_ms: neighbour lists + dense block inverses
-    double check_ms = 0.0;     ///< part of build_ms: sparse Cholesky of G (definiteness check)
+    double check_ms = 0.0;     ///< part of build_ms: sparse Cholesky of G (only with check_definite)
     double sinv_ms = 0.0;      ///< part of build_ms: dense S^-1 (GPU path only)
 
     /// z = P_G r = G r - H S^-1 C G r. Deterministic (fixed summation order).
@@ -874,6 +877,8 @@ public:
      *                      the column-major n x n buffer `out`; called concurrently from
      *                      several threads, must be read-only on shared data
      * @param radius_bohr   R: entries kept per row; ext_bohr: R_ext, block that is inverted
+     * @param check_definite sparse-Cholesky check of G (serial, O(build)); the CPU PPCG passes false
+     *                      and relies on its CG guards (Claude Generated, Oct 2026)
      * @return always non-null; ->ok tells whether it may be used
      * Claude Generated (Oct 2026). Result is bit-identical for any thread count.
      */
@@ -881,7 +886,7 @@ public:
         const Matrix& geometry_bohr, const std::vector<int>& frag, int nfrag,
         const std::function<void(const std::vector<int>& idx, double* out)>& fill_block,
         double radius_bohr, double ext_bohr, CxxThreadPool* pool, int num_threads,
-        bool want_dense_S_inverse = false);
+        bool want_dense_S_inverse = false, bool check_definite = true);
 
     /// Statistics of the local-inverse preconditioner (test and benchmark hooks).
     long localInverseBuilds() const { return m_localinv_builds; }
@@ -1021,6 +1026,10 @@ private:
     const Matrix* m_ppcg_geometry = nullptr;  ///< Phase-2 geometry (Bohr) during dispatchSolve; null in Phase 1
     const std::vector<int>* m_ppcg_atom_frag = nullptr;  ///< Phase-2 atom -> fragment (0-based, -1 none) during dispatchSolve
     CxxThreadPool* m_ppcg_pool = nullptr;     ///< pool for the parallel build (dispatchSolve)
+    /// Claude Generated (Oct 2026): Phase-2 matrix whose constraint block was not written because the
+    /// projected PCG does not read it; filled by fillDeferredConstraintBlock before a direct-solver fallback.
+    mutable Matrix* m_deferred_constraint_A = nullptr;
+    void fillDeferredConstraintBlock(int natoms, int nfrag) const;
     int    m_ppcg_threads = 1;
     long   m_localinv_builds = 0;            ///< successful builds
     long   m_localinv_build_failures = 0;    ///< builds rejected (G or S not positive definite)

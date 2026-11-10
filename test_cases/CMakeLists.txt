@@ -102,6 +102,45 @@ endif()
 add_test(NAME test_bmt_utils COMMAND test_bmt_utils)
 set_tests_properties(test_bmt_utils PROPERTIES TIMEOUT 10 LABELS "bmt;unit")
 
+# Claude Generated (Jul 2026): torsion-space reduction (rotatable bonds, rotamer states, setDihedral)
+add_executable(test_torsion_space
+        test_torsion_space.cpp)
+
+target_link_libraries(test_torsion_space curcuma_core test_molecule_registry)
+
+if(USE_PCH)
+        target_precompile_headers(test_torsion_space REUSE_FROM curcuma_core)
+endif()
+
+add_test(NAME test_torsion_space COMMAND test_torsion_space)
+set_tests_properties(test_torsion_space PROPERTIES TIMEOUT 20 LABELS "conformer;unit")
+
+# Claude Generated (Jul 2026): harmonic geometry restraints (dihedral + distance; FD gradient checks)
+add_executable(test_geometry_restraints
+        test_geometry_restraints.cpp)
+
+target_link_libraries(test_geometry_restraints curcuma_core test_molecule_registry)
+
+if(USE_PCH)
+        target_precompile_headers(test_geometry_restraints REUSE_FROM curcuma_core)
+endif()
+
+add_test(NAME test_geometry_restraints COMMAND test_geometry_restraints)
+set_tests_properties(test_geometry_restraints PROPERTIES TIMEOUT 60 LABELS "conformer;optimiser;unit")
+
+# Claude Generated 2026: Delta-ML descriptor and regression unit tests
+add_executable(test_deltaml
+        test_deltaml.cpp)
+
+target_link_libraries(test_deltaml curcuma_core)
+
+if(USE_PCH)
+        target_precompile_headers(test_deltaml REUSE_FROM curcuma_core)
+endif()
+
+add_test(NAME test_deltaml COMMAND test_deltaml)
+set_tests_properties(test_deltaml PROPERTIES TIMEOUT 120 LABELS "deltaml;unit")
+
 # Claude Generated 2026: PLUMED init unit test suite (only built with USE_Plumed)
 if(USE_Plumed)
     add_executable(test_plumed_init
@@ -298,6 +337,19 @@ add_test(NAME test_eeq_extrapolation
                  ${CMAKE_CURRENT_BINARY_DIR}/molecules/larger/complex.xyz 12)
 set_tests_properties(test_eeq_extrapolation PROPERTIES TIMEOUT 180 LABELS "eeq_extrapolation")
 
+# Claude Generated (Oct 2026): a re-initialised GFN-FF calculator must equal a fresh one
+# (stale EEQ phase-2 distances after InitialiseMolecule, found while labelling Delta-ML data).
+curcuma_structure_path(helicene-frames17 _gfnff_reinit_set)
+add_executable(test_gfnff_reinit
+        unit/test_gfnff_reinit.cpp)
+target_link_libraries(test_gfnff_reinit curcuma_core)
+if(USE_PCH)
+        target_precompile_headers(test_gfnff_reinit REUSE_FROM curcuma_core)
+endif()
+add_test(NAME test_gfnff_reinit
+         COMMAND test_gfnff_reinit ${_gfnff_reinit_set} 8)
+set_tests_properties(test_gfnff_reinit PROPERTIES TIMEOUT 120 LABELS "gfnff;unit")
+
 add_test(NAME test_fast_exp
          COMMAND test_fast_exp)
 
@@ -384,6 +436,22 @@ add_test(NAME test_polymerbuild_structure
          COMMAND test_polymerbuild_structure
          WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 set_tests_properties(test_polymerbuild_structure PROPERTIES TIMEOUT 120)
+
+# PDMAEMA 4-mer built with the real optimisation: composition, bonded caps, backbone. Claude Generated 2026.
+add_executable(test_polymerbuild_pdmaema test_polymerbuild_pdmaema.cpp)
+target_link_libraries(test_polymerbuild_pdmaema curcuma_cap curcuma_core)
+target_compile_definitions(test_polymerbuild_pdmaema PRIVATE CURCUMA_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+add_test(NAME polymerbuild_pdmaema COMMAND test_polymerbuild_pdmaema)
+set_tests_properties(polymerbuild_pdmaema PROPERTIES TIMEOUT 600)
+# 30-mer: about 6 minutes (Oct 2026, one run), so it is not part of the default ctest run.
+# Enable with -DCURCUMA_LONG_TESTS=ON, run with ctest -L long.
+option(CURCUMA_LONG_TESTS "Register tests that run for minutes (label 'long')" OFF)
+if(CURCUMA_LONG_TESTS)
+    add_test(NAME polymerbuild_pdmaema_30 COMMAND test_polymerbuild_pdmaema A30)
+    set_tests_properties(polymerbuild_pdmaema_30 PROPERTIES TIMEOUT 1800 LABELS long)
+    add_test(NAME polymerbuild_pdmaema_ab15 COMMAND test_polymerbuild_pdmaema AB15)
+    set_tests_properties(polymerbuild_pdmaema_ab15 PROPERTIES TIMEOUT 3600 LABELS long)
+endif()
 
 # Claude Generated (April 2026): CPU GFN-FF analytical vs numerical gradient test
 # Tests gradient correctness for all built-in molecules (H2O, CH4, CH3OH, CH3OCH3).
@@ -597,6 +665,47 @@ target_link_libraries(test_measurement curcuma_cap curcuma_core)
 add_test(NAME measurement_capability COMMAND test_measurement)
 set_tests_properties(measurement_capability PROPERTIES TIMEOUT 120)
 
+# Counter-ion placement. Claude Generated 2026 - checked against properties of the
+# constructed box (counts, minimum distances, whole solvent molecules), not a previous run.
+add_executable(test_ionize test_ionize.cpp)
+target_link_libraries(test_ionize curcuma_cap curcuma_core)
+add_test(NAME ionize_capability COMMAND test_ionize)
+set_tests_properties(ionize_capability PROPERTIES TIMEOUT 120)
+
+# Streaming trajectory properties. Claude Generated 2026 - geometry worked out by hand.
+add_executable(test_trajprops test_trajprops.cpp)
+target_link_libraries(test_trajprops curcuma_cap curcuma_core)
+add_test(NAME trajprops_capability COMMAND test_trajprops)
+set_tests_properties(trajprops_capability PROPERTIES TIMEOUT 120)
+
+# Per-triple GFN-FF hydrogen-bond energies. Claude Generated 2026 - identities that hold by construction.
+add_executable(test_hbond_energies test_hbond_energies.cpp)
+target_link_libraries(test_hbond_energies curcuma_core)
+add_test(NAME hbond_energies COMMAND test_hbond_energies)
+set_tests_properties(hbond_energies PROPERTIES TIMEOUT 120)
+
+# Opt-in hydrogen-bond log of SimpleMD. Claude Generated 2026 - reference run vs run with the log on.
+add_executable(test_md_hbond_log test_md_hbond_log.cpp)
+target_link_libraries(test_md_hbond_log curcuma_cap curcuma_core)
+add_test(NAME md_hbond_log COMMAND test_md_hbond_log)
+set_tests_properties(md_hbond_log PROPERTIES TIMEOUT 300)
+# Claude Generated (Oct 2026): the same per-triple energies from the CUDA/ROCm device workspace against the CPU.
+# Exits 0 with a SKIP line when the backend sees no device.
+if(USE_CUDA OR USE_ROCM)
+    add_executable(test_hbond_energies_gpu unit/test_hbond_energies_gpu.cpp)
+    target_link_libraries(test_hbond_energies_gpu curcuma_core test_molecule_registry)
+    # The GPU plugin is looked up next to the executable (gpu_plugin.cpp, /proc/self/exe).
+    set_target_properties(test_hbond_energies_gpu PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+    if(USE_CUDA)
+        add_test(NAME hbond_energies_cuda COMMAND test_hbond_energies_gpu cuda)
+        set_tests_properties(hbond_energies_cuda PROPERTIES TIMEOUT 120 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu")
+    endif()
+    if(USE_ROCM)
+        add_test(NAME hbond_energies_rocm COMMAND test_hbond_energies_gpu rocm)
+        set_tests_properties(hbond_energies_rocm PROPERTIES TIMEOUT 120 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;rocm")
+    endif()
+endif()
+
 add_executable(test_lobpcg unit/test_lobpcg.cpp)
 target_link_libraries(test_lobpcg curcuma_core)
 if(USE_PCH)
@@ -754,6 +863,16 @@ if(Python3_Interpreter_FOUND)
                          ${CMAKE_CURRENT_BINARY_DIR}/molecules/larger/polymer_2x.xyz)
         set_tests_properties(gfnff_gpu_split_equals_single
             PROPERTIES TIMEOUT 600 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu" SKIP_RETURN_CODE 77)
+
+        # Claude Generated (Oct 2026): -gfnff.charge_groups (file/auto/ionpairs) and -gfnff.cn_zero_guard on the CUDA
+        # path without CPU fallback (-gpu_strict true): gradient and MD charges against the CPU method. Skipped (77)
+        # without a CUDA device or plugin.
+        add_test(NAME gfnff_gpu_charge_groups
+                 COMMAND ${Python3_EXECUTABLE}
+                         ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_gpu_charge_groups.py
+                         $<TARGET_FILE:curcuma> ${CMAKE_SOURCE_DIR})
+        set_tests_properties(gfnff_gpu_charge_groups
+            PROPERTIES TIMEOUT 900 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;charge" SKIP_RETURN_CODE 77)
     endif()
 
     # Claude Generated (Sep 2026): adaptive (step-rejecting) integrator.
@@ -793,4 +912,43 @@ if(Python3_Interpreter_FOUND)
                      --structures ${CMAKE_CURRENT_SOURCE_DIR}/structures)
     set_tests_properties(xtb_library_energies
         PROPERTIES TIMEOUT 900 LABELS "gfnff;sqm;xtb_reference")
+
+    # Claude Generated (Oct 2026): EEQ charge groups inside one connected molecule (-gfnff.charge_groups),
+    # PDMAEMA (AB)2 built by polymerbuild; docs/POLYMERBUILD_CHARGE.md.
+    add_test(NAME gfnff_charge_groups
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_charge_groups.py
+                     $<TARGET_FILE:curcuma> ${CMAKE_SOURCE_DIR})
+    set_tests_properties(gfnff_charge_groups PROPERTIES TIMEOUT 600 LABELS "gfnff;charge")
+
+    # Claude Generated (Oct 2026): opt-in -gfnff.cn_zero_guard (Coulomb TERM 1b at CN = 0, isolated Cl-);
+    # energy unchanged, FD gradient check; docs/KNOWN_ISSUES_ARCHIVE.md.
+    add_test(NAME gfnff_cn_zero_guard
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_cn_zero_guard.py
+                     $<TARGET_FILE:curcuma> ${CMAKE_SOURCE_DIR})
+    set_tests_properties(gfnff_cn_zero_guard PROPERTIES TIMEOUT 300 LABELS "gfnff")
+
+    # Claude Generated (Oct 2026): fused D4 pair C6 (-gfnff.disp_c6_fused, default on) is bit-identical to the
+    # stored per-pair path: -sp gradient files and 20-step MD (also with d4_cn_cache_threshold); docs/GFNFF_STATUS.md.
+    add_test(NAME gfnff_d4_fused_c6
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_d4_fused_c6.py
+                     $<TARGET_FILE:curcuma> ${CMAKE_SOURCE_DIR})
+    set_tests_properties(gfnff_d4_fused_c6 PROPERTIES TIMEOUT 300 LABELS "gfnff;d4")
+    # Claude Generated (Oct 2026): CPU projected PCG - deferred constraint block (fallback fills it) and the CG
+    # guards that replace the sparse-Cholesky check of the local inverse; docs/EEQ_SOLVER_CONTROL.md.
+    add_test(NAME gfnff_eeq_ppcg_guards
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_eeq_ppcg_guards.py
+                     $<TARGET_FILE:curcuma> ${CMAKE_SOURCE_DIR})
+    set_tests_properties(gfnff_eeq_ppcg_guards PROPERTIES TIMEOUT 600 LABELS "gfnff;eeq")
+
+    # Claude Generated (Oct 2026): -lbfgs_max_atom_step (per-atom step cap of the lbfgspp optimiser);
+    # default off = bit-identical; docs/LBFGS_ATOM_STEP_CAP.md.
+    add_test(NAME opt_lbfgs_atom_step_cap
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_lbfgs_atom_step_cap.py
+                     $<TARGET_FILE:curcuma> ${CMAKE_SOURCE_DIR})
+    set_tests_properties(opt_lbfgs_atom_step_cap PROPERTIES TIMEOUT 300 LABELS "gfnff;curcumaopt")
 endif()

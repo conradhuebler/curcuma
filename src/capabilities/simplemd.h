@@ -40,6 +40,8 @@
 #endif
 
 #include "src/capabilities/md_diagnostics.h"
+
+class GFNFF;   // Claude Generated (Oct 2026): hydrogen-bond log, defined in gfnff.h
 #include "src/capabilities/rmsd.h"
 #include "src/capabilities/rmsdtraj.h"
 
@@ -64,7 +66,20 @@ struct BiasStructure {
     int index = 0;
     double counter = 0; // Claude Generated (Jul 2026): soft residence-weighted height (strided scheme); was int visit count
     double temperature = 0;  // Claude Generated (Apr 2026): deposition temperature for cross-T propagation
+    /* Claude Generated (Aug 2026): which MD RUN deposited this hill -- the walker index inside the
+     * phase (one MD per seed, see MDThread). Together with `time` it says where a structure came
+     * from, which the pool index alone does not: a search hands its structures through five stages
+     * and several files, and without this the question "which trajectory found the best conformer,
+     * and when" cannot be answered afterwards. -1 = unknown (restart from an older checkpoint). */
+    int origin = -1;
     bool persistent = false; // Claude Generated (Jun 2026): fed-back optimised minimum; exempt from counter pruning
+    /* Claude Generated (Aug 2026): this snapshot has already been handed to the optimisation.
+     * The pool keeps every deposit forever (it IS the bias), so without this mark a stage
+     * repetition re-exports and re-optimises everything the previous ones already processed --
+     * measured: repetitions 2 and 3 of a 600 K stage produced byte-identical results, 148
+     * optimisations and a 215 s deduplication each, because the newly deposited snapshots all
+     * failed the topology gate and the survivors were the same old ones every time. */
+    bool exported = false;
 };
 
 class SharedBiasPool;  // Claude Generated (Apr 2026): forward declaration
@@ -123,6 +138,9 @@ public:
     inline double RMSDReference() const { return m_rmsd_reference; }
     // Exploration bias V(x) = Sum_i k*counter_i*exp(-alpha*RMSD_i^2): drives force + deposition.
     inline double BiasEnergy() const { return m_current_bias; }
+    /* Claude Generated (Jul 2026): best-fit RMSD to the CLOSEST structure in this thread's bias
+     * pool -- how new the walker's current position is. Free: the bias computes it anyway. */
+    inline double MinRMSD() const { return m_min_rmsd; }
     // Optional well-tempered energy (opt-in, output only — never used for force/deposition).
     inline double BiasEnergyWT() const { return m_current_bias_wt; }
     inline void setk(double k) { m_k = k; }
@@ -154,6 +172,7 @@ private:
     Geometry m_gradient;
     double m_k, m_alpha, m_DT, m_currentStep, m_rmsd_reference, m_current_bias, m_rmsd_econv;
     double m_current_bias_wt = 0; // well-tempered bias energy (opt-in, output only)
+    double m_min_rmsd = std::numeric_limits<double>::infinity(); // novelty measure, see MinRMSD()
     double m_counter = 0; // reported soft-counter sum (diagnostic only)
     int m_atoms = 0;
     // Claude Generated (Jul 2026): Gaussian-cutoff screen (see SimpleMD::m_rmsd_mtd_screen).
@@ -524,6 +543,12 @@ private:
 
     void InitVelocities(double scaling = 1.0);
 
+    /* Claude Generated (Sep 2026): seeds m_rng from m_seed and the current start geometry, so a
+     * repeat of the same structure with the same seed is bit-identical while different structures
+     * (the walkers of a search) get different velocities on their own. Called once, after the
+     * geometry is in place. */
+    void seedRandomEngine();
+
     double FastEnergy();
     double CleanEnergy();
 
@@ -641,6 +666,18 @@ private:
     double ApplyRectLogFermiWalls();
 
     double ApplySphericHarmonicWalls();
+
+    /** Bias auf den Gyrationsradius; addiert dE/dr auf m_eigen_gradient und gibt E zurueck. */
+    double ApplyGyrationBias();
+    /** Claude Generated (Sep 2026): target-free, well-tempered 1-D metadynamics on the heavy-atom radius
+     *  of gyration -- hills at the Rg values this trajectory (and, seeded by ConfSearch, the search) has
+     *  visited, no target value. Adds dE/dr to m_eigen_gradient, returns E. See PARAM rg_flood. */
+    double ApplyRgFlood();
+    /** Claude Generated (Sep 2026): harmonic distance restraints 1/2 k (d - d0)^2 acting during the
+     *  dynamics (json list `distance_restraints`, same form the optimiser reads). Adds dE/dr to
+     *  m_eigen_gradient in the convention of the other added terms, returns E. Used by ConfGen's
+     *  steered relaxation of a built proposal. */
+    double ApplyDistanceRestraints();
     double ApplyRectHarmonicWalls();
 
     void InitConstrainedBonds();
@@ -770,6 +807,22 @@ private:
     bool m_epot_abort = false;           // abort when running-mean potential climbs too high
     double m_epot_abort_window = 250.0;  // kJ/mol above the starting energy
     double m_epot_ref = 0.0;             // bare potential energy at run start (reference)
+    /* Claude Generated (Jul 2026): novelty target. > 0 ends the run once the walker is at least
+     * this far (best-fit RMSD, Angstrom) from EVERY structure in the bias pool -- "run until you
+     * are somewhere new" instead of "run for N fs". m_bias_min_rmsd is the distance to the closest
+     * visited structure, which the RMSD-MTD bias computes for every hill anyway. */
+    double m_rmsd_mtd_target = 0.0;
+    double m_bias_min_rmsd = std::numeric_limits<double>::infinity();
+    bool m_novelty_reached = false;
+    /* Claude Generated (Aug 2026): sanity abort on a geometry that has been torn apart. The
+     * largest coordinate span of the starting structure is the yardstick; a run whose span grows
+     * past factor * that is not sampling anything. Measured on a 107-atom peptide (span 16 A)
+     * under an accumulated RMSD-MTD bias of 27-98 Eh: the span reached 1000-9500 A while the run
+     * continued to its last step and kept depositing the debris. */
+    double m_geometry_abort_factor = 10.0;
+    int m_walker_id = -1;                // provenance: which MD run of the phase this is
+    double m_start_extent = 0.0;
+    int m_deposits_rejected = 0;         // deposits refused because the molecule had fragmented
     bool m_temp_abort = false;           // abort when running-mean temperature runs away from target
     double m_temp_abort_factor = 1.5;    // abort if <T> > factor * T0 (<= 0 disables)
     double m_temp_abort_delta = 300.0;   // abort if <T> > T0 + delta [K] (<= 0 disables)
@@ -804,6 +857,24 @@ private:
     double m_wall_spheric_radius = 6, m_wall_temp = 298.15, m_wall_beta = 6;
     double m_wall_x_min = 0, m_wall_x_max = 0, m_wall_y_min = 0, m_wall_y_max = 0, m_wall_z_min = 0, m_wall_z_max = 0;
     double m_wall_potential = 0, m_average_wall_potential = 0;
+    // Claude Generated (Sep 2026): Gyrationsradius-Bias, siehe ApplyGyrationBias()
+    bool m_gyration_bias = false, m_gyration_one_sided = true, m_gyration_heavy_only = true;
+    double m_gyration_target = -1.0, m_gyration_force = 0.1, m_gyration_potential = 0.0;
+    std::vector<int> m_gyration_indices;
+    double m_gyration_current = 0.0;
+    // Claude Generated (Sep 2026): Rg flooding, see ApplyRgFlood() and PARAM rg_flood
+    bool m_rg_flood = false, m_rg_flood_armed = false;
+    double m_rg_flood_sigma = -1.0, m_rg_flood_sigma_eff = 0.15, m_rg_flood_w0 = -1.0, m_rg_flood_w0_eff = 0.0;
+    double m_rg_flood_dt = 2000.0, m_rg_flood_wall = -1.0, m_rg_flood_wall_force = 0.05, m_rg_flood_warmup_fs = 300.0;
+    double m_rg_flood_potential = 0.0, m_rg_seen_min = 1e9, m_rg_seen_max = 0.0;
+    int m_rg_flood_last_deposit_step = -1, m_rg_flood_deposits = 0;
+    std::vector<int> m_rg_indices;                       ///< heavy atoms the CV is computed over
+    std::vector<double> m_rg_hill_pos, m_rg_hill_w;       ///< deposited hills: centre (A) and height (Eh)
+    std::vector<double> m_rg_seed_hills, m_rg_warmup;    ///< hills handed in by the caller; Rg samples of the warm-up
+    // Claude Generated (Sep 2026): distance restraints during MD, see ApplyDistanceRestraints()
+    struct MDDistanceRestraint { int i = -1, j = -1; double target = 0.0, force = 1.0; };
+    std::vector<MDDistanceRestraint> m_distance_restraints;
+    double m_restraint_potential = 0.0;
     double m_virial_correction = 0, m_average_virial_correction = 0;
     double m_deltaT = 0;
     double m_k_rmsd = 0.01;
@@ -907,6 +978,16 @@ private:
     bool m_md_diagnostics = false;
     std::unique_ptr<MDDiagnosticsWriter> m_diag_writer;
 
+    // Claude Generated (Oct 2026): hydrogen-bond log (hb_log_frequency > 0 only)
+    int m_hb_log_frequency = 0;
+    double m_hb_log_limit_kj = 0.0;
+    std::vector<int> m_hb_log_a, m_hb_log_b;
+    std::ofstream m_hb_log_file;
+    GFNFF* m_hb_log_gfnff = nullptr;
+    bool m_hb_log_warned_empty = false;
+    void SetupHydrogenBondLog();
+    void LogHydrogenBonds();
+
     // WP-P1 (May 2026): per-phase wall-clock breakdown for diagnostics
     bool m_md_diagnostics_timing = false;
     double m_last_ff_ms = 0.0;     ///< wall-clock of last m_interface->CalculateEnergy()
@@ -915,21 +996,22 @@ private:
 
     int m_mtd_dT = -1;
     int m_seed = -1;
-    /* Per-instance random generator. Claude Generated 2026.
-     *
-     * Previously three separate `static std::mt19937` objects were shared by ALL SimpleMD
-     * instances. That had three consequences: concurrent stepping of several instances was
-     * a data race (undefined behaviour, not merely non-reproducible); constructing a new
-     * instance re-seeded the stream that existing ones were drawing from; and the seed
-     * parameter reached only one of the three sites, so the thermostats were never
-     * reproducible. For replica methods such as NEB-MD, whose whole premise is that the
-     * images are independent, the shared stream broke that premise at the lowest level. */
+    /* Claude Generated (Sep 2026): THE random source of this MD instance. Before, every
+     * stochastic site held its own function-local `static` engine: InitVelocities and Andersen
+     * used a default-constructed (i.e. fixed-seed) engine, CSVR a random_device-seeded one, and
+     * none of them ever saw m_seed. Consequences measured: `-seed` was read, logged and ignored,
+     * and two processes with identical input produced BIT-IDENTICAL trajectories (12 runs with
+     * seeds 1..8 agreed to 0.00e+00 in every coordinate), so an MD could not be repeated with a
+     * different realisation. Being function-local statics they were also shared across all
+     * SimpleMD instances of a process, which is where the per-walker variation in ConfSearch
+     * accidentally came from. Seeded in seedRandomEngine() from m_seed AND the start geometry:
+     * same structure + same seed = same trajectory (reproducible), different structures =
+     * different velocities without any extra bookkeeping (the search's diversity comes from the
+     * structures, not from the velocity draw). */
     std::mt19937 m_rng;
-    /* CSVR state, per instance. Claude Generated 2026: these were function-local statics -
-     * the chi-squared distribution and its cached degree-of-freedom count were shared by
-     * every SimpleMD in the process and mutated on each call, and the normal distribution
-     * carried its Box-Muller spare value from one instance to the next. Shared mutation is
-     * a data race under concurrency and couples replicas that are meant to be independent. */
+    /// Claude Generated (Oct 31, 2026): CSVR distributions per instance (were function-local statics shared by
+    /// all instances: normal_distribution caches its second value, so concurrent MD runs consumed a common
+    /// state and same-seed runs diverged). Same member names as on feature/nebmd-path-sampling.
     std::normal_distribution<double> m_csvr_norm{ 0.0, 1.0 };
     std::chi_squared_distribution<float> m_csvr_chi{ 1.0f };
     int m_csvr_last_dof = -1;
@@ -939,7 +1021,6 @@ private:
     // Claude Generated (Jul 2026): RMSD-MTD screen accounting (Kabsch fits done vs skipped over the run).
     long long m_bias_hills_evaluated = 0, m_bias_hills_screened = 0;
 
-    std::vector<std::vector<double>> m_atom_temp;
     std::vector<double> m_zeta; // Thermostatische Variablen
     std::vector<double> m_xi; // Zeitderivate von zeta
     std::vector<double> m_Q; // Trägheiten der Thermostatkette
@@ -1078,6 +1159,28 @@ private:
     PARAM(rmsd_mtd, Bool, false, "Enable internal RMSD-based metadynamics.", "RMSD-MTD", {})
     PARAM(rmsd_mtd_k, Double, 0.01, "Hill-height constant: bias height W_i = k * counter_i (Eh). The force is the exact gradient of the bias, so k is ~100x smaller than the pre-2026 value.", "RMSD-MTD", {"k_rmsd"},
         "requires=rmsd_mtd")
+    PARAM(gyration_bias, Bool, false, "Add a bias on the RADIUS OF GYRATION to the dynamics: E = 1/2 * k * (Rg - Rg0)^2, with the analytic gradient. A second collective variable next to the RMSD bias, and it addresses a gap that variable cannot: the RMSD bias drives AWAY from visited structures but has no preference in compactness, so a search can sit in an extended family indefinitely. Measured on a 107-atom peptide: the deep basin sits at Rg = 4.076 A; of a run that found it, 38 of 2210 structures lie below 4.20, and of a run that did not, 0 of 1513 -- the compact corner was simply never entered. Imposing the same compaction as a STATIC restraint in an optimisation was tried and does not work (0 of 45 restrained builds survive the clash gate: a harmonic restraint between two distant atoms satisfies its distance along the shortest path, which runs through the molecule). During dynamics the molecule folds along a physical trajectory instead, which is why this belongs here and not in the proposal generator. Off by default -- new term, measure before trusting.", "Bias", {})
+    PARAM(gyration_target, Double, -1.0, "Target radius of gyration Rg0 in Angstrom for -gyration_bias. -1 = derive it from the starting structure as 0.95 * Rg(start), i.e. ask for a 5 percent contraction relative to where the run begins. Set an absolute value when a target compactness is known from a reference structure.", "Bias", {},
+        "requires=gyration_bias")
+    PARAM(gyration_force, Double, 0.1, "Force constant k of the gyration bias in Eh/Angstrom^2. Scale reference: at k = 0.1 a deviation of 0.5 A costs 0.0125 Eh = 33 kJ/mol, which is the order of the conformer spread on a peptide of this size -- strong enough to matter, not strong enough to dominate the force field. The RMSD hills next to it are k_hill * counter with k_hill = 0.01 Eh.", "Bias", {},
+        "requires=gyration_bias")
+    PARAM(gyration_one_sided, Bool, true, "Act only when Rg EXCEEDS the target, like a wall. The bias then pushes towards compactness and never resists a structure that is already compact enough -- which is the asymmetry the measurement calls for (the missing region is compact, not extended). false = a plain two-sided harmonic that also holds the molecule away from over-collapse.", "Bias", {},
+        "requires=gyration_bias")
+    PARAM(gyration_heavy_only, Bool, true, "Compute Rg over heavy atoms only. Hydrogens follow their host and add noise without adding a coordinate; the reference numbers this term was designed against are heavy-atom radii.", "Bias", {},
+        "requires=gyration_bias")
+    PARAM(rg_flood, Bool, false, "Target-free compactness sampling: well-tempered 1-D metadynamics on the heavy-atom radius of gyration, V(Rg) = SUM_j w_j exp(-(Rg-Rg_j)^2/(2 sigma^2)), a hill deposited every rmsd_mtd_deposit_stride at the CURRENT Rg with height w = W0 exp(-V(Rg)/(kB dT)) (Barducci). It has no target value: it pushes the trajectory away from the Rg values already visited, towards BOTH the compact and the extended side. Why (measured on a 107-atom peptide, 17343 bias deposits of two production runs): the RMSD bias alone leaves the seed's Rg upwards in 90 percent of deposits, +0.7 to +0.85 A median at every temperature, because expansion is the cheapest way to gain RMSD against every deposited hill; a direct A/B from the same seed (450 K, 1000 fs) gave +0.20 A without and +0.52 A with the RMSD bias. In all four pools examined the mean energy is worst exactly in the Rg bins where those deposits land. Compact products were only ever inherited from compact seeds. This term corrects the distribution of candidates; it is NOT a ranking criterion (Spearman Rg-E only 0.2-0.5) and knows nothing about any reference structure. Off by default -- new term, A/B pending.", "Bias", {})
+    PARAM(rg_flood_sigma, Double, -1.0, "Hill width sigma in Angstrom for -rg_flood. -1 = adaptive: the standard deviation of Rg over the first rg_flood_warmup fs of THIS trajectory, i.e. the fluctuation inside the starting basin (the textbook choice of a metadynamics hill width). Measured on 299 walkers of a peptide search: median 0.17 A (quartiles 0.12-0.24). Fallback 0.15 A when the warm-up gives less than 0.05 A.", "Bias", {},
+        "requires=rg_flood")
+    PARAM(rg_flood_w0, Double, -1.0, "Initial hill height W0 in Hartree for -rg_flood. -1 = kB*T/4 of the run temperature (about 0.9 kJ/mol at 450 K). With the well-tempered damping (rg_flood_dt) the bias converges to dT/(T+dT) times the free-energy profile along Rg -- it can level that profile, it can never grow into a mountain (the lesson of the RMSD counter runaway).", "Bias", {},
+        "requires=rg_flood")
+    PARAM(rg_flood_dt, Double, 2000.0, "Well-tempered bias temperature dT in Kelvin for -rg_flood: each new hill is damped by exp(-V(Rg)/(kB dT)). Same default as rmsd_mtd_dt.", "Bias", {},
+        "requires=rg_flood")
+    PARAM(rg_flood_wall, Double, -1.0, "Soft upper wall for -rg_flood in Angstrom: above this Rg a one-sided harmonic 1/2 k (Rg-wall)^2 (k = rg_flood_wall_force) is added, so the flooding does not spend its budget filling the extended side first. -1 = no wall. ConfSearch sets it per repetition from the search's OWN pool (the rg_flood_wall_quantile of the heavy-atom Rg of the optimised minima found so far), i.e. data-driven and reference-free; measured, 98-100 percent of the 50 lowest conformers of every pool lie below its 95th percentile.", "Bias", {},
+        "requires=rg_flood")
+    PARAM(rg_flood_wall_force, Double, 0.05, "Force constant of the -rg_flood_wall in Eh/Angstrom^2 (0.05: a 0.5 A excursion beyond the wall costs 16 kJ/mol).", "Bias", {},
+        "requires=rg_flood")
+    PARAM(rg_flood_warmup, Double, 300.0, "Warm-up in fs before -rg_flood starts acting: Rg is only recorded (for the adaptive sigma), no hill and no force. Measured basin fluctuation settles within 300 fs.", "Bias", {},
+        "requires=rg_flood")
     PARAM(rmsd_mtd_alpha, Double, 10.0, "Width parameter for RMSD Gaussians.", "RMSD-MTD", {"alpha_rmsd"},
         "requires=rmsd_mtd")
     PARAM(rmsd_mtd_pace, Int, 1, "DEPRECATED and ignored under the strided scheme (use rmsd_mtd_deposit_stride). Only honoured by rmsd_mtd_scheme=legacy.", "RMSD-MTD", {"mtd_steps"})
@@ -1119,15 +1222,22 @@ private:
     // --- CSV Status Output (Claude Generated 2026) ---
     PARAM(write_csv, Bool, true, "Write per-step energies/temperatures to <basename>.md.csv in the output directory.", "Output", {})
     PARAM(csv_delimiter, String, ";", "Delimiter for the CSV status file (e.g. ';', ',', or '\\t' for tab).", "Output", {})
+    // Claude Generated (Oct 2026): opt-in hydrogen-bond log by GFN-FF triple energy. Off (0) = nothing runs.
+    PARAM(hb_log_frequency, Int, 0, "Log the hydrogen bonds every N steps to <basename>.hbonds.csv: number of GFN-FF triples (A-H...B) with an energy below hb_log_energy_limit, per direction, and the sum of the triple energies. GFN-FF only; 0 = off (the run is then exactly as without this option). Recording the triple energies costs one write per triple and step.", "Output", {}, "min=0")
+    PARAM(hb_log_energy_limit, Double, 0.0, "hb_log_frequency: a triple counts when its energy is below this (kJ/mol, negative = attractive; 0 counts every attractive triple). Calibrate with `-trajprops -hb_criterion energy` and its histogram.", "Output", {})
+    PARAM(hb_log_selection, Selection, "", "hb_log_frequency: first atom group (selection grammar, a leading ! means all atoms except the rest); empty = all atoms.", "Output", {})
+    PARAM(hb_log_selection_b, Selection, "", "hb_log_frequency: second group; bonds between the two groups are counted per direction, empty counts bonds inside the first group.", "Output", {})
 
     // --- ConfSearch robustness gates (Jun 2026, Claude Generated) ---
     PARAM(topo_check, Bool, false, "Abort the MD run when the molecule fragments (number of connected components grows above the start value). Off by default so reactive paths are still sampled.", "ConfSearch", {})
     PARAM(topo_check_interval, Int, 0, "Steps between topology checks (0 -> use dump_frequency).", "ConfSearch", {})
     PARAM(epot_abort, Bool, false, "Abort the MD run when the running-mean potential energy climbs more than epot_abort_window above the run's starting energy.", "ConfSearch", {})
     PARAM(epot_abort_window, Double, 250.0, "Energy window (kJ/mol) above the starting energy for epot_abort. Must exceed the thermal baseline (~N_dof*kT/2) plus typical barriers.", "ConfSearch", {})
+    PARAM(rmsd_mtd_target, Double, 0.0, "End the RMSD-MTD run once the walker stands at least this far (best-fit RMSD in Angstrom) from EVERY structure in the bias pool, its own starting structure included. 0 = off, run for the full max_time. Turns the run length into a property of the exploration instead of a fixed number of femtoseconds: a walker that escapes early stops early, one that is still circling its start keeps going. The distance is measured to the NEAREST visited structure, not to the start -- on a 107-atom peptide the conformers already sat 4-6 Angstrom from the input while the closest approach to a known reference conformer was still 2.7 Angstrom, i.e. the radius was never the limitation, the coverage of directions was.", "ConfSearch", {})
     PARAM(temp_abort, Bool, false, "Abort the MD run when the running-mean temperature runs away from the target (catches bias-driven heating). Uses temp_abort_factor and/or temp_abort_delta.", "ConfSearch", {})
     PARAM(temp_abort_factor, Double, 1.5, "Abort when <T> exceeds temp_abort_factor * target T. <= 0 disables this threshold. Only active when temp_abort=true.", "ConfSearch", {})
     PARAM(temp_abort_delta, Double, 300.0, "Abort when <T> exceeds (target T + temp_abort_delta) Kelvin. <= 0 disables this threshold. Only active when temp_abort=true.", "ConfSearch", {})
+    PARAM(geometry_abort_factor, Double, 10.0, "Abort the MD when the molecule's largest coordinate span grows beyond this factor times its span at the start (never below 50 Angstrom, so small molecules keep room). Unlike topo_check this is not about chemistry -- it catches a trajectory that has been torn apart and is no longer sampling anything. Measured on a 107-atom peptide (span 16 Angstrom) whose accumulated RMSD-MTD bias reached 27-98 Eh: the span grew past 1000 Angstrom, the run continued to its last step and kept depositing the debris into the shared bias pool. 0 disables the check.", "ConfSearch", {})
 
     // --- Temperature Ramp (Jun 2026, Claude Generated) ---
     // Claude Generated 2026 - Registered at last. It was read from the controller by

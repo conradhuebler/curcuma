@@ -55,7 +55,7 @@ def run(mode, xyz, extra, env_add=None, threads=4, fs=2):
         env.update(env_add or {})
         cmd = [B, "-" + mode, "m.xyz", "-method", "gfnff", "-no_bmt", "-threads", str(threads)]
         if mode == "md":
-            cmd += ["-max_time", str(fs), "-md_diagnostics", "true", "-dump_frequency", "1", "-seed", "1"]  # explicit seed: the CSVR noise comes from the per-instance RNG seeded by -seed (default -1 = time), so two runs are only comparable with a fixed seed
+            cmd += ["-max_time", str(fs), "-md_diagnostics", "true", "-dump_frequency", "1", "-md.seed", "1"]  # seed fixed (Oct 31, 2026): the default seed is the clock since -md.seed works
         p = subprocess.run(cmd + extra, cwd=d, capture_output=True, text=True, timeout=600, env=env)
         out = ANSI.sub("", p.stdout + p.stderr)
         pp = [l for l in out.splitlines() if l.startswith("PPCG")]

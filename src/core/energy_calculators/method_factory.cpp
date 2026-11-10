@@ -33,6 +33,7 @@
 #include "qm_methods/native_xtb_method.h"
 #include "qm_methods/gfnff_method.h"
 #include "qm_methods/nddo_method.h"
+#include "ml_methods/deltaml_method.h"
 // CUDA GPU methods are loaded at runtime from libcurcuma_cuda.so via gpu_plugin (so the
 // cuBLAS/cuSOLVER runtime never touches the CPU startup path). No CUDA headers here.
 #include "gpu_plugin.h"
@@ -539,6 +540,18 @@ const std::vector<MethodDescriptor>& MethodFactory::methodTable()
         { m_ulysses_methods, "Quantum Methods (external providers)", "Ulysses semi-empirical methods (PM6, AM1, ..., ugfn2; -d3h4x / -d3h+ variants)",
           hasUlysses, {{"Ulysses", hasUlysses}},
           [](const std::string& m, const json& c) { return createUlyssesExplicit(m, c); } },
+        // ---- learned correction on top of another method ----
+        // Plain name only; the 'deltaml:<path>' shorthand is handled in create() before the lookup.
+        { {"deltaml"}, "Machine Learning", "Delta-ML: base method + learned correction (-deltaml.model or 'deltaml:<model.json>')",
+          always, {{"Native", always}},
+          [](const std::string& m, const json& c) -> std::unique_ptr<ComputationalMethod> {
+              CurcumaLogger::success("Method 'deltaml' resolved to delta-ML corrected method");
+              json ml_config = c;
+              ml_config["method"] = m;
+              auto ml = std::make_unique<DeltaMLMethod>(ml_config);
+              if (ml->hasError())
+                  throw MethodCreationException(ml->getErrorMessage());
+              return ml; } },
         // ---- dispersion-only ----
         { {"d3"}, "Dispersion Corrections", "DFT-D3 (external s-dftd3)", hasD3, {{"DFT-D3", hasD3}},
           [](const std::string&, const json& c) { return createDFTD3(c); } },
@@ -568,7 +581,7 @@ const std::vector<std::string>& MethodFactory::methodParameterScopes()
     static const std::vector<std::string> scopes = {
         "gfnff", "eeq_solver", "gfnff_external", "forcefield", "uff", "qmdff",
         "xtb", "tblite", "ulysses", "eht", "orca",
-        "d3", "d4", "dftd3", "dftd4", "d3param", "d4param",
+        "d3", "d4", "dftd3", "dftd4", "d3param", "d4param", "deltaml",
         "scf"   // shared SCF knobs (scf_parameters.h), Oct 2026
     };
     return scopes;
@@ -728,6 +741,19 @@ std::unique_ptr<ComputationalMethod> MethodFactory::create(const std::string& me
     // Oct 2026: resolve the shared "scf" scope once for every method (scf_parameters.h).
     json config = config_in;
     applySharedScfScope(config, method);
+
+    // 'deltaml:<path>' survives capabilities that rebuild their sub-configuration from the
+    // method name alone. Pass the ORIGINAL spelling: the lowercased copy is only for dispatch,
+    // and the ':<path>' suffix is a file name (case-folding breaks models with upper-case names).
+    if (method.rfind("deltaml:", 0) == 0) {
+        CurcumaLogger::success("Method 'deltaml' resolved to delta-ML corrected method");
+        json ml_config = config;
+        ml_config["method"] = method_name;
+        auto ml = std::make_unique<DeltaMLMethod>(ml_config);
+        if (ml->hasError())
+            throw MethodCreationException(ml->getErrorMessage());
+        return ml;
+    }
 
     if (const MethodDescriptor* d = findMethod(method)) {
         if (!d->available()) {

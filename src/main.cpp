@@ -29,10 +29,12 @@
 #include "src/core/curcuma_logger.h"
 #include "src/core/citation_registry.h"
 
+#include "src/capabilities/activelearn.h"
 #include "src/capabilities/analysenciplot.h"
 #include "src/capabilities/analysis.h"
 #include "src/capabilities/confscan.h"
 #include "src/capabilities/confsearch.h"
+#include "src/capabilities/confgen.h"
 #include "src/capabilities/confstat.h"
 #include "src/capabilities/curcumamethod.h"
 #include "src/tools/bmt_utils.h"
@@ -52,6 +54,8 @@
 #include "src/capabilities/trajectory_statistics.h"
 #include "src/capabilities/trajectoryanalysis.h"
 #include "src/capabilities/polymerbuild.h"
+#include "src/capabilities/ionize.h"
+#include "src/capabilities/trajprops.h"
 #include "src/tools/trajectory_writer.h"
 
 #include "src/tools/general.h"
@@ -1890,6 +1894,12 @@ int executeSinglePoint(const json& controller, int argc, char** argv) {
     };
     read_dump_path(controller);                                    // top-level (dotted -opt.dump_gradient)
     if (controller.contains("opt")) read_dump_path(controller["opt"]); // sp routes flat flags into "opt"
+    // Claude Generated (Oct 2026): -dump_atomic_charges <path> writes the atomic partial charges of the method
+    // (EEQ for gfnff, Mulliken for gfn1/gfn2; one value per atom in e) for comparing charge models.
+    std::string dump_atomic_charges_path;
+    for (const json* j : { &controller, controller.contains("opt") ? &controller["opt"] : nullptr })
+        if (j && j->is_object() && j->contains("dump_atomic_charges") && (*j)["dump_atomic_charges"].is_string())
+            dump_atomic_charges_path = (*j)["dump_atomic_charges"].get<std::string>();
     const bool want_gradient = read_bool(controller, "gradient")
         || (controller.contains("opt") && read_bool(controller["opt"], "gradient"))
         || !dump_gradient_path.empty();
@@ -1963,6 +1973,21 @@ int executeSinglePoint(const json& controller, int argc, char** argv) {
         }
     }
 
+    if (!dump_atomic_charges_path.empty()) {
+        const Vector charges = energy_calc.Charges();
+        std::ofstream cf(dump_atomic_charges_path);
+        if (cf && charges.size() == molecule.AtomCount()) {
+            cf << "# atomic partial charges [e], method " << method << ", one atom per row, total "
+               << fmt::format("{:.6f}", charges.sum()) << "\n";
+            for (int i = 0; i < charges.size(); ++i)
+                cf << fmt::format("{:.10f}\n", charges(i));
+        } else {
+            CurcumaLogger::error(fmt::format("Could not write -dump_atomic_charges {} ({} charges for {} atoms)",
+                dump_atomic_charges_path, static_cast<int>(charges.size()), molecule.AtomCount()));
+            return 1;
+        }
+    }
+
     return 0;
 }
 
@@ -1990,10 +2015,15 @@ int executeOptimization(const json& controller, int argc, char** argv) {
         fmt::print("  -verbosity <n>       Output level: 0=silent, 1=table, 2=detailed, 3=debug (default: 1)\n\n");
         fmt::print("Convergence:\n");
         fmt::print("  -convergence_preset <name>  Preset: loose, normal, tight, verytight (default: normal)\n");
-        fmt::print("                               loose      - fast, coarse (for pre-optimization)\n");
-        fmt::print("                               normal     - balanced (default)\n");
-        fmt::print("                               tight      - accurate (for publication-quality)\n");
-        fmt::print("                               verytight  - extreme accuracy (rarely needed)\n");
+        fmt::print("                               one decade per step in every criterion:\n");
+        fmt::print("                               name       dE[kJ/mol]  dRMSD[A]  |g|[Eh/a0]  max steps\n");
+        fmt::print("                               loose         1         0.1       5e-3      max(50,    1*N)\n");
+        fmt::print("                               normal        0.1       0.01      5e-4      max(500,  10*N)\n");
+        fmt::print("                               tight         0.01      1e-3      5e-5      max(1000, 25*N)\n");
+        fmt::print("                               verytight     0.001     1e-4      5e-6      max(5000,100*N)\n");
+        fmt::print("                               N = atoms; -max_iterations switches the scaling off.\n");
+        fmt::print("                               |g| is the norm of the full 3N gradient, so a large\n");
+        fmt::print("                               molecule is converged more strictly than a small one.\n");
         fmt::print("                               Individual thresholds below override the preset.\n");
         fmt::print("  -energy_threshold <f>       Energy change [kJ/mol] (default: 0.1)\n");
         fmt::print("  -rmsd_threshold <f>         RMSD change [Angstrom] (default: 0.01)\n");
@@ -2008,6 +2038,8 @@ int executeOptimization(const json& controller, int argc, char** argv) {
         fmt::print("  -lbfgs_line_search <n>   Line search: 1=Armijo, 2=Wolfe, 3=StrongWolfe, 4=Backtrack (default: 3)\n");
         fmt::print("  -lbfgs_max_line_search <n>  Max line search iterations (default: 20)\n");
         fmt::print("  -lbfgs_min_step <f>      Minimum step size (default: 1e-4)\n");
+        fmt::print("  -lbfgs_max_atom_step <f> Largest displacement of one atom per step in Angstrom, 0 = off (default: auto, 0.2 from 2000 atoms on)\n");
+        fmt::print("  -lbfgs_atom_step_auto_natoms <n>  Atom count from which the automatic cap applies (default: 2000)\n");
         fmt::print("  -lbfgs_ftol <f>          Armijo sufficient-decrease parameter (default: 1e-4)\n");
         fmt::print("  -lbfgs_wolfe <f>         Wolfe curvature parameter (default: 0.9)\n\n");
         fmt::print("Native optimizer tuning (lbfgs/diis/rfo):\n");
@@ -2097,29 +2129,31 @@ int executeOptimization(const json& controller, int argc, char** argv) {
                 BMTUtils::processBakFiles(bmt_dir, bak_files);
                 return 0;
             } else {
-                // Claude Generated (Sep 2026): write the geometry even when the optimiser did
-                // not converge. It is the best structure found and often hours of compute - a
-                // GFN2 optimisation of polymer_2x (7320 atoms) ran 1.8 h, hit max_iterations
-                // and left NOTHING behind. The multi-structure path below already writes
-                // non-converged results; this makes the single-structure path agree.
-                CurcumaLogger::warn_fmt("{} optimizer did not converge: {}", optimizer_method,
-                                        result.error_message);
-                // result.final_molecule, NOT molecules[0]: the optimiser does not update the
-                // input molecule in place, so writing molecules[0] would silently hand back the
-                // INPUT geometry dressed as a result (caught by measurement: the "optimised"
-                // water500 had exactly the input's single-point energy). The multi-structure
-                // path below uses final_molecule for the same reason.
-                if (result.final_molecule.AtomCount() > 0) {
-                    result.final_molecule.writeXYZFile(output_file);
-                    // Since Sep 2026 every abort returns the last accepted structure (or the
-                    // input, if the optimiser never started); energy/|grad| are NaN when unknown.
+                /* Claude Generated (Aug/Sep 2026): a non-converged optimisation is not an empty one.
+                 * The single-structure path used to write NOTHING when the step cap was reached,
+                 * while the multi-structure path below writes every frame that has atoms. Measured:
+                 * 3 of a 419-structure ensemble lost this way, and a 7320-atom GFN2 optimisation
+                 * (1.8 h) left nothing behind. result.final_molecule, NOT molecules[0]: the
+                 * optimiser does not update the input in place, so molecules[0] would hand back the
+                 * INPUT geometry dressed as a result. The marker goes FIRST in the comment line and
+                 * the original name is kept; the exit code stays non-zero. */
+                CurcumaLogger::warn_fmt("{} optimizer failed: {}", optimizer_method, result.error_message);
+                if (result.final_molecule.AtomCount() > 0
+                    && result.final_molecule.getGeometry().allFinite()) {
+                    Molecule out = result.final_molecule;
+                    out.setName(fmt::format("NOT_CONVERGED_after_{}_iterations_|g|={:.2e} {}",
+                        result.iterations_performed, result.final_gradient_norm, out.Name()));
+                    out.writeXYZFile(output_file);
+                    // energy/|grad| are NaN when unknown (every abort returns the last accepted
+                    // structure, or the input if the optimiser never started).
                     auto num = [](double v, const char* f) {
                         return std::isfinite(v) ? fmt::format(fmt::runtime(f), v) : std::string("n/a");
                     };
                     CurcumaLogger::warn_fmt("Last geometry written anyway to: {} (E = {} Eh, "
-                                            "|grad| = {}) - NOT a converged minimum",
-                                            output_file, num(result.final_energy, "{:.8f}"),
-                                            num(result.final_gradient_norm, "{:.6f}"));
+                                            "|grad| = {}) - NOT a converged minimum (marked "
+                                            "NOT_CONVERGED in the comment line)",
+                        output_file, num(result.final_energy, "{:.8f}"),
+                        num(result.final_gradient_norm, "{:.6f}"));
                     std::vector<std::string> bak_files = BMTUtils::collectBakFiles(controller);
                     BMTUtils::processBakFiles(bmt_dir, bak_files);
                 } else {
@@ -2237,6 +2271,28 @@ int executeConfStat(const json& controller, int argc, char** argv) {
     stat->start();
     stat->processBakFiles();
     delete stat;
+    return 0;
+}
+
+// Claude Generated (Jul 2026): ensemble analysis + conformer proposals from the energy decomposition
+int executeConfGen(const json& controller, int argc, char** argv) {
+    if (argc < 3) {
+        std::cerr << "Please use curcuma for conformer proposals as follows:\n"
+                     "curcuma -confgen ensemble.xyz -method gfnff\n"
+                     "  (ensemble.xyz = multi-structure XYZ of optimised conformers, e.g.\n"
+                     "   <basename>.cumulative.opt.accepted.xyz from a ConfSearch run)"
+                  << std::endl;
+        return 1;
+    }
+
+    json gen_controller = controller;
+    gen_controller["geometry_file"] = std::string(argv[2]); // enables GFN-FF parameter/topology caching
+
+    auto* gen = new ConfGen(gen_controller, false);
+    initializeBMT(gen, argv[2], "confgen", controller);
+    gen->start();
+    gen->processBakFiles();
+    delete gen;
     return 0;
 }
 
@@ -2494,6 +2550,28 @@ int executeCasino(const json& controller, int argc, char** argv) {
     return 0;
 }
 
+// Delta-ML model training and active learning: -activelearn  -- Claude Generated 2026
+//
+//   curcuma -activelearn conf.xyz -method gfnff -ref_method gfn2 -threads 8
+//   curcuma -activelearn conf.xyz -center_sweep 200,500,1000,2000
+//   curcuma -activelearn conf.xyz -al_mode test -model conf.deltaml.json
+//
+// The resulting model plugs into any capability through '-method deltaml:<file.json>'.
+int executeActiveLearn(const json& controller, int argc, char** argv) {
+    if (argc < 3) {
+        ActiveLearn dummy(json{}, true);
+        dummy.printHelp();
+        return 0;
+    }
+
+    auto* learner = new ActiveLearn(controller, false);
+    initializeBMT(learner, argv[2], "activelearn", controller); // also sets the input file
+    learner->start();
+    learner->processBakFiles();
+    delete learner;
+    return 0;
+}
+
 int executeTrajectoryAnalysis(const json& controller, int argc, char** argv) {
     if (argc < 3) {
         TrajectoryAnalysis dummy(json{}, true);
@@ -2548,7 +2626,39 @@ int executePolymerBuild(const json& controller, int argc, char** argv)
     initializeBMT(&builder, "polymer", "polymerbuild", controller);
     builder.start();
     builder.processBakFiles();
+    if (!builder.error().empty()) {
+        std::cerr << "polymerbuild failed: " << builder.error() << std::endl;
+        return 1;
+    }
     return 0;
+}
+
+// Counter-ion placement: -ionize system.xyz -charge N  (Claude Generated 2026)
+int executeIonize(const json& controller, int argc, char** argv)
+{
+    if (argc < 3) {
+        std::cerr << "Please use curcuma for counter-ions as follows:\ncurcuma -ionize solvated.xyz -charge 15 [-anion Cl] [-cation Na] [-solvent H2O]" << std::endl;
+        return 1;
+    }
+    curcuma::Ionize ionizer(controller, false);
+    initializeBMT(&ionizer, argv[2], "ionize", controller);
+    ionizer.start();
+    ionizer.processBakFiles();
+    return ionizer.error().empty() ? 0 : 1;
+}
+
+// Streaming trajectory properties: -trajprops traj.xyz -selection "F1" -last_fraction 0.3333  (Claude Generated 2026)
+int executeTrajProps(const json& controller, int argc, char** argv)
+{
+    if (argc < 3) {
+        std::cerr << "Please use curcuma for trajectory properties as follows:\ncurcuma -trajprops traj.xyz [-quantity gyration] [-selection F1] [-last_fraction 0.3333]" << std::endl;
+        return 1;
+    }
+    curcuma::TrajectoryProperties props(controller, false);
+    initializeBMT(&props, argv[2], "trajprops", controller);
+    props.start();
+    props.processBakFiles();
+    return props.error().empty() ? 0 : 1;
 }
 
 // ============================================================================
@@ -2796,10 +2906,18 @@ const std::map<std::string, CapabilityInfo> CAPABILITY_REGISTRY = {
                   {"XYZ", "MOL2", "SDF"}, executeConfScan}},
     {"confstat", {"Conformational statistics and analysis", "conformational",
                   {"XYZ", "MOL2", "SDF"}, executeConfStat}},
+    {"confgen", {"Torsion/energy-decomposition analysis of a conformer ensemble", "conformational",
+                  {"XYZ", "MOL2", "SDF"}, executeConfGen}},
+    {"activelearn", {"Delta-ML model training: lift a cheap method to a reference level", "calculation",
+                  {"XYZ", "MOL2", "SDF"}, executeActiveLearn}},
     {"dock", {"Molecular docking calculations", "docking",
               {"XYZ", "MOL2", "SDF"}, executeDocking}},
     {"polymerbuild", {"Iterative polymer assembly from fragments", "assembly",
                   {"XYZ"}, executePolymerBuild}},
+    {"trajprops", {"Streaming properties of a long trajectory (gyration radius)", "analysis",
+                  {"XYZ", "VTF"}, executeTrajProps}},
+    {"ionize", {"Neutralise a solvated system by replacing solvent with counter-ions", "assembly",
+                  {"XYZ"}, executeIonize}},
     {"md", {"Molecular dynamics simulation (incl. RMSD-MTD enhanced sampling)", "dynamics",
             {"XYZ", "VTF", "MOL2", "SDF"}, executeSimpleMD}},
     {"casino", {"Casino Monte Carlo simulation with enhanced sampling", "dynamics",

@@ -15,7 +15,34 @@ Stand.
   Der Fehler bleibt, die Struktur fehlt damit in jedem gfn1-Vergleich. Keine gültige Energie für dieses System.
 - **PLUMED-Bias nur auf `feature/bmt-plumed-nebmd` korrigiert** (`96c29c50`, 2026-10-30): `upstream/master` hat Vorzeichenfehler und kB statt kB*T noch; biased PLUMED-Läufe davor sind ungültig. Offen: nach master bringen, betroffene Läufe neu rechnen. [docs/PLUMED_HELP.md](docs/PLUMED_HELP.md).
 - **`-md -method uff` schreibt `<basename>.param.json` trotz BMT ins Arbeitsverzeichnis** (2026-10-30, gemessen, alter und neuer Stand gleich): verstößt gegen die BMT-Regel in `CLAUDE.md`.
+- **MD-Instabilitätsprüfung schlägt bei wenigen Freiheitsgraden fälschlich an** (2026-11-10, gemessen n=10 Seeds): `m_unstable = T > 10000 * m_T` (`simplemd.cpp` Z. 4252/4724) vergleicht mit dem Vorschritt; Ar2 NVE (1 DOF) bricht mit Seed 1, 4, 9 an einem Umkehrpunkt (Ekin ~ 0) ab. `plumed_bias` nutzt deshalb Seed 2.
 - **PLUMED rechnet Schritt 0 doppelt** (2026-10-30): Init und erster Integrationsschritt rufen beide `performPlumedCalc()`, COLVAR hat zwei Zeilen bei t = 0; Folgen für HILLS nicht geprüft. `energyUnits = 2625.5` steht als Literal statt über `CurcumaUnit`.
+
+
+
+- **`-gfnff.charge_groups` auf der GPU** (2026-10-23): GPU-Methode faellt auf die CPU zurueck (Aenderung in `gfnff_gpu_method_impl.h` nicht uebersetzt, nicht gelaufen); mehrere Fragmente nur, wenn jede Gruppe eine Vereinigung ganzer Fragmente ist (2026-10-24) oder mit `"rest": "per_fragment"` (2026-10-25).
+
+- **`-gfnff.charge_groups auto`: offene Grenzen** (2026-10-23): nur Kationen (Anionen, Carbenium fehlen); nur ein Fragment (Ionenpaare, S30L-CI 24/27/28 nicht erfasst); Gruppe einmal je Instanz, kein Neu-Gruppieren bei Bindungsbruch (unstetig, nicht gelaufen); GPU nicht gelaufen. Gruppenausdehnung (Radius 2, 14 Atome) offen (Schritt 3, Potentialmass). [docs/POLYMERBUILD_CHARGE.md](docs/POLYMERBUILD_CHARGE.md)
+
+- **`-gfnff.charge_groups auto` auf hypervalenten P/S-Geruesten** (2026-10-23, n=3): PArel h4p2o71/h4p2o72/s4o41 werden erkannt (Bedingung (c) blockt P/S nicht), Energie +53 bis +178 kcal/mol; freie Gruppensumme bis -0,90 e wird auf +1 gezwungen. Ob P/S-Partner blocken sollen, ist zu entscheiden.
+
+- **Topologie-Cache `<basename>.topo.json` traegt die Molekuelladung nicht** (2026-10-23, n=1): eine bei Ladung 2 geschriebene Datei wird bei Ladung 0 wiederverwendet (gleiche Energie -14,11678988 Eh, (AB)2). Cache-Schluessel um Ladung/Spin ergaenzen; nicht untersucht, ob die Ladung beim Laden doch gelesen wird.
+
+- **`cli_simplemd_14_gfnff_react_h_recombination` schlaegt fehl** (2026-10-23, n=1 Binary mit und ohne Ladungsgruppen-Aenderung): "no bond formation events", MD laeuft 0,2 s ohne Fehler. Ursache nicht untersucht.
+
+- **`polymerbuild`: Optimierungsschritte laufen mit Ladung 0, ohne Ladungsgruppen** (2026-10-23): die Formalladung steht nur im Ergebnis. `-gfnff.charge_groups` existiert, wird beim Bauen aber nicht benutzt (Gruppen der wachsenden Kette je Schritt noetig). [docs/POLYMERBUILD_CHARGE.md](docs/POLYMERBUILD_CHARGE.md)
+
+- **`-opt` (LBFGS++): Abriss der C=O-Bindung bei 5747 Atomen** (diagnostiziert 2026-10-29, [docs/LBFGS_ATOM_STEP_CAP.md](docs/LBFGS_ATOM_STEP_CAP.md)): Schalter `-lbfgs_max_atom_step` (Default auto: 0,2 A ab 2000 Atomen) behebt es in L1. Offen: Schwelle 2000 Atome belegen (nur eine Struktur gemessen), Cap auf MOR41/GMTKN55 pruefen, Bindungscheck am Ende von `-opt`, Nebenbefunde (`alpha=`-Ausgabe, Hilfe `lbfgs_line_search`, Doppel-Default `lbfgs_max_line_search`).
+- **Entscheidung: Default von `-md.seed`** (2026-10-31): seit dem Seed-Fix ist der Default -1 = Uhrzeit, eine MD ist also nicht mehr bitgleich wiederholbar (vorher war sie es, weil der Seed wirkungslos war); `cli_gfnff_07_eeq_localinv` wurde dadurch flaky und nutzt jetzt `-md.seed 1`. Alternative: Default 0 (aus Atomzahl und T0, mit der Startgeometrie im Seed reproduzierbar). Betrifft jede MD und alle Vergleichslaeufe.
+- **ROCm: Ladungsgruppen und `cn_zero_guard` bleiben auf der CPU** (Luecke, 2026-10-31): CUDA hat beides auf dem Device (Commit `fix/gpu-charge-groups`, gemessen 15,5 ms/Schritt bei 5747 Atomen), ROCm nicht: kein Hardwaretest, Trait `has_charge_groups_cn_guard = false` haelt den CPU-Rueckfall, der HIP-Kern ist nie kompiliert (kein hipcc) und nie gelaufen. Zu tun auf ROCm-Hardware: GPU gegen CPU wie bei CUDA (Gruppensummen, Gradient Cl-, 200 MD-Schritte), dann Trait auf true. Vulkan: nicht betrachtet. Ausserdem: `k_subtract_qtmp` (CUDA) hat keinen Aufrufer, Loeschkandidat.
+- **Rechenzeit je MD-Schritt ~ N^1,55** (diagnostiziert 2026-10-29, [docs/MD_STEPTIME_SCALING_2026-10.md](docs/MD_STEPTIME_SCALING_2026-10.md)): All-Pairs-Anteil (EEQ-Matrix/PPCG, Coulomb, D4-Liste), N^2 = 74 % bei 5750 Atomen. Offen, Hebel je 5-15 %: Constraint-Block nur fuer Schur/LU, pAp-Pruefung statt serieller Definitheitspruefung, D4-C6-Auffrischung fusionieren; Linearisierung braucht Cutoff/Ewald (aendert Energien, Entscheidung).
+
+- **Literaturverweise der Trajektorien- und Ionen-Methoden pruefen** (Oktober 2026): die Quellen fuer Blockfehler, H-Brueckenkriterium, g(r), Shrake-Rupley, Sondenradius, Bondi-Radien, Fibonacci-Punkte und `-ionize`
+  stehen in `docs/TRAJPROPS.md`, `src/core/citation_database.cpp` und `src/capabilities/trajprops.h`; sie stammen aus dem Gedaechtnis der KI und sind NICHT gegen die Arbeiten geprueft. Ebenso offen: welchen Radiensatz Min 2015 fuer die WASA verwendet.
+
+- **Flat-Flag ohne Modulpräfix erreicht den nativen xTB nicht** (bestätigt 2026-10-11, n=1): `-diis_start 1` landet laut `-export_run` in `/opt` und `/sp`, nicht in `/xtb`; der Name ist in
+  `curcumaopt.h`, `lbfgs.h` und `native_xtb_method.h` registriert, bei `-verbosity 2` kommt keine Warnung. `-xtb.diis_start 1` wirkt (seit `1bb4781b`). Ursache im Routing nicht untersucht;
+  gleiches Muster für andere mehrfach registrierte Namen möglich. Vault: Labor `curcuma GFN2-SCF-Vorkonditionierung`, Schritt 19.
 - **Flache SCF-Namen, die auch das Optimiermodul kennt** (2026-10-26, Ursache gefunden): `-diis_start`, `-max_iterations` gehören auch zu `opt`, das `-sp` und `-opt`
   benutzen; das Befehlsmodul gewinnt, also erreichen sie den SCF nicht (keine Warnung). Wirksam: `-scf_max_iterations`, `-scf.diis_start`, `-xtb.diis_start`.
   Offen: soll `-sp` die Optimiererparameter überhaupt besitzen? [docs/PARAMETER_SYSTEM.md](docs/PARAMETER_SYSTEM.md), "Shared module scf".
@@ -61,8 +88,52 @@ Stand.
 - **Restraint-Modus-Tube** (`umbrella_kz`) laeuft ueber `applyExternalForces` (einen Schritt verzoegert, nicht in `trueGradient()`), ueberschneidet sich mit `z_wall`.
 - **`Molecule::CalculateDihedral` falsch** (`src/core/molecule.cpp` ~551, benutzt von `-dihedral` in `src/main.cpp` ~523): das Skalarprodukt der unnormierten Flaechennormalen wird vor der Division durch die Betraege auf [-1,1] begrenzt
   (Agent-Nachrechnung: 116.4 Grad fuer eine +60-Grad-Geometrie), Ausgabe 0..2pi statt IUPAC. Korrekt ist `GFNFF_Geometry::calculateDihedralAngle`. Nicht repariert, nicht gegengeprueft ausser der Rechnung des Agenten.
+- **Segfault: `-md_method gfnff -opt_method uff` in ConfSearch (Sep 11, 2026, not re-checked after the Oct 2026 master merge)**. Crash in
+  `~EnergyCalculator` while `CxxThreadPool::~CxxThreadPool()` tears down the MD threads, after the
+  run has produced correct results. Reproducible 3/3. Measured scope: ONLY this pair --
+  gfnff/gfn2, gfnff/qmdff, gfnff/eht, uff/uff, uff/gfnff and gfn2/uff all run clean, so no
+  production path is affected. Appeared with the Sep 2026 master merge (`611cdd6a`): pure master
+  does not crash on the same command, and the confsearch branch did not before the merge, so it
+  is the combination of this branch's ConfSearch with master's ForceField/FFWorkspace rework.
+  Not triggered by any ConfSearch switch (`-topology_lock`, `-confgen_phase`, `-opt_feedback_bias`,
+  `-relax_pes`, `-snapshot_dedup_rmsd` all still crash). `MALLOC_CHECK_=3` reports no heap
+  corruption, so it is a stale/invalid object rather than an overflow -- next step is an
+  AddressSanitizer build. `cli_confsearch_04` was moved to qmdff, so the suite is green and this
+  issue is NOT covered by a test any more.
+- **LBFGSpp prüft die Krümmung nicht** (geprüft 2026-10-18, n=1): `BFGSMat::add_correction` überspringt das Update bei `s'y <= 0` nicht; auf einer rauen Delta-ML-Fläche (alte Defaults, 120 Zentren) bricht der Optimierer `auto` mit Exit 1 ab. Beobachtet an `cli_deltaml_01` mit dem alten ACSF-Gitter, mit den neuen Defaults (6 Schalen, eta 4) konvergiert er. Details: `AIChangelog.md` (Delta-ML), Vault `Projekte/curcuma Delta-ML`.
+- **`-opt.optimizer lbfgs` macht bei großem Startgradienten einen Nullschritt** (n=160 Läufe, 2026-10-19): ab etwa 0,3 Eh/Bohr Exit 1, 0 Iterationen, kein Fehlertext, auch für GFN2 und GFN-FF allein (400-K-MD-Frames); der Standardoptimierer läuft durch. Ursache nicht untersucht.
+- **Delta-ML: Modellenergie am eigenen Optimum zu niedrig** (n=20 je Molekül, 2026-10-19): bei `lambda 1e-6` und 4000 Zentren liegt sie um bis zu 34 kcal/mol unter GFN2 (19/19 auf dem Trisaccharid), `lambda 1e-3` beseitigt das und verschiebt die Energie um 7 bis 16 kcal/mol nach oben; `uncertainty_abort` hilft nicht. Details: `docs/DELTA_ML_RETEST_2026-10.md`.
+- **Delta-ML aktives Lernen: Abbruchkriterium** (2026-10-27, n=3+3 Läufe peo8): ersetzt durch Pool über `al_window` 3 Zyklen, zentrierte Fehler, 10-%-Quantil, Ziele 2,5/3,5 kcal/mol aus Tuning-Seeds 4-6; `both` = Validierung `al_patience`-mal + Indikator im Stoppzyklus. Löst in 2 von 3 Läufen aus (Zyklus 18, 19), Zeitpunkt vom Indikator bestimmt, JSD wie N0 (0,221).
+  Offen: andere Moleküle, ob `validation` allein (stoppt bei 7-9) gleich gute Modelle gibt, Wandzeit +20-38 % ungeklärt. Details: `docs/DELTA_ML_ACTIVE_LEARNING_2026-10.md` (Addendum). Warntext `not converged ... was not met in N consecutive cycles` (`activelearn.cpp:1311`) sagt nicht, ob Validierung oder Indikator fehlte.
+- **`charge_groups ionpairs`** (experimentell, Paritätsregel, 2026-10-24): setzt Formalladungen auch in Protonentransfer-TS und Komplexen mit geteiltem
+  Proton (WTMAD-2 +0,47; WCPT18/PX13 bis +143 kcal/mol; Kontrollen 6/10 +39 bis +196). Offen: Wahrnehmung Guanidinium/Amidinium, Phosphonium,
+  Sulfonium, protonierte Carbonyle, Dianionen; Gruppen je Instanz eingefroren (MD/react nicht geprüft). [docs/FRAG_CHARGE_MODEL.md](docs/FRAG_CHARGE_MODEL.md)
+- **Kontinuierliches Ladungsmodell für Ionenpaare** (rev-gfnff, SQE/ACKS2-artig): kein geprüftes GFN-FF-Maß trennt Ammoniumhalogenid-Paare von
+  Protonentransfer-TS. Falsifikator-Paket im Vault; dessen `species/*.xyz` passen bei 85/124 Spezies nicht zu den ORCA-Energien (vor Nutzung ersetzen).
+- **Fragmentreihenfolge im Mehrfragment-EEQ**: IL16/144 (neutrales Ionenpaar) ändert beim Vertauschen der Fragmentreihenfolge die Energie um
+  -2,4e-4 Eh und Ladungen um 7,8e-3 e, ohne Schalter, auf allen Lösern; mit `ionpairs` -4,1e-4 Eh; 230/187/008: 0 (n=1 je, 2026-10-24, nicht eingegrenzt).
+- **Coulomb-CN-Kettenregel bei CN = 0, Rest** (2026-10-25): CPU-Schalter `-gfnff.cn_zero_guard` (opt-in, Known Issue #43). Offen: CUDA/ROCm-Kernel
+  `k_subtract_qtmp`/`k_coulomb_postprocess` (bisher CPU-Rückfall, GPU-Zweig nicht übersetzt), Bestätigung in pprcht `gfnff_engrad.F90` (nur Vorrunde),
+  Default-Entscheidung (Betreiber); Hessian (FD der Gradienten) erbt den Schalter, nicht gelaufen.
+- **`frag_charge_model ensemble` bei Polymer^n+ + Cl-** (2026-10-25, n=1 je): Einheit nur +1, daher Q = +1 aus (AB)2 (+2) und Cl- als Polymer 0 / Cl +1
+  (Paritätsregel), (AB)3+Cl-: Polymer +1 / Cl +1. NVE 1 ps, 50 K: Etot-Sprünge bis -0,093 Eh (4 > 1e-3), der erste bei H(N)...Cl 1,65 A;
+  `reference` und Dateigruppen 1e-5 bzw. 2e-7 Eh/ps. Ursache des Sprungs in der MD nicht eingegrenzt. [docs/FRAG_CHARGE_MODEL.md](docs/FRAG_CHARGE_MODEL.md)
+- **`charge_groups` `"rest": "per_fragment"`** (2026-10-25): Gruppen je Instanz eingefroren, geänderte Fragmentierung in der MD wird nicht erkannt
+  (nur Codelesen; in keinem Lauf aufgetreten, Kontaktpaar-MD kam nicht unter 1,9 A, 2026-10-25); Fragmente des Skripts aus Kovalenzradien, nicht aus der GFN-FF-Topologie; periodisch, GPU, equilibrierte MD offen.
+  Validierung nur PDMAEMA-Einheit/Dimer in Wasserclustern (n=16/8): Kraefte nicht signifikant besser, Relativenergien besser. [docs/POLYMERBUILD_CHARGE.md](docs/POLYMERBUILD_CHARGE.md)
+- **100-ps-Probelauf (AB)5 im Wassertropfen** (2026-10-25, n=1 je T, 303/338 K): ausgewertet, offen: Kette wandert in beiden Läufen zur Tropfenoberfläche
+  (COM-Versatz 1,1-1,4 -> 3,2-3,5 A, 35 A^2 unbedeckt in H2), 338 K Epot-Drift -1,25e-3 Eh/ps, Rg nicht stationär (tau 5-15 ps, 3-15 unabhängige Werte);
+  (`-md.seed` wirkte in diesen Läufen nicht, seit 2026-10-30 behoben.) Läufe unter `~/curcuma_runs/probe100/`. [docs/PDMAEMA_PROBE_100PS_2026-10.md](docs/PDMAEMA_PROBE_100PS_2026-10.md)
+- **`-trajprops hb_criterion energy`** baut GFN-FF ohne `charge_groups`/`cn_zero_guard` (`countHydrogenBondsByEnergy`), also nicht das
+  Ladungsmodell des Laufs. [docs/PDMAEMA_PROBE_100PS_2026-10.md](docs/PDMAEMA_PROBE_100PS_2026-10.md)
+- **H...Cl-Bindungserkennung als Energiestufe** (2026-10-25, starrer Scan n=1): frische GFN-FF-Topologie gibt +34 kcal/mol bei 1,7->1,6 A (ohne Gruppen),
+  +50 bei 1,8->1,7 A mit Gruppen (Pass-2-Radien mit q(Cl) = -1), dazu -21 bei 1,2 A (N-Cl); ORCA/GFN2 glatt. In MD nicht erreicht; `auto` baut dort die
+  Topologie ohne Bindungsterme neu, Gruppen bleiben ungeprueft (Codelesen). Entscheidung offen. [docs/POLYMERBUILD_CHARGE.md](docs/POLYMERBUILD_CHARGE.md)
 
 ## 2. Leistung
+
+- **Delta-ML-Labels auf der GPU lohnen nicht** (2026-10-27, n=2 Wiederholungen, peo8 + 90-Atom-Wirt, [docs/DELTA_ML_LABEL_GPU_2026-10.md](docs/DELTA_ML_LABEL_GPU_2026-10.md)): beste GPU 0,06x / 0,25x der besten CPU, kein `label_gpu`.
+  Offen (Entscheidung): `-activelearn -gpu cuda` schickt die Labels heute schon auf die GPU (`LabelThread` übernimmt den globalen `gpu`-Schlüssel), 4-16x langsamer; Labels bei `-gpu` auf die CPU festlegen?
 
 - **CUDA/ROCm-Parität: ROCm-Seite** (2026-10-24, [docs/GPU_PARITY_CUDA_ROCM.md](docs/GPU_PARITY_CUDA_ROCM.md), Abschnitt A): auf ROCm fehlen residente SCF-Schleife, Geräte-Potential, Multipol on-the-fly, Solvation, Besetzungen/Broyden/Pseudodiagonalisierung, D3/D4 nach dem SCF, Gradientenschwanz; GFN-FF: Geräte-Schur, Mehr-GPU-Split, Geräte-Abstoßungsliste, tabelliertes dc6dcn, Fixed-Point.
 - **CUDA/ROCm-Parität: CUDA-Seite** (Stand 2026-10-25, [docs/GPU_PARITY_CUDA_ROCM.md](docs/GPU_PARITY_CUDA_ROCM.md), Abschnitt B): erledigt 1, 10, 12 (Faktor-Probe, Stream-Reihenfolge, Fixkomma-Flag); gemessen und nicht portiert 2, 3, 4, 5, 6, 7, 8; offen nur 9 ((entschieden 2026-10-26: `-gpu auto` entfernt)) und 5 bei Einzelkarten ueber 5000 Atomen.
@@ -131,6 +202,10 @@ Stand.
 - **PLUMED, ungetestet** (Stand 2026-10-30, getestet nur Ar2-RESTRAINT und Ethan-Torsion mit GFN-FF): QM-Methoden, größere Systeme, Restart, NPT/`setVirial`, PLUMED zusammen mit GPU. Gemeldete extreme PLUMED-Langsamkeit nicht nachgemessen. Well-tempered METAD lag 10 % über der freien MD (2.66 gegen 2.43 kcal/mol, Hügel nicht konvergiert).
 - **GPU nach dem NEB-MD-Merge** (2026-10-30, RTX 5080, Stand vor `96c29c50`): CUDA bitgleich auf Koffein und Benzol, Vulkan nur ohne `-gpu_strict` geprüft (CPU-Fallback nicht ausgeschlossen), ROCm nicht testbar (kein SDK). NEB-MD auf CUDA nur 1 ps ohne Zahlenvergleich zur CPU.
 - **Compiler-Warnungen aus dem Master** (2026-10-30, kein Neubau zum Nachzählen): `measurement.h` (`-Wsuggest-override`), `xtb_native.cpp` (`t_gp0`), `src/helpers/main.cpp` (`columns`), dazu 65 `-Winline`; die Vorgabe "warnungsfreier Build" aus `CLAUDE.md` ist nicht erfüllt.
+- **`gfnff_d4_fused_c6` hängt an den Build-Flags** (2026-11-01, gemessen): der Test verlangt
+  Bitgleichheit von fused- und stored-D4-Pfad; mit `-DUSE_AVX512/AVX2/BLAS=ON` weichen die
+  Gradienten ab, aus demselben Quellbaum ohne die drei sind sie gleich (Details Archiv #45).
+
 - **xtb-Referenzenergien der Teststruktur-Bibliothek** (2026-10-11, `test_cases/reference_data/xtb_library_energies.json`): 66 Strukturen GFN-FF, 64 GFN2 gerechnet (peo201-chain 1410 Atome GFN2: +1,6e-3 Eh, mit `d4_atm_cutoff 40.0` +2,6e-5). GFN-FF: 57 <= 1e-6 Eh, 8 > 1e-4 (hydronium-water2 -0,169 Eh Standard `ensemble` gegen xtb Referenzregel;
   jl22-bgal/macrocycle-bgal 173/231 Atome +0,25 bis +0,80 kcal/mol, nicht erklärt: `storsion_reference_loop_bug` ändert nichts, Term-Vergleich und pprcht/gfnff als dritte Meinung stehen aus). GFN2: max 5,2e-5 Eh, mit `-xtb.d4_atm_cutoff 40.0` auf macrocycle-bgal 5e-5 -> -2e-7 Eh. Offen: ctest gegen die Datei (Toleranzen), 4 Strukturen > 3000 Atome ohne xtb-GFN-FF (xtb wird bei 6200 und 7320 Atomen am 48-GB-Deckel getötet; curcuma 5 s), na2cl2 GFN2 xtb unkonvergiert.
 
