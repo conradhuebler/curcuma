@@ -52,6 +52,10 @@ extern "C" {
 // Optional symbols: the core treats a plugin without them as "1 device, no details".
 // Indices are the CUDA runtime's, i.e. AFTER CUDA_VISIBLE_DEVICES (which SLURM sets per job).
 
+// Eigen alignment this plugin was compiled with; the loader compares it with the executable's
+// (Claude Generated, Oct 2026).
+int curcuma_cuda_eigen_align() { return EIGEN_MAX_ALIGN_BYTES; }
+
 int curcuma_cuda_device_count()
 {
     int n = 0;
