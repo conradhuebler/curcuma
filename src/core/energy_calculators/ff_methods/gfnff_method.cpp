@@ -4669,7 +4669,14 @@ bool GFNFF::initializeForceField()
         } else {
             std::string geom_file = m_parameters["geometry_file"].get<std::string>();
             size_t dot = geom_file.find_last_of('.');
-            std::string topo_file = (dot != std::string::npos ? geom_file.substr(0, dot) : geom_file) + ".topo.json";
+            std::string topo_basename = (dot != std::string::npos ? geom_file.substr(0, dot) : geom_file);
+            // Claude Generated (June 2026): Route .topo.json into BMT directory when output_dir is set
+            std::string topo_file;
+            if (m_parameters.contains("output_dir") && m_parameters["output_dir"].is_string() && !m_parameters["output_dir"].get<std::string>().empty()) {
+                topo_file = m_parameters["output_dir"].get<std::string>() + "/" + topo_basename.substr(topo_basename.find_last_of('/') + 1) + ".topo.json";
+            } else {
+                topo_file = topo_basename + ".topo.json";
+            }
 
             json topo_export = exportTopology();
             topo_export["fingerprint"] = computeTopologyFingerprint();
@@ -11368,7 +11375,14 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
         if (m_cache_topology && m_parameters.contains("geometry_file")) {
             std::string geom_file = m_parameters["geometry_file"].get<std::string>();
             size_t dot = geom_file.find_last_of('.');
-            std::string topo_file = (dot != std::string::npos ? geom_file.substr(0, dot) : geom_file) + ".topo.json";
+            std::string topo_basename = (dot != std::string::npos ? geom_file.substr(0, dot) : geom_file);
+            // Claude Generated (June 2026): Route .topo.json into BMT directory when output_dir is set
+            std::string topo_file;
+            if (m_parameters.contains("output_dir") && m_parameters["output_dir"].is_string() && !m_parameters["output_dir"].get<std::string>().empty()) {
+                topo_file = m_parameters["output_dir"].get<std::string>() + "/" + topo_basename.substr(topo_basename.find_last_of('/') + 1) + ".topo.json";
+            } else {
+                topo_file = topo_basename + ".topo.json";
+            }
 
             std::ifstream topo_in(topo_file);
             if (topo_in.good()) {

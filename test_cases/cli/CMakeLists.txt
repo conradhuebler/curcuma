@@ -239,6 +239,9 @@ set_tests_properties(cli_simplemd_14_gfnff_react_h_recombination PROPERTIES TIME
 add_cli_test(simplemd 15_gfnff_react_water_noevent)
 set_tests_properties(cli_simplemd_15_gfnff_react_water_noevent PROPERTIES TIMEOUT 300 LABELS "simplemd;gfnff;react")
 set_tests_properties(cli_simplemd_12_eeq_cutoff_auto PROPERTIES TIMEOUT 180 LABELS "simplemd;gfnff;eeq_cutoff")
+add_cli_test(simplemd 15_csv_output)
+set_tests_properties(cli_simplemd_15_csv_output PROPERTIES TIMEOUT 120 LABELS "simplemd;uff;csv")
+
 # Claude Generated (Jul 2026): RMSD-MTD strided-scheme regression tests (docs/RMSD_MTD_TEXTBOOK.md 6)
 add_cli_test(simplemd 13_rmsd_mtd_legacy_ab)
 set_tests_properties(cli_simplemd_13_rmsd_mtd_legacy_ab PROPERTIES TIMEOUT 300 LABELS "simplemd;gfnff;rmsd_mtd")
@@ -269,6 +272,35 @@ add_cli_test(confsearch 04_relax_pes_opt)
 set_tests_properties(cli_confsearch_04_relax_pes_opt PROPERTIES TIMEOUT 400 LABELS "confsearch;gfnff;qmdff;dual_method")
 add_cli_test(confsearch 05_seed_cold_bias)
 set_tests_properties(cli_confsearch_05_seed_cold_bias PROPERTIES TIMEOUT 600 LABELS "confsearch;gfnff;seeding")
+
+# =============================================================================
+# NEB-MD Tests
+# =============================================================================
+
+add_cli_test(nebmd 01_gfnff_ethane)
+add_cli_test(nebmd 02_neb_optimize)
+set_tests_properties(cli_nebmd_01_gfnff_ethane cli_nebmd_02_neb_optimize
+    PROPERTIES TIMEOUT 300 LABELS "nebmd;gfnff")
+# Claude Generated 2026: scheme 'string' (finite-temperature string, stage 1)
+add_cli_test(nebmd 03_string_ethane)
+set_tests_properties(cli_nebmd_03_string_ethane PROPERTIES TIMEOUT 300 LABELS "nebmd;gfnff")
+# Claude Generated 2026: two-stage pipeline string -> path-CV mean force
+add_cli_test(nebmd 04_pipeline_ethane)
+set_tests_properties(cli_nebmd_04_pipeline_ethane PROPERTIES TIMEOUT 300 LABELS "nebmd;gfnff")
+# Claude Generated 2026: cv_histogram (reference G_ref(s) from a trajectory, synthetic input)
+add_cli_test(nebmd 05_cv_histogram)
+set_tests_properties(cli_nebmd_05_cv_histogram PROPERTIES TIMEOUT 120 LABELS "nebmd;gfnff")
+# Claude Generated 2026: path CV decoupled from the windows (cv_frames) and extended beyond the
+# path ends (cv_extend); basin-referenced barrier
+add_cli_test(nebmd 06_extended_cv)
+set_tests_properties(cli_nebmd_06_extended_cv PROPERTIES TIMEOUT 300 LABELS "nebmd;gfnff")
+# Claude Generated 2026: string stage aborts on a dead image (string_abort_on_dead), pipeline
+# does not start stage 2
+add_cli_test(nebmd 07_string_dead_abort)
+set_tests_properties(cli_nebmd_07_string_dead_abort PROPERTIES TIMEOUT 60 LABELS "nebmd;gfnff")
+# Claude Generated 2026: fe.csv split of the constrained mean force (gradE + metric + wall = dGds)
+add_cli_test(nebmd 08_fe_split)
+set_tests_properties(cli_nebmd_08_fe_split PROPERTIES TIMEOUT 300 LABELS "nebmd;gfnff")
 
 # =============================================================================
 # CG (Coarse Graining) Tests — disabled: -vtf command not implemented in main.cpp

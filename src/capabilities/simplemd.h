@@ -26,7 +26,10 @@
 
 #include <chrono>
 #include <deque>
+#include <fstream>
+#include <stdexcept>
 #include <ctime>
+#include <fstream>
 #include <functional>
 #include <random>
 #include <ratio>
@@ -316,7 +319,12 @@ public:
     // Getters for stepwise GUI feedback
     const Geometry& positions() const { return m_eigen_geometry; }
     const Geometry& velocities() const { return m_eigen_velocities; }
+    /** Gradient as last used by the integrator. After step() it INCLUDES the external force
+     *  applied in that step - use trueGradient() for dE/dR (Claude Generated 2026). */
     const Geometry& gradient() const { return m_eigen_gradient; }
+    /** Pure dE/dR (potential + walls) at the current position, without external forces.
+     *  Falls back to gradient() before the first step. */
+    const Geometry& trueGradient() const { return m_gradient_true_valid ? m_gradient_true : m_eigen_gradient; }
     /// Claude Generated 2026 - Where the run got to. Pure; the trajectory and
     /// restart files are written by the run itself, not by asking for this.
     ///
@@ -378,6 +386,121 @@ public:
     // Claude Generated (Apr 2026): shared bias pool for parallel ConfSearch
     void setSharedBiasPool(SharedBiasPool* pool) { m_shared_pool = pool; }
 
+    /** Claude Generated (2026): constrain the RMSD-MTD bias force to the plane perpendicular
+     *  to `direction` (a unit vector, shape (natoms,3)). Used by NEB-MD so the metadynamics
+     *  samples an image's transverse degrees of freedom without pushing it along the reaction
+     *  path (which would destroy the string). Empty matrix = no projection (default).
+     *  No effect when rmsd_mtd is off. */
+    void setMTDProjection(const Geometry& direction) { m_mtd_projection = direction; }
+
+    /** Claude Generated (2026): overwrite the current positions between two step() calls.
+     *  Intended for string reparametrisation in NEB-MD, where the images are redistributed
+     *  along the path. This is a DISCONTINUOUS coordinate change: the gradient no longer
+     *  matches the geometry, so the caller must expect one step of transient behaviour
+     *  (the next step() re-evaluates the energy at the new geometry anyway).
+     *  Velocities are left untouched; use rescaleVelocities() to restore the temperature. */
+    void setPositions(const Geometry& positions)
+    {
+        if (positions.rows() == m_natoms && positions.cols() == 3)
+            m_eigen_geometry = positions;
+    }
+
+    /** Claude Generated (2026): scale all velocities by `factor` (used after a
+     *  reparametrisation step to restore the target temperature). */
+    void rescaleVelocities(double factor) { m_eigen_velocities *= factor; }
+
+    /** Claude Generated (2026): overwrite the velocities. Needed to project out the
+     *  component along a constraint gradient (RATTLE step for a collective variable). */
+    void setVelocities(const Geometry& v) { m_eigen_velocities = v; }
+
+    /** Claude Generated (2026): integration time step, needed to make a position
+     *  correction from an external constraint consistent with the velocities
+     *  (dv = dr/dt, exactly as Rattle() does for the bond constraints). */
+    double timeStep() const { return m_dT; }
+
+    /*! \brief Hold a general scalar function of the geometry by a holonomic constraint.
+     *
+     *  Claude Generated 2026. The callback returns sigma(R) and fills its cartesian
+     *  gradient; the constraint sigma(R) = target is then enforced inside Rattle(), in the
+     *  same place and with the same velocity bookkeeping as the bond constraints. That
+     *  placement is what makes it work: applying the correction after step() has finished
+     *  puts it behind the thermostat, so the energy it introduces is never removed again -
+     *  measured, three of four windows heated steadily to 3000 K and were destroyed.
+     *  Passing an empty function disables the constraint.
+     *
+     *  Degrees of freedom (Claude Generated 2026): one holonomic constraint removes one DOF,
+     *  so m_dof is lowered by 1 while a constraint is set (and restored when it is cleared).
+     *  Without this the thermostat targets Ekin for 3N instead of 3N-1 DOF and the measured
+     *  T = 2 Ekin/(kB m_dof) of a constrained run sits above the setpoint. InitConstrainedBonds()
+     *  applies the same correction if the constraint was set before Initialise(). */
+    using ScalarConstraint = std::function<double(const Geometry& R, Geometry& grad)>;
+    void setScalarConstraint(ScalarConstraint fn, double target, double tol = 1e-8)
+    {
+        const bool had = static_cast<bool>(m_scalar_constraint);
+        m_scalar_constraint = std::move(fn);
+        m_scalar_target = target;
+        m_scalar_tol = tol;
+        const bool has = static_cast<bool>(m_scalar_constraint);
+        if (has && !had && m_dof > 1)
+            m_dof -= 1;
+        else if (!has && had && m_dof > 0)
+            m_dof += 1;
+    }
+    /** Claude Generated 2026: optional additional potential W(R) (e.g. NEB-MD's z wall).
+     *  fn(R, grad) returns W in Eh and sets grad = dW/dR in Eh/Angstrom. It is evaluated inside
+     *  the integrator right after the wall potentials, at the NEW positions, so it acts on both
+     *  velocity half-kicks like the potential itself (unlike applyExternalForces(), which is
+     *  computed by the caller at the start of the step). Being part of the potential, its
+     *  gradient IS contained in trueGradient(). Empty function = off (no extra evaluation).
+     *  Set after prepareRun(): the first half-kick of the first step does not contain it. */
+    using ExtraPotential = std::function<double(const Geometry& R, Geometry& grad)>;
+    void setExtraPotential(ExtraPotential fn)
+    {
+        if (m_umbrella_q_on) // Claude Generated 2026: only one extra potential, see umbrella_q
+            throw std::runtime_error("SimpleMD: umbrella_q already uses the extra potential (plain -md only)");
+        if (m_umbrella_cv_on) // Claude Generated 2026: same for umbrella_cv
+            throw std::runtime_error("SimpleMD: umbrella_cv already uses the extra potential (plain -md only)");
+        m_extra_potential = std::move(fn);
+    }
+    /** Claude Generated 2026: umbrella restraint on q = d(i,j) - d(i,k), see docs/UMBRELLA_Q.md.
+     *  Atoms 0-based, q0 in Angstrom, kappa in Eh/A^2. */
+    struct UmbrellaQ {
+        int i = -1, j = -1, k = -1;
+        double q0 = 0.0, kappa = 0.0;
+    };
+    /** Parse "i,j,k,q0,kappa" (atoms 1-based, kappa in kcal/mol/A^2); false + error text on bad input. */
+    static bool parseUmbrellaQ(const std::string& spec, int natoms, UmbrellaQ& out, std::string& error);
+    /** W = kappa/2 (q - q0)^2 in Eh; grad = dW/dR in Eh/A (natoms x 3). Optional q, d_ij, d_ik in A. */
+    static double umbrellaQEnergy(const UmbrellaQ& u, const Geometry& R, Geometry& grad,
+        double* q = nullptr, double* dij = nullptr, double* dik = nullptr);
+    /** Claude Generated 2026: general umbrella restraint (umbrella_cv), see docs/UMBRELLA_Q.md.
+     *  Diff: q = d(i,j) - d(i,k) (k unused as 4th atom), Sum: q = d(i,j) + d(k,l) (q0 in A, kappa in Eh/A^2),
+     *  Dihedral: signed IUPAC phi(i,j,k,l) (q0 in rad, kappa in Eh/rad^2). Atoms 0-based. */
+    struct UmbrellaCV {
+        enum Type { Diff, Sum, Dihedral } type = Sum;
+        int i = -1, j = -1, k = -1, l = -1;
+        double q0 = 0.0, kappa = 0.0;
+    };
+    /** Parse "diff,i,j,k,q0,kappa" | "sum,i,j,k,l,q0,kappa" | "dihedral,i,j,k,l,phi0,kappa"
+     *  (atoms 1-based; q0 in A, phi0 in degrees; kappa in kcal/mol/A^2 or kcal/mol/rad^2). */
+    static bool parseUmbrellaCV(const std::string& spec, int natoms, UmbrellaCV& out, std::string& error);
+    /** W = kappa/2 (q - q0)^2 in Eh (dihedral: q - q0 wrapped to [-pi, pi]); grad = dW/dR in Eh/A.
+     *  Optional outputs: cv (A or rad), a1/a2 = d_ij/d_ik (diff), d_ij/d_kl (sum), dphi in rad (a1, dihedral).
+     *  Throws std::runtime_error for a dihedral with a (near) linear bond angle (|sin| < 1e-6). */
+    static double umbrellaCVEnergy(const UmbrellaCV& u, const Geometry& R, Geometry& grad,
+        double* cv = nullptr, double* a1 = nullptr, double* a2 = nullptr);
+    /** Signed dihedral phi(i,j,k,l) in rad, IUPAC/Klyne-Prelog sign (trans 180, gauche +-60, cis 0),
+     *  same convention as gfnff_geometry.h calculateDihedralAngle; optional dphi/dR rows (4 x 3, 1/A). */
+    static double dihedralAngle(const Geometry& R, int i, int j, int k, int l, Eigen::Matrix<double, 4, 3>* dphi = nullptr);
+    /** W at the current positions (Eh), 0 when no extra potential is set. */
+    double extraPotentialEnergy() const { return m_extra_energy; }
+    /** Claude Generated 2026: dW/dR (Eh/Angstrom) of the extra potential, from the same integrator
+     *  step as trueGradient(), so trueGradient() - extraPotentialGradient() = d(E + walls)/dR.
+     *  Empty (0 rows) when no extra potential is set or it has not been evaluated yet. */
+    const Geometry& extraPotentialGradient() const { return m_extra_gradient; }
+    /** Claude Generated 2026: number of degrees of freedom used for T and the thermostat. */
+    int degreesOfFreedom() const { return m_dof; }
+
 private:
     std::function<void(void)> ThermostatFunction;
     void PrintStatus() const;
@@ -387,6 +510,13 @@ private:
         if (m_snapshots_dir.empty())
             return outputPath(filename);
         return m_snapshots_dir + "/" + filename;
+    }
+
+    // Claude Generated 2026: Build path inside plumed-files subdirectory
+    std::string plumedPath(const std::string& filename) const {
+        if (m_plumed_dir.empty())
+            return outputPath(filename);
+        return m_plumed_dir + "/" + filename;
     }
 
     /* Lets have this for all modules */
@@ -457,6 +587,9 @@ private:
     /*! \brief Claude Generated (Sep 2026): run one integration step, with optional step
      *  rejection (adaptive_step). Without it this is a plain call to Integrator(). */
     void IntegratorStep();
+#ifdef USE_Plumed
+    void performPlumedCalc(); ///< run PLUMED with the force sign it expects (see simplemd.cpp)
+#endif
     /*! \brief Claude Generated (Sep 2026): step-rejection tolerance in Hartree, derived from
      *  adaptive_step_tol and the system's thermal energy. */
     double adaptiveStepTolerance() const;
@@ -564,6 +697,8 @@ private:
 #endif
 
     std::string m_snapshots_dir;  // Claude Generated 2026: Snapshots subdirectory inside BMT
+    std::string m_plumed_dir;     // Claude Generated 2026: PLUMED output subdirectory inside BMT
+    Geometry m_mtd_projection;    // Claude Generated 2026: if non-empty, RMSD-MTD bias is projected perpendicular to this unit direction
 
     int m_natoms = 0;
     int m_dump = 1;
@@ -573,6 +708,13 @@ private:
     int m_hmass = 1;
     double m_single_step = 1;
     double m_dT = 0.5, m_currentStep = 0, m_maxtime = 1000;
+    ScalarConstraint m_scalar_constraint;    // optional CV constraint (Claude Generated 2026)
+    ExtraPotential m_extra_potential;        // optional extra potential, see setExtraPotential()
+    double m_extra_energy = 0.0;             // its value at the current positions [Eh]
+    Geometry m_extra_gradient;               // its gradient dW/dR at the current positions [Eh/A]
+    void ApplyExtraPotential();              // adds dW/dR to m_eigen_gradient (Claude Generated 2026)
+    double m_scalar_target = 0.0, m_scalar_tol = 1e-8;
+    int m_scalar_iters = 0;
     int m_spin = 0, m_charge = 0, m_print = 100;
     double m_T0 = 298.15, m_aver_Temp = 0, m_aver_rattle_Temp = 0, m_rmsd = 1.5;
     // Claude Generated (Jun 2026): initial velocity sampling temperature. Set to
@@ -619,6 +761,9 @@ private:
     Molecule m_molecule, m_reference, m_target, m_rmsd_mtd_molecule;
     ConfigManager m_config;  // Claude Generated - Modern type-safe parameter access
     bool m_initialised = false, m_restart = false, m_writeUnique = true, m_opt = false, m_rescue = false, m_writeXYZ = true, m_writeinit = false, m_norestart = false;
+    bool m_write_csv = true;                 // Claude Generated 2026: enable CSV status output
+    std::string m_csv_delimiter = ";";       // Claude Generated 2026: CSV field delimiter
+    mutable std::ofstream m_csv_file;        // Claude Generated 2026: CSV status stream (mutable: written from const PrintStatus)
     int m_rmrottrans = 0, m_rattle_maxiter = 100;
     bool m_nocenter = false;
     bool m_COM = false;
@@ -633,6 +778,8 @@ private:
     Vector m_eigen_masses, m_eigen_inv_masses;
 
     // Stepwise-API state (Claude Generated 2026)
+    Geometry m_gradient_true;            // dE/dR without external force, see trueGradient()
+    bool m_gradient_true_valid = false;
     Geometry m_external_forces;          // additive per-atom force contribution, cleared after use
     bool m_external_forces_pending = false;
 
@@ -801,6 +948,7 @@ private:
     bool m_dipole = false;
     bool m_clean_energy = false;
     bool m_mtd = false;
+    bool m_no_plumed_redirect = false;  // Claude Generated 2026: Disable automatic PLUMED output routing
     bool m_eval_mtd = true;
     bool m_rmsd_mtd = false;
     bool m_wtmtd = false;
@@ -810,6 +958,21 @@ private:
     bool m_nohillsfile = false;
     bool m_rattle_12 = false;
     bool m_rattle_13 = false;
+
+    // Claude Generated 2026: umbrella restraint on a distance difference (umbrella_q)
+    std::string m_umbrella_q_spec;
+    UmbrellaQ m_umbrella_q;
+    bool m_umbrella_q_on = false;
+    int m_umbrella_q_frequency = 20;
+    std::ofstream m_umbrella_q_file;
+    void WriteUmbrellaQ(int step, double time_fs);
+    // Claude Generated 2026: general umbrella restraint (umbrella_cv: diff | sum | dihedral)
+    std::string m_umbrella_cv_spec;
+    UmbrellaCV m_umbrella_cv;
+    bool m_umbrella_cv_on = false;
+    int m_umbrella_cv_frequency = 20;
+    std::ofstream m_umbrella_cv_file;
+    void WriteUmbrellaCV(int step, double time_fs);
 
     // WP-S2 (May 2026): per-step diagnostics JSONL dump
     bool m_md_diagnostics = false;
@@ -990,6 +1153,7 @@ private:
     // --- Metadynamics (PLUMED) ---
     PARAM(mtd, Bool, false, "Enable PLUMED metadynamics.", "Metadynamics", {})
     PARAM(plumed_file, String, "plumed.dat", "PLUMED input file.", "Metadynamics", {"plumed"})
+    PARAM(no_plumed_redirect, Bool, false, "Disable automatic routing of PLUMED output files into BMT/plumed-files subdirectory. When false (default), FILE= paths in plumed.dat are rewritten to point into BMT/plumed-files/.", "Metadynamics", {})
 
     // --- RMSD-based Metadynamics (Internal) ---
     PARAM(rmsd_mtd, Bool, false, "Enable internal RMSD-based metadynamics.", "RMSD-MTD", {})
@@ -1038,6 +1202,8 @@ private:
     PARAM(rmsd_mtd_r_dep, Double, -1.0, "Strided scheme: hill spacing in RMSD space (Angstrom) setting V_min = k*exp(-alpha*r_dep^2). -1 = auto FWHM(alpha) = 2.3548/sqrt(2*alpha) (0.5 A at alpha=10).", "RMSD-MTD", {})
     PARAM(rmsd_mtd_gap_guard, Bool, true, "Strided scheme (Milestone 2): force an early deposition test when the walker moves > r_dep from the last deposited hill within a stride (closes coverage gaps). Inert while the force is evaluated every step.", "RMSD-MTD", {})
     PARAM(rmsd_mtd_diag, Bool, true, "Write RMSD-MTD provenance diagnostics (basename.mtd_hills / mtd_coverage CSV + gnuplot scripts) via the BMT output path at verbosity>=1. false = COLVAR only.", "RMSD-MTD", {})
+    PARAM(rmsd_econv, Double, 1e8, "Energy convergence threshold for bias structure addition. Lower = more frequent structure addition (aggressive); higher = rarer addition (conservative). Default effectively disables the filter.", "RMSD-MTD", {})
+    PARAM(wtmtd, Bool, false, "Enable well-tempered metadynamics (adaptive bias deposition).", "RMSD-MTD", {})
 
     // --- Coarse Graining (CG) Parameters --- Claude Generated (Nov 2025)
     PARAM(cg_write_vtf, Bool, true, "Write VTF trajectory for CG systems.", "CG", {"write_vtf"})
@@ -1048,6 +1214,14 @@ private:
     PARAM(md_diagnostics, Bool, false, "Write per-step diagnostics to <basename>.diag.jsonl (energy decomposition, charges, CN, gradient norms, HB/XB counts). Frequency follows dump_frequency. One JSON object per line.", "Output", {})
     // --- WP-P1 Timing Instrumentation (May 2026) ---
     PARAM(md_diagnostics_timing, Bool, false, "Add a timing_ms block to each <basename>.diag.jsonl record (per-phase wall-clock: CN/EEQ/dcn/D4-weights/FF/integrator/HBXB/I-O). GPU runs add a gpu sub-block with per-kernel-category times. Requires md_diagnostics=true. ~1-2 us per hook.", "Output", {})
+    PARAM(umbrella_q, String, "", "Umbrella restraint on a distance difference, 'i,j,k,q0,kappa': q = d(i,j) - d(i,k) (atoms 1-based), W = kappa/2 (q - q0)^2 with q0 in Angstrom and kappa in kcal/mol/A^2. Empty = off. Plain -md only (not with NEB-MD). Writes <basename>.umbrella_q.csv. See docs/UMBRELLA_Q.md.", "System", {})
+    PARAM(umbrella_q_frequency, Int, 20, "Write a line to <basename>.umbrella_q.csv every N steps (only with umbrella_q).", "System", {})
+    PARAM(umbrella_cv, String, "", "Umbrella restraint on a collective variable, W = kappa/2 (q - q0)^2, atoms 1-based: 'sum,i,j,k,l,q0,kappa' (q = d(i,j) + d(k,l), q0 in Angstrom, kappa in kcal/mol/A^2), 'dihedral,i,j,k,l,phi0,kappa' (signed IUPAC dihedral, trans 180, gauche +-60; phi0 in degrees, kappa in kcal/mol/rad^2, periodic), 'diff,i,j,k,q0,kappa' (same as umbrella_q). Empty = off. Excludes umbrella_q and NEB-MD. Writes <basename>.umbrella_cv.csv. See docs/UMBRELLA_Q.md.", "System", {})
+    PARAM(umbrella_cv_frequency, Int, 20, "Write a line to <basename>.umbrella_cv.csv every N steps (only with umbrella_cv).", "System", {})
+
+    // --- CSV Status Output (Claude Generated 2026) ---
+    PARAM(write_csv, Bool, true, "Write per-step energies/temperatures to <basename>.md.csv in the output directory.", "Output", {})
+    PARAM(csv_delimiter, String, ";", "Delimiter for the CSV status file (e.g. ';', ',', or '\\t' for tab).", "Output", {})
     // Claude Generated (Oct 2026): opt-in hydrogen-bond log by GFN-FF triple energy. Off (0) = nothing runs.
     PARAM(hb_log_frequency, Int, 0, "Log the hydrogen bonds every N steps to <basename>.hbonds.csv: number of GFN-FF triples (A-H...B) with an energy below hb_log_energy_limit, per direction, and the sum of the triple energies. GFN-FF only; 0 = off (the run is then exactly as without this option). Recording the triple energies costs one write per triple and step.", "Output", {}, "min=0")
     PARAM(hb_log_energy_limit, Double, 0.0, "hb_log_frequency: a triple counts when its energy is below this (kJ/mol, negative = attractive; 0 counts every attractive triple). Calibrate with `-trajprops -hb_criterion energy` and its histogram.", "Output", {})

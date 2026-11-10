@@ -61,6 +61,12 @@ namespace Constants {
     // 9.1745 fs of reported time, and before this conversion existed it did so in 4.6961.
     constexpr double MD_TIME_UNIT_FS = 1.9516144204; // sqrt(amu*A^2/Eh) in fs
     constexpr double FS_TO_MD_TIME = 1.0 / MD_TIME_UNIT_FS; // 0.5123963
+
+    // Claude Generated 2026: Planck constant and the Hartree energy in SI (CODATA-2018, h exact
+    // since the 2019 SI redefinition). Needed for the Eyring prefactor kB T / h of a rate:
+    // kB T / h [1/s] = kT[Eh] * HARTREE_TO_JOULE / PLANCK_SI.
+    constexpr double PLANCK_SI = 6.62607015e-34; // J s
+    constexpr double HARTREE_TO_JOULE = 4.3597447222071e-18; // J per Eh
 }
 
 // ===== UNIT CONVERSION FUNCTIONS =====

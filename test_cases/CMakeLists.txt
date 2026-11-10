@@ -151,6 +151,13 @@ if(USE_Plumed)
     endif()
     add_test(NAME test_plumed_init COMMAND test_plumed_init)
     set_tests_properties(test_plumed_init PROPERTIES TIMEOUT 10 LABELS "plumed;unit")
+    # Claude Generated (Oct 2026): real PLUMED run, a RESTRAINT must oscillate with the analytic period.
+    find_package(Python3 COMPONENTS Interpreter)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME plumed_bias
+                 COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_plumed_bias.py $<TARGET_FILE:curcuma>)
+        set_tests_properties(plumed_bias PROPERTIES TIMEOUT 300 LABELS "plumed;md;units")
+    endif()
 endif()
 
 # Claude Generated: CG Potentials unit test suite
@@ -745,6 +752,62 @@ add_subdirectory(cli)
 # Claude Generated (Phase 0, Apr 2026): reference SCC dumps from tblite
 # for native GFN1/GFN2 validation (see scripts/extract_xtb_params.py + xtb_native.*)
 add_subdirectory(sqm_reference)
+
+# Claude Generated 2026: Path collective variables (Branduardi s,z) validation
+add_executable(test_path_cv
+        test_path_cv.cpp)
+
+target_link_libraries(test_path_cv curcuma_core)
+
+if(USE_PCH)
+        target_precompile_headers(test_path_cv REUSE_FROM curcuma_core)
+endif()
+
+add_test(NAME test_path_cv COMMAND test_path_cv)
+set_tests_properties(test_path_cv PROPERTIES TIMEOUT 60 LABELS "pathcv;unit")
+
+# Claude Generated 2026: WHAM solver vs a known double-well profile (header-only, no core link)
+add_executable(test_wham test_wham.cpp)
+target_include_directories(test_wham PRIVATE ${CMAKE_SOURCE_DIR})
+add_test(NAME test_wham COMMAND test_wham)
+set_tests_properties(test_wham PROPERTIES TIMEOUT 120 LABELS "pathcv;unit")
+
+# Claude Generated 2026: SHAKE/RATTLE scalar constraint, NVE energy conservation (distance CV)
+add_executable(test_scalar_constraint test_scalar_constraint.cpp)
+target_link_libraries(test_scalar_constraint curcuma_cap curcuma_core)
+target_compile_definitions(test_scalar_constraint PRIVATE CURCUMA_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+add_test(NAME test_scalar_constraint COMMAND test_scalar_constraint)
+set_tests_properties(test_scalar_constraint PROPERTIES TIMEOUT 300 LABELS "pathcv;unit")
+
+# Claude Generated 2026: SimpleMD umbrella_q restraint (gradient vs FD, parser)
+add_executable(test_umbrella_q test_umbrella_q.cpp)
+target_link_libraries(test_umbrella_q curcuma_cap curcuma_core)
+add_test(NAME test_simplemd_umbrella_q COMMAND test_umbrella_q)
+set_tests_properties(test_simplemd_umbrella_q PROPERTIES TIMEOUT 60 LABELS "pathcv;unit")
+
+# Claude Generated 2026: pure string/path helpers (Kabsch, reparametrisation, double-well FTS)
+add_executable(test_string_path test_string_path.cpp)
+target_link_libraries(test_string_path curcuma_core)
+add_test(NAME test_string_path COMMAND test_string_path)
+set_tests_properties(test_string_path PROPERTIES TIMEOUT 60 LABELS "pathcv;unit")
+
+# Claude Generated 2026: automatic z threshold (population separation) for -nebmd.cv_histogram
+add_executable(test_z_filter test_z_filter.cpp)
+target_include_directories(test_z_filter PRIVATE ${CMAKE_SOURCE_DIR})
+add_test(NAME test_z_filter COMMAND test_z_filter)
+set_tests_properties(test_z_filter PROPERTIES TIMEOUT 60 LABELS "pathcv;unit")
+
+# Claude Generated 2026: grid-free (natural cubic spline) barrier of the mean-force profile
+add_executable(test_fe_profile test_fe_profile.cpp)
+target_include_directories(test_fe_profile PRIVATE ${CMAKE_SOURCE_DIR})
+add_test(NAME test_fe_profile COMMAND test_fe_profile)
+set_tests_properties(test_fe_profile PROPERTIES TIMEOUT 60 LABELS "pathcv;unit")
+
+# Claude Generated 2026: absolute TST rate / Eyring free energy across s* (fe_profile.h tstRate)
+add_executable(test_tst_rate test_tst_rate.cpp)
+target_include_directories(test_tst_rate PRIVATE ${CMAKE_SOURCE_DIR})
+add_test(NAME test_tst_rate COMMAND test_tst_rate)
+set_tests_properties(test_tst_rate PROPERTIES TIMEOUT 60 LABELS "pathcv;unit")
 
 # Claude Generated (Oct 2026): property tests generated from the structure library (test_cases/struct_test_policy.json):
 # translation/rotation/permutation invariance, sum of forces and torque, finite-difference gradient, repeat and thread
