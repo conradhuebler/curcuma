@@ -242,6 +242,9 @@ Stand.
 
 ## 5. Funktionen und Refactoring (niedrige Priorität)
 
+- **PLUMED-Hilfeseiten überarbeiten** (2026-11-10, Branch `feature/plumed-help-page`, Stash-Stand vom 01.06., Basis `25d4d8d7`): `-help-plumed` und der SimpleMD-Hinweis darauf doppeln `-help metadynamics` (`printMetadynamicsHelp()` in `src/main.cpp`) und `docs/PLUMED_HELP.md`; zusammenführen, auf den aktuellen Stand bringen.
+  Nur die Hilfetexte übernehmen: die Einheitenänderungen des Branches (Bohr-Positionen, kB*T, `setBox`) sind älter als `07e7544d`/`96c29c50` und würden sie teilweise zurückdrehen.
+
 - **CG Phase 6**: winkelabhängige Ellipsoid-Energie (`calculateEffectiveDistance`, `calculateCGPairEnergy`, Rotationszüge in Casino). Phase 1 bis 5 sind umgesetzt.
 - SimpleMD: Physik des Wandpotentials prüfen; RMSD-Strategy-Pattern Phase 3; erweiterte ConfSearch-Algorithmen; bessere Trajektorienanalyse;
   ConfSearch mit GPU und mehreren Threads (nur noch relevant, solange der GPU-Geräte-Pool inaktiv ist, Korrektur 2026-09-28).
