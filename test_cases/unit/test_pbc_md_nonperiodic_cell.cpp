@@ -20,9 +20,10 @@
  * Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A6b).
  *
  * With a unit cell and a method whose energy does not read the cell (hasPeriodicEnergy() false: uff,
- * native gfn2, GFN-FF with coulomb_ewald false, ...) SimpleMD no longer wraps into the cell and removes
- * COM translation AND rotation as in vacuum (-6 DOF). Checks:
- *   (a) uff and gfn2, registry water dimer around the origin, cell L = 44 Bohr ([0, L), so the dimer
+ * eht, GFN-FF with coulomb_ewald false, ...) SimpleMD no longer wraps into the cell and removes
+ * COM translation AND rotation as in vacuum (-6 DOF). Since WP-PERIODIC-XTB P5 (Nov 2026) the native
+ * gfn1/gfn2 with a cell are periodic energies (check (d)); (a) therefore uses eht instead of gfn2. Checks:
+ *   (a) uff and eht, registry water dimer around the origin, cell L = 44 Bohr ([0, L), so the dimer
  *       starts outside it), wall_potential pbc with the box [-L/2, L/2), fresh 300 K start, seed 7,
  *       NVE 200 steps of 0.5 fs, COM/rotation removal every 10 fs: 0 cell wraps, 0 container actions
  *       (the dimer stays in the box), DOF 3N-6, and the E_tot series bitwise equal to the same run
@@ -30,7 +31,8 @@
  *   (b) uff, box = cell, the dimer drifting through the +x face: the container wrap acts (it really
  *       leaves the box), the cell wrap does not;
  *   (c) the other corner of the matrix: gfnff + cell (periodic) has DOF 3N-3, gfnff + cell +
- *       coulomb_ewald false has DOF 3N-6.
+ *       coulomb_ewald false has DOF 3N-6;
+ *   (d) gfn2 + cell (WP-PERIODIC-XTB): periodic energy, DOF 3N-3.
  */
 
 #include "src/capabilities/simplemd.h"
@@ -183,7 +185,7 @@ int main()
     const double max_time = nsteps * dt + 10;
 
     // (a) cell [0, L), box [-L/2, L/2), dimer at the origin: before A6b cell and container wrap fought (+L/-L per step)
-    for (const std::string method : { std::string("uff"), std::string("gfn2") }) {
+    for (const std::string method : { std::string("uff"), std::string("eht") }) {
         const curcuma::Molecule with_cell = dimerAt(Position::Zero(), true, L);
         const curcuma::Molecule no_cell = dimerAt(Position::Zero(), false, L);
         const RunResult rc = run(mdController(method, dt, max_time, -L / 2, L / 2), with_cell, method + "_cell", nsteps);
@@ -252,6 +254,17 @@ int main()
             check(r.periodic && r.dof == 3 * n - 3, "(c) gfnff + cell: periodic, translation only removed, DOF 3N-3");
         else
             check(!r.periodic && r.dof == 3 * n - 6, "(c) gfnff + cell + coulomb_ewald false: not periodic, DOF 3N-6");
+    }
+
+    // (d) native gfn2 with a cell is a periodic energy since WP-PERIODIC-XTB P5: wrap rules of the periodic corner
+    {
+        const curcuma::Molecule mol = dimerAt(Position(L / 2, L / 2, L / 2), true, L);
+        const RunResult r = run(mdController("gfn2", dt, max_time, 0.0, L), mol, "d_gfn2", 2);
+        check(r.ok, "(d) gfn2 + cell: set up");
+        if (r.ok) {
+            std::printf("(d) gfn2 + cell: periodic %d, DOF %d\n", r.periodic ? 1 : 0, r.dof);
+            check(r.periodic && r.dof == 3 * mol.AtomCount() - 3, "(d) gfn2 + cell: periodic, translation only removed, DOF 3N-3");
+        }
     }
 
     std::printf("%s: %d failure(s)\n", g_failures == 0 ? "ALL PASSED" : "FAILED", g_failures);

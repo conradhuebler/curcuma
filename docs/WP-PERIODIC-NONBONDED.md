@@ -7,7 +7,9 @@ atomic virial / instantaneous pressure** (N1, `-md -compute_pressure true`). Wit
 described below **stays** for everything that has no periodic energy: no cell, the spherical container, every other
 method (gfn1/gfn2, external xtb/tblite/Ulysses, UFF, QMDFF, CG) and GFN-FF with `coulomb_ewald false`; for those a
 cell is not wrapped and the COM removal is the vacuum one (A6b, matrix there). Open: GPU paths with a cell (S2 hybrid
-opt-in, no virial there), triclinic cells, the barostat (N2).
+opt-in, no virial there), triclinic cells, the barostat (N2). **Since Nov 14, 2026 the native gfn1/gfn2 with an
+orthorhombic cell are periodic energies too (energy and gradient, no virial): [WP-PERIODIC-XTB.md](WP-PERIODIC-XTB.md);
+the A6b lists naming gfn1/gfn2 as non-periodic are superseded there.**
 
 ## What exists today
 

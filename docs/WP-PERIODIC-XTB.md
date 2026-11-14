@@ -307,8 +307,22 @@ The periodic D4 (`computeEnergyAndGradientPeriodic`, `computeATMPeriodic`) is se
 i.e. a GFN2 NVT step of about half a minute until the periodic D4 is threaded and the ATM gets a neighbour list (the
 vacuum `computeATM` has both). GFN1 (D3, no ATM) is 4-5x cheaper. NPT needs P4.
 
+## Regression run (2026-11-14, `release/`, `ctest -R 'gfn|xtb|sqm|gfnff|pbc|ewald|simplemd|restart|md_|gpu|plugin|molecule|xyz|parser|curcumaopt|structinv' -j1`)
+
+369 tests selected, 2 failed before the fix below: `pbc_md_nonperiodic_cell` (its check (a) assumed gfn2 + cell to be
+non-periodic; now uses `eht` there and checks gfn2 + cell as periodic with DOF 3N-3 in a new (d), green) and `xtb_cpscf`
+(checks (C), 8e-5 .. 3e-4 against 1e-6 .. 1.5e-4; fails identically with the executable of the main `release/` build of
+Nov 9, i.e. pre-existing and unrelated to this work; not changed). 3 tests `Not Run (Disabled)` as before. The
+WP-PERIODIC-NONBONDED A6b statement "native gfn1/gfn2 have no periodic energy" is superseded by P5.
+
 ## Not implemented / not tested (updated per stage)
 
-- k-point sampling, non-orthorhombic cells, slab/1D periodicity, the vacuum (dipole) boundary term.
-- Not yet: everything (P0). Open shell, charged cells, d-shell elements, GPU with a cell, implicit solvation with a cell,
-  `-large_system_mode` with a cell will be listed here with their status at each stage.
+- k-point sampling, non-orthorhombic cells, slab/1D periodicity, the vacuum (dipole) boundary term, the atomic virial
+  and with it pressure, barostat and NPT (P4), threading of the periodic D4 (serial) and of the Klopman-Ohno / Ewald
+  matrix builds, the structure-factor factorisation of the multipole k sums, d-shell elements with a cell (refused),
+  implicit solvation with a cell (refused), `-large_system_mode` with a cell (its driver ignores the cell: documented
+  as non-periodic, not refused), GPU with a cell (CPU fallback).
+- Not tested: open shell, charged cells (background term differs from tblite), halogen bond with a cell (no Br/I
+  structure), thread-count independence of the periodic energy and gradient, MD energy conservation with a cell,
+  the GPU fallback on a machine with a GPU plugin, anything beyond H/O, real liquid boxes (only a water dimer and
+  water lattices were run). Human production testing pending for everything in this document.
