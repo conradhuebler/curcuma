@@ -72,7 +72,7 @@ fi
 # --- Aliases declared in the ConfSearch PARAM block resolve to their canonical names ---
 "$CURCUMA" -confsearch water.xyz -dt 0.25 -velo 2 -dump 7 $FAST -export_run alias.json -no_bmt -silent > /dev/null 2>&1 || true
 if [ -f alias.json ]; then
-    check_key "-dt stays in confsearch (alias of time_step)"   alias.json "d['confsearch']['time_step']"   "0.25"
+    check_key "-dt stays in confsearch (alias of explore_md_dt)"   alias.json "d['confsearch']['explore_md_dt']"   "0.25"
     check_key "-velo stays in confsearch (exported canonical)" alias.json "d['confsearch']['initial_velocity_scale']" "2.0"
     check_key "-dump stays in confsearch (exported canonical)" alias.json "d['confsearch']['dump_frequency']" "7.0"
 fi

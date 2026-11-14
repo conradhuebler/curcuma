@@ -127,6 +127,15 @@ See KNOWN_ISSUES_ARCHIVE.md Known Issue #28 for the full account.
 
 Energies and optimised geometries were never affected by either.
 
+**Third unit bug, geometry restraints (fixed Oct 2026).** `GeometryRestraints::apply()`
+(`optimisation/geometry_restraints.h`) still converted its gradient to Eh/Bohr (x0.529) while
+both optimiser objectives add it to the Eh/Angstrom calculator gradient: restraint gradient /
+FD of restraint energy = 0.529177 (distance and dihedral). Any stretched restraint broke the
+LBFGSpp line search -- 107-atom peptide, gfn2, 16 polar X-H restraints: 12/12 "zero step"
+before, 0/12 after (4 converged, 8 at the 1070-step cap). `test_geometry_restraints` now
+FD-checks the optimiser's total objective (gfnff + restraints). SimpleMD's own distance
+restraints were always Eh/Angstrom.
+
 ## Are MD and geometry optimisation safe now?
 
 Measured, not asserted.

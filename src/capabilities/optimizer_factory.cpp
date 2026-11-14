@@ -24,6 +24,8 @@
 #include "lbfgspp_optimizer.h"
 #include "native_optimizer_adapters.h"
 
+#include "src/capabilities/optimisation/convergence_presets.h"
+
 #include "src/core/curcuma_logger.h"
 #include "src/core/energycalculator.h"
 #include "src/core/intra_parallel_context.h"
@@ -204,29 +206,17 @@ static json buildPresetConfig(const json& config)
     if (!config.contains("convergence_preset"))
         return json::object();
 
-    std::string preset = config["convergence_preset"].get<std::string>();
+    std::string name = config["convergence_preset"].get<std::string>();
     json preset_config;
-    preset_config["convergence_preset"] = preset;
-    if (preset == "loose") {
-        preset_config["energy_threshold"] = 1.0;
-        preset_config["rmsd_threshold"] = 0.05;
-        preset_config["gradient_threshold"] = 1e-3;
-        preset_config["max_iterations"] = 1000;
-    } else if (preset == "normal") {
-        preset_config["energy_threshold"] = 0.1;
-        preset_config["rmsd_threshold"] = 0.01;
-        preset_config["gradient_threshold"] = 5e-4;
-        preset_config["max_iterations"] = 5000;
-    } else if (preset == "tight") {
-        preset_config["energy_threshold"] = 1e-6 * 2625.5; // 1e-6 Eh in kJ/mol
-        preset_config["rmsd_threshold"] = 1e-3;
-        preset_config["gradient_threshold"] = 1e-5;
-        preset_config["max_iterations"] = 10000;
-    } else if (preset == "verytight") {
-        preset_config["energy_threshold"] = 1e-7 * 2625.5; // 1e-7 Eh in kJ/mol
-        preset_config["rmsd_threshold"] = 1e-4;
-        preset_config["gradient_threshold"] = 1e-6;
-        preset_config["max_iterations"] = 20000;
+    preset_config["convergence_preset"] = name;
+    // Values live in optimisation/convergence_presets.h -- one definition for all three call sites.
+    Optimization::ConvergencePreset preset;
+    if (Optimization::lookupConvergencePreset(name, preset)) {
+        preset_config["energy_threshold"] = preset.energy_threshold;
+        preset_config["rmsd_threshold"] = preset.rmsd_threshold;
+        preset_config["gradient_threshold"] = preset.gradient_threshold;
+        preset_config["max_iterations"] = preset.max_iterations;
+        preset_config["max_iterations_per_atom"] = preset.iterations_per_atom;
     }
     return preset_config;
 }
@@ -285,6 +275,11 @@ OptimizationResult OptimizationDispatcher::optimizeStructure(
                 merged_config[key] = it.value(); // Explicitly changed from default
             }
         }
+        // Claude Generated (Aug 2026): a user who names a step cap gets that cap. The preset layer
+        // above always carries the size term, so it has to be switched off explicitly here.
+        if (config.contains("max_iterations") && default_config.contains("max_iterations")
+            && default_config["max_iterations"] != config["max_iterations"])
+            merged_config["max_iterations_per_atom"] = 0;
         optimizer->LoadConfiguration(merged_config);
         optimizer->setEnergyCalculator(energy_calculator);
 
@@ -412,11 +407,32 @@ std::vector<OptimizationResult> OptimizationDispatcher::optimizeBatch(
         threads = std::max(threads, gpu_pool.capacity());
 
     if (threads <= 1 || molecules.size() <= 1) {
-        // Sequential path: no thread pool, no progress bar, identical behaviour
-        // to the original implementation.
+        // Sequential path: no thread pool, identical behaviour to the original implementation.
         CurcumaLogger::info_fmt("Starting batch optimization of {} structures", molecules.size());
 
+        // Claude Generated (Jul 2026): say which structure is being optimised. The per-iteration
+        // optimiser table prints at verbosity >= 1, so a multi-frame input produced hundreds of
+        // unlabelled numeric rows with no way to tell where one structure ended and the next began.
+        // A live progress bar cannot be used here for the same reason (the table would shred it), so
+        // this is a plain header line per frame.
         for (size_t i = 0; i < molecules.size(); ++i) {
+            if (molecules.size() > 1)
+                CurcumaLogger::result_fmt("--- Structure {}/{} ({} atoms) ---",
+                    i + 1, molecules.size(), molecules[i].AtomCount());
+            // Claude Generated (Aug 2026): this path reuses ONE calculator for every structure, and a
+            // warm start is meant for the next geometry step of the SAME structure -- here it would
+            // hand structure i the converged SCC state of structure i-1, a different conformer (with
+            // -scf_extrapolation even a history of them). That is wrong on its own terms, so the
+            // guess is dropped between structures; within a structure the warm start is untouched.
+            //
+            // It is NOT the explanation for the "SCF eigensolver failed at iteration 0" messages this
+            // path produces, which is what it was written for -- measured with this reset in place:
+            // five conformers of a 107-atom peptide give 0 failures optimised one per process and 4
+            // as one batch, and five copies of the IDENTICAL structure still give 2. So the cause is
+            // state that survives in the reused calculator between structures, independent of the
+            // guess. Open.
+            if (energy_calculator)
+                energy_calculator->resetWarmStart();
             curcuma::Molecule mol_copy = molecules[i];
             OptimizationResult result = optimizeStructure(
                 &mol_copy, optimizer_type, energy_calculator, config);

@@ -1,0 +1,3 @@
+T_s4 4 curcuma_tune -activelearn.al_target_energy 0
+T_s5 5 curcuma_tune -activelearn.al_target_energy 0
+T_s6 6 curcuma_tune -activelearn.al_target_energy 0

@@ -52,6 +52,13 @@ std::unique_ptr<ComputationalMethod> createNativeXtb(const std::string& backend,
  */
 std::unique_ptr<ComputationalMethod> createGfnff(const std::string& backend, const json& config);
 
+/**
+ * Resolve a raw entry point from a backend plugin, or nullptr if the plugin or the symbol
+ * is unavailable. Lets consumers other than the method factory (the delta-ML linear
+ * algebra, for one) reuse the same dlopen cache instead of opening the library again.
+ * Claude Generated (July 2026).
+ */
+void* resolveEntryPoint(const std::string& backend, const std::string& symbol);
 /// True if the plugin library libcurcuma_<backend>.so can be loaded (cached; a failed probe
 /// is not retried and, unlike the create* calls, is silent). Used for
 /// the "was this backend built?" checks — the core no longer needs USE_CUDA/USE_ROCM/

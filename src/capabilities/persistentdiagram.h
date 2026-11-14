@@ -26,6 +26,7 @@
 
 #include "json.hpp"
 
+#include <map>
 #include <vector>
 
 #include <Eigen/Dense>
@@ -110,6 +111,11 @@ public:
         m_compressed_lower_distance_matrix = vector;
     }
 
+    inline void setDimension(int dim)
+    {
+        m_dimension = dim;
+    }
+
     inline void setENScaling(const std::vector<double>& en_scaling)
     {
         m_en_scaling = en_scaling;
@@ -120,6 +126,17 @@ public:
 
     dpairs generatePairs();
     triples generateTriples();
+
+    /**
+     * @brief Vietoris-Rips barcodes per homology dimension, (birth, death) pairs in the unit of
+     *        the distance matrix. Death is +infinity for classes that never die below the
+     *        enclosing radius (always one in dimension 0).
+     *
+     * Claude Generated (Oct 2026): generatePairs() flattens all dimensions into one list, which
+     * loses the dimension; the Delta-ML barcode ablation needs H0 and H1 separately.
+     * Consumes the distance matrix like generatePairs().
+     */
+    std::map<int, dpairs> generateBarcodes();
 
 
 

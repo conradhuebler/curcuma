@@ -1810,6 +1810,47 @@
    ]
   },
   {
+   "id": "pdmaema-ab2-h2-water24-cl2.grad-defect",
+   "class": "clusters",
+   "file": "clusters/pdmaema-ab2-h2-water24-cl2.grad-defect.xyz",
+   "format": "xyz",
+   "formula": "C32H112Cl2N4O32",
+   "natoms": 182,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "non-equilibrium",
+   "size_bytes": 8025,
+   "sha256": "6bdeaa9aa34b97510d8910d810418299c96a8252800773edc33ee719ba747f64",
+   "provenance": {
+    "kind": "constructed",
+    "description": "solvated, perturbed chain built by section (vi) of test_cases/scripts/check_charge_groups.py (revgfnff 4f615941) from the polymerbuild chain of a -DCURCUMA_FP_CONTRACT_OFF=ON build: chain + 24 water + 2 Cl- (-ionize), Gaussian perturbation sigma 0.06 A (seed 5)"
+   },
+   "notes": "Reproduces a GFN-FF charge-groups gradient defect: with -gfnff.charge_groups test_cases/reference_data/charge_groups/pdmaema-ab2-h2-water24-cl2.groups.json (rest per_fragment) the analytic gradient on Cl- atom 180 is (0.928, -0.049, -1.025) Eh/A, the central finite difference (h 0.002 A) (-0.009, -0.009, 0.021); without groups both agree. Same on FMA and no-FMA builds (Oct 31, 2026)."
+  },
+  {
+   "id": "pdmaema-ab2-h2.polymerbuild",
+   "class": "large",
+   "file": "large/pdmaema-ab2-h2.polymerbuild.xyz",
+   "format": "xyz",
+   "formula": "C32H64N4O8",
+   "natoms": 108,
+   "frames": 1,
+   "charge": 2,
+   "spin": 0,
+   "role": "unspecified",
+   "size_bytes": 4355,
+   "sha256": "b8c080fc1423f0b39742b05e37bf2ac7e55458d4d157187ec1942c101565cc6c",
+   "provenance": {
+    "kind": "program_output",
+    "program": "curcuma",
+    "version": "devel/methods 62bcb8d2 (Release, -march=native, FMA contraction on; binary md5 9dea0149f5d17b169602c421534dcd2e)",
+    "method": "polymerbuild with GFN-FF optimisation",
+    "description": "protonated PDMAEMA (AB)2 chain (+2), output polymer_A_final.xyz of: curcuma -polymerbuild -fragments {A: src/molecules/pdmaema.xyz, B: src/molecules/pdmaema_h.xyz} -sequence (AB)2 -no_bmt"
+   },
+   "notes": "Input geometry of test_cases/scripts/check_charge_groups.py, stored so the test no longer depends on the last-bit (FMA) behaviour of the binary that runs polymerbuild; the geometry on which the test passed when it was validated on devel/methods (Oct 2026). Atom order equals the polymerbuild output of revgfnff 4f615941 (checked)."
+  },
+  {
    "id": "peo201-chain",
    "class": "bulk",
    "file": "bulk/peo201-chain.xyz",

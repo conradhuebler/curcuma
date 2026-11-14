@@ -338,6 +338,11 @@ void NativeXtbMethod::setWarmStart(bool on)
     if (m_xtb) m_xtb->setWarmStart(on);
 }
 
+
+void NativeXtbMethod::resetWarmStart()
+{
+    if (m_xtb) m_xtb->resetWarmStart();
+}
 void NativeXtbMethod::setIterativeMode(bool on)
 {
     if (m_xtb) m_xtb->setIterativeMode(on);

@@ -186,6 +186,28 @@ bool XYZCommentParser::parseCurcumaNative(const std::vector<std::string>& tokens
         return false;
     };
 
+    /* Claude Generated (Aug 2026): keep the NAME as well. Molecule::Header() writes it in front of
+     * the first "**", and every stage of a conformer search reads and rewrites these files -- so
+     * dropping it here erased the provenance of a structure at the very first optimisation: the
+     * metadynamics wrote "bias_976", the relaxed file wrote an empty name, and nothing downstream
+     * could say which MD run, which walker and which point in time a final conformer came from.
+     * Everything in front of the first "**" is the name (it may contain spaces, see above). */
+    {
+        std::string name;
+        for (const std::string& t : tokens) {
+            if (t == "**")
+                break;
+            if (!name.empty())
+                name += " ";
+            name += t;
+        }
+        // Only when there IS a "**" section -- otherwise this is not the native format and the
+        // fallback below decides what the tokens mean.
+        if (!name.empty() && name.size() < 256
+            && std::find(tokens.begin(), tokens.end(), std::string("**")) != tokens.end())
+            mol.setName(name);
+    }
+
     double value = 0.0;
     bool parsed_any = false;
     if (valueAfter("Energy", value)) {

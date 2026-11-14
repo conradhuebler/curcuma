@@ -130,9 +130,10 @@ its entries within `eeq_localinv_radius_bohr` (default 8) are kept; G = (Gl + Gl
 z = G r - G C^T S^-1 C G r with S = C G C^T, so the iterates stay on the fragment-charge constraints; derivation and references in
 `eeq_solver.h` (`LocalInversePreconditioner`). Only the Phase-2 (final) charges use it; Phase 1 has no geometry and stays on `diag`.
 
-- **Definiteness**: G is accepted only if a sparse Cholesky of G and of S succeeds; otherwise, or when the CG shows rz <= 0 / pAp <= 0
-  (GPU: also a stall), the solve runs on `diag` with a counted warning. No rejection occurred on the systems below (0 of all builds).
-  `CURCUMA_LOCALINV_TEST_REJECT=1` forces a rejection (test hook).
+- **Definiteness**: S = C G C^T must factorise. The host build for the GPU also checks G with a sparse Cholesky; the CPU solver does
+  not (Oct 30, 2026, see "CPU ppcg: guards instead of the definiteness check" below). When the CG shows rz <= 0 / pAp <= 0 (CPU: also
+  no convergence or a failed true-residual check; GPU: also a stall), the solve runs on `diag` with a counted warning. No rejection
+  occurred on the systems below (0 of all builds). `CURCUMA_LOCALINV_TEST_REJECT=1` forces a rejection (test hook).
 - **Rebuild**: `eeq_localinv_rebuild_bohr` (default 1.0; 0 = every solve) rebuilds when any atom moved further since the last build. A stale
   G changes only the iteration count, never the converged charges (same `eeq_ppcg_tol`).
 - **Reproducibility**: the build is independent of the thread count (one thread per atom row, fixed summation order); MD charges at a fixed
@@ -220,6 +221,28 @@ thread-dependent order: the hash of every product (213 per SP, both phases) is i
 from the former row-wise product by rounding only (charges 1e-14 e, same iteration counts, SP -898.61727307 Eh). `CURCUMA_PPCG_MATVEC_BLOCK=<rows>` overrides the block size.
 polymer_2x `-sp`, Phase-2 solve (median of 3): 1 thread 1138 -> 937 ms, 4: 868 -> 467, 16: 855 -> 350, 32: 827 -> 357. Machine-tested only; MD numbers in `AIChangelog.md`.
 The matrix itself differs by ~1e-13 between thread counts (threaded assembly), so charges are not bitwise equal across `-threads`; energy and iteration counts are (test 07).
+
+## CPU ppcg: constraint block on demand, guards instead of the definiteness check (Oct 30, 2026)
+
+Claude Generated — 🤖 AI-generated, ⚙️ machine-tested (`gfnff_eeq_ppcg_guards`); human production testing pending.
+
+- **Constraint block**: when the CPU solve resolves to `ppcg`, Phase 2 no longer zeroes the nfrag constraint rows/columns of A nor writes
+  their 1.0 entries (the PPCG reads the atom -> fragment map). If the PPCG fails, `fillDeferredConstraintBlock` writes them before the
+  Schur-Cholesky/LU fallback. The (N+nfrag)^2 buffer is unchanged (no memory saving: A_nn keeps its stride N+nfrag).
+- **No sparse Cholesky of G** on the CPU (serial, 43.8 / 190 ms of a 50.8 / 207.6 ms build at 3003 / 5747 atoms; builds now 7.3 / 19.0 ms,
+  mean of 13 / 11 builds in 200 MD steps). Guards, each sending the solve to `diag` until the next rebuild with a counted warning: rz <= 0 or pAp <= 0 in the CG, no
+  convergence with localinv, and after the first solve of every new build a true projected residual above 10 x tol (one extra matvec per
+  build; measured 0.12-0.79 x tol, n = 11 builds). S = C G C^T still has to factorise. A converged solve is exact for any G.
+- Test hooks `CURCUMA_LOCALINV_TEST_INDEFINITE` on the CPU: 1 / 2 as on CUDA (caught by S), 3 = failed true-residual check, 4 = G - s v v^T
+  with C v = 0 (S unchanged, G indefinite; caught only by the CG). The GPU host build keeps the sparse Cholesky (`check_definite`).
+- Identity (both changes, 8 threads): 15 cases (12 geometries) x 7 solvers (`auto ppcg pcg cholesky ldlt lu batched`; caffeine, water8, urea197,
+  H3O+(H2O)2 with and without groups, Na2Cl2, Cl2-, jl22, pep20, 1500 waters, 1501 / 3003 atoms charged with and without groups, 5747 atoms
+  with groups) energy, gradient and charges bit-identical (md5) to the previous build; 200-step MD at 3003 and 5747 atoms: per-step charges,
+  energy terms, final state and trajectory bit-identical, same 11 / 13 rebuilds and iteration counts.
+- MD step (production flags, 200 steps, cores 0-7, siblings and other CCD idle): 5747 atoms 191.5 +- 0.3 (n = 3) -> 172.3 +- 1.7 ms (n = 4),
+  -10.0 %; 3003 atoms 64.9 +- 0.7 -> 58.1 +- 1.2 ms (n = 4), -10.5 %. Each change alone (n = 3, against base 192.4 / 64.3 ms of the
+  same batch): constraint block 182.7 / 61.5 ms, no definiteness check 182.3 / 62.4 ms (5747 / 3003 atoms). With the other CCD 30-40 % busy the 5747-atom step scatters by
+  +-40 ms (not usable for a 10 % effect).
 
 ## Related
 

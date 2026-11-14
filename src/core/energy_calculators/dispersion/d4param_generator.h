@@ -125,6 +125,20 @@ public:
     /// N x N matrix). Readers look a pair up with D4DC6DCNPairs::lookup().
     const D4DC6DCNPairs& getDC6DCN() const { return m_dc6dcn; }
 
+    /**
+     * @brief Fused per-pair C6 (Claude Generated, Oct 2026): let the CPU energy loop evaluate
+     *        C6 and dC6/dCN per pair (d4_pair_c6.h) instead of storing them per pair.
+     *
+     * One-way switch. It takes effect at the next derivative rebuild (updateCNValuesForGradient
+     * or GenerateDispersionPairsNative): from then on computeDC6DCN() is not run, getDC6DCN()
+     * is empty, and the caller must not rely on GFNFFDispersion::C6 written by itself (the
+     * generator still writes C6 when it builds a new pair list). Requires the half-contraction
+     * (disp_half_contraction) and Gaussian weights for every atom; otherwise it stays off.
+     */
+    void requestFusedPairC6() { m_fused_requested = true; }
+    /// View for FFWorkspace::setD4FusedC6View(); nullptr while the fused mode is not active.
+    const D4FusedC6View* fusedPairC6View() const { return m_fused_active ? &m_fused_view : nullptr; }
+
     // Claude Generated (March 2026): GPU dc6dcn Phase 2 — expose weight arrays
     const std::vector<std::vector<double>>& getGaussianWeights() const { return m_gaussian_weights; }
     const std::vector<std::vector<double>>& getGaussianWeightDerivatives() const { return m_gaussian_weight_derivatives; }
@@ -439,6 +453,23 @@ private:
     }
     void buildPresentElementMap();   // fills m_present_elems / m_elem_slot / m_c6_half_K
     void precomputeC6HalfContraction(CxxThreadPool* pool = nullptr, int num_threads = 1);
+
+    // Claude Generated (Oct 2026): fused per-pair C6 (requestFusedPairC6()). The CPU energy
+    // loop evaluates C6 and dC6/dCN from these flat per-atom arrays; computeDC6DCN and the
+    // caller's per-pair C6 write are skipped. *_d hold the state of the last derivative
+    // rebuild once a weight refresh without derivatives has overwritten the current arrays
+    // (m_fused_d_is_current false); while it is true the view points *_d at the current arrays.
+    bool m_fused_requested = false;
+    bool m_fused_active = false;
+    bool m_fused_d_is_current = true;
+    std::vector<int> m_fused_slot, m_fused_nb, m_fused_nb_d;
+    std::vector<double> m_fused_w, m_fused_dw;                       // [atom*MAX_REF + b]
+    std::vector<double> m_fused_w_d, m_fused_dw_d, m_fused_g_d, m_fused_dg_d;
+    D4FusedC6View m_fused_view;
+    bool fusedPairC6Possible() const;  // half-contraction valid, weights for every atom
+    bool fusedTakeDerivativeRebuild(); // at a derivative rebuild: true = skip computeDC6DCN
+    void fusedSaveDerivativeState();   // before weights change without derivatives
+    void fusedBuildView();             // flat copies of the current weights + view pointers
 
     // Claude Generated (Apr 2026): P1a — CN-change threshold cache for Gaussian weights
     // Skip recomputation of gw/dgw/dc6dcn when CN changes < threshold (MD optimization)

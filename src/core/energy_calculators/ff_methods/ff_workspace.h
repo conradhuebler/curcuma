@@ -270,6 +270,12 @@ public:
     /// Oct 2026: per-pair arrays of the D4 generator instead of a dense N x N matrix)
     void setDC6DCNPtr(const D4DC6DCNPairs* ptr) { m_dc6dcn_ptr = ptr; }
 
+    /// Fused D4 pair C6 (Claude Generated, Oct 2026): with a view set, calcD4Dispersion() computes
+    /// each pair's C6 and dC6/dCN from per-atom data (d4_pair_c6.h) and ignores
+    /// GFNFFDispersion::C6 and the setDC6DCNPtr() arrays' values (the pointer still gates the
+    /// dC6/dCN term). nullptr = stored per-pair values. Set by GFNFF::prepareCNAndEEQ().
+    void setD4FusedC6View(const D4FusedC6View* view) { m_d4_fused_c6 = view; }
+
     /// Set baseline energy (e0 from parameter set)
     void setE0(double e0) { m_e0 = e0; }
 
@@ -308,6 +314,8 @@ public:
     void setPool(CxxThreadPool* pool) { m_pool = pool; }
     /// Claude Generated (Oct 2026): exact far-field shortcut of the Coulomb pair loop (see calcCoulomb).
     void setFarfieldShortcut(bool v) { m_farfield_shortcut = v; }
+    /// Claude Generated (Oct 2026): TERM 1b chain-rule term set to 0 at CN_i <= 0 (gfnff.cn_zero_guard, see postProcess).
+    void setCnZeroGuard(bool v) { m_cn_zero_guard = v; }
     int numThreads() const { return m_num_threads; }
 
     // Term enable flags (match ForceField flags)
@@ -420,6 +428,16 @@ public:
         return n;
     }
     int getHBondCount() const { return static_cast<int>(m_hbonds.size()); }
+
+    /// Record the energy of every hydrogen-bond triple at each evaluation (CPU path only).
+    /// Off by default: it costs one double per triple and a write per triple and step.
+    /// Claude Generated (Oct 2026).
+    void setRecordHBondEnergies(bool on);
+    bool recordsHBondEnergies() const { return m_record_hb_energies; }
+
+    /// Energy of each triple of the list from the last evaluation, in list order. Empty unless
+    /// recording was on before that evaluation and the list has not changed since.
+    std::vector<GFNFFHBondEnergy> hydrogenBondEnergies() const;
     int getXBondCount() const { return static_cast<int>(m_xbonds.size()); }
 
 private:
@@ -434,6 +452,7 @@ private:
     Vector m_cn, m_cnf;
     CNDerivStore m_dcn;  // Claude Generated (WP4, May 2026): pair-list replaces std::vector<SpMatrix>
     const D4DC6DCNPairs* m_dc6dcn_ptr = nullptr;
+    const D4FusedC6View* m_d4_fused_c6 = nullptr;  // Claude Generated (Oct 2026), see setD4FusedC6View()
     double m_e0 = 0.0;
 
     // Coulomb self-energy parameters (O(N), extracted at init)
@@ -445,6 +464,8 @@ private:
     double m_coulomb_implicit_rcut = std::numeric_limits<double>::infinity();  // no cutoff, as the reference (Sep 2026)
     /// Claude Generated (Oct 2026): skip erf/exp for gamma_ij*r >= 6.5 (erf = 1 exactly in FP64), see calcCoulomb.
     bool   m_farfield_shortcut = true;
+    /// Claude Generated (Oct 2026): opt-in, default false = reference formula (gfnff.cn_zero_guard).
+    bool   m_cn_zero_guard = false;
 
     // Term-enable flags
     bool m_dispersion_enabled = true;
@@ -466,6 +487,8 @@ private:
     std::vector<GFNFFRepulsion> m_bonded_reps, m_nonbonded_reps;
     std::vector<GFNFFCoulomb> m_coulombs;
     std::vector<GFNFFHydrogenBond> m_hbonds;
+    bool m_record_hb_energies = false;
+    std::vector<double> m_hb_triple_energy;   ///< per triple of m_hbonds, Eh; filled by calcHydrogenBonds when recording
     std::vector<GFNFFHalogenBond> m_xbonds;
     std::vector<ATMTriple> m_atm_triples;
     std::vector<GFNFFBatmTriple> m_batm_triples;

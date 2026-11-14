@@ -120,6 +120,20 @@ namespace TestMolecules {
             }
         },
         {
+            // Claude Generated (Jul 2026): canonical torsion test molecule (anti conformation) -- exactly one
+            // rotatable torsion (the central C-C), the two terminal C-C bonds only spin methyl groups.
+            // Geometry from the structure library (medium/butane.anti.xyz, identical to the former inline one).
+            "butane", {
+                .name = "butane",
+                .description = "n-Butane, anti conformation (structure library butane.anti)",
+                .category = "larger",
+                .library_id = "butane.anti",
+                .reference_energies = {},
+                .tolerances = {},
+                .atom_count = 14
+            }
+        },
+        {
             "HCN", {
                 .name = "HCN",
                 .description = "Hydrogen cyanide from trimers/HCN.xyz",

@@ -102,6 +102,32 @@ dpairs PersistentDiagram::generatePairs()
     return final;
 }
 
+std::map<int, dpairs> PersistentDiagram::generateBarcodes()
+{
+    std::map<int, dpairs> barcodes;
+    if (m_compressed_lower_distance_matrix.empty())
+        return barcodes;
+
+    coefficient_t modulus = 2;
+    compressed_lower_distance_matrix dist(std::move(m_compressed_lower_distance_matrix));
+
+    // Enclosing radius: no class born below it can die above it, so the threshold is lossless.
+    value_t enclosing_radius = std::numeric_limits<value_t>::infinity();
+    for (size_t i = 0; i < dist.size(); ++i) {
+        value_t r_i = -std::numeric_limits<value_t>::infinity();
+        for (size_t j = 0; j < dist.size(); ++j)
+            r_i = std::max(r_i, dist(i, j));
+        enclosing_radius = std::min(enclosing_radius, r_i);
+    }
+
+    auto result = ripser<compressed_lower_distance_matrix>(std::move(dist), m_dimension, enclosing_radius,
+        m_ratio, modulus)
+                      .compute_barcodes();
+    for (const auto& a : result)
+        barcodes[a.first] = a.second;
+    return barcodes;
+}
+
 triples PersistentDiagram::generateTriples()
 {
     // Claude Generated: Input validation and memory safety for generateTriples

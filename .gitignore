@@ -59,6 +59,7 @@ CMakeLists.txt.user*
 # Build directories
 build/
 build_asan/
+build_seedvary/
 debug/
 release/
 bin/

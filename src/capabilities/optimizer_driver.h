@@ -21,6 +21,7 @@
 #pragma once
 
 #include "optimizer_interface.h"
+#include "src/capabilities/optimisation/geometry_restraints.h"
 #include "src/capabilities/rmsd.h"
 #include <chrono>
 #include <functional>
@@ -47,6 +48,13 @@ public:
     double rmsd_threshold = 0.01; // Å - geometric changes
     double gradient_threshold = 5e-4; // Eh/Bohr - gradient norm
     int max_iterations = 5000;
+    // Claude Generated (Aug 2026): size-scaled step cap. The number of steps needed to reach a
+    // minimum grows with the degrees of freedom, so a fixed cap either truncates large molecules or
+    // is pointless for small ones. When per_atom > 0, InitializeOptimization sets
+    // max_iterations = max(max_iterations_floor, max_iterations_per_atom * atoms).
+    // An explicit -max_iterations sets per_atom = 0 and is used verbatim.
+    int max_iterations_floor = 0;    ///< lower bound of the scaled cap (0 = scaling off)
+    int max_iterations_per_atom = 0; ///< steps per atom (0 = scaling off)
     int convergence_count = 7; // Bit field: bits 0(energy)+1(RMSD)+2(gradient) all required
 
     // Performance settings
@@ -72,6 +80,23 @@ public:
     // Constraints and advanced features
     std::vector<int> atom_constraints; // 0 = fixed, 1 = mobile
     bool use_constraints = false;
+    /* Claude Generated (Jul 2026): harmonic dihedral restraints, E += 1/2 k (phi - phi_0)^2.
+     * Unlike atom_constraints (which zeroes gradient components) a restraint DRIVES a coordinate:
+     * it lets a torsion be rotated to a target while the rest of the molecule relaxes out of the
+     * way, which is what conformer recombination needs (docs/CONFSEARCH_PROPOSALS.md, P0). Read
+     * from config["dihedral_restraints"]; empty by default, so every existing run is unchanged. */
+    Optimization::GeometryRestraints restraints;
+    /** Claude Generated (Aug 2026): reuse the calculator's existing molecule setup.
+     *
+     * Initialize() normally calls energy_calculator->setMolecule(), which re-derives the whole force
+     * field (topology, parameters, charge model) for every structure. When a caller optimises MANY
+     * geometries of the SAME molecule through ONE shared calculator -- ConfGen does exactly that, on
+     * purpose, so all its energies are comparable -- that work is wasted, and it repeatedly re-enters
+     * the GFN-FF parameter generation, where an intermittent wild-pointer crash lives
+     * (GFNFF::getGFNFFBondParameters, see docs/CONFSEARCH_ROADMAP.md). With this flag the driver only
+     * updates the coordinates. The caller is responsible for having initialised the calculator with a
+     * molecule of identical composition -- hence opt-in, default false. */
+    bool reuse_calculator = false;
     bool use_hessian = false;
     bool use_numerical_gradient = false; // Use numerical gradient instead of analytical (for debugging)
     double numerical_gradient_step = 1e-5; // Step size for numerical gradient (Bohr)
@@ -105,6 +130,10 @@ protected:
     std::vector<Molecule> m_trajectory; // Optimization trajectory
     std::vector<double> m_energy_trajectory; // Energy at each step
     Vector m_current_gradient; // Current gradient
+    double m_current_energy = 0.0; // Current energy
+    /// Coordinates belonging to m_current_energy. The objective functor overwrites m_molecule with
+    /// line-search trial points, so the two can otherwise diverge (Claude Generated, Jul 2026).
+    Vector m_accepted_coordinates;
 
     // Claude Generated (Sep 2026): result of the last evaluateEnergyAndGradient(). The driver
     // evaluates the start geometry in InitializeOptimization() and the optimiser (LBFGSpp) then
@@ -115,7 +144,6 @@ protected:
     Vector m_eval_cache_gradient;
     double m_eval_cache_energy = 0.0;
     bool m_eval_cache_valid = false;
-    double m_current_energy = 0.0; // Current energy
     double m_initial_energy = 0.0; // Starting energy
 
     // Configuration and context
