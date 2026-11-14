@@ -135,6 +135,72 @@ D4CovalentCNTables d4CovalentCNTables()
     return D4CovalentCNTables{ rad, en, kn, k4, k5, k6 };
 }
 
+// Claude Generated (Nov 2026, WP-PERIODIC-XTB P1): dftd4 ncoord with lattice translations
+// (jat <= iat, every image; cn(iat) += countf, cn(jat) += countf when iat /= jat).
+std::vector<double> computeD4CovalentCNPeriodic(const std::vector<int>& atoms,
+                                                const Matrix& geom_bohr,
+                                                const PBCUtils::LatticeImageList& images)
+{
+    const int N = static_cast<int>(atoms.size());
+    std::vector<double> cn(N, 0.0);
+    std::vector<double> xyz(3 * N);
+    for (int i = 0; i < N; ++i)
+        for (int k = 0; k < 3; ++k) xyz[3 * i + k] = geom_bohr(i, k);
+
+    for (int i = 0; i < N; ++i) {
+        const int zi = atoms[i];
+        if (zi < 1 || zi > MAX_Z) continue;
+        for (int j = 0; j <= i; ++j) {
+            const int zj = atoms[j];
+            if (zj < 1 || zj > MAX_Z) continue;
+            const double rcovij = rad[zi] + rad[zj];
+            const double den = k4 * std::exp(-std::pow(std::fabs(en[zi] - en[zj]) + k5, 2) / k6);
+            const bool same = (i == j);
+            PBCUtils::forEachImage(images, &xyz[3 * i], &xyz[3 * j], same,
+                [&](double, double, double, double r2) {
+                    const double r = std::sqrt(r2);
+                    const double countf = den * erf_count(kn, r / rcovij);
+                    cn[i] += countf;
+                    if (!same) cn[j] += countf;
+                });
+        }
+    }
+    return cn;
+}
+
+void addD4CovalentCNGradientPeriodic(const std::vector<int>& atoms,
+                                     const Matrix& geom_bohr,
+                                     const Vector& dEdcn,
+                                     Matrix& grad_out,
+                                     const PBCUtils::LatticeImageList& images)
+{
+    const int N = static_cast<int>(atoms.size());
+    if (dEdcn.size() != N) return;
+    std::vector<double> xyz(3 * N);
+    for (int i = 0; i < N; ++i)
+        for (int k = 0; k < 3; ++k) xyz[3 * i + k] = geom_bohr(i, k);
+
+    for (int i = 0; i < N; ++i) {
+        const int zi = atoms[i];
+        if (zi < 1 || zi > MAX_Z) continue;
+        for (int j = 0; j < i; ++j) {   // self images: both ends move together, derivative 0
+            const int zj = atoms[j];
+            if (zj < 1 || zj > MAX_Z) continue;
+            const double rcovij = rad[zi] + rad[zj];
+            const double den = k4 * std::exp(-std::pow(std::fabs(en[zi] - en[zj]) + k5, 2) / k6);
+            PBCUtils::forEachImage(images, &xyz[3 * i], &xyz[3 * j], false,
+                [&](double dx, double dy, double dz, double r2) {
+                    const double r = std::sqrt(r2);
+                    const double dcountf = den * derf_count(kn, r / rcovij) / rcovij;
+                    const double factor = (dEdcn(i) + dEdcn(j)) * dcountf / r;
+                    grad_out(i, 0) += factor * dx; grad_out(j, 0) -= factor * dx;
+                    grad_out(i, 1) += factor * dy; grad_out(j, 1) -= factor * dy;
+                    grad_out(i, 2) += factor * dz; grad_out(j, 2) -= factor * dz;
+                });
+        }
+    }
+}
+
 void addD4CovalentCNGradient(const std::vector<int>& atoms,
                              const Matrix& geom_bohr,
                              const Vector& dEdcn,

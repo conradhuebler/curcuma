@@ -20,6 +20,7 @@ namespace curcuma::xtb {
  * ------------------------------------------------------------------ */
 void XTB::buildGammaMatrix()
 {
+    if (m_pbc) { buildGammaMatrixPeriodic(); return; }   // WP-PERIODIC-XTB P2a (xtb_periodic.cpp)
     const double aa = AA_TO_AU;
     const int nat = m_atomcount;
     std::vector<double> xyz_bohr(3 * nat);

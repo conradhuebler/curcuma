@@ -322,6 +322,86 @@ double D4Evaluator::computeEnergyAndGradient(const std::vector<int>& atoms,
     return E_total;
 }
 
+// Claude Generated (Nov 2026, WP-PERIODIC-XTB P1): periodic per-reference pair term, see the header.
+double D4Evaluator::computeEnergyAndGradientPeriodic(const std::vector<int>& atoms,
+                                                     const Matrix& geometry_bohr,
+                                                     const PBCUtils::LatticeImageList& images,
+                                                     bool with_gradient,
+                                                     Matrix& gradient_out,
+                                                     Vector& dEdCN_out,
+                                                     Vector& dEdq_out,
+                                                     bool with_dEdq)
+{
+    const int natoms = static_cast<int>(atoms.size());
+    if (m_data == nullptr || !m_params.per_reference_charge
+        || m_data->getZetaCharges().size() != natoms) {
+        CurcumaLogger::error("D4Evaluator::computeEnergyAndGradientPeriodic: needs the per-reference "
+                             "charge path and charges of the right length");
+        return 0.0;
+    }
+    const bool do_dEdq = with_gradient && with_dEdq;
+    if (with_gradient) {
+        gradient_out = Matrix::Zero(natoms, 3);
+        dEdCN_out = Vector::Zero(natoms);
+        dEdq_out = Vector::Zero(natoms);
+    }
+
+    const Vector& q = m_data->getZetaCharges();
+    std::vector<D4ParameterGenerator::RefW> refw(natoms);
+    for (int a = 0; a < natoms; ++a)
+        refw[a] = m_data->buildAtomRefW(atoms[a], static_cast<size_t>(a), q(a), with_gradient, false);
+    std::vector<double> sq_r4r2(natoms);
+    for (int a = 0; a < natoms; ++a) sq_r4r2[a] = m_data->getSqrtZr4r2(atoms[a]);
+
+    std::vector<double> xyz(3 * natoms);
+    for (int i = 0; i < natoms; ++i)
+        for (int k = 0; k < 3; ++k) xyz[3 * i + k] = geometry_bohr(i, k);
+
+    const double s6 = m_params.s6, s8 = m_params.s8;
+    double E_total = 0.0;
+    for (int i = 0; i < natoms; ++i) {
+        for (int j = 0; j <= i; ++j) {
+            const double rrij = 3.0 * sq_r4r2[i] * sq_r4r2[j];   // dftd4 rrij = 3 r4r2_i r4r2_j
+            const double r0 = m_params.a1 * std::sqrt(rrij) + m_params.a2;
+            const double r0_2 = r0 * r0;
+            const double r0_6 = r0_2 * r0_2 * r0_2;
+            const double r0_8 = r0_6 * r0_2;
+            const D4ParameterGenerator::C6Gfn2 c6g = m_data->contractC6Gfn2(refw[i], refw[j], atoms[i], atoms[j],
+                                                                             with_gradient, false);
+            const bool same = (i == j);
+            PBCUtils::forEachImage(images, &xyz[3 * i], &xyz[3 * j], same,
+                [&](double dx, double dy, double dz, double r2) {
+                    const double r6 = r2 * r2 * r2;
+                    const double r8 = r6 * r2;
+                    const double t6 = 1.0 / (r6 + r0_6);
+                    const double t8 = 1.0 / (r8 + r0_8);
+                    const double edisp = s6 * t6 + s8 * rrij * t8;
+                    // dE = -c6 edisp / 2 to i and (i != j) to j
+                    E_total += -c6g.c6 * edisp * (same ? 0.5 : 1.0);
+                    if (!with_gradient) return;
+                    const double d6 = -6.0 * r2 * r2 * t6 * t6;
+                    const double d8 = -8.0 * r2 * r2 * r2 * t8 * t8;
+                    const double gdisp = s6 * d6 + s8 * rrij * d8;
+                    if (!same) {
+                        // d = x_i - (x_j + T); dftd4 dG = -c6 gdisp vec, gradient(iat) += dG, gradient(jat) -= dG
+                        const double g = -c6g.c6 * gdisp;
+                        gradient_out(i, 0) += g * dx; gradient_out(j, 0) -= g * dx;
+                        gradient_out(i, 1) += g * dy; gradient_out(j, 1) -= g * dy;
+                        gradient_out(i, 2) += g * dz; gradient_out(j, 2) -= g * dz;
+                    }
+                    // dftd4: dEdcn(iat) -= dc6dcn(iat,jat) edisp; (iat /= jat) dEdcn(jat) -= dc6dcn(jat,iat) edisp
+                    dEdCN_out(i) -= c6g.dc6dcni * edisp;
+                    if (!same) dEdCN_out(j) -= c6g.dc6dcnj * edisp;
+                    if (do_dEdq) {
+                        dEdq_out(i) -= c6g.dc6dqi * edisp;
+                        if (!same) dEdq_out(j) -= c6g.dc6dqj * edisp;
+                    }
+                });
+        }
+    }
+    return E_total;
+}
+
 // triple_scale: distribute a triple energy to atomwise energies (dftd4 atm.f90).
 static inline double atm_triple_scale(int ii, int jj, int kk)
 {
@@ -537,6 +617,135 @@ double D4Evaluator::computeATM(const std::vector<int>& atoms,
         }
     }
 
+    return E_atm;
+}
+
+// Claude Generated (Nov 2026, WP-PERIODIC-XTB P1): periodic ATM, dftd4 damping/atm.f90 with `trans`.
+double D4Evaluator::computeATMPeriodic(const std::vector<int>& atoms,
+                                       const Matrix& geometry_bohr,
+                                       const PBCUtils::LatticeImageList& images,
+                                       bool with_gradient,
+                                       Matrix& gradient_out,
+                                       Vector& dEdCN_out)
+{
+    if (std::abs(m_params.s9) < 1e-300 || m_data == nullptr) return 0.0;
+    const int nat = static_cast<int>(atoms.size());
+    if (nat < 1) return 0.0;
+    const double s9 = m_params.s9, a1 = m_params.a1, a2 = m_params.a2, alp = m_params.alpha;
+    const double cutoff2 = images.cutoff2;
+    const double eps = std::numeric_limits<double>::epsilon();
+
+    // q = 0 reference C6 and dC6/dCN exactly as computeATM (dftd4 get_dispersion_nonsc).
+    Matrix c6 = Matrix::Zero(nat, nat);
+    Matrix dc6dcn;
+    if (with_gradient) dc6dcn = Matrix::Zero(nat, nat);
+    std::vector<D4ParameterGenerator::RefW> refw0(nat);
+    for (int a = 0; a < nat; ++a)
+        refw0[a] = m_data->buildAtomRefW(atoms[a], static_cast<size_t>(a), 0.0, with_gradient, false);
+    for (int a = 0; a < nat; ++a)
+        for (int b = 0; b <= a; ++b) {
+            D4ParameterGenerator::C6Gfn2 g = m_data->contractC6Gfn2(refw0[a], refw0[b], atoms[a], atoms[b],
+                                                                     with_gradient, false);
+            c6(a, b) = g.c6;
+            c6(b, a) = g.c6;
+            if (with_gradient) {
+                dc6dcn(a, b) = g.dc6dcni;
+                dc6dcn(b, a) = g.dc6dcnj;
+            }
+        }
+    std::vector<double> r4r2(nat);
+    for (int a = 0; a < nat; ++a) r4r2[a] = m_data->getSqrtZr4r2(atoms[a]);
+    if (with_gradient) {
+        if (gradient_out.rows() != nat || gradient_out.cols() != 3) gradient_out = Matrix::Zero(nat, 3);
+        if (dEdCN_out.size() != nat) dEdCN_out = Vector::Zero(nat);
+    }
+
+    std::vector<double> xyz(3 * nat);
+    for (int i = 0; i < nat; ++i)
+        for (int k = 0; k < 3; ++k) xyz[3 * i + k] = geometry_bohr(i, k);
+
+    // Images of j and k relative to i within the cutoff: vij = (x_j + T) - x_i = -(d of forEachImage).
+    struct Img { double v[3]; double r2; };
+    std::vector<Img> img_j, img_k;
+    auto collect = [&](int i, int j, std::vector<Img>& out) {
+        out.clear();
+        PBCUtils::forEachImage(images, &xyz[3 * i], &xyz[3 * j], i == j,
+            [&](double dx, double dy, double dz, double r2) { out.push_back({ { -dx, -dy, -dz }, r2 }); });
+    };
+
+    double E_atm = 0.0;
+    for (int iat = 0; iat < nat; ++iat) {
+        for (int jat = 0; jat <= iat; ++jat) {
+            const double c6ij = c6(jat, iat);
+            const double r0ij = a1 * std::sqrt(3.0 * r4r2[jat] * r4r2[iat]) + a2;
+            collect(iat, jat, img_j);
+            if (img_j.empty()) continue;
+            for (int kat = 0; kat <= jat; ++kat) {
+                const double c6ik = c6(kat, iat);
+                const double c6jk = c6(kat, jat);
+                const double c9 = -s9 * std::sqrt(std::abs(c6ij * c6ik * c6jk));
+                const double r0ik = a1 * std::sqrt(3.0 * r4r2[kat] * r4r2[iat]) + a2;
+                const double r0jk = a1 * std::sqrt(3.0 * r4r2[kat] * r4r2[jat]) + a2;
+                const double r0 = r0ij * r0ik * r0jk;
+                const double triple = atm_triple_scale(iat, jat, kat);
+                collect(iat, kat, img_k);
+                for (const Img& J : img_j) {
+                    const double r2ij = J.r2;
+                    for (const Img& K : img_k) {
+                        const double r2ik = K.r2;
+                        const double vjk[3] = { K.v[0] - J.v[0], K.v[1] - J.v[1], K.v[2] - J.v[2] };
+                        const double r2jk = vjk[0] * vjk[0] + vjk[1] * vjk[1] + vjk[2] * vjk[2];
+                        if (r2jk > cutoff2 || r2jk < eps) continue;
+
+                        const double r2 = r2ij * r2ik * r2jk;
+                        const double r1 = std::sqrt(r2);
+                        const double r3 = r2 * r1;
+                        const double r5 = r3 * r2;
+                        const double fdmp = 1.0 / (1.0 + 6.0 * std::pow(r0 / r1, alp / 3.0));
+                        const double ang = 0.375 * (r2ij + r2jk - r2ik) * (r2ij - r2jk + r2ik)
+                                               * (-r2ij + r2jk + r2ik) / r5
+                                         + 1.0 / r3;
+                        const double rr = ang * fdmp;
+                        const double dE = rr * c9 * triple;
+                        E_atm -= dE;
+
+                        if (with_gradient) {
+                            // The gradient carries the same triple_scale as the energy. dftd4's
+                            // get_atm_dispersion_derivs applies `triple` to dE and sigma but not to
+                            // dGij/dGik/dGjk; for a molecule that is harmless (distinct atoms, triple =
+                            // 1), with lattice images the self-image triples (iat == jat etc.) are then
+                            // double counted in the force. Found here by the FD gate (test
+                            // pbc_xtb_classical): without the factor the periodic ATM gradient was 10 %
+                            // off FD on the 8 A water-dimer cell. Not a tblite energy difference.
+                            const double c9t = c9 * triple;
+                            const double dfdmp = -2.0 * alp * std::pow(r0 / r1, alp / 3.0) * fdmp * fdmp;
+                            double dang = -0.375 * (r2ij*r2ij*r2ij + r2ij*r2ij*(r2jk + r2ik)
+                                          + r2ij*(3.0*r2jk*r2jk + 2.0*r2jk*r2ik + 3.0*r2ik*r2ik)
+                                          - 5.0*(r2jk - r2ik)*(r2jk - r2ik)*(r2jk + r2ik)) / r5;
+                            const double gij = c9t * (-dang*fdmp + ang*dfdmp) / r2ij;
+                            dang = -0.375 * (r2ik*r2ik*r2ik + r2ik*r2ik*(r2jk + r2ij)
+                                   + r2ik*(3.0*r2jk*r2jk + 2.0*r2jk*r2ij + 3.0*r2ij*r2ij)
+                                   - 5.0*(r2jk - r2ij)*(r2jk - r2ij)*(r2jk + r2ij)) / r5;
+                            const double gik = c9t * (-dang*fdmp + ang*dfdmp) / r2ik;
+                            dang = -0.375 * (r2jk*r2jk*r2jk + r2jk*r2jk*(r2ik + r2ij)
+                                   + r2jk*(3.0*r2ik*r2ik + 2.0*r2ik*r2ij + 3.0*r2ij*r2ij)
+                                   - 5.0*(r2ik - r2ij)*(r2ik - r2ij)*(r2ik + r2ij)) / r5;
+                            const double gjk = c9t * (-dang*fdmp + ang*dfdmp) / r2jk;
+                            for (int c = 0; c < 3; ++c) {
+                                const double dGij = gij * J.v[c], dGik = gik * K.v[c], dGjk = gjk * vjk[c];
+                                gradient_out(iat, c) -= dGij + dGik;
+                                gradient_out(jat, c) += dGij - dGjk;
+                                gradient_out(kat, c) += dGik + dGjk;
+                            }
+                            dEdCN_out(iat) -= dE * 0.5 * (dc6dcn(iat, jat) / c6ij + dc6dcn(iat, kat) / c6ik);
+                            dEdCN_out(jat) -= dE * 0.5 * (dc6dcn(jat, iat) / c6ij + dc6dcn(jat, kat) / c6jk);
+                            dEdCN_out(kat) -= dE * 0.5 * (dc6dcn(kat, iat) / c6ik + dc6dcn(kat, jat) / c6jk);
+                        }
+                    }
+                }
+            }
+        }
+    }
     return E_atm;
 }
 

@@ -22,6 +22,7 @@
 
 #include <Eigen/Dense>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <string>
 #include <utility>
@@ -370,6 +371,80 @@ inline void applyMinimumImageOrtho(const OrthoCell& cell, double& dx, double& dy
     dx = minimumImageOrtho(dx, cell.L[0], cell.inv_L[0]);
     dy = minimumImageOrtho(dy, cell.L[1], cell.inv_L[1]);
     dz = minimumImageOrtho(dz, cell.L[2], cell.inv_L[2]);
+}
+
+/*! \brief Lattice translations for explicit image sums in an orthorhombic cell - Claude Generated (Nov 2026, WP-PERIODIC-XTB P1)
+ *
+ * For a pair (i, j) the periodic xTB terms sum every image j + T with |x_i - x_j - T| < cutoff, including the
+ * images of an atom with itself (T != 0). forEachImage() first takes the minimum image d0 of x_i - x_j, so
+ * |d0_a| <= L_a/2, and then runs over the stored translations; a translation n_a L_a can reach the cutoff only
+ * when |n_a| <= (cutoff + L_a/2)/L_a, which bounds the list. Unlike the minimum-image convention this needs
+ * no cutoff < L/2: a small cell simply has more images per pair. Same unit as the cell (Bohr in xTB).
+ */
+struct LatticeImageList {
+    OrthoCell cell;                              ///< inactive: forEachImage() visits the single plain pair
+    double cutoff = 0.0;                         ///< radius of the image sum
+    double cutoff2 = 0.0;
+    std::vector<std::array<double, 3>> trans;    ///< candidate translations (T = 0 first)
+    int nmax[3] = { 0, 0, 0 };
+    bool active() const { return cell.active; }
+};
+
+inline LatticeImageList makeLatticeImageList(const OrthoCell& cell, double cutoff)
+{
+    LatticeImageList list;
+    list.cell = cell;
+    list.cutoff = cutoff;
+    list.cutoff2 = cutoff * cutoff;
+    if (!cell.active) {
+        list.trans.push_back({ 0.0, 0.0, 0.0 });
+        return list;
+    }
+    for (int a = 0; a < 3; ++a)
+        list.nmax[a] = static_cast<int>(std::ceil((cutoff + 0.5 * cell.L[a]) * cell.inv_L[a]));
+    list.trans.push_back({ 0.0, 0.0, 0.0 });
+    for (int nx = -list.nmax[0]; nx <= list.nmax[0]; ++nx)
+        for (int ny = -list.nmax[1]; ny <= list.nmax[1]; ++ny)
+            for (int nz = -list.nmax[2]; nz <= list.nmax[2]; ++nz) {
+                if (nx == 0 && ny == 0 && nz == 0)
+                    continue;
+                list.trans.push_back({ nx * cell.L[0], ny * cell.L[1], nz * cell.L[2] });
+            }
+    return list;
+}
+
+/*! \brief Visit every image of the pair (i, j) within the list's cutoff - Claude Generated (Nov 2026)
+ * \param xi, xj   Cartesian positions (3 doubles each), same unit as the cell
+ * \param same     true when i == j (the T = 0 term is then skipped)
+ * \param f        callback f(dx, dy, dz, r2) with d = x_i - (x_j + T) (tblite convention vec = xyz_i - xyz_j - trans)
+ *
+ * Without an active cell exactly the plain pair d = x_i - x_j is visited (no cutoff test, no self pair), so a
+ * caller that is also used without a cell keeps its former sum; the active-cell loop is a separate code path.
+ */
+template <class F>
+inline void forEachImage(const LatticeImageList& list, const double* xi, const double* xj, bool same, F&& f)
+{
+    if (!list.cell.active) {
+        if (same)
+            return;
+        const double dx = xi[0] - xj[0], dy = xi[1] - xj[1], dz = xi[2] - xj[2];
+        f(dx, dy, dz, dx * dx + dy * dy + dz * dz);
+        return;
+    }
+    double d0x = xi[0] - xj[0], d0y = xi[1] - xj[1], d0z = xi[2] - xj[2];
+    applyMinimumImageOrtho(list.cell, d0x, d0y, d0z);
+    const size_t n = list.trans.size();
+    for (size_t t = 0; t < n; ++t) {
+        if (same && t == 0)
+            continue;
+        const double dx = d0x - list.trans[t][0];
+        const double dy = d0y - list.trans[t][1];
+        const double dz = d0z - list.trans[t][2];
+        const double r2 = dx * dx + dy * dy + dz * dz;
+        if (r2 >= list.cutoff2 || r2 < 1.0e-24)
+            continue;
+        f(dx, dy, dz, r2);
+    }
 }
 
 /*! \brief Check interaction cutoffs against half the shortest box length - Claude Generated (Nov 2026)

@@ -42,6 +42,10 @@ BEGIN_PARAMETER_DEFINITION(xtb)
     PARAM(scf_guess, String, "eeq", "Initial charges: 'eeq' (EEQ charges, fewer iterations on large or polar systems), 'h0' (bare Hamiltonian) or 'fragments' (converge each molecule alone first; for large neutral clusters of small molecules).", "SCF", {})
     PARAM(sto6g_legacy_4sp, Bool, false, "Use xtb's older STO-6G tables for the 4s/4p shells instead of tblite's. Affects K, Ca and Ge-Kr only; set true to reproduce the xtb binary on these elements.", "Reference", {})
     PARAM(d4_atm_cutoff, Double, 25.0, "Real-space cutoff (Bohr) of the GFN2 D4 three-body (ATM) term. 25 follows tblite; 40 reproduces the xtb binary on molecules larger than ~25 Bohr, at higher cost.", "Reference", {})
+    PARAM(pbc_integral_cutoff_bohr, Double, 0.0, "Periodic cell only: radius (Bohr) of the lattice-image sum of the overlap and H0 integrals. 0 = tblite rule min(sqrt(50/min_alpha), 40). No effect without a unit cell.", "Periodic", {})
+    PARAM(pbc_ewald_tolerance, Double, 1.0e-10, "Periodic cell only: tolerance of the Ewald sum of the isotropic Coulomb (and GFN2 multipole) matrices; sets alpha and the k-space cutoff from the real-space cutoff. No effect without a unit cell.", "Periodic", {})
+    PARAM(pbc_ewald_r_cut_bohr, Double, 0.0, "Periodic cell only: real-space cutoff (Bohr) of the Ewald sum, minimum image, must stay below L_min/2; 0 = L_min/2. No effect without a unit cell.", "Periodic", {})
+    PARAM(pbc_coulomb_switch_bohr, Double, 10.0, "Periodic cell only: distance (Bohr) at which the Klopman-Ohno kernel is switched to 1/r (quintic switch over the last Bohr, tblite rcut = 10). The lattice sum of the Klopman-Ohno remainder diverges without this switch; another value gives no tblite agreement. No effect without a unit cell.", "Periodic", {})
     PARAM(level_shift, Double, 0.2, "Virtual-orbital shift (Eh) for scf_mode level-shift. It is faded out near convergence, so the converged result is unshifted.", "SCF", {})
     PARAM(warm_start, Bool, true, "Start each SCF from the converged charges of the previous geometry (optimisation, MD). false always starts from scf_guess.", "SCF", {})
     PARAM(keep_diis, Bool, false, "Keep the DIIS/Broyden history across geometry steps instead of resetting it. Experimental: may help on smooth MD trajectories and hurt on large steps.", "SCF", {})
@@ -147,6 +151,9 @@ public:
     Vector getBondOrders() const override { return Vector{}; }     // not computed
     Position getDipole() const override { return Position{0.0, 0.0, 0.0}; }  // TODO
     bool hasGradient() const override { return true; }
+    /// WP-PERIODIC-XTB (Nov 2026): true once the engine holds a cell (every term of the energy is then an image
+    /// sum or an Ewald sum); SimpleMD then wraps fragments and removes only the translation (A6/A6b rules).
+    bool hasPeriodicEnergy() const override { return m_xtb && m_xtb->hasPeriodicCell(); }
 
     std::string getMethodName() const override;
     bool isThreadSafe() const override { return true; }

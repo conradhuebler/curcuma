@@ -23,6 +23,7 @@
 #include "src/core/global.h"
 #include "src/core/parameter_macros.h"
 #include "src/core/config_manager.h"
+#include "src/tools/pbc_utils.h"
 
 #include <Eigen/Dense>
 
@@ -134,6 +135,25 @@ public:
      * GFN1 dispersion (≈0.5 s on complex/231). Claude Generated (2026-06).
      */
     void prepareForEnergyGradient(const std::vector<int>& atoms, const Eigen::MatrixXd& geometry);
+
+    /**
+     * Same as prepareForEnergyGradient but with a caller-supplied coordination number (one per
+     * atom), for the periodic GFN1 D3 whose CN is an image sum (WP-PERIODIC-XTB P1).
+     * Claude Generated (Nov 2026).
+     */
+    void prepareForEnergyGradientWithCN(const std::vector<int>& atoms, const Eigen::MatrixXd& geometry,
+                                        const std::vector<double>& coordination_numbers);
+
+    /**
+     * D3(BJ) two-body energy (and gradient / dE/dCN) with explicit lattice images (WP-PERIODIC-XTB P1,
+     * Claude Generated Nov 2026). Mirrors s-dftd3 get_dispersion_energy/derivs with `trans`: atom
+     * pairs j <= i, every image within the list's cutoff, the (i, i, T != 0) self images with weight
+     * 1/2 per translation (T and -T are both in the list). Geometry in Angstrom (as stored), the
+     * image list in Bohr. Requires prepareForEnergyGradient[WithCN]. The non-periodic
+     * getEnergyAndGradient is unchanged.
+     */
+    double getEnergyAndGradientPeriodic(bool need_gradient, Matrix& gradient_out, Vector& dEdcn_out,
+                                        const PBCUtils::LatticeImageList& images) const;
 
     // Energy calculation
     double getTotalEnergy() const;  // Returns total D3 dispersion energy (Eh)

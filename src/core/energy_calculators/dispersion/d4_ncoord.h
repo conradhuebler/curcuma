@@ -28,6 +28,7 @@
 #pragma once
 
 #include "src/core/global.h"
+#include "src/tools/pbc_utils.h"
 
 #include <vector>
 
@@ -64,6 +65,25 @@ void addD4CovalentCNGradient(const std::vector<int>& atoms,
                              const Vector& dEdcn,
                              Matrix& grad_out,
                              double cutoff_bohr = 30.0);
+
+/**
+ * @brief Periodic EN-weighted covalent CN: image sum over (j, T) != (i, 0) within the list's cutoff
+ *        (dftd4 ncoord with lattice translations). Claude Generated (Nov 2026, WP-PERIODIC-XTB P1).
+ * @param images  PBCUtils::makeLatticeImageList(cell_bohr, cutoff) of the D4 CN cutoff (30 Bohr)
+ */
+std::vector<double> computeD4CovalentCNPeriodic(const std::vector<int>& atoms,
+                                                const Matrix& geom_bohr,
+                                                const PBCUtils::LatticeImageList& images);
+
+/**
+ * @brief Periodic counterpart of addD4CovalentCNGradient: the same chain rule over every image
+ *        (j, T) of every pair; a self image (i, i, T) has no Cartesian derivative. Claude Generated (Nov 2026).
+ */
+void addD4CovalentCNGradientPeriodic(const std::vector<int>& atoms,
+                                     const Matrix& geom_bohr,
+                                     const Vector& dEdcn,
+                                     Matrix& grad_out,
+                                     const PBCUtils::LatticeImageList& images);
 
 /**
  * @brief The constants of the CN above for a device port (Claude Generated, Oct 2026).

@@ -40,6 +40,13 @@ Vector XTB::computeCoordinationNumbers() const
     if (m_cn_cache_valid && m_cn_cache.size() == nat)
         return m_cn_cache;
 
+    // WP-PERIODIC-XTB P1 (Claude Generated, Nov 2026): image sum with a cell, separate kernel.
+    if (m_pbc) {
+        m_cn_cache = computeCoordinationNumbersPeriodic();
+        m_cn_cache_valid = true;
+        return m_cn_cache;
+    }
+
     std::vector<double> xyz_bohr(3 * nat);
     for (int i = 0; i < nat; ++i) {
         xyz_bohr[3 * i + 0] = m_geometry(i, 0) * AA_TO_AU;
@@ -184,6 +191,7 @@ void XTB::exportGpuBasis(GpuBasisFlat& bf, GpuH0Flat& hf) const
 void XTB::getHamiltonianH0(const Vector& se,
                             Matrix& S, Matrix& H0) const
 {
+    if (m_pbc) { getHamiltonianH0Periodic(se, S, H0); return; }   // WP-PERIODIC-XTB P2a (xtb_periodic.cpp)
     const int nat = m_atomcount;
     const int nsh = m_basis.nsh;
     const int nao = m_basis.nao;
@@ -368,6 +376,7 @@ void XTB::getHamiltonianH0(const Vector& se,
  * ------------------------------------------------------------------ */
 double XTB::calcRepulsionEnergy() const
 {
+    if (m_pbc) return calcRepulsionEnergyPeriodic();   // WP-PERIODIC-XTB P1 (xtb_periodic.cpp)
     const int nat = m_atomcount;
     double erep = 0.0;
 
@@ -532,6 +541,7 @@ std::vector<XBTriple> buildHalogenBondList(const std::vector<int>& z,
 double XTB::calcHalogenBondEnergy() const
 {
     if (m_method != MethodType::GFN1) return 0.0;   // GFN2 has no XB correction
+    if (m_pbc) return calcHalogenBondEnergyPeriodic();   // WP-PERIODIC-XTB P1 (xtb_periodic.cpp)
 
     const int nat = m_atomcount;
     if (nat < 2) return 0.0;

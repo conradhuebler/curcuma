@@ -29,6 +29,7 @@
 
 #include "src/core/global.h"
 #include "src/core/solvation/implicit_solvation.h"
+#include "src/tools/pbc_utils.h"   // OrthoCell, lattice images (WP-PERIODIC-XTB)
 #include "interface/abstract_interface.h"
 #include "json.hpp"
 
@@ -916,6 +917,31 @@ public:
     Vector getPartialCharges() const { return getCharges(); }
     Vector getCoordinationNumbers() const { return m_coordination_numbers; }
 
+    /* ----- periodic cell (WP-PERIODIC-XTB, Claude Generated Nov 2026; xtb_periodic.cpp) -----
+     * setPeriodicCell: orthorhombic lattice matrix in Angstrom (Mol::m_unit_cell); a non-orthorhombic
+     * cell is refused (false, message in `error`), the previous state is kept. clearPeriodicCell()
+     * returns to the vacuum path. Stage P1: only the classical terms (CN, repulsion, halogen bond,
+     * D3/D4) read the cell; the electronic part follows in P2 (docs/WP-PERIODIC-XTB.md). */
+    bool setPeriodicCell(const Eigen::Matrix3d& cell_angstrom, std::string& error);
+    void clearPeriodicCell() { m_pbc = false; m_cell_bohr = PBCUtils::OrthoCell{}; m_cn_cache_valid = false; }
+    bool hasPeriodicCell() const { return m_pbc; }
+    const PBCUtils::OrthoCell& periodicCellBohr() const { return m_cell_bohr; }
+    void setPbcIntegralCutoff(double bohr) { m_pbc_integral_cutoff = bohr; }
+    void setPbcEwaldTolerance(double eps) { if (eps > 0.0 && eps < 1.0) m_pbc_ewald_tolerance = eps; }
+    void setPbcEwaldRCut(double bohr) { m_pbc_ewald_r_cut = bohr; }
+    void setPbcCoulombSwitch(double bohr) { if (bohr > 1.0) m_pbc_coulomb_switch = bohr; }
+    double pbcEwaldAlphaUsed() const { return m_pbc_ewald_alpha_used; }
+    int pbcEwaldKVectorsUsed() const { return m_pbc_ewald_nk_used; }
+    // Test hooks (P1, Claude Generated): the classical terms at the current geometry and cell, so the
+    // periodic image sums can be checked term by term (supercell scaling, vacuum limit, brute force)
+    // before the SCF is periodic. dispersionEnergyNow() evaluates D3 (GFN1) or D4 (GFN2) at the given
+    // atomic charges (D4 zeta weighting; ignored by D3) and leaves the gradient in dispersionGradientNow().
+    double repulsionEnergyNow() const { return calcRepulsionEnergy(); }
+    double halogenBondEnergyNow() const { return calcHalogenBondEnergy(); }
+    Vector coordinationNumbersNow() const { m_cn_cache_valid = false; return computeCoordinationNumbers(); }
+    double dispersionEnergyNow(const Vector& q_at, bool gradient);
+    const Matrix& dispersionGradientNow() const { return m_disp_gradient; }
+
     // --- CPSCF / Z-vector public API (Phase 3b) ---
 
     // Orbital-Hessian matrix-vector product A·z = (ε_a−ε_i)·z + K·z.
@@ -980,6 +1006,7 @@ public:
 
     // Implicit-solvation config (set by the wrapper from the `xtb` scope).
     void setSolvent(const std::string& s) { m_solvent = s; }
+    const std::string& solventName() const { return m_solvent; }
     void setSolventModel(int m) { m_solvent_model = m; }
     // Name-based overload (preferred): "none"/"cpcm"/"gbsa"/"alpb" (case-insensitive),
     // numeric codes still accepted. An unrecognised name is ignored (keeps current).
@@ -1418,6 +1445,44 @@ private:
     // Repulsion + (GFN1) halogen-bond energies.
     double calcRepulsionEnergy() const;                                  // xtb_native.cpp
     double calcHalogenBondEnergy() const;                                // xtb_h0.cpp
+
+    /* ----- periodic cell (WP-PERIODIC-XTB, Claude Generated Nov 2026; xtb_periodic.cpp) ------
+     * Orthorhombic cell in Bohr. Every periodic kernel is a separate function chosen by
+     * `if (m_pbc)` at its call site, so the cell-free path keeps its statements verbatim.
+     * Image sums: lattice translations T with |x_i - x_j - T| < cutoff (PBCUtils::forEachImage),
+     * self images (i, i, T != 0) included; cutoffs follow tblite 0.4.0 (docs/WP-PERIODIC-XTB.md). */
+    PBCUtils::OrthoCell m_cell_bohr;          ///< active only with a cell
+    bool m_pbc = false;                       ///< a cell is set and valid
+    static constexpr double kPbcCnCutoffBohr        = 25.0;  ///< H0 coordination number (tblite cn_cutoff)
+    static constexpr double kPbcRepulsionCutoffBohr = 25.0;  ///< repulsion (tblite new_repulsion default)
+    static constexpr double kPbcHalogenCutoffBohr   = 20.0;  ///< GFN1 halogen bond (tblite default)
+    static constexpr double kPbcD3CnCutoffBohr      = 25.0;  ///< D3 coordination number (tblite disp/d3.f90)
+    static constexpr double kPbcD3PairCutoffBohr    = 50.0;  ///< D3 pair sum
+    static constexpr double kPbcD4CnCutoffBohr      = 30.0;  ///< D4 EN-weighted covalent CN (dftd4 default)
+    static constexpr double kPbcD4PairCutoffBohr    = 50.0;  ///< D4 pair sum (tblite disp/d4.f90)
+    Vector computeCoordinationNumbersPeriodic() const;                   // xtb_periodic.cpp
+    double calcRepulsionEnergyPeriodic() const;                          // xtb_periodic.cpp
+    double calcHalogenBondEnergyPeriodic() const;                        // xtb_periodic.cpp
+    /// GFN1 D3 with image sums (energy, direct gradient, CN chain rule), the periodic branch of calcDispersionEnergy
+    double calcD3DispersionPeriodic(bool need_gradient) const;           // xtb_periodic.cpp
+    /// GFN2 D4 with image sums (pairs, ATM, CN chain rule); charges from m_wfn.q_at; the q-response is variational
+    double calcD4DispersionPeriodic(bool need_gradient) const;           // xtb_periodic.cpp
+    /// Periodic D4 covalent CN pushed into the generator before GenerateParameters() (replaces its plain CN)
+    void primeD4CnPeriodic(const Matrix& geom_bohr) const;               // xtb_periodic.cpp
+    /* P2a (electronic part, Gamma point): S(Gamma) = sum_T S(T), H0 likewise, every shell pair over the lattice
+     * images within the integral cutoff (self images with the off-site formula, the T = 0 on-atom block as in the
+     * vacuum kernel); gamma = point-charge Ewald matrix (EwaldSum::matrix) + Klopman-Ohno remainder
+     * fcut (KO - 1/r) over images within pbc_coulomb_switch (tblite effective.f90 get_amat_3d). */
+    void getHamiltonianH0Periodic(const Vector& se, Matrix& S, Matrix& H0) const;   // xtb_periodic.cpp
+    void buildGammaMatrixPeriodic();                                                 // xtb_periodic.cpp
+    /// tblite basis get_cutoff: min(sqrt(2 intcut / min_alpha), 40) Bohr with intcut 25 (accuracy 1); 0 = this rule
+    double pbcIntegralCutoffBohr() const;                                            // xtb_periodic.cpp
+    double m_pbc_integral_cutoff = 0.0;    ///< -xtb.pbc_integral_cutoff_bohr (0 = tblite rule)
+    double m_pbc_ewald_tolerance = 1.0e-10; ///< -xtb.pbc_ewald_tolerance (chooseEwaldParameters eps)
+    double m_pbc_ewald_r_cut = 0.0;        ///< -xtb.pbc_ewald_r_cut_bohr (0 = L_min/2)
+    double m_pbc_coulomb_switch = 10.0;    ///< -xtb.pbc_coulomb_switch_bohr (tblite rcut, fsmooth over the last Bohr)
+    mutable double m_pbc_ewald_alpha_used = 0.0;   ///< reporting: alpha of the last gamma build
+    mutable int m_pbc_ewald_nk_used = 0;           ///< reporting: k vectors of the last gamma build
     // Analytic gradient of the GFN1 halogen-bond correction; adds into `gradient`
     // (nat×3, Eh/Bohr). No-op for GFN2. Claude Generated.
     void   addHalogenBondGradient(Matrix& gradient) const;               // xtb_h0.cpp
@@ -1863,6 +1928,11 @@ inline void applyXtbScfConfig(XTB& xtb, const json& cfg)
     lookup("scf_allow_unconverged", [&](const json& v){ if (v.is_boolean()) xtb.setScfAllowUnconverged(v.get<bool>()); else if (v.is_number()) xtb.setScfAllowUnconverged(v.get<double>() != 0.0); });
     lookup("sto6g_legacy_4sp", [&](const json& v){ if (v.is_boolean()) xtb.setSto6gLegacy4sp(v.get<bool>()); });
     lookup("d4_atm_cutoff", [&](const json& v){ if (v.is_number()) xtb.setD4AtmCutoff(v.get<double>()); });
+    // Periodic cell (WP-PERIODIC-XTB P2a, Claude Generated Nov 2026); no effect without a cell.
+    lookup("pbc_integral_cutoff_bohr", [&](const json& v){ if (v.is_number()) xtb.setPbcIntegralCutoff(v.get<double>()); });
+    lookup("pbc_ewald_tolerance",      [&](const json& v){ if (v.is_number()) xtb.setPbcEwaldTolerance(v.get<double>()); });
+    lookup("pbc_ewald_r_cut_bohr",     [&](const json& v){ if (v.is_number()) xtb.setPbcEwaldRCut(v.get<double>()); });
+    lookup("pbc_coulomb_switch_bohr",  [&](const json& v){ if (v.is_number()) xtb.setPbcCoulombSwitch(v.get<double>()); });
     lookup("eigensolver",  [&](const json& v){ if (v.is_string()) xtb.setEigensolver(v.get<std::string>()); });
     lookup("scf_damping",  [&](const json& v){ if (v.is_number()) xtb.setScfDamping(v.get<double>()); });
     lookup("scf_threshold",[&](const json& v){ if (v.is_number()) xtb.setScfThreshold(v.get<double>()); });

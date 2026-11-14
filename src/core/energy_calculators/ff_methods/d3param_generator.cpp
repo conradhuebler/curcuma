@@ -216,6 +216,93 @@ void D3ParameterGenerator::prepareForEnergyGradient(const std::vector<int>& atom
     m_dc6dcn_computed = false;
 }
 
+void D3ParameterGenerator::prepareForEnergyGradientWithCN(const std::vector<int>& atoms,
+                                                          const Eigen::MatrixXd& geometry,
+                                                          const std::vector<double>& coordination_numbers)
+{
+    // Claude Generated (Nov 2026, WP-PERIODIC-XTB P1): prepareForEnergyGradient with an external CN.
+    m_atoms = atoms;
+    m_geometry = geometry;
+    precomputeGaussianWeights(atoms, coordination_numbers);
+    m_dc6dcn_computed = false;
+}
+
+double D3ParameterGenerator::getEnergyAndGradientPeriodic(bool need_gradient,
+                                                          Matrix& gradient_out,
+                                                          Vector& dEdcn_out,
+                                                          const PBCUtils::LatticeImageList& images) const
+{
+    // Claude Generated (Nov 2026, WP-PERIODIC-XTB P1). Reference: s-dftd3 damping/rational.f90
+    // get_dispersion_energy / get_dispersion_derivs with lattice translations: jat <= iat, every
+    // image, dE * 0.5 to iat and (iat /= jat) to jat. The pair formulas are those of
+    // getEnergyAndGradient above.
+    if (!m_data_initialized || !m_weights_cached || m_atoms.empty())
+        return 0.0;
+
+    const double au = CurcumaUnit::Length::angstrom_to_bohr_or_legacy(1.88972612546);
+    const size_t n = m_atoms.size();
+    const double a1 = m_config.get<double>("d3_a1", 0.4);
+    const double a2 = m_config.get<double>("d3_a2", 4.0);
+    const double s6 = m_config.get<double>("d3_s6", 1.0);
+    const double s8 = m_config.get<double>("d3_s8", 1.0);
+
+    if (need_gradient) {
+        computeDC6DCN();
+        if (gradient_out.rows() != static_cast<int>(n) || gradient_out.cols() != 3)
+            gradient_out = Eigen::MatrixXd::Zero(n, 3);
+        if (dEdcn_out.size() != static_cast<int>(n))
+            dEdcn_out = Eigen::VectorXd::Zero(n);
+    }
+
+    std::vector<double> xyz_bohr(3 * n);
+    for (size_t i = 0; i < n; ++i)
+        for (int k = 0; k < 3; ++k)
+            xyz_bohr[3 * i + k] = m_geometry(static_cast<Eigen::Index>(i), k) * au;
+
+    double energy = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        const int elem_i = m_atoms[i];
+        if (elem_i < 1 || elem_i > MAX_ELEM) continue;
+        for (size_t j = 0; j <= i; ++j) {
+            const int elem_j = m_atoms[j];
+            if (elem_j < 1 || elem_j > MAX_ELEM) continue;
+            const double c6 = interpolateC6(elem_i, elem_j, i, j);
+            if (c6 <= 0.0) continue;
+            const double r6_ratio = getR6(elem_i, elem_j);
+            const double c8 = c6 * r6_ratio;
+            const double r0 = a1 * std::sqrt(r6_ratio) + a2;
+            const double r6_0 = std::pow(r0, 6);
+            const double r8_0 = std::pow(r0, 8);
+            const bool same = (i == j);
+            const double w = same ? 0.5 : 1.0;   // self image: half per translation (T and -T both visited)
+
+            PBCUtils::forEachImage(images, &xyz_bohr[3 * i], &xyz_bohr[3 * j], same,
+                [&](double dx, double dy, double dz, double r2) {
+                    const double r = std::sqrt(r2);
+                    const double t6 = 1.0 / (std::pow(r, 6) + r6_0);
+                    const double t8 = 1.0 / (std::pow(r, 8) + r8_0);
+                    energy += w * (-s6 * c6 * t6 - s8 * c8 * t8);
+                    if (!need_gradient) return;
+                    const double d6 = -6.0 * r2 * r2 * t6 * t6;
+                    const double d8 = -8.0 * r2 * r2 * r2 * t8 * t8;
+                    const double gdisp = s6 * d6 + s8 * r6_ratio * d8;
+                    // d = x_i - (x_j + T); dE/dx_i = -c6 * gdisp * d (Eh/Bohr), the image of j gets the negative
+                    if (!same) {
+                        const double gx = -c6 * gdisp * dx, gy = -c6 * gdisp * dy, gz = -c6 * gdisp * dz;
+                        gradient_out(i, 0) += gx; gradient_out(j, 0) -= gx;
+                        gradient_out(i, 1) += gy; gradient_out(j, 1) -= gy;
+                        gradient_out(i, 2) += gz; gradient_out(j, 2) -= gz;
+                    }
+                    // (i, i, T): the two ends move together, so the direct gradient of a self image is zero
+                    const double edisp = s6 * t6 + s8 * r6_ratio * t8;
+                    dEdcn_out(i) -= w * m_dc6dcn(i, j) * edisp;
+                    dEdcn_out(j) -= w * m_dc6dcn(j, i) * edisp;
+                });
+        }
+    }
+    return energy;
+}
+
 void D3ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, const Eigen::MatrixXd& geometry)
 {
     auto t_start_total = std::chrono::high_resolution_clock::now();
@@ -1043,9 +1130,11 @@ void D3ParameterGenerator::computeDC6DCN() const
         }
     }
 
-    // Now build dc6dcn using the weight derivatives
+    // Now build dc6dcn using the weight derivatives. The diagonal (j == i, dC6_ii/dCN_i with
+    // respect to the first argument) is only read by the periodic self-image sum
+    // (getEnergyAndGradientPeriodic, WP-PERIODIC-XTB P1); the cell-free loops use i < j only.
     for (size_t i = 0; i < n; ++i) {
-        for (size_t j = i + 1; j < n; ++j) {
+        for (size_t j = i; j < n; ++j) {
             int elem_i = m_atoms[i];
             int elem_j = m_atoms[j];
 

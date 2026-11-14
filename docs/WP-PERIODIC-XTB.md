@@ -1,7 +1,10 @@
 # WP: Periodic native GFN1/GFN2 (orthorhombic cell, Gamma point, CPU)
 
-**Status: P0 (survey and plan) done, 2026-11-14.** Nothing in the native xTB code reads the cell yet; `-method gfn1|gfn2`
-with a unit cell is still the vacuum energy (root `CLAUDE.md`, WP-PERIODIC-NONBONDED A6b: not wrapped, vacuum COM removal).
+**Status (interim, 2026-11-14): P0 plan, P1 periodic classical terms and P2a periodic GFN1 energy done; P2b (GFN2
+multipole Ewald), P3 (gradient), P4 (virial), P5 (integration) open.** `-method gfn1` with an orthorhombic unit cell
+gives the periodic Gamma-point energy (tblite agreement 3-7e-11 Eh on the water dimer, see P2a); its gradient is not
+periodic yet, so `-opt`/`-md`/`-hessian` with a cell are refused until P3; `-method gfn2` with a cell is refused until
+P2b. Without a cell nothing changes (bitwise gate below).
 Branch `feature/periodic-xtb`, base `feature/bulk` 957afab7. All work here is 🤖 AI-generated; stages are ⚙️ machine-tested
 only when the stage section says so. No human production testing anywhere in this document.
 
@@ -94,6 +97,94 @@ Cost note for the water-box target (432 H2O, 1296 atoms, GFN2 nsh = 1728, nao = 
 those of the vacuum calculation; the image sums add a factor of the number of images per pair within the cutoffs
 (a few at L ~ 25 A); the Ewald matrix via `EwaldSum::matrix` is nat x nat (13 MB); the multipole reciprocal sums must be
 factorised over k vectors (rank updates), a per-pair k loop would be O(nat^2 N_k). Measured numbers follow in P2/P3.
+
+## P1 periodic classical terms (2026-11-14, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+**Scope.** `XTB::setPeriodicCell()` (orthorhombic, Angstrom in, Bohr inside; refuses triclinic cells and, for GFN2,
+`d4_charge_source` other than `mulliken`) and the image-sum twins of the classical kernels in
+`qm_methods/xtb_periodic.cpp`, each reached by `if (m_pbc)` at the entry of the cell-free kernel:
+`computeCoordinationNumbersPeriodic` (H0 CN, 25 Bohr), `calcRepulsionEnergyPeriodic` (25), `calcHalogenBondEnergyPeriodic`
+(20; X-A over images, B the nearest atom or image of X), `calcD3DispersionPeriodic` (GFN1: CN 25, pairs 50, CN chain rule over
+images; `D3ParameterGenerator::prepareForEnergyGradientWithCN`, `getEnergyAndGradientPeriodic`), `calcD4DispersionPeriodic`
+(GFN2: `computeD4CovalentCNPeriodic` 30 pushed into the generator, `D4Evaluator::computeEnergyAndGradientPeriodic` 50,
+`computeATMPeriodic` 25, `addD4CovalentCNGradientPeriodic`), and the in-SCF `computeD4PotentialDedq` with images. Shared
+helper `PBCUtils::LatticeImageList` / `forEachImage` in `src/tools/pbc_utils.h` (minimum image first, then the translations
+`|n_a| <= (R + L_a/2)/L_a`; a self image (i, i, T != 0) counts; convention `d = x_i - x_j - T` as in tblite).
+**Not yet wired to the CLI**: `NativeXtbMethod` does not forward the cell until the electronic part is periodic (P2), so
+`-method gfn1|gfn2` with a unit cell is still the vacuum energy; the P1 code is reached only through the `XTB` object.
+
+- **Counting rules** (dftd4/s-dftd3/tblite): pairs j <= i, every image, `dE/2` to i and (i != j) to j, so a self-image
+  pair (i, i, T) counts half per translation (T and -T are both visited) and has no direct Cartesian gradient;
+  `dE/dCN_i -= dC6_ii/dCN_i(first argument) edisp` once per translation. The D3 generator's `computeDC6DCN()` now also
+  fills the diagonal (dC6_ii/dCN_i), read only by the periodic self-image sum; the cell-free loops use i < j.
+- **Finding, dftd4 periodic ATM gradient**: `get_atm_dispersion_derivs` (dftd4 3.x, `damping/atm.f90`) applies the
+  `triple_scale` to the energy and the virial but not to `dGij/dGik/dGjk`. In a molecule every triple has three distinct
+  atoms (scale 1), with lattice images the self-image triples (iat = jat, 1/2; iat = jat = kat, 1/6) are double counted
+  in the force. Found by the FD gate below (periodic ATM gradient 10 % off FD on the 8 A water-dimer cell, pair term
+  exact); `computeATMPeriodic` scales the gradient with `triple`. Code reading of dftd4 plus the FD here; not confirmed
+  against a dftd4 run. Energies are unaffected, so tblite energies remain the reference; tblite periodic *forces* would
+  carry this error for small cells (to be checked with `tblite_periodic_reference --gradient` against its own FD in P3).
+
+Tests (`ctest -R pbc_xtb_classical`, `test_cases/unit/test_pbc_xtb_classical.cpp`, registry water dimer, GFN1 and GFN2, test
+charges O -0.6 / H +0.3 for the D4 zeta weighting):
+
+| Check | Result |
+|---|---|
+| vacuum limit: 60 A cube vs no cell (repulsion, XB, CN, dispersion, dispersion gradient) | 0 / 0 / 0 / 0 / 7e-21 |
+| 2x1x1 supercell (16 x 8 x 8 A) vs 8 A cube: repulsion and dispersion per cell, CN and dispersion gradient per atom | 1.4e-16, 2e-17, 1.1e-15, 3e-20 (gfn1), 1.4e-16, 2e-17, 1.1e-15, 1e-19 (gfn2) |
+| second molecule shifted by (L, -L, 2L); dimer moved and wrapped atom-wise into [0, L) | repulsion 1.8e-16 / 4e-17, dispersion 1e-19 / 0, CN 4e-16 / 0, gradient 3e-20 / 2e-20 |
+| repulsion in the 8 A cube vs a 13^3-image brute-force sum written in the test | 1.4e-17 (gfn1), 4.2e-17 (gfn2) |
+| dispersion gradient (pairs + ATM + CN chain rule) vs central FD, h 1e-4 A, fixed charges | no cell 4.3e-13 / 5.4e-13 Eh/Bohr; 8 A cube 5.6e-13 / 5.9e-13 (max gradient 7.6e-6 / 2.9e-5) |
+| images are seen in the 8 A cube | E_disp -7.254e-4 vs free -5.475e-4 (gfn1), -9.006e-4 vs -7.384e-4 (gfn2); CN(O) 1.98897 vs 1.98881; GFN1 repulsion identical to 12 digits (exp(-a r^1.5) at 15 Bohr), GFN2 2e-8 |
+
+- **Without a cell**: `-sp` energy and `-dump_gradient` md5 on benzene, caffeine, water8, hydronium-water2 (+1), methanol,
+  urea3-water8 for gfn1 and gfn2 at 1 and 4 threads: 24/24 identical to the binary built from 957afab7.
+- **Not tested**: the halogen bond with a cell (no registry structure with Br/I; code mirrors tblite `get_xbond_list` and the
+  vacuum kernel, vacuum limit on water is trivially 0), elements beyond H/O, charged cells, the self-image half weights for
+  cells so small that `L < 2 r_cov` (bond to the own image), threads (the periodic kernels are serial), tblite agreement of
+  the individual terms (not separable through the C API; total energies in P2).
+
+## P2a periodic GFN1 energy: S/H0 image sums and Ewald Coulomb (2026-11-14, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+- **S and H0 at the Gamma point** (`XTB::getHamiltonianH0Periodic`, chosen by `if (m_pbc)` at the entry of
+  `getHamiltonianH0`): every shell pair over the lattice images within `pbcIntegralCutoffBohr()` = tblite's
+  `min(sqrt(2 * 25 / min_alpha), 40)` Bohr (`-xtb.pbc_integral_cutoff_bohr`, 0 = this rule); the image block uses the
+  off-site `hscale * shpoly(r)` of the image distance (also for the self images, Z_i = Z_j); the T = 0 on-atom block is the
+  vacuum one (`h_factor` 1, exact diagonal). Same `parallelStripes` over the first shell as the vacuum kernel.
+- **gamma by Ewald summation** (`XTB::buildGammaMatrixPeriodic`): `gamma(is, js) = A_pt(at_i, at_j) + sum_T fcut(r)
+  [KO_gam(r) - 1/r] + on-atom hardness`, `A_pt = EwaldSum::matrix(positions)` (point charges: erfc(a r)/r under the
+  minimum image, reciprocal, self, background `-pi/(a^2 V)`), `alpha`/`k_max` from `chooseEwaldParameters(cell,
+  pbc_ewald_tolerance = 1e-10, r_cut = L_min/2)`; the Klopman-Ohno remainder over images within
+  `pbc_coulomb_switch_bohr` = 10 with tblite's quintic `fsmooth` over the last Bohr (P0 decision 4). Reported at
+  verbosity 3 as alpha and the number of k vectors.
+- **Wrapper** (`NativeXtbMethod::setMolecule`): `Mol::m_has_pbc` -> `XTB::setPeriodicCell(m_unit_cell)`; errors (never a
+  silent vacuum energy) for gfn2 (P2b pending), implicit solvation, a non-orthorhombic cell, `d4_charge_source` other
+  than `mulliken`; `-large_system_mode` keeps its own driver (no cell, documented as not periodic). `hasPeriodicEnergy()`
+  is true with a cell. A gradient request with a cell is refused until P3 (`calculateEnergy(true)` sets an error).
+- **tblite agreement** (water dimer `water-dimer.roo2.8`, `tblite_periodic_reference gfn1 ... L L L`, tblite 0.4.0
+  accuracy 1, curcuma `-sp -method gfn1`, cubic cells):
+
+| L (A) | E curcuma (Eh) | E tblite (Eh) | dE (Eh) |
+|---|---|---|---|
+| 8 | -11.530842895860 | -11.530842895902 | +4.2e-11 |
+| 10 | -11.531571559511 | -11.531571559541 | +3.0e-11 |
+| 12 | -11.531722031160 | -11.531722031225 | +6.6e-11 |
+| 30 | -11.531825251411 | -11.531825251444 | +3.3e-11 |
+
+  tblite's own run-to-run scatter is 1e-14 (OpenMP reductions); tblite converges the energy to 1e-6 * accuracy and the
+  charges to 2e-5 * accuracy (`xtb/singlepoint.f90`), at `--accuracy 0.001` its L = 8 energy moves by 5e-11, so the
+  3-7e-11 above is the SCF convergence of both codes. Charges: curcuma at `scf_threshold` 1e-9 against tblite at
+  accuracy 0.001 agree to 2.5e-10 e (at accuracy 1 tblite's charges are 1e-5 off their converged values). The 8 A cell
+  differs from vacuum by 1.0e-3 Eh, the 30 A cell by 1.9e-5 (tin-foil dipole term of the dipolar cell; the Klopman-Ohno
+  switch does not act below 9 Bohr).
+- **Without a cell**: 24/24 `-sp`/`-dump_gradient` md5 identical to the 957afab7 binary (6 structures x gfn1/gfn2 x 1/4
+  threads).
+- ctest `pbc_xtb_tblite` (`test_cases/unit/test_pbc_xtb_tblite.cpp`): the three energies 8/10/12 A against the tblite
+  values above (tolerance 1e-9 Eh), charges against tblite (1e-6 e), `hasPeriodicEnergy()`, gfn2 + cell refused,
+  gradient request refused.
+- **Not tested**: charged cells (tblite has no background term, see P0.4), open shell, d-shell elements, Ewald r_cut other
+  than L_min/2 (`-xtb.pbc_ewald_r_cut_bohr`), threads > 1 with a cell (the Ewald matrix and the KO remainder are serial),
+  cells so small that S(Gamma) becomes ill-conditioned (Cholesky fallback path), anything beyond H/O.
 
 ## Not implemented / not tested (updated per stage)
 

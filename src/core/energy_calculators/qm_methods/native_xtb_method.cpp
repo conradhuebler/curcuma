@@ -230,6 +230,31 @@ bool NativeXtbMethod::setMolecule(const Mol& mol)
                                           : std::string("molecule initialization"));
             return false;
         }
+
+        // Periodic cell (WP-PERIODIC-XTB P2a, Claude Generated Nov 2026): the cell of the Mol goes to the
+        // engine; combinations without a periodic implementation are errors, never a silent vacuum energy.
+        m_xtb->clearPeriodicCell();
+        if (mol.m_has_pbc) {
+            std::string err;
+            if (m_method == curcuma::xtb::MethodType::GFN2) {
+                err = "native gfn2 with a unit cell: the periodic multipole electrostatics (P2b) are not "
+                      "implemented yet; use gfn1 or remove the cell (docs/WP-PERIODIC-XTB.md)";
+            } else if (m_xtb->solventName() != "none" && !m_xtb->solventName().empty()) {
+                err = "native " + getMethodName() + " with a unit cell: implicit solvation is not periodic";
+            }
+            if (err.empty() && !m_xtb->setPeriodicCell(mol.m_unit_cell, err)) { /* message in err */ }
+            if (!err.empty()) {
+                m_has_error = true;
+                m_error_message = err;
+                CurcumaLogger::error(err);
+                return false;
+            }
+            if (CurcumaLogger::get_verbosity() >= 1)
+                CurcumaLogger::info(fmt::format("{}: periodic cell {:.4f} x {:.4f} x {:.4f} A (Gamma point, image sums, "
+                                                "Ewald Coulomb; AI-generated, machine-tested, docs/WP-PERIODIC-XTB.md)",
+                                                getMethodName(), mol.m_unit_cell(0, 0), mol.m_unit_cell(1, 1),
+                                                mol.m_unit_cell(2, 2)));
+        }
         return true;
 
     } catch (const std::exception& e) {
@@ -298,6 +323,14 @@ double NativeXtbMethod::calculateEnergy(bool gradient)
         // Apply controller settings each call so geometry steps in -opt / MD pick
         // up the configuration (D4 charge source + SCF convergence settings).
         applyConfig();
+
+        // WP-PERIODIC-XTB (Nov 2026): the periodic gradient is stage P3; until then a gradient with a cell is
+        // an error, not the vacuum gradient of a periodic energy.
+        if (gradient && m_xtb->hasPeriodicCell()) {
+            handleError("native " + getMethodName() + " with a unit cell: the periodic gradient (P3) is not "
+                        "implemented yet; only single-point energies are available (docs/WP-PERIODIC-XTB.md)");
+            return 0.0;
+        }
 
         m_last_energy = m_xtb->Calculation(gradient);
         m_calculation_done = true;

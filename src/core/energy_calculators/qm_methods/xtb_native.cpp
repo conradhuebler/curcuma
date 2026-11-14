@@ -3424,6 +3424,11 @@ double XTB::calcDispersionEnergy(bool need_gradient) const
 {
     m_disp_gradient_valid = false;
 
+    // WP-PERIODIC-XTB P1 (Claude Generated, Nov 2026): with a cell the image sums of xtb_periodic.cpp.
+    if (m_pbc)
+        return (m_method == MethodType::GFN1) ? calcD3DispersionPeriodic(need_gradient)
+                                              : calcD4DispersionPeriodic(need_gradient);
+
     if (m_method != MethodType::GFN2) {
         // GFN1: native D3(BJ) dispersion (s6=1.0, s8=2.4, a1=0.63, a2=5.0).
         // Claude Generated (May 2026): analytical gradient replaces central
@@ -3845,7 +3850,8 @@ bool XTB::computeD4PotentialDedq(const Vector& q_at, Vector& dEdq) const
     if (!m_d4_prepared) {
         m_d4_generator->setUseD4SingleShotEEQ(false);
         m_d4_generator->setD4CovalentCN(true);  // GFN2 dftd4 EN-weighted covalent CN
-        primeD4CnFromDevice(geom_bohr);
+        if (m_pbc) primeD4CnPeriodic(geom_bohr);   // WP-PERIODIC-XTB P1: periodic covalent CN
+        else primeD4CnFromDevice(geom_bohr);
         m_d4_generator->GenerateParameters(m_atoms, geom_bohr);
         ++m_d4_genparams_calls;
         m_d4_prepared = true;
@@ -3890,7 +3896,14 @@ bool XTB::computeD4PotentialDedq(const Vector& q_at, Vector& dEdq) const
             device_ok = true;
         }
     }
-    if (!device_ok) {
+    if (!device_ok && m_pbc) {
+        // WP-PERIODIC-XTB P1 (Claude Generated, Nov 2026): dE_D4/dq with lattice images (serial).
+        Matrix scratch_grad; Vector scratch_dEdcn;
+        const PBCUtils::LatticeImageList images = PBCUtils::makeLatticeImageList(m_cell_bohr, kPbcD4PairCutoffBohr);
+        m_d4_evaluator->computeEnergyAndGradientPeriodic(
+            m_atoms, geom_bohr, images, /*with_gradient=*/true,
+            scratch_grad, scratch_dEdcn, dEdq, /*with_dEdq=*/true);
+    } else if (!device_ok) {
         Matrix scratch_grad; Vector scratch_dEdcn;
         // WP2-ext: thread the per-SCF D4 pair loop on the same gated budget.
         m_d4_evaluator->setThreads(effectiveIntraThreads(m_atomcount));

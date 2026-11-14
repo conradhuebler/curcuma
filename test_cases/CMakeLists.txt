@@ -747,6 +747,27 @@ endif()
 add_test(NAME pbc_foundation COMMAND test_pbc_foundation WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 set_tests_properties(pbc_foundation PROPERTIES TIMEOUT 120 LABELS "pbc;gfnff")
 
+# Claude Generated (Nov 2026, WP-PERIODIC-XTB P1): periodic classical terms of the native GFN1/GFN2
+# (CN, repulsion, halogen bond, D3/D4 image sums): vacuum limit, supercell, lattice shift, brute force,
+# dispersion gradient FD (docs/WP-PERIODIC-XTB.md)
+add_executable(test_pbc_xtb_classical unit/test_pbc_xtb_classical.cpp)
+target_link_libraries(test_pbc_xtb_classical curcuma_core test_molecule_registry)
+if(USE_PCH)
+    target_precompile_headers(test_pbc_xtb_classical REUSE_FROM curcuma_core)
+endif()
+add_test(NAME pbc_xtb_classical COMMAND test_pbc_xtb_classical WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(pbc_xtb_classical PROPERTIES TIMEOUT 300 LABELS "pbc;xtb;sqm")
+
+# Claude Generated (Nov 2026, WP-PERIODIC-XTB P2a): periodic native GFN1 energy against tblite 0.4.0
+# (water dimer in 8/10/12 A cubes, charges, refusals of gfn2 + cell and gradient + cell)
+add_executable(test_pbc_xtb_tblite unit/test_pbc_xtb_tblite.cpp)
+target_link_libraries(test_pbc_xtb_tblite curcuma_core test_molecule_registry)
+if(USE_PCH)
+    target_precompile_headers(test_pbc_xtb_tblite REUSE_FROM curcuma_core)
+endif()
+add_test(NAME pbc_xtb_tblite COMMAND test_pbc_xtb_tblite WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(pbc_xtb_tblite PROPERTIES TIMEOUT 300 LABELS "pbc;xtb;sqm")
+
 # Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A2): periodic coordination number (value and
 # derivative), periodic SpatialCellList. Tests the CN only; the energy terms have no minimum image yet.
 add_executable(test_pbc_cn unit/test_pbc_cn.cpp)

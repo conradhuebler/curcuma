@@ -30,6 +30,7 @@
 #include "d4param_generator.h"
 #include "src/core/energy_calculators/ff_methods/gfnff_parameters.h"  // GFNFFDispersion
 #include "src/core/global.h"
+#include "src/tools/pbc_utils.h"
 
 #include <Eigen/Dense>
 #include <memory>
@@ -168,6 +169,33 @@ public:
                       Matrix& gradient_out,
                       Vector& dEdCN_out,
                       double cutoff_bohr = 25.0);
+
+    // ---------- periodic image sums (WP-PERIODIC-XTB P1, Claude Generated Nov 2026) ----------
+    //
+    // computeEnergyAndGradientPeriodic: the per-reference GFN2 pair term (per_reference_charge
+    // must be set) summed over every lattice image (j, T) with |x_i - x_j - T| < images.cutoff,
+    // pairs j <= i, the self images (i, i, T != 0) with 1/2 per translation: dftd4
+    // damping/rational.f90 get_dispersion_energy/derivs with `trans`. Outputs as in
+    // computeEnergyAndGradient (gradient Eh/Bohr, dE/dCN, dE/dq; all overwritten). The generator
+    // must hold the periodic CN (GenerateParameters after setPrecomputedCovalentCN) and the charges
+    // (setTopologyCharges). Serial.
+    double computeEnergyAndGradientPeriodic(const std::vector<int>& atoms,
+                                            const Matrix& geometry_bohr,
+                                            const PBCUtils::LatticeImageList& images,
+                                            bool with_gradient,
+                                            Matrix& gradient_out,
+                                            Vector& dEdCN_out,
+                                            Vector& dEdq_out,
+                                            bool with_dEdq = false);
+    // computeATMPeriodic: dftd4 damping/atm.f90 get_atm_dispersion_energy/derivs with `trans`
+    // (iat, jat <= iat, T_j, kat <= jat, T_k; triple_scale on the atom indices). Accumulates
+    // (+=) into gradient_out and dEdCN_out like computeATM. Serial.
+    double computeATMPeriodic(const std::vector<int>& atoms,
+                              const Matrix& geometry_bohr,
+                              const PBCUtils::LatticeImageList& images,
+                              bool with_gradient,
+                              Matrix& gradient_out,
+                              Vector& dEdCN_out);
 
     // ---------- CUDA hook (not used in this AP) ----------
     //
