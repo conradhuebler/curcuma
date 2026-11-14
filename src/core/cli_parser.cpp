@@ -130,7 +130,8 @@ json CLI2Json(int argc, char** argv)
         // Claude Generated (Nov 2026): the classes read modules "docking"/"trajectoryanalysis",
         // the CLI keywords are -dock/-traj; without the mapping their flags were never routed.
         {"dock", "docking"},
-        {"traj", "trajectoryanalysis"}
+        {"traj", "trajectoryanalysis"},
+        {"nebmd", "nebmd"}  // NEB-like molecular dynamics (PR 16)
     };
 
     // Get actual module name (for ConfigManager)

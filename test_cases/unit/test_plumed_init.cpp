@@ -41,7 +41,8 @@ void test_plumed_unit_conversions()
     std::cout << "\n=== test_plumed_unit_conversions ===" << std::endl;
 
     // PLUMED uses kJ/mol, nm, ps, amu internally.
-    // Curcuma uses Hartree, Bohr, atomic time units, atomic mass units.
+    // Curcuma's SimpleMD geometry/gradient arrays (m_eigen_geometry/m_eigen_gradient) are
+    // Angstrom-based, Hartree energies, atomic time units, atomic mass units.
     // The conversion factors in simplemd.cpp must be consistent with CurcumaUnit.
 
     // Energy: 1 Hartree = 2625.5 kJ/mol (CODATA 2018: 2625.49962)
@@ -55,10 +56,15 @@ void test_plumed_unit_conversions()
     TEST_ASSERT(std::abs(bohr_to_angstrom - 0.529177) < 0.001,
                 "Bohr to Angstrom conversion factor is correct");
 
-    // PLUMED lengthUnits = 10 (Bohr * 0.529177 Angstrom/Bohr, reported in Angstrom not nm)
-    // PLUMED internally converts Angstrom to nm (divide by 10)
-    double plumed_lengthUnits = 10.0;  // Curcuma reports positions in Bohr * 10 -> Angstrom
-    TEST_ASSERT(plumed_lengthUnits > 0, "PLUMED lengthUnits is positive");
+    // PLUMED lengthUnits = 0.1 (Angstrom -> nm, no Bohr step involved: curcuma passes
+    // Angstrom-valued position/force arrays to PLUMED directly, and this single scalar
+    // tells PLUMED how to relate them to its internal nm). Regression test for the
+    // Sep 2026 bug where this was 10 (the reciprocal), which inflated every length-based
+    // COLVAR (DISTANCE, COM, ...) by exactly 10x.
+    double plumed_lengthUnits = 0.1;
+    double expected_length = CurcumaUnit::Length::angstrom_to_nm(1.0);
+    TEST_ASSERT(std::abs(plumed_lengthUnits - expected_length) < 1e-12,
+                "PLUMED lengthUnits matches Angstrom -> nm conversion (0.1, not its reciprocal)");
 
     // Mass: atomic mass units and amu are the same scale (factor = 1)
     double plumed_massUnits = 1.0;

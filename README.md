@@ -228,8 +228,9 @@ AI-generated, machine-tested; human production testing pending. Start with [docs
 the opt-in GFN1/GFN2 SCF preconditioner `-scf_precond frag`, with segmentation of large molecules ([docs/SCF_PRECOND.md](docs/SCF_PRECOND.md), experimental),
 solvation ([docs/SOLVATION.md](docs/SOLVATION.md)), temperature ramps
 ([docs/TEMPERATURE_RAMP.md](docs/TEMPERATURE_RAMP.md)), large-system MD
-([docs/MD_LARGE_SYSTEMS.md](docs/MD_LARGE_SYSTEMS.md)), PLUMED ([docs/PLUMED_HELP.md](docs/PLUMED_HELP.md)),
-reactive GFN-FF MD ([docs/GFNFF_REACT_TOPOLOGY.md](docs/GFNFF_REACT_TOPOLOGY.md), experimental), benchmark
+([docs/MD_LARGE_SYSTEMS.md](docs/MD_LARGE_SYSTEMS.md)), the per-step MD CSV file ([docs/MD_CSV_OUTPUT.md](docs/MD_CSV_OUTPUT.md)), PLUMED ([docs/PLUMED_HELP.md](docs/PLUMED_HELP.md)),
+reactive GFN-FF MD ([docs/GFNFF_REACT_TOPOLOGY.md](docs/GFNFF_REACT_TOPOLOGY.md), experimental), NEB-MD free-energy
+barriers and rates (`-nebmd.pipeline`, [docs/NEB_MD.md](docs/NEB_MD.md), AI-generated, machine-tested, validated on ethane only), benchmark
 sets ([docs/TESTSET_RETRIEVAL.md](docs/TESTSET_RETRIEVAL.md)). Method status paragraphs that used to stand in
 this README are in [docs/README_METHOD_NOTES_2026.md](docs/README_METHOD_NOTES_2026.md).
 

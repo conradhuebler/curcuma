@@ -60,7 +60,7 @@ public:
         m_help = true;
         m_verbosity = 1; // Default: Normal Print
     }
-    ~CurcumaMethod();
+    virtual ~CurcumaMethod();
 
     inline void setRestart(bool restart) { m_restart = restart; }
 

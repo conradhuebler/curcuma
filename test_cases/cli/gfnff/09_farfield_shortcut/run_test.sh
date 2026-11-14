@@ -63,7 +63,7 @@ def md(src, charge, flag, extra):
     d = work(*src)
     try:
         cmd = [B, "-md", "m.xyz", "-method", "gfnff", "-charge", str(charge), "-threads", "2", "-no_bmt",
-               "-gfnff.cache_topology", "false", "-gfnff.farfield_shortcut", flag, "-max_time", "3",
+               "-gfnff.cache_topology", "false", "-gfnff.farfield_shortcut", flag, "-max_time", "3", "-seed", "1",
                "-md_diagnostics", "true", "-dump_frequency", "1"] + extra
         p = subprocess.run(cmd, cwd=d, capture_output=True, text=True, timeout=600)
         ep = []
