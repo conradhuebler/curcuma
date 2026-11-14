@@ -960,6 +960,14 @@ add_test(NAME gfnff_param_fallbacks
 set_tests_properties(gfnff_param_fallbacks PROPERTIES TIMEOUT 60 LABELS "gfnff;routing")
 
 
+# Claude Generated (Nov 2026): the optimiser default layers agree (docs/debt_2026-11/PARAMS.md H5) and a
+# direct call with an empty config optimises (lbfgs_max_line_search 2 stopped at the first step)
+add_executable(optimizer_default_layers_test unit/optimizer_default_layers_test.cpp)
+target_link_libraries(optimizer_default_layers_test curcuma_core)
+add_test(NAME optimizer_default_layers
+         COMMAND optimizer_default_layers_test ${CMAKE_CURRENT_SOURCE_DIR}/structures/small/ethane.xyz)
+set_tests_properties(optimizer_default_layers PROPERTIES TIMEOUT 120 LABELS "unit;curcumaopt;routing")
+
 # Claude Generated (Nov 2026): ConfigManager::get separates a missing key from a value of the wrong
 # type (docs/debt_2026-11/PARAMS.md M8)
 add_executable(config_manager_types_test unit/config_manager_types_test.cpp)

@@ -11,6 +11,8 @@ Stand.
 
 ## 1. Korrektheit (offen)
 
+- **GFN-FF unter Last nicht bitgleich** (2026-11-14): zwei identische `-sp`-Läufe (Defektstruktur der Ladungsgruppen, 273 Atome, `-threads 1`) unterscheiden sich unter paralleler Last um bis zu 6.7e-16 Eh/A (Gradient bis 0.74); im Leerlauf 6 von 6 identisch, unter Last 4 von 8 verschieden, auch auf `devel/methods` pur. Die Ursache (Summationsreihenfolge trotz einem Thread) ist nicht gesucht.
+  Folge: Testskripte mit Bitvergleich (`check_cn_zero_guard.py`, `check_adaptive_step.py`, `check_lbfgs_atom_step_cap.py`, `check_d4_fused_c6.py`) können unter `ctest -j` flackern; `check_charge_groups.py` vergleicht jetzt mit 1e-12.
 - **FEHLER: GMTKN55 `G21EA/EA_16` (SiH3-) mit gfn1 liefert keine Energie** (2026-10-30, Ursache bekannt, vorerst gewollt): Abbruch "implausible charge distribution" (max |q| 5.55 > 5.00, auch aus H0); xtb 6.7 konvergiert auf dieselbe SCC-Energie (-7.94141906 Eh) mit Si = -5.55 e, derselbe q^3-Runaway.
   Der Fehler bleibt, die Struktur fehlt damit in jedem gfn1-Vergleich. Keine gültige Energie für dieses System.
 - **PLUMED-Bias nur auf `feature/bmt-plumed-nebmd` korrigiert** (`96c29c50`, 2026-10-30): `upstream/master` hat Vorzeichenfehler und kB statt kB*T noch; biased PLUMED-Läufe davor sind ungültig. Offen: nach master bringen, betroffene Läufe neu rechnen. [docs/PLUMED_HELP.md](docs/PLUMED_HELP.md).
@@ -261,6 +263,8 @@ Stand.
 - **Build und Doku aus dem Debt-Bericht** ([docs/debt_2026-11/BUILD_DOCS.md](docs/debt_2026-11/BUILD_DOCS.md), nicht angefasst): `curcuma_cap` kompiliert 38 Dateien ein zweites Mal (M1); ungenutzte Compile-Definitionen, `-g` in jedem Build-Typ, PCH nur teilweise wirksam, ungepinnte Abhängigkeiten (M3 bis M6); Doku-Drift; `-dipole`-Ausgabe wiederherstellen (Punkt 14).
 - **Nicht verifiziert nach dem Debt-Branch** (2026-11-14): Builds mit `USE_TBLITE`, `USE_D3`, `USE_GFNFF`, `USE_XTB`, `USE_ULYSSES`, CUDA, ROCm, Vulkan; gfn1/gfn2-Regression (MOR41 nur `uff` und `gfnff`); `ctest` mit `-DCURCUMA_UNICODE_OUTPUT=ON`; Casino hat keinen Test.
 
+- **NEB-MD nach PR #16** (2026-11-14): `docs/NEB_MD_HISTORY.md` (1092 Zeilen) hält Freie-Energie-Zahlen fest, die laut Datei ungültig sind und deren Rohdaten nur im Scratchpad lagen; in den Vault verschieben oder streichen. Nicht geprüft: PLUMED-Korrektur (Vorzeichen, `kB*T`) im Build, GPU, ROCm; NEB-MD nur auf Ethan mit GFN-FF validiert; `nebmd.cpp` hat Funktionen bis 465 Zeilen und `CoutSuppress` (tauscht `std::cout.rdbuf`).
+
 ## 6. Entscheidungen und Fragen
 
 Code-gebundene Entscheidungen, die bei Ihnen liegen. Fachliche Fragen und Projektstatus stehen im Vault und sind nur verlinkt.
@@ -274,6 +278,8 @@ Code-gebundene Entscheidungen, die bei Ihnen liegen. Fachliche Fragen und Projek
 - GPU-Bitgleichheit angehen (Sammel-Kernel statt `atomicAdd`) oder bei Ensemblevergleichen bleiben?
 - Defaults je Modul für `verbosity`, `threads`, `method`, `charge`, `spin` (Casino-Verbosity 2, Opt 1, Trajektorienanalyse 2): ein Wert aus `global` für alle (ändert Ausgaben) oder die Modul-Vorgaben behalten? ([PARAMS.md](docs/debt_2026-11/PARAMS.md) M3)
 - ConfScan: `-method` ist die Alignment-Methode (`confscan.h`, `rmsd.h`), die Energiemethode heißt `energy_method` und ist kein PARAM; `-method gfn2` wird dort als ungültiger Alignment-Name gemeldet (H2). `energy_method` als PARAM einführen und `-method` dafür auswerten?
+- `lbfgs_max_line_search` (geprüft 2026-11-14): 2 stammt aus dem Legacy-`CurcumaOpt` (`LBFGS_ls_iter`), `LBFGSppOptimizer` bekam es am 2026-04-01 (`35afc6ed`), das Registry-PARAM am 2026-04-14 den Default 20 (`3ac3584e`); `-opt` läuft seitdem mit 20. Messung `-opt ethane.xyz -method gfnff -lbfgs_max_line_search N`: N=1 bis 3 macht keinen Schritt, ab 4 konvergiert es, ab 5 gleich 20 (Ethan, Wasser-Achter, Methylgalactopyranosid; nur der 231-Atom-Makrozyklus läuft auch mit 2).
+  Auf `devel/methods` bekommen ConfSearch, ConfGen, MD-Voroptimierung, Docking, PolymerBuild und RMSDTraj den Wert 2 (aus dem Code gelesen, nicht beobachtet); hier gilt überall 20, Test `optimizer_default_layers`. Bei 20 bleiben (Empfehlung) und `devel/methods` informieren?
 - Vault, fachliche Fragen: `Offene Fragen/` ("Valenzanteil im reaktiven GFN-FF", "Veraltete C6-Dispersion und Paarlisten in inaktiven Topologie-Ecken",
   "Lücke zwischen GFN2-xTB und Doppelhybrid-Methoden schließen", "RRHO-Näherung durch MD ... ersetzen", "Ladungsplatzierung bei geladenen Mehrfragment-Systemen in GFN-FF - was ist physikalisch besser", Known Issue #31).
 - Vault, Projektstatus: `Projekte/curcuma rev-gfnff`, `curcuma GPU-Backends`, `curcuma MD-Stabilität großer Systeme`, `curcuma ConfSearch Weiterentwicklung`,
