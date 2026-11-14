@@ -1,11 +1,12 @@
 # WP: Periodic native GFN1/GFN2 (orthorhombic cell, Gamma point, CPU)
 
-**Status (interim, 2026-11-14): P0 plan, P1 periodic classical terms, P2a periodic GFN1 energy and P2b periodic GFN2
-energy done; P3 (gradient), P4 (virial), P5 (integration) open.** `-method gfn1|gfn2` with an orthorhombic unit cell
-gives the periodic Gamma-point single-point energy (gfn1: 3-7e-11 Eh from tblite on the water dimer; gfn2: tblite's
-periodic multipole Ewald is not alpha-consistent, curcuma uses the consistent form and differs from tblite by up to
-1e-3 Eh at 8 A, see P2b); the gradient is not periodic yet, so `-opt`/`-md`/`-hessian` with a cell are refused until P3.
-Without a cell nothing changes (bitwise gate below).
+**Status (2026-11-14): P0 plan, P1 periodic classical terms, P2a/P2b periodic GFN1/GFN2 energy, P3 periodic gradient
+and P5 integration done; P4 (virial, pressure, barostat) open.** `-method gfn1|gfn2` with an orthorhombic unit cell
+gives the periodic Gamma-point energy and gradient (gfn1: 3-7e-11 Eh and 8.6e-7 Eh/Bohr from tblite on the water
+dimer; gfn2: tblite's periodic multipole Ewald is not alpha-consistent, curcuma uses the consistent form and differs
+from tblite by up to 1e-3 Eh at 8 A, see P2b), so `-opt` and NVT/NVE `-md` with a cell run (SimpleMD wraps fragments,
+-3 DOF); `-barostat` and `-compute_pressure` with gfn1/gfn2 are refused (no virial). Without a cell nothing changes
+(bitwise gate in every stage).
 Branch `feature/periodic-xtb`, base `feature/bulk` 957afab7. All work here is 🤖 AI-generated; stages are ⚙️ machine-tested
 only when the stage section says so. No human production testing anywhere in this document.
 
@@ -241,6 +242,70 @@ charges O -0.6 / H +0.3 for the D4 zeta weighting):
 - **Not tested**: d-shell elements with a cell (the d block uses `sphericalMultipoleBlock` per image), charged and
   open-shell cells, cells smaller than 8 A, more than two molecules, threads > 1 with a cell (matrices built with
   `parallelStripes`, not compared across thread counts).
+
+## P3 periodic gradient and FD gate (2026-11-14, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+- `XTB::calculateGradientPeriodic()` (chosen by `if (m_pbc)` at the entry of `calculateGradient`), every section of the
+  vacuum gradient over the lattice images: repulsion (pairs j < i, images within 25 Bohr), GFN1 halogen bond
+  (`addHalogenBondGradientPeriodic`, B over atoms and images), H0/Pulay per image with the image's own overlap block
+  (the shpoly and dE/dCN terms need `S_T`, not the Gamma-point sum) and the multipole-integral Pulay term at the image
+  position (origin shift `dR = x_j + T - x_i`), the self images (i, i, T != 0) only through dE/dCN (their Cartesian
+  derivative is zero), isotropic Coulomb as `EwaldSum::gradient(positions, q_at)` (point charges, the same
+  alpha/r_cut/k_max as the energy) plus the Klopman-Ohno remainder `d/dr [fcut (KO - 1/r)]` over images within the
+  switch radius, GFN2 multipoles (`addMultipoleGradientPeriodic`: tblite `get_multipole_gradient_3d` with the P2b
+  reciprocal factors 1 and -1/3, direct part verbatim, `dE/d(mrad)` into dE/dCN), the cached periodic dispersion
+  gradient (D3/D4 of P1, CN chain rule already folded), and the CN chain rule of the H0 coordination number over
+  images. `NativeXtbMethod` no longer refuses a gradient with a cell.
+- **Not implemented with a cell**: d-shell elements (`setPeriodicCell` refuses them: the periodic gradient of the d
+  multipole integrals would need the per-image spherical blocks); threads > 1 only in the H0/Pulay stripes.
+- **Gate** (`ctest -R pbc_xtb_gradient`, `test_cases/unit/test_pbc_xtb_gradient.cpp`; water dimer, `scf_threshold`
+  1e-9, central differences with h = 1e-4 A in Angstrom through `EnergyCalculator`; CLI gate
+  `-dump_gradient` vs `-sp` differences with the same h): max |analytic - FD| 8.1e-9 (gfn1) / 8.9e-9 (gfn2) Eh/A at
+  L = 8 A, 8.1e-9 / 8.9e-9 at 12 A, against max |g| 3.1e-2 / 2.8e-2; forces sum to zero (6e-16); GFN1 forces at L = 8
+  within 8.6e-7 Eh/Bohr of tblite's (tblite accuracy 1, its charges converged to 2e-5). CLI gate gfn1 8.1e-9, gfn2
+  8.9e-9 Eh/A. Without a cell 24/24 bitwise (6 structures x gfn1/gfn2 x 1/4 threads) to the 957afab7 binary.
+- **Not compared**: GFN2 forces with tblite (tblite's periodic multipole gradient carries the factor-2 / +1 terms of
+  P2b and the dftd4 ATM `triple_scale` issue of P1); forces of charged, open-shell or d-shell cells; thread-count
+  independence of the periodic gradient.
+
+## P4 virial / pressure: not implemented
+
+The atomic virial of the periodic gfn1/gfn2 energy (strain derivative of every term incl. the Ewald sums and the
+Pulay terms at fixed fractional coordinates) is not implemented. `-md -barostat` with gfn1/gfn2 is refused (`barostat:
+needs the periodic native CPU GFN-FF energy (the periodic native gfn1/gfn2 have no atomic virial yet, WP-PERIODIC-XTB
+P4)`), `-compute_pressure` throws at the first step (`readVirial`: no virial). An NPT water box with GFN2 therefore
+needs P4 first; NVT in a fixed cell works (P5). Estimate: 1-2 days (every image kernel of P3 contracted with its pair
+vector, the Ewald virial of `EwaldSum` exists for the point-charge part, the multipole Ewald virial has to be
+derived, FD gate by cell scaling).
+
+## P5 integration (2026-11-14, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+- `NativeXtbMethod::hasPeriodicEnergy()` is true once the engine holds a cell; SimpleMD then applies the A6/A6b rules
+  (fragment wrap into the cell, translation-only COM removal, -3 DOF). Smoke run: `-md dimer_L8.xyz -method gfn1
+  -MaxTime 10 -dt 0.5 -thermostat none`: `COM/rot removal (mode 1): -3 DOF | effective DOF = 15`, 20 steps, no error
+  (energy conservation not evaluated, n = 1).
+- GPU with a cell: `EnergyCalculator::setMolecule()` swaps a `-gpu cuda|rocm|vulkan` gfn1/gfn2 request with a cell to
+  the CPU method with a counted GPU fallback (`native xTB: periodic cell set, GPU path has no lattice images,
+  calculation on the CPU`, same pattern as the GFN-FF A3b guard); `XTB::Calculation()` additionally refuses a cell
+  with an attached device backend (`setHardError`). Checked only in a build without the plugin (the plugin fallback
+  fires first, the periodic guard second, energy = CPU periodic energy, test in `pbc_xtb_tblite`); not run on a GPU.
+- External methods (`xtb-*`, `tblite-*`, Ulysses) unchanged (a cell is still ignored there, A6b rules).
+
+## Water-box cost (2026-11-14, one shared 32-core machine, `-threads 4`, `-sp` with `-dump_gradient`, wall incl. start-up)
+
+Cubic water lattices at 0.997 g/cm^3 (scratch `make_water_box.py`, random orientations, 3.10 A spacing; not liquids,
+timing only), energy + gradient:
+
+| box | atoms | L (A) | gfn1 (s) | gfn2 (s) | gfn2 split (verbosity 3) |
+|---|---|---|---|---|---|
+| 3^3 = 27 H2O | 81 | 9.3 | 0.15 | 0.38 | |
+| 4^3 = 64 H2O | 192 | 12.4 | 0.30 | 1.1 | |
+| 6^3 = 216 H2O | 648 | 18.6 | 2.5 | 11.0 | setup 0.45 (gamma Ewald 0.12, multipoles 0.25), SCF 10 iterations 1.3, post-SCF 8.0 of which periodic D4 (pairs + ATM over images, serial) 7.98 |
+
+The periodic D4 (`computeEnergyAndGradientPeriodic`, `computeATMPeriodic`) is serial and dominates; for 432 H2O
+(1296 atoms, L ~ 23.5 A) a factor 4 on the N^2 parts gives an estimate of 35-45 s per energy+gradient at 4 threads,
+i.e. a GFN2 NVT step of about half a minute until the periodic D4 is threaded and the ATM gets a neighbour list (the
+vacuum `computeATM` has both). GFN1 (D3, no ATM) is 4-5x cheaper. NPT needs P4.
 
 ## Not implemented / not tested (updated per stage)
 

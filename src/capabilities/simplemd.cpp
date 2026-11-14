@@ -5847,7 +5847,8 @@ bool SimpleMD::setupBarostat()
     }
     GFNFF* gfnff = m_interface->Interface() ? m_interface->Interface()->gfnffInstance() : nullptr;
     if (!gfnff) {
-        CurcumaLogger::error("barostat: needs the periodic native CPU GFN-FF energy");
+        CurcumaLogger::error("barostat: needs the periodic native CPU GFN-FF energy (the periodic native gfn1/gfn2 "
+                             "have no atomic virial yet, WP-PERIODIC-XTB P4)");
         return false;
     }
     try {

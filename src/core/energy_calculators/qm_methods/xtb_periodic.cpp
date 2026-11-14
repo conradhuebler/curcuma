@@ -88,6 +88,11 @@ bool XTB::setPeriodicCell(const Eigen::Matrix3d& cell_angstrom, std::string& err
               + " (only orthorhombic cells are supported, docs/WP-PERIODIC-XTB.md)";
         return false;
     }
+    if (m_has_dshell) {
+        error = "native " + methodName() + " with a unit cell: d-shell elements are not implemented with periodic "
+                "boundary conditions (the periodic gradient of the d multipole integrals, P3)";
+        return false;
+    }
     if (m_method == MethodType::GFN2 && m_d4_charge_source != "mulliken") {
         error = "native gfn2 with a unit cell: d4_charge_source '" + m_d4_charge_source
               + "' is not implemented with periodic boundary conditions (the EEQ/CPSCF q-response "
@@ -703,6 +708,9 @@ void XTB::buildMultipoleInteractionMatricesPeriodic() const
     if (CurcumaLogger::get_verbosity() >= 3)
         CurcumaLogger::info_fmt("  periodic multipoles: alpha {:.4f}, direct cutoff {:.2f} Bohr ({} translations), "
                                 "reciprocal cutoff {:.3f} ({} k vectors)", alpha, dir_cut, dtrans.size(), rec_cut, rtrans.size());
+    m_mp_pbc_alpha = alpha;      // the gradient (P3) uses the same split
+    m_mp_pbc_dtrans = dtrans;
+    m_mp_pbc_rtrans = rtrans;
 
     const double fac = 4.0 * M_PI / vol;
     const double alp2 = alpha * alpha;
@@ -928,6 +936,556 @@ void XTB::setupMultipolePeriodic()
     m_mp_t_ao_ints = m_mp_t_d_block = m_mp_t_shift = m_mp_t_cn_mrad = m_mp_t_amat = 0.0;
     m_mp_initialized = true;
     ++m_mp_version;
+}
+
+/* ------------------------------------------------------------------ *
+ *  P3: nuclear gradient with a cell (Eh/Bohr into m_gradient)          *
+ *  Sections as in calculateGradient() (xtb_gradient.cpp), each over    *
+ *  the lattice images; a self image (i, i, T != 0) has no Cartesian    *
+ *  derivative but contributes to dE/dCN (H0 of the self-image block).  *
+ * ------------------------------------------------------------------ */
+void XTB::addHalogenBondGradientPeriodic(Matrix& gradient) const
+{
+    if (m_method != MethodType::GFN1) return;
+    const int nat = m_atomcount;
+    if (nat < 2 || gradient.rows() != nat || gradient.cols() != 3) return;
+    const std::vector<double> xyz = geometryBohr(m_geometry, nat);
+    const PBCUtils::LatticeImageList images = PBCUtils::makeLatticeImageList(m_cell_bohr, kPbcHalogenCutoffBohr);
+    constexpr double xb_alp = 6.0, xb_lj2 = 6.0;
+
+    for (int x = 0; x < nat; ++x) {
+        const int zx = m_atoms[x];
+        if (!xb_is_halogen(zx)) continue;
+        const double cc = gfn1_params::halogen_bond[zx - 1];
+        if (cc == 0.0) continue;
+        double best = std::numeric_limits<double>::max();
+        double dxb[3] = { 0.0, 0.0, 0.0 };
+        int b = -1;
+        for (int m = 0; m < nat; ++m) {
+            PBCUtils::forEachImage(images, &xyz[3 * x], &xyz[3 * m], m == x,
+                [&](double dx, double dy, double dz, double r2) {
+                    if (r2 < best) { best = r2; dxb[0] = -dx; dxb[1] = -dy; dxb[2] = -dz; b = m; }
+                });
+        }
+        if (b < 0) continue;
+        const double d2bx = best;
+        const double rbx = std::sqrt(d2bx) + 1.0e-18;
+        const double damping = gfn1_params::halogen_damping;
+        for (int a = 0; a < nat; ++a) {
+            if (!xb_is_acceptor(m_atoms[a])) continue;
+            const double r0ax = gfn1_params::halogen_radscale * (atomic_rad_au(zx) + atomic_rad_au(m_atoms[a]));
+            PBCUtils::forEachImage(images, &xyz[3 * x], &xyz[3 * a], false,
+                [&](double dx, double dy, double dz, double d2ax) {
+                    const double dxa[3] = { -dx, -dy, -dz };
+                    const double dba[3] = { dxa[0] - dxb[0], dxa[1] - dxb[1], dxa[2] - dxb[2] };
+                    const double d2ab = dba[0]*dba[0] + dba[1]*dba[1] + dba[2]*dba[2];
+                    const double rax = std::sqrt(d2ax) + 1.0e-18;
+                    const double xy = std::sqrt(d2bx * d2ax);
+                    const double term = (d2bx + d2ax - d2ab) / xy;
+                    const double aterm = std::pow(0.5 - 0.25 * term, xb_alp);
+                    const double t14 = std::pow(r0ax / rax, xb_lj2);
+                    const double numerator = t14 * t14 - damping * t14;
+                    const double denominator = 1.0 + t14 * t14;
+                    const double termlj = numerator / denominator;
+                    double dtermlj = 2.0 * xb_lj2 * numerator * t14 * t14 / (rax * denominator * denominator);
+                    dtermlj += xb_lj2 * t14 * (damping - 2.0 * t14) / (rax * denominator);
+                    dtermlj *= aterm * cc / rax;
+                    for (int k = 0; k < 3; ++k) { gradient(a, k) += dtermlj * dxa[k]; gradient(x, k) -= dtermlj * dxa[k]; }
+                    double prefactor = -0.25 * xb_alp * std::pow(0.5 - 0.25 * term, xb_alp - 1.0);
+                    prefactor *= cc * termlj;
+                    double dcosterm = (2.0 / rbx - term / rax) * prefactor / rax;
+                    for (int k = 0; k < 3; ++k) { gradient(a, k) += dcosterm * dxa[k]; gradient(x, k) -= dcosterm * dxa[k]; }
+                    dcosterm = (2.0 / rax - term / rbx) * prefactor / rbx;
+                    for (int k = 0; k < 3; ++k) { gradient(b, k) += dcosterm * dxb[k]; gradient(x, k) -= dcosterm * dxb[k]; }
+                    const double t13 = 2.0 * prefactor / xy;
+                    for (int k = 0; k < 3; ++k) { gradient(a, k) -= t13 * dba[k]; gradient(b, k) += t13 * dba[k]; }
+                });
+        }
+    }
+}
+
+// Port of tblite get_multipole_gradient_3d / get_damat_sdq_{dir,rec}_3d with the P2b reciprocal factors
+// (charge-dipole 1, charge-quadrupole -1/3). vec = x_j - x_i + T (tblite gradient convention), gradient(i) += dG,
+// gradient(j) -= dG; dE/d(mrad) into dEdcn through dmrad/dCN as in section 5 of calculateGradient().
+void XTB::addMultipoleGradientPeriodic(Matrix& gradient, Vector& dEdcn) const
+{
+    using namespace curcuma::xtb::gfn2_params;
+    const int nat = m_atomcount;
+    if (!m_mp_initialized || m_mp_pbc_alpha <= 0.0) return;
+    const std::vector<double> xyz = geometryBohr(m_geometry, nat);
+    const double vol = m_cell_bohr.L[0] * m_cell_bohr.L[1] * m_cell_bohr.L[2];
+    const double alp = m_mp_pbc_alpha, alp2 = alp * alp;
+    const double fac = 4.0 * M_PI / vol;
+    const double eps_r = kTbliteEps;
+    double sd_f = 1.0, sq_f = -1.0 / 3.0;
+    if (const char* e = std::getenv("CURCUMA_PBC_MP_SD_FACTOR")) sd_f = std::atof(e);
+    if (const char* e = std::getenv("CURCUMA_PBC_MP_SQ_FACTOR")) sq_f = std::atof(e);
+    const auto& q = m_wfn.q_at;
+    const auto& dp = m_wfn.dp_at;
+    const auto& qp = m_wfn.qp_at;
+
+    std::vector<double> kexp(m_mp_pbc_rtrans.size());
+    for (size_t t = 0; t < m_mp_pbc_rtrans.size(); ++t) {
+        const auto& k = m_mp_pbc_rtrans[t];
+        const double g2 = k[0] * k[0] + k[1] * k[1] + k[2] * k[2];
+        kexp[t] = (g2 < eps_r) ? 0.0 : fac * std::exp(-0.25 * g2 / alp2) / g2;
+    }
+
+    Vector dEdr_mp = Vector::Zero(nat);
+    // pair (iat, jat): direct images and reciprocal part; iat == jat only for dE/d(mrad)
+    auto pairTerms = [&](int iat, int jat, double dG[3], double& dE) {
+        dG[0] = dG[1] = dG[2] = 0.0;
+        dE = 0.0;
+        double v0x = xyz[3 * jat] - xyz[3 * iat], v0y = xyz[3 * jat + 1] - xyz[3 * iat + 1], v0z = xyz[3 * jat + 2] - xyz[3 * iat + 2];
+        PBCUtils::applyMinimumImageOrtho(m_cell_bohr, v0x, v0y, v0z);
+        const double rr = 0.5 * (m_mp_mrad[jat] + m_mp_mrad[iat]);
+        const double qi = q(iat), qj = q(jat);
+        const double mi[3] = { dp(0, iat), dp(1, iat), dp(2, iat) };
+        const double mj[3] = { dp(0, jat), dp(1, jat), dp(2, jat) };
+        double ti[6], tj[6];
+        for (int k = 0; k < 6; ++k) { ti[k] = qp(k, iat); tj[k] = qp(k, jat); }
+        const double dpidpj = mi[0] * mj[0] + mi[1] * mj[1] + mi[2] * mj[2];
+
+        // reciprocal
+        if (iat != jat) {
+            for (size_t t = 0; t < m_mp_pbc_rtrans.size(); ++t) {
+                if (kexp[t] == 0.0) continue;
+                const double* kv = m_mp_pbc_rtrans[t].data();
+                const double gv = v0x * kv[0] + v0y * kv[1] + v0z * kv[2];
+                const double cosk = std::cos(gv) * kexp[t];
+                const double sink = std::sin(gv) * kexp[t];
+                const double dpiv = kv[0] * mi[0] + kv[1] * mi[1] + kv[2] * mi[2];
+                const double dpjv = kv[0] * mj[0] + kv[1] * mj[1] + kv[2] * mj[2];
+                const double dpiqj = dpiv * qj, qidpj = dpjv * qi;
+                const double qiqpj = qi * (tj[0]*kv[0]*kv[0] + tj[2]*kv[1]*kv[1] + tj[5]*kv[2]*kv[2]
+                                          + 2*tj[1]*kv[0]*kv[1] + 2*tj[3]*kv[0]*kv[2] + 2*tj[4]*kv[1]*kv[2]);
+                const double qpiqj = qj * (ti[0]*kv[0]*kv[0] + ti[2]*kv[1]*kv[1] + ti[5]*kv[2]*kv[2]
+                                          + 2*ti[1]*kv[0]*kv[1] + 2*ti[3]*kv[0]*kv[2] + 2*ti[4]*kv[1]*kv[2]);
+                for (int c = 0; c < 3; ++c) {
+                    dG[c] -= sd_f * kv[c] * cosk * (dpiqj - qidpj);        // tblite: 2 * ...
+                    dG[c] += kv[c] * sink * dpiv * dpjv;
+                    dG[c] += sq_f * kv[c] * sink * (qiqpj + qpiqj);        // tblite: +1 * ...
+                }
+            }
+        }
+        // direct
+        for (const auto& T : m_mp_pbc_dtrans) {
+            const double vec[3] = { v0x + T[0], v0y + T[1], v0z + T[2] };
+            const double r1 = std::sqrt(vec[0] * vec[0] + vec[1] * vec[1] + vec[2] * vec[2]);
+            if (r1 < eps_r) continue;
+            const double r2 = r1 * r1, g1 = 1.0 / r1, g3 = g1 * g1 * g1, g5 = g3 * g1 * g1, g7 = g5 * g1 * g1;
+            const double arg = r1 * alp, arg2 = arg * arg;
+            const double erft = -std::erf(arg) * g1;
+            const double expt = std::exp(-arg2) / kSqrtPi;
+            const double e1 = g1 * g1 * (erft + expt * (2 * alp2) / alp);
+            const double e2 = g1 * g1 * (e1 + expt * (2 * alp2) * (2 * alp2) / (3 * alp));
+            const double e3 = g1 * g1 * (e2 + expt * (2 * alp2) * (2 * alp2) * (2 * alp2) / (15 * alp));
+            const double fdmp3 = 1.0 / (1.0 + 6.0 * std::pow(rr * g1, mp_dmp3));
+            const double ddmp3 = -3 * fdmp3 - mp_dmp3 * fdmp3 * (fdmp3 - 1.0);
+            const double fdmp5 = 1.0 / (1.0 + 6.0 * std::pow(rr * g1, mp_dmp5));
+            const double ddmp5 = -5 * fdmp5 - mp_dmp5 * (fdmp5 * fdmp5 - fdmp5);
+            const double dpiv = vec[0] * mi[0] + vec[1] * mi[1] + vec[2] * mi[2];
+            const double dpjv = vec[0] * mj[0] + vec[1] * mj[1] + vec[2] * mj[2];
+            const double dpiqj = dpiv * qj, qidpj = dpjv * qi;
+            const double edd = dpidpj * r2 - 3 * dpjv * dpiv;
+            // charge - dipole
+            double g_sd[3], tab[3][3];
+            for (int c = 0; c < 3; ++c)
+                g_sd[c] = -(ddmp3 * g5) * vec[c] * (dpiqj - qidpj) + fdmp3 * g3 * (qi * mj[c] - qj * mi[c]);
+            for (int bb = 0; bb < 3; ++bb) {
+                for (int a = 0; a < 3; ++a) tab[a][bb] = 3 * vec[a] * vec[bb] * e2;
+                tab[bb][bb] -= e1;
+            }
+            for (int k = 0; k < 3; ++k)
+                g_sd[k] += qj * (tab[0][k] * mi[0] + tab[1][k] * mi[1] + tab[2][k] * mi[2])
+                         - qi * (tab[0][k] * mj[0] + tab[1][k] * mj[1] + tab[2][k] * mj[2]);
+            dE += 3.0 * (dpiqj - qidpj) * mp_dmp3 * fdmp3 * g3 * (fdmp3 / rr) * std::pow(rr * g1, mp_dmp3);
+            // dipole - dipole
+            double g_dd[3], tabc[3][3][3];
+            for (int c = 0; c < 3; ++c)
+                g_dd[c] = -2.0 * fdmp5 * g5 * dpidpj * vec[c] + 3.0 * fdmp5 * g5 * (dpiv * mj[c] + dpjv * mi[c])
+                        - edd * ddmp5 * g7 * vec[c];
+            for (int c = 0; c < 3; ++c) {
+                for (int bb = 0; bb < 3; ++bb)
+                    for (int a = 0; a < 3; ++a) tabc[a][bb][c] = -15 * vec[a] * vec[bb] * vec[c] * e3;
+                for (int a = 0; a < 3; ++a) {
+                    tabc[a][a][c] += 3 * e2 * vec[c];
+                    tabc[c][a][c] += 3 * e2 * vec[a];
+                    tabc[a][c][c] += 3 * e2 * vec[a];
+                }
+            }
+            for (int k = 0; k < 3; ++k)
+                for (int a = 0; a < 3; ++a)
+                    g_dd[k] += mi[a] * (tabc[0][a][k] * mj[0] + tabc[1][a][k] * mj[1] + tabc[2][a][k] * mj[2]);
+            dE += 3.0 * edd * mp_dmp5 * fdmp5 * g5 * (fdmp5 / rr) * std::pow(rr * g1, mp_dmp5);
+            // charge - quadrupole
+            const double eq = 2 * (qj * ti[1] + tj[1] * qi) * vec[0] * vec[1] + 2 * (qj * ti[3] + tj[3] * qi) * vec[0] * vec[2]
+                            + 2 * (qj * ti[4] + tj[4] * qi) * vec[1] * vec[2] + (qj * ti[0] + tj[0] * qi) * vec[0] * vec[0]
+                            + (qj * ti[2] + tj[2] * qi) * vec[1] * vec[1] + (qj * ti[5] + tj[5] * qi) * vec[2] * vec[2];
+            const double tjv[3] = { vec[0]*tj[0] + vec[1]*tj[1] + vec[2]*tj[3], vec[0]*tj[1] + vec[1]*tj[2] + vec[2]*tj[4], vec[0]*tj[3] + vec[1]*tj[4] + vec[2]*tj[5] };
+            const double tiv[3] = { vec[0]*ti[0] + vec[1]*ti[1] + vec[2]*ti[3], vec[0]*ti[1] + vec[1]*ti[2] + vec[2]*ti[4], vec[0]*ti[3] + vec[1]*ti[4] + vec[2]*ti[5] };
+            double g_sq[3];
+            for (int c = 0; c < 3; ++c)
+                g_sq[c] = -eq * ddmp5 * g7 * vec[c] - 2.0 * fdmp5 * g5 * qi * tjv[c] - 2.0 * fdmp5 * g5 * qj * tiv[c];
+            for (int k = 0; k < 3; ++k)
+                g_sq[k] += (-qi * (tabc[0][0][k] * tj[0] + 2 * tabc[1][0][k] * tj[1] + 2 * tabc[2][0][k] * tj[3]
+                                   + tabc[1][1][k] * tj[2] + 2 * tabc[2][1][k] * tj[4] + tabc[2][2][k] * tj[5])
+                            - qj * (tabc[0][0][k] * ti[0] + 2 * tabc[1][0][k] * ti[1] + 2 * tabc[2][0][k] * ti[3]
+                                   + tabc[1][1][k] * ti[2] + 2 * tabc[2][1][k] * ti[4] + tabc[2][2][k] * ti[5])) / 3.0;
+            dE += eq * 3.0 * mp_dmp5 * fdmp5 * g5 * fdmp5 / rr * std::pow(rr * g1, mp_dmp5);
+            if (iat != jat)
+                for (int c = 0; c < 3; ++c) dG[c] += g_sd[c] + g_dd[c] + g_sq[c];
+        }
+    };
+
+    for (int iat = 0; iat < nat; ++iat) {
+        for (int jat = 0; jat < iat; ++jat) {
+            double dG[3], dE;
+            pairTerms(iat, jat, dG, dE);
+            dEdr_mp(iat) += dE;
+            dEdr_mp(jat) += dE;
+            for (int c = 0; c < 3; ++c) { gradient(iat, c) += dG[c]; gradient(jat, c) -= dG[c]; }
+        }
+        double dG[3], dE;   // self images: dE/d(mrad) only
+        pairTerms(iat, iat, dG, dE);
+        dEdr_mp(iat) += dE;
+    }
+    const Vector cn = computeCoordinationNumbers();
+    for (int i = 0; i < nat; ++i) {
+        const int zi = m_atoms[i];
+        const double rad = p_rad[zi - 1], vcn = p_vcn[zi - 1];
+        const double arg = cn(i) - vcn - mp_shift;
+        const double t1 = std::exp(-mp_kexp * arg);
+        const double t2 = (mp_rmax - rad) / (1.0 + t1);
+        const double dmrdcn = -t2 * mp_kexp * t1 / (1.0 + t1);
+        dEdcn(i) += dEdr_mp(i) * dmrdcn;
+    }
+}
+
+void XTB::calculateGradientPeriodic()
+{
+    ensureHostIntegrals(__func__);
+    const int nat = m_atomcount;
+    const int nsh = m_basis.nsh;
+    const int nao = m_basis.nao;
+    m_gradient = Matrix::Zero(nat, 3);
+    const std::vector<double> xyz = geometryBohr(m_geometry, nat);
+
+    // energy-weighted density W (as calculateGradient)
+    const int nocc_orbs = static_cast<int>(std::round(m_wfn.nocc / 2.0));
+    Matrix W;
+    if (m_wfn.W_valid && m_wfn.W.rows() == nao && m_wfn.W.cols() == nao) {
+        W = m_wfn.W;
+    } else if (m_wfn.focc.size() == nao && m_wfn.C.cols() == nao) {
+        int ncol = 0;
+        for (int i = 0; i < nao; ++i)
+            if (m_wfn.focc(i) > 1.0e-12) ncol = i + 1;
+        const auto Cocc = m_wfn.C.leftCols(ncol);
+        const Eigen::VectorXd we = (m_wfn.focc.head(ncol).array() * m_wfn.eps.head(ncol).array()).matrix();
+        W = (Cocc * we.asDiagonal()) * Cocc.transpose();
+    } else {
+        const auto Cocc = m_wfn.C.leftCols(nocc_orbs);
+        const Eigen::VectorXd w2 = 2.0 * m_wfn.eps.head(nocc_orbs);
+        W = (Cocc * w2.asDiagonal()) * Cocc.transpose();
+    }
+    Vector se;
+    getSelfEnergies(m_coordination_numbers, se);
+    std::vector<bool> valence(nsh, false);
+    if (m_method == MethodType::GFN1) {
+        for (int iat = 0; iat < nat; ++iat) {
+            bool ang_seen[3] = { false, false, false };
+            for (int ish = 0; ish < m_basis.nsh_at[iat]; ++ish) {
+                const int sh = m_basis.ish_at[iat] + ish;
+                const int l = m_basis.ang_sh[sh];
+                if (!ang_seen[l]) { valence[sh] = true; ang_seen[l] = true; }
+            }
+        }
+    }
+    std::vector<int> sh_z(nsh);
+    for (int s = 0; s < nsh; ++s) sh_z[s] = m_basis.z[m_basis.sh2at[s]];
+    std::vector<CGTO::Shell> shells(nsh);
+    for (int ish = 0; ish < nsh; ++ish) shells[ish] = as_cgto_shell(m_basis.cgto[ish]);
+
+    // 1. repulsion over images (j < i; self images have no derivative)
+    {
+        const PBCUtils::LatticeImageList images = PBCUtils::makeLatticeImageList(m_cell_bohr, kPbcRepulsionCutoffBohr);
+        const bool g1m = (m_method == MethodType::GFN1);
+        const double kexp = g1m ? gfn1_params::rep_kexp : gfn2_params::rep_kexp;
+        const double rexp = g1m ? gfn1_params::rep_rexp : gfn2_params::rep_rexp;
+        for (int i = 0; i < nat; ++i) {
+            const int zi = m_atoms[i];
+            const double alfi = g1m ? gfn1_params::rep_alpha[zi - 1] : gfn2_params::rep_alpha[zi - 1];
+            const double zeffi = g1m ? gfn1_params::rep_zeff[zi - 1] : gfn2_params::rep_zeff[zi - 1];
+            for (int j = 0; j < i; ++j) {
+                const int zj = m_atoms[j];
+                const double alfj = g1m ? gfn1_params::rep_alpha[zj - 1] : gfn2_params::rep_alpha[zj - 1];
+                const double zeffj = g1m ? gfn1_params::rep_zeff[zj - 1] : gfn2_params::rep_zeff[zj - 1];
+                const double alpha_pair = std::sqrt(alfi * alfj);
+                double kexp_pair = kexp;
+                if (!g1m && zi <= 2 && zj <= 2) kexp_pair = gfn2_params::rep_kexp_light;
+                PBCUtils::forEachImage(images, &xyz[3 * i], &xyz[3 * j], false,
+                    [&](double dx, double dy, double dz, double r2) {
+                        const double r = std::sqrt(r2);
+                        const double r_kexp = std::pow(r, kexp_pair);
+                        const double E_pair = zeffi * zeffj / std::pow(r, rexp) * std::exp(-alpha_pair * r_kexp);
+                        const double dEdr = -(rexp / r + alpha_pair * kexp_pair * std::pow(r, kexp_pair - 1.0)) * E_pair;
+                        const double fx = dEdr * dx / r, fy = dEdr * dy / r, fz = dEdr * dz / r;
+                        m_gradient(i, 0) += fx; m_gradient(j, 0) -= fx;
+                        m_gradient(i, 1) += fy; m_gradient(j, 1) -= fy;
+                        m_gradient(i, 2) += fz; m_gradient(j, 2) -= fz;
+                    });
+            }
+        }
+    }
+    // 1b. halogen bond
+    addHalogenBondGradientPeriodic(m_gradient);
+
+    // 2a. on-site CN term
+    Vector dEdcn = Vector::Zero(nat);
+    for (int ish = 0; ish < nsh; ++ish) {
+        const int iat = m_basis.sh2at[ish];
+        for (int ia = 0; ia < m_basis.nao_sh[ish]; ++ia) {
+            const int mu = m_basis.iao_sh[ish] + ia;
+            dEdcn(iat) += (-m_h0.kcn[ish]) * m_wfn.P(mu, mu);
+        }
+    }
+
+    // 2b. H0 / Pulay over images: pairs iat < jat (all images) and iat == jat (T != 0, dE/dCN only)
+    {
+        const PBCUtils::LatticeImageList images = PBCUtils::makeLatticeImageList(m_cell_bohr, pbcIntegralCutoffBohr());
+        const bool do_mp = (m_method == MethodType::GFN2 && m_mp_initialized && !m_mp_grad_off);
+        const int grad_threads = effectiveIntraThreads(nat);
+        std::vector<Matrix> grad_parts(grad_threads, Matrix::Zero(nat, 3));
+        std::vector<Vector> dEdcn_parts(grad_threads, Vector::Zero(nat));
+        parallelStripes(grad_threads, [&](int tid, int nth) {
+        Matrix& g_loc = grad_parts[tid];
+        Vector& dEdcn_loc = dEdcn_parts[tid];
+        for (int iat = tid; iat < nat; iat += nth) {
+            for (int jat = iat; jat < nat; ++jat) {
+                const bool same = (iat == jat);
+                const int zi = m_basis.z[iat], zj = m_basis.z[jat];
+                const double rad_sum = atomic_rad_au(zi) + atomic_rad_au(zj);
+                const double* xi = &xyz[3 * iat];
+                PBCUtils::forEachImage(images, xi, &xyz[3 * jat], same,
+                    [&](double dx_ij, double dy_ij, double dz_ij, double r2) {
+                        // d = x_i - (x_j + T): image of j at x_i - d
+                        const double xj[3] = { xi[0] - dx_ij, xi[1] - dy_ij, xi[2] - dz_ij };
+                        const double r = std::sqrt(r2);
+                        const double rr = std::sqrt(r / rad_sum);
+                        for (int ia = 0; ia < m_basis.nsh_at[iat]; ++ia) {
+                            const int ish_a = m_basis.ish_at[iat] + ia;
+                            const int ia_start = m_basis.iao_sh[ish_a], ia_nao = m_basis.nao_sh[ish_a];
+                            const double pi_a = 1.0 + m_h0.shpoly[ish_a] * rr;
+                            const double zeta_a = m_basis.cgto[ish_a].slater_exp;
+                            const CGTO::Shell& sh_a = shells[ish_a];
+                            const int ang_a = m_basis.ang_sh[ish_a];
+                            for (int ib = 0; ib < m_basis.nsh_at[jat]; ++ib) {
+                                const int ish_b = m_basis.ish_at[jat] + ib;
+                                const int jb_start = m_basis.iao_sh[ish_b], jb_nao = m_basis.nao_sh[ish_b];
+                                const double pi_b = 1.0 + m_h0.shpoly[ish_b] * rr;
+                                const double zeta_b = m_basis.cgto[ish_b].slater_exp;
+                                const CGTO::Shell& sh_b = shells[ish_b];
+                                const int ang_b = m_basis.ang_sh[ish_b];
+                                double hs;
+                                if (m_method == MethodType::GFN1) {
+                                    const bool vi = valence[ish_a], vj = valence[ish_b];
+                                    const double den = std::pow(pauling_en[zi - 1] - pauling_en[zj - 1], 2);
+                                    if (vi && vj) hs = gfn1::kpair(zi, zj) * gfn1::kshell(ang_a, ang_b) * (1.0 + gfn1::enscale * den);
+                                    else if (vi && !vj) hs = 0.5 * (gfn1::kshell(ang_a, ang_a) + gfn1::kdiff);
+                                    else if (!vi && vj) hs = 0.5 * (gfn1::kshell(ang_b, ang_b) + gfn1::kdiff);
+                                    else hs = gfn1::kdiff;
+                                } else {
+                                    const double den = std::pow(pauling_en[zi - 1] - pauling_en[zj - 1], 2);
+                                    const double enp = 1.0 + gfn2::enscale * den;
+                                    const double km = gfn2::kpair(zi, zj) * gfn2::kshell(ang_a, ang_b) * enp;
+                                    const double zij = std::pow(2.0 * std::sqrt(zeta_a * zeta_b) / (zeta_a + zeta_b), gfn2::wexp);
+                                    hs = zij * km;
+                                }
+                                const double h_factor = hs * (pi_a * pi_b);
+                                const double avg_eps = 0.5 * (se(ish_a) + se(ish_b));
+                                const double h_av = avg_eps * h_factor;
+                                // image overlap block (the Gamma-point S is a sum; the shpoly and CN terms need S_T)
+                                double blk_s[9];
+                                CGTO::cgto_overlap_block(sh_a, ang_a, sh_b, ang_b, xi[0], xi[1], xi[2], xj[0], xj[1], xj[2], blk_s);
+                                double cn_sum = 0.0;
+                                if (same) {
+                                    for (int iao = 0; iao < ia_nao; ++iao)
+                                        for (int jao = 0; jao < jb_nao; ++jao)
+                                            cn_sum += m_wfn.P(ia_start + iao, jb_start + jao) * blk_s[iao * jb_nao + jao];
+                                    dEdcn_loc(iat) += (-m_h0.kcn[ish_a]) * h_factor * cn_sum;
+                                    dEdcn_loc(jat) += (-m_h0.kcn[ish_b]) * h_factor * cn_sum;
+                                    continue;   // self image: no Cartesian derivative
+                                }
+                                const double dlog_pi_dr_r = (m_h0.shpoly[ish_a] / pi_a + m_h0.shpoly[ish_b] / pi_b) * rr / (2.0 * r2);
+                                const double v_a = m_pot.v_sh(ish_a) + m_pot.v_at(iat);
+                                const double v_b = m_pot.v_sh(ish_b) + m_pot.v_at(jat);
+                                CGTO::OverlapPrimPair pp[CGTO::kMaxPrimPairs];
+                                const int npp = CGTO::buildOverlapPrimPairs(sh_a, sh_b, xi[0], xi[1], xi[2], xj[0], xj[1], xj[2], pp);
+                                double G_sval[3] = { 0.0, 0.0, 0.0 };
+                                double G_shpoly_scalar = 0.0;
+                                for (int iao = 0; iao < ia_nao; ++iao) {
+                                    const int mu = ia_start + iao;
+                                    const int t_a = ao_to_type(ang_a, iao);
+                                    if (t_a < 0) continue;
+                                    for (int jao = 0; jao < jb_nao; ++jao) {
+                                        const int nu = jb_start + jao;
+                                        const int t_b = ao_to_type(ang_b, jao);
+                                        if (t_b < 0) continue;
+                                        const double Pmn = m_wfn.P(mu, nu);
+                                        const double Wmn = W(mu, nu);
+                                        const double S_T = blk_s[iao * jb_nao + jao];
+                                        const double H0_T = h_av * S_T;
+                                        double dS[3];
+                                        if (npp >= 0) CGTO::cgto_overlap_grad_pre(pp, npp, t_a, t_b, dS);
+                                        else CGTO::cgto_overlap_grad(sh_a, sh_b, xi[0], xi[1], xi[2], xj[0], xj[1], xj[2], t_a, t_b, dS);
+                                        const double sval = 2.0 * Pmn * h_av - 2.0 * Wmn - Pmn * (v_a + v_b);
+                                        G_sval[0] += sval * dS[0]; G_sval[1] += sval * dS[1]; G_sval[2] += sval * dS[2];
+                                        if (do_mp) {
+                                            double S_mp, D_mp[3], Q_mp[6], dD_dA[3][3], dD_dB[3][3], dQ_dA[3][6], dQ_dB[3][6];
+                                            MI::cgto_multipole_grad_transformed(sh_a, sh_b, xi[0], xi[1], xi[2], xj[0], xj[1], xj[2],
+                                                                                t_a, t_b, S_mp, D_mp, Q_mp, dD_dA, dD_dB, dQ_dA, dQ_dB);
+                                            const double dR[3] = { xj[0] - xi[0], xj[1] - xi[1], xj[2] - xi[2] };
+                                            static const int qa6[6] = { 0, 0, 1, 0, 1, 2 };
+                                            static const int qb6[6] = { 0, 1, 1, 2, 2, 2 };
+                                            for (int l = 0; l < 3; ++l) {
+                                                double term = 0.0;
+                                                for (int k = 0; k < 3; ++k) {
+                                                    term += dD_dA[l][k] * m_pot.v_dp(k, jat);
+                                                    const double dDiat = dD_dA[l][k] + dR[k] * dS[l] - (k == l ? S_T : 0.0);
+                                                    term += dDiat * m_pot.v_dp(k, iat);
+                                                }
+                                                double dq[6];
+                                                for (int qq = 0; qq < 6; ++qq) {
+                                                    const int a = qa6[qq], b = qb6[qq];
+                                                    dq[qq] = -(b == l ? D_mp[a] : 0.0) + dR[b] * dD_dA[l][a]
+                                                           - (a == l ? D_mp[b] : 0.0) + dR[a] * dD_dA[l][b]
+                                                           + (-(a == l ? dR[b] : 0.0) - (b == l ? dR[a] : 0.0)) * S_T
+                                                           + dR[a] * dR[b] * dS[l];
+                                                }
+                                                const double dtr_c = 0.5 * (dq[0] + dq[2] + dq[5]);
+                                                for (int qq = 0; qq < 6; ++qq) {
+                                                    const bool is_diag = (qa6[qq] == qb6[qq]);
+                                                    term += dQ_dA[l][qq] * m_pot.v_qp(qq, jat);
+                                                    const double dQiat = dQ_dA[l][qq] + 1.5 * dq[qq] - (is_diag ? dtr_c : 0.0);
+                                                    term += dQiat * m_pot.v_qp(qq, iat);
+                                                }
+                                                G_sval[l] -= Pmn * term;
+                                            }
+                                        }
+                                        G_shpoly_scalar += 2.0 * Pmn * H0_T * dlog_pi_dr_r;
+                                        cn_sum += Pmn * S_T;
+                                    }
+                                }
+                                const double Gx = G_sval[0] + G_shpoly_scalar * dx_ij;
+                                const double Gy = G_sval[1] + G_shpoly_scalar * dy_ij;
+                                const double Gz = G_sval[2] + G_shpoly_scalar * dz_ij;
+                                g_loc(iat, 0) += Gx; g_loc(jat, 0) -= Gx;
+                                g_loc(iat, 1) += Gy; g_loc(jat, 1) -= Gy;
+                                g_loc(iat, 2) += Gz; g_loc(jat, 2) -= Gz;
+                                dEdcn_loc(iat) += (-m_h0.kcn[ish_a]) * h_factor * cn_sum;
+                                dEdcn_loc(jat) += (-m_h0.kcn[ish_b]) * h_factor * cn_sum;
+                            }
+                        }
+                    });
+            }
+        }
+        });
+        for (int t = 0; t < grad_threads; ++t) {
+            m_gradient += grad_parts[t];
+            dEdcn += dEdcn_parts[t];
+        }
+    }
+
+    // 3. isotropic Coulomb: point-charge Ewald gradient at q_at plus the Klopman-Ohno remainder over images
+    if (!m_coulomb_grad_off) {
+        Eigen::MatrixXd pos(nat, 3);
+        for (int i = 0; i < nat; ++i)
+            for (int k = 0; k < 3; ++k) pos(i, k) = xyz[3 * i + k];
+        const curcuma::ewald::EwaldParameters par = curcuma::ewald::chooseEwaldParameters(
+            m_cell_bohr, m_pbc_ewald_tolerance, m_pbc_ewald_r_cut > 0.0 ? m_pbc_ewald_r_cut : -1.0);
+        const curcuma::ewald::EwaldSum ewald(m_cell_bohr, par);
+        m_gradient += ewald.gradient(pos, m_wfn.q_at);
+
+        const double gexp = (m_method == MethodType::GFN1) ? gfn1_params::gexp : gfn2_params::gexp;
+        const coulomb::Method cm = (m_method == MethodType::GFN1) ? coulomb::Method::GFN1 : coulomb::Method::GFN2;
+        std::vector<double> g_sh(nsh);
+        for (int is = 0; is < nsh; ++is) g_sh[is] = coulomb::shell_hardness(cm, m_basis.z[m_basis.sh2at[is]], m_basis.ang_sh[is]);
+        const PBCUtils::LatticeImageList images = PBCUtils::makeLatticeImageList(m_cell_bohr, m_pbc_coulomb_switch);
+        const double rcut = m_pbc_coulomb_switch;
+        for (int is = 0; is < nsh; ++is) {
+            const int iat = m_basis.sh2at[is];
+            for (int js = 0; js < is; ++js) {
+                const int jat = m_basis.sh2at[js];
+                if (iat == jat) continue;   // on-site and self images: no derivative
+                const double gam_bar = coulomb::average(cm, g_sh[is], g_sh[js]);
+                const double gam_pow = std::pow(gam_bar, -gexp);
+                const double qq = m_wfn.q_sh(is) * m_wfn.q_sh(js);
+                PBCUtils::forEachImage(images, &xyz[3 * iat], &xyz[3 * jat], false,
+                    [&](double dx, double dy, double dz, double r2) {
+                        const double r1 = std::sqrt(r2);
+                        const double f = koSwitch(r1, rcut);
+                        if (f == 0.0) return;
+                        const double gamma = std::pow(std::pow(r1, gexp) + gam_pow, -1.0 / gexp);
+                        const double dgamma_dr = -std::pow(r1, gexp - 2.0) * std::pow(gamma, gexp + 1.0) * r1;
+                        // d/dr [ f (gamma - 1/r) ] = f' (gamma - 1/r) + f (gamma' + 1/r^2)
+                        double df = 0.0;
+                        if (r1 > rcut - 1.0 && r1 < rcut) {
+                            const double x = r1 - (rcut - 1.0);
+                            df = -30.0 * x * x * x * x + 60.0 * x * x * x - 30.0 * x * x;
+                        }
+                        const double dko = df * (gamma - 1.0 / r1) + f * (dgamma_dr + 1.0 / r2);
+                        const double force = qq * dko / r1;
+                        m_gradient(iat, 0) += force * dx; m_gradient(jat, 0) -= force * dx;
+                        m_gradient(iat, 1) += force * dy; m_gradient(jat, 1) -= force * dy;
+                        m_gradient(iat, 2) += force * dz; m_gradient(jat, 2) -= force * dz;
+                    });
+            }
+        }
+    }
+
+    // 5. GFN2 multipoles
+    if (m_method == MethodType::GFN2 && m_mp_initialized && !m_mp_grad_off)
+        addMultipoleGradientPeriodic(m_gradient, dEdcn);
+
+    // 3b. dispersion (periodic D3/D4, CN chain rule already folded)
+    if (m_disp_gradient_valid && !m_d4_grad_off && m_disp_gradient.rows() == nat && m_disp_gradient.cols() == 3) {
+        m_gradient += m_disp_gradient;
+        if (m_disp_dEdcn.size() == nat) dEdcn += m_disp_dEdcn;
+    }
+
+    // 4. CN chain rule of the H0 coordination number over images (j < i)
+    if (!m_cnchain_off) {
+        const PBCUtils::LatticeImageList images = PBCUtils::makeLatticeImageList(m_cell_bohr, kPbcCnCutoffBohr);
+        std::vector<double> rcov(nat);
+        for (int i = 0; i < nat; ++i) rcov[i] = covalent_rad_d3_au(m_atoms[i]);
+        for (int i = 0; i < nat; ++i)
+            for (int j = 0; j < i; ++j) {
+                const double rc = rcov[i] + rcov[j];
+                PBCUtils::forEachImage(images, &xyz[3 * i], &xyz[3 * j], false,
+                    [&](double dx, double dy, double dz, double r2) {
+                        const double r = std::sqrt(r2);
+                        double dcndr;
+                        if (m_method == MethodType::GFN1) {
+                            constexpr double k = 16.0;
+                            const double ef = std::exp(-k * (rc / r - 1.0));
+                            const double c = 1.0 / (1.0 + ef);
+                            dcndr = -c * (1.0 - c) * k * rc / r2;
+                        } else {
+                            constexpr double ka = 10.0, kb = 20.0, rs = 2.0;
+                            const double ef1 = std::exp(-ka * (rc / r - 1.0));
+                            const double ef2 = std::exp(-kb * ((rc + rs) / r - 1.0));
+                            const double c1 = 1.0 / (1.0 + ef1), c2 = 1.0 / (1.0 + ef2);
+                            const double dc1dr = -c1 * (1.0 - c1) * ka * rc / r2;
+                            const double dc2dr = -c2 * (1.0 - c2) * kb * (rc + rs) / r2;
+                            dcndr = dc1dr * c2 + c1 * dc2dr;
+                        }
+                        const double factor = (dEdcn(i) + dEdcn(j)) * dcndr / r;
+                        m_gradient(i, 0) += factor * dx; m_gradient(j, 0) -= factor * dx;
+                        m_gradient(i, 1) += factor * dy; m_gradient(j, 1) -= factor * dy;
+                        m_gradient(i, 2) += factor * dz; m_gradient(j, 2) -= factor * dz;
+                    });
+            }
+    }
 }
 
 /* ------------------------------------------------------------------ *

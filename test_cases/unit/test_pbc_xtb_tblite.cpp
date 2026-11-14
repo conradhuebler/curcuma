@@ -22,7 +22,7 @@
  * factors the energy is independent of alpha (CURCUMA_PBC_MP_ALPHA 0.14 vs 0.3 at L = 12, < 5e-7 Eh); (c) the
  * 30 A cell is within 5e-6 Eh of the vacuum energy (dipolar cell, tin-foil term; GFN1 shows 1.1e-6);
  * (d) regression values of the consistent energies (own numbers of 2026-11-14, 1e-9 Eh).
- * Also: hasPeriodicEnergy() true with a cell, false without; a gradient request with a cell is refused (P3).
+ * Also: hasPeriodicEnergy() true with a cell, false without; a gradient request with a cell is accepted (P3).
  * Exit 0 when every check passes.
  */
 #include "src/core/energycalculator.h"
@@ -141,17 +141,23 @@ int main()
     testGfn1();
     testGfn2();
     {
-        // gradient with a cell: refused until P3
+        // gradient with a cell (P3): accepted, same energy as the energy-only call (FD gate: pbc_xtb_gradient)
         Mol mol = dimerInCell(8.0);
         EnergyCalculator calc("gfn1", kCfg);
         calc.setMolecule(mol);
-        bool threw = false;
-        try {
-            calc.CalculateEnergy(true);
-        } catch (const std::exception&) {
-            threw = true;
-        }
-        check(threw || calc.Error(), "gradient request with a cell is refused (P3 pending)");
+        const double e_g = calc.CalculateEnergy(true);
+        check(!calc.Error(), "gradient request with a cell is accepted (P3)");
+        const double e_0 = energyOf("gfn1", 8.0, kCfg);
+        check(std::abs(e_g - e_0) < 1.0e-12, "energy with and without gradient request identical");
+        // P5: a GPU request with a cell runs on the CPU (counted fallback; in a build without the plugin the plugin
+        // fallback fires first, the periodic guard is then the second line and the energy is the CPU one)
+        const json gpu_cfg = { { "verbosity", 0 }, { "threads", 1 }, { "gpu", "cuda" } };
+        EnergyCalculator calc_gpu("gfn1", gpu_cfg);
+        calc_gpu.setMolecule(mol);
+        check(!calc_gpu.Error(), "gfn1 -gpu cuda with a cell: no error");
+        check(calc_gpu.hasPeriodicEnergy(), "gfn1 -gpu cuda with a cell: periodic energy (CPU)");
+        const double e_gpu = calc_gpu.CalculateEnergy(false);
+        check(std::abs(e_gpu - e_0) < 1.0e-10, "gfn1 -gpu cuda with a cell gives the CPU periodic energy");
     }
     if (g_failures == 0)
         std::printf("test_pbc_xtb_tblite: all checks passed\n");

@@ -768,6 +768,16 @@ endif()
 add_test(NAME pbc_xtb_tblite COMMAND test_pbc_xtb_tblite WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 set_tests_properties(pbc_xtb_tblite PROPERTIES TIMEOUT 300 LABELS "pbc;xtb;sqm")
 
+# Claude Generated (Nov 2026, WP-PERIODIC-XTB P3): finite-difference gate of the periodic gfn1/gfn2 gradient
+# (water dimer in 8 and 12 A cubes, Angstrom steps), force sum, GFN1 forces against tblite
+add_executable(test_pbc_xtb_gradient unit/test_pbc_xtb_gradient.cpp)
+target_link_libraries(test_pbc_xtb_gradient curcuma_core test_molecule_registry)
+if(USE_PCH)
+    target_precompile_headers(test_pbc_xtb_gradient REUSE_FROM curcuma_core)
+endif()
+add_test(NAME pbc_xtb_gradient COMMAND test_pbc_xtb_gradient WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(pbc_xtb_gradient PROPERTIES TIMEOUT 600 LABELS "pbc;xtb;sqm")
+
 # Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A2): periodic coordination number (value and
 # derivative), periodic SpatialCellList. Tests the CN only; the energy terms have no minimum image yet.
 add_executable(test_pbc_cn unit/test_pbc_cn.cpp)

@@ -556,6 +556,15 @@ double XTB::Calculation(bool gradient)
     }
 
 
+    // WP-PERIODIC-XTB P5 (Claude Generated, Nov 2026): defence in depth behind the EnergyCalculator swap. The device
+    // integral/SCF/gradient paths know no lattice images; a cell with a device backend must not run.
+    if (m_pbc && m_gpu_scf) {
+        setHardError("periodic cell with a GPU backend: the native xTB device paths have no lattice images "
+                     "(docs/WP-PERIODIC-XTB.md P5); run without -gpu");
+        m_scf_converged = false;
+        return m_E_total;
+    }
+
     // 1. Coordination numbers + 2. self-energies. Claude Generated (Oct 2026): on the device-integral path the
     // device computes both itself (beginComputed) and the CN is downloaded from there, so the host O(nat^2) loop
     // is only run when the host builds the integrals (ensure_host_cn) or a host consumer needs it later.

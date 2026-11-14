@@ -321,14 +321,6 @@ double NativeXtbMethod::calculateEnergy(bool gradient)
         // up the configuration (D4 charge source + SCF convergence settings).
         applyConfig();
 
-        // WP-PERIODIC-XTB (Nov 2026): the periodic gradient is stage P3; until then a gradient with a cell is
-        // an error, not the vacuum gradient of a periodic energy.
-        if (gradient && m_xtb->hasPeriodicCell()) {
-            handleError("native " + getMethodName() + " with a unit cell: the periodic gradient (P3) is not "
-                        "implemented yet; only single-point energies are available (docs/WP-PERIODIC-XTB.md)");
-            return 0.0;
-        }
-
         m_last_energy = m_xtb->Calculation(gradient);
         m_calculation_done = true;
 

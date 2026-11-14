@@ -1480,6 +1480,16 @@ private:
      * translation lists and conv = 100 eps (coulomb/multipole.f90 get_multipole_matrix_3d, coulomb/ewald.f90). */
     void setupMultipolePeriodic();                                                   // xtb_periodic.cpp
     void buildMultipoleInteractionMatricesPeriodic() const;                          // xtb_periodic.cpp
+    mutable double m_mp_pbc_alpha = 0.0;                              ///< Ewald alpha of the last periodic multipole build
+    mutable std::vector<std::array<double, 3>> m_mp_pbc_dtrans;       ///< its direct translation box
+    mutable std::vector<std::array<double, 3>> m_mp_pbc_rtrans;       ///< its reciprocal box (k vectors, no origin)
+    /* P3 (gradient with a cell): the sections of calculateGradient() over the lattice images (repulsion, XB, H0/Pulay
+     * incl. multipole integral Pulay and the CN terms of the self images, Klopman-Ohno remainder), the point-charge
+     * Ewald gradient (EwaldSum::gradient at q_at), the periodic multipole gradient (tblite get_multipole_gradient_3d
+     * with the P2b reciprocal factors), the cached periodic dispersion gradient and the CN chain rule over images. */
+    void calculateGradientPeriodic();                                                // xtb_periodic.cpp
+    void addHalogenBondGradientPeriodic(Matrix& gradient) const;                     // xtb_periodic.cpp
+    void addMultipoleGradientPeriodic(Matrix& gradient, Vector& dEdcn) const;        // xtb_periodic.cpp
     /// tblite basis get_cutoff: min(sqrt(2 intcut / min_alpha), 40) Bohr with intcut 25 (accuracy 1); 0 = this rule
     double pbcIntegralCutoffBohr() const;                                            // xtb_periodic.cpp
     double m_pbc_integral_cutoff = 0.0;    ///< -xtb.pbc_integral_cutoff_bohr (0 = tblite rule)

@@ -299,7 +299,23 @@ void EnergyCalculator::setMolecule(const Mol& mol) {
         // Claude Generated (Nov 2026, A3b): the GPU GFN-FF paths (CUDA, ROCm, Vulkan) have no minimum image
         // (device pair builders, EEQ matrix), so a periodic cell would give a wrong energy without a message.
         // Swap to the CPU method BEFORE the device setup; counted GPU fallback, -gpu_strict true stops here.
-        if (MethodFactory::periodicCellNeedsCpu(mol, *m_method)) {
+        bool periodic_cpu_swap = MethodFactory::periodicCellNeedsCpu(mol, *m_method);
+        // Claude Generated (Nov 2026, WP-PERIODIC-XTB P5): the native gfn1/gfn2 device paths (CUDA, ROCm, Vulkan)
+        // build S/H0, gamma and the multipoles without lattice images, so a cell on the GPU would be the vacuum
+        // energy without a message. Same pattern as the GFN-FF guard: counted fallback to the CPU method.
+        if (!periodic_cpu_swap && mol.m_has_pbc) {
+            std::string gpu = m_controller.is_object() ? m_controller.value("gpu", std::string("none")) : std::string("none");
+            std::string name = m_requested_method_name;
+            std::transform(gpu.begin(), gpu.end(), gpu.begin(), ::tolower);
+            std::transform(name.begin(), name.end(), name.begin(), ::tolower);
+            if (gpu != "none" && !gpu.empty() && (name == "gfn1" || name == "gfn2")) {
+                CurcumaLogger::warn("periodic cell set: the native " + name + " GPU path has no lattice images, using the CPU");
+                curcuma::reportGpuFallback("native xTB: periodic cell set, GPU path has no lattice images, calculation on the CPU",
+                                           fmt::format("{} atoms", mol.m_number_atoms));
+                periodic_cpu_swap = true;
+            }
+        }
+        if (periodic_cpu_swap) {
             json cpu_config = m_controller;
             cpu_config["gpu"] = "none";
             if (!createMethod(m_requested_method_name, cpu_config)) {
