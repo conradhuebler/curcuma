@@ -67,6 +67,7 @@ void XTB::ensureHostMultipoleIntegrals()
  * ------------------------------------------------------------------ */
 void XTB::buildMultipoleInteractionMatrices() const
 {
+    if (m_pbc) { buildMultipoleInteractionMatricesPeriodic(); return; }   // WP-PERIODIC-XTB P2b (xtb_periodic.cpp)
     const int nat = m_atomcount;
     using namespace curcuma::xtb::gfn2_params;
     std::vector<double> xyz_bohr(3 * nat);
@@ -140,6 +141,7 @@ void XTB::setupMultipole(bool integrals_on_device, bool defer_amat)
     const int nao = m_basis.nao;
 
     if (nat == 0 || nao == 0) return;
+    if (m_pbc) { setupMultipolePeriodic(); return; }   // WP-PERIODIC-XTB P2b (xtb_periodic.cpp), CPU only
 
     // Geometry in bohr
     std::vector<double> xyz_bohr(3 * nat);

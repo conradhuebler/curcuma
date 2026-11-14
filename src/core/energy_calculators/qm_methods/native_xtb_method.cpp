@@ -236,10 +236,7 @@ bool NativeXtbMethod::setMolecule(const Mol& mol)
         m_xtb->clearPeriodicCell();
         if (mol.m_has_pbc) {
             std::string err;
-            if (m_method == curcuma::xtb::MethodType::GFN2) {
-                err = "native gfn2 with a unit cell: the periodic multipole electrostatics (P2b) are not "
-                      "implemented yet; use gfn1 or remove the cell (docs/WP-PERIODIC-XTB.md)";
-            } else if (m_xtb->solventName() != "none" && !m_xtb->solventName().empty()) {
+            if (m_xtb->solventName() != "none" && !m_xtb->solventName().empty()) {
                 err = "native " + getMethodName() + " with a unit cell: implicit solvation is not periodic";
             }
             if (err.empty() && !m_xtb->setPeriodicCell(mol.m_unit_cell, err)) { /* message in err */ }

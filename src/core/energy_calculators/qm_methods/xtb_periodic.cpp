@@ -38,6 +38,7 @@
 #include "STO_CGTO.hpp"
 #include "xtb_ao_utils.hpp"
 #include "xtb_coulomb.hpp"
+#include "xtb_multipole_ints.hpp"
 
 #include "src/core/curcuma_logger.h"
 #include "src/core/energy_calculators/ff_methods/ewald.h"
@@ -49,6 +50,8 @@
 
 #include <cmath>
 #include <limits>
+
+namespace MI = curcuma::xtb::multipole_ints;
 
 namespace curcuma::xtb {
 
@@ -577,6 +580,354 @@ void XTB::buildGammaMatrixPeriodic()
             m_gamma(js, is) = val;
         }
     }
+}
+
+/* ------------------------------------------------------------------ *
+ *  P2b: GFN2 anisotropic electrostatics (dipole, quadrupole) with a    *
+ *  cell. The Ewald parameters and translation lists follow tblite     *
+ *  exactly (coulomb/ewald.f90 search_alpha / search_cutoff with the    *
+ *  multipole terms, conv = 100 eps, box-shaped lattice points of       *
+ *  cutoff.f90) because the direct sum also truncates the damping       *
+ *  remainder (fdmp - 1) g3 ~ r^-6 of the damped kernels: a different   *
+ *  direct cutoff is a different (converging) model value, documented   *
+ *  in docs/WP-PERIODIC-XTB.md P2b.                                      *
+ * ------------------------------------------------------------------ */
+namespace {
+
+constexpr double kTbliteEps = 1.4901161193847656e-08;   // sqrt(epsilon(0.0_wp))
+constexpr double kSqrtPi = 1.7724538509055159;
+
+inline double tbDirMp(double dist, double alpha)
+{
+    const double arg = alpha * dist;
+    return (2.0 / kSqrtPi * arg * std::exp(-arg * arg) + std::erfc(arg)) / (dist * dist * dist);
+}
+inline double tbRecMp(double dist, double alpha, double vol)
+{
+    return 4.0 * M_PI * std::exp(-0.25 * dist * dist / (alpha * alpha)) / vol;
+}
+
+// tblite search_cutoff: smallest x (by bisection) with term(x) <= conv
+template <class F>
+double tbSearchCutoff(F term, double conv)
+{
+    double x = kTbliteEps;
+    double y = term(x);
+    while (y > conv && x <= 1.0e300) { x *= 2.0; y = term(x); }
+    double xl = 0.5 * x, yl = term(xl), xr = x, yr = y;
+    for (int iter = 0; iter < 30; ++iter) {
+        if (yl - yr <= conv) break;
+        x = 0.5 * (xl + xr);
+        y = term(x);
+        if (y >= conv) { xl = x; yl = y; } else { xr = x; yr = y; }
+    }
+    return x;
+}
+
+// tblite search_alpha for the multipole terms (lattice orthorhombic: rlen = 2 pi / L_max, dlen = L_min)
+double tbSearchAlphaMultipole(const PBCUtils::OrthoCell& cell)
+{
+    const double vol = cell.L[0] * cell.L[1] * cell.L[2];
+    const double dlen = cell.minLength();
+    const double rlen = 2.0 * M_PI / std::max(cell.L[0], std::max(cell.L[1], cell.L[2]));
+    auto diff = [&](double a) {
+        return (tbRecMp(4.0 * rlen, a, vol) - tbRecMp(5.0 * rlen, a, vol))
+             - (tbDirMp(2.0 * dlen, a) - tbDirMp(3.0 * dlen, a));
+    };
+    const double tol = kTbliteEps;
+    double alpha = kTbliteEps;
+    double d = diff(alpha);
+    while (d < -tol && alpha <= 1.0e300) { alpha *= 2.0; d = diff(alpha); }
+    if (alpha > 1.0e300 || alpha == kTbliteEps) return 0.25;
+    double alpl = 0.5 * alpha;
+    while (d < tol && alpha <= 1.0e300) { alpha *= 2.0; d = diff(alpha); }
+    if (alpha > 1.0e300) return 0.25;
+    double alpr = alpha;
+    alpha = 0.5 * (alpl + alpr);
+    d = diff(alpha);
+    int ibs = 0;
+    while (std::abs(d) > tol && ibs <= 30) {
+        if (d < 0) alpl = alpha; else alpr = alpha;
+        alpha = 0.5 * (alpl + alpr);
+        d = diff(alpha);
+        ++ibs;
+    }
+    if (ibs > 30) return 0.25;
+    return alpha;
+}
+
+// tblite get_lattice_points: every n with |n_a| <= ceil(rthr / L_a) (box, no spherical filter); origin optional
+std::vector<std::array<double, 3>> tbBoxPoints(const double L[3], double rthr, bool with_origin)
+{
+    int rep[3];
+    for (int a = 0; a < 3; ++a) rep[a] = static_cast<int>(std::ceil(rthr / L[a]));
+    std::vector<std::array<double, 3>> pts;
+    for (int ix = -rep[0]; ix <= rep[0]; ++ix)
+        for (int iy = -rep[1]; iy <= rep[1]; ++iy)
+            for (int iz = -rep[2]; iz <= rep[2]; ++iz) {
+                if (!with_origin && ix == 0 && iy == 0 && iz == 0) continue;
+                pts.push_back({ ix * L[0], iy * L[1], iz * L[2] });
+            }
+    return pts;
+}
+
+} // namespace
+
+void XTB::buildMultipoleInteractionMatricesPeriodic() const
+{
+    using namespace curcuma::xtb::gfn2_params;
+    const int nat = m_atomcount;
+    const std::vector<double> xyz = geometryBohr(m_geometry, nat);
+    for (int k = 0; k < 3; ++k) m_mp_amat_sd[k] = Eigen::MatrixXd::Zero(nat, nat);
+    for (int a = 0; a < 3; ++a)
+        for (int b = 0; b < 3; ++b) m_mp_amat_dd[a][b] = Eigen::MatrixXd::Zero(nat, nat);
+    for (int k = 0; k < 6; ++k) m_mp_amat_sq[k] = Eigen::MatrixXd::Zero(nat, nat);
+
+    const double vol = m_cell_bohr.L[0] * m_cell_bohr.L[1] * m_cell_bohr.L[2];
+    double alpha = tbSearchAlphaMultipole(m_cell_bohr);
+    double conv = 100.0 * kTbliteEps;
+    if (const char* e = std::getenv("CURCUMA_PBC_MP_ALPHA")) alpha = std::atof(e);   // convergence experiments
+    if (const char* e = std::getenv("CURCUMA_PBC_MP_CONV")) conv = std::atof(e);
+    // charge-dipole reciprocal term: -grad of (4 pi/V) sum_k w_k cos(k.r) over the full k set is sum_k w_k k sin(k.r)
+    // (factor 1); tblite's get_amat_sdq_rec_3d uses 2 k sin (factor 2) over the same full set. Experiment switch.
+    double sd_rec_factor = 1.0;
+    if (const char* e = std::getenv("CURCUMA_PBC_MP_SD_FACTOR")) sd_rec_factor = std::atof(e);
+    double sq_rec_factor = -1.0 / 3.0;   // tblite: +1 (see the comment at the reciprocal loop)
+    if (const char* e = std::getenv("CURCUMA_PBC_MP_SQ_FACTOR")) sq_rec_factor = std::atof(e);
+    auto build = [&](double alpha) {
+    const double dir_cut = tbSearchCutoff([&](double x) { return tbDirMp(x, alpha); }, conv);
+    const double rec_cut = tbSearchCutoff([&](double x) { return tbRecMp(x, alpha, vol); }, conv);
+    const std::vector<std::array<double, 3>> dtrans = tbBoxPoints(m_cell_bohr.L, dir_cut, true);
+    const double Lrec[3] = { 2.0 * M_PI / m_cell_bohr.L[0], 2.0 * M_PI / m_cell_bohr.L[1], 2.0 * M_PI / m_cell_bohr.L[2] };
+    const std::vector<std::array<double, 3>> rtrans = tbBoxPoints(Lrec, rec_cut, false);
+    if (CurcumaLogger::get_verbosity() >= 3)
+        CurcumaLogger::info_fmt("  periodic multipoles: alpha {:.4f}, direct cutoff {:.2f} Bohr ({} translations), "
+                                "reciprocal cutoff {:.3f} ({} k vectors)", alpha, dir_cut, dtrans.size(), rec_cut, rtrans.size());
+
+    const double fac = 4.0 * M_PI / vol;
+    const double alp2 = alpha * alpha;
+    const double eps_r = kTbliteEps;
+
+    // reciprocal weights per k (independent of the pair)
+    std::vector<double> kexp(rtrans.size());
+    for (size_t t = 0; t < rtrans.size(); ++t) {
+        const double g2 = rtrans[t][0] * rtrans[t][0] + rtrans[t][1] * rtrans[t][1] + rtrans[t][2] * rtrans[t][2];
+        kexp[t] = (g2 < eps_r) ? 0.0 : fac * std::exp(-0.25 * g2 / alp2) / g2;
+    }
+
+    const int mp_threads = effectiveIntraThreads(nat);
+    parallelStripes(mp_threads, [&](int tid, int nth) {
+    for (int iat = tid; iat < nat; iat += nth) {
+        for (int jat = 0; jat <= iat; ++jat) {
+            // minimum image of x_i - x_j (tblite: Wigner-Seitz image; identical for non-degenerate positions)
+            double v0x = xyz[3 * iat] - xyz[3 * jat], v0y = xyz[3 * iat + 1] - xyz[3 * jat + 1], v0z = xyz[3 * iat + 2] - xyz[3 * jat + 2];
+            PBCUtils::applyMinimumImageOrtho(m_cell_bohr, v0x, v0y, v0z);
+            const double rr = 0.5 * (m_mp_mrad[jat] + m_mp_mrad[iat]);
+
+            double sd[3] = { 0, 0, 0 }, dd[3][3] = { { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 } }, sq[6] = { 0, 0, 0, 0, 0, 0 };
+            // reciprocal part (tblite get_amat_sdq_rec_3d), k.T = 2 pi n: the image choice does not matter
+            dd[0][0] += fac / 6.0; dd[1][1] += fac / 6.0; dd[2][2] += fac / 6.0;
+            sq[0] -= fac / 9.0; sq[2] -= fac / 9.0; sq[5] -= fac / 9.0;
+            for (size_t t = 0; t < rtrans.size(); ++t) {
+                if (kexp[t] == 0.0) continue;
+                const double kx = rtrans[t][0], ky = rtrans[t][1], kz = rtrans[t][2];
+                const double gv = v0x * kx + v0y * ky + v0z * kz;
+                const double sink = std::sin(gv) * kexp[t];
+                const double cosk = std::cos(gv) * kexp[t];
+                sd[0] += sd_rec_factor * kx * sink; sd[1] += sd_rec_factor * ky * sink; sd[2] += sd_rec_factor * kz * sink;
+                const double kv[3] = { kx, ky, kz };
+                for (int a = 0; a < 3; ++a)
+                    for (int b = 0; b < 3; ++b) dd[a][b] += kv[a] * kv[b] * cosk;
+                // charge-quadrupole: the vacuum kernel v_a v_b / r^5 is (1/3) d_a d_b (1/r) for a traceless
+                // quadrupole, so its reciprocal part is (1/3) d_a d_b sum_k w_k cos(k.r) = -(1/3) w_k k_a k_b cos(k.r)
+                // (the direct part of tblite is exactly (1/3) d_a d_b erfc(a r)/r, see the derivation in
+                // docs/WP-PERIODIC-XTB.md P2b). tblite's get_amat_sdq_rec_3d adds + k_a k_b cos (factor -3 off),
+                // which made the block alpha dependent (probe CURCUMA_PBC_MP_DEBUG: 6.6e-3 of 3.3e-2 at L = 12).
+                const double cq = sq_rec_factor * cosk;
+                sq[0] += kx * kx * cq; sq[1] += 2.0 * kx * ky * cq; sq[2] += ky * ky * cq;
+                sq[3] += 2.0 * kx * kz * cq; sq[4] += 2.0 * ky * kz * cq; sq[5] += kz * kz * cq;
+            }
+            // direct part (tblite get_amat_sdq_dir_3d): every translation of the box, damped kernel minus the
+            // Ewald-screened bare kernel
+            for (const auto& T : dtrans) {
+                const double vx = v0x + T[0], vy = v0y + T[1], vz = v0z + T[2];
+                const double r1 = std::sqrt(vx * vx + vy * vy + vz * vz);
+                if (r1 < eps_r) continue;
+                const double g1 = 1.0 / r1, g3 = g1 * g1 * g1, g5 = g3 * g1 * g1;
+                const double fdmp3 = 1.0 / (1.0 + 6.0 * std::pow(rr / r1, mp_dmp3));
+                const double fdmp5 = 1.0 / (1.0 + 6.0 * std::pow(rr / r1, mp_dmp5));
+                const double arg = r1 * alpha, arg2 = arg * arg;
+                const double expt = std::exp(-arg2) / kSqrtPi;
+                const double erft = -std::erf(arg) * g1;
+                const double e1 = g1 * g1 * (erft + 2.0 * expt * alpha);
+                const double e2 = g1 * g1 * (e1 + 4.0 * expt * alp2 * alpha / 3.0);
+                const double tmp3 = fdmp3 * g3 + e1;
+                const double t5 = g5 * fdmp5 + e2;
+                const double t3 = fdmp5 * g3 + e1;
+                sd[0] += vx * tmp3; sd[1] += vy * tmp3; sd[2] += vz * tmp3;
+                const double vv[3] = { vx, vy, vz };
+                for (int a = 0; a < 3; ++a)
+                    for (int b = 0; b < 3; ++b) dd[a][b] += ((a == b) ? t3 : 0.0) - vv[a] * vv[b] * 3.0 * t5;
+                sq[0] += vx * vx * t5 - t3 / 3.0; sq[1] += 2.0 * vx * vy * t5; sq[2] += vy * vy * t5 - t3 / 3.0;
+                sq[3] += 2.0 * vx * vz * t5; sq[4] += 2.0 * vy * vz * t5; sq[5] += vz * vz * t5 - t3 / 3.0;
+            }
+            // amat(:, jat, iat) with vec = x_i - x_j (target j, source i); the mirrored element by (anti)symmetry
+            for (int k = 0; k < 3; ++k) {
+                m_mp_amat_sd[k](jat, iat) = (iat == jat) ? 0.0 : sd[k];
+                m_mp_amat_sd[k](iat, jat) = (iat == jat) ? 0.0 : -sd[k];
+            }
+            for (int a = 0; a < 3; ++a)
+                for (int b = 0; b < 3; ++b) {
+                    m_mp_amat_dd[a][b](jat, iat) = dd[a][b];
+                    m_mp_amat_dd[a][b](iat, jat) = dd[a][b];
+                }
+            for (int k = 0; k < 6; ++k) {
+                m_mp_amat_sq[k](jat, iat) = sq[k];
+                m_mp_amat_sq[k](iat, jat) = sq[k];
+            }
+        }
+    }
+    });
+    // self terms (tblite): dipole -2/3 alpha^3/sqrt(pi) (x2 on the diagonal), quadrupole trace 4/9 alpha^3/sqrt(pi)
+    const double a3 = alpha * alpha * alpha / kSqrtPi;
+    for (int iat = 0; iat < nat; ++iat) {
+        for (int k = 0; k < 3; ++k) m_mp_amat_dd[k][k](iat, iat) += 2.0 * (-2.0 / 3.0 * a3);
+        const double rq = 4.0 / 9.0 * a3;
+        m_mp_amat_sq[0](iat, iat) += rq; m_mp_amat_sq[2](iat, iat) += rq; m_mp_amat_sq[5](iat, iat) += rq;
+    }
+    };   // build(alpha)
+    build(alpha);
+    if (std::getenv("CURCUMA_PBC_MP_DEBUG")) {
+        // alpha-independence probe per block: rebuild with 1.5 alpha, print the largest element change
+        const auto sd0 = m_mp_amat_sd;
+        const auto dd0 = m_mp_amat_dd;
+        const auto sq0 = m_mp_amat_sq;
+        build(1.5 * alpha);
+        double dsd = 0, ddd = 0, dsq = 0, msd = 0, mdd = 0, msq = 0;
+        for (int k = 0; k < 3; ++k) { dsd = std::max(dsd, (m_mp_amat_sd[k] - sd0[k]).cwiseAbs().maxCoeff()); msd = std::max(msd, sd0[k].cwiseAbs().maxCoeff()); }
+        for (int a = 0; a < 3; ++a) for (int b = 0; b < 3; ++b) { ddd = std::max(ddd, (m_mp_amat_dd[a][b] - dd0[a][b]).cwiseAbs().maxCoeff()); mdd = std::max(mdd, dd0[a][b].cwiseAbs().maxCoeff()); }
+        for (int k = 0; k < 6; ++k) { dsq = std::max(dsq, (m_mp_amat_sq[k] - sq0[k]).cwiseAbs().maxCoeff()); msq = std::max(msq, sq0[k].cwiseAbs().maxCoeff()); }
+        CurcumaLogger::result(fmt::format("MP_DEBUG alpha {:.4f} vs {:.4f}: max|dSD| {:.3e} (max {:.3e}), max|dDD| {:.3e} (max {:.3e}), max|dSQ| {:.3e} (max {:.3e})",
+                                          alpha, 1.5 * alpha, dsd, msd, ddd, mdd, dsq, msq));
+        build(alpha);
+    }
+    m_mp_amat_deferred = false;
+}
+
+void XTB::setupMultipolePeriodic()
+{
+    using namespace curcuma::xtb::gfn2_params;
+    const int nat = m_atomcount;
+    const int nao = m_basis.nao;
+    const int nsh = m_basis.nsh;
+    const std::vector<double> xyz = geometryBohr(m_geometry, nat);
+    const PBCUtils::LatticeImageList images = PBCUtils::makeLatticeImageList(m_cell_bohr, pbcIntegralCutoffBohr());
+    std::vector<CGTO::Shell> shells(nsh);
+    for (int ish = 0; ish < nsh; ++ish) shells[ish] = as_cgto_shell(m_basis.cgto[ish]);
+
+    // 1 + 2: AO dipole and raw quadrupole integrals, per image shifted to the image position of the column atom
+    // (origin at atom(nu) + T), summed over the images; the traceless transform is linear and applied at the end.
+    for (int k = 0; k < 3; ++k) m_dp_int[k] = Eigen::MatrixXd::Zero(nao, nao);
+    std::array<Eigen::MatrixXd, 6> qraw;
+    for (int k = 0; k < 6; ++k) qraw[k] = Eigen::MatrixXd::Zero(nao, nao);
+
+    const int mp_threads = effectiveIntraThreads(nsh);
+    parallelStripes(mp_threads, [&](int tid, int nth) {
+    for (int ish_a = tid; ish_a < nsh; ish_a += nth) {
+        const int ang_a = m_basis.ang_sh[ish_a];
+        const int iat = m_basis.sh2at[ish_a];
+        const int ia0 = m_basis.iao_sh[ish_a];
+        const int nca = m_basis.nao_sh[ish_a];
+        const CGTO::Shell& sh_a = shells[ish_a];
+        const double* xi = &xyz[3 * iat];
+        for (int ish_b = 0; ish_b < nsh; ++ish_b) {
+            const int ang_b = m_basis.ang_sh[ish_b];
+            const int jat = m_basis.sh2at[ish_b];
+            const int jb0 = m_basis.iao_sh[ish_b];
+            const int ncb = m_basis.nao_sh[ish_b];
+            const CGTO::Shell& sh_b = shells[ish_b];
+            const bool dpair = (ang_a >= 2 || ang_b >= 2);
+
+            auto addBlock = [&](const double* xj) {
+                double bS[9], bD[27], bQ[54];
+                double Db[5 * 5 * 3], Qb[5 * 5 * 6], Sb[6 * 6];
+                if (!dpair) {
+                    MI::cgto_multipole_block(sh_a, ang_a, sh_b, ang_b, xi[0], xi[1], xi[2], xj[0], xj[1], xj[2], bS, bD, bQ);
+                } else {
+                    sphericalMultipoleBlock(sh_a, ang_a, sh_b, ang_b, xi[0], xi[1], xi[2], xj[0], xj[1], xj[2], Db, Qb, 5);
+                    sphericalOverlapBlock(sh_a, ang_a, sh_b, ang_b, xi[0], xi[1], xi[2], xj[0], xj[1], xj[2], Sb, 6);
+                }
+                const double Rx = xj[0], Ry = xj[1], Rz = xj[2];
+                for (int ia = 0; ia < nca; ++ia) {
+                    const int mu = ia0 + ia;
+                    for (int jb = 0; jb < ncb; ++jb) {
+                        const int nu = jb0 + jb;
+                        double Smn, dx, dy, dz, q[6];
+                        if (!dpair) {
+                            const int c = ia * ncb + jb;
+                            Smn = bS[c]; dx = bD[c * 3]; dy = bD[c * 3 + 1]; dz = bD[c * 3 + 2];
+                            for (int k = 0; k < 6; ++k) q[k] = bQ[c * 6 + k];
+                        } else {
+                            const int o = ia * 5 + jb;
+                            Smn = Sb[ia * 6 + jb]; dx = Db[o * 3]; dy = Db[o * 3 + 1]; dz = Db[o * 3 + 2];
+                            for (int k = 0; k < 6; ++k) q[k] = Qb[o * 6 + k];
+                        }
+                        m_dp_int[0](mu, nu) += dx - Rx * Smn;
+                        m_dp_int[1](mu, nu) += dy - Ry * Smn;
+                        m_dp_int[2](mu, nu) += dz - Rz * Smn;
+                        qraw[0](mu, nu) += q[0] - 2 * Rx * dx + Rx * Rx * Smn;
+                        qraw[1](mu, nu) += q[1] - Rx * dy - Ry * dx + Rx * Ry * Smn;
+                        qraw[2](mu, nu) += q[2] - 2 * Ry * dy + Ry * Ry * Smn;
+                        qraw[3](mu, nu) += q[3] - Rx * dz - Rz * dx + Rx * Rz * Smn;
+                        qraw[4](mu, nu) += q[4] - Ry * dz - Rz * dy + Ry * Rz * Smn;
+                        qraw[5](mu, nu) += q[5] - 2 * Rz * dz + Rz * Rz * Smn;
+                    }
+                }
+            };
+            if (iat == jat) addBlock(&xyz[3 * jat]);   // T = 0 on-atom block
+            PBCUtils::forEachImage(images, xi, &xyz[3 * jat], iat == jat,
+                [&](double dx, double dy, double dz, double) {
+                    const double xj_img[3] = { xi[0] - dx, xi[1] - dy, xi[2] - dz };
+                    addBlock(xj_img);
+                });
+        }
+    }
+    });
+    for (int k = 0; k < 6; ++k) m_qp_int[k] = Eigen::MatrixXd::Zero(nao, nao);
+    for (int mu = 0; mu < nao; ++mu)
+        for (int nu = 0; nu < nao; ++nu) {
+            const double qxx = qraw[0](mu, nu), qxy = qraw[1](mu, nu), qyy = qraw[2](mu, nu);
+            const double qxz = qraw[3](mu, nu), qyz = qraw[4](mu, nu), qzz = qraw[5](mu, nu);
+            const double tr = 0.5 * (qxx + qyy + qzz);
+            m_qp_int[0](mu, nu) = 1.5 * qxx - tr;
+            m_qp_int[1](mu, nu) = 1.5 * qxy;
+            m_qp_int[2](mu, nu) = 1.5 * qyy - tr;
+            m_qp_int[3](mu, nu) = 1.5 * qxz;
+            m_qp_int[4](mu, nu) = 1.5 * qyz;
+            m_qp_int[5](mu, nu) = 1.5 * qzz - tr;
+        }
+
+    // 3 + 4: periodic GFN2 CN (the same double-exponential CN as the self-energies) and the damping radii
+    const Vector cn = computeCoordinationNumbers();
+    m_mp_mrad.resize(nat);
+    m_mp_dkernel.resize(nat);
+    m_mp_qkernel.resize(nat);
+    for (int i = 0; i < nat; ++i) {
+        const int z = m_atoms[i];
+        const double vcn = p_vcn[z - 1];
+        const double rad = p_rad[z - 1];
+        const double arg = cn(i) - vcn - mp_shift;
+        const double t1 = std::exp(-mp_kexp * arg);
+        const double t2 = (mp_rmax - rad) / (1.0 + t1);
+        m_mp_mrad[i] = rad + t2;
+        m_mp_dkernel[i] = p_dkernel[z - 1];
+        m_mp_qkernel[i] = p_qkernel[z - 1];
+    }
+    // 5: interaction matrices by Ewald summation
+    buildMultipoleInteractionMatricesPeriodic();
+    m_mp_t_ao_ints = m_mp_t_d_block = m_mp_t_shift = m_mp_t_cn_mrad = m_mp_t_amat = 0.0;
+    m_mp_initialized = true;
+    ++m_mp_version;
 }
 
 /* ------------------------------------------------------------------ *

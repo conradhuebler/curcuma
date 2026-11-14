@@ -1,10 +1,11 @@
 # WP: Periodic native GFN1/GFN2 (orthorhombic cell, Gamma point, CPU)
 
-**Status (interim, 2026-11-14): P0 plan, P1 periodic classical terms and P2a periodic GFN1 energy done; P2b (GFN2
-multipole Ewald), P3 (gradient), P4 (virial), P5 (integration) open.** `-method gfn1` with an orthorhombic unit cell
-gives the periodic Gamma-point energy (tblite agreement 3-7e-11 Eh on the water dimer, see P2a); its gradient is not
-periodic yet, so `-opt`/`-md`/`-hessian` with a cell are refused until P3; `-method gfn2` with a cell is refused until
-P2b. Without a cell nothing changes (bitwise gate below).
+**Status (interim, 2026-11-14): P0 plan, P1 periodic classical terms, P2a periodic GFN1 energy and P2b periodic GFN2
+energy done; P3 (gradient), P4 (virial), P5 (integration) open.** `-method gfn1|gfn2` with an orthorhombic unit cell
+gives the periodic Gamma-point single-point energy (gfn1: 3-7e-11 Eh from tblite on the water dimer; gfn2: tblite's
+periodic multipole Ewald is not alpha-consistent, curcuma uses the consistent form and differs from tblite by up to
+1e-3 Eh at 8 A, see P2b); the gradient is not periodic yet, so `-opt`/`-md`/`-hessian` with a cell are refused until P3.
+Without a cell nothing changes (bitwise gate below).
 Branch `feature/periodic-xtb`, base `feature/bulk` 957afab7. All work here is 🤖 AI-generated; stages are ⚙️ machine-tested
 only when the stage section says so. No human production testing anywhere in this document.
 
@@ -185,6 +186,61 @@ charges O -0.6 / H +0.3 for the D4 zeta weighting):
 - **Not tested**: charged cells (tblite has no background term, see P0.4), open shell, d-shell elements, Ewald r_cut other
   than L_min/2 (`-xtb.pbc_ewald_r_cut_bohr`), threads > 1 with a cell (the Ewald matrix and the KO remainder are serial),
   cells so small that S(Gamma) becomes ill-conditioned (Cholesky fallback path), anything beyond H/O.
+
+## P2b periodic GFN2 energy: multipole electrostatics by Ewald summation (2026-11-14, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+- **AO dipole/quadrupole integrals** (`XTB::setupMultipolePeriodic`, chosen by `if (m_pbc)` in `setupMultipole`): the
+  same image sum as S/H0 (integral cutoff); every image block is shifted to the image position of its column atom
+  (origin at atom(nu) + T, the periodic form of tblite's `shift_operator`), the traceless transform is applied to the
+  sum. The damping radii `mrad` use the periodic GFN2 CN (`computeCoordinationNumbers()`).
+- **Interaction matrices** (`buildMultipoleInteractionMatricesPeriodic`, port of tblite `get_multipole_matrix_3d` with
+  tblite's Ewald parameters: `search_alpha` with the multipole terms, `search_cutoff` at conv = 100 eps, box-shaped
+  translation lists; `alpha` 0.156 at L = 8 and 10 A, 0.141 at 12 A, 0.070 at 30 A): per atom pair the direct sum
+  of damped kernel minus Ewald-screened bare kernel over the translation box, the reciprocal sums, the self terms.
+  The direct box also truncates the damping remainder `(fdmp - 1) r^-3` (~ r^-6), which is why tblite's cutoffs are
+  kept (a different direct cutoff is a different, converging, value; conv 1e-10 instead of 1.5e-6 moves the L = 12
+  energy by 6e-8 Eh). Matrices are stored (anti)symmetric by construction (pairs j <= i mirrored).
+- **Finding: tblite 0.4.0's periodic multipole matrices are not Ewald-consistent.** In `get_amat_sdq_rec_3d`
+  (`coulomb/multipole.f90`) the charge-dipole reciprocal term is `2 k sin(k.r) w_k` and the charge-quadrupole term
+  `+k_a k_b cos(k.r) w_k` over the full k set. The kernels are derivatives of the Coulomb kernel: charge-dipole
+  `v/r^3 = -grad(1/r)`, dipole-dipole `delta/r^3 - 3 v v/r^5 = -grad grad(1/r)`, charge-quadrupole (traceless)
+  `v_a v_b/r^5 = (1/3) d_a d_b (1/r)`. With `phi_rec = (4 pi/V) sum_k e^{-k^2/4a^2}/k^2 cos(k.r)` the reciprocal
+  parts are `+k sin w` (factor 1), `+k_a k_b cos w` (as in tblite) and `-(1/3) k_a k_b cos w`; tblite's direct
+  parts are exactly the matching `-grad erfc(ar)/r`, `-grad grad`, `(1/3) grad grad` (checked term by term, the
+  `e1`/`e2` expressions). Measured with the probe `CURCUMA_PBC_MP_DEBUG` (rebuild at 1.5 alpha, L = 12): with
+  tblite's factors the charge-dipole block changes by 1.1e-2 (of 7.3e-2) and the charge-quadrupole block by 6.6e-3
+  (of 3.3e-2); with the factors 1 and -1/3 all three blocks change by <= 3.3e-7 (the conv level). Energies: with
+  tblite's factors the port reproduces tblite at L = 8 to 2.1e-10 Eh (so the port itself is exact), with the
+  consistent factors the total energy is alpha independent (0.14 vs 0.3: 5.5e-8 Eh at L = 12) and converges
+  smoothly to vacuum; tblite's own L series does not (table). Decision: **the consistent factors are used**
+  (`CURCUMA_PBC_MP_SD_FACTOR`, `CURCUMA_PBC_MP_SQ_FACTOR`, `CURCUMA_PBC_MP_ALPHA`, `CURCUMA_PBC_MP_CONV` are kept as
+  diagnostic environment switches, defaults 1, -1/3, tblite alpha, 100 eps). Consequence: **periodic GFN2 energies
+  differ from tblite 0.4.0 by up to 1e-3 Eh at L = 8 A** (3.6e-5 at 16 A, 5e-5 at 20 A, 2.9e-6 at 30 A) and the
+  stop rule of the task (1e-5 against tblite) is formally violated with the cause located in the reference; not
+  confirmed against a corrected tblite or an independent periodic GFN2 code. The dipole-dipole constant `fac/6` (a
+  `2 pi/(3V) |M|^2` term, tblite convention) and the self terms are kept as in tblite.
+
+| L (A) | E curcuma consistent (Eh) | E tblite 0.4.0 (Eh) | curcuma - vacuum | tblite - vacuum | GFN1 periodic - vacuum (tblite = curcuma) |
+|---|---|---|---|---|---|
+| 8 | -10.133473316 | -10.132459657 | 1.21e-3 | 2.22e-3 | 9.8e-4 |
+| 10 | -10.134288580 | -10.133111595 | 3.9e-4 | 1.57e-3 | 2.5e-4 |
+| 12 | -10.134522049 | -10.133359079 | 1.61e-4 | 1.32e-3 | 1.0e-4 |
+| 16 | -10.134644660 | -10.134562075 | 3.8e-5 | 1.2e-4 | |
+| 20 | -10.134670320 | -10.134618108 | 1.3e-5 | 6.5e-5 | 8.4e-6 |
+| 30 | -10.134681289 | -10.134678386 | 1.7e-6 | 4.6e-6 | 1.1e-6 |
+
+  Vacuum: GFN2 -10.134682949 (curcuma = tblite -10.1346829493), GFN1 -11.531826377. The periodic-minus-vacuum
+  difference of a dipolar cell is dominated by the tin-foil dipole term and vanishes with the cell; the consistent
+  GFN2 series follows GFN1's, tblite's GFN2 series does not.
+- **Tests** (`ctest -R pbc_xtb_tblite`): gfn1 as in P2a; gfn2 (a) tblite factors reproduce tblite at L = 8 (1e-9),
+  (b) alpha 0.14 vs 0.3 at L = 12 within 5e-7, (c) L = 30 within 5e-6 of vacuum, (d) regression values L = 8 / 12,
+  charge neutrality. `pbc_xtb_classical` unchanged. Without a cell 24/24 bitwise (6 structures x gfn1/gfn2 x 1/4
+  threads).
+- **Cost**: the reciprocal part is a per-pair k loop, O(nat^2 N_k) (342 k vectors at L = 8-12 A; 1296 atoms x 342 is
+  5.7e8 trig evaluations per geometry, a few seconds); a structure-factor factorisation is open (P-perf).
+- **Not tested**: d-shell elements with a cell (the d block uses `sphericalMultipoleBlock` per image), charged and
+  open-shell cells, cells smaller than 8 A, more than two molecules, threads > 1 with a cell (matrices built with
+  `parallelStripes`, not compared across thread counts).
 
 ## Not implemented / not tested (updated per stage)
 

@@ -1475,6 +1475,11 @@ private:
      * fcut (KO - 1/r) over images within pbc_coulomb_switch (tblite effective.f90 get_amat_3d). */
     void getHamiltonianH0Periodic(const Vector& se, Matrix& S, Matrix& H0) const;   // xtb_periodic.cpp
     void buildGammaMatrixPeriodic();                                                 // xtb_periodic.cpp
+    /* P2b (GFN2 anisotropic electrostatics): AO dipole/quadrupole integrals as image sums with the origin at the
+     * image of the column atom; interaction matrices by Ewald summation with tblite's alpha search, box-shaped
+     * translation lists and conv = 100 eps (coulomb/multipole.f90 get_multipole_matrix_3d, coulomb/ewald.f90). */
+    void setupMultipolePeriodic();                                                   // xtb_periodic.cpp
+    void buildMultipoleInteractionMatricesPeriodic() const;                          // xtb_periodic.cpp
     /// tblite basis get_cutoff: min(sqrt(2 intcut / min_alpha), 40) Bohr with intcut 25 (accuracy 1); 0 = this rule
     double pbcIntegralCutoffBohr() const;                                            // xtb_periodic.cpp
     double m_pbc_integral_cutoff = 0.0;    ///< -xtb.pbc_integral_cutoff_bohr (0 = tblite rule)
