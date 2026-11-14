@@ -164,6 +164,11 @@ Stand.
 - **Build-System** (Stand November 2025, nicht geprüft): bedingte Kompilierung, fünf Build-Varianten, nur der Standardbuild war damals fehlerfrei.
   Seit 2026-09-30 baut `make` in `release/` wieder mit Exit 0; die übrigen Varianten vor einer Wiederaufnahme neu messen.
 
+- **Code-Schulden aus dem Debt-Bericht** (2026-11-14, [docs/debt_2026-11/CODE.md](docs/debt_2026-11/CODE.md), nicht angefasst): zwei GFN-FF-EEQ-Pfade, einer unregistriert (H3); funktionslokale `static`-Zähler in Rechencode (H4); Riesenfunktionen und Dateigrößen (M9, M10); CUDA/ROCm-Copy-Paste und doppelte CPU-Zahlenroutinen (M11, M12);
+  zwei abstrakte Basisklassen (M13); 809 `std::cout`/`cerr` am Logger vorbei (M14); 107 `getenv`-Schalter (M15); `exit()` in Bibliothekscode (M16); statische JSON-Defaults in weiteren Headern (M17).
+- **Build und Doku aus dem Debt-Bericht** ([docs/debt_2026-11/BUILD_DOCS.md](docs/debt_2026-11/BUILD_DOCS.md), nicht angefasst): `curcuma_cap` kompiliert 38 Dateien ein zweites Mal (M1); ungenutzte Compile-Definitionen, `-g` in jedem Build-Typ, PCH nur teilweise wirksam, ungepinnte Abhängigkeiten (M3 bis M6); Doku-Drift; `-dipole`-Ausgabe wiederherstellen (Punkt 14).
+- **Nicht verifiziert nach dem Debt-Branch** (2026-11-14): Builds mit `USE_TBLITE`, `USE_D3`, `USE_GFNFF`, `USE_XTB`, `USE_ULYSSES`, CUDA, ROCm, Vulkan; gfn1/gfn2-Regression (MOR41 nur `uff` und `gfnff`); `ctest` mit `-DCURCUMA_UNICODE_OUTPUT=ON`; Casino hat keinen Test.
+
 ## 6. Entscheidungen und Fragen
 
 Code-gebundene Entscheidungen, die bei Ihnen liegen. Fachliche Fragen und Projektstatus stehen im Vault und sind nur verlinkt.
@@ -173,12 +178,16 @@ Code-gebundene Entscheidungen, die bei Ihnen liegen. Fachliche Fragen und Projek
 - `shouldUpdateHBXB()` korrigieren und damit von der Fortran-Referenz abweichen, oder als Referenzeigenschaft belassen?
 - UFF-/QMDFF-Gradient reparieren (Stand: "erstmal nicht")? `-seed` für die MD-Startgeschwindigkeiten reparieren (ändert jede MD)?
 - GPU-Bitgleichheit angehen (Sammel-Kernel statt `atomicAdd`) oder bei Ensemblevergleichen bleiben?
+- Defaults je Modul für `verbosity`, `threads`, `method`, `charge`, `spin` (Casino-Verbosity 2, Opt 1, Trajektorienanalyse 2): ein Wert aus `global` für alle (ändert Ausgaben) oder die Modul-Vorgaben behalten? ([PARAMS.md](docs/debt_2026-11/PARAMS.md) M3)
+- ConfScan: `-method` ist die Alignment-Methode (`confscan.h`, `rmsd.h`), die Energiemethode heißt `energy_method` und ist kein PARAM; `-method gfn2` wird dort als ungültiger Alignment-Name gemeldet (H2). `energy_method` als PARAM einführen und `-method` dafür auswerten?
 - Vault, fachliche Fragen: `Offene Fragen/` ("Valenzanteil im reaktiven GFN-FF", "Veraltete C6-Dispersion und Paarlisten in inaktiven Topologie-Ecken",
   "Lücke zwischen GFN2-xTB und Doppelhybrid-Methoden schließen", "RRHO-Näherung durch MD ... ersetzen", "Ladungsplatzierung bei geladenen Mehrfragment-Systemen in GFN-FF - was ist physikalisch besser", Known Issue #31).
 - Vault, Projektstatus: `Projekte/curcuma rev-gfnff`, `curcuma GPU-Backends`, `curcuma MD-Stabilität großer Systeme`, `curcuma ConfSearch Weiterentwicklung`,
   `curcuma GFN-FF Transitionsmetalle (MOR41)`, `curcuma Reaktives GFN-FF (react-Topologie)`, `curcuma Konformerenfilter (reorder_paper)`.
 
-- **Parameter-Routing vereinheitlichen** (2026-11-05, [docs/debt_2026-11/PARAMS.md](docs/debt_2026-11/PARAMS.md)): Schritte 4-9 offen (Registry-Defaults in Numerik, `global`-Modul, ConfigManager ohne Fallbacks); Golden-Test `cli_parser_golden` vorhanden.
+- **Parameter-Routing, Rest** (2026-11-14, [docs/debt_2026-11/PARAMS.md](docs/debt_2026-11/PARAMS.md)): erledigt sind H1 bis H7 ohne H2, M1/M7/M8/M9, L1 bis L8 (Warnungen statt Fehler für unbekannte Schlüssel, Werte außerhalb `enum`/`min`/`max` und Typfehler); Modul `global`, Golden-Test `cli_parser_golden` (24 Fälle).
+  Offen: Globals in nur einer Kopie (rund 158 Leser, je Capability migrieren), M2 (Top-Level-Skalare im `ConfigManager`), `Json2KeyWord` (123 Aufrufe) und `MergeJson` in Capabilities, `Casino::LoadRestartInformation` ohne Aufrufer, Mehrfach-XYZ-`-opt` schreibt keine `.trj.xyz`.
+- **Optimierer-Defaults** (2026-11-14): die Erkennung "Nutzerwert" für `-convergence_preset` vergleicht noch mit dem Default (`optimizer_factory.cpp`), ein explizit gleicher Wert wird verworfen; `OptimizerInterfaceJson` und Registry-Modul `opt` sind zwei Literale, die nur per Kommentar gleich gehalten werden.
 
 ## 7. Löschkandidaten
 
