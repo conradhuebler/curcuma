@@ -559,7 +559,7 @@ private:
     PARAM(nimages, Int, 8, "Number of replicas along the path (including endpoints).", "Band", {"N"})
     PARAM(nudged, Bool, true, "Nudged NEB projection: true force perpendicular + spring parallel. false = full spring + full true force (plain elastic band).", "Band", {})
     PARAM(fixed_endpoints, Bool, true, "Clamp endpoint images (do not integrate them). false = integrate endpoints as full images.", "Band", {})
-    PARAM(k_spring, Double, 0.005, "Spring constant in Eh/Å² (mass-weighted: Eh/(amu·Å²)). Raise for a stiffer band, lower for looser coupling.", "Band", {"k"})
+    PARAM(k_spring, Double, 0.005, "Spring constant in Eh/Å" SYM_SQ " (mass-weighted: Eh/(amu" SYM_CDOT "Å" SYM_SQ ")). Raise for a stiffer band, lower for looser coupling.", "Band", {"k"})
     PARAM(mass_weighted_spring, Bool, true, "Scale k by per-atom mass so the spring frequency is mass-independent (MD-friendly; keeps H atoms stable).", "Band", {})
     // --- Band optimisation (classical NEB) ---
     PARAM(optimize, Bool, false, "Optimise the band to the minimum energy path with a classical NEB (FIRE optimiser) before starting the MD. Gives the potential barrier dE and a relaxed path for the subsequent sampling.", "Optimisation", {"neb"})
