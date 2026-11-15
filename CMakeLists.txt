@@ -108,7 +108,7 @@ option(USE_PCH
     "Enable Precompiled Headers for faster compilation" ON)
 
 option(CURCUMA_UNICODE_OUTPUT
-    "Print Unicode symbols (Angstrom sign, sigma, degree, ...) instead of their ASCII spelling; see src/core/output_symbols.h" OFF)
+    "Print Unicode symbols (sigma, degree, superscripts, ...); OFF prints their ASCII spelling (sigma, deg, ^2) for terminals and log parsers that need it; see src/core/output_symbols.h" ON)
 if(CURCUMA_UNICODE_OUTPUT)
     add_compile_definitions(CURCUMA_UNICODE_OUTPUT)
 endif()

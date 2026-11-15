@@ -1,5 +1,5 @@
 /*
- * Symbols for terminal and file output: ASCII by default, Unicode with -DCURCUMA_UNICODE_OUTPUT=ON.
+ * Symbols for terminal and file output: Unicode by default, ASCII with -DCURCUMA_UNICODE_OUTPUT=OFF.
  * Copyright (C) 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@
 // Each SYM_* is a string literal, so it concatenates with its neighbours at compile time:
 //   fmt::format("{:.4f} " SYM_DEG, x)
 // Letters with diacritics (u-umlaut, e-acute, the A with ring above, ...) are written as plain UTF-8 and need no symbol.
-// Use it in output strings only. PARAM help texts stay ASCII (the parameter generator reads them as plain literals).
+// Use it in output strings and, between the string literals, in PARAM help texts (the parameter generator passes SYM_* names through).
 // The switch is a build option (CMake: CURCUMA_UNICODE_OUTPUT); there is no run-time switch.
 
 #ifdef CURCUMA_UNICODE_OUTPUT
