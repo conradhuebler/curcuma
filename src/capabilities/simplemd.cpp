@@ -5833,8 +5833,12 @@ void SimpleMD::AverageQuantities()
 // is on and the virial request accepted by now).
 bool SimpleMD::setupBarostat()
 {
-    if (m_defaults.value("gpu", std::string("none")) != "none" || m_config.get<std::string>("gpu", "none") != "none") {
-        CurcumaLogger::error("barostat: not available with -gpu (the GPU hybrid carries no atomic virial and no cell update); run on the CPU");
+    // WP-PERIODIC-XTB G1: the native gfn1/gfn2 on CUDA compute virial and cell update on the host (xtbInstance()), so
+    // only the GFN-FF GPU hybrid is refused here.
+    const bool gpu_requested = m_defaults.value("gpu", std::string("none")) != "none" || m_config.get<std::string>("gpu", "none") != "none";
+    const bool native_xtb = m_interface && m_interface->Interface() && m_interface->Interface()->xtbInstance();
+    if (gpu_requested && !native_xtb) {
+        CurcumaLogger::error("barostat: not available with -gpu for this method (the GFN-FF GPU hybrid carries no atomic virial and no cell update); run on the CPU");
         return false;
     }
     if (m_wall_type != 0) {

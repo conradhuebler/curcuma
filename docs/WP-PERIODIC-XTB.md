@@ -465,9 +465,17 @@ Water lattice 216 H2O (648 atoms, 18.6 A, `-sp` + `-dump_gradient`, wall incl. s
   (nao 5184, 8x the eigensolve work) the device eigensolve is the lever; the host matrix builds (O(nat^2) image sums,
   multipole k loop) then dominate the GPU run and are the next items (G1 device integrals, G3).
 
-Not tested: a water lattice on the GPU with a cell (only the dimer cells), MD with a cell on the GPU, `-gpu cuda`
-with a cell and threads > 1, open-shell or charged cells on the device, d-shell elements (refused with a cell
-anyway), the ROCm/Vulkan refusal on a machine with those plugins.
+SimpleMD: `setupBarostat()` refused every `-gpu` request (N2 rule for the GFN-FF hybrid); it now refuses only when the
+method has no native xTB engine (`xtbInstance()`), so `-md ... -gpu cuda -barostat berendsen -compute_pressure true`
+runs with gfn1/gfn2 (virial and cell update on the host). Smoke (27 H2O lattice 9.31 A, gfn1, 20 steps of 0.5 fs,
+Berendsen thermostat and barostat, `-threads 2`): CUDA and CPU both run, P/V/rho/L columns present, cell moves
+(9.3105 -> 9.3102 A on CUDA, -> 9.3119 A on the CPU; the two runs start from different unseeded velocities, so their
+pressures differ from step 0 on; n = 1, no physics claim).
+
+Not tested: MD with a cell on the GPU beyond the 20-step smoke (no energy conservation or seeded CPU/CUDA
+trajectory comparison), `-gpu cuda` with a cell and threads > 1 beyond the 8-thread lattice single points, open-shell
+or charged cells on the device, d-shell elements (refused with a cell anyway), the ROCm/Vulkan refusal on a machine
+with those plugins.
 
 ## Regression run (2026-11-14, `release/`, `ctest -R 'gfn|xtb|sqm|gfnff|pbc|ewald|simplemd|restart|md_|gpu|plugin|molecule|xyz|parser|curcumaopt|structinv' -j1`)
 
