@@ -499,6 +499,7 @@ double XTB::Calculation(bool gradient)
     // solve breakdowns below set it so the wrapper refuses to return E=0 silently.
     m_has_error = false;
     m_error_message.clear();
+    m_virial_valid = false;   // P4: set again by calculateGradientPeriodic() when requested
 
     // Pin MKL to one thread for the whole native SCF (see MklSerialScope in
     // xtb_native.h): the serial iteration over small/medium matrices is faster

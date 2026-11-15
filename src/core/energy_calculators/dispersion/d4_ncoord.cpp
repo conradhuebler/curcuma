@@ -172,7 +172,8 @@ void addD4CovalentCNGradientPeriodic(const std::vector<int>& atoms,
                                      const Matrix& geom_bohr,
                                      const Vector& dEdcn,
                                      Matrix& grad_out,
-                                     const PBCUtils::LatticeImageList& images)
+                                     const PBCUtils::LatticeImageList& images,
+                                     Eigen::Matrix3d* virial)
 {
     const int N = static_cast<int>(atoms.size());
     if (dEdcn.size() != N) return;
@@ -183,19 +184,30 @@ void addD4CovalentCNGradientPeriodic(const std::vector<int>& atoms,
     for (int i = 0; i < N; ++i) {
         const int zi = atoms[i];
         if (zi < 1 || zi > MAX_Z) continue;
-        for (int j = 0; j < i; ++j) {   // self images: both ends move together, derivative 0
+        // self images (j == i, T != 0): both ends move together, Cartesian derivative 0, but |T| scales with the
+        // cell, so they enter the virial (P4); visited only when a virial is requested
+        for (int j = 0; j <= (virial ? i : i - 1); ++j) {
             const int zj = atoms[j];
             if (zj < 1 || zj > MAX_Z) continue;
+            const bool same = (i == j);
             const double rcovij = rad[zi] + rad[zj];
             const double den = k4 * std::exp(-std::pow(std::fabs(en[zi] - en[zj]) + k5, 2) / k6);
-            PBCUtils::forEachImage(images, &xyz[3 * i], &xyz[3 * j], false,
+            PBCUtils::forEachImage(images, &xyz[3 * i], &xyz[3 * j], same,
                 [&](double dx, double dy, double dz, double r2) {
                     const double r = std::sqrt(r2);
                     const double dcountf = den * derf_count(kn, r / rcovij) / rcovij;
-                    const double factor = (dEdcn(i) + dEdcn(j)) * dcountf / r;
-                    grad_out(i, 0) += factor * dx; grad_out(j, 0) -= factor * dx;
-                    grad_out(i, 1) += factor * dy; grad_out(j, 1) -= factor * dy;
-                    grad_out(i, 2) += factor * dz; grad_out(j, 2) -= factor * dz;
+                    // the pair enters CN_i and (i != j) CN_j; a self image enters CN_i once per translation
+                    const double factor = (same ? dEdcn(i) : dEdcn(i) + dEdcn(j)) * dcountf / r;
+                    if (!same) {
+                        grad_out(i, 0) += factor * dx; grad_out(j, 0) -= factor * dx;
+                        grad_out(i, 1) += factor * dy; grad_out(j, 1) -= factor * dy;
+                        grad_out(i, 2) += factor * dz; grad_out(j, 2) -= factor * dz;
+                    }
+                    if (virial) {
+                        const double d[3] = { dx, dy, dz };
+                        for (int a = 0; a < 3; ++a)
+                            for (int b = 0; b < 3; ++b) (*virial)(a, b) -= factor * d[a] * d[b];
+                    }
                 });
         }
     }

@@ -291,6 +291,16 @@ public:
     /// new cell is too small for a cutoff (the instance is then unchanged).
     void setUnitCell(const Eigen::Matrix3d& cell_angstrom);
 
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB P4): atomic virial Xi = -dE/d(eps) of a periodic energy, method
+    /// independent (GFN-FF via GFNFF::virial, native gfn1/gfn2 via NativeXtbMethod::virial). setWantVirial(true)
+    /// asks the method to accumulate it with the gradient; virialValid() is false when the last call carried none.
+    void setWantVirial(bool want);
+    bool virialValid() const;
+    Eigen::Matrix3d virial() const;
+    /// Largest cutoff radius (Bohr) that must stay below L_min/2 under cell changes, with its name; (none, 0) when the
+    /// method has no such limit (native xTB: image sums adapt to the cell). Used by the barostat cell-limit check.
+    std::pair<std::string, double> largestActiveCutoffBohr() const;
+
     /// WP-P1 (May 2026): per-phase CPU timing JSON from the last calculation.
     json LastPrepTiming() const;
 

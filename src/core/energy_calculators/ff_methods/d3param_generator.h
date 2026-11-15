@@ -153,7 +153,9 @@ public:
      * getEnergyAndGradient is unchanged.
      */
     double getEnergyAndGradientPeriodic(bool need_gradient, Matrix& gradient_out, Vector& dEdcn_out,
-                                        const PBCUtils::LatticeImageList& images) const;
+                                        const PBCUtils::LatticeImageList& images,
+                                        Eigen::Matrix3d* virial_out = nullptr) const;
+    /// virial_out (P4): Xi_ab -= (dE/dd_a) d_b over every image pair incl. the self images (Eh), added into the 3x3.
 
     // Energy calculation
     double getTotalEnergy() const;  // Returns total D3 dispersion energy (Eh)

@@ -1131,13 +1131,13 @@ bool SimpleMD::Initialise()
             CurcumaLogger::error(fmt::format("{}: not available with cleanenergy (per-step energy calculator)", pressure_user));
             return false;
         }
-        GFNFF* gfnff = m_interface->Interface() ? m_interface->Interface()->gfnffInstance() : nullptr;
-        if (!m_periodic_energy || !gfnff) {
-            CurcumaLogger::error(fmt::format("{}: needs the periodic native CPU GFN-FF energy (method gfnff with a unit cell and coulomb_ewald)", pressure_user));
+        // N1: GFN-FF; WP-PERIODIC-XTB P4: native gfn1/gfn2 with a cell (EnergyCalculator::setWantVirial dispatches)
+        if (!m_periodic_energy || !m_interface->Interface()) {
+            CurcumaLogger::error(fmt::format("{}: needs a periodic native CPU energy (gfnff with a unit cell and coulomb_ewald, or gfn1/gfn2 with a unit cell)", pressure_user));
             return false;
         }
         try {
-            gfnff->setWantVirial(true);
+            m_interface->setWantVirial(true);
         } catch (const std::exception& e) {
             CurcumaLogger::error(fmt::format("{}: {}", pressure_user, e.what()));
             return false;
@@ -1149,7 +1149,7 @@ bool SimpleMD::Initialise()
         for (int i = 0; i < m_natoms; ++i)
             m_total_mass_amu += Elements::AtomicMass[m_atomtype[i]];
         if (m_verbosity >= 1)
-            CurcumaLogger::info(fmt::format("compute_pressure: atomic virial of the periodic GFN-FF energy; V = {:.3f} A^3, mass {:.3f} amu, density {:.4f} g/cm^3",
+            CurcumaLogger::info(fmt::format("compute_pressure: atomic virial of the periodic energy; V = {:.3f} A^3, mass {:.3f} amu, density {:.4f} g/cm^3",
                 m_cell_volume_ang3, m_total_mass_amu,
                 CurcumaUnit::Pressure::amu_per_angstrom3_to_gcm3(m_total_mass_amu, m_cell_volume_ang3)));
     }
@@ -5845,17 +5845,20 @@ bool SimpleMD::setupBarostat()
         CurcumaLogger::error("barostat: tau_p and compressibility must be positive");
         return false;
     }
+    // N2: GFN-FF freezes its evaluation radii for the cell changes; WP-PERIODIC-XTB P4: the native gfn1/gfn2 rebuild
+    // their image lists and Ewald parameters from the cell at every call (nothing to freeze, no cutoff limit).
     GFNFF* gfnff = m_interface->Interface() ? m_interface->Interface()->gfnffInstance() : nullptr;
-    if (!gfnff) {
-        CurcumaLogger::error("barostat: needs the periodic native CPU GFN-FF energy (the periodic native gfn1/gfn2 "
-                             "have no atomic virial yet, WP-PERIODIC-XTB P4)");
+    if (!m_periodic_energy || !m_interface->Interface()) {
+        CurcumaLogger::error("barostat: needs a periodic native CPU energy (gfnff with a unit cell and coulomb_ewald, or gfn1/gfn2 with a unit cell)");
         return false;
     }
-    try {
-        gfnff->freezeCutoffsForCellChanges(0.15);
-    } catch (const std::exception& e) {
-        CurcumaLogger::error(std::string("barostat: ") + e.what());
-        return false;
+    if (gfnff) {
+        try {
+            gfnff->freezeCutoffsForCellChanges(0.15);
+        } catch (const std::exception& e) {
+            CurcumaLogger::error(std::string("barostat: ") + e.what());
+            return false;
+        }
     }
     if (m_barostat_type == BarostatType::CRescale) {
         CitationRegistry::cite("crescale");
@@ -5867,7 +5870,7 @@ bool SimpleMD::setupBarostat()
         CitationRegistry::cite("berendsen");
     }
     if (m_verbosity >= 1) {
-        const auto big = gfnff->largestActiveCutoffBohr();
+        const auto big = m_interface->largestActiveCutoffBohr();
         CurcumaLogger::info(fmt::format("barostat {}: P0 {:.5f} bar, tau_p {:.1f} fs, compressibility {:.3e} 1/bar, every {} steps "
                                         "(coupling time step {:.2f} fs); cell edge {:.4f} A, limit L_min > {:.4f} A ({})",
             m_barostat_type == BarostatType::CRescale ? "crescale" : "berendsen", m_pressure0_bar, m_tau_p, m_compressibility,
@@ -5955,8 +5958,7 @@ bool SimpleMD::applyBarostat()
         m_eigen_geometry /= mu;
         m_molecule.setGeometry(m_eigen_geometry);
         const double l_new = std::min({ new_cell.row(0).norm(), new_cell.row(1).norm(), new_cell.row(2).norm() }) * CurcumaUnit::Length::ANGSTROM_TO_BOHR;
-        GFNFF* gfnff = m_interface->Interface() ? m_interface->Interface()->gfnffInstance() : nullptr;
-        const auto big = gfnff ? gfnff->largestActiveCutoffBohr() : std::pair<std::string, double>{ "", 0.0 };
+        const auto big = m_interface ? m_interface->largestActiveCutoffBohr() : std::pair<std::string, double>{ "", 0.0 };
         const std::string restart_name = snapshotPath(Basename() + ".npt_limit.json");
         {
             std::ofstream restart_file(restart_name);
@@ -6000,11 +6002,12 @@ std::string SimpleMD::trajectoryComment() const
 // Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED N1)
 void SimpleMD::readVirial()
 {
-    GFNFF* gfnff = (m_interface && m_interface->Interface()) ? m_interface->Interface()->gfnffInstance() : nullptr;
-    if (!gfnff || !gfnff->virialValid())
+    // N1 (GFN-FF) and WP-PERIODIC-XTB P4 (native gfn1/gfn2) through EnergyCalculator
+    EnergyCalculator* ec = m_interface;
+    if (!ec || !ec->virialValid())
         throw std::runtime_error("compute_pressure: the energy of this step carries no atomic virial (the energy was not evaluated "
-                                 "by the CPU GFN-FF workspace, e.g. a GPU path); run without -gpu or without compute_pressure");
-    m_virial_trace_eh = gfnff->virial().trace();
+                                 "by a periodic CPU path, e.g. a GPU path); run without -gpu or without compute_pressure");
+    m_virial_trace_eh = ec->virial().trace();
 }
 
 bool SimpleMD::WriteGeometry()

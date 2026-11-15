@@ -83,7 +83,9 @@ void addD4CovalentCNGradientPeriodic(const std::vector<int>& atoms,
                                      const Matrix& geom_bohr,
                                      const Vector& dEdcn,
                                      Matrix& grad_out,
-                                     const PBCUtils::LatticeImageList& images);
+                                     const PBCUtils::LatticeImageList& images,
+                                     Eigen::Matrix3d* virial = nullptr);
+/// virial (P4): Xi_ab -= (dE/dCN) dcountf/dr d_a d_b / r over every image pair incl. the self images (i, i, T).
 
 /**
  * @brief The constants of the CN above for a device port (Claude Generated, Oct 2026).

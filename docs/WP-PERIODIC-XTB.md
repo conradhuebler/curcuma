@@ -1,12 +1,13 @@
 # WP: Periodic native GFN1/GFN2 (orthorhombic cell, Gamma point, CPU)
 
-**Status (2026-11-14): P0 plan, P1 periodic classical terms, P2a/P2b periodic GFN1/GFN2 energy, P3 periodic gradient
-and P5 integration done; P4 (virial, pressure, barostat) open.** `-method gfn1|gfn2` with an orthorhombic unit cell
-gives the periodic Gamma-point energy and gradient (gfn1: 3-7e-11 Eh and 8.6e-7 Eh/Bohr from tblite on the water
-dimer; gfn2: tblite's periodic multipole Ewald is not alpha-consistent, curcuma uses the consistent form and differs
-from tblite by up to 1e-3 Eh at 8 A, see P2b), so `-opt` and NVT/NVE `-md` with a cell run (SimpleMD wraps fragments,
--3 DOF); `-barostat` and `-compute_pressure` with gfn1/gfn2 are refused (no virial). Without a cell nothing changes
-(bitwise gate in every stage).
+**Status (2026-11-15): P0 plan, P1 periodic classical terms, P2a/P2b periodic GFN1/GFN2 energy, P3 periodic gradient,
+P4 virial/pressure/barostat, P5 integration and T threading done; G (CUDA port) in progress, see the G section.**
+`-method gfn1|gfn2` with an orthorhombic unit cell gives the periodic Gamma-point energy, gradient and atomic virial
+(gfn1: 3-7e-11 Eh, 8.6e-7 Eh/Bohr and 1.8e-6 Eh virial from tblite on the water dimer; gfn2: tblite's periodic multipole
+Ewald is not alpha-consistent, curcuma uses the consistent form and differs from tblite by up to 1e-3 Eh at 8 A, see P2b;
+`-xtb.pbc_multipole_tblite_factors true` reproduces tblite), so `-opt`, NVT/NVE and NPT `-md` with a cell run (SimpleMD
+wraps fragments, -3 DOF, `-compute_pressure`, `-barostat berendsen|crescale`). Without a cell nothing changes (bitwise
+gate in every stage).
 Branch `feature/periodic-xtb`, base `feature/bulk` 957afab7. All work here is 🤖 AI-generated; stages are ⚙️ machine-tested
 only when the stage section says so. No human production testing anywhere in this document.
 
@@ -268,15 +269,53 @@ charges O -0.6 / H +0.3 for the D4 zeta weighting):
   P2b and the dftd4 ATM `triple_scale` issue of P1); forces of charged, open-shell or d-shell cells; thread-count
   independence of the periodic gradient.
 
-## P4 virial / pressure: not implemented
+## P4 atomic virial, pressure and barostat (2026-11-15, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
 
-The atomic virial of the periodic gfn1/gfn2 energy (strain derivative of every term incl. the Ewald sums and the
-Pulay terms at fixed fractional coordinates) is not implemented. `-md -barostat` with gfn1/gfn2 is refused (`barostat:
-needs the periodic native CPU GFN-FF energy (the periodic native gfn1/gfn2 have no atomic virial yet, WP-PERIODIC-XTB
-P4)`), `-compute_pressure` throws at the first step (`readVirial`: no virial). An NPT water box with GFN2 therefore
-needs P4 first; NVT in a fixed cell works (P5). Estimate: 1-2 days (every image kernel of P3 contracted with its pair
-vector, the Ewald virial of `EwaldSum` exists for the point-charge part, the multipole Ewald virial has to be
-derived, FD gate by cell scaling).
+- **Definition**: Xi_ab = -dE/d(eps_ab) at fixed fractional coordinates (positions and cell scaled together), as
+  `GFNFF::virial()` (N1); P = (2 K + tr Xi)/(3 V). Computed in `XTB::calculateGradientPeriodic()` when
+  `setWantVirial(true)` (one gradient call; `virialValid()`), symmetrised.
+- **Rule used everywhere**: a term that depends on an image pair vector d = x_i - x_j - T contributes -(dE/dd) (x) d,
+  i.e. every per-image gradient vector of P3 contracted with its vector; **the self images (i, i, T != 0) now
+  enter** (|T| scales with the cell) although their Cartesian derivative is zero: repulsion and D3/D4 pairs with weight
+  1/2 per translation, the H0/Pulay self-image blocks with weight 1/2 (the loop visits both AO orderings; P3 had added
+  their dE/dCN with weight 1, corrected here, 1e-7-level), the Klopman-Ohno remainder of on-site shell pairs (1/2 for
+  is = js), the CN chain rules of the H0 CN, the D3 CN and the D4 CN (dE/dCN_i f'(r) d (x) d / r once per translation),
+  the ATM through its three edge vectors (dG_ij (x) v_ij + ...), the halogen bond through its three vectors.
+  Point-charge Ewald: `EwaldSum::realSpaceVirialRange`, `reciprocalVirialRange`, `backgroundVirial` (N1) at q_at.
+  Multipole Ewald (`addMultipoleGradientPeriodic`): direct images -g (x) vec (self 1/2); reciprocal with k_a ->
+  k_a - eps_ba k_b, w_k -> w_k [1 - tr eps + k_a k_b eps_ab (2/k^2 + 1/(2 alpha^2))], k.r invariant: charge-dipole
+  E = sd_f sin w A (A' = -(mu_i,a q_j - mu_j,a q_i) k_b), dipole-dipole E = DDw cos w (k.mu_i)(k.mu_j), charge-quadrupole
+  E = sq_f cos w B (B' = -2 [q_i (theta_j k)_a + q_j (theta_i k)_a] k_b), the 1/V constant fac/6 of the dipole-dipole
+  block (-(fac/6) mu_i.mu_j delta_ab), alpha held fixed (the energy is alpha independent to conv). The strain
+  derivative of the AO multipole integrals is the P3 Pulay term at the image position contracted with d (translation
+  invariance: d/dd = d/dA at fixed B). Third order and on-site terms: no strain dependence.
+- **Interfaces**: `XTB::setWantVirial/virial/virialValid`, `XTB::updateCell` (= `setPeriodicCell`: image lists, Ewald
+  parameters and boxes are rebuilt from the cell at every call, nothing frozen, no cutoff limit);
+  `NativeXtbMethod` forwards (no `ComputationalMethod` virtual, plugin ABI unchanged); `EnergyCalculator::setWantVirial/
+  virialValid/virial/largestActiveCutoffBohr` dispatch to GFN-FF or (`dynamic_cast`) the native xTB, `setUnitCell`
+  accepts gfn1/gfn2; SimpleMD `-compute_pressure` and `-barostat berendsen|crescale` accept a periodic gfn1/gfn2
+  (`readVirial` via `EnergyCalculator`), the GFN-FF cutoff freeze stays GFN-FF only.
+- **Cell changes (barostat)**: the image lists adapt, the point-charge Ewald uses r_cut = L_min/2 with alpha, k_max
+  from the tolerance (smooth in L), the multipole Ewald uses tblite's alpha search and box counts (`ceil(cut/L)`), which
+  jump with L at the conv level (1.5e-6 in matrix elements, ~1e-7 Eh): continuous enough for MD, visible in a
+  cell-scaling FD at h = 1e-5 only through the energy, not through the analytic virial (which is at fixed alpha).
+- **Gate** (`ctest -R pbc_xtb_virial`, `test_cases/unit/test_pbc_xtb_virial.cpp`; water dimer, `scf_threshold` 1e-9,
+  central differences of the energy under eps_xx, eps_yy, eps_zz and the isotropic strain, h = 1e-5, positions and
+  cell scaled): gfn1 L = 8 A: 4e-11 / 1.2e-10 / 3e-11 Eh, trace 4.9e-10; gfn2 L = 8 A: 2.5e-10 / 9e-11 / 2.7e-10,
+  trace 1.2e-9; gfn2 L = 12 A: 1.6e-10 / 1.9e-10 / 1.2e-11, trace 6.5e-10 (target 1e-7). Term isolation (probes
+  `dispersionVirialNow`, `multipoleEnergyProbe`/`multipoleVirialProbe` at fixed moments, radii and alpha): D3/D4 incl.
+  ATM 1e-13, dipole-dipole and charge-quadrupole 1e-13, charge-dipole 1e-13 after a sign fix found by this probe (the
+  reciprocal charge-dipole energy is +sd_f sin(k.v0) w A with v0 = x_j - x_i). gfn1 virial against tblite's sigma
+  (`virial_eh`, Xi = -sigma): max 1.8e-6 Eh (tblite accuracy 1); gfn2 not compared (P2b). Without a cell 24/24 bitwise.
+- **Smoke**: `-md w27 (27 H2O lattice, 9.3 A) -method gfn1 -barostat berendsen -compute_pressure true -thermostat
+  berendsen`, 40 steps: runs, pressure and density columns, cell updated (n = 1, no physics claim).
+- **tblite factors as a registered switch** (`-xtb.pbc_multipole_tblite_factors`, Bool, default false): true sets the
+  reciprocal charge-dipole / charge-quadrupole factors to tblite 0.4.0's 2 / +1 (energy, gradient and virial; the env
+  variables `CURCUMA_PBC_MP_SD_FACTOR`/`SQ_FACTOR` still override both); `pbc_xtb_tblite` check (a) uses it. The
+  default stays the Ewald-consistent 1 / -1/3 (operator decision pending, P2b).
+- **Not tested**: off-diagonal strains (a sheared cell is not orthorhombic and is refused), the virial of charged or
+  open-shell cells, d-shell elements (refused), thread-count independence of the virial, NPT densities (a water box
+  run is the operator's campaign), the barostat cell-limit path (no limit for xTB).
 
 ## P5 integration (2026-11-14, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
 
@@ -309,9 +348,9 @@ vacuum `computeATM` has both). GFN1 (D3, no ATM) is 4-5x cheaper. NPT needs P4.
 
 ## Follow-up stages (operator decision of 2026-11-14): T threading, P4 virial, G CUDA port
 
-Interim status 2026-11-15: **T done** (below), **P4 not started**, **G not started** (G0 design pending). The tblite
-multipole finding stays open; the factors remain switchable (`CURCUMA_PBC_MP_SD_FACTOR`, `CURCUMA_PBC_MP_SQ_FACTOR`,
-default consistent = Ewald-correct).
+Interim status 2026-11-15: **T done** (below), **P4 done** (section above), **G0 design written, G1-G7 see the G
+status below**. The tblite multipole finding stays open; the factors remain switchable
+(`-xtb.pbc_multipole_tblite_factors`, env `CURCUMA_PBC_MP_SD_FACTOR`/`SQ_FACTOR`, default consistent = Ewald-correct).
 
 ### T threading of the periodic loops (2026-11-15, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
 
@@ -350,6 +389,30 @@ default consistent = Ewald-correct).
   run-to-run scatter of the threaded SCF; a 1-thread comparison of the old binary was not kept); without a cell 24/24
   bitwise to 957afab7.
 
+### G0 design: CUDA port of the periodic gfn1/gfn2 paths (2026-11-15, Claude Generated; design only, nothing ported)
+
+What runs on the device today (CUDA plugin `libcurcuma_cuda.so`, `XtbGpuComputationalMethod` in `xtb_gpu_adapter.h`,
+`XtbGpuContext` in `qm_methods/cuda/`, stages 0-6 of [SQM_GPU.md](SQM_GPU.md)): S/H0/CN/gamma/multipole integrals
+(`beginComputed`), the resident GFN1 and GFN2 SCF loops (Fock, eigensolve, populations, Broyden, in-SCF D4 and
+multipole potentials), the nuclear gradient (repulsion, H0/Pulay, Coulomb, multipole Pulay), post-SCF D4 (pairs, ATM,
+CN fold) and D3; all **without lattice images or Ewald sums**. With a cell the P5 guard swaps to the CPU (counted
+fallback) and `XTB::Calculation()` refuses an attached backend; the GPU is used by the periodic path nowhere.
+
+| G sub-stage | device work | host today | estimate | note |
+|---|---|---|---|---|
+| G1 | image-summed S/H0 and multipole AO integrals: the device integral kernels get a per-pair translation list (`LatticeImageList` upload) and accumulate `sum_T` into the same nao x nao matrices; the on-atom T = 0 block as today | `getHamiltonianH0Periodic`, `setupMultipolePeriodic` (0.03 + 0.17 s at 216 H2O) | 2-3 days | the SCF loop then runs unchanged on the device (Gamma point = same dense matrices) |
+| G2 | periodic gamma: point-charge Ewald matrix on the device (real pairs under MIC, reciprocal as structure-factor rank updates `C W C^T + S W S^T`, self/background) plus the Klopman-Ohno remainder over images | `buildGammaMatrixPeriodic` (0.13 s) | 1-2 days | reuse the B0/B2 formulas; `EwaldSum::matrix` is the reference |
+| G3 | periodic multipole interaction matrices (direct box + reciprocal with the P2b factors, tblite alpha/cutoffs) | `buildMultipoleInteractionMatricesPeriodic` (0.25 s, O(nat^2 N_k)) | 1-2 days | the k loop maps well to one thread per (pair, k block) |
+| G4 | periodic D4/D3 (pairs, ATM, CN fold) with images; the existing device D4 kernels take a translation list | `calcD{3,4}DispersionPeriodic` (0.6 s at 8 threads) | 1-2 days | self-image weights 1/2 and the ATM `triple_scale` in the gradient as on the CPU |
+| G5 | periodic gradient: image loops of H0/Pulay (incl. multipole Pulay at the image position), repulsion, KO remainder, Ewald gradient (device), multipole gradient, CN chain | `calculateGradientPeriodic` (~1 s) | 2-3 days | the self-image dE/dCN terms and the 1/2 weights of P4 |
+| G6 | virial (P4 formulas: -G (x) d per image, Ewald/multipole strain terms) | `m_virial` accumulation | 1 day | after G5 |
+| G7 | lift the P5 guard for CUDA only when G1-G6 exist; ROCm/Vulkan keep the CPU fallback (not ported, documented); every new `GpuScfBackend` virtual raises `CURCUMA_GPU_PLUGIN_ABI_VERSION` (S0 pattern) | | 0.5 day | parity gate: CPU vs CUDA energy/gradient/virial <= 1e-8 Eh resp. Eh/A on the dimer cells and a water lattice; bitwise CUDA run to run ([GPU_REPRODUCIBILITY.md](GPU_REPRODUCIBILITY.md)) |
+
+Order of benefit: G1 (enables the resident SCF with a cell, the SCF is 1.1 of 2.2 s at 216 H2O and grows as nao^3)
+before G4/G5 (the CPU image loops are already threaded), G2/G3 last (cheap on the CPU). Build: `release_cuda/` of the
+main checkout holds a CUDA build (`-DUSE_CUDA_XTB=ON -DCMAKE_CUDA_ARCHITECTURES=120`), the RTX 5080 was idle (0 %)
+on 2026-11-15; no GPU run was made in this session. **Status: G0 written, G1-G7 not started.**
+
 ## Regression run (2026-11-14, `release/`, `ctest -R 'gfn|xtb|sqm|gfnff|pbc|ewald|simplemd|restart|md_|gpu|plugin|molecule|xyz|parser|curcumaopt|structinv' -j1`)
 
 369 tests selected, 2 failed before the fix below: `pbc_md_nonperiodic_cell` (its check (a) assumed gfn2 + cell to be
@@ -360,11 +423,11 @@ WP-PERIODIC-NONBONDED A6b statement "native gfn1/gfn2 have no periodic energy" i
 
 ## Not implemented / not tested (updated per stage)
 
-- k-point sampling, non-orthorhombic cells, slab/1D periodicity, the vacuum (dipole) boundary term, the atomic virial
-  and with it pressure, barostat and NPT (P4), threading of the periodic D4 (serial) and of the Klopman-Ohno / Ewald
-  matrix builds, the structure-factor factorisation of the multipole k sums, d-shell elements with a cell (refused),
-  implicit solvation with a cell (refused), `-large_system_mode` with a cell (its driver ignores the cell: documented
-  as non-periodic, not refused), GPU with a cell (CPU fallback).
+- k-point sampling, non-orthorhombic cells, slab/1D periodicity, the vacuum (dipole) boundary term, off-diagonal
+  strains (a sheared cell is refused), threading of the periodic CN/D3, Klopman-Ohno and Ewald matrix builds, the
+  structure-factor factorisation of the multipole k sums, d-shell elements with a cell (refused), implicit solvation
+  with a cell (refused), `-large_system_mode` with a cell (its driver ignores the cell: documented as non-periodic, not
+  refused), GPU with a cell (CPU fallback; CUDA port stage G, ROCm/Vulkan not planned).
 - Not tested: open shell, charged cells (background term differs from tblite), halogen bond with a cell (no Br/I
   structure), thread-count independence of the periodic energy and gradient, MD energy conservation with a cell,
   the GPU fallback on a machine with a GPU plugin, anything beyond H/O, real liquid boxes (only a water dimer and

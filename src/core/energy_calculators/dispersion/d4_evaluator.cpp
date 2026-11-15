@@ -355,7 +355,8 @@ double D4Evaluator::computeEnergyAndGradientPeriodic(const std::vector<int>& ato
                                                      Matrix& gradient_out,
                                                      Vector& dEdCN_out,
                                                      Vector& dEdq_out,
-                                                     bool with_dEdq)
+                                                     bool with_dEdq,
+                                                     Eigen::Matrix3d* virial_out)
 {
     const int natoms = static_cast<int>(atoms.size());
     if (m_data == nullptr || !m_params.per_reference_charge
@@ -394,6 +395,9 @@ double D4Evaluator::computeEnergyAndGradientPeriodic(const std::vector<int>& ato
         dcn_b.assign(NB, Vector::Zero(natoms));
         dq_b.assign(NB, Vector::Zero(natoms));
     }
+    // P4 (virial): Xi_ab -= sum over every image pair (incl. self images) of dE/dd_a d_b, d = x_i - x_j - T
+    const bool want_vir = with_gradient && virial_out != nullptr;
+    std::vector<Eigen::Matrix3d> v_b(want_vir ? NB : 0, Eigen::Matrix3d::Zero());
     Matrix g_dummy;
     Vector v_dummy;
     runBlocks(NB, [&](int blk) {
@@ -401,6 +405,7 @@ double D4Evaluator::computeEnergyAndGradientPeriodic(const std::vector<int>& ato
         Matrix& gb = with_gradient ? g_b[blk] : g_dummy;
         Vector& dcnb = with_gradient ? dcn_b[blk] : v_dummy;
         Vector& dqb = with_gradient ? dq_b[blk] : v_dummy;
+        Eigen::Matrix3d* vb = want_vir ? &v_b[blk] : nullptr;
         for (int i = blk; i < natoms; i += NB) {
         for (int j = 0; j <= i; ++j) {
             const double rrij = 3.0 * sq_r4r2[i] * sq_r4r2[j];   // dftd4 rrij = 3 r4r2_i r4r2_j
@@ -424,12 +429,18 @@ double D4Evaluator::computeEnergyAndGradientPeriodic(const std::vector<int>& ato
                     const double d6 = -6.0 * r2 * r2 * t6 * t6;
                     const double d8 = -8.0 * r2 * r2 * r2 * t8 * t8;
                     const double gdisp = s6 * d6 + s8 * rrij * d8;
+                    // d = x_i - (x_j + T); dftd4 dG = -c6 gdisp vec, gradient(iat) += dG, gradient(jat) -= dG
+                    const double g = -c6g.c6 * gdisp;
                     if (!same) {
-                        // d = x_i - (x_j + T); dftd4 dG = -c6 gdisp vec, gradient(iat) += dG, gradient(jat) -= dG
-                        const double g = -c6g.c6 * gdisp;
                         gb(i, 0) += g * dx; gb(j, 0) -= g * dx;
                         gb(i, 1) += g * dy; gb(j, 1) -= g * dy;
                         gb(i, 2) += g * dz; gb(j, 2) -= g * dz;
+                    }
+                    if (vb) {
+                        const double gw = g * (same ? 0.5 : 1.0);
+                        const double d[3] = { dx, dy, dz };
+                        for (int a = 0; a < 3; ++a)
+                            for (int b2 = 0; b2 < 3; ++b2) (*vb)(a, b2) -= gw * d[a] * d[b2];
                     }
                     // dftd4: dEdcn(iat) -= dc6dcn(iat,jat) edisp; (iat /= jat) dEdcn(jat) -= dc6dcn(jat,iat) edisp
                     dcnb(i) -= c6g.dc6dcni * edisp;
@@ -450,6 +461,7 @@ double D4Evaluator::computeEnergyAndGradientPeriodic(const std::vector<int>& ato
             dEdCN_out += dcn_b[blk];
             dEdq_out += dq_b[blk];
         }
+        if (want_vir) *virial_out += v_b[blk];
     }
     return E_total;
 }
@@ -678,7 +690,8 @@ double D4Evaluator::computeATMPeriodic(const std::vector<int>& atoms,
                                        const PBCUtils::LatticeImageList& images,
                                        bool with_gradient,
                                        Matrix& gradient_out,
-                                       Vector& dEdCN_out)
+                                       Vector& dEdCN_out,
+                                       Eigen::Matrix3d* virial_out)
 {
     if (std::abs(m_params.s9) < 1e-300 || m_data == nullptr) return 0.0;
     const int nat = static_cast<int>(atoms.size());
@@ -728,12 +741,15 @@ double D4Evaluator::computeATMPeriodic(const std::vector<int>& atoms,
         g_b.assign(NB, Matrix::Zero(nat, 3));
         dcn_b.assign(NB, Vector::Zero(nat));
     }
+    const bool want_vir = with_gradient && virial_out != nullptr;
+    std::vector<Eigen::Matrix3d> v_b(want_vir ? NB : 0, Eigen::Matrix3d::Zero());
     Matrix g_dummy;
     Vector v_dummy;
     runBlocks(NB, [&](int blk) {
         double& Eb = E_b[blk];
         Matrix& gb = with_gradient ? g_b[blk] : g_dummy;
         Vector& dcnb = with_gradient ? dcn_b[blk] : v_dummy;
+        Eigen::Matrix3d* vb = want_vir ? &v_b[blk] : nullptr;
         std::vector<Img> img_j;
         auto collect = [&](int i, int j, std::vector<Img>& out) {
             out.clear();
@@ -817,6 +833,12 @@ double D4Evaluator::computeATMPeriodic(const std::vector<int>& atoms,
                                 gb(jat, c) += dGij - dGjk;
                                 gb(kat, c) += dGik + dGjk;
                             }
+                            if (vb) {
+                                // P4: Xi_ab -= dE/dv_a v_b for the three edge vectors (dG = dE/dv of its edge)
+                                for (int a = 0; a < 3; ++a)
+                                    for (int b2 = 0; b2 < 3; ++b2)
+                                        (*vb)(a, b2) -= gij * J.v[a] * J.v[b2] + gik * K.v[a] * K.v[b2] + gjk * vjk[a] * vjk[b2];
+                            }
                             dcnb(iat) -= dE * 0.5 * (dc6dcn(iat, jat) / c6ij + dc6dcn(iat, kat) / c6ik);
                             dcnb(jat) -= dE * 0.5 * (dc6dcn(jat, iat) / c6ij + dc6dcn(jat, kat) / c6jk);
                             dcnb(kat) -= dE * 0.5 * (dc6dcn(kat, iat) / c6ik + dc6dcn(kat, jat) / c6jk);
@@ -834,6 +856,7 @@ double D4Evaluator::computeATMPeriodic(const std::vector<int>& atoms,
             gradient_out += g_b[blk];
             dEdCN_out += dcn_b[blk];
         }
+        if (want_vir) *virial_out += v_b[blk];
     }
     return E_atm;
 }

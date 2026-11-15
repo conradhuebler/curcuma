@@ -17,7 +17,7 @@
  * GFN2 (P2b): tblite's periodic anisotropic electrostatics (coulomb/multipole.f90 get_amat_sdq_rec_3d) carry a
  * factor 2 in the charge-dipole and +1 instead of -1/3 in the charge-quadrupole reciprocal term, which makes its
  * matrices depend on the Ewald splitting parameter (docs/WP-PERIODIC-XTB.md P2b). curcuma uses the consistent
- * factors. Checks: (a) with tblite's factors (CURCUMA_PBC_MP_SD_FACTOR=2, CURCUMA_PBC_MP_SQ_FACTOR=1) the L = 8
+ * factors. Checks: (a) with tblite's factors (-xtb.pbc_multipole_tblite_factors true) the L = 8
  * energy reproduces tblite to 1e-9 Eh (the port is exact, the deviation is the factor); (b) with the consistent
  * factors the energy is independent of alpha (CURCUMA_PBC_MP_ALPHA 0.14 vs 0.3 at L = 12, < 5e-7 Eh); (c) the
  * 30 A cell is within 5e-6 Eh of the vacuum energy (dipolar cell, tin-foil term; GFN1 shows 1.1e-6);
@@ -103,13 +103,12 @@ static void testGfn1()
 static void testGfn2()
 {
     // (a) exact port: tblite's reciprocal factors reproduce tblite at L = 8 (tblite accuracy 1.0: -10.1324596572071339)
-    setenv("CURCUMA_PBC_MP_SD_FACTOR", "2", 1);
-    setenv("CURCUMA_PBC_MP_SQ_FACTOR", "1", 1);
-    const double e_tb = energyOf("gfn2", 8.0, kCfg);
-    unsetenv("CURCUMA_PBC_MP_SD_FACTOR");
-    unsetenv("CURCUMA_PBC_MP_SQ_FACTOR");
+    //     through the registered switch -xtb.pbc_multipole_tblite_factors (P4; the env variables CURCUMA_PBC_MP_*
+    //     remain diagnostic overrides)
+    const json cfg_tb = { { "verbosity", 0 }, { "threads", 1 }, { "xtb", { { "pbc_multipole_tblite_factors", true } } } };
+    const double e_tb = energyOf("gfn2", 8.0, cfg_tb);
     std::printf("gfn2 L = 8 A with tblite's reciprocal factors: E %.12f tblite -10.132459657207 dE %.3e Eh\n", e_tb, e_tb + 10.1324596572071339);
-    check(std::abs(e_tb + 10.1324596572071339) < 1.0e-9, "gfn2 with tblite's factors reproduces tblite at L = 8");
+    check(std::abs(e_tb + 10.1324596572071339) < 1.0e-9, "gfn2 with tblite's factors (-xtb.pbc_multipole_tblite_factors) reproduces tblite at L = 8");
 
     // (b) alpha independence of the consistent version at L = 12
     setenv("CURCUMA_PBC_MP_ALPHA", "0.14", 1);

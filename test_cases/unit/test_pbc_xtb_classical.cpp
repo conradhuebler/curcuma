@@ -264,6 +264,41 @@ static void testDispersionFD(MethodType t, double L)
     check(max_err < 2e-8, std::string(mname(t)) + " dispersion gradient vs FD < 2e-8 Eh/Bohr, L = " + std::to_string(L));
 }
 
+// ---------------------------------------------------------------------------------------------
+// P4: dispersion virial (D3 / D4 incl. ATM and CN chain) against central differences of the periodic dispersion
+// energy under diagonal cell strains (positions and cell scaled together), fixed charges, h = 1e-5.
+static void testDispersionVirialFD(MethodType t)
+{
+    const Mol mol = waterDimer();
+    const Vector q = testCharges(mol);
+    const double L = 8.0, h = 1.0e-5;
+    auto x = makeEngine(t, mol, L, L, L);
+    x->dispersionEnergyNow(q, true);
+    const Eigen::Matrix3d Xi = x->dispersionVirialNow();
+    double max_err = 0.0;
+    for (int a = 0; a < 3; ++a) {
+        double e[2];
+        for (int s = 0; s < 2; ++s) {
+            const double f = 1.0 + (s == 0 ? h : -h);
+            Matrix g = mol.m_geometry;
+            g.col(a) *= f;
+            Eigen::Matrix3d cell = Eigen::Matrix3d::Identity() * L;
+            cell(a, a) *= f;
+            std::string err;
+            x->setPeriodicCell(cell, err);
+            x->UpdateMolecule(g);
+            e[s] = x->dispersionEnergyNow(q, false);
+        }
+        const double fd = -(e[0] - e[1]) / (2.0 * h);
+        max_err = std::max(max_err, std::abs(fd - Xi(a, a)));
+        std::printf("info %s dispersion virial Xi_%c%c analytic %.9e FD %.9e diff %.3e Eh\n", mname(t), "xyz"[a], "xyz"[a], Xi(a, a), fd, fd - Xi(a, a));
+    }
+    std::string err;
+    x->setPeriodicCell(Eigen::Matrix3d::Identity() * L, err);
+    x->UpdateMolecule(mol.m_geometry);
+    check(max_err < 1.0e-9, std::string(mname(t)) + " dispersion virial vs cell-scaling FD < 1e-9 Eh");
+}
+
 int main()
 {
     CurcumaLogger::set_verbosity(0);
@@ -274,6 +309,7 @@ int main()
         testBruteForce(t);
         testDispersionFD(t, 0.0);
         testDispersionFD(t, 8.0);
+        testDispersionVirialFD(t);
     }
     if (g_failures == 0)
         std::printf("test_pbc_xtb_classical: all checks passed\n");

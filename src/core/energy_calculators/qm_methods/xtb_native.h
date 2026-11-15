@@ -842,6 +842,8 @@ public:
 
     Vector  getCharges() const { return m_wfn.q_at; }
     Vector  getShellCharges() const { return m_wfn.q_sh; }
+    Matrix  dipoleMoments() const { return m_wfn.dp_at; }       // GFN2 atomic dipoles, 3 x nat (P4 probes)
+    Matrix  quadrupoleMoments() const { return m_wfn.qp_at; }   // GFN2 atomic quadrupoles, 6 x nat, traceless
     // GFN2 component audit (Claude Generated): reference shell occupations
     // n0_sh (length nsh). Built in buildReferenceOccupations() from the gfn1_
     // / gfn2_params reference_occ tables. Exposing this lets diagnostics
@@ -930,8 +932,19 @@ public:
     void setPbcEwaldTolerance(double eps) { if (eps > 0.0 && eps < 1.0) m_pbc_ewald_tolerance = eps; }
     void setPbcEwaldRCut(double bohr) { m_pbc_ewald_r_cut = bohr; }
     void setPbcCoulombSwitch(double bohr) { if (bohr > 1.0) m_pbc_coulomb_switch = bohr; }
+    void setPbcMultipoleTbliteFactors(bool on) { m_pbc_mp_tblite_factors = on; }   // P2b/P4: -xtb.pbc_multipole_tblite_factors
     double pbcEwaldAlphaUsed() const { return m_pbc_ewald_alpha_used; }
     int pbcEwaldKVectorsUsed() const { return m_pbc_ewald_nk_used; }
+    /* P4 (Claude Generated, Nov 2026): atomic virial Xi_ab = -dE/d(eps_ab) at fixed fractional coordinates (Eh),
+     * of the complete periodic energy (every image sum, Ewald real/reciprocal/background, Pulay terms through the
+     * strain derivative of the image integrals). Computed with the gradient when setWantVirial(true) and a cell
+     * is set; virialValid() is false otherwise. Pressure: P = (2 K + tr Xi) / (3 V). */
+    void setWantVirial(bool v) { m_want_virial = v; }
+    bool virialValid() const { return m_virial_valid; }
+    const Eigen::Matrix3d& virial() const { return m_virial; }
+    /// New orthorhombic cell between two calls (barostat); image lists, Ewald parameters and cutoff boxes are
+    /// rebuilt from the cell at every Calculation(), nothing is frozen (docs/WP-PERIODIC-XTB.md P4).
+    bool updateCell(const Eigen::Matrix3d& cell_angstrom, std::string& error) { return setPeriodicCell(cell_angstrom, error); }
     // Test hooks (P1, Claude Generated): the classical terms at the current geometry and cell, so the
     // periodic image sums can be checked term by term (supercell scaling, vacuum limit, brute force)
     // before the SCF is periodic. dispersionEnergyNow() evaluates D3 (GFN1) or D4 (GFN2) at the given
@@ -941,6 +954,13 @@ public:
     Vector coordinationNumbersNow() const { m_cn_cache_valid = false; return computeCoordinationNumbers(); }
     double dispersionEnergyNow(const Vector& q_at, bool gradient);
     const Matrix& dispersionGradientNow() const { return m_disp_gradient; }
+    const Eigen::Matrix3d& dispersionVirialNow() const { return m_disp_virial; }   // P4 probe (with gradient = true)
+    // P4 probes of the GFN2 multipole electrostatics at given atomic moments (q, dipoles 3 x nat, quadrupoles
+    // 6 x nat): energy at a (strained) cell and geometry with the current damping radii and the current Ewald
+    // parameters (matrices rebuilt), and the analytic virial of the same term. Needs a converged Calculation first.
+    double multipoleEnergyProbe(const Eigen::Matrix3d& cell_angstrom, const Matrix& geometry_angstrom,
+                                const Vector& q, const Matrix& dp, const Matrix& qp);
+    Eigen::Matrix3d multipoleVirialProbe(const Vector& q, const Matrix& dp, const Matrix& qp);
 
     // --- CPSCF / Z-vector public API (Phase 3b) ---
 
@@ -1488,16 +1508,21 @@ private:
      * Ewald gradient (EwaldSum::gradient at q_at), the periodic multipole gradient (tblite get_multipole_gradient_3d
      * with the P2b reciprocal factors), the cached periodic dispersion gradient and the CN chain rule over images. */
     void calculateGradientPeriodic();                                                // xtb_periodic.cpp
-    void addHalogenBondGradientPeriodic(Matrix& gradient) const;                     // xtb_periodic.cpp
-    void addMultipoleGradientPeriodic(Matrix& gradient, Vector& dEdcn) const;        // xtb_periodic.cpp
+    void addHalogenBondGradientPeriodic(Matrix& gradient, Eigen::Matrix3d* virial = nullptr) const;   // xtb_periodic.cpp
+    void addMultipoleGradientPeriodic(Matrix& gradient, Vector& dEdcn, Eigen::Matrix3d* virial = nullptr) const;   // xtb_periodic.cpp
     /// tblite basis get_cutoff: min(sqrt(2 intcut / min_alpha), 40) Bohr with intcut 25 (accuracy 1); 0 = this rule
     double pbcIntegralCutoffBohr() const;                                            // xtb_periodic.cpp
     double m_pbc_integral_cutoff = 0.0;    ///< -xtb.pbc_integral_cutoff_bohr (0 = tblite rule)
     double m_pbc_ewald_tolerance = 1.0e-10; ///< -xtb.pbc_ewald_tolerance (chooseEwaldParameters eps)
     double m_pbc_ewald_r_cut = 0.0;        ///< -xtb.pbc_ewald_r_cut_bohr (0 = L_min/2)
     double m_pbc_coulomb_switch = 10.0;    ///< -xtb.pbc_coulomb_switch_bohr (tblite rcut, fsmooth over the last Bohr)
+    bool m_pbc_mp_tblite_factors = false;  ///< -xtb.pbc_multipole_tblite_factors: reciprocal sd 2 / sq +1 (tblite 0.4.0) instead of 1 / -1/3
     mutable double m_pbc_ewald_alpha_used = 0.0;   ///< reporting: alpha of the last gamma build
     mutable int m_pbc_ewald_nk_used = 0;           ///< reporting: k vectors of the last gamma build
+    bool m_want_virial = false;                    ///< P4: accumulate Xi in calculateGradientPeriodic()
+    bool m_virial_valid = false;
+    Eigen::Matrix3d m_virial = Eigen::Matrix3d::Zero();
+    mutable Eigen::Matrix3d m_disp_virial = Eigen::Matrix3d::Zero();   ///< D3/D4 part, filled by calcD{3,4}DispersionPeriodic
     // Analytic gradient of the GFN1 halogen-bond correction; adds into `gradient`
     // (nat×3, Eh/Bohr). No-op for GFN2. Claude Generated.
     void   addHalogenBondGradient(Matrix& gradient) const;               // xtb_h0.cpp
@@ -1948,6 +1973,7 @@ inline void applyXtbScfConfig(XTB& xtb, const json& cfg)
     lookup("pbc_ewald_tolerance",      [&](const json& v){ if (v.is_number()) xtb.setPbcEwaldTolerance(v.get<double>()); });
     lookup("pbc_ewald_r_cut_bohr",     [&](const json& v){ if (v.is_number()) xtb.setPbcEwaldRCut(v.get<double>()); });
     lookup("pbc_coulomb_switch_bohr",  [&](const json& v){ if (v.is_number()) xtb.setPbcCoulombSwitch(v.get<double>()); });
+    lookup("pbc_multipole_tblite_factors", [&](const json& v){ if (v.is_boolean()) xtb.setPbcMultipoleTbliteFactors(v.get<bool>()); });
     lookup("eigensolver",  [&](const json& v){ if (v.is_string()) xtb.setEigensolver(v.get<std::string>()); });
     lookup("scf_damping",  [&](const json& v){ if (v.is_number()) xtb.setScfDamping(v.get<double>()); });
     lookup("scf_threshold",[&](const json& v){ if (v.is_number()) xtb.setScfThreshold(v.get<double>()); });

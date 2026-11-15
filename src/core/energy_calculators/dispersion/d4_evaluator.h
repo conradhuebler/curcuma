@@ -187,7 +187,8 @@ public:
                                             Matrix& gradient_out,
                                             Vector& dEdCN_out,
                                             Vector& dEdq_out,
-                                            bool with_dEdq = false);
+                                            bool with_dEdq = false,
+                                            Eigen::Matrix3d* virial_out = nullptr);
     // computeATMPeriodic: dftd4 damping/atm.f90 get_atm_dispersion_energy/derivs with `trans`
     // (iat, jat <= iat, T_j, kat <= jat, T_k; triple_scale on the atom indices). Accumulates
     // (+=) into gradient_out and dEdCN_out like computeATM. Serial.
@@ -196,7 +197,10 @@ public:
                               const PBCUtils::LatticeImageList& images,
                               bool with_gradient,
                               Matrix& gradient_out,
-                              Vector& dEdCN_out);
+                              Vector& dEdCN_out,
+                              Eigen::Matrix3d* virial_out = nullptr);
+    // virial_out (P4, both functions): Xi_ab -= sum (dE/dd_a) d_b over every image pair / triple edge incl. the
+    // self images, i.e. -dE/d(eps_ab) at fixed fractional coordinates, added (+=) into the given 3x3 (Eh).
 
     // ---------- CUDA hook (not used in this AP) ----------
     //

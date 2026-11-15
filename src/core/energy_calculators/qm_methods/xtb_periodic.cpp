@@ -273,7 +273,9 @@ double XTB::calcD3DispersionPeriodic(bool need_gradient) const
     m_disp_gradient = Matrix::Zero(nat, 3);
     m_disp_dEdcn = need_gradient ? Vector::Zero(nat) : Vector();
     m_disp_dEdq = Vector();
-    const double e_disp = d3.getEnergyAndGradientPeriodic(need_gradient, m_disp_gradient, m_disp_dEdcn, pair_images);
+    m_disp_virial.setZero();
+    Eigen::Matrix3d* vir = (need_gradient && m_want_virial) ? &m_disp_virial : nullptr;
+    const double e_disp = d3.getEnergyAndGradientPeriodic(need_gradient, m_disp_gradient, m_disp_dEdcn, pair_images, vir);
     if (!need_gradient) {
         m_disp_gradient_valid = false;
         return e_disp;
@@ -283,20 +285,28 @@ double XTB::calcD3DispersionPeriodic(bool need_gradient) const
         for (int i = 0; i < nat; ++i) {
             const int ei = m_atoms[i] - 1;
             if (ei < 0 || ei >= static_cast<int>(rcov_A.size())) continue;
-            for (int j = 0; j < i; ++j) {   // self images: no Cartesian derivative
+            for (int j = 0; j <= (vir ? i : i - 1); ++j) {   // self images: no Cartesian derivative, virial only (P4)
                 const int ej = m_atoms[j] - 1;
                 if (ej < 0 || ej >= static_cast<int>(rcov_A.size())) continue;
+                const bool same = (i == j);
                 const double rc_bohr = (4.0 / 3.0) * (rcov_A[ei] + rcov_A[ej]) * AA_TO_AU;
-                PBCUtils::forEachImage(cn_images, &xyz[3 * i], &xyz[3 * j], false,
+                PBCUtils::forEachImage(cn_images, &xyz[3 * i], &xyz[3 * j], same,
                     [&](double dx, double dy, double dz, double r2) {
                         const double r = std::sqrt(r2);
                         const double ef = std::exp(-16.0 * (rc_bohr / r - 1.0));
                         const double c = 1.0 / (1.0 + ef);
                         const double dcdr = -c * (1.0 - c) * 16.0 * rc_bohr / r2;
-                        const double f = (m_disp_dEdcn(i) + m_disp_dEdcn(j)) * dcdr / r;
-                        m_disp_gradient(i, 0) += f * dx; m_disp_gradient(j, 0) -= f * dx;
-                        m_disp_gradient(i, 1) += f * dy; m_disp_gradient(j, 1) -= f * dy;
-                        m_disp_gradient(i, 2) += f * dz; m_disp_gradient(j, 2) -= f * dz;
+                        const double f = (same ? m_disp_dEdcn(i) : m_disp_dEdcn(i) + m_disp_dEdcn(j)) * dcdr / r;
+                        if (!same) {
+                            m_disp_gradient(i, 0) += f * dx; m_disp_gradient(j, 0) -= f * dx;
+                            m_disp_gradient(i, 1) += f * dy; m_disp_gradient(j, 1) -= f * dy;
+                            m_disp_gradient(i, 2) += f * dz; m_disp_gradient(j, 2) -= f * dz;
+                        }
+                        if (vir) {
+                            const double d[3] = { dx, dy, dz };
+                            for (int a = 0; a < 3; ++a)
+                                for (int b = 0; b < 3; ++b) (*vir)(a, b) -= f * d[a] * d[b];
+                        }
                     });
             }
         }
@@ -359,16 +369,18 @@ double XTB::calcD4DispersionPeriodic(bool need_gradient) const
     m_d4_evaluator->setThreads(effectiveIntraThreads(nat));
     using d4clk = std::chrono::steady_clock;
     const auto td0 = d4clk::now();
+    m_disp_virial.setZero();
+    Eigen::Matrix3d* vir = m_want_virial ? &m_disp_virial : nullptr;   // P4
     double E = m_d4_evaluator->computeEnergyAndGradientPeriodic(m_atoms, geom_bohr, pair_images,
-        /*with_gradient=*/true, m_disp_gradient, m_disp_dEdcn, m_disp_dEdq, /*with_dEdq=*/true);
+        /*with_gradient=*/true, m_disp_gradient, m_disp_dEdcn, m_disp_dEdq, /*with_dEdq=*/true, vir);
     const auto td1 = d4clk::now();
     E += m_d4_evaluator->computeATMPeriodic(m_atoms, geom_bohr, atm_images, /*with_gradient=*/true,
-        m_disp_gradient, m_disp_dEdcn);
+        m_disp_gradient, m_disp_dEdcn, vir);
     const auto td2 = d4clk::now();
 
     // CN chain rule with the D4 CN's own derivative over images (as the cell-free path, d4_ncoord)
     if (m_disp_dEdcn.size() == nat) {
-        curcuma::dispersion::addD4CovalentCNGradientPeriodic(m_atoms, geom_bohr, m_disp_dEdcn, m_disp_gradient, cn_images);
+        curcuma::dispersion::addD4CovalentCNGradientPeriodic(m_atoms, geom_bohr, m_disp_dEdcn, m_disp_gradient, cn_images, vir);
         m_disp_dEdcn = Vector();
     }
     if (CurcumaLogger::get_verbosity() >= 3) {
@@ -707,9 +719,9 @@ void XTB::buildMultipoleInteractionMatricesPeriodic() const
     if (const char* e = std::getenv("CURCUMA_PBC_MP_CONV")) conv = std::atof(e);
     // charge-dipole reciprocal term: -grad of (4 pi/V) sum_k w_k cos(k.r) over the full k set is sum_k w_k k sin(k.r)
     // (factor 1); tblite's get_amat_sdq_rec_3d uses 2 k sin (factor 2) over the same full set. Experiment switch.
-    double sd_rec_factor = 1.0;
+    double sd_rec_factor = m_pbc_mp_tblite_factors ? 2.0 : 1.0;   // -xtb.pbc_multipole_tblite_factors
     if (const char* e = std::getenv("CURCUMA_PBC_MP_SD_FACTOR")) sd_rec_factor = std::atof(e);
-    double sq_rec_factor = -1.0 / 3.0;   // tblite: +1 (see the comment at the reciprocal loop)
+    double sq_rec_factor = m_pbc_mp_tblite_factors ? 1.0 : -1.0 / 3.0;   // tblite: +1 (see the comment at the reciprocal loop)
     if (const char* e = std::getenv("CURCUMA_PBC_MP_SQ_FACTOR")) sq_rec_factor = std::atof(e);
     auto build = [&](double alpha) {
     const double dir_cut = tbSearchCutoff([&](double x) { return tbDirMp(x, alpha); }, conv);
@@ -956,8 +968,15 @@ void XTB::setupMultipolePeriodic()
  *  the lattice images; a self image (i, i, T != 0) has no Cartesian    *
  *  derivative but contributes to dE/dCN (H0 of the self-image block).  *
  * ------------------------------------------------------------------ */
-void XTB::addHalogenBondGradientPeriodic(Matrix& gradient) const
+void XTB::addHalogenBondGradientPeriodic(Matrix& gradient, Eigen::Matrix3d* virial) const
 {
+    // P4: every pair of (gradient(p) += G, gradient(q) -= G) along d = x_p - x_q adds -G (x) d to the virial
+    auto vir = [&](double gx, double gy, double gz, const double d[3]) {
+        if (!virial) return;
+        const double G[3] = { gx, gy, gz };
+        for (int a = 0; a < 3; ++a)
+            for (int b = 0; b < 3; ++b) (*virial)(a, b) -= G[a] * d[b];
+    };
     if (m_method != MethodType::GFN1) return;
     const int nat = m_atomcount;
     if (nat < 2 || gradient.rows() != nat || gradient.cols() != 3) return;
@@ -1003,14 +1022,18 @@ void XTB::addHalogenBondGradientPeriodic(Matrix& gradient) const
                     dtermlj += xb_lj2 * t14 * (damping - 2.0 * t14) / (rax * denominator);
                     dtermlj *= aterm * cc / rax;
                     for (int k = 0; k < 3; ++k) { gradient(a, k) += dtermlj * dxa[k]; gradient(x, k) -= dtermlj * dxa[k]; }
+                    vir(dtermlj * dxa[0], dtermlj * dxa[1], dtermlj * dxa[2], dxa);
                     double prefactor = -0.25 * xb_alp * std::pow(0.5 - 0.25 * term, xb_alp - 1.0);
                     prefactor *= cc * termlj;
                     double dcosterm = (2.0 / rbx - term / rax) * prefactor / rax;
                     for (int k = 0; k < 3; ++k) { gradient(a, k) += dcosterm * dxa[k]; gradient(x, k) -= dcosterm * dxa[k]; }
+                    vir(dcosterm * dxa[0], dcosterm * dxa[1], dcosterm * dxa[2], dxa);
                     dcosterm = (2.0 / rax - term / rbx) * prefactor / rbx;
                     for (int k = 0; k < 3; ++k) { gradient(b, k) += dcosterm * dxb[k]; gradient(x, k) -= dcosterm * dxb[k]; }
+                    vir(dcosterm * dxb[0], dcosterm * dxb[1], dcosterm * dxb[2], dxb);
                     const double t13 = 2.0 * prefactor / xy;
                     for (int k = 0; k < 3; ++k) { gradient(a, k) -= t13 * dba[k]; gradient(b, k) += t13 * dba[k]; }
+                    vir(-t13 * dba[0], -t13 * dba[1], -t13 * dba[2], dba);
                 });
         }
     }
@@ -1019,7 +1042,7 @@ void XTB::addHalogenBondGradientPeriodic(Matrix& gradient) const
 // Port of tblite get_multipole_gradient_3d / get_damat_sdq_{dir,rec}_3d with the P2b reciprocal factors
 // (charge-dipole 1, charge-quadrupole -1/3). vec = x_j - x_i + T (tblite gradient convention), gradient(i) += dG,
 // gradient(j) -= dG; dE/d(mrad) into dEdcn through dmrad/dCN as in section 5 of calculateGradient().
-void XTB::addMultipoleGradientPeriodic(Matrix& gradient, Vector& dEdcn) const
+void XTB::addMultipoleGradientPeriodic(Matrix& gradient, Vector& dEdcn, Eigen::Matrix3d* virial) const
 {
     using namespace curcuma::xtb::gfn2_params;
     const int nat = m_atomcount;
@@ -1029,7 +1052,7 @@ void XTB::addMultipoleGradientPeriodic(Matrix& gradient, Vector& dEdcn) const
     const double alp = m_mp_pbc_alpha, alp2 = alp * alp;
     const double fac = 4.0 * M_PI / vol;
     const double eps_r = kTbliteEps;
-    double sd_f = 1.0, sq_f = -1.0 / 3.0;
+    double sd_f = m_pbc_mp_tblite_factors ? 2.0 : 1.0, sq_f = m_pbc_mp_tblite_factors ? 1.0 : -1.0 / 3.0;
     if (const char* e = std::getenv("CURCUMA_PBC_MP_SD_FACTOR")) sd_f = std::atof(e);
     if (const char* e = std::getenv("CURCUMA_PBC_MP_SQ_FACTOR")) sq_f = std::atof(e);
     const auto& q = m_wfn.q_at;
@@ -1045,9 +1068,16 @@ void XTB::addMultipoleGradientPeriodic(Matrix& gradient, Vector& dEdcn) const
 
     Vector dEdr_mp = Vector::Zero(nat);
     // pair (iat, jat): direct images and reciprocal part; iat == jat only for dE/d(mrad)
-    auto pairTerms = [&](int iat, int jat, double dG[3], double& dE) {
+    // P4: dEde[a][b] = dE/d(eps_ab) of the pair at fixed fractional coordinates (direct images: dE/dvec (x) vec with
+    // vec = x_j + T - x_i, i.e. -dG (x) vec; reciprocal: k_a -> k_a - eps_ba k_b, w_k -> w_k [1 - tr eps +
+    // k_a k_b eps_ab (2/k^2 + 1/(2 alpha^2))], k.r invariant; the 1/V constants scale with -tr eps). The self pair
+    // (iat == jat) carries the single-ordering weights (1/2 for dipole-dipole and the direct part).
+    auto pairTerms = [&](int iat, int jat, double dG[3], double& dE, double dEde[3][3]) {
         dG[0] = dG[1] = dG[2] = 0.0;
         dE = 0.0;
+        const bool want_v = (dEde != nullptr);
+        if (want_v) for (int a = 0; a < 3; ++a) for (int b = 0; b < 3; ++b) dEde[a][b] = 0.0;
+        const double wself = (iat == jat) ? 0.5 : 1.0;
         double v0x = xyz[3 * jat] - xyz[3 * iat], v0y = xyz[3 * jat + 1] - xyz[3 * iat + 1], v0z = xyz[3 * jat + 2] - xyz[3 * iat + 2];
         PBCUtils::applyMinimumImageOrtho(m_cell_bohr, v0x, v0y, v0z);
         const double rr = 0.5 * (m_mp_mrad[jat] + m_mp_mrad[iat]);
@@ -1058,8 +1088,8 @@ void XTB::addMultipoleGradientPeriodic(Matrix& gradient, Vector& dEdcn) const
         for (int k = 0; k < 6; ++k) { ti[k] = qp(k, iat); tj[k] = qp(k, jat); }
         const double dpidpj = mi[0] * mj[0] + mi[1] * mj[1] + mi[2] * mj[2];
 
-        // reciprocal
-        if (iat != jat) {
+        // reciprocal (gradient for iat != jat; virial for every pair incl. iat == jat)
+        if (iat != jat || want_v) {
             for (size_t t = 0; t < m_mp_pbc_rtrans.size(); ++t) {
                 if (kexp[t] == 0.0) continue;
                 const double* kv = m_mp_pbc_rtrans[t].data();
@@ -1073,11 +1103,45 @@ void XTB::addMultipoleGradientPeriodic(Matrix& gradient, Vector& dEdcn) const
                                           + 2*tj[1]*kv[0]*kv[1] + 2*tj[3]*kv[0]*kv[2] + 2*tj[4]*kv[1]*kv[2]);
                 const double qpiqj = qj * (ti[0]*kv[0]*kv[0] + ti[2]*kv[1]*kv[1] + ti[5]*kv[2]*kv[2]
                                           + 2*ti[1]*kv[0]*kv[1] + 2*ti[3]*kv[0]*kv[2] + 2*ti[4]*kv[1]*kv[2]);
-                for (int c = 0; c < 3; ++c) {
-                    dG[c] -= sd_f * kv[c] * cosk * (dpiqj - qidpj);        // tblite: 2 * ...
-                    dG[c] += kv[c] * sink * dpiv * dpjv;
-                    dG[c] += sq_f * kv[c] * sink * (qiqpj + qpiqj);        // tblite: +1 * ...
+                if (iat != jat)
+                    for (int c = 0; c < 3; ++c) {
+                        dG[c] -= sd_f * kv[c] * cosk * (dpiqj - qidpj);        // tblite: 2 * ...
+                        dG[c] += kv[c] * sink * dpiv * dpjv;
+                        dG[c] += sq_f * kv[c] * sink * (qiqpj + qpiqj);        // tblite: +1 * ...
+                    }
+                if (want_v) {
+                    const double g2 = kv[0] * kv[0] + kv[1] * kv[1] + kv[2] * kv[2];
+                    const double X = 2.0 / g2 + 0.5 / alp2;
+                    const double w = kexp[t];
+                    const double cg = cosk / w, sg = sink / w;   // cos(gv), sin(gv)
+                    // theta.k vectors
+                    const double tjk[3] = { tj[0]*kv[0] + tj[1]*kv[1] + tj[3]*kv[2], tj[1]*kv[0] + tj[2]*kv[1] + tj[4]*kv[2], tj[3]*kv[0] + tj[4]*kv[1] + tj[5]*kv[2] };
+                    const double tik[3] = { ti[0]*kv[0] + ti[1]*kv[1] + ti[3]*kv[2], ti[1]*kv[0] + ti[2]*kv[1] + ti[4]*kv[2], ti[3]*kv[0] + ti[4]*kv[1] + ti[5]*kv[2] };
+                    const double A = dpiqj - qidpj;              // charge-dipole scalar (odd in k)
+                    const double B = (iat != jat) ? (qiqpj + qpiqj) : qpiqj;   // charge-quadrupole scalar
+                    const double DDw = (iat != jat) ? 1.0 : 0.5;  // dipole-dipole single-ordering weight for the self pair
+                    for (int a = 0; a < 3; ++a)
+                        for (int b = 0; b < 3; ++b) {
+                            const double wprime = w * (-(a == b ? 1.0 : 0.0) + kv[a] * kv[b] * X);
+                            double dE_ab = 0.0;
+                            // charge-dipole: with v0 = x_j - x_i the pair energy is E = +sd_f sin(gv) w A (the matrix
+                            // uses x_i - x_j and the energy -mu_i.SD(j,i) q_j; sin is odd), consistent with the
+                            // gradient dG -= sd_f k cos A above
+                            if (iat != jat)
+                                dE_ab += sd_f * sg * (wprime * A + w * (-(mi[a] * qj - mj[a] * qi) * kv[b]));
+                            // dipole-dipole: E = DDw cos(gv) w (k.mu_i)(k.mu_j)
+                            dE_ab += DDw * cg * (wprime * dpiv * dpjv + w * (-mi[a] * kv[b] * dpjv - dpiv * mj[a] * kv[b]));
+                            // charge-quadrupole: E = sq_f cos(gv) w B
+                            const double Bprime = (iat != jat) ? -2.0 * (qi * tjk[a] + qj * tik[a]) * kv[b]
+                                                                : -2.0 * qi * tik[a] * kv[b];
+                            dE_ab += sq_f * cg * (wprime * B + w * Bprime);
+                            dEde[a][b] += dE_ab;
+                        }
                 }
+            }
+            if (want_v) {   // dipole-dipole constant (fac/6) delta_ab, fac ~ 1/V: dE/d(eps_ab) = -(fac/6) mu_i.mu_j delta_ab
+                const double cdd = (iat != jat) ? (fac / 6.0) * dpidpj : 0.5 * (fac / 6.0) * dpidpj;
+                for (int a = 0; a < 3; ++a) dEde[a][a] -= cdd;
             }
         }
         // direct
@@ -1147,6 +1211,9 @@ void XTB::addMultipoleGradientPeriodic(Matrix& gradient, Vector& dEdcn) const
             dE += eq * 3.0 * mp_dmp5 * fdmp5 * g5 * fdmp5 / rr * std::pow(rr * g1, mp_dmp5);
             if (iat != jat)
                 for (int c = 0; c < 3; ++c) dG[c] += g_sd[c] + g_dd[c] + g_sq[c];
+            if (want_v)   // dE/d(eps_ab) = (dE/dvec_a) vec_b = -(g_a) vec_b (g = dE/dx_i of this image)
+                for (int a = 0; a < 3; ++a)
+                    for (int b = 0; b < 3; ++b) dEde[a][b] -= wself * (g_sd[a] + g_dd[a] + g_sq[a]) * vec[b];
         }
     };
 
@@ -1155,27 +1222,32 @@ void XTB::addMultipoleGradientPeriodic(Matrix& gradient, Vector& dEdcn) const
     const int NB = nat < 32 ? nat : 32;
     std::vector<Matrix> g_b(NB, Matrix::Zero(nat, 3));
     std::vector<Vector> dEdr_b(NB, Vector::Zero(nat));
+    std::vector<Eigen::Matrix3d> v_b(virial ? NB : 0, Eigen::Matrix3d::Zero());
     parallelStripes(effectiveIntraThreads(nat), [&](int tid, int nth) {
         for (int blk = tid; blk < NB; blk += nth) {
             Matrix& gb = g_b[blk];
             Vector& eb = dEdr_b[blk];
+            double dEde[3][3];
             for (int iat = blk; iat < nat; iat += NB) {
-                for (int jat = 0; jat < iat; ++jat) {
+                for (int jat = 0; jat <= iat; ++jat) {
                     double dG[3], dE;
-                    pairTerms(iat, jat, dG, dE);
+                    pairTerms(iat, jat, dG, dE, virial ? dEde : nullptr);
                     eb(iat) += dE;
-                    eb(jat) += dE;
-                    for (int c = 0; c < 3; ++c) { gb(iat, c) += dG[c]; gb(jat, c) -= dG[c]; }
+                    if (jat != iat) {
+                        eb(jat) += dE;
+                        for (int c = 0; c < 3; ++c) { gb(iat, c) += dG[c]; gb(jat, c) -= dG[c]; }
+                    }
+                    if (virial)
+                        for (int a = 0; a < 3; ++a)
+                            for (int b = 0; b < 3; ++b) v_b[blk](a, b) -= dEde[a][b];   // Xi = -dE/d(eps)
                 }
-                double dG[3], dE;   // self images: dE/d(mrad) only
-                pairTerms(iat, iat, dG, dE);
-                eb(iat) += dE;
             }
         }
     });
     for (int blk = 0; blk < NB; ++blk) {
         gradient += g_b[blk];
         dEdr_mp += dEdr_b[blk];
+        if (virial) *virial += v_b[blk];
     }
     const Vector cn = computeCoordinationNumbers();
     for (int i = 0; i < nat; ++i) {
@@ -1197,6 +1269,17 @@ void XTB::calculateGradientPeriodic()
     const int nao = m_basis.nao;
     m_gradient = Matrix::Zero(nat, 3);
     const std::vector<double> xyz = geometryBohr(m_geometry, nat);
+    // P4: atomic virial Xi_ab = -dE/d(eps_ab) at fixed fractional coordinates; every image term contributes
+    // -(dE/dd_a) d_b with its pair vector d (self images included: |T| scales with the cell), Ewald terms their
+    // own strain derivatives. Symmetrised at the end.
+    const bool want_vir = m_want_virial;
+    Eigen::Matrix3d Xi = Eigen::Matrix3d::Zero();
+    m_virial_valid = false;
+    auto virPair = [&](Eigen::Matrix3d& X, double gx, double gy, double gz, double dx, double dy, double dz) {
+        const double G[3] = { gx, gy, gz }, d[3] = { dx, dy, dz };
+        for (int a = 0; a < 3; ++a)
+            for (int b = 0; b < 3; ++b) X(a, b) -= G[a] * d[b];
+    };
 
     // energy-weighted density W (as calculateGradient)
     const int nocc_orbs = static_cast<int>(std::round(m_wfn.nocc / 2.0));
@@ -1243,29 +1326,36 @@ void XTB::calculateGradientPeriodic()
             const int zi = m_atoms[i];
             const double alfi = g1m ? gfn1_params::rep_alpha[zi - 1] : gfn2_params::rep_alpha[zi - 1];
             const double zeffi = g1m ? gfn1_params::rep_zeff[zi - 1] : gfn2_params::rep_zeff[zi - 1];
-            for (int j = 0; j < i; ++j) {
+            for (int j = 0; j <= (want_vir ? i : i - 1); ++j) {   // self images only for the virial (weight 1/2)
                 const int zj = m_atoms[j];
                 const double alfj = g1m ? gfn1_params::rep_alpha[zj - 1] : gfn2_params::rep_alpha[zj - 1];
                 const double zeffj = g1m ? gfn1_params::rep_zeff[zj - 1] : gfn2_params::rep_zeff[zj - 1];
                 const double alpha_pair = std::sqrt(alfi * alfj);
                 double kexp_pair = kexp;
                 if (!g1m && zi <= 2 && zj <= 2) kexp_pair = gfn2_params::rep_kexp_light;
-                PBCUtils::forEachImage(images, &xyz[3 * i], &xyz[3 * j], false,
+                const bool same = (i == j);
+                PBCUtils::forEachImage(images, &xyz[3 * i], &xyz[3 * j], same,
                     [&](double dx, double dy, double dz, double r2) {
                         const double r = std::sqrt(r2);
                         const double r_kexp = std::pow(r, kexp_pair);
                         const double E_pair = zeffi * zeffj / std::pow(r, rexp) * std::exp(-alpha_pair * r_kexp);
                         const double dEdr = -(rexp / r + alpha_pair * kexp_pair * std::pow(r, kexp_pair - 1.0)) * E_pair;
                         const double fx = dEdr * dx / r, fy = dEdr * dy / r, fz = dEdr * dz / r;
-                        m_gradient(i, 0) += fx; m_gradient(j, 0) -= fx;
-                        m_gradient(i, 1) += fy; m_gradient(j, 1) -= fy;
-                        m_gradient(i, 2) += fz; m_gradient(j, 2) -= fz;
+                        if (!same) {
+                            m_gradient(i, 0) += fx; m_gradient(j, 0) -= fx;
+                            m_gradient(i, 1) += fy; m_gradient(j, 1) -= fy;
+                            m_gradient(i, 2) += fz; m_gradient(j, 2) -= fz;
+                        }
+                        if (want_vir) {
+                            const double w = same ? 0.5 : 1.0;
+                            virPair(Xi, w * fx, w * fy, w * fz, dx, dy, dz);
+                        }
                     });
             }
         }
     }
     // 1b. halogen bond
-    addHalogenBondGradientPeriodic(m_gradient);
+    addHalogenBondGradientPeriodic(m_gradient, want_vir ? &Xi : nullptr);
 
     // 2a. on-site CN term
     Vector dEdcn = Vector::Zero(nat);
@@ -1284,9 +1374,11 @@ void XTB::calculateGradientPeriodic()
         const int grad_threads = effectiveIntraThreads(nat);
         std::vector<Matrix> grad_parts(grad_threads, Matrix::Zero(nat, 3));
         std::vector<Vector> dEdcn_parts(grad_threads, Vector::Zero(nat));
+        std::vector<Eigen::Matrix3d> vir_parts(grad_threads, Eigen::Matrix3d::Zero());
         parallelStripes(grad_threads, [&](int tid, int nth) {
         Matrix& g_loc = grad_parts[tid];
         Vector& dEdcn_loc = dEdcn_parts[tid];
+        Eigen::Matrix3d& v_loc = vir_parts[tid];
         for (int iat = tid; iat < nat; iat += nth) {
             for (int jat = iat; jat < nat; ++jat) {
                 const bool same = (iat == jat);
@@ -1335,13 +1427,18 @@ void XTB::calculateGradientPeriodic()
                                 double blk_s[9];
                                 CGTO::cgto_overlap_block(sh_a, ang_a, sh_b, ang_b, xi[0], xi[1], xi[2], xj[0], xj[1], xj[2], blk_s);
                                 double cn_sum = 0.0;
-                                if (same) {
+                                // self image (iat == jat, T != 0): the loop visits both AO orderings and every T, so the
+                                // pair formulas below (built for the half-visited iat < jat case) carry a weight 1/2 here;
+                                // no Cartesian derivative (both centres move together), but the integrals depend on |T|
+                                // and enter the virial (P4) and dE/dCN
+                                const double wself = same ? 0.5 : 1.0;
+                                if (same && !want_vir) {
                                     for (int iao = 0; iao < ia_nao; ++iao)
                                         for (int jao = 0; jao < jb_nao; ++jao)
                                             cn_sum += m_wfn.P(ia_start + iao, jb_start + jao) * blk_s[iao * jb_nao + jao];
-                                    dEdcn_loc(iat) += (-m_h0.kcn[ish_a]) * h_factor * cn_sum;
-                                    dEdcn_loc(jat) += (-m_h0.kcn[ish_b]) * h_factor * cn_sum;
-                                    continue;   // self image: no Cartesian derivative
+                                    dEdcn_loc(iat) += wself * (-m_h0.kcn[ish_a]) * h_factor * cn_sum;
+                                    dEdcn_loc(jat) += wself * (-m_h0.kcn[ish_b]) * h_factor * cn_sum;
+                                    continue;
                                 }
                                 const double dlog_pi_dr_r = (m_h0.shpoly[ish_a] / pi_a + m_h0.shpoly[ish_b] / pi_b) * rr / (2.0 * r2);
                                 const double v_a = m_pot.v_sh(ish_a) + m_pot.v_at(iat);
@@ -1403,14 +1500,17 @@ void XTB::calculateGradientPeriodic()
                                         cn_sum += Pmn * S_T;
                                     }
                                 }
-                                const double Gx = G_sval[0] + G_shpoly_scalar * dx_ij;
-                                const double Gy = G_sval[1] + G_shpoly_scalar * dy_ij;
-                                const double Gz = G_sval[2] + G_shpoly_scalar * dz_ij;
-                                g_loc(iat, 0) += Gx; g_loc(jat, 0) -= Gx;
-                                g_loc(iat, 1) += Gy; g_loc(jat, 1) -= Gy;
-                                g_loc(iat, 2) += Gz; g_loc(jat, 2) -= Gz;
-                                dEdcn_loc(iat) += (-m_h0.kcn[ish_a]) * h_factor * cn_sum;
-                                dEdcn_loc(jat) += (-m_h0.kcn[ish_b]) * h_factor * cn_sum;
+                                const double Gx = wself * (G_sval[0] + G_shpoly_scalar * dx_ij);
+                                const double Gy = wself * (G_sval[1] + G_shpoly_scalar * dy_ij);
+                                const double Gz = wself * (G_sval[2] + G_shpoly_scalar * dz_ij);
+                                if (!same) {
+                                    g_loc(iat, 0) += Gx; g_loc(jat, 0) -= Gx;
+                                    g_loc(iat, 1) += Gy; g_loc(jat, 1) -= Gy;
+                                    g_loc(iat, 2) += Gz; g_loc(jat, 2) -= Gz;
+                                }
+                                if (want_vir) virPair(v_loc, Gx, Gy, Gz, dx_ij, dy_ij, dz_ij);
+                                dEdcn_loc(iat) += wself * (-m_h0.kcn[ish_a]) * h_factor * cn_sum;
+                                dEdcn_loc(jat) += wself * (-m_h0.kcn[ish_b]) * h_factor * cn_sum;
                             }
                         }
                     });
@@ -1420,6 +1520,7 @@ void XTB::calculateGradientPeriodic()
         for (int t = 0; t < grad_threads; ++t) {
             m_gradient += grad_parts[t];
             dEdcn += dEdcn_parts[t];
+            Xi += vir_parts[t];
         }
     }
 
@@ -1432,6 +1533,15 @@ void XTB::calculateGradientPeriodic()
             m_cell_bohr, m_pbc_ewald_tolerance, m_pbc_ewald_r_cut > 0.0 ? m_pbc_ewald_r_cut : -1.0);
         const curcuma::ewald::EwaldSum ewald(m_cell_bohr, par);
         m_gradient += ewald.gradient(pos, m_wfn.q_at);
+        if (want_vir) {   // P4: real, reciprocal and background strain derivatives of the point-charge Ewald sum (N1)
+            curcuma::ewald::EwaldGeometryCache cache;
+            ewald.buildGeometryCache(pos, nullptr, cache, static_cast<size_t>(1) << 30);
+            ewald.realSpaceVirialRange(cache, m_wfn.q_at, 0, static_cast<int>(cache.pairs.size()), Xi);
+            ewald.reciprocalVirialRange(cache.table, m_wfn.q_at, 0, ewald.numberOfKVectors(), Xi);
+            curcuma::ewald::EwaldResult bg;
+            ewald.selfAndBackground(m_wfn.q_at, nullptr, false, bg);
+            Xi += curcuma::ewald::EwaldSum::backgroundVirial(bg.terms);
+        }
 
         const double gexp = (m_method == MethodType::GFN1) ? gfn1_params::gexp : gfn2_params::gexp;
         const coulomb::Method cm = (m_method == MethodType::GFN1) ? coulomb::Method::GFN1 : coulomb::Method::GFN2;
@@ -1441,13 +1551,17 @@ void XTB::calculateGradientPeriodic()
         const double rcut = m_pbc_coulomb_switch;
         for (int is = 0; is < nsh; ++is) {
             const int iat = m_basis.sh2at[is];
-            for (int js = 0; js < is; ++js) {
+            for (int js = 0; js <= is; ++js) {
                 const int jat = m_basis.sh2at[js];
-                if (iat == jat) continue;   // on-site and self images: no derivative
-                const double gam_bar = coulomb::average(cm, g_sh[is], g_sh[js]);
+                const bool same_atom = (iat == jat);
+                if (same_atom && !want_vir) continue;   // on-site and self images: no Cartesian derivative
+                // self images of an on-site shell pair: energy 1/2 q q sum_T (is == js) or q q sum_T (is != js, both
+                // orderings) -> weights for the virial
+                const double wgt = same_atom ? ((is == js) ? 0.5 : 1.0) : 1.0;
+                const double gam_bar = (is == js) ? g_sh[is] : coulomb::average(cm, g_sh[is], g_sh[js]);
                 const double gam_pow = std::pow(gam_bar, -gexp);
                 const double qq = m_wfn.q_sh(is) * m_wfn.q_sh(js);
-                PBCUtils::forEachImage(images, &xyz[3 * iat], &xyz[3 * jat], false,
+                PBCUtils::forEachImage(images, &xyz[3 * iat], &xyz[3 * jat], same_atom,
                     [&](double dx, double dy, double dz, double r2) {
                         const double r1 = std::sqrt(r2);
                         const double f = koSwitch(r1, rcut);
@@ -1462,9 +1576,12 @@ void XTB::calculateGradientPeriodic()
                         }
                         const double dko = df * (gamma - 1.0 / r1) + f * (dgamma_dr + 1.0 / r2);
                         const double force = qq * dko / r1;
-                        m_gradient(iat, 0) += force * dx; m_gradient(jat, 0) -= force * dx;
-                        m_gradient(iat, 1) += force * dy; m_gradient(jat, 1) -= force * dy;
-                        m_gradient(iat, 2) += force * dz; m_gradient(jat, 2) -= force * dz;
+                        if (!same_atom) {
+                            m_gradient(iat, 0) += force * dx; m_gradient(jat, 0) -= force * dx;
+                            m_gradient(iat, 1) += force * dy; m_gradient(jat, 1) -= force * dy;
+                            m_gradient(iat, 2) += force * dz; m_gradient(jat, 2) -= force * dz;
+                        }
+                        if (want_vir) virPair(Xi, wgt * force * dx, wgt * force * dy, wgt * force * dz, dx, dy, dz);
                     });
             }
         }
@@ -1472,12 +1589,13 @@ void XTB::calculateGradientPeriodic()
 
     // 5. GFN2 multipoles
     if (m_method == MethodType::GFN2 && m_mp_initialized && !m_mp_grad_off)
-        addMultipoleGradientPeriodic(m_gradient, dEdcn);
+        addMultipoleGradientPeriodic(m_gradient, dEdcn, want_vir ? &Xi : nullptr);
 
-    // 3b. dispersion (periodic D3/D4, CN chain rule already folded)
+    // 3b. dispersion (periodic D3/D4, CN chain rule already folded; its virial was accumulated with it)
     if (m_disp_gradient_valid && !m_d4_grad_off && m_disp_gradient.rows() == nat && m_disp_gradient.cols() == 3) {
         m_gradient += m_disp_gradient;
         if (m_disp_dEdcn.size() == nat) dEdcn += m_disp_dEdcn;
+        if (want_vir) Xi += m_disp_virial;
     }
 
     // 4. CN chain rule of the H0 coordination number over images (j < i)
@@ -1486,9 +1604,10 @@ void XTB::calculateGradientPeriodic()
         std::vector<double> rcov(nat);
         for (int i = 0; i < nat; ++i) rcov[i] = covalent_rad_d3_au(m_atoms[i]);
         for (int i = 0; i < nat; ++i)
-            for (int j = 0; j < i; ++j) {
+            for (int j = 0; j <= (want_vir ? i : i - 1); ++j) {   // self images: virial only
                 const double rc = rcov[i] + rcov[j];
-                PBCUtils::forEachImage(images, &xyz[3 * i], &xyz[3 * j], false,
+                const bool same = (i == j);
+                PBCUtils::forEachImage(images, &xyz[3 * i], &xyz[3 * j], same,
                     [&](double dx, double dy, double dz, double r2) {
                         const double r = std::sqrt(r2);
                         double dcndr;
@@ -1506,13 +1625,48 @@ void XTB::calculateGradientPeriodic()
                             const double dc2dr = -c2 * (1.0 - c2) * kb * (rc + rs) / r2;
                             dcndr = dc1dr * c2 + c1 * dc2dr;
                         }
-                        const double factor = (dEdcn(i) + dEdcn(j)) * dcndr / r;
-                        m_gradient(i, 0) += factor * dx; m_gradient(j, 0) -= factor * dx;
-                        m_gradient(i, 1) += factor * dy; m_gradient(j, 1) -= factor * dy;
-                        m_gradient(i, 2) += factor * dz; m_gradient(j, 2) -= factor * dz;
+                        const double factor = (same ? dEdcn(i) : dEdcn(i) + dEdcn(j)) * dcndr / r;
+                        if (!same) {
+                            m_gradient(i, 0) += factor * dx; m_gradient(j, 0) -= factor * dx;
+                            m_gradient(i, 1) += factor * dy; m_gradient(j, 1) -= factor * dy;
+                            m_gradient(i, 2) += factor * dz; m_gradient(j, 2) -= factor * dz;
+                        }
+                        if (want_vir) virPair(Xi, factor * dx, factor * dy, factor * dz, dx, dy, dz);
                     });
             }
     }
+    if (want_vir) {
+        m_virial = 0.5 * (Xi + Xi.transpose());
+        m_virial_valid = true;
+    }
+}
+
+/* ------------------------------------------------------------------ *
+ *  Test hooks (P4): multipole energy / virial at given moments        *
+ * ------------------------------------------------------------------ */
+double XTB::multipoleEnergyProbe(const Eigen::Matrix3d& cell_angstrom, const Matrix& geometry_angstrom,
+                                 const Vector& q, const Matrix& dp, const Matrix& qp)
+{
+    std::string err;
+    if (!setPeriodicCell(cell_angstrom, err)) return 0.0;
+    m_geometry = geometry_angstrom;
+    m_wfn.q_at = q;
+    m_wfn.dp_at = dp;
+    m_wfn.qp_at = qp;
+    buildMultipoleInteractionMatricesPeriodic();   // current m_mp_mrad, alpha/boxes from the cell (or the env overrides)
+    return energyMultipole();
+}
+
+Eigen::Matrix3d XTB::multipoleVirialProbe(const Vector& q, const Matrix& dp, const Matrix& qp)
+{
+    m_wfn.q_at = q;
+    m_wfn.dp_at = dp;
+    m_wfn.qp_at = qp;
+    Matrix g = Matrix::Zero(m_atomcount, 3);
+    Vector dEdcn = Vector::Zero(m_atomcount);
+    Eigen::Matrix3d V = Eigen::Matrix3d::Zero();
+    addMultipoleGradientPeriodic(g, dEdcn, &V);
+    return 0.5 * (V + V.transpose());
 }
 
 /* ------------------------------------------------------------------ *
@@ -1524,6 +1678,7 @@ double XTB::dispersionEnergyNow(const Vector& q_at, bool gradient)
     else m_wfn.q_at = Vector::Zero(m_atomcount);
     m_d4_prepared = false;
     m_d4_variational_qresp = true;   // no separate q-response in the probe
+    m_want_virial = gradient;        // P4 probe: dispersionVirialNow() holds the D3/D4 part of Xi
     return calcDispersionEnergy(gradient);
 }
 

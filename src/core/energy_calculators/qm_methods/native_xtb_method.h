@@ -46,6 +46,7 @@ BEGIN_PARAMETER_DEFINITION(xtb)
     PARAM(pbc_ewald_tolerance, Double, 1.0e-10, "Periodic cell only: tolerance of the Ewald sum of the isotropic Coulomb (and GFN2 multipole) matrices; sets alpha and the k-space cutoff from the real-space cutoff. No effect without a unit cell.", "Periodic", {})
     PARAM(pbc_ewald_r_cut_bohr, Double, 0.0, "Periodic cell only: real-space cutoff (Bohr) of the Ewald sum, minimum image, must stay below L_min/2; 0 = L_min/2. No effect without a unit cell.", "Periodic", {})
     PARAM(pbc_coulomb_switch_bohr, Double, 10.0, "Periodic cell only: distance (Bohr) at which the Klopman-Ohno kernel is switched to 1/r (quintic switch over the last Bohr, tblite rcut = 10). The lattice sum of the Klopman-Ohno remainder diverges without this switch; another value gives no tblite agreement. No effect without a unit cell.", "Periodic", {})
+    PARAM(pbc_multipole_tblite_factors, Bool, false, "Periodic cell, GFN2 only: use tblite 0.4.0's reciprocal-space factors of the multipole Ewald (charge-dipole 2, charge-quadrupole +1) instead of the Ewald-consistent 1 and -1/3. true reproduces tblite's periodic GFN2 energy (alpha dependent, up to 1e-3 Eh at 8 A); false (default) is alpha independent. No effect without a unit cell. Diagnostic; see docs/WP-PERIODIC-XTB.md P2b.", "Periodic", {})
     PARAM(level_shift, Double, 0.2, "Virtual-orbital shift (Eh) for scf_mode level-shift. It is faded out near convergence, so the converged result is unshifted.", "SCF", {})
     PARAM(warm_start, Bool, true, "Start each SCF from the converged charges of the previous geometry (optimisation, MD). false always starts from scf_guess.", "SCF", {})
     PARAM(keep_diis, Bool, false, "Keep the DIIS/Broyden history across geometry steps instead of resetting it. Experimental: may help on smooth MD trajectories and hurt on large steps.", "SCF", {})
@@ -189,6 +190,19 @@ public:
     // driver is active). Used by the GPU wrapper to install an external
     // eigensolver hook. Claude Generated (GPU port).
     curcuma::xtb::XTB* solver() { return m_xtb.get(); }
+
+    // ---- Periodic cell: atomic virial and cell update (WP-PERIODIC-XTB P4, Claude Generated Nov 2026) ----
+    // Not part of ComputationalMethod (no vtable change, plugin ABI untouched); EnergyCalculator reaches them
+    // by dynamic_cast on the CPU method. The virial is computed with the gradient when wanted.
+    void setWantVirial(bool v) { if (m_xtb) m_xtb->setWantVirial(v); }
+    bool virialValid() const { return m_xtb && m_xtb->virialValid(); }
+    Eigen::Matrix3d virial() const { return m_xtb ? m_xtb->virial() : Eigen::Matrix3d::Zero(); }
+    bool updateCell(const Eigen::Matrix3d& cell_angstrom, std::string& error)
+    {
+        if (!m_xtb || !m_xtb->hasPeriodicCell()) { error = "no periodic cell set"; return false; }
+        m_molecule.m_unit_cell = cell_angstrom;
+        return m_xtb->updateCell(cell_angstrom, error);
+    }
 
     // ---- Native xTB extras (not in the base interface) --------------------
     Matrix getMolecularOrbitals() const;

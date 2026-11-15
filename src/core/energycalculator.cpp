@@ -22,6 +22,7 @@
 #include "src/core/gpu_fallback.h"
 #include "energy_calculators/ff_methods/forcefield_method.h"
 #include "energy_calculators/ff_methods/gfnff.h"  // N2: GFNFF::updateCell in setUnitCell()
+#include "energy_calculators/qm_methods/native_xtb_method.h"  // WP-PERIODIC-XTB P4: virial and cell update of gfn1/gfn2
 #include "gpu_device_pool.h"
 #include "energy_calculators/gpu_plugin.h"
 #include "src/tools/general.h"
@@ -1015,15 +1016,61 @@ bool EnergyCalculator::hasPeriodicEnergy() const
     return m_method && m_method->hasPeriodicEnergy();
 }
 
-// Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED N2)
+// Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED N2; WP-PERIODIC-XTB P4 for gfn1/gfn2)
 void EnergyCalculator::setUnitCell(const Eigen::Matrix3d& cell_angstrom)
 {
     GFNFF* ff = m_method ? m_method->gfnffInstance() : nullptr;
-    if (!ff || !hasPeriodicEnergy())
-        throw std::runtime_error("EnergyCalculator::setUnitCell: only the periodic native CPU GFN-FF energy "
-                                 "(method gfnff with a unit cell and coulomb_ewald) can change its cell");
-    ff->updateCell(cell_angstrom);  // throws (instance unchanged) when a cutoff no longer fits below L_min/2
-    m_mol.m_unit_cell = cell_angstrom;
+    if (ff && hasPeriodicEnergy()) {
+        ff->updateCell(cell_angstrom);  // throws (instance unchanged) when a cutoff no longer fits below L_min/2
+        m_mol.m_unit_cell = cell_angstrom;
+        return;
+    }
+    if (auto* xtb = dynamic_cast<NativeXtbMethod*>(m_method.get()); xtb && hasPeriodicEnergy()) {
+        std::string err;
+        if (!xtb->updateCell(cell_angstrom, err))
+            throw std::runtime_error("EnergyCalculator::setUnitCell: " + err);
+        m_mol.m_unit_cell = cell_angstrom;
+        return;
+    }
+    throw std::runtime_error("EnergyCalculator::setUnitCell: only a periodic native CPU energy (gfnff with a unit cell "
+                             "and coulomb_ewald, or gfn1/gfn2 with a unit cell) can change its cell");
+}
+
+// Claude Generated (Nov 2026, WP-PERIODIC-XTB P4)
+void EnergyCalculator::setWantVirial(bool want)
+{
+    if (GFNFF* ff = m_method ? m_method->gfnffInstance() : nullptr) {
+        ff->setWantVirial(want);   // throws when the GFN-FF set-up has no virial (ATM, ALPB, ...)
+        return;
+    }
+    if (auto* xtb = dynamic_cast<NativeXtbMethod*>(m_method.get())) {
+        if (want && !hasPeriodicEnergy())
+            throw std::runtime_error("virial: the native " + xtb->getMethodName() + " has no cell, no atomic virial");
+        xtb->setWantVirial(want);
+        return;
+    }
+    if (want)
+        throw std::runtime_error("virial: no atomic virial for method " + m_requested_method_name);
+}
+
+bool EnergyCalculator::virialValid() const
+{
+    if (const GFNFF* ff = m_method ? m_method->gfnffInstance() : nullptr) return ff->virialValid();
+    if (const auto* xtb = dynamic_cast<const NativeXtbMethod*>(m_method.get())) return xtb->virialValid();
+    return false;
+}
+
+Eigen::Matrix3d EnergyCalculator::virial() const
+{
+    if (const GFNFF* ff = m_method ? m_method->gfnffInstance() : nullptr) return ff->virial();
+    if (const auto* xtb = dynamic_cast<const NativeXtbMethod*>(m_method.get())) return xtb->virial();
+    return Eigen::Matrix3d::Zero();
+}
+
+std::pair<std::string, double> EnergyCalculator::largestActiveCutoffBohr() const
+{
+    if (const GFNFF* ff = m_method ? m_method->gfnffInstance() : nullptr) return ff->largestActiveCutoffBohr();
+    return { std::string("none"), 0.0 };
 }
 
 // WP-P1 (May 2026): per-phase timing forwarders for MDDiagnosticsWriter

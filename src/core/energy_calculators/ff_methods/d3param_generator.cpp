@@ -230,7 +230,8 @@ void D3ParameterGenerator::prepareForEnergyGradientWithCN(const std::vector<int>
 double D3ParameterGenerator::getEnergyAndGradientPeriodic(bool need_gradient,
                                                           Matrix& gradient_out,
                                                           Vector& dEdcn_out,
-                                                          const PBCUtils::LatticeImageList& images) const
+                                                          const PBCUtils::LatticeImageList& images,
+                                                          Eigen::Matrix3d* virial_out) const
 {
     // Claude Generated (Nov 2026, WP-PERIODIC-XTB P1). Reference: s-dftd3 damping/rational.f90
     // get_dispersion_energy / get_dispersion_derivs with lattice translations: jat <= iat, every
@@ -292,6 +293,12 @@ double D3ParameterGenerator::getEnergyAndGradientPeriodic(bool need_gradient,
                         gradient_out(i, 0) += gx; gradient_out(j, 0) -= gx;
                         gradient_out(i, 1) += gy; gradient_out(j, 1) -= gy;
                         gradient_out(i, 2) += gz; gradient_out(j, 2) -= gz;
+                    }
+                    if (virial_out) {   // P4: Xi_ab -= w (dE/dd_a) d_b, self images with their 1/2 weight
+                        const double gw = -c6 * gdisp * w;
+                        const double d[3] = { dx, dy, dz };
+                        for (int a = 0; a < 3; ++a)
+                            for (int b = 0; b < 3; ++b) (*virial_out)(a, b) -= gw * d[a] * d[b];
                     }
                     // (i, i, T): the two ends move together, so the direct gradient of a self image is zero
                     const double edisp = s6 * t6 + s8 * r6_ratio * t8;
