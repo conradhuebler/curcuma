@@ -6,8 +6,8 @@ two-stage free-energy route: a finite-temperature string (stage 1) followed by c
 mean-force sampling on a path collective variable (stage 2), which yields G(s), a basin barrier
 and an absolute TST rate.
 
-The previous lab notebook (helicene, band PMF, umbrella/WHAM attempts) is in
-[NEB_MD_HISTORY.md](NEB_MD_HISTORY.md). **All free-energy numbers in that file are invalid.**
+The previous lab notebook (helicene, band PMF, umbrella/WHAM attempts) was removed in Nov 2026: its free-energy
+numbers were invalid and its raw data are not kept. It remains in git history (`git show e81f1a23:docs/NEB_MD_HISTORY.md`).
 
 ## Status
 
@@ -343,6 +343,14 @@ CSVR issue below, the absolute comparison with k_MD holds only to about 20 %.
   earlier perfect symmetry (0.013 +- 0.069) was luck.
 - NEB-MD (3 runs, own string each): basin barrier 1.549 (sd 0.010) fwd / 1.541 (0.014) rev, k_TST 0.142 / 0.144 /ps, no
   dead windows. k_TST / k_MD is now 1.35-1.50 at equal temperature (was 1.08-1.27 across different temperatures).
+
+## Re-measurement Nov 15, 2026 (commit `b677027c`)
+
+> AI-generated, machine-run, not human-reviewed. Record, inputs, scripts and outputs: vault `Labor/curcuma NEB-MD Pfad-Sampling.md`, `_artefacts/2026-11-15_curcuma_nebmd_remessung/`.
+
+- **Ethane** (GFN-FF, 300 K, 12 windows, 20 ps string + 20 ps stage 2, own string per seed, n=4; staggered minimum, one methyl turned by 120 degrees): basin barrier fwd 1.535-1.562 (mean 1.549, sd 0.011) / rev 1.547-1.564 (1.554, sd 0.007) kcal/mol, k_TST 0.139-0.145 / 0.139-0.143 /ps, basin reaction dG -0.017 to +0.011. Agrees with the Oct 30 values above.
+- **Identity SN2 Cl(-) + CH3Cl** (GFN2, charge -1, 34 windows x 22 ps, `z_wall 0.5`, n=3 seeds on one rebuilt mirror-symmetric path; the Oct 18 path file was not kept): Eyring fwd 11.05 / 11.73 / 11.82 (mean 11.54, sd 0.42), rev 10.97 / 11.38 / 11.19 (11.18, sd 0.20), basin reaction dG +0.08 / +0.35 / +0.63 (mean 0.35, sd 0.27), largest window mean z 0.29 A^2; classical harmonic reference 12.02. Means within one sd of the Oct 18 values; the fwd spread is larger.
+- Not re-measured: the free-MD reference (4 x 2 ns), direct MD rates, variations of windows, `cv_frames`, dt, and all other systems.
 - Of the 8 pre-registered criteria, "NEB vs reference TST +-25 %" is not met (fwd +44 %, rev +14 % at 160 bins); CV, window
   and dt variations were not repeated. Reference barrier depends on `fe_bins` by +0.3 (20 -> 320), so the old "1.50 vs 1.45
   agreement" was within the spread, partly luck.

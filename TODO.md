@@ -263,7 +263,7 @@ Stand.
 - **Build und Doku aus dem Debt-Bericht** ([docs/debt_2026-11/BUILD_DOCS.md](docs/debt_2026-11/BUILD_DOCS.md), nicht angefasst): `curcuma_cap` kompiliert 38 Dateien ein zweites Mal (M1); ungenutzte Compile-Definitionen, `-g` in jedem Build-Typ, PCH nur teilweise wirksam, ungepinnte Abhängigkeiten (M3 bis M6); Doku-Drift; `-dipole`-Ausgabe wiederherstellen (Punkt 14).
 - **Nicht verifiziert nach dem Debt-Branch** (2026-11-14): Builds mit `USE_TBLITE`, `USE_D3`, `USE_GFNFF`, `USE_XTB`, `USE_ULYSSES`, CUDA, ROCm, Vulkan; gfn1/gfn2-Regression (MOR41 nur `uff` und `gfnff`); `ctest` mit `-DCURCUMA_UNICODE_OUTPUT=ON`; Casino hat keinen Test.
 
-- **NEB-MD nach PR #16** (2026-11-14): `docs/NEB_MD_HISTORY.md` (1092 Zeilen) hält Freie-Energie-Zahlen fest, die laut Datei ungültig sind und deren Rohdaten nur im Scratchpad lagen; in den Vault verschieben oder streichen. Nicht geprüft: PLUMED-Korrektur (Vorzeichen, `kB*T`) im Build, GPU, ROCm; NEB-MD nur auf Ethan mit GFN-FF validiert; `nebmd.cpp` hat Funktionen bis 465 Zeilen und `CoutSuppress` (tauscht `std::cout.rdbuf`).
+- **NEB-MD nach PR #16** (2026-11-14): Nicht geprüft: PLUMED-Korrektur (Vorzeichen, `kB*T`) im Build, GPU, ROCm; NEB-MD nur auf Ethan mit GFN-FF validiert; `nebmd.cpp` hat Funktionen bis 465 Zeilen und `CoutSuppress` (tauscht `std::cout.rdbuf`).
 
 ## 6. Entscheidungen und Fragen
 
