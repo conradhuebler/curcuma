@@ -399,6 +399,16 @@ public:
         return m_ctx->dispersionATM(nat, c6, dc6dcn, s9, a1, a2, alp, cutoff,
                                     e_atom_out, grad_out, dEdcn_out);
     }
+    // Claude Generated (Nov 2026, WP-PERIODIC-XTB G4a): periodic ATM, see GpuScfBackend.
+    bool dispersionATMPeriodic(int nat, const double* xyz_bohr, const double* r4r2, const double* c6,
+                               const double* dc6dcn, const double* cell_L, int ntrans, const double* trans,
+                               double cutoff2, double s9, double a1, double a2, double alp, bool want_virial,
+                               double* e_atom_out, double* grad_out, double* dEdcn_out, double* vir6_out) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->dispersionATMPeriodic(nat, xyz_bohr, r4r2, c6, dc6dcn, cell_L, ntrans, trans, cutoff2, s9, a1,
+                                            a2, alp, want_virial, e_atom_out, grad_out, dEdcn_out, vir6_out);
+    }
 
     bool gradientTailDevice(int nat, bool is_gfn2, bool with_mp, const double* xyz_bohr, const double* dEdcn,
                             const double* rcov_au, const double* q_at, const double* dp_at, const double* qp_at,

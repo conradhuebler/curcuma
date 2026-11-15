@@ -666,6 +666,19 @@ struct GpuScfBackend {
                                double* e_atom_out, double* grad_out, double* dEdcn_out)
     { (void)nat; (void)c6; (void)dc6dcn; (void)s9; (void)a1; (void)a2; (void)alp; (void)cutoff;
       (void)e_atom_out; (void)grad_out; (void)dEdcn_out; return false; }
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB G4a): periodic D4 ATM on the device, self-contained (needs no
+    /// earlier begin*). Orthorhombic cell L[3] (Bohr), translations trans[3 ntrans] (T = 0 first, the
+    /// PBCUtils::LatticeImageList of the ATM cutoff), xyz_bohr [3 nat], r4r2 = sqrt(Z r4r2) per atom, c6/dc6dcn
+    /// nat x nat (buildAtmC6Flat). Per-atom gather over the image neighbours of each atom: e_atom (E = 1/3 sum),
+    /// grad [3 nat] and dEdcn [nat] (full, not 1/3), vir6 [6 nat] (xx xy xz yy yz zz; Xi += 1/3 sum) when
+    /// want_virial. Deterministic (warp per atom, fixed lane order). Default false -> host computeATMPeriodic.
+    virtual bool dispersionATMPeriodic(int nat, const double* xyz_bohr, const double* r4r2, const double* c6,
+                                       const double* dc6dcn, const double* cell_L, int ntrans, const double* trans,
+                                       double cutoff2, double s9, double a1, double a2, double alp, bool want_virial,
+                                       double* e_atom_out, double* grad_out, double* dEdcn_out, double* vir6_out)
+    { (void)nat; (void)xyz_bohr; (void)r4r2; (void)c6; (void)dc6dcn; (void)cell_L; (void)ntrans; (void)trans;
+      (void)cutoff2; (void)s9; (void)a1; (void)a2; (void)alp; (void)want_virial; (void)e_atom_out; (void)grad_out;
+      (void)dEdcn_out; (void)vir6_out; return false; }
     /// Claude Generated (Oct 2026): potentials of the gradient at the converged charges of the resident loop built on the
     /// device (XtbGpuContext::convergedPotentials) and the gradient that reads them (no host potential, no upload).
     virtual bool prepareConvergedPotentials(bool gfn2) { (void)gfn2; return false; }

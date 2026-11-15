@@ -477,7 +477,51 @@ trajectory comparison), `-gpu cuda` with a cell and threads > 1 beyond the 8-thr
 or charged cells on the device, d-shell elements (refused with a cell anyway), the ROCm/Vulkan refusal on a machine
 with those plugins.
 
-## Regression run (2026-11-14, `release/`, `ctest -R 'gfn|xtb|sqm|gfnff|pbc|ewald|simplemd|restart|md_|gpu|plugin|molecule|xyz|parser|curcumaopt|structinv' -j1`)
+### G2-G6 profile: host time per step in CUDA mode (2026-11-15, Claude Generated)
+
+Water boxes of `build_waterbox.py` (operator project GFN-FF-Wasser; 216 H2O built with `--n 216 --seed 1`, L 18.64 A;
+432 H2O = `box432_s1.xyz`, L 23.49 A, nao 5184), gfn2, `-sp` + `-dump_gradient`, `-gpu cuda`, `-threads 8`, RTX 5080,
+binary of G1 plus verbosity-3 timers (no numerical change), one run each on a shared machine (repeat scatter of single
+items 10-20 %):
+
+| item (ms) | 216 H2O | 432 H2O | stage |
+|---|---|---|---|
+| CN / overlap + H0 / orthonormalizer | 17 / 29 / 22 | 56 / 78 / 143 | G1 integrals |
+| gamma: Ewald matrix / Klopman-Ohno remainder | 118 / 15 | 396 / 59 | G2 |
+| multipoles: AO dp/qp image sums / interaction matrices | 81 / 104 | 334 / 728 | G1 / G3 |
+| pre-SCF upload (H0/S/L, multipole ints) | 55 | 143 | - |
+| SCF 11 it: total / device eigensolve / host D4 dE/dq | 540 / 284 / 220 | 1758 / 1062 / 532 | G4 (dE/dq) |
+| post-SCF D4: pairs / ATM / CN fold | 21 / 768 / 41 | 42 / 1415 / 102 | G4 |
+| gradient: W / repulsion+XB / H0-Pulay / Ewald / KO / multipole / CN chain | 58 / 23 / 63 / 9 / 16 / 124 / 37 | 331 / 70 / 136 / 34 / 59 / 894 / 133 | G5 |
+| TOTAL (`Timing breakdown`) / wall | 2284 / 2710 | 7284 / 7610 | |
+
+Order of benefit at 432 H2O: ATM (1.4 s), multipole gradient (0.9 s), multipole matrices (0.7 s), in-SCF D4 dE/dq
+(0.5 s), Ewald gamma (0.4 s), AO multipole image sums and W (0.33 s each). The virial is not part of this table (`-sp`
+requests none); its extra cost is in the MD measurements below. `CURCUMA_PBC_GPU_HOST=<tokens>` (diagnostic env,
+`atm`, `mpmat`, ..., `all`) keeps a ported stage on the host in the same binary.
+
+### G4a periodic D4 ATM on the device (2026-11-15, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+- `GpuScfBackend::dispersionATMPeriodic` (CUDA: `XtbGpuContext::dispersionATMPeriodic`, kernels `k_atm_pbc_nb<FILL>`,
+  `k_d4_atm_pbc_w`): image neighbour list of every atom on the device (candidates atom x translation in ascending
+  order, warp-ballot compaction, two passes), then a warp-per-atom gather over the unordered pairs of list points;
+  every translation class of triples appears once per member, so E = 1/3 sum e_atom, the gradient and dE/dCN of an
+  atom take the derivative with respect to the centre only, and the virial is 1/3 of the per-atom sum (the
+  `triple_scale` weights of `computeATMPeriodic` are the multiplicities of this gather). No atomics; the host adds
+  the per-atom results in atom order. The q = 0 C6 matrices come from `buildAtmC6Flat` (host, 10 ms at 432 H2O).
+  Per list entry the kernel stores r, 1/r^2, r0_aX, sqrt(C6_aX) and dC6_aX/dCN_a / C6_aX, so the triple loop has one
+  sqrt, two divisions and one cbrt (FP64 sqrt/div are slow on consumer GPUs; 490 -> 240 ms at 432 H2O).
+- G1 repair found here: with a cell `beginBasis` was skipped, so the device lacked the CSR offsets of the fixed-order
+  charge/moment sums and used the atomic kernels; the CUDA run of 216 H2O was not bitwise reproducible (dE 2e-13 Eh
+  between two runs, the dimer cells of the G1 gate were). `XTB::Calculation` now uploads the (geometry-free) basis with
+  a cell as well; 216 H2O gfn2 and gfn1, 1 and 8 threads: second run md5-identical.
+- Plugin ABI 8 -> 9 (new `GpuScfBackend` virtual). Diagnostic `CURCUMA_PBC_GPU_HOST=atm` keeps the host loop.
+- Gates: `pbc_xtb_gpu_parity` (now also the water trimer in a 6.5 A cube; virial limit 1e-7 as specified) gfn1/gfn2:
+  |dE| <= 5.3e-15 Eh, max |dG| <= 1.3e-10 Eh/A, max |dXi| <= 2.3e-10 Eh, second CUDA run bitwise in 6/6; 216 H2O gfn2
+  (`-scf_threshold 1e-9`, 8 threads) device ATM vs `CURCUMA_PBC_GPU_HOST=atm` in the same binary: dE 2.3e-13 Eh,
+  max dG 4e-15 Eh/A; `pbc_xtb_*` 5/5 in `release/` and `release_cuda/`; CPU without a cell 24/24 md5 to 957afab7,
+  CUDA without a cell 24/24 md5 to a 957afab7 build with the `release_cuda/` configuration (AVX2/AVX512/MKL/march native).
+ `ctest -R 'gfn|xtb|sqm|gfnff|pbc|ewald|simplemd|restart|md_|gpu|plugin|molecule|xyz|parser|curcumaopt|structinv' -j1`)
 
 369 tests selected, 2 failed before the fix below: `pbc_md_nonperiodic_cell` (its check (a) assumed gfn2 + cell to be
 non-periodic; now uses `eht` there and checks gfn2 + cell as periodic with DOF 3N-3 in a new (d), green) and `xtb_cpscf`

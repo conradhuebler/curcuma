@@ -615,6 +615,15 @@ double XTB::Calculation(bool gradient)
         }
     }
     // G1: with a cell the host builds the periodic integrals (image sums, Ewald gamma) and uploads them below.
+    // G4a (Nov 2026): the geometry-free basis upload still runs with a cell; it carries the CSR offsets of the
+    // fixed-order charge and moment sums (without them the device used the atomic kernels, and the periodic CUDA
+    // run was not bitwise reproducible from 216 H2O on: dE 2e-13 Eh between two runs).
+    if (m_gpu_scf && m_pbc && m_pbc_device_scf && m_gpu_basis_dirty && m_scf_mode == ScfMode::Broyden) {
+        GpuBasisFlat gbf;
+        GpuH0Flat    gh0;
+        exportGpuBasis(gbf, gh0);
+        if (m_gpu_scf->beginBasis(gbf, gh0)) m_gpu_basis_dirty = false;
+    }
     if (m_gpu_scf && !m_pbc && m_scf_mode == ScfMode::Broyden && (!m_has_dshell || gpu_d_ok)) {
         GpuBasisFlat gbf;
         GpuH0Flat    gh0;

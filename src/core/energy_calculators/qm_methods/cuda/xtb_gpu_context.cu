@@ -179,6 +179,9 @@ struct XtbGpuContext::Impl {
     CudaBuffer<double> dD4dWc, dD4Eat, dD4Grad, dD4Dcn;   // nat*7 / nat / 3 nat / nat
     CudaBuffer<double> dD4AtmC6, dD4AtmDc6;               // nat^2 each (q=0 reference)
     CudaBuffer<int>    dD4NbPtr, dD4Nb;                   // ATM neighbour list
+    // Nov 2026 (WP-PERIODIC-XTB G4a): periodic ATM image neighbour list and outputs
+    CudaBuffer<double> dPbcXyz, dPbcTrans, dPbcR4r2, dPbcSr4r2, dPbcNbV, dPbcEat, dPbcGrad, dPbcDcn, dPbcVir;
+    CudaBuffer<int>    dPbcNbCnt, dPbcNbPtr, dPbcNbIdx;
     // Oct 2026: whole post-SCF D4 on the device (d4PostScfDevice)
     CudaBuffer<double> dD4Rad, dD4En;                     // covalent-CN tables (119)
     CudaBuffer<double> dD4Q, dD4QZero, dD4W0, dD4dWq0, dD4dWc0;
@@ -3107,6 +3110,173 @@ __global__ void k_d4_atm_nl_w(int nat, const double* __restrict__ xyz, const dou
     e_atom[a] = eacc;
     grad[3*a+0] = gx; grad[3*a+1] = gy; grad[3*a+2] = gz;
     dEdcn[a] = cnacc;
+}
+
+/* ---------------------------------------------------------------------------------------------- *
+ *  WP-PERIODIC-XTB G4a (Claude Generated, Nov 2026): periodic D4 ATM on the device.               *
+ *  Image neighbour list of every atom a: all points x + T (T from the host LatticeImageList,     *
+ *  T = 0 first) with 1e-24 <= |x_x + T - x_a|^2 < cut2, x == a only for T != 0; the image vector  *
+ *  is formed as in PBCUtils::forEachImage (minimum image of x_a - x_x, then minus T). Candidates  *
+ *  c = x * ntr + t are taken in ascending order (warp ballot compaction), so the list and every   *
+ *  sum over it are fixed. The triple gather (k_d4_atm_pbc_w) is the periodic twin of             *
+ *  k_d4_atm_nl_w: each unordered pair {X, Y} of list points of a (r_XY in the cutoff) is one      *
+ *  triple entry; every translation class of triples appears once per member, so                 *
+ *  E = 1/3 sum_a e_atom, the gradient of a is the derivative with respect to the centre only,     *
+ *  dE/dCN as in the vacuum kernel, and the virial (a class quantity) 1/3 of the sum. Same         *
+ *  formulas as D4Evaluator::computeATMPeriodic (the triple_scale weights there are the             *
+ *  multiplicities of this gather). Not bitwise to the host (summation order, cbrt for alpha 16).  *
+ * ---------------------------------------------------------------------------------------------- */
+// Entry layout of the image neighbour list (kAtmNbStride doubles per entry): v (3, x_X - x_a), r^2, r, 1/r^2,
+// r0_aX = a1 sqrt(3 r4r2_a r4r2_X) + a2, sqrt(C6_aX), dC6_aX/dCN_a / C6_aX. The per-entry factors move every sqrt and
+// division but two out of the triple loop (consumer GPUs run FP64 sqrt/div at a small fraction of the FMA rate).
+constexpr int kAtmNbStride = 9;
+
+// one warp per atom a: number of image neighbours (pass 1) or their compacted list (pass 2, FILL)
+template <bool FILL>
+__global__ void k_atm_pbc_nb(int nat, const double* __restrict__ xyz, double Lx, double Ly, double Lz,
+                             int ntr, const double* __restrict__ trans, double cut2,
+                             const double* __restrict__ r4r2, const double* __restrict__ c6,
+                             const double* __restrict__ dc6dcn, double a1, double a2,
+                             int* __restrict__ cnt, const int* __restrict__ ptr,
+                             int* __restrict__ nb_idx, double* __restrict__ nb_v)
+{
+    const int a = static_cast<int>((static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x) >> 5);
+    const int lane = threadIdx.x & 31;
+    if (a >= nat) return;   // uniform per warp
+    const double iLx = 1.0 / Lx, iLy = 1.0 / Ly, iLz = 1.0 / Lz;
+    const double xa = xyz[3*a+0], ya = xyz[3*a+1], za = xyz[3*a+2];
+    const long long ncand = static_cast<long long>(nat) * ntr;
+    const size_t nat_s = static_cast<size_t>(nat);
+    int count = 0;
+    int base = FILL ? ptr[a] : 0;
+    for (long long c0 = 0; c0 < ncand; c0 += 32) {
+        const long long c = c0 + lane;
+        bool take = false;
+        double vx = 0.0, vy = 0.0, vz = 0.0, r2 = 0.0;
+        int x = 0;
+        if (c < ncand) {
+            x = static_cast<int>(c / ntr);
+            const int t = static_cast<int>(c - static_cast<long long>(x) * ntr);
+            if (!(x == a && t == 0)) {
+                double d0x = xa - xyz[3*x+0], d0y = ya - xyz[3*x+1], d0z = za - xyz[3*x+2];
+                double s = d0x * iLx; s -= rint(s); d0x = Lx * s;
+                s = d0y * iLy; s -= rint(s); d0y = Ly * s;
+                s = d0z * iLz; s -= rint(s); d0z = Lz * s;
+                const double dx = d0x - trans[3*t+0], dy = d0y - trans[3*t+1], dz = d0z - trans[3*t+2];
+                r2 = __dadd_rn(__dadd_rn(__dmul_rn(dx, dx), __dmul_rn(dy, dy)), __dmul_rn(dz, dz));
+                take = (r2 < cut2 && r2 >= 1.0e-24);
+                vx = -dx; vy = -dy; vz = -dz;
+            }
+        }
+        const unsigned m = __ballot_sync(0xffffffffu, take);
+        if (FILL && take) {
+            const size_t o = static_cast<size_t>(base + __popc(m & ((1u << lane) - 1u)));
+            nb_idx[o] = x;
+            double* e = nb_v + kAtmNbStride * o;
+            const double c6ax = c6[a*nat_s + x];
+            e[0] = vx; e[1] = vy; e[2] = vz; e[3] = r2;
+            e[4] = sqrt(r2);
+            e[5] = 1.0 / r2;
+            e[6] = a1 * sqrt(3.0 * r4r2[x] * r4r2[a]) + a2;
+            e[7] = sqrt(fabs(c6ax));
+            e[8] = dc6dcn[a*nat_s + x] / c6ax;
+        }
+        base += __popc(m);
+        count += __popc(m);
+    }
+    if (!FILL && lane == 0) cnt[a] = count;
+}
+
+// in place: c6 -> sqrt(|c6|) (the triple loop needs sqrt(C6_XY) only)
+__global__ void k_atm_sqrt_abs(size_t n, double* __restrict__ v)
+{
+    const size_t i = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < n) v[i] = sqrt(fabs(v[i]));
+}
+
+__global__ void k_d4_atm_pbc_w(int nat, const double* __restrict__ sr4r2, const double* __restrict__ sc6,
+                               const int* __restrict__ ptr, const int* __restrict__ nb_idx,
+                               const double* __restrict__ nb_v,
+                               double s9, double a1sq3, double a2, double alp, double cut2, int want_vir,
+                               double* __restrict__ e_atom, double* __restrict__ grad,
+                               double* __restrict__ dEdcn, double* __restrict__ vir6)
+{
+    const int a = static_cast<int>((static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x) >> 5);
+    const int lane = threadIdx.x & 31;
+    if (a >= nat) return;   // uniform per warp
+    const double eps = 2.220446049250313e-16;
+    const size_t nat_s = static_cast<size_t>(nat);
+    const bool alp16 = (alp == 16.0);
+    double eacc = 0.0, gx = 0.0, gy = 0.0, gz = 0.0, cnacc = 0.0;
+    double v[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    const int p0 = ptr[a], p1 = ptr[a + 1];
+    for (int ix = p0 + lane; ix < p1; ix += 32) {
+        const int x = nb_idx[ix];
+        const double* ex = nb_v + kAtmNbStride * static_cast<size_t>(ix);
+        const double vaxx = ex[0], vaxy = ex[1], vaxz = ex[2], r2ax = ex[3], rax = ex[4], ir2ax = ex[5];
+        const double r0ax = ex[6], sc6ax = ex[7], ratax = ex[8];
+        const double srx = sr4r2[x];
+        const double* sc6x = sc6 + x * nat_s;
+        for (int iy = p0; iy < ix; ++iy) {
+            const double* ey = nb_v + kAtmNbStride * static_cast<size_t>(iy);
+            const double dxyx = ey[0] - vaxx, dxyy = ey[1] - vaxy, dxyz_ = ey[2] - vaxz;
+            const double r2xy = dxyx*dxyx + dxyy*dxyy + dxyz_*dxyz_;
+            if (r2xy > cut2 || r2xy < eps) continue;
+            const int y = nb_idx[iy];
+            const double vayx = ey[0], vayy = ey[1], vayz = ey[2], r2ay = ey[3];
+
+            const double c9 = -s9 * (sc6ax * ey[7] * sc6x[y]);
+            const double r0xy = a1sq3 * srx * sr4r2[y] + a2;
+            const double r0 = r0ax * ey[6] * r0xy;
+            const double r2 = r2ax*r2ay*r2xy;
+            const double r1 = rax * ey[4] * sqrt(r2xy);
+            const double ir1 = 1.0 / r1;
+            const double ir2 = ir1 * ir1;
+            const double ir3 = ir2 * ir1;
+            const double ir5 = ir3 * ir2;
+            const double q = r0 * ir1;
+            const double pw = alp16 ? (q*q*q*q*q) * cbrt(q) : pow(q, alp/3.0);
+            const double fdmp = 1.0/(1.0 + 6.0*pw);
+            const double ang = 0.375*(r2ax + r2xy - r2ay)*(r2ax - r2xy + r2ay)*(-r2ax + r2xy + r2ay)*ir5 + ir3;
+            const double dE = ang*fdmp*c9;
+            eacc += -dE;
+
+            const double dfdmp = -2.0*alp*pw*fdmp*fdmp;
+            const double dang_ax = -0.375*(r2ax*r2ax*r2ax + r2ax*r2ax*(r2xy+r2ay)
+                          + r2ax*(3.0*r2xy*r2xy + 2.0*r2xy*r2ay + 3.0*r2ay*r2ay)
+                          - 5.0*(r2xy-r2ay)*(r2xy-r2ay)*(r2xy+r2ay))*ir5;
+            const double gcax = c9*(-dang_ax*fdmp + ang*dfdmp)*ir2ax;
+            gx += -gcax*vaxx; gy += -gcax*vaxy; gz += -gcax*vaxz;
+            const double dang_ay = -0.375*(r2ay*r2ay*r2ay + r2ay*r2ay*(r2xy+r2ax)
+                          + r2ay*(3.0*r2xy*r2xy + 2.0*r2xy*r2ax + 3.0*r2ax*r2ax)
+                          - 5.0*(r2xy-r2ax)*(r2xy-r2ax)*(r2xy+r2ax))*ir5;
+            const double gcay = c9*(-dang_ay*fdmp + ang*dfdmp)*ey[5];
+            gx += -gcay*vayx; gy += -gcay*vayy; gz += -gcay*vayz;
+            cnacc += -dE*0.5*(ratax + ey[8]);
+            if (want_vir) {
+                const double dang_xy = -0.375*(r2xy*r2xy*r2xy + r2xy*r2xy*(r2ay+r2ax)
+                              + r2xy*(3.0*r2ay*r2ay + 2.0*r2ay*r2ax + 3.0*r2ax*r2ax)
+                              - 5.0*(r2ay-r2ax)*(r2ay-r2ax)*(r2ay+r2ax))*ir5;
+                const double gcxy = c9*(-dang_xy*fdmp + ang*dfdmp)/r2xy;
+                v[0] -= gcax*vaxx*vaxx + gcay*vayx*vayx + gcxy*dxyx*dxyx;
+                v[1] -= gcax*vaxx*vaxy + gcay*vayx*vayy + gcxy*dxyx*dxyy;
+                v[2] -= gcax*vaxx*vaxz + gcay*vayx*vayz + gcxy*dxyx*dxyz_;
+                v[3] -= gcax*vaxy*vaxy + gcay*vayy*vayy + gcxy*dxyy*dxyy;
+                v[4] -= gcax*vaxy*vaxz + gcay*vayy*vayz + gcxy*dxyy*dxyz_;
+                v[5] -= gcax*vaxz*vaxz + gcay*vayz*vayz + gcxy*dxyz_*dxyz_;
+            }
+        }
+    }
+    eacc = d_warp_sum(eacc);
+    gx = d_warp_sum(gx); gy = d_warp_sum(gy); gz = d_warp_sum(gz);
+    cnacc = d_warp_sum(cnacc);
+    for (int k = 0; k < 6; ++k) v[k] = d_warp_sum(v[k]);
+    if (lane != 0) return;
+    e_atom[a] = eacc;
+    grad[3*a+0] = gx; grad[3*a+1] = gy; grad[3*a+2] = gz;
+    dEdcn[a] = cnacc;
+    if (want_vir)
+        for (int k = 0; k < 6; ++k) vir6[6*a+k] = v[k];
 }
 
 // v_at(A) += dE_D4/dq(A) (resident from k_d4_dedq). One thread per atom.
@@ -6060,6 +6230,79 @@ bool XtbGpuContext::dispersionATM(int nat, const double* c6, const double* dc6dc
     I.dD4AtmDc6.free();
     return okk;
 }
+
+// Claude Generated (Nov 2026, WP-PERIODIC-XTB G4a): periodic D4 ATM (kernels k_atm_pbc_nb, k_d4_atm_pbc_w).
+bool XtbGpuContext::dispersionATMPeriodic(int nat, const double* xyz_bohr, const double* r4r2, const double* c6,
+                                          const double* dc6dcn, const double* cell_L, int ntrans,
+                                          const double* trans, double cutoff2, double s9, double a1, double a2,
+                                          double alp, bool want_virial, double* e_atom_out, double* grad_out,
+                                          double* dEdcn_out, double* vir6_out)
+{
+    Impl& I = *m_impl;
+    if (!ok() || nat <= 0 || ntrans <= 0 || !xyz_bohr || !r4r2 || !c6 || !dc6dcn || !cell_L || !trans
+        || !e_atom_out || !grad_out || !dEdcn_out || (want_virial && !vir6_out))
+        return false;
+    const size_t nn = static_cast<size_t>(nat) * nat;
+    if (nn > static_cast<size_t>(INT_MAX) || static_cast<long long>(nat) * ntrans > (1LL << 40)) return false;
+    cudaStream_t stream = I.stream;
+    const int b = 128;                                   // 4 atoms (warps) per block
+    const unsigned grid = static_cast<unsigned>((32LL * nat + b - 1) / b);
+    std::vector<int> cnt(nat), ptr(nat + 1, 0);
+    try {
+        I.dPbcXyz.upload(xyz_bohr, 3 * nat, stream);
+        I.dPbcTrans.upload(trans, 3 * ntrans, stream);
+        I.dPbcR4r2.upload(r4r2, nat, stream);
+        I.dPbcNbCnt.ensure(nat);
+        k_atm_pbc_nb<false><<<grid, b, 0, stream>>>(nat, I.dPbcXyz.ptr, cell_L[0], cell_L[1], cell_L[2], ntrans,
+                                                    I.dPbcTrans.ptr, cutoff2, nullptr, nullptr, nullptr, a1, a2,
+                                                    I.dPbcNbCnt.ptr, nullptr, nullptr, nullptr);
+        if (cudaGetLastError() != cudaSuccess) return false;
+        I.dPbcNbCnt.download(cnt.data(), nat, stream);
+        if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
+        long long total = 0;
+        for (int a = 0; a < nat; ++a) {
+            ptr[a] = static_cast<int>(total);
+            total += cnt[a];
+            if (total > INT_MAX / kAtmNbStride) return false;
+        }
+        ptr[nat] = static_cast<int>(total);
+        const int ntot = std::max(1, static_cast<int>(total));
+        I.dPbcNbPtr.upload(ptr.data(), nat + 1, stream);
+        I.dPbcNbIdx.ensure(ntot);
+        I.dPbcNbV.ensure(kAtmNbStride * ntot);
+        I.dD4AtmC6.upload(c6, static_cast<int>(nn), stream);
+        I.dD4AtmDc6.upload(dc6dcn, static_cast<int>(nn), stream);
+        k_atm_pbc_nb<true><<<grid, b, 0, stream>>>(nat, I.dPbcXyz.ptr, cell_L[0], cell_L[1], cell_L[2], ntrans,
+                                                   I.dPbcTrans.ptr, cutoff2, I.dPbcR4r2.ptr, I.dD4AtmC6.ptr,
+                                                   I.dD4AtmDc6.ptr, a1, a2, nullptr, I.dPbcNbPtr.ptr,
+                                                   I.dPbcNbIdx.ptr, I.dPbcNbV.ptr);
+        if (cudaGetLastError() != cudaSuccess) return false;
+        k_atm_sqrt_abs<<<static_cast<unsigned>((nn + 255) / 256), 256, 0, stream>>>(nn, I.dD4AtmC6.ptr);
+        std::vector<double> sr(nat);
+        for (int a = 0; a < nat; ++a) sr[a] = std::sqrt(r4r2[a]);
+        I.dPbcSr4r2.upload(sr.data(), nat, stream);
+        I.dPbcEat.ensure(nat);
+        I.dPbcGrad.ensure(3 * nat);
+        I.dPbcDcn.ensure(nat);
+        I.dPbcVir.ensure(6 * nat);
+        k_d4_atm_pbc_w<<<grid, b, 0, stream>>>(nat, I.dPbcSr4r2.ptr, I.dD4AtmC6.ptr, I.dPbcNbPtr.ptr,
+                                               I.dPbcNbIdx.ptr, I.dPbcNbV.ptr, s9, a1 * std::sqrt(3.0), a2, alp,
+                                               cutoff2, want_virial ? 1 : 0, I.dPbcEat.ptr, I.dPbcGrad.ptr,
+                                               I.dPbcDcn.ptr, I.dPbcVir.ptr);
+        if (cudaGetLastError() != cudaSuccess) return false;
+        I.dPbcEat.download(e_atom_out, nat, stream);
+        I.dPbcGrad.download(grad_out, 3 * nat, stream);
+        I.dPbcDcn.download(dEdcn_out, nat, stream);
+        if (want_virial) I.dPbcVir.download(vir6_out, 6 * nat, stream);
+    } catch (...) {
+        return false;
+    }
+    const bool okk = cudaStreamSynchronize(stream) == cudaSuccess;
+    I.dD4AtmC6.free();
+    I.dD4AtmDc6.free();
+    return okk;
+}
+
 
 /* ====================================================================== *
  *  Whole post-SCF D4 of GFN2 on the device (Claude Generated, Oct 2026).

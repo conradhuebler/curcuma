@@ -44,10 +44,12 @@
 // 8 = Nov 2026, WP-PERIODIC-XTB P4/G1 (ComputationalMethod gained the virtual xtbInstance(); XTB gained m_pbc_device_scf,
 //     m_want_virial, m_virial_valid, m_virial, m_disp_virial, m_pbc_mp_tblite_factors; XTB is shared with the xTB GPU
 //     wrappers compiled into the plugins).
+// 9 = Nov 2026, WP-PERIODIC-XTB G4a (GpuScfBackend gained the virtual dispersionATMPeriodic; the backend vtable is
+//     called by XTB in the executable and implemented in the plugin).
 
 #pragma once
 
-#define CURCUMA_GPU_PLUGIN_ABI_VERSION 8
+#define CURCUMA_GPU_PLUGIN_ABI_VERSION 9
 
 /// Defines `extern "C" int curcuma_<backend>_abi_version()` in a plugin entry file (use at file scope).
 #define CURCUMA_GPU_PLUGIN_DEFINE_ABI_VERSION(backend)                                                                \

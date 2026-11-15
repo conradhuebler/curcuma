@@ -49,6 +49,8 @@
 #include "src/core/energy_calculators/ff_methods/d3param_generator.h"
 
 #include <chrono>
+#include <cstdlib>
+#include <string>
 #include <cmath>
 #include <limits>
 
@@ -68,6 +70,16 @@ std::vector<double> geometryBohr(const Matrix& geometry, int nat)
         xyz[3 * i + 2] = geometry(i, 2) * AA_TO_AU;
     }
     return xyz;
+}
+
+/// G2-G6 (Nov 2026): CURCUMA_PBC_GPU_HOST=<list> keeps the named periodic device stages on the host (comparison
+/// and timing in one binary; tokens: atm, all). Diagnostic only, default empty = every ported stage on the device.
+bool pbcGpuStageOnHost(const char* token)
+{
+    const char* e = std::getenv("CURCUMA_PBC_GPU_HOST");
+    if (!e) return false;
+    const std::string v(e);
+    return v.find("all") != std::string::npos || v.find(token) != std::string::npos;
 }
 
 inline bool xb_is_halogen(int z) { return z == 17 || z == 35 || z == 53 || z == 85; }
@@ -374,8 +386,49 @@ double XTB::calcD4DispersionPeriodic(bool need_gradient) const
     double E = m_d4_evaluator->computeEnergyAndGradientPeriodic(m_atoms, geom_bohr, pair_images,
         /*with_gradient=*/true, m_disp_gradient, m_disp_dEdcn, m_disp_dEdq, /*with_dEdq=*/true, vir);
     const auto td1 = d4clk::now();
-    E += m_d4_evaluator->computeATMPeriodic(m_atoms, geom_bohr, atm_images, /*with_gradient=*/true,
-        m_disp_gradient, m_disp_dEdcn, vir);
+    // G4a (Nov 2026): the ATM on the CUDA device when the periodic device SCF is on (G1 wrapper); every failure
+    // (backend without the kernel, allocation) falls back to the host loop below.
+    bool atm_device = false;
+    double t_atm_c6 = 0.0;
+    if (m_gpu_scf && m_pbc_device_scf && !pbcGpuStageOnHost("atm")) {
+        std::vector<double> c6f, dc6f;
+        m_d4_generator->buildAtmC6Flat(m_atoms, c6f, dc6f);
+        t_atm_c6 = std::chrono::duration<double, std::milli>(d4clk::now() - td1).count();
+        std::vector<double> xyz(3 * nat), r4r2(nat), trans(3 * atm_images.trans.size());
+        for (int i = 0; i < nat; ++i) {
+            for (int k = 0; k < 3; ++k) xyz[3 * i + k] = geom_bohr(i, k);
+            r4r2[i] = m_d4_generator->getSqrtZr4r2(m_atoms[i]);
+        }
+        for (size_t t = 0; t < atm_images.trans.size(); ++t)
+            for (int k = 0; k < 3; ++k) trans[3 * t + k] = atm_images.trans[t][k];
+        std::vector<double> e_at(nat), g_at(3 * nat), dcn_at(nat), v_at(m_want_virial ? 6 * nat : 0);
+        if (m_gpu_scf->dispersionATMPeriodic(nat, xyz.data(), r4r2.data(), c6f.data(), dc6f.data(), m_cell_bohr.L,
+                static_cast<int>(atm_images.trans.size()), trans.data(), atm_images.cutoff2, /*s9=*/5.0, /*a1=*/0.52,
+                /*a2=*/5.0, /*alp=*/16.0, m_want_virial, e_at.data(), g_at.data(), dcn_at.data(),
+                m_want_virial ? v_at.data() : nullptr)) {
+            double esum = 0.0;
+            double vs[6] = { 0, 0, 0, 0, 0, 0 };
+            for (int a = 0; a < nat; ++a) {
+                esum += e_at[a];
+                for (int k = 0; k < 3; ++k) m_disp_gradient(a, k) += g_at[3 * a + k];
+                m_disp_dEdcn(a) += dcn_at[a];
+                if (m_want_virial)
+                    for (int k = 0; k < 6; ++k) vs[k] += v_at[6 * a + k];
+            }
+            E += esum / 3.0;   // every translation class of triples once per member
+            if (vir) {
+                const int ia[6] = { 0, 0, 0, 1, 1, 2 }, ib[6] = { 0, 1, 2, 1, 2, 2 };
+                for (int k = 0; k < 6; ++k) {
+                    (*vir)(ia[k], ib[k]) += vs[k] / 3.0;
+                    if (ia[k] != ib[k]) (*vir)(ib[k], ia[k]) += vs[k] / 3.0;
+                }
+            }
+            atm_device = true;
+        }
+    }
+    if (!atm_device)
+        E += m_d4_evaluator->computeATMPeriodic(m_atoms, geom_bohr, atm_images, /*with_gradient=*/true,
+            m_disp_gradient, m_disp_dEdcn, vir);
     const auto td2 = d4clk::now();
 
     // CN chain rule with the D4 CN's own derivative over images (as the cell-free path, d4_ncoord)
@@ -385,8 +438,9 @@ double XTB::calcD4DispersionPeriodic(bool need_gradient) const
     }
     if (CurcumaLogger::get_verbosity() >= 3) {
         auto ms = [](d4clk::time_point a, d4clk::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
-        CurcumaLogger::info_fmt("  periodic D4: pairs {:8.2f} ms, ATM {:8.2f} ms, CN fold {:8.2f} ms ({} threads)",
-                                ms(td0, td1), ms(td1, td2), ms(td2, d4clk::now()), effectiveIntraThreads(nat));
+        CurcumaLogger::info_fmt("  periodic D4: pairs {:8.2f} ms, ATM {:8.2f} ms ({}, host C6 {:.1f} ms), CN fold {:8.2f} ms ({} threads)",
+                                ms(td0, td1), ms(td1, td2), atm_device ? "device" : "host", t_atm_c6, ms(td2, d4clk::now()),
+                                effectiveIntraThreads(nat));
     }
     // q-response: only the variational route (dE_D4/dq in the Fock potential, charge Pulay) exists with a
     // cell; setPeriodicCell() refuses the other d4_charge_source values.
@@ -570,6 +624,8 @@ void XTB::buildGammaMatrixPeriodic()
     const double gexp = (m_method == MethodType::GFN1) ? gfn1_params::gexp : gfn2_params::gexp;
     const double inv_gexp = 1.0 / gexp;
 
+    using gmclk = std::chrono::steady_clock;   // G2 profile (verbosity 3), no numerical effect
+    const auto tgm0 = gmclk::now();
     // 1. point-charge Ewald matrix of the atoms
     Eigen::MatrixXd pos(nat, 3);
     for (int i = 0; i < nat; ++i)
@@ -580,6 +636,7 @@ void XTB::buildGammaMatrixPeriodic()
     const Eigen::MatrixXd A = ewald.matrix(pos);
     m_pbc_ewald_alpha_used = par.alpha;
     m_pbc_ewald_nk_used = ewald.numberOfKVectors();
+    const auto tgm1 = gmclk::now();
 
     // 2. shell matrix: Ewald part per atom pair plus the short-range Klopman-Ohno remainder over images
     std::vector<double> g(nsh);
@@ -608,6 +665,11 @@ void XTB::buildGammaMatrixPeriodic()
             m_gamma(is, js) = val;
             m_gamma(js, is) = val;
         }
+    }
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        auto ms = [](gmclk::time_point a, gmclk::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+        CurcumaLogger::info_fmt("  periodic gamma: Ewald matrix {:.1f} ms ({} k vectors), KO remainder {:.1f} ms",
+                                ms(tgm0, tgm1), m_pbc_ewald_nk_used, ms(tgm1, gmclk::now()));
     }
 }
 
@@ -856,6 +918,9 @@ void XTB::setupMultipolePeriodic()
     const PBCUtils::LatticeImageList images = PBCUtils::makeLatticeImageList(m_cell_bohr, pbcIntegralCutoffBohr());
     std::vector<CGTO::Shell> shells(nsh);
     for (int ish = 0; ish < nsh; ++ish) shells[ish] = as_cgto_shell(m_basis.cgto[ish]);
+    using mpclk = std::chrono::steady_clock;   // G2 profile (verbosity 3 setup table), no numerical effect
+    auto mpms = [](mpclk::time_point a, mpclk::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+    const auto tmp0 = mpclk::now();
 
     // 1 + 2: AO dipole and raw quadrupole integrals, per image shifted to the image position of the column atom
     // (origin at atom(nu) + T), summed over the images; the traceless transform is linear and applied at the end.
@@ -939,6 +1004,7 @@ void XTB::setupMultipolePeriodic()
             m_qp_int[5](mu, nu) = 1.5 * qzz - tr;
         }
 
+    const auto tmp_ao = mpclk::now();
     // 3 + 4: periodic GFN2 CN (the same double-exponential CN as the self-energies) and the damping radii
     const Vector cn = computeCoordinationNumbers();
     m_mp_mrad.resize(nat);
@@ -955,9 +1021,13 @@ void XTB::setupMultipolePeriodic()
         m_mp_dkernel[i] = p_dkernel[z - 1];
         m_mp_qkernel[i] = p_qkernel[z - 1];
     }
+    const auto tmp_cn = mpclk::now();
     // 5: interaction matrices by Ewald summation
     buildMultipoleInteractionMatricesPeriodic();
-    m_mp_t_ao_ints = m_mp_t_d_block = m_mp_t_shift = m_mp_t_cn_mrad = m_mp_t_amat = 0.0;
+    m_mp_t_d_block = m_mp_t_shift = 0.0;
+    m_mp_t_ao_ints = mpms(tmp0, tmp_ao);
+    m_mp_t_cn_mrad = mpms(tmp_ao, tmp_cn);
+    m_mp_t_amat = mpms(tmp_cn, mpclk::now());
     m_mp_initialized = true;
     ++m_mp_version;
 }
@@ -1281,6 +1351,8 @@ void XTB::calculateGradientPeriodic()
             for (int b = 0; b < 3; ++b) X(a, b) -= G[a] * d[b];
     };
 
+    using gclk = std::chrono::steady_clock;   // G2 profile (verbosity 3), no numerical effect
+    const auto tg0 = gclk::now();
     // energy-weighted density W (as calculateGradient)
     const int nocc_orbs = static_cast<int>(std::round(m_wfn.nocc / 2.0));
     Matrix W;
@@ -1316,6 +1388,7 @@ void XTB::calculateGradientPeriodic()
     std::vector<CGTO::Shell> shells(nsh);
     for (int ish = 0; ish < nsh; ++ish) shells[ish] = as_cgto_shell(m_basis.cgto[ish]);
 
+    const auto tg_w = gclk::now();
     // 1. repulsion over images (j < i; self images have no derivative)
     {
         const PBCUtils::LatticeImageList images = PBCUtils::makeLatticeImageList(m_cell_bohr, kPbcRepulsionCutoffBohr);
@@ -1357,6 +1430,7 @@ void XTB::calculateGradientPeriodic()
     // 1b. halogen bond
     addHalogenBondGradientPeriodic(m_gradient, want_vir ? &Xi : nullptr);
 
+    const auto tg_rep = gclk::now();
     // 2a. on-site CN term
     Vector dEdcn = Vector::Zero(nat);
     for (int ish = 0; ish < nsh; ++ish) {
@@ -1524,6 +1598,8 @@ void XTB::calculateGradientPeriodic()
         }
     }
 
+    const auto tg_h0 = gclk::now();
+    auto tg_ew = tg_h0;
     // 3. isotropic Coulomb: point-charge Ewald gradient at q_at plus the Klopman-Ohno remainder over images
     if (!m_coulomb_grad_off) {
         Eigen::MatrixXd pos(nat, 3);
@@ -1542,6 +1618,7 @@ void XTB::calculateGradientPeriodic()
             ewald.selfAndBackground(m_wfn.q_at, nullptr, false, bg);
             Xi += curcuma::ewald::EwaldSum::backgroundVirial(bg.terms);
         }
+        tg_ew = gclk::now();
 
         const double gexp = (m_method == MethodType::GFN1) ? gfn1_params::gexp : gfn2_params::gexp;
         const coulomb::Method cm = (m_method == MethodType::GFN1) ? coulomb::Method::GFN1 : coulomb::Method::GFN2;
@@ -1587,9 +1664,11 @@ void XTB::calculateGradientPeriodic()
         }
     }
 
+    const auto tg_coul = gclk::now();
     // 5. GFN2 multipoles
     if (m_method == MethodType::GFN2 && m_mp_initialized && !m_mp_grad_off)
         addMultipoleGradientPeriodic(m_gradient, dEdcn, want_vir ? &Xi : nullptr);
+    const auto tg_mp = gclk::now();
 
     // 3b. dispersion (periodic D3/D4, CN chain rule already folded; its virial was accumulated with it)
     if (m_disp_gradient_valid && !m_d4_grad_off && m_disp_gradient.rows() == nat && m_disp_gradient.cols() == 3) {
@@ -1638,6 +1717,13 @@ void XTB::calculateGradientPeriodic()
     if (want_vir) {
         m_virial = 0.5 * (Xi + Xi.transpose());
         m_virial_valid = true;
+    }
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        auto ms = [](gclk::time_point a, gclk::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+        CurcumaLogger::info_fmt("  periodic gradient: W {:.1f}, repulsion+XB {:.1f}, H0/Pulay {:.1f}, Ewald {:.1f}, "
+                                "KO remainder {:.1f}, multipole {:.1f}, CN chain {:.1f} ms (virial {})",
+                                ms(tg0, tg_w), ms(tg_w, tg_rep), ms(tg_rep, tg_h0), ms(tg_h0, tg_ew), ms(tg_ew, tg_coul),
+                                ms(tg_coul, tg_mp), ms(tg_mp, gclk::now()), want_vir ? "yes" : "no");
     }
 }
 

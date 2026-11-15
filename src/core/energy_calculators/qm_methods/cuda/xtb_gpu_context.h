@@ -446,6 +446,11 @@ public:
     bool dispersionATM(int nat, const double* c6, const double* dc6dcn,
                        double s9, double a1, double a2, double alp, double cutoff,
                        double* e_atom_out, double* grad_out, double* dEdcn_out);
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB G4a): periodic D4 ATM (see GpuScfBackend::dispersionATMPeriodic).
+    bool dispersionATMPeriodic(int nat, const double* xyz_bohr, const double* r4r2, const double* c6,
+                               const double* dc6dcn, const double* cell_L, int ntrans, const double* trans,
+                               double cutoff2, double s9, double a1, double a2, double alp, bool want_virial,
+                               double* e_atom_out, double* grad_out, double* dEdcn_out, double* vir6_out);
 
     /* ----- Stage 5 (Part B3/B4): full device GFN2 potential build -------- *
      * Move the WHOLE per-iteration isotropic+anisotropic potential build onto the
