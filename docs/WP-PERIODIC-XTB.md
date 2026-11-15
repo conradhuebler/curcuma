@@ -413,8 +413,9 @@ Order of benefit: G1 (enables the resident SCF with a cell, the SCF is 1.1 of 2.
 before G4/G5 (the CPU image loops are already threaded), G2/G3 last (cheap on the CPU). Build: `release_cuda/` of the
 main checkout holds a CUDA build (`-DUSE_CUDA_XTB=ON -DCMAKE_CUDA_ARCHITECTURES=120`), the RTX 5080 was idle (0 %)
 on 2026-11-15; no GPU run was made in this session. **Status: G0 written; G1 done in the reduced form below
-(host-built periodic matrices, device-resident SCF); G1 device integral kernels, G2-G6 not started; G7 lifted for CUDA
-in the G1 form.**
+(host-built periodic matrices, device-resident SCF); of G2-G6 done: G3 (multipole matrices), G4a (ATM), G4b (in-SCF
+D4 dE/dq), G5a (multipole gradient + virial pair loop), see the sections below; G1 device integral kernels, G2, the rest
+of G4/G5/G6 open; G7 lifted for CUDA in the G1 form.**
 
 ### G1 (reduced): device-resident SCF with host-built periodic matrices, CUDA only (2026-11-15, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
 
@@ -566,6 +567,32 @@ requests none); its extra cost is in the MD measurements below. `CURCUMA_PBC_GPU
   vs host in the same binary: 216 H2O dE 0, max dG 4.6e-15 Eh/A, 432 H2O dE 0, max dG 4.2e-15 Eh/A; second 216 H2O
   device run md5-identical; `pbc_xtb_*` 5/5 in both builds; without a cell CPU 24/24 and CUDA 24/24 md5 to 957afab7.
 
+### G2-G6 status and timing after G4a/G3/G5a/G4b (2026-11-15, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+Same binary (`release_cuda/`, ABI 12), RTX 5080, `-threads 8`, gfn2; "before" = `CURCUMA_PBC_GPU_HOST=all` (every
+ported stage on the host, i.e. the G1 split), "after" = default. `-sp` wall with `-dump_gradient` (no virial); MD:
+`-md -time_step 0.5 -max_time 10` (20 steps) `-seed 7 -compute_pressure true` (gradient + virial every step), mean of
+the per-step wall column over the 20 steps; one run each, machine shared (load 1-7):
+
+| box | `-sp` before (s) | `-sp` after (s) | MD step before (s) | MD step after (s) |
+|---|---|---|---|---|
+| 216 H2O (648 atoms) | 2.18 | 1.38 | 1.75 | 0.99 |
+| 432 H2O (1296 atoms, nao 5184) | 6.39 | 4.09 | 6.90 | 3.73 |
+
+One 432 H2O MD step with the virial after G4b (verbosity 3, ms): TOTAL 3753 = setup 918 (gamma: Ewald matrix 348 +
+KO remainder 55, AO multipole image sums 175, multipole matrices 104 on the device, orthonormalizer 115, S/H0 68) +
+pre-SCF 120 + SCF 8 it 1007 (device eigensolve 786, D4 dE/dq 107) + post-SCF 656 (ATM 309 on the device, CN fold 94,
+D4 pairs 48) + gradient 1048 (W 287, multipole + virial 293 on the device, H0/Pulay 143, CN chain 126, Ewald 67, KO 56,
+repulsion 68). Not ported (largest first): Ewald gamma matrix (G2, 0.35-0.40 s; reciprocal part is a rank update
+C C^T + S S^T over 6602 k vectors, a cuBLAS dsyrk candidate), W = C f eps C^T (0.29 s, could use the device C), AO
+multipole image sums and S/H0 image sums (G1 device integral kernels, 0.24 s), H0/Pulay and CN-chain image loops
+(G5 rest, 0.27 s), KO remainder (0.11 s), periodic D3 (GFN1), Ewald gradient/virial (0.07 s); G6 (virial) is ported
+only where its pair loop is (ATM, multipole), the other virial terms stay on the host.
+
+Regression after G4b (2026-11-15, test selection of the regression run below, `-j1`): `release/` 367 of 368 passed,
+`release_cuda/` 638 of 639 passed; the only failure in both is the pre-existing `xtb_cpscf`; 3 tests `Not Run
+(Disabled)` as before.
+
 ## Regression run (2026-11-14, `release/`, `ctest -R 'gfn|xtb|sqm|gfnff|pbc|ewald|simplemd|restart|md_|gpu|plugin|molecule|xyz|parser|curcumaopt|structinv' -j1`)
 
 369 tests selected, 2 failed before the fix below: `pbc_md_nonperiodic_cell` (its check (a) assumed gfn2 + cell to be
@@ -580,7 +607,8 @@ WP-PERIODIC-NONBONDED A6b statement "native gfn1/gfn2 have no periodic energy" i
   strains (a sheared cell is refused), threading of the periodic CN/D3, Klopman-Ohno and Ewald matrix builds, the
   structure-factor factorisation of the multipole k sums, d-shell elements with a cell (refused), implicit solvation
   with a cell (refused), `-large_system_mode` with a cell (its driver ignores the cell: documented as non-periodic, not
-  refused), GPU with a cell (CPU fallback; CUDA port stage G, ROCm/Vulkan not planned).
+  refused), GPU with a cell: CUDA in the G1 split plus the device stages G3/G4a/G4b/G5a (the rest on the host, see G2-G6
+  status), ROCm/Vulkan CPU fallback (not planned).
 - Not tested: open shell, charged cells (background term differs from tblite), halogen bond with a cell (no Br/I
   structure), thread-count independence of the periodic energy and gradient, MD energy conservation with a cell,
   the GPU fallback on a machine with a GPU plugin, anything beyond H/O, real liquid boxes (only a water dimer and
