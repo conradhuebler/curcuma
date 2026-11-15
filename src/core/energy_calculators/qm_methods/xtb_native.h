@@ -689,6 +689,18 @@ struct GpuScfBackend {
                                            double sq_f, double fac, double* const* out18)
     { (void)nat; (void)xyz_bohr; (void)mrad; (void)cell_L; (void)ndtrans; (void)dtrans; (void)nrtrans; (void)rtrans;
       (void)kexp; (void)alpha; (void)dmp3; (void)dmp5; (void)sd_f; (void)sq_f; (void)fac; (void)out18; return false; }
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB G5a): the pair loop of the periodic GFN2 multipole gradient
+    /// (XTB::addMultipoleGradientPeriodic) on the device, self-contained. Moments atom-major (dp [3 nat], qp [6 nat]).
+    /// Outputs grad [3 nat] (Eh/Bohr), dE/d(mrad) [nat], vir9 (Xi_ab, row-major, only with want_virial); fixed-point
+    /// accumulation (order independent). Default false -> host blocks.
+    virtual bool multipoleGradientPeriodic(int nat, const double* xyz_bohr, const double* mrad, const double* q_at,
+                                           const double* dp_at, const double* qp_at, const double* cell_L, int ndtrans,
+                                           const double* dtrans, int nrtrans, const double* rtrans, const double* kexp,
+                                           double alpha, double fac, double sd_f, double sq_f, double dmp3, double dmp5,
+                                           bool want_virial, double* grad_out, double* dEdr_out, double* vir9_out)
+    { (void)nat; (void)xyz_bohr; (void)mrad; (void)q_at; (void)dp_at; (void)qp_at; (void)cell_L; (void)ndtrans;
+      (void)dtrans; (void)nrtrans; (void)rtrans; (void)kexp; (void)alpha; (void)fac; (void)sd_f; (void)sq_f;
+      (void)dmp3; (void)dmp5; (void)want_virial; (void)grad_out; (void)dEdr_out; (void)vir9_out; return false; }
     /// Claude Generated (Oct 2026): potentials of the gradient at the converged charges of the resident loop built on the
     /// device (XtbGpuContext::convergedPotentials) and the gradient that reads them (no host potential, no upload).
     virtual bool prepareConvergedPotentials(bool gfn2) { (void)gfn2; return false; }

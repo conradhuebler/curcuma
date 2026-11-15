@@ -456,6 +456,12 @@ public:
                                    int ndtrans, const double* dtrans, int nrtrans, const double* rtrans,
                                    const double* kexp, double alpha, double dmp3, double dmp5, double sd_f,
                                    double sq_f, double fac, double* const* out18);
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB G5a): see GpuScfBackend::multipoleGradientPeriodic.
+    bool multipoleGradientPeriodic(int nat, const double* xyz_bohr, const double* mrad, const double* q_at,
+                                           const double* dp_at, const double* qp_at, const double* cell_L, int ndtrans,
+                                           const double* dtrans, int nrtrans, const double* rtrans, const double* kexp,
+                                           double alpha, double fac, double sd_f, double sq_f, double dmp3, double dmp5,
+                                           bool want_virial, double* grad_out, double* dEdr_out, double* vir9_out);
 
     /* ----- Stage 5 (Part B3/B4): full device GFN2 potential build -------- *
      * Move the WHOLE per-iteration isotropic+anisotropic potential build onto the

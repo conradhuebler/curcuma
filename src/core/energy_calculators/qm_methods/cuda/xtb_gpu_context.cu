@@ -184,6 +184,8 @@ struct XtbGpuContext::Impl {
     CudaBuffer<int>    dPbcNbCnt, dPbcNbPtr, dPbcNbIdx;
     // Nov 2026 (G3): periodic multipole interaction matrices
     CudaBuffer<double> dPbcMrad, dPbcDtrans, dPbcRtrans, dPbcKexp, dPbcAmat;
+    // Nov 2026 (G5a): periodic multipole gradient (moments, fixed-point accumulators)
+    CudaBuffer<double> dPbcQ, dPbcDp, dPbcQp, dPbcGfix;
     // Oct 2026: whole post-SCF D4 on the device (d4PostScfDevice)
     CudaBuffer<double> dD4Rad, dD4En;                     // covalent-CN tables (119)
     CudaBuffer<double> dD4Q, dD4QZero, dD4W0, dD4dWq0, dD4dWc0;
@@ -3365,6 +3367,189 @@ __global__ void k_mp_amat_pbc(int nat, const double* __restrict__ xyz, const dou
     }
 }
 
+/* ---------------------------------------------------------------------------------------------- *
+ *  WP-PERIODIC-XTB G5a (Claude Generated, Nov 2026): periodic GFN2 multipole gradient on the      *
+ *  device, the pair body (`pairTerms`) of XTB::addMultipoleGradientPeriodic statement for         *
+ *  statement: reciprocal k list (gradient for iat != jat, strain for every pair), direct box      *
+ *  translations, dE/d(mrad) per pair. One thread per pair jat <= iat; gradient and dE/d(mrad) by  *
+ *  fixed-point accumulation (gfix_add, order independent), the virial as a fixed-order block sum   *
+ *  of -dE/d(eps) added with gfix_add. Moments dp [3 nat] and qp [6 nat] atom-major.               *
+ * ---------------------------------------------------------------------------------------------- */
+template <bool WANT_V>
+__global__ void k_mp_grad_pbc(int nat, const double* __restrict__ xyz, const double* __restrict__ mrad,
+                              const double* __restrict__ qat, const double* __restrict__ dpat,
+                              const double* __restrict__ qpat, double Lx, double Ly, double Lz,
+                              int ndt, const double* __restrict__ dtrans, int nrt, const double* __restrict__ rtrans,
+                              const double* __restrict__ kexp, double alp, double fac, double sd_f, double sq_f,
+                              double dmp3, double dmp5, double* __restrict__ grad_fix, double* __restrict__ dEdr_fix,
+                              double* __restrict__ vir_fix)
+{
+    const int iat = blockIdx.y * blockDim.y + threadIdx.y;
+    const int jat = blockIdx.x * blockDim.x + threadIdx.x;
+    const bool active = (iat < nat && jat <= iat);
+    const double kSqrtPi_d = 1.7724538509055159;
+    const double eps_r = 1.4901161193847656e-08;
+    double dEde[3][3] = { { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 } };
+    if (active) {
+        const double alp2 = alp * alp;
+        double dG[3] = { 0.0, 0.0, 0.0 };
+        double dE = 0.0;
+        const double wself = (iat == jat) ? 0.5 : 1.0;
+        double v0x = xyz[3*jat] - xyz[3*iat], v0y = xyz[3*jat+1] - xyz[3*iat+1], v0z = xyz[3*jat+2] - xyz[3*iat+2];
+        { double s = v0x * (1.0 / Lx); s -= rint(s); v0x = Lx * s; }
+        { double s = v0y * (1.0 / Ly); s -= rint(s); v0y = Ly * s; }
+        { double s = v0z * (1.0 / Lz); s -= rint(s); v0z = Lz * s; }
+        const double rr = 0.5 * (mrad[jat] + mrad[iat]);
+        const double qi = qat[iat], qj = qat[jat];
+        const double mi[3] = { dpat[3*iat], dpat[3*iat+1], dpat[3*iat+2] };
+        const double mj[3] = { dpat[3*jat], dpat[3*jat+1], dpat[3*jat+2] };
+        double ti[6], tj[6];
+        for (int k = 0; k < 6; ++k) { ti[k] = qpat[6*iat+k]; tj[k] = qpat[6*jat+k]; }
+        const double dpidpj = mi[0] * mj[0] + mi[1] * mj[1] + mi[2] * mj[2];
+
+        if (iat != jat || WANT_V) {
+            for (int t = 0; t < nrt; ++t) {
+                const double w = kexp[t];
+                if (w == 0.0) continue;
+                const double kv[3] = { rtrans[3*t], rtrans[3*t+1], rtrans[3*t+2] };
+                const double gv = v0x * kv[0] + v0y * kv[1] + v0z * kv[2];
+                double sg, cg;
+                sincos(gv, &sg, &cg);
+                const double cosk = cg * w;
+                const double sink = sg * w;
+                const double dpiv = kv[0] * mi[0] + kv[1] * mi[1] + kv[2] * mi[2];
+                const double dpjv = kv[0] * mj[0] + kv[1] * mj[1] + kv[2] * mj[2];
+                const double dpiqj = dpiv * qj, qidpj = dpjv * qi;
+                const double qiqpj = qi * (tj[0]*kv[0]*kv[0] + tj[2]*kv[1]*kv[1] + tj[5]*kv[2]*kv[2]
+                                          + 2*tj[1]*kv[0]*kv[1] + 2*tj[3]*kv[0]*kv[2] + 2*tj[4]*kv[1]*kv[2]);
+                const double qpiqj = qj * (ti[0]*kv[0]*kv[0] + ti[2]*kv[1]*kv[1] + ti[5]*kv[2]*kv[2]
+                                          + 2*ti[1]*kv[0]*kv[1] + 2*ti[3]*kv[0]*kv[2] + 2*ti[4]*kv[1]*kv[2]);
+                if (iat != jat)
+                    for (int c = 0; c < 3; ++c) {
+                        dG[c] -= sd_f * kv[c] * cosk * (dpiqj - qidpj);
+                        dG[c] += kv[c] * sink * dpiv * dpjv;
+                        dG[c] += sq_f * kv[c] * sink * (qiqpj + qpiqj);
+                    }
+                if (WANT_V) {
+                    const double g2 = kv[0] * kv[0] + kv[1] * kv[1] + kv[2] * kv[2];
+                    const double X = 2.0 / g2 + 0.5 / alp2;
+                    const double tjk[3] = { tj[0]*kv[0] + tj[1]*kv[1] + tj[3]*kv[2], tj[1]*kv[0] + tj[2]*kv[1] + tj[4]*kv[2], tj[3]*kv[0] + tj[4]*kv[1] + tj[5]*kv[2] };
+                    const double tik[3] = { ti[0]*kv[0] + ti[1]*kv[1] + ti[3]*kv[2], ti[1]*kv[0] + ti[2]*kv[1] + ti[4]*kv[2], ti[3]*kv[0] + ti[4]*kv[1] + ti[5]*kv[2] };
+                    const double A = dpiqj - qidpj;
+                    const double B = (iat != jat) ? (qiqpj + qpiqj) : qpiqj;
+                    const double DDw = (iat != jat) ? 1.0 : 0.5;
+                    for (int a = 0; a < 3; ++a)
+                        for (int b = 0; b < 3; ++b) {
+                            const double wprime = w * (-(a == b ? 1.0 : 0.0) + kv[a] * kv[b] * X);
+                            double dE_ab = 0.0;
+                            if (iat != jat)
+                                dE_ab += sd_f * sg * (wprime * A + w * (-(mi[a] * qj - mj[a] * qi) * kv[b]));
+                            dE_ab += DDw * cg * (wprime * dpiv * dpjv + w * (-mi[a] * kv[b] * dpjv - dpiv * mj[a] * kv[b]));
+                            const double Bprime = (iat != jat) ? -2.0 * (qi * tjk[a] + qj * tik[a]) * kv[b]
+                                                                : -2.0 * qi * tik[a] * kv[b];
+                            dE_ab += sq_f * cg * (wprime * B + w * Bprime);
+                            dEde[a][b] += dE_ab;
+                        }
+                }
+            }
+            if (WANT_V) {
+                const double cdd = (iat != jat) ? (fac / 6.0) * dpidpj : 0.5 * (fac / 6.0) * dpidpj;
+                for (int a = 0; a < 3; ++a) dEde[a][a] -= cdd;
+            }
+        }
+        for (int t = 0; t < ndt; ++t) {
+            const double vec[3] = { v0x + dtrans[3*t], v0y + dtrans[3*t+1], v0z + dtrans[3*t+2] };
+            const double r1 = sqrt(vec[0] * vec[0] + vec[1] * vec[1] + vec[2] * vec[2]);
+            if (r1 < eps_r) continue;
+            const double r2 = r1 * r1, g1 = 1.0 / r1, g3 = g1 * g1 * g1, g5 = g3 * g1 * g1, g7 = g5 * g1 * g1;
+            const double arg = r1 * alp, arg2 = arg * arg;
+            const double erft = -erf(arg) * g1;
+            const double expt = exp(-arg2) / kSqrtPi_d;
+            const double e1 = g1 * g1 * (erft + expt * (2 * alp2) / alp);
+            const double e2 = g1 * g1 * (e1 + expt * (2 * alp2) * (2 * alp2) / (3 * alp));
+            const double e3 = g1 * g1 * (e2 + expt * (2 * alp2) * (2 * alp2) * (2 * alp2) / (15 * alp));
+            const double pw3 = pow(rr * g1, dmp3), pw5 = pow(rr * g1, dmp5);
+            const double fdmp3 = 1.0 / (1.0 + 6.0 * pw3);
+            const double ddmp3 = -3 * fdmp3 - dmp3 * fdmp3 * (fdmp3 - 1.0);
+            const double fdmp5 = 1.0 / (1.0 + 6.0 * pw5);
+            const double ddmp5 = -5 * fdmp5 - dmp5 * (fdmp5 * fdmp5 - fdmp5);
+            const double dpiv = vec[0] * mi[0] + vec[1] * mi[1] + vec[2] * mi[2];
+            const double dpjv = vec[0] * mj[0] + vec[1] * mj[1] + vec[2] * mj[2];
+            const double dpiqj = dpiv * qj, qidpj = dpjv * qi;
+            const double edd = dpidpj * r2 - 3 * dpjv * dpiv;
+            double g_sd[3], tab[3][3];
+            for (int c = 0; c < 3; ++c)
+                g_sd[c] = -(ddmp3 * g5) * vec[c] * (dpiqj - qidpj) + fdmp3 * g3 * (qi * mj[c] - qj * mi[c]);
+            for (int bb = 0; bb < 3; ++bb) {
+                for (int a = 0; a < 3; ++a) tab[a][bb] = 3 * vec[a] * vec[bb] * e2;
+                tab[bb][bb] -= e1;
+            }
+            for (int k = 0; k < 3; ++k)
+                g_sd[k] += qj * (tab[0][k] * mi[0] + tab[1][k] * mi[1] + tab[2][k] * mi[2])
+                         - qi * (tab[0][k] * mj[0] + tab[1][k] * mj[1] + tab[2][k] * mj[2]);
+            dE += 3.0 * (dpiqj - qidpj) * dmp3 * fdmp3 * g3 * (fdmp3 / rr) * pw3;
+            double g_dd[3], tabc[3][3][3];
+            for (int c = 0; c < 3; ++c)
+                g_dd[c] = -2.0 * fdmp5 * g5 * dpidpj * vec[c] + 3.0 * fdmp5 * g5 * (dpiv * mj[c] + dpjv * mi[c])
+                        - edd * ddmp5 * g7 * vec[c];
+            for (int c = 0; c < 3; ++c) {
+                for (int bb = 0; bb < 3; ++bb)
+                    for (int a = 0; a < 3; ++a) tabc[a][bb][c] = -15 * vec[a] * vec[bb] * vec[c] * e3;
+                for (int a = 0; a < 3; ++a) {
+                    tabc[a][a][c] += 3 * e2 * vec[c];
+                    tabc[c][a][c] += 3 * e2 * vec[a];
+                    tabc[a][c][c] += 3 * e2 * vec[a];
+                }
+            }
+            for (int k = 0; k < 3; ++k)
+                for (int a = 0; a < 3; ++a)
+                    g_dd[k] += mi[a] * (tabc[0][a][k] * mj[0] + tabc[1][a][k] * mj[1] + tabc[2][a][k] * mj[2]);
+            dE += 3.0 * edd * dmp5 * fdmp5 * g5 * (fdmp5 / rr) * pw5;
+            const double eq = 2 * (qj * ti[1] + tj[1] * qi) * vec[0] * vec[1] + 2 * (qj * ti[3] + tj[3] * qi) * vec[0] * vec[2]
+                            + 2 * (qj * ti[4] + tj[4] * qi) * vec[1] * vec[2] + (qj * ti[0] + tj[0] * qi) * vec[0] * vec[0]
+                            + (qj * ti[2] + tj[2] * qi) * vec[1] * vec[1] + (qj * ti[5] + tj[5] * qi) * vec[2] * vec[2];
+            const double tjv[3] = { vec[0]*tj[0] + vec[1]*tj[1] + vec[2]*tj[3], vec[0]*tj[1] + vec[1]*tj[2] + vec[2]*tj[4], vec[0]*tj[3] + vec[1]*tj[4] + vec[2]*tj[5] };
+            const double tiv[3] = { vec[0]*ti[0] + vec[1]*ti[1] + vec[2]*ti[3], vec[0]*ti[1] + vec[1]*ti[2] + vec[2]*ti[4], vec[0]*ti[3] + vec[1]*ti[4] + vec[2]*ti[5] };
+            double g_sq[3];
+            for (int c = 0; c < 3; ++c)
+                g_sq[c] = -eq * ddmp5 * g7 * vec[c] - 2.0 * fdmp5 * g5 * qi * tjv[c] - 2.0 * fdmp5 * g5 * qj * tiv[c];
+            for (int k = 0; k < 3; ++k)
+                g_sq[k] += (-qi * (tabc[0][0][k] * tj[0] + 2 * tabc[1][0][k] * tj[1] + 2 * tabc[2][0][k] * tj[3]
+                                   + tabc[1][1][k] * tj[2] + 2 * tabc[2][1][k] * tj[4] + tabc[2][2][k] * tj[5])
+                            - qj * (tabc[0][0][k] * ti[0] + 2 * tabc[1][0][k] * ti[1] + 2 * tabc[2][0][k] * ti[3]
+                                   + tabc[1][1][k] * ti[2] + 2 * tabc[2][1][k] * ti[4] + tabc[2][2][k] * ti[5])) / 3.0;
+            dE += eq * 3.0 * dmp5 * fdmp5 * g5 * fdmp5 / rr * pw5;
+            if (iat != jat)
+                for (int c = 0; c < 3; ++c) dG[c] += g_sd[c] + g_dd[c] + g_sq[c];
+            if (WANT_V)
+                for (int a = 0; a < 3; ++a)
+                    for (int b = 0; b < 3; ++b) dEde[a][b] -= wself * (g_sd[a] + g_dd[a] + g_sq[a]) * vec[b];
+        }
+        gfix_add(&dEdr_fix[iat], dE);
+        if (iat != jat) {
+            gfix_add(&dEdr_fix[jat], dE);
+            for (int c = 0; c < 3; ++c) { gfix_add(&grad_fix[3*iat+c], dG[c]); gfix_add(&grad_fix[3*jat+c], -dG[c]); }
+        }
+    }
+    if (WANT_V) {
+        // Xi -= dEde: fixed-order block tree (inactive threads add zero), one fixed-point add per block
+        __shared__ double red[256];
+        const int tid = threadIdx.y * blockDim.x + threadIdx.x;
+        const int nthr = blockDim.x * blockDim.y;   // 256 (power of two, launch below)
+        for (int a = 0; a < 3; ++a)
+            for (int b = 0; b < 3; ++b) {
+                red[tid] = -dEde[a][b];
+                __syncthreads();
+                for (int s = nthr / 2; s > 0; s >>= 1) {
+                    if (tid < s) red[tid] += red[tid + s];
+                    __syncthreads();
+                }
+                if (tid == 0) gfix_add(&vir_fix[3 * a + b], red[0]);
+                __syncthreads();
+            }
+    }
+}
+
 // v_at(A) += dE_D4/dq(A) (resident from k_d4_dedq). One thread per atom.
 __global__ void k_vat_add_d4(int nat, const double* __restrict__ d4_dedq, double* __restrict__ v_at)
 {
@@ -6357,6 +6542,68 @@ bool XtbGpuContext::multipoleMatricesPeriodic(int nat, const double* xyz_bohr, c
     const bool okk = cudaStreamSynchronize(stream) == cudaSuccess;
     I.dPbcAmat.free();
     return okk;
+}
+
+// Claude Generated (Nov 2026, WP-PERIODIC-XTB G5a): periodic multipole gradient (kernel k_mp_grad_pbc).
+bool XtbGpuContext::multipoleGradientPeriodic(int nat, const double* xyz_bohr, const double* mrad, const double* q_at,
+                                           const double* dp_at, const double* qp_at, const double* cell_L, int ndtrans,
+                                           const double* dtrans, int nrtrans, const double* rtrans, const double* kexp,
+                                           double alpha, double fac, double sd_f, double sq_f, double dmp3, double dmp5,
+                                           bool want_virial, double* grad_out, double* dEdr_out, double* vir9_out)
+{
+    Impl& I = *m_impl;
+    if (!ok() || nat <= 0 || ndtrans <= 0 || nrtrans < 0 || !xyz_bohr || !mrad || !q_at || !dp_at || !qp_at || !cell_L
+        || !dtrans || !grad_out || !dEdr_out || (want_virial && !vir9_out) || (nrtrans > 0 && (!rtrans || !kexp)))
+        return false;
+    cudaStream_t stream = I.stream;
+    try {
+        I.dPbcXyz.upload(xyz_bohr, 3 * nat, stream);
+        I.dPbcMrad.upload(mrad, nat, stream);
+        I.dPbcQ.upload(q_at, nat, stream);
+        I.dPbcDp.upload(dp_at, 3 * nat, stream);
+        I.dPbcQp.upload(qp_at, 6 * nat, stream);
+        I.dPbcDtrans.upload(dtrans, 3 * ndtrans, stream);
+        if (nrtrans > 0) {
+            I.dPbcRtrans.upload(rtrans, 3 * nrtrans, stream);
+            I.dPbcKexp.upload(kexp, nrtrans, stream);
+        }
+        I.dPbcGfix.ensure(4 * nat + 9);   // grad 3 nat | dEdr nat | vir 9
+        if (cudaMemsetAsync(I.dPbcGfix.ptr, 0, sizeof(double) * (4 * nat + 9), stream) != cudaSuccess) return false;
+        double* gfix = I.dPbcGfix.ptr;
+        double* efix = gfix + 3 * nat;
+        double* vfix = efix + nat;
+        const dim3 blk(16, 16);   // 256 threads: the block tree of the virial assumes a power of two
+        const dim3 grd((nat + 15) / 16, (nat + 15) / 16);
+        const double* rt = nrtrans > 0 ? I.dPbcRtrans.ptr : nullptr;
+        const double* kx = nrtrans > 0 ? I.dPbcKexp.ptr : nullptr;
+        if (want_virial)
+            k_mp_grad_pbc<true><<<grd, blk, 0, stream>>>(nat, I.dPbcXyz.ptr, I.dPbcMrad.ptr, I.dPbcQ.ptr, I.dPbcDp.ptr,
+                I.dPbcQp.ptr, cell_L[0], cell_L[1], cell_L[2], ndtrans, I.dPbcDtrans.ptr, nrtrans, rt, kx, alpha, fac,
+                sd_f, sq_f, dmp3, dmp5, gfix, efix, vfix);
+        else
+            k_mp_grad_pbc<false><<<grd, blk, 0, stream>>>(nat, I.dPbcXyz.ptr, I.dPbcMrad.ptr, I.dPbcQ.ptr, I.dPbcDp.ptr,
+                I.dPbcQp.ptr, cell_L[0], cell_L[1], cell_L[2], ndtrans, I.dPbcDtrans.ptr, nrtrans, rt, kx, alpha, fac,
+                sd_f, sq_f, dmp3, dmp5, gfix, efix, vfix);
+        if (cudaGetLastError() != cudaSuccess) return false;
+        const int nfix = 4 * nat + 9;
+        k_grad_fix_to_double<<<(nfix + 255) / 256, 256, 0, stream>>>(nfix, gfix);
+        if (cudaGetLastError() != cudaSuccess) return false;
+        I.dPbcGfix.download(grad_out, 3 * nat, stream);
+        if (cudaMemcpyAsync(dEdr_out, efix, sizeof(double) * nat, cudaMemcpyDeviceToHost, stream) != cudaSuccess) return false;
+        if (want_virial && cudaMemcpyAsync(vir9_out, vfix, sizeof(double) * 9, cudaMemcpyDeviceToHost, stream) != cudaSuccess)
+            return false;
+    } catch (...) {
+        return false;
+    }
+    if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
+    int fix_bad = 0;   // a non-finite or out-of-range contribution: fail (the host blocks run), reset the flag
+    if (cudaMemcpyFromSymbol(&fix_bad, g_gfix_bad, sizeof(int)) != cudaSuccess) return false;
+    if (fix_bad) {
+        const int zero = 0;
+        cudaMemcpyToSymbol(g_gfix_bad, &zero, sizeof(int));
+        return false;
+    }
+    return true;
 }
 
 // Claude Generated (Nov 2026, WP-PERIODIC-XTB G4a): periodic D4 ATM (kernels k_atm_pbc_nb, k_d4_atm_pbc_w).

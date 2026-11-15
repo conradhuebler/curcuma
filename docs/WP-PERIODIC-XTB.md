@@ -535,6 +535,22 @@ requests none); its extra cost is in the MD measurements below. `CURCUMA_PBC_GPU
   device vs host matrices in the same binary: 216 H2O dE 2.3e-13 Eh (1 ulp of E), max dG 3.8e-15 Eh/A; 432 H2O dE 0,
   max dG 4.9e-15 Eh/A; `pbc_xtb_*` 5/5 in both builds; without a cell CPU 24/24 and CUDA 24/24 md5 to 957afab7.
 
+### G5a periodic multipole gradient on the device (2026-11-15, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+- `GpuScfBackend::multipoleGradientPeriodic` (CUDA kernel `k_mp_grad_pbc<WANT_V>`): the pair body (`pairTerms`) of
+  `addMultipoleGradientPeriodic` statement for statement, one thread per pair jat <= iat; gradient and dE/d(mrad)
+  added with `gfix_add` (64-bit fixed point, 2^-52, order independent, the GFN1/GFN2 gradient scheme of
+  [GPU_REPRODUCIBILITY.md](GPU_REPRODUCIBILITY.md)), the virial (-dE/d(eps)) as a fixed-order block tree per 256
+  threads then one fixed-point add per block; a non-finite or out-of-range contribution (`g_gfix_bad`) fails the call
+  and the host blocks run. The dE/d(mrad) -> dE/dCN fold stays on the host. `CURCUMA_PBC_GPU_HOST=mpgrad`. ABI 11.
+- Time (`multipole` in `periodic gradient`, 8 threads, without virial): 216 H2O 135 -> 18 ms, 432 H2O 901 -> 110 ms.
+- Gates: `pbc_xtb_gpu_parity` 6/6 unchanged (incl. the virial, max |dXi| 2.3e-10 Eh, set by the SCF), bitwise run to
+  run; device vs host in the same binary: 216 H2O dE 0, max dG 1.1e-14 Eh/A, 432 H2O dE 0, max dG 1.8e-14 Eh/A; 216 H2O
+  second device run md5-identical; MD 216 H2O gfn2 20 steps of 0.5 fs, `-seed 7 -compute_pressure true`, all stages
+  on the device vs `CURCUMA_PBC_GPU_HOST=all`: after 20 steps E_pot identical to 6 decimals, T 458.811166 / 458.811149 K,
+  P 15331.03 / 15331.03 bar (lattice start, not equilibrated); `pbc_xtb_*` 5/5 in both builds; without a cell CPU 24/24
+  and CUDA 24/24 md5 to 957afab7.
+
 ## Regression run (2026-11-14, `release/`, `ctest -R 'gfn|xtb|sqm|gfnff|pbc|ewald|simplemd|restart|md_|gpu|plugin|molecule|xyz|parser|curcumaopt|structinv' -j1`)
 
 369 tests selected, 2 failed before the fix below: `pbc_md_nonperiodic_cell` (its check (a) assumed gfn2 + cell to be

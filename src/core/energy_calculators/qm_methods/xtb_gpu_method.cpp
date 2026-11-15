@@ -419,6 +419,18 @@ public:
         return m_ctx->multipoleMatricesPeriodic(nat, xyz_bohr, mrad, cell_L, ndtrans, dtrans, nrtrans, rtrans, kexp,
                                                 alpha, dmp3, dmp5, sd_f, sq_f, fac, out18);
     }
+    // Claude Generated (Nov 2026, WP-PERIODIC-XTB G5a): periodic multipole gradient, see GpuScfBackend.
+    bool multipoleGradientPeriodic(int nat, const double* xyz_bohr, const double* mrad, const double* q_at,
+                                           const double* dp_at, const double* qp_at, const double* cell_L, int ndtrans,
+                                           const double* dtrans, int nrtrans, const double* rtrans, const double* kexp,
+                                           double alpha, double fac, double sd_f, double sq_f, double dmp3, double dmp5,
+                                           bool want_virial, double* grad_out, double* dEdr_out, double* vir9_out) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->multipoleGradientPeriodic(nat, xyz_bohr, mrad, q_at, dp_at, qp_at, cell_L, ndtrans, dtrans,
+                                                nrtrans, rtrans, kexp, alpha, fac, sd_f, sq_f, dmp3, dmp5,
+                                                want_virial, grad_out, dEdr_out, vir9_out);
+    }
 
     bool gradientTailDevice(int nat, bool is_gfn2, bool with_mp, const double* xyz_bohr, const double* dEdcn,
                             const double* rcov_au, const double* q_at, const double* dp_at, const double* qp_at,

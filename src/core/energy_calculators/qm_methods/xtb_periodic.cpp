@@ -1308,12 +1308,43 @@ void XTB::addMultipoleGradientPeriodic(Matrix& gradient, Vector& dEdcn, Eigen::M
         }
     };
 
+    // G5a (Nov 2026): the pair loop on the CUDA device when the periodic device SCF is on (fixed-point sums,
+    // order independent); on any failure the host blocks below run.
+    bool mpg_device = false;
+    if (m_gpu_scf && m_pbc_device_scf && !pbcGpuStageOnHost("mpgrad")) {
+        std::vector<double> qv(nat), dpv(3 * nat), qpv(6 * nat);
+        for (int i = 0; i < nat; ++i) {
+            qv[i] = q(i);
+            for (int k = 0; k < 3; ++k) dpv[3 * i + k] = dp(k, i);
+            for (int k = 0; k < 6; ++k) qpv[6 * i + k] = qp(k, i);
+        }
+        std::vector<double> dt(3 * m_mp_pbc_dtrans.size()), rt(3 * m_mp_pbc_rtrans.size());
+        for (size_t t = 0; t < m_mp_pbc_dtrans.size(); ++t)
+            for (int k = 0; k < 3; ++k) dt[3 * t + k] = m_mp_pbc_dtrans[t][k];
+        for (size_t t = 0; t < m_mp_pbc_rtrans.size(); ++t)
+            for (int k = 0; k < 3; ++k) rt[3 * t + k] = m_mp_pbc_rtrans[t][k];
+        std::vector<double> g3(3 * nat), der(nat), vir9(9);
+        mpg_device = m_gpu_scf->multipoleGradientPeriodic(nat, xyz.data(), m_mp_mrad.data(), qv.data(), dpv.data(),
+            qpv.data(), m_cell_bohr.L, static_cast<int>(m_mp_pbc_dtrans.size()), dt.data(),
+            static_cast<int>(m_mp_pbc_rtrans.size()), rt.data(), kexp.data(), alp, fac, sd_f, sq_f, mp_dmp3, mp_dmp5,
+            virial != nullptr, g3.data(), der.data(), vir9.data());
+        if (mpg_device) {
+            for (int i = 0; i < nat; ++i) {
+                for (int k = 0; k < 3; ++k) gradient(i, k) += g3[3 * i + k];
+                dEdr_mp(i) += der[i];
+            }
+            if (virial)
+                for (int a = 0; a < 3; ++a)
+                    for (int b = 0; b < 3; ++b) (*virial)(a, b) += vir9[3 * a + b];
+        }
+    }
     // Stage T: fixed row blocks (iat % NB == blk) with per-block accumulators reduced in block order, so the
     // result does not depend on the thread count; the same (iat, jat) order within a block as the plain loop.
-    const int NB = nat < 32 ? nat : 32;
+    const int NB = mpg_device ? 0 : (nat < 32 ? nat : 32);
     std::vector<Matrix> g_b(NB, Matrix::Zero(nat, 3));
     std::vector<Vector> dEdr_b(NB, Vector::Zero(nat));
     std::vector<Eigen::Matrix3d> v_b(virial ? NB : 0, Eigen::Matrix3d::Zero());
+    if (!mpg_device)
     parallelStripes(effectiveIntraThreads(nat), [&](int tid, int nth) {
         for (int blk = tid; blk < NB; blk += nth) {
             Matrix& gb = g_b[blk];
