@@ -899,6 +899,11 @@ XtbGpuComputationalMethod::XtbGpuComputationalMethod(MethodType method, const js
         // Stage-1 eigensolver hook above.
         m_scf_backend = std::make_unique<XtbGpuScfBackend>(ctx);
         xtb->setGpuScfBackend(m_scf_backend.get());
+        // WP-PERIODIC-XTB G1 (Claude Generated, Nov 2026): with a unit cell the host builds the periodic
+        // S/H0/L, gamma and multipole integrals and uploads them through begin()/beginMultipole(); the device
+        // runs the resident Fock/eigensolve/density/moments, the potential, dispersion, gradient and virial stay
+        // on the host (XTB::Calculation gates every image-free device kernel with !m_pbc). CUDA only.
+        xtb->setPeriodicDeviceScf(true);
         // CUDA-SPECIFIC: FP64 is ~1/64 of FP32 on consumer GPUs, so the per-iteration
         // FP64 eigensolve is the bottleneck. Default mixed precision ON for the GPU
         // path: far-from-convergence iterations solve in FP32, reverting to

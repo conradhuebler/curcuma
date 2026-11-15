@@ -291,8 +291,9 @@ charges O -0.6 / H +0.3 for the D4 zeta weighting):
   invariance: d/dd = d/dA at fixed B). Third order and on-site terms: no strain dependence.
 - **Interfaces**: `XTB::setWantVirial/virial/virialValid`, `XTB::updateCell` (= `setPeriodicCell`: image lists, Ewald
   parameters and boxes are rebuilt from the cell at every call, nothing frozen, no cutoff limit);
-  `NativeXtbMethod` forwards (no `ComputationalMethod` virtual, plugin ABI unchanged); `EnergyCalculator::setWantVirial/
-  virialValid/virial/largestActiveCutoffBohr` dispatch to GFN-FF or (`dynamic_cast`) the native xTB, `setUnitCell`
+  `EnergyCalculator::setWantVirial/virialValid/virial/largestActiveCutoffBohr` dispatch to GFN-FF (`gfnffInstance()`)
+  or the native xTB engine through the new virtual `ComputationalMethod::xtbInstance()` (G1: a `dynamic_cast` to
+  `NativeXtbMethod` does not resolve for the GPU adapters compiled into the plugins; plugin ABI 7 -> 8), `setUnitCell`
   accepts gfn1/gfn2; SimpleMD `-compute_pressure` and `-barostat berendsen|crescale` accept a periodic gfn1/gfn2
   (`readVirial` via `EnergyCalculator`), the GFN-FF cutoff freeze stays GFN-FF only.
 - **Cell changes (barostat)**: the image lists adapt, the point-charge Ewald uses r_cut = L_min/2 with alpha, k_max
@@ -411,7 +412,62 @@ fallback) and `XTB::Calculation()` refuses an attached backend; the GPU is used 
 Order of benefit: G1 (enables the resident SCF with a cell, the SCF is 1.1 of 2.2 s at 216 H2O and grows as nao^3)
 before G4/G5 (the CPU image loops are already threaded), G2/G3 last (cheap on the CPU). Build: `release_cuda/` of the
 main checkout holds a CUDA build (`-DUSE_CUDA_XTB=ON -DCMAKE_CUDA_ARCHITECTURES=120`), the RTX 5080 was idle (0 %)
-on 2026-11-15; no GPU run was made in this session. **Status: G0 written, G1-G7 not started.**
+on 2026-11-15; no GPU run was made in this session. **Status: G0 written; G1 done in the reduced form below
+(host-built periodic matrices, device-resident SCF); G1 device integral kernels, G2-G6 not started; G7 lifted for CUDA
+in the G1 form.**
+
+### G1 (reduced): device-resident SCF with host-built periodic matrices, CUDA only (2026-11-15, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+Revision of the G0 design after reading the code: the `GpuScfBackend` already has an upload path next to the
+device integral build (`begin(H0, S, L)`, `beginMultipole(dp_int, qp_int)`, Stage 2 of [SQM_GPU.md](SQM_GPU.md)) and a
+host-driven loop in which the host assembles the potential and the device does Fock/eigensolve/density/moments. With a
+cell this path needs no new device kernel: the host builds the periodic S/H0/L (image sums), the Ewald gamma and the
+periodic multipole integrals/matrices as on the CPU and uploads them once per geometry; the device-resident SCF
+(`solve`/`density`/`atomicCharges`/`multipoleMoments`) is linear in the uploaded matrices and therefore periodic by
+construction (Gamma point = dense matrices). Everything that has no lattice images on the device stays on the host
+and is gated with `!m_pbc` in `XTB::Calculation`: the device integral build (`beginComputed`), the device CN, the
+device potential (`beginPotential*`, the fully resident loops for GFN2 and GFN1), the device multipole potential
+(`beginMultipolePotential`), the in-SCF device D4 dE/dq (`dispersionDedq`), the device D3 and post-SCF D4, and the
+device gradient (`calculateGradientGpu`); the P3/P4 host gradient and virial run on the downloaded density. The CUDA
+wrapper alone enables this (`XTB::setPeriodicDeviceScf(true)` in `XtbGpuComputationalMethod`); ROCm/Vulkan keep the
+P5 swap to the CPU (`EnergyCalculator::setMolecule`, `gpu != cuda`) and `XTB::Calculation` refuses a cell with any
+other backend (hard error). `CURCUMA_GPU_PLUGIN_ABI_VERSION` 7 -> 8 (`XTB` gained data members in P4 and here; the
+class is shared with the wrappers compiled into the plugins).
+
+What this buys: the SCF eigensolve (the nao^3 part, 1.1 of 2.2 s at 216 H2O on 8 CPU threads, the dominant term for
+432 H2O) runs on the device; the host keeps the O(nat^2) image sums, the Ewald/multipole matrix builds and the
+periodic D4 (threaded, stage T). Not ported (G1 device kernels, G2-G6): image-summed device integrals, device Ewald
+gamma, device multipole Ewald matrices, device periodic D3/D4, device periodic gradient and virial; the host-driven
+loop transfers v_ao and the charges/moments per iteration (the fully resident loop is off with a cell).
+
+Gate (`ctest -R pbc_xtb_gpu_parity`, `test_cases/unit/test_pbc_xtb_gpu_parity.cpp`; water dimer 8 and 12 A, gfn1 and
+gfn2, `scf_threshold` 1e-9, `-gpu cuda` through `EnergyCalculator` against the CPU; the test SKIPs when the GPU
+request fell back; RTX 5080, CUDA plugin of `release_cuda/` in the worktree, 2026-11-15): |dE| 5e-15 / 0 / 5e-15 /
+5e-15 Eh, max |dG| 3.9e-11 / 4.2e-11 / 1.3e-10 / 9.0e-11 Eh/A, max |dXi| 5.2e-11 / 5.8e-11 / 2.3e-10 / 1.2e-10 Eh for
+gfn1 8 A / gfn1 12 A / gfn2 8 A / gfn2 12 A; the second CUDA run is bitwise identical in energy, gradient and
+virial in all four cases (n = 1 repeat each). Verbosity 2 shows `SCF: device-resident GFN2 path (H0/S/L + multipole
+integrals uploaded)` with the cell. `pbc_xtb_tblite` keeps its `-gpu cuda` check (1e-8 instead of 1e-10: device
+eigensolver rounding) and passes in the CUDA build. Without a cell the CUDA path is untouched (every new gate is
+`!m_pbc`); the CPU binary without a cell is 24/24 bitwise to 957afab7 (6 structures x gfn1/gfn2 x 1/4 threads).
+
+Water lattice 216 H2O (648 atoms, 18.6 A, `-sp` + `-dump_gradient`, wall incl. start-up, same binary, one run each):
+
+| method | threads | SCF threshold | CPU (s) | `-gpu cuda` (s) | E (8 printed decimals) | max dG cuda - cpu (Eh/A) |
+|---|---|---|---|---|---|---|
+| gfn2 | 8 | default | 2.35 | 2.14 | identical | 9.2e-7 |
+| gfn1 | 8 | default | 1.85 | 1.52 | identical | 1.1e-6 |
+| gfn2 | 1 | 1e-9 | 10.53 | 3.13 | identical | 9.1e-11 |
+
+  The 1e-6 Eh/A at 8 threads with the default threshold is the SCF convergence level plus the per-thread partials of
+  the host H0/Pulay gradient (stage T: 1e-7 between thread counts); with a tight SCF at one thread the two paths agree
+  to 9e-11. At 8 host threads the device eigensolve saves little (the host still builds every periodic matrix and the
+  threaded MKL eigensolve is already fast at nao = 2592); at one host thread the GPU run is 3.4x faster. For 432 H2O
+  (nao 5184, 8x the eigensolve work) the device eigensolve is the lever; the host matrix builds (O(nat^2) image sums,
+  multipole k loop) then dominate the GPU run and are the next items (G1 device integrals, G3).
+
+Not tested: a water lattice on the GPU with a cell (only the dimer cells), MD with a cell on the GPU, `-gpu cuda`
+with a cell and threads > 1, open-shell or charged cells on the device, d-shell elements (refused with a cell
+anyway), the ROCm/Vulkan refusal on a machine with those plugins.
 
 ## Regression run (2026-11-14, `release/`, `ctest -R 'gfn|xtb|sqm|gfnff|pbc|ewald|simplemd|restart|md_|gpu|plugin|molecule|xyz|parser|curcumaopt|structinv' -j1`)
 

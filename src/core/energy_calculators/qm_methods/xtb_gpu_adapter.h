@@ -183,6 +183,11 @@ protected:
 
     /// The owned XTB the derived constructor hangs its device hooks on (may be null).
     curcuma::xtb::XTB* cpuSolver() { return m_cpu->solver(); }
+    /// WP-PERIODIC-XTB G1 (Claude Generated, Nov 2026): the engine for EnergyCalculator's virial/cell dispatch.
+    curcuma::xtb::XTB* xtbInstance() const override { return m_cpu ? m_cpu->solver() : nullptr; }
+    /// WP-PERIODIC-XTB G1: the engine holds the cell (NativeXtbMethod::setMolecule forwarded it); SimpleMD's wrap/DOF
+    /// rules and EnergyCalculator's virial/cell dispatch read this.
+    bool hasPeriodicEnergy() const override { return m_cpu && m_cpu->hasPeriodicEnergy(); }
     Context* context() { return m_gpu.get(); }
 
     curcuma::xtb::MethodType m_method;

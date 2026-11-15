@@ -309,9 +309,11 @@ void EnergyCalculator::setMolecule(const Mol& mol) {
             std::string name = m_requested_method_name;
             std::transform(gpu.begin(), gpu.end(), gpu.begin(), ::tolower);
             std::transform(name.begin(), name.end(), name.begin(), ::tolower);
-            if (gpu != "none" && !gpu.empty() && (name == "gfn1" || name == "gfn2")) {
-                CurcumaLogger::warn("periodic cell set: the native " + name + " GPU path has no lattice images, using the CPU");
-                curcuma::reportGpuFallback("native xTB: periodic cell set, GPU path has no lattice images, calculation on the CPU",
+            // WP-PERIODIC-XTB G1: CUDA keeps its backend (host-built periodic matrices, device-resident SCF,
+            // XtbGpuComputationalMethod sets XTB::setPeriodicDeviceScf); ROCm/Vulkan are not ported and swap.
+            if (gpu != "none" && gpu != "cuda" && !gpu.empty() && (name == "gfn1" || name == "gfn2")) {
+                CurcumaLogger::warn("periodic cell set: the native " + name + " " + gpu + " path has no lattice images, using the CPU");
+                curcuma::reportGpuFallback("native xTB: periodic cell set, " + gpu + " path has no lattice images, calculation on the CPU",
                                            fmt::format("{} atoms", mol.m_number_atoms));
                 periodic_cpu_swap = true;
             }
@@ -1025,7 +1027,8 @@ void EnergyCalculator::setUnitCell(const Eigen::Matrix3d& cell_angstrom)
         m_mol.m_unit_cell = cell_angstrom;
         return;
     }
-    if (auto* xtb = dynamic_cast<NativeXtbMethod*>(m_method.get()); xtb && hasPeriodicEnergy()) {
+    // G1: through the virtual xtbInstance() (CPU wrapper and the GPU adapters in the plugins), not a dynamic_cast
+    if (auto* xtb = m_method ? m_method->xtbInstance() : nullptr; xtb && hasPeriodicEnergy()) {
         std::string err;
         if (!xtb->updateCell(cell_angstrom, err))
             throw std::runtime_error("EnergyCalculator::setUnitCell: " + err);
@@ -1043,9 +1046,9 @@ void EnergyCalculator::setWantVirial(bool want)
         ff->setWantVirial(want);   // throws when the GFN-FF set-up has no virial (ATM, ALPB, ...)
         return;
     }
-    if (auto* xtb = dynamic_cast<NativeXtbMethod*>(m_method.get())) {
+    if (auto* xtb = m_method ? m_method->xtbInstance() : nullptr) {
         if (want && !hasPeriodicEnergy())
-            throw std::runtime_error("virial: the native " + xtb->getMethodName() + " has no cell, no atomic virial");
+            throw std::runtime_error("virial: the native " + m_requested_method_name + " has no cell, no atomic virial");
         xtb->setWantVirial(want);
         return;
     }
@@ -1056,14 +1059,14 @@ void EnergyCalculator::setWantVirial(bool want)
 bool EnergyCalculator::virialValid() const
 {
     if (const GFNFF* ff = m_method ? m_method->gfnffInstance() : nullptr) return ff->virialValid();
-    if (const auto* xtb = dynamic_cast<const NativeXtbMethod*>(m_method.get())) return xtb->virialValid();
+    if (const auto* xtb = m_method ? m_method->xtbInstance() : nullptr) return xtb->virialValid();
     return false;
 }
 
 Eigen::Matrix3d EnergyCalculator::virial() const
 {
     if (const GFNFF* ff = m_method ? m_method->gfnffInstance() : nullptr) return ff->virial();
-    if (const auto* xtb = dynamic_cast<const NativeXtbMethod*>(m_method.get())) return xtb->virial();
+    if (const auto* xtb = m_method ? m_method->xtbInstance() : nullptr) return xtb->virial();
     return Eigen::Matrix3d::Zero();
 }
 

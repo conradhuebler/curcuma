@@ -148,15 +148,16 @@ int main()
         check(!calc.Error(), "gradient request with a cell is accepted (P3)");
         const double e_0 = energyOf("gfn1", 8.0, kCfg);
         check(std::abs(e_g - e_0) < 1.0e-12, "energy with and without gradient request identical");
-        // P5: a GPU request with a cell runs on the CPU (counted fallback; in a build without the plugin the plugin
-        // fallback fires first, the periodic guard is then the second line and the energy is the CPU one)
+        // P5/G1: a -gpu cuda request with a cell gives the periodic energy: in a build without the plugin through the
+        // counted CPU fallback (identical), with the CUDA plugin through the host-built periodic matrices and the
+        // device-resident SCF (G1; same fixed point, device eigensolver rounding, parity gate pbc_xtb_gpu_parity)
         const json gpu_cfg = { { "verbosity", 0 }, { "threads", 1 }, { "gpu", "cuda" } };
         EnergyCalculator calc_gpu("gfn1", gpu_cfg);
         calc_gpu.setMolecule(mol);
         check(!calc_gpu.Error(), "gfn1 -gpu cuda with a cell: no error");
-        check(calc_gpu.hasPeriodicEnergy(), "gfn1 -gpu cuda with a cell: periodic energy (CPU)");
+        check(calc_gpu.hasPeriodicEnergy(), "gfn1 -gpu cuda with a cell: periodic energy");
         const double e_gpu = calc_gpu.CalculateEnergy(false);
-        check(std::abs(e_gpu - e_0) < 1.0e-10, "gfn1 -gpu cuda with a cell gives the CPU periodic energy");
+        check(std::abs(e_gpu - e_0) < 1.0e-8, "gfn1 -gpu cuda with a cell gives the CPU periodic energy (1e-8)");
     }
     if (g_failures == 0)
         std::printf("test_pbc_xtb_tblite: all checks passed\n");

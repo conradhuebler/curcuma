@@ -23,6 +23,7 @@
 #include "json.hpp"
 
 class GFNFF;   ///< forward declaration for gfnffInstance(); no header dependency
+namespace curcuma { namespace xtb { class XTB; } }   ///< forward declaration for xtbInstance() (WP-PERIODIC-XTB G1)
 
 using json = nlohmann::json;
 
@@ -128,6 +129,15 @@ public:
      * plugin emits, is what works across that boundary.
      */
     virtual GFNFF* gfnffInstance() const { return nullptr; }
+    /**
+     * @brief The native xTB engine behind this method, or nullptr (Claude Generated, Nov 2026, WP-PERIODIC-XTB G1).
+     *
+     * EnergyCalculator reaches the periodic virial and the cell update (setWantVirial/virial/updateCell) through
+     * it; the CPU wrapper NativeXtbMethod and the GPU adapters (XtbGpuAdapter, compiled into the plugins) answer
+     * with their engine. Virtual for the same reason as gfnffInstance(): a dynamic_cast across the plugin boundary
+     * does not resolve.
+     */
+    virtual curcuma::xtb::XTB* xtbInstance() const { return nullptr; }
 
     /**
      * @brief True if this method set up a molecule it should not calculate (Claude Generated, Oct 2026).

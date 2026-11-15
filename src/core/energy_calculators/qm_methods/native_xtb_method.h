@@ -190,19 +190,9 @@ public:
     // driver is active). Used by the GPU wrapper to install an external
     // eigensolver hook. Claude Generated (GPU port).
     curcuma::xtb::XTB* solver() { return m_xtb.get(); }
-
-    // ---- Periodic cell: atomic virial and cell update (WP-PERIODIC-XTB P4, Claude Generated Nov 2026) ----
-    // Not part of ComputationalMethod (no vtable change, plugin ABI untouched); EnergyCalculator reaches them
-    // by dynamic_cast on the CPU method. The virial is computed with the gradient when wanted.
-    void setWantVirial(bool v) { if (m_xtb) m_xtb->setWantVirial(v); }
-    bool virialValid() const { return m_xtb && m_xtb->virialValid(); }
-    Eigen::Matrix3d virial() const { return m_xtb ? m_xtb->virial() : Eigen::Matrix3d::Zero(); }
-    bool updateCell(const Eigen::Matrix3d& cell_angstrom, std::string& error)
-    {
-        if (!m_xtb || !m_xtb->hasPeriodicCell()) { error = "no periodic cell set"; return false; }
-        m_molecule.m_unit_cell = cell_angstrom;
-        return m_xtb->updateCell(cell_angstrom, error);
-    }
+    /// WP-PERIODIC-XTB P4/G1: EnergyCalculator reaches the periodic virial and the cell update (XTB::setWantVirial/
+    /// virial/virialValid/updateCell) through this virtual, for the CPU wrapper and the GPU adapters alike.
+    curcuma::xtb::XTB* xtbInstance() const override { return m_xtb.get(); }
 
     // ---- Native xTB extras (not in the base interface) --------------------
     Matrix getMolecularOrbitals() const;

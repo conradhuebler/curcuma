@@ -1111,6 +1111,12 @@ public:
     // caller (the GPU wrapper) and must outlive every Calculation(). Unset
     // (default) → unchanged CPU SCF. begin() returning false → CPU fallback.
     void setGpuScfBackend(GpuScfBackend* b) { m_gpu_scf = b; }
+    /** WP-PERIODIC-XTB G1 (Claude Generated, Nov 2026): allow a periodic cell together with the device backend.
+     *  Only the CUDA wrapper sets this: with a cell the host builds the periodic S/H0/L, gamma and multipole
+     *  integrals/matrices and uploads them (begin/beginMultipole), the device runs Fock/eigensolve/density/moments,
+     *  the potential, the dispersion and the gradient/virial stay on the host. ROCm/Vulkan keep the CPU fallback. */
+    void setPeriodicDeviceScf(bool on) { m_pbc_device_scf = on; }
+    bool periodicDeviceScf() const { return m_pbc_device_scf; }
     bool hasGpuScfBackend() const { return m_gpu_scf != nullptr; }
 
     // Export a flattened, CUDA-free snapshot of the built basis (m_basis) and H0
@@ -1519,6 +1525,7 @@ private:
     bool m_pbc_mp_tblite_factors = false;  ///< -xtb.pbc_multipole_tblite_factors: reciprocal sd 2 / sq +1 (tblite 0.4.0) instead of 1 / -1/3
     mutable double m_pbc_ewald_alpha_used = 0.0;   ///< reporting: alpha of the last gamma build
     mutable int m_pbc_ewald_nk_used = 0;           ///< reporting: k vectors of the last gamma build
+    bool m_pbc_device_scf = false;                 ///< G1: cell + device backend allowed (CUDA wrapper only)
     bool m_want_virial = false;                    ///< P4: accumulate Xi in calculateGradientPeriodic()
     bool m_virial_valid = false;
     Eigen::Matrix3d m_virial = Eigen::Matrix3d::Zero();

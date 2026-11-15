@@ -40,11 +40,14 @@
 // 4 = Nov 2026, N2 (GFNFF gained m_cutoffs_frozen, m_frozen_d4, m_lists_rebuild_pending, m_cell_update_count);
 // 5 = Nov 2026, S-HB (FFWorkspace gained m_hb_scale, the diagnostic hb_scale factor);
 // 6 = Nov 2026, V-LRC (FFVirialComponents gained tail_lrc; FFWorkspace gained m_disp_tail_e6/e8/lrc; GFNFF m_pressure_lrc);
-// 7 = Nov 2026, T-SCALE (FFWorkspace gained m_repulsion_scale, m_dispersion_scale, m_coulomb_scale, the term-scale factors).
+// 7 = Nov 2026, T-SCALE (FFWorkspace gained m_repulsion_scale, m_dispersion_scale, m_coulomb_scale, the term-scale factors);
+// 8 = Nov 2026, WP-PERIODIC-XTB P4/G1 (ComputationalMethod gained the virtual xtbInstance(); XTB gained m_pbc_device_scf,
+//     m_want_virial, m_virial_valid, m_virial, m_disp_virial, m_pbc_mp_tblite_factors; XTB is shared with the xTB GPU
+//     wrappers compiled into the plugins).
 
 #pragma once
 
-#define CURCUMA_GPU_PLUGIN_ABI_VERSION 7
+#define CURCUMA_GPU_PLUGIN_ABI_VERSION 8
 
 /// Defines `extern "C" int curcuma_<backend>_abi_version()` in a plugin entry file (use at file scope).
 #define CURCUMA_GPU_PLUGIN_DEFINE_ABI_VERSION(backend)                                                                \

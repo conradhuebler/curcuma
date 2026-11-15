@@ -788,6 +788,18 @@ endif()
 add_test(NAME pbc_xtb_virial COMMAND test_pbc_xtb_virial WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 set_tests_properties(pbc_xtb_virial PROPERTIES TIMEOUT 900 LABELS "pbc;xtb;sqm")
 
+# Claude Generated (Nov 2026, WP-PERIODIC-XTB G1): CPU vs -gpu cuda energy/gradient/virial of the periodic gfn1/gfn2
+# (host-built periodic matrices, device-resident SCF) and CUDA run-to-run bitwise; the plugin is loaded at run time
+# from CURCUMA_PLUGIN_DIR (build root); without plugin or device the test prints SKIP and passes
+add_executable(test_pbc_xtb_gpu_parity unit/test_pbc_xtb_gpu_parity.cpp)
+target_link_libraries(test_pbc_xtb_gpu_parity curcuma_core test_molecule_registry)
+if(USE_PCH)
+    target_precompile_headers(test_pbc_xtb_gpu_parity REUSE_FROM curcuma_core)
+endif()
+add_test(NAME pbc_xtb_gpu_parity COMMAND test_pbc_xtb_gpu_parity WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(pbc_xtb_gpu_parity PROPERTIES TIMEOUT 900 LABELS "pbc;xtb;sqm;gpu"
+    ENVIRONMENT "CURCUMA_PLUGIN_DIR=${CMAKE_BINARY_DIR}")
+
 # Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A2): periodic coordination number (value and
 # derivative), periodic SpatialCellList. Tests the CN only; the energy terms have no minimum image yet.
 add_executable(test_pbc_cn unit/test_pbc_cn.cpp)

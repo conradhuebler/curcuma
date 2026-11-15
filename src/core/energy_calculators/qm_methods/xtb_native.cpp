@@ -557,11 +557,14 @@ double XTB::Calculation(bool gradient)
     }
 
 
-    // WP-PERIODIC-XTB P5 (Claude Generated, Nov 2026): defence in depth behind the EnergyCalculator swap. The device
-    // integral/SCF/gradient paths know no lattice images; a cell with a device backend must not run.
-    if (m_pbc && m_gpu_scf) {
-        setHardError("periodic cell with a GPU backend: the native xTB device paths have no lattice images "
-                     "(docs/WP-PERIODIC-XTB.md P5); run without -gpu");
+    // WP-PERIODIC-XTB P5/G1 (Claude Generated, Nov 2026): defence in depth behind the EnergyCalculator swap. The
+    // device integral, potential, dispersion and gradient kernels know no lattice images. With a cell only the
+    // CUDA wrapper (setPeriodicDeviceScf) may keep its backend: the host builds the periodic matrices and uploads
+    // them, the device runs the resident Fock/eigensolve/density/moments (G1); every `!m_pbc` gate below keeps the
+    // image-free device kernels off. ROCm/Vulkan with a cell must not run.
+    if (m_pbc && m_gpu_scf && !m_pbc_device_scf) {
+        setHardError("periodic cell with this GPU backend: the native xTB device paths have no lattice images "
+                     "(docs/WP-PERIODIC-XTB.md P5/G1); run without -gpu or with -gpu cuda");
         m_scf_converged = false;
         return m_E_total;
     }
@@ -579,7 +582,7 @@ double XTB::Calculation(bool gradient)
             cn_ready = true;
         }
     };
-    const bool cn_from_device_ok = m_gpu_scf && m_scf_mode == ScfMode::Broyden && !std::getenv("CURCUMA_CN_HOST");
+    const bool cn_from_device_ok = m_gpu_scf && !m_pbc && m_scf_mode == ScfMode::Broyden && !std::getenv("CURCUMA_CN_HOST");
     if (!cn_from_device_ok) ensure_host_cn();
     const auto t_cn = clock::now();
 
@@ -611,7 +614,8 @@ double XTB::Calculation(bool gradient)
                                 "D4/EEQ stay on device");
         }
     }
-    if (m_gpu_scf && m_scf_mode == ScfMode::Broyden && (!m_has_dshell || gpu_d_ok)) {
+    // G1: with a cell the host builds the periodic integrals (image sums, Ewald gamma) and uploads them below.
+    if (m_gpu_scf && !m_pbc && m_scf_mode == ScfMode::Broyden && (!m_has_dshell || gpu_d_ok)) {
         GpuBasisFlat gbf;
         GpuH0Flat    gh0;
         exportGpuBasis(gbf, gh0);
@@ -1275,7 +1279,7 @@ double XTB::Calculation(bool gradient)
     bool   mp_stored_on_device = false;
     double mp_stored_bytes     = 0.0;
     if (use_gpu_resident && gpu_multipole && m_method == MethodType::GFN2 && m_mp_initialized
-        && !solv_blocks_device
+        && !solv_blocks_device && !m_pbc   // G1: the device potential (gamma, D4, multipoles) has no images
         && m_gpu_scf->supportsDeviceDispersion() && m_gpu_scf->supportsDevicePotential()) {
         // Prime the D4 reference set + device beginDispersion (the m_d4_prepared
         // first-call path); the returned potential is discarded here.
@@ -1381,7 +1385,7 @@ double XTB::Calculation(bool gradient)
     // v_dp/v_qp also stay on the device for the Fock build. Any failure switches this object to
     // the host path for good (m_mp_device_failed); the backend prints one notice.
     bool use_dev_mp = false;
-    if (use_gpu_resident && gpu_multipole && !use_device_potential && m_mp_initialized
+    if (use_gpu_resident && gpu_multipole && !use_device_potential && m_mp_initialized && !m_pbc   // G1: host potential
         && !m_mp_device_failed && m_gpu_scf->supportsDeviceMultipolePotential()) {
         use_dev_mp = m_gpu_scf->beginMultipolePotential(m_mp_amat_sd, m_mp_amat_dd, m_mp_amat_sq,
                                                         m_mp_dkernel, m_mp_qkernel, m_mp_version);
@@ -2387,7 +2391,7 @@ double XTB::Calculation(bool gradient)
     // reads dP/dC straight off the device (xtb_gradient.cpp:859-868). Skip finalize() there too;
     // ensureHostWavefunction() downloads on demand for the few paths that still need the host
     // matrices (host gradient fallback, property accessors) - see xtb_multipole.cpp:44.
-    const bool device_grad_will_run = gradient && use_gpu_resident && m_gpu_scf
+    const bool device_grad_will_run = gradient && use_gpu_resident && m_gpu_scf && !m_pbc   // G1: host periodic gradient
         && m_gpu_scf->supportsGradient();
     m_wfn_on_device = false;
     if (use_gpu_resident && m_gpu_scf) {
@@ -2577,7 +2581,7 @@ double XTB::Calculation(bool gradient)
         // backend has no gradient.
         bool gpu_grad = false;
         const auto t_gp3 = clock::now();
-        if (use_gpu_resident && m_gpu_scf && m_gpu_scf->supportsGradient())
+        if (use_gpu_resident && m_gpu_scf && !m_pbc && m_gpu_scf->supportsGradient())   // G1: host periodic gradient
             gpu_grad = calculateGradientGpu();
         if (verb >= 3 || std::getenv("CURCUMA_GPU_PROFILE"))
             CurcumaLogger::result(fmt::format(
@@ -3461,7 +3465,7 @@ double XTB::calcDispersionEnergy(bool need_gradient) const
         // Claude Generated (Oct 2026): CN, weights, pair energy / gradient / dE/dCN and the CN chain rule on the
         // device (XtbGpuContext::d3DispersionDevice); the host code below is the fallback and the reference.
         // CURCUMA_D3_DEVICE=0 forces it.
-        if (m_gpu_scf) {
+        if (m_gpu_scf && !m_pbc) {   // G1: the device D3 has no lattice images; calcD3DispersionPeriodic below
             const char* env_off = std::getenv("CURCUMA_D3_DEVICE");
             if (!(env_off && env_off[0] == '0')) {
                 const int nat = m_atomcount;
@@ -3606,7 +3610,7 @@ double XTB::calcDispersionEnergy(bool need_gradient) const
     // matrices and neighbour list, dE/dCN fold); the host flow after it stays as the fallback and for the
     // backends without the call. CURCUMA_D4_POSTSCF_DEVICE=0 forces the host flow.
     bool d4_all_device = false;
-    if (m_gpu_scf && m_gpu_scf->supportsDeviceDispersion() && m_d4_prepared) {
+    if (m_gpu_scf && !m_pbc && m_gpu_scf->supportsDeviceDispersion() && m_d4_prepared) {   // G1: host periodic D4
         const char* env_off = std::getenv("CURCUMA_D4_POSTSCF_DEVICE");
         if (!(env_off && env_off[0] == '0')) {
             const int nat = m_atomcount;
@@ -3856,7 +3860,7 @@ bool XTB::computeD4PotentialDedq(const Vector& q_at, Vector& dEdq) const
     // Stage 5 (Part B2): on the device-resident path run the per-iteration O(N²)
     // dE_D4/dq pair loop on the GPU (the host still builds the per-atom reference
     // weights once per iteration; the device does the contraction + BJ damping).
-    const bool use_device_disp = (m_gpu_scf && m_gpu_scf->supportsDeviceDispersion());
+    const bool use_device_disp = (m_gpu_scf && !m_pbc && m_gpu_scf->supportsDeviceDispersion());   // G1: images on the host
     if (!m_d4_prepared) {
         m_d4_generator->setUseD4SingleShotEEQ(false);
         m_d4_generator->setD4CovalentCN(true);  // GFN2 dftd4 EN-weighted covalent CN
