@@ -72,9 +72,14 @@ std::vector<double> geometryBohr(const Matrix& geometry, int nat)
     return xyz;
 }
 
+inline bool xb_is_halogen(int z) { return z == 17 || z == 35 || z == 53 || z == 85; }
+inline bool xb_is_acceptor(int z) { return z == 7 || z == 8 || z == 15 || z == 16; }
+
+} // namespace
+
 /// G2-G6 (Nov 2026): CURCUMA_PBC_GPU_HOST=<list> keeps the named periodic device stages on the host (comparison
-/// and timing in one binary; tokens: atm, all). Diagnostic only, default empty = every ported stage on the device.
-bool pbcGpuStageOnHost(const char* token)
+/// and timing in one binary; tokens: atm, mpmat, mpgrad, d4dedq, all). Diagnostic only, default empty = every ported stage on the device.
+bool pbcGpuStageOnHost(const char* token)   // declared in xtb_native.h
 {
     const char* e = std::getenv("CURCUMA_PBC_GPU_HOST");
     if (!e) return false;
@@ -82,10 +87,6 @@ bool pbcGpuStageOnHost(const char* token)
     return v.find("all") != std::string::npos || v.find(token) != std::string::npos;
 }
 
-inline bool xb_is_halogen(int z) { return z == 17 || z == 35 || z == 53 || z == 85; }
-inline bool xb_is_acceptor(int z) { return z == 7 || z == 8 || z == 15 || z == 16; }
-
-} // namespace
 
 /* ------------------------------------------------------------------ *
  *  Cell                                                               *

@@ -498,7 +498,7 @@ items 10-20 %):
 Order of benefit at 432 H2O: ATM (1.4 s), multipole gradient (0.9 s), multipole matrices (0.7 s), in-SCF D4 dE/dq
 (0.5 s), Ewald gamma (0.4 s), AO multipole image sums and W (0.33 s each). The virial is not part of this table (`-sp`
 requests none); its extra cost is in the MD measurements below. `CURCUMA_PBC_GPU_HOST=<tokens>` (diagnostic env,
-`atm`, `mpmat`, ..., `all`) keeps a ported stage on the host in the same binary.
+`atm`, `mpmat`, `mpgrad`, `d4dedq`, `all`) keeps a ported stage on the host in the same binary.
 
 ### G4a periodic D4 ATM on the device (2026-11-15, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
 
@@ -550,6 +550,21 @@ requests none); its extra cost is in the MD measurements below. `CURCUMA_PBC_GPU
   on the device vs `CURCUMA_PBC_GPU_HOST=all`: after 20 steps E_pot identical to 6 decimals, T 458.811166 / 458.811149 K,
   P 15331.03 / 15331.03 bar (lattice start, not equilibrated); `pbc_xtb_*` 5/5 in both builds; without a cell CPU 24/24
   and CUDA 24/24 md5 to 957afab7.
+
+### G4b periodic in-SCF D4 dE/dq on the device (2026-11-15, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+- The BJ factor of a pair does not depend on the charges, so `GpuScfBackend::beginDispersionImages` (after the existing
+  `beginDispersion` upload, once per geometry) builds D(i, j) = sum_T [s6/(r^6 + R0^6) + s8 r4r2_ij/(r^8 + R0^8)] over the
+  images of the 50 Bohr pair cutoff (kernel `k_d4_pbc_dmat`, one thread per element); per SCF iteration
+  `dispersionDedqPeriodic` (kernel `k_d4_dedq_pbc`, one thread per atom, fixed j order) contracts the host-built
+  W/dWq with D, the terms of `computeEnergyAndGradientPeriodic`'s dE/dq. `XTB::m_pbc_d4_dev_ready` follows
+  `m_d4_prepared`; `CURCUMA_PBC_GPU_HOST=d4dedq`. Plugin ABI 12. The post-SCF D4 pair term (42 ms at 432 H2O) stays
+  on the host.
+- Time (`potential build - of which D4`, 8 threads): 216 H2O 13.6 -> 2.5 ms per iteration, 432 H2O 45.9 -> 10.2 ms per
+  iteration (the rest is the host `buildRefWFlat`).
+- Gates: `pbc_xtb_gpu_parity` 6/6 (gfn2 |dE| <= 8.9e-15 Eh, gradient and virial as before), bitwise run to run; device
+  vs host in the same binary: 216 H2O dE 0, max dG 4.6e-15 Eh/A, 432 H2O dE 0, max dG 4.2e-15 Eh/A; second 216 H2O
+  device run md5-identical; `pbc_xtb_*` 5/5 in both builds; without a cell CPU 24/24 and CUDA 24/24 md5 to 957afab7.
 
 ## Regression run (2026-11-14, `release/`, `ctest -R 'gfn|xtb|sqm|gfnff|pbc|ewald|simplemd|restart|md_|gpu|plugin|molecule|xyz|parser|curcumaopt|structinv' -j1`)
 

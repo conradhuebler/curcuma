@@ -443,6 +443,9 @@ public:
     bool d4PostScfDevice(int nat, const double* q_at, bool with_atm, double s9, double a1, double a2, double alp,
                          double atm_cutoff, double cn_cutoff, const double* rad, const double* en, double kn,
                          double k4, double k5, double k6, double* energy_out, double* grad_out, double* dEdq_out);
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB G4b): see GpuScfBackend::beginDispersionImages / dispersionDedqPeriodic.
+    bool beginDispersionImages(int nat, const double* cell_L, int ntrans, const double* trans, double cut2);
+    bool dispersionDedqPeriodic(int nat, const double* W, const double* dWq, double* dEdq_out);
     bool dispersionATM(int nat, const double* c6, const double* dc6dcn,
                        double s9, double a1, double a2, double alp, double cutoff,
                        double* e_atom_out, double* grad_out, double* dEdcn_out);

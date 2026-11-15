@@ -3870,6 +3870,10 @@ bool XTB::computeD4PotentialDedq(const Vector& q_at, Vector& dEdq) const
     // dE_D4/dq pair loop on the GPU (the host still builds the per-atom reference
     // weights once per iteration; the device does the contraction + BJ damping).
     const bool use_device_disp = (m_gpu_scf && !m_pbc && m_gpu_scf->supportsDeviceDispersion());   // G1: images on the host
+    // G4b (Nov 2026): with a cell the image-summed BJ factors go to the device once per geometry (CUDA wrapper only)
+    const bool use_device_disp_pbc = (m_gpu_scf && m_pbc && m_pbc_device_scf && m_gpu_scf->supportsDeviceDispersion()
+                                      && !pbcGpuStageOnHost("d4dedq"));
+    if (!m_d4_prepared) m_pbc_d4_dev_ready = false;
     if (!m_d4_prepared) {
         m_d4_generator->setUseD4SingleShotEEQ(false);
         m_d4_generator->setD4CovalentCN(true);  // GFN2 dftd4 EN-weighted covalent CN
@@ -3881,7 +3885,7 @@ bool XTB::computeD4PotentialDedq(const Vector& q_at, Vector& dEdq) const
         // WP2: new geometry → the evaluator's cached pair list is stale (rebuilt on the
         // next computeEnergyAndGradient). Per-iter calls within this geometry reuse it.
         m_d4_evaluator->invalidatePairCache();
-        if (use_device_disp) {
+        if (use_device_disp || use_device_disp_pbc) {
             // Upload the geometry-fixed D4 reference data once per geometry. The
             // BJ params (1, 2.7, 0.52, 5.0) match the evaluator init above; the
             // effective pair cutoff is 50 Bohr (GFNFFDispersion::r_cut).
@@ -3903,6 +3907,14 @@ bool XTB::computeD4PotentialDedq(const Vector& q_at, Vector& dEdq) const
                                        xyzv.data(), c6.data(),
                                        static_cast<int>(c6.size()),
                                        1.0, 2.7, 0.52, 5.0, 50.0);
+            if (use_device_disp_pbc) {
+                const PBCUtils::LatticeImageList im = PBCUtils::makeLatticeImageList(m_cell_bohr, kPbcD4PairCutoffBohr);
+                std::vector<double> tr(3 * im.trans.size());
+                for (size_t t = 0; t < im.trans.size(); ++t)
+                    for (int k = 0; k < 3; ++k) tr[3 * t + k] = im.trans[t][k];
+                m_pbc_d4_dev_ready = m_gpu_scf->beginDispersionImages(nat, m_cell_bohr.L,
+                    static_cast<int>(im.trans.size()), tr.data(), im.cutoff2);
+            }
         }
     }
 
@@ -3914,6 +3926,16 @@ bool XTB::computeD4PotentialDedq(const Vector& q_at, Vector& dEdq) const
         m_d4_generator->buildRefWFlat(m_atoms, q_at, W, dWq);
         std::vector<double> dedq(m_atomcount, 0.0);
         if (m_gpu_scf->dispersionDedq(m_atomcount, W.data(), dWq.data(), dedq.data())) {
+            dEdq = Vector::Zero(m_atomcount);
+            for (int A = 0; A < m_atomcount; ++A) dEdq(A) = dedq[A];
+            device_ok = true;
+        }
+    }
+    if (use_device_disp_pbc && m_pbc_d4_dev_ready) {
+        std::vector<double> W, dWq;
+        m_d4_generator->buildRefWFlat(m_atoms, q_at, W, dWq);
+        std::vector<double> dedq(m_atomcount, 0.0);
+        if (m_gpu_scf->dispersionDedqPeriodic(m_atomcount, W.data(), dWq.data(), dedq.data())) {
             dEdq = Vector::Zero(m_atomcount);
             for (int A = 0; A < m_atomcount; ++A) dEdq(A) = dedq[A];
             device_ok = true;

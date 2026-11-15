@@ -431,6 +431,17 @@ public:
                                                 nrtrans, rtrans, kexp, alpha, fac, sd_f, sq_f, dmp3, dmp5,
                                                 want_virial, grad_out, dEdr_out, vir9_out);
     }
+    // Claude Generated (Nov 2026, WP-PERIODIC-XTB G4b): periodic in-SCF D4 dE/dq, see GpuScfBackend.
+    bool beginDispersionImages(int nat, const double* cell_L, int ntrans, const double* trans, double cut2) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->beginDispersionImages(nat, cell_L, ntrans, trans, cut2);
+    }
+    bool dispersionDedqPeriodic(int nat, const double* W, const double* dWq, double* dEdq_out) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->dispersionDedqPeriodic(nat, W, dWq, dEdq_out);
+    }
 
     bool gradientTailDevice(int nat, bool is_gfn2, bool with_mp, const double* xyz_bohr, const double* dEdcn,
                             const double* rcov_au, const double* q_at, const double* dp_at, const double* qp_at,

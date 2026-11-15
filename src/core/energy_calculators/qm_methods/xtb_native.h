@@ -382,6 +382,9 @@ struct GpuPrecondFlat {
 /// *store_best when x_n/F_n are to be kept as the "best" pair; returns true to drop M.
 using GpuBroydenGuardFn = std::function<bool(int n, double fnorm, bool* store_best)>;
 
+/// G2-G6 (Nov 2026, xtb_periodic.cpp): true when env CURCUMA_PBC_GPU_HOST names the periodic device stage (or all).
+bool pbcGpuStageOnHost(const char* token);
+
 struct GpuScfBackend {
     virtual ~GpuScfBackend() = default;
     virtual bool begin(const Matrix& H0, const Matrix& S,
@@ -701,6 +704,14 @@ struct GpuScfBackend {
     { (void)nat; (void)xyz_bohr; (void)mrad; (void)q_at; (void)dp_at; (void)qp_at; (void)cell_L; (void)ndtrans;
       (void)dtrans; (void)nrtrans; (void)rtrans; (void)kexp; (void)alpha; (void)fac; (void)sd_f; (void)sq_f;
       (void)dmp3; (void)dmp5; (void)want_virial; (void)grad_out; (void)dEdr_out; (void)vir9_out; return false; }
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB G4b): after beginDispersion, build the image-summed BJ factor
+    /// D(i, j) of the periodic in-SCF D4 dE/dq once per geometry (cell L[3] in Bohr, translations trans[3 ntrans]
+    /// with T = 0 first, squared pair cutoff). Default false -> host loop.
+    virtual bool beginDispersionImages(int nat, const double* cell_L, int ntrans, const double* trans, double cut2)
+    { (void)nat; (void)cell_L; (void)ntrans; (void)trans; (void)cut2; return false; }
+    /// Per SCF iteration: dE_D4/dq with the D(i, j) of beginDispersionImages; W/dWq as dispersionDedq.
+    virtual bool dispersionDedqPeriodic(int nat, const double* W, const double* dWq, double* dEdq_out)
+    { (void)nat; (void)W; (void)dWq; (void)dEdq_out; return false; }
     /// Claude Generated (Oct 2026): potentials of the gradient at the converged charges of the resident loop built on the
     /// device (XtbGpuContext::convergedPotentials) and the gradient that reads them (no host potential, no upload).
     virtual bool prepareConvergedPotentials(bool gfn2) { (void)gfn2; return false; }
@@ -1853,6 +1864,7 @@ private:
     // GenerateParameters of the current geometry so per-SCF addDispersionPotential()
     // only refreshes the charges instead of regenerating the full reference set.
     mutable bool   m_d4_prepared = false;
+    mutable bool   m_pbc_d4_dev_ready = false;   ///< G4b: device D(i, j) of this geometry built (reset with m_d4_prepared)
     mutable int    m_d4_genparams_calls = 0;  // diagnostic: GenerateParameters calls (verbosity>=3)
     // GFN2 component audit (Claude Generated): when set, calcDispersionEnergy
     // skips the Mulliken CPSCF charge-response fold. The diagnostic injects a

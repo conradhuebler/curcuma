@@ -48,10 +48,12 @@
 //     called by XTB in the executable and implemented in the plugin).
 // 10 = Nov 2026, WP-PERIODIC-XTB G3 (GpuScfBackend gained the virtual multipoleMatricesPeriodic).
 // 11 = Nov 2026, WP-PERIODIC-XTB G5a (GpuScfBackend gained the virtual multipoleGradientPeriodic).
+// 12 = Nov 2026, WP-PERIODIC-XTB G4b (GpuScfBackend gained beginDispersionImages/dispersionDedqPeriodic; XTB gained
+//      m_pbc_d4_dev_ready).
 
 #pragma once
 
-#define CURCUMA_GPU_PLUGIN_ABI_VERSION 11
+#define CURCUMA_GPU_PLUGIN_ABI_VERSION 12
 
 /// Defines `extern "C" int curcuma_<backend>_abi_version()` in a plugin entry file (use at file scope).
 #define CURCUMA_GPU_PLUGIN_DEFINE_ABI_VERSION(backend)                                                                \

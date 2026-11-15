@@ -186,6 +186,9 @@ struct XtbGpuContext::Impl {
     CudaBuffer<double> dPbcMrad, dPbcDtrans, dPbcRtrans, dPbcKexp, dPbcAmat;
     // Nov 2026 (G5a): periodic multipole gradient (moments, fixed-point accumulators)
     CudaBuffer<double> dPbcQ, dPbcDp, dPbcQp, dPbcGfix;
+    // Nov 2026 (G4b): image-summed D4 BJ factor D(i, j) of the periodic in-SCF dE/dq
+    CudaBuffer<double> dPbcD4D;
+    bool               d4_pbc_ready = false;
     // Oct 2026: whole post-SCF D4 on the device (d4PostScfDevice)
     CudaBuffer<double> dD4Rad, dD4En;                     // covalent-CN tables (119)
     CudaBuffer<double> dD4Q, dD4QZero, dD4W0, dD4dWq0, dD4dWc0;
@@ -3550,6 +3553,77 @@ __global__ void k_mp_grad_pbc(int nat, const double* __restrict__ xyz, const dou
     }
 }
 
+/* ---------------------------------------------------------------------------------------------- *
+ *  WP-PERIODIC-XTB G4b (Claude Generated, Nov 2026): in-SCF periodic D4 dE/dq on the device.       *
+ *  The BJ factor of a pair is charge independent, so its image sum                                *
+ *  D(i, j) = sum_T [s6/(r^6 + R0^6) + s8 r4r2_ij/(r^8 + R0^8)],  |x_i - x_j - T| < r_cut,          *
+ *  (T != 0 for i == j; images as PBCUtils::forEachImage) is built once per geometry               *
+ *  (k_d4_pbc_dmat, one thread per element, symmetric by construction). Per SCF iteration          *
+ *  k_d4_dedq_pbc gathers dEdq(i) = -sum_j dC6_ij/dq_i D(i, j) over every j incl. i, the            *
+ *  contraction of k_d4_dedq; the same terms as D4Evaluator::computeEnergyAndGradientPeriodic       *
+ *  (dqb(i) -= dc6dqi edisp for every image, dqb(j) -= dc6dqj edisp for i != j).                   *
+ * ---------------------------------------------------------------------------------------------- */
+__global__ void k_d4_pbc_dmat(int nat, const double* __restrict__ xyz, const double* __restrict__ sqrtZr4r2,
+                              double Lx, double Ly, double Lz, int ntr, const double* __restrict__ trans,
+                              double s6, double s8, double a1, double a2, double cut2, double* __restrict__ D)
+{
+    const int j = blockIdx.x * blockDim.x + threadIdx.x;
+    const int i = blockIdx.y * blockDim.y + threadIdx.y;
+    if (i >= nat || j >= nat) return;
+    double d0x = xyz[3*i] - xyz[3*j], d0y = xyz[3*i+1] - xyz[3*j+1], d0z = xyz[3*i+2] - xyz[3*j+2];
+    { double s = d0x * (1.0 / Lx); s -= rint(s); d0x = Lx * s; }
+    { double s = d0y * (1.0 / Ly); s -= rint(s); d0y = Ly * s; }
+    { double s = d0z * (1.0 / Lz); s -= rint(s); d0z = Lz * s; }
+    const double rrij = 3.0 * sqrtZr4r2[i] * sqrtZr4r2[j];
+    const double r0 = a1 * sqrt(rrij) + a2;
+    const double r0_2 = r0 * r0, r0_6 = r0_2 * r0_2 * r0_2, r0_8 = r0_6 * r0_2;
+    double acc = 0.0;
+    for (int t = (i == j) ? 1 : 0; t < ntr; ++t) {
+        const double dx = d0x - trans[3*t], dy = d0y - trans[3*t+1], dz = d0z - trans[3*t+2];
+        const double r2 = dx * dx + dy * dy + dz * dz;
+        if (r2 >= cut2 || r2 < 1.0e-24) continue;
+        const double r6 = r2 * r2 * r2, r8 = r6 * r2;
+        acc += s6 / (r6 + r0_6) + s8 * rrij / (r8 + r0_8);
+    }
+    D[static_cast<size_t>(i) * nat + j] = acc;
+}
+
+__global__ void k_d4_dedq_pbc(int nat, int max_elem, int max_ref,
+                              const int* __restrict__ Z, const int* __restrict__ nref,
+                              const double* __restrict__ c6_flat, const double* __restrict__ W,
+                              const double* __restrict__ dWq, const double* __restrict__ D,
+                              double* __restrict__ dEdq)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= nat) return;
+    const int ei = Z[i] - 1;
+    const int nri = nref[i];
+    if (ei < 0 || ei >= max_elem || nri <= 0) { dEdq[i] = 0.0; return; }
+    const double* dWqi = dWq + static_cast<size_t>(i) * max_ref;
+    const double* Di = D + static_cast<size_t>(i) * nat;
+    double acc = 0.0;
+    for (int j = 0; j < nat; ++j) {
+        const double dij = Di[j];
+        if (dij == 0.0) continue;
+        const int ej = Z[j] - 1;
+        const int nrj = nref[j];
+        if (ej < 0 || ej >= max_elem || nrj <= 0) continue;
+        const double* Wj = W + static_cast<size_t>(j) * max_ref;
+        const size_t base = (static_cast<size_t>(ei) * max_elem + ej) * static_cast<size_t>(max_ref) * max_ref;
+        double dc6dqi = 0.0;
+        for (int a = 0; a < nri; ++a) {
+            const double dwa = dWqi[a];
+            if (dwa == 0.0) continue;
+            const size_t basea = base + static_cast<size_t>(a) * max_ref;
+            double s = 0.0;
+            for (int b = 0; b < nrj; ++b) s += Wj[b] * c6_flat[basea + b];
+            dc6dqi += dwa * s;
+        }
+        acc += -dc6dqi * dij;
+    }
+    dEdq[i] = acc;
+}
+
 // v_at(A) += dE_D4/dq(A) (resident from k_d4_dedq). One thread per atom.
 __global__ void k_vat_add_d4(int nat, const double* __restrict__ d4_dedq, double* __restrict__ v_at)
 {
@@ -6363,6 +6437,7 @@ bool XtbGpuContext::beginDispersion(int nat, const int* Z, const double* sqrtZr4
     m_impl->d4_nat = nat;
     m_impl->d4_s6 = s6; m_impl->d4_s8 = s8; m_impl->d4_a1 = a1; m_impl->d4_a2 = a2;
     m_impl->d4_cut = cutoff;
+    m_impl->d4_pbc_ready = false;   // G4b: a new geometry needs beginDispersionImages again
     return cudaStreamSynchronize(stream) == cudaSuccess;
 }
 
@@ -6604,6 +6679,52 @@ bool XtbGpuContext::multipoleGradientPeriodic(int nat, const double* xyz_bohr, c
         return false;
     }
     return true;
+}
+
+// Claude Generated (Nov 2026, WP-PERIODIC-XTB G4b): periodic in-SCF D4 dE/dq (kernels k_d4_pbc_dmat, k_d4_dedq_pbc).
+bool XtbGpuContext::beginDispersionImages(int nat, const double* cell_L, int ntrans, const double* trans, double cut2)
+{
+    Impl& I = *m_impl;
+    I.d4_pbc_ready = false;
+    if (!ok() || nat <= 0 || nat != I.d4_nat || ntrans <= 0 || !cell_L || !trans) return false;
+    const size_t nn = static_cast<size_t>(nat) * nat;
+    if (nn > static_cast<size_t>(INT_MAX)) return false;
+    cudaStream_t stream = I.stream;
+    try {
+        I.dPbcTrans.upload(trans, 3 * ntrans, stream);
+        I.dPbcD4D.ensure(static_cast<int>(nn));
+    } catch (...) {
+        return false;
+    }
+    const dim3 blk(16, 16);
+    const dim3 grd((nat + 15) / 16, (nat + 15) / 16);
+    k_d4_pbc_dmat<<<grd, blk, 0, stream>>>(nat, I.dD4Xyz.ptr, I.dD4Sqrt.ptr, cell_L[0], cell_L[1], cell_L[2], ntrans,
+                                           I.dPbcTrans.ptr, I.d4_s6, I.d4_s8, I.d4_a1, I.d4_a2, cut2, I.dPbcD4D.ptr);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
+    I.d4_pbc_ready = true;
+    return true;
+}
+
+bool XtbGpuContext::dispersionDedqPeriodic(int nat, const double* W, const double* dWq, double* dEdq_out)
+{
+    Impl& I = *m_impl;
+    if (!ok() || !I.d4_pbc_ready || nat <= 0 || nat != I.d4_nat || !W || !dWq || !dEdq_out || I.dD4C6Flat.empty())
+        return false;
+    cudaStream_t stream = I.stream;
+    try {
+        I.dD4W.upload(W, nat * Impl::D4_MAX_REF, stream);
+        I.dD4dWq.upload(dWq, nat * Impl::D4_MAX_REF, stream);
+    } catch (...) {
+        return false;
+    }
+    const int b = 128;
+    k_d4_dedq_pbc<<<(nat + b - 1) / b, b, 0, stream>>>(nat, 118, Impl::D4_MAX_REF, I.dD4Z.ptr, I.dD4Nref.ptr,
+                                                      I.dD4C6Flat.ptr, I.dD4W.ptr, I.dD4dWq.ptr, I.dPbcD4D.ptr,
+                                                      I.dD4Dedq.ptr);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    I.dD4Dedq.download(dEdq_out, nat, stream);
+    return cudaStreamSynchronize(stream) == cudaSuccess;
 }
 
 // Claude Generated (Nov 2026, WP-PERIODIC-XTB G4a): periodic D4 ATM (kernels k_atm_pbc_nb, k_d4_atm_pbc_w).
