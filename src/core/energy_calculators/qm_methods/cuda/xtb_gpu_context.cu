@@ -182,6 +182,8 @@ struct XtbGpuContext::Impl {
     // Nov 2026 (WP-PERIODIC-XTB G4a): periodic ATM image neighbour list and outputs
     CudaBuffer<double> dPbcXyz, dPbcTrans, dPbcR4r2, dPbcSr4r2, dPbcNbV, dPbcEat, dPbcGrad, dPbcDcn, dPbcVir;
     CudaBuffer<int>    dPbcNbCnt, dPbcNbPtr, dPbcNbIdx;
+    // Nov 2026 (G3): periodic multipole interaction matrices
+    CudaBuffer<double> dPbcMrad, dPbcDtrans, dPbcRtrans, dPbcKexp, dPbcAmat;
     // Oct 2026: whole post-SCF D4 on the device (d4PostScfDevice)
     CudaBuffer<double> dD4Rad, dD4En;                     // covalent-CN tables (119)
     CudaBuffer<double> dD4Q, dD4QZero, dD4W0, dD4dWq0, dD4dWc0;
@@ -3279,6 +3281,90 @@ __global__ void k_d4_atm_pbc_w(int nat, const double* __restrict__ sr4r2, const 
         for (int k = 0; k < 6; ++k) vir6[6*a+k] = v[k];
 }
 
+/* ---------------------------------------------------------------------------------------------- *
+ *  WP-PERIODIC-XTB G3 (Claude Generated, Nov 2026): periodic GFN2 multipole interaction matrices  *
+ *  on the device, statement for statement the pair body of XTB::buildMultipoleInteractionMatrices *
+ *  Periodic (xtb_periodic.cpp): reciprocal part over the host k list (weights kexp, P2b factors)   *
+ *  and the direct box translations. One thread per pair jat <= iat writes both mirrored elements  *
+ *  (every element once: deterministic). Output column-major nat x nat blocks out[18][nat*nat]:    *
+ *  sd 0-2, dd 3-11 (a*3+b), sq 12-17. The self terms on the diagonal are added by the host.        *
+ * ---------------------------------------------------------------------------------------------- */
+__global__ void k_mp_amat_pbc(int nat, const double* __restrict__ xyz, const double* __restrict__ mrad,
+                              double Lx, double Ly, double Lz,
+                              int ndt, const double* __restrict__ dtrans, int nrt, const double* __restrict__ rtrans,
+                              const double* __restrict__ kexp, double alpha, double dmp3, double dmp5,
+                              double sd_f, double sq_f, double fac, double* __restrict__ out)
+{
+    const int iat = blockIdx.y * blockDim.y + threadIdx.y;
+    const int jat = blockIdx.x * blockDim.x + threadIdx.x;
+    if (iat >= nat || jat > iat) return;
+    const double kSqrtPi_d = 1.7724538509055159;
+    const double eps_r = 1.4901161193847656e-08;
+    const double alp2 = alpha * alpha;
+    double v0x = xyz[3*iat] - xyz[3*jat], v0y = xyz[3*iat+1] - xyz[3*jat+1], v0z = xyz[3*iat+2] - xyz[3*jat+2];
+    { double s = v0x * (1.0 / Lx); s -= rint(s); v0x = Lx * s; }
+    { double s = v0y * (1.0 / Ly); s -= rint(s); v0y = Ly * s; }
+    { double s = v0z * (1.0 / Lz); s -= rint(s); v0z = Lz * s; }
+    const double rr = 0.5 * (mrad[jat] + mrad[iat]);
+    double sd[3] = { 0, 0, 0 }, dd[3][3] = { { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 } }, sq[6] = { 0, 0, 0, 0, 0, 0 };
+    dd[0][0] += fac / 6.0; dd[1][1] += fac / 6.0; dd[2][2] += fac / 6.0;
+    sq[0] -= fac / 9.0; sq[2] -= fac / 9.0; sq[5] -= fac / 9.0;
+    for (int t = 0; t < nrt; ++t) {
+        const double kx = kexp[t];
+        if (kx == 0.0) continue;
+        const double gx = rtrans[3*t], gy = rtrans[3*t+1], gz = rtrans[3*t+2];
+        const double gv = v0x * gx + v0y * gy + v0z * gz;
+        double sn, cs;
+        sincos(gv, &sn, &cs);
+        const double sink = sn * kx, cosk = cs * kx;
+        sd[0] += sd_f * gx * sink; sd[1] += sd_f * gy * sink; sd[2] += sd_f * gz * sink;
+        const double kv[3] = { gx, gy, gz };
+        for (int a = 0; a < 3; ++a)
+            for (int b = 0; b < 3; ++b) dd[a][b] += kv[a] * kv[b] * cosk;
+        const double cq = sq_f * cosk;
+        sq[0] += gx * gx * cq; sq[1] += 2.0 * gx * gy * cq; sq[2] += gy * gy * cq;
+        sq[3] += 2.0 * gx * gz * cq; sq[4] += 2.0 * gy * gz * cq; sq[5] += gz * gz * cq;
+    }
+    for (int t = 0; t < ndt; ++t) {
+        const double vx = v0x + dtrans[3*t], vy = v0y + dtrans[3*t+1], vz = v0z + dtrans[3*t+2];
+        const double r1 = sqrt(vx * vx + vy * vy + vz * vz);
+        if (r1 < eps_r) continue;
+        const double g1 = 1.0 / r1, g3 = g1 * g1 * g1, g5 = g3 * g1 * g1;
+        const double fdmp3 = 1.0 / (1.0 + 6.0 * pow(rr / r1, dmp3));
+        const double fdmp5 = 1.0 / (1.0 + 6.0 * pow(rr / r1, dmp5));
+        const double arg = r1 * alpha, arg2 = arg * arg;
+        const double expt = exp(-arg2) / kSqrtPi_d;
+        const double erft = -erf(arg) * g1;
+        const double e1 = g1 * g1 * (erft + 2.0 * expt * alpha);
+        const double e2 = g1 * g1 * (e1 + 4.0 * expt * alp2 * alpha / 3.0);
+        const double tmp3 = fdmp3 * g3 + e1;
+        const double t5 = g5 * fdmp5 + e2;
+        const double t3 = fdmp5 * g3 + e1;
+        sd[0] += vx * tmp3; sd[1] += vy * tmp3; sd[2] += vz * tmp3;
+        const double vv[3] = { vx, vy, vz };
+        for (int a = 0; a < 3; ++a)
+            for (int b = 0; b < 3; ++b) dd[a][b] += ((a == b) ? t3 : 0.0) - vv[a] * vv[b] * 3.0 * t5;
+        sq[0] += vx * vx * t5 - t3 / 3.0; sq[1] += 2.0 * vx * vy * t5; sq[2] += vy * vy * t5 - t3 / 3.0;
+        sq[3] += 2.0 * vx * vz * t5; sq[4] += 2.0 * vy * vz * t5; sq[5] += vz * vz * t5 - t3 / 3.0;
+    }
+    const size_t n2 = static_cast<size_t>(nat) * nat;
+    const size_t eji = static_cast<size_t>(jat) + static_cast<size_t>(iat) * nat;   // (jat, iat) column-major
+    const size_t eij = static_cast<size_t>(iat) + static_cast<size_t>(jat) * nat;   // (iat, jat)
+    for (int k = 0; k < 3; ++k) {
+        out[k * n2 + eji] = (iat == jat) ? 0.0 : sd[k];
+        out[k * n2 + eij] = (iat == jat) ? 0.0 : -sd[k];
+    }
+    for (int a = 0; a < 3; ++a)
+        for (int b = 0; b < 3; ++b) {
+            out[(3 + a * 3 + b) * n2 + eji] = dd[a][b];
+            out[(3 + a * 3 + b) * n2 + eij] = dd[a][b];
+        }
+    for (int k = 0; k < 6; ++k) {
+        out[(12 + k) * n2 + eji] = sq[k];
+        out[(12 + k) * n2 + eij] = sq[k];
+    }
+}
+
 // v_at(A) += dE_D4/dq(A) (resident from k_d4_dedq). One thread per atom.
 __global__ void k_vat_add_d4(int nat, const double* __restrict__ d4_dedq, double* __restrict__ v_at)
 {
@@ -6228,6 +6314,48 @@ bool XtbGpuContext::dispersionATM(int nat, const double* c6, const double* dc6dc
     // The nat^2 reference matrices are only needed for this call.
     I.dD4AtmC6.free();
     I.dD4AtmDc6.free();
+    return okk;
+}
+
+// Claude Generated (Nov 2026, WP-PERIODIC-XTB G3): periodic multipole interaction matrices (kernel k_mp_amat_pbc).
+bool XtbGpuContext::multipoleMatricesPeriodic(int nat, const double* xyz_bohr, const double* mrad, const double* cell_L,
+                                              int ndtrans, const double* dtrans, int nrtrans, const double* rtrans,
+                                              const double* kexp, double alpha, double dmp3, double dmp5, double sd_f,
+                                              double sq_f, double fac, double* const* out18)
+{
+    Impl& I = *m_impl;
+    if (!ok() || nat <= 0 || ndtrans <= 0 || nrtrans < 0 || !xyz_bohr || !mrad || !cell_L || !dtrans || !out18
+        || (nrtrans > 0 && (!rtrans || !kexp)))
+        return false;
+    const size_t n2 = static_cast<size_t>(nat) * nat;
+    if (18 * n2 > static_cast<size_t>(INT_MAX)) return false;
+    cudaStream_t stream = I.stream;
+    try {
+        I.dPbcXyz.upload(xyz_bohr, 3 * nat, stream);
+        I.dPbcMrad.upload(mrad, nat, stream);
+        I.dPbcDtrans.upload(dtrans, 3 * ndtrans, stream);
+        if (nrtrans > 0) {
+            I.dPbcRtrans.upload(rtrans, 3 * nrtrans, stream);
+            I.dPbcKexp.upload(kexp, nrtrans, stream);
+        }
+        I.dPbcAmat.ensure(static_cast<int>(18 * n2));
+        const dim3 blk(16, 16);
+        const dim3 grd((nat + 15) / 16, (nat + 15) / 16);
+        k_mp_amat_pbc<<<grd, blk, 0, stream>>>(nat, I.dPbcXyz.ptr, I.dPbcMrad.ptr, cell_L[0], cell_L[1], cell_L[2],
+                                               ndtrans, I.dPbcDtrans.ptr, nrtrans,
+                                               nrtrans > 0 ? I.dPbcRtrans.ptr : nullptr,
+                                               nrtrans > 0 ? I.dPbcKexp.ptr : nullptr, alpha, dmp3, dmp5, sd_f, sq_f,
+                                               fac, I.dPbcAmat.ptr);
+        if (cudaGetLastError() != cudaSuccess) return false;
+        for (int b = 0; b < 18; ++b)
+            if (cudaMemcpyAsync(out18[b], I.dPbcAmat.ptr + b * n2, n2 * sizeof(double), cudaMemcpyDeviceToHost,
+                                stream) != cudaSuccess)
+                return false;
+    } catch (...) {
+        return false;
+    }
+    const bool okk = cudaStreamSynchronize(stream) == cudaSuccess;
+    I.dPbcAmat.free();
     return okk;
 }
 

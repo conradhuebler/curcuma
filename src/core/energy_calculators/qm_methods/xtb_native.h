@@ -679,6 +679,16 @@ struct GpuScfBackend {
     { (void)nat; (void)xyz_bohr; (void)r4r2; (void)c6; (void)dc6dcn; (void)cell_L; (void)ntrans; (void)trans;
       (void)cutoff2; (void)s9; (void)a1; (void)a2; (void)alp; (void)want_virial; (void)e_atom_out; (void)grad_out;
       (void)dEdcn_out; (void)vir6_out; return false; }
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB G3): the periodic GFN2 multipole interaction matrices (Ewald:
+    /// reciprocal k list with weights kexp and the P2b factors sd_f/sq_f, direct box translations dtrans) on the
+    /// device, self-contained. out18 = 18 host column-major nat x nat blocks (sd 0-2, dd 3-11 as a*3+b, sq 12-17),
+    /// written completely except the diagonal self terms, which the host adds. Default false -> host loop.
+    virtual bool multipoleMatricesPeriodic(int nat, const double* xyz_bohr, const double* mrad, const double* cell_L,
+                                           int ndtrans, const double* dtrans, int nrtrans, const double* rtrans,
+                                           const double* kexp, double alpha, double dmp3, double dmp5, double sd_f,
+                                           double sq_f, double fac, double* const* out18)
+    { (void)nat; (void)xyz_bohr; (void)mrad; (void)cell_L; (void)ndtrans; (void)dtrans; (void)nrtrans; (void)rtrans;
+      (void)kexp; (void)alpha; (void)dmp3; (void)dmp5; (void)sd_f; (void)sq_f; (void)fac; (void)out18; return false; }
     /// Claude Generated (Oct 2026): potentials of the gradient at the converged charges of the resident loop built on the
     /// device (XtbGpuContext::convergedPotentials) and the gradient that reads them (no host potential, no upload).
     virtual bool prepareConvergedPotentials(bool gfn2) { (void)gfn2; return false; }

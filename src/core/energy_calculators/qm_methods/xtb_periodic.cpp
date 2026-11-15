@@ -809,7 +809,28 @@ void XTB::buildMultipoleInteractionMatricesPeriodic() const
         kexp[t] = (g2 < eps_r) ? 0.0 : fac * std::exp(-0.25 * g2 / alp2) / g2;
     }
 
-    const int mp_threads = effectiveIntraThreads(nat);
+    // G3 (Nov 2026): the pair loop on the CUDA device when the periodic device SCF is on (G1 wrapper); it writes
+    // every off-diagonal and diagonal element of the 18 blocks like the loop below, which runs on any failure.
+    bool mp_device = false;
+    if (m_gpu_scf && m_pbc_device_scf && !pbcGpuStageOnHost("mpmat")) {
+        std::vector<double> dt(3 * dtrans.size()), rt(3 * rtrans.size());
+        for (size_t t = 0; t < dtrans.size(); ++t)
+            for (int k = 0; k < 3; ++k) dt[3 * t + k] = dtrans[t][k];
+        for (size_t t = 0; t < rtrans.size(); ++t)
+            for (int k = 0; k < 3; ++k) rt[3 * t + k] = rtrans[t][k];
+        double* outs[18];
+        for (int k = 0; k < 3; ++k) outs[k] = m_mp_amat_sd[k].data();
+        for (int a = 0; a < 3; ++a)
+            for (int b = 0; b < 3; ++b) outs[3 + a * 3 + b] = m_mp_amat_dd[a][b].data();
+        for (int k = 0; k < 6; ++k) outs[12 + k] = m_mp_amat_sq[k].data();
+        mp_device = m_gpu_scf->multipoleMatricesPeriodic(nat, xyz.data(), m_mp_mrad.data(), m_cell_bohr.L,
+            static_cast<int>(dtrans.size()), dt.data(), static_cast<int>(rtrans.size()), rt.data(), kexp.data(),
+            alpha, mp_dmp3, mp_dmp5, sd_rec_factor, sq_rec_factor, fac, outs);
+        if (CurcumaLogger::get_verbosity() >= 3)
+            CurcumaLogger::info_fmt("  periodic multipole matrices on the {}", mp_device ? "device" : "host (device call failed)");
+    }
+    const int mp_threads = mp_device ? 1 : effectiveIntraThreads(nat);
+    if (!mp_device)
     parallelStripes(mp_threads, [&](int tid, int nth) {
     for (int iat = tid; iat < nat; iat += nth) {
         for (int jat = 0; jat <= iat; ++jat) {

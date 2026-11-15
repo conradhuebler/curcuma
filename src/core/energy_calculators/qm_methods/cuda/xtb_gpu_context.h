@@ -451,6 +451,11 @@ public:
                                const double* dc6dcn, const double* cell_L, int ntrans, const double* trans,
                                double cutoff2, double s9, double a1, double a2, double alp, bool want_virial,
                                double* e_atom_out, double* grad_out, double* dEdcn_out, double* vir6_out);
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB G3): see GpuScfBackend::multipoleMatricesPeriodic.
+    bool multipoleMatricesPeriodic(int nat, const double* xyz_bohr, const double* mrad, const double* cell_L,
+                                   int ndtrans, const double* dtrans, int nrtrans, const double* rtrans,
+                                   const double* kexp, double alpha, double dmp3, double dmp5, double sd_f,
+                                   double sq_f, double fac, double* const* out18);
 
     /* ----- Stage 5 (Part B3/B4): full device GFN2 potential build -------- *
      * Move the WHOLE per-iteration isotropic+anisotropic potential build onto the

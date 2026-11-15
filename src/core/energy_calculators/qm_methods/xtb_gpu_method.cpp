@@ -409,6 +409,16 @@ public:
         return m_ctx->dispersionATMPeriodic(nat, xyz_bohr, r4r2, c6, dc6dcn, cell_L, ntrans, trans, cutoff2, s9, a1,
                                             a2, alp, want_virial, e_atom_out, grad_out, dEdcn_out, vir6_out);
     }
+    // Claude Generated (Nov 2026, WP-PERIODIC-XTB G3): periodic multipole interaction matrices, see GpuScfBackend.
+    bool multipoleMatricesPeriodic(int nat, const double* xyz_bohr, const double* mrad, const double* cell_L,
+                                   int ndtrans, const double* dtrans, int nrtrans, const double* rtrans,
+                                   const double* kexp, double alpha, double dmp3, double dmp5, double sd_f,
+                                   double sq_f, double fac, double* const* out18) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->multipoleMatricesPeriodic(nat, xyz_bohr, mrad, cell_L, ndtrans, dtrans, nrtrans, rtrans, kexp,
+                                                alpha, dmp3, dmp5, sd_f, sq_f, fac, out18);
+    }
 
     bool gradientTailDevice(int nat, bool is_gfn2, bool with_mp, const double* xyz_bohr, const double* dEdcn,
                             const double* rcov_au, const double* q_at, const double* dp_at, const double* qp_at,

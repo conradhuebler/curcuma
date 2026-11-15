@@ -521,7 +521,21 @@ requests none); its extra cost is in the MD measurements below. `CURCUMA_PBC_GPU
   (`-scf_threshold 1e-9`, 8 threads) device ATM vs `CURCUMA_PBC_GPU_HOST=atm` in the same binary: dE 2.3e-13 Eh,
   max dG 4e-15 Eh/A; `pbc_xtb_*` 5/5 in `release/` and `release_cuda/`; CPU without a cell 24/24 md5 to 957afab7,
   CUDA without a cell 24/24 md5 to a 957afab7 build with the `release_cuda/` configuration (AVX2/AVX512/MKL/march native).
- `ctest -R 'gfn|xtb|sqm|gfnff|pbc|ewald|simplemd|restart|md_|gpu|plugin|molecule|xyz|parser|curcumaopt|structinv' -j1`)
+
+### G3 periodic multipole interaction matrices on the device (2026-11-15, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+- `GpuScfBackend::multipoleMatricesPeriodic` (CUDA kernel `k_mp_amat_pbc`): the pair body of
+  `buildMultipoleInteractionMatricesPeriodic` statement for statement (host k list with weights and P2b factors, direct
+  box translations), one thread per pair jat <= iat writing both mirrored elements (each element once, deterministic);
+  the 18 nat x nat blocks are downloaded into the host matrices (the potential and energy stay on the host), the
+  diagonal self terms are added by the host as before. `CURCUMA_PBC_GPU_HOST=mpmat` keeps the host loop. Plugin ABI 10.
+- Time (`interaction mats`, 8 threads, one run each, same binary with and without the env switch): 216 H2O 95 -> 22 ms,
+  432 H2O 719 -> 108 ms (the 18 x 13 MB download is most of the device time).
+- Gates: `pbc_xtb_gpu_parity` 6/6 unchanged within 1e-15 (gfn2 trimer |dE| 4.4e-15 Eh), second CUDA run bitwise in 6/6;
+  device vs host matrices in the same binary: 216 H2O dE 2.3e-13 Eh (1 ulp of E), max dG 3.8e-15 Eh/A; 432 H2O dE 0,
+  max dG 4.9e-15 Eh/A; `pbc_xtb_*` 5/5 in both builds; without a cell CPU 24/24 and CUDA 24/24 md5 to 957afab7.
+
+## Regression run (2026-11-14, `release/`, `ctest -R 'gfn|xtb|sqm|gfnff|pbc|ewald|simplemd|restart|md_|gpu|plugin|molecule|xyz|parser|curcumaopt|structinv' -j1`)
 
 369 tests selected, 2 failed before the fix below: `pbc_md_nonperiodic_cell` (its check (a) assumed gfn2 + cell to be
 non-periodic; now uses `eht` there and checks gfn2 + cell as periodic with DOF 3N-3 in a new (d), green) and `xtb_cpscf`
