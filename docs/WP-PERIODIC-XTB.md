@@ -307,6 +307,49 @@ The periodic D4 (`computeEnergyAndGradientPeriodic`, `computeATMPeriodic`) is se
 i.e. a GFN2 NVT step of about half a minute until the periodic D4 is threaded and the ATM gets a neighbour list (the
 vacuum `computeATM` has both). GFN1 (D3, no ATM) is 4-5x cheaper. NPT needs P4.
 
+## Follow-up stages (operator decision of 2026-11-14): T threading, P4 virial, G CUDA port
+
+Interim status 2026-11-15: **T done** (below), **P4 not started**, **G not started** (G0 design pending). The tblite
+multipole finding stays open; the factors remain switchable (`CURCUMA_PBC_MP_SD_FACTOR`, `CURCUMA_PBC_MP_SQ_FACTOR`,
+default consistent = Ewald-correct).
+
+### T threading of the periodic loops (2026-11-15, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+- **Scheme** (deterministic reduction): the periodic D4 pair term, the periodic ATM (`D4Evaluator::runBlocks`) and the
+  periodic multipole gradient (`addMultipoleGradientPeriodic`) split their row loop into `NB = min(nat, 32)` fixed blocks
+  (`iat % NB == blk`), each block has its own energy/gradient/dE/dCN/dE/dq accumulators, and the blocks are reduced in
+  block order. The block count depends only on the atom count, so these terms give the same bits for 1, 4 or 8
+  threads (and run to run); worker t takes the blocks t, t + T, ... on the `CxxThreadPool` of the evaluator /
+  `parallelStripes`, gated by `effectiveIntraThreads` (serial under molecule-level parallelism and for small systems,
+  docs/SQM_THREADING.md). The in-SCF periodic dE/dq (`computeD4PotentialDedq`) uses the same blocks.
+- **ATM neighbour list**: the images of every partner are collected once per `iat` (O(N) per atom) instead of once per
+  (iat, jat, kat) triple; the triple loop runs over the partners with images in the same (iat, jat, kat) and image
+  order, so the ATM sum is unchanged bit for bit (the plain O(N^3) image collection was the hot spot: 8.0 s of 11.0 s
+  at 216 H2O).
+- **Unchanged (still serial or per-thread partials)**: periodic CN and D3 (0.26 s at 216 H2O/8 threads, GFN1 only),
+  the Klopman-Ohno remainder of gamma, the AO multipole-integral image sum (`parallelStripes`, disjoint rows), the
+  H0/Pulay gradient (`parallelStripes` with per-thread partials as in vacuum: thread-count dependent at the last bit),
+  the reciprocal multipole matrices (`parallelStripes` over `iat`, every element written once: deterministic).
+- **Remaining thread dependence** of the total: energy 2e-12 Eh, gradient 1e-7 Eh/A between 1 and 4/8 threads (w64
+  gfn2, w216 gfn1), the same for gfn1 (no D4 blocks involved), i.e. from the SCF (MKL eigensolver threads) and the
+  per-thread partials of the H0/Pulay gradient as in vacuum (root CLAUDE.md: bit-identical only at a fixed thread count).
+- **Timing** (water lattices as above, `-sp` + `-dump_gradient`, wall incl. start-up, s):
+
+| box | method | threads | before T | after T |
+|---|---|---|---|---|
+| 64 H2O | gfn1 | 1 / 4 / 8 | 0.66 / 0.28 / 0.22 | 0.70 / 0.33 / 0.28 |
+| 64 H2O | gfn2 | 1 / 4 / 8 | 1.42 / 1.10 / 1.07 | 1.45 / 0.60 / 0.64 |
+| 216 H2O | gfn1 | 1 / 4 / 8 | 6.6 / 2.45 / 1.88 | 6.9 / 2.65 / 2.06 |
+| 216 H2O | gfn2 | 1 / 4 / 8 | 13.6 / 11.0 / 10.7 | 7.9 / 3.7 / 2.5 |
+
+  216 H2O gfn2 at 8 threads: setup 0.37, SCF (10 it.) 1.14, post-SCF 0.71 (D4 pairs 0.016, ATM 0.61, CN fold 0.04),
+  total 2.2 s of the 2.5 s wall. Estimate for 432 H2O: 6-10 s per energy+gradient at 8 threads (the SCF eigensolve
+  grows as nao^3). The gfn1 numbers are the start-up and SCF (the 0.1-0.2 s differences are machine noise, shared node).
+- Gates: `pbc_xtb_classical`, `pbc_xtb_gradient` (FD 8e-9 Eh/A) and `pbc_xtb_tblite` green; the 216 H2O gfn2 gradient
+  before/after the ATM restructuring agrees to 7e-13 Eh and 6e-8 Eh/A (both runs at 8 threads, i.e. within the
+  run-to-run scatter of the threaded SCF; a 1-thread comparison of the old binary was not kept); without a cell 24/24
+  bitwise to 957afab7.
+
 ## Regression run (2026-11-14, `release/`, `ctest -R 'gfn|xtb|sqm|gfnff|pbc|ewald|simplemd|restart|md_|gpu|plugin|molecule|xyz|parser|curcumaopt|structinv' -j1`)
 
 369 tests selected, 2 failed before the fix below: `pbc_md_nonperiodic_cell` (its check (a) assumed gfn2 + cell to be

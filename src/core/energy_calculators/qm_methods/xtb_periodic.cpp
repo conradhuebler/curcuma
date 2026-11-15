@@ -48,6 +48,7 @@
 #include "src/core/energy_calculators/ff_methods/cn_calculator.h"
 #include "src/core/energy_calculators/ff_methods/d3param_generator.h"
 
+#include <chrono>
 #include <cmath>
 #include <limits>
 
@@ -354,15 +355,26 @@ double XTB::calcD4DispersionPeriodic(bool need_gradient) const
     const PBCUtils::LatticeImageList atm_images = PBCUtils::makeLatticeImageList(m_cell_bohr, m_d4_atm_cutoff);
     const PBCUtils::LatticeImageList cn_images = PBCUtils::makeLatticeImageList(m_cell_bohr, kPbcD4CnCutoffBohr);
 
+    // Stage T: the periodic pair and ATM loops run on fixed blocks over the gated intra-thread budget
+    m_d4_evaluator->setThreads(effectiveIntraThreads(nat));
+    using d4clk = std::chrono::steady_clock;
+    const auto td0 = d4clk::now();
     double E = m_d4_evaluator->computeEnergyAndGradientPeriodic(m_atoms, geom_bohr, pair_images,
         /*with_gradient=*/true, m_disp_gradient, m_disp_dEdcn, m_disp_dEdq, /*with_dEdq=*/true);
+    const auto td1 = d4clk::now();
     E += m_d4_evaluator->computeATMPeriodic(m_atoms, geom_bohr, atm_images, /*with_gradient=*/true,
         m_disp_gradient, m_disp_dEdcn);
+    const auto td2 = d4clk::now();
 
     // CN chain rule with the D4 CN's own derivative over images (as the cell-free path, d4_ncoord)
     if (m_disp_dEdcn.size() == nat) {
         curcuma::dispersion::addD4CovalentCNGradientPeriodic(m_atoms, geom_bohr, m_disp_dEdcn, m_disp_gradient, cn_images);
         m_disp_dEdcn = Vector();
+    }
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        auto ms = [](d4clk::time_point a, d4clk::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+        CurcumaLogger::info_fmt("  periodic D4: pairs {:8.2f} ms, ATM {:8.2f} ms, CN fold {:8.2f} ms ({} threads)",
+                                ms(td0, td1), ms(td1, td2), ms(td2, d4clk::now()), effectiveIntraThreads(nat));
     }
     // q-response: only the variational route (dE_D4/dq in the Fock potential, charge Pulay) exists with a
     // cell; setPeriodicCell() refuses the other d4_charge_source values.
@@ -1138,17 +1150,32 @@ void XTB::addMultipoleGradientPeriodic(Matrix& gradient, Vector& dEdcn) const
         }
     };
 
-    for (int iat = 0; iat < nat; ++iat) {
-        for (int jat = 0; jat < iat; ++jat) {
-            double dG[3], dE;
-            pairTerms(iat, jat, dG, dE);
-            dEdr_mp(iat) += dE;
-            dEdr_mp(jat) += dE;
-            for (int c = 0; c < 3; ++c) { gradient(iat, c) += dG[c]; gradient(jat, c) -= dG[c]; }
+    // Stage T: fixed row blocks (iat % NB == blk) with per-block accumulators reduced in block order, so the
+    // result does not depend on the thread count; the same (iat, jat) order within a block as the plain loop.
+    const int NB = nat < 32 ? nat : 32;
+    std::vector<Matrix> g_b(NB, Matrix::Zero(nat, 3));
+    std::vector<Vector> dEdr_b(NB, Vector::Zero(nat));
+    parallelStripes(effectiveIntraThreads(nat), [&](int tid, int nth) {
+        for (int blk = tid; blk < NB; blk += nth) {
+            Matrix& gb = g_b[blk];
+            Vector& eb = dEdr_b[blk];
+            for (int iat = blk; iat < nat; iat += NB) {
+                for (int jat = 0; jat < iat; ++jat) {
+                    double dG[3], dE;
+                    pairTerms(iat, jat, dG, dE);
+                    eb(iat) += dE;
+                    eb(jat) += dE;
+                    for (int c = 0; c < 3; ++c) { gb(iat, c) += dG[c]; gb(jat, c) -= dG[c]; }
+                }
+                double dG[3], dE;   // self images: dE/d(mrad) only
+                pairTerms(iat, iat, dG, dE);
+                eb(iat) += dE;
+            }
         }
-        double dG[3], dE;   // self images: dE/d(mrad) only
-        pairTerms(iat, iat, dG, dE);
-        dEdr_mp(iat) += dE;
+    });
+    for (int blk = 0; blk < NB; ++blk) {
+        gradient += g_b[blk];
+        dEdr_mp += dEdr_b[blk];
     }
     const Vector cn = computeCoordinationNumbers();
     for (int i = 0; i < nat; ++i) {

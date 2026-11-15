@@ -3909,6 +3909,7 @@ bool XTB::computeD4PotentialDedq(const Vector& q_at, Vector& dEdq) const
         // WP-PERIODIC-XTB P1 (Claude Generated, Nov 2026): dE_D4/dq with lattice images (serial).
         Matrix scratch_grad; Vector scratch_dEdcn;
         const PBCUtils::LatticeImageList images = PBCUtils::makeLatticeImageList(m_cell_bohr, kPbcD4PairCutoffBohr);
+        m_d4_evaluator->setThreads(effectiveIntraThreads(m_atomcount));   // Stage T: fixed-block threading
         m_d4_evaluator->computeEnergyAndGradientPeriodic(
             m_atoms, geom_bohr, images, /*with_gradient=*/true,
             scratch_grad, scratch_dEdcn, dEdq, /*with_dEdq=*/true);

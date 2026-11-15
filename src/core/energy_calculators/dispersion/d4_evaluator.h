@@ -33,6 +33,7 @@
 #include "src/tools/pbc_utils.h"
 
 #include <Eigen/Dense>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -210,6 +211,13 @@ private:
     // The unified single-pair formula (see header comment).
     // Returns disp_sum = s6·t6 + s8·r4r2ij·t8 so callers can reuse it.
     inline double evalDispSum(double t6, double t8, double r4r2ij) const;
+
+    // Stage T (WP-PERIODIC-XTB, Claude Generated Nov 2026): fixed-block runner for the periodic loops. The
+    // block count depends only on the atom count, worker t takes the blocks t, t + T, ...; the callers keep
+    // one accumulator set per block and reduce in block order, so energies, gradients, dE/dCN and dE/dq are
+    // the same for every thread count (and run to run). Serial when m_threads <= 1.
+    void runBlocks(int nblocks, const std::function<void(int)>& f);
+    static int periodicBlockCount(int nat) { return nat < 32 ? nat : 32; }
 
     D4ParameterGenerator* m_data;  // non-owning
     D4Params m_params;

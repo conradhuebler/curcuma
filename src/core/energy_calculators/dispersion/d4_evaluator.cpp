@@ -322,6 +322,31 @@ double D4Evaluator::computeEnergyAndGradient(const std::vector<int>& atoms,
     return E_total;
 }
 
+// Stage T (Claude Generated, Nov 2026): run nblocks work blocks on up to m_threads pool workers. The block
+// decomposition is fixed by the caller (independent of the thread count); worker t takes the blocks
+// b = t, t + T, ... The caller reduces the per-block accumulators in block order.
+void D4Evaluator::runBlocks(int nblocks, const std::function<void(int)>& f)
+{
+    const int nthr = (m_threads > 1 && nblocks >= 2) ? std::min(m_threads, nblocks) : 1;
+    if (nthr <= 1) {
+        for (int b = 0; b < nblocks; ++b) f(b);
+        return;
+    }
+    if (!m_pool) {
+        m_pool = std::make_unique<CxxThreadPool>();
+        m_pool->setProgressBar(CxxThreadPool::ProgressBarType::None);
+    }
+    m_pool->setActiveThreadCount(nthr);
+    auto worker = [&](int tid, int T) {
+        for (int b = tid; b < nblocks; b += T) f(b);
+    };
+    std::vector<std::future<void>> fut;
+    fut.reserve(nthr - 1);
+    for (int t = 1; t < nthr; ++t) fut.push_back(m_pool->enqueue(worker, t, nthr));
+    worker(0, nthr);
+    for (auto& ff : fut) ff.get();
+}
+
 // Claude Generated (Nov 2026, WP-PERIODIC-XTB P1): periodic per-reference pair term, see the header.
 double D4Evaluator::computeEnergyAndGradientPeriodic(const std::vector<int>& atoms,
                                                      const Matrix& geometry_bohr,
@@ -358,8 +383,25 @@ double D4Evaluator::computeEnergyAndGradientPeriodic(const std::vector<int>& ato
         for (int k = 0; k < 3; ++k) xyz[3 * i + k] = geometry_bohr(i, k);
 
     const double s6 = m_params.s6, s8 = m_params.s8;
-    double E_total = 0.0;
-    for (int i = 0; i < natoms; ++i) {
+    // Stage T (Claude Generated, Nov 2026): fixed blocks of rows (i % NB == b), one accumulator set per block,
+    // reduced in block order -> the same numbers for every thread count (docs/WP-PERIODIC-XTB.md T).
+    const int NB = periodicBlockCount(natoms);
+    std::vector<double> E_b(NB, 0.0);
+    std::vector<Matrix> g_b;
+    std::vector<Vector> dcn_b, dq_b;
+    if (with_gradient) {
+        g_b.assign(NB, Matrix::Zero(natoms, 3));
+        dcn_b.assign(NB, Vector::Zero(natoms));
+        dq_b.assign(NB, Vector::Zero(natoms));
+    }
+    Matrix g_dummy;
+    Vector v_dummy;
+    runBlocks(NB, [&](int blk) {
+        double& Eb = E_b[blk];
+        Matrix& gb = with_gradient ? g_b[blk] : g_dummy;
+        Vector& dcnb = with_gradient ? dcn_b[blk] : v_dummy;
+        Vector& dqb = with_gradient ? dq_b[blk] : v_dummy;
+        for (int i = blk; i < natoms; i += NB) {
         for (int j = 0; j <= i; ++j) {
             const double rrij = 3.0 * sq_r4r2[i] * sq_r4r2[j];   // dftd4 rrij = 3 r4r2_i r4r2_j
             const double r0 = m_params.a1 * std::sqrt(rrij) + m_params.a2;
@@ -377,7 +419,7 @@ double D4Evaluator::computeEnergyAndGradientPeriodic(const std::vector<int>& ato
                     const double t8 = 1.0 / (r8 + r0_8);
                     const double edisp = s6 * t6 + s8 * rrij * t8;
                     // dE = -c6 edisp / 2 to i and (i != j) to j
-                    E_total += -c6g.c6 * edisp * (same ? 0.5 : 1.0);
+                    Eb += -c6g.c6 * edisp * (same ? 0.5 : 1.0);
                     if (!with_gradient) return;
                     const double d6 = -6.0 * r2 * r2 * t6 * t6;
                     const double d8 = -8.0 * r2 * r2 * r2 * t8 * t8;
@@ -385,18 +427,28 @@ double D4Evaluator::computeEnergyAndGradientPeriodic(const std::vector<int>& ato
                     if (!same) {
                         // d = x_i - (x_j + T); dftd4 dG = -c6 gdisp vec, gradient(iat) += dG, gradient(jat) -= dG
                         const double g = -c6g.c6 * gdisp;
-                        gradient_out(i, 0) += g * dx; gradient_out(j, 0) -= g * dx;
-                        gradient_out(i, 1) += g * dy; gradient_out(j, 1) -= g * dy;
-                        gradient_out(i, 2) += g * dz; gradient_out(j, 2) -= g * dz;
+                        gb(i, 0) += g * dx; gb(j, 0) -= g * dx;
+                        gb(i, 1) += g * dy; gb(j, 1) -= g * dy;
+                        gb(i, 2) += g * dz; gb(j, 2) -= g * dz;
                     }
                     // dftd4: dEdcn(iat) -= dc6dcn(iat,jat) edisp; (iat /= jat) dEdcn(jat) -= dc6dcn(jat,iat) edisp
-                    dEdCN_out(i) -= c6g.dc6dcni * edisp;
-                    if (!same) dEdCN_out(j) -= c6g.dc6dcnj * edisp;
+                    dcnb(i) -= c6g.dc6dcni * edisp;
+                    if (!same) dcnb(j) -= c6g.dc6dcnj * edisp;
                     if (do_dEdq) {
-                        dEdq_out(i) -= c6g.dc6dqi * edisp;
-                        if (!same) dEdq_out(j) -= c6g.dc6dqj * edisp;
+                        dqb(i) -= c6g.dc6dqi * edisp;
+                        if (!same) dqb(j) -= c6g.dc6dqj * edisp;
                     }
                 });
+        }
+        }
+    });
+    double E_total = 0.0;
+    for (int blk = 0; blk < NB; ++blk) {
+        E_total += E_b[blk];
+        if (with_gradient) {
+            gradient_out += g_b[blk];
+            dEdCN_out += dcn_b[blk];
+            dEdq_out += dq_b[blk];
         }
     }
     return E_total;
@@ -666,21 +718,50 @@ double D4Evaluator::computeATMPeriodic(const std::vector<int>& atoms,
 
     // Images of j and k relative to i within the cutoff: vij = (x_j + T) - x_i = -(d of forEachImage).
     struct Img { double v[3]; double r2; };
-    std::vector<Img> img_j, img_k;
-    auto collect = [&](int i, int j, std::vector<Img>& out) {
-        out.clear();
-        PBCUtils::forEachImage(images, &xyz[3 * i], &xyz[3 * j], i == j,
-            [&](double dx, double dy, double dz, double r2) { out.push_back({ { -dx, -dy, -dz }, r2 }); });
-    };
-
-    double E_atm = 0.0;
-    for (int iat = 0; iat < nat; ++iat) {
+    // Stage T (Claude Generated, Nov 2026): fixed row blocks with per-block accumulators, reduced in block order
+    // (thread-count independent result), per-block image buffers.
+    const int NB = periodicBlockCount(nat);
+    std::vector<double> E_b(NB, 0.0);
+    std::vector<Matrix> g_b;
+    std::vector<Vector> dcn_b;
+    if (with_gradient) {
+        g_b.assign(NB, Matrix::Zero(nat, 3));
+        dcn_b.assign(NB, Vector::Zero(nat));
+    }
+    Matrix g_dummy;
+    Vector v_dummy;
+    runBlocks(NB, [&](int blk) {
+        double& Eb = E_b[blk];
+        Matrix& gb = with_gradient ? g_b[blk] : g_dummy;
+        Vector& dcnb = with_gradient ? dcn_b[blk] : v_dummy;
+        std::vector<Img> img_j;
+        auto collect = [&](int i, int j, std::vector<Img>& out) {
+            out.clear();
+            PBCUtils::forEachImage(images, &xyz[3 * i], &xyz[3 * j], i == j,
+                [&](double dx, double dy, double dz, double r2) { out.push_back({ { -dx, -dy, -dz }, r2 }); });
+        };
+        std::vector<int> nb_idx;                 // atoms jat <= iat with at least one image within the cutoff
+        std::vector<std::vector<Img>> nb_img;    // their images relative to iat (ascending jat, as the plain loop)
+        for (int iat = blk; iat < nat; iat += NB) {
+        // Stage T: the images of every partner are collected once per iat (O(N) per atom) instead of once per
+        // (iat, jat, kat) triple; the triple loop then runs over the partners only. Same (iat, jat, kat) order and
+        // the same image order as the plain loop, so the sums are bitwise unchanged.
+        nb_idx.clear();
+        nb_img.clear();
         for (int jat = 0; jat <= iat; ++jat) {
-            const double c6ij = c6(jat, iat);
-            const double r0ij = a1 * std::sqrt(3.0 * r4r2[jat] * r4r2[iat]) + a2;
             collect(iat, jat, img_j);
             if (img_j.empty()) continue;
-            for (int kat = 0; kat <= jat; ++kat) {
+            nb_idx.push_back(jat);
+            nb_img.push_back(img_j);
+        }
+        for (size_t a = 0; a < nb_idx.size(); ++a) {
+            const int jat = nb_idx[a];
+            const std::vector<Img>& img_ja = nb_img[a];
+            const double c6ij = c6(jat, iat);
+            const double r0ij = a1 * std::sqrt(3.0 * r4r2[jat] * r4r2[iat]) + a2;
+            for (size_t b = 0; b <= a; ++b) {
+                const int kat = nb_idx[b];
+                const std::vector<Img>& img_k = nb_img[b];
                 const double c6ik = c6(kat, iat);
                 const double c6jk = c6(kat, jat);
                 const double c9 = -s9 * std::sqrt(std::abs(c6ij * c6ik * c6jk));
@@ -688,8 +769,7 @@ double D4Evaluator::computeATMPeriodic(const std::vector<int>& atoms,
                 const double r0jk = a1 * std::sqrt(3.0 * r4r2[kat] * r4r2[jat]) + a2;
                 const double r0 = r0ij * r0ik * r0jk;
                 const double triple = atm_triple_scale(iat, jat, kat);
-                collect(iat, kat, img_k);
-                for (const Img& J : img_j) {
+                for (const Img& J : img_ja) {
                     const double r2ij = J.r2;
                     for (const Img& K : img_k) {
                         const double r2ik = K.r2;
@@ -707,7 +787,7 @@ double D4Evaluator::computeATMPeriodic(const std::vector<int>& atoms,
                                          + 1.0 / r3;
                         const double rr = ang * fdmp;
                         const double dE = rr * c9 * triple;
-                        E_atm -= dE;
+                        Eb -= dE;
 
                         if (with_gradient) {
                             // The gradient carries the same triple_scale as the energy. dftd4's
@@ -733,17 +813,26 @@ double D4Evaluator::computeATMPeriodic(const std::vector<int>& atoms,
                             const double gjk = c9t * (-dang*fdmp + ang*dfdmp) / r2jk;
                             for (int c = 0; c < 3; ++c) {
                                 const double dGij = gij * J.v[c], dGik = gik * K.v[c], dGjk = gjk * vjk[c];
-                                gradient_out(iat, c) -= dGij + dGik;
-                                gradient_out(jat, c) += dGij - dGjk;
-                                gradient_out(kat, c) += dGik + dGjk;
+                                gb(iat, c) -= dGij + dGik;
+                                gb(jat, c) += dGij - dGjk;
+                                gb(kat, c) += dGik + dGjk;
                             }
-                            dEdCN_out(iat) -= dE * 0.5 * (dc6dcn(iat, jat) / c6ij + dc6dcn(iat, kat) / c6ik);
-                            dEdCN_out(jat) -= dE * 0.5 * (dc6dcn(jat, iat) / c6ij + dc6dcn(jat, kat) / c6jk);
-                            dEdCN_out(kat) -= dE * 0.5 * (dc6dcn(kat, iat) / c6ik + dc6dcn(kat, jat) / c6jk);
+                            dcnb(iat) -= dE * 0.5 * (dc6dcn(iat, jat) / c6ij + dc6dcn(iat, kat) / c6ik);
+                            dcnb(jat) -= dE * 0.5 * (dc6dcn(jat, iat) / c6ij + dc6dcn(jat, kat) / c6jk);
+                            dcnb(kat) -= dE * 0.5 * (dc6dcn(kat, iat) / c6ik + dc6dcn(kat, jat) / c6jk);
                         }
                     }
                 }
             }
+        }
+        }
+    });
+    double E_atm = 0.0;
+    for (int blk = 0; blk < NB; ++blk) {
+        E_atm += E_b[blk];
+        if (with_gradient) {
+            gradient_out += g_b[blk];
+            dEdCN_out += dcn_b[blk];
         }
     }
     return E_atm;
