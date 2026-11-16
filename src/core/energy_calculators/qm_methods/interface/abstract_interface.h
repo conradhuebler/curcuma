@@ -116,7 +116,6 @@ public:
 
     virtual bool UpdateMolecule()
     {
-        // std::cout << m_geometry << std::endl;
         return true;
     }
     virtual bool Error() { return false; };

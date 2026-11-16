@@ -33,6 +33,7 @@
 #endif
 #endif
 
+#include "src/tools/bmt_utils.h"
 #include "eeq_solver.h"
 #include "gfnff_par.h"  // EEQ parameters (chi_eeq, gam_eeq, alpha_eeq, cnf_eeq)
 #include "cn_calculator.h"  // Shared CN calculation utility
@@ -64,6 +65,7 @@
 #include <cstring>
 #if defined(__x86_64__) && defined(__SSE2__)
 #include <immintrin.h>  // _mm_stream_si64 / _mm_sfence (non-temporal stores in the Phase-2 matrix build)
+#include "src/core/output_symbols.h"
 #endif
 
 using namespace GFNFFParameters;  // Access to chi_eeq, gam_eeq, alpha_eeq, cnf_eeq
@@ -670,7 +672,7 @@ static inline int detectElementSpecificHybridization(int Z, double cn,
 
                         // DEBUG: Log angle sum for first few nitrogen atoms
                         if (atom_index < 5) {
-                            CurcumaLogger::info(fmt::format("  N atom {}: angle_sum = {:.2f}° (neighbors: {}, {}, {})",
+                            CurcumaLogger::info(fmt::format("  N atom {}: angle_sum = {:.2f}" SYM_DEG " (neighbors: {}, {}, {})",
                                               atom_index, angle_sum_deg,
                                               neighbors[0], neighbors[1], neighbors[2]));
                         }
@@ -680,11 +682,11 @@ static inline int detectElementSpecificHybridization(int Z, double cn,
                         if (angle_sum_deg > 355.0) {
                             hyb = 2; // sp2 (aromatic/planar)
                             if (atom_index < 5) {
-                                CurcumaLogger::info(fmt::format("    → sp2 (aromatic/planar)"));
+                                CurcumaLogger::info(fmt::format("    -> sp2 (aromatic/planar)"));
                             }
                         } else {
                             if (atom_index < 5) {
-                                CurcumaLogger::info(fmt::format("    → sp3 (tetrahedral)"));
+                                CurcumaLogger::info(fmt::format("    -> sp3 (tetrahedral)"));
                             }
                         }
                     }
@@ -1175,7 +1177,7 @@ Vector EEQSolver::calculateCharges(
     // Claude Generated (April 2026): skip_phase2 option — bypass Phase 2 entirely
     if (m_skip_phase2) {
         if (m_verbosity >= 1) {
-            CurcumaLogger::warn("EEQSolver: skip_phase2=true — bypassing Phase 2 refinement, using Phase 1 topology charges");
+            CurcumaLogger::warn("EEQSolver: skip_phase2=true - bypassing Phase 2 refinement, using Phase 1 topology charges");
         }
         return topology_charges;
     }
@@ -3796,7 +3798,7 @@ Vector EEQSolver::calculateFinalCharges(
     // Claude Generated (April 2026): skip_phase2 option — bypass Phase 2 entirely
     if (m_skip_phase2) {
         if (m_verbosity >= 1) {
-            CurcumaLogger::warn("EEQSolver: skip_phase2=true — bypassing Phase 2 refinement, using Phase 1 topology charges");
+            CurcumaLogger::warn("EEQSolver: skip_phase2=true - bypassing Phase 2 refinement, using Phase 1 topology charges");
         }
         return topology_charges;
     }
@@ -4220,7 +4222,6 @@ Vector EEQSolver::calculateFinalCharges(
         } else {
             // Claude Generated (Oct 2026): tiled build of the N x N Coulomb block.
             // The lower triangle is cut into TILE x TILE tiles (I >= J). Each element
-            // A_ij = erf(r_ij / sqrt(alpha_i + alpha_j)) / r_ij (far field: 1 / r_ij; cutoff: 0;
             // diagonal: gam_i + sqrt(2/pi) / sqrt(alpha_i)) is computed once, with the same
             // expression and inputs as the former row loop, into a thread-local tile buffer;
             // the tile is then stored row by row to A(i, J-block) and, transposed, to
@@ -4509,7 +4510,7 @@ Vector EEQSolver::calculateFinalCharges(
                 return m_last_successful_charges;
             }
             CurcumaLogger::warn(fmt::format(
-                "EEQ Phase 2: all solvers failed for N={}, no valid prior charges — using Phase 1 topology charges",
+                "EEQ Phase 2: all solvers failed for N={}, no valid prior charges - using Phase 1 topology charges",
                 natoms));
             // Claude Generated (Apr 2026): Remember that Phase 2 is garbage for this system.
             m_phase2_historically_implausible = true;
@@ -4543,7 +4544,7 @@ Vector EEQSolver::calculateFinalCharges(
                 CurcumaLogger::warn("EEQ Phase 2: invalid solution, using last successful charges as fallback");
                 return m_last_successful_charges;
             }
-            CurcumaLogger::warn("EEQ Phase 2: invalid solution, no valid prior charges — using Phase 1 topology charges");
+            CurcumaLogger::warn("EEQ Phase 2: invalid solution, no valid prior charges - using Phase 1 topology charges");
             // Claude Generated (Apr 2026): Remember that Phase 2 is garbage for this system.
             m_phase2_historically_implausible = true;
             m_phase2_implausible_natoms = natoms;
@@ -4650,7 +4651,7 @@ Vector EEQSolver::calculateFinalCharges(
                     atom["q_phase2"] = new_charges(i);
                     dump["atoms"].push_back(atom);
                 }
-                std::string fname = fmt::format("charges_dump_N{}.json", natoms);
+                std::string fname = BMTUtils::processOutputPath(fmt::format("charges_dump_N{}.json", natoms));
                 std::ofstream ofs(fname);
                 ofs << dump.dump(2) << std::endl;
                 CurcumaLogger::info(fmt::format("EEQ: Charge dump saved to {}", fname));

@@ -166,9 +166,6 @@ public:
     void GenerateD3Parameters();
     void GenerateD4Parameters();
 
-    // Claude Generated (December 19, 2025): UFF-D3 hybrid method
-    json GenerateUFFD3Parameters();
-
     // Claude Generated (December 21, 2025): D3-only dispersion method
     json GenerateD3OnlyParameters(const std::string& preset = "pbe0");
 
@@ -176,8 +173,6 @@ private:
     double UFFBondRestLength(int i, int j, double order);
     void AssignUffAtomTypes();
 
-    // Phase 3 LITE: GFN-FF parameter generation (Claude Generated Nov 2025)
-    void GenerateGFNFF();
 
     void setBonds(const TContainer& bonds);
     void setAngles();
@@ -193,7 +188,6 @@ private:
     json vdWs() const;
     json ESPs() const;
 
-    json writeUFF();
 
     Mol m_mol;
     int m_atoms;

@@ -30,7 +30,7 @@
 #include <iomanip>
 
 Casino::Casino(const json& controller, bool silent)
-    : CurcumaMethod(CasinoJson, controller, silent)
+    : CurcumaMethod(ParameterRegistry::getInstance().getDefaultJson("casino"), controller, silent)
     , m_energy_calculator(nullptr)
     , m_current_step(0)
     , m_total_moves(0)
@@ -41,7 +41,8 @@ Casino::Casino(const json& controller, bool silent)
     , m_scnp_parser(silent)
 {
     UpdateController(controller);
-    m_config = MergeJson(CasinoJson, controller);
+    m_config = MergeJson(ParameterRegistry::getInstance().getDefaultJson("casino"), controller);
+    m_checkpoint_file = Json2KeyWord<std::string>(m_config, "checkpoint_file");
 
     // Extract simulation parameters
     m_total_steps = Json2KeyWord<int>(m_config, "steps");
@@ -104,7 +105,7 @@ Casino::Casino(const json& controller, bool silent)
     if (!silent) {
         CurcumaLogger::info_fmt("Monte Carlo simulation initialized with {} steps", m_total_steps);
         CurcumaLogger::info_fmt("Temperature: {:.1f} K", m_temperature);
-        CurcumaLogger::info_fmt("Initial step size: {:.3f} Å", m_step_size);
+        CurcumaLogger::info_fmt("Initial step size: {:.3f} Angstrom", m_step_size);
         CurcumaLogger::info_fmt("Move strategy: {}", m_move_strategy);
         if (m_local_energy_updates) {
             CurcumaLogger::info("Local energy updates enabled for efficiency");
@@ -843,7 +844,7 @@ void Casino::updateStepSize()
     m_orientational_step_size = std::max(0.001, std::min(m_orientational_step_size, 0.5)); // Radians
 
     if (m_verbosity >= 3) {  // Debug level output
-        CurcumaLogger::info_fmt("Step {} | Acceptance: {:.3f} | Translation: {:.3f} Å | Orientation: {:.3f} rad",
+        CurcumaLogger::info_fmt("Step {} | Acceptance: {:.3f} | Translation: {:.3f} Angstrom | Orientation: {:.3f} rad",
                               m_current_step, current_acceptance, m_single_atom_step_size, m_orientational_step_size);
     }
 }
@@ -909,11 +910,11 @@ void Casino::printHelp() const
     std::cout << "- XYZ, VTF, MOL2, SDF, PDB (molecular structures)" << std::endl;
     std::cout << "- JSON (Curcuma native), SCNP/molsim (auto-converted)" << std::endl;
     std::cout << "\nSCNP Parameter Mapping (common parameters):" << std::endl;
-    std::cout << "  txtitle    → simulation_title  (descriptive title)" << std::endl;
-    std::cout << "  temp       → temperature        (temperature in K)" << std::endl;
-    std::cout << "  nstep1     → steps              (number of MC steps)" << std::endl;
-    std::cout << "  nfreq      → output_frequency   (trajectory output frequency)" << std::endl;
-    std::cout << "  seed       → seed               (random number seed)" << std::endl;
+    std::cout << "  txtitle    -> simulation_title  (descriptive title)" << std::endl;
+    std::cout << "  temp       -> temperature        (temperature in K)" << std::endl;
+    std::cout << "  nstep1     -> steps              (number of MC steps)" << std::endl;
+    std::cout << "  nfreq      -> output_frequency   (trajectory output frequency)" << std::endl;
+    std::cout << "  seed       -> seed               (random number seed)" << std::endl;
 }
 
 nlohmann::json Casino::WriteRestartInformation()
@@ -1126,119 +1127,6 @@ bool Casino::LoadRestartInformation()
     }
 }
 
-void Casino::performCheckpoint()
-{
-    try {
-        json restart_data = WriteRestartInformation();
-
-        std::string checkpoint_path = m_checkpoint_file;
-        if (m_max_checkpoints > 1) {
-            checkpoint_path = m_checkpoint_file + ".backup." + std::to_string(m_current_step);
-        }
-
-        std::ofstream checkpoint_file(checkpoint_path);
-        if (!checkpoint_file.is_open()) {
-            if (m_verbose) {
-                std::cout << "[CASINO] Warning: Cannot write checkpoint to " << checkpoint_path << std::endl;
-            }
-            return;
-        }
-
-        checkpoint_file << restart_data.dump(4) << std::endl;
-        checkpoint_file.close();
-
-        if (m_max_checkpoints > 1) {
-            std::filesystem::copy_file(checkpoint_path, m_checkpoint_file,
-                                       std::filesystem::copy_options::overwrite_existing);
-        }
-
-        if (m_verbose) {
-            std::cout << "[CASINO] Checkpoint saved at step " << m_current_step << std::endl;
-        }
-
-        if (m_max_checkpoints > 1) {
-            cleanupOldCheckpoints();
-        }
-    }
-    catch (const std::exception& e) {
-        if (m_verbose) {
-            std::cout << "[CASINO] Error during checkpointing: " << e.what() << std::endl;
-        }
-    }
-}
-
-void Casino::cleanupOldCheckpoints()
-{
-    try {
-        std::vector<std::string> checkpoint_files;
-        std::string base_name = m_checkpoint_file + ".backup.";
-
-        for (const auto& entry : std::filesystem::directory_iterator(std::filesystem::current_path())) {
-            if (entry.path().filename().string().find(base_name) == 0) {
-                checkpoint_files.push_back(entry.path().string());
-            }
-        }
-
-        if (checkpoint_files.size() > static_cast<size_t>(m_max_checkpoints)) {
-            std::sort(checkpoint_files.begin(), checkpoint_files.end());
-
-            size_t files_to_remove = checkpoint_files.size() - m_max_checkpoints;
-            for (size_t i = 0; i < files_to_remove; ++i) {
-                std::filesystem::remove(checkpoint_files[i]);
-                if (m_verbose) {
-                    std::cout << "[CASINO] Removed old checkpoint: " << checkpoint_files[i] << std::endl;
-                }
-            }
-        }
-    }
-    catch (const std::exception& e) {
-        if (m_verbose) {
-            std::cout << "[CASINO] Error cleaning old checkpoints: " << e.what() << std::endl;
-        }
-    }
-}
-
-bool Casino::detectAndLoadRestart()
-{
-    if (!m_auto_restart) {
-        return false;
-    }
-
-    std::vector<std::string> potential_restart_files = {
-        m_checkpoint_file,
-        m_checkpoint_file + ".backup." + std::to_string(m_current_step),
-        "casino_checkpoint.json",
-        "casino_checkpoint_latest.json"
-    };
-
-    for (const auto& file : potential_restart_files) {
-        if (validateRestartFile(file)) {
-            if (m_verbose) {
-                std::cout << "[CASINO] Found restart file: " << file << std::endl;
-            }
-
-            std::string backup_checkpoint_file = m_checkpoint_file;
-            m_checkpoint_file = file;
-            bool success = LoadRestartInformation();
-
-            if (success) {
-                m_checkpoint_file = backup_checkpoint_file;
-                return true;
-            } else {
-                m_checkpoint_file = backup_checkpoint_file;
-                if (m_verbose) {
-                    std::cout << "[CASINO] Failed to load restart from: " << file << std::endl;
-                }
-            }
-        }
-    }
-
-    if (m_verbose) {
-        std::cout << "[CASINO] No valid restart files found" << std::endl;
-    }
-    return false;
-}
-
 bool Casino::validateRestartFile(const std::string& filename)
 {
     try {
@@ -1277,56 +1165,6 @@ bool Casino::validateRestartFile(const std::string& filename)
     }
     catch (const std::exception&) {
         return false;
-    }
-}
-
-bool Casino::loadFromRestartFile(const std::string& filename)
-{
-    if (!validateRestartFile(filename)) {
-        return false;
-    }
-
-    std::string backup_checkpoint_file = m_checkpoint_file;
-    m_checkpoint_file = filename;
-    bool success = LoadRestartInformation();
-    m_checkpoint_file = backup_checkpoint_file;
-
-    return success;
-}
-
-void Casino::handleTrajectoryRestart()
-{
-    if (!m_append_trajectory) {
-        return;
-    }
-
-    try {
-        if (std::filesystem::exists(m_output_file)) {
-            if (m_verbose) {
-                std::cout << "[CASINO] Existing trajectory found: " << m_output_file << std::endl;
-            }
-
-            if (m_current_step == 0) {
-                if (m_verbose) {
-                    std::cout << "[CASINO] Starting from step 0, overwriting trajectory" << std::endl;
-                }
-                std::filesystem::remove(m_output_file);
-                return;
-            }
-
-            std::string backup_name = m_output_file + ".backup." + std::to_string(std::time(nullptr));
-            std::filesystem::copy_file(m_output_file, backup_name);
-
-            if (m_verbose) {
-                std::cout << "[CASINO] Trajectory backup created: " << backup_name << std::endl;
-                std::cout << "[CASINO] Continuing trajectory from step " << m_current_step << std::endl;
-            }
-        }
-    }
-    catch (const std::exception& e) {
-        if (m_verbose) {
-            std::cout << "[CASINO] Error handling trajectory restart: " << e.what() << std::endl;
-        }
     }
 }
 

@@ -124,17 +124,6 @@ int RMSDThread::execute()
             found_none = false;
             Molecule target_local(target);
             if (target_local.addPair(m_target.Atom(j))) {
-                /*
-                //const auto t = RMSDFunctions::getAligned(m_reference, GeometryTools::TranslateGeometry(target_local.getGeometry(), target_local.Centroid(true), Position{ 0, 0, 0 }), 1);
-                const auto t = RMSDFunctions::getAligned(m_reference, target_local.getGeometry(), 1);
-                double value = 0;
-                if(!m_topo)
-                    value = RMSDFunctions::getRMSD(m_reference, t);
-                else{
-                    Matrix target_topo = target_local.DistanceMatrix().second;
-                    value = (target_topo - m_reference_topology).cwiseAbs().sum();
-                }
-                */
                 double value = m_evaluator(target_local);
                 m_calculations++;
                 if (target_local.AtomCount() <= m_target.AtomCount()) {
@@ -363,7 +352,6 @@ void RMSDDriver::LoadFileOrderParameters()
             file.close();
 
             // Parse den Inhalt der Datei
-            // m_reorder_rules = Tools::ParseStringToVector(fileContent);
             std::vector<int> vector = Tools::String2Vector(fileContent);
 #ifdef CURCUMA_DEBUG
             if (m_verbosity >= 3)
@@ -401,7 +389,7 @@ void RMSDDriver::LoadAtomSelectionParameters()
         if (m_verbosity >= 2) {
             CurcumaLogger::info("Aligning molecules using specified atoms:");
             for (int i = 0; i < m_reference_atoms.size(); ++i) {
-                CurcumaLogger::info_fmt("  Reference atom {} ↔ Target atom {}",
+                CurcumaLogger::info_fmt("  Reference atom {} <-> Target atom {}",
                     m_reference_atoms[i], m_target_atoms[i]);
             }
         }
@@ -484,7 +472,7 @@ void RMSDDriver::setMatchingAtoms(const std::vector<int>& reference_atoms, const
 {
     m_reference_atoms = reference_atoms;
     m_target_atoms = target_atoms;
-#pragma message("TODO: remove notreorder in the future")
+// TODO: remove notreorder in the future
     m_noreorder = true;
 }
 
@@ -887,20 +875,13 @@ void RMSDDriver::CheckTopology()
         for (int j = 1; j <= 10; ++j) {
             target_geometry += step;
             tar.setGeometry(target_geometry);
-            // tar.appendXYZFile(std::to_string(index) + ".test.xyz");
             topo += CompareTopoMatrix(reference_matrix, tar.DistanceMatrix().second);
         }
-        // ref.appendXYZFile(std::to_string(index) + ".test.xyz");
 
 #ifdef CURCUMA_DEBUG
         if (m_verbosity >= 3)
             CurcumaLogger::debug(2, fmt::format("Topology check {}: RMSD={:.6f}, TopoInit={}, TopoStep={}", index, rmsd, topo0, topo));
 #endif
-        /*  if (topo < best_topo) {
-              best_topo = topo;
-              best_rule = rule;
-              best_index = index;
-          }*/
     }
     /*
     if(index > 1)
@@ -1042,9 +1023,7 @@ void RMSDDriver::ReorderMolecule()
     Eigen::Matrix3d rotation = R.first;
 
     auto initial_costmatrix = MakeCostMatrix(OptimiseRotation(rotation));
-    // std::cout << initial_costmatrix.first << std::endl;
     //  if (m_method == 4)
-    //      blob.first = 1;
     // Claude Generated - Clean enum-based strategy selection for ALL methods
     AlignmentMethod method = static_cast<AlignmentMethod>(m_method);
 
@@ -1238,7 +1217,6 @@ std::pair<double, Matrix> RMSDDriver::MakeCostMatrix(const std::vector<int>& ref
     Geometry cached_reference = m_reference_centered.getGeometry();
     Geometry cached_target = m_target_centered.getGeometry();
 
-    //  Eigen::MatrixXd tar = cached_target.transpose();
 
     Geometry rotated = cached_target * R;
 
@@ -1317,29 +1295,12 @@ std::vector<int> RMSDDriver::SolveCostMatrix(Matrix& distance)
     double difference = distance.cwiseAbs().sum();
     int iter = 0;
     for (iter = 0; iter < 10 && difference != 0; ++iter) {
-        bool use_c = false;
-        int dim = distance.rows();
-        if (use_c) {
-            double* table = new double[dim * dim];
-            for (int i = 0; i < dim; ++i) {
-                for (int j = 0; j < dim; ++j) {
-                    table[i * dim + j] = distance(i, j);
-                }
-            }
-            int* order = new int[dim];
-            assign(dim, table, order);
-            for (int i = 0; i < dim; ++i)
-                new_order[i] = order[i];
-            delete[] table;
-            delete[] order;
-        } else {
-            auto result = MunkressAssign(distance);
-            for (int i = 0; i < result.cols(); ++i) {
-                for (int j = 0; j < result.rows(); ++j) {
-                    if (result(i, j) == 1) {
-                        new_order[i] = j;
-                        break;
-                    }
+        auto result = MunkressAssign(distance);
+        for (int i = 0; i < result.cols(); ++i) {
+            for (int j = 0; j < result.rows(); ++j) {
+                if (result(i, j) == 1) {
+                    new_order[i] = j;
+                    break;
                 }
             }
         }
@@ -1434,6 +1395,29 @@ Geometry RMSDDriver::Gradient() const
         return g / (RMSD() * (wsum > 0 ? wsum : 1.0));
     }
     return (m_reference.getGeometry() - m_target.getGeometry()) / (RMSD() * m_target.getGeometry().rows());
+}
+
+Geometry RMSDDriver::GradientTimesRMSD() const
+{
+    // Claude Generated 2026: RMSD * d(RMSD)/dR without ever forming 1/RMSD.
+    //
+    // The division in Gradient() is exact but numerically hostile: at RMSD -> 0 it
+    // produces an arbitrarily large vector that the caller then multiplies by RMSD again.
+    // Measured consequence in the path collective variable: a window whose setpoint IS a
+    // reference frame sat next to the singularity and |grad s| reached 67.7 against 0.05
+    // for the other windows, which drove the restraint force to values that destroyed the
+    // molecule. Cancelling the factor analytically removes the failure mode entirely.
+    if (!m_rmsd_weights.empty()
+        && static_cast<int>(m_rmsd_weights.size()) == m_reference.getGeometry().rows()) {
+        Geometry g = m_reference.getGeometry() - m_target.getGeometry();
+        double wsum = 0.0;
+        for (double w : m_rmsd_weights)
+            wsum += w;
+        for (int i = 0; i < g.rows(); ++i)
+            g.row(i) *= m_rmsd_weights[i];
+        return g / (wsum > 0 ? wsum : 1.0);
+    }
+    return (m_reference.getGeometry() - m_target.getGeometry()) / m_target.getGeometry().rows();
 }
 
 // Claude Generated 2026 - The document main.cpp used to assemble, now where the

@@ -103,7 +103,7 @@ Every new method or capability added by AI must include in its CLAUDE.md:
 - **Complex Architecture Documentation**: Factory patterns, dispatchers, and multi-step workflows require comprehensive inline documentation following docs/ARCHITECTURE_DOCUMENTATION.md standards
 - **Finite-difference gate for energy methods (MANDATORY, Jul 2026)**: Any method that returns a gradient must pass an FD check of the **fully assembled** surface (`-dump_gradient` vs. central differences on `-sp` energies), not of its components. Component-level unit tests cannot see a unit or convention break at an integration seam: a Delta-ML gradient exact to 1e-11 in isolation was still 1.89x wrong once added to a base method reporting Eh/Bohr instead of Eh/Angstrom, and the error was invisible in every energy.
 - **BMT output compatibility (MANDATORY)**: Every capability that writes output files MUST route them through `outputPath()` (CurcumaMethod subclasses) or `BMTUtils::outputPath()` (standalone handlers). Hardcoded CWD paths are not permitted. Verify with `-no_bmt` (legacy) and default BMT mode before merging.
-- **No UTF symbols in terminal output**: Do not use Unicode box-drawing characters, emoji, arrows (->), checkmarks, or any non-ASCII symbols in fmt::print/std::cout output. Use plain ASCII only. Reason: breaks output in many terminal emulators, log files, and remote shells. CurcumaLogger colored output is exempt (uses ANSI codes, not Unicode).
+- **Output symbols**: no box-drawing characters, emoji or checkmarks in output. Letters with diacritics (u-umlaut, e-acute, A with ring) are plain UTF-8 and allowed. Symbols such as sigma, degree, plus-minus, Greek letters, superscripts and arrows go through the `SYM_*` macros of `src/core/output_symbols.h` (Unicode by default, ASCII with `-DCURCUMA_UNICODE_OUTPUT=OFF`); see [docs/OUTPUT_SYMBOLS.md](docs/OUTPUT_SYMBOLS.md). PARAM help texts follow the same rule: symbols as `SYM_*` macros between the string literals (`"Eh/Å" SYM_SQ`), which the parameter generator passes through.
 
 #### Parameter Definition Standards (MANDATORY for new capabilities)
 - **ALL new capabilities MUST use Parameter Registry System** - no static JSON configurations
@@ -166,6 +166,9 @@ numbers: [docs/KNOWN_ISSUES_ARCHIVE.md](docs/KNOWN_ISSUES_ARCHIVE.md).
 - **ConfSearch details** (dual-method, restart, seeding, reporting, ConfGen, release pass, `-seed_vary`, MTD screen): `docs/CONFSEARCH_*.md`, notes in [CONFSEARCH_DEVELOPMENT_NOTES.md](docs/CONFSEARCH_DEVELOPMENT_NOTES.md), measured levers and the Oct 2026 review in [CONFSEARCH_POTENTIAL_REVIEW.md](docs/CONFSEARCH_POTENTIAL_REVIEW.md). Long-form bullets: [CAPABILITY_NOTES_2026.md](docs/CAPABILITY_NOTES_2026.md).
 - **ConfSearch / ConfScan / RMSD**: ConfScan filter protocol for structures with topological symmetry (energy, rotational constants, Vietoris-Rips barcodes, permutation reuse): preprint [ChemRxiv 10.26434/chemrxiv.15009180/v1](https://chemrxiv.org/doi/full/10.26434/chemrxiv.15009180/v1); dual-method (`-md_method`, `-opt_method`), restartable (`-restart`), MTD screen: [CONFSEARCH_DUAL_METHOD.md](docs/CONFSEARCH_DUAL_METHOD.md), [CONFSEARCH_RESTART.md](docs/CONFSEARCH_RESTART.md), [CONFSEARCH_MTD_SCREEN.md](docs/CONFSEARCH_MTD_SCREEN.md).
 - **MD**: SimpleMD, temperature ramps/regions ([TEMPERATURE_RAMP.md](docs/TEMPERATURE_RAMP.md)), step-rejecting integrator `-adaptive_step` (off by default), PLUMED `-mtd`, isotropic NPT barostat for the periodic CPU GFN-FF `-barostat berendsen|crescale` ([NPT.md](docs/NPT.md)). **MD times recorded before `ef462fcf` (Sep 2026) must be multiplied by 1.9516.** Large-system MD: [MD_LARGE_SYSTEMS.md](docs/MD_LARGE_SYSTEMS.md).
+- **PLUMED**: biased runs before Oct 30, 2026 are invalid (bias sign reversed, kB instead of kB*T), see [PLUMED_HELP.md](docs/PLUMED_HELP.md).
+- **NEB-MD** (`-nebmd`, Oct 2026, AI-generated, machine-tested, validated on ethane/GFN-FF only): CI-NEB, string stage, constrained path-CV mean force, basin barrier + TST rate, `-nebmd.pipeline` - [docs/NEB_MD.md](docs/NEB_MD.md)
+- **MD output** (AI-generated, machine-tested; human production testing pending): per-step status file `<basename>.md.csv` ([MD_CSV_OUTPUT.md](docs/MD_CSV_OUTPUT.md)); PLUMED `FILE=` paths routed into `Basename.plumed_files/` ([PLUMED_HELP.md](docs/PLUMED_HELP.md)), `-no_plumed_redirect` disables.
 - **Counter-ions**: `-ionize` replaces solvent molecules by monovalent ions to a target charge (🤖, ⚙️ constructed water box only): [IONIZE.md](docs/IONIZE.md).
 - **Trajectory properties**: `-trajprops` streams a long trajectory frame by frame (R_g, hydrogen bonds, g(r), SASA, each with block error; 🤖, ⚙️; literature references unchecked, see TODO.md): [TRAJPROPS.md](docs/TRAJPROPS.md).
 - **GFN-FF hydrogen-bond energies per triple**: `GFNFF::setRecordHBondEnergies` / `hydrogenBondEnergies()`, CPU workspace (🤖, ⚙️) and CUDA/ROCm device workspace (🤖, compiled, never run on a GPU): [HBOND_ENERGIES.md](docs/HBOND_ENERGIES.md); opt-in log during MD `-hb_log_frequency`.
@@ -192,9 +195,9 @@ Older (2025) work: `AIChangelog.md` and git history.
 
 ##### **Method Resolution (New)**
 ```cpp
-// New MethodFactory system (replaces old SwitchMethod)
+// MethodFactory system (replaces old SwitchMethod)
 std::unique_ptr<ComputationalMethod> method = 
-    MethodFactory::createMethod("gfn2", config);
+    MethodFactory::create("gfn2", config);
 double energy = method->calculateEnergy();
 ```
 
@@ -203,12 +206,12 @@ double energy = method->calculateEnergy();
 - **xtb-gfn1/xtb-gfn2**: External GFN — TBLite (USE_TBLITE) → XTB binary (USE_XTB), like `xtb-gfnff`
 - **tblite-gfn1/tblite-gfn2**: TBLite explicitly (forces that backend)
 - **eht**: Native only (always available, no dependencies)
-- **pm3**: Native only (H, C, N, O supported, no dependencies)
+- **pm3**: Native only (30 elements, `getPM3Params()` in `nddo_params.cpp`; no dependencies)
 - **uff/qmdff**: ForceField wrapper with parameter generation
-- **gfnff**: Native C++ GFN-FF (always available, ✅ **COMPLETE**)
+- **gfnff**: Native C++ GFN-FF (always available; 🤖 AI-implemented, ⚙️ machine-tested, see the method table)
 - **xtb-gfnff**: Fortran/XTB GFN-FF — ExternalGFNFF (USE_GFNFF) → XTB (USE_XTB)
 
-#### Force Field System (`src/core/forcefield.h/cpp`)
+#### Force Field System (`src/core/energy_calculators/ff_methods/forcefield.h/cpp`)
 Modern force field engine with:
 - **Threading** via the single `FFWorkspace` engine (the legacy `ForceFieldThread` engine was removed Sep 2026)
 - **Universal parameter caching** - automatic save/load as JSON
@@ -218,12 +221,12 @@ Modern force field engine with:
 #### QM Interface (`src/core/energy_calculators/qm_methods/interface/abstract_interface.h`)
 Unified interface for all quantum mechanical methods:
 ```cpp
-class QMInterface {
-    virtual bool InitialiseMolecule() = 0;
-    virtual double Calculation(bool gradient, bool verbose) = 0;
-    virtual bool hasGradient() const = 0;
-    virtual Vector Charges() const = 0;
-    virtual Vector BondOrders() const = 0;
+class QMInterface {  // abstract_interface.h; only Calculation() is pure
+    virtual bool InitialiseMolecule(...);          // several overloads
+    virtual double Calculation(bool gradient = false) = 0;
+    virtual Vector Charges() const;                // default: empty
+    virtual Vector BondOrders() const;             // default: empty
+    virtual bool hasGradient() const;              // default: false
 };
 ```
 
@@ -368,8 +371,6 @@ before committing, or enable the hook with `git config core.hooksPath scripts/gi
 ## Standards
 
 ### Universal Logging System (`src/core/curcuma_logger.h/.cpp`)
-**✅ FULLY IMPLEMENTED** across all computational methods
-
 #### **Verbosity Levels**
 - **Level 0**: **Silent Mode** - Zero output (critical for optimization/MD)
 - **Level 1**: **Minimal Results** - Final energies, convergence status
@@ -399,11 +400,11 @@ before committing, or enable the hook with `git config core.hooksPath scripts/gi
 - **Educational**: Clear naming and comprehensive documentation
 - **Migration**: Replace scattered constants with centralized functions
 
-### JSON Controller System (`src/main.cpp`, CLI2Json)
+### JSON Controller System (`src/core/cli_parser.cpp`, CLI2Json; golden test `cli_parser_golden`)
 - **Consistent Parameter Passing**: All methods use `controller["methodname"]` subdocuments
-- **Examples**: `Hessian(controller["hessian"])`, `QMDFFFit(controller["qmdfffit"])`, `ModernOptimizer(..., controller["opt"])`
+- **Examples**: `ConfigManager("hessian", controller)` (`hessian.cpp`), `ConfigManager("docking", controller)` (`docking.cpp`)
 - **CLI Arguments**: Automatically split into controller subdocuments via `CLI2Json()`
-- **Structure**: `controller[keyword][parameter]` - e.g. `controller["opt"]["verbosity"]`, `controller["hessian"]["MaxIter"]`
+- **Structure**: `controller[keyword][parameter]` - e.g. `controller["opt"]["verbosity"]`, `controller["hessian"]["finite_diff_step"]`
 - **Global Parameters**: `verbosity`, `threads`, `method`, `gpu` are additionally duplicated at top-level
 - **Flat-flag auto-routing (2026)**: Any registered PARAM is reachable by its flat name (`-cn_cutoff_bohr 5.5` routes to `controller["gfnff"]["cn_cutoff_bohr"]` because the registry records ownership). Same-name in the active command's module wins; several owners and none matching the command: routed to the module of the selected `-method` if it owns the name (`MethodFactory::parameterScopeForMethod`, test `cli_sqm_15`), else warn and stay. Dotted form `-<module>.<param>` always works for disambiguation. Unregistered/legacy flags stay in the command module (unchanged).
 - **Sub-scopes must be forwarded explicitly (MANDATORY, Jul 2026)**: a capability that builds a narrower config for its `EnergyCalculator` must forward the method sub-scopes (`EnergyCalculator::isMethodScope()`, list in `MethodFactory::methodParameterScopes()`) and write settings the sub-method reads into the module sub-document, not only flat keys. Otherwise `-gfnff.*`/`-deltaml.*` work from `-sp` and vanish from `-md`, and `-activelearn` samples on the default `uff`. The CLI auto-routing does not exist for code.
@@ -420,7 +421,7 @@ Learned during the Jul - Sep 2026 GFN-FF / xTB validation (evidence per item in
 - **Characterise a set by every structure, never a sample** (#23, #24).
 - **Caches fake results.** `gmtkn55_compare.py` reuses `_run/energies.json` (drop the keys or `--recompute`); GFN-FF writes `<basename>.topo.json` next to the input, so delete it before re-measuring and use a fresh directory per structure when file names repeat (#11, #28). Cache keys must carry every input the content depends on (#21c).
 - **Check that the build happened.** Test `make`'s exit status, not a grep for "error"; a changed default argument in a header may not trigger a rebuild (#15, #30).
-- **Hardcoded fallbacks are the defaults** for `GFNFF::GFNFF(const json&)`: changing a PARAM default in `gfnff.h` alone has no runtime effect (#31).
+- **Hardcoded fallbacks are the defaults** for `GFNFF::GFNFF(const json&)`: changing a PARAM default in `gfnff.h` alone has no runtime effect (#31). Test `gfnff_param_fallbacks` fails when a literal fallback and its PARAM default differ.
 - **Element-indexed tables: check the length first.** Three 15-entry-short tables were undefined behaviour for Z >= 72 (#22).
 - **No numerical path may depend on the print level** (#38) or on atom order (#34); per-structure benchmarks cannot see reused-calculator bugs (#32).
 - **Gradients**: validate against a central finite difference of curcuma's own energy with Angstrom displacements (`gradient_unit_contract`); the `getGradient()` contract is Eh/Angstrom (#28). A converged SCF criterion must cover everything the mixer mixes (#29).

@@ -180,7 +180,6 @@ triples PersistentDiagram::generateTriples()
                     }
 
                     if (std::abs(distance[i] - b.second) < 1e-6 && std::find(indices.begin(), indices.end(), i) == indices.end()) {
-                        //    std::cout << i << " " << distance[i] << " " << m_en_scaling[i] << " " << counter++ << std::endl;
                         indices.push_back(i);
                         triple t;
                         t.start = b.first;

@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include <stdexcept>
 #include <string>
 #include <algorithm>
 #include <vector>
@@ -26,6 +27,17 @@
 #include "json.hpp"
 
 using json = nlohmann::json;
+
+/// Claude Generated (Nov 2026): a key exists but its JSON value cannot be converted to the
+/// requested C++ type (a bool stored as 0.0, a number given as text). get<T>(key) throws it;
+/// get<T>(key, default) reports it once and returns the default.
+class ConfigTypeError : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+
+/// Warns once per message through CurcumaLogger (defined in config_manager.cpp).
+void reportConfigTypeError(const std::string& message);
 
 /*! \brief Modern configuration manager for Curcuma capabilities - Claude Generated 2025
  *
@@ -225,12 +237,22 @@ T ConfigManager::get(const std::string& key) const
     }
 
     // Single-Module mode (backward compatible)
+    json value;
     try {
-        json value = findKey(key);
-        return value.get<T>();
+        value = findKey(key);
     } catch (...) {
         throw std::runtime_error("ConfigManager: Parameter '" + key +
                                 "' not found in module '" + m_module + "'");
+    }
+    if (value.is_null()) {
+        throw std::runtime_error("ConfigManager: Parameter '" + key +
+                                "' not found in module '" + m_module + "'");
+    }
+    try {
+        return value.get<T>();
+    } catch (const json::exception& e) {
+        throw ConfigTypeError("ConfigManager: Parameter '" + key + "' of module '" + m_module + "' is "
+                              + value.dump() + " (" + value.type_name() + "), which cannot be read as the requested type");
     }
 }
 
@@ -256,7 +278,13 @@ T ConfigManager::getFromModule(const std::string& module, const std::string& key
                       config_key_lower.begin(), ::tolower);
 
         if (key_lower == config_key_lower) {
-            return item.value().get<T>();
+            try {
+                return item.value().get<T>();
+            } catch (const json::exception&) {
+                throw ConfigTypeError("ConfigManager: Parameter '" + key + "' of module '" + module + "' is "
+                                      + item.value().dump() + " (" + item.value().type_name()
+                                      + "), which cannot be read as the requested type");
+            }
         }
     }
 
@@ -269,6 +297,9 @@ T ConfigManager::get(const std::string& key, T default_value) const
 {
     try {
         return get<T>(key);
+    } catch (const ConfigTypeError& e) {
+        reportConfigTypeError(e.what());
+        return default_value;
     } catch (...) {
         return default_value;
     }

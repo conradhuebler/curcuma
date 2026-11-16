@@ -36,7 +36,6 @@ int main(int argc, char** argv)
     tblite_set_context_logger(ctx, NULL, NULL);
     tblite_set_context_color(ctx, 5);
     auto calc = tblite_new_gfn2_calculator(ctx, mol);
-    // cont = tblite_new_cpcm_solvation_solvent(ctx, mol, calc, "ethanol");
     auto res = tblite_new_result();
 
     tblite_get_singlepoint(ctx, mol, calc, res);

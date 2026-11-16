@@ -77,9 +77,7 @@ struct LevMarNEBFunctor : LevMarNEBBaseFunctor<double> {
         Molecule second = m_second;
         second.GetFragments();
 
-        //   std::cout << position << std::endl;
 
-        //  std::cout << std::endl;
 
         for (std::size_t i = 0; i < m_fragments_a; ++i) {
             Geometry geom = first.getGeometryByFragment(i + 1);
@@ -88,7 +86,6 @@ struct LevMarNEBFunctor : LevMarNEBBaseFunctor<double> {
                                             GeometryTools::Centroid(geom),
                                             Position{ position(3 * i), position(3 * i + 1), position(3 * i + 2) }),
                 i + 1);
-            //std::cout << Position{ position(3 * i), position(3 * i + 1), position(3 * i + 2) }.transpose() << std::endl;
         }
 
         for (std::size_t i = 0; i < m_fragments_b; ++i) {
@@ -98,7 +95,6 @@ struct LevMarNEBFunctor : LevMarNEBBaseFunctor<double> {
                                              GeometryTools::Centroid(geom),
                                              Position{ position(3 * (i + m_fragments_a)), position(3 * (i + m_fragments_a) + 1), position(3 * (i + m_fragments_a) + 2) }),
                 i + 1);
-            //std::cout << Position{ position(3 * (i + m_fragments_a)), position(3 * (i + m_fragments_a) + 1), position(3 * (i + m_fragments_a) + 2) }.transpose() << std::endl;
         }
         double scaling = 1.5;
         double LJ_energy = 0;
@@ -199,7 +195,6 @@ std::pair<Molecule, Molecule> OptimiseAtoms(const Molecule& first, const Molecul
 
     int MaxIter = 3000;
     Vector old_param = parameter;
-    // std::cout << parameter.transpose() << std::endl;
     for (; iter < MaxIter /*&& ((qAbs(error_0 - error_2) > ErrorConvergence) || norm > DeltaParameter)*/; ++iter) {
         status = lm.minimizeOneStep(parameter);
 
@@ -208,8 +203,6 @@ std::pair<Molecule, Molecule> OptimiseAtoms(const Molecule& first, const Molecul
 
         old_param = parameter;
     }
-    // std::cout << parameter.transpose() << std::endl;
-    // std::cout << "took " << iter << " optimisation steps." << std::endl;
 
     for (std::size_t i = 0; i < fragments_a; ++i) {
         Geometry geom = f.getGeometryByFragment(i + 1);
@@ -218,7 +211,6 @@ std::pair<Molecule, Molecule> OptimiseAtoms(const Molecule& first, const Molecul
                                     GeometryTools::Centroid(geom),
                                     Position{ parameter(3 * i), parameter(3 * i + 1), parameter(3 * i + 2) }),
             i + 1);
-        //  std::cout << Position{ parameter(3 * i), parameter(3 * i + 1), parameter(3 * i + 2) }.transpose() << std::endl;
     }
 
     for (std::size_t i = 0; i < fragments_b; ++i) {
@@ -228,7 +220,6 @@ std::pair<Molecule, Molecule> OptimiseAtoms(const Molecule& first, const Molecul
                                     GeometryTools::Centroid(geom),
                                     Position{ parameter(3 * (i + fragments_a)), parameter(3 * (i + fragments_a) + 1), parameter(3 * (i + fragments_a) + 2) }),
             i + 1);
-        // std::cout << Position{ parameter(3 * (i + fragments_a)), parameter(3 * (i + fragments_a) + 1), parameter(3 * (i + fragments_a) + 2) }.transpose() << std::endl;
     }
     return std::pair<Molecule, Molecule>(f, s);
 }

@@ -98,17 +98,6 @@ struct MyFCFunctor : FCFunctor<double> {
 
         index = 0;
         double diff = 0;
-        /*
-                                for (int i = 0; i < m_hessian.rows(); ++i) {
-                                    for (int j = i; j < m_hessian.cols(); ++j) {
-                                        if (index >= fvec.size())
-                                            break;
-                                        fvec(index) = (m_hessian(j, i) - (hessian(j, i) + m_const_hessian(j, i))) + (m_hessian(i, j) - (hessian(i, j) + m_const_hessian(i, j)));
-                                        diff += (m_hessian(i, j) - (hessian(i, j) + m_const_hessian(i, j)));
-                                        index++;
-                                    }
-                                }
-                   */
         for (auto pair : pairs) {
             int i = pair.first;
             int j = pair.second;
@@ -125,17 +114,9 @@ struct MyFCFunctor : FCFunctor<double> {
             }
                 }
 
-                // std::cout << index << " " << fvec.size()<< " " << diff << " ";
                 return 0;
     }
 
-    void Controller(const json& controller)
-    {
-        // Claude Generated: Replace static HessianJson with ParameterRegistry
-        json hessian_defaults = ParameterRegistry::getInstance().getDefaultJson("hessian");
-        m_controller = MergeJson(hessian_defaults, m_controller);
-        m_controller["method"] = "uff";
-    }
 
     int no_parameter;
     int no_points;
@@ -191,7 +172,6 @@ inline Vector OptimiseFC(const Molecule& molecule, const Matrix& hessian, const 
         std::cout << "Norm " << (old_param - parameter).norm() << std::endl;
         if ((old_param - parameter).norm() < 1e-12)
             break;
-        // std::cout << parameter.transpose() << std::endl;
         old_param = parameter;
     }
 

@@ -476,7 +476,7 @@ Recommended order (easiest → most complex):
 
 ## Getting Help
 
-- Technical details: [PARAMETER_SYSTEM.md](PARAMETER_SYSTEM.md)
+- Technical details: [PARAMETER_SYSTEM.md](../PARAMETER_SYSTEM.md)
 - Reference implementation: `src/capabilities/analysis.h`
 - Parser code: `scripts/param_parser/main.cpp`
 - Registry implementation: `src/core/parameter_registry.{h,cpp}`

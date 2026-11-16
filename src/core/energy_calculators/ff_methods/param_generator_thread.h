@@ -70,8 +70,6 @@ public:
     /// Get the JSON result after execution completes
     const json& getResult() const { return m_result; }
 
-    /// Get phase name for timing output
-    const std::string& getPhaseName() const { return m_phase_name; }
 
 private:
     std::string m_phase_name;

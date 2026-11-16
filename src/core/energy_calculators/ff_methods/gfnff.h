@@ -445,6 +445,13 @@ PARAM(rocm_dc6dcn_tables, Bool, false, "ROCm: per-pair C6 and dC6/dCN from per-a
 PARAM(rocm_device_schur, Bool, true, "ROCm: do the Schur step of the dense EEQ solve on the device, so only nfrag + nfrag^2 numbers reach the host. false does it on the host.", "GPU", {})
 PARAM(rocm_fixed_point, Bool, true, "ROCm: sum forces, dE/dCN, energies and CN in 64-bit fixed point, so repeated runs are bitwise identical. false uses FP64 atomics.", "GPU", {})
 PARAM(eeq_rocm_cpu_fragment_threshold, Int, 16, "ROCm: from this fragment count on, a stalled device EEQ falls back to the CPU; giving the key explicitly forces the exact CPU EEQ there. 0 = always the device.", "GPU", {})
+PARAM(dispersion, Bool, true, "Include the D4 dispersion term (GFN-FF uses D4, Spicher & Grimme 2020). false switches it off.", "Terms", {})
+PARAM(hbond, Bool, true, "Include the hydrogen-bond term. false switches it off.", "Terms", {})
+PARAM(repulsion, Bool, true, "Include the bonded and non-bonded repulsion term. false switches it off.", "Terms", {})
+PARAM(coulomb, Bool, true, "Include the Coulomb term. false switches it off.", "Terms", {})
+PARAM(use_simplified_pbo, Bool, false, "Use the simplified pi bond order instead of the full Hueckel treatment.", "Topology", {})
+PARAM(cache_topology, Bool, true, "Store the Phase-1 topology in <input>.topo.json and reuse it. false recomputes it every run.", "Topology", {})
+PARAM(print_timing, Bool, true, "Print the initialisation timing at verbosity >= 1.", "Output", {})
 END_PARAMETER_DEFINITION
 
 class GFNFF {
@@ -629,17 +636,6 @@ public:
         // Atomic charges (EEQ)
         Eigen::VectorXd charges;  ///< Phase-2 EEQ charges
 
-        /**
-         * @brief Export to JSON for serialization
-         * @return JSON object with all energy components
-         */
-        json toJSON() const;
-
-        /**
-         * @brief Import from JSON for restart
-         * @param j JSON object with results
-         */
-        void fromJSON(const json& j);
     };
 
     /**
@@ -1025,12 +1021,6 @@ public:
         std::vector<double> cnf;                  ///< [N] cnf_eeq per atom
     };
     EEQGPUParams prepareEEQParametersForGPU(const Vector& cn) const;
-
-    /**
-     * @brief Get EEQ distance cutoff from parameters (Bohr).
-     * Used by GPU path to match CPU matrix conditioning behavior.
-     */
-    double getEEQDistanceCutoff() const;
 
     /**
      * @brief Forward gfnff-level solver parameters to eeq_solver sub-config.
@@ -1550,10 +1540,6 @@ public:
     // Claude Generated (March 2026): Phase 2 GPU dc6dcn — expose D4 internals
     D4ParameterGenerator* getD4Generator() { return m_d4_generator.get(); }
 
-    // Claude Generated (Apr 2026): P1a — Delegate CN-change threshold check to D4ParameterGenerator
-    bool canSkipD4GaussianWeightsUpdate(const std::vector<double>& cn) const;
-    void recordD4CNValues(const std::vector<double>& cn);
-
     /**
      * @brief Set external CN values (from GPU computation).
      * Claude Generated (March 2026): Phase 1 GPU CN migration.
@@ -1699,29 +1685,6 @@ private:
      * @return JSON array of torsion parameters
      */
     json generateGFNFFTorsions() const;
-
-    /**
-     * @brief Generate GFN-FF triple bond torsion (sTors_eg) parameters
-     *
-     * Claude Generated (March 2026): specialized torsion for sp-sp systems
-     * Reference: external/gfnff/src/gfnff_ini.f90:2308 (specialTorsList)
-     *
-     * @return JSON array of triple bond torsion parameters
-     */
-    json generateGFNFFSTorsions() const;
-
-    /**
-     * @brief Generate GFN-FF inversion/out-of-plane parameters
-     *
-     * Claude Generated (2025): Inversion term implementation
-     * Reference: external/gfnff/src/gfnff_helpers.f90:427-510 (omega, domegadr)
-     *
-     * Implements out-of-plane bending potentials for sp² centers (planarity constraints).
-     * See docs/theory/GFNFF_INVERSION_THEORY.md for scientific background.
-     *
-     * @return JSON array of inversion parameters
-     */
-    json generateGFNFFInversions() const;
 
     // =================================================================================
     // NATIVE STRUCT GENERATORS (March 2026 — Phase 2 architecture cleanup)
@@ -1891,21 +1854,7 @@ private:
     double estimateXBStrength(int A, int X, int B,
                                double acidity_X, double q_X, double q_B) const;
 
-    /// Generate BATM triple parameters as native GFNFFBatmTriple structs
-    std::vector<GFNFFBatmTriple> generateBatmTriplesNative(const TopologyInfo& topo_info) const;
-
     // Phase 4.2: GFN-FF pairwise non-bonded parameter generation (Claude Generated 2025)
-
-    /**
-     * @brief Extract D3/D4 configuration from main GFN-FF config
-     * @param method Dispersion method: "d3" or "d4"
-     * @return ConfigManager for D3/D4 parameter generator
-     *
-     * Claude Generated (December 2025): Configuration helper
-     * Extracts relevant parameters (s6, s8, a1, a2) from main config
-     * and creates ConfigManager for D3ParameterGenerator or D4ParameterGenerator.
-     */
-    ConfigManager extractDispersionConfig(const std::string& method) const;
 
     /**
      * @brief Get covalent radius for element
@@ -2116,29 +2065,6 @@ private:
     double calculateDihedralAngle(int i, int j, int k, int l) const;
 
     /**
-     * @brief Calculate derivatives of dihedral angle w.r.t. atomic positions
-     *
-     * Claude Generated (2025): Analytical gradient for torsions
-     * Reference: external/gfnff/src/gfnff_engrad.F90 (dphidr subroutine)
-     *
-     * Computes ∂φ/∂x_i, ∂φ/∂x_j, ∂φ/∂x_k, ∂φ/∂x_l for chain rule in gradient.
-     * Critical for analytical force calculation in molecular dynamics.
-     *
-     * @param i Index of first atom
-     * @param j Index of second atom
-     * @param k Index of third atom
-     * @param l Index of fourth atom
-     * @param phi Current dihedral angle (from calculateDihedralAngle)
-     * @param dda Output: ∂φ/∂x_i (3D vector)
-     * @param ddb Output: ∂φ/∂x_j (3D vector)
-     * @param ddc Output: ∂φ/∂x_k (3D vector)
-     * @param ddd Output: ∂φ/∂x_l (3D vector)
-     */
-    void calculateDihedralGradient(int i, int j, int k, int l, double phi,
-                                     Vector& dda, Vector& ddb,
-                                     Vector& ddc, Vector& ddd) const;
-
-    /**
      * @brief Calculate damping function for torsion potential
      *
      * Claude Generated (2025): Distance-dependent damping
@@ -2187,49 +2113,6 @@ private:
      * @return Out-of-plane angle in radians [-π/2, π/2]
      */
     double calculateOutOfPlaneAngle(int i, int j, int k, int l) const;
-
-    /**
-     * @brief Calculate derivatives of out-of-plane angle w.r.t. atomic positions
-     *
-     * Claude Generated (2025): Analytical gradient for inversions
-     * Reference: external/gfnff/src/gfnff_helpers.f90:450-510 (domegadr subroutine)
-     *
-     * Computes ∂ω/∂x_i, ∂ω/∂x_j, ∂ω/∂x_k, ∂ω/∂x_l for chain rule in gradient.
-     * Critical for analytical force calculation in geometry optimization.
-     *
-     * @param i Index of central atom
-     * @param j Index of first plane atom
-     * @param k Index of second plane atom
-     * @param l Index of third plane atom
-     * @param omega Current out-of-plane angle (from calculateOutOfPlaneAngle)
-     * @param grad_i Output: ∂ω/∂x_i (3D vector)
-     * @param grad_j Output: ∂ω/∂x_j (3D vector)
-     * @param grad_k Output: ∂ω/∂x_k (3D vector)
-     * @param grad_l Output: ∂ω/∂x_l (3D vector)
-     */
-    void calculateInversionGradient(int i, int j, int k, int l, double omega,
-                                     Vector& grad_i, Vector& grad_j,
-                                     Vector& grad_k, Vector& grad_l) const;
-
-    /**
-     * @brief Get GFN-FF inversion parameters for atom quartet
-     *
-     * Claude Generated (2025): Topology-aware inversion parameter assignment
-     *
-     * Assigns inversion parameters based on:
-     * - Hybridization of central atom i (sp² → needs inversion)
-     * - Element type (C, N, O, B different barriers)
-     * - Pi-system membership (aromatics → higher barriers)
-     *
-     * @param z_i Atomic number of central atom (out-of-plane)
-     * @param z_j Atomic number of plane atom j
-     * @param z_k Atomic number of plane atom k
-     * @param z_l Atomic number of plane atom l
-     * @param hyb_i Hybridization of central atom i (1=sp, 2=sp², 3=sp³)
-     * @return GFN-FF inversion parameters
-     */
-    GFNFFInversionParams getGFNFFInversionParameters(int z_i, int z_j, int z_k, int z_l,
-                                                      int hyb_i) const;
 
     // =================================================================================
     // Advanced GFN-FF Parameter Generation (for future implementation)
@@ -2559,38 +2442,9 @@ private:
     // Advanced parameter structures (EEQParameters already defined above at line 298)
     // TopologyInfo now defined at line 51 (public section) for use in function signatures
 
-    /**
-     * @brief Get EEQ parameters for specific atom with environment corrections
-     * @param atom_idx Atom index
-     * @param topo_info Topology information
-     * @return EEQ parameters for this atom
-     */
-    EEQParameters getEEQParameters(int atom_idx, const TopologyInfo& topo_info) const;
-
     // =================================================================================
     // Two-Phase EEQ System Methods (Session 5, December 2025)
     // =================================================================================
-
-    /**
-     * @brief Phase 1: Calculate topology charges using base EEQ parameters
-     *
-     * Solves EEQ using ONLY base parameters without any corrections:
-     * - chi = -chi_base (NO dxi corrections)
-     * - gamma = gam_base (NO dgam corrections)
-     * - alpha = alp_base^2 (NO dalpha corrections)
-     *
-     * These topology charges (qa) are then used in Phase 2 to calculate
-     * the correction terms (dxi, dgam, dalpha).
-     *
-     * @param cn Coordination numbers
-     * @param hyb Hybridization states
-     * @param rings Ring information
-     * @return Topology charges (qa) from base EEQ
-     *
-     * Reference: Fortran gfnff_ini.f90:405-421
-     */
-    Vector calculateTopologyCharges(const Vector& cn, const std::vector<int>& hyb,
-                                     const std::vector<int>& rings) const;
 
     /**
      * @brief Calculate dxi (electronegativity) corrections
@@ -2630,23 +2484,6 @@ private:
      * Reference: Fortran gfnff_ini.f90:694-707
      */
     Vector calculateDalpha(const Vector& qa_charges) const;
-
-    /**
-     * @brief Phase 2: Calculate final charges with all corrections applied
-     *
-     * Solves second EEQ with corrected parameters:
-     * - chi = -chi_base + dxi [+ amide correction]
-     * - gamma = gam_base + dgam
-     * - alpha = (alp_base + dalpha)^2
-     *
-     * Also applies special amide hydrogen correction: chi -= 0.02
-     *
-     * @param topo Topology information with all corrections calculated
-     * @return Final EEQ charges (q) to be used for force field calculations
-     *
-     * Reference: Fortran gfnff_ini.f90:694-707
-     */
-    Vector calculateFinalCharges(const TopologyInfo& topo) const;
 
 public:
     // =================================================================================
@@ -2833,30 +2670,6 @@ public:
     // =================================================================================
 
     /**
-     * @brief Phase 1: Calculate topology-aware base charges (qa) via EEQ
-     *
-     * The two-phase EEQ system separates charge calculation into:
-     * 1. TOPOLOGY PHASE: Base charges from atomic properties (electronegativity, hardness)
-     *    using coordination-dependent parameters
-     * 2. CORRECTION PHASE: Apply dxi, dgam, dalpha corrections for refined accuracy
-     *
-     * Reference: angewChem 2020, GFN-FF parameter set
-     *   - chi[z]: Electronegativity for element z
-     *   - gam[z]: Chemical hardness for element z
-     *   - alp[z]: Damping parameter for erf(γ*r)/r Coulomb
-     *   - cnf[z]: Coordination number correction factor
-     *
-     * Extended Hückel Theory (EHT) approximation:
-     *   qa_i = -χ_i - J_ii + Σ_j(1/(2*J_ij) - 1/(2*r_ij))
-     *
-     * @param topo_info TopologyInfo structure with coordination numbers, hybridization
-     * @return true if Phase 1 charges calculated successfully
-     *
-     * Output written to: topo_info.topology_charges (qa in Hartree)
-     */
-    bool calculateTopologyCharges(TopologyInfo& topo_info) const;
-
-    /**
      * @brief Calculate dxi (electronegativity) corrections for Phase 2
      *
      * dxi corrects electronegativity based on:
@@ -2955,30 +2768,6 @@ public:
     }
 
     /**
-     * @brief Phase 2: Calculate final refined charges by solving corrected EEQ
-     *
-     * Iteratively solves EEQ with corrections:
-     *   qa_i_final = qa_i + dxi_i + (dgam correction)
-     *   Then re-solve EEQ with modified parameters
-     *
-     * The correction application is:
-     * 1. Modify electronegativity: χ'_i = χ_i + dxi_i
-     * 2. Recalculate Coulomb matrix with corrected polarizabilities: α'_i = α_i + dalpha_i
-     * 3. Re-solve the linear EEQ system to consistency
-     *
-     * Convergence: Typically 1-2 iterations for <0.01 e change per atom
-     *
-     * @param topo_info TopologyInfo with topology_charges, dxi, dalpha corrections
-     * @param max_iterations Maximum iterations for EEQ convergence (default: 10)
-     * @param convergence_threshold Threshold for charge change (default: 1e-5 Hartree)
-     * @return true if Phase 2 refinement successful
-     *
-     * Output written to: topo_info.eeq_charges (final qa in Hartree)
-     */
-    bool calculateFinalCharges(TopologyInfo& topo_info, int max_iterations = 10,
-                               double convergence_threshold = 1e-5) const;
-
-    /**
      * @brief Set external charges (for testing/validation)
      * @param charges Atomic partial charges to use instead of EEQ-calculated charges
      *
@@ -3050,7 +2839,7 @@ private:
     GeoGradMatrix m_gradient; ///< Gradient in Hartree/Bohr — WP-G: RowMajor
     std::vector<int> m_atoms; ///< Atomic numbers (Z values)
     int m_charge = 0; ///< Total molecular charge
-    int m_spin = 0; ///< Spin multiplicity
+    int m_spin = 0; ///< Unpaired electrons (multiplicity - 1), as Molecule::Spin()
 
     // GFN-FF specific
     json m_parameters; ///< GFN-FF parameters
@@ -3522,7 +3311,7 @@ private:
  * - generateTopologyAwareBonds()     → JSON["bonds"]
  * - generateTopologyAwareAngles()    → JSON["angles"]
  * - generateGFNFFTorsions()          → JSON["dihedrals"]
- * - generateGFNFFInversions()        → JSON["inversions"]
+ * - generateInversionsNative()       → std::vector<Inversion>
  * - generateGFNFFDispersionPairs()   → JSON["gfnff_dispersions"]
  * - generateGFNFFRepulsionPairs()    → JSON["gfnff_repulsions"]
  * - generateGFNFFCoulombPairs()      → JSON["gfnff_coulombs"]

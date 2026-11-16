@@ -170,17 +170,6 @@ inline bool isDouble(const std::string& input)
         isD = false;
     }
     return isD;
-    /*
-    const char* delim = ".";
-    StringList list = SplitString(input, delim);
-    if (list.size() != 2)
-        return false;
-
-    bool left = isInt(list[0]);
-    bool right = isInt(list[1]);
-    return left && right;
-    */
-    // return std::all_of(input.begin(), input.end(), ::isdigit);
 }
 
 inline bool StringContains(const std::string& string, const std::string& search)
@@ -352,8 +341,6 @@ inline std::string Geometry2String(const Geometry& matrix)
     for (int j = 0; j < matrix.rows(); ++j)
         for (int i = 0; i < matrix.cols(); ++i) 
             result += std::to_string(matrix(j,i)) + "|";
-    //    }
-    //    result += "|";
 
     result.pop_back();
     result.pop_back();
@@ -382,7 +369,7 @@ inline std::string Matrix2String(const Matrix& matrix)
 inline void String2Matrix(Matrix &matrix, const std::string &string, const std::string &delim = "|")
 {
     (void)delim; // Mark parameter as intentionally unused
-    #pragma message ("fix string char stuff")
+    // fix string char stuff
     StringList elements = SplitString(string, "|");
     int rows = matrix.rows();
     int cols = matrix.cols();
@@ -395,7 +382,7 @@ inline void String2Matrix(Matrix &matrix, const std::string &string, const std::
 inline void String2Geometry(Geometry &matrix, const std::string &string, const std::string &delim = "|")
 {
     (void)delim; // Mark parameter as intentionally unused
-    #pragma message ("fix string char stuff")
+    // fix string char stuff
     StringList elements = SplitString(string, "|");
     int rows = matrix.rows();
     int cols = matrix.cols();

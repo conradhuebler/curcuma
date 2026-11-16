@@ -6,7 +6,7 @@
 case in the test set.
 
 This supersedes the hypothesis in
-[WP-EEQ-P2-profile-plan.md](WP-EEQ-P2-profile-plan.md), which assumed the
+WP-EEQ-P2-profile-plan.md (not in the repository), which assumed the
 per-step EEQ cost is the Cholesky factorisation and that loosening
 `eeq_refactor_eps_bohr` would amortise it. The threshold is not the binding
 constraint — see below.

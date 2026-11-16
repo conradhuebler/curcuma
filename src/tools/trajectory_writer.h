@@ -52,14 +52,12 @@ public:
     // Statistics summary output - Claude Generated 2026
     // Writes aggregated statistics summaries in a consistent format
     // JSON schema for summary_data:
-    // {
     //   "title": "Analysis Results",
     //   "metadata": {"file": "input.xyz", "frames": 100},
     //   "sections": [
     //     {"name": "Gyration", "unit": "Å", "enabled": true,
     //      "statistics": {"mean": 5.1, "std_dev": 0.04, "min": 4.9, "max": 5.3, "median": 5.1}}
     //   ]
-    // }
     void writeStatisticsSummary(std::ostream& out, const json& summary_data) const;
 
     // Scattering per-frame file output helpers - Claude Generated 2026

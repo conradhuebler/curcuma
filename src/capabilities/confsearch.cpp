@@ -5375,9 +5375,9 @@ void ConfSearch::LoadControlJson()
     // global section even when it was not given as -confsearch.gpu.
     m_gpu = m_config.get<std::string>("gpu", std::string("none"));
     m_time = m_config.get<double>("explore_md_time");
-    m_startT = m_config.get<double>("startT");
-    m_endT = m_config.get<double>("endT");
-    m_deltaT = m_config.get<double>("deltaT");
+    m_startT = m_config.get<double>("start_temperature");
+    m_endT = m_config.get<double>("end_temperature");
+    m_deltaT = m_config.get<double>("delta_temperature");
     m_repeat = m_config.get<int>("repeat");
     m_rmsd = m_config.get<double>("rmsd");
     m_threads = m_config.get<int>("threads");

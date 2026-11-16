@@ -13,8 +13,8 @@ Four things, on a SINGLE water molecule so the test costs a second:
      GFN-FF O-H period is 9.17 fs, so 2 fs samples it 4.6 times per period - below
      what velocity-Verlet can follow for an unconstrained X-H bond - and the bond
      stiffens further under compression (3817 cm^-1 at the equilibrium length,
-     10758 cm^-1 at 0.70 A), which takes it the rest of the way. Measured: +0.63 Eh
-     over 1 ps, with an average "temperature" of 77211 K. This is the failure mode
+     10758 cm^-1 at 0.70 A), which takes it the rest of the way. Measured (seed 2): +0.40 Eh
+     over 1 ps, with an average "temperature" of 45805 K. This is the failure mode
      the feature exists for, reproduced on three atoms.
 
      The step used to be 1 fs here. That was before commit ef462fcf, when SimpleMD
@@ -30,8 +30,10 @@ Four things, on a SINGLE water molecule so the test costs a second:
      global energy criterion already handles, `-adaptive_step_local false` must give
      a bit-identical trajectory.
 
-The initial velocities of a 3-atom system are deterministic here (verified over
-three different seeds), so the numbers are reproducible.
+The run uses -seed 2. Before the -seed fix (07e7544d) SimpleMD ignored the seed, so
+the old "-seed 1" only looked seed-independent; with the seed honoured, seed 1 happens
+not to run away (dE -0.0003 Eh), while seeds 2/4/5/7/11/42/123 all do (+0.40..+5.3 Eh).
+Seed 2: off +0.397 Eh, on -0.0015 Eh (measured Oct 2026).
 
 See docs/MD_LARGE_SYSTEMS.md for the mechanism and the calibration measurements.
 
@@ -62,7 +64,7 @@ def run_md(binary, workdir, label, extra):
 
     cmd = [binary, "-md", str(xyz), "-method", "gfnff", "-threads", "1",
            "-T", "1750", "-dt", "2.0", "-MaxTime", "1000", "-thermostat", "none",
-           "-no_bmt", "-verbosity", "1", "-seed", "1"] + extra
+           "-no_bmt", "-verbosity", "1", "-seed", "2"] + extra
     proc = subprocess.run(cmd, capture_output=True, text=True, cwd=workdir)
     if VERBOSE:
         print(" ".join(cmd))
@@ -100,7 +102,7 @@ def main():
         if dE_off < 0.1:
             failures.append(
                 f"the reference failure mode did not reproduce: dE = {dE_off:+.4f} Eh, "
-                "expected > +0.1 Eh (measured +0.63). Either GFN-FF changed, or adaptive_step "
+                "expected > +0.1 Eh (measured +0.40). Either GFN-FF changed, the seed handling changed, or adaptive_step "
                 "is no longer off by default, or the MD time step changed again - check which, "
                 "the second would be a silent default change and the third is what ef462fcf "
                 "fixed (see md_time_axis).")

@@ -89,19 +89,6 @@ Molecule::Molecule(const Molecule& other)
     m_hbond_cutoff = other.m_hbond_cutoff;
     m_dirty = other.m_dirty;
 }
-/*
-Molecule& Molecule::operator=(const Molecule& other)
-{
-    m_geometry = other.m_geometry;
-    m_charge = other.m_charge;
-    m_fragments = other.m_fragments;
-    m_atoms = other.m_atoms;
-    m_name = other.m_name;
-    m_energy = other.m_energy;
-    m_spin = other.m_spin;
-    return *this;
-}
-*/
 Molecule::Molecule(const Molecule* other)
 {
     m_geometry = other->m_geometry;
@@ -127,19 +114,6 @@ Molecule::Molecule(const Molecule* other)
     m_hbond_cutoff = other->m_hbond_cutoff;
     m_dirty = other->m_dirty;
 }
-/*
-Molecule& Molecule::operator=(const Molecule* other)
-{
-    m_geometry = other->m_geometry;
-    m_charge = other->m_charge;
-    m_fragments = other->m_fragments;
-    m_atoms = other->m_atoms;
-    m_name = other->m_name;
-    m_energy = other->m_energy;
-    m_spin = other->m_spin;
-    return *this;
-}
-*/
 Molecule::Molecule(const Mol& other)
 {
     setXYZComment(other.m_commentline);
@@ -178,39 +152,6 @@ Molecule::Molecule(const Mol* other)
 
 Molecule::Molecule(const std::string& file)
 {
-    /*
-    std::vector<std::string> lines;
-    int atoms = 0;
-    int index = 0;
-    int i = 0;
-    bool xyzfile = std::string(file).find(".xyz") != std::string::npos || std::string(file).find(".trj") != std::string::npos;
-    if (xyzfile) {
-        auto m_file = new std::ifstream(file);
-        for (std::string line; getline(*m_file, line);) {
-            if (index == 0 && xyzfile) {
-                try {
-                    atoms = stoi(line);
-                } catch (const std::invalid_argument& arg) {
-                    atoms = 0;
-                }
-                InitialiseEmptyGeometry(atoms);
-            }
-            if (xyzfile) {
-                if (i == 1)
-                    setXYZComment(line);
-                if (i > 1) {
-                    setXYZ(line, i - 2);
-                }
-                if (i - 1 == atoms) {
-                    break;
-                }
-                ++i;
-            } else {
-                setAtom(line, i);
-            }
-            index++;
-        }
-    }*/
     LoadMolecule(Files::LoadFile(file));
 }
 
@@ -291,7 +232,6 @@ void Molecule::Initialise(const int* attyp, const double* coord, const int natom
         m_geometry(i, 1) = coord[3 * i + 1];
         m_geometry(i, 2) = coord[3 * i + 2];
 
-        // m_geometry.push_back({ coord[3 * i], coord[3 * i + 1], coord[3 * i + 2] });
         m_atoms.push_back(attyp[i]);
 
         m_mass += Elements::AtomicMass[attyp[i]];
@@ -381,7 +321,7 @@ void Molecule::printFragmente()
 
     CurcumaLogger::header("Fragment Analysis");
     Position center = Centroid();
-    CurcumaLogger::info_fmt("Center: [{:.5f}, {:.5f}, {:.5f}] Å", center(0), center(1), center(2));
+    CurcumaLogger::info_fmt("Center: [{:.5f}, {:.5f}, {:.5f}] Angstrom", center(0), center(1), center(2));
     CurcumaLogger::param("fragments", static_cast<int>(GetFragments().size()));
     CurcumaLogger::param("Ia (rotational const)", Ia());
     CurcumaLogger::param("Ib (rotational const)", Ib());
@@ -408,24 +348,15 @@ void Molecule::printAtom(int i) const
 void Molecule::InitialiseEmptyGeometry(int atoms)
 {
     m_geometry = Eigen::MatrixXd::Zero(atoms, 3);
-    /*
-    for (int i = 0; i < atoms; i++) {
-        std::array<double, 3> atom = { 0, 0, 0 };
-        //m_geometry.push_back(atom);
-        m_geometry.conservativeResize(m_geometry.rows() +  1, m_geometry.cols());
-        m_geometry.row(m_geometry.rows() -  1) = Eigen::Vector3d(vector[0], vector[1], vector[2]);
-    }*/
     invalidateCaches();
 }
 
 bool Molecule::addPair(const std::pair<int, Position>& atom)
 {
     bool exist = true;
-    // const std::array<double, 3> at = { atom.second(0),  atom.second(1),  atom.second(2)};
     m_geometry.conservativeResize(m_geometry.rows() + 1, 3);
     m_geometry.row(m_geometry.rows() - 1) = atom.second;
 
-    // m_geometry.push_back({ atom.second(0), atom.second(1), atom.second(2) });
     m_atoms.push_back(atom.first);
     m_mass += Elements::AtomicMass[atom.first];
 
@@ -1209,16 +1140,13 @@ Position Molecule::CalculateDipoleMoment(const Vector& scaling, const bool bond)
                 if (i == j)
                     continue;
                 double revr = 1 / (m_geometry.row(i) - m_geometry.row(j)).norm();
-                // std::cout << m_charges[i] *revr *  scale << " ";
 
                 dipole(0) -= m_charges[i] * revr * scale;
                 dipole(1) -= m_charges[i] * revr * scale;
                 dipole(2) -= m_charges[i] * revr * scale;
             }
-            // std::cout << scale << " ";
         }
     }
-    // std::cout << std::endl;
     return dipole;
 }
 
@@ -1247,16 +1175,13 @@ Position Molecule::CalculateDipoleMoment(const std::vector<double>& scaling, con
                 if (i == j)
                     continue;
                 double revr = 1 / (m_geometry.row(i) - m_geometry.row(j)).norm();
-                // std::cout << m_charges[i] *revr *  scale << " ";
 
                 dipole(0) -= m_charges[i] * revr * scale;
                 dipole(1) -= m_charges[i] * revr * scale;
                 dipole(2) -= m_charges[i] * revr * scale;
             }
-            // std::cout << scale << " ";
         }
     }
-    // std::cout << std::endl;
     return dipole;
 }
 
@@ -1318,10 +1243,7 @@ std::pair<double, double> Molecule::GyrationRadiusPBC(double hmass, bool protons
 
         // Apply PBC if active - Claude Generated (Oct 2025): Use cached inverse
         if (m_has_pbc) {
-            //std::cout << "Applying PBC for atom " << i << std::endl;
-            //std::cout << "old distance: " << atom_pos.norm() << " ";
             atom_pos = PBCUtils::applyMinimumImage(atom_pos, m_unit_cell, cell_inv);
-            //std::cout << "  --  new distance" << atom_pos.norm() << std::endl;
         }
         Eigen::Vector3d r = atom_pos - com;
 
@@ -1602,7 +1524,6 @@ void Molecule::appendXYZFile(const std::string& filename) const
     }
     std::ofstream input;
     input.open(filename, std::ios_base::app);
-    //std::cout << output << std::endl;
     input << output;
     input.close();
 }
@@ -1626,7 +1547,6 @@ void Molecule::appendDipoleFile(const std::string& filename) const
     }
     std::ofstream input;
     input.open(filename, std::ios_base::app);
-    // std::cout << output << std::endl;
     input << output;
     input.close();
 }
@@ -1720,11 +1640,9 @@ std::vector<int> Molecule::BoundHydrogens(int atom, double scaling) const
         return result;
 
     for (int i = 0; i < AtomCount(); ++i) {
-        // std::cout << Atom(i).first << std::endl;
         if (atom == i || Atom(i).first != 1)
             continue;
         double distance = CalculateDistance(i, atom);
-        // std::cout << i << " " << atom << " " << distance << std::endl;
         if (distance < (Elements::CovalentRadius[Atom(atom).first] + Elements::CovalentRadius[1]) * scaling)
             result.push_back(i);
     }
@@ -1836,7 +1754,7 @@ void Molecule::PrintConnectivitiy(double scaling) const
                 if (Atom(j).first == 1) {
                     double distance = CalculateDistance(i, j);
                     if (distance < (Elements::CovalentRadius[Atom(i).first] + Elements::CovalentRadius[Atom(j).first]) * scaling)
-                        CurcumaLogger::info_fmt("Bond: Atom {} - Atom {}: Distance = {:.4f} Å (Cov Rad Sum: {:.3f} Å)", i, j, distance, (Elements::CovalentRadius[Atom(i).first] + Elements::CovalentRadius[Atom(j).first]));
+                        CurcumaLogger::info_fmt("Bond: Atom {} - Atom {}: Distance = {:.4f} Angstrom (Cov Rad Sum: {:.3f} Angstrom)", i, j, distance, (Elements::CovalentRadius[Atom(i).first] + Elements::CovalentRadius[Atom(j).first]));
                 }
             }
         }
@@ -1853,7 +1771,7 @@ void Molecule::AnalyseIntermoleculeDistance() const
                     double distance = CalculateDistance(a, b);
                     if (distance < cutoff) {
                         if (Atom(a).first == 1 && Atom(b).first != 1 || Atom(a).first != 1 && Atom(b).first == 1)
-                            CurcumaLogger::info_fmt("Intermolecular contact: {:.6f} Å - Atom {}({}) to Atom {}({})", distance, a, Elements::ElementAbbr[Atom(a).first], b, Elements::ElementAbbr[Atom(b).first]);
+                            CurcumaLogger::info_fmt("Intermolecular contact: {:.6f} Angstrom - Atom {}({}) to Atom {}({})", distance, a, Elements::ElementAbbr[Atom(a).first], b, Elements::ElementAbbr[Atom(b).first]);
                     }
                 }
             }
@@ -1898,19 +1816,15 @@ std::vector<std::vector<int>> Molecule::GetFragments(double scaling) const
                 double distance = m_has_pbc ?
                     CalculateDistancePBC(fragment[i], atoms[j]) :
                     CalculateDistance(fragment[i], atoms[j]);
-                //std::cout << "Fragment No: " << m_fragments.size() + 1 << " ("<< fragment.size() <<")  ##  Atom " << fragment[i] << " (Index " << i << ") and Atom " << atoms[j] << " - Distance: " << distance << " Thresh " << (Elements::CovalentRadius[Atom(fragment[i]).first] + Elements::CovalentRadius[Atom(atoms[j]).first]);
                 if (distance < (Elements::CovalentRadius[Atom(fragment[i]).first] + Elements::CovalentRadius[Atom(atoms[j]).first]) * m_scaling) {
-                    //std::cout << " ... taken " << std::endl;
                     fragment.push_back(atoms.at(j));
                     mass += Elements::AtomicMass[Atom(atoms.at(j)).first];
                     atoms.erase(atoms.begin() + j);
                     --j; // We have to decrease the atom vector counter since it got one element removed and we dont want to skip single elements
                 } //else
-                //   std::cout  << std::endl;
             }
         }
         std::sort(fragment.begin(), fragment.end());
-        //m_fragments.push_back(fragment);
         mass *= -1; // I think, that is an easy way to ***
         ordered_list.insert(std::pair<double, std::vector<int>>(mass, fragment));
         fragment.clear();

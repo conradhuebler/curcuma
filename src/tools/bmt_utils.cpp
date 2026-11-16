@@ -15,6 +15,7 @@
 #include <chrono>
 #include <ctime>
 #include <fstream>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -26,6 +27,22 @@ namespace fs = std::filesystem;
 #endif
 
 namespace BMTUtils {
+
+namespace {
+std::mutex g_process_dir_mutex;
+std::string g_process_dir;
+}
+
+std::string processOutputDir()
+{
+    std::lock_guard<std::mutex> lock(g_process_dir_mutex);
+    return g_process_dir;
+}
+
+std::string processOutputPath(const std::string& filename)
+{
+    return outputPath(processOutputDir(), filename);
+}
 
 std::string createBMTDir(const std::string& basename, const std::string& keyword)
 {
@@ -55,6 +72,14 @@ std::string createBMTDir(const std::string& basename, const std::string& keyword
     bmt_dir = candidate;
 #endif
 #endif
+
+    {
+        // The first directory of the process belongs to the command the user started;
+        // directories made later by child runs (ConfSearch MD, batch workers) do not replace it.
+        std::lock_guard<std::mutex> lock(g_process_dir_mutex);
+        if (g_process_dir.empty())
+            g_process_dir = bmt_dir;
+    }
 
     CurcumaLogger::info_fmt("Output directory: {}", bmt_dir);
     return bmt_dir;

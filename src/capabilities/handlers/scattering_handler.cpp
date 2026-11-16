@@ -21,6 +21,7 @@
 #include "src/core/curcuma_logger.h"
 #include <fstream>
 #include <cstdio>  // for snprintf
+#include "src/core/output_symbols.h"
 
 bool ScatteringOutputHandler::isEnabled(const UnifiedAnalysis::AnalysisConfig& config) const
 {
@@ -186,7 +187,7 @@ void ScatteringOutputHandler::generateGnuplotScript(
     out << "# Plot 1: Form Factor P(q) [Log-Log]\n";
     out << "set logscale xy\n";
     out << "set title \"Form Factor P(q) [Log-Log]\"\n";
-    out << "set xlabel \"q (Å⁻¹)\"\n";
+    out << "set xlabel \"q (Å" SYM_INV ")\"\n";
     out << "set ylabel \"P(q)\"\n";
     out << "plot '" << stats_file << "' using 1:2 with lines lw 2 lc rgb \"#0072B2\" title \"P(q) (mean)\"\n\n";
 
@@ -195,7 +196,7 @@ void ScatteringOutputHandler::generateGnuplotScript(
     out << "unset logscale y\n";
     out << "set logscale x\n";
     out << "set title \"Structure Factor S(q)\"\n";
-    out << "set xlabel \"q (Å⁻¹)\"\n";
+    out << "set xlabel \"q (Å" SYM_INV ")\"\n";
     out << "set ylabel \"S(q)\"\n";
     out << "plot '" << stats_file << "' using 1:5 with lines lw 2 lc rgb \"#E69F00\" title \"S(q) (mean)\", \\\n";
     out << "     '" << stats_file << "' using 1:(1.0) with lines lt 2 lc rgb \"#999999\" title \"Ideal Gas\"\n\n";
@@ -204,16 +205,16 @@ void ScatteringOutputHandler::generateGnuplotScript(
     out << "# Plot 3: Form Factor vs Structure Factor\n";
     out << "set logscale y\n";
     out << "set title \"Form Factor vs Structure Factor\"\n";
-    out << "set xlabel \"q (Å⁻¹)\"\n";
+    out << "set xlabel \"q (Å" SYM_INV ")\"\n";
     out << "set ylabel \"P(q), S(q)\"\n";
     out << "plot '" << stats_file << "' using 1:2 with lines lw 2 lc rgb \"#0072B2\" title \"P(q)\", \\\n";
     out << "     '" << stats_file << "' using 1:5 with lines lw 2 lc rgb \"#E69F00\" title \"S(q)\"\n\n";
 
     // Plot 4: Guinier Analysis
-    out << "# Plot 4: Guinier Region: ln(P(q)) vs q²\n";
+    out << "# Plot 4: Guinier Region: ln(P(q)) vs q" SYM_SQ "\n";
     out << "unset logscale xy\n";
-    out << "set title \"Guinier Region: ln(P(q)) vs q²\"\n";
-    out << "set xlabel \"q² (Å⁻²)\"\n";
+    out << "set title \"Guinier Region: ln(P(q)) vs q" SYM_SQ "\"\n";
+    out << "set xlabel \"q" SYM_SQ " (Å" SYM_INV SYM_SQ ")\"\n";
     out << "set ylabel \"ln(P(q))\"\n";
     out << "set xrange [0:0.01]\n";
     out << "plot '" << stats_file << "' using ($1*$1):(log($2)) with lines lw 2 lc rgb \"#0072B2\" title \"ln(P(q))\"\n\n";

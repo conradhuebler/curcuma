@@ -1,4 +1,7 @@
 #include "parameter_registry.h"
+#include "src/core/key_normalize.h"
+
+#include <set>
 #include <algorithm>
 #include <iomanip>
 #include <iostream>
@@ -44,9 +47,7 @@ void ParameterRegistry::addDefinition(const std::string& module, ParameterDefini
     // Used by findOwnerModules to auto-route flat CLI flags.
     auto add_owner = [&](const std::string& key) {
         std::string lower = key;
-        std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-        // Claude Generated (Jun 2026): canonicalize hyphens to underscores
-        lower.erase(std::remove(lower.begin(), lower.end(), '-'), lower.end());
+        lower = curcuma::normalizeKey(lower);
         auto& mods = name_to_modules_map[lower];
         if (std::find(mods.begin(), mods.end(), module) == mods.end()) {
             mods.push_back(module);
@@ -83,6 +84,68 @@ const ParameterDefinition* ParameterRegistry::findDefinition(const std::string& 
     }
 
     return nullptr;
+}
+
+void ParameterRegistry::coerceBoolParameters(nlohmann::json& controller) const
+{
+    if (!controller.is_object())
+        return;
+    for (auto& [module, params] : controller.items()) {
+        if (!params.is_object())
+            continue;
+        for (auto& [key, value] : params.items()) {
+            if (!value.is_number())
+                continue;
+            const std::string canonical = resolveAlias(module, key);
+            const ParameterDefinition* def = canonical.empty() ? nullptr : findDefinition(module, canonical);
+            if (def && def->type == ParamType::Bool)
+                value = (value.get<double>() != 0.0);
+        }
+    }
+}
+
+std::vector<std::string> ParameterRegistry::checkAnnotations(const nlohmann::json& controller) const
+{
+    std::vector<std::string> messages;
+    if (!controller.is_object())
+        return messages;
+    std::set<std::string> seen;
+    auto lower = [](std::string t) {
+        std::transform(t.begin(), t.end(), t.begin(), ::tolower);
+        return t;
+    };
+    for (const auto& [module, params] : controller.items()) {
+        if (!params.is_object())
+            continue;
+        for (const auto& [key, value] : params.items()) {
+            const std::string canonical = resolveAlias(module, key);
+            const ParameterDefinition* def = canonical.empty() ? nullptr : findDefinition(module, canonical);
+            if (!def || !seen.insert(def->module + "." + def->name).second)
+                continue;
+            if (!def->allowed.empty() && value.is_string()) {
+                const std::string given = lower(value.get<std::string>());
+                bool ok = false;
+                std::string list;
+                for (const auto& a : def->allowed) {
+                    ok = ok || lower(a) == given;
+                    list += (list.empty() ? "" : "|") + a;
+                }
+                if (!ok)
+                    messages.push_back("Value '" + value.get<std::string>() + "' of -" + key + " (module " + def->module
+                        + ") is not one of " + list);
+            }
+            if (value.is_number() && (def->hasMinimum || def->hasMaximum)) {
+                const double v = value.get<double>();
+                if (def->hasMinimum && v < def->minimum)
+                    messages.push_back("Value " + std::to_string(v) + " of -" + key + " (module " + def->module
+                        + ") is below the minimum " + std::to_string(def->minimum));
+                else if (def->hasMaximum && v > def->maximum)
+                    messages.push_back("Value " + std::to_string(v) + " of -" + key + " (module " + def->module
+                        + ") is above the maximum " + std::to_string(def->maximum));
+            }
+        }
+    }
+    return messages;
 }
 
 std::vector<ParameterDefinition> ParameterRegistry::getForModule(const std::string& module) const
@@ -399,9 +462,7 @@ bool ParameterRegistry::validateRegistry() const
 std::vector<std::string> ParameterRegistry::findOwnerModules(const std::string& param_name) const
 {
     std::string lower = param_name;
-    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-    // Claude Generated (Jun 2026): canonicalize hyphens to underscores for matching
-    lower.erase(std::remove(lower.begin(), lower.end(), '-'), lower.end());
+    lower = curcuma::normalizeKey(lower);
     auto it = name_to_modules_map.find(lower);
     if (it == name_to_modules_map.end()) {
         return {};
@@ -426,14 +487,11 @@ std::string ParameterRegistry::resolveAlias(const std::string& module_name, cons
 
     // Try case-insensitive match (slower path for backward compatibility)
     std::string alias_lower = alias;
-    std::transform(alias_lower.begin(), alias_lower.end(), alias_lower.begin(), ::tolower);
-    // Claude Generated (Jun 2026): canonicalize hyphens to underscores for matching
-    alias_lower.erase(std::remove(alias_lower.begin(), alias_lower.end(), '-'), alias_lower.end());
+    alias_lower = curcuma::normalizeKey(alias_lower);
 
     for (const auto& entry : module_it->second) {
         std::string entry_key_lower = entry.first;
-        std::transform(entry_key_lower.begin(), entry_key_lower.end(), entry_key_lower.begin(), ::tolower);
-        entry_key_lower.erase(std::remove(entry_key_lower.begin(), entry_key_lower.end(), '-'), entry_key_lower.end());
+        entry_key_lower = curcuma::normalizeKey(entry_key_lower);
 
         if (alias_lower == entry_key_lower) {
             return entry.second; // Return canonical name

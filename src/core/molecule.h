@@ -138,7 +138,6 @@ class Molecule
       inline double ConnectedMass(int atom) const { return m_connect_mass[atom]; }
       double CalculateAngle(int atom1, int atom2, int atom3) const;
       double CalculateDihedral(int atom1, int atom2, int atom3, int atom4) const;
-      // double DotProduct(std::array<double, 3> pos1, std::array<double, 3> pos2) const;
 
       void clear();
 

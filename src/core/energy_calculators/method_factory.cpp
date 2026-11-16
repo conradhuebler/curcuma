@@ -20,6 +20,7 @@
 #include "src/tools/string_similarity.h"
 
 #include "method_factory.h"
+#include "src/core/key_normalize.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/parameter_registry.h"
 #include "src/core/gpu_fallback.h"
@@ -441,7 +442,7 @@ std::unique_ptr<ComputationalMethod> createNativeGfnff(const std::string& method
     if (method == "gfnff-fast") {
         gfnff_config["static_charges"] = true;
         gfnff_config["static_cn"] = true;
-        CurcumaLogger::warn("Method 'gfnff-fast': NON-POLARIZING fast GFN-FF — EEQ charges and "
+        CurcumaLogger::warn("Method 'gfnff-fast': NON-POLARIZING fast GFN-FF - EEQ charges and "
             "CN/D4 are frozen after the first geometry for speed. Valid for equilibrium dynamics "
             "/ relaxation of pre-equilibrated systems only; NOT for charge transfer, ionic "
             "dynamics, large conformational change, or reactions. See docs/GFNFF_FAST_WP.md.");
@@ -682,8 +683,7 @@ void MethodFactory::applySharedScfScope(json& config, const std::string& method_
     std::transform(m.begin(), m.end(), m.begin(), ::tolower);
     auto& reg = ParameterRegistry::getInstance();
     auto lower = [](std::string s) {
-        std::transform(s.begin(), s.end(), s.begin(), ::tolower);
-        s.erase(std::remove(s.begin(), s.end(), '-'), s.end());
+        s = curcuma::normalizeKey(s);
         return s;
     };
 

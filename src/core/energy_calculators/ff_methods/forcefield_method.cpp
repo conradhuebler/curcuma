@@ -341,10 +341,6 @@ void ForceFieldMethod::setParameterCaching(bool enable) {
     }
 }
 
-bool ForceFieldMethod::isParameterCachingEnabled() const {
-    return m_parameters.value("parameter_caching", true);
-}
-
 bool ForceFieldMethod::loadParametersFromFile(const std::string& filename) {
     if (!m_forcefield) {
         handleForceFieldError("ForceField not initialized");
@@ -414,19 +410,6 @@ void ForceFieldMethod::printParameterSummary() const {
         m_forcefield->printParameterSummary();
     } else {
         fmt::print("ForceField not initialized - no parameters available\n");
-    }
-}
-
-Matrix ForceFieldMethod::calculateNumericalGradient() {
-    if (!m_forcefield) {
-        return Matrix{};
-    }
-    
-    try {
-        return m_forcefield->NumGrad();
-    } catch (const std::exception& e) {
-        handleForceFieldError(fmt::format("numerical gradient: {}", e.what()));
-        return Matrix{};
     }
 }
 
@@ -542,7 +525,7 @@ bool ForceFieldMethod::generateParametersIfNeeded(const Mol& mol) {
 
     if (m_forcefield->tryLoadAutoParameters(m_method_name)) {
         if (CurcumaLogger::get_verbosity() >= 1) {
-            CurcumaLogger::success("✅ Loaded parameters from cache - skipping generation");
+            CurcumaLogger::success("[OK] Loaded parameters from cache - skipping generation");
         }
         return true;
     }

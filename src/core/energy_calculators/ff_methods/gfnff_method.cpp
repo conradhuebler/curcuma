@@ -16,6 +16,7 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "src/tools/bmt_utils.h"
 #include "gfnff.h"
 #include "src/core/energy_calculators/ff_methods/gfnff_par.h"
 #include "src/core/curcuma_logger.h"
@@ -101,6 +102,7 @@ struct SetupScope {
 
 #include <fmt/format.h>
 #include "src/tools/spatial_cell_list.h"  // Claude Generated (Apr 2026): O(N) neighbor queries for HB/XB
+#include "src/core/output_symbols.h"
 
 // Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A4b): minimum-image helpers of the HB/XB detection.
 // Only called with an active cell; the non-periodic code keeps its own expressions (bitwise unchanged).
@@ -165,7 +167,7 @@ void printGFNFFEnergyReport(const GFNFFEnergyReport& r)
     CurcumaLogger::result(fmt::format(
         "  {:<22} {:>16}    {:>6}    {:>6}",
         "Component", "Energy (Eh)", "CPU ms", "GPU ms"));
-    CurcumaLogger::result("  ─────────────────────────────────────────────────────────────────");
+    CurcumaLogger::result("  -----------------------------------------------------------------");
     CurcumaLogger::result("  Bonded:");
     row("Bond",                r.bond,         r.t_bond);
     row("Angle",               r.angle,        r.t_angle);
@@ -202,7 +204,7 @@ void printGFNFFEnergyReport(const GFNFFEnergyReport& r)
     row("X-bonds",             r.xbond,        r.t_xbond);
     row("ATM (3-body)",        r.atm,          r.t_atm);
     row("BATM",                r.batm,         r.t_batm);
-    CurcumaLogger::result("  ═════════════════════════════════════════════════════════════════");
+    CurcumaLogger::result("  =================================================================");
     CurcumaLogger::result(fmt::format("  {:<22} {:>+16.10f}", "Total", r.total));
     if (r.gradient_norm >= 0.0) {
         CurcumaLogger::result(fmt::format(
@@ -249,7 +251,7 @@ void printGFNFFEnergyReport(const GFNFFEnergyReport& r)
             phase_row("Phase 2: Coulomb + DMA (GPU)", r.t_gpu_phase2, -1.0, r.t_gpu_phase2);
     }
 
-    CurcumaLogger::result("  ═════════════════════════════════════════════════════════════════");
+    CurcumaLogger::result("  =================================================================");
     // Init cost of setMolecule(), measured once there. Sep 2026 (Claude Generated): it used to be
     // printed and ADDED to "Total energy call" on every call - on polymer_2x a stale 498 ms per
     // MD step that never happened (24 s run for 30 steps, not 30 x 680 ms). Labelled one-time now.
@@ -297,7 +299,7 @@ void printGFNFFParamGenReport(const GFNFFParamGenReport& r)
         "GFN-FF Parameter Generation [N={} atoms, {} threads, backend={}{}]",
         r.n_atoms, r.n_threads, backend_str,
         r.topology_cached ? ", topo cached" : ""));
-    CurcumaLogger::result("  ─────────────────────────────────────────────────────────────────");
+    CurcumaLogger::result("  -----------------------------------------------------------------");
     CurcumaLogger::result("  Topology:");
     row("Distance matrix",              r.t_distance_matrix);
     row("CN + hybridization + rings",   r.t_cn_hyb_pi_rings);
@@ -328,7 +330,7 @@ void printGFNFFParamGenReport(const GFNFFParamGenReport& r)
     row("Bond-HB cross-reference",       r.t_crossref);
 
     if (r.t_parallel_block_wall >= 0.0) {
-        CurcumaLogger::result("  ─────────────────────────────────────────────────────────────────");
+        CurcumaLogger::result("  -----------------------------------------------------------------");
         CurcumaLogger::result(fmt::format(
             "  Parallel block ({}, {} threads)  wall={:>7.1f}  cpu-sum={:>7.1f}",
             backend_str, r.n_threads, r.t_parallel_block_wall, r.t_parallel_block_cpu_sum));
@@ -341,7 +343,7 @@ void printGFNFFParamGenReport(const GFNFFParamGenReport& r)
         }
     }
 
-    CurcumaLogger::result("  ═════════════════════════════════════════════════════════════════");
+    CurcumaLogger::result("  =================================================================");
     CurcumaLogger::result(fmt::format(
         "  {:<32}  {} ms", "Total parameter generation", fmt_t(r.t_param_gen_total)));
     CurcumaLogger::result("");
@@ -352,205 +354,7 @@ void printGFNFFParamGenReport(const GFNFFParamGenReport& r)
 // Used ONLY for file-based parameter caching, not for in-memory transfer.
 // =============================================================================
 
-json GFNFFParameterSet::toJSON() const
-{
-    json j;
-    j["method"] = "gfnff";
-    j["e0"] = e0;
 
-    // Bonds
-    json bonds_json = json::array();
-    for (const auto& b : bonds) {
-        json bj;
-        bj["type"] = b.type; bj["i"] = b.i; bj["j"] = b.j; bj["k"] = b.k;
-        bj["distance"] = b.distance; bj["fc"] = b.fc; bj["r0_ij"] = b.r0_ij;
-        bj["r0_ik"] = b.r0_ik; bj["exponent"] = b.exponent;
-        bj["rabshift"] = b.rabshift; bj["fqq"] = b.fqq;
-        bj["z_i"] = b.z_i; bj["z_j"] = b.z_j;
-        bj["r0_base_i"] = b.r0_base_i; bj["r0_base_j"] = b.r0_base_j;
-        bj["cnfak_i"] = b.cnfak_i; bj["cnfak_j"] = b.cnfak_j;
-        bj["ff"] = b.ff; bj["nr_hb"] = b.nr_hb; bj["hb_cn_H"] = b.hb_cn_H;
-        bonds_json.push_back(bj);
-    }
-    j["bonds"] = bonds_json;
-
-    // Angles
-    json angles_json = json::array();
-    for (const auto& a : angles) {
-        json aj;
-        aj["type"] = a.type; aj["i"] = a.i; aj["j"] = a.j; aj["k"] = a.k;
-        aj["fc"] = a.fc; aj["theta0_ijk"] = a.theta0_ijk;
-        aj["r0_ij"] = a.r0_ij; aj["r0_ik"] = a.r0_ik;
-        angles_json.push_back(aj);
-    }
-    j["angles"] = angles_json;
-
-    // Dihedrals (primary + extra combined with is_extra flag)
-    json dihedrals_json = json::array();
-    for (const auto& d : dihedrals) {
-        json dj;
-        dj["type"] = d.type; dj["i"] = d.i; dj["j"] = d.j; dj["k"] = d.k; dj["l"] = d.l;
-        dj["V"] = d.V; dj["n"] = d.n; dj["phi0"] = d.phi0;
-        dj["is_extra"] = d.is_extra; dj["is_nci"] = d.is_nci;
-        dihedrals_json.push_back(dj);
-    }
-    for (const auto& d : extra_dihedrals) {
-        json dj;
-        dj["type"] = d.type; dj["i"] = d.i; dj["j"] = d.j; dj["k"] = d.k; dj["l"] = d.l;
-        dj["V"] = d.V; dj["n"] = d.n; dj["phi0"] = d.phi0;
-        dj["is_extra"] = true; dj["is_nci"] = d.is_nci;
-        dihedrals_json.push_back(dj);
-    }
-    j["dihedrals"] = dihedrals_json;
-
-    // Inversions
-    json inversions_json = json::array();
-    for (const auto& inv : inversions) {
-        json ij;
-        ij["type"] = inv.type; ij["i"] = inv.i; ij["j"] = inv.j; ij["k"] = inv.k; ij["l"] = inv.l;
-        ij["fc"] = inv.fc; ij["C0"] = inv.C0; ij["C1"] = inv.C1; ij["C2"] = inv.C2;
-        ij["potential_type"] = inv.potential_type; ij["omega0"] = inv.omega0;
-        inversions_json.push_back(ij);
-    }
-    j["inversions"] = inversions_json;
-
-    // STorsions
-    json storsions_json = json::array();
-    for (const auto& s : storsions) {
-        json sj;
-        sj["i"] = s.i; sj["j"] = s.j; sj["k"] = s.k; sj["l"] = s.l;
-        sj["erefhalf"] = s.erefhalf;
-        storsions_json.push_back(sj);
-    }
-    j["gfnff_storsions"] = storsions_json;
-
-    // Dispersions
-    json disp_json = json::array();
-    for (const auto& d : dispersions) {
-        json dj;
-        dj["i"] = d.i; dj["j"] = d.j; dj["C6"] = d.C6; dj["r4r2ij"] = d.r4r2ij;
-        dj["r0_squared"] = d.r0_squared; dj["r_cut"] = d.r_cut; dj["zetac6"] = d.zetac6;
-        dj["dispersion_method"] = dispersion_method;
-        disp_json.push_back(dj);
-    }
-    if (dispersion_method == "d4")
-        j["d4_dispersion_pairs"] = disp_json;
-    else
-        j["gfnff_dispersions"] = disp_json;
-
-    // Repulsions
-    json bonded_rep_json = json::array();
-    for (const auto& r : bonded_repulsions) {
-        json rj;
-        rj["i"] = r.i; rj["j"] = r.j; rj["alpha"] = r.alpha;
-        rj["repab"] = r.repab; rj["r_cut"] = r.r_cut;
-        bonded_rep_json.push_back(rj);
-    }
-    j["gfnff_bonded_repulsions"] = bonded_rep_json;
-
-    json nonbonded_rep_json = json::array();
-    for (const auto& r : nonbonded_repulsions) {
-        json rj;
-        rj["i"] = r.i; rj["j"] = r.j; rj["alpha"] = r.alpha;
-        rj["repab"] = r.repab; rj["r_cut"] = r.r_cut;
-        nonbonded_rep_json.push_back(rj);
-    }
-    j["gfnff_nonbonded_repulsions"] = nonbonded_rep_json;
-
-    // Coulombs
-    json coul_json = json::array();
-    for (const auto& c : coulombs) {
-        json cj;
-        cj["i"] = c.i; cj["j"] = c.j; cj["q_i"] = c.q_i; cj["q_j"] = c.q_j;
-        cj["gamma_ij"] = c.gamma_ij;
-        cj["chi_i"] = c.chi_i; cj["chi_j"] = c.chi_j;
-        cj["chi_base_i"] = c.chi_base_i; cj["chi_base_j"] = c.chi_base_j;
-        cj["cnf_i"] = c.cnf_i; cj["cnf_j"] = c.cnf_j;
-        cj["gam_i"] = c.gam_i; cj["gam_j"] = c.gam_j;
-        cj["alp_i"] = c.alp_i; cj["alp_j"] = c.alp_j;
-        cj["r_cut"] = c.r_cut;
-        coul_json.push_back(cj);
-    }
-    j["gfnff_coulombs"] = coul_json;
-
-    // HBonds
-    json hb_json = json::array();
-    for (const auto& h : hbonds) {
-        json hj;
-        hj["i"] = h.i; hj["j"] = h.j; hj["k"] = h.k;
-        hj["basicity_A"] = h.basicity_A; hj["basicity_B"] = h.basicity_B;
-        hj["acidity_A"] = h.acidity_A; hj["acidity_B"] = h.acidity_B;
-        hj["q_H"] = h.q_H; hj["q_A"] = h.q_A; hj["q_B"] = h.q_B;
-        hj["r_cut"] = h.r_cut; hj["case_type"] = h.case_type;
-        hj["neighbors_A"] = h.neighbors_A; hj["neighbors_B"] = h.neighbors_B;
-        hj["acceptor_parent_index"] = h.acceptor_parent_index;
-        hj["neighbors_C"] = h.neighbors_C;
-        hb_json.push_back(hj);
-    }
-    j["gfnff_hbonds"] = hb_json;
-
-    // XBonds
-    json xb_json = json::array();
-    for (const auto& x : xbonds) {
-        json xj;
-        xj["i"] = x.i; xj["j"] = x.j; xj["k"] = x.k;
-        xj["basicity_B"] = x.basicity_B; xj["acidity_X"] = x.acidity_X;
-        xj["q_X"] = x.q_X; xj["q_B"] = x.q_B; xj["r_cut"] = x.r_cut;
-        xb_json.push_back(xj);
-    }
-    j["gfnff_xbonds"] = xb_json;
-
-    // ATM triples
-    json atm_json = json::array();
-    for (const auto& t : atm_triples) {
-        json tj;
-        tj["i"] = t.i; tj["j"] = t.j; tj["k"] = t.k;
-        tj["C6_ij"] = t.C6_ij; tj["C6_ik"] = t.C6_ik; tj["C6_jk"] = t.C6_jk;
-        tj["s9"] = t.s9; tj["a1"] = t.a1; tj["a2"] = t.a2; tj["alp"] = t.alp;
-        tj["atm_method"] = t.atm_method; tj["triple_scale"] = t.triple_scale;
-        atm_json.push_back(tj);
-    }
-    j["atm_triples"] = atm_json;
-
-    // BATM triples
-    json batm_json = json::array();
-    for (const auto& b : batm_triples) {
-        json bj;
-        bj["i"] = b.i; bj["j"] = b.j; bj["k"] = b.k;
-        bj["zb3atm_i"] = b.zb3atm_i; bj["zb3atm_j"] = b.zb3atm_j; bj["zb3atm_k"] = b.zb3atm_k;
-        batm_json.push_back(bj);
-    }
-    j["gfnff_batms"] = batm_json;
-
-    // Bond-HB data
-    json bhb_json = json::array();
-    for (const auto& e : bond_hb_data) {
-        json ej;
-        ej["A"] = e.A; ej["H"] = e.H; ej["B_atoms"] = e.B_atoms;
-        bhb_json.push_back(ej);
-    }
-    j["bond_hb_data"] = bhb_json;
-
-    // EEQ charges
-    if (eeq_charges.size() > 0) {
-        j["eeq_charges"] = std::vector<double>(eeq_charges.data(),
-            eeq_charges.data() + eeq_charges.size());
-    }
-
-    j["vdws"] = json::array(); // Legacy
-
-    return j;
-}
-
-GFNFFParameterSet GFNFFParameterSet::fromJSON(const json& j)
-{
-    // Stub: not needed yet — fromJSON will be implemented when cache-loading
-    // is routed through GFNFFParameterSet. For now, the old setParameter(json)
-    // path handles cache loading.
-    GFNFFParameterSet params;
-    // TODO: implement full deserialization when needed
-    return params;
-}
 
 // =============================================================================
 
@@ -730,7 +534,7 @@ GFNFF::GFNFF(const json& parameters)
         CurcumaLogger::warn(fmt::format(
             "GFN-FF Static-Mode active: static_charges={}, static_cn={}. "
             "Initial CN/charges will be reused for all subsequent calls. "
-            "Recommended only for equilibrium dynamics — invalid for reactions or large conformational moves.",
+            "Recommended only for equilibrium dynamics - invalid for reactions or large conformational moves.",
             m_static_charges, m_static_cn));
     }
 }
@@ -815,14 +619,6 @@ void GFNFF::forwardEEQSolverParams(json& eeq_params) {
         eeq["farfield_shortcut"] = m_parameters["farfield_shortcut"];
 }
 
-double GFNFF::getEEQDistanceCutoff() const {
-    // WP-C (May 2026): Default changed from 30.0 → 0.0 to match Fortran goed_gfnff
-    // (full Coulomb in EEQ matrix). The previous 30.0 default was a non-Fortran
-    // approximation that violated Hellmann-Feynman vs the full Coulomb energy.
-    // Canonical PARAM definition lives in eeq_solver.h:965.
-    return m_parameters.value("eeq_distance_cutoff", 0.0);
-}
-
 // WP-S3 (May 2026): apply eeq_distance_cutoff_auto heuristic after Phase-1.
 // Sets EEQSolver cutoff to 30 Bohr when topology yields nfrag==1 and Phase-1
 // charges remain weakly polar (max|q| < 0.5 e). Otherwise clears any override.
@@ -863,7 +659,7 @@ void GFNFF::applyEEQCutoffAutoIfRequested()
         m_eeq_cutoff_auto_active = false;
         if (CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::info(fmt::format(
-                "EEQ cutoff auto: keeping 0.0 (nfrag={}, max|q|={:.3f} e — not neutral/single)",
+                "EEQ cutoff auto: keeping 0.0 (nfrag={}, max|q|={:.3f} e - not neutral/single)",
                 nfrag, max_abs_charge));
         }
     }
@@ -1164,7 +960,7 @@ const GFNFF::TopologyInfo& GFNFF::getCachedTopology() const {
         }
         // Static-Mode (WP-S1): warn but do NOT invalidate captured CN/charges — user override.
         if ((m_static_charges || m_static_cn) && m_static_state_captured) {
-            CurcumaLogger::warn("Static-mode: topology re-initialised but cached CN/charges remain frozen — results may diverge");
+            CurcumaLogger::warn("Static-mode: topology re-initialised but cached CN/charges remain frozen - results may diverge");
         }
         // WP-EEQ-Cache: drop stale LLT before Phase 2 rebuilds A with new dxi/dgam.
         // WP-EEQ-Matrix-Cache: same trigger — A_nn off-diag cache is also stale once
@@ -2141,8 +1937,8 @@ void GFNFF::updateHBXBIfNeeded(FFWorkspace* extra_ws)
     // Verbose output at level 2
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info("GFNFF: RMSD-based re-evaluation triggered");
-        CurcumaLogger::param("HB pairs", fmt::format("{} → {}", old_hb_count, m_hb_reference->nhb_count));
-        CurcumaLogger::param("XB pairs", fmt::format("{} → {}", old_xb_count, m_hb_reference->nxb_count));
+        CurcumaLogger::param("HB pairs", fmt::format("{} -> {}", old_hb_count, m_hb_reference->nhb_count));
+        CurcumaLogger::param("XB pairs", fmt::format("{} -> {}", old_xb_count, m_hb_reference->nxb_count));
         CurcumaLogger::param("Dispersion pairs", std::to_string(old_disp_count) + " (static)");
     }
 }
@@ -2388,9 +2184,9 @@ void GFNFF::updateNonbondedRepulsionIfNeeded(FFWorkspace* extra_ws)
             CurcumaLogger::param("max displacement since last build",
                 fmt::format("{:.3f} Bohr (half-skin {:.3f} Bohr)", max_disp, 0.5 * skin));
         CurcumaLogger::param("bonded repulsion pairs",
-            fmt::format("{} → {}", old_bonded_count, m_last_bonded_reps.size()));
+            fmt::format("{} -> {}", old_bonded_count, m_last_bonded_reps.size()));
         CurcumaLogger::param("non-bonded repulsion pairs",
-            fmt::format("{} → {}", old_nonbonded_count, m_last_nonbonded_reps.size()));
+            fmt::format("{} -> {}", old_nonbonded_count, m_last_nonbonded_reps.size()));
         CurcumaLogger::param("rebuild time", fmt::format("{:.3f} ms", duration.count() / 1000.0));
     }
 }
@@ -3369,7 +3165,7 @@ double GFNFF::calculationSingle(bool gradient)
         // to a specific energy term. This is the diagnostic path for opt failures
         // on large systems (e.g. 1410-atom polymer) where SP/MD succeed.
         if (!m_gradient.allFinite()) {
-            CurcumaLogger::error("GFN-FF: combined gradient contains NaN/Inf — scanning per-term contributions");
+            CurcumaLogger::error("GFN-FF: combined gradient contains NaN/Inf - scanning per-term contributions");
             if (!m_charges.allFinite()) {
                 CurcumaLogger::error("GFN-FF: m_charges (EEQ Phase-2) contains NaN/Inf");
             }
@@ -3424,7 +3220,7 @@ double GFNFF::calculationSingle(bool gradient)
             double rotation_error = total_torque.norm();
 
             CurcumaLogger::param("translation_invariance", fmt::format("{:.2e} Eh/Bohr", translation_error));
-            CurcumaLogger::param("rotation_invariance", fmt::format("{:.2e} Eh·Bohr/Bohr", rotation_error));
+            CurcumaLogger::param("rotation_invariance", fmt::format("{:.2e} Eh" SYM_CDOT "Bohr/Bohr", rotation_error));
 
             if (translation_error > 1e-8 || rotation_error > 1e-8) {
                 CurcumaLogger::warn("Gradient invariance violation detected!");
@@ -3433,7 +3229,7 @@ double GFNFF::calculationSingle(bool gradient)
                                                     total_force(0), total_force(1), total_force(2)));
                 }
                 if (rotation_error > 1e-8) {
-                    CurcumaLogger::info(fmt::format("  Total torque: ({:.2e}, {:.2e}, {:.2e}) Eh·Bohr",
+                    CurcumaLogger::info(fmt::format("  Total torque: ({:.2e}, {:.2e}, {:.2e}) Eh" SYM_CDOT "Bohr",
                                                     total_torque(0), total_torque(1), total_torque(2)));
                 }
 
@@ -3444,10 +3240,10 @@ double GFNFF::calculationSingle(bool gradient)
                     if (comp.rows() == 0) return;
                     double err = comp.colwise().sum().norm();
                     if (err > 1e-8) {
-                        CurcumaLogger::warn(fmt::format("  [INVARIANCE] {} |Σ F| = {:.2e} Eh/Bohr  <<< VIOLATED",
+                        CurcumaLogger::warn(fmt::format("  [INVARIANCE] {} |" SYM_SUM " F| = {:.2e} Eh/Bohr  <<< VIOLATED",
                                                         name, err));
                     } else {
-                        CurcumaLogger::info(fmt::format("  [invariance] {} |Σ F| = {:.2e} Eh/Bohr  OK",
+                        CurcumaLogger::info(fmt::format("  [invariance] {} |" SYM_SUM " F| = {:.2e} Eh/Bohr  OK",
                                                         name, err));
                     }
                 };
@@ -3546,7 +3342,7 @@ double GFNFF::calculationSingle(bool gradient)
         if (seq_frac > 0 && t_calc > 0) {
             double parallel_headroom = 100.0 * seq_frac / t_calc;
             CurcumaLogger::result(fmt::format(
-                "  Sequential fraction: {:.1f}% of calculation — overlap potential: ~{:.1f}%",
+                "  Sequential fraction: {:.1f}% of calculation - overlap potential: ~{:.1f}%",
                 parallel_headroom, parallel_headroom));
         }
     }
@@ -3736,128 +3532,7 @@ Vector GFNFF::BondOrders() const
 // GFNFFResults Implementation
 // =================================================================================
 
-json GFNFF::GFNFFResults::toJSON() const
-{
-    json j;
 
-    // Total energy and gradient
-    j["e_total"] = e_total;
-    j["gnorm"] = gnorm;
-
-    // Bonded energies
-    j["e_bond"] = e_bond;
-    j["e_angle"] = e_angle;
-    j["e_torsion"] = e_torsion;
-    j["e_inversion"] = e_inversion;
-    j["e_storsion"] = e_storsion;
-
-    // Non-bonded energies
-    j["e_repulsion"] = e_repulsion;
-    j["e_bonded_repulsion"] = e_bonded_repulsion;
-    j["e_coulomb"] = e_coulomb;
-    j["e_dispersion"] = e_dispersion;
-    j["e_hb"] = e_hb;
-    j["e_xb"] = e_xb;
-
-    // Three-body
-    j["e_atm"] = e_atm;
-    j["e_batm"] = e_batm;
-
-    // External (reserved)
-    j["e_ext"] = e_ext;
-
-    // Solvation (if active)
-    j["g_born"] = g_born;
-    j["g_sasa"] = g_sasa;
-    j["g_hb_solv"] = g_hb_solv;
-    j["g_shift"] = g_shift;
-    j["g_solv"] = g_solv;
-
-    // Dipole moment
-    j["dipole"] = {dipole(0), dipole(1), dipole(2)};
-
-    // Charges
-    if (charges.size() > 0) {
-        j["charges"] = std::vector<double>(charges.data(), charges.data() + charges.size());
-    }
-
-    // Gradient components (only include if non-empty)
-    if (g_total.rows() > 0 && g_total.cols() > 0) {
-        j["g_bond"] = std::vector<std::vector<double>>();
-        for (int i = 0; i < g_bond.rows(); ++i) {
-            j["g_bond"].push_back({g_bond(i, 0), g_bond(i, 1), g_bond(i, 2)});
-        }
-        // Store total gradient only (component storage optional)
-        j["g_total"] = std::vector<std::vector<double>>();
-        for (int i = 0; i < g_total.rows(); ++i) {
-            j["g_total"].push_back({g_total(i, 0), g_total(i, 1), g_total(i, 2)});
-        }
-    }
-
-    return j;
-}
-
-void GFNFF::GFNFFResults::fromJSON(const json& j)
-{
-    // Total energy and gradient
-    e_total = j.value("e_total", 0.0);
-    gnorm = j.value("gnorm", 0.0);
-
-    // Bonded energies
-    e_bond = j.value("e_bond", 0.0);
-    e_angle = j.value("e_angle", 0.0);
-    e_torsion = j.value("e_torsion", 0.0);
-    e_inversion = j.value("e_inversion", 0.0);
-    e_storsion = j.value("e_storsion", 0.0);
-
-    // Non-bonded energies
-    e_repulsion = j.value("e_repulsion", 0.0);
-    e_bonded_repulsion = j.value("e_bonded_repulsion", 0.0);
-    e_coulomb = j.value("e_coulomb", 0.0);
-    e_dispersion = j.value("e_dispersion", 0.0);
-    e_hb = j.value("e_hb", 0.0);
-    e_xb = j.value("e_xb", 0.0);
-
-    // Three-body
-    e_atm = j.value("e_atm", 0.0);
-    e_batm = j.value("e_batm", 0.0);
-
-    // External
-    e_ext = j.value("e_ext", 0.0);
-
-    // Solvation
-    g_born = j.value("g_born", 0.0);
-    g_sasa = j.value("g_sasa", 0.0);
-    g_hb_solv = j.value("g_hb_solv", 0.0);
-    g_shift = j.value("g_shift", 0.0);
-    g_solv = j.value("g_solv", 0.0);
-
-    // Dipole
-    if (j.contains("dipole") && j["dipole"].is_array() && j["dipole"].size() >= 3) {
-        dipole(0) = j["dipole"][0].get<double>();
-        dipole(1) = j["dipole"][1].get<double>();
-        dipole(2) = j["dipole"][2].get<double>();
-    }
-
-    // Charges
-    if (j.contains("charges") && j["charges"].is_array()) {
-        charges.resize(j["charges"].size());
-        for (size_t i = 0; i < j["charges"].size(); ++i) {
-            charges(i) = j["charges"][i].get<double>();
-        }
-    }
-
-    // Gradient (optional)
-    if (j.contains("g_total") && j["g_total"].is_array()) {
-        int natoms = j["g_total"].size();
-        g_total.resize(natoms, 3);
-        for (int i = 0; i < natoms; ++i) {
-            g_total(i, 0) = j["g_total"][i][0].get<double>();
-            g_total(i, 1) = j["g_total"][i][1].get<double>();
-            g_total(i, 2) = j["g_total"][i][2].get<double>();
-        }
-    }
-}
 
 GFNFF::GFNFFResults GFNFF::getResults() const
 {
@@ -4857,7 +4532,7 @@ bool GFNFF::initializeForceField()
                     std::max({ 40.0, eeq_cut, dispersionCutoffBohr(), cnDerivativeRangeBohr() })));
         CurcumaLogger::param("  eeq_distance_cutoff",
             fmt::format("{:.2f} Bohr  ({})", eeq_cut,
-                eeq_cut > 0.0 ? "OPT-IN — Hellmann-Feynman risk if inconsistent across sites"
+                eeq_cut > 0.0 ? "OPT-IN - Hellmann-Feynman risk if inconsistent across sites"
                               : "0 = full Coulomb (matches Fortran goed_gfnff)"));
         CurcumaLogger::param("  coulomb_pair_r_cut",
             std::string("100.00 Bohr  (per-pair, hardcoded; effective no-cutoff for typical chemistry)"));
@@ -4939,7 +4614,14 @@ bool GFNFF::initializeForceField()
         } else {
             std::string geom_file = m_parameters["geometry_file"].get<std::string>();
             size_t dot = geom_file.find_last_of('.');
-            std::string topo_file = (dot != std::string::npos ? geom_file.substr(0, dot) : geom_file) + ".topo.json";
+            std::string topo_basename = (dot != std::string::npos ? geom_file.substr(0, dot) : geom_file);
+            // Claude Generated (June 2026): Route .topo.json into BMT directory when output_dir is set
+            std::string topo_file;
+            if (m_parameters.contains("output_dir") && m_parameters["output_dir"].is_string() && !m_parameters["output_dir"].get<std::string>().empty()) {
+                topo_file = m_parameters["output_dir"].get<std::string>() + "/" + topo_basename.substr(topo_basename.find_last_of('/') + 1) + ".topo.json";
+            } else {
+                topo_file = topo_basename + ".topo.json";
+            }
 
             json topo_export = exportTopology();
             topo_export["fingerprint"] = computeTopologyFingerprint();
@@ -5569,7 +5251,7 @@ double GFNFF::getCovalentRadius(int atomic_number) const
         return covalent_radii[atomic_number - 1] * CurcumaUnit::Length::ANGSTROM_TO_BOHR;
     } else {
         // Fallback for unknown elements (convert to Bohr)
-        CurcumaLogger::warn(fmt::format("No covalent radius for element {}, using default 1.0 Å → Bohr", atomic_number));
+        CurcumaLogger::warn(fmt::format("No covalent radius for element {}, using default 1.0 Å -> Bohr", atomic_number));
         return 1.0 * CurcumaUnit::Length::ANGSTROM_TO_BOHR;
     }
 }
@@ -5749,7 +5431,7 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     double ff = 1.0 - k1 * en_diff - k2 * en_diff * en_diff;
 
     if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info(fmt::format("RAB_TRANSFORM: EN1(rab)={:.8f}, EN2(rab)={:.8f}, |ΔEN|={:.8f}", en1, en2, en_diff));
+        CurcumaLogger::info(fmt::format("RAB_TRANSFORM: EN1(rab)={:.8f}, EN2(rab)={:.8f}, |" SYM_DELTA "EN|={:.8f}", en1, en2, en_diff));
         CurcumaLogger::info(fmt::format("RAB_TRANSFORM: k1={:.8f}, k2={:.8f}, ff={:.8f}", k1, k2, ff));
     }
 
@@ -6681,7 +6363,7 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     if ((is_H_bond || is_CO_bond) && CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info(fmt::format("=== ALPHA DEBUG: Bond {}-{} (Z{}={}, Z{}={}) ===",
                                          atom1, atom2, atom1, z1, atom2, z2));
-        CurcumaLogger::info(fmt::format("  EN (param%en): en_alpha1={:.8f}, en_alpha2={:.8f}, |ΔEN|={:.8f}",
+        CurcumaLogger::info(fmt::format("  EN (param%en): en_alpha1={:.8f}, en_alpha2={:.8f}, |" SYM_DELTA "EN|={:.8f}",
                                          en_alpha1, en_alpha2, en_diff_alpha));
         CurcumaLogger::info(fmt::format("  Constants: srb1={:.10f}, srb2={:.10f}, srb3={:.10f}",
                                          srb1, srb2, srb3));
@@ -6689,7 +6371,7 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
                                          fsrb2, srb2, mtyp1, mtyp2));
         CurcumaLogger::info(fmt::format("  Bstrength: {:.10f} (hyb1={}, hyb2={})",
                                          bstrength, hyb1, hyb2));
-        CurcumaLogger::info(fmt::format("  Terms: term1=fsrb2*ΔEN²={:.10f}, term2=srb3*bstr={:.10f}",
+        CurcumaLogger::info(fmt::format("  Terms: term1=fsrb2*" SYM_DELTA "EN" SYM_SQ "={:.10f}, term2=srb3*bstr={:.10f}",
                                          alpha_term1, alpha_term2));
         CurcumaLogger::info(fmt::format("  Sum: 1.0 + {:.10f} + {:.10f} = {:.10f}",
                                          alpha_term1, alpha_term2, alpha_sum));
@@ -7255,7 +6937,7 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
 
                             if (CurcumaLogger::get_verbosity() >= 3) {
                                 CurcumaLogger::result(fmt::format(
-                                    "  N angle {}-{}-{}: pbo({},{})={:.3f}, pbo({},{})={:.3f} → sumppi={:.3f} → f2={:.3f}",
+                                    "  N angle {}-{}-{}: pbo({},{})={:.3f}, pbo({},{})={:.3f} -> sumppi={:.3f} -> f2={:.3f}",
                                     atom_i, atom_j, atom_k,
                                     atom_j, atom_i, topo_info.pi_bond_orders[idx_ji],
                                     atom_j, atom_k, topo_info.pi_bond_orders[idx_jk],
@@ -7263,7 +6945,7 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
                             }
                         } else {
                             CurcumaLogger::warn(fmt::format(
-                                "π-bond order index out of bounds for angle {}-{}-{}",
+                                SYM_PI "-bond order index out of bounds for angle {}-{}-{}",
                                 atom_i, atom_j, atom_k));
                             f2 = 1.0;  // Fallback
                         }
@@ -8860,13 +8542,13 @@ Vector GFNFF::calculateEEQCharges(const Vector& cn, const std::vector<int>& hyb,
         CurcumaLogger::info("Eigenvalue spectrum:");
         int n_show = std::min(5, (int)eigenvalues.size());
         for (int i = 0; i < n_show; ++i) {
-            CurcumaLogger::param(fmt::format("λ[{}]", i), fmt::format("{:.6e}", eigenvalues[i]));
+            CurcumaLogger::param(fmt::format(SYM_LAMBDA "[{}]", i), fmt::format("{:.6e}", eigenvalues[i]));
         }
         if (eigenvalues.size() > 10) {
             CurcumaLogger::param("...", fmt::format("({} more eigenvalues)", eigenvalues.size() - 10));
         }
         for (int i = std::max(n_show, (int)eigenvalues.size() - 5); i < eigenvalues.size(); ++i) {
-            CurcumaLogger::param(fmt::format("λ[{}]", i), fmt::format("{:.6e}", eigenvalues[i]));
+            CurcumaLogger::param(fmt::format(SYM_LAMBDA "[{}]", i), fmt::format("{:.6e}", eigenvalues[i]));
         }
     }
 
@@ -8970,7 +8652,7 @@ Vector GFNFF::calculateEEQCharges(const Vector& cn, const std::vector<int>& hyb,
         for (int i = 0; i < n; ++i) {
             EEQParameters params = getEEQParameters(m_atoms[i]);
             CurcumaLogger::param(fmt::format("atom_{}_Z{}", i, m_atoms[i]),
-                fmt::format("q={:.6f}, χ={:.6f}, γ={:.6f}, α={:.6f}, CN={:.3f}",
+                fmt::format("q={:.6f}, " SYM_CHI "={:.6f}, " SYM_GAMMA "={:.6f}, " SYM_ALPHA "={:.6f}, CN={:.3f}",
                     charges[i], params.chi, params.gam, params.alp, cn[i]));
         }
         CurcumaLogger::param("total_charge", fmt::format("{:.6f}", total_charge_actual));
@@ -9725,7 +9407,7 @@ std::vector<double> GFNFF::calculatePiBondOrders(
     // ========================================================================
     if (m_use_full_huckel && m_huckel_solver && !charges.empty() && geometry_bohr.size() > 0) {
         if (CurcumaLogger::get_verbosity() >= 2) {
-            CurcumaLogger::info("Using full iterative Hückel calculation for π-bond orders");
+            CurcumaLogger::info("Using full iterative Hückel calculation for " SYM_PI "-bond orders");
         }
 
         // itag drives the FT-HMO π-electron count (carbene C=itag 1 → 0 electrons,
@@ -9763,7 +9445,7 @@ std::vector<double> GFNFF::calculatePiBondOrders(
                 if (std::abs(pbo) > 0.01) nonzero++;
             }
             CurcumaLogger::success(fmt::format(
-                "Full Hückel: {}/{} non-zero π-bond orders",
+                "Full Hückel: {}/{} non-zero " SYM_PI "-bond orders",
                 nonzero, bond_list.size()));
         }
 
@@ -9784,7 +9466,7 @@ std::vector<double> GFNFF::calculatePiBondOrders(
     // Simplified approximation (fallback mode)
     // ========================================================================
     if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::info("Using simplified approximation for π-bond orders");
+        CurcumaLogger::info("Using simplified approximation for " SYM_PI "-bond orders");
     }
 
     std::vector<double> pi_bond_orders(max_index, 0.0);
@@ -9837,7 +9519,7 @@ std::vector<double> GFNFF::calculatePiBondOrders(
 
         if (CurcumaLogger::get_verbosity() >= 3 && pbo > 0.0) {
             CurcumaLogger::result(fmt::format(
-                "  Bond {}-{}: hyb({},{}) pi({},{}) → pbo={:.2f} [idx={}]",
+                "  Bond {}-{}: hyb({},{}) pi({},{}) -> pbo={:.2f} [idx={}]",
                 atom_i, atom_j, hyb_i, hyb_j, pi_i, pi_j, pbo, idx));
         }
     }
@@ -9848,7 +9530,7 @@ std::vector<double> GFNFF::calculatePiBondOrders(
             if (pbo > 0.0) nonzero++;
         }
         CurcumaLogger::success(fmt::format(
-            "Simplified approx: {}/{} non-zero π-bond orders",
+            "Simplified approx: {}/{} non-zero " SYM_PI "-bond orders",
             nonzero, pi_bond_orders.size()));
     }
 
@@ -11777,7 +11459,14 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
         if (m_cache_topology && m_parameters.contains("geometry_file")) {
             std::string geom_file = m_parameters["geometry_file"].get<std::string>();
             size_t dot = geom_file.find_last_of('.');
-            std::string topo_file = (dot != std::string::npos ? geom_file.substr(0, dot) : geom_file) + ".topo.json";
+            std::string topo_basename = (dot != std::string::npos ? geom_file.substr(0, dot) : geom_file);
+            // Claude Generated (June 2026): Route .topo.json into BMT directory when output_dir is set
+            std::string topo_file;
+            if (m_parameters.contains("output_dir") && m_parameters["output_dir"].is_string() && !m_parameters["output_dir"].get<std::string>().empty()) {
+                topo_file = m_parameters["output_dir"].get<std::string>() + "/" + topo_basename.substr(topo_basename.find_last_of('/') + 1) + ".topo.json";
+            } else {
+                topo_file = topo_basename + ".topo.json";
+            }
 
             std::ifstream topo_in(topo_file);
             if (topo_in.good()) {
@@ -11854,10 +11543,10 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
                             // ConfSearch reuses the topology cache on every child MD/opt, so at verbosity 1
                             // this flooded stdout with one [OK] line per reused structure. Demoted to info.
                             if (topology_from_cache && CurcumaLogger::get_verbosity() >= 2) {
-                                CurcumaLogger::info(fmt::format("Topology cache hit — skipping Phase 1 EEQ ({})", topo_file));
+                                CurcumaLogger::info(fmt::format("Topology cache hit - skipping Phase 1 EEQ ({})", topo_file));
                             }
                         } else if (CurcumaLogger::get_verbosity() >= 2) {
-                            CurcumaLogger::warn("Topology cache fingerprint mismatch — recalculating");
+                            CurcumaLogger::warn("Topology cache fingerprint mismatch - recalculating");
                         }
                     }
                 } catch (const std::exception& e) {
@@ -12116,11 +11805,12 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
                     }
                     diag["energy_charges"] = atoms_q;
 
-                    std::ofstream diag_file("gfnff_diag_charges.json");
+                    const std::string diag_path = BMTUtils::processOutputPath("gfnff_diag_charges.json");
+                    std::ofstream diag_file(diag_path);
                     if (diag_file.is_open()) {
                         diag_file << diag.dump(2) << std::endl;
                         diag_file.close();
-                        CurcumaLogger::info("Wrote topology charge diagnostics to gfnff_diag_charges.json");
+                        CurcumaLogger::info_fmt("Wrote topology charge diagnostics to {}", diag_path);
                     }
                 }
             }
@@ -12150,7 +11840,7 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     // MOVED HERE: Requires EEQ charges for charge-dependent diagonal elements
     // Used in nitrogen angle f2 calculation: f2 = 1.0 - sumppi*0.7
     if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info("Phase 2C: Calculating π-bond orders (full Hückel)");
+        CurcumaLogger::info("Phase 2C: Calculating " SYM_PI "-bond orders (full Hückel)");
     }
 
     // Convert charges to std::vector for HuckelSolver interface
@@ -12582,42 +12272,6 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     (void)topo_duration; // timing captured in m_param_gen_report
 
     return topo_info;
-}
-
-GFNFF::EEQParameters GFNFF::getEEQParameters(int atom_idx, const TopologyInfo& topo_info) const
-{
-    EEQParameters params;
-
-    int z = m_atoms[atom_idx];
-
-    // Get base EEQ parameters from canonical arrays in gfnff_par.h
-    // Reference: gfnff_param.f90 chi/gam/alp/cnf_angewChem2020 (Spicher, Grimme 2020)
-    if (z >= 1 && z <= static_cast<int>(GFNFFParameters::chi_eeq.size())) {
-        params.chi = GFNFFParameters::chi_eeq[z - 1];
-        params.gam = GFNFFParameters::gam_eeq[z - 1];
-        // CRITICAL FIX (Nov 2025): alp must be SQUARED (gfnff_ini.f90:420)
-        double alp_raw = GFNFFParameters::alpha_eeq[z - 1];
-        params.alp = alp_raw * alp_raw;  // Fortran: topo%alpeeq(i) = param%alp(ati)**2
-        params.cnf = (z <= static_cast<int>(GFNFFParameters::cnf_eeq.size()))
-                         ? GFNFFParameters::cnf_eeq[z - 1] : 0.0;
-    } else {
-        // Fallback values
-        params.chi = 1.0;
-        params.gam = 0.5;
-        params.alp = 5.0 * 5.0;  // SQUARED! Fallback for undefined elements
-        params.cnf = 0.0;
-    }
-
-    // TODO: Add environment-dependent corrections (dxi, dgam)
-    // This should include:
-    // - Coordination number corrections
-    // - Hybridization corrections
-    // - Ring corrections
-    // - Charge corrections
-
-    params.xi_corr = 0.0; // TODO: Calculate environment correction
-
-    return params;
 }
 
 // ============================================================================
@@ -13788,60 +13442,6 @@ bool GFNFF::repulsionListIsDistanceFiltered() const
     return threshold == 0 || m_atomcount >= threshold;
 }
 
-ConfigManager GFNFF::extractDispersionConfig(const std::string& method) const
-{
-    // TODO Might me obsolete once D3 and D4 Params are fully integrated, or check method validity
-
-    /**
-     * @brief Extract D3/D4 configuration parameters from main GFN-FF config
-     *
-     * Creates a ConfigManager for D3ParameterGenerator or D4ParameterGenerator
-     * by extracting relevant parameters from the main m_parameters JSON.
-     *
-     * Parameter sources (priority order):
-     * 1. Method-specific overrides: m_parameters["d3_s6"], m_parameters["d4_s8"], etc.
-     * 2. GFN-FF defaults for the method
-     *
-     * Claude Generated (December 2025): Configuration extraction helper
-     */
-
-    json disp_config;
-
-    if (method == "d3") {
-        // D3 parameters with GFN-FF defaults (Spicher/Grimme, J. Chem. Theory Comput. 2020)
-        disp_config["d3_s6"] = m_parameters.value("d3_s6", 1.0);
-        disp_config["d3_s8"] = m_parameters.value("d3_s8", 2.85);  // GFN-FF D3-BJ default
-        disp_config["d3_a1"] = m_parameters.value("d3_a1", 0.80);  // GFN-FF D3-BJ damping
-        disp_config["d3_a2"] = m_parameters.value("d3_a2", 4.60);  // GFN-FF D3-BJ damping (Bohr)
-        disp_config["d3_s9"] = 0.0;  // Claude Generated (Jan 17, 2026): GFN-FF uses bonded batm, not D3 ATM
-        disp_config["d3_alp"] = m_parameters.value("d3_alp", 14.0);
-        disp_config["cutoff_radius"] = m_parameters.value("dispersion_cutoff", 95.0);
-
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::param("D3_s6", disp_config["d3_s6"].get<double>());
-            CurcumaLogger::param("D3_s8", disp_config["d3_s8"].get<double>());
-        }
-
-    } else if (method == "d4") {
-        // D4 parameters with GFN-FF defaults
-        disp_config["d4_s6"] = m_parameters.value("d4_s6", 1.0);
-        disp_config["d4_s8"] = m_parameters.value("d4_s8", 1.0);  // GFN-FF D4 (Spicher/Grimme 2020)
-        disp_config["d4_a1"] = m_parameters.value("d4_a1", 0.44); // GFN-FF D4
-        disp_config["d4_a2"] = m_parameters.value("d4_a2", 4.60); // GFN-FF D4 (Bohr)
-        disp_config["d4_alp"] = m_parameters.value("d4_alp", 14.0);
-        disp_config["d4_s10"] = m_parameters.value("d4_s10", 0.0);  // Higher-order terms typically off
-        disp_config["d4_s12"] = m_parameters.value("d4_s12", 0.0);
-        disp_config["cutoff_radius"] = m_parameters.value("dispersion_cutoff", 95.0);
-
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::param("D4_s6", disp_config["d4_s6"].get<double>());
-            CurcumaLogger::param("D4_s8", disp_config["d4_s8"].get<double>());
-        }
-    }
-
-    return ConfigManager(method + "param", disp_config);
-}
-
 // Energy component getters (FFWorkspace is the only GFN-FF engine).
 // frag_charge_model ensemble (Sep 2026): when the variant blend is active the components are the
 // same weighted sum as the energy (sum of the components == total), not the master's own workspace.
@@ -13929,96 +13529,6 @@ void GFNFF::setCharges(const Vector& charges) {
 // =================================================================================
 // TWO-PHASE EEQ IMPLEMENTATION (Claude Generated November 2025, Session 5)
 // =================================================================================
-
-/**
- * @brief Phase 1: Calculate topology-aware base charges (qa) via EEQ
- *
- * Solves the linear EEQ system with coordination-dependent electronegativity
- * and hardness parameters to get base charges.
- *
- * Claude Generated (November 2025): Complete two-phase EEQ implementation
- * Reference: angewChem 2020 GFN-FF publication
- */
-bool GFNFF::calculateTopologyCharges(TopologyInfo& topo_info) const
-{
-    // REFACTORED (Dec 2025 - Phase 3): Delegate to standalone EEQSolver
-    // Old implementation (lines 4024-4201) replaced with simple delegation
-    //
-    // UPDATED (Dec 2025): Now passes topology information for Floyd-Warshall topological distances
-    // This fixes the 4-5× charge overestimation bug (geometric vs topological distances)
-
-    if (m_atomcount <= 0) {
-        CurcumaLogger::error("calculateTopologyCharges: No atoms initialized");
-        return false;
-    }
-
-    // Initialize coordination numbers if not already present
-    if (topo_info.coordination_numbers.size() != m_atomcount) {
-        // Phase 2C: Migrate to shared CNCalculator for GFN-FF CN calculation
-        auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr, 1600.0, -7.5, 4.4, nullptr,
-            &m_cell_bohr_ortho);  // Nov 2026 (A2)
-        topo_info.coordination_numbers = Eigen::Map<Vector>(cn_vec.data(), cn_vec.size());
-        if (topo_info.coordination_numbers.size() != m_atomcount) {
-            CurcumaLogger::error("calculateTopologyCharges: Failed to calculate CN");
-            return false;
-        }
-    }
-
-    // Build EEQSolver::TopologyInput from GFNFF data (Dec 2025 - Floyd-Warshall fix)
-    EEQSolver::TopologyInput eeq_topology;
-
-    // 1. Extract neighbor lists from TopologyInfo
-    // These are bond connectivity lists needed for shortest path computation
-    eeq_topology.neighbor_lists = topo_info.neighbor_lists;
-
-    // 2. Extract covalent radii for Floyd-Warshall topological distances
-    // CRITICAL FIX (Mar 2026): Use Pyykko covalent radii (param%rad), NOT D3 radii
-    // Fortran: gfnff_ini.f90:438 uses param%rad (Pyykko radii in Angstrom)
-    eeq_topology.covalent_radii.resize(m_atomcount);
-    for (int i = 0; i < m_atomcount; ++i) {
-        int z = m_atoms[i];
-        if (z > 0 && z <= static_cast<int>(GFNFFParameters::covalent_radii.size())) {
-            eeq_topology.covalent_radii[i] = GFNFFParameters::covalent_radii[z - 1];  // Pyykko in Å
-        } else {
-            eeq_topology.covalent_radii[i] = 0.75;
-            CurcumaLogger::warn(fmt::format(
-                "GFNFF::calculateTopologyCharges: Unknown atomic number {} (using default covalent radius 0.75 Å)", z));
-        }
-    }
-
-    // 3. Pass topology to EEQSolver for Floyd-Warshall topological distances
-    // CRITICAL FIX (Jan 29, 2026): Enable dxi corrections in Phase 1 to match Fortran goedeckera
-    // Reference: Fortran gfnff_ini.f90:377-402 applies dxi corrections BEFORE Phase 1 EEQ solve
-    // - Ether oxygens (nh=0): dxi = 0
-    // - Hydroxyl oxygens (nh=1): dxi = -0.005
-    // This was incorrectly disabled, causing 0.0025 e charge error per hydroxyl oxygen
-    // and cumulative Coulomb energy errors of ~26 mEh for triose (66 atoms).
-    // Claude Generated (WP2, May 2026): forward pool + thread count
-    auto* pool_topo = threadPool();
-    if (pool_topo) pool_topo->setActiveThreadCount(m_threads);
-    topo_info.topology_charges = m_eeq_solver->calculateTopologyCharges(
-        m_atoms,
-        m_geometry_bohr,
-        m_charge,
-        topo_info.coordination_numbers,
-        eeq_topology,  // NEW: Pass topology for Floyd-Warshall (Dec 2025)
-        true,  // RESTORED (Jan 29, 2026): Enable dxi corrections to match Fortran goedeckera
-        pool_topo,
-        m_threads
-    );
-
-    if (topo_info.topology_charges.size() != m_atomcount) {
-        CurcumaLogger::error("calculateTopologyCharges: EEQSolver failed");
-        return false;
-    }
-
-    if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::info("calculateTopologyCharges: Delegated to EEQSolver with Floyd-Warshall topological distances");
-    }
-
-    return true;
-}
-
 
 // DEPRECATED (Dec 2025 - Phase 3): Old calculateTopologyCharges implementation (170 lines)
 // removed and replaced with delegation to EEQSolver above.
@@ -14243,100 +13753,6 @@ bool GFNFF::calculateAlpeeq(TopologyInfo& topo_info) const
             std::cout << fmt::format("    Atom {} (Z={}): qa={:.6f}, alpeeq={:.6f}",
                                     i, z_i, qa, topo_info.alpeeq(i)) << std::endl;
         }
-    }
-
-    return true;
-}
-
-/**
- * @brief Phase 2: Calculate final refined charges by solving corrected EEQ
- *
- * FIXED (Session 8, December 2025): Uses AUGMENTED SYSTEM (n+1 x n+1)
- * with correct EEQ matrix formula matching Fortran goedeckera reference.
- *
- * Iteratively solves EEQ with dxi, dgam, dalpha corrections applied,
- * refining the charges to account for environmental effects.
- *
- * Critical fixes from Session 8:
- * 1. Use augmented system (n+1 rows/cols) like Phase 1
- * 2. Diagonal: gam + sqrt(2/π)/sqrt(α) [NOT -1/(2*gam)]
- * 3. Off-diagonal: erf(γij*r)/r [NOT bare 1/r]
- * 4. chi uses NEGATIVE sign: -chi [NOT +chi]
- * 5. Apply dalpha to alpha parameters [NOT ignored]
- *
- * Claude Generated (November 2025): Initial version
- * Fixed (December 2025, Session 8): Bugs #1-5 corrected
- */
-bool GFNFF::calculateFinalCharges(TopologyInfo& topo_info, int max_iterations,
-                                   double convergence_threshold) const
-{
-    if (m_atomcount <= 0) {
-        CurcumaLogger::error("calculateFinalCharges: No atoms initialized");
-        return false;
-    }
-
-    if (topo_info.topology_charges.size() != m_atomcount) {
-        CurcumaLogger::error("calculateFinalCharges: topology_charges not yet calculated");
-        return false;
-    }
-
-    if (topo_info.dxi.size() != m_atomcount) {
-        CurcumaLogger::error("calculateFinalCharges: dxi corrections not calculated");
-        return false;
-    }
-
-    if (topo_info.dalpha.size() != m_atomcount) {
-        CurcumaLogger::error("calculateFinalCharges: dalpha corrections not calculated");
-        return false;
-    }
-
-    // Build EEQSolver::TopologyInput from GFNFF data for Phase 2
-    // This enables integer neighbor count usage in CNF calculation (Jan 2026 fix)
-    EEQSolver::TopologyInput eeq_topology;
-
-    // 1. Extract neighbor lists from TopologyInfo (already computed)
-    eeq_topology.neighbor_lists = topo_info.neighbor_lists;
-
-    // 2. Extract covalent radii for Floyd-Warshall topological distances
-    // CRITICAL FIX (Mar 2026): Use Pyykko covalent radii (param%rad), NOT D3 radii
-    // Fortran: gfnff_ini.f90:438 uses param%rad (Pyykko radii in Angstrom)
-    eeq_topology.covalent_radii.resize(m_atomcount);
-    for (int i = 0; i < m_atomcount; ++i) {
-        int z = m_atoms[i];
-        if (z >= 1 && z <= static_cast<int>(GFNFFParameters::covalent_radii.size())) {
-            eeq_topology.covalent_radii[i] = GFNFFParameters::covalent_radii[z - 1];  // Pyykko in Å
-        } else {
-            eeq_topology.covalent_radii[i] = 0.75;
-            CurcumaLogger::warn(fmt::format("calculateFinalCharges: Unknown atomic number {} (using default covalent radius 0.75 Å)", z));
-        }
-    }
-
-
-    // Delegate to EEQSolver for Phase 2 refinement
-    // Claude Generated (WP2, May 2026): forward pool + thread count
-    auto* pool_final = threadPool();
-    if (pool_final) pool_final->setActiveThreadCount(m_threads);
-    topo_info.eeq_charges = m_eeq_solver->calculateFinalCharges(
-        m_atoms,
-        m_geometry_bohr,
-        m_charge,
-        topo_info.topology_charges,
-        topo_info.coordination_numbers,
-        topo_info.hybridization,
-        eeq_topology,
-        true, // ENABLE corrections to match Fortran goed_gfnff (dxi, dgam)
-        topo_info.alpeeq, // Pass charge-dependent alpha (alpeeq) from Phase 1B
-        pool_final,
-        m_threads
-    );
-
-    if (topo_info.eeq_charges.size() != m_atomcount) {
-        CurcumaLogger::error("calculateFinalCharges: EEQSolver failed");
-        return false;
-    }
-
-    if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::info("calculateFinalCharges: Delegated to EEQSolver (Phase 3)");
     }
 
     return true;
@@ -14580,16 +13996,4 @@ Matrix GFNFF::NumGrad(double dx)
     }
 
     return numgrad;
-}
-
-// Claude Generated (Apr 2026): P1a — Delegate CN-change threshold check to D4ParameterGenerator
-bool GFNFF::canSkipD4GaussianWeightsUpdate(const std::vector<double>& cn) const
-{
-    if (!m_d4_generator) return false;
-    return m_d4_generator->canSkipGaussianWeightsUpdate(cn);
-}
-
-void GFNFF::recordD4CNValues(const std::vector<double>& cn)
-{
-    if (m_d4_generator) m_d4_generator->recordCNValues(cn);
 }

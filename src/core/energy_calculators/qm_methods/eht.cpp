@@ -46,6 +46,7 @@
 #include "eht_parameters.h"
 
 #include "json.hpp"
+#include "src/core/output_symbols.h"
 
 EHT::EHT()
     : m_K(EHTParams::ParameterDatabase::getWolfsbergHelmholzConstant())
@@ -126,7 +127,7 @@ Basisset EHT::MakeBasis()
                 break;
             }
 
-            std::string orbital_info = fmt::format("{}:{}{}-{} (ζ={:.3f}, VSIP={:.2f} eV)",
+            std::string orbital_info = fmt::format("{}:{}{}-{} (" SYM_ZETA "={:.3f}, VSIP={:.2f} eV)",
                 i + 1,
                 EHTParams::ParameterDatabase::getElementSymbol(m_atoms[orb.atom]),
                 orb.atom + 1,
@@ -161,10 +162,8 @@ double EHT::Calculation(bool gradient)
 {
     CitationRegistry::cite("eht");
     m_threads = 1; // EHT typically uses single thread for matrix operations
-    // std::cout << m_geometry << std::endl << std::endl;
     //  Check for gradient request (not supported in EHT)
     if (gradient) {
-        // std::cout << "Warning: EHT does not support analytical gradients." << std::endl;
     }
 
     // Validate molecule
@@ -285,7 +284,6 @@ Matrix EHT::MakeOverlap(Basisset& basisset)
             // if (m_verbose) {
             //    std::cout << "Overlap between orbital " << i << " and " << j
             //              << ": " << overlap << std::endl;
-            //}
         }
     }
 

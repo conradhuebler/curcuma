@@ -260,7 +260,6 @@ public:
     inline std::string NamePattern(int index) const { return "#" + std::to_string(index); }
 
     std::vector<Molecule*> Result() const { return m_result; }
-    // std::vector<Molecule*> Failed() const { return m_failed; }
 
     void ParametriseRotationalCutoffs();
 
@@ -393,15 +392,15 @@ private:
     PARAM(reuse_energies, Bool, false, "Reuse the energy stored in the input file instead of recomputing it with the energy method. Only correct when every structure in the file was produced at the same level of theory, e.g. an ensemble written by ConfSearch right after optimisation. Structures without a stored energy are always computed.", "Filtering", {})
 
     // --- Descriptor Thresholds (Loose) ---
-    PARAM(slx, String, "default", "Default multiplier for all loose thresholds: 'default' or '1.0,2.0' or '1.5'", "Thresholds", {"sLX"})
-    PARAM(sle, String, "default", "Loose energy threshold multiplier", "Thresholds", {"sLE"})
-    PARAM(sli, String, "default", "Loose rotational constants threshold multiplier", "Thresholds", {"sLI"})
-    PARAM(slh, String, "default", "Loose Ripser (topology) threshold multiplier", "Thresholds", {"sLH"})
+    PARAM(slx, String, "default", "Default multiplier for all loose thresholds: 'default' or '1.0,2.0' or '1.5'", "Thresholds", {})
+    PARAM(sle, String, "default", "Loose energy threshold multiplier", "Thresholds", {})
+    PARAM(sli, String, "default", "Loose rotational constants threshold multiplier", "Thresholds", {})
+    PARAM(slh, String, "default", "Loose Ripser (topology) threshold multiplier", "Thresholds", {})
 
     // --- Descriptor Thresholds (Tight) ---
-    PARAM(ste, Double, 0.1, "Tight energy difference threshold", "Thresholds", {"sTE"})
-    PARAM(sti, Double, 0.1, "Tight rotational constants difference threshold", "Thresholds", {"sTI"})
-    PARAM(sth, Double, 0.1, "Tight Ripser difference threshold", "Thresholds", {"sTH"})
+    PARAM(ste, Double, 0.1, "Tight energy difference threshold", "Thresholds", {})
+    PARAM(sti, Double, 0.1, "Tight rotational constants difference threshold", "Thresholds", {})
+    PARAM(sth, Double, 0.1, "Tight Ripser difference threshold", "Thresholds", {})
 
     // --- Threshold Control Flags ---
     PARAM(loose_thresh, Int, 7, "Bit flags for loose threshold checks (1=inertia, 2=ripser, 4=energy)", "Thresholds", {"looseThresh"})

@@ -355,22 +355,11 @@ void LBFGSppOptimizer::FinalizeOptimizationInternal()
 
 json LBFGSppOptimizer::GetDefaultConfiguration() const
 {
+    // Single default layer: OptimizerInterfaceJson holds the LBFGS values, kept equal to the
+    // registry module "opt" (curcumaopt.h) that -opt merges into the config. Earlier this
+    // function overrode lbfgs_max_line_search (2) and lbfgs_min_step, so -opt and direct
+    // callers (SimpleMD, PolymerBuild, Docking, RMSDTraj) ran with different values.
     json config = OptimizerInterfaceJson;
-
-    // LBFGSpp-specific parameters - matching legacy CurcumaOpt defaults
-    config["lbfgs_m"] = 2000;
-    config["lbfgs_past"] = 0;
-    config["lbfgs_eps_abs"] = 1e-5;
-    config["lbfgs_eps_rel"] = 1e-5;
-    config["lbfgs_delta"] = 0.0;
-    config["lbfgs_line_search"] = 3; // LBFGS_LINESEARCH_DEFAULT
-    config["lbfgs_max_line_search"] = 2;  // Legacy: LBFGS_ls_iter = 2
-    config["lbfgs_min_step"] = 1e-4;      // Legacy: LBFGS_min_step = 1e-4 (not 1e-20!)
-    config["lbfgs_max_step"] = 1e20;
-    config["lbfgs_max_atom_step"] = -1.0;
-    config["lbfgs_atom_step_auto_natoms"] = 2000;
-    config["lbfgs_ftol"] = 1e-4;
-    config["lbfgs_wolfe"] = 0.9;
 
     return config;
 }

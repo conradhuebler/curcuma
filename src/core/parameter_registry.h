@@ -84,6 +84,16 @@ public:
     const ParameterDefinition* findDefinition(const std::string& module, const std::string& alias) const;
     std::vector<ParameterDefinition> getForModule(const std::string& module) const;
 
+    /// Claude Generated (Nov 2026): CLI2Json stores `-flag 1` as the number 1.0. Turn numeric
+    /// values of parameters registered as Bool (by name or alias) into JSON booleans in every
+    /// module sub-object of the controller, so `value("x", true)` and `get<bool>()` do not throw.
+    void coerceBoolParameters(nlohmann::json& controller) const;
+
+    /// Claude Generated (Nov 2026): values in the module sub-objects of the controller that break
+    /// the `enum=`, `min=` or `max=` annotation of their parameter, as readable messages (one per
+    /// parameter). Enumerations compare case-insensitively. Nothing is changed or rejected.
+    std::vector<std::string> checkAnnotations(const nlohmann::json& controller) const;
+
     // Claude Generated: Auto-generated help system
     void printHelp(const std::string& module) const;
     void printAllModules() const;

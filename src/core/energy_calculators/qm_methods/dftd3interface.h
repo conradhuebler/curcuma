@@ -76,12 +76,6 @@ public:
     void PrintParameter() const;
     void UpdateAtom(int index, double x, double y, double z);
 
-    inline double ParameterA1() const { return m_d3_a1; }
-    inline double ParameterA2() const { return m_d3_a2; }
-    inline double ParameterAlp() const { return m_d3_alp; }
-    inline double ParameterS6() const { return m_d3_s6; }
-    inline double ParameterS8() const { return m_d3_s8; }
-    inline double ParameterS9() const { return m_d3_s9; }
     virtual bool hasGradient() const { return true; }
 
 private:

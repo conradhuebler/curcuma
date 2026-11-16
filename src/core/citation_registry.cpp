@@ -16,6 +16,7 @@
 std::vector<std::string> CitationRegistry::m_cited_keys;
 std::set<std::string> CitationRegistry::m_seen;
 std::vector<std::pair<std::string, std::string>> CitationRegistry::m_subrefs;
+std::string CitationRegistry::m_output_dir;
 std::mutex CitationRegistry::m_mutex;
 
 void CitationRegistry::cite(const std::string& key, const std::string& parent)
@@ -124,6 +125,9 @@ void CitationRegistry::writeBibTeX(const std::string& output_dir, const std::str
     std::lock_guard<std::mutex> lock(m_mutex);
     if (m_cited_keys.empty()) return;
 
+    // Use m_output_dir (set by BMT) if available, otherwise fall back to output_dir param
+    std::string dir = m_output_dir.empty() ? output_dir : m_output_dir;
+
     // Derive filename
     std::string filename;
     if (!basename.empty()) {
@@ -135,8 +139,8 @@ void CitationRegistry::writeBibTeX(const std::string& output_dir, const std::str
         filename = "curcuma_citations.bib";
     }
 
-    if (!output_dir.empty()) {
-        filename = output_dir + "/" + filename;
+    if (!dir.empty()) {
+        filename = dir + "/" + filename;
     }
 
     std::ofstream ofs(filename);
@@ -167,6 +171,12 @@ void CitationRegistry::clear()
     m_cited_keys.clear();
     m_seen.clear();
     m_subrefs.clear();
+    m_output_dir.clear();
+}
+
+void CitationRegistry::setOutputDir(const std::string& dir)
+{
+    m_output_dir = dir;
 }
 
 bool CitationRegistry::hasKey(const std::string& key)

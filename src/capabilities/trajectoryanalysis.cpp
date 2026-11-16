@@ -27,6 +27,7 @@
 #include <cmath>
 #include <numeric>
 #include <iomanip>
+#include "src/core/output_symbols.h"
 
 TrajectoryAnalysis::TrajectoryAnalysis(const json& controller, bool silent)
     : TrajectoryAnalysis(ConfigManager("trajectoryanalysis", controller), silent)
@@ -162,9 +163,9 @@ void TrajectoryAnalysis::start()
             CurcumaLogger::param("lattice_a", fmt::format("{:.4f} Å", params[0]));
             CurcumaLogger::param("lattice_b", fmt::format("{:.4f} Å", params[1]));
             CurcumaLogger::param("lattice_c", fmt::format("{:.4f} Å", params[2]));
-            CurcumaLogger::param("lattice_alpha", fmt::format("{:.2f}°", params[3]));
-            CurcumaLogger::param("lattice_beta", fmt::format("{:.2f}°", params[4]));
-            CurcumaLogger::param("lattice_gamma", fmt::format("{:.2f}°", params[5]));
+            CurcumaLogger::param("lattice_alpha", fmt::format("{:.2f}" SYM_DEG, params[3]));
+            CurcumaLogger::param("lattice_beta", fmt::format("{:.2f}" SYM_DEG, params[4]));
+            CurcumaLogger::param("lattice_gamma", fmt::format("{:.2f}" SYM_DEG, params[5]));
             pbc_logged = true;
         }
 
