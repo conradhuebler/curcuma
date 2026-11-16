@@ -72,6 +72,8 @@ All in `src/core/energy_calculators/qm_methods/`. Every pair loop below uses pla
    only when every pair is below 9 Bohr (water dimer: yes); for larger molecules the KO -> 1/r switch beyond 9 Bohr is a
    model difference to the vacuum GFN2 of a few 1e-5 Eh per pair at 10 Bohr (3 % of 1/r). This is tblite's definition of
    periodic GFN-xTB and is kept as `-xtb.pbc_coulomb_switch_bohr` (default 10; change = no tblite agreement).
+   **It is a model constant, not a convergence parameter**: energy and pressure of a liquid grow with ln(rc) without
+   limit (measured in "Klopman-Ohno switch radius" below).
    The background term `-pi/(a^2 V)` (missing in tblite) is included so that charged cells are alpha-independent; a
    charged cell therefore differs from tblite by `-pi Q^2/(2 a^2 V)` (documented, tested neutral only).
 5. **GFN2 multipoles with Ewald** (tblite's split: damped kernel minus Ewald-screened bare kernel in real space, bare
@@ -600,6 +602,50 @@ non-periodic; now uses `eht` there and checks gfn2 + cell as periodic with DOF 3
 (checks (C), 8e-5 .. 3e-4 against 1e-6 .. 1.5e-4; fails identically with the executable of the main `release/` build of
 Nov 9, i.e. pre-existing and unrelated to this work; not changed). 3 tests `Not Run (Disabled)` as before. The
 WP-PERIODIC-NONBONDED A6b statement "native gfn1/gfn2 have no periodic energy" is superseded by P5.
+
+## Klopman-Ohno switch radius: model constant, not a convergence parameter (2026-11-16, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+Question from the GFN2 water box (density 1.31 g/cm^3 at rc = 10 Bohr, pressure shifts of 10^4 bar with rc): is the
+rc dependence of `-xtb.pbc_coulomb_switch_bohr` a bug or the model? Answer: the model (tblite's definition); no code
+change. Measurements and scripts: project folder GFN-FF-Wasser, subfolder 06_gfn2/switch (operator's scratch, not in the repo).
+
+- **Code = tblite statement by statement**: kernel `f KO + (1 - f)/r - erf(a r)/r` per image (`effective.f90:404-412`),
+  quintic `fsmooth` over [rc - 1, rc] (`:449-466`), `rcut = 10` hard-coded (`:114`); `buildGammaMatrixPeriodic` and
+  the gradient/virial loop (`xtb_periodic.cpp`, `koSwitch`) are the same. The CUDA path uses the host gamma.
+- **Why it cannot converge**: `KO - 1/r = -1/(2 gbar^2 r^3) + O(r^-5)` with `gbar` the shell-pair hardness average.
+  For two neutral molecules the r^-3 term does not cancel because `gbar` differs per shell pair: point model
+  `u(R) = -C/R^3`, `C = sum_{a in A, b in B} q_a q_b / (2 gbar_ab^2)`. GFN1 (harmonic mean) gives `C = D_A D_B / 4`,
+  `D = sum_a q_a / g_a`, i.e. orientation-independent and attractive between equal molecules; GFN2 (arithmetic mean)
+  is not separable but behaves alike. GFN2 water shell charges (64-H2O box image, rc 10): O s +0.24, O p -0.90,
+  H +0.32 e, giving `C` = 0.135 Eh Bohr^3. A lattice sum of R^-3 in 3D diverges logarithmically:
+  `dE/dln rc = -2 pi rho C N`, `dP/dln rc = -2 pi rho^2 C` (-10200 bar per e-fold at 1.29 g/cm^3).
+- **Measured** (1-step MD, CPU, `-scf_threshold 1e-9`, n = 1 image each; 64 H2O GFN2 box end image, rho 1.29; 432 H2O
+  GFN-FF box image, rho 1.02):
+
+| rc (Bohr) | 6 | 8 | 10 | 12 | 15 | 20 | 25 | 30 | 40 | 50 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 64: E - E(10) (Eh) | -0.066 | +0.212 | 0 | +0.042 | -0.049 | -0.150 | -0.232 | -0.295 | -0.404 | -0.490 |
+| 64: P_vir - P_vir(10) (bar) | -8690 | +9216 | 0 | -4988 | -1720 | -11909 | -10535 | -13623 | -20552 | -23269 |
+| 432: E - E(10) (Eh) | +0.075 | +0.616 | 0 | -0.246 | -0.646 | -1.124 | -1.514 | -1.843 | -2.362 | |
+| 432: P_vir - P_vir(10) (bar) | -14940 | +4679 | 0 | +948 | -1448 | -4031 | -6354 | -7940 | -10753 | |
+
+  For rc >= 8 E(rc) - E(10) is reproduced by the remainder sum at fixed rc = 10 shell charges to within 6.2 % on both
+  images (e.g. 64: +0.223 / +0.044 / -0.469 Eh at 8 / 12 / 50); the rest is the SCF response (larger at rc = 6:
+  16 % and 49 %, where the switch reaches the first neighbour shell). Beyond 15 Bohr E falls
+  linearly in ln rc (64: -0.37 Eh per e-fold, point model -0.35; 432: -1.79, point model -1.69). P falls by
+  -10^4 bar per e-fold (64) and -6000 to -10000 bar (432); below 15 Bohr it oscillates by +-10^4 bar with the
+  pair structure in the 1-Bohr switch window (the fixed-charge estimate of dP has the measured sign at every rc of both images; magnitude mostly within a factor 2, at 432/15 Bohr a factor 10).
+- **Consistency**: `fsmooth` has zero first and second derivatives at both ends, so E is C2 in the geometry and in rc.
+  Cell-scaling FD (central, isotropic, h = 1e-4 / 2e-4, scf_threshold 1e-10, 64 image) minus analytic virial:
+  +31.2 / +20.7 bar at rc 8, 10 and 12 alike (spread 0.07 bar), so the KO term is virial-consistent. The offset is the
+  hard D4 ATM cutoff (25 Bohr, energy discontinuous, FD h-dependent): with `-xtb.d4_atm_cutoff 40` -1.2 / -5.1 bar,
+  60: -7.9 bar (h = 1e-4); remaining scatter from the other hard cutoffs (D4 pairs 50, CN). Not a code error.
+- **Consequence**: a periodic GFN2 (and GFN1) liquid density is defined only together with rc; there is no rc -> inf
+  limit, and the vacuum GFN2 of a cluster corresponds to an rc of the cluster size (expected denser; not measured).
+  A larger default would not be "more converged". Proposal, not implemented: keep 10 (tblite parity) and report rc with
+  every periodic GFN density; a larger value only as an explicitly named model variant. NPT 64-H2O runs at rc = 8 and
+  12 are queued in the project folder (density response, pending).
+- Not tested: GFN1 numbers (only the analytic form), other liquids, cells below 2 rc (image sums are exact there too).
 
 ## Not implemented / not tested (updated per stage)
 
