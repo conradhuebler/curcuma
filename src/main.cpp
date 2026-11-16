@@ -50,6 +50,7 @@
 #include "src/capabilities/rmsd.h"
 #include "src/capabilities/rmsdtraj.h"
 #include "src/capabilities/simplemd.h"
+#include "src/capabilities/nebmd.h"  // Claude Generated 2026: NEB-like molecular dynamics
 #include "src/capabilities/trajectory_statistics.h"
 #include "src/capabilities/trajectoryanalysis.h"
 #include "src/capabilities/polymerbuild.h"
@@ -64,6 +65,7 @@
 // Claude Generated: Parameter registry system
 #include "generated/parameter_registry.h"
 #include "src/core/parameter_registry.h"
+#include "src/core/cli_parser.h"
 
 #include "src/capabilities/optimiser/OptimiseDipoleScaling.h"
 
@@ -97,6 +99,7 @@ namespace fs = std::filesystem;
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include "src/core/output_symbols.h"
 
 void bt_handler(int sig)
 {
@@ -113,7 +116,6 @@ void bt_handler(int sig)
     fprintf(stderr, "Good-By\n");
 #ifdef C17
 #ifndef _WIN32
-    //  std::filesystem::remove("stop");
 #endif
 #else
     remove("stop");
@@ -283,7 +285,7 @@ int executeBond(const json& controller, int argc, char** argv)
             // Use original inline formatting for CSV and human formats
             // (maintaining compatibility while JSON uses trajectory framework)
             if (format == "csv") {
-                std::cout << "frame,bond_length,<bond_length>,σ(bond_length)" << std::endl;
+                std::cout << "frame,bond_length,<bond_length>," SYM_SIGMA "(bond_length)" << std::endl;
                 double mean = stats.getMean("bond_length");
                 double std_dev = stats.getStdDev("bond_length");
                 for (size_t i = 0; i < distances.size(); ++i) {
@@ -297,7 +299,7 @@ int executeBond(const json& controller, int argc, char** argv)
 
                 // Header (original inline code)
                 std::cout << std::setw(8) << "# Frame" << std::setw(15) << "bond_length"
-                         << std::setw(15) << "<bond_length>" << std::setw(15) << "σ(bond_length)" << std::endl;
+                         << std::setw(15) << "<bond_length>" << std::setw(15) << SYM_SIGMA "(bond_length)" << std::endl;
 
                 // Data rows (original inline code)
                 for (size_t i = 0; i < distances.size(); ++i) {
@@ -325,7 +327,7 @@ int executeBond(const json& controller, int argc, char** argv)
 // Claude Generated helper: Convert angles from radians based on unit
 double convertAngle(double radians, const std::string& unit)
 {
-    if (unit == "degrees" || unit == "deg" || unit == "°") {
+    if (unit == "degrees" || unit == "deg" || unit == SYM_DEG) {
         return radians * 180.0 / M_PI;
     }
     return radians;  // Return radians
@@ -334,7 +336,7 @@ double convertAngle(double radians, const std::string& unit)
 // Claude Generated helper: Get angle unit string
 std::string getAngleUnitString(const std::string& unit)
 {
-    if (unit == "degrees" || unit == "deg" || unit == "°") {
+    if (unit == "degrees" || unit == "deg" || unit == SYM_DEG) {
         return "degrees";
     }
     return "radians";
@@ -442,7 +444,7 @@ int executeAngle(const json& controller, int argc, char** argv)
             // Use original inline formatting for CSV and human formats
             // (maintaining compatibility while JSON uses trajectory framework)
             if (format == "csv") {
-                std::cout << "frame,bond_angle,<bond_angle>,σ(bond_angle)" << std::endl;
+                std::cout << "frame,bond_angle,<bond_angle>," SYM_SIGMA "(bond_angle)" << std::endl;
                 double mean = stats.getMean("bond_angle");
                 double std_dev = stats.getStdDev("bond_angle");
                 for (size_t i = 0; i < angles.size(); ++i) {
@@ -456,7 +458,7 @@ int executeAngle(const json& controller, int argc, char** argv)
 
                 // Header (original inline code)
                 std::cout << std::setw(8) << "# Frame" << std::setw(15) << "bond_angle"
-                         << std::setw(15) << "<bond_angle>" << std::setw(15) << "σ(bond_angle)" << std::endl;
+                         << std::setw(15) << "<bond_angle>" << std::setw(15) << SYM_SIGMA "(bond_angle)" << std::endl;
 
                 // Data rows (original inline code)
                 for (size_t i = 0; i < angles.size(); ++i) {
@@ -584,7 +586,7 @@ int executeTorsion(const json& controller, int argc, char** argv)
             // Use original inline formatting for CSV and human formats
             // (maintaining compatibility while JSON uses trajectory framework)
             if (format == "csv") {
-                std::cout << "frame,dihedral,<dihedral>,σ(dihedral)" << std::endl;
+                std::cout << "frame,dihedral,<dihedral>," SYM_SIGMA "(dihedral)" << std::endl;
                 double mean = stats.getMean("dihedral");
                 double std_dev = stats.getStdDev("dihedral");
                 for (size_t i = 0; i < dihedrals.size(); ++i) {
@@ -598,7 +600,7 @@ int executeTorsion(const json& controller, int argc, char** argv)
 
                 // Header (original inline code)
                 std::cout << std::setw(8) << "# Frame" << std::setw(15) << "dihedral"
-                         << std::setw(15) << "<dihedral>" << std::setw(15) << "σ(dihedral)" << std::endl;
+                         << std::setw(15) << "<dihedral>" << std::setw(15) << SYM_SIGMA "(dihedral)" << std::endl;
 
                 // Data rows (original inline code)
                 for (size_t i = 0; i < dihedrals.size(); ++i) {
@@ -628,505 +630,6 @@ double DotProduct(const Eigen::Vector3d& pos1, const Eigen::Vector3d& pos2)
     return pos1.dot(pos2);
 }
 
-// Claude Generated 2026: Recursive deep-merge — dst wins where it already has a value (CLI > file).
-// Unlike nlohmann::merge_patch this never deletes on null and recurses through every nested object,
-// fixing the 1-level-only behavior of the old -import_config merge.
-static void mergeJsonRecursive(json& dst, const json& src)
-{
-    if (!src.is_object()) {
-        return;
-    }
-    for (auto it = src.begin(); it != src.end(); ++it) {
-        if (!dst.contains(it.key())) {
-            dst[it.key()] = it.value();
-        } else if (dst[it.key()].is_object() && it.value().is_object()) {
-            mergeJsonRecursive(dst[it.key()], it.value());
-        }
-        // else: dst already has a scalar/array at this key — CLI wins, keep dst.
-    }
-}
-
-// Helper function to set nested JSON values from dot-notation keys - Claude Generated
-void setNestedJsonValue(json& target, const std::string& dotKey, const json& value) {
-    if (dotKey.find('.') == std::string::npos) {
-        // No dots - use as flat key
-        target[dotKey] = value;
-        return;
-    }
-
-    // Split on dots and create nested structure
-    std::vector<std::string> keys;
-    std::stringstream ss(dotKey);
-    std::string key;
-
-    while (std::getline(ss, key, '.')) {
-        keys.push_back(key);
-    }
-
-    // Navigate/create nested structure
-    json* current = &target;
-    for (size_t i = 0; i < keys.size() - 1; ++i) {
-        if (!current->contains(keys[i]) || !(*current)[keys[i]].is_object()) {
-            (*current)[keys[i]] = json::object();
-        }
-        current = &(*current)[keys[i]];
-    }
-
-    // Set the final value
-    (*current)[keys.back()] = value;
-}
-
-json CLI2Json(int argc, char** argv)
-{
-    json controller;
-    json key = json::object();  // Initialize as empty object (not null) so controller["opt"] is always usable
-    if (argc < 2)
-        return controller;
-
-    std::string keyword = argv[1];
-    keyword.erase(0, 1);
-
-    // Claude Generated (October 2025): Global parameters that should be accessible
-    // both at top level (controller[param]) and module level (controller[module][param])
-    // ENHANCED: Added "method" to support global energy method specification
-    // Claude Generated (March 2026): Added "gpu" for GPU acceleration control.
-    //   -gpu <backend>: none (default, CPU) | cuda | rocm | vulkan. ("auto" was removed Oct 26, 2026: warning, CPU.)
-    //   Applies to gfn1/gfn2 (USE_*_XTB builds) and gfnff (USE_* builds); an explicit
-    //   backend not compiled in warns and falls back to CPU.
-    // Claude Generated (Jul 2026): Added "charge","spin" — molecular charge/spin must reach
-    // top-level controller["charge"] so -sp/-opt can apply them to the molecule
-    // (setCharge reads controller["charge"], not the command-module namespace).
-    std::set<std::string> global_params = {
-        "verbosity", "threads", "method", "gpu",  // energy_method and gpu apply to all capabilities
-        "gpu_device",   // Claude Generated (Sep 2026, multi-GPU): device index for -gpu (see docs/MULTI_GPU.md)
-        "gpu_devices", "gpu_workers_per_device",  // batch workers spread over these devices
-        "gpu_strict",   // Claude Generated (Sep 2026): any GPU fallback ends the run (exit 3), see src/core/gpu_fallback.h
-        "gpu_memory_check",  // native gfn1/gfn2 GPU: refuse a basis that does not fit (default true)
-        "gpu_sparse_integrals",  // native gfn1/gfn2 GPU: screened S/H0/multipole storage auto|on|off
-        // Claude Generated (Sep 2026, multi-GPU step 3): multi-GPU eigensolve (docs/GPU_TUNING.md)
-        "gpu_eigensolver_devices", "gpu_eigensolver_backend", "gpu_eigensolver_block",
-        "gpu_eigensolver_min_nao", "gpu_eigensolver_fp32", "gpu_eigensolver_verify",
-        "gpu_density_devices", "gpu_density_min_nao",  // split the pattern density (docs/GPU_TUNING.md)
-        "charge", "spin",  // molecular charge/spin (top-level, not module-scoped)
-        "export_run", // Export current run configuration
-        "import_config", // Import custom configuration
-        "bak",   // Files to copy back from BMT output directory to CWD
-        "no_bmt", // Disable BMT output directory (legacy: write to CWD)
-        "noprogress" // Disable live progress bars globally (e.g. when redirecting to a file)
-    };
-
-    // Claude Generated (Jul 2026): modules that are sub-scopes of a calculation rather than
-    // commands in their own right. Auto-routing a flat flag into one of these is the intended,
-    // everyday behaviour ("-sp mol.xyz -cn_cutoff_bohr 5.5" -> controller["gfnff"]), so it is
-    // only reported at info level. Moving a flag into another CAPABILITY module means the user
-    // almost certainly aimed it at the active command and it silently went elsewhere -> warn.
-    // This is the safety net for the class of bug where ConfSearch (unregistered) lost
-    // -opt_method to polymerbuild and -thermostat to simplemd without any diagnostic.
-    std::set<std::string> scope_modules(MethodFactory::methodParameterScopes().begin(),
-                                        MethodFactory::methodParameterScopes().end());
-    scope_modules.insert({"ripser", "rmsd", "ancopt", "modern_optimizer", "native_lbfgs"});
-
-    // Claude Generated (October 2025): CLI keyword to module name mapping
-    // Maps command-line keywords (e.g., -md) to actual module names (e.g., simplemd)
-    std::map<std::string, std::string> keyword_to_module = {
-        {"md", "simplemd"},
-        {"opt", "opt"},
-        {"sp", "opt"},  // single point also uses opt module
-        {"interaction", "interaction"},
-        {"confscan", "confscan"},
-        {"rmsd", "rmsd"},
-        {"analysis", "analysis"},
-        {"hessian", "hessian"},
-        {"casino", "casino"}
-    };
-
-    // Get actual module name (for ConfigManager)
-    std::string module_name = keyword;
-    if (keyword_to_module.count(keyword) > 0) {
-        module_name = keyword_to_module[keyword];
-    }
-
-    // Claude Generated (Jul 2026, F2): a token starting with '-' followed by a digit or '.'
-    // is a negative NUMBER value (e.g. "-charge -1", "-threshold -1e-6"), not a flag. The
-    // value-consume logic below treats any '-'-prefixed next arg as a flag, which silently
-    // drops negative numeric values (charge became boolean true -> get<int>()=1, breaking
-    // all negatively-charged species). isFlag() returns false for negative numbers so they
-    // flow into the stod() value branch instead.
-    auto isFlag = [](const std::string& s) -> bool {
-        if (s.empty() || s[0] != '-') return false;
-        if (s.size() < 2) return true;             // lone "-"
-        char c = s[1];
-        // "-3", "-1.5", "-.5", "-1e-6" are numbers, not flags
-        if (std::isdigit(static_cast<unsigned char>(c)) || c == '.') return false;
-        return true;
-    };
-
-    for (int i = 2; i < argc; ++i) {
-        std::string current = argv[i];
-        std::string sub = current.substr(0, 1);
-
-        if (sub == "-") {
-            // Claude Generated (Oct 2026): a flag token that contains whitespace ("-spin 1" as ONE
-            // argv entry, e.g. from a shell variable that was not word-split) used to become the
-            // boolean key "spin 1" and was silently ignored - the run then reported a closed-shell
-            // energy for a radical. No parameter name contains whitespace, so refuse it.
-            if (current.find_first_of(" \t\r\n") != std::string::npos) {
-                CurcumaLogger::error("Command-line argument '" + current
-                    + "' contains whitespace: flag and value must be separate arguments "
-                      "(check shell quoting / variable expansion).");
-                exit(1);
-            }
-            current.erase(0, 1);
-            // Claude Generated (Jun 2026): canonicalize hyphens to underscores in CLI
-            // parameter names so "-opt-method" matches the JSON key "opt_method".
-            std::replace(current.begin(), current.end(), '-', '_');
-
-            // Handle special verbosity shortcuts - Claude Generated
-            if (current == "silent" || current == "quiet") {
-                key["verbosity"] = 0;
-                continue;
-            } else if (current == "verbose") {
-                key["verbosity"] = 3;
-                continue;
-            } else if (current == "plain") {
-                // Claude Generated: Plain mode - no colors, no prefixes (like ORCA/Gaussian)
-                CurcumaLogger::set_plain_mode(true);
-                continue;
-            } else if (current == "v") {
-                // Handle -v N syntax for verbosity level
-                if ((i + 1) < argc) {
-                    try {
-                        int verbosity_level = std::stoi(argv[i + 1]);
-                        if (verbosity_level >= 0 && verbosity_level <= 4) {
-                            key["verbosity"] = verbosity_level;
-                            ++i; // Skip next argument
-                            continue;
-                        }
-                    } catch (const std::exception&) {
-                        // Fall through to normal processing
-                    }
-                }
-            }
-
-            // Claude Generated (October 2025 - CRITICAL FIX): Strip redundant keyword prefix from dotted parameters
-            // Makes "-md.max_time 10" and "-max_time 10" synonymous within "-md" command context
-            // Fixes SimpleMD double-nesting bug: controller["simplemd"]["md"]["max_time"] → controller["simplemd"]["max_time"]
-            if (current.find('.') != std::string::npos) {
-                size_t dot_pos = current.find('.');
-                std::string param_prefix = current.substr(0, dot_pos);
-                std::string param_key = current.substr(dot_pos + 1);
-
-                // Resolve prefix to module name using keyword_to_module map (e.g., "md" → "simplemd")
-                std::string prefix_module = param_prefix;
-                if (keyword_to_module.count(param_prefix) > 0) {
-                    prefix_module = keyword_to_module[param_prefix];
-                }
-
-                // If prefix matches current command's keyword or module name, strip it
-                // Example: "-md input.xyz -md.max_time 10" → keyword="md", module_name="simplemd"
-                //          param_prefix="md" matches keyword → strip → current="max_time"
-                // Preserves cross-module routing: "-md -rmsd.method subspace" keeps "rmsd.method"
-                if (param_prefix == keyword || prefix_module == module_name) {
-                    current = param_key;  // Strip prefix: "md.max_time" → "max_time"
-                }
-            }
-
-            if ((i + 1) >= argc || isFlag(argv[i + 1]) || argv[i + 1] == std::string("true") || argv[i + 1] == std::string("+")) {
-                // Claude Generated (May 2026): Multi-value accumulation for -bak flag
-                if (current == "bak" && key.contains("bak")) {
-                    if (key["bak"].is_array()) {
-                        key["bak"].push_back(true);
-                    } else {
-                        key["bak"] = json::array({key["bak"], true});
-                    }
-                } else {
-                    setNestedJsonValue(key, current, true);
-                }
-            } else if (argv[i + 1] == std::string("false")) {
-                setNestedJsonValue(key, current, false);
-                ++i;
-            } else {
-                std::string next = argv[i + 1];
-                //       std::cout << "next: " << next << std::endl;
-
-                bool isNumber = true;
-                bool isVector = next.find("|") != std::string::npos || next.find(",") != std::string::npos || next.find(":") != std::string::npos;
-                //      std::cout << "isNumber: " << isNumber << std::endl
-                //                  << "isVector: " << isVector << std::endl;
-                if (isVector) {
-                    isNumber = false;
-                }
-                if (!isVector) {
-                    try {
-                        // std::cout << "stod: " << std::stod(next) << std::endl;
-                        std::stod(next);
-
-                    } catch (const std::invalid_argument&) {
-                        isNumber = false;
-                        isVector = true;
-                    }
-                }
-                // std::cout << "isNumber: " << isNumber << std::endl
-                //             << "isVector: " << isVector << std::endl;
-
-                // Claude Generated (Jul 2026): a numeric-looking token (e.g. "1.0", "2.0")
-                // must still be stored as a JSON STRING when the target parameter is
-                // declared String (e.g. confscan.slx: "1.0" or "1.0,2.0" per confscan.h).
-                // Otherwise setNestedJsonValue() below stores a JSON number, and the later
-                // ConfigManager::get<std::string>() -> nlohmann from_json<string> merge
-                // throws json::type_error.302 ("type must be string, but is number"),
-                // which is uncaught in ConfigManager::getFromModule() and aborts (signal 6).
-                // Comma/pipe/colon-separated values ("1.0,2.0") already take the string path
-                // via isVector above; this closes the gap for single bare numbers.
-                if (isNumber) {
-                    std::string mod = module_name, param = current;
-                    size_t dot = current.find('.');
-                    if (dot != std::string::npos) {
-                        std::string pfx = current.substr(0, dot);
-                        mod = keyword_to_module.count(pfx) ? keyword_to_module[pfx] : pfx;
-                        param = current.substr(dot + 1);
-                    }
-                    const ParameterDefinition* def = ParameterRegistry::getInstance().findDefinition(mod, param);
-                    if (!def) {
-                        for (const auto& owner : ParameterRegistry::getInstance().findOwnerModules(param)) {
-                            if ((def = ParameterRegistry::getInstance().findDefinition(owner, param)))
-                                break;
-                        }
-                    }
-                    if (def && def->type == ParamType::String)
-                        isNumber = false;
-                }
-                if (isNumber) {
-                    // Claude Generated (May 2026): Multi-value accumulation for -bak
-                    if (current == "bak" && key.contains("bak")) {
-                        if (key["bak"].is_array()) {
-                            key["bak"].push_back(std::stod(next));
-                        } else {
-                            key["bak"] = json::array({key["bak"], std::stod(next)});
-                        }
-                    } else {
-                        setNestedJsonValue(key, current, std::stod(next));
-                    }
-                } else if (isVector) {
-                    //        std::cout << next << std::endl;
-                    if (current == "bak" && key.contains("bak")) {
-                        if (key["bak"].is_array()) {
-                            key["bak"].push_back(next);
-                        } else {
-                            key["bak"] = json::array({key["bak"], next});
-                        }
-                    } else {
-                        setNestedJsonValue(key, current, next);
-                    }
-                } else {
-                    if (current == "bak" && key.contains("bak")) {
-                        if (key["bak"].is_array()) {
-                            key["bak"].push_back(next);
-                        } else {
-                            key["bak"] = json::array({key["bak"], next});
-                        }
-                    } else {
-                        setNestedJsonValue(key, current, next);
-                    }
-                }
-                ++i;
-            }
-        }
-    }
-
-    // Claude Generated 2026: Auto-route flat CLI flags to their owning module via ParameterRegistry.
-    // Lets "-static_charges true" land in controller["gfnff"]["static_charges"] without requiring
-    // dotted form "-gfnff.static_charges true". Same-name-in-command-module wins; truly ambiguous
-    // names (multiple owners, none matching the current command) emit a warning and stay put.
-    {
-        std::vector<std::string> reroute_remove;
-        json reroute_targets; // module -> {param_name: value}
-        for (auto it = key.begin(); it != key.end(); ++it) {
-            const std::string& pname = it.key();
-            if (global_params.count(pname) > 0)
-                continue;
-            if (it.value().is_object())
-                continue;
-            if (pname.find('.') != std::string::npos)
-                continue;
-
-            auto owners = ParameterRegistry::getInstance().findOwnerModules(pname);
-            if (owners.empty())
-                continue; // legacy / unregistered flag — preserve current behavior
-
-            bool matches_current = false;
-            for (const auto& owner : owners) {
-                if (owner == module_name) {
-                    matches_current = true;
-                    break;
-                }
-            }
-            if (matches_current)
-                continue;
-
-            // Claude Generated (Oct 16, 2026): a name several modules register (-electronic_temperature:
-            // tblite, ulysses, xtb) is routed to the module of the selected -method when that module is
-            // one of the owners. Before, it stayed in the command module with a warning and no method
-            // ever read it (-electronic_temperature 40000 did not change a native gfn2 energy).
-            if (owners.size() > 1 && key.contains("method") && key["method"].is_string()) {
-                std::string method_scope = MethodFactory::parameterScopeForMethod(key["method"].get<std::string>());
-                // Oct 2026: a shared SCF knob (-max_iterations, -diis_start: module "scf" via aliases, and others)
-                // goes to "scf" when the method's own scope does not register it but the method reads "scf".
-                if (std::find(owners.begin(), owners.end(), method_scope) == owners.end()
-                    && std::find(owners.begin(), owners.end(), std::string("scf")) != owners.end()
-                    && MethodFactory::readsSharedScfScope(key["method"].get<std::string>()))
-                    method_scope = "scf";
-                if (!method_scope.empty()
-                    && std::find(owners.begin(), owners.end(), method_scope) != owners.end()) {
-                    CurcumaLogger::info("CLI flag -" + pname + " is registered in several modules; routed to -"
-                        + method_scope + "." + pname + " for the selected method \"" + key["method"].get<std::string>() + "\".");
-                    reroute_targets[method_scope][pname] = it.value();
-                    reroute_remove.push_back(pname);
-                    continue;
-                }
-            }
-
-            if (owners.size() > 1) {
-                std::string candidates;
-                for (size_t i = 0; i < owners.size(); ++i) {
-                    if (i)
-                        candidates += ", ";
-                    candidates += owners[i];
-                }
-                CurcumaLogger::warn("CLI flag -" + pname + " is registered in multiple modules ("
-                    + candidates + ") and none match the active command's module \"" + module_name
-                    + "\". Use -<module>." + pname + " to disambiguate. Keeping flag in command module.");
-                continue;
-            }
-
-            // Claude Generated (Jul 2026): announce the move. Silent rerouting hid the fact that
-            // -opt_method / -thermostat / -restart never reached ConfSearch for months.
-            {
-                const std::string msg = "CLI flag -" + pname + " is not a parameter of the active"
-                    " command's module \"" + module_name + "\"; it is owned by \"" + owners[0]
-                    + "\" and was routed to -" + owners[0] + "." + pname + ".";
-                if (scope_modules.count(owners[0]) > 0)
-                    CurcumaLogger::info(msg);
-                else
-                    CurcumaLogger::warn(msg + " Use the dotted form if that is not what you meant.");
-            }
-            reroute_targets[owners[0]][pname] = it.value();
-            reroute_remove.push_back(pname);
-        }
-        for (const auto& k : reroute_remove)
-            key.erase(k);
-        for (auto& [mod, params] : reroute_targets.items()) {
-            if (!key.contains(mod) || !key[mod].is_object())
-                key[mod] = json::object();
-            for (auto& [pname, pval] : params.items())
-                key[mod][pname] = pval;
-        }
-    }
-
-    // Claude Generated 2025: Extract module-specific parameters to top level
-    // Parameters like "rmsd.method" should be at controller["rmsd"]["method"], NOT controller["confscan"]["rmsd"]["method"]
-    json module_params;
-    std::vector<std::string> keys_to_remove;
-
-    for (auto& [param_name, param_value] : key.items()) {
-        // Claude Generated 2025: Check if this is a module-specific parameter
-        // Could be either:
-        // 1. Flat key with dots: "rmsd.method" (stored as param_name contains dot)
-        // 2. Nested structure: setNestedJsonValue already created key["rmsd"]["method"]
-        //    so param_name = "rmsd" and param_value = {"method": "subspace"}
-
-        bool is_flat_dotted = param_name.find('.') != std::string::npos;
-        bool is_nested_object = param_value.is_object();
-
-        if (is_flat_dotted) {
-            // Handle flat dot notation: "rmsd.method" or "-md.max_time"
-            size_t dot_pos = param_name.find('.');
-            std::string module_name = param_name.substr(0, dot_pos);
-            std::string param_key = param_name.substr(dot_pos + 1);
-
-            if (module_name != keyword) {
-                // Claude Generated (October 2025 - CRITICAL FIX): Map keywords to actual module names
-                // e.g., "-md.max_time" has module_name="md" from Punkt-notation,
-                // but must be routed to module_params["simplemd"] (the actual module)
-                std::string target_module = module_name;
-                if (keyword_to_module.count(module_name) > 0) {
-                    target_module = keyword_to_module[module_name];
-                }
-                if (!module_params.contains(target_module)) {
-                    module_params[target_module] = json::object();
-                }
-                setNestedJsonValue(module_params[target_module], param_key, param_value);
-                keys_to_remove.push_back(param_name);
-            } else {
-                // Claude Generated (October 2025 - CRITICAL FIX): Handle "-keyword.param" (e.g., "-md.max_time")
-                // These should be FLAT in controller["simplemd"], not nested as key["md"]["max_time"]
-                // Extract directly to top level to avoid double-nesting
-                setNestedJsonValue(key, param_key, param_value);
-                keys_to_remove.push_back(param_name);
-            }
-        } else if (is_nested_object && param_name != keyword) {
-            // Handle nested structure for OTHER modules (not this command's keyword)
-            // param_name = "rmsd", param_value = {"method": "subspace"}
-            //
-            // Claude Generated (Jul 2026): map CLI keywords to module names here too. Because
-            // setNestedJsonValue() already split "md.rmsd_mtd" into key["md"]["rmsd_mtd"], this
-            // branch (not the flat-dotted one above) is what handles "-md.x" issued from another
-            // command -- and it used to store it verbatim under controller["md"], which no module
-            // reads. So "curcuma -confsearch mol.xyz -md.rmsd_mtd false" was silently ignored.
-            std::string target_module = param_name;
-            if (keyword_to_module.count(param_name) > 0)
-                target_module = keyword_to_module[param_name];
-            if (module_params.contains(target_module) && module_params[target_module].is_object()) {
-                for (auto& [k, v] : param_value.items())
-                    module_params[target_module][k] = v; // merge, do not clobber a sibling block
-            } else {
-                module_params[target_module] = param_value;
-            }
-            keys_to_remove.push_back(param_name);
-        }
-        // NOTE: We KEEP nested structures where param_name == keyword!
-        // E.g., key["md"] = {"max_time": 10} stays in key for backward compat
-        // It will be stored in both controller["simplemd"] and controller["md"]
-    }
-
-    // Remove extracted module parameters from main command params
-    for (const auto& remove_key : keys_to_remove) {
-        key.erase(remove_key);
-    }
-
-    // Claude Generated (October 2025): Extract global parameters for explicit access
-    json global_values;
-    for (const auto& param : global_params) {
-        if (key.count(param) > 0) {
-            global_values[param] = key[param];
-        }
-    }
-
-    // Build controller with proper structure using actual module name
-    // This enables ConfigManager to find parameters under the correct module name
-    controller[module_name] = key;  // Changed from keyword to module_name
-
-    // Claude Generated (October 2025): Backward compatibility - keep old keyword-based access
-    // Some tests use "-md.max_time" which creates controller["md"],
-    // but we now route to controller["simplemd"] via module_name
-    // Store under both for compatibility
-    if (module_name != keyword) {
-        controller[keyword] = key;  // Also keep the old keyword for backward compat
-    }
-
-    // Merge module-specific parameters at top level
-    for (auto& [mod_name, module_config] : module_params.items()) {
-        controller[mod_name] = module_config;  // Direct assignment (may contain nested structure from setNestedJsonValue)
-    }
-
-    // Ensure global parameters are always set at top level AND in global section
-    for (const auto& [param, value] : global_values.items()) {
-        controller[param] = value;  // Top-level access (backward compat)
-        controller["global"][param] = value;  // Explicit global namespace
-    }
-    return controller;
-}
-
 // Claude Generated (May 2026): Helper to initialize BMT directory for CurcumaMethod-based capabilities
 // Sets basename, creates BMT output directory, and registers -bak files from controller
 void initializeBMT(CurcumaMethod* method, const std::string& filename,
@@ -1136,6 +639,9 @@ void initializeBMT(CurcumaMethod* method, const std::string& filename,
     bool no_bmt = controller.value("no_bmt", false);
     if (!no_bmt)
         method->createBMTDir(cli_keyword);
+
+    // Claude Generated 2026: Route citations.bib into BMT directory
+    CitationRegistry::setOutputDir(method->OutputDir());
 
     // Register -bak files for post-computation copy to CWD
     if (controller.contains("bak")) {
@@ -1653,6 +1159,7 @@ int executeAnalysis(const json& controller, int argc, char** argv) {
     if (!controller.value("no_bmt", false)) {
         analysis_bmt_dir = BMTUtils::createBMTDir(analysis_basename, "analysis");
         BMTUtils::writeMetadata(analysis_bmt_dir, analysis_basename, "analysis", analysis_filename);
+        CitationRegistry::setOutputDir(analysis_bmt_dir);
     }
 
     auto* analysis = new UnifiedAnalysis(analysis_config, false);
@@ -2004,7 +1511,7 @@ int executeOptimization(const json& controller, int argc, char** argv) {
         fmt::print("  NOTE: lbfgs, diis, rfo are AI-generated and not yet tested/approved.\n");
         fmt::print("        Use lbfgspp or ancopt for production calculations.\n");
         fmt::print("  -charge <n>          Molecular charge (default: 0)\n");
-        fmt::print("  -spin <n>            Spin multiplicity (default: 0)\n");
+        fmt::print("  -spin <n>            Unpaired electrons, multiplicity - 1 (default: 0)\n");
         fmt::print("  -threads <n>         Parallel threads (default: 1)\n");
         fmt::print("  -verbosity <n>       Output level: 0=silent, 1=table, 2=detailed, 3=debug (default: 1)\n\n");
         fmt::print("Convergence:\n");
@@ -2098,6 +1605,7 @@ int executeOptimization(const json& controller, int argc, char** argv) {
         if (!controller.value("no_bmt", false)) {
             bmt_dir = BMTUtils::createBMTDir(basename, "opt");
             BMTUtils::writeMetadata(bmt_dir, basename, "opt", filename);
+            CitationRegistry::setOutputDir(bmt_dir);
         }
 
         // Enable iterative mode + warm-start for native GFN so SCF iterations are
@@ -2111,6 +1619,10 @@ int executeOptimization(const json& controller, int argc, char** argv) {
 
         if (molecules.size() == 1) {
             // Single-structure path: preserve exact existing behavior
+            // write_trajectory (default true) asks for <basename>.trj.xyz; the driver wrote none
+            // before because nothing gave it a file name.
+            if (opt_config.value("write_trajectory", true))
+                opt_config["trajectory_file"] = BMTUtils::outputPath(bmt_dir, basename + ".trj.xyz");
             auto result = Optimization::OptimizationDispatcher::optimizeStructure(
                 &molecules[0], opt_type, &energy_calc, opt_config);
 
@@ -2299,8 +1811,9 @@ int executeDocking(const json& controller, int argc, char** argv) {
 
     // Claude Generated (May 2026): Extract host filename for BMT directory naming
     std::string dock_basename;
-    if (controller.contains("dock") && controller["dock"].contains("host")) {
-        dock_basename = controller["dock"]["host"].get<std::string>();
+    if (controller.contains("docking") && controller["docking"].contains("host")
+        && controller["docking"]["host"].is_string()) {
+        dock_basename = controller["docking"]["host"].get<std::string>();
     }
     if (!dock_basename.empty()) {
         initializeBMT(docking, dock_basename, "dock", controller);
@@ -2360,6 +1873,172 @@ int executeSimpleMD(const json& controller, int argc, char** argv) {
     return 0;
 }
 
+/*! \brief Two-stage NEB-MD chain: finite-temperature string -> path-CV conditional mean force.
+ *
+ *  Claude Generated 2026 (AI-generated, machine-tested). Stage 1 runs scheme 'string' for
+ *  string_max_time and writes <base>.neb.string.xyz (consecutively Kabsch-aligned, atom order
+ *  of start.xyz). Stage 2 reads it as path_file and runs scheme 'independent' with umbrella and
+ *  (unless the user set -nebmd.constrain) the holonomic constraint on s, in the SAME BMT
+ *  directory under the basename <base>.stage2. The stage-2 path is used as written: optimize,
+ *  idpp and repair_overlaps would otherwise modify the frames read from path_file.
+ *  \param ctrl        resolved controller (simplemd merge already done by executeNebMD)
+ *  \param controller  original controller (BMT / -bak handling)
+ *  \return 0 on success, 1 when stage 1 aborted (dead image) or produced no path. */
+static int executeNebMDPipeline(const json& ctrl, const json& controller, const Molecule& start,
+                                const Molecule& end, const std::string& startfile)
+{
+    ConfigManager cfg("nebmd", ctrl);
+
+    json ctrl1 = ctrl;
+    if (!ctrl1.contains("nebmd") || !ctrl1["nebmd"].is_object())
+        ctrl1["nebmd"] = json::object();
+    if (!ctrl1.contains("simplemd") || !ctrl1["simplemd"].is_object())
+        ctrl1["simplemd"] = json::object();
+    ctrl1["nebmd"]["scheme"] = "string";
+    ctrl1["nebmd"]["umbrella"] = false;  // stage-2 settings must not leak into stage 1
+    ctrl1["nebmd"]["constrain"] = false;
+    ctrl1["nebmd"]["pipeline"] = false;
+    ctrl1["simplemd"]["max_time"] = cfg.get<double>("string_max_time");
+
+    CurcumaLogger::result("NEB-MD pipeline: stage 1 - finite-temperature string");
+    auto* neb1 = new NebMD(ctrl1, false);
+    initializeBMT(neb1, startfile, "nebmd", controller);
+    neb1->setEndpoints(start, end);
+    neb1->Initialise();
+    neb1->start();
+    // Claude Generated 2026: stage 1 aborted (dead image, string_abort_on_dead) -> its path is
+    // not relaxed; never continue with it.
+    if (neb1->failed()) {
+        CurcumaLogger::error("NEB-MD pipeline: stage 1 (string) aborted - stage 2 skipped.");
+        neb1->processBakFiles();
+        delete neb1;
+        return 1;
+    }
+    const std::string path = neb1->outputPath(neb1->Basename() + ".neb.string.xyz");
+    if (!std::ifstream(path).good()) {
+        CurcumaLogger::error("NEB-MD pipeline: stage 1 wrote no string path (" + path + ") - stage 2 skipped.");
+        neb1->processBakFiles();
+        delete neb1;
+        return 1;
+    }
+
+    json ctrl2 = ctrl;
+    if (!ctrl2.contains("nebmd") || !ctrl2["nebmd"].is_object())
+        ctrl2["nebmd"] = json::object();
+    const bool user_constrain = ctrl2["nebmd"].contains("constrain");
+    ctrl2["nebmd"]["path_file"] = path;
+    ctrl2["nebmd"]["scheme"] = "independent";
+    ctrl2["nebmd"]["umbrella"] = true;
+    if (!user_constrain)
+        ctrl2["nebmd"]["constrain"] = true;
+    ctrl2["nebmd"]["optimize"] = false;        // the path is the stage-1 result, use as written
+    ctrl2["nebmd"]["idpp"] = false;
+    ctrl2["nebmd"]["repair_overlaps"] = false;
+    ctrl2["nebmd"]["pipeline"] = false;
+
+    CurcumaLogger::result("NEB-MD pipeline: stage 2 - conditional mean force on the path CV of " + path);
+    auto* neb2 = new NebMD(ctrl2, false);
+    neb2->setFile(startfile);
+    neb2->setOutputDir(neb1->OutputDir());
+    neb2->overrideBasename(neb1->Basename() + ".stage2");
+    neb2->setEndpoints(start, end);
+    neb2->Initialise();
+    neb2->start();
+    // neb2 has no BMT directory of its own (it only borrows the output dir), so its copy-back
+    // is done through neb1: register every stage-2 output that exists.
+    for (const char* suffix : { ".neb.path.xyz", ".neb.energy.csv", ".neb.final.xyz", ".neb.init.xyz",
+             ".neb.fe.csv", ".neb.wham.csv" }) {
+        const std::string name = neb2->Basename() + suffix;
+        if (std::ifstream(neb1->outputPath(name)).good())
+            neb1->addBakFile(name);
+    }
+    neb1->processBakFiles();
+    delete neb2;
+    delete neb1;
+    return 0;
+}
+
+// Claude Generated 2026: NEB-like molecular dynamics handler.
+int executeNebMD(const json& controller, int argc, char** argv) {
+    if (argc < 4) {
+        std::cerr << "Please use curcuma for NEB-MD as follows:\n"
+                  << "  curcuma -nebmd start.xyz end.xyz -nebmd.nimages 12 -method uff ..." << std::endl;
+        NebMD help(json::object(), true);
+        help.printHelp();
+        return 0;
+    }
+    Molecule start = Files::LoadFile(argv[2]);
+    Molecule end = Files::LoadFile(argv[3]);
+    if (start.AtomCount() == 0) {
+        CurcumaLogger::error_fmt("Could not load start structure from file: {}", argv[2]);
+        return 1;
+    }
+    if (end.AtomCount() == 0) {
+        CurcumaLogger::error_fmt("Could not load end structure from file: {}", argv[3]);
+        return 1;
+    }
+
+    // Claude Generated (Oct 2026): apply total charge/spin from the CLI (-charge, -spin) to both
+    // endpoints. Without this every NEB-MD calculator was built at charge 0 (an anionic SN2 test
+    // evaluated the endpoints as neutral); same convention as -sp/-opt.
+    if (controller.contains("charge")) {
+        start.setCharge(controller["charge"].get<int>());
+        end.setCharge(controller["charge"].get<int>());
+    }
+    if (controller.contains("spin")) {
+        start.setSpin(controller["spin"].get<int>());
+        end.setSpin(controller["spin"].get<int>());
+    }
+
+    json ctrl = controller;
+    ctrl["geometry_file"] = std::string(argv[2]);
+
+    // Claude Generated 2026: Forward MD parameters supplied as -md.* (which land in
+    // controller["md"]) and ambiguous bare flags like -temperature (multi-owner
+    // casino+simplemd, kept in the command module) into controller["simplemd"] so
+    // the per-image SimpleMD instances receive them. -simplemd.* wins on conflict.
+    // This makes -md.*, bare -time_step/-max_time/-thermostat/-temperature and
+    // -simplemd.* all work for -nebmd (bare single-owner flags already auto-route).
+    auto ensure_simplemd = [&ctrl]() {
+        if (!ctrl.contains("simplemd") || !ctrl["simplemd"].is_object())
+            ctrl["simplemd"] = json::object();
+    };
+    auto merge_from = [&ctrl, &ensure_simplemd](const std::string& src) {
+        if (!ctrl.contains(src) || !ctrl[src].is_object()) return;
+        ensure_simplemd();
+        for (auto& [k, v] : ctrl[src].items())
+            if (!ctrl["simplemd"].contains(k)) ctrl["simplemd"][k] = v;
+    };
+    merge_from("md"); // -md.* -> controller["md"]
+    // Move ambiguous bare MD flags that the flat-router left in the command module
+    // (controller["nebmd"]) because they are multi-owner and none matched "nebmd".
+    if (ctrl.contains("nebmd") && ctrl["nebmd"].is_object()) {
+        ensure_simplemd();
+        for (auto& [k, v] : ctrl["nebmd"].items()) {
+            if (v.is_object() || ctrl["simplemd"].contains(k)) continue;
+            const auto owners = ParameterRegistry::getInstance().findOwnerModules(k);
+            for (const auto& o : owners)
+                if (o == "simplemd") { ctrl["simplemd"][k] = v; break; }
+        }
+    }
+
+    // Claude Generated 2026: two-stage chain string -> path-CV mean force (-nebmd.pipeline).
+    // Lives here because the BMT directory is created here; stage 2 writes into the stage-1
+    // directory under the basename <base>.stage2.
+    if (ConfigManager("nebmd", ctrl).get<bool>("pipeline"))
+        return executeNebMDPipeline(ctrl, controller, start, end, argv[2]);
+
+    auto* neb = new NebMD(ctrl, false);
+    initializeBMT(neb, argv[2], "nebmd", controller);
+    neb->setEndpoints(start, end);
+    neb->Initialise();
+    neb->start();
+    neb->processBakFiles();
+    const int rc = neb->failed() ? 1 : 0; // Claude Generated 2026: aborted string stage -> exit != 0
+    delete neb;
+    return rc;
+}
+
 int executeCasino(const json& controller, int argc, char** argv) {
     if (argc < 3) {
         Casino dummy(json{}, true);
@@ -2369,6 +2048,19 @@ int executeCasino(const json& controller, int argc, char** argv) {
     // Claude Generated 2025: Apply parameter merging to fix JSON null issues
     json casino_defaults = ParameterRegistry::getInstance().getDefaultJson("casino");
     json casino_config = MergeJson(casino_defaults, controller.contains("casino") ? controller["casino"] : json{});
+    // Method scopes (-gfnff.*, -xtb.*, -scf.*, ...) and the global threads/gpu keys live beside
+    // controller["casino"]; Casino hands this json to its EnergyCalculator, so they must be copied in.
+    for (const std::string& scope : MethodFactory::methodParameterScopes()) {
+        if (controller.contains(scope) && controller[scope].is_object())
+            casino_config[scope] = controller[scope];
+    }
+    for (const char* key : { "threads", "gpu" }) {
+        if (!casino_config.contains(key) && controller.contains(key))
+            casino_config[key] = controller[key];
+    }
+    // Global -verbosity applies unless -casino.verbosity was given (module default 2 otherwise).
+    if (controller.contains("verbosity") && !(controller.contains("casino") && controller["casino"].contains("verbosity")))
+        casino_config["verbosity"] = controller["verbosity"];
 
     auto* casino = new Casino(casino_config, false);
     casino->setFileName(argv[2]);
@@ -2432,6 +2124,9 @@ int executeRMSDTraj(const json& controller, int argc, char** argv) {
     if (controller.contains("rmsdtraj") && !controller["rmsdtraj"].is_null()) {
         rmsdtraj_config = MergeJson(rmsdtraj_config, controller["rmsdtraj"]);
     }
+    // Global -verbosity applies unless -rmsdtraj.verbosity was given.
+    if (controller.contains("verbosity") && !(controller.contains("rmsdtraj") && controller["rmsdtraj"].contains("verbosity")))
+        rmsdtraj_config["verbosity"] = controller["verbosity"];
 
     RMSDTraj traj(rmsdtraj_config, false);
     traj.setFile(argv[2]);
@@ -2745,7 +2440,7 @@ const std::map<std::string, CapabilityInfo> CAPABILITY_REGISTRY = {
                   {"XYZ", "VTF"}, executeTrajProps}},
     {"ionize", {"Neutralise a solvated system by replacing solvent with counter-ions", "assembly",
                   {"XYZ"}, executeIonize}},
-    {"md", {"Molecular dynamics simulation", "dynamics",
+    {"md", {"Molecular dynamics simulation (incl. RMSD-MTD enhanced sampling)", "dynamics",
             {"XYZ", "VTF", "MOL2", "SDF"}, executeSimpleMD}},
     {"casino", {"Casino Monte Carlo simulation with enhanced sampling", "dynamics",
                 {"XYZ", "VTF", "MOL2", "SDF", "PDB"}, executeCasino}},
@@ -2785,6 +2480,8 @@ const std::map<std::string, CapabilityInfo> CAPABILITY_REGISTRY = {
                   {"XYZ.trj", "VTF"}, executeRMSDTraj}},
     {"nebprep", {"Nudged Elastic Band (NEB) geometry preparation", "conformational",
                  {"XYZ"}, executeNEBPrep}},
+    {"nebmd", {"NEB-like molecular dynamics: independently-thermostatted replicas coupled by springs along a reaction path", "dynamics",
+               {"XYZ"}, executeNebMD}},
     {"centroid", {"Calculate centroid of atom fragments", "analysis",
                   {"XYZ", "MOL2", "SDF"}, executeCentroid}},
     {"split", {"Split supramolecular structures into fragments", "analysis",
@@ -2801,6 +2498,131 @@ const std::map<std::string, CapabilityInfo> CAPABILITY_REGISTRY = {
                  {"XYZ", "MOL2", "PDB", "SDF"}, executeTorsion}},
     // TODO: Add more capabilities here as they are converted
 };
+
+// Claude Generated (June 2026): Metadynamics topic help page
+static void printMetadynamicsHelp()
+{
+    std::cout << "===============================================================" << std::endl;
+    std::cout << "  Metadynamics - Enhanced Sampling Guide" << std::endl;
+    std::cout << "===============================================================" << std::endl;
+    std::cout << std::endl;
+
+    std::cout << "OVERVIEW" << std::endl;
+    std::cout << "  Metadynamics adds a history-dependent bias potential during MD" << std::endl;
+    std::cout << "  simulation, pushing the system away from already-visited regions" << std::endl;
+    std::cout << "  of conformational space. This accelerates the exploration of new" << std::endl;
+    std::cout << "  conformers and free energy surfaces." << std::endl;
+    std::cout << std::endl;
+
+    std::cout << "TWO MODES" << std::endl;
+    std::cout << "  1. Internal RMSD-MTD (recommended for conformational sampling):" << std::endl;
+    std::cout << "       curcuma -md input.xyz -rmsd_mtd true -rmsd_mtd_ref_file refs.xyz" << std::endl;
+    std::cout << "     Built-in bias based on RMSD from reference structures." << std::endl;
+    std::cout << "     No external dependencies." << std::endl;
+    std::cout << std::endl;
+    std::cout << "  2. PLUMED-based (advanced collective variables):" << std::endl;
+    std::cout << "       curcuma -md input.xyz -mtd true -plumed_file plumed.dat" << std::endl;
+    std::cout << "     Full PLUMED2 collective variables and bias potentials." << std::endl;
+    std::cout << "     Requires PLUMED2 library (--enable-plumed at build time)." << std::endl;
+    std::cout << std::endl;
+
+    std::cout << "QUICK START" << std::endl;
+    std::cout << "  # Minimal RMSD-MTD (bias away from reference structure):" << std::endl;
+    std::cout << "  curcuma -md input.xyz -method gfnff -temp 300 \\" << std::endl;
+    std::cout << "      -rmsd_mtd true -rmsd_mtd_ref_file ref.xyz" << std::endl;
+    std::cout << std::endl;
+    std::cout << "  # With well-tempered bias (adaptive deposition):" << std::endl;
+    std::cout << "  curcuma -md input.xyz -method gfnff -temp 300 \\" << std::endl;
+    std::cout << "      -rmsd_mtd true -rmsd_mtd_ref_file ref.xyz \\" << std::endl;
+    std::cout << "      -wtmtd true -rmsd_mtd_dt 500" << std::endl;
+    std::cout << std::endl;
+    std::cout << "  # PLUMED metadynamics:" << std::endl;
+    std::cout << "  curcuma -md input.xyz -method gfnff -temp 300 \\" << std::endl;
+    std::cout << "      -mtd true -plumed_file plumed.dat" << std::endl;
+    std::cout << std::endl;
+
+    std::cout << "RMSD-MTD PARAMETERS" << std::endl;
+    std::cout << "  -rmsd_mtd <bool>            Enable internal RMSD-based metadynamics" << std::endl;
+    std::cout << "                              (default: false)" << std::endl;
+    std::cout << "  -rmsd_mtd_ref_file <string> Reference structure file (required for" << std::endl;
+    std::cout << "                              -rmsd_mtd). Can contain multiple structures." << std::endl;
+    std::cout << "  -rmsd_mtd_k <double>        Force constant for RMSD bias (default: 0.1)" << std::endl;
+    std::cout << "                              Controls bias strength. Start with 0.01-0.1." << std::endl;
+    std::cout << "  -rmsd_mtd_alpha <double>     Gaussian width in RMSD^2 (default: 10)" << std::endl;
+    std::cout << "                              Smaller = narrower Gaussians = finer resolution." << std::endl;
+    std::cout << "  -rmsd_mtd_pace <int>         Add bias every N MD steps (default: 1)" << std::endl;
+    std::cout << "                              Increase for less frequent deposition (e.g. 10-100)." << std::endl;
+    std::cout << "  -rmsd_mtd_max_gaussians <int> Max stored bias structures (default: -1 = unlimited)" << std::endl;
+    std::cout << "  -rmsd_mtd_atoms <string>     Atom indices for RMSD (default: all, \"-1\")" << std::endl;
+    std::cout << "  -wtmtd <bool>               Enable well-tempered metadynamics (default: false)" << std::endl;
+    std::cout << "  -rmsd_mtd_dt <double>        Bias factor for well-tempered MTD (default: 1e6)" << std::endl;
+    std::cout << "                              Only used when -wtmtd true." << std::endl;
+    std::cout << "                              Lower values = stronger adaptive rescaling." << std::endl;
+    std::cout << "                              Typical: 10-1000." << std::endl;
+    std::cout << "  -rmsd_econv <double>         Energy convergence threshold (default: 1e8)" << std::endl;
+    std::cout << "                              Controls when new bias structures are added." << std::endl;
+    std::cout << "                              Lower values = more frequent structure addition" << std::endl;
+    std::cout << "                                (aggressive sampling, more reference structures)." << std::endl;
+    std::cout << "                              Higher values = rarer addition" << std::endl;
+    std::cout << "                                (conservative, fewer reference structures)." << std::endl;
+    std::cout << "                              Default (1e8) effectively disables the filter." << std::endl;
+    std::cout << std::endl;
+
+    std::cout << "WELL-TEMPERED MTD" << std::endl;
+    std::cout << "  In standard MTD, Gaussians are added with constant height, leading to" << std::endl;
+    std::cout << "  over-filling. Well-tempered MTD (-wtmtd true) rescales the Gaussian" << std::endl;
+    std::cout << "  height by exp(-V / kT*DT), where DT is the bias factor (-rmsd_mtd_dt)." << std::endl;
+    std::cout << "  This converges to the free energy surface as F(RMSD) = -DT * c(RMSD)." << std::endl;
+    std::cout << std::endl;
+    std::cout << "  Practical guidance:" << std::endl;
+    std::cout << "    - Start with -rmsd_mtd_dt 100-1000 for typical organic molecules" << std::endl;
+    std::cout << "    - Lower DT = stronger rescaling = faster convergence but less exploration" << std::endl;
+    std::cout << "    - Always combine with -rmsd_mtd true" << std::endl;
+    std::cout << std::endl;
+
+    std::cout << "OUTPUT FILES" << std::endl;
+    std::cout << "  When BMT output is active (default):" << std::endl;
+    std::cout << "    input.md.TIMESTAMP/                      BMT root directory" << std::endl;
+    std::cout << "    input.md.TIMESTAMP/input.trj.xyz          MD trajectory" << std::endl;
+    std::cout << "    input.md.TIMESTAMP/Basename.rmsd_mtd/     COLVAR subdirectory" << std::endl;
+    std::cout << "    input.md.TIMESTAMP/Basename.rmsd_mtd/COLVAR_0" << std::endl;
+    std::cout << "                                              Collective variable log" << std::endl;
+    std::cout << "    input.md.TIMESTAMP/Basename.rmsd_mtd/COLVAR_N" << std::endl;
+    std::cout << "                                              Per-reference COLVAR files" << std::endl;
+    std::cout << "    input.md.TIMESTAMP/input.topo.json        GFN-FF topology cache" << std::endl;
+    std::cout << "    input.md.TIMESTAMP/curcuma_citations.bib  Citation references" << std::endl;
+    std::cout << std::endl;
+    std::cout << "  With -no_bmt, files are written to the current working directory." << std::endl;
+    std::cout << std::endl;
+
+    std::cout << "EXAMPLES" << std::endl;
+    std::cout << "  # 1. Simple RMSD-MTD (bias away from starting structure):" << std::endl;
+    std::cout << "  curcuma -md ethanol.xyz -method gfnff -temp 300 -steps 10000 \\" << std::endl;
+    std::cout << "      -rmsd_mtd true -rmsd_mtd_ref_file ethanol.xyz" << std::endl;
+    std::cout << std::endl;
+    std::cout << "  # 2. Well-tempered RMSD-MTD:" << std::endl;
+    std::cout << "  curcuma -md ethanol.xyz -method gfnff -temp 300 \\" << std::endl;
+    std::cout << "      -rmsd_mtd true -rmsd_mtd_ref_file ethanol.xyz \\" << std::endl;
+    std::cout << "      -wtmtd true -rmsd_mtd_dt 500" << std::endl;
+    std::cout << std::endl;
+    std::cout << "  # 3. Multi-reference MTD (bias away from several conformers):" << std::endl;
+    std::cout << "  curcuma -md ethanol.xyz -method gfnff -temp 300 \\" << std::endl;
+    std::cout << "      -rmsd_mtd true -rmsd_mtd_ref_file conformers.xyz \\" << std::endl;
+    std::cout << "      -rmsd_mtd_k 0.05 -rmsd_mtd_alpha 5.0" << std::endl;
+    std::cout << std::endl;
+    std::cout << "  # 4. PLUMED metadynamics:" << std::endl;
+    std::cout << "  curcuma -md ethanol.xyz -method gfnff -temp 300 \\" << std::endl;
+    std::cout << "      -mtd true -plumed_file plumed.dat" << std::endl;
+    std::cout << std::endl;
+    std::cout << "  # 5. MTD with custom atom selection (only heavy atoms):" << std::endl;
+    std::cout << "  curcuma -md ethanol.xyz -method gfnff -temp 300 \\" << std::endl;
+    std::cout << "      -rmsd_mtd true -rmsd_mtd_ref_file ref.xyz \\" << std::endl;
+    std::cout << "      -rmsd_mtd_atoms \"1-2,4-9\"" << std::endl;
+    std::cout << std::endl;
+
+    std::cout << "  For all SimpleMD parameters: curcuma -help-module simplemd" << std::endl;
+    std::cout << "  For PLUMED syntax:              see docs/PLUMED_HELP.md" << std::endl;
+}
 
 void showStructuredHelp(const std::string& category = "") {
     std::cout << "Curcuma - Computational Chemistry Toolkit" << std::endl;
@@ -2866,6 +2688,10 @@ void showStructuredHelp(const std::string& category = "") {
         std::cout << "  curcuma -traj md_output.xyz -stride 10     # Trajectory analysis" << std::endl;
         std::cout << std::endl;
 
+        std::cout << "Topic Guides:" << std::endl;
+        std::cout << "  curcuma -help metadynamics                 # Metadynamics guide (RMSD-MTD & PLUMED)" << std::endl;
+        std::cout << std::endl;
+
         std::cout << "Get detailed help: curcuma -help [category]" << std::endl;
         std::cout << "   Available categories: ";
         bool first = true;
@@ -2874,7 +2700,11 @@ void showStructuredHelp(const std::string& category = "") {
             std::cout << cat;
             first = false;
         }
-        std::cout << std::endl;
+        std::cout << ", metadynamics" << std::endl;
+
+    } else if (category == "metadynamics") {
+        // Claude Generated (June 2026): Topic-based help for metadynamics
+        printMetadynamicsHelp();
 
     } else {
         // Enhanced category-specific help
@@ -2925,6 +2755,7 @@ void showStructuredHelp(const std::string& category = "") {
             } else if (category == "dynamics") {
                 std::cout << "Dynamics Examples:" << std::endl;
                 std::cout << "  curcuma -md system.xyz -temperature 300 -steps 10000" << std::endl;
+                std::cout << "  curcuma -md system.xyz -rmsd_mtd true -rmsd_mtd_ref_file refs.xyz" << std::endl;
                 std::cout << "  curcuma -casino polymer.vtf -move_type mixed -adaptive_step true" << std::endl;
             } else if (category == "optimization") {
                 std::cout << "Optimization Examples:" << std::endl;
@@ -2942,6 +2773,7 @@ void showStructuredHelp(const std::string& category = "") {
             for (const auto& [name, info] : CAPABILITY_REGISTRY) {
                 available_categories.insert(info.category);
             }
+            available_categories.insert("metadynamics");
 
             bool first = true;
             for (const auto& cat : available_categories) {
@@ -3163,6 +2995,41 @@ int main(int argc, char **argv) {
         std::cout << "Loaded configuration from: " << config_file << std::endl;
     }
 
+    // Claude Generated (Nov 2026, docs/debt_2026-11/PARAMS.md M1): a key that no registry module
+    // knows, neither as parameter nor as alias, is reported once. Nothing is dropped: a typo such
+    // as -temprature was silently ignored before. Keys that code reads without a PARAM stay quiet:
+    // -sp reads gradient and dump_gradient directly, and the SimpleMD names below are left
+    // unregistered on purpose (see the comment in confsearch.h).
+    {
+        static const std::set<std::string> read_without_param = {
+            "gradient", "dump_gradient",
+            "unique", "rescue", "respa", "dipole", "cleanenergy", "MaxTopoDiff", "impuls_scaling",
+            "rattle_tolerance", "printOutput", "wall_xl", "wall_yl", "wall_zl"
+        };
+        auto& registry = ParameterRegistry::getInstance();
+        std::set<std::string> reported;
+        for (auto& [scope, params] : controller.items()) {
+            if (scope == "global" || !params.is_object() || registry.getForModule(scope).empty())
+                continue;
+            for (auto& [key, value] : params.items()) {
+                if (value.is_object() || read_without_param.count(key) || !registry.findOwnerModules(key).empty())
+                    continue;
+                if (reported.insert(key).second)
+                    CurcumaLogger::warn_fmt("Parameter '{}' is unknown (not a parameter or alias of any module; misspelled? -help-module {} lists the parameters of the command)",
+                        key, scope);
+            }
+        }
+    }
+
+    // Claude Generated (Nov 2026, docs/debt_2026-11/PARAMS.md L4): enum/min/max annotations of the
+    // PARAMs were only printed by -help-module. A value outside them is reported; the run goes on.
+    for (const std::string& message : ParameterRegistry::getInstance().checkAnnotations(controller))
+        CurcumaLogger::warn(message);
+
+    // Claude Generated (Nov 2026): `-write_trajectory 0|1` and other numeric flags of Bool parameters
+    // arrive as numbers; make them booleans before any capability reads them.
+    ParameterRegistry::getInstance().coerceBoolParameters(controller);
+
     // Claude Generated (Sep 2026, multi-GPU case A): one process-wide pool of GPU device slots
     // for molecule-level batch workers (-gpu_devices, -gpu_workers_per_device). No-op for CPU
     // runs and for a single visible device without explicit pool flags.
@@ -3222,7 +3089,9 @@ int main(int argc, char **argv) {
         auto& param_registry = ParameterRegistry::getInstance();
         std::set<std::string> touched_modules;
         for (auto it = export_config.begin(); it != export_config.end(); ++it) {
-            if (it.value().is_object() && !param_registry.getForModule(it.key()).empty()) {
+            // "global" is left out: its registry defaults are documentation, and flags such as
+            // gpu_devices are read as "given or not", so an exported default would become a user value.
+            if (it.key() != "global" && it.value().is_object() && !param_registry.getForModule(it.key()).empty()) {
                 touched_modules.insert(it.key());
             }
         }
@@ -3233,6 +3102,16 @@ int main(int argc, char **argv) {
             }
         }
         for (const auto& mod : touched_modules) {
+            // Write canonical names only: an alias key next to the canonical default would be
+            // overwritten by that default when the file is replayed (key order is alphabetical).
+            if (export_config.contains(mod) && export_config[mod].is_object()) {
+                json canonical_keys = json::object();
+                for (auto& [key, value] : export_config[mod].items()) {
+                    const std::string canon = param_registry.resolveAlias(mod, key);
+                    canonical_keys[(canon.empty() || value.is_object()) ? key : canon] = value;
+                }
+                export_config[mod] = canonical_keys;
+            }
             json defaults = param_registry.getDefaultJson(mod);
             if (!export_config.contains(mod) || !export_config[mod].is_object()) {
                 export_config[mod] = json::object();
@@ -3266,7 +3145,15 @@ int main(int argc, char **argv) {
     // Try structured dispatch first - Claude Generated
     auto it = CAPABILITY_REGISTRY.find(command);
     if (it != CAPABILITY_REGISTRY.end()) {
-        int result = it->second.handler(controller, argc, argv);
+        int result = 1;
+        try {
+            result = it->second.handler(controller, argc, argv);
+        } catch (const ConfigTypeError& e) {
+            // Claude Generated (Nov 2026): a parameter value of the wrong type (-max_time abc)
+            // ended in std::terminate with the message "not found"; now the cause and exit code 1.
+            CurcumaLogger::error(e.what());
+            return 1;
+        }
         curcuma::printGpuFallbackSummary();
         return result;
     }

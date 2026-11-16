@@ -50,11 +50,11 @@ Known inconsistency inside this text: the d-shell bullet (June 2026) calls trans
 - **TBLite Interface** - Tight-binding DFT methods (GFN1, GFN2, iPEA1) + **Solvation** (CPCM, GB, ALPB)
 - **XTB Interface** - Extended tight-binding methods (GFN-FF, GFN1, GFN2)
 - **Ulysses Interface** - Semi-empirical methods (PM3, PM6, AM1, MNDO, RM1, etc.) + **Solvation** (GBSA)
-- **Native GFN-FF** - Curcuma's own implementation (`gfnff`) - ✅ **IMPLEMENTED**
+- ⚠️ **Native GFN-FF** - Curcuma's own implementation (`gfnff`), AI-implemented, machine-tested
 
 ### 2. Force Field Methods
 - **Universal Force Field (UFF)** - General-purpose molecular mechanics
-- **GFN-FF** (`gfnff`) - ✅ **FULLY IMPLEMENTED** - See [docs/GFNFF_STATUS.md](GFNFF_STATUS.md)
+- ⚠️ **GFN-FF** (`gfnff`) - AI-implemented, machine-tested - See [docs/GFNFF_STATUS.md](GFNFF_STATUS.md)
 - ⚠️ **Coarse-grained beads** (`cg`, Sep 2026, AI/machine-tested) - LJ spheres/ellipsoids on the workspace engine, input via `-load_ff_json FILE` (`cg_default`, `cg_per_atom`, `pair_interactions`); analytic sphere gradient - see [docs/CLEANUP_2026_09.md](CLEANUP_2026_09.md)
 - **QMDFF** - Quantum Mechanically Derived Force Fields
 - **Universal Parameter Caching** - Automatic save/load for all FF methods

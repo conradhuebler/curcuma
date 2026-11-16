@@ -33,6 +33,7 @@
 #include <algorithm>
 #include <iomanip>
 #include <sstream>
+#include "src/core/output_symbols.h"
 
 UnifiedAnalysis::UnifiedAnalysis(const json& controller, bool silent)
     : CurcumaMethod(ParameterRegistry::getInstance().getDefaultJson("analysis"), controller, silent)
@@ -385,9 +386,9 @@ void UnifiedAnalysis::start()
             CurcumaLogger::param("lattice_a", fmt::format("{:.4f} Å", params[0]));
             CurcumaLogger::param("lattice_b", fmt::format("{:.4f} Å", params[1]));
             CurcumaLogger::param("lattice_c", fmt::format("{:.4f} Å", params[2]));
-            CurcumaLogger::param("lattice_alpha", fmt::format("{:.2f}°", params[3]));
-            CurcumaLogger::param("lattice_beta", fmt::format("{:.2f}°", params[4]));
-            CurcumaLogger::param("lattice_gamma", fmt::format("{:.2f}°", params[5]));
+            CurcumaLogger::param("lattice_alpha", fmt::format("{:.2f}" SYM_DEG, params[3]));
+            CurcumaLogger::param("lattice_beta", fmt::format("{:.2f}" SYM_DEG, params[4]));
+            CurcumaLogger::param("lattice_gamma", fmt::format("{:.2f}" SYM_DEG, params[5]));
         }
     }
 
@@ -1046,7 +1047,7 @@ json UnifiedAnalysis::calculateTopologicalProperties(const Molecule& mol)
 
                             // Main feedback message
                             double percentage = (100.0 * selected_indices.size()) / mol.AtomCount();
-                            CurcumaLogger::success_fmt("✓ Atom selection: {}/{} atoms ({:.1f}%) selected: {}",
+                            CurcumaLogger::success_fmt("[OK] Atom selection: {}/{} atoms ({:.1f}%) selected: {}",
                                                      selected_indices.size(), mol.AtomCount(), percentage, indices_str);
 
                             // Additional details
@@ -1427,27 +1428,27 @@ void UnifiedAnalysis::printEnhancedTDAHelp() const
     std::cout << std::endl;
     CurcumaLogger::raw("1. Distance Matrix Analysis");
     CurcumaLogger::raw("   -topological.save_distance_matrix true");
-    CurcumaLogger::raw("   • Exports complete distance matrix (.dMat files)");
-    CurcumaLogger::raw("   • Includes atomic elements and energies if requested");
-    CurcumaLogger::raw("   • Supports bond exclusion for topological analysis");
+    CurcumaLogger::raw("   - Exports complete distance matrix (.dMat files)");
+    CurcumaLogger::raw("   - Includes atomic elements and energies if requested");
+    CurcumaLogger::raw("   - Supports bond exclusion for topological analysis");
     std::cout << std::endl;
     CurcumaLogger::raw("2. Persistent Homology Analysis");
     CurcumaLogger::raw("   -topological.save_persistence_pairs true");
-    CurcumaLogger::raw("   • Generates persistence pairs (.pairs files)");
-    CurcumaLogger::raw("   • Calculates birth-death persistence data");
-    CurcumaLogger::raw("   • Provides topological invariants and statistics");
+    CurcumaLogger::raw("   - Generates persistence pairs (.pairs files)");
+    CurcumaLogger::raw("   - Calculates birth-death persistence data");
+    CurcumaLogger::raw("   - Provides topological invariants and statistics");
     std::cout << std::endl;
     CurcumaLogger::raw("3. Persistence Diagrams");
     CurcumaLogger::raw("   -topological.save_persistence_diagram true");
-    CurcumaLogger::raw("   • Creates persistence diagram matrices (.PD files)");
-    CurcumaLogger::raw("   • Exports both text and image formats");
-    CurcumaLogger::raw("   • Supports multiple colormaps and post-processing");
+    CurcumaLogger::raw("   - Creates persistence diagram matrices (.PD files)");
+    CurcumaLogger::raw("   - Exports both text and image formats");
+    CurcumaLogger::raw("   - Supports multiple colormaps and post-processing");
     std::cout << std::endl;
     CurcumaLogger::raw("4. Persistence Images");
     CurcumaLogger::raw("   -topological.save_persistence_image true");
-    CurcumaLogger::raw("   • Generates persistence images (.PI files)");
-    CurcumaLogger::raw("   • EN-scaled bond topology analysis");
-    CurcumaLogger::raw("   • Advanced image processing and enhancement");
+    CurcumaLogger::raw("   - Generates persistence images (.PI files)");
+    CurcumaLogger::raw("   - EN-scaled bond topology analysis");
+    CurcumaLogger::raw("   - Advanced image processing and enhancement");
     std::cout << std::endl;
     CurcumaLogger::raw("ADVANCED CONFIGURATION:");
     std::cout << std::endl;
@@ -1473,9 +1474,9 @@ void UnifiedAnalysis::printEnhancedTDAHelp() const
     CurcumaLogger::raw("multi-structure files with automatic detection:");
     std::cout << std::endl;
     CurcumaLogger::raw("Supported Multi-Structure Formats:");
-    CurcumaLogger::raw("• XYZ trajectories (.trj.xyz, multi-frame .xyz)");
-    CurcumaLogger::raw("• VTF trajectories (.vtf with multiple timesteps)");
-    CurcumaLogger::raw("• MOL2, SDF multi-structure files");
+    CurcumaLogger::raw("- XYZ trajectories (.trj.xyz, multi-frame .xyz)");
+    CurcumaLogger::raw("- VTF trajectories (.vtf with multiple timesteps)");
+    CurcumaLogger::raw("- MOL2, SDF multi-structure files");
     std::cout << std::endl;
     CurcumaLogger::raw("Usage Examples:");
     CurcumaLogger::raw("  curcuma -analysis trajectory.trj.xyz -topological.save_distance_matrix true");
@@ -1483,33 +1484,33 @@ void UnifiedAnalysis::printEnhancedTDAHelp() const
     CurcumaLogger::raw("  curcuma -analysis multi_conf.xyz -topological.save_persistence_pairs true");
     std::cout << std::endl;
     CurcumaLogger::raw("Auto-Detection Features:");
-    CurcumaLogger::raw("• Automatic multi-structure detection (legacy dMatrix compatibility)");
-    CurcumaLogger::raw("• Per-frame analysis with automatic indexing");
-    CurcumaLogger::raw("• VTF timestep parsing with structure template preservation");
-    CurcumaLogger::raw("• Progress reporting for large trajectory files");
-    CurcumaLogger::raw("• Statistical analysis across trajectory (average, standard deviation)");
-    CurcumaLogger::raw("• Correlation analysis between frames");
-    CurcumaLogger::raw("• Batch export of all persistence data");
+    CurcumaLogger::raw("- Automatic multi-structure detection (legacy dMatrix compatibility)");
+    CurcumaLogger::raw("- Per-frame analysis with automatic indexing");
+    CurcumaLogger::raw("- VTF timestep parsing with structure template preservation");
+    CurcumaLogger::raw("- Progress reporting for large trajectory files");
+    CurcumaLogger::raw("- Statistical analysis across trajectory (average, standard deviation)");
+    CurcumaLogger::raw("- Correlation analysis between frames");
+    CurcumaLogger::raw("- Batch export of all persistence data");
     std::cout << std::endl;
     CurcumaLogger::raw("OUTPUT FILES:");
     CurcumaLogger::raw("The system generates indexed files for each analysis type:");
     std::cout << std::endl;
-    CurcumaLogger::raw("• prefix_N.dMat     - Distance matrix (text format)");
-    CurcumaLogger::raw("• prefix_N.pairs    - Persistence pairs (birth-death values)");
-    CurcumaLogger::raw("• prefix_N.PD       - Persistence diagram (matrix format)");
-    CurcumaLogger::raw("• prefix_N.PD.png   - Persistence diagram (image)");
-    CurcumaLogger::raw("• prefix_N.PI       - Persistence image (matrix format)");
-    CurcumaLogger::raw("• prefix_N.PI.png   - Persistence image (visualization)");
+    CurcumaLogger::raw("- prefix_N.dMat     - Distance matrix (text format)");
+    CurcumaLogger::raw("- prefix_N.pairs    - Persistence pairs (birth-death values)");
+    CurcumaLogger::raw("- prefix_N.PD       - Persistence diagram (matrix format)");
+    CurcumaLogger::raw("- prefix_N.PD.png   - Persistence diagram (image)");
+    CurcumaLogger::raw("- prefix_N.PI       - Persistence image (matrix format)");
+    CurcumaLogger::raw("- prefix_N.PI.png   - Persistence image (visualization)");
     std::cout << std::endl;
     CurcumaLogger::raw("Where N is the frame index (0 for single structures).");
     std::cout << std::endl;
     CurcumaLogger::raw("RESEARCH APPLICATIONS:");
     CurcumaLogger::raw("This implementation is suitable for:");
-    CurcumaLogger::raw("• Molecular shape analysis and comparison");
-    CurcumaLogger::raw("• Protein folding and conformational studies");
-    CurcumaLogger::raw("• Materials science and crystal structure analysis");
-    CurcumaLogger::raw("• Drug discovery and molecular recognition");
-    CurcumaLogger::raw("• Machine learning feature generation");
+    CurcumaLogger::raw("- Molecular shape analysis and comparison");
+    CurcumaLogger::raw("- Protein folding and conformational studies");
+    CurcumaLogger::raw("- Materials science and crystal structure analysis");
+    CurcumaLogger::raw("- Drug discovery and molecular recognition");
+    CurcumaLogger::raw("- Machine learning feature generation");
     std::cout << std::endl;
     CurcumaLogger::raw("CITATION:");
     CitationRegistry::cite("ripser");
@@ -1614,7 +1615,7 @@ json UnifiedAnalysis::calculateScatteringProperties(const Molecule& mol)
                 double exponent = static_cast<double>(i) / std::max(1, q_steps - 1);
                 q_values.push_back(q_min * std::exp(exponent * log_ratio));
             }
-            CurcumaLogger::info_fmt("Using logarithmic q-spacing ({} points from {} to {} Å⁻¹)",
+            CurcumaLogger::info_fmt("Using logarithmic q-spacing ({} points from {} to {} Å" SYM_INV ")",
                                     q_steps, q_min, q_max);
         }
     }
@@ -1627,7 +1628,7 @@ json UnifiedAnalysis::calculateScatteringProperties(const Molecule& mol)
             q_values.push_back(q_min + i * q_step);
         }
         if (q_spacing == "linear") {
-            CurcumaLogger::info_fmt("Using linear q-spacing ({} points from {} to {} Å⁻¹)",
+            CurcumaLogger::info_fmt("Using linear q-spacing ({} points from {} to {} Å" SYM_INV ")",
                                     q_steps, q_min, q_max);
         }
     }

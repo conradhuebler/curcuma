@@ -10,6 +10,7 @@
 #include <sstream>
 #include <algorithm>
 #include "../core/curcuma_logger.h"
+#include "src/core/output_symbols.h"
 
 using namespace nlohmann;
 
@@ -198,9 +199,9 @@ void TrajectoryWriter::writeStatisticsSummary(std::ostream& out, const json& sum
                 if (stats.contains("mean")) {
                     out << "  Mean";
                     if (stats.contains("std_dev")) {
-                        out << " ± StdDev:    ";
+                        out << " " SYM_PM " StdDev:    ";
                         out << std::fixed << std::setprecision(m_precision)
-                            << stats["mean"].get<double>() << " ± "
+                            << stats["mean"].get<double>() << " " SYM_PM " "
                             << stats["std_dev"].get<double>();
                     } else {
                         out << ":            ";
@@ -349,7 +350,7 @@ std::vector<std::string> TrajectoryWriter::parseMetricsList(const std::string& m
 std::string TrajectoryWriter::bracketNotation(const std::string& metric, const std::string& stat_suffix)
 {
     if (stat_suffix == "mean") return "<" + metric + ">";
-    if (stat_suffix == "std") return "σ(" + metric + ")";
+    if (stat_suffix == "std") return SYM_SIGMA "(" + metric + ")";
     if (stat_suffix == "moving_avg") return "<" + metric + ">_w";
     return metric;
 }
@@ -362,27 +363,27 @@ void TrajectoryWriter::writeHumanHeader(std::ostream& out, const std::vector<std
     for (const auto& metric : enabled_metrics) {
         if (metric == "gyration") {
             out << "  Gyr_u";
-            if (m_enable_cumulative) out << "   <Gyr_u> σ(Gyr_u)";
+            if (m_enable_cumulative) out << "   <Gyr_u> " SYM_SIGMA "(Gyr_u)";
             if (m_enable_moving) out << " <Gyr_u>_w";
 
             out << "  Gyr_m";
-            if (m_enable_cumulative) out << "   <Gyr_m> σ(Gyr_m)";
+            if (m_enable_cumulative) out << "   <Gyr_m> " SYM_SIGMA "(Gyr_m)";
             if (m_enable_moving) out << " <Gyr_m>_w";
         } else if (metric == "rout") {
             out << "   Rout";
-            if (m_enable_cumulative) out << "    <Rout>  σ(Rout)";
+            if (m_enable_cumulative) out << "    <Rout>  " SYM_SIGMA "(Rout)";
             if (m_enable_moving) out << "  <Rout>_w";
         } else if (metric == "end2end") {
             out << "  End2End";
-            if (m_enable_cumulative) out << "  <End2End> σ(End2End)";
+            if (m_enable_cumulative) out << "  <End2End> " SYM_SIGMA "(End2End)";
             if (m_enable_moving) out << " <End2End>_w";
         } else if (metric == "mass") {
             out << "   Mass";
-            if (m_enable_cumulative) out << "    <Mass>  σ(Mass)";
+            if (m_enable_cumulative) out << "    <Mass>  " SYM_SIGMA "(Mass)";
             if (m_enable_moving) out << "  <Mass>_w";
         } else if (metric == "com") {
             out << "    COM";
-            if (m_enable_cumulative) out << "     <COM>   σ(COM)";
+            if (m_enable_cumulative) out << "     <COM>   " SYM_SIGMA "(COM)";
             if (m_enable_moving) out << "   <COM>_w";
         } else if (metric == "scattering") {
             // Enhanced header with additional scattering parameters
@@ -401,26 +402,26 @@ void TrajectoryWriter::writeCSVHeader(std::ostream& out, const std::vector<std::
     for (const auto& metric : enabled_metrics) {
         if (metric == "gyration") {
             out << ",Gyr_u";
-            if (m_enable_cumulative) out << ",<Gyr_u>,σ(Gyr_u)";
+            if (m_enable_cumulative) out << ",<Gyr_u>," SYM_SIGMA "(Gyr_u)";
             if (m_enable_moving) out << ",<Gyr_u>_w";
             out << ",Gyr_m";
-            if (m_enable_cumulative) out << ",<Gyr_m>,σ(Gyr_m)";
+            if (m_enable_cumulative) out << ",<Gyr_m>," SYM_SIGMA "(Gyr_m)";
             if (m_enable_moving) out << ",<Gyr_m>_w";
         } else if (metric == "rout") {
             out << ",Rout";
-            if (m_enable_cumulative) out << ",<Rout>,σ(Rout)";
+            if (m_enable_cumulative) out << ",<Rout>," SYM_SIGMA "(Rout)";
             if (m_enable_moving) out << ",<Rout>_w";
         } else if (metric == "end2end") {
             out << ",End2End";
-            if (m_enable_cumulative) out << ",<End2End>,σ(End2End)";
+            if (m_enable_cumulative) out << ",<End2End>," SYM_SIGMA "(End2End)";
             if (m_enable_moving) out << ",<End2End>_w";
         } else if (metric == "mass") {
             out << ",Mass";
-            if (m_enable_cumulative) out << ",<Mass>,σ(Mass)";
+            if (m_enable_cumulative) out << ",<Mass>," SYM_SIGMA "(Mass)";
             if (m_enable_moving) out << ",<Mass>_w";
         } else if (metric == "com") {
             out << ",COM";
-            if (m_enable_cumulative) out << ",<COM>,σ(COM)";
+            if (m_enable_cumulative) out << ",<COM>," SYM_SIGMA "(COM)";
             if (m_enable_moving) out << ",<COM>_w";
         } else if (metric == "scattering") {
             // Enhanced header with additional scattering parameters
@@ -1496,7 +1497,7 @@ bool TrajectoryWriter::writeScatteringPerFrameFiles(const json& timestep_data,
         std::string pq_filename = output_directory + "/" + file_prefix + "_" + frame_num + "_Pq.csv";
         std::ofstream pq_file(pq_filename);
         if (pq_file.is_open()) {
-            pq_file << "# q (Å⁻¹),P(q)\n";
+            pq_file << "# q (Å" SYM_INV "),P(q)\n";
             for (const auto& data_point : pq_data) {
                 pq_file << std::fixed << std::setprecision(6)
                        << data_point.first << ","
@@ -1511,7 +1512,7 @@ bool TrajectoryWriter::writeScatteringPerFrameFiles(const json& timestep_data,
         std::string sq_filename = output_directory + "/" + file_prefix + "_" + frame_num + "_Sq.csv";
         std::ofstream sq_file(sq_filename);
         if (sq_file.is_open()) {
-            sq_file << "# q (Å⁻¹),S(q)\n";
+            sq_file << "# q (Å" SYM_INV "),S(q)\n";
             for (const auto& data_point : sq_data) {
                 sq_file << std::fixed << std::setprecision(6)
                        << data_point.first << ","
@@ -1641,9 +1642,9 @@ bool TrajectoryWriter::writeScatteringStatistics(const json& trajectory_data,
     std::string mode_note = include_median ? "" : " (memory-efficient, no median)";
     stats_file << "# Cross-frame scattering statistics (N=" << frame_count << " frames)" << mode_note << "\n";
     if (include_median) {
-        stats_file << "# q (Å⁻¹),P_avg,P_std,P_median,S_avg,S_std,S_median\n";
+        stats_file << "# q (Å" SYM_INV "),P_avg,P_std,P_median,S_avg,S_std,S_median\n";
     } else {
-        stats_file << "# q (Å⁻¹),P_avg,P_std,S_avg,S_std\n";
+        stats_file << "# q (Å" SYM_INV "),P_avg,P_std,S_avg,S_std\n";
     }
 
     // Data rows

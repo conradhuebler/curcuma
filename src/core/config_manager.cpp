@@ -18,13 +18,27 @@
  */
 
 #include "config_manager.h"
+#include "src/core/key_normalize.h"
 #include "parameter_registry.h"
+#include "curcuma_logger.h"
 #include "global.h"  // For MergeJson
 #include <algorithm>
 #include <cctype>
 #include <stdexcept>
+#include <set>
+#include <mutex>
 
 // Claude Generated 2025: Modern configuration manager for Curcuma capabilities
+
+// Claude Generated (Nov 2026): reported once per message, see ConfigManager::get(key, default)
+void reportConfigTypeError(const std::string& message)
+{
+    static std::mutex mutex;
+    static std::set<std::string> reported;
+    std::lock_guard<std::mutex> lock(mutex);
+    if (reported.insert(message).second)
+        CurcumaLogger::warn(message + "; using the default value");
+}
 
 // Single-Module Constructor
 ConfigManager::ConfigManager(const std::string& module, const json& user_input)
@@ -86,10 +100,7 @@ ConfigManager::ConfigManager(const std::string& module, const json& user_input)
     for (const auto& item : to_merge.items()) {
         std::string user_key = item.key();
         std::string user_key_lower = user_key;
-        std::transform(user_key_lower.begin(), user_key_lower.end(),
-                      user_key_lower.begin(), ::tolower);
-        // Claude Generated (Jun 2026): canonicalize hyphens to underscores for matching
-        user_key_lower.erase(std::remove(user_key_lower.begin(), user_key_lower.end(), '-'), user_key_lower.end());
+        user_key_lower = curcuma::normalizeKey(user_key_lower);
 
         // First, try alias resolution (case-insensitive)
         std::string resolved_key = registry.resolveAlias(module, user_key);
@@ -108,10 +119,7 @@ ConfigManager::ConfigManager(const std::string& module, const json& user_input)
         for (const auto& def_item : m_config.items()) {
             std::string def_key = def_item.key();
             std::string def_key_lower = def_key;
-            std::transform(def_key_lower.begin(), def_key_lower.end(),
-                          def_key_lower.begin(), ::tolower);
-            // Claude Generated (Jun 2026): canonicalize hyphens to underscores for matching
-            def_key_lower.erase(std::remove(def_key_lower.begin(), def_key_lower.end(), '-'), def_key_lower.end());
+            def_key_lower = curcuma::normalizeKey(def_key_lower);
 
             if (user_key_lower == def_key_lower) {
                 // Override default with user value
@@ -261,10 +269,7 @@ ConfigManager::ConfigManager(const std::vector<std::string>& modules, const json
         for (const auto& item : module_user_input.items()) {
             std::string user_key = item.key();
             std::string user_key_lower = user_key;
-            std::transform(user_key_lower.begin(), user_key_lower.end(),
-                          user_key_lower.begin(), ::tolower);
-            // Claude Generated (Jun 2026): canonicalize hyphens to underscores for matching
-            user_key_lower.erase(std::remove(user_key_lower.begin(), user_key_lower.end(), '-'), user_key_lower.end());
+            user_key_lower = curcuma::normalizeKey(user_key_lower);
 
             // Try alias resolution
             std::string resolved_key = registry.resolveAlias(module, user_key);
@@ -282,10 +287,7 @@ ConfigManager::ConfigManager(const std::vector<std::string>& modules, const json
             for (const auto& def_item : merged_config.items()) {
                 std::string def_key = def_item.key();
                 std::string def_key_lower = def_key;
-                std::transform(def_key_lower.begin(), def_key_lower.end(),
-                              def_key_lower.begin(), ::tolower);
-                // Claude Generated (Jun 2026): canonicalize hyphens to underscores for matching
-                def_key_lower.erase(std::remove(def_key_lower.begin(), def_key_lower.end(), '-'), def_key_lower.end());
+                def_key_lower = curcuma::normalizeKey(def_key_lower);
 
                 if (user_key_lower == def_key_lower) {
                     merged_config[def_key] = item.value();
@@ -399,16 +401,12 @@ json ConfigManager::findKey(const std::string& key) const
 {
     // First try: Exact case-insensitive match
     std::string key_lower = key;
-    std::transform(key_lower.begin(), key_lower.end(), key_lower.begin(), ::tolower);
-    // Claude Generated (Jun 2026): canonicalize hyphens to underscores for matching
-    key_lower.erase(std::remove(key_lower.begin(), key_lower.end(), '-'), key_lower.end());
+    key_lower = curcuma::normalizeKey(key_lower);
 
     for (const auto& item : m_config.items()) {
         std::string config_key = item.key();
         std::string config_key_lower = config_key;
-        std::transform(config_key_lower.begin(), config_key_lower.end(),
-                      config_key_lower.begin(), ::tolower);
-        config_key_lower.erase(std::remove(config_key_lower.begin(), config_key_lower.end(), '-'), config_key_lower.end());
+        config_key_lower = curcuma::normalizeKey(config_key_lower);
 
         if (key_lower == config_key_lower) {
             return item.value();
@@ -421,23 +419,16 @@ json ConfigManager::findKey(const std::string& key) const
     if (!m_module.empty()) {
         std::string prefixed_key = m_module + "." + key;
         std::string prefixed_key_lower = prefixed_key;
-        std::transform(prefixed_key_lower.begin(), prefixed_key_lower.end(),
-                      prefixed_key_lower.begin(), ::tolower);
-        prefixed_key_lower.erase(std::remove(prefixed_key_lower.begin(), prefixed_key_lower.end(), '-'), prefixed_key_lower.end());
+        prefixed_key_lower = curcuma::normalizeKey(prefixed_key_lower);
 
         for (const auto& item : m_config.items()) {
             std::string config_key = item.key();
             std::string config_key_lower = config_key;
-            std::transform(config_key_lower.begin(), config_key_lower.end(),
-                          config_key_lower.begin(), ::tolower);
-            config_key_lower.erase(std::remove(config_key_lower.begin(), config_key_lower.end(), '-'), config_key_lower.end());
+            config_key_lower = curcuma::normalizeKey(config_key_lower);
 
             if (prefixed_key_lower == config_key_lower) {
-                #ifndef DEBUG_CONFIG_MANAGER
-                std::cerr << "[ConfigManager WARNING] Parameter '" << key
-                          << "' found via prefix fallback as '" << config_key
-                          << "'. Consider using flat structure." << std::endl;
-                #endif
+                CurcumaLogger::warn("ConfigManager: parameter '" + key + "' found via prefix fallback as '"
+                                    + config_key + "'. Consider using flat structure.");
                 return item.value();
             }
         }
@@ -458,11 +449,8 @@ json ConfigManager::findKey(const std::string& key) const
                           nested_key_lower.begin(), ::tolower);
 
             if (key_lower_nested == nested_key_lower) {
-                #ifndef DEBUG_CONFIG_MANAGER
-                std::cerr << "[ConfigManager WARNING] Parameter '" << key
-                          << "' found in nested object config[\"" << m_module << "\"][\""
-                          << nested_key << "\"]. Consider flattening JSON structure." << std::endl;
-                #endif
+                CurcumaLogger::warn("ConfigManager: parameter '" + key + "' found in nested object config[\""
+                                    + m_module + "\"][\"" + nested_key + "\"]. Consider flattening JSON structure.");
                 return nested_item.value();
             }
         }

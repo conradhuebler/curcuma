@@ -48,7 +48,7 @@ namespace Files {
 
 inline StringList SplitString(const std::string& string, const char* delim)
 {
-#pragma message("Has to be removed, as it is redudant")
+// Has to be removed, as it is redudant
     StringList elements;
     std::string element;
     for (const char& c : string) {
@@ -111,7 +111,6 @@ inline Mol XYZString2Mol(const std::string& coord)
             molecule.m_atoms.push_back(pair.first);
             molecule.m_geometry.conservativeResize(molecule.m_geometry.rows() + 1, molecule.m_geometry.cols());
             molecule.m_geometry.row(molecule.m_geometry.rows() - 1) = Eigen::Vector3d(pair.second[0], pair.second[1], pair.second[2]);
-            //            push_back(pair.second);
         }
         if (i - 1 == atoms) {
             break;
@@ -169,8 +168,6 @@ inline Mol XYZ2Mol(const std::string& filename)
             try {
                 auto pair = Line2Atoms(line);
                 molecule.m_atoms.push_back(pair.first);
-                // molecule.m_geometry.push_back(pair.second);
-                // molecule.m_geometry.conservativeResize(molecule.m_geometry.rows() +  1, molecule.m_geometry.cols());
                 molecule.m_geometry.row(molecule.m_atoms.size() - 1) = Eigen::Vector3d(pair.second[0], pair.second[1], pair.second[2]);
             } catch (const std::invalid_argument& arg) {
                 // Phase 1: Enhanced coordinate error context - Claude Generated 2025
@@ -232,7 +229,6 @@ inline Mol Coord2Mol(const std::string& filename)
                 vector[0] = std::stod(strings[0]) * au;
                 vector[1] = std::stod(strings[1]) * au;
                 vector[2] = std::stod(strings[2]) * au;
-                // molecule.m_geometry.push_back(vector);
                 molecule.m_geometry.conservativeResize(molecule.m_atoms.size(), molecule.m_geometry.cols());
                 molecule.m_geometry.row(molecule.m_geometry.rows() - 1) = Eigen::Vector3d(vector[0], vector[1], vector[2]);
             } catch (const std::invalid_argument& arg) {
@@ -267,7 +263,6 @@ inline Mol SDF2Mol(const std::string& filename)
         throw std::runtime_error(fmt::format("Failed to open file: {}", filename));
     }
     for (std::string line; getline(*file, line);) {
-        //if (readblock) {
         auto strings = SplitString(line, " ");
         if (strings.size() == 16) {
             try {
@@ -276,7 +271,6 @@ inline Mol SDF2Mol(const std::string& filename)
                 vector[0] = std::stod(strings[0]);
                 vector[1] = std::stod(strings[1]);
                 vector[2] = std::stod(strings[2]);
-                // molecule.m_geometry.push_back(vector);
                 molecule.m_geometry.conservativeResize(molecule.m_atoms.size(), molecule.m_geometry.cols());
                 molecule.m_geometry.row(molecule.m_geometry.rows() - 1) = Eigen::Vector3d(vector[0], vector[1], vector[2]);
             } catch (const std::invalid_argument& arg) {
@@ -315,7 +309,6 @@ inline Mol Mol22Mol(const std::string& filename)
                     vector[0] = std::stod(strings[2]);
                     vector[1] = std::stod(strings[3]);
                     vector[2] = std::stod(strings[4]);
-                    // molecule.m_geometry.push_back(vector);
                     molecule.m_geometry.conservativeResize(molecule.m_atoms.size(), molecule.m_geometry.cols());
                     molecule.m_geometry.row(molecule.m_geometry.rows() - 1) = Eigen::Vector3d(vector[0], vector[1], vector[2]);
                 } catch (const std::invalid_argument& arg) {
@@ -669,24 +662,5 @@ inline Molecule LoadMol(const std::string& filename)
         return Molecule();
     }
 }
-/*
-inline void xyz2allxyz(const std::string& xyzfile)
-{
-    std::string allxyz = xyzfile;
-    allxyz.erase(allxyz.end() - 3, allxyz.end());
-
-    std::ofstream input;
-    input.open(allxyz + "allxyz", std::ios_base::app);
-    FileIterator file(xyzfile);
-    while (!file.AtEnd()) {
-        Molecule mol = file.Next();
-        input << mol.XYZString();
-        if (!file.AtEnd())
-            input << ">" << std::endl;
-    }
-    //input << "\n";
-    input.close();
-}
-*/
 
 }

@@ -25,6 +25,7 @@
 #include <cmath>
 #include <set>
 #include <iostream>
+#include "src/core/output_symbols.h"
 
 // ============================================================================
 // Main Entry Point
@@ -71,13 +72,13 @@ std::vector<double> HuckelSolver::calculatePiBondOrders(
     int picount = static_cast<int>(pi_system_ids.size());
     if (picount == 0) {
         if (m_verbosity >= 3) {
-            CurcumaLogger::info("HuckelSolver: No π-systems found, returning zero bond orders");
+            CurcumaLogger::info("HuckelSolver: No " SYM_PI "-systems found, returning zero bond orders");
         }
         return pbo;
     }
 
     if (m_verbosity >= 3) {
-        CurcumaLogger::info(fmt::format("HuckelSolver: Processing {} π-system(s)", picount));
+        CurcumaLogger::info(fmt::format("HuckelSolver: Processing {} " SYM_PI "-system(s)", picount));
     }
 
     // Process each π-system separately
@@ -133,14 +134,14 @@ std::vector<double> HuckelSolver::calculatePiBondOrders(
         // Skip if too small (need at least 2 atoms and 1 electron)
         if (npi < 2 || nelpi < 1) {
             if (m_verbosity >= 3) {
-                CurcumaLogger::info(fmt::format("HuckelSolver: Skipping π-system {} (npi={}, nel={})",
+                CurcumaLogger::info(fmt::format("HuckelSolver: Skipping " SYM_PI "-system {} (npi={}, nel={})",
                                   pis, npi, nelpi));
             }
             continue;
         }
 
         if (m_verbosity >= 3) {
-            CurcumaLogger::info(fmt::format("HuckelSolver: π-system {} has {} atoms, {} electrons",
+            CurcumaLogger::info(fmt::format("HuckelSolver: " SYM_PI "-system {} has {} atoms, {} electrons",
                               pis, npi, nelpi));
         }
 

@@ -409,7 +409,7 @@ This would eliminate even more boilerplate from capability constructors.
 - **Implementation**: `src/core/config_manager.{h,cpp}`
 - **Proof-of-Concept**: `src/capabilities/analysis.cpp`
 - **Parameter Registry**: [PARAMETER_SYSTEM.md](PARAMETER_SYSTEM.md)
-- **Migration Guide**: [PARAMETER_MIGRATION_GUIDE.md](PARAMETER_MIGRATION_GUIDE.md)
+- **Migration Guide**: [PARAMETER_MIGRATION_GUIDE.md](archive/PARAMETER_MIGRATION_GUIDE.md)
 
 ## Contributing
 

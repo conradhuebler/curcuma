@@ -442,10 +442,7 @@ void Docking::FilterStructures()
     confscan["RMSDMethod"] = m_RMSDmethod;
     confscan["RMSDThreads"] = m_threads;
     confscan["RMSDElement"] = m_RMSDElement;
-    // json controller;
-    // controller["ConfScan"] = confscan;
     ConfScan* scan = new ConfScan(confscan, true);
-    // scan->setMolecules(m_optimisation_result);
     scan->setFileName("Final_Result.xyz");
     scan->start();
 

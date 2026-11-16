@@ -467,7 +467,7 @@ void ScnpInputParser::documentParameters() const
     CurcumaLogger::info("Known Parameters:");
     for (const auto& [name, info] : m_parameter_db) {
         if (info.is_known) {
-            CurcumaLogger::param(name, fmt::format("{} → {}", info.probable_meaning, info.curcuma_equivalent));
+            CurcumaLogger::param(name, fmt::format("{} -> {}", info.probable_meaning, info.curcuma_equivalent));
         }
     }
 
@@ -476,7 +476,7 @@ void ScnpInputParser::documentParameters() const
         CurcumaLogger::warn("Unknown Parameters (educated guesses):");
         for (const std::string& name : m_unknown_parameters) {
             const auto& info = m_parameter_db.at(name);
-            CurcumaLogger::param(name, fmt::format("Probably: {} → {}", info.probable_meaning, info.curcuma_equivalent));
+            CurcumaLogger::param(name, fmt::format("Probably: {} -> {}", info.probable_meaning, info.curcuma_equivalent));
         }
     }
 

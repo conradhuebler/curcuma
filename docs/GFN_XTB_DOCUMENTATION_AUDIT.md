@@ -287,7 +287,6 @@ Fast jedes Dokument enthält die gleichen TBLite-Referenzen:
 |---|---|
 | `src/helpers/gfnff_helper.cpp` | Wird es noch gebaut/genutzt? |
 | `src/helpers/xtb_helper.cpp` | Wird es noch gebaut/genutzt? |
-| `src/helpers/gfnff_term_validator.cpp` | Wird es noch gebaut/genutzt? |
 | `test_cases/GFNFF_TESTING.md` | Ist es aktueller als `GFNFF_STATUS.md`? |
 | `docs/archive/GFNFF_TEST_RESULTS_2026-01-12.txt` | Hat es Ersatz durch CTest? |
 

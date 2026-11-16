@@ -85,7 +85,7 @@ void ForceField::UpdateGeometry(const Matrix& geometry)
 
 void ForceField::UpdateGeometry(const double* coord)
 {
-#pragma message("replace with raw data")
+// replace with raw data
     for (int i = 0; i < m_natoms; ++i) {
         m_geometry(i, 0) = coord[3 * i + 0];
         m_geometry(i, 1) = coord[3 * i + 1];
@@ -95,7 +95,7 @@ void ForceField::UpdateGeometry(const double* coord)
 
 void ForceField::UpdateGeometry(const std::vector<std::array<double, 3>>& geometry)
 {
-#pragma message("replace with raw data")
+// replace with raw data
     for (int i = 0; i < m_natoms; ++i) {
         m_geometry(i, 0) = geometry[i][0];
         m_geometry(i, 1) = geometry[i][1];
@@ -554,43 +554,6 @@ void ForceField::setD3DispersionPairs(const json& pairs)
     }
 }
 
-void ForceField::setESPs(const json& esps)
-{
-    m_EQs.clear();
-    for (int i = 0; i < esps.size(); ++i) {
-        json esp = esps[i].get<json>();
-        EQ v;
-        v.type = esp["type"];
-
-        v.i = esp["i"];
-        v.j = esp["j"];
-        v.q_i = esp["q_i"];
-        v.q_j = esp["q_j"];
-        v.epsilon = esp["epsilon"];
-
-        m_EQs.push_back(v);
-    }
-}
-
-Eigen::MatrixXd ForceField::NumGrad()
-{
-    Eigen::MatrixXd gradient = Eigen::MatrixXd::Zero(m_natoms, 3);
-
-    double dx = 1e-6; // m_d;
-    double E1, E2;
-    for (int i = 0; i < m_natoms; ++i) {
-        for (int j = 0; j < 3; ++j) {
-            m_geometry(i, j) += dx;
-            E1 = Calculate(false);
-            m_geometry(i, j) -= 2 * dx;
-            E2 = Calculate(false);
-            gradient(i, j) = (E1 - E2) / (2 * dx);
-            m_geometry(i, j) += dx;
-        }
-    }
-    return gradient;
-}
-
 bool ForceField::saveParametersToFile(const std::string& filename) const
 {
     try {
@@ -664,6 +627,9 @@ json ForceField::exportCurrentParameters() const
     output["method"] = m_method;
     output["natoms"] = m_natoms;
     output["e0"] = m_e0;
+    // Claude Generated 2026: stamp the geometry signature so a stale cache (same
+    // basename, different structure) is rejected on load by tryLoadAutoParameters.
+    output["_geometry_signature"] = geometrySignature();
 
     // Export bonds
     json bonds = json::array();
@@ -795,6 +761,28 @@ std::string ForceField::generateParameterFileName(const std::string& geometry_fi
     return base + ".param.json";
 }
 
+json ForceField::geometrySignature() const
+{
+    // Claude Generated 2026: a cheap, deterministic signature of the CURRENT geometry
+    // so the auto-parameter cache can detect a stale file (same basename, different
+    // structure). Atom count + sorted element multiset + a weighted coordinate checksum
+    // rounded to 1e-6 Angstrom (tolerance-robust yet distinguishes different geometries).
+    json sig;
+    sig["natoms"] = m_natoms;
+    std::vector<int> atoms = m_atom_types;
+    std::sort(atoms.begin(), atoms.end());
+    sig["atoms"] = atoms;
+    double cs = 0.0;
+    for (int i = 0; i < m_natoms; ++i) {
+        for (int k = 0; k < 3; ++k) {
+            const double v = m_geometry(i, k);
+            cs += std::llround(v * 1e6) * static_cast<double>(3 * i + k + 1);
+        }
+    }
+    sig["coord_hash"] = cs;
+    return sig;
+}
+
 bool ForceField::tryLoadAutoParameters(const std::string& method)
 {
     if (m_auto_param_file.empty()) {
@@ -823,6 +811,20 @@ bool ForceField::tryLoadAutoParameters(const std::string& method)
     if (m_parameters.contains("method") && !m_parameters["method"].is_null()) {
         std::string cached_method = m_parameters["method"].get<std::string>();
         if (cached_method == method) {
+            // Claude Generated 2026: reject stale caches whose geometry no longer matches
+            // the current input (same basename, different structure — e.g. NEB-MD -no_bmt
+            // re-runs, or a user pointing -md at a different molecule under the same name).
+            // Caches written before this field existed lack it and are regenerated.
+            if (!m_parameters.contains("_geometry_signature") ||
+                m_parameters["_geometry_signature"] != geometrySignature()) {
+                if (CurcumaLogger::get_verbosity() >= 2) {
+                    CurcumaLogger::warn(fmt::format(
+                        "Cached {} parameters at {} are stale (geometry mismatch) - regenerating.",
+                        method, m_auto_param_file));
+                }
+                m_parameters.clear();
+                return false;
+            }
             // Claude Generated (Dec 2025): Show cache success at verbosity ≥1 (important user info)
             if (CurcumaLogger::get_verbosity() >= 1) {
                 CurcumaLogger::success(fmt::format("Loaded cached {} parameters from: {}", method, m_auto_param_file));
@@ -866,7 +868,7 @@ double ForceField::Calculate(bool gradient)
     // rebuild it here if interaction lists exist without one.
     if (!m_workspace && !m_bonds.empty()) {
         CurcumaLogger::warn(fmt::format(
-            "UFF/QMDFF workspace not initialized for method '{}' — rebuilding", m_method));
+            "UFF/QMDFF workspace not initialized for method '{}' - rebuilding", m_method));
         buildWorkspace();
     }
 

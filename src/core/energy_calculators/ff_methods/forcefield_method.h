@@ -96,12 +96,6 @@ public:
     void setParameterCaching(bool enable);
     
     /**
-     * @brief Check if parameter caching is enabled
-     * @return True if caching is enabled
-     */
-    bool isParameterCachingEnabled() const;
-    
-    /**
      * @brief Load parameters from file
      * @param filename Parameter file path
      * @return True if load successful
@@ -144,12 +138,6 @@ public:
      * @brief Print parameter summary for analysis
      */
     void printParameterSummary() const;
-    
-    /**
-     * @brief Calculate numerical gradient (for testing/validation)
-     * @return Numerical gradient matrix
-     */
-    Matrix calculateNumericalGradient();
     
     /**
      * @brief Set parameter file path

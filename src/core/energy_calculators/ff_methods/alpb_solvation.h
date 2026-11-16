@@ -172,10 +172,6 @@ public:
      */
     void printInfo() const;
 
-    /**
-     * @brief Check if model is initialized and ready
-     */
-    bool isInitialized() const { return m_initialized; }
 
     /**
      * @brief Get the symmetric Born interaction matrix B (nat × nat).
@@ -188,15 +184,7 @@ public:
      */
     const Eigen::MatrixXd& bornMatrix() const { return m_born_mat; }
 
-    /**
-     * @brief Get Born radii (for diagnostics)
-     */
-    const Eigen::VectorXd& getBornRadii() const { return m_brad; }
 
-    /**
-     * @brief Get SASA values (for diagnostics)
-     */
-    const Eigen::VectorXd& getSASA() const { return m_sasa; }
 
 private:
     // ─── Initialization helpers ───

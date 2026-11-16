@@ -120,7 +120,6 @@ inline std::pair<Position, Position> OptimiseAnchor(const Molecule* host, const 
 
     int MaxIter = 3000;
     Vector old_param = parameter;
-    // std::cout << parameter.transpose() << std::endl;
     for (; iter < MaxIter /*&& ((qAbs(error_0 - error_2) > ErrorConvergence) || norm > DeltaParameter)*/; ++iter) {
         status = lm.minimizeOneStep(parameter);
 
@@ -129,8 +128,6 @@ inline std::pair<Position, Position> OptimiseAnchor(const Molecule* host, const 
 
         old_param = parameter;
     }
-    // std::cout << parameter.transpose() << std::endl;
-    // std::cout << "took " << iter << " optimisation steps." << std::endl;
 
     return Vector2PositionPair(parameter);
 }

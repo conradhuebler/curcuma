@@ -731,13 +731,13 @@ private:
 
     // --- System ---
     PARAM(charge, Int, 0, "Total charge of the system. Applied to every MD run, every optimisation and every ConfScan energy.", "System", {})
-    PARAM(spin, Int, 0, "Total spin of the system.", "System", {"Spin"})
+    PARAM(spin, Int, 0, "Number of unpaired electrons (multiplicity - 1) of the system.", "System", {})
     PARAM(threads, Int, 1, "Number of ConfSearch cycles run in parallel. Each child MD or optimisation then runs single-threaded.", "System", {})
 
     // --- Search Schedule ---
-    PARAM(startT, Double, 600.0, "Temperature of the first exploration cycle in Kelvin.", "Schedule", {})
-    PARAM(endT, Double, 300.0, "Temperature of the last exploration cycle in Kelvin.", "Schedule", {})
-    PARAM(deltaT, Double, 50.0, "Temperature decrement between cycles in Kelvin.", "Schedule", {})
+    PARAM(start_temperature, Double, 600.0, "Temperature of the first exploration cycle in Kelvin.", "Schedule", {"startT"})
+    PARAM(end_temperature, Double, 300.0, "Temperature of the last exploration cycle in Kelvin.", "Schedule", {"endT"})
+    PARAM(delta_temperature, Double, 50.0, "Temperature decrement between cycles in Kelvin.", "Schedule", {"deltaT"})
     PARAM(repeat, Int, 4, "How often a temperature stage is repeated. Each repetition runs ONE MD per seed structure and then re-seeds from the best structures found so far, so repetition 2 starts from what repetition 1 discovered. The high-level re-optimisation runs once per temperature, at the end of the last repetition. Parallelism comes from the number of seeds (seed_rank), not from re-running one seed.", "Schedule", {})
     PARAM(explore_md_time, Double, 2000.0, "Length of each EXPLORATION MD run in femtoseconds (the biased discovery step; its densifying counterpart is refine_md_time).", "Schedule", {"time", "max_time", "MaxTime"})
 

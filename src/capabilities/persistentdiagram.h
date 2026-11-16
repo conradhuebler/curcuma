@@ -111,25 +111,18 @@ public:
         m_compressed_lower_distance_matrix = vector;
     }
 
-    inline void setENScaling(const std::vector<double>& en_scaling)
-    {
-        m_en_scaling = en_scaling;
-    }
-
     inline void setDimension(int dim)
     {
         m_dimension = dim;
     }
 
-    inline void setRatio(double ratio)
+    inline void setENScaling(const std::vector<double>& en_scaling)
     {
-        m_ratio = ratio;
+        m_en_scaling = en_scaling;
     }
 
-    inline void setThreshold(double threshold)
-    {
-        m_threshold = threshold;
-    }
+
+
 
     dpairs generatePairs();
     triples generateTriples();
@@ -145,25 +138,12 @@ public:
      */
     std::map<int, dpairs> generateBarcodes();
 
-    inline void setXRange(double xmin, double xmax)
-    {
-        m_xmin = xmin;
-        m_xmax = xmax;
-    }
 
-    inline void setYRange(double ymin, double ymax)
-    {
-        m_ymin = ymin;
-        m_ymax = ymax;
-    }
 
     Eigen::MatrixXd generateImage(const dpairs& pairs);
     Eigen::MatrixXd generateImage(const triples& pairs);
 
     void setScaling(double scaling) { m_scaling = scaling; }
-    void setBins(int bins) { m_bins = bins; }
-    void setStdX(double std_x) { m_std_x = std_x; }
-    void setStdY(double std_y) { m_std_x = std_y; }
 
     void printHelp() const override;
 

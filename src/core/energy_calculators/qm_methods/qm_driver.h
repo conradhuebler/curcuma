@@ -53,7 +53,6 @@ public:
     }
 
 private:
-    // std::vector<STO_6G> MakeBasis();
     // Basisset MakeBasis();
 
     virtual Matrix MakeOverlap(Basisset& basisset) = 0;

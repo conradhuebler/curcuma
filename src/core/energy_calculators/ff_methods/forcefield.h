@@ -82,7 +82,6 @@ public:
     inline double VdWEnergy() const { return m_vdw_energy; }
     inline double RepulsionEnergy() const { return m_rep_energy; }
     inline double DispersionEnergy() const { return m_dispersion_energy; }
-    inline double D3Energy() const { return m_d3_energy; }  // Claude Generated (Jan 2, 2026): D3 dispersion energy (uff-d3)
 
     void setParameter(const json& parameter);
     void setParameterFile(const std::string& file);
@@ -96,10 +95,12 @@ public:
     // Auto-parameter file management: input.xyz -> input.param.json
     bool tryLoadAutoParameters(const std::string& method);
     bool autoSaveParameters() const;
+    // Claude Generated 2026: Geometry signature (atom count + sorted elements + coord hash)
+    // used to reject stale auto-parameter caches whose topology no longer matches the input
+    // geometry (e.g. NEB-MD -no_bmt re-runs, or same basename / different molecule).
+    json geometrySignature() const;
     static std::string generateParameterFileName(const std::string& geometry_file);
     void setParameterCaching(bool enable) { m_enable_caching = enable; }
-
-    Eigen::MatrixXd NumGrad();
 
     // Claude Generated: Parameter analysis functionality
     void printParameterSummary() const;
@@ -116,8 +117,6 @@ private:
     void setDihedrals(const json& dihedrals);
     void setInversions(const json& inversions);
     void setvdWs(const json& vdws);
-    void setESPs(const json& esps);
-
     /// Claude Generated (Sep 2026): parse "d3_dispersion_pairs" (D3ParameterGenerator output,
     /// forwarded by ForceFieldGenerator for uff-d3) into the GFNFFDispersion pair layout that
     /// FFWorkspace evaluates with dispersion_method = "d3".

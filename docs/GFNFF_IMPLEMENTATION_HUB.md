@@ -13,8 +13,6 @@ This hub provides a central entry point for all documentation related to the nat
 | :--- | :--- | :--- |
 | **Status** | **[GFNFF_STATUS.md](GFNFF_STATUS.md)** | **Current project status and accuracy metrics (start here!)** |
 | **Theory** | [GFNFF_EEQ_THEORY.md](theory/GFNFF_EEQ_THEORY.md) | Electronegativity Equalization (EEQ) and charge model |
-| | [GFNFF_TORSION_THEORY.md](theory/GFNFF_TORSION_THEORY.md) | Torsion and extra-torsion potential formulation |
-| | [GFNFF_INVERSION_THEORY.md](theory/GFNFF_INVERSION_THEORY.md) | Out-of-plane and planarity stabilization |
 | **Mechanics** | **[GFNFF_GRADIENTS.md](GFNFF_GRADIENTS.md)** | Analytical gradients and derivative consistency |
 | | [GFNFF_PHYSICS_AUDIT.md](GFNFF_PHYSICS_AUDIT.md) | In-depth audit of physical parameters and damping |
 | | [GFNFF_DISPERSION_FIX.md](GFNFF_DISPERSION_FIX.md) | Details on D4 integration and BJ-damping formulas |

@@ -35,6 +35,14 @@ void processBakFiles(const std::string& bmt_dir,
 // Build full output path: bmt_dir/filename (or just filename if bmt_dir empty)
 std::string outputPath(const std::string& bmt_dir, const std::string& filename);
 
+// Output directory of the running command, for code that does not know the capability
+// (force-field and dispersion diagnostics). It is the first directory createBMTDir() made in
+// this process; empty with -no_bmt. Claude Generated (Nov 2026).
+std::string processOutputDir();
+
+// processOutputDir()/filename, or filename alone when no BMT directory exists
+std::string processOutputPath(const std::string& filename);
+
 // Strip file extension from filename (handles .xyz, .mol2, .sdf, .pdb, etc.)
 // Returns the basename without extension
 std::string stripExtension(const std::string& filename);

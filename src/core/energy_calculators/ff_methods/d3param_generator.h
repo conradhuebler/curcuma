@@ -215,7 +215,6 @@ public:
 private:
     void initializeReferenceData();
     void copyReferenceData();
-    double calculateR6(int atom_i, int atom_j) const;
 
     // Geometry-dependent methods (NOT YET IMPLEMENTED)
     // TODO (Consolidation): Consider sharing CN calculation with GFN-FF/EEQ
@@ -228,14 +227,10 @@ private:
     void precomputeGaussianWeights(const std::vector<int>& atoms, const std::vector<double>& coordination_numbers);
     double interpolateC6(int elem_i, int elem_j, size_t atom_idx_i, size_t atom_idx_j) const;  // Updated signature: uses atom indices instead of CN values
 
-    double calculateDistance(int i, int j, const Eigen::MatrixXd& geometry) const;
 
     // ATM three-body helper (Claude Generated 2025)
     double calculateTripleScale(int i, int j, int k) const;
 
-    // Reference data lookup methods
-    double getC6Coefficient(int elem1, int elem2, double cn1, double cn2) const;
-    int getElementPairIndex(int elem1, int elem2) const;
 
     // Reference data from s-dftd3 (COMPLETE MAX_REF=7)
     static constexpr int MAX_ELEM = 103;  // Updated to match s-dftd3 (103 vs 94)

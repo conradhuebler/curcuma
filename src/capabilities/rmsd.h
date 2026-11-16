@@ -290,6 +290,16 @@ public:
 
     Geometry Gradient() const;
 
+    /*! \brief RMSD * d(RMSD)/dR, i.e. the gradient with its 1/RMSD factor cancelled.
+     *
+     *  Gradient() is (ref - tar)/(RMSD*N) and therefore singular where the target
+     *  coincides with the reference. Every consumer that multiplies the gradient by the
+     *  RMSD again - as the path collective variable does, because the chain rule of a
+     *  Gaussian in d^2 produces a factor 2*lambda*d - can use this form instead and never
+     *  divide at all. Analytically identical, regular everywhere.
+     *  Claude Generated 2026. */
+    Geometry GradientTimesRMSD() const;
+
     // Claude Generated - Public helper methods for Strategy Pattern access
     Geometry CenterMolecule(const Molecule& mol, int fragment) const;
     Geometry CenterMolecule(const Geometry& geom) const;
@@ -438,7 +448,7 @@ private:
     PARAM(method, String, "subspace", "Alignment method: subspace (default, recommended)|inertia (recommended)|template|dtemplate|incr (legacy)|molalign (external)|hungarian|predefined.", "Method", {"RMSDmethod", "rmsdmethod"},
         "tier=primary; enum=subspace|inertia|template|dtemplate|incr|molalign|hungarian|predefined")
     PARAM(limit, Int, 0, "Limit for subspace and dtemplate methods.", "Method", {})
-    PARAM(element, String, "7", "Element(s) for template methods (e.g., \"7,8\").", "Method", {"Element"})
+    PARAM(element, String, "7", "Element(s) for template methods (e.g., \"7,8\").", "Method", {})
     PARAM(order_file, String, "", "Path to a file with a predefined atom order.", "Method", {"order"})
 
     // --- Cost Matrix & Kuhn-Munkres ---
@@ -491,18 +501,15 @@ public:
             * Eigen::AngleAxisd(x[1], Eigen::Vector3d::UnitY())
             * Eigen::AngleAxisd(x[2], Eigen::Vector3d::UnitZ());
 
-        // Eigen::MatrixXd tar = m_target.transpose();
 
         // Geometry rotated = tar.transpose() * n;
         double fx = 0.0;
         double dx = 1e-5;
 
         auto result = RMSDDriver::MakeCostMatrix(m_reference, m_target * n, m_reference_atoms, m_target_atoms, m_costmatrix);
-        // std::cout << result.first << std::endl;
         Eigen::VectorXd tmp = x;
         for (int i = 0; i < 3; ++i) {
             tmp[i] += dx;
-            // std::cout << tmp.transpose() << std::endl;
             Eigen::Matrix3d n;
             n = Eigen::AngleAxisd(tmp[0], Eigen::Vector3d::UnitX())
                 * Eigen::AngleAxisd(tmp[1], Eigen::Vector3d::UnitY())
@@ -513,16 +520,13 @@ public:
             auto p = RMSDDriver::MakeCostMatrix(m_reference, m_target * n, m_reference_atoms, m_target_atoms, m_costmatrix).first;
 
             tmp[i] -= 2 * dx;
-            // std::cout << tmp.transpose() << std::endl;
 
             n = Eigen::AngleAxisd(tmp[0], Eigen::Vector3d::UnitX())
                 * Eigen::AngleAxisd(tmp[1], Eigen::Vector3d::UnitY())
                 * Eigen::AngleAxisd(tmp[2], Eigen::Vector3d::UnitZ());
 
-            // rotated = tar.transpose() * n;
 
             auto m = RMSDDriver::MakeCostMatrix(m_reference, m_target * n, m_reference_atoms, m_target_atoms, m_costmatrix).first;
-            // std::cout << p << " " << m << " " << (p-m)/(2*dx) << std::endl << std::endl;
             grad[i] = (p - m) / (2 * dx);
         }
 

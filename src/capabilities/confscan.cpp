@@ -50,6 +50,7 @@
 using json = nlohmann::json;
 
 #include "confscan.h"
+#include "src/core/output_symbols.h"
 
 template <typename T>
 std::string to_string_with_precision(const T a_value, const int n = 2)
@@ -430,7 +431,6 @@ void ConfScan::LoadControlJson()
             CurcumaLogger::info("Early break in reorder part is enabled");
 
     // RMSD Element handling (simplified with ConfigManager - Claude Generated 2025)
-    // No more try-catch needed! #pragma message removed!
     m_rmsd_element_templates = m_config.get<std::string>("rmsd.element", "7");  // Default to nitrogen
     if (!m_rmsd_element_templates.empty() && m_rmsd_element_templates != "0") {
         if (m_rmsd_element_templates.find(',') != std::string::npos) {
@@ -503,7 +503,6 @@ bool ConfScan::openFile()
     FileIterator file(Filename());
     int calcH = 0;
     int calcI = 0;
-    // std::cout << m_looseThresh <<" "<<int((m_looseThresh & 1) == 1) << " " << int((m_looseThresh & 2) == 2) << std::endl;
 
     // Claude Generated (June 2026): tell the user about the (potentially long) descriptor pass
     // at verbosity 1 - it runs before the scan and was previously silent. Sync the global logger
@@ -618,7 +617,6 @@ bool ConfScan::openFile()
                 mol->CalculateRotationalConstants();
             auto ripser = std::chrono::system_clock::now();
 
-            // diagram.setDimension(2);
             if ((m_looseThresh & 2) == 2) {
                 diagram.setDistanceMatrix(mol->LowerDistanceVector());
                 mol->setPersisentImage(diagram.generateImage(diagram.generatePairs()));
@@ -986,9 +984,6 @@ void ConfScan::start()
         if (m_analyse) {
             WriteDotFile(outputPath(m_result_basename + ".initial.dot"), m_first_content);
         }
-        // m_sLE[0] = 1;
-        // m_sLI[0] = 1;
-        // m_sLH[0] = 1;
         if (m_analyse) {
             m_collective_content = "edge [color=green];\n";
             for (auto node : m_nodes)
@@ -1183,7 +1178,7 @@ void ConfScan::start()
         energy << "set encoding utf8" << std::endl;
         energy << "set output '" << m_result_basename << ".energy.png'" << std::endl;
         energy << "set xlabel \"RMSD [Å]\"" << std::endl;
-        energy << "set ylabel \"Energy ΔE [kJ/mol]\"" << std::endl;
+        energy << "set ylabel \"Energy " SYM_DELTA "E [kJ/mol]\"" << std::endl;
         energy << "set key left horizontal  font \"Helvetica, 10\" maxrows 1 outside" << std::endl;
         energy << "plot '" << m_result_basename << ".param.dat' using 1:2 pt 10 ps 0.5 lt rgb \"grey\" title \"Parametrisation\", '" << m_result_basename << ".param.skip.dat' using 1:2 pt 10 ps 0.1 lt rgb \"blue\" title \"Reorder skipped\", '" << m_result_basename << ".param.perf.dat' using 1:2 pt 10 ps 0.1 lt rgb \"yellow\" title \"Reorder performed\", '" << m_result_basename << ".param.success.dat' using 2:3 pt 10 ps 0.5 lt rgb \"red\" title \"Reorder successful\", '" << m_result_basename << ".param.limit.dat' using 1:2 with linespoints linestyle 1 notitle" << std::endl;
         energy.close();
@@ -1194,7 +1189,7 @@ void ConfScan::start()
         ripser << "set terminal pngcairo  transparent size 600*scale,400*scale transparent font \"Noto Sans\" fontscale scale linewidth scale pointscale scale" << std::endl;
         ripser << "set encoding utf8" << std::endl;
         ripser << "set xlabel \"RMSD [Å]\"" << std::endl;
-        ripser << "set ylabel \"ΔH\"" << std::endl;
+        ripser << "set ylabel \"" SYM_DELTA "H\"" << std::endl;
         ripser << "set output '" << m_result_basename << ".ripser.png'" << std::endl;
         ripser << "set key left horizontal  font \"Helvetica, 10\" maxrows 1 outside" << std::endl;
         ripser << "plot '" << m_result_basename << ".param.dat' using 1:3 pt 10 ps 0.5 lt rgb \"grey\" title \"Parametrisation\", '" << m_result_basename << ".param.skip.dat' using 1:3 pt 10 ps 0.1 lt rgb \"blue\" title \"Reorder skipped\", '" << m_result_basename << ".param.perf.dat' using 1:3 pt 10 ps 0.1 lt rgb \"yellow\" title \"Reorder performed\",  '" << m_result_basename << ".param.success.dat' using 2:4 pt 10 ps 0.5 lt rgb \"red\" title \"Reorder successful\", '" << m_result_basename << ".param.limit.dat' using 1:3 with linespoints linestyle 1 notitle" << std::endl;
@@ -1206,7 +1201,7 @@ void ConfScan::start()
         rotational << "set terminal pngcairo  transparent size 600*scale,400*scale transparent font \"Noto Sans\" fontscale scale linewidth scale pointscale scale" << std::endl;
         rotational << "set encoding utf8" << std::endl;
         rotational << "set xlabel \"RMSD [Å]\"" << std::endl;
-        rotational << "set ylabel \"ΔI [MHz]\"" << std::endl;
+        rotational << "set ylabel \"" SYM_DELTA "I [MHz]\"" << std::endl;
         rotational << "set output '" << m_result_basename << ".rotational.png'" << std::endl;
         rotational << "set key left horizontal  font \"Helvetica, 10\" maxrows 1 outside" << std::endl;
         rotational << "plot '" << m_result_basename << ".param.dat' using 1:4 pt 10 ps 0.5 lt rgb \"grey\" title \"Parametrisation\", '" << m_result_basename << ".param.skip.dat' using 1:4 pt 10 ps 0.1 lt rgb \"blue\" title \"Reorder skipped\", '" << m_result_basename << ".param.perf.dat' using 1:4 pt 10 ps 0.1 lt rgb \"yellow\" title \"Reorder performed\",  '" << m_result_basename << ".param.success.dat' using 2:5 pt 10 ps 0.5 lt rgb \"red\" title \"Reorder successful\", '" << m_result_basename << ".param.limit.dat' using 1:4 with linespoints linestyle 1 notitle" << std::endl;
@@ -1227,7 +1222,7 @@ void ConfScan::start()
         data["x4"] = i.dIc;
         data["x5"] = i.dH;
         data["X1"] = Tools::Matrix2String(i.dHM);
-        std::ofstream restart_file("confscan_saved_" + std::to_string(index) + ".json");
+        std::ofstream restart_file(outputPath("confscan_saved_" + std::to_string(index) + ".json"));
         restart_file << data;
         index++;
     }
@@ -1329,8 +1324,6 @@ void ConfScan::CheckOnly(double sLE, double sLI, double sLH)
 
             } else {
                 if (!m_mapped) {
-                    //    m_dLI = std::max(m_dLI, t->DI() * (t->RMSD() <= (sLI * m_rmsd_threshold)));
-                    //    m_dLH = std::max(m_dLH, t->DH() * (t->RMSD() <= (sLH * m_rmsd_threshold)));
                     //    m_dLE = std::max(m_dLE, (std::abs(t->Reference()->Energy() - mol1->Energy()) * 2625.5) * (t->RMSD() <= (sLE * m_rmsd_threshold)));
                 }
 
@@ -1420,7 +1413,6 @@ void ConfScan::CheckOnly(double sLE, double sLI, double sLH)
         m_dLI = std::max(m_dLI, i.second[2]);
         m_dLH = std::max(m_dLH, i.second[1]);
         m_dLE = std::max(m_dLE, i.second[0]);
-        // std::cout << i.first << " " << i.second[0] << " " << i.second[1] << " " << i.second[2] << std::endl;
     }
 
     m_rmsd_set = true;
@@ -1678,7 +1670,6 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
 
             if (m_RMSDmethod.compare("molalign") != 0 || m_threads != 1) {
                 // if (m_threads > 2)
-                //     p->StaticPool();
                 p->StartAndWait();
             } else {
                 for (auto* t : threads) {
@@ -1850,7 +1841,6 @@ ConfScanThread* ConfScan::addThread(const Molecule* reference, const json& confi
     thread->setRefineReuse(m_refine_reuse);
     m_energies.push_back(reference->Energy());
 
-    // thread->setVerbose(false);
     return thread;
 }
 
@@ -1909,7 +1899,6 @@ void ConfScan::Finalise()
             std::string content = "\"" + molecule->Name() + "\" [shape=box, label=\"" + molecule->Name() + "\\n" + to_string_with_precision(difference) + " kJ/mol\", fontcolor=\"orange\", fontname=\"times-bold\",id=\"" + molecule->Name() + "\"];\n";
             content_after += content;
             if (std::find(m_nodes_list.begin(), m_nodes_list.end(), molecule->Name()) != m_nodes_list.end()) {
-                //    std::cout << molecule->Name() << " inside ";
             } else {
                 std::string content = "\"" + molecule->Name() + "\";\n";
                 m_collective_content += content;

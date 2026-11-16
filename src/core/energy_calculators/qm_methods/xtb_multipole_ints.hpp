@@ -311,7 +311,6 @@ inline void cgto_multipole_block(const CGTO::Shell& shell_a, int ang_a,
 // The transformed integrals (origin at B, traceless Q) are:
 //   dp_int[k]   = D_global[k] - B_k · S
 //   qraw_ab     = Q_global[ab] - B_a·D_global[b] - B_b·D_global[a] + B_a·B_b·S
-//   qp_int[k]   = 1.5·qraw_k - 0.5·tr(qraw)·δ_{k diag}
 // =============================================================================
 
 // -----------------------------------------------------------------------------

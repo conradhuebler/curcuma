@@ -283,8 +283,8 @@ private:  // Private member variables - Claude Generated 2026
 
     // Scattering analysis options - Claude Generated 2025
     PARAM(scattering_enable, Bool, false, "Enable P(q)/S(q) scattering analysis", "Scattering", {})
-    PARAM(scattering_q_min, Double, 0.01, "Minimum q value (Å⁻¹)", "Scattering", {"qmin"})
-    PARAM(scattering_q_max, Double, 2.0, "Maximum q value (Å⁻¹)", "Scattering", {"qmax"})
+    PARAM(scattering_q_min, Double, 0.01, "Minimum q value (Å^-1)", "Scattering", {"qmin"})
+    PARAM(scattering_q_max, Double, 2.0, "Maximum q value (Å^-1)", "Scattering", {"qmax"})
     PARAM(scattering_q_steps, Int, 100, "Number of q points", "Scattering", {"qsteps"})
     PARAM(scattering_q_spacing, String, "log", "Q-spacing mode: log|linear", "Scattering", {"qspacing"},
         "enum=log|linear")
@@ -309,9 +309,9 @@ private:  // Private member variables - Claude Generated 2026
     PARAM(rdf_coordination_shells, Bool, false, "Calculate running coordination number n(r)", "RDF", {})
 
     // Shape descriptor options - Claude Generated 2025
-    PARAM(shape_asphericity, Bool, false, "Calculate asphericity descriptor (b = λ₃ - 0.5(λ₁+λ₂))", "Shape", {})
-    PARAM(shape_acylindricity, Bool, false, "Calculate acylindricity descriptor (c = λ₂ - λ₁)", "Shape", {})
-    PARAM(shape_anisotropy, Bool, false, "Calculate relative shape anisotropy (κ²)", "Shape", {})
+    PARAM(shape_asphericity, Bool, false, "Calculate asphericity descriptor (b = lambda3 - 0.5(lambda1+lambda2))", "Shape", {})
+    PARAM(shape_acylindricity, Bool, false, "Calculate acylindricity descriptor (c = lambda2 - lambda1)", "Shape", {})
+    PARAM(shape_anisotropy, Bool, false, "Calculate relative shape anisotropy (kappa^2^2)", "Shape", {})
 
     END_PARAMETER_DEFINITION
     // ^^^^^^^^^^^^ PARAMETER DEFINITION BLOCK ^^^^^^^^^^^^

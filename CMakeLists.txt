@@ -107,6 +107,12 @@ set(CURCUMA_DEBUG_LEVEL 2 CACHE STRING "Debug verbosity level 0-3")
 option(USE_PCH
     "Enable Precompiled Headers for faster compilation" ON)
 
+option(CURCUMA_UNICODE_OUTPUT
+    "Print Unicode symbols (sigma, degree, superscripts, ...); OFF prints their ASCII spelling (sigma, deg, ^2) for terminals and log parsers that need it; see src/core/output_symbols.h" ON)
+if(CURCUMA_UNICODE_OUTPUT)
+    add_compile_definitions(CURCUMA_UNICODE_OUTPUT)
+endif()
+
 option(USE_CUDA
     "Build the CUDA GPU plugin libcurcuma_cuda.so (gfnff + gfn1/gfn2 -gpu cuda, requires CUDA toolkit)" OFF)
 
@@ -338,12 +344,9 @@ if(UNIX) # dont work on windows systems, compilation fails unfortranatly ...
     )
 endif(UNIX)
 
-add_definitions("-DGIT_COMMIT_HASH=${GIT_COMMIT_HASH}")
-add_definitions("-DGIT_BRANCH=${GIT_BRANCH}")
-# Claude Generated (March 2026): Remove comma from RFC 2822 date — nvcc splits -D values at commas
+# Claude Generated (Nov 2026): the -DGIT_* compile definitions were removed (no source read them);
+# version.h.in carries the values. The comma is still dropped from the RFC 2822 date.
 string(REPLACE "," " " GIT_COMMIT_DATE "${GIT_COMMIT_DATE}")
-add_definitions("-DGIT_COMMIT_DATE=${GIT_COMMIT_DATE}")
-add_definitions("-DGIT_COMMIT_TAG=${GIT_COMMIT_TAG}")
 
 if(CMAKE_COMPILER_IS_GNUCXX)
     set (_UNIX  ON)
@@ -539,7 +542,6 @@ set(curcuma_core_SRC
         src/capabilities/confstat.cpp
         src/capabilities/activelearn.cpp
         src/capabilities/docking.cpp
-        src/capabilities/analysenciplot.cpp
         src/capabilities/nebdocking.cpp
         src/capabilities/pairmapper.cpp
         src/capabilities/rmsd.cpp
@@ -553,6 +555,9 @@ set(curcuma_core_SRC
         src/capabilities/trajprops.cpp
         src/tools/cif.cpp
         src/capabilities/simplemd.cpp
+        src/capabilities/nebmd.cpp
+        src/capabilities/path_cv.cpp
+        src/capabilities/string_path.cpp
         src/capabilities/md_diagnostics.cpp
         src/capabilities/analysis.cpp
         src/capabilities/analysis_output.cpp
@@ -653,6 +658,7 @@ set(curcuma_core_SRC
         src/core/imagewriter.cpp
         src/core/parameter_registry.cpp
         src/core/config_manager.cpp
+        src/core/cli_parser.cpp
         src/core/periodic_table.cpp
         src/core/functional_groups.cpp
 )
@@ -670,7 +676,6 @@ set(curcuma_cap_SRC
         src/capabilities/confgen.cpp
         src/capabilities/confstat.cpp
         src/capabilities/docking.cpp
-        src/capabilities/analysenciplot.cpp
         src/capabilities/nebdocking.cpp
         src/capabilities/pairmapper.cpp
         src/capabilities/rmsd.cpp
@@ -684,6 +689,9 @@ set(curcuma_cap_SRC
         src/capabilities/trajprops.cpp
         src/tools/cif.cpp
         src/capabilities/simplemd.cpp
+        src/capabilities/nebmd.cpp
+        src/capabilities/path_cv.cpp
+        src/capabilities/string_path.cpp
         src/capabilities/md_diagnostics.cpp
         src/capabilities/analysis.cpp
         src/capabilities/analysis_output.cpp
@@ -755,15 +763,6 @@ if(USE_PCH)
 
     message(STATUS "Precompiled headers enabled for curcuma_core")
     
-    # Additional PCH configuration for Ulysses-heavy builds
-    if(USE_ULYSSES)
-        message(STATUS "Ulysses PCH module enabled - significant compilation speedup expected")
-    endif()
-    
-    # Additional PCH configuration for external libraries
-    if(USE_D3 OR USE_D4)
-        message(STATUS "DFT dispersion correction PCH modules enabled")
-    endif()
 endif()
 
 # Claude Generated 2026 - km (Kuhn-Munkres/Hungarian assignment, c_code/hungarian.c)
@@ -808,7 +807,6 @@ add_executable(curcuma
 
 # Enable precompiled headers for main executable
 if(USE_PCH)
-    target_precompile_headers(curcuma REUSE_FROM curcuma_core)
     target_precompile_headers(curcuma REUSE_FROM curcuma_cap)
 
 endif()

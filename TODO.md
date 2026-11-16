@@ -11,7 +11,14 @@ Stand.
 
 ## 1. Korrektheit (offen)
 
-  Vermutlich ein statischer Zufallsgenerator; nicht untersucht. `test_cases/test_md_hbond_log.cpp` startet deshalb einen Prozess je Lauf. Betrifft jeden, der mehrere MD in einem Prozess einbettet.
+- **GFN-FF unter Last nicht bitgleich** (2026-11-14): zwei identische `-sp`-Läufe (Defektstruktur der Ladungsgruppen, 273 Atome, `-threads 1`) unterscheiden sich unter paralleler Last um bis zu 6.7e-16 Eh/A (Gradient bis 0.74); im Leerlauf 6 von 6 identisch, unter Last 4 von 8 verschieden, auch auf `devel/methods` pur. Die Ursache (Summationsreihenfolge trotz einem Thread) ist nicht gesucht.
+  Folge: Testskripte mit Bitvergleich (`check_cn_zero_guard.py`, `check_adaptive_step.py`, `check_lbfgs_atom_step_cap.py`, `check_d4_fused_c6.py`) können unter `ctest -j` flackern; `check_charge_groups.py` vergleicht jetzt mit 1e-12.
+- **FEHLER: GMTKN55 `G21EA/EA_16` (SiH3-) mit gfn1 liefert keine Energie** (2026-10-30, Ursache bekannt, vorerst gewollt): Abbruch "implausible charge distribution" (max |q| 5.55 > 5.00, auch aus H0); xtb 6.7 konvergiert auf dieselbe SCC-Energie (-7.94141906 Eh) mit Si = -5.55 e, derselbe q^3-Runaway.
+  Der Fehler bleibt, die Struktur fehlt damit in jedem gfn1-Vergleich. Keine gültige Energie für dieses System.
+- **PLUMED-Bias nur auf `feature/bmt-plumed-nebmd` korrigiert** (`96c29c50`, 2026-10-30): `upstream/master` hat Vorzeichenfehler und kB statt kB*T noch; biased PLUMED-Läufe davor sind ungültig. Offen: nach master bringen, betroffene Läufe neu rechnen. [docs/PLUMED_HELP.md](docs/PLUMED_HELP.md).
+- **`-md -method uff` schreibt `<basename>.param.json` trotz BMT ins Arbeitsverzeichnis** (2026-10-30, gemessen, alter und neuer Stand gleich): verstößt gegen die BMT-Regel in `CLAUDE.md`.
+- **MD-Instabilitätsprüfung schlägt bei wenigen Freiheitsgraden fälschlich an** (2026-11-10, gemessen n=10 Seeds): `m_unstable = T > 10000 * m_T` (`simplemd.cpp` Z. 4252/4724) vergleicht mit dem Vorschritt; Ar2 NVE (1 DOF) bricht mit Seed 1, 4, 9 an einem Umkehrpunkt (Ekin ~ 0) ab. `plumed_bias` nutzt deshalb Seed 2.
+- **PLUMED rechnet Schritt 0 doppelt** (2026-10-30): Init und erster Integrationsschritt rufen beide `performPlumedCalc()`, COLVAR hat zwei Zeilen bei t = 0; Folgen für HILLS nicht geprüft. `energyUnits = 2625.5` steht als Literal statt über `CurcumaUnit`.
 
 
 
@@ -31,7 +38,6 @@ Stand.
 - **Entscheidung: Default von `-md.seed`** (2026-10-31): seit dem Seed-Fix ist der Default -1 = Uhrzeit, eine MD ist also nicht mehr bitgleich wiederholbar (vorher war sie es, weil der Seed wirkungslos war); `cli_gfnff_07_eeq_localinv` wurde dadurch flaky und nutzt jetzt `-md.seed 1`. Alternative: Default 0 (aus Atomzahl und T0, mit der Startgeometrie im Seed reproduzierbar). Betrifft jede MD und alle Vergleichslaeufe.
 - **Entscheidung: doppelte MD-Tabellenzeilen bei dt < 1 fs** (2026-11-09, F-MD Punkt 2): ganzzahliges `print_frequency` testet `int(Schritt*dt) % f`, bei dt 0,5 fs drucken Schritt 100 und 101 die 50-fs-Zeile; nicht behoben, weil `gfnff_d4_fused_c6` eine Zeile je Schritt zaehlt. Fix (erste Zeile je Rasterzeit) braucht angepassten Test. [docs/WP-PERIODIC-NONBONDED.md](docs/WP-PERIODIC-NONBONDED.md) F-MD.
 - **ROCm: Ladungsgruppen und `cn_zero_guard` bleiben auf der CPU** (Luecke, 2026-10-31): CUDA hat beides auf dem Device (Commit `fix/gpu-charge-groups`, gemessen 15,5 ms/Schritt bei 5747 Atomen), ROCm nicht: kein Hardwaretest, Trait `has_charge_groups_cn_guard = false` haelt den CPU-Rueckfall, der HIP-Kern ist nie kompiliert (kein hipcc) und nie gelaufen. Zu tun auf ROCm-Hardware: GPU gegen CPU wie bei CUDA (Gruppensummen, Gradient Cl-, 200 MD-Schritte), dann Trait auf true. Vulkan: nicht betrachtet. Ausserdem: `k_subtract_qtmp` (CUDA) hat keinen Aufrufer, Loeschkandidat.
-- **`SimpleMD::CSVR()` hatte statische Verteilungen (Z. 5059, jetzt Instanz-Member `m_csvr_*`, Oct 31 2026, ohne dof-1-Änderung; Fix auf `feature/nebmd-path-sampling` bleibt maßgeblich für dof-1)** (`static std::normal_distribution d`, `csvr_last_dof`, `static std::chi_squared_distribution dchi`, `simplemd.cpp` um Z. 5059): Datenrennen bei mehreren gleichzeitigen SimpleMD-Instanzen (ConfSearch, NEB-MD); der Fix liegt auf `feature/nebmd-path-sampling`, nicht hier. Einzelne MD ist nicht betroffen.
 - **Rechenzeit je MD-Schritt ~ N^1,55** (diagnostiziert 2026-10-29, [docs/MD_STEPTIME_SCALING_2026-10.md](docs/MD_STEPTIME_SCALING_2026-10.md)): All-Pairs-Anteil (EEQ-Matrix/PPCG, Coulomb, D4-Liste), N^2 = 74 % bei 5750 Atomen. Offen, Hebel je 5-15 %: Constraint-Block nur fuer Schur/LU, pAp-Pruefung statt serieller Definitheitspruefung, D4-C6-Auffrischung fusionieren; Linearisierung braucht Cutoff/Ewald (aendert Energien, Entscheidung).
 
 - **Literaturverweise der Trajektorien- und Ionen-Methoden pruefen** (Oktober 2026): die Quellen fuer Blockfehler, H-Brueckenkriterium, g(r), Shrake-Rupley, Sondenradius, Bondi-Radien, Fibonacci-Punkte und `-ionize`
@@ -46,7 +52,7 @@ Stand.
 - **SCF-Modul `scf` bei tblite/xtb/Ulysses nicht gelaufen** (2026-10-26): Abbildung auf `max_iterations`/`damping` nur per `-verbosity 3` gesehen, die
   TBLite-Änderung (GFN2-Anhebung auf 150/0.6 nur ohne Nutzerwert) nur syntaxgeprüft; kein Provider in `release/`. `-hessian` endet mit 0, wenn ein
   Verschiebungs-SCF scheitert (pm3, `-scf_max_iterations 3`), nicht untersucht. [docs/SCF_MODES.md](docs/SCF_MODES.md)
-- **Offene Schalen über die CLI: Aliase und ctest fehlen** (2026-10-11): `-multi`, `-multiplicity`, `-uhf`, `-xtb.spin` werden still ignoriert; Zeile 2 "Ladung Multiplizität" der ORCA-xyz wird nicht gelesen;
+- **Offene Schalen über die CLI: Aliase und ctest fehlen** (2026-10-11): `-multi`, `-multiplicity`, `-uhf`, `-xtb.spin` werden ignoriert (seit 2026-11-09 mit der Warnung "is unknown"); Zeile 2 "Ladung Multiplizität" der ORCA-xyz wird nicht gelesen;
   ungerade Elektronenzahl ohne `-spin` besetzt fraktional (tblite), xtb nimmt ein Dublett (Entscheidung offen); es gibt keinen ctest für `-spin` (Known Issue #9). Flag mit Leerzeichen und Paritätswiderspruch
   sind seit 2026-10-11 Fehler bzw. Warnung (`CLI2Json`, `buildReferenceOccupations`). Vault: Labor `curcuma GFN2-SCF-Vorkonditionierung`, Schritt 13.
 - **GFN-FF-Energie hängt von der Atomnummerierung ab** (911 von 2557 Strukturen, bis 237 kcal/mol bei geladenen Mehrfragment-Systemen;
@@ -89,6 +95,7 @@ Stand.
 - **Exitcode bei fehlgeschlagenem Setup**: `-md` gibt seit `a2b7c5f0` 1 zurück; prüfen, ob dasselbe für `-opt` und `-sp` gilt (nicht geprüft).
 - **UFF- und QMDFF-Gradient falsch** (Eintrag vom 2026-09-27: UFF-Winkel ohne den Faktor -sin(theta); Fix vorbereitet, Betreiber: "erstmal nicht").
   Nicht erneut geprüft; Details im Archiv unter "UFF- und QMDFF-Gradient falsch".
+- **`shouldUpdateHBXB()`: RMSD-Formel ohne Faktor `sqrt(natoms)`** (`gfnff_method.cpp:3058`, geprüft 2026-10-01). Bei 7320 Atomen
   ~13,6 Å mittlere Verschiebung bis zum Auslösen. Aus der Fortran-Referenz übernommen (`gfnff_ini2.f90:717`); vor einer Änderung gegen
   MOR41/GMTKN55 prüfen und das Abweichen von der Referenz entscheiden.
 - **D4-ATM-C6 auf den Tripeln bleibt auf dem Setup-Wert eingefroren.** Ohne Wirkung, solange `dispersion_atm` aus ist (Voreinstellung).
@@ -108,6 +115,11 @@ Stand.
 - **Windows**: `-DUSE_PORTABLE_MATH=ON` nicht auf einer echten Windows-Maschine bestätigt ([docs/PORTABLE_ERF.md](docs/PORTABLE_ERF.md)).
 - **Ladungsplatzierung** (Known Issue #31) nicht getestet für periodische Systeme, GPU-Laufzeit, viele Fragmente in Kontakt und lange MD mit
   `frag_charge_s_max` > 1.
+- **Fensteraufloesung ueber steilen Barrieren**: NEB-MD integriert dG/ds mit Trapez/Spline ueber `nimages` Fenster; Retro-DA GFN2: 12/23/34 Fenster geben dG_TST 91.5/71.8/67.0
+  (n=1). Noetig: Warnung bei grossem Sprung von dG/ds zwischen Nachbarfenstern, adaptive Verdichtung am Maximum, `nimages` mit `path_file` nicht ignorieren. [docs/NEB_MD.md](docs/NEB_MD.md).
+- **Restraint-Modus-Tube** (`umbrella_kz`) laeuft ueber `applyExternalForces` (einen Schritt verzoegert, nicht in `trueGradient()`), ueberschneidet sich mit `z_wall`.
+- **`Molecule::CalculateDihedral` falsch** (`src/core/molecule.cpp` ~551, benutzt von `-dihedral` in `src/main.cpp` ~523): das Skalarprodukt der unnormierten Flaechennormalen wird vor der Division durch die Betraege auf [-1,1] begrenzt
+  (Agent-Nachrechnung: 116.4 Grad fuer eine +60-Grad-Geometrie), Ausgabe 0..2pi statt IUPAC. Korrekt ist `GFNFF_Geometry::calculateDihedralAngle`. Nicht repariert, nicht gegengeprueft ausser der Rechnung des Agenten.
 - **Segfault: `-md_method gfnff -opt_method uff` in ConfSearch (Sep 11, 2026, not re-checked after the Oct 2026 master merge)**. Crash in
   `~EnergyCalculator` while `CxxThreadPool::~CxxThreadPool()` tears down the MD threads, after the
   run has produced correct results. Reproducible 3/3. Measured scope: ONLY this pair --
@@ -219,6 +231,9 @@ Stand.
 
 ## 3. Tests und Validierung
 
+- **PLUMED, ungetestet** (Stand 2026-10-30, getestet nur Ar2-RESTRAINT und Ethan-Torsion mit GFN-FF): QM-Methoden, größere Systeme, Restart, NPT/`setVirial`, PLUMED zusammen mit GPU. Gemeldete extreme PLUMED-Langsamkeit nicht nachgemessen. Well-tempered METAD lag 10 % über der freien MD (2.66 gegen 2.43 kcal/mol, Hügel nicht konvergiert).
+- **GPU nach dem NEB-MD-Merge** (2026-10-30, RTX 5080, Stand vor `96c29c50`): CUDA bitgleich auf Koffein und Benzol, Vulkan nur ohne `-gpu_strict` geprüft (CPU-Fallback nicht ausgeschlossen), ROCm nicht testbar (kein SDK). NEB-MD auf CUDA nur 1 ps ohne Zahlenvergleich zur CPU.
+- **Compiler-Warnungen aus dem Master** (2026-10-30, kein Neubau zum Nachzählen): `measurement.h` (`-Wsuggest-override`), `xtb_native.cpp` (`t_gp0`), `src/helpers/main.cpp` (`columns`), dazu 65 `-Winline`; die Vorgabe "warnungsfreier Build" aus `CLAUDE.md` ist nicht erfüllt.
 - **`gfnff_d4_fused_c6` hängt an den Build-Flags** (2026-11-01, gemessen): der Test verlangt
   Bitgleichheit von fused- und stored-D4-Pfad; mit `-DUSE_AVX512/AVX2/BLAS=ON` weichen die
   Gradienten ab, aus demselben Quellbaum ohne die drei sind sie gleich (Details Archiv #45).
@@ -226,12 +241,14 @@ Stand.
 - **xtb-Referenzenergien der Teststruktur-Bibliothek** (2026-10-11, `test_cases/reference_data/xtb_library_energies.json`): 66 Strukturen GFN-FF, 64 GFN2 gerechnet (peo201-chain 1410 Atome GFN2: +1,6e-3 Eh, mit `d4_atm_cutoff 40.0` +2,6e-5). GFN-FF: 57 <= 1e-6 Eh, 8 > 1e-4 (hydronium-water2 -0,169 Eh Standard `ensemble` gegen xtb Referenzregel;
   jl22-bgal/macrocycle-bgal 173/231 Atome +0,25 bis +0,80 kcal/mol, nicht erklärt: `storsion_reference_loop_bug` ändert nichts, Term-Vergleich und pprcht/gfnff als dritte Meinung stehen aus). GFN2: max 5,2e-5 Eh, mit `-xtb.d4_atm_cutoff 40.0` auf macrocycle-bgal 5e-5 -> -2e-7 Eh. Offen: ctest gegen die Datei (Toleranzen), 4 Strukturen > 3000 Atome ohne xtb-GFN-FF (xtb wird bei 6200 und 7320 Atomen am 48-GB-Deckel getötet; curcuma 5 s), na2cl2 GFN2 xtb unkonvergiert.
 
+- **NEB-MD Helicen-Neulauf** mit dem Stand nach `e81f1a23` (Trust-Radius, Abbruch bei toten Images): einziger vollständiger Lauf (2026-10-03, n=1) hatte tote Images in Stufe 1
+  und Reaktions-dG 2.3-2.5 statt 0; zusätzlich mehrere unabhängige String-Pfade für Ethan (Pfadvarianz ungemessen). Vault: `Projekte/curcuma NEB-MD Pfad-Sampling`.
 - `cli_simplemd_08/09` (Essigsäuredimer, CSVR, dt 1 fs) gegen das gemergte Binary mit der MD-Uhr-Korrektur (`ef462fcf`) erneut laufen lassen (Known Issue #32).
 - `test_cg_potentials` ist seit 2026-10-01 als ctest `cg_potentials` registriert (besteht); der CG-Beispielaufruf mit VTF-Eingabe endet mit "Failed to initialize ForceField
   engine" (`docs/archive/CG.md`, geprüft 2026-10-01).
 - **Zwei ctests scheitern reproduzierbar** (am 2026-10-01 auf `master` und auf `fix/remove-dead-code` gleich, `confscan_dtemplate` 3 von 3 Läufen auf `master`): `xtb_cpscf` (Gate (C), Antwort Mulliken gegen EEQ: H2 8.2e-5 gegen 1e-6, H2O und HCN je über 1.5e-4), `test_orca_interface` ("O2 triplet mult=3" in `methodToOrcaKeyword`), `confscan_dtemplate` (bis 2026-10-09 erwartet 17/2/1/305, tatsächlich 14/5/1/237 unabhängig von `CurcumaThreads` 1/4/24; die Zähler sind jetzt die aktuellen des Binaries und gleich denen von `confscan_free`/`confscan_subspace`; ob `dtemplate` tatsächlich wie `subspace` rechnet oder die alten Werte vor 2026-08 anders zustande kamen, ist nicht geklärt). Die Einordnung "flaky" für `confscan_dtemplate` in älteren Notizen trifft nicht zu.
 - **Voller ctest 2026-10-11** (Paket 4, CPU-only ohne `-march=native` und CUDA-Build, je 9 rot, `confscan_dtemplate` grün): `test_orca_interface` scheitert auch bei "O2 quartet mult=5" (nicht nur Triplett); `cli_errors_01` bis `_06` und `parameter_io_tests` codieren `${PROJECT_ROOT}/release/curcuma` fest (grün mit umgebogenem Pfad, ohne `release/` rot);
-  Warnung `-Wdelete-non-virtual-dtor` auf `delete md` in `src/main.cpp` (`SimpleMD`, virtuelle Funktionen, Destruktor nicht virtuell: `simplemd.h:813`); nicht gebaut: MinGW, ROCm (Compiler fehlen).
+  Nicht gebaut: MinGW, ROCm (Compiler fehlen).
 - **Strukturbibliothek** (`test_cases/structures/`, Phasen 0 bis 4 erledigt): 69 Strukturen, alle Tests und Skripte lesen sie; 65 % der Herkunftsangaben sind `unknown`
   (Altbestand, nur abgeleitet). Offen: Phase 4 (getrackte `.out`-Dateien als Beleg,
   115 untracked Laufausgaben in `test_cases/` entfernen, Berichte in `test_cases/cli/` ins Archiv), case.json je Test. Das Optimierungslevel der `unknown`-Strukturen
@@ -250,11 +267,15 @@ Stand.
 
 ## 4. Betreiber-Prüfung offen (🤖/⚙️, nur Sie vergeben ✅)
 
+- PLUMED-Vorzeichen und kB*T (`96c29c50`); CSVR chi2(Nf-1) (`521fa5e8`, Ethan 6 x 25 ps: 314.1 -> 297.0 K, Verhältnis 0.9455 gegen 18/19); NEB-MD-Pipeline, nur Ethan reproduziert (4 Läufe, AIChangelog 2026-10-30); `.md.csv`-Ausgabe und PLUMED-Routing.
 - CODATA-2018-Einheiten (`191cebe3`; Rest 0,0036 kcal/mol gegen pprcht auf polymer_2x nicht verfolgt), Known Issue #35.
 - `eeq_refactor_eps_bohr` Voreinstellung 0 (Faktor-Cache aus) und `nonbonded_skin_bohr` 2,0; Ladungsplatzierung `ensemble` (#31);
   Stillstandserkennung `-opt.stall_steps` 20; `-scf_guess fragments`; `-scf_precond frag` (Okt 2026, opt-in).
 
 ## 5. Funktionen und Refactoring (niedrige Priorität)
+
+- **PLUMED-Hilfeseiten überarbeiten** (2026-11-10, Branch `feature/plumed-help-page`, Stash-Stand vom 01.06., Basis `25d4d8d7`): `-help-plumed` und der SimpleMD-Hinweis darauf doppeln `-help metadynamics` (`printMetadynamicsHelp()` in `src/main.cpp`) und `docs/PLUMED_HELP.md`; zusammenführen, auf den aktuellen Stand bringen.
+  Nur die Hilfetexte übernehmen: die Einheitenänderungen des Branches (Bohr-Positionen, kB*T, `setBox`) sind älter als `07e7544d`/`96c29c50` und würden sie teilweise zurückdrehen.
 
 - **CG Phase 6**: winkelabhängige Ellipsoid-Energie (`calculateEffectiveDistance`, `calculateCGPairEnergy`, Rotationszüge in Casino). Phase 1 bis 5 sind umgesetzt.
 - SimpleMD: Physik des Wandpotentials prüfen; RMSD-Strategy-Pattern Phase 3; erweiterte ConfSearch-Algorithmen; bessere Trajektorienanalyse;
@@ -267,20 +288,38 @@ Stand.
 - **Build-System** (Stand November 2025, nicht geprüft): bedingte Kompilierung, fünf Build-Varianten, nur der Standardbuild war damals fehlerfrei.
   Seit 2026-09-30 baut `make` in `release/` wieder mit Exit 0; die übrigen Varianten vor einer Wiederaufnahme neu messen.
 
+- **Code-Schulden aus dem Debt-Bericht** (2026-11-14, [docs/debt_2026-11/CODE.md](docs/debt_2026-11/CODE.md), nicht angefasst): zwei GFN-FF-EEQ-Pfade, einer unregistriert (H3); funktionslokale `static`-Zähler in Rechencode (H4); Riesenfunktionen und Dateigrößen (M9, M10); CUDA/ROCm-Copy-Paste und doppelte CPU-Zahlenroutinen (M11, M12);
+  zwei abstrakte Basisklassen (M13); 809 `std::cout`/`cerr` am Logger vorbei (M14); 107 `getenv`-Schalter (M15); `exit()` in Bibliothekscode (M16); statische JSON-Defaults in weiteren Headern (M17).
+- **Build und Doku aus dem Debt-Bericht** ([docs/debt_2026-11/BUILD_DOCS.md](docs/debt_2026-11/BUILD_DOCS.md), nicht angefasst): `curcuma_cap` kompiliert 38 Dateien ein zweites Mal (M1); ungenutzte Compile-Definitionen, `-g` in jedem Build-Typ, PCH nur teilweise wirksam, ungepinnte Abhängigkeiten (M3 bis M6); Doku-Drift; `-dipole`-Ausgabe wiederherstellen (Punkt 14).
+- **Nicht verifiziert nach dem Debt-Branch** (2026-11-14): Builds mit `USE_TBLITE`, `USE_D3`, `USE_GFNFF`, `USE_XTB`, `USE_ULYSSES`, CUDA, ROCm, Vulkan; gfn1/gfn2-Regression (MOR41 nur `uff` und `gfnff`); `ctest` mit `-DCURCUMA_UNICODE_OUTPUT=ON`; Casino hat keinen Test.
+
+- **NEB-MD nach PR #16** (2026-11-14): Nicht geprüft: PLUMED-Korrektur (Vorzeichen, `kB*T`) im Build, GPU, ROCm; NEB-MD nur auf Ethan mit GFN-FF validiert; `nebmd.cpp` hat Funktionen bis 465 Zeilen und `CoutSuppress` (tauscht `std::cout.rdbuf`).
+
 ## 6. Entscheidungen und Fragen
 
 Code-gebundene Entscheidungen, die bei Ihnen liegen. Fachliche Fragen und Projektstatus stehen im Vault und sind nur verlinkt.
 
+- Branch `feature/nebmd-path-sampling` nach master mergen? (enthält überwiegend Master-Arbeit; `/pre-merge-check` fällig.) NEB-MD-Status: Vault `Projekte/curcuma NEB-MD Pfad-Sampling`.
+- `-scf_pseudo_diag` als Standard einschalten? (Messungen sprechen dafür, Abschnitt 2.)
 - `-scf_precond_guard`: Vorgabe `g2:4:best` kostet auf dem unrelaxierten 599-Atom-Cluster bei 8 Threads 4 Iterationen gegen `none` (Kriterium war <= 3);
   über 5 Threadzahlen liegt frag (55-62) unter none (58-138). Varianten streuen 58-109, eine konvergiert nicht. Vorgabe behalten? [docs/SCF_PRECOND.md](docs/SCF_PRECOND.md)
 - `eeq_ewald_dense_max_atoms` (1000) senken? Matrixfreies pcg ist bei 900 Atomen 7,2 statt 84 ms (300 Atome: 1,5 statt 16 ms), liefert aber nur `eeq_ewald_tol`-Genauigkeit statt exakt; die kleinen pbc-Tests laufen heute dicht (WP-Doku P1).
 - `shouldUpdateHBXB()` korrigieren und damit von der Fortran-Referenz abweichen, oder als Referenzeigenschaft belassen?
 - UFF-/QMDFF-Gradient reparieren (Stand: "erstmal nicht")?
 - GPU-Bitgleichheit angehen (Sammel-Kernel statt `atomicAdd`) oder bei Ensemblevergleichen bleiben?
+- Defaults je Modul für `verbosity`, `threads`, `method`, `charge`, `spin` (Casino-Verbosity 2, Opt 1, Trajektorienanalyse 2): ein Wert aus `global` für alle (ändert Ausgaben) oder die Modul-Vorgaben behalten? ([PARAMS.md](docs/debt_2026-11/PARAMS.md) M3)
+- ConfScan: `-method` ist die Alignment-Methode (`confscan.h`, `rmsd.h`), die Energiemethode heißt `energy_method` und ist kein PARAM; `-method gfn2` wird dort als ungültiger Alignment-Name gemeldet (H2). `energy_method` als PARAM einführen und `-method` dafür auswerten?
+- `lbfgs_max_line_search` (gemessen 2026-11-14, `scripts/lbfgs_linesearch_grid.py`): 2 stammt aus dem Legacy-`CurcumaOpt` (`LBFGS_ls_iter`), `LBFGSppOptimizer` bekam es am 2026-04-01 (`35afc6ed`), das Registry-PARAM am 2026-04-14 den Default 20 (`3ac3584e`); `-opt` läuft seitdem mit 20. 27 Kombinationen (gfnff 14, gfn1 6, gfn2 7; 8 bis 231 Atome, davon 5 gestörte Starts), Werte 2/3/5/20:
+  2 macht in 19 von 27 keinen einzigen Schritt und konvergiert nie, wo 20 scheitert; 3 scheitert in 10; 5 und 20 sind gleich (0 Unterschiede im Konvergieren, größte Energiedifferenz 1e-4 Eh). Nicht verwertbar: `uff` (Gradient, siehe oben), `pm3` und `gfn2` auf dem 117-Atom-System (leere Tabelle bei jedem Wert, Ursache nicht untersucht), 1410-Atom-Kette (300 Schritte, alle gleich).
+  Auf `devel/methods` bekommen ConfSearch, ConfGen, MD-Voroptimierung, Docking, PolymerBuild und RMSDTraj den Wert 2 (aus dem Code gelesen, nicht beobachtet); hier gilt überall 20, Test `optimizer_default_layers`. Bei 20 bleiben (Empfehlung) und `devel/methods` informieren?
 - Vault, fachliche Fragen: `Offene Fragen/` ("Valenzanteil im reaktiven GFN-FF", "Veraltete C6-Dispersion und Paarlisten in inaktiven Topologie-Ecken",
   "Lücke zwischen GFN2-xTB und Doppelhybrid-Methoden schließen", "RRHO-Näherung durch MD ... ersetzen", "Ladungsplatzierung bei geladenen Mehrfragment-Systemen in GFN-FF - was ist physikalisch besser", Known Issue #31).
 - Vault, Projektstatus: `Projekte/curcuma rev-gfnff`, `curcuma GPU-Backends`, `curcuma MD-Stabilität großer Systeme`, `curcuma ConfSearch Weiterentwicklung`,
   `curcuma GFN-FF Transitionsmetalle (MOR41)`, `curcuma Reaktives GFN-FF (react-Topologie)`, `curcuma Konformerenfilter (reorder_paper)`.
+
+- **Parameter-Routing, Rest** (2026-11-14, [docs/debt_2026-11/PARAMS.md](docs/debt_2026-11/PARAMS.md)): erledigt sind H1 bis H7 ohne H2, M1/M7/M8/M9, L1 bis L8 (Warnungen statt Fehler für unbekannte Schlüssel, Werte außerhalb `enum`/`min`/`max` und Typfehler); Modul `global`, Golden-Test `cli_parser_golden` (24 Fälle).
+  Offen: Globals in nur einer Kopie (rund 158 Leser, je Capability migrieren), M2 (Top-Level-Skalare im `ConfigManager`), `Json2KeyWord` (123 Aufrufe) und `MergeJson` in Capabilities, `Casino::LoadRestartInformation` ohne Aufrufer, Mehrfach-XYZ-`-opt` schreibt keine `.trj.xyz`.
+- **Optimierer-Defaults** (2026-11-14): die Erkennung "Nutzerwert" für `-convergence_preset` vergleicht noch mit dem Default (`optimizer_factory.cpp`), ein explizit gleicher Wert wird verworfen; `OptimizerInterfaceJson` und Registry-Modul `opt` sind zwei Literale, die nur per Kommentar gleich gehalten werden.
 
 ## 7. Löschkandidaten
 
@@ -292,8 +331,9 @@ Offen, Aufrufer vor dem Löschen erneut suchen:
 - `src/capabilities/curcumaopt.h`: hält den PARAM-Block des Moduls `opt` (28 Parameter); die Klasse `CurcumaOpt` ist ohne Implementierung. Die Parameter müssen erst in ein anderes Header umziehen.
 - `src/capabilities/rmsd/rmsd_costmatrix.*`, `rmsd_assignment.*` (`CostMatrixCalculator`, `MunkresAssignmentSolver`): kompiliert und von `rmsd_strategies.h` eingebunden, die Klassen selbst werden nirgends aufgerufen. Entscheidung nötig, ob die Strategien sie künftig nutzen sollen.
 - dc6dcn-Skip-Pruefung (`FFWorkspaceGPU::shouldSkipDc6dcn()` in `cuda/ff_workspace_gpu.h`, hat keinen Aufrufer; ROCm fuehrt sie mit `CURCUMA_ROCM_LEAN_STEP=0` noch aus).
-- `main.cpp` führt `modern_optimizer` noch in der Liste der Scope-Module; das Modul existiert nicht mehr.
-- `src/helpers/`: `imagewrite.cpp`, `storage_bench.cpp`, `polymer_topo.cpp`, `gfnff_term_validator.cpp` ohne CMake-Target (eigenständige `main()`-Programme).
+- Member-Funktionen ohne Aufrufer: Liste mit 215 sicheren Kandidaten ("kann weg"), 47 nur im eigenen Header benutzten und Bibliotheks-/GPU-Headern in `docs/debt_2026-11/DEAD_MEMBERS.md`, erzeugt von `scripts/find_dead_members.py`. Vor dem Löschen Build mit `USE_TBLITE`, `USE_D3`, `USE_GFNFF` und GPU prüfen.
+- `test_cases/cli/*/run_test.sh` (81 getrackte Dateien) sind erzeugte Kopien mit altem `PROJECT_ROOT` (`claude_curcuma`); ctest benutzt die im Build erzeugten. Prüfen, ob sie aus git entfernt werden können (`.gitignore`).
+- `xtb_cpscf` schlägt fehl (Gruppe C: H2 response 8.2e-5 gegen 1e-6, H2O/HCN isolation 1.7e-4/2.9e-4 gegen 1.5e-4); identisch im Stand vor dem Debt-Branch.
 - PARAM `gfnff.accuracy` (loose|normal|medium|high) bleibt: kein Leser bis jetzt, soll mit den Genauigkeitsprofilen (Eintrag oben) eine Bedeutung bekommen. Nicht entfernen; der Hilfetext sagt bis dahin "no effect".
 
 ## 8. Aus der alten Liste entfernt (überholt oder erledigt)

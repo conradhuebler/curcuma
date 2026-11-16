@@ -119,9 +119,6 @@ void QMDFFFit::start()
         std::ofstream hess_file(outputPath("hessian.json"));
         hess_file << hjson;
     }
-    // hessian.PrintVibrations();
-    // std::cout << m_hessian << std::endl;
-    // Initialise();
     m_controller["method"] = "qmdff";
     // Claude Generated: Create ConfigManager for ForceFieldGenerator (Phase 3B)
     ConfigManager ff_config("forcefield", m_controller);
@@ -129,18 +126,14 @@ void QMDFFFit::start()
     ff.setMolecule(m_molecule.getMolInfo());
     ff.Generate();
 
-    // std::ifstream hess_file("qmdff_param.json");
 
     json parameter;
     parameter = ff.getParameter();
     // hess_file >>parameter;
     parameter["method"] = "quff";
     parameter["e0"] = e0;
-    // parameter["bonds"] = Bonds();
-    // parameter["angles"] = Angles();
     std::ofstream parameterfile_init(outputPath("qmdff_init_param.json"));
     parameterfile_init << parameter;
-    // std::cout << parameter << std::endl;
     parameterfile_init.close();
     // Claude Generated: Replace static QMDFFFitJson with ParameterRegistry
     json qmdff_init = ParameterRegistry::getInstance().getDefaultJson("qmdfffit");
@@ -171,7 +164,6 @@ void QMDFFFit::start()
                 const_hessian_matrix(j, i) = 0;
             }
         }
-    // std::cout << const_hessian_matrix << std::endl;
     int counter = 1;
 
     parameter["bonds"] = bonds;
@@ -183,12 +175,10 @@ void QMDFFFit::start()
 
     for (int start = 0; start < 10 && counter; ++start) {
         std::cout << bonds.size() << " " << angles.size() << std::endl;
-        // std::cout << bonds << std::endl;
         parameter["bonds"] = bonds;
         parameter["angles"] = angles;
         std::ofstream parameterfile_init(outputPath("qmdff_" + std::to_string(start) + "_param.json"));
         parameterfile_init << parameter;
-        // std::cout << parameter << std::endl;
         parameterfile_init.close();
         m_fc_parameter.resize(bonds.size() + angles.size());
         int i = 0;
@@ -204,10 +194,8 @@ void QMDFFFit::start()
 
         qmdff_init["variable"] = true;
         qmdff_init["const"] = false;
-        // std::cout << m_fc_parameter << std::endl;
 
         Vector vec = OptimiseFC(m_molecule, m_hessian, const_hessian_matrix, m_fc_parameter, parameter, qmdff_init);
-        // std::cout << vec << std::endl;
         bonds = parameter["bonds"];
         angles = parameter["angles"];
         int index = 0;
@@ -229,13 +217,10 @@ void QMDFFFit::start()
         bonds.clear();
         counter = 0;
         for (auto c : cache) {
-            // std::cout << c << std::endl;
             if (c["fc"] > 0)
                 bonds.push_back(c);
             else {
-                // c["fc"] = 0;
                 bonds.push_back(c);
-                // std::cout << "skipped" << std::endl;
 
                 counter++;
             }
@@ -247,8 +232,6 @@ void QMDFFFit::start()
             if (c["fc"] > 0)
                 angles.push_back(c);
             else {
-                // c["fc"] = 0;
-                // angles.push_back(c);
                 std::cout << c << std::endl;
                 counter++;
             }
@@ -256,14 +239,7 @@ void QMDFFFit::start()
         std::cout << "Skipping " << counter << " force constants " << std::endl;
         std::cout << bonds.size() << " " << angles.size() << std::endl;
 
-        // std::cout << he2.getHessian() << std::endl;
     }
-    /*
-        std::cout << "Eigenvectors" << std::endl;
-        std::cout << hessian.Frequencies().transpose() << std::endl;
-        qmdff_init["variable"] = true;
-        qmdff_init["const"] = true;
-    */
     Hessian he2(qmdff_init, false);
     parameter = prm;
     parameter["bonds"] = bonds;
@@ -273,17 +249,7 @@ void QMDFFFit::start()
     he2.start();
     std::cout << he2.Frequencies().transpose() << std::endl;
 
-    // std::cout << parameter << std::endl;
     std::ofstream parameterfile(outputPath("qmdff_param.json"));
     parameterfile << parameter;
 }
 
-/*
-void QMDFFFit::FitDihedrals(json &dihedrals)
-{
-    for(int i = 0; i < dihedrals.size(); ++i)
-    {
-        std::cout << dihedrals[i] << std::endl;
-    }
-}
-*/

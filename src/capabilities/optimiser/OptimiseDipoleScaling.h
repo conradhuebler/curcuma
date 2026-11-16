@@ -130,9 +130,6 @@ inline Vector DipoleScalingCalculation(const std::vector<Molecule>& conformers)
         }
     }
     const Vector Theta = (F.transpose()*F).colPivHouseholderQr().solve(F.transpose()*y);
-    //const Matrix H = (F*(F.transpose()*F).inverse()*F.transpose()).diagonal();
-    //std::cout << "diag(H) x y z:" << std::endl;
     //for (int i = 0; i < H.rows()/3; ++i)
-    //    std::cout << H(3*i,0) << " " << H(3*i+1,0) << " " << H(3*i+2,0) << " " << std::endl;
     return Theta;
 }

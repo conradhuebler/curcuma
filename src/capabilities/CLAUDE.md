@@ -10,6 +10,10 @@ Hessian, docking. Energies and gradients always come from `EnergyCalculator`. Do
 - `optimizer_driver.*`, `optimizer_factory.*`, `optimizer_interface.*`: `OptimizerDriver` loop, `OptimizerFactory`, `OptimizationDispatcher`; the only `-opt` path
 - `lbfgspp_optimizer.*`, `ancopt_optimizer.*`, `native_optimizer_adapters.*`: concrete drivers; native algorithms in [optimisation/](optimisation/CLAUDE.md)
 - `rmsd.*` (`RMSDDriver`, strategies in [rmsd/](rmsd/CLAUDE.md)), `confscan.*`, `confsearch.*`, `shared_bias_pool.*`, `simplemd.*`, `analysis*`, `handlers/`, `trajectory*`
+- `nebmd.*`, `string_path.*`, `path_cv.*`, `fe_profile.h`, `wham.h`, `z_filter.h`: NEB-MD (CI-NEB, string stage, constrained path-CV mean force, TST rate; AI-generated, machine-tested, ethane/GFN-FF only), [../../docs/NEB_MD.md](../../docs/NEB_MD.md)
+- SimpleMD `umbrella_q`/`umbrella_cv`: harmonic umbrella on d(i,j)-d(i,k), d(i,j)+d(k,l) or a signed dihedral via `setExtraPotential`, plain `-md` only, [../../docs/UMBRELLA_Q.md](../../docs/UMBRELLA_Q.md)
+- SimpleMD output (AI-generated, machine-tested; human production testing pending): `<basename>.md.csv` per-step status in the BMT dir ([../../docs/MD_CSV_OUTPUT.md](../../docs/MD_CSV_OUTPUT.md)); `Basename.snapshots/`, `Basename.rmsd_mtd/`, `Basename.plumed_files/` inside BMT; `FILE=` paths in plumed.dat are rewritten into `Basename.plumed_files/`, provenance copy `Basename.plumed.dat`, `-no_plumed_redirect` disables
+- SimpleMD stochastics: one per-instance `m_rng` seeded from `m_seed`; no local static generators in `simplemd.cpp`, they bypass `-seed` and couple NEB-MD replicas
 - Others: `hessian`, `docking`, `nebdocking`, `qmdfffit`, `persistentdiagram`, `tda_engine`, `pairmapper`, `casino`, `polymerbuild`, `confstat`, `rmsdtraj`
 - `optimiser/`: LevMar headers (docking, NEB, qmdfffit), `OptimiseDipoleScaling.h` (main.cpp); `c_code/`: C Hungarian solver used by `rmsd`
 - Removed 2026-10-01 as dead (no callers): the legacy `CurcumaOpt` implementation, `native_lbfgs_optimizer.*`, `optimisation/modern_optimizer_simple.*`, munkress_2.h and four unused `optimiser/*.h` headers; `curcumaopt.h` stays because its PARAM block defines the `opt` module
@@ -26,7 +30,7 @@ Hessian, docking. Energies and gradients always come from `EnergyCalculator`. Do
 ## Invariants and traps
 
 - Distance/dihedral restraints (`optimisation/geometry_restraints.h`) add their gradient in Eh/Angstrom, like `EnergyCalculator::Gradient()`; a Bohr factor makes the LBFGS line search stop with "zero step" (#39, test `test_geometry_restraints`). The driver's `evaluateEnergyAndGradient` already contains the restraints, so a primed evaluation must not add them again.
-- `-opt` PARAMs live in `curcumaopt.h` although `CurcumaOpt` is not built: the registry is generated from every header (`GLOB_RECURSE`), built or not
+- `-opt` PARAMs live in `curcumaopt.h`, which holds nothing else and is included nowhere: the registry is generated from every header (`GLOB_RECURSE`), built or not
 - `-optimizer auto` (default) always means LBFGSpp; `selectOptimalOptimizer()` has no caller. `lbfgs` is the native L-BFGS; unknown names fall back to LBFGSpp
 - `OptimizerDriver` owns loop, convergence and output; every abort returns the last accepted structure, which `-opt` writes even if not converged
 - LBFGSpp runs with a copy of its backtracking line search (`lbfgspp_capped_linesearch.h`, `external/LBFGSpp` is untracked): `-lbfgs_max_atom_step` caps one atom's step, 0 = off ([docs](../../docs/LBFGS_ATOM_STEP_CAP.md))

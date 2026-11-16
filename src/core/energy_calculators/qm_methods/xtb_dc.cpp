@@ -160,7 +160,7 @@ double XTB::calculateDivideConquer(const std::vector<std::vector<int>>& subsyste
     int uncovered = 0;
     for (int at = 0; at < nat; ++at) if (core_owner[at] == -1) ++uncovered;
     if (uncovered)
-        CurcumaLogger::warn(fmt::format("DC: {} atom(s) belong to no core — their density block is dropped", uncovered));
+        CurcumaLogger::warn(fmt::format("DC: {} atom(s) belong to no core - their density block is dropped", uncovered));
 
     // The T=0 hard check for eigensolver=purify is enforced upstream in
     // NativeXtbMethod::setMolecule. We trust m_eigensolver here; the sub-block

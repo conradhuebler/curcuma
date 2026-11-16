@@ -51,12 +51,12 @@ FragmentScfDriver::FragmentScfDriver(MethodType method, const json& config)
 void FragmentScfDriver::configureXtb(XTB& xtb) const
 {
     // D4 charge-response source (no-op for GFN1/D3). Mirror NativeXtbMethod::applyConfig.
-    std::string d4src = "eeq";
+    std::string d4src = "mulliken";
     if (m_config.contains("xtb") && m_config["xtb"].is_object()
         && m_config["xtb"].contains("d4_charge_source"))
         d4src = m_config["xtb"]["d4_charge_source"].get<std::string>();
     else
-        d4src = m_config.value("d4_charge_source", std::string("eeq"));
+        d4src = m_config.value("d4_charge_source", std::string("mulliken"));
     xtb.setD4ChargeSource(d4src);
 
     // SCF-convergence settings (mode/guess/damping/DIIS/level-shift/eigensolver).
@@ -349,7 +349,7 @@ double FragmentScfDriver::runDivideConquer(bool gradient)
     m_gradient = Matrix::Zero(nat, 3);
     if (gradient) {
         m_has_error = true;
-        m_error_message = "large_system_mode=dc is energy-only — no gradient/forces; "
+        m_error_message = "large_system_mode=dc is energy-only - no gradient/forces; "
                           "use large_system_mode=none (or fragments) for -opt/-md";
         CurcumaLogger::error(m_error_message);
         return E;
@@ -391,7 +391,7 @@ double FragmentScfDriver::runSparse(bool gradient)
 
     // The engine returns exactly 0.0 only when it declined (open shell) — fall back.
     if (E == 0.0 && !converged) {
-        CurcumaLogger::warn("large_system_mode=sparse unavailable for this system — running dense instead");
+        CurcumaLogger::warn("large_system_mode=sparse unavailable for this system - running dense instead");
         return runDense(gradient);
     }
 
@@ -408,7 +408,7 @@ double FragmentScfDriver::runSparse(bool gradient)
     m_gradient = Matrix::Zero(nat, 3);
     if (gradient) {
         m_has_error = true;
-        m_error_message = "large_system_mode=sparse is energy-only — no gradient/forces; "
+        m_error_message = "large_system_mode=sparse is energy-only - no gradient/forces; "
                           "use large_system_mode=none for -opt/-md";
         CurcumaLogger::error(m_error_message);
         return E;

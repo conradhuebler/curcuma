@@ -60,7 +60,7 @@ public:
         m_help = true;
         m_verbosity = 1; // Default: Normal Print
     }
-    ~CurcumaMethod();
+    virtual ~CurcumaMethod();
 
     inline void setRestart(bool restart) { m_restart = restart; }
 
@@ -165,7 +165,6 @@ protected:
     }
     int getVerbosity() const { return m_verbosity; }
 
-    //std::filebuf m_curcuma_progress;
     bool m_silent = true; // Legacy - kept for backwards compatibility
     bool m_verbose = false; // Legacy - kept for backwards compatibility
     bool m_help = false;

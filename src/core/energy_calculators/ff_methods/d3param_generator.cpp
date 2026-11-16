@@ -36,15 +36,16 @@
 
 #include <algorithm>
 #include <cmath>
+#include "src/core/output_symbols.h"
 
 D3ParameterGenerator::D3ParameterGenerator(const ConfigManager& config)
     : m_config(config)
 {
     // Phase 3.2: Parameter validation (Claude Generated)
     double s6 = m_config.get<double>("d3_s6", 1.0);
-    double s8 = m_config.get<double>("d3_s8", 1.0);
-    double a1 = m_config.get<double>("d3_a1", 0.4);
-    double a2 = m_config.get<double>("d3_a2", 4.0);
+    double s8 = m_config.get<double>("d3_s8", 2.0);
+    double a1 = m_config.get<double>("d3_a1", 0.58);
+    double a2 = m_config.get<double>("d3_a2", 4.80);
 
     // Validate scaling factors (must be non-negative)
     if (s6 < 0.0 || s8 < 0.0) {
@@ -107,7 +108,7 @@ void D3ParameterGenerator::initializeReferenceData()
     // Declared in d3_reference_data.h (const std::array, .rodata — no static-init cost).
 
     if (reference_cn_data_complete.size() < 721) {  // Need 103 elements × 7 references = 721
-        CurcumaLogger::error("Reference CN data insufficient: expected ≥721, got " +
+        CurcumaLogger::error("Reference CN data insufficient: expected " SYM_GE "721, got " +
                              std::to_string(reference_cn_data_complete.size()));
         return;
     }
@@ -342,7 +343,7 @@ void D3ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
     double t_weights_ms = std::chrono::duration<double, std::milli>(t_weights_end - t_weights_start).count();
 
     if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::info(fmt::format("D3: Weight pre-computation took {:.2f} ms ({} atoms × avg {} refs)",
+        CurcumaLogger::info(fmt::format("D3: Weight pre-computation took {:.2f} ms ({} atoms " SYM_TIMES " avg {} refs)",
             t_weights_ms, m_atoms.size(), m_gaussian_weights.empty() ? 0 : m_gaussian_weights[0].size()));
     }
 
@@ -352,9 +353,9 @@ void D3ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
 
     // Get global scaling factors from config
     double s6 = m_config.get<double>("d3_s6", 1.0);
-    double s8 = m_config.get<double>("d3_s8", 1.0);
-    double a1 = m_config.get<double>("d3_a1", 0.4);
-    double a2 = m_config.get<double>("d3_a2", 4.0);
+    double s8 = m_config.get<double>("d3_s8", 2.0);
+    double a1 = m_config.get<double>("d3_a1", 0.58);
+    double a2 = m_config.get<double>("d3_a2", 4.80);
 
     int num_pairs = 0;
     for (size_t i = 0; i < m_atoms.size(); ++i) {
@@ -425,8 +426,8 @@ void D3ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
 
     // Add Becke-Johnson damping parameters
     m_parameters["d3_damping"] = {
-        {"a1", m_config.get<double>("d3_a1", 0.4)},
-        {"a2", m_config.get<double>("d3_a2", 4.0)},
+        {"a1", m_config.get<double>("d3_a1", 0.58)},
+        {"a2", m_config.get<double>("d3_a2", 4.80)},
         {"alp", m_config.get<double>("d3_alp", 14.0)}
     };
 
@@ -440,8 +441,8 @@ void D3ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
 
     if (m_config.get<double>("d3_s9", 0.0) > 1e-10) {
         double s9 = m_config.get<double>("d3_s9", 1.0);
-        double a1 = m_config.get<double>("d3_a1", 0.40);
-        double a2 = m_config.get<double>("d3_a2", 4.20);
+        double a1 = m_config.get<double>("d3_a1", 0.58);
+        double a2 = m_config.get<double>("d3_a2", 4.80);
         double alp = m_config.get<double>("d3_alp", 14.0);
 
         int n_atoms = static_cast<int>(m_atoms.size());
@@ -517,7 +518,7 @@ void D3ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
 
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::success(fmt::format("D3 parameter generation completed in {:.2f} ms", t_total_ms));
-        CurcumaLogger::info(fmt::format("  └─ Breakdown: CN={:.1f}ms, Weights={:.1f}ms, C6Interp={:.1f}ms, ATM={:.1f}ms",
+        CurcumaLogger::info(fmt::format("  +- Breakdown: CN={:.1f}ms, Weights={:.1f}ms, C6Interp={:.1f}ms, ATM={:.1f}ms",
             t_cn_ms, t_weights_ms, t_pairs_ms, t_atm_triples_ms));
     }
 }
@@ -589,8 +590,8 @@ double D3ParameterGenerator::getC6(int atom_i, int atom_j, int ref_i, int ref_j)
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("getC6: pair_index=" + std::to_string(pair_index) +
-                           " ref_i=" + std::to_string(ref_i) + " → " + std::to_string(ref_i_final) +
-                           " ref_j=" + std::to_string(ref_j) + " → " + std::to_string(ref_j_final) +
+                           " ref_i=" + std::to_string(ref_i) + " -> " + std::to_string(ref_i_final) +
+                           " ref_j=" + std::to_string(ref_j) + " -> " + std::to_string(ref_j_final) +
                            " swap=" + std::string(elem_i <= elem_j ? "YES" : "NO"));
     }
 
@@ -823,7 +824,7 @@ double D3ParameterGenerator::interpolateC6(int elem_i, int elem_j, size_t atom_i
                            "): atoms=(" + std::to_string(atom_idx_i) + "," + std::to_string(atom_idx_j) +
                            "), CN=(" + std::to_string(m_cached_cn[atom_idx_i]) + "," +
                            std::to_string(m_cached_cn[atom_idx_j]) +
-                           ") → C6=" + std::to_string(c6_interpolated));
+                           ") -> C6=" + std::to_string(c6_interpolated));
     }
 
     return c6_interpolated;
@@ -1016,10 +1017,10 @@ double D3ParameterGenerator::getTotalEnergy() const
     double energy = 0.0;
 
     // Get damping parameters and scaling factors from config
-    double a1 = m_config.get<double>("d3_a1", 0.4);
-    double a2 = m_config.get<double>("d3_a2", 4.0);
+    double a1 = m_config.get<double>("d3_a1", 0.58);
+    double a2 = m_config.get<double>("d3_a2", 4.80);
     double s6 = m_config.get<double>("d3_s6", 1.0);
-    double s8 = m_config.get<double>("d3_s8", 1.0);
+    double s8 = m_config.get<double>("d3_s8", 2.0);
 
     const auto& pairs = m_parameters["d3_dispersion_pairs"];
 
@@ -1188,9 +1189,9 @@ D3ParameterGenerator::DeviceTables D3ParameterGenerator::buildDeviceTables(const
 {
     DeviceTables t;
     t.s6 = m_config.get<double>("d3_s6", 1.0);
-    t.s8 = m_config.get<double>("d3_s8", 1.0);
-    t.a1 = m_config.get<double>("d3_a1", 0.4);
-    t.a2 = m_config.get<double>("d3_a2", 4.0);
+    t.s8 = m_config.get<double>("d3_s8", 2.0);
+    t.a1 = m_config.get<double>("d3_a1", 0.58);
+    t.a2 = m_config.get<double>("d3_a2", 4.80);
     t.nref.assign(MAX_ELEM, 0);
     t.refcn.assign(static_cast<size_t>(MAX_ELEM) * MAX_REF, 0.0);
     for (int z = 1; z <= MAX_ELEM; ++z) {
@@ -1254,10 +1255,10 @@ double D3ParameterGenerator::getEnergyAndGradient(bool need_gradient,
     const double au = CurcumaUnit::Length::angstrom_to_bohr_or_legacy(1.88972612546);  // Angstrom -> Bohr
     const size_t n = m_atoms.size();
 
-    double a1 = m_config.get<double>("d3_a1", 0.4);
-    double a2 = m_config.get<double>("d3_a2", 4.0);
+    double a1 = m_config.get<double>("d3_a1", 0.58);
+    double a2 = m_config.get<double>("d3_a2", 4.80);
     double s6 = m_config.get<double>("d3_s6", 1.0);
-    double s8 = m_config.get<double>("d3_s8", 1.0);
+    double s8 = m_config.get<double>("d3_s8", 2.0);
 
     double energy = 0.0;
 

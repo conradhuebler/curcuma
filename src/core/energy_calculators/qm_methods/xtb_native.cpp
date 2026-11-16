@@ -51,6 +51,7 @@
 #include <stdexcept>
 #include <thread>
 #include <vector>
+#include "src/core/output_symbols.h"
 
 namespace curcuma::xtb {
 
@@ -2841,7 +2842,7 @@ void XTB::auditGfn2GradientTerms()
                     * m_wfn.focc.head(ncol).asDiagonal()
                     * m_wfn.C.leftCols(ncol).transpose();
         CurcumaLogger::result(fmt::format(
-            "  [consistency] ||P - C·f·Cᵀ|| = {:.3e}  (||P||={:.3e})  ncol={}",
+            "  [consistency] ||P - C" SYM_CDOT "f" SYM_CDOT "C" SYM_TRANSPOSE "|| = {:.3e}  (||P||={:.3e})  ncol={}",
             (m_wfn.P - Prec).norm(), m_wfn.P.norm(), ncol));
     }
     // Generalized-eigenproblem residual: do the stored eps/C satisfy F·C = S·C·diag(eps)
@@ -2853,7 +2854,7 @@ void XTB::auditGfn2GradientTerms()
         Matrix lhs = m_F * m_wfn.C;
         Matrix rhs = m_S * m_wfn.C * m_wfn.eps.asDiagonal();
         CurcumaLogger::result(fmt::format(
-            "  [consistency] ||F·C - S·C·ε|| = {:.3e}  (||F·C||={:.3e})",
+            "  [consistency] ||F" SYM_CDOT "C - S" SYM_CDOT "C" SYM_CDOT SYM_EPS "|| = {:.3e}  (||F" SYM_CDOT "C||={:.3e})",
             (lhs - rhs).norm(), lhs.norm()));
     }
 

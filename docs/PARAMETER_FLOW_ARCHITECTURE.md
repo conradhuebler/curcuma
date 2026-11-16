@@ -17,7 +17,7 @@ This document describes the complete parameter flow from CLI arguments through t
                              │
                              ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│ LAYER 1: CLI2Json (src/main.cpp lines 184-342)                  │
+│ LAYER 1: CLI2Json (src/core/cli_parser.cpp, function CLI2Json)                  │
 │ Purpose: Convert command-line arguments to nested JSON structure │
 │ Input:  argv array with -flag value pairs                        │
 │ Output: controller dict with module-specific subdocuments        │
@@ -101,7 +101,7 @@ This document describes the complete parameter flow from CLI arguments through t
 
 ## Detailed Layer Descriptions
 
-### Layer 1: CLI2Json Function (src/main.cpp lines 184-342)
+### Layer 1: CLI2Json Function (src/core/cli_parser.cpp, function CLI2Json)
 
 **Purpose**: Transform command-line arguments into structured JSON
 
@@ -288,9 +288,10 @@ T value = config.get<T>("key", default_value);  // With custom default
 config.get<std::string>("module.parameter")
 config.get<bool>("nested.module.parameter")
 
-// Case-insensitive (via alias resolution)
-config.get<int>("MaxIterations")  // Finds "max_iterations"
-config.get<int>("max_iterations")  // Both work
+// Keys are compared in lower case with hyphens removed (curcuma::normalizeKey), underscores
+// are kept: "Max_Iterations" and "max-iterations" find "max_iterations", "MaxIterations" does not.
+// A different spelling works only as a registered alias, e.g. "MaxIter".
+config.get<int>("max_iterations")
 ```
 
 ---
@@ -417,8 +418,9 @@ capability = new Capability(controller);
 
 - Aliases work automatically:
   ```bash
-  -RMSDmethod subspace  # Finds "rmsd.method" via alias resolution
-  -max_iterations 100   # Works with -MaxIterations too
+  -MaxIter 100          # alias of max_iterations
+  -max-iterations 100   # the CLI turns "-" into "_"
+  # -MaxIterations and -maxiterations are NOT aliases: they stay unknown keys (a warning is printed)
   ```
 
 ### For Debugging Parameter Issues

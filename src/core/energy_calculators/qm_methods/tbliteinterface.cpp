@@ -433,7 +433,6 @@ double TBLiteInterface::Calculation(bool gradient)
         tblite_delete_error(&m_error);
         tblite_delete_context(&m_ctx);
         tblite_delete_result(&m_tblite_res);
-        // tblite_delete_structure(  &m_tblite_mol );
         tblite_delete_calculator(&m_tblite_calc);
         tblite_delete_container(&m_tb_cont);
 

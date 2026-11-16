@@ -217,7 +217,6 @@ void ForceFieldGenerator::Generate(const std::vector<std::pair<int, int>>& forme
     }
     AssignUffAtomTypes();
     // if (m_rings)
-    // std::cout << "Crude ring finding method ... " << std::endl;
     int maxsize = m_atom_types.size();
     int maxcache = m_atom_types.size();
     if (m_atom_types.size() > 1000)
@@ -543,51 +542,13 @@ void ForceFieldGenerator::setAngles()
         m_angles[index]["C0"] = C0;
         m_angles[index]["C1"] = C1;
         m_angles[index]["C2"] = C2;
-#pragma message("TODO: Check UFF angle bending")
+// TODO: Check UFF angle bending
         Eigen::Vector3d rij = m_geometry.row(i) - m_geometry.row(j);
         Eigen::Vector3d nij = rij.normalized();
         Eigen::Vector3d rkj = m_geometry.row(k) - m_geometry.row(j);
         Eigen::Vector3d nkj = rkj.normalized();
         double costheta = nij.dot(nkj);
         m_angles[index]["theta0_ijk"] = acos(costheta); // m_molecule.CalculateAngle(i, j, k) / f; // UFF::AngleBending(m_geometry.row(j), m_geometry.row(i), m_geometry.row(k), derivate, false);
-        /*
-                    if(std::find(m_qmdff_methods.begin(), m_qmdff_methods.end(), m_method) != m_qmdff_methods.end())
-                    {
-                        json uffbond = BondJson;
-
-                        uffbond["i"] = i;
-                        uffbond["j"] = k;
-                        uffbond["k"] = k;
-
-                        uffbond["type"] = m_ff_type;
-
-                        r0_ij = m_distance(i, j);
-                        r0_ik = m_distance(i, k);
-
-                        uffbond["r0_ij"] = r0_ik;
-                        uffbond["r0_ik"] = r0_ik;
-
-
-                        uffbond["fc"] = 0.01;
-                        double exp =ka13 + kb13* ka(atom_types[i]) * ka(atom_types[k]);
-                        bool found = false;
-                        for(const auto &ring : m_identified_rings)
-                        {
-                            for(const auto &atom : ring)
-                            {
-                                if((atom == i || atom == j || atom == k) && !found)
-                                {
-                                    exp += k13r;
-                                    found = true;
-                                }
-                            }
-                        }
-                       // exp /= 3.0;
-                        uffbond["exponent"] = exp;
-                        uffbond["distance"] = 2;
-                        m_bonds.push_back(uffbond);
-                    }
-    */
     }
 }
 
@@ -653,7 +614,7 @@ void ForceFieldGenerator::setInversions()
         double f = pi / 180.0;
         double kijkl = 0;
 
-#pragma message("TODO: Check UFF inversion")
+// TODO: Check UFF inversion
         if (6 <= m_mol.m_atoms[i] && m_mol.m_atoms[i] <= 8) {
             C0 = 1.0;
             C1 = -1.0;
@@ -698,7 +659,6 @@ void ForceFieldGenerator::setInversions()
 
 void ForceFieldGenerator::setNCI()
 {
-    // std::vector<double> charges = m_mol.m_partial_charges // m_molecule.getPartialCharges();
     double q_thresh = 1e-5;
     for (int i = 0; i < m_atom_types.size(); ++i) {
         for (int j = i + 1; j < m_atom_types.size(); ++j) {
@@ -727,23 +687,6 @@ void ForceFieldGenerator::setNCI()
             m_esps.push_back(esp);
         }
     }
-    /*
-    for(int i = 0; i < m_1_4_charges.size(); ++i)
-    {
-        for(const auto j : m_1_4_charges[i])
-        {
-            if(i == j)
-                continue;
-            json esp = EQJson;
-            esp["i"] = i;
-            esp["j"] = j;
-            esp["q_i"] = charges[i];
-            esp["q_j"] = charges[j];
-            esp["epsilon"] = 0.85;
-            m_esps.push_back(esp);
-        }
-    }
-*/
 }
 
 void ForceFieldGenerator::AssignUffAtomTypes()
@@ -812,7 +755,7 @@ void ForceFieldGenerator::AssignUffAtomTypes()
             m_atom_types[i] = 27;
             break;
         case 15: // P
-#pragma message("maybe add organometallic phosphorous (28)")
+// maybe add organometallic phosphorous (28)
             m_atom_types[i] = 29;
             break;
         case 16: // S
@@ -820,7 +763,7 @@ void ForceFieldGenerator::AssignUffAtomTypes()
                 m_atom_types[i] = 31;
             else // ok, currently we do not discriminate between SO2 and SO3, just because there is H2SO3 and H2SO4
                 m_atom_types[i] = 32;
-#pragma message("we have to add organic S")
+// we have to add organic S
             break;
         case 17: // Cl
             m_atom_types[i] = 36;
@@ -1157,103 +1100,6 @@ void ForceFieldGenerator::GenerateD4Parameters()
 // ============================================================================
 // Claude Generated (December 19, 2025): UFF-D3 Hybrid Method
 // ============================================================================
-
-json ForceFieldGenerator::GenerateUFFD3Parameters()
-{
-    /**
-     * @brief Generate UFF bonded parameters + native D3 dispersion
-     *
-     * This method combines:
-     * 1. UFF bonded terms (bonds, angles, dihedrals, inversions, vdW)
-     * 2. Native D3 dispersion (validated 10/11 molecules <1% error)
-     *
-     * UFF-D3 provides a fast, accurate hybrid method for molecular mechanics
-     * with geometry-dependent dispersion correction.
-     *
-     * Reference: Grimme et al., J. Chem. Phys. 132, 154104 (2010) [D3-BJ]
-     *
-     * Claude Generated: December 19, 2025
-     */
-
-    auto start_time = std::chrono::high_resolution_clock::now();
-
-    if (CurcumaLogger::get_verbosity() >= 1) {
-        CurcumaLogger::info("Generating UFF-D3 parameters");
-        CurcumaLogger::param("atoms", m_atoms);
-    }
-
-    // Step 1: Generate UFF bonded parameters (bonds, angles, dihedrals, inversions, vdW)
-    Generate();  // Fills m_bonds, m_angles, m_dihedrals, m_inversions, m_vdws
-
-    // Step 2: Get UFF parameters as JSON
-    json uff_params = getParameter();
-
-    // Step 3: Add D3 dispersion correction
-    if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::info("Adding native D3 dispersion correction");
-    }
-
-    try {
-        // D3 configuration with PBE0/BJ parameters (recommended for UFF-D3)
-        json d3_config_json = {
-            {"d3_a1", 0.4145},   // PBE0/BJ damping parameter 1
-            {"d3_a2", 4.8593},   // PBE0/BJ damping parameter 2 (Bohr)
-            {"d3_alp", 14.0},    // Alpha parameter
-            {"d3_s6", 1.0},      // C6 scaling factor
-            {"d3_s8", 1.2177},    // C8 scaling factor (PBE0)
-            {"d3_s9", 1.0}       // ATM three-body scaling factor
-        };
-
-        ConfigManager d3_config("d3param", d3_config_json);
-        D3ParameterGenerator d3_gen(d3_config);
-
-        // Generate D3 parameters with geometry-dependent CN calculation
-        d3_gen.GenerateParameters(m_mol.m_atoms, m_geometry);
-        json d3_params = d3_gen.getParameters();
-
-        // Merge D3 parameters into UFF parameter set
-        if (d3_params.contains("d3_dispersion_pairs")) {
-            uff_params["d3_dispersion_pairs"] = d3_params["d3_dispersion_pairs"];
-            uff_params["d3_damping"] = d3_params["d3_damping"];
-            uff_params["d3_enabled"] = true;
-
-            // Claude Generated (2025): Add ATM triples for three-body dispersion
-            if (d3_params.contains("atm_triples") && !d3_params["atm_triples"].is_null()) {
-                uff_params["atm_triples"] = d3_params["atm_triples"];
-                if (CurcumaLogger::get_verbosity() >= 2) {
-                    CurcumaLogger::param("atm_triples", static_cast<int>(d3_params["atm_triples"].size()));
-                }
-            }
-
-            if (CurcumaLogger::get_verbosity() >= 2) {
-                CurcumaLogger::param("d3_pairs", static_cast<int>(d3_params["d3_dispersion_pairs"].size()));
-            }
-        } else {
-            if (CurcumaLogger::get_verbosity() >= 1) {
-                CurcumaLogger::warn("D3 generated no dispersion pairs");
-            }
-            uff_params["d3_enabled"] = false;
-        }
-
-    } catch (const std::exception& e) {
-        if (CurcumaLogger::get_verbosity() >= 1) {
-            CurcumaLogger::error(fmt::format("D3 parameter generation failed: {}", e.what()));
-        }
-        uff_params["d3_enabled"] = false;
-    }
-
-    auto end_time = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-
-    if (CurcumaLogger::get_verbosity() >= 1) {
-        CurcumaLogger::success("UFF-D3 parameter generation completed");
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::param("total_time", fmt::format("{} ms", duration.count()));
-        }
-    }
-
-    return uff_params;
-}
 
 json ForceFieldGenerator::GenerateD3OnlyParameters(const std::string& preset)
 {

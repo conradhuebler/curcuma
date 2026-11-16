@@ -37,7 +37,6 @@ static double epsilon = 1e-8;
 
 void PrintMatrix(const Matrix& m)
 {
-    //  std::cout << m << std::endl;
 }
 
 void PrintVector(const std::vector<int>& vector)
@@ -144,8 +143,6 @@ void find_star_in_row(const Matrix& starred, int row, int& col)
 
 int Step4(Matrix& starred, Matrix& working, int& col, int& row, std::vector<int>& covered_rows, std::vector<int>& covered_cols, int& path_row_0, int& path_col_0)
 {
-    // int row = -1;
-    // int col = -1;
     bool done;
 
     done = false;
@@ -284,7 +281,6 @@ Matrix MunkressAssign(const Matrix& m)
     double min;
     int path_row_0 = 0;
     int path_col_0 = 0;
-    // int iter = 0;
     while (loop) {
         int col = -1, row = -1;
         //  iter++;
@@ -315,7 +311,6 @@ Matrix MunkressAssign(const Matrix& m)
             break;
         }
     }
-    // std::cout << iter << ":";
     return starred;
 }
 

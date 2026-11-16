@@ -469,7 +469,9 @@ for i, k in ((180, 0), (180, 1), (180, 2), (98, 0), (98, 2)):
 check(worst < 5e-5, "defect structure, rest per_fragment, Cl- at CN = 0: gradient against finite difference, 5 components: max |diff| %.2e Eh/A (largest %.3f)" % (worst, scale))
 e_dg, _ = sp("defect.xyz", groups_d, None, "defect_guard.grad", charge=0, extra=["-gfnff.cn_zero_guard", "true"])
 G_g = np.loadtxt("defect_guard.grad", comments="#")
-check(e_dg == e_d and np.array_equal(G, G_g), "defect structure: -gfnff.cn_zero_guard true changes neither energy nor gradient with groups (guard always on with an override)")
+# Not bit-for-bit: under load the two runs differ by summation-order round-off (measured 7e-16 Eh/A at gradient
+# components up to 0.74, also at -threads 1 and on plain devel/methods), so equality is checked to 1e-12.
+check(abs(e_dg - e_d) < 1e-10 and np.abs(G - G_g).max() < 1e-12, "defect structure: -gfnff.cn_zero_guard true changes neither energy nor gradient with groups (guard always on with an override)")
 
 print("FAILED" if failed else "all passed")
 sys.exit(1 if failed else 0)

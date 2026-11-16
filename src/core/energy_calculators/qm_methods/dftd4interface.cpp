@@ -65,7 +65,6 @@ DFTD4Interface::~DFTD4Interface()
 
 void DFTD4Interface::PrintParameter() const
 {
-    // std::cout << m_par.s8 << " " << m_par.s8 << " " << m_par.s9 << " " << m_par.s10 << " " << m_par.a1 << " " << m_par.a2 << " " << m_par.alp << std::endl;
 }
 
 // Claude Generated 2025: ConfigManager migration - Phase 2.2
@@ -122,7 +121,6 @@ double DFTD4Interface::Calculation(bool gradient)
     double energy = 0;
     dftd4::TCutoff cutoff;
     dftd4::TD4Model d4;
-    // exit(0);
     dftd4::get_dispersion(m_mol, m_charge, d4, m_par, cutoff, energy, m_gradient.data());
     return energy;
 }

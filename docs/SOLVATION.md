@@ -260,6 +260,6 @@ grep "USE_TBLITE\|USE_ULYSSES" build/CMakeCache.txt
 
 ## See Also
 
-- [Parameter Registry Guide](PARAMETER_MIGRATION_GUIDE.md)
+- [Parameter Registry Guide](archive/PARAMETER_MIGRATION_GUIDE.md)
 - [TBLite Interface Documentation](../src/core/energy_calculators/qm_methods/tbliteinterface.h)
 - [Ulysses Interface Documentation](../src/core/energy_calculators/qm_methods/ulyssesinterface.h)
