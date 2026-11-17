@@ -217,6 +217,46 @@ inline void eeqLDLTSolve(const ColMatrix& Afac, const std::vector<int>& ipiv, Ei
 }
 #endif  // USE_BLAS
 
+/// solve_method sytrf: the linear solve of the Fortran reference. Claude Generated (Nov 2026),
+/// AI-generated, machine-tested on the CPU (see docs/EEQ_SOLVER_CONTROL.md, section sytrf).
+///
+/// Both EEQ phases of the reference build the dense augmented matrix of order m = N + nfrag,
+///     [ A   C^T ] [ q      ]   [ x_atoms ]      A(i,i) = gam_i + sqrt(2/pi)/sqrt(alpha_i),
+///     [ C   0   ] [ lambda ] = [ Q_frag  ],     A(i,j) = erf(gamma_ij r_ij)/r_ij (both triangles),
+/// C(f,i) = 1 for the atoms of fragment f, and solve it with LAPACK dsytrf + dsytrs, uplo 'U',
+/// one right-hand side, FP64 (xtb gfnff_ini2.f90 goedeckera: mctc_sytrf/mctc_sytrs; gfnff_eg.f90
+/// goed_gfnff; pprcht gfnff_ini2.f90 and gfnff_engrad.F90: dsytrf_wrap/sytrs_wrap; the wrappers
+/// default to uplo 'u' and query the workspace with lwork = -1). This does the same on the matrix
+/// and right-hand side curcuma's Phase 1 / Phase 2 assemble (`A`, `x` of dispatchSolve). The
+/// single-precision branch of the reference (xtb accuracy > 1, asymptote call) is not reproduced.
+/// Returns the first natoms entries of [q; lambda]; empty on dsytrf/dsytrs info != 0 or without
+/// LAPACK (USE_BLAS off), the caller then falls back to the augmented LU.
+inline Vector solveAugmentedSytrfUpper(const Matrix& A, const Vector& x, int natoms)
+{
+#ifdef USE_BLAS
+    // curcuma's Matrix is row-major; the copy into a column-major buffer keeps A(i,j), so dsytrf
+    // reads the same upper triangle (i <= j) the Fortran column-major array holds.
+    ColMatrix Af = A;
+    const char uplo = 'U';
+    int m = static_cast<int>(Af.rows()), lda = std::max(1, m), info = 0;
+    std::vector<int> ipiv(std::max(1, m), 0);
+    double wkopt = 0.0;
+    int lwork = -1;
+    dsytrf_(&uplo, &m, Af.data(), &lda, ipiv.data(), &wkopt, &lwork, &info);   // workspace query
+    if (info != 0) return Vector();
+    lwork = std::max(1, static_cast<int>(std::lround(wkopt)));                 // nint(test(1)) in the reference
+    std::vector<double> work(lwork);
+    dsytrf_(&uplo, &m, Af.data(), &lda, ipiv.data(), work.data(), &lwork, &info);
+    if (info != 0) return Vector();
+    Eigen::VectorXd b = x;
+    if (!EEQSolver::hostSytrsUpper(m, Af.data(), ipiv.data(), b.data())) return Vector();
+    return b.head(natoms);
+#else
+    (void)A; (void)x; (void)natoms;
+    return Vector();
+#endif
+}
+
 /// Schur complement S = C·Z2 exploiting that the constraint matrix C is a per-fragment
 /// membership matrix (one nonzero per atom column). S(f,g) = Σ_i C(f,i)·Z2(i,g) reduces
 /// to a per-fragment row accumulation: O(N·nfrag) instead of the dense product's
@@ -870,6 +910,7 @@ EEQSolveMethod EEQSolver::parseSolveMethod(const std::string& method_str) {
     if (method_str == "auto") return EEQSolveMethod::Auto;
     if (method_str == "lu") return EEQSolveMethod::LU;
     if (method_str == "ldlt") return EEQSolveMethod::LDLT;
+    if (method_str == "sytrf") return EEQSolveMethod::Sytrf;   // Claude Generated (Nov 2026)
     if (method_str == "pcg") return EEQSolveMethod::PCG;
     if (method_str == "ppcg" || method_str == "projected_pcg") return EEQSolveMethod::ProjectedPCG;
     if (method_str == "batched") return EEQSolveMethod::Batched;
@@ -899,13 +940,30 @@ const char* EEQSolver::methodName(EEQSolveMethod m) {
     case EEQSolveMethod::PCG: return "pcg";
     case EEQSolveMethod::LU: return "lu";
     case EEQSolveMethod::LDLT: return "ldlt";
+    case EEQSolveMethod::Sytrf: return "sytrf";
     case EEQSolveMethod::Batched: return "batched";
     }
     return "?";
 }
 
 std::string EEQSolver::validMethodNames() {
-    return "auto, cholesky, ppcg, pcg, lu, ldlt, batched (aliases: schur_cholesky, projected_pcg)";
+    return "auto, cholesky, ppcg, pcg, lu, ldlt, sytrf, batched (aliases: schur_cholesky, projected_pcg)";
+}
+
+// Claude Generated (Nov 2026): host half of the ROCm sytrf path (rocSOLVER has dsytrf, no dsytrs) and
+// the solve step of the CPU sytrf. See eeq_solver.h.
+bool EEQSolver::hostSytrsUpper(int n, const double* factor, const int* ipiv, double* rhs)
+{
+#ifdef USE_BLAS
+    if (n < 1 || !factor || !ipiv || !rhs) return false;
+    const char uplo = 'U';
+    int nn = n, nrhs = 1, lda = n, ldb = n, info = 0;
+    dsytrs_(&uplo, &nn, &nrhs, factor, &lda, ipiv, rhs, &ldb, &info);
+    return info == 0;
+#else
+    (void)n; (void)factor; (void)ipiv; (void)rhs;
+    return false;
+#endif
 }
 
 double EEQSolver::estimateBatchedError(const Vector& residual,
@@ -936,6 +994,11 @@ bool EEQSolver::gpuSupports(EEQSolveMethod m, const std::string& backend) {
     // Vulkan: GFN-FF runs on the CPU there (gpu_plugin_entry_vulkan.cpp), so the CPU solves every name.
     if (backend == "vulkan")
         return true;
+    // Claude Generated (Nov 2026): sytrf (augmented reference solve) exists in both plugins: CUDA
+    // cusolverDnDsytrf + Xsytrs on the device (compiled with nvcc, never run by its author), ROCm rocsolver_dsytrf
+    // on the device + LAPACK dsytrs on the host (hostSytrsUpper).
+    if (m == EEQSolveMethod::Sytrf)
+        return backend == "cuda" || backend == "rocm";
     // ROCm: no device pcg/batched/lu/ldlt path (has_device_schur=false); the dense Cholesky route and,
     // since Oct 2026 (Claude Generated), the projected PCG with the diagonal Jacobi exist.
     if (backend == "rocm")
@@ -950,7 +1013,8 @@ bool EEQSolver::gpuSupports(EEQSolveMethod m, const std::string& backend) {
 std::string EEQSolver::gpuMethodNames(const std::string& backend) {
     std::string out;
     for (EEQSolveMethod m : { EEQSolveMethod::Auto, EEQSolveMethod::SchurCholesky, EEQSolveMethod::ProjectedPCG,
-                              EEQSolveMethod::PCG, EEQSolveMethod::LU, EEQSolveMethod::LDLT, EEQSolveMethod::Batched }) {
+                              EEQSolveMethod::PCG, EEQSolveMethod::LU, EEQSolveMethod::LDLT, EEQSolveMethod::Sytrf,
+                              EEQSolveMethod::Batched }) {
         if (!gpuSupports(m, backend)) continue;
         if (!out.empty()) out += ", ";
         out += methodName(m);
@@ -1698,6 +1762,24 @@ Vector EEQSolver::dispatchSolve(
             goto end_dispatch;
         if (m_verbosity >= 1)
             CurcumaLogger::warn("EEQ: explicit LDL^T solve failed/unavailable, falling back to LU");
+        goto lu_solve;
+    }
+
+    // Claude Generated (Nov 2026): solve_method sytrf - LAPACK dsytrf + dsytrs (uplo 'U') on the full
+    // augmented (N+nfrag) matrix, as the Fortran reference does in both phases (solveAugmentedSytrfUpper).
+    // Phase 1 and Phase 2 both arrive here; the constraint block of A is written eagerly (only a
+    // ppcg resolution defers it). Failure (info != 0, or no LAPACK) falls back to the augmented LU.
+    if (method_to_use == EEQSolveMethod::Sytrf) {
+        charges = solveAugmentedSytrfUpper(A, x, natoms);
+        if (charges.size() == natoms)
+            goto end_dispatch;
+        CurcumaLogger::warn(
+#ifdef USE_BLAS
+            "EEQ: sytrf (dsytrf/dsytrs) reported info != 0, falling back to the augmented LU"
+#else
+            "EEQ: sytrf needs LAPACK (build with -DUSE_BLAS=ON), falling back to the augmented LU"
+#endif
+        );
         goto lu_solve;
     }
 
@@ -4051,7 +4133,8 @@ Vector EEQSolver::calculateFinalCharges(
         const char* solver_name = (m_solve_method == EEQSolveMethod::PCG) ? "PCG"
             : (m_solve_method == EEQSolveMethod::ProjectedPCG) ? "projected PCG"
             : (m_solve_method == EEQSolveMethod::SchurCholesky) ? "Cholesky"
-            : (m_solve_method == EEQSolveMethod::Auto) ? "auto" : "LU";
+            : (m_solve_method == EEQSolveMethod::Auto) ? "auto"
+            : (m_solve_method == EEQSolveMethod::Sytrf) ? "sytrf" : "LU";
         if (use_iterative)
             fmt::print(stderr, "[EEQ] Phase 2: iterative refinement ({}, max {} iters, thr={:.0e})\n",
                        solver_name, max_iterations, convergence_threshold);
@@ -4608,6 +4691,7 @@ Vector EEQSolver::calculateFinalCharges(
                 dump["solver_method"] = (m_solve_method == EEQSolveMethod::PCG) ? "PCG"
                     : (m_solve_method == EEQSolveMethod::SchurCholesky) ? "SchurCholesky"
                     : (m_solve_method == EEQSolveMethod::Auto) ? "Auto"
+                    : (m_solve_method == EEQSolveMethod::Sytrf) ? "sytrf"
                     : "LU";
                 for (int i = 0; i < natoms; ++i) {
                     json atom;

@@ -296,7 +296,7 @@ PARAM(accuracy, String, "normal", "Accepted for compatibility, but no code reads
         "enum=loose|normal|medium|high")
 PARAM(allow_unconverged_charges, Bool, false, "A failed EEQ solve always falls back to Phase-1 or uniform charges; true reports this as a warning instead of an error. The GPU path ignores it.", "EEQ", {})
 PARAM(skip_phase2, Bool, false, "Use the Phase-1 topology charges as final charges and skip the geometry-dependent Phase-2 EEQ solve. Faster, less accurate.", "EEQ", {})
-PARAM(solve_method, String, "auto", "EEQ linear solver: auto, cholesky, ppcg, pcg, lu, ldlt or batched (inexact). auto takes ppcg from eeq_ppcg_min_atoms and eeq_ppcg_min_nfrag on, else cholesky. See EEQ_SOLVER_CONTROL.md.", "EEQ", {})
+PARAM(solve_method, String, "auto", "EEQ linear solver: auto, cholesky, ppcg, pcg, lu, ldlt, sytrf or batched (inexact). sytrf is the solve of the Fortran reference (dsytrf + dsytrs, uplo U, on the augmented matrix); auto never takes it. auto takes ppcg from eeq_ppcg_min_atoms and eeq_ppcg_min_nfrag on, else cholesky. See EEQ_SOLVER_CONTROL.md.", "EEQ", {})
 PARAM(solve, String, "auto", "Older name of solve_method; a non-auto solve_method wins when both are given.", "EEQ", {})
 PARAM(eeq_ppcg_min_atoms, Int, 500, "auto takes ppcg only from this many atoms on; smaller systems use the exact cholesky solve.", "EEQ", {})
 PARAM(eeq_ppcg_min_nfrag, Int, 1, "auto takes ppcg only with at least this many fragments. 0: auto never takes it; solve_method ppcg still runs it.", "EEQ", {})

@@ -256,7 +256,7 @@ endif()
 add_test(NAME gfnff_frag_charge_selection COMMAND test_frag_charge_selection 20000)
 set_tests_properties(gfnff_frag_charge_selection PROPERTIES TIMEOUT 300 LABELS "gfnff;frag_charge")
 
-# Claude Generated (Oct 2026): -gpu backend vs EEQ solver names (rocm: auto/cholesky only; vulkan: all) - name logic, no device.
+# Claude Generated (Oct 2026): -gpu backend vs EEQ solver names (rocm: auto/cholesky/ppcg/sytrf; vulkan: all) - name logic, no device.
 add_executable(test_eeq_gpu_supports unit/test_eeq_gpu_supports.cpp)
 target_link_libraries(test_eeq_gpu_supports curcuma_core)
 if(USE_PCH)
@@ -943,6 +943,23 @@ if(Python3_Interpreter_FOUND)
                      ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_eeq_ppcg_guards.py
                      $<TARGET_FILE:curcuma> ${CMAKE_SOURCE_DIR})
     set_tests_properties(gfnff_eeq_ppcg_guards PROPERTIES TIMEOUT 600 LABELS "gfnff;eeq")
+    # Claude Generated (Nov 2026): EEQ solver sytrf (dsytrf + dsytrs on the augmented matrix, the solve of the Fortran
+    # reference) against cholesky on the CPU: energy 1e-10 Eh, Phase-1/Phase-2 and MD charges 1e-10 e; docs/EEQ_SOLVER_CONTROL.md.
+    add_test(NAME eeq_sytrf_cpu
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_eeq_sytrf.py
+                     $<TARGET_FILE:curcuma> ${CMAKE_SOURCE_DIR} cpu)
+    set_tests_properties(eeq_sytrf_cpu PROPERTIES TIMEOUT 600 LABELS "gfnff;eeq")
+    if(USE_ROCM)
+        # ROCm sytrf (device rocsolver_dsytrf, host dsytrs) against the CPU sytrf: MD charges 1e-9 e, no GPU fallback.
+        # Skipped (77) without the plugin or a HIP device.
+        add_test(NAME eeq_sytrf_rocm
+                 COMMAND ${Python3_EXECUTABLE}
+                         ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_eeq_sytrf.py
+                         $<TARGET_FILE:curcuma> ${CMAKE_SOURCE_DIR} rocm)
+        set_tests_properties(eeq_sytrf_rocm
+            PROPERTIES TIMEOUT 900 RESOURCE_LOCK "gpu" LABELS "gfnff;eeq;gpu;rocm" SKIP_RETURN_CODE 77)
+    endif()
 
     # Claude Generated (Oct 2026): -lbfgs_max_atom_step (per-atom step cap of the lbfgspp optimiser);
     # default off = bit-identical; docs/LBFGS_ATOM_STEP_CAP.md.

@@ -82,6 +82,7 @@ enum class EEQSolveMethod {
     Batched,        ///< Per-fragment Cholesky (GPU only); CPU falls back to SchurCholesky
     PCG,            ///< Preconditioned Conjugate Gradient with warm start
     ProjectedPCG,   ///< Constraint-projected PCG on A_nn: ONE iterative solve for any number of fragments
+    Sytrf,          ///< Solve of the Fortran reference: LAPACK dsytrf + dsytrs (uplo 'U') on the full augmented (N+nfrag) matrix, one RHS (Claude Generated, Nov 2026)
     Auto            ///< Threshold rule: ProjectedPCG for N >= eeq_ppcg_min_atoms and nfrag >= eeq_ppcg_min_nfrag, else SchurCholesky. Resolved by EEQSolver::resolveMethod (CPU and GPU share it).
 };
 
@@ -429,7 +430,7 @@ public:
      * @brief Parse solve method string to enum (public so GPU dispatch can reuse).
      * Claude Generated - March 2026; moved to public for WP7-B (May 2026).
      *
-     * Canonical names: auto, cholesky, ldlt, lu, pcg, ppcg, batched. Aliases: schur_cholesky
+     * Canonical names: auto, cholesky, ldlt, lu, sytrf, pcg, ppcg, batched. Aliases: schur_cholesky
      * (= cholesky), projected_pcg (= ppcg). Oct 2026: an unknown name throws
      * std::invalid_argument listing the valid names (it used to fall back to auto silently).
      */
@@ -448,12 +449,25 @@ public:
     /// True when the GPU back-end (`cuda`, `rocm`, `vulkan`) has a device implementation of the method
     /// (auto resolves to a supported one). Oct 2026: lu (dense augmented LU, cuSOLVER getrf) and ldlt
     /// (cusolverDnDsytrf + Xsytrs on A_nn, Schur) run on CUDA only - requesting an unsupported one with
-    /// -gpu is an error, not a silent substitute. ROCm: only auto and cholesky (no device ppcg/pcg/batched).
+    /// -gpu is an error, not a silent substitute. ROCm: auto, cholesky, ppcg and sytrf (no device
+    /// pcg/batched/lu/ldlt). sytrf (Nov 2026, augmented reference solve) runs with CUDA and ROCm.
     /// Vulkan: GFN-FF runs on the CPU, so every name is accepted.
     static bool gpuSupports(EEQSolveMethod m, const std::string& backend = "cuda");
 
     /// Comma separated names a back-end can run (for the error message). Claude Generated (Oct 2026).
     static std::string gpuMethodNames(const std::string& backend);
+
+    /**
+     * @brief LAPACK dsytrs with uplo 'U' and one right-hand side on a factor made elsewhere.
+     * Claude Generated (Nov 2026), AI-generated.
+     *
+     * Solves A x = b in place (b overwritten with x) from the Bunch-Kaufman factor A = U D U^T in the
+     * LAPACK dsytrf format: column-major n x n `factor` (leading dimension n) and the 1-based `ipiv` of
+     * dsytrf. Used by the ROCm sytrf path, which factorises on the device (rocsolver_dsytrf) but has no
+     * device sytrs; the plugin resolves this core symbol against the curcuma executable at dlopen time.
+     * @return false when the core was built without LAPACK (USE_BLAS off) or dsytrs reports info != 0.
+     */
+    static bool hostSytrsUpper(int n, const double* factor, const int* ipiv, double* rhs);
 
     /**
      * @brief Energy error of the batched solve, estimated to second order. Claude Generated (Oct 2026).
