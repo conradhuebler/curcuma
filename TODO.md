@@ -199,6 +199,10 @@ Stand.
   (Mischer auf dem Host, der CPU-Hook wäre dort direkt nutzbar), Mehr-GPU-SCF-Aufteilung (Eigenlöser/Dichte; ungetestet, nur ein Gerät hier).
   Ohne Wächter divergiert der unrelaxierte 599-Atom-Cluster mit Mischpräzision (151 Iterationen, harter Fehler, n=3).
 
+- **Fehlschlagende Tests im Build `USE_MKL=ON, USE_BLAS=OFF` (CUDA, RTX 5080, 2026-11-18, 2 von 709 in `ctest -j8`)**: `cli_confsearch_05_seed_cold_bias` (stabil 2/2), `cli_deltaml_04_label_consistency` (Hilfsskript compare_labels.py fehlt, nicht getrackt). Ursachen nicht untersucht.
+
+- **D4-Gradient der Pfade `-d4_charge_source eeq` und `cpscf` ist etwa 1e-4 Eh/A neben FD** (2026-11-18, n = 3 kleine Moleküle, nur CPU; Diagnose eines Agenten, Codestellen von mir nicht nachgelesen): H2 8,2e-5 obwohl die Antwort dort 0 ist; der Standardpfad `mulliken` liegt bei 1e-8. Vermutete Ursache: das D4-Potential steckt im SCF und in W, fehlt aber im Gradienten-Charge-Pulay dieser Pfade (`xtb_native.cpp:2550-2551`, `xtb_gradient.cpp:385`). Entscheidung: als genähert dokumentieren oder entfernen; Details `docs/BROKEN_TESTS_2026-10-14.md`.
+
 ## 3. Tests und Validierung
 
 - **PLUMED, ungetestet** (Stand 2026-10-30, getestet nur Ar2-RESTRAINT und Ethan-Torsion mit GFN-FF): QM-Methoden, größere Systeme, Restart, NPT/`setVirial`, PLUMED zusammen mit GPU. Gemeldete extreme PLUMED-Langsamkeit nicht nachgemessen. Well-tempered METAD lag 10 % über der freien MD (2.66 gegen 2.43 kcal/mol, Hügel nicht konvergiert).

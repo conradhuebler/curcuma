@@ -29,7 +29,7 @@
 // to do with this code path). The registry module stays "xtb" (-xtb.<name>); the
 // definitions live next to the solver they configure.
 BEGIN_PARAMETER_DEFINITION(xtb)
-    PARAM(d4_charge_source, String, "mulliken", "GFN2 D4 charge response in the gradient: 'mulliken' (exact, variational, as tblite), 'eeq' (approximate, single-shot EEQ) or 'cpscf' (exact Z-vector solve, ~100x slower). The energy is the same for all three.", "Dispersion", {})
+    PARAM(d4_charge_source, String, "mulliken", "GFN2 D4 charge response in the gradient: 'mulliken' (exact, variational, as tblite), 'eeq' (approximate, single-shot EEQ) or 'cpscf' (Z-vector solve, ~100x slower). Only 'mulliken' matches finite differences to ~1e-8 Eh/A; 'eeq' and 'cpscf' are about 1e-4 Eh/A off on small molecules (test xtb_cpscf, Nov 2026). The energy is the same for all three.", "Dispersion", {})
     // Implicit solvation (Claude Generated, June 2026): self-consistent ALPB coupled
     // into the native GFN1/GFN2 SCF. Use the dotted form (-xtb.solvent water) because
     // the flat -solvent flag is ambiguous (also registered by tblite/ulysses/gfnff_external).

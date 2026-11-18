@@ -173,12 +173,14 @@ static TestResult testB_zVector(const Mol& mol, const std::string& name)
 // analytical gradient with d4_charge_source="mulliken".
 // ================================================================
 // Analytical and central-difference total gradient for a given D4 charge source.
+// scf_thr > 0 overrides the XTB class default SCF threshold (Claude Generated, Nov 2026).
 static void gradPair(const Mol& mol, const std::string& src,
-                     Matrix& g_anal, Matrix& g_num)
+                     Matrix& g_anal, Matrix& g_num, double scf_thr = 0.0)
 {
     const int nat = mol.m_number_atoms;
     XTB xtb(MethodType::GFN2);
     xtb.setD4ChargeSource(src);
+    if (scf_thr > 0.0) xtb.setScfThreshold(scf_thr);
     xtb.InitialiseMolecule(mol);
     xtb.Calculation(true);
     g_anal = xtb.Gradient();
@@ -192,23 +194,47 @@ static void gradPair(const Mol& mol, const std::string& src,
             mm.m_geometry(i, k) -= h;
             XTB xp(MethodType::GFN2), xm(MethodType::GFN2);
             xp.setD4ChargeSource(src); xm.setD4ChargeSource(src);
+            if (scf_thr > 0.0) { xp.setScfThreshold(scf_thr); xm.setScfThreshold(scf_thr); }
             xp.InitialiseMolecule(mp); const double Ep = xp.Calculation(false);
             xm.InitialiseMolecule(mm); const double Em = xm.Calculation(false);
             g_num(i, k) = (Ep - Em) / (2.0 * h);
         }
 }
 
-// Isolation test: the eeq path is FD-validated, so its (analytical−FD) error is
-// the pre-existing GFN2-gradient baseline. The mulliken path shares that exact
-// baseline; the ONLY difference is the q-response. Comparing
-// (mull_anal − eeq_anal) against (mull_FD − eeq_FD) cancels the baseline and
-// isolates the Mulliken charge-response gradient.
+// Test C0 (Claude Generated, Nov 2026): the default d4_charge_source "mulliken" is,
+// since 40adca7c (Jul 24, 2026), the variational path (dE_D4/dq in the gradient v_at,
+// charge-Pulay + W; no separate response). It must match central differences of its
+// own energy. The SCF threshold is fixed at 1e-9 so FD noise does not depend on the
+// class default. Measured max|anal-FD| (h = 5e-5 A, n = 1 run each): at 1e-9 H2 1.1e-8,
+// H2O 2.4e-9, HCN 7.2e-9 Eh/A; at 1e-5 4.4e-8/1.7e-7/4.2e-7; at 2e-5 HCN 1.2e-6.
+// Before 40adca7c the same comparison gave 7.1e-3 (H2) and 8.5e-5 (H2O) for "mulliken".
+static TestResult testC0_variationalFD(const Mol& mol, const std::string& name)
+{
+    CurcumaLogger::set_verbosity(0);
+    Matrix g_a, g_n;
+    gradPair(mol, "mulliken", g_a, g_n, 1.0e-9);
+    const double err = (g_a - g_n).cwiseAbs().maxCoeff();
+    return {"(C0) " + name + " mulliken (variational) gradient vs FD", err, 1.0e-6, err < 1.0e-6};
+}
+
+// Isolation test between the two separate-response paths "cpscf" (Mulliken
+// Z-vector, computeMullikenChargeResponse) and "eeq" (single-shot EEQ). Both share
+// the same analytical baseline error: the in-SCF D4 potential enters the orbital
+// energies (hence W) but not the gradient charge-Pulay on these paths (xtb_native.cpp,
+// gradient m_pot rebuild, addDispersionPotential only when m_d4_variational_qresp).
+// That baseline is ~1e-4 Eh/A even for H2, where both responses vanish by symmetry
+// (printed as INFO in main). The energy is identical for all sources, so the FD
+// difference is 0 and (cpscf_anal - eeq_anal) isolates the response difference.
+// Before 40adca7c "mulliken" WAS the CPSCF path; this test compared that pair.
 static TestResult testC_responseIsolation(const Mol& mol, const std::string& name, double tol)
 {
     CurcumaLogger::set_verbosity(0);
     Matrix gm_a, gm_n, ge_a, ge_n;
-    gradPair(mol, "mulliken", gm_a, gm_n);
-    gradPair(mol, "eeq",      ge_a, ge_n);
+    gradPair(mol, "cpscf", gm_a, gm_n);
+    gradPair(mol, "eeq",   ge_a, ge_n);
+    std::cout << "        [" << name << "] INFO separate-response baseline max|anal-FD|: cpscf="
+              << std::scientific << std::setprecision(3) << (gm_a - gm_n).cwiseAbs().maxCoeff()
+              << "  eeq=" << (ge_a - ge_n).cwiseAbs().maxCoeff() << " Eh/A (not gated)\n";
 
     const Matrix d_anal = gm_a - ge_a;   // analytical q-response difference
     const Matrix d_num  = gm_n - ge_n;   // numerical q-response difference
@@ -226,7 +252,7 @@ static TestResult testC_responseIsolation(const Mol& mol, const std::string& nam
               << d_anal.cwiseAbs().maxCoeff() << "  |Δnum|=" << d_num.cwiseAbs().maxCoeff()
               << "  ratio(a/n)=" << (d_num.cwiseAbs().maxCoeff() > 1e-12
                   ? d_anal.cwiseAbs().maxCoeff()/d_num.cwiseAbs().maxCoeff() : 0.0) << "\n";
-    return {"(C) " + name + " response isolation (mull−eeq: anal vs FD)",
+    return {"(C) " + name + " response isolation (cpscf−eeq: anal vs FD)",
             err, tol, err < tol};
 }
 
@@ -337,28 +363,38 @@ int main()
         print(r); ok &= r.passed;
     }
 
-    // --- Test C (Gate 3b-3): Mulliken charge-response.
+    // --- Test C0: default (variational) D4 charge source against FD ---
+    for (const char* name : {"H2", "H2O", "HCN"}) {
+        curcuma::Molecule m =
+            TestMolecules::TestMoleculeRegistry::createMolecule(name, false);
+        const TestResult r = testC0_variationalFD(m.getMolInfo(), name);
+        print(r); ok &= r.passed;
+    }
+
+    // --- Test C (Gate 3b-3): Mulliken charge-response (separate-response paths).
     //   GATED: H2 — homonuclear, q≡0 by symmetry → the response must contribute
-    //   ≈0, i.e. the mulliken and eeq analytical gradients must coincide. This
-    //   confirms the response routine does not corrupt the (already FD-validated)
-    //   baseline. Multipole-free, so no deferred-term confound.
+    //   ≈0, i.e. the cpscf and eeq analytical gradients must coincide. This
+    //   confirms the response routine does not corrupt the shared baseline.
+    //   Multipole-free, so no deferred-term confound. Until 40adca7c this
+    //   compared "mulliken" (then the CPSCF path) with "eeq"; "mulliken" is now
+    //   the variational path, which is exact and checked by C0.
     {
         curcuma::Molecule m =
             TestMolecules::TestMoleculeRegistry::createMolecule("H2", false);
         Matrix gm_a, gm_n, ge_a, ge_n;
-        gradPair(m.getMolInfo(), "mulliken", gm_a, gm_n);
-        gradPair(m.getMolInfo(), "eeq",      ge_a, ge_n);
+        gradPair(m.getMolInfo(), "cpscf", gm_a, gm_n);
+        gradPair(m.getMolInfo(), "eeq",   ge_a, ge_n);
         const double err = (gm_a - ge_a).cwiseAbs().maxCoeff();
-        const TestResult r{"(C) H2 response ≈ 0 (mulliken == eeq, symmetry)",
+        const TestResult r{"(C) H2 response ≈ 0 (cpscf == eeq, symmetry)",
                            err, 1.0e-6, err < 1.0e-6};
         print(r); ok &= r.passed;
     }
     //   GATED (<1.5e-4): isolates the Mulliken-CPSCF charge-response gradient by
-    //   comparing it to the analytic single-shot-EEQ response (mull_anal − eeq_anal;
+    //   comparing it to the analytic single-shot-EEQ response (cpscf_anal − eeq_anal;
     //   the FD difference is 0 because the energy weighting is Mulliken in both).
-    //   Both responses are independently FD-validated to <5e-4 (test_xtb_gradient),
-    //   so they are two valid approximations and agree to ~1e-4 (H2O 8.6e-5, HCN
-    //   3.8e-5). The gate catches gross divergence, not the sub-1e-4 method spread.
+    //   The two responses agree to ~1e-4 (H2O 8.6e-5, HCN 3.8e-5). Neither path is
+    //   FD-exact (baseline ~1e-4, see testC_responseIsolation); the gate catches
+    //   gross divergence of the two responses, not the sub-1e-4 method spread.
     //   (Until the eeq routing was wired in calcDispersionEnergy, d4_charge_source
     //   "eeq" silently fell back to the Mulliken CPSCF, so this difference was 0 and
     //   a 5e-5 gate passed trivially.) Raw ∂q/∂x accuracy is gated separately by Test D.
