@@ -1,7 +1,9 @@
 # Multi-step SCC extrapolation (native GFN1/GFN2)
 
-> Status: 🤖 AI-generated, ⚙️ machine-tested only. Opt-in; the default path is
-> unchanged. Human production testing pending.
+> Status: 🤖 AI-generated, ⚙️ machine-tested only. Human production testing pending.
+> Default `none`, except **`-md` with native gfn1/gfn2 and ConfSearch children, which use `aspc`
+> since Nov 18, 2026** (explicit `-scf_extrapolation` / `-xtb.scf_extrapolation`, also `none`, wins;
+> `-sp` and `-opt` keep `none`).
 
 ## What it is
 
@@ -20,8 +22,8 @@ The extrapolated quantity is the full SCC mixing vector:
 The prediction is `P_pred = Σ_j w_j · P(n-1-j)` over the history of converged
 steps, with **charge-conserving** weights (`Σ w_j = 1`).
 
-This is **opt-in** and disabled by default (`scf_extrapolation = none` reproduces
-the existing 1-step warm-start byte-for-byte).
+`scf_extrapolation = none` reproduces the existing 1-step warm-start byte-for-byte; it is the global
+default and the default of `-sp` and `-opt`. `-md` (SimpleMD, `simplemd.cpp`) switches native gfn1/gfn2 to `aspc`.
 
 ## Flags
 
@@ -106,6 +108,23 @@ shows `SCF initial guess: aspc extrapolation over N steps`.
 - **`xlbomd` is experimental** — energy conservation / drift is not yet
   validated. Treat results as exploratory.
 
+## NVE drift with and without aspc (Nov 18, 2026)
+
+`complex` (231 atoms), GFN2, NVE (`-thermostat none -seed 42`), 2 ps, 1 fs, 1 thread, n = 1 per row, mixed precision on:
+
+| `scf_extrapolation`, `scf_threshold` | Etot slope (mEh/ps) | Epot rms vs `none` 1e-6 (mEh) | SCF iterations per step |
+|---|---|---|---|
+| none, 1e-6 (reference) | 0.080 | 0 | 13.0 |
+| none, 1e-5 | 0.083 | 0.021 | 10.2 |
+| aspc, 1e-5 | 0.099 | 0.017 | 7.95 |
+| none, 2e-5 | 0.231 | 0.113 | 9.5 |
+| aspc, 2e-5 | 0.092 | 0.018 | 7.1 |
+
+Detrended Etot scatter 0.46 mEh in all rows; the slope scatter is about 0.2 mEh/ps (rough, n = 1), so only the
+difference between the first and last row is not clearly noise. No trajectory left the reference by 5 mEh within 2 ps.
+Wall time of the two 2e-5 rows: 1383 s (none) and 1212 s (aspc), five runs on one machine at the same time, only the
+ratio is meaningful. Test: `cli_sqm_17_md_default_aspc`.
+
 ## What was tested / not tested
 
 - **Tested**: caffeine GFN1+GFN2 along a smooth interpolated trajectory.
@@ -114,7 +133,7 @@ shows `SCF initial guess: aspc extrapolation over N steps`.
   fewer iterations; a short NVE MD stays bounded. Default-path regression (`none`)
   byte-unchanged across the `gfn1_validation`/`gfn2_validation`/`xtb_gradient`/
   `native_xtb`/`xtb_cpscf` suites. All in `ctest -L scf_extrapolation`.
-- **Not tested**: long production MD energy drift / conservation (the distinct
+- **Not tested**: MD energy drift beyond 2 ps and on other systems (the one NVE series above; the distinct
   XL-BOMD benefit — only smoke-tested for boundedness); systems with large
   per-step geometry changes / bond breaking; charged / open-shell systems; the GPU
   resident path (it consumes the same `m_wfn` guess, so it benefits transparently,
