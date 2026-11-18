@@ -32,6 +32,7 @@
 #include "interface/abstract_interface.h"
 #include "json.hpp"
 
+#include <stdexcept>
 #include <Eigen/Dense>
 #include <array>
 #include <cctype>
@@ -618,6 +619,9 @@ struct GpuScfBackend {
                                  double& e_third, double& e_multipole)
     { (void)fp32; (void)dq; (void)e_band; (void)e_coulomb; (void)e_third; (void)e_multipole;
       return false; }
+    /// Claude Generated (Nov 2026): sum over the SCC vector of (x_out - x_in)^2 of the LAST residentScfStep, for
+    /// scf_criterion xtb (RMS = sqrt(sum / nat)). Negative = the backend does not provide it (default rule runs).
+    virtual double residentLastDqSumSq() const { return -1.0; }
     virtual bool residentLoopCharges(Vector& q_sh, Vector& q_at, Eigen::MatrixXd& dp_at,
                                      Eigen::MatrixXd& qp_at, Vector& eps)
     { (void)q_sh; (void)q_at; (void)dp_at; (void)qp_at; (void)eps; return false; }
@@ -991,6 +995,11 @@ public:
 
     // Tighten the SCF convergence threshold (for FD charge-response validation).
     void setScfThreshold(double t) { m_scf_threshold = t; }
+    double scfThreshold() const { return m_scf_threshold; }   // Claude Generated (Nov 2026)
+    /// Claude Generated (Nov 2026): the convergence limit the SCF test works at: scf_threshold for the default rule,
+    /// the RMS limit (1e-4*acc GFN2, 2e-5*acc GFN1) for scf_criterion xtb. The GPU FP32 switch point must not lie below it.
+    double scfConvergenceLimit() const
+    { return m_scf_criterion_xtb ? (m_method == MethodType::GFN2 ? 1.0e-4 : 2.0e-5) * m_scf_accuracy : m_scf_threshold; }
 
     /* ----- SCF convergence controls (Claude Generated) -------------------- *
      * Set by the GFN1/GFN2 wrappers from the `xtb` config scope. Defaults
@@ -998,6 +1007,14 @@ public:
     void setScfMode(ScfMode m)            { m_scf_mode = m; }
     void setScfMode(const std::string& s) { m_scf_mode = parseScfMode(s); }
     void setScfDamping(double d)          { m_scf_damping = d; }
+    // Claude Generated (Nov 2026): opt-in xtb convergence rule (scf_criterion xtb), see the SCF loop.
+    void setScfCriterion(const std::string& s) {
+        if (s == "default")  m_scf_criterion_xtb = false;
+        else if (s == "xtb") m_scf_criterion_xtb = true;
+        else throw std::invalid_argument("scf_criterion must be 'default' or 'xtb', got '" + s + "'");
+    }
+    void setScfAccuracy(double a)         { if (a > 0.0) m_scf_accuracy = a; }
+    bool scfCriterionXtb() const          { return m_scf_criterion_xtb; }
     void setScfMaxIter(int n)             { if (n > 0) m_scf_max_iter = n; }
     void setDiisStart(int n)              { if (n >= 0) m_diis_start = n; }
     void setDiisSubspace(int n)           { if (n >= 2) m_diis_subspace = n; }
@@ -1577,6 +1594,8 @@ private:
 
     // SCF config / state
     int    m_scf_max_iter    = 150;
+    bool   m_scf_criterion_xtb = false;  // true: xtb rule (RMS dq/sqrt(nat), |dE|, one extra iteration), scf_accuracy scales it
+    double m_scf_accuracy      = 1.0;    // xtb 'acc': qconv = 1e-4*acc (GFN2) / 2e-5*acc (GFN1), econv = 1e-6*acc; xtb MD uses 2.0
     double m_scf_threshold   = 2.0e-5;  // max|dq_shell|; 2e-5 since Nov 2026 (was 1e-5), docs/SCF_THRESHOLD_2026-11.md
     double m_scf_damping     = 0.4;
     double m_electronic_temp = 300.0;  // K; 0 → integer occupation
@@ -1866,6 +1885,8 @@ inline void applyXtbScfConfig(XTB& xtb, const json& cfg)
     lookup("eigensolver",  [&](const json& v){ if (v.is_string()) xtb.setEigensolver(v.get<std::string>()); });
     lookup("scf_damping",  [&](const json& v){ if (v.is_number()) xtb.setScfDamping(v.get<double>()); });
     lookup("scf_threshold",[&](const json& v){ if (v.is_number()) xtb.setScfThreshold(v.get<double>()); });
+    lookup("scf_criterion",[&](const json& v){ if (v.is_string()) xtb.setScfCriterion(v.get<std::string>()); });
+    lookup("scf_accuracy", [&](const json& v){ if (v.is_number()) xtb.setScfAccuracy(v.get<double>()); });
     // scf_diis_start / scf_diis_subspace (the scf_ prefix keeps them apart from the optimiser's -diis_start); the old
     // spellings -xtb.diis_start / -xtb.diis_subspace stay valid in the xtb scope (Oct 26, 2026).
     lookup("scf_diis_start",   [&](const json& v){ if (v.is_number()) xtb.setDiisStart(static_cast<int>(std::lround(v.get<double>()))); });   // CLI numbers arrive as double

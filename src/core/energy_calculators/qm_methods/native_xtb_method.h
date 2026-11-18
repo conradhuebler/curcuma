@@ -100,6 +100,10 @@ BEGIN_PARAMETER_DEFINITION(xtb)
     // [q_sh; dp_at; qp_at] for GFN2) from the history of previous converged steps so the
     // SCF starts closer to the new fixpoint (fewer iterations, esp. in MD). Default
     // 'none' = the existing 1-step warm-start (unchanged). See docs/SQM_SCF_EXTRAPOLATION.md.
+    PARAM(scf_criterion, String, "default", "SCF convergence rule of native gfn1/gfn2 (CPU loop). 'default': max|dq| < scf_threshold and |dE| < 100*scf_threshold. 'xtb': the rule of xtb 6.7.1, RMS of the full SCC residual (shell charges, dipoles, quadrupoles) divided by sqrt(number of atoms) < 1e-4*scf_accuracy (GFN2) or 2e-5*scf_accuracy (GFN1) and |dE| < 1e-6*scf_accuracy, followed by one more iteration that must satisfy it again; scf_threshold is ignored. Not implemented in the device-resident GPU loop (a warning is printed, the default rule runs).", "SCF", {},
+        "enum=default|xtb")
+    PARAM(scf_accuracy, Double, 1.0, "Factor on the xtb convergence limits for scf_criterion xtb (xtb 'acc'; xtb MD uses sccacc 2.0, i.e. -scf_accuracy 2). Larger is looser.", "SCF", {},
+        "min=0")
     PARAM(scf_extrapolation, String, "none", "Predict the starting charges of a new geometry from previous steps: 'none' (last step only), 'aspc' (fixed-step MD) or 'gauss' (polynomial fit, irregular steps). The converged result is unchanged.", "Extrapolation", {})
     PARAM(scf_extrapolation_order, Int, 3, "Order of scf_extrapolation: for 'aspc' the predictor order k (uses k+2 steps), for 'gauss' the polynomial degree. Higher follows smooth MD better but can overshoot in optimisations.", "Extrapolation", {})
     PARAM(scf_extrapolation_apply, String, "guess", "'guess' seeds the SCF with the prediction; 'xlbomd' propagates the charges as extended-Lagrangian MD variables (MD only, with aspc; experimental). The SCF converges in both.", "Extrapolation", {})

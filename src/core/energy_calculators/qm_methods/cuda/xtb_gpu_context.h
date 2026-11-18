@@ -603,6 +603,8 @@ public:
     bool setResidentOpenShell(double n_alpha, double n_beta);
     bool residentScfStep(bool fp32, double* dq_out, double* e_band, double* e_coulomb,
                          double* e_third, double* e_multipole);
+    /// Claude Generated (Nov 2026): sum of (x_out - x_in)^2 over the SCC vector of the last residentScfStep (-1: none yet).
+    double lastDqSumSq() const;
     bool residentLoopCharges(double* q_sh, double* q_at, double* dp_at, double* qp_at,
                              double* eps);
 

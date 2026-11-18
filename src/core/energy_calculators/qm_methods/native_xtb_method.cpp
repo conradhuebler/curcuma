@@ -54,6 +54,8 @@ json NativeXtbMethod::getDefaultConfig(MethodType method)
                                          // is insensitive; MD/opt or the opt-in mulliken
                                          // response may tighten via -scf_threshold.
                                          // See docs/SCF_THRESHOLD_2026-11.md.
+        { "scf_criterion", "default" },  // default | xtb (xtb 6.7.1 convergence rule, CPU loop)
+        { "scf_accuracy", 1.0 },         // factor on the xtb limits (scf_criterion xtb)
         { "scf_damping", 0.4 },          // Density damping factor
         { "scf_mode", "broyden" },       // broyden(default) | diis | plain | level-shift
         { "scf_guess", "eeq" },          // Initial charge guess: eeq(default) | h0

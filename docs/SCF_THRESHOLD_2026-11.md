@@ -31,6 +31,28 @@ printed (8 decimals, 1e-8 Eh = 6.3e-6 kcal/mol). MOR41 gfn2 and gfn1: 95 of 95 i
 GMTKN55 gfn1: 2461 compared, 5 differ by one unit in the last digit, 1 failed in both (G21EA/EA_16). Gradients are not
 part of this comparison (see the force table above, 11 frames of one system).
 
+## `-scf_criterion xtb` (Nov 18, 2026, AI-generated, machine-tested)
+
+Opt-in rule of xtb 6.7.1 (`scc_core.f90:555-632`, `scf_module.F90:272-277`, read from the source, not checked against an
+xtb run): RMS of the full SCC residual (shell charges, 3 dipole + 6 quadrupole components per atom) divided by sqrt(nat)
+< 1e-4*acc (GFN2) / 2e-5*acc (GFN1), |dE| < 1e-6*acc, then one more iteration that must satisfy it again. `-scf_accuracy`
+is `acc` (xtb MD: `sccacc` 2.0). CPU loop only; the device-resident GPU loop warns and keeps the default rule. Test:
+`cli_sqm_16_scf_criterion_xtb` (benzene, gfn1/gfn2: energy within 1e-6 Eh, flat = dotted flag, unknown name is an error).
+
+`complex` MD, 100 steps, 1 thread, xtb-like settings (Berendsen tau 500 fs, `-initial_temperature 777`, trans+rot removal
+every step, seed 42), n = 2 per row except acc 1:
+
+| curcuma | wall | SCF iterations per step |
+|---|---|---|
+| xtb rule, acc 2, FP64 | 61.9 s, 62.0 s | 7.81 |
+| xtb rule, acc 2, mixed precision | 59.3 s, 59.5 s | 8.80 |
+| xtb rule, acc 1, FP64 / mixed (n = 1) | 63.1 s / 59.8 s | 8.15 / 8.84 |
+| xtb 6.7.1 (`sccacc` 2, FP64) | 64.9 s, 65.1 s | 8 (MKL_VERBOSE count) |
+
+Mixed precision needs about one iteration more: convergence is never accepted on an FP32 step. Still different from xtb:
+degrees of freedom (xtb 3N, curcuma 681 with trans+rot removal), H mass (xtb 1 amu), initial velocity distribution
+(xtb: +-v per component, H doubled). No accuracy comparison of forces under this rule was made.
+
 ## Proposal (not implemented): precision levels for native gfn1/gfn2
 
 TBLite (`accuracy` 0-2) and XTB (`accuracy` 0-4) wrappers have such a flag, native gfn1/gfn2 only `scf_threshold`.

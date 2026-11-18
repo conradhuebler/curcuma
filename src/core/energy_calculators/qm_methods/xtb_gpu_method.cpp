@@ -506,6 +506,7 @@ public:
         if (!m_ctx) return false;
         return m_ctx->residentScfStep(fp32, &dq, &e_band, &e_coulomb, &e_third, &e_multipole);
     }
+    double residentLastDqSumSq() const override { return m_ctx ? m_ctx->lastDqSumSq() : -1.0; }
 
     // ---- Broyden seed preconditioner in the resident loop (Claude Generated, Oct 2026) ----
     bool supportsResidentPreconditioner() const override { return true; }
@@ -931,8 +932,12 @@ XtbGpuComputationalMethod::XtbGpuComputationalMethod(MethodType method, const js
         // FP64 eigensolves 4 -> 1, SCF 6.7 -> 4.5 s, energy identical to 1e-12 Eh, gradient vs
         // CPU 2.6e-6 -> 7.0e-6 Eh/A (within the loose default scf_threshold). An explicit
         // -scf_fp32_threshold (or its alias fp32_threshold) wins. See docs/MULTI_GPU.md.
+        // Claude Generated (Nov 2026): never below scf_threshold. Convergence is not accepted on an
+        // FP32 step, so a switch point under scf_threshold (1e-5 against the 2e-5 default) makes
+        // the SCF converge at the switch point and wastes the looser threshold.
         if (!cfg_has("scf_fp32_threshold") && !cfg_has("fp32_threshold"))
-            xtb->setFp32Threshold(1.0e-5);
+            xtb->setFp32Threshold(std::max(1.0e-5, xtb->scfConvergenceLimit()));
+
         if (CurcumaLogger::get_verbosity() >= 2)
             CurcumaLogger::info(fmt::format(
                 "{}: GPU device-resident SCF backend active (Broyden; "

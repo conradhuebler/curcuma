@@ -295,6 +295,8 @@ struct XtbGpuContext::Impl {
     int    loop_nsh = 0, loop_nat = 0, loop_nao = 0, loop_nocc_pairs = 0;
     double loop_Tele = 0.0, loop_nelec = 0.0;
     CudaBuffer<double> dDq;         // max|q_sh_out − q_sh_in| (1 double)
+    CudaBuffer<double> dDqSq;       // sum (x_out − x_in)^2 over the SCC vector (1 double), scf_criterion xtb
+    double last_dq_sumsq = -1.0;    // host copy of dDqSq after the last resident step
 
     // Claude Generated (Sep 2026): pre-allocation memory check (beginBasis).
     bool        memory_check = true;
@@ -3464,6 +3466,20 @@ __global__ void k_maxabsdiff(const double* __restrict__ a, const double* __restr
     for (int i = tid; i < n; i += blockDim.x) m = fmax(m, fabs(a[i] - b[i]));
     sdata[tid] = m; __syncthreads();
     for (int s = blockDim.x >> 1; s > 0; s >>= 1) { if (tid < s) sdata[tid] = fmax(sdata[tid], sdata[tid + s]); __syncthreads(); }
+    if (tid == 0) *out = sdata[0];
+}
+
+// Claude Generated (Nov 2026): sum of (a[i] − b[i])^2 over n, one block, grid-stride, tree reduction (RMS of the SCC
+// residual for scf_criterion xtb).
+__global__ void k_sumsqdiff(const double* __restrict__ a, const double* __restrict__ b,
+                            int n, double* out)
+{
+    extern __shared__ double sdata[];
+    const int tid = threadIdx.x;
+    double acc = 0.0;
+    for (int i = tid; i < n; i += blockDim.x) { const double d = a[i] - b[i]; acc += d * d; }
+    sdata[tid] = acc; __syncthreads();
+    for (int s = blockDim.x >> 1; s > 0; s >>= 1) { if (tid < s) sdata[tid] += sdata[tid + s]; __syncthreads(); }
     if (tid == 0) *out = sdata[0];
 }
 
@@ -7218,7 +7234,7 @@ bool XtbGpuContext::beginResidentLoop(int nsh, int nat, int nao, double Tele, do
     try {
         m_impl->dQat.ensure(nat); m_impl->dQsh.ensure(nsh);
         m_impl->dN0sh.ensure(nsh); m_impl->dN0at.ensure(nat);
-        m_impl->dDq.ensure(1);
+        m_impl->dDq.ensure(1); m_impl->dDqSq.ensure(1);
         m_impl->dOccMu.ensure(1); m_impl->dOccNcol.ensure(1);   // occupied-column count (density)
     } catch (...) {
         return false;
@@ -7263,7 +7279,7 @@ bool XtbGpuContext::beginResidentLoopGfn1(int nsh, int nat, int nao, double Tele
         m_impl->dN0sh.ensure(nsh); m_impl->dN0at.ensure(nat);
         m_impl->dPotQsh.ensure(nsh); m_impl->dVsh.ensure(nsh); m_impl->dVat.ensure(nat);
         m_impl->dGamma3At.ensure(nat);
-        m_impl->dDq.ensure(1);
+        m_impl->dDq.ensure(1); m_impl->dDqSq.ensure(1);
         m_impl->dOccMu.ensure(1); m_impl->dOccNcol.ensure(1);
     } catch (...) {
         m_impl->last_error = "device allocation for the GFN1 resident loop failed";
@@ -7385,6 +7401,9 @@ bool XtbGpuContext::residentScfStep(bool fp32, double* dq_out, double* e_band,
         k_maxabsdiff<<<1, blk, blk * sizeof(double), stream>>>(vout, vin, nsh, m_impl->dDq.ptr);
         if (cudaGetLastError() != cudaSuccess) return fail("convergence (max|dq|) kernel failed");
         m_impl->dDq.download(dq_out, 1, stream);
+        k_sumsqdiff<<<1, blk, blk * sizeof(double), stream>>>(vout, vin, nsh, m_impl->dDqSq.ptr);
+        if (cudaGetLastError() != cudaSuccess) return fail("convergence (sum dq^2) kernel failed");
+        m_impl->dDqSq.download(&m_impl->last_dq_sumsq, 1, stream);
         if (!runBroydenUpdate(vin, vout, m_impl->dBroyVnext.ptr)) return fail("device Broyden update failed");
         cudaMemcpyAsync(m_impl->dPotQsh.ptr, m_impl->dBroyVnext.ptr, sizeof(double) * nsh, cudaMemcpyDeviceToDevice, stream);
     } else
@@ -7407,6 +7426,9 @@ bool XtbGpuContext::residentScfStep(bool fp32, double* dq_out, double* e_band,
         k_maxabsdiff<<<1, blk, blk * sizeof(double), stream>>>(vout, vin, nsh + 9 * nat, m_impl->dDq.ptr);
         if (cudaGetLastError() != cudaSuccess) return fail("convergence (max|dq|) kernel failed");
         m_impl->dDq.download(dq_out, 1, stream);
+        k_sumsqdiff<<<1, blk, blk * sizeof(double), stream>>>(vout, vin, nsh + 9 * nat, m_impl->dDqSq.ptr);
+        if (cudaGetLastError() != cudaSuccess) return fail("convergence (sum dq^2) kernel failed");
+        m_impl->dDqSq.download(&m_impl->last_dq_sumsq, 1, stream);
         if (!runBroydenUpdate(vin, vout, m_impl->dBroyVnext.ptr)) return fail("device Broyden update failed");
         cudaMemcpyAsync(m_impl->dPotQsh.ptr, m_impl->dBroyVnext.ptr, sizeof(double) * nsh, cudaMemcpyDeviceToDevice, stream);
         cudaMemcpyAsync(m_impl->dInDpAt.ptr, m_impl->dBroyVnext.ptr + off_dp, sizeof(double) * 3 * nat, cudaMemcpyDeviceToDevice, stream);
@@ -7417,6 +7439,8 @@ bool XtbGpuContext::residentScfStep(bool fp32, double* dq_out, double* e_band,
     m_impl->last_dq = *dq_out;   // gates the next step's pseudo-diagonalisation
     return true;
 }
+
+double XtbGpuContext::lastDqSumSq() const { return m_impl ? m_impl->last_dq_sumsq : -1.0; }
 
 bool XtbGpuContext::residentLoopCharges(double* q_sh, double* q_at, double* dp_at,
                                         double* qp_at, double* eps)

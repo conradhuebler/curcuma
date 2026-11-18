@@ -85,6 +85,7 @@ and wins over `-scf_threshold` / `-scf.scf_threshold` (precedence: method scope,
 | Flag (module `scf`) | gfn1/gfn2 | pm3/am1/mndo/pm6 | Meaning |
 |---|---|---|---|
 | `-scf_threshold` | `2e-5` on max\|dq_shell\| (and dE; `1e-5` until Nov 17, 2026) | `1e-6` on \|\|P_new - P\|\|_F | Convergence threshold. |
+| `-scf_criterion` (`default`, `xtb`; module xtb) | `default` | not used | `xtb`: the xtb 6.7.1 rule, RMS of the full SCC residual / sqrt(nat) < `1e-4*acc` (GFN2) or `2e-5*acc` (GFN1), \|dE\| < `1e-6*acc`, plus one more iteration; `-scf_threshold` ignored; CPU loop only. `-scf_accuracy` is `acc` (xtb MD uses 2). |
 | `-scf_max_iterations` (`-max_iterations`, `-SCFmaxiter`) | `150` | `100` | Iteration limit; tblite/xtb/Ulysses map it onto their `max_iterations` (default 100). |
 | `-scf_damping` | `0.4` | `0.6` | Fraction of the new charges (gfn) or density (NDDO) per step: `P = d*P_new + (1-d)*P_old`; tblite maps it onto `damping`. |
 | `-scf_allow_unconverged` | `false` | `false` | Accept an SCF that hit the iteration limit (warning + last energy) instead of failing. |
