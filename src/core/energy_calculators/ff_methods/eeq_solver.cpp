@@ -132,6 +132,21 @@ extern "C" {
                   const int* lda, const int* ipiv, double* b, const int* ldb, double* work, int* info);
 }
 #endif
+// Claude Generated (Nov 2026): the sytrf solver (dsytrf + dsytrs, as xtb and pprcht/gfnff) needs LAPACK. An MKL build
+// (USE_MKL, USE_BLAS off) links MKL's LAPACK as well, so it declares just these two routines and runs the solver;
+// the rest of this file keeps its USE_BLAS gating, so the numerical paths of every other solver in an MKL build stay
+// as they were (Eigen LLT, not dpotrf).
+#if defined(USE_MKL) && !defined(USE_BLAS)
+extern "C" {
+    void dsytrf_(const char* uplo, const int* n, double* a, const int* lda, int* ipiv,
+                 double* work, const int* lwork, int* info);
+    void dsytrs_(const char* uplo, const int* n, const int* nrhs, const double* a,
+                 const int* lda, const int* ipiv, double* b, const int* ldb, int* info);
+}
+#endif
+#if defined(USE_BLAS) || defined(USE_MKL)
+#define CURCUMA_EEQ_SYTRF_LAPACK 1
+#endif
 using ColMatrix = Eigen::MatrixXd;  // column-major (LAPACK layout)
 
 /// Cholesky-factorize SPD A (column-major) in place → lower factor. true on success.
@@ -230,10 +245,10 @@ inline void eeqLDLTSolve(const ColMatrix& Afac, const std::vector<int>& ipiv, Ei
 /// and right-hand side curcuma's Phase 1 / Phase 2 assemble (`A`, `x` of dispatchSolve). The
 /// single-precision branch of the reference (xtb accuracy > 1, asymptote call) is not reproduced.
 /// Returns the first natoms entries of [q; lambda]; empty on dsytrf/dsytrs info != 0 or without
-/// LAPACK (USE_BLAS off), the caller then falls back to the augmented LU.
+/// LAPACK (neither USE_BLAS nor USE_MKL), the caller then falls back to the augmented LU.
 inline Vector solveAugmentedSytrfUpper(const Matrix& A, const Vector& x, int natoms)
 {
-#ifdef USE_BLAS
+#ifdef CURCUMA_EEQ_SYTRF_LAPACK
     // curcuma's Matrix is row-major; the copy into a column-major buffer keeps A(i,j), so dsytrf
     // reads the same upper triangle (i <= j) the Fortran column-major array holds.
     ColMatrix Af = A;
@@ -954,7 +969,7 @@ std::string EEQSolver::validMethodNames() {
 // the solve step of the CPU sytrf. See eeq_solver.h.
 bool EEQSolver::hostSytrsUpper(int n, const double* factor, const int* ipiv, double* rhs)
 {
-#ifdef USE_BLAS
+#ifdef CURCUMA_EEQ_SYTRF_LAPACK
     if (n < 1 || !factor || !ipiv || !rhs) return false;
     const char uplo = 'U';
     int nn = n, nrhs = 1, lda = n, ldb = n, info = 0;
@@ -1774,10 +1789,10 @@ Vector EEQSolver::dispatchSolve(
         if (charges.size() == natoms)
             goto end_dispatch;
         CurcumaLogger::warn(
-#ifdef USE_BLAS
+#ifdef CURCUMA_EEQ_SYTRF_LAPACK
             "EEQ: sytrf (dsytrf/dsytrs) reported info != 0, falling back to the augmented LU"
 #else
-            "EEQ: sytrf needs LAPACK (build with -DUSE_BLAS=ON), falling back to the augmented LU"
+            "EEQ: sytrf needs LAPACK (build with -DUSE_BLAS=ON or -DUSE_MKL=ON), falling back to the augmented LU"
 #endif
         );
         goto lu_solve;
