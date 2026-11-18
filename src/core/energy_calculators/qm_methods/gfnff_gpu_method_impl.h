@@ -283,7 +283,7 @@ private:
     // LU           → dense LU of the augmented system (CUDA only, Oct 2026).
     // LDLT         → Bunch-Kaufman LDL^T of A_nn + Schur (CUDA only, Oct 2026).
     // Sytrf        → sytrf/sytrs (upper) of the augmented system, the reference solve (CUDA and ROCm, Nov 2026;
-    //                ROCm: device dsytrf + host dsytrs; CUDA: compiled, never run by its author).
+    //                ROCm: device dsytrf + host dsytrs; CUDA: run on an RTX 5080 Nov 17, 2026, eeq_sytrf_cuda).
     // Auto        → EEQSolver::resolveMethod (ppcg above the size thresholds, else cholesky).
     EEQSolveMethod m_eeq_strategy = EEQSolveMethod::Auto;
     /// Claude Generated (Oct 2026): energy criterion of the batched solver on the GPU path. Rebuilds

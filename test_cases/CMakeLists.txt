@@ -950,6 +950,16 @@ if(Python3_Interpreter_FOUND)
                      ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_eeq_sytrf.py
                      $<TARGET_FILE:curcuma> ${CMAKE_SOURCE_DIR} cpu)
     set_tests_properties(eeq_sytrf_cpu PROPERTIES TIMEOUT 600 LABELS "gfnff;eeq")
+    if(USE_CUDA)
+        # CUDA sytrf (cusolverDnDsytrf + Xsytrs) against the CPU sytrf: MD charges 1e-9 e, no GPU fallback.
+        # Skipped (77) without the plugin or a CUDA device.
+        add_test(NAME eeq_sytrf_cuda
+                 COMMAND ${Python3_EXECUTABLE}
+                         ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_eeq_sytrf.py
+                         $<TARGET_FILE:curcuma> ${CMAKE_SOURCE_DIR} cuda)
+        set_tests_properties(eeq_sytrf_cuda
+            PROPERTIES TIMEOUT 900 RESOURCE_LOCK "gpu" LABELS "gfnff;eeq;gpu;cuda" SKIP_RETURN_CODE 77)
+    endif()
     if(USE_ROCM)
         # ROCm sytrf (device rocsolver_dsytrf, host dsytrs) against the CPU sytrf: MD charges 1e-9 e, no GPU fallback.
         # Skipped (77) without the plugin or a HIP device.

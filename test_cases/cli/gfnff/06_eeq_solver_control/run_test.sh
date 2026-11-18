@@ -14,7 +14,7 @@
 #   5. GPU       - only if a CUDA plugin and a device are present: lu (augmented LU) and ldlt (sytrf + Schur)
 #                  run on the device (Oct 2026) and their charges agree with the CPU solver of the same name to
 #                  1e-9 e in every MD step (chain, 1410 atoms); sytrf (augmented sytrf/sytrs, Nov 2026) is checked
-#                  the same way, but that sytrf check has NEVER been executed (written without a CUDA device)
+#                  the same way, the sytrf check was written without a CUDA device, first run on an RTX 5080 on Nov 17, 2026
 #   6. BATCHED   - the energy criterion: batched on a water dimer (O...O 2.8 A) warns with an estimated error
 #                  within a factor 3 of the measured E(batched) - E(cholesky)
 # The verbosity-1 line "EEQ solver (final charges): <name>[ (auto)] [CPU|GPU ...]" is what is read.
@@ -102,7 +102,7 @@ def md_rc(extra, xyz=CAF, charges=False):
     try:
         shutil.copy(xyz, os.path.join(d, "m.xyz"))
         diag = ["-md_diagnostics", "true", "-dump_frequency", "1"] if charges else []
-        p = subprocess.run([B, "-md", "m.xyz", "-method", "gfnff", "-no_bmt", "-max_time", "2", "-threads", "2"] + diag + extra,
+        p = subprocess.run([B, "-md", "m.xyz", "-method", "gfnff", "-no_bmt", "-max_time", "2", "-threads", "2", "-md.seed", "1"] + diag + extra,
                            cwd=d, capture_output=True, text=True, timeout=600)
         out = ANSI.sub("", p.stdout + p.stderr)
         if not charges:
@@ -124,7 +124,7 @@ plugin = os.path.join(os.path.dirname(os.path.abspath(B)), "libcurcuma_cuda.so")
 have_gpu = os.path.exists(plugin) and shutil.which("nvidia-smi") is not None \
     and subprocess.run(["nvidia-smi", "-L"], capture_output=True).returncode == 0
 if have_gpu:
-    # Nov 2026: the sytrf entry was added without a CUDA device and has not been run.
+    # Nov 2026: the sytrf entry was written without a CUDA device; first run on an RTX 5080 on Nov 17, 2026.
     for name, path in (("lu", "augmented LU"), ("ldlt", "LDL^T (sytrf)"), ("sytrf", "augmented sytrf/sytrs (upper)")):
         rc_g, out_g, q_g = md_rc(["-gpu", "cuda", "-gpu_strict", "true", "-verbosity", "1", S, name], CH, True)
         rc_c, out_c, q_c = md_rc([S, name], CH, True)

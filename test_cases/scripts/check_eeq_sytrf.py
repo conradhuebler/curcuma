@@ -13,7 +13,8 @@ Mode rocm (ctest eeq_sytrf_rocm, USE_ROCM builds; exit 77 = skip without the plu
   -gpu rocm -gpu_strict true and sytrf against the CPU sytrf MD: the device path is named in the verbosity-1 line, no
   counted GPU fallback (exit code 0 under -gpu_strict), per-step charges within 1e-9 e (caffeine, trisaccharide-c18h32o16,
   macrocycle-bgal).
-Usage: check_eeq_sytrf.py CURCUMA_BINARY SOURCE_DIR [cpu|rocm]
+Mode cuda (ctest eeq_sytrf_cuda): as rocm with -gpu cuda; exit 77 without the plugin or a CUDA device.
+Usage: check_eeq_sytrf.py CURCUMA_BINARY SOURCE_DIR [cpu|rocm|cuda]
 """
 import json, os, re, shutil, subprocess, sys, tempfile
 
@@ -135,8 +136,25 @@ elif mode == "rocm":
               f"{name}: ROCm MD runs the device sytrf path without a GPU fallback (rc {rc_g})")
         n, dq = md_dq(q_g, q_c)
         check(rc_c == 0 and n >= 2 and dq <= 1e-9, f"{name}: ROCm sytrf = CPU sytrf, {n} steps, max |dq| = {dq:.2e} e <= 1e-9")
+elif mode == "cuda":
+    # Claude Generated (Nov 2026): CUDA sytrf (cusolverDnDsytrf + Xsytrs, upper) against the CPU sytrf, same checks as rocm.
+    plugin = os.path.join(os.path.dirname(os.path.abspath(curcuma)), "libcurcuma_cuda.so")
+    if not os.path.exists(plugin):
+        print("SKIP  no libcurcuma_cuda.so next to the binary")
+        sys.exit(77)
+    rc, log, _, _, _ = run(XYZ["caffeine"], ["-gpu", "cuda", S, "sytrf"])
+    if re.search(r"no CUDA device|no usable CUDA|cudaErrorNoDevice|plugin did not provide", log):
+        print("SKIP  no usable CUDA device")
+        sys.exit(77)
+    for name in ("caffeine", "trisaccharide-c18h32o16", "macrocycle-bgal"):
+        rc_g, log_g, _, _, q_g = run(XYZ[name], ["-gpu", "cuda", "-gpu_strict", "true", S, "sytrf"], md=True)
+        rc_c, _, _, _, q_c = run(XYZ[name], [S, "sytrf"], md=True)
+        check(rc_g == 0 and "sytrf [GPU CUDA" in log_g,
+              f"{name}: CUDA MD runs the device sytrf path without a GPU fallback (rc {rc_g})")
+        n, dq = md_dq(q_g, q_c)
+        check(rc_c == 0 and n >= 2 and dq <= 1e-9, f"{name}: CUDA sytrf = CPU sytrf, {n} steps, max |dq| = {dq:.2e} e <= 1e-9")
 else:
-    sys.exit(f"unknown mode '{mode}' (cpu or rocm)")
+    sys.exit(f"unknown mode '{mode}' (cpu, rocm or cuda)")
 
 print(f"{failed} check(s) failed" if failed else "all checks passed")
 sys.exit(1 if failed else 0)

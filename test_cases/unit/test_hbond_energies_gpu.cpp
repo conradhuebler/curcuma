@@ -10,8 +10,14 @@
  * caller uses (EnergyCalculator -> Interface()->gfnffInstance() -> setRecordHBondEnergies /
  * hydrogenBondEnergies):
  *  - nothing is returned before recording is switched on, nor after switching on but before an evaluation,
- *  - one entry per triple of getLastHBonds(), in that order, with its atoms and case type,
- *  - the GPU list equals the CPU list, and each GPU triple energy equals the CPU one within 1e-8 Eh,
+ *  - every entry carries its own atoms and case type, each triple appears once, and the set of GPU triples
+ *    equals the CPU set with each triple's energy within 1e-8 Eh (matched by (donor, hydrogen, acceptor,
+ *    case type; for case 1, where the H is bonded to neither atom, donor and acceptor are taken as one
+ *    unordered pair), not by position),
+ *  - host detection (-gfnff.gpu_hb_detect_on_device false): additionally one entry per triple of
+ *    getLastHBonds(), in that order, and the GPU list equals the CPU list triple by triple. With device
+ *    detection (the CUDA default since Oct 14, 2026) the device builds the same set in another order and the
+ *    host list of the wrapper is not the list the device evaluates, so these two order checks do not apply,
  *  - the GPU sum equals the CPU HBond term within 1e-6 Eh,
  *  - recording leaves the GPU energy unchanged (1e-10 Eh), a gradient call records the same values,
  *  - switching recording off empties the result again.
@@ -34,8 +40,10 @@
 #include "test_molecule_registry.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -71,9 +79,23 @@ static bool sameAtoms(const std::vector<GFNFFHBondEnergy>& e, const std::vector<
     return true;
 }
 
-static void compareMolecule(const std::string& name, const std::string& backend)
+// Claude Generated (Nov 2026): energies keyed by triple identity; duplicate is set when a triple appears twice.
+using HBKey = std::array<int, 4>;
+static std::map<HBKey, double> keyed(const std::vector<GFNFFHBondEnergy>& v, bool& duplicate)
 {
-    std::printf("%s on %s\n", name.c_str(), backend.c_str());
+    std::map<HBKey, double> m;
+    for (const auto& t : v)
+        // Case 1 (an H bonded to neither atom, gfnff.h "Case 1 has no such coupling") treats A and B alike: the host
+        // lists the higher atom index first, the device detection the lower one; one canonical order for both.
+        if (!m.emplace(t.case_type == 1 ? HBKey { std::max(t.donor, t.acceptor), t.hydrogen, std::min(t.donor, t.acceptor), 1 }
+                                        : HBKey { t.donor, t.hydrogen, t.acceptor, t.case_type }, t.energy).second)
+            duplicate = true;
+    return m;
+}
+
+static void compareMolecule(const std::string& name, const std::string& backend, bool device_detect)
+{
+    std::printf("%s on %s, GPU H-bond detection on the %s\n", name.c_str(), backend.c_str(), device_detect ? "device" : "host");
     const curcuma::Molecule molecule = TestMolecules::TestMoleculeRegistry::createMolecule(name, false);
     const Mol mol = molecule.getMolInfo();
 
@@ -93,7 +115,7 @@ static void compareMolecule(const std::string& name, const std::string& backend)
 
     // GPU, through the same calls
     const auto fallbacks_before = curcuma::gpuFallbackCounts();
-    json gpu_config = { { "verbosity", 0 }, { "threads", 1 }, { "gfnff", json::object() }, { "gpu", backend } };
+    json gpu_config = { { "verbosity", 0 }, { "threads", 1 }, { "gfnff", { { "gpu_hb_detect_on_device", device_detect } } }, { "gpu", backend } };
     EnergyCalculator gpu("gfnff", gpu_config);
     gpu.setMolecule(mol);
     check(curcuma::gpuFallbackCounts() == fallbacks_before, "the " + backend + " method runs (no GPU fallback)");
@@ -110,18 +132,44 @@ static void compareMolecule(const std::string& name, const std::string& backend)
     const std::vector<GFNFFHBondEnergy> gpu_e = gpu_ff->hydrogenBondEnergies();
     const std::vector<GFNFFHydrogenBond>& gpu_list = gpu_ff->getLastHBonds();
 
-    check(!gpu_e.empty() && gpu_e.size() == gpu_list.size(),
-        "one entry per triple of getLastHBonds() (" + std::to_string(gpu_e.size()) + ")");
-    check(sameAtoms(gpu_e, gpu_list), "entries in list order with the list's atoms and case type");
-    check(gpu_e.size() == cpu_e.size() && sameAtoms(gpu_e, cpu_list), "GPU and CPU have the same triples");
+    bool dup_gpu = false, dup_cpu = false;
+    const std::map<HBKey, double> gpu_m = keyed(gpu_e, dup_gpu);
+    const std::map<HBKey, double> cpu_m = keyed(cpu_e, dup_cpu);
+    check(!gpu_e.empty() && !dup_gpu && !dup_cpu, "GPU entries: " + std::to_string(gpu_e.size()) + ", each triple once");
+    bool same_set = gpu_m.size() == cpu_m.size();
+    for (const auto& kv : gpu_m)
+        if (!cpu_m.count(kv.first))
+            same_set = false;
+    check(same_set, "GPU and CPU have the same set of triples (" + std::to_string(gpu_m.size()) + " against "
+                        + std::to_string(cpu_m.size()) + ")");
+    if (!same_set) {
+        // failure aid: the first triples only one side has
+        int shown = 0;
+        for (const auto& kv : gpu_m)
+            if (!cpu_m.count(kv.first) && shown++ < 6)
+                std::printf("      only GPU: donor %d hydrogen %d acceptor %d case %d  E = %.3e Eh\n", kv.first[0],
+                    kv.first[1], kv.first[2], kv.first[3], kv.second);
+        shown = 0;
+        for (const auto& kv : cpu_m)
+            if (!gpu_m.count(kv.first) && shown++ < 6)
+                std::printf("      only CPU: donor %d hydrogen %d acceptor %d case %d  E = %.3e Eh\n", kv.first[0],
+                    kv.first[1], kv.first[2], kv.first[3], kv.second);
+    }
+    if (!device_detect) {
+        // host detection: the entries follow getLastHBonds() exactly, as on the CPU
+        check(!gpu_e.empty() && gpu_e.size() == gpu_list.size(),
+            "one entry per triple of getLastHBonds() (" + std::to_string(gpu_e.size()) + ")");
+        check(sameAtoms(gpu_e, gpu_list), "entries in list order with the list's atoms and case type");
+        check(gpu_e.size() == cpu_e.size() && sameAtoms(gpu_e, cpu_list), "GPU and CPU have the same triples, same order");
+    }
 
     double max_diff = 0.0;
-    if (gpu_e.size() == cpu_e.size())
-        for (std::size_t i = 0; i < gpu_e.size(); ++i)
-            max_diff = std::max(max_diff, std::fabs(gpu_e[i].energy - cpu_e[i].energy));
+    if (same_set)
+        for (const auto& kv : gpu_m)
+            max_diff = std::max(max_diff, std::fabs(kv.second - cpu_m.at(kv.first)));
     char buf[160];
     std::snprintf(buf, sizeof(buf), "per-triple energy GPU vs CPU, max |dE| = %.3e Eh (tol 1e-8)", max_diff);
-    check(gpu_e.size() == cpu_e.size() && max_diff < 1e-8, buf);
+    check(same_set && max_diff < 1e-8, buf);
     std::snprintf(buf, sizeof(buf), "GPU sum %.10f vs CPU HBond term %.10f Eh (tol 1e-6)", sum(gpu_e), cpu_term);
     check(std::fabs(sum(gpu_e) - cpu_term) < 1e-6, buf);
     std::snprintf(buf, sizeof(buf), "recording leaves the GPU energy unchanged (%.3e Eh)", e_on - e_off);
@@ -155,8 +203,10 @@ int main(int argc, char* argv[])
         return 0;
     }
 
-    compareMolecule("H2O_dimer", backend);
-    compareMolecule("monosaccharide", backend);
+    for (const bool device_detect : { true, false }) {
+        compareMolecule("H2O_dimer", backend, device_detect);
+        compareMolecule("monosaccharide", backend, device_detect);
+    }
 
     std::printf("%s\n", g_failed ? "FAILED" : "all passed");
     return g_failed ? 1 : 0;

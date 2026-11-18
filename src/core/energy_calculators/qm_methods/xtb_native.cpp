@@ -1034,6 +1034,8 @@ double XTB::Calculation(bool gradient)
     // still in FP32, switch to FP64 for the rest, where the iteration is exact and convergence
     // is monotone again. Costs nothing when the FP32 phase is converging normally.
     double dq_best_fp32 = 1.0e30;
+    bool   xtb_lastdiag = false;       // scf_criterion xtb: first satisfied test seen, one more iteration pending
+    bool   xtb_converged_once = false; // scf_criterion xtb: the test was satisfied at least once
     int    fp32_stall = 0;
     bool   fp32_exhausted = false;
     // Claude Generated (Oct 2026): CURCUMA_SCF_JAC=<dir> dumps the numerical Jacobian of the SCC
@@ -1696,8 +1698,31 @@ double XTB::Calculation(bool gradient)
                 CurcumaLogger::result(fmt::format("  {:4d}   {:18.10f}   {:10.2e}   {:10.2e}   {:6.1f}",
                                                   iter, e_scc, de, dq, t_iter_ms));
             }
-            if (iter > 0 && !m_eig_fp32 && dq < thresh && de < thresh * 100.0
-                && (!xlbomd_corrector_step || iter + 1 >= m_scf_xlbomd_correctors)) {
+            // Claude Generated (Nov 2026): scf_criterion xtb on the device loop, same rule as the CPU loop
+            // (RMS of the SCC residual / sqrt(nat), |dE|, one extra iteration). The backend returns the sum of
+            // squares of the last step; one without it (ROCm) keeps the default rule and says so once.
+            bool gpu_conv = false;
+            if (iter > 0 && !m_eig_fp32 && (!xlbomd_corrector_step || iter + 1 >= m_scf_xlbomd_correctors)) {
+                const double sumsq = m_scf_criterion_xtb ? m_gpu_scf->residentLastDqSumSq() : -1.0;
+                if (m_scf_criterion_xtb && sumsq < 0.0) {
+                    static std::atomic<bool> warned{false};
+                    if (!warned.exchange(true))
+                        CurcumaLogger::warn("-scf_criterion xtb: this GPU backend does not return the residual norm "
+                                            "from its resident SCF loop, the default convergence rule runs there");
+                }
+                if (sumsq >= 0.0) {
+                    const double rms_dq = std::sqrt(sumsq / std::max(1, nat));
+                    const double q_lim  = (m_method == MethodType::GFN2 ? 1.0e-4 : 2.0e-5) * m_scf_accuracy;
+                    gpu_conv = rms_dq < q_lim && de < 1.0e-6 * m_scf_accuracy;
+                    if (gpu_conv) {
+                        xtb_converged_once = true;
+                        if (!xtb_lastdiag) { xtb_lastdiag = true; gpu_conv = false; }
+                    }
+                } else {
+                    gpu_conv = dq < thresh && de < thresh * 100.0;
+                }
+            }
+            if (gpu_conv) {
                 m_scf_converged = true;
                 e_total_old = e_scc;
                 break;
@@ -2139,7 +2164,24 @@ double XTB::Calculation(bool gradient)
             // dq is the full-SCC-vector residual computed above (shell charges for
             // GFN1, + atomic multipole moments for GFN2), matching what the mixer
             // acts on and what tblite converges on.
-            if (checkConvergence_impl(dq, e_total_old, e_scc, thresh)) {
+            // Claude Generated (Nov 2026): scf_criterion xtb reproduces xtb 6.7.1 (scc_core.f90:555-632,
+            // scf_module.F90:272-277): RMS over the whole SCC residual divided by sqrt(nat) (xtb: sqrt(sum(dq^2)/n),
+            // dq = shell charges + 3 dipole + 6 quadrupole components per atom), qconv = 1e-4*acc (GFN2) or 2e-5*acc
+            // (GFN1), econv = 1e-6*acc, and one extra iteration after the first satisfied test (xtb's lastdiag).
+            // Unlike the default rule the first satisfied iteration is mixed and iterated once more.
+            bool scf_conv_now;
+            if (m_scf_criterion_xtb) {
+                const double rms_dq = std::sqrt((x_out_check - x_in).squaredNorm() / std::max(1, nat));
+                const double q_lim  = (m_method == MethodType::GFN2 ? 1.0e-4 : 2.0e-5) * m_scf_accuracy;
+                scf_conv_now = rms_dq < q_lim && std::fabs(e_scc - e_total_old) < 1.0e-6 * m_scf_accuracy;
+                if (scf_conv_now) {
+                    xtb_converged_once = true;
+                    if (!xtb_lastdiag) { xtb_lastdiag = true; scf_conv_now = false; }
+                }
+            } else {
+                scf_conv_now = checkConvergence_impl(dq, e_total_old, e_scc, thresh);
+            }
+            if (scf_conv_now) {
                 m_scf_converged = true;
                 if (scf_jac_active) {   // keep x* and G(x*) for the dump / capture below
                     scf_jac_x_star = x_in;
@@ -2192,6 +2234,9 @@ double XTB::Calculation(bool gradient)
         e_total_old = e_scc;
     }
 
+    // scf_criterion xtb: like xtb (`converged` stays set), a run that satisfied the test once but ran out of
+    // iterations during the extra pass counts as converged.
+    if (m_scf_criterion_xtb && xtb_converged_once && !m_scf_converged) m_scf_converged = true;
     m_scf_iterations = iter + 1;
     const auto t_scf_end = clock::now();
 

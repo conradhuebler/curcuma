@@ -36,7 +36,7 @@ field) the robust path is the augmented-LU fallback of `cholesky`, which `ldlt` 
 ## sytrf: the linear solve of the Fortran reference (Nov 2026)
 
 Claude Generated (Nov 2026): 🤖 AI-generated, ⚙️ machine-tested (`eeq_sytrf_cpu`, `eeq_sytrf_rocm`, `eeq_gpu_supports`, `cli_gfnff_06_eeq_solver_control`) on
-the CPU and on one Radeon 890M (gfx1150); the CUDA path was compiled but has never run. Human production testing pending.
+the CPU and on one Radeon 890M (gfx1150); the CUDA path ran once on one RTX 5080 (Nov 17, 2026: `eeq_sytrf_cuda`, GPU = CPU charges <= 7.2e-14 e on 3 structures, 5 MD steps, against the LU fallback because that build had no LAPACK path; Nov 18, 2026 after the MKL fix: against the real CPU `dsytrf`, <= 4.4e-14 e). Human production testing pending.
 
 **Reference.** Both EEQ phases of xtb and pprcht/gfnff (xtb `gfnff_ini2.f90` `goedeckera` and `gfnff_eg.f90` `goed_gfnff`; pprcht
 `gfnff_ini2.f90` and `gfnff_engrad.F90`) build the dense augmented matrix of order m = N + nfrag: A(i,i) = gam_i + sqrt(2/pi)/sqrt(alpha_i),
@@ -49,7 +49,7 @@ the single-precision `ssytrf` only for `accuracy > 1` and for the asymptote call
 (`EEQSolver::dispatchSolve` -> `solveAugmentedSytrfUpper`, `eeq_solver.cpp`): a column-major copy of the matrix, `dsytrf_` with uplo `'U'` after a
 workspace query, `dsytrs_` with uplo `'U'` and one right-hand side (`EEQSolver::hostSytrsUpper`). Always FP64; the single-precision branch of the
 reference is not reproduced. It uses `dsytrs`, not the `dsytrs2` of `ldlt`, and no Schur complement. `auto` never selects it; an explicit
-`sytrf` is never overridden by a size threshold. On `info != 0`, or in a build without LAPACK (`USE_BLAS` off), the solve warns and falls back
+`sytrf` is never overridden by a size threshold. On `info != 0`, or in a build without LAPACK (neither `USE_BLAS` nor `USE_MKL`), the solve warns and falls back
 to the augmented LU for that call. Cost: one dense factorisation of order N + nfrag per solve, no factor reuse.
 
 | backend | factorisation | solve | status |
@@ -91,7 +91,7 @@ solvers: the runs carry no fixed seed, and the time-based seed differs once runs
 **Not tested:** a comparison against the Fortran programs themselves (only against curcuma's `cholesky` and between CPU and ROCm); the LU
 fallback (`info != 0` never occurred) and a build without LAPACK; ALPB solvation (Born matrix added to A), `eeq_distance_cutoff > 0`,
 `-gfnff.charge_groups`, transition metals, periodic systems, systems above 1410 atoms; ROCm with 16 or more fragments (CPU route), other AMD
-cards, multi-GPU; bitwise reproducibility; the whole CUDA path (never run). Pivot choices of `rocsolver_dsytrf` and LAPACK `dsytrf` were not
+cards, multi-GPU; bitwise reproducibility; the CUDA path beyond one RTX 5080 and the three test structures. Pivot choices of `rocsolver_dsytrf` and LAPACK `dsytrf` were not
 compared directly, only the solutions.
 
 ## Parameters (module `gfnff`, category EEQ)
