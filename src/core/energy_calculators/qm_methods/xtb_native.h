@@ -1577,7 +1577,7 @@ private:
 
     // SCF config / state
     int    m_scf_max_iter    = 150;
-    double m_scf_threshold   = 1.0e-5;  // max|dq_shell|; energy bit-identical to 1e-6
+    double m_scf_threshold   = 2.0e-5;  // max|dq_shell|; 2e-5 since Nov 2026 (was 1e-5), docs/SCF_THRESHOLD_2026-11.md
     double m_scf_damping     = 0.4;
     double m_electronic_temp = 300.0;  // K; 0 → integer occupation
     bool   m_scf_converged   = false;

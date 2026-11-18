@@ -21,7 +21,7 @@
 #include "src/core/parameter_macros.h"
 
 BEGIN_PARAMETER_DEFINITION(scf)
-    PARAM(scf_threshold, Double, 0.0, "SCF convergence threshold; 0 uses the method's own: 1e-5 on max|dq_shell| for gfn1/gfn2, 1e-6 on the density change ||dP||_F for pm3/am1/mndo/pm6.", "SCF", {})
+    PARAM(scf_threshold, Double, 0.0, "SCF convergence threshold; 0 uses the method's own: 2e-5 on max|dq_shell| for gfn1/gfn2, 1e-6 on the density change ||dP||_F for pm3/am1/mndo/pm6.", "SCF", {})
     PARAM(scf_max_iterations, Int, 0, "Most SCF iterations; 0 uses the method's own (gfn1/gfn2 150, pm3/am1/mndo/pm6 100, tblite/xtb/Ulysses their max_iterations). Raise it for slowly converging systems.", "SCF", {"max_iterations", "SCFmaxiter"})
     PARAM(scf_damping, Double, 0.0, "Fraction of the new charges (gfn1/gfn2, tblite) or density (pm3/am1/mndo/pm6) taken per step; 0 uses the method's own (0.4, NDDO 0.6). Lower values are more robust and slower.", "SCF", {})
     PARAM(scf_allow_unconverged, Bool, false, "Accept an SCF that reaches the iteration limit without converging (gfn1/gfn2, pm3/am1/mndo/pm6); by default this is an error. Non-finite energies are always an error.", "SCF", {})

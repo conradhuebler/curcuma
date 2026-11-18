@@ -47,12 +47,13 @@ json NativeXtbMethod::getDefaultConfig(MethodType method)
     // The SCF iteration limit is not set here: XTB keeps its own default (150), changed
     // only by scf_max_iterations (module scf) or -xtb.max_iterations (applyXtbScfConfig).
     json cfg = {
-        { "scf_threshold", 1.0e-5 },    // Convergence threshold on max|dq_shell|.
-                                         // Energy bit-identical to 1e-6 (<1e-8 Eh) but
-                                         // converges ~10-20% fewer iterations. The default
-                                         // eeq D4 gradient is insensitive; MD/opt or the
-                                         // opt-in mulliken response may tighten via
-                                         // -scf_threshold.
+        { "scf_threshold", 2.0e-5 },    // Convergence threshold on max|dq_shell| (2e-5 since
+                                         // Nov 2026, was 1e-5). Energy error < 0.01 uEh, rms
+                                         // force error 5e-4 mEh/A on complex(231); ~6% fewer
+                                         // iterations than 1e-5. The default eeq D4 gradient
+                                         // is insensitive; MD/opt or the opt-in mulliken
+                                         // response may tighten via -scf_threshold.
+                                         // See docs/SCF_THRESHOLD_2026-11.md.
         { "scf_damping", 0.4 },          // Density damping factor
         { "scf_mode", "broyden" },       // broyden(default) | diis | plain | level-shift
         { "scf_guess", "eeq" },          // Initial charge guess: eeq(default) | h0
