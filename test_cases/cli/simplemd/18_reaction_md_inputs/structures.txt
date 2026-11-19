@@ -1,0 +1,3 @@
+# Structures from test_cases/structures (id, optionally "as <file name>"); see structures/README.md
+reactions-haber-bosch-gas as haber.xyz
+reactions-h2-pt4 as pt4.xyz

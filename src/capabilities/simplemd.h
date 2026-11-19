@@ -22,6 +22,7 @@
 
 #include "external_potentials.h"
 
+#include <atomic>
 #include <mutex>
 
 #include <chrono>
@@ -376,6 +377,21 @@ public:
     void setWallTemp(double T) { m_wall_temp = T; }
     /** Claude Generated (2026): live-set the wall potential steepness parameter (β). */
     void setWallBeta(double beta) { m_wall_beta = beta; }
+    /** Claude Generated (2026): live-set the spherical wall radius [Angstrom]. Thread-safe request,
+     *  applied at the top of the next MD step; cancels an active wall_radius_schedule for the rest
+     *  of the run (manual control wins, like setTargetTemperature). Ignored for r <= 0. */
+    void setWallRadius(double radius) { m_wall_radius_request.store(radius); }
+    /** Claude Generated (2026): current spherical wall radius [Angstrom] (includes the schedule). */
+    double wallRadius() const { return m_wall_spheric_radius; }
+    /** Claude Generated (2026): wall force measure of the last step [GPa]: sum over atoms of the
+     *  magnitude of the wall force, divided by 4 pi R^2. A force-per-area diagnostic of the
+     *  confining potential, NOT a thermodynamic equilibrium pressure (see docs/WALL_RADIUS_SCHEDULE.md).
+     *  0 without a spherical harmonic/logfermi wall. */
+    double wallPressure() const { return m_wall_pressure_gpa; }
+    /** Claude Generated (2026): wallPressure() averaged over the last 100 steps [GPa]. */
+    double wallPressureAverage() const { return m_wall_pressure_avg_gpa; }
+    /** Claude Generated (2026): summed magnitude of the radial wall force of the last step [Eh/Angstrom]. */
+    double wallForce() const { return m_wall_force_sum; }
 
     // Claude Generated (Apr 2026): shared bias pool for parallel ConfSearch
     void setSharedBiasPool(SharedBiasPool* pool) { m_shared_pool = pool; }
@@ -638,7 +654,10 @@ private:
     };
 
     bool ParseSchedule(const std::string& spec, std::vector<RampSegment>& out, const std::string& ctx);  ///< parse 'T:mode:val;...'
-    void StepRamp(RampState& rs, double& T0, double measuredT);  ///< advance one schedule by one step
+    void StepRamp(RampState& rs, double& T0, double measuredT, const char* label = "Temperature ramp",
+        const char* unit = " K", int precision = 0);  ///< advance one schedule by one step
+    void UpdateWallRadius();                                     ///< wall_radius_schedule / setWallRadius(), each step
+    void RecordWallForce(double sum_force);                      ///< store F_wall, P = F/(4 pi R^2), 100-step average
     void UpdateTemperatureRamp();                                ///< drive global + region setpoints (called each step)
     void ParseThermalRegions();                                  ///< read temp_regions specs from the controller
     void ParseExternalPotentials();                              ///< read external_potentials from the controller
@@ -847,6 +866,13 @@ private:
     double m_wall_spheric_radius = 6, m_wall_temp = 298.15, m_wall_beta = 6;
     double m_wall_x_min = 0, m_wall_x_max = 0, m_wall_y_min = 0, m_wall_y_max = 0, m_wall_z_min = 0, m_wall_z_max = 0;
     double m_wall_potential = 0, m_average_wall_potential = 0;
+    // Claude Generated (2026): wall radius schedule / live setter and wall force diagnostics
+    RampState m_wall_radius_ramp;                       ///< wall_radius_schedule (Steps segments only; target = radius in A)
+    std::atomic<double> m_wall_radius_request{ -1.0 };  ///< setWallRadius() request, < 0 = none
+    double m_wall_force_sum = 0;                        ///< sum_i |F_wall,i| of the last step [Eh/Angstrom]
+    double m_wall_pressure_gpa = 0, m_wall_pressure_avg_gpa = 0;
+    std::deque<double> m_wall_pressure_window;          ///< last 100 instantaneous values
+    double m_wall_pressure_window_sum = 0;
     // Claude Generated (Sep 2026): Gyrationsradius-Bias, siehe ApplyGyrationBias()
     bool m_gyration_bias = false, m_gyration_one_sided = true, m_gyration_heavy_only = true;
     double m_gyration_target = -1.0, m_gyration_force = 0.1, m_gyration_potential = 0.0;
@@ -1237,6 +1263,8 @@ private:
         "tier=primary")
     PARAM(temp_regions, Json, "[]", "Per-region thermostats: a list of {atoms, temperature, schedule} objects. atoms uses the selection grammar.", "Temperature Ramp", {},
         "tier=advanced")
+    PARAM(wall_radius_schedule, String, "", "Time-dependent spherical wall radius 'radius:steps:n;...' (Angstrom): the radius moves linearly from its current value to <radius> over n integration steps, then the next segment starts; the last radius is held. Only mode steps exists (reach is rejected). Needs wall_type=spheric; wall_radius is the start radius (auto-sized if 0). Example: '6.0:steps:2000;3.0:steps:4000'. SimpleMD::setWallRadius() overrides it live. Compressing the wall raises the wall force measure wall_pressure_gpa in <basename>.md.csv, see docs/WALL_RADIUS_SCHEDULE.md.", "Walls", {},
+        "requires=wall_type=spheric")
     PARAM(temp_ramp, Bool, false, "Enable a multi-stage temperature ramp schedule (see temp_schedule). A live GUI slider / setTargetTemperature() overrides it for the rest of the run.", "Temperature Ramp", {})
     PARAM(temp_schedule, String, "", "Ramp schedule 'target:mode:value;...'. mode=steps ramps the setpoint linearly from the previous target to <target> over <value> integration steps; mode=reach jumps the setpoint to <target> and advances once |<T>-target| < value Kelvin. Example: '500:steps:5000;500:steps:2000;300:reach:10'.", "Temperature Ramp", {},
         "requires=temp_ramp")

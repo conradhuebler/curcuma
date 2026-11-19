@@ -2091,6 +2091,120 @@
    "notes": "Built to test -scf_precond segmentation on a molecule with aromatic rings. GFN2 SCF: 12 iterations without M."
   },
   {
+   "id": "reactions-h2-pt4",
+   "class": "metals",
+   "file": "metals/reactions-h2-pt4.xyz",
+   "format": "xyz",
+   "formula": "H2Pt4",
+   "natoms": 6,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "non-equilibrium",
+   "size_bytes": 257,
+   "sha256": "b57ae1d17dd5305c03e3167b356bb45cf80bc6506bab1939015b25bfac410fc0",
+   "provenance": {
+    "kind": "constructed",
+    "description": "Idealised fcc Pt4 tetrahedron (Pt-Pt 2.75 A) with H2 (0.76 A) 2.0 A above a vertex atom; built by script, not optimised"
+   },
+   "notes": "Start structure of a reactive-MD example (docs/REACTION_MD_EXAMPLES.md), not a minimum. Atom order is load-bearing for the JSON input of the same name."
+  },
+  {
+   "id": "reactions-h2-pt7",
+   "class": "metals",
+   "file": "metals/reactions-h2-pt7.xyz",
+   "format": "xyz",
+   "formula": "H2Pt7",
+   "natoms": 9,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "non-equilibrium",
+   "size_bytes": 345,
+   "sha256": "6ec53ea3ec278cd69a4a0c05fabcee039f3e9ab962a3391634d8b567f3b5d7f5",
+   "provenance": {
+    "kind": "constructed",
+    "description": "Idealised fcc Pt7 fragment (Pt-Pt 2.75 A) with H2 2.0 A above a vertex atom; built by script, not optimised"
+   },
+   "notes": "Start structure of a reactive-MD example (docs/REACTION_MD_EXAMPLES.md), not a minimum. Atom order is load-bearing for the JSON input of the same name."
+  },
+  {
+   "id": "reactions-haber-bosch-fe4",
+   "class": "metals",
+   "file": "metals/reactions-haber-bosch-fe4.xyz",
+   "format": "xyz",
+   "formula": "Fe4H6N2",
+   "natoms": 12,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "non-equilibrium",
+   "size_bytes": 581,
+   "sha256": "7e69242578698da8af99e200d3776d9957e8b584ff1371713637e38cc12d492d",
+   "provenance": {
+    "kind": "constructed",
+    "description": "Ideal Fe4 tetrahedron (Fe-Fe 2.50 A), N2 end-on along z above it (nearest Fe-N 2.19 A, N-N 1.12 A), 3 H2 beside the N2 on the same side (2.3 A); atoms 1-4 Fe, 5-6 N, 7-12 H; not optimised, Fe4 is not stable without a tether"
+   },
+   "notes": "Start structure of a reactive-MD example (docs/REACTION_MD_EXAMPLES.md), not a minimum. Atom order is load-bearing for the JSON input of the same name."
+  },
+  {
+   "id": "reactions-haber-bosch-gas",
+   "class": "clusters",
+   "file": "clusters/reactions-haber-bosch-gas.xyz",
+   "format": "xyz",
+   "formula": "H6N2",
+   "natoms": 8,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "non-equilibrium",
+   "size_bytes": 412,
+   "sha256": "c659ea0b23b4f4da2ef4a5bf5ff9282db5bb4883151146360a1d80f39a1fc93e",
+   "provenance": {
+    "kind": "constructed",
+    "description": "N2 (1.10 A) + 3 H2 (0.74 A), centre-centre distance 3.3 A, centre of mass at the origin; atoms 1 and 2 are the N atoms; not optimised"
+   },
+   "notes": "Start structure of a reactive-MD example (docs/REACTION_MD_EXAMPLES.md), not a minimum. Atom order is load-bearing for the JSON input of the same name."
+  },
+  {
+   "id": "reactions-soup45",
+   "class": "clusters",
+   "file": "clusters/reactions-soup45.xyz",
+   "format": "xyz",
+   "formula": "C3H35N3O4",
+   "natoms": 45,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "non-equilibrium",
+   "size_bytes": 1958,
+   "sha256": "c0ad4f540086efad5f2ec427be40d2da9f4375a637bbc674777c14f61a10b839",
+   "provenance": {
+    "kind": "constructed",
+    "description": "3 CH4 + 3 NH3 + 4 H2O + 3 H2 randomly packed in a sphere R 5.0 A, minimum molecule distance 2.0 A, seed 7 (pack.py), about 0.56 g/cm3; not optimised"
+   },
+   "notes": "Start structure of a reactive-MD example (docs/REACTION_MD_EXAMPLES.md), not a minimum. Atom order is load-bearing for the JSON input of the same name."
+  },
+  {
+   "id": "reactions-wgs-gas",
+   "class": "clusters",
+   "file": "clusters/reactions-wgs-gas.xyz",
+   "format": "xyz",
+   "formula": "C3H6O6",
+   "natoms": 15,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "non-equilibrium",
+   "size_bytes": 481,
+   "sha256": "5ab947a0bbe5c3b4a7c6b561b219348b64eba45a9eb449e7257759f5e0655cdd",
+   "provenance": {
+    "kind": "constructed",
+    "description": "3 CO + 3 H2O randomly placed in a sphere R 3.5 A, minimum centre-of-mass distance 2.8 A, seed 1 (gen.py); not optimised"
+   },
+   "notes": "Start structure of a reactive-MD example (docs/REACTION_MD_EXAMPLES.md), not a minimum. Atom order is load-bearing for the JSON input of the same name."
+  },
+  {
    "id": "silane.d-shell-validation",
    "class": "small",
    "file": "small/silane.d-shell-validation.xyz",

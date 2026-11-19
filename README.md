@@ -54,7 +54,7 @@ re-measure them.
 `-sp`, optimisation `-opt`, Hessian and frequencies `-hessian`, molecular dynamics `-md` (thermostats,
 RATTLE, temperature ramps, PLUMED metadynamics), conformer search `-confsearch` and filtering `-confscan`,
 RMSD with atom reordering `-rmsd`, docking `-dock`, interaction energies `-interaction`, counter-ion placement `-ionize`, streaming trajectory properties `-trajprops`, implicit solvation
-(ALPB/GBSA for native GFN1/GFN2, ALPB for GFN-FF), trajectory and structure analysis `-analysis`.
+(ALPB/GBSA for native GFN1/GFN2, ALPB for GFN-FF), trajectory and structure analysis `-analysis`. Ready-made reactive-MD inputs (GFN2, CPU; free and forced scenarios, [docs/REACTION_MD_EXAMPLES.md](docs/REACTION_MD_EXAMPLES.md)).
 
 ## Download and requirements
 
@@ -227,7 +227,7 @@ AI-generated, machine-tested; human production testing pending. Start with [docs
 [docs/](docs/) holds one document per feature: the SCF modes ([docs/SCF_MODES.md](docs/SCF_MODES.md)),
 the opt-in GFN1/GFN2 SCF preconditioner `-scf_precond frag`, with segmentation of large molecules ([docs/SCF_PRECOND.md](docs/SCF_PRECOND.md), experimental),
 solvation ([docs/SOLVATION.md](docs/SOLVATION.md)), temperature ramps
-([docs/TEMPERATURE_RAMP.md](docs/TEMPERATURE_RAMP.md)), large-system MD
+([docs/TEMPERATURE_RAMP.md](docs/TEMPERATURE_RAMP.md)), a time-dependent spherical wall radius with a wall-force pressure column (`-wall_radius_schedule`, [docs/WALL_RADIUS_SCHEDULE.md](docs/WALL_RADIUS_SCHEDULE.md)), large-system MD
 ([docs/MD_LARGE_SYSTEMS.md](docs/MD_LARGE_SYSTEMS.md)), the per-step MD CSV file ([docs/MD_CSV_OUTPUT.md](docs/MD_CSV_OUTPUT.md)), PLUMED ([docs/PLUMED_HELP.md](docs/PLUMED_HELP.md)),
 reactive GFN-FF MD ([docs/GFNFF_REACT_TOPOLOGY.md](docs/GFNFF_REACT_TOPOLOGY.md), experimental), NEB-MD free-energy
 barriers and rates (`-nebmd.pipeline`, [docs/NEB_MD.md](docs/NEB_MD.md), AI-generated, machine-tested, validated on ethane only), benchmark

@@ -1,0 +1,28 @@
+{
+ "_command": "md",
+ "_input": "test_cases/structures/clusters/reactions-wgs-gas.xyz",
+ "_comment": "as reactions-wgs-gas, wall radius 6.0 -> 3.5 A over 3000 steps (needs wall_radius_schedule, docs/WALL_RADIUS_SCHEDULE.md)",
+ "simplemd": {
+  "method": "gfn2",
+  "charge": 0,
+  "spin": 0,
+  "time_step": 1.0,
+  "thermostat": "csvr",
+  "seed": 1,
+  "threads": 4,
+  "temperature": 4000,
+  "coupling": 10.0,
+  "max_time": 8000,
+  "dump_frequency": 10,
+  "wall_type": "spheric",
+  "wall_potential": "logfermi",
+  "wall_radius": 6.0,
+  "wall_temp": 4000.0,
+  "electronic_temperature": 1000.0,
+  "scf_max_iterations": 500,
+  "scf_damping": 0.15,
+  "geometry_abort_factor": 0,
+  "wall_radius_schedule": "3.5:steps:3000",
+  "print_frequency": 100
+ }
+}

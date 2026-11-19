@@ -1,0 +1,83 @@
+{
+ "_command": "md",
+ "_input": "test_cases/structures/metals/reactions-haber-bosch-fe4.xyz",
+ "_comment": "FORCED: Fe4 tethered (k 5 per Fe, atoms 1-4, 1-based) and N-N pulled (atoms 5,6); Fe4 spin 0; not free dynamics",
+ "simplemd": {
+  "method": "gfn2",
+  "charge": 0,
+  "spin": 0,
+  "time_step": 1.0,
+  "thermostat": "csvr",
+  "seed": 1,
+  "threads": 4,
+  "temperature": 1000,
+  "coupling": 10.0,
+  "max_time": 3000,
+  "dump_frequency": 10,
+  "no_center": true,
+  "wall_type": "spheric",
+  "wall_potential": "harmonic",
+  "wall_radius": 6.5,
+  "wall_temp": 20000.0,
+  "electronic_temperature": 2000.0,
+  "scf_max_iterations": 500,
+  "geometry_abort_factor": 0,
+  "remove_com_mode": 0,
+  "scf_damping": 0.15,
+  "external_potentials": [
+   {
+    "kind": "centroid_harmonic",
+    "atoms": "1",
+    "target": [
+     0.883883,
+     0.883883,
+     0.883883
+    ],
+    "k": 5.0,
+    "label": "Fe1 tether"
+   },
+   {
+    "kind": "centroid_harmonic",
+    "atoms": "2",
+    "target": [
+     0.883883,
+     -0.883883,
+     -0.883883
+    ],
+    "k": 5.0,
+    "label": "Fe2 tether"
+   },
+   {
+    "kind": "centroid_harmonic",
+    "atoms": "3",
+    "target": [
+     -0.883883,
+     0.883883,
+     -0.883883
+    ],
+    "k": 5.0,
+    "label": "Fe3 tether"
+   },
+   {
+    "kind": "centroid_harmonic",
+    "atoms": "4",
+    "target": [
+     -0.883883,
+     -0.883883,
+     0.883883
+    ],
+    "k": 5.0,
+    "label": "Fe4 tether"
+   },
+   {
+    "kind": "distance_harmonic",
+    "atoms": "5",
+    "atoms_b": "6",
+    "k": 0.3,
+    "r0": 3.2,
+    "label": "N-N pull (forced)"
+   }
+  ],
+  "print_frequency": 100
+ }
+}

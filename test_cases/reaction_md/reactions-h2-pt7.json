@@ -1,0 +1,21 @@
+{
+ "_command": "md",
+ "_input": "test_cases/structures/metals/reactions-h2-pt7.xyz",
+ "_comment": "free: H2 on Pt7, 300 K CSVR, closed shell; expect H2 dissociation (docs/REACTION_MD_EXAMPLES.md)",
+ "simplemd": {
+  "method": "gfn2",
+  "charge": 0,
+  "spin": 0,
+  "time_step": 1.0,
+  "thermostat": "csvr",
+  "seed": 1,
+  "threads": 4,
+  "temperature": 300,
+  "coupling": 10.0,
+  "max_time": 1000,
+  "dump_frequency": 5,
+  "scf_max_iterations": 500,
+  "geometry_abort_factor": 0,
+  "print_frequency": 100
+ }
+}

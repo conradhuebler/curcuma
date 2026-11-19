@@ -250,6 +250,16 @@ set_tests_properties(cli_simplemd_14_rmsd_mtd_coverage PROPERTIES TIMEOUT 200 LA
 # Claude Generated (Jul 2026): RATTLE must not freeze inter-fragment motion (bias-under-constraints)
 add_cli_test(simplemd 15_rattle_mtd_fragments)
 set_tests_properties(cli_simplemd_15_rattle_mtd_fragments PROPERTIES TIMEOUT 250 LABELS "simplemd;gfnff;rmsd_mtd;rattle")
+# Claude Generated (Nov 2026): wall_radius_schedule and wall pressure CSV columns (docs/WALL_RADIUS_SCHEDULE.md)
+add_cli_test(simplemd 17_wall_radius_schedule)
+set_tests_properties(cli_simplemd_17_wall_radius_schedule PROPERTIES TIMEOUT 120 LABELS "simplemd;gfn2;wall")
+# Claude Generated (Nov 2026): reaction-MD example inputs (docs/REACTION_MD_EXAMPLES.md); JSON and checker stay in one place and are copied here
+add_cli_test(simplemd 18_reaction_md_inputs)
+foreach(_rmd reactions-haber-bosch-gas reactions-haber-bosch-gas-control reactions-h2-pt4)
+    configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../reaction_md/${_rmd}.json"
+                   "${CMAKE_CURRENT_BINARY_DIR}/simplemd/18_reaction_md_inputs/${_rmd}.json" COPYONLY)
+endforeach()
+set_tests_properties(cli_simplemd_18_reaction_md_inputs PROPERTIES TIMEOUT 120 LABELS "simplemd;gfn2;reaction_md")
 
 # =============================================================================
 # ConfGen Tests (Claude Generated, Jul 2026): torsion/energy-decomposition ensemble analysis

@@ -459,6 +459,22 @@ void SimpleMD::LoadControlJson()
     m_global_ramp.schedule.clear();
     m_global_ramp.enabled = m_temp_ramp
         && ParseSchedule(m_config.get<std::string>("temp_schedule"), m_global_ramp.schedule, "temp_schedule");
+
+    // Claude Generated (2026): wall radius schedule, same grammar as temp_schedule (target = radius [A]).
+    // Only "steps" segments make sense for a radius; "reach" has no measured counterpart.
+    m_wall_radius_ramp = RampState();
+    {
+        const std::string wr_spec = m_config.get<std::string>("wall_radius_schedule");
+        m_wall_radius_ramp.enabled = !wr_spec.empty()
+            && ParseSchedule(wr_spec, m_wall_radius_ramp.schedule, "wall_radius_schedule");
+        for (const auto& seg : m_wall_radius_ramp.schedule) {
+            if (seg.mode != RampSegment::Steps || seg.target <= 0.0) {
+                CurcumaLogger::warn("wall_radius_schedule: only 'radius:steps:n' with radius > 0 is supported, schedule disabled.");
+                m_wall_radius_ramp.enabled = false;
+                break;
+            }
+        }
+    }
     ParseThermalRegions();
     ParseExternalPotentials();
 
@@ -2298,6 +2314,15 @@ void SimpleMD::prepareRun()
     m_global_ramp.seg_start_step = 0;
     m_global_ramp.seg_start_T = m_T0;
     m_global_ramp.overridden = false;
+    m_wall_radius_ramp.idx = 0;
+    m_wall_radius_ramp.seg_start_step = 0;
+    m_wall_radius_ramp.seg_start_T = m_wall_spheric_radius;  // start radius (after auto-sizing)
+    m_wall_radius_ramp.overridden = false;
+    if (m_wall_radius_ramp.enabled && m_wall_type != 1) {
+        CurcumaLogger::warn("wall_radius_schedule needs wall_type spheric (rect walls are not implemented), schedule disabled.");
+        m_wall_radius_ramp.enabled = false;
+    }
+    m_wall_radius_request.store(-1.0);
     ResolveThermalRegions();
     if (!m_thermal_regions.empty()) {
         auto thermo_it_r = thermostat_map.find(m_thermostat);
@@ -2528,6 +2553,10 @@ void SimpleMD::prepareRun()
                 m_csv_file << m_csv_delimiter << "dipole_debye";
             if (m_writeUnique)
                 m_csv_file << m_csv_delimiter << "n_unique";
+            // Claude Generated (2026): appendix columns only with a spherical force wall (existing files unchanged)
+            if (m_wall_type == 1 && !m_wall_wrap)
+                m_csv_file << m_csv_delimiter << "wall_radius_A" << m_csv_delimiter << "wall_pressure_GPa"
+                           << m_csv_delimiter << "wall_pressure_avg100_GPa";
             m_csv_file << "\n";
         }
     }
@@ -2599,7 +2628,7 @@ bool SimpleMD::ParseSchedule(const std::string& spec, std::vector<RampSegment>& 
  *   Steps: linearly interpolate the setpoint from the segment's start value to its target over
  *          `value` integration steps, then advance.
  *   Reach: hold the setpoint at the target and advance once `measuredT` is within `value` K. */
-void SimpleMD::StepRamp(RampState& rs, double& T0, double measuredT)
+void SimpleMD::StepRamp(RampState& rs, double& T0, double measuredT, const char* label, const char* unit, int precision)
 {
     if (!rs.enabled || rs.overridden || rs.schedule.empty())
         return;
@@ -2625,10 +2654,10 @@ void SimpleMD::StepRamp(RampState& rs, double& T0, double measuredT)
         rs.seg_start_T = T0;
         if (rs.idx < static_cast<int>(rs.schedule.size())) {
             const RampSegment& next = rs.schedule[rs.idx];
-            CurcumaLogger::info_fmt("Temperature ramp: segment {} target {:.0f} K ({}).",
-                rs.idx, next.target, next.mode == RampSegment::Steps ? "steps" : "reach");
+            CurcumaLogger::info_fmt("{}: segment {} target {:.{}f}{} ({}).",
+                label, rs.idx, next.target, precision, unit, next.mode == RampSegment::Steps ? "steps" : "reach");
         } else {
-            CurcumaLogger::info_fmt("Temperature ramp: schedule complete, holding {:.0f} K.", T0);
+            CurcumaLogger::info_fmt("{}: schedule complete, holding {:.{}f}{}.", label, T0, precision, unit);
         }
     }
 }
@@ -2641,6 +2670,40 @@ void SimpleMD::UpdateTemperatureRamp()
     StepRamp(m_global_ramp, m_T0, m_aver_Temp);
     for (auto& reg : m_thermal_regions)
         StepRamp(reg.ramp, reg.T0, RegionTemperature(reg.atoms, reg.dof));
+}
+
+/* Claude Generated 2026 - Move the spherical wall radius: a live setWallRadius() request wins and
+ * cancels the schedule; otherwise wall_radius_schedule is advanced with the same StepRamp as the
+ * temperature ramp (target = radius in Angstrom, linear in steps). Called once per step before
+ * the wall potential is evaluated. */
+void SimpleMD::UpdateWallRadius()
+{
+    const double req = m_wall_radius_request.exchange(-1.0);
+    if (req > 0.0) {
+        m_wall_spheric_radius = req;
+        m_wall_radius_ramp.overridden = true;
+        return;
+    }
+    StepRamp(m_wall_radius_ramp, m_wall_spheric_radius, 0.0, "Wall radius schedule", " A", 2);
+}
+
+/* Claude Generated 2026 - Wall force diagnostic. sum_force = sum_i |F_wall,i| in Eh/Angstrom (the
+ * wall gradient has that unit, like EnergyCalculator::Gradient()). P = F / (4 pi R^2) in
+ * Eh/Angstrom^3; 1 Eh/Angstrom^3 = 4.3597447222071e-18 J / 1e-30 m^3 = 4359.7447222071 GPa.
+ * Force per wall area at the radius of this step; not an equilibrium thermodynamic pressure. */
+void SimpleMD::RecordWallForce(double sum_force)
+{
+    constexpr double EH_PER_A3_TO_GPA = 4359.7447222071;
+    const double R = m_wall_spheric_radius;
+    m_wall_force_sum = sum_force;
+    m_wall_pressure_gpa = (R > 0.0) ? sum_force / (4.0 * pi * R * R) * EH_PER_A3_TO_GPA : 0.0;
+    m_wall_pressure_window.push_back(m_wall_pressure_gpa);
+    m_wall_pressure_window_sum += m_wall_pressure_gpa;
+    if (m_wall_pressure_window.size() > 100) {
+        m_wall_pressure_window_sum -= m_wall_pressure_window.front();
+        m_wall_pressure_window.pop_front();
+    }
+    m_wall_pressure_avg_gpa = m_wall_pressure_window_sum / static_cast<double>(m_wall_pressure_window.size());
 }
 
 /* Claude Generated 2026 - Instantaneous temperature [K] of an atom subset from its kinetic
@@ -2954,6 +3017,7 @@ bool SimpleMD::step()
     // integrator/thermostat runs this step, so the thermostat tracks the updated m_T0.
     // No-op unless temp_ramp is enabled; a live setTargetTemperature() overrides it.
     UpdateTemperatureRamp();
+    UpdateWallRadius();
 
     if (m_rm_COM_step > 0 && m_step % m_rm_COM_step == 0) {
         if (m_rmrottrans == 1)
@@ -5340,6 +5404,8 @@ double SimpleMD::ApplySphericLogFermiWalls()
         potential += curr_pot;
     }
 
+    RecordWallForce(sum_grad);  // Claude Generated (2026): wall force / pressure diagnostic
+
     // Claude Generated: Smart wall violation reporting - prevent console spam
     m_wall_violation_count = counter;
 
@@ -5394,6 +5460,7 @@ double SimpleMD::ApplyRectLogFermiWalls()
         }
         potential += curr_pot;
     }
+
 
     // Claude Generated: Smart wall violation reporting - prevent console spam
     m_wall_violation_count = counter;
@@ -5628,6 +5695,8 @@ double SimpleMD::ApplySphericHarmonicWalls()
         potential += curr_pot;
     }
 
+    RecordWallForce(sum_grad);  // Claude Generated (2026): wall force / pressure diagnostic
+
     // Claude Generated: Smart wall violation reporting - prevent console spam
     m_wall_violation_count = counter;
 
@@ -5687,6 +5756,7 @@ double SimpleMD::ApplyRectHarmonicWalls()
 
         potential += curr_pot;
     }
+
 
     // Claude Generated: Smart wall violation reporting - prevent console spam
     m_wall_violation_count = counter;
@@ -5950,6 +6020,9 @@ void SimpleMD::PrintStatus() const
             m_csv_file << m_csv_delimiter << m_aver_dipol_linear * 2.5418 * 3.3356;
         if (m_writeUnique)
             m_csv_file << m_csv_delimiter << m_unqiue->StoredStructures();
+        if (m_wall_type == 1 && !m_wall_wrap)
+            m_csv_file << m_csv_delimiter << m_wall_spheric_radius << m_csv_delimiter << m_wall_pressure_gpa
+                       << m_csv_delimiter << m_wall_pressure_avg_gpa;
         m_csv_file << "\n";
     }
 

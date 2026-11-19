@@ -1,0 +1,37 @@
+{
+ "_command": "md",
+ "_input": "test_cases/structures/clusters/reactions-haber-bosch-gas.xyz",
+ "_comment": "FORCED: N-N distance_harmonic k 0.3 r0 3.2 A (atoms 1,2 = N, 1-based); not free dynamics",
+ "simplemd": {
+  "method": "gfn2",
+  "charge": 0,
+  "spin": 0,
+  "time_step": 1.0,
+  "thermostat": "csvr",
+  "seed": 1,
+  "threads": 4,
+  "temperature": 1000,
+  "coupling": 10.0,
+  "max_time": 3000,
+  "dump_frequency": 10,
+  "no_center": true,
+  "wall_type": "spheric",
+  "wall_potential": "harmonic",
+  "wall_radius": 4.5,
+  "wall_temp": 20000.0,
+  "electronic_temperature": 1000.0,
+  "scf_max_iterations": 500,
+  "geometry_abort_factor": 0,
+  "external_potentials": [
+   {
+    "kind": "distance_harmonic",
+    "atoms": "1",
+    "atoms_b": "2",
+    "k": 0.3,
+    "r0": 3.2,
+    "label": "N-N pull (forced)"
+   }
+  ],
+  "print_frequency": 100
+ }
+}

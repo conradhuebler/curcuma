@@ -244,6 +244,11 @@ Stand.
 
 ## 5. Funktionen und Refactoring (niedrige Priorität)
 
+- **`external_potentials` ohne Zeitfenster** (2026-11-19): ein Potential gilt über den ganzen Lauf; `start_step`/`stop_step` fehlen (Zwang an, dann frei, ohne Neustart). Die Haber-Bosch-Beispiele (`docs/REACTION_MD_EXAMPLES.md`) brauchen das, um den Zwang abzuschalten.
+  Zwei Restart-Fallen (gemessen in der Kampagne, nicht neu geprüft): `restart_file` erwartet das entpackte `{"MD": ...}` statt der `curcuma_restart.json`; `MaxTime` aus dem Restart überschreibt `max_time` (`simplemd.cpp` Z. 1954).
+- **Open-Shell/UHF pro Fragment fehlt** (2026-11-19): GFN2 rechnet Radikale und freie Atome (H, HO, CH3 in den Reaktions-MD-Beispielen) geschlossenschalig, `-spin N` gilt global; Fe-Cluster laufen mit Spin 0. Details: `docs/REACTION_MD_EXAMPLES.md`.
+- **qurcuma: `setExternalPotentials` nicht verdrahtet** (2026-11-19, `~/src/qurcuma` gelesen, nichts geändert): `external_potentials` steht nicht in der Oberfläche (qurcuma, WP-ux-restructure Z. 88), kein Aufruf im Quelltext; die forcierten Beispiele laufen dort nur über den Reiter "All parameters", ungeprüft. Barostat/periodischer Code liegt außerhalb dieses Zweigs.
+
 - **PLUMED-Hilfeseiten überarbeiten** (2026-11-10, Branch `feature/plumed-help-page`, Stash-Stand vom 01.06., Basis `25d4d8d7`): `-help-plumed` und der SimpleMD-Hinweis darauf doppeln `-help metadynamics` (`printMetadynamicsHelp()` in `src/main.cpp`) und `docs/PLUMED_HELP.md`; zusammenführen, auf den aktuellen Stand bringen.
   Nur die Hilfetexte übernehmen: die Einheitenänderungen des Branches (Bohr-Positionen, kB*T, `setBox`) sind älter als `07e7544d`/`96c29c50` und würden sie teilweise zurückdrehen.
 

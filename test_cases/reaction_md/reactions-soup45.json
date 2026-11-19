@@ -1,0 +1,27 @@
+{
+ "_command": "md",
+ "_input": "test_cases/structures/clusters/reactions-soup45.xyz",
+ "_comment": "free, unphysically hot (4000 K) and dense; CPU only (GPU SCF fails); docs/REACTION_MD_EXAMPLES.md",
+ "simplemd": {
+  "method": "gfn2",
+  "charge": 0,
+  "spin": 0,
+  "time_step": 1.0,
+  "thermostat": "csvr",
+  "seed": 1,
+  "threads": 4,
+  "temperature": 4000,
+  "coupling": 50.0,
+  "max_time": 6000,
+  "dump_frequency": 10,
+  "wall_type": "spheric",
+  "wall_potential": "logfermi",
+  "wall_radius": 6.5,
+  "wall_temp": 3000.0,
+  "wall_beta": 6.0,
+  "electronic_temperature": 1500.0,
+  "scf_max_iterations": 500,
+  "geometry_abort_factor": 0,
+  "print_frequency": 100
+ }
+}
