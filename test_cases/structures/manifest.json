@@ -2091,6 +2091,44 @@
    "notes": "Built to test -scf_precond segmentation on a molecule with aromatic rings. GFN2 SCF: 12 iterations without M."
   },
   {
+   "id": "reactions-doebereiner-control",
+   "class": "clusters",
+   "file": "clusters/reactions-doebereiner-control.xyz",
+   "format": "xyz",
+   "formula": "H4O2",
+   "natoms": 6,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "non-equilibrium",
+   "size_bytes": 259,
+   "sha256": "439e11b0a15ddbb874a29b60f89a2ffe78e1a8c0b5b0aee7559ebe81d1b155fa",
+   "provenance": {
+    "kind": "constructed",
+    "description": "2 H2 + O2 of reactions-doebereiner-pt4 with the same intermolecular geometry, no Pt, shifted by 1.5 A in z; built by script, not optimised"
+   },
+   "notes": "Control of the Doebereiner-lighter reactive-MD example (docs/REACTION_MD_EXAMPLES.md): same gas, no catalyst. Spin 0 is a closed-shell singlet O2; the JSON reactions-doebereiner-control-triplet.json uses spin 2."
+  },
+  {
+   "id": "reactions-doebereiner-pt4",
+   "class": "metals",
+   "file": "metals/reactions-doebereiner-pt4.xyz",
+   "format": "xyz",
+   "formula": "H4O2Pt4",
+   "natoms": 10,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "non-equilibrium",
+   "size_bytes": 377,
+   "sha256": "4fd3b872199d4ed6f2bbb6257f2f8affdaf07fe91b046d44424569d2cef26d4d",
+   "provenance": {
+    "kind": "constructed",
+    "description": "Pt4 tetrahedron (Pt-Pt 2.75 A, as reactions-h2-pt4) with 2 H2 and 1 O2 placed 3.0 and 3.2 A above one facet, molecules 3.5 A apart; built by script, not optimised"
+   },
+   "notes": "Start structure of the Doebereiner-lighter reactive-MD example (docs/REACTION_MD_EXAMPLES.md), not a minimum. Spin 0: closed-shell singlet O2 (the triplet ground state is not represented; GFN2 has no spin polarisation). Atom order (Pt 1-4, H 5-8, O 9-10) is load-bearing for scripts/reaction_md_check.py doeb."
+  },
+  {
    "id": "reactions-h2-pt4",
    "class": "metals",
    "file": "metals/reactions-h2-pt4.xyz",

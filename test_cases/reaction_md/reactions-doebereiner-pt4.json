@@ -1,0 +1,28 @@
+{
+ "_command": "md",
+ "_input": "test_cases/structures/metals/reactions-doebereiner-pt4.xyz",
+ "_comment": "free: 2 H2 + O2 on Pt4, 2000 K CSVR, closed-shell singlet, wall R 6.5 -> 4.5 A in 10000 steps; expect H2 dissociation, OH, sometimes H2O (docs/REACTION_MD_EXAMPLES.md)",
+ "simplemd": {
+  "method": "gfn2",
+  "charge": 0,
+  "spin": 0,
+  "time_step": 1.0,
+  "thermostat": "csvr",
+  "seed": 1,
+  "threads": 1,
+  "temperature": 2000,
+  "coupling": 10.0,
+  "max_time": 20000,
+  "dump_frequency": 10,
+  "wall_type": "spheric",
+  "wall_potential": "logfermi",
+  "wall_radius": 6.5,
+  "wall_radius_schedule": "4.5:steps:10000",
+  "wall_temp": 2000.0,
+  "electronic_temperature": 2000.0,
+  "scf_max_iterations": 500,
+  "scf_damping": 0.15,
+  "geometry_abort_factor": 0,
+  "print_frequency": 500
+ }
+}

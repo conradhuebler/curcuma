@@ -9,7 +9,7 @@ hot, stretched H2 (above 0.775 A) and loosely bound intermediates are missed or 
 
 Usage:
   reaction_md_check.py <scenario> <trajectory.xyz | run directory> [--dt 1.0] [--dump 10]
-  scenario: h2-metal | soup | wgs | haber | fe4
+  scenario: h2-metal | soup | wgs | haber | fe4 | doeb
   A directory is searched for the newest *.trj.xyz (BMT output directory or CWD).
 Time of frame k is k * dump * dt (fs); frame 0 is the start structure.
 Exit status 0 = analysis done (it does not judge whether the expected event happened; the report does).
@@ -195,9 +195,74 @@ def scen_haber(sym, X, B, dt, fe=False):
     print("EVENT NH3 (free) formed :", first_nh3 is not None, "| N-N max > 2.5 A:", max(nn) > 2.5)
 
 
+def scen_doeb(sym, X, B, dt):
+    """2 H2 + O2 with or without a Pt cluster (Doebereiner lighter), Claude Generated (Nov 2026).
+
+    Events (geometric criterion only): H-H pairs of the start structure broken, O-O broken, first O-H bond,
+    first O bound to two H (H2O unit, free or on Pt), first free H2O (component of formula H2O), first Pt-O/Pt-H contact.
+    """
+    h = [k for k, s in enumerate(sym) if s == 'H']
+    o = [k for k, s in enumerate(sym) if s == 'O']
+    pt = [k for k, s in enumerate(sym) if s == 'Pt']
+    hh0 = [(a, b) for a, b in itertools.combinations([k for k, s in enumerate(sym) if s == 'H'], 2) if math.dist(X[0][a], X[0][b]) < 0.9]
+    oo0 = [b for b in B[0] if sym[b[0]] == 'O' and sym[b[1]] == 'O']
+
+    def oh_count(bs):
+        c = collections.Counter()
+        for i, j in bs:
+            if {sym[i], sym[j]} == {'O', 'H'}:
+                c[i if sym[i] == 'O' else j] += 1
+        return c
+
+    def first(pred):
+        k = next((k for k, bs in enumerate(B) if pred(bs)), None)
+        return fmt_time(k * dt) if k is not None else "never"
+
+    def n_oh(bs):
+        return sum(oh_count(bs).values())
+
+    def h2o_unit(bs):
+        return any(v >= 2 for v in oh_count(bs).values())
+
+    def free_h2o(bs):
+        return any(formula(sym, c) == 'H2O' for c in components(len(sym), bs))
+
+    # H-H "intact" = distance < 1.0 A (a stretched, hot H2 stays an H2; the 1.25 criterion would call it broken)
+    hh_pairs = [(a, b) for a, b in itertools.combinations(h, 2) if math.dist(X[0][a], X[0][b]) < 0.9]
+    hh_n = [sum(1 for a, b in hh_pairs if math.dist(x[a], x[b]) < 1.0) for x in X]
+    hh_id = {id(bs): k for k, bs in enumerate(B)}
+
+    def hh_left(bs):
+        return hh_n[hh_id[id(bs)]]
+
+    def pt_contact(bs, el):
+        return any({sym[i], sym[j]} == {'Pt', el} for i, j in bs)
+
+    print(f"start H-H pairs {len(hh0)}, O-O pairs {len(oo0)}, Pt atoms {len(pt)}")
+    print("first H-H pair broken   :", first(lambda bs: hh_left(bs) < len(hh0)))
+    print("both H-H pairs broken   :", first(lambda bs: hh_left(bs) == 0))
+    print("first O-O broken        :", first(lambda bs: oo0 and not all(b in bs for b in oo0)))
+    print("first O-H bond          :", first(lambda bs: n_oh(bs) > 0))
+    print("first O with 2 H (H2O)  :", first(h2o_unit))
+    print("first free H2O          :", first(free_h2o))
+    print("first Pt-H / Pt-O bond  :", first(lambda bs: pt_contact(bs, 'H')), "/", first(lambda bs: pt_contact(bs, 'O')))
+    print("frames with an O-H bond :", f"{sum(1 for bs in B if n_oh(bs)) / len(B):.2f}",
+          "| with an H2O unit:", f"{sum(1 for bs in B if h2o_unit(bs)) / len(B):.2f}")
+    print("max O-H bonds (any frame)/final :", max(n_oh(bs) for bs in B), "/", n_oh(B[-1]))
+    print("final H-H pairs (<1.0 A):", hh_left(B[-1]), "of", len(hh0), "| final O-O intact:",
+          sum(1 for b in oo0 if b in B[-1]), "of", len(oo0))
+    print("final species           :", dict(collections.Counter(species(sym, B[-1]))))
+    if pt:
+        pt0 = [(a, b) for a, b in itertools.combinations(pt, 2) if math.dist(X[0][a], X[0][b]) < 3.2]
+        print(f"max Pt-Pt (start nbrs)  : {max(math.dist(x[a], x[b]) for x in X for a, b in pt0):.2f} A (start {max(math.dist(X[0][a], X[0][b]) for a, b in pt0):.2f})")
+    rmax = max(math.dist(x[a], (0, 0, 0)) for x in X for a in range(len(sym)))
+    print(f"max distance from origin: {rmax:.2f} A")
+    print("EVENT H2O unit formed   :", any(h2o_unit(bs) for bs in B), "| O-H bond:", any(n_oh(bs) for bs in B))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('scenario', choices=['h2-metal', 'soup', 'wgs', 'haber', 'fe4'])
+    ap.add_argument('scenario', choices=['h2-metal', 'soup', 'wgs', 'haber', 'fe4', 'doeb'])
     ap.add_argument('path')
     ap.add_argument('--dt', type=float, default=1.0, help='time step in fs')
     ap.add_argument('--dump', type=int, default=10, help='dump_frequency in steps')
@@ -211,7 +276,7 @@ def main():
     print(f"trajectory              : {path}")
     print(f"frames                  : {len(fr)} ({fmt_time((len(fr) - 1) * dt)} of simulated time), atoms {len(sym)}")
     {'h2-metal': scen_h2_metal, 'soup': scen_soup, 'wgs': scen_wgs,
-     'haber': scen_haber, 'fe4': lambda *p: scen_haber(*p, fe=True)}[a.scenario](sym, X, B, dt)
+     'haber': scen_haber, 'fe4': lambda *p: scen_haber(*p, fe=True), 'doeb': scen_doeb}[a.scenario](sym, X, B, dt)
 
 
 if __name__ == '__main__':

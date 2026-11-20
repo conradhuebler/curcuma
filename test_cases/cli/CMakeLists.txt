@@ -255,7 +255,8 @@ add_cli_test(simplemd 17_wall_radius_schedule)
 set_tests_properties(cli_simplemd_17_wall_radius_schedule PROPERTIES TIMEOUT 120 LABELS "simplemd;gfn2;wall")
 # Claude Generated (Nov 2026): reaction-MD example inputs (docs/REACTION_MD_EXAMPLES.md); JSON and checker stay in one place and are copied here
 add_cli_test(simplemd 18_reaction_md_inputs)
-foreach(_rmd reactions-haber-bosch-gas reactions-haber-bosch-gas-control reactions-h2-pt4)
+foreach(_rmd reactions-haber-bosch-gas reactions-haber-bosch-gas-control reactions-h2-pt4
+                  reactions-doebereiner-pt4 reactions-doebereiner-control)
     configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../reaction_md/${_rmd}.json"
                    "${CMAKE_CURRENT_BINARY_DIR}/simplemd/18_reaction_md_inputs/${_rmd}.json" COPYONLY)
 endforeach()
