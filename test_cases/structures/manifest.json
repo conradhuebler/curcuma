@@ -2438,6 +2438,25 @@
    "description": "comment line: water C2v, r(OH)=0.9572 A"
   },
   {
+   "id": "water216-box.sc-s1",
+   "class": "bulk",
+   "file": "bulk/water216-box.sc-s1.xyz",
+   "format": "xyz",
+   "formula": "H432O216",
+   "natoms": 648,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "non-equilibrium",
+   "size_bytes": 31494,
+   "sha256": "8624effb86dcd3a62aa0aa037a55d9938670186962f1274b6f7cf8fa4a0cdd41",
+   "provenance": {
+    "kind": "constructed",
+    "description": "Cubic periodic water box, 216 H2O on a simple-cubic 6x6x6 lattice, L = 18.625793445945 A (rho 1.0 g/cm3), rigid TIP3P-like monomers (rOH 0.9572 A, HOH 104.52 deg), random orientations seed 1; built Nov 2026 with build_waterbox.py --n 216 --seed 1 of the operator project GFN-FF-Wasser; not relaxed. The comment line carries the unitcell."
+   },
+   "notes": "Periodic GPU parity cell of pbc_xtb_gpu_parity (WP-PERIODIC-XTB G2-G6)"
+  },
+  {
    "id": "water8-cluster",
    "class": "clusters",
    "file": "clusters/water8-cluster.xyz",

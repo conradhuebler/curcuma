@@ -127,6 +127,8 @@ public:
     /// Download the converged density and MO coefficients to the host (column
     /// major; symmetric P may be read as row-major). Called once after the loop.
     bool residentFinalize(double* P_colmajor, double* C_colmajor, int n);
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB G5b): W = C diag(w) C^T (column-major) from the resident dC.
+    bool residentEnergyWeightedDensity(const double* w, int ncol, int n, double* W_colmajor);
 
     /* ----- Device-resident GFN2 multipole (Stage 2b) --------------------- *
      * Layered on residentBegin: the geometry-constant dipole (3) and quadrupole
@@ -459,6 +461,20 @@ public:
                                    int ndtrans, const double* dtrans, int nrtrans, const double* rtrans,
                                    const double* kexp, double alpha, double dmp3, double dmp5, double sd_f,
                                    double sq_f, double fac, double* const* out18);
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB G2): see GpuScfBackend::ewaldGammaPeriodic.
+    bool ewaldGammaPeriodic(int nat, const double* xyz_bohr, const double* cell_L, double alpha, double volume,
+                            double r_cut, int nk, const double* ktab, int nsh, const int* sh2at,
+                            const double* hardness, bool harmonic, double gexp, int nko, const double* ko_trans,
+                            double ko_cut, double* gamma_out);
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB G5d): see GpuScfBackend::repulsionPeriodic.
+    bool repulsionPeriodic(int nat, const double* xyz_bohr, const double* alpha, const double* zeff, const int* light,
+                           double kexp, double kexp_light, double rexp, const double* cell_L, int ntrans,
+                           const double* trans, double cut2, bool gradient, bool want_virial, double* energy_out,
+                           double* grad_out, double* vir9_out);
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB G5c): see GpuScfBackend::cnChainGradientPeriodic.
+    bool cnChainGradientPeriodic(int nat, const double* xyz_bohr, const double* rcov, const double* dEdcn,
+                                 const double* cell_L, int ntrans, const double* trans, double cut2, bool gfn1,
+                                 bool want_virial, double* grad_out, double* vir9_out);
     /// Claude Generated (Nov 2026, WP-PERIODIC-XTB G5a): see GpuScfBackend::multipoleGradientPeriodic.
     bool multipoleGradientPeriodic(int nat, const double* xyz_bohr, const double* mrad, const double* q_at,
                                            const double* dp_at, const double* qp_at, const double* cell_L, int ndtrans,

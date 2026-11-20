@@ -416,8 +416,9 @@ before G4/G5 (the CPU image loops are already threaded), G2/G3 last (cheap on th
 main checkout holds a CUDA build (`-DUSE_CUDA_XTB=ON -DCMAKE_CUDA_ARCHITECTURES=120`), the RTX 5080 was idle (0 %)
 on 2026-11-15; no GPU run was made in this session. **Status: G0 written; G1 done in the reduced form below
 (host-built periodic matrices, device-resident SCF); of G2-G6 done: G3 (multipole matrices), G4a (ATM), G4b (in-SCF
-D4 dE/dq), G5a (multipole gradient + virial pair loop), see the sections below; G1 device integral kernels, G2, the rest
-of G4/G5/G6 open; G7 lifted for CUDA in the G1 form.**
+D4 dE/dq), G5a (multipole gradient + virial pair loop), G2 (Ewald gamma), G5b-d (W, CN chain, repulsion), see the
+sections below; G1 device integral kernels, H0/Pulay, Ewald/KO gradient, periodic D3 and the remaining virial terms
+open; G7 lifted for CUDA in the G1 form.**
 
 ### G1 (reduced): device-resident SCF with host-built periodic matrices, CUDA only (2026-11-15, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
 
@@ -594,6 +595,105 @@ only where its pair loop is (ATM, multipole), the other virial terms stay on the
 Regression after G4b (2026-11-15, test selection of the regression run below, `-j1`): `release/` 367 of 368 passed,
 `release_cuda/` 638 of 639 passed; the only failure in both is the pre-existing `xtb_cpscf`; 3 tests `Not Run
 (Disabled)` as before.
+
+### G2-G6 continuation: profile at the start (2026-11-20, Claude Generated)
+
+Binary of 45c9358c (`release_cuda/`, ABI 12), gfn2, `-gpu cuda -threads 8`, RTX 5080 idle, `-sp` + `-dump_gradient`
+at verbosity 3 (no virial), one run each (ms):
+
+| item | 216 H2O | 432 H2O |
+|---|---|---|
+| gamma: Ewald matrix / KO remainder | 105 / 14 | 351 / 55 |
+| CN / S+H0 / orthonormalizer | 20 / 43 / 22 | 53 / 86 / 118 |
+| multipole: AO dp/qp image sums / interaction matrices (device) | 54 / 21 | 184 / 96 |
+| SCF 11 it: total / device eigensolve / D4 dE/dq (device) | 332 / 260 / 37 | 1256 / 984 / 112 |
+| post-SCF: D4 pairs / ATM (device) / CN fold; repulsion+XB energy | 15 / 108 / 35; 34 | 37 / 217 / 95; 124 |
+| gradient: W / rep+XB / H0-Pulay / Ewald / KO / multipole (device) / CN chain | 40 / 21 / 53 / 8 / 15 / 16 / 35 | 291 / 65 / 124 / 34 / 56 / 101 / 125 |
+| TOTAL / wall | 1077 / 1420 | 3699 / 3949 |
+
+MD baseline (same binary, `md.sh`: `-md -time_step 0.5 -max_time 10 -seed 7 -compute_pressure true`, wall of the
+whole run / 20, incl. start-up and step 0): 216 H2O 1.04 s, 432 H2O 3.81 s per step.
+
+Bitwise base (gate d): the system compiler and CUDA were upgraded on 2026-11-17 (gcc 16.1.1 -> 16.2.1, CUDA 13.3.1
+-> 13.4.2), after the builds of 45c9358c; a rebuild of unchanged sources then differs from those binaries in the last
+bits of the gfn1/gfn2 CUDA results without a cell (methanol gfn2: 15828dc5 vs 58f8f966, each run to run stable). The
+base of the G2-G6 continuation is therefore 45c9358c (`git archive`) rebuilt with the current toolchain and the
+`release`/`release_cuda` configuration (MKL, BLAS, march native, CUDA host compiler g++-15; without them the cell-free
+gfnff results differ as well). Check: gfnff/gfn1/gfn2 x 6 structures (methanol, benzene, HCN, ammonia, caffeine,
+butane) x 1/4 threads, `-sp` energy line + `-dump_gradient` file, md5 per run (36 runs per binary).
+
+### G2 periodic Ewald gamma on the device (2026-11-20, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+- `GpuScfBackend::ewaldGammaPeriodic` (CUDA: `XtbGpuContext::ewaldGammaPeriodic`, kernels `k_ewald_phase`,
+  `k_ewald_finish`, `k_gamma_pbc`): the reciprocal part of `EwaldSum::matrix` as `A += M M^T` with
+  M(i, k) = sqrt(2 w_k) [cos k.r_i | sin k.r_i] in blocks of k vectors (`cublasDsyrk`, phases by `sincos` instead
+  of the host recursion table), then per atom pair i >= j the real-space erfc(a r)/r (minimum image, r < r_cut), self
+  and background terms, then per shell pair the Klopman-Ohno remainder over the images and the on-atom hardness, the
+  statements of `buildGammaMatrixPeriodic`. Every element is written by one thread (no atomics), cuBLAS dsyrk is
+  deterministic; the nsh x nsh result is downloaded into `m_gamma` (the energy and the G1 upload use it as before).
+  k vectors from the new `EwaldSum::kVectorTable()`. `CURCUMA_PBC_GPU_HOST=gamma` keeps the host loop. Plugin ABI 13.
+- Time (`Coulomb gamma matrix`, 8 threads, gfn2, same binary with and without the env switch): 216 H2O 116 -> 51 ms,
+  432 H2O 417 -> 80 ms (the FP64 dsyrk, about 44 GFLOP at 432 H2O, is most of it on the RTX 5080).
+- Gates: `pbc_xtb_gpu_parity` extended by the 216 H2O box (structure library `water216-box.sc-s1`, registry
+  `water216_box`, 4 host threads): 8/8 cells pass, gfn1 box |dE| 2.3e-13 Eh, max |dG| 2.9e-10 Eh/A, max |dXi|
+  1.0e-9 Eh; gfn2 box 6.8e-13 / 7.9e-11 / 3.7e-10; the small cells as before (<= 1.4e-14 Eh, <= 1.3e-10 Eh/A,
+  <= 2.3e-10 Eh); second CUDA run bitwise in 8/8. Device vs host gamma in the same binary (`-scf_threshold 1e-9`):
+  216 H2O dE 0 (15 printed digits), max dG 4.4e-15 Eh/A; 432 H2O dE 0, max dG 7.6e-15 Eh/A; second device run
+  md5-identical (216 and 432). Without a cell: CUDA 36/36 and CPU 36/36 md5-identical to the rebuilt base.
+
+### G5b/G5c/G5d W, CN chain and repulsion on the device (2026-11-20, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+- G5b `GpuScfBackend::energyWeightedDensity` (CUDA `residentEnergyWeightedDensity`): W = C diag(focc eps) C^T of
+  `calculateGradientPeriodic` from the eigenvectors that stay on the device after the resident SCF (`k_scale_cols` +
+  `cublasDgemm`, the statements of the cell-free device gradient), downloaded into the host W. Used only when the
+  host C came from the device finalize of the same SCF (`XTB::m_pbc_dev_wfn`, reset per `Calculation`).
+  `CURCUMA_PBC_GPU_HOST=wmat`.
+- G5c `cnChainGradientPeriodic` (kernel `k_cnchain_pbc<WANT_V>`): section 4 (CN chain rule of the H0 CN over the
+  images, 25 Bohr), one thread per pair, image sum in registers, gradient by `gfix_add`, virial by the fixed-order
+  block tree of G5a. `CURCUMA_PBC_GPU_HOST=cnchain`.
+- G5d `repulsionPeriodic` (kernels `k_rep_pbc<GRAD, WANT_V>`, `k_rep_rows`): the repulsion energy
+  (`calcRepulsionEnergyPeriodic`, pair sums written per element, rows summed in j order, rows added in atom order on
+  the host) and section 1 of the gradient (fixed point, virial with the self images at weight 1/2).
+  `CURCUMA_PBC_GPU_HOST=rep`. The GFN1 halogen bond stays on the host (no XB system in the tests).
+- Plugin ABI stays 13 (G2, G5b-d in one ABI step, uncommitted in between).
+- Time (8 threads, gfn2, `-scf_threshold 1e-9`, same binary with and without `CURCUMA_PBC_GPU_HOST=wmat,cnchain,rep`):
+
+| item (ms) | 216 H2O host -> device | 432 H2O host -> device |
+|---|---|---|
+| W | 39 -> 8 | 286 -> 41 |
+| repulsion energy (post-SCF `entropy/repulsion/halogen bond`) | 35 -> 2 | 125 -> 4 |
+| repulsion gradient (+XB) | 22 -> 2 | 73 -> 4 |
+| CN chain | 19 -> 1 | 59 -> 3 |
+
+- Gates: `pbc_xtb_gpu_parity` 8/8 (gfn2 216 H2O |dE| 1.4e-12 Eh, max |dG| 7.9e-11 Eh/A, max |dXi| 3.7e-10 Eh; gfn1
+  box 2.3e-13 / 2.9e-10 / 1.0e-9; small cells unchanged), second CUDA run bitwise 8/8; device vs host in the same
+  binary: 216 H2O dE 7e-13 Eh, max dG 1.1e-14 Eh/A, 432 H2O dE 2.7e-12 Eh (1e-15 relative), max dG 1.4e-14 Eh/A,
+  second device run md5-identical; FD of the assembled surface on the device (water dimer, 8 A cube, -gpu cuda,
+  h = 1e-4 A, all 18 coordinates): gfn1 8.1e-9, gfn2 8.9e-9 Eh/A (the CPU FD gate level of P3); `pbc_xtb_*`/`ewald*`
+  9/9 in `release/` and `release_cuda/`; without a cell CPU 36/36 and CUDA 36/36 md5 to the rebuilt base.
+- MD (216 H2O, 20 steps of 0.5 fs, `-seed 7 -compute_pressure true`, all stages on the device vs
+  `CURCUMA_PBC_GPU_HOST=all`): default SCF threshold: E_pot -1096.551628 / -1096.551629, T 462.483528 / 462.483513 K,
+  P 14765.51 / 14765.52 bar (the default SCF convergence, about 1e-6 Eh/A in the forces, carries the rounding
+  difference of the two paths into the trajectory); with `-scf_threshold 1e-9`: E_pot -1096.551628 both, T 462.483544
+  both, P 14765.49 both (6 printed decimals). n = 1 run each.
+
+### G2-G6 timing after G2/G5b-d (2026-11-20, Claude Generated)
+
+MD step = wall of the 20-step run / 20 (`md.sh`, as at the start), RTX 5080, 8 threads, machine shared (load 5-7), one
+run each:
+
+| box | base 45c9358c | after G2 + G5b-d | same binary, every ported stage on the host (`all`) |
+|---|---|---|---|
+| 216 H2O | 1.04 s | 0.81 s | 1.78 s |
+| 432 H2O | 3.81 s | 3.13 s | - (`gamma,wmat,cnchain,rep` on the host: 4.23 s, noise of the shared machine) |
+
+Remaining on the host (432 H2O `-sp`, ms): device eigensolve 0.98 s of the SCF (device), AO multipole image sums 184
+and S/H0 86 (G1 device integrals), H0/Pulay gradient 124-132 (needs the image-shifted CGTO overlap and multipole
+derivative kernels; not started), orthonormalizer 118, Ewald gradient 33 and KO gradient 34, D4 CN fold 95, periodic D3
+(GFN1), halogen bond (GFN1), the virial terms of the H0/Pulay, Ewald and dispersion loops.
+
+Regression after G2/G5b-d (2026-11-20, test selection of the regression run below, `-j1`): `release/` 379 of 380,
+`release_cuda/` 650 of 651 passed; the only failure in both is the pre-existing `xtb_cpscf`.
 
 ## Regression run (2026-11-14, `release/`, `ctest -R 'gfn|xtb|sqm|gfnff|pbc|ewald|simplemd|restart|md_|gpu|plugin|molecule|xyz|parser|curcumaopt|structinv' -j1`)
 

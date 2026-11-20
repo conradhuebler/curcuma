@@ -2404,6 +2404,7 @@ double XTB::Calculation(bool gradient)
     const bool device_grad_will_run = gradient && use_gpu_resident && m_gpu_scf && !m_pbc   // G1: host periodic gradient
         && m_gpu_scf->supportsGradient();
     m_wfn_on_device = false;
+    m_pbc_dev_wfn = false;   // G5b
     if (use_gpu_resident && m_gpu_scf) {
         // The converged P/C stay on the device only for big systems (as before for GFN2: dense multipole integrals
         // above 2 GB, nao > ~5270); the small ones keep the public accessors (getDensity, MolecularOrbitals)
@@ -2412,8 +2413,10 @@ double XTB::Calculation(bool gradient)
         const bool big_wfn = 9.0 * static_cast<double>(m_basis.nao) * m_basis.nao * sizeof(double) > 2.0e9;
         if (use_resident_loop && big_wfn && (m_mp_ints_deferred || gfn1_resident) && (!gradient || device_grad_will_run))
             m_wfn_on_device = true;
-        else
-            m_gpu_scf->finalize(m_wfn.P, m_wfn.C);
+        else {
+            const bool fin_ok = m_gpu_scf->finalize(m_wfn.P, m_wfn.C);
+            m_pbc_dev_wfn = m_pbc && fin_ok;   // G5b: the device dC is the m_wfn.C of this SCF
+        }
     }
     post_mark("finalize: download P and C");
 

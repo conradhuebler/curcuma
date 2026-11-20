@@ -292,6 +292,20 @@ public:
 
     const EwaldParameters& parameters() const { return m_par; }
     int numberOfKVectors() const { return static_cast<int>(m_kvectors.size()); }
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB G2): the half-space k vectors as kx ky kz weight (4 per k, the
+    /// weight already doubled for the -k partner), for a device build of matrix().
+    std::vector<double> kVectorTable() const
+    {
+        std::vector<double> t;
+        t.reserve(4 * m_kvectors.size());
+        for (const KVector& kv : m_kvectors) {
+            t.push_back(kv.k[0]);
+            t.push_back(kv.k[1]);
+            t.push_back(kv.k[2]);
+            t.push_back(kv.weight);
+        }
+        return t;
+    }
     double volume() const { return m_volume; }
 
 private:

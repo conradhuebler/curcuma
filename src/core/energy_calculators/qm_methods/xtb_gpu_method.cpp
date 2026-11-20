@@ -431,6 +431,41 @@ public:
                                                 nrtrans, rtrans, kexp, alpha, fac, sd_f, sq_f, dmp3, dmp5,
                                                 want_virial, grad_out, dEdr_out, vir9_out);
     }
+    // Claude Generated (Nov 2026, WP-PERIODIC-XTB G2): periodic shell gamma (Ewald + KO remainder), see GpuScfBackend.
+    bool ewaldGammaPeriodic(int nat, const double* xyz_bohr, const double* cell_L, double alpha, double volume,
+                            double r_cut, int nk, const double* ktab, int nsh, const int* sh2at,
+                            const double* hardness, bool harmonic, double gexp, int nko, const double* ko_trans,
+                            double ko_cut, double* gamma_out) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->ewaldGammaPeriodic(nat, xyz_bohr, cell_L, alpha, volume, r_cut, nk, ktab, nsh, sh2at, hardness,
+                                         harmonic, gexp, nko, ko_trans, ko_cut, gamma_out);
+    }
+    // Claude Generated (Nov 2026, WP-PERIODIC-XTB G5b): W = C diag(w) C^T from the resident eigenvectors.
+    bool energyWeightedDensity(const double* w, int ncol, int n, double* W_colmajor) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->residentEnergyWeightedDensity(w, ncol, n, W_colmajor);
+    }
+    // Claude Generated (Nov 2026, WP-PERIODIC-XTB G5d): periodic repulsion, see GpuScfBackend.
+    bool repulsionPeriodic(int nat, const double* xyz_bohr, const double* alpha, const double* zeff, const int* light,
+                           double kexp, double kexp_light, double rexp, const double* cell_L, int ntrans,
+                           const double* trans, double cut2, bool gradient, bool want_virial, double* energy_out,
+                           double* grad_out, double* vir9_out) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->repulsionPeriodic(nat, xyz_bohr, alpha, zeff, light, kexp, kexp_light, rexp, cell_L, ntrans,
+                                        trans, cut2, gradient, want_virial, energy_out, grad_out, vir9_out);
+    }
+    // Claude Generated (Nov 2026, WP-PERIODIC-XTB G5c): periodic CN chain rule, see GpuScfBackend.
+    bool cnChainGradientPeriodic(int nat, const double* xyz_bohr, const double* rcov, const double* dEdcn,
+                                 const double* cell_L, int ntrans, const double* trans, double cut2, bool gfn1,
+                                 bool want_virial, double* grad_out, double* vir9_out) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->cnChainGradientPeriodic(nat, xyz_bohr, rcov, dEdcn, cell_L, ntrans, trans, cut2, gfn1,
+                                              want_virial, grad_out, vir9_out);
+    }
     // Claude Generated (Nov 2026, WP-PERIODIC-XTB G4b): periodic in-SCF D4 dE/dq, see GpuScfBackend.
     bool beginDispersionImages(int nat, const double* cell_L, int ntrans, const double* trans, double cut2) override
     {

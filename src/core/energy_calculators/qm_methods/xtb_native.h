@@ -712,6 +712,47 @@ struct GpuScfBackend {
     /// Per SCF iteration: dE_D4/dq with the D(i, j) of beginDispersionImages; W/dWq as dispersionDedq.
     virtual bool dispersionDedqPeriodic(int nat, const double* W, const double* dWq, double* dEdq_out)
     { (void)nat; (void)W; (void)dWq; (void)dEdq_out; return false; }
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB G2): the periodic shell gamma of XTB::buildGammaMatrixPeriodic on
+    /// the device, self-contained. Point-charge Ewald matrix A of the atoms (real erfc(a r)/r under the minimum image
+    /// for r < r_cut, reciprocal sum over the nk half-space vectors ktab[4 nk] = kx ky kz w as a rank update
+    /// (cuBLAS dsyrk), self -2a/sqrt(pi), background -pi/(a^2 V)), then per shell pair A(iat, jat) + the Klopman-Ohno
+    /// remainder over the images ko_trans[3 nko] (T = 0 first) within ko_cut + the on-atom hardness. hardness[nsh]
+    /// per shell, harmonic = GFN1 average (else arithmetic, GFN2). gamma_out nsh x nsh (symmetric). Default false.
+    virtual bool ewaldGammaPeriodic(int nat, const double* xyz_bohr, const double* cell_L, double alpha, double volume,
+                                    double r_cut, int nk, const double* ktab, int nsh, const int* sh2at,
+                                    const double* hardness, bool harmonic, double gexp, int nko,
+                                    const double* ko_trans, double ko_cut, double* gamma_out)
+    { (void)nat; (void)xyz_bohr; (void)cell_L; (void)alpha; (void)volume; (void)r_cut; (void)nk; (void)ktab;
+      (void)nsh; (void)sh2at; (void)hardness; (void)harmonic; (void)gexp; (void)nko; (void)ko_trans; (void)ko_cut;
+      (void)gamma_out; return false; }
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB G5b): energy-weighted density W = C diag(w) C^T (n x n,
+    /// column-major) from the eigenvectors left on the device by the resident SCF (finalize), w[ncol] = focc * eps of
+    /// the first ncol orbitals (cuBLAS dgemm). Default false -> host GEMM.
+    virtual bool energyWeightedDensity(const double* w, int ncol, int n, double* W_colmajor)
+    { (void)w; (void)ncol; (void)n; (void)W_colmajor; return false; }
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB G5c): CN chain rule of the periodic H0 coordination number
+    /// (section 4 of XTB::calculateGradientPeriodic) on the device, self-contained: pairs j < i (j <= i with the
+    /// virial) over the images trans[3 ntrans] (T = 0 first) within cut2, rcov [nat] (Bohr), dEdcn [nat]. Outputs
+    /// grad [3 nat] (Eh/Bohr, to be added) and vir9 (Xi_ab contribution, row-major, want_virial only); fixed-point
+    /// accumulation. gfn1: the single erf-free exponential CN of GFN1, else the GFN2 double exponential.
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB G5d): periodic xTB repulsion over the images trans[3 ntrans]
+    /// (T = 0 first) within cut2 on the device, self-contained; per atom alpha, zeff and kexp (the pair uses kexp_i
+    /// only when both atoms carry the light exponent: kexp_pair = light_i && light_j ? kexp_light : kexp). Energy
+    /// mode (gradient false): *energy_out = sum over j <= i (self images weight 1/2), rows summed in atom order.
+    /// Gradient mode: grad [3 nat] (Eh/Bohr, to be added) for j < i and, with want_virial, vir9 (incl. the self
+    /// images with weight 1/2); fixed-point accumulation. Default false -> host loops.
+    virtual bool repulsionPeriodic(int nat, const double* xyz_bohr, const double* alpha, const double* zeff,
+                                   const int* light, double kexp, double kexp_light, double rexp,
+                                   const double* cell_L, int ntrans, const double* trans, double cut2, bool gradient,
+                                   bool want_virial, double* energy_out, double* grad_out, double* vir9_out)
+    { (void)nat; (void)xyz_bohr; (void)alpha; (void)zeff; (void)light; (void)kexp; (void)kexp_light; (void)rexp;
+      (void)cell_L; (void)ntrans; (void)trans; (void)cut2; (void)gradient; (void)want_virial; (void)energy_out;
+      (void)grad_out; (void)vir9_out; return false; }
+    virtual bool cnChainGradientPeriodic(int nat, const double* xyz_bohr, const double* rcov, const double* dEdcn,
+                                         const double* cell_L, int ntrans, const double* trans, double cut2,
+                                         bool gfn1, bool want_virial, double* grad_out, double* vir9_out)
+    { (void)nat; (void)xyz_bohr; (void)rcov; (void)dEdcn; (void)cell_L; (void)ntrans; (void)trans; (void)cut2;
+      (void)gfn1; (void)want_virial; (void)grad_out; (void)vir9_out; return false; }
     /// Claude Generated (Oct 2026): potentials of the gradient at the converged charges of the resident loop built on the
     /// device (XtbGpuContext::convergedPotentials) and the gradient that reads them (no host potential, no upload).
     virtual bool prepareConvergedPotentials(bool gfn2) { (void)gfn2; return false; }
@@ -1864,6 +1905,7 @@ private:
     // GenerateParameters of the current geometry so per-SCF addDispersionPotential()
     // only refreshes the charges instead of regenerating the full reference set.
     mutable bool   m_d4_prepared = false;
+    bool           m_pbc_dev_wfn = false;        ///< G5b: the device eigenvectors are m_wfn.C of this SCF (finalize)
     mutable bool   m_pbc_d4_dev_ready = false;   ///< G4b: device D(i, j) of this geometry built (reset with m_d4_prepared)
     mutable int    m_d4_genparams_calls = 0;  // diagnostic: GenerateParameters calls (verbosity>=3)
     // GFN2 component audit (Claude Generated): when set, calcDispersionEnergy

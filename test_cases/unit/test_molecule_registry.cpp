@@ -149,6 +149,15 @@ namespace TestMolecules {
             }
         },
         {
+            "water216_box", {
+                .name = "water216_box",
+                .description = "Periodic water box, 216 H2O, L = 18.625793445945 A (structure library water216-box.sc-s1, cell set by the caller)",
+                .category = "bulk",
+                .library_id = "water216-box.sc-s1",
+                .atom_count = 648
+            }
+        },
+        {
             "H2O", {
                 .name = "H2O",
                 .description = "Water trimer from trimers/water.xyz",
@@ -288,7 +297,7 @@ namespace TestMolecules {
         ensureLoaded();
         auto it = s_molecule_registry.find(name);
         if (it == s_molecule_registry.end()) {
-            throw std::invalid_argument("Molecule '" + name + "' not found in registry. Available molecules: H2, HCl, OH, CH4, CH3OH, CH3OCH3, C6H6, HCN, H2O, H2O_dimer, NH3, O3, monosaccharide, triose, caffeine, acetic_acid_dimer, hydronium_water2, fi_pyridine. Note: 'polymer' is xyz-path-only (1410 atoms — too large to inline).");
+            throw std::invalid_argument("Molecule '" + name + "' not found in registry. Available molecules: H2, HCl, OH, CH4, CH3OH, CH3OCH3, C6H6, HCN, H2O, H2O_dimer, NH3, O3, monosaccharide, triose, caffeine, acetic_acid_dimer, hydronium_water2, fi_pyridine, water216_box. Note: 'polymer' is xyz-path-only (1410 atoms — too large to inline).");
         }
         return it->second;
     }

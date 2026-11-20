@@ -77,8 +77,32 @@ inline bool xb_is_acceptor(int z) { return z == 7 || z == 8 || z == 15 || z == 1
 
 } // namespace
 
+namespace {
+/// G5d (Nov 2026): per-atom repulsion inputs and the image list as flat arrays for GpuScfBackend::repulsionPeriodic.
+struct PbcRepulsionArrays {
+    std::vector<double> alpha, zeff, trans;
+    std::vector<int> light;
+};
+PbcRepulsionArrays pbcRepulsionArrays(const std::vector<int>& atoms, bool g1, const PBCUtils::LatticeImageList& images)
+{
+    PbcRepulsionArrays a;
+    const int nat = static_cast<int>(atoms.size());
+    a.alpha.resize(nat); a.zeff.resize(nat); a.light.resize(nat);
+    for (int i = 0; i < nat; ++i) {
+        const int z = atoms[i];
+        a.alpha[i] = g1 ? gfn1_params::rep_alpha[z - 1] : gfn2_params::rep_alpha[z - 1];
+        a.zeff[i] = g1 ? gfn1_params::rep_zeff[z - 1] : gfn2_params::rep_zeff[z - 1];
+        a.light[i] = (!g1 && z <= 2) ? 1 : 0;
+    }
+    a.trans.resize(3 * images.trans.size());
+    for (size_t t = 0; t < images.trans.size(); ++t)
+        for (int k = 0; k < 3; ++k) a.trans[3 * t + k] = images.trans[t][k];
+    return a;
+}
+} // namespace
+
 /// G2-G6 (Nov 2026): CURCUMA_PBC_GPU_HOST=<list> keeps the named periodic device stages on the host (comparison
-/// and timing in one binary; tokens: atm, mpmat, mpgrad, d4dedq, all). Diagnostic only, default empty = every ported stage on the device.
+/// and timing in one binary; tokens: atm, mpmat, mpgrad, d4dedq, gamma, wmat, cnchain, rep, all). Diagnostic only, default empty = every ported stage on the device.
 bool pbcGpuStageOnHost(const char* token)   // declared in xtb_native.h
 {
     const char* e = std::getenv("CURCUMA_PBC_GPU_HOST");
@@ -168,6 +192,19 @@ double XTB::calcRepulsionEnergyPeriodic() const
     const bool g1 = (m_method == MethodType::GFN1);
     const double kexp = g1 ? gfn1_params::rep_kexp : gfn2_params::rep_kexp;
     const double rexp = g1 ? gfn1_params::rep_rexp : gfn2_params::rep_rexp;
+
+    // G5d (Nov 2026): the pair loop on the CUDA device when the periodic device SCF is on; the host loop below runs on
+    // any failure or with CURCUMA_PBC_GPU_HOST=rep.
+    if (m_gpu_scf && m_pbc_device_scf && !pbcGpuStageOnHost("rep")) {
+        const PbcRepulsionArrays ra = pbcRepulsionArrays(m_atoms, g1, images);
+        double e_dev = 0.0;
+        const bool ok_dev = m_gpu_scf->repulsionPeriodic(nat, xyz.data(), ra.alpha.data(), ra.zeff.data(),
+            ra.light.data(), kexp, g1 ? kexp : gfn2_params::rep_kexp_light, rexp, m_cell_bohr.L,
+            static_cast<int>(images.trans.size()), ra.trans.data(), images.cutoff2, false, false, &e_dev, nullptr, nullptr);
+        if (CurcumaLogger::get_verbosity() >= 3)
+            CurcumaLogger::info_fmt("  periodic repulsion energy on the {}", ok_dev ? "device" : "host (device call failed)");
+        if (ok_dev) return e_dev;
+    }
 
     double erep = 0.0;
     for (int i = 0; i < nat; ++i) {
@@ -634,18 +671,41 @@ void XTB::buildGammaMatrixPeriodic()
     const curcuma::ewald::EwaldParameters par = curcuma::ewald::chooseEwaldParameters(
         m_cell_bohr, m_pbc_ewald_tolerance, m_pbc_ewald_r_cut > 0.0 ? m_pbc_ewald_r_cut : -1.0);
     const curcuma::ewald::EwaldSum ewald(m_cell_bohr, par);
-    const Eigen::MatrixXd A = ewald.matrix(pos);
-    m_pbc_ewald_alpha_used = par.alpha;
-    m_pbc_ewald_nk_used = ewald.numberOfKVectors();
-    const auto tgm1 = gmclk::now();
-
-    // 2. shell matrix: Ewald part per atom pair plus the short-range Klopman-Ohno remainder over images
     std::vector<double> g(nsh);
     for (int is = 0; is < nsh; ++is)
         g[is] = coulomb::shell_hardness(meth, m_basis.z[m_basis.sh2at[is]], m_basis.ang_sh[is]);
     const PBCUtils::LatticeImageList images = PBCUtils::makeLatticeImageList(m_cell_bohr, m_pbc_coulomb_switch);
     const double rcut = m_pbc_coulomb_switch;
 
+    // G2 (Nov 2026): Ewald matrix, KO remainder and shell expansion on the CUDA device when the periodic device SCF
+    // is on (G1 wrapper); the host statements below run on any failure or with CURCUMA_PBC_GPU_HOST=gamma.
+    if (m_gpu_scf && m_pbc_device_scf && !pbcGpuStageOnHost("gamma")) {
+        const std::vector<double> ktab = ewald.kVectorTable();
+        std::vector<double> tr(3 * images.trans.size());
+        for (size_t t = 0; t < images.trans.size(); ++t)
+            for (int k = 0; k < 3; ++k) tr[3 * t + k] = images.trans[t][k];
+        m_gamma.resize(nsh, nsh);
+        const bool gm_device = m_gpu_scf->ewaldGammaPeriodic(nat, xyz_bohr.data(), m_cell_bohr.L, ewald.parameters().alpha,
+            ewald.volume(), ewald.parameters().r_cut, ewald.numberOfKVectors(), ktab.data(), nsh, m_basis.sh2at.data(), g.data(),
+            meth == coulomb::Method::GFN1, gexp, static_cast<int>(images.trans.size()), tr.data(), rcut, m_gamma.data());
+        if (gm_device) {
+            m_pbc_ewald_alpha_used = par.alpha;
+            m_pbc_ewald_nk_used = ewald.numberOfKVectors();
+            if (CurcumaLogger::get_verbosity() >= 3)
+                CurcumaLogger::info_fmt("  periodic gamma on the device: {:.1f} ms ({} k vectors)",
+                    std::chrono::duration<double, std::milli>(gmclk::now() - tgm0).count(), m_pbc_ewald_nk_used);
+            return;
+        }
+        if (CurcumaLogger::get_verbosity() >= 3)
+            CurcumaLogger::info("  periodic gamma: device call failed, host loop");
+    }
+
+    const Eigen::MatrixXd A = ewald.matrix(pos);
+    m_pbc_ewald_alpha_used = par.alpha;
+    m_pbc_ewald_nk_used = ewald.numberOfKVectors();
+    const auto tgm1 = gmclk::now();
+
+    // 2. shell matrix: Ewald part per atom pair plus the short-range Klopman-Ohno remainder over images
     m_gamma = Eigen::MatrixXd::Zero(nsh, nsh);
     for (int is = 0; is < nsh; ++is) {
         const int iat = m_basis.sh2at[is];
@@ -1415,9 +1475,21 @@ void XTB::calculateGradientPeriodic()
         int ncol = 0;
         for (int i = 0; i < nao; ++i)
             if (m_wfn.focc(i) > 1.0e-12) ncol = i + 1;
-        const auto Cocc = m_wfn.C.leftCols(ncol);
         const Eigen::VectorXd we = (m_wfn.focc.head(ncol).array() * m_wfn.eps.head(ncol).array()).matrix();
-        W = (Cocc * we.asDiagonal()) * Cocc.transpose();
+        // G5b (Nov 2026): the GEMM on the CUDA device from its resident eigenvectors (same C as m_wfn.C) when the
+        // periodic device SCF ran; host GEMM on any failure or with CURCUMA_PBC_GPU_HOST=wmat.
+        bool w_device = false;
+        if (m_gpu_scf && m_pbc_device_scf && m_pbc_dev_wfn && ncol > 0 && !pbcGpuStageOnHost("wmat")) {
+            Eigen::MatrixXd Wcm(nao, nao);
+            w_device = m_gpu_scf->energyWeightedDensity(we.data(), ncol, nao, Wcm.data());
+            if (w_device) W = Wcm;   // element (i, j) kept (Matrix is row-major)
+            if (CurcumaLogger::get_verbosity() >= 3)
+                CurcumaLogger::info_fmt("  periodic gradient: W on the {}", w_device ? "device" : "host (device call failed)");
+        }
+        if (!w_device) {
+            const auto Cocc = m_wfn.C.leftCols(ncol);
+            W = (Cocc * we.asDiagonal()) * Cocc.transpose();
+        }
     } else {
         const auto Cocc = m_wfn.C.leftCols(nocc_orbs);
         const Eigen::VectorXd w2 = 2.0 * m_wfn.eps.head(nocc_orbs);
@@ -1448,6 +1520,24 @@ void XTB::calculateGradientPeriodic()
         const bool g1m = (m_method == MethodType::GFN1);
         const double kexp = g1m ? gfn1_params::rep_kexp : gfn2_params::rep_kexp;
         const double rexp = g1m ? gfn1_params::rep_rexp : gfn2_params::rep_rexp;
+        // G5d (Nov 2026): the pair loop on the CUDA device (host loop on failure or CURCUMA_PBC_GPU_HOST=rep)
+        bool rep_device = false;
+        if (m_gpu_scf && m_pbc_device_scf && !pbcGpuStageOnHost("rep")) {
+            const PbcRepulsionArrays ra = pbcRepulsionArrays(m_atoms, g1m, images);
+            std::vector<double> g(3 * nat, 0.0), v9(9, 0.0);
+            rep_device = m_gpu_scf->repulsionPeriodic(nat, xyz.data(), ra.alpha.data(), ra.zeff.data(),
+                ra.light.data(), kexp, g1m ? kexp : gfn2_params::rep_kexp_light, rexp, m_cell_bohr.L,
+                static_cast<int>(images.trans.size()), ra.trans.data(), images.cutoff2, true, want_vir, nullptr,
+                g.data(), v9.data());
+            if (rep_device) {
+                for (int i = 0; i < nat; ++i)
+                    for (int k = 0; k < 3; ++k) m_gradient(i, k) += g[3 * i + k];
+                if (want_vir)
+                    for (int a = 0; a < 3; ++a)
+                        for (int b = 0; b < 3; ++b) Xi(a, b) += v9[3 * a + b];
+            }
+        }
+        if (!rep_device)
         for (int i = 0; i < nat; ++i) {
             const int zi = m_atoms[i];
             const double alfi = g1m ? gfn1_params::rep_alpha[zi - 1] : gfn2_params::rep_alpha[zi - 1];
@@ -1735,6 +1825,27 @@ void XTB::calculateGradientPeriodic()
         const PBCUtils::LatticeImageList images = PBCUtils::makeLatticeImageList(m_cell_bohr, kPbcCnCutoffBohr);
         std::vector<double> rcov(nat);
         for (int i = 0; i < nat; ++i) rcov[i] = covalent_rad_d3_au(m_atoms[i]);
+        // G5c (Nov 2026): the pair loop on the CUDA device when the periodic device SCF is on; the host loop below
+        // runs on any failure or with CURCUMA_PBC_GPU_HOST=cnchain.
+        bool cn_device = false;
+        if (m_gpu_scf && m_pbc_device_scf && !pbcGpuStageOnHost("cnchain")) {
+            std::vector<double> tr(3 * images.trans.size()), g(3 * nat, 0.0), v9(9, 0.0);
+            for (size_t t = 0; t < images.trans.size(); ++t)
+                for (int k = 0; k < 3; ++k) tr[3 * t + k] = images.trans[t][k];
+            cn_device = m_gpu_scf->cnChainGradientPeriodic(nat, xyz.data(), rcov.data(), dEdcn.data(), m_cell_bohr.L,
+                static_cast<int>(images.trans.size()), tr.data(), images.cutoff2, m_method == MethodType::GFN1,
+                want_vir, g.data(), v9.data());
+            if (cn_device) {
+                for (int i = 0; i < nat; ++i)
+                    for (int k = 0; k < 3; ++k) m_gradient(i, k) += g[3 * i + k];
+                if (want_vir)
+                    for (int a = 0; a < 3; ++a)
+                        for (int b = 0; b < 3; ++b) Xi(a, b) += v9[3 * a + b];
+            }
+            if (CurcumaLogger::get_verbosity() >= 3)
+                CurcumaLogger::info_fmt("  periodic CN chain on the {}", cn_device ? "device" : "host (device call failed)");
+        }
+        if (!cn_device)
         for (int i = 0; i < nat; ++i)
             for (int j = 0; j <= (want_vir ? i : i - 1); ++j) {   // self images: virial only
                 const double rc = rcov[i] + rcov[j];
