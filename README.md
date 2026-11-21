@@ -44,7 +44,7 @@ re-measure them.
 **Limits you should know.**
 - GFN-FF is a force field. On the 41 MOR41 reactions it is 60 to 70 kcal/mol away from DLPNO-CCSD(T) in mean absolute deviation (GFN2: about 12). Port fidelity to the reference is high; the reference itself is not accurate for reaction energies of metal complexes.
 - GFN-FF has no periodic boundary conditions.
-- Open-shell systems work for `gfn1`/`gfn2` (`-spin N`, N = number of unpaired electrons).
+- Open-shell systems work for `gfn1`/`gfn2` (`-spin N`, N = number of unpaired electrons). `-spin N` alone fills one orbital set with two Fermi fillings; `-xtb.spin_polarization true` adds the tblite spin polarisation (two Fock matrices, CPU and Broyden only, AI-implemented, machine-tested): [docs/SPIN_POLARISATION.md](docs/SPIN_POLARISATION.md).
 - GPU backends (`-gpu cuda|rocm|vulkan`) are optional and off by default. CUDA has been run on an NVIDIA H200, RTX 5090, RTX 5080, RTX A4500 and GTX 1660; ROCm on a Radeon 890M (gfx1150) only, so the ROCm plugin build is unverified on other setups; Vulkan is opt-in and brings no speed-up. A GPU run that falls back to the CPU says so after the run (`-gpu_strict true` stops instead).
 - Results of the native methods can differ in the last digits from tblite/xtb in documented places (`-xtb.sto6g_legacy_4sp`, `-xtb.d4_atm_cutoff 40.0` reproduce xtb's choices).
 - Molecular dynamics times recorded with versions before the fix of 2026-09 (`ef462fcf`) run 1.9516 times too long; multiply them by that factor.
@@ -225,7 +225,7 @@ AI-generated, machine-tested; human production testing pending. Start with [docs
 ### More
 
 [docs/](docs/) holds one document per feature: the SCF modes ([docs/SCF_MODES.md](docs/SCF_MODES.md)),
-the opt-in GFN1/GFN2 SCF preconditioner `-scf_precond frag`, with segmentation of large molecules ([docs/SCF_PRECOND.md](docs/SCF_PRECOND.md), experimental),
+spin polarisation of native GFN1/GFN2 ([docs/SPIN_POLARISATION.md](docs/SPIN_POLARISATION.md)), the opt-in GFN1/GFN2 SCF preconditioner `-scf_precond frag`, with segmentation of large molecules ([docs/SCF_PRECOND.md](docs/SCF_PRECOND.md), experimental),
 solvation ([docs/SOLVATION.md](docs/SOLVATION.md)), temperature ramps
 ([docs/TEMPERATURE_RAMP.md](docs/TEMPERATURE_RAMP.md)), a time-dependent spherical wall radius with a wall-force pressure column (`-wall_radius_schedule`, [docs/WALL_RADIUS_SCHEDULE.md](docs/WALL_RADIUS_SCHEDULE.md)), large-system MD
 ([docs/MD_LARGE_SYSTEMS.md](docs/MD_LARGE_SYSTEMS.md)), the per-step MD CSV file ([docs/MD_CSV_OUTPUT.md](docs/MD_CSV_OUTPUT.md)), PLUMED ([docs/PLUMED_HELP.md](docs/PLUMED_HELP.md)),

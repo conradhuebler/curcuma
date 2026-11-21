@@ -311,6 +311,13 @@ struct Wavefunction {
     // gradient uses it directly. Claude Generated.
     Matrix  W;
     bool    W_valid = false;
+
+    // Spin polarisation (spin_polarization, Claude Generated Nov 2026): Pm = P_alpha - P_beta
+    // (AO basis, nao x nao) and the shell magnetisation m_sh(l) = sum_{mu in l, nu} Pm_{mu nu} S_{nu mu}
+    // (alpha minus beta shell population; Broyden mixes it together with q_sh). Empty / zero unless
+    // XTB::spinPolActive().
+    Matrix  Pm;
+    Vector  m_sh;
     Vector  n_at;     // atomic populations, length nat
     Vector  n_sh;     // shell populations, length nsh
     Vector  q_at;     // atomic charges (= z_eff - n_at), length nat
@@ -1018,6 +1025,10 @@ public:
     // both the dense solveEigen() path and the per-block sub-block diagonaliser in
     // large_system_mode=dc.
     void setElectronicTemperature(double K) { if (K >= 0.0) m_electronic_temp = K; }
+    /// Spin polarisation (alpha/beta Fock matrices, tblite spin-polarization); acts only with -spin N > 0.
+    void setSpinPolarization(bool on, double scale) { m_spin_pol = on; m_spin_pol_scale = scale; }
+    bool spinPolarization() const { return m_spin_pol; }
+    double spinEnergy() const { return m_E_spin; }
     /// Electronic temperature in Kelvin (Stage-6 GPU occupation validation).
     double electronicTemperature() const { return m_electronic_temp; }
     /// Public diagnostic accessor (Stage-6 GPU validation, Claude Generated):
@@ -1123,6 +1134,7 @@ public:
         m_warmstart_q_sh.resize(0);
         m_warmstart_dp_at.resize(0, 0);
         m_warmstart_qp_at.resize(0, 0);
+        m_warmstart_m_sh.resize(0);
         m_scf_history.clear();
         // Clearing the saved guess is not enough: UpdateMolecule() PROMOTES the live
         // wavefunction into the warm-start slot (`m_warmstart_q_sh = m_wfn.q_sh`) whenever the
@@ -1342,6 +1354,22 @@ private:
     void buildOrthonormalizer();
     // Diagonalise F in S metric, update wavefunction populations.
     bool solveEigen(const Matrix& F, const Matrix& S);                   // xtb_scf.cpp
+
+    // ---- Spin polarisation (spin_polarization; Claude Generated, Nov 2026; docs/SPIN_POLARISATION.md) ----
+    // True when the SCF runs two Fock matrices (alpha, beta): option on AND -spin N > 0.
+    bool spinPolActive() const { return m_spin_pol && openShell(); }
+    /// W_{ll'}(shell a, shell b) of one atom [Eh]: spin_constants[Z][lidx[l_a][l_b]] * spin_polarization_scale.
+    double spinConstant(int z, int l_a, int l_b) const;
+    /// u_l = sum_{l' on the same atom} W_{ll'} m_{l'}  (spin potential per shell)
+    void   spinPotential(const Vector& m_sh, Vector& u_sh) const;
+    /// E_spin = 1/2 sum_A sum_{l,l' on A} W_{ll'} m_l m_l'  for the shell magnetisation of m_wfn
+    double energySpin() const;
+    /// F^alpha = F + 1/2 S (u_mu + u_nu), F^beta = F - 1/2 S (u_mu + u_nu)
+    void   buildSpinFocks(const Matrix& F, const Matrix& S, const Vector& u_sh, Matrix& Fa, Matrix& Fb) const;
+    /// Diagonalise F C = S C eps with the cached Cholesky factor (dsygst + dsyevd), FP64, ascending eps.
+    bool   diagonalizeFock(const Matrix& F, const Matrix& S, Matrix& C, Vector& eps) const;
+    /// Two-Fock-matrix eigensolve: Pa, Pb, P = Pa + Pb, Pm = Pa - Pb, W (both spins), entropy m_ts_uhf.
+    bool   solveEigenUhf(const Matrix& Fa, const Matrix& Fb, const Matrix& S);
     bool pseudoDiagStepCpu(const Matrix& F);                            // xtb_scf.cpp (Oct 2026)
     void updatePopulations(const Matrix& S);                             // xtb_scf.cpp
 
@@ -1574,6 +1602,10 @@ private:
     // into the electronic container to match tblite/xtb, which report the free
     // energy A = E - T*S. Claude Generated.
     double m_E_entropy       = 0.0;
+    // Spin-polarisation energy 1/2 sum W m m (included in m_E_electronic); 0 unless spinPolActive().
+    double m_E_spin          = 0.0;
+    bool   m_spin_pol        = false;   ///< -xtb.spin_polarization
+    double m_spin_pol_scale  = 1.0;     ///< -xtb.spin_polarization_scale (tblite wscale)
 
     // SCF config / state
     int    m_scf_max_iter    = 150;
@@ -1749,6 +1781,7 @@ private:
     // GFN1-like few-iteration tail. Claude Generated (opt/md warm-start).
     Eigen::MatrixXd m_warmstart_dp_at; ///< Converged 3×nat atomic dipoles (GFN2)
     Eigen::MatrixXd m_warmstart_qp_at; ///< Converged 6×nat atomic quadrupoles (GFN2)
+    Vector m_warmstart_m_sh;           ///< Converged shell magnetisation (spin_polarization)
     bool   m_keep_diis      = false;  ///< preserve DIIS/Broyden history across steps
     bool   m_is_iterative   = false;
 
@@ -1914,6 +1947,13 @@ inline void applyXtbScfConfig(XTB& xtb, const json& cfg)
     lookup("scf_extrapolation_apply",[&](const json& v){ if (v.is_string())          xtb.setScfExtrapolationApply(v.get<std::string>()); });
     lookup("scf_xlbomd_correctors",  [&](const json& v){ if (v.is_number())  xtb.setScfXlbomdCorrectors(static_cast<int>(std::lround(v.get<double>()))); });
     lookup("electronic_temperature", [&](const json& v){ if (v.is_number()) xtb.setElectronicTemperature(v.get<double>()); });
+    // Spin polarisation (Claude Generated, Nov 2026); fallback literals equal the PARAM defaults in native_xtb_method.h.
+    {
+        bool sp = false; double sps = 1.0;
+        lookup("spin_polarization",       [&](const json& v){ if (v.is_boolean()) sp = v.get<bool>(); else if (v.is_number()) sp = v.get<double>() != 0.0; });
+        lookup("spin_polarization_scale", [&](const json& v){ if (v.is_number()) sps = v.get<double>(); });
+        xtb.setSpinPolarization(sp, sps);
+    }
     // Implicit solvation (Claude Generated, June 2026). solvent_model is a
     // descriptive name ("none"/"cpcm"/"gbsa"/"alpb"); legacy numeric codes (0..3) are
     // still accepted. The number branch also covers CLI flat-flags, which arrive as a

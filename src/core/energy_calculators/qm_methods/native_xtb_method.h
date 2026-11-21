@@ -42,6 +42,8 @@ BEGIN_PARAMETER_DEFINITION(xtb)
     PARAM(scf_guess, String, "eeq", "Initial charges: 'eeq' (EEQ charges, fewer iterations on large or polar systems), 'h0' (bare Hamiltonian) or 'fragments' (converge each molecule alone first; for large neutral clusters of small molecules).", "SCF", {})
     PARAM(sto6g_legacy_4sp, Bool, false, "Use xtb's older STO-6G tables for the 4s/4p shells instead of tblite's. Affects K, Ca and Ge-Kr only; set true to reproduce the xtb binary on these elements.", "Reference", {})
     PARAM(d4_atm_cutoff, Double, 25.0, "Real-space cutoff (Bohr) of the GFN2 D4 three-body (ATM) term. 25 follows tblite; 40 reproduces the xtb binary on molecules larger than ~25 Bohr, at higher cost.", "Reference", {})
+    PARAM(spin_polarization, Bool, false, "Spin polarisation of native GFN1/GFN2 (tblite spin-polarization): separate alpha and beta Fock matrices with the shell spin constants W; acts only with -spin N > 0 (closed shell is unchanged). CPU and Broyden SCF only; -gpu, -large_system_mode, -scf_mode other than broyden, -scf_precond and non-default -eigensolver give an error. AI-generated, machine-tested only; see SPIN_POLARISATION.md.", "SCF", {})
+    PARAM(spin_polarization_scale, Double, 1.0, "Factor on all spin constants W of spin_polarization (tblite wscale); 1.0 is the tblite model, other values are for calibration only.", "SCF", {})
     PARAM(level_shift, Double, 0.2, "Virtual-orbital shift (Eh) for scf_mode level-shift. It is faded out near convergence, so the converged result is unshifted.", "SCF", {})
     PARAM(warm_start, Bool, true, "Start each SCF from the converged charges of the previous geometry (optimisation, MD). false always starts from scf_guess.", "SCF", {})
     PARAM(keep_diis, Bool, false, "Keep the DIIS/Broyden history across geometry steps instead of resetting it. Experimental: may help on smooth MD trajectories and hurt on large steps.", "SCF", {})
@@ -207,6 +209,7 @@ private:
     std::string largeSystemModeString() const;
     std::string eigensolverString() const;
     double      electronicTemperature() const;
+    bool        spinPolarizationRequested() const;   // -xtb.spin_polarization (Claude Generated, Nov 2026)
     std::string scfPrecondString() const;   // -scf_precond, for the large_system_mode warning
 
     // Push the controller settings into the native solver: the D4 charge-response

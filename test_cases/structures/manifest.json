@@ -784,6 +784,24 @@
    }
   },
   {
+   "id": "dioxygen.bent-triplet",
+   "class": "small",
+   "file": "small/dioxygen.bent-triplet.xyz",
+   "format": "xyz",
+   "formula": "O2",
+   "natoms": 2,
+   "frames": 1,
+   "charge": 0,
+   "spin": 2,
+   "role": "non-equilibrium",
+   "size_bytes": 95,
+   "sha256": "f5db3552b695140a1f4de7c50a4e7bbad09c2189a0f013ec0d91f922587fcf54",
+   "provenance": {
+    "kind": "constructed",
+    "description": "O2 with a deliberately tilted bond (r = 1.2506 A, not an energy minimum), so that the gradient has all three components; used by cli_sqm_16 (spin polarisation against tblite 0.8.0)"
+   }
+  },
+  {
    "id": "ethane",
    "class": "small",
    "file": "small/ethane.xyz",

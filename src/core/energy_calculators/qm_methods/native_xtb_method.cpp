@@ -142,6 +142,17 @@ std::string NativeXtbMethod::scfPrecondString() const
     return "none";
 }
 
+bool NativeXtbMethod::spinPolarizationRequested() const
+{
+    if (m_parameters.contains("xtb") && m_parameters["xtb"].is_object()
+        && m_parameters["xtb"].contains("spin_polarization")) {
+        const json& v = m_parameters["xtb"]["spin_polarization"];
+        return v.is_boolean() ? v.get<bool>() : (v.is_number() && v.get<double>() != 0.0);
+    }
+    const json v = m_parameters.value("spin_polarization", json(false));
+    return v.is_boolean() ? v.get<bool>() : (v.is_number() && v.get<double>() != 0.0);
+}
+
 double NativeXtbMethod::electronicTemperature() const
 {
     if (m_parameters.contains("xtb") && m_parameters["xtb"].is_object()
@@ -181,6 +192,15 @@ bool NativeXtbMethod::setMolecule(const Mol& mol)
         // fragmentation driver (it owns its own per-fragment XTB instances).
         const std::string mode_str = largeSystemModeString();
         const auto mode = curcuma::xtb::parseLargeSystemMode(mode_str);
+        // spin_polarization is CPU/dense-SCF only (Claude Generated, Nov 2026): the large-system drivers
+        // run one SCF per fragment with spin 0 and would drop it silently.
+        if (mode != curcuma::xtb::LargeSystemMode::None && mol.m_spin > 0.0 && spinPolarizationRequested()) {
+            m_has_error = true;
+            m_error_message = fmt::format("{}: spin_polarization with -spin {} is not implemented for "
+                                          "-large_system_mode {} (dense CPU Broyden SCF only)",
+                                          getMethodName(), static_cast<int>(std::lround(mol.m_spin)), mode_str);
+            return false;
+        }
         if (mode != curcuma::xtb::LargeSystemMode::None) {
             // Hard-error: large_system_mode=fragments|dc + -eigensolver=purify
             // requires -electronic_temperature 0 (purification is 0-K by

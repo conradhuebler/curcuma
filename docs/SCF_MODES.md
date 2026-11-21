@@ -172,7 +172,7 @@ systems (use 0.1-0.2) and/or the EEQ guess; `broyden` does not.
 
 ## Open shell (`-spin N`)
 
-`-spin N` = number of unpaired electrons (`xtb_native.cpp` Z. 3151). One orbital set, two Fermi fillings (n_alpha, n_beta), no separate Fock matrices, no spin-polarisation term; triplet lies above the singlet (O2 +1.65 kcal/mol). Measurements: [REACTION_MD_EXAMPLES.md](REACTION_MD_EXAMPLES.md), section "What `-spin` does".
+`-spin N` = number of unpaired electrons (`xtb_native.cpp` Z. 3151). One orbital set, two Fermi fillings (n_alpha, n_beta), no separate Fock matrices, no spin-polarisation term; triplet lies above the singlet (O2 +1.65 kcal/mol). With `-xtb.spin_polarization true` (CPU, Broyden only) two Fock matrices and the tblite spin constants are used and the O2 triplet lies below the singlet: [SPIN_POLARISATION.md](SPIN_POLARISATION.md). Measurements: [REACTION_MD_EXAMPLES.md](REACTION_MD_EXAMPLES.md), section "What `-spin` does".
 
 ## What was NOT tested
 

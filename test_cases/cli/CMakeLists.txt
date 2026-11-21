@@ -378,6 +378,7 @@ add_cli_test(sqm 10_gfn2_optimization_smoke)       # gfn2 -opt anchor (gradient 
 add_cli_test(sqm 11_gfn2_provider_check)           # routing anchor — updated for AP 3 (native backend)
 add_cli_test(sqm 12_gfn2_scf_precond)              # -scf_precond frag: same energy, fewer SCF iterations, ignored for ions (Oct 2026)
 add_cli_test(sqm 15_flat_flag_routing)             # flat -electronic_temperature routed to the module of -method (Oct 2026)
+add_cli_test(sqm 16_spin_polarization)             # -xtb.spin_polarization: triplet O2 energy/gradient against tblite 0.8.0, excluded modes error (Nov 2026)
 # -scf_precond frag on the device-resident CUDA loop (Oct 2026); exit 77 (skip) without a usable CUDA device.
 if(USE_CUDA)
     add_cli_test(sqm 13_gfn2_scf_precond_cuda)

@@ -415,19 +415,27 @@ Eigen::VectorXd XTB::packSccState() const
 {
     const int nsh = m_basis.nsh;
     const int nat = m_atomcount;
+    // Spin polarisation (Claude Generated, Nov 2026): the shell magnetisation m_sh is appended
+    // at the end, [q_sh (| dp | qp) | m_sh]; without the option the layout is unchanged.
+    const bool sp = spinPolActive() && m_wfn.m_sh.size() == nsh;
     // GFN1 (SCC vector IS q_sh), or a GFN2 state whose multipoles are not yet sized
     // (degenerate): return just q_sh. A shorter-than-packed_len vector is rejected by
     // the size guard in Calculation(), which then falls back to the 1-step warm-start.
     if (m_method != MethodType::GFN2
         || m_wfn.dp_at.cols() != nat || m_wfn.qp_at.cols() != nat) {
-        return m_wfn.q_sh;
+        if (!sp) return m_wfn.q_sh;
+        Eigen::VectorXd w(2 * nsh);
+        w.head(nsh) = m_wfn.q_sh;
+        w.tail(nsh) = m_wfn.m_sh;
+        return w;
     }
-    Eigen::VectorXd v(nsh + 3 * nat + 6 * nat);
+    Eigen::VectorXd v(nsh + 3 * nat + 6 * nat + (sp ? nsh : 0));
     v.head(nsh) = m_wfn.q_sh;
     // dp_at is 3×nat, qp_at is 6×nat; Eigen is column-major, so .data() is the
     // column-major flatten that Eigen::Map reads back identically.
     v.segment(nsh, 3 * nat)            = Eigen::Map<const Eigen::VectorXd>(m_wfn.dp_at.data(), 3 * nat);
     v.segment(nsh + 3 * nat, 6 * nat)  = Eigen::Map<const Eigen::VectorXd>(m_wfn.qp_at.data(), 6 * nat);
+    if (sp) v.tail(nsh) = m_wfn.m_sh;
     return v;
 }
 
@@ -435,15 +443,19 @@ void XTB::unpackSccState(const Eigen::VectorXd& v)
 {
     const int nsh = m_basis.nsh;
     const int nat = m_atomcount;
+    const bool sp = spinPolActive();
     m_wfn.q_sh = v.head(nsh);
     // Rebuild atomic charges from shell charges (as the warm-start block does).
     m_wfn.q_at.setZero(nat);
     for (int s = 0; s < nsh; ++s)
         m_wfn.q_at(m_basis.sh2at[s]) += m_wfn.q_sh(s);
-    if (m_method == MethodType::GFN2 && v.size() == nsh + 9 * nat) {
+    const int base = (m_method == MethodType::GFN2) ? nsh + 9 * nat : nsh;
+    if (m_method == MethodType::GFN2 && v.size() == base + (sp ? nsh : 0)) {
         m_wfn.dp_at = Eigen::Map<const Eigen::MatrixXd>(v.data() + nsh, 3, nat);
         m_wfn.qp_at = Eigen::Map<const Eigen::MatrixXd>(v.data() + nsh + 3 * nat, 6, nat);
     }
+    if (sp && v.size() == base + nsh)
+        m_wfn.m_sh = v.tail(nsh);
 }
 
 /* ------------------------------------------------------------------------- *
@@ -556,6 +568,29 @@ double XTB::Calculation(bool gradient)
         }
     }
 
+    // Spin polarisation (Claude Generated, Nov 2026, docs/SPIN_POLARISATION.md): CPU + Broyden only.
+    // Every other SCF path works on one Fock matrix or one density and would silently drop the
+    // alpha/beta split, so it is a hard error instead of a fallback.
+    if (spinPolActive()) {
+        std::string why;
+        if (m_gpu_scf || m_external_eigensolver)
+            why = "a GPU backend (-gpu cuda|rocm|vulkan) is active";
+        else if (m_scf_mode != ScfMode::Broyden)
+            why = fmt::format("-scf_mode {} is not supported (Broyden only)", scfModeName(m_scf_mode));
+        else if (m_scf_precond != "none" && !m_scf_precond.empty())
+            why = "-scf_precond " + m_scf_precond + " is not supported";
+        else if (m_eigensolver != "mkl" && !m_eigensolver.empty())
+            why = "-eigensolver " + m_eigensolver + " is not supported (the two Fock matrices use the LAPACK path)";
+        else if (m_scf_extrapolation != "none" && m_scf_extrap_apply == "xlbomd")
+            why = "-scf_extrapolation_apply xlbomd is not supported";
+        if (!why.empty()) {
+            setHardError("spin_polarization (-xtb.spin_polarization true, -spin " + std::to_string(static_cast<int>(std::lround(nUhf())))
+                         + ") is implemented for the CPU Broyden SCF only: " + why);
+            m_scf_converged = false;
+            return m_E_total;
+        }
+        if (m_wfn.m_sh.size() != m_basis.nsh) m_wfn.m_sh = Vector::Zero(m_basis.nsh);
+    }
 
     // 1. Coordination numbers + 2. self-energies. Claude Generated (Oct 2026): on the device-integral path the
     // device computes both itself (beginComputed) and the CN is downloaded from there, so the host O(nat^2) loop
@@ -858,7 +893,8 @@ double XTB::Calculation(bool gradient)
     }
 
     const int nsh = m_basis.nsh;
-    const int packed_len = (m_method == MethodType::GFN2) ? (nsh + 9 * m_atomcount) : nsh;
+    const bool spin_pol = spinPolActive();   // two Fock matrices; m_sh is part of the SCC vector
+    const int packed_len = ((m_method == MethodType::GFN2) ? (nsh + 9 * m_atomcount) : nsh) + (spin_pol ? nsh : 0);
 
     // XL-BOMD (extended-Lagrangian Born-Oppenheimer MD) — opt-in, EXPERIMENTAL.
     // Each Calculation() is treated as one MD/geometry step. When a time-reversibly
@@ -975,6 +1011,8 @@ double XTB::Calculation(bool gradient)
             m_wfn.dp_at = m_warmstart_dp_at;
             m_wfn.qp_at = m_warmstart_qp_at;
         }
+        if (spin_pol && m_warmstart_m_sh.size() == nsh)
+            m_wfn.m_sh = m_warmstart_m_sh;
         if (verb >= scf_min)
             CurcumaLogger::result("SCF initial guess: warm-start from previous step");
     } else if ((m_scf_guess == "eeq" || m_scf_guess == "fragments") && !m_force_h0_guess) {
@@ -1106,7 +1144,7 @@ double XTB::Calculation(bool gradient)
     // mixes). Claude Generated.
     auto packSCC = [&]() -> Vector {
         if (m_method == MethodType::GFN2) {
-            Vector v = Vector::Zero(nsh + 9 * nat);
+            Vector v = Vector::Zero(nsh + 9 * nat + (spin_pol ? nsh : 0));
             v.head(nsh) = m_wfn.q_sh;
             if (m_wfn.dp_at.cols() == nat)
                 for (int k = 0; k < 3; ++k)
@@ -1114,6 +1152,13 @@ double XTB::Calculation(bool gradient)
             if (m_wfn.qp_at.cols() == nat)
                 for (int k = 0; k < 6; ++k)
                     v.segment(nsh + 3 * nat + k * nat, nat) = m_wfn.qp_at.row(k).transpose();
+            if (spin_pol) v.tail(nsh) = m_wfn.m_sh;   // spin polarisation: shell magnetisation last
+            return v;
+        }
+        if (spin_pol) {
+            Vector v(2 * nsh);
+            v.head(nsh) = m_wfn.q_sh;
+            v.tail(nsh) = m_wfn.m_sh;
             return v;
         }
         return m_wfn.q_sh;
@@ -1132,6 +1177,7 @@ double XTB::Calculation(bool gradient)
             for (int k = 0; k < 6; ++k)
                 m_wfn.qp_at.row(k) = v.segment(nsh + 3 * nat + k * nat, nat).transpose();
         }
+        if (spin_pol) m_wfn.m_sh = v.tail(nsh);
     };
     // Ensure the GFN2 multipole moments are sized before the first pack.
     if (mode == ScfMode::Broyden && m_method == MethodType::GFN2) {
@@ -1902,6 +1948,14 @@ double XTB::Calculation(bool gradient)
         } else {
             // Expand to AO potential and build Fock
             Matrix F = buildFock(m_H0, m_S, m_pot);
+            // Spin polarisation: alpha/beta Fock matrices F +- 1/2 S (u_mu + u_nu), u = W m from the SCC
+            // input magnetisation (m_wfn.m_sh, as q_sh feeds the charge potential). Claude Generated (Nov 2026).
+            Matrix F_alpha, F_beta;
+            if (spin_pol) {
+                Vector u_sh;
+                spinPotential(m_wfn.m_sh, u_sh);
+                buildSpinFocks(F, m_S, u_sh, F_alpha, F_beta);
+            }
 
             // --- SCF acceleration strategy (Claude Generated) -----------------
             switch (mode) {
@@ -1955,7 +2009,7 @@ double XTB::Calculation(bool gradient)
             bool eig_ok;
             {
                 MklThreadScope eig_scope(eig_threads);
-                eig_ok = solveEigen(F, m_S);
+                eig_ok = spin_pol ? solveEigenUhf(F_alpha, F_beta, m_S) : solveEigen(F, m_S);
             }
             if (!eig_ok) {
                 // Claude Generated (Aug 2026): say WHAT was wrong instead of guessing in the message.
@@ -2058,8 +2112,9 @@ double XTB::Calculation(bool gradient)
         acc_e_band  += ms(t_e3, t_e4);
 
         // Total SCC = band + coulomb + third-order + multipole
+        m_E_spin = spin_pol ? energySpin() : 0.0;   // 1/2 sum W m m of the output magnetisation
         const double e_scc = m_E_electronic + m_E_coulomb_shell
-                           + m_E_third_order + m_E_multipole;
+                           + m_E_third_order + m_E_multipole + m_E_spin;
 
         // Accumulate per-phase timings (see breakdown at verbosity >= 3).
         acc_pot    += ms(t_iter0, t_pot);
@@ -2448,6 +2503,8 @@ double XTB::Calculation(bool gradient)
     } else {
         m_E_electronic    = energyCoulombShell() + energyThirdOrder() + energyMultipole();
     }
+    m_E_spin          = spin_pol ? energySpin() : 0.0;
+    m_E_electronic   += m_E_spin;   // spin polarisation 1/2 sum W m m (0 without the option)
     post_mark("Coulomb/third-order/multipole energies");
     // Band energy: Tr(P · H0) for electronic part (from the device when P stayed there)
     m_E_electronic   += (m_wfn_on_device || use_resident_loop) ? resident_band : (m_wfn.P.cwiseProduct(m_H0)).sum();
@@ -2496,6 +2553,8 @@ double XTB::Calculation(bool gradient)
         CurcumaLogger::info(fmt::format("  Third-order  = {: .8f} Eh", m_E_third_order));
         if (m_method == MethodType::GFN2)
             CurcumaLogger::info(fmt::format("  Multipole    = {: .8f} Eh", m_E_multipole));
+        if (spin_pol)
+            CurcumaLogger::info(fmt::format("  Spin pol.    = {: .8f} Eh (folded into Electronic)", m_E_spin));
         CurcumaLogger::info(fmt::format("  Free E (-TS) = {: .8f} Eh (folded into Electronic)", m_E_entropy));
         CurcumaLogger::info(fmt::format("  Repulsion    = {: .8f} Eh", m_E_repulsion));
         if (m_method == MethodType::GFN1)
@@ -2772,6 +2831,7 @@ bool XTB::evaluateComponentsAtFixedDensity(
     m_E_third_order   = energyThirdOrder();
     m_E_multipole     = energyMultipole();
     const double e_band = (m_wfn.P.cwiseProduct(m_H0)).sum();
+    m_E_spin = 0.0;   // audit at an injected density: no spin-polarisation term (not supported here)
     m_E_electronic = e_band + m_E_coulomb_shell + m_E_third_order + m_E_multipole;
     m_E_repulsion    = calcRepulsionEnergy();
     m_E_halogen_bond = calcHalogenBondEnergy();
@@ -3176,6 +3236,8 @@ void XTB::buildReferenceOccupations()
     }
     m_wfn.q_at.setZero(m_basis.nat);
     m_wfn.q_sh.setZero(m_basis.nsh);
+    m_wfn.m_sh.setZero(m_basis.nsh);
+    m_wfn.Pm.resize(0, 0);
     if (m_method == MethodType::GFN2) {
         m_wfn.dp_at = Eigen::MatrixXd::Zero(3, m_basis.nat);
         m_wfn.qp_at = Eigen::MatrixXd::Zero(6, m_basis.nat);
@@ -3256,6 +3318,8 @@ bool XTB::UpdateMolecule(const Matrix& geometry)
             m_warmstart_dp_at = m_wfn.dp_at;
             m_warmstart_qp_at = m_wfn.qp_at;
         }
+        if (spinPolActive() && m_wfn.m_sh.size() == m_basis.nsh)
+            m_warmstart_m_sh = m_wfn.m_sh;   // spin polarisation: magnetisation is part of the SCC vector
         // Multi-step SCC extrapolation (opt-in): record the converged SCC vector so
         // Calculation() can predict the next step from several past steps, not just
         // this one. Pushed before m_wfn is zeroed below. Trimmed to the order the
@@ -3277,8 +3341,10 @@ bool XTB::UpdateMolecule(const Matrix& geometry)
     m_wfn.q_sh.setZero(m_basis.nsh);
     m_wfn.dp_at.setZero(3, m_basis.nat);
     m_wfn.qp_at.setZero(6, m_basis.nat);
+    m_wfn.m_sh.setZero(m_basis.nsh);   // spin polarisation (unused otherwise)
 
     // 6. Energy components are now stale
+    m_E_spin = 0.0;
     m_E_electronic = m_E_repulsion = m_E_coulomb_shell = 0.0;
     m_E_third_order = m_E_multipole = m_E_halogen_bond = m_E_dispersion = 0.0;
     m_E_total = 0.0;
@@ -3301,6 +3367,7 @@ nlohmann::json XTB::getEnergyDecomposition() const
     j["repulsion"]      = m_E_repulsion;
     j["halogen_bond"]   = m_E_halogen_bond;
     j["dispersion"]     = m_E_dispersion;
+    j["spin_polarization"] = m_E_spin;   // 1/2 sum W m m, already included in "electronic"
     j["entropy"]        = m_E_entropy;   // -T*S, already included in "electronic"
     j["total"]          = m_E_total;
     j["scf_converged"]  = m_scf_converged;
