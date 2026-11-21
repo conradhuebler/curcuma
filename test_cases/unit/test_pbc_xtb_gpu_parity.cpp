@@ -7,7 +7,7 @@
  * G1: with a unit cell the host builds the periodic S/H0/L, gamma and multipole integrals and uploads them; the
  * CUDA device runs the resident Fock/eigensolve/density/moments; potential, dispersion, gradient and virial stay
  * on the host. Gate: energy, gradient and virial of `-gpu cuda` against the CPU on the registry water dimer in an
- * 8 A and a 12 A cube, the water trimer in a 6.5 A cube and the 216 H2O box (G2-G6), gfn1 and gfn2, scf_threshold 1e-9: |dE| <= 1e-8 Eh,
+ * 8 A and a 12 A cube, the water trimer in a 6.5 A cube, the 216 H2O box (G2-G6) and caffeine in 14 A (H4/H5), gfn1 and gfn2, scf_threshold 1e-9: |dE| <= 1e-8 Eh,
  * max |dG| <= 1e-8 Eh/A, max |dXi| <= 1e-7 Eh (coordinator targets); a second CUDA run from a fresh calculator must be bitwise identical (energy and gradient,
  * docs/GPU_REPRODUCIBILITY.md). The GPU path counts as used when the run added no GPU fallback
  * (curcuma::gpuFallbackCounts()); without the plugin or a device the first GPU request falls back, the test prints
@@ -80,10 +80,12 @@ int main()
     for (const char* method : { "gfn1", "gfn2" }) {
         // water dimer in 8 and 12 A, water trimer ("H2O") in a dense 6.5 A cube (G2-G6: many self images and
         // image triples in the ATM, multipole and Ewald paths); 216 H2O box (G2: many k vectors and a real-space
-        // cutoff below L/2, the size where the device kernels are blocked; 4 host threads)
+        // cutoff below L/2, the size where the device kernels are blocked; 4 host threads); caffeine in a 14 A cube
+        // (H4/H5: four element types in the D3/D4 pair tables; the halogen-bond donors Br/I carry d shells, which a
+        // cell refuses, so no XB cell exists)
         struct Cell { const char* name; double L; int threads; };
         for (const Cell& c : { Cell{ "H2O_dimer", 8.0, 1 }, Cell{ "H2O_dimer", 12.0, 1 }, Cell{ "H2O", 6.5, 1 },
-                               Cell{ "water216_box", 18.625793445945, 4 } }) {
+                               Cell{ "water216_box", 18.625793445945, 4 }, Cell{ "caffeine", 14.0, 1 } }) {
             const double L = c.L;
             const Mol mol = inCell(c.name, L);
             const Result cpu = run(method, mol, false, c.threads);

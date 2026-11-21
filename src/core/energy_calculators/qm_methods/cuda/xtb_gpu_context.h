@@ -488,6 +488,19 @@ public:
                             bool harmonic, double gexp, const double* q_sh, const double* cell_L, int ntrans,
                             const double* trans, double cut2, double rcut, bool want_virial, double* grad_out,
                             double* vir9_out);
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB H5): see GpuScfBackend::d4PairsPeriodic.
+    bool d4PairsPeriodic(int nat, const int* Z, const int* nref, const double* sq_r4r2, const double* xyz_bohr,
+                         const double* W, const double* dWq, const double* dWc, double s6, double s8, double a1,
+                         double a2, const double* cell_L, int ntrans, const double* trans, double cut2,
+                         bool want_virial, double* energy_out, double* grad_out, double* dEdcn_out, double* dEdq_out,
+                         double* vir9_out);
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB H4): see GpuScfBackend::d3DispersionPeriodic.
+    bool d3DispersionPeriodic(int nat, const int* Z, const double* xyz_bohr, int nt, const int* atom_type,
+                              const double* c6tab, const double* r6tab, const int* nref_tab, const double* refcn_tab,
+                              const double* rcov_ang, int nrcov, double s6, double s8, double a1, double a2,
+                              double aa_to_au, const double* cell_L, int ncn, const double* cn_trans, double cn_cut2,
+                              int npair, const double* pair_trans, double pair_cut2, bool need_gradient,
+                              bool want_virial, double* energy_out, double* grad_out, double* vir9_out);
     /// Claude Generated (Nov 2026, WP-PERIODIC-XTB H3): see GpuScfBackend::cnPeriodic.
     bool cnPeriodic(int nat, const double* xyz_bohr, const double* rcov, const double* cell_L, int ntrans,
                     const double* trans, double cut2, int mode, double* cn_out);

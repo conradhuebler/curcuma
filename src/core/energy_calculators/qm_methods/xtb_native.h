@@ -778,6 +778,30 @@ struct GpuScfBackend {
     { (void)nat; (void)xyz_bohr; (void)nsh; (void)sh2at; (void)hardness; (void)harmonic; (void)gexp; (void)q_sh;
       (void)cell_L; (void)ntrans; (void)trans; (void)cut2; (void)rcut; (void)want_virial; (void)grad_out;
       (void)vir9_out; return false; }
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB H5): periodic D4 pair term (D4Evaluator::computeEnergyAndGradient-
+    /// Periodic) on the device: W/dWq/dWc = D4ParameterGenerator::buildRefWFlat at the zeta charges, nref per atom,
+    /// the reference C6 cache of beginDispersion. Outputs the full pair contribution. Default false -> host.
+    virtual bool d4PairsPeriodic(int nat, const int* Z, const int* nref, const double* sq_r4r2, const double* xyz_bohr,
+                         const double* W, const double* dWq, const double* dWc, double s6, double s8, double a1,
+                         double a2, const double* cell_L, int ntrans, const double* trans, double cut2,
+                         bool want_virial, double* energy_out, double* grad_out, double* dEdcn_out, double* dEdq_out,
+                         double* vir9_out)
+    { (void)nat; (void)Z; (void)nref; (void)sq_r4r2; (void)xyz_bohr; (void)W; (void)dWq; (void)dWc; (void)s6; (void)s8;
+      (void)a1; (void)a2; (void)cell_L; (void)ntrans; (void)trans; (void)cut2; (void)want_virial; (void)energy_out;
+      (void)grad_out; (void)dEdcn_out; (void)dEdq_out; (void)vir9_out; return false; }
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB H4): periodic GFN1 D3(BJ) (D3 CN over the CN images, weights,
+    /// pair sum over the pair images, CN chain rule) on the device; tables of D3ParameterGenerator::buildDeviceTables,
+    /// xyz in Bohr, rcov_ang the D3 radii (A). grad_out[3 nat] / vir9_out are the full D3 contributions. Default false.
+    virtual bool d3DispersionPeriodic(int nat, const int* Z, const double* xyz_bohr, int nt, const int* atom_type,
+                              const double* c6tab, const double* r6tab, const int* nref_tab, const double* refcn_tab,
+                              const double* rcov_ang, int nrcov, double s6, double s8, double a1, double a2,
+                              double aa_to_au, const double* cell_L, int ncn, const double* cn_trans, double cn_cut2,
+                              int npair, const double* pair_trans, double pair_cut2, bool need_gradient,
+                              bool want_virial, double* energy_out, double* grad_out, double* vir9_out)
+    { (void)nat; (void)Z; (void)xyz_bohr; (void)nt; (void)atom_type; (void)c6tab; (void)r6tab; (void)nref_tab;
+      (void)refcn_tab; (void)rcov_ang; (void)nrcov; (void)s6; (void)s8; (void)a1; (void)a2; (void)aa_to_au; (void)cell_L;
+      (void)ncn; (void)cn_trans; (void)cn_cut2; (void)npair; (void)pair_trans; (void)pair_cut2; (void)need_gradient;
+      (void)want_virial; (void)energy_out; (void)grad_out; (void)vir9_out; return false; }
     /// Claude Generated (Nov 2026, WP-PERIODIC-XTB H3): periodic coordination number over the images of cut2,
     /// rc = rcov_i + rcov_j; mode 0 GFN2 counting, 1 GFN1 (k = 16). Default false -> host loop.
     virtual bool cnPeriodic(int nat, const double* xyz_bohr, const double* rcov, const double* cell_L, int ntrans,

@@ -923,6 +923,32 @@ the gfn1 step); the W download is part of the W item (54 MB at 432 H2O). Halogen
 - MD wall per step (`md.sh`, before = same binary with the three tokens): 216 H2O 0.51 -> 0.47 s, 432 H2O 1.55 ->
   1.39 s.
 
+### H4/H5 periodic GFN1 D3 and periodic D4 pair term on the device (2026-11-21, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+- **H4** `GpuScfBackend::d3DispersionPeriodic`: `calcD3DispersionPeriodic` + `D3ParameterGenerator::
+  getEnergyAndGradientPeriodic` with the tables of `buildDeviceTables` (`k_d3_cn_pbc` one block per atom over the CN
+  images, `k_d3_weights` unchanged, `k_d3_pairs_pbc` one thread per pair j <= i over the pair images with energy,
+  gradient, virial and dE/dCN in fixed point, `k_d3_fold_pbc` the CN chain rule); host path with an element without
+  D3 data. Token `d3`.
+- **H5** `GpuScfBackend::d4PairsPeriodic` (`k_d4_pairs_pbc`): the pair term of `D4Evaluator::computeEnergyAndGradient
+  Periodic` (energy, gradient, dE/dCN, dE/dq, virial; dftd4 weights) from the host reference weights
+  (`buildRefWFlat` with dWc, O(N)) and the resident reference C6 cache of `beginDispersion`. Token `d4pair`.
+  Plugin ABI 19 -> 21.
+- Halogen bond with a cell: not ported and not portable as a test case: the GFN1 donors Br and I (and Cl) carry a d
+  shell, and a cell refuses d shells, so `addHalogenBondGradientPeriodic` never has a donor (0 ms in every run).
+  `pbc_xtb_gpu_parity` gained caffeine in a 14 A cube (four element types in the D3/D4 tables) instead.
+- Time (432 H2O, MD step): gfn1 D3 855 -> 18 ms; gfn2 D4 pairs 56 -> 5 ms.
+- Gates (one binary, new vs `CURCUMA_PBC_GPU_HOST=d3,d4pair`): `pbc_xtb_gpu_parity` 10/10 (new caffeine cell: gfn1
+  |dE| 0, max |dG| 3.7e-10 Eh/A, max |dXi| 2.1e-9 Eh; gfn2 7.1e-15 / 6.9e-10 / 4.1e-9; the other cells as H1),
+  second CUDA run bitwise 10/10; `pbc_|ewald` 29/29; `-sp -scf_threshold 1e-9`: gfn2 216 H2O dE 0, max dG 1.1e-14
+  Eh/A, 432 H2O dE 0, 1.7e-14 Eh/A; gfn1 216 H2O dE 0, 1.6e-14 Eh/A, 432 H2O dE 0, 2.2e-14 Eh/A; second device run
+  md5-identical (all four); GPU FD (dimer 8 A): gfn1 8.1e-9, gfn2 8.9e-9 Eh/A; NVE 216 H2O 100 steps tight: gfn2 max
+  |dE_pot| 2.2e-11 Eh, gfn1 3.3e-10 Eh; MD 216 H2O 20 steps tight: gfn2 unchanged (E_pot -1096.551628, T 462.483544
+  K, P 14765.49 bar), gfn1 new = old (E_pot -1247.843278, T 385.040039 K, P 8768.74 bar); without a cell CPU 36/36 and
+  CUDA 36/36 md5 to the rebuilt base.
+- MD wall per step (`md.sh`, before = same binary with the tokens): gfn2 216 H2O 0.47 -> 0.45 s, 432 H2O 1.41 -> 1.35
+  s; gfn1 216 H2O 0.63 -> 0.52 s, 432 H2O 1.99 -> 1.68 s.
+
 ## Regression run (2026-11-14, `release/`, `ctest -R 'gfn|xtb|sqm|gfnff|pbc|ewald|simplemd|restart|md_|gpu|plugin|molecule|xyz|parser|curcumaopt|structinv' -j1`)
 
 369 tests selected, 2 failed before the fix below: `pbc_md_nonperiodic_cell` (its check (a) assumed gfn2 + cell to be

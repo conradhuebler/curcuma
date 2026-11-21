@@ -493,6 +493,31 @@ public:
         return m_ctx->koGradientPeriodic(nat, xyz_bohr, nsh, sh2at, hardness, harmonic, gexp, q_sh, cell_L, ntrans, trans,
                                          cut2, rcut, want_virial, grad_out, vir9_out);
     }
+    // Claude Generated (Nov 2026, WP-PERIODIC-XTB H5): periodic D4 pair term, see GpuScfBackend.
+    bool d4PairsPeriodic(int nat, const int* Z, const int* nref, const double* sq_r4r2, const double* xyz_bohr,
+                         const double* W, const double* dWq, const double* dWc, double s6, double s8, double a1,
+                         double a2, const double* cell_L, int ntrans, const double* trans, double cut2,
+                         bool want_virial, double* energy_out, double* grad_out, double* dEdcn_out, double* dEdq_out,
+                         double* vir9_out) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->d4PairsPeriodic(nat, Z, nref, sq_r4r2, xyz_bohr, W, dWq, dWc, s6, s8, a1, a2, cell_L, ntrans, trans,
+                                      cut2, want_virial, energy_out, grad_out, dEdcn_out, dEdq_out, vir9_out);
+    }
+    // Claude Generated (Nov 2026, WP-PERIODIC-XTB H4): periodic GFN1 D3, see GpuScfBackend.
+    bool d3DispersionPeriodic(int nat, const int* Z, const double* xyz_bohr, int nt, const int* atom_type,
+                              const double* c6tab, const double* r6tab, const int* nref_tab, const double* refcn_tab,
+                              const double* rcov_ang, int nrcov, double s6, double s8, double a1, double a2,
+                              double aa_to_au, const double* cell_L, int ncn, const double* cn_trans, double cn_cut2,
+                              int npair, const double* pair_trans, double pair_cut2, bool need_gradient,
+                              bool want_virial, double* energy_out, double* grad_out, double* vir9_out) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->d3DispersionPeriodic(nat, Z, xyz_bohr, nt, atom_type, c6tab, r6tab, nref_tab, refcn_tab, rcov_ang,
+                                           nrcov, s6, s8, a1, a2, aa_to_au, cell_L, ncn, cn_trans, cn_cut2, npair,
+                                           pair_trans, pair_cut2, need_gradient, want_virial, energy_out, grad_out,
+                                           vir9_out);
+    }
     // Claude Generated (Nov 2026, WP-PERIODIC-XTB H3): periodic coordination number, see GpuScfBackend.
     bool cnPeriodic(int nat, const double* xyz_bohr, const double* rcov, const double* cell_L, int ntrans,
                     const double* trans, double cut2, int mode, double* cn_out) override

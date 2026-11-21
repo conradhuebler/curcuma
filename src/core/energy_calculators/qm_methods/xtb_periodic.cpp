@@ -314,6 +314,47 @@ double XTB::calcD3DispersionPeriodic(bool need_gradient) const
     const std::vector<double> xyz = geometryBohr(m_geometry, nat);
     const PBCUtils::LatticeImageList cn_images = PBCUtils::makeLatticeImageList(m_cell_bohr, kPbcD3CnCutoffBohr);
     const std::vector<double>& rcov_A = CNCalculator::covalentRadiiD3();
+
+    // H4 (Nov 2026): CN, weights, pair sum, chain rule and virial on the CUDA device (host below on failure, with an
+    // element without D3 data, or with CURCUMA_PBC_GPU_HOST=d3)
+    if (m_gpu_scf && m_pbc_device_scf && !pbcGpuStageOnHost("d3")) {
+        const auto tb = d3.buildDeviceTables(m_atoms);
+        bool typed = tb.nt > 0;
+        for (int i = 0; i < nat && typed; ++i) typed = tb.atom_type[i] >= 0;
+        if (typed) {
+            const PBCUtils::LatticeImageList pimg = PBCUtils::makeLatticeImageList(m_cell_bohr, kPbcD3PairCutoffBohr);
+            std::vector<double> ctr(3 * cn_images.trans.size()), ptr(3 * pimg.trans.size());
+            for (size_t t = 0; t < cn_images.trans.size(); ++t)
+                for (int k = 0; k < 3; ++k) ctr[3 * t + k] = cn_images.trans[t][k];
+            for (size_t t = 0; t < pimg.trans.size(); ++t)
+                for (int k = 0; k < 3; ++k) ptr[3 * t + k] = pimg.trans[t][k];
+            const bool vir_on = need_gradient && m_want_virial;
+            std::vector<double> g(3 * nat, 0.0), v9(9, 0.0);
+            double e_dev = 0.0;
+            const bool d3_dev = m_gpu_scf->d3DispersionPeriodic(nat, m_atoms.data(), xyz.data(), tb.nt,
+                tb.atom_type.data(), tb.c6tab.data(), tb.r6tab.data(), tb.nref.data(), tb.refcn.data(), rcov_A.data(),
+                static_cast<int>(rcov_A.size()), tb.s6, tb.s8, tb.a1, tb.a2, AA_TO_AU, m_cell_bohr.L,
+                static_cast<int>(cn_images.trans.size()), ctr.data(), cn_images.cutoff2,
+                static_cast<int>(pimg.trans.size()), ptr.data(), pimg.cutoff2, need_gradient, vir_on, &e_dev,
+                g.data(), v9.data());
+            if (CurcumaLogger::get_verbosity() >= 3)
+                CurcumaLogger::info_fmt("  periodic D3 on the {}", d3_dev ? "device" : "host (device call failed)");
+            if (d3_dev) {
+                m_disp_gradient = Matrix::Zero(nat, 3);
+                m_disp_dEdcn = Vector();
+                m_disp_dEdq = Vector();
+                m_disp_virial.setZero();
+                if (need_gradient)
+                    for (int i = 0; i < nat; ++i)
+                        for (int k = 0; k < 3; ++k) m_disp_gradient(i, k) = g[3 * i + k];
+                if (vir_on)
+                    for (int a = 0; a < 3; ++a)
+                        for (int b = 0; b < 3; ++b) m_disp_virial(a, b) = v9[3 * a + b];
+                m_disp_gradient_valid = need_gradient;
+                return e_dev;
+            }
+        }
+    }
     std::vector<double> cn(nat, 0.0);
     for (int i = 0; i < nat; ++i) {
         const int ei = m_atoms[i] - 1;
@@ -435,8 +476,48 @@ double XTB::calcD4DispersionPeriodic(bool need_gradient) const
     const auto td0 = d4clk::now();
     m_disp_virial.setZero();
     Eigen::Matrix3d* vir = m_want_virial ? &m_disp_virial : nullptr;   // P4
-    double E = m_d4_evaluator->computeEnergyAndGradientPeriodic(m_atoms, geom_bohr, pair_images,
-        /*with_gradient=*/true, m_disp_gradient, m_disp_dEdcn, m_disp_dEdq, /*with_dEdq=*/true, vir);
+    // H5 (Nov 2026): the pair term on the CUDA device (reference weights on the host, O(N)); host evaluator on any
+    // failure, before the device C6 cache exists, or with CURCUMA_PBC_GPU_HOST=d4pair
+    bool pairs_device = false;
+    double E = 0.0;
+    if (m_gpu_scf && m_pbc_device_scf && !pbcGpuStageOnHost("d4pair")) {
+        std::vector<double> W, dWq, dWc;
+        m_d4_generator->buildRefWFlat(m_atoms, m_d4_generator->getZetaCharges(), W, dWq, dWc);
+        const std::vector<int>& refn = m_d4_generator->getRefN();
+        std::vector<int> nrefv(nat);
+        std::vector<double> sq(nat), xyz(3 * nat), tr(3 * pair_images.trans.size()), g(3 * nat), dcn(nat), dq(nat),
+            v9(9, 0.0);
+        for (int a = 0; a < nat; ++a) {
+            const int Z = m_atoms[a];
+            nrefv[a] = (Z >= 1 && (Z - 1) < static_cast<int>(refn.size())) ? refn[Z - 1] : 0;
+            sq[a] = m_d4_generator->getSqrtZr4r2(Z);
+            for (int k = 0; k < 3; ++k) xyz[3 * a + k] = geom_bohr(a, k);
+        }
+        for (size_t t = 0; t < pair_images.trans.size(); ++t)
+            for (int k = 0; k < 3; ++k) tr[3 * t + k] = pair_images.trans[t][k];
+        const curcuma::dispersion::D4Params& dp = m_d4_evaluator->params();
+        pairs_device = m_gpu_scf->d4PairsPeriodic(nat, m_atoms.data(), nrefv.data(), sq.data(), xyz.data(), W.data(),
+            dWq.data(), dWc.data(), dp.s6, dp.s8, dp.a1, dp.a2, m_cell_bohr.L, static_cast<int>(pair_images.trans.size()),
+            tr.data(), pair_images.cutoff2, vir != nullptr, &E, g.data(), dcn.data(), dq.data(), v9.data());
+        if (pairs_device) {
+            m_disp_gradient = Matrix::Zero(nat, 3);
+            m_disp_dEdcn = Vector::Zero(nat);
+            m_disp_dEdq = Vector::Zero(nat);
+            for (int a = 0; a < nat; ++a) {
+                for (int k = 0; k < 3; ++k) m_disp_gradient(a, k) = g[3 * a + k];
+                m_disp_dEdcn(a) = dcn[a];
+                m_disp_dEdq(a) = dq[a];
+            }
+            if (vir)
+                for (int a = 0; a < 3; ++a)
+                    for (int b = 0; b < 3; ++b) (*vir)(a, b) += v9[3 * a + b];
+        }
+        if (CurcumaLogger::get_verbosity() >= 3)
+            CurcumaLogger::info_fmt("  periodic D4 pairs on the {}", pairs_device ? "device" : "host (device call failed)");
+    }
+    if (!pairs_device)
+        E = m_d4_evaluator->computeEnergyAndGradientPeriodic(m_atoms, geom_bohr, pair_images,
+            /*with_gradient=*/true, m_disp_gradient, m_disp_dEdcn, m_disp_dEdq, /*with_dEdq=*/true, vir);
     const auto td1 = d4clk::now();
     // G4a (Nov 2026): the ATM on the CUDA device when the periodic device SCF is on (G1 wrapper); every failure
     // (backend without the kernel, allocation) falls back to the host loop below.
