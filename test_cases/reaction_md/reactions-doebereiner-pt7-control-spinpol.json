@@ -1,0 +1,31 @@
+{
+ "_command": "md",
+ "_input": "test_cases/structures/clusters/reactions-doebereiner-pt7-control.xyz",
+ "_comment": "free: the gas of reactions-doebereiner-pt7 without Pt, 2000 K, spin 2 (O2 triplet) with native spin polarisation (xtb.spin_polarization, CPU only), same wall schedule (control, docs/REACTION_MD_EXAMPLES.md)",
+ "simplemd": {
+  "method": "gfn2",
+  "charge": 0,
+  "spin": 2,
+  "time_step": 1.0,
+  "thermostat": "csvr",
+  "seed": 1,
+  "threads": 1,
+  "temperature": 2000.0,
+  "coupling": 10.0,
+  "max_time": 12000,
+  "dump_frequency": 10,
+  "wall_type": "spheric",
+  "wall_potential": "logfermi",
+  "wall_radius": 8.0,
+  "wall_radius_schedule": "5.5:steps:6000",
+  "wall_temp": 2000.0,
+  "electronic_temperature": 2000.0,
+  "scf_max_iterations": 500,
+  "scf_damping": 0.15,
+  "geometry_abort_factor": 0,
+  "print_frequency": 500
+ },
+ "xtb": {
+  "spin_polarization": true
+ }
+}

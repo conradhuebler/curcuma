@@ -1,0 +1,37 @@
+{
+ "_command": "md",
+ "_input": "test_cases/structures/metals/reactions-doebereiner-pt7.xyz",
+ "_comment": "free: 2 H2 + O2 on a cold Pt7 (Pt region 500 K, gas region 2000 K), spin 8 (lowest spin of the start geometries) with native spin polarisation (xtb.spin_polarization, CPU only), wall R 8 -> 5.5 A in 6000 steps; expect H2 split and O2 stretched on Pt, no free H2O (docs/REACTION_MD_EXAMPLES.md, 16 seeds). Spin 2 with spin polarisation aborts on the SCF in 15/16 runs",
+ "simplemd": {
+  "method": "gfn2",
+  "charge": 0,
+  "spin": 8,
+  "time_step": 1.0,
+  "thermostat": "csvr",
+  "seed": 1,
+  "threads": 1,
+  "temperature": 500.0,
+  "coupling": 10.0,
+  "max_time": 12000,
+  "dump_frequency": 10,
+  "wall_type": "spheric",
+  "wall_potential": "logfermi",
+  "wall_radius": 8.0,
+  "wall_radius_schedule": "5.5:steps:6000",
+  "wall_temp": 2000.0,
+  "electronic_temperature": 2000.0,
+  "scf_max_iterations": 500,
+  "scf_damping": 0.15,
+  "geometry_abort_factor": 0,
+  "print_frequency": 500,
+  "temp_regions": [
+   {
+    "atoms": "8:13",
+    "temperature": 2000.0
+   }
+  ]
+ },
+ "xtb": {
+  "spin_polarization": true
+ }
+}

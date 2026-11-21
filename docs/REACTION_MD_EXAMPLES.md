@@ -3,7 +3,7 @@
 > Status: AI-generated (Nov 2026), machine-tested. Human production testing pending. No reference calculation (DFT, tblite, xtb) exists for any run.
 > **Forced scenarios (Haber-Bosch) are not free dynamics.** A bias potential pulls the N atoms apart; the result shows a path into the NH3 sink under that bias, no barrier, no rate, no thermodynamics.
 
-Thirteen inputs for interactive reaction MD (eight listed first, five Doebereiner variants in their own section) (GFN2, 1 fs, `csvr`, CPU) that a viewer such as qurcuma can show. Each is a JSON for `-import_config` (group `simplemd`, `_command: md`, [CLI_ROUND_TRIP.md](CLI_ROUND_TRIP.md)) in `test_cases/reaction_md/`, with a start structure `reactions-*` in `test_cases/structures/` (provenance `constructed`, atom order is load-bearing for the atom indices in the JSON).
+Fifteen inputs for interactive reaction MD (eight listed first, seven Doebereiner variants in their own section) (GFN2, 1 fs, `csvr`, CPU) that a viewer such as qurcuma can show. Each is a JSON for `-import_config` (group `simplemd`, `_command: md`, [CLI_ROUND_TRIP.md](CLI_ROUND_TRIP.md)) in `test_cases/reaction_md/`, with a start structure `reactions-*` in `test_cases/structures/` (provenance `constructed`, atom order is load-bearing for the atom indices in the JSON).
 
 ```bash
 cd <any empty directory>
@@ -32,6 +32,8 @@ Steps/s: wall time of the verification run (incl. ~1 s start) over steps, 4 thre
 | Doebereiner, control (triplet) | same structure | `reactions-doebereiner-control-triplet.json`, `spin 2` | free | no stable O-H | 2700 | see below | spin 2 occupation, not a spin-polarised GFN2 |
 | Doebereiner, cold Pt7 | `reactions-doebereiner-pt7` (13: Pt7, 2 H2, O2) | `reactions-doebereiner-pt7.json`, Pt region 500 K, gas region 2000 K, `spin 2`, wall R 8 -> 5.5 (6000 steps), 12000 steps | free, wall radius ramp | H2 split and O2 stretched on Pt, no H2O gain | 27 | see "cold Pt7" below | not a catalytic effect on H2O |
 | Doebereiner, Pt7 control | `reactions-doebereiner-pt7-control` (6) | `reactions-doebereiner-pt7-control.json`, same gas, spin 2, same wall | free | gas phase | 2900 | see below | same wall radius as Pt7 |
+| Doebereiner, cold Pt7, spin-polarised | `reactions-doebereiner-pt7` (13) | `reactions-doebereiner-pt7-spinpol.json`, as cold Pt7 but `spin 8` and `xtb.spin_polarization true` | free, wall radius ramp | H2 split, O2 stretched, no free H2O | 16 (loaded machine) | see "spin polarisation" below | CPU only; spin 2 aborts on the SCF |
+| Doebereiner, Pt7 control, spin-polarised | `reactions-doebereiner-pt7-control` (6) | `reactions-doebereiner-pt7-control-spinpol.json`, spin 2 (O2 triplet) with `xtb.spin_polarization true` | free | gas phase, O2 triplet unreactive | 1400-2500 | see below | same wall radius as Pt7 |
 
 Verification: every input run from an empty directory with `release/curcuma` built from this working tree (`ci-feature-delta-ml-170-g267dc325` plus the uncommitted wall-radius change); 24 runs, none with an SCF error or abort; CPU FP32 "false fixed point" warnings occurred and were handled by the program (continued in FP64). `-electronic_temperature` from the JSON is effective (Fe4 step-0 energy -21.0963 Eh at 2000 K against -21.0300 Eh at 300 K). Atom indices in `external_potentials` are 1-based (selection grammar): N-N pull stretches N-N in gas and Fe4, the control does not; the Fe tethers hold. Test: `ctest -R cli_simplemd_18_reaction_md_inputs` (4 s: forced vs control NH3 and H2 on Pt4).
 
@@ -125,7 +127,35 @@ Fisher (two-sided): free H2O Pt7 against gas p = 1.0 at spin 0, 2 and 4 (1/16 ag
 
 Speed: Pt7 + 6 atoms 26.7-29.3 steps/s (12000 steps in 410-449 s, 16 Pt jobs and 6 control jobs in parallel on 24 threads; machine load average 15 at the end, 22 own threads, so a foreign load of about 14 threads at times); target 30 missed again. Control 3.3 s per run (3600 steps/s). No SCF error or abort in 32 runs (settings electronic_temperature 2000, scf_damping 0.15, scf_max_iterations 500, geometry_abort_factor 0; no countermeasure needed, no "false fixed point" warning in the checked logs).
 
-Not tested: a UHF-type or spin-polarised GFN2 (not implemented; needs separate alpha/beta Fock matrices and spin constants, TODO.md), spin state per fragment (Pt7 singlet with O2 triplet is not expressible: `-spin` is global and with one orbital set the unpaired electrons go to the highest orbitals, wherever they are), other spins for the gas control, Pt7 spin 6/8, reference calculation. Caveat: because singlet GFN2 is the lowest state, the observed difference between spin 0 and spin 2 gas (O-O broken 11/16 against 1/16) is an effect of the occupation constraint, not of real O2 spin chemistry.
+Not tested: a UHF-type or spin-polarised GFN2 (implemented later the same day, see the spin-polarisation section below), spin state per fragment (Pt7 singlet with O2 triplet is not expressible: `-spin` is global and with one orbital set the unpaired electrons go to the highest orbitals, wherever they are), other spins for the gas control, Pt7 spin 6/8, reference calculation. Caveat: because singlet GFN2 is the lowest state, the observed difference between spin 0 and spin 2 gas (O-O broken 11/16 against 1/16) is an effect of the occupation constraint, not of real O2 spin chemistry.
+
+## Doebereiner lighter, cold Pt7 with spin polarisation (16 seeds)
+
+> Status: AI-generated (Nov 2026), machine-tested. Human production testing pending. No reference calculation of the dynamics. Result: **no catalyst effect on H2O formation (0/16 free H2O in Pt7 and in the gas control)**; Pt7 still splits H2 and stretches O2 significantly more often than the gas.
+
+Same protocol, geometries and seeds as the cold-Pt7 section (Pt region 500 K, gas region 2000 K, wall R 8 -> 5.5 A in 6000 steps, 12000 steps, `electronic_temperature 2000`, `scf_damping 0.15`, `scf_max_iterations 500`, `geometry_abort_factor 0`, 1 thread), but with `xtb.spin_polarization true` ([SPIN_POLARISATION.md](SPIN_POLARISATION.md): tblite spin-polarisation model, CPU and Broyden only). Spin: the `-sp` ladder uhf 0/2/4/6/8/10 of all 16 start geometries (GFN2, 2000 K, spin polarisation) has its minimum at uhf 8 in every geometry (uhf 6 0.6-4.5, uhf 4 0.06-5.6 kcal/mol higher; in geometries 2, 5, 6, 14 uhf 4 is within 0.11 kcal/mol; uhf 2 did not converge in geometries 4 and 9), so Pt7 runs use the fixed spin 8. The gas has no spin-8 state; it uses spin 2 (O2 triplet) and, for classification, spin 0 (singlet, unchanged by the option).
+
+| 16 seeds each | Pt7 s8 | gas s2 | gas s0 (singlet) | Pt7 s2, `scf_allow_unconverged` |
+|---|---|---|---|---|
+| both H2 split within 1 ps | 10 [0.39-0.82] | 2 [0.03-0.36] | 2 | 15 [0.72-0.99] |
+| O-O above 1.65 A | 13 [0.57-0.93] | 1 [0.01-0.28] | 11 | 16 [0.81-1.00] |
+| any O-H bond | 9 [0.33-0.77] | 6 [0.18-0.61] | 16 | 9 [0.33-0.77] |
+| O-H in at least half of the frames | 5 | 1 | 8 | 2 |
+| O with two H | 0 | 0 | 9 | 0 |
+| free H2O | 0 [0.00-0.19] | 0 [0.00-0.19] | 1 (7.8 ps) | 0 [0.00-0.19] |
+| runs ended by SCF abort | 0 | 0 | 0 | 0 (15/16 with the default, see below) |
+
+Fisher (two-sided, uncorrected for multiple comparisons): Pt7 s8 against gas s2: free H2O and H2O unit p = 1.0, any O-H p = 0.48, O-H persistent p = 0.17, O-O stretched p < 0.001, H2 split p = 0.009. Pt7 s2 against gas s2 (same total spin): free H2O and H2O unit p = 1.0, any O-H p = 0.48, O-O p < 0.001, H2 split p < 0.001. Pt7 s8 against Pt7 s2: all p >= 0.083. Gas s0 reproduces the earlier result exactly (1/16 free H2O at 7.76 ps, 9/16 H2O units, 16/16 O-H, 11/16 O-O, 2/16 H2 split), as expected since the option does not act at spin 0. Previous results without spin polarisation (Pt7 s0/s2/s4 free H2O 1/16 each; gas s0/s2/s4 1/16, 1/16, 0/16) are not different within the 16-seed intervals.
+
+Findings: (1) with a real O2 triplet (15.8 kcal/mol below the singlet in this model) the gas is **less** reactive than the singlet gas: O-O stretched 1/16 against 11/16, any O-H 6/16 against 16/16, H2O units 0/16 against 9/16 (p <= 0.001); the earlier occupation-only spin 2 showed the same (1/16, 10/16, 1/16), so the spin polarisation changes little there. (2) Pt7 (s8 and s2) catalyses H2 dissociation and O2 stretching as before. (3) No free H2O and no H2O unit in 32 Pt7 runs; O-H bonds on Pt7 are not more frequent than in the triplet gas (p = 0.48). A catalyst effect on H2O formation within 12 ps is not shown (upper Wilson bound 0.19 per variant). Pt7 s8: Pt stays one connected cluster in 16/16 runs (3.4 A criterion, Pt Rg at most 2.45 A).
+
+SCF: Pt7 s8 and all gas runs: no abort in 48 runs. **Pt7 s2 with spin polarisation aborted in 16/16 runs** (SCF not converged after 501 iterations, "Simulation got unstable", within the first 250 steps (aborted trajectories hold 2-24 frames of 10 steps)). Settings tried on geometry 1 (300 steps) did not remove it: `scf_damping` 0.05 and 0.3, `scf_max_iterations` 2000, `scf_guess h0`, `scf_mixed_precision false`, `scf_extrapolation aspc`, h0 with FP64; only `scf_allow_unconverged true` continues (warning at the SCF level is not visible in MD output, so the number of unconverged steps was not counted; the abort rate of about 2 % per step in the default runs is a lower guide). The table column Pt7 s2 is that run: forces from an unconverged SCF are not consistent energy derivatives, and the Pt cluster split into two components for part of the time in 6/16 runs (one run for most of the time, Pt Rg up to 4.2 A), so this column is not a clean comparison; the Pt7 s8 column is. Spin 2 on Pt7 is an excited magnetisation (0.7-5.6 kcal/mol above uhf 8) with several competing SCF solutions.
+
+Speed: Pt7 + 6 atoms with spin polarisation 15.4-19.0 steps/s (12000 steps in 630-780 s) with 16 own jobs and a load average of 22-37 on 24 threads (foreign load about 6-20 threads); the 26 steps/s of the 1000-step test were at load 25 with 1 job; gas control 1400-2500 steps/s. The cost of the option itself was not isolated in this run.
+
+Inputs: `reactions-doebereiner-pt7-spinpol.json` (geometry 1, spin 8; start energy -41.961434 Eh) and `reactions-doebereiner-pt7-control-spinpol.json` (spin 2); structures as the cold-Pt7 inputs. The `xtb` group in the JSON selects the option; without it the run is the old one. Test: not added to `cli_simplemd_18_reaction_md_inputs` (a 1200-step Pt7 run would take about 60 s); the two JSONs were run for 100 steps each.
+
+Not tested: another spin per geometry (spin 8 is the minimum only of the start geometry, not along the trajectory), spin per fragment, times beyond 12 ps, other Pt cluster sizes, a reference calculation (tblite was not run on the dynamics), GFN2 over-binding of Pt-H and Pt-O, a closed-shell Pt7 with an O2 triplet (not expressible, `-spin` is global). Caveat: 16 seeds from 16 start geometries; zero events in 16 do not exclude an effect of a factor of 3.
 
 ## What these are not
 
