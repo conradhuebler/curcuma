@@ -254,6 +254,8 @@ Stand.
 
 ## 5. Funktionen und Refactoring (niedrige Priorität)
 
+- **Open-Shell: Spin pro Fragment, GPU und Konstanten-Fragen offen** (2026-11-19, aktualisiert 2026-11-21): `-xtb.spin_polarization true` (tblite-Spinpolarisation, CPU, Broyden, `docs/SPIN_POLARISATION.md`) legt den O2-Triplett unter den Singulett; ohne die Option bleibt `-spin N` ein Orbitalsatz mit zwei Fermi-Besetzungen (Triplett über Singulett, O2 +1,65 kcal/mol). `-spin` gilt global (kein Spin pro Fragment).
+  Offen: GPU, `-large_system_mode`, DIIS/Level-Shift, `-scf_precond` mit Spinpolarisation (heute Fehler); Zitat und LGPL-Lizenzfrage der Konstanten (`parameters/spin_constants.hpp`, Operator); tblite-Pin in `CMakeLists.txt` hat alte Konstanten; mehrere SCF-Lösungen, bei 300 K oft > 500 Broyden-Zyklen.
 - **PLUMED-Hilfeseiten überarbeiten** (2026-11-10, Branch `feature/plumed-help-page`, Stash-Stand vom 01.06., Basis `25d4d8d7`): `-help-plumed` und der SimpleMD-Hinweis darauf doppeln `-help metadynamics` (`printMetadynamicsHelp()` in `src/main.cpp`) und `docs/PLUMED_HELP.md`; zusammenführen, auf den aktuellen Stand bringen.
   Nur die Hilfetexte übernehmen: die Einheitenänderungen des Branches (Bohr-Positionen, kB*T, `setBox`) sind älter als `07e7544d`/`96c29c50` und würden sie teilweise zurückdrehen.
 
