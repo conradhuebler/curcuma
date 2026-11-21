@@ -858,6 +858,9 @@ not exact eigenvectors. Hence E1 below (density) instead of a new eigensolver.
   started in this continuation (effort against the remaining budget). Also open: Ewald gradient + virial (67 ms
   with virial, host), KO remainder (33 ms, host), CN (53 ms, host), the ATM triple algebra (FP64-bound, 150 ms).
 
+Regression after E1/A1/M1/M2/C1 (2026-11-21, test selection of the regression run below, `-j1`): `release/` 379 of
+380, `release_cuda/` 650 of 651 passed; the only failure in both is the pre-existing `xtb_cpscf`.
+
 ## Regression run (2026-11-14, `release/`, `ctest -R 'gfn|xtb|sqm|gfnff|pbc|ewald|simplemd|restart|md_|gpu|plugin|molecule|xyz|parser|curcumaopt|structinv' -j1`)
 
 369 tests selected, 2 failed before the fix below: `pbc_md_nonperiodic_cell` (its check (a) assumed gfn2 + cell to be
