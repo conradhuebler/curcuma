@@ -273,6 +273,8 @@ public:
     /// Pseudo-diagonalisation steps taken / tried and rejected since the last beginResidentLoop.
     /// Claude Generated (Nov 2026, WP-PERIODIC-XTB G1c): see GpuScfBackend::setHostLoopPseudo.
     void setHostLoopPseudo(bool on, int n, double n_elec, int nocc_pairs, double Tele, double last_dq);
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB E1): see GpuScfBackend::setHostLoopDensityComplement.
+    void setHostLoopDensityComplement(bool on);
     void pseudoDiagonalisationCounts(int& taken, int& rejected) const;
 
     /// "" when not configured, else the devices used and the number of split steps.

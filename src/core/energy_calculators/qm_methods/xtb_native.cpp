@@ -1695,6 +1695,7 @@ double XTB::Calculation(bool gradient)
     double resident_band = 0.0;   // Tr(P H0) of the last device-resident step
     double pbc_last_gpu_band = 0.0;   // G1b: Tr(P H0) of the last host-driven device step (host H0 deferred)
     if (m_gpu_scf) m_gpu_scf->setHostLoopPseudo(false, 0, 0.0, 0, 0.0, 0.0);   // G1c: nothing left from a failed SCF
+    if (m_gpu_scf) m_gpu_scf->setHostLoopDensityComplement(false);             // E1
     double resident_ecoul = 0.0, resident_ethird = 0.0, resident_emp = 0.0;  // its SCC energies
     pre_mark("preconditioner, SCF state");
     const auto t_scf_start = clock::now();
@@ -1870,6 +1871,10 @@ double XTB::Calculation(bool gradient)
             if (m_pbc && !openShell())
                 m_gpu_scf->setHostLoopPseudo(!pbcGpuStageOnHost("pseudo"), m_basis.nao, m_wfn.nocc,
                                              static_cast<int>(std::floor(m_wfn.nocc / 2.0)), m_electronic_temp, dq_prev);
+            // E1 (Claude Generated, Nov 2026): closed-shell complement density P = 2 (S^-1 - C_v C_v^T) on the device
+            // (taken only when every occupied orbital has occ = 2 exactly). CURCUMA_PBC_GPU_HOST=dcompl keeps the GEMM.
+            if (m_pbc && !openShell())
+                m_gpu_scf->setHostLoopDensityComplement(!pbcGpuStageOnHost("dcompl"));
             bool solve_ok;
             Eigen::VectorXd v_ao;  // host-expanded potential (non-device-potential path)
             // GFN2 multipole solve. With -xtb.rocm_device_multipole the device already holds
@@ -2470,6 +2475,7 @@ double XTB::Calculation(bool gradient)
     m_wfn_on_device = false;
     m_pbc_dev_wfn = false;   // G5b
     if (m_pbc && m_gpu_scf) m_gpu_scf->setHostLoopPseudo(false, 0, 0.0, 0, 0.0, 0.0);   // G1c: SCF done
+    if (m_pbc && m_gpu_scf) m_gpu_scf->setHostLoopDensityComplement(false);             // E1: SCF done
     if (use_gpu_resident && m_gpu_scf) {
         // The converged P/C stay on the device only for big systems (as before for GFN2: dense multipole integrals
         // above 2 GB, nao > ~5270); the small ones keep the public accessors (getDensity, MolecularOrbitals)
@@ -2778,6 +2784,11 @@ double XTB::Calculation(bool gradient)
         }
     }
 
+    {   // Claude Generated (Nov 2026): CURCUMA_XTB_ETRACE=1 prints every returned energy at full precision (diagnostic,
+        // e.g. per MD step; the MD status line has 6 decimals)
+        static const bool etrace = std::getenv("CURCUMA_XTB_ETRACE") != nullptr;
+        if (etrace) fmt::print(stderr, "ETRACE {:.15f}\n", m_E_total);
+    }
     return m_E_total;
 }
 

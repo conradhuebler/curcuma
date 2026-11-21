@@ -180,10 +180,10 @@ struct XtbGpuContext::Impl {
     CudaBuffer<double> dD4AtmC6, dD4AtmDc6;               // nat^2 each (q=0 reference)
     CudaBuffer<int>    dD4NbPtr, dD4Nb;                   // ATM neighbour list
     // Nov 2026 (WP-PERIODIC-XTB G4a): periodic ATM image neighbour list and outputs
-    CudaBuffer<double> dPbcXyz, dPbcTrans, dPbcR4r2, dPbcSr4r2, dPbcNbV, dPbcEat, dPbcGrad, dPbcDcn, dPbcVir;
+    CudaBuffer<double> dPbcXyz, dPbcTrans, dPbcR4r2, dPbcSr4r2, dPbcNbV, dPbcEat, dPbcGrad, dPbcDcn, dPbcVir, dPbcAtmRatio, dPbcAtmRatioT;
     CudaBuffer<int>    dPbcNbCnt, dPbcNbPtr, dPbcNbIdx;
     // Nov 2026 (G3): periodic multipole interaction matrices
-    CudaBuffer<double> dPbcMrad, dPbcDtrans, dPbcRtrans, dPbcKexp, dPbcAmat;
+    CudaBuffer<double> dPbcMrad, dPbcDtrans, dPbcRtrans, dPbcKexp, dPbcAmat, dPbcMpSf, dPbcMpKv;
     // Nov 2026 (G5a): periodic multipole gradient (moments, fixed-point accumulators)
     CudaBuffer<double> dPbcQ, dPbcDp, dPbcQp, dPbcGfix;
     // Nov 2026 (G4b): image-summed D4 BJ factor D(i, j) of the periodic in-SCF dE/dq
@@ -621,6 +621,16 @@ struct XtbGpuContext::Impl {
     /// Claude Generated (Oct 2026, parity item C2): dense density P = Cs Cs^T with Cs(:,k) = sqrt(occ_k) C(:,k) by dsyrk on the
     /// occupied columns (half the flops of the GEMM), lower triangle mirrored. Opt-in: CURCUMA_GPU_DENSITY_SYRK=1.
     bool densitySyrk(int n, int ncol);
+    // Claude Generated (Nov 2026, WP-PERIODIC-XTB E1): closed-shell density from the virtual complement,
+    // P = 2 (S^-1 - C_v C_v^T), for the host-driven periodic loop (setHostLoopDensityComplement). S^-1 is built
+    // once per Cholesky factor (dpotri, sinv_gen == l_generation); c_cols_valid = number of columns of dC that
+    // hold eigenvectors (n after a full or pseudo step, n_eig after a partial solve).
+    bool dens_compl = false;
+    CudaBuffer<double> dSinv, dSinvWork;
+    long sinv_gen = -1;
+    int  c_cols_valid = 0;
+    long dens_compl_taken = 0;
+    bool densityComplement(int n, int ncol);
     static bool densitySyrkWanted() { static const bool on = [] { const char* e = std::getenv("CURCUMA_GPU_DENSITY_SYRK"); return e && *e && *e != '0'; }(); return on; }
     CudaBuffer<double> dLProbeV, dLProbeW, dLProbeU;   ///< probe vectors v, L L^T v, S v
     int  lprobe_fail_left = -2;                        ///< CURCUMA_GPU_FAIL_LPROBE=k: corrupt the factor k times (-2: not read yet)
@@ -3309,7 +3319,7 @@ __global__ void k_d4_atm_nl_w(int nat, const double* __restrict__ xyz, const dou
 // Entry layout of the image neighbour list (kAtmNbStride doubles per entry): v (3, x_X - x_a), r^2, r, 1/r^2,
 // r0_aX = a1 sqrt(3 r4r2_a r4r2_X) + a2, sqrt(C6_aX), dC6_aX/dCN_a / C6_aX. The per-entry factors move every sqrt and
 // division but two out of the triple loop (consumer GPUs run FP64 sqrt/div at a small fraction of the FMA rate).
-constexpr int kAtmNbStride = 9;
+constexpr int kAtmNbStride = 10;   // A1: entry 9 = 1/r (per-class kernel)
 
 // one warp per atom a: number of image neighbours (pass 1) or their compacted list (pass 2, FILL)
 template <bool FILL>
@@ -3360,6 +3370,7 @@ __global__ void k_atm_pbc_nb(int nat, const double* __restrict__ xyz, double Lx,
             e[6] = a1 * sqrt(3.0 * r4r2[x] * r4r2[a]) + a2;
             e[7] = sqrt(fabs(c6ax));
             e[8] = dc6dcn[a*nat_s + x] / c6ax;
+            e[9] = 1.0 / e[4];
         }
         base += __popc(m);
         count += __popc(m);
@@ -3457,6 +3468,156 @@ __global__ void k_d4_atm_pbc_w(int nat, const double* __restrict__ sr4r2, const 
     dEdcn[a] = cnacc;
     if (want_vir)
         for (int k = 0; k < 6; ++k) vir6[6*a+k] = v[k];
+}
+
+/* ---------------------------------------------------------------------------------------------- *
+ *  WP-PERIODIC-XTB A1 (Claude Generated, Nov 2026): periodic D4 ATM, each translation class of    *
+ *  triples once. k_d4_atm_pbc_w visits every class from each of its three members (E = 1/3 sum,   *
+ *  gradient of the centre only). Here a class is taken only in the views of its members with the  *
+ *  smallest atom index: in the list of a only entries X, Y with atom index >= a (a suffix, the     *
+ *  list is sorted by atom index), weight w = 1 / (1 + [x == a] + [y == a]), which sums to one over *
+ *  the views of every class. The gradient and dE/dCN of all three members follow from the same     *
+ *  terms: a in registers per warp, X in registers per lane (the outer entry), Y (the inner entry,  *
+ *  the same for the whole warp) by a fixed-order warp sum and one fixed-point add (gfix_add) per   *
+ *  inner step; integer atomics, so the sums do not depend on the order. e_atom and the virial are  *
+ *  returned times 3 so the caller's 1/3 stays. About a third of the FP64 work of the per-member    *
+ *  form; the sqrt(C6_XY) and dC6/dCN ratios are read from matrices indexed [y][x] (coalesced over  *
+ *  the lanes of a warp: the list is sorted by x).                                                  *
+ * ---------------------------------------------------------------------------------------------- */
+// ratio[i*nat+j] = dC6_ij/dCN_i / C6_ij, ratioT[j*nat+i] = ratio[i*nat+j]
+__global__ void k_atm_ratio(int nat, const double* __restrict__ c6, const double* __restrict__ dc6,
+                            double* __restrict__ ratio, double* __restrict__ ratioT)
+{
+    const size_t e = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const size_t nn = static_cast<size_t>(nat) * nat;
+    if (e >= nn) return;
+    const size_t i = e / nat, j = e - i * nat;
+    const double r = dc6[e] / c6[e];
+    ratio[e] = r;
+    ratioT[j * nat + i] = r;
+}
+
+__global__ void k_d4_atm_pbc_u(int nat, const double* __restrict__ sr4r2, const double* __restrict__ sc6,
+                               const double* __restrict__ ratio, const double* __restrict__ ratioT,
+                               const int* __restrict__ ptr, const int* __restrict__ nb_idx,
+                               const double* __restrict__ nb_v,
+                               double s9, double a1sq3, double a2, double alp, double cut2, int want_vir,
+                               double* __restrict__ e_atom, double* __restrict__ grad_fix,
+                               double* __restrict__ dcn_fix, double* __restrict__ vir6)
+{
+    const int a = static_cast<int>((static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x) >> 5);
+    const int lane = threadIdx.x & 31;
+    if (a >= nat) return;   // uniform per warp
+    const double eps = 2.220446049250313e-16;
+    const size_t nat_s = static_cast<size_t>(nat);
+    const bool alp16 = (alp == 16.0);
+    const int p0 = ptr[a], p1 = ptr[a + 1];
+    // first entry with atom index >= a (the list is sorted by atom index)
+    int lo = p0, hi = p1;
+    while (lo < hi) { const int mid = (lo + hi) >> 1; if (nb_idx[mid] < a) lo = mid + 1; else hi = mid; }
+    const int q0 = lo;
+    double eacc = 0.0, gax = 0.0, gay = 0.0, gaz = 0.0, cna = 0.0;
+    double v[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    // Every lane runs the same number of inner steps (warp-uniform iy) so the warp sums for Y line up.
+    for (int base = q0; base < p1; base += 32) {
+        const int ix = base + lane;
+        const bool xin = ix < p1;
+        int x = 0;
+        double vaxx = 0, vaxy = 0, vaxz = 0, r2ax = 1, irax = 1, ir2ax = 1, r0ax = 0, sc6ax = 0, ratax = 0, srx = 0;
+        double ratxa = 0.0;
+        if (xin) {
+            x = nb_idx[ix];
+            const double* ex = nb_v + kAtmNbStride * static_cast<size_t>(ix);
+            vaxx = ex[0]; vaxy = ex[1]; vaxz = ex[2]; r2ax = ex[3]; irax = ex[9]; ir2ax = ex[5];
+            r0ax = ex[6]; sc6ax = ex[7]; ratax = ex[8];
+            srx = sr4r2[x];
+            ratxa = ratioT[a * nat_s + x];    // dC6_xa/dCN_x / C6_xa
+        }
+        double gxx = 0.0, gxy = 0.0, gxz = 0.0, cnx = 0.0;
+        const int iy_end = min(base + 31, p1 - 1);   // the largest ix of this chunk
+        for (int iy = q0; iy < iy_end; ++iy) {
+            const double* ey = nb_v + kAtmNbStride * static_cast<size_t>(iy);
+            const int y = nb_idx[iy];
+            double gyx = 0.0, gyy = 0.0, gyz = 0.0, cny = 0.0;
+            if (xin && iy < ix) {
+                const double dxyx = ey[0] - vaxx, dxyy = ey[1] - vaxy, dxyz_ = ey[2] - vaxz;
+                const double r2xy = dxyx*dxyx + dxyy*dxyy + dxyz_*dxyz_;
+                if (!(r2xy > cut2 || r2xy < eps)) {
+                    const int nself = (x == a ? 1 : 0) + (y == a ? 1 : 0);
+                    const double w = nself == 0 ? 1.0 : (nself == 1 ? 0.5 : (1.0 / 3.0));
+                    const double vayx = ey[0], vayy = ey[1], vayz = ey[2], r2ay = ey[3];
+                    const double c9 = -s9 * (sc6ax * ey[7] * sc6[y * nat_s + x]);
+                    const double r0xy = a1sq3 * srx * sr4r2[y] + a2;
+                    const double r0 = r0ax * ey[6] * r0xy;
+                    const double rsxy = rsqrt(r2xy);       // one rsqrt instead of sqrt + two divisions
+                    const double ir1 = irax * ey[9] * rsxy;
+                    const double ir2 = ir1 * ir1;
+                    const double ir3 = ir2 * ir1;
+                    const double ir5 = ir3 * ir2;
+                    const double q = r0 * ir1;
+                    const double pw = alp16 ? (q*q*q*q*q) * cbrt(q) : pow(q, alp/3.0);
+                    const double fdmp = 1.0/(1.0 + 6.0*pw);
+                    const double ang = 0.375*(r2ax + r2xy - r2ay)*(r2ax - r2xy + r2ay)*(-r2ax + r2xy + r2ay)*ir5 + ir3;
+                    const double dE = ang*fdmp*c9;          // E_triple = -dE
+                    const double wE = w * dE;
+                    eacc += -wE;
+                    const double dfdmp = -2.0*alp*pw*fdmp*fdmp;
+                    const double dang_ax = -0.375*(r2ax*r2ax*r2ax + r2ax*r2ax*(r2xy+r2ay)
+                                  + r2ax*(3.0*r2xy*r2xy + 2.0*r2xy*r2ay + 3.0*r2ay*r2ay)
+                                  - 5.0*(r2xy-r2ay)*(r2xy-r2ay)*(r2xy+r2ay))*ir5;
+                    const double dang_ay = -0.375*(r2ay*r2ay*r2ay + r2ay*r2ay*(r2xy+r2ax)
+                                  + r2ay*(3.0*r2xy*r2xy + 2.0*r2xy*r2ax + 3.0*r2ax*r2ax)
+                                  - 5.0*(r2xy-r2ax)*(r2xy-r2ax)*(r2xy+r2ax))*ir5;
+                    const double dang_xy = -0.375*(r2xy*r2xy*r2xy + r2xy*r2xy*(r2ay+r2ax)
+                                  + r2xy*(3.0*r2ay*r2ay + 2.0*r2ay*r2ax + 3.0*r2ax*r2ax)
+                                  - 5.0*(r2ay-r2ax)*(r2ay-r2ax)*(r2ay+r2ax))*ir5;
+                    const double wc9 = w * c9;
+                    const double gcax = wc9*(-dang_ax*fdmp + ang*dfdmp)*ir2ax;
+                    const double gcay = wc9*(-dang_ay*fdmp + ang*dfdmp)*ey[5];
+                    const double gcxy = wc9*(-dang_xy*fdmp + ang*dfdmp)*(rsxy*rsxy);
+                    // dE/dR_a = -(gcax v_ax + gcay v_ay), dE/dR_X = gcax v_ax - gcxy d_xy, dE/dR_Y = gcay v_ay + gcxy d_xy
+                    gax += -gcax*vaxx - gcay*vayx; gay += -gcax*vaxy - gcay*vayy; gaz += -gcax*vaxz - gcay*vayz;
+                    gxx += gcax*vaxx - gcxy*dxyx; gxy += gcax*vaxy - gcxy*dxyy; gxz += gcax*vaxz - gcxy*dxyz_;
+                    gyx = gcay*vayx + gcxy*dxyx; gyy = gcay*vayy + gcxy*dxyy; gyz = gcay*vayz + gcxy*dxyz_;
+                    cna += -wE*0.5*(ratax + ey[8]);
+                    cnx += -wE*0.5*(ratxa + ratioT[y * nat_s + x]);            // dC6_xy/dCN_x / C6_xy
+                    cny = -wE*0.5*(ratio[y * nat_s + a] + ratio[y * nat_s + x]);   // dC6_ya/dCN_y, dC6_yx/dCN_y
+                    if (want_vir) {
+                        v[0] -= gcax*vaxx*vaxx + gcay*vayx*vayx + gcxy*dxyx*dxyx;
+                        v[1] -= gcax*vaxx*vaxy + gcay*vayx*vayy + gcxy*dxyx*dxyy;
+                        v[2] -= gcax*vaxx*vaxz + gcay*vayx*vayz + gcxy*dxyx*dxyz_;
+                        v[3] -= gcax*vaxy*vaxy + gcay*vayy*vayy + gcxy*dxyy*dxyy;
+                        v[4] -= gcax*vaxy*vaxz + gcay*vayy*vayz + gcxy*dxyy*dxyz_;
+                        v[5] -= gcax*vaxz*vaxz + gcay*vayz*vayz + gcxy*dxyz_*dxyz_;
+                    }
+                }
+            }
+            // Y is the same atom for every lane of this step: one fixed-order warp sum, one fixed-point add.
+            const unsigned any = __ballot_sync(0xffffffffu, gyx != 0.0 || gyy != 0.0 || gyz != 0.0 || cny != 0.0);
+            if (any) {
+                gyx = d_warp_sum(gyx); gyy = d_warp_sum(gyy); gyz = d_warp_sum(gyz);
+                cny = d_warp_sum(cny);
+                if (lane == 0) {
+                    gfix_add(&grad_fix[3*y+0], gyx); gfix_add(&grad_fix[3*y+1], gyy); gfix_add(&grad_fix[3*y+2], gyz);
+                    gfix_add(&dcn_fix[y], cny);
+                }
+            }
+        }
+        if (xin) {
+            gfix_add(&grad_fix[3*x+0], gxx); gfix_add(&grad_fix[3*x+1], gxy); gfix_add(&grad_fix[3*x+2], gxz);
+            gfix_add(&dcn_fix[x], cnx);
+        }
+    }
+    eacc = d_warp_sum(eacc);
+    gax = d_warp_sum(gax); gay = d_warp_sum(gay); gaz = d_warp_sum(gaz);
+    cna = d_warp_sum(cna);
+    for (int k = 0; k < 6; ++k) v[k] = d_warp_sum(v[k]);
+    if (lane != 0) return;
+    e_atom[a] = 3.0 * eacc;
+    gfix_add(&grad_fix[3*a+0], gax); gfix_add(&grad_fix[3*a+1], gay); gfix_add(&grad_fix[3*a+2], gaz);
+    gfix_add(&dcn_fix[a], cna);
+    if (want_vir)
+        for (int k = 0; k < 6; ++k) vir6[6*a+k] = 3.0 * v[k];
 }
 
 /* ---------------------------------------------------------------------------------------------- *
@@ -3811,7 +3972,7 @@ __global__ void k_mp_amat_pbc(int nat, const double* __restrict__ xyz, const dou
  *  fixed-point accumulation (gfix_add, order independent), the virial as a fixed-order block sum   *
  *  of -dE/d(eps) added with gfix_add. Moments dp [3 nat] and qp [6 nat] atom-major.               *
  * ---------------------------------------------------------------------------------------------- */
-template <bool WANT_V>
+template <bool WANT_V, bool KV = true, bool KG = true>
 __global__ void k_mp_grad_pbc(int nat, const double* __restrict__ xyz, const double* __restrict__ mrad,
                               const double* __restrict__ qat, const double* __restrict__ dpat,
                               const double* __restrict__ qpat, double Lx, double Ly, double Lz,
@@ -3843,7 +4004,7 @@ __global__ void k_mp_grad_pbc(int nat, const double* __restrict__ xyz, const dou
         for (int k = 0; k < 6; ++k) { ti[k] = qpat[6*iat+k]; tj[k] = qpat[6*jat+k]; }
         const double dpidpj = mi[0] * mj[0] + mi[1] * mj[1] + mi[2] * mj[2];
 
-        if (iat != jat || WANT_V) {
+        if ((KG && iat != jat) || (WANT_V && KV)) {
             for (int t = 0; t < nrt; ++t) {
                 const double w = kexp[t];
                 if (w == 0.0) continue;
@@ -3860,13 +4021,13 @@ __global__ void k_mp_grad_pbc(int nat, const double* __restrict__ xyz, const dou
                                           + 2*tj[1]*kv[0]*kv[1] + 2*tj[3]*kv[0]*kv[2] + 2*tj[4]*kv[1]*kv[2]);
                 const double qpiqj = qj * (ti[0]*kv[0]*kv[0] + ti[2]*kv[1]*kv[1] + ti[5]*kv[2]*kv[2]
                                           + 2*ti[1]*kv[0]*kv[1] + 2*ti[3]*kv[0]*kv[2] + 2*ti[4]*kv[1]*kv[2]);
-                if (iat != jat)
+                if (KG && iat != jat)
                     for (int c = 0; c < 3; ++c) {
                         dG[c] -= sd_f * kv[c] * cosk * (dpiqj - qidpj);
                         dG[c] += kv[c] * sink * dpiv * dpjv;
                         dG[c] += sq_f * kv[c] * sink * (qiqpj + qpiqj);
                     }
-                if (WANT_V) {
+                if (WANT_V && KV) {
                     const double g2 = kv[0] * kv[0] + kv[1] * kv[1] + kv[2] * kv[2];
                     const double X = 2.0 / g2 + 0.5 / alp2;
                     const double tjk[3] = { tj[0]*kv[0] + tj[1]*kv[1] + tj[3]*kv[2], tj[1]*kv[0] + tj[2]*kv[1] + tj[4]*kv[2], tj[3]*kv[0] + tj[4]*kv[1] + tj[5]*kv[2] };
@@ -3888,7 +4049,7 @@ __global__ void k_mp_grad_pbc(int nat, const double* __restrict__ xyz, const dou
                         }
                 }
             }
-            if (WANT_V) {
+            if (WANT_V && KV) {
                 const double cdd = (iat != jat) ? (fac / 6.0) * dpidpj : 0.5 * (fac / 6.0) * dpidpj;
                 for (int a = 0; a < 3; ++a) dEde[a][a] -= cdd;
             }
@@ -3983,6 +4144,145 @@ __global__ void k_mp_grad_pbc(int nat, const double* __restrict__ xyz, const dou
                 if (tid == 0) gfix_add(&vir_fix[3 * a + b], red[0]);
                 __syncthreads();
             }
+    }
+}
+
+/* ---------------------------------------------------------------------------------------------- *
+ *  WP-PERIODIC-XTB M1 (Claude Generated, Nov 2026): reciprocal-space strain derivative of the GFN2  *
+ *  multipole Ewald sum by structure factors, O(N N_k) instead of the O(N^2 N_k) pair loop of       *
+ *  k_mp_grad_pbc<true>. The k part of the pair sum is (1/2) sum_ij over all ordered pairs (the     *
+ *  self pairs carry the weights 1/2 of the pair kernel), so with e_j = exp(i k.r_j) and            *
+ *     Q = sum q_j e_j, D = sum (k.m_j) e_j, T = sum (k.Theta_j.k) e_j,                           *
+ *     M_a = sum m_ja e_j, U_a = sum (Theta_j k)_a e_j,                                            *
+ *  cos(k.(r_j - r_i)) and sin(...) are Re/Im of e_i^* e_j and per k                                *
+ *     dE/de_ab = sd_f (w'_ab Im(D*Q) - w k_b Im(M_a*Q)) + w'_ab |D|^2/2 - w k_b Re(M_a*D)           *
+ *              + sq_f (w'_ab Re(Q*T) - 2 w k_b Re(Q*U_a)),   w'_ab = w (-delta_ab + k_a k_b X),       *
+ *  X = 2/k^2 + 1/(2 alpha^2): the terms of the pair kernel (A, dpiv dpjv, B, B') summed in closed  *
+ *  form. The constant dipole term (fac/6) (sum m)^2 / 2 is added by the caller. k_mp_sf writes the *
+ *  9 complex sums per k (one block per k, fixed-order block tree), k_mp_kvir sums the 9 strain    *
+ *  derivatives over k in one block (fixed order). Deterministic, no atomics.                     *
+ * ---------------------------------------------------------------------------------------------- */
+__global__ void k_mp_sf(int nat, const double* __restrict__ xyz, const double* __restrict__ qat,
+                        const double* __restrict__ dpat, const double* __restrict__ qpat, int nrt,
+                        const double* __restrict__ rtrans, double* __restrict__ sf)
+{
+    const int t = blockIdx.x;
+    if (t >= nrt) return;
+    constexpr int NS = 18;   // Q, D, T, M_xyz, U_xyz as (re, im)
+    __shared__ double red[256];
+    const double kx = rtrans[3*t], ky = rtrans[3*t+1], kz = rtrans[3*t+2];
+    double acc[NS];
+    for (int c = 0; c < NS; ++c) acc[c] = 0.0;
+    for (int j = threadIdx.x; j < nat; j += blockDim.x) {
+        double sn, cs;
+        sincos(kx * xyz[3*j] + ky * xyz[3*j+1] + kz * xyz[3*j+2], &sn, &cs);
+        const double q = qat[j];
+        const double m0 = dpat[3*j], m1 = dpat[3*j+1], m2 = dpat[3*j+2];
+        const double* th = qpat + 6 * j;   // xx, xy, yy, xz, yz, zz
+        const double u0 = th[0]*kx + th[1]*ky + th[3]*kz;
+        const double u1 = th[1]*kx + th[2]*ky + th[4]*kz;
+        const double u2 = th[3]*kx + th[4]*ky + th[5]*kz;
+        const double km = kx*m0 + ky*m1 + kz*m2;
+        const double tkk = th[0]*kx*kx + th[2]*ky*ky + th[5]*kz*kz + 2*th[1]*kx*ky + 2*th[3]*kx*kz + 2*th[4]*ky*kz;
+        const double f[9] = { q, km, tkk, m0, m1, m2, u0, u1, u2 };
+        for (int c = 0; c < 9; ++c) { acc[2*c] += f[c] * cs; acc[2*c+1] += f[c] * sn; }
+    }
+    for (int c = 0; c < NS; ++c) {
+        red[threadIdx.x] = acc[c];
+        __syncthreads();
+        for (int st = blockDim.x / 2; st > 0; st >>= 1) {
+            if (threadIdx.x < st) red[threadIdx.x] += red[threadIdx.x + st];
+            __syncthreads();
+        }
+        if (threadIdx.x == 0) sf[static_cast<size_t>(t) * NS + c] = red[0];
+        __syncthreads();
+    }
+}
+
+// M2 (Claude Generated, Nov 2026): k-space part of the multipole gradient from the structure factors of k_mp_sf,
+//   dE/dr_i = sum_k w k [ -sd_f ((k.m_i) Re(e_i^* Q) - q_i Re(e_i^* D)) + (k.m_i) Im(e_i^* D)
+//                         + sq_f (q_i Im(e_i^* T) + (k.Theta_i.k) Im(e_i^* Q)) ],
+// the closed-form sum over j of the pair terms of k_mp_grad_pbc (the j = i term vanishes). One block per atom,
+// threads over k, fixed-order block tree; the result is added to the converted gradient (gadd).
+__global__ void k_mp_kgrad(int nat, const double* __restrict__ xyz, const double* __restrict__ qat,
+                           const double* __restrict__ dpat, const double* __restrict__ qpat, int nrt,
+                           const double* __restrict__ rtrans, const double* __restrict__ kexp,
+                           const double* __restrict__ sf, double sd_f, double sq_f, double* __restrict__ gadd)
+{
+    const int i = blockIdx.x;
+    if (i >= nat) return;
+    __shared__ double red[256];
+    const double xi = xyz[3*i], yi = xyz[3*i+1], zi = xyz[3*i+2];
+    const double q = qat[i], m0 = dpat[3*i], m1 = dpat[3*i+1], m2 = dpat[3*i+2];
+    const double* th = qpat + 6 * i;
+    double g[3] = { 0.0, 0.0, 0.0 };
+    for (int t = threadIdx.x; t < nrt; t += blockDim.x) {
+        const double w = kexp[t];
+        if (w == 0.0) continue;
+        const double kx = rtrans[3*t], ky = rtrans[3*t+1], kz = rtrans[3*t+2];
+        double sn, cs;
+        sincos(kx * xi + ky * yi + kz * zi, &sn, &cs);
+        const double* S = sf + static_cast<size_t>(t) * 18;
+        const double reQ = cs * S[0] + sn * S[1], imQ = cs * S[1] - sn * S[0];
+        const double reD = cs * S[2] + sn * S[3], imD = cs * S[3] - sn * S[2];
+        const double imT = cs * S[5] - sn * S[4];
+        const double km = kx*m0 + ky*m1 + kz*m2;
+        const double tkk = th[0]*kx*kx + th[2]*ky*ky + th[5]*kz*kz + 2*th[1]*kx*ky + 2*th[3]*kx*kz + 2*th[4]*ky*kz;
+        const double f = w * (-sd_f * (km * reQ - q * reD) + km * imD + sq_f * (q * imT + tkk * imQ));
+        g[0] += f * kx; g[1] += f * ky; g[2] += f * kz;
+    }
+    for (int c = 0; c < 3; ++c) {
+        red[threadIdx.x] = g[c];
+        __syncthreads();
+        for (int st = blockDim.x / 2; st > 0; st >>= 1) {
+            if (threadIdx.x < st) red[threadIdx.x] += red[threadIdx.x + st];
+            __syncthreads();
+        }
+        if (threadIdx.x == 0) gadd[3*i + c] += red[0];
+        __syncthreads();
+    }
+}
+
+__global__ void k_mp_kvir(int nrt, const double* __restrict__ rtrans, const double* __restrict__ kexp,
+                          const double* __restrict__ sf, double alp, double sd_f, double sq_f,
+                          double* __restrict__ out9)
+{
+    __shared__ double red[256];
+    double acc[9] = { 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    const double alp2 = alp * alp;
+    for (int t = threadIdx.x; t < nrt; t += blockDim.x) {
+        const double w = kexp[t];
+        if (w == 0.0) continue;
+        const double kv[3] = { rtrans[3*t], rtrans[3*t+1], rtrans[3*t+2] };
+        const double* S = sf + static_cast<size_t>(t) * 18;
+        const double Qr = S[0], Qi = S[1], Dr = S[2], Di = S[3], Tr = S[4], Ti = S[5];
+        const double imDQ = Dr * Qi - Di * Qr;            // Im(D* Q)
+        const double DD = Dr * Dr + Di * Di;              // |D|^2
+        const double reQT = Qr * Tr + Qi * Ti;            // Re(Q* T)
+        const double g2 = kv[0] * kv[0] + kv[1] * kv[1] + kv[2] * kv[2];
+        const double X = 2.0 / g2 + 0.5 / alp2;
+        for (int a = 0; a < 3; ++a) {
+            const double Mr = S[6 + 2*a], Mi = S[7 + 2*a], Ur = S[12 + 2*a], Ui = S[13 + 2*a];
+            const double imMQ = Mr * Qi - Mi * Qr;        // Im(M_a* Q)
+            const double reMD = Mr * Dr + Mi * Di;        // Re(M_a* D)
+            const double reQU = Qr * Ur + Qi * Ui;        // Re(Q* U_a)
+            for (int b = 0; b < 3; ++b) {
+                const double wp = w * (-(a == b ? 1.0 : 0.0) + kv[a] * kv[b] * X);
+                const double dE = sd_f * (wp * imDQ - w * kv[b] * imMQ) + 0.5 * wp * DD - w * kv[b] * reMD
+                                + sq_f * (wp * reQT - 2.0 * w * kv[b] * reQU);
+                acc[3*a + b] -= dE;                       // Xi = -dE/de
+            }
+        }
+    }
+    for (int c = 0; c < 9; ++c) {
+        red[threadIdx.x] = acc[c];
+        __syncthreads();
+        for (int st = blockDim.x / 2; st > 0; st >>= 1) {
+            if (threadIdx.x < st) red[threadIdx.x] += red[threadIdx.x + st];
+            __syncthreads();
+        }
+        if (threadIdx.x == 0) out9[c] = red[0];
+        __syncthreads();
     }
 }
 
@@ -4875,6 +5175,88 @@ bool XtbGpuContext::Impl::densitySyrk(int n, int ncol)
     return cudaGetLastError() == cudaSuccess;
 }
 
+// 2 * (lower triangle of A) into B, column-major n x n (the upper triangle of B is left alone).
+__global__ void k_twice_lower(const double* __restrict__ A, double* __restrict__ B, int n)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int j = blockIdx.y * blockDim.y + threadIdx.y;
+    if (i < n && j < n && i >= j) {
+        const size_t e = static_cast<size_t>(i) + static_cast<size_t>(j) * n;
+        B[e] = 2.0 * A[e];
+    }
+}
+
+/**
+ * Closed-shell density from the virtual complement (Claude Generated, Nov 2026, WP-PERIODIC-XTB E1).
+ * For an S-orthonormal set C = [C_o C_v] (C^T S C = I) C C^T = S^-1, so with every occupied orbital doubly occupied
+ *     P = 2 C_o C_o^T = 2 (S^-1 - C_v C_v^T).
+ * The dsyrk then runs over the nv = n - ncol virtual columns: n^2 nv flops instead of the 2 n^2 ncol of the GEMM
+ * (water GFN2: ncol = 2 n / 3, a factor 4). S^-1 = L^-T L^-1 (cusolver dpotri on the resident Cholesky factor) is
+ * built once per factor. The two forms differ only by the rounding of C^T S C = I (measured in the WP doc).
+ * Returns false (P untouched or about to be rebuilt by the caller) on any device failure.
+ */
+bool XtbGpuContext::Impl::densityComplement(int n, int ncol)
+{
+    const size_t nn = static_cast<size_t>(n) * n;
+    const int nv = n - ncol;
+    if (nv <= 0) return false;
+    try {
+        dSinv.ensure(static_cast<int>(nn));
+        dInfo.ensure(1);
+    } catch (...) { return false; }
+    if (sinv_gen != l_generation) {
+        int lw = 0;
+        if (cudaMemcpyAsync(dSinv.ptr, dL.ptr, sizeof(double) * nn, cudaMemcpyDeviceToDevice, stream) != cudaSuccess
+            || cusolverDnDpotri_bufferSize(cusolver, CUBLAS_FILL_MODE_LOWER, n, dSinv.ptr, n, &lw)
+                != CUSOLVER_STATUS_SUCCESS)
+            return false;
+        try { dSinvWork.ensure(std::max(1, lw)); } catch (...) { return false; }
+        if (cusolverDnDpotri(cusolver, CUBLAS_FILL_MODE_LOWER, n, dSinv.ptr, n, dSinvWork.ptr, lw, dInfo.ptr)
+            != CUSOLVER_STATUS_SUCCESS)
+            return false;
+        int info = 1;
+        if (cudaMemcpyAsync(&info, dInfo.ptr, sizeof(int), cudaMemcpyDeviceToHost, stream) != cudaSuccess
+            || cudaStreamSynchronize(stream) != cudaSuccess || info != 0)
+            return false;
+        dSinvWork.free();
+        sinv_gen = l_generation;
+        profMark("SCF step: S^-1 by dpotri (once per geometry)");
+    }
+    const dim3 blk(16, 16);
+    k_twice_lower<<<grid_for_square(n), blk, 0, stream>>>(dSinv.ptr, dP.ptr, n);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    const double mtwo = -2.0, one = 1.0;
+    const double* Cv = dC.ptr + static_cast<size_t>(ncol) * n;
+    if (cublasDsyrk(cublas, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_N, n, nv, &mtwo, Cv, n, &one, dP.ptr, n)
+        != CUBLAS_STATUS_SUCCESS)
+        return false;
+    k_mirror_lower<<<grid_for_square(n), blk, 0, stream>>>(dP.ptr, n);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    ++dens_compl_taken;
+    {   // CURCUMA_PBC_DENSITY_CHECK=1: max |P_complement - P_direct| and the change of Tr(P S) (diagnostic only)
+        static const bool chk = [] { const char* e = std::getenv("CURCUMA_PBC_DENSITY_CHECK"); return e && *e && *e != '0'; }();
+        if (chk) {
+            CudaBuffer<double> Pd;
+            try { Pd.ensure(static_cast<int>(nn)); } catch (...) { return true; }
+            const double two = 2.0, zero = 0.0;
+            cublasDgemm(cublas, CUBLAS_OP_N, CUBLAS_OP_T, n, n, ncol, &two, dC.ptr, n, dC.ptr, n, &zero, Pd.ptr, n);
+            std::vector<double> a(nn), b(nn), sm(nn);
+            dP.download(a.data(), static_cast<int>(nn), stream);
+            Pd.download(b.data(), static_cast<int>(nn), stream);
+            dS.download(sm.data(), static_cast<int>(nn), stream);
+            cudaStreamSynchronize(stream);
+            double dmax = 0.0, tr_a = 0.0, tr_b = 0.0;
+            for (size_t e = 0; e < nn; ++e) {
+                dmax = std::max(dmax, std::fabs(a[e] - b[e]));
+                tr_a += a[e] * sm[e]; tr_b += b[e] * sm[e];
+            }
+            fprintf(stderr, "PBC_DENSITY_CHECK n %d ncol %d max|dP| %.3e Tr(PS) compl %.15f direct %.15f\n", n, ncol,
+                    dmax, tr_a, tr_b);
+        }
+    }
+    return true;
+}
+
 int XtbGpuContext::Impl::probeCholeskyFactor(int n)
 {
     // v, w = L^T v, w = L w, u = S v; |w - u|_2 against |u|_2. dS is the full symmetric overlap (dense storage).
@@ -5001,6 +5383,12 @@ void XtbGpuContext::setHostLoopPseudo(bool on, int n, double n_elec, int nocc_pa
     I.last_dq = last_dq;
 }
 
+// Claude Generated (Nov 2026, WP-PERIODIC-XTB E1): closed-shell complement density in the host-driven periodic loop.
+void XtbGpuContext::setHostLoopDensityComplement(bool on)
+{
+    if (m_impl) m_impl->dens_compl = on;
+}
+
 void XtbGpuContext::pseudoDiagonalisationCounts(int& taken, int& rejected) const
 {
     taken = m_impl ? m_impl->pseudo_taken : 0;
@@ -5022,6 +5410,7 @@ bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32, int n_eig
                 pseudo_ok ? 1 : 0, I.cprev_valid ? 1 : 0, I.pseudo_consecutive, I.last_dq);
     auto finish_pseudo = [&](const char* what) {
         ++I.pseudo_taken;
+        I.c_cols_valid = n;   // E1: a pseudo step rotates and re-orthonormalises all n columns
         I.profMark(what);
         if (download_eps && eps_out) I.dEps.download(eps_out, n, I.stream);
         return cudaStreamSynchronize(I.stream) == cudaSuccess;
@@ -5051,6 +5440,7 @@ bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32, int n_eig
     }
     const bool ok = eigensolveResidentFockFull(eps_out, fp32, n_eig, download_eps);
     if (ok) I.c_exact_eigenvectors = true;
+    I.c_cols_valid = ok ? (partial ? n_eig : n) : 0;   // E1
     if (ok && I.pseudo_enabled && !partial) {
         const size_t nn = static_cast<size_t>(n) * n;
         const int b = 256;
@@ -5321,7 +5711,17 @@ bool XtbGpuContext::residentDensity(const double* occ, int ncol, int n,
         if (cudaGetLastError() != cudaSuccess)
             return false;
         // P = Cw[:, :ncol] · C[:, :ncol]ᵀ  ⇒  P_ij = Σ_k occ_k C_ik C_jk.
-        if (Impl::densitySyrkWanted()) {
+        // E1 (Claude Generated, Nov 2026): with a cell and every occupied column at occ = 2 exactly, the complement
+        // P = 2 (S^-1 - C_v C_v^T) costs n^2 (n - ncol) instead of 2 n^2 ncol flops; any failure takes the GEMM below.
+        bool compl_done = false;
+        if (m_impl->dens_compl && ncol < n && m_impl->c_cols_valid == n) {
+            bool all_two = true;
+            for (int k = 0; k < ncol && all_two; ++k) all_two = (occ[k] == 2.0);
+            if (all_two) compl_done = m_impl->densityComplement(n, ncol);
+        }
+        if (compl_done) {
+            // done
+        } else if (Impl::densitySyrkWanted()) {
             if (!m_impl->densitySyrk(n, ncol)) return false;
         } else if (cublasDgemm(m_impl->cublas, CUBLAS_OP_N, CUBLAS_OP_T, n, n, ncol,
                         &one, m_impl->dCw.ptr, n, m_impl->dC.ptr, n,
@@ -5334,12 +5734,15 @@ bool XtbGpuContext::residentDensity(const double* occ, int ncol, int n,
             return false;
     }
 
+    m_impl->profMark("SCF step: density P = C occ C^T");
     // pop_ao(μ) = Σ_ν P(μ,ν)·S(μ,ν); band energy = Σ_μν P_μν·H0_μν.
     if (!populationsAndBand(n, band_out))
         return false;
 
     m_impl->dPop.download(pop_ao_out, n, stream);
-    return cudaStreamSynchronize(stream) == cudaSuccess;
+    const bool dens_ok = cudaStreamSynchronize(stream) == cudaSuccess;
+    m_impl->profMark("SCF step: populations + band");
+    return dens_ok;
 }
 
 // Stage 6: density + Mulliken-AO from the RESIDENT occupations (dOcc, set by
@@ -5694,8 +6097,10 @@ bool XtbGpuContext::residentSolveMultipole(const double* v_ao, const double* v_d
     m_impl->dVqp.upload(v_qp, 6 * nat, stream);
 
     // F = H0 − ½·S·(v_ao⊕v_ao) into dC, then add the GFN2 multipole contribution.
+    m_impl->profMark("SCF step: host gap + upload v_ao/v_dp/v_qp");
     if (!buildFockIntoC(n, /*multipole=*/true))
         return false;
+    m_impl->profMark("SCF step: Fock build (multipole)");
 
     return eigensolveResidentFock(eps_out, fp32, n_eig);
 }
@@ -5712,7 +6117,9 @@ bool XtbGpuContext::residentMultipoleMoments(double* dp_at3, double* qp_at6, int
 
     m_impl->dDpAt.download(dp_at3, 3 * nat, stream);
     m_impl->dQpAt.download(qp_at6, 6 * nat, stream);
-    return cudaStreamSynchronize(stream) == cudaSuccess;
+    const bool mom_ok = cudaStreamSynchronize(stream) == cudaSuccess;
+    m_impl->profMark("SCF step: multipole moments");
+    return mom_ok;
 }
 
 /* ====================================================================== *
@@ -7403,6 +7810,8 @@ bool XtbGpuContext::multipoleGradientPeriodic(int nat, const double* xyz_bohr, c
         || !dtrans || !grad_out || !dEdr_out || (want_virial && !vir9_out) || (nrtrans > 0 && (!rtrans || !kexp)))
         return false;
     cudaStream_t stream = I.stream;
+    bool vir_sf = false, k_sf = false;   // M1, M2
+    double kv9[9] = { 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     try {
         I.dPbcXyz.upload(xyz_bohr, 3 * nat, stream);
         I.dPbcMrad.upload(mrad, nat, stream);
@@ -7423,7 +7832,29 @@ bool XtbGpuContext::multipoleGradientPeriodic(int nat, const double* xyz_bohr, c
         const dim3 grd((nat + 15) / 16, (nat + 15) / 16);
         const double* rt = nrtrans > 0 ? I.dPbcRtrans.ptr : nullptr;
         const double* kx = nrtrans > 0 ? I.dPbcKexp.ptr : nullptr;
-        if (want_virial)
+        // M1/M2: the k-space strain derivative and gradient by structure factors (k_mp_sf, k_mp_kvir, k_mp_kgrad), the pair
+        // kernel then runs only the real-space sum; CURCUMA_PBC_GPU_HOST=mppair keeps the k sums in the pair kernel.
+        static const bool k_pair = [] { const char* e = std::getenv("CURCUMA_PBC_GPU_HOST");
+                                        return e && std::string(e).find("mppair") != std::string::npos; }();
+        k_sf = !k_pair && nrtrans > 0;
+        vir_sf = want_virial && k_sf;
+        if (k_sf) {
+            I.dPbcMpSf.ensure(18 * nrtrans);
+            I.dPbcMpKv.ensure(9);
+            k_mp_sf<<<nrtrans, 256, 0, stream>>>(nat, I.dPbcXyz.ptr, I.dPbcQ.ptr, I.dPbcDp.ptr, I.dPbcQp.ptr, nrtrans,
+                                                 rt, I.dPbcMpSf.ptr);
+            if (want_virial)
+                k_mp_kvir<<<1, 256, 0, stream>>>(nrtrans, rt, kx, I.dPbcMpSf.ptr, alpha, sd_f, sq_f, I.dPbcMpKv.ptr);
+            if (cudaGetLastError() != cudaSuccess) return false;
+            if (want_virial)
+                k_mp_grad_pbc<true, false, false><<<grd, blk, 0, stream>>>(nat, I.dPbcXyz.ptr, I.dPbcMrad.ptr, I.dPbcQ.ptr,
+                    I.dPbcDp.ptr, I.dPbcQp.ptr, cell_L[0], cell_L[1], cell_L[2], ndtrans, I.dPbcDtrans.ptr, nrtrans, rt, kx,
+                    alpha, fac, sd_f, sq_f, dmp3, dmp5, gfix, efix, vfix);
+            else
+                k_mp_grad_pbc<false, false, false><<<grd, blk, 0, stream>>>(nat, I.dPbcXyz.ptr, I.dPbcMrad.ptr, I.dPbcQ.ptr,
+                    I.dPbcDp.ptr, I.dPbcQp.ptr, cell_L[0], cell_L[1], cell_L[2], ndtrans, I.dPbcDtrans.ptr, nrtrans, rt, kx,
+                    alpha, fac, sd_f, sq_f, dmp3, dmp5, gfix, efix, vfix);
+        } else if (want_virial)
             k_mp_grad_pbc<true><<<grd, blk, 0, stream>>>(nat, I.dPbcXyz.ptr, I.dPbcMrad.ptr, I.dPbcQ.ptr, I.dPbcDp.ptr,
                 I.dPbcQp.ptr, cell_L[0], cell_L[1], cell_L[2], ndtrans, I.dPbcDtrans.ptr, nrtrans, rt, kx, alpha, fac,
                 sd_f, sq_f, dmp3, dmp5, gfix, efix, vfix);
@@ -7435,10 +7866,19 @@ bool XtbGpuContext::multipoleGradientPeriodic(int nat, const double* xyz_bohr, c
         const int nfix = 4 * nat + 9;
         k_grad_fix_to_double<<<(nfix + 255) / 256, 256, 0, stream>>>(nfix, gfix);
         if (cudaGetLastError() != cudaSuccess) return false;
+        if (k_sf) {   // M2: + the k-space gradient (after the fixed-point conversion of the real-space part)
+            k_mp_kgrad<<<nat, 256, 0, stream>>>(nat, I.dPbcXyz.ptr, I.dPbcQ.ptr, I.dPbcDp.ptr, I.dPbcQp.ptr, nrtrans, rt, kx,
+                                                I.dPbcMpSf.ptr, sd_f, sq_f, gfix);
+            if (cudaGetLastError() != cudaSuccess) return false;
+        }
         I.dPbcGfix.download(grad_out, 3 * nat, stream);
         if (cudaMemcpyAsync(dEdr_out, efix, sizeof(double) * nat, cudaMemcpyDeviceToHost, stream) != cudaSuccess) return false;
         if (want_virial && cudaMemcpyAsync(vir9_out, vfix, sizeof(double) * 9, cudaMemcpyDeviceToHost, stream) != cudaSuccess)
             return false;
+        if (vir_sf) {   // M1: the k-space part, downloaded after the stream sync below
+            if (cudaMemcpyAsync(kv9, I.dPbcMpKv.ptr, sizeof(double) * 9, cudaMemcpyDeviceToHost, stream) != cudaSuccess)
+                return false;
+        }
     } catch (...) {
         return false;
     }
@@ -7449,6 +7889,14 @@ bool XtbGpuContext::multipoleGradientPeriodic(int nat, const double* xyz_bohr, c
         const int zero = 0;
         cudaMemcpyToSymbol(g_gfix_bad, &zero, sizeof(int));
         return false;
+    }
+    if (vir_sf) {   // M1: k-space part plus the constant dipole term (fac/6) |sum m|^2 / 2 on the diagonal
+        double M[3] = { 0.0, 0.0, 0.0 };
+        for (int i = 0; i < nat; ++i)
+            for (int k = 0; k < 3; ++k) M[k] += dp_at[3 * i + k];
+        const double cdd = 0.5 * (fac / 6.0) * (M[0] * M[0] + M[1] * M[1] + M[2] * M[2]);
+        for (int a = 0; a < 3; ++a)
+            for (int b = 0; b < 3; ++b) vir9_out[3 * a + b] += kv9[3 * a + b] + (a == b ? cdd : 0.0);
     }
     return true;
 }
@@ -7525,6 +7973,7 @@ bool XtbGpuContext::dispersionATMPeriodic(int nat, const double* xyz_bohr, const
                                                     I.dPbcTrans.ptr, cutoff2, nullptr, nullptr, nullptr, a1, a2,
                                                     I.dPbcNbCnt.ptr, nullptr, nullptr, nullptr);
         if (cudaGetLastError() != cudaSuccess) return false;
+        I.profMark("ATM PBC: upload + neighbour count");
         I.dPbcNbCnt.download(cnt.data(), nat, stream);
         if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
         long long total = 0;
@@ -7545,6 +7994,18 @@ bool XtbGpuContext::dispersionATMPeriodic(int nat, const double* xyz_bohr, const
                                                    I.dD4AtmDc6.ptr, a1, a2, nullptr, I.dPbcNbPtr.ptr,
                                                    I.dPbcNbIdx.ptr, I.dPbcNbV.ptr);
         if (cudaGetLastError() != cudaSuccess) return false;
+        I.profMark("ATM PBC: C6 upload + neighbour fill");
+        // A1: per-class kernel (default) needs the dC6/dCN ratios before C6 becomes sqrt|C6|;
+        // CURCUMA_PBC_GPU_HOST=triview keeps the per-member kernel k_d4_atm_pbc_w.
+        static const bool triview = [] { const char* e = std::getenv("CURCUMA_PBC_GPU_HOST");
+                                         return e && std::string(e).find("triview") != std::string::npos; }();
+        if (!triview) {
+            I.dPbcAtmRatio.ensure(static_cast<int>(nn));
+            I.dPbcAtmRatioT.ensure(static_cast<int>(nn));
+            k_atm_ratio<<<static_cast<unsigned>((nn + 255) / 256), 256, 0, stream>>>(nat, I.dD4AtmC6.ptr, I.dD4AtmDc6.ptr,
+                                                                                    I.dPbcAtmRatio.ptr, I.dPbcAtmRatioT.ptr);
+            if (cudaGetLastError() != cudaSuccess) return false;
+        }
         k_atm_sqrt_abs<<<static_cast<unsigned>((nn + 255) / 256), 256, 0, stream>>>(nn, I.dD4AtmC6.ptr);
         std::vector<double> sr(nat);
         for (int a = 0; a < nat; ++a) sr[a] = std::sqrt(r4r2[a]);
@@ -7553,11 +8014,26 @@ bool XtbGpuContext::dispersionATMPeriodic(int nat, const double* xyz_bohr, const
         I.dPbcGrad.ensure(3 * nat);
         I.dPbcDcn.ensure(nat);
         I.dPbcVir.ensure(6 * nat);
-        k_d4_atm_pbc_w<<<grid, b, 0, stream>>>(nat, I.dPbcSr4r2.ptr, I.dD4AtmC6.ptr, I.dPbcNbPtr.ptr,
-                                               I.dPbcNbIdx.ptr, I.dPbcNbV.ptr, s9, a1 * std::sqrt(3.0), a2, alp,
-                                               cutoff2, want_virial ? 1 : 0, I.dPbcEat.ptr, I.dPbcGrad.ptr,
-                                               I.dPbcDcn.ptr, I.dPbcVir.ptr);
-        if (cudaGetLastError() != cudaSuccess) return false;
+        I.profMark("ATM PBC: ratios, sqrt C6, uploads");
+        if (triview) {
+            k_d4_atm_pbc_w<<<grid, b, 0, stream>>>(nat, I.dPbcSr4r2.ptr, I.dD4AtmC6.ptr, I.dPbcNbPtr.ptr,
+                                                   I.dPbcNbIdx.ptr, I.dPbcNbV.ptr, s9, a1 * std::sqrt(3.0), a2, alp,
+                                                   cutoff2, want_virial ? 1 : 0, I.dPbcEat.ptr, I.dPbcGrad.ptr,
+                                                   I.dPbcDcn.ptr, I.dPbcVir.ptr);
+            if (cudaGetLastError() != cudaSuccess) return false;
+        } else {
+            I.dPbcGrad.zero(3 * nat, stream);   // fixed-point accumulators
+            I.dPbcDcn.zero(nat, stream);
+            k_d4_atm_pbc_u<<<grid, b, 0, stream>>>(nat, I.dPbcSr4r2.ptr, I.dD4AtmC6.ptr, I.dPbcAtmRatio.ptr,
+                                                   I.dPbcAtmRatioT.ptr, I.dPbcNbPtr.ptr, I.dPbcNbIdx.ptr, I.dPbcNbV.ptr,
+                                                   s9, a1 * std::sqrt(3.0), a2, alp, cutoff2, want_virial ? 1 : 0,
+                                                   I.dPbcEat.ptr, I.dPbcGrad.ptr, I.dPbcDcn.ptr, I.dPbcVir.ptr);
+            if (cudaGetLastError() != cudaSuccess) return false;
+            k_grad_fix_to_double<<<(3 * nat + 255) / 256, 256, 0, stream>>>(3 * nat, I.dPbcGrad.ptr);
+            k_grad_fix_to_double<<<(nat + 255) / 256, 256, 0, stream>>>(nat, I.dPbcDcn.ptr);
+            if (cudaGetLastError() != cudaSuccess) return false;
+        }
+        I.profMark(triview ? "ATM PBC: triple kernel (per member)" : "ATM PBC: triple kernel (per class)");
         I.dPbcEat.download(e_atom_out, nat, stream);
         I.dPbcGrad.download(grad_out, 3 * nat, stream);
         I.dPbcDcn.download(dEdcn_out, nat, stream);
@@ -7565,9 +8041,20 @@ bool XtbGpuContext::dispersionATMPeriodic(int nat, const double* xyz_bohr, const
     } catch (...) {
         return false;
     }
-    const bool okk = cudaStreamSynchronize(stream) == cudaSuccess;
+    bool okk = cudaStreamSynchronize(stream) == cudaSuccess;
     I.dD4AtmC6.free();
     I.dD4AtmDc6.free();
+    I.dPbcAtmRatio.free();
+    I.dPbcAtmRatioT.free();
+    if (okk) {   // A1: a non-finite or out-of-range fixed-point contribution fails the call (host loop), flag reset
+        int fix_bad = 0;
+        if (cudaMemcpyFromSymbol(&fix_bad, g_gfix_bad, sizeof(int)) != cudaSuccess) return false;
+        if (fix_bad) {
+            const int zero = 0;
+            cudaMemcpyToSymbol(g_gfix_bad, &zero, sizeof(int));
+            return false;
+        }
+    }
     return okk;
 }
 

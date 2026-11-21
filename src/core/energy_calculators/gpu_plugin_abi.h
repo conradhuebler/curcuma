@@ -54,10 +54,11 @@
 //      energyWeightedDensity, cnChainGradientPeriodic and repulsionPeriodic; XTB gained m_pbc_dev_wfn).
 // 14 = Nov 2026, WP-PERIODIC-XTB G1b (GpuScfBackend::beginComputedPeriodic; XTB gained m_pbc_sx_deferred).
 // 15 = Nov 2026, WP-PERIODIC-XTB G1c (GpuScfBackend::setHostLoopPseudo).
+// 16 = Nov 2026, WP-PERIODIC-XTB E1 (GpuScfBackend::setHostLoopDensityComplement).
 
 #pragma once
 
-#define CURCUMA_GPU_PLUGIN_ABI_VERSION 15
+#define CURCUMA_GPU_PLUGIN_ABI_VERSION 16
 
 /// Defines `extern "C" int curcuma_<backend>_abi_version()` in a plugin entry file (use at file scope).
 #define CURCUMA_GPU_PLUGIN_DEFINE_ABI_VERSION(backend)                                                                \

@@ -777,6 +777,67 @@ Regression after G1b/G1c (2026-11-21, test selection of the regression run below
 `release_cuda/` 650 of 651 passed; the only failure in both is the pre-existing `xtb_cpscf`; without a cell CPU
 36/36 md5 to the rebuilt base after G1c as well.
 
+### G2-G6 continuation 3: profile at the start (2026-11-21, Claude Generated)
+
+Binary of 058ab45f (`release_cuda/`, ABI 15), gfn2, `-gpu cuda -threads 8`, RTX 5080 idle, verbosity 3 with
+`CURCUMA_GPU_PROFILE=1`, second step of a `-md -compute_pressure true` run (ms):
+
+| item | 216 H2O | 432 H2O |
+|---|---|---|
+| SCF 8 it: total / solve eigen (Fock + eigensolve + density + moments) | 179 / 116 | 797 / 568 |
+| post-SCF D4: pairs / ATM (device) / CN fold (host) | 27 / 145 / 35 | 59 / 285 / 93 |
+| gradient: W / H0-Pulay / Ewald / KO / multipole incl. virial (device) | 7 / 51 / 18 / 10 / 33 | 40 / 123 / 67 / 33 / 272 |
+| TOTAL | 597 | 2096 |
+
+Eigensolve split (432, `-sp`, stream-synchronised profile marks added for this): the FP64 GEMM of the density
+P = C occ C^T is 28 ms per SCF iteration (water: nocc = 1728 = 2/3 of nao = 2592), more than a whole pseudo step
+(about 7 ms); one FP64 full solve per SCF (dtrsm reduction 51, dsyevd 175, back-transform 24 ms). Occupied-subspace
+ideas for the FP64 step (syevdx, subspace/Chebyshev iteration, Rayleigh-Ritz in the occupied block) do not pay
+here: with nocc = 2/3 nao every occupied-space GEMM costs about as much as the full solve (T = F C_o alone is
+2 nao^2 nocc = 23 GFLOP FP64, 30 ms at the 0.75 TFLOP/s measured for cuBLAS FP64 on the RTX 5080), and the gradient
+needs exact occupied eigenpairs (W). Measured but not used: `-scf_gpu_partial_diag` does not shorten the FP64 dsyevd
+with a cell (175 ms either way); the FP64 pseudo step (`-scf_pseudo_diag_fp64`) costs 98 + 109 ms (n x n GEMMs),
+not exact eigenvectors. Hence E1 below (density) instead of a new eigensolver.
+
+### E1/A1/M1/M2 density complement, ATM per triple class, multipole k sums by structure factors (2026-11-21, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+- **E1** (eigensolver step): closed-shell density of the host-driven periodic loop as P = 2 (S^-1 - C_v C_v^T)
+  (`Impl::densityComplement`, dsyrk over the nv = nao - nocc virtual columns, n^2 nv instead of 2 n^2 nocc flops),
+  taken only when every occupied orbital has occ = 2.0 exactly and all n columns of C are eigenvectors (full or
+  pseudo step, not a partial solve); S^-1 by dpotri once per Cholesky factor (`l_generation`). Any failure takes
+  the GEMM. New `GpuScfBackend::setHostLoopDensityComplement` (set per step with a cell, reset before/after the
+  SCF), `CURCUMA_PBC_GPU_HOST=dcompl` keeps the GEMM; `CURCUMA_PBC_DENSITY_CHECK=1` prints max |dP| and Tr(PS) of
+  both forms: FP64 step 1.3e-14, FP32 steps 1e-6 (both forms then carry the FP32 rounding of C^T S C = I, electron
+  count off by 1e-4 in opposite directions; the converged FP64 step is unaffected). 432 H2O: 28 -> 11 ms per
+  iteration. Plugin ABI 15 -> 16.
+- **A1** (ATM): `k_d4_atm_pbc_u` takes each translation class of triples once, in the views of its members with the
+  smallest atom index (list suffix x >= a, weight 1/(1 + [x = a] + [y = a])), gradient and dE/dCN of all three
+  members (outer entry in registers, inner entry by a fixed-order warp sum, gfix_add), sqrt(C6) and dC6/dCN ratios
+  read [y][x] (coalesced), one rsqrt instead of sqrt + two divisions; e_atom and the virial are returned x3 so the
+  caller's 1/3 stays. Not bitwise to the per-member kernel (order), integer atomics only. `CURCUMA_PBC_GPU_HOST=
+  triview` keeps `k_d4_atm_pbc_w`. Triple kernel (432, MD step with virial): 249 -> 150 ms; the FP64 algebra of
+  the triple (cbrt, damping, three angle derivatives) is the remaining cost.
+- **M1/M2** (multipole gradient): the reciprocal part of the multipole Ewald gradient and strain derivative in
+  closed form over structure factors (`k_mp_sf`: Q, D = sum (k.m) e, T = sum (k Theta k) e, M_a, U_a = sum
+  (Theta k)_a e per k; `k_mp_kvir`: per-k strain terms; `k_mp_kgrad`: per-atom gradient, both fixed-order block
+  sums), O(N N_k) instead of O(N^2 N_k); the pair kernel `k_mp_grad_pbc<WANT_V, KV, KG>` then runs only the direct
+  sum (the old instantiations unchanged); the constant dipole term (fac/6) |sum m|^2 / 2 on the virial diagonal is
+  added on the host. `CURCUMA_PBC_GPU_HOST=mppair` keeps the pair kernel. 432: 272 -> 41 ms with virial,
+  102 -> 40 ms without.
+- Gates (one binary, new vs `CURCUMA_PBC_GPU_HOST=dcompl,triview,mppair` = the code of 058ab45f): `pbc_xtb_gpu_parity`
+  8/8 (gfn2 216 box |dE| 4.1e-12 Eh, max |dG| 1.0e-10 Eh/A, max |dXi| 1.7e-9 Eh; gfn1 box 3.6e-12 / 6.2e-11 /
+  1.0e-9; small cells <= 9e-15 / 1.2e-10 / 1.2e-10), second CUDA run bitwise 8/8; `pbc_|ewald` 29/29 in
+  `release_cuda/`; `-sp -scf_threshold 1e-9` (E1 against `dcompl`): 216 H2O dE 0, 432 H2O dE 4.5e-13 Eh, same 17
+  iterations, max dG 5.9e-11 / 4.8e-11 Eh/A; A1 against `triview` max dG 3.5e-14 Eh/A, M2 against `mppair` 2.3e-14
+  Eh/A, second device run md5-identical (216, 432); GPU FD (dimer 8 A, h = 1e-4 A): gfn1 8.1e-9, gfn2 8.9e-9 Eh/A;
+  NVE 216 H2O, 100 steps of 0.5 fs, `-thermostat none -scf_threshold 1e-9`, E_pot per step (`CURCUMA_XTB_ETRACE=1`,
+  new diagnostic, full precision) new vs old: max |dE_pot| 8.8e-10 Eh over 101 energies; MD 216 H2O 20 steps
+  `-scf_threshold 1e-9`: E_pot -1096.551628, T 462.483544 K, P 14765.49 bar (as G1c and the host path); without a
+  cell CPU 36/36 and CUDA 36/36 md5 to the rebuilt base.
+- Time (RTX 5080, 8 threads, load 1.5, same binary): MD wall per step (`md.sh`, 20 steps incl. start-up) 216 H2O
+  0.66 -> 0.58 s, 432 H2O 2.20 -> 1.74 s; 432 MD step at verbosity 3: TOTAL 2096 -> 1629 ms (solve eigen 568 -> 444,
+  ATM 285 -> 189, multipole gradient 272 -> 41).
+
 ## Regression run (2026-11-14, `release/`, `ctest -R 'gfn|xtb|sqm|gfnff|pbc|ewald|simplemd|restart|md_|gpu|plugin|molecule|xyz|parser|curcumaopt|structinv' -j1`)
 
 369 tests selected, 2 failed before the fix below: `pbc_md_nonperiodic_cell` (its check (a) assumed gfn2 + cell to be
@@ -833,10 +894,11 @@ change. Measurements and scripts: project folder GFN-FF-Wasser, subfolder 06_gfn
 
 - k-point sampling, non-orthorhombic cells, slab/1D periodicity, the vacuum (dipole) boundary term, off-diagonal
   strains (a sheared cell is refused), threading of the periodic CN/D3, Klopman-Ohno and Ewald matrix builds, the
-  structure-factor factorisation of the multipole k sums, d-shell elements with a cell (refused), implicit solvation
+  structure-factor factorisation of the multipole k sums of the energy matrices (G3; the gradient and virial use it
+  since M1/M2), d-shell elements with a cell (refused), implicit solvation
   with a cell (refused), `-large_system_mode` with a cell (its driver ignores the cell: documented as non-periodic, not
-  refused), GPU with a cell: CUDA with the device stages G1b/G2/G3/G4a/G4b/G5a-d (the rest on the host, see the G1b
-  section), ROCm/Vulkan CPU fallback (not planned).
+  refused), GPU with a cell: CUDA with the device stages G1b/G2/G3/G4a/G4b/G5a-d and E1/A1/M1/M2 (the rest on the
+  host, see the continuation 3 section), ROCm/Vulkan CPU fallback (not planned).
 - Not tested: open shell, charged cells (background term differs from tblite), halogen bond with a cell (no Br/I
   structure), thread-count independence of the periodic energy and gradient, MD energy conservation with a cell,
   the GPU fallback on a machine with a GPU plugin, anything beyond H/O, real liquid boxes (only a water dimer and

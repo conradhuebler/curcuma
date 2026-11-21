@@ -253,6 +253,11 @@ public:
     {
         if (m_ctx) m_ctx->setHostLoopPseudo(on, n, n_elec, nocc_pairs, Tele, last_dq);
     }
+    // Claude Generated (Nov 2026, WP-PERIODIC-XTB E1): complement density in the host-driven loop.
+    void setHostLoopDensityComplement(bool on) override
+    {
+        if (m_ctx) m_ctx->setHostLoopDensityComplement(on);
+    }
     // Claude Generated (Nov 2026, WP-PERIODIC-XTB G1b): periodic integrals on the device, see GpuScfBackend.
     bool beginComputedPeriodic(const std::vector<double>& xyz_bohr, const double* se, const double* cell_L,
                                int ntrans, const double* trans, double cut2, bool multipole) override

@@ -433,6 +433,9 @@ struct GpuScfBackend {
     /// last_dq = max|dq| of the previous step. on = false switches it off again. Default: no-op.
     virtual void setHostLoopPseudo(bool on, int n, double n_elec, int nocc_pairs, double Tele, double last_dq)
     { (void)on; (void)n; (void)n_elec; (void)nocc_pairs; (void)Tele; (void)last_dq; }
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB E1): closed-shell density of the host-driven loop as
+    /// P = 2 (S^-1 - C_v C_v^T) when every occupied orbital carries occ = 2 exactly (else the GEMM). Default: no-op.
+    virtual void setHostLoopDensityComplement(bool on) { (void)on; }
     virtual bool beginComputedPeriodic(const std::vector<double>& xyz_bohr, const double* se, const double* cell_L,
                                        int ntrans, const double* trans, double cut2, bool multipole)
     { (void)xyz_bohr; (void)se; (void)cell_L; (void)ntrans; (void)trans; (void)cut2; (void)multipole; return false; }
