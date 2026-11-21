@@ -872,6 +872,12 @@ double XTB::Calculation(bool gradient)
         bool defer_amat = integrals_from_device && m_gpu_scf && m_gpu_scf->supportsResidentLoop()
             && m_gpu_scf->supportsStoredMultipoleOnDevice() && m_scf_mode == ScfMode::Broyden;
         if (const char* e = std::getenv("CURCUMA_MP_AMAT_DEVICE")) defer_amat = defer_amat && (e[0] != '0');
+        // R4 (Nov 2026): with a cell the periodic multipole matrices stay on the device when the resident periodic loop
+        // will consume them (its preconditions as far as known here; a later fallback rebuilds the host copies).
+        // CURCUMA_PBC_GPU_HOST=mpdl keeps the download.
+        m_pbc_mp_device_only = pbc_dev_ints && m_pbc_device_scf && !m_solvation && !openShell() && m_charge == 0
+            && !pbcGpuStageOnHost("devpot") && !pbcGpuStageOnHost("resloop") && !pbcGpuStageOnHost("mpdl")
+            && m_d4_charge_source != "cpscf";
         setupMultipole(mp_on_device || defer || pbc_dev_ints, defer_amat);   // G1b: periodic AO ints on the device
         m_mp_ints_deferred = defer || pbc_dev_ints;
         if (defer && verb >= 2)
@@ -1438,6 +1444,30 @@ double XTB::Calculation(bool gradient)
                 : "SCF: device potential build unavailable; host potential build");
     }
 
+    // WP-PERIODIC-XTB R2 (Claude Generated, Nov 2026): the GFN2 potential with a cell on the device (periodic gamma
+    // and multipole matrices kept resident by their G2/G3 builders, periodic D4 dE/dq gather); the host-driven loop
+    // then uploads only q_sh/dp_at/qp_at and the host D4 weights per iteration. Closed shell, neutral cell, no
+    // solvation (refused with a cell anyway). Any failure keeps the host potential. CURCUMA_PBC_GPU_HOST=devpot
+    // keeps the host potential.
+    const bool pbc_neutral_closed = m_pbc && !openShell() && std::fabs(m_wfn.n0_at.sum() - m_wfn.nocc) < 1.0e-9;
+    if (use_gpu_resident && gpu_multipole && m_method == MethodType::GFN2 && m_mp_initialized && m_pbc
+        && m_pbc_device_scf && pbc_neutral_closed && !m_solvation && !pbcGpuStageOnHost("devpot")
+        && m_gpu_scf->supportsDeviceDispersion() && m_gpu_scf->supportsDevicePotential()) {
+        Vector warm_dedq;
+        computeD4PotentialDedq(m_wfn.q_at, warm_dedq);   // primes beginDispersion + beginDispersionImages
+        if (m_pbc_d4_dev_ready) {
+            std::vector<double> dk(nat), qk(nat), g3(nsh);
+            for (int i = 0; i < nat; ++i) { dk[i] = m_mp_dkernel[i]; qk[i] = m_mp_qkernel[i]; }
+            const Vector g3diag = thirdOrderKernelDiag(Vector::Ones(nsh), m_wfn.q_at);  // = 2 Gamma_s
+            for (int s = 0; s < nsh; ++s) g3[s] = 0.5 * g3diag(s);
+            use_device_potential = m_gpu_scf->beginPotentialPeriodic(nat, nsh, dk.data(), qk.data(), g3.data());
+        }
+        if (verb >= 2)
+            CurcumaLogger::info(use_device_potential
+                ? "SCF: periodic GFN2 potential (Ewald gamma, third order, periodic multipole, periodic D4) on the device"
+                : "SCF: periodic device potential unavailable (" + m_gpu_scf->lastError() + "); host potential build");
+    }
+
     // Claude Generated (Oct 2026), ROCm -xtb.rocm_device_multipole (opt-in): in the host-driven
     // resident GFN2 loop (no device potential build) only the multipole potential and energy
     // move to the device. The host interaction matrices are uploaded once per setupMultipole()
@@ -1476,7 +1506,10 @@ double XTB::Calculation(bool gradient)
     // occupations, then drive m_gpu_scf->residentScfStep below. Falls back to the
     // host-driven device-potential loop on any failure. GFN2 only.
     bool use_resident_loop = false;
-    if (use_device_potential && mode == ScfMode::Broyden && m_gpu_scf->supportsResidentLoop()) {
+    // R3 (Nov 2026): with a cell the same loop on the periodic device potential (closed shell, neutral, see R2);
+    // CURCUMA_PBC_GPU_HOST=resloop keeps the host-driven loop with the device potential.
+    if (use_device_potential && mode == ScfMode::Broyden && m_gpu_scf->supportsResidentLoop()
+        && !(m_pbc && (pbcGpuStageOnHost("resloop") || !pbc_neutral_closed))) {
         std::vector<double> rcn, rgi, rzeff, rrefcn, rrefcovcn, rrefq;
         std::vector<int> rnref;
         exportD4RefWDeviceData(rcn, rgi, rzeff, rrefcn, rrefcovcn, rrefq, rnref);
@@ -1705,6 +1738,9 @@ double XTB::Calculation(bool gradient)
     m_scf_converged = false;
     m_pseudo_c_valid = false; m_pseudo_consecutive = 0; m_pseudo_used = false; m_eig_pseudo = false;   // Oct 2026
     m_pseudo_taken = m_pseudo_rejected = 0;
+    // R3: the complement density E1 also in the periodic resident loop (reset after the SCF with the other G1c/E1 flags)
+    if (use_resident_loop && m_pbc && m_gpu_scf && !openShell())
+        m_gpu_scf->setHostLoopDensityComplement(!pbcGpuStageOnHost("dcompl"));
     int iter;
     // G1b: the host-driven device loop with a cell reads no host S/H0/L (only its CPU branch, which a failure
     // reaches through the restart below, which ensures them).
@@ -1725,11 +1761,15 @@ double XTB::Calculation(bool gradient)
                 // Claude Generated (Oct 2026, ROCm WP2): a backend that allows it restarts this SCF from the
                 // unchanged initial guess in m_wfn on the host-driven loop (the resident steps never wrote
                 // m_wfn or the host mixer); default backends keep the hard error below.
-                if (m_gpu_scf->residentLoopFallback("SCF step " + std::to_string(iter)
+                // R3: with a cell (CUDA) the host-driven device loop is always the fallback; it reads no host S/H0
+                // or AO multipole integrals (G1b), and it sets the complement / pseudo flags per step itself.
+                if (m_pbc || m_gpu_scf->residentLoopFallback("SCF step " + std::to_string(iter)
                                                     + (why.empty() ? std::string() : " (" + why + ")"))) {
                     use_resident_loop = false;
-                    ensureHostMultipoleIntegrals();
-                    ensureHostIntegrals();
+                    if (!m_pbc) {
+                        ensureHostMultipoleIntegrals();
+                        ensureHostIntegrals();
+                    }
                     dq_prev = 1.0e30; e_total_old = 0.0; q_sh_old = m_wfn.q_sh;
                     dq_best_fp32 = 1.0e30; fp32_stall = 0; fp32_exhausted = false; dq_fp32_last = -1.0;
                     if (verb >= 2)
@@ -1902,7 +1942,8 @@ double XTB::Calculation(bool gradient)
                                                      W, dWq, m_wfn.eps, m_eig_fp32, gpu_n_eig);
                 // Claude Generated (Oct 2026, ROCm WP1): a backend that allows it continues this SCF with the
                 // host potential build (same input charges/moments); default backends keep the hard error.
-                if (!solve_ok && m_gpu_scf->devicePotentialFallback("SCF step " + std::to_string(iter))) {
+                // R2: with a cell (CUDA) the host potential of the host-driven loop is always a valid fallback.
+                if (!solve_ok && (m_pbc || m_gpu_scf->devicePotentialFallback("SCF step " + std::to_string(iter)))) {
                     use_device_potential = false;
                     m_pot.reset();
                     addCoulombShellPotential(m_pot);
@@ -2515,7 +2556,23 @@ double XTB::Calculation(bool gradient)
     // would only fetch the host S/H0/L/gamma and build the 18 nat^2 multipole interaction matrices.
     const bool skip_post_pot = use_resident_loop && m_gpu_scf && m_gpu_scf->deferHostCopies()
         && m_host_ints_deferred && m_d4_charge_source != "cpscf";
-    if ((use_device_potential || gfn1_resident) && !m_wfn_on_device && !skip_post_pot) {
+    // R4 (Nov 2026): the periodic resident loop hands over its converged potentials (the host rebuild would need the
+    // host multipole matrices); used below by the periodic gradient instead of rebuild_host_potentials. Only with the
+    // variational D4 response, whose gradient potential carries D4 dE/dq like the device one.
+    bool pbc_pot_from_device = false;
+    if (m_pbc && use_resident_loop && m_gpu_scf && m_method == MethodType::GFN2 && m_d4_charge_source == "mulliken"
+        && !std::getenv("CURCUMA_D4_NONVARIATIONAL") && !pbcGpuStageOnHost("potdl")) {
+        m_pot.v_sh = Vector::Zero(m_basis.nsh);
+        m_pot.v_at = Vector::Zero(m_atomcount);
+        m_pot.v_dp = Eigen::MatrixXd::Zero(3, m_atomcount);
+        m_pot.v_qp = Eigen::MatrixXd::Zero(6, m_atomcount);
+        m_pot.v_ao = Vector::Zero(m_basis.nao);
+        pbc_pot_from_device = m_gpu_scf->downloadConvergedPotentials(m_pot.v_sh, m_pot.v_at, m_pot.v_dp, m_pot.v_qp)
+            && m_pot.v_sh.size() == m_basis.nsh && m_pot.v_at.size() == m_atomcount;
+        if (!pbc_pot_from_device && verb >= 2)
+            CurcumaLogger::warn("SCF: converged periodic device potentials unavailable; host potential rebuild");
+    }
+    if ((use_device_potential || gfn1_resident) && !m_wfn_on_device && !skip_post_pot && !pbc_pot_from_device) {
         m_pot.reset();
         addCoulombShellPotential(m_pot);
         addThirdOrderPotential(m_pot);
@@ -2631,7 +2688,7 @@ double XTB::Calculation(bool gradient)
         // gradient reads them from there; the host m_pot is only rebuilt for the host fallbacks below.
         // CURCUMA_GRAD_DEVPOT=0 keeps the host rebuild.
         m_dev_potentials = false;
-        if (use_resident_loop && m_gpu_scf && !m_solvation
+        if (use_resident_loop && m_gpu_scf && !m_solvation && !m_pbc   // R3: the periodic gradient reads the host m_pot
             && (m_method == MethodType::GFN1 || (m_method == MethodType::GFN2 && m_d4_variational_qresp))) {
             const char* env_off = std::getenv("CURCUMA_GRAD_DEVPOT");
             if (!(env_off && env_off[0] == '0'))
@@ -2658,7 +2715,7 @@ double XTB::Calculation(bool gradient)
         addSolvationPotential(m_pot);
         };
         const auto t_gp1 = clock::now();
-        if (!m_dev_potentials) rebuild_host_potentials();
+        if (!m_dev_potentials && !pbc_pot_from_device) rebuild_host_potentials();   // R4: device potentials (above)
         const auto t_gp2 = clock::now();
 
         // Stage 4 (Claude Generated): native nuclear gradient on the device when the

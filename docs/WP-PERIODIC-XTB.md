@@ -1003,6 +1003,91 @@ Still on the host (432 H2O gfn2 MD step):
 Regression after H1-H5/D1 (2026-11-21, test selection of the regression run below, `-j1`): `release/` 379 of 380,
 `release_cuda/` 650 of 651 passed; the only failure in both is the pre-existing `xtb_cpscf`.
 
+### R0 profile of the host-driven periodic SCF iteration (2026-11-21, Claude Generated)
+
+Binary of ade60896 (`release_cuda/`, ABI 21), gfn2, `-gpu cuda -threads 8`, RTX 5080 idle, second step of a
+`-md -compute_pressure true` run, verbosity 3 with `CURCUMA_GPU_PROFILE=1` (ms, n = 1 each):
+
+| item | 216 H2O | 432 H2O |
+|---|---|---|
+| SCF (8 iterations) | 160 | 671 |
+| iteration wall: first (FP32 full solve) / middle (FP32 pseudo steps) / last (FP64 full solve) | 51 / 7.8 / 61 | 202 / 32.6 / 272 |
+| host potential build per iteration (gamma q_sh, third order, multipole potential from the host matrices, D4 dE/dq incl. host W/dWq and the device gather) | 4.6 (D4 3.5) | 19.7 (D4 14.1) |
+| host moments download + charges per iteration | 1.4 | 3.0 |
+| host SCC energies per iteration (Coulomb, multipole from the host matrices) | 1.1 | 5.6 |
+| per geometry: multipole matrices on the device + 18 nat^2 download / gamma on the device + nsh^2 download | 18 / 12 | 92 / 47 |
+
+Per iteration the host uploads v_ao (nao), v_dp (3 nat), v_qp (6 nat) and downloads eps (nao), pop_ao (nao) and the
+moments (9 nat); the Broyden mix (N = nsh + 9 nat) runs on the host. Of a middle iteration at 432 H2O (32.6 ms)
+about 28 ms are host work; the first and the last iteration are dominated by the full eigensolves (FP64: reduce 50,
+dsyevd 174, back-transform 24 ms).
+
+### R1 design: device-resident periodic SCF loop (2026-11-21, Claude Generated)
+
+- Reuse the cell-free resident loop (`residentScfStep`: D4 weights, potential, Fock, eigensolve with the FP32/FP64
+  switch and the pseudo steps, occupations, density, charges/moments, SCC energies, device Broyden, max|dq|) with
+  periodic data: gamma = the G2 Ewald/KO matrix, the multipole matrices = the G3 matrices (both kept resident by
+  their builders), D4 dE/dq = the G4b/D1 periodic gather (`k_d4_dedq_pbc_b`, damping matrix of
+  `beginDispersionImages`) instead of `k_d4_dedq`, the D4 reference weights from the periodic covalent CN (the
+  exported tables of the geometry). Cell-free kernels and cell-free calls are not changed; the periodic choice is
+  the device flag `pot_pbc`, set only by the new `beginPotentialPeriodic`.
+- Convergence as the host loop: dq = max|x_out - x_in| over [q_sh; dp; qp], accepted only on FP64 steps with
+  dq < thresh and |dE| < 100 thresh; the FP64 acceptance solve is unchanged (full dsyevd).
+- Stages: R2 device potential in the host-driven loop (host keeps occupations, moments download, Broyden,
+  energies); R3 the resident loop (charges/moments, energies, Broyden and convergence on the device, the complement
+  density E1 in the resident density); R4 no download of the multipole matrices when the resident loop consumes them.
+- Refused (old loop): open shell, charged cell, solvation, GFN1 (until its own stage), non-Broyden modes. Any device
+  failure before or during the loop falls back to the host-driven loop of the same SCF. `CURCUMA_PBC_GPU_HOST=
+  resloop` keeps the host-driven loop with the device potential, `devpot` also the host potential (the code of
+  ade60896).
+
+### R2/R3 periodic device potential and device-resident periodic GFN2 loop (2026-11-21, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+- **R2** `GpuScfBackend::beginPotentialPeriodic`: `ewaldGammaPeriodic` keeps a copy of the periodic gamma in the
+  resident `dGamma`, `multipoleMatricesPeriodic` keeps the 18 blocks in `dMpAmat*` (below 2 GB) and adds the on-site
+  self terms on the device (`k_mp_pbc_self`, the additions the host makes after the download; a first version without
+  them was 1.4e-3 Eh off); `buildDevicePotentialOnly` takes the periodic D4 gather `k_d4_dedq_pbc_b` when `pot_pbc`.
+  The host-driven loop then uploads q_sh/dp/qp and the host D4 weights only; a failed device solve continues with
+  the host potential (with a cell always allowed). Token `devpot`.
+- **R3** the cell-free resident loop (`beginResidentLoop`/`residentScfStep`) runs on that potential: device D4 weights
+  from the exported periodic covalent CN, occupations, density, charges/moments, energies, Broyden and max|dq| on the
+  device; per step only dq and four energy scalars (plus ncol) come back. New for the cell: the complement density
+  E1 inside the resident density (`k_occ_all_two` checks occ = 2 on the device), warp-per-atom multipole potential and
+  energy kernels over column reads (`k_multipole_potential_cw`, `k_energy_multipole_cw`; the one-thread-per-atom
+  kernels took 3.9 + 4.3 ms per iteration at 432 H2O, now 0.4 + 0.4). A failed resident step restarts the SCF on the
+  host-driven loop (with a cell always). Token `resloop`. Plugin ABI 21 -> 22.
+- Gates (one binary; old = `CURCUMA_PBC_GPU_HOST=resloop,devpot`): `pbc_xtb_gpu_parity` 10/10 (gfn2 216 box |dE|
+  4.1e-12 Eh, max |dG| 1.5e-10 Eh/A, max |dXi| 4.1e-9 Eh; caffeine 0 / 5.2e-10 / 3.5e-9; gfn1 unchanged path),
+  second CUDA run bitwise 10/10; `pbc_|ewald` 29/29 (`release_cuda/`); `-sp -scf_threshold 1e-9`: 216 H2O R3, R2 and
+  old all 17 iterations, E identical to the 15 printed digits, max dG 1.2e-10 Eh/A (old vs R3); 432 H2O 17 / 17 / 17
+  iterations, E identical, max dG 2.8e-11 Eh/A; second device run md5-identical (216, 432); GPU FD (dimer 8 A): gfn1
+  8.1e-9, gfn2 8.9e-9 Eh/A; NVE 216 H2O 100 steps tight, new vs old: max |dE_pot| 1.9e-10 Eh; MD 216 H2O 20 steps
+  tight: E_pot -1096.551628, T 462.483544 K, P 14765.49 bar (unchanged); without a cell CPU 36/36 and CUDA 36/36 md5
+  to the rebuilt base.
+- Time (RTX 5080, 8 threads, n = 1 each; second step of the MD run, verbosity 3): 432 H2O SCF 671 -> 479 ms, iteration
+  first / middle / last 202 / 32.6 / 272 -> 81 / 22.5 / 263 ms (the D4 warm-up of about 110 ms moved from iteration 0
+  into the pre-SCF block), 216 H2O SCF 160 -> 121 ms, middle iteration 7.8 -> 6.5 ms. MD wall per step (`md.sh`):
+  216 H2O 0.437 (old) / 0.437 (R2) / 0.433 s (R3), 432 H2O 1.345 / 1.308 / 1.265 s.
+- Device time of a middle iteration at 432 H2O after R3 (ms): density (complement dsyrk) 9.0, pseudo step about 7,
+  moments 3.0, Fock 1.6, occupations 1.0, potential 0.4, energies 0.4, Broyden 0.3.
+
+### R4 periodic multipole matrices without a host copy (2026-11-21, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+- `buildMultipoleInteractionMatricesPeriodic(host_copy)`: when the resident periodic loop will consume them (closed
+  shell, neutral, no solvation, device integrals, tokens below not set) the 18 blocks are built on the device only
+  (`multipoleMatricesPeriodic(..., out18 = nullptr)`), the host copies stay empty and deferred
+  (`ensureHostMultipoleMatrices` rebuilds them with a copy for any host consumer, e.g. a fallback to the host-driven
+  loop). The converged potentials of the periodic gradient come from the device (`GpuScfBackend::
+  downloadConvergedPotentials`: `convergedPotentials` at the output charges/moments, then v_sh/v_at/v_dp/v_qp) instead
+  of the host rebuild (variational D4 only, as the host rebuild). Tokens `mpdl` (download), `potdl` (host rebuild).
+  ABI stays 22 (R2-R4 in one commit).
+- Gates (old = `mpdl,potdl` = R3): parity 10/10 (values as R3), bitwise 10/10, `pbc_|ewald` 29/29; `-sp -scf_threshold
+  1e-9`: 216 and 432 H2O 17 / 17 iterations, E identical, max dG 4.2e-16 / 8.4e-16 Eh/A (device vs host potentials);
+  run to run md5-identical; GPU FD gfn1 8.1e-9, gfn2 8.9e-9 Eh/A; NVE 216 H2O 100 steps tight: max |dE_pot| 6.7e-11
+  Eh; MD 20 steps tight unchanged; no-cell CPU 36/36 and CUDA 36/36 md5 to the base.
+- Time (432 H2O `-sp`, verbosity 3): multipole setup 102 -> 65 ms, gradient potential rebuild 17 -> 0.5 ms. MD wall
+  per step: 216 H2O 0.431 -> 0.418 s, 432 H2O 1.266 -> 1.219 s.
+
 ## Regression run (2026-11-14, `release/`, `ctest -R 'gfn|xtb|sqm|gfnff|pbc|ewald|simplemd|restart|md_|gpu|plugin|molecule|xyz|parser|curcumaopt|structinv' -j1`)
 
 369 tests selected, 2 failed before the fix below: `pbc_md_nonperiodic_cell` (its check (a) assumed gfn2 + cell to be

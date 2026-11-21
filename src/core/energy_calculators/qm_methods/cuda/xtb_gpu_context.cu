@@ -251,6 +251,14 @@ struct XtbGpuContext::Impl {
     CudaBuffer<double> dMpAmatSQ;   // charge-quadrupole, 6·nat²
     // Claude Generated (Sep 2026): on-the-fly interaction (no stored nat² matrices).
     bool               mp_otf = false;
+    // Claude Generated (Nov 2026, WP-PERIODIC-XTB R2): periodic device potential. gamma_pbc_resident / mp_pbc_resident:
+    // ewaldGammaPeriodic / multipoleMatricesPeriodic left the periodic gamma in dGamma and the 18 periodic multipole
+    // blocks in dMpAmat* for this geometry; pot_pbc (set only by beginPotentialPeriodic, cleared by every other
+    // beginPotential*) makes buildDevicePotentialOnly take the periodic D4 dE/dq gather.
+    bool               gamma_pbc_resident = false;
+    bool               mp_pbc_resident = false;
+    int                mp_pbc_nat = 0;
+    bool               pot_pbc = false;
     double             mp_dmp3 = 3.0, mp_dmp5 = 4.0;
     CudaBuffer<double> dMpXyz;      // geometry (Bohr), 3·nat
     CudaBuffer<double> dMpRad;      // CN-dependent damping radii, nat
@@ -638,6 +646,8 @@ struct XtbGpuContext::Impl {
     // once per Cholesky factor (dpotri, sinv_gen == l_generation); c_cols_valid = number of columns of dC that
     // hold eigenvectors (n after a full or pseudo step, n_eig after a partial solve).
     bool dens_compl = false;
+    bool res_occ_all_two = false;     // R3: the resident step's occupations are all 2 (set per step)
+    CudaBuffer<int> dOccFlag;
     CudaBuffer<double> dSinv, dSinvWork;
     long sinv_gen = -1;
     int  c_cols_valid = 0;
@@ -5132,6 +5142,102 @@ __global__ void k_energy_multipole(int nat, const double* __restrict__ amat_sd,
     if (tid == 0) e_out[blockIdx.x] = sdata[0];   // block partial (Oct 2026: deterministic, summed by k_sum_part)
 }
 
+// Claude Generated (Nov 2026, WP-PERIODIC-XTB R3): warp-per-atom twins of k_multipole_potential / k_energy_multipole
+// for the periodic stored matrices (pot_pbc). One warp per target atom i reads column i of every block (contiguous in
+// j) through the exact symmetry of the builders (sd(i,j) = -sd(j,i), dd and sq symmetric, as the host
+// addMultipolePotential); lanes over j, fixed xor-tree warp sum (deterministic). The periodic diagonal (self terms)
+// is included like every other element. The one-thread-per-atom kernels left 1296 threads on a whole card.
+__global__ void k_multipole_potential_cw(
+    int nat, const double* __restrict__ amat_sd, const double* __restrict__ amat_dd,
+    const double* __restrict__ amat_sq, const double* __restrict__ dkernel,
+    const double* __restrict__ qkernel, const double* __restrict__ q_at,
+    const double* __restrict__ dp_at, const double* __restrict__ qp_at,
+    double* __restrict__ v_dp, double* __restrict__ v_qp, double* __restrict__ v_at)
+{
+    const int i = static_cast<int>((static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x) >> 5);
+    const int lane = threadIdx.x & 31;
+    if (i >= nat) return;   // uniform per warp
+    const size_t nn = static_cast<size_t>(nat) * static_cast<size_t>(nat);
+    const size_t col = static_cast<size_t>(i) * nat;
+    double vd[3] = {0.0, 0.0, 0.0};
+    double vq[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    double vat = 0.0;
+    for (int j = lane; j < nat; j += 32) {
+        const size_t c = col + j;   // element (j, i)
+        const double qj = q_at[j];
+        const double p0 = dp_at[0 + j * 3], p1 = dp_at[1 + j * 3], p2 = dp_at[2 + j * 3];
+        const double s0 = amat_sd[c], s1 = amat_sd[nn + c], s2 = amat_sd[2 * nn + c];
+        const double d00 = amat_dd[0 * nn + c], d01 = amat_dd[1 * nn + c], d02 = amat_dd[2 * nn + c];
+        const double d11 = amat_dd[4 * nn + c], d12 = amat_dd[5 * nn + c], d22 = amat_dd[8 * nn + c];
+        vd[0] += -s0 * qj + d00 * p0 + d01 * p1 + d02 * p2;
+        vd[1] += -s1 * qj + d01 * p0 + d11 * p1 + d12 * p2;
+        vd[2] += -s2 * qj + d02 * p0 + d12 * p1 + d22 * p2;
+        vat += s0 * p0 + s1 * p1 + s2 * p2;
+        for (int k = 0; k < 6; ++k) {
+            const double sqk = amat_sq[static_cast<size_t>(k) * nn + c];
+            vq[k] += sqk * qj;
+            vat += sqk * qp_at[k + j * 6];
+        }
+    }
+    for (int k = 0; k < 3; ++k) vd[k] = d_warp_sum(vd[k]);
+    for (int k = 0; k < 6; ++k) vq[k] = d_warp_sum(vq[k]);
+    vat = d_warp_sum(vat);
+    if (lane != 0) return;
+    const double mpscale_q[6] = {1.0, 2.0, 1.0, 2.0, 2.0, 1.0};
+    for (int k = 0; k < 3; ++k) v_dp[k + i * 3] = vd[k] + 2.0 * dkernel[i] * dp_at[k + i * 3];
+    for (int k = 0; k < 6; ++k)
+        v_qp[k + i * 6] = vq[k] + 2.0 * qkernel[i] * qp_at[k + i * 6] * mpscale_q[k];
+    v_at[i] = vat;
+}
+
+// E_mp per atom (row i of energyMultipole, column reads as above) into e_atom[i]; the caller sums the nat entries in
+// atom order (k_sum_part).
+__global__ void k_energy_multipole_cw(int nat, const double* __restrict__ amat_sd,
+                                      const double* __restrict__ amat_dd, const double* __restrict__ amat_sq,
+                                      const double* __restrict__ dkernel, const double* __restrict__ qkernel,
+                                      const double* __restrict__ dp_at, const double* __restrict__ qp_at,
+                                      const double* __restrict__ q_at, double* __restrict__ e_atom)
+{
+    const int i = static_cast<int>((static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x) >> 5);
+    const int lane = threadIdx.x & 31;
+    if (i >= nat) return;
+    const size_t nn = static_cast<size_t>(nat) * static_cast<size_t>(nat);
+    const size_t col = static_cast<size_t>(i) * nat;
+    double dpi[3], qpi[6];
+    for (int k = 0; k < 3; ++k) dpi[k] = dp_at[k + static_cast<size_t>(i) * 3];
+    for (int k = 0; k < 6; ++k) qpi[k] = qp_at[k + static_cast<size_t>(i) * 6];
+    double e = 0.0;
+    for (int j = lane; j < nat; j += 32) {
+        const size_t c = col + j;
+        const double qj = q_at[j];
+        for (int k = 0; k < 3; ++k) e -= dpi[k] * amat_sd[static_cast<size_t>(k) * nn + c] * qj;
+        for (int a = 0; a < 3; ++a)
+            for (int b = 0; b < 3; ++b)
+                e += 0.5 * dpi[a] * amat_dd[(static_cast<size_t>(a) * 3 + b) * nn + c] * dp_at[b + static_cast<size_t>(j) * 3];
+        for (int k = 0; k < 6; ++k) e += qpi[k] * amat_sq[static_cast<size_t>(k) * nn + c] * qj;
+    }
+    e = d_warp_sum(e);
+    if (lane != 0) return;
+    const double mpscale_q[6] = {1.0, 2.0, 1.0, 2.0, 2.0, 1.0};
+    const double dk = dkernel[i], qk = qkernel[i];
+    for (int k = 0; k < 3; ++k) e += dk * dpi[k] * dpi[k];
+    for (int k = 0; k < 6; ++k) e += qk * qpi[k] * qpi[k] * mpscale_q[k];
+    e_atom[i] = e;
+}
+
+// R3: 1 when every occupied column k < *ncol carries occ = 2 exactly (closed-shell complement density), else 0.
+__global__ void k_occ_all_two(const double* __restrict__ occ, const int* __restrict__ ncol, int* __restrict__ flag)
+{
+    __shared__ int bad;
+    if (threadIdx.x == 0) bad = 0;
+    __syncthreads();
+    const int nc = *ncol;
+    for (int k = threadIdx.x; k < nc; k += blockDim.x)
+        if (occ[k] != 2.0) bad = 1;
+    __syncthreads();
+    if (threadIdx.x == 0) *flag = bad ? 0 : 1;
+}
+
 // ---- Stage 6 (S6.4) Broyden mixer kernels ---------------------------------
 __global__ void k_vec_sub(double* __restrict__ out, const double* __restrict__ a,
                           const double* __restrict__ b, int n)
@@ -6502,6 +6608,9 @@ bool XtbGpuContext::residentDensityResident(int n, int ncol, double* band_out)
             I.dSpP.zero(I.sp_nnz, stream);
         }
         I.p_dense_valid = false;
+    } else if (ncol > 0 && I.dens_compl && I.res_occ_all_two && ncol < n && I.c_cols_valid == n
+               && I.densityComplement(n, ncol)) {   // R3: P = 2 (S^-1 - C_v C_v^T), any failure takes the GEMM
+        I.p_dense_valid = true;
     } else if (ncol > 0) {
         if (Impl::densitySyrkWanted()) {
             if (!I.densitySyrk(n, ncol)) return false;
@@ -8097,18 +8206,36 @@ bool XtbGpuContext::dispersionATM(int nat, const double* c6, const double* dc6dc
 }
 
 // Claude Generated (Nov 2026, WP-PERIODIC-XTB G3): periodic multipole interaction matrices (kernel k_mp_amat_pbc).
+// Claude Generated (Nov 2026, WP-PERIODIC-XTB R2): the on-site self terms of the periodic multipole matrices on the
+// device copy (same additions as the host loop of buildMultipoleInteractionMatricesPeriodic; blocks of k_mp_amat_pbc).
+__global__ void k_mp_pbc_self(int nat, double add_dd, double add_sq, double* __restrict__ out)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= nat) return;
+    const size_t n2 = static_cast<size_t>(nat) * nat, ii = static_cast<size_t>(i) * nat + i;
+    for (int k = 0; k < 3; ++k) out[(3 + k * 3 + k) * n2 + ii] += add_dd;
+    out[(12 + 0) * n2 + ii] += add_sq;
+    out[(12 + 2) * n2 + ii] += add_sq;
+    out[(12 + 5) * n2 + ii] += add_sq;
+}
+
 bool XtbGpuContext::multipoleMatricesPeriodic(int nat, const double* xyz_bohr, const double* mrad, const double* cell_L,
                                               int ndtrans, const double* dtrans, int nrtrans, const double* rtrans,
                                               const double* kexp, double alpha, double dmp3, double dmp5, double sd_f,
                                               double sq_f, double fac, double* const* out18)
 {
     Impl& I = *m_impl;
-    if (!ok() || nat <= 0 || ndtrans <= 0 || nrtrans < 0 || !xyz_bohr || !mrad || !cell_L || !dtrans || !out18
+    if (m_impl) m_impl->mp_pbc_resident = false;
+    if (!ok() || nat <= 0 || ndtrans <= 0 || nrtrans < 0 || !xyz_bohr || !mrad || !cell_L || !dtrans
         || (nrtrans > 0 && (!rtrans || !kexp)))
         return false;
     const size_t n2 = static_cast<size_t>(nat) * nat;
     if (18 * n2 > static_cast<size_t>(INT_MAX)) return false;
     cudaStream_t stream = I.stream;
+    // R2 (Nov 2026): keep a resident copy for the periodic device potential (beginPotentialPeriodic) while the
+    // 18 blocks stay below 2 GB; out18 == nullptr skips the host download (R4).
+    const bool keep = 18.0 * static_cast<double>(n2) * sizeof(double) < 2.0e9;
+    if (!out18 && !keep) return false;
     try {
         I.dPbcXyz.upload(xyz_bohr, 3 * nat, stream);
         I.dPbcMrad.upload(mrad, nat, stream);
@@ -8126,16 +8253,43 @@ bool XtbGpuContext::multipoleMatricesPeriodic(int nat, const double* xyz_bohr, c
                                                nrtrans > 0 ? I.dPbcKexp.ptr : nullptr, alpha, dmp3, dmp5, sd_f, sq_f,
                                                fac, I.dPbcAmat.ptr);
         if (cudaGetLastError() != cudaSuccess) return false;
-        for (int b = 0; b < 18; ++b)
-            if (cudaMemcpyAsync(out18[b], I.dPbcAmat.ptr + b * n2, n2 * sizeof(double), cudaMemcpyDeviceToHost,
-                                stream) != cudaSuccess)
-                return false;
+        if (out18)
+            for (int b = 0; b < 18; ++b)
+                if (cudaMemcpyAsync(out18[b], I.dPbcAmat.ptr + b * n2, n2 * sizeof(double), cudaMemcpyDeviceToHost,
+                                    stream) != cudaSuccess)
+                    return false;
+        bool kept = false;
+        if (keep) {
+            // self terms of buildMultipoleInteractionMatricesPeriodic (added there on the host after the download):
+            // dipole 2 (-2/3 alpha^3/sqrt(pi)) on the dd diagonal blocks, quadrupole 4/9 alpha^3/sqrt(pi) on sq 0, 2, 5
+            const double a3 = alpha * alpha * alpha / 1.7724538509055159;
+            const double add_dd = 2.0 * (-2.0 / 3.0 * a3), add_sq = 4.0 / 9.0 * a3;
+            k_mp_pbc_self<<<(nat + 127) / 128, 128, 0, stream>>>(nat, add_dd, add_sq, I.dPbcAmat.ptr);
+            if (cudaGetLastError() != cudaSuccess) return false;
+            // block layout of dPbcAmat: SD 0-2, DD 3-11 (a*3+b), SQ 12-17 = the dMpAmat* layouts back to back
+            try {
+                I.dMpAmatSD.ensure(static_cast<int>(3 * n2));
+                I.dMpAmatDD.ensure(static_cast<int>(9 * n2));
+                I.dMpAmatSQ.ensure(static_cast<int>(6 * n2));
+                kept = cudaMemcpyAsync(I.dMpAmatSD.ptr, I.dPbcAmat.ptr, 3 * n2 * sizeof(double),
+                                       cudaMemcpyDeviceToDevice, stream) == cudaSuccess
+                    && cudaMemcpyAsync(I.dMpAmatDD.ptr, I.dPbcAmat.ptr + 3 * n2, 9 * n2 * sizeof(double),
+                                       cudaMemcpyDeviceToDevice, stream) == cudaSuccess
+                    && cudaMemcpyAsync(I.dMpAmatSQ.ptr, I.dPbcAmat.ptr + 12 * n2, 6 * n2 * sizeof(double),
+                                       cudaMemcpyDeviceToDevice, stream) == cudaSuccess;
+            } catch (...) {
+                kept = false;
+            }
+            if (!kept && !out18) return false;
+        }
+        if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
+        I.mp_pbc_resident = kept;
+        I.mp_pbc_nat = kept ? nat : 0;
     } catch (...) {
         return false;
     }
-    const bool okk = cudaStreamSynchronize(stream) == cudaSuccess;
     I.dPbcAmat.free();
-    return okk;
+    return true;
 }
 
 // Claude Generated (Nov 2026, WP-PERIODIC-XTB G2): periodic shell gamma (kernels k_ewald_phase, k_ewald_finish,
@@ -8154,7 +8308,8 @@ bool XtbGpuContext::ewaldGammaPeriodic(int nat, const double* xyz_bohr, const do
     // k block: the phase matrix M (nat x 2 nb) stays below 128 MB
     const int nb_max = std::max(1, std::min(std::max(nk, 1), static_cast<int>((16u << 20) / (2u * static_cast<unsigned>(nat)))));
     cudaStream_t stream = I.stream;
-    bool okk = true;
+    bool okk = true, gamma_kept = false;
+    I.gamma_pbc_resident = false;
     try {
         I.dPbcXyz.upload(xyz_bohr, 3 * nat, stream);
         if (nk > 0) I.dPbcKtab.upload(ktab, 4 * nk, stream);
@@ -8191,11 +8346,18 @@ bool XtbGpuContext::ewaldGammaPeriodic(int nat, const double* xyz_bohr, const do
             if (okk && cudaMemcpyAsync(gamma_out, I.dPbcGamma.ptr, s2 * sizeof(double), cudaMemcpyDeviceToHost,
                                        stream) != cudaSuccess)
                 okk = false;
+            // R2 (Nov 2026): the resident copy of the periodic potential (beginPotentialPeriodic, sccEnergy)
+            if (okk) {
+                I.dGamma.ensure(static_cast<int>(s2));
+                gamma_kept = cudaMemcpyAsync(I.dGamma.ptr, I.dPbcGamma.ptr, s2 * sizeof(double), cudaMemcpyDeviceToDevice,
+                                             stream) == cudaSuccess;
+            }
         }
     } catch (...) {
         okk = false;
     }
     okk = (cudaStreamSynchronize(stream) == cudaSuccess) && okk;
+    I.gamma_pbc_resident = okk && gamma_kept;
     I.dPbcEwM.free();
     I.dPbcEwA.free();
     I.dPbcGamma.free();
@@ -10193,6 +10355,15 @@ bool XtbGpuContext::sccEnergy(int nat, int nsh, double* e_coulomb, double* e_thi
                 m_impl->dQat.ptr, m_impl->dEPartM.ptr);
         }
         if (cudaGetLastError() != cudaSuccess) return false;
+    } else if (m_impl->pot_pbc && !m_impl->dMpAmatSD.empty() && e_multipole) {   // R3: periodic, warp per atom
+        try { m_impl->dEPartM.ensure(nat); } catch (...) { return false; }
+        em_blocks = nat;
+        const long long threads = 32LL * nat;
+        k_energy_multipole_cw<<<static_cast<unsigned>((threads + 127) / 128), 128, 0, stream>>>(
+            nat, m_impl->dMpAmatSD.ptr, m_impl->dMpAmatDD.ptr, m_impl->dMpAmatSQ.ptr,
+            m_impl->dMpDkernel.ptr, m_impl->dMpQkernel.ptr, m_impl->dDpAt.ptr, m_impl->dQpAt.ptr,
+            m_impl->dQat.ptr, m_impl->dEPartM.ptr);
+        if (cudaGetLastError() != cudaSuccess) return false;
     } else if (!m_impl->dMpAmatSD.empty() && e_multipole) {
         const int grid = (nat + block - 1) / block;
         em_blocks = grid;
@@ -10644,9 +10815,18 @@ bool XtbGpuContext::residentScfStep(bool fp32, double* dq_out, double* e_band,
     // leftCols(ncol)). The dropped columns weigh < 1e-12; the GEMM shrinks from nao^3 to
     // nao^2 * ncol (polymer: 26 % of the SCF time was this product over all nao columns).
     int ncol = nao;
+    int all_two = 0;
+    m_impl->res_occ_all_two = false;
+    if (m_impl->dens_compl && !m_impl->loop_open) {   // R3: complement density of the periodic resident loop
+        try { m_impl->dOccFlag.ensure(1); } catch (...) { return fail("occupation flag buffer"); }
+        k_occ_all_two<<<1, 256, 0, stream>>>(m_impl->dOcc.ptr, m_impl->dOccNcol.ptr, m_impl->dOccFlag.ptr);
+        if (cudaGetLastError() != cudaSuccess) return fail("occupation flag kernel failed");
+        m_impl->dOccFlag.download(&all_two, 1, stream);
+    }
     m_impl->dOccNcol.download(&ncol, 1, stream);
     if (cudaStreamSynchronize(stream) != cudaSuccess) return fail("stream synchronisation after occupations failed");
     if (ncol <= 0 || ncol > nao) ncol = nao;
+    m_impl->res_occ_all_two = (all_two == 1);
     m_impl->profMark("scf: occupations");
 
     // 4. Density + Mulliken-AO over the occupied columns.
@@ -10789,6 +10969,7 @@ bool XtbGpuContext::beginPotential(int nat, int nsh,
     m_impl->mp_otf = false;
     m_impl->dMpXyz.free();
     m_impl->dMpRad.free();
+    m_impl->pot_pbc = false;   // R2: cell-free potential
     m_impl->dMpAmatSD.upload(amat_sd, static_cast<int>(3 * nn), stream);
     m_impl->dMpAmatDD.upload(amat_dd, static_cast<int>(9 * nn), stream);
     m_impl->dMpAmatSQ.upload(amat_sq, static_cast<int>(6 * nn), stream);
@@ -10839,6 +11020,7 @@ bool XtbGpuContext::beginPotentialOnTheFly(int nat, int nsh, const double* xyz_b
     m_impl->mp_dmp3 = dmp3;
     m_impl->mp_dmp5 = dmp5;
     m_impl->mp_otf = true;
+    m_impl->pot_pbc = false;   // R2: cell-free potential
     m_impl->pot_nsh = nsh;
     m_impl->solv_active = false;
     return cudaStreamSynchronize(stream) == cudaSuccess;
@@ -10914,8 +11096,51 @@ bool XtbGpuContext::beginPotentialStored(int nat, int nsh, const double* xyz_boh
     if (cudaGetLastError() != cudaSuccess) return false;
     m_impl->mp_otf = false;
     m_impl->pot_nsh = nsh;
+    m_impl->pot_pbc = false;   // R2: cell-free potential
     m_impl->solv_active = false;
     return cudaStreamSynchronize(stream) == cudaSuccess;
+}
+
+// Claude Generated (Nov 2026, WP-PERIODIC-XTB R2): periodic GFN2 device potential. The periodic gamma
+// (ewaldGammaPeriodic) and the 18 periodic multipole blocks (multipoleMatricesPeriodic) of this geometry are already
+// resident, the periodic D4 damping matrix comes from beginDispersionImages; only the on-site kernels and the shell
+// third-order hardness are uploaded. Any missing piece returns false (the caller keeps the host potential).
+bool XtbGpuContext::beginPotentialPeriodic(int nat, int nsh, const double* dkernel, const double* qkernel,
+                                           const double* gamma3)
+{
+    if (!m_impl) return false;
+    Impl& I = *m_impl;
+    I.pot_pbc = false;
+    if (!ok() || nat <= 0 || nsh <= 0 || !dkernel || !qkernel || !gamma3) return false;
+    if (!I.gamma_pbc_resident || !I.mp_pbc_resident || I.mp_pbc_nat != nat || !I.d4_pbc_ready || I.d4_nat != nat
+        || I.dD4C6Flat.empty() || I.dGamma.n < nsh * nsh) {
+        I.last_error = "periodic device potential: gamma, multipole matrices or D4 images not resident";
+        return false;
+    }
+    cudaStream_t stream = I.stream;
+    try {
+        I.dMpDkernel.ensure(nat);
+        I.dMpQkernel.ensure(nat);
+        I.dGamma3.ensure(nsh);
+        I.dPotQsh.ensure(nsh);
+        I.dInDpAt.ensure(3 * nat);
+        I.dInQpAt.ensure(6 * nat);
+        I.dVsh.ensure(nsh);
+        I.dVat.ensure(nat);
+        I.dQat.ensure(nat);
+    } catch (...) {
+        I.last_error = "device allocation for the periodic potential failed";
+        return false;
+    }
+    I.dMpDkernel.upload(dkernel, nat, stream);
+    I.dMpQkernel.upload(qkernel, nat, stream);
+    I.dGamma3.upload(gamma3, nsh, stream);
+    I.mp_otf = false;
+    I.pot_nsh = nsh;
+    I.solv_active = false;
+    if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
+    I.pot_pbc = true;
+    return true;
 }
 
 // WP4b (Claude Generated June 2026): upload the nat×nat Born interaction matrix B so
@@ -10972,8 +11197,15 @@ bool XtbGpuContext::buildDevicePotentialOnly(int n)
     const int nat = m_impl->resident_nat;
     const int nsh = m_impl->pot_nsh;
     const int b = 128;
-    // D4 atom-potential dE/dq (B2 kernel; resident, no download).
-    {
+    // D4 atom-potential dE/dq (B2 kernel; resident, no download). R2: with a cell the periodic gather of D1 over the
+    // image-summed damping matrix of beginDispersionImages.
+    if (m_impl->pot_pbc) {
+        if (!m_impl->d4_pbc_ready) return false;
+        k_d4_dedq_pbc_b<<<nat, 128, 0, stream>>>(nat, 118, Impl::D4_MAX_REF, m_impl->dD4Z.ptr, m_impl->dD4Nref.ptr,
+                                                 m_impl->dD4C6Flat.ptr, m_impl->dD4W.ptr, m_impl->dD4dWq.ptr,
+                                                 m_impl->dPbcD4D.ptr, m_impl->dD4Dedq.ptr);
+        if (cudaGetLastError() != cudaSuccess) return false;
+    } else {
         const double cut2 = m_impl->d4_cut * m_impl->d4_cut;
         k_d4_dedq<<<(nat + b - 1) / b, b, 0, stream>>>(
             nat, 118, Impl::D4_MAX_REF, m_impl->dD4Z.ptr, m_impl->dD4Nref.ptr,
@@ -11007,6 +11239,13 @@ bool XtbGpuContext::buildDevicePotentialOnly(int n)
         const long long threads = 32LL * nat;
         k_multipole_potential_otf_w<<<static_cast<unsigned>((threads + b - 1) / b), b, 0, stream>>>(
             nat, m_impl->dMpXyz.ptr, m_impl->dMpRad.ptr, m_impl->mp_dmp3, m_impl->mp_dmp5,
+            m_impl->dMpDkernel.ptr, m_impl->dMpQkernel.ptr, m_impl->dQat.ptr,
+            m_impl->dInDpAt.ptr, m_impl->dInQpAt.ptr,
+            m_impl->dVdp.ptr, m_impl->dVqp.ptr, m_impl->dVat.ptr);
+    } else if (m_impl->pot_pbc) {   // R3: periodic stored matrices, warp per atom
+        const long long threads = 32LL * nat;
+        k_multipole_potential_cw<<<static_cast<unsigned>((threads + b - 1) / b), b, 0, stream>>>(
+            nat, m_impl->dMpAmatSD.ptr, m_impl->dMpAmatDD.ptr, m_impl->dMpAmatSQ.ptr,
             m_impl->dMpDkernel.ptr, m_impl->dMpQkernel.ptr, m_impl->dQat.ptr,
             m_impl->dInDpAt.ptr, m_impl->dInQpAt.ptr,
             m_impl->dVdp.ptr, m_impl->dVqp.ptr, m_impl->dVat.ptr);
@@ -11115,6 +11354,24 @@ bool XtbGpuContext::convergedPotentials(bool gfn2)
     if (!good || cudaStreamSynchronize(stream) != cudaSuccess) return false;
     I.potentials_resident = true;
     return true;
+}
+
+// Claude Generated (Nov 2026, WP-PERIODIC-XTB R4): convergedPotentials(true) and the download of v_sh, v_at, v_dp, v_qp
+// (the host m_pot of the periodic gradient; no host multipole matrices needed).
+bool XtbGpuContext::residentLoopDims(int nsh, int nat) const
+{
+    return m_impl && m_impl->loop_nsh == nsh && m_impl->loop_nat == nat && m_impl->loop_nao > 0;
+}
+
+bool XtbGpuContext::downloadConvergedPotentials(double* v_sh, double* v_at, double* v_dp, double* v_qp)
+{
+    if (!ok() || !v_sh || !v_at || !v_dp || !v_qp || !convergedPotentials(true)) return false;
+    Impl& I = *m_impl;
+    I.dVsh.download(v_sh, I.loop_nsh, I.stream);
+    I.dVat.download(v_at, I.loop_nat, I.stream);
+    I.dVdp.download(v_dp, 3 * I.loop_nat, I.stream);
+    I.dVqp.download(v_qp, 6 * I.loop_nat, I.stream);
+    return cudaStreamSynchronize(I.stream) == cudaSuccess;
 }
 
 bool XtbGpuContext::computeOverlapGrad(const double* xyz_bohr, double* dSdR_out)

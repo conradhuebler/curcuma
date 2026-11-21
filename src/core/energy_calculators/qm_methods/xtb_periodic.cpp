@@ -949,15 +949,23 @@ std::vector<std::array<double, 3>> tbBoxPoints(const double L[3], double rthr, b
 
 } // namespace
 
-void XTB::buildMultipoleInteractionMatricesPeriodic() const
+void XTB::buildMultipoleInteractionMatricesPeriodic(bool host_copy) const
 {
     using namespace curcuma::xtb::gfn2_params;
     const int nat = m_atomcount;
     const std::vector<double> xyz = geometryBohr(m_geometry, nat);
-    for (int k = 0; k < 3; ++k) m_mp_amat_sd[k] = Eigen::MatrixXd::Zero(nat, nat);
-    for (int a = 0; a < 3; ++a)
-        for (int b = 0; b < 3; ++b) m_mp_amat_dd[a][b] = Eigen::MatrixXd::Zero(nat, nat);
-    for (int k = 0; k < 6; ++k) m_mp_amat_sq[k] = Eigen::MatrixXd::Zero(nat, nat);
+    // R4 (Nov 2026): without a host copy only the device matrices are made (no 18 nat^2 download, no host memset);
+    // any device failure falls back to the host build with a copy.
+    const bool device_only = !host_copy && m_gpu_scf && m_pbc_device_scf && !pbcGpuStageOnHost("mpmat")
+                             && !std::getenv("CURCUMA_PBC_MP_DEBUG");
+    auto zero_host = [&]() {
+        for (int k = 0; k < 3; ++k) m_mp_amat_sd[k] = Eigen::MatrixXd::Zero(nat, nat);
+        for (int a = 0; a < 3; ++a)
+            for (int b = 0; b < 3; ++b) m_mp_amat_dd[a][b] = Eigen::MatrixXd::Zero(nat, nat);
+        for (int k = 0; k < 6; ++k) m_mp_amat_sq[k] = Eigen::MatrixXd::Zero(nat, nat);
+    };
+    if (!device_only) zero_host();
+    bool built_device_only = false;
 
     const double vol = m_cell_bohr.L[0] * m_cell_bohr.L[1] * m_cell_bohr.L[2];
     double alpha = tbSearchAlphaMultipole(m_cell_bohr);
@@ -1004,15 +1012,20 @@ void XTB::buildMultipoleInteractionMatricesPeriodic() const
         for (size_t t = 0; t < rtrans.size(); ++t)
             for (int k = 0; k < 3; ++k) rt[3 * t + k] = rtrans[t][k];
         double* outs[18];
-        for (int k = 0; k < 3; ++k) outs[k] = m_mp_amat_sd[k].data();
-        for (int a = 0; a < 3; ++a)
-            for (int b = 0; b < 3; ++b) outs[3 + a * 3 + b] = m_mp_amat_dd[a][b].data();
-        for (int k = 0; k < 6; ++k) outs[12 + k] = m_mp_amat_sq[k].data();
+        if (!device_only) {
+            for (int k = 0; k < 3; ++k) outs[k] = m_mp_amat_sd[k].data();
+            for (int a = 0; a < 3; ++a)
+                for (int b = 0; b < 3; ++b) outs[3 + a * 3 + b] = m_mp_amat_dd[a][b].data();
+            for (int k = 0; k < 6; ++k) outs[12 + k] = m_mp_amat_sq[k].data();
+        }
         mp_device = m_gpu_scf->multipoleMatricesPeriodic(nat, xyz.data(), m_mp_mrad.data(), m_cell_bohr.L,
             static_cast<int>(dtrans.size()), dt.data(), static_cast<int>(rtrans.size()), rt.data(), kexp.data(),
-            alpha, mp_dmp3, mp_dmp5, sd_rec_factor, sq_rec_factor, fac, outs);
+            alpha, mp_dmp3, mp_dmp5, sd_rec_factor, sq_rec_factor, fac, device_only ? nullptr : outs);
+        if (device_only && !mp_device) zero_host();   // host loop below
+        built_device_only = device_only && mp_device;
         if (CurcumaLogger::get_verbosity() >= 3)
-            CurcumaLogger::info_fmt("  periodic multipole matrices on the {}", mp_device ? "device" : "host (device call failed)");
+            CurcumaLogger::info_fmt("  periodic multipole matrices on the {}", !mp_device ? "host (device call failed)"
+                                    : (built_device_only ? "device (no host copy)" : "device"));
     }
     const int mp_threads = mp_device ? 1 : effectiveIntraThreads(nat);
     if (!mp_device)
@@ -1089,7 +1102,9 @@ void XTB::buildMultipoleInteractionMatricesPeriodic() const
     }
     });
     // self terms (tblite): dipole -2/3 alpha^3/sqrt(pi) (x2 on the diagonal), quadrupole trace 4/9 alpha^3/sqrt(pi)
+    // (the device copy adds them itself, k_mp_pbc_self)
     const double a3 = alpha * alpha * alpha / kSqrtPi;
+    if (!built_device_only)
     for (int iat = 0; iat < nat; ++iat) {
         for (int k = 0; k < 3; ++k) m_mp_amat_dd[k][k](iat, iat) += 2.0 * (-2.0 / 3.0 * a3);
         const double rq = 4.0 / 9.0 * a3;
@@ -1111,7 +1126,13 @@ void XTB::buildMultipoleInteractionMatricesPeriodic() const
                                           alpha, 1.5 * alpha, dsd, msd, ddd, mdd, dsq, msq));
         build(alpha);
     }
-    m_mp_amat_deferred = false;
+    if (built_device_only) {   // R4: host copies empty until ensureHostMultipoleMatrices()
+        for (int k = 0; k < 3; ++k) m_mp_amat_sd[k].resize(0, 0);
+        for (int a = 0; a < 3; ++a)
+            for (int b = 0; b < 3; ++b) m_mp_amat_dd[a][b].resize(0, 0);
+        for (int k = 0; k < 6; ++k) m_mp_amat_sq[k].resize(0, 0);
+    }
+    m_mp_amat_deferred = built_device_only;
 }
 
 void XTB::setupMultipolePeriodic(bool ao_ints_on_device)
@@ -1236,8 +1257,8 @@ void XTB::setupMultipolePeriodic(bool ao_ints_on_device)
         m_mp_qkernel[i] = p_qkernel[z - 1];
     }
     const auto tmp_cn = mpclk::now();
-    // 5: interaction matrices by Ewald summation
-    buildMultipoleInteractionMatricesPeriodic();
+    // 5: interaction matrices by Ewald summation (R4: device only when the resident periodic loop consumes them)
+    buildMultipoleInteractionMatricesPeriodic(!m_pbc_mp_device_only);
     m_mp_t_d_block = m_mp_t_shift = 0.0;
     m_mp_t_ao_ints = mpms(tmp0, tmp_ao);
     m_mp_t_cn_mrad = mpms(tmp_ao, tmp_cn);

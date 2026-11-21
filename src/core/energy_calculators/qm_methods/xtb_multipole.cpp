@@ -132,7 +132,10 @@ void XTB::buildMultipoleInteractionMatrices() const
 
 void XTB::ensureHostMultipoleMatrices() const
 {
-    if (m_mp_amat_deferred && m_mp_initialized) buildMultipoleInteractionMatrices();
+    if (m_mp_amat_deferred && m_mp_initialized) {
+        if (m_pbc) buildMultipoleInteractionMatricesPeriodic(/*host_copy=*/true);   // R4: device-only matrices
+        else buildMultipoleInteractionMatrices();
+    }
 }
 
 void XTB::setupMultipole(bool integrals_on_device, bool defer_amat)

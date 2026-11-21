@@ -932,6 +932,18 @@ struct GpuScfBackend {
                                       const double* gamma3)
     { (void)nat; (void)nsh; (void)xyz_bohr; (void)mrad; (void)dmp3; (void)dmp5; (void)dkernel; (void)qkernel;
       (void)gamma3; return false; }
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB R2): periodic GFN2 device potential from the periodic gamma and
+    /// multipole matrices that ewaldGammaPeriodic / multipoleMatricesPeriodic left on the device for this geometry and
+    /// the periodic D4 images of beginDispersionImages (the dE/dq gather of dispersionDedqPeriodic); uploads only the
+    /// on-site kernels and the shell third-order hardness. Default false -> host potential.
+    virtual bool beginPotentialPeriodic(int nat, int nsh, const double* dkernel, const double* qkernel,
+                                        const double* gamma3)
+    { (void)nat; (void)nsh; (void)dkernel; (void)qkernel; (void)gamma3; return false; }
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB R4): the converged potentials of the resident loop (device
+    /// convergedPotentials: gamma q_sh + third order, multipole, D4 dE/dq at the output charges/moments) downloaded
+    /// into v_sh (nsh), v_at (nat), v_dp (3 x nat), v_qp (6 x nat). Default false -> host rebuild.
+    virtual bool downloadConvergedPotentials(Vector& v_sh, Vector& v_at, Eigen::MatrixXd& v_dp, Eigen::MatrixXd& v_qp)
+    { (void)v_sh; (void)v_at; (void)v_dp; (void)v_qp; return false; }
     virtual bool beginPotentialOnTheFly(int nat, int nsh, const double* xyz_bohr,
                                         const double* mrad, double dmp3, double dmp5,
                                         const double* dkernel, const double* qkernel,
@@ -1675,7 +1687,10 @@ private:
      * image of the column atom; interaction matrices by Ewald summation with tblite's alpha search, box-shaped
      * translation lists and conv = 100 eps (coulomb/multipole.f90 get_multipole_matrix_3d, coulomb/ewald.f90). */
     void setupMultipolePeriodic(bool ao_ints_on_device = false);                                                   // xtb_periodic.cpp
-    void buildMultipoleInteractionMatricesPeriodic() const;                          // xtb_periodic.cpp
+    /// R4 (Nov 2026): host_copy = false leaves the matrices on the device only (resident periodic loop); the host
+    /// copies are then deferred (m_mp_amat_deferred) and ensureHostMultipoleMatrices() rebuilds them with a copy.
+    void buildMultipoleInteractionMatricesPeriodic(bool host_copy = true) const;     // xtb_periodic.cpp
+    bool m_pbc_mp_device_only = false;             ///< R4: this geometry's periodic multipole matrices stay on the device
     mutable double m_mp_pbc_alpha = 0.0;                              ///< Ewald alpha of the last periodic multipole build
     mutable std::vector<std::array<double, 3>> m_mp_pbc_dtrans;       ///< its direct translation box
     mutable std::vector<std::array<double, 3>> m_mp_pbc_rtrans;       ///< its reciprocal box (k vectors, no origin)

@@ -772,6 +772,19 @@ public:
         return m_ctx->beginPotentialStored(nat, nsh, xyz_bohr, mrad, dmp3, dmp5, dkernel, qkernel, gamma3);
     }
     std::string lastError() const override { return m_ctx ? m_ctx->lastError() : std::string(); }
+    bool downloadConvergedPotentials(Vector& v_sh, Vector& v_at, Eigen::MatrixXd& v_dp, Eigen::MatrixXd& v_qp) override
+    {
+        // sized by the caller (nsh, nat); the context checks them against its loop dimensions
+        if (!m_ctx || v_sh.size() <= 0 || v_at.size() <= 0 || v_dp.rows() != 3 || v_qp.rows() != 6
+            || v_dp.cols() != v_at.size() || v_qp.cols() != v_at.size()) return false;
+        if (!m_ctx->residentLoopDims(static_cast<int>(v_sh.size()), static_cast<int>(v_at.size()))) return false;
+        return m_ctx->downloadConvergedPotentials(v_sh.data(), v_at.data(), v_dp.data(), v_qp.data());
+    }
+    bool beginPotentialPeriodic(int nat, int nsh, const double* dkernel, const double* qkernel,
+                                const double* gamma3) override
+    {
+        return m_ctx && m_ctx->beginPotentialPeriodic(nat, nsh, dkernel, qkernel, gamma3);
+    }
     bool beginPotentialOnTheFly(int nat, int nsh, const double* xyz_bohr, const double* mrad,
                                 double dmp3, double dmp5, const double* dkernel,
                                 const double* qkernel, const double* gamma3) override
