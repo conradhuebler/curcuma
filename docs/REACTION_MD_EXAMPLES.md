@@ -92,6 +92,41 @@ Inputs: `reactions-doebereiner-pt7.json` (geometry 1, spin 2, Pt cold) and `reac
 
 Not tested: other geometries as inputs, clusters larger than Pt7 or surfaces, Pt above 1000 K, times longer than 12 ps, wall radius against density (the wall was identical in Pt and control but the free volume is not), 1000-1500 K gas, spin-polarised O2 (spin 2 is only an occupation), comparison with a reference calculation or a different method. Caveats: GFN2 over-binding of Pt-H and Pt-O is not checked; cold Pt and hot gas is not an equilibrium situation; counts of one event in 16 runs are not suitable to rank variants.
 
+## What `-spin` does in native GFN2, and Pt7 at spin 0, 2, 4
+
+> Status: AI-generated (Nov 2026), machine-tested. Human production testing pending. Result: no spin treatment available in the native code makes the catalyst effect on H2O formation visible (free H2O 1/16 in every Pt7 variant, 0-1/16 in every control).
+
+**What `-spin N` is** (`xtb_native.cpp` Z. 3151-3160, `xtb_scf.cpp` Z. 658-684, `xtb_native.h` Z. 1369-1372): N is the **number of unpaired electrons** (multiplicity - 1, tblite `nuhf`): `-spin 2` is a triplet, `-spin 4` a quintet. It sets n_alpha = (n_el - N)/2 + N and n_beta = (n_el - N)/2. The SCF keeps **one** set of orbitals and one Fock matrix and fills them with two Fermi fillings (n_alpha, n_beta), summed to one density (tblite `nspin == 1`). It is not a UHF with separate alpha and beta Fock matrices, and the code has no spin-polarisation term (no spin constants W; searched `src/core/energy_calculators/qm_methods/`, none found, as in GFN2 of xtb/tblite). `-spin 0` is the closed-shell Fermi-smeared singlet. Consequence: a triplet is only a constrained occupation of the same orbitals, so it lies **above** the singlet; the physical O2 ground state (triplet, about 22 kcal/mol below the singlet) cannot be obtained. Native GFN2 only; TBLite/xtb are not built here (`USE_TBLITE=OFF`), so a spin-polarised reference was not available.
+
+Spin energy ladder, `-sp`, GFN2, `electronic_temperature` 2000 (O2 also 300), Eh as printed:
+
+| System | spin 0 | spin 2 | spin 4 | spin 6 | spin 8 |
+|---|---|---|---|---|---|
+| O2 1.21 A, 300 K | -7.90675236 | -7.90411828 | -7.14534257 | | |
+| O2 1.21 A, 2000 K | -7.92167879 | -7.90411829 | -7.14680292 | | |
+| Pt7 (pentagonal bipyramid) | -32.02907763 | -32.02660670 | -32.01891122 | -32.00486430 | -31.97890440 |
+| Pt7 + 2 H2 + O2, geometry 1 | -41.94941114 | -41.94733139 | -41.94092682 | -41.92960890 | -41.91194893 |
+| geometry 2 | -41.96167194 | -41.95958330 | -41.95315518 | -41.94180988 | -41.92413772 |
+| geometry 3 | -41.96656953 | -41.96446404 | -41.95799319 | -41.94661180 | -41.92899727 |
+
+Singlet is lowest in every case: triplet minus singlet is +1.65 kcal/mol (O2, 300 K), +1.55 (Pt7) and +1.31 (full system, geometry 1); the energy rises monotonically with spin. At 2000 K the singlet O2 energy is lowered by the smearing (11.0 kcal/mol below the triplet), while spin 2 gives the same energy at 300 and 2000 K (fixed occupation). Consequently there is no "energetically best" physical spin state; spin 0 is the GFN2 minimum and spin 2 is the constrained triplet that blocks the artificial fractional pi* occupation of the singlet O2.
+
+Runs (16 geometries each, same protocol, seeds and geometries as the cold-Pt7 section; Pt region 500 K, gas region 2000 K, 12000 steps), new here: **Pt7 at spin 4** (Pt7 triplet plus O2 triplet in the one-orbital-set picture) and the **gas control at spin 4**. Spin 4 for the control is not physical (O2 quintet is 0.76 Eh above the triplet); it is listed only for a like-for-like test.
+
+| 16 seeds each | Pt7 s0 | gas s0 | Pt7 s2 | gas s2 | Pt7 s4 | gas s4 |
+|---|---|---|---|---|---|---|
+| both H2 split within 1 ps | 12 | 2 | 14 | 3 | 10 | 16 |
+| O-O above 1.65 A | 15 | 11 | 13 | 1 | 15 | 2 |
+| any O-H bond | 7 | 16 | 10 | 10 | 8 | 8 |
+| O with two H | 1 | 9 | 1 | 1 | 1 | 0 |
+| free H2O | 1 | 1 | 1 | 1 | 1 (0.6 ps) | 0 |
+
+Fisher (two-sided): free H2O Pt7 against gas p = 1.0 at spin 0, 2 and 4 (1/16 against 1/16, 1/16, 0/16). Pt7 s4 against gas s2: O-O stretched p < 0.001, H2 split p = 0.029, H2O unit and free H2O p = 1.0. Pt7 s4 against Pt7 s0 and s2: all p >= 0.22. Multiple comparisons uncorrected. The only O-H-related difference is the one already reported (singlet gas forms H2O units 9/16, Pt7 1/16, p = 0.006). Spin 4 in the gas splits H2 16/16 because the forced occupation excites the H2 molecules, not a catalytic effect.
+
+Speed: Pt7 + 6 atoms 26.7-29.3 steps/s (12000 steps in 410-449 s, 16 Pt jobs and 6 control jobs in parallel on 24 threads; machine load average 15 at the end, 22 own threads, so a foreign load of about 14 threads at times); target 30 missed again. Control 3.3 s per run (3600 steps/s). No SCF error or abort in 32 runs (settings electronic_temperature 2000, scf_damping 0.15, scf_max_iterations 500, geometry_abort_factor 0; no countermeasure needed, no "false fixed point" warning in the checked logs).
+
+Not tested: a UHF-type or spin-polarised GFN2 (not implemented; needs separate alpha/beta Fock matrices and spin constants, TODO.md), spin state per fragment (Pt7 singlet with O2 triplet is not expressible: `-spin` is global and with one orbital set the unpaired electrons go to the highest orbitals, wherever they are), other spins for the gas control, Pt7 spin 6/8, reference calculation. Caveat: because singlet GFN2 is the lowest state, the observed difference between spin 0 and spin 2 gas (O-O broken 11/16 against 1/16) is an effect of the occupation constraint, not of real O2 spin chemistry.
+
 ## What these are not
 
 - 4000 K, the 0.56 g/cm3 soup and the 3.5 A WGS sphere (6 molecules in 180 A3, about 33 per nm3) are far from real conditions; reactions occur because of temperature and density.

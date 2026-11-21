@@ -170,6 +170,10 @@ systems (use 0.1-0.2) and/or the EEQ guess; `broyden` does not.
   `cli_sqm_09_ngfn2_baseline` (7/7). (`cli_sqm_11` fails only because TBLite/`ipea1`
   is not compiled in this build — unrelated.)
 
+## Open shell (`-spin N`)
+
+`-spin N` = number of unpaired electrons (`xtb_native.cpp` Z. 3151). One orbital set, two Fermi fillings (n_alpha, n_beta), no separate Fock matrices, no spin-polarisation term; triplet lies above the singlet (O2 +1.65 kcal/mol). Measurements: [REACTION_MD_EXAMPLES.md](REACTION_MD_EXAMPLES.md), section "What `-spin` does".
+
 ## What was NOT tested
 
 - Charged / open-shell systems, transition-metal complexes.
