@@ -28,6 +28,8 @@
 // Method implementations
 #include "ff_methods/forcefield_method.h"
 #include "ff_methods/gfnff_method.h"
+#include "ff_methods/alpb_solvation.h"
+#include "src/core/solvation/solvent_names.h"
 #include "qm_methods/dispersion_method.h"
 #include "qm_methods/eht_method.h"
 #include "qm_methods/external_gfnff_method.h"
@@ -208,8 +210,11 @@ static std::string resolveGpuMode(const json& config, const char* label) {
 
 // One dispatch for gfn1/gfn2 on any GPU backend; falls back to the CPU engine when the
 // plugin refuses (no device, construction error).
+namespace { void validateNativeSolvation(const std::string& host, const json& cfg); }   // defined below (same unnamed namespace)
+
 static std::unique_ptr<ComputationalMethod> createNativeXtbAny(curcuma::xtb::MethodType mt,
                                                                const char* label, const json& config) {
+    validateNativeSolvation(mt == curcuma::xtb::MethodType::GFN1 ? "gfn1" : "gfn2", config);
     const std::string gpu = resolveGpuMode(config, label);
     if (gpu != "none") {
         CurcumaLogger::info(std::string(label) + ": using native xTB on GPU (" + gpu + ")");
@@ -427,9 +432,55 @@ void fixEEQSolverChoice(json& cfg, const std::string& gpu)
         cfg["gfnff"]["eeq_solver"]["solve_method"] = EEQSolver::methodName(m);
 }
 
+// Claude Generated (Nov 2026): a solvent request that cannot be honoured is an error, not a gas-phase run.
+// Checks name, model and reference state of the native solvation for gfn1, gfn2 and gfnff before the calculator is
+// built (the solvent name accepts any case and the xtb aliases, see solvent_names.h).
+void validateNativeSolvation(const std::string& host, const json& cfg)
+{
+    const char* scope = (host == "gfnff") ? "gfnff" : "xtb";
+    auto find = [&](const char* key) -> const json* {
+        if (cfg.contains(scope) && cfg[scope].is_object() && cfg[scope].contains(key)) return &cfg[scope][key];
+        if (cfg.contains(key)) return &cfg[key];
+        return nullptr;
+    };
+    auto fail = [&](const std::string& msg) {
+        CurcumaLogger::error(msg);
+        throw MethodCreationException(msg);
+    };
+    const json* sv = find("solvent");
+    if (!sv || !sv->is_string()) return;
+    const std::string solvent = sv->get<std::string>();
+    if (curcuma::solvation::isGasPhase(solvent)) return;
+
+    bool alpb = true;
+    if (host != "gfnff") {
+        int code = 0;   // 0 = not given
+        if (const json* m = find("solvent_model")) {
+            if (m->is_string()) {
+                code = curcuma::xtb::solventModelCode(m->get<std::string>());
+                if (code < 0) fail("Unknown solvent_model '" + m->get<std::string>() + "' (alpb, gbsa, cpcm or none)");
+            } else if (m->is_number()) {
+                code = static_cast<int>(std::lround(m->get<double>()));
+            }
+        }
+        if (code == 1) fail("solvent_model cpcm has no native implementation yet (alpb and gbsa are available)");
+        alpb = (code != 2);
+    }
+    std::string known;
+    if (!ALPBSolvation::solventAvailable(host, alpb, solvent, &known))
+        fail(fmt::format("Unknown solvent '{}' for native {} {} (names are case-insensitive; available: {})", solvent, host,
+                         alpb ? "ALPB" : "GBSA", known));
+    if (const json* st = find("solvent_state")) {
+        curcuma::solvation::SolutionState s;
+        if (st->is_string() && !curcuma::solvation::parseSolutionState(st->get<std::string>(), s))
+            fail("Unknown solvent_state '" + st->get<std::string>() + "' (gsolv, bar1M or reference)");
+    }
+}
+
 // Native GFN-FF with the optional GPU back-ends (-gpu cuda|rocm|vulkan|auto).
 std::unique_ptr<ComputationalMethod> createNativeGfnff(const std::string& method, const json& config)
 {
+    validateNativeSolvation("gfnff", config);
     json gfnff_config = config;
     if (method == "gfnff-fast") {
         gfnff_config["static_charges"] = true;
@@ -613,6 +664,10 @@ std::string MethodFactory::parameterScopeForMethod(const std::string& method_nam
     // Native gfn1/gfn2 (and their ngfn aliases) read the "xtb" scope, like the external XTB methods.
     if (m == "gfn1" || m == "gfn2" || m == "ngfn1" || m == "ngfn2" || m.rfind("xtb-gfn", 0) == 0) return "xtb";
     if (m == "eht") return "eht";
+    // Nov 2026: native GFN-FF reads the "gfnff" scope, so a flat name that several modules register (solvent,
+    // solvent_model, solvent_state) reaches it with -method gfnff, as it reaches "xtb" with -method gfn2. A name
+    // that the gfnff scope does not own is still not routed (the CLI keeps the ambiguity warning).
+    if (m == "gfnff" || m.rfind("gfnff-", 0) == 0) return "gfnff";
     return "";
 }
 

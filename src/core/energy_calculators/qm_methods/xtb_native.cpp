@@ -161,7 +161,7 @@ bool XTB::InitialiseMolecule()
         CitationRegistry::cite("d3", meth);        // D3(BJ) dispersion (GFN1 only)
     else
         CitationRegistry::cite("d4", meth);        // D4 dispersion (GFN2 only)
-    if (m_solvent != "none" && !m_solvent.empty()) {
+    if (!curcuma::solvation::isGasPhase(m_solvent)) {
         const int model = (m_solvent_model > 0) ? m_solvent_model : 3;
         if (model == 3) CitationRegistry::cite("alpb", meth);
         else if (model == 2) { CitationRegistry::cite("alpb", meth); CitationRegistry::cite("still_gb", meth); }
@@ -194,7 +194,7 @@ bool XTB::InitialiseMolecule()
     // later WP. GBSA = ALPB with the shape term off (see ALPBSolvation::setUseAlpb).
     m_solvation.reset();
     m_E_solvation = 0.0;
-    if (m_solvent != "none" && !m_solvent.empty()) {
+    if (!curcuma::solvation::isGasPhase(m_solvent)) {
         const int model = (m_solvent_model > 0) ? m_solvent_model : 3;  // default ALPB
         const std::string meth = (m_method == MethodType::GFN1) ? "gfn1" : "gfn2";
         if (model == 3 || model == 2) {
@@ -202,17 +202,27 @@ bool XTB::InitialiseMolecule()
             const char* tag = use_alpb ? "ALPB" : "GBSA";
             auto solv = std::make_unique<ALPBSolvation>();
             solv->setUseAlpb(use_alpb);
+            curcuma::solvation::SolutionState state;
+            if (!curcuma::solvation::parseSolutionState(m_solvent_state, state)) {
+                CurcumaLogger::error("Native solvation: unknown solvent_state '" + m_solvent_state
+                                     + "' (gsolv, bar1M or reference)");
+                return false;
+            }
+            solv->setSolutionState(state);
             if (solv->init(m_atoms, m_solvent, meth)) {
                 m_solvation = std::move(solv);
             } else {
-                CurcumaLogger::warn(std::string("Native solvation: no ") + tag
-                                    + " parameters for solvent '" + m_solvent + "' ("
-                                    + meth + "); running gas phase");
+                // MethodFactory checks the name before the calculator is built; this is the
+                // direct-use path. A silent gas-phase result for a solvent run is wrong.
+                CurcumaLogger::error(std::string("Native solvation: no ") + tag
+                                     + " parameters for solvent '" + m_solvent + "' ("
+                                     + meth + ")");
+                return false;
             }
         } else {
-            CurcumaLogger::warn("Native solvation: only solvent_model alpb and gbsa "
-                                "are implemented for native GFN (cpcm pending); "
-                                "running gas phase");
+            CurcumaLogger::error("Native solvation: only solvent_model alpb and gbsa "
+                                 "are implemented for native GFN (cpcm pending)");
+            return false;
         }
     }
     return true;

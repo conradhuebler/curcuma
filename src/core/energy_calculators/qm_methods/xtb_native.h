@@ -992,6 +992,8 @@ public:
         if (c >= 0) m_solvent_model = c;
     }
     void setSolventEpsilon(double e) { m_solvent_epsilon = e; }
+    /// Reference state of the solvation free energy (gsolv, bar1M, reference); validated in InitialiseMolecule. Claude Generated (Nov 2026).
+    void setSolventState(const std::string& s) { m_solvent_state = s; }
 
     // Tighten the SCF convergence threshold (for FD charge-response validation).
     void setScfThreshold(double t) { m_scf_threshold = t; }
@@ -1748,6 +1750,7 @@ private:
     std::string m_solvent = "none";   ///< solvent name; "none" disables solvation
     int    m_solvent_model = 0;        ///< 0=none, 1=CPCM, 2=GBSA, 3=ALPB
     double m_solvent_epsilon = -1.0;   ///< explicit dielectric (CPCM); -1 = from name
+    std::string m_solvent_state = "gsolv";   ///< reference state: gsolv | bar1M | reference
     double m_E_solvation = 0.0;        ///< last solvation free energy (Eh)
 
     // Warm-start and iterative-mode state (Claude Generated).
@@ -1944,6 +1947,7 @@ inline void applyXtbScfConfig(XTB& xtb, const json& cfg)
         if (v.is_string())      xtb.setSolventModel(v.get<std::string>());        // name or numeric string
         else if (v.is_number()) xtb.setSolventModel(static_cast<int>(std::lround(v.get<double>())));
     });
+    lookup("solvent_state",   [&](const json& v){ if (v.is_string()) xtb.setSolventState(v.get<std::string>()); });
     lookup("solvent_epsilon", [&](const json& v){
         if (v.is_number()) xtb.setSolventEpsilon(v.get<double>());
         else if (v.is_string()) { try { xtb.setSolventEpsilon(std::stod(v.get<std::string>())); } catch (...) {} }

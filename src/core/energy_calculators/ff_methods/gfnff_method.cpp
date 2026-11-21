@@ -817,7 +817,7 @@ bool GFNFF::InitialiseMolecule()
     if (m_parameters.contains("solvent")) {
         m_solvent = m_parameters["solvent"].get<std::string>();
     }
-    if (m_solvent != "none" && !m_solvent.empty()) {
+    if (!curcuma::solvation::isGasPhase(m_solvent)) {
         m_solvation = std::make_unique<ALPBSolvation>();
         // GFN-FF has NO separate GBSA model: the reference (gfnff_alpb.F90:23-24,66)
         // ALWAYS uses the improved ALPB model (alpb=.true., P16 kernel), even when GBSA
@@ -829,8 +829,15 @@ bool GFNFF::InitialiseMolecule()
         const bool requested_gbsa = (sm == "gbsa" || sm == "gb" || sm == "2" || sm == "2.0");
         m_solvation->setUseAlpb(true);          // GFN-FF: always ALPB (P16 kernel)
         m_solvent_model_label = "ALPB";
+        // Reference state (Nov 2026): gsolv (default), bar1M, reference; MethodFactory has validated the name.
+        curcuma::solvation::SolutionState solv_state = curcuma::solvation::SolutionState::GSolv;
+        if (!curcuma::solvation::parseSolutionState(m_parameters.value("solvent_state", std::string("gsolv")), solv_state))
+            CurcumaLogger::error("GFN-FF solvation: unknown solvent_state '" + m_parameters.value("solvent_state", std::string())
+                                 + "' (gsolv, bar1M or reference), using gsolv");
+        m_solvation->setSolutionState(solv_state);
         if (!m_solvation->init(m_atoms, m_solvent)) {
-            CurcumaLogger::warn("ALPB solvation initialization failed for solvent '" + m_solvent + "', continuing gas-phase");
+            // MethodFactory rejects unknown solvents before the force field is built; this is the direct-use path.
+            CurcumaLogger::error("ALPB solvation initialization failed for solvent '" + m_solvent + "', continuing gas-phase");
             m_solvation.reset();
         } else {
             if (requested_gbsa) {

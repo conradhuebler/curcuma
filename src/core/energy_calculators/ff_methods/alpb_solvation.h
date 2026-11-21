@@ -31,6 +31,7 @@
 
 #include "src/core/global.h"
 #include "src/core/solvation/implicit_solvation.h"
+#include "src/core/solvation/solvent_names.h"
 #include <Eigen/Dense>
 #include <string>
 #include <vector>
@@ -78,6 +79,15 @@ public:
      * path is always ALPB. Claude Generated (June 2026).
      */
     void setUseAlpb(bool use_alpb) { m_use_alpb = use_alpb; }
+    /// True when a parameter set exists for (host method gfn1|gfn2|gfnff, ALPB or GBSA, solvent in any accepted spelling).
+    /// `available` receives the canonical names that exist for that combination. Claude Generated (Nov 2026).
+    static bool solventAvailable(const std::string& host_method, bool alpb, const std::string& solvent,
+                                 std::string* available = nullptr);
+
+    /// Reference state of the solvation free energy (gsolv, bar1M, reference), set before init().
+    /// Claude Generated (Nov 2026).
+    void setSolutionState(curcuma::solvation::SolutionState s) { m_state = s; }
+    curcuma::solvation::SolutionState solutionState() const { return m_state; }
 
     /**
      * @brief Initialize solvation model for a given molecule and solvent
@@ -240,6 +250,7 @@ private:
     std::string m_solvent;
     std::string m_host_method = "gfnff";  ///< Parameter set selector: gfn1/gfn2/gfnff
     bool m_use_alpb = true;               ///< true=ALPB (solvent_model 3), false=GBSA (2)
+    curcuma::solvation::SolutionState m_state = curcuma::solvation::SolutionState::GSolv;  ///< reference state (Nov 2026)
     double m_dielectric_const = 0.0;  ///< Dielectric constant ε
     double m_keps = 0.0;              ///< (1/ε - 1) / (1 + αβ)
     double m_alpbet = 0.0;            ///< ALPB constant: 0.571412/ε

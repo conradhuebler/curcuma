@@ -26,7 +26,7 @@ Curcuma supports implicit solvation models for quantum chemistry calculations:
 
 The native `gfn1`/`gfn2` backends include self-consistent ALPB and GBSA solvation
 models matching the tblite parameterization (Born electrostatics + CDS surface
-tension/H-bond + state shift). GFN1 uses CM5 charges, GFN2 Mulliken charges, as in
+tension/H-bond + state shift, see "Reference states"). GFN1 uses CM5 charges, GFN2 Mulliken charges, as in
 tblite. The solvent reaction field enters the SCF (the wavefunction polarizes), the
 energy is added to the total, and the nuclear gradient is analytic. ALPB uses the
 P16 Born kernel; GBSA is ALPB with the analytical-PB shape term off and the
@@ -53,23 +53,53 @@ other solvents, ions, metals, large systems, long MD/opt stability. See
 
 ## Supported Solvents
 
-### Common Solvents (TBLite & Ulysses)
-- `water` - Most polar solvent
-- `methanol`, `ethanol`, `octanol`
-- `acetone`, `dmso` (dimethyl sulfoxide), `dmf` (dimethylformamide)
-- `acetonitrile`, `nitromethane`
-- `benzene`, `toluene`, `aniline`
-- `chloroform`, `dichloromethane`
-- `thf` (tetrahydrofuran), `dioxane`, `furane`
-- `diethyl ether`, `ethyl acetate`
-- `hexane`, `hexadecane`
-- `carbon disulfide`
-- `phenol`, `benzaldehyde`
-- `octanol wet` - Wet octanol for partition coefficients
+Native GFN1/GFN2 (ALPB and GBSA) and native GFN-FF (ALPB) share one name handling (`src/core/solvation/solvent_names.h`):
+names are case-insensitive (`Water`, `CHCl3`), spaces and underscores are ignored, and the aliases of xtb 6.7.1 are
+accepted. A name that has no parameter set for the chosen method and model is an **error** (exit code 1), never a silent
+gas-phase run. `none`, `vacuum` and `gas` mean no solvent.
 
-### Special Keywords
-- `none` - No solvation (vacuum/gas phase)
-- `vacuum` - Equivalent to `none`
+| Canonical name | Accepted spellings (besides the canonical one) |
+|---|---|
+| `water` | `h2o` |
+| `ch2cl2` | `dichloromethane`, `dichlormethane`, `methylenechloride`, `dcm` |
+| `chcl3` | `chloroform`, `trichloromethane`, `tcm` |
+| `acetonitrile` | `methylcyanide` |
+| `cs2` | `carbondisulfide`, `carbon disulfide` |
+| `ether` | `diethylether`, `diethyl ether` |
+| `dmf`, `dmso` | `dimethylformamide`, `dimethylsulfoxide` |
+| `furane` | `furan` |
+| `hexane` | `n-hexane`, `nhexane`, `n-hexan`, `nhexan` |
+| `thf` | `tetrahydrofuran` |
+| `ethylacetate` | `ethyl acetate` |
+| `woctanol` | `octanol wet`, `wet octanol`, `wetoctanol` |
+
+Also available under their own names: `acetone`, `aniline`, `benzaldehyde`, `benzene`, `dioxane`, `ethanol`, `hexadecane`, `methanol`,
+`nitromethane`, `octanol`, `phenol`, `toluene` (25 ALPB solvents; the GBSA sets are smaller: GFN1 12, GFN2 14, as in tblite and
+xtb, e.g. `dmf` and `hexane` have no GFN1 GBSA parameters). `dichloromethane`, `diethyl ether`, `carbon disulfide`, `ethyl acetate`
+and `octanol wet` are curcuma additions. The alias list is that of the xtb source tree in `external/xtb` (`normalizeSolventName`,
+newer than the 6.7.1 binary): the 6.7.1 binary accepts only `furane`, `h2o`, `n-hexane` and the canonical names (measured: it rejects `dcm`,
+`dichloromethane`, `methylenechloride`, `furan`, `diethylether`, `tetrahydrofuran`, `trichloromethane`, `methylcyanide`), curcuma accepts the longer list.
+
+### Reference states (`-solvent_state`)
+
+One flat argument for GFN1, GFN2 and GFN-FF (`-solvent_state gsolv|bar1M|reference`, case-insensitive; the dotted
+`-xtb.solvent_state` and `-gfnff.solvent_state` also work). The state shifts the solvation free energy as `xtb --alpb water [state]`:
+
+| State | Meaning | Shift (298.15 K) |
+|---|---|---|
+| `gsolv` (default) | gas and solution at the same concentration | 0 |
+| `bar1M` | 1 bar ideal gas to 1 mol/L solution | +3.0312e-3 Eh (+1.902 kcal/mol), all solvents |
+| `reference` | 1 bar ideal gas to the pure solvent, as in xtb | solvent dependent, e.g. water +1.8138e-3 Eh |
+
+One implementation serves all methods (`solutionStateShift`): ideal-gas molar volume 24.79 L/mol as in xtb and pprcht/gfnff,
+CODATA-2018 kB. Against xtb 6.7.1 the shifts agree to 3e-9 Eh (`ctest -R cli_sqm_18`, 3 solvents x 3 methods). tblite derives
+24.78960 L/mol from R instead of 24.79 and therefore differs by 1.4e-8 Eh in `bar1M`; it was not ported separately. The temperature is fixed at 298.15 K.
+
+### Not implemented natively
+
+CPCM (tblite `--cpcm`, `solvent_model cpcm` is an error), ddCOSMO (xtb `--cosmo`), CPCM-X (xtb `--cpcmx`), the ionic strength of xtb's GBSA,
+a choice of the Born kernel (ALPB always P16, GBSA always Still), the Lebedev grid size (230) and a solvent given only by its dielectric
+constant. GFN-FF with `solvent_model gbsa` runs ALPB with a warning, as pprcht/gfnff does; xtb 6.7.1 runs a Still-kernel GBSA with the GFN2 parameters there.
 
 ## Usage
 

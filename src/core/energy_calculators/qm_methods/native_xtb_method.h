@@ -33,8 +33,9 @@ BEGIN_PARAMETER_DEFINITION(xtb)
     // Implicit solvation (Claude Generated, June 2026): self-consistent ALPB coupled
     // into the native GFN1/GFN2 SCF. Use the dotted form (-xtb.solvent water) because
     // the flat -solvent flag is ambiguous (also registered by tblite/ulysses/gfnff_external).
-    PARAM(solvent, String, "none", "Implicit solvent for native GFN1/GFN2 (e.g. 'water', 'dmso', 'chloroform'); 'none' runs in the gas phase. Use the dotted form -xtb.solvent, the flat -solvent is shared with other providers.", "Solvation", {})
-    PARAM(solvent_model, String, "none", "Native solvation model: 'alpb' or 'gbsa' (numeric codes 0-3 accepted); 'none' with a solvent set means ALPB. 'cpcm' has no native implementation and runs in the gas phase with a warning.", "Solvation", {})
+    PARAM(solvent, String, "none", "Implicit solvent for native GFN1/GFN2 (e.g. 'water', 'dmso', 'chloroform'); 'none' runs in the gas phase. Names are case-insensitive and accept the xtb aliases (dcm, dichloromethane, diethylether, thf, h2o, ...); an unknown solvent is an error. Use the dotted form -xtb.solvent, the flat -solvent is shared with other providers.", "Solvation", {})
+    PARAM(solvent_model, String, "none", "Native solvation model: 'alpb' or 'gbsa' (numeric codes 0-3 accepted); 'none' with a solvent set means ALPB. 'cpcm' has no native implementation and is an error.", "Solvation", {})
+    PARAM(solvent_state, String, "gsolv", "Reference state of the solvation free energy, as xtb --alpb water [state]: 'gsolv' (default), 'bar1M' (1 bar gas to 1 mol/L solution, +1.9 kcal/mol) or 'reference' (1 bar gas to the pure solvent). Case-insensitive; anything else is an error.", "Solvation", {})
     PARAM(solvent_epsilon, Double, -1.0, "Dielectric constant for CPCM; -1 takes it from the solvent name. No effect on the native solver, whose ALPB and GBSA take it from the solvent parameters.", "Solvation", {})
     // SCF knobs shared with other methods (scf_threshold, scf_max_iterations, scf_damping,
     // scf_allow_unconverged, scf_mode, scf_diis_start, scf_diis_subspace) are in module "scf"

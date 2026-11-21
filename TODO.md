@@ -207,6 +207,8 @@ Stand.
 
 - **D4-Gradient der Pfade `-d4_charge_source eeq` und `cpscf` ist etwa 1e-4 Eh/A neben FD** (2026-11-18, n = 3 kleine Moleküle, nur CPU; Diagnose eines Agenten, Codestellen von mir nicht nachgelesen): H2 8,2e-5 obwohl die Antwort dort 0 ist; der Standardpfad `mulliken` liegt bei 1e-8. Vermutete Ursache: das D4-Potential steckt im SCF und in W, fehlt aber im Gradienten-Charge-Pulay dieser Pfade (`xtb_native.cpp:2550-2551`, `xtb_gradient.cpp:385`). Entscheidung: als genähert dokumentieren oder entfernen; Details `docs/BROKEN_TESTS_2026-10-14.md`.
 
+- **Solvatation, eigenes Arbeitspaket** (2026-11-21, Audit gegen xtb 6.7.1 und tblite, [docs/SOLVATION.md](docs/SOLVATION.md) "Not implemented natively"): CPCM (tblite), ddCOSMO (`--cosmo`), CPCM-X (`--cpcmx`), Ionenstärke, Kernel- und Gitterwahl fehlen. Offen: GFN-FF `gbsa` rechnet ALPB (xtb 6.7.1: Still-GBSA), GFN2-Gradient bei `na2cl2` gegen xtb ungeklärt (GFN1: xtb weicht von FD ab), Radius für Z > 94 still 2 A.
+
 ## 3. Tests und Validierung
 
 - **PLUMED, ungetestet** (Stand 2026-10-30, getestet nur Ar2-RESTRAINT und Ethan-Torsion mit GFN-FF): QM-Methoden, größere Systeme, Restart, NPT/`setVirial`, PLUMED zusammen mit GPU. Gemeldete extreme PLUMED-Langsamkeit nicht nachgemessen. Well-tempered METAD lag 10 % über der freien MD (2.66 gegen 2.43 kcal/mol, Hügel nicht konvergiert).

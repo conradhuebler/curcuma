@@ -196,13 +196,15 @@ ALPBSolvation::~ALPBSolvation() = default;
 bool ALPBSolvation::init(const std::vector<int>& atomic_numbers, const std::string& solvent,
                          const std::string& method)
 {
-    m_solvent = solvent;
+    // Claude Generated (Nov 2026): any accepted spelling (case, xtb aliases) -> table key
+    const std::string solvent_key = curcuma::solvation::normalizeSolventName(solvent);
+    m_solvent = solvent_key;
     m_host_method = method;
     m_nat = static_cast<int>(atomic_numbers.size());
     m_ntpair = m_nat * (m_nat - 1) / 2;
 
     // Load solvent parameters
-    if (!loadSolventParameters(solvent)) {
+    if (!loadSolventParameters(solvent_key)) {
         CurcumaLogger::error("ALPB: Unknown solvent '" + solvent + "'");
         return false;
     }
@@ -264,6 +266,28 @@ bool ALPBSolvation::init(const std::vector<int>& atomic_numbers, const std::stri
     return true;
 }
 
+bool ALPBSolvation::solventAvailable(const std::string& host_method, bool alpb, const std::string& solvent,
+                                     std::string* available)
+{
+    // The 25 canonical keys of the ALPB tables (tblite data/alpb, gfnff include/param_alpb_*.fh)
+    static const char* kNames[] = { "acetone", "acetonitrile", "aniline", "benzaldehyde", "benzene", "ch2cl2", "chcl3",
+                                    "cs2", "dioxane", "dmf", "dmso", "ethanol", "ether", "ethylacetate", "furane",
+                                    "hexadecane", "hexane", "methanol", "nitromethane", "octanol", "phenol", "thf",
+                                    "toluene", "water", "woctanol" };
+    const bool tblite = (host_method == "gfn1" || host_method == "gfn2");
+    auto has = [&](const std::string& key) {
+        return tblite ? curcuma::solvation::getTbliteSolvationParam(host_method, alpb, key) != nullptr
+                      : getSolventParameters(key) != nullptr;
+    };
+    if (available) {
+        available->clear();
+        for (const char* n : kNames)
+            if (has(n))
+                *available += (available->empty() ? "" : ", ") + std::string(n);
+    }
+    return has(curcuma::solvation::normalizeSolventName(solvent));
+}
+
 bool ALPBSolvation::loadSolventParameters(const std::string& solvent)
 {
     m_gamscale_elem.resize(MAX_ELEM);
@@ -273,8 +297,9 @@ bool ALPBSolvation::loadSolventParameters(const std::string& solvent)
     // ── tblite GFN1/GFN2 ALPB/GBSA parameter set (Claude Generated, June 2026) ──
     // Born (epsv,c1,soset,sx) + CDS (rprobe,gamscale,sqrtGhbond) + shift (gshift),
     // joined per (method, model, solvent) in tblite_solvation_params.h. m_use_alpb
-    // selects ALPB (solvent_model 3) vs plain GBSA (solvent_model 2); GBSA differs
-    // only by alpbet=0 (see below), reusing the same P16 Born kernel and CDS terms.
+    // selects ALPB (solvent_model 3) vs plain GBSA (solvent_model 2). GBSA differs by
+    // alpbet=0 and by the classical Still kernel (buildBornMatrix, tblite add_born_mat_still);
+    // ALPB uses the P16 kernel. The CDS terms are shared.
     // The non-electrostatic CDS terms reuse the existing SASA/HB machinery by
     // feeding tblite's per-element values (see below) — radii stay D3 for both
     // Born and CDS, exactly as tblite's load_alpb_param / load_cds_param do.
@@ -286,9 +311,11 @@ bool ALPBSolvation::loadSolventParameters(const std::string& solvent)
         m_dielectric_const = tp->epsv;
         m_molar_mass = tp->smass;
         m_density = tp->rhos / tp->smass * molcm3toau;
-        // gsolv reference state (refstate=1) => total_shift = gshift (stateshift 0),
-        // distributed per atom in tblite; the molecular total is gshift*kcaltoau.
+        // total_shift = gshift + stateshift (shift.f90 create_shift), distributed per atom in
+        // tblite; the molecular total is added once. stateshift is 0 for the default gsolv state.
         m_gshift = tp->gshift * kcaltoau;
+        // Reference state (Nov 2026): gsolv adds nothing; bar1M and reference add T kB ln(...), one shift for all methods.
+        m_gshift += curcuma::solvation::solutionStateShift(m_state, 298.15, m_density, m_molar_mass);
         m_born_scale = tp->c1;
         m_born_offset = tp->soset * 0.1 * aatoau;  // born.f90: svdw = vdwr - soset*0.1*aatoau
         m_probe_rad = tp->rprobe * aatoau;
@@ -326,6 +353,8 @@ bool ALPBSolvation::loadSolventParameters(const std::string& solvent)
     m_molar_mass = p->smass;
     m_density = p->rhos / p->smass * molcm3toau;
     m_gshift = p->gshift * kcaltoau;
+    // Reference state (Nov 2026), the same shift as for GFN1/GFN2 (gfnff/src/gbsa/state.f90 getStateShift)
+    m_gshift += curcuma::solvation::solutionStateShift(m_state, 298.15, m_density, m_molar_mass);
     m_born_scale = p->c1;
     m_born_offset = p->soset * 0.1 * aatoau;
     m_probe_rad = p->rprobe * aatoau;
@@ -1334,5 +1363,6 @@ void ALPBSolvation::printInfo() const
     CurcumaLogger::param("Free energy shift", std::to_string(m_gshift) + " Eh");
     CurcumaLogger::param("Grid points", std::to_string(m_nang) + " per atom");
     CurcumaLogger::param("HB correction", m_lhb ? "true" : "false");
-    CurcumaLogger::param("Kernel", "P16");
+    CurcumaLogger::param("Kernel", (m_use_alpb || (m_host_method != "gfn1" && m_host_method != "gfn2")) ? "P16" : "Still");
+    CurcumaLogger::param("Reference state", curcuma::solvation::solutionStateName(m_state));
 }
