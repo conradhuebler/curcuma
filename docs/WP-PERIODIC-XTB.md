@@ -1209,6 +1209,11 @@ gemm (symm/syrk/trmm run at native FP64 speed), so the symmetric structure canno
 needed because the previous SCF vectors (pseudo steps) are not near-diagonal (max\|T_off\| 2.6e-2). The first SCF
 iteration of a step (81 ms, FP32 full solve) and the middle iterations (22.5 ms) are unchanged.
 
+Regression after A1r/B1 (2026-11-22, test selection of the regression run below, `-j1`, after a full rebuild of both
+trees): `release/` 379 of 380, `release_cuda/` 650 of 651 passed (the same 5 skipped as before); the only failure in
+both is the pre-existing `xtb_cpscf`. Not tested: the `emulated` and `fp32_refine` strategies on any device but the
+RTX 5080; a cluster of more than 256 near-degenerate eigenvalues (refinement refused, direct solve; never seen in water).
+
 ## Regression run (2026-11-14, `release/`, `ctest -R 'gfn|xtb|sqm|gfnff|pbc|ewald|simplemd|restart|md_|gpu|plugin|molecule|xyz|parser|curcumaopt|structinv' -j1`)
 
 369 tests selected, 2 failed before the fix below: `pbc_md_nonperiodic_cell` (its check (a) assumed gfn2 + cell to be
