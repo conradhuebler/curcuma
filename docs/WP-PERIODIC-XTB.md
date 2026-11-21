@@ -1000,6 +1000,9 @@ Still on the host (432 H2O gfn2 MD step):
 | halogen bond | 0 | cannot run with a cell (donors Br/I carry d shells, a cell refuses them) |
 | remaining virial terms (G6) | 0 | every term of `calculateGradientPeriodic` now has its virial on the device (H1, H2, H4, H5 with G5a-d, C1, A1) |
 
+Regression after H1-H5/D1 (2026-11-21, test selection of the regression run below, `-j1`): `release/` 379 of 380,
+`release_cuda/` 650 of 651 passed; the only failure in both is the pre-existing `xtb_cpscf`.
+
 ## Regression run (2026-11-14, `release/`, `ctest -R 'gfn|xtb|sqm|gfnff|pbc|ewald|simplemd|restart|md_|gpu|plugin|molecule|xyz|parser|curcumaopt|structinv' -j1`)
 
 369 tests selected, 2 failed before the fix below: `pbc_md_nonperiodic_cell` (its check (a) assumed gfn2 + cell to be
