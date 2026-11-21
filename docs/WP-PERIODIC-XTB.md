@@ -1190,6 +1190,25 @@ about 263 ms of the 479 ms SCF of an MD step. Measured in the standalone program
   run md5-identical; GPU FD 8.07e-9 / 8.87e-9 Eh/A; NVE 216 H2O 100 steps tight against `eigref,d4cn`: max |dE_pot|
   5.5e-11 Eh; MD 20 steps tight unchanged; no-cell CPU 36/36 and CUDA 36/36 md5 to the base.
 
+### A1r/B1 result (2026-11-21, Claude Generated)
+
+gfn2, `-gpu cuda -threads 8`, RTX 5080; old = same binary with `CURCUMA_PBC_GPU_HOST=eigref,d4cn` (= f51b54b0). Another
+session shared the machine (load 2-6, its GPU jobs intermittent; each run waited for GPU utilisation < 30 %), so the
+MD walls are alternating pairs, n = 2, the better pair given:
+
+| item | 216 H2O old -> new | 432 H2O old -> new |
+|---|---|---|
+| MD wall per step (`md.sh`, 20 steps incl. start-up) | 0.437 -> 0.377 s (first pair 0.614 -> 0.429) | 1.270 -> 1.034 s (first pair 1.344 -> 1.078) |
+| SCF iteration wall, second MD step (first / middle / last FP64) | - | 81.2 / 22.5 / 262.6 -> 81.3 / 22.5 / 190.8 ms |
+| FP64 solve (profile, per call) | - | reduce 51 + dsyevd 173 + back 24 = 248 -> FP32 start 36 + refinement 122 = 158 ms |
+| pre-SCF block (D4 setup) | - | 92-111 -> 17-32 ms |
+| step TOTAL (verbosity 3 profile, n = 3 steps) | - | 1182-1407 -> 957-1179 ms |
+
+What stays: the refinement is 3 passes of 4 emulated GEMMs (25 ms each) plus 3 update GEMMs; the emulation covers only
+gemm (symm/syrk/trmm run at native FP64 speed), so the symmetric structure cannot be used. The FP32 start (36 ms) is
+needed because the previous SCF vectors (pseudo steps) are not near-diagonal (max\|T_off\| 2.6e-2). The first SCF
+iteration of a step (81 ms, FP32 full solve) and the middle iterations (22.5 ms) are unchanged.
+
 ## Regression run (2026-11-14, `release/`, `ctest -R 'gfn|xtb|sqm|gfnff|pbc|ewald|simplemd|restart|md_|gpu|plugin|molecule|xyz|parser|curcumaopt|structinv' -j1`)
 
 369 tests selected, 2 failed before the fix below: `pbc_md_nonperiodic_cell` (its check (a) assumed gfn2 + cell to be
