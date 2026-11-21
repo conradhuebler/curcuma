@@ -48,6 +48,7 @@
  */
 
 #include "gfnff.h"
+#include "src/core/periodic_table.h"
 #include "gfnff_par.h"
 #include "src/core/math_compat.h"
 #include <cmath>
@@ -1021,7 +1022,7 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
         if (a < 0 || a >= static_cast<int>(m_atoms.size())) return false;
         const int z = m_atoms[a];
         if (z < 1 || z > 86) return false;
-        if (GFNFFParameters::metal_type[z - 1] <= 1) return false;  // TM only
+        if (PeriodicTable::getMetalType(z) <= 1) return false;  // TM only
         const auto& nb_a = getCachedTopology().neighbor_lists;
         return a < static_cast<int>(nb_a.size()) && static_cast<int>(nb_a[a].size()) > 4;
     };

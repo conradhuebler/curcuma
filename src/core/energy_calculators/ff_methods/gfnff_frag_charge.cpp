@@ -58,6 +58,7 @@
  */
 
 #include "gfnff.h"
+#include "src/core/periodic_table.h"
 #include "src/core/energy_calculators/ff_methods/gfnff_par.h"
 #include "src/core/curcuma_logger.h"
 
@@ -176,7 +177,6 @@ double GFNFF::fragPass1Threshold(int i, int j) const
 {
     // Identical to perceiveGeometricBonds() at qa = 0 (pass 1 of the q-loop, gfnff_ini2.f90:111-126
     // + getnb icase 1): threshold = fm_i fm_j rthr rab(Z_i,Z_j,normcn) fat_i fat_j.
-    using GFNFFParameters::metal_type;
     using GFNFFParameters::normcn;
     constexpr double rthr = 1.25;
     constexpr double rthr2 = 1.00;
@@ -184,7 +184,7 @@ double GFNFF::fragPass1Threshold(int i, int j) const
     const double ncn_i = (zi >= 1 && zi <= 86) ? static_cast<double>(normcn[zi - 1]) : 4.0;
     const double ncn_j = (zj >= 1 && zj <= 86) ? static_cast<double>(normcn[zj - 1]) : 4.0;
     auto fm = [&](int z) {
-        const int mt = (z >= 1 && z <= 86) ? metal_type[z - 1] : 0;
+        const int mt = PeriodicTable::getMetalType(z);
         return mt == 2 ? rthr2 : (mt == 1 ? rthr2 + 0.025 : 1.0);
     };
     double rco = GFNFFParameters::computeRabEstimate(zi, zj, ncn_i, ncn_j);
@@ -192,7 +192,7 @@ double GFNFF::fragPass1Threshold(int i, int j) const
     // anchor the window at THAT threshold, with the pass-1 charges it was built from.
     if (m_frag_split_pass == 2 && static_cast<int>(m_bond_qa.size()) == m_atomcount) {
         constexpr double rqshrink = 0.23;
-        auto fq = [&](int z) { const int mt = (z >= 1 && z <= 86) ? metal_type[z - 1] : 0; return rqshrink * (mt > 0 ? 2.0 : 1.0); };
+        auto fq = [&](int z) { const int mt = PeriodicTable::getMetalType(z); return rqshrink * (mt > 0 ? 2.0 : 1.0); };
         rco -= m_bond_qa[i] * fq(zi) + m_bond_qa[j] * fq(zj);
     }
     rco *= fat[zi] * fat[zj];

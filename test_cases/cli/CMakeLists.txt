@@ -111,6 +111,10 @@ set_tests_properties(cli_gfnff_05_frag_charge_ensemble PROPERTIES TIMEOUT 900 LA
 add_cli_test(gfnff 08_frag_charge_many_fragments)
 set_tests_properties(cli_gfnff_08_frag_charge_many_fragments PROPERTIES TIMEOUT 600 LABELS "gfnff;frag_charge")
 
+# Claude Generated (Nov 2026): one GFN-FF metal table, Sn/Pb/Bi small-CN rule (Zn, Cd, Ga, Sn, Pb, Bi systems vs xtb 6.7.1).
+add_cli_test(gfnff 11_metal_type)
+set_tests_properties(cli_gfnff_11_metal_type PROPERTIES TIMEOUT 120 LABELS "gfnff")
+
 # Claude Generated (Oct 2026): EEQ solver control (auto thresholds, explicit names, alias, typo, GPU gap).
 add_cli_test(gfnff 06_eeq_solver_control)
 set_tests_properties(cli_gfnff_06_eeq_solver_control PROPERTIES TIMEOUT 900 RESOURCE_LOCK "gpu" LABELS "gfnff;eeq")
