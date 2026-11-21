@@ -861,6 +861,47 @@ not exact eigenvectors. Hence E1 below (density) instead of a new eigensolver.
 Regression after E1/A1/M1/M2/C1 (2026-11-21, test selection of the regression run below, `-j1`): `release/` 379 of
 380, `release_cuda/` 650 of 651 passed; the only failure in both is the pre-existing `xtb_cpscf`.
 
+### G2-G6 continuation 4: profile at the start (2026-11-21, Claude Generated)
+
+Binary of 87214d0d (`release_cuda/`, ABI 17), `-gpu cuda -threads 8`, RTX 5080 idle, verbosity 3 with
+`CURCUMA_GPU_PROFILE=1`, second step of a `-md -compute_pressure true` run (ms, n = 1 each):
+
+| item | gfn2 216 H2O | gfn2 432 H2O | gfn1 432 H2O |
+|---|---|---|---|
+| setup: CN (host) / S+H0 / gamma / multipole setup + matrices | 16 / 31 / 18 / 37 | 53 / 79 / 47 / 182 | 51 / 226 / 53 / - |
+| SCF: total / solve eigen | 158 / 101 | 660 / 440 | 970 / 952 |
+| post-SCF: D4 pairs / ATM (device) / D3 (host, gfn1) | 43 / 119 / - | 56 / 186 / - | - / - / 855 |
+| gradient: W / H0-Pulay (host) / Ewald (host) / KO (host) / multipole / CN chain | 7 / 52 / 18 / 10 / 11 / 1 | 40 / 123 / 67 / 33 / 41 / 4 | 83 / 161 / 68 / 83 / - / 3 |
+| TOTAL | 510 | 1540 | 2632 |
+
+1 % of the step: 5 ms (gfn2 216), 15 ms (gfn2 432), 26 ms (gfn1 432). Above it on the host: H0/Pulay gradient
+(8-10 %), Ewald gradient + virial (3-4 %), KO remainder (2-3 %), CN (3 %), and for gfn1 the periodic D3 (32 % of
+the gfn1 step); the W download is part of the W item (54 MB at 432 H2O). Halogen bond: no XB atoms in water
+(0 ms), measured separately on its own cell.
+
+### H1 periodic H0/Pulay gradient on the device (2026-11-21, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+- `GpuScfBackend::h0PulayGradientPeriodic` (CUDA `k_grad_h0_pulay_pbc<WANT_V, MP>`): section 2b of
+  `calculateGradientPeriodic`, one thread per AO pair with atom(mu) <= atom(nu), per image the image overlap and its
+  derivative at x_i - d, the shpoly term, with MP the GFN2 multipole-integral Pulay term (statements of
+  `d_grad_h0_pulay_pair`, dR = -d), images and r2 as `k_overlap_h0_pbc`; same atom with weight 1/2, dE/dCN always,
+  the derivative only for the virial. Gradient and dE/dCN by gfix_add, virial by the fixed-order block tree. P is the
+  resident dP, W is built on the device from the resident dC (dsyrk W = -Cs Cs^T when every focc eps < 0, else the
+  dgemm) and is no longer downloaded; on a failed call the host builds W and runs its loop. Token `h0grad`.
+  The on-site CN term (2a) stays on the host (O(nao)). Plugin ABI 17 -> 18.
+- Time (432 H2O, MD step, `CURCUMA_GPU_PROFILE`): W 40 + H0/Pulay 123 ms (host) -> W 17 + kernel 60 ms.
+- Gates (one binary, new vs `CURCUMA_PBC_GPU_HOST=h0grad`): `pbc_xtb_gpu_parity` 8/8 (gfn2 216 box |dE| 4.1e-12 Eh,
+  max |dG| 1.0e-10 Eh/A, max |dXi| 1.7e-9 Eh; gfn1 box 3.6e-12 / 6.2e-11 / 1.0e-9), second CUDA run bitwise 8/8;
+  `pbc_|ewald` 29/29 (`release_cuda/`); `-sp -scf_threshold 1e-9`: 216 H2O dE 0, max dG 1.5e-14 Eh/A; 432 H2O dE 0,
+  max dG 1.9e-14 Eh/A; second device run md5-identical (216, 432); GPU FD (dimer 8 A): gfn1 8.1e-9, gfn2 8.9e-9 Eh/A;
+  NVE 216 H2O 100 steps (`-scf_threshold 1e-9`) against `h0grad`: max |dE_pot| 2.6e-11 Eh; MD 216 H2O 20 steps tight:
+  E_pot -1096.551628, T 462.483544 K, P 14765.49 bar (unchanged); without a cell CPU 36/36 and CUDA 36/36 md5 to the
+  rebuilt base.
+- MD wall per step (`md.sh`, load 1.0-1.7, before = same binary with `h0grad`): 216 H2O 0.56 -> 0.51 s, 432 H2O
+  1.63 -> 1.53 s.
+- Open: the kernel recomputes the shell-pair primitive work for every AO of a p shell (9x for p-p); a shell-pair
+  blocked variant would cut the 60 ms further (not done).
+
 ## Regression run (2026-11-14, `release/`, `ctest -R 'gfn|xtb|sqm|gfnff|pbc|ewald|simplemd|restart|md_|gpu|plugin|molecule|xyz|parser|curcumaopt|structinv' -j1`)
 
 369 tests selected, 2 failed before the fix below: `pbc_md_nonperiodic_cell` (its check (a) assumed gfn2 + cell to be

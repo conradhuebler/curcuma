@@ -56,10 +56,11 @@
 // 15 = Nov 2026, WP-PERIODIC-XTB G1c (GpuScfBackend::setHostLoopPseudo).
 // 16 = Nov 2026, WP-PERIODIC-XTB E1 (GpuScfBackend::setHostLoopDensityComplement).
 // 17 = Nov 2026, WP-PERIODIC-XTB C1 (GpuScfBackend::d4CnFoldPeriodic).
+// 18 = Nov 2026, WP-PERIODIC-XTB H1 (GpuScfBackend::h0PulayGradientPeriodic).
 
 #pragma once
 
-#define CURCUMA_GPU_PLUGIN_ABI_VERSION 17
+#define CURCUMA_GPU_PLUGIN_ABI_VERSION 18
 
 /// Defines `extern "C" int curcuma_<backend>_abi_version()` in a plugin entry file (use at file scope).
 #define CURCUMA_GPU_PLUGIN_DEFINE_ABI_VERSION(backend)                                                                \

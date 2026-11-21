@@ -763,6 +763,18 @@ struct GpuScfBackend {
     { (void)nat; (void)xyz_bohr; (void)alpha; (void)zeff; (void)light; (void)kexp; (void)kexp_light; (void)rexp;
       (void)cell_L; (void)ntrans; (void)trans; (void)cut2; (void)gradient; (void)want_virial; (void)energy_out;
       (void)grad_out; (void)vir9_out; return false; }
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB H1): H0/Pulay gradient over the images (section 2b of
+    /// calculateGradientPeriodic) on the device from the resident P and C of this SCF: se[nsh] self-energies,
+    /// v_ao[nao] = v_sh + v_at, v_dp[3 nat] / v_qp[6 nat] (atom-major, GFN2 only, multipole), we[ncol] = focc eps
+    /// (W built on the device). Outputs are the contributions of 2b (grad 3 nat, dEdcn nat, vir9). Default false.
+    virtual bool h0PulayGradientPeriodic(int nat, const double* xyz_bohr, const double* se, const double* v_ao,
+                                         const double* v_dp, const double* v_qp, const double* we, int ncol,
+                                         const double* cell_L, int ntrans, const double* trans, double cut2,
+                                         bool multipole, bool want_virial, double* grad_out, double* dEdcn_out,
+                                         double* vir9_out)
+    { (void)nat; (void)xyz_bohr; (void)se; (void)v_ao; (void)v_dp; (void)v_qp; (void)we; (void)ncol; (void)cell_L;
+      (void)ntrans; (void)trans; (void)cut2; (void)multipole; (void)want_virial; (void)grad_out; (void)dEdcn_out;
+      (void)vir9_out; return false; }
     /// Claude Generated (Nov 2026, WP-PERIODIC-XTB C1): dE/dCN chain rule of the periodic D4 covalent CN
     /// (addD4CovalentCNGradientPeriodic) on the device: rcov[i] = rad[Z_i] (0 skips the atom), en[i] = EN[Z_i], the
     /// d4CovalentCNTables constants, images of the D4 CN cutoff. Adds nothing itself: grad_out[3 nat] and vir9_out

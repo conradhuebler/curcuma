@@ -198,6 +198,8 @@ struct XtbGpuContext::Impl {
     // Nov 2026 (G5d): periodic repulsion
     CudaBuffer<double> dPbcRepAlp, dPbcRepZeff, dPbcRepTrans, dPbcRepE, dPbcRepFix;
     CudaBuffer<int>    dPbcRepLight;
+    // Nov 2026 (H1): periodic H0/Pulay gradient (self-energies, AO/moment potentials, images, fixed-point sums)
+    CudaBuffer<double> dPbcH0Se, dPbcH0Vao, dPbcH0Vdp, dPbcH0Vqp, dPbcH0Trans, dPbcH0Fix;
     // Nov 2026 (G1b): lattice translations of the periodic S/H0 and multipole integral image sums
     CudaBuffer<double> dPbcIntTrans;
     bool               d4_pbc_ready = false;
@@ -3702,6 +3704,174 @@ __global__ void k_rep_rows(int nat, const double* __restrict__ epair, double* __
     double e = 0.0;
     for (int j = 0; j <= i; ++j) e += epair[static_cast<size_t>(i) * nat + j];
     erow[i] = e;
+}
+
+/* ---------------------------------------------------------------------------------------------- *
+ *  WP-PERIODIC-XTB H1 (Claude Generated, Nov 2026): H0/Pulay gradient over the images, section 2b  *
+ *  of XTB::calculateGradientPeriodic. One thread per AO pair (mu, nu) with atom(mu) <= atom(nu),   *
+ *  s/p shells only (a cell refuses d shells). Per image d = d0 - T (images as k_overlap_h0_pbc, r2  *
+ *  without FMA for the cutoff decisions; T = 0 skipped on the same atom) the image overlap S_T and  *
+ *  its derivative at the image position x_i - d, h_factor = hs pi_a(r) pi_b(r), the shpoly term,   *
+ *  and with MP the GFN2 multipole-integral Pulay term (dR = x_image - x_i = -d, the statements of  *
+ *  d_grad_h0_pulay_pair). Same atom: weight 1/2, dE/dCN always, the derivative only for the        *
+ *  virial. Image sum in registers; gradient and dE/dCN by gfix_add (order independent), virial      *
+ *  -G (x) d by the fixed-order block tree. Not bitwise to the host loop (summation order).         *
+ * ---------------------------------------------------------------------------------------------- */
+template <bool WANT_V, bool MP>
+__global__ void k_grad_h0_pulay_pbc(
+    int nao, int is_gfn2, const int* __restrict__ ao2sh, const int* __restrict__ ao2at,
+    const int* __restrict__ ang_sh, const int* __restrict__ iao_sh,
+    const int* __restrict__ sh_nprim, const int* __restrict__ sh_prim_off,
+    const double* __restrict__ prim_alpha, const double* __restrict__ prim_coeff,
+    const double* __restrict__ sh_zeta, const double* __restrict__ shpoly, const double* __restrict__ kcn,
+    const double* __restrict__ se, const int* __restrict__ z, const int* __restrict__ valence,
+    const double* __restrict__ xyz, const double* __restrict__ P, const double* __restrict__ W,
+    const double* __restrict__ v_ao, const double* __restrict__ v_dp, const double* __restrict__ v_qp,
+    double Lx, double Ly, double Lz, int ntr, const double* __restrict__ trans, double cut2,
+    double* __restrict__ grad_fix, double* __restrict__ dEdcn_fix, double* __restrict__ vir_fix)
+{
+    const int mu = blockIdx.x * blockDim.x + threadIdx.x;
+    const int nu = blockIdx.y * blockDim.y + threadIdx.y;
+    double v[3][3] = { { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 } };
+    bool active = (mu < nao && nu < nao) && ao2at[mu] <= ao2at[nu];
+    int a = 0, b = 0, iat = 0, jat = 0, la = 0, lb = 0, ta = -1, tb = -1;
+    if (active) {
+        a = ao2sh[mu]; b = ao2sh[nu]; iat = ao2at[mu]; jat = ao2at[nu];
+        la = ang_sh[a]; lb = ang_sh[b];
+        ta = d_ao_to_type(la, mu - iao_sh[a]);
+        tb = d_ao_to_type(lb, nu - iao_sh[b]);
+        active = (ta >= 0 && tb >= 0);
+    }
+    if (active) {
+        const bool same = (iat == jat);
+        const double wself = same ? 0.5 : 1.0;
+        const double xa = xyz[3 * iat + 0], ya = xyz[3 * iat + 1], za = xyz[3 * iat + 2];
+        const double avg_eps = 0.5 * (se[a] + se[b]);
+        const int zi = z[iat], zj = z[jat];
+        double hs;
+        if (is_gfn2 == 0) {
+            const bool vi = valence[a] != 0, vj = valence[b] != 0;
+            if (vi && vj) {
+                double den = c_pauling[zi - 1] - c_pauling[zj - 1]; den *= den;
+                hs = d_kpair_gfn1(zi, zj) * d_kshell_gfn1(la, lb) * (1.0 + (-7.0e-3) * den);
+            } else if (vi && !vj) {
+                hs = 0.5 * (d_kshell_gfn1(la, la) + 2.85);
+            } else if (!vi && vj) {
+                hs = 0.5 * (d_kshell_gfn1(lb, lb) + 2.85);
+            } else {
+                hs = 2.85;
+            }
+        } else {
+            double den = c_pauling[zi - 1] - c_pauling[zj - 1]; den *= den;
+            const double enp = 1.0 + 2.0e-2 * den;
+            const double km  = d_kshell_gfn2(la, lb) * enp;
+            const double za_ = sh_zeta[a], zb_ = sh_zeta[b];
+            hs = pow(2.0 * sqrt(za_ * zb_) / (za_ + zb_), 0.5) * km;
+        }
+        const double rad_sum = c_atomic_rad[zi - 1] + c_atomic_rad[zj - 1];
+        const double* pa_alpha = prim_alpha + sh_prim_off[a];
+        const double* pa_coeff = prim_coeff + sh_prim_off[a];
+        const int npa = sh_nprim[a];
+        const double* pb_alpha = prim_alpha + sh_prim_off[b];
+        const double* pb_coeff = prim_coeff + sh_prim_off[b];
+        const int npb = sh_nprim[b];
+        const size_t mn = static_cast<size_t>(mu) + static_cast<size_t>(nu) * nao;
+        const size_t mn_lo = (mu >= nu) ? mn : static_cast<size_t>(nu) + static_cast<size_t>(mu) * nao;   // W: lower
+        const double Pmn = P[mn], Wmn = W[mn_lo];
+        const double vsum = v_ao[mu] + v_ao[nu];
+        double d0x = xa - xyz[3 * jat], d0y = ya - xyz[3 * jat + 1], d0z = za - xyz[3 * jat + 2];
+        double s = d0x * (1.0 / Lx); s -= rint(s); d0x = Lx * s;
+        s = d0y * (1.0 / Ly); s -= rint(s); d0y = Ly * s;
+        s = d0z * (1.0 / Lz); s -= rint(s); d0z = Lz * s;
+        double gx = 0.0, gy = 0.0, gz = 0.0, cn_acc = 0.0;
+        for (int t = same ? 1 : 0; t < ntr; ++t) {
+            const double dx = d0x - trans[3 * t], dy = d0y - trans[3 * t + 1], dz = d0z - trans[3 * t + 2];
+            const double r2 = __dadd_rn(__dadd_rn(__dmul_rn(dx, dx), __dmul_rn(dy, dy)), __dmul_rn(dz, dz));
+            if (r2 >= cut2 || r2 < 1.0e-24) continue;
+            const double r = sqrt(r2);
+            const double rr = sqrt(r / rad_sum);
+            const double pi_a = 1.0 + shpoly[a] * rr, pi_b = 1.0 + shpoly[b] * rr;
+            const double h_factor = hs * (pi_a * pi_b);
+            const double xb = xa - dx, yb = ya - dy, zb = za - dz;
+            const double S_T = d_cgto_overlap(pa_alpha, pa_coeff, npa, pb_alpha, pb_coeff, npb, xa, ya, za, xb, yb, zb,
+                                              ta, tb);
+            cn_acc += h_factor * S_T;
+            if (same && !WANT_V) continue;
+            const double h_av = avg_eps * h_factor;
+            const double dlog_pi_dr_r = (shpoly[a] / pi_a + shpoly[b] / pi_b) * rr / (2.0 * r2);
+            double dS[3];
+            d_cgto_overlap_grad(pa_alpha, pa_coeff, npa, pb_alpha, pb_coeff, npb, xa, ya, za, xb, yb, zb, ta, tb, dS);
+            const double sval = 2.0 * Pmn * h_av - 2.0 * Wmn - Pmn * vsum;
+            double G[3] = { sval * dS[0], sval * dS[1], sval * dS[2] };
+            if (MP) {
+                double D_mp[3], dD_dA[3][3], dQ_dA[3][6];
+                d_cgto_multipole_grad_transformed(pa_alpha, pa_coeff, npa, pb_alpha, pb_coeff, npb,
+                                                  xa, ya, za, xb, yb, zb, ta, tb, D_mp, dD_dA, dQ_dA);
+                const double dR[3] = { xb - xa, yb - ya, zb - za };
+                const int qa6[6] = { 0, 0, 1, 0, 1, 2 }, qb6[6] = { 0, 1, 1, 2, 2, 2 };
+                for (int l = 0; l < 3; ++l) {
+                    double tt = 0.0;
+                    for (int k = 0; k < 3; ++k) {
+                        tt += dD_dA[l][k] * v_dp[k + jat * 3];
+                        const double dDiat = dD_dA[l][k] + dR[k] * dS[l] - (k == l ? S_T : 0.0);
+                        tt += dDiat * v_dp[k + iat * 3];
+                    }
+                    double dqr[6];
+                    for (int q = 0; q < 6; ++q) {
+                        const int qa = qa6[q], qb = qb6[q];
+                        dqr[q] = -(qb == l ? D_mp[qa] : 0.0) + dR[qb] * dD_dA[l][qa]
+                               - (qa == l ? D_mp[qb] : 0.0) + dR[qa] * dD_dA[l][qb]
+                               + (-(qa == l ? dR[qb] : 0.0) - (qb == l ? dR[qa] : 0.0)) * S_T
+                               + dR[qa] * dR[qb] * dS[l];
+                    }
+                    const double dtr_c = 0.5 * (dqr[0] + dqr[2] + dqr[5]);
+                    for (int q = 0; q < 6; ++q) {
+                        const bool is_diag = (qa6[q] == qb6[q]);
+                        tt += dQ_dA[l][q] * v_qp[q + jat * 6];
+                        const double dQiat = dQ_dA[l][q] + 1.5 * dqr[q] - (is_diag ? dtr_c : 0.0);
+                        tt += dQiat * v_qp[q + iat * 6];
+                    }
+                    G[l] -= Pmn * tt;
+                }
+            }
+            const double shp = 2.0 * Pmn * (h_av * S_T) * dlog_pi_dr_r;
+            const double Gx = wself * (G[0] + shp * dx);
+            const double Gy = wself * (G[1] + shp * dy);
+            const double Gz = wself * (G[2] + shp * dz);
+            if (!same) { gx += Gx; gy += Gy; gz += Gz; }
+            if (WANT_V) {
+                const double Gv[3] = { Gx, Gy, Gz }, d[3] = { dx, dy, dz };
+                for (int p = 0; p < 3; ++p)
+                    for (int q = 0; q < 3; ++q) v[p][q] -= Gv[p] * d[q];
+            }
+        }
+        if (!same) {
+            gfix_add(&grad_fix[3 * iat + 0], gx); gfix_add(&grad_fix[3 * jat + 0], -gx);
+            gfix_add(&grad_fix[3 * iat + 1], gy); gfix_add(&grad_fix[3 * jat + 1], -gy);
+            gfix_add(&grad_fix[3 * iat + 2], gz); gfix_add(&grad_fix[3 * jat + 2], -gz);
+        }
+        if (cn_acc != 0.0) {
+            const double cn_c = wself * Pmn * cn_acc;
+            gfix_add(&dEdcn_fix[iat], (-kcn[a]) * cn_c);
+            gfix_add(&dEdcn_fix[jat], (-kcn[b]) * cn_c);
+        }
+    }
+    if (WANT_V) {
+        __shared__ double red[256];
+        const int tid = threadIdx.y * blockDim.x + threadIdx.x;
+        const int nthr = blockDim.x * blockDim.y;   // 256 (power of two, launch below)
+        for (int p = 0; p < 3; ++p)
+            for (int q = 0; q < 3; ++q) {
+                red[tid] = v[p][q];
+                __syncthreads();
+                for (int st = nthr / 2; st > 0; st >>= 1) {
+                    if (tid < st) red[tid] += red[tid + st];
+                    __syncthreads();
+                }
+                if (tid == 0) gfix_add(&vir_fix[3 * p + q], red[0]);
+                __syncthreads();
+            }
+    }
 }
 
 /* ---------------------------------------------------------------------------------------------- *
@@ -7911,6 +8081,117 @@ bool XtbGpuContext::d4CnFoldPeriodic(int nat, const double* xyz_bohr, const doub
         return false;
     }
     if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
+    int fix_bad = 0;   // a non-finite or out-of-range contribution: fail (the host loop runs), reset the flag
+    if (cudaMemcpyFromSymbol(&fix_bad, g_gfix_bad, sizeof(int)) != cudaSuccess) return false;
+    if (fix_bad) {
+        const int zero = 0;
+        cudaMemcpyToSymbol(g_gfix_bad, &zero, sizeof(int));
+        return false;
+    }
+    return true;
+}
+
+// Claude Generated (Nov 2026, WP-PERIODIC-XTB H1): periodic H0/Pulay gradient (kernel k_grad_h0_pulay_pbc). P is the
+// resident dP of this SCF (residentFinalize), W = C(:, 0:ncol) diag(we) C(:, 0:ncol)^T is built here from the resident
+// dC (the dgemm of residentEnergyWeightedDensity) and never downloaded. grad_out[3 nat], dEdcn_out[nat] and vir9_out
+// are the contributions of section 2b only (the on-site CN term stays on the host).
+bool XtbGpuContext::h0PulayGradientPeriodic(int nat, const double* xyz_bohr, const double* se, const double* v_ao,
+                                            const double* v_dp, const double* v_qp, const double* we, int ncol,
+                                            const double* cell_L, int ntrans, const double* trans, double cut2,
+                                            bool multipole, bool want_virial, double* grad_out, double* dEdcn_out,
+                                            double* vir9_out)
+{
+    Impl& I = *m_impl;
+    const int n = I.basis_nao, nsh = I.basis_nsh;
+    if (!ok() || !I.cublas || nat <= 0 || nat != I.basis_nat || n <= 0 || n != I.resident_n || ncol <= 0 || ncol > n
+        || ntrans <= 0 || !xyz_bohr || !se || !v_ao || !we || !cell_L || !trans || !grad_out || !dEdcn_out
+        || (want_virial && !vir9_out) || (multipole && (!v_dp || !v_qp || !I.basis_is_gfn2)))
+        return false;
+    const size_t nn = static_cast<size_t>(n) * static_cast<size_t>(n);
+    if (nn > static_cast<size_t>(INT_MAX) || I.dC.n < static_cast<int>(nn) || I.dP.n < static_cast<int>(nn))
+        return false;
+    cudaStream_t stream = I.stream;
+    bool okk = true;
+    try {
+        I.dPbcXyz.upload(xyz_bohr, 3 * nat, stream);
+        I.dPbcH0Se.upload(se, nsh, stream);
+        I.dPbcH0Vao.upload(v_ao, n, stream);
+        if (multipole) {
+            I.dPbcH0Vdp.upload(v_dp, 3 * nat, stream);
+            I.dPbcH0Vqp.upload(v_qp, 6 * nat, stream);
+        }
+        I.dPbcH0Trans.upload(trans, 3 * ntrans, stream);
+        // W: with every weight < 0 (occupied eps < 0, the usual case) W = -Cs Cs^T, Cs = C diag(sqrt(-we)), by dsyrk
+        // (n^2 ncol flops instead of 2 n^2 ncol), else the dgemm; the kernel reads the lower triangle only.
+        bool all_neg = true;
+        for (int k = 0; k < ncol; ++k)
+            if (!(we[k] < 0.0)) { all_neg = false; break; }
+        std::vector<double> wabs;
+        if (all_neg) {
+            wabs.resize(ncol);
+            for (int k = 0; k < ncol; ++k) wabs[k] = -we[k];
+        }
+        I.profStart();
+        I.dPbcWocc.upload(all_neg ? wabs.data() : we, ncol, stream);
+        I.dPbcCw.ensure(n * ncol);
+        I.dPbcWmat.ensure(static_cast<int>(nn));
+        const dim3 wb(16, 16);
+        const dim3 wg((n + wb.x - 1) / wb.x, (ncol + wb.y - 1) / wb.y);
+        if (all_neg) k_scale_cols_sqrt<<<wg, wb, 0, stream>>>(I.dPbcCw.ptr, I.dC.ptr, I.dPbcWocc.ptr, n, ncol);
+        else k_scale_cols<<<wg, wb, 0, stream>>>(I.dPbcCw.ptr, I.dC.ptr, I.dPbcWocc.ptr, n, ncol);
+        if (cudaGetLastError() != cudaSuccess) okk = false;
+        const double one = 1.0, zero = 0.0, mone = -1.0;
+        if (okk && all_neg
+            && cublasDsyrk(I.cublas, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_N, n, ncol, &mone, I.dPbcCw.ptr, n, &zero,
+                           I.dPbcWmat.ptr, n) != CUBLAS_STATUS_SUCCESS)
+            okk = false;
+        if (okk && !all_neg
+            && cublasDgemm(I.cublas, CUBLAS_OP_N, CUBLAS_OP_T, n, n, ncol, &one, I.dPbcCw.ptr, n, I.dC.ptr, n,
+                           &zero, I.dPbcWmat.ptr, n) != CUBLAS_STATUS_SUCCESS)
+            okk = false;
+        I.profMark(all_neg ? "grad PBC: W (dsyrk)" : "grad PBC: W (dgemm)");
+        I.dPbcH0Fix.ensure(4 * nat + 9);   // grad 3 nat | dEdcn nat | vir 9
+        if (okk && cudaMemsetAsync(I.dPbcH0Fix.ptr, 0, sizeof(double) * (4 * nat + 9), stream) != cudaSuccess)
+            okk = false;
+        double* gfix = I.dPbcH0Fix.ptr;
+        double* efix = gfix + 3 * nat;
+        double* vfix = efix + nat;
+        const dim3 blk(16, 16);   // 256 threads: the block tree of the virial assumes a power of two
+        const dim3 grd((n + 15) / 16, (n + 15) / 16);
+        const double* vdp = multipole ? I.dPbcH0Vdp.ptr : nullptr;
+        const double* vqp = multipole ? I.dPbcH0Vqp.ptr : nullptr;
+#define H0PBC_ARGS n, I.basis_is_gfn2, I.dAo2sh.ptr, I.dAo2at.ptr, I.dAng.ptr, I.dIaoSh.ptr, I.dShNprim.ptr,          \
+        I.dShPrimOff.ptr, I.dPrimAlpha.ptr, I.dPrimCoeff.ptr, I.dShZeta.ptr, I.dShpoly.ptr, I.dKcn.ptr, I.dPbcH0Se.ptr, \
+        I.dZ.ptr, I.dValence.ptr, I.dPbcXyz.ptr, I.dP.ptr, I.dPbcWmat.ptr, I.dPbcH0Vao.ptr, vdp, vqp, cell_L[0],      \
+        cell_L[1], cell_L[2], ntrans, I.dPbcH0Trans.ptr, cut2, gfix, efix, vfix
+        if (okk) {
+            if (want_virial && multipole) k_grad_h0_pulay_pbc<true, true><<<grd, blk, 0, stream>>>(H0PBC_ARGS);
+            else if (want_virial)         k_grad_h0_pulay_pbc<true, false><<<grd, blk, 0, stream>>>(H0PBC_ARGS);
+            else if (multipole)           k_grad_h0_pulay_pbc<false, true><<<grd, blk, 0, stream>>>(H0PBC_ARGS);
+            else                          k_grad_h0_pulay_pbc<false, false><<<grd, blk, 0, stream>>>(H0PBC_ARGS);
+            if (cudaGetLastError() != cudaSuccess) okk = false;
+        }
+        I.profMark("grad PBC: H0/Pulay kernel");
+#undef H0PBC_ARGS
+        const int nfix = 4 * nat + 9;
+        if (okk) {
+            k_grad_fix_to_double<<<(nfix + 255) / 256, 256, 0, stream>>>(nfix, gfix);
+            if (cudaGetLastError() != cudaSuccess) okk = false;
+        }
+        if (okk && cudaMemcpyAsync(grad_out, gfix, sizeof(double) * 3 * nat, cudaMemcpyDeviceToHost, stream) != cudaSuccess)
+            okk = false;
+        if (okk && cudaMemcpyAsync(dEdcn_out, efix, sizeof(double) * nat, cudaMemcpyDeviceToHost, stream) != cudaSuccess)
+            okk = false;
+        if (okk && want_virial
+            && cudaMemcpyAsync(vir9_out, vfix, sizeof(double) * 9, cudaMemcpyDeviceToHost, stream) != cudaSuccess)
+            okk = false;
+    } catch (...) {
+        okk = false;
+    }
+    okk = (cudaStreamSynchronize(stream) == cudaSuccess) && okk;
+    I.dPbcCw.free();
+    I.dPbcWmat.free();
+    if (!okk) return false;
     int fix_bad = 0;   // a non-finite or out-of-range contribution: fail (the host loop runs), reset the flag
     if (cudaMemcpyFromSymbol(&fix_bad, g_gfix_bad, sizeof(int)) != cudaSuccess) return false;
     if (fix_bad) {

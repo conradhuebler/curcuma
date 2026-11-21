@@ -480,6 +480,11 @@ public:
                            double kexp, double kexp_light, double rexp, const double* cell_L, int ntrans,
                            const double* trans, double cut2, bool gradient, bool want_virial, double* energy_out,
                            double* grad_out, double* vir9_out);
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB H1): see GpuScfBackend::h0PulayGradientPeriodic.
+    bool h0PulayGradientPeriodic(int nat, const double* xyz_bohr, const double* se, const double* v_ao,
+                                 const double* v_dp, const double* v_qp, const double* we, int ncol,
+                                 const double* cell_L, int ntrans, const double* trans, double cut2, bool multipole,
+                                 bool want_virial, double* grad_out, double* dEdcn_out, double* vir9_out);
     /// Claude Generated (Nov 2026, WP-PERIODIC-XTB C1): see GpuScfBackend::d4CnFoldPeriodic.
     bool d4CnFoldPeriodic(int nat, const double* xyz_bohr, const double* rcov, const double* en, const double* dEdcn,
                           double kn, double k4, double k5, double k6, const double* cell_L, int ntrans,

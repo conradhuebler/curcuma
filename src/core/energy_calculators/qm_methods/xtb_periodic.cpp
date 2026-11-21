@@ -1506,6 +1506,19 @@ void XTB::calculateGradientPeriodic()
     // energy-weighted density W (as calculateGradient)
     const int nocc_orbs = static_cast<int>(std::round(m_wfn.nocc / 2.0));
     Matrix W;
+    // H1 (Nov 2026): with the resident periodic wavefunction the H0/Pulay section runs on the CUDA device and builds W
+    // there (never downloaded); W is then formed on the host only if that call fails (buildW below).
+    int h0_ncol = 0;
+    Eigen::VectorXd h0_we;
+    const bool h0_device_try = m_gpu_scf && m_pbc_device_scf && m_pbc_dev_wfn && !pbcGpuStageOnHost("h0grad")
+        && !(m_wfn.W_valid && m_wfn.W.rows() == nao && m_wfn.W.cols() == nao)
+        && m_wfn.focc.size() == nao && m_wfn.C.cols() == nao;
+    if (h0_device_try) {
+        for (int i = 0; i < nao; ++i)
+            if (m_wfn.focc(i) > 1.0e-12) h0_ncol = i + 1;
+        h0_we = (m_wfn.focc.head(h0_ncol).array() * m_wfn.eps.head(h0_ncol).array()).matrix();
+    }
+    auto buildW = [&]() {
     if (m_wfn.W_valid && m_wfn.W.rows() == nao && m_wfn.W.cols() == nao) {
         W = m_wfn.W;
     } else if (m_wfn.focc.size() == nao && m_wfn.C.cols() == nao) {
@@ -1532,6 +1545,8 @@ void XTB::calculateGradientPeriodic()
         const Eigen::VectorXd w2 = 2.0 * m_wfn.eps.head(nocc_orbs);
         W = (Cocc * w2.asDiagonal()) * Cocc.transpose();
     }
+    };
+    if (!(h0_device_try && h0_ncol > 0)) buildW();
     Vector se;
     getSelfEnergies(m_coordination_numbers, se);
     std::vector<bool> valence(nsh, false);
@@ -1625,6 +1640,43 @@ void XTB::calculateGradientPeriodic()
     {
         const PBCUtils::LatticeImageList images = PBCUtils::makeLatticeImageList(m_cell_bohr, pbcIntegralCutoffBohr());
         const bool do_mp = (m_method == MethodType::GFN2 && m_mp_initialized && !m_mp_grad_off);
+        // H1 (Nov 2026): the pair loop on the CUDA device (kernel k_grad_h0_pulay_pbc); host loop on any failure or
+        // with CURCUMA_PBC_GPU_HOST=h0grad.
+        bool h0_device = false;
+        if (h0_device_try && h0_ncol > 0) {
+            std::vector<double> tr(3 * images.trans.size()), v_ao(nao), v_dp, v_qp;
+            for (size_t t = 0; t < images.trans.size(); ++t)
+                for (int k = 0; k < 3; ++k) tr[3 * t + k] = images.trans[t][k];
+            for (int ish = 0; ish < nsh; ++ish)
+                for (int ia = 0; ia < m_basis.nao_sh[ish]; ++ia)
+                    v_ao[m_basis.iao_sh[ish] + ia] = m_pot.v_sh(ish) + m_pot.v_at(m_basis.sh2at[ish]);
+            if (do_mp) {
+                v_dp.resize(3 * nat); v_qp.resize(6 * nat);
+                for (int i = 0; i < nat; ++i) {
+                    for (int k = 0; k < 3; ++k) v_dp[3 * i + k] = m_pot.v_dp(k, i);
+                    for (int k = 0; k < 6; ++k) v_qp[6 * i + k] = m_pot.v_qp(k, i);
+                }
+            }
+            std::vector<double> g(3 * nat, 0.0), de(nat, 0.0), v9(9, 0.0);
+            h0_device = m_gpu_scf->h0PulayGradientPeriodic(nat, xyz.data(), se.data(), v_ao.data(),
+                do_mp ? v_dp.data() : nullptr, do_mp ? v_qp.data() : nullptr, h0_we.data(), h0_ncol, m_cell_bohr.L,
+                static_cast<int>(images.trans.size()), tr.data(), images.cutoff2, do_mp, want_vir, g.data(), de.data(),
+                v9.data());
+            if (h0_device) {
+                for (int i = 0; i < nat; ++i) {
+                    for (int k = 0; k < 3; ++k) m_gradient(i, k) += g[3 * i + k];
+                    dEdcn(i) += de[i];
+                }
+                if (want_vir)
+                    for (int a = 0; a < 3; ++a)
+                        for (int b = 0; b < 3; ++b) Xi(a, b) += v9[3 * a + b];
+            } else {
+                buildW();
+            }
+            if (CurcumaLogger::get_verbosity() >= 3)
+                CurcumaLogger::info_fmt("  periodic H0/Pulay gradient on the {}", h0_device ? "device" : "host (device call failed)");
+        }
+        if (!h0_device) {
         const int grad_threads = effectiveIntraThreads(nat);
         std::vector<Matrix> grad_parts(grad_threads, Matrix::Zero(nat, 3));
         std::vector<Vector> dEdcn_parts(grad_threads, Vector::Zero(nat));
@@ -1775,6 +1827,7 @@ void XTB::calculateGradientPeriodic()
             m_gradient += grad_parts[t];
             dEdcn += dEdcn_parts[t];
             Xi += vir_parts[t];
+        }
         }
     }
 
