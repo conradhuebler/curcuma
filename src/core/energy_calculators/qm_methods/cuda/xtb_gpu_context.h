@@ -271,6 +271,8 @@ public:
     /// fp64: also in FP64 steps (the whole SCF where mixed precision is off, the final steps otherwise).
     void setPseudoDiagonalisation(bool on, double max_dq, int max_steps, bool fp64 = false);
     /// Pseudo-diagonalisation steps taken / tried and rejected since the last beginResidentLoop.
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB G1c): see GpuScfBackend::setHostLoopPseudo.
+    void setHostLoopPseudo(bool on, int n, double n_elec, int nocc_pairs, double Tele, double last_dq);
     void pseudoDiagonalisationCounts(int& taken, int& rejected) const;
 
     /// "" when not configured, else the devices used and the number of split steps.

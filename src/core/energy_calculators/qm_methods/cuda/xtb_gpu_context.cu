@@ -592,6 +592,8 @@ struct XtbGpuContext::Impl {
     int    pseudo_consecutive = 0;   // pseudo steps since the last full solve
     int    pseudo_taken = 0, pseudo_rejected = 0;
     double last_dq = 1e300;          // max|dq| of the previous resident step
+    bool   host_pseudo = false;      // Nov 2026 (G1c): pseudo steps also in the host-driven loop (periodic cell)
+    int    host_pseudo_n = 0;
     bool   in_resident_step = false; // pseudo steps only inside residentScfStep
     bool   cprev_valid = false;      // dCprev32 holds the previous step's eigenvectors (AO basis)
     CudaBuffer<float>  dCprev32, dPsT, dPsGov, dPsWork;
@@ -4982,6 +4984,23 @@ void XtbGpuContext::setPseudoDiagonalisation(bool on, double max_dq, int max_ste
     if (!on) m_impl->releasePseudoDiag();
 }
 
+// Claude Generated (Nov 2026, WP-PERIODIC-XTB G1c): the gates of the resident pseudo-diagonalisation for one step
+// of the host-driven loop (closed shell; the loop sets on = false for open shells and after the SCF). Sets the
+// loop_* occupation fields the gap gate and pseudoDiagStep read; the resident loop begin overwrites them.
+void XtbGpuContext::setHostLoopPseudo(bool on, int n, double n_elec, int nocc_pairs, double Tele, double last_dq)
+{
+    if (!m_impl) return;
+    Impl& I = *m_impl;
+    I.host_pseudo = on;
+    if (!on) return;
+    I.host_pseudo_n = n;
+    I.loop_nelec = n_elec;
+    I.loop_nocc_pairs = nocc_pairs;
+    I.loop_Tele = Tele;
+    I.loop_open = false;
+    I.last_dq = last_dq;
+}
+
 void XtbGpuContext::pseudoDiagonalisationCounts(int& taken, int& rejected) const
 {
     taken = m_impl ? m_impl->pseudo_taken : 0;
@@ -4994,8 +5013,9 @@ bool XtbGpuContext::eigensolveResidentFock(double* eps_out, bool fp32, int n_eig
     const int n = I.resident_n;
     const bool partial = (n_eig > 0 && n_eig < n);
     const bool closed_shell = !I.loop_open && std::fabs(I.loop_nelec - 2.0 * I.loop_nocc_pairs) < 1e-9;
-    const bool pseudo_ok = I.pseudo_enabled && I.in_resident_step && !partial && closed_shell
-        && I.loop_nao == n && I.last_dq < I.pseudo_max_dq;
+    const bool step_ok = (I.in_resident_step && I.loop_nao == n) || (I.host_pseudo && I.host_pseudo_n == n);   // G1c
+    const bool pseudo_ok = I.pseudo_enabled && step_ok && !partial && closed_shell
+        && I.last_dq < I.pseudo_max_dq;
     static const bool pstrace = std::getenv("CURCUMA_PSEUDO_TRACE") != nullptr;
     if (pstrace && I.in_resident_step)
         fprintf(stderr, "PSTRACE call: fp32 %d pseudo_ok %d cprev %d consecutive %d last_dq %.17g\n", fp32 ? 1 : 0,

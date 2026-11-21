@@ -1694,6 +1694,7 @@ double XTB::Calculation(bool gradient)
 
     double resident_band = 0.0;   // Tr(P H0) of the last device-resident step
     double pbc_last_gpu_band = 0.0;   // G1b: Tr(P H0) of the last host-driven device step (host H0 deferred)
+    if (m_gpu_scf) m_gpu_scf->setHostLoopPseudo(false, 0, 0.0, 0, 0.0, 0.0);   // G1c: nothing left from a failed SCF
     double resident_ecoul = 0.0, resident_ethird = 0.0, resident_emp = 0.0;  // its SCC energies
     pre_mark("preconditioner, SCF state");
     const auto t_scf_start = clock::now();
@@ -1862,6 +1863,13 @@ double XTB::Calculation(bool gradient)
             // (max|dq| above the threshold; iter 0 starts FP32 via dq_prev=1e30),
             // reverting to FP64 near convergence so the converged energy is FP64.
             m_eig_fp32 = fp32_wanted(dq_prev);
+            // G1c (Claude Generated, Nov 2026): with a cell the device pseudo-diagonalisation (-scf_pseudo_diag, the
+            // gates of the resident loop) also serves the FP32 steps of this host-driven loop. Convergence is only
+            // reached in FP64 steps (scf_threshold < scf_fp32_threshold), which are full solves. Closed shell only.
+            // CURCUMA_PBC_GPU_HOST=pseudo keeps every step a full solve.
+            if (m_pbc && !openShell())
+                m_gpu_scf->setHostLoopPseudo(!pbcGpuStageOnHost("pseudo"), m_basis.nao, m_wfn.nocc,
+                                             static_cast<int>(std::floor(m_wfn.nocc / 2.0)), m_electronic_temp, dq_prev);
             bool solve_ok;
             Eigen::VectorXd v_ao;  // host-expanded potential (non-device-potential path)
             // GFN2 multipole solve. With -xtb.rocm_device_multipole the device already holds
@@ -2461,6 +2469,7 @@ double XTB::Calculation(bool gradient)
         && m_gpu_scf->supportsGradient();
     m_wfn_on_device = false;
     m_pbc_dev_wfn = false;   // G5b
+    if (m_pbc && m_gpu_scf) m_gpu_scf->setHostLoopPseudo(false, 0, 0.0, 0, 0.0, 0.0);   // G1c: SCF done
     if (use_gpu_resident && m_gpu_scf) {
         // The converged P/C stay on the device only for big systems (as before for GFN2: dense multipole integrals
         // above 2 GB, nao > ~5270); the small ones keep the public accessors (getDensity, MolecularOrbitals)

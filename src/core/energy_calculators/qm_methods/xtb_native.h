@@ -428,6 +428,11 @@ struct GpuScfBackend {
     /// image sums with the host self-energies se[nsh], for GFN2 with multipole the AO dipole/quadrupole image sums,
     /// L = chol(S) and the resident buffers, all on the device. cell_L[3], trans[3 ntrans] (T = 0 first, the
     /// LatticeImageList of the integral cutoff) and cut2 in Bohr. Default false -> host build + upload.
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB G1c): allow the device pseudo-diagonalisation (-scf_pseudo_diag) in
+    /// the next solve of the host-driven loop: closed shell, n_elec electrons in nocc_pairs orbitals, Tele (K),
+    /// last_dq = max|dq| of the previous step. on = false switches it off again. Default: no-op.
+    virtual void setHostLoopPseudo(bool on, int n, double n_elec, int nocc_pairs, double Tele, double last_dq)
+    { (void)on; (void)n; (void)n_elec; (void)nocc_pairs; (void)Tele; (void)last_dq; }
     virtual bool beginComputedPeriodic(const std::vector<double>& xyz_bohr, const double* se, const double* cell_L,
                                        int ntrans, const double* trans, double cut2, bool multipole)
     { (void)xyz_bohr; (void)se; (void)cell_L; (void)ntrans; (void)trans; (void)cut2; (void)multipole; return false; }

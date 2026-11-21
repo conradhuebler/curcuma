@@ -248,6 +248,11 @@ public:
         return m_ctx && m_n > 0 && m_ctx->downloadH0(H0_colmajor);
     }
 
+    // Claude Generated (Nov 2026, WP-PERIODIC-XTB G1c): pseudo-diagonalisation in the host-driven loop.
+    void setHostLoopPseudo(bool on, int n, double n_elec, int nocc_pairs, double Tele, double last_dq) override
+    {
+        if (m_ctx) m_ctx->setHostLoopPseudo(on, n, n_elec, nocc_pairs, Tele, last_dq);
+    }
     // Claude Generated (Nov 2026, WP-PERIODIC-XTB G1b): periodic integrals on the device, see GpuScfBackend.
     bool beginComputedPeriodic(const std::vector<double>& xyz_bohr, const double* se, const double* cell_L,
                                int ntrans, const double* trans, double cut2, bool multipole) override

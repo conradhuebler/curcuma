@@ -749,6 +749,30 @@ Remaining at 432 H2O (MD step, ms): device eigensolve 740 (8 it), multipole grad
 (102 without the virial), ATM on the device 287, H0/Pulay gradient 122 (host), D4 CN fold 101 (host), interaction
 matrices 92 (device, mostly the 18 x 13 MB download), Ewald gradient + virial 68, CN 55 (host), Cholesky 52, KO 33.
 
+### G1c device pseudo-diagonalisation in the host-driven periodic loop (2026-11-21, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+- The periodic CUDA SCF is the host-driven device loop; the device pseudo-diagonalisation (`-scf_pseudo_diag`, CUDA
+  default on: one first-order occupied-virtual rotation of the previous FP32 eigenvectors plus Cholesky
+  re-orthonormalisation instead of the full FP32 solve) was gated to the fully resident loop. New
+  `GpuScfBackend::setHostLoopPseudo` hands the gates (closed shell, n_elec, nocc, T_el, max|dq| of the previous step)
+  to the device for each step of that loop with a cell; the device gates are unchanged (gap > 30 kT, step size,
+  `scf_pseudo_diag_max_dq`, `max_steps`). Convergence is accepted only on FP64 steps (`!m_eig_fp32`), which are
+  full solves; the host Fermi filling does not need sorted virtual eigenvalues. Open shell: off.
+  `CURCUMA_PBC_GPU_HOST=pseudo` keeps every step a full solve. Cell-free paths unchanged (the flag is set only with
+  a cell and reset before and after every SCF). Plugin ABI 14 -> 15.
+- 432 H2O `-sp` (`CURCUMA_GPU_PROFILE`): 7 of 9 FP32 steps were pseudo steps; solve eigen 977 -> 713 ms, SCF 11 -> 10
+  iterations, TOTAL 2359 -> 2017 ms. MD step (432, verbosity 3): solve eigen 740 -> 568 ms, TOTAL 2258 -> 2079 ms.
+- Gates: `pbc_xtb_gpu_parity` 8/8 (gfn2 216 H2O |dE| 4.1e-12 Eh, max |dG| 1.0e-10 Eh/A, max |dXi| 1.3e-9 Eh; gfn1 box
+  3.9e-12 / 1.3e-10 / 4.9e-10), second CUDA run bitwise 8/8; device vs `pseudo` (full solves) in the same binary
+  (`-scf_threshold 1e-9`): 216 H2O dE 0 (17 iterations vs 18), max dG 1.1e-10 Eh/A; 432 H2O dE 4.5e-13 Eh (17 vs 19),
+  max dG 7.9e-11 Eh/A; second device run md5-identical; GPU FD (dimer 8 A): gfn1 8.1e-9, gfn2 8.9e-9 Eh/A; without
+  a cell CUDA 36/36 md5 to the base; MD 216 H2O 20 steps with `-scf_threshold 1e-9`: E_pot -1096.551628, T
+  462.483544 K, P 14765.49 bar (as G1b and the host path). With the default threshold the 20-step MD differs from
+  the full-solve run in the last printed digits (E_pot -1096.551629 / -1096.551628, T 462.483435 / 462.483511 K,
+  P 14765.55 / 14765.50 bar), the known SCF-convergence level (n = 1 each).
+- MD wall per step (`md.sh`, one run each, load 1.4): 216 H2O 0.70 -> 0.65 s, 432 H2O 2.41 -> 2.20 s (before = same
+  binary with `pseudo`).
+
 ## Regression run (2026-11-14, `release/`, `ctest -R 'gfn|xtb|sqm|gfnff|pbc|ewald|simplemd|restart|md_|gpu|plugin|molecule|xyz|parser|curcumaopt|structinv' -j1`)
 
 369 tests selected, 2 failed before the fix below: `pbc_md_nonperiodic_cell` (its check (a) assumed gfn2 + cell to be
