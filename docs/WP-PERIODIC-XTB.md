@@ -838,6 +838,26 @@ not exact eigenvectors. Hence E1 below (density) instead of a new eigensolver.
   0.66 -> 0.58 s, 432 H2O 2.20 -> 1.74 s; 432 MD step at verbosity 3: TOTAL 2096 -> 1629 ms (solve eigen 568 -> 444,
   ATM 285 -> 189, multipole gradient 272 -> 41).
 
+### C1 periodic D4 CN chain rule on the device (2026-11-21, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+- `GpuScfBackend::d4CnFoldPeriodic` (CUDA `k_d4cnfold_pbc<WANT_V>`): `addD4CovalentCNGradientPeriodic` (dE/dCN of the
+  D4 EN-weighted covalent CN over the images of the 30 Bohr D4 CN cutoff) with the layout of the G5c CN chain kernel
+  (one thread per pair, image sum in registers, gradient by gfix_add, virial by the fixed-order block tree, self
+  images only in the virial), the constants from `d4CovalentCNTables`. `CURCUMA_PBC_GPU_HOST=cnfold` keeps the
+  host loop. Plugin ABI 16 -> 17.
+- Time (432 H2O): CN fold 95 -> 3.3 ms; 216 H2O 35 -> 1.1 ms.
+- Gates: device vs `cnfold` (`-scf_threshold 1e-9`): 216 H2O dE 0, max dG 4.9e-16 Eh/A; 432 H2O dE 0, max dG
+  4.0e-16 Eh/A; second device run md5-identical; `pbc_xtb_gpu_parity` 8/8 (values as E1/A1/M1/M2, the D4 CN fold
+  enters below 1e-15), second CUDA run bitwise 8/8, `pbc_|ewald` 29/29 (`release_cuda/`), GPU FD gfn1 8.1e-9, gfn2
+  8.9e-9 Eh/A, NVE 216 H2O 100 steps (`-scf_threshold 1e-9`) against `cnfold`: max |dE_pot| 1.9e-11 Eh, MD 216 H2O 20
+  steps tight: E_pot -1096.551628, T 462.483544 K, P 14765.49 bar; without a cell CPU 36/36 and CUDA 36/36 md5 to the
+  rebuilt base.
+- MD wall per step (`md.sh`, load 1.8): 216 H2O 0.58 -> 0.54 s, 432 H2O 1.74 -> 1.65 s.
+- Not ported, with the reason: the H0/Pulay gradient (123 ms at 432 H2O, host) needs image-shifted CGTO overlap and
+  multipole-integral derivative kernels plus the periodic self-energy CN chain; the largest remaining port, not
+  started in this continuation (effort against the remaining budget). Also open: Ewald gradient + virial (67 ms
+  with virial, host), KO remainder (33 ms, host), CN (53 ms, host), the ATM triple algebra (FP64-bound, 150 ms).
+
 ## Regression run (2026-11-14, `release/`, `ctest -R 'gfn|xtb|sqm|gfnff|pbc|ewald|simplemd|restart|md_|gpu|plugin|molecule|xyz|parser|curcumaopt|structinv' -j1`)
 
 369 tests selected, 2 failed before the fix below: `pbc_md_nonperiodic_cell` (its check (a) assumed gfn2 + cell to be
@@ -897,7 +917,7 @@ change. Measurements and scripts: project folder GFN-FF-Wasser, subfolder 06_gfn
   structure-factor factorisation of the multipole k sums of the energy matrices (G3; the gradient and virial use it
   since M1/M2), d-shell elements with a cell (refused), implicit solvation
   with a cell (refused), `-large_system_mode` with a cell (its driver ignores the cell: documented as non-periodic, not
-  refused), GPU with a cell: CUDA with the device stages G1b/G2/G3/G4a/G4b/G5a-d and E1/A1/M1/M2 (the rest on the
+  refused), GPU with a cell: CUDA with the device stages G1b/G2/G3/G4a/G4b/G5a-d and E1/A1/M1/M2/C1 (the rest on the
   host, see the continuation 3 section), ROCm/Vulkan CPU fallback (not planned).
 - Not tested: open shell, charged cells (background term differs from tblite), halogen bond with a cell (no Br/I
   structure), thread-count independence of the periodic energy and gradient, MD energy conservation with a cell,

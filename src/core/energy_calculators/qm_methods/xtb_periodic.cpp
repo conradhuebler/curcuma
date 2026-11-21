@@ -470,15 +470,44 @@ double XTB::calcD4DispersionPeriodic(bool need_gradient) const
     const auto td2 = d4clk::now();
 
     // CN chain rule with the D4 CN's own derivative over images (as the cell-free path, d4_ncoord)
+    bool cnfold_device = false;
     if (m_disp_dEdcn.size() == nat) {
-        curcuma::dispersion::addD4CovalentCNGradientPeriodic(m_atoms, geom_bohr, m_disp_dEdcn, m_disp_gradient, cn_images, vir);
+        // C1 (Nov 2026): on the CUDA device when the periodic device SCF is on; the host loop runs on any failure or
+        // with CURCUMA_PBC_GPU_HOST=cnfold.
+        if (m_gpu_scf && m_pbc_device_scf && !pbcGpuStageOnHost("cnfold")) {
+            const auto tab = curcuma::dispersion::d4CovalentCNTables();
+            std::vector<double> xyz(3 * nat), rc(nat), enz(nat), dcn(nat), tr(3 * cn_images.trans.size()),
+                g(3 * nat, 0.0), v9(9, 0.0);
+            for (int i = 0; i < nat; ++i) {
+                for (int k = 0; k < 3; ++k) xyz[3 * i + k] = geom_bohr(i, k);
+                const int z = m_atoms[i];
+                const bool zok = (z >= 1 && z <= 118);
+                rc[i] = zok ? tab.rad[z] : 0.0;
+                enz[i] = zok ? tab.en[z] : 0.0;
+                dcn[i] = m_disp_dEdcn(i);
+            }
+            for (size_t t = 0; t < cn_images.trans.size(); ++t)
+                for (int k = 0; k < 3; ++k) tr[3 * t + k] = cn_images.trans[t][k];
+            cnfold_device = m_gpu_scf->d4CnFoldPeriodic(nat, xyz.data(), rc.data(), enz.data(), dcn.data(), tab.kn,
+                tab.k4, tab.k5, tab.k6, m_cell_bohr.L, static_cast<int>(cn_images.trans.size()), tr.data(),
+                cn_images.cutoff2, vir != nullptr, g.data(), v9.data());
+            if (cnfold_device) {
+                for (int i = 0; i < nat; ++i)
+                    for (int k = 0; k < 3; ++k) m_disp_gradient(i, k) += g[3 * i + k];
+                if (vir)
+                    for (int a = 0; a < 3; ++a)
+                        for (int b = 0; b < 3; ++b) (*vir)(a, b) += v9[3 * a + b];
+            }
+        }
+        if (!cnfold_device)
+            curcuma::dispersion::addD4CovalentCNGradientPeriodic(m_atoms, geom_bohr, m_disp_dEdcn, m_disp_gradient, cn_images, vir);
         m_disp_dEdcn = Vector();
     }
     if (CurcumaLogger::get_verbosity() >= 3) {
         auto ms = [](d4clk::time_point a, d4clk::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
-        CurcumaLogger::info_fmt("  periodic D4: pairs {:8.2f} ms, ATM {:8.2f} ms ({}, host C6 {:.1f} ms), CN fold {:8.2f} ms ({} threads)",
+        CurcumaLogger::info_fmt("  periodic D4: pairs {:8.2f} ms, ATM {:8.2f} ms ({}, host C6 {:.1f} ms), CN fold {:8.2f} ms ({})",
                                 ms(td0, td1), ms(td1, td2), atm_device ? "device" : "host", t_atm_c6, ms(td2, d4clk::now()),
-                                effectiveIntraThreads(nat));
+                                cnfold_device ? "device" : "host");
     }
     // q-response: only the variational route (dE_D4/dq in the Fock potential, charge Pulay) exists with a
     // cell; setPeriodicCell() refuses the other d4_charge_source values.

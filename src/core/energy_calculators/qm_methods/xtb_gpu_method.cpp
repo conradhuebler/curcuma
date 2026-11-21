@@ -475,6 +475,16 @@ public:
         return m_ctx->repulsionPeriodic(nat, xyz_bohr, alpha, zeff, light, kexp, kexp_light, rexp, cell_L, ntrans,
                                         trans, cut2, gradient, want_virial, energy_out, grad_out, vir9_out);
     }
+    // Claude Generated (Nov 2026, WP-PERIODIC-XTB C1): periodic D4 CN chain rule, see GpuScfBackend.
+    bool d4CnFoldPeriodic(int nat, const double* xyz_bohr, const double* rcov, const double* en, const double* dEdcn,
+                          double kn, double k4, double k5, double k6, const double* cell_L, int ntrans,
+                          const double* trans, double cut2, bool want_virial, double* grad_out,
+                          double* vir9_out) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->d4CnFoldPeriodic(nat, xyz_bohr, rcov, en, dEdcn, kn, k4, k5, k6, cell_L, ntrans, trans, cut2,
+                                       want_virial, grad_out, vir9_out);
+    }
     // Claude Generated (Nov 2026, WP-PERIODIC-XTB G5c): periodic CN chain rule, see GpuScfBackend.
     bool cnChainGradientPeriodic(int nat, const double* xyz_bohr, const double* rcov, const double* dEdcn,
                                  const double* cell_L, int ntrans, const double* trans, double cut2, bool gfn1,

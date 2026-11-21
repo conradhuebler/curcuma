@@ -763,6 +763,17 @@ struct GpuScfBackend {
     { (void)nat; (void)xyz_bohr; (void)alpha; (void)zeff; (void)light; (void)kexp; (void)kexp_light; (void)rexp;
       (void)cell_L; (void)ntrans; (void)trans; (void)cut2; (void)gradient; (void)want_virial; (void)energy_out;
       (void)grad_out; (void)vir9_out; return false; }
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB C1): dE/dCN chain rule of the periodic D4 covalent CN
+    /// (addD4CovalentCNGradientPeriodic) on the device: rcov[i] = rad[Z_i] (0 skips the atom), en[i] = EN[Z_i], the
+    /// d4CovalentCNTables constants, images of the D4 CN cutoff. Adds nothing itself: grad_out[3 nat] and vir9_out
+    /// are the contributions. Default false -> host loop.
+    virtual bool d4CnFoldPeriodic(int nat, const double* xyz_bohr, const double* rcov, const double* en,
+                                  const double* dEdcn, double kn, double k4, double k5, double k6, const double* cell_L,
+                                  int ntrans, const double* trans, double cut2, bool want_virial, double* grad_out,
+                                  double* vir9_out)
+    { (void)nat; (void)xyz_bohr; (void)rcov; (void)en; (void)dEdcn; (void)kn; (void)k4; (void)k5; (void)k6;
+      (void)cell_L; (void)ntrans; (void)trans; (void)cut2; (void)want_virial; (void)grad_out; (void)vir9_out;
+      return false; }
     virtual bool cnChainGradientPeriodic(int nat, const double* xyz_bohr, const double* rcov, const double* dEdcn,
                                          const double* cell_L, int ntrans, const double* trans, double cut2,
                                          bool gfn1, bool want_virial, double* grad_out, double* vir9_out)
