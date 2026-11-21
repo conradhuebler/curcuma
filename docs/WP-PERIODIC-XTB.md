@@ -1123,6 +1123,11 @@ and the per-step convergence decision. Not covered by the resident loop (host-dr
 charged cells, `-scf_mode` other than Broyden, `-d4_charge_source cpscf`. The FP64 acceptance solve is the
 unchanged full dsyevd (263 ms of the 479 ms SCF at 432 H2O).
 
+Regression after R2-R5 (2026-11-21, test selection of the regression run below, `-j1`): `release/` 379 of 380,
+`release_cuda/` 650 of 651 passed; the only failure in both is the pre-existing `xtb_cpscf`. Not tested: the
+fallback paths of R2-R5 (failed device potential, failed resident step, failed device matrices) were not triggered
+by any run (no fault injection); open-shell or charged cells (refused, host-driven loop).
+
 ## Regression run (2026-11-14, `release/`, `ctest -R 'gfn|xtb|sqm|gfnff|pbc|ewald|simplemd|restart|md_|gpu|plugin|molecule|xyz|parser|curcumaopt|structinv' -j1`)
 
 369 tests selected, 2 failed before the fix below: `pbc_md_nonperiodic_cell` (its check (a) assumed gfn2 + cell to be
