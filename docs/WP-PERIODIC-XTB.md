@@ -1088,6 +1088,41 @@ dsyevd 174, back-transform 24 ms).
 - Time (432 H2O `-sp`, verbosity 3): multipole setup 102 -> 65 ms, gradient potential rebuild 17 -> 0.5 ms. MD wall
   per step: 216 H2O 0.431 -> 0.418 s, 432 H2O 1.266 -> 1.219 s.
 
+### R5 device-resident periodic GFN1 loop (2026-11-21, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+- The cell-free GFN1 resident loop (`beginResidentLoopGfn1`: v_sh = gamma q_sh, atom third order on site, no
+  charge-dependent dispersion) runs with a cell on the periodic gamma that `ewaldGammaPeriodic` kept resident
+  (`GpuScfBackend::periodicGammaResident`), closed shell and neutral only, with the complement density; token
+  `resloop` keeps the host-driven loop. Plugin ABI 22 -> 23.
+- Gates (old = `resloop`): parity 10/10 (gfn1 216 box |dE| 3.6e-12 Eh, max |dG| 6.2e-11 Eh/A, max |dXi| 1.0e-9 Eh;
+  caffeine 1.4e-14 / 3.7e-10 / 2.1e-9), bitwise 10/10, `pbc_|ewald` 29/29; `-sp -scf_threshold 1e-9` gfn1: 216 H2O 15
+  / 15 iterations, E identical, max dG 1.1e-14 Eh/A; 432 H2O 15 / 15, dE 4.5e-13 Eh, max dG 1.7e-14 Eh/A; run to run
+  md5-identical; GPU FD gfn1 8.1e-9, gfn2 8.9e-9 Eh/A; NVE 216 H2O gfn1 100 steps tight: max |dE_pot| 3.9e-10 Eh
+  (gfn2 R4 vs R2: 1.7e-10 Eh); MD 216 H2O 20 steps tight: gfn1 E_pot -1247.843278, T 385.040039 K, P 8768.74 bar
+  (new = old), gfn2 unchanged; no-cell CPU 36/36 and CUDA 36/36 md5 to the base.
+- Time: the host part of the GFN1 periodic iteration was small (no multipoles, no D4): 432 H2O MD step, middle
+  iteration 45.3 -> 44.1 ms, SCF 975 -> 965 ms (7 iterations); MD wall per step (`md1.sh`) 216 H2O 0.517 -> 0.519 s,
+  432 H2O 1.678 -> 1.667 s (equal within the scatter, n = 1).
+
+### R-series result and what stays on the host (2026-11-21, Claude Generated)
+
+| stage | gfn2 216 H2O (s per MD step) | gfn2 432 H2O (s per MD step) | 432 middle SCF iteration (ms) |
+|---|---|---|---|
+| start (ade60896, host-driven loop) | 0.437 | 1.345 | 32.6 |
+| R2 device potential, host-driven loop | 0.437 | 1.308 | - |
+| R3 resident loop | 0.433 | 1.265 | 22.5 |
+| R4 no matrix download, device gradient potentials | 0.418 | 1.219 | 22.5 |
+
+Per SCF iteration the host now receives dq, four energy scalars and ncol (the occupation count that sizes the
+density). Per geometry it still downloads the periodic gamma (nsh^2, 24 MB at 432 H2O; read by the host potential
+rebuild of the GFN1 gradient and the host fallbacks), the converged charges, moments, eigenvalues, P and C (the
+`finalize` download, 23 ms; P/C feed the host-side public accessors and the gradient fallbacks) and the converged
+potentials. Still on the host per geometry: the D4 reference set (`GenerateParameters`, periodic covalent CN, about
+110 ms of pre-SCF time at 432 H2O, the largest host item of the SCF block), the Fermi occupations after the loop
+and the per-step convergence decision. Not covered by the resident loop (host-driven loop as before): open shell,
+charged cells, `-scf_mode` other than Broyden, `-d4_charge_source cpscf`. The FP64 acceptance solve is the
+unchanged full dsyevd (263 ms of the 479 ms SCF at 432 H2O).
+
 ## Regression run (2026-11-14, `release/`, `ctest -R 'gfn|xtb|sqm|gfnff|pbc|ewald|simplemd|restart|md_|gpu|plugin|molecule|xyz|parser|curcumaopt|structinv' -j1`)
 
 369 tests selected, 2 failed before the fix below: `pbc_md_nonperiodic_cell` (its check (a) assumed gfn2 + cell to be
@@ -1148,7 +1183,7 @@ change. Measurements and scripts: project folder GFN-FF-Wasser, subfolder 06_gfn
   since M1/M2), d-shell elements with a cell (refused), implicit solvation
   with a cell (refused), `-large_system_mode` with a cell (its driver ignores the cell: documented as non-periodic, not
   refused), GPU with a cell: CUDA with the device stages G1b/G2/G3/G4a/G4b/G5a-d, E1/A1/M1/M2/C1, H1-H5 and D1
-  (the host-driven SCF iteration stays on the host, see continuation 4), ROCm/Vulkan CPU fallback (not planned).
+  (the closed-shell neutral SCF is device-resident since R3/R5; open shell and charged cells keep the host-driven loop), ROCm/Vulkan CPU fallback (not planned).
 - Not tested: open shell, charged cells (background term differs from tblite), halogen bond with a cell (cannot run:
   the GFN1 donors Br/I carry d shells, which a cell refuses), thread-count independence of the periodic energy and gradient, MD energy conservation with a cell,
   the GPU fallback on a machine with a GPU plugin, anything beyond H/O, real liquid boxes (only a water dimer and

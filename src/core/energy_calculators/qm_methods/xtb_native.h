@@ -942,6 +942,9 @@ struct GpuScfBackend {
     /// Claude Generated (Nov 2026, WP-PERIODIC-XTB R4): the converged potentials of the resident loop (device
     /// convergedPotentials: gamma q_sh + third order, multipole, D4 dE/dq at the output charges/moments) downloaded
     /// into v_sh (nsh), v_at (nat), v_dp (3 x nat), v_qp (6 x nat). Default false -> host rebuild.
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB R5): the periodic gamma (nsh x nsh) of this geometry is resident
+    /// (ewaldGammaPeriodic kept its device copy). Default false.
+    virtual bool periodicGammaResident(int nsh) const { (void)nsh; return false; }
     virtual bool downloadConvergedPotentials(Vector& v_sh, Vector& v_at, Eigen::MatrixXd& v_dp, Eigen::MatrixXd& v_qp)
     { (void)v_sh; (void)v_at; (void)v_dp; (void)v_qp; return false; }
     virtual bool beginPotentialOnTheFly(int nat, int nsh, const double* xyz_bohr,

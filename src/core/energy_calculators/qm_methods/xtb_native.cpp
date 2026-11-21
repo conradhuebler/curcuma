@@ -1549,7 +1549,12 @@ double XTB::Calculation(bool gradient)
             }
         }
     }
-    if (!use_resident_loop && m_method == MethodType::GFN1 && use_gpu_resident && gpu_computed && !m_pbc   // G1b: no images
+    // R5 (Nov 2026): with a cell the GFN1 resident loop on the periodic gamma that ewaldGammaPeriodic left resident
+    // (closed shell, neutral; GFN1's third order is on-site, its D3 is charge independent). Token resloop keeps the
+    // host-driven loop.
+    const bool gfn1_pbc_ok = !m_pbc || (pbc_neutral_closed && !pbcGpuStageOnHost("resloop")
+                                        && m_gpu_scf && m_gpu_scf->periodicGammaResident(m_basis.nsh));
+    if (!use_resident_loop && m_method == MethodType::GFN1 && use_gpu_resident && gpu_computed && gfn1_pbc_ok
         && mode == ScfMode::Broyden && (!m_solvation || gfn1_born) && m_gpu_scf->supportsResidentLoopGfn1()) {
         bool want = m_gpu_gfn1_resident;
         if (const char* e = std::getenv("CURCUMA_GFN1_RESIDENT")) want = (e[0] != '0');

@@ -10741,6 +10741,7 @@ bool XtbGpuContext::beginResidentLoopGfn1(int nsh, int nat, int nao, double Tele
     m_impl->dN0at.upload(n0_at, nat, stream);
     m_impl->dGamma3At.upload(gamma3_at, nat, stream);
     m_impl->pot_nsh = nsh;
+    m_impl->pot_pbc = false;      // R5: GFN1 reads no D4 / multipole state
     m_impl->resident_nat = nat;   // the multipole upload (GFN2) is what sets it otherwise
     // No multipole matrices, no solvation: a stale GFN2 upload must not leak into this loop.
     m_impl->solv_active = false;
@@ -11358,6 +11359,11 @@ bool XtbGpuContext::convergedPotentials(bool gfn2)
 
 // Claude Generated (Nov 2026, WP-PERIODIC-XTB R4): convergedPotentials(true) and the download of v_sh, v_at, v_dp, v_qp
 // (the host m_pot of the periodic gradient; no host multipole matrices needed).
+bool XtbGpuContext::periodicGammaResident(int nsh) const
+{
+    return m_impl && m_impl->gamma_pbc_resident && nsh > 0 && m_impl->dGamma.n >= nsh * nsh;
+}
+
 bool XtbGpuContext::residentLoopDims(int nsh, int nat) const
 {
     return m_impl && m_impl->loop_nsh == nsh && m_impl->loop_nat == nat && m_impl->loop_nao > 0;

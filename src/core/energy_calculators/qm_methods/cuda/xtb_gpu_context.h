@@ -545,6 +545,8 @@ public:
                               double dmp5, const double* dkernel, const double* qkernel, const double* gamma3);
     /// Claude Generated (Nov 2026, WP-PERIODIC-XTB R4): see GpuScfBackend::downloadConvergedPotentials.
     bool downloadConvergedPotentials(double* v_sh, double* v_at, double* v_dp, double* v_qp);
+    /// R5: the periodic gamma of this geometry sits in the resident dGamma (nsh x nsh).
+    bool periodicGammaResident(int nsh) const;
     /// true when the resident loop was set up for nsh shells and nat atoms (R4 size check).
     bool residentLoopDims(int nsh, int nat) const;
     /// Claude Generated (Nov 2026, WP-PERIODIC-XTB R2): see GpuScfBackend::beginPotentialPeriodic.

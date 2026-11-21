@@ -772,6 +772,7 @@ public:
         return m_ctx->beginPotentialStored(nat, nsh, xyz_bohr, mrad, dmp3, dmp5, dkernel, qkernel, gamma3);
     }
     std::string lastError() const override { return m_ctx ? m_ctx->lastError() : std::string(); }
+    bool periodicGammaResident(int nsh) const override { return m_ctx && m_ctx->periodicGammaResident(nsh); }
     bool downloadConvergedPotentials(Vector& v_sh, Vector& v_at, Eigen::MatrixXd& v_dp, Eigen::MatrixXd& v_qp) override
     {
         // sized by the caller (nsh, nat); the context checks them against its loop dimensions
