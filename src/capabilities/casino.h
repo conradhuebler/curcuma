@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include "src/core/units.h"
 #include <chrono>
 #include <random>
 #include <vector>
@@ -294,5 +295,5 @@ private:
     double m_orientational_step_size;                 // Step size for orientational moves
 
     // Physical constants
-    static constexpr double kB = 8.314462618e-3; // Boltzmann constant in kJ/(mol·K)
+    static constexpr double kB = CurcumaUnit::Constants::GAS_CONSTANT_KJ_MOL_K; // gas constant R in kJ/(mol K) (named kB: per mole)
 };

@@ -22,6 +22,7 @@
 
 #include <limits>
 #include "xtb_native.h"
+#include "src/core/units.h"
 #include "native_eigensolver.h"
 #include "src/core/curcuma_logger.h"
 
@@ -320,7 +321,7 @@ bool XTB::pseudoDiagStepCpu(const Matrix& F)
     // 2. Is one rotation safe? The occupied/virtual gap must be large against kT and every angle small.
     const double homo = g.head(no).maxCoeff();
     const double lumo = g.tail(nv).minCoeff();
-    const double kT = m_electronic_temp * 3.166808e-6;
+    const double kT = m_electronic_temp * CurcumaUnit::Constants::BOLTZMANN_HARTREE_K_XTB;
     if (!(lumo - homo > std::max(30.0 * kT, 1.0e-3))) return false;
     double max_theta = 0.0;
     for (int i = 0; i < no; ++i)
@@ -669,7 +670,7 @@ bool XTB::solveEigen(const Matrix& F, const Matrix& S)
         // bit-identical.
         Eigen::VectorXd occ_a, occ_b;
         double s_a = 0.0, s_b = 0.0;
-        const double kT_uhf = m_electronic_temp * 3.166808e-6;
+        const double kT_uhf = m_electronic_temp * CurcumaUnit::Constants::BOLTZMANN_HARTREE_K_XTB;
         fermiFillingChannel(m_wfn.eps, m_nalpha, kT_uhf, occ_a, s_a);
         fermiFillingChannel(m_wfn.eps, m_nbeta, kT_uhf, occ_b, s_b);
         Eigen::VectorXd occ = occ_a + occ_b;
@@ -684,7 +685,7 @@ bool XTB::solveEigen(const Matrix& F, const Matrix& S)
         m_wfn.focc = occ;
     } else if (m_electronic_temp > 0.0) {
         // Fermi-Dirac smearing: bisect for Fermi level, build fractional-occupation density
-        const double kT = m_electronic_temp * 3.166808e-6;  // K → Hartree
+        const double kT = m_electronic_temp * CurcumaUnit::Constants::BOLTZMANN_HARTREE_K_XTB;  // K → Hartree
         const double n_elec = m_wfn.nocc;
 
         double mu_lo = m_wfn.eps.minCoeff() - 1.0;
@@ -947,7 +948,7 @@ void XTB::occupationsFromEps(const Vector& eps,
     if (openShell()) {
         Eigen::VectorXd occ_a, occ_b;
         double s_a = 0.0, s_b = 0.0;
-        const double kT_uhf = m_electronic_temp * 3.166808e-6;
+        const double kT_uhf = m_electronic_temp * CurcumaUnit::Constants::BOLTZMANN_HARTREE_K_XTB;
         fermiFillingChannel(eps, m_nalpha, kT_uhf, occ_a, s_a);
         fermiFillingChannel(eps, m_nbeta, kT_uhf, occ_b, s_b);
         occ = occ_a + occ_b;
@@ -957,7 +958,7 @@ void XTB::occupationsFromEps(const Vector& eps,
         return;
     }
     if (m_electronic_temp > 0.0) {
-        const double kT = m_electronic_temp * 3.166808e-6;  // K → Hartree
+        const double kT = m_electronic_temp * CurcumaUnit::Constants::BOLTZMANN_HARTREE_K_XTB;  // K → Hartree
         const double n_elec = m_wfn.nocc;
         double mu_lo = eps.minCoeff() - 1.0;
         double mu_hi = eps.maxCoeff() + 1.0;
@@ -1017,7 +1018,7 @@ double XTB::electronicFreeEnergy() const
     // per-channel get_electronic_entropy, src/tblite/scf/iterator.f90:319-322).
     // Claude Generated (Sep 2026).
     if (openShell()) return m_ts_uhf;
-    const double kT  = m_electronic_temp * 3.166808e-6;  // K → Hartree (matches smearing)
+    const double kT  = m_electronic_temp * CurcumaUnit::Constants::BOLTZMANN_HARTREE_K_XTB;  // K → Hartree (matches smearing)
     const double thr = 1.0e-9;                            // xtb fermismear cutoff
     double s = 0.0;
     for (int i = 0; i < m_wfn.focc.size(); ++i) {

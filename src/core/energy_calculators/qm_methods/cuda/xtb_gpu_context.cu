@@ -12,6 +12,7 @@
 #ifdef USE_CUDA
 
 #include "xtb_gpu_context.h"
+#include "src/core/units.h"
 
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
@@ -3884,7 +3885,7 @@ int XtbGpuContext::Impl::pseudoRotateOrthonormalise(int n, int no, const R* F, c
     float max_theta = 0.0f;
     std::memcpy(&max_theta, &maxbits, sizeof(float));
     I.pseudo_last_max_theta = max_theta;
-    const double kT = I.loop_Tele * 3.166808e-6;
+    const double kT = I.loop_Tele * CurcumaUnit::Constants::BOLTZMANN_HARTREE_K_XTB;
     {   // Claude Generated (Oct 2026): CURCUMA_PSEUDO_TRACE=1 prints the quantities the gate decides on
         static const bool trace = std::getenv("CURCUMA_PSEUDO_TRACE") != nullptr;
         if (trace)
@@ -7345,7 +7346,7 @@ bool XtbGpuContext::residentScfStep(bool fp32, double* dq_out, double* e_band,
     if (!solved) return fail("potential build / Fock / eigensolve failed");
 
     // 3. Occupation on the device (resident eps → resident occ).
-    const double kT = m_impl->loop_Tele * 3.166808e-6;
+    const double kT = m_impl->loop_Tele * CurcumaUnit::Constants::BOLTZMANN_HARTREE_K_XTB;
     const int use_fermi = (m_impl->loop_Tele > 0.0) ? 1 : 0;
     const int blk = 256;
     if (m_impl->loop_open) {
@@ -8165,7 +8166,7 @@ bool XtbGpuContext::occupations(const double* eps, int n, double Tele, double n_
     m_impl->dOccNcol.ensure(1);
     m_impl->dEps.upload(eps, n, stream);
 
-    const double kT = Tele * 3.166808e-6;            // K → Hartree (host constant)
+    const double kT = Tele * CurcumaUnit::Constants::BOLTZMANN_HARTREE_K_XTB;            // K → Hartree (host constant)
     const int nocc_pairs = static_cast<int>(std::floor(n_elec / 2.0));
     const int use_fermi = (Tele > 0.0) ? 1 : 0;
     const int block = 256;                            // power of two for the tree reduction

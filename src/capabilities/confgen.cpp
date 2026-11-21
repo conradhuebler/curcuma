@@ -47,7 +47,7 @@ namespace {
 /// Hartree -> kJ/mol (same literal as the rest of the conformer code, see confsearch.cpp).
 constexpr double kEh2kJ = 2625.5;
 /// Boltzmann constant in Hartree/Kelvin.
-constexpr double kBoltzmannEh = 3.166811563e-6;
+constexpr double kBoltzmannEh = CurcumaUnit::Constants::boltzmann_hartree_or_legacy(3.166811563e-6);
 }
 
 ConfGen::ConfGen(const json& controller, bool silent)

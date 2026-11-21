@@ -30,6 +30,7 @@
  */
 
 #include "xtb_native.h"
+#include "src/core/units.h"
 #include "native_eigensolver.h"
 #include "src/core/curcuma_logger.h"
 
@@ -242,7 +243,7 @@ double XTB::calculateDivideConquer(const std::vector<std::vector<int>>& subsyste
     m_wfn.qp_at = Eigen::MatrixXd::Zero(6, nat);
 
     const double n_elec = m_wfn.nocc;          // target electron count
-    const double kT     = m_electronic_temp * 3.166808e-6;   // K -> Hartree
+    const double kT     = m_electronic_temp * CurcumaUnit::Constants::BOLTZMANN_HARTREE_K_XTB;   // K -> Hartree
     const double damp   = (m_scf_damping > 0.0 && m_scf_damping <= 1.0) ? m_scf_damping : 0.4;
     const double thresh = m_scf_threshold;
     const int    maxit  = m_scf_max_iter;

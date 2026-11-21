@@ -17,6 +17,8 @@
 #include <cmath>
 #include <string>
 
+#include "src/core/units.h"
+
 namespace curcuma {
 namespace solvation {
 
@@ -121,7 +123,7 @@ constexpr double kIdealGasMolVolume = 24.79;
 inline double solutionStateShift(SolutionState state, double temperature, double density, double molar_mass)
 {
     constexpr double vig = kIdealGasMolVolume;
-    constexpr double kB_au = 3.166811563455546e-06;   // CODATA 2018 kB / Hartree, Eh/K
+    constexpr double kB_au = CurcumaUnit::Constants::BOLTZMANN_HARTREE_K;   // CODATA 2018 kB / Hartree, Eh/K
     constexpr double T0 = 298.15;
     constexpr double refDensity = 1.0e-3, refMolMass = 1.0;
     const double bar = std::log(vig * temperature / T0);
