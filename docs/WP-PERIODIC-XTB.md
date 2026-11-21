@@ -949,6 +949,57 @@ the gfn1 step); the W download is part of the W item (54 MB at 432 H2O). Halogen
 - MD wall per step (`md.sh`, before = same binary with the tokens): gfn2 216 H2O 0.47 -> 0.45 s, 432 H2O 1.41 -> 1.35
   s; gfn1 216 H2O 0.63 -> 0.52 s, 432 H2O 1.99 -> 1.68 s.
 
+### D1 in-SCF periodic D4 dE/dq, one block per atom; A2/E2 measured and not taken (2026-11-21, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+- **D1** `k_d4_dedq_pbc_b`: the G4b gather with one block per atom (threads over j, fixed-order block tree) instead of
+  one thread per atom (1296 threads left most of the card idle). Token `dedq1` keeps the old launch. No interface
+  change (ABI 21). D4 share of the potential build (432 H2O, MD step): 15.5 -> 12.0 ms per iteration.
+  Gates (new vs `dedq1`): parity 10/10 (gfn2 caffeine |dE| 1.4e-14 Eh, the rest as H4/H5), bitwise 10/10, `pbc_|ewald`
+  29/29, `-sp -scf_threshold 1e-9` 216 / 432 H2O dE 0, max dG 1.2e-14 / 1.1e-14 Eh/A, run to run md5-identical, GPU FD
+  8.1e-9 / 8.9e-9 Eh/A, NVE 100 steps max |dE_pot| 2.3e-11 Eh, MD 20 steps tight unchanged, no-cell 36/36 + 36/36 md5
+  to the base. MD wall per step: 216 H2O 0.450 -> 0.438 s, 432 H2O 1.354 -> 1.345 s (n = 1 each).
+- **A2 (ATM cbrt), not taken**: q^(16/3) = q^5 cbrt(q) in `k_d4_atm_pbc_u`. An FP32 cbrt seed plus one FP64 Newton
+  step gave ATM 190 ms against 187 ms with the FP64 cbrt (432 H2O, MD step, n = 1); replacing cbrt by nothing at all
+  (ceiling test, wrong physics, not committed) gave 179 ms, i.e. at most 8 ms = 0.6 % of the step. Below the 1 %
+  threshold; the FP64 algebra of the three angle derivatives and the damping is the rest.
+- **E2 (FP64 eigensolver), not taken**: cuSOLVER on the RTX 5080, n = 2592 (the 432 H2O nao), random symmetric
+  matrix, FP64, n = 2-3 repetitions: dsyevd 180 ms, Xsyevd 180 ms (identical eigenvalues), syevdx all 180 ms, syevdx
+  lowest 2/3 (= nocc) 168 ms, syevj 905 ms, dsytrd alone 79 ms (44 % of dsyevd). No variant is shorter by more than
+  7 %, and the partial one does not give the virtual vectors that the complement density E1 and the pseudo steps
+  need. Rayleigh-Ritz / subspace iteration: as continuation 3 (nocc = 2/3 nao, every occupied-space GEMM costs about
+  a full solve). Stream overlap of the gradient kernels: each of the large ones (H0/Pulay 6.7 M threads, multipole,
+  ATM) fills the device; overlap of host and device work inside the host-driven SCF iteration is not possible without
+  changing the iteration (the host potential needs the density of the same step). Program: scratchpad
+  `eig/bench_eig.cu` (not in the repository).
+
+### Continuation 4: result and what stays on the host (2026-11-21, Claude Generated)
+
+MD wall per step (`md.sh`, 20 steps incl. start-up, 8 threads, RTX 5080, n = 1 each; "before" of every stage = same
+binary with the stage's tokens):
+
+| stage | gfn2 216 H2O (s) | gfn2 432 H2O (s) |
+|---|---|---|
+| start (87214d0d, C1) | 0.54-0.56 | 1.63-1.65 |
+| H1 H0/Pulay gradient | 0.56 -> 0.51 | 1.63 -> 1.53 |
+| H2/H3 Ewald, KO, CN | 0.51 -> 0.47 | 1.55 -> 1.39 |
+| H4/H5 D3 (gfn1), D4 pairs | 0.47 -> 0.45 | 1.41 -> 1.35 |
+| D1 D4 dE/dq gather | 0.450 -> 0.438 | 1.354 -> 1.345 |
+
+gfn1 (H4): 216 H2O 0.63 -> 0.52 s, 432 H2O 1.99 -> 1.68 s. Profile of the 432 H2O gfn2 MD step after D1 (verbosity 3,
+`CURCUMA_GPU_PROFILE`): TOTAL about 1240 ms; device: eigensolve 440 ms (8 it), ATM 187, H0/Pulay 60 + W 17, multipole
+gradient 41, S/H0 43, multipole integrals 27, Cholesky 57.
+
+Still on the host (432 H2O gfn2 MD step):
+
+| item | ms | why it stays |
+|---|---|---|
+| host-driven SCF iteration ("host gap" of the device profile: potential from the downloaded multipole matrices, D4 reference weights, Broyden mixing, energies) | about 37 per iteration, 26 % of the step | the periodic SCF is the host-driven device loop (G1); moving it needs the fully resident loop with a cell (multipole potential on the device from the G3 matrices instead of their 18 x 13 MB download, device Broyden); not started, the largest remaining item |
+| multipole interaction matrices download (G3) | about 90 | consumer is the host potential above |
+| on-site CN term (2a), Ewald background virial, constant dipole virial term | < 1 | O(N) |
+| D4 reference weights and ATM C6 (`buildRefWFlat`, `buildAtmC6Flat`) | about 6 | O(N) / O(N^2 49), < 1 % |
+| halogen bond | 0 | cannot run with a cell (donors Br/I carry d shells, a cell refuses them) |
+| remaining virial terms (G6) | 0 | every term of `calculateGradientPeriodic` now has its virial on the device (H1, H2, H4, H5 with G5a-d, C1, A1) |
+
 ## Regression run (2026-11-14, `release/`, `ctest -R 'gfn|xtb|sqm|gfnff|pbc|ewald|simplemd|restart|md_|gpu|plugin|molecule|xyz|parser|curcumaopt|structinv' -j1`)
 
 369 tests selected, 2 failed before the fix below: `pbc_md_nonperiodic_cell` (its check (a) assumed gfn2 + cell to be
@@ -1008,9 +1059,9 @@ change. Measurements and scripts: project folder GFN-FF-Wasser, subfolder 06_gfn
   structure-factor factorisation of the multipole k sums of the energy matrices (G3; the gradient and virial use it
   since M1/M2), d-shell elements with a cell (refused), implicit solvation
   with a cell (refused), `-large_system_mode` with a cell (its driver ignores the cell: documented as non-periodic, not
-  refused), GPU with a cell: CUDA with the device stages G1b/G2/G3/G4a/G4b/G5a-d and E1/A1/M1/M2/C1 (the rest on the
-  host, see the continuation 3 section), ROCm/Vulkan CPU fallback (not planned).
-- Not tested: open shell, charged cells (background term differs from tblite), halogen bond with a cell (no Br/I
-  structure), thread-count independence of the periodic energy and gradient, MD energy conservation with a cell,
+  refused), GPU with a cell: CUDA with the device stages G1b/G2/G3/G4a/G4b/G5a-d, E1/A1/M1/M2/C1, H1-H5 and D1
+  (the host-driven SCF iteration stays on the host, see continuation 4), ROCm/Vulkan CPU fallback (not planned).
+- Not tested: open shell, charged cells (background term differs from tblite), halogen bond with a cell (cannot run:
+  the GFN1 donors Br/I carry d shells, which a cell refuses), thread-count independence of the periodic energy and gradient, MD energy conservation with a cell,
   the GPU fallback on a machine with a GPU plugin, anything beyond H/O, real liquid boxes (only a water dimer and
   water lattices were run). Human production testing pending for everything in this document.

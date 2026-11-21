@@ -4852,6 +4852,52 @@ __global__ void k_d4_dedq_pbc(int nat, int max_elem, int max_ref,
     dEdq[i] = acc;
 }
 
+__global__ void k_d4_dedq_pbc_b(int nat, int max_elem, int max_ref,
+                              const int* __restrict__ Z, const int* __restrict__ nref,
+                              const double* __restrict__ c6_flat, const double* __restrict__ W,
+                              const double* __restrict__ dWq, const double* __restrict__ D,
+                              double* __restrict__ dEdq)
+{
+    // D1 (Claude Generated, Nov 2026): k_d4_dedq_pbc with one block per atom i, the threads stride over j, fixed-order
+    // block tree (the thread-per-atom kernel left most of the card idle); CURCUMA_PBC_GPU_HOST=dedq1 keeps it.
+    const int i = blockIdx.x;
+    if (i >= nat) return;
+    const int ei = Z[i] - 1;
+    const int nri = nref[i];
+    if (ei < 0 || ei >= max_elem || nri <= 0) { if (threadIdx.x == 0) dEdq[i] = 0.0; return; }
+    const double* dWqi = dWq + static_cast<size_t>(i) * max_ref;
+    const double* Di = D + static_cast<size_t>(i) * nat;
+    double acc = 0.0;
+    for (int j = threadIdx.x; j < nat; j += blockDim.x) {
+        const double dij = Di[j];
+        if (dij == 0.0) continue;
+        const int ej = Z[j] - 1;
+        const int nrj = nref[j];
+        if (ej < 0 || ej >= max_elem || nrj <= 0) continue;
+        const double* Wj = W + static_cast<size_t>(j) * max_ref;
+        const size_t base = (static_cast<size_t>(ei) * max_elem + ej) * static_cast<size_t>(max_ref) * max_ref;
+        double dc6dqi = 0.0;
+        for (int a = 0; a < nri; ++a) {
+            const double dwa = dWqi[a];
+            if (dwa == 0.0) continue;
+            const size_t basea = base + static_cast<size_t>(a) * max_ref;
+            double s = 0.0;
+            for (int b = 0; b < nrj; ++b) s += Wj[b] * c6_flat[basea + b];
+            dc6dqi += dwa * s;
+        }
+        acc += -dc6dqi * dij;
+    }
+    __shared__ double red[128];
+    red[threadIdx.x] = acc;
+    __syncthreads();
+    for (int st = blockDim.x / 2; st > 0; st >>= 1) {
+        if (threadIdx.x < st) red[threadIdx.x] += red[threadIdx.x + st];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) dEdq[i] = red[0];
+}
+
+
 // v_at(A) += dE_D4/dq(A) (resident from k_d4_dedq). One thread per atom.
 __global__ void k_vat_add_d4(int nat, const double* __restrict__ d4_dedq, double* __restrict__ v_at)
 {
@@ -8732,9 +8778,15 @@ bool XtbGpuContext::dispersionDedqPeriodic(int nat, const double* W, const doubl
         return false;
     }
     const int b = 128;
-    k_d4_dedq_pbc<<<(nat + b - 1) / b, b, 0, stream>>>(nat, 118, Impl::D4_MAX_REF, I.dD4Z.ptr, I.dD4Nref.ptr,
-                                                      I.dD4C6Flat.ptr, I.dD4W.ptr, I.dD4dWq.ptr, I.dPbcD4D.ptr,
-                                                      I.dD4Dedq.ptr);
+    static const bool dedq_thread = [] { const char* e = std::getenv("CURCUMA_PBC_GPU_HOST");
+                                         return e && std::string(e).find("dedq1") != std::string::npos; }();
+    if (dedq_thread)
+        k_d4_dedq_pbc<<<(nat + b - 1) / b, b, 0, stream>>>(nat, 118, Impl::D4_MAX_REF, I.dD4Z.ptr, I.dD4Nref.ptr,
+                                                          I.dD4C6Flat.ptr, I.dD4W.ptr, I.dD4dWq.ptr, I.dPbcD4D.ptr,
+                                                          I.dD4Dedq.ptr);
+    else   // D1: one block per atom
+        k_d4_dedq_pbc_b<<<nat, 128, 0, stream>>>(nat, 118, Impl::D4_MAX_REF, I.dD4Z.ptr, I.dD4Nref.ptr, I.dD4C6Flat.ptr,
+                                                 I.dD4W.ptr, I.dD4dWq.ptr, I.dPbcD4D.ptr, I.dD4Dedq.ptr);
     if (cudaGetLastError() != cudaSuccess) return false;
     I.dD4Dedq.download(dEdq_out, nat, stream);
     return cudaStreamSynchronize(stream) == cudaSuccess;
