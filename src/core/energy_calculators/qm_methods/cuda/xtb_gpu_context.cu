@@ -658,6 +658,18 @@ struct XtbGpuContext::Impl {
     int  lprobe_fail_left = -2;                        ///< CURCUMA_GPU_FAIL_LPROBE=k: corrupt the factor k times (-2: not read yet)
     long lprobe_recomputes = 0;                        ///< factors recomputed after a failed probe
     int  pseudoDiagStep64(int n);
+    // Claude Generated (Nov 2026, WP-PERIODIC-XTB A1r): FP64 eigenpairs of F C = S C eps by iterative refinement of an
+    // FP32 solve (Ogita-Aishima, clusters by small exact solves) with FP64 GEMMs, cuBLAS fixed-point emulation.
+    // Taken only when eig_refine is set (GpuScfBackend::setEigenRefinement, periodic SCF); returns 1 when dC/dEps hold
+    // the accepted eigenpairs, 0 when not taken or not accepted (dC still holds F, the full FP64 solve follows).
+    bool eig_refine = false;
+    int  eig_strategy = 0;   // 0 fp64_direct, 1 fp32_refine, 2 emulated (selectEigenStrategy)
+    long eig_refine_taken = 0, eig_refine_rejected = 0;
+    CudaBuffer<double> dRfX, dRfY, dRfT, dRfM, dRfG, dRfLam, dRfMax, dRfZ, dRfBlkT, dRfBlkM;
+    CudaBuffer<float>  dRfXf, dRfLf, dRfEpsf, dRfWorkf;
+    CudaBuffer<int>    dRfColB0, dRfColK, dRfColZoff, dRfCid, dRfBlkSrc;
+    int  rf_lwork_f32 = 0;
+    int  refineEigenFP64(int n);
     template <typename R>
     int pseudoRotateOrthonormalise(int n, int no, const R* F, const R* L, R* C, R* Tb, R* Gov, R* M,
                                    CudaBuffer<R>& work, double* g, const char* tag);
@@ -6003,6 +6015,439 @@ int XtbGpuContext::Impl::pseudoDiagStep64(int n)
     return 1;
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// A1r (Claude Generated, Nov 2026, WP-PERIODIC-XTB): iterative refinement of the generalized eigenproblem F C = S C eps.
+// Ogita and Aishima, Japan J. Indust. Appl. Math. 35, 1007 (2018) ("RefSyEv"), generalized form: for an approximate
+// S-orthonormal X, T = X^T F X and M = X^T S X (R = I - M) give lam_i = T_ii / M_ii and the first-order correction
+// X <- X (I + E), E_ii = R_ii / 2, E_ij = (T_ij + lam_j R_ij) / (lam_j - lam_i). Eigenvalues closer than dc (a cluster)
+// are first rotated by the exact eigenvectors Z of the small pencil (T_cc, M_cc) (the cluster variant of the paper),
+// E inside a cluster is R / 2. The convergence is quadratic; from an FP32 start two updates reach the FP64 level for
+// the 432 H2O box (scratchpad benchmark eig/bench4.cu). The FP64 GEMMs run with the cuBLAS fixed-point emulation
+// (CUBLAS_FP64_EMULATED_FIXEDPOINT_MATH, dynamic mantissa: FP64 accuracy, integer tensor cores, deterministic).
+// ---------------------------------------------------------------------------------------------------------------------
+namespace {
+std::string fmt_device(const std::string& name, int ma, int mi, int ratio, int sms, bool emu)
+{
+    char buf[256];
+    std::snprintf(buf, sizeof(buf), "%s (cc %d.%d, FP32:FP64 %d:1, %d SMs, FP64 emulation %s)", name.c_str(), ma, mi,
+                  ratio, sms, emu ? "yes" : "no");
+    return buf;
+}
+// lam_i = T_ii / M_ii
+__global__ void k_rf_lam(const double* __restrict__ T, const double* __restrict__ M, double* __restrict__ lam, int n)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) lam[i] = T[i + static_cast<size_t>(i) * n] / M[i + static_cast<size_t>(i) * n];
+}
+// out[0] = max_{i != j} |T_ij|, out[1] = max |delta_ij - M_ij|; non-negative doubles compare like their bit patterns,
+// so the atomicMax result is independent of the order (deterministic).
+__global__ void k_rf_offmax(const double* __restrict__ T, const double* __restrict__ M, unsigned long long* out, int n)
+{
+    __shared__ double s_t[256], s_r[256];
+    const size_t nn = static_cast<size_t>(n) * n;
+    double mt = 0.0, mr = 0.0;
+    for (size_t idx = blockIdx.x * static_cast<size_t>(blockDim.x) + threadIdx.x; idx < nn;
+         idx += static_cast<size_t>(gridDim.x) * blockDim.x) {
+        const int i = static_cast<int>(idx % n), j = static_cast<int>(idx / n);
+        if (i != j) mt = fmax(mt, fabs(T[idx]));
+        mr = fmax(mr, fabs((i == j ? 1.0 : 0.0) - M[idx]));
+    }
+    s_t[threadIdx.x] = mt; s_r[threadIdx.x] = mr;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) {
+            s_t[threadIdx.x] = fmax(s_t[threadIdx.x], s_t[threadIdx.x + s]);
+            s_r[threadIdx.x] = fmax(s_r[threadIdx.x], s_r[threadIdx.x + s]);
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        atomicMax(&out[0], static_cast<unsigned long long>(__double_as_longlong(s_t[0])));
+        atomicMax(&out[1], static_cast<unsigned long long>(__double_as_longlong(s_r[0])));
+    }
+}
+// packed cluster blocks: dst[e] = A[src[e]]
+__global__ void k_rf_gather(const double* __restrict__ T, const double* __restrict__ M, const int* __restrict__ src,
+                            double* __restrict__ bt, double* __restrict__ bm, int ne)
+{
+    const int e = blockIdx.x * blockDim.x + threadIdx.x;
+    if (e < ne) { bt[e] = T[src[e]]; bm[e] = M[src[e]]; }
+}
+// G = A Zblk (column pass; columns outside a cluster are copied)
+__global__ void k_rf_col(const double* __restrict__ A, double* __restrict__ G, const int* __restrict__ b0a,
+                         const int* __restrict__ ka, const int* __restrict__ zoff, const double* __restrict__ Z, int n)
+{
+    const size_t idx = blockIdx.x * static_cast<size_t>(blockDim.x) + threadIdx.x;
+    if (idx >= static_cast<size_t>(n) * n) return;
+    const int i = static_cast<int>(idx % n), j = static_cast<int>(idx / n);
+    const int k = ka[j];
+    if (k <= 1) { G[idx] = A[idx]; return; }
+    const int b0 = b0a[j], q = j - b0;
+    const double* z = Z + zoff[j];
+    double s = 0.0;
+    for (int p = 0; p < k; ++p) s += A[i + static_cast<size_t>(b0 + p) * n] * z[p + q * k];
+    G[idx] = s;
+}
+// A = Zblk^T G (trans = 1) or Zblk G (trans = 0) (row pass; rows outside a cluster are copied)
+__global__ void k_rf_row(const double* __restrict__ G, double* __restrict__ A, const int* __restrict__ b0a,
+                         const int* __restrict__ ka, const int* __restrict__ zoff, const double* __restrict__ Z, int n,
+                         int trans)
+{
+    const size_t idx = blockIdx.x * static_cast<size_t>(blockDim.x) + threadIdx.x;
+    if (idx >= static_cast<size_t>(n) * n) return;
+    const int i = static_cast<int>(idx % n), j = static_cast<int>(idx / n);
+    const int k = ka[i];
+    if (k <= 1) { A[idx] = G[idx]; return; }
+    const int b0 = b0a[i], q = i - b0;
+    const double* z = Z + zoff[i];
+    double s = 0.0;
+    for (int p = 0; p < k; ++p)
+        s += (trans ? z[p + q * k] : z[q + p * k]) * G[(b0 + p) + static_cast<size_t>(j) * n];
+    A[idx] = s;
+}
+// G = I + E (Ogita-Aishima correction; inside a cluster E = R / 2)
+__global__ void k_rf_E(const double* __restrict__ T, const double* __restrict__ M, const int* __restrict__ cid,
+                       double* __restrict__ G, int n)
+{
+    const size_t idx = blockIdx.x * static_cast<size_t>(blockDim.x) + threadIdx.x;
+    if (idx >= static_cast<size_t>(n) * n) return;
+    const int i = static_cast<int>(idx % n), j = static_cast<int>(idx / n);
+    const double R = (i == j ? 1.0 : 0.0) - M[idx];
+    double e;
+    if (i == j || cid[i] == cid[j]) {
+        e = 0.5 * R;
+    } else {
+        const double li = T[i + static_cast<size_t>(i) * n] / M[i + static_cast<size_t>(i) * n];
+        const double lj = T[j + static_cast<size_t>(j) * n] / M[j + static_cast<size_t>(j) * n];
+        e = (T[idx] + lj * R) / (lj - li);
+    }
+    G[idx] = (i == j ? 1.0 : 0.0) + e;
+}
+// G = I + R / 2 = 1.5 I - 0.5 M (final orthonormalisation step)
+__global__ void k_rf_orth(const double* __restrict__ M, double* __restrict__ G, int n)
+{
+    const size_t idx = blockIdx.x * static_cast<size_t>(blockDim.x) + threadIdx.x;
+    if (idx >= static_cast<size_t>(n) * n) return;
+    const int i = static_cast<int>(idx % n), j = static_cast<int>(idx / n);
+    G[idx] = (i == j ? 1.5 : 0.0) - 0.5 * M[idx];
+}
+
+// Small generalized symmetric eigenproblem A z = mu B z (k x k, column-major, B SPD): Cholesky B = L L^T, cyclic
+// Jacobi on L^-1 A L^-T, Z = L^-T V (B-orthonormal), mu ascending. Deterministic. False on a non-SPD B.
+bool smallGeneralizedEigen(int k, std::vector<double> A, std::vector<double> B, double* Z)
+{
+    auto a = [&](int i, int j) -> double& { return A[i + static_cast<size_t>(j) * k]; };
+    auto b = [&](int i, int j) -> double& { return B[i + static_cast<size_t>(j) * k]; };
+    for (int j = 0; j < k; ++j) {   // Cholesky, lower triangle of B
+        double d = b(j, j);
+        for (int p = 0; p < j; ++p) d -= b(j, p) * b(j, p);
+        if (!(d > 0.0)) return false;
+        b(j, j) = std::sqrt(d);
+        for (int i = j + 1; i < k; ++i) {
+            double s = b(i, j);
+            for (int p = 0; p < j; ++p) s -= b(i, p) * b(j, p);
+            b(i, j) = s / b(j, j);
+        }
+    }
+    for (int j = 0; j < k; ++j)   // A <- L^-1 A (columns)
+        for (int i = 0; i < k; ++i) {
+            double s = a(i, j);
+            for (int p = 0; p < i; ++p) s -= b(i, p) * a(p, j);
+            a(i, j) = s / b(i, i);
+        }
+    for (int i = 0; i < k; ++i)   // A <- A L^-T (rows)
+        for (int j = 0; j < k; ++j) {
+            double s = a(i, j);
+            for (int p = 0; p < j; ++p) s -= a(i, p) * b(j, p);
+            a(i, j) = s / b(j, j);
+        }
+    for (int j = 0; j < k; ++j)
+        for (int i = j + 1; i < k; ++i) { const double s = 0.5 * (a(i, j) + a(j, i)); a(i, j) = s; a(j, i) = s; }
+    std::vector<double> V(static_cast<size_t>(k) * k, 0.0);
+    for (int i = 0; i < k; ++i) V[i + static_cast<size_t>(i) * k] = 1.0;
+    for (int sweep = 0; sweep < 60; ++sweep) {
+        double off = 0.0, diag = 0.0;
+        for (int j = 0; j < k; ++j) { diag += a(j, j) * a(j, j); for (int i = 0; i < j; ++i) off += a(i, j) * a(i, j); }
+        if (off <= 1e-34 * diag || off == 0.0) break;
+        for (int p = 0; p < k; ++p)
+            for (int q = p + 1; q < k; ++q) {
+                const double apq = a(p, q);
+                if (apq == 0.0) continue;
+                const double theta = (a(q, q) - a(p, p)) / (2.0 * apq);
+                const double t = (theta >= 0.0 ? 1.0 : -1.0) / (std::fabs(theta) + std::sqrt(theta * theta + 1.0));
+                const double c = 1.0 / std::sqrt(t * t + 1.0), s = t * c;
+                for (int r = 0; r < k; ++r) {   // columns p, q
+                    const double arp = a(r, p), arq = a(r, q);
+                    a(r, p) = c * arp - s * arq; a(r, q) = s * arp + c * arq;
+                }
+                for (int r = 0; r < k; ++r) {   // rows p, q
+                    const double apr = a(p, r), aqr = a(q, r);
+                    a(p, r) = c * apr - s * aqr; a(q, r) = s * apr + c * aqr;
+                }
+                for (int r = 0; r < k; ++r) {
+                    const double vrp = V[r + static_cast<size_t>(p) * k], vrq = V[r + static_cast<size_t>(q) * k];
+                    V[r + static_cast<size_t>(p) * k] = c * vrp - s * vrq;
+                    V[r + static_cast<size_t>(q) * k] = s * vrp + c * vrq;
+                }
+            }
+    }
+    std::vector<int> ord(k);
+    for (int i = 0; i < k; ++i) ord[i] = i;
+    std::stable_sort(ord.begin(), ord.end(), [&](int x, int y) { return a(x, x) < a(y, y); });
+    for (int c = 0; c < k; ++c) {   // Z(:, c) = L^-T V(:, ord[c])
+        const double* v = &V[static_cast<size_t>(ord[c]) * k];
+        for (int i = k - 1; i >= 0; --i) {
+            double s = v[i];
+            for (int p = i + 1; p < k; ++p) s -= b(p, i) * Z[p + static_cast<size_t>(c) * k];
+            Z[i + static_cast<size_t>(c) * k] = s / b(i, i);
+        }
+    }
+    return true;
+}
+} // namespace
+
+int XtbGpuContext::Impl::refineEigenFP64(int n)
+{
+#if defined(CUBLAS_VER_MAJOR) && CUBLAS_VER_MAJOR >= 13
+    const size_t nn = static_cast<size_t>(n) * n;
+    if (n < 2 || dS.n < static_cast<int>(nn) || dL.n < static_cast<int>(nn) || dC.n < static_cast<int>(nn))
+        return 0;
+    try {
+        for (CudaBuffer<double>* b : { &dRfX, &dRfY, &dRfT, &dRfM, &dRfG }) b->ensure(static_cast<int>(nn));
+        dRfXf.ensure(static_cast<int>(nn)); dRfLf.ensure(static_cast<int>(nn)); dRfEpsf.ensure(n);
+        dRfLam.ensure(n); dRfMax.ensure(2);
+        dRfColB0.ensure(n); dRfColK.ensure(n); dRfColZoff.ensure(n); dRfCid.ensure(n);
+    } catch (...) { return 0; }
+    const int b = 256;
+    const int gnn = static_cast<int>((nn + b - 1) / b);
+    // 1. FP32 start: reduce, ssyevd, back-transform (the FP32 branch of eigensolveResidentFockFull).
+    k_d2f<<<gnn, b, 0, stream>>>(dC.ptr, dRfXf.ptr, nn);
+    k_d2f<<<gnn, b, 0, stream>>>(dL.ptr, dRfLf.ptr, nn);
+    if (cudaGetLastError() != cudaSuccess) return 0;
+    const float onef = 1.0f;
+    if (cublasStrsm(cublas, CUBLAS_SIDE_RIGHT, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT, n, n, &onef,
+                    dRfLf.ptr, n, dRfXf.ptr, n) != CUBLAS_STATUS_SUCCESS
+        || cublasStrsm(cublas, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_N, CUBLAS_DIAG_NON_UNIT, n, n, &onef,
+                       dRfLf.ptr, n, dRfXf.ptr, n) != CUBLAS_STATUS_SUCCESS)
+        return 0;
+    int lwf = 0;
+    if (cusolverDnSsyevd_bufferSize(cusolver, CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_LOWER, n, dRfXf.ptr, n,
+                                    dRfEpsf.ptr, &lwf) != CUSOLVER_STATUS_SUCCESS)
+        return 0;
+    if (rf_lwork_f32 < lwf) {
+        try { dRfWorkf.alloc(lwf > 0 ? lwf : 1); } catch (...) { return 0; }
+        rf_lwork_f32 = lwf;
+    }
+    if (cusolverDnSsyevd(cusolver, CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_LOWER, n, dRfXf.ptr, n, dRfEpsf.ptr,
+                         dRfWorkf.ptr, rf_lwork_f32, dInfo.ptr) != CUSOLVER_STATUS_SUCCESS)
+        return 0;
+    if (cublasStrsm(cublas, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT, n, n, &onef,
+                    dRfLf.ptr, n, dRfXf.ptr, n) != CUBLAS_STATUS_SUCCESS)
+        return 0;
+    k_f2d<<<gnn, b, 0, stream>>>(dRfXf.ptr, dRfX.ptr, nn);
+    int info = 0;
+    if (cudaGetLastError() != cudaSuccess
+        || cudaMemcpyAsync(&info, dInfo.ptr, sizeof(int), cudaMemcpyDeviceToHost, stream) != cudaSuccess
+        || cudaStreamSynchronize(stream) != cudaSuccess || info != 0)
+        return 0;
+    profMark("eig FP64 refine: FP32 start");
+
+    // 2. FP64 GEMMs by fixed-point emulation; the math mode is restored on every exit.
+    struct MathScope {
+        cublasHandle_t h; bool ok;
+        explicit MathScope(cublasHandle_t hh) : h(hh)
+        {
+            ok = cublasSetMathMode(h, CUBLAS_FP64_EMULATED_FIXEDPOINT_MATH) == CUBLAS_STATUS_SUCCESS
+                && cublasSetEmulationStrategy(h, CUBLAS_EMULATION_STRATEGY_EAGER) == CUBLAS_STATUS_SUCCESS;
+        }
+        ~MathScope()
+        {
+            cublasSetEmulationStrategy(h, CUBLAS_EMULATION_STRATEGY_DEFAULT);
+            cublasSetMathMode(h, CUBLAS_DEFAULT_MATH);
+        }
+    } math(cublas);
+    if (!math.ok) return 0;
+    const double one = 1.0, zero = 0.0;
+    double* X = dRfX.ptr;
+    double* Y = dRfY.ptr;
+    std::vector<double> lam(n);
+    unsigned long long hmax[2] = { 0, 0 };
+    double t_off = 0.0, r_max = 0.0, l_max = 0.0;
+    // T = X^T F X, M = X^T S X, lam, max|T_off|, max|R|
+    auto pass = [&]() -> bool {
+        if (cublasDgemm(cublas, CUBLAS_OP_N, CUBLAS_OP_N, n, n, n, &one, dC.ptr, n, X, n, &zero, Y, n) != CUBLAS_STATUS_SUCCESS
+            || cublasDgemm(cublas, CUBLAS_OP_T, CUBLAS_OP_N, n, n, n, &one, X, n, Y, n, &zero, dRfT.ptr, n) != CUBLAS_STATUS_SUCCESS
+            || cublasDgemm(cublas, CUBLAS_OP_N, CUBLAS_OP_N, n, n, n, &one, dS.ptr, n, X, n, &zero, Y, n) != CUBLAS_STATUS_SUCCESS
+            || cublasDgemm(cublas, CUBLAS_OP_T, CUBLAS_OP_N, n, n, n, &one, X, n, Y, n, &zero, dRfM.ptr, n) != CUBLAS_STATUS_SUCCESS)
+            return false;
+        k_rf_lam<<<(n + b - 1) / b, b, 0, stream>>>(dRfT.ptr, dRfM.ptr, dRfLam.ptr, n);
+        if (cudaMemsetAsync(dRfMax.ptr, 0, 2 * sizeof(double), stream) != cudaSuccess) return false;
+        k_rf_offmax<<<std::min(gnn, 1024), b, 0, stream>>>(dRfT.ptr, dRfM.ptr,
+                                                            reinterpret_cast<unsigned long long*>(dRfMax.ptr), n);
+        if (cudaGetLastError() != cudaSuccess
+            || cudaMemcpyAsync(lam.data(), dRfLam.ptr, sizeof(double) * n, cudaMemcpyDeviceToHost, stream) != cudaSuccess
+            || cudaMemcpyAsync(hmax, dRfMax.ptr, 2 * sizeof(double), cudaMemcpyDeviceToHost, stream) != cudaSuccess
+            || cudaStreamSynchronize(stream) != cudaSuccess)
+            return false;
+        std::memcpy(&t_off, &hmax[0], sizeof(double));
+        std::memcpy(&r_max, &hmax[1], sizeof(double));
+        l_max = 0.0;
+        for (int i = 0; i < n; ++i) l_max = std::max(l_max, std::fabs(lam[i]));
+        return std::isfinite(t_off) && std::isfinite(r_max) && std::isfinite(l_max);
+    };
+    // Acceptance (FP64 level): off-diagonal of X^T F X and of X^T S X - I below these, eigenvalues ascending.
+    const double tol_r = 1e-10;
+    static const bool rftrace = std::getenv("CURCUMA_EIG_REFINE_TRACE") != nullptr;
+    // CURCUMA_EIG_REFINE_MAX_UPDATES=k (test switch, default 3): k = 0 never accepts and exercises the fallback.
+    static const int max_updates = [] { const char* e = std::getenv("CURCUMA_EIG_REFINE_MAX_UPDATES"); return e && *e ? std::atoi(e) : 3; }();
+    const int kmax_cap = 256;
+    std::vector<int> colB0(n), colK(n), colZoff(n), cid(n), blkSrc;
+    std::vector<double> blkT, blkM, Zp;
+    bool accepted = false;
+    for (int upd = 0; upd <= max_updates; ++upd) {
+        if (!pass()) return 0;
+        const double tt = 1e-11 * std::max(1.0, l_max);
+        bool sorted = true;
+        for (int i = 1; i < n && sorted; ++i) sorted = lam[i] >= lam[i - 1];
+        if (rftrace)
+            fprintf(stderr, "EIGREFINE pass %d: max|T_off| %.3e max|R| %.3e max|lam| %.3f sorted %d\n", upd, t_off, r_max,
+                    l_max, sorted ? 1 : 0);
+        if (t_off <= tt && r_max <= tol_r && sorted) { accepted = true; break; }
+        if (upd == max_updates) break;
+        // clusters of consecutive eigenvalues closer than dc
+        const double dc = 100.0 * (t_off + l_max * r_max);   // |E_ij| <= 1e-2 outside the clusters
+        blkSrc.clear(); Zp.clear();
+        int nclust = 0, zoff = 0, ncl_idx = 0;
+        for (int i = 0; i < n;) {
+            int j = i + 1;
+            while (j < n && lam[j] - lam[j - 1] <= dc) ++j;
+            const int k = j - i;
+            if (k > kmax_cap) return 0;
+            for (int t = i; t < j; ++t) { colB0[t] = i; colK[t] = k; colZoff[t] = zoff; cid[t] = ncl_idx; }
+            if (k > 1) {
+                for (int q = 0; q < k; ++q)
+                    for (int p = 0; p < k; ++p) blkSrc.push_back((i + p) + (i + q) * n);
+                zoff += k * k; ++nclust;
+            }
+            ++ncl_idx;
+            i = j;
+        }
+        try {
+            dRfColB0.upload(colB0.data(), n); dRfColK.upload(colK.data(), n);
+            dRfColZoff.upload(colZoff.data(), n); dRfCid.upload(cid.data(), n);
+        } catch (...) { return 0; }
+        if (nclust > 0) {
+            const int ne = static_cast<int>(blkSrc.size());
+            blkT.resize(ne); blkM.resize(ne); Zp.resize(ne);
+            try {
+                dRfBlkSrc.upload(blkSrc.data(), ne);
+                dRfBlkT.ensure(ne); dRfBlkM.ensure(ne);
+            } catch (...) { return 0; }
+            k_rf_gather<<<(ne + b - 1) / b, b, 0, stream>>>(dRfT.ptr, dRfM.ptr, dRfBlkSrc.ptr, dRfBlkT.ptr, dRfBlkM.ptr, ne);
+            if (cudaGetLastError() != cudaSuccess
+                || cudaMemcpyAsync(blkT.data(), dRfBlkT.ptr, sizeof(double) * ne, cudaMemcpyDeviceToHost, stream) != cudaSuccess
+                || cudaMemcpyAsync(blkM.data(), dRfBlkM.ptr, sizeof(double) * ne, cudaMemcpyDeviceToHost, stream) != cudaSuccess
+                || cudaStreamSynchronize(stream) != cudaSuccess)
+                return 0;
+            for (int i = 0; i < n;) {
+                const int k = colK[i];
+                if (k > 1) {
+                    const int o = colZoff[i];
+                    std::vector<double> A(blkT.begin() + o, blkT.begin() + o + k * k), B(blkM.begin() + o, blkM.begin() + o + k * k);
+                    for (int q = 0; q < k; ++q)   // symmetrise
+                        for (int p = q + 1; p < k; ++p) {
+                            const double sa = 0.5 * (A[p + q * k] + A[q + p * k]), sb = 0.5 * (B[p + q * k] + B[q + p * k]);
+                            A[p + q * k] = A[q + p * k] = sa; B[p + q * k] = B[q + p * k] = sb;
+                        }
+                    if (!smallGeneralizedEigen(k, std::move(A), std::move(B), &Zp[o])) return 0;
+                }
+                i += k;
+            }
+            try { dRfZ.upload(Zp.data(), static_cast<int>(Zp.size())); } catch (...) { return 0; }
+            // T <- Z^T T Z, M <- Z^T M Z (block-diagonal Z)
+            k_rf_col<<<gnn, b, 0, stream>>>(dRfT.ptr, dRfG.ptr, dRfColB0.ptr, dRfColK.ptr, dRfColZoff.ptr, dRfZ.ptr, n);
+            k_rf_row<<<gnn, b, 0, stream>>>(dRfG.ptr, dRfT.ptr, dRfColB0.ptr, dRfColK.ptr, dRfColZoff.ptr, dRfZ.ptr, n, 1);
+            k_rf_col<<<gnn, b, 0, stream>>>(dRfM.ptr, dRfG.ptr, dRfColB0.ptr, dRfColK.ptr, dRfColZoff.ptr, dRfZ.ptr, n);
+            k_rf_row<<<gnn, b, 0, stream>>>(dRfG.ptr, dRfM.ptr, dRfColB0.ptr, dRfColK.ptr, dRfColZoff.ptr, dRfZ.ptr, n, 1);
+        }
+        k_rf_E<<<gnn, b, 0, stream>>>(dRfT.ptr, dRfM.ptr, dRfCid.ptr, dRfG.ptr, n);
+        double* H = dRfG.ptr;
+        if (nclust > 0) {   // H = Z (I + E)
+            k_rf_row<<<gnn, b, 0, stream>>>(dRfG.ptr, dRfT.ptr, dRfColB0.ptr, dRfColK.ptr, dRfColZoff.ptr, dRfZ.ptr, n, 0);
+            H = dRfT.ptr;
+        }
+        if (cudaGetLastError() != cudaSuccess
+            || cublasDgemm(cublas, CUBLAS_OP_N, CUBLAS_OP_N, n, n, n, &one, X, n, H, n, &zero, Y, n) != CUBLAS_STATUS_SUCCESS)
+            return 0;
+        std::swap(X, Y);
+    }
+    if (!accepted) { ++eig_refine_rejected; return 0; }
+    // 3. orthonormalisation X <- X (I + R / 2), eigenvalues = the Rayleigh quotients of the accepted pass.
+    k_rf_orth<<<gnn, b, 0, stream>>>(dRfM.ptr, dRfG.ptr, n);
+    if (cudaGetLastError() != cudaSuccess
+        || cublasDgemm(cublas, CUBLAS_OP_N, CUBLAS_OP_N, n, n, n, &one, X, n, dRfG.ptr, n, &zero, dC.ptr, n) != CUBLAS_STATUS_SUCCESS
+        || cudaMemcpyAsync(dEps.ptr, dRfLam.ptr, sizeof(double) * n, cudaMemcpyDeviceToDevice, stream) != cudaSuccess)
+        return -1;   // F in dC may be overwritten: no silent fallback on it
+    ++eig_refine_taken;
+    profMark("eig FP64 refine: refinement");
+    return 1;
+#else
+    (void)n;
+    return 0;
+#endif
+}
+
+void XtbGpuContext::setEigenRefinement(bool on)
+{
+    if (m_impl) m_impl->eig_refine = on;
+}
+
+// Claude Generated (Nov 2026, WP-PERIODIC-XTB A1r): strategy of the full FP64 solves of the periodic SCF, from the
+// request ("auto", "fp64_direct", "fp32_refine", "emulated") and the device attributes only (deterministic, no timing
+// probe). Measured on an RTX 5080 (cc 12.0, FP64 1:64) only; the other device classes follow the rule without a
+// measurement. Returns the chosen code (0 fp64_direct, 1 fp32_refine, 2 emulated) or -1 for an unknown name.
+int XtbGpuContext::selectEigenStrategy(const std::string& requested, std::string* reason)
+{
+    if (!m_impl || m_impl->device < 0) return -1;
+    int ratio = 0, cc_major = 0, cc_minor = 0, sms = 0;
+    cudaDeviceGetAttribute(&ratio, cudaDevAttrSingleToDoublePrecisionPerfRatio, m_impl->device);
+    cudaDeviceGetAttribute(&cc_major, cudaDevAttrComputeCapabilityMajor, m_impl->device);
+    cudaDeviceGetAttribute(&cc_minor, cudaDevAttrComputeCapabilityMinor, m_impl->device);
+    cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, m_impl->device);
+    bool emulation = false;   // cuBLAS FP64 fixed-point emulation accepted by the library for this handle
+#if defined(CUBLAS_VER_MAJOR) && CUBLAS_VER_MAJOR >= 13
+    if (m_impl->cublas) {
+        emulation = cublasSetMathMode(m_impl->cublas, CUBLAS_FP64_EMULATED_FIXEDPOINT_MATH) == CUBLAS_STATUS_SUCCESS;
+        cublasSetMathMode(m_impl->cublas, CUBLAS_DEFAULT_MATH);
+    }
+#endif
+    const bool fast_fp64 = deviceHasFastFp64() || (ratio > 0 && ratio <= 4);
+    const std::string dev = fmt_device(m_impl->name, cc_major, cc_minor, ratio, sms, emulation);
+    int code = -1;
+    std::string why;
+    if (requested == "auto") {
+        if (fast_fp64) {
+            code = 0; why = "auto: FP64 rate high, native FP64 solve (not measured on such a device)";
+        } else if (emulation && cc_major >= 12) {
+            code = 1; why = "auto: FP64-weak device with cuBLAS FP64 emulation, FP32 solve + FP64 refinement (measured on RTX 5080 only)";
+        } else {
+            code = 0; why = "auto: no FP64 emulation assumed for this device class, refinement with native FP64 GEMMs is slower (RTX 5080 measurement), native FP64 solve (not measured on this device)";
+        }
+    } else if (requested == "fp64_direct") {
+        code = 0; why = "requested";
+    } else if (requested == "fp32_refine") {
+        code = 1; why = emulation ? "requested" : "requested; no FP64 emulation: the refinement GEMMs run in native FP64";
+    } else if (requested == "emulated") {
+        if (emulation) { code = 2; why = "requested"; }
+        else { code = 0; why = "requested emulated, but cuBLAS FP64 emulation is unavailable: native FP64 solve"; }
+    } else {
+        return -1;
+    }
+    m_impl->eig_strategy = code;
+    if (reason) *reason = dev + ": " + why;
+    return code;
+}
+
 void XtbGpuContext::setPseudoDiagonalisation(bool on, double max_dq, int max_steps, bool fp64)
 {
     if (!m_impl) return;
@@ -6250,6 +6695,43 @@ bool XtbGpuContext::eigensolveResidentFockFull(double* eps_out, bool fp32, int n
         return info == 0;
     }
 
+    // A1r (Claude Generated, Nov 2026): FP32 solve + FP64 refinement (periodic SCF, single device); not accepted -> dC
+    // still holds F and the full solve below runs.
+    if (!partial && m_impl->eig_refine && m_impl->eig_strategy == 1 && m_impl->dist_devices.size() <= 1) {
+        const int rr = m_impl->refineEigenFP64(n);
+        if (rr < 0) { m_impl->last_error = "FP64 eigen refinement failed after the Fock matrix was consumed"; return false; }
+        if (rr == 1) {
+            if (download_eps && eps_out) m_impl->dEps.download(eps_out, n, stream);
+            return cudaStreamSynchronize(stream) == cudaSuccess;
+        }
+    }
+    // A1e (Claude Generated, Nov 2026): strategy "emulated" - the same reduce + dsyevd + back-transform with the
+    // cuBLAS/cuSOLVER FP64 fixed-point emulation (math modes restored when the function returns).
+    struct EmuScope {
+        cublasHandle_t cb = nullptr; cusolverDnHandle_t cs = nullptr; bool on = false;
+        ~EmuScope()
+        {
+            if (!on) return;
+#if defined(CUBLAS_VER_MAJOR) && CUBLAS_VER_MAJOR >= 13
+            cublasSetEmulationStrategy(cb, CUBLAS_EMULATION_STRATEGY_DEFAULT);
+            cublasSetMathMode(cb, CUBLAS_DEFAULT_MATH);
+            cusolverDnSetEmulationStrategy(cs, CUDA_EMULATION_STRATEGY_DEFAULT);
+            cusolverDnSetMathMode(cs, CUSOLVER_DEFAULT_MATH);
+#endif
+        }
+    } emu;
+#if defined(CUBLAS_VER_MAJOR) && CUBLAS_VER_MAJOR >= 13
+    if (!partial && m_impl->eig_refine && m_impl->eig_strategy == 2 && m_impl->dist_devices.size() <= 1) {
+        emu.cb = m_impl->cublas; emu.cs = m_impl->cusolver; emu.on = true;
+        if (cublasSetMathMode(emu.cb, CUBLAS_FP64_EMULATED_FIXEDPOINT_MATH) != CUBLAS_STATUS_SUCCESS
+            || cublasSetEmulationStrategy(emu.cb, CUBLAS_EMULATION_STRATEGY_EAGER) != CUBLAS_STATUS_SUCCESS
+            || cusolverDnSetMathMode(emu.cs, CUSOLVER_FP64_EMULATED_FIXEDPOINT_MATH) != CUSOLVER_STATUS_SUCCESS
+            || cusolverDnSetEmulationStrategy(emu.cs, CUDA_EMULATION_STRATEGY_EAGER) != CUSOLVER_STATUS_SUCCESS) {
+            EmuScope reset; reset.cb = emu.cb; reset.cs = emu.cs; reset.on = true;   // native solve on failure
+            emu.on = false;
+        }
+    }
+#endif
     // dC holds F → Ã = L⁻¹·F·L⁻ᵀ → C̃ → C.
     if (cublasDtrsm(m_impl->cublas, CUBLAS_SIDE_RIGHT, CUBLAS_FILL_MODE_LOWER,
                     CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT, n, n, &one,
@@ -8772,6 +9254,81 @@ bool XtbGpuContext::koGradientPeriodic(int nat, const double* xyz_bohr, int nsh,
     } catch (...) {
         return false;
     }
+}
+
+/* ---------------------------------------------------------------------------------------------- *
+ *  WP-PERIODIC-XTB B1 (Claude Generated, Nov 2026): dftd4 EN-weighted covalent CN with lattice    *
+ *  images (dispersion::computeD4CovalentCNPeriodic), layout of k_cn_pbc: one block per atom i,   *
+ *  128 threads stride over j and its images (T = 0 skipped for j = i, r2 < cut2), fixed-order     *
+ *  block tree. countf = k4 exp(-(|en_i - en_j| + k5)^2 / k6) 0.5 (1 + erf(-kn (r/rcov_ij - 1))).  *
+ *  Not bitwise to the host (summation order, device erf).                                         *
+ * ---------------------------------------------------------------------------------------------- */
+__global__ void k_d4_cn_pbc(int nat, const int* __restrict__ Z, const double* __restrict__ xyz,
+                            const double* __restrict__ rad, const double* __restrict__ en, double kn, double k4,
+                            double k5, double k6, double Lx, double Ly, double Lz, int ntr,
+                            const double* __restrict__ trans, double cut2, double* __restrict__ cn)
+{
+    const int i = blockIdx.x;
+    if (i >= nat) return;
+    const int zi = Z[i];
+    double acc = 0.0;
+    if (zi >= 1 && zi <= 118) {
+        for (int j = threadIdx.x; j < nat; j += blockDim.x) {
+            const int zj = Z[j];
+            if (zj < 1 || zj > 118) continue;
+            const double rcov = rad[zi] + rad[zj];
+            const double t = fabs(en[zi] - en[zj]) + k5;
+            const double den = k4 * exp(-(t * t) / k6);
+            double d0x = xyz[3 * i] - xyz[3 * j], d0y = xyz[3 * i + 1] - xyz[3 * j + 1], d0z = xyz[3 * i + 2] - xyz[3 * j + 2];
+            double s = d0x * (1.0 / Lx); s -= rint(s); d0x = Lx * s;
+            s = d0y * (1.0 / Ly); s -= rint(s); d0y = Ly * s;
+            s = d0z * (1.0 / Lz); s -= rint(s); d0z = Lz * s;
+            for (int tt = (i == j) ? 1 : 0; tt < ntr; ++tt) {
+                const double dx = d0x - trans[3 * tt], dy = d0y - trans[3 * tt + 1], dz = d0z - trans[3 * tt + 2];
+                const double r2 = __dadd_rn(__dadd_rn(__dmul_rn(dx, dx), __dmul_rn(dy, dy)), __dmul_rn(dz, dz));
+                if (r2 >= cut2 || r2 < 1.0e-24) continue;
+                acc += den * (0.5 * (1.0 + erf(-kn * (sqrt(r2) / rcov - 1.0))));
+            }
+        }
+    }
+    __shared__ double red[128];
+    red[threadIdx.x] = acc;
+    __syncthreads();
+    for (int st = blockDim.x / 2; st > 0; st >>= 1) {
+        if (threadIdx.x < st) red[threadIdx.x] += red[threadIdx.x + st];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) cn[i] = red[0];
+}
+
+// Claude Generated (Nov 2026, WP-PERIODIC-XTB B1): periodic D4 covalent CN (kernel k_d4_cn_pbc).
+bool XtbGpuContext::d4CovalentCnPeriodic(int nat, const int* Z, const double* xyz_bohr, const double* rad,
+                                         const double* en, double kn, double k4, double k5, double k6,
+                                         const double* cell_L, int ntrans, const double* trans, double cut2,
+                                         double* cn_out)
+{
+    Impl& I = *m_impl;
+    if (!ok() || nat <= 0 || ntrans <= 0 || !Z || !xyz_bohr || !rad || !en || !cell_L || !trans || !cn_out) return false;
+    cudaStream_t stream = I.stream;
+    try {
+        I.profStart();
+        I.dD4CnZ.upload(Z, nat, stream);
+        I.dD4CnXyz.upload(xyz_bohr, 3 * nat, stream);
+        I.dD4Rad.upload(rad, 119, stream);
+        I.dD4En.upload(en, 119, stream);
+        I.dPbcCnTrans.upload(trans, 3 * ntrans, stream);
+        I.dD4CnOut.ensure(nat);
+        k_d4_cn_pbc<<<nat, 128, 0, stream>>>(nat, I.dD4CnZ.ptr, I.dD4CnXyz.ptr, I.dD4Rad.ptr, I.dD4En.ptr, kn, k4, k5,
+                                             k6, cell_L[0], cell_L[1], cell_L[2], ntrans, I.dPbcCnTrans.ptr, cut2,
+                                             I.dD4CnOut.ptr);
+        if (cudaGetLastError() != cudaSuccess) return false;
+        I.dD4CnOut.download(cn_out, nat, stream);
+        if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
+        I.profMark("PBC: D4 covalent CN");
+    } catch (...) {
+        return false;
+    }
+    return true;
 }
 
 // Claude Generated (Nov 2026, WP-PERIODIC-XTB H3): periodic coordination number (kernel k_cn_pbc).

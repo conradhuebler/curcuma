@@ -275,6 +275,12 @@ public:
     void setHostLoopPseudo(bool on, int n, double n_elec, int nocc_pairs, double Tele, double last_dq);
     /// Claude Generated (Nov 2026, WP-PERIODIC-XTB E1): see GpuScfBackend::setHostLoopDensityComplement.
     void setHostLoopDensityComplement(bool on);
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB A1r): see GpuScfBackend::setEigenRefinement.
+    void setEigenRefinement(bool on);
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB A1r): strategy of the FP64 solves while setEigenRefinement is on:
+    /// "auto" (from the device attributes), "fp64_direct", "fp32_refine", "emulated". Returns 0/1/2 or -1 (unknown
+    /// name); *reason names the device and the rule.
+    int selectEigenStrategy(const std::string& requested, std::string* reason);
     void pseudoDiagonalisationCounts(int& taken, int& rejected) const;
 
     /// "" when not configured, else the devices used and the number of split steps.
@@ -504,6 +510,10 @@ public:
     /// Claude Generated (Nov 2026, WP-PERIODIC-XTB H3): see GpuScfBackend::cnPeriodic.
     bool cnPeriodic(int nat, const double* xyz_bohr, const double* rcov, const double* cell_L, int ntrans,
                     const double* trans, double cut2, int mode, double* cn_out);
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB B1): see GpuScfBackend::d4CovalentCnPeriodic.
+    bool d4CovalentCnPeriodic(int nat, const int* Z, const double* xyz_bohr, const double* rad, const double* en,
+                              double kn, double k4, double k5, double k6, const double* cell_L, int ntrans,
+                              const double* trans, double cut2, double* cn_out);
     /// Claude Generated (Nov 2026, WP-PERIODIC-XTB H1): see GpuScfBackend::h0PulayGradientPeriodic.
     bool h0PulayGradientPeriodic(int nat, const double* xyz_bohr, const double* se, const double* v_ao,
                                  const double* v_dp, const double* v_qp, const double* we, int ncol,

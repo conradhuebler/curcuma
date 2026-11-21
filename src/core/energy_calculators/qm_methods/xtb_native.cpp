@@ -1734,6 +1734,9 @@ double XTB::Calculation(bool gradient)
     double pbc_last_gpu_band = 0.0;   // G1b: Tr(P H0) of the last host-driven device step (host H0 deferred)
     if (m_gpu_scf) m_gpu_scf->setHostLoopPseudo(false, 0, 0.0, 0, 0.0, 0.0);   // G1c: nothing left from a failed SCF
     if (m_gpu_scf) m_gpu_scf->setHostLoopDensityComplement(false);             // E1
+    // A1r (Claude Generated, Nov 2026): FP64 solves of the periodic SCF by FP32 solve + FP64 refinement on the device;
+    // CURCUMA_PBC_GPU_HOST=eigref keeps the full FP64 solve.
+    if (m_gpu_scf) m_gpu_scf->setEigenRefinement(m_pbc && !pbcGpuStageOnHost("eigref"));
     double resident_ecoul = 0.0, resident_ethird = 0.0, resident_emp = 0.0;  // its SCC energies
     pre_mark("preconditioner, SCF state");
     const auto t_scf_start = clock::now();
@@ -2522,6 +2525,7 @@ double XTB::Calculation(bool gradient)
     m_pbc_dev_wfn = false;   // G5b
     if (m_pbc && m_gpu_scf) m_gpu_scf->setHostLoopPseudo(false, 0, 0.0, 0, 0.0, 0.0);   // G1c: SCF done
     if (m_pbc && m_gpu_scf) m_gpu_scf->setHostLoopDensityComplement(false);             // E1: SCF done
+    if (m_gpu_scf) m_gpu_scf->setEigenRefinement(false);                                 // A1r: SCF done
     if (use_gpu_resident && m_gpu_scf) {
         // The converged P/C stay on the device only for big systems (as before for GFN2: dense multipole integrals
         // above 2 GB, nao > ~5270); the small ones keep the public accessors (getDensity, MolecularOrbitals)
@@ -4054,10 +4058,23 @@ bool XTB::computeD4PotentialDedq(const Vector& q_at, Vector& dEdq) const
     if (!m_d4_prepared) {
         m_d4_generator->setUseD4SingleShotEEQ(false);
         m_d4_generator->setD4CovalentCN(true);  // GFN2 dftd4 EN-weighted covalent CN
+        // B0 (Claude Generated, Nov 2026): split of the per-geometry D4 setup (CURCUMA_GPU_PROFILE or verbosity 3)
+        using d4sclk = std::chrono::steady_clock;
+        const auto t_s0 = d4sclk::now();
         if (m_pbc) primeD4CnPeriodic(geom_bohr);   // WP-PERIODIC-XTB P1: periodic covalent CN
         else primeD4CnFromDevice(geom_bohr);
+        const auto t_s1 = d4sclk::now();
         m_d4_generator->GenerateParameters(m_atoms, geom_bohr);
         ++m_d4_genparams_calls;
+        const auto t_s2 = d4sclk::now();
+        auto d4_setup_report = [&](const char* tail) {
+            static const bool prof = std::getenv("CURCUMA_GPU_PROFILE") != nullptr;
+            if (!(prof || CurcumaLogger::get_verbosity() >= 3)) return;
+            const auto ms = [](d4sclk::time_point a, d4sclk::time_point b) {
+                return std::chrono::duration<double, std::milli>(b - a).count(); };
+            CurcumaLogger::result(fmt::format("  D4 setup: covalent CN {:.1f} ms, GenerateParameters {:.1f} ms{}",
+                                              ms(t_s0, t_s1), ms(t_s1, t_s2), tail));
+        };
         m_d4_prepared = true;
         // WP2: new geometry → the evaluator's cached pair list is stale (rebuilt on the
         // next computeEnergyAndGradient). Per-iter calls within this geometry reuse it.
@@ -4092,6 +4109,10 @@ bool XTB::computeD4PotentialDedq(const Vector& q_at, Vector& dEdq) const
                 m_pbc_d4_dev_ready = m_gpu_scf->beginDispersionImages(nat, m_cell_bohr.L,
                     static_cast<int>(im.trans.size()), tr.data(), im.cutoff2);
             }
+            d4_setup_report(fmt::format(", device upload {:.1f} ms", std::chrono::duration<double, std::milli>(
+                                                                         d4sclk::now() - t_s2).count()).c_str());
+        } else {
+            d4_setup_report("");
         }
     }
 

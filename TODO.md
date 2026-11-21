@@ -231,6 +231,9 @@ Stand.
 
 ## 3. Tests und Validierung
 
+- **`-xtb.gpu_eigen_strategy auto` ungemessen ausser RTX 5080** (2026-11-21, WP-PERIODIC-XTB A1r): Rechenzentrums-GPU (H200/A100: erwartet fp64_direct) und
+  FP64-schwache Karten ohne cc >= 12 (A4500, GTX 1660: auto = fp64_direct, ob die cuBLAS-Emulation dort lohnt, offen) je einmal `fp64_direct` gegen
+  `fp32_refine` messen und die Regel in `XtbGpuContext::selectEigenStrategy` nachziehen.
 - **PLUMED, ungetestet** (Stand 2026-10-30, getestet nur Ar2-RESTRAINT und Ethan-Torsion mit GFN-FF): QM-Methoden, größere Systeme, Restart, NPT/`setVirial`, PLUMED zusammen mit GPU. Gemeldete extreme PLUMED-Langsamkeit nicht nachgemessen. Well-tempered METAD lag 10 % über der freien MD (2.66 gegen 2.43 kcal/mol, Hügel nicht konvergiert).
 - **GPU nach dem NEB-MD-Merge** (2026-10-30, RTX 5080, Stand vor `96c29c50`): CUDA bitgleich auf Koffein und Benzol, Vulkan nur ohne `-gpu_strict` geprüft (CPU-Fallback nicht ausgeschlossen), ROCm nicht testbar (kein SDK). NEB-MD auf CUDA nur 1 ps ohne Zahlenvergleich zur CPU.
 - **Compiler-Warnungen aus dem Master** (2026-10-30, kein Neubau zum Nachzählen): `measurement.h` (`-Wsuggest-override`), `xtb_native.cpp` (`t_gp0`), `src/helpers/main.cpp` (`columns`), dazu 65 `-Winline`; die Vorgabe "warnungsfreier Build" aus `CLAUDE.md` ist nicht erfüllt.

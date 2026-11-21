@@ -62,10 +62,11 @@
 // 21 = Nov 2026, WP-PERIODIC-XTB H5 (GpuScfBackend::d4PairsPeriodic).
 // 22 = Nov 2026, WP-PERIODIC-XTB R2-R4 (GpuScfBackend::beginPotentialPeriodic, downloadConvergedPotentials).
 // 23 = Nov 2026, WP-PERIODIC-XTB R5 (GpuScfBackend::periodicGammaResident).
+// 24 = Nov 2026, WP-PERIODIC-XTB A1r/B1 (GpuScfBackend::setEigenRefinement, d4CovalentCnPeriodic).
 
 #pragma once
 
-#define CURCUMA_GPU_PLUGIN_ABI_VERSION 23
+#define CURCUMA_GPU_PLUGIN_ABI_VERSION 24
 
 /// Defines `extern "C" int curcuma_<backend>_abi_version()` in a plugin entry file (use at file scope).
 #define CURCUMA_GPU_PLUGIN_DEFINE_ABI_VERSION(backend)                                                                \

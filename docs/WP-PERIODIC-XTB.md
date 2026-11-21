@@ -1128,6 +1128,68 @@ Regression after R2-R5 (2026-11-21, test selection of the regression run below, 
 fallback paths of R2-R5 (failed device potential, failed resident step, failed device matrices) were not triggered
 by any run (no fault injection); open-shell or charged cells (refused, host-driven loop).
 
+### A1r FP64 eigensolve by FP32 solve + FP64 refinement, selectable per device (2026-11-21, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+Starting point (432 H2O, gfn2, R4): one full FP64 solve (dtrsm reduction + dsyevd + back-transform) per FP64 SCF step,
+about 263 ms of the 479 ms SCF of an MD step. Measured in the standalone program `eig/bench2.cu` ... `bench5.cu`
+(scratchpad, not in the repository), RTX 5080, CUDA 13.4, n = 2592, then in the code:
+
+| idea | measurement | taken |
+|---|---|---|
+| cuBLAS FP64 fixed-point emulation (`CUBLAS_FP64_EMULATED_FIXEDPOINT_MATH`, strategy EAGER) | dgemm n^3 41.7 -> 6.7 ms; max \|dC\| vs native 2.4e-14 at max \|C\| 4.6 (FP64 level), run to run bitwise; only gemm is emulated: dsymm 42.7, dsyrkx 20.6, dsyrk 21.9, dtrmm 21.0 ms (native speed) | yes, inside the refinement |
+| emulated solve (strategy `emulated`): cuSOLVER `CUSOLVER_FP64_EMULATED_FIXEDPOINT_MATH` + emulated dtrsm | dsyevd 179 -> 159 ms, 2 dtrsm 50 -> 27 ms (random matrix); in the code `-sp` 216 H2O SCF 564 -> 648 ms (slower), 432 H2O 2430 -> 2283 ms | selectable, never chosen by auto |
+| FP32 solve + Ogita-Aishima refinement (strategy `fp32_refine`) | 432 H2O dump of the FP64 step: FP32 start (strsm, ssyevd, strsm) 36 ms, 4 emulated GEMMs per pass 25 ms; two updates + acceptance pass + orthonormalisation: residual max\|F c - eps S c\|/max\|F\| 2.8e-15 (dsyevd 4.3e-15), max\|C^T S C - I\| 7.3e-15 (dsyevd 9.1e-15), max\|dP\| vs dsyevd 1.6e-14, max\|deps\| 1.0e-15 | yes (auto on cc >= 12 with emulation) |
+| refinement without cluster solves (plain RefSyEv) | diverges from the FP32 start (eigenvalue spacing down to 2.3e-7 Eh, below the FP32 error): orthonormality 1.2e-1 | no |
+| refinement started from the previous SCF vectors (`dCprev32`, pseudo-step vectors) | max\|T_off\| 2.6e-2 (the pseudo steps do not diagonalise inside the occupied block): one cluster of all 2592 vectors | no |
+| refinement with native FP64 GEMMs | 15 GEMMs x 42 ms = 630 ms > 263 ms of the direct solve | no (fp32_refine on a device without emulation is allowed explicitly, auto does not take it) |
+
+- Algorithm (`XtbGpuContext::Impl::refineEigenFP64`): FP32 generalized solve of F; per pass T = X^T F X and
+  M = X^T S X (4 emulated GEMMs), lam_i = T_ii / M_ii; clusters of consecutive lam closer than dc = 100 (max\|T_off\| +
+  max\|lam\| max\|R\|) get the exact eigenvectors of their small pencil (T_cc, M_cc) (host Cholesky + cyclic Jacobi,
+  at most 256 per cluster), the rest the first-order correction E_ij = (T_ij + lam_j R_ij)/(lam_j - lam_i), X <- X Z (I + E).
+  Accepted when max\|T_off\| <= 1e-11 max(1, max\|lam\|), max\|R\| <= 1e-10 and lam ascending (at most 3 updates, two
+  suffice in every water step seen), then X <- X (1.5 I - 0.5 M). Not accepted: dC still holds F and the direct solve
+  runs (counted, `CURCUMA_EIG_REFINE_MAX_UPDATES=0` forces it; `CURCUMA_EIG_REFINE_TRACE=1` prints the passes).
+- Selection (`XtbGpuContext::selectEigenStrategy`, parameter `-xtb.gpu_eigen_strategy auto|fp64_direct|fp32_refine|
+  emulated`, env `CURCUMA_GPU_EIGEN_STRATEGY` wins; acts only in the SCF with a cell, `CURCUMA_PBC_GPU_HOST=eigref`
+  keeps the direct solve). auto reads only device attributes (deterministic, no timing probe), verbosity 2 names the
+  choice and the attributes:
+
+| device class (criterion) | auto | measured |
+|---|---|---|
+| full-rate FP64 (cc 6.0/7.0/8.0/9.x/10.x or FP32:FP64 <= 4; A100, H100/H200, B200) | fp64_direct | not measured (expectation: the native solve is not slower there; a datacenter test is pending) |
+| FP64-weak, cuBLAS FP64 emulation accepted, cc >= 12 (RTX 50xx, RTX PRO Blackwell) | fp32_refine | RTX 5080 only |
+| FP64-weak without emulation or cc < 12 (RTX A4500 cc 8.6, RTX 40xx, GTX 1660 cc 7.5) | fp64_direct | not measured (whether the emulation pays on these architectures is open) |
+
+- Plugin ABI 23 -> 24 (`GpuScfBackend::setEigenRefinement`).
+- Gates (one binary; new = auto = fp32_refine, old = `eigref` or `fp64_direct`): `pbc_xtb_gpu_parity` 10/10 for each of
+  auto, `fp64_direct` and `emulated` (gfn2 216 box |dE| 4.3e-12 / 4.1e-12 / 4.3e-12 Eh, max |dG| 1.5e-10 Eh/A, max
+  |dXi| 4.1e-9 Eh; gfn1 box 3.6e-12 / 6.2e-11 / 1.0e-9; caffeine gfn2 1.4e-14 / 5.2e-10 / 3.5e-9), second CUDA run
+  bitwise 10/10 for each; `pbc_|ewald` 29/29; `-sp -scf_threshold 1e-9` new vs old: gfn2 216 H2O dE 2.3e-13 Eh, max dG
+  2.9e-14 Eh/A, 432 H2O 4.6e-13 / 3.5e-14, 17 / 17 iterations; gfn1 216 H2O 4.6e-13 / 2.3e-14, 432 H2O 9.1e-13 /
+  2.6e-14, 15 / 15; `emulated` vs old 216 / 432 dE 2.3e-13 / 4.6e-13, dG <= 1.1e-14; forced fallback
+  (`CURCUMA_EIG_REFINE_MAX_UPDATES=0`) md5-identical to `fp64_direct`; run to run md5-identical for auto (gfn1, gfn2,
+  216, 432) and `emulated` (216, 432); GPU FD (dimer 8 A): gfn1 8.07e-9, gfn2 8.87e-9 Eh/A (auto; 8.09e-9 / 8.86e-9
+  with the other two); NVE 216 H2O 100 steps tight, new vs old: max |dE_pot| 5.2e-11 Eh; MD 216 H2O 20 steps tight:
+  E_pot -1096.551628, T 462.483544 K, P 14765.49 bar (unchanged); without a cell CPU 36/36 and CUDA 36/36 md5 to the
+  rebuilt base.
+- Time: `-sp -scf_threshold 1e-9` (17 iterations, 8 FP64 steps) SCF 216 H2O 564 -> 424 ms, 432 H2O 2430 -> 1587 ms;
+  MD wall per step (`md.sh`, 20 steps, n = 1 each): 216 H2O 0.424 -> 0.395 s, 432 H2O 1.211 -> 1.110-1.125 s.
+
+### B0/B1 per-geometry D4 reference setup: split and periodic covalent CN on the device (2026-11-21, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+- **B0** split (new profile line `D4 setup:` with `CURCUMA_GPU_PROFILE` or verbosity 3; 432 H2O MD step, n = 3 geometries):
+  periodic covalent CN (host, serial `computeD4CovalentCNPeriodic`, 30 Bohr images) 81-101 ms, `GenerateParameters`
+  (weights, reference C6) 4.8-5.3 ms, device upload (`beginDispersion`, images) 5.3-5.8 ms. The CN is the whole item;
+  threading or a neighbour list with skin was therefore not needed.
+- **B1** `GpuScfBackend::d4CovalentCnPeriodic` (CUDA `k_d4_cn_pbc`, layout of `k_cn_pbc`: one block per atom, threads
+  over j and its images, fixed-order block tree, device erf): 81-101 -> 6.5 ms (kernel 6.5 ms incl. uploads);
+  host loop on failure, token `d4cn`. pre-SCF block 92-111 -> 17-32 ms.
+- Gates (with A1r, old = `eigref,d4cn`): parity 10/10 and bitwise 10/10 as A1r, `pbc_|ewald` 29/29; `-sp -scf_threshold
+  1e-9` B1 vs `d4cn`: 216 H2O dE 0, max dG 6.3e-15 Eh/A; 432 H2O 4.6e-13 Eh / 1.0e-14 Eh/A, 17 / 17 iterations; run to
+  run md5-identical; GPU FD 8.07e-9 / 8.87e-9 Eh/A; NVE 216 H2O 100 steps tight against `eigref,d4cn`: max |dE_pot|
+  5.5e-11 Eh; MD 20 steps tight unchanged; no-cell CPU 36/36 and CUDA 36/36 md5 to the base.
+
 ## Regression run (2026-11-14, `release/`, `ctest -R 'gfn|xtb|sqm|gfnff|pbc|ewald|simplemd|restart|md_|gpu|plugin|molecule|xyz|parser|curcumaopt|structinv' -j1`)
 
 369 tests selected, 2 failed before the fix below: `pbc_md_nonperiodic_cell` (its check (a) assumed gfn2 + cell to be
@@ -1187,7 +1249,7 @@ change. Measurements and scripts: project folder GFN-FF-Wasser, subfolder 06_gfn
   structure-factor factorisation of the multipole k sums of the energy matrices (G3; the gradient and virial use it
   since M1/M2), d-shell elements with a cell (refused), implicit solvation
   with a cell (refused), `-large_system_mode` with a cell (its driver ignores the cell: documented as non-periodic, not
-  refused), GPU with a cell: CUDA with the device stages G1b/G2/G3/G4a/G4b/G5a-d, E1/A1/M1/M2/C1, H1-H5 and D1
+  refused), GPU with a cell: CUDA with the device stages G1b/G2/G3/G4a/G4b/G5a-d, E1/A1/M1/M2/C1, H1-H5, D1, A1r and B1
   (the closed-shell neutral SCF is device-resident since R3/R5; open shell and charged cells keep the host-driven loop), ROCm/Vulkan CPU fallback (not planned).
 - Not tested: open shell, charged cells (background term differs from tblite), halogen bond with a cell (cannot run:
   the GFN1 donors Br/I carry d shells, which a cell refuses), thread-count independence of the periodic energy and gradient, MD energy conservation with a cell,

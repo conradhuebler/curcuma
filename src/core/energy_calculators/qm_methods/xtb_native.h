@@ -436,6 +436,10 @@ struct GpuScfBackend {
     /// Claude Generated (Nov 2026, WP-PERIODIC-XTB E1): closed-shell density of the host-driven loop as
     /// P = 2 (S^-1 - C_v C_v^T) when every occupied orbital carries occ = 2 exactly (else the GEMM). Default: no-op.
     virtual void setHostLoopDensityComplement(bool on) { (void)on; }
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB A1r): full FP64 solves of the SCF as an FP32 solve plus FP64
+    /// iterative refinement (emulated FP64 GEMMs); a refinement that misses the FP64 acceptance runs the full solve.
+    /// Default: no-op.
+    virtual void setEigenRefinement(bool on) { (void)on; }
     virtual bool beginComputedPeriodic(const std::vector<double>& xyz_bohr, const double* se, const double* cell_L,
                                        int ntrans, const double* trans, double cut2, bool multipole)
     { (void)xyz_bohr; (void)se; (void)cell_L; (void)ntrans; (void)trans; (void)cut2; (void)multipole; return false; }
@@ -808,6 +812,13 @@ struct GpuScfBackend {
                             const double* trans, double cut2, int mode, double* cn_out)
     { (void)nat; (void)xyz_bohr; (void)rcov; (void)cell_L; (void)ntrans; (void)trans; (void)cut2; (void)mode;
       (void)cn_out; return false; }
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB B1): dftd4 EN-weighted covalent CN over the images of cut2
+    /// (computeD4CovalentCNPeriodic): rad/en are the 119-entry tables of d4CovalentCNTables. Default false -> host.
+    virtual bool d4CovalentCnPeriodic(int nat, const int* Z, const double* xyz_bohr, const double* rad, const double* en,
+                                      double kn, double k4, double k5, double k6, const double* cell_L, int ntrans,
+                                      const double* trans, double cut2, double* cn_out)
+    { (void)nat; (void)Z; (void)xyz_bohr; (void)rad; (void)en; (void)kn; (void)k4; (void)k5; (void)k6; (void)cell_L;
+      (void)ntrans; (void)trans; (void)cut2; (void)cn_out; return false; }
     /// Claude Generated (Nov 2026, WP-PERIODIC-XTB H1): H0/Pulay gradient over the images (section 2b of
     /// calculateGradientPeriodic) on the device from the resident P and C of this SCF: se[nsh] self-energies,
     /// v_ao[nao] = v_sh + v_at, v_dp[3 nat] / v_qp[6 nat] (atom-major, GFN2 only, multipole), we[ncol] = focc eps

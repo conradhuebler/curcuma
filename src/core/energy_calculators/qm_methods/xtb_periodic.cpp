@@ -428,6 +428,22 @@ void XTB::primeD4CnPeriodic(const Matrix& geom_bohr) const
 {
     if (!m_d4_generator) return;
     const PBCUtils::LatticeImageList images = PBCUtils::makeLatticeImageList(m_cell_bohr, kPbcD4CnCutoffBohr);
+    // B1 (Claude Generated, Nov 2026): on the CUDA device (host loop on failure or CURCUMA_PBC_GPU_HOST=d4cn)
+    if (m_gpu_scf && m_pbc_device_scf && !pbcGpuStageOnHost("d4cn")) {
+        const int nat = m_atomcount;
+        std::vector<double> xyz(3 * static_cast<size_t>(nat)), tr(3 * images.trans.size()), cn(nat, 0.0);
+        for (int i = 0; i < nat; ++i)
+            for (int k = 0; k < 3; ++k) xyz[3 * i + k] = geom_bohr(i, k);
+        for (size_t t = 0; t < images.trans.size(); ++t)
+            for (int k = 0; k < 3; ++k) tr[3 * t + k] = images.trans[t][k];
+        const auto tab = curcuma::dispersion::d4CovalentCNTables();
+        if (m_gpu_scf->d4CovalentCnPeriodic(nat, m_atoms.data(), xyz.data(), tab.rad, tab.en, tab.kn, tab.k4, tab.k5,
+                                            tab.k6, m_cell_bohr.L, static_cast<int>(images.trans.size()), tr.data(),
+                                            images.cutoff2, cn.data())) {
+            m_d4_generator->setPrecomputedCovalentCN(std::move(cn));
+            return;
+        }
+    }
     m_d4_generator->setPrecomputedCovalentCN(
         curcuma::dispersion::computeD4CovalentCNPeriodic(m_atoms, geom_bohr, images));
 }

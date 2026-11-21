@@ -258,6 +258,11 @@ public:
     {
         if (m_ctx) m_ctx->setHostLoopDensityComplement(on);
     }
+    // Claude Generated (Nov 2026, WP-PERIODIC-XTB A1r): FP32 solve + FP64 refinement for the full FP64 solves.
+    void setEigenRefinement(bool on) override
+    {
+        if (m_ctx) m_ctx->setEigenRefinement(on);
+    }
     // Claude Generated (Nov 2026, WP-PERIODIC-XTB G1b): periodic integrals on the device, see GpuScfBackend.
     bool beginComputedPeriodic(const std::vector<double>& xyz_bohr, const double* se, const double* cell_L,
                                int ntrans, const double* trans, double cut2, bool multipole) override
@@ -524,6 +529,14 @@ public:
     {
         if (!m_ctx) return false;
         return m_ctx->cnPeriodic(nat, xyz_bohr, rcov, cell_L, ntrans, trans, cut2, mode, cn_out);
+    }
+    // Claude Generated (Nov 2026, WP-PERIODIC-XTB B1): periodic D4 covalent CN, see GpuScfBackend.
+    bool d4CovalentCnPeriodic(int nat, const int* Z, const double* xyz_bohr, const double* rad, const double* en,
+                              double kn, double k4, double k5, double k6, const double* cell_L, int ntrans,
+                              const double* trans, double cut2, double* cn_out) override
+    {
+        return m_ctx && m_ctx->d4CovalentCnPeriodic(nat, Z, xyz_bohr, rad, en, kn, k4, k5, k6, cell_L, ntrans, trans,
+                                                    cut2, cn_out);
     }
     // Claude Generated (Nov 2026, WP-PERIODIC-XTB H1): periodic H0/Pulay gradient, see GpuScfBackend.
     bool h0PulayGradientPeriodic(int nat, const double* xyz_bohr, const double* se, const double* v_ao,
@@ -997,6 +1010,28 @@ XtbGpuComputationalMethod::XtbGpuComputationalMethod(MethodType method, const js
                          : (x->is_string() && (x->get<std::string>() == "true" || x->get<std::string>() == "1"));
             ctx->setPseudoDiagonalisation(pseudo, scfnum("scf_pseudo_diag_max_dq", 0.3),
                                           static_cast<int>(scfnum("scf_pseudo_diag_max_steps", 12)), pseudo64);
+        }
+
+        // Claude Generated (Nov 2026, WP-PERIODIC-XTB A1r): strategy of the full FP64 eigensolves of the periodic SCF
+        // (-xtb.gpu_eigen_strategy auto|fp64_direct|fp32_refine|emulated; CURCUMA_GPU_EIGEN_STRATEGY overrides it for
+        // tests). Chosen from the device attributes only; acts only while XTB enables it (SCF with a unit cell).
+        {
+            std::string req = "auto";
+            const json* x = (config.contains("xtb") && config["xtb"].is_object() && config["xtb"].contains("gpu_eigen_strategy"))
+                ? &config["xtb"]["gpu_eigen_strategy"]
+                : (config.contains("gpu_eigen_strategy") ? &config["gpu_eigen_strategy"] : nullptr);
+            if (x && x->is_string()) req = x->get<std::string>();
+            if (const char* e = std::getenv("CURCUMA_GPU_EIGEN_STRATEGY"); e && *e) req = e;
+            std::string why;
+            int code = ctx->selectEigenStrategy(req, &why);
+            if (code < 0) {
+                CurcumaLogger::warn(fmt::format("{}: unknown gpu_eigen_strategy '{}' (auto|fp64_direct|fp32_refine|emulated), using auto",
+                                                getMethodName(), req));
+                code = ctx->selectEigenStrategy("auto", &why);
+            }
+            static const char* names[] = { "fp64_direct", "fp32_refine", "emulated" };
+            if (code >= 0 && CurcumaLogger::get_verbosity() >= 2)
+                CurcumaLogger::info(fmt::format("{}: periodic FP64 eigensolve strategy {} - {}", getMethodName(), names[code], why));
         }
 
         // Claude Generated (Sep 2026, multi-GPU): `-gpu_density_devices all|0,1,..|solver|none`
