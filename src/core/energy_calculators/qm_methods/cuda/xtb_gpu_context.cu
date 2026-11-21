@@ -200,6 +200,11 @@ struct XtbGpuContext::Impl {
     CudaBuffer<int>    dPbcRepLight;
     // Nov 2026 (H1): periodic H0/Pulay gradient (self-energies, AO/moment potentials, images, fixed-point sums)
     CudaBuffer<double> dPbcH0Se, dPbcH0Vao, dPbcH0Vdp, dPbcH0Vqp, dPbcH0Trans, dPbcH0Fix;
+    // Nov 2026 (H2): periodic point-charge Ewald and Klopman-Ohno gradient (charges, k table, structure factors)
+    CudaBuffer<double> dPbcEgQ, dPbcEgKtab, dPbcEgSf, dPbcEgFix, dPbcKoQsh, dPbcKoG, dPbcKoTr, dPbcKoFix;
+    CudaBuffer<int>    dPbcKoShAt;
+    // Nov 2026 (H3): periodic coordination number
+    CudaBuffer<double> dPbcCnOut;
     // Nov 2026 (G1b): lattice translations of the periodic S/H0 and multipole integral image sums
     CudaBuffer<double> dPbcIntTrans;
     bool               d4_pbc_ready = false;
@@ -4119,6 +4124,250 @@ __global__ void k_gamma_pbc(int nsh, int nat, const int* __restrict__ sh2at, con
     if (iat == jat) val += gam;
     gamma[static_cast<size_t>(js) * nsh + is] = val;
     gamma[static_cast<size_t>(is) * nsh + js] = val;
+}
+
+/* ---------------------------------------------------------------------------------------------- *
+ *  WP-PERIODIC-XTB H2 (Claude Generated, Nov 2026): section 3 of XTB::calculateGradientPeriodic on  *
+ *  the device. Point-charge Ewald gradient and strain derivative (EwaldSum::realSpaceRange /        *
+ *  reciprocalRange / realSpaceVirialRange / reciprocalVirialRange, ewald.cpp):                       *
+ *  k_ewg_real: one thread per pair lo < hi, d = r_hi - r_lo under the minimum image, r2 < rc2,     *
+ *    dK = -erfc(a r)/r^2 - (2 a/sqrt pi) exp(-a^2 r^2)/r, f = q q dK/r, grad_lo -= f d, grad_hi +=  *
+ *    f d, Xi += -f d (x) d.                                                                        *
+ *  k_ewg_sf: one block per k, S(k) = sum q_i e^{i k.r_i} by a fixed-order block tree.              *
+ *  k_ewg_kvir: one block, E_k [delta_ab - 2 k_a k_b (1/k^2 + 1/(4 a^2))] summed over k.            *
+ *  k_ewg_kgrad: one thread per atom, sum_k 2 w q_i (c_i S_i - s_i S_r) k in k order.               *
+ *  k_ko_grad_pbc: Klopman-Ohno remainder f (gamma - 1/r) per shell pair js <= is over the images of *
+ *    the switch radius (forEachImage order), self images (same atom) only for the virial, weights  *
+ *    as the host loop. Gradients and virial in fixed point (gfix_add): run to run bitwise.         *
+ * ---------------------------------------------------------------------------------------------- */
+template <bool WANT_V>
+__global__ void k_ewg_real(int nat, const double* __restrict__ xyz, const double* __restrict__ q, double Lx, double Ly,
+                           double Lz, double alpha, double rc2, double* __restrict__ grad_fix, double* __restrict__ vir_fix)
+{
+    const int hi = blockIdx.y * blockDim.y + threadIdx.y;
+    const int lo = blockIdx.x * blockDim.x + threadIdx.x;
+    double v[3][3] = { { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 } };
+    if (hi < nat && lo < hi) {
+        double dx = xyz[3 * hi] - xyz[3 * lo], dy = xyz[3 * hi + 1] - xyz[3 * lo + 1], dz = xyz[3 * hi + 2] - xyz[3 * lo + 2];
+        double s = dx * (1.0 / Lx); s -= rint(s); dx = Lx * s;
+        s = dy * (1.0 / Ly); s -= rint(s); dy = Ly * s;
+        s = dz * (1.0 / Lz); s -= rint(s); dz = Lz * s;
+        const double r2 = __dadd_rn(__dadd_rn(__dmul_rn(dx, dx), __dmul_rn(dy, dy)), __dmul_rn(dz, dz));
+        if (r2 < rc2) {
+            const double r = sqrt(r2);
+            const double inv_r = 1.0 / r;
+            const double dK = -erfc(alpha * r) * inv_r * inv_r
+                              - (2.0 * alpha / 1.7724538509055159) * exp(-alpha * alpha * r * r) * inv_r;
+            const double f = q[lo] * q[hi] * dK / r;
+            gfix_add(&grad_fix[3 * lo + 0], -f * dx); gfix_add(&grad_fix[3 * hi + 0], f * dx);
+            gfix_add(&grad_fix[3 * lo + 1], -f * dy); gfix_add(&grad_fix[3 * hi + 1], f * dy);
+            gfix_add(&grad_fix[3 * lo + 2], -f * dz); gfix_add(&grad_fix[3 * hi + 2], f * dz);
+            if (WANT_V) {
+                const double d[3] = { dx, dy, dz };
+                for (int a = 0; a < 3; ++a)
+                    for (int b = 0; b < 3; ++b) v[a][b] = -f * d[a] * d[b];
+            }
+        }
+    }
+    if (WANT_V) {
+        __shared__ double red[256];
+        const int tid = threadIdx.y * blockDim.x + threadIdx.x;
+        const int nthr = blockDim.x * blockDim.y;
+        for (int a = 0; a < 3; ++a)
+            for (int b = 0; b < 3; ++b) {
+                red[tid] = v[a][b];
+                __syncthreads();
+                for (int st = nthr / 2; st > 0; st >>= 1) {
+                    if (tid < st) red[tid] += red[tid + st];
+                    __syncthreads();
+                }
+                if (tid == 0) gfix_add(&vir_fix[3 * a + b], red[0]);
+                __syncthreads();
+            }
+    }
+}
+
+__global__ void k_ewg_sf(int nat, const double* __restrict__ xyz, const double* __restrict__ q,
+                         const double* __restrict__ ktab, double* __restrict__ sf)
+{
+    const int kk = blockIdx.x;
+    const double* kv = ktab + 4 * kk;
+    double sr = 0.0, si = 0.0;
+    for (int i = threadIdx.x; i < nat; i += blockDim.x) {
+        double sn, cs;
+        sincos(kv[0] * xyz[3 * i] + kv[1] * xyz[3 * i + 1] + kv[2] * xyz[3 * i + 2], &sn, &cs);
+        sr += q[i] * cs;
+        si += q[i] * sn;
+    }
+    __shared__ double rr[256], ri[256];
+    rr[threadIdx.x] = sr; ri[threadIdx.x] = si;
+    __syncthreads();
+    for (int st = blockDim.x / 2; st > 0; st >>= 1) {
+        if (threadIdx.x < st) { rr[threadIdx.x] += rr[threadIdx.x + st]; ri[threadIdx.x] += ri[threadIdx.x + st]; }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) { sf[2 * kk] = rr[0]; sf[2 * kk + 1] = ri[0]; }
+}
+
+__global__ void k_ewg_kvir(int nk, const double* __restrict__ ktab, const double* __restrict__ sf, double alpha,
+                           double* __restrict__ vir_fix)
+{
+    const double inv_4a2 = 1.0 / (4.0 * alpha * alpha);
+    double v[9] = { 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    for (int kk = threadIdx.x; kk < nk; kk += blockDim.x) {
+        const double* kv = ktab + 4 * kk;
+        const double Sr = sf[2 * kk], Si = sf[2 * kk + 1];
+        const double ek = kv[3] * (Sr * Sr + Si * Si);
+        const double k2 = kv[0] * kv[0] + kv[1] * kv[1] + kv[2] * kv[2];
+        const double c = 2.0 * (1.0 / k2 + inv_4a2);
+        for (int a = 0; a < 3; ++a)
+            for (int b = 0; b < 3; ++b) v[3 * a + b] += ek * ((a == b ? 1.0 : 0.0) - c * kv[a] * kv[b]);
+    }
+    __shared__ double red[256];
+    for (int e = 0; e < 9; ++e) {
+        red[threadIdx.x] = v[e];
+        __syncthreads();
+        for (int st = blockDim.x / 2; st > 0; st >>= 1) {
+            if (threadIdx.x < st) red[threadIdx.x] += red[threadIdx.x + st];
+            __syncthreads();
+        }
+        if (threadIdx.x == 0) gfix_add(&vir_fix[e], red[0]);
+        __syncthreads();
+    }
+}
+
+__global__ void k_ewg_kgrad(int nat, int nk, const double* __restrict__ xyz, const double* __restrict__ q,
+                            const double* __restrict__ ktab, const double* __restrict__ sf, double* __restrict__ grad_fix)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= nat) return;
+    const double x = xyz[3 * i], y = xyz[3 * i + 1], z = xyz[3 * i + 2], qi = q[i];
+    double gx = 0.0, gy = 0.0, gz = 0.0;
+    for (int kk = 0; kk < nk; ++kk) {
+        const double* kv = ktab + 4 * kk;
+        double sn, cs;
+        sincos(kv[0] * x + kv[1] * y + kv[2] * z, &sn, &cs);
+        const double g = 2.0 * kv[3] * qi * (cs * sf[2 * kk + 1] - sn * sf[2 * kk]);
+        gx += g * kv[0]; gy += g * kv[1]; gz += g * kv[2];
+    }
+    gfix_add(&grad_fix[3 * i + 0], gx);
+    gfix_add(&grad_fix[3 * i + 1], gy);
+    gfix_add(&grad_fix[3 * i + 2], gz);
+}
+
+template <bool WANT_V>
+__global__ void k_ko_grad_pbc(int nsh, const int* __restrict__ sh2at, const double* __restrict__ g, int harmonic,
+                              double gexp, const double* __restrict__ q_sh, const double* __restrict__ xyz, double Lx,
+                              double Ly, double Lz, int ntr, const double* __restrict__ trans, double cut2, double rcut,
+                              double* __restrict__ grad_fix, double* __restrict__ vir_fix)
+{
+    const int is = blockIdx.y * blockDim.y + threadIdx.y;
+    const int js = blockIdx.x * blockDim.x + threadIdx.x;
+    double v[3][3] = { { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 } };
+    bool active = (is < nsh && js <= is);
+    int iat = 0, jat = 0;
+    if (active) {
+        iat = sh2at[is]; jat = sh2at[js];
+        if (iat == jat && !WANT_V) active = false;
+    }
+    if (active) {
+        const bool same_atom = (iat == jat);
+        const double wgt = same_atom ? ((is == js) ? 0.5 : 1.0) : 1.0;
+        double gam;
+        if (is == js) gam = g[is];
+        else if (harmonic) gam = (g[is] == 0.0 || g[js] == 0.0) ? 0.0 : 2.0 / (1.0 / g[is] + 1.0 / g[js]);
+        else gam = 0.5 * (g[is] + g[js]);
+        const double gam_pow = pow(gam, -gexp);
+        const double qq = q_sh[is] * q_sh[js];
+        double d0x = xyz[3 * iat] - xyz[3 * jat], d0y = xyz[3 * iat + 1] - xyz[3 * jat + 1], d0z = xyz[3 * iat + 2] - xyz[3 * jat + 2];
+        double s = d0x * (1.0 / Lx); s -= rint(s); d0x = Lx * s;
+        s = d0y * (1.0 / Ly); s -= rint(s); d0y = Ly * s;
+        s = d0z * (1.0 / Lz); s -= rint(s); d0z = Lz * s;
+        double gx = 0.0, gy = 0.0, gz = 0.0;
+        for (int t = same_atom ? 1 : 0; t < ntr; ++t) {
+            const double dx = d0x - trans[3 * t], dy = d0y - trans[3 * t + 1], dz = d0z - trans[3 * t + 2];
+            const double r2 = __dadd_rn(__dadd_rn(__dmul_rn(dx, dx), __dmul_rn(dy, dy)), __dmul_rn(dz, dz));
+            if (r2 >= cut2 || r2 < 1.0e-24) continue;
+            const double r1 = sqrt(r2);
+            const double f = d_ko_switch(r1, rcut);
+            if (f == 0.0) continue;
+            const double gamma = pow(pow(r1, gexp) + gam_pow, -1.0 / gexp);
+            const double dgamma_dr = -pow(r1, gexp - 2.0) * pow(gamma, gexp + 1.0) * r1;
+            double df = 0.0;
+            if (r1 > rcut - 1.0 && r1 < rcut) {
+                const double x = r1 - (rcut - 1.0);
+                df = -30.0 * x * x * x * x + 60.0 * x * x * x - 30.0 * x * x;
+            }
+            const double dko = df * (gamma - 1.0 / r1) + f * (dgamma_dr + 1.0 / r2);
+            const double force = qq * dko / r1;
+            if (!same_atom) { gx += force * dx; gy += force * dy; gz += force * dz; }
+            if (WANT_V) {
+                const double G[3] = { wgt * force * dx, wgt * force * dy, wgt * force * dz }, d[3] = { dx, dy, dz };
+                for (int a = 0; a < 3; ++a)
+                    for (int b = 0; b < 3; ++b) v[a][b] -= G[a] * d[b];
+            }
+        }
+        if (!same_atom) {
+            gfix_add(&grad_fix[3 * iat + 0], gx); gfix_add(&grad_fix[3 * jat + 0], -gx);
+            gfix_add(&grad_fix[3 * iat + 1], gy); gfix_add(&grad_fix[3 * jat + 1], -gy);
+            gfix_add(&grad_fix[3 * iat + 2], gz); gfix_add(&grad_fix[3 * jat + 2], -gz);
+        }
+    }
+    if (WANT_V) {
+        __shared__ double red[256];
+        const int tid = threadIdx.y * blockDim.x + threadIdx.x;
+        const int nthr = blockDim.x * blockDim.y;
+        for (int a = 0; a < 3; ++a)
+            for (int b = 0; b < 3; ++b) {
+                red[tid] = v[a][b];
+                __syncthreads();
+                for (int st = nthr / 2; st > 0; st >>= 1) {
+                    if (tid < st) red[tid] += red[tid + st];
+                    __syncthreads();
+                }
+                if (tid == 0) gfix_add(&vir_fix[3 * a + b], red[0]);
+                __syncthreads();
+            }
+    }
+}
+
+/* ---------------------------------------------------------------------------------------------- *
+ *  WP-PERIODIC-XTB H3 (Claude Generated, Nov 2026): periodic coordination number of the H0         *
+ *  (XTB::computeCoordinationNumbersPeriodic). One block per atom i, 128 threads stride over j and   *
+ *  its images (T = 0 skipped for j = i, r2 < cut2), fixed-order block tree (no atomics). mode 0: GFN2 product   *
+ *  of two logistic counts 1/(1+e^{-10 (rc/r-1)}) 1/(1+e^{-20 ((rc+2)/r-1)}); mode 1: GFN1         *
+ *  1/(1+e^{-16 (rc/r-1)}). rc = rcov_i + rcov_j. Not bitwise to the host (summation order).        *
+ * ---------------------------------------------------------------------------------------------- */
+__global__ void k_cn_pbc(int nat, const double* __restrict__ xyz, const double* __restrict__ rcov, double Lx, double Ly,
+                         double Lz, int ntr, const double* __restrict__ trans, double cut2, int mode,
+                         double* __restrict__ cn)
+{
+    const int i = blockIdx.x;   // one block per atom, the threads stride over j, fixed-order block tree
+    if (i >= nat) return;
+    double acc = 0.0;
+    for (int j = threadIdx.x; j < nat; j += blockDim.x) {
+        const double rc = rcov[i] + rcov[j];
+        double d0x = xyz[3 * i] - xyz[3 * j], d0y = xyz[3 * i + 1] - xyz[3 * j + 1], d0z = xyz[3 * i + 2] - xyz[3 * j + 2];
+        double s = d0x * (1.0 / Lx); s -= rint(s); d0x = Lx * s;
+        s = d0y * (1.0 / Ly); s -= rint(s); d0y = Ly * s;
+        s = d0z * (1.0 / Lz); s -= rint(s); d0z = Lz * s;
+        for (int t = (i == j) ? 1 : 0; t < ntr; ++t) {
+            const double dx = d0x - trans[3 * t], dy = d0y - trans[3 * t + 1], dz = d0z - trans[3 * t + 2];
+            const double r2 = __dadd_rn(__dadd_rn(__dmul_rn(dx, dx), __dmul_rn(dy, dy)), __dmul_rn(dz, dz));
+            if (r2 >= cut2 || r2 < 1.0e-24) continue;
+            const double r = sqrt(r2);
+            if (mode == 1) acc += 1.0 / (1.0 + exp(-16.0 * (rc / r - 1.0)));
+            else acc += (1.0 / (1.0 + exp(-10.0 * (rc / r - 1.0)))) * (1.0 / (1.0 + exp(-20.0 * ((rc + 2.0) / r - 1.0))));
+        }
+    }
+    __shared__ double red[128];
+    red[threadIdx.x] = acc;
+    __syncthreads();
+    for (int st = blockDim.x / 2; st > 0; st >>= 1) {
+        if (threadIdx.x < st) red[threadIdx.x] += red[threadIdx.x + st];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) cn[i] = red[0];
 }
 
 /* ---------------------------------------------------------------------------------------------- *
@@ -8197,6 +8446,141 @@ bool XtbGpuContext::h0PulayGradientPeriodic(int nat, const double* xyz_bohr, con
     if (fix_bad) {
         const int zero = 0;
         cudaMemcpyToSymbol(g_gfix_bad, &zero, sizeof(int));
+        return false;
+    }
+    return true;
+}
+
+// Shared tail of the fixed-point gradient calls: convert, download grad (3 nat) and vir9, check the range flag.
+static bool pbcFixFinish(cudaStream_t stream, double* fix, int nat, bool want_virial, double* grad_out, double* vir9_out)
+{
+    const int nfix = 3 * nat + 9;
+    k_grad_fix_to_double<<<(nfix + 255) / 256, 256, 0, stream>>>(nfix, fix);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    if (cudaMemcpyAsync(grad_out, fix, sizeof(double) * 3 * nat, cudaMemcpyDeviceToHost, stream) != cudaSuccess)
+        return false;
+    if (want_virial && cudaMemcpyAsync(vir9_out, fix + 3 * nat, sizeof(double) * 9, cudaMemcpyDeviceToHost, stream)
+                           != cudaSuccess)
+        return false;
+    if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
+    int fix_bad = 0;
+    if (cudaMemcpyFromSymbol(&fix_bad, g_gfix_bad, sizeof(int)) != cudaSuccess) return false;
+    if (fix_bad) {
+        const int zero = 0;
+        cudaMemcpyToSymbol(g_gfix_bad, &zero, sizeof(int));
+        return false;
+    }
+    return true;
+}
+
+// Claude Generated (Nov 2026, WP-PERIODIC-XTB H2): point-charge Ewald gradient + strain derivative (real and reciprocal
+// parts; the background virial stays on the host). ktab as ewaldGammaPeriodic (kx ky kz w per k).
+bool XtbGpuContext::ewaldGradientPeriodic(int nat, const double* xyz_bohr, const double* q_at, const double* cell_L,
+                                          double alpha, double r_cut, int nk, const double* ktab, bool want_virial,
+                                          double* grad_out, double* vir9_out)
+{
+    Impl& I = *m_impl;
+    if (!ok() || nat <= 0 || nk < 0 || !xyz_bohr || !q_at || !cell_L || (nk > 0 && !ktab) || !grad_out
+        || (want_virial && !vir9_out))
+        return false;
+    cudaStream_t stream = I.stream;
+    try {
+        I.profStart();
+        I.dPbcXyz.upload(xyz_bohr, 3 * nat, stream);
+        I.dPbcEgQ.upload(q_at, nat, stream);
+        if (nk > 0) {
+            I.dPbcEgKtab.upload(ktab, 4 * nk, stream);
+            I.dPbcEgSf.ensure(2 * nk);
+        }
+        I.dPbcEgFix.ensure(3 * nat + 9);
+        if (cudaMemsetAsync(I.dPbcEgFix.ptr, 0, sizeof(double) * (3 * nat + 9), stream) != cudaSuccess) return false;
+        double* gfix = I.dPbcEgFix.ptr;
+        double* vfix = gfix + 3 * nat;
+        const dim3 blk(16, 16);
+        const dim3 grd((nat + 15) / 16, (nat + 15) / 16);
+        if (want_virial)
+            k_ewg_real<true><<<grd, blk, 0, stream>>>(nat, I.dPbcXyz.ptr, I.dPbcEgQ.ptr, cell_L[0], cell_L[1], cell_L[2],
+                                                      alpha, r_cut * r_cut, gfix, vfix);
+        else
+            k_ewg_real<false><<<grd, blk, 0, stream>>>(nat, I.dPbcXyz.ptr, I.dPbcEgQ.ptr, cell_L[0], cell_L[1], cell_L[2],
+                                                       alpha, r_cut * r_cut, gfix, vfix);
+        if (cudaGetLastError() != cudaSuccess) return false;
+        if (nk > 0) {
+            k_ewg_sf<<<nk, 256, 0, stream>>>(nat, I.dPbcXyz.ptr, I.dPbcEgQ.ptr, I.dPbcEgKtab.ptr, I.dPbcEgSf.ptr);
+            if (want_virial) k_ewg_kvir<<<1, 256, 0, stream>>>(nk, I.dPbcEgKtab.ptr, I.dPbcEgSf.ptr, alpha, vfix);
+            k_ewg_kgrad<<<(nat + 127) / 128, 128, 0, stream>>>(nat, nk, I.dPbcXyz.ptr, I.dPbcEgQ.ptr, I.dPbcEgKtab.ptr,
+                                                               I.dPbcEgSf.ptr, gfix);
+            if (cudaGetLastError() != cudaSuccess) return false;
+        }
+        const bool r = pbcFixFinish(stream, gfix, nat, want_virial, grad_out, vir9_out);
+        I.profMark("grad PBC: Ewald gradient");
+        return r;
+    } catch (...) {
+        return false;
+    }
+}
+
+// Claude Generated (Nov 2026, WP-PERIODIC-XTB H2): Klopman-Ohno remainder gradient + virial (kernel k_ko_grad_pbc).
+bool XtbGpuContext::koGradientPeriodic(int nat, const double* xyz_bohr, int nsh, const int* sh2at, const double* hardness,
+                                       bool harmonic, double gexp, const double* q_sh, const double* cell_L, int ntrans,
+                                       const double* trans, double cut2, double rcut, bool want_virial,
+                                       double* grad_out, double* vir9_out)
+{
+    Impl& I = *m_impl;
+    if (!ok() || nat <= 0 || nsh <= 0 || ntrans <= 0 || !xyz_bohr || !sh2at || !hardness || !q_sh || !cell_L || !trans
+        || !grad_out || (want_virial && !vir9_out))
+        return false;
+    cudaStream_t stream = I.stream;
+    try {
+        I.profStart();
+        I.dPbcXyz.upload(xyz_bohr, 3 * nat, stream);
+        I.dPbcKoShAt.upload(sh2at, nsh, stream);
+        I.dPbcKoG.upload(hardness, nsh, stream);
+        I.dPbcKoQsh.upload(q_sh, nsh, stream);
+        I.dPbcKoTr.upload(trans, 3 * ntrans, stream);
+        I.dPbcKoFix.ensure(3 * nat + 9);
+        if (cudaMemsetAsync(I.dPbcKoFix.ptr, 0, sizeof(double) * (3 * nat + 9), stream) != cudaSuccess) return false;
+        double* gfix = I.dPbcKoFix.ptr;
+        double* vfix = gfix + 3 * nat;
+        const dim3 blk(16, 16);
+        const dim3 grd((nsh + 15) / 16, (nsh + 15) / 16);
+        if (want_virial)
+            k_ko_grad_pbc<true><<<grd, blk, 0, stream>>>(nsh, I.dPbcKoShAt.ptr, I.dPbcKoG.ptr, harmonic ? 1 : 0, gexp,
+                I.dPbcKoQsh.ptr, I.dPbcXyz.ptr, cell_L[0], cell_L[1], cell_L[2], ntrans, I.dPbcKoTr.ptr, cut2, rcut,
+                gfix, vfix);
+        else
+            k_ko_grad_pbc<false><<<grd, blk, 0, stream>>>(nsh, I.dPbcKoShAt.ptr, I.dPbcKoG.ptr, harmonic ? 1 : 0, gexp,
+                I.dPbcKoQsh.ptr, I.dPbcXyz.ptr, cell_L[0], cell_L[1], cell_L[2], ntrans, I.dPbcKoTr.ptr, cut2, rcut,
+                gfix, vfix);
+        if (cudaGetLastError() != cudaSuccess) return false;
+        const bool r = pbcFixFinish(stream, gfix, nat, want_virial, grad_out, vir9_out);
+        I.profMark("grad PBC: KO remainder");
+        return r;
+    } catch (...) {
+        return false;
+    }
+}
+
+// Claude Generated (Nov 2026, WP-PERIODIC-XTB H3): periodic coordination number (kernel k_cn_pbc).
+bool XtbGpuContext::cnPeriodic(int nat, const double* xyz_bohr, const double* rcov, const double* cell_L, int ntrans,
+                               const double* trans, double cut2, int mode, double* cn_out)
+{
+    Impl& I = *m_impl;
+    if (!ok() || nat <= 0 || ntrans <= 0 || !xyz_bohr || !rcov || !cell_L || !trans || !cn_out) return false;
+    cudaStream_t stream = I.stream;
+    try {
+        I.profStart();
+        I.dPbcXyz.upload(xyz_bohr, 3 * nat, stream);
+        I.dPbcCnRcov.upload(rcov, nat, stream);
+        I.dPbcCnTrans.upload(trans, 3 * ntrans, stream);
+        I.dPbcCnOut.ensure(nat);
+        k_cn_pbc<<<nat, 128, 0, stream>>>(nat, I.dPbcXyz.ptr, I.dPbcCnRcov.ptr, cell_L[0], cell_L[1],
+                                                        cell_L[2], ntrans, I.dPbcCnTrans.ptr, cut2, mode, I.dPbcCnOut.ptr);
+        if (cudaGetLastError() != cudaSuccess) return false;
+        I.dPbcCnOut.download(cn_out, nat, stream);
+        if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
+        I.profMark("PBC: coordination number");
+    } catch (...) {
         return false;
     }
     return true;

@@ -763,6 +763,27 @@ struct GpuScfBackend {
     { (void)nat; (void)xyz_bohr; (void)alpha; (void)zeff; (void)light; (void)kexp; (void)kexp_light; (void)rexp;
       (void)cell_L; (void)ntrans; (void)trans; (void)cut2; (void)gradient; (void)want_virial; (void)energy_out;
       (void)grad_out; (void)vir9_out; return false; }
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB H2): point-charge Ewald gradient and real + reciprocal strain
+    /// derivative at q_at (ktab = EwaldSum::kVectorTable), and the Klopman-Ohno remainder gradient + virial over the
+    /// images of the switch radius. Contributions only (grad 3 nat, vir9). Default false -> host loops.
+    virtual bool ewaldGradientPeriodic(int nat, const double* xyz_bohr, const double* q_at, const double* cell_L,
+                                       double alpha, double r_cut, int nk, const double* ktab, bool want_virial,
+                                       double* grad_out, double* vir9_out)
+    { (void)nat; (void)xyz_bohr; (void)q_at; (void)cell_L; (void)alpha; (void)r_cut; (void)nk; (void)ktab;
+      (void)want_virial; (void)grad_out; (void)vir9_out; return false; }
+    virtual bool koGradientPeriodic(int nat, const double* xyz_bohr, int nsh, const int* sh2at, const double* hardness,
+                                    bool harmonic, double gexp, const double* q_sh, const double* cell_L, int ntrans,
+                                    const double* trans, double cut2, double rcut, bool want_virial, double* grad_out,
+                                    double* vir9_out)
+    { (void)nat; (void)xyz_bohr; (void)nsh; (void)sh2at; (void)hardness; (void)harmonic; (void)gexp; (void)q_sh;
+      (void)cell_L; (void)ntrans; (void)trans; (void)cut2; (void)rcut; (void)want_virial; (void)grad_out;
+      (void)vir9_out; return false; }
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB H3): periodic coordination number over the images of cut2,
+    /// rc = rcov_i + rcov_j; mode 0 GFN2 counting, 1 GFN1 (k = 16). Default false -> host loop.
+    virtual bool cnPeriodic(int nat, const double* xyz_bohr, const double* rcov, const double* cell_L, int ntrans,
+                            const double* trans, double cut2, int mode, double* cn_out)
+    { (void)nat; (void)xyz_bohr; (void)rcov; (void)cell_L; (void)ntrans; (void)trans; (void)cut2; (void)mode;
+      (void)cn_out; return false; }
     /// Claude Generated (Nov 2026, WP-PERIODIC-XTB H1): H0/Pulay gradient over the images (section 2b of
     /// calculateGradientPeriodic) on the device from the resident P and C of this SCF: se[nsh] self-energies,
     /// v_ao[nao] = v_sh + v_at, v_dp[3 nat] / v_qp[6 nat] (atom-major, GFN2 only, multipole), we[ncol] = focc eps

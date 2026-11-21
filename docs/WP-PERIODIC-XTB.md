@@ -902,6 +902,27 @@ the gfn1 step); the W download is part of the W item (54 MB at 432 H2O). Halogen
 - Open: the kernel recomputes the shell-pair primitive work for every AO of a p shell (9x for p-p); a shell-pair
   blocked variant would cut the 60 ms further (not done).
 
+### H2/H3 periodic Ewald and Klopman-Ohno gradient, periodic CN on the device (2026-11-21, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+- **H2** `GpuScfBackend::ewaldGradientPeriodic`: point-charge Ewald gradient and real + reciprocal strain derivative
+  at q_at (`k_ewg_real` per pair under the minimum image, `k_ewg_sf` structure factor per k by a block tree,
+  `k_ewg_kvir`, `k_ewg_kgrad` per atom in k order; the formulas of `EwaldSum::realSpaceRange/reciprocalRange/
+  *VirialRange`, phases by sincos instead of the recursion table); the background virial stays on the host (O(1)).
+  `koGradientPeriodic` (`k_ko_grad_pbc`): the Klopman-Ohno remainder loop per shell pair js <= is over the images of
+  the switch radius, weights and self images as the host loop. Tokens `ewgrad`, `kograd`.
+- **H3** `GpuScfBackend::cnPeriodic` (`k_cn_pbc`, one block per atom, threads over j and its images, fixed-order
+  block tree): `computeCoordinationNumbersPeriodic` (GFN1/GFN2 counting). Token `cn`. Plugin ABI 18 -> 19.
+- Time (432 H2O, MD step): Ewald 67 -> 7.5 ms, KO 33 -> 2.5 ms, CN 53 -> 6 ms (a first version with one thread per
+  atom took 52 ms on the device: 1296 threads do not fill the card).
+- Gates (one binary, new vs `CURCUMA_PBC_GPU_HOST=ewgrad,kograd,cn`): `pbc_xtb_gpu_parity` 8/8 (values as H1),
+  second CUDA run bitwise 8/8; `pbc_|ewald` 29/29 (`release_cuda/`); `-sp -scf_threshold 1e-9`: 216 H2O dE 0, max dG
+  1.4e-14 Eh/A; 432 H2O dE 4.5e-13 Eh, max dG 1.8e-14 Eh/A; second device run md5-identical (216, 432); GPU FD (dimer
+  8 A): gfn1 8.1e-9, gfn2 8.9e-9 Eh/A; NVE 216 H2O 100 steps (`-scf_threshold 1e-9`): max |dE_pot| 2.2e-11 Eh; MD
+  216 H2O 20 steps tight: E_pot -1096.551628, T 462.483544 K, P 14765.49 bar (unchanged); without a cell CPU 36/36
+  and CUDA 36/36 md5 to the rebuilt base.
+- MD wall per step (`md.sh`, before = same binary with the three tokens): 216 H2O 0.51 -> 0.47 s, 432 H2O 1.55 ->
+  1.39 s.
+
 ## Regression run (2026-11-14, `release/`, `ctest -R 'gfn|xtb|sqm|gfnff|pbc|ewald|simplemd|restart|md_|gpu|plugin|molecule|xyz|parser|curcumaopt|structinv' -j1`)
 
 369 tests selected, 2 failed before the fix below: `pbc_md_nonperiodic_cell` (its check (a) assumed gfn2 + cell to be

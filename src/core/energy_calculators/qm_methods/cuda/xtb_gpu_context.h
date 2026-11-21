@@ -480,6 +480,17 @@ public:
                            double kexp, double kexp_light, double rexp, const double* cell_L, int ntrans,
                            const double* trans, double cut2, bool gradient, bool want_virial, double* energy_out,
                            double* grad_out, double* vir9_out);
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB H2): see GpuScfBackend::ewaldGradientPeriodic / koGradientPeriodic.
+    bool ewaldGradientPeriodic(int nat, const double* xyz_bohr, const double* q_at, const double* cell_L, double alpha,
+                               double r_cut, int nk, const double* ktab, bool want_virial, double* grad_out,
+                               double* vir9_out);
+    bool koGradientPeriodic(int nat, const double* xyz_bohr, int nsh, const int* sh2at, const double* hardness,
+                            bool harmonic, double gexp, const double* q_sh, const double* cell_L, int ntrans,
+                            const double* trans, double cut2, double rcut, bool want_virial, double* grad_out,
+                            double* vir9_out);
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB H3): see GpuScfBackend::cnPeriodic.
+    bool cnPeriodic(int nat, const double* xyz_bohr, const double* rcov, const double* cell_L, int ntrans,
+                    const double* trans, double cut2, int mode, double* cn_out);
     /// Claude Generated (Nov 2026, WP-PERIODIC-XTB H1): see GpuScfBackend::h0PulayGradientPeriodic.
     bool h0PulayGradientPeriodic(int nat, const double* xyz_bohr, const double* se, const double* v_ao,
                                  const double* v_dp, const double* v_qp, const double* we, int ncol,

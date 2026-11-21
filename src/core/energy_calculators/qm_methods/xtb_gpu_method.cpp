@@ -475,6 +475,31 @@ public:
         return m_ctx->repulsionPeriodic(nat, xyz_bohr, alpha, zeff, light, kexp, kexp_light, rexp, cell_L, ntrans,
                                         trans, cut2, gradient, want_virial, energy_out, grad_out, vir9_out);
     }
+    // Claude Generated (Nov 2026, WP-PERIODIC-XTB H2): periodic Ewald / Klopman-Ohno gradient, see GpuScfBackend.
+    bool ewaldGradientPeriodic(int nat, const double* xyz_bohr, const double* q_at, const double* cell_L, double alpha,
+                               double r_cut, int nk, const double* ktab, bool want_virial, double* grad_out,
+                               double* vir9_out) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->ewaldGradientPeriodic(nat, xyz_bohr, q_at, cell_L, alpha, r_cut, nk, ktab, want_virial, grad_out,
+                                            vir9_out);
+    }
+    bool koGradientPeriodic(int nat, const double* xyz_bohr, int nsh, const int* sh2at, const double* hardness,
+                            bool harmonic, double gexp, const double* q_sh, const double* cell_L, int ntrans,
+                            const double* trans, double cut2, double rcut, bool want_virial, double* grad_out,
+                            double* vir9_out) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->koGradientPeriodic(nat, xyz_bohr, nsh, sh2at, hardness, harmonic, gexp, q_sh, cell_L, ntrans, trans,
+                                         cut2, rcut, want_virial, grad_out, vir9_out);
+    }
+    // Claude Generated (Nov 2026, WP-PERIODIC-XTB H3): periodic coordination number, see GpuScfBackend.
+    bool cnPeriodic(int nat, const double* xyz_bohr, const double* rcov, const double* cell_L, int ntrans,
+                    const double* trans, double cut2, int mode, double* cn_out) override
+    {
+        if (!m_ctx) return false;
+        return m_ctx->cnPeriodic(nat, xyz_bohr, rcov, cell_L, ntrans, trans, cut2, mode, cn_out);
+    }
     // Claude Generated (Nov 2026, WP-PERIODIC-XTB H1): periodic H0/Pulay gradient, see GpuScfBackend.
     bool h0PulayGradientPeriodic(int nat, const double* xyz_bohr, const double* se, const double* v_ao,
                                  const double* v_dp, const double* v_qp, const double* we, int ncol,

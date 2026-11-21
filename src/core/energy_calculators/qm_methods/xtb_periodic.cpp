@@ -158,6 +158,20 @@ Vector XTB::computeCoordinationNumbersPeriodic() const
 
     Vector cn = Vector::Zero(nat);
     const bool gfn1 = (m_method == MethodType::GFN1);
+    // H3 (Nov 2026): on the CUDA device (host loop on failure or CURCUMA_PBC_GPU_HOST=cn)
+    if (m_gpu_scf && m_pbc_device_scf && !pbcGpuStageOnHost("cn")) {
+        std::vector<double> tr(3 * images.trans.size()), c(nat, 0.0);
+        for (size_t t = 0; t < images.trans.size(); ++t)
+            for (int k = 0; k < 3; ++k) tr[3 * t + k] = images.trans[t][k];
+        const bool cn_dev = m_gpu_scf->cnPeriodic(nat, xyz.data(), rcov.data(), m_cell_bohr.L,
+            static_cast<int>(images.trans.size()), tr.data(), images.cutoff2, gfn1 ? 1 : 0, c.data());
+        if (CurcumaLogger::get_verbosity() >= 3)
+            CurcumaLogger::info_fmt("  periodic CN on the {}", cn_dev ? "device" : "host (device call failed)");
+        if (cn_dev) {
+            for (int i = 0; i < nat; ++i) cn(i) = c[i];
+            return cn;
+        }
+    }
     for (int i = 0; i < nat; ++i) {
         for (int j = 0; j <= i; ++j) {
             const double rc = rcov[i] + rcov[j];
@@ -1841,12 +1855,32 @@ void XTB::calculateGradientPeriodic()
         const curcuma::ewald::EwaldParameters par = curcuma::ewald::chooseEwaldParameters(
             m_cell_bohr, m_pbc_ewald_tolerance, m_pbc_ewald_r_cut > 0.0 ? m_pbc_ewald_r_cut : -1.0);
         const curcuma::ewald::EwaldSum ewald(m_cell_bohr, par);
-        m_gradient += ewald.gradient(pos, m_wfn.q_at);
+        // H2 (Nov 2026): real and reciprocal parts on the CUDA device (host on failure or CURCUMA_PBC_GPU_HOST=ewgrad)
+        bool ew_device = false;
+        if (m_gpu_scf && m_pbc_device_scf && !pbcGpuStageOnHost("ewgrad")) {
+            const std::vector<double> ktab = ewald.kVectorTable();
+            std::vector<double> g(3 * nat, 0.0), v9(9, 0.0);
+            ew_device = m_gpu_scf->ewaldGradientPeriodic(nat, xyz.data(), m_wfn.q_at.data(), m_cell_bohr.L,
+                ewald.parameters().alpha, ewald.parameters().r_cut, ewald.numberOfKVectors(), ktab.data(), want_vir,
+                g.data(), v9.data());
+            if (ew_device) {
+                for (int i = 0; i < nat; ++i)
+                    for (int k = 0; k < 3; ++k) m_gradient(i, k) += g[3 * i + k];
+                if (want_vir)
+                    for (int a = 0; a < 3; ++a)
+                        for (int b = 0; b < 3; ++b) Xi(a, b) += v9[3 * a + b];
+            }
+            if (CurcumaLogger::get_verbosity() >= 3)
+                CurcumaLogger::info_fmt("  periodic Ewald gradient on the {}", ew_device ? "device" : "host (device call failed)");
+        }
+        if (!ew_device) m_gradient += ewald.gradient(pos, m_wfn.q_at);
         if (want_vir) {   // P4: real, reciprocal and background strain derivatives of the point-charge Ewald sum (N1)
-            curcuma::ewald::EwaldGeometryCache cache;
-            ewald.buildGeometryCache(pos, nullptr, cache, static_cast<size_t>(1) << 30);
-            ewald.realSpaceVirialRange(cache, m_wfn.q_at, 0, static_cast<int>(cache.pairs.size()), Xi);
-            ewald.reciprocalVirialRange(cache.table, m_wfn.q_at, 0, ewald.numberOfKVectors(), Xi);
+            if (!ew_device) {
+                curcuma::ewald::EwaldGeometryCache cache;
+                ewald.buildGeometryCache(pos, nullptr, cache, static_cast<size_t>(1) << 30);
+                ewald.realSpaceVirialRange(cache, m_wfn.q_at, 0, static_cast<int>(cache.pairs.size()), Xi);
+                ewald.reciprocalVirialRange(cache.table, m_wfn.q_at, 0, ewald.numberOfKVectors(), Xi);
+            }
             curcuma::ewald::EwaldResult bg;
             ewald.selfAndBackground(m_wfn.q_at, nullptr, false, bg);
             Xi += curcuma::ewald::EwaldSum::backgroundVirial(bg.terms);
@@ -1859,6 +1893,27 @@ void XTB::calculateGradientPeriodic()
         for (int is = 0; is < nsh; ++is) g_sh[is] = coulomb::shell_hardness(cm, m_basis.z[m_basis.sh2at[is]], m_basis.ang_sh[is]);
         const PBCUtils::LatticeImageList images = PBCUtils::makeLatticeImageList(m_cell_bohr, m_pbc_coulomb_switch);
         const double rcut = m_pbc_coulomb_switch;
+        // H2 (Nov 2026): the shell-pair loop on the CUDA device (host on failure or CURCUMA_PBC_GPU_HOST=kograd)
+        bool ko_device = false;
+        if (m_gpu_scf && m_pbc_device_scf && !pbcGpuStageOnHost("kograd")) {
+            std::vector<double> tr(3 * images.trans.size()), g(3 * nat, 0.0), v9(9, 0.0), qsh(nsh);
+            for (size_t t = 0; t < images.trans.size(); ++t)
+                for (int k = 0; k < 3; ++k) tr[3 * t + k] = images.trans[t][k];
+            for (int is = 0; is < nsh; ++is) qsh[is] = m_wfn.q_sh(is);
+            ko_device = m_gpu_scf->koGradientPeriodic(nat, xyz.data(), nsh, m_basis.sh2at.data(), g_sh.data(),
+                cm == coulomb::Method::GFN1, gexp, qsh.data(), m_cell_bohr.L, static_cast<int>(images.trans.size()),
+                tr.data(), images.cutoff2, rcut, want_vir, g.data(), v9.data());
+            if (ko_device) {
+                for (int i = 0; i < nat; ++i)
+                    for (int k = 0; k < 3; ++k) m_gradient(i, k) += g[3 * i + k];
+                if (want_vir)
+                    for (int a = 0; a < 3; ++a)
+                        for (int b = 0; b < 3; ++b) Xi(a, b) += v9[3 * a + b];
+            }
+            if (CurcumaLogger::get_verbosity() >= 3)
+                CurcumaLogger::info_fmt("  periodic KO gradient on the {}", ko_device ? "device" : "host (device call failed)");
+        }
+        if (!ko_device)
         for (int is = 0; is < nsh; ++is) {
             const int iat = m_basis.sh2at[is];
             for (int js = 0; js <= is; ++js) {
