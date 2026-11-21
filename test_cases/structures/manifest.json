@@ -2129,6 +2129,44 @@
    "notes": "Start structure of the Doebereiner-lighter reactive-MD example (docs/REACTION_MD_EXAMPLES.md), not a minimum. Spin 0: closed-shell singlet O2 (the triplet ground state is not represented; GFN2 has no spin polarisation). Atom order (Pt 1-4, H 5-8, O 9-10) is load-bearing for scripts/reaction_md_check.py doeb."
   },
   {
+   "id": "reactions-doebereiner-pt7",
+   "class": "metals",
+   "file": "metals/reactions-doebereiner-pt7.xyz",
+   "format": "xyz",
+   "formula": "H4O2Pt7",
+   "natoms": 13,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "non-equilibrium",
+   "size_bytes": 474,
+   "sha256": "61c0a28ff979dc0b17a2aea4fb0c31051ad276331aaed6848c06efd55f6639eb",
+   "provenance": {
+    "kind": "constructed",
+    "description": "Pt7 pentagonal bipyramid (Pt-Pt 2.75 A) with 2 H2 and O2 placed at random orientation 3.0-3.6 A from the cluster (generator seed 1001, cap of 55 degrees), not optimised; geometry 1 of 16 of the Doebereiner Pt7 series"
+   },
+   "notes": "Start of reactions-doebereiner-pt7.json (docs/REACTION_MD_EXAMPLES.md); atom order Pt1-7, H8-11, O12-13 is load-bearing for the temp_regions of the JSON."
+  },
+  {
+   "id": "reactions-doebereiner-pt7-control",
+   "class": "clusters",
+   "file": "clusters/reactions-doebereiner-pt7-control.xyz",
+   "format": "xyz",
+   "formula": "H4O2",
+   "natoms": 6,
+   "frames": 1,
+   "charge": 0,
+   "spin": 0,
+   "role": "non-equilibrium",
+   "size_bytes": 266,
+   "sha256": "cf947f981ca74c36da0b27b0198a658f9bc7d2943797cc15d4084a3706320a2b",
+   "provenance": {
+    "kind": "constructed",
+    "description": "The 2 H2 + O2 of reactions-doebereiner-pt7 without Pt, translated so that the gas centroid is the origin; built by script, not optimised"
+   },
+   "notes": "Control of reactions-doebereiner-pt7.json (same wall radius schedule, spin 2)."
+  },
+  {
    "id": "reactions-h2-pt4",
    "class": "metals",
    "file": "metals/reactions-h2-pt4.xyz",

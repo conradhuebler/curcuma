@@ -3,3 +3,5 @@ reactions-haber-bosch-gas as haber.xyz
 reactions-h2-pt4 as pt4.xyz
 reactions-doebereiner-pt4 as doeb-pt4.xyz
 reactions-doebereiner-control as doeb-control.xyz
+reactions-doebereiner-pt7 as doeb-pt7.xyz
+reactions-doebereiner-pt7-control as doeb-pt7-control.xyz

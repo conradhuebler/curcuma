@@ -3,7 +3,7 @@
 > Status: AI-generated (Nov 2026), machine-tested. Human production testing pending. No reference calculation (DFT, tblite, xtb) exists for any run.
 > **Forced scenarios (Haber-Bosch) are not free dynamics.** A bias potential pulls the N atoms apart; the result shows a path into the NH3 sink under that bias, no barrier, no rate, no thermodynamics.
 
-Eleven inputs for interactive reaction MD (eight listed first, three Doebereiner variants in their own section) (GFN2, 1 fs, `csvr`, CPU) that a viewer such as qurcuma can show. Each is a JSON for `-import_config` (group `simplemd`, `_command: md`, [CLI_ROUND_TRIP.md](CLI_ROUND_TRIP.md)) in `test_cases/reaction_md/`, with a start structure `reactions-*` in `test_cases/structures/` (provenance `constructed`, atom order is load-bearing for the atom indices in the JSON).
+Thirteen inputs for interactive reaction MD (eight listed first, five Doebereiner variants in their own section) (GFN2, 1 fs, `csvr`, CPU) that a viewer such as qurcuma can show. Each is a JSON for `-import_config` (group `simplemd`, `_command: md`, [CLI_ROUND_TRIP.md](CLI_ROUND_TRIP.md)) in `test_cases/reaction_md/`, with a start structure `reactions-*` in `test_cases/structures/` (provenance `constructed`, atom order is load-bearing for the atom indices in the JSON).
 
 ```bash
 cd <any empty directory>
@@ -30,6 +30,8 @@ Steps/s: wall time of the verification run (incl. ~1 s start) over steps, 4 thre
 | Doebereiner, Pt4 | `reactions-doebereiner-pt4` (10: Pt4, 2 H2, O2) | `reactions-doebereiner-pt4.json`, 2000 K CSVR, spin 0, `electronic_temperature 2000`, wall R 6.5 -> 4.5 logfermi (`wall_radius_schedule "4.5:steps:10000"`), 20000 steps, 1 thread | free, wall radius ramp | H2 dissociates on Pt, O2 activated, OH and H2O on Pt | 86 | see "Doebereiner lighter" below | see below |
 | Doebereiner, control | `reactions-doebereiner-control` (6: 2 H2, O2) | `reactions-doebereiner-control.json`, same settings, no Pt, spin 0 | free | gas phase, less reaction | 2700 | see below | closed-shell singlet O2 is reactive without a catalyst |
 | Doebereiner, control (triplet) | same structure | `reactions-doebereiner-control-triplet.json`, `spin 2` | free | no stable O-H | 2700 | see below | spin 2 occupation, not a spin-polarised GFN2 |
+| Doebereiner, cold Pt7 | `reactions-doebereiner-pt7` (13: Pt7, 2 H2, O2) | `reactions-doebereiner-pt7.json`, Pt region 500 K, gas region 2000 K, `spin 2`, wall R 8 -> 5.5 (6000 steps), 12000 steps | free, wall radius ramp | H2 split and O2 stretched on Pt, no H2O gain | 27 | see "cold Pt7" below | not a catalytic effect on H2O |
+| Doebereiner, Pt7 control | `reactions-doebereiner-pt7-control` (6) | `reactions-doebereiner-pt7-control.json`, same gas, spin 2, same wall | free | gas phase | 2900 | see below | same wall radius as Pt7 |
 
 Verification: every input run from an empty directory with `release/curcuma` built from this working tree (`ci-feature-delta-ml-170-g267dc325` plus the uncommitted wall-radius change); 24 runs, none with an SCF error or abort; CPU FP32 "false fixed point" warnings occurred and were handled by the program (continued in FP64). `-electronic_temperature` from the JSON is effective (Fe4 step-0 energy -21.0963 Eh at 2000 K against -21.0300 Eh at 300 K). Atom indices in `external_potentials` are 1-based (selection grammar): N-N pull stretches N-N in gas and Fe4, the control does not; the Fe tethers hold. Test: `ctest -R cli_simplemd_18_reaction_md_inputs` (4 s: forced vs control NH3 and H2 on Pt4).
 
@@ -64,6 +66,31 @@ Findings, without interpretation beyond the numbers:
 Caveats: 2000 K and 20 ps are far from a Doebereiner lighter (room temperature, hydrogen on platinum sponge in air; the heat of H2O formation heating the metal to glowing is not modelled, the thermostat removes it); the wall compression raises the density of 10 atoms to a sphere of R 4.5 A; energies shifted by the 2000 K Fermi smearing; no reference calculation; the metal is a distorted Pt4, not a surface; seeds 1-8 are all from one start geometry (gas placement not varied).
 
 Not tested: Pt cluster sizes other than 4 and 7, other metals, a gas placement away from the facet, temperatures between 1500 and 2000 K with compression for more than 3 seeds, GPU other than the single Pt4 throughput run, spin 2 for Pt4 with compression, and a restraint-assisted variant.
+
+## Doebereiner lighter, cold Pt7 (16 seeds, Pt against gas control)
+
+> Status: AI-generated (Nov 2026), machine-tested. Human production testing pending. No reference calculation. Result: Pt7 splits H2 and stretches O2 significantly more often than the gas, **H2O formation is not increased** (1/16 in every variant).
+
+Changes against the Pt4 section: (1) Pt7 pentagonal bipyramid (Pt-Pt 2.75 A) instead of Pt4; (2) the Pt atoms are held cold with a thermal region: global `temperature 500`, `temp_regions` gas atoms (8:13) at 2000 K ([TEMPERATURE_RAMP.md](TEMPERATURE_RAMP.md)), so the metal does not melt/fly apart (the earlier "cluster flies apart" came from starting all atoms at 2000 K; with this protocol Pt stays one connected cluster, Pt-Pt 3.4 A criterion, in all 64 Pt7 runs with Pt at 500 K: Pt Rg 2.12 A at start, at most 2.52 A; at Pt 1000 K up to 2.82 A, one run (F, spin 0) with two Pt components in some frames); (3) 16 start geometries: 2 H2 and O2 at random orientation 3.0-3.6 A from the cluster within a 55 degree cap (generator seed 1000+i), seed i = geometry i; (4) the control is the same gas atoms without Pt (centroid at the origin) with the same wall schedule R 8 -> 5.5 A in 6000 steps (same wall radius, so same wall; the free volume differs by the Pt7 volume); (5) 12000 steps (12 ps), spin 0 and spin 2 for Pt and control. Other settings as the Pt4 section (GFN2, CSVR, 1 fs, `electronic_temperature 2000`, `scf_damping 0.15`, `geometry_abort_factor 0`, logfermi, 1 thread). Free dynamics, no restraint. Analysis: same bond criteria as above (1.25 x covalent radii, free H2O = fragment H2O not bonded to Pt, O with two H = H2O unit also on Pt), batch evaluation, Wilson 95 % intervals and two-sided Fisher exact test (scripts were in the scratchpad, copy in the lab journal tarball, not in the repository).
+
+| 16 seeds each | Pt7 spin 0 | control spin 0 | Pt7 spin 2 | control spin 2 |
+|---|---|---|---|---|
+| both H2 split within 1 ps | 12/16 | 2/16 | 14/16 | 3/16 |
+| O-O above 1.65 A at least once | 15/16 | 11/16 | 13/16 | 1/16 |
+| any O-H bond | 7/16 | 16/16 | 10/16 | 10/16 |
+| O-H in at least half of the frames | 6/16 | 8/16 | 4/16 | 1/16 |
+| O with two H (H2O unit) | 1/16 | 9/16 | 1/16 | 1/16 |
+| free H2O | 1/16 (11.6 ps) | 1/16 (7.8 ps) | 1/16 (10.6 ps) | 1/16 (2.9 ps) |
+
+Fisher (Pt against control, same spin): H2 split p = 0.001 (spin 0) and p < 0.001 (spin 2); O-O stretched p = 0.17 (spin 0, singlet gas also breaks O-O) and p < 0.001 (spin 2); H2O unit p = 0.006 (spin 0, Pt has *fewer* than the gas, which forms H2O2-like species) and p = 1.0 (spin 2); free H2O p = 1.0 in all comparisons. Pt at 1000 K (gas 2000 K, 16 seeds, same geometries): spin 2: H2 split 9/16 (against control p = 0.066), O-O stretched 14/16 (p < 0.001), H2O unit 1/16, free H2O 1/16 (4.3 ps); spin 0: H2 split 12/16, O-O 14/16, H2O unit 2/16, free H2O 1/16. Pt 500 K against 1000 K (spin 2): no difference (all p >= 0.11).
+
+Findings: Pt7 catalyses the first steps (H2 dissociation, O2 stretching with the triplet occupation) at high significance; the product H2O does not appear more often than in the gas (1 of 16 in each of six variants, confidence interval 0.01-0.28, so an effect of about 3x or more cannot be excluded or shown). Oxygen and hydrogen stay adsorbed on the cold metal in 12 ps; with spin 0 the Pt suppresses the O-H bond formation that the singlet gas shows. A catalytic effect on H2O formation is **not established**; whether longer times, hotter metal with a stable cluster, or a larger cluster change this is not tested.
+
+Speed (CPU, 1 thread, 8 jobs in parallel, machine carrying a foreign job at load 24-32 on 24 threads): Pt7 + 6 atoms 26.6-27.6 steps/s (below the target of 30; 12000 steps in about 450 s), gas control 2600-2900 steps/s.
+
+Inputs: `reactions-doebereiner-pt7.json` (geometry 1, spin 2, Pt cold) and `reactions-doebereiner-pt7-control.json` (same gas, spin 2, wall identical); structures `reactions-doebereiner-pt7`, `reactions-doebereiner-pt7-control`. Geometry 1 is not representative: in this one the cold Pt7 splits both H2 (640 fs) and stretches O2 (9.1 ps) without any O-H bond, while its spin-2 gas control forms H2O at 2.9 ps. Test: `cli_simplemd_18_reaction_md_inputs` F checks only the H2 split on Pt7 in 1200 steps.
+
+Not tested: other geometries as inputs, clusters larger than Pt7 or surfaces, Pt above 1000 K, times longer than 12 ps, wall radius against density (the wall was identical in Pt and control but the free volume is not), 1000-1500 K gas, spin-polarised O2 (spin 2 is only an occupation), comparison with a reference calculation or a different method. Caveats: GFN2 over-binding of Pt-H and Pt-O is not checked; cold Pt and hot gas is not an equilibrium situation; counts of one event in 16 runs are not suitable to rank variants.
 
 ## What these are not
 
