@@ -424,6 +424,13 @@ struct GpuScfBackend {
      * them returns false and the caller falls back to the begin() upload path. */
     virtual bool beginBasis(const GpuBasisFlat& basis, const GpuH0Flat& h0) { (void)basis; (void)h0; return false; }
     virtual bool beginComputed(const std::vector<double>& xyz_bohr) { (void)xyz_bohr; return false; }
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB G1b): the periodic twin of beginComputed (after beginBasis): S/H0
+    /// image sums with the host self-energies se[nsh], for GFN2 with multipole the AO dipole/quadrupole image sums,
+    /// L = chol(S) and the resident buffers, all on the device. cell_L[3], trans[3 ntrans] (T = 0 first, the
+    /// LatticeImageList of the integral cutoff) and cut2 in Bohr. Default false -> host build + upload.
+    virtual bool beginComputedPeriodic(const std::vector<double>& xyz_bohr, const double* se, const double* cell_L,
+                                       int ntrans, const double* trans, double cut2, bool multipole)
+    { (void)xyz_bohr; (void)se; (void)cell_L; (void)ntrans; (void)trans; (void)cut2; (void)multipole; return false; }
     /// Fetch the device-computed Coulomb γ matrix (nsh×nsh) so the host
     /// potential build (v_sh += γ·q_sh) uses the device-built γ. Returns false if
     /// unavailable (caller keeps its own CPU γ). Claude Generated (Stage 3c).
@@ -1591,7 +1598,7 @@ private:
     /* P2b (GFN2 anisotropic electrostatics): AO dipole/quadrupole integrals as image sums with the origin at the
      * image of the column atom; interaction matrices by Ewald summation with tblite's alpha search, box-shaped
      * translation lists and conv = 100 eps (coulomb/multipole.f90 get_multipole_matrix_3d, coulomb/ewald.f90). */
-    void setupMultipolePeriodic();                                                   // xtb_periodic.cpp
+    void setupMultipolePeriodic(bool ao_ints_on_device = false);                                                   // xtb_periodic.cpp
     void buildMultipoleInteractionMatricesPeriodic() const;                          // xtb_periodic.cpp
     mutable double m_mp_pbc_alpha = 0.0;                              ///< Ewald alpha of the last periodic multipole build
     mutable std::vector<std::array<double, 3>> m_mp_pbc_dtrans;       ///< its direct translation box
@@ -1725,6 +1732,11 @@ private:
     void ensureHostIntegrals(const char* who = nullptr) const;
     void ensureHostIntegralsImpl(const char* who);
     mutable bool m_host_ints_deferred = false;
+    /// G1b (Nov 2026): with a cell the device built S/H0/L; the host copies of these three (not gamma, which the
+    /// host keeps) are fetched by the first consumer. ensureHostGamma() is the check of the gamma-only consumers.
+    mutable bool m_pbc_sx_deferred = false;
+    void ensureHostGamma(const char* who = nullptr) const
+    { if (m_host_ints_deferred) const_cast<XTB*>(this)->ensureHostIntegralsImpl(who); }
     /// Oct 2026: hand the D4 generator the device-computed covalent CN (no host O(nat^2) loop in GenerateParameters).
     void primeD4CnFromDevice(const Matrix& geom_bohr) const;
     bool m_dev_potentials = false;     // Oct 2026: the gradient reads the potentials the device built (no host m_pot)

@@ -198,6 +198,8 @@ struct XtbGpuContext::Impl {
     // Nov 2026 (G5d): periodic repulsion
     CudaBuffer<double> dPbcRepAlp, dPbcRepZeff, dPbcRepTrans, dPbcRepE, dPbcRepFix;
     CudaBuffer<int>    dPbcRepLight;
+    // Nov 2026 (G1b): lattice translations of the periodic S/H0 and multipole integral image sums
+    CudaBuffer<double> dPbcIntTrans;
     bool               d4_pbc_ready = false;
     // Oct 2026: whole post-SCF D4 on the device (d4PostScfDevice)
     CudaBuffer<double> dD4Rad, dD4En;                     // covalent-CN tables (119)
@@ -1386,6 +1388,165 @@ __global__ void k_multipole_ints(
     qp_int[3*nn + mn] = 1.5 * qxz;
     qp_int[4*nn + mn] = 1.5 * qyz;
     qp_int[5*nn + mn] = 1.5 * qzz - tr;
+}
+
+/* Claude Generated (Nov 2026, WP-PERIODIC-XTB G1b): periodic S and H0 as image sums, the statements of
+ * XTB::getHamiltonianH0Periodic (xtb_periodic.cpp). One thread per AO pair (mu, nu); s/p shells only (a cell
+ * refuses d shells). For iat == jat the T = 0 on-atom block (h_factor 1, exact 1 on the diagonal) comes first,
+ * then every image d = d0 - T (d0 minimum image of x_i - x_j, T in list order, T = 0 skipped for iat == jat) with
+ * r2 < cut2; the image of b sits at x_i - d and carries h_factor = hs * pi_ij(r). Each element is accumulated in
+ * registers in the host order and written once (no atomics). r2 without FMA contraction (host cutoff decisions). */
+__global__ void k_overlap_h0_pbc(
+    int nao, int is_gfn2, const int* __restrict__ ao2sh, const int* __restrict__ ao2at,
+    const int* __restrict__ ang_sh, const int* __restrict__ iao_sh,
+    const int* __restrict__ sh_nprim, const int* __restrict__ sh_prim_off,
+    const double* __restrict__ prim_alpha, const double* __restrict__ prim_coeff,
+    const double* __restrict__ sh_zeta, const double* __restrict__ shpoly,
+    const double* __restrict__ se, const int* __restrict__ z,
+    const int* __restrict__ valence, const double* __restrict__ xyz,
+    double Lx, double Ly, double Lz, int ntr, const double* __restrict__ trans, double cut2,
+    double* __restrict__ S, double* __restrict__ H0)
+{
+    const int mu = blockIdx.x * blockDim.x + threadIdx.x;
+    const int nu = blockIdx.y * blockDim.y + threadIdx.y;
+    if (mu >= nao || nu >= nao) return;
+    const int a = ao2sh[mu], b = ao2sh[nu];
+    const int iat = ao2at[mu], jat = ao2at[nu];
+    const int la = ang_sh[a], lb = ang_sh[b];
+    const int ta = d_ao_to_type(la, mu - iao_sh[a]);
+    const int tb = d_ao_to_type(lb, nu - iao_sh[b]);
+    const size_t idx = static_cast<size_t>(mu) + static_cast<size_t>(nu) * nao;
+    if (ta < 0 || tb < 0) { S[idx] = 0.0; H0[idx] = 0.0; return; }
+    const double xa = xyz[3 * iat + 0], ya = xyz[3 * iat + 1], za = xyz[3 * iat + 2];
+    const double avg_eps = 0.5 * (se[a] + se[b]);
+    const int zi = z[iat], zj = z[jat];
+
+    double hs;
+    if (is_gfn2 == 0) {
+        const bool vi = valence[a] != 0, vj = valence[b] != 0;
+        if (vi && vj) {
+            double den = c_pauling[zi - 1] - c_pauling[zj - 1]; den *= den;
+            hs = d_kpair_gfn1(zi, zj) * d_kshell_gfn1(la, lb) * (1.0 + (-7.0e-3) * den);
+        } else if (vi && !vj) {
+            hs = 0.5 * (d_kshell_gfn1(la, la) + 2.85);
+        } else if (!vi && vj) {
+            hs = 0.5 * (d_kshell_gfn1(lb, lb) + 2.85);
+        } else {
+            hs = 2.85;
+        }
+    } else {
+        double den = c_pauling[zi - 1] - c_pauling[zj - 1]; den *= den;
+        const double enp = 1.0 + 2.0e-2 * den;
+        const double km  = d_kshell_gfn2(la, lb) * enp;  // kpair=1 for GFN2
+        const double za_ = sh_zeta[a], zb_ = sh_zeta[b];
+        const double zij = pow(2.0 * sqrt(za_ * zb_) / (za_ + zb_), 0.5);  // wexp=0.5
+        hs = zij * km;
+    }
+    const double rad_sum = c_atomic_rad[zi - 1] + c_atomic_rad[zj - 1];
+    const double* pa_alpha = prim_alpha + sh_prim_off[a];
+    const double* pa_coeff = prim_coeff + sh_prim_off[a];
+    const int npa = sh_nprim[a];
+    const double* pb_alpha = prim_alpha + sh_prim_off[b];
+    const double* pb_coeff = prim_coeff + sh_prim_off[b];
+    const int npb = sh_nprim[b];
+
+    double s_acc = 0.0, h_acc = 0.0;
+    const bool same = (iat == jat);
+    if (same) {   // T = 0 on-atom block, h_factor 1, exact 1 on the diagonal of a shell
+        const double s_ab = (a == b && ta == tb)
+            ? 1.0 : d_cgto_overlap(pa_alpha, pa_coeff, npa, pb_alpha, pb_coeff, npb, xa, ya, za, xa, ya, za, ta, tb);
+        s_acc += s_ab;
+        h_acc += avg_eps * 1.0 * s_ab;
+    }
+    double d0x = xa - xyz[3 * jat], d0y = ya - xyz[3 * jat + 1], d0z = za - xyz[3 * jat + 2];
+    double s = d0x * (1.0 / Lx); s -= rint(s); d0x = Lx * s;
+    s = d0y * (1.0 / Ly); s -= rint(s); d0y = Ly * s;
+    s = d0z * (1.0 / Lz); s -= rint(s); d0z = Lz * s;
+    for (int t = same ? 1 : 0; t < ntr; ++t) {
+        const double dx = d0x - trans[3 * t], dy = d0y - trans[3 * t + 1], dz = d0z - trans[3 * t + 2];
+        const double r2 = __dadd_rn(__dadd_rn(__dmul_rn(dx, dx), __dmul_rn(dy, dy)), __dmul_rn(dz, dz));
+        if (r2 >= cut2 || r2 < 1.0e-24) continue;
+        const double rr = sqrt(sqrt(r2) / rad_sum);
+        const double pi_ij = (1.0 + shpoly[a] * rr) * (1.0 + shpoly[b] * rr);
+        const double s_ab = d_cgto_overlap(pa_alpha, pa_coeff, npa, pb_alpha, pb_coeff, npb,
+                                           xa, ya, za, xa - dx, ya - dy, za - dz, ta, tb);
+        s_acc += s_ab;
+        h_acc += avg_eps * (hs * pi_ij) * s_ab;
+    }
+    S[idx]  = s_acc;
+    H0[idx] = h_acc;
+}
+
+/* Claude Generated (Nov 2026, WP-PERIODIC-XTB G1b): periodic GFN2 AO dipole/quadrupole integrals, the statements of
+ * steps 1 + 2 of XTB::setupMultipolePeriodic: one thread per AO pair (mu, nu), per image the multipole block at the
+ * image position R of atom(nu) (origin shifted to R with the block's own overlap), summed in the host image order,
+ * then the traceless transform. s/p shells only. Layout as k_multipole_ints (dp 3 nn, qp 6 nn, mu + nu nao). */
+__global__ void k_multipole_ints_pbc(
+    int nao, const int* __restrict__ ao2sh, const int* __restrict__ ao2at,
+    const int* __restrict__ iao_sh, const int* __restrict__ ang_sh,
+    const int* __restrict__ sh_nprim, const int* __restrict__ sh_prim_off,
+    const double* __restrict__ prim_alpha, const double* __restrict__ prim_coeff,
+    const double* __restrict__ xyz, double Lx, double Ly, double Lz, int ntr,
+    const double* __restrict__ trans, double cut2,
+    double* __restrict__ dp_int, double* __restrict__ qp_int)
+{
+    const int mu = blockIdx.x * blockDim.x + threadIdx.x;
+    const int nu = blockIdx.y * blockDim.y + threadIdx.y;
+    if (mu >= nao || nu >= nao) return;
+    const size_t nn = static_cast<size_t>(nao) * static_cast<size_t>(nao);
+    const size_t mn = static_cast<size_t>(mu) + static_cast<size_t>(nu) * nao;
+
+    const int isha = ao2sh[mu], iat = ao2at[mu];
+    const int ishb = ao2sh[nu], jat = ao2at[nu];
+    const int ta = d_ao_to_type(ang_sh[isha], mu - iao_sh[isha]);
+    const int tb = d_ao_to_type(ang_sh[ishb], nu - iao_sh[ishb]);
+    const double* aA = prim_alpha + sh_prim_off[isha];
+    const double* cA = prim_coeff + sh_prim_off[isha];
+    const int npa = sh_nprim[isha];
+    const double* aB = prim_alpha + sh_prim_off[ishb];
+    const double* cB = prim_coeff + sh_prim_off[ishb];
+    const int npb = sh_nprim[ishb];
+    const double xa = xyz[3 * iat + 0], ya = xyz[3 * iat + 1], za = xyz[3 * iat + 2];
+
+    double dp[3] = { 0.0, 0.0, 0.0 }, qr[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    auto addBlock = [&](double Rx, double Ry, double Rz) {
+        double Smn, D[3], Q[6];
+        d_cgto_multipole(aA, cA, npa, aB, cB, npb, xa, ya, za, Rx, Ry, Rz, ta, tb, Smn, D, Q);
+        const double dx = D[0], dy = D[1], dz = D[2];
+        dp[0] += dx - Rx * Smn;
+        dp[1] += dy - Ry * Smn;
+        dp[2] += dz - Rz * Smn;
+        qr[0] += Q[0] - 2 * Rx * dx + Rx * Rx * Smn;
+        qr[1] += Q[1] - Rx * dy - Ry * dx + Rx * Ry * Smn;
+        qr[2] += Q[2] - 2 * Ry * dy + Ry * Ry * Smn;
+        qr[3] += Q[3] - Rx * dz - Rz * dx + Rx * Rz * Smn;
+        qr[4] += Q[4] - Ry * dz - Rz * dy + Ry * Rz * Smn;
+        qr[5] += Q[5] - 2 * Rz * dz + Rz * Rz * Smn;
+    };
+    const bool same = (iat == jat);
+    if (ta >= 0 && tb >= 0) {
+        if (same) addBlock(xyz[3 * jat], xyz[3 * jat + 1], xyz[3 * jat + 2]);
+        double d0x = xa - xyz[3 * jat], d0y = ya - xyz[3 * jat + 1], d0z = za - xyz[3 * jat + 2];
+        double s = d0x * (1.0 / Lx); s -= rint(s); d0x = Lx * s;
+        s = d0y * (1.0 / Ly); s -= rint(s); d0y = Ly * s;
+        s = d0z * (1.0 / Lz); s -= rint(s); d0z = Lz * s;
+        for (int t = same ? 1 : 0; t < ntr; ++t) {
+            const double dx = d0x - trans[3 * t], dy = d0y - trans[3 * t + 1], dz = d0z - trans[3 * t + 2];
+            const double r2 = __dadd_rn(__dadd_rn(__dmul_rn(dx, dx), __dmul_rn(dy, dy)), __dmul_rn(dz, dz));
+            if (r2 >= cut2 || r2 < 1.0e-24) continue;
+            addBlock(xa - dx, ya - dy, za - dz);
+        }
+    }
+    dp_int[0 * nn + mn] = dp[0];
+    dp_int[1 * nn + mn] = dp[1];
+    dp_int[2 * nn + mn] = dp[2];
+    const double tr = 0.5 * (qr[0] + qr[2] + qr[5]);
+    qp_int[0 * nn + mn] = 1.5 * qr[0] - tr;
+    qp_int[1 * nn + mn] = 1.5 * qr[1];
+    qp_int[2 * nn + mn] = 1.5 * qr[2] - tr;
+    qp_int[3 * nn + mn] = 1.5 * qr[3];
+    qp_int[4 * nn + mn] = 1.5 * qr[4];
+    qp_int[5 * nn + mn] = 1.5 * qr[5] - tr;
 }
 
 // Cholesky-factor probe helpers (Claude Generated, Oct 2026): fixed probe vector and the fault injection.
@@ -6239,6 +6400,90 @@ bool XtbGpuContext::computeIntegrals(const double* xyz_bohr)
     ++I.l_generation;
     (void)nat;
     return info == 0;
+}
+
+// Claude Generated (Nov 2026, WP-PERIODIC-XTB G1b): periodic S/H0 (+ GFN2 dp/qp) image sums and L = chol(S) on the
+// device, dense storage only, single device. se[nsh] are the host self-energies of the periodic CN. On success
+// dS/dH0/dL (and dDpInt/dQpInt) hold this geometry, as after computeIntegrals; residentBeginComputed follows.
+bool XtbGpuContext::computeIntegralsPeriodic(const double* xyz_bohr, const double* se, const double* cell_L,
+                                             int ntrans, const double* trans, double cut2, bool multipole)
+{
+    if (!ok() || m_impl->basis_nao <= 0 || !xyz_bohr || !se || !cell_L || !trans || ntrans < 1) return false;
+    Impl& I = *m_impl;
+    const int nat = I.basis_nat, nsh = I.basis_nsh, nao = I.basis_nao;
+    const bool want_mp = multipole && I.basis_is_gfn2;
+    cudaStream_t stream = I.stream;
+    const size_t nn = static_cast<size_t>(nao) * static_cast<size_t>(nao);
+    I.last_error.clear();
+    if (I.memory_check && I.dL.empty()) {
+        const size_t need = estimateStorageBytes(nat, nsh, nao, I.basis_is_gfn2 != 0, 0.0);
+        size_t free_b = 0, total_b = 0;
+        if (cudaMemGetInfo(&free_b, &total_b) == cudaSuccess && need > free_b) {
+            I.last_error = "periodic integrals: not enough device memory for the dense storage";
+            return false;
+        }
+    }
+    try {
+        for (CudaBuffer<double>* buf : { &I.dSpS, &I.dSpH0, &I.dSpTmp, &I.dSpDp, &I.dSpQp }) buf->free();
+        for (CudaBuffer<int>* buf : { &I.dSpRow, &I.dSpCol, &I.dSpColPtr, &I.dSpPerm, &I.dSpUp }) buf->free();
+        I.h_sp_row.clear(); I.h_sp_col.clear();
+        I.dL.ensure(static_cast<int>(nn));
+        I.dS.ensure(static_cast<int>(nn));
+        I.dH0.ensure(static_cast<int>(nn));
+        if (want_mp) {
+            I.dDpInt.ensure(static_cast<int>(3 * nn));
+            I.dQpInt.ensure(static_cast<int>(6 * nn));
+        }
+        int lwork = 0;
+        if (cusolverDnDpotrf_bufferSize(I.cusolver, CUBLAS_FILL_MODE_LOWER, nao, I.dL.ptr, nao, &lwork)
+            != CUSOLVER_STATUS_SUCCESS)
+            return false;
+        I.potrf_lwork = lwork;
+        I.dPotrfWork.ensure(lwork > 0 ? lwork : 1);
+        I.dXyz.upload(xyz_bohr, 3 * nat, stream);
+        I.dSE.upload(se, nsh, stream);
+        I.dPbcIntTrans.upload(trans, 3 * ntrans, stream);
+        if (I.dInfo.n < 1) I.dInfo.alloc(1);
+    } catch (const std::exception& ex) {
+        I.last_error = std::string("periodic integrals: device allocation failed: ") + ex.what();
+        return false;
+    }
+    I.sparse = false;
+    I.profStart();
+    const dim3 block(16, 16);
+    const dim3 grid((nao + block.x - 1) / block.x, (nao + block.y - 1) / block.y);
+    k_overlap_h0_pbc<<<grid, block, 0, stream>>>(
+        nao, I.basis_is_gfn2, I.dAo2sh.ptr, I.dAo2at.ptr, I.dAng.ptr, I.dIaoSh.ptr,
+        I.dShNprim.ptr, I.dShPrimOff.ptr, I.dPrimAlpha.ptr, I.dPrimCoeff.ptr, I.dShZeta.ptr, I.dShpoly.ptr,
+        I.dSE.ptr, I.dZ.ptr, I.dValence.ptr, I.dXyz.ptr, cell_L[0], cell_L[1], cell_L[2], ntrans,
+        I.dPbcIntTrans.ptr, cut2, I.dS.ptr, I.dH0.ptr);
+    if (cudaGetLastError() != cudaSuccess) { I.last_error = "periodic overlap/H0 kernel failed"; return false; }
+    I.profMark("integrals PBC: overlap + H0");
+    if (want_mp) {
+        const dim3 mgrid((nao + block.x - 1) / block.x, (nao + block.y - 1) / block.y);
+        k_multipole_ints_pbc<<<mgrid, block, 0, stream>>>(
+            nao, I.dAo2sh.ptr, I.dAo2at.ptr, I.dIaoSh.ptr, I.dAng.ptr, I.dShNprim.ptr, I.dShPrimOff.ptr,
+            I.dPrimAlpha.ptr, I.dPrimCoeff.ptr, I.dXyz.ptr, cell_L[0], cell_L[1], cell_L[2], ntrans,
+            I.dPbcIntTrans.ptr, cut2, I.dDpInt.ptr, I.dQpInt.ptr);
+        if (cudaGetLastError() != cudaSuccess) { I.last_error = "periodic multipole integral kernel failed"; return false; }
+        I.profMark("integrals PBC: multipole");
+    }
+    // L = chol(S), lower triangle in place (the convention of computeIntegrals and the host Eigen matrixL()),
+    // probed like every device factor; a failed factor or probe fails the call (host build follows).
+    if (cudaMemcpyAsync(I.dL.ptr, I.dS.ptr, sizeof(double) * nn, cudaMemcpyDeviceToDevice, stream) != cudaSuccess)
+        return false;
+    int info = 1;
+    if (cusolverDnDpotrf(I.cusolver, CUBLAS_FILL_MODE_LOWER, nao, I.dL.ptr, nao, I.dPotrfWork.ptr, I.potrf_lwork,
+                         I.dInfo.ptr) != CUSOLVER_STATUS_SUCCESS)
+        return false;
+    if (cudaMemcpyAsync(&info, I.dInfo.ptr, sizeof(int), cudaMemcpyDeviceToHost, stream) != cudaSuccess) return false;
+    if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
+    if (info != 0) { I.last_error = "periodic overlap is not positive definite (device Cholesky)"; return false; }
+    const int pr = I.probeCholeskyFactor(nao);
+    if (pr != 1) { I.last_error = "device Cholesky factor of the periodic S failed its probe"; return false; }
+    I.profMark("integrals PBC: Cholesky of S");
+    ++I.l_generation;
+    return true;
 }
 
 // ---- Storage-independent SCF building blocks (Claude Generated, Sep 2026) ----------------

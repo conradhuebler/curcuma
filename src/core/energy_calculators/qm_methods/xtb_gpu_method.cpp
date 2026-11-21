@@ -248,6 +248,14 @@ public:
         return m_ctx && m_n > 0 && m_ctx->downloadH0(H0_colmajor);
     }
 
+    // Claude Generated (Nov 2026, WP-PERIODIC-XTB G1b): periodic integrals on the device, see GpuScfBackend.
+    bool beginComputedPeriodic(const std::vector<double>& xyz_bohr, const double* se, const double* cell_L,
+                               int ntrans, const double* trans, double cut2, bool multipole) override
+    {
+        if (!m_ctx || m_n <= 0) return false;
+        return m_ctx->computeIntegralsPeriodic(xyz_bohr.data(), se, cell_L, ntrans, trans, cut2, multipole)
+            && m_ctx->residentBeginComputed();
+    }
     bool beginMultipoleComputed() override
     {
         if (!m_ctx || m_nat <= 0) return false;

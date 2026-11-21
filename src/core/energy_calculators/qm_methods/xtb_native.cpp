@@ -625,6 +625,51 @@ double XTB::Calculation(bool gradient)
         exportGpuBasis(gbf, gh0);
         if (m_gpu_scf->beginBasis(gbf, gh0)) m_gpu_basis_dirty = false;
     }
+    // G1b (Claude Generated, Nov 2026): the periodic S/H0 (and GFN2 AO multipole) image sums and L = chol(S) on the
+    // device; the host keeps the periodic CN/self-energies (input of H0) and the gamma build. The host copies of
+    // S/H0/L and of the multipole integrals are deferred (downloaded by the first host consumer).
+    // CURCUMA_PBC_GPU_HOST=ints keeps the host build and upload.
+    bool pbc_dev_ints = false;
+    if (m_gpu_scf && m_pbc && m_pbc_device_scf && !m_gpu_basis_dirty && m_scf_mode == ScfMode::Broyden
+        && !m_has_dshell && !pbcGpuStageOnHost("ints")) {
+        ensure_host_cn();
+        std::vector<double> xyz_b(3 * static_cast<size_t>(m_atomcount));
+        for (int i = 0; i < m_atomcount; ++i)
+            for (int k = 0; k < 3; ++k) xyz_b[3 * i + k] = m_geometry(i, k) * AA_TO_AU;
+        const PBCUtils::LatticeImageList images = PBCUtils::makeLatticeImageList(m_cell_bohr, pbcIntegralCutoffBohr());
+        std::vector<double> tr(3 * images.trans.size());
+        for (size_t t = 0; t < images.trans.size(); ++t)
+            for (int k = 0; k < 3; ++k) tr[3 * t + k] = images.trans[t][k];
+        std::vector<double> se_v(se.data(), se.data() + se.size());
+        if (m_gpu_scf->beginComputedPeriodic(xyz_b, se_v.data(), m_cell_bohr.L, static_cast<int>(images.trans.size()),
+                                             tr.data(), images.cutoff2, m_method == MethodType::GFN2)) {
+            pbc_dev_ints = true;
+            gpu_computed = true;
+            m_pbc_sx_deferred = true;
+            m_S.resize(0, 0); m_H0.resize(0, 0); m_X.resize(0, 0);
+            if (verb >= 2)
+                CurcumaLogger::info("SCF: periodic S/H0/L and multipole integrals built on the GPU device (G1b)");
+            if (std::getenv("CURCUMA_PBC_INTS_CHECK")) {   // diagnostic: device vs host periodic S/H0
+                Matrix Sh, Hh;
+                getHamiltonianH0Periodic(se, Sh, Hh);
+                const int nao = m_basis.nao;
+                Matrix Sd(nao, nao), Hd(nao, nao);
+                if (m_gpu_scf->downloadOverlapInto(Sd.data()) && m_gpu_scf->downloadH0Into(Hd.data())) {
+                    transposeSquareInPlace(Sd.data(), nao);
+                    transposeSquareInPlace(Hd.data(), nao);
+                    Eigen::Index r = 0, c = 0;
+                    const double ds = (Sd - Sh).cwiseAbs().maxCoeff(&r, &c);
+                    CurcumaLogger::result(fmt::format("PBC ints check: max|dS| {:.3e} at ({},{}) dev {} host {}",
+                                                      ds, r, c, Sd(r, c), Sh(r, c)));
+                    const double dh = (Hd - Hh).cwiseAbs().maxCoeff(&r, &c);
+                    CurcumaLogger::result(fmt::format("PBC ints check: max|dH0| {:.3e} at ({},{}) dev {} host {}",
+                                                      dh, r, c, Hd(r, c), Hh(r, c)));
+                }
+            }
+        } else if (verb >= 1) {
+            CurcumaLogger::warn("periodic device integral build failed; host build and upload");
+        }
+    }
     if (m_gpu_scf && !m_pbc && m_scf_mode == ScfMode::Broyden && (!m_has_dshell || gpu_d_ok)) {
         GpuBasisFlat gbf;
         GpuH0Flat    gh0;
@@ -699,7 +744,12 @@ double XTB::Calculation(bool gradient)
     auto t_h0 = t_cn;
     auto t_ortho = t_cn;
     auto t_gamma = t_cn;
-    if (!integrals_from_device) {
+    if (pbc_dev_ints) {
+        // G1b: S/H0/L are on the device; only the periodic gamma is built on the host side (G2 on the device).
+        t_h0 = t_ortho = clock::now();
+        buildGammaMatrix();
+        t_gamma = clock::now();
+    } else if (!integrals_from_device) {
         // Full host integral build (CPU path, or device build unavailable).
         ensure_host_cn();
         getHamiltonianH0(se, S, H0);
@@ -822,8 +872,8 @@ double XTB::Calculation(bool gradient)
         bool defer_amat = integrals_from_device && m_gpu_scf && m_gpu_scf->supportsResidentLoop()
             && m_gpu_scf->supportsStoredMultipoleOnDevice() && m_scf_mode == ScfMode::Broyden;
         if (const char* e = std::getenv("CURCUMA_MP_AMAT_DEVICE")) defer_amat = defer_amat && (e[0] != '0');
-        setupMultipole(mp_on_device || defer, defer_amat);
-        m_mp_ints_deferred = defer;
+        setupMultipole(mp_on_device || defer || pbc_dev_ints, defer_amat);   // G1b: periodic AO ints on the device
+        m_mp_ints_deferred = defer || pbc_dev_ints;
         if (defer && verb >= 2)
             CurcumaLogger::info(fmt::format("SCF: host GFN2 multipole integrals deferred ({:.1f} GB; "
                                             "the device-resident loop builds its own)", mp_bytes / 1.0e9));
@@ -1211,7 +1261,7 @@ double XTB::Calculation(bool gradient)
     bool use_gpu_resident = false;
     bool gpu_multipole    = false;
     if (m_gpu_scf && mode == ScfMode::Broyden && (!m_has_dshell || m_gpu_scf->supportsDshell())
-        && ((m_X.rows() == m_basis.nao && m_X.cols() == m_basis.nao) || m_host_ints_deferred)) {
+        && ((m_X.rows() == m_basis.nao && m_X.cols() == m_basis.nao) || m_host_ints_deferred || m_pbc_sx_deferred)) {
         // Stage 3: the device-computed integral build (beginBasis once + beginComputed
         // per geometry: CN/S/H0/L on the device, no nao² upload) was hoisted into the
         // integral-build step above (AP4) so S/H0/L/gamma could be downloaded in place
@@ -1252,7 +1302,7 @@ double XTB::Calculation(bool gradient)
         // host (the rest of v_sh — third-order, D4 — is assembled there too).
         // (Oct 2026: already in m_gamma when the integrals came from the device - the setup downloaded it; the second
         // nsh^2 download cost 55 ms (GFN2) / 115 ms (GFN1) on peo201-water500 for the same numbers.)
-        if (use_gpu_resident && computed && !integrals_from_device) {
+        if (use_gpu_resident && computed && !integrals_from_device && !pbc_dev_ints) {   // G1b: periodic gamma stays the host one
             Eigen::MatrixXd dev_gamma;
             if (m_gpu_scf->downloadGamma(dev_gamma)
                 && dev_gamma.rows() == m_gamma.rows()
@@ -1466,7 +1516,7 @@ double XTB::Calculation(bool gradient)
             }
         }
     }
-    if (!use_resident_loop && m_method == MethodType::GFN1 && use_gpu_resident && gpu_computed
+    if (!use_resident_loop && m_method == MethodType::GFN1 && use_gpu_resident && gpu_computed && !m_pbc   // G1b: no images
         && mode == ScfMode::Broyden && (!m_solvation || gfn1_born) && m_gpu_scf->supportsResidentLoopGfn1()) {
         bool want = m_gpu_gfn1_resident;
         if (const char* e = std::getenv("CURCUMA_GFN1_RESIDENT")) want = (e[0] != '0');
@@ -1524,7 +1574,9 @@ double XTB::Calculation(bool gradient)
             std::to_string(static_cast<int>(std::floor(m_wfn.nocc / 2.0))) + " + buffer)");
 
     // Deferred host multipole integrals are needed as soon as any iteration runs on the host.
-    if (!use_resident_loop)
+    // G1b: the host-driven device loop with a cell keeps its multipole integrals resident (solveMultipole uploads
+    // only v_dp/v_qp, the moments come from the device); its CPU branch is unreachable (a failure is a hard error).
+    if (!use_resident_loop && !(pbc_dev_ints && use_gpu_resident && gpu_multipole))
         ensureHostMultipoleIntegrals();
 
     // Claude Generated (Oct 2026): Broyden seed preconditioner (xtb_precond.cpp). The scalar seed
@@ -1641,6 +1693,7 @@ double XTB::Calculation(bool gradient)
     }
 
     double resident_band = 0.0;   // Tr(P H0) of the last device-resident step
+    double pbc_last_gpu_band = 0.0;   // G1b: Tr(P H0) of the last host-driven device step (host H0 deferred)
     double resident_ecoul = 0.0, resident_ethird = 0.0, resident_emp = 0.0;  // its SCC energies
     pre_mark("preconditioner, SCF state");
     const auto t_scf_start = clock::now();
@@ -1651,7 +1704,9 @@ double XTB::Calculation(bool gradient)
     m_pseudo_c_valid = false; m_pseudo_consecutive = 0; m_pseudo_used = false; m_eig_pseudo = false;   // Oct 2026
     m_pseudo_taken = m_pseudo_rejected = 0;
     int iter;
-    if (!use_resident_loop) ensureHostIntegrals();   // the host-driven loops read m_S / m_H0 / m_X
+    // G1b: the host-driven device loop with a cell reads no host S/H0/L (only its CPU branch, which a failure
+    // reaches through the restart below, which ensures them).
+    if (!use_resident_loop && !(m_pbc_sx_deferred && use_gpu_resident)) ensureHostIntegrals();   // the host-driven loops read m_S / m_H0 / m_X
     for (iter = 0; iter < max_iter; ++iter) {
         const auto t_iter0 = clock::now();
 
@@ -2071,6 +2126,7 @@ double XTB::Calculation(bool gradient)
 
         // Band energy: Tr(P · H0). Device-resident path returns it from the GPU
         // (P is not on the host during the loop); CPU path sums P⊙H0 directly.
+        if (use_gpu_resident) pbc_last_gpu_band = gpu_band;   // G1b
         m_E_electronic = use_gpu_resident ? gpu_band
                                           : (m_wfn.P.cwiseProduct(m_H0)).sum();
 
@@ -2456,7 +2512,7 @@ double XTB::Calculation(bool gradient)
     // Claude Generated (Sep 2026): m_F is only read by debug dumps / consistency audits. With
     // deferred host multipole integrals (large system on the GPU) skip the O(nao^2) host
     // rebuild instead of forcing the 17 GB integral build just for it.
-    if (m_mp_ints_deferred || m_wfn_on_device || m_host_ints_deferred)
+    if (m_mp_ints_deferred || m_wfn_on_device || m_host_ints_deferred || m_pbc_sx_deferred)
         m_F.resize(0, 0);
     else
         m_F = buildFock(m_H0, m_S, m_pot);
@@ -2476,7 +2532,11 @@ double XTB::Calculation(bool gradient)
     }
     post_mark("Coulomb/third-order/multipole energies");
     // Band energy: Tr(P · H0) for electronic part (from the device when P stayed there)
-    m_E_electronic   += (m_wfn_on_device || use_resident_loop) ? resident_band : (m_wfn.P.cwiseProduct(m_H0)).sum();
+    // G1b: with the periodic S/H0/L on the device (host copies deferred) the band energy of the last device step,
+    // computed from the same converged P that finalize() downloaded.
+    const bool pbc_band_dev = m_pbc_sx_deferred && use_gpu_resident;
+    m_E_electronic   += (m_wfn_on_device || use_resident_loop) ? resident_band
+                      : (pbc_band_dev ? pbc_last_gpu_band : (m_wfn.P.cwiseProduct(m_H0)).sum());
     post_mark("band energy Tr(P H0)");
     // Electronic free-energy (Mermin/Fermi entropy) term g = -T*S. Zero for
     // gapped systems (occ ∈ {0,2}); only bites on small-gap systems with
@@ -2607,7 +2667,7 @@ double XTB::Calculation(bool gradient)
         }
         if (!gpu_grad) {
             ensureHostWavefunction();
-            ensureHostMultipoleIntegrals();
+            if (!m_pbc) ensureHostMultipoleIntegrals();   // G1b: the periodic gradient reads no AO multipole integrals
             calculateGradient();   // fills m_gradient in Eh/Bohr
         }
 
@@ -3244,6 +3304,7 @@ bool XTB::UpdateMolecule(const Matrix& geometry)
     m_S.resize(0, 0);
     m_H0.resize(0, 0);
     m_host_ints_deferred = false;   // Oct 2026: the lazy host copies belong to the old geometry
+    m_pbc_sx_deferred = false;      // G1b
     m_mp_amat_deferred = false;
 
     // 3. Fock matrix depends on geometry via H0 + potential
@@ -3396,11 +3457,41 @@ nlohmann::json XTB::getEnergyDecomposition() const
  * ------------------------------------------------------------------------- */
 void XTB::ensureHostIntegrals(const char* who) const
 {
-    if (m_host_ints_deferred) const_cast<XTB*>(this)->ensureHostIntegralsImpl(who);
+    if (m_host_ints_deferred || m_pbc_sx_deferred) const_cast<XTB*>(this)->ensureHostIntegralsImpl(who);
 }
 
 void XTB::ensureHostIntegralsImpl(const char* who)
 {
+    if (m_pbc_sx_deferred) {
+        // G1b (Claude Generated, Nov 2026): periodic S/H0/L from the device; the host gamma is current. Without the
+        // device copies the periodic host build (getHamiltonianH0 dispatches to the image sums).
+        m_pbc_sx_deferred = false;
+        if (CurcumaLogger::get_verbosity() >= 3 || std::getenv("CURCUMA_GPU_PROFILE"))
+            CurcumaLogger::result(fmt::format("  host copies of the periodic S/H0/L fetched (first consumer: {})",
+                                              who ? who : "getter"));
+        const int nao = m_basis.nao;
+        bool got = false;
+        if (m_gpu_scf) {
+            m_S.resize(nao, nao);
+            m_H0.resize(nao, nao);
+            if (m_gpu_scf->downloadOverlapInto(m_S.data()) && m_gpu_scf->downloadH0Into(m_H0.data())) {
+                transposeSquareInPlace(m_S.data(), nao);
+                transposeSquareInPlace(m_H0.data(), nao);
+                got = m_gpu_scf->downloadCholesky(m_X) && m_X.rows() == nao;
+            }
+        }
+        if (!got) {
+            const Vector cn = computeCoordinationNumbers();
+            Vector se;
+            getSelfEnergies(cn, se);
+            Matrix S, H0;
+            getHamiltonianH0(se, S, H0);
+            m_S = S;
+            m_H0 = H0;
+            buildOrthonormalizer();
+        }
+        return;
+    }
     m_host_ints_deferred = false;    // first: the rebuild below calls functions that would ensure again
     if (CurcumaLogger::get_verbosity() >= 3 || std::getenv("CURCUMA_GPU_PROFILE"))
         CurcumaLogger::result(fmt::format("  host copies of S/H0/L/gamma fetched (first consumer: {})", who ? who : "getter"));

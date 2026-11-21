@@ -695,6 +695,60 @@ derivative kernels; not started), orthonormalizer 118, Ewald gradient 33 and KO 
 Regression after G2/G5b-d (2026-11-20, test selection of the regression run below, `-j1`): `release/` 379 of 380,
 `release_cuda/` 650 of 651 passed; the only failure in both is the pre-existing `xtb_cpscf`.
 
+### G2-G6 continuation 2: profile at the start (2026-11-21, Claude Generated)
+
+Binary of dcedbfbd (`release_cuda/`, ABI 13), gfn2, `-gpu cuda -threads 8`, RTX 5080 idle, verbosity 3, one run each
+(ms). `-sp` = `-sp` + `-dump_gradient` (no virial); MD = one step of `-md ... -compute_pressure true` (with virial).
+
+| item | 432 `-sp` | 432 MD step |
+|---|---|---|
+| CN / S+H0 / orthonormalizer (host Eigen LLT) | 55 / 94 / 142 | 55 / 75 / 115 |
+| gamma (device) / AO dp/qp image sums (host) / multipole matrices (device) | 79 / 254 / 115 | 48 / 256 / 110 |
+| pre-SCF upload of H0/S/L + 9 multipole matrices | 187 | 164 |
+| SCF: total / device eigensolve / D4 dE/dq | 1241 (11 it) / 985 / 117 | 954 (8 it) / 740 / 109 |
+| post-SCF: ATM (device) / CN fold / D4 pairs; host Fock | 219 / 103 / 39; 55 | 287 / 101 / 69; 50 |
+| gradient: H0/Pulay / multipole (device) / Ewald / KO / W | 128 / 102 / 34 / 35 / 54 | 128 / 272 / 72 / 35 / 52 |
+| TOTAL | 3046 | 2910 |
+
+Device eigensolve (`CURCUMA_GPU_PROFILE`, 432 `-sp`): 10 FP32 solves (strsm reduction about 34 ms, ssyevd 33 ms,
+back-transform 1.6 ms each) and one FP64 solve (dtrsm reduction 100 ms, dsyevd 176 ms, back-transform 24 ms). The
+device pseudo-diagonalisation (on for the cell-free resident loop) is off in the host-driven periodic loop
+(`in_resident_step` gate); enabling it there needs the host occupation and convergence logic to accept unsorted
+virtual eigenvalues (not done). The host-side integral chain (S/H0, Cholesky, AO multipole sums, upload, about
+0.65 s per 432 step) was the largest block that could move without touching the eigensolver, hence G1b first.
+
+### G1b periodic S/H0, AO multipole integrals and Cholesky on the device (2026-11-21, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+- `GpuScfBackend::beginComputedPeriodic` (CUDA `XtbGpuContext::computeIntegralsPeriodic`, kernels `k_overlap_h0_pbc`,
+  `k_multipole_ints_pbc`): one thread per AO pair, the statements of `getHamiltonianH0Periodic` and of steps 1 + 2 of
+  `setupMultipolePeriodic` (on-atom block first, then the images in the `LatticeImageList` order, minimum image and
+  r2 without FMA as the other periodic kernels, origin shift with the block's own overlap, traceless transform at
+  the end); then L = chol(S) by cuSOLVER dpotrf with the probe of the cell-free build. Dense storage, one device,
+  s/p shells only (a cell refuses d shells). The host keeps the periodic CN/self-energies (input) and the gamma.
+- Host side: `XTB::m_pbc_sx_deferred` defers the host S/H0/L (downloaded by the first consumer, otherwise the
+  periodic host build); gamma-only consumers check `ensureHostGamma`; the periodic AO multipole integrals are
+  deferred (`setupMultipolePeriodic(true)`), the host-driven device loop reads neither; the post-SCF band energy is
+  the device Tr(P H0) of the last step; m_F is not built. Two cell leaks of the device-integral flag were closed on
+  the way (gamma download from the device, GFN1 resident loop); both are now `!m_pbc`/`!pbc_dev_ints`.
+  `CURCUMA_PBC_GPU_HOST=ints` keeps the host build and upload; `CURCUMA_PBC_INTS_CHECK=1` prints max |dS|, |dH0| of
+  device vs host (water dimer 8 A: 1.3e-15, 6.9e-16). Plugin ABI 13 -> 14.
+- Device time (432 H2O, `CURCUMA_GPU_PROFILE`): S/H0 43 ms, multipole 26 ms, Cholesky 52 ms (FP64 dpotrf).
+- Gates: `pbc_xtb_gpu_parity` 8/8 (gfn2 216 H2O |dE| 4.1e-12 Eh, max |dG| 7.9e-11 Eh/A, max |dXi| 3.7e-10 Eh; gfn1
+  box 3.6e-12 / 2.9e-10 / 1.0e-9; small cells <= 1.2e-14 / 1.3e-10 / 2.3e-10), second CUDA run bitwise 8/8; device vs
+  `ints` on the host in the same binary (`-scf_threshold 1e-9`): 216 H2O dE 2.7e-12 Eh, max dG 1.1e-14 Eh/A, 432 H2O
+  dE 1.1e-11 Eh (5e-15 relative), max dG 1.5e-14 Eh/A, second device run md5-identical (216 and 432); GPU FD of the
+  assembled surface (water dimer 8 A, h = 1e-4 A): gfn1 8.1e-9, gfn2 8.9e-9 Eh/A; `pbc_|ewald` ctests 28/28
+  (`release/`) and 29/29 (`release_cuda/`); without a cell CPU 36/36 and CUDA 36/36 md5 to the rebuilt base; MD
+  216 H2O 20 steps `-scf_threshold 1e-9`: E_pot -1096.551628, T 462.483544 K, P 14765.49 bar, identical to the
+  `CURCUMA_PBC_GPU_HOST=all` run and to the G5b-d result.
+- Time (RTX 5080 idle, 8 threads, one run each): 432 `-sp` TOTAL 3046 -> 2359 ms (same binary with `ints`: 2770 ms);
+  432 MD step TOTAL 2910 -> 2258 ms; MD wall per step (`md.sh`, 20 steps incl. start-up): 216 H2O 0.79 -> 0.70 s,
+  432 H2O 2.84 -> 2.40 s (before = same binary with `ints`; the 0.81/3.13 s of G5b-d were on a loaded machine).
+
+Remaining at 432 H2O (MD step, ms): device eigensolve 740 (8 it), multipole gradient + virial on the device 274
+(102 without the virial), ATM on the device 287, H0/Pulay gradient 122 (host), D4 CN fold 101 (host), interaction
+matrices 92 (device, mostly the 18 x 13 MB download), Ewald gradient + virial 68, CN 55 (host), Cholesky 52, KO 33.
+
 ## Regression run (2026-11-14, `release/`, `ctest -R 'gfn|xtb|sqm|gfnff|pbc|ewald|simplemd|restart|md_|gpu|plugin|molecule|xyz|parser|curcumaopt|structinv' -j1`)
 
 369 tests selected, 2 failed before the fix below: `pbc_md_nonperiodic_cell` (its check (a) assumed gfn2 + cell to be
@@ -753,8 +807,8 @@ change. Measurements and scripts: project folder GFN-FF-Wasser, subfolder 06_gfn
   strains (a sheared cell is refused), threading of the periodic CN/D3, Klopman-Ohno and Ewald matrix builds, the
   structure-factor factorisation of the multipole k sums, d-shell elements with a cell (refused), implicit solvation
   with a cell (refused), `-large_system_mode` with a cell (its driver ignores the cell: documented as non-periodic, not
-  refused), GPU with a cell: CUDA in the G1 split plus the device stages G3/G4a/G4b/G5a (the rest on the host, see G2-G6
-  status), ROCm/Vulkan CPU fallback (not planned).
+  refused), GPU with a cell: CUDA with the device stages G1b/G2/G3/G4a/G4b/G5a-d (the rest on the host, see the G1b
+  section), ROCm/Vulkan CPU fallback (not planned).
 - Not tested: open shell, charged cells (background term differs from tblite), halogen bond with a cell (no Br/I
   structure), thread-count independence of the periodic energy and gradient, MD energy conservation with a cell,
   the GPU fallback on a machine with a GPU plugin, anything beyond H/O, real liquid boxes (only a water dimer and

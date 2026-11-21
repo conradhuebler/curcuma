@@ -141,7 +141,7 @@ void XTB::setupMultipole(bool integrals_on_device, bool defer_amat)
     const int nao = m_basis.nao;
 
     if (nat == 0 || nao == 0) return;
-    if (m_pbc) { setupMultipolePeriodic(); return; }   // WP-PERIODIC-XTB P2b (xtb_periodic.cpp), CPU only
+    if (m_pbc) { setupMultipolePeriodic(integrals_on_device); return; }   // G1b: true = AO ints on the device   // WP-PERIODIC-XTB P2b (xtb_periodic.cpp), CPU only
 
     // Geometry in bohr
     std::vector<double> xyz_bohr(3 * nat);

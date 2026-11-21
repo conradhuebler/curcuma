@@ -285,6 +285,11 @@ public:
     /// k_overlap_h0) → lower Cholesky L = chol(S) (cusolverDnDpotrf). All resident
     /// in the same dH0/dS/dL buffers the resident SCF consumes. Requires beginBasis.
     bool computeIntegrals(const double* xyz_bohr);
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB G1b): periodic S/H0 (and GFN2 dp/qp) image sums + L = chol(S) on
+    /// the device (GpuScfBackend::beginComputedPeriodic); dense storage, se[nsh] host self-energies, cell_L[3] and
+    /// translations trans[3 ntrans] (T = 0 first) in Bohr, cut2 the squared integral cutoff.
+    bool computeIntegralsPeriodic(const double* xyz_bohr, const double* se, const double* cell_L, int ntrans,
+                                  const double* trans, double cut2, bool multipole);
 
     /// Download the resident coordination numbers (length nat) to the host.
     bool downloadCn(double* cn_out);

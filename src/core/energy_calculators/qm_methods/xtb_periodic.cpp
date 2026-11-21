@@ -990,7 +990,7 @@ void XTB::buildMultipoleInteractionMatricesPeriodic() const
     m_mp_amat_deferred = false;
 }
 
-void XTB::setupMultipolePeriodic()
+void XTB::setupMultipolePeriodic(bool ao_ints_on_device)
 {
     using namespace curcuma::xtb::gfn2_params;
     const int nat = m_atomcount;
@@ -1006,7 +1006,14 @@ void XTB::setupMultipolePeriodic()
 
     // 1 + 2: AO dipole and raw quadrupole integrals, per image shifted to the image position of the column atom
     // (origin at atom(nu) + T), summed over the images; the traceless transform is linear and applied at the end.
-    for (int k = 0; k < 3; ++k) m_dp_int[k] = Eigen::MatrixXd::Zero(nao, nao);
+    // G1b (Nov 2026): with ao_ints_on_device the device built them (k_multipole_ints_pbc); the host copies stay
+    // empty until ensureHostMultipoleIntegrals() rebuilds them here.
+    if (ao_ints_on_device) {
+        for (int k = 0; k < 3; ++k) m_dp_int[k].resize(0, 0);
+        for (int k = 0; k < 6; ++k) m_qp_int[k].resize(0, 0);
+    }
+    for (int k = 0; k < 3 && !ao_ints_on_device; ++k) m_dp_int[k] = Eigen::MatrixXd::Zero(nao, nao);
+    if (!ao_ints_on_device) {
     std::array<Eigen::MatrixXd, 6> qraw;
     for (int k = 0; k < 6; ++k) qraw[k] = Eigen::MatrixXd::Zero(nao, nao);
 
@@ -1086,6 +1093,7 @@ void XTB::setupMultipolePeriodic()
             m_qp_int[5](mu, nu) = 1.5 * qzz - tr;
         }
 
+    }   // !ao_ints_on_device
     const auto tmp_ao = mpclk::now();
     // 3 + 4: periodic GFN2 CN (the same double-exponential CN as the self-energies) and the damping radii
     const Vector cn = computeCoordinationNumbers();
@@ -1446,7 +1454,7 @@ void XTB::addMultipoleGradientPeriodic(Matrix& gradient, Vector& dEdcn, Eigen::M
 
 void XTB::calculateGradientPeriodic()
 {
-    ensureHostIntegrals(__func__);
+    ensureHostGamma(__func__);   // G1b: the periodic gradient reads gamma, P and W, not the host S/H0/L
     const int nat = m_atomcount;
     const int nsh = m_basis.nsh;
     const int nao = m_basis.nao;

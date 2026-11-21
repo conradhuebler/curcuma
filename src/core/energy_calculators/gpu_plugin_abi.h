@@ -52,10 +52,11 @@
 //      m_pbc_d4_dev_ready).
 // 13 = Nov 2026, WP-PERIODIC-XTB G2/G5b/G5c/G5d (GpuScfBackend gained the virtuals ewaldGammaPeriodic,
 //      energyWeightedDensity, cnChainGradientPeriodic and repulsionPeriodic; XTB gained m_pbc_dev_wfn).
+// 14 = Nov 2026, WP-PERIODIC-XTB G1b (GpuScfBackend::beginComputedPeriodic; XTB gained m_pbc_sx_deferred).
 
 #pragma once
 
-#define CURCUMA_GPU_PLUGIN_ABI_VERSION 13
+#define CURCUMA_GPU_PLUGIN_ABI_VERSION 14
 
 /// Defines `extern "C" int curcuma_<backend>_abi_version()` in a plugin entry file (use at file scope).
 #define CURCUMA_GPU_PLUGIN_DEFINE_ABI_VERSION(backend)                                                                \
