@@ -773,6 +773,10 @@ matrices 92 (device, mostly the 18 x 13 MB download), Ewald gradient + virial 68
 - MD wall per step (`md.sh`, one run each, load 1.4): 216 H2O 0.70 -> 0.65 s, 432 H2O 2.41 -> 2.20 s (before = same
   binary with `pseudo`).
 
+Regression after G1b/G1c (2026-11-21, test selection of the regression run below, `-j1`): `release/` 379 of 380,
+`release_cuda/` 650 of 651 passed; the only failure in both is the pre-existing `xtb_cpscf`; without a cell CPU
+36/36 md5 to the rebuilt base after G1c as well.
+
 ## Regression run (2026-11-14, `release/`, `ctest -R 'gfn|xtb|sqm|gfnff|pbc|ewald|simplemd|restart|md_|gpu|plugin|molecule|xyz|parser|curcumaopt|structinv' -j1`)
 
 369 tests selected, 2 failed before the fix below: `pbc_md_nonperiodic_cell` (its check (a) assumed gfn2 + cell to be
