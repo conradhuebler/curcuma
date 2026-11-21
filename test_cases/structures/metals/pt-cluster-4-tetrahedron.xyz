@@ -1,0 +1,6 @@
+4
+id=pt-cluster-4-tetrahedron charge=0 spin=2 level=curcuma/GFN2 native, 300 K, frozen frame of the H2+Pt_n scan source=optimized
+Pt -0.93942100 -0.93942100 -0.93942100
+Pt 0.93942100 0.93942100 -0.93942100
+Pt 0.93942100 -0.93942000 0.93942000
+Pt -0.93942100 0.93942100 0.93942100

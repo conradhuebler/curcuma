@@ -1,0 +1,7 @@
+5
+id=pt-cluster-5 charge=0 spin=4 level=curcuma/GFN2 native, 300 K, frozen frame of the H2+Pt_n scan source=optimized
+Pt 0.46956500 0.98379800 0.98190300
+Pt -1.04320600 0.00999900 -0.98444400
+Pt 1.68371300 -1.15257300 0.97674500
+Pt -1.36974500 2.27437100 -0.04724400
+Pt 0.28091300 -2.05611700 -0.84517600
