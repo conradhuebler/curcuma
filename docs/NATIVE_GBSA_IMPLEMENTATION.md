@@ -3,6 +3,7 @@
 **Date**: November 2025
 **Status**: Functional (Energy-only, Gradients pending)
 **Author**: Claude (Anthropic AI Assistant)
+**Note (Nov 21, 2026)**: historical. `src/core/solvation/gbsa.{h,cpp}` described here, `solvation_parameters.h` and `lebedev_grid.h` were removed (no caller); the native GBSA is `ALPBSolvation` (`-solvent_model gbsa`), see SOLVATION.md.
 **Based on**: Ulysses GBSA implementation
 
 ---
