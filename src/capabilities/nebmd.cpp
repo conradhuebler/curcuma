@@ -2830,7 +2830,7 @@ void NebMD::histogramTrajectory(const std::string& traj) const
     const int nat = static_cast<int>(m_start.AtomCount());
     const double T = m_md_config.contains("temperature") && m_md_config["temperature"].is_number()
         ? m_md_config["temperature"].get<double>() : 300.0;
-    const double kT = 3.166811563e-6 * T;
+    const double kT = CurcumaUnit::Constants::boltzmann_hartree_or_legacy(3.166811563e-6) * T;
     const double kcal = 627.5094740631;
 
     // reference frames: interior range and the on-path z baseline z_path(s). z is offset
@@ -3212,7 +3212,7 @@ double NebMD::thermalEnergy() const
                 T = t;
             break;
         }
-    return 3.166811563e-6 * T;
+    return CurcumaUnit::Constants::boltzmann_hartree_or_legacy(3.166811563e-6) * T;
 }
 
 Geometry NebMD::pathBiasField(const Geometry& R, double* Z_out) const

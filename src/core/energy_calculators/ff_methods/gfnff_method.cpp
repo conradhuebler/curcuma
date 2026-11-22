@@ -817,7 +817,7 @@ bool GFNFF::InitialiseMolecule()
     if (m_parameters.contains("solvent")) {
         m_solvent = m_parameters["solvent"].get<std::string>();
     }
-    if (m_solvent != "none" && !m_solvent.empty()) {
+    if (!curcuma::solvation::isGasPhase(m_solvent)) {
         m_solvation = std::make_unique<ALPBSolvation>();
         // GFN-FF has NO separate GBSA model: the reference (gfnff_alpb.F90:23-24,66)
         // ALWAYS uses the improved ALPB model (alpb=.true., P16 kernel), even when GBSA
@@ -829,8 +829,15 @@ bool GFNFF::InitialiseMolecule()
         const bool requested_gbsa = (sm == "gbsa" || sm == "gb" || sm == "2" || sm == "2.0");
         m_solvation->setUseAlpb(true);          // GFN-FF: always ALPB (P16 kernel)
         m_solvent_model_label = "ALPB";
+        // Reference state (Nov 2026): gsolv (default), bar1M, reference; MethodFactory has validated the name.
+        curcuma::solvation::SolutionState solv_state = curcuma::solvation::SolutionState::GSolv;
+        if (!curcuma::solvation::parseSolutionState(m_parameters.value("solvent_state", std::string("gsolv")), solv_state))
+            CurcumaLogger::error("GFN-FF solvation: unknown solvent_state '" + m_parameters.value("solvent_state", std::string())
+                                 + "' (gsolv, bar1M or reference), using gsolv");
+        m_solvation->setSolutionState(solv_state);
         if (!m_solvation->init(m_atoms, m_solvent)) {
-            CurcumaLogger::warn("ALPB solvation initialization failed for solvent '" + m_solvent + "', continuing gas-phase");
+            // MethodFactory rejects unknown solvents before the force field is built; this is the direct-use path.
+            CurcumaLogger::error("ALPB solvation initialization failed for solvent '" + m_solvent + "', continuing gas-phase");
             m_solvation.reset();
         } else {
             if (requested_gbsa) {
@@ -985,7 +992,6 @@ const std::vector<std::pair<int,int>>& GFNFF::getCachedBondList() const {
             // This replaces the older heuristic `1.3*(rcov_i+rcov_j)*fat_i*fat_j`, which
             // agreed with Fortran on 94/95 MOR41 structures but over-bonded agostic
             // contacts to heavy metals (ED07: an extra C-H...W pair).
-            using GFNFFParameters::metal_type;
             using GFNFFParameters::normcn;
 
             constexpr double rthr = 1.25;    // gen%rthr    (gfnff_param.f90:718)
@@ -999,7 +1005,7 @@ const std::vector<std::pair<int,int>>& GFNFF::getCachedBondList() const {
             for (int i = 0; i < m_atomcount; ++i) {
                 const int z = m_atoms[i];
                 fat_val[i] = fat[z];
-                const int mt = (z >= 1 && z <= 86) ? metal_type[z - 1] : 0;
+                const int mt = PeriodicTable::getMetalType(z);
                 // f1 = fq, doubled for metals (gfnff_ini2.f90:115/119)
                 const double f1 = rqshrink * (mt > 0 ? 2.0 : 1.0);
                 qshift[i] = have_qa ? m_bond_qa[i] * f1 : 0.0;
@@ -4841,7 +4847,7 @@ int GFNFF::classifyBondType(int atom_i, int atom_j, int hyb_i, int hyb_j,
     auto imetal_of = [&](int a) -> int {
         const int z = m_atoms[a];
         if (z < 1 || z > 86) return 0;
-        int im = GFNFFParameters::metal_type[z - 1];
+        int im = PeriodicTable::getMetalType(z);
         const int grp = GFNFFParameters::periodic_group[z - 1];
         const auto& topo_nb = getCachedTopology().neighbor_lists;
         const int nb_a = (a < static_cast<int>(topo_nb.size()))
@@ -5135,7 +5141,7 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     // every HEAVY28 complex inherits, doubling where the motif appears twice.
     auto imetal_bond = [&](int z, int a) -> int {
         if (z < 1 || z > 86) return 0;
-        int im = metal_type[z - 1];
+        int im = PeriodicTable::getMetalType(z);
         if (im == 0) return 0;
         const int grp = GFNFFParameters::periodic_group[z - 1];
         if (grp <= 3) return im;
@@ -5702,8 +5708,8 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     }
 
     // Get metal types for both atoms
-    int imetal1 = (z1 >= 1 && z1 <= 86) ? metal_type[z1 - 1] : 0;
-    int imetal2 = (z2 >= 1 && z2 <= 86) ? metal_type[z2 - 1] : 0;
+    int imetal1 = (z1 >= 1 && z1 <= 86) ? PeriodicTable::getMetalType(z1) : 0;
+    int imetal2 = (z2 >= 1 && z2 <= 86) ? PeriodicTable::getMetalType(z2) : 0;
     int group1 = (z1 >= 1 && z1 <= 86) ? periodic_group[z1 - 1] : 0;
     int group2 = (z2 >= 1 && z2 <= 86) ? periodic_group[z2 - 1] : 0;
     // CORRECTED (Sep 2026): imetal is not param%metal(Z) raw - gfnff_ini.f90:273-274 demotes a
@@ -6187,7 +6193,7 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
         auto imetal_of = [&](int a) -> int {
             const int z = (a >= 0 && a < m_atomcount) ? m_atoms[a] : 0;
             if (z < 1 || z > 86) return 0;
-            int im = GFNFFParameters::metal_type[z - 1];
+            int im = PeriodicTable::getMetalType(z);
             const int grp = GFNFFParameters::periodic_group[z - 1];
             const int nb_a = (a < static_cast<int>(topo_info.neighbor_lists.size()))
                                  ? static_cast<int>(topo_info.neighbor_lists[a].size()) : 0;
@@ -6318,7 +6324,7 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
 
     // Check if central atom is a transition metal (metal_type==2)
     // Note: z_center already declared above at line 1689
-    bool is_tm_center = (z_center >= 1 && z_center <= 86) && (metal_type[z_center - 1] == 2);
+    bool is_tm_center = (z_center >= 1 && z_center <= 86) && (PeriodicTable::getMetalType(z_center) == 2);
 
     if (is_tm_center) {
         // η-coordination of the OUTER atoms (Fortran itag==-1), NOT hybridization.
@@ -6503,11 +6509,11 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
             bool has_tm_neighbor = false;
             if (!topo_info.is_metal.empty()) {
                 if (atom_i < topo_info.is_metal.size() && topo_info.is_metal[atom_i]) {
-                    int metal_type_i = (m_atoms[atom_i] >= 1 && m_atoms[atom_i] <= 86) ? metal_type[m_atoms[atom_i]-1] : 0;
+                    int metal_type_i = (m_atoms[atom_i] >= 1 && m_atoms[atom_i] <= 86) ? PeriodicTable::getMetalType(m_atoms[atom_i]) : 0;
                     if (metal_type_i == 2) has_tm_neighbor = true;
                 }
                 if (atom_k < topo_info.is_metal.size() && topo_info.is_metal[atom_k]) {
-                    int metal_type_k = (m_atoms[atom_k] >= 1 && m_atoms[atom_k] <= 86) ? metal_type[m_atoms[atom_k]-1] : 0;
+                    int metal_type_k = (m_atoms[atom_k] >= 1 && m_atoms[atom_k] <= 86) ? PeriodicTable::getMetalType(m_atoms[atom_k]) : 0;
                     if (metal_type_k == 2) has_tm_neighbor = true;
                 }
             }
@@ -6724,8 +6730,8 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
         // Reference: gfnff_ini.f90:1664-1677
         int atj_z = m_atoms[atom_i];  // Fortran atj = neighbor
         int atk_z = m_atoms[atom_k];  // Fortran atk = neighbor
-        int imetal_i = (atj_z >= 1 && atj_z <= 86) ? GFNFFParameters::metal_type[atj_z - 1] : 0;
-        int imetal_k = (atk_z >= 1 && atk_z <= 86) ? GFNFFParameters::metal_type[atk_z - 1] : 0;
+        int imetal_i = (atj_z >= 1 && atj_z <= 86) ? PeriodicTable::getMetalType(atj_z) : 0;
+        int imetal_k = (atk_z >= 1 && atk_z <= 86) ? PeriodicTable::getMetalType(atk_z) : 0;
         double current_angle_deg = current_angle * 180.0 / M_PI;
         const double linear_threshold = 160.0;
 
@@ -6805,7 +6811,7 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
     // the 90 deg cis L-M-L angles), and the linear GEODEP override (phi>linthr) flattens the
     // 180 deg trans angles to r0=180. Without this branch the metal used r0~100/109.5 -> a
     // spurious +0.02..0.03 Eh angle energy for Cr(CO)6, Mn(CO)5H, etc.
-    int imetal_ctr = (z_center >= 1 && z_center <= 86) ? metal_type[z_center - 1] : 0;
+    int imetal_ctr = (z_center >= 1 && z_center <= 86) ? PeriodicTable::getMetalType(z_center) : 0;
     // Fortran gfnff_ini.f90:274 — Sn/Pb/Bi (main-group metals) with small CN are non-metals
     if (imetal_ctr == 1 && group_center > 3 && nn_center <= 4) imetal_ctr = 0;
     if (imetal_ctr > 0) {
@@ -7643,7 +7649,7 @@ std::vector<int> GFNFF::determineHybridization(const std::vector<std::vector<int
         // (nni>=6) stays hyb=0 -> r0=90 in the metal angle branch, matching the 90 deg
         // cis L-M-L angles. Without it the TM fell to hyb=3 -> r0~100 -> spurious angle
         // energy (Cr(CO)6 / Mn(CO)5H off by +0.02..0.03 Eh). Overrides the geometry rules.
-        if (z >= 1 && z <= 86 && GFNFFParameters::metal_type[z - 1] == 2) {  // transition metal
+        if (z >= 1 && z <= 86 && PeriodicTable::getMetalType(z) == 2) {  // transition metal
             int grp = GFNFFParameters::periodic_group[z - 1];  // negative for TMs (Sc=-3 ... Zn=-12)
             int nh_metal = 0;
             for (int j : neighbors) if (m_atoms[j] == 1) nh_metal++;
@@ -8221,8 +8227,8 @@ Vector GFNFF::calculateEEQCharges(const Vector& cn, const std::vector<int>& hyb,
             ff = -0.07;  // Iodine (line 686)
         }
         // Note: Metal corrections (lines 687-688) not needed for CH3OH test
-        // if (metal_type[Z-1] == 1) ff = -0.08;  // M main
-        // if (metal_type[Z-1] == 2) ff = -0.9;   // M TM
+        // if (PeriodicTable::getMetalType(Z) == 1) ff = -0.08;  // M main
+        // if (PeriodicTable::getMetalType(Z) == 2) ff = -0.9;   // M TM
 
         // Update diagonal for this charge correction
         // NOTE: This updates the gamma value retroactively - ideally should re-solve with corrected gammas
@@ -8252,7 +8258,7 @@ Vector GFNFF::calculateEEQCharges(const Vector& cn, const std::vector<int>& hyb,
                     "atom", "Z", "CN", "sp-hybrid", "im", "q(est)");
         for (int i = 0; i < n; ++i) {
             int z = m_atoms[i];
-            int im = (z >= 1 && z <= 86 && metal_type[z - 1] > 0) ? 1 : 0;
+            int im = (z >= 1 && z <= 86 && PeriodicTable::getMetalType(z) > 0) ? 1 : 0;
             int hybridization = (i < hyb.size()) ? hyb[i] : 0;
 
             fmt::print("{:>5d}  {:<3}  {:>8.2f}  {:>10d}  {:>2d}  {:>7.3f}\n",
@@ -8369,11 +8375,10 @@ Vector GFNFF::calculateDgam(const Vector& qa_charges,
 std::vector<int> GFNFF::computeEtaCoordination(const std::vector<std::vector<int>>& neighbor_lists,
                                                const std::vector<std::vector<int>>& nbm) const
 {
-    using GFNFFParameters::metal_type;
     std::vector<int> itag(m_atomcount, 0);
 
     auto is_metal = [](int z) -> bool {
-        return (z >= 1 && z <= 86) && (metal_type[z - 1] != 0);
+        return (z >= 1 && z <= 86) && (PeriodicTable::getMetalType(z) != 0);
     };
 
     for (int i = 0; i < m_atomcount; ++i) {
@@ -8443,13 +8448,12 @@ int GFNFF::nnNearestNoM(int ii, const std::vector<std::vector<int>>& nb,
      * if ii has no non-metal neighbour. Fortran calls this with topo%nb, i.e. the
      * HC-filtered list (nb_hc) - NOT the nbdum mixture.
      */
-    using GFNFFParameters::metal_type;
 
     double rmin = 1.0e42;
     int jmin = -1;
     for (int jj : nb[ii]) {
         const int z = m_atoms[jj];
-        if (z >= 1 && z <= 86 && metal_type[z - 1] != 0) continue;  // skip metals
+        if (z >= 1 && z <= 86 && PeriodicTable::getMetalType(z) != 0) continue;  // skip metals
         const double r = distance_matrix(ii, jj);
         if (r < rmin) {
             rmin = r;
@@ -8483,7 +8487,6 @@ std::vector<int> GFNFF::determineHybridizationFortran(const GFNFFTopology& topo,
      *
      * hyb codes: 0 = none/octahedral, 1 = sp, 2 = sp2, 3 = sp3, 5 = hypervalent.
      */
-    using GFNFFParameters::metal_type;
     using GFNFFParameters::periodic_group;
 
     // gen%linthr (gfnff_param.f90:713): "when is an angle close to linear"
@@ -8493,7 +8496,7 @@ std::vector<int> GFNFF::determineHybridizationFortran(const GFNFFTopology& topo,
         return (z >= 1 && z <= 86) ? periodic_group[z - 1] : 0;
     };
     auto is_metal = [](int z) -> bool {
-        return (z >= 1 && z <= 86) && (metal_type[z - 1] != 0);
+        return (z >= 1 && z <= 86) && (PeriodicTable::getMetalType(z) != 0);
     };
     // Angle at vertex j between i and k (gfnff_helpers.f90:587 bangl), in degrees
     auto bangl_deg = [&](int i, int j, int k) -> double {
@@ -8711,7 +8714,7 @@ std::vector<double> GFNFF::computeMetallicCharacter() const
      * from GFNFFParameters::gfnff_cn_rcov_bohr() since Sep 2026 - this site used to apply
      * the CODATA-2018 constant while CNCalculator used the CODATA-1986 one (1.8897259886).
      */
-    using GFNFFParameters::gfnff_en;
+    using GFNFFParameters::en_gfnff;
 
     constexpr double kn = -7.5;
     constexpr double cnmax = 4.4;
@@ -8763,7 +8766,7 @@ std::vector<double> GFNFF::computeMetallicCharacter() const
 
         const double dum2 = (dlogdcn_i * self_sum).norm() + offdiag_norm_sum;
 
-        const double en = gfnff_en[zi - 1];
+        const double en = en_gfnff[zi - 1];
         const double en2 = en * en;
         const double en4 = en2 * en2;
         const double en8 = en4 * en4;
@@ -8784,12 +8787,11 @@ void GFNFF::buildNeighborListSet(GFNFFTopology& topo, std::vector<std::vector<in
      * MOR41 structures (the exception, ED07, is an agostic C-H...W contact that native
      * bonds and Fortran does not; the HC and metal filters below absorb it).
      */
-    using GFNFFParameters::metal_type;
     using GFNFFParameters::normcn;
     using GFNFFParameters::periodic_group;
 
     auto is_metal = [](int z) -> bool {
-        return (z >= 1 && z <= 86) && (metal_type[z - 1] != 0);
+        return (z >= 1 && z <= 86) && (PeriodicTable::getMetalType(z) != 0);
     };
     // gfnff_ini2.f90:387-392. periodic_group is NEGATIVE for the d-block, so every
     // transition metal lands in the "group <= 2" branch and gets hc_crit = 4.
@@ -8836,7 +8838,7 @@ void GFNFF::buildNeighborListSet(GFNFFTopology& topo, std::vector<std::vector<in
         const bool have_qa = (static_cast<int>(m_bond_qa.size()) == m_atomcount);
         auto qshift_of = [&](int a) {
             const int z = m_atoms[a];
-            const int mt = (z >= 1 && z <= 86) ? metal_type[z - 1] : 0;
+            const int mt = PeriodicTable::getMetalType(z);
             return have_qa ? m_bond_qa[a] * rqshrink * (mt > 0 ? 2.0 : 1.0) : 0.0;
         };
         const double ncn_i = (zi >= 1 && zi <= 86) ? static_cast<double>(normcn[zi - 1]) : 4.0;
@@ -9277,7 +9279,7 @@ std::vector<Angle> GFNFF::generateAnglesNative(const TopologyInfo& topo_info) co
                     if (angle_params.force_constant < 1e-10) continue;
 
                     int z_center = m_atoms[center];
-                    if (z_center >= 1 && z_center <= 86 && GFNFFParameters::metal_type[z_center - 1] > 0) {
+                    if (z_center >= 1 && z_center <= 86 && PeriodicTable::getMetalType(z_center) > 0) {
                         if (current_angle * 180.0 / M_PI < 60.0) continue;
                     }
 
@@ -10790,7 +10792,7 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
     for (int i = 0; i < m_atomcount; ++i) {
         int z = m_atoms[i];
         if (z >= 1 && z <= 86) {
-            topo_info.is_metal[i] = (GFNFFParameters::metal_type[z - 1] > 0);
+            topo_info.is_metal[i] = (PeriodicTable::getMetalType(z) > 0);
         }
     }
 
@@ -11694,7 +11696,7 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
         auto imetal_nonzero = [&](int a) -> bool {
             const int z = m_atoms[a];
             if (z < 1 || z > 86) return false;
-            if (GFNFFParameters::metal_type[z - 1] == 0) return false;
+            if (PeriodicTable::getMetalType(z) == 0) return false;
             const int grp = GFNFFParameters::periodic_group[z - 1];
             if (grp > 3 && a < static_cast<int>(topo_info.adjacency_list.size())
                 && static_cast<int>(topo_info.adjacency_list[a].size()) <= 4)
@@ -12809,7 +12811,11 @@ bool GFNFF::calculateAlpeeq(TopologyInfo& topo_info) const
                 ff = 0.50;
             } else if (topo_info.is_metal[i]) {
                 // Metal elements
-                int imetal_val = GFNFFParameters::metal_type[z_i - 1];
+                int imetal_val = PeriodicTable::getMetalType(z_i);
+                // gfnff_ini.f90:234-235: Sn/Pb/Bi with CN <= 4 count as non-metals
+                if (i < static_cast<int>(topo_info.neighbor_lists.size())
+                    && static_cast<int>(topo_info.neighbor_lists[i].size()) <= 4 && group > 3)
+                    imetal_val = 0;
                 if (imetal_val == 2) {
                     // Transition metals
                     ff = -0.1;

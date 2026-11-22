@@ -250,7 +250,7 @@ passes; regression ctest green.
 > Implemented by extending `ALPBSolvation` (setUseAlpb + Still kernel), not by
 > resurrecting `gbsa.{h,cpp}`. The notes below are the original spec.
 
-- Consolidate the second, unused GBSA implementation `src/core/solvation/gbsa.{h,cpp}`
+- (Removed Nov 21, 2026: the second, unused GBSA implementation `src/core/solvation/gbsa.{h,cpp}`, with `solvation_parameters.h` and `lebedev_grid.h`.) Original spec: consolidate it
   (GBOBC-II, energy+gradient) under `ImplicitSolvationModel`: add `addPotential`
   (= Born-matrix·q, same math as ALPB), method-aware params from WP0 (`param_gbsa_*`),
   `update`/`energy`/`addGradient` to the interface signatures.

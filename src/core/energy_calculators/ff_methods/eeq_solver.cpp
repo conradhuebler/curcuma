@@ -35,6 +35,7 @@
 
 #include "src/tools/bmt_utils.h"
 #include "eeq_solver.h"
+#include "src/core/periodic_table.h"
 #include "gfnff_par.h"  // EEQ parameters (chi_eeq, gam_eeq, alpha_eeq, cnf_eeq)
 #include "cn_calculator.h"  // Shared CN calculation utility
 
@@ -1284,7 +1285,7 @@ Vector EEQSolver::calculateCharges(
         // Claude Generated (January 17, 2026): Detect pi-system and amide nitrogens for dgam refinements
         std::vector<bool> is_pi_atom = detectPiSystem(atoms, hybridization, topology);
         std::vector<bool> is_amide = detectAmideNitrogens(atoms, hybridization, is_pi_atom, topology, cn);
-        Vector dgam = calculateDgam(atoms, topology_charges, hybridization, is_pi_atom, is_amide);
+        Vector dgam = calculateDgam(atoms, topology_charges, hybridization, is_pi_atom, is_amide, topology);
 
         // Diagnostic output for comparison with Fortran goed_gfnff debug output
         // Matches format: gfnff_engrad.F90:1581-1594
@@ -1463,7 +1464,11 @@ Matrix EEQSolver::buildCorrectedEEQMatrix(
                 ff = 0.50;  // Halogens (F, Cl, Br, I, At)
             } else {
                 // Metal elements
-                int imetal_val = metal_type[z_i - 1];
+                int imetal_val = PeriodicTable::getMetalType(z_i);
+                // gfnff_ini.f90:234-235: Sn/Pb/Bi with CN <= 4 count as non-metals (imetal, not param%metal)
+                if (topology.has_value() && i < static_cast<int>(topology->neighbor_lists.size())
+                    && static_cast<int>(topology->neighbor_lists[i].size()) <= 4 && group > 3)
+                    imetal_val = 0;
                 if (imetal_val == 1) {
                     ff = 0.3;  // Main group metals (Li, Be, Na, Mg, etc.)
                 } else if (imetal_val == 2) {
@@ -3397,11 +3402,11 @@ std::vector<Vector> EEQSolver::calculateTopologyChargesMultiRHS(
         // metal, which better reflects the polarity used for guessing bond/angle parameters.
         // imetal==2 (metal_type==2) are the d-block TMs; all have periodic group <=2 or negative, so
         // the Fortran line-274 caveat (nb<=4 & group>3 → imetal=0) can never clear a "2", making the
-        // metal_type[z-1]==2 test faithful. Phase 2 overwrites chieeq WITHOUT this shift
+        // PeriodicTable::getMetalType(z)==2 test faithful. Phase 2 overwrites chieeq WITHOUT this shift
         // (gfnff_ini.f90:715), so this is deliberately Phase-1 only. Missing here caused metal
         // complexes (e.g. RhCl(CO)2) to put too little topology charge on the metal → wrong fqq bond
         // factor + Coulomb (ED39 native gfnff 12.9 mEh above xtb --gfnff).
-        if (z_i >= 1 && z_i <= 86 && metal_type[z_i - 1] == 2) {
+        if (z_i >= 1 && z_i <= 86 && PeriodicTable::getMetalType(z_i) == 2) {
             constexpr double MCHISHIFT = -0.09;  // gfnff_param.f90:756
             chi(i) -= MCHISHIFT;  // effectively += 0.09
         }
@@ -3925,7 +3930,7 @@ Vector EEQSolver::calculateFinalCharges(
         : std::vector<bool>(natoms, false);
     std::vector<bool> is_amide_h = use_corrections ? detectAmideHydrogens(atoms, hybridization, is_amide_for_h, topology) : std::vector<bool>(natoms, false);
 
-    Vector dgam = use_corrections ? calculateDgam(atoms, topology_charges, hybridization, is_pi_atom, is_amide) : Vector::Zero(natoms);
+    Vector dgam = use_corrections ? calculateDgam(atoms, topology_charges, hybridization, is_pi_atom, is_amide, topology) : Vector::Zero(natoms);
 
     // DEBUG: Print topology charges used for dgam
     if (m_verbosity >= 3) {
@@ -4833,30 +4838,10 @@ Vector EEQSolver::calculateDxi(
 {
     // Claude Generated (December 2025, Session 13): FULL dxi calculation
     // Reference: XTB gfnff_ini.f90:358-403
-    // Phase 2.5-2.7: Added pi-system detection and neighbor EN averaging
+    // Phase 2.5-2.7: Added pi-system detection (the unused neighbor EN average and its table were removed Nov 2026)
 
     const int natoms = atoms.size();
     Vector dxi = Vector::Zero(natoms);
-
-    // Pauling electronegativities for neighbor averaging (indices 0-86)
-    // Reference: Standard Pauling scale
-    static const std::array<double, 87> pauling_en = {
-        0.0,  // 0: dummy
-        2.20, 0.0,  // 1-2: H, He
-        0.98, 1.57, 2.04, 2.55, 3.04, 3.44, 3.98, 0.0,  // 3-10: Li-Ne
-        0.93, 1.31, 1.61, 1.90, 2.19, 2.58, 3.16, 0.0,  // 11-18: Na-Ar
-        0.82, 1.00,  // 19-20: K, Ca
-        1.36, 1.54, 1.63, 1.66, 1.55, 1.83, 1.88, 1.91, 1.90, 1.65,  // 21-30: Sc-Zn
-        1.81, 2.01, 2.18, 2.55, 2.96, 3.00, 0.0,  // 31-37: Ga-Kr (Kr noble gas)
-        0.82, 0.95,  // 38-39: Rb, Sr (Note: index mismatch fixed below)
-        1.22, 1.33, 1.60, 2.16, 1.90, 2.20, 2.28, 2.20, 1.93, 1.69,  // 40-49: Y-Cd
-        1.78, 1.96, 2.05, 2.10, 2.66, 2.60, 0.0,  // 50-56: In-Xe (Xe noble gas)
-        0.79, 0.89,  // 57-58: Cs, Ba
-        1.10, 1.12, 1.13, 1.14, 1.13, 1.17, 1.20,  // 59-65: La-Eu
-        1.20, 1.20, 1.22, 1.23, 1.24, 1.25, 1.10,  // 66-72: Gd-Yb
-        1.27, 1.30, 1.50, 2.36, 1.90, 2.20, 2.20, 2.28, 2.54, 2.00,  // 73-82: Lu-Hg
-        1.62, 2.33, 2.02, 2.00  // 83-86: Tl-Rn
-    };
 
     // Estimate hybridization from CN (approximation)
     // Reference: CN-based heuristic (hyb: 1=sp, 2=sp2, 3=sp3)
@@ -4875,7 +4860,7 @@ Vector EEQSolver::calculateDxi(
     if (m_verbosity >= 3) {
         CurcumaLogger::info("\n=== Dxi Calculation (FULL - Phase 2.7) ===");
         CurcumaLogger::info("Reference: XTB gfnff_ini.f90:358-403 + pi-system + neighbor EN");
-        CurcumaLogger::info("Atom |  Z | CN  | Hyb | Pi | EN_avg | dxi_total | Components");
+        CurcumaLogger::info("Atom |  Z | CN  | Hyb | Pi | dxi_total | Components");
         CurcumaLogger::info("-----+----+-----+-----+----+--------+-----------+-----------");
     }
 
@@ -4888,7 +4873,6 @@ Vector EEQSolver::calculateDxi(
         int nh = 0;  // Number of H neighbors
         int nn = 0;  // Total number of neighbors
         int nm = 0;  // Number of metal neighbors
-        double en_avg = 0.0;  // Average neighbor electronegativity
         std::string env_desc = "";
 
         if (topology.has_value()) {
@@ -4907,19 +4891,12 @@ Vector EEQSolver::calculateDxi(
                 // chieeq that inverted their topology charge (-0.261 vs the reference
                 // +0.158) and, through fqq, cost 52 kcal/mol in the bond term.
                 if (Z_j >= 1 && Z_j <= 86) {
-                    int imetal_j = metal_type[Z_j - 1];
+                    int imetal_j = PeriodicTable::getMetalType(Z_j);
                     const int group_j = periodic_group[Z_j - 1];
                     const int nb_j = static_cast<int>(topology->neighbor_lists[j].size());
                     if (nb_j <= 4 && group_j > 3) imetal_j = 0;
                     if (imetal_j != 0) nm++;
                 }
-                // Sum electronegativities for averaging
-                if (Z_j < static_cast<int>(pauling_en.size())) {
-                    en_avg += pauling_en[Z_j];
-                }
-            }
-            if (nn > 0) {
-                en_avg /= nn;  // Average neighbor EN
             }
         }
 
@@ -5080,8 +5057,8 @@ Vector EEQSolver::calculateDxi(
             if (components.empty()) components = "none";
             std::string hyb_str = (hyb[i] == 1) ? "sp" : (hyb[i] == 2) ? "sp2" : "sp3";
             std::string pi_str = is_pi_atom[i] ? "Y" : "N";
-            CurcumaLogger::info(fmt::format("  {:2d} | {:2d} | {:3.1f} | {:3s} | {:2s} | {:6.2f} | {:+9.5f} | {}",
-                                    i, ati, cn(i), hyb_str, pi_str, en_avg, dxi_total, components));
+            CurcumaLogger::info(fmt::format("  {:2d} | {:2d} | {:3.1f} | {:3s} | {:2s} | {:+9.5f} | {}",
+                                    i, ati, cn(i), hyb_str, pi_str, dxi_total, components));
         }
     }
 
@@ -5097,7 +5074,8 @@ Vector EEQSolver::calculateDgam(
     const Vector& charges,
     const std::vector<int>& hybridization,
     const std::vector<bool>& is_pi_atom,
-    const std::vector<bool>& is_amide)
+    const std::vector<bool>& is_amide,
+    const std::optional<TopologyInput>& topology)
 {
     const int natoms = atoms.size();
     Vector dgam = Vector::Zero(natoms);
@@ -5168,7 +5146,11 @@ Vector EEQSolver::calculateDgam(
         // qa*(-0.08), a 25-200 kcal/mol self-energy error found via GMTKN55
         // (DIPCS10/G21IP/ALK8 single-ion structures; Na+/Mg2+, Z>10, were unaffected).
         if (Z >= 1 && Z <= 86) {
-            int imetal_val = metal_type[Z - 1];
+            int imetal_val = PeriodicTable::getMetalType(Z);
+            // gfnff_ini.f90:234-235: Sn/Pb/Bi with CN <= 4 count as non-metals
+            if (topology.has_value() && i < static_cast<int>(topology->neighbor_lists.size())
+                && static_cast<int>(topology->neighbor_lists[i].size()) <= 4 && periodic_group[Z - 1] > 3)
+                imetal_val = 0;
             if (imetal_val == 1) ff = -0.08;   // Main group metals
             if (imetal_val == 2) ff = -0.9;    // Transition metals (XTB comment: "too large")
 
@@ -5193,7 +5175,7 @@ Vector EEQSolver::calculateDgamFull(
 {
     auto is_pi = detectPiSystem(atoms, hybridization, topology);
     auto is_amide = detectAmideNitrogens(atoms, hybridization, is_pi, topology, cn);
-    return calculateDgam(atoms, topology_charges, hybridization, is_pi, is_amide);
+    return calculateDgam(atoms, topology_charges, hybridization, is_pi, is_amide, topology);
 }
 
 // Claude Generated (March 2026): Public interface for dxi with full environment corrections

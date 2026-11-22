@@ -628,7 +628,8 @@ private:
         const Vector& charges,
         const std::vector<int>& hybridization,
         const std::vector<bool>& is_pi_atom = {},
-        const std::vector<bool>& is_amide = {}
+        const std::vector<bool>& is_amide = {},
+        const std::optional<TopologyInput>& topology = std::nullopt
     );
 
     // NOTE: calculateDalpha() removed - alpha now calculated inline with charge-dependent formula

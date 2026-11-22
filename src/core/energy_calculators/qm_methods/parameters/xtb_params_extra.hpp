@@ -20,6 +20,7 @@
 #ifndef CURCUMA_XTB_PARAMS_EXTRA_H_
 #define CURCUMA_XTB_PARAMS_EXTRA_H_
 
+#include "src/core/element_tables.h"
 #include "src/core/units.h"
 #include <cmath>
 #include <vector>
@@ -30,55 +31,15 @@ inline constexpr double AA_TO_AU = CurcumaUnit::Length::ANGSTROM_TO_BOHR;
 
 // ---- Pauling electronegativities (dimensionless, elements 1..86) ----------
 // paulingen.f90 lines 40-57. Elements 87+ are dummy 1.50.
-inline constexpr double pauling_en[86] = {
-    2.20, 3.00,                                                 // H, He
-    0.98, 1.57, 2.04, 2.55, 3.04, 3.44, 3.98, 4.50,             // Li-Ne
-    0.93, 1.31, 1.61, 1.90, 2.19, 2.58, 3.16, 3.50,             // Na-Ar
-    0.82, 1.00,                                                 // K, Ca
-    1.36, 1.54, 1.63, 1.66, 1.55, 1.83, 1.88, 1.91, 1.90, 1.65, // Sc-Zn
-    1.81, 2.01, 2.18, 2.55, 2.96, 3.00,                         // Ga-Kr
-    0.82, 0.95,                                                 // Rb, Sr
-    1.22, 1.33, 1.60, 2.16, 1.90, 2.20, 2.28, 2.20, 1.93, 1.69, // Y-Cd
-    1.78, 1.96, 2.05, 2.10, 2.66, 2.60,                         // In-Xe
-    0.79, 0.89,                                                 // Cs, Ba
-    1.10, 1.12, 1.13, 1.14, 1.15, 1.17, 1.18,                   // La-Eu
-    1.20, 1.21, 1.22, 1.23, 1.24, 1.25, 1.26,                   // Gd-Yb
-    1.27, 1.30, 1.50, 2.36, 1.90, 2.20, 2.20, 2.28, 2.54, 2.00, // Lu-Hg
-    1.62, 2.33, 2.02, 2.00, 2.20, 2.20                          // Tl-Rn
-};
+inline constexpr const double (&pauling_en)[86] = CurcumaElements::PAULING_EN;  // table lives in src/core/element_tables.h
 
 // ---- Atomic radii (CRC Handbook / Mantina), elements 1..86, in Angstrom ---
 // atomicrad.f90 lines 46-61 (AU there; we store in Å and convert via AA_TO_AU).
-inline constexpr double atomic_rad_angstrom[86] = {
-    0.32, 0.37, 1.30, 0.99, 0.84, 0.75, 0.71, 0.64, 0.60, 0.62,
-    1.60, 1.40, 1.24, 1.14, 1.09, 1.04, 1.00, 1.01, 2.00, 1.74,
-    1.59, 1.48, 1.44, 1.30, 1.29, 1.24, 1.18, 1.17, 1.22, 1.20,
-    1.23, 1.20, 1.20, 1.18, 1.17, 1.16, 2.15, 1.90, 1.76, 1.64,
-    1.56, 1.46, 1.38, 1.36, 1.34, 1.30, 1.36, 1.40, 1.42, 1.40,
-    1.40, 1.37, 1.36, 1.36, 2.38, 2.06, 1.94, 1.84, 1.90, 1.88,
-    1.86, 1.85, 1.83, 1.82, 1.81, 1.80, 1.79, 1.77, 1.77, 1.78,
-    1.74, 1.64, 1.58, 1.50, 1.41, 1.36, 1.32, 1.30, 1.30, 1.32,
-    1.44, 1.45, 1.50, 1.42, 1.48, 1.46
-};
+inline constexpr const double (&atomic_rad_angstrom)[86] = CurcumaElements::ATOMIC_RAD_ANGSTROM;  // table lives in src/core/element_tables.h
 
 // ---- Pyykkö-Atsumi covalent radii (metals -10%), elements 1..86, in Å -----
 // covrad.f90 lines 43-60. D3 form is (4/3) * this (also applied below).
-inline constexpr double covalent_rad_2009_angstrom[86] = {
-    0.32, 0.46,                                                 // H, He
-    1.20, 0.94, 0.77, 0.75, 0.71, 0.63, 0.64, 0.67,             // Li-Ne
-    1.40, 1.25, 1.13, 1.04, 1.10, 1.02, 0.99, 0.96,             // Na-Ar
-    1.76, 1.54,                                                 // K, Ca
-    1.33, 1.22, 1.21, 1.10, 1.07, 1.04, 1.00, 0.99, 1.01, 1.09, // Sc-Zn
-    1.12, 1.09, 1.15, 1.10, 1.14, 1.17,                         // Ga-Kr
-    1.89, 1.67,                                                 // Rb, Sr
-    1.47, 1.39, 1.32, 1.24, 1.15, 1.13, 1.13, 1.08, 1.15, 1.23, // Y-Cd
-    1.28, 1.26, 1.26, 1.23, 1.32, 1.31,                         // In-Xe
-    2.09, 1.76,                                                 // Cs, Ba
-    1.62, 1.47, 1.58, 1.57, 1.56, 1.55, 1.51,                   // La-Eu
-    1.52, 1.51, 1.50, 1.49, 1.49, 1.48, 1.53,                   // Gd-Yb
-    1.46, 1.37, 1.31, 1.23, 1.18, 1.16, 1.11, 1.12, 1.13, 1.32, // Lu-Hg
-    1.30, 1.30, 1.36, 1.31, 1.38, 1.42                          // Tl-Rn
-};
+inline constexpr const double (&covalent_rad_2009_angstrom)[86] = CurcumaElements::COVALENT_RAD_2009_ANGSTROM;  // table lives in src/core/element_tables.h
 
 inline double atomic_rad_au(int z) {
     return atomic_rad_angstrom[z - 1] * AA_TO_AU;

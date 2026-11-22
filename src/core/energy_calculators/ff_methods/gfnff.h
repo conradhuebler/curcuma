@@ -389,8 +389,9 @@ PARAM(nb_cell_list_min_atoms, Int, 800, "From this atom count on, non-bonded nei
 PARAM(nonbonded_skin_bohr, Double, 2.0, "Verlet skin (Bohr) of the repulsion and cutoff Coulomb lists, rebuilt once an atom moved more than skin/2 (exact). Active from nb_cell_list_min_atoms on; 0 uses nonbonded_rebuild_every.", "Pair lists", {})
 PARAM(nonbonded_rebuild_every, Int, 1, "With nonbonded_skin_bohr 0: rebuild the repulsion and cutoff Coulomb lists every N energy calls; 1 is always safe. See GFNFF_PAIR_LIST_REFRESH.md.", "Pair lists", {})
 // ---- Implicit solvation (use the dotted -gfnff.solvent; the flat -solvent is shared) ----
-PARAM(solvent, String, "none", "Implicit solvent for native GFN-FF ALPB, such as water or dmso; 'none' = gas phase, and the EEQ charges feel the solvent. Use -gfnff.solvent, since the flat -solvent is shared.", "Solvation", {})
+PARAM(solvent, String, "none", "Implicit solvent for native GFN-FF ALPB, such as water or dmso; 'none' = gas phase, and the EEQ charges feel the solvent. Names are case-insensitive and accept the xtb aliases; an unknown solvent is an error. Use -gfnff.solvent, since the flat -solvent is shared.", "Solvation", {})
 PARAM(solvent_model, String, "alpb", "Solvation model. GFN-FF has ALPB only, as the reference: 'gbsa' (or code 2) runs ALPB with a warning.", "Solvation", {})
+PARAM(solvent_state, String, "gsolv", "Reference state of the solvation free energy, as xtb --gfnff --alpb water [state]: 'gsolv' (default), 'bar1M' or 'reference'. Case-insensitive; anything else is an error.", "Solvation", {})
 // ---- Deliberate deviations from the reference (docs/KNOWN_ISSUES_ARCHIVE.md switch table) ----
 PARAM(nh_linear_fix, Bool, true, "Keep a 2-coordinate N-H nitrogen from becoming sp by the angle-only rule (> 160 deg), which lets stretched N-H geometries optimise into a too deep artefact. false = reference rule.", "Reference", {})
 PARAM(storsion_reference_loop_bug, Bool, false, "Reproduce the reference loop bug that evaluates only the last C#C triple-bond torsion; curcuma sums all of them. true only to match reference totals.", "Reference", {})
@@ -2179,7 +2180,7 @@ private:
      * The exp(-0.005*en^8) factor is extremely stiff (en=2.0 -> 0.28, en=3.0 -> ~0),
      * so it acts as a near-hard electronegativity switch around en ~ 2.4.
      *
-     * NOTE: uses GFNFFParameters::gfnff_en (Fortran param%en), NOT the rab_en table.
+     * NOTE: uses GFNFFParameters::en_gfnff (Fortran param%en), NOT the en_rab_gfnff table.
      *
      * @return mchar per atom (size m_atomcount)
      */

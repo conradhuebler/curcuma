@@ -26,7 +26,9 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-DATA = os.path.join(ROOT, "external", "tblite", "src", "tblite", "solvation", "data")
+# Optional first argument: the tblite source tree (default external/tblite), e.g. a checkout outside this worktree.
+TBLITE = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "external", "tblite")
+DATA = os.path.join(TBLITE, "src", "tblite", "solvation", "data")
 OUT = os.path.join(ROOT, "src", "core", "solvation", "tblite_solvation_params.h")
 
 NELEM = 94
@@ -110,7 +112,7 @@ def fmt_array(vals):
     rows = []
     for r in range(0, NELEM, 5):
         chunk = vals[r:r + 5]
-        rows.append("        " + ", ".join(f"{v: .8e}" for v in chunk) + ",")
+        rows.append("        " + ", ".join(f"{v: .16e}" for v in chunk) + ",")
     s = "\n".join(rows)
     return "{\n" + s + "\n    }"
 
@@ -150,9 +152,9 @@ def main():
             f.write(
                 f"inline const TbliteSolvationParam tbsolv_{e['key']} = {{\n"
                 f"    \"{e['key']}\", \"{e['method']}\", \"{e['model']}\", \"{e['solvent']}\",\n"
-                f"    {e['epsv']: .8e}, {e['c1']: .8e}, {e['soset']: .8e},  // epsv, c1, soset\n"
-                f"    {e['rprobe']: .8e},  // rprobe (Angstrom)\n"
-                f"    {e['smass']: .8e}, {e['rhos']: .8e}, {e['gshift']: .8e},  // smass, rhos, gshift(kcal/mol)\n"
+                f"    {e['epsv']: .16e}, {e['c1']: .16e}, {e['soset']: .16e},  // epsv, c1, soset\n"
+                f"    {e['rprobe']: .16e},  // rprobe (Angstrom)\n"
+                f"    {e['smass']: .16e}, {e['rhos']: .16e}, {e['gshift']: .16e},  // smass, rhos, gshift(kcal/mol)\n"
                 f"    /* sx */ {fmt_array(e['sx'])},\n"
                 f"    /* gamscale */ {fmt_array(e['gamscale'])},\n"
                 f"    /* sqrtGhbond */ {fmt_array(e['sqrtGhbond'])}\n"

@@ -268,6 +268,24 @@
    "description": "comment line: ammonia C3v, r(NH)=1.012 A, ang(HNH)=106.7 deg"
   },
   {
+   "id": "ammonium.ideal-td",
+   "class": "small",
+   "file": "small/ammonium.ideal-td.xyz",
+   "format": "xyz",
+   "formula": "H4N",
+   "natoms": 5,
+   "frames": 1,
+   "charge": 1,
+   "spin": 0,
+   "role": "non-equilibrium",
+   "size_bytes": 228,
+   "sha256": "8ac4abd426788d5577423141305a52a0af19dc679871166f8ec8da2fb39720e0",
+   "provenance": {
+    "kind": "constructed",
+    "description": "Ammonium cation NH4+, ideal Td with r(NH)=1.03 A (H at (+-a,+-a,+-a), a=1.03/sqrt(3)); built by hand for the native COSMO test (cli/sqm/19), not optimised"
+   }
+  },
+  {
    "id": "benzene",
    "class": "small",
    "file": "small/benzene.xyz",

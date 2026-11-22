@@ -14,6 +14,7 @@
  */
 
 #include "xtb_native.h"
+#include "src/core/units.h"
 #include "STO_CGTO.hpp"
 #include "xtb_coulomb.hpp"
 #include "xtb_multipole_ints.hpp"
@@ -749,7 +750,7 @@ bool XTB::computeScfJacobianResponse(const Vector& x_star, PrecondMatrix& J, std
     const Vector f = m_wfn.focc;
 
     // 2. Response weights w_pq and Fermi derivatives f'_p.
-    const double kT = m_electronic_temp * 3.166808e-6;   // K -> Eh, as in solveEigen
+    const double kT = m_electronic_temp * CurcumaUnit::Constants::BOLTZMANN_HARTREE_K_XTB;   // K -> Eh, as in solveEigen
     Vector dfde = Vector::Zero(nao);
     if (kT > 0.0)
         for (int p = 0; p < nao; ++p) dfde(p) = -f(p) * (1.0 - 0.5 * f(p)) / kT;

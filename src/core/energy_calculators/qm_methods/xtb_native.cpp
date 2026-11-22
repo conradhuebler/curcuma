@@ -39,6 +39,7 @@
 #include "src/core/energy_calculators/ff_methods/d3param_generator.h"
 #include "src/core/energy_calculators/ff_methods/cn_calculator.h"  // D3 CN gradient (May 2026)
 #include "src/core/energy_calculators/ff_methods/alpb_solvation.h"  // implicit solvation (June 2026)
+#include "src/core/solvation/ddcosmo.h"                              // native ddCOSMO (Nov 2026)
 #include "diis_accelerator.h"
 #include "broyden_mixer.h"
 
@@ -161,10 +162,15 @@ bool XTB::InitialiseMolecule()
         CitationRegistry::cite("d3", meth);        // D3(BJ) dispersion (GFN1 only)
     else
         CitationRegistry::cite("d4", meth);        // D4 dispersion (GFN2 only)
-    if (m_solvent != "none" && !m_solvent.empty()) {
+    // COSMO and CPCM may also be requested by an explicit dielectric constant alone (-xtb.solvent_epsilon). Claude Generated (Nov 2026).
+    // CPCM-X (model 5): the SCF runs in xtb's conductor COSMO set whatever the solvent name. Claude Generated (Nov 2026).
+    const bool cosmo_eps_only = ((m_solvent_model == 4 || m_solvent_model == 1) && m_solvent_epsilon > 0.0)
+        || m_solvent_model == 5;
+    if (!curcuma::solvation::isGasPhase(m_solvent) || cosmo_eps_only) {
         const int model = (m_solvent_model > 0) ? m_solvent_model : 3;
         if (model == 3) CitationRegistry::cite("alpb", meth);
         else if (model == 2) { CitationRegistry::cite("alpb", meth); CitationRegistry::cite("still_gb", meth); }
+        else if (model == 4 || model == 1 || model == 5) CitationRegistry::cite("ddcosmo", meth);   // CPCM and CPCM-X use the same ddCOSMO solver
     }
     CitationRegistry::cite("diis", meth);         // SCF convergence (DIIS/Broyden)
 
@@ -190,29 +196,81 @@ bool XTB::InitialiseMolecule()
     // ── Implicit solvation (Claude Generated, June 2026) ──
     // Build the self-consistent reaction-field model when a solvent is requested.
     // Created here (atoms known); update() refreshes the geometry-dependent state
-    // each Calculation(). solvent_model: 3=ALPB, 2=GBSA (both wired); 1=CPCM is a
-    // later WP. GBSA = ALPB with the shape term off (see ALPBSolvation::setUseAlpb).
+    // each Calculation(). solvent_model: 3=ALPB, 2=GBSA, 4=COSMO (xtb), 1=CPCM (tblite; same ddCOSMO solver).
+    // GBSA = ALPB with the shape term off (see ALPBSolvation::setUseAlpb).
     m_solvation.reset();
     m_E_solvation = 0.0;
-    if (m_solvent != "none" && !m_solvent.empty()) {
+    if (!curcuma::solvation::isGasPhase(m_solvent) || cosmo_eps_only) {
         const int model = (m_solvent_model > 0) ? m_solvent_model : 3;  // default ALPB
         const std::string meth = (m_method == MethodType::GFN1) ? "gfn1" : "gfn2";
-        if (model == 3 || model == 2) {
+        if (model == 5) {
+            // CPCM-X (xtb 6.7.1 --cpcmx, Claude Generated Nov 2026): xtb runs the SCF with --cosmo inf (conductor set
+            // gfn_cosmo_inf, default grid/lmax/conv/eta) and hands the converged segments to the CPCM-X post-SCF step,
+            // which NativeXtbMethod drives (cpcmx.h). The solvent name is used only there.
+            auto solv = std::make_unique<DdCosmoSolvation>();
+            solv->setModel(DdCosmoSolvation::Model::XtbCosmoInf);
+            if (!solv->init(m_atoms, "inf", meth)) {
+                CurcumaLogger::error("Native solvation: conductor COSMO setup for CPCM-X failed (" + meth + ")");
+                return false;
+            }
+            m_solvation = std::move(solv);
+        } else if (model == 4 || model == 1) {
+            // Native ddCOSMO (port of xtb 6.7.1 --cosmo, Claude Generated Nov 2026). xtb adds no reference-state
+            // shift to the COSMO energy, so a state other than gsolv cannot be honoured and is an error.
+            // model 1 = CPCM of tblite 0.4.0 on the same solver (other keps, grid, eta, epsilon table, no surface
+            // term); tblite's CLI also rejects a solution state other than gsolv for CPCM. Claude Generated (Nov 2026).
+            const bool cpcm = (model == 1);
+            const char* tag = cpcm ? "cpcm" : "cosmo";
+            curcuma::solvation::SolutionState state;
+            if (!curcuma::solvation::parseSolutionState(m_solvent_state, state)
+                || state != curcuma::solvation::SolutionState::GSolv) {
+                CurcumaLogger::error("Native solvation: solvent_state '" + m_solvent_state + "' is not available for solvent_model "
+                                     + tag + (cpcm ? " (only gsolv; tblite rejects a solution state shift for CPCM)"
+                                                   : " (only gsolv; xtb applies no state shift to COSMO)"));
+                return false;
+            }
+            auto solv = std::make_unique<DdCosmoSolvation>();
+            solv->setDielectricOverride(m_solvent_epsilon);
+            if (cpcm) {
+                solv->setModel(DdCosmoSolvation::Model::TbliteCpcm);   // tblite defaults: 74 points, eta 2, lmax 6, conv 1e-8
+            } else {
+                solv->setGridPoints(m_cosmo_nang);
+                solv->setLmax(m_cosmo_lmax);
+                solv->setConvergence(m_cosmo_conv);
+                solv->setEta(m_cosmo_eta);
+            }
+            if (!solv->init(m_atoms, curcuma::solvation::isGasPhase(m_solvent) ? std::string("none") : m_solvent, meth)) {
+                CurcumaLogger::error(std::string("Native solvation: ") + (cpcm ? "CPCM" : "COSMO") + " setup failed for solvent '"
+                                     + m_solvent + "' (" + meth + ")");
+                return false;
+            }
+            m_solvation = std::move(solv);
+        } else if (model == 3 || model == 2) {
             const bool use_alpb = (model == 3);
             const char* tag = use_alpb ? "ALPB" : "GBSA";
             auto solv = std::make_unique<ALPBSolvation>();
             solv->setUseAlpb(use_alpb);
+            curcuma::solvation::SolutionState state;
+            if (!curcuma::solvation::parseSolutionState(m_solvent_state, state)) {
+                CurcumaLogger::error("Native solvation: unknown solvent_state '" + m_solvent_state
+                                     + "' (gsolv, bar1M or reference)");
+                return false;
+            }
+            solv->setSolutionState(state);
             if (solv->init(m_atoms, m_solvent, meth)) {
                 m_solvation = std::move(solv);
             } else {
-                CurcumaLogger::warn(std::string("Native solvation: no ") + tag
-                                    + " parameters for solvent '" + m_solvent + "' ("
-                                    + meth + "); running gas phase");
+                // MethodFactory checks the name before the calculator is built; this is the
+                // direct-use path. A silent gas-phase result for a solvent run is wrong.
+                CurcumaLogger::error(std::string("Native solvation: no ") + tag
+                                     + " parameters for solvent '" + m_solvent + "' ("
+                                     + meth + ")");
+                return false;
             }
         } else {
-            CurcumaLogger::warn("Native solvation: only solvent_model alpb and gbsa "
-                                "are implemented for native GFN (cpcm pending); "
-                                "running gas phase");
+            CurcumaLogger::error("Native solvation: only solvent_model alpb, gbsa, cosmo, cpcm and cpcmx "
+                                 "are implemented for native GFN");
+            return false;
         }
     }
     return true;
