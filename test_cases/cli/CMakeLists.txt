@@ -376,6 +376,7 @@ add_cli_test(sqm 18_solvent_names_states)           # solvent names (case, xtb a
 add_cli_test(sqm 19_cosmo_solvation)                # native ddCOSMO vs xtb 6.7.1 --cosmo, FD gradient, errors (Nov 2026)
 add_cli_test(sqm 20_cpcm_solvation)                 # native CPCM vs tblite 0.4.0 --cpcm, FD gradient, errors (Nov 2026)
 add_cli_test(sqm 21_cpcmx_solvation)                # native CPCM-X vs xtb 6.7.1 --cpcmx and CPCM-X 1.1.0, errors (Nov 2026)
+add_cli_test(sqm 16_spin_polarization)             # -xtb.spin_polarization: triplet O2 energy/gradient against tblite 0.8.0, excluded modes error (Nov 2026)
 # -scf_precond frag on the device-resident CUDA loop (Oct 2026); exit 77 (skip) without a usable CUDA device.
 if(USE_CUDA)
     add_cli_test(sqm 13_gfn2_scf_precond_cuda)

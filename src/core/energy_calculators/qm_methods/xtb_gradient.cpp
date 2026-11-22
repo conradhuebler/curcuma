@@ -95,6 +95,17 @@ void XTB::calculateGradient()
         W = (Cocc * w2.asDiagonal()) * Cocc.transpose();
     }
 
+    // ── Spin polarisation (Claude Generated, Nov 2026, docs/SPIN_POLARISATION.md) ──────────────────
+    // E_spin = 1/2 sum W m m has no explicit geometry dependence (W is a constant). Its gradient is the
+    // Mulliken response of m_l = sum_{mu in l, nu} Pm_{mu nu} S_{nu mu} (Pm = Pa - Pb, dm_l = +sum Pm dS) and,
+    // through the orbitals, the energy-weighted density W of BOTH spin sets (supplied by solveEigenUhf with
+    // W_valid). Per unique atom pair the overlap-gradient coefficient gets + Pm_{mu nu} (u_a + u_b), u = W m,
+    // opposite in sign to the charge part - P (v_a + v_b) because dq = -sum P dS but dm = +sum Pm dS.
+    const bool spin_grad = spinPolActive() && m_wfn.Pm.rows() == nao && m_wfn.Pm.cols() == nao
+                           && m_wfn.m_sh.size() == nsh;
+    Vector u_spin;
+    if (spin_grad) spinPotential(m_wfn.m_sh, u_spin);
+
     // ── v_ao: expand shell+atom potential to AO resolution ──────────────────
     // F_μν = H0_μν - 0.5·S_μν·(v_ao(μ)+v_ao(ν))  (xtb_scf.cpp:expand_potential)
     Vector v_ao = Vector::Zero(nao);
@@ -342,6 +353,7 @@ void XTB::calculateGradient()
                     // Mulliken charge response of every SCC term.
                     const double v_a = m_pot.v_sh(ish_a) + m_pot.v_at(iat);
                     const double v_b = m_pot.v_sh(ish_b) + m_pot.v_at(jat);
+                    const double u_ab = spin_grad ? (u_spin(ish_a) + u_spin(ish_b)) : 0.0;
 
                     // ── Accumulate over AO pairs ──────────────────────────────
                     double G_sval[3]       = {0.0, 0.0, 0.0};
@@ -380,9 +392,11 @@ void XTB::calculateGradient()
 
                             // sval: coefficient for the overlap-gradient term
                             // sval = 2·P·h_av - 2·W - P·(v_a+v_b)
-                            const double sval = m_sval_h0_only
+                            double sval = m_sval_h0_only
                                 ? 2.0*Pmn*h_av                                  // Tr(P·dH0) band only
                                 : 2.0*Pmn*h_av - 2.0*Wmn - Pmn*(v_a + v_b);
+                            if (spin_grad && !m_sval_h0_only)
+                                sval += m_wfn.Pm(mu, nu) * u_ab;                // spin polarisation: + Pm (u_a + u_b)
 
                             G_sval[0] += sval * dS[0];
                             G_sval[1] += sval * dS[1];
