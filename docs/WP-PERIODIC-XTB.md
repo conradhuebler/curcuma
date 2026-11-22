@@ -1214,6 +1214,107 @@ trees): `release/` 379 of 380, `release_cuda/` 650 of 651 passed (the same 5 ski
 both is the pre-existing `xtb_cpscf`. Not tested: the `emulated` and `fp32_refine` strategies on any device but the
 RTX 5080; a cluster of more than 256 near-degenerate eigenvalues (refinement refused, direct solve; never seen in water).
 
+## CPU threading pass (2026-11-22, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+Input: the thread-scaling measurement `GFN-FF-Wasser/07_cpu_skalierung/BERICHT.md` (Ryzen 9 9950X3D, 16 cores / 32
+threads, shared). Operator order: (1) periodic D4 ATM, (2) the serial periodic blocks, (3) eigensolver behaviour above 8
+threads (measurement, at most a configuration change), (4) GFN-FF CPU phase timers. CPU paths only, no GPU code touched.
+Commits: stage 1 `8d0a0df0`, stage 2 `f2d1239a` + 2b `333cb898`, stage 3 `ee37a60d`, stage 4 `f5b208d3`.
+
+**Stage 1, periodic ATM** (`D4Evaluator::computeATMPeriodic`). Every translation class of triples was already taken once
+(`jat <= iat`, `kat <= jat`, all images, `atm_triple_scale`), the cutoff (25 Bohr) is unchanged. The serial part was not
+the C6 set-up (1-3 ms once threaded) but **false sharing**: each block accumulated its energy (and virial) in an element
+of a shared `std::vector`, i.e. 8 blocks per cache line; one block took 47 ms at 1 thread, 70 ms at 2 and 100 ms at 8
+(216 H2O, per-block timer, pinned or not). Energy and virial now accumulate in locals and are stored once per block, in
+the ATM, the periodic D4 pair term (also the in-SCF dE/dq) and the periodic multipole gradient. Also: reference weights
+and C6 matrix on the fixed blocks (each element written once), one flat image buffer per block instead of a heap vector
+per (iat, jat), `pow` once per triple, the dC6/dCN ratios hoisted out of the image loops. ATM 216 H2O `-sp`: 1.72 s / 0.53
+s (1 / 8 threads) -> 1.67 / 0.22 s, 0.15 s at 16. Parity: energies bitwise at every thread count, ATM gradient within
+3.5e-18 Eh/Bohr of the base (restructured loop, the compiler's FMA choice; not located further), MD 20 steps identical.
+
+**Stage 2, serial periodic blocks.** Symmetric pair loops `for i, for j <= i: out[i] += c, out[j] += c'` (H0 CN, D3 CN,
+pair term and chain rule, D4 covalent CN and CN fold, repulsion gradient, H0 CN chain rule) run in a gather form
+(`src/tools/pbc_gather.h`, `PBCGather::gatherSymmetricPairs`): atom a visits its own row, then the pairs (i, a) of the
+later rows, in exactly the order in which the serial loop adds to a; atoms in contiguous ranges per thread; with one
+thread the plain serial loop (`Side::Both`). Energies and virials (one running sum in the serial loop) are recorded per
+row (`RowRecords`, the factors of each term) and replayed in the serial order on one thread. Result: these terms keep
+the bits of the serial loop for every thread count. Trap found on the way (measured): with `-march=native` GCC fuses a
+product into its addition only inside one basic block; a visit that chose `+g`/`-g` by a branch changed the D3 gradient
+by 1e-19, so the two update statements stay verbatim and the end that is not atom a points at a scratch value.
+Elementwise blocks: KO remainder of gamma (shell rows), real-space part of `EwaldSum::matrix` (optional runner, distinct
+pairs; the phase-block fill stays serial because a threaded fill changed the FMA choice of the complex products),
+energy-weighted density W as a GEMM in fixed row blocks (block count from nao only). Threaded BLAS with a cell only
+(`MklThreadScope`): the Ewald rank-k updates and the overlap Cholesky (`buildOrthonormalizer`); these two are thread-count
+dependent at the last bit like the eigensolver; `CURCUMA_PBC_SERIAL_BLAS=1` keeps them serial (diagnostic: with it and
+`CURCUMA_EIG_MAX_THREADS=1` the gfn1 energies of the 216 H2O box and caffeine are bitwise equal at 1, 2, 8, 16
+threads). `CURCUMA_XTB_ETRACE=1` now also prints the periodic virial (`ETRACE_VIRIAL`, full precision).
+Not threaded (left serial): the Ewald point-charge gradient and virial (68 ms at 432 H2O), the KO gradient (34 ms), the
+phase table and the H0/Pulay partials (unchanged, already threaded).
+
+**Parity** (`-sp -scf_threshold 1e-9 -dump_gradient`, caffeine in a 14 A cube and the 216 H2O box, gfn1 and gfn2, t = 1,
+2, 4, 8, 16, each stage against the previous one at the same thread count; gradient in Eh/A):
+
+| gate | stage 1 vs base | stage 2/2b vs stage 1 | stage 3 vs 2b |
+|---|---|---|---|
+| energy | bitwise | t = 1 bitwise, t >= 2 <= 4.6e-13 Eh (threaded BLAS) | t <= 16 md5-identical; t = 32 <= 6.8e-13 Eh |
+| gradient | gfn1 md5-identical, gfn2 <= 3.5e-18 | <= 1.6e-14 (W row blocks) | t = 32 <= 4.2e-12 |
+| virial, first MD step (`ETRACE_VIRIAL`) | - (no trace in the base) | <= 3.9e-14 Eh | - |
+| MD 216 H2O, 20 steps, gfn2 and gfn1, t = 8 | Epot, T, P identical on every printed digit, 21 energies bitwise | printed Epot, T, P identical; energies <= 6.8e-13 Eh, virial <= 3.8e-10 Eh after 20 steps (trajectories drift apart) | - |
+| repeat at t = 8 | md5-identical | md5-identical | - |
+| without a cell (`bit3.sh`, gfnff/gfn1/gfn2, 6 structures, 1 and 4 threads) | 36/36 md5 to the base | 36/36 | 36/36 |
+| ctest `pbc_|ewald|d4|xtb_gradient` (FD gates `pbc_xtb_gradient`, `pbc_xtb_virial`) | green | green | green |
+
+Thread-count spread at a fixed stage is unchanged in size (216 H2O: <= 1.1e-12 Eh, <= 1e-11 Eh/A between t = 1 and 2-16;
+caffeine gfn1 3.2e-10 Eh/A at t >= 4 as in the base), from the eigensolver, threaded BLAS and the H0/Pulay partials.
+
+**Timing** (MD, `-compute_pressure true -time_step 0.5 -thermostat csvr`, median s per step over 3 runs x 4-5 steps, step
+0 dropped; scripts adapted from `07_cpu_skalierung/skripte/`; every run started with < 1.5 busy cores (216 H2O final
+column: < 0.5); the machine was shared and two earlier stage-2 series that overlapped other users' builds and timing
+runs were discarded; S = T(1)/T(t)):
+
+| case | t | base | stage 1 | stage 2b (final, t <= 16) |
+|---|---|---|---|---|
+| gfn2 216 H2O | 1 / 4 / 8 / 16 | 7.34 / 2.81 / 2.01 / 1.95 | 7.10 / 2.37 / 1.61 / 1.39 | 7.17 / 2.20 / 1.40 / 1.19 (S16 6.05) |
+| gfn1 216 H2O | 1 / 4 / 8 / 16 | 5.02 / 1.94 / 1.46 / 1.36 | 5.02 / 1.94 / 1.47 / 1.40 | 5.07 / 1.73 / 1.18 / 1.05 (S16 4.83) |
+| gfn2 432 H2O | 1 / 4 / 8 / 16 | 39.8 / 13.27 / 9.16 / 7.67 | 39.6 / 12.48 / 8.13 / 6.47 | 39.7 / 11.82 / 7.32 / 5.33 (S16 7.45) |
+
+At -threads 32 (stage 2b -> stage 3): gfn2 216 H2O 1.50 -> 1.23 s, gfn1 216 H2O 1.52 -> 1.03 s, gfn2 432 H2O 6.22 -> 5.08 s.
+Profile at t = 8 (verbosity 3, one run, 432 H2O gfn2, ms per MD step, base -> final): TOTAL 9126 -> 7159; ATM 1367 -> 594;
+Ewald matrix 351 -> 69; KO remainder 55 -> 10; overlap Cholesky 115 -> 28; D4 covalent CN 91 -> 38, CN fold 97 -> 33;
+entropy/repulsion 126 -> 18; gradient W 288 -> 57, repulsion 67 -> 29, CN chain 61 -> 26; in-SCF potential build 365 -> 169;
+eigensolve 2717 -> 2690 (unchanged, now 38 %). gfn1 216 H2O at t = 8: TOTAL 1670 -> 1408, D3 259 -> 196, gamma 135 -> 29.
+
+**Stage 3, eigensolver above 8 threads** (gfn2 432 H2O `-sp`, n = 3 runs each, eigensolve ms): the "cap min(t, 8)" of
+docs/SQM_THREADING.md is gone since Sep 2026 (`-threads` decides, `-eigensolver_max_threads` caps). -threads 16:
+16 MKL threads 3362, cap 8 3826, cap 16 3382; -threads 32: 32 MKL threads 4829 (dsyevd 3124), cap 16 3506 (2140), cap 8
+3864. The slowdown at t = 32 is MKL on SMT siblings. `OMP_PLACES=cores OMP_PROC_BIND=close` makes the eigensolve faster
+(3052 at t = 16) but the whole run 2.6x slower (14.2 s): the bound master thread passes its affinity to the CxxThreadPool
+workers it creates; not usable. Change taken (periodic only): without an explicit cap the eigensolve uses at most the
+physical cores (`physicalCoreCount()`, Linux sysfs; unchanged elsewhere). Not changed: the cell-free path (same SMT effect
+in the base report's 648-atom vacuum point, operator decision).
+
+**Stage 4, GFN-FF CPU phase trace** (`CURCUMA_GFNFF_PHASE=1`, one `GFNFFPHASE` line per call; timing only, md5-identical
+gradients with and without it). Mean ms per call over 2 x 29 MD steps:
+
+| system, t | total | prepareCNAndEEQ (EEQ) | workspace (partitions) | HB/XB refresh | largest term CPU sums |
+|---|---|---|---|---|---|
+| 432 H2O, 1 / 8 / 16 | 82.5 / 20.2 / 16.5 | 41.5 (37.3) / 9.9 (8.1) / 7.6 (6.1) | 37.5 (35.0) / 8.6 (5.6) / 7.5 (4.4) | 3.1 / 1.4 / 1.3 | HB 13.7, Coulomb 8.4, dispersion 7.3, repulsion 5.4 (t = 1) |
+| 3456 H2O, 1 / 8 / 16 | 1718 / 315 / 246 | 927 (893) / 172 (161) / 127 (118) | 760 (739) / 131 (109) / 108 (84) | 25 / 9 / 8 | dispersion 388, Coulomb 195, HB 112 (t = 1) |
+
+The periodic EEQ is half of the call and scales S8 = 4.6 (432) / 5.5 (3456); the workspace part outside the partitions
+(HB coordination numbers, Ewald set-up) is about 2 ms (432) / 16-22 ms (3456) and serial. Not attempted: the EEQ itself
+(the trace does not split the matrix-free PCG further; no cheap, clearly risk-free change visible), documented in TODO.md.
+
+**What stays:** eigensolve (38 % of the 432 step at t = 8); multipole gradient and setup (threaded, S ~ 7); the Ewald
+point-charge gradient and virial and the KO gradient (serial, ~100 ms at 432 H2O); the periodic D3 pair term scales
+poorly (276 -> 179 ms at 1 -> 8 threads, gfn1 216 H2O; the gather evaluates each pair twice, the record replay and
+`computeDC6DCN` are serial; not profiled further); GFN-FF EEQ.
+
+Regression after the CPU pass (2026-11-22, `release/`, test selection of the regression run below, `-j1`, full rebuild):
+379 of 380 passed (7 skipped/disabled as before), the only failure is the pre-existing `xtb_cpscf`; `release_cuda/`
+rebuilt, `ctest -R pbc_xtb` 5/5 (incl. `pbc_xtb_gpu_parity`). Not tested: other CPUs (core-count detection only on
+Linux sysfs), charged or open-shell cells, cells with Br/I (XB), ROCm/Vulkan builds.
+
 ## Regression run (2026-11-14, `release/`, `ctest -R 'gfn|xtb|sqm|gfnff|pbc|ewald|simplemd|restart|md_|gpu|plugin|molecule|xyz|parser|curcumaopt|structinv' -j1`)
 
 369 tests selected, 2 failed before the fix below: `pbc_md_nonperiodic_cell` (its check (a) assumed gfn2 + cell to be

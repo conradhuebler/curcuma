@@ -163,6 +163,9 @@ Stand.
   Topologie ohne Bindungsterme neu, Gruppen bleiben ungeprueft (Codelesen). Entscheidung offen. [docs/POLYMERBUILD_CHARGE.md](docs/POLYMERBUILD_CHARGE.md)
 
 ## 2. Leistung
+- **Periodische CPU-Pfade nach dem Threading-Durchgang** (2026-11-22, WP-PERIODIC-XTB): seriell bleiben Ewald-Punktladungsgradient/-virial und KO-Gradient (~100 ms bei 432 H2O), schlecht skaliert der periodische D3-Paarterm (gfn1 216 H2O 276 -> 179 ms bei 1 -> 8 Threads: Replay, `computeDC6DCN`); der Eigenlöser trägt 38 % des Schritts bei t = 8. Details: [docs/WP-PERIODIC-XTB.md](docs/WP-PERIODIC-XTB.md) "CPU threading pass".
+- **GFN-FF-CPU: periodische EEQ ist die Hälfte des Aufrufs** (2026-11-22, `CURCUMA_GFNFF_PHASE`): 432 H2O t = 8 8,1 von 20,2 ms (S8 4,6), 3456 H2O 161 von 315 ms (S8 5,5); der matrixfreie PCG ist nicht weiter zerlegt; Workspace-Vorlauf (HB-CN, Ewald-Aufbau) ~2 / 16-22 ms seriell. Erst zerlegen, dann entscheiden.
+- **Eigenlöser-Kappe ohne Zelle offen** (2026-11-22): mit Zelle nutzt der Eigenlöser höchstens die physischen Kerne (-threads 32: 1,4x schneller); ohne Zelle gilt weiter `-threads` (gleicher SMT-Effekt im Basisbericht, 648 Atome), Entscheidung des Betreibers. `docs/SQM_THREADING.md` nennt noch die alte Kappe min(t, 8) (seit Sep 2026 entfernt).
 
 - **Delta-ML-Labels auf der GPU lohnen nicht** (2026-10-27, n=2 Wiederholungen, peo8 + 90-Atom-Wirt, [docs/DELTA_ML_LABEL_GPU_2026-10.md](docs/DELTA_ML_LABEL_GPU_2026-10.md)): beste GPU 0,06x / 0,25x der besten CPU, kein `label_gpu`.
   Offen (Entscheidung): `-activelearn -gpu cuda` schickt die Labels heute schon auf die GPU (`LabelThread` übernimmt den globalen `gpu`-Schlüssel), 4-16x langsamer; Labels bei `-gpu` auf die CPU festlegen?
