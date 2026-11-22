@@ -153,6 +153,33 @@ public:
     /// Call after residentDensity (reads the resident P). Column-major outputs.
     bool residentMultipoleMoments(double* dp_at3, double* qp_at6, int n, int nat);
 
+    /* ----- Spin polarisation on the host-driven resident loop (Nov 2026) - *
+     * Claude Generated (docs/SPIN_POLARISATION.md, section GPU). The alpha and beta Fock matrices
+     * F^sigma = F + sigma 1/2 S (u_mu + u_nu) have the form of the isotropic potential term, so they
+     * are built by residentSolve/residentSolveMultipole with v_ao -/+ u_ao (alpha: v - u, beta: v + u);
+     * no new Fock kernel. Sequence per SCF iteration:
+     *   residentSolve*(v - u) -> residentSpinKeepAlpha() -> residentSolve*(v + u)
+     *   -> residentDensitySpin(f_alpha, f_beta)
+     * dCa holds the alpha eigenvectors, dC the beta ones; dP = Pa + Pb (all spin-independent
+     * consumers - populations, band energy, multipole moments, gradient - read it unchanged),
+     * dPm = Pa - Pb. HIP port: the same four calls on XtbHipContext, kernels k_spin_combine and
+     * k_spin_w_shift (plain element-wise loops, no atomics). */
+    /// Copy the eigenvectors of the last solve (dC) into the alpha buffer dCa.
+    bool residentSpinKeepAlpha(int n);
+    /// Pa from dCa/occ_a, Pb from dC/occ_b; dP = Pa + Pb, dPm = Pa - Pb; pop_ao (from P),
+    /// spop_ao(mu) = sum_nu Pm_mu,nu S_mu,nu (from Pm), band = sum P H0. All outputs length n.
+    bool residentDensitySpin(const double* occ_a, int ncol_a, const double* occ_b, int ncol_b, int n,
+                             double* pop_ao_out, double* spop_ao_out, double* band_out);
+    /// Download P, Pm, Ca (alpha) and Cb (beta), each n x n column-major, after the loop.
+    bool residentFinalizeSpin(double* P_colmajor, double* Pm_colmajor, double* Ca_colmajor,
+                              double* Cb_colmajor, int n);
+    /// Energy-weighted density of both spins for the device gradient, with the spin term folded in:
+    ///   W' = Ca diag(fa ea) Ca^T + Cb diag(fb eb) Cb^T - 1/2 Pm o (u_mu + u_nu)
+    /// (the overlap-gradient coefficient -2 W' then carries + Pm (u_a + u_b)). The next computeGradient
+    /// uses this W instead of building one from C (one-shot flag).
+    bool spinWeightedDensity(const double* we_a, int ncol_a, const double* we_b, int ncol_b,
+                             const double* u_ao, int n);
+
     /* ----- Device-side integral build (Stage 3) -------------------------- *
      * Move the one-time-per-geometry integral build (CN, self-energies, S, H0,
      * γ, GFN2 multipole) onto the device. beginBasis uploads the molecule-

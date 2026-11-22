@@ -2494,6 +2494,28 @@
    "aliases": [
     "water8_cluster"
    ]
+  },
+  {
+   "id": "pt-cluster-7",
+   "class": "metals",
+   "file": "metals/pt-cluster-7.xyz",
+   "format": "xyz",
+   "formula": "Pt7",
+   "natoms": 7,
+   "frames": 1,
+   "charge": 0,
+   "spin": 8,
+   "role": "equilibrium",
+   "size_bytes": 383,
+   "sha256": "83bd1587c71ae6996257c5f4cf9e886bd53ea9ea7869c41b5e32ff0e2c79ce3a",
+   "provenance": {
+    "kind": "optimized",
+    "program": "curcuma",
+    "method": "GFN2 native, 300 K, frozen frame of the H2+Pt_n scan",
+    "convergence": "-opt, one start motif, no global search",
+    "description": "Pt7 capped octahedron, GFN2 -opt, lowest spin 8 with spin polarisation"
+   },
+   "notes": "Differs from the pentagonal bipyramid of reactions-doebereiner-pt7; from docs/H2_PT_BARRIERS.md."
   }
  ],
  "sets": [

@@ -626,13 +626,19 @@ double XTB::Calculation(bool gradient)
         }
     }
 
-    // Spin polarisation (Claude Generated, Nov 2026, docs/SPIN_POLARISATION.md): CPU + Broyden only.
+    // Spin polarisation (Claude Generated, Nov 2026, docs/SPIN_POLARISATION.md): Broyden only, CPU or CUDA.
     // Every other SCF path works on one Fock matrix or one density and would silently drop the
     // alpha/beta split, so it is a hard error instead of a fallback.
+    // Nov 22, 2026: CUDA runs it on the host-driven device loop (GpuScfBackend::supportsSpinPolarization,
+    // see the spin branch of the SCF loop); ROCm and Vulkan have no such backend and stay a hard error.
+    m_gpu_spin_loop = false;
     if (spinPolActive()) {
         std::string why;
-        if (m_gpu_scf || m_external_eigensolver)
-            why = "a GPU backend (-gpu cuda|rocm|vulkan) is active";
+        const bool gpu = m_gpu_scf || m_external_eigensolver;
+        if (gpu && !(m_gpu_scf && m_gpu_scf->supportsSpinPolarization()))
+            why = "this GPU backend (-gpu rocm|vulkan) has no spin-polarised SCF; -gpu cuda or the CPU support it";
+        else if (gpu && m_gpu_partial_diag)
+            why = "-scf_gpu_partial_diag is not supported with -gpu cuda (both spin channels need the full spectrum)";
         else if (m_scf_mode != ScfMode::Broyden)
             why = fmt::format("-scf_mode {} is not supported (Broyden only)", scfModeName(m_scf_mode));
         else if (m_scf_precond != "none" && !m_scf_precond.empty())
@@ -643,7 +649,7 @@ double XTB::Calculation(bool gradient)
             why = "-scf_extrapolation_apply xlbomd is not supported";
         if (!why.empty()) {
             setHardError("spin_polarization (-xtb.spin_polarization true, -spin " + std::to_string(static_cast<int>(std::lround(nUhf())))
-                         + ") is implemented for the CPU Broyden SCF only: " + why);
+                         + ") is implemented for the Broyden SCF on the CPU and on -gpu cuda only: " + why);
             m_scf_converged = false;
             return m_E_total;
         }
@@ -1345,6 +1351,21 @@ double XTB::Calculation(bool gradient)
     }
 
     pre_mark("device-resident begin (H0/S/L, gamma download, multipole begin)");
+    // Spin polarisation with a GPU backend (Claude Generated, Nov 2026): only the host-driven device loop
+    // has the two-channel solve (the device potential build and both fully resident loops know one Fock
+    // matrix and are skipped below for spin_pol). Without that loop there is no silent CPU run.
+    if (spin_pol && m_gpu_scf) {
+        if (!use_gpu_resident) {
+            m_scf_converged = false; m_scf_iterations = 0;
+            setHardError("spin_polarization with -gpu cuda needs the device-resident SCF (device integrals and "
+                         "Cholesky factor); its setup failed for this geometry");
+            return m_E_total;
+        }
+        m_gpu_spin_loop = true;
+        if (verb >= 2)
+            CurcumaLogger::info("SCF: spin polarisation on the host-driven device loop (alpha/beta solves on the GPU, "
+                                "potential on the host; device potential build and resident loop not used)");
+    }
     // Stage 5 (Part B3/B4, Claude Generated): full device GFN2 potential build.
     // When the backend supports it, the WHOLE per-iteration potential (γ·q_sh +
     // shell third-order + multipole v_dp/v_qp/v_at scalar shift + in-SCF D4) is
@@ -1372,7 +1393,7 @@ double XTB::Calculation(bool gradient)
     bool   mp_stored_on_device = false;
     double mp_stored_bytes     = 0.0;
     if (use_gpu_resident && gpu_multipole && m_method == MethodType::GFN2 && m_mp_initialized
-        && !solv_blocks_device
+        && !solv_blocks_device && !spin_pol
         && m_gpu_scf->supportsDeviceDispersion() && m_gpu_scf->supportsDevicePotential()) {
         // Prime the D4 reference set + device beginDispersion (the m_d4_prepared
         // first-call path); the returned potential is discarded here.
@@ -1478,7 +1499,7 @@ double XTB::Calculation(bool gradient)
     // v_dp/v_qp also stay on the device for the Fock build. Any failure switches this object to
     // the host path for good (m_mp_device_failed); the backend prints one notice.
     bool use_dev_mp = false;
-    if (use_gpu_resident && gpu_multipole && !use_device_potential && m_mp_initialized
+    if (use_gpu_resident && gpu_multipole && !use_device_potential && m_mp_initialized && !spin_pol
         && !m_mp_device_failed && m_gpu_scf->supportsDeviceMultipolePotential()) {
         use_dev_mp = m_gpu_scf->beginMultipolePotential(m_mp_amat_sd, m_mp_amat_dd, m_mp_amat_sq,
                                                         m_mp_dkernel, m_mp_qkernel, m_mp_version);
@@ -1549,7 +1570,7 @@ double XTB::Calculation(bool gradient)
             }
         }
     }
-    if (!use_resident_loop && m_method == MethodType::GFN1 && use_gpu_resident && gpu_computed
+    if (!use_resident_loop && !spin_pol && m_method == MethodType::GFN1 && use_gpu_resident && gpu_computed
         && mode == ScfMode::Broyden && (!m_solvation || gfn1_born) && m_gpu_scf->supportsResidentLoopGfn1()) {
         bool want = m_gpu_gfn1_resident;
         if (const char* e = std::getenv("CURCUMA_GFN1_RESIDENT")) want = (e[0] != '0');
@@ -1593,7 +1614,7 @@ double XTB::Calculation(bool gradient)
     // so the 1e-8 energy is never at risk. Disabled on the device-potential path (its
     // re-solve would need the host D4 weights again).
     int gpu_n_eig = 0;  // 0 = full spectrum
-    bool gpu_partial_diag = m_gpu_partial_diag && use_gpu_resident && !use_device_potential
+    bool gpu_partial_diag = m_gpu_partial_diag && use_gpu_resident && !use_device_potential && !spin_pol
         && (m_d4_charge_source != "cpscf") && (verb < 3);
     if (gpu_partial_diag) {
         const int nocc_orbs = static_cast<int>(std::floor(m_wfn.nocc / 2.0));
@@ -1902,7 +1923,72 @@ double XTB::Calculation(bool gradient)
         // convergence) follows both branches.
         double gpu_band = 0.0;
         std::chrono::steady_clock::time_point t_fock, t_solve, t_mull;
-        if (use_gpu_resident) {
+        if (use_gpu_resident && spin_pol) {
+            // Spin polarisation on the host-driven device loop (Claude Generated, Nov 2026;
+            // docs/SPIN_POLARISATION.md, section GPU). Same iteration as the CPU branch below
+            // (buildSpinFocks + solveEigenUhf + updatePopulations), split between host and device:
+            //   host  : charge potential v_ao (built above), spin potential u_l = sum_l' W_ll' m_l'
+            //           from the SCC input magnetisation, the two Fermi fillings, m_sh from spop_ao;
+            //   device: F^alpha = F(v - u), F^beta = F(v + u) (= F +- 1/2 S (u_mu + u_nu)), both
+            //           eigensolves, Pa, Pb, P = Pa + Pb, Pm = Pa - Pb, Mulliken populations of P and Pm.
+            // Mixed precision: both solves of an FP32 step are FP32; the convergence test below never
+            // accepts an FP32 step (unchanged rule), so the converged state comes from an FP64 step.
+            m_eig_fp32 = fp32_wanted(dq_prev);
+            const int nao = m_basis.nao;
+            Eigen::VectorXd v_ao(nao), u_ao(nao);
+            Vector u_sh;
+            spinPotential(m_wfn.m_sh, u_sh);
+            for (int ao = 0; ao < nao; ++ao) {
+                v_ao(ao) = m_pot.v_sh(m_basis.ao2sh[ao]) + m_pot.v_at(m_basis.ao2at[ao]);
+                u_ao(ao) = u_sh(m_basis.ao2sh[ao]);
+            }
+            t_fock = clock::now();
+            Vector eps_b;
+            bool ok = m_gpu_scf->solveSpin(v_ao, u_ao, gpu_multipole ? &m_pot.v_dp : nullptr,
+                                           gpu_multipole ? &m_pot.v_qp : nullptr, m_wfn.eps, eps_b, m_eig_fp32);
+            Eigen::VectorXd fa, fb, pop_ao, spop_ao;
+            if (ok) {
+                // Per-spin Fermi filling, as solveEigenUhf (same kT constant).
+                const double kT = m_electronic_temp * 3.166808e-6;
+                double s_a = 0.0, s_b = 0.0;
+                fermiFillingChannel(m_wfn.eps, m_nalpha, kT, fa, s_a);
+                fermiFillingChannel(eps_b, m_nbeta, kT, fb, s_b);
+                m_ts_uhf = s_a + s_b;
+                auto ncol_of = [nao](const Eigen::VectorXd& f) {
+                    int nc = 0;
+                    for (int i = 0; i < nao; ++i) if (f(i) > 1.0e-12) nc = i + 1;
+                    return nc;
+                };
+                ok = m_gpu_scf->densitySpin(fa, ncol_of(fa), fb, ncol_of(fb), pop_ao, spop_ao, gpu_band);
+            }
+            if (!ok) {
+                const std::string why = m_gpu_scf->lastError();
+                CurcumaLogger::warn("XTB::Calculation: GPU spin-polarised solve/density failed at iteration "
+                                    + std::to_string(iter) + (why.empty() ? std::string() : ": " + why));
+                m_scf_converged = false; m_scf_iterations = iter;
+                setHardError("native GPU spin-polarised SCF step failed (see warning above) at iteration " + std::to_string(iter));
+                return m_E_total;
+            }
+            t_solve = clock::now();
+            updatePopulationsFromPopAo(pop_ao);   // q_sh / q_at from P = Pa + Pb
+            // Shell magnetisation m_l = sum_{mu in l} spop_ao(mu), spop_ao(mu) = sum_nu Pm_mu,nu S_nu,mu.
+            Vector msh = Vector::Zero(nsh);
+            for (int s = 0; s < nsh; ++s)
+                for (int mu = m_basis.iao_sh[s]; mu < m_basis.iao_sh[s] + m_basis.nao_sh[s]; ++mu)
+                    msh(s) += spop_ao(mu);
+            m_wfn.m_sh = msh;
+            if (gpu_multipole && !m_gpu_scf->multipoleMoments(m_wfn.dp_at, m_wfn.qp_at)) {
+                m_scf_converged = false; m_scf_iterations = iter;
+                setHardError("native GPU spin-polarised SCF: multipole moments failed at iteration " + std::to_string(iter));
+                return m_E_total;
+            }
+            m_wfn.focc = fa + fb;                // diagnostic, as solveEigenUhf
+            m_gpu_spin_eb = std::move(eps_b);
+            m_gpu_spin_fa = std::move(fa);
+            m_gpu_spin_fb = std::move(fb);
+            q_sh_new = m_wfn.q_sh;
+            t_mull = clock::now();
+        } else if (use_gpu_resident) {
             // Expand shell+atom potential to AO resolution (host; mirrors
             // expand_potential in xtb_scf.cpp). v_ao(μ)=v_sh(sh)+v_at(at) — this
             // isotropic part carries Coulomb + third-order (v_sh) and, for GFN2,
@@ -2547,7 +2633,16 @@ double XTB::Calculation(bool gradient)
         const bool big_wfn = 9.0 * static_cast<double>(m_basis.nao) * m_basis.nao * sizeof(double) > 2.0e9;
         if (use_resident_loop && big_wfn && (m_mp_ints_deferred || gfn1_resident) && (!gradient || device_grad_will_run))
             m_wfn_on_device = true;
-        else
+        else if (m_gpu_spin_loop) {
+            // Spin polarisation: P, Pm and both orbital sets (C/eps keep the alpha set, as solveEigenUhf).
+            // W is not built here: the device gradient builds its own, the host fallback calls
+            // spinHostEnergyWeightedDensity(). Claude Generated (Nov 2026).
+            if (!m_gpu_scf->finalizeSpin(m_wfn.P, m_wfn.Pm, m_wfn.C, m_gpu_spin_Cb)) {
+                setHardError("native GPU spin-polarised SCF: download of the converged density failed");
+                return m_E_total;
+            }
+            m_wfn.W_valid = false;
+        } else
             m_gpu_scf->finalize(m_wfn.P, m_wfn.C);
     }
     post_mark("finalize: download P and C");
@@ -2559,7 +2654,9 @@ double XTB::Calculation(bool gradient)
     // density W use the fractional Fermi occupations instead of the integer
     // fallback (xtb_gradient.cpp). occupationsFromEps is bit-faithful to
     // solveEigen, so this is identical to the CPU path. Claude Generated.
-    if ((use_gpu_resident || use_resident_loop) && m_wfn.eps.size() == m_basis.nao) {
+    // (Not for the spin-polarised device loop: there focc = fa + fb and m_ts_uhf come from the two
+    // channel fillings of the last iteration; one filling over the alpha eps would overwrite them.)
+    if ((use_gpu_resident || use_resident_loop) && !m_gpu_spin_loop && m_wfn.eps.size() == m_basis.nao) {
         Eigen::VectorXd occ; int ncol = 0;
         occupationsFromEps(m_wfn.eps, occ, ncol);
         m_wfn.focc = occ;
@@ -2744,6 +2841,7 @@ double XTB::Calculation(bool gradient)
         if (!gpu_grad) {
             ensureHostWavefunction();
             ensureHostMultipoleIntegrals();
+            if (m_gpu_spin_loop) spinHostEnergyWeightedDensity();   // W of both spins for the host gradient
             calculateGradient();   // fills m_gradient in Eh/Bohr
         }
 

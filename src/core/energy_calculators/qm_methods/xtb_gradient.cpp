@@ -886,6 +886,30 @@ bool XTB::calculateGradientGpu()
         }
     }
 
+    // Spin polarisation on the CUDA loop (Claude Generated, Nov 2026): W must hold both orbital sets and
+    // the spin term of the overlap-gradient coefficient, + Pm (u_a + u_b) (see calculateGradient). The
+    // device builds W' = Wa + Wb - 1/2 Pm o (u_mu + u_nu) from its resident Ca/Cb/Pm, and gradient()
+    // below reads it instead of building W from C (nocc_orbs = 0, eps unused).
+    if (m_gpu_spin_loop) {
+        if (m_dev_potentials || m_wfn.m_sh.size() != m_basis.nsh || m_wfn.eps.size() != nao
+            || m_gpu_spin_eb.size() != nao || m_gpu_spin_fa.size() != nao || m_gpu_spin_fb.size() != nao)
+            return false;
+        Vector u_sh;
+        spinPotential(m_wfn.m_sh, u_sh);
+        Vector u_ao(nao);
+        for (int mu = 0; mu < nao; ++mu) u_ao(mu) = u_sh(m_basis.ao2sh[mu]);
+        auto ncol_of = [nao](const Vector& f) {
+            int nc = 0;
+            for (int i = 0; i < nao; ++i) if (f(i) > 1.0e-12) nc = i + 1;
+            return nc;
+        };
+        const Vector we_a = m_gpu_spin_fa.cwiseProduct(m_wfn.eps);
+        const Vector we_b = m_gpu_spin_fb.cwiseProduct(m_gpu_spin_eb);
+        if (!m_gpu_scf->spinWeightedDensity(we_a, ncol_of(m_gpu_spin_fa), we_b, ncol_of(m_gpu_spin_fb), u_ao))
+            return false;
+        nocc_orbs = 0;
+    }
+
     // GFN2 multipole potentials for the device multipole-integral Pulay term.
     Eigen::MatrixXd v_dp_empty, v_qp_empty;
     const Eigen::MatrixXd& v_dp = (m_method == MethodType::GFN2) ? m_pot.v_dp : v_dp_empty;
