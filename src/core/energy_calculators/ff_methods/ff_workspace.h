@@ -404,6 +404,15 @@ public:
     const GeoGradMatrix& gradient() const { return m_result_gradient; }
     const FFEnergyComponents& energyComponents() const { return m_result_energy; }
     const FFTermTimings& termTimings() const { return m_result_timings; }
+    /// Wall ms of the last calculate() on the calling thread: kernel partitions (incl. the pool join), reduce,
+    /// postProcess. Measured at verbosity >= 2 or with CURCUMA_GFNFF_PHASE=1, else -1 (timing only, no numerical
+    /// effect). Static, thread-local storage in ff_workspace.cpp: no change of the class layout (plugin ABI).
+    /// Claude Generated (Nov 2026)
+    static double lastExecuteMs();
+    static double lastReduceMs();
+    static double lastPostMs();
+    /// CURCUMA_GFNFF_PHASE=1 (read once): one GFNFFPHASE line per GFNFF::Calculation on stderr (CPU path)
+    static bool phaseTraceEnabled();
     int threadCount() const { return m_num_threads; }
     const Vector& dEdcnTotal() const { return m_dEdcn_total; }
     const Vector& dEdcnBondTotal() const { return m_dEdcn_bond_total; }

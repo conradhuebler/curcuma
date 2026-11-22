@@ -1246,7 +1246,8 @@ void GFNFF::prepareCNAndEEQ(bool gradient, bool gpu_only, const Vector* external
 {
     // WP-P1 (May 2026): also collect timings when forcePhaseTiming() is set, so MD
     // diagnostics get non-zero values without requiring CurcumaLogger verbosity 2.
-    const bool do_timing = (CurcumaLogger::get_verbosity() >= 2) || m_force_phase_timing;
+    // Nov 2026 (stage 4): CURCUMA_GFNFF_PHASE=1 also fills the sub-phase stamps (timing only)
+    const bool do_timing = (CurcumaLogger::get_verbosity() >= 2) || m_force_phase_timing || FFWorkspace::phaseTraceEnabled();
     auto t_prep_total = std::chrono::high_resolution_clock::now();  // always measure, negligible overhead
     double t_cn = 0.0, t_eeq_topo = 0.0, t_cnf = 0.0, t_dcn = 0.0, t_d4_gw = 0.0, t_eeq_solve = 0.0, t_charge_dist = 0.0;
     bool c6_current_from_gradient_path = false;  // see the gradient-path D4 block (Oct 2026)
@@ -3032,6 +3033,9 @@ double GFNFF::calculationSingle(bool gradient)
 
     // Claude Generated (Mar 2026): Timing infrastructure for sequential sections
     double t_cn = 0, t_threads = 0, t_hbxb_update = 0;
+    // Nov 2026 (CPU threading pass stage 4): stamps of the host phases for CURCUMA_GFNFF_PHASE=1 (timing only)
+    using phclk = std::chrono::steady_clock;
+    const auto ph0 = phclk::now();
 
     // WP-FF-DistMatrix-Sharing (May 2026): compute packed sqrab/srab ONCE for this
     // energy/gradient call BEFORE any consumer reads m_shared_srab. Mirrors XTB
@@ -3044,6 +3048,7 @@ double GFNFF::calculationSingle(bool gradient)
     // and rebuild all bonded terms BEFORE distances/CN/EEQ/HB-XB, so every consumer in
     // this step sees the new topology.
     updateReactiveTopologyIfNeeded();
+    const auto ph_react = phclk::now();
 
     // Nov 2026 (B3): the periodic EEQ reads no distance buffer (Ewald pairs and k vectors instead)
     if (periodicEEQActive()) {
@@ -3058,7 +3063,9 @@ double GFNFF::calculationSingle(bool gradient)
     // D4 pair-list skin check (Claude Generated, Sep 2026): must precede prepareCNAndEEQ(),
     // whose Gaussian-weight / dC6dCN / C6 refresh then already runs over the new pair list.
     // See updateDispersionPairsIfNeeded() for the bug this closes.
+    const auto ph_srab = phclk::now();
     updateDispersionPairsIfNeeded(nullptr);
+    const auto ph_d4list = phclk::now();
 
     // Phase A: CN + EEQ calculation (delegated to extracted helper)
     PrepTiming prep_timing{};  // zero-initialize so unused fields are 0.0
@@ -3080,12 +3087,14 @@ double GFNFF::calculationSingle(bool gradient)
     // Periodic non-bonded repulsion pair-list refresh (Claude Generated, Sep 2026): the
     // list is otherwise built once from a hard 20 Bohr cutoff and never revisited — see
     // updateNonbondedRepulsionIfNeeded() for the bug this closes.
+    const auto ph_hbxb = phclk::now();
     updateNonbondedRepulsionIfNeeded(nullptr);
 
     // Same refresh for the explicit Coulomb list, which exists only with eeq_distance_cutoff > 0
     // (Claude Generated, Sep 2026) — see updateCoulombPairsIfNeeded().
     updateCoulombPairsIfNeeded(nullptr);
     m_lists_rebuild_pending = false;  // N2: every list above was rebuilt for the current cell
+    const auto ph_lists = phclk::now();
 
     // Claude Generated (Feb 21, 2026): Enable per-component gradient storage for invariance diagnosis
     // Apr 2026: enabled unconditionally when gradient is requested so the NaN trap below
@@ -3103,7 +3112,9 @@ double GFNFF::calculationSingle(bool gradient)
 
     // Nov 2026 (A3c): homogeneous D4 tail from the CN weights prepareCNAndEEQ() just set (no cell: cleared)
     updateDispersionTail(gradient);
+    const auto ph_tail = phclk::now();
     energy_hartree = m_workspace->calculate(gradient);
+    const auto ph_ws = phclk::now();
     t_threads = std::chrono::duration<double, std::milli>(
         std::chrono::high_resolution_clock::now() - t_ff_start).count();
 
@@ -3269,6 +3280,27 @@ double GFNFF::calculationSingle(bool gradient)
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::param("energy_hartree", fmt::format("{:.10f}", energy_hartree));
+    }
+
+    if (FFWorkspace::phaseTraceEnabled()) {
+        // Claude Generated (Nov 2026, stage 4): one line per call, host phases and the workspace split (ms); the
+        // per-term values are CPU sums over the partitions (wall = sum / threads only for a balanced split)
+        auto ms = [](phclk::time_point a, phclk::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+        const FFTermTimings& tt = m_workspace->termTimings();
+        auto pos = [](double v) { return v < 0 ? 0.0 : v; };
+        fmt::print(stderr,
+            "GFNFFPHASE react={:.3f} srab={:.3f} d4list={:.3f} prep={:.3f} cn={:.3f} eeq_topo={:.3f} cnf={:.3f} dcn={:.3f} "
+            "d4gw={:.3f} eeq={:.3f} qdist={:.3f} hbxb={:.3f} lists={:.3f} tail={:.3f} ws={:.3f} ws_exec={:.3f} "
+            "ws_reduce={:.3f} ws_post={:.3f} bonds={:.3f} angles={:.3f} dihedrals={:.3f} inversions={:.3f} stors={:.3f} "
+            "disp={:.3f} brep={:.3f} nbrep={:.3f} coul={:.3f} hb={:.3f} xb={:.3f} atm={:.3f} batm={:.3f} after={:.3f} "
+            "total={:.3f} threads={}\n",
+            ms(ph0, ph_react), ms(ph_react, ph_srab), ms(ph_srab, ph_d4list), prep_timing.total, prep_timing.cn,
+            prep_timing.eeq_topo, prep_timing.cnf, prep_timing.dcn, prep_timing.d4_gw, prep_timing.eeq_solve,
+            prep_timing.charge_dist, t_hbxb_update, ms(ph_hbxb, ph_lists), ms(ph_lists, ph_tail), ms(ph_tail, ph_ws),
+            m_workspace->lastExecuteMs(), m_workspace->lastReduceMs(), m_workspace->lastPostMs(), pos(tt.bonds),
+            pos(tt.angles), pos(tt.dihedrals), pos(tt.inversions), pos(tt.stors), pos(tt.dispersion), pos(tt.bonded_rep),
+            pos(tt.nonbonded_rep), pos(tt.coulomb), pos(tt.hbond), pos(tt.xbond), pos(tt.atm), pos(tt.batm),
+            ms(ph_ws, phclk::now()), ms(ph0, phclk::now()), m_workspace->threadCount());
     }
 
     // Claude Generated (February 2026): Total GFN-FF calculation timing at verbosity 1+

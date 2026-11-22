@@ -26,6 +26,7 @@
 #include <fmt/format.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <cmath>
 
 FFWorkspace::FFWorkspace(int num_threads)
@@ -391,9 +392,22 @@ double FFWorkspace::evaluateEwaldCoulomb(const Matrix& geometry_bohr, const Vect
     return e_pair;
 }
 
+// Claude Generated (Nov 2026, CPU threading pass stage 4): phase trace switch and split, timing only
+namespace {
+thread_local double tl_ws_execute_ms = -1.0, tl_ws_reduce_ms = -1.0, tl_ws_post_ms = -1.0;
+}
+bool FFWorkspace::phaseTraceEnabled()
+{
+    static const bool on = std::getenv("CURCUMA_GFNFF_PHASE") != nullptr;
+    return on;
+}
+double FFWorkspace::lastExecuteMs() { return tl_ws_execute_ms; }
+double FFWorkspace::lastReduceMs() { return tl_ws_reduce_ms; }
+double FFWorkspace::lastPostMs() { return tl_ws_post_ms; }
+
 double FFWorkspace::calculate(bool gradient)
 {
-    const bool do_timing = (CurcumaLogger::get_verbosity() >= 2);
+    const bool do_timing = (CurcumaLogger::get_verbosity() >= 2) || phaseTraceEnabled();
     auto t_calc_start = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
     double t_execute = 0.0, t_reduce = 0.0, t_post = 0.0;
 
@@ -506,13 +520,15 @@ double FFWorkspace::calculate(bool gradient)
         for (auto& f : futures)
             f.get();
 
+        // Nov 2026: the reduce has its own stamp (t_reduce was taken before t_execute existed, i.e. it held both)
+        const auto t_join = do_timing ? std::chrono::high_resolution_clock::now() : t0;
         reduce();
         if (do_timing) {
-            t_reduce = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count() - t_execute;
+            t_reduce = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t_join).count();
         }
     }
     if (do_timing) {
-        t_execute = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
+        t_execute = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count() - t_reduce;
     }
 
     t0 = do_timing ? std::chrono::high_resolution_clock::now() : std::chrono::time_point<std::chrono::high_resolution_clock>{};
@@ -521,6 +537,9 @@ double FFWorkspace::calculate(bool gradient)
         t_post = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
     }
     m_virial_valid = want_virial;  // N1: components summed in reduce()/the T=1 copy, remainder in postProcess()
+    tl_ws_execute_ms = do_timing ? t_execute : -1.0;
+    tl_ws_reduce_ms = do_timing ? t_reduce : -1.0;
+    tl_ws_post_ms = do_timing ? t_post : -1.0;
 
     // CPU ENERGY TERMS (verbosity >= 3)
     if (CurcumaLogger::get_verbosity() >= 3) {
