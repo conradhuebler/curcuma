@@ -49,6 +49,8 @@
 #include <chrono>
 #include <future>
 #include <stdexcept>
+#include <fstream>
+#include <set>
 #include <thread>
 #include <vector>
 #include "src/core/output_symbols.h"
@@ -99,6 +101,25 @@ XTB::~XTB() = default;
  *  budget ONLY for a single large molecule and otherwise stay serial. See the
  *  auto-gate rationale in xtb_native.h (CxxThreadPoolWorkerFlag, MklThreadScope).
  * ------------------------------------------------------------------------- */
+// CPU threading pass stage 3 (Claude Generated, Nov 2026): number of physical cores (distinct package/core ids in
+// /sys/devices/system/cpu), 0 when unknown (non-Linux or unreadable); read once.
+static int physicalCoreCount()
+{
+    static const int count = []() {
+        std::set<std::pair<int, int>> ids;
+        const unsigned n = std::thread::hardware_concurrency();
+        for (unsigned c = 0; c < n; ++c) {
+            const std::string base = "/sys/devices/system/cpu/cpu" + std::to_string(c) + "/topology/";
+            std::ifstream fc(base + "core_id"), fp(base + "physical_package_id");
+            int core = -1, pkg = -1;
+            if (!(fc >> core) || !(fp >> pkg)) return 0;
+            ids.insert({ pkg, core });
+        }
+        return static_cast<int>(ids.size());
+    }();
+    return count;
+}
+
 int XTB::effectiveIntraThreads(int work_units) const
 {
     if (m_intra_threads <= 1) return 1;
@@ -1247,10 +1268,22 @@ double XTB::Calculation(bool gradient)
         if (v > 0) eig_cap = v;        // the environment variable still wins
     }
     const int eig_intra = effectiveIntraThreads(m_basis.nao);
-    const int eig_threads = eig_cap > 0 ? std::min(eig_intra, eig_cap) : eig_intra;
+    int eig_threads = eig_cap > 0 ? std::min(eig_intra, eig_cap) : eig_intra;
+    // CPU threading pass stage 3 (Claude Generated, Nov 2026): with a cell and no explicit cap the eigensolve does not
+    // use SMT siblings. Measured (gfn2 432 H2O -sp, 16 cores / 32 threads, n = 3): -threads 32 eigensolve 4.83 s with 32
+    // MKL threads, 3.51 s capped at 16; -threads 16 unchanged. The cell-free path keeps the -threads rule (no change).
+    bool eig_core_cap = false;
+    if (m_pbc && eig_cap <= 0) {
+        const int cores = physicalCoreCount();
+        if (cores > 0 && eig_threads > cores) {
+            eig_threads = cores;
+            eig_core_cap = true;
+        }
+    }
     if (verb >= 3 && eig_threads > 1)
         CurcumaLogger::info_fmt("Eigensolve BLAS/LAPACK threads: {}{}", eig_threads,
-                                eig_cap > 0 ? " (eigensolver_max_threads cap)" : " (from -threads)");
+                                eig_cap > 0 ? " (eigensolver_max_threads cap)"
+                                            : (eig_core_cap ? " (physical cores, periodic)" : " (from -threads)"));
 
     pre_mark("thread budgets, eigensolver settings");
     // Device-resident SCF (Claude Generated, GPU port Stage 2). Enabled with the
