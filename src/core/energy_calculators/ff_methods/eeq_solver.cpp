@@ -4838,30 +4838,10 @@ Vector EEQSolver::calculateDxi(
 {
     // Claude Generated (December 2025, Session 13): FULL dxi calculation
     // Reference: XTB gfnff_ini.f90:358-403
-    // Phase 2.5-2.7: Added pi-system detection and neighbor EN averaging
+    // Phase 2.5-2.7: Added pi-system detection (the unused neighbor EN average and its table were removed Nov 2026)
 
     const int natoms = atoms.size();
     Vector dxi = Vector::Zero(natoms);
-
-    // Pauling electronegativities for neighbor averaging (indices 0-86)
-    // Reference: Standard Pauling scale
-    static const std::array<double, 87> pauling_en = {
-        0.0,  // 0: dummy
-        2.20, 0.0,  // 1-2: H, He
-        0.98, 1.57, 2.04, 2.55, 3.04, 3.44, 3.98, 0.0,  // 3-10: Li-Ne
-        0.93, 1.31, 1.61, 1.90, 2.19, 2.58, 3.16, 0.0,  // 11-18: Na-Ar
-        0.82, 1.00,  // 19-20: K, Ca
-        1.36, 1.54, 1.63, 1.66, 1.55, 1.83, 1.88, 1.91, 1.90, 1.65,  // 21-30: Sc-Zn
-        1.81, 2.01, 2.18, 2.55, 2.96, 3.00, 0.0,  // 31-37: Ga-Kr (Kr noble gas)
-        0.82, 0.95,  // 38-39: Rb, Sr (Note: index mismatch fixed below)
-        1.22, 1.33, 1.60, 2.16, 1.90, 2.20, 2.28, 2.20, 1.93, 1.69,  // 40-49: Y-Cd
-        1.78, 1.96, 2.05, 2.10, 2.66, 2.60, 0.0,  // 50-56: In-Xe (Xe noble gas)
-        0.79, 0.89,  // 57-58: Cs, Ba
-        1.10, 1.12, 1.13, 1.14, 1.13, 1.17, 1.20,  // 59-65: La-Eu
-        1.20, 1.20, 1.22, 1.23, 1.24, 1.25, 1.10,  // 66-72: Gd-Yb
-        1.27, 1.30, 1.50, 2.36, 1.90, 2.20, 2.20, 2.28, 2.54, 2.00,  // 73-82: Lu-Hg
-        1.62, 2.33, 2.02, 2.00  // 83-86: Tl-Rn
-    };
 
     // Estimate hybridization from CN (approximation)
     // Reference: CN-based heuristic (hyb: 1=sp, 2=sp2, 3=sp3)
@@ -4880,7 +4860,7 @@ Vector EEQSolver::calculateDxi(
     if (m_verbosity >= 3) {
         CurcumaLogger::info("\n=== Dxi Calculation (FULL - Phase 2.7) ===");
         CurcumaLogger::info("Reference: XTB gfnff_ini.f90:358-403 + pi-system + neighbor EN");
-        CurcumaLogger::info("Atom |  Z | CN  | Hyb | Pi | EN_avg | dxi_total | Components");
+        CurcumaLogger::info("Atom |  Z | CN  | Hyb | Pi | dxi_total | Components");
         CurcumaLogger::info("-----+----+-----+-----+----+--------+-----------+-----------");
     }
 
@@ -4893,7 +4873,6 @@ Vector EEQSolver::calculateDxi(
         int nh = 0;  // Number of H neighbors
         int nn = 0;  // Total number of neighbors
         int nm = 0;  // Number of metal neighbors
-        double en_avg = 0.0;  // Average neighbor electronegativity
         std::string env_desc = "";
 
         if (topology.has_value()) {
@@ -4918,13 +4897,6 @@ Vector EEQSolver::calculateDxi(
                     if (nb_j <= 4 && group_j > 3) imetal_j = 0;
                     if (imetal_j != 0) nm++;
                 }
-                // Sum electronegativities for averaging
-                if (Z_j < static_cast<int>(pauling_en.size())) {
-                    en_avg += pauling_en[Z_j];
-                }
-            }
-            if (nn > 0) {
-                en_avg /= nn;  // Average neighbor EN
             }
         }
 
@@ -5085,8 +5057,8 @@ Vector EEQSolver::calculateDxi(
             if (components.empty()) components = "none";
             std::string hyb_str = (hyb[i] == 1) ? "sp" : (hyb[i] == 2) ? "sp2" : "sp3";
             std::string pi_str = is_pi_atom[i] ? "Y" : "N";
-            CurcumaLogger::info(fmt::format("  {:2d} | {:2d} | {:3.1f} | {:3s} | {:2s} | {:6.2f} | {:+9.5f} | {}",
-                                    i, ati, cn(i), hyb_str, pi_str, en_avg, dxi_total, components));
+            CurcumaLogger::info(fmt::format("  {:2d} | {:2d} | {:3.1f} | {:3s} | {:2s} | {:+9.5f} | {}",
+                                    i, ati, cn(i), hyb_str, pi_str, dxi_total, components));
         }
     }
 

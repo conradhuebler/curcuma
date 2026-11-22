@@ -315,6 +315,8 @@ Offen, Aufrufer vor dem Löschen erneut suchen:
 - `xtb_cpscf` schlägt fehl (Gruppe C: H2 response 8.2e-5 gegen 1e-6, H2O/HCN isolation 1.7e-4/2.9e-4 gegen 1.5e-4); identisch im Stand vor dem Debt-Branch.
 - PARAM `gfnff.accuracy` (loose|normal|medium|high) bleibt: kein Leser bis jetzt, soll mit den Genauigkeitsprofilen (Eintrag oben) eine Bedeutung bekommen. Nicht entfernen; der Hilfetext sagt bis dahin "no effect".
 
+- Restliche Tabellen-Duplikate: `d4_ncoord.cpp` (`rad`, `en`, verbatim cpp-d4, Pauling-EN gleich `element_tables.h` fuer Z <= 86) und die Device-Kopien in `cuda/`/`rocm/` (laden die Host-Tabellen, nicht geprueft); Konsolidierung nur mit GPU-Test.
+
 ## 8. Aus der alten Liste entfernt (überholt oder erledigt)
 
 | Eintrag | Grund |

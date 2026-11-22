@@ -2180,7 +2180,7 @@ private:
      * The exp(-0.005*en^8) factor is extremely stiff (en=2.0 -> 0.28, en=3.0 -> ~0),
      * so it acts as a near-hard electronegativity switch around en ~ 2.4.
      *
-     * NOTE: uses GFNFFParameters::gfnff_en (Fortran param%en), NOT the rab_en table.
+     * NOTE: uses GFNFFParameters::en_gfnff (Fortran param%en), NOT the en_rab_gfnff table.
      *
      * @return mchar per atom (size m_atomcount)
      */

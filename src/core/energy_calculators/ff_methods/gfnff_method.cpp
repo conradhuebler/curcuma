@@ -8714,7 +8714,7 @@ std::vector<double> GFNFF::computeMetallicCharacter() const
      * from GFNFFParameters::gfnff_cn_rcov_bohr() since Sep 2026 - this site used to apply
      * the CODATA-2018 constant while CNCalculator used the CODATA-1986 one (1.8897259886).
      */
-    using GFNFFParameters::gfnff_en;
+    using GFNFFParameters::en_gfnff;
 
     constexpr double kn = -7.5;
     constexpr double cnmax = 4.4;
@@ -8766,7 +8766,7 @@ std::vector<double> GFNFF::computeMetallicCharacter() const
 
         const double dum2 = (dlogdcn_i * self_sum).norm() + offdiag_norm_sum;
 
-        const double en = gfnff_en[zi - 1];
+        const double en = en_gfnff[zi - 1];
         const double en2 = en * en;
         const double en4 = en2 * en2;
         const double en8 = en4 * en4;

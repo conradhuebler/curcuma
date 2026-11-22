@@ -7,6 +7,7 @@
  */
 
 #include "src/tools/bmt_utils.h"
+#include "src/core/element_tables.h"
 #include "src/core/units.h"
 #include "d4param_generator.h"
 #include "d4_pair_c6.h"
@@ -153,31 +154,7 @@ void D4ParameterGenerator::initializeReferenceData()
     // heavier was silently filled with a placeholder 10.0, which made native D4
     // dispersion wrong for I and all 4d/5d elements (too-large R0 -> underbinding).
     // The full array below fixes heavy elements without touching Z<=36.
-    m_r4_over_r2 = {
-        8.0589, 3.4698,  // H-He
-        29.0974, 14.8517, 11.8799, 7.8715, 5.5588, 4.7566, 3.8025, 3.1036,  // Li-Ne
-        26.1552, 17.2304, 17.7210, 12.7442, 9.5361, 8.1652, 6.7463, 5.6004,  // Na-Ar
-        29.2012, 22.3934, // K-Ca
-        19.0598, 16.8590, 15.4023, 12.5589, 13.4788, // Sc-Mn
-        12.2309, 11.2809, 10.5569, 10.1428, 9.4907,  // Fe-Zn
-        13.4606, 10.8544, 8.9386, 8.1350, 7.1251, 6.1971, // Ga-Kr
-        30.0162, 24.4103, // Rb-Sr
-        20.3537, 17.4780, 13.5528, 11.8451, 11.0355, // Y-Tc
-        10.1997, 9.5414, 9.0061, 8.6417, 8.9975,     // Ru-Cd
-        14.0834, 11.8333, 10.0179, 9.3844, 8.4110, 7.5152, // In-Xe
-        32.7622, 27.5708, // Cs-Ba
-        23.1671, 21.6003, 20.9615, 20.4562, 20.1010, 19.7475, 19.4828, // La-Eu
-        15.6013, 19.2362, 17.4717, 17.8321, 17.4237, 17.1954, 17.1631, // Gd-Yb
-        14.5716, 15.8758, 13.8989, 12.4834, 11.4421, // Lu-Re
-        10.2671, 8.3549, 7.8496, 7.3278, 7.4820,     // Os-Hg
-        13.5124, 11.6554, 10.0959, 9.7340, 8.8584, 8.0125, // Tl-Rn
-        29.8135, 26.3157, // Fr-Ra
-        19.1885, 15.8542, 16.1305, 15.6161, 15.1226, 16.1576, 0.0000, // Ac-Am
-        0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, // Cm-No
-        0.0000, 0.0000, 0.0000, 0.0000, 0.0000, // Lr-Bh
-        0.0000, 0.0000, 0.0000, 0.0000, 5.4929, // Hs-Cn
-        6.7286, 6.5144, 10.9169, 10.3600, 9.4723, 8.6641 // Nh-Og
-    };
+    m_r4_over_r2.assign(std::begin(CurcumaElements::R4_OVER_R2), std::end(CurcumaElements::R4_OVER_R2));
     if (m_r4_over_r2.size() < MAX_ELEM) m_r4_over_r2.resize(MAX_ELEM, 10.0);
 
     for (int i = 0; i < MAX_ELEM; ++i) {
@@ -616,16 +593,8 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
 
         // Covalent radii in Angstrom (from GFN-FF method) for bond detection
         const double ANGSTROM_TO_BOHR = CurcumaUnit::Length::angstrom_to_bohr_or_legacy(1.8897261246257702);
-        static const std::vector<double> rcov_angstrom = {
-            0.32, 0.37, 1.30, 0.99, 0.84, 0.75, 0.71, 0.64, 0.60, 0.62, // H-Ne
-            1.60, 1.40, 1.24, 1.14, 1.09, 1.04, 1.00, 1.01, // Na-Ar
-            2.00, 1.74, 1.59, 1.48, 1.44, 1.30, 1.29, 1.24, 1.18, 1.17, 1.22, 1.20, // K-Zn
-            1.23, 1.20, 1.20, 1.18, 1.17, 1.16, 2.15, 1.90, 1.76, 1.64, 1.56, 1.46, // Rb-Tc
-            1.38, 1.36, 1.34, 1.30, 1.36, 1.40, 1.42, 1.40, 1.40, 1.37, 1.36, 1.36, // Ru-Xe
-            2.38, 2.06, 1.94, 1.84, 1.90, 1.88, 1.86, 1.85, 1.83, 1.82, 1.81, 1.80, // Cs-Er
-            1.79, 1.77, 1.77, 1.78, 1.74, 1.64, 1.58, 1.50, 1.41, 1.36, 1.32, 1.30, // Tm-Au
-            1.30, 1.32, 1.44, 1.45, 1.50, 1.42, 1.48, 1.46 // Hg-Rn
-        };
+        // atomic radii (CRC/Mantina, Angstrom) = first 86 entries of the shared table; Z >= 86 falls back to 1.5 as before
+        static const std::vector<double> rcov_angstrom(std::begin(CurcumaElements::ATOMIC_RAD_ANGSTROM), std::end(CurcumaElements::ATOMIC_RAD_ANGSTROM));
 
         for (int i = 0; i < n_atoms; ++i) {
             int Zi = m_atoms[i];
