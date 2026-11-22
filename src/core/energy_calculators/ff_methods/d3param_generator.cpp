@@ -266,7 +266,7 @@ double D3ParameterGenerator::getEnergyAndGradientPeriodic(bool need_gradient,
     const int N = static_cast<int>(n);
     PBCGather::RowRecords<2> erec(N);                          // (w, term): energy += w * term
     PBCGather::RowRecords<4> vrec(N, virial_out != nullptr);   // (gw, dx, dy, dz)
-    PBCGather::gatherSymmetricPairs(run, N, true, [&](int a, int ii, int jj, bool first) {
+    PBCGather::gatherSymmetricPairs(run, N, true, [&](int, int ii, int jj, PBCGather::Side side) {
             const size_t i = static_cast<size_t>(ii), j = static_cast<size_t>(jj);
             const int elem_i = m_atoms[i];
             if (elem_i < 1 || elem_i > MAX_ELEM) return;
@@ -287,7 +287,7 @@ double D3ParameterGenerator::getEnergyAndGradientPeriodic(bool need_gradient,
                     const double r = std::sqrt(r2);
                     const double t6 = 1.0 / (std::pow(r, 6) + r6_0);
                     const double t8 = 1.0 / (std::pow(r, 8) + r8_0);
-                    if (first) erec.push(a, { w, -s6 * c6 * t6 - s8 * c8 * t8 });
+                    if (side != PBCGather::Side::Column) erec.push(ii, { w, -s6 * c6 * t6 - s8 * c8 * t8 });
                     if (!need_gradient) return;
                     const double d6 = -6.0 * r2 * r2 * t6 * t6;
                     const double d8 = -8.0 * r2 * r2 * r2 * t8 * t8;
@@ -298,20 +298,20 @@ double D3ParameterGenerator::getEnergyAndGradientPeriodic(bool need_gradient,
                         // row: the same expressions give the compiler the same FMA choices (bitwise; a branch per
                         // update changed them by 1e-19)
                         double scratch[3] = { 0.0, 0.0, 0.0 };
-                        double* gi = first ? &gradient_out(a, 0) : scratch;
-                        double* gj = first ? scratch : &gradient_out(a, 0);
+                        double* gi = side != PBCGather::Side::Column ? &gradient_out(i, 0) : scratch;
+                        double* gj = side != PBCGather::Side::Row ? &gradient_out(j, 0) : scratch;
                         const double gx = -c6 * gdisp * dx, gy = -c6 * gdisp * dy, gz = -c6 * gdisp * dz;
                         gi[0] += gx; gj[0] -= gx;
                         gi[1] += gy; gj[1] -= gy;
                         gi[2] += gz; gj[2] -= gz;
                     }
-                    if (virial_out && first)   // P4: Xi_ab -= w (dE/dd_a) d_b, self images with their 1/2 weight
-                        vrec.push(a, { -c6 * gdisp * w, dx, dy, dz });
+                    if (virial_out && side != PBCGather::Side::Column)   // P4: Xi_ab -= w (dE/dd_a) d_b, self images 1/2
+                        vrec.push(ii, { -c6 * gdisp * w, dx, dy, dz });
                     // (i, i, T): the two ends move together, so the direct gradient of a self image is zero
                     const double edisp = s6 * t6 + s8 * r6_ratio * t8;
                     double dscr = 0.0;
-                    double* di = first ? &dEdcn_out(a) : &dscr;
-                    double* dj = (first && !same) ? &dscr : &dEdcn_out(a);
+                    double* di = side != PBCGather::Side::Column ? &dEdcn_out(i) : &dscr;
+                    double* dj = (side == PBCGather::Side::Row && !same) ? &dscr : &dEdcn_out(j);
                     *di -= w * m_dc6dcn(i, j) * edisp;
                     *dj -= w * m_dc6dcn(j, i) * edisp;
                 });

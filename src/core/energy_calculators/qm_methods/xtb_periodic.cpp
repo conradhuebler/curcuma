@@ -175,7 +175,7 @@ Vector XTB::computeCoordinationNumbersPeriodic() const
     }
     // CPU stage 2 (Nov 2026): gather form, every cn(a) in the serial order (bitwise for any thread count)
     const PBCGather::StripeRunner run = PBCGather::StripeRunner([this, nthr_ = effectiveIntraThreads(nat)](const std::function<void(int, int)>& w) { parallelStripes(nthr_, w); });
-    PBCGather::gatherSymmetricPairs(&run, nat, true, [&](int a, int i, int j, bool first) {
+    PBCGather::gatherSymmetricPairs(&run, nat, true, [&](int, int i, int j, PBCGather::Side side) {
             const double rc = rcov[i] + rcov[j];
             const bool same = (i == j);
             PBCUtils::forEachImage(images, &xyz[3 * i], &xyz[3 * j], same,
@@ -191,8 +191,8 @@ Vector XTB::computeCoordinationNumbersPeriodic() const
                     }
                     // serial statements verbatim, the other end to a scratch value (same FMA choices)
                     double scr = 0.0;
-                    double* ci = first ? &cn(a) : &scr;
-                    double* cj = first ? &scr : &cn(a);
+                    double* ci = side != PBCGather::Side::Column ? &cn(i) : &scr;
+                    double* cj = side != PBCGather::Side::Row ? &cn(j) : &scr;
                     *ci += c;
                     if (!same) *cj += c;
                 });
@@ -372,7 +372,7 @@ double XTB::calcD3DispersionPeriodic(bool need_gradient) const
     const auto td3_0 = d3clk::now();
     const PBCGather::StripeRunner run = PBCGather::StripeRunner([this, nthr_ = effectiveIntraThreads(nat)](const std::function<void(int, int)>& w) { parallelStripes(nthr_, w); });
     std::vector<double> cn(nat, 0.0);
-    PBCGather::gatherSymmetricPairs(&run, nat, true, [&](int a, int i, int j, bool first) {
+    PBCGather::gatherSymmetricPairs(&run, nat, true, [&](int, int i, int j, PBCGather::Side side) {
             const int ei = m_atoms[i] - 1;
             if (ei < 0 || ei >= static_cast<int>(rcov_A.size())) return;
             const int ej = m_atoms[j] - 1;
@@ -383,8 +383,8 @@ double XTB::calcD3DispersionPeriodic(bool need_gradient) const
                 [&](double, double, double, double r2) {
                     const double c = 1.0 / (1.0 + std::exp(-16.0 * (rc_bohr / std::sqrt(r2) - 1.0)));
                     double scr = 0.0;   // serial statements verbatim, the other end to a scratch value
-                    double* ci = first ? &cn[a] : &scr;
-                    double* cj = first ? &scr : &cn[a];
+                    double* ci = side != PBCGather::Side::Column ? &cn[i] : &scr;
+                    double* cj = side != PBCGather::Side::Row ? &cn[j] : &scr;
                     *ci += c;
                     if (!same) *cj += c;
                 });
@@ -417,7 +417,7 @@ double XTB::calcD3DispersionPeriodic(bool need_gradient) const
     if (m_disp_dEdcn.size() == nat) {
         PBCGather::RowRecords<4> vrec(nat, vir != nullptr);   // (f, dx, dy, dz), replayed in the serial order
         // self images: no Cartesian derivative, virial only (P4)
-        PBCGather::gatherSymmetricPairs(&run, nat, vir != nullptr, [&](int a, int i, int j, bool first) {
+        PBCGather::gatherSymmetricPairs(&run, nat, vir != nullptr, [&](int, int i, int j, PBCGather::Side side) {
                 const int ei = m_atoms[i] - 1;
                 if (ei < 0 || ei >= static_cast<int>(rcov_A.size())) return;
                 const int ej = m_atoms[j] - 1;
@@ -433,13 +433,13 @@ double XTB::calcD3DispersionPeriodic(bool need_gradient) const
                         const double f = (same ? m_disp_dEdcn(i) : m_disp_dEdcn(i) + m_disp_dEdcn(j)) * dcdr / r;
                         if (!same) {   // serial statements verbatim, the other end to a scratch row
                             double scratch[3] = { 0.0, 0.0, 0.0 };
-                            double* gi = first ? &m_disp_gradient(a, 0) : scratch;
-                            double* gj = first ? scratch : &m_disp_gradient(a, 0);
+                            double* gi = side != PBCGather::Side::Column ? &m_disp_gradient(i, 0) : scratch;
+                            double* gj = side != PBCGather::Side::Row ? &m_disp_gradient(j, 0) : scratch;
                             gi[0] += f * dx; gj[0] -= f * dx;
                             gi[1] += f * dy; gj[1] -= f * dy;
                             gi[2] += f * dz; gj[2] -= f * dz;
                         }
-                        if (vir && first) vrec.push(a, { f, dx, dy, dz });
+                        if (vir && side != PBCGather::Side::Column) vrec.push(i, { f, dx, dy, dz });
                     });
         });
         if (vir)
@@ -887,7 +887,9 @@ void XTB::buildGammaMatrixPeriodic()
     const PBCGather::StripeRunner gm_run = PBCGather::StripeRunner([this, nthr_ = gm_threads](const std::function<void(int, int)>& w) { parallelStripes(nthr_, w); });
     Eigen::MatrixXd A;
     {
-        MklThreadScope gm_blas(gm_threads);
+        // CURCUMA_PBC_SERIAL_BLAS=1 (diagnostic): serial BLAS here and in the overlap Cholesky, for thread-count tests
+        static const bool serial_blas = std::getenv("CURCUMA_PBC_SERIAL_BLAS") != nullptr;
+        MklThreadScope gm_blas(serial_blas ? 1 : gm_threads);
         A = ewald.matrix(pos, nullptr, &gm_run);
     }
     m_pbc_ewald_alpha_used = par.alpha;
@@ -1794,7 +1796,7 @@ void XTB::calculateGradientPeriodic()
         // virial terms recorded per row and replayed in the serial order (both bitwise for any thread count)
         PBCGather::RowRecords<6> vrec(nat, want_vir);
         const PBCGather::StripeRunner run = PBCGather::StripeRunner([this, nthr_ = effectiveIntraThreads(nat)](const std::function<void(int, int)>& w) { parallelStripes(nthr_, w); });
-        PBCGather::gatherSymmetricPairs(&run, nat, want_vir, [&](int a, int i, int j, bool first) {
+        PBCGather::gatherSymmetricPairs(&run, nat, want_vir, [&](int, int i, int j, PBCGather::Side side) {
                 const int zi = m_atoms[i];
                 const double alfi = g1m ? gfn1_params::rep_alpha[zi - 1] : gfn2_params::rep_alpha[zi - 1];
                 const double zeffi = g1m ? gfn1_params::rep_zeff[zi - 1] : gfn2_params::rep_zeff[zi - 1];
@@ -1814,15 +1816,15 @@ void XTB::calculateGradientPeriodic()
                         const double fx = dEdr * dx / r, fy = dEdr * dy / r, fz = dEdr * dz / r;
                         if (!same) {   // serial statements verbatim, the other end to a scratch row
                             double scratch[3] = { 0.0, 0.0, 0.0 };
-                            double* gi = first ? &m_gradient(a, 0) : scratch;
-                            double* gj = first ? scratch : &m_gradient(a, 0);
+                            double* gi = side != PBCGather::Side::Column ? &m_gradient(i, 0) : scratch;
+                            double* gj = side != PBCGather::Side::Row ? &m_gradient(j, 0) : scratch;
                             gi[0] += fx; gj[0] -= fx;
                             gi[1] += fy; gj[1] -= fy;
                             gi[2] += fz; gj[2] -= fz;
                         }
-                        if (want_vir && first) {
+                        if (want_vir && side != PBCGather::Side::Column) {
                             const double w = same ? 0.5 : 1.0;
-                            vrec.push(a, { w * fx, w * fy, w * fz, dx, dy, dz });
+                            vrec.push(i, { w * fx, w * fy, w * fz, dx, dy, dz });
                         }
                     });
         });
@@ -2188,7 +2190,7 @@ void XTB::calculateGradientPeriodic()
         PBCGather::RowRecords<6> vrec(nat, want_vir && !cn_device);
         const PBCGather::StripeRunner run = PBCGather::StripeRunner([this, nthr_ = effectiveIntraThreads(nat)](const std::function<void(int, int)>& w) { parallelStripes(nthr_, w); });
         if (!cn_device)
-        PBCGather::gatherSymmetricPairs(&run, nat, want_vir, [&](int a, int i, int j, bool first) {   // self: virial only
+        PBCGather::gatherSymmetricPairs(&run, nat, want_vir, [&](int, int i, int j, PBCGather::Side side) {   // self: virial only
                 const double rc = rcov[i] + rcov[j];
                 const bool same = (i == j);
                 PBCUtils::forEachImage(images, &xyz[3 * i], &xyz[3 * j], same,
@@ -2212,13 +2214,13 @@ void XTB::calculateGradientPeriodic()
                         const double factor = (same ? dEdcn(i) : dEdcn(i) + dEdcn(j)) * dcndr / r;
                         if (!same) {   // serial statements verbatim, the other end to a scratch row
                             double scratch[3] = { 0.0, 0.0, 0.0 };
-                            double* gi = first ? &m_gradient(a, 0) : scratch;
-                            double* gj = first ? scratch : &m_gradient(a, 0);
+                            double* gi = side != PBCGather::Side::Column ? &m_gradient(i, 0) : scratch;
+                            double* gj = side != PBCGather::Side::Row ? &m_gradient(j, 0) : scratch;
                             gi[0] += factor * dx; gj[0] -= factor * dx;
                             gi[1] += factor * dy; gj[1] -= factor * dy;
                             gi[2] += factor * dz; gj[2] -= factor * dz;
                         }
-                        if (want_vir && first) vrec.push(a, { factor * dx, factor * dy, factor * dz, dx, dy, dz });
+                        if (want_vir && side != PBCGather::Side::Column) vrec.push(i, { factor * dx, factor * dy, factor * dz, dx, dy, dz });
                     });
         });
         if (!cn_device && want_vir)

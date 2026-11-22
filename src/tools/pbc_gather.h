@@ -29,12 +29,12 @@
  * written by one thread only). The price is that every pair is evaluated twice (once per member).
  *
  * Bitwise trap (measured): with -march=native GCC fuses a product into its addition (FMA) only when both are in
- * one basic block. A visit that adds "first ? +g : -g" through a branch changed the last bit (1e-19 in the D3
+ * one basic block. A visit that adds "row ? +g : -g" through a branch changed the last bit (1e-19 in the D3
  * gradient). Keep the two update statements of the serial loop verbatim and point the end that is not atom a at a
- * scratch value: double* gi = first ? &out[a] : &scr; double* gj = first ? &scr : &out[a]; gi += g; gj -= g.
+ * scratch value: gi = side != Column ? &out[i] : &scr; gj = side != Row ? &out[j] : &scr; *gi += g; *gj -= g.
  *
  * Scalars (an energy) and the 3x3 virial are one running sum over all pairs in the serial loop. Callers record
- * the factors of every term during the visit with first == true (pair (a, j) of row a, in serial order) in a
+ * the factors of every term during the visits with side != Column (pair (i, j) of row i, serial order) in a
  * per-row buffer (RowRecords) and replay the buffers in row order on one thread with the statement of the serial
  * loop: the same additions in the same order, so the same bits for every thread count. The factors are stored,
  * not their product, because the compiler may fuse the last multiplication with the addition (FMA).
@@ -59,12 +59,17 @@ inline void runStripes(const StripeRunner* run, const std::function<void(int, in
         worker(0, 1);
 }
 
+/// Which end(s) of pair (i, j) a visit updates: Row = atom i (the visit of a == i), Column = atom j (a == j < i),
+/// Both = the serial loop itself (one thread: no second evaluation of the pair).
+enum class Side { Row, Column, Both };
+
 /**
  * @brief Visit, per atom a, every pair of the serial symmetric loop that touches a, in serial order.
  * @param n          number of atoms
  * @param with_self  the serial row runs j = 0..i (true) or j = 0..i-1 (false)
- * @param visit      visit(a, i, j, first): pair (i, j) of row i; first == true means a == i (own row,
- *                   includes j == i when with_self), first == false means a == j < i
+ * @param visit      visit(a, i, j, side): pair (i, j) of row i. Side::Row: a == i (own row, includes j == i when
+ *                   with_self); Side::Column: a == j < i; Side::Both (one thread): the plain serial loop, a == i,
+ *                   update both ends. Records (energy, virial) belong to row i whenever side != Column.
  */
 template <class Visit>
 void gatherSymmetricPairs(const StripeRunner* run, int n, bool with_self, Visit&& visit)
@@ -72,14 +77,22 @@ void gatherSymmetricPairs(const StripeRunner* run, int n, bool with_self, Visit&
     // contiguous atom ranges per thread (the per-atom cost is uniform, every atom visits all n pairs): neighbouring
     // output rows stay in one thread, no false sharing on the per-atom accumulators
     runStripes(run, [&](int tid, int nth) {
+        if (nth <= 1) {   // one thread: the serial loop, each pair once (same bits, half the work)
+            for (int i = 0; i < n; ++i) {
+                const int jmax = with_self ? i : i - 1;
+                for (int j = 0; j <= jmax; ++j)
+                    visit(i, i, j, Side::Both);
+            }
+            return;
+        }
         const int a0 = static_cast<int>((static_cast<long long>(n) * tid) / nth);
         const int a1 = static_cast<int>((static_cast<long long>(n) * (tid + 1)) / nth);
         for (int a = a0; a < a1; ++a) {
             const int jmax = with_self ? a : a - 1;
             for (int j = 0; j <= jmax; ++j)
-                visit(a, a, j, true);
+                visit(a, a, j, Side::Row);
             for (int i = a + 1; i < n; ++i)
-                visit(a, i, a, false);
+                visit(a, i, a, Side::Column);
         }
     });
 }

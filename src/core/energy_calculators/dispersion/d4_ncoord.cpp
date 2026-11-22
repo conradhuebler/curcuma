@@ -150,7 +150,7 @@ std::vector<double> computeD4CovalentCNPeriodic(const std::vector<int>& atoms,
     for (int i = 0; i < N; ++i)
         for (int k = 0; k < 3; ++k) xyz[3 * i + k] = geom_bohr(i, k);
 
-    PBCGather::gatherSymmetricPairs(run, N, true, [&](int a, int i, int j, bool first) {
+    PBCGather::gatherSymmetricPairs(run, N, true, [&](int, int i, int j, PBCGather::Side side) {
         const int zi = atoms[i];
         if (zi < 1 || zi > MAX_Z) return;
         const int zj = atoms[j];
@@ -165,8 +165,8 @@ std::vector<double> computeD4CovalentCNPeriodic(const std::vector<int>& atoms,
                 // the serial statements verbatim, the end that is not atom a writes to a scratch value: the same
                 // expressions give the compiler the same FMA choices (src/tools/pbc_gather.h)
                 double scr = 0.0;
-                double* ci = first ? &cn[a] : &scr;
-                double* cj = first ? &scr : &cn[a];
+                double* ci = side != PBCGather::Side::Column ? &cn[i] : &scr;
+                double* cj = side != PBCGather::Side::Row ? &cn[j] : &scr;
                 *ci += countf;
                 if (!same) *cj += countf;
             });
@@ -194,7 +194,7 @@ void addD4CovalentCNGradientPeriodic(const std::vector<int>& atoms,
 
     // self images (j == i, T != 0): both ends move together, Cartesian derivative 0, but |T| scales with the
     // cell, so they enter the virial (P4); visited only when a virial is requested
-    PBCGather::gatherSymmetricPairs(run, N, virial != nullptr, [&](int a, int i, int j, bool first) {
+    PBCGather::gatherSymmetricPairs(run, N, virial != nullptr, [&](int, int i, int j, PBCGather::Side side) {
         const int zi = atoms[i];
         if (zi < 1 || zi > MAX_Z) return;
         const int zj = atoms[j];
@@ -210,13 +210,13 @@ void addD4CovalentCNGradientPeriodic(const std::vector<int>& atoms,
                 const double factor = (same ? dEdcn(i) : dEdcn(i) + dEdcn(j)) * dcountf / r;
                 if (!same) {   // serial statements verbatim, the other end to a scratch row (same FMA choices)
                     double scratch[3] = { 0.0, 0.0, 0.0 };
-                    double* gi = first ? &grad_out(a, 0) : scratch;
-                    double* gj = first ? scratch : &grad_out(a, 0);
+                    double* gi = side != PBCGather::Side::Column ? &grad_out(i, 0) : scratch;
+                    double* gj = side != PBCGather::Side::Row ? &grad_out(j, 0) : scratch;
                     gi[0] += factor * dx; gj[0] -= factor * dx;
                     gi[1] += factor * dy; gj[1] -= factor * dy;
                     gi[2] += factor * dz; gj[2] -= factor * dz;
                 }
-                if (virial && first) vrec.push(a, { factor, dx, dy, dz });
+                if (virial && side != PBCGather::Side::Column) vrec.push(i, { factor, dx, dy, dz });
             });
     });
     if (virial)

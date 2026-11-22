@@ -256,7 +256,8 @@ void XTB::buildOrthonormalizer()
     // CPU stage 2 (Claude Generated, Nov 2026): with a cell the factorisation runs on threaded BLAS (the gated
     // intra-thread budget); without a cell no scope is set (unchanged).
     std::optional<MklThreadScope> llt_blas;
-    if (m_pbc) llt_blas.emplace(effectiveIntraThreads(m_atomcount));
+    static const bool serial_blas = std::getenv("CURCUMA_PBC_SERIAL_BLAS") != nullptr;   // diagnostic, see xtb_periodic
+    if (m_pbc) llt_blas.emplace(serial_blas ? 1 : effectiveIntraThreads(m_atomcount));
     Eigen::LLT<Matrix> llt(m_S);
     if (llt.info() != Eigen::Success) {
         // S not positive definite (near-linear-dependent basis): fall back to the
