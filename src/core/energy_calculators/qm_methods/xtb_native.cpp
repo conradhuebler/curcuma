@@ -163,12 +163,14 @@ bool XTB::InitialiseMolecule()
     else
         CitationRegistry::cite("d4", meth);        // D4 dispersion (GFN2 only)
     // COSMO and CPCM may also be requested by an explicit dielectric constant alone (-xtb.solvent_epsilon). Claude Generated (Nov 2026).
-    const bool cosmo_eps_only = ((m_solvent_model == 4 || m_solvent_model == 1) && m_solvent_epsilon > 0.0);
+    // CPCM-X (model 5): the SCF runs in xtb's conductor COSMO set whatever the solvent name. Claude Generated (Nov 2026).
+    const bool cosmo_eps_only = ((m_solvent_model == 4 || m_solvent_model == 1) && m_solvent_epsilon > 0.0)
+        || m_solvent_model == 5;
     if (!curcuma::solvation::isGasPhase(m_solvent) || cosmo_eps_only) {
         const int model = (m_solvent_model > 0) ? m_solvent_model : 3;
         if (model == 3) CitationRegistry::cite("alpb", meth);
         else if (model == 2) { CitationRegistry::cite("alpb", meth); CitationRegistry::cite("still_gb", meth); }
-        else if (model == 4 || model == 1) CitationRegistry::cite("ddcosmo", meth);   // CPCM uses the same ddCOSMO solver
+        else if (model == 4 || model == 1 || model == 5) CitationRegistry::cite("ddcosmo", meth);   // CPCM and CPCM-X use the same ddCOSMO solver
     }
     CitationRegistry::cite("diis", meth);         // SCF convergence (DIIS/Broyden)
 
@@ -201,7 +203,18 @@ bool XTB::InitialiseMolecule()
     if (!curcuma::solvation::isGasPhase(m_solvent) || cosmo_eps_only) {
         const int model = (m_solvent_model > 0) ? m_solvent_model : 3;  // default ALPB
         const std::string meth = (m_method == MethodType::GFN1) ? "gfn1" : "gfn2";
-        if (model == 4 || model == 1) {
+        if (model == 5) {
+            // CPCM-X (xtb 6.7.1 --cpcmx, Claude Generated Nov 2026): xtb runs the SCF with --cosmo inf (conductor set
+            // gfn_cosmo_inf, default grid/lmax/conv/eta) and hands the converged segments to the CPCM-X post-SCF step,
+            // which NativeXtbMethod drives (cpcmx.h). The solvent name is used only there.
+            auto solv = std::make_unique<DdCosmoSolvation>();
+            solv->setModel(DdCosmoSolvation::Model::XtbCosmoInf);
+            if (!solv->init(m_atoms, "inf", meth)) {
+                CurcumaLogger::error("Native solvation: conductor COSMO setup for CPCM-X failed (" + meth + ")");
+                return false;
+            }
+            m_solvation = std::move(solv);
+        } else if (model == 4 || model == 1) {
             // Native ddCOSMO (port of xtb 6.7.1 --cosmo, Claude Generated Nov 2026). xtb adds no reference-state
             // shift to the COSMO energy, so a state other than gsolv cannot be honoured and is an error.
             // model 1 = CPCM of tblite 0.4.0 on the same solver (other keps, grid, eta, epsilon table, no surface
@@ -255,7 +268,7 @@ bool XTB::InitialiseMolecule()
                 return false;
             }
         } else {
-            CurcumaLogger::error("Native solvation: only solvent_model alpb, gbsa, cosmo and cpcm "
+            CurcumaLogger::error("Native solvation: only solvent_model alpb, gbsa, cosmo, cpcm and cpcmx "
                                  "are implemented for native GFN");
             return false;
         }

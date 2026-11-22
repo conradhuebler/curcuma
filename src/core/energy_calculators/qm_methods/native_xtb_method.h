@@ -24,6 +24,8 @@
 #include <memory>
 #include <string>
 
+#include "src/core/solvation/cpcmx.h"
+
 // Parameters of the NATIVE GFN1/GFN2 solver (Claude Generated, moved here Sep 2026
 // from xtbinterface.h, which wraps the EXTERNAL xtb/tblite binaries and has nothing
 // to do with this code path). The registry module stays "xtb" (-xtb.<name>); the
@@ -34,7 +36,11 @@ BEGIN_PARAMETER_DEFINITION(xtb)
     // into the native GFN1/GFN2 SCF. Use the dotted form (-xtb.solvent water) because
     // the flat -solvent flag is ambiguous (also registered by tblite/ulysses/gfnff_external).
     PARAM(solvent, String, "none", "Implicit solvent for native GFN1/GFN2 (e.g. 'water', 'dmso', 'chloroform'); 'none' runs in the gas phase. Names are case-insensitive and accept the xtb aliases (dcm, dichloromethane, diethylether, thf, h2o, ...); an unknown solvent is an error. With solvent_model cosmo or cpcm a plain number is the dielectric constant (as xtb --cosmo 78.4, tblite --cpcm 78.4); cpcm takes epsilon of a name from tblite's solvent table (water 78.36). Use the dotted form -xtb.solvent, the flat -solvent is shared with other providers.", "Solvation", {})
-    PARAM(solvent_model, String, "none", "Native solvation model: 'alpb', 'gbsa', 'cosmo' (ddCOSMO as xtb --cosmo) or 'cpcm' (as tblite --cpcm: same ddCOSMO solver, keps / (1 + 0.571412), 74 points, eta 2, no surface term); numeric codes 0-3 accepted for none/cpcm/gbsa/alpb; 'none' with a solvent set means ALPB.", "Solvation", {})
+    PARAM(solvent_model, String, "none", "Native solvation model: 'alpb', 'gbsa', 'cosmo' (ddCOSMO as xtb --cosmo), 'cpcm' (as tblite --cpcm: same ddCOSMO solver, keps / (1 + 0.571412), 74 points, eta 2, no surface term) or 'cpcmx' (CPCM-X as xtb --cpcmx: conductor COSMO SCF plus the post-SCF COSMO-RS/SMD step; single points only, no gradient; needs the CPCM-X solvent database, see cpcmx_db); numeric codes 0-3 accepted for none/cpcm/gbsa/alpb; 'none' with a solvent set means ALPB.", "Solvation", {})
+    // CPCM-X (Claude Generated, Nov 2026): port of CPCM-X 1.1.0 as called by xtb 6.7.1 --cpcmx (src/core/solvation/cpcmx.h).
+    PARAM(cpcmx_db, String, "", "Directory with the CPCM-X solvent database (the files DB/xtb/<solvent>.cosmo of github.com/grimme-lab/CPCM-X, LGPL-3.0; not shipped with curcuma). Empty: $CURCUMA_CPCMX_DB, then <executable dir>/cpcmx_db, then <executable dir>/../share/curcuma/cpcmx_db.", "Solvation", {})
+    PARAM(cpcmx_smd_oxygen_radius, String, "atom8", "CPCM-X SMD term for solvents with Abraham acidity alpha < 0.43 (not water): which radius gets the SMD oxygen enlargement 1.8 (0.43 - alpha), added in Bohr units as in the Fortran sources. 'atom8' (default) reproduces xtb 6.7.1, whose CPCM-X enlarges the radius of the 8th atom whatever its element (nothing below 8 atoms, so the result depends on the atom order); 'oxygen' every oxygen atom, as CPCM-X 1.1.0; 'none' no enlargement.", "Solvation", {})
+    PARAM(cpcmx_reference_rounding, Bool, true, "CPCM-X: round the solute segment data to the decimals of xtb's xtb.cosmo file (positions, charges, areas, potentials f14.9, coordinates f19.14, energy f21.10) before the post-SCF step, as xtb --cpcmx does by passing the data through that file. false uses full precision (measured effect <= 2e-10 Eh on four molecules, Nov 2026).", "Solvation", {})
     PARAM(solvent_state, String, "gsolv", "Reference state of the solvation free energy, as xtb --alpb water [state]: 'gsolv' (default), 'bar1M' (1 bar gas to 1 mol/L solution, +1.9 kcal/mol) or 'reference' (1 bar gas to the pure solvent). Case-insensitive; anything else is an error. COSMO and CPCM allow gsolv only (xtb adds no state shift to COSMO, tblite rejects one for CPCM).", "Solvation", {})
     PARAM(solvent_epsilon, Double, -1.0, "Dielectric constant for solvent_model cosmo or cpcm; -1 takes it from the solvent name. With no solvent name it alone switches COSMO/CPCM on (COSMO: surface tensions of xtb's default COSMO set). No effect on ALPB and GBSA, which take it from the solvent parameters.", "Solvation", {})
     // Native ddCOSMO discretisation (Claude Generated, Nov 2026); defaults are those of xtb 6.7.1 (cosmo.f90).
@@ -156,7 +162,8 @@ public:
     Vector getCharges() const override;
     Vector getBondOrders() const override { return Vector{}; }     // not computed
     Position getDipole() const override { return Position{0.0, 0.0, 0.0}; }  // TODO
-    bool hasGradient() const override { return true; }
+    /// CPCM-X (solvent_model cpcmx) has no analytic gradient, as in xtb; every other setting has one.
+    bool hasGradient() const override { return !m_cpcmx; }
 
     std::string getMethodName() const override;
     bool isThreadSafe() const override { return true; }
@@ -167,6 +174,7 @@ public:
     {
         m_thread_count = std::max(1, threads);
         if (m_xtb) m_xtb->setIntraThreads(m_thread_count);
+        if (m_xtb_conductor) m_xtb_conductor->setIntraThreads(m_thread_count);
         if (m_c1_driver) m_c1_driver->setIntraThreads(m_thread_count);
     }
 
@@ -207,6 +215,19 @@ private:
     // calculate/gradient/charge calls delegate here instead of m_xtb. Built in
     // setMolecule once the mode is known. Claude Generated.
     std::unique_ptr<curcuma::xtb::FragmentScfDriver> m_c1_driver;
+    // CPCM-X (solvent_model cpcmx, Claude Generated Nov 2026): m_xtb runs the gas-phase SCF (E_gas, and all reported
+    // properties, as xtb prints the gas-phase results last), m_xtb_conductor the SCF in xtb's conductor COSMO set whose
+    // segments feed the post-SCF step. The energy is E_gas + dG_solv(CPCM-X).
+    bool m_cpcmx = false;
+    std::unique_ptr<curcuma::xtb::XTB> m_xtb_conductor;
+    std::string m_cpcmx_solvent;                     ///< normalised CPCM-X solvent name
+    std::unique_ptr<curcuma::solvation::cpcmx::Molecule> m_cpcmx_solvent_data;
+    curcuma::solvation::cpcmx::Result m_cpcmx_result;
+    double m_cpcmx_conductor_energy = 0.0, m_cpcmx_gas_energy = 0.0;
+    double calculateCpcmx();
+    std::string scopedString(const char* key, const std::string& fallback) const;
+    bool scopedBool(const char* key, bool fallback) const;
+
     Mol m_molecule;
     bool m_calculation_done = false;
     double m_last_energy = 0.0;

@@ -18,6 +18,8 @@ Curcuma supports implicit solvation models for quantum chemistry calculations:
   self-consistent **ddCOSMO** (Nov 2026), a port of xtb 6.7.1 `--cosmo` (section "Native GFN1/GFN2 COSMO").
 - **Native GFN1/GFN2 CPCM**: 🤖 AI-generated, ⚙️ machine-tested only, human production testing pending: tblite 0.4.0 `--cpcm`
   on the same ddCOSMO solver (Nov 2026, section "Native GFN1/GFN2 CPCM").
+- **Native GFN1/GFN2 CPCM-X**: 🤖 AI-generated, ⚙️ machine-tested only, human production testing pending: xtb 6.7.1 `--cpcmx`
+  (conductor COSMO SCF plus the post-SCF COSMO-RS/SMD step of CPCM-X), single points only (Nov 2026, section "Native GFN1/GFN2 CPCM-X").
 - **Native GFN-FF**: ⚠️ self-consistent **ALPB** (June 2026, WP5) — the Born reaction
   field couples into the EEQ charge solve (`A_eeq += B`), so the EEQ charges polarize in
   the solvent. Matches **xtb 6.7.1** (`--gfnff --alpb`) to ≤1e-8 Eh (7 mol × 4 solvents,
@@ -44,7 +46,7 @@ curcuma -opt mol.xyz -method gfn1 -xtb.solvent dmso                          # d
 ```
 
 - `-xtb.solvent <name>`: water, dmso, acetone, chloroform, methanol, … (tblite set)
-- `-xtb.solvent_model`: `alpb` (default when a solvent is given), `gbsa`, `cosmo` (ddCOSMO, below), `cpcm` (tblite's CPCM, below), `none`.
+- `-xtb.solvent_model`: `alpb` (default when a solvent is given), `gbsa`, `cosmo` (ddCOSMO, below), `cpcm` (tblite's CPCM, below), `cpcmx` (CPCM-X, below, `-sp` only), `none`.
   Legacy numeric codes (3=alpb, 2=gbsa, 1=cpcm, 0=none) are still accepted; `cosmo` has no numeric code.
 - ROCm (`-gpu rocm`): the reaction field v_at += B q_at enters the device SCF potential and the resident loop (`-xtb.rocm_device_solvation`, default true; energy and gradient on the host); see [GPU_TUNING.md](GPU_TUNING.md).
 
@@ -101,8 +103,7 @@ CODATA-2018 kB. Against xtb 6.7.1 the shifts agree to 3e-9 Eh (`ctest -R cli_sqm
 
 ### Not implemented natively
 
-CPCM-X (xtb `--cpcmx`),
-the ionic strength of xtb's GBSA, a choice of the Born kernel (ALPB always P16, GBSA always Still), the Lebedev grid size of ALPB/GBSA (230)
+The ionic strength of xtb's GBSA, a choice of the Born kernel (ALPB always P16, GBSA always Still), the Lebedev grid size of ALPB/GBSA (230)
 and, for ALPB/GBSA, a solvent given only by its dielectric constant (COSMO and CPCM accept one). GFN-FF with `solvent_model gbsa` runs ALPB with a
 warning, as pprcht/gfnff does; xtb 6.7.1 runs a Still-kernel GBSA with the GFN2 parameters there. GFN-FF has no COSMO and no CPCM.
 
@@ -127,7 +128,8 @@ curcuma -opt mol.xyz -method gfn2 -xtb.solvent_model cosmo -xtb.solvent_epsilon 
 - **Parameters**: a solvent name takes epsilon and the surface tensions of its ALPB set of the method (GFN1 or GFN2), exactly as xtb does
   (xtb `model.f90` with cosmo); all 25 ALPB solvents. A number, or `-xtb.solvent_epsilon` without a name, takes the surface tensions of xtb's
   default COSMO set (`param_cosmo.fh`, identical to the GFN1/ALPB/water set, checked). `-xtb.solvent_epsilon` with a name keeps the name's
-  surface tensions and replaces epsilon. xtb's `--cosmo inf` (conductor, own parameter set) is not ported.
+  surface tensions and replaces epsilon. xtb's `--cosmo inf` (conductor, own parameter set `param_cosmo_inf.fh`) exists only as the
+  COSMO step of CPCM-X (`DdCosmoSolvation::Model::XtbCosmoInf`), not as a `cosmo` solvent.
 - **SCF coupling**: per SCF iteration one direct (L X = g) and one adjoint (L* S = Psi) solve, restarted from the previous solution; the
   potential is v = keps sqrt(4 pi) X_00 - J^T zeta. Gradient: surface term plus the ddCOSMO force kernels (fdoka/fdokb/fdoga) plus the two
   field terms; the adjoint is re-solved to 1e-3 of the threshold first, as in xtb.
@@ -147,7 +149,8 @@ phase (8.6e-4 Eh/A), where xtb's own finite difference (-3.62442e-3) agrees with
 analytic one (-2.76e-3), so this is an xtb gradient issue outside COSMO (not investigated further). Test: `ctest -R cli_sqm_19`.
 **Not tested**: other solvents than water/acetone and epsilon 37.5, metals and d elements (radius stub 2.223 A as xtb), large systems,
 molecules with grid points on a sphere pole in the force kernel, geometry optimisation and MD stability, GPU, periodic systems (not
-supported). Not implemented: CPCM-X, `--cosmo inf`, ionic strength, the `.cosmo` file output of xtb (`--tmcosmo`).
+supported). Not implemented: `--cosmo inf` as a `cosmo` solvent (only inside CPCM-X), ionic strength, the `.cosmo` file output of xtb
+(`--tmcosmo`).
 
 ## Native GFN1/GFN2 CPCM (tblite model)
 
@@ -196,6 +199,59 @@ ROCm and Vulkan, periodic systems. CUDA keeps the host-driven SCF loop as for CO
 equals the CPU energy within 3e-14 Eh and the gradient within 3.5e-11 Eh/A. Not implemented: tblite's `cpcm_input` options `nang`, `rscale`, `eta`, `lmax` (tblite's CLI exposes
 none of them either).
 
+## Native GFN1/GFN2 CPCM-X
+
+🤖 AI-generated (Nov 2026), ⚙️ machine-tested only; human production testing pending. Port of CPCM-X 1.1.0 (github.com/grimme-lab/CPCM-X,
+LGPL-3.0; Stahn, Ehlert, Grimme, J. Phys. Chem. A 127, 7036 (2023)) and of the SMD part of numsa 0.2.0, as xtb 6.7.1 calls them
+(`xtb/src/solv/cpx.F90`, `prog/main.F90`). Code: `src/core/solvation/cpcmx.h`, `cpcmx_data.cpp` (parameters, tables, database, solute input),
+`cpcmx_crs.cpp` (charge averaging, rings, restoring free energy, Broyden solver, state correction), `cpcmx_smd.cpp` (SMD CDS, numsa surface);
+driver `NativeXtbMethod::calculateCpcmx()`.
+
+```bash
+curcuma -sp mol.xyz -method gfn2 -xtb.solvent water -xtb.solvent_model cpcmx -xtb.cpcmx_db ~/CPCM-X/DB/xtb   # = xtb --gfn 2 --cpcmx water --sp
+CURCUMA_CPCMX_DB=~/CPCM-X/DB/xtb curcuma -sp mol.xyz -method gfn2 -solvent hexane -solvent_model cpcmx
+```
+
+- **Steps (as xtb)**: (1) SCF in xtb's conductor set `gfn_cosmo_inf` (epsilon = inf, element radius scales, probe 2.949 A, its surface
+  tensions), E_COSMO and the segments (position, charge, area, potential); (2) gas-phase SCF, E_gas (also all reported properties);
+  (3) CPCM-X: sigma averaging (r_av, 2 r_av, orthogonalised), ring atoms, ideal-state energy E_COSMO - E_gas - eta RT, averaging correction,
+  self-consistent solvent segment potentials (Broyden, 500 cycles, 1e-4 kcal/mol), solute chemical potential, state correction
+  -RT ln(rho V_m / M), SMD CDS (probe 0.4); E = E_gas + dG_solv at 298.15 K. Verbosity 2 prints the contributions as xtb -v does;
+  `getEnergyDecomposition()` has them as `cpcmx_dG_*`.
+- **Solvent database**: read at run time from `-xtb.cpcmx_db <dir>`, else `$CURCUMA_CPCMX_DB`, else `<exe dir>/cpcmx_db`,
+  `<exe dir>/../share/curcuma/cpcmx_db`; the files are `DB/xtb/<solvent>.cosmo` of CPCM-X (88 solvents, 8.9 MB, not shipped; the ctest
+  carries water, hexane, acetonitrile). Their numbers are read in single precision, as xtb compiles them (default-real literals of the
+  `.fh` include files; checked: `.fh` = `.cosmo` for all 88). Names: CPCM-X `solvent_name` (case-insensitive, e.g. `dmso`, `thf`, `dcm`);
+  `methanol`, `xylene`, `benzonitrile`, `heptanol` have a name but no database file; an unknown name or a missing file is an error.
+  xtb 6.7.1 rejects `dmso` (its CPCM-X is older); `dimethylsulfoxide` works in both.
+- **Reproduced Fortran details**: single-precision constants (BtoA 0.529177, jtokcal, 1.15, 0.3, 0.43, 1.8); both covalent radii of a
+  bond taken from the first atom (`det_bonds`); the Gauss-Seidel order of `iterate_solvent`; the SMD coordinates of the first n atoms with
+  n = number of atoms owning a segment; xtb's file round trip of the solute (`-xtb.cpcmx_reference_rounding true`: positions, charges,
+  areas, potentials to 9 decimals, energy to 10; false changes dG by <= 2e-10 Eh on four molecules).
+- **SMD oxygen radius** (`-xtb.cpcmx_smd_oxygen_radius`, solvents with Abraham acidity < 0.43, i.e. not water): the CPCM-X in xtb 6.7.1
+  enlarges `rad(8)`, the radius of the **8th atom whatever its element** (`atom8`, default, nothing below 8 atoms, so the result depends on
+  the atom order); CPCM-X 1.1.0 enlarges every oxygen (`oxygen`); `none` disables it. Both add 1.8 (0.43 - alpha) (an Angstrom amount in
+  the SMD paper) to a radius in Bohr. Found by comparison: the Fortran CPCM-X 1.1.0 with this one line changed to `rad(8)` reproduces
+  xtb 6.7.1's CDS term to 6e-11 Eh (caffeine, glucoside, trisaccharide in hexane and acetonitrile), unchanged it does not (up to 2e-2 Eh); water in hexane differs between the rules by 4.1e-3 Eh, the trisaccharide in hexane by 2.1e-2 Eh.
+- **No gradient** (xtb has none either): `hasGradient()` is false, `-sp -dump_gradient` is an error, every other command (`-opt`, `-md`,
+  `-hessian`, ...) is rejected at start. CPU only (`-gpu` is an error), no `-large_system_mode`, `-solvent_state` gsolv only (CPCM-X applies
+  its own state correction). GFN1 warns as xtb does (CPCM-X is parametrised for GFN2). Temperature, probe and solver settings are fixed
+  at xtb's values (298.15 K, 0.4, 500, 1e-4).
+
+**Validation (Nov 22, 2026, xtb 6.7.1 `/opt/bin/xtb mol.xyz --gfn N --cpcmx <solvent> --sp --acc 0.01`, curcuma `-scf_threshold 1e-10`):**
+56 single points, {water, methanol, caffeine, OH-, NH4+, methyl alpha-D-glucopyranoside, trisaccharide C18H32O16 (66 atoms)} x {gfn1, gfn2}
+x {water, hexane, acetonitrile, dmso}. Total energy: max |E_curcuma - E_xtb| = 4.8e-8 Eh except trisaccharide/gfn2 (4.8e-6 Eh, its gas-phase
+D4 ATM difference; with `-xtb.d4_atm_cutoff 40.0` 6.1e-8). The differences equal the gas-phase differences of the native methods (max
+6.1e-8). Contributions against CPCM-X 1.1.0 run on xtb's own `xtb.cosmo` (full precision, linked as a Fortran harness; it reproduces xtb's
+total to <= 7e-10 Eh for water solvent): dG_IS 1.5e-8 (it contains E_COSMO - E_gas), dG_av 2.3e-9, dG_res 4.8e-9, dG_ss 1.3e-10, dG_CDS
+4.6e-9 (`atom8` vs xtb) / 3.2e-10 (`oxygen` vs CPCM-X 1.1.0). Segments of water/gfn2 against xtb.cosmo: same 224 segments and atoms,
+charges 1.0e-9, areas exact, positions 3.2e-7 Bohr and potentials 2e-8 (curcuma's CODATA-2018 Bohr vs xtb's 0.52917726). Run time
+0.3-0.8 s for 24-66 atoms. Test: `ctest -R cli_sqm_21`.
+**Not tested**: solvents other than water, hexane, acetonitrile, dmso; elements other than H, C, N, O; open-shell molecules; molecules
+with buried atoms (no segment); temperatures other than 298.15 K. **Not implemented**: CPCM-X's own programs (SAC models, sigma
+profiles, isodensity cavities, `.prop` and `smd_*` files in the working directory, which numsa reads when present), other parameter
+sets than `xtb` (gtb, isodens, orca, tm), a gradient.
+
 ## Usage
 
 ### Basic Syntax
@@ -243,10 +299,10 @@ curcuma -sp molecule.xyz -method gfn2:tblite \\
 |--------|----------|-----------|------------------|
 | **GFN2** | TBLite | ✅ Yes | CPCM, GB, ALPB |
 | **GFN2** | Ulysses | ✅ Yes | GBSA |
-| **GFN2** | Native | Yes (AI-generated, machine-tested) | ALPB, GBSA, COSMO (ddCOSMO), CPCM (tblite) |
+| **GFN2** | Native | Yes (AI-generated, machine-tested) | ALPB, GBSA, COSMO (ddCOSMO), CPCM (tblite), CPCM-X (`-sp`) |
 | **GFN1** | TBLite | ✅ Yes | CPCM, GB, ALPB |
 | **GFN1** | Ulysses | ✅ Yes | GBSA |
-| **GFN1** | Native | Yes (AI-generated, machine-tested) | ALPB, GBSA, COSMO (ddCOSMO), CPCM (tblite) |
+| **GFN1** | Native | Yes (AI-generated, machine-tested) | ALPB, GBSA, COSMO (ddCOSMO), CPCM (tblite), CPCM-X (`-sp`) |
 | **PM6** | Ulysses | ✅ Yes | GBSA |
 | **PM6** | Native | ❌ Not yet | Planned |
 | **AM1** | Ulysses | ✅ Yes | GBSA |

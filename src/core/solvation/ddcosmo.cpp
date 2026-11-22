@@ -16,6 +16,9 @@
  * Claude Generated (Nov 2026): Model::TbliteCpcm, the CPCM of tblite 0.4.0 (src/tblite/solvation/cpcm.f90 on the
  * ddCOSMO core cpcm_dd.f90, which is xtb's core.f90 + solver.f90 with gradient instead of force sign convention):
  * only init() differs (epsilon table, keps, grid, eta, no surface term).
+ * Claude Generated (Nov 2026): Model::XtbCosmoInf, xtb's conductor set gfn_cosmo_inf (include/param_cosmo_inf.fh, xtb
+ * --cosmo inf), the COSMO step of xtb --cpcmx; cosmoSegments() returns the segment data xtb writes to xtb.cosmo
+ * (cosmo.f90 writeCosmoFile) for the CPCM-X post-SCF step (cpcmx.h).
  * AI-generated, machine-tested only; human production testing pending.
  */
 
@@ -64,6 +67,39 @@ constexpr double kCpcmEta = 2.0;
 constexpr int kCosmoGrid = 230;
 constexpr double kCosmoEta = 0.2;
 
+// xtb conductor set gfn_cosmo_inf (include/param_cosmo_inf.fh), used by xtb --cosmo inf and by the COSMO step of
+// --cpcmx: epsilon = +inf (keps = 1/2), probe radius 2.94903643 Angstrom, element radius scales sx (vdwRad =
+// vanDerWaalsRadCosmo * sx, model.f90 paramToModel), surface tensions gamscale. Elements not listed: gamscale 0, sx 1.
+constexpr double kCosmoInfProbeAA = 2.94903643;
+double cosmoInfGamscale(int z)
+{
+    switch (z) {
+    case 1: return -0.35147423;
+    case 6: return -0.26053405;
+    case 7: return -0.85100961;
+    case 8: return -0.38455056;
+    case 9: return 0.02328270;
+    case 15: return -0.03236934;
+    case 16: return -0.25944025;
+    case 17: return 0.01711509;
+    default: return 0.0;
+    }
+}
+double cosmoInfRadiusScale(int z)
+{
+    switch (z) {
+    case 1: return 0.93069759;
+    case 6: return 1.11953986;
+    case 7: return 1.21082767;
+    case 8: return 1.06487129;
+    case 9: return 0.95536183;
+    case 15: return 1.00338080;
+    case 16: return 1.17965821;
+    case 17: return 1.16340197;
+    default: return 1.0;
+    }
+}
+
 /// COSMO-optimised van-der-Waals radii in Angstrom (xtb/src/param/vdwradcosmo.f90), Z = 1..94.
 constexpr double kStub = 2.223;
 constexpr double kCosmoRadAA[94] = {
@@ -111,6 +147,8 @@ void DdCosmoSolvation::setModel(Model model)
 bool DdCosmoSolvation::solventAvailable(const std::string& method, const std::string& solvent, Model model)
 {
     double eps = 0.0;
+    if (model == Model::XtbCosmoInf)
+        return true;   // the conductor needs no solvent parameters
     if (parseNumber(solvent, eps))
         return eps > 0.0;
     if (model == Model::TbliteCpcm)
@@ -132,6 +170,7 @@ bool DdCosmoSolvation::init(const std::vector<int>& atomic_numbers, const std::s
     // (probe 1.3 A, radius scale 1, COSMO radii, no H-bond term, no shift). A number is the dielectric constant
     // and keeps the gamscale of gfn_cosmo, which equals the gfn1/ALPB/water set (checked against param_cosmo.fh).
     const bool cpcm = (m_model == Model::TbliteCpcm);
+    const bool conductor = (m_model == Model::XtbCosmoInf);
     const std::string key = curcuma::solvation::normalizeSolventName(solvent);
     const auto* named = curcuma::solvation::getTbliteSolvationParam(method, true, key);
     const auto* deflt = curcuma::solvation::getTbliteSolvationParam("gfn1", true, "water");
@@ -139,7 +178,11 @@ bool DdCosmoSolvation::init(const std::vector<int>& atomic_numbers, const std::s
     const bool is_number = parseNumber(solvent, eps_number);
     const double* gamscale = nullptr;
     const double cpcm_eps = cpcm ? curcuma::solvation::tbliteSolventEpsilon(solvent) : -1.0;
-    if (cpcm) {
+    if (conductor) {
+        // xtb model.f90 with solvent 'inf': param = gfn_cosmo_inf, epsv = +inf; the solvent name is not used
+        m_eps = std::numeric_limits<double>::infinity();
+        m_param_source = "xtb conductor set gfn_cosmo_inf (--cosmo inf)";
+    } else if (cpcm) {
         // tblite app/cli.f90 --cpcm: a solvent name from get_solvent_data, else the argument as a number
         if (m_eps_override > 0.0) {
             m_eps = m_eps_override;
@@ -175,7 +218,7 @@ bool DdCosmoSolvation::init(const std::vector<int>& atomic_numbers, const std::s
         CurcumaLogger::error("COSMO: dielectric constant must be positive");
         return false;
     }
-    m_keps = 0.5 * (1.0 - 1.0 / m_eps);   // cosmo.f90 addShift
+    m_keps = 0.5 * (1.0 - 1.0 / m_eps);   // cosmo.f90 addShift (1/inf = 0: keps = 1/2 for the conductor)
     if (cpcm)
         m_keps /= (1.0 + kAlphaAlpb);     // tblite cpcm.f90 new_cpcm: -0.5 (1/eps - 1) / (1 + alpha_alpb)
 
@@ -190,14 +233,15 @@ bool DdCosmoSolvation::init(const std::vector<int>& atomic_numbers, const std::s
     m_wrp.resize(m_nat);
     m_trj2.resize(2, m_nat);
     m_gamsasa.resize(m_nat);
-    const double probe = kProbeRadAA * aatoau;
+    const double probe = (conductor ? kCosmoInfProbeAA : kProbeRadAA) * aatoau;
     for (int i = 0; i < m_nat; ++i) {
         const int z = atomic_numbers[i];
         if (z < 1 || z > 94) {
             CurcumaLogger::error(fmt::format("COSMO: no radius for element Z = {}", z));
             return false;
         }
-        const double vdw = kCosmoRadAA[z - 1] * aatoau;
+        // model.f90 paramToModel: vdwRad = vanDerWaalsRadCosmo * sx (sx = 1 in gfn_cosmo, element scales in gfn_cosmo_inf)
+        const double vdw = conductor ? (kCosmoRadAA[z - 1] * aatoau) * cosmoInfRadiusScale(z) : kCosmoRadAA[z - 1] * aatoau;
         m_rvdw(i) = kRadScale * vdw;
         m_vdwsa(i) = vdw + probe;
         m_trj2(0, i) = (m_vdwsa(i) - kW) * (m_vdwsa(i) - kW);
@@ -206,7 +250,8 @@ bool DdCosmoSolvation::init(const std::vector<int>& atomic_numbers, const std::s
         m_wrp(i) = (0.25 / kW + 3.0 * kAh3 * (0.2 * r * r - 0.5 * r * m_vdwsa(i) + m_vdwsa(i) * m_vdwsa(i) / 3.0)) * r * r * r;
         r = m_vdwsa(i) - kW;
         m_wrp(i) -= (0.25 / kW + 3.0 * kAh3 * (0.2 * r * r - 0.5 * r * m_vdwsa(i) + m_vdwsa(i) * m_vdwsa(i) / 3.0)) * r * r * r;
-        m_gamsasa(i) = cpcm ? 0.0 : gamscale[z - 1] * fourpi * kSurfaceTension;   // CPCM: no surface term
+        const double gam = conductor ? cosmoInfGamscale(z) : (cpcm ? 0.0 : gamscale[z - 1]);
+        m_gamsasa(i) = cpcm ? 0.0 : gam * fourpi * kSurfaceTension;   // CPCM: no surface term
     }
     m_srcut = 2.0 * (kW + m_vdwsa.maxCoeff()) + kROffsetAA * aatoau;
 
@@ -281,8 +326,9 @@ bool DdCosmoSolvation::init(const std::vector<int>& atomic_numbers, const std::s
 
 void DdCosmoSolvation::printInfo() const
 {
-    CurcumaLogger::info(m_model == Model::TbliteCpcm ? "Native CPCM (ddCOSMO solver, port of tblite 0.4.0)"
-                                                     : "Native COSMO (ddCOSMO, port of xtb 6.7.1)");
+    CurcumaLogger::info(m_model == Model::TbliteCpcm   ? "Native CPCM (ddCOSMO solver, port of tblite 0.4.0)"
+                        : m_model == Model::XtbCosmoInf ? "Native COSMO conductor (ddCOSMO, xtb 6.7.1 --cosmo inf, CPCM-X step)"
+                                                        : "Native COSMO (ddCOSMO, port of xtb 6.7.1)");
     CurcumaLogger::param("solvent", m_solvent);
     CurcumaLogger::param("parameters", m_param_source);
     CurcumaLogger::param("dielectric constant", fmt::format("{:.4f}", m_eps));
@@ -928,6 +974,39 @@ void DdCosmoSolvation::getZeta(Eigen::VectorXd& zeta) const
                 zeta(ii) = m_keps * m_w(its) * m_ui(its, iat) * m_basis.col(its).dot(m_s.col(iat));
                 ++ii;
             }
+}
+
+/// Segment data as xtb cosmo.f90 writeCosmoFile: zeta(ii) = w(ig) ui(ig,iat) <basis(:,ig), s(:,iat)> (no keps),
+/// area(ii) = w(ig) autoaa^2 rvdw(iat)^2, potential = getPhi(q). The adjoint is re-solved first with the tighter
+/// threshold of addGradient (conv * 1e-3); Psi is that of q_at. Claude Generated (Nov 2026).
+bool DdCosmoSolvation::segments(const Vector& q_at, Segments& out) const
+{
+    if (!m_initialized || q_at.size() != m_nat)
+        return false;
+    ensureSolution(q_at);
+    solveAdjoint(m_have_s, m_conv * 1.0e-3);
+    m_q_s = q_at;
+    const double autoaa = ALPBParameters::autoaa;
+    const Eigen::VectorXd phi = m_jmat * q_at;
+    out.atom.resize(m_ncav);
+    out.position = m_ccav;
+    out.charge.resize(m_ncav);
+    out.area.resize(m_ncav);
+    out.potential = phi;
+    out.radius.resize(m_nat);
+    out.atom_position = m_xyz;
+    int ii = 0;
+    for (int iat = 0; iat < m_nat; ++iat) {
+        out.radius(iat) = m_rvdw(iat) * autoaa;
+        for (int ig = 0; ig < m_ngrid; ++ig)
+            if (m_ui(ig, iat) > 0.0) {
+                out.atom[ii] = iat;
+                out.charge(ii) = m_w(ig) * m_ui(ig, iat) * m_basis.col(ig).dot(m_s.col(iat));
+                out.area(ii) = m_w(ig) * autoaa * autoaa * m_rvdw(iat) * m_rvdw(iat);
+                ++ii;
+            }
+    }
+    return ii == m_ncav;
 }
 
 void DdCosmoSolvation::addPotential(const Vector& q_at, Vector& v_at) const

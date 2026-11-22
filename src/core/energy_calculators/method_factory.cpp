@@ -31,6 +31,9 @@
 #include "ff_methods/alpb_solvation.h"
 #include "src/core/solvation/solvent_names.h"
 #include "src/core/solvation/ddcosmo.h"
+#include "src/core/solvation/cpcmx.h"
+
+#include <filesystem>
 #include "qm_methods/dispersion_method.h"
 #include "qm_methods/eht_method.h"
 #include "qm_methods/external_gfnff_method.h"
@@ -448,12 +451,21 @@ void validateNativeSolvation(const std::string& host, const json& cfg)
         CurcumaLogger::error(msg);
         throw MethodCreationException(msg);
     };
+    if (host == "gfnff") {
+        // GFN-FF has ALPB only (gbsa maps to ALPB with a warning); the other models were silently ignored before.
+        if (const json* m = find("solvent_model"); m && m->is_string()) {
+            std::string sm = m->get<std::string>();
+            std::transform(sm.begin(), sm.end(), sm.begin(), [](unsigned char c) { return std::tolower(c); });
+            if (sm == "cosmo" || sm == "cpcm" || sm == "cpcmx")
+                fail("solvent_model '" + sm + "' is not available for GFN-FF (alpb or gbsa, which runs ALPB); use gfn1/gfn2");
+        }
+    }
     int code = 0;   // 0 = not given
     if (host != "gfnff") {
         if (const json* m = find("solvent_model")) {
             if (m->is_string()) {
                 code = curcuma::xtb::solventModelCode(m->get<std::string>());
-                if (code < 0) fail("Unknown solvent_model '" + m->get<std::string>() + "' (alpb, gbsa, cosmo, cpcm or none)");
+                if (code < 0) fail("Unknown solvent_model '" + m->get<std::string>() + "' (alpb, gbsa, cosmo, cpcm, cpcmx or none)");
             } else if (m->is_number()) {
                 code = static_cast<int>(std::lround(m->get<double>()));
             }
@@ -465,6 +477,38 @@ void validateNativeSolvation(const std::string& host, const json& cfg)
     else if (sv && sv->is_number()) solvent = sv->dump();
     double eps = -1.0;
     if (const json* e = find("solvent_epsilon"); e && e->is_number()) eps = e->get<double>();
+
+    // CPCM-X (code 5, Nov 2026): a solvent of the CPCM-X database (names of CPCM-X data.f90), the database directory
+    // must exist, single points on the CPU only (no gradient, no GPU path, no large_system_mode), gsolv only.
+    if (code == 5) {
+        if (curcuma::solvation::isGasPhase(solvent))
+            fail("solvent_model cpcmx needs a solvent (-xtb.solvent <name>, e.g. water, hexane, acetonitrile)");
+        const std::string name = curcuma::solvation::cpcmx::solventName(solvent);
+        if (name.empty())
+            fail(fmt::format("Unknown CPCM-X solvent '{}' (known: {})", solvent, curcuma::solvation::cpcmx::knownSolvents()));
+        std::string db;
+        if (const json* d = find("cpcmx_db"); d && d->is_string()) db = d->get<std::string>();
+        std::vector<std::string> tried;
+        const std::string dir = curcuma::solvation::cpcmx::findDatabase(db, &tried);
+        if (dir.empty()) {
+            std::string list;
+            for (const auto& t : tried) list += (list.empty() ? "" : ", ") + t;
+            fail("CPCM-X solvent database not found (tried: " + (list.empty() ? std::string("nothing") : list)
+                 + "); set -xtb.cpcmx_db <dir> or CURCUMA_CPCMX_DB to a directory with the CPCM-X DB/xtb/<solvent>.cosmo "
+                   "files (github.com/grimme-lab/CPCM-X, LGPL-3.0)");
+        }
+        if (!std::filesystem::exists(std::filesystem::path(dir) / (name + ".cosmo")))
+            fail("CPCM-X solvent '" + name + "' is not in the database (missing " + (std::filesystem::path(dir) / (name + ".cosmo")).string() + ")");
+        if (const json* st = find("solvent_state")) {
+            curcuma::solvation::SolutionState s;
+            if (st->is_string() && (!curcuma::solvation::parseSolutionState(st->get<std::string>(), s)
+                                    || s != curcuma::solvation::SolutionState::GSolv))
+                fail("solvent_state '" + st->get<std::string>() + "' is not available for solvent_model cpcmx (CPCM-X applies its own state correction)");
+        }
+        if (cfg.contains("gpu") && cfg["gpu"].is_string() && cfg["gpu"].get<std::string>() != "none" && !cfg["gpu"].get<std::string>().empty())
+            fail("solvent_model cpcmx runs on the CPU only; remove -gpu");
+        return;
+    }
 
     // Native ddCOSMO (Nov 2026): a solvent name with an ALPB set, a number (dielectric constant) or solvent_epsilon > 0;
     // only the gsolv state (xtb applies no state shift to COSMO). Native CPCM (code 1, tblite's model on the same solver):

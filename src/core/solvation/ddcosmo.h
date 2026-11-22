@@ -83,7 +83,23 @@ public:
     ~DdCosmoSolvation() override;
 
     /// Parameterisation of the shared ddCOSMO core (see the class comment). Claude Generated (Nov 2026).
-    enum class Model { XtbCosmo, TbliteCpcm };
+    /// XtbCosmoInf: xtb's conductor set gfn_cosmo_inf (xtb --cosmo inf), the COSMO step of CPCM-X (Nov 2026).
+    enum class Model { XtbCosmo, TbliteCpcm, XtbCosmoInf };
+
+    /**
+     * @brief Surface segments of the converged COSMO solution, the data xtb writes to xtb.cosmo
+     *        (cosmo.f90 writeCosmoFile) and CPCM-X reads back (cpcmx.h). One segment per exposed cavity point.
+     * Claude Generated (Nov 2026).
+     */
+    struct Segments {
+        std::vector<int> atom;            ///< 0-based atom of each segment
+        Eigen::MatrixXd position;         ///< 3 x nseg segment positions (Bohr)
+        Eigen::VectorXd charge;           ///< zeta_n = w_n U_i(n) sum_lm Y_lm(s_n) S_i,lm (no keps, as xtb.cosmo)
+        Eigen::VectorXd area;             ///< w_n r_i^2 in Angstrom^2 (xtb autoaa)
+        Eigen::VectorXd potential;        ///< solute potential Phi = J q on the segment (e/Bohr)
+        Eigen::VectorXd radius;           ///< cavity radius per atom (Angstrom, xtb autoaa)
+        Eigen::MatrixXd atom_position;    ///< 3 x nat atom positions of the solver (Bohr)
+    };
 
     // ---- settings (call before init) ----
     /// Select xtb COSMO or tblite CPCM; resets grid and eta to the defaults of that model (call before the other setters).
@@ -119,6 +135,13 @@ public:
     /// True if init() would accept this solvent for the method (name with an ALPB set or a number). Claude Generated.
     static bool solventAvailable(const std::string& method, const std::string& solvent,
                                  Model model = Model::XtbCosmo);
+
+    /**
+     * @brief Segment data for the charges q_at (normally the converged SCF charges).
+     * Re-solves the adjoint problem L^* S = Psi(q) to cosmo_conv * 1e-3, as xtb's addGradient does before
+     * writeCosmoFile, and evaluates Phi = J q. Claude Generated (Nov 2026).
+     */
+    bool segments(const Vector& q_at, Segments& out) const;
 
     double dielectricConstant() const { return m_eps; }
     /// Non-polar surface energy of the current geometry (Eh).

@@ -827,6 +827,7 @@ inline int solventModelCode(const std::string& s)
     if (t == "gbsa" || t == "gb" || t == "2")                   return 2;
     if (t == "alpb" || t == "3")                                return 3;
     if (t == "cosmo" || t == "ddcosmo")                         return 4;   // native ddCOSMO (Nov 2026), xtb --cosmo
+    if (t == "cpcmx" || t == "cpcm-x" || t == "5")              return 5;   // CPCM-X (Nov 2026), xtb --cpcmx: conductor COSMO SCF here, post-SCF in NativeXtbMethod
     return -1;
 }
 
@@ -919,6 +920,8 @@ public:
 
     // API compatibility for the NativeXtbMethod wrapper
     Vector getPartialCharges() const { return getCharges(); }
+    /// The active implicit-solvation model (nullptr in the gas phase). Claude Generated (Nov 2026, CPCM-X segments).
+    const ImplicitSolvationModel* solvationModel() const { return m_solvation.get(); }
     Vector getCoordinationNumbers() const { return m_coordination_numbers; }
 
     // --- CPSCF / Z-vector public API (Phase 3b) ---
