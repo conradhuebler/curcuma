@@ -225,6 +225,11 @@ FP32→FP64 decision) — only then does the latency region actually shrink.
 ## Notes / limits
 
 - **`-scf_precond frag` (Oct 2026, AI-generated, machine-tested only)**: the fully device-resident GFN2 loop applies the fragment Broyden seed M on the device (one CUDA block per fragment block, guard on ||F||_2); ROCm, Vulkan, the host-driven CUDA loop and a multi-GPU SCF split ignore the switch with a warning. Measurements: [SCF_PRECOND.md](SCF_PRECOND.md#gpu-cuda-resident-loop).
+- **Spin polarisation (`-xtb.spin_polarization true`, `-spin N > 0`; Nov 22, 2026, AI-generated, machine-tested on one RTX 5080)**: runs on the host-driven
+  device loop with two eigensolves per iteration (alpha Fock = Fock with v - u, beta with v + u); the GFN2 device potential and the resident loops are not
+  used then; FP64 and mixed precision; device gradient with W' = Wa + Wb - 1/2 Pm o (u_mu + u_nu). GPU = CPU to <= 1.7e-14 Eh, gradient <= 5.7e-12 Eh/A
+  (FP64). ROCm and Vulkan: hard error. Numbers and limits: [SPIN_POLARISATION.md](SPIN_POLARISATION.md#gpu-cuda--gpu-cuda). The interface gained five
+  `GpuScfBackend` virtuals at its end: rebuild the plugins with the executable.
 - Plugin rebuild (Oct 2026): the `GpuScfBackend` interface gained virtual methods (`supportsResidentPreconditioner`, `residentSetPreconditioner`, ...) inserted before `residentScfStep`; the plugin loader checks no ABI version, so rebuild `libcurcuma_cuda`/`_rocm`/`_vulkan` together with the executable.
 - **Implicit solvation (ALPB/GBSA) on GPU (WP4a+WP4b, 2026-06-07)**: `-xtb.solvent`
   works on `-gpu cuda` for both GFN1 and GFN2, matching the CPU/tblite refs to 1e-8

@@ -31,8 +31,8 @@ by shell position (transition metals are ordered d,s,p). 85 of the 86 rows diffe
 
 ## Not supported (hard error, no silent fallback)
 
-`-gpu cuda|rocm|vulkan`, `-large_system_mode fragments|dc|sparse`, `-scf_mode` other than `broyden`, `-scf_precond frag`, `-eigensolver` other than `mkl`,
-`-scf_extrapolation_apply xlbomd`. The analytic response (`xtb_response.cpp`) already rejects open shells. `-spin` stays global (no spin per fragment).
+`-gpu rocm|vulkan`, `-scf_gpu_partial_diag` with `-gpu cuda`, `-large_system_mode fragments|dc|sparse`, `-scf_mode` other than `broyden`, `-scf_precond frag`
+(CPU and GPU), `-eigensolver` other than `mkl`, `-scf_extrapolation_apply xlbomd`. The analytic response (`xtb_response.cpp`) already rejects open shells. `-spin` stays global (no spin per fragment).
 Not implemented: UHF without the spin constants, spin contamination analysis, orbital output for the beta set (`C`/`eps` hold the alpha set).
 
 ## What was tested (Nov 21, 2026, release build, CPU, `-threads 1`)
@@ -69,6 +69,50 @@ against 30.1 s without (26 against 33 steps/s, not half), 20.4 against 20.0 SCF 
 - The SCF has several solutions (different magnetisation patterns). The result depends on guess and damping: GFN1 full system uhf 4, 2000 K: `-scf_guess eeq` (default) -42.50317, `-scf_guess h0` -42.51162 (tblite -42.51162).
   Multi-solution cases were not resolved; compare energies only where both programs converge to the same solution. At 300 K the 13-atom system often needs more than 500 Broyden cycles (also in tblite).
 - Not tested: MD beyond 1000 steps, `-opt` of open-shell metal clusters (only a smoke run on O2), solvation, `-hessian`, periodic or charged systems, elements other than H, O, Pt, GFN1 d-shell systems other than Pt.
-- GPU: not implemented (hard error with `-gpu cuda|rocm|vulkan`), so there is neither a CUDA nor a ROCm path yet. Plan (Nov 22, 2026, operator): implement the CUDA path and port it to ROCm when a ROCm machine is at hand.
+- GPU: CUDA only (section below); ROCm and Vulkan are a hard error. Plan (Nov 22, 2026, operator): port the CUDA path to ROCm when a ROCm machine is at hand.
 - Solvation (checked Nov 22, 2026 after the merge with the native ddCOSMO/CPCM/CPCM-X work, n = 1, OH radical, GFN2, `-spin 1`, water): ALPB, cosmo and cpcm change the energy with spin polarisation as without it
   (cpcm -5.1e-4 Eh both, cosmo +1.1e-3 against +1.2e-3, alpb -9.9e-3 against -9.8e-3); no external reference exists for the combination (tblite 0.4.0 has no spin polarisation) and no test covers it.
+
+## GPU (CUDA, `-gpu cuda`)
+
+Status: 🤖 AI-implemented, ⚙️ machine-tested on one RTX 5080 (CUDA 13, Nov 22, 2026). Human production testing pending.
+
+- Runs on the host-driven device loop: the host builds the charge potential v and the spin potential u (as on the CPU), the device solves
+  F^alpha = F(v - u) and F^beta = F(v + u) (the spin shift +- 1/2 S (u_mu + u_nu) has the form of the isotropic potential term, so the existing
+  Fock builders are reused), keeps both orbital sets (`dCa`, `dC`), builds Pa, Pb, P = Pa + Pb, Pm = Pa - Pb and the Mulliken populations of P
+  and Pm; the host does the two Fermi fillings, m_sh, E_spin and the Broyden step on `[q_sh | dp | qp | m_sh]`.
+- Gradient on the device: W' = Wa + Wb - 1/2 Pm o (u_mu + u_nu) (`XtbGpuContext::spinWeightedDensity`), read by the unchanged gradient kernels
+  in place of W, which reproduces the CPU term + Pm (u_a + u_b). If the device gradient fails, the host gradient runs with W of both spins.
+- Mixed precision (`-scf_mixed_precision`, default on for FP64-weak GPUs) is supported: both solves of a step use the same precision and no FP32
+  step is accepted as converged (unchanged rule).
+- Not used with spin polarisation (automatically, GPU still used): the GFN2 device potential build, the fully device-resident loops (GFN1 and
+  GFN2), pseudo-diagonalisation (resident loop only). Screened integral storage works (`-gpu_sparse_integrals on`, checked on the 13-atom system
+  only, where the pattern holds 100 % of the pairs). Multi-GPU eigensolver/density split: not run (one GPU).
+- Code: spin branch of the SCF loop in `XTB::Calculation` (`xtb_native.cpp`), `GpuScfBackend::solveSpin/densitySpin/finalizeSpin/spinWeightedDensity`
+  (`xtb_native.h`, CUDA in `xtb_gpu_method.cpp`), `XtbGpuContext::residentSpinKeepAlpha/residentDensitySpin/residentFinalizeSpin/spinWeightedDensity`
+  (`cuda/xtb_gpu_context.cu`). ctest `cli_sqm_22_spin_polarization_cuda`.
+
+Measured (Nov 22, 2026, GPU against the CPU of the same build, `-scf_threshold 1e-8`, `-threads 1` on the CPU):
+- O2 (uhf 2, 4; GFN2, GFN1 uhf 2), OH (uhf 1, GFN2 and GFN1), H2 (uhf 2), Pt7 (`pt-cluster-7`, uhf 4 and 6, 2000 K, GFN2 and GFN1), Pt7 + 2 H2 + O2
+  (`reactions-doebereiner-pt7`, 2000 K, GFN2 uhf 4 and 8, GFN1 uhf 4): FP64 energy <= 1.7e-14 Eh, gradient <= 5.7e-12 Eh/A; mixed precision energy
+  <= 3.6e-14 Eh, gradient <= 4.2e-9 Eh/A. The Doebereiner system at uhf 2 does not converge in 500 cycles on the CPU nor in FP64 on the GPU at
+  `-scf_threshold 1e-8` (the mixed-precision run converged to -41.95068297, another solution), and uhf 6 converges to -41.95410536 on both (the
+  ladder below lists -41.96038415): multi-solution case, not compared.
+- FD gate (GPU `-dump_gradient` against central differences of GPU energies, FP64, `-scf_threshold 1e-10`): O2 uhf 2 GFN2 2.1e-6 (h = 1e-3) and
+  5.3e-7 Eh/A (h = 5e-4); Pt7 uhf 4 2000 K GFN2 1.6e-7 / 3.3e-8, GFN1 6.3e-8 (h = 5e-4); Pt7 + 2 H2 + O2 uhf 8 GFN2 3.1e-7 Eh/A (h = 5e-4, 39 components).
+- Without the option: 10 cases (8 GPU, 2 CPU; caffeine GFN1/GFN2, O2 spin 2, OH spin 1, Pt7 spin 8, Pt7 + 2 H2 + O2 spin 4, trisaccharide GFN2 in mixed
+  precision and FP64, GFN1 CPU) give the same energies (8 decimals) and bit-identical `-dump_gradient` files as the binary of f8b0fa3f.
+
+Timing (Nov 22, 2026, GFN2, RTX 5080 + 32 CPU threads, n = 2 each, the two runs within 2 % except CPU 16 threads on the small systems; foreign load
+average 8 to 13 from another session's curcuma runs during the measurement, so CPU numbers may be pessimistic). GPU = `-gpu cuda -threads 16`, default
+mixed precision; FP64 = `-scf_mixed_precision false`. SCF = the "SCF converged" time of `-sp`; MD = wall time of 200 steps (`-dt 0.5 -max_time 100`).
+
+| System | atoms, uhf | SCF CPU 1 thr | SCF CPU 16 thr | SCF GPU | SCF GPU FP64 | MD CPU 1 thr | MD CPU 16 thr | MD GPU | MD GPU FP64 |
+|---|---|---|---|---|---|---|---|---|---|
+| Pt7 + 2 H2 + O2, 2000 K | 13, 8 | 31 ms | 21-28 ms | 213 ms | 191 ms | 5.3 s | 5.0-6.1 s | 15.2 s | 20.7 s |
+| trisaccharide minus one H | 65, 1 | 100 ms | 64-96 ms | 224 ms | 254 ms | - | - | - | - |
+| pep20 peptide minus one H | 308, 1 | 4.65 s | 1.92 s | 1.07 s | 1.41 s | 421 s | 128 s | 58 s | 102 s |
+
+The GPU is slower than the CPU up to at least 65 atoms (per-iteration launch and transfer cost of the host-driven loop) and 1.8x (SCF) / 2.2x (MD)
+faster than 16 CPU threads at 308 atoms. The same 308-atom radical without spin polarisation (fully resident loop): SCF 665 ms on the GPU against
+1.08 s on 16 CPU threads, i.e. the spin branch costs 1.6x the closed-loop GPU time per SCF (two eigensolves, host potential).

@@ -386,6 +386,10 @@ if(USE_CUDA)
     add_cli_test(sqm 14_open_shell_cuda)
     set_tests_properties(cli_sqm_14_open_shell_cuda
         PROPERTIES TIMEOUT 300 RESOURCE_LOCK "gpu" LABELS "sqm;gpu;cli" SKIP_RETURN_CODE 77)
+    # Spin polarisation on the CUDA path against the CPU: O2 and Pt7, GFN1/GFN2, FP64 and mixed precision (Nov 2026).
+    add_cli_test(sqm 22_spin_polarization_cuda)
+    set_tests_properties(cli_sqm_22_spin_polarization_cuda
+        PROPERTIES TIMEOUT 600 RESOURCE_LOCK "gpu" LABELS "sqm;gpu;cli" SKIP_RETURN_CODE 77)
 endif()
 
 # cli_sqm_04..07 are enabled since 2026-10-09: the native gfn1/gfn2 match the TBLite references (4e-9 Eh, OH radical 8e-4 Eh).

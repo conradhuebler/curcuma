@@ -903,6 +903,34 @@ bool XTB::solveEigenUhf(const Matrix& Fa, const Matrix& Fb, const Matrix& S)
     return true;
 }
 
+/**
+ * @brief Energy-weighted density of both spins after the CUDA spin-polarised SCF (Claude Generated, Nov 2026).
+ *
+ * The device loop keeps W on the device (XtbGpuContext::spinWeightedDensity); this host copy is built only
+ * when the host gradient runs instead (device gradient unavailable or failed). Same sum as solveEigenUhf.
+ */
+void XTB::spinHostEnergyWeightedDensity()
+{
+    const int nao = m_basis.nao;
+    m_wfn.W_valid = false;
+    if (m_wfn.C.rows() != nao || m_gpu_spin_Cb.rows() != nao || m_wfn.eps.size() != nao
+        || m_gpu_spin_eb.size() != nao || m_gpu_spin_fa.size() != nao || m_gpu_spin_fb.size() != nao)
+        return;
+    auto channel = [&](const Matrix& C, const Vector& e, const Vector& f) -> Matrix {
+        int ncol = 0;
+        for (int i = 0; i < nao; ++i)
+            if (f(i) > 1.0e-12) ncol = i + 1;
+        if (ncol == 0) return Matrix::Zero(nao, nao);
+        const auto Cocc = C.leftCols(ncol);
+        const Eigen::VectorXd fe = (f.head(ncol).array() * e.head(ncol).array()).matrix();
+        const Matrix Cwe = Cocc * fe.asDiagonal();
+        Matrix Wc = Cwe * Cocc.transpose();
+        return Wc;
+    };
+    m_wfn.W = channel(m_wfn.C, m_wfn.eps, m_gpu_spin_fa) + channel(m_gpu_spin_Cb, m_gpu_spin_eb, m_gpu_spin_fb);
+    m_wfn.W_valid = true;
+}
+
 /* ------------------------------------------------------------------ *
  *  Saunders–Hillier level shift (Claude Generated).                  *
  *                                                                    *

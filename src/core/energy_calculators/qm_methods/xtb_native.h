@@ -806,6 +806,31 @@ struct GpuScfBackend {
     virtual bool supportsDeviceSolvationGfn1() const { return false; }
     virtual bool beginSolvationGfn1(int nat, const double* born_mat, const double* v_shift)
     { (void)nat; (void)born_mat; (void)v_shift; return false; }
+
+    /* ----- Spin polarisation on the host-driven device loop (Nov 2026) --------------------- *
+     * Claude Generated (docs/SPIN_POLARISATION.md, section GPU). -xtb.spin_polarization with
+     * -spin N > 0: the host builds the charge potential v_ao and the spin potential u_ao
+     * (u_l = sum_l' W_ll' m_l', expanded to AOs); the device solves the alpha Fock matrix
+     * (potential v - u) and the beta one (v + u), keeps both orbital sets, and builds P = Pa + Pb
+     * and Pm = Pa - Pb from the host Fermi fillings of the two channels. A backend without it
+     * (ROCm, Vulkan) keeps false and XTB::Calculation stops with an error. */
+    virtual bool supportsSpinPolarization() const { return false; }
+    /// Both eigensolves. v_dp/v_qp: GFN2 multipole potentials (nullptr for GFN1). eps_a/eps_b ascending.
+    virtual bool solveSpin(const Eigen::VectorXd& v_ao, const Eigen::VectorXd& u_ao,
+                           const Eigen::MatrixXd* v_dp, const Eigen::MatrixXd* v_qp,
+                           Vector& eps_a, Vector& eps_b, bool fp32)
+    { (void)v_ao; (void)u_ao; (void)v_dp; (void)v_qp; (void)eps_a; (void)eps_b; (void)fp32; return false; }
+    /// Densities of both channels; pop_ao from P, spop_ao(mu) = sum_nu Pm_mu,nu S_mu,nu, band = Tr(P H0).
+    virtual bool densitySpin(const Eigen::VectorXd& occ_a, int ncol_a, const Eigen::VectorXd& occ_b, int ncol_b,
+                             Eigen::VectorXd& pop_ao, Eigen::VectorXd& spop_ao, double& band)
+    { (void)occ_a; (void)ncol_a; (void)occ_b; (void)ncol_b; (void)pop_ao; (void)spop_ao; (void)band; return false; }
+    /// Converged P, Pm and both orbital sets to the host.
+    virtual bool finalizeSpin(Matrix& P, Matrix& Pm, Matrix& Ca, Matrix& Cb)
+    { (void)P; (void)Pm; (void)Ca; (void)Cb; return false; }
+    /// Device W for the next gradient(): sum_s C_s diag(we_s) C_s^T - 1/2 Pm o (u_mu + u_nu), we_s = f_s eps_s.
+    virtual bool spinWeightedDensity(const Vector& we_a, int ncol_a, const Vector& we_b, int ncol_b,
+                                     const Vector& u_ao)
+    { (void)we_a; (void)ncol_a; (void)we_b; (void)ncol_b; (void)u_ao; return false; }
 };
 
 /* ------------------------------------------------------------------------- *
@@ -1402,6 +1427,9 @@ private:
     bool   diagonalizeFock(const Matrix& F, const Matrix& S, Matrix& C, Vector& eps) const;
     /// Two-Fock-matrix eigensolve: Pa, Pb, P = Pa + Pb, Pm = Pa - Pb, W (both spins), entropy m_ts_uhf.
     bool   solveEigenUhf(const Matrix& Fa, const Matrix& Fb, const Matrix& S);
+    /// W = sum_s sum_i f^s_i eps^s_i C^s_i C^s_i^T from the orbitals of the CUDA spin loop
+    /// (m_wfn.C/eps = alpha, m_gpu_spin_Cb/eb = beta); sets m_wfn.W_valid. Host gradient fallback only.
+    void   spinHostEnergyWeightedDensity();
     bool pseudoDiagStepCpu(const Matrix& F);                            // xtb_scf.cpp (Oct 2026)
     void updatePopulations(const Matrix& S);                             // xtb_scf.cpp
 
@@ -1638,6 +1666,12 @@ private:
     double m_E_spin          = 0.0;
     bool   m_spin_pol        = false;   ///< -xtb.spin_polarization
     double m_spin_pol_scale  = 1.0;     ///< -xtb.spin_polarization_scale (tblite wscale)
+    // Spin polarisation on the CUDA device loop (Claude Generated, Nov 2026): the last iteration's
+    // beta orbitals and both Fermi fillings, kept for the device W (spinWeightedDensity) and for
+    // the host gradient fallback, which rebuilds m_wfn.W from them (spinHostEnergyWeightedDensity).
+    bool   m_gpu_spin_loop   = false;   ///< this SCF ran spin-polarised on the device loop
+    Matrix m_gpu_spin_Cb;               ///< beta eigenvectors (host copy after finalizeSpin)
+    Vector m_gpu_spin_eb, m_gpu_spin_fa, m_gpu_spin_fb;   ///< beta eps; alpha / beta occupations [0,1]
 
     // SCF config / state
     int    m_scf_max_iter    = 150;
