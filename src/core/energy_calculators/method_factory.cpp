@@ -30,6 +30,7 @@
 #include "ff_methods/gfnff_method.h"
 #include "ff_methods/alpb_solvation.h"
 #include "src/core/solvation/solvent_names.h"
+#include "src/core/solvation/ddcosmo.h"
 #include "qm_methods/dispersion_method.h"
 #include "qm_methods/eht_method.h"
 #include "qm_methods/external_gfnff_method.h"
@@ -447,25 +448,44 @@ void validateNativeSolvation(const std::string& host, const json& cfg)
         CurcumaLogger::error(msg);
         throw MethodCreationException(msg);
     };
-    const json* sv = find("solvent");
-    if (!sv || !sv->is_string()) return;
-    const std::string solvent = sv->get<std::string>();
-    if (curcuma::solvation::isGasPhase(solvent)) return;
-
-    bool alpb = true;
+    int code = 0;   // 0 = not given
     if (host != "gfnff") {
-        int code = 0;   // 0 = not given
         if (const json* m = find("solvent_model")) {
             if (m->is_string()) {
                 code = curcuma::xtb::solventModelCode(m->get<std::string>());
-                if (code < 0) fail("Unknown solvent_model '" + m->get<std::string>() + "' (alpb, gbsa, cpcm or none)");
+                if (code < 0) fail("Unknown solvent_model '" + m->get<std::string>() + "' (alpb, gbsa, cosmo, cpcm or none)");
             } else if (m->is_number()) {
                 code = static_cast<int>(std::lround(m->get<double>()));
             }
         }
-        if (code == 1) fail("solvent_model cpcm has no native implementation yet (alpb and gbsa are available)");
-        alpb = (code != 2);
+        if (code == 1)
+            fail("solvent_model cpcm has no native implementation yet (alpb, gbsa and cosmo are available; "
+                 "tblite's CPCM differs from xtb's COSMO in the dielectric scaling, the grid, the switching width and the surface term, see docs/SOLVATION.md)");
     }
+    const json* sv = find("solvent");
+    std::string solvent;
+    if (sv && sv->is_string()) solvent = sv->get<std::string>();
+    else if (sv && sv->is_number()) solvent = sv->dump();
+    double eps = -1.0;
+    if (const json* e = find("solvent_epsilon"); e && e->is_number()) eps = e->get<double>();
+
+    // Native ddCOSMO (Nov 2026): a solvent name with an ALPB set, a number (dielectric constant) or solvent_epsilon > 0;
+    // only the gsolv state (xtb applies no state shift to COSMO).
+    if (code == 4) {
+        if (curcuma::solvation::isGasPhase(solvent) && !(eps > 0.0)) return;
+        if (!(eps > 0.0) && !DdCosmoSolvation::solventAvailable(host, solvent))
+            fail(fmt::format("Unknown solvent '{}' for native {} COSMO (a solvent with an ALPB parameter set, a dielectric "
+                             "constant, or -xtb.solvent_epsilon)", solvent, host));
+        if (const json* st = find("solvent_state")) {
+            curcuma::solvation::SolutionState s;
+            if (st->is_string() && (!curcuma::solvation::parseSolutionState(st->get<std::string>(), s)
+                                    || s != curcuma::solvation::SolutionState::GSolv))
+                fail("solvent_state '" + st->get<std::string>() + "' is not available for solvent_model cosmo (gsolv only)");
+        }
+        return;
+    }
+    if (solvent.empty() || curcuma::solvation::isGasPhase(solvent)) return;
+    const bool alpb = (code != 2);
     std::string known;
     if (!ALPBSolvation::solventAvailable(host, alpb, solvent, &known))
         fail(fmt::format("Unknown solvent '{}' for native {} {} (names are case-insensitive; available: {})", solvent, host,

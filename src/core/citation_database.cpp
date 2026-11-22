@@ -564,6 +564,32 @@ const std::unordered_map<std::string, CitationData>& database()
             "}"
         }},
 
+        { "ddcosmo", {
+            "Domain-decomposition COSMO (Cances, Maday, Stamm 2013; Lipparini et al. 2013)",
+            "Cances, E.; Maday, Y.; Stamm, B. J. Chem. Phys. 2013, 139, 054111 (DOI: 10.1063/1.4816767); "
+            "Lipparini, F.; Stamm, B.; Cances, E.; Maday, Y.; Mennucci, B. J. Chem. Theory Comput. 2013, 9, 3637-3648 "
+            "(DOI: 10.1021/ct400280b)",
+            "cances2013ddcosmo",
+            "@article{cances2013ddcosmo,\n"
+            "  author = {Canc{\\`e}s, Eric and Maday, Yvon and Stamm, Benjamin},\n"
+            "  title = {Domain decomposition for implicit solvation models},\n"
+            "  journal = {J. Chem. Phys.},\n"
+            "  year = {2013},\n"
+            "  volume = {139},\n"
+            "  pages = {054111},\n"
+            "  doi = {10.1063/1.4816767}\n"
+            "}\n"
+            "@article{lipparini2013ddcosmo,\n"
+            "  author = {Lipparini, Filippo and Stamm, Benjamin and Canc{\\`e}s, Eric and Maday, Yvon and Mennucci, Benedetta},\n"
+            "  title = {Fast Domain Decomposition Algorithm for Continuum Solvation Models: Energy and First Derivatives},\n"
+            "  journal = {J. Chem. Theory Comput.},\n"
+            "  year = {2013},\n"
+            "  volume = {9},\n"
+            "  pages = {3637--3648},\n"
+            "  doi = {10.1021/ct400280b}\n"
+            "}"
+        }},
+
         { "cpcm_x", {
             "CPCM-X / ddCOSMO Implicit Solvation (Stahn, Ehlert, Grimme 2023)",
             "Stahn, M.; Ehlert, S.; Grimme, S. J. Phys. Chem. A 2023, 127, 7036-7043 (DOI: 10.1021/acs.jpca.3c04382)",

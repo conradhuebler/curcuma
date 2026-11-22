@@ -39,6 +39,7 @@
 #include "src/core/energy_calculators/ff_methods/d3param_generator.h"
 #include "src/core/energy_calculators/ff_methods/cn_calculator.h"  // D3 CN gradient (May 2026)
 #include "src/core/energy_calculators/ff_methods/alpb_solvation.h"  // implicit solvation (June 2026)
+#include "src/core/solvation/ddcosmo.h"                              // native ddCOSMO (Nov 2026)
 #include "diis_accelerator.h"
 #include "broyden_mixer.h"
 
@@ -161,10 +162,13 @@ bool XTB::InitialiseMolecule()
         CitationRegistry::cite("d3", meth);        // D3(BJ) dispersion (GFN1 only)
     else
         CitationRegistry::cite("d4", meth);        // D4 dispersion (GFN2 only)
-    if (!curcuma::solvation::isGasPhase(m_solvent)) {
+    // COSMO may also be requested by an explicit dielectric constant alone (-xtb.solvent_epsilon). Claude Generated (Nov 2026).
+    const bool cosmo_eps_only = (m_solvent_model == 4 && m_solvent_epsilon > 0.0);
+    if (!curcuma::solvation::isGasPhase(m_solvent) || cosmo_eps_only) {
         const int model = (m_solvent_model > 0) ? m_solvent_model : 3;
         if (model == 3) CitationRegistry::cite("alpb", meth);
         else if (model == 2) { CitationRegistry::cite("alpb", meth); CitationRegistry::cite("still_gb", meth); }
+        else if (model == 4) CitationRegistry::cite("ddcosmo", meth);
     }
     CitationRegistry::cite("diis", meth);         // SCF convergence (DIIS/Broyden)
 
@@ -194,10 +198,31 @@ bool XTB::InitialiseMolecule()
     // later WP. GBSA = ALPB with the shape term off (see ALPBSolvation::setUseAlpb).
     m_solvation.reset();
     m_E_solvation = 0.0;
-    if (!curcuma::solvation::isGasPhase(m_solvent)) {
+    if (!curcuma::solvation::isGasPhase(m_solvent) || cosmo_eps_only) {
         const int model = (m_solvent_model > 0) ? m_solvent_model : 3;  // default ALPB
         const std::string meth = (m_method == MethodType::GFN1) ? "gfn1" : "gfn2";
-        if (model == 3 || model == 2) {
+        if (model == 4) {
+            // Native ddCOSMO (port of xtb 6.7.1 --cosmo, Claude Generated Nov 2026). xtb adds no reference-state
+            // shift to the COSMO energy, so a state other than gsolv cannot be honoured and is an error.
+            curcuma::solvation::SolutionState state;
+            if (!curcuma::solvation::parseSolutionState(m_solvent_state, state)
+                || state != curcuma::solvation::SolutionState::GSolv) {
+                CurcumaLogger::error("Native solvation: solvent_state '" + m_solvent_state
+                                     + "' is not available for solvent_model cosmo (only gsolv; xtb applies no state shift to COSMO)");
+                return false;
+            }
+            auto solv = std::make_unique<DdCosmoSolvation>();
+            solv->setDielectricOverride(m_solvent_epsilon);
+            solv->setGridPoints(m_cosmo_nang);
+            solv->setLmax(m_cosmo_lmax);
+            solv->setConvergence(m_cosmo_conv);
+            solv->setEta(m_cosmo_eta);
+            if (!solv->init(m_atoms, curcuma::solvation::isGasPhase(m_solvent) ? std::string("none") : m_solvent, meth)) {
+                CurcumaLogger::error("Native solvation: COSMO setup failed for solvent '" + m_solvent + "' (" + meth + ")");
+                return false;
+            }
+            m_solvation = std::move(solv);
+        } else if (model == 3 || model == 2) {
             const bool use_alpb = (model == 3);
             const char* tag = use_alpb ? "ALPB" : "GBSA";
             auto solv = std::make_unique<ALPBSolvation>();
@@ -220,7 +245,7 @@ bool XTB::InitialiseMolecule()
                 return false;
             }
         } else {
-            CurcumaLogger::error("Native solvation: only solvent_model alpb and gbsa "
+            CurcumaLogger::error("Native solvation: only solvent_model alpb, gbsa and cosmo "
                                  "are implemented for native GFN (cpcm pending)");
             return false;
         }

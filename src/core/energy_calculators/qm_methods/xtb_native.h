@@ -813,7 +813,7 @@ struct GpuScfBackend {
  *  matching tblite's module split.
  * ------------------------------------------------------------------------- */
 
-// Map a solvation-model name to the internal code (0=none, 1=CPCM, 2=GBSA, 3=ALPB).
+// Map a solvation-model name to the internal code (0=none, 1=CPCM, 2=GBSA, 3=ALPB, 4=COSMO).
 // Accepts descriptive names (preferred, case-insensitive) and the legacy numeric
 // codes for backward compatibility. Returns -1 for an unrecognised value.
 // Claude Generated (June 2026).
@@ -826,6 +826,7 @@ inline int solventModelCode(const std::string& s)
     if (t == "cpcm" || t == "1")                                return 1;
     if (t == "gbsa" || t == "gb" || t == "2")                   return 2;
     if (t == "alpb" || t == "3")                                return 3;
+    if (t == "cosmo" || t == "ddcosmo")                         return 4;   // native ddCOSMO (Nov 2026), xtb --cosmo
     return -1;
 }
 
@@ -992,6 +993,15 @@ public:
         if (c >= 0) m_solvent_model = c;
     }
     void setSolventEpsilon(double e) { m_solvent_epsilon = e; }
+    /// ddCOSMO discretisation (solvent_model cosmo): surface grid points, lmax, solver threshold, switch width.
+    /// Claude Generated (Nov 2026).
+    void setCosmoSettings(int nang, int lmax, double conv, double eta)
+    {
+        if (nang > 0) m_cosmo_nang = nang;
+        if (lmax > 0) m_cosmo_lmax = lmax;
+        if (conv > 0.0) m_cosmo_conv = conv;
+        if (eta > 0.0) m_cosmo_eta = eta;
+    }
     /// Reference state of the solvation free energy (gsolv, bar1M, reference); validated in InitialiseMolecule. Claude Generated (Nov 2026).
     void setSolventState(const std::string& s) { m_solvent_state = s; }
 
@@ -1748,8 +1758,12 @@ private:
     // Eh/Bohr before the final unit conversion. See docs/SQM_SOLVATION_WP.md.
     std::unique_ptr<ImplicitSolvationModel> m_solvation;
     std::string m_solvent = "none";   ///< solvent name; "none" disables solvation
-    int    m_solvent_model = 0;        ///< 0=none, 1=CPCM, 2=GBSA, 3=ALPB
-    double m_solvent_epsilon = -1.0;   ///< explicit dielectric (CPCM); -1 = from name
+    int    m_solvent_model = 0;        ///< 0=none, 1=CPCM, 2=GBSA, 3=ALPB, 4=COSMO (ddCOSMO)
+    double m_solvent_epsilon = -1.0;   ///< explicit dielectric (COSMO); -1 = from name
+    int    m_cosmo_nang = 230;         ///< COSMO surface grid; cavity grid nearest to half of it (xtb)
+    int    m_cosmo_lmax = 6;           ///< COSMO spherical-harmonics order (xtb)
+    double m_cosmo_conv = 1.0e-8;      ///< COSMO linear-solver threshold (xtb)
+    double m_cosmo_eta = 0.2;          ///< COSMO switching-region width (xtb)
     std::string m_solvent_state = "gsolv";   ///< reference state: gsolv | bar1M | reference
     double m_E_solvation = 0.0;        ///< last solvation free energy (Eh)
 
@@ -1942,12 +1956,25 @@ inline void applyXtbScfConfig(XTB& xtb, const json& cfg)
     // descriptive name ("none"/"cpcm"/"gbsa"/"alpb"); legacy numeric codes (0..3) are
     // still accepted. The number branch also covers CLI flat-flags, which arrive as a
     // float (2.0) — an is_number_integer()-only check would silently drop them.
-    lookup("solvent",         [&](const json& v){ if (v.is_string()) xtb.setSolvent(v.get<std::string>()); });
+    // A plain number (-xtb.solvent 78.4) is a dielectric constant for COSMO, as in xtb --cosmo 78.4; the CLI
+    // parser hands it over as a JSON number. Claude Generated (Nov 2026).
+    lookup("solvent",         [&](const json& v){
+        if (v.is_string()) xtb.setSolvent(v.get<std::string>());
+        else if (v.is_number()) xtb.setSolvent(v.dump());
+    });
     lookup("solvent_model",   [&](const json& v){
         if (v.is_string())      xtb.setSolventModel(v.get<std::string>());        // name or numeric string
         else if (v.is_number()) xtb.setSolventModel(static_cast<int>(std::lround(v.get<double>())));
     });
     lookup("solvent_state",   [&](const json& v){ if (v.is_string()) xtb.setSolventState(v.get<std::string>()); });
+    {   // ddCOSMO discretisation (Claude Generated, Nov 2026); CLI numbers arrive as double
+        int nang = 0, lmax = 0; double conv = 0.0, eta = 0.0;
+        lookup("cosmo_grid",  [&](const json& v){ if (v.is_number()) nang = static_cast<int>(std::lround(v.get<double>())); });
+        lookup("cosmo_lmax",  [&](const json& v){ if (v.is_number()) lmax = static_cast<int>(std::lround(v.get<double>())); });
+        lookup("cosmo_conv",  [&](const json& v){ if (v.is_number()) conv = v.get<double>(); });
+        lookup("cosmo_eta",   [&](const json& v){ if (v.is_number()) eta = v.get<double>(); });
+        xtb.setCosmoSettings(nang, lmax, conv, eta);
+    }
     lookup("solvent_epsilon", [&](const json& v){
         if (v.is_number()) xtb.setSolventEpsilon(v.get<double>());
         else if (v.is_string()) { try { xtb.setSolventEpsilon(std::stod(v.get<std::string>())); } catch (...) {} }

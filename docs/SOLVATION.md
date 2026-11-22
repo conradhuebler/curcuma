@@ -14,6 +14,8 @@ Curcuma supports implicit solvation models for quantum chemistry calculations:
 - **Native GFN1/GFN2**: ⚠️ self-consistent **ALPB** and **GBSA** (June 2026) —
   AI-implemented, machine-tested vs tblite (≤1e-8 Eh on the validation set), human
   production testing pending. CPCM not yet implemented natively. See below.
+- **Native GFN1/GFN2 COSMO**: 🤖 AI-generated, ⚙️ machine-tested only, human production testing pending:
+  self-consistent **ddCOSMO** (Nov 2026), a port of xtb 6.7.1 `--cosmo` (section "Native GFN1/GFN2 COSMO").
 - **Native GFN-FF**: ⚠️ self-consistent **ALPB** (June 2026, WP5) — the Born reaction
   field couples into the EEQ charge solve (`A_eeq += B`), so the EEQ charges polarize in
   the solvent. Matches **xtb 6.7.1** (`--gfnff --alpb`) to ≤1e-8 Eh (7 mol × 4 solvents,
@@ -40,8 +42,8 @@ curcuma -opt mol.xyz -method gfn1 -xtb.solvent dmso                          # d
 ```
 
 - `-xtb.solvent <name>`: water, dmso, acetone, chloroform, methanol, … (tblite set)
-- `-xtb.solvent_model`: `alpb` (default when a solvent is given), `gbsa`, `cpcm` (not yet native), `none`.
-  Legacy numeric codes (3=alpb, 2=gbsa, 1=cpcm, 0=none) are still accepted.
+- `-xtb.solvent_model`: `alpb` (default when a solvent is given), `gbsa`, `cosmo` (ddCOSMO, below), `cpcm` (not yet native, error), `none`.
+  Legacy numeric codes (3=alpb, 2=gbsa, 1=cpcm, 0=none) are still accepted; `cosmo` has no numeric code.
 - ROCm (`-gpu rocm`): the reaction field v_at += B q_at enters the device SCF potential and the resident loop (`-xtb.rocm_device_solvation`, default true; energy and gradient on the host); see [GPU_TUNING.md](GPU_TUNING.md).
 
 **Validation (machine-tested):** native total energy matches tblite to ≤1e-8 Eh for
@@ -97,9 +99,57 @@ CODATA-2018 kB. Against xtb 6.7.1 the shifts agree to 3e-9 Eh (`ctest -R cli_sqm
 
 ### Not implemented natively
 
-CPCM (tblite `--cpcm`, `solvent_model cpcm` is an error), ddCOSMO (xtb `--cosmo`), CPCM-X (xtb `--cpcmx`), the ionic strength of xtb's GBSA,
-a choice of the Born kernel (ALPB always P16, GBSA always Still), the Lebedev grid size (230) and a solvent given only by its dielectric
-constant. GFN-FF with `solvent_model gbsa` runs ALPB with a warning, as pprcht/gfnff does; xtb 6.7.1 runs a Still-kernel GBSA with the GFN2 parameters there.
+CPCM (tblite `--cpcm`, `solvent_model cpcm` is an error; it is not the same model as xtb's COSMO, see below), CPCM-X (xtb `--cpcmx`),
+the ionic strength of xtb's GBSA, a choice of the Born kernel (ALPB always P16, GBSA always Still), the Lebedev grid size of ALPB/GBSA (230)
+and, for ALPB/GBSA, a solvent given only by its dielectric constant (COSMO accepts one). GFN-FF with `solvent_model gbsa` runs ALPB with a
+warning, as pprcht/gfnff does; xtb 6.7.1 runs a Still-kernel GBSA with the GFN2 parameters there. GFN-FF has no COSMO.
+
+## Native GFN1/GFN2 COSMO (ddCOSMO)
+
+🤖 AI-generated (Nov 2026), ⚙️ machine-tested only; human production testing pending. Code: `src/core/solvation/ddcosmo.{h,cpp}`
+(class `DdCosmoSolvation`), a line-by-line port of xtb 6.7.1 `src/solv/cosmo.f90` and its ddCOSMO backend `src/solv/ddcosmo/{core,solver}.f90`
+(Lipparini, Stamm, Cances, Maday, Mennucci; Cances et al., J. Chem. Phys. 139, 054111 (2013); Lipparini et al., J. Chem. Theory Comput. 9,
+3637 (2013)). Lebedev grids: `src/core/solvation/lebedev_xtb_grids.h`, generated from xtb `lebedev.f90` by `scripts/extract_lebedev_grids.py`.
+
+```bash
+curcuma -sp mol.xyz -method gfn2 -xtb.solvent water -xtb.solvent_model cosmo       # = xtb mol.xyz --gfn 2 --cosmo water
+curcuma -sp mol.xyz -method gfn1 -xtb.solvent 37.5 -xtb.solvent_model cosmo        # = xtb --cosmo 37.5 (dielectric constant)
+curcuma -opt mol.xyz -method gfn2 -xtb.solvent_model cosmo -xtb.solvent_epsilon 20 # epsilon alone also switches COSMO on
+```
+
+- **Model (as xtb)**: cavity of spheres with the COSMO radii of xtb (`vdwradcosmo.f90`, radius scale 1.0); surface charge per sphere in real
+  spherical harmonics up to `lmax` 6; Jacobi/DIIS solver to 1e-8; switching width eta 0.2; cavity grid = the Lebedev grid nearest to half of
+  `-xtb.cosmo_grid` (230 -> 110 points), surface-area grid = 230 points. Energy E = 1/2 (1 - 1/eps) <X, Psi> + sum_i gamma_i A_i (solvent
+  accessible surface, probe 1.3 A). Atomic charges: Mulliken for GFN2 and for GFN1 (xtb uses CM5 only with GBSA/ALPB, not with COSMO).
+  No hydrogen-bond term, no empirical shift, no reference-state shift: `-solvent_state` other than `gsolv` is an error with cosmo.
+- **Parameters**: a solvent name takes epsilon and the surface tensions of its ALPB set of the method (GFN1 or GFN2), exactly as xtb does
+  (xtb `model.f90` with cosmo); all 25 ALPB solvents. A number, or `-xtb.solvent_epsilon` without a name, takes the surface tensions of xtb's
+  default COSMO set (`param_cosmo.fh`, identical to the GFN1/ALPB/water set, checked). `-xtb.solvent_epsilon` with a name keeps the name's
+  surface tensions and replaces epsilon. xtb's `--cosmo inf` (conductor, own parameter set) is not ported.
+- **SCF coupling**: per SCF iteration one direct (L X = g) and one adjoint (L* S = Psi) solve, restarted from the previous solution; the
+  potential is v = keps sqrt(4 pi) X_00 - J^T zeta. Gradient: surface term plus the ddCOSMO force kernels (fdoka/fdokb/fdoga) plus the two
+  field terms; the adjoint is re-solved to 1e-3 of the threshold first, as in xtb.
+- **PARAMs** (module `xtb`): `cosmo_grid` (230), `cosmo_lmax` (6), `cosmo_conv` (1e-8), `cosmo_eta` (0.2), `solvent_epsilon`.
+- **GPU**: no device path. The model has no Born matrix, so `-gpu cuda|rocm` keep the host-driven SCF loop for the solvation potential.
+  Run once with `-gpu cuda` (methanol/water, gfn2, RTX 5080): energy equal to the CPU run within 5e-12 Eh (n = 1); ROCm and Vulkan not run.
+
+**Validation (Nov 22, 2026, xtb 6.7.1 `/opt/bin/xtb --gfn N --cosmo <solvent> --sp --acc 0.01`, curcuma `-scf_threshold 1e-9`):**
+20 single points, {water, methanol, caffeine, NH4+, acetate} x {gfn1, gfn2} x {water, acetone}: max |E_curcuma - E_xtb| = 2.8e-8 Eh
+(caffeine; its gas-phase difference without solvent is already 3.1e-8 Eh, the other molecules <= 5.2e-9 Eh); `--cosmo 37.5` and
+`-xtb.solvent_epsilon 37.5` on methanol 3.1e-9 Eh. Analytic gradient against central differences of curcuma's energy, max over all coordinates:
+h = 5e-4 A, 8 cases ({water, methanol, NH4+, acetate} x {gfn1, gfn2}, water or acetone): <= 4.7e-7 Eh/A (step truncation; acetate gfn2
+falls from 4.5e-7 to 7.2e-8 at h = 2e-4 A); h = 2e-4 A: water gfn2 3.8e-8, acetate gfn2 7.2e-8, caffeine gfn2 1.6e-7, NH4+ gfn1/acetone
+3.3e-7 Eh/A (5.3e-8 at h = 5e-4 A: the ddCOSMO threshold 1e-8 leaves an energy noise of about 1e-10 Eh that limits small steps).
+Against xtb's analytic gradient: <= 1.7e-8 Eh/A for water, methanol, NH4+, caffeine; acetate differs by 5e-4 Eh/A, but already in the gas
+phase (8.6e-4 Eh/A), where xtb's own finite difference (-3.62442e-3) agrees with curcuma's analytic value (-3.62446e-3) and not with xtb's
+analytic one (-2.76e-3), so this is an xtb gradient issue outside COSMO (not investigated further). Test: `ctest -R cli_sqm_19`.
+**Not tested**: other solvents than water/acetone and epsilon 37.5, metals and d elements (radius stub 2.223 A as xtb), large systems,
+molecules with grid points on a sphere pole in the force kernel, geometry optimisation and MD stability, GPU, periodic systems (not
+supported). Not implemented: CPCM-X, `--cosmo inf`, ionic strength, the `.cosmo` file output of xtb (`--tmcosmo`).
+
+**Difference to tblite's CPCM** (why `cpcm` is not an alias of `cosmo`; read from `tblite/solvation/cpcm.f90`, not run): tblite uses the
+same ddCOSMO core, but keps = 1/2 (1 - 1/eps) / (1 + 0.571412) (an extra ALPB-like factor), eta = 2.0 instead of 0.2, a 74-point cavity grid
+instead of 110, no non-polar surface term and epsilon only from the solvent. The energies therefore differ from xtb's COSMO.
 
 ## Usage
 
@@ -148,10 +198,10 @@ curcuma -sp molecule.xyz -method gfn2:tblite \\
 |--------|----------|-----------|------------------|
 | **GFN2** | TBLite | ✅ Yes | CPCM, GB, ALPB |
 | **GFN2** | Ulysses | ✅ Yes | GBSA |
-| **GFN2** | Native | ❌ Not yet | Planned |
+| **GFN2** | Native | Yes (AI-generated, machine-tested) | ALPB, GBSA, COSMO (ddCOSMO) |
 | **GFN1** | TBLite | ✅ Yes | CPCM, GB, ALPB |
 | **GFN1** | Ulysses | ✅ Yes | GBSA |
-| **GFN1** | Native | ❌ Not yet | Planned |
+| **GFN1** | Native | Yes (AI-generated, machine-tested) | ALPB, GBSA, COSMO (ddCOSMO) |
 | **PM6** | Ulysses | ✅ Yes | GBSA |
 | **PM6** | Native | ❌ Not yet | Planned |
 | **AM1** | Ulysses | ✅ Yes | GBSA |
