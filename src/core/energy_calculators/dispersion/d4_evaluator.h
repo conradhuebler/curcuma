@@ -211,6 +211,10 @@ public:
     // cache rationale on m_pairs_cache below.
     void invalidatePairCache() { m_pairs_cached = false; }
 
+    /// Wall time (ms) of the reference-weight and C6 set-up of the last computeATMPeriodic call (verbosity-3
+    /// profile only, no numerical effect). Claude Generated (Nov 2026).
+    double lastAtmSetupMs() const { return m_last_atm_setup_ms; }
+
 private:
     // The unified single-pair formula (see header comment).
     // Returns disp_sum = s6·t6 + s8·r4r2ij·t8 so callers can reuse it.
@@ -240,6 +244,7 @@ private:
     // lazily for m_threads>1; reused across SCF iterations and geometry steps.
     int m_threads = 1;
     std::unique_ptr<CxxThreadPool> m_pool;
+    double m_last_atm_setup_ms = 0.0;
 };
 
 }  // namespace curcuma::dispersion

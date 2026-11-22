@@ -575,9 +575,11 @@ double XTB::calcD4DispersionPeriodic(bool need_gradient) const
             atm_device = true;
         }
     }
-    if (!atm_device)
+    if (!atm_device) {
         E += m_d4_evaluator->computeATMPeriodic(m_atoms, geom_bohr, atm_images, /*with_gradient=*/true,
             m_disp_gradient, m_disp_dEdcn, vir);
+        t_atm_c6 = m_d4_evaluator->lastAtmSetupMs();   // profile only (C6 set-up inside the host ATM)
+    }
     const auto td2 = d4clk::now();
 
     // CN chain rule with the D4 CN's own derivative over images (as the cell-free path, d4_ncoord)
@@ -1580,6 +1582,8 @@ void XTB::addMultipoleGradientPeriodic(Matrix& gradient, Vector& dEdcn, Eigen::M
             Matrix& gb = g_b[blk];
             Vector& eb = dEdr_b[blk];
             double dEde[3][3];
+            // Stage 1 (Nov 2026): block-local virial, stored once (v_b elements shared cache lines between blocks)
+            Eigen::Matrix3d v_loc = Eigen::Matrix3d::Zero();
             for (int iat = blk; iat < nat; iat += NB) {
                 for (int jat = 0; jat <= iat; ++jat) {
                     double dG[3], dE;
@@ -1591,9 +1595,10 @@ void XTB::addMultipoleGradientPeriodic(Matrix& gradient, Vector& dEdcn, Eigen::M
                     }
                     if (virial)
                         for (int a = 0; a < 3; ++a)
-                            for (int b = 0; b < 3; ++b) v_b[blk](a, b) -= dEde[a][b];   // Xi = -dE/d(eps)
+                            for (int b = 0; b < 3; ++b) v_loc(a, b) -= dEde[a][b];   // Xi = -dE/d(eps)
                 }
             }
+            if (virial) v_b[blk] = v_loc;
         }
     });
     for (int blk = 0; blk < NB; ++blk) {

@@ -10,6 +10,7 @@
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <future>
 #include <limits>
@@ -401,11 +402,15 @@ double D4Evaluator::computeEnergyAndGradientPeriodic(const std::vector<int>& ato
     Matrix g_dummy;
     Vector v_dummy;
     runBlocks(NB, [&](int blk) {
-        double& Eb = E_b[blk];
+        // Stage 1 (Nov 2026): energy and virial accumulate in locals and are stored once per block. As elements
+        // of E_b / v_b they shared cache lines between the blocks (false sharing: every block ran 2x slower at 8
+        // threads). Same operations in the same order, so the same bits.
+        double Eb = 0.0;
+        Eigen::Matrix3d v_loc = Eigen::Matrix3d::Zero();
         Matrix& gb = with_gradient ? g_b[blk] : g_dummy;
         Vector& dcnb = with_gradient ? dcn_b[blk] : v_dummy;
         Vector& dqb = with_gradient ? dq_b[blk] : v_dummy;
-        Eigen::Matrix3d* vb = want_vir ? &v_b[blk] : nullptr;
+        Eigen::Matrix3d* vb = want_vir ? &v_loc : nullptr;
         for (int i = blk; i < natoms; i += NB) {
         for (int j = 0; j <= i; ++j) {
             const double rrij = 3.0 * sq_r4r2[i] * sq_r4r2[j];   // dftd4 rrij = 3 r4r2_i r4r2_j
@@ -452,6 +457,8 @@ double D4Evaluator::computeEnergyAndGradientPeriodic(const std::vector<int>& ato
                 });
         }
         }
+        E_b[blk] = Eb;
+        if (want_vir) v_b[blk] = v_loc;
     });
     double E_total = 0.0;
     for (int blk = 0; blk < NB; ++blk) {
@@ -701,23 +708,34 @@ double D4Evaluator::computeATMPeriodic(const std::vector<int>& atoms,
     const double eps = std::numeric_limits<double>::epsilon();
 
     // q = 0 reference C6 and dC6/dCN exactly as computeATM (dftd4 get_dispersion_nonsc).
+    // Stage 1 of the CPU threading pass (Claude Generated, Nov 2026): the reference weights and the C6 matrix
+    // were serial (O(N^2) contractions). Both are now filled on the fixed row blocks: every element is written
+    // once by a pure function of its own atoms, so the matrices are bitwise the serial ones for every thread count.
+    const auto t_setup0 = std::chrono::steady_clock::now();
     Matrix c6 = Matrix::Zero(nat, nat);
     Matrix dc6dcn;
     if (with_gradient) dc6dcn = Matrix::Zero(nat, nat);
     std::vector<D4ParameterGenerator::RefW> refw0(nat);
-    for (int a = 0; a < nat; ++a)
-        refw0[a] = m_data->buildAtomRefW(atoms[a], static_cast<size_t>(a), 0.0, with_gradient, false);
-    for (int a = 0; a < nat; ++a)
-        for (int b = 0; b <= a; ++b) {
-            D4ParameterGenerator::C6Gfn2 g = m_data->contractC6Gfn2(refw0[a], refw0[b], atoms[a], atoms[b],
-                                                                     with_gradient, false);
-            c6(a, b) = g.c6;
-            c6(b, a) = g.c6;
-            if (with_gradient) {
-                dc6dcn(a, b) = g.dc6dcni;
-                dc6dcn(b, a) = g.dc6dcnj;
+    const int NB = periodicBlockCount(nat);
+    runBlocks(NB, [&](int blk) {
+        for (int a = blk; a < nat; a += NB)
+            refw0[a] = m_data->buildAtomRefW(atoms[a], static_cast<size_t>(a), 0.0, with_gradient, false);
+    });
+    // row a writes (a, b) and (b, a) for b <= a: disjoint between rows
+    runBlocks(NB, [&](int blk) {
+        for (int a = blk; a < nat; a += NB)
+            for (int b = 0; b <= a; ++b) {
+                D4ParameterGenerator::C6Gfn2 g = m_data->contractC6Gfn2(refw0[a], refw0[b], atoms[a], atoms[b],
+                                                                         with_gradient, false);
+                c6(a, b) = g.c6;
+                c6(b, a) = g.c6;
+                if (with_gradient) {
+                    dc6dcn(a, b) = g.dc6dcni;
+                    dc6dcn(b, a) = g.dc6dcnj;
+                }
             }
-        }
+    });
+    m_last_atm_setup_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_setup0).count();
     std::vector<double> r4r2(nat);
     for (int a = 0; a < nat; ++a) r4r2[a] = m_data->getSqrtZr4r2(atoms[a]);
     if (with_gradient) {
@@ -733,7 +751,6 @@ double D4Evaluator::computeATMPeriodic(const std::vector<int>& atoms,
     struct Img { double v[3]; double r2; };
     // Stage T (Claude Generated, Nov 2026): fixed row blocks with per-block accumulators, reduced in block order
     // (thread-count independent result), per-block image buffers.
-    const int NB = periodicBlockCount(nat);
     std::vector<double> E_b(NB, 0.0);
     std::vector<Matrix> g_b;
     std::vector<Vector> dcn_b;
@@ -746,38 +763,44 @@ double D4Evaluator::computeATMPeriodic(const std::vector<int>& atoms,
     Matrix g_dummy;
     Vector v_dummy;
     runBlocks(NB, [&](int blk) {
-        double& Eb = E_b[blk];
+        // Stage 1 (Nov 2026): energy and virial in block-local accumulators, stored once at the end (as elements
+        // of E_b / v_b they shared cache lines between blocks: false sharing, each block ~2x slower at 8 threads).
+        double Eb = 0.0;
+        Eigen::Matrix3d v_loc = Eigen::Matrix3d::Zero();
         Matrix& gb = with_gradient ? g_b[blk] : g_dummy;
         Vector& dcnb = with_gradient ? dcn_b[blk] : v_dummy;
-        Eigen::Matrix3d* vb = want_vir ? &v_b[blk] : nullptr;
-        std::vector<Img> img_j;
-        auto collect = [&](int i, int j, std::vector<Img>& out) {
-            out.clear();
-            PBCUtils::forEachImage(images, &xyz[3 * i], &xyz[3 * j], i == j,
-                [&](double dx, double dy, double dz, double r2) { out.push_back({ { -dx, -dy, -dz }, r2 }); });
-        };
+        Eigen::Matrix3d* vb = want_vir ? &v_loc : nullptr;
+        // Stage 1 (Nov 2026): the partner images live in one flat buffer per block (offsets per partner) instead
+        // of one heap vector per (iat, jat); same partners, same image order.
         std::vector<int> nb_idx;                 // atoms jat <= iat with at least one image within the cutoff
-        std::vector<std::vector<Img>> nb_img;    // their images relative to iat (ascending jat, as the plain loop)
+        std::vector<size_t> nb_off;              // their images: flat[nb_off[a] .. nb_off[a + 1])
+        std::vector<Img> flat;
         for (int iat = blk; iat < nat; iat += NB) {
         // Stage T: the images of every partner are collected once per iat (O(N) per atom) instead of once per
         // (iat, jat, kat) triple; the triple loop then runs over the partners only. Same (iat, jat, kat) order and
         // the same image order as the plain loop, so the sums are bitwise unchanged.
         nb_idx.clear();
-        nb_img.clear();
+        nb_off.clear();
+        flat.clear();
+        nb_off.push_back(0);
         for (int jat = 0; jat <= iat; ++jat) {
-            collect(iat, jat, img_j);
-            if (img_j.empty()) continue;
+            const size_t before = flat.size();
+            PBCUtils::forEachImage(images, &xyz[3 * iat], &xyz[3 * jat], iat == jat,
+                [&](double dx, double dy, double dz, double r2) { flat.push_back({ { -dx, -dy, -dz }, r2 }); });
+            if (flat.size() == before) continue;
             nb_idx.push_back(jat);
-            nb_img.push_back(img_j);
+            nb_off.push_back(flat.size());
         }
         for (size_t a = 0; a < nb_idx.size(); ++a) {
             const int jat = nb_idx[a];
-            const std::vector<Img>& img_ja = nb_img[a];
+            const Img* ja_begin = flat.data() + nb_off[a];
+            const Img* ja_end = flat.data() + nb_off[a + 1];
             const double c6ij = c6(jat, iat);
             const double r0ij = a1 * std::sqrt(3.0 * r4r2[jat] * r4r2[iat]) + a2;
             for (size_t b = 0; b <= a; ++b) {
                 const int kat = nb_idx[b];
-                const std::vector<Img>& img_k = nb_img[b];
+                const Img* k_begin = flat.data() + nb_off[b];
+                const Img* k_end = flat.data() + nb_off[b + 1];
                 const double c6ik = c6(kat, iat);
                 const double c6jk = c6(kat, jat);
                 const double c9 = -s9 * std::sqrt(std::abs(c6ij * c6ik * c6jk));
@@ -785,9 +808,18 @@ double D4Evaluator::computeATMPeriodic(const std::vector<int>& atoms,
                 const double r0jk = a1 * std::sqrt(3.0 * r4r2[kat] * r4r2[jat]) + a2;
                 const double r0 = r0ij * r0ik * r0jk;
                 const double triple = atm_triple_scale(iat, jat, kat);
-                for (const Img& J : img_ja) {
+                // Stage 1: the dC6/dCN ratios of the triple, hoisted out of the image loops (same expressions)
+                double fcn_i = 0.0, fcn_j = 0.0, fcn_k = 0.0;
+                if (with_gradient) {
+                    fcn_i = dc6dcn(iat, jat) / c6ij + dc6dcn(iat, kat) / c6ik;
+                    fcn_j = dc6dcn(jat, iat) / c6ij + dc6dcn(jat, kat) / c6jk;
+                    fcn_k = dc6dcn(kat, iat) / c6ik + dc6dcn(kat, jat) / c6jk;
+                }
+                for (const Img* Jp = ja_begin; Jp != ja_end; ++Jp) {
+                    const Img& J = *Jp;
                     const double r2ij = J.r2;
-                    for (const Img& K : img_k) {
+                    for (const Img* Kp = k_begin; Kp != k_end; ++Kp) {
+                        const Img& K = *Kp;
                         const double r2ik = K.r2;
                         const double vjk[3] = { K.v[0] - J.v[0], K.v[1] - J.v[1], K.v[2] - J.v[2] };
                         const double r2jk = vjk[0] * vjk[0] + vjk[1] * vjk[1] + vjk[2] * vjk[2];
@@ -797,7 +829,8 @@ double D4Evaluator::computeATMPeriodic(const std::vector<int>& atoms,
                         const double r1 = std::sqrt(r2);
                         const double r3 = r2 * r1;
                         const double r5 = r3 * r2;
-                        const double fdmp = 1.0 / (1.0 + 6.0 * std::pow(r0 / r1, alp / 3.0));
+                        const double pw = std::pow(r0 / r1, alp / 3.0);   // Stage 1: evaluated once
+                        const double fdmp = 1.0 / (1.0 + 6.0 * pw);
                         const double ang = 0.375 * (r2ij + r2jk - r2ik) * (r2ij - r2jk + r2ik)
                                                * (-r2ij + r2jk + r2ik) / r5
                                          + 1.0 / r3;
@@ -814,7 +847,7 @@ double D4Evaluator::computeATMPeriodic(const std::vector<int>& atoms,
                             // pbc_xtb_classical): without the factor the periodic ATM gradient was 10 %
                             // off FD on the 8 A water-dimer cell. Not a tblite energy difference.
                             const double c9t = c9 * triple;
-                            const double dfdmp = -2.0 * alp * std::pow(r0 / r1, alp / 3.0) * fdmp * fdmp;
+                            const double dfdmp = -2.0 * alp * pw * fdmp * fdmp;
                             double dang = -0.375 * (r2ij*r2ij*r2ij + r2ij*r2ij*(r2jk + r2ik)
                                           + r2ij*(3.0*r2jk*r2jk + 2.0*r2jk*r2ik + 3.0*r2ik*r2ik)
                                           - 5.0*(r2jk - r2ik)*(r2jk - r2ik)*(r2jk + r2ik)) / r5;
@@ -839,15 +872,17 @@ double D4Evaluator::computeATMPeriodic(const std::vector<int>& atoms,
                                     for (int b2 = 0; b2 < 3; ++b2)
                                         (*vb)(a, b2) -= gij * J.v[a] * J.v[b2] + gik * K.v[a] * K.v[b2] + gjk * vjk[a] * vjk[b2];
                             }
-                            dcnb(iat) -= dE * 0.5 * (dc6dcn(iat, jat) / c6ij + dc6dcn(iat, kat) / c6ik);
-                            dcnb(jat) -= dE * 0.5 * (dc6dcn(jat, iat) / c6ij + dc6dcn(jat, kat) / c6jk);
-                            dcnb(kat) -= dE * 0.5 * (dc6dcn(kat, iat) / c6ik + dc6dcn(kat, jat) / c6jk);
+                            dcnb(iat) -= dE * 0.5 * fcn_i;
+                            dcnb(jat) -= dE * 0.5 * fcn_j;
+                            dcnb(kat) -= dE * 0.5 * fcn_k;
                         }
                     }
                 }
             }
         }
         }
+        E_b[blk] = Eb;
+        if (want_vir) v_b[blk] = v_loc;
     });
     double E_atm = 0.0;
     for (int blk = 0; blk < NB; ++blk) {
