@@ -88,6 +88,7 @@
 
 #pragma once
 
+#include "src/tools/pbc_gather.h"
 #include "src/tools/pbc_utils.h"
 
 #include <Eigen/Dense>
@@ -230,7 +231,12 @@ public:
     /// Dense Ewald matrix A (N x N, symmetric), A q = phi. O(N^2 N_k) flops (reciprocal part as rank-k updates
     /// in blocks of k vectors, B3): the dense EEQ matrix of a periodic cell up to ~1000 atoms, and tests.
     /// With gaussian_alp: A_ij -= erfc(g_ij r)/r (pairs, g r < XMAX) and A_ij += (pi/V)(alp_i + alp_j) (all i, j).
-    Eigen::MatrixXd matrix(const Eigen::MatrixXd& positions, const Eigen::VectorXd* gaussian_alp = nullptr) const;
+    /// run (Claude Generated, Nov 2026, CPU stage 2 of WP-PERIODIC-XTB): optional thread runner for the real-space
+    /// pair kernels (every element written once, same bits with and without it). The phase blocks stay serial (a
+    /// threaded fill changed the FMA choices of the complex products), the rank-k updates are BLAS calls whose
+    /// threads follow the caller's BLAS setting.
+    Eigen::MatrixXd matrix(const Eigen::MatrixXd& positions, const Eigen::VectorXd* gaussian_alp = nullptr,
+        const PBCGather::StripeRunner* run = nullptr) const;
     /// Reciprocal-space diagonal A_ii = sum_{k != 0} (4 pi/V) exp(-k^2/(4a^2))/k^2, the same for every atom
     /// (|e^{ik r}|^2 = 1); with the self and background terms it gives the diagonal of A for a Jacobi
     /// preconditioner without the matrix (B3, Claude Generated Nov 2026).

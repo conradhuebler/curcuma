@@ -688,14 +688,20 @@ Eigen::VectorXd EwaldSum::potentials(const Eigen::MatrixXd& positions, const Eig
 }
 
 // Claude Generated (Nov 2026): dense Ewald matrix, formula in ewald.h
-Eigen::MatrixXd EwaldSum::matrix(const Eigen::MatrixXd& positions, const Eigen::VectorXd* gaussian_alp) const
+Eigen::MatrixXd EwaldSum::matrix(const Eigen::MatrixXd& positions, const Eigen::VectorXd* gaussian_alp,
+    const PBCGather::StripeRunner* run) const
 {
     const int N = static_cast<int>(positions.rows());
     const double alpha = m_par.alpha;
     Eigen::MatrixXd A = Eigen::MatrixXd::Zero(N, N);
 
-    for (const auto& pr : realSpacePairs(positions)) {
-        const int i = pr.first, j = pr.second;
+    // CPU stage 2 (Nov 2026): the minimum-image pairs are distinct unordered pairs, so each element (i, j)/(j, i)
+    // receives one value; contiguous pair ranges per thread give the serial bits.
+    const std::vector<std::pair<int, int>> pairs = realSpacePairs(positions);
+    const long long npairs = static_cast<long long>(pairs.size());
+    PBCGather::runStripes(run, [&](int tid, int nth) {
+    for (long long idx = (npairs * tid) / nth; idx < (npairs * (tid + 1)) / nth; ++idx) {
+        const int i = pairs[idx].first, j = pairs[idx].second;
         double dx = positions(j, 0) - positions(i, 0), dy = positions(j, 1) - positions(i, 1),
                dz = positions(j, 2) - positions(i, 2);
         PBCUtils::applyMinimumImageOrtho(m_cell, dx, dy, dz);
@@ -710,6 +716,7 @@ Eigen::MatrixXd EwaldSum::matrix(const Eigen::MatrixXd& positions, const Eigen::
         A(i, j) += K;
         A(j, i) += K;
     }
+    });
     if (gaussian_alp) // (pi Q/V) sum_i q_i alp_i = 1/2 sum_ij q_i q_j (pi/V)(alp_i + alp_j)
         for (int i = 0; i < N; ++i)
             for (int j = 0; j < N; ++j)

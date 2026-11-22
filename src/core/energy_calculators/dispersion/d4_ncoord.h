@@ -28,6 +28,7 @@
 #pragma once
 
 #include "src/core/global.h"
+#include "src/tools/pbc_gather.h"
 #include "src/tools/pbc_utils.h"
 
 #include <vector>
@@ -73,7 +74,9 @@ void addD4CovalentCNGradient(const std::vector<int>& atoms,
  */
 std::vector<double> computeD4CovalentCNPeriodic(const std::vector<int>& atoms,
                                                 const Matrix& geom_bohr,
-                                                const PBCUtils::LatticeImageList& images);
+                                                const PBCUtils::LatticeImageList& images,
+                                                const PBCGather::StripeRunner* run = nullptr);
+/// run (CPU stage 2, Nov 2026): optional thread runner; the gather form gives the serial bits for any thread count.
 
 /**
  * @brief Periodic counterpart of addD4CovalentCNGradient: the same chain rule over every image
@@ -84,7 +87,8 @@ void addD4CovalentCNGradientPeriodic(const std::vector<int>& atoms,
                                      const Vector& dEdcn,
                                      Matrix& grad_out,
                                      const PBCUtils::LatticeImageList& images,
-                                     Eigen::Matrix3d* virial = nullptr);
+                                     Eigen::Matrix3d* virial = nullptr,
+                                     const PBCGather::StripeRunner* run = nullptr);
 /// virial (P4): Xi_ab -= (dE/dCN) dcountf/dr d_a d_b / r over every image pair incl. the self images (i, i, T).
 
 /**

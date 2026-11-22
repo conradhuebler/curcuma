@@ -2854,6 +2854,10 @@ double XTB::Calculation(bool gradient)
         // e.g. per MD step; the MD status line has 6 decimals)
         static const bool etrace = std::getenv("CURCUMA_XTB_ETRACE") != nullptr;
         if (etrace) fmt::print(stderr, "ETRACE {:.15f}\n", m_E_total);
+        // CPU threading pass (Nov 2026): the periodic virial at full precision as well (bitwise gates)
+        if (etrace && m_virial_valid)
+            fmt::print(stderr, "ETRACE_VIRIAL {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e}\n", m_virial(0, 0), m_virial(1, 1),
+                       m_virial(2, 2), m_virial(0, 1), m_virial(0, 2), m_virial(1, 2));
     }
     return m_E_total;
 }

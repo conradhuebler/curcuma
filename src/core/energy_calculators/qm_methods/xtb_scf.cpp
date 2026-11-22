@@ -17,6 +17,7 @@
  */
 
 #ifdef _OPENMP
+#include <optional>
 #include <omp.h>
 #endif
 
@@ -252,6 +253,10 @@ void XTB::buildOrthonormalizer()
     // (Eigen LLT, BLAS-backed, ~nao³/3 flops — far cheaper than the former full
     // eigendecomposition of S). solveEigen() reduces each F to standard form with
     // dsygst and back-transforms eigenvectors with a triangular solve; m_X holds L.
+    // CPU stage 2 (Claude Generated, Nov 2026): with a cell the factorisation runs on threaded BLAS (the gated
+    // intra-thread budget); without a cell no scope is set (unchanged).
+    std::optional<MklThreadScope> llt_blas;
+    if (m_pbc) llt_blas.emplace(effectiveIntraThreads(m_atomcount));
     Eigen::LLT<Matrix> llt(m_S);
     if (llt.info() != Eigen::Success) {
         // S not positive definite (near-linear-dependent basis): fall back to the

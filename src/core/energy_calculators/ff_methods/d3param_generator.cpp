@@ -232,7 +232,8 @@ double D3ParameterGenerator::getEnergyAndGradientPeriodic(bool need_gradient,
                                                           Matrix& gradient_out,
                                                           Vector& dEdcn_out,
                                                           const PBCUtils::LatticeImageList& images,
-                                                          Eigen::Matrix3d* virial_out) const
+                                                          Eigen::Matrix3d* virial_out,
+                                                          const PBCGather::StripeRunner* run) const
 {
     // Claude Generated (Nov 2026, WP-PERIODIC-XTB P1). Reference: s-dftd3 damping/rational.f90
     // get_dispersion_energy / get_dispersion_derivs with lattice translations: jat <= iat, every
@@ -261,15 +262,18 @@ double D3ParameterGenerator::getEnergyAndGradientPeriodic(bool need_gradient,
         for (int k = 0; k < 3; ++k)
             xyz_bohr[3 * i + k] = m_geometry(static_cast<Eigen::Index>(i), k) * au;
 
-    double energy = 0.0;
-    for (size_t i = 0; i < n; ++i) {
-        const int elem_i = m_atoms[i];
-        if (elem_i < 1 || elem_i > MAX_ELEM) continue;
-        for (size_t j = 0; j <= i; ++j) {
+    // CPU stage 2 (Claude Generated, Nov 2026): gather form (src/tools/pbc_gather.h), see the header.
+    const int N = static_cast<int>(n);
+    PBCGather::RowRecords<2> erec(N);                          // (w, term): energy += w * term
+    PBCGather::RowRecords<4> vrec(N, virial_out != nullptr);   // (gw, dx, dy, dz)
+    PBCGather::gatherSymmetricPairs(run, N, true, [&](int a, int ii, int jj, bool first) {
+            const size_t i = static_cast<size_t>(ii), j = static_cast<size_t>(jj);
+            const int elem_i = m_atoms[i];
+            if (elem_i < 1 || elem_i > MAX_ELEM) return;
             const int elem_j = m_atoms[j];
-            if (elem_j < 1 || elem_j > MAX_ELEM) continue;
+            if (elem_j < 1 || elem_j > MAX_ELEM) return;
             const double c6 = interpolateC6(elem_i, elem_j, i, j);
-            if (c6 <= 0.0) continue;
+            if (c6 <= 0.0) return;
             const double r6_ratio = getR6(elem_i, elem_j);
             const double c8 = c6 * r6_ratio;
             const double r0 = a1 * std::sqrt(r6_ratio) + a2;
@@ -283,31 +287,44 @@ double D3ParameterGenerator::getEnergyAndGradientPeriodic(bool need_gradient,
                     const double r = std::sqrt(r2);
                     const double t6 = 1.0 / (std::pow(r, 6) + r6_0);
                     const double t8 = 1.0 / (std::pow(r, 8) + r8_0);
-                    energy += w * (-s6 * c6 * t6 - s8 * c8 * t8);
+                    if (first) erec.push(a, { w, -s6 * c6 * t6 - s8 * c8 * t8 });
                     if (!need_gradient) return;
                     const double d6 = -6.0 * r2 * r2 * t6 * t6;
                     const double d8 = -8.0 * r2 * r2 * r2 * t8 * t8;
                     const double gdisp = s6 * d6 + s8 * r6_ratio * d8;
                     // d = x_i - (x_j + T); dE/dx_i = -c6 * gdisp * d (Eh/Bohr), the image of j gets the negative
                     if (!same) {
+                        // the statements of the serial loop verbatim, the row that is not atom a goes to a scratch
+                        // row: the same expressions give the compiler the same FMA choices (bitwise; a branch per
+                        // update changed them by 1e-19)
+                        double scratch[3] = { 0.0, 0.0, 0.0 };
+                        double* gi = first ? &gradient_out(a, 0) : scratch;
+                        double* gj = first ? scratch : &gradient_out(a, 0);
                         const double gx = -c6 * gdisp * dx, gy = -c6 * gdisp * dy, gz = -c6 * gdisp * dz;
-                        gradient_out(i, 0) += gx; gradient_out(j, 0) -= gx;
-                        gradient_out(i, 1) += gy; gradient_out(j, 1) -= gy;
-                        gradient_out(i, 2) += gz; gradient_out(j, 2) -= gz;
+                        gi[0] += gx; gj[0] -= gx;
+                        gi[1] += gy; gj[1] -= gy;
+                        gi[2] += gz; gj[2] -= gz;
                     }
-                    if (virial_out) {   // P4: Xi_ab -= w (dE/dd_a) d_b, self images with their 1/2 weight
-                        const double gw = -c6 * gdisp * w;
-                        const double d[3] = { dx, dy, dz };
-                        for (int a = 0; a < 3; ++a)
-                            for (int b = 0; b < 3; ++b) (*virial_out)(a, b) -= gw * d[a] * d[b];
-                    }
+                    if (virial_out && first)   // P4: Xi_ab -= w (dE/dd_a) d_b, self images with their 1/2 weight
+                        vrec.push(a, { -c6 * gdisp * w, dx, dy, dz });
                     // (i, i, T): the two ends move together, so the direct gradient of a self image is zero
                     const double edisp = s6 * t6 + s8 * r6_ratio * t8;
-                    dEdcn_out(i) -= w * m_dc6dcn(i, j) * edisp;
-                    dEdcn_out(j) -= w * m_dc6dcn(j, i) * edisp;
+                    double dscr = 0.0;
+                    double* di = first ? &dEdcn_out(a) : &dscr;
+                    double* dj = (first && !same) ? &dscr : &dEdcn_out(a);
+                    *di -= w * m_dc6dcn(i, j) * edisp;
+                    *dj -= w * m_dc6dcn(j, i) * edisp;
                 });
-        }
-    }
+    });
+    double energy = 0.0;
+    erec.replay([&](const std::array<double, 2>& r) { energy += r[0] * r[1]; });
+    if (virial_out)
+        vrec.replay([&](const std::array<double, 4>& r) {
+            const double gw = r[0];
+            const double d[3] = { r[1], r[2], r[3] };
+            for (int p = 0; p < 3; ++p)
+                for (int q = 0; q < 3; ++q) (*virial_out)(p, q) -= gw * d[p] * d[q];
+        });
     return energy;
 }
 

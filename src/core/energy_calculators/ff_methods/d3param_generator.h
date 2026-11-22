@@ -23,6 +23,7 @@
 #include "src/core/global.h"
 #include "src/core/parameter_macros.h"
 #include "src/core/config_manager.h"
+#include "src/tools/pbc_gather.h"
 #include "src/tools/pbc_utils.h"
 
 #include <Eigen/Dense>
@@ -154,8 +155,11 @@ public:
      */
     double getEnergyAndGradientPeriodic(bool need_gradient, Matrix& gradient_out, Vector& dEdcn_out,
                                         const PBCUtils::LatticeImageList& images,
-                                        Eigen::Matrix3d* virial_out = nullptr) const;
+                                        Eigen::Matrix3d* virial_out = nullptr,
+                                        const PBCGather::StripeRunner* run = nullptr) const;
     /// virial_out (P4): Xi_ab -= (dE/dd_a) d_b over every image pair incl. the self images (Eh), added into the 3x3.
+    /// run (CPU stage 2, Nov 2026): gather form; gradient, dE/dCN and the replayed energy and virial are bitwise
+    /// the serial loop for any thread count.
 
     // Energy calculation
     double getTotalEnergy() const;  // Returns total D3 dispersion energy (Eh)

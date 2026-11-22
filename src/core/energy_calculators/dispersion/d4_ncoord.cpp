@@ -137,9 +137,12 @@ D4CovalentCNTables d4CovalentCNTables()
 
 // Claude Generated (Nov 2026, WP-PERIODIC-XTB P1): dftd4 ncoord with lattice translations
 // (jat <= iat, every image; cn(iat) += countf, cn(jat) += countf when iat /= jat).
+// CPU stage 2 (Claude Generated, Nov 2026): gather form (src/tools/pbc_gather.h), atoms spread over the threads
+// of `run`; every cn[a] is summed in the order of the serial loop, so the result is bitwise the serial one.
 std::vector<double> computeD4CovalentCNPeriodic(const std::vector<int>& atoms,
                                                 const Matrix& geom_bohr,
-                                                const PBCUtils::LatticeImageList& images)
+                                                const PBCUtils::LatticeImageList& images,
+                                                const PBCGather::StripeRunner* run)
 {
     const int N = static_cast<int>(atoms.size());
     std::vector<double> cn(N, 0.0);
@@ -147,70 +150,82 @@ std::vector<double> computeD4CovalentCNPeriodic(const std::vector<int>& atoms,
     for (int i = 0; i < N; ++i)
         for (int k = 0; k < 3; ++k) xyz[3 * i + k] = geom_bohr(i, k);
 
-    for (int i = 0; i < N; ++i) {
+    PBCGather::gatherSymmetricPairs(run, N, true, [&](int a, int i, int j, bool first) {
         const int zi = atoms[i];
-        if (zi < 1 || zi > MAX_Z) continue;
-        for (int j = 0; j <= i; ++j) {
-            const int zj = atoms[j];
-            if (zj < 1 || zj > MAX_Z) continue;
-            const double rcovij = rad[zi] + rad[zj];
-            const double den = k4 * std::exp(-std::pow(std::fabs(en[zi] - en[zj]) + k5, 2) / k6);
-            const bool same = (i == j);
-            PBCUtils::forEachImage(images, &xyz[3 * i], &xyz[3 * j], same,
-                [&](double, double, double, double r2) {
-                    const double r = std::sqrt(r2);
-                    const double countf = den * erf_count(kn, r / rcovij);
-                    cn[i] += countf;
-                    if (!same) cn[j] += countf;
-                });
-        }
-    }
+        if (zi < 1 || zi > MAX_Z) return;
+        const int zj = atoms[j];
+        if (zj < 1 || zj > MAX_Z) return;
+        const double rcovij = rad[zi] + rad[zj];
+        const double den = k4 * std::exp(-std::pow(std::fabs(en[zi] - en[zj]) + k5, 2) / k6);
+        const bool same = (i == j);
+        PBCUtils::forEachImage(images, &xyz[3 * i], &xyz[3 * j], same,
+            [&](double, double, double, double r2) {
+                const double r = std::sqrt(r2);
+                const double countf = den * erf_count(kn, r / rcovij);
+                // the serial statements verbatim, the end that is not atom a writes to a scratch value: the same
+                // expressions give the compiler the same FMA choices (src/tools/pbc_gather.h)
+                double scr = 0.0;
+                double* ci = first ? &cn[a] : &scr;
+                double* cj = first ? &scr : &cn[a];
+                *ci += countf;
+                if (!same) *cj += countf;
+            });
+    });
     return cn;
 }
 
+// CPU stage 2 (Claude Generated, Nov 2026): gather form (src/tools/pbc_gather.h). The gradient of every atom is
+// summed in the serial order; the virial terms are recorded per row and replayed in the serial order, so both are
+// bitwise the serial loop for any thread count.
 void addD4CovalentCNGradientPeriodic(const std::vector<int>& atoms,
                                      const Matrix& geom_bohr,
                                      const Vector& dEdcn,
                                      Matrix& grad_out,
                                      const PBCUtils::LatticeImageList& images,
-                                     Eigen::Matrix3d* virial)
+                                     Eigen::Matrix3d* virial,
+                                     const PBCGather::StripeRunner* run)
 {
     const int N = static_cast<int>(atoms.size());
     if (dEdcn.size() != N) return;
     std::vector<double> xyz(3 * N);
     for (int i = 0; i < N; ++i)
         for (int k = 0; k < 3; ++k) xyz[3 * i + k] = geom_bohr(i, k);
+    PBCGather::RowRecords<4> vrec(N, virial != nullptr);   // (factor, dx, dy, dz)
 
-    for (int i = 0; i < N; ++i) {
+    // self images (j == i, T != 0): both ends move together, Cartesian derivative 0, but |T| scales with the
+    // cell, so they enter the virial (P4); visited only when a virial is requested
+    PBCGather::gatherSymmetricPairs(run, N, virial != nullptr, [&](int a, int i, int j, bool first) {
         const int zi = atoms[i];
-        if (zi < 1 || zi > MAX_Z) continue;
-        // self images (j == i, T != 0): both ends move together, Cartesian derivative 0, but |T| scales with the
-        // cell, so they enter the virial (P4); visited only when a virial is requested
-        for (int j = 0; j <= (virial ? i : i - 1); ++j) {
-            const int zj = atoms[j];
-            if (zj < 1 || zj > MAX_Z) continue;
-            const bool same = (i == j);
-            const double rcovij = rad[zi] + rad[zj];
-            const double den = k4 * std::exp(-std::pow(std::fabs(en[zi] - en[zj]) + k5, 2) / k6);
-            PBCUtils::forEachImage(images, &xyz[3 * i], &xyz[3 * j], same,
-                [&](double dx, double dy, double dz, double r2) {
-                    const double r = std::sqrt(r2);
-                    const double dcountf = den * derf_count(kn, r / rcovij) / rcovij;
-                    // the pair enters CN_i and (i != j) CN_j; a self image enters CN_i once per translation
-                    const double factor = (same ? dEdcn(i) : dEdcn(i) + dEdcn(j)) * dcountf / r;
-                    if (!same) {
-                        grad_out(i, 0) += factor * dx; grad_out(j, 0) -= factor * dx;
-                        grad_out(i, 1) += factor * dy; grad_out(j, 1) -= factor * dy;
-                        grad_out(i, 2) += factor * dz; grad_out(j, 2) -= factor * dz;
-                    }
-                    if (virial) {
-                        const double d[3] = { dx, dy, dz };
-                        for (int a = 0; a < 3; ++a)
-                            for (int b = 0; b < 3; ++b) (*virial)(a, b) -= factor * d[a] * d[b];
-                    }
-                });
-        }
-    }
+        if (zi < 1 || zi > MAX_Z) return;
+        const int zj = atoms[j];
+        if (zj < 1 || zj > MAX_Z) return;
+        const bool same = (i == j);
+        const double rcovij = rad[zi] + rad[zj];
+        const double den = k4 * std::exp(-std::pow(std::fabs(en[zi] - en[zj]) + k5, 2) / k6);
+        PBCUtils::forEachImage(images, &xyz[3 * i], &xyz[3 * j], same,
+            [&](double dx, double dy, double dz, double r2) {
+                const double r = std::sqrt(r2);
+                const double dcountf = den * derf_count(kn, r / rcovij) / rcovij;
+                // the pair enters CN_i and (i != j) CN_j; a self image enters CN_i once per translation
+                const double factor = (same ? dEdcn(i) : dEdcn(i) + dEdcn(j)) * dcountf / r;
+                if (!same) {   // serial statements verbatim, the other end to a scratch row (same FMA choices)
+                    double scratch[3] = { 0.0, 0.0, 0.0 };
+                    double* gi = first ? &grad_out(a, 0) : scratch;
+                    double* gj = first ? scratch : &grad_out(a, 0);
+                    gi[0] += factor * dx; gj[0] -= factor * dx;
+                    gi[1] += factor * dy; gj[1] -= factor * dy;
+                    gi[2] += factor * dz; gj[2] -= factor * dz;
+                }
+                if (virial && first) vrec.push(a, { factor, dx, dy, dz });
+            });
+    });
+    if (virial)
+        vrec.replay([&](const std::array<double, 4>& r) {
+            const double factor = r[0];
+            const double d[3] = { r[1], r[2], r[3] };
+            for (int p = 0; p < 3; ++p)
+                for (int q = 0; q < 3; ++q) (*virial)(p, q) -= factor * d[p] * d[q];
+        });
 }
 
 void addD4CovalentCNGradient(const std::vector<int>& atoms,
