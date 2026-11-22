@@ -14,7 +14,7 @@ Core data structures and shared infrastructure. All energy methods live in
 | Units, elements | `units.h` (`CurcumaUnit`, CODATA 2018), `elements.h`, `periodic_table.*` |
 | Numerics | `curcuma_eigen_config.h`, `blas_threads.h`, `math_compat.h`, `portable_{erf,exp,log,acos}.h`, `charge_extrapolation.h`, `intra_parallel_context.h` |
 | GPU infrastructure | `gpu_device_pool.*` (batch workers over GPUs), `gpu_fallback.*` (counts every CPU fallback) |
-| Other | `solvation/` (solvent tables, native ddCOSMO `ddcosmo.*` with xtb Lebedev grids, see docs/SOLVATION.md), `functional_groups.*`, `topology.h`, `form_factors.h`, `pseudoff.*`, `imagewriter.hpp` |
+| Other | `solvation/` (solvent tables, native ddCOSMO `ddcosmo.*` with xtb Lebedev grids, also tblite's CPCM via `DdCosmoSolvation::Model::TbliteCpcm` and `tblite_solvent_data.h`, see docs/SOLVATION.md), `functional_groups.*`, `topology.h`, `form_factors.h`, `pseudoff.*`, `imagewriter.hpp` |
 
 ## Parameter system
 

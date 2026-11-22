@@ -61,6 +61,16 @@
  * as xtb does for COSMO). Defaults are those of xtb: lmax 6, conv 1e-8, eta 0.2,
  * 230 grid points for the surface area and the grid nearest to 230/2 (110) for the cavity.
  *
+ * Two parameterisations share this ddCOSMO core (setModel()):
+ *  - Model::XtbCosmo (xtb 6.7.1 --cosmo, default): keps = 1/2 (1 - 1/eps), eta 0.2, cavity grid nearest to 230/2,
+ *    epsilon from the ALPB parameter set of the solvent, plus the surface term above.
+ *  - Model::TbliteCpcm (tblite 0.4.0 --cpcm, src/tblite/solvation/cpcm.f90 + cpcm_dd.f90):
+ *    keps = 1/2 (1 - 1/eps) / (1 + 0.571412) (tblite divides by 1 + alpha_ALPB), eta 2.0, cavity grid nearest to
+ *    74 points, epsilon from tblite's solvent table (tblite_solvent_data.h, water 78.36), no surface term, no
+ *    shift. tblite's cpcm_dd.f90 is the same ddCOSMO core as xtb's (identical switching function, lmax 6, conv 1e-8,
+ *    Jacobi/DIIS with 25 vectors, adjoint re-solved to conv * 1e-3 for the gradient); it only returns gradients
+ *    instead of forces (opposite signs in fdoka/fdokb/fdoga), which gives the same total.
+ *
  * Usage (same hooks as ALPB): init() once per molecule, update() per geometry,
  * addPotential() per SCF iteration, energy() and addGradient() at convergence.
  * All quantities in atomic units (Bohr, Hartree).
@@ -72,10 +82,17 @@ public:
     DdCosmoSolvation() = default;
     ~DdCosmoSolvation() override;
 
+    /// Parameterisation of the shared ddCOSMO core (see the class comment). Claude Generated (Nov 2026).
+    enum class Model { XtbCosmo, TbliteCpcm };
+
     // ---- settings (call before init) ----
+    /// Select xtb COSMO or tblite CPCM; resets grid and eta to the defaults of that model (call before the other setters).
+    void setModel(Model model);
+    Model model() const { return m_model; }
     /// Explicit dielectric constant; > 0 overrides the value of the solvent name. Claude Generated.
     void setDielectricOverride(double eps) { m_eps_override = eps; }
-    /// Lebedev points of the surface-area grid; the cavity grid is the one nearest to half of it (xtb). Claude Generated.
+    /// COSMO: Lebedev points of the surface-area grid, the cavity grid is the one nearest to half of it (xtb).
+    /// CPCM: the cavity grid is the one nearest to this number (tblite). Claude Generated.
     void setGridPoints(int nang) { m_nang_request = nang; }
     /// Maximum angular momentum of the spherical-harmonics expansion (xtb: 6). Claude Generated.
     void setLmax(int lmax) { m_lmax = lmax; }
@@ -100,7 +117,8 @@ public:
                      const Vector& q_at, Matrix& gradient) override;
 
     /// True if init() would accept this solvent for the method (name with an ALPB set or a number). Claude Generated.
-    static bool solventAvailable(const std::string& method, const std::string& solvent);
+    static bool solventAvailable(const std::string& method, const std::string& solvent,
+                                 Model model = Model::XtbCosmo);
 
     double dielectricConstant() const { return m_eps; }
     /// Non-polar surface energy of the current geometry (Eh).
@@ -148,6 +166,7 @@ private:
     double zi(int c, int ig, int iat) const { return m_zi[c + 3 * (ig + m_ngrid * iat)]; }
 
     // settings
+    Model m_model = Model::XtbCosmo;
     double m_eps_override = -1.0;
     int m_nang_request = 230;
     int m_lmax = 6;
@@ -158,7 +177,7 @@ private:
     bool m_initialized = false;
     int m_nat = 0;
     double m_eps = 0.0;
-    double m_keps = 0.0;                 ///< 1/2 (1 - 1/eps)
+    double m_keps = 0.0;                 ///< 1/2 (1 - 1/eps), CPCM: divided by 1 + 0.571412
     std::string m_solvent, m_method, m_param_source;
     Eigen::VectorXd m_rvdw;              ///< cavity radii (Bohr)
     Eigen::VectorXd m_vdwsa;             ///< surface radii incl. probe (Bohr)

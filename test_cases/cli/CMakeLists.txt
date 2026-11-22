@@ -374,6 +374,7 @@ add_cli_test(sqm 16_scf_criterion_xtb)              # -scf_criterion xtb / -scf_
 add_cli_test(sqm 17_md_default_aspc)               # MD with native gfn1/gfn2 extrapolates SCC charges (aspc) by default (Nov 2026)
 add_cli_test(sqm 18_solvent_names_states)           # solvent names (case, xtb aliases), errors, reference states bar1M/reference (Nov 2026)
 add_cli_test(sqm 19_cosmo_solvation)                # native ddCOSMO vs xtb 6.7.1 --cosmo, FD gradient, errors (Nov 2026)
+add_cli_test(sqm 20_cpcm_solvation)                 # native CPCM vs tblite 0.4.0 --cpcm, FD gradient, errors (Nov 2026)
 # -scf_precond frag on the device-resident CUDA loop (Oct 2026); exit 77 (skip) without a usable CUDA device.
 if(USE_CUDA)
     add_cli_test(sqm 13_gfn2_scf_precond_cuda)

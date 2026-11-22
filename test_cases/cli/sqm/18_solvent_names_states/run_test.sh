@@ -4,7 +4,8 @@
 # Claude Generated (Nov 2026). AI-generated, machine-tested only.
 #
 #   (a) any case and the xtb aliases give the energy of the canonical name, and that energy is not the gas phase
-#   (b) an unknown solvent, a GBSA solvent without parameters, cpcm and an unknown state are errors (exit code != 0)
+#   (b) an unknown solvent, a GBSA solvent without parameters, cpcm with a state other than gsolv (tblite rejects it too)
+#       and an unknown state are errors (exit code != 0)
 #   (c) -solvent_state (one flat argument for gfn1, gfn2 and gfnff): bar1M and reference shift the energy as xtb 6.7.1 does
 #       (reference values measured with xtb 6.7.1 --alpb <solvent> <state> on methanol, identical for gfn1, gfn2, gfnff):
 #       bar1M - gsolv = +3.0312463360e-3 Eh; reference - gsolv: water +1.8137894620e-3, acetone -6.2090370e-4, octanol -2.0990886180e-3.
@@ -110,8 +111,8 @@ main() {
     expect_error e2.log "unknown solvent" "gfn1 GBSA without a dmf parameter set is an error"
     run e3.log -method gfnff -gfnff.solvent watr
     expect_error e3.log "unknown solvent" "gfnff: unknown solvent is an error"
-    run e4.log -method gfn2 -xtb.solvent water -xtb.solvent_model cpcm
-    expect_error e4.log "cpcm" "gfn2: cpcm has no native implementation (error)"
+    run e4.log -method gfn2 -xtb.solvent water -xtb.solvent_model cpcm -solvent_state bar1M
+    expect_error e4.log "solvent_state" "gfn2: cpcm with solvent_state bar1M is an error (as tblite --cpcm)"
     run e5.log -method gfn2 -xtb.solvent water -solvent_state foo
     expect_error e5.log "solvent_state" "gfn2: unknown solvent_state is an error"
     run e6.log -method gfnff -gfnff.solvent water -solvent_state foo

@@ -458,9 +458,6 @@ void validateNativeSolvation(const std::string& host, const json& cfg)
                 code = static_cast<int>(std::lround(m->get<double>()));
             }
         }
-        if (code == 1)
-            fail("solvent_model cpcm has no native implementation yet (alpb, gbsa and cosmo are available; "
-                 "tblite's CPCM differs from xtb's COSMO in the dielectric scaling, the grid, the switching width and the surface term, see docs/SOLVATION.md)");
     }
     const json* sv = find("solvent");
     std::string solvent;
@@ -470,17 +467,22 @@ void validateNativeSolvation(const std::string& host, const json& cfg)
     if (const json* e = find("solvent_epsilon"); e && e->is_number()) eps = e->get<double>();
 
     // Native ddCOSMO (Nov 2026): a solvent name with an ALPB set, a number (dielectric constant) or solvent_epsilon > 0;
-    // only the gsolv state (xtb applies no state shift to COSMO).
-    if (code == 4) {
+    // only the gsolv state (xtb applies no state shift to COSMO). Native CPCM (code 1, tblite's model on the same solver):
+    // a name from tblite's solvent table, a number or solvent_epsilon; gsolv only (tblite rejects other states for CPCM).
+    if (code == 4 || code == 1) {
+        const bool cpcm = (code == 1);
+        const char* tag = cpcm ? "cpcm" : "cosmo";
         if (curcuma::solvation::isGasPhase(solvent) && !(eps > 0.0)) return;
-        if (!(eps > 0.0) && !DdCosmoSolvation::solventAvailable(host, solvent))
-            fail(fmt::format("Unknown solvent '{}' for native {} COSMO (a solvent with an ALPB parameter set, a dielectric "
-                             "constant, or -xtb.solvent_epsilon)", solvent, host));
+        const auto model = cpcm ? DdCosmoSolvation::Model::TbliteCpcm : DdCosmoSolvation::Model::XtbCosmo;
+        if (!(eps > 0.0) && !DdCosmoSolvation::solventAvailable(host, solvent, model))
+            fail(fmt::format("Unknown solvent '{}' for native {} {} ({}, a dielectric constant, or -xtb.solvent_epsilon)",
+                             solvent, host, cpcm ? "CPCM" : "COSMO",
+                             cpcm ? "a solvent of tblite's solvent table" : "a solvent with an ALPB parameter set"));
         if (const json* st = find("solvent_state")) {
             curcuma::solvation::SolutionState s;
             if (st->is_string() && (!curcuma::solvation::parseSolutionState(st->get<std::string>(), s)
                                     || s != curcuma::solvation::SolutionState::GSolv))
-                fail("solvent_state '" + st->get<std::string>() + "' is not available for solvent_model cosmo (gsolv only)");
+                fail("solvent_state '" + st->get<std::string>() + "' is not available for solvent_model " + tag + " (gsolv only)");
         }
         return;
     }

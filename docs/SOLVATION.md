@@ -8,14 +8,16 @@ Curcuma supports implicit solvation models for quantum chemistry calculations:
 
 - **TBLite Interface**: CPCM, GB (Generalized Born), ALPB for GFN methods. ⚠️ **Pending**:
   this path needs `USE_TBLITE=ON`; the reference dev build (`release/`) has TBLite off, so
-  the TBLite Interface solvation models (CPCM in particular — not yet native, see below)
-  are currently unverified in that build. Native ALPB/GBSA below are unaffected.
+  the TBLite Interface solvation models are currently unverified in that build. Native ALPB/GBSA/COSMO/CPCM below are
+  unaffected.
 - **Ulysses Interface**: GBSA (Generalized Born) for GFN and MNDO methods
 - **Native GFN1/GFN2**: ⚠️ self-consistent **ALPB** and **GBSA** (June 2026) —
   AI-implemented, machine-tested vs tblite (≤1e-8 Eh on the validation set), human
-  production testing pending. CPCM not yet implemented natively. See below.
+  production testing pending. See below.
 - **Native GFN1/GFN2 COSMO**: 🤖 AI-generated, ⚙️ machine-tested only, human production testing pending:
   self-consistent **ddCOSMO** (Nov 2026), a port of xtb 6.7.1 `--cosmo` (section "Native GFN1/GFN2 COSMO").
+- **Native GFN1/GFN2 CPCM**: 🤖 AI-generated, ⚙️ machine-tested only, human production testing pending: tblite 0.4.0 `--cpcm`
+  on the same ddCOSMO solver (Nov 2026, section "Native GFN1/GFN2 CPCM").
 - **Native GFN-FF**: ⚠️ self-consistent **ALPB** (June 2026, WP5) — the Born reaction
   field couples into the EEQ charge solve (`A_eeq += B`), so the EEQ charges polarize in
   the solvent. Matches **xtb 6.7.1** (`--gfnff --alpb`) to ≤1e-8 Eh (7 mol × 4 solvents,
@@ -42,7 +44,7 @@ curcuma -opt mol.xyz -method gfn1 -xtb.solvent dmso                          # d
 ```
 
 - `-xtb.solvent <name>`: water, dmso, acetone, chloroform, methanol, … (tblite set)
-- `-xtb.solvent_model`: `alpb` (default when a solvent is given), `gbsa`, `cosmo` (ddCOSMO, below), `cpcm` (not yet native, error), `none`.
+- `-xtb.solvent_model`: `alpb` (default when a solvent is given), `gbsa`, `cosmo` (ddCOSMO, below), `cpcm` (tblite's CPCM, below), `none`.
   Legacy numeric codes (3=alpb, 2=gbsa, 1=cpcm, 0=none) are still accepted; `cosmo` has no numeric code.
 - ROCm (`-gpu rocm`): the reaction field v_at += B q_at enters the device SCF potential and the resident loop (`-xtb.rocm_device_solvation`, default true; energy and gradient on the host); see [GPU_TUNING.md](GPU_TUNING.md).
 
@@ -99,10 +101,10 @@ CODATA-2018 kB. Against xtb 6.7.1 the shifts agree to 3e-9 Eh (`ctest -R cli_sqm
 
 ### Not implemented natively
 
-CPCM (tblite `--cpcm`, `solvent_model cpcm` is an error; it is not the same model as xtb's COSMO, see below), CPCM-X (xtb `--cpcmx`),
+CPCM-X (xtb `--cpcmx`),
 the ionic strength of xtb's GBSA, a choice of the Born kernel (ALPB always P16, GBSA always Still), the Lebedev grid size of ALPB/GBSA (230)
-and, for ALPB/GBSA, a solvent given only by its dielectric constant (COSMO accepts one). GFN-FF with `solvent_model gbsa` runs ALPB with a
-warning, as pprcht/gfnff does; xtb 6.7.1 runs a Still-kernel GBSA with the GFN2 parameters there. GFN-FF has no COSMO.
+and, for ALPB/GBSA, a solvent given only by its dielectric constant (COSMO and CPCM accept one). GFN-FF with `solvent_model gbsa` runs ALPB with a
+warning, as pprcht/gfnff does; xtb 6.7.1 runs a Still-kernel GBSA with the GFN2 parameters there. GFN-FF has no COSMO and no CPCM.
 
 ## Native GFN1/GFN2 COSMO (ddCOSMO)
 
@@ -147,9 +149,52 @@ analytic one (-2.76e-3), so this is an xtb gradient issue outside COSMO (not inv
 molecules with grid points on a sphere pole in the force kernel, geometry optimisation and MD stability, GPU, periodic systems (not
 supported). Not implemented: CPCM-X, `--cosmo inf`, ionic strength, the `.cosmo` file output of xtb (`--tmcosmo`).
 
-**Difference to tblite's CPCM** (why `cpcm` is not an alias of `cosmo`; read from `tblite/solvation/cpcm.f90`, not run): tblite uses the
-same ddCOSMO core, but keps = 1/2 (1 - 1/eps) / (1 + 0.571412) (an extra ALPB-like factor), eta = 2.0 instead of 0.2, a 74-point cavity grid
-instead of 110, no non-polar surface term and epsilon only from the solvent. The energies therefore differ from xtb's COSMO.
+## Native GFN1/GFN2 CPCM (tblite model)
+
+🤖 AI-generated (Nov 2026), ⚙️ machine-tested only; human production testing pending. tblite 0.4.0 (commit 9ca469a)
+`src/tblite/solvation/cpcm.f90` on the ddCOSMO class above (`DdCosmoSolvation::Model::TbliteCpcm`); solvent table
+`src/core/solvation/tblite_solvent_data.h` (epsilon column of tblite `data.f90`, `get_solvent_data`).
+
+```bash
+curcuma -sp mol.xyz -method gfn2 -xtb.solvent water -xtb.solvent_model cpcm      # = tblite run --method gfn2 --cpcm water
+curcuma -sp mol.xyz -method gfn1 -solvent 37.5 -solvent_model cpcm                # = tblite --cpcm 37.5 (flat flags also work)
+curcuma -md mol.xyz -method gfn2 -xtb.solvent_model cpcm -xtb.solvent_epsilon 20  # epsilon alone also switches CPCM on
+```
+
+tblite's `cpcm_dd.f90` is the ddCOSMO core of xtb (`core.f90` + `solver.f90`), read side by side: same switching function, neighbour
+list, Y_lm basis, Jacobi/DIIS (25 vectors, drop 10), H^-1/2 norm, 200 iterations, adjoint re-solved to conv * 1e-3 for the gradient;
+it returns gradients instead of forces (fdoka/fdokb/fdoga with the opposite sign), the same total. So no second core was written;
+CPCM differs from COSMO only in the parameters:
+
+| | xtb COSMO (`cosmo`) | tblite CPCM (`cpcm`) |
+|---|---|---|
+| keps | 1/2 (1 - 1/eps) | 1/2 (1 - 1/eps) / (1 + 0.571412) |
+| eta (switching width) | 0.2 | 2.0 (`cpcm_input` default; the CLI does not change it) |
+| cavity grid | nearest to 230/2 = 110 points | nearest to 74 points |
+| epsilon of a name | ALPB parameter set (water 80.2) | tblite solvent table (water 78.36), 112 names incl. `inf` |
+| non-polar term | SASA, surface tensions of the ALPB set | none |
+| radii, lmax, conv, charges | COSMO radii, 6, 1e-8, Mulliken (GFN1 too) | same |
+| reference state | gsolv only (error otherwise) | gsolv only (tblite: "Solution state shift not supported for CPCM") |
+
+`cosmo_grid`, `cosmo_lmax`, `cosmo_conv`, `cosmo_eta` do not apply to `cpcm`, which keeps tblite's fixed defaults; no new PARAMs.
+
+**Validation (Nov 22, 2026, `tblite run --method gfnN --cpcm <solvent> --acc 0.0001`, curcuma `-scf_threshold 1e-10`):** 24 single points
+{water, methanol, caffeine, NH4+, OH-, H2S} x {gfn1, gfn2} x {water, hexane}: max |E_curcuma - E_tblite| = 7.8e-10 Eh (caffeine gfn2), equal to
+the gas-phase difference (caffeine gfn2 7.5e-10, methanol gfn2 5.0e-10 Eh). `--cpcm 37.5` (name and `-xtb.solvent_epsilon`) 4.9e-10,
+pyridine (no ALPB set) 8e-11, `inf` 3e-14 Eh. Analytic gradient against `tblite --grad`: max 1.9e-9 Eh/A over the 24 cases. Against central
+differences of curcuma's energy (h = 2e-4 A): methanol gfn2 3.7e-8, NH4+ gfn1/hexane 4.8e-9, caffeine gfn2 1.2e-7, OH- gfn2 3.1e-8,
+H2S gfn1/hexane 1.4e-7, water gfn1 3.5e-8 Eh/A. Test: `ctest -R cli_sqm_20`.
+
+**Properties of tblite's model that curcuma reproduces (not curcuma bugs):** for small neutral molecules the CPCM energy lies *above*
+the gas phase (water gfn2: +2.0e-3 Eh in tblite and curcuma; methanol +8.9e-4 Eh), ions are stabilised (NH4+ -0.10 Eh). With eta = 2 the
+switching function is 0.5 at the centre of a neighbour sphere, so grid points inside neighbour spheres stay partly in the cavity. The surface
+is stiff: in a 500 fs NVE run of methanol (gfn2, water, n = 1) the total energy spans 4.2e-4 Eh (gas, ALPB, COSMO: 1.5-1.6e-4), with single-step
+spikes; at the spike frame curcuma's energy equals tblite within 3e-11 Eh and its gradient tblite's within 1.6e-10 Eh/A, and the FD error
+there falls as h^2 (3.9e-5 at h = 1e-3 A, 9.8e-8 at 5e-5 A), i.e. large curvature, not a wrong gradient.
+**Not tested**: other solvents than water/hexane/pyridine/37.5/inf, metals and d elements (radius stub 2.223 A), large systems, long MD,
+ROCm and Vulkan, periodic systems. CUDA keeps the host-driven SCF loop as for COSMO; one run (caffeine gfn2/water, RTX 5080, n = 1)
+equals the CPU energy within 3e-14 Eh and the gradient within 3.5e-11 Eh/A. Not implemented: tblite's `cpcm_input` options `nang`, `rscale`, `eta`, `lmax` (tblite's CLI exposes
+none of them either).
 
 ## Usage
 
@@ -198,10 +243,10 @@ curcuma -sp molecule.xyz -method gfn2:tblite \\
 |--------|----------|-----------|------------------|
 | **GFN2** | TBLite | ✅ Yes | CPCM, GB, ALPB |
 | **GFN2** | Ulysses | ✅ Yes | GBSA |
-| **GFN2** | Native | Yes (AI-generated, machine-tested) | ALPB, GBSA, COSMO (ddCOSMO) |
+| **GFN2** | Native | Yes (AI-generated, machine-tested) | ALPB, GBSA, COSMO (ddCOSMO), CPCM (tblite) |
 | **GFN1** | TBLite | ✅ Yes | CPCM, GB, ALPB |
 | **GFN1** | Ulysses | ✅ Yes | GBSA |
-| **GFN1** | Native | Yes (AI-generated, machine-tested) | ALPB, GBSA, COSMO (ddCOSMO) |
+| **GFN1** | Native | Yes (AI-generated, machine-tested) | ALPB, GBSA, COSMO (ddCOSMO), CPCM (tblite) |
 | **PM6** | Ulysses | ✅ Yes | GBSA |
 | **PM6** | Native | ❌ Not yet | Planned |
 | **AM1** | Ulysses | ✅ Yes | GBSA |

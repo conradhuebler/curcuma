@@ -13,6 +13,9 @@
  *   xtb/src/solv/ddcosmo/solver.f90 (Jacobi/DIIS solver, L and L* actions, H^-1/2 norm)
  *   xtb/src/solv/sasa.f90           (numerical solvent accessible surface and its derivative)
  * Fortran indices are 1-based, here 0-based: (l, m) lives at l*l + l + m.
+ * Claude Generated (Nov 2026): Model::TbliteCpcm, the CPCM of tblite 0.4.0 (src/tblite/solvation/cpcm.f90 on the
+ * ddCOSMO core cpcm_dd.f90, which is xtb's core.f90 + solver.f90 with gradient instead of force sign convention):
+ * only init() differs (epsilon table, keps, grid, eta, no surface term).
  * AI-generated, machine-tested only; human production testing pending.
  */
 
@@ -21,6 +24,7 @@
 #include "lebedev_xtb_grids.h"
 #include "solvent_names.h"
 #include "tblite_solvation_params.h"
+#include "tblite_solvent_data.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/energy_calculators/ff_methods/alpb_parameters.h"
 
@@ -51,6 +55,14 @@ constexpr double kSurfaceTension = 1.0e-5;   // model.f90 surfaceTension
 constexpr double kProbeRadAA = 1.3;          // param_cosmo.fh rprobe (Angstrom)
 constexpr double kRadScale = 1.0;            // param_cosmo.fh c1 (bornScale)
 constexpr double kROffsetAA = 2.0;           // model.f90 srcut, passed as rOffset
+
+// tblite CPCM (cpcm.f90): keps is divided by 1 + alpha_alpb, alpha_alpb = 0.571412 (the ALPB shape constant);
+// cpcm_input defaults nang = grid_size(6) = 74, eta = 2.0, lmax 6, conv 1e-8, rscale 1.
+constexpr double kAlphaAlpb = 0.571412;
+constexpr int kCpcmGrid = 74;
+constexpr double kCpcmEta = 2.0;
+constexpr int kCosmoGrid = 230;
+constexpr double kCosmoEta = 0.2;
 
 /// COSMO-optimised van-der-Waals radii in Angstrom (xtb/src/param/vdwradcosmo.f90), Z = 1..94.
 constexpr double kStub = 2.223;
@@ -89,11 +101,20 @@ bool parseNumber(const std::string& s, double& value)
 
 DdCosmoSolvation::~DdCosmoSolvation() = default;
 
-bool DdCosmoSolvation::solventAvailable(const std::string& method, const std::string& solvent)
+void DdCosmoSolvation::setModel(Model model)
+{
+    m_model = model;
+    m_nang_request = (model == Model::TbliteCpcm) ? kCpcmGrid : kCosmoGrid;
+    m_eta = (model == Model::TbliteCpcm) ? kCpcmEta : kCosmoEta;
+}
+
+bool DdCosmoSolvation::solventAvailable(const std::string& method, const std::string& solvent, Model model)
 {
     double eps = 0.0;
     if (parseNumber(solvent, eps))
         return eps > 0.0;
+    if (model == Model::TbliteCpcm)
+        return curcuma::solvation::tbliteSolventEpsilon(solvent) > 0.0;
     return curcuma::solvation::getTbliteSolvationParam(method, true, curcuma::solvation::normalizeSolventName(solvent))
         != nullptr;
 }
@@ -110,13 +131,30 @@ bool DdCosmoSolvation::init(const std::vector<int>& atomic_numbers, const std::s
     // takes epsv and gamscale of its ALPB set of the method level (GFN1 or GFN2), everything else from gfn_cosmo
     // (probe 1.3 A, radius scale 1, COSMO radii, no H-bond term, no shift). A number is the dielectric constant
     // and keeps the gamscale of gfn_cosmo, which equals the gfn1/ALPB/water set (checked against param_cosmo.fh).
+    const bool cpcm = (m_model == Model::TbliteCpcm);
     const std::string key = curcuma::solvation::normalizeSolventName(solvent);
     const auto* named = curcuma::solvation::getTbliteSolvationParam(method, true, key);
     const auto* deflt = curcuma::solvation::getTbliteSolvationParam("gfn1", true, "water");
     double eps_number = 0.0;
     const bool is_number = parseNumber(solvent, eps_number);
     const double* gamscale = nullptr;
-    if (m_eps_override > 0.0) {
+    const double cpcm_eps = cpcm ? curcuma::solvation::tbliteSolventEpsilon(solvent) : -1.0;
+    if (cpcm) {
+        // tblite app/cli.f90 --cpcm: a solvent name from get_solvent_data, else the argument as a number
+        if (m_eps_override > 0.0) {
+            m_eps = m_eps_override;
+            m_param_source = "explicit epsilon";
+        } else if (cpcm_eps > 0.0) {
+            m_eps = cpcm_eps;
+            m_param_source = "tblite solvent table/" + solvent;
+        } else if (is_number && eps_number > 0.0) {
+            m_eps = eps_number;
+            m_param_source = "epsilon from the solvent argument";
+        } else {
+            CurcumaLogger::error("CPCM: solvent '" + solvent + "' is neither in tblite's solvent table nor a dielectric constant");
+            return false;
+        }
+    } else if (m_eps_override > 0.0) {
         m_eps = m_eps_override;
         gamscale = named ? named->gamscale : deflt->gamscale;
         m_param_source = named ? method + "/ALPB/" + key + " surface tensions, explicit epsilon"
@@ -138,6 +176,8 @@ bool DdCosmoSolvation::init(const std::vector<int>& atomic_numbers, const std::s
         return false;
     }
     m_keps = 0.5 * (1.0 - 1.0 / m_eps);   // cosmo.f90 addShift
+    if (cpcm)
+        m_keps /= (1.0 + kAlphaAlpb);     // tblite cpcm.f90 new_cpcm: -0.5 (1/eps - 1) / (1 + alpha_alpb)
 
     if (m_lmax < 1 || m_lmax > 20) {
         CurcumaLogger::error("COSMO: lmax must be between 1 and 20");
@@ -166,14 +206,15 @@ bool DdCosmoSolvation::init(const std::vector<int>& atomic_numbers, const std::s
         m_wrp(i) = (0.25 / kW + 3.0 * kAh3 * (0.2 * r * r - 0.5 * r * m_vdwsa(i) + m_vdwsa(i) * m_vdwsa(i) / 3.0)) * r * r * r;
         r = m_vdwsa(i) - kW;
         m_wrp(i) -= (0.25 / kW + 3.0 * kAh3 * (0.2 * r * r - 0.5 * r * m_vdwsa(i) + m_vdwsa(i) * m_vdwsa(i) / 3.0)) * r * r * r;
-        m_gamsasa(i) = gamscale[z - 1] * fourpi * kSurfaceTension;
+        m_gamsasa(i) = cpcm ? 0.0 : gamscale[z - 1] * fourpi * kSurfaceTension;   // CPCM: no surface term
     }
     m_srcut = 2.0 * (kW + m_vdwsa.maxCoeff()) + kROffsetAA * aatoau;
 
-    // grids: cavity grid nearest to nAng/2, surface grid nearest to nAng (bisectSearch as xtb)
+    // grids: COSMO cavity grid nearest to nAng/2, surface grid nearest to nAng (bisectSearch as xtb);
+    // CPCM cavity grid nearest to nAng (tblite list_bisection), no surface grid
     namespace leb = curcuma::solvation::lebedev;
-    const int icav = leb::bisectGridIndex(m_nang_request / 2);
-    const int isas = leb::bisectGridIndex(m_nang_request);
+    const int icav = leb::bisectGridIndex(cpcm ? m_nang_request : m_nang_request / 2);
+    const int isas = cpcm ? icav : leb::bisectGridIndex(m_nang_request);
     std::vector<double> gx, gw;
     if (icav < 0 || isas < 0 || !leb::getAngGrid(icav, gx, gw)) {
         CurcumaLogger::error(fmt::format("COSMO: no Lebedev grid for {} points", m_nang_request));
@@ -187,7 +228,12 @@ bool DdCosmoSolvation::init(const std::vector<int>& atomic_numbers, const std::s
             m_grid(c, i) = gx[3 * i + c];
         m_w(i) = gw[i] * 4.0 * kPi;   // core.f90: weights are normalised
     }
-    leb::getAngGrid(isas, gx, gw);
+    if (cpcm) {
+        gx.clear();
+        gw.clear();
+    } else {
+        leb::getAngGrid(isas, gx, gw);
+    }
     m_sgrid.resize(3, static_cast<int>(gw.size()));
     m_sweight.resize(static_cast<int>(gw.size()));
     for (int i = 0; i < static_cast<int>(gw.size()); ++i) {
@@ -235,7 +281,8 @@ bool DdCosmoSolvation::init(const std::vector<int>& atomic_numbers, const std::s
 
 void DdCosmoSolvation::printInfo() const
 {
-    CurcumaLogger::info("Native COSMO (ddCOSMO, port of xtb 6.7.1)");
+    CurcumaLogger::info(m_model == Model::TbliteCpcm ? "Native CPCM (ddCOSMO solver, port of tblite 0.4.0)"
+                                                     : "Native COSMO (ddCOSMO, port of xtb 6.7.1)");
     CurcumaLogger::param("solvent", m_solvent);
     CurcumaLogger::param("parameters", m_param_source);
     CurcumaLogger::param("dielectric constant", fmt::format("{:.4f}", m_eps));
