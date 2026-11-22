@@ -69,4 +69,6 @@ against 30.1 s without (26 against 33 steps/s, not half), 20.4 against 20.0 SCF 
 - The SCF has several solutions (different magnetisation patterns). The result depends on guess and damping: GFN1 full system uhf 4, 2000 K: `-scf_guess eeq` (default) -42.50317, `-scf_guess h0` -42.51162 (tblite -42.51162).
   Multi-solution cases were not resolved; compare energies only where both programs converge to the same solution. At 300 K the 13-atom system often needs more than 500 Broyden cycles (also in tblite).
 - Not tested: MD beyond 1000 steps, `-opt` of open-shell metal clusters (only a smoke run on O2), solvation, `-hessian`, periodic or charged systems, elements other than H, O, Pt, GFN1 d-shell systems other than Pt.
-- GPU: not implemented, not tested.
+- GPU: not implemented (hard error with `-gpu cuda|rocm|vulkan`), so there is neither a CUDA nor a ROCm path yet. Plan (Nov 22, 2026, operator): implement the CUDA path and port it to ROCm when a ROCm machine is at hand.
+- Solvation (checked Nov 22, 2026 after the merge with the native ddCOSMO/CPCM/CPCM-X work, n = 1, OH radical, GFN2, `-spin 1`, water): ALPB, cosmo and cpcm change the energy with spin polarisation as without it
+  (cpcm -5.1e-4 Eh both, cosmo +1.1e-3 against +1.2e-3, alpb -9.9e-3 against -9.8e-3); no external reference exists for the combination (tblite 0.4.0 has no spin polarisation) and no test covers it.
