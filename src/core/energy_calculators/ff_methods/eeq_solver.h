@@ -577,6 +577,11 @@ public:
         m_ewald_kernel_cap = kernel_cap_bytes;
     }
     bool periodicEwaldActive() const { return m_ewald != nullptr; }
+    /// Claude Generated (Nov 2026, GPU_PERIODIC_GAPS A2/S3b): device back end of the matrix-free periodic pcg operator
+    /// (CUDA hybrid; not owned, nullptr = CPU gathers). The CG stays here; a device failure is a counted fallback.
+    void setEwaldDeviceOps(curcuma::ewald::EwaldDeviceOps* dev) { m_ewald_device = dev; }
+    /// True when the last matrix-free periodic solve ran its operator on the device.
+    bool lastPeriodicOnDevice() const { return m_periodic_last_on_device; }
     /// Diagnostics of the last periodic Phase-2 solve: CG iterations (0 on the dense path), solve time, path name.
     int lastPeriodicIterations() const { return m_periodic_iters; }
     double lastPeriodicSolveMs() const { return m_periodic_solve_ms; }
@@ -1230,6 +1235,8 @@ private:
     std::string m_periodic_path;                        ///< "dense cholesky", "matrix-free pcg", ...
     PeriodicSolveProfile m_periodic_profile;            ///< P1: time split of the last matrix-free solve
     std::shared_ptr<curcuma::ewald::EwaldGeometryCache> m_ewald_cache; ///< P1: shared with the workspace (else private)
+    curcuma::ewald::EwaldDeviceOps* m_ewald_device = nullptr; ///< A2/S3b: device operator (CUDA hybrid), not owned
+    bool m_periodic_last_on_device = false;             ///< A2/S3b: the last pcg solve used m_ewald_device
     size_t m_ewald_kernel_cap = size_t(1024) << 20;     ///< P1: cap of the stored real-space kernel (bytes)
     std::string m_ewald_precond = "block";              ///< P1: eeq_ewald_precond (block | jacobi)
     int    m_ewald_precond_block = 32;                  ///< P1: eeq_ewald_precond_block, largest dense block (atoms)

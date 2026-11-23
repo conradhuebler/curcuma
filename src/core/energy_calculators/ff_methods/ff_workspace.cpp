@@ -19,6 +19,7 @@
  */
 
 #include "ff_workspace.h"
+#include "src/core/gpu_fallback.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/units.h"
 
@@ -329,64 +330,93 @@ double FFWorkspace::evaluateEwaldCoulomb(const Matrix& geometry_bohr, const Vect
     m_do_gradient = gradient;
     m_ewald_terms = curcuma::ewald::EwaldEnergyTerms();
     m_ewald_setup_ms = 0.0;
-    {
-        // the same build (or lookup, when the periodic EEQ solve of this step built it) as in calculate()
-        auto t0 = std::chrono::high_resolution_clock::now();
-        if (!m_ewald_cache)
-            m_ewald_cache = std::make_shared<curcuma::ewald::EwaldGeometryCache>();
-        const Eigen::MatrixXd pos = m_geometry;
-        auto run = [this](int T, const std::function<void(int)>& f) {
-            std::vector<std::future<void>> futures;
-            futures.reserve(T - 1);
-            for (int t = 1; t < T; ++t)
-                futures.push_back(m_pool->enqueue([&f, t]() { f(t); }));
-            f(0);
-            for (auto& fu : futures)
-                fu.get();
-        };
-        const int T = (m_pool && m_num_threads > 1) ? m_num_threads : 1;
-        m_ewald->buildGeometryCache(pos, &m_coul_alp, *m_ewald_cache, m_ewald_kernel_cap_bytes, T,
-            T > 1 ? curcuma::ewald::EwaldParallelFor(run) : curcuma::ewald::EwaldParallelFor());
-        m_ewald_setup_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
-    }
-    // A1 (Nov 2026): with the virial requested the Ewald kernels run their VIRIAL instantiation (calcCoulombEwald
-    // dispatches on m_want_virial), so the accumulators' virial is reset as well; the result goes to
-    // m_result_virial.coulomb / coulomb_bg below and the GPU wrapper completes it (setHybridVirial).
     const bool want_virial = m_want_virial && gradient;
-    for (int t = 0; t < m_num_threads; ++t)
-        m_accumulators[t].reset(m_natoms, gradient, /*store_components=*/false, /*want_potentials=*/false, want_virial);
     m_virial_valid = false;  // N1: the hybrid result holds no atomic virial of the local terms (setHybridVirial)
     m_result_virial.reset();
-    if (m_num_threads == 1 || !m_pool) {
-        calcCoulombEwald(0);
-    } else {
-        std::vector<std::future<void>> futures;
-        futures.reserve(m_num_threads - 1);
-        for (int t = 1; t < m_num_threads; ++t)
-            futures.push_back(m_pool->enqueue([this, t]() { calcCoulombEwald(t); }));
-        calcCoulombEwald(0);
-        for (auto& f : futures)
-            f.get();
-    }
-    // partition order, as reduce()
     double e_pair = 0.0;
-    m_ewald_real_ms = m_ewald_recip_ms = 0.0;
-    if (gradient && gradient_out) {
-        if (gradient_out->rows() != m_natoms || gradient_out->cols() != 3)
-            gradient_out->resize(m_natoms, 3);
-        gradient_out->setZero();
+    bool on_device = false;
+    // A2/S3a (Nov 2026, Claude Generated): the CUDA hybrid evaluates the real-space and reciprocal pair part on the
+    // device (EwaldDeviceOps, prepared by the EEQ solve of the same step or here); self and background below as on
+    // the CPU. A device failure is a counted fallback to the CPU code in the else branch.
+    if (m_ewald_device) {
+        const auto t0 = std::chrono::high_resolution_clock::now();
+        const Eigen::MatrixXd pos = m_geometry;
+        Eigen::MatrixXd g;
+        Eigen::Matrix3d vir = Eigen::Matrix3d::Zero();
+        curcuma::ewald::EwaldEnergyTerms t;
+        on_device = m_ewald_device->prepare(*m_ewald, pos, m_coul_alp)
+            && m_ewald_device->evaluate(m_eeq_charges, t, gradient ? &g : nullptr, want_virial ? &vir : nullptr);
+        m_ewald_setup_ms = m_ewald_device->lastPrepareMs();
+        if (on_device) {
+            m_ewald_terms.real = t.real;
+            m_ewald_terms.reciprocal = t.reciprocal;
+            e_pair = t.real + t.reciprocal;
+            if (gradient && gradient_out)
+                *gradient_out = g;  // N x 3 Eh/Bohr (column- to row-major copy)
+            if (want_virial)
+                m_result_virial.coulomb = vir;
+            m_ewald_real_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
+            m_ewald_recip_ms = 0.0;
+        } else {
+            curcuma::reportGpuFallback("gfnff_periodic_ewald_device", "Ewald Coulomb: " + m_ewald_device->lastError());
+        }
     }
-    for (int t = 0; t < m_num_threads; ++t) {
-        const auto& acc = m_accumulators[t];
-        if (want_virial)
-            m_result_virial.coulomb += acc.virial.coulomb;  // partition order, as reduce()
-        e_pair += acc.energy.coulomb;
-        m_ewald_terms.real += acc.ewald_real;
-        m_ewald_terms.reciprocal += acc.ewald_recip;
-        m_ewald_real_ms += acc.ewald_real_ms;
-        m_ewald_recip_ms += acc.ewald_recip_ms;
-        if (gradient && gradient_out)
-            *gradient_out += acc.gradient;
+    if (!on_device) {
+        {
+            // the same build (or lookup, when the periodic EEQ solve of this step built it) as in calculate()
+            auto t0 = std::chrono::high_resolution_clock::now();
+            if (!m_ewald_cache)
+                m_ewald_cache = std::make_shared<curcuma::ewald::EwaldGeometryCache>();
+            const Eigen::MatrixXd pos = m_geometry;
+            auto run = [this](int T, const std::function<void(int)>& f) {
+                std::vector<std::future<void>> futures;
+                futures.reserve(T - 1);
+                for (int t = 1; t < T; ++t)
+                    futures.push_back(m_pool->enqueue([&f, t]() { f(t); }));
+                f(0);
+                for (auto& fu : futures)
+                    fu.get();
+            };
+            const int T = (m_pool && m_num_threads > 1) ? m_num_threads : 1;
+            m_ewald->buildGeometryCache(pos, &m_coul_alp, *m_ewald_cache, m_ewald_kernel_cap_bytes, T,
+                T > 1 ? curcuma::ewald::EwaldParallelFor(run) : curcuma::ewald::EwaldParallelFor());
+            m_ewald_setup_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
+        }
+        // A1 (Nov 2026): with the virial requested the Ewald kernels run their VIRIAL instantiation (calcCoulombEwald
+        // dispatches on m_want_virial), so the accumulators' virial is reset as well; the result goes to
+        // m_result_virial.coulomb / coulomb_bg below and the GPU wrapper completes it (setHybridVirial).
+        for (int t = 0; t < m_num_threads; ++t)
+            m_accumulators[t].reset(m_natoms, gradient, /*store_components=*/false, /*want_potentials=*/false, want_virial);
+        if (m_num_threads == 1 || !m_pool) {
+            calcCoulombEwald(0);
+        } else {
+            std::vector<std::future<void>> futures;
+            futures.reserve(m_num_threads - 1);
+            for (int t = 1; t < m_num_threads; ++t)
+                futures.push_back(m_pool->enqueue([this, t]() { calcCoulombEwald(t); }));
+            calcCoulombEwald(0);
+            for (auto& f : futures)
+                f.get();
+        }
+        // partition order, as reduce()
+        m_ewald_real_ms = m_ewald_recip_ms = 0.0;
+        if (gradient && gradient_out) {
+            if (gradient_out->rows() != m_natoms || gradient_out->cols() != 3)
+                gradient_out->resize(m_natoms, 3);
+            gradient_out->setZero();
+        }
+        for (int t = 0; t < m_num_threads; ++t) {
+            const auto& acc = m_accumulators[t];
+            if (want_virial)
+                m_result_virial.coulomb += acc.virial.coulomb;  // partition order, as reduce()
+            e_pair += acc.energy.coulomb;
+            m_ewald_terms.real += acc.ewald_real;
+            m_ewald_terms.reciprocal += acc.ewald_recip;
+            m_ewald_real_ms += acc.ewald_real_ms;
+            m_ewald_recip_ms += acc.ewald_recip_ms;
+            if (gradient && gradient_out)
+                *gradient_out += acc.gradient;
+        }
     }
     curcuma::ewald::EwaldResult tail;
     m_ewald->selfAndBackground(m_eeq_charges, &m_coul_alp, /*want_potentials=*/false, tail);

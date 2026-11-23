@@ -89,6 +89,8 @@ struct GFNFFRocmBackend {
     /// Nov 2026 (S1): the HIP kernels have not been given the minimum-image frames of S1 (stage S6); a periodic
     /// cell is refused by the wrapper also with -gfnff.gpu_periodic true.
     static constexpr bool has_periodic_local_terms = false;
+    /// Nov 2026 (GPU_PERIODIC_GAPS A2/S3): no device Ewald on ROCm (the cell is refused anyway): nullptr.
+    static std::unique_ptr<curcuma::ewald::EwaldDeviceOps> createEwaldDevice() { return nullptr; }
 
     /// Deliverable 3 (Jun 2026): from 16 fragments on, the dense device Cholesky (O(N^3) plus a
     /// host Schur step over nfrag+1 columns) is not used. Oct 2026: there the device projected PCG

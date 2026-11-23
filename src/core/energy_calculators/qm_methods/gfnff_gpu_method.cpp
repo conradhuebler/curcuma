@@ -16,6 +16,7 @@
 #ifdef USE_CUDA
 
 #include "gfnff_gpu_method.h"
+#include "../ff_methods/cuda/ewald_gpu.h"
 
 #include <cuda_runtime.h>
 
@@ -39,6 +40,12 @@ bool GFNFFCudaBackend::setDevice(int device)
     int cur = -1;
     if (cudaGetDevice(&cur) == cudaSuccess && cur == device) return true;
     return cudaSetDevice(device) == cudaSuccess;
+}
+
+// Claude Generated (Nov 2026, GPU_PERIODIC_GAPS A2/S3)
+std::unique_ptr<curcuma::ewald::EwaldDeviceOps> GFNFFCudaBackend::createEwaldDevice()
+{
+    return std::make_unique<GfnffEwaldGPU>();
 }
 
 // ---------------------------------------------------------------------------

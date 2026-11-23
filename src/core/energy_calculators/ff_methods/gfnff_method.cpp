@@ -13219,6 +13219,15 @@ void GFNFF::configurePeriodicCell()
 }
 
 // Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED B3)
+// Claude Generated (Nov 2026, GPU_PERIODIC_GAPS A2/S3): see gfnff.h
+void GFNFF::setEwaldDeviceOps(curcuma::ewald::EwaldDeviceOps* dev)
+{
+    if (m_eeq_solver)
+        m_eeq_solver->setEwaldDeviceOps(dev);
+    if (m_workspace)
+        m_workspace->setEwaldDeviceOps(dev);
+}
+
 bool GFNFF::periodicEEQActive() const
 {
     return coulombEwaldActive() && m_eeq_solver && m_eeq_solver->periodicEwaldActive();

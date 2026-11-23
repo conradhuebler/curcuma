@@ -67,10 +67,13 @@
 //      (Core symbol EEQSolver::hostSytrsUpper, EEQSolveMethod::Sytrf before Auto).
 // 26 = Nov 2026, GPU_PERIODIC_GAPS A1: GFN-FF device virial (core symbol FFWorkspace::setHybridVirial;
 //      FFWorkspace::evaluateEwaldCoulomb now also fills the Ewald virial; GFNFFGpuMethodImpl gained members).
+// 27 = Nov 2026, GPU_PERIODIC_GAPS A2/S3: device Ewald of the GFN-FF hybrid (new interface curcuma::ewald::EwaldDeviceOps
+//      implemented in the plugin and called by the core; EEQSolver and FFWorkspace gained m_ewald_device; core symbol
+//      GFNFF::setEwaldDeviceOps; GFNFFGpuMethodImpl gained m_ewald_device).
 
 #pragma once
 
-#define CURCUMA_GPU_PLUGIN_ABI_VERSION 26
+#define CURCUMA_GPU_PLUGIN_ABI_VERSION 27
 
 /// Defines `extern "C" int curcuma_<backend>_abi_version()` in a plugin entry file (use at file scope).
 #define CURCUMA_GPU_PLUGIN_DEFINE_ABI_VERSION(backend)                                                                \

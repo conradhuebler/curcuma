@@ -2004,3 +2004,79 @@ Options for the operator: (a) leave as is and correct NPT densities by about +0.
 HB crossing estimator in the virial (CPU and GPU), (c) a larger hb_accuracy-derived radius as a deliberate model
 deviation (switch, port fidelity stays the default). Not measured: other liquids, XB (no halogen in the frames),
 charged boxes, the GPU-detected lists (the CPU lists are used here).
+
+## S3 device Ewald of the CUDA periodic hybrid: Ewald sum and pcg operator on the device (2026-11-23, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+On `feature/gfnff-gpu-ewald` (base `f7229704`, A1). Item A2 of [GPU_PERIODIC_GAPS.md](GPU_PERIODIC_GAPS.md), stages S3a
+(Ewald pair sum at given charges) and S3b (operator of the periodic pcg), built and gated together. Default in the hybrid
+(`-gpu cuda -gfnff.gpu_periodic true`, `coulomb_ewald` true); `-gfnff.gpu_ewald_device false` restores the S2/A1 host Ewald
+in the same binary.
+
+### What runs where
+
+| part | where |
+|---|---|
+| pair list (full list per atom, ascending j), kernel K_ij = erfc(a r)/r - erfc(g_ij r)/r and dK/dr, phase table | device, once per geometry (`GfnffEwaldGPU::prepare`, key: positions, alp, cell, parameters bit for bit) |
+| operator of the periodic pcg: real-space gather + reciprocal (structure factors, per-atom pass) | device (`potentials`), one call per CG iteration |
+| Ewald pair energy, gradient (Eh/Bohr), virial (real + reciprocal) at the final charges | device (`evaluate`) inside `FFWorkspace::evaluateEwaldCoulomb` |
+| self, background, Gaussian background (O(N)), diag_local; CG loop (start vector, aspc, block preconditioner, projection, dots, stopping rule) | host, the CPU code unchanged (`calculateFinalChargesPeriodic`) |
+| dense EEQ path (N <= `eeq_ewald_dense_max_atoms`, 1000) | host, as before; the Ewald energy then still runs on the device |
+
+Interface: `curcuma::ewald::EwaldDeviceOps` (ewald.h, pure virtual), implemented by `GfnffEwaldGPU`
+(`cuda/ewald_gpu.cu`), owned by the wrapper, handed over by `GFNFF::setEwaldDeviceOps` to `EEQSolver` and `FFWorkspace`
+(not owned there). Every sum has a fixed order (warp shuffles, block trees, slices summed in order, one-block final sums):
+no atomic additions. A device failure (any call returns false) is a counted fallback (`reportGpuFallback`,
+`gfnff_periodic_ewald_device`; `-gpu_strict` stops): the pcg restarts on the host cache, the Ewald energy takes the host
+partitions. Fault injection `CURCUMA_GFNFF_EWALD_DEVICE_FAIL=prepare|potentials|evaluate`; profile lines
+`CURCUMA_GFNFF_EWALD_PROFILE=1` (EWALDPROF) and `CURCUMA_GFNFF_STEPPHASE=1` (STEPPHASE_EEQ: pcg split). Plugin ABI 26 -> 27.
+Multi-GPU with a cell stays off (unchanged); ROCm has no device Ewald (`createEwaldDevice()` returns nullptr, the cell is
+refused there anyway).
+
+### Acceptance (thresholds fixed beforehand; ctest `gfnff_gpu_pbc_ewald`, CUDA only, 77 without CUDA)
+
+| check | result |
+|---|---|
+| (a) device Ewald vs CPU and vs the host-Ewald GPU hybrid, input geometry and every atom moved by <= 0.005 A (per-step solve); 20 H2O (FD settings), 60 H2O, H3O+(H2O)2 + 18 H2O (Q = +1), 970 H2O L 58 (pcg), 4 threads | charges <= 3.8e-15 e, energy <= 5.2e-14 Eh, gradient <= 7.9e-15 Eh/A, model virial <= 9.2e-14 Eh (limits 1e-9 e, 1e-9 Eh, 1e-9 Eh/A, 1e-7 Eh); device used (7 operator calls per solve at 2910 atoms), no fallback counted |
+| (a) W1 boxes 432 / 864 / 1728 H2O (`box*_s1`, 4 threads, production settings) | vs CPU: charges <= 7.7e-15 e, energy <= 7.7e-12 Eh, gradient <= 4.2e-14 Eh/A, virial <= 6.5e-11 Eh; vs host-Ewald GPU: energy <= 9.1e-13, gradient <= 1.0e-15, virial <= 9.3e-13 |
+| (a) ionic mixture Na2Cl2 + 380 H2O, L 48 Bohr (1144 atoms, pcg) | vs host-Ewald GPU: energy 4.3e-14 Eh, gradient 1.1e-15 Eh/A, virial 5.7e-14 Eh; vs CPU 3.4e-9 Eh / 3.5e-8 Eh/A / 1.1e-7 Eh (charges 5e-11 e): **pre-existing**, the same numbers with the A1 base build (D4 pair term 3.5e-9 Eh and its CN chain rule for the isolated ions; not Ewald), test limit there 1e-8 / 1e-7 / 2e-7 (TODO.md) |
+| (b) FD gate, device Ewald: gradient vs Richardson FD of the total energy (h 2e-4 / 1e-4 A, 6 atoms near a face) and virial vs FD under isotropic and axial strain; 20 H2O and Q = +1, dense EEQ and forced pcg (`eeq_ewald_dense_max_atoms 0`, 423 / 558 device operator calls) | gradient <= 9.4e-10 Eh/A (limit 1e-8), virial <= 6.3e-9 Eh (limit 1e-7) |
+| (c) second GPU instance, 970 H2O, two steps, 4 threads | energy, gradient, charges, virial bit for bit |
+| (d) fault injection prepare / potentials / evaluate | energy equal to the host-Ewald hybrid within 0 / 2.8e-13 / 1.4e-13 Eh, fallback counted 2 / 1 / 1 times |
+| no cell, 6 structures x gfnff/gfn1/gfn2 x 1/4 threads + 2 MD, `-sp -dump_gradient` against the A1 build (`gfnff-gpu-virial`, same options) | CPU 38/38 lines identical, CUDA 38/38 identical; SASS (`cuobjdump -sass`) of every function of the base plugin identical (names in anonymous namespaces carry the source path hash; the cub scan kernels now have a second instantiation) |
+| CPU with a cell, 432 / 864 H2O `-sp` (pcg inside the set-up), new vs A1 build | energy and gradient md5 identical (the restructured CPU pcg is bitwise the old one) |
+| CLI NPT 432 H2O (`box432_s1`, 20 steps, CSVR 300 K, Berendsen every 2 steps, 4 threads): CPU, A1 hybrid, new | 15 status lines: Epot (6 decimals), P (2), V (3), rho (5), L (5) identical in all three |
+| existing ctests `gfnff_gpu_pbc_hybrid`, `gfnff_gpu_pbc_virial` (now on the device Ewald by default) | pass |
+
+### Time per NPT step (ms; CLI, 4 host threads, CSVR, Berendsen every 2 steps, difference of 60- and 20-step runs, n = 3, median; RTX 5080; load average 0.6-3.3 from the runs themselves, nothing else running)
+
+| box (`box*_s1`) | atoms | CPU | A1 hybrid (host EEQ + Ewald) | S3 (device Ewald + operator) | S3 vs A1 | S3 vs CPU |
+|---|---|---|---|---|---|---|
+| 432 H2O | 1296 | 47.0 (45.9-49.2) | 23.6 (21.4-23.7) | 12.6 (12.4-12.8) | 1.9x | 3.7x |
+| 864 H2O | 2592 | 119.6 (118.0-123.8) | 63.0 (61.3-64.2) | 32.6 (32.5-32.7) | 1.9x | 3.7x |
+| 1728 H2O | 5184 | 308.8 (308.1-309.1) | 175.8 (170.5-176.1) | 93.4 (93.2-93.4) | 1.9x | 3.3x |
+| 3456 H2O | 10368 | 871.0 (870.0-871.5) | 514.2 (512.4-520.4) | 278.4 (278.1-279.4) | 1.8x | 3.1x |
+
+Split at 3456 H2O (STEPPHASE, step without a barostat event): energy call 96 ms, of it EEQ 73 ms = device pair build 17 ms
+(4.6 ms alone, the rest is contention with the device terms on other streams) + 7 operator calls 48 ms (6.8 ms each: structure
+factors 3.1, per-atom pass 3.5, real space 0.16; FP64-bound, about half the FP64 peak of the card) + CN download 5.7 ms;
+Ewald energy/gradient/virial 9 ms; the host share of the CG is about 1 ms. A step with a barostat event costs 396 ms: the
+forced list rebuilds after the cell change (HB/XB 101 ms, other host lists ~200 ms; A1/N2 behaviour, unchanged here) are now
+the largest item of an NPT step (about half of the 278 ms average).
+
+### S4 (device-resident pcg): not done, by measurement
+
+The CG loop itself (vectors, projection, block preconditioner, dots) costs about 1 ms of the 66 ms solve at 10368 atoms
+(0.2 ms at 5184); moving it to the device would save that and seven 80 KB round trips. The solve is the device operator.
+Levers that remain, each measured or estimated above: (1) the forced list rebuilds on barostat steps (~150 ms per step
+averaged at 3456 H2O); (2) a larger real-space radius moves work out of the FP64-bound reciprocal sum (the device real space
+costs 0.16 ms for 11 million entries): `-gfnff.ewald_r_cut` up to L/2 changes the energy at the 1e-7 Eh level (ewald_tolerance
+is per term) and must be set for CPU comparisons too; at L/2 instead of 17.5 sqrt(L/40) the k-vector count falls by about
+3.5x at 3456 H2O (estimate, not run); (3) a pair list with a skin instead of the per-step rebuild (4.6 ms alone).
+
+### Not done / not tested
+
+- ROCm (no device Ewald; B2/B3), multi-GPU with a cell, triclinic cells, energy-only MD on the device path (covered only
+  by the FD energies), `ewald_kernel_cache_mb` (the device keeps every entry; memory 20 bytes per entry, 225 MB at
+  10368 atoms), more than 10368 atoms, heavy elements near the r_g < L/2 limit, charged boxes under the ensemble charge
+  model (CPU fallback as before), a long NPT run (20 steps here), C-rescale (same code path). Human production testing
+  pending.

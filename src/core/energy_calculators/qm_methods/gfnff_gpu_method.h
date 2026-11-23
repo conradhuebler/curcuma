@@ -71,6 +71,9 @@ struct GFNFFCudaBackend {
     /// Nov 2026 (S1): every local GFN-FF term, the device pair builders, the device H-bond detection and the D4
     /// tail apply the minimum image of an orthorhombic cell (-gfnff.gpu_periodic, coulomb_ewald false only).
     static constexpr bool has_periodic_local_terms = true;
+    /// Nov 2026 (GPU_PERIODIC_GAPS A2/S3): device Ewald sum of the periodic hybrid (GfnffEwaldGPU, cuda/ewald_gpu.cu);
+    /// defined in gfnff_gpu_method.cpp. nullptr on a device failure (the hybrid then keeps the host Ewald).
+    static std::unique_ptr<curcuma::ewald::EwaldDeviceOps> createEwaldDevice();
 
     /// 0 = never route the EEQ to the CPU PCG; the device Schur paths handle nfrag>1.
     static constexpr int default_eeq_cpu_fragment_threshold = 0;

@@ -432,7 +432,8 @@ PARAM(gpu_staged_list_upload, Bool, true, "GPU MD: convert rebuilt pair lists on
 PARAM(gpu_coulomb_implicit, Bool, true, "GPU: enumerate the Coulomb pairs on the device instead of uploading an N^2/2 host list. Not used with eeq_distance_cutoff > 0.", "GPU", {})
 PARAM(gpu_disp_pairs_on_device, Bool, true, "GPU: build the D4 dispersion pair list on the device, in the host order. false builds it on the host.", "GPU", {})
 PARAM(gpu_rep_pairs_on_device, Bool, true, "GPU: rebuild the repulsion pair list on the device when the skin rule fires; only for distance-filtered lists (nb_cell_list_min_atoms). false builds it on the host.", "GPU", {})
-PARAM(gpu_periodic, Bool, false, "CUDA GFN-FF with a periodic cell (opt-in, stage S1 of the GPU port): run the local terms (CN, D4 pair term and tail, repulsion, bonded terms, HB/XB) on the device with the minimum image. Only with coulomb_ewald false (the device Coulomb is a minimum-image sum, not Ewald; the periodic EEQ/Ewald Coulomb arrive with S3/S4); with coulomb_ewald true (default) the run falls back to the CPU as before. false = every periodic cell runs on the CPU.", "GPU", {})
+PARAM(gpu_periodic, Bool, false, "CUDA GFN-FF with a periodic cell (opt-in): local terms (CN, D4 pair term and tail, repulsion, bonded terms, HB/XB) on the device with the minimum image. With coulomb_ewald true (default) the periodic hybrid: Ewald Coulomb and periodic EEQ as on the CPU (operator and Ewald sum on the device, see gpu_ewald_device); with coulomb_ewald false a minimum-image Coulomb sum and a non-periodic EEQ. false = every periodic cell runs on the CPU.", "GPU", {})
+PARAM(gpu_ewald_device, Bool, true, "CUDA periodic hybrid (gpu_periodic, coulomb_ewald): Ewald pair sum (energy, gradient, virial) and the operator of the periodic pcg EEQ on the device. false = both on the host (the S2 hybrid), for comparison. Device failures fall back to the host, counted.", "GPU", {})
 PARAM(eeq_mixed_precision, Bool, false, "GPU EEQ: factor the matrix in FP32 and refine to FP64 accuracy, for FP64-weak cards. Opt-in; few-fragment paths only.", "GPU", {})
 PARAM(eeq_mixed_precision_iters, Int, 2, "Refinement steps of eeq_mixed_precision, at least 1.", "GPU", {})
 PARAM(gpu_block_jacobi_max_frag_atoms, Int, 300, "GPU pcg: fragments larger than this get the diagonal instead of the dense block-Jacobi preconditioner, whose build grows steeply with size. See EEQ_SOLVER_CONTROL.md.", "GPU", {})
@@ -1462,6 +1463,9 @@ public:
     bool gpuPeriodicRequested() const { return m_gpu_periodic; }
     /// true when the Phase-2 EEQ runs with the periodic Ewald matrix (cell and coulomb_ewald).
     bool periodicEEQActive() const;
+    /// Claude Generated (Nov 2026, GPU_PERIODIC_GAPS A2/S3): hand the device Ewald back end (CUDA hybrid, owned by the
+    /// GPU wrapper) to the periodic EEQ solver (pcg operator) and the workspace (evaluateEwaldCoulomb); nullptr = CPU.
+    void setEwaldDeviceOps(curcuma::ewald::EwaldDeviceOps* dev);
     /// dE_pair/dq_i of the periodic Coulomb pair energy (fixed charges) after Calculation() with
     /// setWantCoulombPotentials(true); empty otherwise. Input for the periodic EEQ (B3).
     void setWantCoulombPotentials(bool v);

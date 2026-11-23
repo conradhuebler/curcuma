@@ -67,6 +67,7 @@
 #if defined(__x86_64__) && defined(__SSE2__)
 #include <immintrin.h>  // _mm_stream_si64 / _mm_sfence (non-temporal stores in the Phase-2 matrix build)
 #include "src/core/output_symbols.h"
+#include "src/core/gpu_fallback.h"
 #endif
 
 using namespace GFNFFParameters;  // Access to chi_eeq, gam_eeq, alpha_eeq, cnf_eeq
@@ -5482,6 +5483,11 @@ std::pair<int, int> periodicRange(int total, int t, int T)
     return { static_cast<int>(static_cast<long long>(total) * t / T), static_cast<int>(static_cast<long long>(total) * (t + 1) / T) };
 }
 
+/// A2/S3b (Nov 2026, Claude Generated): a device operator call failed; the periodic pcg restarts on the CPU path.
+struct EwaldDeviceFailure : std::runtime_error {
+    explicit EwaldDeviceFailure(const std::string& m) : std::runtime_error(m) {}
+};
+
 struct PeriodicEEQOperator {
     // P1 (Nov 2026): the geometry data (pair list, kernel K_ij per pair, phase table) live in an
     // EwaldGeometryCache built once per geometry and shared with the workspace Coulomb; apply() is a gather over
@@ -5497,9 +5503,13 @@ struct PeriodicEEQOperator {
     mutable double apply_wall = 0.0;
     mutable int applies = 0;
 
+    /// A2/S3b (Nov 2026): when set, the real-space and reciprocal potentials come from the device (prepared by the
+    /// caller for this geometry); self, background and diag_local stay here. nullptr = the CPU gathers below.
+    curcuma::ewald::EwaldDeviceOps* dev = nullptr;
+
     PeriodicEEQOperator(const curcuma::ewald::EwaldSum& e, const curcuma::ewald::EwaldGeometryCache& c, const Vector& alp_in,
-        const Vector& diag_in, CxxThreadPool* p, int threads)
-        : ew(e), cache(c), alp(alp_in), diag_local(diag_in), pool(p), N(static_cast<int>(c.pos.rows()))
+        const Vector& diag_in, CxxThreadPool* p, int threads, curcuma::ewald::EwaldDeviceOps* device = nullptr)
+        : ew(e), cache(c), alp(alp_in), diag_local(diag_in), pool(p), N(static_cast<int>(alp_in.size())), dev(device)
     {
         T = (p && threads > 1) ? threads : 1;
         t_real.assign(T, 0.0);
@@ -5509,6 +5519,21 @@ struct PeriodicEEQOperator {
     /// A x, with A = Ewald matrix of the Gaussian charges + diag_local
     Vector apply(const Vector& x) const
     {
+        if (dev) {
+            const auto tw = std::chrono::steady_clock::now();
+            Eigen::VectorXd y(N);
+            if (!dev->potentials(x, y))
+                throw EwaldDeviceFailure(dev->lastError());
+            curcuma::ewald::EwaldResult tail;
+            tail.potentials = Vector::Zero(N);
+            ew.selfAndBackground(x, &alp, true, tail);
+            Vector out = y;
+            out += tail.potentials;
+            out += diag_local.cwiseProduct(x);
+            apply_wall += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tw).count();
+            ++applies;
+            return out;
+        }
         std::vector<curcuma::ewald::EwaldResult> acc(T);
         const auto tw = std::chrono::steady_clock::now();
         auto worker = [&](int t) {
@@ -5760,11 +5785,20 @@ Vector EEQSolver::calculateFinalChargesPeriodic(const std::vector<int>& atoms, c
     if (method == EEQSolveMethod::PCG) {
         // ---- matrix-free projected conjugate gradient on the constraint null space ----
         m_periodic_path = "matrix-free pcg";
-        // P1 (Nov 2026): geometry data once per geometry, shared with the workspace Coulomb of the same step
+        // A2/S3b (Nov 2026): with a device back end (CUDA hybrid) the pair list, kernel and phase table live on the
+        // device and every operator call runs there; the CG itself (start vector, preconditioner, projection, scalars,
+        // stopping rule) is this code in both cases. A device failure restarts the solve on the CPU path, counted.
+        bool use_device = m_ewald_device != nullptr;
+        double setup_ms = 0.0;
         const auto t_setup = std::chrono::steady_clock::now();
-        if (!m_ewald_cache)
-            m_ewald_cache = std::make_shared<curcuma::ewald::EwaldGeometryCache>();
-        {
+        if (use_device && !m_ewald_device->prepare(*m_ewald, geometry_bohr, alpha_corrected)) {
+            curcuma::reportGpuFallback("gfnff_periodic_ewald_device", "EEQ operator set-up: " + m_ewald_device->lastError());
+            use_device = false;
+        }
+        auto buildHostCache = [&]() {
+            // P1 (Nov 2026): geometry data once per geometry, shared with the workspace Coulomb of the same step
+            if (!m_ewald_cache)
+                m_ewald_cache = std::make_shared<curcuma::ewald::EwaldGeometryCache>();
             auto run = [pool](int nt, const std::function<void(int)>& f) {
                 std::vector<std::future<void>> futures;
                 futures.reserve(nt - 1);
@@ -5777,12 +5811,15 @@ Vector EEQSolver::calculateFinalChargesPeriodic(const std::vector<int>& atoms, c
             const Eigen::MatrixXd pos = geometry_bohr;
             m_ewald->buildGeometryCache(pos, &alpha_corrected, *m_ewald_cache, m_ewald_kernel_cap, T,
                 T > 1 ? curcuma::ewald::EwaldParallelFor(run) : curcuma::ewald::EwaldParallelFor());
-        }
-        const double setup_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_setup).count();
-        const PeriodicEEQOperator op(*m_ewald, *m_ewald_cache, alpha_corrected, diag_local, pool, T);
+        };
+        if (!use_device)
+            buildHostCache();
+        setup_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_setup).count();
+        static const curcuma::ewald::EwaldGeometryCache empty_cache;
         const auto t_pc = std::chrono::steady_clock::now();
+        const Vector diag_exact = m_ewald->diagonal(natoms, &alpha_corrected) + diag_local;
         const PeriodicBlockPreconditioner pc(m_ewald_precond, m_ewald_precond_block, geometry_bohr, m_ewald_cell,
-            alpha_corrected, diag_local, op.diagonal(), atom_frag, nfrag);
+            alpha_corrected, diag_local, diag_exact, atom_frag, nfrag);
         double precond_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_pc).count();
         // P v = v - sum_f (1_f . v / n_f) 1_f: orthogonal projection onto {C v = 0}
         auto project = [&](Vector& v) {
@@ -5808,7 +5845,7 @@ Vector EEQSolver::calculateFinalChargesPeriodic(const std::vector<int>& atoms, c
         // Start vector: the previous charges when they belong to this system (P1: or their extrapolation over the
         // last steps, eeq_extrapolation aspc | gauss, weights summing to 1), else uniform per fragment; in every
         // case the constraints are enforced exactly before the iteration starts.
-        Vector q = (m_periodic_last_q.size() == natoms) ? m_periodic_last_q : Vector::Zero(natoms);
+        Vector q0 = (m_periodic_last_q.size() == natoms) ? m_periodic_last_q : Vector::Zero(natoms);
         if (m_ewald_extrapolation != "none" && static_cast<int>(m_periodic_q_hist.size()) >= 2) {
             const Eigen::VectorXd w = curcuma::extrapolation::weights(m_ewald_extrapolation, m_ewald_extrap_order,
                 static_cast<int>(m_periodic_q_hist.size()));
@@ -5817,39 +5854,62 @@ Vector EEQSolver::calculateFinalChargesPeriodic(const std::vector<int>& atoms, c
                 for (int j = 0; j < w.size(); ++j)
                     qe += w(j) * m_periodic_q_hist[j];
                 if (qe.allFinite())
-                    q = qe;
+                    q0 = qe;
             }
         }
         {
             std::vector<double> s(nfrag, 0.0);
             for (int i = 0; i < natoms; ++i)
-                if (atom_frag[i] >= 0) s[atom_frag[i]] += q(i);
+                if (atom_frag[i] >= 0) s[atom_frag[i]] += q0(i);
             for (int i = 0; i < natoms; ++i)
-                if (atom_frag[i] >= 0) q(i) += (qfrag[atom_frag[i]] - s[atom_frag[i]]) / nfrag_atoms[atom_frag[i]];
+                if (atom_frag[i] >= 0) q0(i) += (qfrag[atom_frag[i]] - s[atom_frag[i]]) / nfrag_atoms[atom_frag[i]];
         }
-        Vector r = rhs - op.apply(q);
-        project(r);
-        Vector z = precondition(r);
-        Vector p = z;
-        double rz = r.dot(z);
         const double tol = m_ewald_tol * (rhs.norm() + 1.0);  // P1: own tolerance (eeq_ewald_tol)
         bool converged = false, breakdown = false;
         int it = 0;
-        for (; it < m_ppcg_max_iter; ++it) {
-            if (r.norm() <= tol) { converged = true; break; }
-            Vector Ap = op.apply(p);
-            const double pAp = p.dot(Ap);
-            if (!(pAp > 0.0)) { breakdown = true; break; }
-            const double a = rz / pAp;
-            q += a * p;
-            r -= a * Ap;
-            project(r);
-            z = precondition(r);
-            const double rz_new = r.dot(z);
-            if (!(rz_new > 0.0) && r.norm() > tol) { breakdown = true; break; }
-            p = z + (rz_new / rz) * p;
-            rz = rz_new;
+        Vector q, r;
+        std::unique_ptr<PeriodicEEQOperator> op_ptr;
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            op_ptr = std::make_unique<PeriodicEEQOperator>(*m_ewald, use_device ? empty_cache : *m_ewald_cache,
+                alpha_corrected, diag_local, pool, T, use_device ? m_ewald_device : nullptr);
+            const PeriodicEEQOperator& op = *op_ptr;
+            try {
+                q = q0;
+                r = rhs - op.apply(q);
+                project(r);
+                Vector z = precondition(r);
+                Vector p = z;
+                double rz = r.dot(z);
+                converged = breakdown = false;
+                it = 0;
+                for (; it < m_ppcg_max_iter; ++it) {
+                    if (r.norm() <= tol) { converged = true; break; }
+                    Vector Ap = op.apply(p);
+                    const double pAp = p.dot(Ap);
+                    if (!(pAp > 0.0)) { breakdown = true; break; }
+                    const double a = rz / pAp;
+                    q += a * p;
+                    r -= a * Ap;
+                    project(r);
+                    z = precondition(r);
+                    const double rz_new = r.dot(z);
+                    if (!(rz_new > 0.0) && r.norm() > tol) { breakdown = true; break; }
+                    p = z + (rz_new / rz) * p;
+                    rz = rz_new;
+                }
+                break;
+            } catch (const EwaldDeviceFailure& e) {
+                if (!use_device)
+                    throw;
+                curcuma::reportGpuFallback("gfnff_periodic_ewald_device", std::string("EEQ operator call: ") + e.what());
+                use_device = false;
+                const auto t_re = std::chrono::steady_clock::now();
+                buildHostCache();
+                setup_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_re).count();
+            }
         }
+        m_periodic_last_on_device = use_device;
+        const PeriodicEEQOperator& op = *op_ptr;
         if (r.norm() <= tol) converged = true;
         m_periodic_iters = it;
         m_periodic_profile = PeriodicSolveProfile();
@@ -5871,8 +5931,8 @@ Vector EEQSolver::calculateFinalChargesPeriodic(const std::vector<int>& atoms, c
         } else {
             new_charges = q;
             if (CurcumaLogger::get_verbosity() >= 1)
-                reportSolverLine(fmt::format("EEQ solver (final charges): pcg{} [CPU, periodic Ewald matrix-free, {} iterations], N={}, nfrag={}",
-                    m_solve_method == EEQSolveMethod::Auto ? " (auto)" : "", it, natoms, nfrag));
+                reportSolverLine(fmt::format("EEQ solver (final charges): pcg{} [{}, periodic Ewald matrix-free, {} iterations], N={}, nfrag={}",
+                    m_solve_method == EEQSolveMethod::Auto ? " (auto)" : "", use_device ? "CPU CG, device operator" : "CPU", it, natoms, nfrag));
         }
     }
 
@@ -5950,8 +6010,14 @@ Vector EEQSolver::calculateFinalChargesPeriodic(const std::vector<int>& atoms, c
     if (CurcumaLogger::get_verbosity() >= 2) {
         Vector Aq;
         if (method == EEQSolveMethod::PCG) {
-            const PeriodicEEQOperator op(*m_ewald, *m_ewald_cache, alpha_corrected, diag_local, pool, T);
-            Aq = op.apply(new_charges);
+            static const curcuma::ewald::EwaldGeometryCache empty_cache;
+            const PeriodicEEQOperator op(*m_ewald, m_periodic_last_on_device ? empty_cache : *m_ewald_cache, alpha_corrected,
+                diag_local, pool, T, m_periodic_last_on_device ? m_ewald_device : nullptr);
+            try {
+                Aq = op.apply(new_charges);
+            } catch (const EwaldDeviceFailure&) {
+                Aq = Vector::Zero(natoms);  // diagnostic print only; the charges are already accepted
+            }
         } else {
             Aq = m_phase2_A.topLeftCorner(natoms, natoms) * new_charges;
         }

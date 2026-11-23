@@ -1142,6 +1142,7 @@ if(USE_CUDA)
         src/core/energy_calculators/ff_methods/cuda/gfnff_kernels.cu
         src/core/energy_calculators/ff_methods/cuda/ff_workspace_gpu.cu
         src/core/energy_calculators/ff_methods/cuda/eeq_solver_gpu.cu
+        src/core/energy_calculators/ff_methods/cuda/ewald_gpu.cu
         src/core/energy_calculators/ff_methods/cuda/gpu_utils.cpp
         src/core/energy_calculators/qm_methods/gfnff_gpu_method.cpp
         # Claude Generated (2026-06): native xTB GPU kernels (compiled by nvcc).

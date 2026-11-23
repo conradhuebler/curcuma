@@ -463,6 +463,9 @@ public:
         m_ewald_kernel_cap_bytes = kernel_cap_bytes;
     }
     const curcuma::ewald::EwaldGeometryCache* ewaldGeometryCache() const { return m_ewald_cache.get(); }
+    /// Claude Generated (Nov 2026, GPU_PERIODIC_GAPS A2/S3a): device back end of evaluateEwaldCoulomb() (CUDA hybrid;
+    /// not owned, nullptr = CPU). calculate() never uses it.
+    void setEwaldDeviceOps(curcuma::ewald::EwaldDeviceOps* dev) { m_ewald_device = dev; }
     bool ewaldActive() const { return m_coulomb_ewald && m_ewald != nullptr; }
     const curcuma::ewald::EwaldSum* ewald() const { return m_ewald.get(); }
     /// Also accumulate dE_pair/dq_i (periodic Coulomb pair energy only, for the periodic EEQ, B3).
@@ -712,6 +715,7 @@ private:
     /// P1 (Nov 2026): pair list, real-space kernel values and phase table of the current geometry, shared with the
     /// periodic EEQ solver when GFNFF hands both the same object (setEwaldGeometryCache); else private.
     std::shared_ptr<curcuma::ewald::EwaldGeometryCache> m_ewald_cache;
+    curcuma::ewald::EwaldDeviceOps* m_ewald_device = nullptr;  ///< A2/S3a: device Ewald of evaluateEwaldCoulomb (not owned)
     size_t m_ewald_kernel_cap_bytes = size_t(1024) << 20; ///< P1: memory cap of the stored kernel (ewald_kernel_cache_mb)
     curcuma::ewald::EwaldEnergyTerms m_ewald_terms;   ///< result split of the last calculate()
     Vector m_result_coulomb_potentials;

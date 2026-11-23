@@ -228,6 +228,17 @@ private:
     double           m_host_ewald_energy = 0.0;
     Matrix           m_host_ewald_grad;      ///< N x 3, Eh/Bohr (the device gradient unit); pre-allocated
     curcuma::ewald::EwaldEnergyTerms m_host_ewald_terms;
+    /// Claude Generated (Nov 2026, GPU_PERIODIC_GAPS A2/S3): device Ewald (pair list, kernel, phase table, operator
+    /// of the periodic pcg, energy/gradient/virial at fixed charges), handed to the host GFNFF (setEwaldDeviceOps);
+    /// nullptr = host Ewald (S2), also with -gfnff.gpu_ewald_device false.
+    std::unique_ptr<curcuma::ewald::EwaldDeviceOps> m_ewald_device;
+    double m_eeq_route_cn_ms = 0.0;           ///< STEPPHASE_EEQ diagnostics: CN download of the host EEQ route
+    GFNFF::PrepTiming m_eeq_route_timing;     ///< STEPPHASE_EEQ diagnostics: prepareCNAndEEQ split
+public:
+    /// True when the periodic hybrid evaluates its Ewald sum on the device (A2/S3).
+    bool deviceEwaldActive() const { return m_ewald_device != nullptr; }
+    const curcuma::ewald::EwaldDeviceOps* deviceEwald() const { return m_ewald_device.get(); }
+private:
 
     // Claude Generated (Sep 2026): GPU-path per-phase wall-clock breakdown, so
     // getLastPrepTiming() reports real numbers instead of the CPU PrepTiming's zeros
@@ -585,6 +596,10 @@ GFNFFGpuMethodImpl<Backend>::~GFNFFGpuMethodImpl()
     // GFNFF that outlives the wrapper (CURCUMA_GFNFF_GPU_LEAK) never calls into a destroyed one.
     if (m_gfnff)
         m_gfnff->setHBondEnergySource({}, {});
+    if (m_gfnff)
+        m_gfnff->setEwaldDeviceOps(nullptr);   // A2/S3: the device Ewald is freed below, on the right device
+    bindDevice();
+    m_ewald_device.reset();
 
     // Destroy GPU workspace first (holds CUDA resources) - on the device that owns them.
     bindDevice();
@@ -715,6 +730,22 @@ bool GFNFFGpuMethodImpl<Backend>::setMolecule(const Mol& mol)
             }
             m_gpu_workspace->setCoulombPairOnDevice(false);
             m_host_ewald_grad = Matrix::Zero(static_cast<int>(m_atom_types.size()), 3);
+            // A2/S3 (Nov 2026): Ewald pair terms and the periodic pcg operator on the device unless switched off
+            // (-gfnff.gpu_ewald_device false = the S2 host Ewald, same binary). Fallbacks inside are counted.
+            m_gfnff->setEwaldDeviceOps(nullptr);
+            m_ewald_device.reset();
+            bool want_dev = true;   // == PARAM default of gpu_ewald_device (gfnff.h)
+            if (m_parameters.contains("gfnff") && m_parameters["gfnff"].is_object()
+                && m_parameters["gfnff"].contains("gpu_ewald_device"))
+                want_dev = m_parameters["gfnff"].value("gpu_ewald_device", want_dev);
+            else
+                want_dev = m_parameters.value("gpu_ewald_device", want_dev);
+            if (want_dev) {
+                m_ewald_device = Backend::createEwaldDevice();
+                if (!m_ewald_device)
+                    curcuma::reportGpuFallback("gfnff_periodic_ewald_device", "device Ewald not available on this backend; host Ewald");
+            }
+            m_gfnff->setEwaldDeviceOps(m_ewald_device.get());
         }
     }
 
@@ -1611,8 +1642,10 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
     // high fragment counts where the device has no usable solve. The normal device path leaves CN
     // GPU-resident (WP5-D), so m_gpu_cn_final is synced to the current geometry first.
     auto eeqCpuFragmentRoute = [&]() {
+        const auto tr0 = std::chrono::high_resolution_clock::now();
         m_gpu_workspace->finalizeCNForCPU(m_gpu_cn_final);
-        m_gfnff->prepareCNAndEEQ(gradient, /*gpu_only=*/true, &m_gpu_cn_final, /*skip_eeq=*/false);
+        m_eeq_route_cn_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - tr0).count();
+        m_gfnff->prepareCNAndEEQ(gradient, /*gpu_only=*/true, &m_gpu_cn_final, /*skip_eeq=*/false, &m_eeq_route_timing);
         charges = m_gfnff->getLastCharges();
         m_gpu_workspace->setEEQCharges(charges);
     };
@@ -1662,7 +1695,9 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
         // aspc warm start, eeq_ewald_tol) with the CN of the device, exactly the CPU path; uploaded like the
         // many-fragment CPU route. The same charges feed the host Ewald pair term below.
         if (CurcumaLogger::get_verbosity() >= 2)
-            CurcumaLogger::info("EEQ GPU Phase 2: periodic hybrid - host periodic EEQ (Ewald matrix) with the device CN");
+            CurcumaLogger::info(m_ewald_device ? "EEQ GPU Phase 2: periodic hybrid - host pcg with the device Ewald operator and the device CN"
+                                               : "EEQ GPU Phase 2: periodic hybrid - host periodic EEQ (Ewald matrix) with the device CN");
+        m_gfnff->setEwaldDeviceOps(m_ewald_device.get());   // A2/S3: also after a workspace rebuild
         eeqCpuFragmentRoute();
     } else if (many_frag_cpu_route && !many_frag_device_ppcg) {
         // Deliverable 3 (Jun 2026), ROCm only (threshold 0 on CUDA): high fragment count
@@ -2428,6 +2463,17 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
             fmt::print(stderr, "STEPPHASE {} grad={} cn={:.2f} dlogdcn={:.2f} hb_cn={:.2f} hbxb={:.2f}{} launch={:.2f} eeq={:.2f} ewald={:.2f} coul={:.2f} total={:.2f}\n",
                        m_calc_count, gradient ? 1 : 0, T.cn, T.dlogdcn, T.hb_cn, T.hbxb, hbxb_updated ? "[F]" : "",
                        T.launch, T.eeq_solve, T.host_ewald, T.coulomb_postprocess, T.total);
+            // A2/S3 (Nov 2026): split of the periodic pcg (operator set-up, preconditioner, operator calls) in the hybrid
+            if (m_periodic_hybrid && m_gfnff->eeqSolver()) {
+                const EEQSolver* es = m_gfnff->eeqSolver();
+                const auto& pr = es->lastPeriodicProfile();
+                const auto& rt = m_eeq_route_timing;
+                fmt::print(stderr, "STEPPHASE_EEQ {} path={}{} it={} solve={:.2f} setup={:.2f} precond={:.2f} apply={:.2f} applies={} "
+                    "cn_down={:.2f} prep_total={:.2f} prep_cn={:.2f} topo={:.2f} cnf={:.2f} eeq_solve={:.2f} dist={:.2f}\n",
+                    m_calc_count, es->lastPeriodicPath(), es->lastPeriodicOnDevice() ? "[dev]" : "", es->lastPeriodicIterations(),
+                    es->lastPeriodicSolveMs(), pr.setup_ms, pr.precond_ms, pr.apply_wall_ms, pr.applies, m_eeq_route_cn_ms, rt.total,
+                    rt.cn, rt.eeq_topo, rt.cnf, rt.eeq_solve, rt.charge_dist);
+            }
         }
     }
 

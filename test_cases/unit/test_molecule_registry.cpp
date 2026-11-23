@@ -281,6 +281,17 @@ namespace TestMolecules {
             }
         },
         {
+            "na2cl2_ions", {
+                .name = "na2cl2_ions",
+                .description = "two Na and two Cl, 5.5 A apart (structure library na2cl2-isolated-ions); ions for periodic boxes",
+                .category = "dimers",
+                .library_id = "na2cl2-isolated-ions",
+                .reference_energies = {},
+                .tolerances = {},
+                .atom_count = 4
+            }
+        },
+        {
             "fi_pyridine", {
                 .name = "fi_pyridine",
                 .description = "F-I...pyridine halogen-bond complex (structure library fi-pyridine)",

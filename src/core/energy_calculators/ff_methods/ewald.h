@@ -95,6 +95,7 @@
 
 #include <complex>
 #include <functional>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -313,6 +314,21 @@ public:
         return t;
     }
     double volume() const { return m_volume; }
+    /// Claude Generated (Nov 2026, GPU_PERIODIC_GAPS A2/S3): the cell, the integer indices n of the half-space k
+    /// vectors (3 per k, the order of kVectorTable()) and the largest |n_a| per axis, for the device Ewald.
+    const PBCUtils::OrthoCell& cell() const { return m_cell; }
+    std::vector<int> kVectorIndices() const
+    {
+        std::vector<int> t;
+        t.reserve(3 * m_kvectors.size());
+        for (const KVector& kv : m_kvectors) {
+            t.push_back(kv.n[0]);
+            t.push_back(kv.n[1]);
+            t.push_back(kv.n[2]);
+        }
+        return t;
+    }
+    int nmax(int axis) const { return m_nmax[axis]; }
 
 private:
     /// One reciprocal vector of the half space (n and -n give the same term; only one is stored).
@@ -327,6 +343,33 @@ private:
     double m_volume = 0.0;
     int m_nmax[3] = { 0, 0, 0 };
     std::vector<KVector> m_kvectors;
+};
+
+/*! \brief Device back end of the Ewald pair terms of Gaussian charges - Claude Generated (Nov 2026, GPU_PERIODIC_GAPS A2, S3)
+ *
+ * Implemented in the CUDA plugin (cuda/ewald_gpu.cu, GfnffEwaldGPU), called by the CPU code that owns the algorithm:
+ * EEQSolver::calculateFinalChargesPeriodic (matrix-free pcg: one potentials() per operator call) and
+ * FFWorkspace::evaluateEwaldCoulomb (energy, gradient, virial at fixed charges). The device computes exactly the parts
+ * EwaldSum::realSpaceRangeCached + reciprocalRange (+ realSpaceVirialRange + reciprocalVirialRange) compute on the CPU:
+ * the real-space pairs (i != j, minimum image, r < r_cut, kernel erfc(a r)/r - erfc(g_ij r)/r) and the k != 0 sum.
+ * Self, background and Gaussian background (O(N)) stay with the caller (EwaldSum::selfAndBackground).
+ * Every call returns false on a device failure (message in lastError()); the caller then takes the CPU path and
+ * reports a counted GPU fallback. Results are deterministic (fixed-order reductions, no atomic additions).
+ */
+class EwaldDeviceOps {
+public:
+    virtual ~EwaldDeviceOps() = default;
+    /// Make the device hold pair list, kernel values and phase table of (ew, positions, alp); a no-op when it already
+    /// holds them (bitwise key on positions, alp, cell and parameters, as EwaldSum::cacheValidFor).
+    virtual bool prepare(const EwaldSum& ew, const Eigen::MatrixXd& positions, const Eigen::VectorXd& alp) = 0;
+    /// y = (A_real + A_recip) x of the prepared geometry (the potentials of realSpaceRangeCached + reciprocalRange).
+    virtual bool potentials(const Eigen::VectorXd& x, Eigen::VectorXd& y) = 0;
+    /// Pair energy terms.real / .reciprocal of charges q (other fields untouched); gradient N x 3 (Eh/Bohr, resized)
+    /// when grad != nullptr; virial (real + reciprocal pair part, Eh) when virial != nullptr.
+    virtual bool evaluate(const Eigen::VectorXd& q, EwaldEnergyTerms& terms, Eigen::MatrixXd* grad, Eigen::Matrix3d* virial) = 0;
+    virtual std::string lastError() const = 0;
+    /// Milliseconds of the last prepare() that rebuilt the device data (0 on a key hit), for the step profile.
+    virtual double lastPrepareMs() const = 0;
 };
 
 } // namespace ewald
