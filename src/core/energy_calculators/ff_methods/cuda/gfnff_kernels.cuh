@@ -521,7 +521,8 @@ __global__ GFNFF_KERNEL_BOUNDS void k_cn_chainrule(
     const double* __restrict__ dEdcn,          ///< [N] combined dE/dCN (bond+disp-qtmp)
     const double* __restrict__ dlogdcn,        ///< [N] logistic squashing factor
     double*                    grad,
-    double        kn                            ///< CN decay constant (-7.5)
+    double        kn,                           ///< CN decay constant (-7.5)
+    double        r2_max                        ///< A16: pairs with r^2 > r2_max skipped (cnCutoffR2Max)
 );
 
 /// HB alpha-modulation chain-rule gradient: pairwise kernel over (H, B) pairs.
@@ -1048,7 +1049,8 @@ __global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_cn_compute_pairs(
     const double* __restrict__ cy,       ///< [N] y-coordinates (Bohr, SoA)
     const double* __restrict__ cz,       ///< [N] z-coordinates (Bohr, SoA)
     double*       __restrict__ cn_raw,   ///< [N] output: erf sum (atomicAdd, zero before)
-    double        kn                     ///< CN decay constant (-7.5)
+    double        kn,                    ///< CN decay constant (-7.5)
+    double        r2_max                 ///< A16: pairs with r^2 > r2_max skipped (cnCutoffR2Max)
 );
 
 /// Apply log squashing transform from cn_raw to cn_final: 1 thread per atom.
@@ -1259,7 +1261,7 @@ __global__ __launch_bounds__(512) void k_repulsion_virial(int n, const int* __re
     const double* __restrict__ cy, const double* __restrict__ cz, double* vir);
 __global__ __launch_bounds__(512) void k_cn_chainrule_virial(int n_pairs, const int* __restrict__ idx_i, const int* __restrict__ idx_j, const double* __restrict__ rcov_sum,
     const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
-    const double* __restrict__ dEdcn, const double* __restrict__ dlogdcn, double kn, double* vir);
+    const double* __restrict__ dEdcn, const double* __restrict__ dlogdcn, double kn, double r2_max, double* vir);
 __global__ __launch_bounds__(512) void k_hb_alpha_virial(int n_pairs, const int* __restrict__ idx_H, const int* __restrict__ idx_B, const double* __restrict__ rcov_sum,
     const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
     const double* __restrict__ zz_hb, double kn, double* vir);

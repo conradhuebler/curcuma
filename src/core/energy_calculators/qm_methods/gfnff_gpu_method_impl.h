@@ -19,6 +19,7 @@
  *       static constexpr bool has_localinv_upload   = true;   // host-built localinv upload (ROCm too, Oct 2026)
  *       static constexpr bool has_localinv_device_build = true; // device-built localinv (ROCm too, Oct 2026)
  *       static constexpr bool has_cn_pair_skin      = true;   // K1 CN pair-list skin (ROCm too, Oct 2026)
+ *       static constexpr bool has_cn_cutoff         = true;   // A16 CPU CN range on the device (false on ROCm)
  *       static constexpr bool has_stream_overlap    = true;   // false on ROCm (K2/K3, Oct 2026)
  *       static constexpr bool has_charge_groups_cn_guard = true; // false on ROCm: CPU fallback (Oct 2026)
  *       static constexpr int  default_eeq_cpu_fragment_threshold = 0;   // 16 on ROCm
@@ -947,6 +948,18 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
         m_cn_pair_regen_every   = cfg_get_int("gpu_cn_pair_regen_every", 0);
         m_cn_pair_cutoff_factor = cfg_get_dbl("gpu_cn_pair_cutoff_factor", 2.5);
         m_gpu_workspace->setCNPairCutoffFactor(m_cn_pair_cutoff_factor);
+        // A16 (Nov 2026, Claude Generated): the device CN, its chain rule and its virial use the CN
+        // range of the CPU (GFNFF::cnDerivativeRangeBohr): cn_cutoff_bohr > 0 is the strict test
+        // r^2 < rc^2 of CNCalculator::calculateGFNFFCNWithNeighbors, i.e. r^2 <= nextafter(rc^2, 0);
+        // cn_cutoff_bohr = 0 the test r^2 <= cnthr(cn_accuracy) of CNCalculator::calculateGFNFFCN.
+        // Same lookup as GFNFF (the gfnff scope wins over the flat key), same fallbacks (10.0, 1.0).
+        if constexpr (Backend::has_cn_cutoff) {
+            const double cn_cut = cfg_get_dbl("cn_cutoff_bohr", 10.0);
+            const double r2_max = cn_cut > 0.0
+                ? std::nextafter(cn_cut * cn_cut, 0.0)
+                : CNCalculator::gfnffAccuracyThresholdSqBohr(cfg_get_dbl("cn_accuracy", 1.0));
+            m_gpu_workspace->setCNCutoffR2Max(r2_max);
+        }
         // K1 (Oct 2026, Claude Generated): CN pair list as a Verlet list with skin s.
         // The list holds every pair with r < f*rs + 2s (rs = rcov_i + rcov_j, 4/3-scaled D3 radii,
         // f = gpu_cn_pair_cutoff_factor). A pair NOT in the list had r_build >= f*rs + 2s; after every

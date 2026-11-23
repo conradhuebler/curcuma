@@ -10,7 +10,8 @@ gehört in `AIChangelog.md` bzw. das Archiv, Fehlerberichte in [docs/KNOWN_ISSUE
 Stand.
 
 ## 1. Korrektheit (offen)
-- **GFN-FF-CN auf CUDA ohne `cn_cutoff_bohr`** (Ursache gefunden 2026-11-23): die CUDA-CN (O(N^2)-Kern 30 Bohr, Paarliste 2,5 x rcov) ignoriert den Referenz-Cutoff 10 Bohr; Na-Cl-Paare bei 10-11 Bohr aendern C6/EEQ (Na2Cl2-Box: 3,4e-9 Eh, 3,5e-8 Eh/A); CPU folgt der Referenz, beide FD-konsistent. Fix auf CUDA und ROCm (Betreiber). [docs/GPU_PERIODIC_GAPS.md](docs/GPU_PERIODIC_GAPS.md) A16.
+- **GFN-FF-CN auf ROCm ohne `cn_cutoff_bohr`** (CUDA behoben 2026-11-23, A16): `gfnff_rocm.hip` nutzt 30 Bohr bzw. keinen Cutoff in der CN-Paarliste; `r2_max` portieren, Trait `has_cn_cutoff`. [docs/GPU_PERIODIC_GAPS.md](docs/GPU_PERIODIC_GAPS.md) B10.
+- **GFN-FF-Gradient Pt7 (`pt-cluster-7`) verfehlt das FD-Gate um 2,0e-2 Eh/A** (gefunden 2026-11-23, CPU und CUDA gleich, glatt in h): fehlender Gradiententerm oder Topologie-Neuableitung je `-sp`; nicht untersucht. [docs/WP-PERIODIC-NONBONDED.md](docs/WP-PERIODIC-NONBONDED.md) A16.
 
 - **GPU und periodische Simulation mit Druck (Betreiberziel, Nov 22, 2026)**: GFN-FF und GFN1/GFN2 sollen auf jedem Backend vollständige
   NPT-Simulationen können. Fehlend auf CUDA: Druckterme der scharfen Radien (A3); A1 (Virial/Barostat mit `-gpu cuda`) und A2/S3 (Geräte-Ewald und pcg-Operator) erledigt 2026-11-23. ROCm: Teil B.

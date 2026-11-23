@@ -504,6 +504,14 @@ public:
     void setCNPairSkin(double skin_bohr) { m_cn_pair_skin_bohr = skin_bohr > 0.0 ? skin_bohr : 0.0; }
     double getCNPairSkin() const { return m_cn_pair_skin_bohr; }
 
+    /// A16 (Nov 2026, Claude Generated): CN range of the CPU reference model. Pairs with
+    /// r^2 > r2_max are left out of the device CN, its chain rule and its virial (CUDA only;
+    /// ROCm does not read it). The caller passes nextafter(cn_cutoff_bohr^2, 0), the strict
+    /// r^2 < rc^2 test of CNCalculator::calculateGFNFFCNWithNeighbors, or with
+    /// cn_cutoff_bohr = 0 the threshold cnthr(cn_accuracy) of CNCalculator::calculateGFNFFCN.
+    void setCNCutoffR2Max(double r2_max) { m_cn_r2_max = r2_max; }
+    double cnCutoffR2Max() const { return m_cn_r2_max; }
+
     /// K1 (Oct 2026, Claude Generated): true when an atom moved more than max_disp_bohr since
     /// the last generateCNPairListOnGPU() (own reference geometry, set by every build).
     bool cnPairListStale(double max_disp_bohr);
@@ -804,6 +812,7 @@ private:
     // Task #10 (Jun 2026): CN-derivative pair-list cutoff factor (× rcov sum)
     double m_cn_pair_cutoff_factor = 2.5;
     double m_cn_pair_skin_bohr = 0.0;   ///< K1 (Oct 2026): pair-list skin, 0 = legacy
+    double m_cn_r2_max = 900.0;          ///< A16 (Nov 2026): CN range r^2 (Bohr^2), set by setCNCutoffR2Max
     long   m_cn_pair_builds = 0;        ///< K1 (Oct 2026): build counter
 
     // Pre-allocated pinned staging buffers for async DMA transfers.

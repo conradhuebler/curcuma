@@ -3960,7 +3960,8 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
             impl.d_dEdcn.ptr,
             impl.d_dlogdcn.ptr,
             impl.d_grad.ptr,
-            m_kn);
+            m_kn,
+            m_cn_r2_max);
         checkCuda(cudaGetLastError(), "k_cn_chainrule launch");
     }
 
@@ -4024,7 +4025,7 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
             LaunchConfig c = getLaunchConfig(impl.n_cn_pairs, m_block_size);
             k_cn_chainrule_virial<<<c.gridSize, c.blockSize, 0, stream>>>(impl.n_cn_pairs, impl.d_cn_idx_i.ptr,
                 impl.d_cn_idx_j.ptr, impl.d_cn_rcov_sum.ptr, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
-                impl.d_dEdcn.ptr, impl.d_dlogdcn.ptr, m_kn, V + 9 * VIR_CN);
+                impl.d_dEdcn.ptr, impl.d_dlogdcn.ptr, m_kn, m_cn_r2_max, V + 9 * VIR_CN);
         }
         if (tail_ran) {   // C8 part of the tail alone (pref6 = 0, no dE/dCN) for the pressure correction E6/E8
             LaunchConfig cfg_a = getLaunchConfigLight(N, m_block_size);
@@ -4415,10 +4416,10 @@ void FFWorkspaceGPU::computeCN(const std::vector<int>& atom_types)
     // Reference: gfnff_cn.f90:66-126, cn_calculator.cpp:99-155
     constexpr double kn = -7.5;          // CN decay constant
     constexpr double cnmax = 4.4;       // Squashing limit
-    // Distance cutoff of the O(N^2) CN sum: 30 Bohr. Sep 2026: the dead rcov-based estimate
-    // that was computed and then overwritten here (with a CODATA-1986 Angstrom->Bohr factor
-    // applied to radii already in Bohr) is removed - Claude Generated.
-    const double threshold_sq = 900.0;
+    // A16 (Nov 2026, Claude Generated): the CN range of the CPU reference (cn_cutoff_bohr, or
+    // cnthr(cn_accuracy) with cn_cutoff_bohr = 0), set by setCNCutoffR2Max(); it was a fixed
+    // 30 Bohr here and no cutoff in the pair-list path. k_cn_compute skips r^2 > threshold_sq.
+    const double threshold_sq = m_cn_r2_max;
 
     // Ensure CN buffers are allocated
     if (impl.d_cn_raw.n < N) impl.d_cn_raw.alloc(N);
@@ -4446,7 +4447,8 @@ void FFWorkspaceGPU::computeCN(const std::vector<int>& atom_types)
             impl.coords.d_y.ptr,
             impl.coords.d_z.ptr,
             impl.d_cn_raw.ptr,
-            kn);
+            kn,
+            m_cn_r2_max);
         // fixed-point accumulator -> double (order-independent CN, docs/GPU_REPRODUCIBILITY.md)
         k_fix_to_double<<<cfg_zero.gridSize, cfg_zero.blockSize, 0, impl.stream>>>(
             N, impl.d_cn_raw.ptr, 1.0 / GFNFF_FIX_CN);

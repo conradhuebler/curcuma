@@ -2038,7 +2038,7 @@ refused there anyway).
 |---|---|
 | (a) device Ewald vs CPU and vs the host-Ewald GPU hybrid, input geometry and every atom moved by <= 0.005 A (per-step solve); 20 H2O (FD settings), 60 H2O, H3O+(H2O)2 + 18 H2O (Q = +1), 970 H2O L 58 (pcg), 4 threads | charges <= 3.8e-15 e, energy <= 5.2e-14 Eh, gradient <= 7.9e-15 Eh/A, model virial <= 9.2e-14 Eh (limits 1e-9 e, 1e-9 Eh, 1e-9 Eh/A, 1e-7 Eh); device used (7 operator calls per solve at 2910 atoms), no fallback counted |
 | (a) W1 boxes 432 / 864 / 1728 H2O (`box*_s1`, 4 threads, production settings) | vs CPU: charges <= 7.7e-15 e, energy <= 7.7e-12 Eh, gradient <= 4.2e-14 Eh/A, virial <= 6.5e-11 Eh; vs host-Ewald GPU: energy <= 9.1e-13, gradient <= 1.0e-15, virial <= 9.3e-13 |
-| (a) ionic mixture Na2Cl2 + 380 H2O, L 48 Bohr (1144 atoms, pcg) | vs host-Ewald GPU: energy 4.3e-14 Eh, gradient 1.1e-15 Eh/A, virial 5.7e-14 Eh; vs CPU 3.4e-9 Eh / 3.5e-8 Eh/A / 1.1e-7 Eh (charges 5e-11 e): **pre-existing**, the same numbers with the A1 base build (D4 pair term 3.5e-9 Eh; cause found Nov 23, 2026: the CUDA CN ignores `cn_cutoff_bohr` 10, GPU_PERIODIC_GAPS.md A16; not Ewald), test limit there 1e-8 / 1e-7 / 2e-7 (TODO.md) |
+| (a) ionic mixture Na2Cl2 + 380 H2O, L 48 Bohr (1144 atoms, pcg) | vs host-Ewald GPU: energy 4.3e-14 Eh, gradient 1.1e-15 Eh/A, virial 5.7e-14 Eh; vs CPU 3.4e-9 Eh / 3.5e-8 Eh/A / 1.1e-7 Eh (charges 5e-11 e): **pre-existing**, the same numbers with the A1 base build (D4 pair term 3.5e-9 Eh; cause found Nov 23, 2026: the CUDA CN ignores `cn_cutoff_bohr` 10, GPU_PERIODIC_GAPS.md A16; not Ewald), test limit there 1e-8 / 1e-7 / 2e-7 until A16 fixed it (below: 2.4e-12 Eh, 8.2e-14 Eh/A, 3.1e-12 Eh, strict limits) |
 | (b) FD gate, device Ewald: gradient vs Richardson FD of the total energy (h 2e-4 / 1e-4 A, 6 atoms near a face) and virial vs FD under isotropic and axial strain; 20 H2O and Q = +1, dense EEQ and forced pcg (`eeq_ewald_dense_max_atoms 0`, 423 / 558 device operator calls) | gradient <= 9.4e-10 Eh/A (limit 1e-8), virial <= 6.3e-9 Eh (limit 1e-7) |
 | (c) second GPU instance, 970 H2O, two steps, 4 threads | energy, gradient, charges, virial bit for bit |
 | (d) fault injection prepare / potentials / evaluate | energy equal to the host-Ewald hybrid within 0 / 2.8e-13 / 1.4e-13 Eh, fallback counted 2 / 1 / 1 times |
@@ -2081,6 +2081,33 @@ is per term) and must be set for CPU comparisons too; at L/2 instead of 17.5 sqr
   10368 atoms), more than 10368 atoms, heavy elements near the r_g < L/2 limit, charged boxes under the ensemble charge
   model (CPU fallback as before), a long NPT run (20 steps here), C-rescale (same code path). Human production testing
   pending.
+
+## A16 CN range of the CUDA CN = CPU CN range (2026-11-23, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+**Change.** The CUDA CN used a fixed 30 Bohr in the O(N^2) kernel and no distance cutoff in the CN pair list (reach
+2.5 (rcov_i + rcov_j) + 2 skin, 17 Bohr for Na-Cl); the CPU, validated against pprcht/gfnff, uses `cn_cutoff_bohr`
+(10 Bohr, strict r^2 < rc^2) or with `cn_cutoff_bohr` 0 the cnthr of `cn_accuracy`. Now `k_cn_compute_pairs`,
+`k_cn_chainrule` and `k_cn_chainrule_virial` skip r^2 > `r2_max` and `k_cn_compute` gets `r2_max` as its threshold;
+`r2_max` = nextafter(rc^2, 0) (the strict test) or cnthr, set by `GFNFFGpuMethodImpl::initGPUWorkspace` with the GFNFF
+lookup (gfnff scope before the flat key, fallbacks 10.0 / 1.0). ROCm unchanged (trait `has_cn_cutoff` false, GPU_PERIODIC_GAPS B10).
+Plugin ABI 27 unchanged (no shared layout or entry point changed).
+
+**Why the energies of light-atom systems cannot move.** A pair beyond 1.79 (rcov_i + rcov_j) contributes exactly 0 to
+the CN (erf(kn x) rounds to -1 for kn x < -5.9); beyond 10 Bohr that holds for every pair with rcov_i + rcov_j < 5.6 Bohr
+(all H/C/N/O/F/S/Cl pairs). Their chain-rule terms are below 1e-50 Eh/Bohr and vanish in the fixed-point gradient.
+
+| check (thresholds fixed beforehand) | result |
+|---|---|
+| SASS, `cuobjdump -sass` of the plugin vs the reference build `af140bb4` | 330 of 333 kernels identical; the 3 changed are the 3 CN pair kernels |
+| no cell, 6 structures x gfnff/gfn1/gfn2 x 1/4 threads + 2 MD, `-dump_gradient` md5 (16-digit energy in the file) vs reference build | CPU 38/38, CUDA 38/38 identical; second CUDA run 38/38 identical |
+| no cell, heavy-atom sample, gfnff 4 threads, GPU new vs GPU reference | Pt7, F-I...pyridine, Cl2-, pdmaema + 2 Cl- + 24 H2O (182 atoms): md5 identical; `na2cl2-isolated-ions`: E moves by -1.12e-10 Eh, gradient by 1.7e-9 Eh/A, now = CPU (dE 0, dG 2.7e-16 Eh/A; before 1.1e-10 / 1.7e-9) |
+| ion box Na2Cl2 + 380 H2O, L 48 Bohr (ctest `gfnff_gpu_pbc_ewald`, two geometries) | GPU vs CPU energy <= 2.4e-12 Eh (was 3.4e-9), gradient <= 8.2e-14 Eh/A (was 3.5e-8), virial <= 3.1e-12 Eh (was 1.1e-7), charges <= 2.7e-15 e; limits back to 1e-9 / 1e-9 / 1e-7 |
+| `gfnff_gpu_pbc_*` (refuse, terms, hybrid, virial, ewald) | 5/5 passed |
+| FD gate, GPU, no cell, `-dump_gradient` vs Richardson central differences of `-sp` (h 1e-3 / 5e-4 A, all components) | `na2cl2-isolated-ions` 2.8e-12 Eh/A |
+
+Finding on the way (not from A16, not investigated): `pt-cluster-7` fails the same FD gate by 2.0e-2 Eh/A on the CPU, the
+reference GPU build and the new GPU build alike (smooth: FD with h and h/2 agree to 1e-6, so the analytic gradient misses
+a term, or the per-geometry topology derivation of each `-sp` run moves parameters); TODO.md.
 
 ## Moved from TODO.md (Nov 23, 2026)
 

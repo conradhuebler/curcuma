@@ -54,6 +54,8 @@ struct GFNFFCudaBackend {
     static constexpr bool has_multi_gpu_split = true;
     /// K1 (Oct 2026): CN pair list as a Verlet list with skin (cnPairListStale(), setCNPairSkin()).
     static constexpr bool has_cn_pair_skin = true;
+    /// A16 (Nov 2026): the device CN uses the CPU CN range (setCNCutoffR2Max: cn_cutoff_bohr / cnthr).
+    static constexpr bool has_cn_cutoff = true;
     /// K2/K3 (Oct 2026): dispersion and the device EEQ solve overlap dc6dcn on own streams
     /// (recordEEQInputsReady(), launchDispersionGradientEarly(), EEQ setInputReadyEvent()).
     static constexpr bool has_stream_overlap = true;

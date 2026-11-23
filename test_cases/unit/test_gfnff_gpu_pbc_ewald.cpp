@@ -271,11 +271,10 @@ static Geometry moved(const Mol& m, unsigned seed, double amp_ang)
 }
 
 // (a) device Ewald vs CPU and vs the host-Ewald hybrid
-/// ion_gap: a pre-existing GPU-vs-CPU difference (the same numbers in the A1 base build, not from the Ewald sum): the
-/// CUDA CN ignores cn_cutoff_bohr (10 Bohr, the reference cnthr), so Na-Cl pairs at 10-11 Bohr enter C6 and the EEQ on the
-/// GPU only (GPU_PERIODIC_GAPS.md A16, diagnosed Nov 23, 2026): against the CPU the limits are 1e-8 Eh / 1e-7 Eh/A /
-/// 2e-7 Eh there; against the host-Ewald GPU hybrid they stay strict.
-static void testParity(const char* label, const Mol& m, int threads, bool fd, bool ion_gap = false)
+/// The ionic box needed loose CPU limits until A16 (Nov 23, 2026): the CUDA CN ignored cn_cutoff_bohr, so Na-Cl pairs at
+/// 10-11 Bohr entered C6 and the EEQ on the GPU only. Since the fix the device CN uses the CPU CN range and every box is
+/// held to the strict limits (GPU_PERIODIC_GAPS.md A16).
+static void testParity(const char* label, const Mol& m, int threads, bool fd)
 {
     std::printf("(a) %s (%d atoms, L %.2f Bohr, %d threads)\n", label, m.m_number_atoms, m.m_unit_cell(0, 0) * A2B, threads);
     const int fb0 = fallbackCount();
@@ -296,8 +295,7 @@ static void testParity(const char* label, const Mol& m, int threads, bool fd, bo
         for (int ref = 0; ref < 2; ++ref) {
             const Result& r = ref == 0 ? c : h;
             const std::string tag = std::string(label) + " " + gname[s] + " dev vs " + (ref == 0 ? "CPU" : "host-Ewald GPU");
-            const bool loose = ion_gap && ref == 0;
-            const double le = loose ? 1e-8 : 1e-9, lg = loose ? 1e-7 : 1e-9, lv = loose ? 2e-7 : 1e-7;
+            const double le = 1e-9, lg = 1e-9, lv = 1e-7;
             check(maxAbsV(d.q, r.q) <= 1e-9, tag + ": charges (e)", maxAbsV(d.q, r.q), 1e-9);
             check(std::abs(d.e - r.e) <= le, tag + ": energy (Eh)", std::abs(d.e - r.e), le);
             check(maxAbs(d.grad, r.grad) <= lg, tag + ": gradient (Eh/A)", maxAbs(d.grad, r.grad), lg);
@@ -516,7 +514,7 @@ int main(int argc, char** argv)
     if (run('a')) {
         // ionic mixture: Na2Cl2 (four ions, neutral in total) in 380 waters, L 48 Bohr (0.7 g/cm3), 1144 atoms (matrix-free pcg)
         const Mol salt = waterBox(380, 48.0, 20261123, { registryMol("na2cl2_ions") }, 2.4);
-        testParity("Na2Cl2 + 380 H2O L 48 (pcg)", salt, 4, false, /*ion_gap=*/true);
+        testParity("Na2Cl2 + 380 H2O L 48 (pcg)", salt, 4, false);
     }
     if (run('b')) testFD("20 H2O", box20);
     if (run('b')) testFD("H3O+(H2O)2 + 18 H2O, Q = +1", charged);

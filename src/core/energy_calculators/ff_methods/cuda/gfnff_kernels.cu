@@ -3526,7 +3526,8 @@ __global__ void k_cn_chainrule(
     const double* __restrict__ dEdcn,
     const double* __restrict__ dlogdcn,
     double*                    grad,
-    double        kn)
+    double        kn,
+    double        r2_max)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n_pairs) return;
@@ -3537,6 +3538,8 @@ __global__ void k_cn_chainrule(
     double dz = cz[i] - cz[j];
     applyMIC(dx, dy, dz);
     double r2 = dx*dx + dy*dy + dz*dz;
+    // A16 (Nov 2026, Claude Generated): the CPU CN range (cn_cutoff_bohr / cnthr), see k_cn_compute_pairs.
+    if (r2 > r2_max) return;
     double rij = sqrt(r2);
     if (rij < 1e-10) return;
 
@@ -4097,7 +4100,8 @@ __global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_cn_compute_pairs(
     const double* __restrict__ cy,
     const double* __restrict__ cz,
     double*       __restrict__ cn_raw,
-    double        kn)
+    double        kn,
+    double        r2_max)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n_pairs) return;
@@ -4109,7 +4113,13 @@ __global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_cn_compute_pairs(
     double dy = cy[i] - cy[j];
     double dz = cz[i] - cz[j];
     applyMIC(dx, dy, dz);
-    double r = __dsqrt_rn(dx*dx + dy*dy + dz*dz);
+    // A16 (Nov 2026, Claude Generated): the CN range of the CPU (CNCalculator::calculateGFNFFCN*):
+    // r2_max = nextafter(cn_cutoff_bohr^2, 0) (strict r^2 < rc^2) or cnthr(cn_accuracy) with
+    // cn_cutoff_bohr = 0. The pair list itself reaches f*(rcov_i+rcov_j) + 2 skin, which exceeds
+    // 10 Bohr for heavy atoms (Na-Cl 17 Bohr); before A16 those pairs entered the GPU CN.
+    const double r2 = dx*dx + dy*dy + dz*dz;
+    if (r2 > r2_max) return;
+    double r = __dsqrt_rn(r2);
     if (r < 1e-10) return;
 
     // erf-based CN contribution (same formula as k_cn_compute)
@@ -5405,7 +5415,7 @@ __global__ __launch_bounds__(512) void k_repulsion_virial(
 __global__ __launch_bounds__(512) void k_cn_chainrule_virial(
     int n_pairs, const int* __restrict__ idx_i, const int* __restrict__ idx_j, const double* __restrict__ rcov_sum,
     const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
-    const double* __restrict__ dEdcn, const double* __restrict__ dlogdcn, double kn, double* vir)
+    const double* __restrict__ dEdcn, const double* __restrict__ dlogdcn, double kn, double r2_max, double* vir)
 {
     const int tid = blockIdx.x * blockDim.x + threadIdx.x;
     double v[9] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
@@ -5413,8 +5423,9 @@ __global__ __launch_bounds__(512) void k_cn_chainrule_virial(
         const int i = idx_i[tid], j = idx_j[tid];
         double dx = cx[i] - cx[j], dy = cy[i] - cy[j], dz = cz[i] - cz[j];
         applyMIC(dx, dy, dz);
-        const double rij = sqrt(dx * dx + dy * dy + dz * dz);
-        if (rij >= 1e-10) {
+        const double r2 = dx * dx + dy * dy + dz * dz;
+        const double rij = sqrt(r2);
+        if (rij >= 1e-10 && r2 <= r2_max) {   // A16: the CN range of k_cn_chainrule
             const double rcov = rcov_sum[tid];
             const double dr = (rij - rcov) / rcov;
             const double dSdr = kn * 0.5641895835477563 * exp(-kn * kn * dr * dr) / rcov;
