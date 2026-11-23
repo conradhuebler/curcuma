@@ -390,6 +390,8 @@ PARAM(hb_parallel_min_pairs, Int, 500, "Run the H-bond detection on the thread p
 PARAM(dispersion_cutoff_bohr, Double, 0.0, "Cutoff (Bohr) of the D4 dispersion pair list; 0 keeps all pairs, as the reference. A cutoff also widens the CN-derivative range to match. With a periodic cell, 0 reduces the 50 Bohr evaluation radius to just below L_min/2 (the part beyond it is added by dispersion_tail); an explicit value must be below L_min/2.", "Dispersion", {})
 PARAM(dispersion_tail, Bool, true, "Periodic cell only: add the long-range D4 tail beyond the evaluation radius for homogeneous density (g(r) = 1), from the current CN, with its force through dE/dCN; reported as 'Dispersion tail'. No effect without a cell. false leaves the pair term cut at the evaluation radius.", "Dispersion", {})
 PARAM(pressure_lrc, Bool, true, "Periodic cell with dispersion_tail only: the reported pressure (MD column P, barostat) adds the long-range correction of the D4 pairs crossing the evaluation radius, tr Xi_lrc = 3 E6_tail + 5 E8_tail (homogeneous estimator g(r) = 1, not a derivative of the model energy). false: pressure from the model-energy derivative alone (behaviour before Nov 9, 2026). No effect on energies and forces.", "Dispersion", {})
+PARAM(pressure_hb_crossing, Bool, true, "Periodic cell only: the reported pressure (MD column P, barostat) adds the crossing term of the sharp HB/XB search radii, the triples that enter or leave the lists under a volume change (statistical shell estimator, not a derivative of the model energy; about -31 bar on liquid water). false: pressure without it (behaviour before Nov 23, 2026). No effect on energies and forces.", "HB/XB", {})
+PARAM(pressure_crossing_shell, Double, 0.03, "Width of the shell inside the HB/XB search radii, relative to the radius, from which pressure_hb_crossing extrapolates the energy density of the triples linearly to the radius (0 < value < 0.5). Smaller: more noise per step; larger: bias from the curvature (measured on water: unbiased within 1 bar for 0.01-0.05).", "HB/XB", {})
 PARAM(dispersion_c6_update, Bool, true, "Recompute the D4 pair C6 from the current CN at each new geometry, so MD and optimisation agree with single points. false keeps C6 of the setup geometry.", "Dispersion", {})
 PARAM(disp_c6_fused, Bool, true, "CPU: evaluate each D4 pair's C6 and dC6/dCN inside the dispersion energy loop instead of storing them per pair every step (same values bit for bit, less memory traffic). false for the stored per-pair path.", "Dispersion", {})
 PARAM(disp_half_contraction, Bool, true, "Faster per-atom contraction for the D4 C6 and dC6/dCN; it changes the summation order (energies agree to about 1e-10 Eh). false for the plain contraction.", "Dispersion", {})
@@ -1282,6 +1284,11 @@ public:
     void acknowledgeListsRebuilt() { m_lists_rebuild_pending = false; }
     /// Claude Generated (Nov 2026, A1): PARAM pressure_lrc (V-LRC), for the GPU hybrid virial
     bool pressureLrc() const { return m_pressure_lrc; }
+    /// Claude Generated (Nov 2026, HB-X): PARAMs pressure_hb_crossing / pressure_crossing_shell, for the GPU hybrid virial
+    bool pressureHBCrossing() const { return m_pressure_hb_crossing; }
+    double pressureCrossingShell() const { return m_pressure_crossing_shell; }
+    /// HB/XB search thresholds hbthr1, hbthr2 (Bohr^2) as the detection derives them (XB A-B radius = hbthr2)
+    void hbSearchThresholds(double& thr1, double& thr2) const;
     /// Claude Generated (Nov 2026, A4a): number of non-bonded repulsion list rebuilds since set-up (diagnostic, tests)
     long repulsionRebuildCount() const { return m_rep_rebuild_count; }
 
@@ -3060,6 +3067,8 @@ private:
     bool m_print_timing = true;     ///< Print init timing summary at verbosity >= 1
     bool m_dispersion_tail = true;  ///< Nov 2026 (A3c): PARAM dispersion_tail (periodic cell only)
     bool m_pressure_lrc = true;     ///< Nov 2026 (V-LRC): PARAM pressure_lrc (virial component tail_lrc)
+    bool m_pressure_hb_crossing = true;     ///< Nov 2026 (HB-X): PARAM pressure_hb_crossing (virial hb_crossing/xb_crossing)
+    double m_pressure_crossing_shell = 0.03; ///< Nov 2026 (HB-X): PARAM pressure_crossing_shell (relative shell width)
     bool m_want_virial = false;     ///< Nov 2026 (N1): atomic virial requested (setWantVirial)
     bool m_cutoffs_frozen = false;  ///< Nov 2026 (N2): dispersionRadiiBohr() returns m_frozen_d4 (freezeCutoffsForCellChanges)
     D4RadiiBohr m_frozen_d4;        ///< Nov 2026 (N2): the frozen D4 radii

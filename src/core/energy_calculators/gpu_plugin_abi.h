@@ -70,10 +70,13 @@
 // 27 = Nov 2026, GPU_PERIODIC_GAPS A2/S3: device Ewald of the GFN-FF hybrid (new interface curcuma::ewald::EwaldDeviceOps
 //      implemented in the plugin and called by the core; EEQSolver and FFWorkspace gained m_ewald_device; core symbol
 //      GFNFF::setEwaldDeviceOps; GFNFFGpuMethodImpl gained m_ewald_device).
+// 28 = Nov 2026, HB-X (branch feature/gfnff-pressure-crossing): HB/XB crossing estimator of the pressure
+//      (FFVirialComponents gained hb_crossing, xb_crossing; FFWorkspace and FFWorkspaceGPU gained m_hb_cross_*;
+//      GFNFF gained m_pressure_hb_crossing, m_pressure_crossing_shell; core symbol GFNFF::hbSearchThresholds).
 
 #pragma once
 
-#define CURCUMA_GPU_PLUGIN_ABI_VERSION 27
+#define CURCUMA_GPU_PLUGIN_ABI_VERSION 28
 
 /// Defines `extern "C" int curcuma_<backend>_abi_version()` in a plugin entry file (use at file scope).
 #define CURCUMA_GPU_PLUGIN_DEFINE_ABI_VERSION(backend)                                                                \

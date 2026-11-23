@@ -217,6 +217,8 @@ void FFWorkspace::rebuildInteractionLists(GFNFFParameterSet&& params)
 
 void FFWorkspace::setRecordHBondEnergies(bool on)
 {
+    m_user_record_hb = on;
+    on = on || (m_hb_cross_on && m_want_virial);   // HB-X: the crossing pass reads the per-triple energies
     m_record_hb_energies = on;
     m_hb_triple_energy.clear();
     if (on)
@@ -226,7 +228,7 @@ void FFWorkspace::setRecordHBondEnergies(bool on)
 std::vector<GFNFFHBondEnergy> FFWorkspace::hydrogenBondEnergies() const
 {
     std::vector<GFNFFHBondEnergy> out;
-    if (!m_record_hb_energies || m_hb_triple_energy.size() != m_hbonds.size())
+    if (!m_user_record_hb || !m_record_hb_energies || m_hb_triple_energy.size() != m_hbonds.size())
         return out;
     out.reserve(m_hbonds.size());
     for (std::size_t i = 0; i < m_hbonds.size(); ++i)
@@ -655,6 +657,8 @@ void FFWorkspace::executeGFNFF(int p)
     if (m_hbond_enabled) {
         t = tic(); calcHydrogenBonds(p); timings.hbond = toc(t);
         t = tic(); calcHalogenBonds(p);  timings.xbond = toc(t);
+        calcHBCrossing(p);   // HB-X (Nov 2026): pressure crossing estimator, virial only (separate pass, kernels untouched)
+        calcXBCrossing(p);
     }
 
     // Three-body dispersion

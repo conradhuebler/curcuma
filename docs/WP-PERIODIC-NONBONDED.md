@@ -2081,3 +2081,84 @@ is per term) and must be set for CPU comparisons too; at L/2 instead of 17.5 sqr
   10368 atoms), more than 10368 atoms, heavy elements near the r_g < L/2 limit, charged boxes under the ensemble charge
   model (CPU fallback as before), a long NPT run (20 steps here), C-rescale (same code path). Human production testing
   pending.
+
+## HB-X crossing term of the HB/XB search radii in the pressure (2026-11-23, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+On `feature/gfnff-pressure-crossing` (base `724802bf`, devel/methods). Option (b) of A3-P (operator decision): a
+statistical estimator of the term that A3-P measured as missing, carried as its own virial component like V-LRC.
+**Behaviour change**: with the default `pressure_hb_crossing true` the reported pressure of a water box is about
+**31 bar lower** than with earlier binaries (NPT runs of Nov 2026 and before do not contain it).
+
+### What the detection tests (read from `detectHydrogenBondsNative` / `detectHalogenBondsNative` before the change)
+
+- HB, all distances in Bohr, minimum image: every listed triple has `r_AB^2 < hbthr1` (250 Bohr^2 at hb_accuracy 0.1);
+  case 1 (H bonded to neither) also `r_AB^2 + r_AH^2 + r_BH^2 < hbthr2` (450 Bohr^2); cases 2-4 (H bonded to the donor)
+  only the first. The energy filter `hb_min_pair_energy_eh` (1e-9 Eh, case 1) is not a geometric surface (A3-P: its
+  crossing term about 0.1 bar) and is not treated. The out-of-line cut `expo > 15` is scale-invariant (ratio of
+  distances), so an isotropic strain does not move it.
+- XB: list `r_AB^2 < hbthr2` (A bonded to X), kernel `r_XB <= r_cut` (20 Bohr, per triple).
+
+### Derivation (code comment at `crossingShellAdd`, ff_workspace_gfnff.cpp)
+
+1. Normalised criterion per triple: `h = max(r_AB^2/thr1, s/thr2)` (HB case 1, `s` the sum of squares), `r_AB^2/thr1`
+   (HB cases 2-4), `max(r_AB^2/hbthr2, r_XB^2/r_cut^2)` (XB). The triple is listed iff `h < 1`; `h` is homogeneous of
+   degree 2 in the positions: under the affine strain `x -> (1 + eps) x`, `dh/d(eps_ab) = 2 sum_d d_a d_b / thr` over the
+   vectors `d` of the active criterion (trace `2h`).
+2. Truncated energy `E = sum_t E_t Theta(1 - h_t)`. Its strain derivative has, besides the fixed-list part (N1 virial),
+   the impulsive part `Xi_cross,ab = -dE/d(eps_ab) = sum_t E_t delta(h_t - 1) dh_t/d(eps_ab)`.
+3. Isotropic part: `tr Xi_cross = 2 f(1)`, `f(h) = sum_t E_t delta(h_t - h)`, the energy density of the triples in `h`.
+   `f(1)` is not observable from triples beyond the radius (not evaluated), so it is estimated from the shell inside:
+   `h0 <= h < 1`, `h0 = (1 - shell)^2` (`shell` relative to the radius), `u = (h - h0)/(1 - h0)`. A flat average
+   `sum_shell E_t / (1 - h0)` estimates `f` at the shell middle, biased by `f'`; the weight `w(u) = -2 + 6u` (normalised:
+   `int_0^1 w = 1`, `int_0^1 w (u - 1) = 0`) extrapolates a linear `f` exactly to `u = 1` (variance factor 4 of the flat
+   weight at the same shell).
+4. Tensor: `dh/d(eps)` taken on the surface (the triple scaled radially onto `h = 1`, both sides homogeneous of degree
+   2): `2 M_t`, `M_t = sum d d^T / sum |d|^2` (trace 1). Result
+   **`Xi_cross = 2/(1 - h0) sum_shell (-2 + 6 u_t) E_t M_t`**; `P_cross = tr Xi_cross/(3V)`. E_HB < 0, so `P_cross < 0`.
+5. Assumptions: smooth `f` near the radius (no structure at r_AB = 15.8 / sqrt(s) = 21.2 Bohr in a liquid), the
+   list fresh (MD between HB refreshes: triples with `h >= 1` add nothing, triples that entered since are missing).
+
+### Implementation
+
+- `FFVirialComponents::hb_crossing`, `xb_crossing`; `pressureTotal() = total() + tail_lrc + hb_crossing + xb_crossing`
+  (`total()` stays the model derivative, FD gate `pbc_virial`). CPU: separate passes `FFWorkspace::calcHBCrossing` /
+  `calcXBCrossing` per partition after the HB/XB kernels, frame as in the kernels; HB energies from the per-triple
+  record (switched on with the estimator, so `hb_scale` reaches it), XB energy re-evaluated with the kernel's energy
+  statements. `FFWorkspace::setHBCrossing()` from `GFNFF` (thresholds `GFNFF::hbSearchThresholds()`, the formula of
+  the detection).
+- **Finding on the way (CPU, the S1/A1 trap once more)**: a first version put the estimator inside
+  `if constexpr (VIRIAL)` of the HB/XB kernels. With `pressure_hb_crossing false` (estimator not executed) the NPT run
+  of a 432 box then differed from the base binary in the last bits (final `average_P` 32.04622155123545 vs
+  32.04622155122361 bar, 20 steps): the added code changed the contraction of the VIRIAL instantiation. With the
+  `if` compiled out the run was byte-identical again; hence the separate passes, which leave every kernel unchanged.
+- PARAMs (module gfnff, category HB/XB): `pressure_hb_crossing` (Bool, default true; false = pressure before this
+  change, bitwise), `pressure_crossing_shell` (Double, default 0.03, allowed (0, 0.5)); constructor fallbacks equal.
+  Plugin ABI 27 -> 28 (class layouts).
+
+### Validation against the re-derived-list strain slope (A3-P method, `test_pbc_pressure_cutoffs --strain --crossing`)
+
+Reference per frame: HB crossing = `P_thermo,HB - P_vir,HB` (9 strains, fresh instance each). Frames: W1 cutoff-scan
+frames (`03_auswertung/cutoff_scan/runs/frames_*`, equilibrated Berendsen NPT 300 K, 4 ps apart), 5 each of 432, 864
+and 1728 H2O, n = 15; 8 threads, production settings (D4 radius frozen as in NPT).
+
+| shell (relative to the radius) | 0.005 | 0.01 | 0.02 | 0.03 | 0.05 | 0.075 | 0.1 |
+|---|---|---|---|---|---|---|---|
+| flat weight: mean (estimate - reference), bar | -0.91 | -2.00 | -3.80 | -5.52 | -9.95 | -16.83 | -25.25 |
+| linear weight (implemented): mean (estimate - reference), bar | +0.57 | +0.40 | -0.04 | -0.15 | +0.82 | +2.92 | +6.09 |
+
+(standard error of each mean 0.7-1.2 bar, n = 15.) Default 0.03: **residual -0.15 +- 0.79 bar** (mean estimate -30.58,
+mean reference -30.43 bar); the in-kernel component equals the offline estimator of the tool (same numbers).
+Scatter per frame: residual sd 3.05 bar, dominated by the reference (a 9-strain fit sees only the triples crossing within
++-8e-4); the estimator's own counting error is 1.1 / 0.76 / 0.55 bar per frame (432 / 864 / 1728 H2O), it averages over
+MD steps.
+- Non-water: urea400 + water1000 (structure library) with an **assigned cell L = 42 A, not relaxed**, one frame:
+  estimate -30.51 +- 0.62 bar, reference -31.76 bar.
+- Halogen bonds: 20 random boxes of 35-36 fi-pyridine (structure library) in a **constructed cell L = 24 A** (random
+  orientations, d_min 2.8 A, not relaxed): XB estimate -0.039, reference -0.047 bar, residual +0.008 +- 0.007 bar; HB
+  (weak C-H...N/F triples) -1.36 vs -1.52, residual +0.16 +- 0.09 bar. With the radius reduced to `hb_thr2_bohr2 120`
+  (contacts at the radius) the reference becomes heavy-tailed (single boxes -112 bar HB, -0.74 bar XB) and n = 20 does
+  not decide (XB estimate -0.20 to -0.24 bar for shells 0.01-0.1, reference -0.064 +- 0.043; HB -6.3 vs -9.6 +- 5.7):
+  not conclusive, the XB estimator is validated only at the default radius, where the XB term is below 0.1 bar.
+- Density: the barostat saw P about 30.6 bar too high; with the term the NPT density of water rises by about
+  6e-5/bar x 30.6 bar = **+0.18 %** (rough linear estimate, kappa_T ~6e-5 /bar is not the measured compressibility of
+  GFN-FF; no NPT rerun made).

@@ -456,6 +456,12 @@ GFNFF::GFNFF(const json& parameters)
     m_dispersion_tail = m_parameters.value("dispersion_tail", true);
     // Nov 2026 (V-LRC): fallback == PARAM default of pressure_lrc (gfnff.h); only the reported pressure changes
     m_pressure_lrc = m_parameters.value("pressure_lrc", true);
+    // Nov 2026 (HB-X): fallbacks == PARAM defaults of pressure_hb_crossing, pressure_crossing_shell (gfnff.h);
+    // only the reported pressure changes (virial component hb_crossing / xb_crossing)
+    m_pressure_hb_crossing = m_parameters.value("pressure_hb_crossing", true);
+    m_pressure_crossing_shell = m_parameters.value("pressure_crossing_shell", 0.03);
+    if (!(m_pressure_crossing_shell > 0.0 && m_pressure_crossing_shell < 0.5))
+        throw std::runtime_error("GFN-FF: pressure_crossing_shell must lie in (0, 0.5)");
     // Nov 2026 (B2): fallbacks == PARAM defaults of coulomb_ewald, ewald_tolerance, ewald_r_cut, ewald_alpha
     // (gfnff.h); no effect without a cell
     m_coulomb_ewald = m_parameters.value("coulomb_ewald", true);   // B3: default true (periodic EEQ + Coulomb)
@@ -4695,6 +4701,14 @@ bool GFNFF::initializeForceField()
                 CurcumaLogger::warn(fmt::format("GFN-FF: hb_scale = {} multiplies the hydrogen-bond energy, gradient and virial "
                                                 "(diagnostic, deviates from the reference parametrisation)", hb_scale));
             m_workspace->setHBScale(hb_scale);
+        }
+        {
+            // HB-X (Claude Generated, Nov 2026): crossing estimator of the HB/XB search radii in the virial (cell only;
+            // read only by the VIRIAL kernels). Same thresholds as detectHydrogenBondsNative / detectHalogenBondsNative.
+            double thr1 = 0.0, thr2 = 0.0;
+            hbSearchThresholds(thr1, thr2);
+            m_workspace->setHBCrossing(m_pressure_hb_crossing && m_cell_bohr_ortho.active, m_pressure_crossing_shell,
+                thr1, thr2, thr2);
         }
         {
             // term-scale switches (Claude Generated, Nov 2026): diagnostic factors on the repulsion, the D4 dispersion
@@ -13254,6 +13268,17 @@ std::string GFNFF::virialUnavailableReason() const
 bool GFNFF::m_atm_enabled_for_virial_check() const
 {
     return m_parameters.value("dispersion_atm", false);
+}
+
+/// HB/XB search thresholds (Bohr^2) as the detection derives them: hbthr1, hbthr2 from hb_accuracy (gfnff_param.f90:553-554)
+/// or the direct overrides; the XB A-B list radius is hbthr2. Claude Generated (Nov 2026, HB-X).
+void GFNFF::hbSearchThresholds(double& thr1, double& thr2) const
+{
+    const double hb_acc = m_parameters.value("hb_accuracy", 0.1);
+    const double thr1_override = m_parameters.value("hb_thr1_bohr2", 0.0);
+    const double thr2_override = m_parameters.value("hb_thr2_bohr2", 0.0);
+    thr1 = (thr1_override > 0.0) ? thr1_override : (200.0 - std::log10(hb_acc) * 50.0);
+    thr2 = (thr2_override > 0.0) ? thr2_override : (400.0 - std::log10(hb_acc) * 50.0);
 }
 
 void GFNFF::setWantVirial(bool v)

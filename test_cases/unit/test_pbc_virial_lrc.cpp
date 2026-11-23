@@ -142,6 +142,7 @@ static json config(double rc, bool lrc, int threads)
     if (rc > 0.0)
         c["dispersion_cutoff_bohr"] = rc;
     c["pressure_lrc"] = lrc;
+    c["pressure_hb_crossing"] = false;  // HB-X (Nov 2026): its own component, tested in pbc_pressure_cutoffs
     return c;
 }
 
