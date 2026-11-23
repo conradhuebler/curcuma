@@ -1676,7 +1676,8 @@ private:
      * Used for extra torsion filtering (btyp < 5 excludes metal bonds)
      */
     int classifyBondType(int atom_i, int atom_j, int hyb_i, int hyb_j,
-                         bool is_metal_i, bool is_metal_j) const;
+                         bool is_metal_i, bool is_metal_j,
+                         const std::vector<std::vector<int>>& neighbor_lists) const;
 
     /**
      * @brief Validate molecular structure for GFN-FF

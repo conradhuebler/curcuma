@@ -5167,7 +5167,8 @@ bool GFNFF::calculateTopology()
 }
 
 int GFNFF::classifyBondType(int atom_i, int atom_j, int hyb_i, int hyb_j,
-                             bool is_metal_i, bool is_metal_j) const
+                             bool is_metal_i, bool is_metal_j,
+                             const std::vector<std::vector<int>>& neighbor_lists) const
 {
     /**
      * Bond type classification following Fortran gfnff_ini.f90:1131-1148
@@ -5241,7 +5242,11 @@ int GFNFF::classifyBondType(int atom_i, int atom_j, int hyb_i, int hyb_j,
         if (z < 1 || z > 86) return 0;
         int im = PeriodicTable::getMetalType(z);
         const int grp = GFNFFParameters::periodic_group[z - 1];
-        const auto& topo_nb = getCachedTopology().neighbor_lists;
+        // Claude Generated (Nov 2026): the neighbour lists of the topology being built.
+        // This ran inside calculateTopologyInfoOnce() and called getCachedTopology(), which
+        // there dereferences the still-empty m_cached_topology (undefined behaviour; SIGSEGV
+        // in classifyBondType on AL2X6/al2me5 and ALK8/li4_me4 depending on heap layout).
+        const auto& topo_nb = neighbor_lists;
         const int nb_a = (a < static_cast<int>(topo_nb.size()))
                              ? static_cast<int>(topo_nb[a].size()) : 0;
         if (nb_a <= 4 && grp > 3) im = 0;
@@ -12149,7 +12154,8 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfoOnce() const
 
         topo_info.bond_types[bond_idx] = classifyBondType(atom_i, atom_j,
                                                             hyb_i, hyb_j,
-                                                            is_metal_i, is_metal_j);
+                                                            is_metal_i, is_metal_j,
+                                                            topo_info.neighbor_lists);
 
         // Reference btyp re-classification inside the bond-parameter loop. Two steps,
         // in this order:
