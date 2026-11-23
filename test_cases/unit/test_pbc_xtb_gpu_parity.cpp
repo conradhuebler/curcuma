@@ -11,7 +11,8 @@
  * max |dG| <= 1e-8 Eh/A, max |dXi| <= 1e-7 Eh (coordinator targets); a second CUDA run from a fresh calculator must be bitwise identical (energy and gradient,
  * docs/GPU_REPRODUCIBILITY.md). The GPU path counts as used when the run added no GPU fallback
  * (curcuma::gpuFallbackCounts()); without the plugin or a device the first GPU request falls back, the test prints
- * SKIP and exits 0, so it never false-fails off-GPU. Exit 0 when every check passes.
+ * SKIP and exits 77 (ctest SKIP_RETURN_CODE; until Nov 23, 2026 it exited 0 and counted as passed). A counted fallback
+ * of a periodic device stage ("xTB periodic device stage ...") is a failure, not a SKIP. Exit 0 when every check passes.
  */
 #include "src/core/energycalculator.h"
 #include "src/core/molecule.h"
@@ -39,6 +40,14 @@ static int fallbackTotal()
 {
     int n = 0;
     for (const auto& kv : curcuma::gpuFallbackCounts()) n += kv.second;
+    return n;
+}
+
+static int stageTotal()
+{
+    int n = 0;
+    for (const auto& kv : curcuma::gpuFallbackCounts())
+        if (kv.first.rfind("xTB periodic device stage ", 0) == 0) n += kv.second;
     return n;
 }
 
@@ -90,9 +99,10 @@ int main()
             const Mol mol = inCell(c.name, L);
             const Result cpu = run(method, mol, false, c.threads);
             check(cpu.ok, std::string(method) + " CPU periodic energy/gradient/virial");
-            const int fb0 = fallbackTotal();
+            const int fb0 = fallbackTotal(), st0 = stageTotal();
             const Result gpu = run(method, mol, true, c.threads);
-            if (fallbackTotal() != fb0) {
+            check(stageTotal() == st0, std::string(method) + " " + c.name + ": no periodic device stage fallback");
+            if (fallbackTotal() - (stageTotal() - st0) != fb0) {
                 std::printf("SKIP %s %s L = %.1f A: the -gpu cuda request fell back to the CPU (no plugin or device)\n", method, c.name, L);
                 continue;
             }
@@ -116,7 +126,7 @@ int main()
     }
     if (!any_gpu) {
         std::printf("test_pbc_xtb_gpu_parity: SKIP (no CUDA path ran)\n");
-        return 0;
+        return g_failures == 0 ? 77 : 1;
     }
     if (g_failures == 0)
         std::printf("test_pbc_xtb_gpu_parity: all checks passed\n");

@@ -825,15 +825,15 @@ set_tests_properties(pbc_xtb_virial PROPERTIES TIMEOUT 900 LABELS "pbc;xtb;sqm")
 
 # Claude Generated (Nov 2026, WP-PERIODIC-XTB G1): CPU vs -gpu cuda energy/gradient/virial of the periodic gfn1/gfn2
 # (host-built periodic matrices, device-resident SCF) and CUDA run-to-run bitwise; the plugin is loaded at run time
-# from CURCUMA_PLUGIN_DIR (build root); without plugin or device the test prints SKIP and passes
+# from CURCUMA_PLUGIN_DIR (build root); without plugin or device the test exits 77 (ctest SKIP, Nov 23, 2026)
 add_executable(test_pbc_xtb_gpu_parity unit/test_pbc_xtb_gpu_parity.cpp)
 target_link_libraries(test_pbc_xtb_gpu_parity curcuma_core test_molecule_registry)
 if(USE_PCH)
     target_precompile_headers(test_pbc_xtb_gpu_parity REUSE_FROM curcuma_core)
 endif()
 add_test(NAME pbc_xtb_gpu_parity COMMAND test_pbc_xtb_gpu_parity WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
-set_tests_properties(pbc_xtb_gpu_parity PROPERTIES TIMEOUT 900 LABELS "pbc;xtb;sqm;gpu"
-    ENVIRONMENT "CURCUMA_PLUGIN_DIR=${CMAKE_BINARY_DIR}")
+set_tests_properties(pbc_xtb_gpu_parity PROPERTIES TIMEOUT 900 LABELS "pbc;xtb;sqm;gpu" RESOURCE_LOCK "gpu"
+    SKIP_RETURN_CODE 77 ENVIRONMENT "CURCUMA_PLUGIN_DIR=${CMAKE_BINARY_DIR}")
 
 # Claude Generated (Nov 23, 2026, GPU_PERIODIC_GAPS A4/A7): fault injection into every periodic CUDA device stage of
 # gfn1/gfn2 (CURCUMA_PBC_GPU_FAIL): the host fallback is counted (gpu_fallback, -gpu_strict exit 3) and gives the host
@@ -860,18 +860,6 @@ set_tests_properties(pbc_xtb_cell_refusals PROPERTIES TIMEOUT 300 LABELS "pbc;xt
     ENVIRONMENT "CURCUMA_PLUGIN_DIR=${CMAKE_BINARY_DIR};CURCUMA_TEST_CPCMX_DB=${CMAKE_CURRENT_SOURCE_DIR}/cli/sqm/21_cpcmx_solvation/cpcmx_db")
 add_test(NAME pbc_xtb_gpu_combinations COMMAND test_pbc_xtb_combinations cuda WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 set_tests_properties(pbc_xtb_gpu_combinations PROPERTIES TIMEOUT 900 LABELS "pbc;xtb;sqm;gpu" RESOURCE_LOCK "gpu"
-    SKIP_RETURN_CODE 77 ENVIRONMENT "CURCUMA_PLUGIN_DIR=${CMAKE_BINARY_DIR}")
-
-# Claude Generated (Nov 23, 2026, GPU_PERIODIC_GAPS A4/A7): fault injection into every periodic CUDA device stage of
-# gfn1/gfn2 (CURCUMA_PBC_GPU_FAIL): the host fallback is counted (gpu_fallback, -gpu_strict exit 3) and gives the host
-# variant's energy/gradient/virial; exit 77 = SKIP without plugin or device
-add_executable(test_pbc_xtb_gpu_fallback unit/test_pbc_xtb_gpu_fallback.cpp)
-target_link_libraries(test_pbc_xtb_gpu_fallback curcuma_core test_molecule_registry)
-if(USE_PCH)
-    target_precompile_headers(test_pbc_xtb_gpu_fallback REUSE_FROM curcuma_core)
-endif()
-add_test(NAME pbc_xtb_gpu_fallback COMMAND test_pbc_xtb_gpu_fallback WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
-set_tests_properties(pbc_xtb_gpu_fallback PROPERTIES TIMEOUT 900 LABELS "pbc;xtb;sqm;gpu" RESOURCE_LOCK "gpu"
     SKIP_RETURN_CODE 77 ENVIRONMENT "CURCUMA_PLUGIN_DIR=${CMAKE_BINARY_DIR}")
 
 # Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A2): periodic coordination number (value and
@@ -1088,7 +1076,7 @@ if(USE_PCH)
     target_precompile_headers(test_pbc_gpu_guard REUSE_FROM curcuma_core)
 endif()
 add_test(NAME pbc_gpu_guard COMMAND test_pbc_gpu_guard WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
-set_tests_properties(pbc_gpu_guard PROPERTIES TIMEOUT 120 LABELS "pbc;gfnff;gpu")
+set_tests_properties(pbc_gpu_guard PROPERTIES TIMEOUT 120 LABELS "pbc;gfnff;gpu" RESOURCE_LOCK "gpu")
 
 # GPU plugin ABI version check (S0, gpu_plugin_abi.h) - Claude Generated (Nov 2026). Runs without a GPU: stand-in
 # plugins (no GPU code) without the version symbol, with a wrong and with the right version, and with a wrong Eigen
