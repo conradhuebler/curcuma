@@ -23,6 +23,9 @@ GFN1/GFN2 (`GpuScfBackend`, `xtb_native.h:384`). ROCm overrides only `supportsGr
 | Gradient potentials at the converged charges on the device (`convergedPotentials`, `gradientResident`), lazy host S/H0 copies (`downloadOverlapInto`/`downloadH0Into`) | yes | yes since Oct 25, 2026 (WP8b, `-xtb.rocm_grad_resident`, `-xtb.rocm_defer_host_integrals`); declines with a device solvent (the host gate never asks then) |
 | Bitwise reproducible SCF and gradient (fixed-order gathers, `gfix_add`) | yes | yes since Oct 25, 2026 (WP10): the SCF loop has no floating-point atomics, the gradient kernels and host-loop moments accumulate in fixed point (`xfix_add`, `-xtb.rocm_fixed_point`, default true); rocBLAS/rocSOLVER reductions not audited |
 | Multi-GPU eigensolver (cuSOLVERMg/Mp), sparse integrals | yes | no |
+| GFN-FF charge groups and `cn_zero_guard` on the device (trait `has_charge_groups_cn_guard`, `9e8a609c`, Oct 31, 2026; recorded here Nov 23, 2026) | yes | no: the trait false keeps the counted CPU fallback; not ported, no ROCm hardware test (TODO.md "Ladungsgruppen") |
+| GFN-FF periodic local terms with a cell (trait `has_periodic_local_terms`, S1 `8ee4f638`, Nov 4, 2026; recorded Nov 23, 2026) | yes (`-gfnff.gpu_periodic true`) | no: a cell is refused with a clear error (`gfnff_gpu_method_impl.h` setMolecule, `gfnff_hip_method.h`); port = GPU_PERIODIC_GAPS.md B2 |
+| Spin polarisation in the GFN1/GFN2 SCF (`supportsSpinPolarization`, merge of Nov 22, 2026; recorded Nov 23, 2026) | yes (host-driven device loop) | no: `-xtb.spin_polarization true` with `-gpu rocm` is a hard error (qm_methods/CLAUDE.md) |
 
 GFN-FF (traits and kernels): `has_multi_gpu_split` (ROCm false) with its mixed-precision split EEQ. Since WP10 (Oct 25,
 2026) on ROCm too: fixed-point energy, force, dE/dCN and CN accumulation (`fix_add`, `k_fix_*`, same scales,

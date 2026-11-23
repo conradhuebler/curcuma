@@ -103,3 +103,9 @@ Real production NPT of a liquid (only 2 ps on the 432-water box, started from a 
 is not equilibrated), anisotropic cells under strain (uniform scaling only), the reactive topology mode with a
 barostat (the scan is forced at every cell change, not run), charged boxes, restart files with RATTLE, more than 1296
 atoms with a barostat. Human production testing pending.
+
+## Moved from TODO.md (Nov 23, 2026)
+
+Verbatim TODO.md entries (German) shortened there to <= 600 characters; status as of the date in each entry.
+
+- **Barostat / NPT (N2, 2026-11-05) und Virial (N1):** `-barostat berendsen|crescale` mit `GFNFF::updateCell` (CPU, isotrop) ist da (ctests `pbc_npt_*`, [docs/NPT.md](docs/NPT.md)); offen: (a) C-rescale-Gleichungen gegen den Originaltext pruefen (aus Auftrag/Gedaechtnis, eine Websuche ohne Treffer; Idealgas-Test stimmt mit N_eff = dof/3 + 1), (b) Virial der RATTLE-Zwangskraefte (mit `-rattle` abgelehnt; NPT-Produktion laeuft daher ohne Constraints), (c) Virial/Zellupdate im CUDA-Hybrid seit A1 (2026-11-23), keiner fuer `frag_charge_model ensemble`, ALPB, ATM, (d) molekularer Virial (COM-Korrektur) nicht berechnet, (e) Plugin-ABI 4: CUDA-Plugin muss neu gebaut werden (hier nicht gebaut), (f) Zelle in der Trajektorien-Kommentarzeile nur mit Barostat (ohne Barostat bleibt die Trajektorie md5-gleich zu N1; Entscheidung des Betreibers, ob jede periodische MD sie schreiben soll), (g) Paarlisten werden bei jeder Zellaenderung neu gebaut (kein Verlet-Argument fuer ein geaendertes Gitter; Mehraufwand gemessen in N2), (h) anisotrope/semi-isotrope Kopplung nicht implementiert. [docs/WP-PERIODIC-NONBONDED.md](docs/WP-PERIODIC-NONBONDED.md) N1/N2.

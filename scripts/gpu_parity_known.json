@@ -1,12 +1,15 @@
 {
   "seam": {
     "supportsDeviceMultipolePotential": "ROCm only: device multipole potential for the host SCF loop; CUDA covers it inside the resident loop (GPU_PARITY_CUDA_ROCM.md, table B item 4)",
-    "supportsDeviceSolvationGfn1": "ROCm takes GFN1 with solvent on the resident loop, CUDA keeps it on its host-driven loop (GPU_PARITY_CUDA_ROCM.md, table A)"
+    "supportsDeviceSolvationGfn1": "ROCm takes GFN1 with solvent on the resident loop, CUDA keeps it on its host-driven loop (GPU_PARITY_CUDA_ROCM.md, table A)",
+    "supportsSpinPolarization": "ROCm: spin polarisation is a hard error, not ported (GPU_PARITY_CUDA_ROCM.md, table A)"
   },
   "traits": {
     "has_device_schur": "ROCm false by design: the device Schur step has its own switch rocm_device_schur (GPU_PARITY_CUDA_ROCM.md, table A)",
     "has_multi_gpu_split": "gap: no multi-GPU EEQ split on ROCm (GPU_PARITY_CUDA_ROCM.md, table A)",
-    "default_eeq_cpu_fragment_threshold": "ROCm keeps 16, the CPU fragment route is about 3x faster than the dense device route at 197 atoms and 39 fragments (ROCM_RESIDENT_LOOP_WP.md)"
+    "default_eeq_cpu_fragment_threshold": "ROCm keeps 16, the CPU fragment route is about 3x faster than the dense device route at 197 atoms and 39 fragments (ROCM_RESIDENT_LOOP_WP.md)",
+    "has_charge_groups_cn_guard": "gap from 9e8a609c (devel/methods, Oct 31, 2026): ROCm keeps the counted CPU fallback (GPU_PARITY_CUDA_ROCM.md, table A)",
+    "has_periodic_local_terms": "gap: ROCm refuses a cell with a clear error; port is GPU_PERIODIC_GAPS.md B2 (GPU_PARITY_CUDA_ROCM.md, table A)"
   },
   "kernel_aliases": {}
 }

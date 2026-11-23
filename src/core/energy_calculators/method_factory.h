@@ -133,10 +133,11 @@ public:
     static bool isGpuGfnffMethod(const ComputationalMethod& method);
     /**
      * @brief Periodic cell on a GPU GFN-FF method: warn, count the GPU fallback, return true. Claude Generated (Nov 2026).
-     * The device paths have no minimum image (pair builders, EEQ matrix; docs/WP-PERIODIC-NONBONDED.md, A3b), so the
-     * caller must replace the method by the CPU one before its setMolecule(). Under -gpu_strict the counted fallback
-     * ends the run (exit 3). False, with no output, without a cell or for any other method. Native gfn1/gfn2 are not
-     * affected: CPU and GPU both ignore the cell, so a fallback would change nothing but the speed.
+     * Without -gfnff.gpu_periodic true the device paths are not used with a cell (CUDA has the opt-in periodic hybrid,
+     * S1-S3/A1, docs/WP-PERIODIC-NONBONDED.md; ROCm refuses a cell in its setMolecule()), so the caller must replace
+     * the method by the CPU one before its setMolecule(). Under -gpu_strict the counted fallback ends the run (exit 3).
+     * False, with no output, without a cell, with gpu_periodic, or for any other method. Native gfn1/gfn2 with a cell
+     * on ROCm/Vulkan are handled in EnergyCalculator::setMolecule().
      */
     static bool periodicCellNeedsCpu(const Mol& mol, const ComputationalMethod& method);
 

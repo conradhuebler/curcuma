@@ -267,3 +267,9 @@ the real hook before choosing a default. Also relevant for `-gpu auto`: today it
 ## Not covered
 Multi-GPU, solvation, gradients of GFN2 on the device (only the `-sp` energy path was profiled), periodic systems, other AMD GPUs,
 power/clock behaviour, memory footprint.
+
+## Moved from TODO.md (Nov 23, 2026)
+
+Verbatim TODO.md entries (German) shortened there to <= 600 characters; status as of the date in each entry.
+
+- **GPU-Schrittzeit GFN-FF, Reste und nicht ROCm-spezifische Hebel** (Stand 13. Okt. 2026, Messwerte in [docs/ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md](docs/ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md)): (a) MD-Integrator und Thermostat auf der GPU statt `SimpleMD` auf der CPU (7320 Atome: 4-7 ms Luecke und 4,3 MB Transfer pro Schritt, etwa 10 %); (b) viele kleine Moleküle gebündelt auf der GPU (Konformerensuche, Durchsatz); (c) Coulomb (10 ms bei 7320 Atomen) und Dispersion (7,5 ms) weiter ausreizen, auch 20 % lohnen sich; (e) `-gpu auto` samt Schwelle entfernt (2026-10-26); Break-even Wasser auf ROCm zwischen 300 und 600 Atomen, andere Systemtypen offen; CUDA gemessen 17. Okt. 2026 ([GPU_TUNING.md](docs/GPU_TUNING.md)): MD-Schritt ab etwa 66 Atomen schneller, aber 0,8 s Start je Prozess, `-gpu auto` hat auf CUDA keine Schwelle (Entscheidung offen); (f) projiziertes PCG macht bei 600 Atomen ca. 11 Host-Roundtrips je Schritt, Abhilfe: Konvergenzflag auf dem Device; (g) Logzeile sagt bei kleinem Device-EEQ noch "WP2 dense Cholesky + CPU Schur" (kosmetisch); (d) danach GFN1/GFN2 auf ROCm (Host-Eigenloeser unterhalb eines Break-evens, Cache-L, Pseudo-Diagonalisierung), erst nachdem GFN-FF ausgereizt ist.

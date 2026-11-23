@@ -20,6 +20,11 @@ Built by `.github/workflows/ccpp.yml` (AutomaticBuild), which calls `linux-gpu.y
 2. Unpack the plugin archive next to the AppImage: `tar -xzf curcuma-<v>-plugin-cuda-<level>.tar.gz --strip-components=1` (the archives have the top directory `curcuma-<level>/`; with the executable archive, unpack everything into one directory without the option).
 3. Run `./curcuma-<v>-<level>-x86_64.AppImage -sp mol.xyz -method gfn2 -gpu cuda` (or `-gpu rocm`).
 
+**Release-notes item (periodic work, Nov 2026):** the plugin ABI version is 27 (`gpu_plugin_abi.h`; master has no ABI
+symbol at all, the periodic GFN-FF and xTB stages raised it step by step). Every CUDA, ROCm and Vulkan plugin archive
+built from master or an older state is refused (warning, CPU run); the ROCm plugin must be rebuilt as well although it
+has no periodic stages (the `GpuScfBackend` vtable grew).
+
 Plugin search order: `$CURCUMA_PLUGIN_DIR`, the executable's directory, the directory of the `.AppImage` file, `~/.local/share/curcuma/plugins`, then the system library path. Details: [GPU_PLUGIN_STARTUP.md](GPU_PLUGIN_STARTUP.md).
 
 Requirements: CUDA needs the NVIDIA driver (`libcuda` is taken from the system). ROCm needs the `amdgpu` kernel driver (`/dev/kfd`); the plugin is built for `gfx1100`, `gfx1150` and `gfx1200` and falls back to the CPU on other cards. `-gpu_strict true` stops at the first CPU fallback.

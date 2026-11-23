@@ -1,7 +1,9 @@
-# WP: Periodic native GFN1/GFN2 (orthorhombic cell, Gamma point, CPU)
+# WP: Periodic native GFN1/GFN2 (orthorhombic cell, Gamma point, CPU and CUDA)
 
-**Status (2026-11-15): P0 plan, P1 periodic classical terms, P2a/P2b periodic GFN1/GFN2 energy, P3 periodic gradient,
-P4 virial/pressure/barostat, P5 integration and T threading done; G (CUDA port) in progress, see the G section.**
+**Status (2026-11-23): P0-P5 and T done on the CPU; the CUDA port G (G1-G6, E1/A1/M1/M2/C1, H1-H5, D1, A1r, B1, R2-R5)
+done: every periodic stage on the device, closed-shell neutral SCF device-resident, open shell and charged cells on the
+host-driven device loop; stage fallbacks counted (`-gpu_strict`); ROCm/Vulkan: counted CPU fallback. Open items:
+[GPU_PERIODIC_GAPS.md](GPU_PERIODIC_GAPS.md). AI-generated, machine-tested; human production testing pending.**
 `-method gfn1|gfn2` with an orthorhombic unit cell gives the periodic Gamma-point energy, gradient and atomic virial
 (gfn1: 3-7e-11 Eh, 8.6e-7 Eh/Bohr and 1.8e-6 Eh virial from tblite on the water dimer; gfn2: tblite's periodic multipole
 Ewald is not alpha-consistent, curcuma uses the consistent form and differs from tblite by up to 1e-3 Eh at 8 A, see P2b;
@@ -1367,8 +1369,6 @@ change. Measurements and scripts: project folder GFN-FF-Wasser, subfolder 06_gfn
   12 are queued in the project folder (density response, pending).
 - Not tested: GFN1 numbers (only the analytic form), other liquids, cells below 2 rc (image sums are exact there too).
 
-## Not implemented / not tested (updated per stage)
-
 ## Stage tokens, fallback counting and fault injection (Nov 23, 2026)
 
 Two diagnostic environment variables take a list of exact tokens (separated by comma, space, colon or semicolon; `all`
@@ -1402,6 +1402,8 @@ Removed on Nov 23, 2026: `CURCUMA_PBC_MP_SD_FACTOR` / `CURCUMA_PBC_MP_SQ_FACTOR`
 overrides and print a warning when used. Invalid `pbc_*` values (`pbc_ewald_tolerance` outside (0, 1),
 `pbc_coulomb_switch_bohr` <= 1, negative cutoffs) are an error instead of being replaced silently by the default.
 
+## Not implemented / not tested (updated per stage)
+
 - k-point sampling, non-orthorhombic cells, slab/1D periodicity, the vacuum (dipole) boundary term, off-diagonal
   strains (a sheared cell is refused), threading of the periodic CN/D3, Klopman-Ohno and Ewald matrix builds, the
   structure-factor factorisation of the multipole k sums of the energy matrices (G3; the gradient and virial use it
@@ -1413,3 +1415,9 @@ overrides and print a warning when used. Invalid `pbc_*` values (`pbc_ewald_tole
   the GFN1 donors Br/I carry d shells, which a cell refuses), thread-count independence of the periodic energy and gradient, MD energy conservation with a cell,
   the GPU fallback on a machine with a GPU plugin, anything beyond H/O, real liquid boxes (only a water dimer and
   water lattices were run). Human production testing pending for everything in this document.
+
+## Moved from TODO.md (Nov 23, 2026)
+
+Verbatim TODO.md entries (German) shortened there to <= 600 characters; status as of the date in each entry.
+
+- **Periodisches natives GFN1/GFN2 (WP-PERIODIC-XTB, Stand P5 + T + P4, 2026-11-15):** `-method gfn1|gfn2` mit orthorhombischer Zelle: periodische Gamma-Punkt-Energie, Gradient (FD-Gate 8e-9 Eh/A) und Virial (Zellskalierungs-FD 1e-9 Eh), SimpleMD NVT/NVE/NPT (`-compute_pressure`, `-barostat`; nur Rauchtest, keine Dichte-Kampagne); gfn1 3-7e-11 Eh zu tblite, gfn2 bis 1e-3 Eh (8 A) von tblite entfernt, weil tblites `get_amat_sdq_rec_3d` alpha-abhaengig ist (Faktor 2 Ladung-Dipol, +1 statt -1/3 Ladung-Quadrupol; nicht gegen ein korrigiertes tblite geprueft, Entscheidung des Betreibers offen); CUDA (G1, reduziert): `-gpu cuda` mit Zelle nutzt die auf dem Host gebauten periodischen Matrizen und den geraeteresidenten SCF (Eigenloeser), Potential/Dispersion/Gradient/Virial bleiben auf dem Host (Paritaets-ctest `pbc_xtb_gpu_parity`); G3/G4a/G4b/G5a (Multipolmatrizen, ATM, D4 dE/dq, Multipolgradient+Virial) auf dem Geraet, 432 H2O MD-Schritt 6,9 -> 3,7 s; G2 (Ewald-gamma), G5b-d (W, CN-Kette, Repulsion) auf dem Geraet, 432 H2O 3,13 s; G1b (S/H0-, Multipol-Integral-Bildsummen, Cholesky) auf dem Geraet, 432 H2O 2,40 s je MD-Schritt; G1c Pseudo-Diagonalisierung auch in der hostgefuehrten periodischen Schleife, 2,20 s; E1/A1/M1/M2 (Komplement-Dichte, ATM je Tripelklasse, Multipol-k-Summen von Gradient/Virial ueber Strukturfaktoren) 1,74 s; C1 (D4-CN-Faltung) 1,65 s; H1 (H0/Pulay-Gradient) 1,53 s; H2/H3 (Ewald/KO-Gradient, CN) 1,39 s; H4/H5 (periodisches D3, D4-Paare) 1,35 s; D1 (D4 dE/dq) 1,34 s; XB mit Zelle unerreichbar (Br/I haben d-Schalen); offen: hostgefuehrte periodische SCF-Iteration (26 % des Schritts, braucht die residente Schleife mit Zelle), ROCm/Vulkan nicht geplant (CPU-Rueckfall), Strukturfaktor-Faktorisierung der Multipol-k-Summe der Energiematrizen (G3, O(nat^2 N_k)), Schub-Dehnungen im Virial-Gate (nicht orthorhombisch); Stufe T (2026-11-15): periodische D4-Paare/ATM/dE/dq und Multipolgradient blockweise parallel und thread-deterministisch, 216 H2O gfn2 10.7 -> 2.5 s (8 Threads); nicht getestet: XB mit Zelle (keine Br/I-Struktur), geladene Zellen, offene Schale, GPU-Rueckfall auf echter GPU, Energieerhaltung in der MD; d-Schalen mit Zelle abgelehnt. [docs/WP-PERIODIC-XTB.md](docs/WP-PERIODIC-XTB.md) Befund: dftd4 `get_atm_dispersion_derivs` ohne `triple_scale` im Gradienten (Selbstbild-Tripel doppelt), hier korrigiert, gegen dftd4 selbst nicht geprueft. [docs/WP-PERIODIC-XTB.md](docs/WP-PERIODIC-XTB.md)
