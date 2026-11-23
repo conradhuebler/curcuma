@@ -44,7 +44,7 @@ re-measure them.
 **Limits you should know.**
 - GFN-FF is a force field. On the 41 MOR41 reactions it is 60 to 70 kcal/mol away from DLPNO-CCSD(T) in mean absolute deviation (GFN2: about 12). Port fidelity to the reference is high; the reference itself is not accurate for reaction energies of metal complexes.
 - GFN-FF periodic boundary conditions (orthorhombic cell from a `unitcell a b c 90 90 90` comment line, CPU; `-gpu cuda` only as an opt-in hybrid with `-gfnff.gpu_periodic true`) with Ewald electrostatics, pressure and Berendsen/C-rescale barostats (`-barostat`): 🤖 AI-implemented, machine-tested only, not human-tested; see [docs/WP-PERIODIC-NONBONDED.md](docs/WP-PERIODIC-NONBONDED.md) and [docs/NPT.md](docs/NPT.md). Native `gfn1`/`gfn2` with a unit cell give the periodic Gamma-point energy and gradient (image sums, Ewald Coulomb and multipoles; atomic virial, `-compute_pressure` and `-barostat` MD; 🤖 AI-implemented, machine-tested on a water dimer and water lattices only: gfn1 agrees with tblite, gfn2 deliberately deviates from tblite 0.4.0's alpha-dependent multipole Ewald; `-gpu cuda` runs the SCF eigensolve on the device with host-built periodic matrices, ROCm/Vulkan fall back to the CPU); see [docs/WP-PERIODIC-XTB.md](docs/WP-PERIODIC-XTB.md). Other methods ignore a unit cell.
-- Open-shell systems work for `gfn1`/`gfn2` (`-spin N`, N = number of unpaired electrons).
+- Open-shell systems work for `gfn1`/`gfn2` (`-spin N`, N = number of unpaired electrons). `-spin N` alone fills one orbital set with two Fermi fillings; `-xtb.spin_polarization true` adds the tblite spin polarisation (two Fock matrices, CPU and Broyden only, AI-implemented, machine-tested): [docs/SPIN_POLARISATION.md](docs/SPIN_POLARISATION.md).
 - GPU backends (`-gpu cuda|rocm|vulkan`) are optional and off by default. CUDA has been run on an NVIDIA H200, RTX 5090, RTX 5080, RTX A4500 and GTX 1660; ROCm on a Radeon 890M (gfx1150) only, so the ROCm plugin build is unverified on other setups; Vulkan is opt-in and brings no speed-up. A GPU run that falls back to the CPU says so after the run (`-gpu_strict true` stops instead).
 - Results of the native methods can differ in the last digits from tblite/xtb in documented places (`-xtb.sto6g_legacy_4sp`, `-xtb.d4_atm_cutoff 40.0` reproduce xtb's choices).
 - Molecular dynamics times recorded with versions before the fix of 2026-09 (`ef462fcf`) run 1.9516 times too long; multiply them by that factor.
@@ -54,7 +54,7 @@ re-measure them.
 `-sp`, optimisation `-opt`, Hessian and frequencies `-hessian`, molecular dynamics `-md` (thermostats,
 RATTLE, temperature ramps, PLUMED metadynamics), conformer search `-confsearch` and filtering `-confscan`,
 RMSD with atom reordering `-rmsd`, docking `-dock`, interaction energies `-interaction`, counter-ion placement `-ionize`, streaming trajectory properties `-trajprops`, implicit solvation
-(ALPB/GBSA for native GFN1/GFN2, ALPB for GFN-FF), trajectory and structure analysis `-analysis`.
+(ALPB/GBSA, ddCOSMO, tblite's CPCM and CPCM-X single points with the CPCM-X solvent database, AI-generated and machine-tested, for native GFN1/GFN2, ALPB for GFN-FF), trajectory and structure analysis `-analysis`.
 
 ## Download and requirements
 
@@ -131,7 +131,7 @@ so a CPU-only run does not touch them.
 - **ROCm / HIP** (`-DUSE_ROCM=ON -DCMAKE_PREFIX_PATH=/opt/rocm -DROCM_GPU_ARCH=gfxNNNN`): `hip-runtime-amd`, `rocm-llvm`, `rocm-device-libs`, `rocminfo`, `rocblas`, `rocsolver`. [docs/SQM_ROCM.md](docs/SQM_ROCM.md)
 - **Vulkan** (`-DUSE_VULKAN=ON`): `vulkan-icd-loader`, `vulkan-headers` and a driver with `shaderFloat64`; no ROCm needed on AMD. [docs/SQM_VULKAN.md](docs/SQM_VULKAN.md)
 - **Several GPUs**: `-gpu_device N` pins a run; batch runs spread over the visible devices (`-gpu_devices`, `-gpu_workers_per_device`); one large molecule can be split over several GPUs. [docs/MULTI_GPU.md](docs/MULTI_GPU.md), [docs/GPU_TUNING.md](docs/GPU_TUNING.md)
-- **GFN-FF EEQ solver**: `-gfnff.solve_method auto|cholesky|ppcg|pcg|lu|ldlt|batched` (flat `-solve_method`; the older `-eeq_solver.solve_method` and `-gfnff.solve` are still accepted) picks the charge solver; `auto` switches to `ppcg` at 500 atoms. The names mean the same on the CPU and with `-gpu cuda`; `-gpu rocm` accepts `auto`, `cholesky` and `ppcg`. `batched` drops cross-fragment Coulomb (inexact). [docs/EEQ_SOLVER_CONTROL.md](docs/EEQ_SOLVER_CONTROL.md)
+- **GFN-FF EEQ solver**: `-gfnff.solve_method auto|cholesky|ppcg|pcg|lu|ldlt|sytrf|batched` (flat `-solve_method`; the older `-eeq_solver.solve_method` and `-gfnff.solve` are still accepted) picks the charge solver; `auto` switches to `ppcg` at 500 atoms and never takes `sytrf`, the solve of the Fortran reference (dsytrf + dsytrs on the augmented matrix). The names mean the same on the CPU and with `-gpu cuda`; `-gpu rocm` accepts `auto`, `cholesky`, `ppcg` and `sytrf`. `batched` drops cross-fragment Coulomb (inexact). [docs/EEQ_SOLVER_CONTROL.md](docs/EEQ_SOLVER_CONTROL.md)
 - **Tuning**: every performance knob is a CLI flag; `python scripts/tuning_sweep.py mol.xyz --method gfn2 [--gpu cuda]` measures them on your machine and checks that no setting changes the energy.
 
 ## Using curcuma
@@ -231,7 +231,7 @@ AI-generated, machine-tested; human production testing pending. Start with [docs
 ### More
 
 [docs/](docs/) holds one document per feature: the SCF modes ([docs/SCF_MODES.md](docs/SCF_MODES.md)),
-the opt-in GFN1/GFN2 SCF preconditioner `-scf_precond frag`, with segmentation of large molecules ([docs/SCF_PRECOND.md](docs/SCF_PRECOND.md), experimental),
+spin polarisation of native GFN1/GFN2 ([docs/SPIN_POLARISATION.md](docs/SPIN_POLARISATION.md)), the opt-in GFN1/GFN2 SCF preconditioner `-scf_precond frag`, with segmentation of large molecules ([docs/SCF_PRECOND.md](docs/SCF_PRECOND.md), experimental),
 solvation ([docs/SOLVATION.md](docs/SOLVATION.md)), temperature ramps
 ([docs/TEMPERATURE_RAMP.md](docs/TEMPERATURE_RAMP.md)), large-system MD
 ([docs/MD_LARGE_SYSTEMS.md](docs/MD_LARGE_SYSTEMS.md)), the per-step MD CSV file ([docs/MD_CSV_OUTPUT.md](docs/MD_CSV_OUTPUT.md)), PLUMED ([docs/PLUMED_HELP.md](docs/PLUMED_HELP.md)),

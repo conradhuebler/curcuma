@@ -1,0 +1,7 @@
+# Structures from test_cases/structures (id, optionally 'as <file name>'); see structures/README.md
+water as water.xyz
+methanol as methanol.xyz
+caffeine as caffeine.xyz
+ammonium.ideal-td as ammonium.xyz
+hydroxyl as hydroxyl.xyz
+hydrogen-sulfide.d-shell-validation as h2s.xyz

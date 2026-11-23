@@ -33,6 +33,7 @@
 #include "interface/abstract_interface.h"
 #include "json.hpp"
 
+#include <stdexcept>
 #include <Eigen/Dense>
 #include <array>
 #include <cctype>
@@ -312,6 +313,13 @@ struct Wavefunction {
     // gradient uses it directly. Claude Generated.
     Matrix  W;
     bool    W_valid = false;
+
+    // Spin polarisation (spin_polarization, Claude Generated Nov 2026): Pm = P_alpha - P_beta
+    // (AO basis, nao x nao) and the shell magnetisation m_sh(l) = sum_{mu in l, nu} Pm_{mu nu} S_{nu mu}
+    // (alpha minus beta shell population; Broyden mixes it together with q_sh). Empty / zero unless
+    // XTB::spinPolActive().
+    Matrix  Pm;
+    Vector  m_sh;
     Vector  n_at;     // atomic populations, length nat
     Vector  n_sh;     // shell populations, length nsh
     Vector  q_at;     // atomic charges (= z_eff - n_at), length nat
@@ -641,6 +649,9 @@ struct GpuScfBackend {
                                  double& e_third, double& e_multipole)
     { (void)fp32; (void)dq; (void)e_band; (void)e_coulomb; (void)e_third; (void)e_multipole;
       return false; }
+    /// Claude Generated (Nov 2026): sum over the SCC vector of (x_out - x_in)^2 of the LAST residentScfStep, for
+    /// scf_criterion xtb (RMS = sqrt(sum / nat)). Negative = the backend does not provide it (default rule runs).
+    virtual double residentLastDqSumSq() const { return -1.0; }
     virtual bool residentLoopCharges(Vector& q_sh, Vector& q_at, Eigen::MatrixXd& dp_at,
                                      Eigen::MatrixXd& qp_at, Vector& eps)
     { (void)q_sh; (void)q_at; (void)dp_at; (void)qp_at; (void)eps; return false; }
@@ -992,6 +1003,31 @@ struct GpuScfBackend {
     virtual bool supportsDeviceSolvationGfn1() const { return false; }
     virtual bool beginSolvationGfn1(int nat, const double* born_mat, const double* v_shift)
     { (void)nat; (void)born_mat; (void)v_shift; return false; }
+
+    /* ----- Spin polarisation on the host-driven device loop (Nov 2026) --------------------- *
+     * Claude Generated (docs/SPIN_POLARISATION.md, section GPU). -xtb.spin_polarization with
+     * -spin N > 0: the host builds the charge potential v_ao and the spin potential u_ao
+     * (u_l = sum_l' W_ll' m_l', expanded to AOs); the device solves the alpha Fock matrix
+     * (potential v - u) and the beta one (v + u), keeps both orbital sets, and builds P = Pa + Pb
+     * and Pm = Pa - Pb from the host Fermi fillings of the two channels. A backend without it
+     * (ROCm, Vulkan) keeps false and XTB::Calculation stops with an error. */
+    virtual bool supportsSpinPolarization() const { return false; }
+    /// Both eigensolves. v_dp/v_qp: GFN2 multipole potentials (nullptr for GFN1). eps_a/eps_b ascending.
+    virtual bool solveSpin(const Eigen::VectorXd& v_ao, const Eigen::VectorXd& u_ao,
+                           const Eigen::MatrixXd* v_dp, const Eigen::MatrixXd* v_qp,
+                           Vector& eps_a, Vector& eps_b, bool fp32)
+    { (void)v_ao; (void)u_ao; (void)v_dp; (void)v_qp; (void)eps_a; (void)eps_b; (void)fp32; return false; }
+    /// Densities of both channels; pop_ao from P, spop_ao(mu) = sum_nu Pm_mu,nu S_mu,nu, band = Tr(P H0).
+    virtual bool densitySpin(const Eigen::VectorXd& occ_a, int ncol_a, const Eigen::VectorXd& occ_b, int ncol_b,
+                             Eigen::VectorXd& pop_ao, Eigen::VectorXd& spop_ao, double& band)
+    { (void)occ_a; (void)ncol_a; (void)occ_b; (void)ncol_b; (void)pop_ao; (void)spop_ao; (void)band; return false; }
+    /// Converged P, Pm and both orbital sets to the host.
+    virtual bool finalizeSpin(Matrix& P, Matrix& Pm, Matrix& Ca, Matrix& Cb)
+    { (void)P; (void)Pm; (void)Ca; (void)Cb; return false; }
+    /// Device W for the next gradient(): sum_s C_s diag(we_s) C_s^T - 1/2 Pm o (u_mu + u_nu), we_s = f_s eps_s.
+    virtual bool spinWeightedDensity(const Vector& we_a, int ncol_a, const Vector& we_b, int ncol_b,
+                                     const Vector& u_ao)
+    { (void)we_a; (void)ncol_a; (void)we_b; (void)ncol_b; (void)u_ao; return false; }
 };
 
 /* ------------------------------------------------------------------------- *
@@ -1006,7 +1042,7 @@ struct GpuScfBackend {
  *  matching tblite's module split.
  * ------------------------------------------------------------------------- */
 
-// Map a solvation-model name to the internal code (0=none, 1=CPCM, 2=GBSA, 3=ALPB).
+// Map a solvation-model name to the internal code (0=none, 1=CPCM, 2=GBSA, 3=ALPB, 4=COSMO).
 // Accepts descriptive names (preferred, case-insensitive) and the legacy numeric
 // codes for backward compatibility. Returns -1 for an unrecognised value.
 // Claude Generated (June 2026).
@@ -1019,6 +1055,8 @@ inline int solventModelCode(const std::string& s)
     if (t == "cpcm" || t == "1")                                return 1;
     if (t == "gbsa" || t == "gb" || t == "2")                   return 2;
     if (t == "alpb" || t == "3")                                return 3;
+    if (t == "cosmo" || t == "ddcosmo")                         return 4;   // native ddCOSMO (Nov 2026), xtb --cosmo
+    if (t == "cpcmx" || t == "cpcm-x" || t == "5")              return 5;   // CPCM-X (Nov 2026), xtb --cpcmx: conductor COSMO SCF here, post-SCF in NativeXtbMethod
     return -1;
 }
 
@@ -1113,6 +1151,8 @@ public:
 
     // API compatibility for the NativeXtbMethod wrapper
     Vector getPartialCharges() const { return getCharges(); }
+    /// The active implicit-solvation model (nullptr in the gas phase). Claude Generated (Nov 2026, CPCM-X segments).
+    const ImplicitSolvationModel* solvationModel() const { return m_solvation.get(); }
     Vector getCoordinationNumbers() const { return m_coordination_numbers; }
 
     /* ----- periodic cell (WP-PERIODIC-XTB, Claude Generated Nov 2026; xtb_periodic.cpp) -----
@@ -1231,9 +1271,25 @@ public:
         if (c >= 0) m_solvent_model = c;
     }
     void setSolventEpsilon(double e) { m_solvent_epsilon = e; }
+    /// ddCOSMO discretisation (solvent_model cosmo): surface grid points, lmax, solver threshold, switch width.
+    /// Claude Generated (Nov 2026).
+    void setCosmoSettings(int nang, int lmax, double conv, double eta)
+    {
+        if (nang > 0) m_cosmo_nang = nang;
+        if (lmax > 0) m_cosmo_lmax = lmax;
+        if (conv > 0.0) m_cosmo_conv = conv;
+        if (eta > 0.0) m_cosmo_eta = eta;
+    }
+    /// Reference state of the solvation free energy (gsolv, bar1M, reference); validated in InitialiseMolecule. Claude Generated (Nov 2026).
+    void setSolventState(const std::string& s) { m_solvent_state = s; }
 
     // Tighten the SCF convergence threshold (for FD charge-response validation).
     void setScfThreshold(double t) { m_scf_threshold = t; }
+    double scfThreshold() const { return m_scf_threshold; }   // Claude Generated (Nov 2026)
+    /// Claude Generated (Nov 2026): the convergence limit the SCF test works at: scf_threshold for the default rule,
+    /// the RMS limit (1e-4*acc GFN2, 2e-5*acc GFN1) for scf_criterion xtb. The GPU FP32 switch point must not lie below it.
+    double scfConvergenceLimit() const
+    { return m_scf_criterion_xtb ? (m_method == MethodType::GFN2 ? 1.0e-4 : 2.0e-5) * m_scf_accuracy : m_scf_threshold; }
 
     /* ----- SCF convergence controls (Claude Generated) -------------------- *
      * Set by the GFN1/GFN2 wrappers from the `xtb` config scope. Defaults
@@ -1241,6 +1297,14 @@ public:
     void setScfMode(ScfMode m)            { m_scf_mode = m; }
     void setScfMode(const std::string& s) { m_scf_mode = parseScfMode(s); }
     void setScfDamping(double d)          { m_scf_damping = d; }
+    // Claude Generated (Nov 2026): opt-in xtb convergence rule (scf_criterion xtb), see the SCF loop.
+    void setScfCriterion(const std::string& s) {
+        if (s == "default")  m_scf_criterion_xtb = false;
+        else if (s == "xtb") m_scf_criterion_xtb = true;
+        else throw std::invalid_argument("scf_criterion must be 'default' or 'xtb', got '" + s + "'");
+    }
+    void setScfAccuracy(double a)         { if (a > 0.0) m_scf_accuracy = a; }
+    bool scfCriterionXtb() const          { return m_scf_criterion_xtb; }
     void setScfMaxIter(int n)             { if (n > 0) m_scf_max_iter = n; }
     void setDiisStart(int n)              { if (n >= 0) m_diis_start = n; }
     void setDiisSubspace(int n)           { if (n >= 2) m_diis_subspace = n; }
@@ -1261,6 +1325,10 @@ public:
     // both the dense solveEigen() path and the per-block sub-block diagonaliser in
     // large_system_mode=dc.
     void setElectronicTemperature(double K) { if (K >= 0.0) m_electronic_temp = K; }
+    /// Spin polarisation (alpha/beta Fock matrices, tblite spin-polarization); acts only with -spin N > 0.
+    void setSpinPolarization(bool on, double scale) { m_spin_pol = on; m_spin_pol_scale = scale; }
+    bool spinPolarization() const { return m_spin_pol; }
+    double spinEnergy() const { return m_E_spin; }
     /// Electronic temperature in Kelvin (Stage-6 GPU occupation validation).
     double electronicTemperature() const { return m_electronic_temp; }
     /// Public diagnostic accessor (Stage-6 GPU validation, Claude Generated):
@@ -1372,6 +1440,7 @@ public:
         m_warmstart_q_sh.resize(0);
         m_warmstart_dp_at.resize(0, 0);
         m_warmstart_qp_at.resize(0, 0);
+        m_warmstart_m_sh.resize(0);
         m_scf_history.clear();
         // Clearing the saved guess is not enough: UpdateMolecule() PROMOTES the live
         // wavefunction into the warm-start slot (`m_warmstart_q_sh = m_wfn.q_sh`) whenever the
@@ -1591,6 +1660,25 @@ private:
     void buildOrthonormalizer();
     // Diagonalise F in S metric, update wavefunction populations.
     bool solveEigen(const Matrix& F, const Matrix& S);                   // xtb_scf.cpp
+
+    // ---- Spin polarisation (spin_polarization; Claude Generated, Nov 2026; docs/SPIN_POLARISATION.md) ----
+    // True when the SCF runs two Fock matrices (alpha, beta): option on AND -spin N > 0.
+    bool spinPolActive() const { return m_spin_pol && openShell(); }
+    /// W_{ll'}(shell a, shell b) of one atom [Eh]: spin_constants[Z][lidx[l_a][l_b]] * spin_polarization_scale.
+    double spinConstant(int z, int l_a, int l_b) const;
+    /// u_l = sum_{l' on the same atom} W_{ll'} m_{l'}  (spin potential per shell)
+    void   spinPotential(const Vector& m_sh, Vector& u_sh) const;
+    /// E_spin = 1/2 sum_A sum_{l,l' on A} W_{ll'} m_l m_l'  for the shell magnetisation of m_wfn
+    double energySpin() const;
+    /// F^alpha = F + 1/2 S (u_mu + u_nu), F^beta = F - 1/2 S (u_mu + u_nu)
+    void   buildSpinFocks(const Matrix& F, const Matrix& S, const Vector& u_sh, Matrix& Fa, Matrix& Fb) const;
+    /// Diagonalise F C = S C eps with the cached Cholesky factor (dsygst + dsyevd), FP64, ascending eps.
+    bool   diagonalizeFock(const Matrix& F, const Matrix& S, Matrix& C, Vector& eps) const;
+    /// Two-Fock-matrix eigensolve: Pa, Pb, P = Pa + Pb, Pm = Pa - Pb, W (both spins), entropy m_ts_uhf.
+    bool   solveEigenUhf(const Matrix& Fa, const Matrix& Fb, const Matrix& S);
+    /// W = sum_s sum_i f^s_i eps^s_i C^s_i C^s_i^T from the orbitals of the CUDA spin loop
+    /// (m_wfn.C/eps = alpha, m_gpu_spin_Cb/eb = beta); sets m_wfn.W_valid. Host gradient fallback only.
+    void   spinHostEnergyWeightedDensity();
     bool pseudoDiagStepCpu(const Matrix& F);                            // xtb_scf.cpp (Oct 2026)
     void updatePopulations(const Matrix& S);                             // xtb_scf.cpp
 
@@ -1890,10 +1978,22 @@ private:
     // into the electronic container to match tblite/xtb, which report the free
     // energy A = E - T*S. Claude Generated.
     double m_E_entropy       = 0.0;
+    // Spin-polarisation energy 1/2 sum W m m (included in m_E_electronic); 0 unless spinPolActive().
+    double m_E_spin          = 0.0;
+    bool   m_spin_pol        = false;   ///< -xtb.spin_polarization
+    double m_spin_pol_scale  = 1.0;     ///< -xtb.spin_polarization_scale (tblite wscale)
+    // Spin polarisation on the CUDA device loop (Claude Generated, Nov 2026): the last iteration's
+    // beta orbitals and both Fermi fillings, kept for the device W (spinWeightedDensity) and for
+    // the host gradient fallback, which rebuilds m_wfn.W from them (spinHostEnergyWeightedDensity).
+    bool   m_gpu_spin_loop   = false;   ///< this SCF ran spin-polarised on the device loop
+    Matrix m_gpu_spin_Cb;               ///< beta eigenvectors (host copy after finalizeSpin)
+    Vector m_gpu_spin_eb, m_gpu_spin_fa, m_gpu_spin_fb;   ///< beta eps; alpha / beta occupations [0,1]
 
     // SCF config / state
     int    m_scf_max_iter    = 150;
-    double m_scf_threshold   = 1.0e-5;  // max|dq_shell|; energy bit-identical to 1e-6
+    bool   m_scf_criterion_xtb = false;  // true: xtb rule (RMS dq/sqrt(nat), |dE|, one extra iteration), scf_accuracy scales it
+    double m_scf_accuracy      = 1.0;    // xtb 'acc': qconv = 1e-4*acc (GFN2) / 2e-5*acc (GFN1), econv = 1e-6*acc; xtb MD uses 2.0
+    double m_scf_threshold   = 2.0e-5;  // max|dq_shell|; 2e-5 since Nov 2026 (was 1e-5), docs/SCF_THRESHOLD_2026-11.md
     double m_scf_damping     = 0.4;
     double m_electronic_temp = 300.0;  // K; 0 → integer occupation
     bool   m_scf_converged   = false;
@@ -2045,8 +2145,13 @@ private:
     // Eh/Bohr before the final unit conversion. See docs/SQM_SOLVATION_WP.md.
     std::unique_ptr<ImplicitSolvationModel> m_solvation;
     std::string m_solvent = "none";   ///< solvent name; "none" disables solvation
-    int    m_solvent_model = 0;        ///< 0=none, 1=CPCM, 2=GBSA, 3=ALPB
-    double m_solvent_epsilon = -1.0;   ///< explicit dielectric (CPCM); -1 = from name
+    int    m_solvent_model = 0;        ///< 0=none, 1=CPCM, 2=GBSA, 3=ALPB, 4=COSMO (ddCOSMO)
+    double m_solvent_epsilon = -1.0;   ///< explicit dielectric (COSMO); -1 = from name
+    int    m_cosmo_nang = 230;         ///< COSMO surface grid; cavity grid nearest to half of it (xtb)
+    int    m_cosmo_lmax = 6;           ///< COSMO spherical-harmonics order (xtb)
+    double m_cosmo_conv = 1.0e-8;      ///< COSMO linear-solver threshold (xtb)
+    double m_cosmo_eta = 0.2;          ///< COSMO switching-region width (xtb)
+    std::string m_solvent_state = "gsolv";   ///< reference state: gsolv | bar1M | reference
     double m_E_solvation = 0.0;        ///< last solvation free energy (Eh)
 
     // Warm-start and iterative-mode state (Claude Generated).
@@ -2067,6 +2172,7 @@ private:
     // GFN1-like few-iteration tail. Claude Generated (opt/md warm-start).
     Eigen::MatrixXd m_warmstart_dp_at; ///< Converged 3×nat atomic dipoles (GFN2)
     Eigen::MatrixXd m_warmstart_qp_at; ///< Converged 6×nat atomic quadrupoles (GFN2)
+    Vector m_warmstart_m_sh;           ///< Converged shell magnetisation (spin_polarization)
     bool   m_keep_diis      = false;  ///< preserve DIIS/Broyden history across steps
     bool   m_is_iterative   = false;
 
@@ -2190,6 +2296,8 @@ inline void applyXtbScfConfig(XTB& xtb, const json& cfg)
     lookup("eigensolver",  [&](const json& v){ if (v.is_string()) xtb.setEigensolver(v.get<std::string>()); });
     lookup("scf_damping",  [&](const json& v){ if (v.is_number()) xtb.setScfDamping(v.get<double>()); });
     lookup("scf_threshold",[&](const json& v){ if (v.is_number()) xtb.setScfThreshold(v.get<double>()); });
+    lookup("scf_criterion",[&](const json& v){ if (v.is_string()) xtb.setScfCriterion(v.get<std::string>()); });
+    lookup("scf_accuracy", [&](const json& v){ if (v.is_number()) xtb.setScfAccuracy(v.get<double>()); });
     // scf_diis_start / scf_diis_subspace (the scf_ prefix keeps them apart from the optimiser's -diis_start); the old
     // spellings -xtb.diis_start / -xtb.diis_subspace stay valid in the xtb scope (Oct 26, 2026).
     lookup("scf_diis_start",   [&](const json& v){ if (v.is_number()) xtb.setDiisStart(static_cast<int>(std::lround(v.get<double>()))); });   // CLI numbers arrive as double
@@ -2238,15 +2346,36 @@ inline void applyXtbScfConfig(XTB& xtb, const json& cfg)
     lookup("scf_extrapolation_apply",[&](const json& v){ if (v.is_string())          xtb.setScfExtrapolationApply(v.get<std::string>()); });
     lookup("scf_xlbomd_correctors",  [&](const json& v){ if (v.is_number())  xtb.setScfXlbomdCorrectors(static_cast<int>(std::lround(v.get<double>()))); });
     lookup("electronic_temperature", [&](const json& v){ if (v.is_number()) xtb.setElectronicTemperature(v.get<double>()); });
+    // Spin polarisation (Claude Generated, Nov 2026); fallback literals equal the PARAM defaults in native_xtb_method.h.
+    {
+        bool sp = false; double sps = 1.0;
+        lookup("spin_polarization",       [&](const json& v){ if (v.is_boolean()) sp = v.get<bool>(); else if (v.is_number()) sp = v.get<double>() != 0.0; });
+        lookup("spin_polarization_scale", [&](const json& v){ if (v.is_number()) sps = v.get<double>(); });
+        xtb.setSpinPolarization(sp, sps);
+    }
     // Implicit solvation (Claude Generated, June 2026). solvent_model is a
     // descriptive name ("none"/"cpcm"/"gbsa"/"alpb"); legacy numeric codes (0..3) are
     // still accepted. The number branch also covers CLI flat-flags, which arrive as a
     // float (2.0) — an is_number_integer()-only check would silently drop them.
-    lookup("solvent",         [&](const json& v){ if (v.is_string()) xtb.setSolvent(v.get<std::string>()); });
+    // A plain number (-xtb.solvent 78.4) is a dielectric constant for COSMO, as in xtb --cosmo 78.4; the CLI
+    // parser hands it over as a JSON number. Claude Generated (Nov 2026).
+    lookup("solvent",         [&](const json& v){
+        if (v.is_string()) xtb.setSolvent(v.get<std::string>());
+        else if (v.is_number()) xtb.setSolvent(v.dump());
+    });
     lookup("solvent_model",   [&](const json& v){
         if (v.is_string())      xtb.setSolventModel(v.get<std::string>());        // name or numeric string
         else if (v.is_number()) xtb.setSolventModel(static_cast<int>(std::lround(v.get<double>())));
     });
+    lookup("solvent_state",   [&](const json& v){ if (v.is_string()) xtb.setSolventState(v.get<std::string>()); });
+    {   // ddCOSMO discretisation (Claude Generated, Nov 2026); CLI numbers arrive as double
+        int nang = 0, lmax = 0; double conv = 0.0, eta = 0.0;
+        lookup("cosmo_grid",  [&](const json& v){ if (v.is_number()) nang = static_cast<int>(std::lround(v.get<double>())); });
+        lookup("cosmo_lmax",  [&](const json& v){ if (v.is_number()) lmax = static_cast<int>(std::lround(v.get<double>())); });
+        lookup("cosmo_conv",  [&](const json& v){ if (v.is_number()) conv = v.get<double>(); });
+        lookup("cosmo_eta",   [&](const json& v){ if (v.is_number()) eta = v.get<double>(); });
+        xtb.setCosmoSettings(nang, lmax, conv, eta);
+    }
     lookup("solvent_epsilon", [&](const json& v){
         if (v.is_number()) xtb.setSolventEpsilon(v.get<double>());
         else if (v.is_string()) { try { xtb.setSolventEpsilon(std::stod(v.get<std::string>())); } catch (...) {} }

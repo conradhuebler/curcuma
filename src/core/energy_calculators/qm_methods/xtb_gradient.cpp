@@ -96,6 +96,17 @@ void XTB::calculateGradient()
         W = (Cocc * w2.asDiagonal()) * Cocc.transpose();
     }
 
+    // ── Spin polarisation (Claude Generated, Nov 2026, docs/SPIN_POLARISATION.md) ──────────────────
+    // E_spin = 1/2 sum W m m has no explicit geometry dependence (W is a constant). Its gradient is the
+    // Mulliken response of m_l = sum_{mu in l, nu} Pm_{mu nu} S_{nu mu} (Pm = Pa - Pb, dm_l = +sum Pm dS) and,
+    // through the orbitals, the energy-weighted density W of BOTH spin sets (supplied by solveEigenUhf with
+    // W_valid). Per unique atom pair the overlap-gradient coefficient gets + Pm_{mu nu} (u_a + u_b), u = W m,
+    // opposite in sign to the charge part - P (v_a + v_b) because dq = -sum P dS but dm = +sum Pm dS.
+    const bool spin_grad = spinPolActive() && m_wfn.Pm.rows() == nao && m_wfn.Pm.cols() == nao
+                           && m_wfn.m_sh.size() == nsh;
+    Vector u_spin;
+    if (spin_grad) spinPotential(m_wfn.m_sh, u_spin);
+
     // ── v_ao: expand shell+atom potential to AO resolution ──────────────────
     // F_μν = H0_μν - 0.5·S_μν·(v_ao(μ)+v_ao(ν))  (xtb_scf.cpp:expand_potential)
     Vector v_ao = Vector::Zero(nao);
@@ -343,6 +354,7 @@ void XTB::calculateGradient()
                     // Mulliken charge response of every SCC term.
                     const double v_a = m_pot.v_sh(ish_a) + m_pot.v_at(iat);
                     const double v_b = m_pot.v_sh(ish_b) + m_pot.v_at(jat);
+                    const double u_ab = spin_grad ? (u_spin(ish_a) + u_spin(ish_b)) : 0.0;
 
                     // ── Accumulate over AO pairs ──────────────────────────────
                     double G_sval[3]       = {0.0, 0.0, 0.0};
@@ -381,9 +393,11 @@ void XTB::calculateGradient()
 
                             // sval: coefficient for the overlap-gradient term
                             // sval = 2·P·h_av - 2·W - P·(v_a+v_b)
-                            const double sval = m_sval_h0_only
+                            double sval = m_sval_h0_only
                                 ? 2.0*Pmn*h_av                                  // Tr(P·dH0) band only
                                 : 2.0*Pmn*h_av - 2.0*Wmn - Pmn*(v_a + v_b);
+                            if (spin_grad && !m_sval_h0_only)
+                                sval += m_wfn.Pm(mu, nu) * u_ab;                // spin polarisation: + Pm (u_a + u_b)
 
                             G_sval[0] += sval * dS[0];
                             G_sval[1] += sval * dS[1];
@@ -871,6 +885,30 @@ bool XTB::calculateGradientGpu()
             nocc_orbs = ncol;
             eps_eff = 0.5 * m_wfn.focc.cwiseProduct(m_wfn.eps);
         }
+    }
+
+    // Spin polarisation on the CUDA loop (Claude Generated, Nov 2026): W must hold both orbital sets and
+    // the spin term of the overlap-gradient coefficient, + Pm (u_a + u_b) (see calculateGradient). The
+    // device builds W' = Wa + Wb - 1/2 Pm o (u_mu + u_nu) from its resident Ca/Cb/Pm, and gradient()
+    // below reads it instead of building W from C (nocc_orbs = 0, eps unused).
+    if (m_gpu_spin_loop) {
+        if (m_dev_potentials || m_wfn.m_sh.size() != m_basis.nsh || m_wfn.eps.size() != nao
+            || m_gpu_spin_eb.size() != nao || m_gpu_spin_fa.size() != nao || m_gpu_spin_fb.size() != nao)
+            return false;
+        Vector u_sh;
+        spinPotential(m_wfn.m_sh, u_sh);
+        Vector u_ao(nao);
+        for (int mu = 0; mu < nao; ++mu) u_ao(mu) = u_sh(m_basis.ao2sh[mu]);
+        auto ncol_of = [nao](const Vector& f) {
+            int nc = 0;
+            for (int i = 0; i < nao; ++i) if (f(i) > 1.0e-12) nc = i + 1;
+            return nc;
+        };
+        const Vector we_a = m_gpu_spin_fa.cwiseProduct(m_wfn.eps);
+        const Vector we_b = m_gpu_spin_fb.cwiseProduct(m_gpu_spin_eb);
+        if (!m_gpu_scf->spinWeightedDensity(we_a, ncol_of(m_gpu_spin_fa), we_b, ncol_of(m_gpu_spin_fb), u_ao))
+            return false;
+        nocc_orbs = 0;
     }
 
     // GFN2 multipole potentials for the device multipole-integral Pulay term.

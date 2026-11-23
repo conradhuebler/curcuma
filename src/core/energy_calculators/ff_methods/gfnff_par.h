@@ -17,6 +17,7 @@
 #pragma once
 
 #include "src/core/units.h"
+#include "src/core/element_tables.h"
 #include <cmath>
 #include <initializer_list>
 #include <utility>
@@ -293,37 +294,14 @@ static const std::vector<double> rcov_bohr = r0_gfnff;
 static constexpr double gfnff_autoaa = CurcumaUnit::Length::bohr_radius_or_legacy(0.52917726);
 static constexpr double gfnff_aatoau = 1.0 / gfnff_autoaa;
 
-static const std::vector<double> covalent_rad_d3 = {
-    0.32 * gfnff_aatoau, 0.46 * gfnff_aatoau,                                         // H, He
-    1.20 * gfnff_aatoau, 0.94 * gfnff_aatoau, 0.77 * gfnff_aatoau, 0.75 * gfnff_aatoau, // Li-C
-    0.71 * gfnff_aatoau, 0.63 * gfnff_aatoau, 0.64 * gfnff_aatoau, 0.67 * gfnff_aatoau, // N-Ne
-    1.40 * gfnff_aatoau, 1.25 * gfnff_aatoau, 1.13 * gfnff_aatoau, 1.04 * gfnff_aatoau, // Na-Si
-    1.10 * gfnff_aatoau, 1.02 * gfnff_aatoau, 0.99 * gfnff_aatoau, 0.96 * gfnff_aatoau, // P-Ar
-    1.76 * gfnff_aatoau, 1.54 * gfnff_aatoau,                                         // K, Ca
-    1.33 * gfnff_aatoau, 1.22 * gfnff_aatoau, 1.21 * gfnff_aatoau, 1.10 * gfnff_aatoau, // Sc-Cr
-    1.07 * gfnff_aatoau, 1.04 * gfnff_aatoau, 1.00 * gfnff_aatoau, 0.99 * gfnff_aatoau, // Mn-Ni
-    1.01 * gfnff_aatoau, 1.09 * gfnff_aatoau,                                         // Cu, Zn
-    1.12 * gfnff_aatoau, 1.09 * gfnff_aatoau, 1.15 * gfnff_aatoau, 1.10 * gfnff_aatoau, // Ga-Se
-    1.14 * gfnff_aatoau, 1.17 * gfnff_aatoau,                                         // Br, Kr
-    1.89 * gfnff_aatoau, 1.67 * gfnff_aatoau,                                         // Rb, Sr
-    1.47 * gfnff_aatoau, 1.39 * gfnff_aatoau, 1.32 * gfnff_aatoau, 1.24 * gfnff_aatoau, // Y-Mo
-    1.15 * gfnff_aatoau, 1.13 * gfnff_aatoau, 1.13 * gfnff_aatoau, 1.08 * gfnff_aatoau, // Tc-Pd
-    1.15 * gfnff_aatoau, 1.23 * gfnff_aatoau,                                         // Ag, Cd
-    1.28 * gfnff_aatoau, 1.26 * gfnff_aatoau, 1.26 * gfnff_aatoau, 1.23 * gfnff_aatoau, // In-Te
-    1.32 * gfnff_aatoau, 1.31 * gfnff_aatoau,                                         // I, Xe
-    2.09 * gfnff_aatoau, 1.76 * gfnff_aatoau,                                         // Cs, Ba
-    1.62 * gfnff_aatoau, 1.47 * gfnff_aatoau, 1.58 * gfnff_aatoau, 1.57 * gfnff_aatoau, // La-Nd
-    1.56 * gfnff_aatoau, 1.55 * gfnff_aatoau, 1.51 * gfnff_aatoau,                     // Pm-Eu
-    1.52 * gfnff_aatoau, 1.51 * gfnff_aatoau, 1.50 * gfnff_aatoau, 1.49 * gfnff_aatoau, // Gd-Dy
-    1.49 * gfnff_aatoau, 1.48 * gfnff_aatoau, 1.53 * gfnff_aatoau,                     // Ho-Yb
-    1.46 * gfnff_aatoau, 1.37 * gfnff_aatoau, 1.31 * gfnff_aatoau, 1.23 * gfnff_aatoau, // Lu-W
-    1.18 * gfnff_aatoau, 1.16 * gfnff_aatoau, 1.11 * gfnff_aatoau, 1.12 * gfnff_aatoau, // Re-Pt
-    1.13 * gfnff_aatoau, 1.32 * gfnff_aatoau,                                         // Au, Hg
-    1.30 * gfnff_aatoau, 1.30 * gfnff_aatoau, 1.36 * gfnff_aatoau, 1.31 * gfnff_aatoau, // Tl-Po
-    1.38 * gfnff_aatoau, 1.42 * gfnff_aatoau,                                         // At, Rn
-    2.01 * gfnff_aatoau, 1.81 * gfnff_aatoau,                                         // Fr, Ra
-    1.67 * gfnff_aatoau, 1.58 * gfnff_aatoau                                          // Ac, Th
-};
+static const std::vector<double> covalent_rad_d3 = [] {
+    // Z = 1-86: Pyykkoe-Atsumi radii (metals -10 %) from the shared table, in Bohr (x gfnff_aatoau);
+    // Z = 87-90 (Fr, Ra, Ac, Th) are GFN-FF specific.
+    std::vector<double> v;
+    for (double r : CurcumaElements::COVALENT_RAD_2009_ANGSTROM) v.push_back(r * gfnff_aatoau);
+    for (double r : { 2.01, 1.81, 1.67, 1.58 }) v.push_back(r * gfnff_aatoau);
+    return v;
+}();
 
 /**
  * @brief GFN-FF coordination-number radius in Bohr for element Z
@@ -348,20 +326,16 @@ inline double gfnff_cn_rcov_bohr(int Z)
 
 // Standard covalent radii - Angström
 // Used for bond detection threshold (× 1.3)
-static const std::vector<double> covalent_radii = {
-    0.32, 0.37, 1.30, 0.99, 0.84, 0.75, 0.71, 0.64, 0.60, 0.62, // H-Ne
-    1.60, 1.40, 1.24, 1.14, 1.09, 1.04, 1.00, 1.01, // Na-Ar
-    2.00, 1.74, 1.59, 1.48, 1.44, 1.30, 1.29, 1.24, 1.18, // K-Ni
-    1.17, 1.22, 1.20, 1.23, 1.20, 1.20, 1.18, 1.17, 1.16, // Cu-Kr
-    2.15, 1.90, 1.76, 1.64, 1.56, 1.46, 1.38, 1.36, 1.34, // Rb-Pd
-    1.30, 1.36, 1.40, 1.42, 1.40, 1.40, 1.37, 1.36, 1.36, // Ag-Xe
-    2.38, 2.06, 1.94, 1.84, 1.90, 1.88, 1.86, 1.85, 1.83, // Cs-Eu
-    1.82, 1.81, 1.80, 1.79, 1.77, 1.77, 1.78, 1.74, 1.64, // Gd-Lu
-    1.58, 1.50, 1.41, 1.36, 1.32, 1.30, 1.30, 1.32, 1.44, // Hf-Au
-    1.45, 1.50, 1.42, 1.48, 1.46, // Hg-Po
-    2.42, 2.11, 2.01, 1.90, 1.84, 1.83, 1.80, 1.80, 1.73, // Fr-Am
-    1.68, 1.68, 1.68, 1.65, 1.67, 1.73, 1.76, 1.61 // Cm-Lr
-};
+static const std::vector<double> covalent_radii = [] {
+    // Z = 1-86: shared atomic radii table; Z = 87-103 (Fr-Lr) are GFN-FF specific
+    std::vector<double> v(std::begin(CurcumaElements::ATOMIC_RAD_ANGSTROM), std::end(CurcumaElements::ATOMIC_RAD_ANGSTROM));
+    const double fr_lr[] = {
+        2.42, 2.11, 2.01, 1.90, 1.84, 1.83, 1.80, 1.80, 1.73, // Fr-Am
+        1.68, 1.68, 1.68, 1.65, 1.67, 1.73, 1.76, 1.61 // Cm-Lr
+    };
+    v.insert(v.end(), std::begin(fr_lr), std::end(fr_lr));
+    return v;
+}();
 
 // ============================================================================
 // SECTION 3: Hybridization and Bond Strength (19 lines)
@@ -396,24 +370,11 @@ static const double bsmat[4][4] = {
 // SECTION 4: Topology and Metal Classification (28 lines)
 // ============================================================================
 
-// Metal type classification
-// 0=non-metal, 1=main group metal, 2=transition metal
-// Claude Generated (Jul 2026, F3 fix): corrected to match xtb metal(86) EXACTLY
-// (external/xtb/src/gfnff/gfnff_param.f90:318-325). The previous array had only 83
-// entries — the K-Kr row was missing Kr(36)=0 and the Rb-Xe row was missing I(53)=0
-// and Xe(54)=0, plus Ag(47) was 1 instead of 2. The 3-element shortfall shifted
-// every Z>=36 index by 1-3, so I(Z=53) read index 52 (=2, TM) instead of 0. That
-// made calculateDgam use the TM ff=-0.9 for I instead of the halogen ff=-0.07,
-// giving dgam(I)=-0.176 instead of -0.0137, gameeq(I)=-0.136 (negative hardness)
-// and over-polarised iodine by ~0.19 e (S30L 15/16 Coulomb -14 kcal/mol).
-static const int metal_type[86] = {
-    0, 0,                                                                      // H-He
-    1, 1, 0, 0, 0, 0, 0, 0,                                                    // Li-Ne
-    1, 1, 1, 0, 0, 0, 0, 0,                                                    // Na-Ar
-    1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0, 0, 0, 0,                     // K-Kr   (Kr=0 added)
-    1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 0, 0, 0, 0, 0,                     // Rb-Xe  (Ag=2, I=0, Xe=0 added)
-    1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 0, 0 // Cs-Rn
-};
+// Metal type classification (0 = non-metal, 1 = main group metal, 2 = transition metal): PeriodicTable::getMetalType
+// (src/core/periodic_table.h), which is exact against gfnff_param.f90 metal(86). A second copy of this table lived here
+// as GFNFFParameters::metal_type until Nov 2026; it differed from the reference at Zn, Ga, Cd and Sn (2/1/2/1 there,
+// 1/0/1/0 here) and was removed.
+
 
 // Periodic group numbers
 // Main group: 1-8, d-block: negative values
@@ -438,23 +399,6 @@ static const int normcn[86] = {
     4, 4, 4, 4, 6, 6, 6, 6, 6, 6, 4, 4, 4, 4, 4, 4, 1, 0,                      // Rb-Xe
     4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,                         // Cs-Lu
     4, 6, 6, 6, 6, 6, 6, 6, 4, 4, 4, 4, 4, 1, 0                                // Hf-Rn
-};
-
-// Pauling-like electronegativity used by GFN-FF for the "metallic character"
-// estimate mchar (gfnff_ini.f90:249). Verbatim port of gfnff_param.f90:315-324.
-// NOTE: this is param%en and is NOT the same array as rab_en (from gfnffrab.f90)
-// used by computeRabEstimate - do not substitute one for the other.
-// Claude Generated (Jul 2026) - metal-reduced neighbour list port
-static const double gfnff_en[86] = {
-    2.200, 3.000, 0.980, 1.570, 2.040, 2.550, 3.040, 3.440, 3.980,             // H-F
-    4.500, 0.930, 1.310, 1.610, 1.900, 2.190, 2.580, 3.160, 3.500,             // Ne-Ar
-    0.820, 1.000, 1.360, 1.540, 1.630, 1.660, 1.550, 1.830, 1.880,             // K-Co
-    1.910, 1.900, 1.650, 1.810, 2.010, 2.180, 2.550, 2.960, 3.000,             // Ni-Kr
-    0.820, 0.950, 1.220, 1.330, 1.600, 2.160, 1.900, 2.200, 2.280,             // Rb-Rh
-    2.200, 1.930, 1.690, 1.780, 1.960, 2.050, 2.100, 2.660, 2.600,             // Pd-Xe
-    0.79, 0.89, 1.10, 1.12, 1.13, 1.14, 1.15, 1.17, 1.18, 1.20, 1.21, 1.22,    // Cs-Dy
-    1.23, 1.24, 1.25, 1.26, 1.27, 1.3, 1.5, 1.7, 1.9, 2.1, 2.2, 2.2, 2.2,      // Ho-Au (W-Au modified)
-    2.00, 1.62, 2.33, 2.02, 2.0, 2.2, 2.2                                      // Hg-Rn
 };
 
 // ============================================================================
@@ -1084,77 +1028,13 @@ inline double zetaChargeScaleDerivative(int Z, double q) {
 
 // ============================================================================
 // SECTION: RAB Bond Length Estimation Parameters
+// (tables: en_rab_gfnff = gfnff_rab.f90:63-79, r0_gfnff = :82-102, cnfak_gfnff = :105-123, at the top of this file;
+//  the copies rab_en/rab_r0/rab_cnfak and gfnff_en (== en_gfnff) were removed Nov 2026, values identical)
 // Claude Generated (2026): Port of Fortran gfnff_rab.f90:gfnffrab()
 // Used for sorting inversion neighbors to match Fortran tlist ordering.
 // rab(i,j) = (ra + rb) * ff
 //   where ra/rb are CN-dependent radii and ff is an EN-difference correction.
 // ============================================================================
-
-// Fitted electronegativities for rab estimation (gfnff_rab.f90:63-79)
-static const double rab_en[86] = {
-    2.30085633, 2.78445145, 1.52956084, 1.51714704, 2.20568300,
-    2.49640820, 2.81007174, 4.51078438, 4.67476223, 3.29383610,
-    2.84505365, 2.20047950, 2.31739628, 2.03636974, 1.97558064,
-    2.13446570, 2.91638164, 1.54098156, 2.91656301, 2.26312147,
-    2.25621439, 1.32628677, 2.27050569, 1.86790977, 2.44759456,
-    2.49480042, 2.91545568, 3.25897750, 2.68723778, 1.86132251,
-    2.01200832, 1.97030722, 1.95495427, 2.68920990, 2.84503857,
-    2.61591858, 2.64188286, 2.28442252, 1.33011187, 1.19809388,
-    1.89181390, 2.40186898, 1.89282464, 3.09963488, 2.50677823,
-    2.61196704, 2.09943450, 2.66930105, 1.78349472, 2.09634533,
-    2.00028974, 1.99869908, 2.59072029, 2.54497829, 2.52387890,
-    2.30204667, 1.60119300, 2.00000000, 2.00000000, 2.00000000,
-    2.00000000, 2.00000000, 2.00000000, 2.00000000, 2.00000000,
-    2.00000000, 2.00000000, 2.00000000, 2.00000000, 2.00000000,
-    2.00000000, 2.30089349, 1.75039077, 1.51785130, 2.62972945,
-    2.75372921, 2.62540906, 2.55860939, 3.32492356, 2.65140898,
-    1.52014458, 2.54984804, 1.72021963, 2.69303422, 1.81031095,
-    2.34224386
-};
-
-// Base radii for rab estimation (gfnff_rab.f90:82-102)
-static const double rab_r0[86] = {
-    0.55682207, 0.80966997, 2.49092101, 1.91705642, 1.35974851,
-    0.98310699, 0.98423007, 0.76716063, 1.06139799, 1.17736822,
-    2.85570926, 2.56149012, 2.31673425, 2.03181740, 1.82568535,
-    1.73685958, 1.97498207, 2.00136196, 3.58772537, 2.68096221,
-    2.23355957, 2.33135502, 2.15870365, 2.10522128, 2.16376162,
-    2.10804037, 1.96460045, 2.00476257, 2.22628712, 2.43846700,
-    2.39408483, 2.24245792, 2.05751204, 2.15427677, 2.27191920,
-    2.19722638, 3.80910350, 3.26020971, 2.99716916, 2.71707818,
-    2.34950167, 2.11644818, 2.47180659, 2.32198800, 2.32809515,
-    2.15244869, 2.55958313, 2.59141300, 2.62030465, 2.39935278,
-    2.56912355, 2.54374096, 2.56914830, 2.53680807, 4.24537037,
-    3.66542289, 3.19903011, 2.80000000, 2.80000000, 2.80000000,
-    2.80000000, 2.80000000, 2.80000000, 2.80000000, 2.80000000,
-    2.80000000, 2.80000000, 2.80000000, 2.80000000, 2.80000000,
-    2.80000000, 2.34880037, 2.37597108, 2.49067697, 2.14100577,
-    2.33473532, 2.19498900, 2.12678348, 2.34895048, 2.33422774,
-    2.86560827, 2.62488837, 2.88376127, 2.75174124, 2.83054552,
-    2.63264944
-};
-
-// CN-dependent correction factors (gfnff_rab.f90:105-123)
-static const double rab_cnfak[86] = {
-    0.17957827, 0.25584045,-0.02485871, 0.00374217, 0.05646607,
-    0.10514203, 0.09753494, 0.30470380, 0.23261783, 0.36752208,
-    0.00131819,-0.00368122,-0.01364510, 0.04265789, 0.07583916,
-    0.08973207,-0.00589677, 0.13689929,-0.01861307, 0.11061699,
-    0.10201137, 0.05426229, 0.06014681, 0.05667719, 0.02992924,
-    0.03764312, 0.06140790, 0.08563465, 0.03707679, 0.03053526,
-   -0.00843454, 0.01887497, 0.06876354, 0.01370795,-0.01129196,
-    0.07226529, 0.01005367, 0.01541506, 0.05301365, 0.07066571,
-    0.07637611, 0.07873977, 0.02997732, 0.04745400, 0.04582912,
-    0.10557321, 0.02167468, 0.05463616, 0.05370913, 0.05985441,
-    0.02793994, 0.02922983, 0.02220438, 0.03340460,-0.04110969,
-   -0.01987240, 0.07260201, 0.07700000, 0.07700000, 0.07700000,
-    0.07700000, 0.07700000, 0.07700000, 0.07700000, 0.07700000,
-    0.07700000, 0.07700000, 0.07700000, 0.07700000, 0.07700000,
-    0.07700000, 0.08379100, 0.07314553, 0.05318438, 0.06799334,
-    0.04671159, 0.06758819, 0.09488437, 0.07556405, 0.13384502,
-    0.03203572, 0.04235009, 0.03153769,-0.00152488, 0.02714675,
-    0.04800662
-};
 
 // Period-dependent EN polynomial parameters (gfnff_rab.f90:125-136)
 // p[row-1][0] = p(row,1), p[row-1][1] = p(row,2)
@@ -1190,9 +1070,9 @@ inline double computeRabEstimate(int Z_i, int Z_j, double cn_i, double cn_j) {
     if (Z_i < 1 || Z_i > 86 || Z_j < 1 || Z_j > 86) return 1e10;
     int ir = rab_itabrow6(Z_i) - 1;  // 0-based index
     int jr = rab_itabrow6(Z_j) - 1;
-    double ra = rab_r0[Z_i - 1] + rab_cnfak[Z_i - 1] * cn_i;
-    double rb = rab_r0[Z_j - 1] + rab_cnfak[Z_j - 1] * cn_j;
-    double den = std::abs(rab_en[Z_i - 1] - rab_en[Z_j - 1]);
+    double ra = r0_gfnff[Z_i - 1] + cnfak_gfnff[Z_i - 1] * cn_i;
+    double rb = r0_gfnff[Z_j - 1] + cnfak_gfnff[Z_j - 1] * cn_j;
+    double den = std::abs(en_rab_gfnff[Z_i - 1] - en_rab_gfnff[Z_j - 1]);
     double k1 = 0.005 * (rab_p[ir][0] + rab_p[jr][0]);
     double k2 = 0.005 * (rab_p[ir][1] + rab_p[jr][1]);
     double ff = 1.0 - k1 * den - k2 * den * den;

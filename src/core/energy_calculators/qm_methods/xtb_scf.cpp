@@ -23,7 +23,9 @@
 
 #include <limits>
 #include "xtb_native.h"
+#include "src/core/units.h"
 #include "native_eigensolver.h"
+#include "parameters/spin_constants.hpp"
 #include "src/core/curcuma_logger.h"
 
 #include <Eigen/Dense>
@@ -326,7 +328,7 @@ bool XTB::pseudoDiagStepCpu(const Matrix& F)
     // 2. Is one rotation safe? The occupied/virtual gap must be large against kT and every angle small.
     const double homo = g.head(no).maxCoeff();
     const double lumo = g.tail(nv).minCoeff();
-    const double kT = m_electronic_temp * 3.166808e-6;
+    const double kT = m_electronic_temp * CurcumaUnit::Constants::BOLTZMANN_HARTREE_K_XTB;
     if (!(lumo - homo > std::max(30.0 * kT, 1.0e-3))) return false;
     double max_theta = 0.0;
     for (int i = 0; i < no; ++i)
@@ -675,7 +677,7 @@ bool XTB::solveEigen(const Matrix& F, const Matrix& S)
         // bit-identical.
         Eigen::VectorXd occ_a, occ_b;
         double s_a = 0.0, s_b = 0.0;
-        const double kT_uhf = m_electronic_temp * 3.166808e-6;
+        const double kT_uhf = m_electronic_temp * CurcumaUnit::Constants::BOLTZMANN_HARTREE_K_XTB;
         fermiFillingChannel(m_wfn.eps, m_nalpha, kT_uhf, occ_a, s_a);
         fermiFillingChannel(m_wfn.eps, m_nbeta, kT_uhf, occ_b, s_b);
         Eigen::VectorXd occ = occ_a + occ_b;
@@ -690,7 +692,7 @@ bool XTB::solveEigen(const Matrix& F, const Matrix& S)
         m_wfn.focc = occ;
     } else if (m_electronic_temp > 0.0) {
         // Fermi-Dirac smearing: bisect for Fermi level, build fractional-occupation density
-        const double kT = m_electronic_temp * 3.166808e-6;  // K → Hartree
+        const double kT = m_electronic_temp * CurcumaUnit::Constants::BOLTZMANN_HARTREE_K_XTB;  // K → Hartree
         const double n_elec = m_wfn.nocc;
 
         double mu_lo = m_wfn.eps.minCoeff() - 1.0;
@@ -740,6 +742,199 @@ bool XTB::solveEigen(const Matrix& F, const Matrix& S)
         std::chrono::steady_clock::now() - t_dens0).count();
 
     return true;
+}
+
+/* ================================================================== *
+ *  Spin polarisation (spin_polarization)  -  Claude Generated, Nov 2026 *
+ *                                                                    *
+ *  Port of tblite's spin_polarization container (src/tblite/spin.f90) *
+ *  with nspin = 2 (src/tblite/scf/iterator.f90). Notation:            *
+ *    m_l  = alpha - beta Mulliken population of shell l on atom A:    *
+ *           m_l = sum_{mu in l, nu} (Pa - Pb)_{mu nu} S_{nu mu}       *
+ *    W^A_{ll'} = spin_constants[Z_A][lidx(ang_l, ang_l')] * scale     *
+ *           (all shell pairs of ONE atom, also l != l' and equal l)   *
+ *    E_spin = 1/2 sum_A sum_{l,l' on A} W^A_{ll'} m_l m_l'    (W < 0) *
+ *    u_l    = dE_spin/dm_l = sum_{l'} W_{ll'} m_l'                    *
+ *    F^sigma_{mu nu} = F_{mu nu} + sigma * 1/2 S_{mu nu} (u_mu + u_nu)*
+ *           sigma = +1 (alpha), -1 (beta); F = buildFock() (charge    *
+ *           part, identical for both spins).                          *
+ *  Because dE/dn^alpha_l = +u_l and dE/dn^beta_l = -u_l, the sign of  *
+ *  the shift is opposite to the charge part -1/2 S (v_mu + v_nu).     *
+ *  Gradient (xtb_gradient.cpp): no derivative of W; W_energy uses     *
+ *  both orbital sets and the Mulliken Pulay term gets + Pm (u_a+u_b). *
+ * ================================================================== */
+
+/** @brief Spin constant W_{ll'} of element z for shells with angular momenta l_a, l_b [Eh] (times scale). */
+double XTB::spinConstant(int z, int l_a, int l_b) const
+{
+    if (z < 1 || z > spin_params::max_elem || l_a < 0 || l_a > 2 || l_b < 0 || l_b > 2)
+        return 0.0;
+    return m_spin_pol_scale * spin_params::spin_constants[z - 1][spin_params::lidx[l_a][l_b]];
+}
+
+/** @brief u_l = sum_{l' on atom(l)} W_{ll'} m_{l'} for every shell (index by ang_sh, not by shell position). */
+void XTB::spinPotential(const Vector& m_sh, Vector& u_sh) const
+{
+    const int nat = m_atomcount;
+    u_sh = Vector::Zero(m_basis.nsh);
+    for (int iat = 0; iat < nat; ++iat) {
+        const int z = m_basis.z[iat];
+        const int i0 = m_basis.ish_at[iat];
+        const int n  = m_basis.nsh_at[iat];
+        for (int a = 0; a < n; ++a)
+            for (int b = 0; b < n; ++b)
+                u_sh(i0 + a) += spinConstant(z, m_basis.ang_sh[i0 + a], m_basis.ang_sh[i0 + b]) * m_sh(i0 + b);
+    }
+}
+
+/** @brief E_spin = 1/2 sum_l m_l u_l (0 unless the shell magnetisation of m_wfn exists). */
+double XTB::energySpin() const
+{
+    if (!spinPolActive() || m_wfn.m_sh.size() != m_basis.nsh) return 0.0;
+    Vector u;
+    spinPotential(m_wfn.m_sh, u);
+    return 0.5 * m_wfn.m_sh.dot(u);
+}
+
+/** @brief Spin Fock matrices F^{alpha,beta} = F +- 1/2 S (u_mu + u_nu); F is the charge Fock matrix. */
+void XTB::buildSpinFocks(const Matrix& F, const Matrix& S, const Vector& u_sh, Matrix& Fa, Matrix& Fb) const
+{
+    const int nao = m_basis.nao;
+    Vector u_ao(nao);
+    for (int mu = 0; mu < nao; ++mu) u_ao(mu) = u_sh(m_basis.ao2sh[mu]);
+    Fa.resize(nao, nao);
+    Fb.resize(nao, nao);
+    for (int mu = 0; mu < nao; ++mu)
+        for (int nu = 0; nu < nao; ++nu) {
+            const double ds = 0.5 * S(mu, nu) * (u_ao(mu) + u_ao(nu));
+            Fa(mu, nu) = F(mu, nu) + ds;
+            Fb(mu, nu) = F(mu, nu) - ds;
+        }
+}
+
+/**
+ * @brief Generalised symmetric eigenproblem F C = S C eps in FP64 (CPU), eps ascending, C^T S C = 1.
+ *
+ * Same reduction as solveEigen() (Cholesky factor L of S in m_X, A = L^-1 F L^-T, dsyevd, C = L^-T C~);
+ * without LAPACK or without m_X the Eigen generalised solver is used. No GPU hook, no pseudo-diagonalisation.
+ */
+bool XTB::diagonalizeFock(const Matrix& F, const Matrix& S, Matrix& C, Vector& eps) const
+{
+    ensureHostIntegrals(__func__);
+    const int n = m_basis.nao;
+#ifdef CURCUMA_XTB_HAVE_LAPACK_SYEVD
+    if (m_X.rows() == n && m_X.cols() == n) {
+        Eigen::MatrixXd A = F;                  // row-major Matrix -> column-major (transpose copy, F symmetric)
+        bool red_ok = true;
+        reduceToStandardForm(A, n, blasThreadsNow(), red_ok);
+        if (!red_ok) return false;
+        Eigen::VectorXd e(n);
+        int lwork = 1 + 6 * n + 2 * n * n, liwork = 3 + 5 * n, info = 0;
+        std::vector<double> work(lwork);
+        std::vector<int> iwork(liwork);
+        const char jobz = 'V', uplo = 'L';
+        dsyevd_(&jobz, &uplo, &n, A.data(), &n, e.data(), work.data(), &lwork, iwork.data(), &liwork, &info);
+        if (info != 0) return false;
+        m_X.triangularView<Eigen::Lower>().transpose().solveInPlace(A);
+        eps = std::move(e);
+        C = A;
+        return true;
+    }
+#endif
+    Eigen::GeneralizedSelfAdjointEigenSolver<Matrix> solver(F, S);
+    if (solver.info() != Eigen::Success) return false;
+    eps = solver.eigenvalues();
+    C = solver.eigenvectors();
+    return true;
+}
+
+/**
+ * @brief Eigensolve of the alpha and beta Fock matrix (spin polarisation).
+ *
+ * Each channel gets its own orbitals C^s, eps^s and its own Fermi filling f^s in [0,1] with n_alpha/n_beta
+ * electrons (fermiFillingChannel, tblite get_fermi_filling). Outputs in m_wfn:
+ *   P  = Pa + Pb  (all existing consumers of the total density stay valid), Pm = Pa - Pb,
+ *   W  = sum_s sum_i f^s_i eps^s_i C^s_i C^s_i^T (energy-weighted density of both spins, W_valid = true),
+ *   C, eps = alpha set (HOMO/LUMO printout only), focc = fa + fb (diagnostic), m_ts_uhf = -T*S of both channels.
+ */
+bool XTB::solveEigenUhf(const Matrix& Fa, const Matrix& Fb, const Matrix& S)
+{
+    const int nao = m_basis.nao;
+    m_wfn.W_valid = false;
+    m_eig_fp32 = false;            // two FP64 eigensolves; mixed precision and pseudo-diagonalisation are not used
+    m_pseudo_used = false;
+    m_pseudo_c_valid = false;
+    m_pseudo_consecutive = 0;
+
+    const auto t0 = std::chrono::steady_clock::now();
+    Matrix Ca, Cb;
+    Vector ea, eb;
+    if (!diagonalizeFock(Fa, S, Ca, ea) || !diagonalizeFock(Fb, S, Cb, eb)) return false;
+    m_t_diag += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+
+    const double kT = m_electronic_temp * 3.166808e-6;   // K -> Eh, same constant as solveEigen
+    Eigen::VectorXd fa, fb;
+    double s_a = 0.0, s_b = 0.0;
+    fermiFillingChannel(ea, m_nalpha, kT, fa, s_a);
+    fermiFillingChannel(eb, m_nbeta,  kT, fb, s_b);
+    m_ts_uhf = s_a + s_b;
+
+    auto channel = [&](const Matrix& C, const Vector& e, const Vector& f, Matrix& P, Matrix& Wc) {
+        int ncol = 0;
+        for (int i = 0; i < nao; ++i)
+            if (f(i) > 1.0e-12) ncol = i + 1;
+        if (ncol == 0) {
+            P = Matrix::Zero(nao, nao);
+            Wc = Matrix::Zero(nao, nao);
+            return;
+        }
+        const auto Cocc = C.leftCols(ncol);
+        const Matrix Cw = Cocc * f.head(ncol).asDiagonal();
+        P.noalias() = Cw * Cocc.transpose();
+        const Eigen::VectorXd fe = (f.head(ncol).array() * e.head(ncol).array()).matrix();
+        const Matrix Cwe = Cocc * fe.asDiagonal();
+        Wc.noalias() = Cwe * Cocc.transpose();
+    };
+    Matrix Pa, Pb, Wa, Wb;
+    channel(Ca, ea, fa, Pa, Wa);
+    channel(Cb, eb, fb, Pb, Wb);
+
+    m_wfn.P  = Pa + Pb;
+    m_wfn.Pm = Pa - Pb;
+    m_wfn.W  = Wa + Wb;
+    m_wfn.W_valid = true;
+    m_wfn.C   = std::move(Ca);
+    m_wfn.eps = std::move(ea);
+    m_wfn.focc = fa + fb;
+    return true;
+}
+
+/**
+ * @brief Energy-weighted density of both spins after the CUDA spin-polarised SCF (Claude Generated, Nov 2026).
+ *
+ * The device loop keeps W on the device (XtbGpuContext::spinWeightedDensity); this host copy is built only
+ * when the host gradient runs instead (device gradient unavailable or failed). Same sum as solveEigenUhf.
+ */
+void XTB::spinHostEnergyWeightedDensity()
+{
+    const int nao = m_basis.nao;
+    m_wfn.W_valid = false;
+    if (m_wfn.C.rows() != nao || m_gpu_spin_Cb.rows() != nao || m_wfn.eps.size() != nao
+        || m_gpu_spin_eb.size() != nao || m_gpu_spin_fa.size() != nao || m_gpu_spin_fb.size() != nao)
+        return;
+    auto channel = [&](const Matrix& C, const Vector& e, const Vector& f) -> Matrix {
+        int ncol = 0;
+        for (int i = 0; i < nao; ++i)
+            if (f(i) > 1.0e-12) ncol = i + 1;
+        if (ncol == 0) return Matrix::Zero(nao, nao);
+        const auto Cocc = C.leftCols(ncol);
+        const Eigen::VectorXd fe = (f.head(ncol).array() * e.head(ncol).array()).matrix();
+        const Matrix Cwe = Cocc * fe.asDiagonal();
+        Matrix Wc = Cwe * Cocc.transpose();
+        return Wc;
+    };
+    m_wfn.W = channel(m_wfn.C, m_wfn.eps, m_gpu_spin_fa) + channel(m_gpu_spin_Cb, m_gpu_spin_eb, m_gpu_spin_fb);
+    m_wfn.W_valid = true;
 }
 
 /* ------------------------------------------------------------------ *
@@ -796,6 +991,20 @@ void XTB::updatePopulations(const Matrix& S)
 
     // Compute shell charges relative to reference
     m_wfn.q_sh = m_wfn.n0_sh - n_sh;
+
+    // Spin polarisation: shell magnetisation m_l = sum_{mu in l, nu} Pm_{mu nu} S_{nu mu}
+    // (alpha - beta population), the second Broyden variable next to q_sh. Claude Generated (Nov 2026).
+    if (spinPolActive() && m_wfn.Pm.rows() == nao && m_wfn.Pm.cols() == nao) {
+        Vector msh = Vector::Zero(nsh);
+        for (int s = 0; s < nsh; ++s) {
+            const int ao_start = m_basis.iao_sh[s];
+            const int ao_nao   = m_basis.nao_sh[s];
+            for (int mu = ao_start; mu < ao_start + ao_nao; ++mu)
+                for (int nu = 0; nu < nao; ++nu)
+                    msh(s) += m_wfn.Pm(mu, nu) * S(nu, mu);
+        }
+        m_wfn.m_sh = msh;
+    }
 
     // Accumulate atomic populations and charges
     m_wfn.n_at.setZero(m_atomcount);
@@ -953,7 +1162,7 @@ void XTB::occupationsFromEps(const Vector& eps,
     if (openShell()) {
         Eigen::VectorXd occ_a, occ_b;
         double s_a = 0.0, s_b = 0.0;
-        const double kT_uhf = m_electronic_temp * 3.166808e-6;
+        const double kT_uhf = m_electronic_temp * CurcumaUnit::Constants::BOLTZMANN_HARTREE_K_XTB;
         fermiFillingChannel(eps, m_nalpha, kT_uhf, occ_a, s_a);
         fermiFillingChannel(eps, m_nbeta, kT_uhf, occ_b, s_b);
         occ = occ_a + occ_b;
@@ -963,7 +1172,7 @@ void XTB::occupationsFromEps(const Vector& eps,
         return;
     }
     if (m_electronic_temp > 0.0) {
-        const double kT = m_electronic_temp * 3.166808e-6;  // K → Hartree
+        const double kT = m_electronic_temp * CurcumaUnit::Constants::BOLTZMANN_HARTREE_K_XTB;  // K → Hartree
         const double n_elec = m_wfn.nocc;
         double mu_lo = eps.minCoeff() - 1.0;
         double mu_hi = eps.maxCoeff() + 1.0;
@@ -1023,7 +1232,7 @@ double XTB::electronicFreeEnergy() const
     // per-channel get_electronic_entropy, src/tblite/scf/iterator.f90:319-322).
     // Claude Generated (Sep 2026).
     if (openShell()) return m_ts_uhf;
-    const double kT  = m_electronic_temp * 3.166808e-6;  // K → Hartree (matches smearing)
+    const double kT  = m_electronic_temp * CurcumaUnit::Constants::BOLTZMANN_HARTREE_K_XTB;  // K → Hartree (matches smearing)
     const double thr = 1.0e-9;                            // xtb fermismear cutoff
     double s = 0.0;
     for (int i = 0; i < m_wfn.focc.size(); ++i) {

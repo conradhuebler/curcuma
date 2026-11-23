@@ -7,6 +7,7 @@
  */
 
 #include "src/tools/bmt_utils.h"
+#include "src/core/element_tables.h"
 #include "src/core/units.h"
 #include "d4param_generator.h"
 #include "d4_pair_c6.h"
@@ -153,31 +154,7 @@ void D4ParameterGenerator::initializeReferenceData()
     // heavier was silently filled with a placeholder 10.0, which made native D4
     // dispersion wrong for I and all 4d/5d elements (too-large R0 -> underbinding).
     // The full array below fixes heavy elements without touching Z<=36.
-    m_r4_over_r2 = {
-        8.0589, 3.4698,  // H-He
-        29.0974, 14.8517, 11.8799, 7.8715, 5.5588, 4.7566, 3.8025, 3.1036,  // Li-Ne
-        26.1552, 17.2304, 17.7210, 12.7442, 9.5361, 8.1652, 6.7463, 5.6004,  // Na-Ar
-        29.2012, 22.3934, // K-Ca
-        19.0598, 16.8590, 15.4023, 12.5589, 13.4788, // Sc-Mn
-        12.2309, 11.2809, 10.5569, 10.1428, 9.4907,  // Fe-Zn
-        13.4606, 10.8544, 8.9386, 8.1350, 7.1251, 6.1971, // Ga-Kr
-        30.0162, 24.4103, // Rb-Sr
-        20.3537, 17.4780, 13.5528, 11.8451, 11.0355, // Y-Tc
-        10.1997, 9.5414, 9.0061, 8.6417, 8.9975,     // Ru-Cd
-        14.0834, 11.8333, 10.0179, 9.3844, 8.4110, 7.5152, // In-Xe
-        32.7622, 27.5708, // Cs-Ba
-        23.1671, 21.6003, 20.9615, 20.4562, 20.1010, 19.7475, 19.4828, // La-Eu
-        15.6013, 19.2362, 17.4717, 17.8321, 17.4237, 17.1954, 17.1631, // Gd-Yb
-        14.5716, 15.8758, 13.8989, 12.4834, 11.4421, // Lu-Re
-        10.2671, 8.3549, 7.8496, 7.3278, 7.4820,     // Os-Hg
-        13.5124, 11.6554, 10.0959, 9.7340, 8.8584, 8.0125, // Tl-Rn
-        29.8135, 26.3157, // Fr-Ra
-        19.1885, 15.8542, 16.1305, 15.6161, 15.1226, 16.1576, 0.0000, // Ac-Am
-        0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, // Cm-No
-        0.0000, 0.0000, 0.0000, 0.0000, 0.0000, // Lr-Bh
-        0.0000, 0.0000, 0.0000, 0.0000, 5.4929, // Hs-Cn
-        6.7286, 6.5144, 10.9169, 10.3600, 9.4723, 8.6641 // Nh-Og
-    };
+    m_r4_over_r2.assign(std::begin(CurcumaElements::R4_OVER_R2), std::end(CurcumaElements::R4_OVER_R2));
     if (m_r4_over_r2.size() < MAX_ELEM) m_r4_over_r2.resize(MAX_ELEM, 10.0);
 
     for (int i = 0; i < MAX_ELEM; ++i) {
@@ -192,96 +169,6 @@ void D4ParameterGenerator::initializeReferenceData()
     // Initialize frequency-dependent polarizabilities (simplified - real data extraction pending)
     m_alpha_iw.resize(MAX_ELEM, std::vector<std::vector<double>>(MAX_REF, std::vector<double>(N_FREQ, 0.0)));
     m_integrated_alpha.resize(MAX_ELEM, std::vector<double>(MAX_REF, 0.0));
-}
-
-void D4ParameterGenerator::calculateFrequencyDependentPolarizabilities()
-{
-    // Phase 2.1 (December 2025): Frequency-dependent polarizability calculation
-    // Implements Casimir-Polder integration over 23-point frequency grid
-    // Reference: Caldeweyher et al., J. Chem. Phys. 150, 154122 (2019)
-
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info("=== D4: Calculating frequency-dependent polarizabilities ===");
-    }
-
-    // 23-point imaginary frequency grid (from GFN-FF Fortran dftd4param.f90)
-    // Used for Casimir-Polder integration: α_static = (3/2π) ∫ α(iω) dω
-    const std::vector<double> frequency_grid = {
-        0.000001, 0.050000, 0.100000, 0.200000, 0.300000, 0.400000,
-        0.500000, 0.600000, 0.700000, 0.800000, 0.900000, 1.000000,
-        1.200000, 1.400000, 1.600000, 1.800000, 2.000000, 2.500000,
-        3.000000, 4.000000, 5.000000, 7.500000, 10.000000
-    };
-
-    // Initialize 3D array: m_alpha_iw[element][reference][frequency]
-    m_alpha_iw.resize(MAX_ELEM, std::vector<std::vector<double>>(MAX_REF, std::vector<double>(N_FREQ, 0.0)));
-    m_integrated_alpha.resize(MAX_ELEM, std::vector<double>(MAX_REF, 0.0));
-
-    // Simplified approach for Phase 2.1: Use approximate alpha_iw for key elements
-    // Full extraction from Fortran dftd4param.f90 deferred to Phase 2.2
-
-    // Hydrogen (Z=1) - 2 reference states (from Fortran secaiw data for H2)
-    if (m_refn.size() > 0 && m_refn[0] >= 2) {
-        std::vector<double> h_alpha = {
-            5.4415160, 5.3912720, 5.2466780, 4.7462570, 4.1122050, 3.4827990,
-            2.9256260, 2.4586020, 2.0763900, 1.7660350, 1.5138980, 1.3080740,
-            0.9987770, 0.7833600, 0.6286810, 0.5145050, 0.4281480, 0.2867670,
-            0.2047270, 0.1187560, 0.0772270, 0.0349350, 0.0197880
-        };
-        for (int ref = 0; ref < m_refn[0] && ref < MAX_REF; ++ref) {
-            for (int iw = 0; iw < N_FREQ; ++iw) {
-                m_alpha_iw[0][ref][iw] = h_alpha[iw];
-            }
-        }
-    }
-
-    // Carbon (Z=6) - 7 reference states (from Fortran secaiw data for C6H6)
-    if (m_refn.size() > 5 && m_refn[5] >= 6) {
-        std::vector<double> c_alpha = {
-            68.5832590, 67.5115260, 64.6123080, 56.1286650, 47.4318310, 39.9459190,
-            33.7814890, 28.7553020, 24.6561470, 21.2992860, 18.5340330, 16.2406480,
-            12.7133690, 10.1832050, 8.3194640, 6.9133790, 5.8298100, 4.0106600,
-            2.9230920, 1.7494800, 1.1654830, 0.5523060, 0.3242020
-        };
-        for (int ref = 0; ref < m_refn[5] && ref < MAX_REF; ++ref) {
-            for (int iw = 0; iw < N_FREQ; ++iw) {
-                m_alpha_iw[5][ref][iw] = c_alpha[iw];
-            }
-        }
-    }
-
-    // Integrate α(iω) over frequency grid using trapezoidal rule
-    // Static polarizability: α_0 = (3/2π) ∫ α(iω) dω
-    const double prefactor = THREE_OVER_PI;  // 3/(2π) with extra 1/2 absorbed
-
-    for (int elem = 0; elem < MAX_ELEM; ++elem) {
-        for (int ref = 0; ref < MAX_REF; ++ref) {
-            double integral = 0.0;
-
-            // Trapezoidal integration
-            for (int iw = 0; iw < N_FREQ - 1; ++iw) {
-                double dw = frequency_grid[iw + 1] - frequency_grid[iw];
-                double avg_alpha = 0.5 * (m_alpha_iw[elem][ref][iw] + m_alpha_iw[elem][ref][iw + 1]);
-                integral += avg_alpha * dw;
-            }
-
-            m_integrated_alpha[elem][ref] = prefactor * integral;
-        }
-    }
-
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::success("D4: Frequency-dependent polarizabilities calculated");
-
-        // Print validation for H and C
-        if (m_refn.size() > 0) {
-            CurcumaLogger::result(fmt::format("  H (Z=1) " SYM_ALPHA "_0[0] = {:.4f}", m_integrated_alpha[0][0]));
-        }
-        if (m_refn.size() > 5) {
-            CurcumaLogger::result(fmt::format("  C (Z=6) " SYM_ALPHA "_0[0] = {:.4f}", m_integrated_alpha[5][0]));
-        }
-
-        CurcumaLogger::warn("D4: Using simplified alpha_iw for H and C only (Phase 2.2: full extraction)");
-    }
 }
 
 void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, const Matrix& geometry_bohr)
@@ -706,16 +593,8 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
 
         // Covalent radii in Angstrom (from GFN-FF method) for bond detection
         const double ANGSTROM_TO_BOHR = CurcumaUnit::Length::angstrom_to_bohr_or_legacy(1.8897261246257702);
-        static const std::vector<double> rcov_angstrom = {
-            0.32, 0.37, 1.30, 0.99, 0.84, 0.75, 0.71, 0.64, 0.60, 0.62, // H-Ne
-            1.60, 1.40, 1.24, 1.14, 1.09, 1.04, 1.00, 1.01, // Na-Ar
-            2.00, 1.74, 1.59, 1.48, 1.44, 1.30, 1.29, 1.24, 1.18, 1.17, 1.22, 1.20, // K-Zn
-            1.23, 1.20, 1.20, 1.18, 1.17, 1.16, 2.15, 1.90, 1.76, 1.64, 1.56, 1.46, // Rb-Tc
-            1.38, 1.36, 1.34, 1.30, 1.36, 1.40, 1.42, 1.40, 1.40, 1.37, 1.36, 1.36, // Ru-Xe
-            2.38, 2.06, 1.94, 1.84, 1.90, 1.88, 1.86, 1.85, 1.83, 1.82, 1.81, 1.80, // Cs-Er
-            1.79, 1.77, 1.77, 1.78, 1.74, 1.64, 1.58, 1.50, 1.41, 1.36, 1.32, 1.30, // Tm-Au
-            1.30, 1.32, 1.44, 1.45, 1.50, 1.42, 1.48, 1.46 // Hg-Rn
-        };
+        // atomic radii (CRC/Mantina, Angstrom) = first 86 entries of the shared table; Z >= 86 falls back to 1.5 as before
+        static const std::vector<double> rcov_angstrom(std::begin(CurcumaElements::ATOMIC_RAD_ANGSTROM), std::end(CurcumaElements::ATOMIC_RAD_ANGSTROM));
 
         for (int i = 0; i < n_atoms; ++i) {
             int Zi = m_atoms[i];
@@ -832,43 +711,6 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
     }
 }
 
-double D4ParameterGenerator::getEffectiveC6(int atom_i, int atom_j) const
-{
-    // Convert to 0-based for internal arrays
-    int elem_i = atom_i - 1;
-    int elem_j = atom_j - 1;
-
-    if (elem_i < 0 || elem_i >= MAX_ELEM || elem_j < 0 || elem_j >= MAX_ELEM || !m_data_initialized) {
-        return 0.0;
-    }
-
-    // Use integrated polarizabilities for more accurate C6 estimation
-    // This mimics the D4 approach with charge-state dependence
-    double alpha_i = (elem_i < static_cast<int>(m_integrated_alpha.size())) ?
-                     m_integrated_alpha[elem_i][0] : 1.0;
-    double alpha_j = (elem_j < static_cast<int>(m_integrated_alpha.size())) ?
-                     m_integrated_alpha[elem_j][0] : 1.0;
-
-    // Weighted geometric mean accounting for atomic number differences
-    double z_i = atom_i;
-    double z_j = atom_j;
-    double weight_factor = 2.0 * std::sqrt(z_i * z_j) / (z_i + z_j);
-
-    // Simplified London dispersion formula
-    double c6 = weight_factor * 1.5 * alpha_i * alpha_j;
-
-    return c6;
-}
-
-double D4ParameterGenerator::getR4OverR2(int atom) const
-{
-    --atom; // Convert to 0-based
-    if (atom >= 0 && atom < MAX_ELEM && atom < static_cast<int>(m_r4_over_r2.size())) {
-        return m_r4_over_r2[atom];
-    }
-    return 10.0; // Default fallback
-}
-
 double D4ParameterGenerator::getSqrtZr4r2(int atom) const
 {
     --atom; // Convert to 0-based
@@ -889,17 +731,6 @@ double D4ParameterGenerator::getZeta(int Z, double q) const
 double D4ParameterGenerator::getZetaDerivative(int Z, double q) const
 {
     return GFNFFParameters::zetaChargeScaleDerivative(Z, q);
-}
-
-double D4ParameterGenerator::getAtomicPolarizability(int atom, int frequency_index) const
-{
-    --atom; // Convert to 0-based
-    if (atom >= 0 && atom < MAX_ELEM && atom < static_cast<int>(m_alpha_iw.size()) &&
-        frequency_index >= 0 && frequency_index < N_FREQ &&
-        frequency_index < static_cast<int>(m_alpha_iw[atom][0].size())) {
-        return m_alpha_iw[atom][0][frequency_index];
-    }
-    return 1.0; // Default value
 }
 
 // Claude Generated (Jul 2026): true iff the C6 reference cache already covers every element in
@@ -2281,13 +2112,6 @@ bool D4ParameterGenerator::canSkipGaussianWeightsUpdate(const std::vector<double
         if (delta > max_change) max_change = delta;
     }
     return max_change < threshold;
-}
-
-// Claude Generated (Apr 2026): P1a — Record CN values for next step's threshold check
-void D4ParameterGenerator::recordCNValues(const std::vector<double>& cn)
-{
-    m_prev_cn_values = cn;
-    m_cn_cached = true;
 }
 
 // Claude Generated (March 2026): Native dispersion pair generation — bypasses JSON entirely

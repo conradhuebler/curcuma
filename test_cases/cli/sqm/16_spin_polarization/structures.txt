@@ -1,0 +1,2 @@
+# Structures from test_cases/structures (id, optionally 'as <file name>'); see structures/README.md
+dioxygen.bent-triplet as o2.xyz

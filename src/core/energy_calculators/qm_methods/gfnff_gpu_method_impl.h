@@ -301,7 +301,9 @@ private:
     // PCG          → WP7-C (nfrag>1)                   — iterative O(k·N²), warm-started.
     // LU           → dense LU of the augmented system (CUDA only, Oct 2026).
     // LDLT         → Bunch-Kaufman LDL^T of A_nn + Schur (CUDA only, Oct 2026).
-    // Auto         → EEQSolver::resolveMethod (ppcg above the size thresholds, else cholesky).
+    // Sytrf        → sytrf/sytrs (upper) of the augmented system, the reference solve (CUDA and ROCm, Nov 2026;
+    //                ROCm: device dsytrf + host dsytrs; CUDA: run on an RTX 5080 Nov 17, 2026, eeq_sytrf_cuda).
+    // Auto        → EEQSolver::resolveMethod (ppcg above the size thresholds, else cholesky).
     EEQSolveMethod m_eeq_strategy = EEQSolveMethod::Auto;
     /// Claude Generated (Oct 2026): energy criterion of the batched solver on the GPU path. Rebuilds
     /// the residual r = A q_b - x of the full EEQ system on the host (one O(N^2) pass, once per
@@ -488,6 +490,7 @@ GFNFFGpuMethodImpl<Backend>::GFNFFGpuMethodImpl(const std::string& method_name,
     //   "pcg"                         → WP7-C iterative PCG (warm-started).
     //   "auto"                        → EEQSolver::resolveMethod (ppcg by eeq_ppcg_min_atoms/min_nfrag, else cholesky).
     //   "lu" / "ldlt"                 → device LU / LDL^T (CUDA only; other backends reject them, EEQSolver::gpuSupports).
+    //   "sytrf"                       → augmented reference solve (CUDA and ROCm, Nov 2026).
     // WP7-E: reuses the CPU EEQSolver's ppcg PARAMs (eeq_solver.h) for both the iteration
     // cap and the Auto-strategy nfrag/atom thresholds, so CPU and GPU agree on when to
     // prefer projected PCG. Note m_eeq_ppcg_tolerance is an ABSOLUTE tolerance on |r| (GPU
@@ -1737,9 +1740,13 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
         if (CurcumaLogger::get_verbosity() >= 1) {
             const char* path = "CPU-fallback";
             if (gpu_eeq_applicable) {
-                if constexpr (!Backend::has_device_schur) {
-                    // ROCm: no device pcg/batched/Schur/lu/ldlt (EEQSolver::gpuSupports allows auto, cholesky
-                    // and ppcg). Oct 2026: projected PCG with the diagonal Jacobi or the host-built local
+                if (resolved_method == EEQSolveMethod::Sytrf) {
+                    // Claude Generated (Nov 2026): same path name on both backends apart from where sytrs runs.
+                    path = Backend::has_device_schur ? "augmented sytrf/sytrs (upper)"
+                                                     : "augmented sytrf (upper), host dsytrs, reference path";
+                } else if constexpr (!Backend::has_device_schur) {
+                    // ROCm: no device pcg/batched/Schur/lu/ldlt (EEQSolver::gpuSupports allows auto, cholesky,
+                    // ppcg and sytrf). Oct 2026: projected PCG with the diagonal Jacobi or the host-built local
                     // inverse (eeq_ppcg_precond); every other solve is the dense device Cholesky of WP2
                     // plus the host Schur step.
                     if (resolved_method == EEQSolveMethod::ProjectedPCG && m_eeq_gpu->isFragmentTopoValid()) {
@@ -1771,9 +1778,10 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
                 }
             }
             // Once per run (and again if the path changes), not every MD/opt step.
-            // On ROCm only ppcg and the dense Cholesky run on the device; anything else is shown as cholesky.
+            // On ROCm only ppcg, sytrf and the dense Cholesky run on the device; anything else is shown as cholesky.
             const EEQSolveMethod shown_method = (Backend::has_device_schur
-                                                 || resolved_method == EEQSolveMethod::ProjectedPCG)
+                                                 || resolved_method == EEQSolveMethod::ProjectedPCG
+                                                 || resolved_method == EEQSolveMethod::Sytrf)
                 ? resolved_method : EEQSolveMethod::SchurCholesky;
             const std::string line = fmt::format("EEQ solver (final charges): {}{} [GPU {}, {}], N={}, nfrag={}",
                 EEQSolver::methodName(shown_method),
@@ -1815,6 +1823,29 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
             bool used_gpu_schur = false;
 
             if (use_device_rhs) {
+                // Claude Generated (Nov 2026): solve_method sytrf -> the reference solve (dsytrf + dsytrs,
+                // uplo upper) of the augmented (N+nfrag) system, any nfrag, CUDA and ROCm. ROCm factorises on
+                // the device and solves on the host with EEQSolver::hostSytrsUpper (rocSOLVER has no sytrs).
+                // On failure: a counted GPU fallback and the dense Cholesky path below for this step.
+                if (resolved_method == EEQSolveMethod::Sytrf && m_eeq_gpu->isFragmentTopoValid()) {
+                    eeq_ok = m_eeq_gpu->solveWithDeviceRHSAndAugmentedSytrf(
+                        N, m_eeq_nfrag,
+                        m_gpu_workspace->getDeviceXPtr(),
+                        m_gpu_workspace->getDeviceYPtr(),
+                        m_gpu_workspace->getDeviceZPtr(),
+                        m_gpu_workspace->getDeviceAlphaPtr(),
+                        m_gpu_workspace->getDeviceGamPtr(),
+                        m_gpu_workspace->getDeviceRHSPtr(),
+                        m_eeq_rhs_constraints,
+                        eeq_cutoff_sq,
+                        &EEQSolver::hostSytrsUpper);
+                    if (eeq_ok) {
+                        used_gpu_schur = true;
+                    } else {
+                        CurcumaLogger::warn("EEQ GPU: augmented sytrf failed, using the dense Cholesky path for this step");
+                        curcuma::reportGpuFallback("GFN-FF EEQ: sytrf failed, dense Cholesky step");
+                    }
+                }
                 // Claude Generated (Oct 2026): solve_method lu -> dense LU of the augmented
                 // (N+nfrag) system on the device, any nfrag (same semantics as the CPU lu).
                 // Only the CUDA backend has it (EEQSolver::gpuSupports rejects lu elsewhere);

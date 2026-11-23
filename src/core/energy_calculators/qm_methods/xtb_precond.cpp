@@ -1073,7 +1073,7 @@ void XTB::writeScfJacobianDump(const std::string& dir, const Vector& x_star, con
 
     // (4) LDOS data of the converged state (m_wfn on entry: orbitals of the last iteration, whose
     // input was x*). Fermi level recomputed with the bisection of solveEigen (closed shell, T > 0).
-    const double kT = m_electronic_temp * 3.166808e-6;   // K -> Eh, same constant as solveEigen
+    const double kT = m_electronic_temp * CurcumaUnit::Constants::BOLTZMANN_HARTREE_K_XTB;   // K -> Eh, same constant as solveEigen
     double mu_fermi = std::nan("");
     if (!openShell() && m_electronic_temp > 0.0 && m_wfn.eps.size() == nao) {
         double mu_lo = m_wfn.eps.minCoeff() - 1.0, mu_hi = m_wfn.eps.maxCoeff() + 1.0;

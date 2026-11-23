@@ -39,6 +39,7 @@
 #include "src/core/energy_calculators/ff_methods/d3param_generator.h"
 #include "src/core/energy_calculators/ff_methods/cn_calculator.h"  // D3 CN gradient (May 2026)
 #include "src/core/energy_calculators/ff_methods/alpb_solvation.h"  // implicit solvation (June 2026)
+#include "src/core/solvation/ddcosmo.h"                              // native ddCOSMO (Nov 2026)
 #include "diis_accelerator.h"
 #include "broyden_mixer.h"
 
@@ -182,10 +183,15 @@ bool XTB::InitialiseMolecule()
         CitationRegistry::cite("d3", meth);        // D3(BJ) dispersion (GFN1 only)
     else
         CitationRegistry::cite("d4", meth);        // D4 dispersion (GFN2 only)
-    if (m_solvent != "none" && !m_solvent.empty()) {
+    // COSMO and CPCM may also be requested by an explicit dielectric constant alone (-xtb.solvent_epsilon). Claude Generated (Nov 2026).
+    // CPCM-X (model 5): the SCF runs in xtb's conductor COSMO set whatever the solvent name. Claude Generated (Nov 2026).
+    const bool cosmo_eps_only = ((m_solvent_model == 4 || m_solvent_model == 1) && m_solvent_epsilon > 0.0)
+        || m_solvent_model == 5;
+    if (!curcuma::solvation::isGasPhase(m_solvent) || cosmo_eps_only) {
         const int model = (m_solvent_model > 0) ? m_solvent_model : 3;
         if (model == 3) CitationRegistry::cite("alpb", meth);
         else if (model == 2) { CitationRegistry::cite("alpb", meth); CitationRegistry::cite("still_gb", meth); }
+        else if (model == 4 || model == 1 || model == 5) CitationRegistry::cite("ddcosmo", meth);   // CPCM and CPCM-X use the same ddCOSMO solver
     }
     CitationRegistry::cite("diis", meth);         // SCF convergence (DIIS/Broyden)
 
@@ -211,29 +217,81 @@ bool XTB::InitialiseMolecule()
     // ── Implicit solvation (Claude Generated, June 2026) ──
     // Build the self-consistent reaction-field model when a solvent is requested.
     // Created here (atoms known); update() refreshes the geometry-dependent state
-    // each Calculation(). solvent_model: 3=ALPB, 2=GBSA (both wired); 1=CPCM is a
-    // later WP. GBSA = ALPB with the shape term off (see ALPBSolvation::setUseAlpb).
+    // each Calculation(). solvent_model: 3=ALPB, 2=GBSA, 4=COSMO (xtb), 1=CPCM (tblite; same ddCOSMO solver).
+    // GBSA = ALPB with the shape term off (see ALPBSolvation::setUseAlpb).
     m_solvation.reset();
     m_E_solvation = 0.0;
-    if (m_solvent != "none" && !m_solvent.empty()) {
+    if (!curcuma::solvation::isGasPhase(m_solvent) || cosmo_eps_only) {
         const int model = (m_solvent_model > 0) ? m_solvent_model : 3;  // default ALPB
         const std::string meth = (m_method == MethodType::GFN1) ? "gfn1" : "gfn2";
-        if (model == 3 || model == 2) {
+        if (model == 5) {
+            // CPCM-X (xtb 6.7.1 --cpcmx, Claude Generated Nov 2026): xtb runs the SCF with --cosmo inf (conductor set
+            // gfn_cosmo_inf, default grid/lmax/conv/eta) and hands the converged segments to the CPCM-X post-SCF step,
+            // which NativeXtbMethod drives (cpcmx.h). The solvent name is used only there.
+            auto solv = std::make_unique<DdCosmoSolvation>();
+            solv->setModel(DdCosmoSolvation::Model::XtbCosmoInf);
+            if (!solv->init(m_atoms, "inf", meth)) {
+                CurcumaLogger::error("Native solvation: conductor COSMO setup for CPCM-X failed (" + meth + ")");
+                return false;
+            }
+            m_solvation = std::move(solv);
+        } else if (model == 4 || model == 1) {
+            // Native ddCOSMO (port of xtb 6.7.1 --cosmo, Claude Generated Nov 2026). xtb adds no reference-state
+            // shift to the COSMO energy, so a state other than gsolv cannot be honoured and is an error.
+            // model 1 = CPCM of tblite 0.4.0 on the same solver (other keps, grid, eta, epsilon table, no surface
+            // term); tblite's CLI also rejects a solution state other than gsolv for CPCM. Claude Generated (Nov 2026).
+            const bool cpcm = (model == 1);
+            const char* tag = cpcm ? "cpcm" : "cosmo";
+            curcuma::solvation::SolutionState state;
+            if (!curcuma::solvation::parseSolutionState(m_solvent_state, state)
+                || state != curcuma::solvation::SolutionState::GSolv) {
+                CurcumaLogger::error("Native solvation: solvent_state '" + m_solvent_state + "' is not available for solvent_model "
+                                     + tag + (cpcm ? " (only gsolv; tblite rejects a solution state shift for CPCM)"
+                                                   : " (only gsolv; xtb applies no state shift to COSMO)"));
+                return false;
+            }
+            auto solv = std::make_unique<DdCosmoSolvation>();
+            solv->setDielectricOverride(m_solvent_epsilon);
+            if (cpcm) {
+                solv->setModel(DdCosmoSolvation::Model::TbliteCpcm);   // tblite defaults: 74 points, eta 2, lmax 6, conv 1e-8
+            } else {
+                solv->setGridPoints(m_cosmo_nang);
+                solv->setLmax(m_cosmo_lmax);
+                solv->setConvergence(m_cosmo_conv);
+                solv->setEta(m_cosmo_eta);
+            }
+            if (!solv->init(m_atoms, curcuma::solvation::isGasPhase(m_solvent) ? std::string("none") : m_solvent, meth)) {
+                CurcumaLogger::error(std::string("Native solvation: ") + (cpcm ? "CPCM" : "COSMO") + " setup failed for solvent '"
+                                     + m_solvent + "' (" + meth + ")");
+                return false;
+            }
+            m_solvation = std::move(solv);
+        } else if (model == 3 || model == 2) {
             const bool use_alpb = (model == 3);
             const char* tag = use_alpb ? "ALPB" : "GBSA";
             auto solv = std::make_unique<ALPBSolvation>();
             solv->setUseAlpb(use_alpb);
+            curcuma::solvation::SolutionState state;
+            if (!curcuma::solvation::parseSolutionState(m_solvent_state, state)) {
+                CurcumaLogger::error("Native solvation: unknown solvent_state '" + m_solvent_state
+                                     + "' (gsolv, bar1M or reference)");
+                return false;
+            }
+            solv->setSolutionState(state);
             if (solv->init(m_atoms, m_solvent, meth)) {
                 m_solvation = std::move(solv);
             } else {
-                CurcumaLogger::warn(std::string("Native solvation: no ") + tag
-                                    + " parameters for solvent '" + m_solvent + "' ("
-                                    + meth + "); running gas phase");
+                // MethodFactory checks the name before the calculator is built; this is the
+                // direct-use path. A silent gas-phase result for a solvent run is wrong.
+                CurcumaLogger::error(std::string("Native solvation: no ") + tag
+                                     + " parameters for solvent '" + m_solvent + "' ("
+                                     + meth + ")");
+                return false;
             }
         } else {
-            CurcumaLogger::warn("Native solvation: only solvent_model alpb and gbsa "
-                                "are implemented for native GFN (cpcm pending); "
-                                "running gas phase");
+            CurcumaLogger::error("Native solvation: only solvent_model alpb, gbsa, cosmo, cpcm and cpcmx "
+                                 "are implemented for native GFN");
+            return false;
         }
     }
     return true;
@@ -436,19 +494,27 @@ Eigen::VectorXd XTB::packSccState() const
 {
     const int nsh = m_basis.nsh;
     const int nat = m_atomcount;
+    // Spin polarisation (Claude Generated, Nov 2026): the shell magnetisation m_sh is appended
+    // at the end, [q_sh (| dp | qp) | m_sh]; without the option the layout is unchanged.
+    const bool sp = spinPolActive() && m_wfn.m_sh.size() == nsh;
     // GFN1 (SCC vector IS q_sh), or a GFN2 state whose multipoles are not yet sized
     // (degenerate): return just q_sh. A shorter-than-packed_len vector is rejected by
     // the size guard in Calculation(), which then falls back to the 1-step warm-start.
     if (m_method != MethodType::GFN2
         || m_wfn.dp_at.cols() != nat || m_wfn.qp_at.cols() != nat) {
-        return m_wfn.q_sh;
+        if (!sp) return m_wfn.q_sh;
+        Eigen::VectorXd w(2 * nsh);
+        w.head(nsh) = m_wfn.q_sh;
+        w.tail(nsh) = m_wfn.m_sh;
+        return w;
     }
-    Eigen::VectorXd v(nsh + 3 * nat + 6 * nat);
+    Eigen::VectorXd v(nsh + 3 * nat + 6 * nat + (sp ? nsh : 0));
     v.head(nsh) = m_wfn.q_sh;
     // dp_at is 3×nat, qp_at is 6×nat; Eigen is column-major, so .data() is the
     // column-major flatten that Eigen::Map reads back identically.
     v.segment(nsh, 3 * nat)            = Eigen::Map<const Eigen::VectorXd>(m_wfn.dp_at.data(), 3 * nat);
     v.segment(nsh + 3 * nat, 6 * nat)  = Eigen::Map<const Eigen::VectorXd>(m_wfn.qp_at.data(), 6 * nat);
+    if (sp) v.tail(nsh) = m_wfn.m_sh;
     return v;
 }
 
@@ -456,15 +522,19 @@ void XTB::unpackSccState(const Eigen::VectorXd& v)
 {
     const int nsh = m_basis.nsh;
     const int nat = m_atomcount;
+    const bool sp = spinPolActive();
     m_wfn.q_sh = v.head(nsh);
     // Rebuild atomic charges from shell charges (as the warm-start block does).
     m_wfn.q_at.setZero(nat);
     for (int s = 0; s < nsh; ++s)
         m_wfn.q_at(m_basis.sh2at[s]) += m_wfn.q_sh(s);
-    if (m_method == MethodType::GFN2 && v.size() == nsh + 9 * nat) {
+    const int base = (m_method == MethodType::GFN2) ? nsh + 9 * nat : nsh;
+    if (m_method == MethodType::GFN2 && v.size() == base + (sp ? nsh : 0)) {
         m_wfn.dp_at = Eigen::Map<const Eigen::MatrixXd>(v.data() + nsh, 3, nat);
         m_wfn.qp_at = Eigen::Map<const Eigen::MatrixXd>(v.data() + nsh + 3 * nat, 6, nat);
     }
+    if (sp && v.size() == base + nsh)
+        m_wfn.m_sh = v.tail(nsh);
 }
 
 /* ------------------------------------------------------------------------- *
@@ -578,6 +648,35 @@ double XTB::Calculation(bool gradient)
         }
     }
 
+    // Spin polarisation (Claude Generated, Nov 2026, docs/SPIN_POLARISATION.md): Broyden only, CPU or CUDA.
+    // Every other SCF path works on one Fock matrix or one density and would silently drop the
+    // alpha/beta split, so it is a hard error instead of a fallback.
+    // Nov 22, 2026: CUDA runs it on the host-driven device loop (GpuScfBackend::supportsSpinPolarization,
+    // see the spin branch of the SCF loop); ROCm and Vulkan have no such backend and stay a hard error.
+    m_gpu_spin_loop = false;
+    if (spinPolActive()) {
+        std::string why;
+        const bool gpu = m_gpu_scf || m_external_eigensolver;
+        if (gpu && !(m_gpu_scf && m_gpu_scf->supportsSpinPolarization()))
+            why = "this GPU backend (-gpu rocm|vulkan) has no spin-polarised SCF; -gpu cuda or the CPU support it";
+        else if (gpu && m_gpu_partial_diag)
+            why = "-scf_gpu_partial_diag is not supported with -gpu cuda (both spin channels need the full spectrum)";
+        else if (m_scf_mode != ScfMode::Broyden)
+            why = fmt::format("-scf_mode {} is not supported (Broyden only)", scfModeName(m_scf_mode));
+        else if (m_scf_precond != "none" && !m_scf_precond.empty())
+            why = "-scf_precond " + m_scf_precond + " is not supported";
+        else if (m_eigensolver != "mkl" && !m_eigensolver.empty())
+            why = "-eigensolver " + m_eigensolver + " is not supported (the two Fock matrices use the LAPACK path)";
+        else if (m_scf_extrapolation != "none" && m_scf_extrap_apply == "xlbomd")
+            why = "-scf_extrapolation_apply xlbomd is not supported";
+        if (!why.empty()) {
+            setHardError("spin_polarization (-xtb.spin_polarization true, -spin " + std::to_string(static_cast<int>(std::lround(nUhf())))
+                         + ") is implemented for the Broyden SCF on the CPU and on -gpu cuda only: " + why);
+            m_scf_converged = false;
+            return m_E_total;
+        }
+        if (m_wfn.m_sh.size() != m_basis.nsh) m_wfn.m_sh = Vector::Zero(m_basis.nsh);
+    }
 
     // WP-PERIODIC-XTB P5/G1 (Claude Generated, Nov 2026): defence in depth behind the EnergyCalculator swap. The
     // device integral, potential, dispersion and gradient kernels know no lattice images. With a cell only the
@@ -958,7 +1057,8 @@ double XTB::Calculation(bool gradient)
     }
 
     const int nsh = m_basis.nsh;
-    const int packed_len = (m_method == MethodType::GFN2) ? (nsh + 9 * m_atomcount) : nsh;
+    const bool spin_pol = spinPolActive();   // two Fock matrices; m_sh is part of the SCC vector
+    const int packed_len = ((m_method == MethodType::GFN2) ? (nsh + 9 * m_atomcount) : nsh) + (spin_pol ? nsh : 0);
 
     // XL-BOMD (extended-Lagrangian Born-Oppenheimer MD) — opt-in, EXPERIMENTAL.
     // Each Calculation() is treated as one MD/geometry step. When a time-reversibly
@@ -1075,6 +1175,8 @@ double XTB::Calculation(bool gradient)
             m_wfn.dp_at = m_warmstart_dp_at;
             m_wfn.qp_at = m_warmstart_qp_at;
         }
+        if (spin_pol && m_warmstart_m_sh.size() == nsh)
+            m_wfn.m_sh = m_warmstart_m_sh;
         if (verb >= scf_min)
             CurcumaLogger::result("SCF initial guess: warm-start from previous step");
     } else if ((m_scf_guess == "eeq" || m_scf_guess == "fragments") && !m_force_h0_guess) {
@@ -1134,6 +1236,8 @@ double XTB::Calculation(bool gradient)
     // still in FP32, switch to FP64 for the rest, where the iteration is exact and convergence
     // is monotone again. Costs nothing when the FP32 phase is converging normally.
     double dq_best_fp32 = 1.0e30;
+    bool   xtb_lastdiag = false;       // scf_criterion xtb: first satisfied test seen, one more iteration pending
+    bool   xtb_converged_once = false; // scf_criterion xtb: the test was satisfied at least once
     int    fp32_stall = 0;
     bool   fp32_exhausted = false;
     // Claude Generated (Oct 2026): CURCUMA_SCF_JAC=<dir> dumps the numerical Jacobian of the SCC
@@ -1206,7 +1310,7 @@ double XTB::Calculation(bool gradient)
     // mixes). Claude Generated.
     auto packSCC = [&]() -> Vector {
         if (m_method == MethodType::GFN2) {
-            Vector v = Vector::Zero(nsh + 9 * nat);
+            Vector v = Vector::Zero(nsh + 9 * nat + (spin_pol ? nsh : 0));
             v.head(nsh) = m_wfn.q_sh;
             if (m_wfn.dp_at.cols() == nat)
                 for (int k = 0; k < 3; ++k)
@@ -1214,6 +1318,13 @@ double XTB::Calculation(bool gradient)
             if (m_wfn.qp_at.cols() == nat)
                 for (int k = 0; k < 6; ++k)
                     v.segment(nsh + 3 * nat + k * nat, nat) = m_wfn.qp_at.row(k).transpose();
+            if (spin_pol) v.tail(nsh) = m_wfn.m_sh;   // spin polarisation: shell magnetisation last
+            return v;
+        }
+        if (spin_pol) {
+            Vector v(2 * nsh);
+            v.head(nsh) = m_wfn.q_sh;
+            v.tail(nsh) = m_wfn.m_sh;
             return v;
         }
         return m_wfn.q_sh;
@@ -1232,6 +1343,7 @@ double XTB::Calculation(bool gradient)
             for (int k = 0; k < 6; ++k)
                 m_wfn.qp_at.row(k) = v.segment(nsh + 3 * nat + k * nat, nat).transpose();
         }
+        if (spin_pol) m_wfn.m_sh = v.tail(nsh);
     };
     // Ensure the GFN2 multipole moments are sized before the first pack.
     if (mode == ScfMode::Broyden && m_method == MethodType::GFN2) {
@@ -1351,6 +1463,21 @@ double XTB::Calculation(bool gradient)
     }
 
     pre_mark("device-resident begin (H0/S/L, gamma download, multipole begin)");
+    // Spin polarisation with a GPU backend (Claude Generated, Nov 2026): only the host-driven device loop
+    // has the two-channel solve (the device potential build and both fully resident loops know one Fock
+    // matrix and are skipped below for spin_pol). Without that loop there is no silent CPU run.
+    if (spin_pol && m_gpu_scf) {
+        if (!use_gpu_resident) {
+            m_scf_converged = false; m_scf_iterations = 0;
+            setHardError("spin_polarization with -gpu cuda needs the device-resident SCF (device integrals and "
+                         "Cholesky factor); its setup failed for this geometry");
+            return m_E_total;
+        }
+        m_gpu_spin_loop = true;
+        if (verb >= 2)
+            CurcumaLogger::info("SCF: spin polarisation on the host-driven device loop (alpha/beta solves on the GPU, "
+                                "potential on the host; device potential build and resident loop not used)");
+    }
     // Stage 5 (Part B3/B4, Claude Generated): full device GFN2 potential build.
     // When the backend supports it, the WHOLE per-iteration potential (γ·q_sh +
     // shell third-order + multipole v_dp/v_qp/v_at scalar shift + in-SCF D4) is
@@ -1378,7 +1505,7 @@ double XTB::Calculation(bool gradient)
     bool   mp_stored_on_device = false;
     double mp_stored_bytes     = 0.0;
     if (use_gpu_resident && gpu_multipole && m_method == MethodType::GFN2 && m_mp_initialized
-        && !solv_blocks_device && !m_pbc   // G1: the device potential (gamma, D4, multipoles) has no images
+        && !solv_blocks_device && !m_pbc && !spin_pol   // G1: the device potential (gamma, D4, multipoles) has no images; spin: not in the device potential
         && m_gpu_scf->supportsDeviceDispersion() && m_gpu_scf->supportsDevicePotential()) {
         // Prime the D4 reference set + device beginDispersion (the m_d4_prepared
         // first-call path); the returned potential is discarded here.
@@ -1508,7 +1635,7 @@ double XTB::Calculation(bool gradient)
     // v_dp/v_qp also stay on the device for the Fock build. Any failure switches this object to
     // the host path for good (m_mp_device_failed); the backend prints one notice.
     bool use_dev_mp = false;
-    if (use_gpu_resident && gpu_multipole && !use_device_potential && m_mp_initialized && !m_pbc   // G1: host potential
+    if (use_gpu_resident && gpu_multipole && !use_device_potential && m_mp_initialized && !m_pbc && !spin_pol   // G1: host potential
         && !m_mp_device_failed && m_gpu_scf->supportsDeviceMultipolePotential()) {
         use_dev_mp = m_gpu_scf->beginMultipolePotential(m_mp_amat_sd, m_mp_amat_dd, m_mp_amat_sq,
                                                         m_mp_dkernel, m_mp_qkernel, m_mp_version);
@@ -1587,7 +1714,7 @@ double XTB::Calculation(bool gradient)
     // host-driven loop.
     const bool gfn1_pbc_ok = !m_pbc || (pbc_neutral_closed && !pbcGpuStageOnHost("resloop")
                                         && m_gpu_scf && m_gpu_scf->periodicGammaResident(m_basis.nsh));
-    if (!use_resident_loop && m_method == MethodType::GFN1 && use_gpu_resident && gpu_computed && gfn1_pbc_ok
+    if (!use_resident_loop && !spin_pol && m_method == MethodType::GFN1 && use_gpu_resident && gpu_computed && gfn1_pbc_ok
         && mode == ScfMode::Broyden && (!m_solvation || gfn1_born) && m_gpu_scf->supportsResidentLoopGfn1()) {
         bool want = m_gpu_gfn1_resident;
         if (const char* e = std::getenv("CURCUMA_GFN1_RESIDENT")) want = (e[0] != '0');
@@ -1631,7 +1758,7 @@ double XTB::Calculation(bool gradient)
     // so the 1e-8 energy is never at risk. Disabled on the device-potential path (its
     // re-solve would need the host D4 weights again).
     int gpu_n_eig = 0;  // 0 = full spectrum
-    bool gpu_partial_diag = m_gpu_partial_diag && use_gpu_resident && !use_device_potential
+    bool gpu_partial_diag = m_gpu_partial_diag && use_gpu_resident && !use_device_potential && !spin_pol
         && (m_d4_charge_source != "cpscf") && (verb < 3);
     if (gpu_partial_diag) {
         const int nocc_orbs = static_cast<int>(std::floor(m_wfn.nocc / 2.0));
@@ -1857,8 +1984,31 @@ double XTB::Calculation(bool gradient)
                 CurcumaLogger::result(fmt::format("  {:4d}   {:18.10f}   {:10.2e}   {:10.2e}   {:6.1f}",
                                                   iter, e_scc, de, dq, t_iter_ms));
             }
-            if (iter > 0 && !m_eig_fp32 && dq < thresh && de < thresh * 100.0
-                && (!xlbomd_corrector_step || iter + 1 >= m_scf_xlbomd_correctors)) {
+            // Claude Generated (Nov 2026): scf_criterion xtb on the device loop, same rule as the CPU loop
+            // (RMS of the SCC residual / sqrt(nat), |dE|, one extra iteration). The backend returns the sum of
+            // squares of the last step; one without it (ROCm) keeps the default rule and says so once.
+            bool gpu_conv = false;
+            if (iter > 0 && !m_eig_fp32 && (!xlbomd_corrector_step || iter + 1 >= m_scf_xlbomd_correctors)) {
+                const double sumsq = m_scf_criterion_xtb ? m_gpu_scf->residentLastDqSumSq() : -1.0;
+                if (m_scf_criterion_xtb && sumsq < 0.0) {
+                    static std::atomic<bool> warned{false};
+                    if (!warned.exchange(true))
+                        CurcumaLogger::warn("-scf_criterion xtb: this GPU backend does not return the residual norm "
+                                            "from its resident SCF loop, the default convergence rule runs there");
+                }
+                if (sumsq >= 0.0) {
+                    const double rms_dq = std::sqrt(sumsq / std::max(1, nat));
+                    const double q_lim  = (m_method == MethodType::GFN2 ? 1.0e-4 : 2.0e-5) * m_scf_accuracy;
+                    gpu_conv = rms_dq < q_lim && de < 1.0e-6 * m_scf_accuracy;
+                    if (gpu_conv) {
+                        xtb_converged_once = true;
+                        if (!xtb_lastdiag) { xtb_lastdiag = true; gpu_conv = false; }
+                    }
+                } else {
+                    gpu_conv = dq < thresh && de < thresh * 100.0;
+                }
+            }
+            if (gpu_conv) {
                 m_scf_converged = true;
                 e_total_old = e_scc;
                 break;
@@ -1934,7 +2084,72 @@ double XTB::Calculation(bool gradient)
         // convergence) follows both branches.
         double gpu_band = 0.0;
         std::chrono::steady_clock::time_point t_fock, t_solve, t_mull;
-        if (use_gpu_resident) {
+        if (use_gpu_resident && spin_pol) {
+            // Spin polarisation on the host-driven device loop (Claude Generated, Nov 2026;
+            // docs/SPIN_POLARISATION.md, section GPU). Same iteration as the CPU branch below
+            // (buildSpinFocks + solveEigenUhf + updatePopulations), split between host and device:
+            //   host  : charge potential v_ao (built above), spin potential u_l = sum_l' W_ll' m_l'
+            //           from the SCC input magnetisation, the two Fermi fillings, m_sh from spop_ao;
+            //   device: F^alpha = F(v - u), F^beta = F(v + u) (= F +- 1/2 S (u_mu + u_nu)), both
+            //           eigensolves, Pa, Pb, P = Pa + Pb, Pm = Pa - Pb, Mulliken populations of P and Pm.
+            // Mixed precision: both solves of an FP32 step are FP32; the convergence test below never
+            // accepts an FP32 step (unchanged rule), so the converged state comes from an FP64 step.
+            m_eig_fp32 = fp32_wanted(dq_prev);
+            const int nao = m_basis.nao;
+            Eigen::VectorXd v_ao(nao), u_ao(nao);
+            Vector u_sh;
+            spinPotential(m_wfn.m_sh, u_sh);
+            for (int ao = 0; ao < nao; ++ao) {
+                v_ao(ao) = m_pot.v_sh(m_basis.ao2sh[ao]) + m_pot.v_at(m_basis.ao2at[ao]);
+                u_ao(ao) = u_sh(m_basis.ao2sh[ao]);
+            }
+            t_fock = clock::now();
+            Vector eps_b;
+            bool ok = m_gpu_scf->solveSpin(v_ao, u_ao, gpu_multipole ? &m_pot.v_dp : nullptr,
+                                           gpu_multipole ? &m_pot.v_qp : nullptr, m_wfn.eps, eps_b, m_eig_fp32);
+            Eigen::VectorXd fa, fb, pop_ao, spop_ao;
+            if (ok) {
+                // Per-spin Fermi filling, as solveEigenUhf (same kT constant).
+                const double kT = m_electronic_temp * 3.166808e-6;
+                double s_a = 0.0, s_b = 0.0;
+                fermiFillingChannel(m_wfn.eps, m_nalpha, kT, fa, s_a);
+                fermiFillingChannel(eps_b, m_nbeta, kT, fb, s_b);
+                m_ts_uhf = s_a + s_b;
+                auto ncol_of = [nao](const Eigen::VectorXd& f) {
+                    int nc = 0;
+                    for (int i = 0; i < nao; ++i) if (f(i) > 1.0e-12) nc = i + 1;
+                    return nc;
+                };
+                ok = m_gpu_scf->densitySpin(fa, ncol_of(fa), fb, ncol_of(fb), pop_ao, spop_ao, gpu_band);
+            }
+            if (!ok) {
+                const std::string why = m_gpu_scf->lastError();
+                CurcumaLogger::warn("XTB::Calculation: GPU spin-polarised solve/density failed at iteration "
+                                    + std::to_string(iter) + (why.empty() ? std::string() : ": " + why));
+                m_scf_converged = false; m_scf_iterations = iter;
+                setHardError("native GPU spin-polarised SCF step failed (see warning above) at iteration " + std::to_string(iter));
+                return m_E_total;
+            }
+            t_solve = clock::now();
+            updatePopulationsFromPopAo(pop_ao);   // q_sh / q_at from P = Pa + Pb
+            // Shell magnetisation m_l = sum_{mu in l} spop_ao(mu), spop_ao(mu) = sum_nu Pm_mu,nu S_nu,mu.
+            Vector msh = Vector::Zero(nsh);
+            for (int s = 0; s < nsh; ++s)
+                for (int mu = m_basis.iao_sh[s]; mu < m_basis.iao_sh[s] + m_basis.nao_sh[s]; ++mu)
+                    msh(s) += spop_ao(mu);
+            m_wfn.m_sh = msh;
+            if (gpu_multipole && !m_gpu_scf->multipoleMoments(m_wfn.dp_at, m_wfn.qp_at)) {
+                m_scf_converged = false; m_scf_iterations = iter;
+                setHardError("native GPU spin-polarised SCF: multipole moments failed at iteration " + std::to_string(iter));
+                return m_E_total;
+            }
+            m_wfn.focc = fa + fb;                // diagnostic, as solveEigenUhf
+            m_gpu_spin_eb = std::move(eps_b);
+            m_gpu_spin_fa = std::move(fa);
+            m_gpu_spin_fb = std::move(fb);
+            q_sh_new = m_wfn.q_sh;
+            t_mull = clock::now();
+        } else if (use_gpu_resident) {
             // Expand shell+atom potential to AO resolution (host; mirrors
             // expand_potential in xtb_scf.cpp). v_ao(μ)=v_sh(sh)+v_at(at) — this
             // isotropic part carries Coulomb + third-order (v_sh) and, for GFN2,
@@ -2075,6 +2290,14 @@ double XTB::Calculation(bool gradient)
         } else {
             // Expand to AO potential and build Fock
             Matrix F = buildFock(m_H0, m_S, m_pot);
+            // Spin polarisation: alpha/beta Fock matrices F +- 1/2 S (u_mu + u_nu), u = W m from the SCC
+            // input magnetisation (m_wfn.m_sh, as q_sh feeds the charge potential). Claude Generated (Nov 2026).
+            Matrix F_alpha, F_beta;
+            if (spin_pol) {
+                Vector u_sh;
+                spinPotential(m_wfn.m_sh, u_sh);
+                buildSpinFocks(F, m_S, u_sh, F_alpha, F_beta);
+            }
 
             // --- SCF acceleration strategy (Claude Generated) -----------------
             switch (mode) {
@@ -2128,7 +2351,7 @@ double XTB::Calculation(bool gradient)
             bool eig_ok;
             {
                 MklThreadScope eig_scope(eig_threads);
-                eig_ok = solveEigen(F, m_S);
+                eig_ok = spin_pol ? solveEigenUhf(F_alpha, F_beta, m_S) : solveEigen(F, m_S);
             }
             if (!eig_ok) {
                 // Claude Generated (Aug 2026): say WHAT was wrong instead of guessing in the message.
@@ -2232,8 +2455,9 @@ double XTB::Calculation(bool gradient)
         acc_e_band  += ms(t_e3, t_e4);
 
         // Total SCC = band + coulomb + third-order + multipole
+        m_E_spin = spin_pol ? energySpin() : 0.0;   // 1/2 sum W m m of the output magnetisation
         const double e_scc = m_E_electronic + m_E_coulomb_shell
-                           + m_E_third_order + m_E_multipole;
+                           + m_E_third_order + m_E_multipole + m_E_spin;
 
         // Accumulate per-phase timings (see breakdown at verbosity >= 3).
         acc_pot    += ms(t_iter0, t_pot);
@@ -2313,7 +2537,24 @@ double XTB::Calculation(bool gradient)
             // dq is the full-SCC-vector residual computed above (shell charges for
             // GFN1, + atomic multipole moments for GFN2), matching what the mixer
             // acts on and what tblite converges on.
-            if (checkConvergence_impl(dq, e_total_old, e_scc, thresh)) {
+            // Claude Generated (Nov 2026): scf_criterion xtb reproduces xtb 6.7.1 (scc_core.f90:555-632,
+            // scf_module.F90:272-277): RMS over the whole SCC residual divided by sqrt(nat) (xtb: sqrt(sum(dq^2)/n),
+            // dq = shell charges + 3 dipole + 6 quadrupole components per atom), qconv = 1e-4*acc (GFN2) or 2e-5*acc
+            // (GFN1), econv = 1e-6*acc, and one extra iteration after the first satisfied test (xtb's lastdiag).
+            // Unlike the default rule the first satisfied iteration is mixed and iterated once more.
+            bool scf_conv_now;
+            if (m_scf_criterion_xtb) {
+                const double rms_dq = std::sqrt((x_out_check - x_in).squaredNorm() / std::max(1, nat));
+                const double q_lim  = (m_method == MethodType::GFN2 ? 1.0e-4 : 2.0e-5) * m_scf_accuracy;
+                scf_conv_now = rms_dq < q_lim && std::fabs(e_scc - e_total_old) < 1.0e-6 * m_scf_accuracy;
+                if (scf_conv_now) {
+                    xtb_converged_once = true;
+                    if (!xtb_lastdiag) { xtb_lastdiag = true; scf_conv_now = false; }
+                }
+            } else {
+                scf_conv_now = checkConvergence_impl(dq, e_total_old, e_scc, thresh);
+            }
+            if (scf_conv_now) {
                 m_scf_converged = true;
                 if (scf_jac_active) {   // keep x* and G(x*) for the dump / capture below
                     scf_jac_x_star = x_in;
@@ -2366,6 +2607,9 @@ double XTB::Calculation(bool gradient)
         e_total_old = e_scc;
     }
 
+    // scf_criterion xtb: like xtb (`converged` stays set), a run that satisfied the test once but ran out of
+    // iterations during the extra pass counts as converged.
+    if (m_scf_criterion_xtb && xtb_converged_once && !m_scf_converged) m_scf_converged = true;
     m_scf_iterations = iter + 1;
     const auto t_scf_end = clock::now();
 
@@ -2567,7 +2811,16 @@ double XTB::Calculation(bool gradient)
         const bool big_wfn = 9.0 * static_cast<double>(m_basis.nao) * m_basis.nao * sizeof(double) > 2.0e9;
         if (use_resident_loop && big_wfn && (m_mp_ints_deferred || gfn1_resident) && (!gradient || device_grad_will_run))
             m_wfn_on_device = true;
-        else {
+        else if (m_gpu_spin_loop) {
+            // Spin polarisation: P, Pm and both orbital sets (C/eps keep the alpha set, as solveEigenUhf).
+            // W is not built here: the device gradient builds its own, the host fallback calls
+            // spinHostEnergyWeightedDensity(). Claude Generated (Nov 2026).
+            if (!m_gpu_scf->finalizeSpin(m_wfn.P, m_wfn.Pm, m_wfn.C, m_gpu_spin_Cb)) {
+                setHardError("native GPU spin-polarised SCF: download of the converged density failed");
+                return m_E_total;
+            }
+            m_wfn.W_valid = false;
+        } else {
             const bool fin_ok = m_gpu_scf->finalize(m_wfn.P, m_wfn.C);
             m_pbc_dev_wfn = m_pbc && fin_ok;   // G5b: the device dC is the m_wfn.C of this SCF
         }
@@ -2581,7 +2834,9 @@ double XTB::Calculation(bool gradient)
     // density W use the fractional Fermi occupations instead of the integer
     // fallback (xtb_gradient.cpp). occupationsFromEps is bit-faithful to
     // solveEigen, so this is identical to the CPU path. Claude Generated.
-    if ((use_gpu_resident || use_resident_loop) && m_wfn.eps.size() == m_basis.nao) {
+    // (Not for the spin-polarised device loop: there focc = fa + fb and m_ts_uhf come from the two
+    // channel fillings of the last iteration; one filling over the alpha eps would overwrite them.)
+    if ((use_gpu_resident || use_resident_loop) && !m_gpu_spin_loop && m_wfn.eps.size() == m_basis.nao) {
         Eigen::VectorXd occ; int ncol = 0;
         occupationsFromEps(m_wfn.eps, occ, ncol);
         m_wfn.focc = occ;
@@ -2644,6 +2899,8 @@ double XTB::Calculation(bool gradient)
     } else {
         m_E_electronic    = energyCoulombShell() + energyThirdOrder() + energyMultipole();
     }
+    m_E_spin          = spin_pol ? energySpin() : 0.0;
+    m_E_electronic   += m_E_spin;   // spin polarisation 1/2 sum W m m (0 without the option)
     post_mark("Coulomb/third-order/multipole energies");
     // Band energy: Tr(P · H0) for electronic part (from the device when P stayed there)
     // G1b: with the periodic S/H0/L on the device (host copies deferred) the band energy of the last device step,
@@ -2696,6 +2953,8 @@ double XTB::Calculation(bool gradient)
         CurcumaLogger::info(fmt::format("  Third-order  = {: .8f} Eh", m_E_third_order));
         if (m_method == MethodType::GFN2)
             CurcumaLogger::info(fmt::format("  Multipole    = {: .8f} Eh", m_E_multipole));
+        if (spin_pol)
+            CurcumaLogger::info(fmt::format("  Spin pol.    = {: .8f} Eh (folded into Electronic)", m_E_spin));
         CurcumaLogger::info(fmt::format("  Free E (-TS) = {: .8f} Eh (folded into Electronic)", m_E_entropy));
         CurcumaLogger::info(fmt::format("  Repulsion    = {: .8f} Eh", m_E_repulsion));
         if (m_method == MethodType::GFN1)
@@ -2782,6 +3041,7 @@ double XTB::Calculation(bool gradient)
         if (!gpu_grad) {
             ensureHostWavefunction();
             if (!m_pbc) ensureHostMultipoleIntegrals();   // G1b: the periodic gradient reads no AO multipole integrals
+            if (m_gpu_spin_loop) spinHostEnergyWeightedDensity();   // W of both spins for the host gradient
             calculateGradient();   // fills m_gradient in Eh/Bohr
         }
 
@@ -2981,6 +3241,7 @@ bool XTB::evaluateComponentsAtFixedDensity(
     m_E_third_order   = energyThirdOrder();
     m_E_multipole     = energyMultipole();
     const double e_band = (m_wfn.P.cwiseProduct(m_H0)).sum();
+    m_E_spin = 0.0;   // audit at an injected density: no spin-polarisation term (not supported here)
     m_E_electronic = e_band + m_E_coulomb_shell + m_E_third_order + m_E_multipole;
     m_E_repulsion    = calcRepulsionEnergy();
     m_E_halogen_bond = calcHalogenBondEnergy();
@@ -3385,6 +3646,8 @@ void XTB::buildReferenceOccupations()
     }
     m_wfn.q_at.setZero(m_basis.nat);
     m_wfn.q_sh.setZero(m_basis.nsh);
+    m_wfn.m_sh.setZero(m_basis.nsh);
+    m_wfn.Pm.resize(0, 0);
     if (m_method == MethodType::GFN2) {
         m_wfn.dp_at = Eigen::MatrixXd::Zero(3, m_basis.nat);
         m_wfn.qp_at = Eigen::MatrixXd::Zero(6, m_basis.nat);
@@ -3466,6 +3729,8 @@ bool XTB::UpdateMolecule(const Matrix& geometry)
             m_warmstart_dp_at = m_wfn.dp_at;
             m_warmstart_qp_at = m_wfn.qp_at;
         }
+        if (spinPolActive() && m_wfn.m_sh.size() == m_basis.nsh)
+            m_warmstart_m_sh = m_wfn.m_sh;   // spin polarisation: magnetisation is part of the SCC vector
         // Multi-step SCC extrapolation (opt-in): record the converged SCC vector so
         // Calculation() can predict the next step from several past steps, not just
         // this one. Pushed before m_wfn is zeroed below. Trimmed to the order the
@@ -3487,8 +3752,10 @@ bool XTB::UpdateMolecule(const Matrix& geometry)
     m_wfn.q_sh.setZero(m_basis.nsh);
     m_wfn.dp_at.setZero(3, m_basis.nat);
     m_wfn.qp_at.setZero(6, m_basis.nat);
+    m_wfn.m_sh.setZero(m_basis.nsh);   // spin polarisation (unused otherwise)
 
     // 6. Energy components are now stale
+    m_E_spin = 0.0;
     m_E_electronic = m_E_repulsion = m_E_coulomb_shell = 0.0;
     m_E_third_order = m_E_multipole = m_E_halogen_bond = m_E_dispersion = 0.0;
     m_E_total = 0.0;
@@ -3511,6 +3778,7 @@ nlohmann::json XTB::getEnergyDecomposition() const
     j["repulsion"]      = m_E_repulsion;
     j["halogen_bond"]   = m_E_halogen_bond;
     j["dispersion"]     = m_E_dispersion;
+    j["spin_polarization"] = m_E_spin;   // 1/2 sum W m m, already included in "electronic"
     j["entropy"]        = m_E_entropy;   // -T*S, already included in "electronic"
     j["total"]          = m_E_total;
     j["scf_converged"]  = m_scf_converged;

@@ -19,6 +19,7 @@
 #ifdef USE_ROCM
 
 #include "xtb_hip_context.h"
+#include "src/core/units.h"
 
 #include <hip/hip_runtime.h>
 #ifdef HAVE_ROCSOLVER
@@ -3882,7 +3883,7 @@ struct XtbHipContext::Impl {
             || hipStreamSynchronize(stream) != hipSuccess) return 0;
         float max_theta = 0.0f;
         std::memcpy(&max_theta, &maxbits, sizeof(float));
-        const double kT = loop_Tele * 3.166808e-6;
+        const double kT = loop_Tele * CurcumaUnit::Constants::BOLTZMANN_HARTREE_K_XTB;
         if (psTrace())
             fprintf(stderr, "PSTRACE gate: homo %.17g lumo %.17g gap %.17g max_theta %.9g\n", st[0], st[1],
                     st[1] - st[0], static_cast<double>(max_theta));
@@ -4602,11 +4603,11 @@ struct XtbHipContext::Impl {
         const int blk = 256;
         if (loop_open)   // WP4: n_alpha / n_beta fillings over the same eigenvectors, summed
             hipLaunchKernelGGL(k_res_occupations_uhf, dim3(1), dim3(blk), blk * sizeof(double), stream, dEps, dOcc,
-                               dResOccA, dResOccB, dResDf, n, loop_Tele * 3.166808e-6, loop_nalpha, loop_nbeta,
+                               dResOccA, dResOccB, dResDf, n, loop_Tele * CurcumaUnit::Constants::BOLTZMANN_HARTREE_K_XTB, loop_nalpha, loop_nbeta,
                                dResNcol);
         else
             hipLaunchKernelGGL(k_res_occupations, dim3(1), dim3(blk), blk * sizeof(double), stream, dEps, dOcc, n,
-                               loop_Tele * 3.166808e-6, loop_nelec, loop_nocc_pairs, loop_Tele > 0.0 ? 1 : 0,
+                               loop_Tele * CurcumaUnit::Constants::BOLTZMANN_HARTREE_K_XTB, loop_nelec, loop_nocc_pairs, loop_Tele > 0.0 ? 1 : 0,
                                dResNcol);
         int ncol = n;
         if (hipGetLastError() != hipSuccess

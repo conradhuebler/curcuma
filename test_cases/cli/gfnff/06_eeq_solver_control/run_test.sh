@@ -6,14 +6,15 @@
 #
 #   1. AUTO      - default on 1410 atoms: "ppcg (auto)"; on caffeine (24 atoms): "cholesky (auto)"
 #   2. THRESHOLD - -eeq_solver.eeq_ppcg_min_atoms 5000 turns auto on 1410 atoms into "cholesky (auto)"
-#   3. EXPLICIT  - -eeq_solver.solve_method cholesky|ppcg|pcg|lu|ldlt runs exactly that solver, at a size where
+#   3. EXPLICIT  - -eeq_solver.solve_method cholesky|ppcg|pcg|lu|ldlt|sytrf runs exactly that solver, at a size where
 #                  auto would pick another one (no size threshold overrides a named solver); energies agree
 #                  to 1e-7 Eh; -gfnff.solve is an equivalent alias, -eeq_solver.solve_method wins over it
 #   4. TYPO      - an unknown name ends with an error naming the valid solvers (it used to mean auto); for -md
 #                  a failed setup also gives a non-zero exit code (it used to be 0)
 #   5. GPU       - only if a CUDA plugin and a device are present: lu (augmented LU) and ldlt (sytrf + Schur)
 #                  run on the device (Oct 2026) and their charges agree with the CPU solver of the same name to
-#                  1e-9 e in every MD step (chain, 1410 atoms)
+#                  1e-9 e in every MD step (chain, 1410 atoms); sytrf (augmented sytrf/sytrs, Nov 2026) is checked
+#                  the same way, the sytrf check was written without a CUDA device, first run on an RTX 5080 on Nov 17, 2026
 #   6. BATCHED   - the energy criterion: batched on a water dimer (O...O 2.8 A) warns with an estimated error
 #                  within a factor 3 of the measured E(batched) - E(cholesky)
 # The verbosity-1 line "EEQ solver (final charges): <name>[ (auto)] [CPU|GPU ...]" is what is read.
@@ -66,7 +67,7 @@ rc, line, _, _ = sp(CH, ["-eeq_solver.eeq_ppcg_min_atoms", "5000"])
 check("threshold argument moves the switch", rc == 0 and line.startswith("cholesky (auto) [CPU]"), line)
 
 energies = {}
-for name in ("cholesky", "ppcg", "pcg", "lu", "ldlt"):
+for name in ("cholesky", "ppcg", "pcg", "lu", "ldlt", "sytrf"):
     rc, line, e, _ = sp(CH, [S, name])
     energies[name] = e
     check(f"explicit {name} runs {name}", rc == 0 and line.startswith(name + " [CPU]"), line)
@@ -74,7 +75,8 @@ ref = energies["cholesky"]
 def dev(names):
     return max(abs(energies[n] - ref) if energies[n] is not None and ref is not None else 1.0 for n in names)
 # pcg stops at a relative residual of 1e-6 for large systems (about 4e-7 Eh here); the others are exact to the print precision
-check("direct solvers and ppcg agree", dev(("ppcg", "lu", "ldlt")) < 1e-7, f"max |dE| to cholesky = {dev(('ppcg', 'lu', 'ldlt')):.2e} Eh")
+check("direct solvers and ppcg agree", dev(("ppcg", "lu", "ldlt", "sytrf")) < 1e-7,
+      f"max |dE| to cholesky = {dev(('ppcg', 'lu', 'ldlt', 'sytrf')):.2e} Eh")
 check("pcg agrees within its tolerance", dev(("pcg",)) < 1e-5, f"|dE| = {dev(('pcg',)):.2e} Eh")
 rc, line, _, _ = sp(CAF, [S, "ppcg"])
 check("explicit ppcg below the threshold", rc == 0 and line.startswith("ppcg [CPU]"), line)
@@ -100,7 +102,7 @@ def md_rc(extra, xyz=CAF, charges=False):
     try:
         shutil.copy(xyz, os.path.join(d, "m.xyz"))
         diag = ["-md_diagnostics", "true", "-dump_frequency", "1"] if charges else []
-        p = subprocess.run([B, "-md", "m.xyz", "-method", "gfnff", "-no_bmt", "-max_time", "2", "-threads", "2"] + diag + extra,
+        p = subprocess.run([B, "-md", "m.xyz", "-method", "gfnff", "-no_bmt", "-max_time", "2", "-threads", "2", "-md.seed", "1"] + diag + extra,
                            cwd=d, capture_output=True, text=True, timeout=600)
         out = ANSI.sub("", p.stdout + p.stderr)
         if not charges:
@@ -122,7 +124,8 @@ plugin = os.path.join(os.path.dirname(os.path.abspath(B)), "libcurcuma_cuda.so")
 have_gpu = os.path.exists(plugin) and shutil.which("nvidia-smi") is not None \
     and subprocess.run(["nvidia-smi", "-L"], capture_output=True).returncode == 0
 if have_gpu:
-    for name, path in (("lu", "augmented LU"), ("ldlt", "LDL^T (sytrf)")):
+    # Nov 2026: the sytrf entry was written without a CUDA device; first run on an RTX 5080 on Nov 17, 2026.
+    for name, path in (("lu", "augmented LU"), ("ldlt", "LDL^T (sytrf)"), ("sytrf", "augmented sytrf/sytrs (upper)")):
         rc_g, out_g, q_g = md_rc(["-gpu", "cuda", "-gpu_strict", "true", "-verbosity", "1", S, name], CH, True)
         rc_c, out_c, q_c = md_rc([S, name], CH, True)
         check(f"GPU MD: {name} runs on the device", rc_g == 0 and f"{name} [GPU CUDA, {path}" in out_g, f"rc={rc_g}")

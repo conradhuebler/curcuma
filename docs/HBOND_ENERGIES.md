@@ -34,7 +34,12 @@ std::vector<GFNFFHBondEnergy> e = gfnff->hydrogenBondEnergies();   // donor, hyd
   reach the device. `hydrogenBondEnergies()` then synchronises the device and downloads the energies together with the
   atom indices and case types of the device list (`FFWorkspaceGPU::downloadHBondEnergies`); nothing is copied unless
   it is called. The wrapper unregisters itself in its destructor.
-- Order: that of `getLastHBonds()`, as on the CPU. ROCm stores the triples grouped by case type
+- Order: with host detection (`-gfnff.gpu_hb_detect_on_device false`) that of `getLastHBonds()`, as on the CPU. With
+  device detection (the CUDA default since Oct 14, 2026) the device builds the triples itself: the same set, another
+  order, and for case 1 (an H bonded to neither atom) the lower atom index is listed first as donor instead of the
+  higher one; the two roles are equivalent there. Every entry carries its own atoms and case type, so match entries
+  by (donor, hydrogen, acceptor, case type, case 1 as an unordered pair), not by position and not against
+  `getLastHBonds()` of the wrapper. ROCm stores the triples grouped by case type
   (`hbCasePermutation`); the download puts them back into list order.
 - Switching the recording, or a list that outgrows the device array, drops a captured Phase-1 graph, because the
   array is a kernel argument.
@@ -43,7 +48,7 @@ std::vector<GFNFFHBondEnergy> e = gfnff->hydrogenBondEnergies();   // donor, hyd
 
 ## Status
 
-🤖 AI-generated. CPU path ⚙️ machine-tested; GPU path compiled only.
+🤖 AI-generated. CPU path ⚙️ machine-tested; CUDA path ⚙️ machine-tested on one RTX 5080 (Nov 18, 2026, `hbond_energies_cuda`, both detection modes, 2 molecules, n = 1); ROCm compiled only.
 
 Checked (`test_hbond_energies`, 12 checks, constructed water dimers): nothing recorded unless asked, one entry per
 triple in list order with the list's atoms, sum equals the `HBond` term to 1e-12 Eh, recording leaves the energy
@@ -54,9 +59,11 @@ GPU: `test_hbond_energies_gpu cuda|rocm` (ctest `hbond_energies_cuda`, `hbond_en
 registry molecules `H2O_dimer` and `monosaccharide`, the GPU entries with the CPU ones (same triples, per-triple
 energy within 1e-8 Eh, sum within 1e-6 Eh of the CPU `HBond` term), and checks that recording leaves the GPU energy
 unchanged and that nothing is returned before recording is switched on. Without a device it prints SKIP and exits 0.
-The CUDA plugin (CUDA 13.3, sm_86) and the ROCm plugin (hipcc, gfx1150) were compiled, the test was built in the CUDA
-tree and ran only its SKIP path (no device on that machine); neither the comparison nor the kernels have run on GPU
-hardware, so no GPU value is verified. With recording off the arithmetic of `k_hbonds` is
+The test ran on a CUDA GPU on Nov 18, 2026 (one RTX 5080, n = 1 per molecule and mode): host detection gives the CPU
+list in the same order (per-triple difference 2.8e-16 Eh), device detection the same 210 triples (monosaccharide) with
+case-1 donor/acceptor labels swapped and the same sorted energies; the first run of this test (before it was reworked
+on Nov 18) failed 4 checks for exactly that reason. The kernels have not run on ROCm.
+With recording off the arithmetic of `k_hbonds` is
 unchanged as far as the machine code shows: the sm_86 SASS and the gfx1150 assembly of the kernel before and after
 the change have the same number of each FP64 instruction (SASS DFMA/DMUL/DADD 1137/531/284, gfx1150
 v_fma/v_mul/v_add_f64 1057/544/502); the differences are instruction order, registers and the guarded store.

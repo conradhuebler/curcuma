@@ -11,6 +11,12 @@ Stand.
 
 ## 1. Korrektheit (offen)
 
+- **GPU und periodische Simulation mit Druck (Betreiberziel, Nov 22, 2026)**: GFN-FF und GFN1/GFN2 sollen auf jedem Backend vollständige
+  NPT-Simulationen können. Fehlend auf CUDA: GFN-FF-Virial und Barostat mit `-gpu cuda` (A1), Geräte-Ewald/-EEQ (A2). ROCm: Teil B.
+  Zuerst alle CUDA-Lücken auf dem CUDA-Rechner, dann die ROCm-Lücken auf einem Rechner mit ROCm-GPU: [docs/GPU_PERIODIC_GAPS.md](docs/GPU_PERIODIC_GAPS.md).
+- **`-large_system_mode` mit Zelle liefert still eine Vakuumenergie** (`native_xtb_method.cpp`, Rückkehr vor `setPeriodicCell`): harter Fehler nötig,
+  Doku widerspricht sich (`WP-PERIODIC-XTB.md` Z. 45/167/1376). Geprüft 2026-11-22. Eintrag A5 in [docs/GPU_PERIODIC_GAPS.md](docs/GPU_PERIODIC_GAPS.md).
+
 - **GFN-FF unter Last nicht bitgleich** (2026-11-14): zwei identische `-sp`-Läufe (Defektstruktur der Ladungsgruppen, 273 Atome, `-threads 1`) unterscheiden sich unter paralleler Last um bis zu 6.7e-16 Eh/A (Gradient bis 0.74); im Leerlauf 6 von 6 identisch, unter Last 4 von 8 verschieden, auch auf `devel/methods` pur. Die Ursache (Summationsreihenfolge trotz einem Thread) ist nicht gesucht.
   Folge: Testskripte mit Bitvergleich (`check_cn_zero_guard.py`, `check_adaptive_step.py`, `check_lbfgs_atom_step_cap.py`, `check_d4_fused_c6.py`) können unter `ctest -j` flackern; `check_charge_groups.py` vergleicht jetzt mit 1e-12.
 - **FEHLER: GMTKN55 `G21EA/EA_16` (SiH3-) mit gfn1 liefert keine Energie** (2026-10-30, Ursache bekannt, vorerst gewollt): Abbruch "implausible charge distribution" (max |q| 5.55 > 5.00, auch aus H0); xtb 6.7 konvergiert auf dieselbe SCC-Energie (-7.94141906 Eh) mit Si = -5.55 e, derselbe q^3-Runaway.
@@ -232,6 +238,16 @@ Stand.
   (Mischer auf dem Host, der CPU-Hook wäre dort direkt nutzbar), Mehr-GPU-SCF-Aufteilung (Eigenlöser/Dichte; ungetestet, nur ein Gerät hier).
   Ohne Wächter divergiert der unrelaxierte 599-Atom-Cluster mit Mischpräzision (151 Iterationen, harter Fehler, n=3).
 
+- **GFN2 CPU-MD gegen xtb, Reste** (2026-11-17, [docs/SCF_THRESHOLD_2026-11.md](docs/SCF_THRESHOLD_2026-11.md), `complex`, 1 Thread, n=1-2): Ursache der Lücke sind SCF-Iterationen (9,9 gegen 8), nicht der Eigenlöser. Offen: Dipol-/Quadrupolintegrale `xtb_multipole.cpp:183-219` in einem Durchlauf mit S und H0 (Gewinn 20-30 ms, geschätzt); Precision-Stufen `scf_precision` loose 5e-5 / normal 2e-5 / tight 1e-5 / verytight 1e-6 (Vorschlag).
+- **Idee, nach der GFN2-xtb-Klärung: Basiswechsel statt voller Diagonalisierung** (2026-11-17, ungemessen): Fock-Matrix in die Orbitale des Vorschritts transformieren (fast diagonal), Eigenpaare per Jacobi/Störungsrechnung, kleine Rotationen abschneiden; verwandt `-large_system_mode dc|sparse` (dünn besetzte Dichtematrix, lohnt erst bei vielen tausend AOs) und die Dichteantwort in `docs/SCF_PRECOND.md`. Zuerst prüfen, was `partial diagonalisation` und der Warmstart schon tun.
+- **Idee: SCF-Vorkonditionierer `-scf_precond frag` auf `complex` messen** (2026-11-17): additive Schwarz-Blöcke je Fragment (204 + 27 Atome), `docs/SCF_PRECOND.md` hat keinen `complex`-Eintrag; Ziel Iterationen je MD-Schritt (aktuell 9,9).
+
+- **Fehlschlagende Tests im Build `USE_MKL=ON, USE_BLAS=OFF` (CUDA, RTX 5080, 2026-11-18, 2 von 709 in `ctest -j8`)**: `cli_confsearch_05_seed_cold_bias` (stabil 2/2), `cli_deltaml_04_label_consistency` (Hilfsskript compare_labels.py fehlt, nicht getrackt). Ursachen nicht untersucht.
+
+- **D4-Gradient der Pfade `-d4_charge_source eeq` und `cpscf` ist etwa 1e-4 Eh/A neben FD** (2026-11-18, n = 3 kleine Moleküle, nur CPU; Diagnose eines Agenten, Codestellen von mir nicht nachgelesen): H2 8,2e-5 obwohl die Antwort dort 0 ist; der Standardpfad `mulliken` liegt bei 1e-8. Vermutete Ursache: das D4-Potential steckt im SCF und in W, fehlt aber im Gradienten-Charge-Pulay dieser Pfade (`xtb_native.cpp:2550-2551`, `xtb_gradient.cpp:385`). Entscheidung: als genähert dokumentieren oder entfernen; Details `docs/BROKEN_TESTS_2026-10-14.md`.
+
+- **Solvatation, eigenes Arbeitspaket** (2026-11-21, Audit gegen xtb 6.7.1 und tblite, [docs/SOLVATION.md](docs/SOLVATION.md) "Not implemented natively"): CPCM (tblite), ddCOSMO (`--cosmo`), CPCM-X (`--cpcmx`), Ionenstärke, Kernel- und Gitterwahl fehlen. Offen: GFN-FF `gbsa` rechnet ALPB (xtb 6.7.1: Still-GBSA), GFN2-Gradient bei `na2cl2` gegen xtb ungeklärt (GFN1: xtb weicht von FD ab), Radius für Z > 94 still 2 A.
+
 ## 3. Tests und Validierung
 
 - **`-xtb.gpu_eigen_strategy auto` ungemessen ausser RTX 5080** (2026-11-21, WP-PERIODIC-XTB A1r): Rechenzentrums-GPU (H200/A100: erwartet fp64_direct) und
@@ -280,6 +296,8 @@ Stand.
 
 ## 5. Funktionen und Refactoring (niedrige Priorität)
 
+- **Open-Shell: Spin pro Fragment, GPU und Konstanten-Fragen offen** (2026-11-19, aktualisiert 2026-11-21): `-xtb.spin_polarization true` (tblite-Spinpolarisation, CPU, Broyden, `docs/SPIN_POLARISATION.md`) legt den O2-Triplett unter den Singulett; ohne die Option bleibt `-spin N` ein Orbitalsatz mit zwei Fermi-Besetzungen (Triplett über Singulett, O2 +1,65 kcal/mol). `-spin` gilt global (kein Spin pro Fragment).
+  Offen: ROCm/Vulkan (heute Fehler; CUDA-Pfad seit 2026-11-22, host-getriebene Geräteschleife, mechanisch nach `rocm/xtb_hip_context.hip` portierbar, siehe docs/SPIN_POLARISATION.md Abschnitt GPU), voll geräteresidente Schleife mit Spinpolarisation (CUDA), `-large_system_mode`, DIIS/Level-Shift, `-scf_precond` mit Spinpolarisation (heute Fehler); Zitat und LGPL-Lizenzfrage der Konstanten (`parameters/spin_constants.hpp`, Operator); tblite-Pin in `CMakeLists.txt` hat alte Konstanten; mehrere SCF-Lösungen, bei 300 K oft > 500 Broyden-Zyklen.
 - **PLUMED-Hilfeseiten überarbeiten** (2026-11-10, Branch `feature/plumed-help-page`, Stash-Stand vom 01.06., Basis `25d4d8d7`): `-help-plumed` und der SimpleMD-Hinweis darauf doppeln `-help metadynamics` (`printMetadynamicsHelp()` in `src/main.cpp`) und `docs/PLUMED_HELP.md`; zusammenführen, auf den aktuellen Stand bringen.
   Nur die Hilfetexte übernehmen: die Einheitenänderungen des Branches (Bohr-Positionen, kB*T, `setBox`) sind älter als `07e7544d`/`96c29c50` und würden sie teilweise zurückdrehen.
 
@@ -341,6 +359,8 @@ Offen, Aufrufer vor dem Löschen erneut suchen:
 - `test_cases/cli/*/run_test.sh` (81 getrackte Dateien) sind erzeugte Kopien mit altem `PROJECT_ROOT` (`claude_curcuma`); ctest benutzt die im Build erzeugten. Prüfen, ob sie aus git entfernt werden können (`.gitignore`).
 - `xtb_cpscf` schlägt fehl (Gruppe C: H2 response 8.2e-5 gegen 1e-6, H2O/HCN isolation 1.7e-4/2.9e-4 gegen 1.5e-4); identisch im Stand vor dem Debt-Branch.
 - PARAM `gfnff.accuracy` (loose|normal|medium|high) bleibt: kein Leser bis jetzt, soll mit den Genauigkeitsprofilen (Eintrag oben) eine Bedeutung bekommen. Nicht entfernen; der Hilfetext sagt bis dahin "no effect".
+
+- Restliche Tabellen-Duplikate: `d4_ncoord.cpp` (`rad`, `en`, verbatim cpp-d4, Pauling-EN gleich `element_tables.h` fuer Z <= 86) und die Device-Kopien in `cuda/`/`rocm/` (laden die Host-Tabellen, nicht geprueft); Konsolidierung nur mit GPU-Test.
 
 ## 8. Aus der alten Liste entfernt (überholt oder erledigt)
 

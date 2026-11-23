@@ -35,6 +35,21 @@ namespace Constants {
     constexpr double BOLTZMANN_HARTREE_K = 3.1668115634556e-6; // Eh/K
     constexpr double BOLTZMANN_SI = 1.380649e-23; // J/K
     constexpr double BOLTZMANN_EV_K = 8.617333262e-5; // eV/K
+    // Gas constant, kJ/(mol K) (CODATA 2018: N_A kB)
+    constexpr double GAS_CONSTANT_KJ_MOL_K = 8.314462618e-3;
+    // kB in Eh/K as written in xtb and tblite (3.166808578545117e-6 there; the SCF smearing of the native
+    // GFN1/GFN2 uses the 7-digit value 3.166808e-6 so that energies stay at the 1e-8 Eh level of tblite).
+    // A reference-matching value, deliberately NOT CODATA 2018 (3.1668115634556e-6): do not replace it.
+    constexpr double BOLTZMANN_HARTREE_K_XTB = 3.166808e-6; // Eh/K
+    // CODATA 2018 kB in Eh/K, or `legacy` in a USE_LEGACY_UNIT_CONSTANTS build (Claude Generated, Nov 2026).
+    inline constexpr double boltzmann_hartree_or_legacy([[maybe_unused]] double legacy)
+    {
+#ifdef CURCUMA_LEGACY_UNIT_CONSTANTS
+        return legacy;
+#else
+        return BOLTZMANN_HARTREE_K;
+#endif
+    }
 
     // Avogadro's number
     constexpr double AVOGADRO = 6.02214076e23; // mol^-1

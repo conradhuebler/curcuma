@@ -90,9 +90,7 @@ public:
 
     // Individual parameter accessors
     double getC6(int atom_i, int atom_j, int ref_i = 0, int ref_j = 0) const;
-    double getR4OverR2(int atom) const;
     double getSqrtZr4r2(int atom) const;
-    double getAtomicPolarizability(int atom, int frequency_index = 1) const;
 
     // Claude Generated (Jan 31, 2026): Set topology charges for zeta scaling
     // Reference: Fortran gfnff_ini.f90:789 - f1 = zeta(ati, topo%qa(i))
@@ -181,7 +179,6 @@ public:
 
     // Claude Generated (March 2026): GPU dc6dcn Phase 2 — expose weight arrays
     const std::vector<std::vector<double>>& getGaussianWeights() const { return m_gaussian_weights; }
-    const std::vector<std::vector<double>>& getGaussianWeightDerivatives() const { return m_gaussian_weight_derivatives; }
     const std::vector<double>& getC6FlatCache() const { return m_c6_flat_cache; }
     const std::vector<int>& getRefN() const { return m_refn; }
     const std::vector<std::vector<double>>& getRefCN() const { return m_refcn; }
@@ -301,7 +298,6 @@ public:
 
     // Non-owning access to the EEQ solver that produced m_eeq_charges, so the
     // q-response path can reuse its cached factorisation for dq/dx (Phase 2).
-    EEQSolver* getEEQSolver() const { return m_eeq_solver.get(); }
     const Vector& getEEQCharges() const { return m_eeq_charges; }
 
     // Claude Generated (2026): D4 q-response chain rule (AP ∂q/∂x, Phase 2)
@@ -310,7 +306,6 @@ public:
     // m_eeq_charges from D4ChargeModel — a single smooth linear system whose
     // dq/dx has a closed form. GFN-FF leaves this off (uses topology charges).
     void setUseD4SingleShotEEQ(bool on) { m_use_d4_single_shot_eeq = on; }
-    bool usesD4SingleShotEEQ() const { return m_use_d4_single_shot_eeq; }
 
     // Claude Generated (2026): use the dftd4 EN-weighted covalent CN (no log-cap)
     // for the D4 C6 interpolation instead of the GFN-FF erf-CN. GFN2 turns this
@@ -324,7 +319,6 @@ public:
             m_c6_reference_cached = false;
         }
     }
-    bool usesD4CovalentCN() const { return m_use_d4_covalent_cn; }
 
     // Accumulate the D4 charge-response gradient Σ_A dEdq(A)·∂q_A/∂R into
     // grad_out (Hartree/Bohr). Valid only when the single-shot EEQ model was
@@ -340,19 +334,13 @@ public:
     // inserts/pair) plus an OpenMP spawn that is pure overhead for it. GFN-FF
     // leaves this on; its ForceFieldThread consumes m_parameters["d4_dispersion_pairs"].
     void setBuildPairLists(bool on) { m_build_pair_lists = on; }
-    bool buildsPairLists() const { return m_build_pair_lists; }
 
     // Claude Generated (Apr 2026): P1a — CN-change threshold cache for Gaussian weights
     // Skip recomputation of gw/dgw/dc6dcn when CN changes < d4_cn_cache_threshold (MD optimization)
     bool canSkipGaussianWeightsUpdate(const std::vector<double>& new_cn) const;
-    void recordCNValues(const std::vector<double>& cn);
 
 private:
     void initializeReferenceData();
-    void calculateFrequencyDependentPolarizabilities();
-
-    // OLD: Crude neutral-atom approximation (deprecated)
-    double getEffectiveC6(int atom_i, int atom_j) const;
 
     // Claude Generated (Dec 27, 2025): Weight caching optimization
     void precomputeGaussianWeights(CxxThreadPool* pool = nullptr, int num_threads = 1);

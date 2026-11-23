@@ -480,6 +480,40 @@ public:
         const std::vector<double>& rhs_constraints,
         double cutoff_sq = 0.0);
 
+    /// Host LAPACK dsytrs (uplo 'U', one right-hand side) on a dsytrf factor: EEQSolver::hostSytrsUpper,
+    /// handed in by the wrapper so that the device TU needs no LAPACK of its own. Claude Generated (Nov 2026).
+    using HostSytrsFn = bool (*)(int n, const double* factor, const int* ipiv, double* rhs);
+
+    /**
+     * @brief The linear solve of the Fortran reference on the augmented EEQ system
+     *        (-eeq_solver.solve_method sytrf). Claude Generated (Nov 2026), AI-generated.
+     *
+     * Same semantics as the CPU sytrf (EEQSolver::dispatchSolve, solveAugmentedSytrfUpper): the
+     * augmented matrix [A C^T; C 0] of order M = N + nfrag is built on the device (column-major, both
+     * triangles, the element formula of the dense paths), factorised by Bunch-Kaufman LDL^T with
+     * uplo upper, and solved for the one right-hand side [b_atoms; Q_frag]. Refactorised on every call.
+     *   - CUDA: cusolverDnDsytrf (upper) + cusolverDnXsytrs (upper, nrhs 1) on the device.
+     *     compiled as a translation unit (nvcc 13.4), not linked into a plugin, NOT run (no CUDA device): see
+     *     docs/EEQ_SOLVER_CONTROL.md. `host_sytrs` is ignored.
+     *   - ROCm: rocsolver_dsytrf (upper) on the device; rocSOLVER has no sytrs, so the factor
+     *     (M x M) and the pivots are copied to the host and solved there with `host_sytrs`
+     *     (O(M^2) per call plus an M^2 download): a reference path, not a performance path.
+     * Needs uploadFragmentTopology() (0-based atom -> fragment map on the device) and keeps an
+     * M x M device matrix for the lifetime of the solver.
+     * On success: charges in d_rhs[0..N-1] (getDeviceChargesPtr()). Returns false on an invalid
+     * topology, a too large system (M*M > INT_MAX), info != 0, or (ROCm) host_sytrs == nullptr or
+     * host_sytrs failing (core without LAPACK).
+     */
+    bool solveWithDeviceRHSAndAugmentedSytrf(
+        int natoms, int nfrag,
+        const double* cx, const double* cy, const double* cz,
+        const double* d_alpha,
+        const double* d_gam,
+        const double* d_rhs_atoms,
+        const std::vector<double>& rhs_constraints,
+        double cutoff_sq,
+        HostSytrsFn host_sytrs);
+
 private:
     std::unique_ptr<EEQSolverGPUImpl> m_impl;
     int m_max_natoms;

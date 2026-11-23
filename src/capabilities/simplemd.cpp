@@ -1078,6 +1078,16 @@ bool SimpleMD::Initialise()
         ec_config["output_dir"] = OutputDir();
     }
 
+    // Claude Generated (Nov 2026): SCC extrapolation (ASPC) is the default for MD with native GFN1/GFN2, as it
+    // already is for ConfSearch children (confsearch.cpp). An MD is a smooth geometry series: ASPC takes the
+    // iterations per step from about 9.9 to 7.8 on `complex` (231 atoms) and leaves the converged fixpoint
+    // unchanged; docs/SQM_SCF_EXTRAPOLATION.md has the NVE drift check. The global default stays 'none' (-sp has no
+    // history). An explicit -scf_extrapolation / -xtb.scf_extrapolation (also 'none') wins.
+    if ((m_method == "gfn2" || m_method == "gfn1")
+        && !ec_config.contains("scf_extrapolation")
+        && !(ec_config.contains("xtb") && ec_config["xtb"].is_object() && ec_config["xtb"].contains("scf_extrapolation")))
+        ec_config["xtb"]["scf_extrapolation"] = "aspc";
+
     // RATTLE builds its constraint list once at initialisation and cannot follow a
     // bond topology that changes during the run: refuse the combination with the
     // GFN-FF react topology mode instead of constraining bonds that no longer exist.

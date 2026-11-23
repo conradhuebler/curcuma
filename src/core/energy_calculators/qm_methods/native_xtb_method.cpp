@@ -13,6 +13,12 @@
 
 #include "src/tools/general.h"          // MergeJson
 #include "src/core/curcuma_logger.h"
+#include "src/core/solvation/ddcosmo.h"
+#include "src/core/citation_registry.h"
+#include "src/core/energy_calculators/ff_methods/alpb_parameters.h"
+
+#include <cstdio>
+#include <cstdlib>
 
 #include <fmt/format.h>
 #include <algorithm>
@@ -29,6 +35,15 @@ NativeXtbMethod::NativeXtbMethod(MethodType method, const json& config)
 {
     m_parameters = MergeJson(getDefaultConfig(method), config);
     m_xtb = std::make_unique<curcuma::xtb::XTB>(method);
+    // CPCM-X (Claude Generated, Nov 2026): a second solver for the conductor COSMO SCF; m_xtb stays in the gas phase.
+    m_cpcmx = (curcuma::xtb::solventModelCode(scopedString("solvent_model", "none")) == 5);
+    if (m_cpcmx) {
+        m_xtb_conductor = std::make_unique<curcuma::xtb::XTB>(method);
+        m_cpcmx_solvent = curcuma::solvation::cpcmx::solventName(scopedString("solvent", "none"));
+        if (method == MethodType::GFN1)   // same warning as xtb prog/main.F90
+            CurcumaLogger::warn("CPCM-X was parametrized for GFN2-xTB. The results are probably inaccurate with other methods.");
+        CitationRegistry::cite("cpcm_x", getMethodName());
+    }
     applyConfig();
 
     if (CurcumaLogger::get_verbosity() >= 2)
@@ -47,12 +62,15 @@ json NativeXtbMethod::getDefaultConfig(MethodType method)
     // The SCF iteration limit is not set here: XTB keeps its own default (150), changed
     // only by scf_max_iterations (module scf) or -xtb.max_iterations (applyXtbScfConfig).
     json cfg = {
-        { "scf_threshold", 1.0e-5 },    // Convergence threshold on max|dq_shell|.
-                                         // Energy bit-identical to 1e-6 (<1e-8 Eh) but
-                                         // converges ~10-20% fewer iterations. The default
-                                         // eeq D4 gradient is insensitive; MD/opt or the
-                                         // opt-in mulliken response may tighten via
-                                         // -scf_threshold.
+        { "scf_threshold", 2.0e-5 },    // Convergence threshold on max|dq_shell| (2e-5 since
+                                         // Nov 2026, was 1e-5). Energy error < 0.01 uEh, rms
+                                         // force error 5e-4 mEh/A on complex(231); ~6% fewer
+                                         // iterations than 1e-5. The default eeq D4 gradient
+                                         // is insensitive; MD/opt or the opt-in mulliken
+                                         // response may tighten via -scf_threshold.
+                                         // See docs/SCF_THRESHOLD_2026-11.md.
+        { "scf_criterion", "default" },  // default | xtb (xtb 6.7.1 convergence rule, CPU loop)
+        { "scf_accuracy", 1.0 },         // factor on the xtb limits (scf_criterion xtb)
         { "scf_damping", 0.4 },          // Density damping factor
         { "scf_mode", "broyden" },       // broyden(default) | diis | plain | level-shift
         { "scf_guess", "eeq" },          // Initial charge guess: eeq(default) | h0
@@ -108,6 +126,44 @@ void NativeXtbMethod::applyConfig()
     // SCF-convergence settings (mode, guess, damping, DIIS, level shift) from the
     // controller, reading the "xtb" scope with a top-level fallback.
     curcuma::xtb::applyXtbScfConfig(*m_xtb, m_parameters);
+
+    // CPCM-X: the conductor solver gets the same settings with solvent_model cpcmx (conductor COSMO set), the main
+    // solver runs in the gas phase (xtb: cpxcalc = calc without solvation). Claude Generated (Nov 2026).
+    if (m_cpcmx && m_xtb_conductor) {
+        m_xtb_conductor->setD4ChargeSource(d4src);
+        curcuma::xtb::applyXtbScfConfig(*m_xtb_conductor, m_parameters);
+        m_xtb_conductor->setSolventModel(5);
+        m_xtb->setSolvent("none");
+        m_xtb->setSolventModel(0);
+        m_xtb->setSolventEpsilon(-1.0);
+    }
+}
+
+std::string NativeXtbMethod::scopedString(const char* key, const std::string& fallback) const
+{
+    const json* v = nullptr;
+    if (m_parameters.contains("xtb") && m_parameters["xtb"].is_object() && m_parameters["xtb"].contains(key))
+        v = &m_parameters["xtb"][key];
+    else if (m_parameters.contains(key))
+        v = &m_parameters[key];
+    if (!v) return fallback;
+    if (v->is_string()) return v->get<std::string>();
+    if (v->is_number()) return v->dump();
+    return fallback;
+}
+
+bool NativeXtbMethod::scopedBool(const char* key, bool fallback) const
+{
+    const json* v = nullptr;
+    if (m_parameters.contains("xtb") && m_parameters["xtb"].is_object() && m_parameters["xtb"].contains(key))
+        v = &m_parameters["xtb"][key];
+    else if (m_parameters.contains(key))
+        v = &m_parameters[key];
+    if (!v) return fallback;
+    if (v->is_boolean()) return v->get<bool>();
+    if (v->is_number()) return v->get<double>() != 0.0;
+    if (v->is_string()) return *v == "true" || *v == "1";
+    return fallback;
 }
 
 void NativeXtbMethod::handleError(const std::string& operation)
@@ -140,6 +196,17 @@ std::string NativeXtbMethod::scfPrecondString() const
     if (m_parameters.contains("scf_precond") && m_parameters["scf_precond"].is_string())
         return m_parameters["scf_precond"].get<std::string>();
     return "none";
+}
+
+bool NativeXtbMethod::spinPolarizationRequested() const
+{
+    if (m_parameters.contains("xtb") && m_parameters["xtb"].is_object()
+        && m_parameters["xtb"].contains("spin_polarization")) {
+        const json& v = m_parameters["xtb"]["spin_polarization"];
+        return v.is_boolean() ? v.get<bool>() : (v.is_number() && v.get<double>() != 0.0);
+    }
+    const json v = m_parameters.value("spin_polarization", json(false));
+    return v.is_boolean() ? v.get<bool>() : (v.is_number() && v.get<double>() != 0.0);
 }
 
 double NativeXtbMethod::electronicTemperature() const
@@ -181,6 +248,20 @@ bool NativeXtbMethod::setMolecule(const Mol& mol)
         // fragmentation driver (it owns its own per-fragment XTB instances).
         const std::string mode_str = largeSystemModeString();
         const auto mode = curcuma::xtb::parseLargeSystemMode(mode_str);
+        if (m_cpcmx && mode != curcuma::xtb::LargeSystemMode::None) {
+            m_has_error = true;
+            m_error_message = "solvent_model cpcmx is not available with -large_system_mode " + mode_str;
+            return false;
+        }
+        // spin_polarization is CPU/dense-SCF only (Claude Generated, Nov 2026): the large-system drivers
+        // run one SCF per fragment with spin 0 and would drop it silently.
+        if (mode != curcuma::xtb::LargeSystemMode::None && mol.m_spin > 0.0 && spinPolarizationRequested()) {
+            m_has_error = true;
+            m_error_message = fmt::format("{}: spin_polarization with -spin {} is not implemented for "
+                                          "-large_system_mode {} (dense CPU Broyden SCF only)",
+                                          getMethodName(), static_cast<int>(std::lround(mol.m_spin)), mode_str);
+            return false;
+        }
         if (mode != curcuma::xtb::LargeSystemMode::None) {
             // Hard-error: large_system_mode=fragments|dc + -eigensolver=purify
             // requires -electronic_temperature 0 (purification is 0-K by
@@ -239,6 +320,14 @@ bool NativeXtbMethod::setMolecule(const Mol& mol)
             if (m_xtb->solventName() != "none" && !m_xtb->solventName().empty()) {
                 err = "native " + getMethodName() + " with a unit cell: implicit solvation is not periodic";
             }
+            // Merge of spin polarisation and CPCM-X (Nov 2026): neither has a periodic implementation; never a silent
+            // vacuum or non-periodic spin energy.
+            if (err.empty() && m_cpcmx) {
+                err = "native " + getMethodName() + " with a unit cell: CPCM-X solvation is not periodic";
+            }
+            if (err.empty() && spinPolarizationRequested()) {
+                err = "native " + getMethodName() + " with a unit cell: spin_polarization has no periodic implementation";
+            }
             if (err.empty() && !m_xtb->setPeriodicCell(mol.m_unit_cell, err)) { /* message in err */ }
             if (!err.empty()) {
                 m_has_error = true;
@@ -251,6 +340,25 @@ bool NativeXtbMethod::setMolecule(const Mol& mol)
                                                 "Ewald Coulomb; AI-generated, machine-tested, docs/WP-PERIODIC-XTB.md)",
                                                 getMethodName(), mol.m_unit_cell(0, 0), mol.m_unit_cell(1, 1),
                                                 mol.m_unit_cell(2, 2)));
+        }
+
+        if (m_cpcmx) {
+            if (!m_xtb_conductor->QMInterface::InitialiseMolecule(mol)) {
+                handleError(m_xtb_conductor->hasError() ? m_xtb_conductor->errorMessage()
+                                                        : std::string("CPCM-X conductor COSMO initialization"));
+                return false;
+            }
+            if (!m_cpcmx_solvent_data) {   // solvent sigma segments from the database, once per method object
+                const std::string dir = curcuma::solvation::cpcmx::findDatabase(scopedString("cpcmx_db", ""));
+                auto data = std::make_unique<curcuma::solvation::cpcmx::Molecule>();
+                std::string err;
+                if (dir.empty() || !curcuma::solvation::cpcmx::loadSolvent(dir, m_cpcmx_solvent, *data, err)) {
+                    m_has_error = true;
+                    m_error_message = dir.empty() ? std::string("CPCM-X solvent database not found (set -xtb.cpcmx_db)") : err;
+                    return false;
+                }
+                m_cpcmx_solvent_data = std::move(data);
+            }
         }
         return true;
 
@@ -284,6 +392,10 @@ bool NativeXtbMethod::updateGeometry(const Matrix& geometry)
 
         if (!m_xtb->UpdateMolecule(geometry)) {
             handleError("geometry update");
+            return false;
+        }
+        if (m_xtb_conductor && !m_xtb_conductor->UpdateMolecule(geometry)) {
+            handleError("CPCM-X conductor geometry update");
             return false;
         }
         return true;
@@ -321,6 +433,20 @@ double NativeXtbMethod::calculateEnergy(bool gradient)
         // up the configuration (D4 charge source + SCF convergence settings).
         applyConfig();
 
+        if (m_cpcmx) {
+            // xtb has no CPCM-X gradient either (cpx.F90 computes energies only); refuse instead of returning the
+            // gas-phase gradient with a solvated energy.
+            if (gradient) {
+                m_has_error = true;
+                m_error_message = "solvent_model cpcmx has no analytic gradient (as xtb --cpcmx): single points only "
+                                  "(-sp without -dump_gradient); for -opt, -md, -hessian use cosmo, cpcm or alpb";
+                return 0.0;
+            }
+            m_last_energy = calculateCpcmx();
+            m_calculation_done = !m_has_error;
+            return m_has_error ? 0.0 : m_last_energy;
+        }
+
         m_last_energy = m_xtb->Calculation(gradient);
         m_calculation_done = true;
 
@@ -350,6 +476,93 @@ double NativeXtbMethod::calculateEnergy(bool gradient)
         handleError(fmt::format("energy calculation: {}", e.what()));
         return 0.0;
     }
+}
+
+/**
+ * CPCM-X single point as xtb 6.7.1 --cpcmx (prog/main.F90 + solv/cpx.F90):
+ *   1. SCF in the conductor COSMO set (xtb --cosmo inf): E_COSMO and the surface segments (xtb.cosmo)
+ *   2. gas-phase SCF: E_gas (xtb: singlepoint of the calculator without solvation)
+ *   3. post-SCF CPCM-X: average_charge, init_bonding, solv('crs', 298.15 K, 500 cycles, 1e-4 kcal/mol),
+ *      state_correction, cds(probe 0.4); E = E_gas + dG_solv.
+ * Claude Generated (Nov 2026).
+ */
+double NativeXtbMethod::calculateCpcmx()
+{
+    namespace cx = curcuma::solvation::cpcmx;
+    const double e_cond = m_xtb_conductor->Calculation(false);
+    if (m_xtb_conductor->hasError()) {
+        handleError("CPCM-X conductor SCF: " + m_xtb_conductor->errorMessage());
+        return 0.0;
+    }
+    const auto* cosmo = dynamic_cast<const DdCosmoSolvation*>(m_xtb_conductor->solvationModel());
+    DdCosmoSolvation::Segments seg;
+    if (!cosmo || !cosmo->segments(m_xtb_conductor->getCharges(), seg)) {
+        handleError("CPCM-X: no conductor COSMO segments");
+        return 0.0;
+    }
+    const double e_gas = m_xtb->Calculation(false);
+    if (m_xtb->hasError()) {
+        handleError("CPCM-X gas-phase SCF: " + m_xtb->errorMessage());
+        return 0.0;
+    }
+
+    // Diagnostic dump (env CURCUMA_CPCMX_DUMP=<file>): the segment lines of xtb's xtb.cosmo (cosmo.f90 writeCosmoFile
+    // format '(2i5, 7(1x, f14.9))') for a line-by-line comparison with xtb --cpcmx. No effect on the result.
+    if (const char* dump = std::getenv("CURCUMA_CPCMX_DUMP"); dump && *dump) {
+        if (std::FILE* f = std::fopen(dump, "w")) {
+            const double autoaa = ALPBParameters::autoaa;
+            for (size_t i = 0; i < seg.atom.size(); ++i)
+                std::fprintf(f, "%5zu%5d %14.9f %14.9f %14.9f %14.9f %14.9f %14.9f %14.9f\n", i + 1, seg.atom[i] + 1,
+                             seg.position(0, i), seg.position(1, i), seg.position(2, i), seg.charge(i), seg.area(i),
+                             seg.charge(i) / seg.area(i), seg.potential(i) / autoaa);
+            std::fclose(f);
+        }
+    }
+
+    cx::ConductorData data;
+    data.segment_atom = seg.atom;
+    data.segment_xyz = seg.position;
+    data.charge = seg.charge;
+    data.area = seg.area;
+    data.potential = seg.potential;
+    data.z = m_molecule.m_atoms;
+    data.atom_xyz = seg.atom_position.transpose();
+    data.energy = e_cond;
+    cx::Molecule solute = cx::soluteFromConductor(data, scopedBool("cpcmx_reference_rounding", true));
+    solute.energy_gas = e_gas;
+    cx::Molecule solvent = *m_cpcmx_solvent_data;
+    std::string err;
+    cx::OxygenRadiusRule rule;
+    if (!cx::parseOxygenRadiusRule(scopedString("cpcmx_smd_oxygen_radius", "atom8"), rule)) {
+        handleError("CPCM-X: unknown cpcmx_smd_oxygen_radius '" + scopedString("cpcmx_smd_oxygen_radius", "")
+                    + "' (atom8, oxygen or none)");
+        return 0.0;
+    }
+    if (!cx::calculate(solute, solvent, m_cpcmx_solvent, 298.15, 500, 1.0e-4, 0.4, rule, m_cpcmx_result, err)) {
+        handleError(err);
+        return 0.0;
+    }
+    m_cpcmx_conductor_energy = e_cond;
+    m_cpcmx_gas_energy = e_gas;
+    const auto& r = m_cpcmx_result;
+    const double total = e_gas + r.dG();
+    constexpr double kcal = 627.509;   // CPCM-X autokcal
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info(fmt::format("CPCM-X post-SCF solvation ({}, xtb parameter set, port of CPCM-X 1.1.0)", m_cpcmx_solvent));
+        CurcumaLogger::param("conductor COSMO energy", fmt::format("{:.10f} Eh ({} segments)", e_cond, seg.atom.size()));
+        CurcumaLogger::param("Ideal state (dG_IS)", fmt::format("{:.10f} Eh {:.5f} kcal/mol", r.dG_is, r.dG_is * kcal));
+        CurcumaLogger::param("Averaging correction (dG_av)", fmt::format("{:.10f} Eh {:.5f} kcal/mol", r.dG_cc, r.dG_cc * kcal));
+        CurcumaLogger::param("Restoring free energy (dG_res)", fmt::format("{:.10f} Eh {:.5f} kcal/mol", r.dG_res, r.dG_res * kcal));
+        CurcumaLogger::param("SMD contribution (dG_CDS)", fmt::format("{:.10f} Eh {:.5f} kcal/mol", r.dG_smd, r.dG_smd * kcal));
+        CurcumaLogger::param("Standard state correction (dG_corr)", fmt::format("{:.10f} Eh {:.5f} kcal/mol", r.dG_ss, r.dG_ss * kcal));
+        CurcumaLogger::param("Empirical shift (dG_shift)", fmt::format("{:.10f} Eh", r.dG_shift));
+        CurcumaLogger::param("solvent profile cycles / N_ring", fmt::format("{} / {}", r.solvent_iterations, r.near));
+    }
+    if (CurcumaLogger::get_verbosity() >= 1)
+        CurcumaLogger::result(fmt::format("CPCM-X ({}): dG_solv = {:.10f} Eh ({:.5f} kcal/mol), E_gas = {:.10f} Eh, "
+                                          "total free energy = {:.10f} Eh",
+                                          m_cpcmx_solvent, r.dG(), r.dG() * kcal, e_gas, total));
+    return total;
 }
 
 // ---------------------------------------------------------------------------
@@ -454,7 +667,22 @@ json NativeXtbMethod::getEnergyDecomposition() const
     if (m_c1_driver)
         return m_calculation_done ? m_c1_driver->getEnergyDecomposition() : json{};
     if (!m_calculation_done || !m_xtb) return json{};
-    try { return m_xtb->getEnergyDecomposition(); } catch (const std::exception&) { return json{}; }
+    try {
+        json d = m_xtb->getEnergyDecomposition();
+        if (m_cpcmx && m_calculation_done) {   // CPCM-X contributions (Eh); the other terms are those of the gas phase
+            const auto& r = m_cpcmx_result;
+            d["cpcmx_dG_is"] = r.dG_is;
+            d["cpcmx_dG_av"] = r.dG_cc;
+            d["cpcmx_dG_res"] = r.dG_res;
+            d["cpcmx_dG_cds"] = r.dG_smd;
+            d["cpcmx_dG_ss"] = r.dG_ss;
+            d["cpcmx_dG_shift"] = r.dG_shift;
+            d["cpcmx_dG_solv"] = r.dG();
+            d["cpcmx_E_gas"] = m_cpcmx_gas_energy;
+            d["cpcmx_E_conductor"] = m_cpcmx_conductor_energy;
+        }
+        return d;
+    } catch (const std::exception&) { return json{}; }
 }
 
 bool NativeXtbMethod::saveToFile(const std::string& filename) const

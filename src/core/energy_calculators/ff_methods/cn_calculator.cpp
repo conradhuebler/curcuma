@@ -6,6 +6,7 @@
  */
 
 #include "src/core/units.h"
+#include "src/core/element_tables.h"
 #include "cn_calculator.h"
 #include "gfnff_par.h"  // gfnff_cn_rcov_bohr: the one CN radius source (Sep 2026)
 #include "src/core/curcuma_logger.h"
@@ -26,22 +27,8 @@
 // Reference: gfnff_param.f90:381-405 (covalentRadD3 base values before *aatoau*4/3 scaling)
 // Used for D3 CN calculation (with 4/3 scaling applied in calculateGFNFFCN)
 // Claude Generated (Feb 16, 2026): Extended from 18 to 86 elements to fix Z>18 CN=0 bug
-const std::vector<double> CNCalculator::COVALENT_RADII = {
-    0.32, 0.46,                                                 // H, He
-    1.20, 0.94, 0.77, 0.75, 0.71, 0.63, 0.64, 0.67,           // Li-Ne
-    1.40, 1.25, 1.13, 1.04, 1.10, 1.02, 0.99, 0.96,           // Na-Ar
-    1.76, 1.54,                                                 // K, Ca
-    1.33, 1.22, 1.21, 1.10, 1.07, 1.04, 1.00, 0.99, 1.01, 1.09, // Sc-Zn
-    1.12, 1.09, 1.15, 1.10, 1.14, 1.17,                        // Ga-Kr
-    1.89, 1.67,                                                 // Rb, Sr
-    1.47, 1.39, 1.32, 1.24, 1.15, 1.13, 1.13, 1.08, 1.15, 1.23, // Y-Cd
-    1.28, 1.26, 1.26, 1.23, 1.32, 1.31,                        // In-Xe
-    2.09, 1.76,                                                 // Cs, Ba
-    1.62, 1.47, 1.58, 1.57, 1.56, 1.55, 1.51,                  // La-Eu
-    1.52, 1.51, 1.50, 1.49, 1.49, 1.48, 1.53,                  // Gd-Yb
-    1.46, 1.37, 1.31, 1.23, 1.18, 1.16, 1.11, 1.12, 1.13, 1.32, // Lu-Hg
-    1.30, 1.30, 1.36, 1.31, 1.38, 1.42                         // Tl-Rn
-};
+const std::vector<double> CNCalculator::COVALENT_RADII(std::begin(CurcumaElements::COVALENT_RAD_2009_ANGSTROM),
+                                                          std::end(CurcumaElements::COVALENT_RAD_2009_ANGSTROM));
 
 std::vector<double> CNCalculator::calculateD3CN(
     const std::vector<int>& atoms,

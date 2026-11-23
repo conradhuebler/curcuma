@@ -92,6 +92,51 @@ public:
         return true;
     }
 
+    // ---- Spin polarisation (Claude Generated, Nov 2026; docs/SPIN_POLARISATION.md) -------
+    // Alpha: Fock with v - u, then its eigenvectors are kept in dCa; beta: Fock with v + u (dC).
+    bool supportsSpinPolarization() const override { return true; }
+
+    bool solveSpin(const Eigen::VectorXd& v_ao, const Eigen::VectorXd& u_ao,
+                   const Eigen::MatrixXd* v_dp, const Eigen::MatrixXd* v_qp,
+                   Vector& eps_a, Vector& eps_b, bool fp32) override
+    {
+        if (!m_ctx || static_cast<int>(v_ao.size()) != m_n || static_cast<int>(u_ao.size()) != m_n) return false;
+        const bool mp = v_dp && v_qp;
+        auto one = [&](const Eigen::VectorXd& v, Vector& eps) {
+            return mp ? solveMultipole(v, *v_dp, *v_qp, eps, fp32, 0) : solve(v, eps, fp32, 0);
+        };
+        const Eigen::VectorXd va = v_ao - u_ao, vb = v_ao + u_ao;
+        return one(va, eps_a) && m_ctx->residentSpinKeepAlpha(m_n) && one(vb, eps_b);
+    }
+
+    bool densitySpin(const Eigen::VectorXd& occ_a, int ncol_a, const Eigen::VectorXd& occ_b, int ncol_b,
+                     Eigen::VectorXd& pop_ao, Eigen::VectorXd& spop_ao, double& band) override
+    {
+        if (!m_ctx || ncol_a < 0 || ncol_a > m_n || ncol_b < 0 || ncol_b > m_n) return false;
+        pop_ao.resize(m_n);
+        spop_ao.resize(m_n);
+        band = 0.0;
+        return m_ctx->residentDensitySpin(occ_a.data(), ncol_a, occ_b.data(), ncol_b, m_n,
+                                          pop_ao.data(), spop_ao.data(), &band);
+    }
+
+    bool finalizeSpin(Matrix& P, Matrix& Pm, Matrix& Ca, Matrix& Cb) override
+    {
+        if (!m_ctx || m_n <= 0) return false;
+        Eigen::MatrixXd Pcm(m_n, m_n), Pmcm(m_n, m_n), Cacm(m_n, m_n), Cbcm(m_n, m_n);
+        if (!m_ctx->residentFinalizeSpin(Pcm.data(), Pmcm.data(), Cacm.data(), Cbcm.data(), m_n)) return false;
+        reportDistributedEigensolver();
+        P = Pcm; Pm = Pmcm; Ca = Cacm; Cb = Cbcm;   // column-major -> project Matrix, values preserved
+        return true;
+    }
+
+    bool spinWeightedDensity(const Vector& we_a, int ncol_a, const Vector& we_b, int ncol_b,
+                             const Vector& u_ao) override
+    {
+        if (!m_ctx || static_cast<int>(u_ao.size()) != m_n) return false;
+        return m_ctx->spinWeightedDensity(we_a.data(), ncol_a, we_b.data(), ncol_b, u_ao.data(), m_n);
+    }
+
     // ---- GFN2 multipole (Stage 2b) ----------------------------------------
     bool supportsMultipole() const override { return true; }
 
@@ -685,6 +730,7 @@ public:
         if (!m_ctx) return false;
         return m_ctx->residentScfStep(fp32, &dq, &e_band, &e_coulomb, &e_third, &e_multipole);
     }
+    double residentLastDqSumSq() const override { return m_ctx ? m_ctx->lastDqSumSq() : -1.0; }
 
     // ---- Broyden seed preconditioner in the resident loop (Claude Generated, Oct 2026) ----
     bool supportsResidentPreconditioner() const override { return true; }
@@ -1151,8 +1197,12 @@ XtbGpuComputationalMethod::XtbGpuComputationalMethod(MethodType method, const js
         // FP64 eigensolves 4 -> 1, SCF 6.7 -> 4.5 s, energy identical to 1e-12 Eh, gradient vs
         // CPU 2.6e-6 -> 7.0e-6 Eh/A (within the loose default scf_threshold). An explicit
         // -scf_fp32_threshold (or its alias fp32_threshold) wins. See docs/MULTI_GPU.md.
+        // Claude Generated (Nov 2026): never below scf_threshold. Convergence is not accepted on an
+        // FP32 step, so a switch point under scf_threshold (1e-5 against the 2e-5 default) makes
+        // the SCF converge at the switch point and wastes the looser threshold.
         if (!cfg_has("scf_fp32_threshold") && !cfg_has("fp32_threshold"))
-            xtb->setFp32Threshold(1.0e-5);
+            xtb->setFp32Threshold(std::max(1.0e-5, xtb->scfConvergenceLimit()));
+
         if (CurcumaLogger::get_verbosity() >= 2)
             CurcumaLogger::info(fmt::format(
                 "{}: GPU device-resident SCF backend active (Broyden; "

@@ -84,7 +84,8 @@ and wins over `-scf_threshold` / `-scf.scf_threshold` (precedence: method scope,
 
 | Flag (module `scf`) | gfn1/gfn2 | pm3/am1/mndo/pm6 | Meaning |
 |---|---|---|---|
-| `-scf_threshold` | `1e-5` on max\|dq_shell\| (and dE) | `1e-6` on \|\|P_new - P\|\|_F | Convergence threshold. |
+| `-scf_threshold` | `2e-5` on max\|dq_shell\| (and dE; `1e-5` until Nov 17, 2026) | `1e-6` on \|\|P_new - P\|\|_F | Convergence threshold. |
+| `-scf_criterion` (`default`, `xtb`; module xtb) | `default` | not used | `xtb`: the xtb 6.7.1 rule, RMS of the full SCC residual / sqrt(nat) < `1e-4*acc` (GFN2) or `2e-5*acc` (GFN1), \|dE\| < `1e-6*acc`, plus one more iteration; `-scf_threshold` ignored; CPU loop only. `-scf_accuracy` is `acc` (xtb MD uses 2). |
 | `-scf_max_iterations` (`-max_iterations`, `-SCFmaxiter`) | `150` | `100` | Iteration limit; tblite/xtb/Ulysses map it onto their `max_iterations` (default 100). |
 | `-scf_damping` | `0.4` | `0.6` | Fraction of the new charges (gfn) or density (NDDO) per step: `P = d*P_new + (1-d)*P_old`; tblite maps it onto `damping`. |
 | `-scf_allow_unconverged` | `false` | `false` | Accept an SCF that hit the iteration limit (warning + last energy) instead of failing. |
@@ -98,7 +99,7 @@ Module `xtb` (gfn1/gfn2 only): `-scf_guess` (`eeq`), `-level_shift` (`0.2` Eh, `
 With `-sp` and `-opt` the flat `-max_iterations` and `-diis_start` stay with the optimiser (module `opt` owns them, they do not reach the SCF);
 use `-scf_max_iterations` and `-scf_diis_start` (the `scf_` names exist for this reason, since Oct 26, 2026). `-scf.diis_start` and `-xtb.diis_start` still work.
 
-Default `-scf_threshold 1e-5` (recorded in the PARAM help until 2026-10-26): the energy is identical to the 1e-6 run
+Default `-scf_threshold 2e-5` (1e-5 until Nov 17, 2026, see [SCF_THRESHOLD_2026-11.md](SCF_THRESHOLD_2026-11.md)): the energy is identical to the 1e-6 run
 (< 1e-8 Eh) at about 10-20 % fewer SCF iterations; the gradient with the `eeq` D4 response (the default when this was
 recorded) is insensitive to it. Tighten to 1e-6 for the `cpscf` D4 response or high-precision force work.
 
@@ -169,6 +170,10 @@ systems (use 0.1-0.2) and/or the EEQ guess; `broyden` does not.
   `xtb_gradient_{H2O,CH4,NH3}`, `d4_dedq`, `xtb_cpscf`, `cli_sqm_08_ngfn1_baseline`,
   `cli_sqm_09_ngfn2_baseline` (7/7). (`cli_sqm_11` fails only because TBLite/`ipea1`
   is not compiled in this build — unrelated.)
+
+## Open shell (`-spin N`)
+
+`-spin N` = number of unpaired electrons (`xtb_native.cpp` Z. 3151). One orbital set, two Fermi fillings (n_alpha, n_beta), no separate Fock matrices, no spin-polarisation term; triplet lies above the singlet (O2 +1.65 kcal/mol). With `-xtb.spin_polarization true` (CPU, Broyden only) two Fock matrices and the tblite spin constants are used and the O2 triplet lies below the singlet: [SPIN_POLARISATION.md](SPIN_POLARISATION.md). Measurements: [REACTION_MD_EXAMPLES.md](REACTION_MD_EXAMPLES.md), section "What `-spin` does".
 
 ## What was NOT tested
 

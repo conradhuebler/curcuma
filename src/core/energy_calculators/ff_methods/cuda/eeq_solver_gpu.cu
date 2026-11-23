@@ -3935,3 +3935,116 @@ bool EEQSolverGPU::solveWithDeviceRHSAndGPUSchurLDLT(
     finishGeneralSchur(impl, N, nfrag, rhs_constraints);
     return true;
 }
+
+// ============================================================================
+// solve_method sytrf on the device: the linear solve of the Fortran reference
+// (dsytrf + dsytrs, uplo 'U', one right-hand side) on the augmented (N+nfrag) system.
+// Claude Generated (Nov 2026). AI-generated, compiled as a translation unit (nvcc 13.4, sm_89) but never linked into a plugin and NOT run on a
+// CUDA device by its author: written as a mirror of solveWithDeviceRHSAndGPUAugmentedLU (matrix,
+// RHS, charge copy) and solveWithDeviceRHSAndGPUSchurLDLT (cusolverDnDsytrf + cusolverDnXsytrs,
+// int -> int64 pivots), with CUBLAS_FILL_MODE_UPPER instead of LOWER. See docs/EEQ_SOLVER_CONTROL.md.
+// ============================================================================
+
+bool EEQSolverGPU::solveWithDeviceRHSAndAugmentedSytrf(
+    int natoms, int nfrag,
+    const double* cx, const double* cy, const double* cz,
+    const double* d_alpha,
+    const double* d_gam,
+    const double* d_rhs_atoms,
+    const std::vector<double>& rhs_constraints,
+    double cutoff_sq,
+    HostSytrsFn /*host_sytrs: the CUDA path solves on the device*/)
+{
+    auto& impl = *m_impl;
+    if (nfrag < 1 || !impl.m_frag_topo_valid || impl.m_nfrag_batched != nfrag
+        || impl.d_atom_frag.n < natoms) {
+        CurcumaLogger::warn("EEQ GPU sytrf: fragment topology not on the device");
+        return false;
+    }
+    const int N = natoms;
+    const long long M_ll = static_cast<long long>(N) + nfrag;
+    if (M_ll * M_ll > static_cast<long long>(std::numeric_limits<int>::max())) {
+        CurcumaLogger::warn(fmt::format("EEQ GPU sytrf: augmented system too large ({} rows)", M_ll));
+        return false;
+    }
+    const int M = static_cast<int>(M_ll);
+
+    impl.orderAfterWorkspace(false);   // parity item 10
+
+    // Scratch shared with the lu (d_aug_A, d_aug_rhs) and ldlt (pivots, workspaces) paths; neither
+    // keeps a factor across calls in these buffers. d_A (cached Cholesky/LU factor) is not touched.
+    impl.d_aug_A.ensure(M * M);
+    impl.d_aug_rhs.ensure(M);
+    impl.d_ldlt_piv.ensure(M);
+    impl.d_ldlt_piv64.ensure(M);
+
+    // 1. Augmented matrix on the device (both triangles; sytrf reads the upper one).
+    {
+        const long long tot = static_cast<long long>(M) * M;
+        const int block = 256;
+        const int grid = static_cast<int>((tot + block - 1) / block);
+        k_eeq_build_augmented<<<grid, block, 0, impl.stream>>>(
+            N, M, cx, cy, cz, d_alpha, d_gam, impl.d_atom_frag.ptr, impl.d_aug_A.ptr, cutoff_sq);
+        checkCudaEEQ(cudaGetLastError(), "k_eeq_build_augmented launch (sytrf)");
+    }
+
+    // 2. RHS [b_atoms; Q_frag].
+    std::vector<double> h_q(nfrag, 0.0);
+    for (int f = 0; f < nfrag && f < static_cast<int>(rhs_constraints.size()); ++f)
+        h_q[f] = rhs_constraints[f];
+    checkCudaEEQ(cudaMemcpyAsync(impl.d_aug_rhs.ptr, d_rhs_atoms, N * sizeof(double),
+                                  cudaMemcpyDeviceToDevice, impl.stream), "D2D sytrf rhs atoms");
+    checkCudaEEQ(cudaMemcpyAsync(impl.d_aug_rhs.ptr + N, h_q.data(), nfrag * sizeof(double),
+                                  cudaMemcpyHostToDevice, impl.stream), "H2D sytrf rhs constraints");
+
+    // 3. Bunch-Kaufman LDL^T, upper triangle (LAPACK dsytrf with uplo 'U').
+    int lwork = 0;
+    checkCusolverEEQ(cusolverDnDsytrf_bufferSize(impl.cusolver_handle, M, impl.d_aug_A.ptr, M, &lwork),
+                     "sytrf_bufferSize (augmented sytrf)");
+    impl.d_ldlt_ws.ensure(std::max(1, lwork));
+    checkCusolverEEQ(cusolverDnDsytrf(impl.cusolver_handle, CUBLAS_FILL_MODE_UPPER, M, impl.d_aug_A.ptr, M,
+                                      impl.d_ldlt_piv.ptr, impl.d_ldlt_ws.ptr, std::max(1, lwork),
+                                      impl.d_info.ptr),
+                     "cusolverDnDsytrf (augmented sytrf)");
+    checkCudaEEQ(cudaMemcpyAsync(impl.h_info, impl.d_info.ptr, sizeof(int),
+                                  cudaMemcpyDeviceToHost, impl.stream), "D2H info (augmented sytrf)");
+    checkCudaEEQ(cudaStreamSynchronize(impl.stream), "sync after sytrf (augmented sytrf)");
+    if (*impl.h_info != 0) {
+        CurcumaLogger::warn(fmt::format("EEQ GPU sytrf: sytrf failed (info={})", *impl.h_info));
+        return false;
+    }
+    k_int_to_int64<<<(M + 255) / 256, 256, 0, impl.stream>>>(M, impl.d_ldlt_piv.ptr, impl.d_ldlt_piv64.ptr);
+    checkCudaEEQ(cudaGetLastError(), "k_int_to_int64 launch (augmented sytrf)");
+
+    // 4. sytrs, upper, one right-hand side (far below the 1024-column defect noted in the ldlt path).
+    size_t ws_dev = 0, ws_host = 0;
+    const int64_t m64 = M;
+    checkCusolverEEQ(cusolverDnXsytrs_bufferSize(impl.cusolver_handle, CUBLAS_FILL_MODE_UPPER, m64, 1,
+                                                 CUDA_R_64F, impl.d_aug_A.ptr, m64,
+                                                 reinterpret_cast<const int64_t*>(impl.d_ldlt_piv64.ptr),
+                                                 CUDA_R_64F, impl.d_aug_rhs.ptr, m64, &ws_dev, &ws_host),
+                     "Xsytrs_bufferSize (augmented sytrf)");
+    impl.d_ldlt_xs.ensure(static_cast<int>(std::max<size_t>(1, ws_dev)));
+    if (impl.h_ldlt_xs.size() < std::max<size_t>(1, ws_host)) impl.h_ldlt_xs.resize(std::max<size_t>(1, ws_host));
+    checkCusolverEEQ(cusolverDnXsytrs(impl.cusolver_handle, CUBLAS_FILL_MODE_UPPER, m64, 1,
+                                      CUDA_R_64F, impl.d_aug_A.ptr, m64,
+                                      reinterpret_cast<const int64_t*>(impl.d_ldlt_piv64.ptr),
+                                      CUDA_R_64F, impl.d_aug_rhs.ptr, m64,
+                                      impl.d_ldlt_xs.ptr, ws_dev, impl.h_ldlt_xs.data(), ws_host,
+                                      impl.d_info.ptr),
+                     "cusolverDnXsytrs (augmented sytrf)");
+    checkCudaEEQ(cudaMemcpyAsync(impl.h_info, impl.d_info.ptr, sizeof(int),
+                                  cudaMemcpyDeviceToHost, impl.stream), "D2H info (augmented sytrs)");
+    checkCudaEEQ(cudaStreamSynchronize(impl.stream), "sync after sytrs (augmented sytrf)");
+    if (*impl.h_info != 0) {
+        CurcumaLogger::warn(fmt::format("EEQ GPU sytrf: sytrs failed (info={})", *impl.h_info));
+        return false;
+    }
+
+    // 5. Charges = first N entries of [q; lambda] -> d_rhs[0..N-1] (getDeviceChargesPtr()).
+    if (impl.d_rhs.n < N) impl.d_rhs.alloc(N);
+    checkCudaEEQ(cudaMemcpyAsync(impl.d_rhs.ptr, impl.d_aug_rhs.ptr, N * sizeof(double),
+                                  cudaMemcpyDeviceToDevice, impl.stream), "D2D sytrf charges");
+    checkCudaEEQ(cudaStreamSynchronize(impl.stream), "sync after augmented sytrf");
+    return true;
+}

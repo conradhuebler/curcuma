@@ -5,7 +5,7 @@ Claude Generated (Oct 2026) — 🤖 AI-generated, ⚙️ machine-tested (`cli_g
 ## Rule
 
 `-gfnff.solve_method NAME` (flat `-solve_method NAME`; the older spellings `-eeq_solver.solve_method NAME` and `-gfnff.solve NAME` are still
-accepted, see "Parameters" below for which wins) chooses the linear solve of the EEQ charge system. **The same names run on the CPU and, with `-gpu cuda`, on the GPU; `-gpu rocm` accepts `auto`, `cholesky` and `ppcg` (Oct 2026), `-gpu vulkan` accepts all names (GFN-FF runs on the CPU there).** An explicit name is never
+accepted, see "Parameters" below for which wins) chooses the linear solve of the EEQ charge system. **The same names run on the CPU and, with `-gpu cuda`, on the GPU; `-gpu rocm` accepts `auto`, `cholesky`, `ppcg` (Oct 2026) and `sytrf` (Nov 2026), `-gpu vulkan` accepts all names (GFN-FF runs on the CPU there).** An explicit name is never
 overridden by a size threshold.
 
 | name | algorithm | CPU | GPU (CUDA) |
@@ -17,8 +17,9 @@ overridden by a size threshold.
 | `batched` | per-fragment solves, **drops cross-fragment Coulomb**: inexact; warns when the estimated error exceeds `eeq_batched_max_error_eh` (below) | yes | WP7-B (one fragment: same as `cholesky`) |
 | `lu` | dense LU of the augmented (N+nfrag) system | yes | augmented LU, cuSOLVER getrf/getrs (Oct 2026; ROCm: error; Vulkan: CPU solver) |
 | `ldlt` | dense Bunch-Kaufman LDL^T of A_nn + Schur (`dsytrf` + `dsytrs2`) | yes | cuSOLVER `sytrf` + `Xsytrs` (in blocks of 1024 right-hand sides) + Schur (Oct 2026; ROCm: error; Vulkan: CPU solver) |
+| `sytrf` | the solve of the Fortran reference: Bunch-Kaufman `dsytrf` + `dsytrs`, uplo `'U'`, one right-hand side, on the augmented (N+nfrag) system; `auto` never takes it (Nov 2026, section below) | yes | cuSOLVER `Dsytrf` + `Xsytrs` (upper), **never run**; ROCm: device `rocsolver_dsytrf` + host `dsytrs` (reference path, not a performance path); Vulkan: CPU solver |
 
-ROCm has a device `ppcg` (Oct 2026, `has_device_ppcg`; diagonal Jacobi or, with the default `eeq_ppcg_precond localinv`, the local inverse built on the device (default, `has_localinv_device_build`) or, with `CURCUMA_LOCALINV_HOST_BUILD=1`, built on the host and uploaded as CSR (`has_localinv_upload`)) but no device `pcg`/`batched` (`has_device_schur=false`): `pcg`, `batched`, `lu`, `ldlt` with `-gpu rocm` are an error naming the valid names (`auto, cholesky, ppcg`). `cholesky` runs the dense device Cholesky of the WP2 path plus the host Schur step (verbosity 1: `cholesky ... [GPU ROCm, WP2 dense Cholesky + CPU Schur]`). `auto` and `ppcg` run the device projected PCG (`... WP7-E projected PCG, diagonal Jacobi`); with 16 or more fragments a stalled device solve uses the CPU solver for that step, and giving `-gfnff.eeq_rocm_cpu_fragment_threshold` explicitly forces the CPU solver from that fragment count on. Names checked by `eeq_gpu_supports` (no device); the device solve measured in [ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md](ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md).
+ROCm has a device `ppcg` (Oct 2026, `has_device_ppcg`; diagonal Jacobi or, with the default `eeq_ppcg_precond localinv`, the local inverse built on the device (default, `has_localinv_device_build`) or, with `CURCUMA_LOCALINV_HOST_BUILD=1`, built on the host and uploaded as CSR (`has_localinv_upload`)) but no device `pcg`/`batched` (`has_device_schur=false`): `pcg`, `batched`, `lu`, `ldlt` with `-gpu rocm` are an error naming the valid names (`auto, cholesky, ppcg, sytrf`). `cholesky` runs the dense device Cholesky of the WP2 path plus the host Schur step (verbosity 1: `cholesky ... [GPU ROCm, WP2 dense Cholesky + CPU Schur]`). `auto` and `ppcg` run the device projected PCG (`... WP7-E projected PCG, diagonal Jacobi`); with 16 or more fragments a stalled device solve uses the CPU solver for that step, and giving `-gfnff.eeq_rocm_cpu_fragment_threshold` explicitly forces the CPU solver from that fragment count on. Names checked by `eeq_gpu_supports` (no device); the device solve measured in [ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md](ROCM_PERFORMANCE_ANALYSIS_2026-10-13.md).
 
 | | CPU | CUDA | ROCm / Vulkan |
 |---|---|---|---|
@@ -58,6 +59,67 @@ device; every option of this section applies unchanged, the device EEQ solvers (
 matrix-vector product, same numbers bit for bit). Measurements, tolerance table and the choice of 1e-9:
 [WP-PERIODIC-NONBONDED.md](WP-PERIODIC-NONBONDED.md), section P1. Measured there: the matrix-free pcg is ~12x faster than the
 dense solve at 900 atoms (7 vs 84 ms); the `auto` threshold `eeq_ewald_dense_max_atoms` 1000 was left unchanged (decision open, TODO.md).
+
+## sytrf: the linear solve of the Fortran reference (Nov 2026)
+
+Claude Generated (Nov 2026): 🤖 AI-generated, ⚙️ machine-tested (`eeq_sytrf_cpu`, `eeq_sytrf_rocm`, `eeq_gpu_supports`, `cli_gfnff_06_eeq_solver_control`) on
+the CPU and on one Radeon 890M (gfx1150); the CUDA path ran once on one RTX 5080 (Nov 17, 2026: `eeq_sytrf_cuda`, GPU = CPU charges <= 7.2e-14 e on 3 structures, 5 MD steps, against the LU fallback because that build had no LAPACK path; Nov 18, 2026 after the MKL fix: against the real CPU `dsytrf`, <= 4.4e-14 e). Human production testing pending.
+
+**Reference.** Both EEQ phases of xtb and pprcht/gfnff (xtb `gfnff_ini2.f90` `goedeckera` and `gfnff_eg.f90` `goed_gfnff`; pprcht
+`gfnff_ini2.f90` and `gfnff_engrad.F90`) build the dense augmented matrix of order m = N + nfrag: A(i,i) = gam_i + sqrt(2/pi)/sqrt(alpha_i),
+A(i,j) = erf(gamma_ij r_ij)/r_ij in both triangles, rows/columns N+f equal to 1 on the atoms of fragment f, a zero nfrag x nfrag corner; right-hand
+side chi (+ cnf sqrt(CN) in Phase 2) and the fragment charges. It is solved with LAPACK `dsytrf` + `dsytrs`, uplo `'u'`, one right-hand side
+(`mctc_sytrf`/`mctc_sytrs` in xtb, `dsytrf_wrap`/`sytrs_wrap` in pprcht; both default to `'u'` and query the workspace with lwork = -1). xtb uses
+the single-precision `ssytrf` only for `accuracy > 1` and for the asymptote call; the default is double precision.
+
+**What `sytrf` does.** The same factorisation on the augmented matrix and right-hand side that curcuma's Phase 1 and Phase 2 assemble
+(`EEQSolver::dispatchSolve` -> `solveAugmentedSytrfUpper`, `eeq_solver.cpp`): a column-major copy of the matrix, `dsytrf_` with uplo `'U'` after a
+workspace query, `dsytrs_` with uplo `'U'` and one right-hand side (`EEQSolver::hostSytrsUpper`). Always FP64; the single-precision branch of the
+reference is not reproduced. It uses `dsytrs`, not the `dsytrs2` of `ldlt`, and no Schur complement. `auto` never selects it; an explicit
+`sytrf` is never overridden by a size threshold. On `info != 0`, or in a build without LAPACK (neither `USE_BLAS` nor `USE_MKL`), the solve warns and falls back
+to the augmented LU for that call. Cost: one dense factorisation of order N + nfrag per solve, no factor reuse.
+
+| backend | factorisation | solve | status |
+|---|---|---|---|
+| CPU | LAPACK `dsytrf` ('U') | LAPACK `dsytrs` ('U') | machine-tested (below) |
+| ROCm | `rocsolver_dsytrf` (`rocblas_fill_upper`) on the device | factor (m x m) and pivots copied to the host, LAPACK `dsytrs` there (`EEQSolver::hostSytrsUpper`, handed to the plugin as a function pointer), charges uploaded | **reference path, not a performance path**: m^2 doubles device -> host per solve; machine-tested on one gfx1150 |
+| CUDA | `cusolverDnDsytrf` (`CUBLAS_FILL_MODE_UPPER`) | `cusolverDnXsytrs` (upper, one right-hand side) | **AI-generated, compiled (nvcc 13.4, sm_89, the two translation units only, not linked into a plugin), NOT run** (no CUDA device) |
+
+rocSOLVER (3.32.0, ROCm 7.2.4) has `rocsolver_dsytrf` but no `sytrs`; its header documents the LAPACK storage of the factor and 1-based LAPACK
+pivots, which is what the host `dsytrs` reads. On the GPU paths a failed solve is a counted GPU fallback (`-gpu_strict true`: exit code 3) and
+the step uses the dense Cholesky path. On ROCm a system with at least `eeq_rocm_cpu_fragment_threshold` (16) fragments takes the CPU EEQ route,
+which then runs the CPU `sytrf` (from the code; not run with `sytrf`). Verbosity 1: `sytrf [CPU]` per phase, `sytrf [GPU ROCm, augmented sytrf
+(upper), host dsytrs, reference path]`, on CUDA `sytrf [GPU CUDA, augmented sytrf/sytrs (upper)]`; verbosity 3 on ROCm prints the time of
+build + factorisation, download and host solve per call.
+
+**Tested** (Nov 17, 2026; CPU build `release/` with MKL, ROCm build with the reference LAPACK `/usr/lib/liblapack.so`; one thread; one run each):
+
+| system (library id) | N | nfrag | CPU: \|E(sytrf) - E(cholesky)\| / Eh | CPU: max \|dq\| Phase 1 / Phase 2 / e | ROCm vs CPU sytrf, MD 5 steps: max \|dq\| / e |
+|---|---:|---:|---:|---:|---:|
+| caffeine | 24 | 1 | 0 | 8.9e-16 / 1.2e-15 | 5.5e-15 |
+| trisaccharide-c18h32o16 | 66 | 1 | 7.1e-15 | 8.9e-16 / 1.3e-15 | 2.3e-14 |
+| macrocycle-bgal | 231 | 2 | 3.6e-14 | 5.2e-15 / 5.3e-15 | 4.3e-14 |
+| hydronium-water2, `-charge 1` (ensemble / `frag_charge_model reference`) | 10 | 3 | 0 / 2.0e-15 | 6.7e-16 / 1.1e-15, 8.9e-16 / 7.8e-16 | - |
+| pdmaema-ab2-h2-water24-cl2.grad-defect (neutral, +2 chain, 2 Cl-) | 182 | 27 | 1.4e-14 | 5.9e-15 / 4.1e-15 | - |
+| na2cl2-isolated-ions (ctest only) | 4 | 4 | 1.0e-15 | 4.4e-16 / 4.4e-16 | - |
+| peo201-chain | 1410 | 1 | - | MD 10 steps, fixed seed: 1.3e-14 per step | 1.4e-14 |
+
+Energies from `-dump_gradient` (15 decimals), charges from `-eeq_solver.dump_charges` (single points) and `-md_diagnostics` (MD, `-md.seed 7`);
+the ROCm MD ran with `-gpu_strict true` (no GPU fallback in any run). The MD differences include the drift of the two trajectories. One
+device solve per MD step (verbosity 3, macrocycle-bgal and peo201-chain, 5 of 5 steps). Negative control: `CURCUMA_EEQ_GPU_FORCE_REJECT=1`
+makes the ROCm `sytrf` run end with exit code 3, so a failing device path is visible to `eeq_sytrf_rocm`.
+
+Cost (one run each, 1 thread, MD median per step): CPU EEQ ms/step on peo201-chain cholesky 58.5, `lu` 94.0, `sytrf` 59.0; macrocycle-bgal 0.9 /
+- / 1.0. ROCm per call (verbosity 3, 3 of 5 steps shown): m = 233 build + `rocsolver_dsytrf` 3.3-4.0 ms, download 0.08 ms, host `dsytrs`
+0.06 ms; m = 1411 282-307 ms, 0.5-0.6 ms, 2.5 ms. The `Epot_end` column of `scripts/eeq_solver_benchmark.py` MD runs is not comparable between
+solvers: the runs carry no fixed seed, and the time-based seed differs once runs start in different seconds (peo201-chain: three seeds, three
+`Epot_end`; with `-md.seed 7` the per-step charges agree to 1.3e-14 e).
+
+**Not tested:** a comparison against the Fortran programs themselves (only against curcuma's `cholesky` and between CPU and ROCm); the LU
+fallback (`info != 0` never occurred) and a build without LAPACK; ALPB solvation (Born matrix added to A), `eeq_distance_cutoff > 0`,
+`-gfnff.charge_groups`, transition metals, periodic systems, systems above 1410 atoms; ROCm with 16 or more fragments (CPU route), other AMD
+cards, multi-GPU; bitwise reproducibility; the CUDA path beyond one RTX 5080 and the three test structures. Pivot choices of `rocsolver_dsytrf` and LAPACK `dsytrf` were not
+compared directly, only the solutions.
 
 ## Parameters (module `gfnff`, category EEQ)
 
@@ -277,7 +339,7 @@ GPU MD step breakdown and the CN-list / overlap / staged-upload switches: [GFNFF
 
 ## Not tested / open
 
-- ROCm: the rejection of `pcg`/`batched`/`lu`/`ldlt` is tested by name only (`eeq_gpu_supports`); the device `ppcg` was run on one RX 9060 XT (gfx1200), see the analysis document. Vulkan runs GFN-FF on the CPU, so the CPU solvers apply.
+- ROCm: the rejection of `pcg`/`batched`/`lu`/`ldlt` is tested by name only (`eeq_gpu_supports`); `sytrf`: see its section; the device `ppcg` was run on one RX 9060 XT (gfx1200), see the analysis document. Vulkan runs GFN-FF on the CPU, so the CPU solvers apply.
 - Multi-GPU split and the batch-worker device pool were not run after this change.
 - localinv: the GPU fallbacks were triggered only through the test hooks (no natural rejection or breakdown in any run); not run with ALPB
   solvation, `eeq_distance_cutoff > 0`, transition metals, MD longer than 50 fs, optimisations, nfrag > 4096, or `eeq_localinv_ext_bohr` large

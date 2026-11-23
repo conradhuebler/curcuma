@@ -35,6 +35,7 @@
 
 #include "src/tools/bmt_utils.h"
 #include "eeq_solver.h"
+#include "src/core/periodic_table.h"
 #include "gfnff_par.h"  // EEQ parameters (chi_eeq, gam_eeq, alpha_eeq, cnf_eeq)
 #include "cn_calculator.h"  // Shared CN calculation utility
 
@@ -132,6 +133,21 @@ extern "C" {
                   const int* lda, const int* ipiv, double* b, const int* ldb, double* work, int* info);
 }
 #endif
+// Claude Generated (Nov 2026): the sytrf solver (dsytrf + dsytrs, as xtb and pprcht/gfnff) needs LAPACK. An MKL build
+// (USE_MKL, USE_BLAS off) links MKL's LAPACK as well, so it declares just these two routines and runs the solver;
+// the rest of this file keeps its USE_BLAS gating, so the numerical paths of every other solver in an MKL build stay
+// as they were (Eigen LLT, not dpotrf).
+#if defined(USE_MKL) && !defined(USE_BLAS)
+extern "C" {
+    void dsytrf_(const char* uplo, const int* n, double* a, const int* lda, int* ipiv,
+                 double* work, const int* lwork, int* info);
+    void dsytrs_(const char* uplo, const int* n, const int* nrhs, const double* a,
+                 const int* lda, const int* ipiv, double* b, const int* ldb, int* info);
+}
+#endif
+#if defined(USE_BLAS) || defined(USE_MKL)
+#define CURCUMA_EEQ_SYTRF_LAPACK 1
+#endif
 using ColMatrix = Eigen::MatrixXd;  // column-major (LAPACK layout)
 
 /// Cholesky-factorize SPD A (column-major) in place → lower factor. true on success.
@@ -216,6 +232,46 @@ inline void eeqLDLTSolve(const ColMatrix& Afac, const std::vector<int>& ipiv, Ei
     dsytrs_(&uplo, &n, &nrhs, Afac.data(), &lda, ipiv.data(), b.data(), &ldb, &info);
 }
 #endif  // USE_BLAS
+
+/// solve_method sytrf: the linear solve of the Fortran reference. Claude Generated (Nov 2026),
+/// AI-generated, machine-tested on the CPU (see docs/EEQ_SOLVER_CONTROL.md, section sytrf).
+///
+/// Both EEQ phases of the reference build the dense augmented matrix of order m = N + nfrag,
+///     [ A   C^T ] [ q      ]   [ x_atoms ]      A(i,i) = gam_i + sqrt(2/pi)/sqrt(alpha_i),
+///     [ C   0   ] [ lambda ] = [ Q_frag  ],     A(i,j) = erf(gamma_ij r_ij)/r_ij (both triangles),
+/// C(f,i) = 1 for the atoms of fragment f, and solve it with LAPACK dsytrf + dsytrs, uplo 'U',
+/// one right-hand side, FP64 (xtb gfnff_ini2.f90 goedeckera: mctc_sytrf/mctc_sytrs; gfnff_eg.f90
+/// goed_gfnff; pprcht gfnff_ini2.f90 and gfnff_engrad.F90: dsytrf_wrap/sytrs_wrap; the wrappers
+/// default to uplo 'u' and query the workspace with lwork = -1). This does the same on the matrix
+/// and right-hand side curcuma's Phase 1 / Phase 2 assemble (`A`, `x` of dispatchSolve). The
+/// single-precision branch of the reference (xtb accuracy > 1, asymptote call) is not reproduced.
+/// Returns the first natoms entries of [q; lambda]; empty on dsytrf/dsytrs info != 0 or without
+/// LAPACK (neither USE_BLAS nor USE_MKL), the caller then falls back to the augmented LU.
+inline Vector solveAugmentedSytrfUpper(const Matrix& A, const Vector& x, int natoms)
+{
+#ifdef CURCUMA_EEQ_SYTRF_LAPACK
+    // curcuma's Matrix is row-major; the copy into a column-major buffer keeps A(i,j), so dsytrf
+    // reads the same upper triangle (i <= j) the Fortran column-major array holds.
+    ColMatrix Af = A;
+    const char uplo = 'U';
+    int m = static_cast<int>(Af.rows()), lda = std::max(1, m), info = 0;
+    std::vector<int> ipiv(std::max(1, m), 0);
+    double wkopt = 0.0;
+    int lwork = -1;
+    dsytrf_(&uplo, &m, Af.data(), &lda, ipiv.data(), &wkopt, &lwork, &info);   // workspace query
+    if (info != 0) return Vector();
+    lwork = std::max(1, static_cast<int>(std::lround(wkopt)));                 // nint(test(1)) in the reference
+    std::vector<double> work(lwork);
+    dsytrf_(&uplo, &m, Af.data(), &lda, ipiv.data(), work.data(), &lwork, &info);
+    if (info != 0) return Vector();
+    Eigen::VectorXd b = x;
+    if (!EEQSolver::hostSytrsUpper(m, Af.data(), ipiv.data(), b.data())) return Vector();
+    return b.head(natoms);
+#else
+    (void)A; (void)x; (void)natoms;
+    return Vector();
+#endif
+}
 
 /// Schur complement S = C·Z2 exploiting that the constraint matrix C is a per-fragment
 /// membership matrix (one nonzero per atom column). S(f,g) = Σ_i C(f,i)·Z2(i,g) reduces
@@ -870,6 +926,7 @@ EEQSolveMethod EEQSolver::parseSolveMethod(const std::string& method_str) {
     if (method_str == "auto") return EEQSolveMethod::Auto;
     if (method_str == "lu") return EEQSolveMethod::LU;
     if (method_str == "ldlt") return EEQSolveMethod::LDLT;
+    if (method_str == "sytrf") return EEQSolveMethod::Sytrf;   // Claude Generated (Nov 2026)
     if (method_str == "pcg") return EEQSolveMethod::PCG;
     if (method_str == "ppcg" || method_str == "projected_pcg") return EEQSolveMethod::ProjectedPCG;
     if (method_str == "batched") return EEQSolveMethod::Batched;
@@ -899,13 +956,30 @@ const char* EEQSolver::methodName(EEQSolveMethod m) {
     case EEQSolveMethod::PCG: return "pcg";
     case EEQSolveMethod::LU: return "lu";
     case EEQSolveMethod::LDLT: return "ldlt";
+    case EEQSolveMethod::Sytrf: return "sytrf";
     case EEQSolveMethod::Batched: return "batched";
     }
     return "?";
 }
 
 std::string EEQSolver::validMethodNames() {
-    return "auto, cholesky, ppcg, pcg, lu, ldlt, batched (aliases: schur_cholesky, projected_pcg)";
+    return "auto, cholesky, ppcg, pcg, lu, ldlt, sytrf, batched (aliases: schur_cholesky, projected_pcg)";
+}
+
+// Claude Generated (Nov 2026): host half of the ROCm sytrf path (rocSOLVER has dsytrf, no dsytrs) and
+// the solve step of the CPU sytrf. See eeq_solver.h.
+bool EEQSolver::hostSytrsUpper(int n, const double* factor, const int* ipiv, double* rhs)
+{
+#ifdef CURCUMA_EEQ_SYTRF_LAPACK
+    if (n < 1 || !factor || !ipiv || !rhs) return false;
+    const char uplo = 'U';
+    int nn = n, nrhs = 1, lda = n, ldb = n, info = 0;
+    dsytrs_(&uplo, &nn, &nrhs, factor, &lda, ipiv, rhs, &ldb, &info);
+    return info == 0;
+#else
+    (void)n; (void)factor; (void)ipiv; (void)rhs;
+    return false;
+#endif
 }
 
 double EEQSolver::estimateBatchedError(const Vector& residual,
@@ -936,6 +1010,11 @@ bool EEQSolver::gpuSupports(EEQSolveMethod m, const std::string& backend) {
     // Vulkan: GFN-FF runs on the CPU there (gpu_plugin_entry_vulkan.cpp), so the CPU solves every name.
     if (backend == "vulkan")
         return true;
+    // Claude Generated (Nov 2026): sytrf (augmented reference solve) exists in both plugins: CUDA
+    // cusolverDnDsytrf + Xsytrs on the device (compiled with nvcc, never run by its author), ROCm rocsolver_dsytrf
+    // on the device + LAPACK dsytrs on the host (hostSytrsUpper).
+    if (m == EEQSolveMethod::Sytrf)
+        return backend == "cuda" || backend == "rocm";
     // ROCm: no device pcg/batched/lu/ldlt path (has_device_schur=false); the dense Cholesky route and,
     // since Oct 2026 (Claude Generated), the projected PCG with the diagonal Jacobi exist.
     if (backend == "rocm")
@@ -950,7 +1029,8 @@ bool EEQSolver::gpuSupports(EEQSolveMethod m, const std::string& backend) {
 std::string EEQSolver::gpuMethodNames(const std::string& backend) {
     std::string out;
     for (EEQSolveMethod m : { EEQSolveMethod::Auto, EEQSolveMethod::SchurCholesky, EEQSolveMethod::ProjectedPCG,
-                              EEQSolveMethod::PCG, EEQSolveMethod::LU, EEQSolveMethod::LDLT, EEQSolveMethod::Batched }) {
+                              EEQSolveMethod::PCG, EEQSolveMethod::LU, EEQSolveMethod::LDLT, EEQSolveMethod::Sytrf,
+                              EEQSolveMethod::Batched }) {
         if (!gpuSupports(m, backend)) continue;
         if (!out.empty()) out += ", ";
         out += methodName(m);
@@ -1214,7 +1294,7 @@ Vector EEQSolver::calculateCharges(
         // Claude Generated (January 17, 2026): Detect pi-system and amide nitrogens for dgam refinements
         std::vector<bool> is_pi_atom = detectPiSystem(atoms, hybridization, topology);
         std::vector<bool> is_amide = detectAmideNitrogens(atoms, hybridization, is_pi_atom, topology, cn);
-        Vector dgam = calculateDgam(atoms, topology_charges, hybridization, is_pi_atom, is_amide);
+        Vector dgam = calculateDgam(atoms, topology_charges, hybridization, is_pi_atom, is_amide, topology);
 
         // Diagnostic output for comparison with Fortran goed_gfnff debug output
         // Matches format: gfnff_engrad.F90:1581-1594
@@ -1393,7 +1473,11 @@ Matrix EEQSolver::buildCorrectedEEQMatrix(
                 ff = 0.50;  // Halogens (F, Cl, Br, I, At)
             } else {
                 // Metal elements
-                int imetal_val = metal_type[z_i - 1];
+                int imetal_val = PeriodicTable::getMetalType(z_i);
+                // gfnff_ini.f90:234-235: Sn/Pb/Bi with CN <= 4 count as non-metals (imetal, not param%metal)
+                if (topology.has_value() && i < static_cast<int>(topology->neighbor_lists.size())
+                    && static_cast<int>(topology->neighbor_lists[i].size()) <= 4 && group > 3)
+                    imetal_val = 0;
                 if (imetal_val == 1) {
                     ff = 0.3;  // Main group metals (Li, Be, Na, Mg, etc.)
                 } else if (imetal_val == 2) {
@@ -1709,6 +1793,24 @@ Vector EEQSolver::dispatchSolve(
             goto end_dispatch;
         if (m_verbosity >= 1)
             CurcumaLogger::warn("EEQ: explicit LDL^T solve failed/unavailable, falling back to LU");
+        goto lu_solve;
+    }
+
+    // Claude Generated (Nov 2026): solve_method sytrf - LAPACK dsytrf + dsytrs (uplo 'U') on the full
+    // augmented (N+nfrag) matrix, as the Fortran reference does in both phases (solveAugmentedSytrfUpper).
+    // Phase 1 and Phase 2 both arrive here; the constraint block of A is written eagerly (only a
+    // ppcg resolution defers it). Failure (info != 0, or no LAPACK) falls back to the augmented LU.
+    if (method_to_use == EEQSolveMethod::Sytrf) {
+        charges = solveAugmentedSytrfUpper(A, x, natoms);
+        if (charges.size() == natoms)
+            goto end_dispatch;
+        CurcumaLogger::warn(
+#ifdef CURCUMA_EEQ_SYTRF_LAPACK
+            "EEQ: sytrf (dsytrf/dsytrs) reported info != 0, falling back to the augmented LU"
+#else
+            "EEQ: sytrf needs LAPACK (build with -DUSE_BLAS=ON or -DUSE_MKL=ON), falling back to the augmented LU"
+#endif
+        );
         goto lu_solve;
     }
 
@@ -3311,11 +3413,11 @@ std::vector<Vector> EEQSolver::calculateTopologyChargesMultiRHS(
         // metal, which better reflects the polarity used for guessing bond/angle parameters.
         // imetal==2 (metal_type==2) are the d-block TMs; all have periodic group <=2 or negative, so
         // the Fortran line-274 caveat (nb<=4 & group>3 → imetal=0) can never clear a "2", making the
-        // metal_type[z-1]==2 test faithful. Phase 2 overwrites chieeq WITHOUT this shift
+        // PeriodicTable::getMetalType(z)==2 test faithful. Phase 2 overwrites chieeq WITHOUT this shift
         // (gfnff_ini.f90:715), so this is deliberately Phase-1 only. Missing here caused metal
         // complexes (e.g. RhCl(CO)2) to put too little topology charge on the metal → wrong fqq bond
         // factor + Coulomb (ED39 native gfnff 12.9 mEh above xtb --gfnff).
-        if (z_i >= 1 && z_i <= 86 && metal_type[z_i - 1] == 2) {
+        if (z_i >= 1 && z_i <= 86 && PeriodicTable::getMetalType(z_i) == 2) {
             constexpr double MCHISHIFT = -0.09;  // gfnff_param.f90:756
             chi(i) -= MCHISHIFT;  // effectively += 0.09
         }
@@ -3839,7 +3941,7 @@ Vector EEQSolver::calculateFinalCharges(
         : std::vector<bool>(natoms, false);
     std::vector<bool> is_amide_h = use_corrections ? detectAmideHydrogens(atoms, hybridization, is_amide_for_h, topology) : std::vector<bool>(natoms, false);
 
-    Vector dgam = use_corrections ? calculateDgam(atoms, topology_charges, hybridization, is_pi_atom, is_amide) : Vector::Zero(natoms);
+    Vector dgam = use_corrections ? calculateDgam(atoms, topology_charges, hybridization, is_pi_atom, is_amide, topology) : Vector::Zero(natoms);
 
     // DEBUG: Print topology charges used for dgam
     if (m_verbosity >= 3) {
@@ -4085,7 +4187,8 @@ Vector EEQSolver::calculateFinalCharges(
         const char* solver_name = (m_solve_method == EEQSolveMethod::PCG) ? "PCG"
             : (m_solve_method == EEQSolveMethod::ProjectedPCG) ? "projected PCG"
             : (m_solve_method == EEQSolveMethod::SchurCholesky) ? "Cholesky"
-            : (m_solve_method == EEQSolveMethod::Auto) ? "auto" : "LU";
+            : (m_solve_method == EEQSolveMethod::Auto) ? "auto"
+            : (m_solve_method == EEQSolveMethod::Sytrf) ? "sytrf" : "LU";
         if (use_iterative)
             fmt::print(stderr, "[EEQ] Phase 2: iterative refinement ({}, max {} iters, thr={:.0e})\n",
                        solver_name, max_iterations, convergence_threshold);
@@ -4642,6 +4745,7 @@ Vector EEQSolver::calculateFinalCharges(
                 dump["solver_method"] = (m_solve_method == EEQSolveMethod::PCG) ? "PCG"
                     : (m_solve_method == EEQSolveMethod::SchurCholesky) ? "SchurCholesky"
                     : (m_solve_method == EEQSolveMethod::Auto) ? "Auto"
+                    : (m_solve_method == EEQSolveMethod::Sytrf) ? "sytrf"
                     : "LU";
                 for (int i = 0; i < natoms; ++i) {
                     json atom;
@@ -4768,30 +4872,10 @@ Vector EEQSolver::calculateDxi(
 {
     // Claude Generated (December 2025, Session 13): FULL dxi calculation
     // Reference: XTB gfnff_ini.f90:358-403
-    // Phase 2.5-2.7: Added pi-system detection and neighbor EN averaging
+    // Phase 2.5-2.7: Added pi-system detection (the unused neighbor EN average and its table were removed Nov 2026)
 
     const int natoms = atoms.size();
     Vector dxi = Vector::Zero(natoms);
-
-    // Pauling electronegativities for neighbor averaging (indices 0-86)
-    // Reference: Standard Pauling scale
-    static const std::array<double, 87> pauling_en = {
-        0.0,  // 0: dummy
-        2.20, 0.0,  // 1-2: H, He
-        0.98, 1.57, 2.04, 2.55, 3.04, 3.44, 3.98, 0.0,  // 3-10: Li-Ne
-        0.93, 1.31, 1.61, 1.90, 2.19, 2.58, 3.16, 0.0,  // 11-18: Na-Ar
-        0.82, 1.00,  // 19-20: K, Ca
-        1.36, 1.54, 1.63, 1.66, 1.55, 1.83, 1.88, 1.91, 1.90, 1.65,  // 21-30: Sc-Zn
-        1.81, 2.01, 2.18, 2.55, 2.96, 3.00, 0.0,  // 31-37: Ga-Kr (Kr noble gas)
-        0.82, 0.95,  // 38-39: Rb, Sr (Note: index mismatch fixed below)
-        1.22, 1.33, 1.60, 2.16, 1.90, 2.20, 2.28, 2.20, 1.93, 1.69,  // 40-49: Y-Cd
-        1.78, 1.96, 2.05, 2.10, 2.66, 2.60, 0.0,  // 50-56: In-Xe (Xe noble gas)
-        0.79, 0.89,  // 57-58: Cs, Ba
-        1.10, 1.12, 1.13, 1.14, 1.13, 1.17, 1.20,  // 59-65: La-Eu
-        1.20, 1.20, 1.22, 1.23, 1.24, 1.25, 1.10,  // 66-72: Gd-Yb
-        1.27, 1.30, 1.50, 2.36, 1.90, 2.20, 2.20, 2.28, 2.54, 2.00,  // 73-82: Lu-Hg
-        1.62, 2.33, 2.02, 2.00  // 83-86: Tl-Rn
-    };
 
     // Estimate hybridization from CN (approximation)
     // Reference: CN-based heuristic (hyb: 1=sp, 2=sp2, 3=sp3)
@@ -4810,7 +4894,7 @@ Vector EEQSolver::calculateDxi(
     if (m_verbosity >= 3) {
         CurcumaLogger::info("\n=== Dxi Calculation (FULL - Phase 2.7) ===");
         CurcumaLogger::info("Reference: XTB gfnff_ini.f90:358-403 + pi-system + neighbor EN");
-        CurcumaLogger::info("Atom |  Z | CN  | Hyb | Pi | EN_avg | dxi_total | Components");
+        CurcumaLogger::info("Atom |  Z | CN  | Hyb | Pi | dxi_total | Components");
         CurcumaLogger::info("-----+----+-----+-----+----+--------+-----------+-----------");
     }
 
@@ -4823,7 +4907,6 @@ Vector EEQSolver::calculateDxi(
         int nh = 0;  // Number of H neighbors
         int nn = 0;  // Total number of neighbors
         int nm = 0;  // Number of metal neighbors
-        double en_avg = 0.0;  // Average neighbor electronegativity
         std::string env_desc = "";
 
         if (topology.has_value()) {
@@ -4842,19 +4925,12 @@ Vector EEQSolver::calculateDxi(
                 // chieeq that inverted their topology charge (-0.261 vs the reference
                 // +0.158) and, through fqq, cost 52 kcal/mol in the bond term.
                 if (Z_j >= 1 && Z_j <= 86) {
-                    int imetal_j = metal_type[Z_j - 1];
+                    int imetal_j = PeriodicTable::getMetalType(Z_j);
                     const int group_j = periodic_group[Z_j - 1];
                     const int nb_j = static_cast<int>(topology->neighbor_lists[j].size());
                     if (nb_j <= 4 && group_j > 3) imetal_j = 0;
                     if (imetal_j != 0) nm++;
                 }
-                // Sum electronegativities for averaging
-                if (Z_j < static_cast<int>(pauling_en.size())) {
-                    en_avg += pauling_en[Z_j];
-                }
-            }
-            if (nn > 0) {
-                en_avg /= nn;  // Average neighbor EN
             }
         }
 
@@ -5015,8 +5091,8 @@ Vector EEQSolver::calculateDxi(
             if (components.empty()) components = "none";
             std::string hyb_str = (hyb[i] == 1) ? "sp" : (hyb[i] == 2) ? "sp2" : "sp3";
             std::string pi_str = is_pi_atom[i] ? "Y" : "N";
-            CurcumaLogger::info(fmt::format("  {:2d} | {:2d} | {:3.1f} | {:3s} | {:2s} | {:6.2f} | {:+9.5f} | {}",
-                                    i, ati, cn(i), hyb_str, pi_str, en_avg, dxi_total, components));
+            CurcumaLogger::info(fmt::format("  {:2d} | {:2d} | {:3.1f} | {:3s} | {:2s} | {:+9.5f} | {}",
+                                    i, ati, cn(i), hyb_str, pi_str, dxi_total, components));
         }
     }
 
@@ -5032,7 +5108,8 @@ Vector EEQSolver::calculateDgam(
     const Vector& charges,
     const std::vector<int>& hybridization,
     const std::vector<bool>& is_pi_atom,
-    const std::vector<bool>& is_amide)
+    const std::vector<bool>& is_amide,
+    const std::optional<TopologyInput>& topology)
 {
     const int natoms = atoms.size();
     Vector dgam = Vector::Zero(natoms);
@@ -5103,7 +5180,11 @@ Vector EEQSolver::calculateDgam(
         // qa*(-0.08), a 25-200 kcal/mol self-energy error found via GMTKN55
         // (DIPCS10/G21IP/ALK8 single-ion structures; Na+/Mg2+, Z>10, were unaffected).
         if (Z >= 1 && Z <= 86) {
-            int imetal_val = metal_type[Z - 1];
+            int imetal_val = PeriodicTable::getMetalType(Z);
+            // gfnff_ini.f90:234-235: Sn/Pb/Bi with CN <= 4 count as non-metals
+            if (topology.has_value() && i < static_cast<int>(topology->neighbor_lists.size())
+                && static_cast<int>(topology->neighbor_lists[i].size()) <= 4 && periodic_group[Z - 1] > 3)
+                imetal_val = 0;
             if (imetal_val == 1) ff = -0.08;   // Main group metals
             if (imetal_val == 2) ff = -0.9;    // Transition metals (XTB comment: "too large")
 
@@ -5128,7 +5209,7 @@ Vector EEQSolver::calculateDgamFull(
 {
     auto is_pi = detectPiSystem(atoms, hybridization, topology);
     auto is_amide = detectAmideNitrogens(atoms, hybridization, is_pi, topology, cn);
-    return calculateDgam(atoms, topology_charges, hybridization, is_pi, is_amide);
+    return calculateDgam(atoms, topology_charges, hybridization, is_pi, is_amide, topology);
 }
 
 // Claude Generated (March 2026): Public interface for dxi with full environment corrections

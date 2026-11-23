@@ -19,9 +19,9 @@ For every structure, solver variant and device (cpu/cuda) it runs, each in a FRE
 
 Solver variants (flag spelling matters, see below):
   default        no solver flag (= auto: ppcg for N >= 500 atoms, else cholesky)
-  auto, cholesky, ppcg, pcg, lu, ldlt, batched   -eeq_solver.solve_method <name>; an explicit name
+  auto, cholesky, ppcg, pcg, lu, ldlt, sytrf, batched   -eeq_solver.solve_method <name>; an explicit name
                  is never overridden by the size threshold (cholesky is dense at any size).
-                 lu and ldlt have no GPU implementation yet: with --devices cuda they are recorded as rc != 0.
+                 sytrf (Nov 2026) is the solve of the Fortran reference (dsytrf + dsytrs on the augmented matrix).
   `batched` DROPS cross-fragment Coulomb: energies are not comparable, it is flagged in the table.
 (-gfnff.solve X is an equivalent alias since Oct 2026; the benchmark uses the eeq_solver spelling.)
 
@@ -54,6 +54,7 @@ VARIANTS = {
     "auto": ["-eeq_solver.solve_method", "auto"],
     "ldlt": ["-eeq_solver.solve_method", "ldlt"],
     "lu": ["-eeq_solver.solve_method", "lu"],
+    "sytrf": ["-eeq_solver.solve_method", "sytrf"],   # Claude Generated (Nov 2026)
     "pcg": ["-eeq_solver.solve_method", "pcg"],
     "batched": ["-eeq_solver.solve_method", "batched"],
 }

@@ -3030,6 +3030,32 @@ int main(int argc, char **argv) {
     // arrive as numbers; make them booleans before any capability reads them.
     ParameterRegistry::getInstance().coerceBoolParameters(controller);
 
+    // Claude Generated (Nov 2026): CPCM-X (solvent_model cpcmx) has no gradient, as in xtb. Every capability except -sp
+    // would request one (opt, md, hessian, confsearch, ...), and several of them do not stop with an error code when
+    // the method refuses, so the combination is rejected here, before any calculation.
+    {
+        bool cpcmx = false;
+        auto check = [&](const json& v) {
+            if (v.is_string()) {
+                std::string s = v.get<std::string>();
+                std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                cpcmx = cpcmx || s == "cpcmx" || s == "cpcm-x" || s == "5";
+            } else if (v.is_number()) {
+                cpcmx = cpcmx || std::lround(v.get<double>()) == 5;
+            }
+        };
+        if (controller.contains("solvent_model"))
+            check(controller["solvent_model"]);
+        for (auto& [scope, params] : controller.items())
+            if (params.is_object() && params.contains("solvent_model"))
+                check(params["solvent_model"]);
+        if (cpcmx && command != "sp" && command != "-sp") {
+            CurcumaLogger::error("solvent_model cpcmx (CPCM-X) is a post-SCF energy without gradient (as xtb --cpcmx): only -sp "
+                                 "is supported, not -" + command + "; use solvent_model cosmo, cpcm or alpb there");
+            return 1;
+        }
+    }
+
     // Claude Generated (Sep 2026, multi-GPU case A): one process-wide pool of GPU device slots
     // for molecule-level batch workers (-gpu_devices, -gpu_workers_per_device). No-op for CPU
     // runs and for a single visible device without explicit pool flags.

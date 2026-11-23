@@ -241,6 +241,14 @@ struct EEQSolverHipImpl {
     CudaBuffer<double>  d_schur_sums;                  ///< [nf + nf*nf] Cz1 then S (row-major)
     CudaBuffer<double>  d_schur_lambda;                ///< [nf] Lagrange multipliers
     hipEvent_t          ev_order = nullptr;            ///< orders the dense solve after the workspace work
+
+    // Claude Generated (Nov 2026): solve_method sytrf, the augmented reference solve
+    // (solveWithDeviceRHSAndAugmentedSytrf). Own buffers: d_A (N x N, dense Cholesky / PPCG) is not touched.
+    CudaBuffer<double>  d_aug_A;                       ///< [M*M] augmented matrix, then its dsytrf factor (column-major)
+    CudaBuffer<int>     d_aug_piv;                     ///< [M] dsytrf pivots (1-based, LAPACK convention)
+    std::vector<double> h_aug_A;                       ///< [M*M] host copy of the factor for the host dsytrs
+    std::vector<int>    h_aug_piv;                     ///< [M] host copy of the pivots
+    std::vector<double> h_aug_rhs;                     ///< [M] [b_atoms; Q_frag], then [q; lambda]
 };
 
 /// Claude Generated (Oct 2026): host copy of the charges of the last small-system solve on this host
@@ -2315,3 +2323,173 @@ void EEQSolverHip::uploadFragmentTopology(int nfrag, const std::vector<int>& fra
     impl.m_ppcg_topo_valid = true;
 }
 bool   EEQSolverHip::isFragmentTopoValid() const { return m_impl->m_frag_topo_valid; }
+
+// =============================================================================================
+// solve_method sytrf on ROCm: the linear solve of the Fortran reference on the augmented system
+// Claude Generated (Nov 2026). AI-generated; run on one Radeon 890M (gfx1150) only, see
+// docs/EEQ_SOLVER_CONTROL.md (section sytrf) for what was compared.
+//
+// The reference (xtb gfnff_ini2.f90 goedeckera, gfnff_eg.f90 goed_gfnff; pprcht gfnff) solves
+//     [ A  C^T ] [ q      ]   [ b_atoms ]
+//     [ C  0   ] [ lambda ] = [ Q_frag  ]        (order M = N + nfrag)
+// with LAPACK dsytrf + dsytrs, uplo 'U', one right-hand side. rocSOLVER has dsytrf but no sytrs, so:
+//   1. build the augmented matrix on the device (k_eeq_build_augmented_hip),
+//   2. rocsolver_dsytrf, uplo upper (same factor format and 1-based pivots as LAPACK),
+//   3. copy the M x M factor, the pivots and b_atoms to the host,
+//   4. LAPACK dsytrs on the host (host_sytrs = EEQSolver::hostSytrsUpper, from the wrapper),
+//   5. upload q to d_rhs[0..N-1] (getDeviceChargesPtr contract).
+// This is a REFERENCE path, not a performance path: every call moves M^2 doubles device -> host.
+// =============================================================================================
+
+/// Augmented EEQ matrix [A C^T; C 0] (M = N + nfrag), column-major, both triangles, one thread per
+/// element. The atom block uses the element expressions of k_eeq_build_matrix_hip (i the larger, j the
+/// smaller index; diagonal gam_i + sqrt(2/pi)/sqrt(alpha_i); far field r^2 >= 36 (alpha_i + alpha_j)
+/// gives 1/r), so it equals the matrix of the dense ROCm path; C(f, a) = 1 when atom a belongs to
+/// fragment f (atom_frag, 0-based); the nfrag x nfrag corner is zero. Port of the CUDA
+/// k_eeq_build_augmented (cuda/eeq_solver_gpu.cu).
+__global__ __launch_bounds__(256)
+void k_eeq_build_augmented_hip(int N, int M,
+                               const double* __restrict__ cx, const double* __restrict__ cy,
+                               const double* __restrict__ cz, const double* __restrict__ alpha,
+                               const double* __restrict__ gam, const int* __restrict__ atom_frag,
+                               double* __restrict__ Aug, double cutoff_sq)
+{
+    const long long tid = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const long long tot = static_cast<long long>(M) * M;
+    if (tid >= tot) return;
+    const int row = static_cast<int>(tid % M);
+    const int col = static_cast<int>(tid / M);
+    double v;
+    if (row < N && col < N) {
+        if (row == col) {
+            v = gam[row] + TSQRT2PI_HIP / sqrt(alpha[row]);
+        } else {
+            const int i = row > col ? row : col;
+            const int j = row > col ? col : row;
+            const double dx = cx[i] - cx[j];
+            const double dy = cy[i] - cy[j];
+            const double dz = cz[i] - cz[j];
+            const double r_sq = dx * dx + dy * dy + dz * dz;
+            if (cutoff_sq > 0.0 && r_sq > cutoff_sq) {
+                v = 0.0;
+            } else {
+                const double r = sqrt(r_sq);
+                const double asum = alpha[i] + alpha[j];
+                if (r_sq >= 36.0 * asum) v = 1.0 / r;   // far field: erf == 1.0, as k_eeq_build_matrix_hip
+                else                     v = erf((1.0 / sqrt(asum)) * r) / r;
+            }
+        }
+    } else if (row >= N && col >= N) {
+        v = 0.0;
+    } else {
+        const int atom = row < N ? row : col;
+        const int frag = row < N ? col - N : row - N;
+        v = (atom_frag[atom] == frag) ? 1.0 : 0.0;
+    }
+    Aug[tid] = v;
+}
+
+/// Orders the solver stream after the workspace work that wrote the coordinates and b_atoms: the
+/// same event wait as the dense path (eeqBuildFactorSolveDevice), kept separate so that path stays
+/// unchanged. Claude Generated (Nov 2026).
+static bool orderSytrfAfterWorkspaceHip(EEQSolverHipImpl& impl)
+{
+    if (!impl.ev_order && hipEventCreateWithFlags(&impl.ev_order, hipEventDisableTiming) != hipSuccess) {
+        impl.ev_order = nullptr;
+        return false;
+    }
+    hipStream_t src = g_rocm_small_eeq_stream ? g_rocm_small_eeq_stream : hipStream_t(nullptr);
+    return hipEventRecord(impl.ev_order, src) == hipSuccess
+        && hipStreamWaitEvent(impl.stream, impl.ev_order, 0) == hipSuccess;
+}
+
+bool EEQSolverHip::solveWithDeviceRHSAndAugmentedSytrf(
+    int natoms, int nfrag,
+    const double* cx, const double* cy, const double* cz,
+    const double* d_alpha,
+    const double* d_gam,
+    const double* d_rhs_atoms,
+    const std::vector<double>& rhs_constraints,
+    double cutoff_sq,
+    HostSytrsFn host_sytrs)
+{
+    auto& impl = *m_impl;
+    const int N = natoms;
+    g_rocm_eeq_host_copy = RocmEEQHostCopy{};   // d_rhs is rewritten below
+    if (!host_sytrs) {
+        CurcumaLogger::warn("EEQ ROCm sytrf: no host dsytrs available");
+        return false;
+    }
+    if (N < 1 || nfrag < 1 || !impl.m_ppcg_topo_valid || impl.m_nfrag_topo != nfrag || impl.d_atom_frag.n < N) {
+        CurcumaLogger::warn("EEQ ROCm sytrf: fragment topology not on the device");
+        return false;
+    }
+    const long long M_ll = static_cast<long long>(N) + nfrag;
+    if (M_ll * M_ll > static_cast<long long>(std::numeric_limits<int>::max())) {
+        CurcumaLogger::warn(fmt::format("EEQ ROCm sytrf: augmented system too large ({} rows)", M_ll));
+        return false;
+    }
+    const int M = static_cast<int>(M_ll);
+    const auto t0 = std::chrono::steady_clock::now();
+    if (!orderSytrfAfterWorkspaceHip(impl)) return false;
+
+    impl.d_aug_A.ensure(M * M);
+    impl.d_aug_piv.ensure(M);
+
+    // 1. Augmented matrix on the device.
+    {
+        const long long tot = static_cast<long long>(M) * M;
+        const int block = 256;
+        const int grid = static_cast<int>((tot + block - 1) / block);
+        k_eeq_build_augmented_hip<<<grid, block, 0, impl.stream>>>(
+            N, M, cx, cy, cz, d_alpha, d_gam, impl.d_atom_frag.ptr, impl.d_aug_A.ptr, cutoff_sq);
+        if (hipGetLastError() != hipSuccess) return false;
+    }
+
+    // 2. Bunch-Kaufman LDL^T (U D U^T), upper triangle, as LAPACK dsytrf with uplo 'U'.
+    if (rocsolver_dsytrf(impl.handle, rocblas_fill_upper, M, impl.d_aug_A.ptr, M, impl.d_aug_piv.ptr,
+                         impl.d_info.ptr) != rocblas_status_success)
+        return false;
+    if (hipMemcpyAsync(impl.h_info, impl.d_info.ptr, sizeof(int), hipMemcpyDeviceToHost, impl.stream) != hipSuccess
+        || hipStreamSynchronize(impl.stream) != hipSuccess)
+        return false;
+    if (*impl.h_info != 0) {
+        CurcumaLogger::warn(fmt::format("EEQ ROCm sytrf: rocsolver_dsytrf failed (info={})", *impl.h_info));
+        return false;
+    }
+    const auto t1 = std::chrono::steady_clock::now();
+
+    // 3. Factor, pivots and b_atoms to the host (the stream is idle after the synchronisation above).
+    impl.h_aug_A.resize(static_cast<size_t>(M) * M);
+    impl.h_aug_piv.resize(M);
+    impl.h_aug_rhs.assign(M, 0.0);
+    if (hipMemcpy(impl.h_aug_A.data(), impl.d_aug_A.ptr, static_cast<size_t>(M) * M * sizeof(double),
+                  hipMemcpyDeviceToHost) != hipSuccess
+        || hipMemcpy(impl.h_aug_piv.data(), impl.d_aug_piv.ptr, M * sizeof(int), hipMemcpyDeviceToHost) != hipSuccess
+        || hipMemcpy(impl.h_aug_rhs.data(), d_rhs_atoms, N * sizeof(double), hipMemcpyDeviceToHost) != hipSuccess)
+        return false;
+    for (int f = 0; f < nfrag && f < static_cast<int>(rhs_constraints.size()); ++f)
+        impl.h_aug_rhs[N + f] = rhs_constraints[f];
+    const auto t2 = std::chrono::steady_clock::now();
+
+    // 4. LAPACK dsytrs ('U', one right-hand side) on the host.
+    if (!host_sytrs(M, impl.h_aug_A.data(), impl.h_aug_piv.data(), impl.h_aug_rhs.data())) {
+        CurcumaLogger::warn("EEQ ROCm sytrf: host dsytrs failed (info != 0, or curcuma built without LAPACK)");
+        return false;
+    }
+    const auto t3 = std::chrono::steady_clock::now();
+
+    // 5. Charges = first N entries of [q; lambda] -> d_rhs[0..N-1].
+    if (impl.d_rhs.n < N) impl.d_rhs.alloc(N);
+    if (hipMemcpy(impl.d_rhs.ptr, impl.h_aug_rhs.data(), N * sizeof(double), hipMemcpyHostToDevice) != hipSuccess)
+        return false;
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        auto ms = [](std::chrono::steady_clock::time_point a, std::chrono::steady_clock::time_point b) {
+            return std::chrono::duration<double, std::milli>(b - a).count();
+        };
+        CurcumaLogger::info(fmt::format(
+            "EEQ ROCm sytrf: M={} build+dsytrf {:.2f} ms, download {:.2f} ms, host dsytrs {:.2f} ms",
+            M, ms(t0, t1), ms(t1, t2), ms(t2, t3)));
+    }
+    return true;
+}

@@ -268,6 +268,24 @@
    "description": "comment line: ammonia C3v, r(NH)=1.012 A, ang(HNH)=106.7 deg"
   },
   {
+   "id": "ammonium.ideal-td",
+   "class": "small",
+   "file": "small/ammonium.ideal-td.xyz",
+   "format": "xyz",
+   "formula": "H4N",
+   "natoms": 5,
+   "frames": 1,
+   "charge": 1,
+   "spin": 0,
+   "role": "non-equilibrium",
+   "size_bytes": 228,
+   "sha256": "8ac4abd426788d5577423141305a52a0af19dc679871166f8ec8da2fb39720e0",
+   "provenance": {
+    "kind": "constructed",
+    "description": "Ammonium cation NH4+, ideal Td with r(NH)=1.03 A (H at (+-a,+-a,+-a), a=1.03/sqrt(3)); built by hand for the native COSMO test (cli/sqm/19), not optimised"
+   }
+  },
+  {
    "id": "benzene",
    "class": "small",
    "file": "small/benzene.xyz",
@@ -781,6 +799,24 @@
     "version": "0.0.209-2-g7e38f75",
     "description": "N2, N-N 1.0983 A (experiment 1.0977 A); former test_cases/molecules/dimers/NN.xyz; method of the Curcuma run not recorded",
     "energy_eh": -5.763935
+   }
+  },
+  {
+   "id": "dioxygen.bent-triplet",
+   "class": "small",
+   "file": "small/dioxygen.bent-triplet.xyz",
+   "format": "xyz",
+   "formula": "O2",
+   "natoms": 2,
+   "frames": 1,
+   "charge": 0,
+   "spin": 2,
+   "role": "non-equilibrium",
+   "size_bytes": 95,
+   "sha256": "f5db3552b695140a1f4de7c50a4e7bbad09c2189a0f013ec0d91f922587fcf54",
+   "provenance": {
+    "kind": "constructed",
+    "description": "O2 with a deliberately tilted bond (r = 1.2506 A, not an energy minimum), so that the gradient has all three components; used by cli_sqm_16 (spin polarisation against tblite 0.8.0)"
    }
   },
   {
@@ -2477,6 +2513,28 @@
    "aliases": [
     "water8_cluster"
    ]
+  },
+  {
+   "id": "pt-cluster-7",
+   "class": "metals",
+   "file": "metals/pt-cluster-7.xyz",
+   "format": "xyz",
+   "formula": "Pt7",
+   "natoms": 7,
+   "frames": 1,
+   "charge": 0,
+   "spin": 8,
+   "role": "equilibrium",
+   "size_bytes": 383,
+   "sha256": "83bd1587c71ae6996257c5f4cf9e886bd53ea9ea7869c41b5e32ff0e2c79ce3a",
+   "provenance": {
+    "kind": "optimized",
+    "program": "curcuma",
+    "method": "GFN2 native, 300 K, frozen frame of the H2+Pt_n scan",
+    "convergence": "-opt, one start motif, no global search",
+    "description": "Pt7 capped octahedron, GFN2 -opt, lowest spin 8 with spin polarisation"
+   },
+   "notes": "Differs from the pentagonal bipyramid of reactions-doebereiner-pt7; from docs/H2_PT_BARRIERS.md."
   }
  ],
  "sets": [

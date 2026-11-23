@@ -12,6 +12,7 @@
 #ifdef USE_CUDA
 
 #include "xtb_gpu_context.h"
+#include "src/core/units.h"
 
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
@@ -69,6 +70,11 @@ struct XtbGpuContext::Impl {
     CudaBuffer<double> dC, dP, dCw;      // eigenvectors / density / scaled cols
     CudaBuffer<double> dCs;              // sqrt(occ)-scaled columns of the opt-in syrk density (CURCUMA_GPU_DENSITY_SYRK)
     CudaBuffer<double> dEps, dVao, dOcc, dPop;  // length-n working vectors
+    // Spin polarisation (Claude Generated, Nov 2026): alpha eigenvectors (dC then holds beta), the
+    // spin density Pm = Pa - Pb, its AO populations, and the one-shot flag that makes the next
+    // computeGradient use the W already built by spinWeightedDensity.
+    CudaBuffer<double> dCa, dPm, dPopM;
+    bool               w_spin_override = false;
     CudaBuffer<double> dWork;            // cuSOLVER dsyevd workspace
     CudaBuffer<int>    dInfo;            // cuSOLVER devInfo
     int                lwork = 0;
@@ -337,6 +343,8 @@ struct XtbGpuContext::Impl {
     int    loop_nsh = 0, loop_nat = 0, loop_nao = 0, loop_nocc_pairs = 0;
     double loop_Tele = 0.0, loop_nelec = 0.0;
     CudaBuffer<double> dDq;         // max|q_sh_out − q_sh_in| (1 double)
+    CudaBuffer<double> dDqSq;       // sum (x_out − x_in)^2 over the SCC vector (1 double), scf_criterion xtb
+    double last_dq_sumsq = -1.0;    // host copy of dDqSq after the last resident step
 
     // Claude Generated (Sep 2026): pre-allocation memory check (beginBasis).
     bool        memory_check = true;
@@ -1131,7 +1139,7 @@ struct XtbGpuContext::Impl {
     /// rest of the process (the CPU fallback then runs with a clean device).
     void releaseLarge()
     {
-        for (CudaBuffer<double>* b : { &dH0, &dS, &dL, &dC, &dP, &dCw, &dCs, &dWork, &dDpInt, &dQpInt,
+        for (CudaBuffer<double>* b : { &dH0, &dS, &dL, &dC, &dP, &dCw, &dCs, &dCa, &dPm, &dWork, &dDpInt, &dQpInt,
                                        &dSdR, &dPotrfWork, &dW, &dGamma, &dMpAmatSD, &dMpAmatDD,
                                        &dMpAmatSQ, &dSolvB, &dEeqM, &dEeqWork })
             b->free();
@@ -5374,6 +5382,20 @@ __global__ void k_maxabsdiff(const double* __restrict__ a, const double* __restr
     if (tid == 0) *out = sdata[0];
 }
 
+// Claude Generated (Nov 2026): sum of (a[i] − b[i])^2 over n, one block, grid-stride, tree reduction (RMS of the SCC
+// residual for scf_criterion xtb).
+__global__ void k_sumsqdiff(const double* __restrict__ a, const double* __restrict__ b,
+                            int n, double* out)
+{
+    extern __shared__ double sdata[];
+    const int tid = threadIdx.x;
+    double acc = 0.0;
+    for (int i = tid; i < n; i += blockDim.x) { const double d = a[i] - b[i]; acc += d * d; }
+    sdata[tid] = acc; __syncthreads();
+    for (int s = blockDim.x >> 1; s > 0; s >>= 1) { if (tid < s) sdata[tid] += sdata[tid + s]; __syncthreads(); }
+    if (tid == 0) *out = sdata[0];
+}
+
 XtbGpuContext::XtbGpuContext(int device)
     : m_impl(std::make_unique<Impl>())
 {
@@ -5775,7 +5797,7 @@ int XtbGpuContext::Impl::pseudoRotateOrthonormalise(int n, int no, const R* F, c
     float max_theta = 0.0f;
     std::memcpy(&max_theta, &maxbits, sizeof(float));
     I.pseudo_last_max_theta = max_theta;
-    const double kT = I.loop_Tele * 3.166808e-6;
+    const double kT = I.loop_Tele * CurcumaUnit::Constants::BOLTZMANN_HARTREE_K_XTB;
     {   // Claude Generated (Oct 2026): CURCUMA_PSEUDO_TRACE=1 prints the quantities the gate decides on
         static const bool trace = std::getenv("CURCUMA_PSEUDO_TRACE") != nullptr;
         if (trace)
@@ -7252,6 +7274,166 @@ bool XtbGpuContext::residentMultipoleMoments(double* dp_at3, double* qp_at6, int
     const bool mom_ok = cudaStreamSynchronize(stream) == cudaSuccess;
     m_impl->profMark("SCF step: multipole moments");
     return mom_ok;
+}
+
+/* ====================================================================== *
+ *  Spin polarisation (Claude Generated, Nov 2026; docs/SPIN_POLARISATION.md)
+ *
+ *  Device side of the tblite spin-polarization container on the host-driven
+ *  resident loop. The host builds the spin potential u_l = sum_l' W_ll' m_l'
+ *  and passes v_ao -/+ u_ao to the existing Fock builders, because
+ *    F^alpha = H0 - 1/2 S ((v-u)_mu + (v-u)_nu),  F^beta = ... (v+u) ...
+ *  equals F +- 1/2 S (u_mu + u_nu). These functions only keep the two orbital
+ *  sets apart and form P = Pa + Pb, Pm = Pa - Pb and the spin-weighted W.
+ * ====================================================================== */
+
+// P (in: Pb, out: Pa + Pb) and Pm (in: Pa, out: Pa - Pb), element-wise over n*n entries.
+__global__ void k_spin_combine(double* __restrict__ P, double* __restrict__ Pm, size_t nn)
+{
+    const size_t i = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < nn) {
+        const double pb = P[i], pa = Pm[i];
+        P[i]  = pa + pb;
+        Pm[i] = pa - pb;
+    }
+}
+
+// W(i,j) -= 1/2 Pm(i,j) (u_i + u_j), column-major n x n: folds the spin term + Pm (u_a + u_b) of the
+// overlap-gradient coefficient (sval = ... - 2 W ...) into W.
+__global__ void k_spin_w_shift(double* __restrict__ W, const double* __restrict__ Pm,
+                               const double* __restrict__ u, int n)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int j = blockIdx.y * blockDim.y + threadIdx.y;
+    if (i < n && j < n) {
+        const size_t idx = static_cast<size_t>(i) + static_cast<size_t>(j) * n;
+        W[idx] -= 0.5 * Pm[idx] * (u[i] + u[j]);
+    }
+}
+
+bool XtbGpuContext::residentSpinKeepAlpha(int n)
+{
+    if (!ok() || n <= 0 || n != m_impl->resident_n) return false;
+    const size_t nn = static_cast<size_t>(n) * static_cast<size_t>(n);
+    try { m_impl->dCa.ensure(static_cast<int>(nn)); } catch (...) { return false; }
+    return cudaMemcpyAsync(m_impl->dCa.ptr, m_impl->dC.ptr, sizeof(double) * nn, cudaMemcpyDeviceToDevice,
+                           m_impl->stream) == cudaSuccess;
+}
+
+bool XtbGpuContext::residentDensitySpin(const double* occ_a, int ncol_a, const double* occ_b, int ncol_b,
+                                        int n, double* pop_ao_out, double* spop_ao_out, double* band_out)
+{
+    Impl& I = *m_impl;
+    if (!ok() || n <= 0 || n != I.resident_n || !pop_ao_out || !spop_ao_out || !band_out
+        || ncol_a < 0 || ncol_a > n || ncol_b < 0 || ncol_b > n || I.dCa.n < n * n)
+        return false;
+    cudaStream_t stream = I.stream;
+    const size_t nn = static_cast<size_t>(n) * static_cast<size_t>(n);
+    const double one = 1.0, zero = 0.0;
+    try {
+        I.dP.ensure(static_cast<int>(nn));
+        I.dPm.ensure(static_cast<int>(nn));
+        I.dPopM.ensure(n);
+        const int ncw = std::max(std::max(ncol_a, ncol_b), 1);
+        I.dCw.ensure(n * ncw);
+    } catch (...) { return false; }
+
+    // P_s = C_s diag(f_s) C_s^T over the leading ncol_s columns (same GEMM as residentDensity).
+    auto channel = [&](const double* occ, int ncol, const double* C, double* Pout) -> bool {
+        if (ncol <= 0)
+            return cudaMemsetAsync(Pout, 0, sizeof(double) * nn, stream) == cudaSuccess;
+        // dOcc is reused by the second channel: wait until the first one has consumed it (the
+        // synchronous upload does not order against this stream on every runtime).
+        if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
+        I.dOcc.upload(occ, ncol, stream);
+        const dim3 block(16, 16);
+        const dim3 grid((n + block.x - 1) / block.x, (ncol + block.y - 1) / block.y);
+        k_scale_cols<<<grid, block, 0, stream>>>(I.dCw.ptr, C, I.dOcc.ptr, n, ncol);
+        if (cudaGetLastError() != cudaSuccess) return false;
+        return cublasDgemm(I.cublas, CUBLAS_OP_N, CUBLAS_OP_T, n, n, ncol, &one, I.dCw.ptr, n, C, n,
+                           &zero, Pout, n) == CUBLAS_STATUS_SUCCESS;
+    };
+    if (!channel(occ_b, ncol_b, I.dC.ptr, I.dP.ptr)) return false;    // dP  <- Pb
+    if (!channel(occ_a, ncol_a, I.dCa.ptr, I.dPm.ptr)) return false;  // dPm <- Pa
+    const int b = 256;
+    k_spin_combine<<<static_cast<unsigned>((nn + b - 1) / b), b, 0, stream>>>(I.dP.ptr, I.dPm.ptr, nn);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    I.p_dense_valid = true;
+    I.last_ncol = 0;   // dP is not C diag(occ) C^T of one set; ensureDenseDensity must not rebuild it
+
+    // Charge populations + band energy from P (dense or screened storage, as residentDensity).
+    if (!populationsAndBand(n, band_out)) return false;
+    // Spin populations from Pm with the same kernel pair.
+    const int b1 = 128;
+    if (I.sparse)
+        k_pop_ao_sp<<<(n + b1 - 1) / b1, b1, 0, stream>>>(I.dPopM.ptr, I.dPm.ptr, I.dSpS.ptr,
+                                                         I.dSpRow.ptr, I.dSpColPtr.ptr, I.dSpPerm.ptr, n);
+    else
+        k_pop_ao<<<(n + b1 - 1) / b1, b1, 0, stream>>>(I.dPopM.ptr, I.dPm.ptr, I.dS.ptr, n);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    I.dPop.download(pop_ao_out, n, stream);
+    I.dPopM.download(spop_ao_out, n, stream);
+    return cudaStreamSynchronize(stream) == cudaSuccess;
+}
+
+bool XtbGpuContext::residentFinalizeSpin(double* P_colmajor, double* Pm_colmajor, double* Ca_colmajor,
+                                         double* Cb_colmajor, int n)
+{
+    Impl& I = *m_impl;
+    if (!ok() || n <= 0 || n != I.resident_n || !P_colmajor || !Pm_colmajor || !Ca_colmajor || !Cb_colmajor
+        || I.dPm.n < n * n || I.dCa.n < n * n)
+        return false;
+    cudaStream_t stream = I.stream;
+    const int nn = n * n;
+    I.releaseEigenWorkspaces();   // SCF finished, as residentFinalize
+    I.dP.download(P_colmajor, nn, stream);
+    I.dPm.download(Pm_colmajor, nn, stream);
+    I.dCa.download(Ca_colmajor, nn, stream);
+    I.dC.download(Cb_colmajor, nn, stream);
+    return cudaStreamSynchronize(stream) == cudaSuccess;
+}
+
+bool XtbGpuContext::spinWeightedDensity(const double* we_a, int ncol_a, const double* we_b, int ncol_b,
+                                        const double* u_ao, int n)
+{
+    Impl& I = *m_impl;
+    I.w_spin_override = false;
+    if (!ok() || n <= 0 || n != I.resident_n || n != I.basis_nao || !u_ao
+        || ncol_a < 0 || ncol_a > n || ncol_b < 0 || ncol_b > n
+        || I.dPm.n < n * n || I.dCa.n < n * n || I.dC.n < n * n)
+        return false;
+    cudaStream_t stream = I.stream;
+    const size_t nn = static_cast<size_t>(n) * static_cast<size_t>(n);
+    const double one = 1.0;
+    try {
+        I.releaseEigenWorkspaces();
+        I.dW.ensure(static_cast<int>(nn));
+        I.dCw.ensure(n * std::max(std::max(ncol_a, ncol_b), 1));
+        I.dVao.ensure(n);
+    } catch (...) { return false; }
+    if (cudaMemsetAsync(I.dW.ptr, 0, sizeof(double) * nn, stream) != cudaSuccess) return false;
+    // W += C_s diag(f_s eps_s) C_s^T for both spins (beta = dC, alpha = dCa).
+    auto channel = [&](const double* we, int ncol, const double* C) -> bool {
+        if (ncol <= 0) return true;
+        if (cudaStreamSynchronize(stream) != cudaSuccess) return false;   // dOcc reused, see residentDensitySpin
+        I.dOcc.upload(we, ncol, stream);
+        const dim3 block(16, 16);
+        const dim3 grid((n + block.x - 1) / block.x, (ncol + block.y - 1) / block.y);
+        k_scale_cols<<<grid, block, 0, stream>>>(I.dCw.ptr, C, I.dOcc.ptr, n, ncol);
+        if (cudaGetLastError() != cudaSuccess) return false;
+        return cublasDgemm(I.cublas, CUBLAS_OP_N, CUBLAS_OP_T, n, n, ncol, &one, I.dCw.ptr, n, C, n,
+                           &one, I.dW.ptr, n) == CUBLAS_STATUS_SUCCESS;
+    };
+    if (!channel(we_a, ncol_a, I.dCa.ptr) || !channel(we_b, ncol_b, I.dC.ptr)) return false;
+    // Spin term: dVao is overwritten by computeGradient's v_ao upload afterwards, so it can carry u here.
+    I.dVao.upload(u_ao, n, stream);
+    const dim3 block(16, 16);
+    const dim3 grid((n + block.x - 1) / block.x, (n + block.y - 1) / block.y);
+    k_spin_w_shift<<<grid, block, 0, stream>>>(I.dW.ptr, I.dPm.ptr, I.dVao.ptr, n);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
+    I.w_spin_override = true;
+    return true;
 }
 
 /* ====================================================================== *
@@ -11241,7 +11423,7 @@ bool XtbGpuContext::beginResidentLoop(int nsh, int nat, int nao, double Tele, do
     try {
         m_impl->dQat.ensure(nat); m_impl->dQsh.ensure(nsh);
         m_impl->dN0sh.ensure(nsh); m_impl->dN0at.ensure(nat);
-        m_impl->dDq.ensure(1);
+        m_impl->dDq.ensure(1); m_impl->dDqSq.ensure(1);
         m_impl->dOccMu.ensure(1); m_impl->dOccNcol.ensure(1);   // occupied-column count (density)
     } catch (...) {
         return false;
@@ -11286,7 +11468,7 @@ bool XtbGpuContext::beginResidentLoopGfn1(int nsh, int nat, int nao, double Tele
         m_impl->dN0sh.ensure(nsh); m_impl->dN0at.ensure(nat);
         m_impl->dPotQsh.ensure(nsh); m_impl->dVsh.ensure(nsh); m_impl->dVat.ensure(nat);
         m_impl->dGamma3At.ensure(nat);
-        m_impl->dDq.ensure(1);
+        m_impl->dDq.ensure(1); m_impl->dDqSq.ensure(1);
         m_impl->dOccMu.ensure(1); m_impl->dOccNcol.ensure(1);
     } catch (...) {
         m_impl->last_error = "device allocation for the GFN1 resident loop failed";
@@ -11353,7 +11535,7 @@ bool XtbGpuContext::residentScfStep(bool fp32, double* dq_out, double* e_band,
     if (!solved) return fail("potential build / Fock / eigensolve failed");
 
     // 3. Occupation on the device (resident eps → resident occ).
-    const double kT = m_impl->loop_Tele * 3.166808e-6;
+    const double kT = m_impl->loop_Tele * CurcumaUnit::Constants::BOLTZMANN_HARTREE_K_XTB;
     const int use_fermi = (m_impl->loop_Tele > 0.0) ? 1 : 0;
     const int blk = 256;
     if (m_impl->loop_open) {
@@ -11418,6 +11600,9 @@ bool XtbGpuContext::residentScfStep(bool fp32, double* dq_out, double* e_band,
         k_maxabsdiff<<<1, blk, blk * sizeof(double), stream>>>(vout, vin, nsh, m_impl->dDq.ptr);
         if (cudaGetLastError() != cudaSuccess) return fail("convergence (max|dq|) kernel failed");
         m_impl->dDq.download(dq_out, 1, stream);
+        k_sumsqdiff<<<1, blk, blk * sizeof(double), stream>>>(vout, vin, nsh, m_impl->dDqSq.ptr);
+        if (cudaGetLastError() != cudaSuccess) return fail("convergence (sum dq^2) kernel failed");
+        m_impl->dDqSq.download(&m_impl->last_dq_sumsq, 1, stream);
         if (!runBroydenUpdate(vin, vout, m_impl->dBroyVnext.ptr)) return fail("device Broyden update failed");
         cudaMemcpyAsync(m_impl->dPotQsh.ptr, m_impl->dBroyVnext.ptr, sizeof(double) * nsh, cudaMemcpyDeviceToDevice, stream);
     } else
@@ -11440,6 +11625,9 @@ bool XtbGpuContext::residentScfStep(bool fp32, double* dq_out, double* e_band,
         k_maxabsdiff<<<1, blk, blk * sizeof(double), stream>>>(vout, vin, nsh + 9 * nat, m_impl->dDq.ptr);
         if (cudaGetLastError() != cudaSuccess) return fail("convergence (max|dq|) kernel failed");
         m_impl->dDq.download(dq_out, 1, stream);
+        k_sumsqdiff<<<1, blk, blk * sizeof(double), stream>>>(vout, vin, nsh + 9 * nat, m_impl->dDqSq.ptr);
+        if (cudaGetLastError() != cudaSuccess) return fail("convergence (sum dq^2) kernel failed");
+        m_impl->dDqSq.download(&m_impl->last_dq_sumsq, 1, stream);
         if (!runBroydenUpdate(vin, vout, m_impl->dBroyVnext.ptr)) return fail("device Broyden update failed");
         cudaMemcpyAsync(m_impl->dPotQsh.ptr, m_impl->dBroyVnext.ptr, sizeof(double) * nsh, cudaMemcpyDeviceToDevice, stream);
         cudaMemcpyAsync(m_impl->dInDpAt.ptr, m_impl->dBroyVnext.ptr + off_dp, sizeof(double) * 3 * nat, cudaMemcpyDeviceToDevice, stream);
@@ -11450,6 +11638,8 @@ bool XtbGpuContext::residentScfStep(bool fp32, double* dq_out, double* e_band,
     m_impl->last_dq = *dq_out;   // gates the next step's pseudo-diagonalisation
     return true;
 }
+
+double XtbGpuContext::lastDqSumSq() const { return m_impl ? m_impl->last_dq_sumsq : -1.0; }
 
 bool XtbGpuContext::residentLoopCharges(double* q_sh, double* q_at, double* dp_at,
                                         double* qp_at, double* eps)
@@ -12072,8 +12262,15 @@ bool XtbGpuContext::computeGradient(const double* P, const double* C, const doub
     // started from FP32 vectors). The basis-invariant form W = C_o (2 G_oo) C_o^T with
     // G_oo = C_o^T F C_o is exact for integer occupations (the pseudo step's gap gate). F is rebuilt
     // from the potentials uploaded above, i.e. the converged ones.
-    const bool w_from_goo = nocc_orbs > 0 && !m_impl->c_exact_eigenvectors;
-    if (w_from_goo) {
+    // Spin polarisation (Claude Generated, Nov 2026): spinWeightedDensity already wrote the W of both
+    // spins (with the spin term folded in) into dW; it is used as it is, once.
+    const bool w_spin = m_impl->w_spin_override;
+    m_impl->w_spin_override = false;
+    if (w_spin && use_pattern_pw) return false;   // the spin loop keeps P dense; anything else is a caller error
+    const bool w_from_goo = !w_spin && nocc_orbs > 0 && !m_impl->c_exact_eigenvectors;
+    if (w_spin) {
+        m_impl->profMark("grad: W of both spins (spinWeightedDensity)");
+    } else if (w_from_goo) {
         const int no = nocc_orbs;
         CudaBuffer<double> Cbak, Goo;
         try {
@@ -12097,7 +12294,9 @@ bool XtbGpuContext::computeGradient(const double* P, const double* C, const doub
         if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
         m_impl->profMark("grad: W from G_oo (after a pseudo-diagonalisation step)");
     }
-    if (nocc_orbs > 0) {
+    if (w_spin) {
+        // W is in place
+    } else if (nocc_orbs > 0) {
         if (!w_from_goo) {
             std::vector<double> occ2(nocc_orbs);
             for (int k = 0; k < nocc_orbs; ++k) occ2[k] = 2.0 * eps[k];
@@ -12256,7 +12455,7 @@ bool XtbGpuContext::occupations(const double* eps, int n, double Tele, double n_
     m_impl->dOccNcol.ensure(1);
     m_impl->dEps.upload(eps, n, stream);
 
-    const double kT = Tele * 3.166808e-6;            // K → Hartree (host constant)
+    const double kT = Tele * CurcumaUnit::Constants::BOLTZMANN_HARTREE_K_XTB;            // K → Hartree (host constant)
     const int nocc_pairs = static_cast<int>(std::floor(n_elec / 2.0));
     const int use_fermi = (Tele > 0.0) ? 1 : 0;
     const int block = 256;                            // power of two for the tree reduction

@@ -543,6 +543,7 @@ Comparing at equal convergence instead of equal threshold:
 At 5e-5 — roughly xtb's effective convergence level — curcuma matches gxtb's
 932 ms. The default is deliberately NOT loosened: the energy stays excellent but
 the gradient degrades an order of magnitude, which matters for `-opt`/MD.
+Superseded Nov 17, 2026: the default is now 2e-5 (rms force error 1.7x that of 1e-5, measured on 11 MD frames), see [SCF_THRESHOLD_2026-11.md](SCF_THRESHOLD_2026-11.md).
 
 ## Residual gap to xtb (gfn2 complex, 1083 vs 979 ms)
 

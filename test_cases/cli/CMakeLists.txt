@@ -112,6 +112,10 @@ set_tests_properties(cli_gfnff_05_frag_charge_ensemble PROPERTIES TIMEOUT 900 LA
 add_cli_test(gfnff 08_frag_charge_many_fragments)
 set_tests_properties(cli_gfnff_08_frag_charge_many_fragments PROPERTIES TIMEOUT 600 LABELS "gfnff;frag_charge")
 
+# Claude Generated (Nov 2026): one GFN-FF metal table, Sn/Pb/Bi small-CN rule (Zn, Cd, Ga, Sn, Pb, Bi systems vs xtb 6.7.1).
+add_cli_test(gfnff 11_metal_type)
+set_tests_properties(cli_gfnff_11_metal_type PROPERTIES TIMEOUT 120 LABELS "gfnff")
+
 # Claude Generated (Oct 2026): EEQ solver control (auto thresholds, explicit names, alias, typo, GPU gap).
 add_cli_test(gfnff 06_eeq_solver_control)
 set_tests_properties(cli_gfnff_06_eeq_solver_control PROPERTIES TIMEOUT 900 RESOURCE_LOCK "gpu" LABELS "gfnff;eeq")
@@ -367,6 +371,13 @@ add_cli_test(sqm 10_gfn2_optimization_smoke)       # gfn2 -opt anchor (gradient 
 add_cli_test(sqm 11_gfn2_provider_check)           # routing anchor — updated for AP 3 (native backend)
 add_cli_test(sqm 12_gfn2_scf_precond)              # -scf_precond frag: same energy, fewer SCF iterations, ignored for ions (Oct 2026)
 add_cli_test(sqm 15_flat_flag_routing)             # flat -electronic_temperature routed to the module of -method (Oct 2026)
+add_cli_test(sqm 16_scf_criterion_xtb)              # -scf_criterion xtb / -scf_accuracy: xtb 6.7.1 convergence rule (Nov 2026)
+add_cli_test(sqm 17_md_default_aspc)               # MD with native gfn1/gfn2 extrapolates SCC charges (aspc) by default (Nov 2026)
+add_cli_test(sqm 18_solvent_names_states)           # solvent names (case, xtb aliases), errors, reference states bar1M/reference (Nov 2026)
+add_cli_test(sqm 19_cosmo_solvation)                # native ddCOSMO vs xtb 6.7.1 --cosmo, FD gradient, errors (Nov 2026)
+add_cli_test(sqm 20_cpcm_solvation)                 # native CPCM vs tblite 0.4.0 --cpcm, FD gradient, errors (Nov 2026)
+add_cli_test(sqm 21_cpcmx_solvation)                # native CPCM-X vs xtb 6.7.1 --cpcmx and CPCM-X 1.1.0, errors (Nov 2026)
+add_cli_test(sqm 16_spin_polarization)             # -xtb.spin_polarization: triplet O2 energy/gradient against tblite 0.8.0, excluded modes error (Nov 2026)
 # -scf_precond frag on the device-resident CUDA loop (Oct 2026); exit 77 (skip) without a usable CUDA device.
 if(USE_CUDA)
     add_cli_test(sqm 13_gfn2_scf_precond_cuda)
@@ -376,6 +387,10 @@ if(USE_CUDA)
     add_cli_test(sqm 14_open_shell_cuda)
     set_tests_properties(cli_sqm_14_open_shell_cuda
         PROPERTIES TIMEOUT 300 RESOURCE_LOCK "gpu" LABELS "sqm;gpu;cli" SKIP_RETURN_CODE 77)
+    # Spin polarisation on the CUDA path against the CPU: O2 and Pt7, GFN1/GFN2, FP64 and mixed precision (Nov 2026).
+    add_cli_test(sqm 22_spin_polarization_cuda)
+    set_tests_properties(cli_sqm_22_spin_polarization_cuda
+        PROPERTIES TIMEOUT 600 RESOURCE_LOCK "gpu" LABELS "sqm;gpu;cli" SKIP_RETURN_CODE 77)
 endif()
 
 # cli_sqm_04..07 are enabled since 2026-10-09: the native gfn1/gfn2 match the TBLite references (4e-9 Eh, OH radical 8e-4 Eh).
