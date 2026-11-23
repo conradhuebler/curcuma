@@ -975,6 +975,8 @@ XtbGpuComputationalMethod::XtbGpuComputationalMethod(MethodType method, const js
             const std::string x = v.get<std::string>();
             return !x.empty() && x != "none" && x != "off";
         };
+        m_split_explicit = leased < 0 && (split_requested("gpu_eigensolver_devices") || split_requested("gpu_density_devices"));
+        m_split_implicit = several_devices && !m_split_explicit;
         for (const char* key : { "gpu_eigensolver_devices", "gpu_density_devices" }) {
             if (leased >= 0 && split_requested(key)) {
                 CurcumaLogger::warn(fmt::format("-{} ignored: this calculation is a batch worker on "
@@ -1218,6 +1220,32 @@ XtbGpuComputationalMethod::~XtbGpuComputationalMethod() = default;
 
 // ---- CUDA-SPECIFIC override: host-thread default --------------------------
 // Everything else in the ComputationalMethod interface is forwarded by XtbGpuAdapter.
+// GPU_PERIODIC_GAPS A6 (Claude Generated, Nov 23, 2026): multi-GPU split with a unit cell. The periodic device stages
+// and the FP32-refinement solve (refineEigenFP64) were built and measured for one device; the distributed eigensolver
+// and the density split never ran with a cell. Explicit request: refused. Implicit default split: off for the cell.
+bool XtbGpuComputationalMethod::setMolecule(const Mol& mol)
+{
+    if (mol.m_has_pbc && m_split_explicit) {
+        const std::string msg = "native GFN with a unit cell on CUDA: the multi-GPU split (-gpu_eigensolver_devices / "
+                                "-gpu_density_devices) was never run with a cell; use one device "
+                                "(-gpu_eigensolver_devices none -gpu_density_devices none)";
+        CurcumaLogger::error(msg);
+        m_split_refused = true;
+        m_split_message = msg;
+        return false;
+    }
+    m_split_refused = false;
+    if (mol.m_has_pbc && m_split_implicit && !m_split_disabled_for_cell && context() && context()->ok()) {
+        context()->setDistributedEigensolver({}, "auto", 128, 4000, true, true);
+        context()->setDensityDevices({});
+        m_split_disabled_for_cell = true;
+        if (CurcumaLogger::get_verbosity() >= 1)
+            CurcumaLogger::info("CUDA: unit cell - the default multi-GPU eigensolver/density split is off (one device; "
+                                "never run with a cell, docs/GPU_PERIODIC_GAPS.md A6)");
+    }
+    return XtbGpuAdapter<XtbGpuContext>::setMolecule(mol);
+}
+
 void XtbGpuComputationalMethod::setThreadCount(int threads)
 {
     // On the GPU path the eigensolve + gradient run on the device, but the host

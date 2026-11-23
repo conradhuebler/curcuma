@@ -847,6 +847,33 @@ add_test(NAME pbc_xtb_gpu_fallback COMMAND test_pbc_xtb_gpu_fallback WORKING_DIR
 set_tests_properties(pbc_xtb_gpu_fallback PROPERTIES TIMEOUT 900 LABELS "pbc;xtb;sqm;gpu" RESOURCE_LOCK "gpu"
     SKIP_RETURN_CODE 77 ENVIRONMENT "CURCUMA_PLUGIN_DIR=${CMAKE_BINARY_DIR}")
 
+# Claude Generated (Nov 23, 2026, GPU_PERIODIC_GAPS A6/A9): combinations with a cell. pbc_xtb_cell_refusals (any build):
+# spin polarisation, solvation, CPCM-X refused on CPU and -gpu cuda; -gpu rocm/vulkan + cell = error or counted CPU
+# fallback. pbc_xtb_gpu_combinations (CUDA): open shell and charged cell CPU vs CUDA, multi-GPU split refused; 77 = SKIP
+add_executable(test_pbc_xtb_combinations unit/test_pbc_xtb_combinations.cpp)
+target_link_libraries(test_pbc_xtb_combinations curcuma_core test_molecule_registry)
+if(USE_PCH)
+    target_precompile_headers(test_pbc_xtb_combinations REUSE_FROM curcuma_core)
+endif()
+add_test(NAME pbc_xtb_cell_refusals COMMAND test_pbc_xtb_combinations refusals WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(pbc_xtb_cell_refusals PROPERTIES TIMEOUT 300 LABELS "pbc;xtb;sqm" RESOURCE_LOCK "gpu"
+    ENVIRONMENT "CURCUMA_PLUGIN_DIR=${CMAKE_BINARY_DIR};CURCUMA_TEST_CPCMX_DB=${CMAKE_CURRENT_SOURCE_DIR}/cli/sqm/21_cpcmx_solvation/cpcmx_db")
+add_test(NAME pbc_xtb_gpu_combinations COMMAND test_pbc_xtb_combinations cuda WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(pbc_xtb_gpu_combinations PROPERTIES TIMEOUT 900 LABELS "pbc;xtb;sqm;gpu" RESOURCE_LOCK "gpu"
+    SKIP_RETURN_CODE 77 ENVIRONMENT "CURCUMA_PLUGIN_DIR=${CMAKE_BINARY_DIR}")
+
+# Claude Generated (Nov 23, 2026, GPU_PERIODIC_GAPS A4/A7): fault injection into every periodic CUDA device stage of
+# gfn1/gfn2 (CURCUMA_PBC_GPU_FAIL): the host fallback is counted (gpu_fallback, -gpu_strict exit 3) and gives the host
+# variant's energy/gradient/virial; exit 77 = SKIP without plugin or device
+add_executable(test_pbc_xtb_gpu_fallback unit/test_pbc_xtb_gpu_fallback.cpp)
+target_link_libraries(test_pbc_xtb_gpu_fallback curcuma_core test_molecule_registry)
+if(USE_PCH)
+    target_precompile_headers(test_pbc_xtb_gpu_fallback REUSE_FROM curcuma_core)
+endif()
+add_test(NAME pbc_xtb_gpu_fallback COMMAND test_pbc_xtb_gpu_fallback WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(pbc_xtb_gpu_fallback PROPERTIES TIMEOUT 900 LABELS "pbc;xtb;sqm;gpu" RESOURCE_LOCK "gpu"
+    SKIP_RETURN_CODE 77 ENVIRONMENT "CURCUMA_PLUGIN_DIR=${CMAKE_BINARY_DIR}")
+
 # Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A2): periodic coordination number (value and
 # derivative), periodic SpatialCellList. Tests the CN only; the energy terms have no minimum image yet.
 add_executable(test_pbc_cn unit/test_pbc_cn.cpp)

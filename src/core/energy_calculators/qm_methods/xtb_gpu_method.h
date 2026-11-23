@@ -51,6 +51,20 @@ public:
 
     /// CUDA-specific: default the host-side work to several cores (see the .cpp).
     void setThreadCount(int threads) override;
+
+    /// GPU_PERIODIC_GAPS A6 (Claude Generated, Nov 23, 2026): the multi-GPU eigensolver/density split never ran with a
+    /// unit cell. An explicit -gpu_eigensolver_devices / -gpu_density_devices request with a cell is refused (error);
+    /// the implicit default split of a multi-GPU node is switched off for a cell (one device, for the rest of this object).
+    bool setMolecule(const Mol& mol) override;
+    bool hasError() const override { return m_split_refused || XtbGpuAdapter::hasError(); }
+    std::string getErrorMessage() const override { return m_split_refused ? m_split_message : XtbGpuAdapter::getErrorMessage(); }
+
+private:
+    bool m_split_explicit = false;   ///< the user named devices for the eigensolver or density split
+    bool m_split_implicit = false;   ///< the default "all devices" split was configured (several visible devices)
+    bool m_split_disabled_for_cell = false;   ///< switched off once for a cell; stays off for this object
+    bool m_split_refused = false;    ///< the last setMolecule refused the explicit split with a cell
+    std::string m_split_message;
 };
 
 /// Build a device-resident SCF+gradient backend over an existing context
