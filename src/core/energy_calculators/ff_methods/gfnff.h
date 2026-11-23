@@ -418,6 +418,9 @@ PARAM(cn_zero_guard, Bool, false, "Gradient-only correction of the Coulomb chain
 PARAM(hh_repulsion_bpair, Bool, true, "Classify H...H 1,3/1,4 repulsion from the bond-pair table, as the reference. false uses a BFS bond count, which can depend on the atom order.", "Reference", {})
 PARAM(amideh_acidity_order_bug, Bool, false, "Reproduce the reference atom-order bug in the amide-H donor acidity, which makes the H-bond depend on whether N precedes its H. true only to match reference totals.", "Reference", {})
 PARAM(dispersion_atm, Bool, false, "Add a D4 three-body (ATM) term over bonded triples. The reference dispersion is pairwise, so it is off.", "Reference", {})
+// Claude Generated (Nov 2026): atom-order switches, docs/GFNFF_ORDER_DEPENDENCE.md. Default = pprcht.
+PARAM(inversion_sort_xtb, Bool, false, "Sort the three neighbours of an inversion centre by distance with the selection sort of xtb. Default false keeps the ssort of pprcht, which stops early and leaves some input orders unsorted, so the inversion energy depends on the atom numbering.", "Reference", {})
+PARAM(dgam_pi_membership, Bool, false, "EEQ hardness correction of nitrogen (dgam, -0.14 pi / -0.16 amide): test true pi membership. Default false keeps pprcht and xtb, which test the compact pi list by atom index, so the Coulomb energy depends on the atom numbering.", "Reference", {})
 // ---- GPU ----
 PARAM(gpu_block_size, Int, 0, "GPU kernel block size: 0 adaptive, else 32, 64, 128, 256 or 512.", "GPU", {})
 PARAM(gpu_cn_pair_regen, Bool, true, "GPU: rebuild the CN-derivative pair list when the topology displacement check fires. false builds it once.", "GPU", {})

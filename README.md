@@ -28,7 +28,7 @@ them in research. The labels used in this README and in the developer documentat
 
 | Method | Kind | Use | What it was compared with |
 |---|---|---|---|
-| `gfnff` | GFN-FF force field, native | **default of every capability**; fast (milliseconds per gradient) | pprcht/gfnff (the port source), every structure of MOR41 and GMTKN55: max 0.07 kcal/mol; S30L-CI: max 0.58, caused by one deliberate difference in the triple-bond torsion (0.05 with `-gfnff.storsion_reference_loop_bug true`). Against xtb it differs where xtb and the port source differ. |
+| `gfnff` | GFN-FF force field, native | **default of every capability**; fast (milliseconds per gradient) | pprcht/gfnff (the port source), every structure of MOR41 and GMTKN55: max 0.07 kcal/mol; S30L-CI: max 0.58, caused by one deliberate difference in the triple-bond torsion (0.05 with `-gfnff.storsion_reference_loop_bug true`). Against xtb it differs where xtb and the port source differ. Atom-order dependence as in the reference: [docs/GFNFF_ORDER_DEPENDENCE.md](docs/GFNFF_ORDER_DEPENDENCE.md). |
 | `gfn2` | GFN2-xTB, native | the accurate choice, about 100x slower than `gfnff` | tblite and xtb 6.7.1: 11 of 12 reference molecules within 1e-8 Eh, GMTKN55 within 0.017 kcal/mol |
 | `gfn1` | GFN1-xTB, native | as `gfn2` | tblite: 14 of 16 reference molecules within 1e-8 Eh; GMTKN55 max 0.011 kcal/mol |
 | `pm3`, `am1`, `mndo`, `pm6` | NDDO, native | semi-empirical | PM3/AM1/MNDO: 21 of 21 tests against Ulysses |

@@ -1379,6 +1379,15 @@ if(Python3_Interpreter_FOUND)
                      $<TARGET_FILE:curcuma> ${CMAKE_SOURCE_DIR})
     set_tests_properties(gfnff_xb_gradient_fd PROPERTIES TIMEOUT 300 LABELS "gfnff")
 
+    # Claude Generated (Nov 2026): GFN-FF terms under atom renumbering; default keeps the reference spreads
+    # (inversion: pprcht ssort, Coulomb: dgam piadr index cutoff), the two switches remove them;
+    # docs/GFNFF_ORDER_DEPENDENCE.md.
+    add_test(NAME gfnff_order_invariance
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_gfnff_order_invariance.py
+                     $<TARGET_FILE:curcuma> ${CMAKE_SOURCE_DIR})
+    set_tests_properties(gfnff_order_invariance PROPERTIES TIMEOUT 300 LABELS "gfnff")
+
     # Claude Generated (Oct 2026): fused D4 pair C6 (-gfnff.disp_c6_fused, default on) is bit-identical to the
     # stored per-pair path: -sp gradient files and 20-step MD (also with d4_cn_cache_threshold); docs/GFNFF_STATUS.md.
     add_test(NAME gfnff_d4_fused_c6

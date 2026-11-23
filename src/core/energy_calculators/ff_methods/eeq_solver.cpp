@@ -1078,6 +1078,8 @@ EEQSolver::EEQSolver(const ConfigManager& config)
         CurcumaLogger::info(fmt::format("EEQ solver config: solve_method={}, ppcg auto at nfrag>={} & N>={}, tol={:.0e}, max_iter={}",
             m_config.get<std::string>("solve_method", "auto"), m_ppcg_min_nfrag, m_ppcg_min_atoms, m_ppcg_tol, m_ppcg_max_iter));
     m_farfield_shortcut    = m_config.get<bool>("farfield_shortcut", true);
+    // Claude Generated (Nov 2026): -gfnff.dgam_pi_membership, docs/GFNFF_ORDER_DEPENDENCE.md
+    m_dgam_pi_membership   = m_config.get<bool>("dgam_pi_membership", false);
     m_refactor_eps         = m_config.get<double>("eeq_refactor_eps_bohr", 0.0);
     m_refactor_force_every = m_config.get<int>("eeq_refactor_force_every", 0);
     m_refine_iters         = m_config.get<int>("eeq_refine_iters", 1);
@@ -1294,7 +1296,7 @@ Vector EEQSolver::calculateCharges(
 
         // Claude Generated (January 17, 2026): Detect pi-system and amide nitrogens for dgam refinements
         std::vector<bool> is_pi_atom = detectPiSystem(atoms, hybridization, topology);
-        std::vector<bool> is_amide = detectAmideNitrogens(atoms, hybridization, is_pi_atom, topology, cn);
+        std::vector<bool> is_amide = detectAmideNitrogens(atoms, hybridization, is_pi_atom, topology, cn, m_dgam_pi_membership);
         Vector dgam = calculateDgam(atoms, topology_charges, hybridization, is_pi_atom, is_amide, topology);
 
         // Diagnostic output for comparison with Fortran goed_gfnff debug output
@@ -3926,7 +3928,7 @@ Vector EEQSolver::calculateFinalCharges(
 
     // Claude Generated (January 17, 2026): Detect pi-system and amide nitrogens for dgam
     std::vector<bool> is_pi_atom = use_corrections ? detectPiSystem(atoms, hybridization, topology) : std::vector<bool>(natoms, false);
-    std::vector<bool> is_amide = use_corrections ? detectAmideNitrogens(atoms, hybridization, is_pi_atom, topology, cn) : std::vector<bool>(natoms, false);
+    std::vector<bool> is_amide = use_corrections ? detectAmideNitrogens(atoms, hybridization, is_pi_atom, topology, cn, m_dgam_pi_membership) : std::vector<bool>(natoms, false);
     // Claude Generated (February 2026): Proper amideH detection for Phase 2 chi correction
     // Reference: Fortran gfnff_ini.f90:717 uses amideH() function from gfnff_ini2.f90:1575
     // Requires: H with 1 neighbor, that neighbor is amide N, amide N has exactly 1 sp3 C
@@ -5149,8 +5151,12 @@ Vector EEQSolver::calculateDgam(
         } else if (Z == 7) {  // N
             ff = -0.13;  // Base N
             // Fortran piadr bug: piadr(i)!=0 iff i_fortran <= npiall
-            // In 0-based C++: i < npiall
-            if (i < npiall) {
+            // In 0-based C++: i < npiall. -gfnff.dgam_pi_membership true tests the atom's
+            // own pi membership instead (piadr2), which makes dgam independent of the order.
+            const bool n_is_pi = m_dgam_pi_membership
+                ? (i < static_cast<int>(is_pi_atom.size()) && is_pi_atom[i])
+                : (i < npiall);
+            if (n_is_pi) {
                 ff = -0.14;  // "pi-system" N (Fortran piadr compatibility)
             }
             if (!is_amide.empty() && i < is_amide.size() && is_amide[i]) {
@@ -5209,7 +5215,7 @@ Vector EEQSolver::calculateDgamFull(
     const std::optional<TopologyInput>& topology)
 {
     auto is_pi = detectPiSystem(atoms, hybridization, topology);
-    auto is_amide = detectAmideNitrogens(atoms, hybridization, is_pi, topology, cn);
+    auto is_amide = detectAmideNitrogens(atoms, hybridization, is_pi, topology, cn, m_dgam_pi_membership);
     return calculateDgam(atoms, topology_charges, hybridization, is_pi, is_amide, topology);
 }
 

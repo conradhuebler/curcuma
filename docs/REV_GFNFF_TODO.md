@@ -356,15 +356,16 @@ carries the spread (curcuma default, spread = max − min over the four orders):
 |---|---|---:|---:|---|
 | charged | Coulomb | 89 | 237 | net charge goes to the fragment that contains atom 1 (Known Issue #13: the both-placements trial is dead code in the reference) |
 | charged | bond | 5 | 64 | not traced |
-| neutral | Coulomb | 492 | 1.3 | not traced; most likely the index-cutoff `piadr` in the dgam amide rule (Known Issue #11), unverified |
-| neutral | inversion | 106 | 9.9 | not traced; the out-of-plane term is evaluated for one neighbour ordering per centre, not symmetrised (hypothesis) |
+| neutral | Coulomb | 492 | 1.3 | nitrogen dgam tests the compact pi list `piadr(i)` (index cutoff), pprcht and xtb; verified on caffeine/complex (Nov 2026), switch `dgam_pi_membership` |
+| neutral | inversion | 106 | 9.9 | pprcht's `ssort` stops early, so the distance sort of the three neighbours fails for some orders; xtb's sort is correct; switch `inversion_sort_xtb` |
 | neutral | bond | 2 | 19.6 | MB16-43 only, not traced |
 
 Examples: `ICONF/N3P3H12_1` 7.8, `RSE43/P25` 4.3, `BHPERI/04ts` 2.4 kcal/mol, all inversion.
 **What a fix needs**: each mechanism has to be made order-independent, and for most of them the
 choice of the invariant value is not free — symmetrising the inversion term or placing the
 charge by a physical rule changes energies in the ORIGINAL order too, i.e. against what the
-parameters were fitted on. That needs an external verdict (r²SCAN-3c on the affected
+parameters were fitted on. Nov 2026: mechanisms, source comparison and the two opt-in switches in
+[GFNFF_ORDER_DEPENDENCE.md](GFNFF_ORDER_DEPENDENCE.md). That needs an external verdict (r²SCAN-3c on the affected
 structures) before it can become a default. The charge placement is the largest and the
 clearest: which fragment carries an ion's charge must follow the chemistry, not the input
 file. Status: **open, measured, mechanisms partly identified.**

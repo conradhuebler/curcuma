@@ -617,6 +617,9 @@ void GFNFF::forwardEEQSolverParams(json& eeq_params) {
     // one switch for the energy loop (FFWorkspace) and the EEQ matrix.
     if (m_parameters.contains("farfield_shortcut") && !eeq.contains("farfield_shortcut"))
         eeq["farfield_shortcut"] = m_parameters["farfield_shortcut"];
+    // Claude Generated (Nov 2026): atom-order switch of the nitrogen dgam rule (EEQSolver::calculateDgam).
+    if (m_parameters.contains("dgam_pi_membership") && !eeq.contains("dgam_pi_membership"))
+        eeq["dgam_pi_membership"] = m_parameters["dgam_pi_membership"];
 }
 
 // WP-S3 (May 2026): apply eeq_distance_cutoff_auto heuristic after Phase-1.
@@ -3682,6 +3685,10 @@ std::string GFNFF::computeTopologyFingerprint() const
     // geometry) is thus never reused without it, nor with another cell, and vice versa.
     if (m_cell_bohr_ortho.active)
         data += fmt::format("|cell={:.12e},{:.12e},{:.12e}", m_cell_bohr_ortho.L[0], m_cell_bohr_ortho.L[1], m_cell_bohr_ortho.L[2]);
+    // Claude Generated (Nov 2026): the atom-order switches change cached topology content
+    // (inversion neighbour order, EEQ dgam); appended only when on, so default keys stay as they were.
+    if (m_parameters.value("inversion_sort_xtb", false)) data += "|invsort=xtb";
+    if (m_parameters.value("dgam_pi_membership", false)) data += "|dgampi=1";
     // Use std::hash for a fast, non-cryptographic fingerprint
     size_t hash = std::hash<std::string>{}(data);
     return std::to_string(hash);

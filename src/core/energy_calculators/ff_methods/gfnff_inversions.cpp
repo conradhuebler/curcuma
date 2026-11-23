@@ -355,6 +355,8 @@ std::vector<Inversion> GFNFF::generateInversionsNative() const
 
     const auto& topo_info = getCachedTopology();
     using namespace GFNFFParameters;
+    const bool inversion_sort_xtb = m_parameters.value("inversion_sort_xtb", false);
+    const bool inversion_debug = std::getenv("CURCUMA_GFNFF_INVDBG") != nullptr;
 
     for (int i = 0; i < m_atomcount; ++i) {
         int nb_count = static_cast<int>(topo_info.adjacency_list[i].size());
@@ -382,6 +384,14 @@ std::vector<Inversion> GFNFF::generateInversionsNative() const
         if (!has_pi && !is_saturated_N) continue;
 
         // Sort neighbors using exact Fortran ssort algorithm (gfnff_helpers.f90:267-289)
+        // Claude Generated (Nov 2026, docs/GFNFF_ORDER_DEPENDENCE.md): pprcht's ssort is a
+        // translation of xtb's goto version (gfnff_ini2.F90:1609) in which both
+        // `go to 120` / `go to 140` (= next iteration) became `exit`: the inner scan stops at
+        // the first larger distance and the outer loop stops as soon as one position needs
+        // no swap. Input (r1,r3,r2) therefore stays unsorted, so which neighbour becomes the
+        // apex j and which the out-of-plane atom l depends on the atom numbering. Default
+        // reproduces pprcht; -gfnff.inversion_sort_xtb true uses xtb's selection sort
+        // (continue instead of break), which only depends on the order for exact ties.
         std::vector<int> nb_list = topo_info.adjacency_list[i];
         {
             const int n = static_cast<int>(nb_list.size());
@@ -394,11 +404,17 @@ std::vector<Inversion> GFNFF::generateInversionsNative() const
                 int k = idx;
                 double pp = sdum[idx];
                 for (int j = ii; j < n; ++j) {
-                    if (sdum[j] > pp) break;
+                    if (sdum[j] > pp) {
+                        if (inversion_sort_xtb) continue;
+                        break;
+                    }
                     k = j;
                     pp = sdum[j];
                 }
-                if (k == idx) break;
+                if (k == idx) {
+                    if (inversion_sort_xtb) continue;
+                    break;
+                }
                 sdum[k] = sdum[idx];
                 sdum[idx] = pp;
                 std::swap(nb_list[idx], nb_list[k]);
@@ -463,6 +479,12 @@ std::vector<Inversion> GFNFF::generateInversionsNative() const
             inv.potential_type = 0;
         }
 
+        // Diagnostic (env CURCUMA_GFNFF_INVDBG, print only): one line per term, 1-based
+        // indices in the layout of the instrumented pprcht 'PPINV' line (centre, j, k, l).
+        if (inversion_debug) {
+            fmt::print("CURINV {:6d}{:6d}{:6d}{:6d}{:20.12f}{:20.12f}\n", i + 1, jj + 1, kk + 1, ll + 1,
+                       inv.omega0, inv.fc);
+        }
         inversions.push_back(inv);
     }
 

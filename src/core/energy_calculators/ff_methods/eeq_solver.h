@@ -1078,6 +1078,7 @@ private:
     // Local-inverse preconditioner of the projected PCG (Claude Generated, Oct 2026), see
     // LocalInversePreconditioner. On by default (eeq_ppcg_precond = localinv), diag restores Jacobi.
     bool   m_farfield_shortcut = true;  ///< from farfield_shortcut (default true), see eeq_solver.cpp
+    bool   m_dgam_pi_membership = false; ///< from dgam_pi_membership (default false = reference index cutoff)
     bool   m_ppcg_localinv = false;     ///< set from eeq_ppcg_precond in the constructor (default localinv)
     double m_localinv_radius = 8.0;     ///< eeq_localinv_radius_bohr (kept entries per row)
     double m_localinv_ext = 10.0;       ///< eeq_localinv_ext_bohr (block that is inverted)
