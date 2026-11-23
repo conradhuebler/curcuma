@@ -159,6 +159,24 @@ int main()
         const double e_gpu = calc_gpu.CalculateEnergy(false);
         check(std::abs(e_gpu - e_0) < 1.0e-8, "gfn1 -gpu cuda with a cell gives the CPU periodic energy (1e-8)");
     }
+    {
+        // A5 (Nov 23, 2026): -large_system_mode with a cell is refused (its drivers are cell-free, the result
+        // was a silent vacuum energy); without a cell the same setting still runs
+        for (const char* mode : { "fragments", "dc", "sparse" }) {
+            for (const char* method : { "gfn1", "gfn2" }) {
+                const json cfg = { { "verbosity", 0 }, { "threads", 1 }, { "xtb", { { "large_system_mode", mode } } } };
+                EnergyCalculator calc(method, cfg);
+                calc.setMolecule(dimerInCell(8.0));
+                check(calc.Error(), std::string(method) + " -large_system_mode " + mode + " with a cell is refused");
+                check(!calc.hasPeriodicEnergy(), std::string(method) + " -large_system_mode " + mode + " with a cell: no periodic energy claimed");
+            }
+        }
+        const json cfg = { { "verbosity", 0 }, { "threads", 1 }, { "xtb", { { "large_system_mode", "fragments" } } } };
+        EnergyCalculator calc("gfn1", cfg);
+        calc.setMolecule(dimerInCell(0.0));
+        check(!calc.Error(), "gfn1 -large_system_mode fragments without a cell still runs");
+        std::printf("large_system_mode + cell refusal: checked for fragments/dc/sparse x gfn1/gfn2\n");
+    }
     if (g_failures == 0)
         std::printf("test_pbc_xtb_tblite: all checks passed\n");
     else

@@ -164,7 +164,7 @@ charges O -0.6 / H +0.3 for the D4 zeta weighting):
   verbosity 3 as alpha and the number of k vectors.
 - **Wrapper** (`NativeXtbMethod::setMolecule`): `Mol::m_has_pbc` -> `XTB::setPeriodicCell(m_unit_cell)`; errors (never a
   silent vacuum energy) for gfn2 (P2b pending), implicit solvation, a non-orthorhombic cell, `d4_charge_source` other
-  than `mulliken`; `-large_system_mode` keeps its own driver (no cell, documented as not periodic). `hasPeriodicEnergy()`
+  than `mulliken`; `-large_system_mode` with a cell is an error (its drivers are cell-free; refused since Nov 23, 2026, ctest `pbc_xtb_tblite`). `hasPeriodicEnergy()`
   is true with a cell. A gradient request with a cell is refused until P3 (`calculateEnergy(true)` sets an error).
 - **tblite agreement** (water dimer `water-dimer.roo2.8`, `tblite_periodic_reference gfn1 ... L L L`, tblite 0.4.0
   accuracy 1, curcuma `-sp -method gfn1`, cubic cells):
@@ -1373,8 +1373,8 @@ change. Measurements and scripts: project folder GFN-FF-Wasser, subfolder 06_gfn
   strains (a sheared cell is refused), threading of the periodic CN/D3, Klopman-Ohno and Ewald matrix builds, the
   structure-factor factorisation of the multipole k sums of the energy matrices (G3; the gradient and virial use it
   since M1/M2), d-shell elements with a cell (refused), implicit solvation
-  with a cell (refused), `-large_system_mode` with a cell (its driver ignores the cell: documented as non-periodic, not
-  refused), GPU with a cell: CUDA with the device stages G1b/G2/G3/G4a/G4b/G5a-d, E1/A1/M1/M2/C1, H1-H5, D1, A1r and B1
+  with a cell (refused), `-large_system_mode` with a cell (refused since Nov 23, 2026; before, its driver ignored the cell and returned a
+  vacuum energy), GPU with a cell: CUDA with the device stages G1b/G2/G3/G4a/G4b/G5a-d, E1/A1/M1/M2/C1, H1-H5, D1, A1r and B1
   (the closed-shell neutral SCF is device-resident since R3/R5; open shell and charged cells keep the host-driven loop), ROCm/Vulkan CPU fallback (not planned).
 - Not tested: open shell, charged cells (background term differs from tblite), halogen bond with a cell (cannot run:
   the GFN1 donors Br/I carry d shells, which a cell refuses), thread-count independence of the periodic energy and gradient, MD energy conservation with a cell,

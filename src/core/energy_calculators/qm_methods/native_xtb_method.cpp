@@ -248,6 +248,17 @@ bool NativeXtbMethod::setMolecule(const Mol& mol)
         // fragmentation driver (it owns its own per-fragment XTB instances).
         const std::string mode_str = largeSystemModeString();
         const auto mode = curcuma::xtb::parseLargeSystemMode(mode_str);
+        // A cell with a large-system driver (Claude Generated, Nov 23, 2026; GPU_PERIODIC_GAPS A5): the
+        // fragment/dc/sparse drivers own cell-free XTB objects and never call setPeriodicCell, so the result
+        // would be a silent vacuum energy. Refuse instead.
+        if (mol.m_has_pbc && mode != curcuma::xtb::LargeSystemMode::None) {
+            m_has_error = true;
+            m_error_message = fmt::format("native {} with a unit cell: -large_system_mode {} has no periodic "
+                                          "implementation (use -large_system_mode none)",
+                                          getMethodName(), mode_str);
+            CurcumaLogger::error(m_error_message);
+            return false;
+        }
         if (m_cpcmx && mode != curcuma::xtb::LargeSystemMode::None) {
             m_has_error = true;
             m_error_message = "solvent_model cpcmx is not available with -large_system_mode " + mode_str;

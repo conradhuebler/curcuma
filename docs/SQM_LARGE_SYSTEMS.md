@@ -40,6 +40,9 @@ governs **how the eigenvalue problem is solved**; `-large_system_mode` governs
 | `dc` | `purify` and `lobpcg` **fall back to dense GES** per sub-block; `native` applies directly | purify produces projector eigenvalues (0/1), not orbital energies; lobpcg gives only a partial spectrum; DC needs the full spectrum for Fermi occupation / chemical-potential bisection |
 | `sparse` | **ignored** — sparse IS the eigensolver replacement | `-eigensolver` is consulted for nothing; the driver always runs purification |
 
+**Hard rule (cell):** every `-large_system_mode` other than `none` with a unit cell is an error in `setMolecule`
+(the drivers are cell-free; until Nov 23, 2026 they returned a silent vacuum energy). See docs/WP-PERIODIC-XTB.md.
+
 **Hard rule:** `-large_system_mode=fragments|dc + -eigensolver=purify` requires
 `-electronic_temperature 0`. Purification is 0-K by construction (integer
 occupation, no Fermi smearing). The wrapper enforces this as a **hard error in
