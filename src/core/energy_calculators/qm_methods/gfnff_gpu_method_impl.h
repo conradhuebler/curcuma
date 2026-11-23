@@ -1228,8 +1228,12 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
     uploadCellToDevice();
     if (m_periodic_hybrid) {
         followHostCellChanges();   // A1 (Nov 2026): barostat cell changes and the radius freeze
-        if constexpr (Backend::has_periodic_local_terms)
+        if constexpr (Backend::has_periodic_local_terms) {
             m_gpu_workspace->setWantVirial(m_gfnff->wantVirial());
+            double thr1 = 0.0, thr2 = 0.0;   // HB-X (Nov 2026): the host's thresholds and PARAMs
+            m_gfnff->hbSearchThresholds(thr1, thr2);
+            m_gpu_workspace->setHBCrossing(m_gfnff->pressureHBCrossing(), m_gfnff->pressureCrossingShell(), thr1, thr2, thr2);
+        }
     }
 
     // --- Step 0: GPU topology displacement check (Claude Generated March 2026) ---
@@ -3120,6 +3124,8 @@ void GFNFFGpuMethodImpl<Backend>::assembleHybridVirial()
     vc.batm = T(VIR_BATM);
     vc.atm.setZero();
     vc.cn_bond = T(VIR_CN);
+    vc.hb_crossing = m_gfnff->pressureHBCrossing() ? T(VIR_HB_CROSS) : Eigen::Matrix3d::Zero();   // HB-X
+    vc.xb_crossing = m_gfnff->pressureHBCrossing() ? T(VIR_XB_CROSS) : Eigen::Matrix3d::Zero();
     vc.cn_dispersion.setZero();
     vc.cn_coulomb.setZero();
     const double e_tail = m_gpu_workspace->energyComponents().disp_tail;

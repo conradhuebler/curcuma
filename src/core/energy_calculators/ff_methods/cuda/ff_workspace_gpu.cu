@@ -3602,11 +3602,23 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
                 impl.d_grad.ptr,
                 &impl.d_energies.ptr[impl.E_XBOND],
                 vir_slot(VIR_XBOND));
+            if (want_vir && m_hb_cross_on)   // HB-X (Nov 2026): crossing estimator, own kernel after the term
+                launch_k_xb_crossing(cfg.gridSize, cfg.blockSize, sC, impl.xbonds.n,
+                    impl.xbonds.idx_i.ptr, impl.xbonds.idx_j.ptr, impl.xbonds.idx_k.ptr,
+                    impl.xbonds.elem_A.ptr, impl.xbonds.elem_B.ptr,
+                    impl.xbonds.q_X.ptr, impl.xbonds.q_B.ptr, impl.xbonds.acidity_X.ptr, impl.xbonds.r_cut.ptr,
+                    impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+                    m_hb_cross_h0, m_xb_cross_thr2, vir_slot(VIR_XB_CROSS));
         }
     }
     if (m_hbond_enabled) {
         // Phase 8: hbonds.n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
         LaunchConfig cfg = getLaunchConfig(impl.hbonds.n, m_block_size);
+        // HB-X (Nov 2026): the crossing kernel reads the per-triple energies, so they are recorded with it (the
+        // kernel argument changes from nullptr to the array; the kernel itself is unchanged; no graphs with the virial)
+        const bool want_cross = want_vir && m_hb_cross_on;
+        if (want_cross)
+            ensureHBTripleEnergyBuffer(impl, *this);
         launch_k_hbonds(impl.pbc_active, cfg.gridSize, cfg.blockSize, sC,
             impl.hbonds.n,
             impl.hbonds.idx_i.ptr, impl.hbonds.idx_j.ptr, impl.hbonds.idx_k.ptr,
@@ -3627,8 +3639,13 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
             impl.coords.d_z.ptr,
             impl.d_grad.ptr,
             &impl.d_energies.ptr[impl.E_HBOND],
-            hbTripleEnergyTarget(impl, m_record_hb_energies),   // Oct 2026: nullptr unless recording
+            hbTripleEnergyTarget(impl, m_record_hb_energies || want_cross),   // Oct 2026: nullptr unless recording
             vir_slot(VIR_HBOND));
+        if (want_cross && impl.hbonds.n > 0)
+            launch_k_hb_crossing(cfg.gridSize, cfg.blockSize, sC, impl.hbonds.n,
+                impl.hbonds.idx_i.ptr, impl.hbonds.idx_j.ptr, impl.hbonds.idx_k.ptr, impl.hbonds.case_type.ptr,
+                impl.hb_triple_energy.ptr, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+                m_hb_cross_h0, m_hb_cross_thr1, m_hb_cross_thr2, vir_slot(VIR_HB_CROSS));
     }
     // Per-kernel snapshot: after all stream C kernels (Claude Generated April 2026)
     if (gradient && impl.d_grad_after_sC.ptr) {

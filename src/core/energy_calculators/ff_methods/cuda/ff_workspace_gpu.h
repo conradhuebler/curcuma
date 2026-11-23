@@ -475,6 +475,17 @@ public:
     /// After a gradient step with the virial on: the GFNFF_VIR_BUFFER values in Eh (synchronous copy). False when
     /// the last step carried no virial.
     bool downloadVirial(std::vector<double>& out);
+    /// HB-X (Claude Generated, Nov 2026): crossing estimator of the HB/XB search radii into the slots VIR_HB_CROSS /
+    /// VIR_XB_CROSS (same estimator as FFWorkspace::setHBCrossing, derivation there). Only with the virial and a cell;
+    /// off: the VIR kernels get a null slot and add nothing.
+    void setHBCrossing(bool on, double shell, double hb_thr1, double hb_thr2, double xb_thr2)
+    {
+        m_hb_cross_on = on && shell > 0.0 && shell < 1.0;
+        m_hb_cross_h0 = (1.0 - shell) * (1.0 - shell);
+        m_hb_cross_thr1 = hb_thr1;
+        m_hb_cross_thr2 = hb_thr2;
+        m_xb_cross_thr2 = xb_thr2;
+    }
 
     /// Claude Generated (April 2026): Set unit cell for PBC minimum image convention.
     /// cell_bohr: 3×3 matrix (column-major, in Bohr). Uploads to GPU constant memory.
@@ -796,6 +807,8 @@ private:
     bool m_repulsion_enabled  = true;
     bool m_coulomb_enabled    = true;
     bool m_want_virial = false;             ///< A1 (Nov 2026): device virial requested (setWantVirial)
+    bool m_hb_cross_on = false;             ///< HB-X (Nov 2026): setHBCrossing
+    double m_hb_cross_h0 = 1.0, m_hb_cross_thr1 = 0.0, m_hb_cross_thr2 = 0.0, m_xb_cross_thr2 = 0.0;
     bool m_virial_ready = false;            ///< A1: the last launchChargeDependentAndFinish(true) filled d_virial
     bool m_coulomb_pair_on_device = true;   ///< S2 (Nov 2026): device pair Coulomb; false in the periodic hybrid (host Ewald)
     int  m_verbosity          = 0;

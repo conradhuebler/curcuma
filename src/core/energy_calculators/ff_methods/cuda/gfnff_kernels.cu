@@ -5520,3 +5520,106 @@ void launch_k_batm(double* vir, dim3 grid, dim3 block, cudaStream_t stream, int 
     if (vir) k_batm_vir<<<grid, block, 0, stream>>>(n, idx_i, idx_j, idx_k, zb3atm_i, zb3atm_j, zb3atm_k, cx, cy, cz, topo_charges, grad, energy, vir);
     else     k_batm<<<grid, block, 0, stream>>>(n, idx_i, idx_j, idx_k, zb3atm_i, zb3atm_j, zb3atm_k, cx, cy, cz, topo_charges, grad, energy);
 }
+
+// ============================================================================
+// HB-X (Claude Generated, Nov 2026): crossing estimator of the HB/XB search radii for the pressure, the CPU
+// FFWorkspace::calcHBCrossing / calcXBCrossing (derivation at crossingShellAdd in ff_workspace_gfnff.cpp and in
+// docs/WP-PERIODIC-NONBONDED.md HB-X). Separate kernels after k_hbonds_vir / k_xbonds_vir: those stay unchanged
+// (code added inside a kernel body changed its contraction and the last bits of the NPT pressure on the CPU). Only
+// launched with the virial and a cell, so the frame is the periodic one (A, B as the images next to H or X). The sum
+// goes through blockReduceAddVirial (fixed point, thread-order independent).
+// ============================================================================
+/// One triple: d holds nd vectors of the active criterion with value h; inside the shell h0 <= h < 1
+/// (u = (h - h0)/(1 - h0)) it adds 2 E (-2 + 6u) / ((1 - h0) sum |d|^2) * sum d d^T to v (row-major).
+__device__ __forceinline__ void vir_cross_add(double* v, double E, double h, double h0, const double* d, int nd)
+{
+    if (!(h >= h0 && h < 1.0)) return;
+    double n2 = 0.0;
+    for (int k = 0; k < nd; ++k) n2 += d[3 * k] * d[3 * k] + d[3 * k + 1] * d[3 * k + 1] + d[3 * k + 2] * d[3 * k + 2];
+    const double u = (h - h0) / (1.0 - h0);
+    const double w = 2.0 * E * (-2.0 + 6.0 * u) / ((1.0 - h0) * n2);
+    for (int k = 0; k < nd; ++k)
+        for (int a = 0; a < 3; ++a)
+            for (int b = 0; b < 3; ++b)
+                v[3 * a + b] += w * d[3 * k + a] * d[3 * k + b];
+}
+
+/// HB triples: energies from the per-triple record of k_hbonds_vir (e_triple), h from the frame on H.
+__global__ __launch_bounds__(512) void k_hb_crossing(int n, const int* __restrict__ idx_i, const int* __restrict__ idx_j,
+    const int* __restrict__ idx_k, const int* __restrict__ case_type, const double* __restrict__ e_triple,
+    const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+    double h0, double thr1, double thr2, double* vir_cross)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    double v[9] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    if (tid < n && e_triple[tid] != 0.0) {
+        const int A = idx_i[tid], H = idx_j[tid], B = idx_k[tid];
+        const double hx = cx[H], hy = cy[H], hz = cz[H];
+        double ax, ay, az, bx, by, bz;
+        micPlace(cx, cy, cz, A, hx, hy, hz, ax, ay, az);
+        micPlace(cx, cy, cz, B, hx, hy, hz, bx, by, bz);
+        const double d[9] = { bx - ax, by - ay, bz - az, hx - ax, hy - ay, hz - az, bx - hx, by - hy, bz - hz };
+        const double rab2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+        const double h1 = rab2 / thr1;
+        const double h2 = (case_type[tid] == 1)
+            ? (rab2 + d[3] * d[3] + d[4] * d[4] + d[5] * d[5] + d[6] * d[6] + d[7] * d[7] + d[8] * d[8]) / thr2 : 0.0;
+        if (h2 > h1) vir_cross_add(v, e_triple[tid], h2, h0, d, 3);
+        else         vir_cross_add(v, e_triple[tid], h1, h0, d, 1);
+    }
+    blockReduceAddVirial(v, vir_cross);
+}
+
+/// XB triples: E_XB re-evaluated with the energy statements of k_xbonds_body (frame on X); h = max(r_AB^2/thr_ab,
+/// r_XB^2/r_cut^2).
+__global__ __launch_bounds__(512) void k_xb_crossing(int n, const int* __restrict__ idx_i, const int* __restrict__ idx_j,
+    const int* __restrict__ idx_k, const int* __restrict__ elem_A, const int* __restrict__ elem_B,
+    const double* __restrict__ q_X, const double* __restrict__ q_B, const double* __restrict__ acidity_X,
+    const double* __restrict__ r_cut, const double* __restrict__ cx, const double* __restrict__ cy,
+    const double* __restrict__ cz, double h0, double thr_ab, double* vir_cross)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    double v[9] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    if (tid < n) {
+        const double XB_SCUT_D = 5.0, XB_BACUT_D = 70.0, HB_ALP_D = 6.0, HB_LONGCUT_XB_D = 70.0;
+        const double XB_ST_D = 15.0, XB_SF_D = 0.03;
+        const int A = idx_i[tid], X = idx_j[tid], B = idx_k[tid];
+        const double xx = cx[X], xy = cy[X], xz = cz[X];
+        double ax, ay, az, bx, by, bz;
+        micPlace(cx, cy, cz, A, xx, xy, xz, ax, ay, az);
+        micPlace(cx, cy, cz, B, xx, xy, xz, bx, by, bz);
+        const double d[6] = { bx - ax, by - ay, bz - az, bx - xx, by - xy, bz - xz };
+        const double r2AX = (xx - ax) * (xx - ax) + (xy - ay) * (xy - ay) + (xz - az) * (xz - az);
+        const double r2AB = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+        const double r2XB = d[3] * d[3] + d[4] * d[4] + d[5] * d[5];
+        const double r_AX = sqrt(r2AX), r_XB = sqrt(r2XB), r_AB = sqrt(r2AB);
+        if (r_XB <= r_cut[tid] && r_XB >= 1e-10 && r_AB >= 1e-10) {
+            const int eA = elem_A[tid] - 1, eB = elem_B[tid] - 1;
+            const double r_vdw_AB = ((eA >= 0 && eA < 100) ? d_cov_radii[eA] : 1.0)
+                                  + ((eB >= 0 && eB < 100) ? d_cov_radii[eB] : 1.0);
+            const double damp_short = d_damping_short_range(r_XB, r_vdw_AB, XB_SCUT_D, HB_ALP_D);
+            const double damp_long = d_damping_long_range(r_XB, HB_LONGCUT_XB_D, HB_ALP_D);
+            const double expo_outl = XB_BACUT_D * ((r_AX + r_XB) / r_AB - 1.0);
+            if (expo_outl <= 15.0) {
+                const double damp_outl = 2.0 / (1.0 + exp(expo_outl));
+                const double Q_X = d_charge_scaling(q_X[tid], XB_ST_D, XB_SF_D);
+                const double Q_B = d_charge_scaling(-q_B[tid], XB_ST_D, XB_SF_D);
+                const double E = -(damp_short * damp_long * damp_outl / (r_XB * r_XB * r_XB)) * Q_B * acidity_X[tid] * Q_X;
+                const double h1 = r2AB / thr_ab;
+                const double h2 = r2XB / (r_cut[tid] * r_cut[tid]);
+                if (h2 > h1) vir_cross_add(v, E, h2, h0, d + 3, 1);
+                else         vir_cross_add(v, E, h1, h0, d, 1);
+            }
+        }
+    }
+    blockReduceAddVirial(v, vir_cross);
+}
+
+void launch_k_hb_crossing(dim3 grid, dim3 block, cudaStream_t stream, int n, const int* idx_i, const int* idx_j, const int* idx_k, const int* case_type, const double* e_triple, const double* cx, const double* cy, const double* cz, double h0, double thr1, double thr2, double* vir_cross)
+{
+    k_hb_crossing<<<grid, block, 0, stream>>>(n, idx_i, idx_j, idx_k, case_type, e_triple, cx, cy, cz, h0, thr1, thr2, vir_cross);
+}
+
+void launch_k_xb_crossing(dim3 grid, dim3 block, cudaStream_t stream, int n, const int* idx_i, const int* idx_j, const int* idx_k, const int* elem_A, const int* elem_B, const double* q_X, const double* q_B, const double* acidity_X, const double* r_cut, const double* cx, const double* cy, const double* cz, double h0, double thr_ab, double* vir_cross)
+{
+    k_xb_crossing<<<grid, block, 0, stream>>>(n, idx_i, idx_j, idx_k, elem_A, elem_B, q_X, q_B, acidity_X, r_cut, cx, cy, cz, h0, thr_ab, vir_cross);
+}

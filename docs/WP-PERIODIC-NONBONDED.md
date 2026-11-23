@@ -2162,3 +2162,23 @@ MD steps.
 - Density: the barostat saw P about 30.6 bar too high; with the term the NPT density of water rises by about
   6e-5/bar x 30.6 bar = **+0.18 %** (rough linear estimate, kappa_T ~6e-5 /bar is not the measured compressibility of
   GFN-FF; no NPT rerun made).
+
+### CUDA hybrid (stage 2)
+
+- Kernels `k_hb_crossing` (reads the per-triple record `e_triple` of `k_hbonds_vir`, which is switched on with the
+  estimator: a kernel argument, not kernel code) and `k_xb_crossing` (re-evaluates E_XB with the energy statements of
+  `k_xbonds_body`), launched on stream C after the terms, only with the virial and a cell; slots `VIR_HB_CROSS`,
+  `VIR_XB_CROSS` (`cuda/gfnff_virial_slots.h`), fixed-point block sums (`blockReduceAddVirial`, A1); assembled in
+  `GFNFFGpuMethodImpl::assembleHybridVirial()`; `FFWorkspaceGPU::setHBCrossing()` from the host's PARAMs and thresholds.
+- `cuobjdump -sass` of the plugin: all 333 functions of the base plugin (`724802bf`) instruction-for-instruction
+  identical, 2 new (the crossing kernels).
+- ctest `gfnff_gpu_pbc_virial` (now with both crossing components): GPU vs CPU per component <= 1.3e-14 Eh (5 test
+  systems); `--xyz` on 432 / 864 / 1728 H2O, urea400 + water1000 (L 42 A, assigned) and two fi-pyridine boxes (XB
+  crossing non-zero): HB crossing <= 7.9e-13 Eh, XB crossing <= 1.7e-14 Eh (limit of the work order 1e-9 Eh); second GPU
+  instance bitwise. (The fi-pyridine boxes show a GPU-CPU difference of 1e-8 Eh in the CN chain rule, a pre-existing
+  part, not the crossing term; unrelaxed random packing.)
+- CLI, 432 H2O frame, 20 steps of 0.5 fs, CSVR 300 K, Berendsen every 2 steps, 4 threads: CPU vs `-gpu cuda
+  -gfnff.gpu_periodic true` with the crossing term: all 21 status lines equal in every column except the timing
+  columns (Epot 6 decimals, P 2, V, rho, L); a second GPU run gives a byte-identical restart file. `pressure_hb_crossing
+  false`: restart file byte-identical to the base binary on CPU and GPU; last P 517.80 vs 490.02 bar, <P> 32.05 vs
+  4.82 bar (off / on, 20 steps).
