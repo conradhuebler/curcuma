@@ -2046,6 +2046,7 @@ refused there anyway).
 | CPU with a cell, 432 / 864 H2O `-sp` (pcg inside the set-up), new vs A1 build | energy and gradient md5 identical (the restructured CPU pcg is bitwise the old one) |
 | CLI NPT 432 H2O (`box432_s1`, 20 steps, CSVR 300 K, Berendsen every 2 steps, 4 threads): CPU, A1 hybrid, new | 15 status lines: Epot (6 decimals), P (2), V (3), rho (5), L (5) identical in all three |
 | existing ctests `gfnff_gpu_pbc_hybrid`, `gfnff_gpu_pbc_virial` (now on the device Ewald by default) | pass |
+| full `ctest -j1` | `release/` 494 of 496 run, `release_cuda/` 778 of 780; the two failures in both are the known `cli_confsearch_05_seed_cold_bias`, `cli_deltaml_04_label_consistency` (red in the base build too) |
 
 ### Time per NPT step (ms; CLI, 4 host threads, CSVR, Berendsen every 2 steps, difference of 60- and 20-step runs, n = 3, median; RTX 5080; load average 0.6-3.3 from the runs themselves, nothing else running)
 
