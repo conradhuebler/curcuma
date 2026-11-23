@@ -454,7 +454,6 @@ public:
     /// (setInteractionLists / setCoulombSelfEnergyParams); throws without a cell. The charges stay the
     /// ones last set by setEEQCharges(); the GFN-FF self-energy (TERM 2+3) is unchanged.
     void setEwald(const curcuma::ewald::EwaldParameters& p);
-    void clearEwald() { m_ewald.reset(); m_coulomb_ewald = false; }
     /// P1 (Nov 2026): geometry data shared with the EEQ solver (built by whoever sees a geometry first) and the cap
     /// of its stored kernel arrays in bytes (above it the kernel is evaluated per call, as before P1).
     void setEwaldGeometryCache(std::shared_ptr<curcuma::ewald::EwaldGeometryCache> cache, size_t kernel_cap_bytes)
@@ -498,7 +497,6 @@ public:
     /// periodic cell (the minimum-image frames define the atomic virial); without a cell the sum is the plain
     /// -sum_a x_a . G_a of the cluster, which is reported but not used.
     void setWantVirial(bool v) { m_want_virial = v; }
-    bool wantVirial() const { return m_want_virial; }
     /// True after calculate(true) with the virial requested; evaluateEwaldCoulomb() (GPU hybrid) clears it.
     bool virialValid() const { return m_virial_valid; }
     /// Xi (3x3, Eh) of the last calculate(true) for the reported pressure: the model derivative plus the V-LRC
@@ -648,7 +646,6 @@ public:
     /// 1.0 (default, the reference) runs the unchanged kernel; any other value goes through
     /// calcHydrogenBondsScaled() and deviates from the reference parametrisation.
     void setHBScale(double s) { m_hb_scale = s; }
-    double hbScale() const { return m_hb_scale; }
 
     /// Diagnostic factors on three further GFN-FF terms (PARAMs gfnff.repulsion_scale, dispersion_scale,
     /// coulomb_scale; Claude Generated Nov 2026, "term-scale" switches, docs/REV_GFNFF_TODO.md #19). Same scheme as
@@ -665,9 +662,6 @@ public:
     void setRepulsionScale(double s) { m_repulsion_scale = s; }
     void setDispersionScale(double s) { m_dispersion_scale = s; }
     void setCoulombScale(double s) { m_coulomb_scale = s; }
-    double repulsionScale() const { return m_repulsion_scale; }
-    double dispersionScale() const { return m_dispersion_scale; }
-    double coulombScale() const { return m_coulomb_scale; }
 
     /// Energy of each triple of the list from the last evaluation, in list order. Empty unless
     /// recording was on before that evaluation and the list has not changed since.

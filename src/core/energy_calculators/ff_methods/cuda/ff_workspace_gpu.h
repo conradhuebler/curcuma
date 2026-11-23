@@ -464,14 +464,12 @@ public:
     /// k_coulomb) only; the self term and TERM 1b (k_coulomb_postprocess) stay. The GPU hybrid with a cell then adds
     /// the host Ewald pair energy and gradient (FFWorkspace::evaluateEwaldCoulomb). Default true.
     void setCoulombPairOnDevice(bool v) { m_coulomb_pair_on_device = v; }
-    bool coulombPairOnDevice() const { return m_coulomb_pair_on_device; }
 
     /// Claude Generated (Nov 2026, GPU_PERIODIC_GAPS A1): atomic virial of the device terms with a cell. On: the
     /// gradient calls launch the VIR instantiations of the multi-atom kernels and the *_virial pair kernels into
     /// GFNFF_VIR_BUFFER fixed-point slots (gfnff_kernels.cuh); the CUDA graphs are not used. Off (default): the
     /// launches and every kernel are those of before. Toggling invalidates the captured graphs.
     void setWantVirial(bool v);
-    bool wantVirial() const { return m_want_virial; }
     /// After a gradient step with the virial on: the GFNFF_VIR_BUFFER values in Eh (synchronous copy). False when
     /// the last step carried no virial.
     bool downloadVirial(std::vector<double>& out);

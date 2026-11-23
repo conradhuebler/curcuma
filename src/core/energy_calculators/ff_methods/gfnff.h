@@ -2586,7 +2586,6 @@ public:
      * list rebuild (the stamped per-pair r_cut changes). Throws without a cell or before the set-up.
      */
     void freezeCutoffsForCellChanges(double density_gain = 0.15);
-    bool cutoffsFrozen() const { return m_cutoffs_frozen; }
     /// N2: the largest active cutoff (Bohr) and its name: the cell must keep L_min > 2 x this value.
     std::pair<std::string, double> largestActiveCutoffBohr() const;
 
