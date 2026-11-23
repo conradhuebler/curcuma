@@ -271,8 +271,9 @@ static Geometry moved(const Mol& m, unsigned seed, double amp_ang)
 }
 
 // (a) device Ewald vs CPU and vs the host-Ewald hybrid
-/// ion_gap: a pre-existing GPU-vs-CPU difference of the D4 pair term and its CN chain rule for isolated Na/Cl ions (the
-/// same numbers in the A1 base build, not from the Ewald sum): against the CPU the limits are 1e-8 Eh / 1e-7 Eh/A /
+/// ion_gap: a pre-existing GPU-vs-CPU difference (the same numbers in the A1 base build, not from the Ewald sum): the
+/// CUDA CN ignores cn_cutoff_bohr (10 Bohr, the reference cnthr), so Na-Cl pairs at 10-11 Bohr enter C6 and the EEQ on the
+/// GPU only (GPU_PERIODIC_GAPS.md A16, diagnosed Nov 23, 2026): against the CPU the limits are 1e-8 Eh / 1e-7 Eh/A /
 /// 2e-7 Eh there; against the host-Ewald GPU hybrid they stay strict.
 static void testParity(const char* label, const Mol& m, int threads, bool fd, bool ion_gap = false)
 {
