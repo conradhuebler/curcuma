@@ -41,6 +41,7 @@
 #include "xtb_multipole_ints.hpp"
 
 #include "src/core/curcuma_logger.h"
+#include "src/core/gpu_fallback.h"
 #include "src/core/energy_calculators/ff_methods/ewald.h"
 #include "src/core/energy_calculators/dispersion/d4_evaluator.h"
 #include "src/core/energy_calculators/dispersion/d4_ncoord.h"
@@ -112,6 +113,38 @@ bool pbcGpuStageOnHost(const char* token)   // declared in xtb_native.h
     return v.find("all") != std::string::npos || v.find(token) != std::string::npos;
 }
 
+namespace {
+/// Claude Generated (Nov 23, 2026): exact token match in a list separated by comma, space, colon or semicolon;
+/// "all" matches every token.
+bool envTokenListHas(const char* env_name, const char* token)
+{
+    const char* e = std::getenv(env_name);
+    if (!e || !*e) return false;
+    const std::string v(e), t(token);
+    size_t pos = 0;
+    while (pos <= v.size()) {
+        const size_t end = v.find_first_of(", :;", pos);
+        const std::string item = v.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+        if (item == "all" || item == t) return true;
+        if (end == std::string::npos) break;
+        pos = end + 1;
+    }
+    return false;
+}
+} // namespace
+
+bool pbcGpuStageInjectFail(const char* token)   // declared in xtb_native.h
+{
+    return envTokenListHas("CURCUMA_PBC_GPU_FAIL", token);
+}
+
+void pbcGpuStageFallback(const char* token, const std::string& reason)   // declared in xtb_native.h
+{
+    if (CurcumaLogger::get_verbosity() >= 2)
+        CurcumaLogger::warn_fmt("periodic device stage '{}' failed ({}); host loop", token, reason.empty() ? "no reason given" : reason);
+    curcuma::reportGpuFallback(std::string("xTB periodic device stage ") + token + ": host loop", reason);
+}
+
 
 /* ------------------------------------------------------------------ *
  *  Cell                                                               *
@@ -164,8 +197,9 @@ Vector XTB::computeCoordinationNumbersPeriodic() const
         std::vector<double> tr(3 * images.trans.size()), c(nat, 0.0);
         for (size_t t = 0; t < images.trans.size(); ++t)
             for (int k = 0; k < 3; ++k) tr[3 * t + k] = images.trans[t][k];
-        const bool cn_dev = m_gpu_scf->cnPeriodic(nat, xyz.data(), rcov.data(), m_cell_bohr.L,
+        const bool cn_dev = !pbcGpuStageInjectFail("cn") && m_gpu_scf->cnPeriodic(nat, xyz.data(), rcov.data(), m_cell_bohr.L,
             static_cast<int>(images.trans.size()), tr.data(), images.cutoff2, gfn1 ? 1 : 0, c.data());
+        if (!cn_dev) pbcGpuStageFallback("cn", m_gpu_scf->lastError());
         if (CurcumaLogger::get_verbosity() >= 3)
             CurcumaLogger::info_fmt("  periodic CN on the {}", cn_dev ? "device" : "host (device call failed)");
         if (cn_dev) {
@@ -217,9 +251,10 @@ double XTB::calcRepulsionEnergyPeriodic() const
     if (m_gpu_scf && m_pbc_device_scf && !pbcGpuStageOnHost("rep")) {
         const PbcRepulsionArrays ra = pbcRepulsionArrays(m_atoms, g1, images);
         double e_dev = 0.0;
-        const bool ok_dev = m_gpu_scf->repulsionPeriodic(nat, xyz.data(), ra.alpha.data(), ra.zeff.data(),
+        const bool ok_dev = !pbcGpuStageInjectFail("rep") && m_gpu_scf->repulsionPeriodic(nat, xyz.data(), ra.alpha.data(), ra.zeff.data(),
             ra.light.data(), kexp, g1 ? kexp : gfn2_params::rep_kexp_light, rexp, m_cell_bohr.L,
             static_cast<int>(images.trans.size()), ra.trans.data(), images.cutoff2, false, false, &e_dev, nullptr, nullptr);
+        if (!ok_dev) pbcGpuStageFallback("rep", m_gpu_scf->lastError());
         if (CurcumaLogger::get_verbosity() >= 3)
             CurcumaLogger::info_fmt("  periodic repulsion energy on the {}", ok_dev ? "device" : "host (device call failed)");
         if (ok_dev) return e_dev;
@@ -342,12 +377,13 @@ double XTB::calcD3DispersionPeriodic(bool need_gradient) const
             const bool vir_on = need_gradient && m_want_virial;
             std::vector<double> g(3 * nat, 0.0), v9(9, 0.0);
             double e_dev = 0.0;
-            const bool d3_dev = m_gpu_scf->d3DispersionPeriodic(nat, m_atoms.data(), xyz.data(), tb.nt,
+            const bool d3_dev = !pbcGpuStageInjectFail("d3") && m_gpu_scf->d3DispersionPeriodic(nat, m_atoms.data(), xyz.data(), tb.nt,
                 tb.atom_type.data(), tb.c6tab.data(), tb.r6tab.data(), tb.nref.data(), tb.refcn.data(), rcov_A.data(),
                 static_cast<int>(rcov_A.size()), tb.s6, tb.s8, tb.a1, tb.a2, AA_TO_AU, m_cell_bohr.L,
                 static_cast<int>(cn_images.trans.size()), ctr.data(), cn_images.cutoff2,
                 static_cast<int>(pimg.trans.size()), ptr.data(), pimg.cutoff2, need_gradient, vir_on, &e_dev,
                 g.data(), v9.data());
+            if (!d3_dev) pbcGpuStageFallback("d3", m_gpu_scf->lastError());
             if (CurcumaLogger::get_verbosity() >= 3)
                 CurcumaLogger::info_fmt("  periodic D3 on the {}", d3_dev ? "device" : "host (device call failed)");
             if (d3_dev) {
@@ -364,6 +400,8 @@ double XTB::calcD3DispersionPeriodic(bool need_gradient) const
                 m_disp_gradient_valid = need_gradient;
                 return e_dev;
             }
+        } else {
+            pbcGpuStageFallback("d3", "element without D3 device table");
         }
     }
     // CPU stage 2 (Nov 2026): CN, pair term and chain rule in the gather form (src/tools/pbc_gather.h): CN,
@@ -472,12 +510,14 @@ void XTB::primeD4CnPeriodic(const Matrix& geom_bohr) const
         for (size_t t = 0; t < images.trans.size(); ++t)
             for (int k = 0; k < 3; ++k) tr[3 * t + k] = images.trans[t][k];
         const auto tab = curcuma::dispersion::d4CovalentCNTables();
-        if (m_gpu_scf->d4CovalentCnPeriodic(nat, m_atoms.data(), xyz.data(), tab.rad, tab.en, tab.kn, tab.k4, tab.k5,
+        if (!pbcGpuStageInjectFail("d4cn")
+            && m_gpu_scf->d4CovalentCnPeriodic(nat, m_atoms.data(), xyz.data(), tab.rad, tab.en, tab.kn, tab.k4, tab.k5,
                                             tab.k6, m_cell_bohr.L, static_cast<int>(images.trans.size()), tr.data(),
                                             images.cutoff2, cn.data())) {
             m_d4_generator->setPrecomputedCovalentCN(std::move(cn));
             return;
         }
+        pbcGpuStageFallback("d4cn", m_gpu_scf->lastError());
     }
     const PBCGather::StripeRunner run = PBCGather::StripeRunner([this, nthr_ = effectiveIntraThreads(m_atomcount)](const std::function<void(int, int)>& w) { parallelStripes(nthr_, w); });   // CPU stage 2
     m_d4_generator->setPrecomputedCovalentCN(
@@ -548,9 +588,10 @@ double XTB::calcD4DispersionPeriodic(bool need_gradient) const
         for (size_t t = 0; t < pair_images.trans.size(); ++t)
             for (int k = 0; k < 3; ++k) tr[3 * t + k] = pair_images.trans[t][k];
         const curcuma::dispersion::D4Params& dp = m_d4_evaluator->params();
-        pairs_device = m_gpu_scf->d4PairsPeriodic(nat, m_atoms.data(), nrefv.data(), sq.data(), xyz.data(), W.data(),
+        pairs_device = !pbcGpuStageInjectFail("d4pair") && m_gpu_scf->d4PairsPeriodic(nat, m_atoms.data(), nrefv.data(), sq.data(), xyz.data(), W.data(),
             dWq.data(), dWc.data(), dp.s6, dp.s8, dp.a1, dp.a2, m_cell_bohr.L, static_cast<int>(pair_images.trans.size()),
             tr.data(), pair_images.cutoff2, vir != nullptr, &E, g.data(), dcn.data(), dq.data(), v9.data());
+        if (!pairs_device) pbcGpuStageFallback("d4pair", m_gpu_scf->lastError());
         if (pairs_device) {
             m_disp_gradient = Matrix::Zero(nat, 3);
             m_disp_dEdcn = Vector::Zero(nat);
@@ -587,7 +628,7 @@ double XTB::calcD4DispersionPeriodic(bool need_gradient) const
         for (size_t t = 0; t < atm_images.trans.size(); ++t)
             for (int k = 0; k < 3; ++k) trans[3 * t + k] = atm_images.trans[t][k];
         std::vector<double> e_at(nat), g_at(3 * nat), dcn_at(nat), v_at(m_want_virial ? 6 * nat : 0);
-        if (m_gpu_scf->dispersionATMPeriodic(nat, xyz.data(), r4r2.data(), c6f.data(), dc6f.data(), m_cell_bohr.L,
+        if (!pbcGpuStageInjectFail("atm") && m_gpu_scf->dispersionATMPeriodic(nat, xyz.data(), r4r2.data(), c6f.data(), dc6f.data(), m_cell_bohr.L,
                 static_cast<int>(atm_images.trans.size()), trans.data(), atm_images.cutoff2, /*s9=*/5.0, /*a1=*/0.52,
                 /*a2=*/5.0, /*alp=*/16.0, m_want_virial, e_at.data(), g_at.data(), dcn_at.data(),
                 m_want_virial ? v_at.data() : nullptr)) {
@@ -610,6 +651,7 @@ double XTB::calcD4DispersionPeriodic(bool need_gradient) const
             }
             atm_device = true;
         }
+        if (!atm_device) pbcGpuStageFallback("atm", m_gpu_scf->lastError());
     }
     if (!atm_device) {
         E += m_d4_evaluator->computeATMPeriodic(m_atoms, geom_bohr, atm_images, /*with_gradient=*/true,
@@ -637,9 +679,10 @@ double XTB::calcD4DispersionPeriodic(bool need_gradient) const
             }
             for (size_t t = 0; t < cn_images.trans.size(); ++t)
                 for (int k = 0; k < 3; ++k) tr[3 * t + k] = cn_images.trans[t][k];
-            cnfold_device = m_gpu_scf->d4CnFoldPeriodic(nat, xyz.data(), rc.data(), enz.data(), dcn.data(), tab.kn,
+            cnfold_device = !pbcGpuStageInjectFail("cnfold") && m_gpu_scf->d4CnFoldPeriodic(nat, xyz.data(), rc.data(), enz.data(), dcn.data(), tab.kn,
                 tab.k4, tab.k5, tab.k6, m_cell_bohr.L, static_cast<int>(cn_images.trans.size()), tr.data(),
                 cn_images.cutoff2, vir != nullptr, g.data(), v9.data());
+            if (!cnfold_device) pbcGpuStageFallback("cnfold", m_gpu_scf->lastError());
             if (cnfold_device) {
                 for (int i = 0; i < nat; ++i)
                     for (int k = 0; k < 3; ++k) m_disp_gradient(i, k) += g[3 * i + k];
@@ -866,9 +909,10 @@ void XTB::buildGammaMatrixPeriodic()
         for (size_t t = 0; t < images.trans.size(); ++t)
             for (int k = 0; k < 3; ++k) tr[3 * t + k] = images.trans[t][k];
         m_gamma.resize(nsh, nsh);
-        const bool gm_device = m_gpu_scf->ewaldGammaPeriodic(nat, xyz_bohr.data(), m_cell_bohr.L, ewald.parameters().alpha,
+        const bool gm_device = !pbcGpuStageInjectFail("gamma") && m_gpu_scf->ewaldGammaPeriodic(nat, xyz_bohr.data(), m_cell_bohr.L, ewald.parameters().alpha,
             ewald.volume(), ewald.parameters().r_cut, ewald.numberOfKVectors(), ktab.data(), nsh, m_basis.sh2at.data(), g.data(),
             meth == coulomb::Method::GFN1, gexp, static_cast<int>(images.trans.size()), tr.data(), rcut, m_gamma.data());
+        if (!gm_device) pbcGpuStageFallback("gamma", m_gpu_scf->lastError());
         if (gm_device) {
             m_pbc_ewald_alpha_used = par.alpha;
             m_pbc_ewald_nk_used = ewald.numberOfKVectors();
@@ -1089,9 +1133,10 @@ void XTB::buildMultipoleInteractionMatricesPeriodic(bool host_copy) const
                 for (int b = 0; b < 3; ++b) outs[3 + a * 3 + b] = m_mp_amat_dd[a][b].data();
             for (int k = 0; k < 6; ++k) outs[12 + k] = m_mp_amat_sq[k].data();
         }
-        mp_device = m_gpu_scf->multipoleMatricesPeriodic(nat, xyz.data(), m_mp_mrad.data(), m_cell_bohr.L,
+        mp_device = !pbcGpuStageInjectFail("mpmat") && m_gpu_scf->multipoleMatricesPeriodic(nat, xyz.data(), m_mp_mrad.data(), m_cell_bohr.L,
             static_cast<int>(dtrans.size()), dt.data(), static_cast<int>(rtrans.size()), rt.data(), kexp.data(),
             alpha, mp_dmp3, mp_dmp5, sd_rec_factor, sq_rec_factor, fac, device_only ? nullptr : outs);
+        if (!mp_device) pbcGpuStageFallback("mpmat", m_gpu_scf->lastError());
         if (device_only && !mp_device) zero_host();   // host loop below
         built_device_only = device_only && mp_device;
         if (CurcumaLogger::get_verbosity() >= 3)
@@ -1609,10 +1654,11 @@ void XTB::addMultipoleGradientPeriodic(Matrix& gradient, Vector& dEdcn, Eigen::M
         for (size_t t = 0; t < m_mp_pbc_rtrans.size(); ++t)
             for (int k = 0; k < 3; ++k) rt[3 * t + k] = m_mp_pbc_rtrans[t][k];
         std::vector<double> g3(3 * nat), der(nat), vir9(9);
-        mpg_device = m_gpu_scf->multipoleGradientPeriodic(nat, xyz.data(), m_mp_mrad.data(), qv.data(), dpv.data(),
+        mpg_device = !pbcGpuStageInjectFail("mpgrad") && m_gpu_scf->multipoleGradientPeriodic(nat, xyz.data(), m_mp_mrad.data(), qv.data(), dpv.data(),
             qpv.data(), m_cell_bohr.L, static_cast<int>(m_mp_pbc_dtrans.size()), dt.data(),
             static_cast<int>(m_mp_pbc_rtrans.size()), rt.data(), kexp.data(), alp, fac, sd_f, sq_f, mp_dmp3, mp_dmp5,
             virial != nullptr, g3.data(), der.data(), vir9.data());
+        if (!mpg_device) pbcGpuStageFallback("mpgrad", m_gpu_scf->lastError());
         if (mpg_device) {
             for (int i = 0; i < nat; ++i) {
                 for (int k = 0; k < 3; ++k) gradient(i, k) += g3[3 * i + k];
@@ -1721,7 +1767,8 @@ void XTB::calculateGradientPeriodic()
         bool w_device = false;
         if (m_gpu_scf && m_pbc_device_scf && m_pbc_dev_wfn && ncol > 0 && !pbcGpuStageOnHost("wmat")) {
             Eigen::MatrixXd Wcm(nao, nao);
-            w_device = m_gpu_scf->energyWeightedDensity(we.data(), ncol, nao, Wcm.data());
+            w_device = !pbcGpuStageInjectFail("wmat") && m_gpu_scf->energyWeightedDensity(we.data(), ncol, nao, Wcm.data());
+            if (!w_device) pbcGpuStageFallback("wmat", m_gpu_scf->lastError());
             if (w_device) W = Wcm;   // element (i, j) kept (Matrix is row-major)
             if (CurcumaLogger::get_verbosity() >= 3)
                 CurcumaLogger::info_fmt("  periodic gradient: W on the {}", w_device ? "device" : "host (device call failed)");
@@ -1779,10 +1826,11 @@ void XTB::calculateGradientPeriodic()
         if (m_gpu_scf && m_pbc_device_scf && !pbcGpuStageOnHost("rep")) {
             const PbcRepulsionArrays ra = pbcRepulsionArrays(m_atoms, g1m, images);
             std::vector<double> g(3 * nat, 0.0), v9(9, 0.0);
-            rep_device = m_gpu_scf->repulsionPeriodic(nat, xyz.data(), ra.alpha.data(), ra.zeff.data(),
+            rep_device = !pbcGpuStageInjectFail("rep") && m_gpu_scf->repulsionPeriodic(nat, xyz.data(), ra.alpha.data(), ra.zeff.data(),
                 ra.light.data(), kexp, g1m ? kexp : gfn2_params::rep_kexp_light, rexp, m_cell_bohr.L,
                 static_cast<int>(images.trans.size()), ra.trans.data(), images.cutoff2, true, want_vir, nullptr,
                 g.data(), v9.data());
+            if (!rep_device) pbcGpuStageFallback("rep", m_gpu_scf->lastError());
             if (rep_device) {
                 for (int i = 0; i < nat; ++i)
                     for (int k = 0; k < 3; ++k) m_gradient(i, k) += g[3 * i + k];
@@ -1868,10 +1916,11 @@ void XTB::calculateGradientPeriodic()
                 }
             }
             std::vector<double> g(3 * nat, 0.0), de(nat, 0.0), v9(9, 0.0);
-            h0_device = m_gpu_scf->h0PulayGradientPeriodic(nat, xyz.data(), se.data(), v_ao.data(),
+            h0_device = !pbcGpuStageInjectFail("h0grad") && m_gpu_scf->h0PulayGradientPeriodic(nat, xyz.data(), se.data(), v_ao.data(),
                 do_mp ? v_dp.data() : nullptr, do_mp ? v_qp.data() : nullptr, h0_we.data(), h0_ncol, m_cell_bohr.L,
                 static_cast<int>(images.trans.size()), tr.data(), images.cutoff2, do_mp, want_vir, g.data(), de.data(),
                 v9.data());
+            if (!h0_device) pbcGpuStageFallback("h0grad", m_gpu_scf->lastError());
             if (h0_device) {
                 for (int i = 0; i < nat; ++i) {
                     for (int k = 0; k < 3; ++k) m_gradient(i, k) += g[3 * i + k];
@@ -2056,9 +2105,10 @@ void XTB::calculateGradientPeriodic()
         if (m_gpu_scf && m_pbc_device_scf && !pbcGpuStageOnHost("ewgrad")) {
             const std::vector<double> ktab = ewald.kVectorTable();
             std::vector<double> g(3 * nat, 0.0), v9(9, 0.0);
-            ew_device = m_gpu_scf->ewaldGradientPeriodic(nat, xyz.data(), m_wfn.q_at.data(), m_cell_bohr.L,
+            ew_device = !pbcGpuStageInjectFail("ewgrad") && m_gpu_scf->ewaldGradientPeriodic(nat, xyz.data(), m_wfn.q_at.data(), m_cell_bohr.L,
                 ewald.parameters().alpha, ewald.parameters().r_cut, ewald.numberOfKVectors(), ktab.data(), want_vir,
                 g.data(), v9.data());
+            if (!ew_device) pbcGpuStageFallback("ewgrad", m_gpu_scf->lastError());
             if (ew_device) {
                 for (int i = 0; i < nat; ++i)
                     for (int k = 0; k < 3; ++k) m_gradient(i, k) += g[3 * i + k];
@@ -2096,9 +2146,10 @@ void XTB::calculateGradientPeriodic()
             for (size_t t = 0; t < images.trans.size(); ++t)
                 for (int k = 0; k < 3; ++k) tr[3 * t + k] = images.trans[t][k];
             for (int is = 0; is < nsh; ++is) qsh[is] = m_wfn.q_sh(is);
-            ko_device = m_gpu_scf->koGradientPeriodic(nat, xyz.data(), nsh, m_basis.sh2at.data(), g_sh.data(),
+            ko_device = !pbcGpuStageInjectFail("kograd") && m_gpu_scf->koGradientPeriodic(nat, xyz.data(), nsh, m_basis.sh2at.data(), g_sh.data(),
                 cm == coulomb::Method::GFN1, gexp, qsh.data(), m_cell_bohr.L, static_cast<int>(images.trans.size()),
                 tr.data(), images.cutoff2, rcut, want_vir, g.data(), v9.data());
+            if (!ko_device) pbcGpuStageFallback("kograd", m_gpu_scf->lastError());
             if (ko_device) {
                 for (int i = 0; i < nat; ++i)
                     for (int k = 0; k < 3; ++k) m_gradient(i, k) += g[3 * i + k];
@@ -2173,9 +2224,10 @@ void XTB::calculateGradientPeriodic()
             std::vector<double> tr(3 * images.trans.size()), g(3 * nat, 0.0), v9(9, 0.0);
             for (size_t t = 0; t < images.trans.size(); ++t)
                 for (int k = 0; k < 3; ++k) tr[3 * t + k] = images.trans[t][k];
-            cn_device = m_gpu_scf->cnChainGradientPeriodic(nat, xyz.data(), rcov.data(), dEdcn.data(), m_cell_bohr.L,
+            cn_device = !pbcGpuStageInjectFail("cnchain") && m_gpu_scf->cnChainGradientPeriodic(nat, xyz.data(), rcov.data(), dEdcn.data(), m_cell_bohr.L,
                 static_cast<int>(images.trans.size()), tr.data(), images.cutoff2, m_method == MethodType::GFN1,
                 want_vir, g.data(), v9.data());
+            if (!cn_device) pbcGpuStageFallback("cnchain", m_gpu_scf->lastError());
             if (cn_device) {
                 for (int i = 0; i < nat; ++i)
                     for (int k = 0; k < 3; ++k) m_gradient(i, k) += g[3 * i + k];

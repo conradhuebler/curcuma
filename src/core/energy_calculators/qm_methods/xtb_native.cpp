@@ -761,7 +761,7 @@ double XTB::Calculation(bool gradient)
         for (size_t t = 0; t < images.trans.size(); ++t)
             for (int k = 0; k < 3; ++k) tr[3 * t + k] = images.trans[t][k];
         std::vector<double> se_v(se.data(), se.data() + se.size());
-        if (m_gpu_scf->beginComputedPeriodic(xyz_b, se_v.data(), m_cell_bohr.L, static_cast<int>(images.trans.size()),
+        if (!pbcGpuStageInjectFail("ints") && m_gpu_scf->beginComputedPeriodic(xyz_b, se_v.data(), m_cell_bohr.L, static_cast<int>(images.trans.size()),
                                              tr.data(), images.cutoff2, m_method == MethodType::GFN2)) {
             pbc_dev_ints = true;
             gpu_computed = true;
@@ -786,8 +786,9 @@ double XTB::Calculation(bool gradient)
                                                       dh, r, c, Hd(r, c), Hh(r, c)));
                 }
             }
-        } else if (verb >= 1) {
-            CurcumaLogger::warn("periodic device integral build failed; host build and upload");
+        } else {
+            if (verb >= 1) CurcumaLogger::warn("periodic device integral build failed; host build and upload");
+            pbcGpuStageFallback("ints", m_gpu_scf->lastError());   // A4 (Nov 23, 2026): counted, -gpu_strict
         }
     }
     if (m_gpu_scf && !m_pbc && m_scf_mode == ScfMode::Broyden && (!m_has_dshell || gpu_d_ok)) {
@@ -1620,8 +1621,11 @@ double XTB::Calculation(bool gradient)
             for (int i = 0; i < nat; ++i) { dk[i] = m_mp_dkernel[i]; qk[i] = m_mp_qkernel[i]; }
             const Vector g3diag = thirdOrderKernelDiag(Vector::Ones(nsh), m_wfn.q_at);  // = 2 Gamma_s
             for (int s = 0; s < nsh; ++s) g3[s] = 0.5 * g3diag(s);
-            use_device_potential = m_gpu_scf->beginPotentialPeriodic(nat, nsh, dk.data(), qk.data(), g3.data());
+            use_device_potential = !pbcGpuStageInjectFail("devpot")
+                && m_gpu_scf->beginPotentialPeriodic(nat, nsh, dk.data(), qk.data(), g3.data());
         }
+        if (!use_device_potential)   // A4 (Nov 23, 2026): counted, -gpu_strict
+            pbcGpuStageFallback("devpot", m_pbc_d4_dev_ready ? m_gpu_scf->lastError() : std::string("periodic D4 device data not ready"));
         if (verb >= 2)
             CurcumaLogger::info(use_device_potential
                 ? "SCF: periodic GFN2 potential (Ewald gamma, third order, periodic multipole, periodic D4) on the device"
@@ -1675,7 +1679,7 @@ double XTB::Calculation(bool gradient)
         exportD4RefWDeviceData(rcn, rgi, rzeff, rrefcn, rrefcovcn, rrefq, rnref);
         const int nocc_pairs = static_cast<int>(std::floor(m_wfn.nocc / 2.0));
         const int b_maxhist = (m_diis_subspace > 2) ? 20 : m_diis_subspace;
-        use_resident_loop = !rcn.empty()
+        use_resident_loop = !(m_pbc && pbcGpuStageInjectFail("resloop")) && !rcn.empty()
             && m_gpu_scf->beginDispersionWeights(rcn, rgi, rzeff, rrefcn, rrefcovcn, rrefq, rnref)
             && m_gpu_scf->beginResidentLoop(m_wfn.q_sh, m_wfn.dp_at, m_wfn.qp_at, m_wfn.q_at,
                                             m_wfn.n0_sh, m_wfn.n0_at, m_electronic_temp,
@@ -1690,6 +1694,8 @@ double XTB::Calculation(bool gradient)
             CurcumaLogger::info(use_resident_loop
                 ? "SCF: fully device-resident loop (host polls only dq + energy scalars)"
                 : "SCF: resident-loop setup unavailable; host-driven device-potential loop");
+        if (m_pbc && !use_resident_loop)   // A4 (Nov 23, 2026): counted, -gpu_strict
+            pbcGpuStageFallback("resloop", m_gpu_scf->lastError());
     }
 
     pre_mark("resident loop begin (D4 weights tables, Broyden)");
@@ -1723,7 +1729,7 @@ double XTB::Calculation(bool gradient)
             const int b_maxhist = (m_diis_subspace > 2) ? 20 : m_diis_subspace;
             std::vector<double> g3at(nat);
             for (int i = 0; i < nat; ++i) g3at[i] = coulomb::atom_hubbard_deriv_gfn1(m_basis.z[i]);
-            use_resident_loop = m_gpu_scf->beginResidentLoopGfn1(m_wfn.q_sh, m_wfn.q_at, m_wfn.n0_sh, m_wfn.n0_at,
+            use_resident_loop = !(m_pbc && pbcGpuStageInjectFail("resloop")) && m_gpu_scf->beginResidentLoopGfn1(m_wfn.q_sh, m_wfn.q_at, m_wfn.n0_sh, m_wfn.n0_at,
                                                                  g3at, m_electronic_temp, m_wfn.nocc, nocc_pairs,
                                                                  damp, b_maxhist, 0.01);
             if (use_resident_loop && openShell())
@@ -1740,6 +1746,8 @@ double XTB::Calculation(bool gradient)
                 CurcumaLogger::info(use_resident_loop
                     ? "SCF: fully device-resident GFN1 loop (host polls only dq + energy scalars)"
                     : "SCF: GFN1 resident-loop setup unavailable; host-driven device loop");
+            if (m_pbc && !use_resident_loop)   // A4 (Nov 23, 2026): counted, -gpu_strict
+                pbcGpuStageFallback("resloop", m_gpu_scf->lastError());
         }
     }
 
@@ -1924,8 +1932,10 @@ double XTB::Calculation(bool gradient)
         if (use_resident_loop) {
             m_eig_fp32 = fp32_wanted(dq_prev);
             double dq = 0.0, eb = 0.0, ecoul = 0.0, ethird = 0.0, emp = 0.0;
-            if (!m_gpu_scf->residentScfStep(m_eig_fp32, dq, eb, ecoul, ethird, emp)) {
+            if ((m_pbc && pbcGpuStageInjectFail("resstep"))
+                || !m_gpu_scf->residentScfStep(m_eig_fp32, dq, eb, ecoul, ethird, emp)) {
                 std::string why = m_gpu_scf->lastError();
+                if (m_pbc) pbcGpuStageFallback("resstep", why);   // A4 (Nov 23, 2026): counted, -gpu_strict
                 // Claude Generated (Oct 2026, ROCm WP2): a backend that allows it restarts this SCF from the
                 // unchanged initial guess in m_wfn on the host-driven loop (the resident steps never wrote
                 // m_wfn or the host mixer); default backends keep the hard error below.
@@ -2864,10 +2874,12 @@ double XTB::Calculation(bool gradient)
         m_pot.v_dp = Eigen::MatrixXd::Zero(3, m_atomcount);
         m_pot.v_qp = Eigen::MatrixXd::Zero(6, m_atomcount);
         m_pot.v_ao = Vector::Zero(m_basis.nao);
-        pbc_pot_from_device = m_gpu_scf->downloadConvergedPotentials(m_pot.v_sh, m_pot.v_at, m_pot.v_dp, m_pot.v_qp)
+        pbc_pot_from_device = !pbcGpuStageInjectFail("potdl") && m_gpu_scf->downloadConvergedPotentials(m_pot.v_sh, m_pot.v_at, m_pot.v_dp, m_pot.v_qp)
             && m_pot.v_sh.size() == m_basis.nsh && m_pot.v_at.size() == m_atomcount;
-        if (!pbc_pot_from_device && verb >= 2)
-            CurcumaLogger::warn("SCF: converged periodic device potentials unavailable; host potential rebuild");
+        if (!pbc_pot_from_device) {
+            if (verb >= 2) CurcumaLogger::warn("SCF: converged periodic device potentials unavailable; host potential rebuild");
+            pbcGpuStageFallback("potdl", m_gpu_scf->lastError());   // A4 (Nov 23, 2026): counted, -gpu_strict
+        }
     }
     if ((use_device_potential || gfn1_resident) && !m_wfn_on_device && !skip_post_pot && !pbc_pot_from_device) {
         m_pot.reset();
@@ -4438,12 +4450,14 @@ bool XTB::computeD4PotentialDedq(const Vector& q_at, Vector& dEdq) const
         std::vector<double> W, dWq;
         m_d4_generator->buildRefWFlat(m_atoms, q_at, W, dWq);
         std::vector<double> dedq(m_atomcount, 0.0);
-        if (m_gpu_scf->dispersionDedqPeriodic(m_atomcount, W.data(), dWq.data(), dedq.data())) {
+        if (!pbcGpuStageInjectFail("d4dedq") && m_gpu_scf->dispersionDedqPeriodic(m_atomcount, W.data(), dWq.data(), dedq.data())) {
             dEdq = Vector::Zero(m_atomcount);
             for (int A = 0; A < m_atomcount; ++A) dEdq(A) = dedq[A];
             device_ok = true;
         }
     }
+    if (use_device_disp_pbc && !device_ok)   // A4 (Nov 23, 2026): counted, -gpu_strict
+        pbcGpuStageFallback("d4dedq", m_pbc_d4_dev_ready ? m_gpu_scf->lastError() : std::string("periodic D4 images not on the device"));
     if (!device_ok && m_pbc) {
         // WP-PERIODIC-XTB P1 (Claude Generated, Nov 2026): dE_D4/dq with lattice images (serial).
         Matrix scratch_grad; Vector scratch_dEdcn;

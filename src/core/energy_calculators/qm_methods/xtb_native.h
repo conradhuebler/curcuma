@@ -392,6 +392,13 @@ using GpuBroydenGuardFn = std::function<bool(int n, double fnorm, bool* store_be
 
 /// G2-G6 (Nov 2026, xtb_periodic.cpp): true when env CURCUMA_PBC_GPU_HOST names the periodic device stage (or all).
 bool pbcGpuStageOnHost(const char* token);
+/// Fault injection (Claude Generated, Nov 23, 2026; GPU_PERIODIC_GAPS A4/A7): true when env CURCUMA_PBC_GPU_FAIL names
+/// the periodic device stage (exact token or all); the stage then skips its device call and takes the failure path.
+/// Test/diagnostic only.
+bool pbcGpuStageInjectFail(const char* token);
+/// Count a host fallback of a periodic device stage through curcuma::reportGpuFallback (-gpu_strict ends the run).
+/// Category "xTB periodic device stage <token>"; reason = the backend's last error. Claude Generated (Nov 23, 2026).
+void pbcGpuStageFallback(const char* token, const std::string& reason);
 
 struct GpuScfBackend {
     virtual ~GpuScfBackend() = default;
