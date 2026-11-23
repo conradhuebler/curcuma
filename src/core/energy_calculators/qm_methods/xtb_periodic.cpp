@@ -1085,14 +1085,20 @@ void XTB::buildMultipoleInteractionMatricesPeriodic(bool host_copy) const
     const double vol = m_cell_bohr.L[0] * m_cell_bohr.L[1] * m_cell_bohr.L[2];
     double alpha = tbSearchAlphaMultipole(m_cell_bohr);
     double conv = 100.0 * kTbliteEps;
-    if (const char* e = std::getenv("CURCUMA_PBC_MP_ALPHA")) alpha = std::atof(e);   // convergence experiments
-    if (const char* e = std::getenv("CURCUMA_PBC_MP_CONV")) conv = std::atof(e);
+    // Diagnostic overrides (convergence experiments, tests): announced as such at warning level (Nov 23, 2026)
+    if (const char* e = std::getenv("CURCUMA_PBC_MP_ALPHA")) {
+        alpha = std::atof(e);
+        CurcumaLogger::warn_fmt("diagnostic override CURCUMA_PBC_MP_ALPHA = {} (multipole Ewald alpha; not a production setting)", alpha);
+    }
+    if (const char* e = std::getenv("CURCUMA_PBC_MP_CONV")) {
+        conv = std::atof(e);
+        CurcumaLogger::warn_fmt("diagnostic override CURCUMA_PBC_MP_CONV = {} (multipole Ewald convergence; not a production setting)", conv);
+    }
     // charge-dipole reciprocal term: -grad of (4 pi/V) sum_k w_k cos(k.r) over the full k set is sum_k w_k k sin(k.r)
     // (factor 1); tblite's get_amat_sdq_rec_3d uses 2 k sin (factor 2) over the same full set. Experiment switch.
-    double sd_rec_factor = m_pbc_mp_tblite_factors ? 2.0 : 1.0;   // -xtb.pbc_multipole_tblite_factors
-    if (const char* e = std::getenv("CURCUMA_PBC_MP_SD_FACTOR")) sd_rec_factor = std::atof(e);
-    double sq_rec_factor = m_pbc_mp_tblite_factors ? 1.0 : -1.0 / 3.0;   // tblite: +1 (see the comment at the reciprocal loop)
-    if (const char* e = std::getenv("CURCUMA_PBC_MP_SQ_FACTOR")) sq_rec_factor = std::atof(e);
+    // Nov 23, 2026: the env overrides CURCUMA_PBC_MP_SD_FACTOR/SQ_FACTOR were removed; the PARAM is the only switch
+    const double sd_rec_factor = m_pbc_mp_tblite_factors ? 2.0 : 1.0;   // -xtb.pbc_multipole_tblite_factors
+    const double sq_rec_factor = m_pbc_mp_tblite_factors ? 1.0 : -1.0 / 3.0;   // tblite: +1 (see the comment at the reciprocal loop)
     auto build = [&](double alpha) {
     const double dir_cut = tbSearchCutoff([&](double x) { return tbDirMp(x, alpha); }, conv);
     const double rec_cut = tbSearchCutoff([&](double x) { return tbRecMp(x, alpha, vol); }, conv);
@@ -1473,9 +1479,7 @@ void XTB::addMultipoleGradientPeriodic(Matrix& gradient, Vector& dEdcn, Eigen::M
     const double alp = m_mp_pbc_alpha, alp2 = alp * alp;
     const double fac = 4.0 * M_PI / vol;
     const double eps_r = kTbliteEps;
-    double sd_f = m_pbc_mp_tblite_factors ? 2.0 : 1.0, sq_f = m_pbc_mp_tblite_factors ? 1.0 : -1.0 / 3.0;
-    if (const char* e = std::getenv("CURCUMA_PBC_MP_SD_FACTOR")) sd_f = std::atof(e);
-    if (const char* e = std::getenv("CURCUMA_PBC_MP_SQ_FACTOR")) sq_f = std::atof(e);
+    const double sd_f = m_pbc_mp_tblite_factors ? 2.0 : 1.0, sq_f = m_pbc_mp_tblite_factors ? 1.0 : -1.0 / 3.0;   // PARAM only
     const auto& q = m_wfn.q_at;
     const auto& dp = m_wfn.dp_at;
     const auto& qp = m_wfn.qp_at;

@@ -217,8 +217,8 @@ charges O -0.6 / H +0.3 for the D4 zeta weighting):
   tblite's factors the port reproduces tblite at L = 8 to 2.1e-10 Eh (so the port itself is exact), with the
   consistent factors the total energy is alpha independent (0.14 vs 0.3: 5.5e-8 Eh at L = 12) and converges
   smoothly to vacuum; tblite's own L series does not (table). Decision: **the consistent factors are used**
-  (`CURCUMA_PBC_MP_SD_FACTOR`, `CURCUMA_PBC_MP_SQ_FACTOR`, `CURCUMA_PBC_MP_ALPHA`, `CURCUMA_PBC_MP_CONV` are kept as
-  diagnostic environment switches, defaults 1, -1/3, tblite alpha, 100 eps). Consequence: **periodic GFN2 energies
+  (`CURCUMA_PBC_MP_ALPHA`, `CURCUMA_PBC_MP_CONV` are kept as diagnostic environment switches, defaults tblite alpha and
+  100 eps; the factor switches `CURCUMA_PBC_MP_SD_FACTOR`/`SQ_FACTOR`, defaults 1 and -1/3, were removed Nov 23, 2026). Consequence: **periodic GFN2 energies
   differ from tblite 0.4.0 by up to 1e-3 Eh at L = 8 A** (3.6e-5 at 16 A, 5e-5 at 20 A, 2.9e-6 at 30 A) and the
   stop rule of the task (1e-5 against tblite) is formally violated with the cause located in the reference; not
   confirmed against a corrected tblite or an independent periodic GFN2 code. The dipole-dipole constant `fac/6` (a
@@ -314,7 +314,7 @@ charges O -0.6 / H +0.3 for the D4 zeta weighting):
   berendsen`, 40 steps: runs, pressure and density columns, cell updated (n = 1, no physics claim).
 - **tblite factors as a registered switch** (`-xtb.pbc_multipole_tblite_factors`, Bool, default false): true sets the
   reciprocal charge-dipole / charge-quadrupole factors to tblite 0.4.0's 2 / +1 (energy, gradient and virial; the env
-  variables `CURCUMA_PBC_MP_SD_FACTOR`/`SQ_FACTOR` still override both); `pbc_xtb_tblite` check (a) uses it. The
+  variables `CURCUMA_PBC_MP_SD_FACTOR`/`SQ_FACTOR` overrode both until they were removed on Nov 23, 2026); `pbc_xtb_tblite` check (a) uses it. The
   default stays the Ewald-consistent 1 / -1/3 (operator decision pending, P2b).
 - **Not tested**: off-diagonal strains (a sheared cell is not orthorhombic and is refused), the virial of charged or
   open-shell cells, d-shell elements (refused), thread-count independence of the virial, NPT densities (a water box
@@ -353,7 +353,7 @@ vacuum `computeATM` has both). GFN1 (D3, no ATM) is 4-5x cheaper. NPT needs P4.
 
 Interim status 2026-11-15: **T done** (below), **P4 done** (section above), **G0 design written, G1-G7 see the G
 status below**. The tblite multipole finding stays open; the factors remain switchable
-(`-xtb.pbc_multipole_tblite_factors`, env `CURCUMA_PBC_MP_SD_FACTOR`/`SQ_FACTOR`, default consistent = Ewald-correct).
+(`-xtb.pbc_multipole_tblite_factors`, default consistent = Ewald-correct).
 
 ### T threading of the periodic loops (2026-11-15, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
 

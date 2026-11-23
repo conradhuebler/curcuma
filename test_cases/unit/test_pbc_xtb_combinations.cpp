@@ -10,7 +10,7 @@
  *   spin polarisation (-xtb.spin_polarization true), implicit solvation (-xtb.solvent water), CPCM-X
  *   (-xtb.solvent_model cpcmx), on the CPU and with -gpu cuda; -gpu rocm and -gpu vulkan with a cell: either a counted
  *   CPU fallback with the CPU periodic energy (no plugin, or the plugin swaps to the CPU) or an error, never an
- *   uncounted result.
+ *   uncounted result; invalid pbc_* values are an error.
  * Part 2 (CUDA plugin and device, else exit code 77 = ctest SKIP):
  *   open shell (OH radical, spin 1, registry "OH") and a charged cell (registry "hydronium_water2", charge +1) in an
  *   8/10 A cube on the host-driven CUDA loop against the CPU: |dE| <= 1e-8 Eh, max |dG| <= 1e-8 Eh/A,
@@ -143,6 +143,14 @@ int main(int argc, char** argv)
         }
     }
     std::printf("part 1: spin polarisation, solvation, CPCM-X with a cell refused (gfn1/gfn2 x CPU/-gpu cuda)\n");
+
+    // P4 (Nov 23, 2026): an invalid pbc_* value is an error, no longer replaced silently by the default
+    for (const auto& kv : { std::pair<const char*, double>{ "pbc_ewald_tolerance", 2.0 }, { "pbc_coulomb_switch_bohr", 0.5 },
+                            { "pbc_integral_cutoff_bohr", -1.0 }, { "pbc_ewald_r_cut_bohr", -3.0 } }) {
+        json bad = baseCfg(nullptr);
+        bad["xtb"][kv.first] = kv.second;
+        check(refused("gfn2", dimer, bad), std::string("invalid ") + kv.first + " = " + std::to_string(kv.second) + " is an error");
+    }
 
     // ROCm / Vulkan with a cell: counted CPU fallback with the CPU energy, or an error
     const Result cpu_dimer = run("gfn1", dimer, baseCfg(nullptr));

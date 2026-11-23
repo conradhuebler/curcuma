@@ -1171,10 +1171,24 @@ public:
     void clearPeriodicCell() { m_pbc = false; m_cell_bohr = PBCUtils::OrthoCell{}; m_cn_cache_valid = false; }
     bool hasPeriodicCell() const { return m_pbc; }
     const PBCUtils::OrthoCell& periodicCellBohr() const { return m_cell_bohr; }
-    void setPbcIntegralCutoff(double bohr) { m_pbc_integral_cutoff = bohr; }
-    void setPbcEwaldTolerance(double eps) { if (eps > 0.0 && eps < 1.0) m_pbc_ewald_tolerance = eps; }
-    void setPbcEwaldRCut(double bohr) { m_pbc_ewald_r_cut = bohr; }
-    void setPbcCoulombSwitch(double bohr) { if (bohr > 1.0) m_pbc_coulomb_switch = bohr; }
+    // P4 of the gap closure (Claude Generated, Nov 23, 2026): an invalid pbc_* value is an error (std::invalid_argument,
+    // like scf_criterion), no longer silently replaced by the default.
+    void setPbcIntegralCutoff(double bohr) {
+        if (!(bohr >= 0.0)) throw std::invalid_argument("pbc_integral_cutoff_bohr must be >= 0 (0 = tblite rule), got " + std::to_string(bohr));
+        m_pbc_integral_cutoff = bohr;
+    }
+    void setPbcEwaldTolerance(double eps) {
+        if (!(eps > 0.0 && eps < 1.0)) throw std::invalid_argument("pbc_ewald_tolerance must lie in (0, 1), got " + std::to_string(eps));
+        m_pbc_ewald_tolerance = eps;
+    }
+    void setPbcEwaldRCut(double bohr) {
+        if (!(bohr >= 0.0)) throw std::invalid_argument("pbc_ewald_r_cut_bohr must be >= 0 (0 = L_min/2), got " + std::to_string(bohr));
+        m_pbc_ewald_r_cut = bohr;
+    }
+    void setPbcCoulombSwitch(double bohr) {
+        if (!(bohr > 1.0)) throw std::invalid_argument("pbc_coulomb_switch_bohr must be > 1 Bohr (the quintic switch spans the last Bohr), got " + std::to_string(bohr));
+        m_pbc_coulomb_switch = bohr;
+    }
     void setPbcMultipoleTbliteFactors(bool on) { m_pbc_mp_tblite_factors = on; }   // P2b/P4: -xtb.pbc_multipole_tblite_factors
     double pbcEwaldAlphaUsed() const { return m_pbc_ewald_alpha_used; }
     int pbcEwaldKVectorsUsed() const { return m_pbc_ewald_nk_used; }
