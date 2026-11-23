@@ -2002,7 +2002,7 @@ pressure inconsistent with the forces and roughly triple the HB work (1728 H2O: 
 x0.8 / x1.2 / x2; the default lies between, about 0.6 million by the 432 count of 152 135 per 432 waters).
 Options for the operator: (a) leave as is and correct NPT densities by about +0.2 % in the analysis, (b) a statistical
 HB crossing estimator in the virial (CPU and GPU), (c) a larger hb_accuracy-derived radius as a deliberate model
-deviation (switch, port fidelity stays the default). Not measured: other liquids, XB (no halogen in the frames),
+deviation (switch, port fidelity stays the default). **Option (b) implemented Nov 23, 2026: section HB-X below.** Not measured: other liquids, XB (no halogen in the frames),
 charged boxes, the GPU-detected lists (the CPU lists are used here).
 
 ## S3 device Ewald of the CUDA periodic hybrid: Ewald sum and pcg operator on the device (2026-11-23, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
@@ -2182,3 +2182,19 @@ MD steps.
   columns (Epot 6 decimals, P 2, V, rho, L); a second GPU run gives a byte-identical restart file. `pressure_hb_crossing
   false`: restart file byte-identical to the base binary on CPU and GPU; last P 517.80 vs 490.02 bar, <P> 32.05 vs
   4.82 bar (off / on, 20 steps).
+
+### Acceptance (stage 3) and not done
+
+- Without a cell: `-sp -dump_gradient` 6 structures x gfnff/gfn1/gfn2 x 1/4 threads + 2 MD against the base build
+  (`724802bf`, same options): CPU 38/38 and CUDA 38/38 lines identical. With a cell (432 frame): `-sp` energy and
+  gradient md5, `-md` 20 steps without pressure: identical to the base build on CPU and GPU.
+- `ctest -j1`: release/ 493 of 496 (`cli_confsearch_05_seed_cold_bias`, `cli_deltaml_04_label_consistency` known;
+  `pbc_virial_lrc` asserted `virial() = total() + tail_lrc` and now sets `pressure_hb_crossing false`, then passes);
+  release_cuda/ 484 of 486 without GPU label (the two known) and 294 of 294 with it (5 skipped by their own
+  conditions). `pbc_pressure_cutoffs` gained the HB-X checks (switch off bitwise, estimator = recomputed). Plugin ABI
+  28. `scripts/check_docs.py`: the 9 known errors.
+- **Not done / not tested**: the |E_HB| candidate filter crossing (about 0.1 bar, A3-P), repulsion and CN crossing parts
+  (< 1.5 bar together), anisotropic use of the tensor (only its trace is validated; the barostats are isotropic),
+  stale lists between HB refreshes in MD (estimator from the current list), liquids other than water and the
+  urea/water frame, charged boxes, ROCm (no cell), an NPT production run with the term (the density shift is the
+  linear estimate), XB beyond the default radius (inconclusive above). Human production testing pending.
