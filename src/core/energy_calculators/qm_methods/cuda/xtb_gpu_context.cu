@@ -1164,6 +1164,24 @@ struct XtbGpuContext::Impl {
     }
 };
 
+// Claude Generated (Nov 23, 2026): exact token of CURCUMA_PBC_GPU_HOST (comma/space/colon/semicolon separated, "all"
+// matches every token); the host side uses the same rule (pbcGpuStageOnHost in xtb_periodic.cpp).
+static bool pbcHostTokenSet(const char* token)
+{
+    const char* e = std::getenv("CURCUMA_PBC_GPU_HOST");
+    if (!e || !*e) return false;
+    const std::string v(e), t(token);
+    size_t pos = 0;
+    while (pos <= v.size()) {
+        const size_t end = v.find_first_of(", :;", pos);
+        const std::string item = v.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+        if (item == "all" || item == t) return true;
+        if (end == std::string::npos) break;
+        pos = end + 1;
+    }
+    return false;
+}
+
 // ---- Stage 3 element parameter tables in __constant__ memory --------------
 // Only the D3 covalent radii (au) are needed for the CN kernel; more tables
 // (hubbard, shell_hubbard, pauling_en, …) join here in 3b/3c/3d. The 86-element
@@ -3427,6 +3445,8 @@ __global__ void k_atm_sqrt_abs(size_t n, double* __restrict__ v)
     if (i < n) v[i] = sqrt(fabs(v[i]));
 }
 
+// INACTIVE (2026-11-23): superseded by the per-class ATM kernel (A1); kept as the comparison path, switch
+// CURCUMA_PBC_GPU_HOST=triview (TODO.md "Loeschkandidaten").
 __global__ void k_d4_atm_pbc_w(int nat, const double* __restrict__ sr4r2, const double* __restrict__ sc6,
                                const int* __restrict__ ptr, const int* __restrict__ nb_idx,
                                const double* __restrict__ nb_v,
@@ -4846,6 +4866,8 @@ __global__ void k_d4_pbc_dmat(int nat, const double* __restrict__ xyz, const dou
     D[static_cast<size_t>(i) * nat + j] = acc;
 }
 
+// INACTIVE (2026-11-23): superseded by k_d4_dedq_pbc_b (D1, one block per atom); kept as the comparison path,
+// switch CURCUMA_PBC_GPU_HOST=dedq1 (TODO.md "Loeschkandidaten").
 __global__ void k_d4_dedq_pbc(int nat, int max_elem, int max_ref,
                               const int* __restrict__ Z, const int* __restrict__ nref,
                               const double* __restrict__ c6_flat, const double* __restrict__ W,
@@ -9574,8 +9596,9 @@ bool XtbGpuContext::multipoleGradientPeriodic(int nat, const double* xyz_bohr, c
         const double* kx = nrtrans > 0 ? I.dPbcKexp.ptr : nullptr;
         // M1/M2: the k-space strain derivative and gradient by structure factors (k_mp_sf, k_mp_kvir, k_mp_kgrad), the pair
         // kernel then runs only the real-space sum; CURCUMA_PBC_GPU_HOST=mppair keeps the k sums in the pair kernel.
-        static const bool k_pair = [] { const char* e = std::getenv("CURCUMA_PBC_GPU_HOST");
-                                        return e && std::string(e).find("mppair") != std::string::npos; }();
+        // INACTIVE (2026-11-23): the k-sum branch of the pair kernel is the superseded comparison path, switch
+        // CURCUMA_PBC_GPU_HOST=mppair (TODO.md "Loeschkandidaten").
+        static const bool k_pair = pbcHostTokenSet("mppair");
         k_sf = !k_pair && nrtrans > 0;
         vir_sf = want_virial && k_sf;
         if (k_sf) {
@@ -9679,8 +9702,7 @@ bool XtbGpuContext::dispersionDedqPeriodic(int nat, const double* W, const doubl
         return false;
     }
     const int b = 128;
-    static const bool dedq_thread = [] { const char* e = std::getenv("CURCUMA_PBC_GPU_HOST");
-                                         return e && std::string(e).find("dedq1") != std::string::npos; }();
+    static const bool dedq_thread = pbcHostTokenSet("dedq1");
     if (dedq_thread)
         k_d4_dedq_pbc<<<(nat + b - 1) / b, b, 0, stream>>>(nat, 118, Impl::D4_MAX_REF, I.dD4Z.ptr, I.dD4Nref.ptr,
                                                           I.dD4C6Flat.ptr, I.dD4W.ptr, I.dD4dWq.ptr, I.dPbcD4D.ptr,
@@ -9743,8 +9765,7 @@ bool XtbGpuContext::dispersionATMPeriodic(int nat, const double* xyz_bohr, const
         I.profMark("ATM PBC: C6 upload + neighbour fill");
         // A1: per-class kernel (default) needs the dC6/dCN ratios before C6 becomes sqrt|C6|;
         // CURCUMA_PBC_GPU_HOST=triview keeps the per-member kernel k_d4_atm_pbc_w.
-        static const bool triview = [] { const char* e = std::getenv("CURCUMA_PBC_GPU_HOST");
-                                         return e && std::string(e).find("triview") != std::string::npos; }();
+        static const bool triview = pbcHostTokenSet("triview");
         if (!triview) {
             I.dPbcAtmRatio.ensure(static_cast<int>(nn));
             I.dPbcAtmRatioT.ensure(static_cast<int>(nn));

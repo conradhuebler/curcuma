@@ -1369,6 +1369,39 @@ change. Measurements and scripts: project folder GFN-FF-Wasser, subfolder 06_gfn
 
 ## Not implemented / not tested (updated per stage)
 
+## Stage tokens, fallback counting and fault injection (Nov 23, 2026)
+
+Two diagnostic environment variables take a list of exact tokens (separated by comma, space, colon or semicolon; `all`
+matches every token; until Nov 23, 2026 the host side matched substrings, so `d4cn`, `cnchain` and `cnfold` also
+switched `cn`):
+
+- `CURCUMA_PBC_GPU_HOST=<tokens>` keeps the named stage on its host path (comparison and timing in one binary).
+- `CURCUMA_PBC_GPU_FAIL=<tokens>` makes the named stage skip its device call and take its failure path (test only).
+
+Every failure path of a stage in the table calls `pbcGpuStageFallback` -> `curcuma::reportGpuFallback` with the
+category `xTB periodic device stage <token>: host loop` (counted in the end-of-run summary; `-gpu_strict true` exits with
+code 3 at the first). ctest `pbc_xtb_gpu_fallback` injects every token of the table on the water dimer (8 A, gfn1 and
+gfn2) and checks count, energy/gradient/virial against the `CURCUMA_PBC_GPU_HOST` variant and the strict exit.
+
+| Token | Stage | Kind |
+|---|---|---|
+| `ints` | periodic S/H0/L and AO multipole integrals on the device (G1b, `beginComputedPeriodic`) | fallback counted |
+| `devpot` | periodic GFN2 device potential (R2, `beginPotentialPeriodic`) | fallback counted |
+| `resloop` | resident SCF loop with a cell, set-up (R3/R5) | fallback counted |
+| `resstep` | a failed resident SCF step with a cell restarts on the host-driven loop | fallback counted (FAIL only, no HOST token) |
+| `potdl` | download of the converged periodic device potentials (R4) | fallback counted |
+| `d4dedq` | in-SCF periodic D4 dE/dq (G4b, also the image upload) | fallback counted |
+| `gamma`, `mpmat` | periodic Ewald gamma (G2), periodic multipole matrices (G3) | fallback counted |
+| `cn`, `d4cn`, `d3`, `d4pair`, `atm`, `cnfold`, `rep` | CN (H3), D4 covalent CN (B1), GFN1 D3 (H4, also an element without device table), D4 pairs (H5), ATM (G4a), D4 CN chain rule (C1), repulsion (G5d) | fallback counted |
+| `mpgrad`, `h0grad`, `wmat`, `ewgrad`, `kograd`, `cnchain` | gradient and virial stages G5a, H1, G5b, H2, H2, G5c | fallback counted |
+| `mpdl`, `eigref`, `dcompl`, `pseudo` | switches of device options (keep host download, full FP64 solve, plain density GEMM, full solves) | HOST only, no failure path on the host side |
+| `triview`, `mppair`, `dedq1` | superseded comparison kernels inside the CUDA plugin (INACTIVE, TODO.md "Loeschkandidaten") | HOST only |
+
+Removed on Nov 23, 2026: `CURCUMA_PBC_MP_SD_FACTOR` / `CURCUMA_PBC_MP_SQ_FACTOR` (the PARAM
+`-xtb.pbc_multipole_tblite_factors` is the only switch); `CURCUMA_PBC_MP_ALPHA` / `CURCUMA_PBC_MP_CONV` stay as diagnostic
+overrides and print a warning when used. Invalid `pbc_*` values (`pbc_ewald_tolerance` outside (0, 1),
+`pbc_coulomb_switch_bohr` <= 1, negative cutoffs) are an error instead of being replaced silently by the default.
+
 - k-point sampling, non-orthorhombic cells, slab/1D periodicity, the vacuum (dipole) boundary term, off-diagonal
   strains (a sheared cell is refused), threading of the periodic CN/D3, Klopman-Ohno and Ewald matrix builds, the
   structure-factor factorisation of the multipole k sums of the energy matrices (G3; the gradient and virial use it

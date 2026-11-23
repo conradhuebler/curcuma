@@ -16,8 +16,8 @@
  * Claude Generated. GPL-3.0.
  */
 
+#include <optional>   // std::optional is used unconditionally (llt_blas); outside the _OPENMP block since Nov 23, 2026
 #ifdef _OPENMP
-#include <optional>
 #include <omp.h>
 #endif
 

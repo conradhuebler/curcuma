@@ -103,16 +103,6 @@ PbcRepulsionArrays pbcRepulsionArrays(const std::vector<int>& atoms, bool g1, co
 }
 } // namespace
 
-/// G2-G6 (Nov 2026): CURCUMA_PBC_GPU_HOST=<list> keeps the named periodic device stages on the host (comparison
-/// and timing in one binary; tokens: atm, mpmat, mpgrad, d4dedq, gamma, wmat, cnchain, rep, all). Diagnostic only, default empty = every ported stage on the device.
-bool pbcGpuStageOnHost(const char* token)   // declared in xtb_native.h
-{
-    const char* e = std::getenv("CURCUMA_PBC_GPU_HOST");
-    if (!e) return false;
-    const std::string v(e);
-    return v.find("all") != std::string::npos || v.find(token) != std::string::npos;
-}
-
 namespace {
 /// Claude Generated (Nov 23, 2026): exact token match in a list separated by comma, space, colon or semicolon;
 /// "all" matches every token.
@@ -132,6 +122,16 @@ bool envTokenListHas(const char* env_name, const char* token)
     return false;
 }
 } // namespace
+
+/// G2-G6 (Nov 2026): CURCUMA_PBC_GPU_HOST=<list> keeps the named periodic device stages on the host (comparison and
+/// timing in one binary). Diagnostic only; default empty = every ported stage on the device. Exact tokens since
+/// Nov 23, 2026 (before, a substring match let d4cn/cnchain/cnfold also switch cn): list in docs/WP-PERIODIC-XTB.md
+/// "Stage tokens"; host side: ints mpdl devpot resloop eigref dcompl pseudo potdl d4dedq cn rep d3 d4cn d4pair atm
+/// cnfold gamma mpmat mpgrad h0grad wmat ewgrad kograd cnchain; inside the CUDA plugin: triview mppair dedq1; all.
+bool pbcGpuStageOnHost(const char* token)   // declared in xtb_native.h
+{
+    return envTokenListHas("CURCUMA_PBC_GPU_HOST", token);
+}
 
 bool pbcGpuStageInjectFail(const char* token)   // declared in xtb_native.h
 {
