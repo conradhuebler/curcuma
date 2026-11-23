@@ -66,6 +66,7 @@
 #include "src/core/citation_registry.h"
 #include "src/core/energy_calculators/ff_methods/gfnff_par.h"
 #include "src/core/energy_calculators/ff_methods/cuda/gpu_utils.h"  // backend-neutral
+#include "src/core/energy_calculators/ff_methods/cuda/gfnff_virial_slots.h"  // A1 (Nov 2026): device virial layout
 #include "src/core/energy_calculators/ff_methods/cn_calculator.h"
 #include "src/core/energy_calculators/ff_methods/forcefield.h"
 #include "src/core/energy_calculators/ff_methods/ff_terms.h"
@@ -437,6 +438,15 @@ private:
     void buildDispersionPairsOnDevice();
     /// Claude Generated (Nov 2026, S1): cell (or the "no cell" state) into the device constant memory.
     void uploadCellToDevice();
+    /// Claude Generated (Nov 2026, S1; A1 helper): tables, radius and volume of the device D4 tail from the host set-up.
+    void uploadDispersionTailToDevice();
+    /// Claude Generated (Nov 2026, A1): after a cell change (GFNFF::updateCell, barostat) or the radius freeze: device
+    /// tail (1/V, r_c), CN pair list and graphs; the host decisions rebuild the D4/repulsion/HB lists (pending flag).
+    void followHostCellChanges();
+    /// Claude Generated (Nov 2026, A1): device virial + host Ewald virial -> FFWorkspace::setHybridVirial.
+    void assembleHybridVirial();
+    int    m_seen_cell_updates = 0;     ///< A1: GFNFF::cellUpdateCount() the device state belongs to
+    double m_seen_tail_rc = -1.0;       ///< A1: D4 evaluation radius of the device tail tables
     /// Claude Generated (Oct 2026): compare the device H-bond list with detectHydrogenBondsNative() (sets, case 1
     /// with A < B); prints a summary to stderr and warns on a difference (-gfnff.gpu_hb_detect_verify).
     void verifyDeviceHBList(const std::vector<int>& di, const std::vector<int>& dj, const std::vector<int>& dk,
@@ -989,24 +999,8 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
             }
             // Claude Generated (Nov 2026, S1): homogeneous D4 tail (A3c) on the device, with the radii and zeta of the
             // host set-up (one source: GFNFF::dispersionRadiiBohr(), D4ParameterGenerator::atomZeta()).
-            if constexpr (Backend::has_periodic_local_terms) {
-                const bool tail = m_gfnff->dispersionTailActive();
-                std::vector<double> zeta = d4->atomZeta();
-                if (tail && static_cast<int>(zeta.size()) != static_cast<int>(m_atom_types.size())) {
-                    // the generator skipped its pair loop before zeta was recorded: the same rule from the topology charges
-                    const Vector& tq = m_gfnff->getTopologyInfo().topology_charges;
-                    zeta.assign(m_atom_types.size(), 1.0);
-                    for (size_t i = 0; i < m_atom_types.size(); ++i)
-                        zeta[i] = GFNFFParameters::zetaChargeScale(m_atom_types[i],
-                                                                   i < static_cast<size_t>(tq.size()) ? tq(i) : 0.0);
-                }
-                std::vector<double> sqz(118, 0.0);
-                for (int z = 1; z <= 118; ++z) sqz[z - 1] = d4->getSqrtZr4r2(z);
-                const Eigen::Matrix3d cell = m_gfnff->getUnitCellBohr();
-                const double V = tail ? cell(0, 0) * cell(1, 1) * cell(2, 2) : 0.0;
-                m_gpu_workspace->setDispersionTail(tail, m_gfnff->dispersionRadiiBohr().eval, V, zeta, m_atom_types,
-                                                   sqz, d4->getRefN());
-            }
+            if constexpr (Backend::has_periodic_local_terms)
+                uploadDispersionTailToDevice();   // A1 (Nov 2026): also after a cell change or a radius freeze
         }
 
         // Claude Generated (March 2026): GPU EEQ solver (cuSOLVER/rocSOLVER Cholesky)
@@ -1201,6 +1195,11 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
     // Claude Generated (April 2026): Upload PBC unit cell to GPU constant memory (S1: every step, also the
     // "no cell" state, because the symbols are process-wide per device; unchanged values are not re-copied)
     uploadCellToDevice();
+    if (m_periodic_hybrid) {
+        followHostCellChanges();   // A1 (Nov 2026): barostat cell changes and the radius freeze
+        if constexpr (Backend::has_periodic_local_terms)
+            m_gpu_workspace->setWantVirial(m_gfnff->wantVirial());
+    }
 
     // --- Step 0: GPU topology displacement check (Claude Generated March 2026) ---
     // Runs on GPU where coords already live. Result fed to GFNFF::needsFullTopologyUpdate()
@@ -1468,6 +1467,9 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
     }
     m_last_gpu_prep_timing.coul_update = std::chrono::duration<double, std::milli>(
         std::chrono::high_resolution_clock::now() - t_coul_start).count();
+    // A1 (Nov 2026): every host list decision of this step has seen the cell-change flag (HB/XB refresh, repulsion,
+    // D4, Coulomb lists above); the CPU path clears it at the same point of GFNFF::Calculation.
+    m_gfnff->acknowledgeListsRebuilt();
 
     // HB/XB pair list consistency: CPU vs GPU (verbosity >= 3)
     if (CurcumaLogger::get_verbosity() >= 3 && !hb_on_device) {
@@ -2365,6 +2367,8 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
     m_last_energy = m_gpu_workspace->launchChargeDependentAndFinish(gradient);
     if (m_periodic_hybrid)
         m_last_energy += m_host_ewald_energy;
+    if (m_periodic_hybrid && gradient && m_gfnff->wantVirial())
+        assembleHybridVirial();   // A1 (Nov 2026)
 
     // Claude Generated (Sep 2026): say once which parts of the multi-GPU split ran (or why not).
     if constexpr (Backend::has_multi_gpu_split) {
@@ -2990,6 +2994,96 @@ void GFNFFGpuMethodImpl<Backend>::buildDispersionPairsOnDevice()
         m_gpu_workspace->generateDispersionPairListOnGPU(gw_flat, sqrtzr4r2, topo_q, 0.58, 4.80, rad.build, rad.eval);
     else
         m_gpu_workspace->generateDispersionPairListOnGPU(gw_flat, sqrtzr4r2, topo_q, 0.58, 4.80, rad.build);
+}
+
+template <class Backend>
+void GFNFFGpuMethodImpl<Backend>::uploadDispersionTailToDevice()
+{
+    if constexpr (Backend::has_periodic_local_terms) {
+        D4ParameterGenerator* d4 = m_gfnff->getD4Generator();
+        if (!d4 || !m_gpu_workspace)
+            return;
+        const bool tail = m_gfnff->dispersionTailActive();
+        std::vector<double> zeta = d4->atomZeta();
+        if (tail && static_cast<int>(zeta.size()) != static_cast<int>(m_atom_types.size())) {
+            // the generator skipped its pair loop before zeta was recorded: the same rule from the topology charges
+            const Vector& tq = m_gfnff->getTopologyInfo().topology_charges;
+            zeta.assign(m_atom_types.size(), 1.0);
+            for (size_t i = 0; i < m_atom_types.size(); ++i)
+                zeta[i] = GFNFFParameters::zetaChargeScale(m_atom_types[i],
+                                                           i < static_cast<size_t>(tq.size()) ? tq(i) : 0.0);
+        }
+        std::vector<double> sqz(118, 0.0);
+        for (int z = 1; z <= 118; ++z) sqz[z - 1] = d4->getSqrtZr4r2(z);
+        const Eigen::Matrix3d cell = m_gfnff->getUnitCellBohr();
+        const double V = tail ? cell(0, 0) * cell(1, 1) * cell(2, 2) : 0.0;
+        m_seen_tail_rc = m_gfnff->dispersionRadiiBohr().eval;
+        m_gpu_workspace->setDispersionTail(tail, m_seen_tail_rc, V, zeta, m_atom_types, sqz, d4->getRefN());
+    }
+}
+
+// Claude Generated (Nov 2026, GPU_PERIODIC_GAPS A1): the host GFNFF changed its cell (updateCell, N2) or froze its
+// radii (freezeCutoffsForCellChanges); both set the host's list-rebuild flag, which the host decisions of this step
+// (HB/XB refresh, repulsion and D4 list updates) obey and the device rebuilds follow. Here: the device tail (its
+// prefactors carry 1/V and r_c), the CN-derivative pair list (built for the old lattice) and the graphs. The cell
+// symbols themselves were just uploaded by uploadCellToDevice().
+template <class Backend>
+void GFNFFGpuMethodImpl<Backend>::followHostCellChanges()
+{
+    const int cu = m_gfnff->cellUpdateCount();
+    const double rc = m_gfnff->dispersionRadiiBohr().eval;
+    if (cu == m_seen_cell_updates && rc == m_seen_tail_rc)
+        return;
+    m_seen_cell_updates = cu;
+    uploadDispersionTailToDevice();
+    m_cn_pairs_generated = false;
+    m_eeq_has_ref_geom = false;
+    m_gpu_workspace->invalidateGraph();
+}
+
+// Claude Generated (Nov 2026, GPU_PERIODIC_GAPS A1): atomic virial of the hybrid step, the N1 definition
+// (FFVirialComponents). Device: every local term and both chain rules (gfnff_kernels.cuh slots); the CN chain rule
+// comes as one tensor and is stored in cn_bond (cn_dispersion and cn_coulomb stay zero: the device has one dE/dCN).
+// Host: the Ewald real/reciprocal pair virial and the background terms (evaluateEwaldCoulomb of this step). D4 tail
+// at fixed r_c: E_tail * I; V-LRC: (3 E6 + 5 E8)/3 * I with E8 from the C8-only tail pass.
+template <class Backend>
+void GFNFFGpuMethodImpl<Backend>::assembleHybridVirial()
+{
+  if constexpr (Backend::has_periodic_local_terms) {   // CUDA only (ROCm refuses a cell)
+    FFWorkspace* ws = m_gfnff->getWorkspace();
+    std::vector<double> buf;
+    if (!ws || !m_gpu_workspace->downloadVirial(buf))
+        return;   // virialValid() stays false: SimpleMD reports it
+    FFVirialComponents vc = ws->virialComponents();   // coulomb, coulomb_bg from the host Ewald part
+    auto T = [&](int slot) {
+        Eigen::Matrix3d m;
+        for (int a = 0; a < 3; ++a)
+            for (int b = 0; b < 3; ++b)
+                m(a, b) = buf[9 * slot + 3 * a + b];
+        return m;
+    };
+    vc.bond = T(VIR_BOND);
+    vc.angle = T(VIR_ANGLE);
+    vc.dihedral = T(VIR_DIHED);
+    vc.inversion = T(VIR_INV);
+    vc.stors = T(VIR_STORS);
+    vc.dispersion = T(VIR_DISP);
+    vc.repulsion = T(VIR_REP);
+    vc.hbond = T(VIR_HBOND);
+    vc.xbond = T(VIR_XBOND);
+    vc.batm = T(VIR_BATM);
+    vc.atm.setZero();
+    vc.cn_bond = T(VIR_CN);
+    vc.cn_dispersion.setZero();
+    vc.cn_coulomb.setZero();
+    const double e_tail = m_gpu_workspace->energyComponents().disp_tail;
+    const double e8 = buf[GFNFF_VIR_TAIL_E8];
+    vc.disp_tail = e_tail * Eigen::Matrix3d::Identity();
+    vc.tail_lrc.setZero();
+    if (m_gfnff->pressureLrc() && e_tail != 0.0)
+        vc.tail_lrc = ((3.0 * (e_tail - e8) + 5.0 * e8) / 3.0) * Eigen::Matrix3d::Identity();
+    ws->setHybridVirial(vc);
+  }
 }
 
 template <class Backend>

@@ -1275,6 +1275,12 @@ public:
     long dispersionRebuildCount() const { return m_disp_rebuild_count; }
     /// Claude Generated (Nov 2026, N2): number of updateCell() calls on this instance (diagnostic, tests)
     int cellUpdateCount() const { return m_cell_update_count; }
+    /// Claude Generated (Nov 2026, GPU_PERIODIC_GAPS A1): the GPU wrapper, after its host list decisions of a step
+    /// (HB/XB, repulsion, D4, Coulomb), clears the rebuild flag set by updateCell()/freezeCutoffsForCellChanges(), as
+    /// GFNFF::Calculation does after its own list updates.
+    void acknowledgeListsRebuilt() { m_lists_rebuild_pending = false; }
+    /// Claude Generated (Nov 2026, A1): PARAM pressure_lrc (V-LRC), for the GPU hybrid virial
+    bool pressureLrc() const { return m_pressure_lrc; }
     /// Claude Generated (Nov 2026, A4a): number of non-bonded repulsion list rebuilds since set-up (diagnostic, tests)
     long repulsionRebuildCount() const { return m_rep_rebuild_count; }
 

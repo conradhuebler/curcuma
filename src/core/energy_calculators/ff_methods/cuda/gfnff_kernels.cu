@@ -219,6 +219,52 @@ __device__ __forceinline__ void micChainOfFour(const double* __restrict__ cx, co
 }
 
 // ============================================================================
+// Atomic virial on the device (Claude Generated, Nov 2026, GPU_PERIODIC_GAPS A1; definition at FFVirialComponents)
+// Xi_ab -= p_a g_b for every gradient row g a term writes, p the position of that atom in the frame the term used,
+// taken relative to one atom of the term (the rows of a term sum to zero, so the origin drops out). Row-major
+// 3a+b in a per-thread array; blockReduceAddVirial rounds each of the nine values to a multiple of 2^-48 Eh and sums
+// them as integers (order-independent, docs/GPU_REPRODUCIBILITY.md) into the nine slots of the term. Only the
+// VIRIAL instantiations of the kernels and the separate *_virial kernels call these; the other kernels are unchanged.
+// ============================================================================
+__device__ __forceinline__ void vir_outer(double* v, double px, double py, double pz, double gx, double gy, double gz)
+{
+    v[0] -= px * gx; v[1] -= px * gy; v[2] -= px * gz;
+    v[3] -= py * gx; v[4] -= py * gy; v[5] -= py * gz;
+    v[6] -= pz * gx; v[7] -= pz * gy; v[8] -= pz * gz;
+}
+
+/// All threads of the block must call it (no early return before); slot = 9 fixed-point accumulators.
+__device__ __forceinline__ void blockReduceAddVirial(const double* v, double* slot)
+{
+    __shared__ long long vir_sums_fx[9][32];
+    const int lane = threadIdx.x & 31;
+    const int warp_id = threadIdx.x >> 5;
+    #pragma unroll
+    for (int c = 0; c < 9; ++c) {
+        long long x = fix_round(v[c], GFNFF_FIX_ENERGY);
+        for (int off = 16; off > 0; off >>= 1) x += __shfl_down_sync(0xffffffffu, x, off);
+        if (lane == 0) vir_sums_fx[c][warp_id] = x;
+    }
+    __syncthreads();
+    const int num_warps = (blockDim.x + 31) >> 5;
+    if (warp_id == 0) {
+        #pragma unroll
+        for (int c = 0; c < 9; ++c) {
+            long long s = (lane < num_warps) ? vir_sums_fx[c][lane] : 0ll;
+            for (int off = 16; off > 0; off >>= 1) s += __shfl_down_sync(0xffffffffu, s, off);
+            if (lane == 0 && s != 0ll)
+                atomicAdd(reinterpret_cast<unsigned long long*>(&slot[c]), static_cast<unsigned long long>(s));
+        }
+    }
+}
+
+/// Pair term with gradient fac*d on the first atom and -fac*d on the second (d = x_i - x_j as the kernel formed it)
+__device__ __forceinline__ void vir_pair(double* v, double fac, double dx, double dy, double dz)
+{
+    vir_outer(v, dx, dy, dz, fac * dx, fac * dy, fac * dz);
+}
+
+// ============================================================================
 // Utility kernel
 // ============================================================================
 
@@ -911,8 +957,11 @@ __device__ double cos_angle_grad(
 // verbatim (a rewrite through local arrays changed the FMA contraction of the bonded kernels by one fixed-point
 // quantum on urea197/peo201; the SASS of k_*<false> is compared against the pre-S1 plugin), the true instantiation
 // builds the CPU image frame. FFWorkspaceGPU launches k_*<true> only with an active cell.
-template <bool PBC>
-__global__ void k_angles(
+// A1 (Nov 2026): the body is a device function; the kernel k_angles<PBC> keeps its former signature and statements
+// (an added kernel parameter changed the register/FMA choices and the last bits without a cell); k_angles_vir is
+// the virial instantiation (cell only).
+template <bool PBC, bool VIR>
+__device__ __forceinline__ void k_angles_body(
     int n,
     const int*    __restrict__ idx_i,
     const int*    __restrict__ idx_j,
@@ -927,10 +976,12 @@ __global__ void k_angles(
     const double* __restrict__ cz,
     const double* __restrict__ rcov_d3,  // unused arg; uses constant d_rcov_d3 directly
     double*                    grad,
-    double*                    energy)
+    double*                    energy,
+    double*                    vir)      // A1 (Nov 2026)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     double local_E = 0.0;
+    [[maybe_unused]] double vacc[9] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
 
     if (tid < n) {
         int i = idx_i[tid], j = idx_j[tid], k = idx_k[tid];
@@ -1037,10 +1088,57 @@ __global__ void k_angles(
             add_grad(grad, i, gi_x + t1_x, gi_y + t1_y, gi_z + t1_z);
             add_grad(grad, j, gj_x - t1_x - t2_x, gj_y - t1_y - t2_y, gj_z - t1_z - t2_z);
             add_grad(grad, k, gk_x + t2_x, gk_y + t2_y, gk_z + t2_z);
+            if constexpr (VIR) {   // A1: frame positions relative to the centre j (slot 1)
+                vir_outer(vacc, dij_x, dij_y, dij_z, gi_x + t1_x, gi_y + t1_y, gi_z + t1_z);
+                vir_outer(vacc, dkj_x, dkj_y, dkj_z, gk_x + t2_x, gk_y + t2_y, gk_z + t2_z);
+            }
         }
     }
 
     blockReduceAddEnergy(local_E, energy);
+    if constexpr (VIR) blockReduceAddVirial(vacc, vir);
+}
+
+template <bool PBC>
+__global__ void k_angles(
+    int n,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const int*    __restrict__ idx_k,
+    const int*    __restrict__ ati,
+    const int*    __restrict__ atj,
+    const int*    __restrict__ atk,
+    const double* __restrict__ fc,
+    const double* __restrict__ theta0,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const double* __restrict__ rcov_d3,  // unused arg; uses constant d_rcov_d3 directly
+    double*                    grad,
+    double*                    energy)
+{
+    k_angles_body<PBC, false>(n, idx_i, idx_j, idx_k, ati, atj, atk, fc, theta0, cx, cy, cz, rcov_d3, grad, energy, nullptr);
+}
+
+__global__ __launch_bounds__(512) void k_angles_vir(
+    int n,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const int*    __restrict__ idx_k,
+    const int*    __restrict__ ati,
+    const int*    __restrict__ atj,
+    const int*    __restrict__ atk,
+    const double* __restrict__ fc,
+    const double* __restrict__ theta0,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const double* __restrict__ rcov_d3,  // unused arg; uses constant d_rcov_d3 directly
+    double*                    grad,
+    double*                    energy,
+    double*                    vir)      // A1 (Nov 2026)
+{
+    k_angles_body<true, true>(n, idx_i, idx_j, idx_k, ati, atj, atk, fc, theta0, cx, cy, cz, rcov_d3, grad, energy, vir);
 }
 
 // ============================================================================
@@ -1168,8 +1266,11 @@ __device__ double dihedral_angle_grad(
 // Reference: ff_workspace_gfnff.cpp:calcDihedrals (lines 299-380)
 // ============================================================================
 
-template <bool PBC>
-__global__ void k_dihedrals(
+// A1 (Nov 2026): the body is a device function; the kernel k_dihedrals<PBC> keeps its former signature and statements
+// (an added kernel parameter changed the register/FMA choices and the last bits without a cell); k_dihedrals_vir is
+// the virial instantiation (cell only).
+template <bool PBC, bool VIR>
+__device__ __forceinline__ void k_dihedrals_body(
     int n,
     const int*    __restrict__ idx_i,
     const int*    __restrict__ idx_j,
@@ -1188,10 +1289,12 @@ __global__ void k_dihedrals(
     const double* __restrict__ cz,
     const double* __restrict__ rcov_d3_unused,
     double*                    grad,
-    double*                    energy)
+    double*                    energy,
+    double*                    vir)      // A1 (Nov 2026)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     double local_E = 0.0;
+    [[maybe_unused]] double vacc[9] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
 
     if (tid < n) {
         int ai = idx_i[tid], aj = idx_j[tid], ak = idx_k[tid], al = idx_l[tid];
@@ -1280,6 +1383,11 @@ __global__ void k_dihedrals(
                          dEdphi * damp * derivate[a][1],
                          dEdphi * damp * derivate[a][2]);
             }
+            if constexpr (VIR) {   // A1: frame slots relative to slot 1 (j)
+                for (int a = 0; a < 4; ++a)
+                    vir_outer(vacc, lx[a] - lx[1], ly[a] - ly[1], lz[a] - lz[1],
+                              dEdphi * damp * derivate[a][0], dEdphi * damp * derivate[a][1], dEdphi * damp * derivate[a][2]);
+            }
 
             // Gradient from damping: E_raw * d(damp)/d(rXY²) * rXY_vec
             {
@@ -1289,6 +1397,7 @@ __global__ void k_dihedrals(
                 double fac = E_raw * d2_ij * d_jk * d_kl;
                 add_grad(grad, ai,  fac*dx,  fac*dy,  fac*dz);
                 add_grad(grad, aj, -fac*dx, -fac*dy, -fac*dz);
+                if constexpr (VIR) vir_pair(vacc, fac, dx, dy, dz);
             }
             {
                 double dx, dy, dz;
@@ -1297,6 +1406,7 @@ __global__ void k_dihedrals(
                 double fac = E_raw * d_ij * d2_jk * d_kl;
                 add_grad(grad, aj,  fac*dx,  fac*dy,  fac*dz);
                 add_grad(grad, ak, -fac*dx, -fac*dy, -fac*dz);
+                if constexpr (VIR) vir_pair(vacc, fac, dx, dy, dz);
             }
             {
                 double dx, dy, dz;
@@ -1305,11 +1415,63 @@ __global__ void k_dihedrals(
                 double fac = E_raw * d_ij * d_jk * d2_kl;
                 add_grad(grad, ak,  fac*dx,  fac*dy,  fac*dz);
                 add_grad(grad, al, -fac*dx, -fac*dy, -fac*dz);
+                if constexpr (VIR) vir_pair(vacc, fac, dx, dy, dz);
             }
         }
     }
 
     blockReduceAddEnergy(local_E, energy);
+    if constexpr (VIR) blockReduceAddVirial(vacc, vir);
+}
+
+template <bool PBC>
+__global__ void k_dihedrals(
+    int n,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const int*    __restrict__ idx_k,
+    const int*    __restrict__ idx_l,
+    const int*    __restrict__ ati,
+    const int*    __restrict__ atj,
+    const int*    __restrict__ atk,
+    const int*    __restrict__ atl,
+    const double* __restrict__ V,
+    const double* __restrict__ phi0,
+    const double* __restrict__ n_period,
+    const int*    __restrict__ is_nci,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const double* __restrict__ rcov_d3_unused,
+    double*                    grad,
+    double*                    energy)
+{
+    k_dihedrals_body<PBC, false>(n, idx_i, idx_j, idx_k, idx_l, ati, atj, atk, atl, V, phi0, n_period, is_nci, cx, cy, cz, rcov_d3_unused, grad, energy, nullptr);
+}
+
+__global__ __launch_bounds__(512) void k_dihedrals_vir(
+    int n,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const int*    __restrict__ idx_k,
+    const int*    __restrict__ idx_l,
+    const int*    __restrict__ ati,
+    const int*    __restrict__ atj,
+    const int*    __restrict__ atk,
+    const int*    __restrict__ atl,
+    const double* __restrict__ V,
+    const double* __restrict__ phi0,
+    const double* __restrict__ n_period,
+    const int*    __restrict__ is_nci,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const double* __restrict__ rcov_d3_unused,
+    double*                    grad,
+    double*                    energy,
+    double*                    vir)      // A1 (Nov 2026)
+{
+    k_dihedrals_body<true, true>(n, idx_i, idx_j, idx_k, idx_l, ati, atj, atk, atl, V, phi0, n_period, is_nci, cx, cy, cz, rcov_d3_unused, grad, energy, vir);
 }
 
 // ============================================================================
@@ -1441,8 +1603,11 @@ __device__ double inversion_angle_grad(
 // Reference: ff_workspace_gfnff.cpp:calcInversions
 // ============================================================================
 
-template <bool PBC>
-__global__ void k_inversions(
+// A1 (Nov 2026): the body is a device function; the kernel k_inversions<PBC> keeps its former signature and statements
+// (an added kernel parameter changed the register/FMA choices and the last bits without a cell); k_inversions_vir is
+// the virial instantiation (cell only).
+template <bool PBC, bool VIR>
+__device__ __forceinline__ void k_inversions_body(
     int n,
     const int*    __restrict__ idx_i,
     const int*    __restrict__ idx_j,
@@ -1462,10 +1627,12 @@ __global__ void k_inversions(
     const double* __restrict__ cy,
     const double* __restrict__ cz,
     double*                    grad,
-    double*                    energy)
+    double*                    energy,
+    double*                    vir)      // A1 (Nov 2026)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     double local_E = 0.0;
+    [[maybe_unused]] double vacc[9] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
 
     if (tid < n) {
         int i = idx_i[tid], j = idx_j[tid], k = idx_k[tid], l = idx_l[tid];
@@ -1557,6 +1724,11 @@ __global__ void k_inversions(
                      dEdOmega * derivate[a][1],
                      dEdOmega * derivate[a][2]);
         }
+        if constexpr (VIR) {   // A1: frame slots relative to the centre (slot 0)
+            for (int a = 1; a < 4; ++a)
+                vir_outer(vacc, lx[a] - lx[0], ly[a] - ly[0], lz[a] - lz[0],
+                          dEdOmega * derivate[a][0], dEdOmega * derivate[a][1], dEdOmega * derivate[a][2]);
+        }
 
         auto calc_ddamp = [&](double rsq, double ra, double rb) -> double {
             if (rsq < 1e-8) return 0.0;
@@ -1581,6 +1753,7 @@ __global__ void k_inversions(
             double fac = E_raw * dd_ij * damp_jk * damp_jl;
             add_grad(grad, i,  fac*dx,  fac*dy,  fac*dz);
             add_grad(grad, j, -fac*dx, -fac*dy, -fac*dz);
+            if constexpr (VIR) vir_pair(vacc, fac, dx, dy, dz);
         }
         {
             double dx, dy, dz;
@@ -1589,6 +1762,7 @@ __global__ void k_inversions(
             double fac = E_raw * damp_ij * dd_jk * damp_jl;
             add_grad(grad, k,  fac*dx,  fac*dy,  fac*dz);
             add_grad(grad, j, -fac*dx, -fac*dy, -fac*dz);
+            if constexpr (VIR) vir_pair(vacc, fac, dx, dy, dz);
         }
         {
             double dx, dy, dz;
@@ -1597,10 +1771,64 @@ __global__ void k_inversions(
             double fac = E_raw * damp_ij * damp_jk * dd_jl;
             add_grad(grad, l,  fac*dx,  fac*dy,  fac*dz);
             add_grad(grad, j, -fac*dx, -fac*dy, -fac*dz);
+            if constexpr (VIR) vir_pair(vacc, fac, dx, dy, dz);
         }
     }
 
     blockReduceAddEnergy(local_E, energy);
+    if constexpr (VIR) blockReduceAddVirial(vacc, vir);
+}
+
+template <bool PBC>
+__global__ void k_inversions(
+    int n,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const int*    __restrict__ idx_k,
+    const int*    __restrict__ idx_l,
+    const int*    __restrict__ ati,
+    const int*    __restrict__ atj,
+    const int*    __restrict__ atk,
+    const int*    __restrict__ atl,
+    const double* __restrict__ fc,
+    const double* __restrict__ omega0,
+    const double* __restrict__ C0,
+    const double* __restrict__ C1,
+    const double* __restrict__ C2,
+    const int*    __restrict__ potential_type,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    double*                    grad,
+    double*                    energy)
+{
+    k_inversions_body<PBC, false>(n, idx_i, idx_j, idx_k, idx_l, ati, atj, atk, atl, fc, omega0, C0, C1, C2, potential_type, cx, cy, cz, grad, energy, nullptr);
+}
+
+__global__ __launch_bounds__(512) void k_inversions_vir(
+    int n,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const int*    __restrict__ idx_k,
+    const int*    __restrict__ idx_l,
+    const int*    __restrict__ ati,
+    const int*    __restrict__ atj,
+    const int*    __restrict__ atk,
+    const int*    __restrict__ atl,
+    const double* __restrict__ fc,
+    const double* __restrict__ omega0,
+    const double* __restrict__ C0,
+    const double* __restrict__ C1,
+    const double* __restrict__ C2,
+    const int*    __restrict__ potential_type,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    double*                    grad,
+    double*                    energy,
+    double*                    vir)      // A1 (Nov 2026)
+{
+    k_inversions_body<true, true>(n, idx_i, idx_j, idx_k, idx_l, ati, atj, atk, atl, fc, omega0, C0, C1, C2, potential_type, cx, cy, cz, grad, energy, vir);
 }
 
 // Claude Generated (Nov 2026, S1): the cell symbols live in this translation unit; a cudaMemcpyToSymbol on an
@@ -1689,8 +1917,11 @@ __device__ __forceinline__ double d_charge_scaling(double q, double st, double s
 // Reference: ff_workspace_gfnff.cpp:calcSTorsions (lines 611-648)
 // ============================================================================
 
-template <bool PBC>
-__global__ void k_storsions(
+// A1 (Nov 2026): the body is a device function; the kernel k_storsions<PBC> keeps its former signature and statements
+// (an added kernel parameter changed the register/FMA choices and the last bits without a cell); k_storsions_vir is
+// the virial instantiation (cell only).
+template <bool PBC, bool VIR>
+__device__ __forceinline__ void k_storsions_body(
     int n,
     const int*    __restrict__ idx_i,
     const int*    __restrict__ idx_j,
@@ -1701,10 +1932,13 @@ __global__ void k_storsions(
     const double* __restrict__ cy,
     const double* __restrict__ cz,
     double*                    grad,
-    double*                    energy)
+    double*                    energy,
+    double*                    vir)      // A1 (Nov 2026)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     double local_E = 0.0;
+    [[maybe_unused]] double vacc[9] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    [[maybe_unused]] double vpx[4], vpy[4], vpz[4];   // A1: frame positions relative to slot 1 (VIR only)
 
     if (tid < n) {
         int ai = idx_i[tid], aj = idx_j[tid], ak = idx_k[tid], al = idx_l[tid];
@@ -1716,6 +1950,8 @@ __global__ void k_storsions(
             double lx[4], ly[4], lz[4];
             micChainOfFour(cx, cy, cz, ai, aj, ak, al, lx, ly, lz);
             phi = dihedral_angle_grad(lx, ly, lz, 0, 1, 2, 3, derivate, true);
+            if constexpr (VIR)
+                for (int a = 0; a < 4; ++a) { vpx[a] = lx[a] - lx[1]; vpy[a] = ly[a] - ly[1]; vpz[a] = lz[a] - lz[1]; }
         } else {
             phi = dihedral_angle_grad(cx, cy, cz, ai, aj, ak, al, derivate, true);
         }
@@ -1731,9 +1967,47 @@ __global__ void k_storsions(
                      dEdphi * derivate[a][1],
                      dEdphi * derivate[a][2]);
         }
+        if constexpr (VIR)
+            for (int a = 0; a < 4; ++a)
+                vir_outer(vacc, vpx[a], vpy[a], vpz[a], dEdphi * derivate[a][0], dEdphi * derivate[a][1], dEdphi * derivate[a][2]);
     }
 
     blockReduceAddEnergy(local_E, energy);
+    if constexpr (VIR) blockReduceAddVirial(vacc, vir);
+}
+
+template <bool PBC>
+__global__ void k_storsions(
+    int n,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const int*    __restrict__ idx_k,
+    const int*    __restrict__ idx_l,
+    const double* __restrict__ erefhalf,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    double*                    grad,
+    double*                    energy)
+{
+    k_storsions_body<PBC, false>(n, idx_i, idx_j, idx_k, idx_l, erefhalf, cx, cy, cz, grad, energy, nullptr);
+}
+
+__global__ __launch_bounds__(512) void k_storsions_vir(
+    int n,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const int*    __restrict__ idx_k,
+    const int*    __restrict__ idx_l,
+    const double* __restrict__ erefhalf,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    double*                    grad,
+    double*                    energy,
+    double*                    vir)      // A1 (Nov 2026)
+{
+    k_storsions_body<true, true>(n, idx_i, idx_j, idx_k, idx_l, erefhalf, cx, cy, cz, grad, energy, vir);
 }
 
 // ============================================================================
@@ -1743,7 +2017,9 @@ __global__ void k_storsions(
 // Reference: ff_workspace_gfnff.cpp:calcBATM (lines 1652-1726)
 // ============================================================================
 
-__global__ void k_batm(
+// A1 (Nov 2026): body as a device function, k_batm keeps its former signature (bounds from the .cuh declaration)
+template <bool VIR>
+__device__ __forceinline__ void k_batm_body(
     int n,
     const int*    __restrict__ idx_i,
     const int*    __restrict__ idx_j,
@@ -1756,10 +2032,12 @@ __global__ void k_batm(
     const double* __restrict__ cz,
     const double* __restrict__ topo_charges,
     double*                    grad,
-    double*                    energy)
+    double*                    energy,
+    double*                    vir)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     double local_E = 0.0;
+    [[maybe_unused]] double vacc[9] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
 
     if (tid < n) {
         int i = idx_i[tid], j = idx_j[tid], k = idx_k[tid];
@@ -1818,10 +2096,52 @@ __global__ void k_batm(
             add_grad(grad, j, -fij*rij_x + fjk*rjk_x, -fij*rij_y + fjk*rjk_y, -fij*rij_z + fjk*rjk_z);
             add_grad(grad, k, -fik*rik_x - fjk*rjk_x, -fik*rik_y - fjk*rjk_y, -fik*rik_z - fjk*rjk_z);
             add_grad(grad, i,  fij*rij_x + fik*rik_x,  fij*rij_y + fik*rik_y,  fij*rij_z + fik*rik_z);
+            if constexpr (VIR) {   // positions relative to i
+                vir_outer(vacc, rij_x, rij_y, rij_z, -fij*rij_x + fjk*rjk_x, -fij*rij_y + fjk*rjk_y, -fij*rij_z + fjk*rjk_z);
+                vir_outer(vacc, rik_x, rik_y, rik_z, -fik*rik_x - fjk*rjk_x, -fik*rik_y - fjk*rjk_y, -fik*rik_z - fjk*rjk_z);
+            }
         }
     }
 
     blockReduceAddEnergy(local_E, energy);
+    if constexpr (VIR) blockReduceAddVirial(vacc, vir);
+}
+
+__global__ void k_batm(
+    int n,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const int*    __restrict__ idx_k,
+    const double* __restrict__ zb3atm_i,
+    const double* __restrict__ zb3atm_j,
+    const double* __restrict__ zb3atm_k,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const double* __restrict__ topo_charges,
+    double*                    grad,
+    double*                    energy)
+{
+    k_batm_body<false>(n, idx_i, idx_j, idx_k, zb3atm_i, zb3atm_j, zb3atm_k, cx, cy, cz, topo_charges, grad, energy, nullptr);
+}
+
+__global__ GFNFF_KERNEL_BOUNDS void k_batm_vir(
+    int n,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const int*    __restrict__ idx_k,
+    const double* __restrict__ zb3atm_i,
+    const double* __restrict__ zb3atm_j,
+    const double* __restrict__ zb3atm_k,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const double* __restrict__ topo_charges,
+    double*                    grad,
+    double*                    energy,
+    double*                    vir)
+{
+    k_batm_body<true>(n, idx_i, idx_j, idx_k, zb3atm_i, zb3atm_j, zb3atm_k, cx, cy, cz, topo_charges, grad, energy, vir);
 }
 
 // ============================================================================
@@ -2023,8 +2343,11 @@ __global__ void k_atm(
 // Reference: ff_workspace_gfnff.cpp:calcHalogenBonds (lines 1402-1510)
 // ============================================================================
 
-template <bool PBC>
-__global__ void k_xbonds(
+// A1 (Nov 2026): the body is a device function; the kernel k_xbonds<PBC> keeps its former signature and statements
+// (an added kernel parameter changed the register/FMA choices and the last bits without a cell); k_xbonds_vir is
+// the virial instantiation (cell only).
+template <bool PBC, bool VIR>
+__device__ __forceinline__ void k_xbonds_body(
     int n,
     const int*    __restrict__ idx_i,
     const int*    __restrict__ idx_j,
@@ -2039,10 +2362,12 @@ __global__ void k_xbonds(
     const double* __restrict__ cy,
     const double* __restrict__ cz,
     double*                    grad,
-    double*                    energy)
+    double*                    energy,
+    double*                    vir)      // A1 (Nov 2026)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     double local_E = 0.0;
+    [[maybe_unused]] double vacc[9] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
 
     if (tid < n) {
         const double XB_SCUT_D = 5.0;
@@ -2148,11 +2473,64 @@ __global__ void k_xbonds(
                 add_grad(grad, B, dE_drXB * rXB_x * inv_rXB + dE_drAB * rAB_x * inv_rAB,
                                   dE_drXB * rXB_y * inv_rXB + dE_drAB * rAB_y * inv_rAB,
                                   dE_drXB * rXB_z * inv_rXB + dE_drAB * rAB_z * inv_rAB);
+                if constexpr (VIR) {   // A1: frame anchored on X
+                    vir_outer(vacc, ax - xx, ay - xy, az - xz,
+                              -dE_drAX * rAX_x * inv_rAX - dE_drAB * rAB_x * inv_rAB,
+                              -dE_drAX * rAX_y * inv_rAX - dE_drAB * rAB_y * inv_rAB,
+                              -dE_drAX * rAX_z * inv_rAX - dE_drAB * rAB_z * inv_rAB);
+                    vir_outer(vacc, bx - xx, by - xy, bz - xz,
+                              dE_drXB * rXB_x * inv_rXB + dE_drAB * rAB_x * inv_rAB,
+                              dE_drXB * rXB_y * inv_rXB + dE_drAB * rAB_y * inv_rAB,
+                              dE_drXB * rXB_z * inv_rXB + dE_drAB * rAB_z * inv_rAB);
+                }
             }
         }
     }
 
     blockReduceAddEnergy(local_E, energy);
+    if constexpr (VIR) blockReduceAddVirial(vacc, vir);
+}
+
+template <bool PBC>
+__global__ void k_xbonds(
+    int n,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const int*    __restrict__ idx_k,
+    const int*    __restrict__ elem_A,
+    const int*    __restrict__ elem_B,
+    const double* __restrict__ q_X,
+    const double* __restrict__ q_B,
+    const double* __restrict__ acidity_X,
+    const double* __restrict__ r_cut,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    double*                    grad,
+    double*                    energy)
+{
+    k_xbonds_body<PBC, false>(n, idx_i, idx_j, idx_k, elem_A, elem_B, q_X, q_B, acidity_X, r_cut, cx, cy, cz, grad, energy, nullptr);
+}
+
+__global__ __launch_bounds__(512) void k_xbonds_vir(
+    int n,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const int*    __restrict__ idx_k,
+    const int*    __restrict__ elem_A,
+    const int*    __restrict__ elem_B,
+    const double* __restrict__ q_X,
+    const double* __restrict__ q_B,
+    const double* __restrict__ acidity_X,
+    const double* __restrict__ r_cut,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    double*                    grad,
+    double*                    energy,
+    double*                    vir)      // A1 (Nov 2026)
+{
+    k_xbonds_body<true, true>(n, idx_i, idx_j, idx_k, elem_A, elem_B, q_X, q_B, acidity_X, r_cut, cx, cy, cz, grad, energy, vir);
 }
 
 // ============================================================================
@@ -2318,8 +2696,11 @@ __global__ void k_gather_hb_charges(
     }
 }
 
-template <bool PBC>
-__global__ void k_hbonds(
+// A1 (Nov 2026): the body is a device function; the kernel k_hbonds<PBC> keeps its former signature and statements
+// (an added kernel parameter changed the register/FMA choices and the last bits without a cell); k_hbonds_vir is
+// the virial instantiation (cell only).
+template <bool PBC, bool VIR>
+__device__ __forceinline__ void k_hbonds_body(
     int n,
     const int*    __restrict__ idx_i,
     const int*    __restrict__ idx_j,
@@ -2348,10 +2729,13 @@ __global__ void k_hbonds(
     const double* __restrict__ cz,
     double*                    grad,
     double*                    energy,
-    double*       __restrict__ e_triple)
+    double*       __restrict__ e_triple,
+    double*                    vir)      // A1 (Nov 2026)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     double local_E = 0.0;
+    // A1: frame positions relative to H (the frame anchor), contracted with every gradient row written (VIR only)
+    [[maybe_unused]] double vacc[9] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
 
     if (tid < n) {
 
@@ -2676,6 +3060,8 @@ __global__ void k_hbonds(
                 double dgb_nb_x = gi_nb * drbnb_x, dgb_nb_y = gi_nb * drbnb_y, dgb_nb_z = gi_nb * drbnb_z;
                 gb_x += dgb_nb_x; gb_y += dgb_nb_y; gb_z += dgb_nb_z;
                 add_grad(grad, nb, -dga_nb_x - dgb_nb_x, -dga_nb_y - dgb_nb_y, -dga_nb_z - dgb_nb_z);
+                if constexpr (VIR)
+                    vir_outer(vacc, nbx - hx, nby - hy, nbz - hz, -dga_nb_x - dgb_nb_x, -dga_nb_y - dgb_nb_y, -dga_nb_z - dgb_nb_z);
             }
         }
 
@@ -2736,6 +3122,8 @@ __global__ void k_hbonds(
             // gangl_3body: row0=B, row1=C, row2=H
             gb_x += bterm_c3 * dedb_x; gb_y += bterm_c3 * dedb_y; gb_z += bterm_c3 * dedb_z;
             add_grad(grad, C_idx, bterm_c3 * (-deda_x), bterm_c3 * (-deda_y), bterm_c3 * (-deda_z));
+            if constexpr (VIR)
+                vir_outer(vacc, C_x - hx, C_y - hy, C_z - hz, bterm_c3 * (-deda_x), bterm_c3 * (-deda_y), bterm_c3 * (-deda_z));
             gh_x += bterm_c3 * (-dedc_x); gh_y += bterm_c3 * (-dedc_y); gh_z += bterm_c3 * (-dedc_z);
 
             // Torsion gradient: D-B-C-H for each neighbor of C
@@ -2751,10 +3139,12 @@ __global__ void k_hbonds(
 
                 double derivate[4][3];
                 double phi;
+                [[maybe_unused]] double Dx = 0.0, Dy = 0.0, Dz = 0.0;   // A1: D in the frame (VIR only)
                 if constexpr (PBC) {
                     double tx[4] = { 0.0, bx, C_x, hx }, ty[4] = { 0.0, by, C_y, hy }, tz[4] = { 0.0, bz, C_z, hz };
                     micPlace(cx, cy, cz, D_idx, C_x, C_y, C_z, tx[0], ty[0], tz[0]);   // D next to C
                     phi = dihedral_angle_grad(tx, ty, tz, 0, 1, 2, 3, derivate, true);
+                    if constexpr (VIR) { Dx = tx[0]; Dy = ty[0]; Dz = tz[0]; }
                 } else {
                     phi = dihedral_angle_grad(cx, cy, cz, D_idx, B, C_idx, H, derivate, true);
                 }
@@ -2773,6 +3163,10 @@ __global__ void k_hbonds(
                 add_grad(grad, D_idx, t_k * dij * derivate[0][0], t_k * dij * derivate[0][1], t_k * dij * derivate[0][2]);
                 gb_x += t_k * dij * derivate[1][0]; gb_y += t_k * dij * derivate[1][1]; gb_z += t_k * dij * derivate[1][2];
                 add_grad(grad, C_idx, t_k * dij * derivate[2][0], t_k * dij * derivate[2][1], t_k * dij * derivate[2][2]);
+                if constexpr (VIR) {
+                    vir_outer(vacc, Dx - hx, Dy - hy, Dz - hz, t_k * dij * derivate[0][0], t_k * dij * derivate[0][1], t_k * dij * derivate[0][2]);
+                    vir_outer(vacc, C_x - hx, C_y - hy, C_z - hz, t_k * dij * derivate[2][0], t_k * dij * derivate[2][1], t_k * dij * derivate[2][2]);
+                }
                 gh_x += t_k * dij * derivate[3][0]; gh_y += t_k * dij * derivate[3][1]; gh_z += t_k * dij * derivate[3][2];
             }
         }
@@ -2832,6 +3226,11 @@ __global__ void k_hbonds(
                 for (int ni = 0; ni < nbb_lp_c4; ++ni) {
                     int nb = nb_B_flat[nb_off + ni];
                     add_grad(grad, nb, -gnb_share_x, -gnb_share_y, -gnb_share_z);
+                    if constexpr (VIR) {
+                        double nbx, nby, nbz;
+                        micPlace(cx, cy, cz, nb, bx, by, bz, nbx, nby, nbz);   // neighbour next to B, as the LP vector
+                        vir_outer(vacc, nbx - hx, nby - hy, nbz - hz, -gnb_share_x, -gnb_share_y, -gnb_share_z);
+                    }
                 }
             }
         }
@@ -2895,6 +3294,10 @@ __global__ void k_hbonds(
     add_grad(grad, A, ga_x, ga_y, ga_z);
     add_grad(grad, B, gb_x, gb_y, gb_z);
     add_grad(grad, H, gh_x, gh_y, gh_z);
+    if constexpr (VIR) {   // H is the origin of the frame: its row drops out
+        vir_outer(vacc, ax - hx, ay - hy, az - hz, ga_x, ga_y, ga_z);
+        vir_outer(vacc, bx - hx, by - hy, bz - hz, gb_x, gb_y, gb_z);
+    }
 
     } // expo <= 15.0
     } // r_AB in range
@@ -2907,6 +3310,77 @@ __global__ void k_hbonds(
     } // tid < n
 
     blockReduceAddEnergy(local_E, energy);
+    if constexpr (VIR) blockReduceAddVirial(vacc, vir);
+}
+
+template <bool PBC>
+__global__ void k_hbonds(
+    int n,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const int*    __restrict__ idx_k,
+    const int*    __restrict__ elem_A,
+    const int*    __restrict__ elem_B,
+    const double* __restrict__ q_H,
+    const double* __restrict__ q_A,
+    const double* __restrict__ q_B,
+    const double* __restrict__ basicity_A,
+    const double* __restrict__ basicity_B,
+    const double* __restrict__ acidity_A,
+    const double* __restrict__ acidity_B,
+    const double* __restrict__ r_cut,
+    const int*    __restrict__ case_type,
+    const int*    __restrict__ nb_B_offset,
+    const int*    __restrict__ nb_B_count,
+    const int*    __restrict__ nb_B_flat,
+    const int*    __restrict__ acceptor_parent,
+    const int*    __restrict__ nb_C_offset,
+    const int*    __restrict__ nb_C_count,
+    const int*    __restrict__ nb_C_flat,
+    const double* __restrict__ repz_B,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    double*                    grad,
+    double*                    energy,
+    double*       __restrict__ e_triple)
+{
+    k_hbonds_body<PBC, false>(n, idx_i, idx_j, idx_k, elem_A, elem_B, q_H, q_A, q_B, basicity_A, basicity_B, acidity_A, acidity_B, r_cut, case_type, nb_B_offset, nb_B_count, nb_B_flat, acceptor_parent, nb_C_offset, nb_C_count, nb_C_flat, repz_B, cx, cy, cz, grad, energy, e_triple, nullptr);
+}
+
+__global__ __launch_bounds__(512) void k_hbonds_vir(
+    int n,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const int*    __restrict__ idx_k,
+    const int*    __restrict__ elem_A,
+    const int*    __restrict__ elem_B,
+    const double* __restrict__ q_H,
+    const double* __restrict__ q_A,
+    const double* __restrict__ q_B,
+    const double* __restrict__ basicity_A,
+    const double* __restrict__ basicity_B,
+    const double* __restrict__ acidity_A,
+    const double* __restrict__ acidity_B,
+    const double* __restrict__ r_cut,
+    const int*    __restrict__ case_type,
+    const int*    __restrict__ nb_B_offset,
+    const int*    __restrict__ nb_B_count,
+    const int*    __restrict__ nb_B_flat,
+    const int*    __restrict__ acceptor_parent,
+    const int*    __restrict__ nb_C_offset,
+    const int*    __restrict__ nb_C_count,
+    const int*    __restrict__ nb_C_flat,
+    const double* __restrict__ repz_B,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    double*                    grad,
+    double*                    energy,
+    double*       __restrict__ e_triple,
+    double*                    vir)      // A1 (Nov 2026)
+{
+    k_hbonds_body<true, true>(n, idx_i, idx_j, idx_k, elem_A, elem_B, q_H, q_A, q_B, basicity_A, basicity_B, acidity_A, acidity_B, r_cut, case_type, nb_B_offset, nb_B_count, nb_B_flat, acceptor_parent, nb_C_offset, nb_C_count, nb_C_flat, repz_B, cx, cy, cz, grad, energy, e_triple, vir);
 }
 
 // ============================================================================
@@ -4832,6 +5306,147 @@ __global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_d4_tail_atoms(
     blockReduceAddEnergy(local_E, energy);
 }
 
+// ============================================================================
+// Virial-only pair kernels (Claude Generated, Nov 2026, GPU_PERIODIC_GAPS A1)
+// One thread per pair, the pair vector and the factor fac = (dE/dr)/r exactly as the energy/gradient kernel forms
+// them (k_bonds, k_dispersion, k_repulsion, k_cn_chainrule, k_hb_alpha_chainrule; those kernels are not touched),
+// Xi -= fac d d^T into the nine slots `vir`. Launched after the step's gradient kernels on the main stream, only
+// when the virial is requested; they read the same inputs (CN, dc6dcn, dEdcn after the conversion, zz_hb).
+// ============================================================================
+__global__ __launch_bounds__(512) void k_bonds_virial(
+    int n, const int* __restrict__ idx_i, const int* __restrict__ idx_j, const double* __restrict__ r0,
+    const double* __restrict__ r0_base_i, const double* __restrict__ r0_base_j, const double* __restrict__ cnfak_i,
+    const double* __restrict__ cnfak_j, const double* __restrict__ rabshift, const double* __restrict__ ff,
+    const double* __restrict__ fc, const double* __restrict__ alpha, const int* __restrict__ nr_hb,
+    const double* __restrict__ hb_cn_H, const double* __restrict__ cx, const double* __restrict__ cy,
+    const double* __restrict__ cz, const double* __restrict__ cn, double* vir)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    double v[9] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    if (tid < n) {
+        const int i = idx_i[tid], j = idx_j[tid];
+        double dx = cx[i] - cx[j], dy = cy[i] - cy[j], dz = cz[i] - cz[j];
+        applyMIC(dx, dy, dz);
+        const double rij = sqrt(dx * dx + dy * dy + dz * dz);
+        if (rij >= 1e-10) {
+            double r0_ij;
+            if (cn && r0_base_i[tid] > 0.0) {
+                const double ra = r0_base_i[tid] + cnfak_i[tid] * cn[i];
+                const double rb = r0_base_j[tid] + cnfak_j[tid] * cn[j];
+                r0_ij = (ra + rb + rabshift[tid]) * ff[tid];
+            } else {
+                r0_ij = r0[tid];
+            }
+            const double dr = rij - r0_ij;
+            double alp = alpha[tid];
+            if (nr_hb[tid] >= 1)
+                alp = (-(1.0 - 0.9) * hb_cn_H[tid] + 1.0) * alpha[tid];
+            const double E = fc[tid] * exp(-alp * dr * dr);
+            const double dEdr = -2.0 * alp * dr * E;
+            vir_pair(v, dEdr / rij, dx, dy, dz);
+        }
+    }
+    blockReduceAddVirial(v, vir);
+}
+
+__global__ __launch_bounds__(512) void k_dispersion_virial(
+    int n, const int* __restrict__ idx_i, const int* __restrict__ idx_j, const double* __restrict__ C6,
+    const double* __restrict__ r4r2ij, const double* __restrict__ r0_sq, const double* __restrict__ zetac6,
+    const double* __restrict__ r_cut, const double* __restrict__ cx, const double* __restrict__ cy,
+    const double* __restrict__ cz, double* vir)
+{
+    double v[9] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    const int stride = gridDim.x * blockDim.x;
+    for (int tid = blockIdx.x * blockDim.x + threadIdx.x; tid < n; tid += stride) {
+        const int i = idx_i[tid], j = idx_j[tid];
+        double dx = cx[i] - cx[j], dy = cy[i] - cy[j], dz = cz[i] - cz[j];
+        applyMIC(dx, dy, dz);
+        const double r2 = dx * dx + dy * dy + dz * dz;
+        const double rij = sqrt(r2);
+        if (rij <= r_cut[tid] && rij >= 1e-10) {
+            const double r4 = r2 * r2, r6 = r4 * r2, r0s = r0_sq[tid];
+            const double r0_6 = r0s * r0s * r0s;
+            const double t6 = 1.0 / (r6 + r0_6);
+            const double t8 = 1.0 / (r6 * r2 + r0_6 * r0s);
+            const double d6 = -6.0 * r4 * t6 * t6;
+            const double d8 = -8.0 * r4 * r2 * t8 * t8;
+            const double dEdr = -C6[tid] * zetac6[tid] * (d6 + 2.0 * r4r2ij[tid] * d8) * rij;
+            vir_pair(v, dEdr / rij, dx, dy, dz);
+        }
+    }
+    blockReduceAddVirial(v, vir);
+}
+
+__global__ __launch_bounds__(512) void k_repulsion_virial(
+    int n, const int* __restrict__ idx_i, const int* __restrict__ idx_j, const double* __restrict__ alpha,
+    const double* __restrict__ repab, const double* __restrict__ r_cut, const double* __restrict__ cx,
+    const double* __restrict__ cy, const double* __restrict__ cz, double* vir)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    double v[9] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    if (tid < n) {
+        const int i = idx_i[tid], j = idx_j[tid];
+        double dx = cx[i] - cx[j], dy = cy[i] - cy[j], dz = cz[i] - cz[j];
+        applyMIC(dx, dy, dz);
+        const double rij = sqrt(dx * dx + dy * dy + dz * dz);
+        if (rij <= r_cut[tid] && rij >= 1e-8) {
+            const double alp_r = alpha[tid] * (rij * sqrt(rij));
+            if (!isnan(alp_r) && !isnan(repab[tid]) && alp_r <= 700.0) {
+                const double base_E = repab[tid] * exp(-alp_r) / rij;
+                const double dEdr = -base_E / rij - 1.5 * alpha[tid] * sqrt(rij) * base_E;
+                vir_pair(v, dEdr / rij, dx, dy, dz);
+            }
+        }
+    }
+    blockReduceAddVirial(v, vir);
+}
+
+/// CN chain rule (k_cn_chainrule): fac = dS/dr / r (dEdcn_i dlogdcn_i + dEdcn_j dlogdcn_j), all CN-dependent terms
+__global__ __launch_bounds__(512) void k_cn_chainrule_virial(
+    int n_pairs, const int* __restrict__ idx_i, const int* __restrict__ idx_j, const double* __restrict__ rcov_sum,
+    const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+    const double* __restrict__ dEdcn, const double* __restrict__ dlogdcn, double kn, double* vir)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    double v[9] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    if (tid < n_pairs) {
+        const int i = idx_i[tid], j = idx_j[tid];
+        double dx = cx[i] - cx[j], dy = cy[i] - cy[j], dz = cz[i] - cz[j];
+        applyMIC(dx, dy, dz);
+        const double rij = sqrt(dx * dx + dy * dy + dz * dz);
+        if (rij >= 1e-10) {
+            const double rcov = rcov_sum[tid];
+            const double dr = (rij - rcov) / rcov;
+            const double dSdr = kn * 0.5641895835477563 * exp(-kn * kn * dr * dr) / rcov;
+            vir_pair(v, dSdr / rij * (dEdcn[i] * dlogdcn[i] + dEdcn[j] * dlogdcn[j]), dx, dy, dz);
+        }
+    }
+    blockReduceAddVirial(v, vir);
+}
+
+/// HB-CN modulation of the X-H bonds (k_hb_alpha_chainrule): fac = zz_H dS/dr / r; counted with the bond term (CPU)
+__global__ __launch_bounds__(512) void k_hb_alpha_virial(
+    int n_pairs, const int* __restrict__ idx_H, const int* __restrict__ idx_B, const double* __restrict__ rcov_sum,
+    const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+    const double* __restrict__ zz_hb, double kn, double* vir)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    double v[9] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    if (tid < n_pairs) {
+        const int H = idx_H[tid], B = idx_B[tid];
+        double dx = cx[H] - cx[B], dy = cy[H] - cy[B], dz = cz[H] - cz[B];
+        applyMIC(dx, dy, dz);
+        const double rij = sqrt(dx * dx + dy * dy + dz * dz);
+        if (rij >= 1e-10) {
+            const double rcov = rcov_sum[tid];
+            const double dr = (rij - rcov) / rcov;
+            const double dSdr = -kn * 0.5641895835477563 * exp(-kn * kn * dr * dr) / rcov;
+            vir_pair(v, zz_hb[H] * dSdr / rij, dx, dy, dz);
+        }
+    }
+    blockReduceAddVirial(v, vir);
+}
+
 // Claude Generated (Oct 2026): host access to d_gfnff_fix_bad, which lives in this translation unit only.
 void gfnffFixBadReadAsync(int* h_pinned, cudaStream_t stream)
 {
@@ -4851,38 +5466,57 @@ void gfnffFixBadReset()
 // instantiated here (nvcc gives the host stubs of template kernels hidden visibility, so another translation unit
 // cannot launch them); pbc false launches the former kernel, true the image-frame variant.
 // ============================================================================
-void launch_k_angles(bool pbc, dim3 grid, dim3 block, cudaStream_t stream, int n, const int* idx_i, const int* idx_j, const int* idx_k, const int* ati, const int* atj, const int* atk, const double* fc, const double* theta0, const double* cx, const double* cy, const double* cz, const double* rcov_d3, double* grad, double* energy)
+void launch_k_angles(bool pbc, dim3 grid, dim3 block, cudaStream_t stream, int n, const int* idx_i, const int* idx_j, const int* idx_k, const int* ati, const int* atj, const int* atk, const double* fc, const double* theta0, const double* cx, const double* cy, const double* cz, const double* rcov_d3, double* grad, double* energy, double* vir)
 {
-    if (pbc) k_angles<true><<<grid, block, 0, stream>>>(n, idx_i, idx_j, idx_k, ati, atj, atk, fc, theta0, cx, cy, cz, rcov_d3, grad, energy);
+    // A1 (Nov 2026): vir != nullptr (only with a cell) launches the virial instantiation
+    if (pbc && vir) k_angles_vir<<<grid, block, 0, stream>>>(n, idx_i, idx_j, idx_k, ati, atj, atk, fc, theta0, cx, cy, cz, rcov_d3, grad, energy, vir);
+    else if (pbc) k_angles<true><<<grid, block, 0, stream>>>(n, idx_i, idx_j, idx_k, ati, atj, atk, fc, theta0, cx, cy, cz, rcov_d3, grad, energy);
     else     k_angles<false><<<grid, block, 0, stream>>>(n, idx_i, idx_j, idx_k, ati, atj, atk, fc, theta0, cx, cy, cz, rcov_d3, grad, energy);
 }
 
-void launch_k_dihedrals(bool pbc, dim3 grid, dim3 block, cudaStream_t stream, int n, const int* idx_i, const int* idx_j, const int* idx_k, const int* idx_l, const int* ati, const int* atj, const int* atk, const int* atl, const double* V, const double* phi0, const double* n_period, const int* is_nci, const double* cx, const double* cy, const double* cz, const double* rcov_d3_unused, double* grad, double* energy)
+void launch_k_dihedrals(bool pbc, dim3 grid, dim3 block, cudaStream_t stream, int n, const int* idx_i, const int* idx_j, const int* idx_k, const int* idx_l, const int* ati, const int* atj, const int* atk, const int* atl, const double* V, const double* phi0, const double* n_period, const int* is_nci, const double* cx, const double* cy, const double* cz, const double* rcov_d3_unused, double* grad, double* energy, double* vir)
 {
-    if (pbc) k_dihedrals<true><<<grid, block, 0, stream>>>(n, idx_i, idx_j, idx_k, idx_l, ati, atj, atk, atl, V, phi0, n_period, is_nci, cx, cy, cz, rcov_d3_unused, grad, energy);
+    // A1 (Nov 2026): vir != nullptr (only with a cell) launches the virial instantiation
+    if (pbc && vir) k_dihedrals_vir<<<grid, block, 0, stream>>>(n, idx_i, idx_j, idx_k, idx_l, ati, atj, atk, atl, V, phi0, n_period, is_nci, cx, cy, cz, rcov_d3_unused, grad, energy, vir);
+    else if (pbc) k_dihedrals<true><<<grid, block, 0, stream>>>(n, idx_i, idx_j, idx_k, idx_l, ati, atj, atk, atl, V, phi0, n_period, is_nci, cx, cy, cz, rcov_d3_unused, grad, energy);
     else     k_dihedrals<false><<<grid, block, 0, stream>>>(n, idx_i, idx_j, idx_k, idx_l, ati, atj, atk, atl, V, phi0, n_period, is_nci, cx, cy, cz, rcov_d3_unused, grad, energy);
 }
 
-void launch_k_inversions(bool pbc, dim3 grid, dim3 block, cudaStream_t stream, int n, const int* idx_i, const int* idx_j, const int* idx_k, const int* idx_l, const int* ati, const int* atj, const int* atk, const int* atl, const double* fc, const double* omega0, const double* C0, const double* C1, const double* C2, const int* potential_type, const double* cx, const double* cy, const double* cz, double* grad, double* energy)
+void launch_k_inversions(bool pbc, dim3 grid, dim3 block, cudaStream_t stream, int n, const int* idx_i, const int* idx_j, const int* idx_k, const int* idx_l, const int* ati, const int* atj, const int* atk, const int* atl, const double* fc, const double* omega0, const double* C0, const double* C1, const double* C2, const int* potential_type, const double* cx, const double* cy, const double* cz, double* grad, double* energy, double* vir)
 {
-    if (pbc) k_inversions<true><<<grid, block, 0, stream>>>(n, idx_i, idx_j, idx_k, idx_l, ati, atj, atk, atl, fc, omega0, C0, C1, C2, potential_type, cx, cy, cz, grad, energy);
+    // A1 (Nov 2026): vir != nullptr (only with a cell) launches the virial instantiation
+    if (pbc && vir) k_inversions_vir<<<grid, block, 0, stream>>>(n, idx_i, idx_j, idx_k, idx_l, ati, atj, atk, atl, fc, omega0, C0, C1, C2, potential_type, cx, cy, cz, grad, energy, vir);
+    else if (pbc) k_inversions<true><<<grid, block, 0, stream>>>(n, idx_i, idx_j, idx_k, idx_l, ati, atj, atk, atl, fc, omega0, C0, C1, C2, potential_type, cx, cy, cz, grad, energy);
     else     k_inversions<false><<<grid, block, 0, stream>>>(n, idx_i, idx_j, idx_k, idx_l, ati, atj, atk, atl, fc, omega0, C0, C1, C2, potential_type, cx, cy, cz, grad, energy);
 }
 
-void launch_k_storsions(bool pbc, dim3 grid, dim3 block, cudaStream_t stream, int n, const int* idx_i, const int* idx_j, const int* idx_k, const int* idx_l, const double* erefhalf, const double* cx, const double* cy, const double* cz, double* grad, double* energy)
+void launch_k_storsions(bool pbc, dim3 grid, dim3 block, cudaStream_t stream, int n, const int* idx_i, const int* idx_j, const int* idx_k, const int* idx_l, const double* erefhalf, const double* cx, const double* cy, const double* cz, double* grad, double* energy, double* vir)
 {
-    if (pbc) k_storsions<true><<<grid, block, 0, stream>>>(n, idx_i, idx_j, idx_k, idx_l, erefhalf, cx, cy, cz, grad, energy);
+    // A1 (Nov 2026): vir != nullptr (only with a cell) launches the virial instantiation
+    if (pbc && vir) k_storsions_vir<<<grid, block, 0, stream>>>(n, idx_i, idx_j, idx_k, idx_l, erefhalf, cx, cy, cz, grad, energy, vir);
+    else if (pbc) k_storsions<true><<<grid, block, 0, stream>>>(n, idx_i, idx_j, idx_k, idx_l, erefhalf, cx, cy, cz, grad, energy);
     else     k_storsions<false><<<grid, block, 0, stream>>>(n, idx_i, idx_j, idx_k, idx_l, erefhalf, cx, cy, cz, grad, energy);
 }
 
-void launch_k_xbonds(bool pbc, dim3 grid, dim3 block, cudaStream_t stream, int n, const int* idx_i, const int* idx_j, const int* idx_k, const int* elem_A, const int* elem_B, const double* q_X, const double* q_B, const double* acidity_X, const double* r_cut, const double* cx, const double* cy, const double* cz, double* grad, double* energy)
+void launch_k_xbonds(bool pbc, dim3 grid, dim3 block, cudaStream_t stream, int n, const int* idx_i, const int* idx_j, const int* idx_k, const int* elem_A, const int* elem_B, const double* q_X, const double* q_B, const double* acidity_X, const double* r_cut, const double* cx, const double* cy, const double* cz, double* grad, double* energy, double* vir)
 {
-    if (pbc) k_xbonds<true><<<grid, block, 0, stream>>>(n, idx_i, idx_j, idx_k, elem_A, elem_B, q_X, q_B, acidity_X, r_cut, cx, cy, cz, grad, energy);
+    // A1 (Nov 2026): vir != nullptr (only with a cell) launches the virial instantiation
+    if (pbc && vir) k_xbonds_vir<<<grid, block, 0, stream>>>(n, idx_i, idx_j, idx_k, elem_A, elem_B, q_X, q_B, acidity_X, r_cut, cx, cy, cz, grad, energy, vir);
+    else if (pbc) k_xbonds<true><<<grid, block, 0, stream>>>(n, idx_i, idx_j, idx_k, elem_A, elem_B, q_X, q_B, acidity_X, r_cut, cx, cy, cz, grad, energy);
     else     k_xbonds<false><<<grid, block, 0, stream>>>(n, idx_i, idx_j, idx_k, elem_A, elem_B, q_X, q_B, acidity_X, r_cut, cx, cy, cz, grad, energy);
 }
 
-void launch_k_hbonds(bool pbc, dim3 grid, dim3 block, cudaStream_t stream, int n, const int* idx_i, const int* idx_j, const int* idx_k, const int* elem_A, const int* elem_B, const double* q_H, const double* q_A, const double* q_B, const double* basicity_A, const double* basicity_B, const double* acidity_A, const double* acidity_B, const double* r_cut, const int* case_type, const int* nb_B_offset, const int* nb_B_count, const int* nb_B_flat, const int* acceptor_parent, const int* nb_C_offset, const int* nb_C_count, const int* nb_C_flat, const double* repz_B, const double* cx, const double* cy, const double* cz, double* grad, double* energy, double* e_triple)
+void launch_k_hbonds(bool pbc, dim3 grid, dim3 block, cudaStream_t stream, int n, const int* idx_i, const int* idx_j, const int* idx_k, const int* elem_A, const int* elem_B, const double* q_H, const double* q_A, const double* q_B, const double* basicity_A, const double* basicity_B, const double* acidity_A, const double* acidity_B, const double* r_cut, const int* case_type, const int* nb_B_offset, const int* nb_B_count, const int* nb_B_flat, const int* acceptor_parent, const int* nb_C_offset, const int* nb_C_count, const int* nb_C_flat, const double* repz_B, const double* cx, const double* cy, const double* cz, double* grad, double* energy, double* e_triple, double* vir)
 {
-    if (pbc) k_hbonds<true><<<grid, block, 0, stream>>>(n, idx_i, idx_j, idx_k, elem_A, elem_B, q_H, q_A, q_B, basicity_A, basicity_B, acidity_A, acidity_B, r_cut, case_type, nb_B_offset, nb_B_count, nb_B_flat, acceptor_parent, nb_C_offset, nb_C_count, nb_C_flat, repz_B, cx, cy, cz, grad, energy, e_triple);
+    // A1 (Nov 2026): vir != nullptr (only with a cell) launches the virial instantiation
+    if (pbc && vir) k_hbonds_vir<<<grid, block, 0, stream>>>(n, idx_i, idx_j, idx_k, elem_A, elem_B, q_H, q_A, q_B, basicity_A, basicity_B, acidity_A, acidity_B, r_cut, case_type, nb_B_offset, nb_B_count, nb_B_flat, acceptor_parent, nb_C_offset, nb_C_count, nb_C_flat, repz_B, cx, cy, cz, grad, energy, e_triple, vir);
+    else if (pbc) k_hbonds<true><<<grid, block, 0, stream>>>(n, idx_i, idx_j, idx_k, elem_A, elem_B, q_H, q_A, q_B, basicity_A, basicity_B, acidity_A, acidity_B, r_cut, case_type, nb_B_offset, nb_B_count, nb_B_flat, acceptor_parent, nb_C_offset, nb_C_count, nb_C_flat, repz_B, cx, cy, cz, grad, energy, e_triple);
     else     k_hbonds<false><<<grid, block, 0, stream>>>(n, idx_i, idx_j, idx_k, elem_A, elem_B, q_H, q_A, q_B, basicity_A, basicity_B, acidity_A, acidity_B, r_cut, case_type, nb_B_offset, nb_B_count, nb_B_flat, acceptor_parent, nb_C_offset, nb_C_count, nb_C_flat, repz_B, cx, cy, cz, grad, energy, e_triple);
+}
+
+// A1 (Nov 2026): BATM launch (template on VIR, host stub visibility as above)
+void launch_k_batm(double* vir, dim3 grid, dim3 block, cudaStream_t stream, int n, const int* idx_i, const int* idx_j, const int* idx_k, const double* zb3atm_i, const double* zb3atm_j, const double* zb3atm_k, const double* cx, const double* cy, const double* cz, const double* topo_charges, double* grad, double* energy)
+{
+    if (vir) k_batm_vir<<<grid, block, 0, stream>>>(n, idx_i, idx_j, idx_k, zb3atm_i, zb3atm_j, zb3atm_k, cx, cy, cz, topo_charges, grad, energy, vir);
+    else     k_batm<<<grid, block, 0, stream>>>(n, idx_i, idx_j, idx_k, zb3atm_i, zb3atm_j, zb3atm_k, cx, cy, cz, topo_charges, grad, energy);
 }

@@ -65,10 +65,12 @@
 // 24 = Nov 2026, WP-PERIODIC-XTB A1r/B1 (GpuScfBackend::setEigenRefinement, d4CovalentCnPeriodic).
 // 25 = Nov 2026, merge of spin polarisation on CUDA (GpuScfBackend spin loop, finalizeSpin) and the EEQ sytrf solver
 //      (Core symbol EEQSolver::hostSytrsUpper, EEQSolveMethod::Sytrf before Auto).
+// 26 = Nov 2026, GPU_PERIODIC_GAPS A1: GFN-FF device virial (core symbol FFWorkspace::setHybridVirial;
+//      FFWorkspace::evaluateEwaldCoulomb now also fills the Ewald virial; GFNFFGpuMethodImpl gained members).
 
 #pragma once
 
-#define CURCUMA_GPU_PLUGIN_ABI_VERSION 25
+#define CURCUMA_GPU_PLUGIN_ABI_VERSION 26
 
 /// Defines `extern "C" int curcuma_<backend>_abi_version()` in a plugin entry file (use at file scope).
 #define CURCUMA_GPU_PLUGIN_DEFINE_ABI_VERSION(backend)                                                                \

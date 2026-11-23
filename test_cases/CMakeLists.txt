@@ -611,6 +611,20 @@ endif()
 add_test(NAME gfnff_gpu_pbc_hybrid COMMAND test_gfnff_gpu_pbc_hybrid WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 set_tests_properties(gfnff_gpu_pbc_hybrid PROPERTIES TIMEOUT 1800 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;pbc" SKIP_RETURN_CODE 77)
 
+# Claude Generated (Nov 2026, GPU_PERIODIC_GAPS A1): atomic virial of the CUDA hybrid against the CPU per term, FD gate
+# under cell scaling, bitwise repeat, cell update, NPT smoke test (SimpleMD Berendsen CPU vs GPU). 77 without CUDA.
+add_executable(test_gfnff_gpu_pbc_virial unit/test_gfnff_gpu_pbc_virial.cpp)
+target_link_libraries(test_gfnff_gpu_pbc_virial curcuma_core test_molecule_registry)
+if(USE_CUDA)
+    target_link_libraries(test_gfnff_gpu_pbc_virial curcuma_cuda CUDA::cudart)
+    target_compile_definitions(test_gfnff_gpu_pbc_virial PRIVATE USE_CUDA)
+endif()
+if(USE_PCH)
+    target_precompile_headers(test_gfnff_gpu_pbc_virial REUSE_FROM curcuma_core)
+endif()
+add_test(NAME gfnff_gpu_pbc_virial COMMAND test_gfnff_gpu_pbc_virial WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(gfnff_gpu_pbc_virial PROPERTIES TIMEOUT 1800 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;pbc;simplemd" SKIP_RETURN_CODE 77)
+
 if(USE_CUDA)
 
     # Claude Generated (March 2026): GPU analytical vs numerical gradient test

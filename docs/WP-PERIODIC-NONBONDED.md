@@ -1876,3 +1876,78 @@ the 9 known errors only.
   Datei schlaegt CLI"); a RATTLE restart takes its constraint list from the file; `dump_frequency 0` and the other step
   moduli are not guarded. Not tested: Nose-Hoover after a restart, remove_com_mode 2/3 after a restart, GPU MD. Human
   production testing pending.
+
+## A1-GPU atomic virial and NPT of the CUDA periodic hybrid (2026-11-23, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+On `feature/gfnff-gpu-virial` (base `94303824`, devel/methods). Item A1 of [GPU_PERIODIC_GAPS.md](GPU_PERIODIC_GAPS.md):
+`-md -compute_pressure true` and `-barostat berendsen|crescale` run with `-gpu cuda -gfnff.gpu_periodic true` (S2
+hybrid). The virial is the N1 one (atomic, fixed fractional coordinates, every term).
+
+### Where each part comes from
+
+| part (FFVirialComponents) | evaluated by |
+|---|---|
+| bond (incl. the HB-CN modulation of the X-H bonds), D4 pair, bonded and non-bonded repulsion | separate device kernels `k_bonds_virial`, `k_hb_alpha_virial`, `k_dispersion_virial`, `k_repulsion_virial` (pair vector and dE/dr formed as in the energy kernels, which are untouched) |
+| angle, dihedral (incl. extra torsions), inversion, sTors, HB (frame on H, every gradient row with its frame position: A, B, neighbours of B, C, D, LP neighbours), XB (frame on X), BATM (plain positions, as the energy) | VIR instantiation of the kernel body: `k_*_body<PBC, VIR>` is a `__forceinline__` device function, `k_*<PBC>` (former signature) calls it with VIR false, `k_*_vir` with VIR true |
+| CN chain rule (bond dr0/dCN, dC6/dCN incl. the D4 tail, TERM 1b chi(CN)) | `k_cn_chainrule_virial` with the final device dE/dCN: one tensor, stored in `cn_bond` (`cn_dispersion`, `cn_coulomb` zero; the device keeps one dE/dCN vector) |
+| Coulomb Ewald real + reciprocal pair part, background terms | host, `FFWorkspace::evaluateEwaldCoulomb` (the CPU passes `realSpaceVirialRange`, `reciprocalVirialRange`, `backgroundVirial`) |
+| D4 tail `E_tail I`, V-LRC `(3 E6 + 5 E8)/3 I` | device tail energy; E8 from a second `k_d4_tail_atoms` launch with pref6 = 0 (no dE/dCN) |
+
+Reduction: per thread nine doubles, rounded to 2^-48 Eh and summed as integers (warp, block, one atomic per block and
+component; `blockReduceAddVirial`), so the result does not depend on thread order (docs/GPU_REPRODUCIBILITY.md). Slot
+layout `cuda/gfnff_virial_slots.h`. Assembly: `GFNFFGpuMethodImpl::assembleHybridVirial()` ->
+`FFWorkspace::setHybridVirial()`, read through `GFNFF::virial()` as on the CPU. With the virial on, the CUDA graphs are
+not used; with it off every launch is the former one.
+
+Cell changes: `EnergyCalculator::setUnitCell` -> `GFNFF::updateCell` on the host instance (N2). The wrapper
+(`followHostCellChanges()`) sees the changed `cellUpdateCount()` or frozen D4 radius at the next call: device tail
+tables (1/V, r_c), CN-derivative pair list, graphs; the cell symbols are uploaded every step anyway; the host list
+decisions (HB/XB refresh, repulsion, D4) see the rebuild flag and the device rebuilds follow; the wrapper clears the
+flag after them (`GFNFF::acknowledgeListsRebuilt()`, the CPU does it in `Calculation`). `SimpleMD::setupBarostat` accepts
+`-gpu` when the method is GFN-FF with a periodic energy (the hybrid); `coulomb_ewald false` (S1, not periodic) stays
+refused. Plugin ABI 25 -> 26.
+
+### Finding on the way: an added kernel parameter changes the last bits
+
+A first version added the virial pointer as a last parameter of the six templated kernels. Without a cell the GPU
+gradients then differed from the base build in the last digits on 5 of 6 structures (energy 1e-14 Eh). The SASS of the
+`false` instantiations had another instruction mix (k_dihedrals DADD 96 -> 75, k_hbonds DMUL 717 -> 714,
+k_storsions DFMA 202 -> 200) although no statement of that path changed. Now the kernels keep their former signature and
+call a shared body: `cuobjdump -sass` of the plugin, all 305 functions of the base plugin instruction-for-instruction
+identical (12 new functions).
+
+### Acceptance (thresholds fixed beforehand)
+
+| check | result |
+|---|---|
+| ctest `gfnff_gpu_pbc_virial` (a): GPU vs CPU per term (14 parts + total + pressure virial) and tensor component; 20 / 60 H2O, H3O+(H2O)2 + 18 H2O (Q +1), caffeine, acetic dimer + F-I...pyridine (XB) in L 44 Bohr | worst 5.0e-13 Eh (limit 1e-7) |
+| same, W1 frames and boxes (4 threads, production settings): 432 H2O (equilibrated frame and `box432_s1`), 864, 1728 H2O, urea400 + water1000 with an assigned cell L = 42 A (not relaxed) | 3.6e-12 / 4.2e-12 / 3.4e-12 / 2.7e-11 / 2.8e-11 Eh; total and pressure virial <= 4.8e-11 Eh; dE <= 2.7e-11 Eh, dG <= 8.7e-14 Eh/A |
+| (b) FD gate of the hybrid energy, fresh GPU instance per strain, eps 1e-5 / 2e-5 Richardson, isotropic and axial eps_xx, eps_yy, eps_zz; 20 H2O and the XB composite | <= 5.6e-9 Eh (limit 1e-7) |
+| (c) second GPU instance (60 H2O, 4 threads): energy, gradient, every tensor; energy and gradient with the virial request vs without | bit for bit (both) |
+| (d) `updateCell` (x1.001) on the GPU instance vs a fresh GPU instance on the scaled box | energy, gradient and virial: difference 0 (limits 1e-10 Eh, 1e-10 Eh/A, 1e-9 Eh) |
+| (e) SimpleMD Berendsen 20 steps, 60 atoms, CPU vs `-gpu cuda` (no fallback counted) | 10 couplings each, cell edge equal to 1e-9 A, P 647.0860 bar both |
+| CLI NPT 432 H2O (W1 frame, 20 steps, CSVR 300 K, Berendsen every 2 steps, 4 threads) | 21 status lines: Epot (6 decimals), P (2), V (3), rho (5), L (5) identical CPU vs GPU |
+| no cell, 6 structures x gfnff/gfn1/gfn2 x 1/4 threads + 2 MD, `-sp -dump_gradient` against `merge-devel` builds of the same options | CPU 38/38 lines identical; CUDA 38/38 identical |
+
+Note on the reference builds: the first comparison failed for every method including gfn2, because the build
+directories of this branch had been configured with the options as one quoted string (zsh does not split `$OPTS`),
+i.e. without MKL/AVX/march native. With the options as separate words the comparison above is clean.
+
+### Time per NPT step (ms; CLI, 4 host threads, Berendsen every 2 steps, difference of 60- and 20-step runs, n = 3; RTX 5080)
+
+| box (W1 frame) | CPU | GPU hybrid | gain |
+|---|---|---|---|
+| 432 H2O (1296 atoms) | 48.0 / 44.9 / 48.0 | 26.3 / 28.2 / 30.6 | 1.7x |
+| 864 H2O (2592) | 117.9 / 119.5 / 119.7 | 69.2 / 71.1 / 67.8 | 1.7x |
+| 1728 H2O (5184) | 316.2 / 317.1 / 319.2 | 189.2 / 188.5 / 186.5 | 1.7x |
+
+216 H2O (`water216-box.sc-s1`, L 18.63 A = 35.2 Bohr) cannot be run with a cell: the HB/XB search radius needs L > 42.43
+Bohr (refused by the cell check, CPU and GPU alike). The host EEQ and Ewald (S3/S4, item A2) remain the main cost.
+
+### Not done / not tested
+
+- ROCm (B3; the wrapper code is guarded by `has_periodic_local_terms`, not compiled here), multi-GPU (off with a
+  cell), FP32 mixed precision with the virial (BATM takes the FP64 kernel, repulsion keeps its FP32 gradient but an FP64
+  virial), the CN chain-rule split per term on the device, `topology_mode react` with the virial, charged boxes under
+  the ensemble charge model (CPU fallback), a long NPT run on the GPU (only 20 steps here), C-rescale on the GPU (shares
+  the code path, not run). Human production testing pending.

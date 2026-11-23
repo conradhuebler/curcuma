@@ -466,6 +466,16 @@ public:
     void setCoulombPairOnDevice(bool v) { m_coulomb_pair_on_device = v; }
     bool coulombPairOnDevice() const { return m_coulomb_pair_on_device; }
 
+    /// Claude Generated (Nov 2026, GPU_PERIODIC_GAPS A1): atomic virial of the device terms with a cell. On: the
+    /// gradient calls launch the VIR instantiations of the multi-atom kernels and the *_virial pair kernels into
+    /// GFNFF_VIR_BUFFER fixed-point slots (gfnff_kernels.cuh); the CUDA graphs are not used. Off (default): the
+    /// launches and every kernel are those of before. Toggling invalidates the captured graphs.
+    void setWantVirial(bool v);
+    bool wantVirial() const { return m_want_virial; }
+    /// After a gradient step with the virial on: the GFNFF_VIR_BUFFER values in Eh (synchronous copy). False when
+    /// the last step carried no virial.
+    bool downloadVirial(std::vector<double>& out);
+
     /// Claude Generated (April 2026): Set unit cell for PBC minimum image convention.
     /// cell_bohr: 3×3 matrix (column-major, in Bohr). Uploads to GPU constant memory.
     /// S1 (Nov 2026): the constant symbols are per device and process-wide, so the call is made before every
@@ -785,6 +795,8 @@ private:
     bool m_hbond_enabled      = true;
     bool m_repulsion_enabled  = true;
     bool m_coulomb_enabled    = true;
+    bool m_want_virial = false;             ///< A1 (Nov 2026): device virial requested (setWantVirial)
+    bool m_virial_ready = false;            ///< A1: the last launchChargeDependentAndFinish(true) filled d_virial
     bool m_coulomb_pair_on_device = true;   ///< S2 (Nov 2026): device pair Coulomb; false in the periodic hybrid (host Ewald)
     int  m_verbosity          = 0;
 

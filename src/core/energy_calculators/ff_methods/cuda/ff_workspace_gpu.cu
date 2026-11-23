@@ -812,6 +812,7 @@ struct FFWorkspaceGPUImpl {
         N_ENERGY_SLOTS = 15
     };
     CudaBuffer<double> d_energies;      ///< [N_ENERGY_SLOTS] all per-term energies
+    CudaBuffer<double> d_virial;        ///< A1 (Nov 2026): [GFNFF_VIR_BUFFER] fixed-point virial slots (gfnff_kernels.cuh)
 
     // Nov 2026 (S1): homogeneous D4 tail (setDispersionTail): per-atom element slot, per-slot tables, W[K*MAX_REF]
     bool               tail_active = false;
@@ -1412,6 +1413,7 @@ FFWorkspaceGPU::FFWorkspaceGPU(const GFNFFParameterSet& params,
 
     // Per-term energy accumulators — single contiguous buffer
     m_impl->d_energies.alloc(FFWorkspaceGPUImpl::N_ENERGY_SLOTS);
+    m_impl->d_virial.alloc(GFNFF_VIR_BUFFER);   // A1: 81 + 1 doubles, used only with setWantVirial(true)
 
     // dEdcn snapshot — always needed: dEdcnTotal() is public API (Coulomb chain-rule)
     m_impl->d_dEdcn_snapshot.alloc(natoms);
@@ -3216,7 +3218,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     // Claude Generated (May 2026): m_record_kernel_timings disables graph replay so
     // per-stream events get recorded each step (graph-replay events don't update times).
     if (impl.m_graph_phase1_valid && !need_snapshots && !force_single_stream
-        && !m_record_kernel_timings) {
+        && !m_record_kernel_timings && !m_want_virial) {
         cudaGraphLaunch(impl.m_graph_exec_phase1, stream);
         return;  // GPU executes the graph asynchronously; CPU proceeds to EEQ
     }
@@ -3224,7 +3226,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     // === CAPTURE START: on the first topology-stable step, record this execution ===
     bool capturing = false;
     if (!impl.m_graph_phase1_valid && !need_snapshots && !force_single_stream
-        && !m_record_kernel_timings) {
+        && !m_record_kernel_timings && !m_want_virial) {
         cudaError_t cap_err = cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal);
         capturing = (cap_err == cudaSuccess);
     }
@@ -3237,6 +3239,11 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     cudaMemsetAsync(impl.d_dEdcn.ptr,  0, N*sizeof(double),       stream);
     cudaMemsetAsync(impl.d_energies.ptr, 0,
                     FFWorkspaceGPUImpl::N_ENERGY_SLOTS * sizeof(double), stream);
+    // A1 (Nov 2026): virial slots of this step (only on request; the kernels write them only then)
+    const bool want_vir = m_want_virial && gradient && impl.pbc_active;
+    if (want_vir)
+        cudaMemsetAsync(impl.d_virial.ptr, 0, GFNFF_VIR_BUFFER * sizeof(double), stream);
+    auto vir_slot = [&](int s) -> double* { return want_vir ? impl.d_virial.ptr + 9 * s : nullptr; };
 
     // =========================================================================
     // 2. Upload CN (NOT EEQ charges — those come later)
@@ -3432,7 +3439,8 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
             impl.coords.d_z.ptr,
             (double*)nullptr,
             impl.d_grad.ptr,
-            &impl.d_energies.ptr[impl.E_ANGLE]);
+            &impl.d_energies.ptr[impl.E_ANGLE],
+            vir_slot(VIR_ANGLE));
     }
     // Per-kernel snapshot: after k_angles (Claude Generated April 2026)
     if (gradient && impl.d_grad_after_angles.ptr) {
@@ -3456,7 +3464,8 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
             impl.coords.d_z.ptr,
             (double*)nullptr,
             impl.d_grad.ptr,
-            &impl.d_energies.ptr[impl.E_DIHED]);
+            &impl.d_energies.ptr[impl.E_DIHED],
+            vir_slot(VIR_DIHED));
     }
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
@@ -3474,7 +3483,8 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
             impl.coords.d_y.ptr,
             impl.coords.d_z.ptr,
             impl.d_grad.ptr,
-            &impl.d_energies.ptr[impl.E_INV]);
+            &impl.d_energies.ptr[impl.E_INV],
+            vir_slot(VIR_INV));
     }
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
@@ -3488,7 +3498,8 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
             impl.coords.d_y.ptr,
             impl.coords.d_z.ptr,
             impl.d_grad.ptr,
-            &impl.d_energies.ptr[impl.E_STORS]);
+            &impl.d_energies.ptr[impl.E_STORS],
+            vir_slot(VIR_STORS));
     }
     if (gradient && impl.hb_alpha.n > 0 && impl.d_zz_hb.ptr) {
         constexpr double hb_kn = 27.5;
@@ -3520,7 +3531,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
         LaunchConfig cfg = getLaunchConfig(impl.batm.n, m_block_size);
-        if (impl.use_mixed_precision) {
+        if (impl.use_mixed_precision && !want_vir) {   // A1: the virial takes the FP64 kernel
             k_batm_mixed<<<cfg.gridSize, cfg.blockSize, 0, sC>>>(
                 impl.batm.n,
                 impl.batm.idx_i.ptr, impl.batm.idx_j.ptr, impl.batm.idx_k.ptr,
@@ -3532,7 +3543,7 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
                 impl.d_grad.ptr,
                 &impl.d_energies.ptr[impl.E_BATM]);
         } else {
-            k_batm<<<cfg.gridSize, cfg.blockSize, 0, sC>>>(
+            launch_k_batm(vir_slot(VIR_BATM), cfg.gridSize, cfg.blockSize, sC,
                 impl.batm.n,
                 impl.batm.idx_i.ptr, impl.batm.idx_j.ptr, impl.batm.idx_k.ptr,
                 impl.batm.zb3atm_i.ptr, impl.batm.zb3atm_j.ptr, impl.batm.zb3atm_k.ptr,
@@ -3589,7 +3600,8 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
                 impl.coords.d_y.ptr,
                 impl.coords.d_z.ptr,
                 impl.d_grad.ptr,
-                &impl.d_energies.ptr[impl.E_XBOND]);
+                &impl.d_energies.ptr[impl.E_XBOND],
+                vir_slot(VIR_XBOND));
         }
     }
     if (m_hbond_enabled) {
@@ -3615,7 +3627,8 @@ void FFWorkspaceGPU::prepareAndLaunchChargeIndependent(bool gradient)
             impl.coords.d_z.ptr,
             impl.d_grad.ptr,
             &impl.d_energies.ptr[impl.E_HBOND],
-            hbTripleEnergyTarget(impl, m_record_hb_energies));   // Oct 2026: nullptr unless recording
+            hbTripleEnergyTarget(impl, m_record_hb_energies),   // Oct 2026: nullptr unless recording
+            vir_slot(VIR_HBOND));
     }
     // Per-kernel snapshot: after all stream C kernels (Claude Generated April 2026)
     if (gradient && impl.d_grad_after_sC.ptr) {
@@ -3725,7 +3738,7 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     // skipped → energy = 0. Disable Phase-2 capture whenever Phase-1 is graph-active.
     // Claude Generated (May 2026): m_record_kernel_timings disables graph for accurate per-step events.
     const bool p2_capture_disabled    = p2_need_snapshots || p2_force_single_stream || p1_was_graph
-                                          || m_record_kernel_timings;
+                                          || m_record_kernel_timings || m_want_virial;   // A1: no graph with the virial
     bool&            p2_valid = gradient ? impl.m_graph_phase2_grad_valid
                                          : impl.m_graph_phase2_energy_valid;
     cudaGraph_t&     p2_graph = gradient ? impl.m_graph_phase2_grad
@@ -3864,7 +3877,8 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     // (fixed point into d_dEdcn, before the conversion). Reads the Gaussian weights of this step (d_gw / d_dgw,
     // computeGaussianWeightsOnGPU on this stream), so it runs here on the main stream. With frozen CN the weights
     // are those of the last CN update, like the pair term.
-    if (impl.tail_active && m_dispersion_enabled && impl.dc6dcn_gpu_ready && impl.d_gw.ptr && impl.d_dgw.ptr) {
+    const bool tail_ran = impl.tail_active && m_dispersion_enabled && impl.dc6dcn_gpu_ready && impl.d_gw.ptr && impl.d_dgw.ptr;
+    if (tail_ran) {
         LaunchConfig cfg_w = getLaunchConfigLight(impl.tail_K * D4_MAX_REF, m_block_size);
         k_d4_tail_W<<<cfg_w.gridSize, cfg_w.blockSize, 0, stream>>>(
             N, impl.tail_K, impl.d_tail_slot_of_atom.ptr, impl.d_tail_nref.ptr, impl.d_tail_zeta.ptr,
@@ -3965,6 +3979,65 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
     }
 
     convert_dEdcn();   // no-op unless neither the Coulomb postprocess nor the chain rule ran
+
+    // A1 (Nov 2026, GPU_PERIODIC_GAPS): virial of the pair terms and of the two chain rules, by separate kernels on
+    // the main stream after every producer of d_dEdcn / d_zz_hb / hb_cn_H is done (fences above); the multi-atom
+    // terms wrote their slots in Phase 1 (VIR instantiations). The gradient kernels are not touched.
+    m_virial_ready = false;
+    if (gradient && m_want_virial && impl.pbc_active) {
+        double* V = impl.d_virial.ptr;
+        {
+            LaunchConfig c = getLaunchConfig(impl.bonds.n, m_block_size);
+            k_bonds_virial<<<c.gridSize, c.blockSize, 0, stream>>>(impl.bonds.n, impl.bonds.idx_i.ptr, impl.bonds.idx_j.ptr,
+                impl.bonds.r0.ptr, impl.bonds.r0_base_i.ptr, impl.bonds.r0_base_j.ptr, impl.bonds.cnfak_i.ptr,
+                impl.bonds.cnfak_j.ptr, impl.bonds.rabshift.ptr, impl.bonds.ff.ptr, impl.bonds.fc.ptr, impl.bonds.alpha.ptr,
+                impl.bonds.nr_hb.ptr, impl.bonds.hb_cn_H.ptr, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+                impl.d_cn.ptr, V + 9 * VIR_BOND);
+        }
+        if (impl.hb_alpha.n > 0 && impl.d_zz_hb.ptr) {   // zz_hb converted to doubles on stream B (k_hb_alpha_chainrule)
+            LaunchConfig c = getLaunchConfig(impl.hb_alpha.n, m_block_size);
+            k_hb_alpha_virial<<<c.gridSize, c.blockSize, 0, stream>>>(impl.hb_alpha.n, impl.hb_alpha.idx_H.ptr,
+                impl.hb_alpha.idx_B.ptr, impl.hb_alpha.rcov_sum.ptr, impl.coords.d_x.ptr, impl.coords.d_y.ptr,
+                impl.coords.d_z.ptr, impl.d_zz_hb.ptr, 27.5, V + 9 * VIR_BOND);
+        }
+        if (m_dispersion_enabled && impl.disp.n > 0) {
+            LaunchConfig c = getLaunchConfig(impl.disp.n, m_block_size);
+            k_dispersion_virial<<<c.gridSize, c.blockSize, 0, stream>>>(impl.disp.n, impl.disp.idx_i.ptr, impl.disp.idx_j.ptr,
+                impl.disp.C6.ptr, impl.disp.r4r2ij.ptr, impl.disp.r0_sq.ptr, impl.disp.zetac6.ptr, impl.disp.r_cut.ptr,
+                impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr, V + 9 * VIR_DISP);
+        }
+        if (m_repulsion_enabled) {
+            if (impl.bonded_rep.n > 0) {
+                LaunchConfig c = getLaunchConfig(impl.bonded_rep.n, m_block_size);
+                k_repulsion_virial<<<c.gridSize, c.blockSize, 0, stream>>>(impl.bonded_rep.n, impl.bonded_rep.idx_i.ptr,
+                    impl.bonded_rep.idx_j.ptr, impl.bonded_rep.alpha.ptr, impl.bonded_rep.repab.ptr, impl.bonded_rep.r_cut.ptr,
+                    impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr, V + 9 * VIR_REP);
+            }
+            if (impl.nonbonded_rep.n > 0) {
+                LaunchConfig c = getLaunchConfig(impl.nonbonded_rep.n, m_block_size);
+                k_repulsion_virial<<<c.gridSize, c.blockSize, 0, stream>>>(impl.nonbonded_rep.n, impl.nonbonded_rep.idx_i.ptr,
+                    impl.nonbonded_rep.idx_j.ptr, impl.nonbonded_rep.alpha.ptr, impl.nonbonded_rep.repab.ptr,
+                    impl.nonbonded_rep.r_cut.ptr, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr, V + 9 * VIR_REP);
+            }
+        }
+        if (m_cn_pairs_on_gpu && impl.n_cn_pairs > 0 && impl.d_dlogdcn.ptr && !m_frozen_cn) {
+            LaunchConfig c = getLaunchConfig(impl.n_cn_pairs, m_block_size);
+            k_cn_chainrule_virial<<<c.gridSize, c.blockSize, 0, stream>>>(impl.n_cn_pairs, impl.d_cn_idx_i.ptr,
+                impl.d_cn_idx_j.ptr, impl.d_cn_rcov_sum.ptr, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+                impl.d_dEdcn.ptr, impl.d_dlogdcn.ptr, m_kn, V + 9 * VIR_CN);
+        }
+        if (tail_ran) {   // C8 part of the tail alone (pref6 = 0, no dE/dCN) for the pressure correction E6/E8
+            LaunchConfig cfg_a = getLaunchConfigLight(N, m_block_size);
+            k_d4_tail_atoms<<<cfg_a.gridSize, cfg_a.blockSize, 0, stream>>>(
+                N, impl.tail_K, impl.d_tail_slot_of_atom.ptr, impl.d_tail_slot_elem.ptr, impl.d_tail_nref.ptr,
+                impl.d_tail_sqz.ptr, impl.d_tail_zeta.ptr, impl.d_gw.ptr, impl.d_dgw.ptr, impl.d_c6_flat.ptr,
+                impl.d_tail_W.ptr, 0.0, impl.tail_pref8, 0, impl.d_dEdcn.ptr, V + GFNFF_VIR_TAIL_E8);
+        }
+        k_fix_to_double<<<1, 128, 0, stream>>>(GFNFF_VIR_BUFFER, V, 1.0 / GFNFF_FIX_ENERGY);
+        checkCuda(cudaGetLastError(), "virial kernels launch");
+        m_virial_ready = true;
+    }
+
     if (gradient)      // last accumulation is done: fixed-point -> double before the download
         k_fix_to_double<<<(3*N + 255) / 256, 256, 0, stream>>>(3*N, impl.d_grad.ptr, 1.0 / GFNFF_FIX_FORCE);
     // energy slots are fixed-point accumulators too (blockReduceAddEnergy, k_coulomb_postprocess, k_add_*_parts)
@@ -4654,3 +4727,24 @@ void FFWorkspaceGPU::updateReferenceGeometry()
               "updateReferenceGeometry: D2D copy z");
 }
 
+
+// Claude Generated (Nov 2026, GPU_PERIODIC_GAPS A1): see ff_workspace_gpu.h
+void FFWorkspaceGPU::setWantVirial(bool v)
+{
+    if (v == m_want_virial)
+        return;
+    m_want_virial = v;
+    m_virial_ready = false;
+    invalidateGraph();   // the captured graphs hold the non-virial launches
+}
+
+bool FFWorkspaceGPU::downloadVirial(std::vector<double>& out)
+{
+    if (!m_virial_ready || !m_impl)
+        return false;
+    out.assign(GFNFF_VIR_BUFFER, 0.0);
+    checkCuda(cudaMemcpyAsync(out.data(), m_impl->d_virial.ptr, GFNFF_VIR_BUFFER * sizeof(double),
+                              cudaMemcpyDeviceToHost, m_impl->stream), "downloadVirial");
+    checkCuda(cudaStreamSynchronize(m_impl->stream), "downloadVirial sync");
+    return true;
+}

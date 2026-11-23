@@ -15,12 +15,12 @@ machine), then the ROCm gaps on a machine with a ROCm GPU. A gap is closed only 
 | Method | CPU | CUDA | ROCm | Vulkan |
 |---|---|---|---|---|
 | GFN-FF periodic energy, gradient | complete (MIC, Ewald, EEQ) | hybrid S1/S2: local terms on the device, EEQ and Ewald on the host [read] | refused with a clear error, counted CPU fallback [read] | not built |
-| GFN-FF virial, pressure, barostat | complete (N1, N2, V-LRC) | **missing**: no device virial, `-compute_pressure` throws at the first step [read: `src/capabilities/CLAUDE.md`] | missing | not built |
+| GFN-FF virial, pressure, barostat | complete (N1, N2, V-LRC) | complete for the hybrid S2 (A1 closed Nov 23, 2026: device virial + host Ewald, `-compute_pressure`, `-barostat`) [measured, WP-PERIODIC-NONBONDED A1-GPU] | missing | not built |
 | GFN1/GFN2 periodic energy, gradient | complete (Gamma point, images, Ewald) | complete, device-resident SCF (closed shell, neutral) [reported] | refused, counted fallback [read] | not built |
 | GFN1/GFN2 virial, pressure, barostat | complete (P4) | complete [reported: parity 1e-9 Eh, NPT smoke test] | missing | not built |
 
-So the one **blocking** gap for "complete periodic simulations with pressure" on CUDA is GFN-FF (item A1/A2). GFN2 is complete on
-CUDA for closed-shell neutral cells.
+Since A1 (Nov 23, 2026) GFN-FF NPT runs on CUDA through the S2 hybrid; what is left for GFN-FF on CUDA is speed (A2: host EEQ
+and Ewald) and the approximate pressure terms (A3). GFN2 is complete on CUDA for closed-shell neutral cells.
 
 ## Part A: CUDA gaps (close on the CUDA machine)
 
@@ -28,7 +28,7 @@ Priority P0 = needed for the goal, P1 = correctness or honesty, P2 = performance
 
 | # | P | Gap | Source | Gate |
 |---|---|---|---|---|
-| A1 | P0 | GFN-FF atomic virial on the device (local terms: bond, angle, torsion, inversion, repulsion, D4 pair, HB/XB), plus the host virial of EEQ/Ewald/D4 tail already used by the CPU path, so that `-compute_pressure` and `-barostat` run with `-gpu cuda` and `-gfnff.gpu_periodic true` | [read] `src/capabilities/CLAUDE.md` (N1: "a GPU-evaluated energy throws") | virial vs CPU <= 1e-7 Eh per component; FD of the assembled energy under cell scaling (as `pbc_xtb_virial`); second run bitwise; without a cell bitwise to the base |
+| A1 | P0 | **closed Nov 23, 2026** (`feature/gfnff-gpu-virial`): device virial of every local term and both chain rules, host Ewald virial, cell update followed by the device; GPU vs CPU <= 5e-11 Eh per component (432/864/1728 H2O, mixture, 5 small cells), FD of the hybrid energy under isotropic and axial cell scaling <= 5.6e-9 Eh, second run bitwise, no-cell CPU and CUDA 38/38 bitwise to the base, CLI NPT 432 H2O 20 steps CPU = GPU in every printed digit; MD step 1.7x faster (432-1728 H2O) | [measured] WP-PERIODIC-NONBONDED A1-GPU, ctest `gfnff_gpu_pbc_virial` | met |
 | A2 | P0/P2 | GFN-FF stages S3/S4: device Ewald and device EEQ with a cell (today the host solves EEQ and Ewald: 107 of 123 ms per step at 5748 atoms) | [reported] WP-PERIODIC-NONBONDED S2 | charges and energy vs host <= 1e-9; speed table 3456 H2O |
 | A3 | P0 | Pressure terms of GFN-FF that are still approximate or open: HB/XB and repulsion pairs crossing the cutoff (open in `TODO.md`), HB search radii not converged in the pressure (x0.8: +87 bar, x1.2: -29 bar) | [read] `TODO.md`, Versuchsplan P1 | pressure vs a larger-cutoff reference; document the residual |
 | A4 | P1 | Silent host fallback of the periodic xTB device stages: not counted, visible only at verbosity 3, `-gpu_strict` does not trigger (e.g. `xtb_periodic.cpp:163-174`) | [read] audit B | `reportGpuFallback` for every stage; test with fault injection |

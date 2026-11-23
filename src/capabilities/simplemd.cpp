@@ -6430,10 +6430,15 @@ bool SimpleMD::setupBarostat()
 {
     // WP-PERIODIC-XTB G1: the native gfn1/gfn2 on CUDA compute virial and cell update on the host (xtbInstance()), so
     // only the GFN-FF GPU hybrid is refused here.
+    // GPU_PERIODIC_GAPS A1 (Nov 2026): the GFN-FF CUDA hybrid (gpu_periodic, coulomb_ewald) carries the atomic virial
+    // (device terms + host Ewald) and follows GFNFF::updateCell on its host instance, so it is accepted like the CPU
+    // method; a GPU GFN-FF without a periodic energy (S1 with coulomb_ewald false) stays refused below.
     const bool gpu_requested = m_defaults.value("gpu", std::string("none")) != "none" || m_config.get<std::string>("gpu", "none") != "none";
     const bool native_xtb = m_interface && m_interface->Interface() && m_interface->Interface()->xtbInstance();
-    if (gpu_requested && !native_xtb) {
-        CurcumaLogger::error("barostat: not available with -gpu for this method (the GFN-FF GPU hybrid carries no atomic virial and no cell update); run on the CPU");
+    const bool gfnff_periodic = m_interface && m_interface->Interface() && m_interface->Interface()->gfnffInstance()
+        && m_interface->hasPeriodicEnergy();
+    if (gpu_requested && !native_xtb && !gfnff_periodic) {
+        CurcumaLogger::error("barostat: not available with -gpu for this method (no periodic energy with an atomic virial); run on the CPU");
         return false;
     }
     if (m_wall_type != 0) {
@@ -6604,8 +6609,9 @@ void SimpleMD::readVirial()
     // N1 (GFN-FF) and WP-PERIODIC-XTB P4 (native gfn1/gfn2) through EnergyCalculator
     EnergyCalculator* ec = m_interface;
     if (!ec || !ec->virialValid())
-        throw std::runtime_error("compute_pressure: the energy of this step carries no atomic virial (the energy was not evaluated "
-                                 "by a periodic CPU path, e.g. a GPU path); run without -gpu or without compute_pressure");
+        throw std::runtime_error("compute_pressure: the energy of this step carries no atomic virial (not a periodic energy "
+                                 "with a virial: CPU gfnff/gfn1/gfn2 with a cell, or the GFN-FF CUDA hybrid -gfnff.gpu_periodic true); "
+                                 "run without compute_pressure");
     m_virial_trace_eh = ec->virial().trace();
 }
 

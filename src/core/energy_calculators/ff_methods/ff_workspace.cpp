@@ -349,9 +349,14 @@ double FFWorkspace::evaluateEwaldCoulomb(const Matrix& geometry_bohr, const Vect
             T > 1 ? curcuma::ewald::EwaldParallelFor(run) : curcuma::ewald::EwaldParallelFor());
         m_ewald_setup_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
     }
+    // A1 (Nov 2026): with the virial requested the Ewald kernels run their VIRIAL instantiation (calcCoulombEwald
+    // dispatches on m_want_virial), so the accumulators' virial is reset as well; the result goes to
+    // m_result_virial.coulomb / coulomb_bg below and the GPU wrapper completes it (setHybridVirial).
+    const bool want_virial = m_want_virial && gradient;
     for (int t = 0; t < m_num_threads; ++t)
-        m_accumulators[t].reset(m_natoms, gradient, /*store_components=*/false, /*want_potentials=*/false);
-    m_virial_valid = false;  // N1: the hybrid result holds no atomic virial of the local terms
+        m_accumulators[t].reset(m_natoms, gradient, /*store_components=*/false, /*want_potentials=*/false, want_virial);
+    m_virial_valid = false;  // N1: the hybrid result holds no atomic virial of the local terms (setHybridVirial)
+    m_result_virial.reset();
     if (m_num_threads == 1 || !m_pool) {
         calcCoulombEwald(0);
     } else {
@@ -373,6 +378,8 @@ double FFWorkspace::evaluateEwaldCoulomb(const Matrix& geometry_bohr, const Vect
     }
     for (int t = 0; t < m_num_threads; ++t) {
         const auto& acc = m_accumulators[t];
+        if (want_virial)
+            m_result_virial.coulomb += acc.virial.coulomb;  // partition order, as reduce()
         e_pair += acc.energy.coulomb;
         m_ewald_terms.real += acc.ewald_real;
         m_ewald_terms.reciprocal += acc.ewald_recip;
@@ -387,9 +394,18 @@ double FFWorkspace::evaluateEwaldCoulomb(const Matrix& geometry_bohr, const Vect
     m_ewald_terms.background = tail.terms.background;
     m_ewald_terms.gaussian_background = tail.terms.gaussian_background;
     e_pair += tail.terms.self + tail.terms.background + tail.terms.gaussian_background;
+    if (want_virial)
+        m_result_virial.coulomb_bg += curcuma::ewald::EwaldSum::backgroundVirial(m_ewald_terms);  // as postProcessVirial
     if (terms_out)
         *terms_out = m_ewald_terms;
     return e_pair;
+}
+
+// Claude Generated (Nov 2026, GPU_PERIODIC_GAPS A1): see ff_workspace.h
+void FFWorkspace::setHybridVirial(const FFVirialComponents& v)
+{
+    m_result_virial = v;
+    m_virial_valid = true;
 }
 
 // Claude Generated (Nov 2026, CPU threading pass stage 4): phase trace switch and split, timing only

@@ -18,6 +18,7 @@
 
 #include <cuda_runtime.h>
 #include "gfnff_soa.h"
+#include "gfnff_virial_slots.h"   // A1 (Nov 2026)
 
 // ============================================================================
 // Launch bounds for optimal GPU occupancy (Phase 6: March 2026)
@@ -312,6 +313,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_storsions(
 
 /// Bonded ATM (BATM): 3-body charge-scaled angular term for 1,4-pairs
 /// Reference: ff_workspace_gfnff.cpp:calcBATM, Fortran gfnff_engrad.F90:3267-3334
+/// A1 (Nov 2026): k_batm_vir (virial variant, same body) lives in gfnff_kernels.cu, launched through launch_k_batm().
 __global__ GFNFF_KERNEL_BOUNDS void k_batm(
     int n,
     const int*    __restrict__ idx_i,
@@ -1225,9 +1227,39 @@ void gfnffFixBadReset();
 #endif // USE_CUDA
 
 // Claude Generated (Nov 2026, S1): launch wrappers of the PBC-templated kernels above (defined in gfnff_kernels.cu).
-void launch_k_angles(bool pbc, dim3 grid, dim3 block, cudaStream_t stream, int n, const int* idx_i, const int* idx_j, const int* idx_k, const int* ati, const int* atj, const int* atk, const double* fc, const double* theta0, const double* cx, const double* cy, const double* cz, const double* rcov_d3, double* grad, double* energy);
-void launch_k_dihedrals(bool pbc, dim3 grid, dim3 block, cudaStream_t stream, int n, const int* idx_i, const int* idx_j, const int* idx_k, const int* idx_l, const int* ati, const int* atj, const int* atk, const int* atl, const double* V, const double* phi0, const double* n_period, const int* is_nci, const double* cx, const double* cy, const double* cz, const double* rcov_d3_unused, double* grad, double* energy);
-void launch_k_inversions(bool pbc, dim3 grid, dim3 block, cudaStream_t stream, int n, const int* idx_i, const int* idx_j, const int* idx_k, const int* idx_l, const int* ati, const int* atj, const int* atk, const int* atl, const double* fc, const double* omega0, const double* C0, const double* C1, const double* C2, const int* potential_type, const double* cx, const double* cy, const double* cz, double* grad, double* energy);
-void launch_k_storsions(bool pbc, dim3 grid, dim3 block, cudaStream_t stream, int n, const int* idx_i, const int* idx_j, const int* idx_k, const int* idx_l, const double* erefhalf, const double* cx, const double* cy, const double* cz, double* grad, double* energy);
-void launch_k_xbonds(bool pbc, dim3 grid, dim3 block, cudaStream_t stream, int n, const int* idx_i, const int* idx_j, const int* idx_k, const int* elem_A, const int* elem_B, const double* q_X, const double* q_B, const double* acidity_X, const double* r_cut, const double* cx, const double* cy, const double* cz, double* grad, double* energy);
-void launch_k_hbonds(bool pbc, dim3 grid, dim3 block, cudaStream_t stream, int n, const int* idx_i, const int* idx_j, const int* idx_k, const int* elem_A, const int* elem_B, const double* q_H, const double* q_A, const double* q_B, const double* basicity_A, const double* basicity_B, const double* acidity_A, const double* acidity_B, const double* r_cut, const int* case_type, const int* nb_B_offset, const int* nb_B_count, const int* nb_B_flat, const int* acceptor_parent, const int* nb_C_offset, const int* nb_C_count, const int* nb_C_flat, const double* repz_B, const double* cx, const double* cy, const double* cz, double* grad, double* energy, double* e_triple);
+void launch_k_angles(bool pbc, dim3 grid, dim3 block, cudaStream_t stream, int n, const int* idx_i, const int* idx_j, const int* idx_k, const int* ati, const int* atj, const int* atk, const double* fc, const double* theta0, const double* cx, const double* cy, const double* cz, const double* rcov_d3, double* grad, double* energy, double* vir);
+void launch_k_dihedrals(bool pbc, dim3 grid, dim3 block, cudaStream_t stream, int n, const int* idx_i, const int* idx_j, const int* idx_k, const int* idx_l, const int* ati, const int* atj, const int* atk, const int* atl, const double* V, const double* phi0, const double* n_period, const int* is_nci, const double* cx, const double* cy, const double* cz, const double* rcov_d3_unused, double* grad, double* energy, double* vir);
+void launch_k_inversions(bool pbc, dim3 grid, dim3 block, cudaStream_t stream, int n, const int* idx_i, const int* idx_j, const int* idx_k, const int* idx_l, const int* ati, const int* atj, const int* atk, const int* atl, const double* fc, const double* omega0, const double* C0, const double* C1, const double* C2, const int* potential_type, const double* cx, const double* cy, const double* cz, double* grad, double* energy, double* vir);
+void launch_k_storsions(bool pbc, dim3 grid, dim3 block, cudaStream_t stream, int n, const int* idx_i, const int* idx_j, const int* idx_k, const int* idx_l, const double* erefhalf, const double* cx, const double* cy, const double* cz, double* grad, double* energy, double* vir);
+void launch_k_xbonds(bool pbc, dim3 grid, dim3 block, cudaStream_t stream, int n, const int* idx_i, const int* idx_j, const int* idx_k, const int* elem_A, const int* elem_B, const double* q_X, const double* q_B, const double* acidity_X, const double* r_cut, const double* cx, const double* cy, const double* cz, double* grad, double* energy, double* vir);
+void launch_k_hbonds(bool pbc, dim3 grid, dim3 block, cudaStream_t stream, int n, const int* idx_i, const int* idx_j, const int* idx_k, const int* elem_A, const int* elem_B, const double* q_H, const double* q_A, const double* q_B, const double* basicity_A, const double* basicity_B, const double* acidity_A, const double* acidity_B, const double* r_cut, const int* case_type, const int* nb_B_offset, const int* nb_B_count, const int* nb_B_flat, const int* acceptor_parent, const int* nb_C_offset, const int* nb_C_count, const int* nb_C_flat, const double* repz_B, const double* cx, const double* cy, const double* cz, double* grad, double* energy, double* e_triple, double* vir);
+void launch_k_batm(double* vir, dim3 grid, dim3 block, cudaStream_t stream, int n, const int* idx_i, const int* idx_j, const int* idx_k, const double* zb3atm_i, const double* zb3atm_j, const double* zb3atm_k, const double* cx, const double* cy, const double* cz, const double* topo_charges, double* grad, double* energy);
+
+// ============================================================================
+// Atomic virial on the device (Claude Generated, Nov 2026, GPU_PERIODIC_GAPS A1)
+// Nine fixed-point slots (2^-48 Eh, row-major Xi_ab, a = position component, b = gradient component) per term in
+// one buffer; k_fix_to_double converts them after the step. VIR_CN is the whole CN chain rule (bond dr0/dCN,
+// dC6/dCN incl. the D4 tail, TERM 1b): the device keeps one dE/dCN vector, the CPU splits it in three.
+// VIR_TAIL_E8 is one energy slot (not a tensor): the C8 part of the D4 tail for the pressure correction.
+// ============================================================================
+// slot layout: gfnff_virial_slots.h (shared with the host wrapper)
+
+__global__ __launch_bounds__(512) void k_bonds_virial(int n, const int* __restrict__ idx_i, const int* __restrict__ idx_j, const double* __restrict__ r0,
+    const double* __restrict__ r0_base_i, const double* __restrict__ r0_base_j, const double* __restrict__ cnfak_i,
+    const double* __restrict__ cnfak_j, const double* __restrict__ rabshift, const double* __restrict__ ff,
+    const double* __restrict__ fc, const double* __restrict__ alpha, const int* __restrict__ nr_hb,
+    const double* __restrict__ hb_cn_H, const double* __restrict__ cx, const double* __restrict__ cy,
+    const double* __restrict__ cz, const double* __restrict__ cn, double* vir);
+__global__ __launch_bounds__(512) void k_dispersion_virial(int n, const int* __restrict__ idx_i, const int* __restrict__ idx_j, const double* __restrict__ C6,
+    const double* __restrict__ r4r2ij, const double* __restrict__ r0_sq, const double* __restrict__ zetac6,
+    const double* __restrict__ r_cut, const double* __restrict__ cx, const double* __restrict__ cy,
+    const double* __restrict__ cz, double* vir);
+__global__ __launch_bounds__(512) void k_repulsion_virial(int n, const int* __restrict__ idx_i, const int* __restrict__ idx_j, const double* __restrict__ alpha,
+    const double* __restrict__ repab, const double* __restrict__ r_cut, const double* __restrict__ cx,
+    const double* __restrict__ cy, const double* __restrict__ cz, double* vir);
+__global__ __launch_bounds__(512) void k_cn_chainrule_virial(int n_pairs, const int* __restrict__ idx_i, const int* __restrict__ idx_j, const double* __restrict__ rcov_sum,
+    const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+    const double* __restrict__ dEdcn, const double* __restrict__ dlogdcn, double kn, double* vir);
+__global__ __launch_bounds__(512) void k_hb_alpha_virial(int n_pairs, const int* __restrict__ idx_H, const int* __restrict__ idx_B, const double* __restrict__ rcov_sum,
+    const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+    const double* __restrict__ zz_hb, double kn, double* vir);

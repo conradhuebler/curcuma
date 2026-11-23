@@ -504,6 +504,9 @@ public:
     /// -dE/d(eps) of the model energy alone (FFVirialComponents::total), the quantity the FD gate checks
     Eigen::Matrix3d modelVirial() const { return m_result_virial.total(); }
     const FFVirialComponents& virialComponents() const { return m_result_virial; }
+    /// A1 (Nov 2026): the GPU hybrid stores the virial it assembled (device terms + the host Ewald part that
+    /// evaluateEwaldCoulomb() left in virialComponents().coulomb / coulomb_bg) so that GFNFF::virial() returns it.
+    void setHybridVirial(const FFVirialComponents& v);
 
     /// Per-atom Coulomb self-energy inputs (setCoulombSelfEnergyParams order): tests copy them between instances.
     const Vector& coulombChiBase() const { return m_coul_chi_base; }
