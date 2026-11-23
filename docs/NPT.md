@@ -48,6 +48,10 @@ the old estimator: their pressure is too high by the amounts above, and their NP
 0.32 / 0.15 / 0.07 / 0.04 % (432 / 864 / 1728 / 3456 waters; linear estimate with kappa_T = 4.5e-5 /bar from the cutoff
 scan, not an NPT rerun). Droplet runs without a cell are not affected.
 
+Still missing from the pressure (measured Nov 23, 2026, WP-PERIODIC-NONBONDED A3-P): the crossing term of the HB
+search radius, -31 to -38 bar on water (the reported P is that much too high; NPT density about -0.2 %, rough
+linear estimate); repulsion and CN parts below 1.5 bar. The D4 crossing term measured the same way equals V-LRC.
+
 ## Equations (`SimpleMD::applyBarostat`, the code comment carries the derivation)
 
 - Berendsen (Berendsen et al., J. Chem. Phys. 81, 3684 (1984)): `mu^3 = 1 - (N dt / tau_p) beta (P0 - P)`, velocities

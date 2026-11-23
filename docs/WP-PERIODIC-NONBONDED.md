@@ -1951,3 +1951,56 @@ Bohr (refused by the cell check, CPU and GPU alike). The host EEQ and Ewald (S3/
   virial), the CN chain-rule split per term on the device, `topology_mode react` with the virial, charged boxes under
   the ensemble charge model (CPU fallback), a long NPT run on the GPU (only 20 steps here), C-rescale on the GPU (shares
   the code path, not run). Human production testing pending.
+
+## A3-P pressure terms of the sharp GFN-FF radii, measured (2026-11-23, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+Item A3 of [GPU_PERIODIC_GAPS.md](GPU_PERIODIC_GAPS.md); CPU path (the GPU hybrid has the same virial, A1-GPU). Tool:
+`test_pbc_pressure_cutoffs --xyz FRAME --strain --hb f1,f2,...` (ctest `pbc_pressure_cutoffs` checks only the per-term
+split). Frames: W1 cutoff-scan frames (`03_auswertung/cutoff_scan/runs/frames_*`, equilibrated Berendsen NPT, 300 K),
+D4 radius frozen as an NPT run freezes it, production settings otherwise, 2 threads.
+
+**Method.** The N1 virial is -dE/d(eps) with every pair and triple list fixed. A list with a sharp radius gains or loses
+members under a strain; a member whose energy at the radius is not zero then adds an impulsive term to the pressure of
+the truncated model (V-LRC derives it for the D4 radius). Measured per term: `P_thermo = -(dE_t/d eps)/(3V)` from a
+least-squares quadratic fit of E_t over 9 isotropic strains eps = 0, +-1, 2, 4, 8 x 1e-4, a fresh instance (lists
+re-derived) at every strain, against `P_vir = tr Xi_t/(3V)` at eps = 0; crossing = P_thermo - P_vir. Fit residuals
+<= 1.8e-6 Eh, i.e. a slope uncertainty below 1 bar.
+
+| frame | HB crossing | D4 crossing | V-LRC (in the reported P) | repulsion | bond (CN) | Coulomb (CN) | total crossing |
+|---|---|---|---|---|---|---|---|
+| 432 H2O, t 3.9 ps | -37.7 | -71.0 | -71.2 | +1.31 | -0.29 | -0.17 | -107.9 |
+| 432 H2O, t 11.9 ps | -31.2 | -70.3 | -71.0 | +1.30 | -0.28 | -0.17 | -100.6 |
+| 432 H2O, t 19.9 ps | -30.9 | -68.0 | -66.3 | +1.28 | -0.27 | -0.17 | -98.0 |
+| 864 H2O, t 19.9 ps | -30.5 | -33.2 | -33.6 | +1.29 | -0.28 | -0.17 | -62.8 |
+
+(bar; n = 4 frames, 2 box sizes.) The same 432 frame with the |E_HB| candidate filter off (`hb_min_pair_energy_eh 0`,
+933 431 instead of 152 135 triples): HB crossing -30.8 bar, HB virial pressure -0.2 bar, so the filter's own crossing
+term is about 0.1 bar.
+
+**HB search radii (thr1, thr2 scaled together, fixed-list virial pressure relative to the default, 1728 H2O frame
+t 19.9 ps, L 69.8 Bohr):** x0.8 +87.0, x1.2 -29.5, x1.5 -44.9, x2.0 -50.7, x2.5 -51.1 bar (P1 measured +87 / -29 on
+other frames); E_HB changes by -2.3e-6 Eh per atom from x1 to x2.5: the radius is part of the model (reference
+value hb_accuracy 0.1), not a numerical parameter. 432 frame: x0.8 +81.1, x1.05 -9.2 bar (larger factors exceed L/2).
+
+**Findings.**
+- V-LRC is confirmed by an independent measurement: the measured D4 crossing term equals the V-LRC estimate to
+  0.4-1.7 bar (3 % at most).
+- The HB search radius has a crossing term of -31 to -38 bar that the reported pressure does not contain: the barostat
+  sees a pressure about 31 bar too high for the model it simulates; NPT densities are then too low by about 0.2 %
+  (linear estimate with kappa_T ~ 6e-5 /bar, a rough number, not the measured compressibility of GFN-FF).
+- Against the converged search radius (x2 and beyond) the default-radius pressure is 51 bar too high (density
+  about -0.3 % by the same rough estimate); the crossing term covers 60 % of that. Which of the two is wanted is a
+  model decision: the crossing term makes the pressure consistent with the reference model as it is (its truncated
+  HB energy), the radius limit changes the model.
+- Repulsion (+1.3 bar), CN-dependent bond and Coulomb parts (-0.45 bar together) are negligible.
+
+**Not changed (operator decision).** A per-step HB crossing estimator would need the energy density of the triples at
+two different sharp surfaces (r_AB^2 < hbthr1; case 1 also r_AB^2 + r_AH^2 + r_BH^2 < hbthr2) plus the energy filter,
+estimated from one side of the surface each step, and the device-detected HB lists on the GPU; it is not a cheap,
+exact term like V-LRC (whose g(r) = 1 tail is analytic). Enlarging the radii only for the pressure would make the
+pressure inconsistent with the forces and roughly triple the HB work (1728 H2O: 0.41 / 0.89 / 2.0 million triples at
+x0.8 / x1.2 / x2; the default lies between, about 0.6 million by the 432 count of 152 135 per 432 waters).
+Options for the operator: (a) leave as is and correct NPT densities by about +0.2 % in the analysis, (b) a statistical
+HB crossing estimator in the virial (CPU and GPU), (c) a larger hb_accuracy-derived radius as a deliberate model
+deviation (switch, port fidelity stays the default). Not measured: other liquids, XB (no halogen in the frames),
+charged boxes, the GPU-detected lists (the CPU lists are used here).

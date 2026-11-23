@@ -938,6 +938,16 @@ if(USE_PCH)
 endif()
 add_test(NAME pbc_npt_cell_update COMMAND test_pbc_npt WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 set_tests_properties(pbc_npt_cell_update PROPERTIES TIMEOUT 600 LABELS "pbc;simplemd;gfnff;ewald")
+
+# Claude Generated (Nov 2026, GPU_PERIODIC_GAPS A3): pressure terms of the sharp GFN-FF radii (HB/XB, D4, repulsion):
+# per-term consistency in ctest; with --xyz FRAME --strain --hb f1,f2 the crossing-term and radius analysis.
+add_executable(test_pbc_pressure_cutoffs unit/test_pbc_pressure_cutoffs.cpp)
+target_link_libraries(test_pbc_pressure_cutoffs curcuma_core test_molecule_registry)
+if(USE_PCH)
+    target_precompile_headers(test_pbc_pressure_cutoffs REUSE_FROM curcuma_core)
+endif()
+add_test(NAME pbc_pressure_cutoffs COMMAND test_pbc_pressure_cutoffs WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(pbc_pressure_cutoffs PROPERTIES TIMEOUT 600 LABELS "pbc;gfnff;ewald")
 # N2: NPT ideal gas (64 Ne, CSVR 300 K): crescale <V> = (N+1) kT/P0 with relative variance 1/(N+1), berendsen
 # <V> = (dof/3) kT/P0 with suppressed fluctuations; 200 ps each (~60 s), block statistics
 add_executable(test_pbc_npt_idealgas unit/test_pbc_npt_idealgas.cpp)
