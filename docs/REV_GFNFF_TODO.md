@@ -357,7 +357,7 @@ carries the spread (curcuma default, spread = max − min over the four orders):
 | charged | Coulomb | 89 | 237 | net charge goes to the fragment that contains atom 1 (Known Issue #13: the both-placements trial is dead code in the reference) |
 | charged | bond | 5 | 64 | not traced |
 | neutral | Coulomb | 492 | 1.3 | nitrogen dgam tests the compact pi list `piadr(i)` (index cutoff), pprcht and xtb; verified on caffeine/complex (Nov 2026), switch `dgam_pi_membership` |
-| neutral | inversion | 106 | 9.9 | pprcht's `ssort` stops early, so the distance sort of the three neighbours fails for some orders; xtb's sort is correct; switch `inversion_sort_xtb` |
+| neutral | inversion | 106 | 9.9 | pprcht's `ssort` stops early, so the distance sort of the three neighbours fails for some orders; xtb's sort is correct; **fixed by default since Nov 24, 2026** (`inversion_sort_xtb` true, `false` = pprcht) |
 | neutral | bond | 2 | 19.6 | MB16-43 only, not traced |
 
 Examples: `ICONF/N3P3H12_1` 7.8, `RSE43/P25` 4.3, `BHPERI/04ts` 2.4 kcal/mol, all inversion.
@@ -368,7 +368,13 @@ parameters were fitted on. Nov 2026: mechanisms, source comparison and the two o
 [GFNFF_ORDER_DEPENDENCE.md](GFNFF_ORDER_DEPENDENCE.md). That needs an external verdict (r²SCAN-3c on the affected
 structures) before it can become a default. The charge placement is the largest and the
 clearest: which fragment carries an ion's charge must follow the chemistry, not the input
-file. Status: **open, measured, mechanisms partly identified.**
+file. **Nov 24, 2026 (operator decision)**: `inversion_sort_xtb` defaults to true (xtb; the pprcht
+`ssort` is a method error of the reference implementation, Known Issue #34 d); verdict: GMTKN55 MAD
+-0.022 kcal/mol (95 % interval -0.058 .. +0.005, n = 1505 reactions), r2SCAN-3c at the GFN-FF optima
+-1.44 +- 0.79 kcal/mol (n = 16, carried by 3 structures), no energy jumps at distance ties
+([GFNFF_ORDER_DEPENDENCE.md](GFNFF_ORDER_DEPENDENCE.md)). `dgam_pi_membership` stays false (both
+references, no measurable accuracy effect). Status: **inversion part closed; neutral Coulomb (dgam),
+charged multi-fragment Coulomb and the MB16-43 / WATER27 bond spreads open.**
 
 ### 13. Three-body (ATM) dispersion is absent from GFN-FF
 GFN-FF's dispersion is pairwise (`gfnff_gdisp0.f90` `d3_gradient`); D4 proper carries an

@@ -150,7 +150,7 @@ numbers: [docs/KNOWN_ISSUES_ARCHIVE.md](docs/KNOWN_ISSUES_ARCHIVE.md).
 |---|---|---|
 | `gfn2` native | 11/12 `sqm_reference` at 1e-8 vs tblite (231-atom `complex` open); GMTKN55 vs xtb 6.7.1 within 0.017 kcal/mol (D4 ATM cutoff split, `-xtb.d4_atm_cutoff 40.0` removes it); open shell, d-shell, MOR41 95/95 < 1e-6 Eh vs tblite | SQM_VALIDATION.md, SCF_MODES.md, SQM_DSHELL_WP.md |
 | `gfn1` native | 14/16 `sqm_reference` at 1e-8 (He2, `complex` open); halogen-bond term; residual 0.011 kcal/mol is the xtb/tblite STO-6G split (`-xtb.sto6g_legacy_4sp true`) | SQM_WP2_gfn1_accuracy.md |
-| `gfnff` native | port of GFN-FF; vs pprcht/gfnff over every structure: MOR41 and GMTKN55 max 0.07 kcal/mol (Known Issue #25); S30L-CI max 0.58, from the deliberate sTors deviation (0.05 with `-gfnff.storsion_reference_loop_bug true`, #12); vs xtb differs where xtb and pprcht differ (#6, #21) | GFNFF_STATUS.md, S30L_GFNNF_VALIDATION.md |
+| `gfnff` native | port of GFN-FF; vs pprcht/gfnff over every structure: MOR41 and GMTKN55 max 0.07 kcal/mol (Known Issue #25, with `-gfnff.inversion_sort_xtb false`); S30L-CI max 0.58, from the deliberate sTors deviation (0.05 with `-gfnff.storsion_reference_loop_bug true`, #12); inversion sort follows xtb since Nov 24, 2026 (#34 d); vs xtb differs where xtb and pprcht differ (#6, #21) | GFNFF_STATUS.md, S30L_GFNNF_VALIDATION.md |
 | `pm3`/`am1`/`mndo` native | 21/21 tests vs Ulysses (< 4 µEh) | MNDO_INTEGRALS.md |
 | `eht` native | machine-tested | |
 | External | TBLite (`tblite-*`, `ipea1`), XTB (`xtb-*`), Ulysses (`ugfn2`, PM6, RM1 ...), ORCA, DFT-D3/D4, `xtb-gfnff` | |
@@ -428,13 +428,14 @@ Learned during the Jul - Sep 2026 GFN-FF / xTB validation (evidence per item in
 - **No numerical path may depend on the print level** (#38) or on atom order (#34); per-structure benchmarks cannot see reused-calculator bugs (#32).
 - **Gradients**: validate against a central finite difference of curcuma's own energy with Angstrom displacements (`gradient_unit_contract`); the `getGradient()` contract is Eh/Angstrom (#28). A converged SCF criterion must cover everything the mixer mixes (#29).
 - **Deliberate deviations from a reference** are opt-in/out switches, listed with defaults in the archive's switch table (`-xtb.sto6g_legacy_4sp`, `-xtb.d4_atm_cutoff`, `-gfnff.storsion_reference_loop_bug`, `-gfnff.frag_charge_model reference`, ...).
+- **Deviation from the port source pprcht by default**: inversion neighbour sort = xtb since Nov 24, 2026 (pprcht `ssort` translation bug, #34 d); compare against pprcht with `-gfnff.inversion_sort_xtb false`.
 
 ## Open Items
 
 Complete table with sources: [docs/KNOWN_ISSUES_ARCHIVE.md](docs/KNOWN_ISSUES_ARCHIVE.md#open-items). New bug reports go to the archive
 and `AIChangelog.md`, not into this file; only open items and traps stay here.
 
-- GFN-FF energy depends on atom numbering in pprcht and curcuma (911/2557 GMTKN55+MOR41 structures; REV_GFNFF_TODO #12) (#34)
+- GFN-FF energy depends on atom numbering in pprcht and curcuma (911/2557 GMTKN55+MOR41 structures; REV_GFNFF_TODO #12) (#34); inversion part fixed by default since Nov 24, 2026, dgam and charged multi-fragment parts open
 - ROCm: `-scf_mixed_precision false` ignored (G2-13), wave32 assumption (F-17) (#37)
 - Bit-identical results only at a fixed CPU thread count; the CUDA GFN1/GFN2 SCF and GFN-FF charge/force path are bitwise reproducible since Oct 17, 2026, the ROCm ones (gfx1200 only, `-gfnff.rocm_fixed_point`, `-xtb.rocm_fixed_point`) since Oct 25, 2026 (the multi-GPU EEQ split equals the single-GPU result only to 1e-12, independent of the GPU count; [GPU_REPRODUCIBILITY.md](docs/GPU_REPRODUCIBILITY.md), #36)
 - `shouldUpdateHBXB()` RMSD trigger off by `sqrt(natoms)` (ported from the reference, left); D4 ATM C6 frozen at setup (#33)

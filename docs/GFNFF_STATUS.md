@@ -4,6 +4,12 @@
 **Implementation**: AI-generated, machine-tested — **human production testing pending**
 **Location**: `src/core/energy_calculators/ff_methods/`
 
+## Port fidelity: deliberate deviation from pprcht in the inversion sort (Nov 24, 2026) 🤖⚙️
+
+- Since Nov 24, 2026 (operator decision) the neighbour sort of inversion centres follows xtb (`-gfnff.inversion_sort_xtb`, default true): xtb is the more accurate and correct implementation; pprcht's `ssort` ends both loops with `exit` where xtb continues (`go to`), a documented method error of the reference implementation (Known Issue #34 d, [GFNFF_ORDER_DEPENDENCE.md](GFNFF_ORDER_DEPENDENCE.md)).
+- All other terms stay at port fidelity; `dgam_pi_membership` stays false (both references).
+- Comparison numbers against pprcht in this file and in the validation docs (MOR41/GMTKN55 max 0.07 kcal/mol, S30L-CI) were measured with the pprcht sort. For structures with an inversion order effect (332 of 2462 GMTKN55, 36 of 95 MOR41 in the original order) compute the reference comparison with `-gfnff.inversion_sort_xtb false`.
+
 ## Fused D4 pair C6 on the CPU, `-gfnff.disp_c6_fused` (Oct 30, 2026) 🤖⚙️
 
 - Default on. Before, every gradient step wrote C6 into each `GFNFFDispersion` (`refreshDispersionC6`) and dC6/dCN into `D4DC6DCNPairs` (`computeDC6DCN`), two passes over the 60-Bohr list (12.8 M pairs at 5747 atoms), which the energy loop then read back. Now `FFWorkspace::calcD4Dispersion` evaluates C6 = sum_b g_i[Z_j][b] w_j[b] and both derivatives per pair from the generator's per-atom view (`D4FusedC6View`, kernels in `dispersion/d4_pair_c6.h`, also called by the generator itself); pairs beyond 50 Bohr are skipped before any C6 work.
@@ -25,7 +31,7 @@
 ## xtb library regression gate (Oct 11, 2026) 🤖⚙️
 
 - ctest `xtb_library_energies` (label `gfnff;sqm`, CPU, 4 threads): gfnff and gfn2 single points vs the stored xtb 6.7.1 energies in `test_cases/reference_data/xtb_library_energies.json`; no xtb run at test time.
-- GFN-FF: 1e-5 Eh vs xtb; known deviations (|d| > 1e-5, 8 structures, e.g. macrocycle-bgal, jl22-bgal) only must reproduce the stored difference to 1e-5 Eh. Charged structures use the `frag_charge_model reference` baseline.
+- GFN-FF: 1e-5 Eh vs xtb. The former 8 known deviations (helicene-frames17, jl22-bgal x3, macrocycle-bgal x4; 1.1e-5 .. 1.3e-3 Eh) were the pprcht inversion sort; with the xtb sort as default (Nov 24, 2026) they agree to <= 3.6e-7 Eh and are plain 1e-5 checks now. Charged structures use the `frag_charge_model reference` baseline.
 - GFN2: 1e-4 Eh vs xtb for natoms <= 500 (measured max 5.2e-5); peo201-chain (1410 atoms, D4 ATM split) only with `--include-large`.
 - Limit: for known-deviation structures the check compares differences derived from the same JSON, so an error in the stored `gfnff_xtb` alone is not detected (negative probe: `gfnff_curcuma` +1e-3 fails, `gfnff_xtb` +1e-3 passes).
 

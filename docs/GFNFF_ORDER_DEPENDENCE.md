@@ -6,14 +6,45 @@
 ## Result in short
 
 Two mechanisms carry the whole spread seen on caffeine, benzoic acid, the acetic acid dimer and
-`complex` (31 orders each). Both are in the Fortran sources, curcuma ports them faithfully
-(same order -> same term energy as pprcht), so neither is a port error:
+`complex` (31 orders each). Both are in the Fortran sources and curcuma ported them faithfully
+(same order -> same term energy as pprcht), so neither was a port error. Since Nov 24, 2026 the
+inversion sort follows xtb by default (decision below), because the pprcht behaviour is a
+**method error of the reference implementation** (a translation bug), not a property of GFN-FF:
 
-| Term | Mechanism | pprcht | xtb 6.7.1 | curcuma default | Class | Switch (default off) |
+| Term | Mechanism | pprcht | xtb 6.7.1 | curcuma default | Class | Switch |
 |---|---|---|---|---|---|---|
-| inversion | `ssort` of pprcht stops early, neighbour roles depend on input order | spreads | no spread | = pprcht | R (pprcht translation bug; xtb is correct) | `-gfnff.inversion_sort_xtb true` |
-| Coulomb | nitrogen dgam tests `piadr(i)` (compact list, an index cutoff) | spreads | spreads | = pprcht | R (both references) | `-gfnff.dgam_pi_membership true` |
+| inversion | `ssort` of pprcht stops early, neighbour roles depend on input order | spreads | no spread | = xtb since Nov 24, 2026 (before: = pprcht) | R (pprcht translation bug; xtb is correct) | `-gfnff.inversion_sort_xtb` (default true; `false` = pprcht) |
+| Coulomb | nitrogen dgam tests `piadr(i)` (compact list, an index cutoff) | spreads | spreads | = pprcht = xtb | R (both references) | `-gfnff.dgam_pi_membership true` (default false) |
 | bond, repulsion, ... | summation order (rounding) | <= 6 nEh | | <= 12 nEh | T | none |
+
+## Decision (Nov 24, 2026, operator)
+
+- `-gfnff.inversion_sort_xtb` defaults to **true**: the inversion term follows xtb, the more accurate
+  and correct implementation. `false` restores the pprcht behaviour, bit-compatible with the pprcht
+  port before Nov 2026; use it for per-structure comparisons against pprcht.
+- `-gfnff.dgam_pi_membership` stays **false**: both references have the index cutoff (port fidelity),
+  and no accuracy argument either way was measurable.
+- **Method error of the reference pprcht**: `gfnff_helpers.f90:278` "if (edum(j) .gt. pp) exit" and
+  `:282` "if (k .eq. i) exit" translate xtb's `gfnff_ini2.F90:1620` "go to 120" and `:1624` "go to 140",
+  which continue with the next iteration; `exit` ends the loop. The distance sort of the three
+  neighbours of an inversion centre ("such that the same inversion angle def. always results",
+  `gfnff_ini.f90:1850`) then fails for some input orders.
+- Evidence (vault project folder `GFN-FF-Reihenfolge`, BERICHT.md, Nov 24, 2026; AI-computed, not
+  operator-checked): GMTKN55, n = 1505 reactions: MAD change -0.022 kcal/mol (bootstrap 95 % interval
+  -0.058 .. +0.005); of the 24 reactions that move by more than 0.1 kcal/mol, 19 get better and 5 worse
+  (about 10 independent structure groups). Energy jumps at distance ties: the same geometries rounded to
+  8 decimals (<= 1e-4 A, mostly 1e-7) change ICONF/N3P3H12_1 by 7.84 kcal/mol with the old default and
+  no structure by more than 0.01 with the new one (n = 2376). r2SCAN-3c single points at the GFN-FF
+  optima, n = 16 structures chosen for the largest effect: -1.44 +- 0.79 kcal/mol (new minus old optimum),
+  carried by 3 structures (ICONF/N3P3H12_1 -9.39, N3P3H12_2 -7.48, MB16-43/12 -6.14); the other 13 average 0.00.
+  MOR41: +0.006 kcal/mol MAD, negligible against the ~60 kcal/mol method error. N inversion profiles
+  (5 molecules): no accuracy difference.
+- **Behaviour change for existing users**: in the original atom order the new default changes the GFN-FF
+  energy of 332 of 2462 GMTKN55 structures (58 by more than 0.01 kcal/mol, at most 9.88 kcal/mol,
+  MB16-43/12) and of 36 of 95 MOR41 structures (reaction shifts at most 0.061 kcal/mol); counted from
+  `partA/energies_testset.csv` and `partA/mor41_summary.txt` of the report (variant v1). The 598 / 9.73 in
+  "Effect of the switches" below are for both switches together. Structures whose inversion centres
+  already come out sorted (and structures without inversion centres) are bitwise unchanged. Old values: `-gfnff.inversion_sort_xtb false`.
 
 With both switches the spread is gone on these structures (<= 12 nEh, gradient <= 3e-9 Eh/A).
 Known Issue #42 (NH3 kink) is a third consequence of the same design: the inversion term assigns
@@ -93,11 +124,11 @@ the neighbour roles by distance rank, and the rank changes at a distance tie (cl
   gradient belongs to one fixed role set, so analytic and numeric gradient cannot agree across a
   rank change. Not fixable without changing the term (symmetrising over the three choices of l).
 
-## Effect of the switches in the ORIGINAL order
+## Effect of the switches in the ORIGINAL order (measured before the Nov 24, 2026 default change)
 
 - Six structures above: only `complex` moves (inversion -0.249, Coulomb -0.059 kcal/mol); the
   inversion part equals the curcuma(default) - xtb difference of the total (+0.249 kcal/mol).
-- MOR41 (95): 36 structures change, MAD 0.0022, max 0.061 kcal/mol (ED26). GMTKN55 (2462): 598 change, MAD 0.053, max 9.73 kcal/mol (MB16-43/12; ICONF/N3P3H12_1 7.84). `scripts/refset_regression.py` against `af140bb4`; with the defaults 0 of 2557 change (bitwise).
+- Both switches on, MOR41 (95): 36 structures change, MAD 0.0022, max 0.061 kcal/mol (ED26). GMTKN55 (2462): 598 change, MAD 0.053, max 9.73 kcal/mol (MB16-43/12; ICONF/N3P3H12_1 7.84). `scripts/refset_regression.py` against `af140bb4`; with the defaults of that time (both off) 0 of 2557 change (bitwise).
 
 ## Canonical-order switch (`-gfnff.canonical_order`): assessed, not implemented
 
@@ -111,11 +142,36 @@ measured spread at their source. Left as a TODO work package.
 ## Tests
 
 - ctest `gfnff_order_invariance` (`test_cases/scripts/check_gfnff_order_invariance.py`): C6H5COOH, acetic
-  acid dimer, caffeine, identity + 8 seeded permutations, `-threads 1`. Default: every term except the
-  reference-caused ones within 1e-8 Eh; inversion (C6H5COOH 5.9e-7, dimer 4.7e-4 Eh) and Coulomb
-  (caffeine 6.6e-5 Eh) must SPREAD (> 1e-7 Eh, documents the reference behaviour). Both switches: every
-  term within 1e-8 Eh (inversion <= 5e-12, Coulomb <= 1.2e-10). 1e-8 and not 1e-9, because the bond term
-  spreads by up to 1.7 nEh from summation order on these structures.
+  acid dimer, caffeine, identity + 8 seeded permutations, `-threads 1`, three variants. Default (since
+  Nov 24, 2026): every term, inversion included, within 1e-8 Eh; only the Coulomb spread of caffeine
+  (6.6e-5 Eh, dgam, both references) must SPREAD (> 1e-7 Eh). `-gfnff.inversion_sort_xtb false`: the
+  pprcht inversion spread (C6H5COOH 5.9e-7, dimer 4.7e-4 Eh) must still be present (regression test of
+  the old variant). Both switches: every term within 1e-8 Eh (inversion <= 5e-12, Coulomb <= 1.2e-10).
+  1e-8 and not 1e-9, because the bond term spreads by up to 1.7 nEh from summation order on these structures.
+- Topology cache: the `.topo.json` fingerprint carries `|invsort=xtb` when the switch is on, so with the
+  new default a cache written under the old default (no suffix) is not reused. Checked on `complex`: a
+  `.topo.json` written by `ca7610b5` gives "fingerprint mismatch - recalculating" and the fresh new-default
+  energy (-37.24104719 Eh, old -37.24064962); with `-gfnff.inversion_sort_xtb false` it is a cache hit and
+  gives the old energy.
+- Default change against `ca7610b5` (`bitcheck_merge.sh`, 6 structures x gfnff/gfn1/gfn2 x 1/4 threads + 2 MD,
+  CPU and CUDA): 32 of 38 lines identical; the 6 that differ are gfnff on the three structures whose
+  inversion centres were out of sort order: jl22-bgal -0.773 kcal/mol, aaa-bglc.conf76 -7.8e-8 Eh,
+  ammonia.alt1 energy identical but gradient up to 1.9e-4 Eh/A (another role assignment of the same
+  energy, the #42 mechanism). gfn1, gfn2 and both MD runs bitwise unchanged.
+- `gfnff_val_*` (`test_gfnff_validation`, term references from the pprcht-based analyzer in
+  `test_cases/reference_data/*.ref.json`): the runner now sets `inversion_sort_xtb false`, because the
+  references follow pprcht. Under the new default only `gfnff_val_complex` failed (12 of 947 checks:
+  torsion+inversion energy -3.975e-4 Eh = the inversion change -3.976e-4 Eh, total -37.24105047 vs
+  reference -37.24065188 Eh, plus the torsion gradient checks of 8 atoms); with the pprcht sort 947/947.
+- `xtb_library_energies`: the 8 GFN-FF known deviations against xtb 6.7.1 (helicene-frames17, jl22-bgal x3,
+  macrocycle-bgal x4; frozen 1.1e-5 .. 1.3e-3 Eh, "not explained") were the pprcht inversion sort: with the new
+  default |curcuma - xtb| <= 3.6e-7 Eh on all 8; removed from `KNOWN_DEVIATIONS`, now plain 1e-5 checks.
+- `cli_gfnff_01_complex_gfnff_singlepoint`: references from the pprcht-based analyzer (total -37.240651871 Eh);
+  the new default gave -37.24104719 (dev -3.95e-4 Eh, xtb 6.7.1: -37.24104704); the test now runs with
+  `-gfnff.inversion_sort_xtb false`.
+- `structinv_ammonia_ideal_c3v_gfnff` translate: gradient after translation 1.9e-4 Eh/A (energy 0 Eh; pprcht sort
+  5.6e-16): at the exact N-H tie the last bit of the distances chooses the roles (#42); new `known_deviations`
+  entry, limit 3e-4 Eh/A. FD residual 5.9e-5 -> 9.6e-5 Eh/A (limit 2e-4, unchanged).
 - `ctest -R gfnff_param_fallbacks` passes (PARAM default == code fallback for the two switches).
 - Gates (this branch vs `af140bb4`): `bitcheck_merge.sh` (6 structures x gfnff/gfn1/gfn2 x 1/4 threads + 2 MD) 38 of 38 lines identical; full `ctest -j1` 498/500, the 2 failures pre-existing (`cli_confsearch_05_seed_cold_bias`, `cli_deltaml_04_label_consistency`); MOR41 + GMTKN55 defaults bitwise unchanged.
 
@@ -151,7 +207,12 @@ threshold; the numbers are not directly comparable.)
 ## Not done / open
 
 - Charged Coulomb (35 structures, up to 435 kcal/mol) and bond spreads (MB16-43/23, WATER27/OHmH2O): not traced here.
-- No r2SCAN-3c verdict on whether the switched values are better: they only make the energy
-  independent of the numbering; the parameters were fitted with the reference behaviour.
+- r2SCAN-3c verdict (Nov 24, 2026, see Decision): for the inversion sort small and carried by 3
+  near-symmetric structures (n = 16); for dgam none measurable (n = 9). The parameters were fitted with
+  the reference behaviour.
 - GPU: the inversion list and dgam are host-side inputs, so CUDA/ROCm take the switches without
-  kernel changes; not run on a GPU.
+  kernel changes. New default, CUDA (RTX 5080) against CPU of the same build, 6 structures with
+  inversion centres (complex, C60ISO/1, ICONF/N3P3H12_1, MB16-43/12, C6H5COOH, acetic acid dimer):
+  |dE| <= 1.0e-12 Eh, gradient <= 1.0e-12 Eh/A, no fallback. ROCm not run.
+- Water: no inversion term (O has two neighbours), so water energies are bitwise unchanged
+  (432-H2O box frame, water8 cluster: md5 of `-dump_gradient` identical before/after the default change).
