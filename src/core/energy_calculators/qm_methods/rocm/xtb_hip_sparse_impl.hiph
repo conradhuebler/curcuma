@@ -1,0 +1,331 @@
+/*
+ * <ROCm screened (sparse) AO-pair storage: state and host logic of XtbHipContext::Impl>
+ * Copyright (C) 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+// Claude Generated (Nov 24, 2026, ROCm parity A7). Included INSIDE struct XtbHipContext::Impl
+// (rocm/xtb_hip_context.hip); kernels in xtb_hip_sparse.hiph. Port of the CUDA screened storage
+// (cuda/xtb_gpu_context.cu: buildScreenedPairs, the sparse branch of computeIntegrals, the *_sp dispatch).
+//
+// Switch: -gpu_sparse_integrals off|auto|on -> sp_mode 0|1|2. ROCm default (key absent): 0, every dense path
+// unchanged (no function below allocates or frees anything while sp_mode == 0). auto: screened when fewer than
+// 50 % of the AO pairs survive the distance screen (CUDA rule), on: always screened.
+//
+// Storage with sp_on (screened for the current geometry):
+//   dense (nao^2): dS0 (S, read by every eigensolver path), dF, dS (solver work, Cholesky probe), dCw (Cw, and the
+//                  dense H0 scratch of the integral build); not allocated: dH0, dP, dL, dW, dDpInt, dQpInt.
+//   pattern (nnz): dSpS, dSpH0, dSpP (density), dSpW (energy-weighted density), GFN2 dSpDp (3), dSpQp (6).
+// With sp_mode != 0 the nao^2 buffers above are allocated by computeIntegrals (spPrepare), which knows the geometry,
+// instead of by beginBasis. Not ported: the atom-pair screen of the dense S/H0 build (CUDA dAtKind/dScreenCut2), the
+// distributed density, spin polarisation with screened storage (refused, the caller falls back), the memory
+// estimate before allocation (a failed hipMalloc fails the integral build, a counted fallback).
+
+int    sp_mode = 0;              ///< 0 = dense, 1 = auto, 2 = always screened
+bool   sp_on = false;            ///< storage used for the current geometry
+double sp_eps = 1.0e-20;         ///< integrals below this are dropped (CUDA sparse_eps)
+int    sp_nnz = 0, sp_nup = 0;
+double sp_fraction = 1.0;        ///< nnz / nao^2 of the last screened geometry
+double sp_rmax = 0.0;            ///< largest element-pair cutoff (Bohr)
+int*    dSpRow = nullptr; int* dSpCol = nullptr; int* dSpColPtr = nullptr; int* dSpPerm = nullptr;
+int*    dSpUp = nullptr;  int* dSpDiag = nullptr;
+double* dSpS = nullptr;  double* dSpH0 = nullptr; double* dSpDp = nullptr; double* dSpQp = nullptr;
+double* dSpP = nullptr;  double* dSpW = nullptr;
+std::vector<int>    h_sp_row, h_sp_col;      ///< host copy of the pattern (scatter of the host downloads)
+std::vector<int>    h_sp_z, h_sp_ao0, h_sp_nao;
+std::vector<double> h_sp_amin, h_sp_cmax;
+bool                h_sp_contig = false;      ///< AOs of every atom form one ascending block
+std::string         sp_error;
+
+bool spDefer() const { return sp_mode != 0; }
+
+/// Per-atom screening data (smallest exponent, largest |coefficient|, AO block), geometry independent.
+void spCaptureBasis(const XtbHipBasisData& b) {
+    if (!spDefer()) return;
+    h_sp_z.assign(b.z, b.z + b.nat);
+    h_sp_amin.assign(b.nat, 1.0e300);
+    h_sp_cmax.assign(b.nat, 0.0);
+    for (int ish = 0; ish < b.nsh; ++ish) {
+        const int at = b.sh2at[ish];
+        for (int p = 0; p < b.sh_nprim[ish]; ++p) {
+            const int ip = b.sh_prim_off[ish] + p;
+            h_sp_amin[at] = std::min(h_sp_amin[at], b.prim_alpha[ip]);
+            h_sp_cmax[at] = std::max(h_sp_cmax[at], std::fabs(b.prim_coeff[ip]));
+        }
+    }
+    h_sp_ao0.assign(b.nat, -1);
+    h_sp_nao.assign(b.nat, 0);
+    h_sp_contig = (b.ao2at != nullptr);
+    if (b.ao2at) {
+        for (int mu = 0; mu < b.nao; ++mu) {
+            const int at = b.ao2at[mu];
+            if (mu > 0 && at < b.ao2at[mu - 1]) { h_sp_contig = false; break; }
+            if (h_sp_ao0[at] < 0) h_sp_ao0[at] = mu;
+            ++h_sp_nao[at];
+        }
+    }
+}
+
+void spFreeArrays() {
+    for (void* p : { (void*)dSpRow, (void*)dSpCol, (void*)dSpColPtr, (void*)dSpPerm, (void*)dSpUp, (void*)dSpDiag,
+                     (void*)dSpS, (void*)dSpH0, (void*)dSpDp, (void*)dSpQp, (void*)dSpP, (void*)dSpW })
+        if (p) (void)hipFree(p);
+    dSpRow = dSpCol = dSpColPtr = dSpPerm = dSpUp = dSpDiag = nullptr;
+    dSpS = dSpH0 = dSpDp = dSpQp = dSpP = dSpW = nullptr;
+    h_sp_row.clear(); h_sp_row.shrink_to_fit();
+    h_sp_col.clear(); h_sp_col.shrink_to_fit();
+    sp_on = false; sp_nnz = 0; sp_nup = 0;
+}
+
+/// Dense storage for this geometry: the nao^2 buffers that beginBasis leaves out with sp_mode != 0. The sizes are
+/// those of the dense beginBasis/ensureResident. Claude Generated (Nov 24, 2026).
+bool spEnsureDense() {
+    if (sp_on) spFreeArrays();
+    sp_on = false;
+    if (!spDefer()) return true;
+    const int n = res_n;
+    if (n <= 0) return false;
+    const size_t nn = static_cast<size_t>(n) * n;
+    bool g = true;
+    if (!dH0) g &= hipMalloc(&dH0, nn * sizeof(double)) == hipSuccess;
+    if (g && !dP) g &= hipMalloc(&dP, nn * sizeof(double)) == hipSuccess;
+    if (g && basis_ready && bnao == n) {
+        if (!dL) g &= hipMalloc(&dL, nn * sizeof(double)) == hipSuccess;
+        if (g && !dW) g &= hipMalloc(&dW, nn * sizeof(double)) == hipSuccess;
+        if (g && bis_gfn2 && !dDpInt) g &= hipMalloc(&dDpInt, 3 * nn * sizeof(double)) == hipSuccess;
+        if (g && bis_gfn2 && !dQpInt) g &= hipMalloc(&dQpInt, 6 * nn * sizeof(double)) == hipSuccess;
+    }
+    if (!g) { (void)hipGetLastError(); sp_error = "dense integral storage: device allocation failed"; }
+    return g;
+}
+
+/// Drop the dense nao^2 buffers that the screened storage replaces.
+void spFreeDense() {
+    for (double** p : { &dH0, &dP, &dL, &dW, &dDpInt, &dQpInt })
+        if (*p) { (void)hipFree(*p); *p = nullptr; }
+    dL_ver = 0; chol_chk_ver = 0;
+    mp_computed = false;
+}
+
+/// Element-pair cutoffs, neighbour lists and the pattern (row/col/colptr/perm/up/diag), uploaded when screened
+/// storage is wanted (mode 2, or mode 1 with fraction < 0.5). Verbatim port of CUDA buildScreenedPairs (without the
+/// dense-build screen). Returns false only on an upload/allocation failure.
+bool spBuildPattern(const double* xyz_bohr, bool& use_sparse) {
+    use_sparse = false;
+    const int nat = bnat, nao = bnao;
+    sp_fraction = 1.0;
+    if (sp_mode == 0 || !h_sp_contig || nat <= 0 || static_cast<int>(h_sp_z.size()) != nat) return true;
+    double rabs = 0.0;
+    for (int a = 0; a < 3 * nat; ++a) rabs = std::max(rabs, std::fabs(xyz_bohr[a]));
+    std::map<int, int> kind_of_z;
+    std::vector<int> kind(nat);
+    std::vector<double> k_amin, k_cmax;
+    for (int a = 0; a < nat; ++a) {
+        auto it = kind_of_z.find(h_sp_z[a]);
+        if (it == kind_of_z.end()) {
+            it = kind_of_z.emplace(h_sp_z[a], static_cast<int>(k_amin.size())).first;
+            k_amin.push_back(h_sp_amin[a]);
+            k_cmax.push_back(h_sp_cmax[a]);
+        }
+        kind[a] = it->second;
+    }
+    const int nk = static_cast<int>(k_amin.size());
+    std::vector<double> cut2(static_cast<size_t>(nk) * nk);
+    sp_rmax = 0.0;
+    for (int i = 0; i < nk; ++i)
+        for (int j = 0; j < nk; ++j) {
+            const double r = hipScreenRadius(k_amin[i], k_cmax[i], k_amin[j], k_cmax[j], rabs, sp_eps);
+            cut2[static_cast<size_t>(i) * nk + j] = r * r;
+            sp_rmax = std::max(sp_rmax, r);
+        }
+    const unsigned hw = std::max(1u, std::min(std::thread::hardware_concurrency(), 32u));
+    std::vector<std::vector<int>> nb(nat);
+    {
+        std::vector<std::thread> pool;
+        for (unsigned t = 0; t < hw; ++t)
+            pool.emplace_back([&, t]() {
+                for (int b = static_cast<int>(t); b < nat; b += static_cast<int>(hw)) {
+                    const double xb = xyz_bohr[3*b], yb = xyz_bohr[3*b+1], zb = xyz_bohr[3*b+2];
+                    for (int a = 0; a < nat; ++a) {
+                        const double dx = xyz_bohr[3*a] - xb, dy = xyz_bohr[3*a+1] - yb, dz = xyz_bohr[3*a+2] - zb;
+                        if (dx*dx + dy*dy + dz*dz < cut2[static_cast<size_t>(kind[a]) * nk + kind[b]])
+                            nb[b].push_back(a);
+                    }
+                }
+            });
+        for (auto& th : pool) th.join();
+    }
+    std::vector<long long> col_atom_nnz(nat, 0);
+    long long nnz = 0;
+    for (int b = 0; b < nat; ++b) {
+        for (int a : nb[b]) col_atom_nnz[b] += h_sp_nao[a];
+        nnz += col_atom_nnz[b] * h_sp_nao[b];
+    }
+    sp_fraction = static_cast<double>(nnz) / (static_cast<double>(nao) * nao);
+    const bool want = (sp_mode == 2) || (sp_mode == 1 && sp_fraction < 0.5);
+    if (!want || nnz <= 0 || nnz > INT_MAX / 6) return true;
+
+    std::vector<int> colptr(nao + 1, 0);
+    {
+        long long acc = 0;
+        for (int b = 0; b < nat; ++b)
+            for (int k = 0; k < h_sp_nao[b]; ++k) {
+                colptr[h_sp_ao0[b] + k] = static_cast<int>(acc);
+                acc += col_atom_nnz[b];
+            }
+        colptr[nao] = static_cast<int>(acc);
+    }
+    std::vector<std::vector<int>> nb_off(nat);
+    for (int b = 0; b < nat; ++b) {
+        nb_off[b].resize(nb[b].size());
+        int off = 0;
+        for (size_t i = 0; i < nb[b].size(); ++i) { nb_off[b][i] = off; off += h_sp_nao[nb[b][i]]; }
+    }
+    h_sp_row.assign(static_cast<size_t>(nnz), 0);
+    h_sp_col.assign(static_cast<size_t>(nnz), 0);
+    std::vector<int> perm(static_cast<size_t>(nnz), 0);
+    std::vector<int> diag_idx(nao, -1);   // the AO diagonal is always in the pattern (an atom is its own neighbour)
+    {
+        std::vector<std::thread> pool;
+        for (unsigned t = 0; t < hw; ++t)
+            pool.emplace_back([&, t]() {
+                for (int b = static_cast<int>(t); b < nat; b += static_cast<int>(hw)) {
+                    for (int k = 0; k < h_sp_nao[b]; ++k) {
+                        const int nu = h_sp_ao0[b] + k;
+                        long long e = colptr[nu];
+                        for (size_t ia = 0; ia < nb[b].size(); ++ia) {
+                            const int a = nb[b][ia];
+                            const auto& la = nb[a];
+                            const size_t pos = static_cast<size_t>(std::lower_bound(la.begin(), la.end(), b) - la.begin());
+                            const int boff = nb_off[a][pos];
+                            for (int r = 0; r < h_sp_nao[a]; ++r, ++e) {
+                                const int mu = h_sp_ao0[a] + r;
+                                h_sp_row[e] = mu;
+                                h_sp_col[e] = nu;
+                                perm[e] = colptr[mu] + boff + k;
+                                if (a == b && r == k) diag_idx[nu] = static_cast<int>(e);
+                            }
+                        }
+                    }
+                }
+            });
+        for (auto& th : pool) th.join();
+    }
+    std::vector<int> up;
+    up.reserve(static_cast<size_t>(nnz) / 2 + static_cast<size_t>(nao));
+    for (long long e = 0; e < nnz; ++e)
+        if (h_sp_row[e] <= h_sp_col[e]) up.push_back(static_cast<int>(e));
+    // drop the previous pattern and values (another geometry), keep the host vectors just built
+    for (void* p : { (void*)dSpRow, (void*)dSpCol, (void*)dSpColPtr, (void*)dSpPerm, (void*)dSpUp, (void*)dSpDiag,
+                     (void*)dSpS, (void*)dSpH0, (void*)dSpDp, (void*)dSpQp, (void*)dSpP, (void*)dSpW })
+        if (p) (void)hipFree(p);
+    dSpRow = dSpCol = dSpColPtr = dSpPerm = dSpUp = dSpDiag = nullptr;
+    dSpS = dSpH0 = dSpDp = dSpQp = dSpP = dSpW = nullptr;
+    const size_t z = static_cast<size_t>(nnz);
+    bool g = true;
+    auto upi = [&](int*& d, const int* h, size_t cnt) {
+        if (!g) return;
+        g = hipMalloc(&d, cnt * sizeof(int)) == hipSuccess
+            && hipMemcpy(d, h, cnt * sizeof(int), hipMemcpyHostToDevice) == hipSuccess;
+    };
+    upi(dSpRow, h_sp_row.data(), z);
+    upi(dSpCol, h_sp_col.data(), z);
+    upi(dSpPerm, perm.data(), z);
+    upi(dSpUp, up.data(), up.size());
+    upi(dSpColPtr, colptr.data(), static_cast<size_t>(nao) + 1);
+    upi(dSpDiag, diag_idx.data(), static_cast<size_t>(nao));
+    if (!g) { (void)hipGetLastError(); sp_error = "screened pair upload failed"; spFreeArrays(); return false; }
+    sp_nnz = static_cast<int>(nnz);
+    sp_nup = static_cast<int>(up.size());
+    use_sparse = true;
+    return true;
+}
+
+/**
+ * @brief Storage decision and allocation for this geometry (called by computeIntegrals before the S/H0 build).
+ * sp_mode == 0: returns true and touches nothing. Otherwise screened (pattern + nnz arrays, dense H0/P/L/W/dp/qp
+ * freed) or dense (spEnsureDense). false: allocation/upload failed, sp_error says which. Claude Generated.
+ */
+bool spPrepare(const double* xyz_bohr) {
+    if (!spDefer()) return true;
+    sp_error.clear();
+    bool use_sparse = false;
+    if (!spBuildPattern(xyz_bohr, use_sparse)) return false;
+    if (!use_sparse) return spEnsureDense();
+    spFreeDense();
+    const size_t z = static_cast<size_t>(sp_nnz);
+    bool g = true;
+    for (double** p : { &dSpS, &dSpH0, &dSpP, &dSpW })
+        if (g) g = hipMalloc(p, z * sizeof(double)) == hipSuccess;
+    if (g && bis_gfn2) g = hipMalloc(&dSpDp, 3 * z * sizeof(double)) == hipSuccess
+                         && hipMalloc(&dSpQp, 6 * z * sizeof(double)) == hipSuccess;
+    if (!g) { (void)hipGetLastError(); sp_error = "screened storage: device allocation failed"; spFreeArrays(); return false; }
+    sp_on = true;
+    return true;
+}
+
+// ----- consumers (each is the screened twin of one dense statement sequence) -----
+
+/// F = 0, then F(e) = H0 - 1/2 S (v + v) [- 1/2 multipole] at the stored pairs (k_fock [+ k_add_fock_multipole]).
+bool spFock(double* F, const double* vao, bool multipole) {
+    const int n = bnao;
+    if (hipMemsetAsync(F, 0, static_cast<size_t>(n) * n * sizeof(double), stream) != hipSuccess) return false;
+    const bool mp = multipole && dSpDp && dSpQp;
+    hipLaunchKernelGGL(k_build_fock_sp, dim3((sp_nnz + 255) / 256), dim3(256), 0, stream, F, n, sp_nnz,
+                       dSpRow, dSpCol, dSpPerm, dSpH0, dSpS, vao,
+                       mp ? dSpDp : nullptr, mp ? dSpQp : nullptr, dVdp, dVqp, dao2at);
+    return hipGetLastError() == hipSuccess;
+}
+
+/// out(e) = sum_k Cw(r,k) C(c,k) over the first ncol columns, pattern only (P or W).
+bool spDensity(const double* Cw, const double* C, int ncol, double* out) {
+    if (ncol <= 0)
+        return hipMemsetAsync(out, 0, static_cast<size_t>(sp_nnz) * sizeof(double), stream) == hipSuccess;
+    hipLaunchKernelGGL(k_density_sp_sym, dim3((sp_nup + 255) / 256), dim3(256), 0, stream, sp_nup, dSpUp,
+                       dSpRow, dSpCol, dSpPerm, Cw, C, bnao, ncol, out);
+    return hipGetLastError() == hipSuccess;
+}
+
+/// Populations + band partials into dPB from dSpP (k_popband).
+void spPopBand() {
+    hipLaunchKernelGGL(k_popband_spP, dim3((bnao + 63) / 64), dim3(64), 0, stream, dSpP, dSpS, dSpH0, dSpColPtr,
+                       dSpPerm, dPB, bnao);
+}
+
+/// Host dense (column-major, ncomp blocks of n^2) from ncomp nnz-blocks on the device: zeros outside the pattern.
+bool spScatterHost(const double* dvals, int ncomp, double* out) {
+    const size_t z = static_cast<size_t>(sp_nnz), n = static_cast<size_t>(bnao), nn = n * n;
+    if (!dvals || h_sp_row.size() != z) return false;
+    std::vector<double> v(z * ncomp);
+    if (hipMemcpy(v.data(), dvals, v.size() * sizeof(double), hipMemcpyDeviceToHost) != hipSuccess) return false;
+    std::fill(out, out + nn * ncomp, 0.0);
+    for (int k = 0; k < ncomp; ++k)
+        for (size_t e = 0; e < z; ++e)
+            out[k * nn + static_cast<size_t>(h_sp_row[e]) + static_cast<size_t>(h_sp_col[e]) * n] = v[k * z + e];
+    return true;
+}
+
+/// L = chol(S) for the host copy: dS0 is factorised in the solver work buffer dS (no dense dL is kept).
+bool spDownloadCholesky(double* L) {
+    const size_t nn = static_cast<size_t>(bnao) * bnao;
+    if (!dS || solver_n != bnao || !dS0) return false;
+    if (hipMemcpyAsync(dS, dS0, nn * sizeof(double), hipMemcpyDeviceToDevice, stream) != hipSuccess) return false;
+    if (hipStreamSynchronize(stream) != hipSuccess) return false;
+    if (rocsolver_dpotrf(handle, rocblas_fill_lower, bnao, dS, bnao, dInfo) != rocblas_status_success) return false;
+    if (hipDeviceSynchronize() != hipSuccess) return false;
+    rocblas_int info = 0;
+    if (hipMemcpy(&info, dInfo, sizeof(rocblas_int), hipMemcpyDeviceToHost) != hipSuccess || info != 0) return false;
+    return hipMemcpy(L, dS, nn * sizeof(double), hipMemcpyDeviceToHost) == hipSuccess;
+}

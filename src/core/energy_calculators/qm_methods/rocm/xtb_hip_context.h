@@ -138,6 +138,14 @@ public:
     /// fixed-point integers (2^-52, the CUDA gfix_add scheme), independent of thread arrival order;
     /// false: FP64 atomicAdd. A contribution outside the range fails the call (host fallback).
     void setFixedPoint(bool on);
+    /// A7 (Claude Generated, Nov 24, 2026): screened AO-pair storage of S, H0 and the GFN2 multipole integrals,
+    /// port of the CUDA XtbGpuContext::setSparseIntegrals (cuda/xtb_gpu_context.cu). mode 0 = dense (ROCm default),
+    /// 1 = auto (screened when fewer than 50 % of the AO pairs survive), 2 = always screened. Call before beginBasis.
+    void setSparseIntegrals(int mode);
+    bool sparseIntegrals() const;       ///< screened storage in use for the current geometry
+    double sparseFraction() const;      ///< stored fraction of the AO pairs of the last screened geometry
+    double sparseCutoffBohr() const;    ///< largest element-pair cutoff (Bohr)
+    std::string sparseError() const;    ///< why the last screened allocation failed (empty if none)
 
     /// Bits of solverFallbackEvents(). Claude Generated (Oct 2026).
     enum SolverFallbackEvent : unsigned {

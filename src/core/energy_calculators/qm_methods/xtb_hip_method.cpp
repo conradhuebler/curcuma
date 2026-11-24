@@ -213,7 +213,18 @@ public:
     bool beginComputed(const std::vector<double>& xyz_bohr) override
     {
         const bool ok = XtbGpuResidentBackend::beginComputed(xyz_bohr);
-        if (!ok) warnDeviceFallback("integral build", std::string());
+        if (!ok) warnDeviceFallback("integral build", m_ctx ? m_ctx->sparseError() : std::string());
+        else if (m_ctx && !m_storage_reported && CurcumaLogger::get_verbosity() >= 2
+                 && (m_ctx->sparseIntegrals() || m_ctx->sparseFraction() < 1.0)) {
+            // A7 (Claude Generated, Nov 24, 2026): CUDA wording (xtb_gpu_method.cpp beginComputed); only printed when
+            // -gpu_sparse_integrals auto|on asked for the screen (the dense default computes no fraction)
+            m_storage_reported = true;
+            CurcumaLogger::info(m_ctx->sparseIntegrals()
+                ? fmt::format("GPU integrals: screened pair storage, {:.1f} % of AO pairs (largest cutoff {:.1f} Bohr)",
+                              100.0 * m_ctx->sparseFraction(), m_ctx->sparseCutoffBohr())
+                : fmt::format("GPU integrals: dense storage ({:.1f} % of AO pairs within the screening cutoff)",
+                              100.0 * m_ctx->sparseFraction()));
+        }
         return ok;
     }
     /// One warning at the default verbosity and one counted GPU fallback per backend object (CUDA wording).
@@ -934,6 +945,7 @@ private:
     bool        m_res_pc = false;          ///< WP5: Broyden seed preconditioner on the resident loop allowed
     std::string m_res_error;         ///< reason of the last failed resident-loop call (lastError)
     bool m_fallback_warned = false;  ///< basis/integral build fallback reported once (A5, Claude Generated)
+    bool m_storage_reported = false; ///< A7: screened/dense storage line printed once
     std::string m_res_begin_failed;   ///< error of the last failed begin of the current calculation
     std::string m_res_fallback;       ///< first permanent resident-loop fallback ("" = none)
 
@@ -1064,17 +1076,23 @@ XtbHipComputationalMethod::XtbHipComputationalMethod(MethodType method, const js
         const bool density_syrk = cfgBool("rocm_density_syrk", false);
         const bool explicit_linv = cfgBool("rocm_explicit_linv", false);    // Claude Generated (Oct 2026), default false since Oct 17
         ctx->setSolverOptions(cached_chol, density_syrk, explicit_linv);
-        // Claude Generated (Nov 2026, ROCm parity A5): -gpu_sparse_integrals (screened pair storage of S, H0 and the
-        // multipole integrals, CUDA XtbGpuContext::buildScreenedPairs) has no ROCm counterpart; the HIP context always
-        // stores the integrals dense. 'on' says so once instead of being dropped silently; 'auto' (the default) stays
-        // quiet, it means dense on ROCm. Nothing moves to the CPU, so this is not a counted GPU fallback.
+        // Claude Generated (Nov 24, 2026, ROCm parity A7): -gpu_sparse_integrals off|auto|on, screened pair storage
+        // of S, H0 and the GFN2 multipole integrals (XtbHipContext::setSparseIntegrals, rocm/xtb_hip_sparse_impl.hiph;
+        // CUDA XtbGpuContext::buildScreenedPairs). Same values and thresholds as CUDA (auto: < 50 % of the AO pairs
+        // survive, integrals < 1e-20 dropped); only the default differs: without the key ROCm stores dense (CUDA: auto).
+        // The global PARAM default "auto" is documentation only and does not reach this config.
         if (config.contains("gpu_sparse_integrals")) {
             const auto& v = config["gpu_sparse_integrals"];
             const std::string m = v.is_string() ? v.get<std::string>() : (v.is_boolean() ? (v.get<bool>() ? "on" : "off") : "auto");
-            if (m == "on" || m == "true" || m == "sparse")
-                CurcumaLogger::warn(fmt::format("{}: -gpu_sparse_integrals {} ignored: screened integral storage is "
-                                                "CUDA only, ROCm stores S, H0 and the multipole integrals dense",
-                                                getMethodName(), m));
+            int mode = m == "on" || m == "true" || m == "sparse" ? 2 : (m == "off" || m == "false" || m == "dense") ? 0 : 1;
+            // The spin-polarised device functions keep P, Pm and W dense (A4); with screened storage they are not
+            // ported, so the switch is refused here with one warning and the run keeps the dense storage.
+            if (mode != 0 && cfgBool("spin_polarization", false)) {
+                CurcumaLogger::warn(fmt::format("{}: -gpu_sparse_integrals {} is not available with "
+                                                "-xtb.spin_polarization on ROCm; dense integral storage", getMethodName(), m));
+                mode = 0;
+            }
+            ctx->setSparseIntegrals(mode);
         }
         // WP10 (Claude Generated, Oct 2026): -xtb.rocm_fixed_point, order-independent gradient accumulation.
         ctx->setFixedPoint(cfgBool("rocm_fixed_point", kRocmFixedPointDefault));

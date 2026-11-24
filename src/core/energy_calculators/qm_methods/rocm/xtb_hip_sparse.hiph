@@ -1,0 +1,396 @@
+/*
+ * <ROCm screened (sparse) AO-pair storage: device kernels and the screening radius>
+ * Copyright (C) 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+// Claude Generated (Nov 24, 2026, ROCm parity A7). Included by xtb_hip_context.hip inside its anonymous
+// namespace, after the dense kernels (xacc_add, d_* integral helpers). Port of the CUDA "Screened (sparse)
+// AO-pair storage" block (cuda/xtb_gpu_context.cu: k_sp_gather, k_multipole_ints_sp, k_build_fock_sp,
+// k_density_sp_sym, k_pop_ao_spP, k_multipole_moments_spP, k_grad_cn_onsite_spP, k_grad_h0_pulay_spP) and of
+// screenRadius.
+//
+// Physics: Gaussian integrals between two atoms decay as exp(-a_i a_j/(a_i+a_j) R^2); beyond an element-pair
+// radius every element of S, H0, dp_int and qp_int is below 1e-20 (sparse_eps) and is dropped. Entry e of the
+// pattern is the AO pair (row[e], col[e]), column-major (col ascending, then row ascending), colptr[mu] is the
+// first entry of column mu, perm[e] the entry of the transposed pair. Every kernel performs the arithmetic of
+// its dense ROCm counterpart in the same order, so a forced pattern that drops nothing gives the dense numbers.
+//
+// Differences from CUDA: S stays dense on ROCm (dS0, read by every eigensolver path); the screened S values are
+// a gathered copy used only by these kernels. Atomics use xacc_add (fixed point with -xtb.rocm_fixed_point).
+
+/// values[e] = dense[row[e] + col[e] n]
+__global__ void k_sp_gather(const double* __restrict__ dense, const int* __restrict__ row,
+                            const int* __restrict__ col, int n, int nnz, double* __restrict__ values)
+{
+    const int e = blockIdx.x * blockDim.x + threadIdx.x;
+    if (e >= nnz) return;
+    values[e] = dense[static_cast<size_t>(row[e]) + static_cast<size_t>(col[e]) * n];
+}
+
+/// GFN2 dipole/quadrupole integrals at the stored pairs (twin of k_multipole_ints; S from the screened values of
+/// the same entry). dp/qp are 3 nnz / 6 nnz, component k at k nnz + e.
+__global__ void k_multipole_ints_sp(
+    int nnz, const int* __restrict__ row, const int* __restrict__ col,
+    const int* __restrict__ ao2sh, const int* __restrict__ ao2at,
+    const int* __restrict__ iao_sh, const int* __restrict__ ang_sh,
+    const int* __restrict__ sh_nprim, const int* __restrict__ sh_prim_off,
+    const double* __restrict__ prim_alpha, const double* __restrict__ prim_coeff,
+    const double* __restrict__ xyz, const double* __restrict__ Ssp,
+    double* __restrict__ dp_sp, double* __restrict__ qp_sp)
+{
+    const int e = blockIdx.x * blockDim.x + threadIdx.x;
+    if (e >= nnz) return;
+    const size_t ne = static_cast<size_t>(nnz);
+    const size_t ee = static_cast<size_t>(e);
+    const int mu = row[e], nu = col[e];
+    const int isha = ao2sh[mu], iat = ao2at[mu];
+    const int ishb = ao2sh[nu], jat = ao2at[nu];
+    const int la = ang_sh[isha], lb = ang_sh[ishb];
+    const int sa = mu - iao_sh[isha], sb = nu - iao_sh[ishb];
+    const bool dpair = (la >= 2 || lb >= 2);
+    for (int k = 0; k < 3; ++k) dp_sp[static_cast<size_t>(k) * ne + ee] = 0.0;
+    for (int k = 0; k < 6; ++k) qp_sp[static_cast<size_t>(k) * ne + ee] = 0.0;
+    const double* aA = prim_alpha + sh_prim_off[isha];
+    const double* cA = prim_coeff + sh_prim_off[isha];
+    const int npa = sh_nprim[isha];
+    const double* aB = prim_alpha + sh_prim_off[ishb];
+    const double* cB = prim_coeff + sh_prim_off[ishb];
+    const int npb = sh_nprim[ishb];
+    double Sx, D[3], Q[6];
+    if (!dpair) {
+        const int ta = d_ao_to_type(la, sa);
+        const int tb = d_ao_to_type(lb, sb);
+        if (ta < 0 || tb < 0) return;
+        d_cgto_multipole(aA, cA, npa, aB, cB, npb,
+                         xyz[3*iat+0], xyz[3*iat+1], xyz[3*iat+2],
+                         xyz[3*jat+0], xyz[3*jat+1], xyz[3*jat+2], ta, tb, Sx, D, Q);
+    } else {
+        d_multipole_elem(la, sa, lb, sb, aA, cA, npa, aB, cB, npb,
+                         xyz[3*iat+0], xyz[3*iat+1], xyz[3*iat+2],
+                         xyz[3*jat+0], xyz[3*jat+1], xyz[3*jat+2], Sx, D, Q);
+    }
+    const double Rx = xyz[3*jat+0], Ry = xyz[3*jat+1], Rz = xyz[3*jat+2];
+    const double Smn = Ssp[e];
+    const double dx = D[0], dy = D[1], dz = D[2];
+    dp_sp[0*ne + ee] = dx - Rx * Smn;
+    dp_sp[1*ne + ee] = dy - Ry * Smn;
+    dp_sp[2*ne + ee] = dz - Rz * Smn;
+    const double qxx = Q[0] - 2*Rx*dx + Rx*Rx*Smn;
+    const double qxy = Q[1] - Rx*dy - Ry*dx + Rx*Ry*Smn;
+    const double qyy = Q[2] - 2*Ry*dy + Ry*Ry*Smn;
+    const double qxz = Q[3] - Rx*dz - Rz*dx + Rx*Rz*Smn;
+    const double qyz = Q[4] - Ry*dz - Rz*dy + Ry*Rz*Smn;
+    const double qzz = Q[5] - 2*Rz*dz + Rz*Rz*Smn;
+    const double tr = 0.5 * (qxx + qyy + qzz);
+    qp_sp[0*ne + ee] = 1.5 * qxx - tr;
+    qp_sp[1*ne + ee] = 1.5 * qxy;
+    qp_sp[2*ne + ee] = 1.5 * qyy - tr;
+    qp_sp[3*ne + ee] = 1.5 * qxz;
+    qp_sp[4*ne + ee] = 1.5 * qyz;
+    qp_sp[5*ne + ee] = 1.5 * qzz - tr;
+}
+
+/// Fock matrix at the stored pairs (twin of k_fock + k_add_fock_multipole); F must be zeroed first.
+/// F(mu,nu) = H0 - 1/2 S (v_mu + v_nu) - 1/2 [dp/qp(mu,nu).v(jat) + dp/qp(nu,mu).v(iat)]; dp_sp == nullptr: GFN1.
+__global__ void k_build_fock_sp(double* __restrict__ F, int n, int nnz,
+                                const int* __restrict__ row, const int* __restrict__ col,
+                                const int* __restrict__ perm,
+                                const double* __restrict__ H0sp, const double* __restrict__ Ssp,
+                                const double* __restrict__ vao,
+                                const double* __restrict__ dp_sp, const double* __restrict__ qp_sp,
+                                const double* __restrict__ v_dp, const double* __restrict__ v_qp,
+                                const int* __restrict__ ao2at)
+{
+    const int e = blockIdx.x * blockDim.x + threadIdx.x;
+    if (e >= nnz) return;
+    const int mu = row[e], nu = col[e];
+    const size_t mn = static_cast<size_t>(mu) + static_cast<size_t>(nu) * n;
+    double f = H0sp[e] - 0.5 * Ssp[e] * (vao[mu] + vao[nu]);
+    if (dp_sp) {
+        const size_t ne = static_cast<size_t>(nnz);
+        const size_t em = static_cast<size_t>(e), et = static_cast<size_t>(perm[e]);
+        const int iat = ao2at[mu], jat = ao2at[nu];
+        double dd = 0.0;
+        for (int k = 0; k < 3; ++k) {
+            const size_t off = static_cast<size_t>(k) * ne;
+            dd += dp_sp[off + em] * v_dp[k + jat * 3] + dp_sp[off + et] * v_dp[k + iat * 3];
+        }
+        double qq = 0.0;
+        for (int k = 0; k < 6; ++k) {
+            const size_t off = static_cast<size_t>(k) * ne;
+            qq += qp_sp[off + em] * v_qp[k + jat * 6] + qp_sp[off + et] * v_qp[k + iat * 6];
+        }
+        f -= 0.5 * (dd + qq);   // same two roundings as k_fock followed by k_add_fock_multipole
+    }
+    F[mn] = f;
+}
+
+/// Density (or energy-weighted density) on the pattern only: P(r,c) = sum_k Cw(r,k) C(c,k) for the entries with
+/// row <= col (up[]), mirrored to perm[e]. Same sum as the dense GEMM P = Cw C^T for that element (summation
+/// order of rocBLAS not reproduced; the difference is FP64 rounding). CUDA k_density_sp_sym.
+__global__ void k_density_sp_sym(int nup, const int* __restrict__ up, const int* __restrict__ row,
+                                 const int* __restrict__ col, const int* __restrict__ perm,
+                                 const double* __restrict__ Cw, const double* __restrict__ C,
+                                 int n, int ncol, double* __restrict__ Psp)
+{
+    const int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= nup) return;
+    const int e = up[t];
+    const size_t r = static_cast<size_t>(row[e]), c = static_cast<size_t>(col[e]);
+    double acc = 0.0;
+    for (int k = 0; k < ncol; ++k) {
+        const size_t off = static_cast<size_t>(k) * n;
+        acc += Cw[r + off] * C[c + off];
+    }
+    Psp[e] = acc;
+    Psp[perm[e]] = acc;
+}
+
+/// Twin of k_popband from pattern-only P: out[mu] = sum_r P(mu,r) S(mu,r), out[n+mu] = sum_r P(mu,r) H0(mu,r),
+/// r ascending (the entries of column mu, read at the transposed entry = row mu).
+__global__ void k_popband_spP(const double* __restrict__ Psp, const double* __restrict__ Ssp,
+                              const double* __restrict__ H0sp, const int* __restrict__ colptr,
+                              const int* __restrict__ perm, double* __restrict__ out, int n)
+{
+    const int mu = blockIdx.x * blockDim.x + threadIdx.x;
+    if (mu >= n) return;
+    double pop = 0.0, bnd = 0.0;
+    for (int e = colptr[mu]; e < colptr[mu + 1]; ++e) {
+        const int t = perm[e];
+        const double p = Psp[t];
+        pop += p * Ssp[t];
+        bnd += p * H0sp[t];
+    }
+    out[mu] = pop; out[n + mu] = bnd;
+}
+
+/// Twin of k_multipole_moments from pattern-only P (column mu, rows ascending).
+__global__ void k_multipole_moments_spP(double* dp_at, double* qp_at, const double* __restrict__ Psp,
+                                        const double* __restrict__ dp_sp, const double* __restrict__ qp_sp,
+                                        const int* __restrict__ colptr, const int* __restrict__ ao2at,
+                                        int n, int nnz, int fix)
+{
+    const int mu = blockIdx.x * blockDim.x + threadIdx.x;
+    if (mu >= n) return;
+    const size_t ne = static_cast<size_t>(nnz);
+    const int iat = ao2at[mu];
+    for (int k = 0; k < 3; ++k) {
+        const double* dk = dp_sp + static_cast<size_t>(k) * ne;
+        double acc = 0.0;
+        for (int e = colptr[mu]; e < colptr[mu + 1]; ++e) acc += Psp[e] * dk[e];
+        xacc_add(&dp_at[k + iat * 3], -acc, fix);
+    }
+    for (int k = 0; k < 6; ++k) {
+        const double* qk = qp_sp + static_cast<size_t>(k) * ne;
+        double acc = 0.0;
+        for (int e = colptr[mu]; e < colptr[mu + 1]; ++e) acc += Psp[e] * qk[e];
+        xacc_add(&qp_at[k + iat * 6], -acc, fix);
+    }
+}
+
+/// Twin of k_res_mom_part from pattern-only P: part[9 mu + k] = sum_e P(e) int_k(e) over column mu.
+__global__ void k_res_mom_part_spP(int n, int nnz, const double* __restrict__ Psp, const double* __restrict__ dp_sp,
+                                   const double* __restrict__ qp_sp, const int* __restrict__ colptr,
+                                   double* __restrict__ part)
+{
+    const int mu = blockIdx.x * blockDim.x + threadIdx.x;
+    if (mu >= n) return;
+    const size_t ne = static_cast<size_t>(nnz);
+    for (int k = 0; k < 3; ++k) {
+        const double* dk = dp_sp + static_cast<size_t>(k) * ne;
+        double acc = 0.0;
+        for (int e = colptr[mu]; e < colptr[mu + 1]; ++e) acc += Psp[e] * dk[e];
+        part[9 * static_cast<size_t>(mu) + k] = acc;
+    }
+    for (int k = 0; k < 6; ++k) {
+        const double* qk = qp_sp + static_cast<size_t>(k) * ne;
+        double acc = 0.0;
+        for (int e = colptr[mu]; e < colptr[mu + 1]; ++e) acc += Psp[e] * qk[e];
+        part[9 * static_cast<size_t>(mu) + 3 + k] = acc;
+    }
+}
+
+/// Twin of k_grad_cn_onsite: P(mu,mu) from the pattern via the diagonal entry index.
+__global__ void k_grad_cn_onsite_spP(int nao, const double* __restrict__ Psp, const int* __restrict__ diag_idx,
+                                     const double* __restrict__ kcn, const int* __restrict__ ao2sh,
+                                     const int* __restrict__ ao2at, double* __restrict__ dEdcn, int fix)
+{
+    const int mu = blockIdx.x * blockDim.x + threadIdx.x;
+    if (mu >= nao) return;
+    const double Pmm = Psp[diag_idx[mu]];
+    xacc_add(&dEdcn[ao2at[mu]], (-kcn[ao2sh[mu]]) * Pmm, fix);
+}
+
+/// Twin of k_grad_h0_pulay (ROCm dense kernel, same expressions) for one stored pair e = (mu, nu) with
+/// iat < jat; P, S, H0 and W come from the pattern arrays of the same entry.
+__global__ void k_grad_h0_pulay_spP(
+    int nnz, const int* __restrict__ row, const int* __restrict__ col, int is_gfn2,
+    const int* __restrict__ ao2sh, const int* __restrict__ ao2at, const int* __restrict__ ang,
+    const int* __restrict__ iao_sh, const int* __restrict__ sh_nprim, const int* __restrict__ sh_prim_off,
+    const double* __restrict__ prim_alpha, const double* __restrict__ prim_coeff,
+    const double* __restrict__ sh_zeta, const double* __restrict__ shpoly, const double* __restrict__ kcn,
+    const int* __restrict__ valence, const int* __restrict__ z, const double* __restrict__ se,
+    const double* __restrict__ xyz, const double* __restrict__ Psp, const double* __restrict__ Ssp,
+    const double* __restrict__ H0sp, const double* __restrict__ Wsp, const double* __restrict__ v_ao,
+    const double* __restrict__ v_dp, const double* __restrict__ v_qp,
+    const double* __restrict__ atomic_rad, const double* __restrict__ pauling,
+    double* __restrict__ grad, double* __restrict__ dEdcn, int fix)
+{
+    const int e = blockIdx.x * blockDim.x + threadIdx.x;
+    if (e >= nnz) return;
+    const int mu = row[e], nu = col[e];
+    const int iat = ao2at[mu], jat = ao2at[nu];
+    if (iat >= jat) return;
+
+    const int isha = ao2sh[mu], ishb = ao2sh[nu];
+    const int la = ang[isha], lb = ang[ishb];
+    const int sa = mu - iao_sh[isha], sb = nu - iao_sh[ishb];
+    const bool dpair = (la >= 2 || lb >= 2);
+    int ta = -1, tb = -1;
+    if (!dpair) {
+        ta = d_ao_to_type(la, sa);
+        tb = d_ao_to_type(lb, sb);
+        if (ta < 0 || tb < 0) return;
+    }
+
+    const double xa = xyz[3*iat+0], ya = xyz[3*iat+1], za = xyz[3*iat+2];
+    const double xb = xyz[3*jat+0], yb = xyz[3*jat+1], zb = xyz[3*jat+2];
+    const double dxij = xa - xb, dyij = ya - yb, dzij = za - zb;
+    const double r2 = dxij*dxij + dyij*dyij + dzij*dzij;
+    if (r2 < 1.0e-12) return;
+    const double r = sqrt(r2);
+    const int zi = z[iat], zj = z[jat];
+    const double rad_sum = atomic_rad[zi-1] + atomic_rad[zj-1];
+    const double rr = sqrt(r / rad_sum);
+    const double pi_a = 1.0 + shpoly[isha] * rr, pi_b = 1.0 + shpoly[ishb] * rr;
+
+    double hs;
+    if (is_gfn2 == 0) {
+        const bool vi = valence[isha] != 0, vj = valence[ishb] != 0;
+        if (vi && vj) {
+            double den = pauling[zi-1] - pauling[zj-1]; den *= den;
+            hs = d_kpair_gfn1(zi, zj) * d_kshell_gfn1(la, lb) * (1.0 + (-7.0e-3) * den);
+        } else if (vi && !vj) hs = 0.5 * (d_kshell_gfn1(la, la) + 2.85);
+        else if (!vi && vj)   hs = 0.5 * (d_kshell_gfn1(lb, lb) + 2.85);
+        else                  hs = 2.85;
+    } else {
+        double den = pauling[zi-1] - pauling[zj-1]; den *= den;
+        const double enp = 1.0 + 2.0e-2 * den;
+        const double km = d_kshell_gfn2(la, lb) * enp;
+        const double za_ = sh_zeta[isha], zb_ = sh_zeta[ishb];
+        hs = pow(2.0 * sqrt(za_ * zb_) / (za_ + zb_), 0.5) * km;
+    }
+    const double h_factor = hs * pi_a * pi_b;
+    const double h_av = 0.5 * (se[isha] + se[ishb]) * h_factor;
+    const double dlog_pi_dr_r = (shpoly[isha] / pi_a + shpoly[ishb] / pi_b) * rr / (2.0 * r2);
+
+    const double Pmn = Psp[e], Smn = Ssp[e], H0mn = H0sp[e], Wmn = Wsp[e];
+    double dS[3];
+    if (dpair) {
+        d_overlap_grad_elem(la, sa, lb, sb,
+            prim_alpha + sh_prim_off[isha], prim_coeff + sh_prim_off[isha], sh_nprim[isha],
+            prim_alpha + sh_prim_off[ishb], prim_coeff + sh_prim_off[ishb], sh_nprim[ishb],
+            xa, ya, za, xb, yb, zb, dS);
+    } else {
+        d_cgto_overlap_grad(
+            prim_alpha + sh_prim_off[isha], prim_coeff + sh_prim_off[isha], sh_nprim[isha],
+            prim_alpha + sh_prim_off[ishb], prim_coeff + sh_prim_off[ishb], sh_nprim[ishb],
+            xa, ya, za, xb, yb, zb, ta, tb, dS);
+    }
+
+    const double sval = 2.0*Pmn*h_av - 2.0*Wmn - Pmn*(v_ao[mu] + v_ao[nu]);
+    const double shp  = 2.0*Pmn*H0mn*dlog_pi_dr_r;
+    double Gx = sval*dS[0] + shp*dxij;
+    double Gy = sval*dS[1] + shp*dyij;
+    double Gz = sval*dS[2] + shp*dzij;
+
+    if (is_gfn2 && v_dp) {
+        double D_mp[3], dD_dA[3][3], dQ_dA[3][6];
+        if (dpair) {
+            d_multipole_grad_elem(la, sa, lb, sb,
+                prim_alpha + sh_prim_off[isha], prim_coeff + sh_prim_off[isha], sh_nprim[isha],
+                prim_alpha + sh_prim_off[ishb], prim_coeff + sh_prim_off[ishb], sh_nprim[ishb],
+                xa, ya, za, xb, yb, zb, D_mp, dD_dA, dQ_dA);
+        } else {
+            d_cgto_multipole_grad_transformed(
+                prim_alpha + sh_prim_off[isha], prim_coeff + sh_prim_off[isha], sh_nprim[isha],
+                prim_alpha + sh_prim_off[ishb], prim_coeff + sh_prim_off[ishb], sh_nprim[ishb],
+                xa, ya, za, xb, yb, zb, ta, tb, D_mp, dD_dA, dQ_dA);
+        }
+        const double dR[3] = { xb - xa, yb - ya, zb - za };
+        const int qa6[6] = {0,0,1,0,1,2}, qb6[6] = {0,1,1,2,2,2};
+        double term[3];
+        for (int l = 0; l < 3; ++l) {
+            double t = 0.0;
+            for (int k = 0; k < 3; ++k) {
+                t += dD_dA[l][k] * v_dp[k + jat*3];
+                const double dDiat = dD_dA[l][k] + dR[k]*dS[l] - (k==l ? Smn : 0.0);
+                t += dDiat * v_dp[k + iat*3];
+            }
+            double dqr[6];
+            for (int q = 0; q < 6; ++q) {
+                const int a = qa6[q], b = qb6[q];
+                dqr[q] = -(b==l ? D_mp[a] : 0.0) + dR[b]*dD_dA[l][a]
+                       -  (a==l ? D_mp[b] : 0.0) + dR[a]*dD_dA[l][b]
+                       + (-(a==l ? dR[b] : 0.0) - (b==l ? dR[a] : 0.0))*Smn
+                       + dR[a]*dR[b]*dS[l];
+            }
+            const double dtr_c = 0.5*(dqr[0] + dqr[2] + dqr[5]);
+            for (int q = 0; q < 6; ++q) {
+                const bool is_diag = (qa6[q] == qb6[q]);
+                t += dQ_dA[l][q] * v_qp[q + jat*6];
+                const double dQiat = dQ_dA[l][q] + 1.5*dqr[q] - (is_diag ? dtr_c : 0.0);
+                t += dQiat * v_qp[q + iat*6];
+            }
+            term[l] = t;
+        }
+        Gx -= Pmn * term[0];
+        Gy -= Pmn * term[1];
+        Gz -= Pmn * term[2];
+    }
+
+    xacc_add(&grad[3*iat+0], Gx, fix); xacc_add(&grad[3*jat+0], -Gx, fix);
+    xacc_add(&grad[3*iat+1], Gy, fix); xacc_add(&grad[3*jat+1], -Gy, fix);
+    xacc_add(&grad[3*iat+2], Gz, fix); xacc_add(&grad[3*jat+2], -Gz, fix);
+
+    const double cn_c = h_factor * Pmn * Smn;
+    xacc_add(&dEdcn[iat], (-kcn[isha]) * cn_c, fix);
+    xacc_add(&dEdcn[jat], (-kcn[ishb]) * cn_c, fix);
+}
+
+/**
+ * @brief Radius (Bohr) beyond which every overlap-type integral between two atoms is below eps.
+ *
+ * a1/a2: smallest primitive exponents of the two atoms, c1/c2: largest |contraction coefficients|, rabs: largest
+ * |coordinate| (origin shift of the multipole integrals). A primitive product decays as c1 c2 (pi/g)^1.5
+ * exp(-a1 a2/g R^2), g = a1 + a2; angular and multipole factors are bounded by (1 + R)^6 and (1 + rabs)^2.
+ * Deliberately loose (a larger radius costs memory, not accuracy). Verbatim port of CUDA screenRadius.
+ */
+static double hipScreenRadius(double a1, double c1, double a2, double c2, double rabs, double eps)
+{
+    const double g = a1 + a2;
+    const double mu = a1 * a2 / g;
+    const double logc = std::log(c1 * c2 * std::pow(M_PI / g, 1.5) + 1.0e-300) + 2.0 * std::log1p(rabs);
+    const double target = std::log(eps);
+    auto significant = [&](double R) { return logc + 6.0 * std::log1p(R) - mu * R * R > target; };
+    double lo = 0.0, hi = 8.0;
+    while (significant(hi) && hi < 1.0e6) hi *= 2.0;
+    for (int it = 0; it < 80; ++it) {
+        const double mid = 0.5 * (lo + hi);
+        (significant(mid) ? lo : hi) = mid;
+    }
+    return hi;
+}

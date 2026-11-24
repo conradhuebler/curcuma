@@ -35,6 +35,8 @@
 #include <cstring>
 #include <memory>
 #include <climits>
+#include <map>       // A7 screened storage (xtb_hip_sparse_impl.hiph)
+#include <thread>    // A7 screened storage (xtb_hip_sparse_impl.hiph)
 #include <cstdlib>
 #include <stdexcept>
 #include <string>
@@ -2559,6 +2561,7 @@ __global__ void k_spin_w_shift(double* __restrict__ W, const double* __restrict_
 
 // Claude Generated (Nov 24, 2026, ROCm A3): periodic device kernels and their buffers (port of the CUDA G/H stages).
 #include "xtb_hip_periodic_kernels.hiph"
+#include "xtb_hip_sparse.hiph"   // A7 (Claude Generated, Nov 24, 2026): screened AO-pair storage kernels
 } // namespace
 #endif // HAVE_ROCSOLVER
 
@@ -3006,13 +3009,14 @@ struct XtbHipContext::Impl {
 
     bool ensureResident(int n) {
         if (!ensureSolver(n)) return false;
-        if (n == res_n && dH0) return true;
+        if (n == res_n && (spDefer() ? dS0 : dH0)) return true;
         freeResident();
         const size_t nn = static_cast<size_t>(n) * n;
-        if (hipMalloc(&dH0,  nn * sizeof(double)) != hipSuccess) return false;
+        // A7: with -gpu_sparse_integrals auto|on, dH0 and dP are allocated by computeIntegrals (spPrepare)
+        if (!spDefer() && hipMalloc(&dH0,  nn * sizeof(double)) != hipSuccess) return false;
         if (hipMalloc(&dS0,  nn * sizeof(double)) != hipSuccess) return false;
         if (hipMalloc(&dvao, n  * sizeof(double)) != hipSuccess) return false;
-        if (hipMalloc(&dP,   nn * sizeof(double)) != hipSuccess) return false;
+        if (!spDefer() && hipMalloc(&dP,   nn * sizeof(double)) != hipSuccess) return false;
         if (hipMalloc(&dCw,  nn * sizeof(double)) != hipSuccess) return false;
         if (hipMalloc(&dOcc, n  * sizeof(double)) != hipSuccess) return false;
         if (hipMalloc(&dPB,  2 * n * sizeof(double)) != hipSuccess) return false;
@@ -3025,11 +3029,13 @@ struct XtbHipContext::Impl {
         dH0 = dS0 = dvao = dP = dCw = dOcc = dPB = nullptr; res_n = 0;
         freeSpin();        // A4: the spin buffers have the size of the resident matrices
         freeCholCache();   // the factor belongs to dS0 (Claude Generated, Oct 2026)
+        spFreeArrays();    // A7: the screened arrays have the size of this basis
         ++s_version;
     }
 
     bool resBegin(const double* H0, const double* S, int n) {
         if (!ok || n <= 0 || !ensureResident(n)) return false;
+        if (spDefer() && !spEnsureDense()) return false;   // A7: host-uploaded integrals are always dense (as CUDA)
         const size_t nn = static_cast<size_t>(n) * n;
         if (hipMemcpy(dH0, H0, nn * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
         ++s_version;   // new S: invalidates the cached Cholesky factor (Claude Generated, Oct 2026)
@@ -3043,6 +3049,8 @@ struct XtbHipContext::Impl {
         const int n = res_n; if (n <= 0) return false;
         if (hipMemcpy(dvao, v_ao, n * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
         dim3 blk(16, 16), grd((n + 15) / 16, (n + 15) / 16);
+        if (sp_on) { if (!spFock(dF, dvao, false)) return false; }   // A7 screened twin
+        else
         hipLaunchKernelGGL(k_fock, grd, blk, 0, stream, dH0, dS0, dvao, dF, n);   // F → dF
         if (fp32) {
             if (!eigensolveFp32(n)) return false;   // dF ← C (FP64), dEps ← eps (FP64)
@@ -3058,7 +3066,7 @@ struct XtbHipContext::Impl {
         // Cw = C(:, :ncol) diag(sqrt(occ)) via rocblas_dsyrk (lower triangle, n^2 ncol flops
         // instead of 2 n^2 ncol), then mirrored to the full matrix the kernels read. Needs
         // occ >= 0; any negative occupation keeps the GEMM path.
-        bool syrk = opt_density_syrk && ncol > 0;
+        bool syrk = opt_density_syrk && ncol > 0 && !sp_on;   // A7: the pattern density takes Cw = C diag(occ)
         for (int r = 0; syrk && r < ncol; ++r) if (!(occ[r] >= 0.0)) syrk = false;
         std::vector<double> occ_full(n, 0.0);          // ascending order matches C columns
         for (int r = 0; r < ncol; ++r) occ_full[r] = syrk ? std::sqrt(occ[r]) : occ[r];
@@ -3069,7 +3077,9 @@ struct XtbHipContext::Impl {
         // P = Cw · Cᵀ
         // Claude Generated (Oct 2026): only the first ncol columns carry weight, so the inner
         // dimension is ncol instead of n (same sum, the dropped terms were exact zeros).
-        if (syrk) {
+        if (sp_on) {   // A7: P on the pattern only (k_density_sp_sym), populations/band from it
+            if (!spDensity(dCw, dF, ncol, dSpP)) return false;
+        } else if (syrk) {
             if (rocblas_dsyrk(handle, rocblas_fill_lower, rocblas_operation_none, n, ncol,
                               &one, dCw, n, &zero, dP, n) != rocblas_status_success) return false;
             hipLaunchKernelGGL(k_mirror_lower, grd, blk, 0, stream, dP, n);   // upper <- lower
@@ -3078,6 +3088,7 @@ struct XtbHipContext::Impl {
                               n, n, ncol, &one, dCw, n, dF, n, &zero, dP, n) != rocblas_status_success) return false;
         } else if (hipMemsetAsync(dP, 0, static_cast<size_t>(n) * n * sizeof(double), stream) != hipSuccess) return false;
         dim3 blk1(64), grd1((n + 63) / 64);
+        if (sp_on) spPopBand(); else   // A7
         hipLaunchKernelGGL(k_popband, grd1, blk1, 0, stream, dP, dS0, dH0, dPB, n);
         if (hipStreamSynchronize(stream) != hipSuccess) return false;
         std::vector<double> pb(static_cast<size_t>(2) * n);
@@ -3090,6 +3101,8 @@ struct XtbHipContext::Impl {
     bool resFinalize(double* P, double* C) {
         const int n = res_n; if (n <= 0) return false;
         const size_t nn = static_cast<size_t>(n) * n;
+        if (sp_on) { if (!spScatterHost(dSpP, 1, P)) return false; }   // A7: zeros outside the pattern
+        else
         if (hipMemcpy(P, dP, nn * sizeof(double), hipMemcpyDeviceToHost) != hipSuccess) return false;
         if (hipMemcpy(C, dF, nn * sizeof(double), hipMemcpyDeviceToHost) != hipSuccess) return false;
         return true;
@@ -3124,6 +3137,7 @@ struct XtbHipContext::Impl {
         spCa = spPm = spPB = nullptr; sp_n = 0; w_spin_override = false;
     }
     bool resSpinKeepAlpha() {
+        if (sp_on) return false;   // A7: spin polarisation with screened storage is not ported (caller falls back)
         const int n = res_n; if (n <= 0 || !dF || !ensureSpin(n)) return false;
         return hipMemcpyAsync(spCa, dF, static_cast<size_t>(n) * n * sizeof(double), hipMemcpyDeviceToDevice,
                               stream) == hipSuccess
@@ -3147,7 +3161,7 @@ struct XtbHipContext::Impl {
     bool resDensitySpin(const double* occ_a, int ncol_a, const double* occ_b, int ncol_b,
                         double* pop_ao, double* spop_ao, double* band) {
         const int n = res_n;
-        if (n <= 0 || sp_n != n || !spCa || ncol_a < 0 || ncol_a > n || ncol_b < 0 || ncol_b > n) return false;
+        if (sp_on || n <= 0 || sp_n != n || !spCa || ncol_a < 0 || ncol_a > n || ncol_b < 0 || ncol_b > n) return false;   // A7: sp_on, see resSpinKeepAlpha
         if (!spinChannel(occ_b, ncol_b, dF, dP)) return false;     // dP   <- Pb
         if (!spinChannel(occ_a, ncol_a, spCa, spPm)) return false; // spPm <- Pa
         const size_t nn = static_cast<size_t>(n) * n;
@@ -3178,6 +3192,7 @@ struct XtbHipContext::Impl {
     /// of the closed-shell W (occupation 2 folded into the weights) is the same, so k_grad_h0_pulay's
     /// sval = ... - 2 W ... gives the CPU term + Pm (u_a + u_b).
     bool spinW(const double* we_a, int ncol_a, const double* we_b, int ncol_b, const double* u_ao) {
+        if (sp_on) return false;   // A7: see resSpinKeepAlpha
         w_spin_override = false;
         const int n = res_n;
         if (n <= 0 || sp_n != n || !spCa || !spPm || !dW || !basis_ready || bnao != n
@@ -3314,8 +3329,10 @@ struct XtbHipContext::Impl {
             g &= hipMalloc(&dcn, static_cast<size_t>(bnat) * sizeof(double)) == hipSuccess;
             g &= hipMalloc(&dse, static_cast<size_t>(bnsh) * sizeof(double)) == hipSuccess;
             g &= hipMalloc(&dgamma, static_cast<size_t>(bnsh) * bnsh * sizeof(double)) == hipSuccess;
+            if (!spDefer()) {   // A7: with -gpu_sparse_integrals auto|on allocated by computeIntegrals
             g &= hipMalloc(&dL, static_cast<size_t>(bnao) * bnao * sizeof(double)) == hipSuccess;
             g &= hipMalloc(&dW, static_cast<size_t>(bnao) * bnao * sizeof(double)) == hipSuccess;
+            }
             g &= hipMalloc(&dVao, static_cast<size_t>(bnao) * sizeof(double)) == hipSuccess;
             g &= hipMalloc(&dQsh, static_cast<size_t>(bnsh) * sizeof(double)) == hipSuccess;
             g &= hipMalloc(&dGrad, 3 * static_cast<size_t>(bnat) * sizeof(double)) == hipSuccess;
@@ -3330,14 +3347,17 @@ struct XtbHipContext::Impl {
         mp_pot_valid = false;   // dVdp/dVqp reallocated (Claude Generated, Oct 2026)
         if (bis_gfn2) {
             const size_t nn = static_cast<size_t>(bnao) * bnao;
+            if (!spDefer()) {   // A7: see dL/dW above
             g &= hipMalloc(&dDpInt, 3 * nn * sizeof(double)) == hipSuccess;
             g &= hipMalloc(&dQpInt, 6 * nn * sizeof(double)) == hipSuccess;
+            }
             g &= hipMalloc(&dVdp, 3 * static_cast<size_t>(bnat) * sizeof(double)) == hipSuccess;
             g &= hipMalloc(&dVqp, 6 * static_cast<size_t>(bnat) * sizeof(double)) == hipSuccess;
             g &= hipMalloc(&dDpAt, 3 * static_cast<size_t>(bnat) * sizeof(double)) == hipSuccess;
             g &= hipMalloc(&dQpAt, 6 * static_cast<size_t>(bnat) * sizeof(double)) == hipSuccess;
         }
         basis_ready = g;
+        if (g) spCaptureBasis(bd);   // A7: per-atom screening data (no-op while sp_mode == 0)
         return g;
     }
 
@@ -3349,7 +3369,8 @@ struct XtbHipContext::Impl {
         // A4 (Claude Generated, Nov 2026): consume the one-shot spin W flag first, so no early return leaves it set.
         const bool w_spin = w_spin_override && !resident;
         w_spin_override = false;
-        if (!basis_ready || bnao <= 0 || !dP) return false;
+        if (!basis_ready || bnao <= 0 || (!dP && !sp_on)) return false;
+        if (sp_on && w_spin) { grad_error = "spin polarisation with screened integral storage"; return false; }   // A7
         if (resident && !conv_pot_valid) { grad_error = "converged potentials are not on the device"; return false; }
         if (!resident) conv_pot_valid = false;   // dVao/dQsh/dVdp/dVqp are overwritten below
         const int nao = bnao, nat = bnat, nsh = bnsh;
@@ -3380,18 +3401,21 @@ struct XtbHipContext::Impl {
             // W is in place (dW)
         } else if (w_from_goo) {
             const int no = ps_no_last;
-            if (!dS || solver_n != nao || res_n != nao || !dH0 || !dS0 || (bis_gfn2 && (!mp_grad || !dDpInt || !dQpInt)))
+            if (!dS || solver_n != nao || res_n != nao || !dS0
+                || (sp_on ? (bis_gfn2 && (!mp_grad || !dSpDp)) : (!dH0 || (bis_gfn2 && (!mp_grad || !dDpInt || !dQpInt)))))
                 return false;
             const double two = 2.0;
             dim3 b(16, 16), gr((nao + 15) / 16, (nao + 15) / 16);
-            hipLaunchKernelGGL(k_fock, gr, b, 0, stream, dH0, dS0, dVao, dS, nao);
-            if (bis_gfn2)
+            if (sp_on) { if (!spFock(dS, dVao, bis_gfn2)) return false; }   // A7 screened twin
+            else hipLaunchKernelGGL(k_fock, gr, b, 0, stream, dH0, dS0, dVao, dS, nao);
+            if (bis_gfn2 && !sp_on)
                 hipLaunchKernelGGL(k_add_fock_multipole, gr, b, 0, stream, dS, dDpInt, dQpInt, dVdp, dVqp, dao2at, nao);
+            double* const dT = sp_on ? dCw : dW;   // A7: no dense dW when screened; dCw is overwritten last
             if (hipGetLastError() != hipSuccess
                 || rocblas_dgemm(handle, rocblas_operation_none, rocblas_operation_none, nao, no, nao, &one, dS, nao,
-                                 dF, nao, &zero, dW, nao) != rocblas_status_success           // T = F C_o (dW scratch)
+                                 dF, nao, &zero, dT, nao) != rocblas_status_success           // T = F C_o (dW scratch)
                 || rocblas_dgemm(handle, rocblas_operation_transpose, rocblas_operation_none, no, no, nao, &one, dF, nao,
-                                 dW, nao, &zero, dS, no) != rocblas_status_success            // G_oo (dS scratch)
+                                 dT, nao, &zero, dS, no) != rocblas_status_success            // G_oo (dS scratch)
                 || rocblas_dgemm(handle, rocblas_operation_none, rocblas_operation_none, nao, no, no, &two, dF, nao,
                                  dS, no, &zero, dCw, nao) != rocblas_status_success)          // Cw = C_o 2 G_oo
                 return false;
@@ -3406,6 +3430,8 @@ struct XtbHipContext::Impl {
         }
         if (w_spin) {
             // W is in place (dW)
+        } else if (sp_on) {
+            if (!spDensity(dCw, dF, kocc, dSpW)) return false;   // A7: W on the pattern only (CUDA spP path)
         } else if (kocc > 0) {
             if (rocblas_dgemm(handle, rocblas_operation_none, rocblas_operation_transpose,
                               nao, nao, kocc, &one, dCw, nao, dF, nao, &zero, dW, nao) != rocblas_status_success) return false;
@@ -3417,6 +3443,16 @@ struct XtbHipContext::Impl {
         { dim3 b(128), gr((nat + 127) / 128);
           hipLaunchKernelGGL(k_grad_repulsion, gr, b, 0, stream, nat, bis_gfn2, dz, dxyz,
                              drep_alpha, drep_zeff, kexp, rexp, kexp_light, dGrad, fixi); }
+        if (sp_on) {   // A7: screened twins, P/S/H0/W from the pattern arrays
+          hipLaunchKernelGGL(k_grad_cn_onsite_spP, dim3((nao + 127) / 128), dim3(128), 0, stream, nao, dSpP, dSpDiag,
+                             dkcn, dao2sh, dao2at, dEdcn_buf, fixi);
+          hipLaunchKernelGGL(k_grad_h0_pulay_spP, dim3((sp_nnz + 127) / 128), dim3(128), 0, stream, sp_nnz, dSpRow,
+                             dSpCol, bis_gfn2, dao2sh, dao2at, dang_sh, diao_sh, dsh_nprim, dsh_prim_off,
+                             dprim_alpha, dprim_coeff, dsh_zeta, dshpoly, dkcn, dvalence, dz, dse,
+                             dxyz, dSpP, dSpS, dSpH0, dSpW, dVao,
+                             mp_grad ? dVdp : nullptr, mp_grad ? dVqp : nullptr,
+                             darad, dpauling, dGrad, dEdcn_buf, fixi);
+        } else {
         { dim3 b(128), gr((nao + 127) / 128);
           hipLaunchKernelGGL(k_grad_cn_onsite, gr, b, 0, stream, nao, dP, dkcn, dao2sh, dao2at, dEdcn_buf, fixi); }
         { dim3 b(16, 16), gr((nao + 15) / 16, (nao + 15) / 16);
@@ -3426,6 +3462,7 @@ struct XtbHipContext::Impl {
                              dxyz, dP, dS0, dH0, dW, dVao,
                              mp_grad ? dVdp : nullptr, mp_grad ? dVqp : nullptr,
                              darad, dpauling, dGrad, dEdcn_buf, fixi); }
+        }
         { dim3 b(128), gr((nsh + 127) / 128);
           hipLaunchKernelGGL(k_grad_coulomb, gr, b, 0, stream, nsh, bis_gfn2, dsh2at, dghard,
                              dQsh, dxyz, 2.0, dGrad, fixi); }
@@ -3445,6 +3482,7 @@ struct XtbHipContext::Impl {
         conv_pot_valid = false;   // WP8b: the converged potentials belong to the previous geometry
         if (!basis_ready || bnao <= 0) return false;
         ++s_version; dL_ver = 0;   // dS0 is rebuilt below; dL matches it once potrf succeeds
+        if (!spPrepare(xyz)) return false;   // A7: storage for this geometry (nothing while sp_mode == 0)
         if (hipMemcpy(dxyz, xyz, 3 * static_cast<size_t>(bnat) * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
         { dim3 b(64), gr((bnat + 63) / 64);
           hipLaunchKernelGGL(k_cn, gr, b, 0, stream, bnat, dxyz, dz, bis_gfn2, dcovrad, dcn); }
@@ -3454,19 +3492,26 @@ struct XtbHipContext::Impl {
           hipLaunchKernelGGL(k_overlap_h0, gr, b, 0, stream, bnsh, bnao, bis_gfn2,
                              dsh2at, dang_sh, diao_sh, dnao_sh, dsh_nprim, dsh_prim_off,
                              dprim_alpha, dprim_coeff, dsh_zeta, dshpoly, dse, dz, dvalence, dxyz,
-                             darad, dpauling, dS0, dH0); }   // S → dS0, H0 → dH0 (resident)
+                             darad, dpauling, dS0, sp_on ? dCw : dH0); }   // S → dS0, H0 → dH0 (resident; A7: dCw scratch)
+        if (sp_on) {   // A7: S and H0 values at the stored pairs
+            const dim3 g1((sp_nnz + 255) / 256), b1(256);
+            hipLaunchKernelGGL(k_sp_gather, g1, b1, 0, stream, dS0, dSpRow, dSpCol, bnao, sp_nnz, dSpS);
+            hipLaunchKernelGGL(k_sp_gather, g1, b1, 0, stream, dCw, dSpRow, dSpCol, bnao, sp_nnz, dSpH0);
+        }
         { dim3 b(16, 16), gr((bnsh + 15) / 16, (bnsh + 15) / 16);
           hipLaunchKernelGGL(k_gamma, gr, b, 0, stream, bnsh, bis_gfn2, dsh2at, dghard, dxyz, dgamma); }
         // L = chol(S): work on a copy of S0 (resident S must survive).
-        if (hipMemcpyAsync(dL, dS0, static_cast<size_t>(bnao) * bnao * sizeof(double),
+        // A7: screened storage keeps no dense dL; the positive-definiteness check factorises in the solver work dS.
+        double* const dLw = sp_on ? dS : dL;
+        if (hipMemcpyAsync(dLw, dS0, static_cast<size_t>(bnao) * bnao * sizeof(double),
                            hipMemcpyDeviceToDevice, stream) != hipSuccess) return false;
         if (hipStreamSynchronize(stream) != hipSuccess) return false;
-        if (rocsolver_dpotrf(handle, rocblas_fill_lower, bnao, dL, bnao, dInfo) != rocblas_status_success) return false;
+        if (rocsolver_dpotrf(handle, rocblas_fill_lower, bnao, dLw, bnao, dInfo) != rocblas_status_success) return false;
         if (hipDeviceSynchronize() != hipSuccess) return false;
         rocblas_int info = 0;
         if (hipMemcpy(&info, dInfo, sizeof(rocblas_int), hipMemcpyDeviceToHost) != hipSuccess) return false;
         if (info != 0) return false;   // dS0/dH0 are now the device-built integrals (resident)
-        dL_ver = s_version;            // dL = chol(dS0): reused by the cached-Cholesky solve
+        if (!sp_on) dL_ver = s_version;   // dL = chol(dS0): reused by the cached-Cholesky solve
         // GFN2: build dp_int/qp_int on the device too (resident overlap dS0 just built),
         // so they are resident for the multipole Fock/moments + downloadable for the host gradient.
         if (bis_gfn2 && !computeMultipole()) return false;
@@ -3480,6 +3525,15 @@ struct XtbHipContext::Impl {
 
     // Stage 3m: GFN2 AO multipole integrals on device (needs dS0 = device overlap).
     bool computeMultipole() {
+        if (sp_on) {   // A7: dp/qp at the stored pairs (k_multipole_ints_sp)
+            if (!basis_ready || !bis_gfn2 || !dSpDp || !dSpQp) return false;
+            hipLaunchKernelGGL(k_multipole_ints_sp, dim3((sp_nnz + 255) / 256), dim3(256), 0, stream, sp_nnz, dSpRow,
+                               dSpCol, dao2sh, dao2at, diao_sh, dang_sh, dsh_nprim, dsh_prim_off,
+                               dprim_alpha, dprim_coeff, dxyz, dSpS, dSpDp, dSpQp);
+            if (hipStreamSynchronize(stream) != hipSuccess) return false;
+            mp_computed = true;
+            return true;
+        }
         if (!basis_ready || !bis_gfn2 || bnao <= 0 || !dDpInt || !dQpInt) return false;
         dim3 b(16, 16), gr((bnao + 15) / 16, (bnao + 15) / 16);
         hipLaunchKernelGGL(k_multipole_ints, gr, b, 0, stream, bnao,
@@ -3490,6 +3544,7 @@ struct XtbHipContext::Impl {
         return true;
     }
     bool downloadMP(double* dp3, double* qp6) {
+        if (sp_on) return mp_computed && spScatterHost(dSpDp, 3, dp3) && spScatterHost(dSpQp, 6, qp6);   // A7
         if (!mp_computed || !dDpInt || !dQpInt) return false;
         const size_t nn = static_cast<size_t>(bnao) * bnao;
         if (hipMemcpy(dp3, dDpInt, 3 * nn * sizeof(double), hipMemcpyDeviceToHost) != hipSuccess) return false;
@@ -3498,7 +3553,7 @@ struct XtbHipContext::Impl {
     }
 
     // ----- Stage 2b: device-resident GFN2 multipole SCF --------------------
-    bool beginResidentMP() { return basis_ready && bis_gfn2 && mp_computed && dF && dP; }
+    bool beginResidentMP() { return basis_ready && bis_gfn2 && mp_computed && dF && (dP || sp_on); }   // A7: dP absent when screened
     // One resident SCF step with the GFN2 anisotropic Fock term: F = H0 − ½S(v⊕v) (dF),
     // then F −= ½·multipole(v_dp,v_qp); solve F C = S C ε via rocSOLVER (dF ← C resident).
     bool resSolveMP(const double* v_ao, const double* v_dp, const double* v_qp, double* eps_out, bool fp32) {
@@ -3508,9 +3563,11 @@ struct XtbHipContext::Impl {
         if (hipMemcpy(dVdp, v_dp, 3 * static_cast<size_t>(bnat) * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
         if (hipMemcpy(dVqp, v_qp, 6 * static_cast<size_t>(bnat) * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
         dim3 blk(16, 16), grd((n + 15) / 16, (n + 15) / 16);
+        if (sp_on) { if (!spFock(dF, dvao, true)) return false; } else {   // A7 screened twin
         hipLaunchKernelGGL(k_fock, grd, blk, 0, stream, dH0, dS0, dvao, dF, n);              // F → dF
         hipLaunchKernelGGL(k_add_fock_multipole, grd, blk, 0, stream, dF, dDpInt, dQpInt,
                            dVdp, dVqp, dao2at, n);                                            // F −= ½ multipole
+        }
         if (fp32) {
             if (!eigensolveFp32(n)) return false;   // dF ← C (FP64), dEps ← eps (FP64)
         } else {
@@ -3524,6 +3581,10 @@ struct XtbHipContext::Impl {
         if (hipMemsetAsync(dDpAt, 0, 3 * static_cast<size_t>(bnat) * sizeof(double), stream) != hipSuccess) return false;
         if (hipMemsetAsync(dQpAt, 0, 6 * static_cast<size_t>(bnat) * sizeof(double), stream) != hipSuccess) return false;
         dim3 b(128), gr((bnao + 127) / 128);
+        if (sp_on)   // A7 screened twin (pattern-only P)
+            hipLaunchKernelGGL(k_multipole_moments_spP, gr, b, 0, stream, dDpAt, dQpAt, dSpP, dSpDp, dSpQp, dSpColPtr,
+                               dao2at, bnao, sp_nnz, fixed_point ? 1 : 0);
+        else
         hipLaunchKernelGGL(k_multipole_moments, gr, b, 0, stream, dDpAt, dQpAt, dP, dDpInt, dQpInt, dao2at, bnao,
                            fixed_point ? 1 : 0);
         if (fixed_point) {   // WP10: integer accumulators -> doubles before the download
@@ -3680,9 +3741,11 @@ struct XtbHipContext::Impl {
         const int n = res_n; if (n <= 0 || mpInject("solve") || !beginResidentMP() || !mp_pot_valid) return false;
         if (hipMemcpy(dvao, v_ao, n * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
         dim3 blk(16, 16), grd((n + 15) / 16, (n + 15) / 16);
+        if (sp_on) { if (!spFock(dF, dvao, true)) return false; } else {   // A7 screened twin
         hipLaunchKernelGGL(k_fock, grd, blk, 0, stream, dH0, dS0, dvao, dF, n);
         hipLaunchKernelGGL(k_add_fock_multipole, grd, blk, 0, stream, dF, dDpInt, dQpInt,
                            dVdp, dVqp, dao2at, n);
+        }
         if (fp32) {
             if (!eigensolveFp32(n)) return false;
         } else {
@@ -3909,9 +3972,12 @@ struct XtbHipContext::Impl {
     const char* fockAndSolve(bool multipole, bool fp32) {
         const int n = res_n;
         dim3 blk(16, 16), grd((n + 15) / 16, (n + 15) / 16);
+        if (sp_on) { if (!spFock(dF, dvao, multipole)) return "screened Fock kernel launch failed"; }   // A7
+        else {
         hipLaunchKernelGGL(k_fock, grd, blk, 0, stream, dH0, dS0, dvao, dF, n);
         if (multipole)
             hipLaunchKernelGGL(k_add_fock_multipole, grd, blk, 0, stream, dF, dDpInt, dQpInt, dVdp, dVqp, dao2at, n);
+        }
         if (hipGetLastError() != hipSuccess) return "potential kernel launch failed";
         return eigensolveStep(n, fp32);   // WP7: pseudo step or full solve
     }
@@ -4571,7 +4637,7 @@ struct XtbHipContext::Impl {
         res_error.clear();
         if (resFailMode() == "begin") { res_error = "forced by CURCUMA_ROCM_FAIL_RES=begin"; return false; }
         if (!basis_ready || bis_gfn2 || nao != res_n || nao != bnao || nsh != bnsh || nat != bnat || !dgamma
-            || !dao2sh || !dao2at || !dF || !dP) {
+            || !dao2sh || !dao2at || !dF || (!dP && !sp_on)) {
             res_error = "device integrals of this geometry are not resident"; return false;
         }
         if (!at_csr_ok) { res_error = "shells or AOs are not atom-contiguous"; return false; }
@@ -4779,12 +4845,14 @@ struct XtbHipContext::Impl {
             return fail("occupation kernel failed");
         if (ncol < 0 || ncol > n) ncol = n;
         // 5. density P = C diag(occ) C^T over the occupied columns (as resDensity), populations, band
-        const bool syrk = opt_density_syrk && ncol > 0;
+        const bool syrk = opt_density_syrk && ncol > 0 && !sp_on;   // A7: pattern density takes C diag(occ)
         hipLaunchKernelGGL(k_res_occ_scale, dim3(gao), dim3(b), 0, stream, n, dOcc, syrk ? 1 : 0, dResTmp);
         dim3 blk2(16, 16), grd2((n + 15) / 16, (n + 15) / 16);
         hipLaunchKernelGGL(k_scale_cols, grd2, blk2, 0, stream, dF, dResTmp, dCw, n);
         const double one = 1.0, zero = 0.0;
-        if (syrk) {
+        if (sp_on) {   // A7: P on the pattern only
+            if (!spDensity(dCw, dF, ncol, dSpP)) return fail("screened density kernel failed");
+        } else if (syrk) {
             if (rocblas_dsyrk(handle, rocblas_fill_lower, rocblas_operation_none, n, ncol,
                               &one, dCw, n, &zero, dP, n) != rocblas_status_success) return fail("density syrk failed");
             hipLaunchKernelGGL(k_mirror_lower, grd2, blk2, 0, stream, dP, n);
@@ -4794,6 +4862,7 @@ struct XtbHipContext::Impl {
                 return fail("density gemm failed");
         } else if (hipMemsetAsync(dP, 0, static_cast<size_t>(n) * n * sizeof(double), stream) != hipSuccess)
             return fail("density reset failed");
+        if (sp_on) spPopBand(); else   // A7
         hipLaunchKernelGGL(k_popband, dim3((n + 63) / 64), dim3(64), 0, stream, dP, dS0, dH0, dPB, n);
         hipLaunchKernelGGL(k_res_seqsum, dim3(1), dim3(1), 0, stream, n, dPB + n, nullptr, 0, dResScal + 1);
         // 6. output charges and moments (fixed-order gathers)
@@ -4801,6 +4870,10 @@ struct XtbHipContext::Impl {
                            dResNsh, dResQsh);
         hipLaunchKernelGGL(k_res_qat, dim3(gnat), dim3(b), 0, stream, nat, dAtShOff, dResNsh, dResN0at, dResOutMp);
         if (!g1) {
+            if (sp_on)   // A7 screened twin
+                hipLaunchKernelGGL(k_res_mom_part_spP, dim3(gao), dim3(b), 0, stream, n, sp_nnz, dSpP, dSpDp, dSpQp,
+                                   dSpColPtr, dResPart);
+            else
             hipLaunchKernelGGL(k_res_mom_part, dim3(gao), dim3(b), 0, stream, n, dP, dDpInt, dQpInt, dResPart);
             hipLaunchKernelGGL(k_res_mom_gather, dim3(gnat), dim3(b), 0, stream, nat, dAtAoOff, dResPart,
                                dResOutMp + un, dResOutMp + 4 * un);
@@ -5464,7 +5537,10 @@ struct XtbHipContext::Impl {
         dW = dVao = dQsh = dGrad = dEdcn_buf = nullptr;
         dDpInt = dQpInt = dVdp = dVqp = dDpAt = dQpAt = nullptr; mp_computed = false;
         basis_ready = false; bgeom_nat = 0;
+        spFreeArrays();   // A7
     }
+    // A7 (Claude Generated, Nov 24, 2026): screened AO-pair storage, -gpu_sparse_integrals
+#include "xtb_hip_sparse_impl.hiph"
 #endif // HAVE_ROCSOLVER
 };
 
@@ -5589,6 +5665,49 @@ void XtbHipContext::setSolverOptions(bool cached_cholesky, bool density_syrk, bo
 }
 
 // WP10 (Claude Generated, Oct 2026): fixed-point gradient/moment accumulation, see the header.
+// A7 (Claude Generated, Nov 24, 2026): -gpu_sparse_integrals off|auto|on = 0|1|2 (CUDA setSparseIntegrals). Set
+// before the first beginBasis; the ROCm default (never called) is 0 = dense.
+void XtbHipContext::setSparseIntegrals(int mode)
+{
+#ifndef HAVE_ROCSOLVER
+    (void)mode;
+#else
+    if (m_impl) m_impl->sp_mode = std::max(0, std::min(2, mode));
+#endif
+}
+bool XtbHipContext::sparseIntegrals() const
+{
+#ifndef HAVE_ROCSOLVER
+    return false;
+#else
+    return m_impl && m_impl->sp_on;
+#endif
+}
+double XtbHipContext::sparseFraction() const
+{
+#ifndef HAVE_ROCSOLVER
+    return 1.0;
+#else
+    return m_impl ? m_impl->sp_fraction : 1.0;
+#endif
+}
+double XtbHipContext::sparseCutoffBohr() const
+{
+#ifndef HAVE_ROCSOLVER
+    return 0.0;
+#else
+    return m_impl ? m_impl->sp_rmax : 0.0;
+#endif
+}
+std::string XtbHipContext::sparseError() const
+{
+#ifndef HAVE_ROCSOLVER
+    return {};
+#else
+    return m_impl ? m_impl->sp_error : std::string();
+#endif
+}
+
 void XtbHipContext::setFixedPoint(bool on)
 {
 #ifndef HAVE_ROCSOLVER
@@ -5717,6 +5836,8 @@ bool XtbHipContext::downloadH0(double* H0_colmajor)
 #ifndef HAVE_ROCSOLVER
     (void)H0_colmajor; return false;
 #else
+    if (m_impl && m_impl->ok && H0_colmajor && m_impl->basis_ready && m_impl->sp_on)   // A7: host scatter
+        return m_impl->spScatterHost(m_impl->dSpH0, 1, H0_colmajor);
     return m_impl && m_impl->ok && H0_colmajor && m_impl->basis_ready
         && m_impl->dlMat(H0_colmajor, m_impl->dH0, static_cast<size_t>(m_impl->bnao) * m_impl->bnao);
 #endif
@@ -5726,6 +5847,8 @@ bool XtbHipContext::downloadCholesky(double* L_colmajor)
 #ifndef HAVE_ROCSOLVER
     (void)L_colmajor; return false;
 #else
+    if (m_impl && m_impl->ok && L_colmajor && m_impl->basis_ready && m_impl->sp_on)   // A7: no dense dL kept
+        return m_impl->spDownloadCholesky(L_colmajor);
     return m_impl && m_impl->ok && L_colmajor && m_impl->basis_ready
         && m_impl->dlMat(L_colmajor, m_impl->dL, static_cast<size_t>(m_impl->bnao) * m_impl->bnao);
 #endif

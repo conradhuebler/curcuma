@@ -404,6 +404,10 @@ if(USE_ROCM)
     add_cli_test(sqm 23_gfn2_scf_precond_rocm)
     set_tests_properties(cli_sqm_23_gfn2_scf_precond_rocm
         PROPERTIES TIMEOUT 300 RESOURCE_LOCK "gpu" LABELS "sqm;gpu;rocm;cli" SKIP_RETURN_CODE 77)
+    # Screened (sparse) integral storage on ROCm, GFN1/GFN2 against the dense run (A7, Nov 24, 2026); exit 77 without a device.
+    add_cli_test(sqm 24_gfn2_sparse_integrals_rocm)
+    set_tests_properties(cli_sqm_24_gfn2_sparse_integrals_rocm
+        PROPERTIES TIMEOUT 300 RESOURCE_LOCK "gpu" LABELS "sqm;gpu;rocm;cli" SKIP_RETURN_CODE 77)
 endif()
 
 # cli_sqm_04..07 are enabled since 2026-10-09: the native gfn1/gfn2 match the TBLite references (4e-9 Eh, OH radical 8e-4 Eh).
