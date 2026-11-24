@@ -5369,7 +5369,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_coulomb_postprocess(
             double cn_i = fmax(cn[i], 0.0);
             // Claude Generated (Oct 2026): gfnff.cn_zero_guard, same exact test as FFWorkspace::postProcess
             // (CPU): at CN_i == 0.0 the energy -q*cnf*sqrt(max(CN,0)) is flat, so TERM 1b is 0 (no threshold).
-            // ROCm: compiled, UNTESTED on hardware; the wrapper keeps the CPU fallback (has_charge_groups_cn_guard).
+            // ROCm: active since Nov 24, 2026 (has_charge_groups_cn_guard true; gfx1200 gates in docs/ROCM_PARITY_A1.md).
             if (!(cn_zero_guard && cn_i == 0.0)) {
                 double qtmp = q * cnf[i] / (2.0 * sqrt(cn_i) + 1e-16);
                 dEdcn[i] -= qtmp;

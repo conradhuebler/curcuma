@@ -208,8 +208,7 @@ Isolated ion: a Cl- whose GFN-FF coordination number is exactly 0 (nearest H at 
 gets a spurious force from the reference CN chain rule (Known Issue #39 in [KNOWN_ISSUES_ARCHIVE.md](KNOWN_ISSUES_ARCHIVE.md)),
 largest with an H at about 3.1-3.4 A. In the 182-atom check above the Cl- have neighbours; a Cl- with a first hydration shell
 (H at about 2.2 A) is at CN > 0 and the switch changes nothing (measured on Cl- ... H2O, (AB)2 + Cl- + 10 H2O and the 24 cluster snapshots below only). For a Cl- that can be without neighbours (gas-phase complex, few waters, ion leaving a chain) set
-`-gfnff.cn_zero_guard true`: gradient only, energy unchanged; CUDA applies it on the device, ROCm falls back to the CPU
-method. (AB)3 + Cl- with groups +3/-1: FD error 3.86e-3 -> 1.9e-6 Eh/A; NVE Cl- + 2 H2O: Etot max-min 3.1e-3 -> 2.6e-5 Eh (n=1 each).
+`-gfnff.cn_zero_guard true`: gradient only, energy unchanged; CUDA and ROCm (since Nov 24, 2026) apply it on the device. (AB)3 + Cl- with groups +3/-1: FD error 3.86e-3 -> 1.9e-6 Eh/A; NVE Cl- + 2 H2O: Etot max-min 3.1e-3 -> 2.6e-5 Eh (n=1 each).
 
 ## Validation on a microsolvated unit (Oct 2026)
 

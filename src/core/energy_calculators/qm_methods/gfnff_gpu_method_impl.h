@@ -21,7 +21,7 @@
  *       static constexpr bool has_cn_pair_skin      = true;   // K1 CN pair-list skin (ROCm too, Oct 2026)
  *       static constexpr bool has_cn_cutoff         = true;   // A16 CPU CN range on the device (false on ROCm)
  *       static constexpr bool has_stream_overlap    = true;   // false on ROCm (K2/K3, Oct 2026)
- *       static constexpr bool has_charge_groups_cn_guard = true; // false on ROCm: CPU fallback (Oct 2026)
+ *       static constexpr bool has_charge_groups_cn_guard = true; // ROCm too since Nov 24, 2026 (false = CPU fallback)
  *       static constexpr int  default_eeq_cpu_fragment_threshold = 0;   // 16 on ROCm
  *       static void downloadDoubles(double* host, const double* device, int n);
  *   };
@@ -793,8 +793,8 @@ bool GFNFFGpuMethodImpl<Backend>::setMolecule(const Mol& mol)
     // qfrag, prepareEEQParametersForGPU hands exactly these to the device EEQ (fraglist -> uploadFragmentTopology,
     // qfrag -> rhs_constraints, one Lagrange row per group), and -gfnff.cn_zero_guard runs in k_coulomb_postprocess.
     // A charged system with groups still takes the ensemble fallback above unless frag_charge_model is reference.
-    // ROCm (has_charge_groups_cn_guard = false): the same code is compiled but untested on hardware, the CPU
-    // fallback stays there.
+    // ROCm runs the same path since Nov 24, 2026 (trait true, docs/ROCM_PARITY_A1.md); a backend with the trait
+    // false asks for the CPU method.
     if constexpr (!Backend::has_charge_groups_cn_guard) {
         if (m_gfnff->hasUserChargeGroups() || m_gfnff->cnZeroGuardRequested())
             m_cpu_fallback_requested = true;

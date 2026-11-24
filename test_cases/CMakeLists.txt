@@ -1491,6 +1491,16 @@ if(Python3_Interpreter_FOUND)
                          $<TARGET_FILE:curcuma> ${CMAKE_SOURCE_DIR} rocm)
         set_tests_properties(eeq_sytrf_rocm
             PROPERTIES TIMEOUT 900 RESOURCE_LOCK "gpu" LABELS "gfnff;eeq;gpu;rocm" SKIP_RETURN_CODE 77)
+
+        # Claude Generated (Nov 2026, ROCm parity A1): -gfnff.charge_groups and -gfnff.cn_zero_guard on the ROCm
+        # device (trait has_charge_groups_cn_guard true), same checks as gfnff_gpu_charge_groups (CUDA) with
+        # -gpu rocm -gpu_strict true. Skipped (77) without the plugin or a HIP device.
+        add_test(NAME gfnff_rocm_charge_groups
+                 COMMAND ${Python3_EXECUTABLE}
+                         ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_gpu_charge_groups.py
+                         $<TARGET_FILE:curcuma> ${CMAKE_SOURCE_DIR} rocm)
+        set_tests_properties(gfnff_rocm_charge_groups
+            PROPERTIES TIMEOUT 900 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;rocm;charge" SKIP_RETURN_CODE 77)
     endif()
 
     # Claude Generated (Oct 2026): -lbfgs_max_atom_step (per-atom step cap of the lbfgspp optimiser);

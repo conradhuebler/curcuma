@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Claude Generated (Oct 2026): -gfnff.charge_groups and -gfnff.cn_zero_guard on the CUDA GFN-FF path (no CPU fallback).
+"""Claude Generated (Oct 2026): -gfnff.charge_groups and -gfnff.cn_zero_guard on the CUDA or ROCm GFN-FF path (no CPU fallback).
 
 Uses only the curcuma binary (the same binary runs the CPU reference without -gpu); every structure is built at run time.
 Every GPU run uses -gpu_strict true, so a GPU fallback (also the CPU method fallback) fails the test.
@@ -12,17 +12,22 @@ Every GPU run uses -gpu_strict true, so a GPU fallback (also the CPU method fall
      the first. (AB)2 chain + polymerbuild group file (charge 2, frag_charge_model reference), the same chain with
      charge_groups auto, NH4+ Cl- with charge_groups ionpairs (charge 0), the chain + the group file + cn_zero_guard.
      Per-frame charges within 1e-9 e, every group sum within 1e-8 of its charge on the GPU, mean Epot within 1e-8 Eh,
-     the device EEQ path reported ("[GPU CUDA").
-Exit 0 = pass, 1 = fail, 77 = skipped (no CUDA device or no CUDA plugin next to the binary).
-Usage: check_gpu_charge_groups.py CURCUMA_BINARY SOURCE_DIR
+     the device EEQ path reported ("[GPU CUDA" / "[GPU ROCm").
+Exit 0 = pass, 1 = fail, 77 = skipped (no device of the backend or no plugin next to the binary).
+Usage: check_gpu_charge_groups.py CURCUMA_BINARY SOURCE_DIR [cuda|rocm]   (default cuda; rocm since Nov 24, 2026)
 """
 import json, os, re, subprocess, sys, tempfile
 import numpy as np
 
 curcuma, src = sys.argv[1], sys.argv[2]
+BACKEND = sys.argv[3] if len(sys.argv) > 3 else "cuda"
+if BACKEND not in ("cuda", "rocm"):
+    print("unknown backend " + BACKEND)
+    sys.exit(2)
+TAG = {"cuda": "[GPU CUDA", "rocm": "[GPU ROCm"}[BACKEND]
 failed = 0
 E_RE = re.compile(r"Single Point Energy = (-?\d+\.\d+)")
-GPU = ["-gpu", "cuda", "-gpu_strict", "true"]
+GPU = ["-gpu", BACKEND, "-gpu_strict", "true"]
 REF = ["-gfnff.frag_charge_model", "reference"]
 
 
@@ -34,17 +39,21 @@ def check(ok, what):
 
 def visible_gpus():
     try:
-        out = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True, timeout=30)
-        return sum(1 for l in out.stdout.splitlines() if l.startswith("GPU "))
+        if BACKEND == "cuda":
+            out = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True, timeout=30)
+            return sum(1 for l in out.stdout.splitlines() if l.startswith("GPU "))
+        # ROCm: GPU agents listed by rocminfo (gfx names; the CPU agent has none)
+        out = subprocess.run(["rocminfo"], capture_output=True, text=True, timeout=60)
+        return len(set(re.findall(r"^\s*Name:\s+(gfx\w+)", out.stdout, re.M)))
     except Exception:
         return 0
 
 
 if visible_gpus() < 1:
-    print("SKIP: no CUDA device")
+    print("SKIP: no %s device" % BACKEND)
     sys.exit(77)
-if not os.path.exists(os.path.join(os.path.dirname(os.path.abspath(curcuma)), "libcurcuma_cuda.so")):
-    print("SKIP: no CUDA plugin next to the binary")
+if not os.path.exists(os.path.join(os.path.dirname(os.path.abspath(curcuma)), "libcurcuma_%s.so" % BACKEND)):
+    print("SKIP: no %s plugin next to the binary" % BACKEND)
     sys.exit(77)
 
 work = tempfile.mkdtemp(prefix="curcuma_gpu_charge_groups_")
@@ -163,7 +172,7 @@ for name, xyz, q, extra, groups in cases:
     if groups:
         dev = max(abs(a[g["atoms"]].sum() - g["charge"]) for a in Qg for g in groups)
         check(dev < 1e-8, "%s: GPU group sums, max |sum - Q| %.1e (< 1e-8)" % (name, dev))
-    check("[GPU CUDA" in tg, "%s: device EEQ path reported (%s)" % (name, next((l.strip()[:110] for l in tg.split("\n")
+    check(TAG in tg, "%s: device EEQ path reported (%s)" % (name, next((l.strip()[:110] for l in tg.split("\n")
           if "EEQ solver (final" in l), "no solver line")))
 
 print(f"{count[0]} curcuma runs, {failed} failure(s)")
