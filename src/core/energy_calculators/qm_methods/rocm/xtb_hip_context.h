@@ -89,6 +89,8 @@ public:
 
     /// True if at least one HIP device is visible (static probe, no allocation).
     static bool deviceAvailable();
+    /// Number of visible HIP devices, 0 on error (static probe). Claude Generated (Nov 2026, ROCM_PARITY_A6).
+    static int deviceCount();
 
     /// Solve the generalized symmetric-definite eigenproblem F C = S C ε on the GPU via
     /// rocSOLVER (rocsolver_dsygvd). F_colmajor / S_colmajor are n×n symmetric

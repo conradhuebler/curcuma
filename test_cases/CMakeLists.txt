@@ -1515,6 +1515,26 @@ if(Python3_Interpreter_FOUND)
                          $<TARGET_FILE:curcuma> ${CMAKE_SOURCE_DIR} rocm)
         set_tests_properties(gfnff_rocm_charge_groups
             PROPERTIES TIMEOUT 900 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;rocm;charge" SKIP_RETURN_CODE 77)
+
+        # Claude Generated (Nov 2026, docs/ROCM_PARITY_A6.md): the opt-in ROCm GFN-FF EEQ split on ONE device
+        # (CURCUMA_ROCM_SPLIT_SAME_DEVICE=1, 2 and 3 participants) against the single-device run, and its refusal
+        # without -gfnff.rocm_multi_gpu_split. No real multi-device run. Skipped (77) without plugin or device.
+        add_test(NAME gfnff_rocm_split_one_device
+                 COMMAND ${Python3_EXECUTABLE}
+                         ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_gfnff_rocm_split.py
+                         $<TARGET_FILE:curcuma>
+                         ${CMAKE_CURRENT_BINARY_DIR}/molecules/larger/polymer_2x.xyz)
+        set_tests_properties(gfnff_rocm_split_one_device
+            PROPERTIES TIMEOUT 1200 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;rocm" SKIP_RETURN_CODE 77)
+        # Native GFN2 on ROCm: -gpu_eigensolver_devices / -gpu_density_devices with two devices are refused with a
+        # counted fallback (-gpu_strict exit 3), no multi-GPU eigensolver on ROCm.
+        add_test(NAME xtb_rocm_multi_gpu_refusal
+                 COMMAND ${Python3_EXECUTABLE}
+                         ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_xtb_rocm_multi_gpu_refusal.py
+                         $<TARGET_FILE:curcuma>
+                         ${CMAKE_CURRENT_BINARY_DIR}/molecules/larger/caffeine.xyz)
+        set_tests_properties(xtb_rocm_multi_gpu_refusal
+            PROPERTIES TIMEOUT 600 RESOURCE_LOCK "gpu" LABELS "gpu;rocm;native_xtb" SKIP_RETURN_CODE 77)
     endif()
 
     # Claude Generated (Oct 2026): -lbfgs_max_atom_step (per-atom step cap of the lbfgspp optimiser);

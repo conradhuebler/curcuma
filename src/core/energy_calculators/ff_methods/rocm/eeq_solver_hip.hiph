@@ -249,6 +249,52 @@ struct EEQSolverHipImpl {
     std::vector<double> h_aug_A;                       ///< [M*M] host copy of the factor for the host dsytrs
     std::vector<int>    h_aug_piv;                     ///< [M] host copy of the pivots
     std::vector<double> h_aug_rhs;                     ///< [M] [b_atoms; Q_frag], then [q; lambda]
+
+    // Claude Generated (Nov 2026, ROCM_PARITY_A6): multi-GPU split of the projected PCG, port of the CUDA split
+    // (cuda/eeq_solver_gpu.cu, EEQSolverGPUImpl::SplitPart, docs/MULTI_GPU_GAPS.md F-3). Each helper device owns the
+    // column block [c0, c1) of the symmetric EEQ matrix (both triangles, column-major, N rows); this device owns
+    // [0, split_c1_own). Only peer copies (HIP runtime), no RCCL. Never run with more than one physical device.
+    struct SplitPart {
+        int dev = -1, c0 = 0, c1 = 0;
+        hipStream_t stream = nullptr;
+        hipEvent_t  done   = nullptr;
+        CudaBuffer<double> A, x, y, z, alpha, gam, p, yblk;
+        CudaBuffer<float>  Af, xf, yf;   ///< FP32 block, its input vector and result (mixed-precision matvec)
+    };
+    int  own_device = -1;
+    bool split_same_device = false;              ///< test hook CURCUMA_ROCM_SPLIT_SAME_DEVICE=1: helpers may name this device
+    std::vector<int> split_devs;                 ///< helper devices (configured)
+    int  split_min_atoms = 0;
+    std::vector<std::unique_ptr<SplitPart>> split_parts;
+    int  split_N = 0;
+    int  split_c1_own = 0;
+    bool split_active = false;                   ///< the last projected-PCG matrix build went to the split blocks
+    CudaBuffer<double> d_A_own;                  ///< [N * c1_own] own column block
+    CudaBuffer<float>  d_A_own_f, d_xf, d_yf;    ///< FP32 own block, FP32 input and result vectors
+    bool   split_mixed_req = true;               ///< gpu_eeq_mixed_precision
+    double mixed_rho = 1e-5;                     ///< gpu_eeq_mixed_rho: stored, not used (ROCm keeps its reliable-update scheme)
+    bool   split_mixed = false;                  ///< matvec of the split runs in FP32 (and CURCUMA_EEQ_MIXED != 0)
+    hipEvent_t ev_split = nullptr;               ///< recorded on stream, waited on by the helpers
+    bool   split_failed = false;
+    std::string split_status;
+    long   split_matvecs = 0, split_builds = 0;
+    void releaseSplit()
+    {
+        for (auto& pp : split_parts) {
+            if (!pp) continue;
+            (void)hipSetDevice(pp->dev);
+            pp->Af.free(); pp->xf.free(); pp->yf.free();
+            pp->A.free(); pp->x.free(); pp->y.free(); pp->z.free(); pp->alpha.free();
+            pp->gam.free(); pp->p.free(); pp->yblk.free();
+            if (pp->done)   (void)hipEventDestroy(pp->done);
+            if (pp->stream) (void)hipStreamDestroy(pp->stream);
+        }
+        split_parts.clear();
+        if (own_device >= 0) (void)hipSetDevice(own_device);
+        d_A_own.free(); d_A_own_f.free(); d_xf.free(); d_yf.free();
+        split_N = 0;
+        split_active = false;
+    }
 };
 
 /// Claude Generated (Oct 2026): host copy of the charges of the last small-system solve on this host
@@ -476,6 +522,12 @@ EEQSolverHip::EEQSolverHip(int max_natoms)
         throw std::runtime_error("EEQSolverHip: hipHostMalloc h_info failed");
     if (hipHostMalloc(&m_impl->h_ppcg_back, 4 * sizeof(double)) != hipSuccess)
         throw std::runtime_error("EEQSolverHip: hipHostMalloc h_ppcg_back failed");
+    // Claude Generated (Nov 2026, ROCM_PARITY_A6): the device this solver lives on (the split's own device).
+    (void)hipGetDevice(&m_impl->own_device);
+    {
+        const char* e = std::getenv("CURCUMA_ROCM_SPLIT_SAME_DEVICE");
+        m_impl->split_same_device = e && *e && *e != '0';
+    }
 }
 
 EEQSolverHip::~EEQSolverHip()
@@ -484,6 +536,8 @@ EEQSolverHip::~EEQSolverHip()
         CurcumaLogger::info(fmt::format("EEQ ROCm: {} dense solves with the Schur step on the device",
                                         m_impl->m_device_schur_calls));
     if (m_impl) {
+        m_impl->releaseSplit();   // Claude Generated (Nov 2026, A6): helper buffers are freed on their own device
+        if (m_impl->ev_split) (void)hipEventDestroy(m_impl->ev_split);
         if (g_rocm_eeq_host_copy.host == m_impl->h_result) g_rocm_eeq_host_copy = RocmEEQHostCopy{};
         if (m_impl->h_result) hipHostFree(m_impl->h_result);
         if (m_impl->h_info)   hipHostFree(m_impl->h_info);
@@ -500,6 +554,44 @@ void EEQSolverHip::setMixedPrecision(bool enabled, int refine_iters)
 {
     m_impl->m_mixed_precision = enabled;
     m_impl->m_refine_iters    = (refine_iters < 1) ? 1 : refine_iters;
+}
+
+// Claude Generated (Nov 2026, ROCM_PARITY_A6): configuration of the multi-GPU split (port of the CUDA members,
+// same contract as eeq_solver_gpu.h). The own device is dropped from the helper list unless the test hook
+// CURCUMA_ROCM_SPLIT_SAME_DEVICE=1 is set, which lets one GPU run the split code with several participants.
+void EEQSolverHip::setSplitDevices(const std::vector<int>& helper_devices, int min_atoms)
+{
+    m_impl->releaseSplit();
+    m_impl->split_devs.clear();
+    for (int d : helper_devices)
+        if (d != m_impl->own_device || m_impl->split_same_device) m_impl->split_devs.push_back(d);
+    // With the hook the first entry is the calculation's own device itself (as in "0,0"), not a helper.
+    if (m_impl->split_same_device && !m_impl->split_devs.empty() && m_impl->split_devs.front() == m_impl->own_device)
+        m_impl->split_devs.erase(m_impl->split_devs.begin());
+    m_impl->split_min_atoms = min_atoms;
+    m_impl->split_failed = false;
+    m_impl->split_status.clear();
+}
+
+void EEQSolverHip::setSplitMixedPrecision(bool on, double rho)
+{
+    m_impl->releaseSplit();   // the FP32 blocks are allocated with the split
+    m_impl->split_mixed_req = on;
+    m_impl->mixed_rho = rho;
+}
+
+std::string EEQSolverHip::splitStatus() const
+{
+    const auto& I = *m_impl;
+    if (I.split_devs.empty()) return {};
+    if (!I.split_status.empty()) return I.split_status;
+    if (I.split_builds == 0)
+        return "EEQ split configured but not used (no projected-PCG solve with N >= "
+               + std::to_string(I.split_min_atoms) + ")";
+    std::string list = std::to_string(I.own_device);
+    for (int d : I.split_devs) list += "," + std::to_string(d);
+    return "EEQ matrix + PCG matvec on devices [" + list + "], " + std::to_string(I.split_builds) + " builds, "
+        + std::to_string(I.split_matvecs) + " matvecs" + (I.split_mixed ? ", FP32 matvec" : ", FP64 matvec");
 }
 
 // WP-B: FP32 Cholesky of the FP64 matrix currently in impl.d_A. d_A is left intact (the
@@ -1274,8 +1366,8 @@ bool EEQSolverHip::solveWithDeviceRHSAndGPUPCG(int, int, const double*, const do
 // P subtracts the per-fragment mean. A is the dense EEQ matrix (k_eeq_build_matrix_hip, lower
 // triangle read by rocblas_dsymv). The converged q are the charges of the constrained EEQ system
 // (no Schur step). The device build of the local inverse and its true-residual check are ported
-// (Oct 2026, buildLocalInverseOnDeviceHip). Not ported: multi-GPU split, the K3 input event and
-// stream priority; the wrapper does not call those for ROCm.
+// (Oct 2026, buildLocalInverseOnDeviceHip). The multi-GPU split of the matvec is ported (Nov 2026, opt-in, see
+// the split section above). Not ported: the K3 input event and stream priority; the wrapper does not call those for ROCm.
 // =============================================================================================
 
 /// r <- P r: subtract the per-fragment mean (port of ppcgProjectResidual).
@@ -1324,9 +1416,279 @@ static void ppcgPreconditionHip(EEQSolverHipImpl& impl, int N, int nfrag, const 
         N, impl.d_pcg_M_inv.ptr, impl.d_atom_frag.ptr, impl.d_frag_sum_scratch.ptr, impl.d_frag_sM.ptr, d_z);
 }
 
+// =============================================================================================
+// Multi-GPU split of the projected-PCG EEQ (Claude Generated, Nov 2026, ROCM_PARITY_A6)
+// ---------------------------------------------------------------------------------------------
+// Port of the CUDA split (cuda/eeq_solver_gpu.cu, splitPrepare / splitBuild / splitMatvec / splitMatvecF32,
+// k_eeq_build_cols, k_split_coldot_f64/f32, k_eeq_diag_inv). Every participating device builds a column block
+// of the symmetric EEQ matrix and computes its block of each PCG matrix-vector product y = A x; this device keeps
+// the PCG recurrences. Per product N numbers go to each helper and N/k come back (hipMemcpyPeerAsync).
+// ROCm specifics:
+//   * the matrix elements use the expressions of k_eeq_build_matrix_hip (i the larger, j the smaller index; the
+//     rsqrt form exactly when the single-device ROCm build uses it, i.e. for the FP32 matvec), so a split element
+//     equals the single-device element of the same mode; only the summation order of the product differs;
+//   * the FP32 mode keeps the ROCm reliable-update scheme of runProjectedPCGHip (CURCUMA_ROCM_EEQ_FP32_DELTA);
+//     the CUDA defect-correction rounds (gpu_eeq_mixed_rho) are not used here;
+//   * d_A stays allocated (max_natoms^2, constructor), so the split saves no memory on this device; it is filled
+//     only when the device build of the local inverse needs the dense matrix;
+//   * a helper equal to this device (test hook CURCUMA_ROCM_SPLIT_SAME_DEVICE=1) uses device-local copies.
+// The column dot products run in a fixed order per column, so the result does not depend on how many devices
+// share the columns (CUDA property, Oct 2026).
+// =============================================================================================
+
+/// Column block [c0, c0 + ncols) of the EEQ matrix (N rows, column-major), both triangles. 2-D grid (x = rows,
+/// y = columns, grid-stride in y). Same element expressions as k_eeq_build_matrix_hip; A_blk32 != nullptr also
+/// stores the FP32 copy.
+__global__ __launch_bounds__(256, 4)
+void k_eeq_build_cols_hip(int N, int c0, int ncols,
+                          const double* __restrict__ cx, const double* __restrict__ cy,
+                          const double* __restrict__ cz, const double* __restrict__ alpha,
+                          const double* __restrict__ gam, double* __restrict__ A_blk, double cutoff_sq,
+                          float* __restrict__ A_blk32, bool use_rsqrt)
+{
+    const int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= N) return;
+    for (int lc = blockIdx.y; lc < ncols; lc += gridDim.y) {
+        const size_t idx = static_cast<size_t>(lc) * N + row;
+        const int col = c0 + lc;
+        double val;
+        if (row == col) {
+            val = gam[row] + TSQRT2PI_HIP / sqrt(alpha[row]);
+        } else {
+            const int i = row > col ? row : col;   // k_eeq_build_matrix_hip: i the row (i >= j), j the column
+            const int j = row > col ? col : row;
+            const double dx = cx[i] - cx[j];
+            const double dy = cy[i] - cy[j];
+            const double dz = cz[i] - cz[j];
+            const double r_sq = dx * dx + dy * dy + dz * dz;
+            if (cutoff_sq > 0.0 && r_sq > cutoff_sq) {
+                val = 0.0;
+            } else if (use_rsqrt) {
+                const double inv_r = rsqrt(r_sq);
+                const double asum = alpha[i] + alpha[j];
+                if (r_sq >= 36.0 * asum) val = inv_r;
+                else                     val = erf((1.0 / sqrt(asum)) * (r_sq * inv_r)) * inv_r;
+            } else {
+                const double r = sqrt(r_sq);
+                const double asum = alpha[i] + alpha[j];
+                if (r_sq >= 36.0 * asum) val = 1.0 / r;
+                else                     val = erf((1.0 / sqrt(asum)) * r) / r;
+            }
+        }
+        A_blk[idx] = val;
+        if (A_blk32) A_blk32[idx] = static_cast<float>(val);
+    }
+}
+
+/// 1 / A_ii from alpha and gam (= k_pcg_extract_diag_inv on the full matrix); port of k_eeq_diag_inv.
+__global__ void k_eeq_diag_inv_hip(int N, const double* __restrict__ alpha, const double* __restrict__ gam,
+                                   double* __restrict__ M_inv)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    const double diag = gam[i] + TSQRT2PI_HIP / sqrt(alpha[i]);
+    M_inv[i] = (diag != 0.0) ? 1.0 / diag : 0.0;
+}
+
+/// y[c] = sum_i A[i + c N] x[i], one 256-thread block per column, fixed summation order (port of
+/// k_split_coldot_f64): independent of the block shape and of the wavefront width.
+__global__ __launch_bounds__(256)
+void k_split_coldot_f64_hip(int N, const double* __restrict__ A, const double* __restrict__ x, double* __restrict__ y)
+{
+    __shared__ double sh[256];
+    const double* col = A + static_cast<size_t>(blockIdx.x) * N;
+    double acc = 0.0;
+    for (int i = threadIdx.x; i < N; i += 256) acc = fma(col[i], x[i], acc);
+    sh[threadIdx.x] = acc;
+    __syncthreads();
+    for (int s = 128; s > 0; s >>= 1) {
+        if (threadIdx.x < s) sh[threadIdx.x] += sh[threadIdx.x + s];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) y[blockIdx.x] = sh[0];
+}
+
+/// FP32 matrix and vector, float partials per thread, the tree in double (port of k_split_coldot_f32).
+__global__ __launch_bounds__(256)
+void k_split_coldot_f32_hip(int N, const float* __restrict__ A, const float* __restrict__ x, float* __restrict__ y)
+{
+    __shared__ double sh[256];
+    const float* col = A + static_cast<size_t>(blockIdx.x) * N;
+    float acc = 0.0f;
+    for (int i = threadIdx.x; i < N; i += 256) acc = fmaf(col[i], x[i], acc);
+    sh[threadIdx.x] = static_cast<double>(acc);
+    __syncthreads();
+    for (int s = 128; s > 0; s >>= 1) {
+        if (threadIdx.x < s) sh[threadIdx.x] += sh[threadIdx.x + s];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) y[blockIdx.x] = static_cast<float>(sh[0]);
+}
+
+/// Copy between devices; a device-local copy when both are the same device (test hook).
+static hipError_t splitCopyHip(void* dst, int dst_dev, const void* src, int src_dev, size_t bytes, hipStream_t s)
+{
+    if (dst_dev == src_dev) return hipMemcpyAsync(dst, src, bytes, hipMemcpyDeviceToDevice, s);
+    return hipMemcpyPeerAsync(dst, dst_dev, src, src_dev, bytes, s);
+}
+
+static bool splitWantedHip(const EEQSolverHipImpl& impl, int N)
+{
+    return !impl.split_devs.empty() && !impl.split_failed && N >= impl.split_min_atoms;
+}
+
+/// Allocate the column blocks for N atoms (once per N). false = split unusable for this run (status set).
+static bool splitPrepareHip(EEQSolverHipImpl& impl, int N)
+{
+    if (impl.split_N == N && !impl.split_parts.empty()) return true;
+    impl.releaseSplit();
+    { const char* e = std::getenv("CURCUMA_EEQ_MIXED"); impl.split_mixed = impl.split_mixed_req && !(e && *e == '0'); }
+    const int nparts = static_cast<int>(impl.split_devs.size()) + 1;
+    std::vector<int> bounds(nparts + 1, 0);   // equal column shares; this device takes the first block
+    for (int k = 0; k <= nparts; ++k)
+        bounds[k] = static_cast<int>((static_cast<long long>(N) * k) / nparts);
+    try {
+        if (static_cast<long long>(N) * bounds[1] > std::numeric_limits<int>::max())
+            throw std::runtime_error("column block too large for an int-sized buffer");
+        for (int h = 0; h < static_cast<int>(impl.split_devs.size()); ++h) {
+            auto part = std::make_unique<EEQSolverHipImpl::SplitPart>();
+            part->dev = impl.split_devs[h];
+            part->c0 = bounds[h + 1];
+            part->c1 = bounds[h + 2];
+            const int nc = part->c1 - part->c0;
+            if (hipSetDevice(part->dev) != hipSuccess)
+                throw std::runtime_error("hipSetDevice(" + std::to_string(part->dev) + ") failed");
+            if (part->dev != impl.own_device) {
+                int can = 0;
+                (void)hipDeviceCanAccessPeer(&can, part->dev, impl.own_device);
+                if (can) (void)hipDeviceEnablePeerAccess(impl.own_device, 0);
+                (void)hipGetLastError();   // "already enabled" is fine
+            }
+            int prio_lo = 0, prio_hi = 0;
+            (void)hipDeviceGetStreamPriorityRange(&prio_lo, &prio_hi);
+            if (hipStreamCreateWithPriority(&part->stream, hipStreamDefault, prio_hi) != hipSuccess
+                || hipEventCreateWithFlags(&part->done, hipEventDisableTiming) != hipSuccess)
+                throw std::runtime_error("stream/event setup failed on device " + std::to_string(part->dev));
+            part->A.alloc(N * nc);
+            part->x.alloc(N); part->y.alloc(N); part->z.alloc(N);
+            part->alpha.alloc(N); part->gam.alloc(N);
+            part->p.alloc(N); part->yblk.alloc(nc);
+            if (impl.split_mixed) { part->Af.alloc(N * nc); part->xf.alloc(N); part->yf.alloc(nc); }
+            impl.split_parts.push_back(std::move(part));
+        }
+        (void)hipSetDevice(impl.own_device);
+        for (int d : impl.split_devs) {
+            if (d == impl.own_device) continue;
+            int can = 0;
+            (void)hipDeviceCanAccessPeer(&can, impl.own_device, d);
+            if (can) (void)hipDeviceEnablePeerAccess(d, 0);
+        }
+        (void)hipGetLastError();
+        impl.split_c1_own = bounds[1];
+        impl.d_A_own.alloc(N * impl.split_c1_own);
+        if (impl.split_mixed) { impl.d_A_own_f.alloc(N * impl.split_c1_own); impl.d_xf.alloc(N); impl.d_yf.alloc(N); }
+        if (!impl.ev_split && hipEventCreateWithFlags(&impl.ev_split, hipEventDisableTiming) != hipSuccess)
+            throw std::runtime_error("event setup failed on the own device");
+        impl.split_N = N;
+    } catch (const std::exception& e) {
+        impl.releaseSplit();
+        (void)hipSetDevice(impl.own_device);
+        impl.split_failed = true;
+        impl.split_status = std::string("unavailable: ") + e.what();
+        return false;
+    }
+    return true;
+}
+
+/// Build every column block (this device's on impl.stream, the helpers' on their streams).
+static bool splitBuildHip(EEQSolverHipImpl& impl, int N, const double* cx, const double* cy, const double* cz,
+                          const double* alpha, const double* gam, double cutoff_sq)
+{
+    const size_t bytes = sizeof(double) * static_cast<size_t>(N);
+    const bool use_rsqrt = impl.split_mixed;   // as the single-device build: rsqrt form with the FP32 matvec
+    bool ok = hipEventRecord(impl.ev_split, impl.stream) == hipSuccess;
+    for (auto& pp : impl.split_parts) {
+        auto& P = *pp;
+        const int nc = P.c1 - P.c0;
+        (void)hipSetDevice(P.dev);
+        ok = ok && hipStreamWaitEvent(P.stream, impl.ev_split, 0) == hipSuccess;
+        ok = ok && splitCopyHip(P.x.ptr, P.dev, cx, impl.own_device, bytes, P.stream) == hipSuccess;
+        ok = ok && splitCopyHip(P.y.ptr, P.dev, cy, impl.own_device, bytes, P.stream) == hipSuccess;
+        ok = ok && splitCopyHip(P.z.ptr, P.dev, cz, impl.own_device, bytes, P.stream) == hipSuccess;
+        ok = ok && splitCopyHip(P.alpha.ptr, P.dev, alpha, impl.own_device, bytes, P.stream) == hipSuccess;
+        ok = ok && splitCopyHip(P.gam.ptr, P.dev, gam, impl.own_device, bytes, P.stream) == hipSuccess;
+        const dim3 grd((N + 255) / 256, std::min(nc, 65535));
+        k_eeq_build_cols_hip<<<grd, 256, 0, P.stream>>>(N, P.c0, nc, P.x.ptr, P.y.ptr, P.z.ptr, P.alpha.ptr,
+                                                        P.gam.ptr, P.A.ptr, cutoff_sq,
+                                                        impl.split_mixed ? P.Af.ptr : nullptr, use_rsqrt);
+    }
+    (void)hipSetDevice(impl.own_device);
+    const dim3 grd((N + 255) / 256, std::min(impl.split_c1_own, 65535));
+    k_eeq_build_cols_hip<<<grd, 256, 0, impl.stream>>>(N, 0, impl.split_c1_own, cx, cy, cz, alpha, gam,
+                                                       impl.d_A_own.ptr, cutoff_sq,
+                                                       impl.split_mixed ? impl.d_A_own_f.ptr : nullptr, use_rsqrt);
+    ++impl.split_builds;
+    return ok;
+}
+
+/// y = A x over the column blocks, FP64. x and y live on this device.
+static bool splitMatvecHip(EEQSolverHipImpl& impl, int N, const double* x, double* y)
+{
+    bool ok = hipEventRecord(impl.ev_split, impl.stream) == hipSuccess;
+    for (auto& pp : impl.split_parts) {
+        auto& P = *pp;
+        const int nc = P.c1 - P.c0;
+        (void)hipSetDevice(P.dev);
+        ok = ok && hipStreamWaitEvent(P.stream, impl.ev_split, 0) == hipSuccess;
+        ok = ok && splitCopyHip(P.p.ptr, P.dev, x, impl.own_device, sizeof(double) * N, P.stream) == hipSuccess;
+        k_split_coldot_f64_hip<<<nc, 256, 0, P.stream>>>(N, P.A.ptr, P.p.ptr, P.yblk.ptr);
+        ok = ok && splitCopyHip(y + P.c0, impl.own_device, P.yblk.ptr, P.dev, sizeof(double) * nc, P.stream) == hipSuccess;
+        ok = ok && hipEventRecord(P.done, P.stream) == hipSuccess;
+    }
+    (void)hipSetDevice(impl.own_device);
+    k_split_coldot_f64_hip<<<impl.split_c1_own, 256, 0, impl.stream>>>(N, impl.d_A_own.ptr, x, y);
+    for (auto& pp : impl.split_parts)
+        ok = ok && hipStreamWaitEvent(impl.stream, pp->done, 0) == hipSuccess;
+    ++impl.split_matvecs;
+    return ok;
+}
+
+/// y = A32 x over the FP32 column blocks: FP32 matrix and vectors, FP64 result vector (port of splitMatvecF32).
+static bool splitMatvecF32Hip(EEQSolverHipImpl& impl, int N, const double* x, double* y)
+{
+    const int blk = 256, grd = (N + blk - 1) / blk;
+    k_cast_d2f_hip<<<grd, blk, 0, impl.stream>>>(x, impl.d_xf.ptr, N);
+    bool ok = hipEventRecord(impl.ev_split, impl.stream) == hipSuccess;
+    for (auto& pp : impl.split_parts) {
+        auto& P = *pp;
+        const int nc = P.c1 - P.c0;
+        (void)hipSetDevice(P.dev);
+        ok = ok && hipStreamWaitEvent(P.stream, impl.ev_split, 0) == hipSuccess;
+        ok = ok && splitCopyHip(P.xf.ptr, P.dev, impl.d_xf.ptr, impl.own_device, sizeof(float) * N, P.stream) == hipSuccess;
+        k_split_coldot_f32_hip<<<nc, 256, 0, P.stream>>>(N, P.Af.ptr, P.xf.ptr, P.yf.ptr);
+        ok = ok && splitCopyHip(impl.d_yf.ptr + P.c0, impl.own_device, P.yf.ptr, P.dev, sizeof(float) * nc, P.stream) == hipSuccess;
+        ok = ok && hipEventRecord(P.done, P.stream) == hipSuccess;
+    }
+    (void)hipSetDevice(impl.own_device);
+    k_split_coldot_f32_hip<<<impl.split_c1_own, 256, 0, impl.stream>>>(N, impl.d_A_own_f.ptr, impl.d_xf.ptr, impl.d_yf.ptr);
+    for (auto& pp : impl.split_parts)
+        ok = ok && hipStreamWaitEvent(impl.stream, pp->done, 0) == hipSuccess;
+    k_cast_f2d_hip<<<grd, blk, 0, impl.stream>>>(impl.d_yf.ptr, y, N);
+    ++impl.split_matvecs;
+    return ok;
+}
+
+/// true while the projected PCG of N atoms runs on the split blocks.
+static inline bool splitOnHip(const EEQSolverHipImpl& impl, int N)
+{
+    return impl.split_active && impl.split_N == N && !impl.split_parts.empty();
+}
+
 /// y = A x, A symmetric (lower triangle of impl.d_A), host scalars.
+/// Nov 2026 (A6): the multi-GPU split blocks when the split is active for N.
 static bool eeqMatvecHip(EEQSolverHipImpl& impl, int N, const double* x, double* y)
 {
+    if (splitOnHip(impl, N)) return splitMatvecHip(impl, N, x, y);
     const double one = 1.0, zero = 0.0;
     rocblas_set_pointer_mode(impl.handle, rocblas_pointer_mode_host);
     return rocblas_dsymv(impl.handle, rocblas_fill_lower, N, &one, impl.d_A.ptr, N, x, 1, &zero, y, 1)
@@ -1339,6 +1701,7 @@ static bool eeqMatvecHip(EEQSolverHipImpl& impl, int N, const double* x, double*
 /// Claude Generated (Oct 2026).
 static bool eeqMatvecF32Hip(EEQSolverHipImpl& impl, int N, const double* x, double* y)
 {
+    if (splitOnHip(impl, N)) return splitMatvecF32Hip(impl, N, x, y);   // Nov 2026 (A6)
     const float one = 1.0f, zero = 0.0f;
     const int blk = 256, grd = (N + blk - 1) / blk;
     k_cast_d2f_hip<<<grd, blk, 0, impl.stream>>>(x, impl.d_pcg_p32.ptr, N);
@@ -2075,8 +2438,19 @@ bool EEQSolverHip::solveWithDeviceRHSAndGPUProjectedPCG(
         return (v > 0.0 && v < 1.0) ? v : 1e-4;
     }();
     impl.m_fp32_delta = fp32_delta;
+
+    // Claude Generated (Nov 2026, ROCM_PARITY_A6): multi-GPU split when configured (opt-in in the wrapper) and N
+    // is large enough. A split that fails to set up (status set) falls back to the single-device path for good.
+    // With the split, the FP32 mode is the split's (gpu_eeq_mixed_precision, CURCUMA_EEQ_MIXED) and the
+    // single-device FP32 copy d_A_f32 is not used.
+    const bool split_was_active = impl.split_active;   // before splitPrepareHip/releaseSplit reset it
+    const bool use_split = splitWantedHip(impl, N) && splitPrepareHip(impl, N);
+    if (!use_split && impl.split_N != 0) impl.releaseSplit();
+    const bool split_mode_changed = (use_split != split_was_active);
+    impl.split_active = use_split;
+
     // The FP32 copy needs N*N floats (CudaBuffer counts in int); a failed allocation is not retried.
-    bool want_fp32 = fp32_env && !impl.m_fp32_alloc_failed
+    bool want_fp32 = !use_split && fp32_env && !impl.m_fp32_alloc_failed
                      && static_cast<long long>(N) * N <= std::numeric_limits<int>::max();
     if (want_fp32) {
         try {
@@ -2090,8 +2464,27 @@ bool EEQSolverHip::solveWithDeviceRHSAndGPUProjectedPCG(
     }
 
     const bool do_refactor = force_refactor || !impl.m_pcg_M_inv_valid || (N != m_last_N)
-                             || (want_fp32 && !impl.m_fp32_A_valid);
-    if (do_refactor) {
+                             || (want_fp32 && !impl.m_fp32_A_valid)
+                             || split_mode_changed || (use_split && impl.split_builds == 0);
+    if (do_refactor && use_split) {
+        // Nov 2026 (A6): column blocks on every participant, diagonal from alpha/gam; d_A is not written.
+        impl.d_pcg_M_inv.ensure(N);
+        if (!splitBuildHip(impl, N, cx, cy, cz, d_alpha_corrected, d_gam_corrected, cutoff_sq)) {
+            impl.split_failed = true;
+            impl.split_status = "unavailable: column-block build failed (copy or event error)";
+            impl.releaseSplit();
+            impl.m_pcg_M_inv_valid = false;
+            return false;   // the wrapper takes its fallback for this step; the next solve runs on one device
+        }
+        const int blk = 256, grd = (N + blk - 1) / blk;
+        k_eeq_diag_inv_hip<<<grd, blk, 0, impl.stream>>>(N, d_alpha_corrected, d_gam_corrected, impl.d_pcg_M_inv.ptr);
+        impl.m_fp32_A_valid = false;
+        impl.m_has_cached_factor = false;
+        impl.m_cached_factor_mixed = false;
+        FRAG_SUM_HIP(impl, nfrag, impl.d_pcg_M_inv.ptr, impl.d_frag_sM.ptr, impl.stream);
+        impl.m_pcg_M_inv_valid = true;
+        m_last_N = N;
+    } else if (do_refactor) {
         impl.d_pcg_M_inv.ensure(N);
         // Lower triangle only: rocblas_dsymv (fill_lower) and the diagonal are all the PPCG reads;
         // with want_fp32 the same kernel also writes the FP32 lower triangle into d_A_f32.
@@ -2115,6 +2508,16 @@ bool EEQSolverHip::solveWithDeviceRHSAndGPUProjectedPCG(
     if (impl.m_li_build_pending) {
         impl.m_li_build_pending = false;
         std::string why;
+        if (use_split) {
+            // Nov 2026 (A6, as CUDA): the split keeps only column blocks; the block gather of the device build
+            // reads the dense lower triangle, so assemble it on this device for this rebuild (same element
+            // expressions and rsqrt mode as the split blocks).
+            k_eeq_build_matrix_hip<<<N, 256, 0, impl.stream>>>(
+                N, cx, cy, cz, d_alpha_corrected, d_gam_corrected, impl.d_A.ptr, cutoff_sq, false, nullptr,
+                impl.split_mixed);
+            impl.m_has_cached_factor = false;
+            impl.m_cached_factor_mixed = false;
+        }
         if (buildLocalInverseOnDeviceHip(impl, N, nfrag, cx, cy, cz, why)) {
             impl.m_li_stats.builds += 1;
         } else {
@@ -2150,7 +2553,7 @@ bool EEQSolverHip::solveWithDeviceRHSAndGPUProjectedPCG(
         if (hipMemcpyAsync(impl.d_li_q0.ptr, impl.d_rhs.ptr, N * sizeof(double),
                            hipMemcpyDeviceToDevice, impl.stream) != hipSuccess) return false;
     }
-    const bool use_fp32 = want_fp32 && impl.m_fp32_A_valid;
+    const bool use_fp32 = use_split ? impl.split_mixed : (want_fp32 && impl.m_fp32_A_valid);   // A6: split FP32 mode
     bool ok = runProjectedPCGHip(impl, N, nfrag, impl.d_ppcg_b.ptr, impl.d_rhs.ptr, max_iter, tol, use_fp32);
     bool residual_failed = false;
     if (ok && li_on && impl.m_li_device && use_fp32 && impl.m_ppcg_last_true_sq >= 0.0) {
@@ -2266,7 +2669,8 @@ void EEQSolverHip::requestLocalInverseDeviceBuild(double radius_bohr, double ext
     impl.m_li_valid = false;   // the previous G must not be used with the new geometry's request pending
 }
 
-/// ROCm has no multi-GPU split: a device build is possible whenever the dense matrix fits d_A.
+/// A device build is possible whenever the dense matrix fits d_A (allocated for max_natoms^2 in the constructor);
+/// with the multi-GPU split the dense lower triangle is assembled into d_A for each rebuild (Nov 2026, A6).
 bool EEQSolverHip::localInverseDeviceBuildPossible(int N) const { return N >= 1 && N <= m_max_natoms; }
 
 EEQSolverHip::LocalInverseDeviceStats EEQSolverHip::localInverseDeviceStats() const { return m_impl->m_li_stats; }

@@ -10705,6 +10705,16 @@ void FFWorkspaceHip::setHBondEnabled(bool v)        { m_hbond_enabled = v; }
 void FFWorkspaceHip::setRepulsionEnabled(bool v)    { m_repulsion_enabled = v; }
 void FFWorkspaceHip::setCoulombEnabled(bool v)      { m_coulomb_enabled = v; }
 
+// Claude Generated (Nov 2026, ROCM_PARITY_A6): the ROCm port of the multi-GPU split covers the projected-PCG EEQ
+// only (EEQSolverHip::setSplitDevices). The CUDA Coulomb-tile and D4-pair splits (cuda/ff_workspace_gpu.cu,
+// prepareCoulombSplit / prepareDispSplit) are not ported: both terms stay on the calculation device. The wrapper
+// calls these two members when the split is configured; prepare/launch of the CUDA split are never called here.
+void FFWorkspaceHip::setCoulombSplitDevices(const std::vector<int>& /*helper_devices*/, int /*min_atoms*/) {}
+std::string FFWorkspaceHip::coulombSplitStatus() const
+{
+    return "Coulomb tiles and D4 pairs on the calculation device only (their split is not ported to ROCm)";
+}
+
 /// Claude Generated (April 2026): Upload unit cell to GPU constant memory for PBC.
 /// cell_bohr_9 and cell_bohr_inv_9 are column-major 3x3 matrices (9 doubles each).
 /// Zero overhead when has_pbc==false because applyMIC() returns immediately.

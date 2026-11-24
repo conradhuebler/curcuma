@@ -1073,7 +1073,9 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
         // gpu_split_devices: auto (default) = the -gpu_devices pool, else every visible device,
         // unless this is a leased batch worker or the run is pinned with an explicit -gpu_device;
         // a comma list; none/off. Used from gpu_split_min_atoms on.
-        if constexpr (Backend::has_multi_gpu_split) {
+        // Nov 2026 (ROCM_PARITY_A6): a backend with has_multi_gpu_split_opt_in (ROCm) compiles the same block, but the
+        // split runs only with -gfnff.rocm_multi_gpu_split true (never run with more than one device).
+        if constexpr (Backend::has_multi_gpu_split || Backend::has_multi_gpu_split_opt_in) {
             std::string spec = "auto";
             for (const json* scope : { &gfnff_cfg, &m_parameters })
                 if (scope->contains("gpu_split_devices") && (*scope)["gpu_split_devices"].is_string()) {
@@ -1110,6 +1112,27 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
             if (devs.size() > 1 && m_gfnff->hasPBC()) {
                 CurcumaLogger::warn("gpu_split_devices: ignored with a periodic cell (the split EEQ/Coulomb is not periodic)");
                 devs.clear();
+            }
+            // Claude Generated (Nov 2026, ROCM_PARITY_A6): opt-in gate of an unreleased split (ROCm). Without the switch
+            // an explicit request (a device list or "all") is refused with a counted fallback; "auto" stays silent, as
+            // before the port. With the switch the EEQ split runs and the run says that it is unverified.
+            if constexpr (!Backend::has_multi_gpu_split) {
+                if (devs.size() > 1) {
+                    const bool explicit_request = spec != "auto";
+                    if (!cfg_get_bool("rocm_multi_gpu_split", false)) {
+                        if (explicit_request) {
+                            const std::string msg = std::string("gpu_split_devices: the ") + Backend::name
+                                + " multi-GPU EEQ split has never run with more than one device and is off; "
+                                  "-gfnff.rocm_multi_gpu_split true enables it. This calculation uses one device.";
+                            CurcumaLogger::warn(msg);
+                            curcuma::reportGpuFallback("GFN-FF multi-GPU split not enabled on " + std::string(Backend::name),
+                                                       "-gfnff.rocm_multi_gpu_split false");
+                        }
+                        devs.clear();
+                    }
+                    // With the switch: the warning that the path is unverified comes with the first split report
+                    // after the first calculation (the set-up can run at verbosity 0, e.g. inside -md).
+                }
             }
             if (devs.size() > 1) {
                 m_gpu_workspace->setCoulombSplitDevices(devs, min_atoms);
@@ -2453,9 +2476,13 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
         assembleHybridVirial();   // A1 (Nov 2026); a no-op on a backend without the device virial (B1)
 
     // Claude Generated (Sep 2026): say once which parts of the multi-GPU split ran (or why not).
-    if constexpr (Backend::has_multi_gpu_split) {
+    if constexpr (Backend::has_multi_gpu_split || Backend::has_multi_gpu_split_opt_in) {
         if (m_split_configured && !m_split_reported && m_calc_count >= 1) {
             m_split_reported = true;
+            if constexpr (!Backend::has_multi_gpu_split)   // Nov 2026 (ROCM_PARITY_A6): the opt-in path
+                CurcumaLogger::warn(std::string("GFN-FF multi-GPU split on ") + Backend::name
+                                    + " (-gfnff.rocm_multi_gpu_split true): unverified, never run with more than one "
+                                      "device; only the EEQ is split, Coulomb and D4 stay on the calculation device");
             const std::string c = m_gpu_workspace->coulombSplitStatus();
             const std::string e = m_eeq_gpu ? m_eeq_gpu->splitStatus() : std::string();
             for (const std::string& st : { c, e }) {

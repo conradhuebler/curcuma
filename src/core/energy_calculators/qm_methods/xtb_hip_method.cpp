@@ -20,6 +20,9 @@
 
 #include "xtb_hip_method.h"
 
+#include <algorithm>
+#include <sstream>
+
 namespace {
 using curcuma::xtb::MethodType;
 using curcuma::xtb::gpu::XtbHipContext;
@@ -947,10 +950,52 @@ private:
 #endif // HAVE_ROCSOLVER
 }  // namespace
 
+// Claude Generated (Nov 2026, ROCM_PARITY_A6): CUDA spreads the eigensolve (cuSOLVERMp / cusolverMg,
+// libcurcuma_cuda_mgpu.so) and the pattern density of one molecule over several GPUs (-gpu_eigensolver_devices,
+// -gpu_density_devices, xtb_gpu_method.cpp). ROCm has no counterpart: rocSOLVER and hipSOLVER offer only single-device
+// (and batched) eigensolvers, rocBLAS has no multi-device BLAS, and no distributed solver (ScaLAPACK/SLATE/ELPA/MAGMA
+// multi-GPU) is part of the build (assessment: docs/ROCM_PARITY_A6.md). Before Nov 2026 the two keys were ignored here
+// without a message. A request for more than one device (a list naming two or more devices, or "all"/"auto" with more
+// than one visible device) is now refused: warning plus counted GPU fallback, so -gpu_strict true stops the run.
+// Without the keys nothing changes (one device, as before; CUDA would split by default above 4000 basis functions).
+void XtbHipComputationalMethod::refuseMultiGpuSplit(const json& config)
+{
+    for (const char* key : { "gpu_eigensolver_devices", "gpu_density_devices" }) {
+        if (!config.contains(key)) continue;
+        const json& v = config[key];
+        std::vector<int> devs;
+        bool all = false;
+        if (v.is_array()) {
+            for (const auto& d : v) if (d.is_number()) devs.push_back(static_cast<int>(d.get<double>()));
+        } else if (v.is_string()) {
+            const std::string s = v.get<std::string>();
+            if (s == "all" || s == "auto") all = true;
+            else if (s != "none" && s != "off" && s != "solver" && !s.empty()) {
+                std::stringstream ss(s);
+                for (std::string tok; std::getline(ss, tok, ',');) {
+                    try { devs.push_back(std::stoi(tok)); } catch (...) {}
+                }
+            }
+        } else if (v.is_number()) {
+            devs.push_back(static_cast<int>(v.get<double>()));
+        }
+        std::sort(devs.begin(), devs.end());
+        devs.erase(std::unique(devs.begin(), devs.end()), devs.end());
+        const bool several = all ? XtbHipContext::deviceCount() > 1 : devs.size() > 1;
+        if (!several) continue;
+        CurcumaLogger::warn(fmt::format("-{}: a multi-GPU {} of one molecule is not available on ROCm (no multi-device "
+                                        "eigensolver in rocSOLVER); this calculation uses one device", key,
+                                        std::string(key) == "gpu_eigensolver_devices" ? "eigensolve" : "density"));
+        curcuma::reportGpuFallback(std::string("-") + key + " not available on ROCm", "one device used");
+    }
+}
+
 XtbHipComputationalMethod::XtbHipComputationalMethod(MethodType method, const json& config)
     : XtbGpuAdapter(method, config, "ROCm", "ROCm/HIP device")
 {
     if (!gpuActive()) return;   // the adapter already warned; the CPU path stands
+
+    refuseMultiGpuSplit(config);   // Claude Generated (Nov 2026, ROCM_PARITY_A6)
 
 #ifdef HAVE_ROCSOLVER
     curcuma::xtb::XTB* xtb = cpuSolver();

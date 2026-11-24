@@ -59,6 +59,9 @@ private:
     /// Prints a warning for every bit of the context's fallback mask not reported yet;
     /// below verbosity 1 only when final_report is true (then at level 1).
     void reportSolverFallbacks(bool final_report = false);
+    /// Claude Generated (Nov 2026, ROCM_PARITY_A6): warns and counts a GPU fallback when -gpu_eigensolver_devices or
+    /// -gpu_density_devices asks for more than one device (no multi-GPU eigensolver or density split on ROCm).
+    static void refuseMultiGpuSplit(const json& config);
     unsigned m_reported_fallbacks = 0;   ///< SolverFallbackEvent bits already printed
     bool m_reported_mp_fallback = false; ///< -xtb.rocm_device_multipole fallback printed (Claude Generated, Oct 2026)
     bool m_reported_pot_fallback = false; ///< -xtb.rocm_device_potential fallback printed (Claude Generated, Oct 2026)

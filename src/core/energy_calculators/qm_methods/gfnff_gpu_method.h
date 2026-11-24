@@ -52,6 +52,8 @@ struct GFNFFCudaBackend {
     static constexpr bool has_localinv_device_build = true;
     /// Multi-GPU split of one molecule (Coulomb tiles + EEQ PCG). Claude Generated (Sep 2026).
     static constexpr bool has_multi_gpu_split = true;
+    /// Claude Generated (Nov 2026, ROCM_PARITY_A6): false = the split above is a released path (no opt-in switch).
+    static constexpr bool has_multi_gpu_split_opt_in = false;
     /// K1 (Oct 2026): CN pair list as a Verlet list with skin (cnPairListStale(), setCNPairSkin()).
     static constexpr bool has_cn_pair_skin = true;
     /// A16 (Nov 2026): the device CN uses the CPU CN range (setCNCutoffR2Max: cn_cutoff_bohr / cnthr).

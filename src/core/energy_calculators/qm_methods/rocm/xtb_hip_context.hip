@@ -5534,6 +5534,13 @@ bool XtbHipContext::deviceAvailable()
     return hipGetDeviceCount(&count) == hipSuccess && count > 0;
 }
 
+// Claude Generated (Nov 2026, ROCM_PARITY_A6): used by the multi-GPU refusal in xtb_hip_method.cpp.
+int XtbHipContext::deviceCount()
+{
+    int count = 0;
+    return hipGetDeviceCount(&count) == hipSuccess ? count : 0;
+}
+
 bool XtbHipContext::solveGeneralized(const double* F, const double* S, int n,
                                      double* eps_out, double* C_colmajor)
 {
