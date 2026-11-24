@@ -510,6 +510,10 @@ public:
     /// r^2 < rc^2 test of CNCalculator::calculateGFNFFCNWithNeighbors, or with
     /// cn_cutoff_bohr = 0 the threshold cnthr(cn_accuracy) of CNCalculator::calculateGFNFFCN.
     void setCNCutoffR2Max(double r2_max) { m_cn_r2_max = r2_max; }
+
+    /// L1 (Nov 2026, Claude Generated): periodic list rebuilds by the faster routes with identical lists
+    /// (gfnff list_fast_rebuild; false = the former kernels). CUDA only.
+    void setListFastRebuild(bool on) { m_list_fast_rebuild = on; }
     double cnCutoffR2Max() const { return m_cn_r2_max; }
 
     /// K1 (Oct 2026, Claude Generated): true when an atom moved more than max_disp_bohr since
@@ -812,6 +816,7 @@ private:
     // Task #10 (Jun 2026): CN-derivative pair-list cutoff factor (× rcov sum)
     double m_cn_pair_cutoff_factor = 2.5;
     double m_cn_pair_skin_bohr = 0.0;   ///< K1 (Oct 2026): pair-list skin, 0 = legacy
+    bool m_list_fast_rebuild = true;     ///< L1 (Nov 2026): see setListFastRebuild
     double m_cn_r2_max = 900.0;          ///< A16 (Nov 2026): CN range r^2 (Bohr^2), set by setCNCutoffR2Max
     long   m_cn_pair_builds = 0;        ///< K1 (Oct 2026): build counter
 

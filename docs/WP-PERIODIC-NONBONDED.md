@@ -2109,6 +2109,83 @@ Finding on the way (not from A16, not investigated): `pt-cluster-7` fails the sa
 reference GPU build and the new GPU build alike (smooth: FD with h and h/2 agree to 1e-6, so the analytic gradient misses
 a term, or the per-geometry topology derivation of each `-sp` run moves parameters); TODO.md.
 
+## L1 list rebuilds after a barostat step: same lists, faster builds (2026-11-24, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+**Question.** Every barostat step (`GFNFF::updateCell`) forces the HB/XB, D4, repulsion and Coulomb lists to be rebuilt
+(N2). Can that cost drop without changing a list entry? Reusing a list across the cell change is not possible under that
+condition: a skin-reused list differs in content from the rebuild (the energies could stay equal, the lists would not).
+So L1 keeps every rebuild and makes each build faster; every new route produces the former list bit for bit.
+
+**Profile before L1** (`CURCUMA_GFNFF_STEPPHASE=1`, `CURCUMA_MD_STEPPHASE=1`, CSVR 300 K, Berendsen every 2 steps, 4 threads,
+RTX 5080; ms of the energy call on a barostat step against a step without one; n = 8 to 10 barostat steps, spread < 3 %):
+
+| part (barostat step) | GPU 864 H2O | GPU 3456 H2O | CPU 3456 H2O |
+|---|---|---|---|
+| energy call, step without / with barostat | 13.3 / 48.1 | 96 / 396 | 508 / 1223 |
+| HB/XB detection (device kernel `k_hb_detect`; CPU: `detectHB`) | 14.5 | 97 (detect kernel 90) | 80-103 |
+| HB/XB host follow-up (bond HB data, alpha pairs, workspace) | 1.3 | 3.8 | 20-40 |
+| D4 generator on the host: O(N^2) CN at 40 Bohr | 12.2 | 101 | 101 |
+| D4 pair list: GPU count/build/key sort; CPU pair passes | 4.6 | 70 (16/24/25) | 470 (pass 1 41, list value-initialisation 270, pass 2 140) |
+| repulsion list (device build; CPU host build) | 1.0 | 12.6 | 39-49 |
+
+**What changed** (all behind `-gfnff.list_fast_rebuild`, default true; false runs the former code; only with a cell):
+- D4 generator CN with a cell: `CNCalculator::calculateGFNFFCNPeriodicLocal` visits only pairs within 2 max(rcov_i + rcov_j)
+  (cell list) and sums each row in ascending j with the statements of the full pass. Every skipped pair has kn dr <= -7.5,
+  where erf returns -1 exactly (fdlibm/glibc and `portable_erf`: |x| >= 6 gives +-(1 - tiny)), so its term is +0.0 and the
+  row sum does not change. CPU and GPU (the host generator feeds the device D4 build). 101 -> 2.7 ms at 3456 H2O.
+- CPU D4 list with a cell: built into the storage of the former list (`GenerateDispersionPairsNative(..., storage)`,
+  `FFWorkspace::releaseD4DispersionStorage`); pass 2 writes every field of every element, so no value-initialisation and
+  no first touch of 0.46 GB per rebuild (270 -> 0 ms).
+- CUDA D4 list with a cell: `k_disp_rows_count/build`, one block per row, block prefix sum; the list comes out in (i, j)
+  order without the key sort; a float minimum-image band filter (r^2 outside cutoff^2 (1 +- 1e-4) decided in float, inside
+  by the former double test); per-atom zeta (`k_disp_atom_zeta`, the same function per atom). 70 -> 10 ms.
+- CUDA repulsion list with a cell: `k_rep_rows_count/build` (same scheme); the former build placed a row in atomic arrival
+  order (the fixed-point sums are order-independent), the new one in (i, j) order. 12.6 -> 2.4 ms.
+- CUDA HB detection with a cell: `k_hb_detect_pbc` (body template `hb_detect_body<PBCF>`, `k_hb_detect` = `<false>` with an
+  unchanged SASS) walks, per AB pair, only the hydrogens near the donor (`k_hb_hnb`: float minimum image, kept when
+  r^2 <= thr2 (1 + 1e-4) or NaN), with a float minimum-image pre-filter of the two distance tests and the float case-1
+  strength decision on minimum-image displacements (`d_hb_strength_decision_fv`, 1 % band, double path inside it; the
+  former code had no float path with a cell). Error bound of the float values: double differences rounded once, |d| <= 2 L
+  (else NaN, the double test decides), L <= 400 Bohr, off-diagonal lattice entries < 1e-9 Bohr (they are 5e-15, rounding of
+  the cell conversion): <= 5e-3 Bohr^2 against a margin of 0.045 Bohr^2. 97 -> 22 ms (kernel 90 -> 8.7).
+- Diagnostics (no numerical effect): `CURCUMA_GFNFF_STEPPHASE=1` adds `HBDEV`, `DISPBUILD`, `D4GEN` timers;
+  `CURCUMA_GFNFF_LISTHASH=1` prints FNV-1a hashes of the D4 CN, the device D4 list, the device HB triples, the device
+  repulsion list (as a sorted set) and the host D4 list at every build.
+
+**After L1** (same profile): GPU 864 H2O barostat step 22.5-23.9 ms (n = 3, was 48.1), 3456 H2O 156-164 ms (n = 4, step
+without barostat 96-104; was 396): HB detection
+22, D4 device build 15.6, D4 host CN 3, repulsion 2.4, HB host follow-up 7. CPU 3456 H2O 970 ms (was 1223): the D4 list
+build (311 ms: pass 2 118, pass 1 43, about 150 ms outside the generator, not split up), host HB detection 79-104 and its
+workspace updates 19-41, repulsion 39-48 are left; L1 changed only the D4 CN and the list storage on the CPU.
+
+**Gates** (thresholds fixed beforehand: equality):
+
+| check | result |
+|---|---|
+| new vs old path (`list_fast_rebuild false`), NPT 432 H2O 200 steps, GPU: list hashes (101 D4 CN, 101 D4 lists, 105 HB lists, 100 repulsion lists) | 407/407 identical; trajectory md5 and status lines (Epot ... virial correction) identical |
+| same, 3456 H2O 50 steps, GPU | 103/103 hashes identical; trajectory and status lines identical |
+| same, CPU, 432 H2O 200 steps / 3456 H2O 50 steps (D4 CN and host D4 list hashes) | 186/186 and 47/47 identical; trajectory and status lines identical (also equal to the GPU trajectory) |
+| no cell: 6 structures x gfnff/gfn1/gfn2 x 1/4 threads + 2 MD vs reference build `af140bb4` | CPU 38/38, CUDA 38/38 identical; second CUDA run 38/38 |
+| SASS of the 333 kernels of the A16 plugin | 333 identical, 7 new kernels |
+| NPT 432 H2O 20 steps CPU vs GPU; second GPU run | status lines and cell identical; trajectory md5 identical |
+
+**Time per NPT step** (ms; CLI, 4 host threads, CSVR 300 K, Berendsen every 2 steps, difference of 60- and 20-step runs,
+n = 3, median (range); RTX 5080; old = the same binary with `-gfnff.list_fast_rebuild false`; load average 0.7-2.6 at
+432 H2O, 4.6-9.1 from 864 H2O on: another agent's runs shared the machine, so the CPU columns carry that noise):
+
+| box | atoms | GPU old | GPU new | gain | CPU old | CPU new | gain |
+|---|---|---|---|---|---|---|---|
+| 432 H2O | 1296 | 12.2 (9.4-12.6) | 5.8 (5.4-6.5) | 2.1x | 49.1 (47.6-51.5) | 45.4 (45.4-45.6) | 1.08x |
+| 864 H2O | 2592 | 31.8 (28.1-31.8) | 18.1 (16.0-18.5) | 1.8x | 131.7 (128.9-134.7) | 118.0 (116.8-123.0) | 1.12x |
+| 1728 H2O | 5184 | 93.4 (89.2-93.5) | 47.5 (47.5-47.8) | 2.0x | 343.2 (337.1-357.2) | 304.3 (291.4-310.6) | 1.13x |
+| 3456 H2O | 10368 | 271.4 (243.9-274.4) | 137.1 (131.8-146.2) | 2.0x | 1003 (897-1282) | 789 (714-806) | 1.27x |
+
+**Not done / not tested.** CPU host HB detection and repulsion list with a cell (same float-filter ideas would apply, not
+done); the remaining 150 ms of the CPU D4 rebuild outside the generator (not split up); ROCm (none of the new kernels exist
+there); non-orthorhombic cells (the float filters switch off; GFN-FF refuses them anyway); boxes above L = 400 Bohr (filters
+off). Every gate ran on water boxes only (plus the no-cell set); other periodic systems are not tested. Human production
+testing pending.
+
 ## Moved from TODO.md (Nov 23, 2026)
 
 Verbatim TODO.md entries (German) shortened there to <= 600 characters; status as of the date in each entry.

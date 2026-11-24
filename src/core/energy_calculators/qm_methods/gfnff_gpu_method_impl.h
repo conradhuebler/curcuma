@@ -960,6 +960,9 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
                 : CNCalculator::gfnffAccuracyThresholdSqBohr(cfg_get_dbl("cn_accuracy", 1.0));
             m_gpu_workspace->setCNCutoffR2Max(r2_max);
         }
+        // L1 (Nov 2026, Claude Generated): faster list rebuilds with a cell, identical lists (gfnff list_fast_rebuild)
+        if constexpr (Backend::has_cn_cutoff)
+            m_gpu_workspace->setListFastRebuild(cfg_get_bool("list_fast_rebuild", true));
         // K1 (Oct 2026, Claude Generated): CN pair list as a Verlet list with skin s.
         // The list holds every pair with r < f*rs + 2s (rs = rcov_i + rcov_j, 4/3-scaled D3 radii,
         // f = gpu_cn_pair_cutoff_factor). A pair NOT in the list had r_build >= f*rs + 2s; after every
@@ -1364,14 +1367,20 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
         if (m_hb_detect_on_device) {
             hb_on_device = true;
             if (m_gfnff->hbxbRefreshDue()) {
+                hb_lap("refresh_due");
                 const Vector& topo_q = m_gfnff->getTopologyInfo().topology_charges;
                 const auto in = m_gfnff->prepareHBDetectInputs(topo_q);
+                hb_lap("prepare_inputs");
                 std::vector<int> dev_case, dev_parent;
                 const int n_hb = m_gpu_workspace->detectHBondsOnDevice(in, dev_hb_i, dev_hb_j, dev_hb_k,
                     m_hb_detect_verify ? &dev_case : nullptr, m_hb_detect_verify ? &dev_parent : nullptr);
+                hb_lap("device_detect");
                 if (m_hb_detect_verify)
                     verifyDeviceHBList(dev_hb_i, dev_hb_j, dev_hb_k, dev_case, dev_parent);
-                m_gfnff->commitHBXBDeviceUpdate(n_hb, m_gfnff->detectXBForDevice());
+                auto xb = m_gfnff->detectXBForDevice();
+                hb_lap("xb_detect");
+                m_gfnff->commitHBXBDeviceUpdate(n_hb, std::move(xb));
+                hb_lap("commit");
                 hbxb_updated = m_gfnff->consumeHBXBUpdate();
             }
         }

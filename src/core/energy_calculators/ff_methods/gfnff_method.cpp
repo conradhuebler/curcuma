@@ -2381,11 +2381,32 @@ void GFNFF::updateDispersionPairsIfNeeded(FFWorkspace* extra_ws)
     std::vector<GFNFFDispersion> pairs;
     {
         curcuma::ScopedBlasThreads rebuild_omp_threads(rebuild_threads);
+        // L1 (Nov 2026, Claude Generated): with a cell, build into the storage of the former list (same list)
+        std::vector<GFNFFDispersion> storage;
+        const bool reuse = m_workspace && !m_skip_host_disp_pairs && m_cell_bohr_ortho.active
+                           && m_parameters.value("list_fast_rebuild", true);
+        if (reuse)
+            storage = m_workspace->releaseD4DispersionStorage();
         pairs = m_d4_generator->GenerateDispersionPairsNative(m_atoms, m_geometry_bohr,
-                                                               threadPool(), rebuild_threads);
+                                                               threadPool(), rebuild_threads,
+                                                               reuse ? &storage : nullptr);
     }
     applyDispersionCutoff(pairs, false);
     const int new_count = static_cast<int>(pairs.size());
+    {   // CURCUMA_GFNFF_LISTHASH=1: FNV-1a hash of the host D4 pair list (L1 gate), Claude Generated (Nov 2026)
+        static const bool hash_log = [] { const char* e = std::getenv("CURCUMA_GFNFF_LISTHASH"); return e && *e && std::string(e) != "0"; }();
+        if (hash_log && !pairs.empty()) {
+            std::uint64_t h = 1469598103934665603ull;
+            auto mix = [&](const void* p, size_t bytes) {
+                const unsigned char* c = static_cast<const unsigned char*>(p);
+                for (size_t k = 0; k < bytes; ++k) { h ^= c[k]; h *= 1099511628211ull; }
+            };
+            for (const auto& d : pairs) {
+                mix(&d.i, 4); mix(&d.j, 4); mix(&d.C6, 8); mix(&d.r4r2ij, 8); mix(&d.r0_squared, 8); mix(&d.r_cut, 8); mix(&d.zetac6, 8);
+            }
+            fmt::print(stderr, "LISTHASH d4pairs_host {} {:016x}\n", pairs.size(), h);
+        }
+    }
 
     if (!m_skip_host_disp_pairs) {
         if (extra_ws)
@@ -12809,6 +12830,8 @@ std::tuple<std::vector<GFNFFDispersion>, std::vector<ATMTriple>, std::string> GF
         d4_input["d4_s9"] = 1.00;
         // Lever 3 Opt B: plumb the user-facing gfnff flag down to the generator.
         d4_input["d4_disp_half_contraction"] = m_parameters.value("disp_half_contraction", true);
+        // L1 (Nov 2026, Claude Generated): periodic cell-list CN of the generator, bitwise equal to the full pass.
+        d4_input["d4_cn_periodic_local"] = m_parameters.value("list_fast_rebuild", true);
         // Claude Generated (Sep 2026, Known Issue #32): with the per-step C6 refresh
         // (dispersion_c6_update, "stale-CN fix B" in prepareCNAndEEQ) the Gaussian weights feed
         // the ENERGY, not only dC6/dCN. The generator's CN-change cache (d4_cn_cache_threshold,

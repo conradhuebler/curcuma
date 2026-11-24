@@ -751,6 +751,22 @@ __global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_build(
     // refn read from d_refn_const (constant memory)
 );
 
+/// L1 (Nov 2026): ordered D4 pair build, one block of 256 threads per row (gfnff_kernels.cu): row counts without
+/// atomics, then the pairs in (i, j) order by a block prefix sum; same pair set and values as the two kernels above.
+__global__ __launch_bounds__(256) void k_disp_rows_count(
+    int N, const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+    const int* __restrict__ atom_types, double cutoff_sq, int* __restrict__ row_count);
+__global__ __launch_bounds__(256) void k_disp_rows_build(
+    int N, const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+    const int* __restrict__ atom_types, double cutoff_sq,
+    const double* __restrict__ gw, const double* __restrict__ c6_flat, const double* __restrict__ sqrtzr4r2,
+    const double* __restrict__ zeta_atom,
+    double a1, double a2, double r_cut_eval, const int* __restrict__ row_off,
+    int* out_i, int* out_j, double* out_C6, double* out_r4r2, double* out_r0sq, double* out_zeta, double* out_rcut);
+/// L1: per-atom zetaChargeScale of the D4 pairs (the factors k_disp_pairs_build computes per pair).
+__global__ void k_disp_atom_zeta(int N, const int* __restrict__ atom_types, const double* __restrict__ topo_q,
+    const double* __restrict__ zeta_zeff, const double* __restrict__ zeta_c, double* __restrict__ zeta_atom);
+
 /// Tabulated replacement of k_dc6dcn_per_pair (Claude Generated, Oct 2026): builds the per-atom partner tables A, W
 /// ([N * nt * D4_MAX_REF] each) from gw, then the pair kernel. nt = number of distinct elements, type_z[t] their
 /// atomic numbers, atype_idx[a] the type index of atom a. Same outputs as k_dc6dcn_per_pair.
@@ -788,6 +804,14 @@ __global__ GFNFF_KERNEL_BOUNDS void k_rep_pairs_build(
     int N, const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
     const int* __restrict__ atom_types, double cutoff_sq, RepDevTables t,
     const int* __restrict__ row_off, int* d_counter,
+    int* out_i, int* out_j, double* out_alpha, double* out_repab, double* out_rcut);
+/// L1 (Nov 2026): ordered repulsion pair build with a cell, one block of 256 threads per row (gfnff_kernels.cu).
+__global__ __launch_bounds__(256) void k_rep_rows_count(
+    int N, const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+    double cutoff_sq, RepDevTables t, int* __restrict__ row_count);
+__global__ __launch_bounds__(256) void k_rep_rows_build(
+    int N, const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+    const int* __restrict__ atom_types, double cutoff_sq, RepDevTables t, const int* __restrict__ row_off,
     int* out_i, int* out_j, double* out_alpha, double* out_repab, double* out_rcut);
 
 // ============================================================================
@@ -1176,7 +1200,44 @@ __global__ GFNFF_KERNEL_BOUNDS void k_hb_detect(
     int*          d_counter,
     long long*    out_key,     ///< (A*N + H)*N + B
     int*          out_ct,      ///< case type 1..4
-    int*          out_par);    ///< acceptor parent (case 3) or -1
+    int*          out_par);
+/// L1 (Nov 2026): k_hb_detect with a float minimum-image pre-filter for a periodic cell; emits the same entries.
+__global__ GFNFF_KERNEL_BOUNDS void k_hb_detect_pbc(
+    int n_ab,
+    const int*    __restrict__ ab_i,
+    const int*    __restrict__ ab_j,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const float*  __restrict__ fx,     ///< float copies of the coordinates (pre-filter only)
+    const float*  __restrict__ fy,
+    const float*  __restrict__ fz,
+    int           N,
+    const int*    __restrict__ Z,
+    const double* __restrict__ bas,
+    const double* __restrict__ aci,
+    const double* __restrict__ q,
+    const int*    __restrict__ hyd_list,   ///< HB hydrogens
+    int           n_hyd,
+    const int*    __restrict__ bond_off,
+    const int*    __restrict__ bond_idx,
+    const int*    __restrict__ hyd_off,
+    const int*    __restrict__ hyd_idx,
+    const int*    __restrict__ nbr_off,
+    const int*    __restrict__ nbr_idx,
+    double        thr1,
+    double        thr2,
+    double        min_pair_energy,
+    int           cap,
+    int*          d_counter,
+    long long*    out_key,     ///< (A*N + H)*N + B
+    int*          out_ct,      ///< case type 1..4
+    int*          out_par,
+    const int* __restrict__ hnb_off, const int* __restrict__ hnb_idx);
+/// L1 (Nov 2026): hydrogens near each AB atom (count pass with count != nullptr, then write pass at off).
+__global__ void k_hb_hnb(int N, const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+    const char* __restrict__ ab_ok, const int* __restrict__ hyd_list, int n_hyd, double thr2,
+    int* __restrict__ count, const int* __restrict__ off, int* __restrict__ out);    ///< acceptor parent (case 3) or -1
 
 /// One thread per sorted entry: the 20 columns of HBondSoA except the packed neighbour arrays.
 __global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_hb_fill_columns(

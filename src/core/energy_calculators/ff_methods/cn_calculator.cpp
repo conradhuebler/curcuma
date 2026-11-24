@@ -173,6 +173,69 @@ std::vector<double> CNCalculator::calculateGFNFFCN(
     return cn_values;
 }
 
+// Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED L1): see the header. The statements inside the
+// row loop are those of calculateGFNFFCN above (periodic branch), in the same order.
+bool CNCalculator::calculateGFNFFCNPeriodicLocal(
+    const std::vector<int>& atoms,
+    const Eigen::MatrixXd& geometry_bohr,
+    double threshold,
+    double kn,
+    double cnmax,
+    const PBCUtils::OrthoCell& cell,
+    std::vector<double>& cn_values)
+{
+    if (!cell.active)
+        return false;
+    // Skipped pairs have dr = (r - rc)/rc >= 1 (r >= 2 rc, up to rounding: dr > 0.99), so
+    // kn*dr <= -6 needs kn <= -6/0.99; GFN-FF uses kn = -7.5.
+    if (!(kn <= -6.1))
+        return false;
+    const int natoms = static_cast<int>(atoms.size());
+    std::vector<double> rcov_bohr(natoms, 0.0);
+    double rcov_max = 0.0;
+    for (int i = 0; i < natoms; ++i) {
+        rcov_bohr[i] = GFNFFParameters::gfnff_cn_rcov_bohr(atoms[i]);
+        rcov_max = std::max(rcov_max, rcov_bohr[i]);
+    }
+    const double visit = 2.0 * (2.0 * rcov_max);   // 2 x largest rcov_i + rcov_j
+    if (natoms == 0 || !(visit > 0.0) || visit * visit >= threshold || 2.0 * visit >= cell.minLength())
+        return false;
+
+    SpatialCellList cells;
+    cells.build(geometry_bohr, visit, cell);
+    const double visit_sq = visit * visit;
+    cn_values.assign(natoms, 0.0);
+
+    #pragma omp parallel for schedule(dynamic, 32)
+    for (int i = 0; i < natoms; ++i) {
+        if (rcov_bohr[i] == 0.0) continue;  // Skip unknown elements (as the full pass)
+        std::vector<int> nb;
+        cells.forEachNeighbor(i, visit_sq, [&](int j, double) { nb.push_back(j); });
+        std::sort(nb.begin(), nb.end());
+        nb.erase(std::unique(nb.begin(), nb.end()), nb.end());
+
+        double cn_raw = 0.0;
+        Eigen::Vector3d pos_i = geometry_bohr.row(i);
+        for (int j : nb) {
+            if (i == j) continue;
+            if (rcov_bohr[j] == 0.0) continue;
+            double dx = pos_i(0) - geometry_bohr(j, 0);
+            double dy = pos_i(1) - geometry_bohr(j, 1);
+            double dz = pos_i(2) - geometry_bohr(j, 2);
+            PBCUtils::applyMinimumImageOrtho(cell, dx, dy, dz);
+            double distance_sq = dx * dx + dy * dy + dz * dz;
+            if (distance_sq > threshold) continue;
+
+            double distance = std::sqrt(distance_sq);
+            double rcov_ij = rcov_bohr[i] + rcov_bohr[j];
+            double dr = (distance - rcov_ij) / rcov_ij;
+            cn_raw += 0.5 * (1.0 + curcuma_erf(kn * dr));
+        }
+        cn_values[i] = curcuma_log(1.0 + curcuma_exp(cnmax)) - curcuma_log(1.0 + curcuma_exp(cnmax - cn_raw));
+    }
+    return true;
+}
+
 double CNCalculator::getCovalentRadius(int atomic_number)
 {
     int idx = atomic_number - 1;  // Convert to 0-based

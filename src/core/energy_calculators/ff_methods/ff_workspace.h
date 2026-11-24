@@ -567,6 +567,10 @@ public:
      */
     void updateD4Dispersions(std::vector<GFNFFDispersion>&& pairs);
 
+    /// L1 (Nov 2026, Claude Generated): hand the D4 pair list out as storage for the next build
+    /// (GenerateDispersionPairsNative with storage); the workspace holds no pairs until updateD4Dispersions().
+    std::vector<GFNFFDispersion> releaseD4DispersionStorage();
+
     /// Current D4 pair list (read-only; GPU re-upload source after a rebuild)
     const std::vector<GFNFFDispersion>& d4Dispersions() const { return m_d4_dispersions; }
     /// Claude Generated (Nov 2026, A4a): current non-bonded repulsion pair list (read-only; tests)
