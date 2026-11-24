@@ -125,6 +125,8 @@ struct FFVirialComponents {
     Eigen::Matrix3d dispersion;   ///< D4 (and D3) pair kernel
     Eigen::Matrix3d disp_tail;    ///< homogeneous tail: E_tail * I (fixed r_c, E_tail ~ 1/V)
     Eigen::Matrix3d tail_lrc;     ///< V-LRC: (3 E6_tail + 5 E8_tail)/3 * I, crossing-pair correction (not a model derivative)
+    Eigen::Matrix3d hb_crossing;  ///< HB-X (Nov 2026): HB triples crossing the sharp search radii, shell estimator (not a model derivative)
+    Eigen::Matrix3d xb_crossing;  ///< HB-X: the same for the XB triples (A-B list radius, X-B kernel radius)
     Eigen::Matrix3d repulsion;    ///< bonded + non-bonded repulsion
     Eigen::Matrix3d coulomb;      ///< Coulomb pair term (plain, or Ewald real + reciprocal)
     Eigen::Matrix3d coulomb_bg;   ///< Ewald neutralising and Gaussian background: (E_bg + E_gbg) * I
@@ -134,13 +136,14 @@ struct FFVirialComponents {
     void reset()
     {
         for (Eigen::Matrix3d* m : { &bond, &angle, &dihedral, &inversion, &stors, &dispersion, &disp_tail, &tail_lrc,
-                 &repulsion, &coulomb, &coulomb_bg, &hbond, &xbond, &batm, &atm, &cn_bond, &cn_dispersion, &cn_coulomb })
+                 &hb_crossing, &xb_crossing, &repulsion, &coulomb, &coulomb_bg, &hbond, &xbond, &batm, &atm, &cn_bond, &cn_dispersion, &cn_coulomb })
             m->setZero();
     }
     FFVirialComponents& operator+=(const FFVirialComponents& o)
     {
         bond += o.bond; angle += o.angle; dihedral += o.dihedral; inversion += o.inversion; stors += o.stors;
         dispersion += o.dispersion; disp_tail += o.disp_tail; tail_lrc += o.tail_lrc; repulsion += o.repulsion;
+        hb_crossing += o.hb_crossing; xb_crossing += o.xb_crossing;
         coulomb += o.coulomb; coulomb_bg += o.coulomb_bg; hbond += o.hbond; xbond += o.xbond;
         batm += o.batm; atm += o.atm; cn_bond += o.cn_bond; cn_dispersion += o.cn_dispersion; cn_coulomb += o.cn_coulomb;
         return *this;
@@ -155,8 +158,9 @@ struct FFVirialComponents {
         return bondTotal() + angle + dihedral + inversion + stors + dispersionTotal() + repulsion + coulombTotal()
             + hbond + xbond + batm + atm;
     }
-    /// V-LRC: the virial of the reported pressure, total() + tail_lrc (bitwise total() when tail_lrc is zero)
-    Eigen::Matrix3d pressureTotal() const { return total() + tail_lrc; }
+    /// V-LRC: the virial of the reported pressure, total() + tail_lrc (bitwise total() when tail_lrc is zero);
+    /// HB-X (Nov 2026): plus the HB/XB crossing estimators (zero with pressure_hb_crossing false: + 0.0 leaves it bitwise)
+    Eigen::Matrix3d pressureTotal() const { return total() + tail_lrc + hb_crossing + xb_crossing; }
 };
 
 /**
@@ -496,7 +500,12 @@ public:
     /// kernel runs its non-virial instantiation and nothing here costs anything. Meaningful only for GFN-FF with a
     /// periodic cell (the minimum-image frames define the atomic virial); without a cell the sum is the plain
     /// -sum_a x_a . G_a of the cluster, which is reported but not used.
-    void setWantVirial(bool v) { m_want_virial = v; }
+    void setWantVirial(bool v)
+    {
+        m_want_virial = v;
+        setRecordHBondEnergies(m_user_record_hb);   // HB-X: per-triple energies follow the crossing estimator
+    }
+    bool wantVirial() const { return m_want_virial; }
     /// True after calculate(true) with the virial requested; evaluateEwaldCoulomb() (GPU hybrid) clears it.
     bool virialValid() const { return m_virial_valid; }
     /// Xi (3x3, Eh) of the last calculate(true) for the reported pressure: the model derivative plus the V-LRC
@@ -651,6 +660,31 @@ public:
     /// calcHydrogenBondsScaled() and deviates from the reference parametrisation.
     void setHBScale(double s) { m_hb_scale = s; }
 
+    /**
+     * @brief HB/XB crossing estimator of the pressure (PARAMs gfnff.pressure_hb_crossing, pressure_crossing_shell;
+     * Claude Generated Nov 2026, derivation in docs/WP-PERIODIC-NONBONDED.md section HB-X)
+     *
+     * A triple t is in the list when its normalised search criterion h_t < 1 (HB case 1: h = max(r_AB^2/thr1,
+     * (r_AB^2 + r_AH^2 + r_BH^2)/thr2); case 2-4: r_AB^2/thr1; XB: max(r_AB^2/xb_thr2, r_XB^2/r_cut^2)). h is
+     * homogeneous of degree 2 in the positions, so under a strain triples cross h = 1 and the truncated energy jumps
+     * by E_t; the fixed-list virial misses Xi_cross = sum_t E_t delta(h_t - 1) dh_t/d(eps). Estimated from the
+     * triples inside the shell h in [h0, 1), h0 = (1 - shell)^2, linearly extrapolated to h = 1: Xi_cross =
+     * 2/(1 - h0) sum_shell (-2 + 6 u_t) E_t M_t, u_t = (h_t - h0)/(1 - h0), M_t = (sum d d^T)/(sum d^2) over the
+     * vectors of the active criterion (trace 1). Filled only with the virial, by calcHBCrossing / calcXBCrossing
+     * after the HB/XB kernels (which are not changed), into FFVirialComponents::hb_crossing / xb_crossing; the HB
+     * per-triple energy record is switched on for it. Energies and forces are not touched.
+     */
+    void setHBCrossing(bool on, double shell, double hb_thr1, double hb_thr2, double xb_thr2)
+    {
+        m_hb_cross_on = on && shell > 0.0 && shell < 1.0;
+        m_hb_cross_h0 = (1.0 - shell) * (1.0 - shell);
+        m_hb_cross_thr1 = hb_thr1;
+        m_hb_cross_thr2 = hb_thr2;
+        m_xb_cross_thr2 = xb_thr2;
+        setRecordHBondEnergies(m_user_record_hb);   // the crossing pass reads the per-triple HB energies
+    }
+    bool hbCrossingOn() const { return m_hb_cross_on; }
+
     /// Diagnostic factors on three further GFN-FF terms (PARAMs gfnff.repulsion_scale, dispersion_scale,
     /// coulomb_scale; Claude Generated Nov 2026, "term-scale" switches, docs/REV_GFNFF_TODO.md #19). Same scheme as
     /// hb_scale: 1.0 (default, the reference) runs the unchanged kernels; any other value runs the unchanged kernel
@@ -746,6 +780,9 @@ private:
     std::vector<GFNFFHydrogenBond> m_hbonds;
     bool m_record_hb_energies = false;
     double m_hb_scale = 1.0;                  ///< hb_scale diagnostic factor (setHBScale); 1.0 = reference, plugin ABI 5
+    bool m_hb_cross_on = false;               ///< HB-X: setHBCrossing (plugin ABI 28)
+    bool m_user_record_hb = false;            ///< HB-X: recording requested by setRecordHBondEnergies (m_record_hb_energies may be forced on)
+    double m_hb_cross_h0 = 1.0, m_hb_cross_thr1 = 0.0, m_hb_cross_thr2 = 0.0, m_xb_cross_thr2 = 0.0;
     double m_repulsion_scale = 1.0;           ///< term-scale diagnostic factors (setRepulsionScale, ...); 1.0 = reference, plugin ABI 7
     double m_dispersion_scale = 1.0;
     double m_coulomb_scale = 1.0;
@@ -810,6 +847,8 @@ private:
     void calcCoulombEwald(int p);
     void calcHydrogenBonds(int p);
     void calcHalogenBonds(int p);
+    void calcHBCrossing(int p);   ///< HB-X: crossing estimator of the HB search radii (virial only)
+    void calcXBCrossing(int p);   ///< HB-X: the same for the XB radii
     void calcATM(int p);
     void calcATMGradient(int p);
     void calcBATM(int p);

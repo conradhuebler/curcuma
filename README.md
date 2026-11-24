@@ -178,8 +178,9 @@ Diagnostic GFN-FF switches: `-gfnff.hb_scale s` multiplies the hydrogen-bond ter
 `-gfnff.dispersion_scale` and `-gfnff.coulomb_scale` the repulsion, D4 dispersion and electrostatic terms (default 1.0 = the
 reference; CPU only), [docs/REV_GFNFF_TODO.md](docs/REV_GFNFF_TODO.md) #19.
 Periodic GFN-FF pressure (`-md -compute_pressure true`, barostats): `-gfnff.pressure_lrc` (default true) adds the
-long-range correction of the D4 pairs crossing the evaluation radius; `false` restores the earlier pressure,
-[docs/NPT.md](docs/NPT.md).
+long-range correction of the D4 pairs crossing the evaluation radius, `-gfnff.pressure_hb_crossing` (default true,
+Nov 23, 2026: the reported pressure of water about 31 bar lower than before) the crossing term of the HB/XB search
+radii; `false` restores the earlier pressure, [docs/NPT.md](docs/NPT.md).
 `-export-config <module>` prints a module's defaults as JSON to the standard output (the program banner
 precedes the JSON in the build checked on 2026-10-01, so remove the lines before the first `{` when saving it).
 

@@ -20,6 +20,8 @@ step just finished, `P = (2 Ekin + tr Xi) / (3 V)`. Isotropic only; cubic and or
 | `compressibility` | 4.5e-5 1/bar | isothermal compressibility beta (water at 300 K); sets the coupling strength, not the result |
 | `pcoupl_interval` | 10 | the barostat acts every N steps with the time step N dt |
 | `gfnff.pressure_lrc` | true | add the long-range correction of the D4 pairs crossing the evaluation radius to the pressure (below) |
+| `gfnff.pressure_hb_crossing` | true | add the crossing term of the HB/XB search radii to the pressure (below; false: pressure before Nov 23, 2026) |
+| `gfnff.pressure_crossing_shell` | 0.03 | shell width (relative to the radius) of its estimator |
 
 A barostat switches `compute_pressure` on: the status line gains `P`, `<P>` (bar), `V` (A^3), `rho` (g/cm^3) and `L`
 (shortest cell edge, A); the restart files carry `cell` (9 numbers, A), the barostat parameters, the step counter of
@@ -48,9 +50,17 @@ the old estimator: their pressure is too high by the amounts above, and their NP
 0.32 / 0.15 / 0.07 / 0.04 % (432 / 864 / 1728 / 3456 waters; linear estimate with kappa_T = 4.5e-5 /bar from the cutoff
 scan, not an NPT rerun). Droplet runs without a cell are not affected.
 
-Still missing from the pressure (measured Nov 23, 2026, WP-PERIODIC-NONBONDED A3-P): the crossing term of the HB
-search radius, -31 to -38 bar on water (the reported P is that much too high; NPT density about -0.2 %, rough
-linear estimate); repulsion and CN parts below 1.5 bar. The D4 crossing term measured the same way equals V-LRC.
+## Pressure: crossing term of the HB/XB search radii (HB-X, Nov 23, 2026)
+
+A3-P measured the term of the H-bond triples that cross the sharp search radii under a volume change (-31 to -38 bar
+on water, missing from the fixed-list virial). With `pressure_hb_crossing true` (default) `P`, `<P>` and the barostat
+contain a statistical estimate of it (virial components `hb_crossing`, `xb_crossing`: triples in a shell inside the
+radius, energy density extrapolated linearly to the radius); `false` gives the earlier pressure bitwise. Energies and
+forces are not affected; CPU and the CUDA hybrid. Water, n = 15 frames: estimate -30.6 bar, residual against the
+re-derived-list strain slope -0.15 +- 0.79 bar. **Behaviour change**: the reported P of a water box is about 31 bar
+lower than with earlier binaries; NPT runs made before (all of Nov 2026) have densities about 0.2 % too low (rough
+linear estimate, kappa_T ~6e-5 /bar, no NPT rerun). Derivation and tests: [WP-PERIODIC-NONBONDED.md](WP-PERIODIC-NONBONDED.md)
+section HB-X. Still not in P: repulsion and CN crossing parts (below 1.5 bar), the |E_HB| candidate filter (about 0.1 bar).
 
 ## Equations (`SimpleMD::applyBarostat`, the code comment carries the derivation)
 

@@ -194,6 +194,33 @@ static inline void virialPair(Eigen::Matrix3d& xi, const Eigen::Vector3d& d_ij, 
     xi.noalias() -= d_ij * grad_i.transpose();
 }
 
+/**
+ * @brief HB-X crossing estimator, one triple (Claude Generated, Nov 2026; derivation in docs/WP-PERIODIC-NONBONDED.md HB-X)
+ *
+ * The triple is listed while its normalised search criterion h = |d|^2/thr < 1, where d stands for the vectors of the
+ * active criterion (one vector, or the sum over three for the HB case-1 sum of squares). An affine strain eps moves h
+ * by dh/d(eps_ab) = 2 sum d_a d_b / thr, so the truncated energy has the impulsive virial E delta(h - 1) dh/d(eps).
+ * Over the list, sum_t E_t delta(h_t - 1) is f(1), f(h) = density of the triples in h times their mean energy, which
+ * is estimated from the shell h0 <= h < 1 (u = (h - h0)/(1 - h0)) with the weight (-2 + 6u)/(1 - h0): exact for an f
+ * linear across the shell (int_0^1 w = 1, int_0^1 w (u - 1) = 0); the flat weight 1/(1 - h0) is biased by the slope of
+ * f (measured: -10 bar at shell 0.05 on water). dh/d(eps) is taken on the surface (the triple scaled radially onto
+ * it): 2 sum d d^T / sum |d|^2. Result: Xi += 2 E (-2 + 6u) / (1 - h0) * M, M = sum d d^T / sum |d|^2 (trace 1).
+ * Outside the shell nothing is added.
+ */
+static inline void crossingShellAdd(Eigen::Matrix3d& xi, double E, double h, double h0, const Eigen::Vector3d* d, int nd)
+{
+    if (!(h >= h0 && h < 1.0))
+        return;
+    Eigen::Matrix3d m = Eigen::Matrix3d::Zero();
+    double n2 = 0.0;
+    for (int k = 0; k < nd; ++k) {
+        m.noalias() += d[k] * d[k].transpose();
+        n2 += d[k].squaredNorm();
+    }
+    const double u = (h - h0) / (1.0 - h0);
+    xi += (2.0 * E * (-2.0 + 6.0 * u) / ((1.0 - h0) * n2)) * m;
+}
+
 /// The row recorder exists only in the VIRIAL instantiation; the other gets an empty struct (no object, no code).
 struct NoVirialRows { };
 template <bool V> struct VirialRowsOf { using type = NoVirialRows; };
@@ -1610,7 +1637,6 @@ void FFWorkspace::calcHydrogenBondsImpl(int p)
         acc.energy.hbond += E_HB;
         if (record)
             m_hb_triple_energy[idx] = E_HB;
-
         static const bool hb_dump = (std::getenv("CURCUMA_HB_DUMP") != nullptr);  // once, not per triple
         if (hb_dump && std::abs(E_HB) > 1e-13) {
             fmt::print("HBTRIP A={:3d} H={:3d} B={:3d} case={} E={:.12f}\n",
@@ -2454,6 +2480,97 @@ void FFWorkspace::calcHydrogenBondsScaled(int p)
         for (int idx = begin; idx < end && idx < static_cast<int>(m_hb_triple_energy.size()); ++idx)
             m_hb_triple_energy[idx] *= s;
 }
+// HB-X (Claude Generated, Nov 2026): crossing estimator of the HB/XB search radii, a pass of its own after the HB/XB
+// kernels of the partition. The kernels are not touched: code added inside them (even when switched off at run time)
+// changed the floating-point contraction of their VIRIAL instantiation and the last bits of the NPT pressure. The HB
+// energies come from the per-triple record of calcHydrogenBondsImpl (switched on with the estimator, scaled by
+// hb_scale); the frame is the kernel's (A and B as the images next to H). Derivation at crossingShellAdd().
+void FFWorkspace::calcHBCrossing(int p)
+{
+    if (!m_want_virial || !m_hb_cross_on || !m_do_gradient)
+        return;
+    auto& acc = m_accumulators[p];
+    auto [begin, end] = m_partitions[p].hbonds;
+    if (begin == end || static_cast<int>(m_hb_triple_energy.size()) < end)
+        return;
+    const bool pbc = m_cell_bohr.active;
+    auto imageNear = [&](int atom, const Eigen::Vector3d& ref) -> Eigen::Vector3d {
+        Eigen::Vector3d x = m_geometry.row(atom).transpose();
+        if (!pbc)
+            return x;
+        double d0 = x(0) - ref(0), d1 = x(1) - ref(1), d2 = x(2) - ref(2);
+        PBCUtils::applyMinimumImageOrtho(m_cell_bohr, d0, d1, d2);
+        return Eigen::Vector3d(ref(0) + d0, ref(1) + d1, ref(2) + d2);
+    };
+    for (int idx = begin; idx < end; ++idx) {
+        const auto& hb = m_hbonds[idx];
+        const double E = m_hb_triple_energy[idx];
+        if (E == 0.0)
+            continue;
+        const Eigen::Vector3d pos_H = m_geometry.row(hb.j).transpose();
+        const Eigen::Vector3d pos_A = imageNear(hb.i, pos_H);
+        const Eigen::Vector3d pos_B = imageNear(hb.k, pos_H);
+        const Eigen::Vector3d dv[3] = { pos_B - pos_A, pos_H - pos_A, pos_B - pos_H };
+        const double rab2 = dv[0].squaredNorm();
+        const double h1 = rab2 / m_hb_cross_thr1;
+        const double h2 = (hb.case_type == 1) ? (rab2 + dv[1].squaredNorm() + dv[2].squaredNorm()) / m_hb_cross_thr2 : 0.0;
+        if (h2 > h1)
+            crossingShellAdd(acc.virial.hb_crossing, E, h2, m_hb_cross_h0, dv, 3);
+        else
+            crossingShellAdd(acc.virial.hb_crossing, E, h1, m_hb_cross_h0, dv, 1);
+    }
+}
+
+// HB-X: the XB counterpart. The XB kernel keeps no per-triple record, so E_XB is re-evaluated here with the energy
+// statements of calcHalogenBondsImpl (same helpers, same order; frame on X). Criterion h = max(r_AB^2/hbthr2,
+// r_XB^2/r_cut^2).
+void FFWorkspace::calcXBCrossing(int p)
+{
+    if (!m_want_virial || !m_hb_cross_on || !m_do_gradient)
+        return;
+    using namespace GFNFFParameters;
+    auto& acc = m_accumulators[p];
+    auto [begin, end] = m_partitions[p].xbonds;
+    const bool pbc = m_cell_bohr.active;
+    for (int idx = begin; idx < end; ++idx) {
+        const auto& xb = m_xbonds[idx];
+        Eigen::Vector3d pos_A = m_geometry.row(xb.i).transpose();
+        Eigen::Vector3d pos_X = m_geometry.row(xb.j).transpose();
+        Eigen::Vector3d pos_B = m_geometry.row(xb.k).transpose();
+        if (pbc) {
+            for (Eigen::Vector3d* q : { &pos_A, &pos_B }) {
+                double d0 = (*q)(0) - pos_X(0), d1 = (*q)(1) - pos_X(1), d2 = (*q)(2) - pos_X(2);
+                PBCUtils::applyMinimumImageOrtho(m_cell_bohr, d0, d1, d2);
+                *q = Eigen::Vector3d(pos_X(0) + d0, pos_X(1) + d1, pos_X(2) + d2);
+            }
+        }
+        const Eigen::Vector3d dv[2] = { pos_B - pos_A, pos_B - pos_X };
+        const double r_AX = (pos_X - pos_A).norm();
+        const double r_XB = dv[1].norm();
+        const double r_AB = dv[0].norm();
+        if (r_XB > xb.r_cut)
+            continue;
+        const int elem_A = m_atom_types[xb.i];
+        const int elem_B = m_atom_types[xb.k];
+        const double r_vdw_AB = covalent_radii[elem_A - 1] + covalent_radii[elem_B - 1];
+        const double damp_short = ws_damping_short_range(r_XB, r_vdw_AB, XB_SCUT, HB_ALP);
+        const double damp_long = ws_damping_long_range(r_XB, HB_LONGCUT_XB, HB_ALP);
+        const double expo_outl = XB_BACUT * ((r_AX + r_XB) / r_AB - 1.0);
+        if (expo_outl > 15.0)
+            continue;
+        const double damp_outl = 2.0 / (1.0 + std::exp(expo_outl));
+        const double Q_X = ws_charge_scaling(xb.q_X, XB_ST, XB_SF);
+        const double Q_B = ws_charge_scaling(-xb.q_B, XB_ST, XB_SF);
+        const double E = -(damp_short * damp_long * damp_outl / (r_XB * r_XB * r_XB)) * Q_B * xb.acidity_X * Q_X;
+        const double h1 = dv[0].squaredNorm() / m_xb_cross_thr2;
+        const double h2 = r_XB * r_XB / (xb.r_cut * xb.r_cut);
+        if (h2 > h1)
+            crossingShellAdd(acc.virial.xb_crossing, E, h2, m_hb_cross_h0, dv + 1, 1);
+        else
+            crossingShellAdd(acc.virial.xb_crossing, E, h1, m_hb_cross_h0, dv, 1);
+    }
+}
+
 // term-scale switches (Claude Generated, Nov 2026): diagnostic factors repulsion_scale, dispersion_scale and
 // coulomb_scale, not part of the reference. Same scheme as calcHydrogenBondsScaled: the unchanged kernel runs, then
 // everything it added to this partition's accumulator for its term is multiplied by s (energy fields, gradient

@@ -202,9 +202,9 @@ static json config(int threads, bool fd)
 }
 
 enum Term { T_BOND, T_ANGLE, T_DIHED, T_INV, T_STORS, T_DISP, T_REP, T_HB, T_XB, T_BATM, T_COUL, T_COULBG, T_TAIL,
-    T_LRC, T_CN, T_TOTAL, T_PRESSURE, NT };
+    T_LRC, T_HBX, T_XBX, T_CN, T_TOTAL, T_PRESSURE, NT };
 static const char* kName[NT] = { "bond (+HB-CN)", "angle", "dihedral", "inversion", "stors", "D4 pair", "repulsion", "hbond",
-    "xbond", "batm", "Coulomb Ewald pair", "Ewald background", "D4 tail", "V-LRC", "CN chain rule (sum)", "TOTAL (model)",
+    "xbond", "batm", "Coulomb Ewald pair", "Ewald background", "D4 tail", "V-LRC", "HB crossing (HB-X)", "XB crossing (HB-X)", "CN chain rule (sum)", "TOTAL (model)",
     "pressure virial" };
 
 struct Eval {
@@ -230,6 +230,8 @@ static void fill(const FFVirialComponents& v, Eval& r)
     r.xi[T_COULBG] = v.coulomb_bg;
     r.xi[T_TAIL] = v.disp_tail;
     r.xi[T_LRC] = v.tail_lrc;
+    r.xi[T_HBX] = v.hb_crossing;   // HB-X (Nov 2026)
+    r.xi[T_XBX] = v.xb_crossing;
     r.xi[T_CN] = v.cn_bond + v.cn_dispersion + v.cn_coulomb;
     r.xi[T_TOTAL] = v.total();
     r.xi[T_PRESSURE] = v.pressureTotal();
