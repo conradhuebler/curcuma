@@ -13,6 +13,8 @@
  * (curcuma::gpuFallbackCounts()); without the plugin or a device the first GPU request falls back, the test prints
  * SKIP and exits 77 (ctest SKIP_RETURN_CODE; until Nov 23, 2026 it exited 0 and counted as passed). A counted fallback
  * of a periodic device stage ("xTB periodic device stage ...") is a failure, not a SKIP. Exit 0 when every check passes.
+ * Argument: the backend, "cuda" (default, ctest pbc_xtb_gpu_parity) or "rocm" (ctest pbc_xtb_gpu_parity_rocm, ROCm parity
+ * A3, Nov 24, 2026: same cells and limits; ints and devpot have no HIP port and run on the host without a fallback count).
  */
 #include "src/core/energycalculator.h"
 #include "src/core/molecule.h"
@@ -67,10 +69,12 @@ struct Result {
     bool ok = false;
 };
 
+static std::string g_backend = "cuda";
+
 static Result run(const char* method, const Mol& mol, bool gpu, int threads)
 {
     json cfg = { { "verbosity", 0 }, { "threads", threads }, { "xtb", { { "scf_threshold", 1.0e-9 } } } };
-    if (gpu) cfg["gpu"] = "cuda";
+    if (gpu) cfg["gpu"] = g_backend;
     EnergyCalculator calc(method, cfg);
     calc.setMolecule(mol);
     calc.setWantVirial(true);
@@ -82,9 +86,11 @@ static Result run(const char* method, const Mol& mol, bool gpu, int threads)
     return r;
 }
 
-int main()
+int main(int argc, char** argv)
 {
     CurcumaLogger::set_verbosity(0);
+    if (argc > 1) g_backend = argv[1];
+    const char* B = g_backend.c_str();
     bool any_gpu = false;
     for (const char* method : { "gfn1", "gfn2" }) {
         // water dimer in 8 and 12 A, water trimer ("H2O") in a dense 6.5 A cube (G2-G6: many self images and
@@ -103,29 +109,29 @@ int main()
             const Result gpu = run(method, mol, true, c.threads);
             check(stageTotal() == st0, std::string(method) + " " + c.name + ": no periodic device stage fallback");
             if (fallbackTotal() - (stageTotal() - st0) != fb0) {
-                std::printf("SKIP %s %s L = %.1f A: the -gpu cuda request fell back to the CPU (no plugin or device)\n", method, c.name, L);
+                std::printf("SKIP %s %s L = %.1f A: the -gpu %s request fell back to the CPU (no plugin or device)\n", method, c.name, L, B);
                 continue;
             }
             any_gpu = true;
-            check(gpu.ok, std::string(method) + " CUDA periodic energy/gradient/virial");
+            check(gpu.ok, std::string(method) + " " + B + " periodic energy/gradient/virial");
             const double de = std::abs(gpu.e - cpu.e);
             const double dg = (gpu.g - cpu.g).cwiseAbs().maxCoeff();
             const double dx = (gpu.xi - cpu.xi).cwiseAbs().maxCoeff();
-            std::printf("%s %s L = %.1f A: E cpu %.12f cuda %.12f |dE| %.3e Eh, max |dG| %.3e Eh/A, max |dXi| %.3e Eh\n",
-                        method, c.name, L, cpu.e, gpu.e, de, dg, dx);
-            check(de <= 1.0e-8, std::string(method) + " CUDA vs CPU energy <= 1e-8 Eh, L = " + std::to_string(L));
-            check(dg <= 1.0e-8, std::string(method) + " CUDA vs CPU gradient <= 1e-8 Eh/A, L = " + std::to_string(L));
-            check(dx <= 1.0e-7, std::string(method) + " CUDA vs CPU virial <= 1e-7 Eh, L = " + std::to_string(L));
+            std::printf("%s %s L = %.1f A: E cpu %.12f %s %.12f |dE| %.3e Eh, max |dG| %.3e Eh/A, max |dXi| %.3e Eh\n",
+                        method, c.name, L, cpu.e, B, gpu.e, de, dg, dx);
+            check(de <= 1.0e-8, std::string(method) + " " + B + " vs CPU energy <= 1e-8 Eh, L = " + std::to_string(L));
+            check(dg <= 1.0e-8, std::string(method) + " " + B + " vs CPU gradient <= 1e-8 Eh/A, L = " + std::to_string(L));
+            check(dx <= 1.0e-7, std::string(method) + " " + B + " vs CPU virial <= 1e-7 Eh, L = " + std::to_string(L));
             // run-to-run reproducibility of the CUDA path (fresh calculator)
             const Result gpu2 = run(method, mol, true, c.threads);
             const bool same = gpu2.ok && gpu2.e == gpu.e && (gpu2.g - gpu.g).cwiseAbs().maxCoeff() == 0.0
                 && (gpu2.xi - gpu.xi).cwiseAbs().maxCoeff() == 0.0;
-            std::printf("%s %s L = %.1f A: second CUDA run %s (dE %.1e)\n", method, c.name, L, same ? "bitwise identical" : "DIFFERS", gpu2.e - gpu.e);
-            check(same, std::string(method) + " CUDA run-to-run bitwise, L = " + std::to_string(L));
+            std::printf("%s %s L = %.1f A: second %s run %s (dE %.1e)\n", method, c.name, L, B, same ? "bitwise identical" : "DIFFERS", gpu2.e - gpu.e);
+            check(same, std::string(method) + " " + B + " run-to-run bitwise, L = " + std::to_string(L));
         }
     }
     if (!any_gpu) {
-        std::printf("test_pbc_xtb_gpu_parity: SKIP (no CUDA path ran)\n");
+        std::printf("test_pbc_xtb_gpu_parity: SKIP (no %s path ran)\n", B);
         return g_failures == 0 ? 77 : 1;
     }
     if (g_failures == 0)

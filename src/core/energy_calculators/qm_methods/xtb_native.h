@@ -974,6 +974,11 @@ struct GpuScfBackend {
     /// Claude Generated (Nov 2026, WP-PERIODIC-XTB R5): the periodic gamma (nsh x nsh) of this geometry is resident
     /// (ewaldGammaPeriodic kept its device copy). Default false.
     virtual bool periodicGammaResident(int nsh) const { (void)nsh; return false; }
+    /// Claude Generated (Nov 24, 2026, ROCm parity A3): false for a periodic device stage (token of the stage table in
+    /// docs/WP-PERIODIC-XTB.md "Stage tokens") that this backend does not implement by design (ROCm: ints,
+    /// devpot). The host path of that stage then runs without a GPU fallback count, as every host-only part of the
+    /// periodic path does; a device call that fails is still counted. Default true (CUDA implements every stage).
+    virtual bool periodicStageOnDevice(const char* token) const { (void)token; return true; }
     virtual bool downloadConvergedPotentials(Vector& v_sh, Vector& v_at, Eigen::MatrixXd& v_dp, Eigen::MatrixXd& v_qp)
     { (void)v_sh; (void)v_at; (void)v_dp; (void)v_qp; return false; }
     virtual bool beginPotentialOnTheFly(int nat, int nsh, const double* xyz_bohr,

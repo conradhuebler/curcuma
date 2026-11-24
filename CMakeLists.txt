@@ -1417,6 +1417,8 @@ if(USE_ROCM)
     set(_hip_ctx_hdrs
         ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/qm_methods/rocm/xtb_hip_context.h
         ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/qm_methods/rocm/xtb_hip_integrals.hiph
+        ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/qm_methods/rocm/xtb_hip_periodic_kernels.hiph
+        ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/qm_methods/rocm/xtb_hip_periodic_host.hiph
         ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/qm_methods/parameters/xtb_params_extra.hpp)
     set(_hip_ctx_obj ${CMAKE_CURRENT_BINARY_DIR}/xtb_hip_context.hip.o)
     add_custom_command(

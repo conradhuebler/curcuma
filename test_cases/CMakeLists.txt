@@ -925,6 +925,20 @@ add_test(NAME pbc_xtb_gpu_combinations COMMAND test_pbc_xtb_combinations cuda WO
 set_tests_properties(pbc_xtb_gpu_combinations PROPERTIES TIMEOUT 900 LABELS "pbc;xtb;sqm;gpu" RESOURCE_LOCK "gpu"
     SKIP_RETURN_CODE 77 ENVIRONMENT "CURCUMA_PLUGIN_DIR=${CMAKE_BINARY_DIR}")
 
+# Claude Generated (Nov 24, 2026, ROCm parity A3): the same parity and combination gates on the ROCm plugin
+# (periodic native gfn1/gfn2 with -gpu rocm, docs/ROCM_PARITY_A3.md); 77 = SKIP without plugin or device
+if(USE_ROCM)
+    add_test(NAME pbc_xtb_gpu_parity_rocm COMMAND test_pbc_xtb_gpu_parity rocm WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    set_tests_properties(pbc_xtb_gpu_parity_rocm PROPERTIES TIMEOUT 1800 LABELS "pbc;xtb;sqm;gpu;rocm" RESOURCE_LOCK "gpu"
+        SKIP_RETURN_CODE 77 ENVIRONMENT "CURCUMA_PLUGIN_DIR=${CMAKE_BINARY_DIR}")
+    add_test(NAME pbc_xtb_gpu_fallback_rocm COMMAND test_pbc_xtb_gpu_fallback rocm WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    set_tests_properties(pbc_xtb_gpu_fallback_rocm PROPERTIES TIMEOUT 900 LABELS "pbc;xtb;sqm;gpu;rocm" RESOURCE_LOCK "gpu"
+        SKIP_RETURN_CODE 77 ENVIRONMENT "CURCUMA_PLUGIN_DIR=${CMAKE_BINARY_DIR}")
+    add_test(NAME pbc_xtb_gpu_combinations_rocm COMMAND test_pbc_xtb_combinations rocm WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    set_tests_properties(pbc_xtb_gpu_combinations_rocm PROPERTIES TIMEOUT 900 LABELS "pbc;xtb;sqm;gpu;rocm" RESOURCE_LOCK "gpu"
+        SKIP_RETURN_CODE 77 ENVIRONMENT "CURCUMA_PLUGIN_DIR=${CMAKE_BINARY_DIR}")
+endif()
+
 # Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED A2): periodic coordination number (value and
 # derivative), periodic SpatialCellList. Tests the CN only; the energy terms have no minimum image yet.
 add_executable(test_pbc_cn unit/test_pbc_cn.cpp)

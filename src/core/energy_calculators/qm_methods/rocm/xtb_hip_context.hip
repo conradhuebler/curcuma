@@ -34,7 +34,9 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <climits>
 #include <cstdlib>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -2554,6 +2556,9 @@ __global__ void k_spin_w_shift(double* __restrict__ W, const double* __restrict_
         W[idx] -= 0.5 * Pm[idx] * (u[i] + u[j]);
     }
 }
+
+// Claude Generated (Nov 24, 2026, ROCm A3): periodic device kernels and their buffers (port of the CUDA G/H stages).
+#include "xtb_hip_periodic_kernels.hiph"
 } // namespace
 #endif // HAVE_ROCSOLVER
 
@@ -2566,6 +2571,18 @@ struct XtbHipContext::Impl {
 #ifdef HAVE_ROCSOLVER
     rocblas_handle handle = nullptr;   // rocSOLVER reuses the rocBLAS handle
     bool    handle_ok = false;
+    // Claude Generated (Nov 24, 2026, ROCm A3): buffers of the periodic device stages (xtb_hip_periodic_*.hiph)
+    PbcState pbc;
+    void freePbc() { pbc.release(); }
+    /// the rocBLAS handle for the periodic Ewald rank update (the same handle ensureSolver creates)
+    bool ensurePbcBlas() {
+        if (!handle_ok) {
+            if (rocblas_create_handle(&handle) != rocblas_status_success) return false;
+            rocblas_set_stream(handle, stream);
+            handle_ok = true;
+        }
+        return true;
+    }
     int     solver_n  = 0;             // cached device-buffer size
     double* dF   = nullptr;            // F → eigenvectors (n×n)
     double* dS   = nullptr;            // S (overwritten by its Cholesky factor)
@@ -4854,6 +4871,7 @@ struct XtbHipContext::Impl {
                        double s6, double s8, double a1, double a2, double cutoff) {
         if (!ok || nat <= 0 || c6_len <= 0) return false;
         rw_geom_ok = false;    // WP8a: the D4 reference tables of the previous geometry are stale now
+        pbc.d4_pbc_ready = false;   // ROCm A3 (CUDA G4b): a new geometry needs beginDispersionImages again
         if (nat != d4_nat) {   // atom count changed (new molecule) → drop the nat-sized buffers
             for (void* p : { (void*)dD4W, (void*)dD4dWq, (void*)dD4Dedq,
                              (void*)dD4dWc, (void*)dD4Eat, (void*)dD4Grad, (void*)dD4Dcn,
@@ -5484,6 +5502,7 @@ XtbHipContext::~XtbHipContext()
     m_impl->freeEeq();
     m_impl->freePostScf(); // WP8a (Claude Generated, Oct 2026)
     m_impl->freeGradTail(); // WP8b (Claude Generated, Oct 2026)
+    m_impl->freePbc();     // ROCm A3 (Claude Generated, Nov 24, 2026)
     m_impl->freeDispersion();
     m_impl->freeBasis();
     m_impl->freeResident();
@@ -6257,6 +6276,9 @@ bool XtbHipContext::eeqChargeResponseGradient(int N, const double* dEdq, double*
     return m_impl && m_impl->ok && dEdq && grad_add && m_impl->eeqRespImpl(N, dEdq, grad_add);
 #endif
 }
+
+// Claude Generated (Nov 24, 2026, ROCm A3): host entry points of the periodic device stages.
+#include "xtb_hip_periodic_host.hiph"
 
 } // namespace gpu
 } // namespace xtb

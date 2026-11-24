@@ -2,7 +2,9 @@
 
 **Status (2026-11-23): P0-P5 and T done on the CPU; the CUDA port G (G1-G6, E1/A1/M1/M2/C1, H1-H5, D1, A1r, B1, R2-R5)
 done: every periodic stage on the device, closed-shell neutral SCF device-resident, open shell and charged cells on the
-host-driven device loop; stage fallbacks counted (`-gpu_strict`); ROCm/Vulkan: counted CPU fallback. Open items:
+host-driven device loop; stage fallbacks counted (`-gpu_strict`); ROCm (Nov 24, 2026, [ROCM_PARITY_A3.md](ROCM_PARITY_A3.md)):
+host-driven device loop with every stage except the device integral build (G1b) and the resident periodic loop (R2-R5);
+Vulkan: counted CPU fallback. Open items:
 [GPU_PERIODIC_GAPS.md](GPU_PERIODIC_GAPS.md). AI-generated, machine-tested; human production testing pending.**
 `-method gfn1|gfn2` with an orthorhombic unit cell gives the periodic Gamma-point energy, gradient and atomic virial
 (gfn1: 3-7e-11 Eh, 8.6e-7 Eh/Bohr and 1.8e-6 Eh virial from tblite on the water dimer; gfn2: tblite's periodic multipole
@@ -1410,7 +1412,9 @@ overrides and print a warning when used. Invalid `pbc_*` values (`pbc_ewald_tole
   since M1/M2), d-shell elements with a cell (refused), implicit solvation
   with a cell (refused), `-large_system_mode` with a cell (refused since Nov 23, 2026; before, its driver ignored the cell and returned a
   vacuum energy), GPU with a cell: CUDA with the device stages G1b/G2/G3/G4a/G4b/G5a-d, E1/A1/M1/M2/C1, H1-H5, D1, A1r and B1
-  (the closed-shell neutral SCF is device-resident since R3/R5; open shell and charged cells keep the host-driven loop), ROCm/Vulkan CPU fallback (not planned).
+  (the closed-shell neutral SCF is device-resident since R3/R5; open shell and charged cells keep the host-driven loop); ROCm
+  (Nov 24, 2026) with the stages G2-G5, H1-H5, B1, C1, D1 on the host-driven device loop, without G1b (host S/H0/L and multipole
+  integrals, uploaded) and R2-R5 (no resident periodic potential or loop), see [ROCM_PARITY_A3.md](ROCM_PARITY_A3.md); Vulkan CPU fallback (not planned).
 - Not tested: open shell, charged cells (background term differs from tblite), halogen bond with a cell (cannot run:
   the GFN1 donors Br/I carry d shells, which a cell refuses), thread-count independence of the periodic energy and gradient, MD energy conservation with a cell,
   the GPU fallback on a machine with a GPU plugin, anything beyond H/O, real liquid boxes (only a water dimer and

@@ -548,6 +548,89 @@ public:
                     double total_charge, double* q_out);
     bool eeqChargeResponseGradient(int N, const double* dEdq, double* grad_add);
 
+    // ---- periodic cell (WP-PERIODIC-XTB on ROCm, Claude Generated Nov 24, 2026, ROCm parity A3) ----------------
+    // Self-contained periodic device stages, ports of the CUDA XtbGpuContext methods of the same name (contracts:
+    // GpuScfBackend in xtb_native.h; code: rocm/xtb_hip_periodic_host.hiph). Not ported: the device-built periodic
+    // integrals (computeIntegralsPeriodic), the resident periodic potential and loop
+    // (beginPotentialPeriodic, R2-R5); periodicGammaResident() is therefore always false.
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB G4b): see GpuScfBackend::beginDispersionImages / dispersionDedqPeriodic.
+    bool beginDispersionImages(int nat, const double* cell_L, int ntrans, const double* trans, double cut2);
+    bool dispersionDedqPeriodic(int nat, const double* W, const double* dWq, double* dEdq_out);
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB G4a): periodic D4 ATM (see GpuScfBackend::dispersionATMPeriodic).
+    bool dispersionATMPeriodic(int nat, const double* xyz_bohr, const double* r4r2, const double* c6,
+                               const double* dc6dcn, const double* cell_L, int ntrans, const double* trans,
+                               double cutoff2, double s9, double a1, double a2, double alp, bool want_virial,
+                               double* e_atom_out, double* grad_out, double* dEdcn_out, double* vir6_out);
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB G3): see GpuScfBackend::multipoleMatricesPeriodic.
+    bool multipoleMatricesPeriodic(int nat, const double* xyz_bohr, const double* mrad, const double* cell_L,
+                                   int ndtrans, const double* dtrans, int nrtrans, const double* rtrans,
+                                   const double* kexp, double alpha, double dmp3, double dmp5, double sd_f,
+                                   double sq_f, double fac, double* const* out18);
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB G2): see GpuScfBackend::ewaldGammaPeriodic.
+    bool ewaldGammaPeriodic(int nat, const double* xyz_bohr, const double* cell_L, double alpha, double volume,
+                            double r_cut, int nk, const double* ktab, int nsh, const int* sh2at,
+                            const double* hardness, bool harmonic, double gexp, int nko, const double* ko_trans,
+                            double ko_cut, double* gamma_out);
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB G5d): see GpuScfBackend::repulsionPeriodic.
+    bool repulsionPeriodic(int nat, const double* xyz_bohr, const double* alpha, const double* zeff, const int* light,
+                           double kexp, double kexp_light, double rexp, const double* cell_L, int ntrans,
+                           const double* trans, double cut2, bool gradient, bool want_virial, double* energy_out,
+                           double* grad_out, double* vir9_out);
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB H2): see GpuScfBackend::ewaldGradientPeriodic / koGradientPeriodic.
+    bool ewaldGradientPeriodic(int nat, const double* xyz_bohr, const double* q_at, const double* cell_L, double alpha,
+                               double r_cut, int nk, const double* ktab, bool want_virial, double* grad_out,
+                               double* vir9_out);
+    bool koGradientPeriodic(int nat, const double* xyz_bohr, int nsh, const int* sh2at, const double* hardness,
+                            bool harmonic, double gexp, const double* q_sh, const double* cell_L, int ntrans,
+                            const double* trans, double cut2, double rcut, bool want_virial, double* grad_out,
+                            double* vir9_out);
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB H5): see GpuScfBackend::d4PairsPeriodic.
+    bool d4PairsPeriodic(int nat, const int* Z, const int* nref, const double* sq_r4r2, const double* xyz_bohr,
+                         const double* W, const double* dWq, const double* dWc, double s6, double s8, double a1,
+                         double a2, const double* cell_L, int ntrans, const double* trans, double cut2,
+                         bool want_virial, double* energy_out, double* grad_out, double* dEdcn_out, double* dEdq_out,
+                         double* vir9_out);
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB H4): see GpuScfBackend::d3DispersionPeriodic.
+    bool d3DispersionPeriodic(int nat, const int* Z, const double* xyz_bohr, int nt, const int* atom_type,
+                              const double* c6tab, const double* r6tab, const int* nref_tab, const double* refcn_tab,
+                              const double* rcov_ang, int nrcov, double s6, double s8, double a1, double a2,
+                              double aa_to_au, const double* cell_L, int ncn, const double* cn_trans, double cn_cut2,
+                              int npair, const double* pair_trans, double pair_cut2, bool need_gradient,
+                              bool want_virial, double* energy_out, double* grad_out, double* vir9_out);
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB H3): see GpuScfBackend::cnPeriodic.
+    bool cnPeriodic(int nat, const double* xyz_bohr, const double* rcov, const double* cell_L, int ntrans,
+                    const double* trans, double cut2, int mode, double* cn_out);
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB B1): see GpuScfBackend::d4CovalentCnPeriodic.
+    bool d4CovalentCnPeriodic(int nat, const int* Z, const double* xyz_bohr, const double* rad, const double* en,
+                              double kn, double k4, double k5, double k6, const double* cell_L, int ntrans,
+                              const double* trans, double cut2, double* cn_out);
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB C1): see GpuScfBackend::d4CnFoldPeriodic.
+    bool d4CnFoldPeriodic(int nat, const double* xyz_bohr, const double* rcov, const double* en, const double* dEdcn,
+                          double kn, double k4, double k5, double k6, const double* cell_L, int ntrans,
+                          const double* trans, double cut2, bool want_virial, double* grad_out, double* vir9_out);
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB G5c): see GpuScfBackend::cnChainGradientPeriodic.
+    bool cnChainGradientPeriodic(int nat, const double* xyz_bohr, const double* rcov, const double* dEdcn,
+                                 const double* cell_L, int ntrans, const double* trans, double cut2, bool gfn1,
+                                 bool want_virial, double* grad_out, double* vir9_out);
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB G5a): see GpuScfBackend::multipoleGradientPeriodic.
+    bool multipoleGradientPeriodic(int nat, const double* xyz_bohr, const double* mrad, const double* q_at,
+                                           const double* dp_at, const double* qp_at, const double* cell_L, int ndtrans,
+                                           const double* dtrans, int nrtrans, const double* rtrans, const double* kexp,
+                                           double alpha, double fac, double sd_f, double sq_f, double dmp3, double dmp5,
+                                           bool want_virial, double* grad_out, double* dEdr_out, double* vir9_out);
+
+    /// Claude Generated (Nov 2026, WP-PERIODIC-XTB H1): see GpuScfBackend::h0PulayGradientPeriodic.
+    bool h0PulayGradientPeriodic(int nat, const double* xyz_bohr, const double* se, const double* v_ao,
+                                 const double* v_dp, const double* v_qp, const double* we, int ncol,
+                                 const double* cell_L, int ntrans, const double* trans, double cut2, bool multipole,
+                                 bool want_virial, double* grad_out, double* dEdcn_out, double* vir9_out);
+    bool periodicGammaResident(int nsh) const { (void)nsh; return false; }
+    /// Claude Generated (Nov 24, 2026, ROCm A3): host-built GFN2 AO multipole integrals (dp 3 nao^2, qp 6 nao^2,
+    /// column-major blocks, the layout of downloadMultipoleInts) into the resident buffers; needs beginBasis (GFN2).
+    bool uploadMultipoleInts(const double* dp_int3, const double* qp_int6, int nao);
+    /// Claude Generated (Nov 24, 2026, ROCm A3): see GpuScfBackend::energyWeightedDensity (CUDA G5b).
+    bool residentEnergyWeightedDensity(const double* w, int ncol, int n, double* W_colmajor);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> m_impl;

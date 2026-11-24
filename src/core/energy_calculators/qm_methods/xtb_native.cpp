@@ -752,7 +752,7 @@ double XTB::Calculation(bool gradient)
     // CURCUMA_PBC_GPU_HOST=ints keeps the host build and upload.
     bool pbc_dev_ints = false;
     if (m_gpu_scf && m_pbc && m_pbc_device_scf && !m_gpu_basis_dirty && m_scf_mode == ScfMode::Broyden
-        && !m_has_dshell && !pbcGpuStageOnHost("ints")) {
+        && !m_has_dshell && !pbcGpuStageOnHost("ints") && m_gpu_scf->periodicStageOnDevice("ints")) {
         ensure_host_cn();
         std::vector<double> xyz_b(3 * static_cast<size_t>(m_atomcount));
         for (int i = 0; i < m_atomcount; ++i)
@@ -1614,6 +1614,7 @@ double XTB::Calculation(bool gradient)
     const bool pbc_neutral_closed = m_pbc && !openShell() && std::fabs(m_wfn.n0_at.sum() - m_wfn.nocc) < 1.0e-9;
     if (use_gpu_resident && gpu_multipole && m_method == MethodType::GFN2 && m_mp_initialized && m_pbc
         && m_pbc_device_scf && pbc_neutral_closed && !m_solvation && !pbcGpuStageOnHost("devpot")
+        && m_gpu_scf->periodicStageOnDevice("devpot")   // ROCm A3: not ported there
         && m_gpu_scf->supportsDeviceDispersion() && m_gpu_scf->supportsDevicePotential()) {
         Vector warm_dedq;
         computeD4PotentialDedq(m_wfn.q_at, warm_dedq);   // primes beginDispersion + beginDispersionImages

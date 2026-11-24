@@ -5,12 +5,14 @@
  * Periodic native GFN1/GFN2: combinations with a unit cell that were never run together - Claude Generated
  * (Nov 23, 2026, docs/GPU_PERIODIC_GAPS.md A6, A9).
  *
- * Argument "refusals" (ctest pbc_xtb_cell_refusals) or "cuda" (ctest pbc_xtb_gpu_combinations).
+ * Argument "refusals" (ctest pbc_xtb_cell_refusals), "cuda" (ctest pbc_xtb_gpu_combinations) or "rocm" (ctest
+ * pbc_xtb_gpu_combinations_rocm, Nov 24, 2026: part 2 on the ROCm plugin; the multi-GPU split and GFN-FF checks are CUDA only).
  * Part 1 (any build, no GPU needed): refusals with a cell, each must set an error instead of returning an energy:
  *   spin polarisation (-xtb.spin_polarization true), implicit solvation (-xtb.solvent water), CPCM-X
- *   (-xtb.solvent_model cpcmx), on the CPU and with -gpu cuda; -gpu rocm and -gpu vulkan with a cell: either a counted
- *   CPU fallback with the CPU periodic energy (no plugin, or the plugin swaps to the CPU) or an error, never an
- *   uncounted result; invalid pbc_* values are an error.
+ *   (-xtb.solvent_model cpcmx), on the CPU and with -gpu cuda; -gpu vulkan with a cell: either a counted CPU fallback
+ *   with the CPU periodic energy or an error, never an uncounted result; -gpu rocm with a cell (device path since
+ *   Nov 24, 2026, ROCm parity A3): error, counted CPU fallback, or the CPU energy within 1e-8 Eh;
+ *   invalid pbc_* values are an error.
  * Part 2 (CUDA plugin and device, else exit code 77 = ctest SKIP):
  *   open shell (OH radical, spin 1, registry "OH") and a charged cell (registry "hydronium_water2", charge +1) in an
  *   8/10 A cube on the host-driven CUDA loop against the CPU: |dE| <= 1e-8 Eh, max |dG| <= 1e-8 Eh/A,
@@ -118,8 +120,8 @@ int main(int argc, char** argv)
     CurcumaLogger::set_verbosity(0);
     const std::string part = argc > 1 ? argv[1] : "refusals";
     const Mol dimer = inCell("H2O_dimer", 8.0, 0, 0.0);
-    if (part != "refusals" && part != "cuda") {
-        std::printf("usage: test_pbc_xtb_combinations refusals|cuda\n");
+    if (part != "refusals" && part != "cuda" && part != "rocm") {
+        std::printf("usage: test_pbc_xtb_combinations refusals|cuda|rocm\n");
         return 2;
     }
 
@@ -168,18 +170,23 @@ int main(int argc, char** argv)
         const int counted = fallbackTotal() - fb0;
         std::printf("-gpu %s with a cell: %s, %d fallback(s) counted, dE vs CPU %.2e Eh\n", gpu,
                     err ? "error" : "energy", counted, err ? 0.0 : e - cpu_dimer.e);
-        check(err || (counted >= 1 && std::abs(e - cpu_dimer.e) <= 1.0e-10),
-              std::string("-gpu ") + gpu + " with a cell: honest error or counted CPU fallback with the CPU energy");
+        // ROCm (A3, Nov 24, 2026): the device path runs with a cell; its energy must be the CPU one to 1e-8 Eh
+        const bool rocm_device = std::string(gpu) == "rocm" && !err && std::abs(e - cpu_dimer.e) <= 1.0e-8;
+        check(err || rocm_device || (counted >= 1 && std::abs(e - cpu_dimer.e) <= 1.0e-10),
+              std::string("-gpu ") + gpu + " with a cell: honest error, counted CPU fallback with the CPU energy"
+                  + (std::string(gpu) == "rocm" ? " or the ROCm device energy" : ""));
     }
     std::printf("test_pbc_xtb_combinations refusals: %s\n", g_failures == 0 ? "all checks passed" : "FAILURES");
     return g_failures == 0 ? 0 : 1;
     }
 
-    // ---- Part 2: CUDA parity of open shell and charged cells ---------------------------------------------
+    // ---- Part 2: CUDA (or ROCm) parity of open shell and charged cells ----------------------------------------
+    const char* backend = part.c_str();   // "cuda" or "rocm"
+    const bool is_cuda = part == "cuda";
     bool any_gpu = false;
     {
         const int fb0 = fallbackTotal();
-        const Result probe = run("gfn1", dimer, baseCfg("cuda"));
+        const Result probe = run("gfn1", dimer, baseCfg(backend));
         any_gpu = probe.ok && fallbackTotal() == fb0;
     }
     if (any_gpu) {
@@ -189,27 +196,28 @@ int main(int argc, char** argv)
                 const Mol mol = inCell(c.name, c.L, c.charge, c.spin);
                 const Result cpu = run(method, mol, baseCfg(nullptr));
                 const int st0 = stageTotal();
-                const Result gpu = run(method, mol, baseCfg("cuda"));
-                const Result gpu2 = run(method, mol, baseCfg("cuda"));
+                const Result gpu = run(method, mol, baseCfg(backend));
+                const Result gpu2 = run(method, mol, baseCfg(backend));
                 const std::string tag = std::string(method) + " " + c.name + " (charge " + std::to_string(c.charge)
                     + ", spin " + std::to_string(static_cast<int>(c.spin)) + ")";
-                check(cpu.ok && gpu.ok && gpu2.ok, tag + ": CPU and CUDA runs succeed");
+                check(cpu.ok && gpu.ok && gpu2.ok, tag + ": CPU and " + part + " runs succeed");
                 if (!(cpu.ok && gpu.ok && gpu2.ok)) continue;
                 const double de = std::abs(gpu.e - cpu.e);
                 const double dg = (gpu.g - cpu.g).cwiseAbs().maxCoeff();
                 const double dx = (gpu.xi - cpu.xi).cwiseAbs().maxCoeff();
                 const bool same = gpu2.e == gpu.e && (gpu2.g - gpu.g).cwiseAbs().maxCoeff() == 0.0
                     && (gpu2.xi - gpu.xi).cwiseAbs().maxCoeff() == 0.0;
-                std::printf("%s L = %.0f: E cpu %.12f cuda %.12f |dE| %.2e Eh, max|dG| %.2e Eh/A, max|dXi| %.2e Eh, "
-                            "stage fallbacks %d, second run %s\n", tag.c_str(), c.L, cpu.e, gpu.e, de, dg, dx,
+                std::printf("%s L = %.0f: E cpu %.12f %s %.12f |dE| %.2e Eh, max|dG| %.2e Eh/A, max|dXi| %.2e Eh, "
+                            "stage fallbacks %d, second run %s\n", tag.c_str(), c.L, cpu.e, backend, gpu.e, de, dg, dx,
                             stageTotal() - st0, same ? "bitwise" : "DIFFERS");
-                check(de <= 1.0e-8, tag + ": CUDA vs CPU energy <= 1e-8 Eh");
-                check(dg <= 1.0e-8, tag + ": CUDA vs CPU gradient <= 1e-8 Eh/A");
-                check(dx <= 1.0e-7, tag + ": CUDA vs CPU virial <= 1e-7 Eh");
+                check(de <= 1.0e-8, tag + ": " + part + " vs CPU energy <= 1e-8 Eh");
+                check(dg <= 1.0e-8, tag + ": " + part + " vs CPU gradient <= 1e-8 Eh/A");
+                check(dx <= 1.0e-7, tag + ": " + part + " vs CPU virial <= 1e-7 Eh");
                 check(stageTotal() == st0, tag + ": no periodic stage fallback");
-                check(same, tag + ": second CUDA run bitwise");
+                check(same, tag + ": second " + part + " run bitwise");
             }
         }
+        if (is_cuda) {
         // explicit multi-GPU split with a cell: refused (never run with a cell); without a cell still accepted
         json split = baseCfg("cuda");
         split["gpu_eigensolver_devices"] = "0,1";
@@ -248,14 +256,15 @@ int main(int argc, char** argv)
                 check(!c_gpu.Error() && e_gpu == e_cpu, std::string("gfnff ") + key + " != 1 under -gpu cuda: CPU energy (bitwise)");
             }
         }
+        }   // is_cuda
     } else {
-        std::printf("part 2: SKIP (no CUDA plugin or device)\n");
+        std::printf("part 2: SKIP (no %s plugin or device)\n", backend);
     }
 
     if (g_failures == 0)
-        std::printf("test_pbc_xtb_combinations cuda: %s\n", any_gpu ? "all checks passed" : "SKIP");
+        std::printf("test_pbc_xtb_combinations %s: %s\n", backend, any_gpu ? "all checks passed" : "SKIP");
     else
-        std::printf("test_pbc_xtb_combinations cuda: %d failures\n", g_failures);
+        std::printf("test_pbc_xtb_combinations %s: %d failures\n", backend, g_failures);
     if (g_failures != 0) return 1;
     return any_gpu ? 0 : 77;
 }

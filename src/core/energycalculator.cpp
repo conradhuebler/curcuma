@@ -310,8 +310,9 @@ void EnergyCalculator::setMolecule(const Mol& mol) {
             std::transform(gpu.begin(), gpu.end(), gpu.begin(), ::tolower);
             std::transform(name.begin(), name.end(), name.begin(), ::tolower);
             // WP-PERIODIC-XTB G1: CUDA keeps its backend (host-built periodic matrices, device-resident SCF,
-            // XtbGpuComputationalMethod sets XTB::setPeriodicDeviceScf); ROCm/Vulkan are not ported and swap.
-            if (gpu != "none" && gpu != "cuda" && !gpu.empty() && (name == "gfn1" || name == "gfn2")) {
+            // XtbGpuComputationalMethod sets XTB::setPeriodicDeviceScf); ROCm too since Nov 24, 2026 (ROCm parity A3,
+            // XtbHipComputationalMethod); Vulkan is not ported and swaps.
+            if (gpu != "none" && gpu != "cuda" && gpu != "rocm" && !gpu.empty() && (name == "gfn1" || name == "gfn2")) {
                 CurcumaLogger::warn("periodic cell set: the native " + name + " " + gpu + " path has no lattice images, using the CPU");
                 curcuma::reportGpuFallback("native xTB: periodic cell set, " + gpu + " path has no lattice images, calculation on the CPU",
                                            fmt::format("{} atoms", mol.m_number_atoms));

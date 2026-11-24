@@ -1751,6 +1751,7 @@ void XTB::calculateGradientPeriodic()
     int h0_ncol = 0;
     Eigen::VectorXd h0_we;
     const bool h0_device_try = m_gpu_scf && m_pbc_device_scf && m_pbc_dev_wfn && !pbcGpuStageOnHost("h0grad")
+        && m_gpu_scf->periodicStageOnDevice("h0grad")   // ROCm A3: a backend without the stage skips it uncounted
         && !(m_wfn.W_valid && m_wfn.W.rows() == nao && m_wfn.W.cols() == nao)
         && m_wfn.focc.size() == nao && m_wfn.C.cols() == nao;
     if (h0_device_try) {

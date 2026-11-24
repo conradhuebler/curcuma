@@ -1,0 +1,1118 @@
+/*
+ * <Native xTB ROCm/HIP periodic device stages: host entry points (WP-PERIODIC-XTB on ROCm, GPU_PERIODIC_GAPS B4)>
+ * Copyright (C) 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
+ *
+ * This program is free software under GPL-3.0.
+ *
+ * Claude Generated (Nov 24, 2026, ROCm parity item A3): HIP port of the self-contained periodic entry points of
+ * cuda/xtb_gpu_context.cu (XtbGpuContext::cnPeriodic ... d4PairsPeriodic). Same contracts as the GpuScfBackend
+ * virtuals in xtb_native.h; the statements are the CUDA ones with cuda* -> hip*, cublasDsyrk -> rocblas_dsyrk,
+ * the CUDA Impl buffers -> PbcState (xtb_hip_periodic_kernels.hiph) and the beginDispersion data -> the HIP Impl
+ * members of the same meaning (dD4C6, dD4Z, dD4Nref, dD4Xyz, dD4Sqrt, dD4W, dD4dWq, dD4Dedq, d4_*). Any failure
+ * returns false; the host loop of the stage then runs and xtb_periodic.cpp counts the fallback.
+ * The device-resident copies (periodic gamma, multipole matrices) for the R2-R5 resident periodic SCF are not
+ * ported: ewaldGammaPeriodic / multipoleMatricesPeriodic keep no device copy (periodicGammaResident() false).
+ * Included at the end of xtb_hip_context.hip (namespace curcuma::xtb::gpu, HAVE_ROCSOLVER).
+ * 🤖 AI-generated, ⚙️ machine-tested only.
+ */
+#pragma once
+
+#ifdef HAVE_ROCSOLVER
+// ---- cuda/xtb_gpu_context.cu lines 1166-1183 ----
+
+// Claude Generated (Nov 23, 2026): exact token of CURCUMA_PBC_GPU_HOST (comma/space/colon/semicolon separated, "all"
+// matches every token); the host side uses the same rule (pbcGpuStageOnHost in xtb_periodic.cpp).
+static bool hipPbcHostTokenSet(const char* token)
+{
+    const char* e = std::getenv("CURCUMA_PBC_GPU_HOST");
+    if (!e || !*e) return false;
+    const std::string v(e), t(token);
+    size_t pos = 0;
+    while (pos <= v.size()) {
+        const size_t end = v.find_first_of(", :;", pos);
+        const std::string item = v.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+        if (item == "all" || item == t) return true;
+        if (end == std::string::npos) break;
+        pos = end + 1;
+    }
+    return false;
+}
+
+// ---- cuda/xtb_gpu_context.cu lines 8908-9245 ----
+bool XtbHipContext::multipoleMatricesPeriodic(int nat, const double* xyz_bohr, const double* mrad, const double* cell_L,
+                                              int ndtrans, const double* dtrans, int nrtrans, const double* rtrans,
+                                              const double* kexp, double alpha, double dmp3, double dmp5, double sd_f,
+                                              double sq_f, double fac, double* const* out18)
+{
+    Impl& M = *m_impl;
+    PbcState& I = M.pbc;
+    M.pbc.mp_pbc_resident = false;
+    if (!ok() || nat <= 0 || ndtrans <= 0 || nrtrans < 0 || !xyz_bohr || !mrad || !cell_L || !dtrans
+        || (nrtrans > 0 && (!rtrans || !kexp)))
+        return false;
+    const size_t n2 = static_cast<size_t>(nat) * nat;
+    if (18 * n2 > static_cast<size_t>(INT_MAX)) return false;
+    hipStream_t stream = M.stream;
+    // ROCm A3: the resident copy of CUDA R2/R4 (dMpAmat* for beginPotentialPeriodic) is not ported; the matrices
+    // always go to the host (out18 == nullptr, the device-only request of R4, is refused).
+    if (!out18) return false;
+    try {
+        I.dPbcXyz.upload(xyz_bohr, 3 * nat, stream);
+        I.dPbcMrad.upload(mrad, nat, stream);
+        I.dPbcDtrans.upload(dtrans, 3 * ndtrans, stream);
+        if (nrtrans > 0) {
+            I.dPbcRtrans.upload(rtrans, 3 * nrtrans, stream);
+            I.dPbcKexp.upload(kexp, nrtrans, stream);
+        }
+        I.dPbcAmat.ensure(static_cast<int>(18 * n2));
+        const dim3 blk(16, 16);
+        const dim3 grd((nat + 15) / 16, (nat + 15) / 16);
+        pbc_dev::k_mp_amat_pbc<<<grd, blk, 0, stream>>>(nat, I.dPbcXyz.ptr, I.dPbcMrad.ptr, cell_L[0], cell_L[1], cell_L[2],
+                                               ndtrans, I.dPbcDtrans.ptr, nrtrans,
+                                               nrtrans > 0 ? I.dPbcRtrans.ptr : nullptr,
+                                               nrtrans > 0 ? I.dPbcKexp.ptr : nullptr, alpha, dmp3, dmp5, sd_f, sq_f,
+                                               fac, I.dPbcAmat.ptr);
+        if (hipGetLastError() != hipSuccess) return false;
+        if (out18)
+            for (int b = 0; b < 18; ++b)
+                if (hipMemcpyAsync(out18[b], I.dPbcAmat.ptr + b * n2, n2 * sizeof(double), hipMemcpyDeviceToHost,
+                                    stream) != hipSuccess)
+                    return false;
+        if (hipStreamSynchronize(stream) != hipSuccess) return false;
+        I.mp_pbc_resident = false;
+        I.mp_pbc_nat = 0;
+    } catch (...) {
+        return false;
+    }
+    I.dPbcAmat.free();
+    return true;
+}
+
+// Claude Generated (Nov 2026, WP-PERIODIC-XTB G2): periodic shell gamma (kernels k_ewald_phase, k_ewald_finish,
+// k_gamma_pbc, reciprocal rank update by cublasDsyrk). Any failure returns false and the host loop runs.
+bool XtbHipContext::ewaldGammaPeriodic(int nat, const double* xyz_bohr, const double* cell_L, double alpha,
+                                       double volume, double r_cut, int nk, const double* ktab, int nsh,
+                                       const int* sh2at, const double* hardness, bool harmonic, double gexp, int nko,
+                                       const double* ko_trans, double ko_cut, double* gamma_out)
+{
+    Impl& M = *m_impl;
+    PbcState& I = M.pbc;
+    if (!ok() || !M.ensurePbcBlas() || nat <= 0 || nsh <= 0 || nk < 0 || nko <= 0 || !xyz_bohr || !cell_L || !sh2at
+        || !hardness || !ko_trans || !gamma_out || (nk > 0 && !ktab) || !(alpha > 0.0) || !(volume > 0.0))
+        return false;
+    const size_t n2 = static_cast<size_t>(nat) * nat, s2 = static_cast<size_t>(nsh) * nsh;
+    if (n2 > static_cast<size_t>(INT_MAX) || s2 > static_cast<size_t>(INT_MAX)) return false;
+    // k block: the phase matrix M (nat x 2 nb) stays below 128 MB
+    const int nb_max = std::max(1, std::min(std::max(nk, 1), static_cast<int>((16u << 20) / (2u * static_cast<unsigned>(nat)))));
+    hipStream_t stream = M.stream;
+    bool okk = true, gamma_kept = false;
+    I.gamma_pbc_resident = false;
+    try {
+        I.dPbcXyz.upload(xyz_bohr, 3 * nat, stream);
+        if (nk > 0) I.dPbcKtab.upload(ktab, 4 * nk, stream);
+        I.dPbcKoTrans.upload(ko_trans, 3 * nko, stream);
+        I.dPbcShAt.upload(sh2at, nsh, stream);
+        I.dPbcShG.upload(hardness, nsh, stream);
+        I.dPbcEwA.ensure(static_cast<int>(n2));
+        I.dPbcGamma.ensure(static_cast<int>(s2));
+        if (nk > 0) I.dPbcEwM.ensure(2 * nb_max * nat);
+        if (hipMemsetAsync(I.dPbcEwA.ptr, 0, n2 * sizeof(double), stream) != hipSuccess) okk = false;
+        const double one = 1.0;
+        for (int k0 = 0; okk && k0 < nk; k0 += nb_max) {
+            const int nb = std::min(nb_max, nk - k0);
+            const long long nt = static_cast<long long>(nat) * nb;
+            pbc_dev::k_ewald_phase<<<static_cast<unsigned>((nt + 255) / 256), 256, 0, stream>>>(nat, nb, I.dPbcKtab.ptr + 4 * k0,
+                                                                                      I.dPbcXyz.ptr, I.dPbcEwM.ptr);
+            if (hipGetLastError() != hipSuccess) { okk = false; break; }
+            if (rocblas_dsyrk(M.handle, rocblas_fill_lower, rocblas_operation_none, nat, 2 * nb, &one, I.dPbcEwM.ptr, nat, &one,
+                            I.dPbcEwA.ptr, nat) != rocblas_status_success) { okk = false; break; }
+        }
+        if (okk) {
+            const double cself = 2.0 * alpha / sqrt(M_PI);
+            const double cbg = M_PI / (alpha * alpha * volume);
+            const dim3 blk(16, 16);
+            pbc_dev::k_ewald_finish<<<dim3((nat + 15) / 16, (nat + 15) / 16), blk, 0, stream>>>(
+                nat, I.dPbcXyz.ptr, cell_L[0], cell_L[1], cell_L[2], alpha, r_cut * r_cut, cself, cbg, I.dPbcEwA.ptr);
+            if (hipGetLastError() != hipSuccess) okk = false;
+            if (okk) {
+                pbc_dev::k_gamma_pbc<<<dim3((nsh + 15) / 16, (nsh + 15) / 16), blk, 0, stream>>>(
+                    nsh, nat, I.dPbcShAt.ptr, I.dPbcShG.ptr, harmonic ? 1 : 0, gexp, I.dPbcEwA.ptr, I.dPbcXyz.ptr,
+                    cell_L[0], cell_L[1], cell_L[2], nko, I.dPbcKoTrans.ptr, ko_cut, I.dPbcGamma.ptr);
+                if (hipGetLastError() != hipSuccess) okk = false;
+            }
+            if (okk && hipMemcpyAsync(gamma_out, I.dPbcGamma.ptr, s2 * sizeof(double), hipMemcpyDeviceToHost,
+                                       stream) != hipSuccess)
+                okk = false;
+            // ROCm A3: the resident copy of CUDA R2 (dGamma for beginPotentialPeriodic / the R5 GFN1 loop) is not
+            // ported, so periodicGammaResident() stays false and the periodic SCF keeps the host-driven loop.
+        }
+    } catch (...) {
+        okk = false;
+    }
+    okk = (hipStreamSynchronize(stream) == hipSuccess) && okk;
+    I.gamma_pbc_resident = okk && gamma_kept;
+    I.dPbcEwM.free();
+    I.dPbcEwA.free();
+    I.dPbcGamma.free();
+    return okk;
+}
+
+// Claude Generated (Nov 2026, WP-PERIODIC-XTB G5d): periodic repulsion (kernels k_rep_pbc, k_rep_rows).
+bool XtbHipContext::repulsionPeriodic(int nat, const double* xyz_bohr, const double* alpha, const double* zeff,
+                                      const int* light, double kexp, double kexp_light, double rexp,
+                                      const double* cell_L, int ntrans, const double* trans, double cut2,
+                                      bool gradient, bool want_virial, double* energy_out, double* grad_out,
+                                      double* vir9_out)
+{
+    Impl& M = *m_impl;
+    PbcState& I = M.pbc;
+    if (!ok() || nat <= 0 || ntrans <= 0 || !xyz_bohr || !alpha || !zeff || !light || !cell_L || !trans
+        || (!gradient && !energy_out) || (gradient && !grad_out) || (gradient && want_virial && !vir9_out))
+        return false;
+    const size_t nn = static_cast<size_t>(nat) * nat;
+    if (nn > static_cast<size_t>(INT_MAX)) return false;
+    hipStream_t stream = M.stream;
+    const dim3 blk(16, 16);   // 256 threads: the block tree of the virial assumes a power of two
+    const dim3 grd((nat + 15) / 16, (nat + 15) / 16);
+    bool okk = true;
+    std::vector<double> erow;
+    try {
+        I.dPbcXyz.upload(xyz_bohr, 3 * nat, stream);
+        I.dPbcRepAlp.upload(alpha, nat, stream);
+        I.dPbcRepZeff.upload(zeff, nat, stream);
+        I.dPbcRepLight.upload(light, nat, stream);
+        I.dPbcRepTrans.upload(trans, 3 * ntrans, stream);
+        if (!gradient) {
+            I.dPbcRepE.ensure(static_cast<int>(nn) + nat);
+            double* ep = I.dPbcRepE.ptr;
+            pbc_dev::k_rep_pbc<false, false><<<grd, blk, 0, stream>>>(nat, I.dPbcXyz.ptr, I.dPbcRepAlp.ptr, I.dPbcRepZeff.ptr,
+                I.dPbcRepLight.ptr, kexp, kexp_light, rexp, cell_L[0], cell_L[1], cell_L[2], ntrans, I.dPbcRepTrans.ptr,
+                cut2, ep, nullptr, nullptr);
+            if (hipGetLastError() != hipSuccess) okk = false;
+            if (okk) {
+                pbc_dev::k_rep_rows<<<(nat + 127) / 128, 128, 0, stream>>>(nat, ep, ep + nn);
+                if (hipGetLastError() != hipSuccess) okk = false;
+            }
+            erow.resize(nat);
+            if (okk && hipMemcpyAsync(erow.data(), ep + nn, sizeof(double) * nat, hipMemcpyDeviceToHost, stream)
+                           != hipSuccess)
+                okk = false;
+        } else {
+            I.dPbcRepFix.ensure(3 * nat + 9);
+            if (hipMemsetAsync(I.dPbcRepFix.ptr, 0, sizeof(double) * (3 * nat + 9), stream) != hipSuccess) okk = false;
+            double* gfix = I.dPbcRepFix.ptr;
+            double* vfix = gfix + 3 * nat;
+            if (okk) {
+                if (want_virial)
+                    pbc_dev::k_rep_pbc<true, true><<<grd, blk, 0, stream>>>(nat, I.dPbcXyz.ptr, I.dPbcRepAlp.ptr,
+                        I.dPbcRepZeff.ptr, I.dPbcRepLight.ptr, kexp, kexp_light, rexp, cell_L[0], cell_L[1], cell_L[2],
+                        ntrans, I.dPbcRepTrans.ptr, cut2, nullptr, gfix, vfix);
+                else
+                    pbc_dev::k_rep_pbc<true, false><<<grd, blk, 0, stream>>>(nat, I.dPbcXyz.ptr, I.dPbcRepAlp.ptr,
+                        I.dPbcRepZeff.ptr, I.dPbcRepLight.ptr, kexp, kexp_light, rexp, cell_L[0], cell_L[1], cell_L[2],
+                        ntrans, I.dPbcRepTrans.ptr, cut2, nullptr, gfix, vfix);
+                if (hipGetLastError() != hipSuccess) okk = false;
+            }
+            const int nfix = 3 * nat + 9;
+            if (okk) {
+                pbc_dev::k_pfix_to_double<<<(nfix + 255) / 256, 256, 0, stream>>>(nfix, gfix);
+                if (hipGetLastError() != hipSuccess) okk = false;
+            }
+            if (okk && hipMemcpyAsync(grad_out, gfix, sizeof(double) * 3 * nat, hipMemcpyDeviceToHost, stream)
+                           != hipSuccess)
+                okk = false;
+            if (okk && want_virial
+                && hipMemcpyAsync(vir9_out, vfix, sizeof(double) * 9, hipMemcpyDeviceToHost, stream) != hipSuccess)
+                okk = false;
+        }
+    } catch (...) {
+        okk = false;
+    }
+    okk = (hipStreamSynchronize(stream) == hipSuccess) && okk;
+    I.dPbcRepE.free();
+    if (!okk) return false;
+    if (gradient) {
+        int fix_bad = 0;   // a non-finite or out-of-range contribution: fail (the host loop runs), reset the flag
+        if (hipMemcpyFromSymbol(&fix_bad, HIP_SYMBOL(pbc_dev::g_pfix_bad), sizeof(int)) != hipSuccess) return false;
+        if (fix_bad) {
+            const int zero = 0;
+            (void)hipMemcpyToSymbol(HIP_SYMBOL(pbc_dev::g_pfix_bad), &zero, sizeof(int));
+            return false;
+        }
+    } else {
+        double e = 0.0;
+        for (int i = 0; i < nat; ++i) e += erow[i];   // fixed atom order
+        *energy_out = e;
+    }
+    return true;
+}
+
+// Claude Generated (Nov 2026, WP-PERIODIC-XTB G5c): periodic CN chain rule (kernel k_cnchain_pbc).
+bool XtbHipContext::cnChainGradientPeriodic(int nat, const double* xyz_bohr, const double* rcov, const double* dEdcn,
+                                            const double* cell_L, int ntrans, const double* trans, double cut2,
+                                            bool gfn1, bool want_virial, double* grad_out, double* vir9_out)
+{
+    Impl& M = *m_impl;
+    PbcState& I = M.pbc;
+    if (!ok() || nat <= 0 || ntrans <= 0 || !xyz_bohr || !rcov || !dEdcn || !cell_L || !trans || !grad_out
+        || (want_virial && !vir9_out))
+        return false;
+    hipStream_t stream = M.stream;
+    try {
+        I.dPbcXyz.upload(xyz_bohr, 3 * nat, stream);
+        I.dPbcCnRcov.upload(rcov, nat, stream);
+        I.dPbcCnDedcn.upload(dEdcn, nat, stream);
+        I.dPbcCnTrans.upload(trans, 3 * ntrans, stream);
+        I.dPbcCnFix.ensure(3 * nat + 9);
+        if (hipMemsetAsync(I.dPbcCnFix.ptr, 0, sizeof(double) * (3 * nat + 9), stream) != hipSuccess) return false;
+        double* gfix = I.dPbcCnFix.ptr;
+        double* vfix = gfix + 3 * nat;
+        const dim3 blk(16, 16);   // 256 threads: the block tree of the virial assumes a power of two
+        const dim3 grd((nat + 15) / 16, (nat + 15) / 16);
+        if (want_virial)
+            pbc_dev::k_cnchain_pbc<true><<<grd, blk, 0, stream>>>(nat, I.dPbcXyz.ptr, I.dPbcCnRcov.ptr, I.dPbcCnDedcn.ptr,
+                cell_L[0], cell_L[1], cell_L[2], ntrans, I.dPbcCnTrans.ptr, cut2, gfn1 ? 1 : 0, gfix, vfix);
+        else
+            pbc_dev::k_cnchain_pbc<false><<<grd, blk, 0, stream>>>(nat, I.dPbcXyz.ptr, I.dPbcCnRcov.ptr, I.dPbcCnDedcn.ptr,
+                cell_L[0], cell_L[1], cell_L[2], ntrans, I.dPbcCnTrans.ptr, cut2, gfn1 ? 1 : 0, gfix, vfix);
+        if (hipGetLastError() != hipSuccess) return false;
+        const int nfix = 3 * nat + 9;
+        pbc_dev::k_pfix_to_double<<<(nfix + 255) / 256, 256, 0, stream>>>(nfix, gfix);
+        if (hipGetLastError() != hipSuccess) return false;
+        I.dPbcCnFix.download(grad_out, 3 * nat, stream);
+        if (want_virial && hipMemcpyAsync(vir9_out, vfix, sizeof(double) * 9, hipMemcpyDeviceToHost, stream) != hipSuccess)
+            return false;
+    } catch (...) {
+        return false;
+    }
+    if (hipStreamSynchronize(stream) != hipSuccess) return false;
+    int fix_bad = 0;   // a non-finite or out-of-range contribution: fail (the host loop runs), reset the flag
+    if (hipMemcpyFromSymbol(&fix_bad, HIP_SYMBOL(pbc_dev::g_pfix_bad), sizeof(int)) != hipSuccess) return false;
+    if (fix_bad) {
+        const int zero = 0;
+        (void)hipMemcpyToSymbol(HIP_SYMBOL(pbc_dev::g_pfix_bad), &zero, sizeof(int));
+        return false;
+    }
+    return true;
+}
+
+// Claude Generated (Nov 2026, WP-PERIODIC-XTB C1): periodic D4 CN chain rule (kernel k_d4cnfold_pbc).
+bool XtbHipContext::d4CnFoldPeriodic(int nat, const double* xyz_bohr, const double* rcov, const double* en,
+                                     const double* dEdcn, double kn, double k4, double k5, double k6,
+                                     const double* cell_L, int ntrans, const double* trans, double cut2,
+                                     bool want_virial, double* grad_out, double* vir9_out)
+{
+    Impl& M = *m_impl;
+    PbcState& I = M.pbc;
+    if (!ok() || nat <= 0 || ntrans <= 0 || !xyz_bohr || !rcov || !en || !dEdcn || !cell_L || !trans || !grad_out
+        || (want_virial && !vir9_out))
+        return false;
+    hipStream_t stream = M.stream;
+    try {
+        I.dPbcXyz.upload(xyz_bohr, 3 * nat, stream);
+        I.dPbcCnRcov.upload(rcov, nat, stream);
+        I.dPbcCnEn.upload(en, nat, stream);
+        I.dPbcCnDedcn.upload(dEdcn, nat, stream);
+        I.dPbcCnTrans.upload(trans, 3 * ntrans, stream);
+        I.dPbcCnFix.ensure(3 * nat + 9);
+        if (hipMemsetAsync(I.dPbcCnFix.ptr, 0, sizeof(double) * (3 * nat + 9), stream) != hipSuccess) return false;
+        double* gfix = I.dPbcCnFix.ptr;
+        double* vfix = gfix + 3 * nat;
+        const dim3 blk(16, 16);   // 256 threads: the block tree of the virial assumes a power of two
+        const dim3 grd((nat + 15) / 16, (nat + 15) / 16);
+        if (want_virial)
+            pbc_dev::k_d4cnfold_pbc<true><<<grd, blk, 0, stream>>>(nat, I.dPbcXyz.ptr, I.dPbcCnRcov.ptr, I.dPbcCnEn.ptr,
+                I.dPbcCnDedcn.ptr, kn, k4, k5, k6, cell_L[0], cell_L[1], cell_L[2], ntrans, I.dPbcCnTrans.ptr, cut2,
+                gfix, vfix);
+        else
+            pbc_dev::k_d4cnfold_pbc<false><<<grd, blk, 0, stream>>>(nat, I.dPbcXyz.ptr, I.dPbcCnRcov.ptr, I.dPbcCnEn.ptr,
+                I.dPbcCnDedcn.ptr, kn, k4, k5, k6, cell_L[0], cell_L[1], cell_L[2], ntrans, I.dPbcCnTrans.ptr, cut2,
+                gfix, vfix);
+        if (hipGetLastError() != hipSuccess) return false;
+        const int nfix = 3 * nat + 9;
+        pbc_dev::k_pfix_to_double<<<(nfix + 255) / 256, 256, 0, stream>>>(nfix, gfix);
+        if (hipGetLastError() != hipSuccess) return false;
+        I.dPbcCnFix.download(grad_out, 3 * nat, stream);
+        if (want_virial && hipMemcpyAsync(vir9_out, vfix, sizeof(double) * 9, hipMemcpyDeviceToHost, stream) != hipSuccess)
+            return false;
+    } catch (...) {
+        return false;
+    }
+    if (hipStreamSynchronize(stream) != hipSuccess) return false;
+    int fix_bad = 0;   // a non-finite or out-of-range contribution: fail (the host loop runs), reset the flag
+    if (hipMemcpyFromSymbol(&fix_bad, HIP_SYMBOL(pbc_dev::g_pfix_bad), sizeof(int)) != hipSuccess) return false;
+    if (fix_bad) {
+        const int zero = 0;
+        (void)hipMemcpyToSymbol(HIP_SYMBOL(pbc_dev::g_pfix_bad), &zero, sizeof(int));
+        return false;
+    }
+    return true;
+}
+
+// Claude Generated (Nov 2026, WP-PERIODIC-XTB H1): periodic H0/Pulay gradient (kernel k_grad_h0_pulay_pbc). P is the
+// resident dP of this SCF (residentFinalize), W = C(:, 0:ncol) diag(we) C(:, 0:ncol)^T is built here from the resident
+// dC (the dgemm of residentEnergyWeightedDensity) and never downloaded. grad_out[3 nat], dEdcn_out[nat] and vir9_out
+// are the contributions of section 2b only (the on-site CN term stays on the host).
+
+// ---- cuda/xtb_gpu_context.cu lines 9354-9469 ----
+static bool pbcFixFinish(hipStream_t stream, double* fix, int nat, bool want_virial, double* grad_out, double* vir9_out)
+{
+    const int nfix = 3 * nat + 9;
+    pbc_dev::k_pfix_to_double<<<(nfix + 255) / 256, 256, 0, stream>>>(nfix, fix);
+    if (hipGetLastError() != hipSuccess) return false;
+    if (hipMemcpyAsync(grad_out, fix, sizeof(double) * 3 * nat, hipMemcpyDeviceToHost, stream) != hipSuccess)
+        return false;
+    if (want_virial && hipMemcpyAsync(vir9_out, fix + 3 * nat, sizeof(double) * 9, hipMemcpyDeviceToHost, stream)
+                           != hipSuccess)
+        return false;
+    if (hipStreamSynchronize(stream) != hipSuccess) return false;
+    int fix_bad = 0;
+    if (hipMemcpyFromSymbol(&fix_bad, HIP_SYMBOL(pbc_dev::g_pfix_bad), sizeof(int)) != hipSuccess) return false;
+    if (fix_bad) {
+        const int zero = 0;
+        (void)hipMemcpyToSymbol(HIP_SYMBOL(pbc_dev::g_pfix_bad), &zero, sizeof(int));
+        return false;
+    }
+    return true;
+}
+
+// Claude Generated (Nov 2026, WP-PERIODIC-XTB H2): point-charge Ewald gradient + strain derivative (real and reciprocal
+// parts; the background virial stays on the host). ktab as ewaldGammaPeriodic (kx ky kz w per k).
+bool XtbHipContext::ewaldGradientPeriodic(int nat, const double* xyz_bohr, const double* q_at, const double* cell_L,
+                                          double alpha, double r_cut, int nk, const double* ktab, bool want_virial,
+                                          double* grad_out, double* vir9_out)
+{
+    Impl& M = *m_impl;
+    PbcState& I = M.pbc;
+    if (!ok() || nat <= 0 || nk < 0 || !xyz_bohr || !q_at || !cell_L || (nk > 0 && !ktab) || !grad_out
+        || (want_virial && !vir9_out))
+        return false;
+    hipStream_t stream = M.stream;
+    try {
+        
+        I.dPbcXyz.upload(xyz_bohr, 3 * nat, stream);
+        I.dPbcEgQ.upload(q_at, nat, stream);
+        if (nk > 0) {
+            I.dPbcEgKtab.upload(ktab, 4 * nk, stream);
+            I.dPbcEgSf.ensure(2 * nk);
+        }
+        I.dPbcEgFix.ensure(3 * nat + 9);
+        if (hipMemsetAsync(I.dPbcEgFix.ptr, 0, sizeof(double) * (3 * nat + 9), stream) != hipSuccess) return false;
+        double* gfix = I.dPbcEgFix.ptr;
+        double* vfix = gfix + 3 * nat;
+        const dim3 blk(16, 16);
+        const dim3 grd((nat + 15) / 16, (nat + 15) / 16);
+        if (want_virial)
+            pbc_dev::k_ewg_real<true><<<grd, blk, 0, stream>>>(nat, I.dPbcXyz.ptr, I.dPbcEgQ.ptr, cell_L[0], cell_L[1], cell_L[2],
+                                                      alpha, r_cut * r_cut, gfix, vfix);
+        else
+            pbc_dev::k_ewg_real<false><<<grd, blk, 0, stream>>>(nat, I.dPbcXyz.ptr, I.dPbcEgQ.ptr, cell_L[0], cell_L[1], cell_L[2],
+                                                       alpha, r_cut * r_cut, gfix, vfix);
+        if (hipGetLastError() != hipSuccess) return false;
+        if (nk > 0) {
+            pbc_dev::k_ewg_sf<<<nk, 256, 0, stream>>>(nat, I.dPbcXyz.ptr, I.dPbcEgQ.ptr, I.dPbcEgKtab.ptr, I.dPbcEgSf.ptr);
+            if (want_virial) pbc_dev::k_ewg_kvir<<<1, 256, 0, stream>>>(nk, I.dPbcEgKtab.ptr, I.dPbcEgSf.ptr, alpha, vfix);
+            pbc_dev::k_ewg_kgrad<<<(nat + 127) / 128, 128, 0, stream>>>(nat, nk, I.dPbcXyz.ptr, I.dPbcEgQ.ptr, I.dPbcEgKtab.ptr,
+                                                               I.dPbcEgSf.ptr, gfix);
+            if (hipGetLastError() != hipSuccess) return false;
+        }
+        const bool r = pbcFixFinish(stream, gfix, nat, want_virial, grad_out, vir9_out);
+        
+        return r;
+    } catch (...) {
+        return false;
+    }
+}
+
+// Claude Generated (Nov 2026, WP-PERIODIC-XTB H2): Klopman-Ohno remainder gradient + virial (kernel k_ko_grad_pbc).
+bool XtbHipContext::koGradientPeriodic(int nat, const double* xyz_bohr, int nsh, const int* sh2at, const double* hardness,
+                                       bool harmonic, double gexp, const double* q_sh, const double* cell_L, int ntrans,
+                                       const double* trans, double cut2, double rcut, bool want_virial,
+                                       double* grad_out, double* vir9_out)
+{
+    Impl& M = *m_impl;
+    PbcState& I = M.pbc;
+    if (!ok() || nat <= 0 || nsh <= 0 || ntrans <= 0 || !xyz_bohr || !sh2at || !hardness || !q_sh || !cell_L || !trans
+        || !grad_out || (want_virial && !vir9_out))
+        return false;
+    hipStream_t stream = M.stream;
+    try {
+        
+        I.dPbcXyz.upload(xyz_bohr, 3 * nat, stream);
+        I.dPbcKoShAt.upload(sh2at, nsh, stream);
+        I.dPbcKoG.upload(hardness, nsh, stream);
+        I.dPbcKoQsh.upload(q_sh, nsh, stream);
+        I.dPbcKoTr.upload(trans, 3 * ntrans, stream);
+        I.dPbcKoFix.ensure(3 * nat + 9);
+        if (hipMemsetAsync(I.dPbcKoFix.ptr, 0, sizeof(double) * (3 * nat + 9), stream) != hipSuccess) return false;
+        double* gfix = I.dPbcKoFix.ptr;
+        double* vfix = gfix + 3 * nat;
+        const dim3 blk(16, 16);
+        const dim3 grd((nsh + 15) / 16, (nsh + 15) / 16);
+        if (want_virial)
+            pbc_dev::k_ko_grad_pbc<true><<<grd, blk, 0, stream>>>(nsh, I.dPbcKoShAt.ptr, I.dPbcKoG.ptr, harmonic ? 1 : 0, gexp,
+                I.dPbcKoQsh.ptr, I.dPbcXyz.ptr, cell_L[0], cell_L[1], cell_L[2], ntrans, I.dPbcKoTr.ptr, cut2, rcut,
+                gfix, vfix);
+        else
+            pbc_dev::k_ko_grad_pbc<false><<<grd, blk, 0, stream>>>(nsh, I.dPbcKoShAt.ptr, I.dPbcKoG.ptr, harmonic ? 1 : 0, gexp,
+                I.dPbcKoQsh.ptr, I.dPbcXyz.ptr, cell_L[0], cell_L[1], cell_L[2], ntrans, I.dPbcKoTr.ptr, cut2, rcut,
+                gfix, vfix);
+        if (hipGetLastError() != hipSuccess) return false;
+        const bool r = pbcFixFinish(stream, gfix, nat, want_virial, grad_out, vir9_out);
+        
+        return r;
+    } catch (...) {
+        return false;
+    }
+}
+
+/* ---------------------------------------------------------------------------------------------- *
+ *  WP-PERIODIC-XTB B1 (Claude Generated, Nov 2026): dftd4 EN-weighted covalent CN with lattice    *
+ *  images (dispersion::computeD4CovalentCNPeriodic), layout of k_cn_pbc: one block per atom i,   *
+ *  128 threads stride over j and its images (T = 0 skipped for j = i, r2 < cut2), fixed-order     *
+ *  block tree. countf = k4 exp(-(|en_i - en_j| + k5)^2 / k6) 0.5 (1 + erf(-kn (r/rcov_ij - 1))).  *
+ *  Not bitwise to the host (summation order, device erf).                                         *
+ * ---------------------------------------------------------------------------------------------- */
+
+// ---- cuda/xtb_gpu_context.cu lines 9509-9843 ----
+bool XtbHipContext::d4CovalentCnPeriodic(int nat, const int* Z, const double* xyz_bohr, const double* rad,
+                                         const double* en, double kn, double k4, double k5, double k6,
+                                         const double* cell_L, int ntrans, const double* trans, double cut2,
+                                         double* cn_out)
+{
+    Impl& M = *m_impl;
+    PbcState& I = M.pbc;
+    if (!ok() || nat <= 0 || ntrans <= 0 || !Z || !xyz_bohr || !rad || !en || !cell_L || !trans || !cn_out) return false;
+    hipStream_t stream = M.stream;
+    try {
+        
+        I.dD4CnZ.upload(Z, nat, stream);
+        I.dD4CnXyz.upload(xyz_bohr, 3 * nat, stream);
+        I.dD4Rad.upload(rad, 119, stream);
+        I.dD4En.upload(en, 119, stream);
+        I.dPbcCnTrans.upload(trans, 3 * ntrans, stream);
+        I.dD4CnOut.ensure(nat);
+        pbc_dev::k_d4_cn_pbc<<<nat, 128, 0, stream>>>(nat, I.dD4CnZ.ptr, I.dD4CnXyz.ptr, I.dD4Rad.ptr, I.dD4En.ptr, kn, k4, k5,
+                                             k6, cell_L[0], cell_L[1], cell_L[2], ntrans, I.dPbcCnTrans.ptr, cut2,
+                                             I.dD4CnOut.ptr);
+        if (hipGetLastError() != hipSuccess) return false;
+        I.dD4CnOut.download(cn_out, nat, stream);
+        if (hipStreamSynchronize(stream) != hipSuccess) return false;
+        
+    } catch (...) {
+        return false;
+    }
+    return true;
+}
+
+// Claude Generated (Nov 2026, WP-PERIODIC-XTB H3): periodic coordination number (kernel k_cn_pbc).
+bool XtbHipContext::cnPeriodic(int nat, const double* xyz_bohr, const double* rcov, const double* cell_L, int ntrans,
+                               const double* trans, double cut2, int mode, double* cn_out)
+{
+    Impl& M = *m_impl;
+    PbcState& I = M.pbc;
+    if (!ok() || nat <= 0 || ntrans <= 0 || !xyz_bohr || !rcov || !cell_L || !trans || !cn_out) return false;
+    hipStream_t stream = M.stream;
+    try {
+        
+        I.dPbcXyz.upload(xyz_bohr, 3 * nat, stream);
+        I.dPbcCnRcov.upload(rcov, nat, stream);
+        I.dPbcCnTrans.upload(trans, 3 * ntrans, stream);
+        I.dPbcCnOut.ensure(nat);
+        pbc_dev::k_cn_pbc<<<nat, 128, 0, stream>>>(nat, I.dPbcXyz.ptr, I.dPbcCnRcov.ptr, cell_L[0], cell_L[1],
+                                                        cell_L[2], ntrans, I.dPbcCnTrans.ptr, cut2, mode, I.dPbcCnOut.ptr);
+        if (hipGetLastError() != hipSuccess) return false;
+        I.dPbcCnOut.download(cn_out, nat, stream);
+        if (hipStreamSynchronize(stream) != hipSuccess) return false;
+        
+    } catch (...) {
+        return false;
+    }
+    return true;
+}
+
+// Claude Generated (Nov 2026, WP-PERIODIC-XTB G5a): periodic multipole gradient (kernel k_mp_grad_pbc).
+bool XtbHipContext::multipoleGradientPeriodic(int nat, const double* xyz_bohr, const double* mrad, const double* q_at,
+                                           const double* dp_at, const double* qp_at, const double* cell_L, int ndtrans,
+                                           const double* dtrans, int nrtrans, const double* rtrans, const double* kexp,
+                                           double alpha, double fac, double sd_f, double sq_f, double dmp3, double dmp5,
+                                           bool want_virial, double* grad_out, double* dEdr_out, double* vir9_out)
+{
+    Impl& M = *m_impl;
+    PbcState& I = M.pbc;
+    if (!ok() || nat <= 0 || ndtrans <= 0 || nrtrans < 0 || !xyz_bohr || !mrad || !q_at || !dp_at || !qp_at || !cell_L
+        || !dtrans || !grad_out || !dEdr_out || (want_virial && !vir9_out) || (nrtrans > 0 && (!rtrans || !kexp)))
+        return false;
+    hipStream_t stream = M.stream;
+    bool vir_sf = false, k_sf = false;   // M1, M2
+    double kv9[9] = { 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    try {
+        I.dPbcXyz.upload(xyz_bohr, 3 * nat, stream);
+        I.dPbcMrad.upload(mrad, nat, stream);
+        I.dPbcQ.upload(q_at, nat, stream);
+        I.dPbcDp.upload(dp_at, 3 * nat, stream);
+        I.dPbcQp.upload(qp_at, 6 * nat, stream);
+        I.dPbcDtrans.upload(dtrans, 3 * ndtrans, stream);
+        if (nrtrans > 0) {
+            I.dPbcRtrans.upload(rtrans, 3 * nrtrans, stream);
+            I.dPbcKexp.upload(kexp, nrtrans, stream);
+        }
+        I.dPbcGfix.ensure(4 * nat + 9);   // grad 3 nat | dEdr nat | vir 9
+        if (hipMemsetAsync(I.dPbcGfix.ptr, 0, sizeof(double) * (4 * nat + 9), stream) != hipSuccess) return false;
+        double* gfix = I.dPbcGfix.ptr;
+        double* efix = gfix + 3 * nat;
+        double* vfix = efix + nat;
+        const dim3 blk(16, 16);   // 256 threads: the block tree of the virial assumes a power of two
+        const dim3 grd((nat + 15) / 16, (nat + 15) / 16);
+        const double* rt = nrtrans > 0 ? I.dPbcRtrans.ptr : nullptr;
+        const double* kx = nrtrans > 0 ? I.dPbcKexp.ptr : nullptr;
+        // M1/M2: the k-space strain derivative and gradient by structure factors (k_mp_sf, k_mp_kvir, k_mp_kgrad), the pair
+        // kernel then runs only the real-space sum; CURCUMA_PBC_GPU_HOST=mppair keeps the k sums in the pair kernel.
+        // INACTIVE (2026-11-23): the k-sum branch of the pair kernel is the superseded comparison path, switch
+        // CURCUMA_PBC_GPU_HOST=mppair (TODO.md "Loeschkandidaten").
+        static const bool k_pair = hipPbcHostTokenSet("mppair");
+        k_sf = !k_pair && nrtrans > 0;
+        vir_sf = want_virial && k_sf;
+        if (k_sf) {
+            I.dPbcMpSf.ensure(18 * nrtrans);
+            I.dPbcMpKv.ensure(9);
+            pbc_dev::k_mp_sf<<<nrtrans, 256, 0, stream>>>(nat, I.dPbcXyz.ptr, I.dPbcQ.ptr, I.dPbcDp.ptr, I.dPbcQp.ptr, nrtrans,
+                                                 rt, I.dPbcMpSf.ptr);
+            if (want_virial)
+                pbc_dev::k_mp_kvir<<<1, 256, 0, stream>>>(nrtrans, rt, kx, I.dPbcMpSf.ptr, alpha, sd_f, sq_f, I.dPbcMpKv.ptr);
+            if (hipGetLastError() != hipSuccess) return false;
+            if (want_virial)
+                pbc_dev::k_mp_grad_pbc<true, false, false><<<grd, blk, 0, stream>>>(nat, I.dPbcXyz.ptr, I.dPbcMrad.ptr, I.dPbcQ.ptr,
+                    I.dPbcDp.ptr, I.dPbcQp.ptr, cell_L[0], cell_L[1], cell_L[2], ndtrans, I.dPbcDtrans.ptr, nrtrans, rt, kx,
+                    alpha, fac, sd_f, sq_f, dmp3, dmp5, gfix, efix, vfix);
+            else
+                pbc_dev::k_mp_grad_pbc<false, false, false><<<grd, blk, 0, stream>>>(nat, I.dPbcXyz.ptr, I.dPbcMrad.ptr, I.dPbcQ.ptr,
+                    I.dPbcDp.ptr, I.dPbcQp.ptr, cell_L[0], cell_L[1], cell_L[2], ndtrans, I.dPbcDtrans.ptr, nrtrans, rt, kx,
+                    alpha, fac, sd_f, sq_f, dmp3, dmp5, gfix, efix, vfix);
+        } else if (want_virial)
+            pbc_dev::k_mp_grad_pbc<true><<<grd, blk, 0, stream>>>(nat, I.dPbcXyz.ptr, I.dPbcMrad.ptr, I.dPbcQ.ptr, I.dPbcDp.ptr,
+                I.dPbcQp.ptr, cell_L[0], cell_L[1], cell_L[2], ndtrans, I.dPbcDtrans.ptr, nrtrans, rt, kx, alpha, fac,
+                sd_f, sq_f, dmp3, dmp5, gfix, efix, vfix);
+        else
+            pbc_dev::k_mp_grad_pbc<false><<<grd, blk, 0, stream>>>(nat, I.dPbcXyz.ptr, I.dPbcMrad.ptr, I.dPbcQ.ptr, I.dPbcDp.ptr,
+                I.dPbcQp.ptr, cell_L[0], cell_L[1], cell_L[2], ndtrans, I.dPbcDtrans.ptr, nrtrans, rt, kx, alpha, fac,
+                sd_f, sq_f, dmp3, dmp5, gfix, efix, vfix);
+        if (hipGetLastError() != hipSuccess) return false;
+        const int nfix = 4 * nat + 9;
+        pbc_dev::k_pfix_to_double<<<(nfix + 255) / 256, 256, 0, stream>>>(nfix, gfix);
+        if (hipGetLastError() != hipSuccess) return false;
+        if (k_sf) {   // M2: + the k-space gradient (after the fixed-point conversion of the real-space part)
+            pbc_dev::k_mp_kgrad<<<nat, 256, 0, stream>>>(nat, I.dPbcXyz.ptr, I.dPbcQ.ptr, I.dPbcDp.ptr, I.dPbcQp.ptr, nrtrans, rt, kx,
+                                                I.dPbcMpSf.ptr, sd_f, sq_f, gfix);
+            if (hipGetLastError() != hipSuccess) return false;
+        }
+        I.dPbcGfix.download(grad_out, 3 * nat, stream);
+        if (hipMemcpyAsync(dEdr_out, efix, sizeof(double) * nat, hipMemcpyDeviceToHost, stream) != hipSuccess) return false;
+        if (want_virial && hipMemcpyAsync(vir9_out, vfix, sizeof(double) * 9, hipMemcpyDeviceToHost, stream) != hipSuccess)
+            return false;
+        if (vir_sf) {   // M1: the k-space part, downloaded after the stream sync below
+            if (hipMemcpyAsync(kv9, I.dPbcMpKv.ptr, sizeof(double) * 9, hipMemcpyDeviceToHost, stream) != hipSuccess)
+                return false;
+        }
+    } catch (...) {
+        return false;
+    }
+    if (hipStreamSynchronize(stream) != hipSuccess) return false;
+    int fix_bad = 0;   // a non-finite or out-of-range contribution: fail (the host blocks run), reset the flag
+    if (hipMemcpyFromSymbol(&fix_bad, HIP_SYMBOL(pbc_dev::g_pfix_bad), sizeof(int)) != hipSuccess) return false;
+    if (fix_bad) {
+        const int zero = 0;
+        (void)hipMemcpyToSymbol(HIP_SYMBOL(pbc_dev::g_pfix_bad), &zero, sizeof(int));
+        return false;
+    }
+    if (vir_sf) {   // M1: k-space part plus the constant dipole term (fac/6) |sum m|^2 / 2 on the diagonal
+        double M[3] = { 0.0, 0.0, 0.0 };
+        for (int i = 0; i < nat; ++i)
+            for (int k = 0; k < 3; ++k) M[k] += dp_at[3 * i + k];
+        const double cdd = 0.5 * (fac / 6.0) * (M[0] * M[0] + M[1] * M[1] + M[2] * M[2]);
+        for (int a = 0; a < 3; ++a)
+            for (int b = 0; b < 3; ++b) vir9_out[3 * a + b] += kv9[3 * a + b] + (a == b ? cdd : 0.0);
+    }
+    return true;
+}
+
+// Claude Generated (Nov 2026, WP-PERIODIC-XTB G4b): periodic in-SCF D4 dE/dq (kernels k_d4_pbc_dmat, k_d4_dedq_pbc).
+bool XtbHipContext::beginDispersionImages(int nat, const double* cell_L, int ntrans, const double* trans, double cut2)
+{
+    Impl& M = *m_impl;
+    PbcState& I = M.pbc;
+    I.d4_pbc_ready = false;
+    if (!ok() || nat <= 0 || nat != M.d4_nat || ntrans <= 0 || !cell_L || !trans) return false;
+    const size_t nn = static_cast<size_t>(nat) * nat;
+    if (nn > static_cast<size_t>(INT_MAX)) return false;
+    hipStream_t stream = M.stream;
+    try {
+        I.dPbcTrans.upload(trans, 3 * ntrans, stream);
+        I.dPbcD4D.ensure(static_cast<int>(nn));
+    } catch (...) {
+        return false;
+    }
+    const dim3 blk(16, 16);
+    const dim3 grd((nat + 15) / 16, (nat + 15) / 16);
+    pbc_dev::k_d4_pbc_dmat<<<grd, blk, 0, stream>>>(nat, M.dD4Xyz, M.dD4Sqrt, cell_L[0], cell_L[1], cell_L[2], ntrans,
+                                           I.dPbcTrans.ptr, M.d4_s6, M.d4_s8, M.d4_a1, M.d4_a2, cut2, I.dPbcD4D.ptr);
+    if (hipGetLastError() != hipSuccess) return false;
+    if (hipStreamSynchronize(stream) != hipSuccess) return false;
+    I.d4_pbc_ready = true;
+    return true;
+}
+
+bool XtbHipContext::dispersionDedqPeriodic(int nat, const double* W, const double* dWq, double* dEdq_out)
+{
+    Impl& M = *m_impl;
+    PbcState& I = M.pbc;
+    if (!ok() || !I.d4_pbc_ready || nat <= 0 || nat != M.d4_nat || !W || !dWq || !dEdq_out || (M.dD4C6 == nullptr))
+        return false;
+    hipStream_t stream = M.stream;
+    if (!M.dD4W || !M.dD4dWq || !M.dD4Dedq) return false;   // allocated by begDispersion for this nat
+    const size_t wlen = static_cast<size_t>(nat) * Impl::D4_MAX_REF;
+    if (hipMemcpyAsync(M.dD4W, W, wlen * sizeof(double), hipMemcpyHostToDevice, stream) != hipSuccess) return false;
+    if (hipMemcpyAsync(M.dD4dWq, dWq, wlen * sizeof(double), hipMemcpyHostToDevice, stream) != hipSuccess) return false;
+    const int b = 128;
+    static const bool dedq_thread = hipPbcHostTokenSet("dedq1");
+    if (dedq_thread)
+        pbc_dev::k_d4_dedq_pbc<<<(nat + b - 1) / b, b, 0, stream>>>(nat, 118, Impl::D4_MAX_REF, M.dD4Z, M.dD4Nref,
+                                                          M.dD4C6, M.dD4W, M.dD4dWq, I.dPbcD4D.ptr,
+                                                          M.dD4Dedq);
+    else   // D1: one block per atom
+        pbc_dev::k_d4_dedq_pbc_b<<<nat, 128, 0, stream>>>(nat, 118, Impl::D4_MAX_REF, M.dD4Z, M.dD4Nref, M.dD4C6,
+                                                 M.dD4W, M.dD4dWq, I.dPbcD4D.ptr, M.dD4Dedq);
+    if (hipGetLastError() != hipSuccess) return false;
+    if (hipMemcpyAsync(dEdq_out, M.dD4Dedq, sizeof(double) * nat, hipMemcpyDeviceToHost, stream) != hipSuccess) return false;
+    return hipStreamSynchronize(stream) == hipSuccess;
+}
+
+// Claude Generated (Nov 2026, WP-PERIODIC-XTB G4a): periodic D4 ATM (kernels k_atm_pbc_nb, k_d4_atm_pbc_w).
+bool XtbHipContext::dispersionATMPeriodic(int nat, const double* xyz_bohr, const double* r4r2, const double* c6,
+                                          const double* dc6dcn, const double* cell_L, int ntrans,
+                                          const double* trans, double cutoff2, double s9, double a1, double a2,
+                                          double alp, bool want_virial, double* e_atom_out, double* grad_out,
+                                          double* dEdcn_out, double* vir6_out)
+{
+    Impl& M = *m_impl;
+    PbcState& I = M.pbc;
+    if (!ok() || nat <= 0 || ntrans <= 0 || !xyz_bohr || !r4r2 || !c6 || !dc6dcn || !cell_L || !trans
+        || !e_atom_out || !grad_out || !dEdcn_out || (want_virial && !vir6_out))
+        return false;
+    const size_t nn = static_cast<size_t>(nat) * nat;
+    if (nn > static_cast<size_t>(INT_MAX) || static_cast<long long>(nat) * ntrans > (1LL << 40)) return false;
+    hipStream_t stream = M.stream;
+    const int b = 128;                                   // 4 atoms (warps) per block
+    const unsigned grid = static_cast<unsigned>((32LL * nat + b - 1) / b);
+    std::vector<int> cnt(nat), ptr(nat + 1, 0);
+    try {
+        I.dPbcXyz.upload(xyz_bohr, 3 * nat, stream);
+        I.dPbcTrans.upload(trans, 3 * ntrans, stream);
+        I.dPbcR4r2.upload(r4r2, nat, stream);
+        I.dPbcNbCnt.ensure(nat);
+        pbc_dev::k_atm_pbc_nb<false><<<grid, b, 0, stream>>>(nat, I.dPbcXyz.ptr, cell_L[0], cell_L[1], cell_L[2], ntrans,
+                                                    I.dPbcTrans.ptr, cutoff2, nullptr, nullptr, nullptr, a1, a2,
+                                                    I.dPbcNbCnt.ptr, nullptr, nullptr, nullptr);
+        if (hipGetLastError() != hipSuccess) return false;
+        
+        I.dPbcNbCnt.download(cnt.data(), nat, stream);
+        if (hipStreamSynchronize(stream) != hipSuccess) return false;
+        long long total = 0;
+        for (int a = 0; a < nat; ++a) {
+            ptr[a] = static_cast<int>(total);
+            total += cnt[a];
+            if (total > INT_MAX / pbc_dev::kAtmNbStride) return false;
+        }
+        ptr[nat] = static_cast<int>(total);
+        const int ntot = std::max(1, static_cast<int>(total));
+        I.dPbcNbPtr.upload(ptr.data(), nat + 1, stream);
+        I.dPbcNbIdx.ensure(ntot);
+        I.dPbcNbV.ensure(pbc_dev::kAtmNbStride * ntot);
+        I.dD4AtmC6.upload(c6, static_cast<int>(nn), stream);
+        I.dD4AtmDc6.upload(dc6dcn, static_cast<int>(nn), stream);
+        pbc_dev::k_atm_pbc_nb<true><<<grid, b, 0, stream>>>(nat, I.dPbcXyz.ptr, cell_L[0], cell_L[1], cell_L[2], ntrans,
+                                                   I.dPbcTrans.ptr, cutoff2, I.dPbcR4r2.ptr, I.dD4AtmC6.ptr,
+                                                   I.dD4AtmDc6.ptr, a1, a2, nullptr, I.dPbcNbPtr.ptr,
+                                                   I.dPbcNbIdx.ptr, I.dPbcNbV.ptr);
+        if (hipGetLastError() != hipSuccess) return false;
+        
+        // A1: per-class kernel (default) needs the dC6/dCN ratios before C6 becomes sqrt|C6|;
+        // CURCUMA_PBC_GPU_HOST=triview keeps the per-member kernel k_d4_atm_pbc_w.
+        static const bool triview = hipPbcHostTokenSet("triview");
+        if (!triview) {
+            I.dPbcAtmRatio.ensure(static_cast<int>(nn));
+            I.dPbcAtmRatioT.ensure(static_cast<int>(nn));
+            pbc_dev::k_atm_ratio<<<static_cast<unsigned>((nn + 255) / 256), 256, 0, stream>>>(nat, I.dD4AtmC6.ptr, I.dD4AtmDc6.ptr,
+                                                                                    I.dPbcAtmRatio.ptr, I.dPbcAtmRatioT.ptr);
+            if (hipGetLastError() != hipSuccess) return false;
+        }
+        pbc_dev::k_atm_sqrt_abs<<<static_cast<unsigned>((nn + 255) / 256), 256, 0, stream>>>(nn, I.dD4AtmC6.ptr);
+        std::vector<double> sr(nat);
+        for (int a = 0; a < nat; ++a) sr[a] = std::sqrt(r4r2[a]);
+        I.dPbcSr4r2.upload(sr.data(), nat, stream);
+        I.dPbcEat.ensure(nat);
+        I.dPbcGrad.ensure(3 * nat);
+        I.dPbcDcn.ensure(nat);
+        I.dPbcVir.ensure(6 * nat);
+        
+        if (triview) {
+            pbc_dev::k_d4_atm_pbc_w<<<grid, b, 0, stream>>>(nat, I.dPbcSr4r2.ptr, I.dD4AtmC6.ptr, I.dPbcNbPtr.ptr,
+                                                   I.dPbcNbIdx.ptr, I.dPbcNbV.ptr, s9, a1 * std::sqrt(3.0), a2, alp,
+                                                   cutoff2, want_virial ? 1 : 0, I.dPbcEat.ptr, I.dPbcGrad.ptr,
+                                                   I.dPbcDcn.ptr, I.dPbcVir.ptr);
+            if (hipGetLastError() != hipSuccess) return false;
+        } else {
+            I.dPbcGrad.zero(3 * nat, stream);   // fixed-point accumulators
+            I.dPbcDcn.zero(nat, stream);
+            pbc_dev::k_d4_atm_pbc_u<<<grid, b, 0, stream>>>(nat, I.dPbcSr4r2.ptr, I.dD4AtmC6.ptr, I.dPbcAtmRatio.ptr,
+                                                   I.dPbcAtmRatioT.ptr, I.dPbcNbPtr.ptr, I.dPbcNbIdx.ptr, I.dPbcNbV.ptr,
+                                                   s9, a1 * std::sqrt(3.0), a2, alp, cutoff2, want_virial ? 1 : 0,
+                                                   I.dPbcEat.ptr, I.dPbcGrad.ptr, I.dPbcDcn.ptr, I.dPbcVir.ptr);
+            if (hipGetLastError() != hipSuccess) return false;
+            pbc_dev::k_pfix_to_double<<<(3 * nat + 255) / 256, 256, 0, stream>>>(3 * nat, I.dPbcGrad.ptr);
+            pbc_dev::k_pfix_to_double<<<(nat + 255) / 256, 256, 0, stream>>>(nat, I.dPbcDcn.ptr);
+            if (hipGetLastError() != hipSuccess) return false;
+        }
+        
+        I.dPbcEat.download(e_atom_out, nat, stream);
+        I.dPbcGrad.download(grad_out, 3 * nat, stream);
+        I.dPbcDcn.download(dEdcn_out, nat, stream);
+        if (want_virial) I.dPbcVir.download(vir6_out, 6 * nat, stream);
+    } catch (...) {
+        return false;
+    }
+    bool okk = hipStreamSynchronize(stream) == hipSuccess;
+    I.dD4AtmC6.free();
+    I.dD4AtmDc6.free();
+    I.dPbcAtmRatio.free();
+    I.dPbcAtmRatioT.free();
+    if (okk) {   // A1: a non-finite or out-of-range fixed-point contribution fails the call (host loop), flag reset
+        int fix_bad = 0;
+        if (hipMemcpyFromSymbol(&fix_bad, HIP_SYMBOL(pbc_dev::g_pfix_bad), sizeof(int)) != hipSuccess) return false;
+        if (fix_bad) {
+            const int zero = 0;
+            (void)hipMemcpyToSymbol(HIP_SYMBOL(pbc_dev::g_pfix_bad), &zero, sizeof(int));
+            return false;
+        }
+    }
+    return okk;
+}
+
+
+// ---- cuda/xtb_gpu_context.cu lines 10790-10938 ----
+bool XtbHipContext::d3DispersionPeriodic(int nat, const int* Z, const double* xyz_bohr, int nt, const int* atom_type,
+                                         const double* c6tab, const double* r6tab, const int* nref_tab,
+                                         const double* refcn_tab, const double* rcov_ang, int nrcov, double s6,
+                                         double s8, double a1, double a2, double aa_to_au, const double* cell_L,
+                                         int ncn, const double* cn_trans, double cn_cut2, int npair,
+                                         const double* pair_trans, double pair_cut2, bool need_gradient,
+                                         bool want_virial, double* energy_out, double* grad_out, double* vir9_out)
+{
+    Impl& M = *m_impl;
+    PbcState& I = M.pbc;
+    if (!ok() || nat <= 0 || nt <= 0 || ncn <= 0 || npair <= 0 || !Z || !xyz_bohr || !atom_type || !c6tab || !r6tab
+        || !nref_tab || !refcn_tab || !rcov_ang || !cell_L || !cn_trans || !pair_trans || !energy_out
+        || (need_gradient && !grad_out) || (want_virial && (!need_gradient || !vir9_out)))
+        return false;
+    hipStream_t stream = M.stream;
+    const int nfix = 4 * nat + 10;
+    try {
+        
+        I.dD3Z.ensure(nat); I.dD3Type.ensure(nat); I.dPbcXyz.ensure(3 * nat);
+        I.dD3Cn.ensure(nat); I.dD3Gw.ensure(nat * pbc_dev::D3_MR); I.dD3Dgw.ensure(nat * pbc_dev::D3_MR);
+        I.dD3C6.ensure(nt * nt * pbc_dev::D3_MR * pbc_dev::D3_MR); I.dD3R6.ensure(nt * nt);
+        I.dD3Nref.ensure(pbc_dev::D3_ME); I.dD3Refcn.ensure(pbc_dev::D3_ME * pbc_dev::D3_MR); I.dD3Rcov.ensure(nrcov);
+        I.dD3Z.upload(Z, nat, stream);
+        I.dD3Type.upload(atom_type, nat, stream);
+        I.dPbcXyz.upload(xyz_bohr, 3 * nat, stream);
+        I.dD3C6.upload(c6tab, nt * nt * pbc_dev::D3_MR * pbc_dev::D3_MR, stream);
+        I.dD3R6.upload(r6tab, nt * nt, stream);
+        I.dD3Nref.upload(nref_tab, pbc_dev::D3_ME, stream);
+        I.dD3Refcn.upload(refcn_tab, pbc_dev::D3_ME * pbc_dev::D3_MR, stream);
+        I.dD3Rcov.upload(rcov_ang, nrcov, stream);
+        I.dPbcD3CnTr.upload(cn_trans, 3 * ncn, stream);
+        I.dPbcD3PairTr.upload(pair_trans, 3 * npair, stream);
+        I.dPbcD3Fix.ensure(nfix);
+        I.dPbcD3Fix2.ensure(3 * nat + 9);
+        if (hipMemsetAsync(I.dPbcD3Fix.ptr, 0, sizeof(double) * nfix, stream) != hipSuccess) return false;
+        if (hipMemsetAsync(I.dPbcD3Fix2.ptr, 0, sizeof(double) * (3 * nat + 9), stream) != hipSuccess) return false;
+        const int b = 128, g = (nat + b - 1) / b;
+        pbc_dev::k_d3_cn_pbc<<<nat, 128, 0, stream>>>(nat, I.dD3Z.ptr, I.dPbcXyz.ptr, I.dD3Rcov.ptr, nrcov, aa_to_au, cell_L[0],
+                                         cell_L[1], cell_L[2], ncn, I.dPbcD3CnTr.ptr, cn_cut2, I.dD3Cn.ptr);
+        pbc_dev::k_d3_weights<<<g, b, 0, stream>>>(nat, I.dD3Z.ptr, I.dD3Cn.ptr, I.dD3Nref.ptr, I.dD3Refcn.ptr, I.dD3Gw.ptr,
+                                          I.dD3Dgw.ptr);
+        const dim3 blk(16, 16);
+        const dim3 grd((nat + 15) / 16, (nat + 15) / 16);
+        if (want_virial)
+            pbc_dev::k_d3_pairs_pbc<true><<<grd, blk, 0, stream>>>(nat, nt, I.dD3Z.ptr, I.dD3Type.ptr, I.dD3Nref.ptr,
+                I.dPbcXyz.ptr, I.dD3Gw.ptr, I.dD3Dgw.ptr, I.dD3C6.ptr, I.dD3R6.ptr, s6, s8, a1, a2, cell_L[0], cell_L[1],
+                cell_L[2], npair, I.dPbcD3PairTr.ptr, pair_cut2, need_gradient ? 1 : 0, I.dPbcD3Fix.ptr);
+        else
+            pbc_dev::k_d3_pairs_pbc<false><<<grd, blk, 0, stream>>>(nat, nt, I.dD3Z.ptr, I.dD3Type.ptr, I.dD3Nref.ptr,
+                I.dPbcXyz.ptr, I.dD3Gw.ptr, I.dD3Dgw.ptr, I.dD3C6.ptr, I.dD3R6.ptr, s6, s8, a1, a2, cell_L[0], cell_L[1],
+                cell_L[2], npair, I.dPbcD3PairTr.ptr, pair_cut2, need_gradient ? 1 : 0, I.dPbcD3Fix.ptr);
+        if (hipGetLastError() != hipSuccess) return false;
+        pbc_dev::k_pfix_to_double<<<(nfix + 255) / 256, 256, 0, stream>>>(nfix, I.dPbcD3Fix.ptr);
+        if (hipGetLastError() != hipSuccess) return false;
+        if (need_gradient) {
+            const double* dcn = I.dPbcD3Fix.ptr + 3 * nat + 10;
+            if (want_virial)
+                pbc_dev::k_d3_fold_pbc<true><<<grd, blk, 0, stream>>>(nat, I.dD3Z.ptr, I.dPbcXyz.ptr, I.dD3Rcov.ptr, nrcov,
+                    aa_to_au, dcn, cell_L[0], cell_L[1], cell_L[2], ncn, I.dPbcD3CnTr.ptr, cn_cut2, I.dPbcD3Fix2.ptr,
+                    I.dPbcD3Fix2.ptr + 3 * nat);
+            else
+                pbc_dev::k_d3_fold_pbc<false><<<grd, blk, 0, stream>>>(nat, I.dD3Z.ptr, I.dPbcXyz.ptr, I.dD3Rcov.ptr, nrcov,
+                    aa_to_au, dcn, cell_L[0], cell_L[1], cell_L[2], ncn, I.dPbcD3CnTr.ptr, cn_cut2, I.dPbcD3Fix2.ptr,
+                    I.dPbcD3Fix2.ptr + 3 * nat);
+            if (hipGetLastError() != hipSuccess) return false;
+        }
+        std::vector<double> f1(nfix), f2(3 * nat + 9, 0.0);
+        I.dPbcD3Fix.download(f1.data(), nfix, stream);
+        if (!pbcFixFinish(stream, I.dPbcD3Fix2.ptr, nat, false, f2.data(), nullptr)) return false;
+        if (want_virial && hipMemcpy(f2.data() + 3 * nat, I.dPbcD3Fix2.ptr + 3 * nat, sizeof(double) * 9,
+                                      hipMemcpyDeviceToHost) != hipSuccess)
+            return false;
+        *energy_out = f1[3 * nat + 9];
+        if (need_gradient)
+            for (int k = 0; k < 3 * nat; ++k) grad_out[k] = f1[k] + f2[k];
+        if (want_virial)
+            for (int k = 0; k < 9; ++k) vir9_out[k] = f1[3 * nat + k] + f2[3 * nat + k];
+        
+    } catch (...) {
+        return false;
+    }
+    return true;
+}
+
+// Claude Generated (Nov 2026, WP-PERIODIC-XTB H5): periodic D4 pair energy, gradient, dE/dCN, dE/dq and virial
+// (kernel k_d4_pairs_pbc) with the reference C6 cache that beginDispersion keeps on the device.
+bool XtbHipContext::d4PairsPeriodic(int nat, const int* Z, const int* nref, const double* sq_r4r2,
+                                    const double* xyz_bohr, const double* W, const double* dWq, const double* dWc,
+                                    double s6, double s8, double a1, double a2, const double* cell_L, int ntrans,
+                                    const double* trans, double cut2, bool want_virial, double* energy_out,
+                                    double* grad_out, double* dEdcn_out, double* dEdq_out, double* vir9_out)
+{
+    Impl& M = *m_impl;
+    PbcState& I = M.pbc;
+    if (!ok() || nat <= 0 || ntrans <= 0 || !M.d4_c6_uploaded || (M.dD4C6 == nullptr) || !Z || !nref || !sq_r4r2
+        || !xyz_bohr || !W || !dWq || !dWc || !cell_L || !trans || !energy_out || !grad_out || !dEdcn_out || !dEdq_out
+        || (want_virial && !vir9_out))
+        return false;
+    hipStream_t stream = M.stream;
+    const int MR = Impl::D4_MAX_REF;
+    const int nfix = 5 * nat + 10;
+    try {
+        
+        I.dPbcD4pZ.upload(Z, nat, stream);
+        I.dPbcD4pNref.upload(nref, nat, stream);
+        I.dPbcD4pSq.upload(sq_r4r2, nat, stream);
+        I.dPbcXyz.upload(xyz_bohr, 3 * nat, stream);
+        I.dPbcD4pW.upload(W, nat * MR, stream);
+        I.dPbcD4pWq.upload(dWq, nat * MR, stream);
+        I.dPbcD4pWc.upload(dWc, nat * MR, stream);
+        I.dPbcD4pTr.upload(trans, 3 * ntrans, stream);
+        I.dPbcD4pFix.ensure(nfix);
+        if (hipMemsetAsync(I.dPbcD4pFix.ptr, 0, sizeof(double) * nfix, stream) != hipSuccess) return false;
+        const dim3 blk(16, 16);
+        const dim3 grd((nat + 15) / 16, (nat + 15) / 16);
+        if (want_virial)
+            pbc_dev::k_d4_pairs_pbc<true><<<grd, blk, 0, stream>>>(nat, 118, MR, I.dPbcD4pZ.ptr, I.dPbcD4pNref.ptr,
+                M.dD4C6, I.dPbcD4pW.ptr, I.dPbcD4pWq.ptr, I.dPbcD4pWc.ptr, I.dPbcD4pSq.ptr, I.dPbcXyz.ptr, s6, s8,
+                a1, a2, cell_L[0], cell_L[1], cell_L[2], ntrans, I.dPbcD4pTr.ptr, cut2, I.dPbcD4pFix.ptr);
+        else
+            pbc_dev::k_d4_pairs_pbc<false><<<grd, blk, 0, stream>>>(nat, 118, MR, I.dPbcD4pZ.ptr, I.dPbcD4pNref.ptr,
+                M.dD4C6, I.dPbcD4pW.ptr, I.dPbcD4pWq.ptr, I.dPbcD4pWc.ptr, I.dPbcD4pSq.ptr, I.dPbcXyz.ptr, s6, s8,
+                a1, a2, cell_L[0], cell_L[1], cell_L[2], ntrans, I.dPbcD4pTr.ptr, cut2, I.dPbcD4pFix.ptr);
+        if (hipGetLastError() != hipSuccess) return false;
+        pbc_dev::k_pfix_to_double<<<(nfix + 255) / 256, 256, 0, stream>>>(nfix, I.dPbcD4pFix.ptr);
+        if (hipGetLastError() != hipSuccess) return false;
+        std::vector<double> f(nfix);
+        I.dPbcD4pFix.download(f.data(), nfix, stream);
+        if (hipStreamSynchronize(stream) != hipSuccess) return false;
+        int fix_bad = 0;
+        if (hipMemcpyFromSymbol(&fix_bad, HIP_SYMBOL(pbc_dev::g_pfix_bad), sizeof(int)) != hipSuccess) return false;
+        if (fix_bad) {
+            const int zero = 0;
+            (void)hipMemcpyToSymbol(HIP_SYMBOL(pbc_dev::g_pfix_bad), &zero, sizeof(int));
+            return false;
+        }
+        for (int k = 0; k < 3 * nat; ++k) grad_out[k] = f[k];
+        if (want_virial)
+            for (int k = 0; k < 9; ++k) vir9_out[k] = f[3 * nat + k];
+        *energy_out = f[3 * nat + 9];
+        for (int a = 0; a < nat; ++a) {
+            dEdcn_out[a] = f[3 * nat + 10 + a];
+            dEdq_out[a] = f[4 * nat + 10 + a];
+        }
+        
+    } catch (...) {
+        return false;
+    }
+    return true;
+}
+
+
+// Claude Generated (Nov 24, 2026, ROCm A3): upload of the host-built GFN2 multipole integrals (the CUDA counterpart
+// is XtbGpuContext::residentBeginMultipole). Marks them as the resident set (mp_computed), as computeMultipole does.
+bool XtbHipContext::uploadMultipoleInts(const double* dp_int3, const double* qp_int6, int nao)
+{
+    Impl& M = *m_impl;
+    if (!ok() || !dp_int3 || !qp_int6 || !M.basis_ready || !M.bis_gfn2 || nao != M.bnao || !M.dDpInt || !M.dQpInt)
+        return false;
+    const size_t nn = static_cast<size_t>(nao) * static_cast<size_t>(nao);
+    M.mp_computed = false;
+    if (hipMemcpy(M.dDpInt, dp_int3, 3 * nn * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
+    if (hipMemcpy(M.dQpInt, qp_int6, 6 * nn * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
+    M.mp_computed = true;
+    return true;
+}
+
+// Claude Generated (Nov 24, 2026, ROCm A3): port of XtbGpuContext::residentEnergyWeightedDensity (WP-PERIODIC-XTB G5b).
+// W = C(:, 0:ncol) diag(w) C(:, 0:ncol)^T from the eigenvectors that the resident SCF left in dF (column scaling by
+// the vacuum kernel k_scale_cols with w padded by zeros to n columns, then rocblas_dgemm with inner dimension ncol).
+bool XtbHipContext::residentEnergyWeightedDensity(const double* w, int ncol, int n, double* W_colmajor)
+{
+    Impl& M = *m_impl;
+    PbcState& I = M.pbc;
+    if (!ok() || !M.ensurePbcBlas() || n <= 0 || n != M.res_n || !M.dF || ncol <= 0 || ncol > n || !w || !W_colmajor)
+        return false;
+    const size_t nn = static_cast<size_t>(n) * static_cast<size_t>(n);
+    if (nn > static_cast<size_t>(INT_MAX)) return false;
+    hipStream_t stream = M.stream;
+    bool okk = true;
+    try {
+        std::vector<double> wfull(n, 0.0);
+        for (int r = 0; r < ncol; ++r) wfull[r] = w[r];
+        I.dPbcWocc.upload(wfull.data(), n, stream);
+        I.dPbcCw.ensure(static_cast<int>(nn));
+        I.dPbcWmat.ensure(static_cast<int>(nn));
+        const dim3 blk(16, 16), grd((n + 15) / 16, (n + 15) / 16);
+        hipLaunchKernelGGL(k_scale_cols, grd, blk, 0, stream, M.dF, I.dPbcWocc.ptr, I.dPbcCw.ptr, n);
+        if (hipGetLastError() != hipSuccess) okk = false;
+        const double one = 1.0, zero = 0.0;
+        if (okk && rocblas_dgemm(M.handle, rocblas_operation_none, rocblas_operation_transpose, n, n, ncol, &one,
+                                 I.dPbcCw.ptr, n, M.dF, n, &zero, I.dPbcWmat.ptr, n) != rocblas_status_success)
+            okk = false;
+        if (okk && hipMemcpyAsync(W_colmajor, I.dPbcWmat.ptr, nn * sizeof(double), hipMemcpyDeviceToHost, stream)
+                       != hipSuccess)
+            okk = false;
+    } catch (...) {
+        okk = false;
+    }
+    okk = (hipStreamSynchronize(stream) == hipSuccess) && okk;
+    I.dPbcCw.free();
+    I.dPbcWmat.free();
+    return okk;
+}
+
+// ---- cuda/xtb_gpu_context.cu lines 9246-9352 (WP-PERIODIC-XTB H1) ----
+// Claude Generated (Nov 24, 2026, ROCm A3): port of XtbGpuContext::h0PulayGradientPeriodic. P = the resident dP of the
+// host-driven SCF (resDensity, full matrix), C = dF (the eigenvectors of the last solve); the basis arrays are those of
+// begBasis (which also runs with a cell, xtb_native.cpp G4a). The CUDA __constant__ tables c_pauling / c_atomic_rad are
+// the HIP device tables dpauling / darad (86 elements, index z-1).
+bool XtbHipContext::h0PulayGradientPeriodic(int nat, const double* xyz_bohr, const double* se, const double* v_ao,
+                                            const double* v_dp, const double* v_qp, const double* we, int ncol,
+                                            const double* cell_L, int ntrans, const double* trans, double cut2,
+                                            bool multipole, bool want_virial, double* grad_out, double* dEdcn_out,
+                                            double* vir9_out)
+{
+    Impl& M = *m_impl;
+    PbcState& I = M.pbc;
+    const int n = M.bnao, nsh = M.bnsh;
+    if (!ok() || !M.ensurePbcBlas() || nat <= 0 || nat != M.bnat || n <= 0 || n != M.res_n || !M.basis_ready || !M.dF || !M.dP || !M.dao2sh || !M.dao2at || ncol <= 0 || ncol > n
+        || ntrans <= 0 || !xyz_bohr || !se || !v_ao || !we || !cell_L || !trans || !grad_out || !dEdcn_out
+        || (want_virial && !vir9_out) || (multipole && (!v_dp || !v_qp || !M.bis_gfn2)))
+        return false;
+    const size_t nn = static_cast<size_t>(n) * static_cast<size_t>(n);
+    if (nn > static_cast<size_t>(INT_MAX)) return false;
+    hipStream_t stream = M.stream;
+    bool okk = true;
+    try {
+        I.dPbcXyz.upload(xyz_bohr, 3 * nat, stream);
+        I.dPbcH0Se.upload(se, nsh, stream);
+        I.dPbcH0Vao.upload(v_ao, n, stream);
+        if (multipole) {
+            I.dPbcH0Vdp.upload(v_dp, 3 * nat, stream);
+            I.dPbcH0Vqp.upload(v_qp, 6 * nat, stream);
+        }
+        I.dPbcH0Trans.upload(trans, 3 * ntrans, stream);
+        // W: with every weight < 0 (occupied eps < 0, the usual case) W = -Cs Cs^T, Cs = C diag(sqrt(-we)), by dsyrk
+        // (n^2 ncol flops instead of 2 n^2 ncol), else the dgemm; the kernel reads the lower triangle only.
+        bool all_neg = true;
+        for (int k = 0; k < ncol; ++k)
+            if (!(we[k] < 0.0)) { all_neg = false; break; }
+        std::vector<double> wabs;
+        if (all_neg) {
+            wabs.resize(ncol);
+            for (int k = 0; k < ncol; ++k) wabs[k] = -we[k];
+        }
+                I.dPbcWocc.upload(all_neg ? wabs.data() : we, ncol, stream);
+        I.dPbcCw.ensure(n * ncol);
+        I.dPbcWmat.ensure(static_cast<int>(nn));
+        const dim3 wb(16, 16);
+        const dim3 wg((n + wb.x - 1) / wb.x, (ncol + wb.y - 1) / wb.y);
+        if (all_neg) pbc_dev::k_scale_cols_sqrt<<<wg, wb, 0, stream>>>(I.dPbcCw.ptr, M.dF, I.dPbcWocc.ptr, n, ncol);
+        else pbc_dev::k_scale_cols<<<wg, wb, 0, stream>>>(I.dPbcCw.ptr, M.dF, I.dPbcWocc.ptr, n, ncol);
+        if (hipGetLastError() != hipSuccess) okk = false;
+        const double one = 1.0, zero = 0.0, mone = -1.0;
+        if (okk && all_neg
+            && rocblas_dsyrk(M.handle, rocblas_fill_lower, rocblas_operation_none, n, ncol, &mone, I.dPbcCw.ptr, n, &zero,
+                           I.dPbcWmat.ptr, n) != rocblas_status_success)
+            okk = false;
+        if (okk && !all_neg
+            && rocblas_dgemm(M.handle, rocblas_operation_none, rocblas_operation_transpose, n, n, ncol, &one, I.dPbcCw.ptr, n, M.dF, n,
+                           &zero, I.dPbcWmat.ptr, n) != rocblas_status_success)
+            okk = false;
+        I.dPbcH0Fix.ensure(4 * nat + 9);   // grad 3 nat | dEdcn nat | vir 9
+        if (okk && hipMemsetAsync(I.dPbcH0Fix.ptr, 0, sizeof(double) * (4 * nat + 9), stream) != hipSuccess)
+            okk = false;
+        double* gfix = I.dPbcH0Fix.ptr;
+        double* efix = gfix + 3 * nat;
+        double* vfix = efix + nat;
+        const dim3 blk(16, 16);   // 256 threads: the block tree of the virial assumes a power of two
+        const dim3 grd((n + 15) / 16, (n + 15) / 16);
+        const double* vdp = multipole ? I.dPbcH0Vdp.ptr : nullptr;
+        const double* vqp = multipole ? I.dPbcH0Vqp.ptr : nullptr;
+#define H0PBC_ARGS n, M.bis_gfn2, M.dao2sh, M.dao2at, M.dang_sh, M.diao_sh, M.dsh_nprim,          \
+        M.dsh_prim_off, M.dprim_alpha, M.dprim_coeff, M.dsh_zeta, M.dshpoly, M.dkcn, I.dPbcH0Se.ptr, \
+        M.dz, M.dvalence, I.dPbcXyz.ptr, M.dP, I.dPbcWmat.ptr, I.dPbcH0Vao.ptr, vdp, vqp, cell_L[0],      \
+        cell_L[1], cell_L[2], ntrans, I.dPbcH0Trans.ptr, cut2, M.dpauling, M.darad, gfix, efix, vfix
+        if (okk) {
+            if (want_virial && multipole) pbc_dev::k_grad_h0_pulay_pbc<true, true><<<grd, blk, 0, stream>>>(H0PBC_ARGS);
+            else if (want_virial)         pbc_dev::k_grad_h0_pulay_pbc<true, false><<<grd, blk, 0, stream>>>(H0PBC_ARGS);
+            else if (multipole)           pbc_dev::k_grad_h0_pulay_pbc<false, true><<<grd, blk, 0, stream>>>(H0PBC_ARGS);
+            else                          pbc_dev::k_grad_h0_pulay_pbc<false, false><<<grd, blk, 0, stream>>>(H0PBC_ARGS);
+            if (hipGetLastError() != hipSuccess) okk = false;
+        }
+#undef H0PBC_ARGS
+        const int nfix = 4 * nat + 9;
+        if (okk) {
+            pbc_dev::k_pfix_to_double<<<(nfix + 255) / 256, 256, 0, stream>>>(nfix, gfix);
+            if (hipGetLastError() != hipSuccess) okk = false;
+        }
+        if (okk && hipMemcpyAsync(grad_out, gfix, sizeof(double) * 3 * nat, hipMemcpyDeviceToHost, stream) != hipSuccess)
+            okk = false;
+        if (okk && hipMemcpyAsync(dEdcn_out, efix, sizeof(double) * nat, hipMemcpyDeviceToHost, stream) != hipSuccess)
+            okk = false;
+        if (okk && want_virial
+            && hipMemcpyAsync(vir9_out, vfix, sizeof(double) * 9, hipMemcpyDeviceToHost, stream) != hipSuccess)
+            okk = false;
+    } catch (...) {
+        okk = false;
+    }
+    okk = (hipStreamSynchronize(stream) == hipSuccess) && okk;
+    I.dPbcCw.free();
+    I.dPbcWmat.free();
+    if (!okk) return false;
+    int fix_bad = 0;   // a non-finite or out-of-range contribution: fail (the host loop runs), reset the flag
+    if (hipMemcpyFromSymbol(&fix_bad, HIP_SYMBOL(pbc_dev::g_pfix_bad), sizeof(int)) != hipSuccess) return false;
+    if (fix_bad) {
+        const int zero = 0;
+        (void)hipMemcpyToSymbol(HIP_SYMBOL(pbc_dev::g_pfix_bad), &zero, sizeof(int));
+        return false;
+    }
+    return true;
+}
+
+
+#endif // HAVE_ROCSOLVER

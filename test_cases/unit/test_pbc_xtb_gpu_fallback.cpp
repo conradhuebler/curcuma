@@ -16,6 +16,8 @@
  *   (d) -gpu_strict ends a child process at the first injected stage failure with exit code 3.
  * Water dimer (registry) in an 8 A cube, scf_threshold 1e-9, gfn1 and gfn2. Without the CUDA plugin or a device the
  * test exits 77 (ctest SKIP_RETURN_CODE), never 0.
+ * Argument: the backend, "cuda" (default) or "rocm" (ctest pbc_xtb_gpu_fallback_rocm, ROCm parity A3, Nov 24, 2026: the
+ * tokens of the stages that have a HIP port; ints, devpot and the resident tokens run on the host there).
  */
 #include "src/core/energycalculator.h"
 #include "src/core/molecule.h"
@@ -83,9 +85,11 @@ struct Result {
     bool ok = false;
 };
 
+static std::string g_backend = "cuda";
+
 static Result run(const char* method, const Mol& mol)
 {
-    json cfg = { { "verbosity", 0 }, { "threads", 1 }, { "gpu", "cuda" }, { "xtb", { { "scf_threshold", 1.0e-9 } } } };
+    json cfg = { { "verbosity", 0 }, { "threads", 1 }, { "gpu", g_backend }, { "xtb", { { "scf_threshold", 1.0e-9 } } } };
     EnergyCalculator calc(method, cfg);
     calc.setMolecule(mol);
     calc.setWantVirial(true);
@@ -103,9 +107,11 @@ static void setEnv(const char* name, const std::string& v)
     else setenv(name, v.c_str(), 1);
 }
 
-int main()
+int main(int argc, char** argv)
 {
     CurcumaLogger::set_verbosity(0);
+    if (argc > 1) g_backend = argv[1];
+    const bool rocm = g_backend == "rocm";
     const Mol mol = dimerInCell(8.0);
     int strict_code = -1;
     // (d) -gpu_strict ends the run at the first injected stage failure (child process, exit code 3); forked before
@@ -132,18 +138,18 @@ int main()
     {
         const Result r = run("gfn2", mol);
         if (otherTotal() > 0) {
-            std::printf("test_pbc_xtb_gpu_fallback: SKIP (the -gpu cuda request fell back to the CPU: no plugin or device)\n");
+            std::printf("test_pbc_xtb_gpu_fallback: SKIP (the -gpu %s request fell back to the CPU: no plugin or device)\n", g_backend.c_str());
             return 77;
         }
-        check(r.ok, "gfn2 normal CUDA run");
+        check(r.ok, "gfn2 normal " + g_backend + " run");
     }
     {
         const Result r = run("gfn1", mol);
-        check(r.ok, "gfn1 normal CUDA run");
+        check(r.ok, "gfn1 normal " + g_backend + " run");
     }
     check(strict_code == curcuma::kGpuStrictExitCode, "-gpu_strict stops at the first periodic stage fallback");
     std::printf("normal runs: %d stage fallbacks counted\n", stageTotal());
-    check(stageTotal() == 0, "a normal periodic CUDA run counts no stage fallback");
+    check(stageTotal() == 0, "a normal periodic " + g_backend + " run counts no stage fallback");
 
     // Tokens per method; reached = the water-dimer run in an 8 A cube passes through the stage (measured, Nov 23, 2026).
     // extra = tokens kept on the host in both runs (wmat is reached only when h0grad, which builds W itself, is on the host)
@@ -156,11 +162,21 @@ int main()
     const Stage gfn1_stages[] = { { "ints", "ints" }, { "resloop", "resloop" }, { "resstep", "resloop" },
         { "gamma", "gamma" }, { "cn", "cn" }, { "d3", "d3" }, { "rep", "rep" }, { "h0grad", "h0grad" },
         { "wmat", "wmat", "h0grad" }, { "ewgrad", "ewgrad" }, { "kograd", "kograd" }, { "cnchain", "cnchain" } };
+    // ROCm: the stages with a HIP port (rocm/xtb_hip_periodic_host.hiph)
+    const Stage gfn2_rocm[] = { { "d4dedq", "d4dedq" }, { "gamma", "gamma" }, { "mpmat", "mpmat" }, { "cn", "cn" },
+        { "d4cn", "d4cn" }, { "d4pair", "d4pair" }, { "atm", "atm" }, { "cnfold", "cnfold" }, { "rep", "rep" },
+        { "mpgrad", "mpgrad" }, { "h0grad", "h0grad" }, { "wmat", "wmat", "h0grad" }, { "ewgrad", "ewgrad" },
+        { "kograd", "kograd" }, { "cnchain", "cnchain" } };
+    const Stage gfn1_rocm[] = { { "gamma", "gamma" }, { "cn", "cn" }, { "d3", "d3" }, { "rep", "rep" },
+        { "h0grad", "h0grad" }, { "wmat", "wmat", "h0grad" },
+        { "ewgrad", "ewgrad" }, { "kograd", "kograd" }, { "cnchain", "cnchain" } };
     int reached = 0;
     for (const char* method : { "gfn2", "gfn1" }) {
         const bool g2 = std::string(method) == "gfn2";
-        const Stage* begin = g2 ? std::begin(gfn2_stages) : std::begin(gfn1_stages);
-        const Stage* end = g2 ? std::end(gfn2_stages) : std::end(gfn1_stages);
+        const Stage* begin = rocm ? (g2 ? std::begin(gfn2_rocm) : std::begin(gfn1_rocm))
+                                  : (g2 ? std::begin(gfn2_stages) : std::begin(gfn1_stages));
+        const Stage* end = rocm ? (g2 ? std::end(gfn2_rocm) : std::end(gfn1_rocm))
+                                : (g2 ? std::end(gfn2_stages) : std::end(gfn1_stages));
         for (const Stage* s = begin; s != end; ++s) {
             const std::string extra(s->extra);
             setEnv("CURCUMA_PBC_GPU_HOST", extra.empty() ? std::string(s->host_token) : extra + "," + s->host_token);
