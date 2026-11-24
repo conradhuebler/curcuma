@@ -43,6 +43,10 @@ governs **how the eigenvalue problem is solved**; `-large_system_mode` governs
 **Hard rule (cell):** every `-large_system_mode` other than `none` with a unit cell is an error in `setMolecule`
 (the drivers are cell-free; until Nov 23, 2026 they returned a silent vacuum energy). See docs/WP-PERIODIC-XTB.md.
 
+**GPU:** the drivers have no device path on any backend (`-gpu cuda|rocm|vulkan`): their XTB objects carry no device
+hooks, so the whole calculation runs on the CPU. The GPU adapter (`xtb_gpu_adapter.h`, `setMolecule`) warns once and
+counts it as a GPU fallback, so `-gpu_strict true` stops (Nov 24, 2026; before, the CPU run was silent).
+
 **Hard rule:** `-large_system_mode=fragments|dc + -eigensolver=purify` requires
 `-electronic_temperature 0`. Purification is 0-K by construction (integer
 occupation, no Fermi smearing). The wrapper enforces this as a **hard error in

@@ -214,6 +214,9 @@ public:
     /// WP-PERIODIC-XTB P4/G1: EnergyCalculator reaches the periodic virial and the cell update (XTB::setWantVirial/
     /// virial/virialValid/updateCell) through this virtual, for the CPU wrapper and the GPU adapters alike.
     curcuma::xtb::XTB* xtbInstance() const override { return m_xtb.get(); }
+    /// True after setMolecule when a -large_system_mode driver (CPU only) owns the calculation; the GPU adapters
+    /// count that as a GPU fallback. Claude Generated (Nov 2026, ROCm parity A5).
+    bool largeSystemDriverActive() const { return m_c1_driver != nullptr; }
 
     // ---- Native xTB extras (not in the base interface) --------------------
     Matrix getMolecularOrbitals() const;

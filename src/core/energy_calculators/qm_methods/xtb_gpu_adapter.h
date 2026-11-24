@@ -125,7 +125,22 @@ public:
     // ---- ComputationalMethod interface: forward to the CPU pipeline -------
     // The three calls that reach the device re-bind first: the object may be driven from a
     // different host thread than the one that built it (the CUDA current device is per thread).
-    bool setMolecule(const Mol& mol) override { bindDevice(); return m_cpu->setMolecule(mol); }
+    bool setMolecule(const Mol& mol) override
+    {
+        bindDevice();
+        const bool ok = m_cpu->setMolecule(mol);
+        // Claude Generated (Nov 2026, ROCm parity A5): the -large_system_mode drivers (fragments, dc, sparse) build
+        // their own XTB objects without device hooks, so the whole calculation runs on the CPU. That is a GPU
+        // fallback like any other: one warning, counted, -gpu_strict true stops (docs/SQM_LARGE_SYSTEMS.md).
+        if (ok && gpuActive() && m_cpu->largeSystemDriverActive() && !m_large_system_reported) {
+            m_large_system_reported = true;
+            CurcumaLogger::warn(fmt::format("{}: -large_system_mode runs on the CPU (no device path); the GPU is not used",
+                                            m_cpu->getMethodName()));
+            curcuma::reportGpuFallback(fmt::format("{}: -large_system_mode has no device path, calculation on the CPU",
+                                                   m_cpu->getMethodName()));
+        }
+        return ok;
+    }
     bool updateGeometry(const Matrix& g) override { bindDevice(); return m_cpu->updateGeometry(g); }
     double calculateEnergy(bool gradient = false) override { bindDevice(); return m_cpu->calculateEnergy(gradient); }
 
@@ -192,6 +207,7 @@ protected:
 
     curcuma::xtb::MethodType m_method;
     int                      m_device = -1;   ///< requested device index (-1 = default)
+    bool                     m_large_system_reported = false;   ///< large_system_mode fallback reported once (A5)
     // m_gpu/m_scf_backend before m_cpu: the owned XTB holds the eigensolver hook + the
     // resident-SCF backend pointer, so it must be destroyed (in m_cpu) FIRST — members
     // are destroyed in reverse declaration order.

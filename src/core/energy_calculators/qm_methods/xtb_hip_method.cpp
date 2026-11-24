@@ -199,7 +199,29 @@ public:
     bool beginBasis(const curcuma::xtb::GpuBasisFlat& bf, const curcuma::xtb::GpuH0Flat& hf) override
     {
         m_sh2at = bf.sh2at;   // host copy for q_at = sum of q_sh per atom in solvePotential
-        return XtbGpuResidentBackend::beginBasis(bf, hf);
+        const bool ok = XtbGpuResidentBackend::beginBasis(bf, hf);
+        if (!ok) warnDeviceFallback("basis setup", fmt::format("nao {}, dense device buffers of {:.2f} GB each", bf.nao,
+                                                                8.0 * bf.nao * bf.nao / 1.0e9));
+        return ok;
+    }
+    // Claude Generated (Nov 2026, ROCm parity A5): mirror of the CUDA backend (xtb_gpu_method.cpp beginComputed,
+    // warnDeviceFallback). A failed device integral build (e.g. the dense nao^2 buffers do not fit into device
+    // memory) leaves the whole SCF on the CPU; before, that was a verbosity-2 info line and -gpu_strict did not stop.
+    bool beginComputed(const std::vector<double>& xyz_bohr) override
+    {
+        const bool ok = XtbGpuResidentBackend::beginComputed(xyz_bohr);
+        if (!ok) warnDeviceFallback("integral build", std::string());
+        return ok;
+    }
+    /// One warning at the default verbosity and one counted GPU fallback per backend object (CUDA wording).
+    void warnDeviceFallback(const char* stage, const std::string& detail)
+    {
+        if (m_fallback_warned) return;
+        m_fallback_warned = true;
+        CurcumaLogger::warn(fmt::format("ROCm {} failed{}; this calculation runs on the CPU", stage,
+                                        detail.empty() ? std::string() : " (" + detail + ")"));
+        curcuma::reportGpuFallback(fmt::format("native xTB: ROCm {} failed, calculation on the CPU", stage),
+                                   detail.empty() ? std::string("ROCm device") : detail);
     }
     bool beginPotential(int nat, int nsh, const double* amat_sd, const double* amat_dd,
                         const double* amat_sq, const double* dkernel, const double* qkernel,
@@ -718,6 +740,7 @@ private:
     bool        m_res_open = false;        ///< WP4: open shell on the resident loop allowed
     bool        m_res_pc = false;          ///< WP5: Broyden seed preconditioner on the resident loop allowed
     std::string m_res_error;         ///< reason of the last failed resident-loop call (lastError)
+    bool m_fallback_warned = false;  ///< basis/integral build fallback reported once (A5, Claude Generated)
     std::string m_res_begin_failed;   ///< error of the last failed begin of the current calculation
     std::string m_res_fallback;       ///< first permanent resident-loop fallback ("" = none)
 
@@ -806,6 +829,18 @@ XtbHipComputationalMethod::XtbHipComputationalMethod(MethodType method, const js
         const bool density_syrk = cfgBool("rocm_density_syrk", false);
         const bool explicit_linv = cfgBool("rocm_explicit_linv", false);    // Claude Generated (Oct 2026), default false since Oct 17
         ctx->setSolverOptions(cached_chol, density_syrk, explicit_linv);
+        // Claude Generated (Nov 2026, ROCm parity A5): -gpu_sparse_integrals (screened pair storage of S, H0 and the
+        // multipole integrals, CUDA XtbGpuContext::buildScreenedPairs) has no ROCm counterpart; the HIP context always
+        // stores the integrals dense. 'on' says so once instead of being dropped silently; 'auto' (the default) stays
+        // quiet, it means dense on ROCm. Nothing moves to the CPU, so this is not a counted GPU fallback.
+        if (config.contains("gpu_sparse_integrals")) {
+            const auto& v = config["gpu_sparse_integrals"];
+            const std::string m = v.is_string() ? v.get<std::string>() : (v.is_boolean() ? (v.get<bool>() ? "on" : "off") : "auto");
+            if (m == "on" || m == "true" || m == "sparse")
+                CurcumaLogger::warn(fmt::format("{}: -gpu_sparse_integrals {} ignored: screened integral storage is "
+                                                "CUDA only, ROCm stores S, H0 and the multipole integrals dense",
+                                                getMethodName(), m));
+        }
         // WP10 (Claude Generated, Oct 2026): -xtb.rocm_fixed_point, order-independent gradient accumulation.
         ctx->setFixedPoint(cfgBool("rocm_fixed_point", kRocmFixedPointDefault));
         // Claude Generated (Oct 2026): -xtb.rocm_device_multipole, default false (PARAM default
