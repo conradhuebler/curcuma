@@ -224,16 +224,18 @@ FP32→FP64 decision) — only then does the latency region actually shrink.
 
 ## Notes / limits
 
-- **Periodic cell (Nov 2026)**: native gfn1/gfn2 read no cell on the CPU nor on the GPU (a `unitcell` line is silently
-  ignored). GFN-FF with a cell runs on the CPU unless `-gfnff.gpu_periodic true` is given; then CUDA computes the local
-  terms with the minimum image and, with the default `coulomb_ewald`, the periodic EEQ and the Ewald Coulomb stay on the
-  host (S2 hybrid, [WP-PERIODIC-NONBONDED.md](WP-PERIODIC-NONBONDED.md) S1/S2; ROCm refuses a cell).
+- **Periodic cell (Nov 2026)**: native gfn1/gfn2 with a cell run on CUDA (device stages, resident loop for closed-shell
+  neutral cells) and since Nov 24, 2026 on ROCm (host-driven device loop with the CUDA stage kernels; no G1b device
+  integrals, no R2-R5 resident periodic loop), [WP-PERIODIC-XTB.md](WP-PERIODIC-XTB.md), [ROCM_PARITY_A3.md](ROCM_PARITY_A3.md).
+  GFN-FF with a cell runs on the CPU unless `-gfnff.gpu_periodic true` is given; then CUDA and ROCm compute the local
+  terms with the minimum image and, with the default `coulomb_ewald`, the hybrid with the device Ewald sum (S2/S3,
+  [WP-PERIODIC-NONBONDED.md](WP-PERIODIC-NONBONDED.md); ROCm [ROCM_PARITY_B1.md](ROCM_PARITY_B1.md)).
 
-- **`-scf_precond frag` (Oct 2026, AI-generated, machine-tested only)**: the fully device-resident GFN2 loop applies the fragment Broyden seed M on the device (one CUDA block per fragment block, guard on ||F||_2); ROCm, Vulkan, the host-driven CUDA loop and a multi-GPU SCF split ignore the switch with a warning. Measurements: [SCF_PRECOND.md](SCF_PRECOND.md#gpu-cuda-resident-loop).
+- **`-scf_precond frag` (Oct 2026, AI-generated, machine-tested only)**: the fully device-resident GFN2 loop applies the fragment Broyden seed M on the device (one CUDA block per fragment block, guard on ||F||_2); the ROCm resident GFN1/GFN2 loop does the same (`-xtb.rocm_resident_precond`); Vulkan, the host-driven CUDA and ROCm loops and a multi-GPU SCF split ignore the switch with a warning. Measurements: [SCF_PRECOND.md](SCF_PRECOND.md#gpu-cuda-resident-loop).
 - **Spin polarisation (`-xtb.spin_polarization true`, `-spin N > 0`; Nov 22, 2026, AI-generated, machine-tested on one RTX 5080)**: runs on the host-driven
   device loop with two eigensolves per iteration (alpha Fock = Fock with v - u, beta with v + u); the GFN2 device potential and the resident loops are not
   used then; FP64 and mixed precision; device gradient with W' = Wa + Wb - 1/2 Pm o (u_mu + u_nu). GPU = CPU to <= 1.7e-14 Eh, gradient <= 5.7e-12 Eh/A
-  (FP64). ROCm and Vulkan: hard error. Numbers and limits: [SPIN_POLARISATION.md](SPIN_POLARISATION.md#gpu-cuda--gpu-cuda). The interface gained five
+  (FP64). ROCm since Nov 24, 2026 on the same host-driven loop (one RX 9060 XT, GPU = CPU <= 2.5e-14 Eh, 1.4e-12 Eh/A in FP64, 10 cases; [ROCM_PARITY_A4.md](ROCM_PARITY_A4.md)); Vulkan: hard error. Numbers and limits: [SPIN_POLARISATION.md](SPIN_POLARISATION.md#gpu-cuda--gpu-cuda). The interface gained five
   `GpuScfBackend` virtuals at its end: rebuild the plugins with the executable.
 - Plugin rebuild (Oct 2026): the `GpuScfBackend` interface gained virtual methods (`supportsResidentPreconditioner`, `residentSetPreconditioner`, ...) inserted before `residentScfStep`; the plugin loader checks no ABI version, so rebuild `libcurcuma_cuda`/`_rocm`/`_vulkan` together with the executable.
 - **Implicit solvation (ALPB/GBSA) on GPU (WP4a+WP4b, 2026-06-07)**: `-xtb.solvent`
@@ -261,4 +263,8 @@ FP32→FP64 decision) — only then does the latency region actually shrink.
   practical ceiling is ~`polymer` (1410 atoms, ~3–4 GB). Larger → large-system
   modes (CPU-orchestrated; the GPU dense kernel is the per-block solver).
 - Large-system modes (`-large_system_mode fragments|dc|sparse`) are **not** wired
-  to `-gpu` yet; with `-gpu` GFN1/Broyden they run the CPU fragment/DC driver.
+  to `-gpu`; with `-gpu` they run the CPU fragment/DC driver, since Nov 24, 2026 with one warning and a counted GPU
+  fallback (`-gpu_strict true` exits 3; [ROCM_PARITY_A5.md](ROCM_PARITY_A5.md), run on ROCm only).
+- Screened integral storage (`-gpu_sparse_integrals off|auto|on`): CUDA default `auto`; ROCm since Nov 24, 2026 with the
+  same thresholds but default dense, screened only with `auto` or `on` (4848-atom GFN2 system that does not fit dense on
+  16 GB runs screened; [ROCM_PARITY_A7.md](ROCM_PARITY_A7.md)).

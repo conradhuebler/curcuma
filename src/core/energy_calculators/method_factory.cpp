@@ -787,7 +787,7 @@ bool MethodFactory::periodicCellNeedsCpu(const Mol& mol, const ComputationalMeth
     // Claude Generated (Nov 2026, S1/S2): opt-in release of the device path. -gfnff.gpu_periodic true keeps the GPU:
     // with coulomb_ewald true (default) as the S2 hybrid (local terms on the device, periodic EEQ and Ewald Coulomb on
     // the host, periodic energy), with coulomb_ewald false as the S1 minimum-image Coulomb (non-periodic EEQ). A backend
-    // without the minimum-image kernels (ROCm) is refused by the wrapper's setMolecule() itself.
+    // without the minimum-image kernels is refused by the wrapper's setMolecule() itself (none today: CUDA and ROCm have them).
     if (const GFNFF* g = method.gfnffInstance(); g && g->gpuPeriodicRequested())
         return false;
     // Message updated Nov 23, 2026: CUDA has the periodic hybrid (S1-S3, A1) since Nov 2026, but only on request.

@@ -8,7 +8,8 @@ Work-package record with every measurement: [WP-PERIODIC-NONBONDED.md](WP-PERIOD
 `-md` with a unit cell (`unitcell a b c [alpha beta gamma]` in the XYZ comment line; angles 90 when omitted) and the
 periodic native CPU GFN-FF energy (`-method gfnff`, `coulomb_ewald` default) can couple the volume to a target
 pressure (since Nov 23, 2026 also the GFN-FF CUDA hybrid, `-gpu cuda -gfnff.gpu_periodic true`; WP-PERIODIC-NONBONDED
-A1-GPU). Every `pcoupl_interval` steps the cell edges and **every atom position** are scaled by the same factor mu
+A1-GPU; since Nov 24, 2026 the ROCm hybrid, `-gpu rocm -gfnff.gpu_periodic true`, [ROCM_PARITY_B2.md](ROCM_PARITY_B2.md):
+1728 H2O, 100 steps Berendsen, CPU = ROCm in every status column, one RX 9060 XT; C-rescale and long runs not run on ROCm). Every `pcoupl_interval` steps the cell edges and **every atom position** are scaled by the same factor mu
 (atomic scaling, consistent with the atomic virial of N1); the pressure used is the full instantaneous pressure of the
 step just finished, `P = (2 Ekin + tr Xi) / (3 V)`. Isotropic only; cubic and orthorhombic cells (scaled uniformly).
 
@@ -103,7 +104,8 @@ by a density gain of 12.9 % at 432 waters and more at larger boxes.
 ## Refused
 
 RATTLE (constraint virial not implemented), `cleanenergy`, `-gpu` except the GFN-FF CUDA hybrid (`-gpu cuda
--gfnff.gpu_periodic true`, accepted since Nov 23, 2026, WP-PERIODIC-NONBONDED A1-GPU) and native gfn1/gfn2 on CUDA, wall potentials (they do not scale), a non-periodic energy or no cell, `frag_charge_model ensemble`
+-gfnff.gpu_periodic true`, accepted since Nov 23, 2026, WP-PERIODIC-NONBONDED A1-GPU), the GFN-FF ROCm hybrid (`-gpu rocm
+-gfnff.gpu_periodic true`, since Nov 24, 2026) and native gfn1/gfn2 on CUDA and ROCm (ROCm: 20-step smoke test only, 216 H2O, [ROCM_PARITY_A3.md](ROCM_PARITY_A3.md)), wall potentials (they do not scale), a non-periodic energy or no cell, `frag_charge_model ensemble`
 with a net charge, an implicit solvent, `dispersion_atm`. `crescale` without a thermostat runs with a warning (NVE +
 barostat is not an ensemble).
 

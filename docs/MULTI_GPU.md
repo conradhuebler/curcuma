@@ -79,7 +79,7 @@ Tool: `scripts/gpu_bench/bench_syevd_mg.cpp` (standalone, build line in its head
 - `curcuma -methods` lists the devices each plugin sees.
 - Verified on 4x A4500: gfn2 `complex` on device 3 and GFN-FF `polymer` on device 2 (nvidia-smi PCI bus), energies bit-identical to device 0.
 - The xTB `__constant__` tables are now uploaded per device (was once per process -> uninitialised tables on any second device).
-- ROCm and Vulkan changes are compile-unverified (no SDK on the dev box).
+- ROCm: compiled in the gfx1200 builds since Oct 2026, never run with more than one device (one GPU on that machine). Vulkan: compile-unverified.
 
 ## H200 report (operator, Sep 17, 2026)
 - GFN2 on the ~7k-atom molecule: **110 s on one H200** (so it did run on the GPU; the missing sm_90 architecture was NOT the problem there).
@@ -269,6 +269,12 @@ Energies unchanged at the printed precision (complex -329.52714784, polymer -208
 - polymer_2x GFN2: density 46.9 -> 10.2 s, wall 242 -> **194 s** (single GPU 419 s), energy identical; complex at `-scf_threshold 1e-9` agrees with the single-GPU run to 1.2e-9; `ctest -L gpu` 200/200.
 - Not worth it below ~3000 basis functions (polymer, nao 2975: 50 -> 55 ms per step).
 - Trap found here: `cudaDeviceEnablePeerAccess` leaves `cudaErrorPeerAccessAlreadyEnabled` pending, and the next `cudaGetLastError()` reported it as a kernel-launch failure - the peer calls now consume it.
+
+## ROCm (Nov 24, 2026, AI-generated, machine-tested on one RX 9060 XT only)
+
+- **GFN-FF EEQ split**: the projected-PCG split of `eeq_solver_gpu.cu` is ported (`rocm/eeq_solver_hip.hiph`, HIP peer copies, no RCCL) behind `-gfnff.rocm_multi_gpu_split` (default false). Without it an explicit `-gpu_split_devices` list with more than one device is a warning and a counted GPU fallback; `auto` stays silent. Checked only with two and three participants on the same device (`CURCUMA_ROCM_SPLIT_SAME_DEVICE=1`): polymer_2x split vs single 1.6e-11 e, 8.0e-13 Eh; split(2) == split(3) bitwise; ctest `gfnff_rocm_split_one_device` ([ROCM_PARITY_A6.md](ROCM_PARITY_A6.md)).
+- Not ported: the Coulomb-tile and D4-pair splits, the CUDA defect-correction scheme (`gpu_eeq_mixed_rho` is stored, not used); no memory relief on the calculation device. Never run: two physical GPUs, peer access, devices without peer access, wave64.
+- **GFN1/GFN2 eigensolver and density split**: refused. rocSOLVER has no multi-device eigensolver (no cusolverMg/cuSOLVERMp counterpart); `-gpu_eigensolver_devices` or `-gpu_density_devices` naming more than one device (or `all`/`auto` with more than one visible) gives a warning and a counted GPU fallback, ctest `xtb_rocm_multi_gpu_refusal`. The CUDA default split above 4000 basis functions has no ROCm counterpart.
 
 ## Defaults (operator decision, Sep 17, 2026)
 

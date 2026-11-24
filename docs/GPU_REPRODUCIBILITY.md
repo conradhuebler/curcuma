@@ -45,7 +45,7 @@ all-host run: energies identical, gradient max 2.8e-14 (GFN2).
 
 - **GFN-FF list builds** still take their slot from an atomic counter (`k_disp_pairs_build`, `k_generate_cn_pairs_write`);
   the order of a list no longer matters because every sum over it is an integer sum.
-- **ROCm**: GFN-FF and the GFN1/GFN2 gradient since Oct 25, 2026 (section below); **Vulkan**: not looked at.
+- **ROCm**: GFN-FF and the GFN1/GFN2 gradient since Oct 25, 2026, not while a second process uses rocSOLVER on the same GPU (section below); **Vulkan**: not looked at.
 - CPU runs at different thread counts differ in the last bit (Known Issue #36).
 
 ## GFN-FF on the GPU: fixed-point accumulation (Oct 17, 2026, AI/machine-tested)
@@ -145,10 +145,23 @@ host) instead of wrapping.
 | Against the CPU (switch on) | GFN-FF dE <= 7.8e-12 Eh, dG <= 1.5e-13 Eh/A; GFN2 dE <= 5.5e-12 Eh, dG <= 2.7e-6 Eh/A (as with the switch off) |
 | Cost | urea400-water1000 GFN-FF MD 43.21 -> 44.00 ms/step, peo201-chain 6.20 -> 6.31, PR24 0.998 -> 0.874; GFN2 none measurable |
 
-Not covered: rocBLAS/rocSOLVER reductions (not audited, repeated runs identical), PBC, the range flags by fault
-injection, other cards.
+Periodic paths (Nov 24, 2026, same card, default fixed point): second run md5-identical for the GFN-FF hybrid (caffeine
+in a 25 A cube, 1728 H2O single point, 100-step MD and NPT, two virial instances bit for bit) and periodic GFN1/GFN2
+(216 H2O in 3 of 3 separate processes, caffeine cell 8 of 8) ([ROCM_PARITY_B1.md](ROCM_PARITY_B1.md),
+[ROCM_PARITY_B2.md](ROCM_PARITY_B2.md), [ROCM_PARITY_A3.md](ROCM_PARITY_A3.md)). Screened integral storage: 10 of 10
+second runs md5-identical ([ROCM_PARITY_A7.md](ROCM_PARITY_A7.md)).
+
+rocSOLVER results are not reproducible while another process uses rocSOLVER on the same GPU: `potrf`, `dsygvd` and
+`ssygvd` then return wrong factors or eigenvectors (`potrf` 39 of 20000 calls under a `sygvd` load, 0 of 20000 under a
+`dgemm` or plain kernel load, n = 66), and converged GFN1/GFN2 energies differ by 1e-14 to 4e-12 Eh between runs (216 H2O
+cell: 9 distinct results of 10 under one concurrent process, 1 distinct of 10 alone). A preceding CPU calculation in the same process,
+the host thread count and CPU load change nothing ([ROCM_PARITY_N.md](ROCM_PARITY_N.md)). Only one GPU job per process on
+the card is reproducible; one card, one ROCm version (7.2.4).
+
+Not covered: rocBLAS reductions (atomics mode not switched), `rocm_fixed_point false` with a cell, the range flags by
+fault injection, other cards.
 
 ## Options for the rest (not done)
 
-1. Vulkan: not looked at. ROCm library reductions (rocBLAS atomics mode) not audited.
+1. Vulkan: not looked at. ROCm library reductions (rocBLAS atomics mode) not audited; the rocSOLVER multi-process fault is outside curcuma (not reported to AMD).
 2. Split vs single-GPU GFN-FF is not bitwise equal (FP32 matrix and another kernel in the split); the result is independent of the number of split GPUs.

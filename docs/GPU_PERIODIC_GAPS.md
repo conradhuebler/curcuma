@@ -10,14 +10,14 @@ re-checked, [open] = not examined. Nothing here is human-tested.
 (NPT: virial, barostat) on every supported backend. Order: first close every CUDA gap on the CUDA machine (RTX 5080 development
 machine), then the ROCm gaps on a machine with a ROCm GPU. A gap is closed only when its gate below passes.
 
-## Where we stand (Nov 22, 2026)
+## Where we stand (Nov 22, 2026; ROCm column Nov 24, 2026)
 
 | Method | CPU | CUDA | ROCm | Vulkan |
 |---|---|---|---|---|
-| GFN-FF periodic energy, gradient | complete (MIC, Ewald, EEQ) | hybrid S1-S3: local terms, Ewald sum and pcg operator on the device, CG loop on the host [measured, WP-PERIODIC-NONBONDED S3] | refused with a clear error, counted CPU fallback [read] | not built |
-| GFN-FF virial, pressure, barostat | complete (N1, N2, V-LRC, HB-X) | complete for the hybrid S2 (A1 closed Nov 23, 2026: device virial + host Ewald, `-compute_pressure`, `-barostat`) [measured, WP-PERIODIC-NONBONDED A1-GPU] | missing | not built |
-| GFN1/GFN2 periodic energy, gradient | complete (Gamma point, images, Ewald) | complete, device-resident SCF (closed shell, neutral), open shell and charged cells on the host-driven loop [measured Nov 23, 2026, `pbc_xtb_gpu_combinations`] | refused, counted fallback [read] | not built |
-| GFN1/GFN2 virial, pressure, barostat | complete (P4) | complete [reported: parity 1e-9 Eh, NPT smoke test] | missing | not built |
+| GFN-FF periodic energy, gradient | complete (MIC, Ewald, EEQ) | hybrid S1-S3: local terms, Ewald sum and pcg operator on the device, CG loop on the host [measured, WP-PERIODIC-NONBONDED S3] | hybrid S1-S3 since Nov 24, 2026 (one RX 9060 XT gfx1200; B2 below) [measured, ROCM_PARITY_A2/B1] | not built |
+| GFN-FF virial, pressure, barostat | complete (N1, N2, V-LRC, HB-X) | complete for the hybrid S2 (A1 closed Nov 23, 2026: device virial + host Ewald, `-compute_pressure`, `-barostat`) [measured, WP-PERIODIC-NONBONDED A1-GPU] | device virial, crossing terms, `-barostat` since Nov 24, 2026 (B3 below) [measured, ROCM_PARITY_B2] | not built |
+| GFN1/GFN2 periodic energy, gradient | complete (Gamma point, images, Ewald) | complete, device-resident SCF (closed shell, neutral), open shell and charged cells on the host-driven loop [measured Nov 23, 2026, `pbc_xtb_gpu_combinations`] | host-driven device loop with the CUDA stage kernels since Nov 24, 2026; no G1b/R2-R5 (B4 below) [measured, ROCM_PARITY_A3] | not built |
+| GFN1/GFN2 virial, pressure, barostat | complete (P4) | complete [reported: parity 1e-9 Eh, NPT smoke test] | virial measured against the CPU and FD; barostat run as a 20-step smoke test only (216 H2O) [measured, ROCM_PARITY_A3] | not built |
 
 Since A1 (Nov 23, 2026) GFN-FF NPT runs on CUDA through the S2 hybrid, since A2/S3 (Nov 23, 2026) with the Ewald sum and
 the EEQ operator on the device; what is left for GFN-FF on CUDA is speed (forced list rebuilds after each barostat step, the
@@ -49,18 +49,18 @@ Priority P0 = needed for the goal, P1 = correctness or honesty, P2 = performance
 
 ## Part B: ROCm gaps (close on a machine with a ROCm GPU)
 
-ROCm was only ever run on a Radeon 890M (gfx1150). Nothing below can be checked on the CUDA machine.
+Ported and measured Nov 24, 2026 on one RX 9060 XT (gfx1200, wave32) under [ROCM_PARITY_PLAN_2026-11.md](ROCM_PARITY_PLAN_2026-11.md); no second GPU, no gfx1150 or wave64 run. The shared host files changed for B2-B4 were compiled only in the ROCm build (no CUDA toolkit on that machine). Gate 6 (full `ctest -j1`) was not run in the ROCm build; each item ran its own ctests. With a cell and `-gfnff.gpu_periodic true`, a combination the ROCm wrapper refuses ends with an error, not with a counted CPU fallback: `MethodFactory::periodicCellNeedsCpu` has no backend check (open decision).
 
 | # | Gap | Source |
 |---|---|---|
 | B1 | **closed Nov 24, 2026**: GFN-FF XB damping derivatives fixed in both HIP kernels (FP64 and mixed) as on CPU/CUDA; fi-pyridine RX 9060 XT (gfx1200) vs CPU gradient 4.8e-14 Eh/A, one structure, `-gpu_strict true`; FD gate `gfnff_xb_gradient_fd` is CPU only | [measured] |
-| B2 | Periodic GFN-FF local terms (S1/S2 equivalent: minimum image in all device kernels, `cellFromMolecule`, FMA-safe `template<bool PBC>`); today ROCm refuses a cell | [read] |
-| B3 | GFN-FF device virial (A1 equivalent) so that NPT runs with `-gpu rocm` | derived from A1 |
-| B4 | Periodic xTB on ROCm (`xtb_hip_method.cpp` never calls `setPeriodicDeviceScf`): device stages, virial, barostat; the refusal path has no test | [read] audit B |
-| B5 | Plugin ABI 25: the ROCm plugin must be rebuilt and loaded once; the new core symbol `EEQSolver::hostSytrsUpper` is resolved at load time | [read] merge |
-| B6 | The HB-CN-after-refresh change sits in the shared template (`gfnff_gpu_method_impl.h`) and changes GPU MD trajectories at the refresh steps; compiled for ROCm, never run | [read] audit A |
-| B7 | Parity script: two differences without a reason (`has_charge_groups_cn_guard` from `9e8a609c`, `has_periodic_local_terms` from `8ee4f638`); add them to `docs/GPU_PARITY_CUDA_ROCM.md` and `scripts/gpu_parity_known.json` with the reason or close them | [read] `scripts/gpu_parity_check.py` |
-| B8 | Bitwise reproducibility of the periodic paths on ROCm (`-gfnff.rocm_fixed_point`, `-xtb.rocm_fixed_point`) | [open] |
+| B2 | **closed Nov 24, 2026**: local terms with a cell (A2: `template <bool PBC>` kernels, minimum-image builders and HB detection, D4 tail; ctest `gfnff_rocm_pbc_terms`, GPU vs CPU <= 3.2e-13 Eh per term, 1.5e-13 Eh/A, 8 systems), hybrid and device Ewald (B1: `GfnffEwaldHip`; 1728 H2O dE 1.2e-11 Eh, 100 MD steps trajectory md5 = CPU), fast list rebuilds (L1: barostat step 225 -> 129 ms, 5184 atoms, n = 3; lists 263/263 identical; one orthorhombic water box only). Was: ROCm refused a cell. Open: multi-stream mode with a cell above 500 atoms checked only in the 5184-atom CLI runs, sTors and case-4 H-bonds under a cell (no structure), multi-GPU with a cell (off on both backends) | [measured] ROCM_PARITY_A2, B1, L1 |
+| B3 | **closed Nov 24, 2026** (B2 of the parity plan): device virial of every local term, pair and chain-rule virial kernels, HB/XB crossing, V-LRC; `gfnff_rocm_pbc_virial` GPU vs CPU <= 5.1e-13 Eh per component (5 structures), FD under cell scaling <= 4.5e-9 Eh; CLI NPT 1728 H2O 100 steps CPU = ROCm (status columns, trajectory md5, final edge 8.4e-12 A). Open: XB crossing zero in every structure run, C-rescale barostat and long NPT runs not run | [measured] ROCM_PARITY_B2 |
+| B4 | **partly closed Nov 24, 2026** (A3): `setPeriodicDeviceScf` on ROCm, CUDA stage kernels on the host-driven device loop, virial; `pbc_xtb_gpu_parity_rocm` (10 cells) ROCm vs CPU <= 4.3e-12 Eh, 2.1e-10 Eh/A, 4.6e-10 Eh virial; 24 stage fallbacks injected and counted; NPT 20-step smoke only (216 H2O). Open: G1b device integrals and R2-R5 resident periodic loop (not ported), cells larger than 216 H2O, elements beyond H/C/N/O, MD energy conservation, `-opt` with a cell. The run-to-run differences seen in A3 come from a concurrent rocSOLVER process on the same GPU, not from the periodic path ([ROCM_PARITY_N.md](ROCM_PARITY_N.md)) | [measured] ROCM_PARITY_A3, N |
+| B5 | **closed Nov 24, 2026**: the ROCm plugin was rebuilt and loaded with every item of the parity plan; plugin ABI 29 (raised for `GpuScfBackend::periodicStageOnDevice`, A3) | [read] `gpu_plugin_abi.h` |
+| B6 | The HB-CN-after-refresh change sits in the shared template (`gfnff_gpu_method_impl.h`); run on ROCm in every GFN-FF MD of the parity plan (B1/B2: 1728 H2O, 100 steps, trajectory md5 = CPU; A1: 200 steps, charges <= 1.9e-13 e from the CPU); whether a refresh step was isolated was not checked | [measured] ROCM_PARITY_A1, B1, B2 |
+| B7 | **closed Nov 24, 2026**: both traits are true on ROCm (A1, A2); `scripts/gpu_parity_check.py` reports 0 unexplained differences on `a71d244e` ([GPU_PARITY_CUDA_ROCM.md](GPU_PARITY_CUDA_ROCM.md) C3) | [measured] script run |
+| B8 | **closed for the measured cases, Nov 24, 2026**: second run md5-identical with the default fixed point for the GFN-FF hybrid (caffeine cell, 1728 H2O MD and NPT), the virial instances (bit for bit) and periodic GFN1/GFN2 (216 H2O, caffeine cell, separate processes); a second process using rocSOLVER on the same GPU breaks it for GFN1/GFN2 ([ROCM_PARITY_N.md](ROCM_PARITY_N.md)). Not run: `rocm_fixed_point false` with a cell | [measured] ROCM_PARITY_A2, A3, B1, B2, N |
 | B9 | Vulkan: code and `USE_VULKAN` exist but nothing is built or shipped; either drop it or give it the same refusal tests | [read] profile |
 | B10 | **closed Nov 24, 2026** (gfx1200, `na2cl2-isolated-ions`: GPU vs CPU energy 8e-15 Eh, gradient 2.7e-16 Eh/A, one structure; heavy-atom sets not re-measured): `k_cn_compute`, `k_cn_compute_pairs`, `k_cn_chainrule` use `m_cn_r2_max`, trait `has_cn_cutoff` true; was: GFN-FF CN ignores `cn_cutoff_bohr` on ROCm (CUDA fixed in A16): `gfnff_rocm.hip` keeps the 30 Bohr O(N^2) CN and no cutoff in the CN pair list, chain rule and virial; port `r2_max` (`setCNCutoffR2Max`, set the HIP trait `has_cn_cutoff` true); changes ROCm energies of heavy-atom systems | [read] A16 |
 

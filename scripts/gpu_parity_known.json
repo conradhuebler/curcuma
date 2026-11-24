@@ -1,8 +1,7 @@
 {
   "seam": {
     "supportsDeviceMultipolePotential": "ROCm only: device multipole potential for the host SCF loop; CUDA covers it inside the resident loop (GPU_PARITY_CUDA_ROCM.md, table B item 4)",
-    "supportsDeviceSolvationGfn1": "ROCm takes GFN1 with solvent on the resident loop, CUDA keeps it on its host-driven loop (GPU_PARITY_CUDA_ROCM.md, table A)",
-    "supportsSpinPolarization": "ROCm: spin polarisation is a hard error, not ported (GPU_PARITY_CUDA_ROCM.md, table A)"
+    "supportsDeviceSolvationGfn1": "ROCm takes GFN1 with solvent on the resident loop, CUDA keeps it on its host-driven loop (GPU_PARITY_CUDA_ROCM.md, table A)"
   },
   "traits": {
     "has_device_schur": "ROCm false by design: the device Schur step has its own switch rocm_device_schur (GPU_PARITY_CUDA_ROCM.md, table A)",

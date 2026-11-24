@@ -127,6 +127,8 @@ Status: 🤖 AI-implemented, ⚙️ machine-tested on one RX 9060 XT (gfx1200, N
 - Not used with spin polarisation (automatically, GPU still used): the device potential build (`-xtb.rocm_device_potential`), the device multipole
   potential, both fully device-resident loops, the device gradient potentials (`-xtb.rocm_grad_resident`), pseudo-diagonalisation; post-SCF D4 runs on
   the host (no device D4 reference tables on the host-driven loop). `-xtb.rocm_density_syrk` is not applied to the two spin densities (GEMM).
+- Screened integral storage (`-gpu_sparse_integrals on|auto`) is not combined with spin polarisation on ROCm (CUDA supports it): one warning, dense
+  storage, gradient md5-identical to the dense spin run ([ROCM_PARITY_A7.md](ROCM_PARITY_A7.md)).
 - Measured (Nov 24, 2026, GPU against the CPU of the same build, `-scf_threshold 1e-10`, `-threads 1`): O2 (uhf 2, 4; GFN2, GFN1 uhf 2), OH (uhf 1, GFN2
   and GFN1), H2 (uhf 2), Pt7 (`pt-cluster-7`, uhf 4 and 6, 2000 K, GFN2 and GFN1), 10 cases: FP64 energy <= 2.5e-14 Eh, gradient <= 1.4e-12 Eh/A;
   mixed precision energy <= 4.7e-14 Eh, gradient <= 7.6e-12 Eh/A. O2 uhf 2 with ALPB water (GFN2, GFN1): energy <= 3.6e-15 Eh, gradient <= 2.9e-15 Eh/A.
