@@ -155,6 +155,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_bonds(
 /// GFN-FF angle bending (cosine + distance damping)
 /// E = fc * (cos(theta) - cos(theta0))^2 * damp_ij * damp_jk
 /// Reference: Fortran gfnff_engrad.F90:857-916
+template <bool PBC>   // A2 (Nov 2026): false = former kernel, true = image frame of the cell (CUDA S1)
 __global__ GFNFF_KERNEL_BOUNDS void k_angles(
     int n,
     const int*    __restrict__ idx_i,
@@ -176,6 +177,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_angles(
 /// GFN-FF dihedral torsions (Fourier + distance damping, standard + extra)
 /// E = V * (1 + cos(n*(phi - phi0) + pi)) * damp
 /// Reference: Fortran gfnff_engrad.F90:1041-1122
+template <bool PBC>   // A2 (Nov 2026): false = former kernel, true = image frame of the cell (CUDA S1)
 __global__ GFNFF_KERNEL_BOUNDS void k_dihedrals(
     int n,
     const int*    __restrict__ idx_i,
@@ -201,6 +203,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_dihedrals(
 /// GFN-FF out-of-plane inversions
 /// E = fc * (1 - cos(omega)) * damp  or  fc * (cos(omega) - cos(omega0))^2 * damp
 /// Reference: Fortran gfnff_ini.f90 inversion potential
+template <bool PBC>   // A2 (Nov 2026): false = former kernel, true = image frame of the cell (CUDA S1)
 __global__ GFNFF_KERNEL_BOUNDS void k_inversions(
     int n,
     const int*    __restrict__ idx_i,
@@ -230,6 +233,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_inversions(
 
 /// Triple bond torsions: E = -erefhalf * cos(2φ) + erefhalf
 /// Reference: ff_workspace_gfnff.cpp:calcSTorsions, Fortran gfnff_engrad.F90:3454
+template <bool PBC>   // A2 (Nov 2026): false = former kernel, true = image frame of the cell (CUDA S1)
 __global__ GFNFF_KERNEL_BOUNDS void k_storsions(
     int n,
     const int*    __restrict__ idx_i,
@@ -325,6 +329,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_atm(
 
 /// Halogen bonds (3-body A-X...B): distance damped electrostatic
 /// Reference: ff_workspace_gfnff.cpp:calcHalogenBonds, Fortran rbxgfnff_eg
+template <bool PBC>   // A2 (Nov 2026): false = former kernel, true = image frame of the cell (CUDA S1)
 __global__ GFNFF_KERNEL_BOUNDS void k_xbonds(
     int n,
     const int*    __restrict__ idx_i,     ///< donor A
@@ -354,6 +359,7 @@ __global__ void k_gather_hb_charges(
 
 /// Hydrogen bonds (3-body A-H...B): multi-case with neighbor damping
 /// Reference: ff_workspace_gfnff.cpp:calcHydrogenBonds, Fortran abhgfnff_eg*
+template <bool PBC>   // A2 (Nov 2026): false = former kernel, true = image frame of the cell (CUDA S1)
 __global__ GFNFF_KERNEL_BOUNDS void k_hbonds(
     int n,
     const int*    __restrict__ idx_i,     ///< donor A

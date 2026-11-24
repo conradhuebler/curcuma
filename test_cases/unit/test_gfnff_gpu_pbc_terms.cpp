@@ -26,11 +26,23 @@
  *  (f) two device instances on the same geometry: energy and gradient bit for bit identical.
  * The 60-water box also runs with nb_cell_list_min_atoms 0 (device repulsion list build, cell-list HB branch).
  * Exit 77 (ctest SKIP_RETURN_CODE) when built without CUDA.
+ *
+ * A2 (Nov 2026, Claude Generated): the same source builds the ROCm variant (target test_gfnff_rocm_pbc_terms, ctest
+ * gfnff_rocm_pbc_terms, compiled with GFNFF_PBC_TERMS_ROCM): the HIP method class GFNFFHipComputationalMethod in place
+ * of the CUDA one, same structures, states and thresholds. Exit 77 there when no HIP device answers.
  */
-#ifdef USE_CUDA
+#if defined(GFNFF_PBC_TERMS_ROCM) || defined(USE_CUDA)
 #include "src/core/curcuma_logger.h"
 #include "src/core/energy_calculators/ff_methods/gfnff.h"
+#ifdef GFNFF_PBC_TERMS_ROCM
+#include "src/core/energy_calculators/qm_methods/gfnff_hip_method.h"
+using GpuGfnffMethod = GFNFFHipComputationalMethod;
+static const char* kTestName = "gfnff_rocm_pbc_terms";
+#else
 #include "src/core/energy_calculators/qm_methods/gfnff_gpu_method.h"
+using GpuGfnffMethod = GFNFFGPUComputationalMethod;
+static const char* kTestName = "gfnff_gpu_pbc_terms";
+#endif
 #include "src/core/energy_calculators/qm_methods/gfnff_method.h"
 #include "src/core/molecule.h"
 #include "src/core/units.h"
@@ -210,13 +222,13 @@ static Terms fromComponents(const FFEnergyComponents& c)
 /// One CPU or GPU instance (the ComputationalMethod wrappers, so the gradient contract Eh/A is the same).
 struct Instance {
     std::unique_ptr<GFNFFComputationalMethod> cpu;
-    std::unique_ptr<GFNFFGPUComputationalMethod> gpu;
+    std::unique_ptr<GpuGfnffMethod> gpu;
     bool ok = false;
     Instance(bool on_gpu, const Mol& mol, const json& c)
     {
         try {
             if (on_gpu) {
-                gpu = std::make_unique<GFNFFGPUComputationalMethod>("gfnff", c);
+                gpu = std::make_unique<GpuGfnffMethod>("gfnff", c);
                 ok = gpu->setMolecule(mol) && !gpu->hasError() && !gpu->requestsCpuFallback();
                 if (!ok) std::printf("GPU init: %s%s\n", gpu->getErrorMessage().c_str(),
                                      gpu->requestsCpuFallback() ? " (CPU fallback requested)" : "");
@@ -564,6 +576,17 @@ int main()
 {
     CurcumaLogger::set_verbosity(0);
     const double L_ang = kCellBohr / A2B;
+#ifdef GFNFF_PBC_TERMS_ROCM
+    // A2: no HIP device (or no usable plugin state) -> skipped, as the CUDA build without CUDA; the probe has no cell
+    {
+        Mol probe = registryMol("H2O_dimer");
+        Instance p(true, probe, config(json::object()));
+        if (!p.ok) {
+            std::printf("%s: the ROCm device workspace could not be set up (no HIP device?), skipped\n", kTestName);
+            return 77;
+        }
+    }
+#endif
 
     struct S { const char* label; Mol mol; json extra; };
     std::vector<S> set;
@@ -591,7 +614,10 @@ int main()
     std::printf("GPU vs CPU over every comparison: worst term %.2e Eh, worst gradient %.2e Eh/A\n", g_worst_e, g_worst_g);
     for (int k = 0; k < kNTerms; ++k)
         std::printf("  %-14s max |dE| %.2e Eh\n", kTermNames[k], g_worst_term_e[k]);
-    std::printf(g_failures == 0 ? "gfnff_gpu_pbc_terms: all checks passed\n" : "gfnff_gpu_pbc_terms: %d failure(s)\n", g_failures);
+    if (g_failures == 0)
+        std::printf("%s: all checks passed\n", kTestName);
+    else
+        std::printf("%s: %d failure(s)\n", kTestName, g_failures);
     return g_failures == 0 ? 0 : 1;
 }
 #else

@@ -596,6 +596,19 @@ if(USE_PCH)
 endif()
 add_test(NAME gfnff_gpu_pbc_terms COMMAND test_gfnff_gpu_pbc_terms WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 set_tests_properties(gfnff_gpu_pbc_terms PROPERTIES TIMEOUT 900 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;pbc" SKIP_RETURN_CODE 77)
+# Claude Generated (Nov 2026, ROCm parity A2): the same checks on the ROCm device (HIP method class linked from the
+# plugin, same structures and thresholds); 77 when no HIP device answers. docs/ROCM_PARITY_A2.md.
+if(USE_ROCM)
+    add_executable(test_gfnff_rocm_pbc_terms unit/test_gfnff_gpu_pbc_terms.cpp)
+    target_link_libraries(test_gfnff_rocm_pbc_terms curcuma_core test_molecule_registry curcuma_rocm)
+    target_compile_definitions(test_gfnff_rocm_pbc_terms PRIVATE USE_ROCM GFNFF_PBC_TERMS_ROCM)
+    if(USE_PCH)
+        target_precompile_headers(test_gfnff_rocm_pbc_terms REUSE_FROM curcuma_core)
+    endif()
+    add_test(NAME gfnff_rocm_pbc_terms COMMAND test_gfnff_rocm_pbc_terms WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    set_tests_properties(gfnff_rocm_pbc_terms PROPERTIES TIMEOUT 900 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;pbc;rocm"
+                         SKIP_RETURN_CODE 77)
+endif()
 
 # Claude Generated (Nov 2026, S2): the CUDA periodic hybrid (local terms on the device, periodic EEQ + Ewald Coulomb on
 # the host) against the CPU periodic path: charges, energy, gradient, FD gate, invariances, bitwise. 77 without CUDA.

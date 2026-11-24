@@ -89,9 +89,15 @@ struct GFNFFRocmBackend {
     /// (FFWorkspaceHip::generateNonbondedRepulsionOnGPU, ordered row build with the gather CSR on the device);
     /// false keeps the staged host build (FFWorkspaceHip::updateRepulsion).
     static constexpr bool has_device_repulsion_build = true;
-    /// Nov 2026 (S1): the HIP kernels have not been given the minimum-image frames of S1 (stage S6); a periodic
-    /// cell is refused by the wrapper also with -gfnff.gpu_periodic true.
-    static constexpr bool has_periodic_local_terms = false;
+    /// A2 (Nov 24, 2026, Claude Generated; port of the CUDA S1, ROCM_PARITY_A2.md): the local term kernels (angle,
+    /// dihedral, inversion, sTors, HB, XB) are templates on PBC with the CPU image frame, the device D4/repulsion pair
+    /// builders, the device H-bond detection, k_check_displacement(_pair) and the host displacement tests apply the
+    /// minimum image, the D4 tail runs as k_d4_tail_W/k_d4_tail_atoms. Released with -gfnff.gpu_periodic true and
+    /// coulomb_ewald false (S1 mode: minimum-image Coulomb, non-periodic EEQ).
+    static constexpr bool has_periodic_local_terms = true;
+    /// A2 (Nov 2026): the periodic hybrid (S2/S3: host periodic EEQ, Ewald Coulomb, device virial A1-GPU, HB-X crossing)
+    /// is not ported to ROCm (ROCM_PARITY_PLAN B1/B2); with coulomb_ewald true the wrapper refuses the cell.
+    static constexpr bool has_periodic_hybrid = false;
     /// Nov 2026 (GPU_PERIODIC_GAPS A2/S3): no device Ewald on ROCm (the cell is refused anyway): nullptr.
     static std::unique_ptr<curcuma::ewald::EwaldDeviceOps> createEwaldDevice() { return nullptr; }
 

@@ -646,15 +646,22 @@ bool GFNFFGpuMethodImpl<Backend>::setMolecule(const Mol& mol)
     if (mol.m_has_pbc) {
         const bool opt_in = m_gfnff->gpuPeriodicRequested();
         const bool ewald = m_gfnff->coulombEwaldRequested();
-        if (!opt_in || !Backend::has_periodic_local_terms) {
+        // A2 (Nov 2026): a backend with the local terms but without the hybrid (ROCm) runs only the S1 mode
+        // (coulomb_ewald false); the default coulomb_ewald true is refused there until B1 (ROCM_PARITY_PLAN).
+        if (!opt_in || !Backend::has_periodic_local_terms || (ewald && !Backend::has_periodic_hybrid)) {
             m_has_error = true;
             if (!opt_in)
                 m_error_message = "GFNFFGPUMethod: periodic cell set, but the GPU GFN-FF path is released only with "
                                   "-gfnff.gpu_periodic true (CUDA: local terms on the device, periodic EEQ and Ewald Coulomb "
                                   "on the host); use the CPU method (omit -gpu) for periodic systems";
-            else
+            else if (!Backend::has_periodic_local_terms)
                 m_error_message = std::string("GFNFFGPUMethod: gpu_periodic is available on CUDA only (S1/S2), not on ")
                                   + Backend::name + "; use the CPU method (omit -gpu) for periodic systems";
+            else
+                m_error_message = std::string("GFNFFGPUMethod: the periodic hybrid (periodic EEQ, Ewald Coulomb; "
+                                  "coulomb_ewald true) is available on CUDA only, not on ") + Backend::name
+                                  + "; use the CPU method (omit -gpu), or -gfnff.coulomb_ewald false for the local terms "
+                                    "with a minimum-image Coulomb and a non-periodic EEQ on the device";
             CurcumaLogger::error(m_error_message);
             return false;
         }
@@ -720,7 +727,7 @@ bool GFNFFGpuMethodImpl<Backend>::setMolecule(const Mol& mol)
     // Claude Generated (Nov 2026, S2): the periodic hybrid needs the host Ewald set-up (EEQ solver with the Ewald
     // matrix, FFWorkspace::setEwald with the same parameters, built in InitialiseMolecule as on the CPU); the device
     // then skips its pair Coulomb. Both are checked here rather than assumed.
-    if constexpr (Backend::has_periodic_local_terms) {
+    if constexpr (Backend::has_periodic_hybrid) {
         if (m_periodic_hybrid) {
             FFWorkspace* ws = m_gfnff->getWorkspace();
             if (!m_gfnff->periodicEEQActive() || !ws || !ws->ewaldActive()) {
@@ -1154,7 +1161,7 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
         // Claude Generated (Nov 2026, S2): set here, not only in setMolecule(), because a react-topology rebuild
         // (calculateEnergy) constructs a fresh workspace through this function; without it the device pair Coulomb
         // would run next to the host Ewald term (double count). m_periodic_hybrid is fixed before InitialiseMolecule().
-        if constexpr (Backend::has_periodic_local_terms) {
+        if constexpr (Backend::has_periodic_hybrid) {
             if (m_periodic_hybrid)
                 m_gpu_workspace->setCoulombPairOnDevice(false);
         }
@@ -1244,7 +1251,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
     uploadCellToDevice();
     if (m_periodic_hybrid) {
         followHostCellChanges();   // A1 (Nov 2026): barostat cell changes and the radius freeze
-        if constexpr (Backend::has_periodic_local_terms) {
+        if constexpr (Backend::has_periodic_hybrid) {
             m_gpu_workspace->setWantVirial(m_gfnff->wantVirial());
             double thr1 = 0.0, thr2 = 0.0;   // HB-X (Nov 2026): the host's thresholds and PARAMs
             m_gfnff->hbSearchThresholds(thr1, thr2);
@@ -3121,7 +3128,7 @@ void GFNFFGpuMethodImpl<Backend>::followHostCellChanges()
 template <class Backend>
 void GFNFFGpuMethodImpl<Backend>::assembleHybridVirial()
 {
-  if constexpr (Backend::has_periodic_local_terms) {   // CUDA only (ROCm refuses a cell)
+  if constexpr (Backend::has_periodic_hybrid) {   // CUDA only (ROCm refuses the hybrid)
     FFWorkspace* ws = m_gfnff->getWorkspace();
     std::vector<double> buf;
     if (!ws || !m_gpu_workspace->downloadVirial(buf))

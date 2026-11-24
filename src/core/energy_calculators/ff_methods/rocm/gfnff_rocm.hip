@@ -284,6 +284,31 @@ __device__ __forceinline__ void applyMIC(double& dx, double& dy, double& dz) {
     dz = d_lattice[2]*fx + d_lattice[5]*fy + d_lattice[8]*fz;
 }
 
+// Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED S1): local image frame of a bonded / HB / XB term, the
+// arithmetic of the CPU placeMinimumImage() / imageNear() (ff_workspace_gfnff.cpp): the image of atom `atom`
+// next to the reference point (rx, ry, rz) is ref + mic(x_atom - ref). Without a cell the position is copied
+// as it is (no "ref + (x - ref)" round trip), so the non-periodic kernels keep their bits.
+__device__ __forceinline__ void micPlace(const double* __restrict__ cx, const double* __restrict__ cy,
+                                         const double* __restrict__ cz, int atom,
+                                         double rx, double ry, double rz, double& x, double& y, double& z)
+{
+    if (!d_has_pbc) { x = cx[atom]; y = cy[atom]; z = cz[atom]; return; }
+    double dx = cx[atom] - rx, dy = cy[atom] - ry, dz = cz[atom] - rz;
+    applyMIC(dx, dy, dz);
+    x = rx + dx; y = ry + dy; z = rz + dz;
+}
+
+/// Four-atom chain a-b-c-d in slots 0..3: b at its position, a and c next to b, d next to c (placeChainOfFour()).
+__device__ __forceinline__ void micChainOfFour(const double* __restrict__ cx, const double* __restrict__ cy,
+                                               const double* __restrict__ cz, int a, int b, int c, int d,
+                                               double* lx, double* ly, double* lz)
+{
+    lx[1] = cx[b]; ly[1] = cy[b]; lz[1] = cz[b];
+    micPlace(cx, cy, cz, a, lx[1], ly[1], lz[1], lx[0], ly[0], lz[0]);
+    micPlace(cx, cy, cz, c, lx[1], ly[1], lz[1], lx[2], ly[2], lz[2]);
+    micPlace(cx, cy, cz, d, lx[2], ly[2], lz[2], lx[3], ly[3], lz[3]);
+}
+
 // ============================================================================
 // Utility kernel
 // ============================================================================
@@ -316,6 +341,7 @@ __global__ void k_check_displacement(
     double dx = cx[i] - rx[i];
     double dy = cy[i] - ry[i];
     double dz = cz[i] - rz[i];
+    applyMIC(dx, dy, dz);   // Nov 2026 (S1): a wrap by a lattice vector is no motion (CPU maxAtomDisplacement, A3b/A4a)
     if (dx*dx + dy*dy + dz*dz > threshold_sq)
         atomicOr(exceeded_flag, 1);
 }
@@ -337,16 +363,20 @@ void k_check_displacement_pair(
 {
     int f0 = 0, f1 = 0;
     for (int i = threadIdx.x; i < N; i += blockDim.x) {
+        // Nov 2026 (A2, Claude Generated): minimum-image displacement as k_check_displacement (CUDA S1): a wrap
+        // by a lattice vector is no motion; without a cell applyMIC() returns at once (same decision as before)
         if (rx) {
-            const double dx = cx[i] - rx[i];
-            const double dy = cy[i] - ry[i];
-            const double dz = cz[i] - rz[i];
+            double dx = cx[i] - rx[i];
+            double dy = cy[i] - ry[i];
+            double dz = cz[i] - rz[i];
+            applyMIC(dx, dy, dz);
             if (dx*dx + dy*dy + dz*dz > thr_sq) f0 = 1;
         }
         if (qx) {
-            const double dx = cx[i] - qx[i];
-            const double dy = cy[i] - qy[i];
-            const double dz = cz[i] - qz[i];
+            double dx = cx[i] - qx[i];
+            double dy = cy[i] - qy[i];
+            double dz = cz[i] - qz[i];
+            applyMIC(dx, dy, dz);
             if (dx*dx + dy*dy + dz*dz > qthr_sq) f1 = 1;
         }
     }
@@ -1427,6 +1457,12 @@ __device__ double cos_angle_grad(
 // Reference: ff_workspace_gfnff.cpp:calcAngles (lines 205-271)
 // ============================================================================
 
+// Nov 2026 (S1): the local-term kernels are templates on PBC. The false instantiation keeps the former statements
+// verbatim (a rewrite through local arrays changed the FMA contraction of the bonded kernels by one fixed-point
+// quantum on urea197/peo201; the SASS of k_*<false> is compared against the pre-S1 plugin), the true instantiation
+// builds the CPU image frame. FFWorkspaceHip launches k_*<true> only with an active cell (A2, Nov 2026: port of
+// the CUDA S1 kernels, commit 8ee4f638).
+template <bool PBC>
 __global__ void k_angles(
     int n,
     const int*    __restrict__ idx_i,
@@ -1457,14 +1493,30 @@ __global__ void k_angles(
             double rcov_j = d_rcov_d3[zj] * scale;
             double rcov_k = d_rcov_d3[zk] * scale;
 
-            double dij_x = cx[i] - cx[j];
-            double dij_y = cy[i] - cy[j];
-            double dij_z = cz[i] - cz[j];
-            applyMIC(dij_x, dij_y, dij_z);
-            double dkj_x = cx[k] - cx[j];
-            double dkj_y = cy[k] - cy[j];
-            double dkj_z = cz[k] - cz[j];
-            applyMIC(dkj_x, dkj_y, dkj_z);
+            // Nov 2026 (S1, PBC): local image frame, i and k as the images next to the centre j (slots 0..2 =
+            // i, j, k; CPU calcAngles); the angle and its gradient read the frame too. Else: the former statements.
+            [[maybe_unused]] double lx[3], ly[3], lz[3];
+            double dij_x, dij_y, dij_z, dkj_x, dkj_y, dkj_z;
+            if constexpr (PBC) {
+                lx[1] = cx[j]; ly[1] = cy[j]; lz[1] = cz[j];
+                micPlace(cx, cy, cz, i, lx[1], ly[1], lz[1], lx[0], ly[0], lz[0]);
+                micPlace(cx, cy, cz, k, lx[1], ly[1], lz[1], lx[2], ly[2], lz[2]);
+                dij_x = lx[0] - lx[1];
+                dij_y = ly[0] - ly[1];
+                dij_z = lz[0] - lz[1];
+                dkj_x = lx[2] - lx[1];
+                dkj_y = ly[2] - ly[1];
+                dkj_z = lz[2] - lz[1];
+            } else {
+                dij_x = cx[i] - cx[j];
+                dij_y = cy[i] - cy[j];
+                dij_z = cz[i] - cz[j];
+                applyMIC(dij_x, dij_y, dij_z);
+                dkj_x = cx[k] - cx[j];
+                dkj_y = cy[k] - cy[j];
+                dkj_z = cz[k] - cz[j];
+                applyMIC(dkj_x, dkj_y, dkj_z);
+            }
 
             double r_ij_sq = dij_x*dij_x + dij_y*dij_y + dij_z*dij_z;
             double r_jk_sq = dkj_x*dkj_x + dkj_y*dkj_y + dkj_z*dkj_z;
@@ -1487,10 +1539,17 @@ __global__ void k_angles(
             double d_ri_x, d_ri_y, d_ri_z;
             double d_rk_x, d_rk_y, d_rk_z;
             double d_rj_x, d_rj_y, d_rj_z;
-            double cos_a = cos_angle_grad(cx, cy, cz, i, j, k,
-                                           d_ri_x, d_ri_y, d_ri_z,
-                                           d_rk_x, d_rk_y, d_rk_z,
-                                           d_rj_x, d_rj_y, d_rj_z, true);
+            double cos_a;
+            if constexpr (PBC)
+                cos_a = cos_angle_grad(lx, ly, lz, 0, 1, 2,
+                                       d_ri_x, d_ri_y, d_ri_z,
+                                       d_rk_x, d_rk_y, d_rk_z,
+                                       d_rj_x, d_rj_y, d_rj_z, true);
+            else
+                cos_a = cos_angle_grad(cx, cy, cz, i, j, k,
+                                       d_ri_x, d_ri_y, d_ri_z,
+                                       d_rk_x, d_rk_y, d_rk_z,
+                                       d_rj_x, d_rj_y, d_rj_z, true);
 
             const double pi = 3.14159265358979323846;
             double t0   = theta0[tid];
@@ -1660,6 +1719,7 @@ __device__ double dihedral_angle_grad(
 // Reference: ff_workspace_gfnff.cpp:calcDihedrals (lines 299-380)
 // ============================================================================
 
+template <bool PBC>
 __global__ void k_dihedrals(
     int n,
     const int*    __restrict__ idx_i,
@@ -1695,11 +1755,24 @@ __global__ void k_dihedrals(
 
             double atcutt = is_nci[tid] ? 0.305 : 0.505;
 
+            // Nov 2026 (S1, PBC): local image frame (slots 0..3 = i, j, k, l; placeChainOfFour of the CPU);
+            // every distance and vector below reads the frame. Else: the former statements on cx/cy/cz.
+            [[maybe_unused]] double lx[4], ly[4], lz[4];
+            if constexpr (PBC)
+                micChainOfFour(cx, cy, cz, ai, aj, ak, al, lx, ly, lz);
+
             auto sq_dist = [&](int a, int b) {
-                double dx = cx[b] - cx[a];
-                double dy = cy[b] - cy[a];
-                double dz = cz[b] - cz[a];
-                return dx*dx+dy*dy+dz*dz;
+                if constexpr (PBC) {
+                    double dx = lx[b] - lx[a];
+                    double dy = ly[b] - ly[a];
+                    double dz = lz[b] - lz[a];
+                    return dx*dx+dy*dy+dz*dz;
+                } else {
+                    double dx = cx[b] - cx[a];
+                    double dy = cy[b] - cy[a];
+                    double dz = cz[b] - cz[a];
+                    return dx*dx+dy*dy+dz*dz;
+                }
             };
 
             auto make_damp = [&](double r2_sq, double ra, double rb) {
@@ -1717,9 +1790,16 @@ __global__ void k_dihedrals(
                 return (r2_sq > 1e-8) ? -4.0*rr/(r2_sq*(1.0+rr)*(1.0+rr)) : 0.0;
             };
 
-            double rij2 = sq_dist(ai, aj);
-            double rjk2 = sq_dist(aj, ak);
-            double rkl2 = sq_dist(ak, al);
+            double rij2, rjk2, rkl2;
+            if constexpr (PBC) {
+                rij2 = sq_dist(0, 1);
+                rjk2 = sq_dist(1, 2);
+                rkl2 = sq_dist(2, 3);
+            } else {
+                rij2 = sq_dist(ai, aj);
+                rjk2 = sq_dist(aj, ak);
+                rkl2 = sq_dist(ak, al);
+            }
 
             double d_ij = make_damp(rij2, ri, rj);
             double d_jk = make_damp(rjk2, rj, rk);
@@ -1731,7 +1811,11 @@ __global__ void k_dihedrals(
             double d2_kl = make_damp2(rkl2, rk, rl);
 
             double derivate[4][3];
-            double phi = dihedral_angle_grad(cx, cy, cz, ai, aj, ak, al, derivate, true);
+            double phi;
+            if constexpr (PBC)
+                phi = dihedral_angle_grad(lx, ly, lz, 0, 1, 2, 3, derivate, true);
+            else
+                phi = dihedral_angle_grad(cx, cy, cz, ai, aj, ak, al, derivate, true);
 
             double c1    = n_period[tid] * (phi - phi0[tid]) + M_PI;
             double cos_c1 = cos(c1);
@@ -1750,19 +1834,25 @@ __global__ void k_dihedrals(
 
             // Gradient from damping: E_raw * d(damp)/d(rXY²) * rXY_vec
             {
-                double dx=cx[ai]-cx[aj], dy=cy[ai]-cy[aj], dz=cz[ai]-cz[aj];
+                double dx, dy, dz;
+                if constexpr (PBC) { dx=lx[0]-lx[1]; dy=ly[0]-ly[1]; dz=lz[0]-lz[1]; }
+                else               { dx=cx[ai]-cx[aj]; dy=cy[ai]-cy[aj]; dz=cz[ai]-cz[aj]; }
                 double fac = E_raw * d2_ij * d_jk * d_kl;
                 add_grad(grad, ai,  fac*dx,  fac*dy,  fac*dz);
                 add_grad(grad, aj, -fac*dx, -fac*dy, -fac*dz);
             }
             {
-                double dx=cx[aj]-cx[ak], dy=cy[aj]-cy[ak], dz=cz[aj]-cz[ak];
+                double dx, dy, dz;
+                if constexpr (PBC) { dx=lx[1]-lx[2]; dy=ly[1]-ly[2]; dz=lz[1]-lz[2]; }
+                else               { dx=cx[aj]-cx[ak]; dy=cy[aj]-cy[ak]; dz=cz[aj]-cz[ak]; }
                 double fac = E_raw * d_ij * d2_jk * d_kl;
                 add_grad(grad, aj,  fac*dx,  fac*dy,  fac*dz);
                 add_grad(grad, ak, -fac*dx, -fac*dy, -fac*dz);
             }
             {
-                double dx=cx[ak]-cx[al], dy=cy[ak]-cy[al], dz=cz[ak]-cz[al];
+                double dx, dy, dz;
+                if constexpr (PBC) { dx=lx[2]-lx[3]; dy=ly[2]-ly[3]; dz=lz[2]-lz[3]; }
+                else               { dx=cx[ak]-cx[al]; dy=cy[ak]-cy[al]; dz=cz[ak]-cz[al]; }
                 double fac = E_raw * d_ij * d_jk * d2_kl;
                 add_grad(grad, ak,  fac*dx,  fac*dy,  fac*dz);
                 add_grad(grad, al, -fac*dx, -fac*dy, -fac*dz);
@@ -1902,6 +1992,7 @@ __device__ double inversion_angle_grad(
 // Reference: ff_workspace_gfnff.cpp:calcInversions
 // ============================================================================
 
+template <bool PBC>
 __global__ void k_inversions(
     int n,
     const int*    __restrict__ idx_i,
@@ -1939,16 +2030,40 @@ __global__ void k_inversions(
         double rcov_2 = (zk >= 0 && zk < 87) ? d_rcov_d3[zk] * rcov_scale : 1.0 * rcov_scale;
         double rcov_3 = (zl >= 0 && zl < 87) ? d_rcov_d3[zl] * rcov_scale : 1.0 * rcov_scale;
 
+        // Nov 2026 (S1, PBC): local image frame, the centre i at its position and its three neighbours as the
+        // images next to it (slots 0..3 = i, j, k, l; CPU calcInversions). Else: the former statements.
+        [[maybe_unused]] double lx[4], ly[4], lz[4];
+        if constexpr (PBC) {
+            lx[0] = cx[i]; ly[0] = cy[i]; lz[0] = cz[i];
+            micPlace(cx, cy, cz, j, lx[0], ly[0], lz[0], lx[1], ly[1], lz[1]);
+            micPlace(cx, cy, cz, k, lx[0], ly[0], lz[0], lx[2], ly[2], lz[2]);
+            micPlace(cx, cy, cz, l, lx[0], ly[0], lz[0], lx[3], ly[3], lz[3]);
+        }
+
         auto sq_dist3 = [&](int a, int b) {
-            double dx = cx[b] - cx[a];
-            double dy = cy[b] - cy[a];
-            double dz = cz[b] - cz[a];
-            return dx*dx+dy*dy+dz*dz;
+            if constexpr (PBC) {
+                double dx = lx[b] - lx[a];
+                double dy = ly[b] - ly[a];
+                double dz = lz[b] - lz[a];
+                return dx*dx+dy*dy+dz*dz;
+            } else {
+                double dx = cx[b] - cx[a];
+                double dy = cy[b] - cy[a];
+                double dz = cz[b] - cz[a];
+                return dx*dx+dy*dy+dz*dz;
+            }
         };
 
-        double rij_sq = sq_dist3(j, i);
-        double rjk_sq = sq_dist3(j, k);
-        double rjl_sq = sq_dist3(j, l);
+        double rij_sq, rjk_sq, rjl_sq;
+        if constexpr (PBC) {
+            rij_sq = sq_dist3(1, 0);
+            rjk_sq = sq_dist3(1, 2);
+            rjl_sq = sq_dist3(1, 3);
+        } else {
+            rij_sq = sq_dist3(j, i);
+            rjk_sq = sq_dist3(j, k);
+            rjl_sq = sq_dist3(j, l);
+        }
 
         auto calc_damp = [&](double rsq, double ra, double rb) -> double {
             double sum = ra + rb;
@@ -1964,7 +2079,11 @@ __global__ void k_inversions(
         double damp    = damp_ij * damp_jk * damp_jl;
 
         double derivate[4][3];
-        double omega = inversion_angle_grad(cx, cy, cz, i, j, k, l, derivate, true);
+        double omega;
+        if constexpr (PBC)
+            omega = inversion_angle_grad(lx, ly, lz, 0, 1, 2, 3, derivate, true);
+        else
+            omega = inversion_angle_grad(cx, cy, cz, i, j, k, l, derivate, true);
         double cos_om  = cos(omega);
         double cos_om0 = cos(omega0[tid]);
 
@@ -2007,19 +2126,25 @@ __global__ void k_inversions(
         // Damping gradient: peripheral atom gets +fac*d, hub (j) gets -fac*d
         // Matches Fortran gfnff_engrad.F90:1382-1385 and CPU CalculateGFNFFInversionContribution
         {
-            double dx=cx[i]-cx[j], dy=cy[i]-cy[j], dz=cz[i]-cz[j];
+            double dx, dy, dz;
+            if constexpr (PBC) { dx=lx[0]-lx[1]; dy=ly[0]-ly[1]; dz=lz[0]-lz[1]; }
+            else               { dx=cx[i]-cx[j]; dy=cy[i]-cy[j]; dz=cz[i]-cz[j]; }
             double fac = E_raw * dd_ij * damp_jk * damp_jl;
             add_grad(grad, i,  fac*dx,  fac*dy,  fac*dz);
             add_grad(grad, j, -fac*dx, -fac*dy, -fac*dz);
         }
         {
-            double dx=cx[k]-cx[j], dy=cy[k]-cy[j], dz=cz[k]-cz[j];
+            double dx, dy, dz;
+            if constexpr (PBC) { dx=lx[2]-lx[1]; dy=ly[2]-ly[1]; dz=lz[2]-lz[1]; }
+            else               { dx=cx[k]-cx[j]; dy=cy[k]-cy[j]; dz=cz[k]-cz[j]; }
             double fac = E_raw * damp_ij * dd_jk * damp_jl;
             add_grad(grad, k,  fac*dx,  fac*dy,  fac*dz);
             add_grad(grad, j, -fac*dx, -fac*dy, -fac*dz);
         }
         {
-            double dx=cx[l]-cx[j], dy=cy[l]-cy[j], dz=cz[l]-cz[j];
+            double dx, dy, dz;
+            if constexpr (PBC) { dx=lx[3]-lx[1]; dy=ly[3]-ly[1]; dz=lz[3]-lz[1]; }
+            else               { dx=cx[l]-cx[j]; dy=cy[l]-cy[j]; dz=cz[l]-cz[j]; }
             double fac = E_raw * damp_ij * damp_jk * dd_jl;
             add_grad(grad, l,  fac*dx,  fac*dy,  fac*dz);
             add_grad(grad, j, -fac*dx, -fac*dy, -fac*dz);
@@ -2027,6 +2152,21 @@ __global__ void k_inversions(
     }
 
     blockReduceAddEnergy(local_E, energy);
+}
+
+// Claude Generated (Nov 2026, A2; mirror of the CUDA gfnffUploadCell of S1): cell (column-major, Bohr), its inverse and
+// the PBC flag into the constant symbols d_lattice / d_lattice_inv / d_has_pbc; returns the status of the copies, which
+// FFWorkspaceHip::setUnitCell() checks. This file is a single translation unit, so the CUDA trap (a copy through an
+// `extern __constant__` declaration of another unit failed silently) cannot occur here; the status is checked anyway.
+static hipError_t gfnffUploadCellHip(const double* lattice_9, const double* lattice_inv_9, int has_pbc)
+{
+    if (has_pbc) {
+        hipError_t e = hipMemcpyToSymbol(HIP_SYMBOL(d_lattice), lattice_9, 9 * sizeof(double));
+        if (e != hipSuccess) return e;
+        e = hipMemcpyToSymbol(HIP_SYMBOL(d_lattice_inv), lattice_inv_9, 9 * sizeof(double));
+        if (e != hipSuccess) return e;
+    }
+    return hipMemcpyToSymbol(HIP_SYMBOL(d_has_pbc), &has_pbc, sizeof(int));
 }
 
 // ============================================================================
@@ -2101,6 +2241,7 @@ __device__ __forceinline__ double d_charge_scaling(double q, double st, double s
 // Reference: ff_workspace_gfnff.cpp:calcSTorsions (lines 611-648)
 // ============================================================================
 
+template <bool PBC>
 __global__ void k_storsions(
     int n,
     const int*    __restrict__ idx_i,
@@ -2120,8 +2261,16 @@ __global__ void k_storsions(
     if (tid < n) {
         int ai = idx_i[tid], aj = idx_j[tid], ak = idx_k[tid], al = idx_l[tid];
 
+        // Nov 2026 (S1, PBC): local image frame as in k_dihedrals (CPU calcSTorsions, placeChainOfFour)
         double derivate[4][3];
-        double phi = dihedral_angle_grad(cx, cy, cz, ai, aj, ak, al, derivate, true);
+        double phi;
+        if constexpr (PBC) {
+            double lx[4], ly[4], lz[4];
+            micChainOfFour(cx, cy, cz, ai, aj, ak, al, lx, ly, lz);
+            phi = dihedral_angle_grad(lx, ly, lz, 0, 1, 2, 3, derivate, true);
+        } else {
+            phi = dihedral_angle_grad(cx, cy, cz, ai, aj, ak, al, derivate, true);
+        }
 
         double eref = erefhalf[tid];
         local_E = -eref * cos(2.0 * phi) + eref;
@@ -2426,6 +2575,7 @@ __global__ void k_atm(
 // Reference: ff_workspace_gfnff.cpp:calcHalogenBonds (lines 1402-1510)
 // ============================================================================
 
+template <bool PBC>
 __global__ void k_xbonds(
     int n,
     const int*    __restrict__ idx_i,
@@ -2456,13 +2606,25 @@ __global__ void k_xbonds(
 
         int A = idx_i[tid], X = idx_j[tid], B = idx_k[tid];
 
-        double ax = cx[A], ay = cy[A], az = cz[A];
-        double xx = cx[X], xy = cy[X], xz = cz[X];
-        double bx = cx[B], by = cy[B], bz = cz[B];
-
-        double rAX_x = xx-ax, rAX_y = xy-ay, rAX_z = xz-az; applyMIC(rAX_x, rAX_y, rAX_z);
-        double rXB_x = bx-xx, rXB_y = by-xy, rXB_z = bz-xz; applyMIC(rXB_x, rXB_y, rXB_z);
-        double rAB_x = bx-ax, rAB_y = by-ay, rAB_z = bz-az; applyMIC(rAB_x, rAB_y, rAB_z);
+        // Nov 2026 (S1, PBC): local image frame anchored on X, A and B as the images next to X (CPU
+        // calcHalogenBonds, A4b). Else: the former statements (three minimum-image vectors).
+        double ax, ay, az, xx, xy, xz, bx, by, bz;
+        double rAX_x, rAX_y, rAX_z, rXB_x, rXB_y, rXB_z, rAB_x, rAB_y, rAB_z;
+        if constexpr (PBC) {
+            xx = cx[X]; xy = cy[X]; xz = cz[X];
+            micPlace(cx, cy, cz, A, xx, xy, xz, ax, ay, az);
+            micPlace(cx, cy, cz, B, xx, xy, xz, bx, by, bz);
+            rAX_x = xx-ax; rAX_y = xy-ay; rAX_z = xz-az;
+            rXB_x = bx-xx; rXB_y = by-xy; rXB_z = bz-xz;
+            rAB_x = bx-ax; rAB_y = by-ay; rAB_z = bz-az;
+        } else {
+            ax = cx[A]; ay = cy[A]; az = cz[A];
+            xx = cx[X]; xy = cy[X]; xz = cz[X];
+            bx = cx[B]; by = cy[B]; bz = cz[B];
+            rAX_x = xx-ax; rAX_y = xy-ay; rAX_z = xz-az; applyMIC(rAX_x, rAX_y, rAX_z);
+            rXB_x = bx-xx; rXB_y = by-xy; rXB_z = bz-xz; applyMIC(rXB_x, rXB_y, rXB_z);
+            rAB_x = bx-ax; rAB_y = by-ay; rAB_z = bz-az; applyMIC(rAB_x, rAB_y, rAB_z);
+        }
 
         double r2AX = rAX_x*rAX_x + rAX_y*rAX_y + rAX_z*rAX_z;
         double r2XB = rXB_x*rXB_x + rXB_y*rXB_y + rXB_z*rXB_z;
@@ -2726,6 +2888,7 @@ __global__ void k_hb_charge_scaling(
     }
 }
 
+template <bool PBC>
 __global__ void k_hbonds(
     int n,
     const int*    __restrict__ idx_i,
@@ -2791,13 +2954,26 @@ __global__ void k_hbonds(
     int A = idx_i[tid], H = idx_j[tid], B = idx_k[tid];
     int ct = case_type[tid];
 
-    double ax = cx[A], ay = cy[A], az = cz[A];
-    double hx = cx[H], hy = cy[H], hz = cz[H];
-    double bx = cx[B], by = cy[B], bz = cz[B];
-
-    double rAH_x = hx-ax, rAH_y = hy-ay, rAH_z = hz-az; applyMIC(rAH_x, rAH_y, rAH_z);
-    double rHB_x = bx-hx, rHB_y = by-hy, rHB_z = bz-hz; applyMIC(rHB_x, rHB_y, rHB_z);
-    double rAB_x = bx-ax, rAB_y = by-ay, rAB_z = bz-az; applyMIC(rAB_x, rAB_y, rAB_z);
+    // Nov 2026 (S1, PBC): local image frame anchored on H (CPU calcHydrogenBonds, A4b): A and B as the images
+    // next to H, below the neighbours of B and the acceptor parent C next to B, the neighbours D of C next to C.
+    // Else: the former statements (three minimum-image vectors, neighbours read as they are).
+    double ax, ay, az, hx, hy, hz, bx, by, bz;
+    double rAH_x, rAH_y, rAH_z, rHB_x, rHB_y, rHB_z, rAB_x, rAB_y, rAB_z;
+    if constexpr (PBC) {
+        hx = cx[H]; hy = cy[H]; hz = cz[H];
+        micPlace(cx, cy, cz, A, hx, hy, hz, ax, ay, az);
+        micPlace(cx, cy, cz, B, hx, hy, hz, bx, by, bz);
+        rAH_x = hx-ax; rAH_y = hy-ay; rAH_z = hz-az;
+        rHB_x = bx-hx; rHB_y = by-hy; rHB_z = bz-hz;
+        rAB_x = bx-ax; rAB_y = by-ay; rAB_z = bz-az;
+    } else {
+        ax = cx[A]; ay = cy[A]; az = cz[A];
+        hx = cx[H]; hy = cy[H]; hz = cz[H];
+        bx = cx[B]; by = cy[B]; bz = cz[B];
+        rAH_x = hx-ax; rAH_y = hy-ay; rAH_z = hz-az; applyMIC(rAH_x, rAH_y, rAH_z);
+        rHB_x = bx-hx; rHB_y = by-hy; rHB_z = bz-hz; applyMIC(rHB_x, rHB_y, rHB_z);
+        rAB_x = bx-ax; rAB_y = by-ay; rAB_z = bz-az; applyMIC(rAB_x, rAB_y, rAB_z);
+    }
 
     double r2AH = rAH_x*rAH_x + rAH_y*rAH_y + rAH_z*rAH_z;
     double r2HB = rHB_x*rHB_x + rHB_y*rHB_y + rHB_z*rHB_z;
@@ -2857,7 +3033,9 @@ __global__ void k_hbonds(
         double hbnbcut_save = (eB + 1 == 7 && nb_cnt == 1) ? 2.0 : HB_NBCUT_D;
         for (int ni = 0; ni < nb_cnt; ++ni) {
             int nb = nb_B_flat[nb_off + ni];
-            double nbx = cx[nb], nby = cy[nb], nbz = cz[nb];
+            double nbx, nby, nbz;
+            if constexpr (PBC) micPlace(cx, cy, cz, nb, bx, by, bz, nbx, nby, nbz);   // neighbour next to B
+            else { nbx = cx[nb]; nby = cy[nb]; nbz = cz[nb]; }
             double dAnb_x = nbx-ax, dAnb_y = nby-ay, dAnb_z = nbz-az;
             double dBnb_x = nbx-bx, dBnb_y = nby-by, dBnb_z = nbz-bz;
             double r_Anb = sqrt(dAnb_x*dAnb_x + dAnb_y*dAnb_y + dAnb_z*dAnb_z);
@@ -2882,9 +3060,17 @@ __global__ void k_hbonds(
         if (nb_cnt > 0) {
             for (int ni = 0; ni < nb_cnt; ++ni) {
                 int nb = nb_B_flat[nb_off + ni];
-                lp_vx_c4 += cx[nb] - bx;
-                lp_vy_c4 += cy[nb] - by;
-                lp_vz_c4 += cz[nb] - bz;
+                if constexpr (PBC) {
+                    double nbx, nby, nbz;
+                    micPlace(cx, cy, cz, nb, bx, by, bz, nbx, nby, nbz);   // neighbour next to B
+                    lp_vx_c4 += nbx - bx;
+                    lp_vy_c4 += nby - by;
+                    lp_vz_c4 += nbz - bz;
+                } else {
+                    lp_vx_c4 += cx[nb] - bx;
+                    lp_vy_c4 += cy[nb] - by;
+                    lp_vz_c4 += cz[nb] - bz;
+                }
             }
             vnorm_c4 = sqrt(lp_vx_c4*lp_vx_c4 + lp_vy_c4*lp_vy_c4 + lp_vz_c4*lp_vz_c4);
             if (vnorm_c4 > 1e-10) {
@@ -2916,11 +3102,14 @@ __global__ void k_hbonds(
     double eangl = 1.0, etors = 1.0;
     if (ct == 3 && acceptor_parent[tid] >= 0) {
         int C_idx = acceptor_parent[tid];
-        int B_idx = B, H_idx = H;
+
+        // PBC: C next to B (frame); the D-B-C-H chain below reads slots 0..3 = D, B, C, H with D next to C
+        double C_x, C_y, C_z;
+        if constexpr (PBC) micPlace(cx, cy, cz, C_idx, bx, by, bz, C_x, C_y, C_z);
+        else { C_x = cx[C_idx]; C_y = cy[C_idx]; C_z = cz[C_idx]; }
 
         // eangl: angle bending H...B=C
         {
-            double C_x = cx[C_idx], C_y = cy[C_idx], C_z = cz[C_idx];
             double vab_x = C_x-bx, vab_y = C_y-by, vab_z = C_z-bz;
             double vcb_x = hx-bx, vcb_y = hy-by, vcb_z = hz-bz;
             double rab2a = vab_x*vab_x + vab_y*vab_y + vab_z*vab_z;
@@ -2949,10 +3138,17 @@ __global__ void k_hbonds(
         int nc_cnt = nb_C_count[tid];
         for (int ni = 0; ni < nc_cnt; ++ni) {
             int D_idx = nb_C_flat[nc_off + ni];
-            if (D_idx == B_idx) continue;
+            if (D_idx == B) continue;
 
             double derivate[4][3];
-            double phi = dihedral_angle_grad(cx, cy, cz, D_idx, B_idx, C_idx, H_idx, derivate, false);
+            double phi;
+            if constexpr (PBC) {
+                double tx[4] = { 0.0, bx, C_x, hx }, ty[4] = { 0.0, by, C_y, hy }, tz[4] = { 0.0, bz, C_z, hz };
+                micPlace(cx, cy, cz, D_idx, C_x, C_y, C_z, tx[0], ty[0], tz[0]);   // D next to C
+                phi = dihedral_angle_grad(tx, ty, tz, 0, 1, 2, 3, derivate, false);
+            } else {
+                phi = dihedral_angle_grad(cx, cy, cz, D_idx, B, C_idx, H, derivate, false);
+            }
 
             double tshift = TORS_HB_D;
             double fc_tors = (1.0 - tshift) / 2.0;
@@ -3048,7 +3244,9 @@ __global__ void k_hbonds(
             double hbnbcut_g = (eB + 1 == 7 && nb_cnt == 1) ? 2.0 : HB_NBCUT_D;
             for (int ni = 0; ni < nb_cnt; ++ni) {
                 int nb = nb_B_flat[nb_off + ni];
-                double nbx = cx[nb], nby = cy[nb], nbz = cz[nb];
+                double nbx, nby, nbz;
+                if constexpr (PBC) micPlace(cx, cy, cz, nb, bx, by, bz, nbx, nby, nbz);   // neighbour next to B (as above)
+                else { nbx = cx[nb]; nby = cy[nb]; nbz = cz[nb]; }
                 double dranb_x = ax-nbx, dranb_y = ay-nby, dranb_z = az-nbz;
                 double drbnb_x = bx-nbx, drbnb_y = by-nby, drbnb_z = bz-nbz;
                 double ranb, rbnb;
@@ -3094,8 +3292,10 @@ __global__ void k_hbonds(
         if (ct == 3 && acceptor_parent[tid] >= 0) {
             int C_idx = acceptor_parent[tid];
             double bterm_c3 = -rdamp * qhoutl * etors * acidity_A[tid] * basicity_B[tid] * Q_A * Q_B * global_scale;
-            // Angle gradient: H...B=C angle
-            double C_x = cx[C_idx], C_y = cy[C_idx], C_z = cz[C_idx];
+            // Angle gradient: H...B=C angle (PBC: C next to B, the frame of the energy part)
+            double C_x, C_y, C_z;
+            if constexpr (PBC) micPlace(cx, cy, cz, C_idx, bx, by, bz, C_x, C_y, C_z);
+            else { C_x = cx[C_idx]; C_y = cy[C_idx]; C_z = cz[C_idx]; }
             double vab_x = C_x-bx, vab_y = C_y-by, vab_z = C_z-bz;
             double vcb_x = hx-bx, vcb_y = hy-by, vcb_z = hz-bz;
             double rab2a = vab_x*vab_x + vab_y*vab_y + vab_z*vab_z;
@@ -3170,7 +3370,14 @@ __global__ void k_hbonds(
                 }
 
                 double derivate[4][3];
-                double phi = dihedral_angle_grad(cx, cy, cz, D_idx, B, C_idx, H, derivate, true);
+                double phi;
+                if constexpr (PBC) {
+                    double tx[4] = { 0.0, bx, C_x, hx }, ty[4] = { 0.0, by, C_y, hy }, tz[4] = { 0.0, bz, C_z, hz };
+                    micPlace(cx, cy, cz, D_idx, C_x, C_y, C_z, tx[0], ty[0], tz[0]);   // D next to C
+                    phi = dihedral_angle_grad(tx, ty, tz, 0, 1, 2, 3, derivate, true);
+                } else {
+                    phi = dihedral_angle_grad(cx, cy, cz, D_idx, B, C_idx, H, derivate, true);
+                }
 
                 double tshift = TORS_HB_D;
                 double fc_tors = (1.0 - tshift) / 2.0;
@@ -4053,6 +4260,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_count(
     double dx = cx[i] - cx[j];
     double dy = cy[i] - cy[j];
     double dz = cz[i] - cz[j];
+    applyMIC(dx, dy, dz);   // Nov 2026 (S1): pair once at its minimum-image distance (host generator, A3b)
     double r2 = dx * dx + dy * dy + dz * dz;
     if (r2 > cutoff_sq) return;
 
@@ -4099,6 +4307,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_build(
     double dx = cx[i] - cx[j];
     double dy = cy[i] - cy[j];
     double dz = cz[i] - cz[j];
+    applyMIC(dx, dy, dz);   // Nov 2026 (S1): same test as k_disp_pairs_count
     double r2 = dx * dx + dy * dy + dz * dz;
     if (r2 > cutoff_sq) return;
 
@@ -4144,9 +4353,10 @@ __device__ inline bool dispPairInList(int i, int j,
     const int zi = atom_types[i];
     const int zj = atom_types[j];
     if (zi < 1 || zi > D4_MAX_ELEM || zj < 1 || zj > D4_MAX_ELEM) return false;
-    const double dx = cx[i] - cx[j];
-    const double dy = cy[i] - cy[j];
-    const double dz = cz[i] - cz[j];
+    double dx = cx[i] - cx[j];
+    double dy = cy[i] - cy[j];
+    double dz = cz[i] - cz[j];
+    applyMIC(dx, dy, dz);   // Nov 2026 (S1, Claude Generated): same minimum-image test as k_disp_pairs_count
     const double r2 = dx * dx + dy * dy + dz * dz;
     return !(r2 > cutoff_sq);
 }
@@ -4333,7 +4543,8 @@ __device__ inline bool repPairInListHip(int N, int i, int j, const double* __res
                                         double cutoff_sq, const RepDevTablesHip& t)
 {
     if (!t.valid[i] || !t.valid[j]) return false;
-    const double dx = cx[i] - cx[j], dy = cy[i] - cy[j], dz = cz[i] - cz[j];
+    double dx = cx[i] - cx[j], dy = cy[i] - cy[j], dz = cz[i] - cz[j];
+    applyMIC(dx, dy, dz);   // Nov 2026 (S1): minimum-image build distance (host periodic SpatialCellList, A4a)
     if (dx * dx + dy * dy + dz * dz > cutoff_sq) return false;
     return repKeyFindHip(t.bond_keys, t.n_bond_keys, static_cast<long long>(i) * N + j) < 0;
 }
@@ -4469,7 +4680,8 @@ __device__ __forceinline__ bool d_hb_bonded(int a, int b, const int* __restrict_
 __device__ __forceinline__ double d_hb_dist2(const double* __restrict__ cx, const double* __restrict__ cy,
                                               const double* __restrict__ cz, int a, int b)
 {
-    const double dx = cx[a] - cx[b], dy = cy[a] - cy[b], dz = cz[a] - cz[b];
+    double dx = cx[a] - cx[b], dy = cy[a] - cy[b], dz = cz[a] - cz[b];
+    applyMIC(dx, dy, dz);   // Nov 2026 (S1): minimum-image search distances (host detection, A4b)
     return dx * dx + dy * dy + dz * dz;
 }
 
@@ -4479,9 +4691,13 @@ __device__ double d_hb_case1_strength(const double* __restrict__ cx, const doubl
                                        const double* __restrict__ bas, const double* __restrict__ aci,
                                        const double* __restrict__ q, int A, int H, int B, double thr)
 {
-    const double r_AH = sqrt(d_hb_dist2(cx, cy, cz, A, H));
-    const double r_HB = sqrt(d_hb_dist2(cx, cy, cz, H, B));
-    const double r_AB = sqrt(d_hb_dist2(cx, cy, cz, A, B));
+    // Nov 2026 (S1): the kernel frame of the host estimate, A and B as the images next to H
+    double ax, ay, az, bx, by, bz;
+    micPlace(cx, cy, cz, A, cx[H], cy[H], cz[H], ax, ay, az);
+    micPlace(cx, cy, cz, B, cx[H], cy[H], cz[H], bx, by, bz);
+    const double r_AH = sqrt((cx[H] - ax) * (cx[H] - ax) + (cy[H] - ay) * (cy[H] - ay) + (cz[H] - az) * (cz[H] - az));
+    const double r_HB = sqrt((bx - cx[H]) * (bx - cx[H]) + (by - cy[H]) * (by - cy[H]) + (bz - cz[H]) * (bz - cz[H]));
+    const double r_AB = sqrt((bx - ax) * (bx - ax) + (by - ay) * (by - ay) + (bz - az) * (bz - az));
     const double r_vdw = d_cov_radii[Z[A] - 1] + d_cov_radii[Z[B] - 1];
     // Upper bound first (case1StrengthDecision() of the host): no pow, rejects most candidates. Valid for
     // non-negative basicities and acidities; returns 0 when the bound is below the threshold.
@@ -4544,6 +4760,7 @@ __device__ __forceinline__ int d_hb_strength_decision_f(
     const int* __restrict__ Z, const double* __restrict__ bas, const double* __restrict__ aci,
     const double* __restrict__ q, int A, int H, int B, float thr)
 {
+    if (d_has_pbc) return 0;                   // Nov 2026 (S1): plain float coordinates carry no image; the double path decides
     const float ax = fx[H] - fx[A], ay = fy[H] - fy[A], az = fz[H] - fz[A];
     const float hx = fx[B] - fx[H], hy = fy[B] - fy[H], hz = fz[B] - fz[H];
     const float bx = fx[B] - fx[A], by = fy[B] - fy[A], bz = fz[B] - fz[A];
@@ -4704,7 +4921,9 @@ __global__ __launch_bounds__(HB_DETECT_THREADS) void k_hb_detect_rows(
             const float ax = hp.x - fxi, ay = hp.y - fyi, az = hp.z - fzi;
             const float f_ih = ax * ax + ay * ay + az * az;
             const float bx = hp.x - fxj, by = hp.y - fyj, bz = hp.z - fzj;
-            if (!(f_ih > f_reject) && !(f_rab + f_ih + (bx * bx + by * by + bz * bz) > f_reject))
+            // Nov 2026 (A2, Claude Generated): the float pre-filter carries no image; with a cell every hydrogen is
+            // queued and the double test of exact() alone decides (CUDA S1 k_hb_detect)
+            if (d_has_pbc || (!(f_ih > f_reject) && !(f_rab + f_ih + (bx * bx + by * by + bz * bz) > f_reject)))
                 s_queue[atomicAdd(&s_qn, 1)] = hq;
         }
         __syncthreads();
@@ -4737,6 +4956,74 @@ __global__ __launch_bounds__(HB_DETECT_THREADS) void k_hb_detect_rows(
 constexpr int HB_SCAN_THREADS = 256;
 constexpr int HB_SCAN_ITEMS = 4;
 constexpr int HB_SCAN_TILE = HB_SCAN_THREADS * HB_SCAN_ITEMS;
+
+// ============================================================================
+// Homogeneous long-range D4 tail on the device (WP-PERIODIC-NONBONDED A3c, S1) - Claude Generated (Nov 2026)
+// Mirror of D4ParameterGenerator::homogeneousDispersionTail(): beyond the evaluation radius r_c every atom j
+// has images with density 1/V, so
+//   E_tail = pref6 * S6 + pref8 * S8,  pref6 = -(2 pi/V)/(3 r_c^3),  pref8 = -(2 pi/V) 2/(5 r_c^5),
+//   S6 = sum_ij zeta_i zeta_j C6_ij,  S8 = sum_ij zeta_i zeta_j (3 sqz_i sqz_j) C6_ij   (all ordered pairs, i = j too),
+// factorised per partner element slot s and reference b: W[s][b] = sum_{j in s} zeta_j w_j[b] (k_d4_tail_W, one
+// thread per (s, b), atoms in index order: deterministic), then per atom i (k_d4_tail_atoms, same loop order as
+// the CPU): c6sum_i = sum_s sum_a w_i[a] sum_b C6ref(Z_i,a; Z_s,b) W[s][b], dE/dCN_i = 2 zeta_i (pref6 d6 + pref8
+// r4 d8) with the weight derivatives in place of w_i[a]. The energy is summed per atom in fixed point
+// (blockReduceAddEnergy, slot E_DISP_TAIL), dE/dCN by fix_add into d_dEdcn before the CN chain rule. Differs
+// from the CPU by the summation order of S6/S8 only (per-atom partials instead of two running sums).
+// ============================================================================
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_d4_tail_W(
+    int N, int K, const int* __restrict__ slot_of_atom, const int* __restrict__ nref_slot,
+    const double* __restrict__ zeta, const double* __restrict__ gw, double* __restrict__ W)
+{
+    const int t = blockIdx.x * blockDim.x + threadIdx.x;   // t = s * D4_MAX_REF + b
+    if (t >= K * D4_MAX_REF) return;
+    const int s = t / D4_MAX_REF, b = t % D4_MAX_REF;
+    double acc = 0.0;
+    if (b < nref_slot[s])
+        for (int j = 0; j < N; ++j)
+            if (slot_of_atom[j] == s) acc += zeta[j] * gw[j * D4_MAX_REF + b];
+    W[t] = acc;
+}
+
+__global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_d4_tail_atoms(
+    int N, int K, const int* __restrict__ slot_of_atom, const int* __restrict__ slot_elem,
+    const int* __restrict__ nref_slot, const double* __restrict__ sqz_slot, const double* __restrict__ zeta,
+    const double* __restrict__ gw, const double* __restrict__ dgw, const double* __restrict__ c6_flat,
+    const double* __restrict__ W, double pref6, double pref8, int want_grad,
+    double* __restrict__ dEdcn, double* __restrict__ energy)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    double local_E = 0.0;
+    if (i < N) {
+        const int si = slot_of_atom[i];
+        const int ei = slot_elem[si] - 1;
+        const int na = nref_slot[si];
+        double c6sum = 0.0, c8sum = 0.0, d6sum = 0.0, d8sum = 0.0;
+        for (int s = 0; s < K; ++s) {
+            const size_t base = static_cast<size_t>(ei) * D4_MAX_ELEM * D4_MAX_REF * D4_MAX_REF
+                              + static_cast<size_t>(slot_elem[s] - 1) * D4_MAX_REF * D4_MAX_REF;
+            const double* Ws = W + s * D4_MAX_REF;
+            const int nb = nref_slot[s];
+            double c = 0.0, d = 0.0;
+            for (int a = 0; a < na; ++a) {
+                double h = 0.0;
+                const double* row = c6_flat + base + static_cast<size_t>(a) * D4_MAX_REF;
+                for (int b = 0; b < nb; ++b) h += row[b] * Ws[b];
+                c += gw[i * D4_MAX_REF + a] * h;
+                if (want_grad) d += dgw[i * D4_MAX_REF + a] * h;
+            }
+            c6sum += c;
+            c8sum += sqz_slot[s] * c;
+            d6sum += d;
+            d8sum += sqz_slot[s] * d;
+        }
+        const double zi = zeta[i];
+        const double r4 = 3.0 * sqz_slot[si];
+        local_E = pref6 * (zi * c6sum) + pref8 * (zi * r4 * c8sum);
+        if (want_grad)
+            acc_add(&dEdcn[i], 2.0 * zi * (pref6 * d6sum + pref8 * r4 * d8sum), GFNFF_FIX_FORCE);   // HIP: fixed point or FP64 (WP10)
+    }
+    blockReduceAddEnergy(local_E, energy);
+}
 
 /// Exclusive prefix of v over the workgroup (HB_SCAN_THREADS threads); *total receives the sum.
 __device__ inline int hbBlockExclusiveScan(int v, int* s, int* total)
@@ -6713,9 +7000,24 @@ struct FFWorkspaceHipImpl {
         E_DISP = 0, E_BREP = 1, E_NBREP = 2, E_COUL = 3, E_BOND = 4,
         E_ANGLE = 5, E_DIHED = 6, E_INV = 7, E_STORS = 8, E_BATM = 9,
         E_ATM = 10, E_XBOND = 11, E_HBOND = 12, E_COUL_SELF = 13,
-        N_ENERGY_SLOTS = 14
+        E_DISP_TAIL = 14,   ///< A2 (Nov 2026, CUDA S1): homogeneous D4 tail (periodic cell only)
+        N_ENERGY_SLOTS = 15
     };
     CudaBuffer<double> d_energies;      ///< [N_ENERGY_SLOTS] all per-term energies
+
+    // A2 (Nov 2026, Claude Generated; CUDA S1): homogeneous D4 tail (setDispersionTail): per-atom element slot,
+    // per-slot tables, W[K*MAX_REF]
+    bool               tail_active = false;
+    int                tail_K = 0;
+    double             tail_pref6 = 0.0, tail_pref8 = 0.0;
+    CudaBuffer<int>    d_tail_slot_of_atom, d_tail_slot_elem, d_tail_nref;
+    CudaBuffer<double> d_tail_sqz, d_tail_zeta, d_tail_W;
+
+    // A2 (Nov 2026, Claude Generated): cell state of this workspace (setUnitCell). pbc_active selects the k_*<true>
+    // image-frame kernels; h_lat / h_lat_inv (column-major, Bohr) serve the host displacement tests of the
+    // single-stream mode (hostDisplacementExceeded), which must not count a wrap as motion either.
+    bool               pbc_active = false;
+    double             h_lat[9] = {}, h_lat_inv[9] = {};
 
     // Phase 2: GPU dc6dcn per-pair computation (Claude Generated March 2026)
     // Gaussian weights and C6 reference table for on-GPU dc6dcn computation.
@@ -8434,15 +8736,102 @@ void FFWorkspaceHip::setRepulsionEnabled(bool v)    { m_repulsion_enabled = v; }
 void FFWorkspaceHip::setCoulombEnabled(bool v)      { m_coulomb_enabled = v; }
 
 /// Claude Generated (April 2026): Upload unit cell to GPU constant memory for PBC.
-/// cell_bohr_9 and cell_bohr_inv_9 are column-major 3×3 matrices (9 doubles each).
+/// cell_bohr_9 and cell_bohr_inv_9 are column-major 3x3 matrices (9 doubles each).
 /// Zero overhead when has_pbc==false because applyMIC() returns immediately.
 void FFWorkspaceHip::setUnitCell(const double* cell_bohr_9, const double* cell_bohr_inv_9, bool has_pbc)
 {
-    hipMemcpyToSymbol(HIP_SYMBOL(d_lattice),     cell_bohr_9,     9 * sizeof(double));
-    hipMemcpyToSymbol(HIP_SYMBOL(d_lattice_inv), cell_bohr_inv_9, 9 * sizeof(double));
-    int flag = has_pbc ? 1 : 0;
-    hipMemcpyToSymbol(HIP_SYMBOL(d_has_pbc), &flag, sizeof(int));
+    // A2 (Nov 2026, Claude Generated; mirror of FFWorkspaceGPU::setUnitCell of S1): the constant symbols are one state
+    // per device for the whole process; two workspaces (one with a cell, one without) must not inherit each other's
+    // state, so the wrapper sets them before each step. The copy is skipped while the device state is already the
+    // requested one (no per-step cost for the non-periodic path); the status of the copies is checked.
+    struct CellState { int device = -1; int flag = -1; double L[9] = {}; double Linv[9] = {}; };
+    static CellState s_last[16];
+    static std::mutex s_mutex;
+    const int flag = has_pbc ? 1 : 0;
+    int dev = 0;
+    hipGetDevice(&dev);
+    CellState* st = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(s_mutex);
+        for (auto& c : s_last)
+            if (c.device == dev) { st = &c; break; }
+        if (!st)
+            for (auto& c : s_last)
+                if (c.device < 0) { st = &c; st->device = dev; break; }
+        bool same = st && st->flag == flag;
+        if (same && has_pbc)
+            same = std::memcmp(st->L, cell_bohr_9, 9 * sizeof(double)) == 0
+                && std::memcmp(st->Linv, cell_bohr_inv_9, 9 * sizeof(double)) == 0;
+        if (!same) {
+            checkCuda(gfnffUploadCellHip(cell_bohr_9, cell_bohr_inv_9, flag), "setUnitCell: cell symbols upload");
+            if (st) {
+                st->flag = flag;
+                if (has_pbc) {
+                    std::memcpy(st->L, cell_bohr_9, 9 * sizeof(double));
+                    std::memcpy(st->Linv, cell_bohr_inv_9, 9 * sizeof(double));
+                }
+            }
+        }
+    }
+    m_impl->pbc_active = has_pbc;
+    if (has_pbc) {
+        std::memcpy(m_impl->h_lat, cell_bohr_9, 9 * sizeof(double));
+        std::memcpy(m_impl->h_lat_inv, cell_bohr_inv_9, 9 * sizeof(double));
+    }
 }
+
+void FFWorkspaceHip::setDispersionTail(bool active, double rc_bohr, double volume_bohr3,
+                                       const std::vector<double>& zeta_atom, const std::vector<int>& atom_types,
+                                       const std::vector<double>& sqrtzr4r2, const std::vector<int>& refn)
+{
+    // A2 (Nov 2026, Claude Generated; mirror of FFWorkspaceGPU::setDispersionTail, S1): tables of k_d4_tail_W /
+    // k_d4_tail_atoms, the slot layout of D4ParameterGenerator::homogeneousDispersionTail() (elements in order of
+    // first appearance).
+    auto& impl = *m_impl;
+    const int N = m_natoms;
+    impl.tail_active = false;
+    if (!active || N <= 0 || !(rc_bohr > 0.0) || !(volume_bohr3 > 0.0)
+        || static_cast<int>(zeta_atom.size()) != N || static_cast<int>(atom_types.size()) != N)
+        return;
+    std::vector<int> slot_of_atom(N), slot_elem;
+    std::vector<int> slot(D4_MAX_ELEM + 1, -1);
+    for (int i = 0; i < N; ++i) {
+        const int Z = atom_types[i];
+        if (Z < 1 || Z > D4_MAX_ELEM) return;   // the pair list skips such atoms; the tail stays off, as on the CPU
+        if (slot[Z] < 0) { slot[Z] = static_cast<int>(slot_elem.size()); slot_elem.push_back(Z); }
+        slot_of_atom[i] = slot[Z];
+    }
+    const int K = static_cast<int>(slot_elem.size());
+    std::vector<int> nref(K);
+    std::vector<double> sqz(K);
+    for (int s = 0; s < K; ++s) {
+        const int e = slot_elem[s] - 1;
+        nref[s] = std::min<int>(e < static_cast<int>(refn.size()) ? refn[e] : 0, D4_MAX_REF);
+        sqz[s] = e < static_cast<int>(sqrtzr4r2.size()) ? sqrtzr4r2[e] : 0.0;
+    }
+    impl.d_tail_slot_of_atom.upload(slot_of_atom.data(), N);
+    impl.d_tail_slot_elem.upload(slot_elem.data(), K);
+    impl.d_tail_nref.upload(nref.data(), K);
+    impl.d_tail_sqz.upload(sqz.data(), K);
+    impl.d_tail_zeta.upload(zeta_atom.data(), N);
+    if (impl.d_tail_W.n < K * D4_MAX_REF) impl.d_tail_W.alloc(K * D4_MAX_REF);
+    const double pi = 3.14159265358979323846;
+    const double rc3 = rc_bohr * rc_bohr * rc_bohr;
+    const double rc5 = rc3 * rc_bohr * rc_bohr;
+    impl.tail_pref6 = -(2.0 * pi / volume_bohr3) / (3.0 * rc3);
+    impl.tail_pref8 = -(2.0 * pi / volume_bohr3) * 2.0 / (5.0 * rc5);
+    impl.tail_K = K;
+    impl.tail_active = true;
+}
+
+/// A2 (Nov 2026, Claude Generated; local-term launch of the PBC-templated kernels, CUDA S1 launch_k_*): pbc false
+/// launches the former kernel (k_*<false>), true the image-frame variant. Single translation unit: no host wrapper
+/// functions are needed as in the CUDA plugin.
+#define GFNFF_HIP_PBC_LAUNCH(kern, pbc, grid, block, strm, ...)                     \
+    do {                                                                             \
+        if (pbc) kern<true><<<(grid), (block), 0, (strm)>>>(__VA_ARGS__);            \
+        else     kern<false><<<(grid), (block), 0, (strm)>>>(__VA_ARGS__);           \
+    } while (0)
 
 // ============================================================================
 // GPU-only CN chain-rule setters (Claude Generated March 2026)
@@ -8478,16 +8867,28 @@ static bool copyHostGeometryMirror(bool geom_ok, int N, const double* hx, const 
 
 /// Claude Generated (Oct 2026): true when some atom of (hx, hy, hz) is farther than sqrt(thr_sq) from the
 /// reference ref (x, y, z blocks of N); the per-atom test of k_check_displacement.
+/// A2 (Nov 2026, Claude Generated): with a cell (lat / lat_inv column-major, Bohr; nullptr = none) the displacement is
+/// the minimum image, the arithmetic of the device applyMIC(), so a wrap by a lattice vector is no motion.
 static bool hostDisplacementExceeded(int N, const double* hx, const double* hy, const double* hz,
-                                     const std::vector<double>& ref, double thr_sq)
+                                     const std::vector<double>& ref, double thr_sq,
+                                     const double* lat = nullptr, const double* lat_inv = nullptr)
 {
     const double* rx = ref.data();
     const double* ry = rx + N;
     const double* rz = ry + N;
     for (int i = 0; i < N; ++i) {
-        const double dx = hx[i] - rx[i];
-        const double dy = hy[i] - ry[i];
-        const double dz = hz[i] - rz[i];
+        double dx = hx[i] - rx[i];
+        double dy = hy[i] - ry[i];
+        double dz = hz[i] - rz[i];
+        if (lat) {
+            double fx = lat_inv[0]*dx + lat_inv[3]*dy + lat_inv[6]*dz;
+            double fy = lat_inv[1]*dx + lat_inv[4]*dy + lat_inv[7]*dz;
+            double fz = lat_inv[2]*dx + lat_inv[5]*dy + lat_inv[8]*dz;
+            fx -= std::rint(fx); fy -= std::rint(fy); fz -= std::rint(fz);
+            dx = lat[0]*fx + lat[3]*fy + lat[6]*fz;
+            dy = lat[1]*fx + lat[4]*fy + lat[7]*fz;
+            dz = lat[2]*fx + lat[5]*fy + lat[8]*fz;
+        }
         if (dx*dx + dy*dy + dz*dz > thr_sq) return true;
     }
     return false;
@@ -8595,7 +8996,7 @@ bool FFWorkspaceHip::cnPairListStale(double max_disp_bohr)
         impl.cn_stale_thr = max_disp_bohr;
         if (impl.single_stream && impl.h_cnref_ok && impl.h_geom_ok)   // host test (see checkDisplacement)
             return hostDisplacementExceeded(m_natoms, m_h_x, m_h_y, m_h_z, impl.h_cnref_xyz,
-                                            max_disp_bohr * max_disp_bohr);
+                                            max_disp_bohr * max_disp_bohr, impl.pbc_active ? impl.h_lat : nullptr, impl.pbc_active ? impl.h_lat_inv : nullptr);
         k_check_displacement_pair<<<1, 1024, 0, impl.stream>>>(
             m_natoms, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
             nullptr, nullptr, nullptr, 0.0,
@@ -9313,7 +9714,7 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
         LaunchConfig cfg = getLaunchConfig(impl.angles.n, m_block_size);
-        k_angles<<<cfg.gridSize, cfg.blockSize, 0, sB>>>(
+        GFNFF_HIP_PBC_LAUNCH(k_angles, impl.pbc_active, cfg.gridSize, cfg.blockSize, sB,
             impl.angles.n,
             impl.angles.idx_i.ptr,  impl.angles.idx_j.ptr,  impl.angles.idx_k.ptr,
             impl.angles.ati.ptr,    impl.angles.atj.ptr,    impl.angles.atk.ptr,
@@ -9332,7 +9733,7 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
         LaunchConfig cfg = getLaunchConfig(impl.dihedrals.n, m_block_size);
-        k_dihedrals<<<cfg.gridSize, cfg.blockSize, 0, sB>>>(
+        GFNFF_HIP_PBC_LAUNCH(k_dihedrals, impl.pbc_active, cfg.gridSize, cfg.blockSize, sB,
             impl.dihedrals.n,
             impl.dihedrals.idx_i.ptr, impl.dihedrals.idx_j.ptr,
             impl.dihedrals.idx_k.ptr, impl.dihedrals.idx_l.ptr,
@@ -9352,7 +9753,7 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
         LaunchConfig cfg = getLaunchConfig(impl.inversions.n, m_block_size);
-        k_inversions<<<cfg.gridSize, cfg.blockSize, 0, sB>>>(
+        GFNFF_HIP_PBC_LAUNCH(k_inversions, impl.pbc_active, cfg.gridSize, cfg.blockSize, sB,
             impl.inversions.n,
             impl.inversions.idx_i.ptr, impl.inversions.idx_j.ptr,
             impl.inversions.idx_k.ptr, impl.inversions.idx_l.ptr,
@@ -9370,7 +9771,7 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
         LaunchConfig cfg = getLaunchConfig(impl.storsions.n, m_block_size);
-        k_storsions<<<cfg.gridSize, cfg.blockSize, 0, sB>>>(
+        GFNFF_HIP_PBC_LAUNCH(k_storsions, impl.pbc_active, cfg.gridSize, cfg.blockSize, sB,
             impl.storsions.n,
             impl.storsions.idx_i.ptr, impl.storsions.idx_j.ptr,
             impl.storsions.idx_k.ptr, impl.storsions.idx_l.ptr,
@@ -9451,10 +9852,12 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
             impl.d_grad.ptr,
             &impl.d_energies.ptr[impl.E_ATM]);
     }
-    {
+    // A2 (Nov 2026, as CUDA S1): the XB term follows the hbond switch, as in the CPU workspace (`hbond false` covers HB
+    // and XB); the FP32 variant has no image frame, so a cell takes the FP64 kernel.
+    if (m_hbond_enabled) {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
         LaunchConfig cfg = getLaunchConfig(impl.xbonds.n, m_block_size);
-        if (impl.use_mixed_precision) {
+        if (impl.use_mixed_precision && !impl.pbc_active) {
             k_xbonds_mixed<<<cfg.gridSize, cfg.blockSize, 0, sC>>>(
                 impl.xbonds.n,
                 impl.xbonds.idx_i.ptr, impl.xbonds.idx_j.ptr, impl.xbonds.idx_k.ptr,
@@ -9467,7 +9870,8 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
                 impl.d_grad.ptr,
                 &impl.d_energies.ptr[impl.E_XBOND]);
         } else {
-            k_xbonds<<<cfg.gridSize, cfg.blockSize, 0, sC>>>(
+            GFNFF_HIP_PBC_LAUNCH(k_xbonds, impl.pbc_active, cfg.gridSize, cfg.blockSize, sC,   // A2: image frames only with a cell
+
                 impl.xbonds.n,
                 impl.xbonds.idx_i.ptr, impl.xbonds.idx_j.ptr, impl.xbonds.idx_k.ptr,
                 impl.xbonds.elem_A.ptr, impl.xbonds.elem_B.ptr,
@@ -9485,7 +9889,7 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
         LaunchConfig cfg = getLaunchConfig(impl.hbonds.n, m_block_size);
         // Claude Generated (Oct 2026): slot mode (per-triple slots + per-atom gather) unless disabled.
         const bool hb_slots = impl.hb_gather_enabled && impl.hb_slots.N == N && impl.hb_slots.nslots > 0;
-        k_hbonds<<<cfg.gridSize, cfg.blockSize, 0, sC>>>(
+        GFNFF_HIP_PBC_LAUNCH(k_hbonds, impl.pbc_active, cfg.gridSize, cfg.blockSize, sC,
             impl.hbonds.n,
             impl.hbonds.idx_i.ptr, impl.hbonds.idx_j.ptr, impl.hbonds.idx_k.ptr,
             impl.hbonds.elem_A.ptr, impl.hbonds.elem_B.ptr,
@@ -9784,6 +10188,23 @@ double FFWorkspaceHip::launchChargeDependentAndFinish(bool gradient)
         fixToDoubleHip(impl.d_dEdcn.ptr, N, GFNFF_FIX_FORCE, stream);
         dEdcn_converted = true;
     };
+    // A2 (Nov 2026, Claude Generated; CUDA S1): homogeneous D4 tail (periodic cell): energy slot E_DISP_TAIL and its
+    // dE/dCN (accumulated into d_dEdcn before the conversion). Reads the Gaussian weights of this step (d_gw / d_dgw,
+    // computed on this stream), so it runs here on the main stream. With frozen CN the weights are those of the last
+    // CN update, like the pair term.
+    if (impl.tail_active && m_dispersion_enabled && impl.dc6dcn_gpu_ready && impl.d_gw.ptr && impl.d_dgw.ptr) {
+        LaunchConfig cfg_w = getLaunchConfigLight(impl.tail_K * D4_MAX_REF, m_block_size);
+        k_d4_tail_W<<<cfg_w.gridSize, cfg_w.blockSize, 0, stream>>>(
+            N, impl.tail_K, impl.d_tail_slot_of_atom.ptr, impl.d_tail_nref.ptr, impl.d_tail_zeta.ptr,
+            impl.d_gw.ptr, impl.d_tail_W.ptr);
+        LaunchConfig cfg_a = getLaunchConfigLight(N, m_block_size);
+        k_d4_tail_atoms<<<cfg_a.gridSize, cfg_a.blockSize, 0, stream>>>(
+            N, impl.tail_K, impl.d_tail_slot_of_atom.ptr, impl.d_tail_slot_elem.ptr, impl.d_tail_nref.ptr,
+            impl.d_tail_sqz.ptr, impl.d_tail_zeta.ptr, impl.d_gw.ptr, impl.d_dgw.ptr, impl.d_c6_flat.ptr,
+            impl.d_tail_W.ptr, impl.tail_pref6, impl.tail_pref8, gradient ? 1 : 0,
+            impl.d_dEdcn.ptr, &impl.d_energies.ptr[impl.E_DISP_TAIL]);
+        checkCuda(hipGetLastError(), "k_d4_tail launch");
+    }
     if (m_coulomb_enabled && impl.coul_self_on_gpu) {
         // Wait for pairwise+bonded streams (dEdcn dependency for qtmp subtraction).
         // event_p2_pairwise: Phase-2-dedicated — always wait (records k_coulomb completion).
@@ -10048,6 +10469,7 @@ double FFWorkspaceHip::launchChargeDependentAndFinish(bool gradient)
     const double e_xbond     = m_h_energies[impl.E_XBOND];
     const double e_hbond     = m_h_energies[impl.E_HBOND];
     const double e_coul_self = m_h_energies[impl.E_COUL_SELF];
+    const double e_disp_tail = m_h_energies[impl.E_DISP_TAIL];   // A2: 0 without a cell
 
     // Copy gradient from pinned buffer to Eigen matrix
     if (gradient) {
@@ -10168,6 +10590,7 @@ double FFWorkspaceHip::launchChargeDependentAndFinish(bool gradient)
     m_result_energy.atm           = e_atm;
     m_result_energy.xbond         = e_xbond;
     m_result_energy.hbond         = e_hbond;
+    m_result_energy.disp_tail     = e_disp_tail;
 
     // GPU ENERGY TERMS (verbosity >= 3)
     if (m_verbosity >= 3) {
@@ -10429,6 +10852,12 @@ const Vector& FFWorkspaceHip::dEdcnTotal() const
     return m_dEdcn_total;
 }
 
+/// A2 (Nov 2026, Claude Generated; CUDA S1): number of H-bond triples currently on the device (host or device detection).
+int FFWorkspaceHip::hbondCount() const
+{
+    return m_impl ? m_impl->hbonds.n : 0;
+}
+
 int FFWorkspaceHip::dispersionCount() const
 {
     return m_impl ? m_impl->disp.n : 0;
@@ -10563,9 +10992,10 @@ bool FFWorkspaceHip::checkDisplacement(double threshold)
         const bool want_cn = impl.cn_stale_thr >= 0.0 && !impl.cn_ref_coords.empty() && impl.h_cnref_ok;
         impl.cn_stale_cached = want_cn
             ? (hostDisplacementExceeded(m_natoms, m_h_x, m_h_y, m_h_z, impl.h_cnref_xyz,
-                                        impl.cn_stale_thr * impl.cn_stale_thr) ? 1 : 0)
+                                        impl.cn_stale_thr * impl.cn_stale_thr, impl.pbc_active ? impl.h_lat : nullptr, impl.pbc_active ? impl.h_lat_inv : nullptr) ? 1 : 0)
             : -1;
-        return hostDisplacementExceeded(m_natoms, m_h_x, m_h_y, m_h_z, impl.h_ref_xyz, threshold * threshold);
+        return hostDisplacementExceeded(m_natoms, m_h_x, m_h_y, m_h_z, impl.h_ref_xyz, threshold * threshold,
+                                        impl.pbc_active ? impl.h_lat : nullptr, impl.pbc_active ? impl.h_lat_inv : nullptr);
     }
     if (impl.lean_step && impl.h_disp_flags) {
         const bool want_cn = impl.cn_stale_thr >= 0.0 && !impl.cn_ref_coords.empty();
