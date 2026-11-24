@@ -634,6 +634,14 @@ public:
                                  const double* v_dp, const double* v_qp, const double* we, int ncol,
                                  const double* cell_L, int ntrans, const double* trans, double cut2, bool multipole,
                                  bool want_virial, double* grad_out, double* dEdcn_out, double* vir9_out);
+    /// Claude Generated (Nov 24, 2026, ROCm parity G1B; CUDA XtbGpuContext::computeIntegralsPeriodic, WP-PERIODIC-XTB
+    /// G1b): periodic S/H0 (and GFN2 dp/qp) image sums + L = chol(S) into the resident dense buffers
+    /// (GpuScfBackend::beginComputedPeriodic); se[nsh] host self-energies, cell_L[3] and translations trans[3 ntrans]
+    /// (T = 0 first) in Bohr, cut2 the squared integral cutoff. Needs beginBasis; s/p shells only.
+    bool computeIntegralsPeriodic(const double* xyz_bohr, const double* se, const double* cell_L, int ntrans,
+                                  const double* trans, double cut2, bool multipole);
+    /// Why the last computeIntegralsPeriodic failed (empty if none).
+    std::string periodicIntegralError() const;
     bool periodicGammaResident(int nsh) const { (void)nsh; return false; }
     /// Claude Generated (Nov 24, 2026, ROCm A3): host-built GFN2 AO multipole integrals (dp 3 nao^2, qp 6 nao^2,
     /// column-major blocks, the layout of downloadMultipoleInts) into the resident buffers; needs beginBasis (GFN2).

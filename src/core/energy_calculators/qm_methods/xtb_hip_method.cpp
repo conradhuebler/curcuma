@@ -585,8 +585,8 @@ public:
     // Claude Generated (Nov 24, 2026, ROCm parity A3): the CUDA overrides of xtb_gpu_method.cpp verbatim, forwarded to
     // the HIP ports in rocm/xtb_hip_periodic_host.hiph. xtb_periodic.cpp calls them only with a cell
     // (XTB::setPeriodicDeviceScf, set by the constructor below) and runs its host loop, counted as a GPU fallback, on
-    // false. Not ported (periodicStageOnDevice false, host path without a fallback count): beginComputedPeriodic
-    // (G1b), beginPotentialPeriodic and the resident periodic loop (R2-R5).
+    // false. Not ported (periodicStageOnDevice false, host path without a fallback count): beginPotentialPeriodic and
+    // the resident periodic loop (R2-R5). beginComputedPeriodic (G1b) is ported (ROCm parity G1B, below).
     // Claude Generated (Nov 2026, WP-PERIODIC-XTB G4a): periodic ATM, see GpuScfBackend.
     bool dispersionATMPeriodic(int nat, const double* xyz_bohr, const double* r4r2, const double* c6,
                                const double* dc6dcn, const double* cell_L, int ntrans, const double* trans,
@@ -648,12 +648,28 @@ public:
         return m_ctx->uploadMultipoleInts(dp.data(), qp.data(), m_n) && m_ctx->beginMultipoleComputed();
     }
     // Claude Generated (Nov 24, 2026, ROCm A3): the stages without a HIP port run on the host by design (no fallback
-    // count): ints (device S/H0/L, CUDA G1b) and devpot (periodic device potential and with it the resident periodic
-    // loop, CUDA R2-R5).
+    // count): devpot (periodic device potential and with it the resident periodic loop, CUDA R2-R5). ints (device
+    // S/H0/L, CUDA G1b) has a HIP port since ROCm parity G1B (beginComputedPeriodic below).
     bool periodicStageOnDevice(const char* token) const override
     {
         const std::string t = token ? token : "";
-        return t != "ints" && t != "devpot";
+        return t != "devpot";
+    }
+    // Claude Generated (Nov 24, 2026, ROCm parity G1B): periodic integrals on the device, the CUDA override of
+    // xtb_gpu_method.cpp (computeIntegralsPeriodic + residentBeginComputed). On ROCm the resident buffers are those of
+    // beginBasis, so the context call alone leaves them ready (as beginComputed). A false return makes xtb_native.cpp
+    // run the host build and upload and count the fallback (token ints, -gpu_strict); the reason is lastError().
+    bool beginComputedPeriodic(const std::vector<double>& xyz_bohr, const double* se, const double* cell_L,
+                               int ntrans, const double* trans, double cut2, bool multipole) override
+    {
+        m_res_error.clear();
+        if (!m_ctx || m_n <= 0) return false;
+        const bool ok = m_ctx->computeIntegralsPeriodic(xyz_bohr.data(), se, cell_L, ntrans, trans, cut2, multipole);
+        if (!ok) {
+            const std::string err = m_ctx->periodicIntegralError();
+            m_res_error = err.empty() ? std::string("periodic device integral build failed") : err;
+        }
+        return ok;
     }
     // Claude Generated (Nov 2026, WP-PERIODIC-XTB H1): periodic H0/Pulay gradient, see GpuScfBackend.
     bool h0PulayGradientPeriodic(int nat, const double* xyz_bohr, const double* se, const double* v_ao,

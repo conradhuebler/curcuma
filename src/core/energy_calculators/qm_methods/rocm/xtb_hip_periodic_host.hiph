@@ -1115,4 +1115,79 @@ bool XtbHipContext::h0PulayGradientPeriodic(int nat, const double* xyz_bohr, con
 }
 
 
+// ---- cuda/xtb_gpu_context.cu XtbGpuContext::computeIntegralsPeriodic (WP-PERIODIC-XTB G1b) ----
+// Claude Generated (Nov 24, 2026, ROCm parity G1B): periodic S/H0 (+ GFN2 dp/qp) image sums and L = chol(S) on the
+// device, dense storage only, single device. se[nsh] are the host self-energies of the periodic CN. On success dS0/dH0/dL
+// (and dDpInt/dQpInt) hold this geometry, as after computeIntegrals, and the resident loop (resSolve/resSolveMP,
+// gradient W) reads them. Differences to CUDA: the resident buffers exist from begBasis (no allocation and no memory
+// check here); a screened storage (-gpu_sparse_integrals auto|on) is turned dense (spEnsureDense, as CUDA sets
+// I.sparse = false); the Cholesky factor is checked at its first use (factorCheck in the cached-factor solve, the HIP
+// counterpart of the CUDA probeCholeskyFactor) instead of here. The device CN stays invalid (cn_ok false): the periodic
+// CN is the host one.
+bool XtbHipContext::computeIntegralsPeriodic(const double* xyz_bohr, const double* se, const double* cell_L, int ntrans,
+                                             const double* trans, double cut2, bool multipole)
+{
+    if (!ok() || !xyz_bohr || !se || !cell_L || !trans || ntrans < 1) return false;
+    Impl& M = *m_impl;
+    PbcState& I = M.pbc;
+    M.cn_ok = false;
+    M.conv_pot_valid = false;
+    M.mp_computed = false;
+    I.ints_error.clear();
+    if (!M.basis_ready || M.bnao <= 0 || M.res_n != M.bnao || !M.dao2sh || !M.dao2at || !M.dxyz || !M.dse) {
+        I.ints_error = "periodic integrals: no device basis of this size (beginBasis)";
+        return false;
+    }
+    const int nat = M.bnat, nsh = M.bnsh, nao = M.bnao;
+    const bool want_mp = multipole && M.bis_gfn2;
+    const size_t nn = static_cast<size_t>(nao) * static_cast<size_t>(nao);
+    hipStream_t stream = M.stream;
+    ++M.s_version; M.dL_ver = 0;   // dS0 is rebuilt below; dL matches it once potrf succeeds
+    if (!M.spEnsureDense() || !M.dS0 || !M.dH0 || !M.dL || !M.dInfo || (want_mp && (!M.dDpInt || !M.dQpInt))) {
+        I.ints_error = "periodic integrals: dense device storage unavailable";
+        return false;
+    }
+    try {
+        I.dPbcIntTrans.upload(trans, 3 * ntrans, stream);
+    } catch (const std::exception& ex) {
+        I.ints_error = std::string("periodic integrals: device allocation failed: ") + ex.what();
+        return false;
+    }
+    if (hipMemcpy(M.dxyz, xyz_bohr, 3 * static_cast<size_t>(nat) * sizeof(double), hipMemcpyHostToDevice) != hipSuccess
+        || hipMemcpy(M.dse, se, static_cast<size_t>(nsh) * sizeof(double), hipMemcpyHostToDevice) != hipSuccess)
+        return false;
+    const dim3 block(16, 16);
+    const dim3 grid((nao + block.x - 1) / block.x, (nao + block.y - 1) / block.y);
+    pbc_dev::k_overlap_h0_pbc<<<grid, block, 0, stream>>>(
+        nao, M.bis_gfn2, M.dao2sh, M.dao2at, M.dang_sh, M.diao_sh, M.dsh_nprim, M.dsh_prim_off, M.dprim_alpha,
+        M.dprim_coeff, M.dsh_zeta, M.dshpoly, M.dse, M.dz, M.dvalence, M.dxyz, cell_L[0], cell_L[1], cell_L[2], ntrans,
+        I.dPbcIntTrans.ptr, cut2, M.dpauling, M.darad, M.dS0, M.dH0);
+    if (hipGetLastError() != hipSuccess) { I.ints_error = "periodic overlap/H0 kernel failed"; return false; }
+    if (want_mp) {
+        pbc_dev::k_multipole_ints_pbc<<<grid, block, 0, stream>>>(
+            nao, M.dao2sh, M.dao2at, M.diao_sh, M.dang_sh, M.dsh_nprim, M.dsh_prim_off, M.dprim_alpha, M.dprim_coeff,
+            M.dxyz, cell_L[0], cell_L[1], cell_L[2], ntrans, I.dPbcIntTrans.ptr, cut2, M.dDpInt, M.dQpInt);
+        if (hipGetLastError() != hipSuccess) { I.ints_error = "periodic multipole integral kernel failed"; return false; }
+    }
+    // L = chol(S), lower triangle in place on a copy (the convention of computeIntegrals and the host matrixL())
+    if (hipMemcpyAsync(M.dL, M.dS0, nn * sizeof(double), hipMemcpyDeviceToDevice, stream) != hipSuccess) return false;
+    if (hipStreamSynchronize(stream) != hipSuccess) return false;
+    if (rocsolver_dpotrf(M.handle, rocblas_fill_lower, nao, M.dL, nao, M.dInfo) != rocblas_status_success) return false;
+    if (hipStreamSynchronize(stream) != hipSuccess) return false;
+    rocblas_int info = 1;
+    if (hipMemcpy(&info, M.dInfo, sizeof(rocblas_int), hipMemcpyDeviceToHost) != hipSuccess) return false;
+    if (info != 0) {   // the host build follows
+        I.ints_error = "periodic overlap is not positive definite (device Cholesky)";
+        return false;
+    }
+    M.dL_ver = M.s_version;        // dL = chol(dS0): reused (after factorCheck) by the cached-Cholesky solve
+    M.mp_computed = want_mp;
+    return true;
+}
+std::string XtbHipContext::periodicIntegralError() const
+{
+    return m_impl ? m_impl->pbc.ints_error : std::string();
+}
+
+
 #endif // HAVE_ROCSOLVER

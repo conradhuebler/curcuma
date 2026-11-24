@@ -2093,6 +2093,170 @@ __global__ void k_scale_cols_sqrt(double* Cs, const double* C, const double* occ
 }
 // Copy the lower triangle of the column-major n x n matrix P onto its upper triangle.
 
+/* ---------------------------------------------------------------------------------------------- *
+ *  WP-PERIODIC-XTB G1b (Claude Generated, Nov 24, 2026, ROCm parity G1B): HIP ports of the CUDA     *
+ *  kernels k_overlap_h0_pbc and k_multipole_ints_pbc (cuda/xtb_gpu_context.cu), the statements of    *
+ *  XTB::getHamiltonianH0Periodic and steps 1 + 2 of XTB::setupMultipolePeriodic (xtb_periodic.cpp).  *
+ *  Bodies verbatim; the CUDA __constant__ tables c_pauling / c_atomic_rad are the HIP device tables  *
+ *  pauling / atomic_rad (86 elements, index z-1, as in k_grad_h0_pulay_pbc above). One thread per AO *
+ *  pair (mu, nu); s/p shells only (a cell refuses d shells). For iat == jat the T = 0 on-atom block  *
+ *  (h_factor 1, exact 1 on the diagonal) comes first, then every image d = d0 - T (d0 minimum image  *
+ *  of x_i - x_j, T in list order, T = 0 skipped for iat == jat) with r2 < cut2; r2 without FMA        *
+ *  contraction (host cutoff decisions). Each element accumulated in registers, written once.        *
+ * ---------------------------------------------------------------------------------------------- */
+__global__ void k_overlap_h0_pbc(
+    int nao, int is_gfn2, const int* __restrict__ ao2sh, const int* __restrict__ ao2at,
+    const int* __restrict__ ang_sh, const int* __restrict__ iao_sh,
+    const int* __restrict__ sh_nprim, const int* __restrict__ sh_prim_off,
+    const double* __restrict__ prim_alpha, const double* __restrict__ prim_coeff,
+    const double* __restrict__ sh_zeta, const double* __restrict__ shpoly,
+    const double* __restrict__ se, const int* __restrict__ z,
+    const int* __restrict__ valence, const double* __restrict__ xyz,
+    double Lx, double Ly, double Lz, int ntr, const double* __restrict__ trans, double cut2,
+    const double* __restrict__ pauling, const double* __restrict__ atomic_rad,
+    double* __restrict__ S, double* __restrict__ H0)
+{
+    const int mu = blockIdx.x * blockDim.x + threadIdx.x;
+    const int nu = blockIdx.y * blockDim.y + threadIdx.y;
+    if (mu >= nao || nu >= nao) return;
+    const int a = ao2sh[mu], b = ao2sh[nu];
+    const int iat = ao2at[mu], jat = ao2at[nu];
+    const int la = ang_sh[a], lb = ang_sh[b];
+    const int ta = d_ao_to_type(la, mu - iao_sh[a]);
+    const int tb = d_ao_to_type(lb, nu - iao_sh[b]);
+    const size_t idx = static_cast<size_t>(mu) + static_cast<size_t>(nu) * nao;
+    if (ta < 0 || tb < 0) { S[idx] = 0.0; H0[idx] = 0.0; return; }
+    const double xa = xyz[3 * iat + 0], ya = xyz[3 * iat + 1], za = xyz[3 * iat + 2];
+    const double avg_eps = 0.5 * (se[a] + se[b]);
+    const int zi = z[iat], zj = z[jat];
+
+    double hs;
+    if (is_gfn2 == 0) {
+        const bool vi = valence[a] != 0, vj = valence[b] != 0;
+        if (vi && vj) {
+            double den = pauling[zi - 1] - pauling[zj - 1]; den *= den;
+            hs = d_kpair_gfn1(zi, zj) * d_kshell_gfn1(la, lb) * (1.0 + (-7.0e-3) * den);
+        } else if (vi && !vj) {
+            hs = 0.5 * (d_kshell_gfn1(la, la) + 2.85);
+        } else if (!vi && vj) {
+            hs = 0.5 * (d_kshell_gfn1(lb, lb) + 2.85);
+        } else {
+            hs = 2.85;
+        }
+    } else {
+        double den = pauling[zi - 1] - pauling[zj - 1]; den *= den;
+        const double enp = 1.0 + 2.0e-2 * den;
+        const double km  = d_kshell_gfn2(la, lb) * enp;  // kpair=1 for GFN2
+        const double za_ = sh_zeta[a], zb_ = sh_zeta[b];
+        const double zij = pow(2.0 * sqrt(za_ * zb_) / (za_ + zb_), 0.5);  // wexp=0.5
+        hs = zij * km;
+    }
+    const double rad_sum = atomic_rad[zi - 1] + atomic_rad[zj - 1];
+    const double* pa_alpha = prim_alpha + sh_prim_off[a];
+    const double* pa_coeff = prim_coeff + sh_prim_off[a];
+    const int npa = sh_nprim[a];
+    const double* pb_alpha = prim_alpha + sh_prim_off[b];
+    const double* pb_coeff = prim_coeff + sh_prim_off[b];
+    const int npb = sh_nprim[b];
+
+    double s_acc = 0.0, h_acc = 0.0;
+    const bool same = (iat == jat);
+    if (same) {   // T = 0 on-atom block, h_factor 1, exact 1 on the diagonal of a shell
+        const double s_ab = (a == b && ta == tb)
+            ? 1.0 : d_cgto_overlap(pa_alpha, pa_coeff, npa, pb_alpha, pb_coeff, npb, xa, ya, za, xa, ya, za, ta, tb);
+        s_acc += s_ab;
+        h_acc += avg_eps * 1.0 * s_ab;
+    }
+    double d0x = xa - xyz[3 * jat], d0y = ya - xyz[3 * jat + 1], d0z = za - xyz[3 * jat + 2];
+    double s = d0x * (1.0 / Lx); s -= rint(s); d0x = Lx * s;
+    s = d0y * (1.0 / Ly); s -= rint(s); d0y = Ly * s;
+    s = d0z * (1.0 / Lz); s -= rint(s); d0z = Lz * s;
+    for (int t = same ? 1 : 0; t < ntr; ++t) {
+        const double dx = d0x - trans[3 * t], dy = d0y - trans[3 * t + 1], dz = d0z - trans[3 * t + 2];
+        const double r2 = __dadd_rn(__dadd_rn(__dmul_rn(dx, dx), __dmul_rn(dy, dy)), __dmul_rn(dz, dz));
+        if (r2 >= cut2 || r2 < 1.0e-24) continue;
+        const double rr = sqrt(sqrt(r2) / rad_sum);
+        const double pi_ij = (1.0 + shpoly[a] * rr) * (1.0 + shpoly[b] * rr);
+        const double s_ab = d_cgto_overlap(pa_alpha, pa_coeff, npa, pb_alpha, pb_coeff, npb,
+                                           xa, ya, za, xa - dx, ya - dy, za - dz, ta, tb);
+        s_acc += s_ab;
+        h_acc += avg_eps * (hs * pi_ij) * s_ab;
+    }
+    S[idx]  = s_acc;
+    H0[idx] = h_acc;
+}
+
+/* G1b (Claude Generated, Nov 24, 2026): HIP port of the CUDA k_multipole_ints_pbc. Per image the multipole block at
+ * the image position R of atom(nu) (origin shifted to R with the block's own overlap), summed in the host image order,
+ * then the traceless transform. s/p shells only. Layout as k_multipole_ints (dp 3 nn, qp 6 nn, mu + nu nao). */
+__global__ void k_multipole_ints_pbc(
+    int nao, const int* __restrict__ ao2sh, const int* __restrict__ ao2at,
+    const int* __restrict__ iao_sh, const int* __restrict__ ang_sh,
+    const int* __restrict__ sh_nprim, const int* __restrict__ sh_prim_off,
+    const double* __restrict__ prim_alpha, const double* __restrict__ prim_coeff,
+    const double* __restrict__ xyz, double Lx, double Ly, double Lz, int ntr,
+    const double* __restrict__ trans, double cut2,
+    double* __restrict__ dp_int, double* __restrict__ qp_int)
+{
+    const int mu = blockIdx.x * blockDim.x + threadIdx.x;
+    const int nu = blockIdx.y * blockDim.y + threadIdx.y;
+    if (mu >= nao || nu >= nao) return;
+    const size_t nn = static_cast<size_t>(nao) * static_cast<size_t>(nao);
+    const size_t mn = static_cast<size_t>(mu) + static_cast<size_t>(nu) * nao;
+
+    const int isha = ao2sh[mu], iat = ao2at[mu];
+    const int ishb = ao2sh[nu], jat = ao2at[nu];
+    const int ta = d_ao_to_type(ang_sh[isha], mu - iao_sh[isha]);
+    const int tb = d_ao_to_type(ang_sh[ishb], nu - iao_sh[ishb]);
+    const double* aA = prim_alpha + sh_prim_off[isha];
+    const double* cA = prim_coeff + sh_prim_off[isha];
+    const int npa = sh_nprim[isha];
+    const double* aB = prim_alpha + sh_prim_off[ishb];
+    const double* cB = prim_coeff + sh_prim_off[ishb];
+    const int npb = sh_nprim[ishb];
+    const double xa = xyz[3 * iat + 0], ya = xyz[3 * iat + 1], za = xyz[3 * iat + 2];
+
+    double dp[3] = { 0.0, 0.0, 0.0 }, qr[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    auto addBlock = [&](double Rx, double Ry, double Rz) {
+        double Smn, D[3], Q[6];
+        d_cgto_multipole(aA, cA, npa, aB, cB, npb, xa, ya, za, Rx, Ry, Rz, ta, tb, Smn, D, Q);
+        const double dx = D[0], dy = D[1], dz = D[2];
+        dp[0] += dx - Rx * Smn;
+        dp[1] += dy - Ry * Smn;
+        dp[2] += dz - Rz * Smn;
+        qr[0] += Q[0] - 2 * Rx * dx + Rx * Rx * Smn;
+        qr[1] += Q[1] - Rx * dy - Ry * dx + Rx * Ry * Smn;
+        qr[2] += Q[2] - 2 * Ry * dy + Ry * Ry * Smn;
+        qr[3] += Q[3] - Rx * dz - Rz * dx + Rx * Rz * Smn;
+        qr[4] += Q[4] - Ry * dz - Rz * dy + Ry * Rz * Smn;
+        qr[5] += Q[5] - 2 * Rz * dz + Rz * Rz * Smn;
+    };
+    const bool same = (iat == jat);
+    if (ta >= 0 && tb >= 0) {
+        if (same) addBlock(xyz[3 * jat], xyz[3 * jat + 1], xyz[3 * jat + 2]);
+        double d0x = xa - xyz[3 * jat], d0y = ya - xyz[3 * jat + 1], d0z = za - xyz[3 * jat + 2];
+        double s = d0x * (1.0 / Lx); s -= rint(s); d0x = Lx * s;
+        s = d0y * (1.0 / Ly); s -= rint(s); d0y = Ly * s;
+        s = d0z * (1.0 / Lz); s -= rint(s); d0z = Lz * s;
+        for (int t = same ? 1 : 0; t < ntr; ++t) {
+            const double dx = d0x - trans[3 * t], dy = d0y - trans[3 * t + 1], dz = d0z - trans[3 * t + 2];
+            const double r2 = __dadd_rn(__dadd_rn(__dmul_rn(dx, dx), __dmul_rn(dy, dy)), __dmul_rn(dz, dz));
+            if (r2 >= cut2 || r2 < 1.0e-24) continue;
+            addBlock(xa - dx, ya - dy, za - dz);
+        }
+    }
+    dp_int[0 * nn + mn] = dp[0];
+    dp_int[1 * nn + mn] = dp[1];
+    dp_int[2 * nn + mn] = dp[2];
+    const double tr = 0.5 * (qr[0] + qr[2] + qr[5]);
+    qp_int[0 * nn + mn] = 1.5 * qr[0] - tr;
+    qp_int[1 * nn + mn] = 1.5 * qr[1];
+    qp_int[2 * nn + mn] = 1.5 * qr[2] - tr;
+    qp_int[3 * nn + mn] = 1.5 * qr[3];
+    qp_int[4 * nn + mn] = 1.5 * qr[4];
+    qp_int[5 * nn + mn] = 1.5 * qr[5] - tr;
+}
+
 } // namespace pbc_dev
 
 /* ---------------------------------------------------------------------------------------------- *
@@ -2164,6 +2328,8 @@ struct PbcState {
         dPbcEwA, dPbcEwM, dPbcGamma, dPbcGfix, dPbcGrad, dPbcKexp, dPbcKoFix, dPbcKoG, dPbcKoQsh, dPbcKoTr, dPbcKoTrans,
         dPbcKtab, dPbcMpKv, dPbcMpSf, dPbcMrad, dPbcNbV, dPbcQ, dPbcQp, dPbcR4r2, dPbcRepAlp, dPbcRepE, dPbcRepFix,
         dPbcRepTrans, dPbcRepZeff, dPbcRtrans, dPbcSr4r2, dPbcTrans, dPbcVir, dPbcXyz;
+    PbcBuf<double> dPbcIntTrans;     ///< G1b (Nov 24, 2026): translations of computeIntegralsPeriodic
+    std::string ints_error;          ///< G1b: why the last computeIntegralsPeriodic failed (empty if none)
     void release()
     {
         for (PbcBuf<double>* b : { &dD4AtmC6, &dD4AtmDc6, &dD4Rad, &dD4En, &dD4CnXyz, &dD4CnOut, &dD3C6, &dD3Cn, &dD3Dgw,
@@ -2175,7 +2341,7 @@ struct PbcState {
                                    &dPbcKexp, &dPbcKoFix, &dPbcKoG, &dPbcKoQsh, &dPbcKoTr, &dPbcKoTrans, &dPbcKtab,
                                    &dPbcMpKv, &dPbcMpSf, &dPbcMrad, &dPbcNbV, &dPbcQ, &dPbcQp, &dPbcR4r2, &dPbcRepAlp,
                                    &dPbcRepE, &dPbcRepFix, &dPbcRepTrans, &dPbcRepZeff, &dPbcRtrans, &dPbcSr4r2,
-                                   &dPbcTrans, &dPbcVir, &dPbcXyz })
+                                   &dPbcTrans, &dPbcVir, &dPbcXyz, &dPbcIntTrans })
             b->free();
         for (PbcBuf<int>* b : { &dD4CnZ, &dD3Z, &dD3Type, &dD3Nref, &dPbcNbCnt, &dPbcNbPtr, &dPbcNbIdx, &dPbcShAt,
                                 &dPbcRepLight, &dPbcKoShAt, &dPbcD4pZ, &dPbcD4pNref })

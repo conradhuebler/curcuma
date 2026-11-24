@@ -17,7 +17,8 @@
  * Water dimer (registry) in an 8 A cube, scf_threshold 1e-9, gfn1 and gfn2. Without the CUDA plugin or a device the
  * test exits 77 (ctest SKIP_RETURN_CODE), never 0.
  * Argument: the backend, "cuda" (default) or "rocm" (ctest pbc_xtb_gpu_fallback_rocm, ROCm parity A3, Nov 24, 2026: the
- * tokens of the stages that have a HIP port; ints, devpot and the resident tokens run on the host there).
+ * tokens of the stages that have a HIP port; devpot and the resident tokens run on the host there; ints has a HIP port
+ * since ROCm parity G1B, Nov 24, 2026).
  */
 #include "src/core/energycalculator.h"
 #include "src/core/molecule.h"
@@ -163,11 +164,11 @@ int main(int argc, char** argv)
         { "gamma", "gamma" }, { "cn", "cn" }, { "d3", "d3" }, { "rep", "rep" }, { "h0grad", "h0grad" },
         { "wmat", "wmat", "h0grad" }, { "ewgrad", "ewgrad" }, { "kograd", "kograd" }, { "cnchain", "cnchain" } };
     // ROCm: the stages with a HIP port (rocm/xtb_hip_periodic_host.hiph)
-    const Stage gfn2_rocm[] = { { "d4dedq", "d4dedq" }, { "gamma", "gamma" }, { "mpmat", "mpmat" }, { "cn", "cn" },
+    const Stage gfn2_rocm[] = { { "ints", "ints" }, { "d4dedq", "d4dedq" }, { "gamma", "gamma" }, { "mpmat", "mpmat" }, { "cn", "cn" },
         { "d4cn", "d4cn" }, { "d4pair", "d4pair" }, { "atm", "atm" }, { "cnfold", "cnfold" }, { "rep", "rep" },
         { "mpgrad", "mpgrad" }, { "h0grad", "h0grad" }, { "wmat", "wmat", "h0grad" }, { "ewgrad", "ewgrad" },
         { "kograd", "kograd" }, { "cnchain", "cnchain" } };
-    const Stage gfn1_rocm[] = { { "gamma", "gamma" }, { "cn", "cn" }, { "d3", "d3" }, { "rep", "rep" },
+    const Stage gfn1_rocm[] = { { "ints", "ints" }, { "gamma", "gamma" }, { "cn", "cn" }, { "d3", "d3" }, { "rep", "rep" },
         { "h0grad", "h0grad" }, { "wmat", "wmat", "h0grad" },
         { "ewgrad", "ewgrad" }, { "kograd", "kograd" }, { "cnchain", "cnchain" } };
     int reached = 0;
