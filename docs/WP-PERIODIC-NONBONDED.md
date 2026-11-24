@@ -2038,7 +2038,7 @@ refused there anyway).
 |---|---|
 | (a) device Ewald vs CPU and vs the host-Ewald GPU hybrid, input geometry and every atom moved by <= 0.005 A (per-step solve); 20 H2O (FD settings), 60 H2O, H3O+(H2O)2 + 18 H2O (Q = +1), 970 H2O L 58 (pcg), 4 threads | charges <= 3.8e-15 e, energy <= 5.2e-14 Eh, gradient <= 7.9e-15 Eh/A, model virial <= 9.2e-14 Eh (limits 1e-9 e, 1e-9 Eh, 1e-9 Eh/A, 1e-7 Eh); device used (7 operator calls per solve at 2910 atoms), no fallback counted |
 | (a) W1 boxes 432 / 864 / 1728 H2O (`box*_s1`, 4 threads, production settings) | vs CPU: charges <= 7.7e-15 e, energy <= 7.7e-12 Eh, gradient <= 4.2e-14 Eh/A, virial <= 6.5e-11 Eh; vs host-Ewald GPU: energy <= 9.1e-13, gradient <= 1.0e-15, virial <= 9.3e-13 |
-| (a) ionic mixture Na2Cl2 + 380 H2O, L 48 Bohr (1144 atoms, pcg) | vs host-Ewald GPU: energy 4.3e-14 Eh, gradient 1.1e-15 Eh/A, virial 5.7e-14 Eh; vs CPU 3.4e-9 Eh / 3.5e-8 Eh/A / 1.1e-7 Eh (charges 5e-11 e): **pre-existing**, the same numbers with the A1 base build (D4 pair term 3.5e-9 Eh; cause found Nov 23, 2026: the CUDA CN ignores `cn_cutoff_bohr` 10, GPU_PERIODIC_GAPS.md A16; not Ewald), test limit there 1e-8 / 1e-7 / 2e-7 (TODO.md) |
+| (a) ionic mixture Na2Cl2 + 380 H2O, L 48 Bohr (1144 atoms, pcg) | vs host-Ewald GPU: energy 4.3e-14 Eh, gradient 1.1e-15 Eh/A, virial 5.7e-14 Eh; vs CPU 3.4e-9 Eh / 3.5e-8 Eh/A / 1.1e-7 Eh (charges 5e-11 e): **pre-existing**, the same numbers with the A1 base build (D4 pair term 3.5e-9 Eh; cause found Nov 23, 2026: the CUDA CN ignores `cn_cutoff_bohr` 10, GPU_PERIODIC_GAPS.md A16; not Ewald), test limit there 1e-8 / 1e-7 / 2e-7 until A16 fixed it (below: 2.4e-12 Eh, 8.2e-14 Eh/A, 3.1e-12 Eh, strict limits) |
 | (b) FD gate, device Ewald: gradient vs Richardson FD of the total energy (h 2e-4 / 1e-4 A, 6 atoms near a face) and virial vs FD under isotropic and axial strain; 20 H2O and Q = +1, dense EEQ and forced pcg (`eeq_ewald_dense_max_atoms 0`, 423 / 558 device operator calls) | gradient <= 9.4e-10 Eh/A (limit 1e-8), virial <= 6.3e-9 Eh (limit 1e-7) |
 | (c) second GPU instance, 970 H2O, two steps, 4 threads | energy, gradient, charges, virial bit for bit |
 | (d) fault injection prepare / potentials / evaluate | energy equal to the host-Ewald hybrid within 0 / 2.8e-13 / 1.4e-13 Eh, fallback counted 2 / 1 / 1 times |
@@ -2081,6 +2081,110 @@ is per term) and must be set for CPU comparisons too; at L/2 instead of 17.5 sqr
   10368 atoms), more than 10368 atoms, heavy elements near the r_g < L/2 limit, charged boxes under the ensemble charge
   model (CPU fallback as before), a long NPT run (20 steps here), C-rescale (same code path). Human production testing
   pending.
+
+## A16 CN range of the CUDA CN = CPU CN range (2026-11-23, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+**Change.** The CUDA CN used a fixed 30 Bohr in the O(N^2) kernel and no distance cutoff in the CN pair list (reach
+2.5 (rcov_i + rcov_j) + 2 skin, 17 Bohr for Na-Cl); the CPU, validated against pprcht/gfnff, uses `cn_cutoff_bohr`
+(10 Bohr, strict r^2 < rc^2) or with `cn_cutoff_bohr` 0 the cnthr of `cn_accuracy`. Now `k_cn_compute_pairs`,
+`k_cn_chainrule` and `k_cn_chainrule_virial` skip r^2 > `r2_max` and `k_cn_compute` gets `r2_max` as its threshold;
+`r2_max` = nextafter(rc^2, 0) (the strict test) or cnthr, set by `GFNFFGpuMethodImpl::initGPUWorkspace` with the GFNFF
+lookup (gfnff scope before the flat key, fallbacks 10.0 / 1.0). ROCm unchanged (trait `has_cn_cutoff` false, GPU_PERIODIC_GAPS B10).
+Plugin ABI 27 unchanged (no shared layout or entry point changed).
+
+**Why the energies of light-atom systems cannot move.** A pair beyond 1.79 (rcov_i + rcov_j) contributes exactly 0 to
+the CN (erf(kn x) rounds to -1 for kn x < -5.9); beyond 10 Bohr that holds for every pair with rcov_i + rcov_j < 5.6 Bohr
+(all H/C/N/O/F/S/Cl pairs). Their chain-rule terms are below 1e-50 Eh/Bohr and vanish in the fixed-point gradient.
+
+| check (thresholds fixed beforehand) | result |
+|---|---|
+| SASS, `cuobjdump -sass` of the plugin vs the reference build `af140bb4` | 330 of 333 kernels identical; the 3 changed are the 3 CN pair kernels |
+| no cell, 6 structures x gfnff/gfn1/gfn2 x 1/4 threads + 2 MD, `-dump_gradient` md5 (16-digit energy in the file) vs reference build | CPU 38/38, CUDA 38/38 identical; second CUDA run 38/38 identical |
+| no cell, heavy-atom sample, gfnff 4 threads, GPU new vs GPU reference | Pt7, F-I...pyridine, Cl2-, pdmaema + 2 Cl- + 24 H2O (182 atoms): md5 identical; `na2cl2-isolated-ions`: E moves by -1.12e-10 Eh, gradient by 1.7e-9 Eh/A, now = CPU (dE 0, dG 2.7e-16 Eh/A; before 1.1e-10 / 1.7e-9) |
+| ion box Na2Cl2 + 380 H2O, L 48 Bohr (ctest `gfnff_gpu_pbc_ewald`, two geometries) | GPU vs CPU energy <= 2.4e-12 Eh (was 3.4e-9), gradient <= 8.2e-14 Eh/A (was 3.5e-8), virial <= 3.1e-12 Eh (was 1.1e-7), charges <= 2.7e-15 e; limits back to 1e-9 / 1e-9 / 1e-7 |
+| `gfnff_gpu_pbc_*` (refuse, terms, hybrid, virial, ewald) | 5/5 passed |
+| FD gate, GPU, no cell, `-dump_gradient` vs Richardson central differences of `-sp` (h 1e-3 / 5e-4 A, all components) | `na2cl2-isolated-ions` 2.8e-12 Eh/A |
+
+Finding on the way (not from A16, not investigated): `pt-cluster-7` fails the same FD gate by 2.0e-2 Eh/A on the CPU, the
+reference GPU build and the new GPU build alike (smooth: FD with h and h/2 agree to 1e-6, so the analytic gradient misses
+a term, or the per-geometry topology derivation of each `-sp` run moves parameters); TODO.md.
+
+## L1 list rebuilds after a barostat step: same lists, faster builds (2026-11-24, Claude Generated; 🤖 AI-generated, ⚙️ machine-tested)
+
+**Question.** Every barostat step (`GFNFF::updateCell`) forces the HB/XB, D4, repulsion and Coulomb lists to be rebuilt
+(N2). Can that cost drop without changing a list entry? Reusing a list across the cell change is not possible under that
+condition: a skin-reused list differs in content from the rebuild (the energies could stay equal, the lists would not).
+So L1 keeps every rebuild and makes each build faster; every new route produces the former list bit for bit.
+
+**Profile before L1** (`CURCUMA_GFNFF_STEPPHASE=1`, `CURCUMA_MD_STEPPHASE=1`, CSVR 300 K, Berendsen every 2 steps, 4 threads,
+RTX 5080; ms of the energy call on a barostat step against a step without one; n = 8 to 10 barostat steps, spread < 3 %):
+
+| part (barostat step) | GPU 864 H2O | GPU 3456 H2O | CPU 3456 H2O |
+|---|---|---|---|
+| energy call, step without / with barostat | 13.3 / 48.1 | 96 / 396 | 508 / 1223 |
+| HB/XB detection (device kernel `k_hb_detect`; CPU: `detectHB`) | 14.5 | 97 (detect kernel 90) | 80-103 |
+| HB/XB host follow-up (bond HB data, alpha pairs, workspace) | 1.3 | 3.8 | 20-40 |
+| D4 generator on the host: O(N^2) CN at 40 Bohr | 12.2 | 101 | 101 |
+| D4 pair list: GPU count/build/key sort; CPU pair passes | 4.6 | 70 (16/24/25) | 470 (pass 1 41, list value-initialisation 270, pass 2 140) |
+| repulsion list (device build; CPU host build) | 1.0 | 12.6 | 39-49 |
+
+**What changed** (all behind `-gfnff.list_fast_rebuild`, default true; false runs the former code; only with a cell):
+- D4 generator CN with a cell: `CNCalculator::calculateGFNFFCNPeriodicLocal` visits only pairs within 2 max(rcov_i + rcov_j)
+  (cell list) and sums each row in ascending j with the statements of the full pass. Every skipped pair has kn dr <= -7.5,
+  where erf returns -1 exactly (fdlibm/glibc and `portable_erf`: |x| >= 6 gives +-(1 - tiny)), so its term is +0.0 and the
+  row sum does not change. CPU and GPU (the host generator feeds the device D4 build). 101 -> 2.7 ms at 3456 H2O.
+- CPU D4 list with a cell: built into the storage of the former list (`GenerateDispersionPairsNative(..., storage)`,
+  `FFWorkspace::releaseD4DispersionStorage`); pass 2 writes every field of every element, so no value-initialisation and
+  no first touch of 0.46 GB per rebuild (270 -> 0 ms).
+- CUDA D4 list with a cell: `k_disp_rows_count/build`, one block per row, block prefix sum; the list comes out in (i, j)
+  order without the key sort; a float minimum-image band filter (r^2 outside cutoff^2 (1 +- 1e-4) decided in float, inside
+  by the former double test); per-atom zeta (`k_disp_atom_zeta`, the same function per atom). 70 -> 10 ms.
+- CUDA repulsion list with a cell: `k_rep_rows_count/build` (same scheme); the former build placed a row in atomic arrival
+  order (the fixed-point sums are order-independent), the new one in (i, j) order. 12.6 -> 2.4 ms.
+- CUDA HB detection with a cell: `k_hb_detect_pbc` (body template `hb_detect_body<PBCF>`, `k_hb_detect` = `<false>` with an
+  unchanged SASS) walks, per AB pair, only the hydrogens near the donor (`k_hb_hnb`: float minimum image, kept when
+  r^2 <= thr2 (1 + 1e-4) or NaN), with a float minimum-image pre-filter of the two distance tests and the float case-1
+  strength decision on minimum-image displacements (`d_hb_strength_decision_fv`, 1 % band, double path inside it; the
+  former code had no float path with a cell). Error bound of the float values: double differences rounded once, |d| <= 2 L
+  (else NaN, the double test decides), L <= 400 Bohr, off-diagonal lattice entries < 1e-9 Bohr (they are 5e-15, rounding of
+  the cell conversion): <= 5e-3 Bohr^2 against a margin of 0.045 Bohr^2. 97 -> 22 ms (kernel 90 -> 8.7).
+- Diagnostics (no numerical effect): `CURCUMA_GFNFF_STEPPHASE=1` adds `HBDEV`, `DISPBUILD`, `D4GEN` timers;
+  `CURCUMA_GFNFF_LISTHASH=1` prints FNV-1a hashes of the D4 CN, the device D4 list, the device HB triples, the device
+  repulsion list (as a sorted set) and the host D4 list at every build.
+
+**After L1** (same profile): GPU 864 H2O barostat step 22.5-23.9 ms (n = 3, was 48.1), 3456 H2O 156-164 ms (n = 4, step
+without barostat 96-104; was 396): HB detection
+22, D4 device build 15.6, D4 host CN 3, repulsion 2.4, HB host follow-up 7. CPU 3456 H2O 970 ms (was 1223): the D4 list
+build (311 ms: pass 2 118, pass 1 43, about 150 ms outside the generator, not split up), host HB detection 79-104 and its
+workspace updates 19-41, repulsion 39-48 are left; L1 changed only the D4 CN and the list storage on the CPU.
+
+**Gates** (thresholds fixed beforehand: equality):
+
+| check | result |
+|---|---|
+| new vs old path (`list_fast_rebuild false`), NPT 432 H2O 200 steps, GPU: list hashes (101 D4 CN, 101 D4 lists, 105 HB lists, 100 repulsion lists) | 407/407 identical; trajectory md5 and status lines (Epot ... virial correction) identical |
+| same, 3456 H2O 50 steps, GPU | 103/103 hashes identical; trajectory and status lines identical |
+| same, CPU, 432 H2O 200 steps / 3456 H2O 50 steps (D4 CN and host D4 list hashes) | 186/186 and 47/47 identical; trajectory and status lines identical (also equal to the GPU trajectory) |
+| no cell: 6 structures x gfnff/gfn1/gfn2 x 1/4 threads + 2 MD vs reference build `af140bb4` | CPU 38/38, CUDA 38/38 identical; second CUDA run 38/38 |
+| SASS of the 333 kernels of the A16 plugin | 333 identical, 7 new kernels |
+| NPT 432 H2O 20 steps CPU vs GPU; second GPU run | status lines and cell identical; trajectory md5 identical |
+
+**Time per NPT step** (ms; CLI, 4 host threads, CSVR 300 K, Berendsen every 2 steps, difference of 60- and 20-step runs,
+n = 3, median (range); RTX 5080; old = the same binary with `-gfnff.list_fast_rebuild false`; load average 0.7-2.6 at
+432 H2O, 4.6-9.1 from 864 H2O on: another agent's runs shared the machine, so the CPU columns carry that noise):
+
+| box | atoms | GPU old | GPU new | gain | CPU old | CPU new | gain |
+|---|---|---|---|---|---|---|---|
+| 432 H2O | 1296 | 12.2 (9.4-12.6) | 5.8 (5.4-6.5) | 2.1x | 49.1 (47.6-51.5) | 45.4 (45.4-45.6) | 1.08x |
+| 864 H2O | 2592 | 31.8 (28.1-31.8) | 18.1 (16.0-18.5) | 1.8x | 131.7 (128.9-134.7) | 118.0 (116.8-123.0) | 1.12x |
+| 1728 H2O | 5184 | 93.4 (89.2-93.5) | 47.5 (47.5-47.8) | 2.0x | 343.2 (337.1-357.2) | 304.3 (291.4-310.6) | 1.13x |
+| 3456 H2O | 10368 | 271.4 (243.9-274.4) | 137.1 (131.8-146.2) | 2.0x | 1003 (897-1282) | 789 (714-806) | 1.27x |
+
+**Not done / not tested.** CPU host HB detection and repulsion list with a cell (same float-filter ideas would apply, not
+done); the remaining 150 ms of the CPU D4 rebuild outside the generator (not split up); ROCm (none of the new kernels exist
+there); non-orthorhombic cells (the float filters switch off; GFN-FF refuses them anyway); boxes above L = 400 Bohr (filters
+off). Every gate ran on water boxes only (plus the no-cell set); other periodic systems are not tested. Human production
+testing pending.
 
 ## Moved from TODO.md (Nov 23, 2026)
 

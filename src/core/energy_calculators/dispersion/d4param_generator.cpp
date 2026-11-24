@@ -2119,7 +2119,23 @@ bool D4ParameterGenerator::canSkipGaussianWeightsUpdate(const std::vector<double
 std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative(
     const std::vector<int>& atoms, const Matrix& geometry_bohr, CxxThreadPool* pool, int num_threads)
 {
+    return GenerateDispersionPairsNative(atoms, geometry_bohr, pool, num_threads, nullptr);
+}
+
+std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative(
+    const std::vector<int>& atoms, const Matrix& geometry_bohr, CxxThreadPool* pool, int num_threads,
+    std::vector<GFNFFDispersion>* storage)
+{
     m_atoms = atoms;
+    // CURCUMA_GFNFF_STEPPHASE=1: phase times of a list build on stderr (timing only), Claude Generated (Nov 2026)
+    static const bool gen_log = [] { const char* e = std::getenv("CURCUMA_GFNFF_STEPPHASE"); return e && *e && std::string(e) != "0"; }();
+    auto gen_t = std::chrono::steady_clock::now();
+    auto gen_lap = [&](const char* what) {
+        if (!gen_log) return;
+        const auto now = std::chrono::steady_clock::now();
+        fmt::print(stderr, "D4GEN {} {:.2f}\n", what, std::chrono::duration<double, std::milli>(now - gen_t).count());
+        gen_t = now;
+    };
 
     // Step 1: CN calculation
     if (m_use_d4_covalent_cn) {
@@ -2128,10 +2144,28 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
         m_cn_values = curcuma::dispersion::computeD4CovalentCN(m_atoms, geometry_bohr);
     } else {
         // Nov 2026 (A3b): minimum image with a periodic cell (nullptr: non-periodic, unchanged)
-        m_cn_values = CNCalculator::calculateGFNFFCN(m_atoms, geometry_bohr, 1600.0, -7.5, 4.4, nullptr,
-            m_cell.active ? &m_cell : nullptr);
+        // L1 (Nov 2026, Claude Generated): with a cell the same CN from a cell list (bitwise, see
+        // CNCalculator::calculateGFNFFCNPeriodicLocal); it declines (false) where it does not apply.
+        const bool local = m_cell.active && m_config.get<bool>("d4_cn_periodic_local", true)
+            && CNCalculator::calculateGFNFFCNPeriodicLocal(m_atoms, geometry_bohr, 1600.0, -7.5, 4.4, m_cell, m_cn_values);
+        if (!local)
+            m_cn_values = CNCalculator::calculateGFNFFCN(m_atoms, geometry_bohr, 1600.0, -7.5, 4.4, nullptr,
+                m_cell.active ? &m_cell : nullptr);
     }
 
+    gen_lap("cn");
+    {   // CURCUMA_GFNFF_LISTHASH=1: FNV-1a hash of the CN bits of each list build (stderr), Claude Generated (Nov 2026, L1 gate)
+        static const bool hash_log = [] { const char* e = std::getenv("CURCUMA_GFNFF_LISTHASH"); return e && *e && std::string(e) != "0"; }();
+        if (hash_log) {
+            std::uint64_t h = 1469598103934665603ull;
+            for (double v : m_cn_values) {
+                std::uint64_t b;
+                std::memcpy(&b, &v, sizeof b);
+                for (int k = 0; k < 8; ++k) { h ^= (b >> (8 * k)) & 0xffu; h *= 1099511628211ull; }
+            }
+            fmt::print(stderr, "LISTHASH d4cn {} {:016x}\n", m_cn_values.size(), h);
+        }
+    }
     // Step 2: Reuse topology charges or compute fresh
     if (m_topology_charges.size() != static_cast<Eigen::Index>(m_atoms.size())) {
         Vector cn_eigen = Eigen::Map<const Vector>(m_cn_values.data(), m_cn_values.size());
@@ -2144,6 +2178,7 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
     if (!m_data_initialized) initializeReferenceData();
     if (!c6CacheCoversAtoms()) precomputeC6ReferenceMatrix();
     precomputeGaussianWeights(pool, num_threads);
+    gen_lap("charges_c6ref_weights");
 
     // WP-A (Jun 2026): with gpu_disp_pairs_on_device the GPU builds the pair list +
     // dc6dcn on the device, reusing only the CN + Gaussian weights computed above.
@@ -2160,6 +2195,7 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
     // after the loop (it depends only on CN, always ran unconditionally).
     computeGaussianWeightDerivatives(pool, num_threads);
     precomputeC6HalfContraction(pool, num_threads);
+    gen_lap("derivatives_halfcontraction");
 
     // Step 4: Generate pairs as native structs (no JSON!)
     double a1 = m_config.get<double>("d4_a1", 0.58);
@@ -2168,6 +2204,8 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
     double s8 = m_config.get<double>("d4_s8", 2.0);
 
     std::vector<GFNFFDispersion> all_pairs;
+    if (storage)
+        all_pairs.swap(*storage);   // L1: reuse the elements of the former list (every field is rewritten in pass 2)
 
     // Claude Generated (Apr 2026): Hard distance cutoff of 60 Bohr for dispersion pairs.
     // BJ-damped dispersion is negligible beyond this range; skipping saves N²/2 pairs.
@@ -2258,6 +2296,7 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
             row_offset[i + 1] = c;
         }
     }
+    gen_lap("pass1_count");
     for (int i = 0; i < n_at; ++i) row_offset[i + 1] += row_offset[i];
     all_pairs.resize(row_offset[n_at]);
     // Lever 3 Opt A (Jun 2026): the in-cutoff pair list is captured for computeDC6DCN, which
@@ -2265,6 +2304,7 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
     // the 60 Bohr cutoff, (i, j) order as D4DC6DCNPairs::lookup() requires);
     // updateCNValuesForGradient reuses it. Oct 2026: written in the same pass as the list.
     m_dc6dcn.pairs.resize(all_pairs.size());
+    gen_lap("resize");
 
     // Pass 2: fill each row at its offset
     {
@@ -2297,11 +2337,13 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
     }
 
     m_dc6dcn_pairs_valid = true;
+    gen_lap("pass2_fill");
 
     // dc6dcn for the gradient (derivatives + half-contraction already built above).
     // Claude Generated (Oct 2026): not stored in the fused mode, see requestFusedPairC6().
     if (!fusedTakeDerivativeRebuild())
         computeDC6DCN(pool, num_threads);
+    gen_lap("dc6dcn");
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::result_fmt("D4 native dispersion: {} pairs generated", all_pairs.size());

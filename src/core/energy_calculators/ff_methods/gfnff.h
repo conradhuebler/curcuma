@@ -405,6 +405,7 @@ PARAM(farfield_shortcut, Bool, true, "CPU Coulomb energy and EEQ matrix: use 1/r
 // ---- Pair lists ----
 PARAM(nb_cell_list_min_atoms, Int, 800, "From this atom count on, non-bonded neighbours (repulsion, HB/XB, cutoff Coulomb) come from a cell list; below, all pairs are scanned. 0 = always the cell list.", "Pair lists", {"hb_cell_list_min_atoms"})
 PARAM(nonbonded_skin_bohr, Double, 2.0, "Verlet skin (Bohr) of the repulsion and cutoff Coulomb lists, rebuilt once an atom moved more than skin/2 (exact). Active from nb_cell_list_min_atoms on; 0 uses nonbonded_rebuild_every.", "Pair lists", {})
+PARAM(list_fast_rebuild, Bool, true, "Periodic cell: rebuild the pair and H-bond lists (every barostat step) by the faster routes of L1 (cell-list D4 coordination number, ...) whose lists and values equal the full rebuild bit for bit; false runs the former full rebuilds.", "Pair lists", {})
 PARAM(nonbonded_rebuild_every, Int, 1, "With nonbonded_skin_bohr 0: rebuild the repulsion and cutoff Coulomb lists every N energy calls; 1 is always safe. See GFNFF_PAIR_LIST_REFRESH.md.", "Pair lists", {})
 // ---- Implicit solvation (use the dotted -gfnff.solvent; the flat -solvent is shared) ----
 PARAM(solvent, String, "none", "Implicit solvent for native GFN-FF ALPB, such as water or dmso; 'none' = gas phase, and the EEQ charges feel the solvent. Names are case-insensitive and accept the xtb aliases; an unknown solvent is an error. Use -gfnff.solvent, since the flat -solvent is shared.", "Solvation", {})

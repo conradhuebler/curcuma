@@ -62,6 +62,9 @@ struct GFNFFRocmBackend {
     /// K1 (Oct 2026, Claude Generated): CN pair list as a Verlet list with skin
     /// (gpu_cn_pair_skin_bohr), rebuilt on its own displacement test (cnPairListStale()).
     static constexpr bool has_cn_pair_skin = true;
+    /// A16 (Nov 2026): NOT on ROCm: the HIP CN keeps 30 Bohr (O(N^2)) and no cutoff in the pair list,
+    /// so it ignores cn_cutoff_bohr (GPU_PERIODIC_GAPS.md B10).
+    static constexpr bool has_cn_cutoff = false;
     /// K2/K3 (Oct 2026): dispersion and the device EEQ solve overlap dc6dcn on own streams
     /// (recordEEQInputsReady(), launchDispersionGradientEarly(), EEQ setInputReadyEvent()).
     /// Claude Generated (Oct 2026): on ROCm only K2, and only in the single-stream mode (below 500 atoms):

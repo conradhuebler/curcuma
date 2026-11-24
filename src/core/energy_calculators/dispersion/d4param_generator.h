@@ -88,6 +88,17 @@ public:
         const std::vector<int>& atoms, const Matrix& geometry_bohr,
         CxxThreadPool* pool = nullptr, int num_threads = 1);
 
+    /**
+     * @brief Same list, built into the storage of a previous list (L1, Nov 2026, Claude Generated).
+     * @param storage  a former list (moved from, left empty); its elements are reused, so the build
+     *        does not value-initialise and first-touch the whole list again (270 ms of a 9.5 M pair
+     *        rebuild at 3456 H2O). Every field of every returned element is written by the pair pass,
+     *        so the result equals the four-argument call bit for bit. nullptr = the four-argument call.
+     */
+    std::vector<GFNFFDispersion> GenerateDispersionPairsNative(
+        const std::vector<int>& atoms, const Matrix& geometry_bohr,
+        CxxThreadPool* pool, int num_threads, std::vector<GFNFFDispersion>* storage);
+
     // Individual parameter accessors
     double getC6(int atom_i, int atom_j, int ref_i = 0, int ref_j = 0) const;
     double getSqrtZr4r2(int atom) const;

@@ -616,6 +616,7 @@ struct HBDetectDev {
     int ab_cap = 0;
     CudaBuffer<long long> key;
     int cap = 0;
+    CudaBuffer<int>    hnb_cnt, hnb_off, hnb_idx;   ///< L1 (Nov 2026): hydrogens near each AB atom (k_hb_hnb)
 };
 
 struct FFWorkspaceGPUImpl {
@@ -786,6 +787,7 @@ struct FFWorkspaceGPUImpl {
     RefCoordSoA ref_coords;  ///< Reference geometry SoA (rx[N], ry[N], rz[N]) — Phase 10, March 2026
     CudaBuffer<int>    d_disp_flag;       ///< [1] exceeded flag for displacement check
     RefCoordSoA        cn_ref_coords;     ///< K1 (Oct 2026): geometry of the last CN pair-list build
+    CudaBuffer<double> d_disp_zeta_atom;  ///< L1 (Nov 2026): [N] per-atom D4 charge scaling (k_disp_atom_zeta)
     CudaBuffer<int>    d_cn_disp_flag;    ///< K1 (Oct 2026): [1] flag for cnPairListStale()
 
     // GPU CN computation buffers (Phase 1: GPU migration)
@@ -2260,6 +2262,16 @@ int FFWorkspaceGPU::detectHBondsOnDevice(const GFNFFHBDetectInputs& in, std::vec
     HBondSoA& soa = impl.hbonds;
     const int N = m_natoms;
     auto pol = thrust::cuda::par.on(impl.stream);
+    // CURCUMA_GFNFF_STEPPHASE=1: phase times on stderr (timing only), Claude Generated (Nov 2026)
+    static const bool hd_log = [] { const char* e = std::getenv("CURCUMA_GFNFF_STEPPHASE"); return e && *e && std::string(e) != "0"; }();
+    auto hd_t = std::chrono::steady_clock::now();
+    auto hd_lap = [&](const char* what) {
+        if (!hd_log) return;
+        checkCuda(cudaStreamSynchronize(impl.stream), "hb detect lap");
+        const auto now = std::chrono::steady_clock::now();
+        fmt::print(stderr, "HBDEV {} {:.2f}\n", what, std::chrono::duration<double, std::milli>(now - hd_t).count());
+        hd_t = now;
+    };
 
     // inputs (a few arrays of N and the CSR lists: well below 1 MB on urea400-water1000)
     D.bas.upload(in.basicity.data(), N);
@@ -2279,6 +2291,7 @@ int FFWorkspaceGPU::detectHBondsOnDevice(const GFNFFHBDetectInputs& in, std::vec
         D.repz.upload(repz86.data(), 86);
     }
     if (!D.counter.ptr) D.counter.alloc(1);
+    hd_lap("upload");
 
     // pass 1: AB pairs (compacted), pass 2: one warp per AB pair; both write into buffers of a capacity that grows
     // when the counter shows an overflow (the kernels count past the end and the pass is rerun larger)
@@ -2309,7 +2322,32 @@ int FFWorkspaceGPU::detectHBondsOnDevice(const GFNFFHBDetectInputs& in, std::vec
         ab_cap = n_ab + n_ab / 4;
     }
     D.ab_cap = std::max(D.ab_cap, ab_cap);
+    if (hd_log) fmt::print(stderr, "HBDEV n_ab {}\n", n_ab);
+    hd_lap("ab_pairs");
     if (n_ab > ab_cap) throw std::runtime_error("GPU H-bond detection: AB pair count exceeds the buffer after reruns");
+
+    // L1 (Nov 2026, Claude Generated): with a cell, the hydrogens near each AB atom for k_hb_detect_pbc
+    const bool hb_fast = impl.pbc_active && m_list_fast_rebuild;
+    if (hb_fast && n_ab > 0) {
+        const int n_hyd = static_cast<int>(in.hb_hyd_list.size());
+        D.hnb_cnt.ensure(N); D.hnb_off.ensure(N + 1);
+        k_hb_hnb<<<(N + 127) / 128, 128, 0, impl.stream>>>(N, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+            D.ab_ok.ptr, D.hyd_list.ptr, n_hyd, in.hbthr2, D.hnb_cnt.ptr, nullptr, nullptr);
+        exclusive_scan_int(D.hnb_cnt.ptr, D.hnb_off.ptr, N, impl.stream);
+        int last[2] = { 0, 0 };
+        checkCuda(cudaMemcpyAsync(&last[0], D.hnb_off.ptr + (N - 1), sizeof(int), cudaMemcpyDeviceToHost, impl.stream), "hnb off");
+        checkCuda(cudaMemcpyAsync(&last[1], D.hnb_cnt.ptr + (N - 1), sizeof(int), cudaMemcpyDeviceToHost, impl.stream), "hnb cnt");
+        checkCuda(cudaStreamSynchronize(impl.stream), "hnb count sync");
+        const int total = last[0] + last[1];
+        checkCuda(cudaMemcpyAsync(D.hnb_off.ptr + N, &total, sizeof(int), cudaMemcpyHostToDevice, impl.stream), "hnb end");
+        D.hnb_idx.ensure(std::max(total, 1));
+        k_hb_hnb<<<(N + 127) / 128, 128, 0, impl.stream>>>(N, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+            D.ab_ok.ptr, D.hyd_list.ptr, n_hyd, in.hbthr2, nullptr, D.hnb_off.ptr, D.hnb_idx.ptr);
+        checkCuda(cudaGetLastError(), "k_hb_hnb launch");
+        checkCuda(cudaStreamSynchronize(impl.stream), "hnb write sync");
+        if (hd_log) fmt::print(stderr, "HBDEV hnb_total {}\n", total);
+        hd_lap("h_neighbours");
+    }
 
     int cap = std::max(D.cap, 1 << 20);
     int count = 0;
@@ -2319,6 +2357,16 @@ int FFWorkspaceGPU::detectHBondsOnDevice(const GFNFFHBDetectInputs& in, std::vec
         D.counter.upload(&zero, 1);
         const int threads = 128;   // 4 warps per block, one warp per AB pair
         const long long blocks = (static_cast<long long>(n_ab) * 32 + threads - 1) / threads;
+        // L1 (Nov 2026): with a cell the float minimum-image pre-filter (same entries, setListFastRebuild(false) = former kernel)
+        if (hb_fast)
+            k_hb_detect_pbc<<<static_cast<unsigned>(blocks), threads, 0, impl.stream>>>(
+                n_ab, D.ab_i.ptr, D.ab_j.ptr, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+                D.fx.ptr, D.fy.ptr, D.fz.ptr, N, impl.d_atom_types.ptr, D.bas.ptr, D.aci.ptr, D.q.ptr,
+                D.hyd_list.ptr, static_cast<int>(in.hb_hyd_list.size()),
+                D.bond_off.ptr, D.bond_idx.ptr, D.hyd_off.ptr, D.hyd_idx.ptr, D.nbr_off.ptr, D.nbr_idx.ptr,
+                in.hbthr1, in.hbthr2, in.min_pair_energy, cap, D.counter.ptr, D.key.ptr, D.ct.ptr, D.par.ptr,
+                D.hnb_off.ptr, D.hnb_idx.ptr);
+        else
         k_hb_detect<<<static_cast<unsigned>(blocks), threads, 0, impl.stream>>>(
             n_ab, D.ab_i.ptr, D.ab_j.ptr, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
             D.fx.ptr, D.fy.ptr, D.fz.ptr, N, impl.d_atom_types.ptr, D.bas.ptr, D.aci.ptr, D.q.ptr,
@@ -2333,6 +2381,8 @@ int FFWorkspaceGPU::detectHBondsOnDevice(const GFNFFHBDetectInputs& in, std::vec
         cap = count + count / 4;
     }
     D.cap = std::max(D.cap, cap);
+    if (hd_log) fmt::print(stderr, "HBDEV n_entries {}\n", count);
+    hd_lap("detect");
     if (count > cap) throw std::runtime_error("GPU H-bond detection: entry count exceeds the buffer after reruns");
 
     const int n = count;
@@ -2348,6 +2398,7 @@ int FFWorkspaceGPU::detectHBondsOnDevice(const GFNFFHBDetectInputs& in, std::vec
     thrust::device_ptr<long long> pk(D.key.ptr);
     thrust::sequence(pol, pp, pp + n);
     thrust::sort_by_key(pol, pk, pk + n, pp);
+    hd_lap("sort");
 
     CudaBuffer<int>* icols[] = { &soa.idx_i, &soa.idx_j, &soa.idx_k, &soa.elem_A, &soa.elem_B, &soa.case_type,
                                  &soa.nb_B_offset, &soa.nb_B_count, &soa.acceptor_parent, &soa.nb_C_offset,
@@ -2385,6 +2436,7 @@ int FFWorkspaceGPU::detectHBondsOnDevice(const GFNFFHBDetectInputs& in, std::vec
             soa.nb_B_offset.ptr, soa.nb_C_offset.ptr, soa.nb_B_flat.ptr, soa.nb_C_flat.ptr);
         checkCuda(cudaStreamSynchronize(impl.stream), "k_hb_fill_neighbors sync");
     }
+    hd_lap("fill");
 
     hb_i.resize(n); hb_j.resize(n); hb_k.resize(n);
     soa.idx_i.download(hb_i.data(), n, impl.stream);
@@ -2393,6 +2445,17 @@ int FFWorkspaceGPU::detectHBondsOnDevice(const GFNFFHBDetectInputs& in, std::vec
     if (hb_case) { hb_case->resize(n); soa.case_type.download(hb_case->data(), n, impl.stream); }
     if (hb_parent) { hb_parent->resize(n); soa.acceptor_parent.download(hb_parent->data(), n, impl.stream); }
     checkCuda(cudaStreamSynchronize(impl.stream), "hb triple download sync");
+    hd_lap("download");
+    {   // CURCUMA_GFNFF_LISTHASH=1: FNV-1a hash of the (A, H, B) triples (L1 gate), Claude Generated (Nov 2026)
+        static const bool hash_log = [] { const char* e = std::getenv("CURCUMA_GFNFF_LISTHASH"); return e && *e && std::string(e) != "0"; }();
+        if (hash_log) {
+            std::uint64_t h = 1469598103934665603ull;
+            for (const auto* v : { &hb_i, &hb_j, &hb_k })
+                for (int x : *v)
+                    for (int k = 0; k < 4; ++k) { h ^= (static_cast<unsigned>(x) >> (8 * k)) & 0xffu; h *= 1099511628211ull; }
+            fmt::print(stderr, "LISTHASH hbtriples {} {:016x}\n", n, h);
+        }
+    }
     m_last_hbonds.clear();
     return n;
 }
@@ -2717,6 +2780,30 @@ struct DispPairKey {
     __host__ __device__ long long operator()(int a, int b) const { return static_cast<long long>(a) * N + b; }
 };
 
+// CURCUMA_GFNFF_LISTHASH=1 (Claude Generated, Nov 2026, L1 gate): FNV-1a hash of the device D4 pair list (indices and
+// the five per-pair columns) after a build, on stderr; diagnostics only (downloads the list).
+static void listHashDisp(FFWorkspaceGPUImpl& impl, int n)
+{
+    static const bool on = [] { const char* e = std::getenv("CURCUMA_GFNFF_LISTHASH"); return e && *e && std::string(e) != "0"; }();
+    if (!on || n <= 0) return;
+    std::uint64_t h = 1469598103934665603ull;
+    auto mix = [&](const void* p, size_t bytes) {
+        const unsigned char* c = static_cast<const unsigned char*>(p);
+        for (size_t k = 0; k < bytes; ++k) { h ^= c[k]; h *= 1099511628211ull; }
+    };
+    std::vector<int> vi(n);
+    std::vector<double> vd(n);
+    for (int* col : { impl.disp.idx_i.ptr, impl.disp.idx_j.ptr }) {
+        checkCuda(cudaMemcpy(vi.data(), col, sizeof(int) * n, cudaMemcpyDeviceToHost), "listhash");
+        mix(vi.data(), sizeof(int) * n);
+    }
+    for (double* col : { impl.disp.C6.ptr, impl.disp.r4r2ij.ptr, impl.disp.r0_sq.ptr, impl.disp.zetac6.ptr, impl.disp.r_cut.ptr }) {
+        checkCuda(cudaMemcpy(vd.data(), col, sizeof(double) * n, cudaMemcpyDeviceToHost), "listhash");
+        mix(vd.data(), sizeof(double) * n);
+    }
+    fmt::print(stderr, "LISTHASH d4pairs {} {:016x}\n", n, h);
+}
+
 void FFWorkspaceGPU::generateDispersionPairListOnGPU(
     const std::vector<double>& gw_flat,
     const std::vector<double>& sqrtzr4r2,
@@ -2727,6 +2814,16 @@ void FFWorkspaceGPU::generateDispersionPairListOnGPU(
     ++impl.disp_gen;
     const int N = m_natoms;
     if (N <= 0) return;
+    // CURCUMA_GFNFF_STEPPHASE=1: phase times of the build on stderr (timing only), Claude Generated (Nov 2026)
+    static const bool db_log = [] { const char* e = std::getenv("CURCUMA_GFNFF_STEPPHASE"); return e && *e && std::string(e) != "0"; }();
+    auto db_t = std::chrono::steady_clock::now();
+    auto db_lap = [&](const char* what) {
+        if (!db_log) return;
+        checkCuda(cudaStreamSynchronize(impl.stream), "disp build lap");
+        const auto now = std::chrono::steady_clock::now();
+        fmt::print(stderr, "DISPBUILD {} {:.2f}\n", what, std::chrono::duration<double, std::milli>(now - db_t).count());
+        db_t = now;
+    };
     if (!impl.dc6dcn_gpu_ready) {
         if (CurcumaLogger::get_verbosity() >= 1)
             CurcumaLogger::warn("GPU disp pair build skipped: C6 reference table not uploaded");
@@ -2759,15 +2856,26 @@ void FFWorkspaceGPU::generateDispersionPairListOnGPU(
     if (impl.d_disp_pair_counter.n < N) impl.d_disp_pair_counter.alloc(N);       // row counts, then row fill counters
     if (impl.d_disp_row_off.n < N + 1) impl.d_disp_row_off.alloc(N + 1);
 
+    db_lap("upload");
     const double cutoff_sq = cutoff_bohr * cutoff_bohr;
     const int n_total = N * (N - 1) / 2;
     auto cfg = getLaunchConfig(n_total, m_block_size);
 
+    // L1 (Nov 2026, Claude Generated): with a cell the ordered row-block build (k_disp_rows_*): same pairs, values
+    // and (i, j) order as the two-pass build plus key sort below; setListFastRebuild(false) keeps the former path.
+    const bool rows_build = impl.pbc_active && m_list_fast_rebuild;
+
     // Pass 1: count surviving pairs per row i.
+    if (rows_build) {
+        k_disp_rows_count<<<N, 256, 0, impl.stream>>>(N, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+            impl.d_atom_types.ptr, cutoff_sq, impl.d_disp_pair_counter.ptr);
+        checkCuda(cudaGetLastError(), "k_disp_rows_count launch");
+    } else {
     cudaMemsetAsync(impl.d_disp_pair_counter.ptr, 0, sizeof(int) * N, impl.stream);
     k_disp_pairs_count<<<cfg.gridSize, cfg.blockSize, 0, impl.stream>>>(
         N, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
         impl.d_atom_types.ptr, cutoff_sq, impl.d_disp_pair_counter.ptr);
+    }
     exclusive_scan_int(impl.d_disp_pair_counter.ptr, impl.d_disp_row_off.ptr, N, impl.stream);
     int h_last[2] = { 0, 0 };   // row_off[N-1] + count[N-1] = total
     checkCuda(cudaMemcpyAsync(&h_last[0], impl.d_disp_row_off.ptr + (N - 1), sizeof(int),
@@ -2776,6 +2884,7 @@ void FFWorkspaceGPU::generateDispersionPairListOnGPU(
                               cudaMemcpyDeviceToHost, impl.stream), "disp count last");
     checkCuda(cudaStreamSynchronize(impl.stream), "k_disp_pairs_count sync");
     const int h_count = h_last[0] + h_last[1];
+    db_lap("count");
 
     // (Re)allocate the DispersionSoA to the device-counted pair count.
     impl.disp.n = h_count;
@@ -2790,6 +2899,25 @@ void FFWorkspaceGPU::generateDispersionPairListOnGPU(
     impl.disp.dc6dcn_ji.alloc(h_count);
 
     if (h_count == 0) {
+        impl.disp_built_on_gpu = true;
+        return;
+    }
+
+    db_lap("alloc");
+    if (rows_build) {
+        impl.d_disp_zeta_atom.ensure(N);
+        k_disp_atom_zeta<<<(N + 255) / 256, 256, 0, impl.stream>>>(N, impl.d_atom_types.ptr, impl.d_topo_q.ptr,
+            impl.d_zeta_zeff.ptr, impl.d_zeta_c.ptr, impl.d_disp_zeta_atom.ptr);
+        k_disp_rows_build<<<N, 256, 0, impl.stream>>>(
+            N, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr, impl.d_atom_types.ptr, cutoff_sq,
+            impl.d_gw.ptr, impl.d_c6_flat.ptr, impl.d_sqrtzr4r2.ptr, impl.d_disp_zeta_atom.ptr,
+            a1, a2, r_cut_eval_bohr, impl.d_disp_row_off.ptr,
+            impl.disp.idx_i.ptr, impl.disp.idx_j.ptr, impl.disp.C6.ptr, impl.disp.r4r2ij.ptr, impl.disp.r0_sq.ptr,
+            impl.disp.zetac6.ptr, impl.disp.r_cut.ptr);
+        checkCuda(cudaGetLastError(), "k_disp_rows_build launch");
+        checkCuda(cudaStreamSynchronize(impl.stream), "k_disp_rows_build sync");
+        db_lap("rows_build");
+        listHashDisp(impl, h_count);
         impl.disp_built_on_gpu = true;
         return;
     }
@@ -2809,6 +2937,7 @@ void FFWorkspaceGPU::generateDispersionPairListOnGPU(
         impl.disp.C6.ptr, impl.disp.r4r2ij.ptr, impl.disp.r0_sq.ptr,
         impl.disp.zetac6.ptr, impl.disp.r_cut.ptr);
     checkCuda(cudaStreamSynchronize(impl.stream), "k_disp_pairs_build sync");
+    db_lap("build");
 
     // Claude Generated (Oct 2026): put the pairs in the host's serial (i, j) order. k_disp_pairs_build
     // takes its slot from a global atomic counter, so the order depended on which warp arrived first:
@@ -2859,6 +2988,8 @@ void FFWorkspaceGPU::generateDispersionPairListOnGPU(
         }
     }
 
+    db_lap("sort");
+    listHashDisp(impl, h_count);
     impl.disp_built_on_gpu = true;
 
     if (CurcumaLogger::get_verbosity() >= 2)
@@ -2871,6 +3002,32 @@ void FFWorkspaceGPU::generateDispersionPairListOnGPU(
 // generateRepulsionPairsNative() (26 ms per rebuild on polymer_2x with 16 threads) plus the
 // 6 ms upload. Same two-pass scheme as the D4 list above.
 // ============================================================================
+// CURCUMA_GFNFF_LISTHASH=1 (Claude Generated, Nov 2026, L1 gate): hash of the device repulsion list as a set (entries
+// sorted by (i, j) on the host first, because the two-pass build places a row in atomic arrival order).
+static void listHashRep(FFWorkspaceGPUImpl& impl, int n)
+{
+    static const bool on = [] { const char* e = std::getenv("CURCUMA_GFNFF_LISTHASH"); return e && *e && std::string(e) != "0"; }();
+    if (!on || n <= 0) return;
+    auto& nb = impl.nonbonded_rep;
+    std::vector<int> vi(n), vj(n);
+    std::vector<double> va(n), vr(n), vc(n);
+    checkCuda(cudaMemcpy(vi.data(), nb.idx_i.ptr, sizeof(int) * n, cudaMemcpyDeviceToHost), "listhash");
+    checkCuda(cudaMemcpy(vj.data(), nb.idx_j.ptr, sizeof(int) * n, cudaMemcpyDeviceToHost), "listhash");
+    checkCuda(cudaMemcpy(va.data(), nb.alpha.ptr, sizeof(double) * n, cudaMemcpyDeviceToHost), "listhash");
+    checkCuda(cudaMemcpy(vr.data(), nb.repab.ptr, sizeof(double) * n, cudaMemcpyDeviceToHost), "listhash");
+    checkCuda(cudaMemcpy(vc.data(), nb.r_cut.ptr, sizeof(double) * n, cudaMemcpyDeviceToHost), "listhash");
+    std::vector<int> perm(n);
+    for (int k = 0; k < n; ++k) perm[k] = k;
+    std::sort(perm.begin(), perm.end(), [&](int a, int b) { return vi[a] != vi[b] ? vi[a] < vi[b] : vj[a] < vj[b]; });
+    std::uint64_t h = 1469598103934665603ull;
+    auto mix = [&](const void* p, size_t bytes) {
+        const unsigned char* c = static_cast<const unsigned char*>(p);
+        for (size_t k = 0; k < bytes; ++k) { h ^= c[k]; h *= 1099511628211ull; }
+    };
+    for (int k : perm) { mix(&vi[k], 4); mix(&vj[k], 4); mix(&va[k], 8); mix(&vr[k], 8); mix(&vc[k], 8); }
+    fmt::print(stderr, "LISTHASH reppairs {} {:016x}\n", n, h);
+}
+
 void FFWorkspaceGPU::generateNonbondedRepulsionOnGPU(const GFNFF::RepulsionDeviceInputs& in)
 {
     auto& impl = *m_impl;
@@ -2900,9 +3057,17 @@ void FFWorkspaceGPU::generateNonbondedRepulsionOnGPU(const GFNFF::RepulsionDevic
     const double cutoff_sq = in.build_radius_bohr * in.build_radius_bohr;
     auto cfg = getLaunchConfig(N * (N - 1) / 2, m_block_size);
 
+    // L1 (Nov 2026, Claude Generated): with a cell the ordered row-block build (same pair set and values, (i, j) order)
+    const bool rows_build = impl.pbc_active && m_list_fast_rebuild;
+    if (rows_build) {
+        k_rep_rows_count<<<N, 256, 0, impl.stream>>>(N, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+            cutoff_sq, t, impl.d_rep_counter.ptr);
+        checkCuda(cudaGetLastError(), "k_rep_rows_count launch");
+    } else {
     cudaMemsetAsync(impl.d_rep_counter.ptr, 0, sizeof(int) * N, impl.stream);
     k_rep_pairs_count<<<cfg.gridSize, cfg.blockSize, 0, impl.stream>>>(
         N, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr, cutoff_sq, t, impl.d_rep_counter.ptr);
+    }
     exclusive_scan_int(impl.d_rep_counter.ptr, impl.d_rep_row_off.ptr, N, impl.stream);
     int h_last[2] = { 0, 0 };
     checkCuda(cudaMemcpyAsync(&h_last[0], impl.d_rep_row_off.ptr + (N - 1), sizeof(int),
@@ -2920,12 +3085,22 @@ void FFWorkspaceGPU::generateNonbondedRepulsionOnGPU(const GFNFF::RepulsionDevic
     }
     if (h_count == 0) return;
 
+    if (rows_build) {
+        k_rep_rows_build<<<N, 256, 0, impl.stream>>>(
+            N, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr, impl.d_atom_types.ptr,
+            cutoff_sq, t, impl.d_rep_row_off.ptr, nb.idx_i.ptr, nb.idx_j.ptr, nb.alpha.ptr, nb.repab.ptr, nb.r_cut.ptr);
+        checkCuda(cudaGetLastError(), "k_rep_rows_build launch");
+        checkCuda(cudaStreamSynchronize(impl.stream), "k_rep_rows_build sync");
+        listHashRep(impl, h_count);
+        return;
+    }
     cudaMemsetAsync(impl.d_rep_counter.ptr, 0, sizeof(int) * N, impl.stream);
     k_rep_pairs_build<<<cfg.gridSize, cfg.blockSize, 0, impl.stream>>>(
         N, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr, impl.d_atom_types.ptr,
         cutoff_sq, t, impl.d_rep_row_off.ptr, impl.d_rep_counter.ptr,
         nb.idx_i.ptr, nb.idx_j.ptr, nb.alpha.ptr, nb.repab.ptr, nb.r_cut.ptr);
     checkCuda(cudaStreamSynchronize(impl.stream), "k_rep_pairs_build sync");
+    listHashRep(impl, h_count);
     if (CurcumaLogger::get_verbosity() >= 3)
         CurcumaLogger::info(fmt::format("  GPU non-bonded repulsion list: {} pairs built on GPU", h_count));
 }
@@ -3960,7 +4135,8 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
             impl.d_dEdcn.ptr,
             impl.d_dlogdcn.ptr,
             impl.d_grad.ptr,
-            m_kn);
+            m_kn,
+            m_cn_r2_max);
         checkCuda(cudaGetLastError(), "k_cn_chainrule launch");
     }
 
@@ -4024,7 +4200,7 @@ double FFWorkspaceGPU::launchChargeDependentAndFinish(bool gradient)
             LaunchConfig c = getLaunchConfig(impl.n_cn_pairs, m_block_size);
             k_cn_chainrule_virial<<<c.gridSize, c.blockSize, 0, stream>>>(impl.n_cn_pairs, impl.d_cn_idx_i.ptr,
                 impl.d_cn_idx_j.ptr, impl.d_cn_rcov_sum.ptr, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
-                impl.d_dEdcn.ptr, impl.d_dlogdcn.ptr, m_kn, V + 9 * VIR_CN);
+                impl.d_dEdcn.ptr, impl.d_dlogdcn.ptr, m_kn, m_cn_r2_max, V + 9 * VIR_CN);
         }
         if (tail_ran) {   // C8 part of the tail alone (pref6 = 0, no dE/dCN) for the pressure correction E6/E8
             LaunchConfig cfg_a = getLaunchConfigLight(N, m_block_size);
@@ -4415,10 +4591,10 @@ void FFWorkspaceGPU::computeCN(const std::vector<int>& atom_types)
     // Reference: gfnff_cn.f90:66-126, cn_calculator.cpp:99-155
     constexpr double kn = -7.5;          // CN decay constant
     constexpr double cnmax = 4.4;       // Squashing limit
-    // Distance cutoff of the O(N^2) CN sum: 30 Bohr. Sep 2026: the dead rcov-based estimate
-    // that was computed and then overwritten here (with a CODATA-1986 Angstrom->Bohr factor
-    // applied to radii already in Bohr) is removed - Claude Generated.
-    const double threshold_sq = 900.0;
+    // A16 (Nov 2026, Claude Generated): the CN range of the CPU reference (cn_cutoff_bohr, or
+    // cnthr(cn_accuracy) with cn_cutoff_bohr = 0), set by setCNCutoffR2Max(); it was a fixed
+    // 30 Bohr here and no cutoff in the pair-list path. k_cn_compute skips r^2 > threshold_sq.
+    const double threshold_sq = m_cn_r2_max;
 
     // Ensure CN buffers are allocated
     if (impl.d_cn_raw.n < N) impl.d_cn_raw.alloc(N);
@@ -4446,7 +4622,8 @@ void FFWorkspaceGPU::computeCN(const std::vector<int>& atom_types)
             impl.coords.d_y.ptr,
             impl.coords.d_z.ptr,
             impl.d_cn_raw.ptr,
-            kn);
+            kn,
+            m_cn_r2_max);
         // fixed-point accumulator -> double (order-independent CN, docs/GPU_REPRODUCIBILITY.md)
         k_fix_to_double<<<cfg_zero.gridSize, cfg_zero.blockSize, 0, impl.stream>>>(
             N, impl.d_cn_raw.ptr, 1.0 / GFNFF_FIX_CN);

@@ -278,6 +278,15 @@ void FFWorkspace::updateD4Dispersions(std::vector<GFNFFDispersion>&& pairs)
         m_partitions[t].d4_dispersions = linearRange(m_d4_dispersions.size(), t, T);
 }
 
+std::vector<GFNFFDispersion> FFWorkspace::releaseD4DispersionStorage()
+{
+    std::vector<GFNFFDispersion> out;
+    out.swap(m_d4_dispersions);
+    for (int t = 0; t < m_num_threads; ++t)
+        m_partitions[t].d4_dispersions = linearRange(0, t, m_num_threads);
+    return out;
+}
+
 void FFWorkspace::updateCoulombPairs(std::vector<GFNFFCoulomb>&& pairs)
 {
     // Claude Generated (Sep 2026): same swap + re-partition pattern as updateRepulsion().

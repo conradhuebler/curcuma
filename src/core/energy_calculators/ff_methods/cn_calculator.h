@@ -86,6 +86,29 @@ public:
     );
 
     /**
+     * @brief The threshold-mode CN of calculateGFNFFCN(atoms, geometry, threshold, kn, cnmax, raw, cell)
+     *        for an active periodic cell, bit for bit, from a cell list instead of all N^2 pairs.
+     *        Claude Generated (Nov 2026, WP-PERIODIC-NONBONDED L1).
+     *
+     * A pair with r >= 2 (rcov_i + rcov_j) has kn*dr <= -7.5 < -6, where erf returns -1 exactly
+     * (fdlibm/glibc and CurcumaMath::portable_erf: |x| >= 6 -> +-(1 - tiny)), so its term
+     * 0.5 (1 + erf) is +0.0 and adding it leaves the row sum unchanged. Only pairs within
+     * 2 max(rcov_i + rcov_j) are visited; each row sums its partners in ascending j with the
+     * statements of the reference loop, so CN and raw CN equal the full pass. Returns false
+     * (outputs untouched) when the shortcut does not apply: no active cell, kn > -6.1 (the skipped
+     * pairs need kn*dr <= -6), visit radius not below sqrt(threshold), or twice the visit radius not
+     * below L_min (the caller then runs the full pass).
+     */
+    static bool calculateGFNFFCNPeriodicLocal(
+        const std::vector<int>& atoms,
+        const Eigen::MatrixXd& geometry_bohr,
+        double threshold,
+        double kn,
+        double cnmax,
+        const PBCUtils::OrthoCell& cell,
+        std::vector<double>& cn_values);
+
+    /**
      * Calculate GFN-FF coordination numbers with configurable cutoff mode (P2b)
      *
      * Three modes selected by parameters:
