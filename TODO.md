@@ -10,7 +10,6 @@ gehört in `AIChangelog.md` bzw. das Archiv, Fehlerberichte in [docs/KNOWN_ISSUE
 Stand.
 
 ## 1. Korrektheit (offen)
-- **GFN-FF-CN auf ROCm ohne `cn_cutoff_bohr`** (CUDA behoben 2026-11-23, A16): `gfnff_rocm.hip` nutzt 30 Bohr bzw. keinen Cutoff in der CN-Paarliste; `r2_max` portieren, Trait `has_cn_cutoff`. [docs/GPU_PERIODIC_GAPS.md](docs/GPU_PERIODIC_GAPS.md) B10.
 - **GFN-FF-Gradient Pt7 (`pt-cluster-7`) verfehlt das FD-Gate um 2,0e-2 Eh/A** (gefunden 2026-11-23, CPU und CUDA gleich, glatt in h): fehlender Gradiententerm oder Topologie-Neuableitung je `-sp`; nicht untersucht. [docs/WP-PERIODIC-NONBONDED.md](docs/WP-PERIODIC-NONBONDED.md) A16.
 
 - **GPU und periodische Simulation mit Druck (Betreiberziel, Nov 22, 2026)**: GFN-FF und GFN1/GFN2 sollen auf jedem Backend vollständige
@@ -91,7 +90,6 @@ Stand.
 - **Ewald-Coulomb/EEQ (B2/B3/P1) offen** (2026-11-03): Kernel-Aufbau je Geometrie (erfc) groesster Posten; `GAUSSIAN_CORRECTION_XMAX` 6 erzwingt r_g < L/2 (Cl/Br/I 17-18 Bohr); dxi liest bei 2-fach koordiniertem C einen Rohgeometrie-Winkel. [docs/WP-PERIODIC-NONBONDED.md](docs/WP-PERIODIC-NONBONDED.md) P1, Volltext dort "Moved from TODO.md".
 - **Solvername wirkt auf den Topologieaufbau** (2026-11-03, Befund P1, auch vor P1): `-solve_method pcg` statt `auto` aendert die periodische Energie der 2910-Atom-Box um 3,75e-6 Eh, cholesky vs pcg bei 900 Atomen 5,4e-7 Eh (Winkel-, Torsions-, HB-Parameter); vermutlich ein nichtperiodischer EEQ-Loesungsschritt im Topologieaufbau, der den Namen liest. Nicht untersucht.
 
-- **XB-Gradient (GFN-FF), ROCm offen**: auf CPU und CUDA behoben (`4424c412`, Nov 2026); `rocm/gfnff_rocm.hip` (~2498-2505, ~2630-2637) rechnet noch die alten Daempfungsableitungen (falsches Vorzeichen kurz, r/c statt 1/r lang); Portierung und Lauf nur auf einer ROCm-Maschine ([docs/GPU_PERIODIC_GAPS.md](docs/GPU_PERIODIC_GAPS.md) B1).
 
 - **Periodisch, kleinere Punkte** (2026-11-01): D3 (gfn1 nativ, `uff-d3`) ohne Verbraucher, da dort nirgends MIC; natives gfn1/gfn2 liest `m_has_pbc` nirgends (rechnet mit Zelle still nicht-periodisch); D4-Schwanz ohne R0-Daempfung (Fehler 2,1 % bei r_c 11,5 Bohr, 3e-5 bei 35); `calculate()` ausserhalb `calculationSingle()` behaelt den letzten Schwanz (react `dE_jump`, `NumGradFixedCharges`); NVE-Erhaltung mit Schwanz ungeprueft.
 

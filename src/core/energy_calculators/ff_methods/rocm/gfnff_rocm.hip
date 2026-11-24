@@ -2495,14 +2495,15 @@ __global__ void k_xbonds(
                 double ratio_short = XB_SCUT_D * r_vdw_AB / (r_XB * r_XB);
                 double damp_short_term = 1.0;
                 for (int p = 0; p < (int)HB_ALP_D; ++p) damp_short_term *= ratio_short;
-                double ddamp_short_dr = -2.0 * HB_ALP_D * damp_short * damp_short_term
+                // Known Issue #46: d(damp_s)/dr = +2*alp*damp_s*t/(r*(1+t)), d(damp_l)/dr = -2*alp*damp_l*u/(r*(1+u))
+                double ddamp_short_dr = 2.0 * HB_ALP_D * damp_short * damp_short_term
                                       / (r_XB * (1.0 + damp_short_term));
 
                 double ratio_long = (r_XB * r_XB) / HB_LONGCUT_XB_D;
                 double damp_long_term = 1.0;
                 for (int p = 0; p < (int)HB_ALP_D; ++p) damp_long_term *= ratio_long;
-                double ddamp_long_dr = -2.0 * HB_ALP_D * r_XB * damp_long * damp_long_term
-                                     / (HB_LONGCUT_XB_D * (1.0 + damp_long_term));
+                double ddamp_long_dr = -2.0 * HB_ALP_D * damp_long * damp_long_term
+                                     / (r_XB * (1.0 + damp_long_term));
 
                 double exp_term = exp(expo_outl);
                 double denom_outl = 1.0 + exp_term;
@@ -2627,14 +2628,15 @@ __global__ GFNFF_KERNEL_BOUNDS void k_xbonds_mixed(
                 float damp_short_term = 1.0f;
                 float ratio_short_g = XB_SCUT_D * r_vdw_AB / (r_XB * r_XB);
                 for (int p = 0; p < 6; ++p) damp_short_term *= ratio_short_g;
-                float ddamp_short_dr = -2.0f * HB_ALP_D * damp_short * damp_short_term
+                // Known Issue #46 (see the FP64 kernel above)
+                float ddamp_short_dr = 2.0f * HB_ALP_D * damp_short * damp_short_term
                                       / (r_XB * (1.0f + damp_short_term));
 
                 float damp_long_term = 1.0f;
                 float ratio_long_g = (r_XB * r_XB) / HB_LONGCUT_XB_D;
                 for (int p = 0; p < 6; ++p) damp_long_term *= ratio_long_g;
-                float ddamp_long_dr = -2.0f * HB_ALP_D * r_XB * damp_long * damp_long_term
-                                     / (HB_LONGCUT_XB_D * (1.0f + damp_long_term));
+                float ddamp_long_dr = -2.0f * HB_ALP_D * damp_long * damp_long_term
+                                     / (r_XB * (1.0f + damp_long_term));
 
                 float exp_t = expf(expo_outl);
                 float denom_outl = 1.0f + exp_t;
@@ -3491,7 +3493,8 @@ __global__ void k_cn_chainrule(
     const double* __restrict__ dEdcn,
     const double* __restrict__ dlogdcn,
     double*                    grad,
-    double        kn)
+    double        kn,
+    double        r2_max)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n_pairs) return;
@@ -3502,6 +3505,8 @@ __global__ void k_cn_chainrule(
     double dz = cz[i] - cz[j];
     applyMIC(dx, dy, dz);
     double r2 = dx*dx + dy*dy + dz*dz;
+    // B10 (Nov 2026, Claude Generated): the CPU CN range (cn_cutoff_bohr / cnthr), as the CUDA kernel (A16)
+    if (r2 > r2_max) return;
     double rij = sqrt(r2);
     if (rij < 1e-10) return;
 
@@ -4069,6 +4074,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_build(
     const double* __restrict__ zeta_c,
     double        a1,
     double        a2,
+    double        r_cut_eval,
     int*          d_counter,
     int*          out_i,
     int*          out_j,
@@ -4107,7 +4113,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_build(
     out_r4r2[slot] = r4r2ij;
     out_r0sq[slot] = r0_sq;
     out_zeta[slot] = zeta;
-    out_rcut[slot] = 50.0;  // D4 pair-energy cutoff (struct default, matches host)
+    out_rcut[slot] = r_cut_eval;  // D4 pair-energy cutoff: GFNFF::dispersionRadiiBohr().eval (50 without a cell)
 }
 
 // ============================================================================
@@ -4247,7 +4253,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_static(
     const double* __restrict__ gw, const double* __restrict__ c6_flat,
     const double* __restrict__ sqrtzr4r2, const double* __restrict__ topo_q,
     const double* __restrict__ zeta_zeff, const double* __restrict__ zeta_c,
-    double a1, double a2,
+    double a1, double a2, double r_cut_eval,
     double* __restrict__ out_C6, double* __restrict__ out_r4r2, double* __restrict__ out_r0sq,
     double* __restrict__ out_zeta, double* __restrict__ out_rcut)
 {
@@ -4262,7 +4268,7 @@ __global__ GFNFF_KERNEL_BOUNDS void k_disp_pairs_static(
     out_r4r2[k] = r4r2ij;
     out_r0sq[k] = r0_sq;
     out_zeta[k] = zeta;
-    out_rcut[k] = 50.0;  // D4 pair-energy cutoff (struct default, matches host)
+    out_rcut[k] = r_cut_eval;  // D4 pair-energy cutoff: GFNFF::dispersionRadiiBohr().eval (50 without a cell)
 }
 
 /// Claude Generated (Oct 2026): pair index of the CSR entries (a, p < a): the pair (p, a) sits
@@ -5112,7 +5118,8 @@ __global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_cn_compute_pairs(
     const double* __restrict__ cy,
     const double* __restrict__ cz,
     double*       __restrict__ cn_raw,
-    double        kn)
+    double        kn,
+    double        r2_max)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n_pairs) return;
@@ -5124,7 +5131,10 @@ __global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_cn_compute_pairs(
     double dy = cy[i] - cy[j];
     double dz = cz[i] - cz[j];
     applyMIC(dx, dy, dz);
-    double r = __dsqrt_rn(dx*dx + dy*dy + dz*dz);
+    // B10 (Nov 2026, Claude Generated): the CPU CN range, as the CUDA kernel (A16); the list reaches f*rs + 2 skin
+    const double r2 = dx*dx + dy*dy + dz*dz;
+    if (r2 > r2_max) return;
+    double r = __dsqrt_rn(r2);
     if (r < 1e-10) return;
 
     // erf-based CN contribution (same formula as k_cn_compute)
@@ -8781,7 +8791,7 @@ void FFWorkspaceHip::generateDispersionPairListOnGPU(
     const std::vector<double>& gw_flat,
     const std::vector<double>& sqrtzr4r2,
     const std::vector<double>& topo_charges,
-    double a1, double a2, double cutoff_bohr)
+    double a1, double a2, double cutoff_bohr, double r_cut_eval_bohr)
 {
     auto& impl = *m_impl;
     const int N = m_natoms;
@@ -8871,7 +8881,7 @@ void FFWorkspaceHip::generateDispersionPairListOnGPU(
                 impl.d_gw.ptr, impl.d_c6_flat.ptr,
                 impl.d_sqrtzr4r2.ptr, impl.d_topo_q.ptr,
                 impl.d_zeta_zeff.ptr, impl.d_zeta_c.ptr,
-                a1, a2,
+                a1, a2, r_cut_eval_bohr,
                 impl.disp.C6.ptr, impl.disp.r4r2ij.ptr, impl.disp.r0_sq.ptr,
                 impl.disp.zetac6.ptr, impl.disp.r_cut.ptr);
             k_disp_csr_lower<<<N, DISP_ROW_BLOCK, 0, impl.stream>>>(
@@ -8932,7 +8942,7 @@ void FFWorkspaceHip::generateDispersionPairListOnGPU(
         impl.d_gw.ptr, impl.d_c6_flat.ptr,
         impl.d_sqrtzr4r2.ptr, impl.d_topo_q.ptr,
         impl.d_zeta_zeff.ptr, impl.d_zeta_c.ptr,
-        a1, a2,
+        a1, a2, r_cut_eval_bohr,
         impl.d_disp_pair_counter.ptr,
         impl.disp.idx_i.ptr, impl.disp.idx_j.ptr,
         impl.disp.C6.ptr, impl.disp.r4r2ij.ptr, impl.disp.r0_sq.ptr,
@@ -9847,7 +9857,8 @@ double FFWorkspaceHip::launchChargeDependentAndFinish(bool gradient)
             impl.d_dEdcn.ptr,
             impl.d_dlogdcn.ptr,
             impl.d_grad.ptr,
-            m_kn);
+            m_kn,
+            m_cn_r2_max);
         checkCuda(hipGetLastError(), "k_cn_chainrule launch");
     }
 
@@ -10246,10 +10257,9 @@ void FFWorkspaceHip::computeCN(const std::vector<int>& atom_types)
     // Reference: gfnff_cn.f90:66-126, cn_calculator.cpp:99-155
     constexpr double kn = -7.5;          // CN decay constant
     constexpr double cnmax = 4.4;       // Squashing limit
-    // Distance cutoff of the O(N^2) CN sum: 30 Bohr. Sep 2026: dead rcov-based estimate
-    // (overwritten right after, with a CODATA-1986 factor on radii already in Bohr) removed,
-    // mirroring the CUDA file - Claude Generated; uncompiled here (no ROCm SDK).
-    const double threshold_sq = 900.0;
+    // B10 (Nov 2026, Claude Generated): CN range of the CPU reference (cn_cutoff_bohr, or cnthr(cn_accuracy)
+    // with cn_cutoff_bohr = 0), set by setCNCutoffR2Max(); was a fixed 30 Bohr, as the CUDA file before A16.
+    const double threshold_sq = m_cn_r2_max;
 
     setGfnffFixModeHip(impl.fixed_point);   // WP10
     // Ensure CN buffers are allocated
@@ -10278,7 +10288,8 @@ void FFWorkspaceHip::computeCN(const std::vector<int>& atom_types)
             impl.coords.d_y.ptr,
             impl.coords.d_z.ptr,
             impl.d_cn_raw.ptr,
-            kn);
+            kn,
+            m_cn_r2_max);
         if (impl.fixed_point)   // WP10: integer CN sums -> doubles before the log squashing
             fixToDoubleHip(impl.d_cn_raw.ptr, N, GFNFF_FIX_CN, impl.stream);
 

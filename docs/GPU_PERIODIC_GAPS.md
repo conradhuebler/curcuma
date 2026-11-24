@@ -53,7 +53,7 @@ ROCm was only ever run on a Radeon 890M (gfx1150). Nothing below can be checked 
 
 | # | Gap | Source |
 |---|---|---|
-| B1 | GFN-FF XB gradient fix (`fix/gfnff-xb-gradient`): CPU and CUDA fixed, ROCm NOT (`gfnff_rocm.hip` ~2498-2505 and ~2630-2637 unchanged) | [read] audit A |
+| B1 | **closed Nov 24, 2026**: GFN-FF XB damping derivatives fixed in both HIP kernels (FP64 and mixed) as on CPU/CUDA; fi-pyridine RX 9060 XT (gfx1200) vs CPU gradient 4.8e-14 Eh/A, one structure, `-gpu_strict true`; FD gate `gfnff_xb_gradient_fd` is CPU only | [measured] |
 | B2 | Periodic GFN-FF local terms (S1/S2 equivalent: minimum image in all device kernels, `cellFromMolecule`, FMA-safe `template<bool PBC>`); today ROCm refuses a cell | [read] |
 | B3 | GFN-FF device virial (A1 equivalent) so that NPT runs with `-gpu rocm` | derived from A1 |
 | B4 | Periodic xTB on ROCm (`xtb_hip_method.cpp` never calls `setPeriodicDeviceScf`): device stages, virial, barostat; the refusal path has no test | [read] audit B |
@@ -62,7 +62,7 @@ ROCm was only ever run on a Radeon 890M (gfx1150). Nothing below can be checked 
 | B7 | Parity script: two differences without a reason (`has_charge_groups_cn_guard` from `9e8a609c`, `has_periodic_local_terms` from `8ee4f638`); add them to `docs/GPU_PARITY_CUDA_ROCM.md` and `scripts/gpu_parity_known.json` with the reason or close them | [read] `scripts/gpu_parity_check.py` |
 | B8 | Bitwise reproducibility of the periodic paths on ROCm (`-gfnff.rocm_fixed_point`, `-xtb.rocm_fixed_point`) | [open] |
 | B9 | Vulkan: code and `USE_VULKAN` exist but nothing is built or shipped; either drop it or give it the same refusal tests | [read] profile |
-| B10 | GFN-FF CN ignores `cn_cutoff_bohr` on ROCm (CUDA fixed in A16): `gfnff_rocm.hip` keeps the 30 Bohr O(N^2) CN and no cutoff in the CN pair list, chain rule and virial; port `r2_max` (`setCNCutoffR2Max`, set the HIP trait `has_cn_cutoff` true); changes ROCm energies of heavy-atom systems | [read] A16 |
+| B10 | **closed Nov 24, 2026** (gfx1200, `na2cl2-isolated-ions`: GPU vs CPU energy 8e-15 Eh, gradient 2.7e-16 Eh/A, one structure; heavy-atom sets not re-measured): `k_cn_compute`, `k_cn_compute_pairs`, `k_cn_chainrule` use `m_cn_r2_max`, trait `has_cn_cutoff` true; was: GFN-FF CN ignores `cn_cutoff_bohr` on ROCm (CUDA fixed in A16): `gfnff_rocm.hip` keeps the 30 Bohr O(N^2) CN and no cutoff in the CN pair list, chain rule and virial; port `r2_max` (`setCNCutoffR2Max`, set the HIP trait `has_cn_cutoff` true); changes ROCm energies of heavy-atom systems | [read] A16 |
 
 ## Gates that apply to every item
 
