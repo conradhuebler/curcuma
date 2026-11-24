@@ -1516,14 +1516,16 @@ if(Python3_Interpreter_FOUND)
         set_tests_properties(gfnff_rocm_charge_groups
             PROPERTIES TIMEOUT 900 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;rocm;charge" SKIP_RETURN_CODE 77)
 
-        # Claude Generated (Nov 2026, docs/ROCM_PARITY_A6.md): the opt-in ROCm GFN-FF EEQ split on ONE device
+        # Claude Generated (Nov 2026, docs/ROCM_PARITY_A6.md, ROCM_PARITY_SPL.md): the opt-in ROCm GFN-FF EEQ,
+        # Coulomb-tile and D4 split on ONE device
         # (CURCUMA_ROCM_SPLIT_SAME_DEVICE=1, 2 and 3 participants) against the single-device run, and its refusal
         # without -gfnff.rocm_multi_gpu_split. No real multi-device run. Skipped (77) without plugin or device.
         add_test(NAME gfnff_rocm_split_one_device
                  COMMAND ${Python3_EXECUTABLE}
                          ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_gfnff_rocm_split.py
                          $<TARGET_FILE:curcuma>
-                         ${CMAKE_CURRENT_BINARY_DIR}/molecules/larger/polymer_2x.xyz)
+                         ${CMAKE_CURRENT_BINARY_DIR}/molecules/larger/polymer_2x.xyz
+                         ${CMAKE_CURRENT_BINARY_DIR}/molecules/larger/polymer.xyz)
         set_tests_properties(gfnff_rocm_split_one_device
             PROPERTIES TIMEOUT 1200 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;rocm" SKIP_RETURN_CODE 77)
         # Native GFN2 on ROCm: -gpu_eigensolver_devices / -gpu_density_devices with two devices are refused with a

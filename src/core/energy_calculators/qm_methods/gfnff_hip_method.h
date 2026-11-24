@@ -61,7 +61,7 @@ struct GFNFFRocmBackend {
     static constexpr bool has_multi_gpu_split = false;
     /// Claude Generated (Nov 2026, ROCM_PARITY_A6): the projected-PCG EEQ split is compiled in (EEQSolverHip::
     /// setSplitDevices, port of the CUDA split) but runs only with -gfnff.rocm_multi_gpu_split true, with a warning;
-    /// checked on one GPU only (CURCUMA_ROCM_SPLIT_SAME_DEVICE=1). The Coulomb and D4 splits are not ported.
+    /// checked on one GPU only (CURCUMA_ROCM_SPLIT_SAME_DEVICE=1). Coulomb-tile and D4 split: ROCM_PARITY_SPL.
     static constexpr bool has_multi_gpu_split_opt_in = true;
     /// K1 (Oct 2026, Claude Generated): CN pair list as a Verlet list with skin
     /// (gpu_cn_pair_skin_bohr), rebuilt on its own displacement test (cnPairListStale()).

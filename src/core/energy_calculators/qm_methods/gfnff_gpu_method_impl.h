@@ -1122,7 +1122,7 @@ bool GFNFFGpuMethodImpl<Backend>::initGPUWorkspace()
                     if (!cfg_get_bool("rocm_multi_gpu_split", false)) {
                         if (explicit_request) {
                             const std::string msg = std::string("gpu_split_devices: the ") + Backend::name
-                                + " multi-GPU EEQ split has never run with more than one device and is off; "
+                                + " multi-GPU split (EEQ, Coulomb tiles, D4) has never run with more than one device and is off; "
                                   "-gfnff.rocm_multi_gpu_split true enables it. This calculation uses one device.";
                             CurcumaLogger::warn(msg);
                             curcuma::reportGpuFallback("GFN-FF multi-GPU split not enabled on " + std::string(Backend::name),
@@ -2482,10 +2482,13 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
             if constexpr (!Backend::has_multi_gpu_split)   // Nov 2026 (ROCM_PARITY_A6): the opt-in path
                 CurcumaLogger::warn(std::string("GFN-FF multi-GPU split on ") + Backend::name
                                     + " (-gfnff.rocm_multi_gpu_split true): unverified, never run with more than one "
-                                      "device; only the EEQ is split, Coulomb and D4 stay on the calculation device");
+                                      "device (EEQ, Coulomb tiles and D4 dispersion)");
             const std::string c = m_gpu_workspace->coulombSplitStatus();
             const std::string e = m_eeq_gpu ? m_eeq_gpu->splitStatus() : std::string();
-            for (const std::string& st : { c, e }) {
+            // Nov 2026 (ROCM_PARITY_SPL): the opt-in backend also reports its D4 split (CUDA output unchanged).
+            std::string d;
+            if constexpr (!Backend::has_multi_gpu_split) d = m_gpu_workspace->dispSplitStatus();
+            for (const std::string& st : { c, e, d }) {
                 if (st.rfind("unavailable", 0) == 0) {
                     CurcumaLogger::warn("GFN-FF multi-GPU: " + st);
                     curcuma::reportGpuFallback("GFN-FF multi-GPU split unavailable", st);

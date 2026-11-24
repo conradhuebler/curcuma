@@ -737,6 +737,139 @@ __global__ void k_dispersion_gather_uv(
     blockReduceAddEnergy(local_E, energy, GFNFF_FIX_ENERGY_DISP);
 }
 
+// Claude Generated (Nov 2026, ROCM_PARITY_SPL): k_dispersion_gather_uv on the gather rows a in [a0, a0 + nrows) of a
+// helper device of the multi-GPU D4 split (CUDA reference: the helper k_dispersion of launchDispSplitHelpers in
+// cuda/ff_workspace_gpu.cu). Separate copy (ISA trap of ROCM_PARITY_L1: the former kernel stays untouched); the
+// statements per edge and the reductions are those of k_dispersion_gather_uv. csr_off is row-local
+// (csr_off[row] for atom a0 + row, starting at 0), csr_partner / csr_pairidx are the edges of those rows, and the
+// pair parameters r4r2ij, r0_sq, zetac6, r_cut are indexed by csr_pairidx as in the former kernel.
+__global__ void k_dispersion_gather_uv_rows(
+    int a0, int nrows, int ntypes,
+    const int*    __restrict__ csr_off,
+    const int*    __restrict__ csr_partner,
+    const int*    __restrict__ csr_pairidx,
+    const int*    __restrict__ atom_ctype,
+    const double* __restrict__ uv,
+    const double* __restrict__ gw,
+    const double* __restrict__ r4r2ij,
+    const double* __restrict__ r0_sq,
+    const double* __restrict__ zetac6,
+    const double* __restrict__ r_cut,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    double*                    dEdcn,
+    double*                    grad,
+    double*                    energy)
+{
+    const int row = blockIdx.x;
+    const int a = a0 + row;
+    const int lane = threadIdx.x, nlanes = blockDim.x;
+    double local_E = 0.0;
+    double gx = 0.0, gy = 0.0, gz = 0.0, dEdcn_a = 0.0;
+
+    if (row < nrows) {
+        const double xa = cx[a], ya = cy[a], za = cz[a];
+        const bool has_dcn = (dEdcn != nullptr);
+        const double* uv_a = uv + (size_t)a * ntypes * (2 * D4_MAX_REF);
+        const int s = csr_off[row], e = csr_off[row + 1];
+        for (int t = s + lane; t < e; t += nlanes) {
+            const int p   = csr_partner[t];
+            const int tid = csr_pairidx[t];
+            double dx = xa - cx[p];
+            double dy = ya - cy[p];
+            double dz = za - cz[p];
+            applyMIC(dx, dy, dz);
+            double r2  = dx*dx + dy*dy + dz*dz;
+            const double rc = r_cut[tid];
+            if (r2 <= rc * rc && r2 >= 1e-20) {
+                const double* u  = uv_a + atom_ctype[p] * (2 * D4_MAX_REF);
+                const double* v  = u + D4_MAX_REF;
+                const double* gp = gw + p * D4_MAX_REF;
+                double c6 = 0.0, dc6 = 0.0;
+#pragma unroll
+                for (int r = 0; r < D4_MAX_REF; ++r) {
+                    const double g = gp[r];
+                    c6  += v[r] * g;
+                    dc6 += u[r] * g;
+                }
+                double r4   = r2 * r2;
+                double r6   = r4 * r2;
+                double r0s  = r0_sq[tid];
+                double r0_6 = r0s * r0s * r0s;
+                double r8   = r6 * r2;
+                double r0_8 = r0_6 * r0s;
+                double den6 = r6 + r0_6;
+                double den8 = r8 + r0_8;
+                double inv  = 1.0 / (den6 * den8);
+                double t6   = den8 * inv;
+                double t8   = den6 * inv;
+                double rr   = r4r2ij[tid];
+                double zc   = zetac6[tid];
+                double disp_sum = t6 + 2.0 * rr * t8;
+                local_E += 0.5 * (-c6 * disp_sum * zc);
+                double d6   = -6.0 * r4 * t6 * t6;
+                double d8   = -8.0 * r4 * r2 * t8 * t8;
+                double fac  = -c6 * zc * (d6 + 2.0 * rr * d8);   // force on a = fac*(ra - rp)
+                gx += fac*dx; gy += fac*dy; gz += fac*dz;
+                if (has_dcn) dEdcn_a += -dc6 * (disp_sum * zc);
+            }
+        }
+    }
+
+    __shared__ double sgx[256], sgy[256], sgz[256], sdc[256];
+    sgx[lane] = gx; sgy[lane] = gy; sgz[lane] = gz; sdc[lane] = dEdcn_a;
+    __syncthreads();
+    for (int stride = nlanes >> 1; stride > 0; stride >>= 1) {
+        if (lane < stride) {
+            sgx[lane] += sgx[lane + stride];
+            sgy[lane] += sgy[lane + stride];
+            sgz[lane] += sgz[lane + stride];
+            sdc[lane] += sdc[lane + stride];
+        }
+        __syncthreads();
+    }
+    if (lane == 0 && row < nrows) {
+        add_grad(grad, a, sgx[0], sgy[0], sgz[0]);
+        if (dEdcn != nullptr) acc_add(&dEdcn[a], sdc[0], GFNFF_FIX_FORCE);
+    }
+
+    blockReduceAddEnergy(local_E, energy, GFNFF_FIX_ENERGY_DISP);
+}
+
+/// Claude Generated (Nov 2026, ROCM_PARITY_SPL): per-edge copy of the D4 pair parameters for the edges of a helper's
+/// gather rows (out[t] = in[pairidx[t]]), built on the own device before the peer copy.
+__global__ void k_split_edge_params_hip(int ne, const int* __restrict__ pairidx,
+                                        const double* __restrict__ r4r2ij, const double* __restrict__ r0_sq,
+                                        const double* __restrict__ zetac6, const double* __restrict__ r_cut,
+                                        double* o_r4r2ij, double* o_r0_sq, double* o_zetac6, double* o_r_cut)
+{
+    const int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= ne) return;
+    const int p = pairidx[t];
+    o_r4r2ij[t] = r4r2ij[p]; o_r0_sq[t] = r0_sq[p]; o_zetac6[t] = zetac6[p]; o_r_cut[t] = r_cut[p];
+}
+
+/// Claude Generated (Nov 2026, ROCM_PARITY_SPL; CUDA k_add_coulomb_parts / k_add_disp_parts in cuda/gfnff_kernels.cu):
+/// target[k] += sum_p parts[p * n + k]. With d_gfnff_fix the parts are fixed-point accumulators of the same scale as
+/// the target (integer sum, exact); otherwise an FP64 sum in part order. Atomic, since other streams add to the
+/// same target concurrently.
+__global__ void k_add_split_parts_hip(int n, int nparts, const double* __restrict__ parts, double* target)
+{
+    const int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= n) return;
+    if (d_gfnff_fix) {
+        unsigned long long s = 0ull;
+        for (int p = 0; p < nparts; ++p)
+            s += reinterpret_cast<const unsigned long long*>(parts)[static_cast<size_t>(p) * n + k];
+        atomicAdd(reinterpret_cast<unsigned long long*>(&target[k]), s);
+    } else {
+        double s = 0.0;
+        for (int p = 0; p < nparts; ++p) s += parts[static_cast<size_t>(p) * n + k];
+        atomicAdd(&target[k], s);
+    }
+}
+
 // ============================================================================
 // Kernel 2: Repulsion (bonded AND non-bonded, same formula)
 // E = repab * exp(-alpha * r^1.5) / r
@@ -9515,6 +9648,51 @@ struct FFWorkspaceHipImpl {
     bool               pbc_active = false;
     double             h_lat[9] = {}, h_lat_inv[9] = {};
 
+    // Claude Generated (Nov 2026, ROCM_PARITY_SPL; CUDA reference FFWorkspaceGPUImpl::CoulSplitPart / DispSplitPart
+    // in cuda/ff_workspace_gpu.cu): multi-GPU split of the implicit Coulomb tiles and of the D4 dispersion of ONE
+    // molecule (see "Multi-GPU Coulomb-tile and D4 split" below). Never run with more than one physical device.
+    struct CoulSplitPartHip {
+        int dev = -1, r0 = 0, r1 = 0;     ///< tile rows [r0, r1) of k_coulomb_tiles_hip
+        hipStream_t stream = nullptr;
+        hipEvent_t  done   = nullptr;
+        CudaBuffer<double> x, y, z, q, alp, grad, E;
+    };
+    struct DispSplitPartHip {
+        int dev = -1;
+        int a0 = 0, a1 = 0;               ///< gather rows (atoms) [a0, a1): gradient path
+        int p0 = 0, p1 = 0;               ///< pairs [p0, p1): energy-only pair kernel
+        hipStream_t stream = nullptr;
+        hipEvent_t  done   = nullptr;
+        CudaBuffer<int>    csr_off, csr_partner, csr_pairidx, atom_ctype;   ///< row-local CSR of [a0, a1)
+        CudaBuffer<double> e_r4r2ij, e_r0_sq, e_zetac6, e_r_cut;            ///< pair parameters per local edge
+        CudaBuffer<int>    idx_i, idx_j;                                    ///< pair slice [p0, p1)
+        CudaBuffer<double> C6, r4r2ij, r0_sq, zetac6, r_cut;                ///< pair slice [p0, p1)
+        CudaBuffer<double> x, y, z, gw, uv, grad, dEdcn, E;
+    };
+    int  own_device = -1;
+    bool split_same_device = false;       ///< test hook CURCUMA_ROCM_SPLIT_SAME_DEVICE=1 (helpers may name this device)
+    bool split_same_device_streams = false; ///< hook value "streams": a same-device helper gets its own stream
+    std::vector<int> coul_split_devs;     ///< helper devices of both splits (empty = off)
+    int  coul_split_min_atoms = 0;
+    std::vector<std::unique_ptr<CoulSplitPartHip>> coul_parts;
+    int  coul_split_natoms = -1, coul_own_rows = 0, coul_split_ti = 0, coul_split_tj = 0;
+    CudaBuffer<double> d_coul_part_grad, d_coul_part_E;   ///< [nh * 3N], [nh] helper parts on this device
+    hipEvent_t ev_coul = nullptr;
+    bool coul_split_failed = false;
+    std::string coul_split_status;
+    long coul_split_calls = 0;
+    std::vector<std::unique_ptr<DispSplitPartHip>> disp_parts;
+    long disp_gen = 0;                    ///< bumped whenever the D4 pair list / gather CSR is replaced
+    long disp_split_gen = -1;             ///< disp_gen the helper copies belong to
+    int  disp_split_natoms = -1, disp_own_rows = 0, disp_own_pairs = 0;
+    CudaBuffer<double> d_disp_part_grad, d_disp_part_dEdcn, d_disp_part_E;
+    hipEvent_t ev_disp_in = nullptr;
+    bool disp_split_failed = false;
+    std::string disp_split_status;
+    long disp_split_grad_calls = 0, disp_split_energy_calls = 0, disp_unsplit_calls = 0;
+    void releaseCoulSplit();
+    void releaseDispSplit();
+
     // Phase 2: GPU dc6dcn per-pair computation (Claude Generated March 2026)
     // Gaussian weights and C6 reference table for on-GPU dc6dcn computation.
     // Eliminates O(N²) CPU computeDC6DCN() — only O(nd) pairs computed.
@@ -10299,6 +10477,14 @@ FFWorkspaceHip::~FFWorkspaceHip()
     if (m_impl) {
         // Synchronize all streams before destroying
         if (m_impl->stream)          hipStreamSynchronize(m_impl->stream);
+        // Claude Generated (Nov 2026, ROCM_PARITY_SPL): helper buffers of the split are freed on their own device.
+        // The wrapper reports the split after the second calculation only; a single point says it here.
+        if (!m_impl->coul_split_devs.empty() && CurcumaLogger::get_verbosity() >= 2)
+            CurcumaLogger::info("ROCm GFN-FF multi-GPU: " + coulombSplitStatus() + "; " + dispSplitStatus());
+        m_impl->releaseDispSplit();
+        m_impl->releaseCoulSplit();
+        if (m_impl->ev_coul)    (void)hipEventDestroy(m_impl->ev_coul);
+        if (m_impl->ev_disp_in) (void)hipEventDestroy(m_impl->ev_disp_in);
         if (m_impl->stream_pairwise) hipStreamSynchronize(m_impl->stream_pairwise);
         if (m_impl->stream_bonded)   hipStreamSynchronize(m_impl->stream_bonded);
         if (m_impl->stream_threebody)hipStreamSynchronize(m_impl->stream_threebody);
@@ -11345,6 +11531,7 @@ void FFWorkspaceHip::updateDispersion(const std::vector<GFNFFDispersion>& pairs)
     auto& impl = *m_impl;
     impl.disp.upload(pairs, m_natoms, impl.stream);
     { impl.disp_uv_valid = false; impl.disp_pair_c6_current = true; }  // Oct 2026: new pair list, d_disp_uv stale
+    ++impl.disp_gen;   // Claude Generated (Nov 2026, ROCM_PARITY_SPL): helper copies of the D4 split are stale
     const int nd = impl.disp.n;
     if (impl.dc6dcn_gpu_ready && nd > 0) {
         impl.disp.dc6dcn_ij.ensure(nd);
@@ -11372,14 +11559,481 @@ void FFWorkspaceHip::setHBondEnabled(bool v)        { m_hbond_enabled = v; }
 void FFWorkspaceHip::setRepulsionEnabled(bool v)    { m_repulsion_enabled = v; }
 void FFWorkspaceHip::setCoulombEnabled(bool v)      { m_coulomb_enabled = v; }
 
-// Claude Generated (Nov 2026, ROCM_PARITY_A6): the ROCm port of the multi-GPU split covers the projected-PCG EEQ
-// only (EEQSolverHip::setSplitDevices). The CUDA Coulomb-tile and D4-pair splits (cuda/ff_workspace_gpu.cu,
-// prepareCoulombSplit / prepareDispSplit) are not ported: both terms stay on the calculation device. The wrapper
-// calls these two members when the split is configured; prepare/launch of the CUDA split are never called here.
-void FFWorkspaceHip::setCoulombSplitDevices(const std::vector<int>& /*helper_devices*/, int /*min_atoms*/) {}
+// ============================================================================
+// Multi-GPU Coulomb-tile and D4 split (Claude Generated, Nov 2026, docs/ROCM_PARITY_SPL.md).
+// Port of the CUDA split of ONE molecule (cuda/ff_workspace_gpu.cu: setCoulombSplitDevices, prepareCoulombSplit,
+// launchCoulombSplit, prepareDispSplit, launchDispSplitHelpers, appendDispSplitParts; docs/MULTI_GPU_GAPS.md F-3).
+// Opt-in on ROCm (-gfnff.rocm_multi_gpu_split true, wrapper gate of A6); only HIP peer copies, no RCCL. Never run
+// with more than one physical device; CURCUMA_ROCM_SPLIT_SAME_DEVICE=1 lets helper entries name the calculation's
+// own device (device-local copies), which runs every partition code path on one GPU: such a helper has no stream of
+// its own and its part runs on the calling stream before the own part (partitions one after the other). With the
+// value "streams" a same-device helper gets its own stream and event as a real helper device would; see
+// docs/ROCM_PARITY_SPL.md for the stall measured with that mode and 4 participants.
+//
+// Coulomb: the tile ROWS bi of k_coulomb_tiles_hip (2-D grid, tile shape of the full N) are divided into ranges of
+// equal pair count; the own device takes the first range. A range [r0, r1) is launched with every atom pointer
+// shifted by off = r0 * TI (a multiple of TI and TJ), N - off atoms and r1 - r0 grid rows: the blocks with pairs and
+// the arithmetic inside each block are those of the unsplit launch, so no new kernel is needed (CUDA divides its
+// tile-pair list in the same spirit). Off for periodic systems (as CUDA).
+// D4 dispersion, ROCm-specific because the gradient path is the per-atom gather (k_dispersion_gather_uv), not the
+// CUDA pair kernel: helpers take contiguous ATOM ranges of equal edge count of the gather CSR and evaluate them with
+// k_dispersion_gather_uv_rows (copy of k_dispersion_gather_uv with a row offset and row-local CSR; per-edge pair
+// parameters gathered on the own device by k_split_edge_params_hip); per step coordinates, d_gw and d_disp_uv are
+// copied. Energy-only calls (pair k_dispersion) split contiguous PAIR ranges as CUDA does; the per-pair C6 slice is
+// copied per call. Other dispersion paths (per-pair gather without the fused C6: CURCUMA_ROCM_DISP_FUSED=0,
+// tabulated dc6dcn, no per-step C6 refresh) stay on the own device for that call (counted in the status).
+// Partial gradient, dE/dCN and energy come back into part buffers on the own device and are added by
+// k_add_split_parts_hip (integer sums with -gfnff.rocm_fixed_point, as k_add_coulomb_parts / k_add_disp_parts).
+// ============================================================================
+
+/// true while `s` records a graph (the split then stays off for that launch: a graph must not switch devices).
+static bool ffStreamCapturingHip(hipStream_t s)
+{
+    hipStreamCaptureStatus st = hipStreamCaptureStatusNone;
+    if (hipStreamIsCapturing(s, &st) != hipSuccess) { (void)hipGetLastError(); return false; }
+    return st != hipStreamCaptureStatusNone;
+}
+
+/// Copy between devices; a device-local copy when both are the same device (test hook).
+static hipError_t ffSplitCopyHip(void* dst, int dst_dev, const void* src, int src_dev, size_t bytes, hipStream_t s)
+{
+    if (dst_dev == src_dev) return hipMemcpyAsync(dst, src, bytes, hipMemcpyDeviceToDevice, s);
+    return hipMemcpyPeerAsync(dst, dst_dev, src, src_dev, bytes, s);
+}
+
+/// Enable peer access from the current device to `peer` (no-op for the same device, "already enabled" is fine).
+static void ffSplitEnablePeerHip(int cur, int peer)
+{
+    if (cur == peer) return;
+    int can = 0;
+    (void)hipDeviceCanAccessPeer(&can, cur, peer);
+    if (can) (void)hipDeviceEnablePeerAccess(peer, 0);
+    (void)hipGetLastError();
+}
+
+/// Stream + event of a helper on the current device (helper's device already selected).
+static void ffSplitStreamHip(hipStream_t& s, hipEvent_t& e, int dev, bool low_priority)
+{
+    int prio_lo = 0, prio_hi = 0;
+    (void)hipDeviceGetStreamPriorityRange(&prio_lo, &prio_hi);
+    if (hipStreamCreateWithPriority(&s, hipStreamDefault, low_priority ? prio_lo : prio_hi) != hipSuccess
+        || hipEventCreateWithFlags(&e, hipEventDisableTiming) != hipSuccess)
+        throw std::runtime_error("stream/event setup failed on device " + std::to_string(dev));
+}
+
+/// The fixed-point switch on a helper device (constant memory is per device); the own device keeps its value from
+/// setGfnffFixModeHip. Nothing to do for a helper equal to the own device.
+static void ffSplitFixModeOnHelperHip(int helper_dev, int own_dev, bool fixed_point)
+{
+    if (helper_dev == own_dev) return;
+    const int v = fixed_point ? 1 : 0;
+    checkCuda(hipMemcpyToSymbol(HIP_SYMBOL(d_gfnff_fix), &v, sizeof(int)), "upload d_gfnff_fix (split helper)");
+}
+
+void FFWorkspaceHipImpl::releaseCoulSplit()
+{
+    for (auto& pp : coul_parts) {
+        if (!pp) continue;
+        (void)hipSetDevice(pp->dev);
+        if (pp->stream) (void)hipStreamSynchronize(pp->stream);
+        pp->x.free(); pp->y.free(); pp->z.free(); pp->q.free(); pp->alp.free(); pp->grad.free(); pp->E.free();
+        if (pp->done)   (void)hipEventDestroy(pp->done);
+        if (pp->stream) (void)hipStreamDestroy(pp->stream);
+    }
+    coul_parts.clear();
+    if (own_device >= 0) (void)hipSetDevice(own_device);
+    d_coul_part_grad.free(); d_coul_part_E.free();
+    coul_split_natoms = -1;
+    coul_own_rows = 0;
+}
+
+void FFWorkspaceHipImpl::releaseDispSplit()
+{
+    for (auto& pp : disp_parts) {
+        if (!pp) continue;
+        (void)hipSetDevice(pp->dev);
+        if (pp->stream) (void)hipStreamSynchronize(pp->stream);
+        pp->csr_off.free(); pp->csr_partner.free(); pp->csr_pairidx.free(); pp->atom_ctype.free();
+        pp->e_r4r2ij.free(); pp->e_r0_sq.free(); pp->e_zetac6.free(); pp->e_r_cut.free();
+        pp->idx_i.free(); pp->idx_j.free();
+        pp->C6.free(); pp->r4r2ij.free(); pp->r0_sq.free(); pp->zetac6.free(); pp->r_cut.free();
+        pp->x.free(); pp->y.free(); pp->z.free(); pp->gw.free(); pp->uv.free();
+        pp->grad.free(); pp->dEdcn.free(); pp->E.free();
+        if (pp->done)   (void)hipEventDestroy(pp->done);
+        if (pp->stream) (void)hipStreamDestroy(pp->stream);
+    }
+    disp_parts.clear();
+    if (own_device >= 0) (void)hipSetDevice(own_device);
+    d_disp_part_grad.free(); d_disp_part_dEdcn.free(); d_disp_part_E.free();
+    disp_split_gen = -1; disp_split_natoms = -1; disp_own_rows = 0; disp_own_pairs = 0;
+}
+
+// Claude Generated (Nov 2026, ROCM_PARITY_SPL): configuration (CUDA FFWorkspaceGPU::setCoulombSplitDevices). The
+// own device is dropped from the helper list unless the test hook CURCUMA_ROCM_SPLIT_SAME_DEVICE=1 is set; with
+// the hook the first entry is the calculation's own device itself ("0,0" = two participants on device 0), as in
+// EEQSolverHip::setSplitDevices.
+void FFWorkspaceHip::setCoulombSplitDevices(const std::vector<int>& helper_devices, int min_atoms)
+{
+    auto& impl = *m_impl;
+    if (impl.own_device < 0) (void)hipGetDevice(&impl.own_device);
+    {
+        const char* e = std::getenv("CURCUMA_ROCM_SPLIT_SAME_DEVICE");
+        impl.split_same_device = e && *e && *e != '0';
+        impl.split_same_device_streams = e && std::string(e) == "streams";
+    }
+    impl.releaseDispSplit();
+    impl.releaseCoulSplit();
+    impl.coul_split_devs.clear();
+    for (int d : helper_devices)
+        if (d != impl.own_device || impl.split_same_device) impl.coul_split_devs.push_back(d);
+    if (impl.split_same_device && !impl.coul_split_devs.empty() && impl.coul_split_devs.front() == impl.own_device)
+        impl.coul_split_devs.erase(impl.coul_split_devs.begin());
+    impl.coul_split_min_atoms = min_atoms;
+    impl.coul_split_failed = false;
+    impl.coul_split_status.clear();
+    impl.disp_split_failed = false;
+    impl.disp_split_status.clear();
+}
+
 std::string FFWorkspaceHip::coulombSplitStatus() const
 {
-    return "Coulomb tiles and D4 pairs on the calculation device only (their split is not ported to ROCm)";
+    const auto& I = *m_impl;
+    if (I.coul_split_devs.empty()) return {};
+    if (!I.coul_split_status.empty()) return I.coul_split_status;
+    if (I.coul_parts.empty())
+        return "configured, not used (needs implicit Coulomb, no PBC and N >= "
+               + std::to_string(I.coul_split_min_atoms) + ")";
+    std::string list = std::to_string(I.own_device);
+    for (int d : I.coul_split_devs) list += "," + std::to_string(d);
+    return "Coulomb tiles on devices [" + list + "], " + std::to_string(I.coul_split_calls) + " calls";
+}
+
+std::string FFWorkspaceHip::dispSplitStatus() const
+{
+    const auto& I = *m_impl;
+    if (I.coul_split_devs.empty()) return {};
+    if (!I.disp_split_status.empty()) return I.disp_split_status;
+    if (I.disp_parts.empty())
+        return "dispersion split configured, not used (needs N >= " + std::to_string(I.coul_split_min_atoms)
+               + ", >= 200000 D4 pairs, no PBC)";
+    std::string list = std::to_string(I.own_device);
+    for (auto& pp : I.disp_parts) list += "," + std::to_string(pp->dev);
+    return "dispersion on devices [" + list + "], " + std::to_string(I.disp_split_grad_calls) + " gradient + "
+           + std::to_string(I.disp_split_energy_calls) + " energy calls split, "
+           + std::to_string(I.disp_unsplit_calls) + " on one device (path without fused C6)";
+}
+
+bool FFWorkspaceHip::prepareCoulombSplit()
+{
+    auto& impl = *m_impl;
+    if (impl.coul_split_devs.empty() || impl.coul_split_failed || impl.pbc_active
+        || m_natoms < impl.coul_split_min_atoms || !impl.coulomb_implicit) {
+        if (!impl.coul_parts.empty()) impl.releaseCoulSplit();
+        return false;
+    }
+    if (impl.coul_split_natoms == m_natoms && !impl.coul_parts.empty()) return true;
+    impl.releaseCoulSplit();
+    const int N = m_natoms;
+    int ti = GFNFF_COUL_TILE_HIP, tj = GFNFF_COUL_TILE_HIP;
+    coulombTileShapeHip(N, ti, tj);   // the shape of the unsplit launch: same blocks, same arithmetic per block
+    const int nrows = (N + ti - 1) / ti;
+    const int nparts = static_cast<int>(impl.coul_split_devs.size()) + 1;
+    // Equal pair count per range: row bi holds the pairs (i, j > i) of atoms i in [bi*ti, bi*ti + ti).
+    std::vector<long long> cum(nrows + 1, 0);
+    for (int r = 0; r < nrows; ++r) {
+        long long p = 0;
+        for (int i = r * ti; i < std::min(N, r * ti + ti); ++i) p += N - 1 - i;
+        cum[r + 1] = cum[r] + p;
+    }
+    std::vector<int> bounds(nparts + 1, nrows);
+    bounds[0] = 0;
+    for (int k = 1; k < nparts; ++k) {
+        const long long target = cum[nrows] * k / nparts;
+        int r = bounds[k - 1];
+        while (r < nrows && cum[r] < target) ++r;
+        bounds[k] = r;
+    }
+    try {
+        for (int h = 0; h < nparts - 1; ++h) {
+            auto part = std::make_unique<FFWorkspaceHipImpl::CoulSplitPartHip>();
+            part->dev = impl.coul_split_devs[h];
+            part->r0 = bounds[h + 1];
+            part->r1 = bounds[h + 2];
+            if (hipSetDevice(part->dev) != hipSuccess)
+                throw std::runtime_error("hipSetDevice(" + std::to_string(part->dev) + ") failed");
+            ffSplitEnablePeerHip(part->dev, impl.own_device);
+            ffSplitFixModeOnHelperHip(part->dev, impl.own_device, impl.fixed_point);
+            if (part->dev != impl.own_device || impl.split_same_device_streams)
+                ffSplitStreamHip(part->stream, part->done, part->dev, /*low_priority=*/false);
+            part->x.alloc(N); part->y.alloc(N); part->z.alloc(N); part->q.alloc(N); part->alp.alloc(N);
+            part->grad.alloc(3 * N); part->E.alloc(1);
+            impl.coul_parts.push_back(std::move(part));
+        }
+        (void)hipSetDevice(impl.own_device);
+        for (int d : impl.coul_split_devs) ffSplitEnablePeerHip(impl.own_device, d);
+        impl.d_coul_part_grad.alloc(3 * N * (nparts - 1));
+        impl.d_coul_part_E.alloc(nparts - 1);
+        if (!impl.ev_coul && hipEventCreateWithFlags(&impl.ev_coul, hipEventDisableTiming) != hipSuccess)
+            throw std::runtime_error("event setup failed on the own device");
+        impl.coul_own_rows = bounds[1];
+        impl.coul_split_ti = ti;
+        impl.coul_split_tj = tj;
+        impl.coul_split_natoms = N;
+    } catch (const std::exception& e) {
+        impl.releaseCoulSplit();
+        (void)hipSetDevice(impl.own_device);
+        impl.coul_split_failed = true;
+        impl.coul_split_status = std::string("unavailable: ") + e.what();
+        return false;
+    }
+    return true;
+}
+
+/// Claude Generated (Nov 2026, ROCM_PARITY_SPL): k_coulomb_tiles_hip<TI, TJ> on the tile rows [r0, r1) only. All
+/// atom arrays are shifted by off = r0 * TI; the kernel then sees N - off atoms and r1 - r0 rows, and its blocks
+/// are the blocks (bj + off / TJ, bi + r0) of the full launch with the same pairs in the same order.
+static void launchCoulombTilesRowsHip(int N, int ti, int tj, int r0, int r1, const double* alpha, const double* cx,
+                                      const double* cy, const double* cz, const double* charges, double r_cut,
+                                      double* grad, double* energy, hipStream_t stream)
+{
+    if (r1 <= r0) return;
+    const int off = r0 * ti;
+    const int Nloc = N - off;
+    const dim3 grid((Nloc + tj - 1) / tj, r1 - r0);
+    alpha += off; cx += off; cy += off; cz += off; charges += off; grad += 3 * static_cast<size_t>(off);
+#define COUL_ROWS_LAUNCH(A, B) k_coulomb_tiles_hip<A, B><<<grid, A, 0, stream>>>(Nloc, alpha, cx, cy, cz, charges, r_cut, grad, energy)
+    if      (ti == 128) COUL_ROWS_LAUNCH(128, 128);
+    else if (ti == 64)  COUL_ROWS_LAUNCH(64, 64);
+    else if (tj == 32)  COUL_ROWS_LAUNCH(32, 32);
+    else if (tj == 16)  COUL_ROWS_LAUNCH(32, 16);
+    else if (tj == 8)   COUL_ROWS_LAUNCH(32, 8);
+    else                COUL_ROWS_LAUNCH(32, 4);
+#undef COUL_ROWS_LAUNCH
+}
+
+/// Coulomb split of one step on stream sP (where coordinates and charges are final). CUDA launchCoulombSplit.
+static void launchCoulombSplitHip(FFWorkspaceHipImpl& impl, int N, hipStream_t sP)
+{
+    const size_t b1 = sizeof(double) * static_cast<size_t>(N);
+    double* E_slot = &impl.d_energies.ptr[impl.E_COUL];
+    checkCuda(hipEventRecord(impl.ev_coul, sP), "Coulomb split: input event");
+    int h = 0;
+    for (auto& pp : impl.coul_parts) {
+        auto& P = *pp;
+        (void)hipSetDevice(P.dev);
+        // Without a stream of its own (same-device helper of the test hook) the part runs on sP, after the parts before.
+        hipStream_t ps = P.stream ? P.stream : sP;
+        bool ok = !P.stream || hipStreamWaitEvent(ps, impl.ev_coul, 0) == hipSuccess;
+        ok = ok && ffSplitCopyHip(P.x.ptr, P.dev, impl.coords.d_x.ptr, impl.own_device, b1, ps) == hipSuccess;
+        ok = ok && ffSplitCopyHip(P.y.ptr, P.dev, impl.coords.d_y.ptr, impl.own_device, b1, ps) == hipSuccess;
+        ok = ok && ffSplitCopyHip(P.z.ptr, P.dev, impl.coords.d_z.ptr, impl.own_device, b1, ps) == hipSuccess;
+        ok = ok && ffSplitCopyHip(P.q.ptr, P.dev, impl.d_charges.ptr, impl.own_device, b1, ps) == hipSuccess;
+        ok = ok && ffSplitCopyHip(P.alp.ptr, P.dev, impl.d_coul_alp.ptr, impl.own_device, b1, ps) == hipSuccess;
+        ok = ok && hipMemsetAsync(P.grad.ptr, 0, 3 * b1, ps) == hipSuccess;
+        ok = ok && hipMemsetAsync(P.E.ptr, 0, sizeof(double), ps) == hipSuccess;
+        launchCoulombTilesRowsHip(N, impl.coul_split_ti, impl.coul_split_tj, P.r0, P.r1, P.alp.ptr, P.x.ptr, P.y.ptr,
+                                  P.z.ptr, P.q.ptr, impl.coulomb_rcut, P.grad.ptr, P.E.ptr, ps);
+        ok = ok && hipGetLastError() == hipSuccess;
+        ok = ok && ffSplitCopyHip(impl.d_coul_part_grad.ptr + static_cast<size_t>(h) * 3 * N, impl.own_device,
+                                  P.grad.ptr, P.dev, 3 * b1, ps) == hipSuccess;
+        ok = ok && ffSplitCopyHip(impl.d_coul_part_E.ptr + h, impl.own_device, P.E.ptr, P.dev, sizeof(double),
+                                  ps) == hipSuccess;
+        ok = ok && (!P.done || hipEventRecord(P.done, ps) == hipSuccess);
+        (void)hipSetDevice(impl.own_device);
+        if (!ok) throw std::runtime_error("Coulomb split: launch on device " + std::to_string(P.dev) + " failed");
+        ++h;
+    }
+    launchCoulombTilesRowsHip(N, impl.coul_split_ti, impl.coul_split_tj, 0, impl.coul_own_rows, impl.d_coul_alp.ptr,
+                              impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr, impl.d_charges.ptr,
+                              impl.coulomb_rcut, impl.d_grad.ptr, E_slot, sP);
+    for (auto& pp : impl.coul_parts)
+        if (pp->done) checkCuda(hipStreamWaitEvent(sP, pp->done, 0), "Coulomb split: wait");
+    const int nh = static_cast<int>(impl.coul_parts.size());
+    const int n3 = 3 * N;
+    k_add_split_parts_hip<<<(n3 + 255) / 256, 256, 0, sP>>>(n3, nh, impl.d_coul_part_grad.ptr, impl.d_grad.ptr);
+    k_add_split_parts_hip<<<1, 256, 0, sP>>>(1, nh, impl.d_coul_part_E.ptr, E_slot);
+    ++impl.coul_split_calls;
+}
+
+/// D4 split set-up for the current pair list (CUDA prepareDispSplit). Atom ranges of equal CSR edge count for the
+/// gather, pair ranges of equal size for the energy-only pair kernel. false = this call stays on the own device.
+static bool prepareDispSplitHip(FFWorkspaceHipImpl& impl, int N, bool dispersion_enabled)
+{
+    static const bool env_off = [] {
+        const char* e = std::getenv("CURCUMA_GFNFF_DISP_SPLIT");
+        return e && std::string(e) == "0";
+    }();
+    constexpr int kMinPairs = 200000;   // CUDA: below this the peer copies cost more than the kernels
+    if (env_off || !dispersion_enabled || impl.coul_split_devs.empty() || impl.disp_split_failed || impl.pbc_active
+        || N < impl.coul_split_min_atoms || impl.disp.n < kMinPairs || impl.disp.csr_N != N
+        || impl.disp_ntypes <= 0) {
+        if (!impl.disp_parts.empty()) impl.releaseDispSplit();   // helpers hold no state of their own
+        return false;
+    }
+    if (impl.disp_split_gen == impl.disp_gen && impl.disp_split_natoms == N && !impl.disp_parts.empty()) return true;
+    impl.releaseDispSplit();
+    const int nd = impl.disp.n;
+    const int nparts = static_cast<int>(impl.coul_split_devs.size()) + 1;
+    const int nt = impl.disp_ntypes;
+    const int uv_n = N * nt * 2 * D4_MAX_REF;
+    try {
+        checkCuda(hipStreamSynchronize(impl.stream), "D4 split: list ready");
+        std::vector<int> off(N + 1);
+        impl.disp.csr_off.download(off.data(), N + 1);
+        const long long edges = off[N];
+        std::vector<int> abound(nparts + 1, N), pbound(nparts + 1, nd);
+        abound[0] = 0; pbound[0] = 0;
+        for (int k = 1; k < nparts; ++k) {
+            const long long target = edges * k / nparts;
+            int a = abound[k - 1];
+            while (a < N && off[a] < target) ++a;
+            abound[k] = a;
+            pbound[k] = static_cast<int>((static_cast<long long>(nd) * k) / nparts);
+        }
+        for (int h = 0; h < nparts - 1; ++h) {
+            auto part = std::make_unique<FFWorkspaceHipImpl::DispSplitPartHip>();
+            auto& P = *part;
+            P.dev = impl.coul_split_devs[h];
+            P.a0 = abound[h + 1]; P.a1 = abound[h + 2];
+            P.p0 = pbound[h + 1]; P.p1 = pbound[h + 2];
+            const int e0 = off[P.a0], ne = off[P.a1] - e0, nrow = P.a1 - P.a0, np = P.p1 - P.p0;
+            // Row-local CSR offsets and per-edge parameters, built on the own device.
+            std::vector<int> off_loc(nrow + 1), pidx_loc(std::max(ne, 1));
+            for (int r = 0; r <= nrow; ++r) off_loc[r] = off[P.a0 + r] - e0;
+            for (int t = 0; t < ne; ++t) pidx_loc[t] = t;
+            CudaBuffer<double> s_r4, s_r0, s_zc, s_rc;
+            s_r4.alloc(ne); s_r0.alloc(ne); s_zc.alloc(ne); s_rc.alloc(ne);
+            if (ne > 0) {
+                k_split_edge_params_hip<<<(ne + 255) / 256, 256, 0, impl.stream>>>(
+                    ne, impl.disp.csr_pairidx.ptr + e0, impl.disp.r4r2ij.ptr, impl.disp.r0_sq.ptr,
+                    impl.disp.zetac6.ptr, impl.disp.r_cut.ptr, s_r4.ptr, s_r0.ptr, s_zc.ptr, s_rc.ptr);
+                checkCuda(hipGetLastError(), "k_split_edge_params_hip launch");
+            }
+            checkCuda(hipStreamSynchronize(impl.stream), "D4 split: edge parameters");
+            if (hipSetDevice(P.dev) != hipSuccess)
+                throw std::runtime_error("hipSetDevice(" + std::to_string(P.dev) + ") failed");
+            ffSplitEnablePeerHip(P.dev, impl.own_device);
+            ffSplitFixModeOnHelperHip(P.dev, impl.own_device, impl.fixed_point);
+            if (P.dev != impl.own_device || impl.split_same_device_streams)
+                ffSplitStreamHip(P.stream, P.done, P.dev, /*low_priority=*/true);   // CUDA: below the EEQ helper work
+            P.csr_off.upload(off_loc.data(), nrow + 1);
+            P.csr_pairidx.upload(pidx_loc.data(), std::max(ne, 1));
+            P.csr_partner.alloc(std::max(ne, 1));
+            P.e_r4r2ij.alloc(std::max(ne, 1)); P.e_r0_sq.alloc(std::max(ne, 1));
+            P.e_zetac6.alloc(std::max(ne, 1)); P.e_r_cut.alloc(std::max(ne, 1));
+            P.atom_ctype.alloc(N);
+            P.idx_i.alloc(std::max(np, 1)); P.idx_j.alloc(std::max(np, 1));
+            P.C6.alloc(std::max(np, 1)); P.r4r2ij.alloc(std::max(np, 1)); P.r0_sq.alloc(std::max(np, 1));
+            P.zetac6.alloc(std::max(np, 1)); P.r_cut.alloc(std::max(np, 1));
+            P.x.alloc(N); P.y.alloc(N); P.z.alloc(N);
+            P.gw.alloc(N * D4_MAX_REF); P.uv.alloc(uv_n);
+            P.grad.alloc(3 * N); P.dEdcn.alloc(N); P.E.alloc(1);
+            const int own = impl.own_device;
+            const size_t bi = sizeof(int), bd = sizeof(double);
+            bool ok = true;
+            auto cp = [&](void* dst, const void* src, size_t bytes) {
+                if (bytes > 0) ok = ok && ffSplitCopyHip(dst, P.dev, src, own, bytes, P.stream ? P.stream : impl.stream) == hipSuccess;
+            };
+            cp(P.csr_partner.ptr, impl.disp.csr_partner.ptr + e0, bi * ne);
+            cp(P.e_r4r2ij.ptr, s_r4.ptr, bd * ne); cp(P.e_r0_sq.ptr, s_r0.ptr, bd * ne);
+            cp(P.e_zetac6.ptr, s_zc.ptr, bd * ne); cp(P.e_r_cut.ptr, s_rc.ptr, bd * ne);
+            cp(P.atom_ctype.ptr, impl.d_atom_ctype.ptr, bi * N);
+            const size_t o = static_cast<size_t>(P.p0);
+            cp(P.idx_i.ptr, impl.disp.idx_i.ptr + o, bi * np); cp(P.idx_j.ptr, impl.disp.idx_j.ptr + o, bi * np);
+            cp(P.r4r2ij.ptr, impl.disp.r4r2ij.ptr + o, bd * np); cp(P.r0_sq.ptr, impl.disp.r0_sq.ptr + o, bd * np);
+            cp(P.zetac6.ptr, impl.disp.zetac6.ptr + o, bd * np); cp(P.r_cut.ptr, impl.disp.r_cut.ptr + o, bd * np);
+            ok = ok && hipStreamSynchronize(P.stream ? P.stream : impl.stream) == hipSuccess;   // staging dies with this scope
+            (void)hipSetDevice(own);
+            if (!ok) throw std::runtime_error("copies to device " + std::to_string(P.dev) + " failed");
+            impl.disp_parts.push_back(std::move(part));
+        }
+        (void)hipSetDevice(impl.own_device);
+        for (auto& pp : impl.disp_parts) ffSplitEnablePeerHip(impl.own_device, pp->dev);
+        const int nh = nparts - 1;
+        impl.d_disp_part_grad.alloc(3 * N * nh);
+        impl.d_disp_part_dEdcn.alloc(N * nh);
+        impl.d_disp_part_E.alloc(nh);
+        if (!impl.ev_disp_in && hipEventCreateWithFlags(&impl.ev_disp_in, hipEventDisableTiming) != hipSuccess)
+            throw std::runtime_error("event setup failed on the own device");
+        impl.disp_own_rows = abound[1];
+        impl.disp_own_pairs = pbound[1];
+        impl.disp_split_gen = impl.disp_gen;
+        impl.disp_split_natoms = N;
+    } catch (const std::exception& e) {
+        impl.releaseDispSplit();
+        (void)hipSetDevice(impl.own_device);
+        impl.disp_split_failed = true;
+        impl.disp_split_status = std::string("unavailable: ") + e.what();
+        return false;
+    }
+    return true;
+}
+
+/// Helper work of one dispersion call on stream s (inputs final there). gradient: fused gather on the atom ranges
+/// (coordinates, d_gw, d_disp_uv copied); else: pair k_dispersion on the pair ranges (coordinates, C6 slice copied).
+static void launchDispSplitHelpersHip(FFWorkspaceHipImpl& impl, int N, bool gradient, hipStream_t s)
+{
+    const size_t b1 = sizeof(double) * static_cast<size_t>(N);
+    checkCuda(hipEventRecord(impl.ev_disp_in, s), "D4 split: input event");
+    int h = 0;
+    for (auto& pp : impl.disp_parts) {
+        auto& P = *pp;
+        const int own = impl.own_device;
+        (void)hipSetDevice(P.dev);
+        hipStream_t ps = P.stream ? P.stream : s;   // same-device helper of the test hook: sequential on s
+        bool ok = !P.stream || hipStreamWaitEvent(ps, impl.ev_disp_in, 0) == hipSuccess;
+        ok = ok && ffSplitCopyHip(P.x.ptr, P.dev, impl.coords.d_x.ptr, own, b1, ps) == hipSuccess;
+        ok = ok && ffSplitCopyHip(P.y.ptr, P.dev, impl.coords.d_y.ptr, own, b1, ps) == hipSuccess;
+        ok = ok && ffSplitCopyHip(P.z.ptr, P.dev, impl.coords.d_z.ptr, own, b1, ps) == hipSuccess;
+        ok = ok && hipMemsetAsync(P.grad.ptr, 0, 3 * b1, ps) == hipSuccess;
+        ok = ok && hipMemsetAsync(P.dEdcn.ptr, 0, b1, ps) == hipSuccess;
+        ok = ok && hipMemsetAsync(P.E.ptr, 0, sizeof(double), ps) == hipSuccess;
+        if (gradient) {
+            const size_t bw = sizeof(double) * static_cast<size_t>(N) * D4_MAX_REF;
+            const size_t buv = sizeof(double) * static_cast<size_t>(N) * impl.disp_ntypes * 2 * D4_MAX_REF;
+            ok = ok && ffSplitCopyHip(P.gw.ptr, P.dev, impl.d_gw.ptr, own, bw, ps) == hipSuccess;
+            ok = ok && ffSplitCopyHip(P.uv.ptr, P.dev, impl.d_disp_uv.ptr, own, buv, ps) == hipSuccess;
+            const int nrow = P.a1 - P.a0;
+            if (nrow > 0)
+                k_dispersion_gather_uv_rows<<<nrow, 64, 0, ps>>>(
+                    P.a0, nrow, impl.disp_ntypes, P.csr_off.ptr, P.csr_partner.ptr, P.csr_pairidx.ptr,
+                    P.atom_ctype.ptr, P.uv.ptr, P.gw.ptr, P.e_r4r2ij.ptr, P.e_r0_sq.ptr, P.e_zetac6.ptr, P.e_r_cut.ptr,
+                    P.x.ptr, P.y.ptr, P.z.ptr, P.dEdcn.ptr, P.grad.ptr, P.E.ptr);
+        } else {
+            const int np = P.p1 - P.p0;
+            ok = ok && ffSplitCopyHip(P.C6.ptr, P.dev, impl.disp.C6.ptr + P.p0, own, sizeof(double) * np,
+                                      ps) == hipSuccess;
+            LaunchConfig cfg = getLaunchConfig(np, 256);
+            if (np > 0)
+                k_dispersion<<<cfg.gridSize, cfg.blockSize, 0, ps>>>(
+                    np, P.idx_i.ptr, P.idx_j.ptr, P.C6.ptr, P.r4r2ij.ptr, P.r0_sq.ptr, P.zetac6.ptr, P.r_cut.ptr,
+                    nullptr, nullptr, P.x.ptr, P.y.ptr, P.z.ptr, P.dEdcn.ptr, P.grad.ptr, P.E.ptr);
+        }
+        ok = ok && hipGetLastError() == hipSuccess;
+        ok = ok && ffSplitCopyHip(impl.d_disp_part_grad.ptr + static_cast<size_t>(h) * 3 * N, own, P.grad.ptr,
+                                  P.dev, 3 * b1, ps) == hipSuccess;
+        ok = ok && ffSplitCopyHip(impl.d_disp_part_dEdcn.ptr + static_cast<size_t>(h) * N, own, P.dEdcn.ptr, P.dev,
+                                  b1, ps) == hipSuccess;
+        ok = ok && ffSplitCopyHip(impl.d_disp_part_E.ptr + h, own, P.E.ptr, P.dev, sizeof(double),
+                                  ps) == hipSuccess;
+        ok = ok && (!P.done || hipEventRecord(P.done, ps) == hipSuccess);
+        (void)hipSetDevice(own);
+        if (!ok) throw std::runtime_error("D4 split: launch on device " + std::to_string(P.dev) + " failed");
+        ++h;
+    }
+}
+
+/// After the own device's part: wait for the helpers and add their gradient, dE/dCN and energy (CUDA
+/// appendDispSplitParts).
+static void appendDispSplitPartsHip(FFWorkspaceHipImpl& impl, int N, bool gradient, hipStream_t s)
+{
+    for (auto& pp : impl.disp_parts)
+        if (pp->done) checkCuda(hipStreamWaitEvent(s, pp->done, 0), "D4 split: wait");
+    const int nh = static_cast<int>(impl.disp_parts.size());
+    k_add_split_parts_hip<<<(3 * N + 255) / 256, 256, 0, s>>>(3 * N, nh, impl.d_disp_part_grad.ptr, impl.d_grad.ptr);
+    if (gradient)   // energy-only: the pair kernel gets no dC6/dCN, the helper dE/dCN stays zero
+        k_add_split_parts_hip<<<(N + 255) / 256, 256, 0, s>>>(N, nh, impl.d_disp_part_dEdcn.ptr, impl.d_dEdcn.ptr);
+    k_add_split_parts_hip<<<1, 256, 0, s>>>(1, nh, impl.d_disp_part_E.ptr, &impl.d_energies.ptr[impl.E_DISP]);
 }
 
 /// Claude Generated (April 2026): Upload unit cell to GPU constant memory for PBC.
@@ -11991,6 +12645,7 @@ void FFWorkspaceHip::generateDispersionPairListOnGPU(
     checkCuda(hipStreamSynchronize(impl.stream), "download disp pair count");
 
     { impl.disp_uv_valid = false; impl.disp_pair_c6_current = true; }  // Oct 2026: new pair list, d_disp_uv stale
+    ++impl.disp_gen;   // Claude Generated (Nov 2026, ROCM_PARITY_SPL): helper copies of the D4 split are stale
     // (Re)allocate the DispersionSoA to the device-counted pair count.
     impl.disp.n = h_count;
     impl.disp.idx_i.alloc(h_count);
@@ -12268,9 +12923,15 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
         // energy calls reach this without a weight refresh); fill it from the current d_disp_uv first.
         if (!impl.disp_pair_c6_current && impl.disp_uv_valid)
             launchDispC6PerPair(impl, m_natoms, m_disp_c6_update, m_block_size, sA, /*with_uv=*/false);
-        LaunchConfig cfg = getLaunchConfig(impl.disp.n, m_block_size);
+        // Claude Generated (Nov 2026, ROCM_PARITY_SPL; CUDA launchDispSplitHelpers(false)): multi-GPU D4 split of the
+        // energy-only pair kernel, pairs [disp_own_pairs, n) on the helpers.
+        const bool dsplit = !impl.coul_split_devs.empty() && !ffStreamCapturingHip(sA)
+                            && prepareDispSplitHip(impl, m_natoms, m_dispersion_enabled);
+        if (dsplit) launchDispSplitHelpersHip(impl, m_natoms, /*gradient=*/false, sA);
+        const int nd_own = dsplit ? impl.disp_own_pairs : impl.disp.n;
+        LaunchConfig cfg = getLaunchConfig(nd_own, m_block_size);
         k_dispersion<<<cfg.gridSize, cfg.blockSize, 0, sA>>>(
-            impl.disp.n,
+            nd_own,
             impl.disp.idx_i.ptr,  impl.disp.idx_j.ptr,
             impl.disp.C6.ptr,     impl.disp.r4r2ij.ptr,
             impl.disp.r0_sq.ptr,  impl.disp.zetac6.ptr,
@@ -12283,6 +12944,10 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
             impl.d_dEdcn.ptr,
             impl.d_grad.ptr,
             &impl.d_energies.ptr[impl.E_DISP]);
+        if (dsplit) {
+            appendDispSplitPartsHip(impl, m_natoms, /*gradient=*/false, sA);
+            ++impl.disp_split_energy_calls;
+        }
     }
     if (m_repulsion_enabled) {
         // Phase 8: n > 0 guard removed — n=0 produces a 1-block no-op (graph-capture safe)
@@ -12706,8 +13371,17 @@ static void launchDispersionGatherHip(FFWorkspaceHipImpl& impl, hipStream_t sP)
         // stale d_disp_uv) the per-pair arrays are read via csr_pairidx. Both equal k_dispersion up to FP rounding.
         const int disp_block = 64;   // one workgroup per atom (power of two for the tree reduction)
         int grid = impl.disp.csr_N;
+        // Claude Generated (Nov 2026, ROCM_PARITY_SPL): multi-GPU D4 split of the fused gather (helpers take the atom
+        // rows [disp_own_rows, N)); the other gather paths stay on this device for the call (counted in the status).
+        const bool split_cfg = !impl.coul_split_devs.empty() && !ffStreamCapturingHip(sP)
+                               && prepareDispSplitHip(impl, impl.disp.csr_N, true);
         if (impl.disp_uv_valid && !impl.disp_pair_c6_current) {
+            if (split_cfg) {
+                launchDispSplitHelpersHip(impl, impl.disp.csr_N, /*gradient=*/true, sP);
+                grid = impl.disp_own_rows;
+            }
             // Claude Generated (Oct 2026): C6 and dC6/dCN formed per edge from d_disp_uv (fused path).
+            if (grid > 0)
             k_dispersion_gather_uv<<<grid, disp_block, 0, sP>>>(
                 impl.disp.csr_N, impl.disp_ntypes,
                 impl.disp.csr_off.ptr, impl.disp.csr_partner.ptr, impl.disp.csr_pairidx.ptr,
@@ -12715,7 +13389,12 @@ static void launchDispersionGatherHip(FFWorkspaceHipImpl& impl, hipStream_t sP)
                 impl.disp.r4r2ij.ptr, impl.disp.r0_sq.ptr, impl.disp.zetac6.ptr, impl.disp.r_cut.ptr,
                 impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
                 impl.d_dEdcn.ptr, impl.d_grad.ptr, &impl.d_energies.ptr[impl.E_DISP]);
+            if (split_cfg) {
+                appendDispSplitPartsHip(impl, impl.disp.csr_N, /*gradient=*/true, sP);
+                ++impl.disp_split_grad_calls;
+            }
         } else {
+        if (split_cfg) ++impl.disp_unsplit_calls;
         k_dispersion_gather<<<grid, disp_block, 0, sP>>>(
             impl.disp.csr_N,
             impl.disp.csr_off.ptr, impl.disp.csr_partner.ptr,
@@ -12838,11 +13517,17 @@ double FFWorkspaceHip::launchChargeDependentAndFinish(bool gradient)
     // pair sum (m_coulomb_pair_on_device false): the host adds the Ewald pair energy and gradient at these charges
     // (FFWorkspace::evaluateEwaldCoulomb); self term and TERM 1b (k_coulomb_postprocess below) stay on the device.
     if (m_coulomb_enabled && m_coulomb_pair_on_device && impl.coulomb_implicit) {
+        // Claude Generated (Nov 2026, ROCM_PARITY_SPL; CUDA prepareCoulombSplit / launchCoulombSplit): tile rows over
+        // the helper devices of the multi-GPU split.
+        if (!impl.coul_split_devs.empty() && !ffStreamCapturingHip(sP) && prepareCoulombSplit()) {
+            launchCoulombSplitHip(impl, m_natoms, sP);
+        } else {
         launchCoulombTilesHip(m_natoms, impl.d_coul_alp.ptr,
             impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
             impl.d_charges.ptr, impl.coulomb_rcut,
             impl.d_grad.ptr,
             &impl.d_energies.ptr[impl.E_COUL], sP);
+        }
         checkCuda(hipGetLastError(), "k_coulomb_tiles_hip (implicit) launch");
     } else if (m_coulomb_enabled && m_coulomb_pair_on_device && impl.coulomb.n > 0) {
         // ROCm: the pair k_coulomb's ~6M FP64 atomicAdd dominated the MD step. Preferred path is
