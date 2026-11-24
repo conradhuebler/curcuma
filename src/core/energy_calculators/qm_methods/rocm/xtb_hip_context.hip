@@ -3620,6 +3620,7 @@ struct XtbHipContext::Impl {
         for (void* p : { (void*)dMpAmat, (void*)dMpKern, (void*)dMpIn, (void*)dMpOut, (void*)dMpGeo }) if (p) (void)hipFree(p);
         dMpAmat = dMpKern = dMpIn = dMpOut = dMpGeo = nullptr;
         mp_nat = 0; mp_ver = 0; mp_pot_valid = false; mp_otf = false;
+        pbc.mp_pbc_resident = false;   // R25: the periodic copy lived in dMpAmat
     }
     /// WP11: multipole potential of the device potential (stored or on the fly) from dMpIn into dVdp/dVqp/dMpOut.
     void launchMpPotential(int nat) {
@@ -3658,6 +3659,7 @@ struct XtbHipContext::Impl {
                      unsigned long long version, double max_bytes) {
         if (!ok || nat <= 0 || version == 0) return false;
         if (nat == mp_nat && version == mp_ver && dMpAmat) return true;   // already resident
+        pbc.mp_pbc_resident = false;   // R25: dMpAmat is rewritten with the cell-free host matrices
         const size_t nn = static_cast<size_t>(nat) * static_cast<size_t>(nat);
         const double bytes = 15.0 * static_cast<double>(nn) * sizeof(double);
         if (bytes > max_bytes || mpFailMode() == "limit") {
@@ -3763,6 +3765,7 @@ struct XtbHipContext::Impl {
     //   v_sh = gamma q_sh + q_sh^2 Gamma_s,  v_at = multipole shift + dE_D4/dq,  v_dp, v_qp,
     // expands v_ao, adds the Fock and solves. FP64 throughout (the eigensolve follows fp32).
     int     pot_nsh = 0;                 ///< > 0 once a beginPotential* succeeded for this basis
+    bool    pot_pbc = false;             ///< R25 (CUDA R2): set only by beginPotentialPeriodic; periodic D4 gather
     double* dPotQsh = nullptr;           ///< q_sh (nsh)
     double* dVsh    = nullptr;           ///< v_sh (nsh)
     double* dGamma3 = nullptr;           ///< Gamma_s (nsh)
@@ -3786,6 +3789,7 @@ struct XtbHipContext::Impl {
     bool potBeginCommon(int nat, int nsh, const double* dk, const double* qk, const double* g3,
                         double max_bytes, bool otf = false) {
         pot_nsh = 0;
+        pot_pbc = false;  // R25 (CUDA R2): cell-free potential unless beginPotentialPeriodic sets it again
         mp_otf = false;   // WP11: set again by potBeginOtf once its begin succeeded
         solv_active = false; solv_failed = false;   // WP6: the Born matrix is per geometry (beginSolvation after this begin)
         if (potFailMode() == "begin") { pot_error = "forced by CURCUMA_ROCM_FAIL_POT=begin"; return false; }
@@ -3850,6 +3854,7 @@ struct XtbHipContext::Impl {
     /// beginPotential: the host interaction matrices (3 nat^2 sd, 9 nat^2 dd with block a*3+b, 6 nat^2 sq).
     bool potBegin(int nat, int nsh, const double* sd, const double* dd, const double* sq,
                   const double* dk, const double* qk, const double* g3, double max_bytes) {
+        pbc.mp_pbc_resident = false;   // R25: dMpAmat is rewritten (cell-free)
         if (!potBeginCommon(nat, nsh, dk, qk, g3, max_bytes)) return false;
         const size_t nn = static_cast<size_t>(nat) * static_cast<size_t>(nat);
         const double* src[15] = { sd, sd + nn, sd + 2 * nn,
@@ -3865,6 +3870,7 @@ struct XtbHipContext::Impl {
     /// beginPotentialStored: the matrices built on the device from the geometry and the damping radii.
     bool potBeginStored(int nat, int nsh, const double* xyz, const double* mrad, double dmp3, double dmp5,
                         const double* dk, const double* qk, const double* g3, double max_bytes) {
+        pbc.mp_pbc_resident = false;   // R25: dMpAmat is rewritten (cell-free)
         if (!potBeginCommon(nat, nsh, dk, qk, g3, max_bytes)) return false;
         const size_t nn = static_cast<size_t>(nat) * static_cast<size_t>(nat);
         // dMpIn (10 nat) is free until the first iteration: geometry (3 nat) and radii (nat) go there.
@@ -3886,6 +3892,7 @@ struct XtbHipContext::Impl {
     /// Geometry and damping radii stay resident in dMpGeo; the potential and energy kernels rebuild the elements.
     bool potBeginOtf(int nat, int nsh, const double* xyz, const double* mrad, double dmp3, double dmp5,
                      const double* dk, const double* qk, const double* g3) {
+        pbc.mp_pbc_resident = false;   // R25: the on-the-fly begin may release dMpAmat
         if (!potBeginCommon(nat, nsh, dk, qk, g3, 0.0, true)) return false;
         if (hipMemcpy(dMpGeo, xyz, 3 * static_cast<size_t>(nat) * sizeof(double), hipMemcpyHostToDevice) != hipSuccess
             || hipMemcpy(dMpGeo + 3 * nat, mrad, nat * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) {
@@ -3945,7 +3952,13 @@ struct XtbHipContext::Impl {
     const char* potBuildCore() {
         const int n = res_n, nat = bnat, nsh = pot_nsh;
         const int b = 128;
-        // D4 dE/dq (resident, no download)
+        // D4 dE/dq (resident, no download). R25 (CUDA R2): with a cell the periodic gather of D1 over the
+        // image-summed damping matrix of beginDispersionImages.
+        if (pot_pbc) {
+            if (!pbc.d4_pbc_ready) return "periodic D4 images not on the device";
+            hipLaunchKernelGGL(pbc_dev::k_d4_dedq_pbc_b, dim3(nat), dim3(128), 0, stream, nat, 118, D4_MAX_REF, dD4Z,
+                               dD4Nref, dD4C6, dD4W, dD4dWq, pbc.dPbcD4D.ptr, dD4Dedq);
+        } else
         hipLaunchKernelGGL(k_d4_dedq, dim3((nat + b - 1) / b), dim3(b), 0, stream, nat, 118, D4_MAX_REF,
                            dD4Z, dD4Nref, dD4Sqrt, dD4Xyz, dD4C6, dD4W, dD4dWq,
                            d4_s6, d4_s8, d4_a1, d4_a2, d4_cut * d4_cut, dD4Dedq);
@@ -5811,6 +5824,7 @@ bool XtbHipContext::beginBasis(const XtbHipBasisData& basis)
 #ifndef HAVE_ROCSOLVER
     (void)basis; return false;
 #else
+    if (m_impl) m_impl->pbc.gamma_pbc_resident = false;   // R25: the basis may reallocate the resident gamma
     return m_impl && m_impl->ok && m_impl->begBasis(basis);
 #endif
 }
@@ -5819,6 +5833,7 @@ bool XtbHipContext::beginComputed(const double* xyz_bohr)
 #ifndef HAVE_ROCSOLVER
     (void)xyz_bohr; return false;
 #else
+    if (m_impl) m_impl->pbc.gamma_pbc_resident = false;   // R25: the cell-free gamma overwrites the periodic one
     return m_impl && m_impl->ok && xyz_bohr && m_impl->computeIntegrals(xyz_bohr);
 #endif
 }
@@ -6409,6 +6424,9 @@ bool XtbHipContext::eeqChargeResponseGradient(int N, const double* dEdq, double*
 
 // Claude Generated (Nov 24, 2026, ROCm A3): host entry points of the periodic device stages.
 #include "xtb_hip_periodic_host.hiph"
+
+// Claude Generated (Nov 24, 2026, ROCm parity R25): resident periodic potential and SCF loop (CUDA R2-R5).
+#include "xtb_hip_periodic_resident.hiph"
 
 } // namespace gpu
 } // namespace xtb

@@ -585,8 +585,8 @@ public:
     // Claude Generated (Nov 24, 2026, ROCm parity A3): the CUDA overrides of xtb_gpu_method.cpp verbatim, forwarded to
     // the HIP ports in rocm/xtb_hip_periodic_host.hiph. xtb_periodic.cpp calls them only with a cell
     // (XTB::setPeriodicDeviceScf, set by the constructor below) and runs its host loop, counted as a GPU fallback, on
-    // false. Not ported (periodicStageOnDevice false, host path without a fallback count): beginPotentialPeriodic and
-    // the resident periodic loop (R2-R5). beginComputedPeriodic (G1b) is ported (ROCm parity G1B, below).
+    // false. beginComputedPeriodic (G1b, ROCm parity G1B) and beginPotentialPeriodic with the resident periodic loop
+    // (R2-R5, ROCm parity R25) are ported, see periodicStageOnDevice below.
     // Claude Generated (Nov 2026, WP-PERIODIC-XTB G4a): periodic ATM, see GpuScfBackend.
     bool dispersionATMPeriodic(int nat, const double* xyz_bohr, const double* r4r2, const double* c6,
                                const double* dc6dcn, const double* cell_L, int ntrans, const double* trans,
@@ -647,13 +647,12 @@ public:
         for (int k = 0; k < 6; ++k) std::memcpy(qp.data() + k * nn, qp_int[k].data(), nn * sizeof(double));
         return m_ctx->uploadMultipoleInts(dp.data(), qp.data(), m_n) && m_ctx->beginMultipoleComputed();
     }
-    // Claude Generated (Nov 24, 2026, ROCm A3): the stages without a HIP port run on the host by design (no fallback
-    // count): devpot (periodic device potential and with it the resident periodic loop, CUDA R2-R5). ints (device
-    // S/H0/L, CUDA G1b) has a HIP port since ROCm parity G1B (beginComputedPeriodic below).
+    // Claude Generated (Nov 24, 2026, ROCm A3, G1B, R25): every periodic stage has a HIP port now (ints: G1b,
+    // devpot and the resident loop: CUDA R2-R5), as on CUDA.
     bool periodicStageOnDevice(const char* token) const override
     {
-        const std::string t = token ? token : "";
-        return t != "devpot";
+        (void)token;
+        return true;
     }
     // Claude Generated (Nov 24, 2026, ROCm parity G1B): periodic integrals on the device, the CUDA override of
     // xtb_gpu_method.cpp (computeIntegralsPeriodic + residentBeginComputed). On ROCm the resident buffers are those of
@@ -784,6 +783,30 @@ public:
     {
         if (!m_ctx) return false;
         return m_ctx->dispersionDedqPeriodic(nat, W, dWq, dEdq_out);
+    }
+
+    // ---- BACKEND-SPECIFIC 13: resident periodic potential and SCF loop (CUDA WP-PERIODIC-XTB R2-R5) ---------------
+    // Claude Generated (Nov 24, 2026, ROCm parity R25): the CUDA overrides of xtb_gpu_method.cpp, forwarded to
+    // rocm/xtb_hip_periodic_resident.hiph. A failure returns false with lastError() (pot_error); the host keeps the
+    // host potential / host-driven loop / host potential rebuild and counts the stage fallback (devpot, resloop,
+    // potdl). Not routed through notePotentialBegin: a periodic failure does not switch off the cell-free device
+    // potential of later calculations (as on CUDA).
+    bool beginPotentialPeriodic(int nat, int nsh, const double* dkernel, const double* qkernel,
+                                const double* gamma3) override
+    {
+        m_res_error.clear();
+        if (!m_ctx || !supportsDevicePotential()) return false;
+        return m_ctx->beginPotentialPeriodic(nat, nsh, dkernel, qkernel, gamma3);
+    }
+    bool periodicGammaResident(int nsh) const override { return m_ctx && m_ctx->periodicGammaResident(nsh); }
+    bool downloadConvergedPotentials(Vector& v_sh, Vector& v_at, Eigen::MatrixXd& v_dp, Eigen::MatrixXd& v_qp) override
+    {
+        // sized by the caller (nsh, nat); the context checks them against its loop dimensions
+        m_res_error.clear();
+        if (!m_ctx || v_sh.size() <= 0 || v_at.size() <= 0 || v_dp.rows() != 3 || v_qp.rows() != 6
+            || v_dp.cols() != v_at.size() || v_qp.cols() != v_at.size()) return false;
+        if (!m_ctx->residentLoopDims(static_cast<int>(v_sh.size()), static_cast<int>(v_at.size()))) return false;
+        return m_ctx->downloadConvergedPotentials(v_sh.data(), v_at.data(), v_dp.data(), v_qp.data());
     }
 
 

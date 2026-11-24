@@ -10,8 +10,8 @@
  * the CUDA Impl buffers -> PbcState (xtb_hip_periodic_kernels.hiph) and the beginDispersion data -> the HIP Impl
  * members of the same meaning (dD4C6, dD4Z, dD4Nref, dD4Xyz, dD4Sqrt, dD4W, dD4dWq, dD4Dedq, d4_*). Any failure
  * returns false; the host loop of the stage then runs and xtb_periodic.cpp counts the fallback.
- * The device-resident copies (periodic gamma, multipole matrices) for the R2-R5 resident periodic SCF are not
- * ported: ewaldGammaPeriodic / multipoleMatricesPeriodic keep no device copy (periodicGammaResident() false).
+ * ewaldGammaPeriodic / multipoleMatricesPeriodic keep the device-resident copies of the R2-R5 resident periodic SCF
+ * (R25, Nov 24, 2026; code in xtb_hip_periodic_resident.hiph).
  * Included at the end of xtb_hip_context.hip (namespace curcuma::xtb::gpu, HAVE_ROCSOLVER).
  * 🤖 AI-generated, ⚙️ machine-tested only.
  */
@@ -53,9 +53,10 @@ bool XtbHipContext::multipoleMatricesPeriodic(int nat, const double* xyz_bohr, c
     const size_t n2 = static_cast<size_t>(nat) * nat;
     if (18 * n2 > static_cast<size_t>(INT_MAX)) return false;
     hipStream_t stream = M.stream;
-    // ROCm A3: the resident copy of CUDA R2/R4 (dMpAmat* for beginPotentialPeriodic) is not ported; the matrices
-    // always go to the host (out18 == nullptr, the device-only request of R4, is refused).
-    if (!out18) return false;
+    // R25 (Nov 24, 2026; CUDA R2/R4): keep a resident copy for the periodic device potential (beginPotentialPeriodic)
+    // while the 18 blocks stay below 2 GB; out18 == nullptr skips the host download (R4).
+    const bool keep = 18.0 * static_cast<double>(n2) * sizeof(double) < 2.0e9;
+    if (!out18 && !keep) return false;
     try {
         I.dPbcXyz.upload(xyz_bohr, 3 * nat, stream);
         I.dPbcMrad.upload(mrad, nat, stream);
@@ -78,9 +79,11 @@ bool XtbHipContext::multipoleMatricesPeriodic(int nat, const double* xyz_bohr, c
                 if (hipMemcpyAsync(out18[b], I.dPbcAmat.ptr + b * n2, n2 * sizeof(double), hipMemcpyDeviceToHost,
                                     stream) != hipSuccess)
                     return false;
+        const bool kept = keep && pbcKeepMultipoleResident(nat, alpha);   // R25: self terms + 15-block copy
+        if (!kept && !out18) return false;
         if (hipStreamSynchronize(stream) != hipSuccess) return false;
-        I.mp_pbc_resident = false;
-        I.mp_pbc_nat = 0;
+        I.mp_pbc_resident = kept;
+        I.mp_pbc_nat = kept ? nat : 0;
     } catch (...) {
         return false;
     }
@@ -143,8 +146,9 @@ bool XtbHipContext::ewaldGammaPeriodic(int nat, const double* xyz_bohr, const do
             if (okk && hipMemcpyAsync(gamma_out, I.dPbcGamma.ptr, s2 * sizeof(double), hipMemcpyDeviceToHost,
                                        stream) != hipSuccess)
                 okk = false;
-            // ROCm A3: the resident copy of CUDA R2 (dGamma for beginPotentialPeriodic / the R5 GFN1 loop) is not
-            // ported, so periodicGammaResident() stays false and the periodic SCF keeps the host-driven loop.
+            // R25 (Nov 24, 2026; CUDA R2): the resident copy of the periodic potential (beginPotentialPeriodic, the
+            // resident loops and their energies; R5 GFN1 loop) in the resident gamma of the basis
+            if (okk) gamma_kept = pbcKeepGammaResident(nsh);
         }
     } catch (...) {
         okk = false;

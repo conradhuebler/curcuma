@@ -17,8 +17,8 @@
  * Water dimer (registry) in an 8 A cube, scf_threshold 1e-9, gfn1 and gfn2. Without the CUDA plugin or a device the
  * test exits 77 (ctest SKIP_RETURN_CODE), never 0.
  * Argument: the backend, "cuda" (default) or "rocm" (ctest pbc_xtb_gpu_fallback_rocm, ROCm parity A3, Nov 24, 2026: the
- * tokens of the stages that have a HIP port; devpot and the resident tokens run on the host there; ints has a HIP port
- * since ROCm parity G1B, Nov 24, 2026).
+ * tokens of the stages that have a HIP port; the GFN1 resident tokens run on the host there; ints since G1B and
+ * GFN2 devpot, resloop, resstep, potdl since R25 have a HIP port, Nov 24, 2026).
  */
 #include "src/core/energycalculator.h"
 #include "src/core/molecule.h"
@@ -163,8 +163,8 @@ int main(int argc, char** argv)
     const Stage gfn1_stages[] = { { "ints", "ints" }, { "resloop", "resloop" }, { "resstep", "resloop" },
         { "gamma", "gamma" }, { "cn", "cn" }, { "d3", "d3" }, { "rep", "rep" }, { "h0grad", "h0grad" },
         { "wmat", "wmat", "h0grad" }, { "ewgrad", "ewgrad" }, { "kograd", "kograd" }, { "cnchain", "cnchain" } };
-    // ROCm: the stages with a HIP port (rocm/xtb_hip_periodic_host.hiph)
-    const Stage gfn2_rocm[] = { { "ints", "ints" }, { "d4dedq", "d4dedq" }, { "gamma", "gamma" }, { "mpmat", "mpmat" }, { "cn", "cn" },
+ * tokens of the stages that have a HIP port; the GFN1 resident tokens run on the host there; ints since G1B and
+ * GFN2 devpot, resloop, resstep, potdl since R25 have a HIP port, Nov 24, 2026).
         { "d4cn", "d4cn" }, { "d4pair", "d4pair" }, { "atm", "atm" }, { "cnfold", "cnfold" }, { "rep", "rep" },
         { "mpgrad", "mpgrad" }, { "h0grad", "h0grad" }, { "wmat", "wmat", "h0grad" }, { "ewgrad", "ewgrad" },
         { "kograd", "kograd" }, { "cnchain", "cnchain" } };

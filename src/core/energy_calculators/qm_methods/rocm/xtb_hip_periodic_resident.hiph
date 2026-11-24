@@ -1,0 +1,159 @@
+/*
+ * <Native xTB ROCm/HIP: resident periodic potential and SCF loop (WP-PERIODIC-XTB R2-R5 on ROCm)>
+ * Copyright (C) 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
+ *
+ * This program is free software under GPL-3.0.
+ *
+ * Claude Generated (Nov 24, 2026, ROCm parity item R25): HIP port of the CUDA resident periodic SCF
+ * (cuda/xtb_gpu_context.cu, WP-PERIODIC-XTB R2-R5: the resident copies kept by ewaldGammaPeriodic /
+ * multipoleMatricesPeriodic, k_mp_pbc_self, beginPotentialPeriodic, periodicGammaResident, residentLoopDims,
+ * downloadConvergedPotentials). Same contracts as the GpuScfBackend virtuals in xtb_native.h.
+ * Differences in form, not in the expressions:
+ *  - the periodic shell gamma goes into the resident dgamma of the basis (CUDA: dGamma), which the WP1 potential, the
+ *    WP2/WP3 resident loops and their energies read;
+ *  - the 18 periodic multipole blocks go into the 15-block layout of k_mp_potential_stored (dd packed 00, 01, 02, 11,
+ *    12, 22; CUDA: dMpAmatSD/DD/SQ with all 9 dd blocks). The periodic builder is exactly symmetric in a, b (as the
+ *    CUDA warp-per-atom kernels k_multipole_potential_cw / k_energy_multipole_cw assume), so the potential and energy
+ *    are those of the CUDA kernels; the existing block-per-atom kernels k_mp_potential_stored / k_mp_energy_stored
+ *    evaluate them (the diagonal, i.e. the periodic self terms, is read like every other element);
+ *  - the periodic D4 dE/dq gather (pbc_dev::k_d4_dedq_pbc_b) is selected in Impl::potBuildCore by Impl::pot_pbc.
+ * The R3 complement density (E1) has no HIP port; the resident loop keeps the GEMM density.
+ * Included at the end of xtb_hip_context.hip (namespace curcuma::xtb::gpu, HAVE_ROCSOLVER).
+ * 🤖 AI-generated, ⚙️ machine-tested only.
+ */
+#pragma once
+
+#ifdef HAVE_ROCSOLVER
+
+// Claude Generated (Nov 24, 2026, R25; CUDA k_mp_pbc_self, WP-PERIODIC-XTB R2): the on-site self terms of the periodic
+// multipole matrices on the device copy (the additions of the host loop of buildMultipoleInteractionMatricesPeriodic)
+// in the 18-block layout of pbc_dev::k_mp_amat_pbc (SD 0-2, DD 3-11 with a*3+b, SQ 12-17).
+__global__ void k_mp_pbc_self_r25(int nat, double add_dd, double add_sq, double* __restrict__ out)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= nat) return;
+    const size_t n2 = static_cast<size_t>(nat) * nat, ii = static_cast<size_t>(i) * nat + i;
+    for (int k = 0; k < 3; ++k) out[(3 + k * 3 + k) * n2 + ii] += add_dd;
+    out[(12 + 0) * n2 + ii] += add_sq;
+    out[(12 + 2) * n2 + ii] += add_sq;
+    out[(12 + 5) * n2 + ii] += add_sq;
+}
+
+// Claude Generated (Nov 24, 2026, R25; CUDA ewaldGammaPeriodic R2 branch): enqueue the copy of the periodic shell gamma
+// (pbc.dPbcGamma, nsh x nsh) into the resident dgamma of the basis. The caller synchronises and sets
+// pbc.gamma_pbc_resident only when the whole stage succeeded.
+bool XtbHipContext::pbcKeepGammaResident(int nsh)
+{
+    if (!m_impl) return false;
+    Impl& M = *m_impl;
+    if (!M.dgamma || nsh <= 0 || nsh != M.bnsh || M.pbc.dPbcGamma.empty()) return false;
+    const size_t s2 = static_cast<size_t>(nsh) * nsh;
+    return hipMemcpyAsync(M.dgamma, M.pbc.dPbcGamma.ptr, s2 * sizeof(double), hipMemcpyDeviceToDevice, M.stream)
+        == hipSuccess;
+}
+
+// Claude Generated (Nov 24, 2026, R25; CUDA multipoleMatricesPeriodic R2 branch): the self terms (k_mp_pbc_self_r25) on
+// the 18 blocks of pbc.dPbcAmat (after their optional host download on the same stream) and the copy of the 15 blocks
+// of the k_mp_potential_stored layout into dMpAmat (allocated as potBeginCommon does). Only while the 18 blocks stay
+// below 2 GB (the CUDA limit). mp_ver = 0: the matrices are no host version and no cell-free potential. The caller
+// synchronises and sets pbc.mp_pbc_resident.
+bool XtbHipContext::pbcKeepMultipoleResident(int nat, double alpha)
+{
+    if (!m_impl) return false;
+    Impl& M = *m_impl;
+    PbcState& I = M.pbc;
+    const size_t n2 = static_cast<size_t>(nat) * nat;
+    if (nat <= 0 || I.dPbcAmat.empty() || !(18.0 * static_cast<double>(n2) * sizeof(double) < 2.0e9)) return false;
+    // self terms (tblite): dipole 2 (-2/3 alpha^3/sqrt(pi)) on the dd diagonal blocks, quadrupole 4/9 alpha^3/sqrt(pi)
+    // on sq 0, 2, 5
+    const double a3 = alpha * alpha * alpha / 1.7724538509055159;
+    const double add_dd = 2.0 * (-2.0 / 3.0 * a3), add_sq = 4.0 / 9.0 * a3;
+    hipLaunchKernelGGL(k_mp_pbc_self_r25, dim3((nat + 127) / 128), dim3(128), 0, M.stream, nat, add_dd, add_sq,
+                       I.dPbcAmat.ptr);
+    if (hipGetLastError() != hipSuccess) return false;
+    if (nat != M.mp_nat || !M.dMpAmat) {
+        M.freeMpPot();
+        if (hipMalloc(&M.dMpAmat, 15 * n2 * sizeof(double)) != hipSuccess
+            || hipMalloc(&M.dMpKern, 2 * static_cast<size_t>(nat) * sizeof(double)) != hipSuccess
+            || hipMalloc(&M.dMpIn, 10 * static_cast<size_t>(nat) * sizeof(double)) != hipSuccess
+            || hipMalloc(&M.dMpOut, static_cast<size_t>(nat) * sizeof(double)) != hipSuccess) {
+            (void)hipGetLastError();
+            M.freeMpPot();
+            return false;
+        }
+        M.mp_nat = nat;
+    }
+    M.mp_ver = 0;
+    M.mp_pot_valid = false;
+    // 15-block layout <- 18-block layout: sd 0-2, dd (0,0) (0,1) (0,2) (1,1) (1,2) (2,2) = 3 4 5 7 8 11, sq 12-17
+    static const int src[15] = { 0, 1, 2, 3, 4, 5, 7, 8, 11, 12, 13, 14, 15, 16, 17 };
+    for (int b = 0; b < 15; ++b)
+        if (hipMemcpyAsync(M.dMpAmat + static_cast<size_t>(b) * n2, I.dPbcAmat.ptr + static_cast<size_t>(src[b]) * n2,
+                           n2 * sizeof(double), hipMemcpyDeviceToDevice, M.stream) != hipSuccess)
+            return false;
+    return true;
+}
+
+bool XtbHipContext::periodicGammaResident(int nsh) const
+{
+    return m_impl && m_impl->ok && m_impl->pbc.gamma_pbc_resident && nsh > 0 && nsh == m_impl->bnsh
+        && m_impl->dgamma;
+}
+
+// Claude Generated (Nov 24, 2026, R25; CUDA XtbGpuContext::beginPotentialPeriodic, WP-PERIODIC-XTB R2): periodic GFN2
+// device potential. The periodic gamma (ewaldGammaPeriodic) and the periodic multipole blocks
+// (multipoleMatricesPeriodic) of this geometry are resident, the periodic D4 damping matrix comes from
+// beginDispersionImages; potBeginCommon uploads the on-site kernels and the shell third-order hardness. Any missing
+// piece returns false (pot_error; the caller keeps the host potential and counts the fallback).
+bool XtbHipContext::beginPotentialPeriodic(int nat, int nsh, const double* dkernel, const double* qkernel,
+                                           const double* gamma3)
+{
+    if (!m_impl) return false;
+    Impl& M = *m_impl;
+    M.pot_pbc = false;
+    M.pot_error.clear();
+    if (!M.ok || nat <= 0 || nsh <= 0 || !dkernel || !qkernel || !gamma3) {
+        M.pot_error = "periodic device potential: invalid arguments";
+        return false;
+    }
+    if (!M.pbc.gamma_pbc_resident || nsh != M.bnsh || !M.dgamma || !M.pbc.mp_pbc_resident || M.pbc.mp_pbc_nat != nat
+        || M.mp_nat != nat || !M.dMpAmat || !M.pbc.d4_pbc_ready || M.d4_nat != nat || !M.dD4C6) {
+        M.pot_error = "periodic device potential: gamma, multipole matrices or D4 images not resident";
+        return false;
+    }
+    // the matrices are resident: potBeginCommon keeps dMpAmat (nat == mp_nat) and only checks the device state; no
+    // byte limit there (the 2 GB limit of the 18 blocks applied when they were kept)
+    if (!M.potBeginCommon(nat, nsh, dkernel, qkernel, gamma3, 1.0e300)) return false;
+    M.mp_ver = M.pot_ver_next++;
+    M.pot_nsh = nsh;
+    M.pot_pbc = true;
+    return true;
+}
+
+// Claude Generated (Nov 24, 2026, R25; CUDA XtbGpuContext::residentLoopDims, R4): the GFN2 resident loop was set up for
+// nsh shells and nat atoms.
+bool XtbHipContext::residentLoopDims(int nsh, int nat) const
+{
+    return m_impl && m_impl->loop_ready && !m_impl->loop_gfn1 && m_impl->loop_nsh == nsh && m_impl->loop_nat == nat
+        && m_impl->loop_nao > 0;
+}
+
+// Claude Generated (Nov 24, 2026, R25; CUDA XtbGpuContext::downloadConvergedPotentials, R4): convergedPotentials(true)
+// (Impl::convPotentials: the potentials at the converged output charges/moments, periodic D4 gather with a cell) and
+// the download of v_sh (dVsh), v_at (dMpOut: multipole shift + D4 dE/dq), v_dp (dVdp), v_qp (dVqp).
+bool XtbHipContext::downloadConvergedPotentials(double* v_sh, double* v_at, double* v_dp, double* v_qp)
+{
+    if (!m_impl || !m_impl->ok || !v_sh || !v_at || !v_dp || !v_qp) return false;
+    Impl& M = *m_impl;
+    if (!M.convPotentials(true)) {
+        M.pot_error = "converged periodic potentials: " + M.grad_error;
+        return false;
+    }
+    const size_t un = static_cast<size_t>(M.loop_nat);
+    return hipMemcpy(v_sh, M.dVsh, static_cast<size_t>(M.loop_nsh) * sizeof(double), hipMemcpyDeviceToHost) == hipSuccess
+        && hipMemcpy(v_at, M.dMpOut, un * sizeof(double), hipMemcpyDeviceToHost) == hipSuccess
+        && hipMemcpy(v_dp, M.dVdp, 3 * un * sizeof(double), hipMemcpyDeviceToHost) == hipSuccess
+        && hipMemcpy(v_qp, M.dVqp, 6 * un * sizeof(double), hipMemcpyDeviceToHost) == hipSuccess;
+}
+
+#endif // HAVE_ROCSOLVER

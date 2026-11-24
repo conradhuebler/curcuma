@@ -560,9 +560,9 @@ public:
 
     // ---- periodic cell (WP-PERIODIC-XTB on ROCm, Claude Generated Nov 24, 2026, ROCm parity A3) ----------------
     // Self-contained periodic device stages, ports of the CUDA XtbGpuContext methods of the same name (contracts:
-    // GpuScfBackend in xtb_native.h; code: rocm/xtb_hip_periodic_host.hiph). Not ported: the device-built periodic
-    // integrals (computeIntegralsPeriodic), the resident periodic potential and loop
-    // (beginPotentialPeriodic, R2-R5); periodicGammaResident() is therefore always false.
+    // GpuScfBackend in xtb_native.h; code: rocm/xtb_hip_periodic_host.hiph). The device-built periodic integrals
+    // (computeIntegralsPeriodic, G1b) and the resident periodic potential and loop (beginPotentialPeriodic, R2-R5,
+    // rocm/xtb_hip_periodic_resident.hiph) are ported.
     /// Claude Generated (Nov 2026, WP-PERIODIC-XTB G4b): see GpuScfBackend::beginDispersionImages / dispersionDedqPeriodic.
     bool beginDispersionImages(int nat, const double* cell_L, int ntrans, const double* trans, double cut2);
     bool dispersionDedqPeriodic(int nat, const double* W, const double* dWq, double* dEdq_out);
@@ -642,14 +642,29 @@ public:
                                   const double* trans, double cut2, bool multipole);
     /// Why the last computeIntegralsPeriodic failed (empty if none).
     std::string periodicIntegralError() const;
-    bool periodicGammaResident(int nsh) const { (void)nsh; return false; }
+    /// Claude Generated (Nov 24, 2026, R25; CUDA WP-PERIODIC-XTB R5): the periodic gamma of this geometry sits in the
+    /// resident gamma (nsh x nsh) of the basis (ewaldGammaPeriodic kept it). Code: rocm/xtb_hip_periodic_resident.hiph.
+    bool periodicGammaResident(int nsh) const;
     /// Claude Generated (Nov 24, 2026, ROCm A3): host-built GFN2 AO multipole integrals (dp 3 nao^2, qp 6 nao^2,
     /// column-major blocks, the layout of downloadMultipoleInts) into the resident buffers; needs beginBasis (GFN2).
     bool uploadMultipoleInts(const double* dp_int3, const double* qp_int6, int nao);
     /// Claude Generated (Nov 24, 2026, ROCm A3): see GpuScfBackend::energyWeightedDensity (CUDA G5b).
     bool residentEnergyWeightedDensity(const double* w, int ncol, int n, double* W_colmajor);
 
+    // ---- resident periodic potential and SCF loop (Claude Generated, Nov 24, 2026, ROCm parity R25) -------------
+    // Ports of the CUDA WP-PERIODIC-XTB R2-R4 entry points (contracts: GpuScfBackend in xtb_native.h; code:
+    // rocm/xtb_hip_periodic_resident.hiph).
+    /// see GpuScfBackend::beginPotentialPeriodic (CUDA R2)
+    bool beginPotentialPeriodic(int nat, int nsh, const double* dkernel, const double* qkernel, const double* gamma3);
+    /// see GpuScfBackend::downloadConvergedPotentials (CUDA R4)
+    bool downloadConvergedPotentials(double* v_sh, double* v_at, double* v_dp, double* v_qp);
+    /// true when the GFN2 resident loop was set up for nsh shells and nat atoms (CUDA R4 size check)
+    bool residentLoopDims(int nsh, int nat) const;
+
 private:
+    // R25: resident copies made inside ewaldGammaPeriodic / multipoleMatricesPeriodic (enqueue only; the caller syncs)
+    bool pbcKeepGammaResident(int nsh);
+    bool pbcKeepMultipoleResident(int nat, double alpha);
     struct Impl;
     std::unique_ptr<Impl> m_impl;
 };

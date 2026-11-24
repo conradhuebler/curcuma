@@ -2315,8 +2315,8 @@ struct PbcBuf {
 
 struct PbcState {
     bool d4_pbc_ready = false;        ///< beginDispersionImages built D(i, j) for the current begDispersion geometry
-    bool gamma_pbc_resident = false;  ///< always false on ROCm (no resident periodic gamma; CUDA R2/R5 not ported)
-    bool mp_pbc_resident = false;     ///< always false on ROCm (no resident periodic multipole matrices; CUDA R2/R4)
+    bool gamma_pbc_resident = false;  ///< R25: ewaldGammaPeriodic left the periodic gamma in Impl::dgamma (CUDA R2/R5)
+    bool mp_pbc_resident = false;     ///< R25: multipoleMatricesPeriodic left the periodic blocks in Impl::dMpAmat (R2/R4)
     int mp_pbc_nat = 0;
     PbcBuf<double> dD4AtmC6, dD4AtmDc6, dD4Rad, dD4En, dD4CnXyz, dD4CnOut;
     PbcBuf<int> dD4CnZ, dD3Z, dD3Type, dD3Nref;

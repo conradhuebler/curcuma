@@ -14,8 +14,8 @@
  * SKIP and exits 77 (ctest SKIP_RETURN_CODE; until Nov 23, 2026 it exited 0 and counted as passed). A counted fallback
  * of a periodic device stage ("xTB periodic device stage ...") is a failure, not a SKIP. Exit 0 when every check passes.
  * Argument: the backend, "cuda" (default, ctest pbc_xtb_gpu_parity) or "rocm" (ctest pbc_xtb_gpu_parity_rocm, ROCm parity
- * A3, Nov 24, 2026: same cells and limits; devpot has no HIP port and runs on the host without a fallback count; the
- * device periodic integrals (ints, G1b) run on ROCm since ROCm parity G1B, Nov 24, 2026).
+ * A3, Nov 24, 2026: same cells and limits; the device periodic integrals (ints, G1b) run on ROCm since G1B, devpot
+ * and the GFN2 resident loop since R25, Nov 24, 2026).
  */
 #include "src/core/energycalculator.h"
 #include "src/core/molecule.h"
