@@ -94,6 +94,13 @@
     {
       "structure": "ammonia.ideal-c3v",
       "method": "gfnff",
+      "test": "translate",
+      "limit": 0.0003,
+      "why": "since Nov 24, 2026 the inversion neighbours are sorted as in xtb (inversion_sort_xtb true); at the exact N-H distance tie of this C3v geometry the last bit of the translated distances picks the roles, so the energy is identical (0 Eh) but the gradient belongs to another role set: 1.9e-4 Eh/A (the #42 kink; with the pprcht sort the input order decided and the test gave 5.6e-16 Eh/A; the FD residual rises from 5.9e-5 to 9.6e-5 Eh/A, still inside the 2e-4 fd limit)"
+    },
+    {
+      "structure": "ammonia.ideal-c3v",
+      "method": "gfnff",
       "test": "fd",
       "limit": 0.0002,
       "why": "the GFN-FF inversion energy has a kink at exactly this C3v geometry (N shifted in x: slope 9e-5 -> 2e-6 Eh/A at 0, 2nd-difference ratio 74 against 1-2 for every other term, Oct 25 2026); analytic and finite-difference gradient differ by 6e-5 Eh/A there, whether the reference code has the same kink is not checked (no xtb/pprcht on this machine)"

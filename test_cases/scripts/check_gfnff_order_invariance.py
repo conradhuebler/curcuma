@@ -3,11 +3,13 @@
 
 Claude Generated (Nov 2026), docs/GFNFF_ORDER_DEPENDENCE.md.
 For three small structures and 8 seeded permutations each (plus the identity), one -sp per order:
-  1. default: every term except inversion and Coulomb must agree over all orders to TOL;
-     the inversion (C6H5COOH, acetic acid dimer) and Coulomb (caffeine) spreads are the
-     reference behaviour (pprcht ssort and dgam piadr index cutoff). They are printed and
-     checked to be PRESENT, so a silent change of the default shows up here.
-  2. -gfnff.inversion_sort_xtb true -gfnff.dgam_pi_membership true: every term must agree to TOL.
+  1. default (inversion_sort_xtb true since Nov 24, 2026, dgam_pi_membership false): every term,
+     inversion included, must agree over all orders to TOL, except the Coulomb spread of caffeine
+     (dgam piadr index cutoff, pprcht and xtb). It is printed and checked to be PRESENT, so a silent
+     change of the default shows up here.
+  2. -gfnff.inversion_sort_xtb false (pprcht ssort, the default before Nov 24, 2026): the inversion
+     spread of C6H5COOH and the acetic acid dimer must still be PRESENT (regression of the old variant).
+  3. -gfnff.inversion_sort_xtb true -gfnff.dgam_pi_membership true: every term must agree to TOL.
 Usage: check_gfnff_order_invariance.py <curcuma> <source dir>
 """
 import os
@@ -23,9 +25,14 @@ EXPECT_MIN = 1e-7   # Eh; the reference-caused spreads are 1e-6 .. 1e-3 on these
 NPERM = 8
 TERMS = ("bond", "angle", "dihedral", "inversion", "stors", "batm", "disp", "brep", "nbrep",
          "coulomb", "hbond", "xbond")
-# structure -> terms whose default spread is the expected reference behaviour
-CASES = {"C6H5COOH": ("inversion",), "acetic_acid_dimer": ("inversion",), "caffeine": ("coulomb",)}
-SWITCHES = ["-gfnff.inversion_sort_xtb", "true", "-gfnff.dgam_pi_membership", "true"]
+# variant -> (extra flags, {structure: terms whose spread is expected})
+VARIANTS = {
+    "default": ([], {"caffeine": ("coulomb",)}),
+    "pprcht": (["-gfnff.inversion_sort_xtb", "false"],
+               {"C6H5COOH": ("inversion",), "acetic_acid_dimer": ("inversion",), "caffeine": ("coulomb",)}),
+    "switches": (["-gfnff.inversion_sort_xtb", "true", "-gfnff.dgam_pi_membership", "true"], {}),
+}
+CASES = ("C6H5COOH", "acetic_acid_dimer", "caffeine")
 
 
 def run(curcuma, rows, comment, wdir, extra):
@@ -49,19 +56,20 @@ def main():
     curcuma, src = sys.argv[1], sys.argv[2]
     failures = []
     with tempfile.TemporaryDirectory() as tmp:
-        for name, expected in CASES.items():
+        for name in CASES:
             lines = open(os.path.join(src, "test_cases/molecules/larger", name + ".xyz")).read().splitlines()
             nat = int(lines[0].split()[0])
             rows = lines[2:2 + nat]
             rng = np.random.default_rng(12345 + nat)
             perms = [list(range(nat))] + [list(rng.permutation(nat)) for _ in range(NPERM)]
-            for label, extra in (("default", []), ("switches", SWITCHES)):
+            for label, (extra, expect_map) in VARIANTS.items():
+                expected = expect_map.get(name, ())
                 res = [run(curcuma, [rows[i] for i in p], lines[1], os.path.join(tmp, f"{name}_{label}_{o}"), extra)
                        for o, p in enumerate(perms)]
                 for k in TERMS:
                     v = np.array([r[k] for r in res])
                     spread = v.max() - v.min()
-                    if label == "default" and k in expected:
+                    if k in expected:
                         ok = spread > EXPECT_MIN
                         print(f"{name:18s} {label:8s} {k:10s} spread {spread:.3e} Eh  "
                               f"(reference behaviour, expected > {EXPECT_MIN:.0e}) {'ok' if ok else 'FAIL'}")

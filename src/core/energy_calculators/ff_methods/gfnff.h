@@ -421,8 +421,9 @@ PARAM(cn_zero_guard, Bool, false, "Gradient-only correction of the Coulomb chain
 PARAM(hh_repulsion_bpair, Bool, true, "Classify H...H 1,3/1,4 repulsion from the bond-pair table, as the reference. false uses a BFS bond count, which can depend on the atom order.", "Reference", {})
 PARAM(amideh_acidity_order_bug, Bool, false, "Reproduce the reference atom-order bug in the amide-H donor acidity, which makes the H-bond depend on whether N precedes its H. true only to match reference totals.", "Reference", {})
 PARAM(dispersion_atm, Bool, false, "Add a D4 three-body (ATM) term over bonded triples. The reference dispersion is pairwise, so it is off.", "Reference", {})
-// Claude Generated (Nov 2026): atom-order switches, docs/GFNFF_ORDER_DEPENDENCE.md. Default = pprcht.
-PARAM(inversion_sort_xtb, Bool, false, "Sort the three neighbours of an inversion centre by distance with the selection sort of xtb. Default false keeps the ssort of pprcht, which stops early and leaves some input orders unsorted, so the inversion energy depends on the atom numbering.", "Reference", {})
+// Claude Generated (Nov 2026): atom-order switches, docs/GFNFF_ORDER_DEPENDENCE.md. inversion_sort_xtb defaults to
+// xtb since Nov 24, 2026 (operator decision, pprcht ssort is a translation bug); dgam_pi_membership stays = both references.
+PARAM(inversion_sort_xtb, Bool, true, "Sort the three neighbours of an inversion centre by distance with the selection sort of xtb (gfnff_ini2.F90 ssort). Default true since Nov 24, 2026: xtb is the correct implementation; the ssort of the pprcht port stops early (exit instead of go to), leaves some input orders unsorted and makes the inversion energy depend on the atom numbering and jump at distance ties (docs/GFNFF_ORDER_DEPENDENCE.md). false restores the pprcht behaviour, bit-compatible with the pprcht port before Nov 2026; use it for comparisons against pprcht.", "Reference", {})
 PARAM(dgam_pi_membership, Bool, false, "EEQ hardness correction of nitrogen (dgam, -0.14 pi / -0.16 amide): test true pi membership. Default false keeps pprcht and xtb, which test the compact pi list by atom index, so the Coulomb energy depends on the atom numbering.", "Reference", {})
 // ---- GPU ----
 PARAM(gpu_block_size, Int, 0, "GPU kernel block size: 0 adaptive, else 32, 64, 128, 256 or 512.", "GPU", {})

@@ -34,9 +34,12 @@ PERFORMANCE_TIMEOUT=120      # 2 minutes maximum
 run_test() {
     cd "$TEST_DIR"
 
-    # Execute: curcuma -sp complex.xyz -method gfnff -verbosity 2
-    echo "Executing: $CURCUMA -sp complex.xyz -method gfnff -verbosity 2"
-    timeout $PERFORMANCE_TIMEOUT $CURCUMA -sp complex.xyz -method gfnff -verbosity 2 > stdout.log 2> stderr.log
+    # Execute: curcuma -sp complex.xyz -method gfnff -verbosity 2 -gfnff.inversion_sort_xtb false
+    # Claude Generated (Nov 24, 2026): the references above come from the pprcht-based analyzer, so the
+    # inversion term uses pprcht's sort here; the default (xtb sort) gives -37.24104719 Eh, xtb 6.7.1
+    # -37.24104704 Eh (docs/GFNFF_ORDER_DEPENDENCE.md).
+    echo "Executing: $CURCUMA -sp complex.xyz -method gfnff -verbosity 2 -gfnff.inversion_sort_xtb false"
+    timeout $PERFORMANCE_TIMEOUT $CURCUMA -sp complex.xyz -method gfnff -verbosity 2 -gfnff.inversion_sort_xtb false > stdout.log 2> stderr.log
     local exit_code=$?
 
     echo "Exit code: $exit_code"

@@ -113,13 +113,16 @@ private:
         m_molecule.setCharge(0); // Default to neutral for now
 
         // Claude Generated (March 2026): Pass solve_method to GFNFF via JSON parameters
+        // Claude Generated (Nov 24, 2026): the *.ref.json term references come from the pprcht-based
+        // analyzer (Fortran port source), so the inversion term is compared with pprcht's ssort
+        // (inversion_sort_xtb false); the curcuma default follows xtb since Nov 24, 2026
+        // (docs/GFNFF_ORDER_DEPENDENCE.md). Measured: only complex differs (inversion -3.98e-4 Eh).
+        json params;
+        params["inversion_sort_xtb"] = false;
         if (!m_solve_method.empty()) {
-            json params;
             params["eeq_solver"]["solve_method"] = m_solve_method;
-            m_gfnff = std::make_unique<GFNFF>(params);
-        } else {
-            m_gfnff = std::make_unique<GFNFF>();
         }
+        m_gfnff = std::make_unique<GFNFF>(params);
         if (m_rep_diag) m_gfnff->setRepDiag(true);
         m_gfnff->InitialiseMolecule(m_molecule.getMolInfo());
     }

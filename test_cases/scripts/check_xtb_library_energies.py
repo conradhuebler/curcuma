@@ -36,18 +36,12 @@ KNOWN_TOL = 1e-5
 
 # Known deviations curcuma - xtb 6.7.1 (Eh), frozen from the measurement of 2026-10-11 (curcuma at
 # 5d34e7ed..573db3ea). They are NOT derived from the reference file, so an edited xtb value cannot
-# turn a regression into a "known deviation". The GFN-FF glycoside systems (173/231 atoms) are not
-# explained (TODO.md); peo201-chain GFN2 is the D4 ATM cutoff split (+2.6e-5 Eh with
-# -xtb.d4_atm_cutoff 40.0). The test guards against a change of the deviation, not against its size.
+# turn a regression into a "known deviation". peo201-chain GFN2 is the D4 ATM cutoff split (+2.6e-5 Eh
+# with -xtb.d4_atm_cutoff 40.0). The test guards against a change of the deviation, not against its size.
+# Claude Generated (Nov 24, 2026): the eight GFN-FF entries (helicene-frames17, jl22-bgal x3,
+# macrocycle-bgal x4; 1.1e-5 .. 1.3e-3 Eh) were the pprcht inversion sort; with the xtb sort as default
+# (inversion_sort_xtb true) they agree with xtb 6.7.1 to <= 3.6e-7 Eh and pass the plain 1e-5 gate.
 KNOWN_DEVIATIONS = {
-    ("helicene-frames17", "gfnff"): +1.0725e-05,
-    ("jl22-bgal.conf6", "gfnff"): +1.281529e-03,
-    ("jl22-bgal.xtb-gfn2-opt", "gfnff"): +1.232441e-03,
-    ("jl22-bgal.xtb-gfnff-opt", "gfnff"): +8.04045e-04,
-    ("macrocycle-bgal", "gfnff"): +3.97418e-04,
-    ("macrocycle-bgal.conf2", "gfnff"): +4.08097e-04,
-    ("macrocycle-bgal.uff-analytic-grad", "gfnff"): +1.205250e-03,
-    ("macrocycle-bgal.uff-numeric-grad", "gfnff"): +5.59316e-04,
     ("peo201-chain", "gfn2"): +1.602879e-03,
 }
 RUN_TIMEOUT_S = 600

@@ -355,7 +355,7 @@ std::vector<Inversion> GFNFF::generateInversionsNative() const
 
     const auto& topo_info = getCachedTopology();
     using namespace GFNFFParameters;
-    const bool inversion_sort_xtb = m_parameters.value("inversion_sort_xtb", false);
+    const bool inversion_sort_xtb = m_parameters.value("inversion_sort_xtb", true);
     const bool inversion_debug = std::getenv("CURCUMA_GFNFF_INVDBG") != nullptr;
 
     for (int i = 0; i < m_atomcount; ++i) {
@@ -390,8 +390,8 @@ std::vector<Inversion> GFNFF::generateInversionsNative() const
         // the first larger distance and the outer loop stops as soon as one position needs
         // no swap. Input (r1,r3,r2) therefore stays unsorted, so which neighbour becomes the
         // apex j and which the out-of-plane atom l depends on the atom numbering. Default
-        // reproduces pprcht; -gfnff.inversion_sort_xtb true uses xtb's selection sort
-        // (continue instead of break), which only depends on the order for exact ties.
+        // (since Nov 24, 2026) is xtb's selection sort (continue instead of break), which only
+        // depends on the order for exact ties; -gfnff.inversion_sort_xtb false reproduces pprcht.
         std::vector<int> nb_list = topo_info.adjacency_list[i];
         {
             const int n = static_cast<int>(nb_list.size());

@@ -3713,8 +3713,10 @@ std::string GFNFF::computeTopologyFingerprint() const
     if (m_cell_bohr_ortho.active)
         data += fmt::format("|cell={:.12e},{:.12e},{:.12e}", m_cell_bohr_ortho.L[0], m_cell_bohr_ortho.L[1], m_cell_bohr_ortho.L[2]);
     // Claude Generated (Nov 2026): the atom-order switches change cached topology content
-    // (inversion neighbour order, EEQ dgam); appended only when on, so default keys stay as they were.
-    if (m_parameters.value("inversion_sort_xtb", false)) data += "|invsort=xtb";
+    // (inversion neighbour order, EEQ dgam); appended only when on. Since Nov 24, 2026 inversion_sort_xtb
+    // defaults to true, so a default-run key now carries "|invsort=xtb" and a .topo.json written under the
+    // old default (pprcht sort, no suffix) is not reused; -gfnff.inversion_sort_xtb false keeps the old key.
+    if (m_parameters.value("inversion_sort_xtb", true)) data += "|invsort=xtb";
     if (m_parameters.value("dgam_pi_membership", false)) data += "|dgampi=1";
     // Use std::hash for a fast, non-cryptographic fingerprint
     size_t hash = std::hash<std::string>{}(data);
