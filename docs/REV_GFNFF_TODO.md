@@ -571,6 +571,12 @@ Detail: `docs/WP-PERIODIC-NONBONDED.md` D1 and the plan of the experiment folder
   `-gfnff.frag_charge_model reference` (reproduces the magnitude of the September WATER27 run); the charged WATER27 rows of `reactions_cur_gfnff.csv` (Sep) are
   reference-model values.
 
+- Term sensitivity of the liquid (Nov 9, 2026; box of 432 H2O, NPT 298 K 1 bar, 2 to 3 runs per setting, `repulsion_scale`, `dispersion_scale`, `coulomb_scale`): density per unit
+  scale factor -0.5 (repulsion), +0.32 (dispersion), +0.19 (Coulomb), +0.09 (H-bond, entry 19). The first g_OO maximum follows the density (2.886 / 2.945 A at repulsion 0.9 / 1.1, density
+  1.087 / 0.983), not the individual term; dispersion and Coulomb leave the position at 2.91 to 2.93 A. The coordination number to the first minimum (6.7 to 8.9) follows the density, the
+  minimum stays at 3.7 to 3.9 A (experiment 3.3 A, memory): the missing gap between first and second shell is not a matter of one energy scale. n is small, the scatter of the baseline
+  (0.012 g/cm^3 between three runs) is large, no orientational order parameter was computed: candidate evidence for missing angular (tetrahedral) coupling, not a result.
+
 ## How to add to this list
 
 An entry belongs here when an **external** reference (r²SCAN-3c, GFN2, DLPNO, experiment)
