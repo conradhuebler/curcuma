@@ -67,6 +67,50 @@ public:
     // keep the base false (d systems route to the CPU path). Claude Generated.
     bool supportsDshell() const override { return true; }
 
+    // ---- BACKEND-SPECIFIC 2b: spin polarisation on the host-driven loop (A4) ----------
+    // Claude Generated (Nov 2026), port of the CUDA overrides (xtb_gpu_method.cpp, XtbGpuScfBackend;
+    // docs/SPIN_POLARISATION.md section GPU). Alpha: Fock with v - u, its eigenvectors are kept apart
+    // (residentSpinKeepAlpha); beta: Fock with v + u. The core (xtb_native.cpp) keeps the device potential
+    // build and both resident loops off with spin polarisation, so only these calls run. Vulkan has no
+    // such kernels, so this is not in the shared template.
+    bool supportsSpinPolarization() const override { return true; }
+    bool solveSpin(const Eigen::VectorXd& v_ao, const Eigen::VectorXd& u_ao,
+                   const Eigen::MatrixXd* v_dp, const Eigen::MatrixXd* v_qp,
+                   Vector& eps_a, Vector& eps_b, bool fp32) override
+    {
+        if (!m_ctx || static_cast<int>(v_ao.size()) != m_n || static_cast<int>(u_ao.size()) != m_n) return false;
+        const bool mp = v_dp && v_qp;
+        auto one = [&](const Eigen::VectorXd& v, Vector& eps) {
+            return mp ? solveMultipole(v, *v_dp, *v_qp, eps, fp32, 0) : solve(v, eps, fp32, 0);
+        };
+        const Eigen::VectorXd va = v_ao - u_ao, vb = v_ao + u_ao;
+        return one(va, eps_a) && m_ctx->residentSpinKeepAlpha() && one(vb, eps_b);
+    }
+    bool densitySpin(const Eigen::VectorXd& occ_a, int ncol_a, const Eigen::VectorXd& occ_b, int ncol_b,
+                     Eigen::VectorXd& pop_ao, Eigen::VectorXd& spop_ao, double& band) override
+    {
+        if (!m_ctx || ncol_a < 0 || ncol_a > m_n || ncol_b < 0 || ncol_b > m_n) return false;
+        pop_ao.resize(m_n);
+        spop_ao.resize(m_n);
+        band = 0.0;
+        return m_ctx->residentDensitySpin(occ_a.data(), ncol_a, occ_b.data(), ncol_b,
+                                          pop_ao.data(), spop_ao.data(), &band);
+    }
+    bool finalizeSpin(Matrix& P, Matrix& Pm, Matrix& Ca, Matrix& Cb) override
+    {
+        if (!m_ctx || m_n <= 0) return false;
+        Eigen::MatrixXd Pcm(m_n, m_n), Pmcm(m_n, m_n), Cacm(m_n, m_n), Cbcm(m_n, m_n);
+        if (!m_ctx->residentFinalizeSpin(Pcm.data(), Pmcm.data(), Cacm.data(), Cbcm.data())) return false;
+        P = Pcm; Pm = Pmcm; Ca = Cacm; Cb = Cbcm;   // column-major -> project Matrix, values preserved
+        return true;
+    }
+    bool spinWeightedDensity(const Vector& we_a, int ncol_a, const Vector& we_b, int ncol_b,
+                             const Vector& u_ao) override
+    {
+        if (!m_ctx || static_cast<int>(u_ao.size()) != m_n) return false;
+        return m_ctx->spinWeightedDensity(we_a.data(), ncol_a, we_b.data(), ncol_b, u_ao.data());
+    }
+
     // ---- BACKEND-SPECIFIC 3: multipole potential of the host-driven loop --------------
     // Claude Generated (Oct 2026), -xtb.rocm_device_multipole (default false). The GFN2
     // multipole potential and energy (XTB::addMultipolePotential / energyMultipole) run on the

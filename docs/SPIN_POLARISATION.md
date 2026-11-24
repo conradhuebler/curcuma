@@ -31,7 +31,7 @@ by shell position (transition metals are ordered d,s,p). 85 of the 86 rows diffe
 
 ## Not supported (hard error, no silent fallback)
 
-`-gpu rocm|vulkan`, `-scf_gpu_partial_diag` with `-gpu cuda`, `-large_system_mode fragments|dc|sparse`, `-scf_mode` other than `broyden`, `-scf_precond frag`
+`-gpu vulkan`, `-scf_gpu_partial_diag` with `-gpu cuda|rocm`, `-large_system_mode fragments|dc|sparse`, `-scf_mode` other than `broyden`, `-scf_precond frag`
 (CPU and GPU), `-eigensolver` other than `mkl`, `-scf_extrapolation_apply xlbomd`. The analytic response (`xtb_response.cpp`) already rejects open shells. `-spin` stays global (no spin per fragment).
 Not implemented: UHF without the spin constants, spin contamination analysis, orbital output for the beta set (`C`/`eps` hold the alpha set).
 
@@ -69,7 +69,7 @@ against 30.1 s without (26 against 33 steps/s, not half), 20.4 against 20.0 SCF 
 - The SCF has several solutions (different magnetisation patterns). The result depends on guess and damping: GFN1 full system uhf 4, 2000 K: `-scf_guess eeq` (default) -42.50317, `-scf_guess h0` -42.51162 (tblite -42.51162).
   Multi-solution cases were not resolved; compare energies only where both programs converge to the same solution. At 300 K the 13-atom system often needs more than 500 Broyden cycles (also in tblite).
 - Not tested: MD beyond 1000 steps, `-opt` of open-shell metal clusters (only a smoke run on O2), solvation, `-hessian`, periodic or charged systems, elements other than H, O, Pt, GFN1 d-shell systems other than Pt.
-- GPU: CUDA only (section below); ROCm and Vulkan are a hard error. Plan (Nov 22, 2026, operator): port the CUDA path to ROCm when a ROCm machine is at hand.
+- GPU: CUDA and ROCm (sections below); Vulkan is a hard error.
 - Solvation (checked Nov 22, 2026 after the merge with the native ddCOSMO/CPCM/CPCM-X work, n = 1, OH radical, GFN2, `-spin 1`, water): ALPB, cosmo and cpcm change the energy with spin polarisation as without it
   (cpcm -5.1e-4 Eh both, cosmo +1.1e-3 against +1.2e-3, alpb -9.9e-3 against -9.8e-3); no external reference exists for the combination (tblite 0.4.0 has no spin polarisation) and no test covers it.
 
@@ -116,3 +116,25 @@ mixed precision; FP64 = `-scf_mixed_precision false`. SCF = the "SCF converged" 
 The GPU is slower than the CPU up to at least 65 atoms (per-iteration launch and transfer cost of the host-driven loop) and 1.8x (SCF) / 2.2x (MD)
 faster than 16 CPU threads at 308 atoms. The same 308-atom radical without spin polarisation (fully resident loop): SCF 665 ms on the GPU against
 1.08 s on 16 CPU threads, i.e. the spin branch costs 1.6x the closed-loop GPU time per SCF (two eigensolves, host potential).
+
+## GPU (ROCm, `-gpu rocm`)
+
+Status: 🤖 AI-implemented, ⚙️ machine-tested on one RX 9060 XT (gfx1200, Nov 24, 2026). Human production testing pending.
+
+- Port of the CUDA path above, same split between host and device: `HipScfBackend::supportsSpinPolarization/solveSpin/densitySpin/finalizeSpin/spinWeightedDensity`
+  (`xtb_hip_method.cpp`), `XtbHipContext::residentSpinKeepAlpha/residentDensitySpin/residentFinalizeSpin/spinWeightedDensity` with the kernels
+  `k_spin_combine`, `k_spin_w_shift` (`rocm/xtb_hip_context.hip`); the device gradient reads W' once (`w_spin_override`), as on CUDA.
+- Not used with spin polarisation (automatically, GPU still used): the device potential build (`-xtb.rocm_device_potential`), the device multipole
+  potential, both fully device-resident loops, the device gradient potentials (`-xtb.rocm_grad_resident`), pseudo-diagonalisation; post-SCF D4 runs on
+  the host (no device D4 reference tables on the host-driven loop). `-xtb.rocm_density_syrk` is not applied to the two spin densities (GEMM).
+- Measured (Nov 24, 2026, GPU against the CPU of the same build, `-scf_threshold 1e-10`, `-threads 1`): O2 (uhf 2, 4; GFN2, GFN1 uhf 2), OH (uhf 1, GFN2
+  and GFN1), H2 (uhf 2), Pt7 (`pt-cluster-7`, uhf 4 and 6, 2000 K, GFN2 and GFN1), 10 cases: FP64 energy <= 2.5e-14 Eh, gradient <= 1.4e-12 Eh/A;
+  mixed precision energy <= 4.7e-14 Eh, gradient <= 7.6e-12 Eh/A. O2 uhf 2 with ALPB water (GFN2, GFN1): energy <= 3.6e-15 Eh, gradient <= 2.9e-15 Eh/A.
+- FD gate (GPU `-dump_gradient` against central differences of GPU energies, FP64, `-scf_threshold 1e-10`): O2 uhf 2 GFN2 5.3e-7 (h = 5e-4) and 1.3e-7 Eh/A
+  (h = 2.5e-4), GFN1 6.1e-7 / 1.5e-7 (h^2 scaling, truncation error); Pt7 uhf 4 2000 K GFN2 3.3e-8, GFN1 6.3e-8 Eh/A (h = 5e-4, 21 components each).
+- Two runs md5-identical (`-dump_gradient`, default mixed precision; O2 GFN2, Pt7 GFN2 and GFN1). Without the option: 10 cases (8 GPU, 2 CPU; caffeine
+  GFN1/GFN2 in mixed precision and FP64, O2 spin 2, OH spin 1, Pt7 spin 8 and 4, option explicitly off) give bit-identical `-dump_gradient` files as the
+  binary without the port.
+- Not tested: systems above 13 atoms, MD, `-opt`, d-shell main-group elements, multi-GPU, gfx other than gfx1200, timing. ctest
+  `cli_sqm_23_spin_polarization_rocm` (also checks that `-scf_gpu_partial_diag`, `-scf_precond frag` and `-large_system_mode fragments` stop with an error).
+

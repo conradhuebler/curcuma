@@ -652,15 +652,16 @@ double XTB::Calculation(bool gradient)
     // Every other SCF path works on one Fock matrix or one density and would silently drop the
     // alpha/beta split, so it is a hard error instead of a fallback.
     // Nov 22, 2026: CUDA runs it on the host-driven device loop (GpuScfBackend::supportsSpinPolarization,
-    // see the spin branch of the SCF loop); ROCm and Vulkan have no such backend and stay a hard error.
+    // see the spin branch of the SCF loop); Nov 24, 2026 (A4): ROCm the same (HipScfBackend). Vulkan has no
+    // such backend and stays a hard error.
     m_gpu_spin_loop = false;
     if (spinPolActive()) {
         std::string why;
         const bool gpu = m_gpu_scf || m_external_eigensolver;
         if (gpu && !(m_gpu_scf && m_gpu_scf->supportsSpinPolarization()))
-            why = "this GPU backend (-gpu rocm|vulkan) has no spin-polarised SCF; -gpu cuda or the CPU support it";
+            why = "this GPU backend (-gpu vulkan) has no spin-polarised SCF; -gpu cuda, -gpu rocm or the CPU support it";
         else if (gpu && m_gpu_partial_diag)
-            why = "-scf_gpu_partial_diag is not supported with -gpu cuda (both spin channels need the full spectrum)";
+            why = "-scf_gpu_partial_diag is not supported on the GPU (both spin channels need the full spectrum)";
         else if (m_scf_mode != ScfMode::Broyden)
             why = fmt::format("-scf_mode {} is not supported (Broyden only)", scfModeName(m_scf_mode));
         else if (m_scf_precond != "none" && !m_scf_precond.empty())
@@ -671,7 +672,7 @@ double XTB::Calculation(bool gradient)
             why = "-scf_extrapolation_apply xlbomd is not supported";
         if (!why.empty()) {
             setHardError("spin_polarization (-xtb.spin_polarization true, -spin " + std::to_string(static_cast<int>(std::lround(nUhf())))
-                         + ") is implemented for the Broyden SCF on the CPU and on -gpu cuda only: " + why);
+                         + ") is implemented for the Broyden SCF on the CPU, -gpu cuda and -gpu rocm only: " + why);
             m_scf_converged = false;
             return m_E_total;
         }
@@ -1470,7 +1471,7 @@ double XTB::Calculation(bool gradient)
     if (spin_pol && m_gpu_scf) {
         if (!use_gpu_resident) {
             m_scf_converged = false; m_scf_iterations = 0;
-            setHardError("spin_polarization with -gpu cuda needs the device-resident SCF (device integrals and "
+            setHardError("spin_polarization with -gpu cuda|rocm needs the device-resident SCF (device integrals and "
                          "Cholesky factor); its setup failed for this geometry");
             return m_E_total;
         }

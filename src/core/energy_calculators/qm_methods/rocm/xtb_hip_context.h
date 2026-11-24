@@ -171,6 +171,27 @@ public:
     /// Download the converged density P and MO coefficients C (n×n column-major).
     bool residentFinalize(double* P_colmajor, double* C_colmajor);
 
+    // ---- Spin polarisation on the host-driven loop (A4, Nov 2026) -------------
+    // Claude Generated, port of the CUDA XtbGpuContext functions of the same names
+    // (cuda/xtb_gpu_context.cu, docs/SPIN_POLARISATION.md section GPU). The host passes
+    // v_ao - u_ao (alpha) and v_ao + u_ao (beta) to the unchanged solve kernels:
+    //   residentSolve(v - u) -> residentSpinKeepAlpha() -> residentSolve(v + u)
+    //   -> residentDensitySpin(f_alpha, f_beta)
+    // so the alpha eigenvectors live in a separate buffer and dF holds the beta set.
+    /// Copy the current eigenvectors (alpha solve) into the alpha buffer.
+    bool residentSpinKeepAlpha();
+    /// Pa, Pb from the two orbital sets; P = Pa + Pb (resident density), Pm = Pa - Pb;
+    /// pop_ao / band from P, spop_ao(mu) = sum_nu Pm_mu,nu S_nu,mu.
+    bool residentDensitySpin(const double* occ_a, int ncol_a, const double* occ_b, int ncol_b,
+                             double* pop_ao_out, double* spop_ao_out, double* band_out);
+    /// Download P, Pm and both orbital sets (n x n column-major each).
+    bool residentFinalizeSpin(double* P_colmajor, double* Pm_colmajor, double* Ca_colmajor,
+                              double* Cb_colmajor);
+    /// W' = Ca diag(we_a) Ca^T + Cb diag(we_b) Cb^T - 1/2 Pm o (u_mu + u_nu) into the gradient W
+    /// buffer; the next gradient() uses it once instead of building W from C.
+    bool spinWeightedDensity(const double* we_a, int ncol_a, const double* we_b, int ncol_b,
+                             const double* u_ao);
+
     // ---- Device-side integral build (Stage 3) -------------------------------
     // Instead of begin()/residentBegin uploading the host-built H0/S, the device builds
     // them from the geometry: beginBasis uploads the molecule-constant flattened basis +

@@ -2529,6 +2529,31 @@ __global__ void k_grad_tail_cn(int nat, int is_gfn1, const double* __restrict__ 
     }
     grad[3*a] += gx; grad[3*a+1] += gy; grad[3*a+2] += gz;
 }
+
+// ---- Spin polarisation (A4, Claude Generated, Nov 2026): verbatim ports of the CUDA kernels of the same
+// names (cuda/xtb_gpu_context.cu, docs/SPIN_POLARISATION.md section GPU).
+// P (in: Pb, out: Pa + Pb) and Pm (in: Pa, out: Pa - Pb), element-wise over n*n entries.
+__global__ void k_spin_combine(double* __restrict__ P, double* __restrict__ Pm, size_t nn)
+{
+    const size_t i = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < nn) {
+        const double pb = P[i], pa = Pm[i];
+        P[i]  = pa + pb;
+        Pm[i] = pa - pb;
+    }
+}
+// W(i,j) -= 1/2 Pm(i,j) (u_i + u_j), column-major n x n: folds the spin term + Pm (u_a + u_b) of the
+// overlap-gradient coefficient (sval = ... - 2 W ...) into W.
+__global__ void k_spin_w_shift(double* __restrict__ W, const double* __restrict__ Pm,
+                               const double* __restrict__ u, int n)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int j = blockIdx.y * blockDim.y + threadIdx.y;
+    if (i < n && j < n) {
+        const size_t idx = static_cast<size_t>(i) + static_cast<size_t>(j) * n;
+        W[idx] -= 0.5 * Pm[idx] * (u[i] + u[j]);
+    }
+}
 } // namespace
 #endif // HAVE_ROCSOLVER
 
@@ -2981,6 +3006,7 @@ struct XtbHipContext::Impl {
         for (void* p : { (void*)dH0, (void*)dS0, (void*)dvao, (void*)dP, (void*)dCw, (void*)dOcc, (void*)dPB })
             if (p) hipFree(p);
         dH0 = dS0 = dvao = dP = dCw = dOcc = dPB = nullptr; res_n = 0;
+        freeSpin();        // A4: the spin buffers have the size of the resident matrices
         freeCholCache();   // the factor belongs to dS0 (Claude Generated, Oct 2026)
         ++s_version;
     }
@@ -3049,6 +3075,117 @@ struct XtbHipContext::Impl {
         const size_t nn = static_cast<size_t>(n) * n;
         if (hipMemcpy(P, dP, nn * sizeof(double), hipMemcpyDeviceToHost) != hipSuccess) return false;
         if (hipMemcpy(C, dF, nn * sizeof(double), hipMemcpyDeviceToHost) != hipSuccess) return false;
+        return true;
+    }
+
+    // ----- Spin polarisation on the host-driven loop (A4, Claude Generated, Nov 2026) -----
+    // Port of XtbGpuContext::residentSpinKeepAlpha / residentDensitySpin / residentFinalizeSpin /
+    // spinWeightedDensity (cuda/xtb_gpu_context.cu; docs/SPIN_POLARISATION.md, section GPU). The host
+    // passes v - u and v + u to resSolve / resSolveMP, which equals F -/+ 1/2 S (u_mu + u_nu) (tblite
+    // spin-polarization container). After the alpha solve dF is copied to spCa; dF then holds the beta set.
+    // dP = Pa + Pb is the resident density every later consumer reads (moments, gradient), spPm = Pa - Pb.
+    int     sp_n = 0;
+    double* spCa = nullptr;    // alpha eigenvectors (n x n)
+    double* spPm = nullptr;    // Pm = Pa - Pb (n x n)
+    double* spPB = nullptr;    // 2n scratch: Pm populations + band part / u_ao for the W shift
+    bool    w_spin_override = false;   // next gradient() uses dW as built by spinW (once)
+
+    bool ensureSpin(int n) {
+        if (n == sp_n && spCa && spPm && spPB) return true;
+        freeSpin();
+        const size_t nn = static_cast<size_t>(n) * n;
+        if (hipMalloc(&spCa, nn * sizeof(double)) != hipSuccess
+            || hipMalloc(&spPm, nn * sizeof(double)) != hipSuccess
+            || hipMalloc(&spPB, 2 * static_cast<size_t>(n) * sizeof(double)) != hipSuccess) {
+            (void)hipGetLastError(); freeSpin(); return false;
+        }
+        sp_n = n;
+        return true;
+    }
+    void freeSpin() {
+        for (void* p : { (void*)spCa, (void*)spPm, (void*)spPB }) if (p) (void)hipFree(p);
+        spCa = spPm = spPB = nullptr; sp_n = 0; w_spin_override = false;
+    }
+    bool resSpinKeepAlpha() {
+        const int n = res_n; if (n <= 0 || !dF || !ensureSpin(n)) return false;
+        return hipMemcpyAsync(spCa, dF, static_cast<size_t>(n) * n * sizeof(double), hipMemcpyDeviceToDevice,
+                              stream) == hipSuccess
+            && hipStreamSynchronize(stream) == hipSuccess;
+    }
+    /// P_s = C_s diag(f_s) C_s^T over the leading ncol columns (the GEMM of resDensity), into Pout.
+    bool spinChannel(const double* occ, int ncol, const double* C, double* Pout) {
+        const int n = res_n;
+        const size_t nn = static_cast<size_t>(n) * n;
+        if (ncol <= 0) return hipMemsetAsync(Pout, 0, nn * sizeof(double), stream) == hipSuccess;
+        if (hipStreamSynchronize(stream) != hipSuccess) return false;   // dOcc/dCw reused by the second channel
+        std::vector<double> occ_full(n, 0.0);
+        for (int r = 0; r < ncol; ++r) occ_full[r] = occ[r];
+        if (hipMemcpy(dOcc, occ_full.data(), n * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
+        dim3 blk(16, 16), grd((n + 15) / 16, (n + 15) / 16);
+        hipLaunchKernelGGL(k_scale_cols, grd, blk, 0, stream, C, dOcc, dCw, n);
+        const double one = 1.0, zero = 0.0;
+        return rocblas_dgemm(handle, rocblas_operation_none, rocblas_operation_transpose,
+                             n, n, ncol, &one, dCw, n, C, n, &zero, Pout, n) == rocblas_status_success;
+    }
+    bool resDensitySpin(const double* occ_a, int ncol_a, const double* occ_b, int ncol_b,
+                        double* pop_ao, double* spop_ao, double* band) {
+        const int n = res_n;
+        if (n <= 0 || sp_n != n || !spCa || ncol_a < 0 || ncol_a > n || ncol_b < 0 || ncol_b > n) return false;
+        if (!spinChannel(occ_b, ncol_b, dF, dP)) return false;     // dP   <- Pb
+        if (!spinChannel(occ_a, ncol_a, spCa, spPm)) return false; // spPm <- Pa
+        const size_t nn = static_cast<size_t>(n) * n;
+        const int b = 256;
+        hipLaunchKernelGGL(k_spin_combine, dim3(static_cast<unsigned>((nn + b - 1) / b)), dim3(b), 0, stream,
+                           dP, spPm, nn);                           // dP = Pa + Pb, spPm = Pa - Pb
+        dim3 blk1(64), grd1((n + 63) / 64);
+        hipLaunchKernelGGL(k_popband, grd1, blk1, 0, stream, dP, dS0, dH0, dPB, n);
+        hipLaunchKernelGGL(k_popband, grd1, blk1, 0, stream, spPm, dS0, dH0, spPB, n);
+        if (hipGetLastError() != hipSuccess || hipStreamSynchronize(stream) != hipSuccess) return false;
+        std::vector<double> pb(static_cast<size_t>(2) * n), sb(static_cast<size_t>(2) * n);
+        if (hipMemcpy(pb.data(), dPB, 2 * n * sizeof(double), hipMemcpyDeviceToHost) != hipSuccess) return false;
+        if (hipMemcpy(sb.data(), spPB, 2 * n * sizeof(double), hipMemcpyDeviceToHost) != hipSuccess) return false;
+        double bs = 0.0;
+        for (int i = 0; i < n; ++i) { pop_ao[i] = pb[i]; spop_ao[i] = sb[i]; bs += pb[n + i]; }
+        *band = bs;
+        return true;
+    }
+    bool resFinalizeSpin(double* P, double* Pm, double* Ca, double* Cb) {
+        const int n = res_n; if (n <= 0 || sp_n != n || !spCa || !spPm) return false;
+        const size_t nn = static_cast<size_t>(n) * n;
+        return hipMemcpy(P, dP, nn * sizeof(double), hipMemcpyDeviceToHost) == hipSuccess
+            && hipMemcpy(Pm, spPm, nn * sizeof(double), hipMemcpyDeviceToHost) == hipSuccess
+            && hipMemcpy(Ca, spCa, nn * sizeof(double), hipMemcpyDeviceToHost) == hipSuccess
+            && hipMemcpy(Cb, dF, nn * sizeof(double), hipMemcpyDeviceToHost) == hipSuccess;
+    }
+    /// W' = Ca diag(we_a) Ca^T + Cb diag(we_b) Cb^T - 1/2 Pm o (u_mu + u_nu) in dW; the factor convention
+    /// of the closed-shell W (occupation 2 folded into the weights) is the same, so k_grad_h0_pulay's
+    /// sval = ... - 2 W ... gives the CPU term + Pm (u_a + u_b).
+    bool spinW(const double* we_a, int ncol_a, const double* we_b, int ncol_b, const double* u_ao) {
+        w_spin_override = false;
+        const int n = res_n;
+        if (n <= 0 || sp_n != n || !spCa || !spPm || !dW || !basis_ready || bnao != n
+            || ncol_a < 0 || ncol_a > n || ncol_b < 0 || ncol_b > n) return false;
+        const size_t nn = static_cast<size_t>(n) * n;
+        const double one = 1.0;
+        if (hipMemsetAsync(dW, 0, nn * sizeof(double), stream) != hipSuccess) return false;
+        auto channel = [&](const double* we, int ncol, const double* C) -> bool {
+            if (ncol <= 0) return true;
+            if (hipStreamSynchronize(stream) != hipSuccess) return false;   // dOcc reused
+            std::vector<double> w_full(n, 0.0);
+            for (int r = 0; r < ncol; ++r) w_full[r] = we[r];
+            if (hipMemcpy(dOcc, w_full.data(), n * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
+            dim3 blk(16, 16), grd((n + 15) / 16, (n + 15) / 16);
+            hipLaunchKernelGGL(k_scale_cols, grd, blk, 0, stream, C, dOcc, dCw, n);
+            return rocblas_dgemm(handle, rocblas_operation_none, rocblas_operation_transpose,
+                                 n, n, ncol, &one, dCw, n, C, n, &one, dW, n) == rocblas_status_success;
+        };
+        if (!channel(we_a, ncol_a, spCa) || !channel(we_b, ncol_b, dF)) return false;
+        if (hipStreamSynchronize(stream) != hipSuccess) return false;
+        if (hipMemcpy(spPB, u_ao, n * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
+        dim3 blk(16, 16), grd((n + 15) / 16, (n + 15) / 16);
+        hipLaunchKernelGGL(k_spin_w_shift, grd, blk, 0, stream, dW, spPm, spPB, n);
+        if (hipGetLastError() != hipSuccess || hipStreamSynchronize(stream) != hipSuccess) return false;
+        w_spin_override = true;
         return true;
     }
 
@@ -3192,6 +3329,9 @@ struct XtbHipContext::Impl {
     bool gradient(const double* eps, int nocc_orbs, const double* v_ao, const double* q_sh,
                   const double* v_dp, const double* v_qp,
                   double* grad_out, double* dEdcn_out, bool resident = false) {
+        // A4 (Claude Generated, Nov 2026): consume the one-shot spin W flag first, so no early return leaves it set.
+        const bool w_spin = w_spin_override && !resident;
+        w_spin_override = false;
         if (!basis_ready || bnao <= 0 || !dP) return false;
         if (resident && !conv_pot_valid) { grad_error = "converged potentials are not on the device"; return false; }
         if (!resident) conv_pot_valid = false;   // dVao/dQsh/dVdp/dVqp are overwritten below
@@ -3210,13 +3350,18 @@ struct XtbHipContext::Impl {
         const double one = 1.0, zero = 0.0;
         // Claude Generated (Oct 2026): inner dimension = number of weighted columns (rest are zero).
         int kocc = std::min(nocc_orbs, nao);
+        // A4 spin polarisation (Claude Generated, Nov 2026; as CUDA w_spin_override): spinW already wrote the W of
+        // both spins with the spin term folded in; it is used as it is, once.
+        if (w_spin) kocc = 0;
         // WP7 (Claude Generated, Oct 2026; port of the CUDA w_from_goo branch): after a pseudo-diagonalisation
         // step (-scf_pseudo_diag_fp64 on the converged step) the columns of C span the occupied space but do
         // not diagonalise the occupied block of F, so C diag(2 eps) C^T misses the off-diagonal G_ij. The
         // basis-invariant W = C_o (2 G_oo) C_o^T with G_oo = C_o^T F C_o is exact for integer occupations (the
         // pseudo step's gap gate); F is rebuilt into dS from the converged potentials uploaded above.
-        const bool w_from_goo = !c_exact && ps_no_last > 0 && ps_no_last <= nao;
-        if (w_from_goo) {
+        const bool w_from_goo = !w_spin && !c_exact && ps_no_last > 0 && ps_no_last <= nao;
+        if (w_spin) {
+            // W is in place (dW)
+        } else if (w_from_goo) {
             const int no = ps_no_last;
             if (!dS || solver_n != nao || res_n != nao || !dH0 || !dS0 || (bis_gfn2 && (!mp_grad || !dDpInt || !dQpInt)))
                 return false;
@@ -3242,7 +3387,9 @@ struct XtbHipContext::Impl {
         { dim3 b(16, 16), gr((nao + 15) / 16, (nao + 15) / 16);
           hipLaunchKernelGGL(k_scale_cols, gr, b, 0, stream, dF, dOcc, dCw, nao); }
         }
-        if (kocc > 0) {
+        if (w_spin) {
+            // W is in place (dW)
+        } else if (kocc > 0) {
             if (rocblas_dgemm(handle, rocblas_operation_none, rocblas_operation_transpose,
                               nao, nao, kocc, &one, dCw, nao, dF, nao, &zero, dW, nao) != rocblas_status_success) return false;
         } else if (hipMemsetAsync(dW, 0, static_cast<size_t>(nao) * nao * sizeof(double), stream) != hipSuccess) return false;
@@ -5466,6 +5613,51 @@ bool XtbHipContext::residentFinalize(double* P_colmajor, double* C_colmajor)
     (void)P_colmajor; (void)C_colmajor; return false;
 #else
     return m_impl && m_impl->ok && P_colmajor && C_colmajor && m_impl->resFinalize(P_colmajor, C_colmajor);
+#endif
+}
+
+// Spin polarisation on the host-driven loop (A4, Claude Generated, Nov 2026; CUDA reference:
+// XtbGpuContext functions of the same names in cuda/xtb_gpu_context.cu).
+bool XtbHipContext::residentSpinKeepAlpha()
+{
+#ifndef HAVE_ROCSOLVER
+    return false;
+#else
+    return m_impl && m_impl->ok && m_impl->resSpinKeepAlpha();
+#endif
+}
+bool XtbHipContext::residentDensitySpin(const double* occ_a, int ncol_a, const double* occ_b, int ncol_b,
+                                        double* pop_ao_out, double* spop_ao_out, double* band_out)
+{
+#ifndef HAVE_ROCSOLVER
+    (void)occ_a; (void)ncol_a; (void)occ_b; (void)ncol_b; (void)pop_ao_out; (void)spop_ao_out; (void)band_out;
+    return false;
+#else
+    return m_impl && m_impl->ok && occ_a && occ_b && pop_ao_out && spop_ao_out && band_out
+        && m_impl->resDensitySpin(occ_a, ncol_a, occ_b, ncol_b, pop_ao_out, spop_ao_out, band_out);
+#endif
+}
+bool XtbHipContext::residentFinalizeSpin(double* P_colmajor, double* Pm_colmajor, double* Ca_colmajor,
+                                         double* Cb_colmajor)
+{
+#ifndef HAVE_ROCSOLVER
+    (void)P_colmajor; (void)Pm_colmajor; (void)Ca_colmajor; (void)Cb_colmajor; return false;
+#else
+    return m_impl && m_impl->ok && P_colmajor && Pm_colmajor && Ca_colmajor && Cb_colmajor
+        && m_impl->resFinalizeSpin(P_colmajor, Pm_colmajor, Ca_colmajor, Cb_colmajor);
+#endif
+}
+bool XtbHipContext::spinWeightedDensity(const double* we_a, int ncol_a, const double* we_b, int ncol_b,
+                                        const double* u_ao)
+{
+#ifndef HAVE_ROCSOLVER
+    (void)we_a; (void)ncol_a; (void)we_b; (void)ncol_b; (void)u_ao; return false;
+#else
+    if (!m_impl || !m_impl->ok || !u_ao || (ncol_a > 0 && !we_a) || (ncol_b > 0 && !we_b)) {
+        if (m_impl) m_impl->w_spin_override = false;
+        return false;
+    }
+    return m_impl->spinW(we_a, ncol_a, we_b, ncol_b, u_ao);
 #endif
 }
 

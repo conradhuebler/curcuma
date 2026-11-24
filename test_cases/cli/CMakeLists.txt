@@ -392,6 +392,12 @@ if(USE_CUDA)
     set_tests_properties(cli_sqm_22_spin_polarization_cuda
         PROPERTIES TIMEOUT 600 RESOURCE_LOCK "gpu" LABELS "sqm;gpu;cli" SKIP_RETURN_CODE 77)
 endif()
+# Spin polarisation on the ROCm path against the CPU (A4, Nov 2026): twin of cli_sqm_22, plus -large_system_mode refused.
+if(USE_ROCM)
+    add_cli_test(sqm 23_spin_polarization_rocm)
+    set_tests_properties(cli_sqm_23_spin_polarization_rocm
+        PROPERTIES TIMEOUT 600 RESOURCE_LOCK "gpu" LABELS "sqm;gpu;rocm;cli" SKIP_RETURN_CODE 77)
+endif()
 
 # cli_sqm_04..07 are enabled since 2026-10-09: the native gfn1/gfn2 match the TBLite references (4e-9 Eh, OH radical 8e-4 Eh).
 # cli_sqm_10 stays disabled: it expects the log markers 'Geometry Optimisation converged' / 'gfn2 Final Energy', which -opt does not print
