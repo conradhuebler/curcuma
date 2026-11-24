@@ -523,7 +523,7 @@ public:
     void setCNCutoffR2Max(double r2_max) { m_cn_r2_max = r2_max; }
 
     /// L1 (Nov 2026, Claude Generated): periodic list rebuilds by the faster routes with identical lists
-    /// (gfnff list_fast_rebuild; false = the former kernels). CUDA only.
+    /// (gfnff list_fast_rebuild; false = the former kernels). CUDA and ROCm (ROCm since Nov 24, 2026).
     void setListFastRebuild(bool on) { m_list_fast_rebuild = on; }
     double cnCutoffR2Max() const { return m_cn_r2_max; }
 
