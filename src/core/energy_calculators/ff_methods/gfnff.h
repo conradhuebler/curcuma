@@ -2564,6 +2564,10 @@ public:
     bool wantVirial() const { return m_want_virial; }
     /// Empty when the virial can be computed on this instance, else the reason (for callers that want to report it).
     std::string virialUnavailableReason() const;
+    /// B1 (Nov 24, 2026, Claude Generated, ROCm parity): a GPU wrapper whose backend has no device virial (the ROCm
+    /// periodic hybrid) names the reason here; virialUnavailableReason() then returns it, so setWantVirial(true)
+    /// (compute_pressure, barostat) refuses at set-up. Kept in m_parameters: no new member, the plugin ABI is unchanged.
+    void setBackendVirialUnavailable(const std::string& why) { m_parameters["_backend_virial_unavailable"] = why; }
     /// True when the last Calculation(true) produced the virial on the CPU workspace (false: not requested, no cell,
     /// energy-only call, or the GPU hybrid that evaluates the local terms elsewhere).
     bool virialValid() const;

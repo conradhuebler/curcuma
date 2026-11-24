@@ -19,11 +19,23 @@
  *        <= 1e-12 e, energy <= 1e-11 Eh (supercell: 2 x cell, relative 1e-12), gradient per atom <= 1e-12 Eh/A.
  *  (iv)  two hybrid instances (1 thread, and 4 threads): energy and gradient bit for bit identical.
  * Exit 77 (ctest SKIP_RETURN_CODE) when built without CUDA.
+ *
+ * B1 (Nov 24, 2026, Claude Generated, ROCm parity, docs/ROCM_PARITY_B1.md): the same source builds the ROCm variant
+ * (target test_gfnff_rocm_pbc_hybrid, ctest gfnff_rocm_pbc_hybrid, compiled with GFNFF_PBC_HYBRID_ROCM): the HIP method
+ * class GFNFFHipComputationalMethod, same boxes, checks and thresholds. Exit 77 there when no HIP device answers.
  */
-#ifdef USE_CUDA
+#if defined(GFNFF_PBC_HYBRID_ROCM) || defined(USE_CUDA)
 #include "src/core/curcuma_logger.h"
 #include "src/core/energy_calculators/ff_methods/gfnff.h"
+#ifdef GFNFF_PBC_HYBRID_ROCM
+#include "src/core/energy_calculators/qm_methods/gfnff_hip_method.h"
+using GpuGfnffMethod = GFNFFHipComputationalMethod;
+static const char* kTestName = "gfnff_rocm_pbc_hybrid";
+#else
 #include "src/core/energy_calculators/qm_methods/gfnff_gpu_method.h"
+using GpuGfnffMethod = GFNFFGPUComputationalMethod;
+static const char* kTestName = "gfnff_gpu_pbc_hybrid";
+#endif
 #include "src/core/energy_calculators/qm_methods/gfnff_method.h"
 #include "src/core/molecule.h"
 #include "src/core/units.h"
@@ -33,6 +45,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <random>
@@ -160,6 +173,10 @@ static json config(int threads, const json& extra)
     c["gpu_periodic"] = true;          // the S2 opt-in; coulomb_ewald stays at its default (true)
     c["hb_update_force_every"] = 1;    // HB/XB lists from the geometry of every call
     c["hb_min_pair_energy_eh"] = 0.0;  // no candidate pops in or out by its energy filter (supercell, FD)
+    // B1 (Nov 2026): GPU_HYBRID_EWALD_DEVICE=0 runs every check on the host Ewald of the hybrid (S2 stage,
+    // -gfnff.gpu_ewald_device false); unset = the default of the build (device Ewald since S3)
+    if (const char* e = std::getenv("GPU_HYBRID_EWALD_DEVICE"))
+        c["gpu_ewald_device"] = std::string(e) != "0";
     for (auto it = extra.begin(); it != extra.end(); ++it)
         c[it.key()] = it.value();
     return c;
@@ -175,13 +192,13 @@ struct Result {
 /// One CPU or GPU-hybrid instance through the ComputationalMethod wrappers (same gradient contract Eh/A).
 struct Instance {
     std::unique_ptr<GFNFFComputationalMethod> cpu;
-    std::unique_ptr<GFNFFGPUComputationalMethod> gpu;
+    std::unique_ptr<GpuGfnffMethod> gpu;
     bool ok = false;
     Instance(bool on_gpu, const Mol& mol, const json& c)
     {
         try {
             if (on_gpu) {
-                gpu = std::make_unique<GFNFFGPUComputationalMethod>("gfnff", c);
+                gpu = std::make_unique<GpuGfnffMethod>("gfnff", c);
                 ok = gpu->setMolecule(mol) && !gpu->hasError() && !gpu->requestsCpuFallback() && gpu->periodicHybridActive()
                     && gpu->hasPeriodicEnergy();
                 if (!ok) std::printf("GPU init: %s%s hybrid=%d\n", gpu->getErrorMessage().c_str(),
@@ -446,6 +463,23 @@ static void testBitwise(const char* label, const Mol& mol, const json& extra, in
 int main()
 {
     CurcumaLogger::set_verbosity(0);
+#ifdef GFNFF_PBC_HYBRID_ROCM
+    // B1: no HIP device (or no usable plugin state) -> skipped, as the CUDA build without CUDA; the probe has no cell
+    {
+        Mol probe = registryMol("H2O_dimer");
+        GpuGfnffMethod p("gfnff", config(1, json::object()));
+        bool ok = false;
+        try {
+            ok = p.setMolecule(probe) && !p.hasError();
+        } catch (const std::exception&) {
+            ok = false;
+        }
+        if (!ok) {
+            std::printf("%s: the ROCm device workspace could not be set up (no HIP device?), skipped\n", kTestName);
+            return 77;
+        }
+    }
+#endif
     const Mol w20 = waterBox(20, 44.0, 20261105);
     const Mol w50 = waterBox(50, 44.0, 20261105);
     const Mol q1 = waterBox(18, 44.0, 20261106, { registryMol("hydronium_water2", 1) });
@@ -466,7 +500,10 @@ int main()
 
     std::printf("GPU hybrid vs CPU over every comparison: charges %.2e e, energy (default tol) %.2e Eh, energy (tol 1e-14) %.2e Eh, "
                 "gradient (tol 1e-14) %.2e Eh/A\n", g_worst_q, g_worst_e_def, g_worst_e_tight, g_worst_g_tight);
-    std::printf(g_failures == 0 ? "gfnff_gpu_pbc_hybrid: all checks passed\n" : "gfnff_gpu_pbc_hybrid: %d failure(s)\n", g_failures);
+    if (g_failures == 0)
+        std::printf("%s: all checks passed\n", kTestName);
+    else
+        std::printf("%s: %d failure(s)\n", kTestName, g_failures);
     return g_failures == 0 ? 0 : 1;
 }
 #else

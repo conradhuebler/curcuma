@@ -95,11 +95,18 @@ struct GFNFFRocmBackend {
     /// minimum image, the D4 tail runs as k_d4_tail_W/k_d4_tail_atoms. Released with -gfnff.gpu_periodic true and
     /// coulomb_ewald false (S1 mode: minimum-image Coulomb, non-periodic EEQ).
     static constexpr bool has_periodic_local_terms = true;
-    /// A2 (Nov 2026): the periodic hybrid (S2/S3: host periodic EEQ, Ewald Coulomb, device virial A1-GPU, HB-X crossing)
-    /// is not ported to ROCm (ROCM_PARITY_PLAN B1/B2); with coulomb_ewald true the wrapper refuses the cell.
-    static constexpr bool has_periodic_hybrid = false;
-    /// Nov 2026 (GPU_PERIODIC_GAPS A2/S3): no device Ewald on ROCm (the cell is refused anyway): nullptr.
-    static std::unique_ptr<curcuma::ewald::EwaldDeviceOps> createEwaldDevice() { return nullptr; }
+    /// B1 (Nov 24, 2026, Claude Generated; port of the CUDA S2/S3, docs/ROCM_PARITY_B1.md): the periodic hybrid with
+    /// coulomb_ewald true: local terms on the device, charges from the host periodic EEQ (device CN), the device pair
+    /// Coulomb off (FFWorkspaceHip::setCoulombPairOnDevice(false); self term and TERM 1b stay), the Ewald pair term from
+    /// FFWorkspace::evaluateEwaldCoulomb (device Ewald below, or the host with -gfnff.gpu_ewald_device false).
+    static constexpr bool has_periodic_hybrid = true;
+    /// B1 (Nov 2026): no device virial and no HB/XB crossing kernels on ROCm (ROCM_PARITY_PLAN B2): a virial request
+    /// (compute_pressure, barostat) is refused by the wrapper; virialValid() stays false.
+    static constexpr bool has_periodic_virial = false;
+    /// B1 (Nov 2026): device Ewald sum of the periodic hybrid (GfnffEwaldHip, rocm/ewald_hip.hip; HIP port of
+    /// GfnffEwaldGPU); defined in gfnff_hip_method.cpp. nullptr when no HIP stream could be created (the hybrid then
+    /// keeps the host Ewald, counted fallback).
+    static std::unique_ptr<curcuma::ewald::EwaldDeviceOps> createEwaldDevice();
 
     /// Deliverable 3 (Jun 2026): from 16 fragments on, the dense device Cholesky (O(N^3) plus a
     /// host Schur step over nfrag+1 columns) is not used. Oct 2026: there the device projected PCG

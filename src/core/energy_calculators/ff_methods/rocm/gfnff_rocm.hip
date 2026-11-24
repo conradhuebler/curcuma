@@ -10123,14 +10123,17 @@ double FFWorkspaceHip::launchChargeDependentAndFinish(bool gradient)
     impl.disp_launched_early = false;
 
     // k_coulomb (needs EEQ charges)
-    if (m_coulomb_enabled && impl.coulomb_implicit) {
+    // B1 (Nov 24, 2026, Claude Generated; CUDA S2 in cuda/ff_workspace_gpu.cu): the periodic hybrid skips the device
+    // pair sum (m_coulomb_pair_on_device false): the host adds the Ewald pair energy and gradient at these charges
+    // (FFWorkspace::evaluateEwaldCoulomb); self term and TERM 1b (k_coulomb_postprocess below) stay on the device.
+    if (m_coulomb_enabled && m_coulomb_pair_on_device && impl.coulomb_implicit) {
         launchCoulombTilesHip(m_natoms, impl.d_coul_alp.ptr,
             impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
             impl.d_charges.ptr, impl.coulomb_rcut,
             impl.d_grad.ptr,
             &impl.d_energies.ptr[impl.E_COUL], sP);
         checkCuda(hipGetLastError(), "k_coulomb_tiles_hip (implicit) launch");
-    } else if (m_coulomb_enabled && impl.coulomb.n > 0) {
+    } else if (m_coulomb_enabled && m_coulomb_pair_on_device && impl.coulomb.n > 0) {
         // ROCm: the pair k_coulomb's ~6M FP64 atomicAdd dominated the MD step. Preferred path is
         // the shared-memory tiled all-pairs kernel (k_coulomb_tiles_hip, each pair once) which also fixes
         // the gather's random-memory bottleneck; it needs the per-atom charge-corrected EEQ alpha

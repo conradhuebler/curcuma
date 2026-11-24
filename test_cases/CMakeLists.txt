@@ -581,6 +581,18 @@ if(USE_CUDA)
     add_test(NAME gfnff_gpu_pbc_refuse COMMAND test_gfnff_gpu_pbc_refuse WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
     set_tests_properties(gfnff_gpu_pbc_refuse PROPERTIES TIMEOUT 120 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;pbc")
 endif()
+# Claude Generated (Nov 24, 2026, ROCm parity B1): the same refusal/opt-in checks on the ROCm wrapper (hybrid accepted
+# since B1). Needs a HIP device.
+if(USE_ROCM)
+    add_executable(test_gfnff_rocm_pbc_refuse unit/test_gfnff_gpu_pbc_refuse.cpp)
+    target_link_libraries(test_gfnff_rocm_pbc_refuse curcuma_core curcuma_rocm test_molecule_registry)
+    target_compile_definitions(test_gfnff_rocm_pbc_refuse PRIVATE USE_ROCM GFNFF_PBC_REFUSE_ROCM)
+    if(USE_PCH)
+        target_precompile_headers(test_gfnff_rocm_pbc_refuse REUSE_FROM curcuma_core)
+    endif()
+    add_test(NAME gfnff_rocm_pbc_refuse COMMAND test_gfnff_rocm_pbc_refuse WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    set_tests_properties(gfnff_rocm_pbc_refuse PROPERTIES TIMEOUT 120 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;pbc;rocm")
+endif()
 
 # Claude Generated (Nov 2026, S1): local GFN-FF terms with a cell on the CUDA device against the CPU, term by term
 # (pbc_* structures, invariance, supercell, FD, Verlet wrap, bitwise). Built in every configuration; without CUDA
@@ -623,6 +635,19 @@ if(USE_PCH)
 endif()
 add_test(NAME gfnff_gpu_pbc_hybrid COMMAND test_gfnff_gpu_pbc_hybrid WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 set_tests_properties(gfnff_gpu_pbc_hybrid PROPERTIES TIMEOUT 1800 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;pbc" SKIP_RETURN_CODE 77)
+# Claude Generated (Nov 24, 2026, ROCm parity B1): the same checks on the ROCm hybrid (HIP method class from the plugin,
+# same boxes and thresholds); 77 when no HIP device answers. docs/ROCM_PARITY_B1.md.
+if(USE_ROCM)
+    add_executable(test_gfnff_rocm_pbc_hybrid unit/test_gfnff_gpu_pbc_hybrid.cpp)
+    target_link_libraries(test_gfnff_rocm_pbc_hybrid curcuma_core test_molecule_registry curcuma_rocm)
+    target_compile_definitions(test_gfnff_rocm_pbc_hybrid PRIVATE USE_ROCM GFNFF_PBC_HYBRID_ROCM)
+    if(USE_PCH)
+        target_precompile_headers(test_gfnff_rocm_pbc_hybrid REUSE_FROM curcuma_core)
+    endif()
+    add_test(NAME gfnff_rocm_pbc_hybrid COMMAND test_gfnff_rocm_pbc_hybrid WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    set_tests_properties(gfnff_rocm_pbc_hybrid PROPERTIES TIMEOUT 1800 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;pbc;rocm"
+                         SKIP_RETURN_CODE 77)
+endif()
 
 # Claude Generated (Nov 2026, GPU_PERIODIC_GAPS A1): atomic virial of the CUDA hybrid against the CPU per term, FD gate
 # under cell scaling, bitwise repeat, cell update, NPT smoke test (SimpleMD Berendsen CPU vs GPU). 77 without CUDA.
@@ -651,6 +676,19 @@ if(USE_PCH)
 endif()
 add_test(NAME gfnff_gpu_pbc_ewald COMMAND test_gfnff_gpu_pbc_ewald WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 set_tests_properties(gfnff_gpu_pbc_ewald PROPERTIES TIMEOUT 1800 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;pbc" SKIP_RETURN_CODE 77)
+# Claude Generated (Nov 24, 2026, ROCm parity B1): device Ewald of the ROCm hybrid (GfnffEwaldHip), checks (a)-(d) without
+# the hybrid virial (B2) plus (e) the device Ewald object vs the CPU EwaldSum incl. its pair virial; 77 without a HIP device.
+if(USE_ROCM)
+    add_executable(test_gfnff_rocm_pbc_ewald unit/test_gfnff_gpu_pbc_ewald.cpp)
+    target_link_libraries(test_gfnff_rocm_pbc_ewald curcuma_core test_molecule_registry curcuma_rocm)
+    target_compile_definitions(test_gfnff_rocm_pbc_ewald PRIVATE USE_ROCM GFNFF_PBC_EWALD_ROCM)
+    if(USE_PCH)
+        target_precompile_headers(test_gfnff_rocm_pbc_ewald REUSE_FROM curcuma_core)
+    endif()
+    add_test(NAME gfnff_rocm_pbc_ewald COMMAND test_gfnff_rocm_pbc_ewald WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    set_tests_properties(gfnff_rocm_pbc_ewald PROPERTIES TIMEOUT 1800 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;pbc;rocm"
+                         SKIP_RETURN_CODE 77)
+endif()
 
 if(USE_CUDA)
 

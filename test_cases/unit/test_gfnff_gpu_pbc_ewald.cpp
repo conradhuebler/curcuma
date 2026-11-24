@@ -22,12 +22,31 @@
  * Extra structures: `test_gfnff_gpu_pbc_ewald --xyz FILE [FILE...]` runs (a) on XYZ files with a unitcell comment
  * (production settings, 4 threads) and prints the time of one gradient step on each path.
  * Exit 77 (ctest SKIP_RETURN_CODE) when built without CUDA.
+ *
+ * B1 (Nov 24, 2026, Claude Generated, ROCm parity, docs/ROCM_PARITY_B1.md): the same source builds the ROCm variant
+ * (target test_gfnff_rocm_pbc_ewald, ctest gfnff_rocm_pbc_ewald, GFNFF_PBC_EWALD_ROCM): GFNFFHipComputationalMethod and
+ * GfnffEwaldHip. The ROCm hybrid has no device virial yet (item B2 of ROCM_PARITY_PLAN_2026-11), so there the model
+ * virial checks of (a)-(c) are not made (kHybridVirial false); instead (e) compares the device Ewald object itself
+ * with the CPU EwaldSum range functions: real/reciprocal energy, gradient, potentials and the pair virial
+ * (real + reciprocal) of the device evaluate(), limits 1e-10 Eh, 1e-10 Eh/Bohr, 1e-10 Eh/e, 1e-9 Eh.
+ * Exit 77 there when no HIP device answers.
  */
-#ifdef USE_CUDA
+#if defined(GFNFF_PBC_EWALD_ROCM) || defined(USE_CUDA)
 #include "src/core/curcuma_logger.h"
-#include "src/core/energy_calculators/ff_methods/cuda/ewald_gpu.h"
 #include "src/core/energy_calculators/ff_methods/gfnff.h"
+#ifdef GFNFF_PBC_EWALD_ROCM
+#include "src/core/energy_calculators/ff_methods/rocm/ewald_hip.h"
+#include "src/core/energy_calculators/qm_methods/gfnff_hip_method.h"
+using GpuGfnffMethod = GFNFFHipComputationalMethod;
+using DeviceEwald = GfnffEwaldHip;
+static constexpr bool kHybridVirial = false;   // B2 of the ROCm parity plan
+#else
+#include "src/core/energy_calculators/ff_methods/cuda/ewald_gpu.h"
 #include "src/core/energy_calculators/qm_methods/gfnff_gpu_method.h"
+using GpuGfnffMethod = GFNFFGPUComputationalMethod;
+using DeviceEwald = GfnffEwaldGPU;
+static constexpr bool kHybridVirial = true;
+#endif
 #include "src/core/energy_calculators/qm_methods/gfnff_method.h"
 #include "src/core/fileiterator.h"
 #include "src/core/gpu_fallback.h"
@@ -186,7 +205,7 @@ struct Result {
 /// One instance of a path; evaluate() moves it to a geometry and returns E, gradient (Eh/A), charges, model virial.
 struct Instance {
     std::unique_ptr<ComputationalMethod> meth;
-    GFNFFGPUComputationalMethod* gpu = nullptr;
+    GpuGfnffMethod* gpu = nullptr;
     bool ok = false;
     Instance(Path p, const Mol& m, const json& cfg)
     {
@@ -196,7 +215,7 @@ struct Instance {
                 ok = c->setMolecule(m) && !c->hasError();
                 meth = std::move(c);
             } else {
-                auto g = std::make_unique<GFNFFGPUComputationalMethod>("gfnff", cfg);
+                auto g = std::make_unique<GpuGfnffMethod>("gfnff", cfg);
                 ok = g->setMolecule(m) && !g->hasError() && g->periodicHybridActive();
                 if (ok && (p == Path::GPU_DEVICE_EWALD) != g->deviceEwaldActive()) {
                     std::printf("  device Ewald active = %d, expected %d\n", g->deviceEwaldActive(), p == Path::GPU_DEVICE_EWALD);
@@ -287,7 +306,7 @@ static void testParity(const char* label, const Mol& m, int threads, bool fd)
     const Geometry geo[2] = { m.m_geometry, moved(m, 777, 0.005) };
     const char* gname[2] = { "input geometry", "moved geometry (per-step solve)" };
     for (int s = 0; s < 2; ++s) {
-        const Result d = dev.evaluate(geo[s], true), h = host.evaluate(geo[s], true), c = cpu.evaluate(geo[s], true);
+        const Result d = dev.evaluate(geo[s], kHybridVirial), h = host.evaluate(geo[s], kHybridVirial), c = cpu.evaluate(geo[s], kHybridVirial);
         check(d.ok && h.ok && c.ok, std::string(label) + " " + gname[s] + ": evaluated", 1, 1);
         if (!d.ok || !h.ok || !c.ok)
             continue;
@@ -299,11 +318,13 @@ static void testParity(const char* label, const Mol& m, int threads, bool fd)
             check(maxAbsV(d.q, r.q) <= 1e-9, tag + ": charges (e)", maxAbsV(d.q, r.q), 1e-9);
             check(std::abs(d.e - r.e) <= le, tag + ": energy (Eh)", std::abs(d.e - r.e), le);
             check(maxAbs(d.grad, r.grad) <= lg, tag + ": gradient (Eh/A)", maxAbs(d.grad, r.grad), lg);
-            const double dv = (d.vir - r.vir).cwiseAbs().maxCoeff();
-            check(dv <= lv, tag + ": model virial per component (Eh)", dv, lv);
+            if (kHybridVirial) {
+                const double dv = (d.vir - r.vir).cwiseAbs().maxCoeff();
+                check(dv <= lv, tag + ": model virial per component (Eh)", dv, lv);
+            }
         }
     }
-    const auto* ew = dynamic_cast<const GfnffEwaldGPU*>(dev.gpu->deviceEwald());
+    const auto* ew = dynamic_cast<const DeviceEwald*>(dev.gpu->deviceEwald());
     check(ew != nullptr, std::string(label) + ": device Ewald object present", ew != nullptr, 1);
     if (ew) {
         const auto& st = ew->stats();
@@ -327,7 +348,7 @@ static void testFD(const char* label, const Mol& m, bool force_pcg = false)
     check(g.ok, std::string(label) + ": instance", g.ok, 1);
     if (!g.ok)
         return;
-    const Result an = g.evaluate(m.m_geometry, true);
+    const Result an = g.evaluate(m.m_geometry, kHybridVirial);
     // 6 atoms nearest a face
     std::vector<std::pair<double, int>> face;
     const double L = m.m_unit_cell(0, 0);
@@ -359,10 +380,12 @@ static void testFD(const char* label, const Mol& m, bool force_pcg = false)
     }
     check(worst <= 1e-8, std::string(label) + ": gradient vs Richardson FD, 6 atoms near a face (Eh/A)", worst, 1e-8);
     if (force_pcg) {
-        const auto* ew = dynamic_cast<const GfnffEwaldGPU*>(g.gpu->deviceEwald());
+        const auto* ew = dynamic_cast<const DeviceEwald*>(g.gpu->deviceEwald());
         const long calls = ew ? ew->stats().potentials_calls : 0;
         check(calls > 0, std::string(label) + ": the FD energies used the device pcg operator (calls)", static_cast<double>(calls), 1);
     }
+    if (!kHybridVirial)
+        return;   // ROCm: no device virial of the hybrid (B2)
     // virial under strain (fresh instance per strained cell)
     const double eps[4] = { -2e-5, -1e-5, 1e-5, 2e-5 };
     for (int axis = -1; axis < 3; ++axis) {
@@ -405,7 +428,7 @@ static void testBitwise(const char* label, const Mol& m, int threads)
     bool same = true;
     for (int s = 0; s < 2; ++s) {
         const Geometry x = moved(m, 900 + s, 0.003);
-        const Result ra = a.evaluate(x, true), rb = b.evaluate(x, true);
+        const Result ra = a.evaluate(x, kHybridVirial), rb = b.evaluate(x, kHybridVirial);
         same = same && ra.ok && rb.ok && ra.e == rb.e && ra.grad.size() == rb.grad.size()
             && std::memcmp(ra.grad.data(), rb.grad.data(), ra.grad.size() * sizeof(double)) == 0 && ra.q.size() == rb.q.size()
             && std::memcmp(ra.q.data(), rb.q.data(), ra.q.size() * sizeof(double)) == 0
@@ -421,12 +444,12 @@ static void testFallback(const Mol& m)
     const json cfg_host = config(4, false, 0);
     Instance host(Path::GPU_HOST_EWALD, m, cfg_host);
     const Geometry x = moved(m, 4242, 0.004);
-    const Result rh = host.evaluate(x, true);
+    const Result rh = host.evaluate(x, kHybridVirial);
     for (const char* mode : { "prepare", "potentials", "evaluate" }) {
         setenv("CURCUMA_GFNFF_EWALD_DEVICE_FAIL", mode, 1);
         const int fb0 = fallbackCount();
         Instance dev(Path::GPU_DEVICE_EWALD, m, config(4, false, 1));
-        const Result rd = dev.evaluate(x, true);
+        const Result rd = dev.evaluate(x, kHybridVirial);
         unsetenv("CURCUMA_GFNFF_EWALD_DEVICE_FAIL");
         const int fb = fallbackCount() - fb0;
         check(rd.ok && rh.ok && std::abs(rd.e - rh.e) <= 1e-10, std::string("(d) ") + mode + ": energy equals the host-Ewald hybrid (Eh)",
@@ -435,9 +458,77 @@ static void testFallback(const Mol& m)
     }
 }
 
+// (e) the device Ewald object alone against the CPU EwaldSum range functions (the CPU workspace's sum, widths and
+// positions): real/reciprocal energy, gradient, potentials and the real + reciprocal pair virial. Claude Generated (B1).
+[[maybe_unused]] static void testDeviceOps(const char* label, const Mol& m)
+{
+    std::printf("(e) device Ewald object vs CPU EwaldSum: %s (%d atoms)\n", label, m.m_number_atoms);
+    Instance cpu(Path::CPU, m, config(1, false, 0));
+    FFWorkspace* ws = cpu.ok ? cpu.meth->gfnffInstance()->getWorkspace() : nullptr;
+    check(ws && ws->ewald(), std::string(label) + ": CPU Ewald set-up", ws && ws->ewald(), 1);
+    if (!ws || !ws->ewald())
+        return;
+    const curcuma::ewald::EwaldSum& ew = *ws->ewald();
+    const Eigen::MatrixXd pos = m.m_geometry * A2B;
+    const Eigen::VectorXd alp = ws->coulombAlp();
+    const int N = m.m_number_atoms;
+    std::mt19937 rng(31);
+    std::uniform_real_distribution<double> u(-0.6, 0.6);
+    Eigen::VectorXd q(N);
+    for (int i = 0; i < N; ++i) q(i) = u(rng);
+    q.array() -= q.mean();
+    // CPU reference: stored-kernel cache, then the range functions over everything
+    curcuma::ewald::EwaldGeometryCache cache;
+    ew.buildGeometryCache(pos, &alp, cache, size_t(1) << 32);
+    const curcuma::ewald::EwaldPhaseTable table = ew.phaseTable(pos);
+    curcuma::ewald::EwaldResult acc;
+    acc.gradient = Eigen::MatrixXd::Zero(N, 3);
+    acc.potentials = Eigen::VectorXd::Zero(N);
+    ew.realSpaceRangeCached(cache, q, 0, static_cast<int>(cache.pairs.size()), true, true, acc);
+    ew.reciprocalRange(table, q, 0, ew.numberOfKVectors(), true, true, acc);
+    Eigen::Matrix3d vir = Eigen::Matrix3d::Zero();
+    ew.realSpaceVirialRange(cache, q, 0, static_cast<int>(cache.pairs.size()), vir);
+    ew.reciprocalVirialRange(table, q, 0, ew.numberOfKVectors(), vir);
+    // device
+    DeviceEwald dev;
+    Eigen::VectorXd y;
+    Eigen::MatrixXd g;
+    Eigen::Matrix3d v;
+    curcuma::ewald::EwaldEnergyTerms t;
+    const bool ok = dev.prepare(ew, pos, alp) && dev.potentials(q, y) && dev.evaluate(q, t, &g, &v);
+    check(ok, std::string(label) + ": device prepare/potentials/evaluate (" + dev.lastError() + ")", ok, 1);
+    if (!ok)
+        return;
+    check(std::abs(t.real - acc.terms.real) <= 1e-10, std::string(label) + ": real-space energy (Eh)", std::abs(t.real - acc.terms.real), 1e-10);
+    check(std::abs(t.reciprocal - acc.terms.reciprocal) <= 1e-10, std::string(label) + ": reciprocal energy (Eh)",
+        std::abs(t.reciprocal - acc.terms.reciprocal), 1e-10);
+    check(maxAbs(g, acc.gradient) <= 1e-10, std::string(label) + ": pair gradient (Eh/Bohr)", maxAbs(g, acc.gradient), 1e-10);
+    check(maxAbsV(y, acc.potentials) <= 1e-10, std::string(label) + ": potentials A q (Eh/e)", maxAbsV(y, acc.potentials), 1e-10);
+    const double dv = (v - vir).cwiseAbs().maxCoeff();
+    check(dv <= 1e-9, std::string(label) + ": real + reciprocal pair virial per component (Eh)", dv, 1e-9);
+    // second evaluate on the same key: bit for bit
+    Eigen::MatrixXd g2;
+    Eigen::Matrix3d v2;
+    curcuma::ewald::EwaldEnergyTerms t2;
+    const bool ok2 = dev.prepare(ew, pos, alp) && dev.evaluate(q, t2, &g2, &v2);
+    const bool same = ok2 && t2.real == t.real && t2.reciprocal == t.reciprocal
+        && std::memcmp(g2.data(), g.data(), g.size() * sizeof(double)) == 0 && std::memcmp(v2.data(), v.data(), 9 * sizeof(double)) == 0;
+    check(same, std::string(label) + ": repeated evaluate bit for bit (key hit)", same ? 0 : 1, 0);
+    check(dev.stats().key_hits >= 1, std::string(label) + ": second prepare was a key hit", static_cast<double>(dev.stats().key_hits), 1);
+}
+
 int main(int argc, char** argv)
 {
     CurcumaLogger::set_verbosity(0);
+#ifdef GFNFF_PBC_EWALD_ROCM
+    {   // B1: no HIP device -> skipped (77), as the CUDA build without CUDA
+        DeviceEwald probe;
+        if (!probe.usable()) {
+            std::printf("gfnff_rocm_pbc_ewald: no HIP stream (no HIP device?), skipped\n");
+            return 77;
+        }
+    }
+#endif
     if (argc > 2 && std::strcmp(argv[1], "--xyz") == 0) {
         for (int a = 2; a < argc; ++a) {
             FileIterator it(argv[a], true);
@@ -463,7 +554,7 @@ int main(int argc, char** argv)
         const curcuma::ewald::EwaldSum& ew = *ws->ewald();
         const Eigen::MatrixXd pos = m.m_geometry * A2B;
         const Eigen::VectorXd alp = ws->coulombAlp();
-        GfnffEwaldGPU dev;
+        DeviceEwald dev;
         Eigen::VectorXd x = Eigen::VectorXd::Random(m.m_number_atoms), y;
         Eigen::MatrixXd g;
         Eigen::Matrix3d v;
@@ -497,7 +588,7 @@ int main(int argc, char** argv)
         std::fclose(f);
         return 0;
     }
-    const char* only = std::getenv("GPU_EWALD_ONLY");   // diagnostic: a/b/c/d
+    const char* only = std::getenv("GPU_EWALD_ONLY");   // diagnostic: a/b/c/d/e
     auto run = [&](char c) { return !only || std::strchr(only, c); };
     const Mol box20 = waterBox(20, 44.0, 20261105);
     const Mol box60 = waterBox(60, 44.0, 20261108);
@@ -516,6 +607,11 @@ int main(int argc, char** argv)
         const Mol salt = waterBox(380, 48.0, 20261123, { registryMol("na2cl2_ions") }, 2.4);
         testParity("Na2Cl2 + 380 H2O L 48 (pcg)", salt, 4, false);
     }
+#ifdef GFNFF_PBC_EWALD_ROCM   // (e) is the ROCm stand-in for the hybrid virial checks (not run on CUDA: not verified there)
+    if (run('e')) testDeviceOps("20 H2O", box20);
+    if (run('e')) testDeviceOps("H3O+(H2O)2 + 18 H2O, Q = +1", charged);
+    if (run('e')) testDeviceOps("970 H2O L 58", waterBox(970, 58.0, 20261105));
+#endif
     if (run('b')) testFD("20 H2O", box20);
     if (run('b')) testFD("H3O+(H2O)2 + 18 H2O, Q = +1", charged);
     if (run('b')) testFD("20 H2O", box20, true);

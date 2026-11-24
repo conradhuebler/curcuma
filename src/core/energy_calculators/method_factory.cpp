@@ -791,7 +791,7 @@ bool MethodFactory::periodicCellNeedsCpu(const Mol& mol, const ComputationalMeth
     if (const GFNFF* g = method.gfnffInstance(); g && g->gpuPeriodicRequested())
         return false;
     // Message updated Nov 23, 2026: CUDA has the periodic hybrid (S1-S3, A1) since Nov 2026, but only on request.
-    CurcumaLogger::warn("periodic cell set: the GPU GFN-FF periodic path is opt-in (-gfnff.gpu_periodic true, CUDA only), using CPU");
+    CurcumaLogger::warn("periodic cell set: the GPU GFN-FF periodic path is opt-in (-gfnff.gpu_periodic true, CUDA and ROCm), using CPU");
     curcuma::reportGpuFallback("GFN-FF: periodic cell set without -gfnff.gpu_periodic true, calculation on the CPU",
                                fmt::format("{} atoms", mol.m_number_atoms));
     return true;

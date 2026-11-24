@@ -19,12 +19,23 @@
 // __noinline__ as a macro, which corrupts the [[__gnu__::__noinline__]] attribute in
 // libstdc++'s <format> (pulled in via global.h -> <chrono>).
 #include "gfnff_hip_method.h"
+#include "../ff_methods/rocm/ewald_hip.h"
 
 #include <hip/hip_runtime.h>  // host-side hipMemcpy for the GPU-Schur charge download
 
 // ---------------------------------------------------------------------------
 // ROCm backend traits: the single runtime-API call the wrapper needs
 // ---------------------------------------------------------------------------
+
+// Claude Generated (Nov 24, 2026, ROCm parity B1): device Ewald of the periodic hybrid (HIP port of GfnffEwaldGPU);
+// nullptr without a usable HIP stream, which the wrapper counts as a fallback to the host Ewald.
+std::unique_ptr<curcuma::ewald::EwaldDeviceOps> GFNFFRocmBackend::createEwaldDevice()
+{
+    auto ew = std::make_unique<GfnffEwaldHip>();
+    if (!ew->usable())
+        return nullptr;
+    return ew;
+}
 
 void GFNFFRocmBackend::downloadDoubles(double* host, const double* device, int n)
 {

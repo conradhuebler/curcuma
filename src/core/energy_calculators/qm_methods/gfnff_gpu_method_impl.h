@@ -226,6 +226,7 @@ private:
     // pcg, warm start) through eeqCpuFragmentRoute() and FFWorkspace::evaluateEwaldCoulomb() gives the Ewald pair
     // energy and gradient at those charges (Eh, Eh/Bohr), added to the device result here.
     bool             m_periodic_hybrid = false;
+    bool             m_virial_refusal_reported = false;   ///< B1: the no-virial error is printed once per instance
     double           m_host_ewald_energy = 0.0;
     Matrix           m_host_ewald_grad;      ///< N x 3, Eh/Bohr (the device gradient unit); pre-allocated
     curcuma::ewald::EwaldEnergyTerms m_host_ewald_terms;
@@ -646,20 +647,20 @@ bool GFNFFGpuMethodImpl<Backend>::setMolecule(const Mol& mol)
     if (mol.m_has_pbc) {
         const bool opt_in = m_gfnff->gpuPeriodicRequested();
         const bool ewald = m_gfnff->coulombEwaldRequested();
-        // A2 (Nov 2026): a backend with the local terms but without the hybrid (ROCm) runs only the S1 mode
-        // (coulomb_ewald false); the default coulomb_ewald true is refused there until B1 (ROCM_PARITY_PLAN).
+        // A2 (Nov 2026): a backend with the local terms but without the hybrid runs only the S1 mode (coulomb_ewald
+        // false); the default coulomb_ewald true is refused there. B1 (Nov 24, 2026): ROCm has the hybrid.
         if (!opt_in || !Backend::has_periodic_local_terms || (ewald && !Backend::has_periodic_hybrid)) {
             m_has_error = true;
             if (!opt_in)
                 m_error_message = "GFNFFGPUMethod: periodic cell set, but the GPU GFN-FF path is released only with "
-                                  "-gfnff.gpu_periodic true (CUDA: local terms on the device, periodic EEQ and Ewald Coulomb "
-                                  "on the host); use the CPU method (omit -gpu) for periodic systems";
+                                  "-gfnff.gpu_periodic true (CUDA, ROCm: local terms on the device, periodic EEQ and Ewald "
+                                  "Coulomb on the host); use the CPU method (omit -gpu) for periodic systems";
             else if (!Backend::has_periodic_local_terms)
-                m_error_message = std::string("GFNFFGPUMethod: gpu_periodic is available on CUDA only (S1/S2), not on ")
+                m_error_message = std::string("GFNFFGPUMethod: gpu_periodic is available on CUDA and ROCm only (S1/S2), not on ")
                                   + Backend::name + "; use the CPU method (omit -gpu) for periodic systems";
             else
                 m_error_message = std::string("GFNFFGPUMethod: the periodic hybrid (periodic EEQ, Ewald Coulomb; "
-                                  "coulomb_ewald true) is available on CUDA only, not on ") + Backend::name
+                                  "coulomb_ewald true) is available on CUDA and ROCm only, not on ") + Backend::name
                                   + "; use the CPU method (omit -gpu), or -gfnff.coulomb_ewald false for the local terms "
                                     "with a minimum-image Coulomb and a non-periodic EEQ on the device";
             CurcumaLogger::error(m_error_message);
@@ -754,6 +755,10 @@ bool GFNFFGpuMethodImpl<Backend>::setMolecule(const Mol& mol)
                     curcuma::reportGpuFallback("gfnff_periodic_ewald_device", "device Ewald not available on this backend; host Ewald");
             }
             m_gfnff->setEwaldDeviceOps(m_ewald_device.get());
+            // B1 (Nov 24, 2026): no device virial on this backend (ROCm, item B2): setWantVirial(true) refuses
+            if constexpr (!Backend::has_periodic_virial)
+                m_gfnff->setBackendVirialUnavailable(std::string("the GPU periodic hybrid on ") + Backend::name
+                                                     + " has no device virial (pressure, barostat); use the CPU method or CUDA");
         }
     }
 
@@ -1251,7 +1256,16 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
     uploadCellToDevice();
     if (m_periodic_hybrid) {
         followHostCellChanges();   // A1 (Nov 2026): barostat cell changes and the radius freeze
-        if constexpr (Backend::has_periodic_hybrid) {
+        if constexpr (Backend::has_periodic_hybrid && !Backend::has_periodic_virial) {
+            // B1 (Nov 24, 2026, ROCm parity): the hybrid without a device virial (ROCm, item B2 open). The host would
+            // assemble only its Ewald part; refuse instead, virialValid() stays false (SimpleMD stops with its message).
+            if (m_gfnff->wantVirial() && !m_virial_refusal_reported) {
+                m_virial_refusal_reported = true;
+                CurcumaLogger::error(std::string("GFN-FF GPU periodic hybrid on ") + Backend::name
+                                     + ": no device virial (pressure, barostat) on this backend; use the CPU method or CUDA");
+            }
+        }
+        if constexpr (Backend::has_periodic_virial) {
             m_gpu_workspace->setWantVirial(m_gfnff->wantVirial());
             double thr1 = 0.0, thr2 = 0.0;   // HB-X (Nov 2026): the host's thresholds and PARAMs
             m_gfnff->hbSearchThresholds(thr1, thr2);
@@ -2436,7 +2450,7 @@ double GFNFFGpuMethodImpl<Backend>::calculateEnergy(bool gradient)
     if (m_periodic_hybrid)
         m_last_energy += m_host_ewald_energy;
     if (m_periodic_hybrid && gradient && m_gfnff->wantVirial())
-        assembleHybridVirial();   // A1 (Nov 2026)
+        assembleHybridVirial();   // A1 (Nov 2026); a no-op on a backend without the device virial (B1)
 
     // Claude Generated (Sep 2026): say once which parts of the multi-GPU split ran (or why not).
     if constexpr (Backend::has_multi_gpu_split) {
@@ -3128,7 +3142,7 @@ void GFNFFGpuMethodImpl<Backend>::followHostCellChanges()
 template <class Backend>
 void GFNFFGpuMethodImpl<Backend>::assembleHybridVirial()
 {
-  if constexpr (Backend::has_periodic_hybrid) {   // CUDA only (ROCm refuses the hybrid)
+  if constexpr (Backend::has_periodic_virial) {   // CUDA only (ROCm: hybrid without the device virial, B1/B2)
     FFWorkspace* ws = m_gfnff->getWorkspace();
     std::vector<double> buf;
     if (!ws || !m_gpu_workspace->downloadVirial(buf))

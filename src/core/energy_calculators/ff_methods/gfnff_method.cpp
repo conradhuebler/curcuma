@@ -13290,6 +13290,10 @@ std::string GFNFF::virialUnavailableReason() const
 {
     if (!m_cell_bohr_ortho.active)
         return "no periodic cell";
+    // B1 (Nov 2026): set by a GPU wrapper without a device virial (setBackendVirialUnavailable)
+    if (m_parameters.contains("_backend_virial_unavailable") && m_parameters["_backend_virial_unavailable"].is_string()
+        && !m_parameters["_backend_virial_unavailable"].get<std::string>().empty())
+        return m_parameters["_backend_virial_unavailable"].get<std::string>();
     if (!m_initialized || !m_workspace)
         return "";  // decided when the instance is initialised
     if (!periodicEEQActive())

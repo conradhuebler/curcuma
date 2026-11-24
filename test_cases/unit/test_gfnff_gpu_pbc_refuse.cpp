@@ -11,10 +11,20 @@
  *  (b) setMolecule() with a cell returns false and sets the error flag with a message
  *  (c) the same object type without a cell sets up and returns a finite energy
  * Needs a CUDA device and the plugin (only built with USE_CUDA).
+ * B1 (Nov 24, 2026, Claude Generated, ROCm parity): the same source builds test_gfnff_rocm_pbc_refuse
+ * (GFNFF_PBC_REFUSE_ROCM, HIP method class, same checks).
  */
-#ifdef USE_CUDA
+#if defined(GFNFF_PBC_REFUSE_ROCM) || defined(USE_CUDA)
 #include "src/core/curcuma_logger.h"
+#ifdef GFNFF_PBC_REFUSE_ROCM
+#include "src/core/energy_calculators/qm_methods/gfnff_hip_method.h"
+using GFNFFGpuUnderTest = GFNFFHipComputationalMethod;
+static const char* kTestName = "gfnff_rocm_pbc_refuse";
+#else
 #include "src/core/energy_calculators/qm_methods/gfnff_gpu_method.h"
+using GFNFFGpuUnderTest = GFNFFGPUComputationalMethod;
+static const char* kTestName = "gfnff_gpu_pbc_refuse";
+#endif
 #include "test_molecule_registry.h"
 #include "json.hpp"
 
@@ -39,14 +49,14 @@ int main()
     periodic.m_has_pbc = true;
     periodic.m_unit_cell = Eigen::Matrix3d::Identity() * 200.0;
 
-    GFNFFGPUComputationalMethod refused("gfnff", json::object());
+    GFNFFGpuUnderTest refused("gfnff", json::object());
     check(!refused.hasPeriodicEnergy(), "(a) hasPeriodicEnergy() false before set-up");
     const bool ok = refused.setMolecule(periodic);
     check(!ok, "(b) setMolecule() with a cell returns false");
     check(refused.hasError() && refused.getErrorMessage().find("periodic cell") != std::string::npos,
         "(b) error flag and message: " + refused.getErrorMessage());
 
-    GFNFFGPUComputationalMethod normal("gfnff", json::object());
+    GFNFFGpuUnderTest normal("gfnff", json::object());
     check(normal.setMolecule(plain), "(c) setMolecule() without a cell succeeds");
     const double e = normal.calculateEnergy(false);
     check(std::isfinite(e) && e < 0.0, "(c) finite energy without a cell: " + std::to_string(e));
@@ -57,7 +67,7 @@ int main()
     // false sets up, computes and keeps hasPeriodicEnergy() false.
     json opt = json::object();
     opt["gpu_periodic"] = true;
-    GFNFFGPUComputationalMethod ewald("gfnff", opt);
+    GFNFFGpuUnderTest ewald("gfnff", opt);
     check(ewald.setMolecule(periodic), "(d) gpu_periodic with coulomb_ewald (default): setMolecule() accepted (S2 hybrid)");
     check(!ewald.hasError() && ewald.periodicHybridActive() && ewald.hasPeriodicEnergy(),
         "(d) hybrid active, hasPeriodicEnergy() true: " + ewald.getErrorMessage());
@@ -65,18 +75,21 @@ int main()
     check(std::isfinite(e_hyb) && e_hyb < 0.0 && ewald.hostEwaldEnergy() != 0.0,
         "(d) finite hybrid energy with a host Ewald part: " + std::to_string(e_hyb) + " (Ewald " + std::to_string(ewald.hostEwaldEnergy()) + ")");
     opt["coulomb_ewald"] = false;
-    GFNFFGPUComputationalMethod released("gfnff", opt);
+    GFNFFGpuUnderTest released("gfnff", opt);
     check(released.setMolecule(periodic), "(e) gpu_periodic with coulomb_ewald false: setMolecule() accepted");
     const double e_cell = released.calculateEnergy(true);
     check(std::isfinite(e_cell) && e_cell < 0.0, "(e) finite energy with a cell: " + std::to_string(e_cell));
     check(!released.hasPeriodicEnergy(), "(e) hasPeriodicEnergy() stays false (S1: no Ewald on the device)");
     // the 200 A cube holds the whole dimer within L/2: the local terms equal the run without a cell to rounding
-    GFNFFGPUComputationalMethod plain_ref("gfnff", json{ { "coulomb_ewald", false } });
+    GFNFFGpuUnderTest plain_ref("gfnff", json{ { "coulomb_ewald", false } });
     check(plain_ref.setMolecule(plain), "(e) reference without a cell");
     const double e_plain = plain_ref.calculateEnergy(true);
     check(std::abs(e_cell - e_plain) < 1e-9, "(e) 200 A cube == no cell to 1e-9 Eh (|dE| " + std::to_string(std::abs(e_cell - e_plain)) + ")");
 
-    std::printf(g_failures == 0 ? "gfnff_gpu_pbc_refuse: all checks passed\n" : "gfnff_gpu_pbc_refuse: %d failure(s)\n", g_failures);
+    if (g_failures == 0)
+        std::printf("%s: all checks passed\n", kTestName);
+    else
+        std::printf("%s: %d failure(s)\n", kTestName, g_failures);
     return g_failures == 0 ? 0 : 1;
 }
 #else

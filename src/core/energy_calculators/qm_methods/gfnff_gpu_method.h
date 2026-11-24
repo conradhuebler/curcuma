@@ -77,6 +77,9 @@ struct GFNFFCudaBackend {
     /// Ewald operator, device virial and HB/XB crossing terms. Split from has_periodic_local_terms (A2, ROCm parity), the
     /// CUDA code paths are the same as before the split.
     static constexpr bool has_periodic_hybrid = true;
+    /// A1-GPU/HB-X (Nov 2026): device virial and HB/XB crossing kernels of the hybrid. Split from has_periodic_hybrid
+    /// (B1, ROCm parity, Nov 24, 2026: ROCm has the hybrid without the virial); the CUDA code paths are unchanged.
+    static constexpr bool has_periodic_virial = true;
     /// Nov 2026 (GPU_PERIODIC_GAPS A2/S3): device Ewald sum of the periodic hybrid (GfnffEwaldGPU, cuda/ewald_gpu.cu);
     /// defined in gfnff_gpu_method.cpp. nullptr on a device failure (the hybrid then keeps the host Ewald).
     static std::unique_ptr<curcuma::ewald::EwaldDeviceOps> createEwaldDevice();

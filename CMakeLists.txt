@@ -1457,6 +1457,26 @@ if(USE_ROCM)
     add_custom_target(curcuma_hip_gfnff DEPENDS ${_hip_ff_obj})
     set_source_files_properties(${_hip_ff_obj} PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
 
+    # ---- GFN-FF device Ewald TU (Claude Generated, Nov 24, 2026, ROCm parity B1): HIP port of cuda/ewald_gpu.cu,
+    # its own translation unit so the GFN-FF kernels above are not recompiled with it. Same DEPENDS rule.
+    set(_hip_ew_src ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/ff_methods/rocm/ewald_hip.hip)
+    set(_hip_ew_hdrs
+        ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/ff_methods/rocm/ewald_hip.h
+        ${PROJECT_SOURCE_DIR}/src/core/energy_calculators/ff_methods/ewald.h
+        ${PROJECT_SOURCE_DIR}/src/tools/pbc_utils.h
+        ${PROJECT_SOURCE_DIR}/src/tools/pbc_gather.h)
+    set(_hip_ew_obj ${CMAKE_CURRENT_BINARY_DIR}/ewald_hip.hip.o)
+    add_custom_command(
+        OUTPUT  ${_hip_ew_obj}
+        COMMAND ${HIPCC_EXECUTABLE} -c -fPIC -O2 -std=c++17 ${_rocm_offload_flags}
+                ${_hipcc_defs} ${_hipcc_incs}
+                ${_hip_ew_src} -o ${_hip_ew_obj}
+        DEPENDS ${_hip_ew_src} ${_hip_ew_hdrs}
+        COMMENT "Compiling HIP GFN-FF device Ewald with hipcc (arch ${ROCM_GPU_ARCH})"
+        VERBATIM)
+    add_custom_target(curcuma_hip_ewald DEPENDS ${_hip_ew_obj})
+    set_source_files_properties(${_hip_ew_obj} PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
+
     # ---- the loadable plugin: g++ host wrappers + C entry points + the two hipcc objects
     # Undefined core symbols (XTB, FFWorkspace, CurcumaLogger, ...) resolve against the
     # -rdynamic curcuma executable at dlopen time, exactly like libcurcuma_cuda.so.
@@ -1465,8 +1485,9 @@ if(USE_ROCM)
         src/core/energy_calculators/qm_methods/gfnff_hip_method.cpp
         src/core/energy_calculators/qm_methods/rocm/gpu_plugin_entry_rocm.cpp
         ${_hip_ctx_obj}
-        ${_hip_ff_obj})
-    add_dependencies(curcuma_rocm curcuma_hip_ctx curcuma_hip_gfnff)
+        ${_hip_ff_obj}
+        ${_hip_ew_obj})
+    add_dependencies(curcuma_rocm curcuma_hip_ctx curcuma_hip_gfnff curcuma_hip_ewald)
     target_include_directories(curcuma_rocm PRIVATE ${PROJECT_SOURCE_DIR} /opt/rocm/include)
     target_link_libraries(curcuma_rocm PRIVATE ${ROCM_HIP_RT} ${ROCM_ROCSOLVER} ${ROCM_ROCBLAS})
     # __HIP_PLATFORM_AMD__: the g++-compiled wrappers include <hip/hip_runtime.h> (host-side
