@@ -73,10 +73,12 @@
 // 28 = Nov 2026, HB-X (branch feature/gfnff-pressure-crossing): HB/XB crossing estimator of the pressure
 //      (FFVirialComponents gained hb_crossing, xb_crossing; FFWorkspace and FFWorkspaceGPU gained m_hb_cross_*;
 //      GFNFF gained m_pressure_hb_crossing, m_pressure_crossing_shell; core symbol GFNFF::hbSearchThresholds).
+// 29 = Nov 2026, ROCm parity (feature/rocm-parity, A3): GpuScfBackend::periodicStageOnDevice (new virtual in the
+//      shared SCF backend interface, used by the periodic ROCm stages).
 
 #pragma once
 
-#define CURCUMA_GPU_PLUGIN_ABI_VERSION 28
+#define CURCUMA_GPU_PLUGIN_ABI_VERSION 29
 
 /// Defines `extern "C" int curcuma_<backend>_abi_version()` in a plugin entry file (use at file scope).
 #define CURCUMA_GPU_PLUGIN_DEFINE_ABI_VERSION(backend)                                                                \

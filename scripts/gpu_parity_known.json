@@ -6,10 +6,9 @@
   },
   "traits": {
     "has_device_schur": "ROCm false by design: the device Schur step has its own switch rocm_device_schur (GPU_PARITY_CUDA_ROCM.md, table A)",
-    "has_multi_gpu_split": "gap: no multi-GPU EEQ split on ROCm (GPU_PARITY_CUDA_ROCM.md, table A)",
-    "default_eeq_cpu_fragment_threshold": "ROCm keeps 16, the CPU fragment route is about 3x faster than the dense device route at 197 atoms and 39 fragments (ROCM_RESIDENT_LOOP_WP.md)",
-    "has_charge_groups_cn_guard": "gap from 9e8a609c (devel/methods, Oct 31, 2026): ROCm keeps the counted CPU fallback (GPU_PARITY_CUDA_ROCM.md, table A)",
-    "has_periodic_local_terms": "gap: ROCm refuses a cell with a clear error; port is GPU_PERIODIC_GAPS.md B2 (GPU_PARITY_CUDA_ROCM.md, table A)"
+    "has_multi_gpu_split": "gap: the ROCm EEQ split exists only as an opt-in (-gfnff.rocm_multi_gpu_split) and never ran on more than one device, so the trait stays false (ROCM_PARITY_A6.md)",
+    "has_multi_gpu_split_opt_in": "ROCm only: the unverified opt-in split of A6; CUDA has the full split behind has_multi_gpu_split (ROCM_PARITY_A6.md)",
+    "default_eeq_cpu_fragment_threshold": "ROCm keeps 16, the CPU fragment route is about 3x faster than the dense device route at 197 atoms and 39 fragments (ROCM_RESIDENT_LOOP_WP.md)"
   },
   "kernel_aliases": {}
 }
