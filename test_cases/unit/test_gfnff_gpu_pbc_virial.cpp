@@ -23,12 +23,24 @@
  *      cell edge and pressure reported, cell edges equal to 1e-6 A.
  * Extra structures: `test_gfnff_gpu_pbc_virial --xyz FILE [FILE...]` runs (a) on XYZ files with a unitcell comment.
  * Exit 77 (ctest SKIP_RETURN_CODE) when built without CUDA.
+ *
+ * B2 (Nov 24, 2026, Claude Generated, ROCm parity, docs/ROCM_PARITY_B2.md): the same source builds the ROCm variant
+ * (target test_gfnff_rocm_pbc_virial, ctest gfnff_rocm_pbc_virial, compiled with GFNFF_PBC_VIRIAL_ROCM): the HIP method
+ * class GFNFFHipComputationalMethod and `-gpu rocm` in (e), same boxes, checks and thresholds. Exit 77 there when no
+ * HIP device answers.
  */
-#ifdef USE_CUDA
+#if defined(GFNFF_PBC_VIRIAL_ROCM) || defined(USE_CUDA)
 #include "src/capabilities/simplemd.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/energy_calculators/ff_methods/gfnff.h"
+#ifdef GFNFF_PBC_VIRIAL_ROCM
+#include "src/core/energy_calculators/qm_methods/gfnff_hip_method.h"
+using GFNFFGPUComputationalMethod = GFNFFHipComputationalMethod;   // B2: the HIP method class under the CUDA name
+static const char* kGpuName = "rocm";
+#else
 #include "src/core/energy_calculators/qm_methods/gfnff_gpu_method.h"
+static const char* kGpuName = "cuda";
+#endif
 #include "src/core/energy_calculators/qm_methods/gfnff_method.h"
 #include "src/core/fileiterator.h"
 #include "src/core/gpu_fallback.h"
@@ -448,15 +460,15 @@ static json mdController(bool gpu)
     controller["gfnff"]["cache_topology"] = false;
     controller["gfnff"]["gpu_periodic"] = true;
     if (gpu) {
-        md["gpu"] = "cuda";
-        controller["gpu"] = "cuda";
+        md["gpu"] = kGpuName;
+        controller["gpu"] = kGpuName;
     }
     return controller;
 }
 
 static void testNPT(const Mol& m)
 {
-    std::printf("(e) NPT smoke test, Berendsen, 20 steps: CPU vs -gpu cuda (%d atoms)\n", m.m_number_atoms);
+    std::printf("(e) NPT smoke test, Berendsen, 20 steps: CPU vs -gpu %s (%d atoms)\n", kGpuName, m.m_number_atoms);
     double L[2] = { 0, 0 }, P[2] = { 0, 0 };
     long ev[2] = { 0, 0 };
     bool ok[2] = { false, false };
@@ -513,6 +525,21 @@ int main(int argc, char** argv)
         std::printf("%s: %d failure(s)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures);
         return g_failures == 0 ? 0 : 1;
     }
+#ifdef GFNFF_PBC_VIRIAL_ROCM
+    {   // B2: skip (77) when no HIP device answers
+        GFNFFGPUComputationalMethod p("gfnff", config(1, false));
+        bool ok = false;
+        try {
+            ok = p.setMolecule(centredInBox(registryMol("H2O"), kL)) && !p.hasError() && p.periodicHybridActive();
+        } catch (const std::exception&) {
+            ok = false;
+        }
+        if (!ok) {
+            std::printf("gfnff_rocm_pbc_virial: the ROCm periodic hybrid could not be set up (no HIP device?), skipped\n");
+            return 77;
+        }
+    }
+#endif
     const char* only = std::getenv("GPU_VIRIAL_ONLY");   // diagnostic: a/b/c/d/e
     auto run = [&](char c) { return !only || std::strchr(only, c); };
     const Mol box20 = waterBox(20, kL, 20261105);

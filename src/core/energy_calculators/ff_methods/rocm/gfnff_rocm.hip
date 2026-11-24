@@ -9,6 +9,7 @@
 // member — the CUDA build includes ff_workspace_gpu.h before the kernel header too).
 #include "ff_workspace_hip.h"
 #include "eeq_solver_hip.h"
+#include "../cuda/gfnff_virial_slots.h"   // B2 (Nov 24, 2026): device virial slot layout, shared with CUDA
 
 #include <csignal>
 // Claude Generated (June 2026): GPU-wedge hardening. SIGKILL (kill -9) can't be caught, but
@@ -307,6 +308,69 @@ __device__ __forceinline__ void micChainOfFour(const double* __restrict__ cx, co
     micPlace(cx, cy, cz, a, lx[1], ly[1], lz[1], lx[0], ly[0], lz[0]);
     micPlace(cx, cy, cz, c, lx[1], ly[1], lz[1], lx[2], ly[2], lz[2]);
     micPlace(cx, cy, cz, d, lx[2], ly[2], lz[2], lx[3], ly[3], lz[3]);
+}
+
+// ============================================================================
+// Atomic virial on the device (Claude Generated, Nov 24, 2026, ROCm parity B2; port of the CUDA A1-GPU helpers of
+// cuda/gfnff_kernels.cu, commit 277765fc; definition at FFVirialComponents)
+// Xi_ab -= p_a g_b for every gradient row g a term writes, p the position of that atom in the frame the term used,
+// taken relative to one atom of the term (the rows of a term sum to zero, so the origin drops out). Row-major 3a+b in
+// a per-thread array; blockReduceAddVirial rounds each of the nine values to a multiple of 2^-48 Eh and sums them as
+// integers into the nine slots of the term. The virial slots are fixed point independent of -gfnff.rocm_fixed_point
+// (as on CUDA): the sum is thread-order independent either way. Wave32 lane indexing as blockReduceAddEnergy.
+// Only the VIR instantiations of the kernel bodies and the separate *_virial kernels call these.
+// ============================================================================
+__device__ __forceinline__ long long vir_fix_round(double x)
+{
+    const double y = x * GFNFF_FIX_ENERGY;
+    if (!(fabs(y) < 9.2e18)) {   // not finite or beyond int64: mark (read back in fixed-point mode), contribute 0
+        atomicOr(&d_gfnff_fix_bad, 1);
+        return 0ll;
+    }
+    return llrint(y);
+}
+
+/// B2: per-thread virial storage of the VIR instantiations; empty for VIR false, so the former kernels
+/// (k_*<false>, k_*<true> without the virial) carry no extra local array (their ISA stays that of the base).
+template <bool V, int N> struct VirArr { double v[N]; };
+template <int N> struct VirArr<false, N> {};
+
+__device__ __forceinline__ void vir_outer(double* v, double px, double py, double pz, double gx, double gy, double gz)
+{
+    v[0] -= px * gx; v[1] -= px * gy; v[2] -= px * gz;
+    v[3] -= py * gx; v[4] -= py * gy; v[5] -= py * gz;
+    v[6] -= pz * gx; v[7] -= pz * gy; v[8] -= pz * gz;
+}
+
+/// All threads of the block must call it (no early return before); slot = 9 fixed-point accumulators.
+__device__ __forceinline__ void blockReduceAddVirial(const double* v, double* slot)
+{
+    __shared__ long long vir_sums_fx[9][32];
+    const int lane = threadIdx.x & 31;
+    const int warp_id = threadIdx.x >> 5;
+    #pragma unroll
+    for (int c = 0; c < 9; ++c) {
+        long long x = vir_fix_round(v[c]);
+        for (int off = 16; off > 0; off >>= 1) x += __shfl_down_sync(0xFFFFFFFFFFFFFFFFull, x, off);
+        if (lane == 0) vir_sums_fx[c][warp_id] = x;
+    }
+    __syncthreads();
+    const int num_warps = (blockDim.x + 31) >> 5;
+    if (warp_id == 0) {
+        #pragma unroll
+        for (int c = 0; c < 9; ++c) {
+            long long s = (lane < num_warps) ? vir_sums_fx[c][lane] : 0ll;
+            for (int off = 16; off > 0; off >>= 1) s += __shfl_down_sync(0xFFFFFFFFFFFFFFFFull, s, off);
+            if (lane == 0 && s != 0ll)
+                atomicAdd(reinterpret_cast<unsigned long long*>(&slot[c]), static_cast<unsigned long long>(s));
+        }
+    }
+}
+
+/// Pair term with gradient fac*d on the first atom and -fac*d on the second (d = x_i - x_j as the kernel formed it)
+__device__ __forceinline__ void vir_pair(double* v, double fac, double dx, double dy, double dz)
+{
+    vir_outer(v, dx, dy, dz, fac * dx, fac * dy, fac * dz);
 }
 
 // ============================================================================
@@ -1462,6 +1526,148 @@ __device__ double cos_angle_grad(
 // quantum on urea197/peo201; the SASS of k_*<false> is compared against the pre-S1 plugin), the true instantiation
 // builds the CPU image frame. FFWorkspaceHip launches k_*<true> only with an active cell (A2, Nov 2026: port of
 // the CUDA S1 kernels, commit 8ee4f638).
+// B2 (Nov 24, 2026, Claude Generated; CUDA A1-GPU 277765fc): copy of k_angles<PBC> with the virial (VIR) blocks of
+// the CUDA body, used only by k_angles_vir (cell and virial). k_angles<PBC> below stays the former source: routing it
+// through this body, as CUDA does, changed its gfx1200 ISA (5 of 7 kernels), so the two are kept apart.
+template <bool PBC, bool VIR>
+__device__ __forceinline__ void k_angles_body(
+    int n,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const int*    __restrict__ idx_k,
+    const int*    __restrict__ ati,
+    const int*    __restrict__ atj,
+    const int*    __restrict__ atk,
+    const double* __restrict__ fc,
+    const double* __restrict__ theta0,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const double* __restrict__ rcov_d3,  // unused arg; uses constant d_rcov_d3 directly
+    double*                    grad,
+    double*                    energy,
+    double*                    vir   /* B2 (Nov 24, 2026; CUDA A1-GPU) */)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    double local_E = 0.0;
+    [[maybe_unused]] VirArr<VIR, 9> vacc{};
+
+    if (tid < n) {
+        int i = idx_i[tid], j = idx_j[tid], k = idx_k[tid];
+        int zi = ati[tid] - 1, zj = atj[tid] - 1, zk = atk[tid] - 1;
+
+        if (zi >= 0 && zi < 86 && zj >= 0 && zj < 86 && zk >= 0 && zk < 86) {
+            const double scale = 4.0 / 3.0;
+            double rcov_i = d_rcov_d3[zi] * scale;
+            double rcov_j = d_rcov_d3[zj] * scale;
+            double rcov_k = d_rcov_d3[zk] * scale;
+
+            // Nov 2026 (S1, PBC): local image frame, i and k as the images next to the centre j (slots 0..2 =
+            // i, j, k; CPU calcAngles); the angle and its gradient read the frame too. Else: the former statements.
+            [[maybe_unused]] double lx[3], ly[3], lz[3];
+            double dij_x, dij_y, dij_z, dkj_x, dkj_y, dkj_z;
+            if constexpr (PBC) {
+                lx[1] = cx[j]; ly[1] = cy[j]; lz[1] = cz[j];
+                micPlace(cx, cy, cz, i, lx[1], ly[1], lz[1], lx[0], ly[0], lz[0]);
+                micPlace(cx, cy, cz, k, lx[1], ly[1], lz[1], lx[2], ly[2], lz[2]);
+                dij_x = lx[0] - lx[1];
+                dij_y = ly[0] - ly[1];
+                dij_z = lz[0] - lz[1];
+                dkj_x = lx[2] - lx[1];
+                dkj_y = ly[2] - ly[1];
+                dkj_z = lz[2] - lz[1];
+            } else {
+                dij_x = cx[i] - cx[j];
+                dij_y = cy[i] - cy[j];
+                dij_z = cz[i] - cz[j];
+                applyMIC(dij_x, dij_y, dij_z);
+                dkj_x = cx[k] - cx[j];
+                dkj_y = cy[k] - cy[j];
+                dkj_z = cz[k] - cz[j];
+                applyMIC(dkj_x, dkj_y, dkj_z);
+            }
+
+            double r_ij_sq = dij_x*dij_x + dij_y*dij_y + dij_z*dij_z;
+            double r_jk_sq = dkj_x*dkj_x + dkj_y*dkj_y + dkj_z*dkj_z;
+
+            const double atcuta = 0.595;
+            double sum_ij = rcov_i + rcov_j;
+            double sum_jk = rcov_j + rcov_k;
+            double rcut_ij_sq = atcuta * sum_ij * sum_ij;
+            double rcut_jk_sq = atcuta * sum_jk * sum_jk;
+
+            double rr_ij  = (r_ij_sq > 1e-10) ? (r_ij_sq / rcut_ij_sq) : 0.0;
+            rr_ij  = rr_ij  * rr_ij;
+            double rr_jk  = (r_jk_sq > 1e-10) ? (r_jk_sq / rcut_jk_sq) : 0.0;
+            rr_jk  = rr_jk  * rr_jk;
+
+            double damp_ij = 1.0 / (1.0 + rr_ij);
+            double damp_jk = 1.0 / (1.0 + rr_jk);
+            double damp    = damp_ij * damp_jk;
+
+            double d_ri_x, d_ri_y, d_ri_z;
+            double d_rk_x, d_rk_y, d_rk_z;
+            double d_rj_x, d_rj_y, d_rj_z;
+            double cos_a;
+            if constexpr (PBC)
+                cos_a = cos_angle_grad(lx, ly, lz, 0, 1, 2,
+                                       d_ri_x, d_ri_y, d_ri_z,
+                                       d_rk_x, d_rk_y, d_rk_z,
+                                       d_rj_x, d_rj_y, d_rj_z, true);
+            else
+                cos_a = cos_angle_grad(cx, cy, cz, i, j, k,
+                                       d_ri_x, d_ri_y, d_ri_z,
+                                       d_rk_x, d_rk_y, d_rk_z,
+                                       d_rj_x, d_rj_y, d_rj_z, true);
+
+            const double pi = 3.14159265358979323846;
+            double t0   = theta0[tid];
+            double k_fc = fc[tid];
+            double energy_raw, dedcos;
+
+            if (fabs(pi - t0) < 1e-6) {
+                double theta = acos(cos_a);
+                double dtheta = theta - t0;
+                energy_raw = k_fc * dtheta * dtheta;
+                double sinth = sin(theta);
+                dedcos = (sinth > 1e-8) ? (2.0 * k_fc * dtheta / (-sinth)) : 0.0;
+            } else {
+                double cos0   = cos(t0);
+                double dcos   = cos_a - cos0;
+                energy_raw    = k_fc * dcos * dcos;
+                dedcos        = 2.0 * k_fc * dcos;
+            }
+
+            local_E = energy_raw * damp;
+
+            double damp2ij = (r_ij_sq > 1e-8) ? -2.0 * 2.0 * rr_ij / (r_ij_sq * (1.0+rr_ij)*(1.0+rr_ij)) : 0.0;
+            double damp2jk = (r_jk_sq > 1e-8) ? -2.0 * 2.0 * rr_jk / (r_jk_sq * (1.0+rr_jk)*(1.0+rr_jk)) : 0.0;
+
+            double gi_x = dedcos * damp * d_ri_x, gi_y = dedcos * damp * d_ri_y, gi_z = dedcos * damp * d_ri_z;
+            double gk_x = dedcos * damp * d_rk_x, gk_y = dedcos * damp * d_rk_y, gk_z = dedcos * damp * d_rk_z;
+            double gj_x = dedcos * damp * d_rj_x, gj_y = dedcos * damp * d_rj_y, gj_z = dedcos * damp * d_rj_z;
+
+            double t1_x = energy_raw * damp2ij * damp_jk * dij_x;
+            double t1_y = energy_raw * damp2ij * damp_jk * dij_y;
+            double t1_z = energy_raw * damp2ij * damp_jk * dij_z;
+            double t2_x = energy_raw * damp2jk * damp_ij * dkj_x;
+            double t2_y = energy_raw * damp2jk * damp_ij * dkj_y;
+            double t2_z = energy_raw * damp2jk * damp_ij * dkj_z;
+
+            add_grad(grad, i, gi_x + t1_x, gi_y + t1_y, gi_z + t1_z);
+            add_grad(grad, j, gj_x - t1_x - t2_x, gj_y - t1_y - t2_y, gj_z - t1_z - t2_z);
+            add_grad(grad, k, gk_x + t2_x, gk_y + t2_y, gk_z + t2_z);
+            if constexpr (VIR) {   // B2 (CUDA A1): frame positions relative to the centre j (slot 1)
+                vir_outer(vacc.v, dij_x, dij_y, dij_z, gi_x + t1_x, gi_y + t1_y, gi_z + t1_z);
+                vir_outer(vacc.v, dkj_x, dkj_y, dkj_z, gk_x + t2_x, gk_y + t2_y, gk_z + t2_z);
+            }
+        }
+    }
+
+    blockReduceAddEnergy(local_E, energy);
+    if constexpr (VIR) blockReduceAddVirial(vacc.v, vir);
+}
+
 template <bool PBC>
 __global__ void k_angles(
     int n,
@@ -1594,6 +1800,27 @@ __global__ void k_angles(
     blockReduceAddEnergy(local_E, energy);
 }
 
+__global__ GFNFF_KERNEL_BOUNDS void k_angles_vir(
+    int n,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const int*    __restrict__ idx_k,
+    const int*    __restrict__ ati,
+    const int*    __restrict__ atj,
+    const int*    __restrict__ atk,
+    const double* __restrict__ fc,
+    const double* __restrict__ theta0,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const double* __restrict__ rcov_d3,  // unused arg; uses constant d_rcov_d3 directly
+    double*                    grad,
+    double*                    energy,
+    double*                    vir   /* B2 (Nov 24, 2026; CUDA A1-GPU) */)
+{
+    k_angles_body<true, true>(n, idx_i, idx_j, idx_k, ati, atj, atk, fc, theta0, cx, cy, cz, rcov_d3, grad, energy, vir);
+}
+
 // ============================================================================
 // Device helper: dihedral angle + gradient (Neumann formula)
 // Returns phi in [-pi, pi], fills derivate[4][3]
@@ -1718,6 +1945,164 @@ __device__ double dihedral_angle_grad(
 // E = V * (1 + cos(n*(phi - phi0) + pi)) * damp_ik * damp_jk * damp_jl
 // Reference: ff_workspace_gfnff.cpp:calcDihedrals (lines 299-380)
 // ============================================================================
+
+// B2 (Nov 24, 2026, Claude Generated; CUDA A1-GPU 277765fc): copy of k_dihedrals<PBC> with the virial (VIR) blocks of
+// the CUDA body, used only by k_dihedrals_vir (cell and virial). k_dihedrals<PBC> below stays the former source: routing it
+// through this body, as CUDA does, changed its gfx1200 ISA (5 of 7 kernels), so the two are kept apart.
+template <bool PBC, bool VIR>
+__device__ __forceinline__ void k_dihedrals_body(
+    int n,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const int*    __restrict__ idx_k,
+    const int*    __restrict__ idx_l,
+    const int*    __restrict__ ati,
+    const int*    __restrict__ atj,
+    const int*    __restrict__ atk,
+    const int*    __restrict__ atl,
+    const double* __restrict__ V,
+    const double* __restrict__ phi0,
+    const double* __restrict__ n_period,
+    const int*    __restrict__ is_nci,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const double* __restrict__ rcov_d3_unused,
+    double*                    grad,
+    double*                    energy,
+    double*                    vir   /* B2 (Nov 24, 2026; CUDA A1-GPU) */)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    double local_E = 0.0;
+    [[maybe_unused]] VirArr<VIR, 9> vacc{};
+
+    if (tid < n) {
+        int ai = idx_i[tid], aj = idx_j[tid], ak = idx_k[tid], al = idx_l[tid];
+        int zi = ati[tid]-1, zj = atj[tid]-1, zk = atk[tid]-1, zl = atl[tid]-1;
+
+        if (zi>=0&&zi<86&&zj>=0&&zj<86&&zk>=0&&zk<86&&zl>=0&&zl<86) {
+            const double scale = 4.0/3.0;
+            double ri = d_rcov_d3[zi]*scale, rj = d_rcov_d3[zj]*scale;
+            double rk = d_rcov_d3[zk]*scale, rl = d_rcov_d3[zl]*scale;
+
+            double atcutt = is_nci[tid] ? 0.305 : 0.505;
+
+            // Nov 2026 (S1, PBC): local image frame (slots 0..3 = i, j, k, l; placeChainOfFour of the CPU);
+            // every distance and vector below reads the frame. Else: the former statements on cx/cy/cz.
+            [[maybe_unused]] double lx[4], ly[4], lz[4];
+            if constexpr (PBC)
+                micChainOfFour(cx, cy, cz, ai, aj, ak, al, lx, ly, lz);
+
+            auto sq_dist = [&](int a, int b) {
+                if constexpr (PBC) {
+                    double dx = lx[b] - lx[a];
+                    double dy = ly[b] - ly[a];
+                    double dz = lz[b] - lz[a];
+                    return dx*dx+dy*dy+dz*dz;
+                } else {
+                    double dx = cx[b] - cx[a];
+                    double dy = cy[b] - cy[a];
+                    double dz = cz[b] - cz[a];
+                    return dx*dx+dy*dy+dz*dz;
+                }
+            };
+
+            auto make_damp = [&](double r2_sq, double ra, double rb) {
+                double sum = ra + rb;
+                double rcut_sq = atcutt * sum * sum;
+                double rr = r2_sq / rcut_sq;
+                rr = rr*rr;
+                return 1.0/(1.0+rr);
+            };
+            auto make_damp2 = [&](double r2_sq, double ra, double rb) {
+                double sum = ra + rb;
+                double rcut_sq = atcutt * sum * sum;
+                double rr = r2_sq / rcut_sq;
+                rr = rr*rr;
+                return (r2_sq > 1e-8) ? -4.0*rr/(r2_sq*(1.0+rr)*(1.0+rr)) : 0.0;
+            };
+
+            double rij2, rjk2, rkl2;
+            if constexpr (PBC) {
+                rij2 = sq_dist(0, 1);
+                rjk2 = sq_dist(1, 2);
+                rkl2 = sq_dist(2, 3);
+            } else {
+                rij2 = sq_dist(ai, aj);
+                rjk2 = sq_dist(aj, ak);
+                rkl2 = sq_dist(ak, al);
+            }
+
+            double d_ij = make_damp(rij2, ri, rj);
+            double d_jk = make_damp(rjk2, rj, rk);
+            double d_kl = make_damp(rkl2, rk, rl);
+            double damp  = d_ij * d_jk * d_kl;
+
+            double d2_ij = make_damp2(rij2, ri, rj);
+            double d2_jk = make_damp2(rjk2, rj, rk);
+            double d2_kl = make_damp2(rkl2, rk, rl);
+
+            double derivate[4][3];
+            double phi;
+            if constexpr (PBC)
+                phi = dihedral_angle_grad(lx, ly, lz, 0, 1, 2, 3, derivate, true);
+            else
+                phi = dihedral_angle_grad(cx, cy, cz, ai, aj, ak, al, derivate, true);
+
+            double c1    = n_period[tid] * (phi - phi0[tid]) + M_PI;
+            double cos_c1 = cos(c1);
+            double E_raw = V[tid] * (1.0 + cos_c1);
+            local_E = E_raw * damp;
+
+            // Gradient of torsion potential (angle part)
+            double dEdphi = -V[tid] * n_period[tid] * sin(c1);
+            int atoms[4] = {ai, aj, ak, al};
+            for (int a = 0; a < 4; ++a) {
+                add_grad(grad, atoms[a],
+                         dEdphi * damp * derivate[a][0],
+                         dEdphi * damp * derivate[a][1],
+                         dEdphi * damp * derivate[a][2]);
+            }
+            if constexpr (VIR) {   // B2 (CUDA A1): frame slots relative to slot 1 (j)
+                for (int a = 0; a < 4; ++a)
+                    vir_outer(vacc.v, lx[a] - lx[1], ly[a] - ly[1], lz[a] - lz[1],
+                              dEdphi * damp * derivate[a][0], dEdphi * damp * derivate[a][1], dEdphi * damp * derivate[a][2]);
+            }
+
+            // Gradient from damping: E_raw * d(damp)/d(rXY²) * rXY_vec
+            {
+                double dx, dy, dz;
+                if constexpr (PBC) { dx=lx[0]-lx[1]; dy=ly[0]-ly[1]; dz=lz[0]-lz[1]; }
+                else               { dx=cx[ai]-cx[aj]; dy=cy[ai]-cy[aj]; dz=cz[ai]-cz[aj]; }
+                double fac = E_raw * d2_ij * d_jk * d_kl;
+                add_grad(grad, ai,  fac*dx,  fac*dy,  fac*dz);
+                add_grad(grad, aj, -fac*dx, -fac*dy, -fac*dz);
+                if constexpr (VIR) vir_pair(vacc.v, fac, dx, dy, dz);
+            }
+            {
+                double dx, dy, dz;
+                if constexpr (PBC) { dx=lx[1]-lx[2]; dy=ly[1]-ly[2]; dz=lz[1]-lz[2]; }
+                else               { dx=cx[aj]-cx[ak]; dy=cy[aj]-cy[ak]; dz=cz[aj]-cz[ak]; }
+                double fac = E_raw * d_ij * d2_jk * d_kl;
+                add_grad(grad, aj,  fac*dx,  fac*dy,  fac*dz);
+                add_grad(grad, ak, -fac*dx, -fac*dy, -fac*dz);
+                if constexpr (VIR) vir_pair(vacc.v, fac, dx, dy, dz);
+            }
+            {
+                double dx, dy, dz;
+                if constexpr (PBC) { dx=lx[2]-lx[3]; dy=ly[2]-ly[3]; dz=lz[2]-lz[3]; }
+                else               { dx=cx[ak]-cx[al]; dy=cy[ak]-cy[al]; dz=cz[ak]-cz[al]; }
+                double fac = E_raw * d_ij * d_jk * d2_kl;
+                add_grad(grad, ak,  fac*dx,  fac*dy,  fac*dz);
+                add_grad(grad, al, -fac*dx, -fac*dy, -fac*dz);
+                if constexpr (VIR) vir_pair(vacc.v, fac, dx, dy, dz);
+            }
+        }
+    }
+
+    blockReduceAddEnergy(local_E, energy);
+    if constexpr (VIR) blockReduceAddVirial(vacc.v, vir);
+}
 
 template <bool PBC>
 __global__ void k_dihedrals(
@@ -1863,6 +2248,31 @@ __global__ void k_dihedrals(
     blockReduceAddEnergy(local_E, energy);
 }
 
+__global__ GFNFF_KERNEL_BOUNDS void k_dihedrals_vir(
+    int n,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const int*    __restrict__ idx_k,
+    const int*    __restrict__ idx_l,
+    const int*    __restrict__ ati,
+    const int*    __restrict__ atj,
+    const int*    __restrict__ atk,
+    const int*    __restrict__ atl,
+    const double* __restrict__ V,
+    const double* __restrict__ phi0,
+    const double* __restrict__ n_period,
+    const int*    __restrict__ is_nci,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const double* __restrict__ rcov_d3_unused,
+    double*                    grad,
+    double*                    energy,
+    double*                    vir   /* B2 (Nov 24, 2026; CUDA A1-GPU) */)
+{
+    k_dihedrals_body<true, true>(n, idx_i, idx_j, idx_k, idx_l, ati, atj, atk, atl, V, phi0, n_period, is_nci, cx, cy, cz, rcov_d3_unused, grad, energy, vir);
+}
+
 // ============================================================================
 // Device helper: out-of-plane angle (inversion omega)
 // Atom i is the central atom, j/k/l are substituents
@@ -1991,6 +2401,182 @@ __device__ double inversion_angle_grad(
 // type -1: E = fc * (cos(omega) - cos(omega0))^2 * damp
 // Reference: ff_workspace_gfnff.cpp:calcInversions
 // ============================================================================
+
+// B2 (Nov 24, 2026, Claude Generated; CUDA A1-GPU 277765fc): copy of k_inversions<PBC> with the virial (VIR) blocks of
+// the CUDA body, used only by k_inversions_vir (cell and virial). k_inversions<PBC> below stays the former source: routing it
+// through this body, as CUDA does, changed its gfx1200 ISA (5 of 7 kernels), so the two are kept apart.
+template <bool PBC, bool VIR>
+__device__ __forceinline__ void k_inversions_body(
+    int n,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const int*    __restrict__ idx_k,
+    const int*    __restrict__ idx_l,
+    const int*    __restrict__ ati,
+    const int*    __restrict__ atj,
+    const int*    __restrict__ atk,
+    const int*    __restrict__ atl,
+    const double* __restrict__ fc,
+    const double* __restrict__ omega0,
+    const double* __restrict__ C0,
+    const double* __restrict__ C1,
+    const double* __restrict__ C2,
+    const int*    __restrict__ potential_type,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    double*                    grad,
+    double*                    energy,
+    double*                    vir   /* B2 (Nov 24, 2026; CUDA A1-GPU) */)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    double local_E = 0.0;
+    [[maybe_unused]] VirArr<VIR, 9> vacc{};
+
+    if (tid < n) {
+        int i = idx_i[tid], j = idx_j[tid], k = idx_k[tid], l = idx_l[tid];
+
+        const double rcov_scale = 4.0 / 3.0;
+        const double atcutt = 0.505;
+
+        int zi = ati[tid]-1, zj = atj[tid]-1, zk = atk[tid]-1, zl = atl[tid]-1;
+        double rcov_c = (zi >= 0 && zi < 87) ? d_rcov_d3[zi] * rcov_scale : 1.0 * rcov_scale;
+        double rcov_1 = (zj >= 0 && zj < 87) ? d_rcov_d3[zj] * rcov_scale : 1.0 * rcov_scale;
+        double rcov_2 = (zk >= 0 && zk < 87) ? d_rcov_d3[zk] * rcov_scale : 1.0 * rcov_scale;
+        double rcov_3 = (zl >= 0 && zl < 87) ? d_rcov_d3[zl] * rcov_scale : 1.0 * rcov_scale;
+
+        // Nov 2026 (S1, PBC): local image frame, the centre i at its position and its three neighbours as the
+        // images next to it (slots 0..3 = i, j, k, l; CPU calcInversions). Else: the former statements.
+        [[maybe_unused]] double lx[4], ly[4], lz[4];
+        if constexpr (PBC) {
+            lx[0] = cx[i]; ly[0] = cy[i]; lz[0] = cz[i];
+            micPlace(cx, cy, cz, j, lx[0], ly[0], lz[0], lx[1], ly[1], lz[1]);
+            micPlace(cx, cy, cz, k, lx[0], ly[0], lz[0], lx[2], ly[2], lz[2]);
+            micPlace(cx, cy, cz, l, lx[0], ly[0], lz[0], lx[3], ly[3], lz[3]);
+        }
+
+        auto sq_dist3 = [&](int a, int b) {
+            if constexpr (PBC) {
+                double dx = lx[b] - lx[a];
+                double dy = ly[b] - ly[a];
+                double dz = lz[b] - lz[a];
+                return dx*dx+dy*dy+dz*dz;
+            } else {
+                double dx = cx[b] - cx[a];
+                double dy = cy[b] - cy[a];
+                double dz = cz[b] - cz[a];
+                return dx*dx+dy*dy+dz*dz;
+            }
+        };
+
+        double rij_sq, rjk_sq, rjl_sq;
+        if constexpr (PBC) {
+            rij_sq = sq_dist3(1, 0);
+            rjk_sq = sq_dist3(1, 2);
+            rjl_sq = sq_dist3(1, 3);
+        } else {
+            rij_sq = sq_dist3(j, i);
+            rjk_sq = sq_dist3(j, k);
+            rjl_sq = sq_dist3(j, l);
+        }
+
+        auto calc_damp = [&](double rsq, double ra, double rb) -> double {
+            double sum = ra + rb;
+            double rcut_sq = atcutt * sum * sum;
+            double rr = (rsq / rcut_sq);
+            rr = rr * rr;
+            return 1.0 / (1.0 + rr);
+        };
+
+        double damp_ij = calc_damp(rij_sq, rcov_c, rcov_1);
+        double damp_jk = calc_damp(rjk_sq, rcov_2, rcov_1);
+        double damp_jl = calc_damp(rjl_sq, rcov_3, rcov_1);
+        double damp    = damp_ij * damp_jk * damp_jl;
+
+        double derivate[4][3];
+        double omega;
+        if constexpr (PBC)
+            omega = inversion_angle_grad(lx, ly, lz, 0, 1, 2, 3, derivate, true);
+        else
+            omega = inversion_angle_grad(cx, cy, cz, i, j, k, l, derivate, true);
+        double cos_om  = cos(omega);
+        double cos_om0 = cos(omega0[tid]);
+
+        double E_raw, dEdcos;
+        if (potential_type[tid] == 0) {
+            E_raw  = fc[tid] * (1.0 - cos_om);
+            dEdcos = -fc[tid];
+        } else {
+            double dcos = cos_om - cos_om0;
+            E_raw  = fc[tid] * dcos * dcos;
+            dEdcos = 2.0 * fc[tid] * dcos;
+        }
+
+        local_E = E_raw * damp;
+
+        double dEdOmega = dEdcos * (-sin(omega)) * damp;
+
+        int atoms[4] = {i, j, k, l};
+        for (int a = 0; a < 4; ++a) {
+            add_grad(grad, atoms[a],
+                     dEdOmega * derivate[a][0],
+                     dEdOmega * derivate[a][1],
+                     dEdOmega * derivate[a][2]);
+        }
+        if constexpr (VIR) {   // B2 (CUDA A1): frame slots relative to the centre (slot 0)
+            for (int a = 1; a < 4; ++a)
+                vir_outer(vacc.v, lx[a] - lx[0], ly[a] - ly[0], lz[a] - lz[0],
+                          dEdOmega * derivate[a][0], dEdOmega * derivate[a][1], dEdOmega * derivate[a][2]);
+        }
+
+        auto calc_ddamp = [&](double rsq, double ra, double rb) -> double {
+            if (rsq < 1e-8) return 0.0;
+            double sum = ra + rb;
+            double rcut_sq = atcutt * sum * sum;
+            double rr = (rsq / rcut_sq);
+            rr = rr * rr;
+            double opr = 1.0 + rr;
+            return -4.0 * rr / (rsq * opr * opr);
+        };
+
+        double dd_ij = calc_ddamp(rij_sq, rcov_c, rcov_1);
+        double dd_jk = calc_ddamp(rjk_sq, rcov_2, rcov_1);
+        double dd_jl = calc_ddamp(rjl_sq, rcov_3, rcov_1);
+
+        // Damping gradient: peripheral atom gets +fac*d, hub (j) gets -fac*d
+        // Matches Fortran gfnff_engrad.F90:1382-1385 and CPU CalculateGFNFFInversionContribution
+        {
+            double dx, dy, dz;
+            if constexpr (PBC) { dx=lx[0]-lx[1]; dy=ly[0]-ly[1]; dz=lz[0]-lz[1]; }
+            else               { dx=cx[i]-cx[j]; dy=cy[i]-cy[j]; dz=cz[i]-cz[j]; }
+            double fac = E_raw * dd_ij * damp_jk * damp_jl;
+            add_grad(grad, i,  fac*dx,  fac*dy,  fac*dz);
+            add_grad(grad, j, -fac*dx, -fac*dy, -fac*dz);
+            if constexpr (VIR) vir_pair(vacc.v, fac, dx, dy, dz);
+        }
+        {
+            double dx, dy, dz;
+            if constexpr (PBC) { dx=lx[2]-lx[1]; dy=ly[2]-ly[1]; dz=lz[2]-lz[1]; }
+            else               { dx=cx[k]-cx[j]; dy=cy[k]-cy[j]; dz=cz[k]-cz[j]; }
+            double fac = E_raw * damp_ij * dd_jk * damp_jl;
+            add_grad(grad, k,  fac*dx,  fac*dy,  fac*dz);
+            add_grad(grad, j, -fac*dx, -fac*dy, -fac*dz);
+            if constexpr (VIR) vir_pair(vacc.v, fac, dx, dy, dz);
+        }
+        {
+            double dx, dy, dz;
+            if constexpr (PBC) { dx=lx[3]-lx[1]; dy=ly[3]-ly[1]; dz=lz[3]-lz[1]; }
+            else               { dx=cx[l]-cx[j]; dy=cy[l]-cy[j]; dz=cz[l]-cz[j]; }
+            double fac = E_raw * damp_ij * damp_jk * dd_jl;
+            add_grad(grad, l,  fac*dx,  fac*dy,  fac*dz);
+            add_grad(grad, j, -fac*dx, -fac*dy, -fac*dz);
+            if constexpr (VIR) vir_pair(vacc.v, fac, dx, dy, dz);
+        }
+    }
+
+    blockReduceAddEnergy(local_E, energy);
+    if constexpr (VIR) blockReduceAddVirial(vacc.v, vir);
+}
 
 template <bool PBC>
 __global__ void k_inversions(
@@ -2154,6 +2740,32 @@ __global__ void k_inversions(
     blockReduceAddEnergy(local_E, energy);
 }
 
+__global__ GFNFF_KERNEL_BOUNDS void k_inversions_vir(
+    int n,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const int*    __restrict__ idx_k,
+    const int*    __restrict__ idx_l,
+    const int*    __restrict__ ati,
+    const int*    __restrict__ atj,
+    const int*    __restrict__ atk,
+    const int*    __restrict__ atl,
+    const double* __restrict__ fc,
+    const double* __restrict__ omega0,
+    const double* __restrict__ C0,
+    const double* __restrict__ C1,
+    const double* __restrict__ C2,
+    const int*    __restrict__ potential_type,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    double*                    grad,
+    double*                    energy,
+    double*                    vir   /* B2 (Nov 24, 2026; CUDA A1-GPU) */)
+{
+    k_inversions_body<true, true>(n, idx_i, idx_j, idx_k, idx_l, ati, atj, atk, atl, fc, omega0, C0, C1, C2, potential_type, cx, cy, cz, grad, energy, vir);
+}
+
 // Claude Generated (Nov 2026, A2; mirror of the CUDA gfnffUploadCell of S1): cell (column-major, Bohr), its inverse and
 // the PBC flag into the constant symbols d_lattice / d_lattice_inv / d_has_pbc; returns the status of the copies, which
 // FFWorkspaceHip::setUnitCell() checks. This file is a single translation unit, so the CUDA trap (a copy through an
@@ -2241,6 +2853,65 @@ __device__ __forceinline__ double d_charge_scaling(double q, double st, double s
 // Reference: ff_workspace_gfnff.cpp:calcSTorsions (lines 611-648)
 // ============================================================================
 
+// B2 (Nov 24, 2026, Claude Generated; CUDA A1-GPU 277765fc): copy of k_storsions<PBC> with the virial (VIR) blocks of
+// the CUDA body, used only by k_storsions_vir (cell and virial). k_storsions<PBC> below stays the former source: routing it
+// through this body, as CUDA does, changed its gfx1200 ISA (5 of 7 kernels), so the two are kept apart.
+template <bool PBC, bool VIR>
+__device__ __forceinline__ void k_storsions_body(
+    int n,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const int*    __restrict__ idx_k,
+    const int*    __restrict__ idx_l,
+    const double* __restrict__ erefhalf,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    double*                    grad,
+    double*                    energy,
+    double*                    vir   /* B2 (Nov 24, 2026; CUDA A1-GPU) */)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    double local_E = 0.0;
+    [[maybe_unused]] VirArr<VIR, 9> vacc{};
+    [[maybe_unused]] VirArr<VIR, 4> vpx{}, vpy{}, vpz{};   // B2 (CUDA A1): frame positions relative to slot 1 (VIR only)
+
+    if (tid < n) {
+        int ai = idx_i[tid], aj = idx_j[tid], ak = idx_k[tid], al = idx_l[tid];
+
+        // Nov 2026 (S1, PBC): local image frame as in k_dihedrals (CPU calcSTorsions, placeChainOfFour)
+        double derivate[4][3];
+        double phi;
+        if constexpr (PBC) {
+            double lx[4], ly[4], lz[4];
+            micChainOfFour(cx, cy, cz, ai, aj, ak, al, lx, ly, lz);
+            phi = dihedral_angle_grad(lx, ly, lz, 0, 1, 2, 3, derivate, true);
+            if constexpr (VIR)
+                for (int a = 0; a < 4; ++a) { vpx.v[a] = lx[a] - lx[1]; vpy.v[a] = ly[a] - ly[1]; vpz.v[a] = lz[a] - lz[1]; }
+        } else {
+            phi = dihedral_angle_grad(cx, cy, cz, ai, aj, ak, al, derivate, true);
+        }
+
+        double eref = erefhalf[tid];
+        local_E = -eref * cos(2.0 * phi) + eref;
+
+        double dEdphi = 2.0 * eref * sin(2.0 * phi);
+        int atoms[4] = {ai, aj, ak, al};
+        for (int a = 0; a < 4; ++a) {
+            add_grad(grad, atoms[a],
+                     dEdphi * derivate[a][0],
+                     dEdphi * derivate[a][1],
+                     dEdphi * derivate[a][2]);
+        }
+        if constexpr (VIR)
+            for (int a = 0; a < 4; ++a)
+                vir_outer(vacc.v, vpx.v[a], vpy.v[a], vpz.v[a], dEdphi * derivate[a][0], dEdphi * derivate[a][1], dEdphi * derivate[a][2]);
+    }
+
+    blockReduceAddEnergy(local_E, energy);
+    if constexpr (VIR) blockReduceAddVirial(vacc.v, vir);
+}
+
 template <bool PBC>
 __global__ void k_storsions(
     int n,
@@ -2288,12 +2959,120 @@ __global__ void k_storsions(
     blockReduceAddEnergy(local_E, energy);
 }
 
+__global__ GFNFF_KERNEL_BOUNDS void k_storsions_vir(
+    int n,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const int*    __restrict__ idx_k,
+    const int*    __restrict__ idx_l,
+    const double* __restrict__ erefhalf,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    double*                    grad,
+    double*                    energy,
+    double*                    vir   /* B2 (Nov 24, 2026; CUDA A1-GPU) */)
+{
+    k_storsions_body<true, true>(n, idx_i, idx_j, idx_k, idx_l, erefhalf, cx, cy, cz, grad, energy, vir);
+}
+
 // ============================================================================
 // Kernel 9: Bonded ATM (BATM) for 1,4-pairs
 // E = c9 * angr9  where c9 = fi*fj*fk * zb3atm_i*zb3atm_j*zb3atm_k
 // fi = clamp(1 - 3*q_i, -4, 4)   (topology charges)
 // Reference: ff_workspace_gfnff.cpp:calcBATM (lines 1652-1726)
 // ============================================================================
+
+// B2 (Nov 24, 2026, Claude Generated; CUDA A1-GPU): copy of k_batm with the virial blocks, used only by
+// k_batm_vir; k_batm below stays the former source.
+template <bool VIR>
+__device__ __forceinline__ void k_batm_body(
+    int n,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const int*    __restrict__ idx_k,
+    const double* __restrict__ zb3atm_i,
+    const double* __restrict__ zb3atm_j,
+    const double* __restrict__ zb3atm_k,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const double* __restrict__ topo_charges,
+    double*                    grad,
+    double*                    energy,
+    double*                    vir   /* B2 (Nov 24, 2026; CUDA A1-GPU) */)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    double local_E = 0.0;
+    [[maybe_unused]] VirArr<VIR, 9> vacc{};
+
+    if (tid < n) {
+        int i = idx_i[tid], j = idx_j[tid], k = idx_k[tid];
+
+        double ix = cx[i], iy = cy[i], iz = cz[i];
+        double jx = cx[j], jy = cy[j], jz = cz[j];
+        double kx = cx[k], ky = cy[k], kz = cz[k];
+
+        double rij_x = jx-ix, rij_y = jy-iy, rij_z = jz-iz;
+        double rik_x = kx-ix, rik_y = ky-iy, rik_z = kz-iz;
+        double rjk_x = kx-jx, rjk_y = ky-jy, rjk_z = kz-jz;
+
+        double r2ij = rij_x*rij_x + rij_y*rij_y + rij_z*rij_z;
+        double r2ik = rik_x*rik_x + rik_y*rik_y + rik_z*rik_z;
+        double r2jk = rjk_x*rjk_x + rjk_y*rjk_y + rjk_z*rjk_z;
+
+        double rij = sqrt(r2ij), rik = sqrt(r2ik), rjk = sqrt(r2jk);
+        if (rij >= 1e-10 && rik >= 1e-10 && rjk >= 1e-10) {
+            double rijk3 = r2ij * r2jk * r2ik;
+            double mijk  = -r2ij + r2jk + r2ik;
+            double imjk  = r2ij - r2jk + r2ik;
+            double ijmk  = r2ij + r2jk - r2ik;
+
+            double ang = 0.375 * ijmk * imjk * mijk / rijk3;
+            double rav3 = r2ij * rij * r2ik * rik * r2jk * rjk;
+
+            double angr9 = (ang + 1.0) / rav3;
+
+            const double fqq = 3.0;
+            double fi = fmin(fmax(1.0 - fqq * topo_charges[i], -4.0), 4.0);
+            double fj = fmin(fmax(1.0 - fqq * topo_charges[j], -4.0), 4.0);
+            double fk = fmin(fmax(1.0 - fqq * topo_charges[k], -4.0), 4.0);
+
+            double c9 = fi * fj * fk * zb3atm_i[tid] * zb3atm_j[tid] * zb3atm_k[tid];
+            local_E = c9 * angr9;
+
+            double dang_ij = -0.375 * (r2ij*r2ij*r2ij + r2ij*r2ij*(r2jk + r2ik)
+                              + r2ij*(3.0*r2jk*r2jk + 2.0*r2jk*r2ik + 3.0*r2ik*r2ik)
+                              - 5.0*(r2jk - r2ik)*(r2jk - r2ik)*(r2jk + r2ik))
+                              / (rij * rijk3 * rav3);
+
+            double dang_jk = -0.375 * (r2jk*r2jk*r2jk + r2jk*r2jk*(r2ik + r2ij)
+                              + r2jk*(3.0*r2ik*r2ik + 2.0*r2ik*r2ij + 3.0*r2ij*r2ij)
+                              - 5.0*(r2ik - r2ij)*(r2ik - r2ij)*(r2ik + r2ij))
+                              / (rjk * rijk3 * rav3);
+
+            double dang_ik = -0.375 * (r2ik*r2ik*r2ik + r2ik*r2ik*(r2jk + r2ij)
+                              + r2ik*(3.0*r2jk*r2jk + 2.0*r2jk*r2ij + 3.0*r2ij*r2ij)
+                              - 5.0*(r2jk - r2ij)*(r2jk - r2ij)*(r2jk + r2ij))
+                              / (rik * rijk3 * rav3);
+
+            double fij = -dang_ij * c9 / rij;
+            double fjk = -dang_jk * c9 / rjk;
+            double fik = -dang_ik * c9 / rik;
+
+            add_grad(grad, j, -fij*rij_x + fjk*rjk_x, -fij*rij_y + fjk*rjk_y, -fij*rij_z + fjk*rjk_z);
+            add_grad(grad, k, -fik*rik_x - fjk*rjk_x, -fik*rik_y - fjk*rjk_y, -fik*rik_z - fjk*rjk_z);
+            add_grad(grad, i,  fij*rij_x + fik*rik_x,  fij*rij_y + fik*rik_y,  fij*rij_z + fik*rik_z);
+            if constexpr (VIR) {   // B2 (CUDA A1): positions relative to i
+                vir_outer(vacc.v, rij_x, rij_y, rij_z, -fij*rij_x + fjk*rjk_x, -fij*rij_y + fjk*rjk_y, -fij*rij_z + fjk*rjk_z);
+                vir_outer(vacc.v, rik_x, rik_y, rik_z, -fik*rik_x - fjk*rjk_x, -fik*rik_y - fjk*rjk_y, -fik*rik_z - fjk*rjk_z);
+            }
+        }
+    }
+
+    blockReduceAddEnergy(local_E, energy);
+    if constexpr (VIR) blockReduceAddVirial(vacc.v, vir);
+}
 
 __global__ void k_batm(
     int n,
@@ -2374,6 +3153,25 @@ __global__ void k_batm(
     }
 
     blockReduceAddEnergy(local_E, energy);
+}
+
+__global__ GFNFF_KERNEL_BOUNDS void k_batm_vir(
+    int n,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const int*    __restrict__ idx_k,
+    const double* __restrict__ zb3atm_i,
+    const double* __restrict__ zb3atm_j,
+    const double* __restrict__ zb3atm_k,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const double* __restrict__ topo_charges,
+    double*                    grad,
+    double*                    energy,
+    double*                    vir   /* B2 (Nov 24, 2026; CUDA A1-GPU) */)
+{
+    k_batm_body<true>(n, idx_i, idx_j, idx_k, zb3atm_i, zb3atm_j, zb3atm_k, cx, cy, cz, topo_charges, grad, energy, vir);
 }
 
 // ============================================================================
@@ -2575,6 +3373,153 @@ __global__ void k_atm(
 // Reference: ff_workspace_gfnff.cpp:calcHalogenBonds (lines 1402-1510)
 // ============================================================================
 
+// B2 (Nov 24, 2026, Claude Generated; CUDA A1-GPU 277765fc): copy of k_xbonds<PBC> with the virial (VIR) blocks of
+// the CUDA body, used only by k_xbonds_vir (cell and virial). k_xbonds<PBC> below stays the former source: routing it
+// through this body, as CUDA does, changed its gfx1200 ISA (5 of 7 kernels), so the two are kept apart.
+template <bool PBC, bool VIR>
+__device__ __forceinline__ void k_xbonds_body(
+    int n,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const int*    __restrict__ idx_k,
+    const int*    __restrict__ elem_A,
+    const int*    __restrict__ elem_B,
+    const double* __restrict__ q_X,
+    const double* __restrict__ q_B,
+    const double* __restrict__ acidity_X,
+    const double* __restrict__ r_cut,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    double*                    grad,
+    double*                    energy,
+    double*                    vir   /* B2 (Nov 24, 2026; CUDA A1-GPU) */)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    double local_E = 0.0;
+    [[maybe_unused]] VirArr<VIR, 9> vacc{};
+
+    if (tid < n) {
+        const double XB_SCUT_D = 5.0;
+        const double XB_BACUT_D = 70.0;
+        const double HB_ALP_D = 6.0;
+        const double HB_LONGCUT_XB_D = 70.0;
+        const double XB_ST_D = 15.0;
+        const double XB_SF_D = 0.03;
+
+        int A = idx_i[tid], X = idx_j[tid], B = idx_k[tid];
+
+        // Nov 2026 (S1, PBC): local image frame anchored on X, A and B as the images next to X (CPU
+        // calcHalogenBonds, A4b). Else: the former statements (three minimum-image vectors).
+        double ax, ay, az, xx, xy, xz, bx, by, bz;
+        double rAX_x, rAX_y, rAX_z, rXB_x, rXB_y, rXB_z, rAB_x, rAB_y, rAB_z;
+        if constexpr (PBC) {
+            xx = cx[X]; xy = cy[X]; xz = cz[X];
+            micPlace(cx, cy, cz, A, xx, xy, xz, ax, ay, az);
+            micPlace(cx, cy, cz, B, xx, xy, xz, bx, by, bz);
+            rAX_x = xx-ax; rAX_y = xy-ay; rAX_z = xz-az;
+            rXB_x = bx-xx; rXB_y = by-xy; rXB_z = bz-xz;
+            rAB_x = bx-ax; rAB_y = by-ay; rAB_z = bz-az;
+        } else {
+            ax = cx[A]; ay = cy[A]; az = cz[A];
+            xx = cx[X]; xy = cy[X]; xz = cz[X];
+            bx = cx[B]; by = cy[B]; bz = cz[B];
+            rAX_x = xx-ax; rAX_y = xy-ay; rAX_z = xz-az; applyMIC(rAX_x, rAX_y, rAX_z);
+            rXB_x = bx-xx; rXB_y = by-xy; rXB_z = bz-xz; applyMIC(rXB_x, rXB_y, rXB_z);
+            rAB_x = bx-ax; rAB_y = by-ay; rAB_z = bz-az; applyMIC(rAB_x, rAB_y, rAB_z);
+        }
+
+        double r2AX = rAX_x*rAX_x + rAX_y*rAX_y + rAX_z*rAX_z;
+        double r2XB = rXB_x*rXB_x + rXB_y*rXB_y + rXB_z*rXB_z;
+        double r2AB = rAB_x*rAB_x + rAB_y*rAB_y + rAB_z*rAB_z;
+
+        double r_AX = sqrt(r2AX), r_XB = sqrt(r2XB), r_AB = sqrt(r2AB);
+
+        if (r_XB <= r_cut[tid] && r_XB >= 1e-10 && r_AB >= 1e-10) {
+            int eA = elem_A[tid] - 1, eB = elem_B[tid] - 1;
+            double r_vdw_AB = ((eA >= 0 && eA < 100) ? d_cov_radii[eA] : 1.0)
+                            + ((eB >= 0 && eB < 100) ? d_cov_radii[eB] : 1.0);
+
+            double damp_short = d_damping_short_range(r_XB, r_vdw_AB, XB_SCUT_D, HB_ALP_D);
+            double damp_long = d_damping_long_range(r_XB, HB_LONGCUT_XB_D, HB_ALP_D);
+
+            double ratio_outl = (r_AX + r_XB) / r_AB;
+            double expo_outl = XB_BACUT_D * (ratio_outl - 1.0);
+
+            if (expo_outl <= 15.0) {
+                double damp_outl = 2.0 / (1.0 + exp(expo_outl));
+
+                double Q_X = d_charge_scaling(q_X[tid], XB_ST_D, XB_SF_D);
+                double Q_B = d_charge_scaling(-q_B[tid], XB_ST_D, XB_SF_D);
+
+                double r3XB = r_XB * r_XB * r_XB;
+                double R_damp = damp_short * damp_long * damp_outl / r3XB;
+                local_E = -R_damp * Q_B * acidity_X[tid] * Q_X;
+
+                // Gradient
+                double ratio_short = XB_SCUT_D * r_vdw_AB / (r_XB * r_XB);
+                double damp_short_term = 1.0;
+                for (int p = 0; p < (int)HB_ALP_D; ++p) damp_short_term *= ratio_short;
+                // Known Issue #46: d(damp_s)/dr = +2*alp*damp_s*t/(r*(1+t)), d(damp_l)/dr = -2*alp*damp_l*u/(r*(1+u))
+                double ddamp_short_dr = 2.0 * HB_ALP_D * damp_short * damp_short_term
+                                      / (r_XB * (1.0 + damp_short_term));
+
+                double ratio_long = (r_XB * r_XB) / HB_LONGCUT_XB_D;
+                double damp_long_term = 1.0;
+                for (int p = 0; p < (int)HB_ALP_D; ++p) damp_long_term *= ratio_long;
+                double ddamp_long_dr = -2.0 * HB_ALP_D * damp_long * damp_long_term
+                                     / (r_XB * (1.0 + damp_long_term));
+
+                double exp_term = exp(expo_outl);
+                double denom_outl = 1.0 + exp_term;
+                double ddamp_outl_drAX = -2.0 * exp_term * XB_BACUT_D / (r_AB * denom_outl * denom_outl);
+                double ddamp_outl_drXB = ddamp_outl_drAX;
+                double ddamp_outl_drAB = 2.0 * exp_term * XB_BACUT_D * (r_AX + r_XB)
+                                       / (r_AB * r_AB * denom_outl * denom_outl);
+
+                double dRdamp_drXB = (ddamp_short_dr * damp_long * damp_outl
+                                    + damp_short * ddamp_long_dr * damp_outl
+                                    + damp_short * damp_long * ddamp_outl_drXB) / r3XB
+                                   - 3.0 * R_damp / r_XB;
+                double dRdamp_drAX = damp_short * damp_long * ddamp_outl_drAX / r3XB;
+                double dRdamp_drAB = damp_short * damp_long * ddamp_outl_drAB / r3XB;
+
+                double E_pf = -Q_B * acidity_X[tid] * Q_X;
+                double dE_drXB = E_pf * dRdamp_drXB;
+                double dE_drAX = E_pf * dRdamp_drAX;
+                double dE_drAB = E_pf * dRdamp_drAB;
+
+                double inv_rAX = 1.0 / (r_AX + 1e-14);
+                double inv_rXB = 1.0 / (r_XB + 1e-14);
+                double inv_rAB = 1.0 / (r_AB + 1e-14);
+
+                add_grad(grad, A, -dE_drAX * rAX_x * inv_rAX - dE_drAB * rAB_x * inv_rAB,
+                                  -dE_drAX * rAX_y * inv_rAX - dE_drAB * rAB_y * inv_rAB,
+                                  -dE_drAX * rAX_z * inv_rAX - dE_drAB * rAB_z * inv_rAB);
+                add_grad(grad, X, dE_drAX * rAX_x * inv_rAX - dE_drXB * rXB_x * inv_rXB,
+                                  dE_drAX * rAX_y * inv_rAX - dE_drXB * rXB_y * inv_rXB,
+                                  dE_drAX * rAX_z * inv_rAX - dE_drXB * rXB_z * inv_rXB);
+                add_grad(grad, B, dE_drXB * rXB_x * inv_rXB + dE_drAB * rAB_x * inv_rAB,
+                                  dE_drXB * rXB_y * inv_rXB + dE_drAB * rAB_y * inv_rAB,
+                                  dE_drXB * rXB_z * inv_rXB + dE_drAB * rAB_z * inv_rAB);
+                if constexpr (VIR) {   // B2 (CUDA A1): frame anchored on X
+                    vir_outer(vacc.v, ax - xx, ay - xy, az - xz,
+                              -dE_drAX * rAX_x * inv_rAX - dE_drAB * rAB_x * inv_rAB,
+                              -dE_drAX * rAX_y * inv_rAX - dE_drAB * rAB_y * inv_rAB,
+                              -dE_drAX * rAX_z * inv_rAX - dE_drAB * rAB_z * inv_rAB);
+                    vir_outer(vacc.v, bx - xx, by - xy, bz - xz,
+                              dE_drXB * rXB_x * inv_rXB + dE_drAB * rAB_x * inv_rAB,
+                              dE_drXB * rXB_y * inv_rXB + dE_drAB * rAB_y * inv_rAB,
+                              dE_drXB * rXB_z * inv_rXB + dE_drAB * rAB_z * inv_rAB);
+                }
+            }
+        }
+    }
+
+    blockReduceAddEnergy(local_E, energy);
+    if constexpr (VIR) blockReduceAddVirial(vacc.v, vir);
+}
+
 template <bool PBC>
 __global__ void k_xbonds(
     int n,
@@ -2704,6 +3649,27 @@ __global__ void k_xbonds(
     }
 
     blockReduceAddEnergy(local_E, energy);
+}
+
+__global__ GFNFF_KERNEL_BOUNDS void k_xbonds_vir(
+    int n,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const int*    __restrict__ idx_k,
+    const int*    __restrict__ elem_A,
+    const int*    __restrict__ elem_B,
+    const double* __restrict__ q_X,
+    const double* __restrict__ q_B,
+    const double* __restrict__ acidity_X,
+    const double* __restrict__ r_cut,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    double*                    grad,
+    double*                    energy,
+    double*                    vir   /* B2 (Nov 24, 2026; CUDA A1-GPU) */)
+{
+    k_xbonds_body<true, true>(n, idx_i, idx_j, idx_k, elem_A, elem_B, q_X, q_B, acidity_X, r_cut, cx, cy, cz, grad, energy, vir);
 }
 
 // ============================================================================
@@ -2886,6 +3852,700 @@ __global__ void k_hb_charge_scaling(
         Qs_A[tid] = d_charge_scaling(-q_A[tid], 15.0, 1.0);
         Qs_B[tid] = d_charge_scaling(-q_B[tid], 15.0, 1.0);
     }
+}
+
+// B2 (Nov 24, 2026, Claude Generated; CUDA A1-GPU 277765fc): copy of k_hbonds<PBC> with the virial (VIR) blocks of
+// the CUDA body, used only by k_hbonds_vir (cell and virial). k_hbonds<PBC> below stays the former source: routing it
+// through this body, as CUDA does, changed its gfx1200 ISA (5 of 7 kernels), so the two are kept apart.
+template <bool PBC, bool VIR>
+__device__ __forceinline__ void k_hbonds_body(
+    int n,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const int*    __restrict__ idx_k,
+    const int*    __restrict__ elem_A,
+    const int*    __restrict__ elem_B,
+    const double* __restrict__ q_H,
+    const double* __restrict__ q_A,
+    const double* __restrict__ q_B,
+    const double* __restrict__ basicity_A,
+    const double* __restrict__ basicity_B,
+    const double* __restrict__ acidity_A,
+    const double* __restrict__ acidity_B,
+    const double* __restrict__ r_cut,
+    const int*    __restrict__ case_type,
+    const int*    __restrict__ nb_B_offset,
+    const int*    __restrict__ nb_B_count,
+    const int*    __restrict__ nb_B_flat,
+    const int*    __restrict__ acceptor_parent,
+    const int*    __restrict__ nb_C_offset,
+    const int*    __restrict__ nb_C_count,
+    const int*    __restrict__ nb_C_flat,
+    const double* __restrict__ repz_B,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const int*    __restrict__ slot_off,
+    double*       __restrict__ slot_g,
+    const double* __restrict__ Qs_H,
+    const double* __restrict__ Qs_A,
+    const double* __restrict__ Qs_B,
+    double*                    grad,
+    double*                    energy,
+    double*       __restrict__ e_triple,
+    double*                    vir   /* B2 (Nov 24, 2026; CUDA A1-GPU) */)
+{
+    // Claude Generated (Oct 2026): slot mode (slot_g != nullptr). Instead of FP64 atomicAdd into grad (a CAS
+    // loop on gfx1200; the triples of one H/A sit next to each other, so the lanes of a wavefront collide),
+    // every gradient contribution is stored in this triple's own slots [slot_off[tid], slot_off[tid+1]):
+    // A, H, B, neighbours of B (case >= 2), then C and the neighbours of C (case 3 with a parent). Each slot
+    // is written by this thread only; k_slot_gather sums them per atom. Inactive triples zero their slots.
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    double local_E = 0.0;
+    [[maybe_unused]] VirArr<VIR, 9> vacc{};
+    bool slots_written = false;
+
+    if (tid < n) {
+    const int sbase = slot_g ? slot_off[tid] : 0;
+
+    // Constants
+    const double HB_SCUT_D = 22.0;
+    const double HB_ALP_D = 6.0;
+    const double HB_LONGCUT_D = 85.0;
+    const double HB_BACUT_D = 49.0;
+    const double HB_ST_D = 15.0;
+    const double HB_SF_D = 1.0;
+    const double HB_NBCUT_D = 11.20;
+    const double XHACI_GLOBABH_D = 0.268;
+    const double XHACI_COH_D = 0.350;
+    const double BEND_HB_D = 0.20;
+    const double TORS_HB_D = 0.94;
+    const double HBLPCUT_D = 56.0;
+
+    int A = idx_i[tid], H = idx_j[tid], B = idx_k[tid];
+    int ct = case_type[tid];
+
+    // Nov 2026 (S1, PBC): local image frame anchored on H (CPU calcHydrogenBonds, A4b): A and B as the images
+    // next to H, below the neighbours of B and the acceptor parent C next to B, the neighbours D of C next to C.
+    // Else: the former statements (three minimum-image vectors, neighbours read as they are).
+    double ax, ay, az, hx, hy, hz, bx, by, bz;
+    double rAH_x, rAH_y, rAH_z, rHB_x, rHB_y, rHB_z, rAB_x, rAB_y, rAB_z;
+    if constexpr (PBC) {
+        hx = cx[H]; hy = cy[H]; hz = cz[H];
+        micPlace(cx, cy, cz, A, hx, hy, hz, ax, ay, az);
+        micPlace(cx, cy, cz, B, hx, hy, hz, bx, by, bz);
+        rAH_x = hx-ax; rAH_y = hy-ay; rAH_z = hz-az;
+        rHB_x = bx-hx; rHB_y = by-hy; rHB_z = bz-hz;
+        rAB_x = bx-ax; rAB_y = by-ay; rAB_z = bz-az;
+    } else {
+        ax = cx[A]; ay = cy[A]; az = cz[A];
+        hx = cx[H]; hy = cy[H]; hz = cz[H];
+        bx = cx[B]; by = cy[B]; bz = cz[B];
+        rAH_x = hx-ax; rAH_y = hy-ay; rAH_z = hz-az; applyMIC(rAH_x, rAH_y, rAH_z);
+        rHB_x = bx-hx; rHB_y = by-hy; rHB_z = bz-hz; applyMIC(rHB_x, rHB_y, rHB_z);
+        rAB_x = bx-ax; rAB_y = by-ay; rAB_z = bz-az; applyMIC(rAB_x, rAB_y, rAB_z);
+    }
+
+    double r2AH = rAH_x*rAH_x + rAH_y*rAH_y + rAH_z*rAH_z;
+    double r2HB = rHB_x*rHB_x + rHB_y*rHB_y + rHB_z*rHB_z;
+    double r2AB = rAB_x*rAB_x + rAB_y*rAB_y + rAB_z*rAB_z;
+
+    double r_AH = sqrt(r2AH), r_HB = sqrt(r2HB), r_AB = sqrt(r2AB);
+
+    if (r_AB <= r_cut[tid] && r_AB >= 1e-10) {
+
+    double r_AH_4 = r2AH * r2AH;
+    double r_HB_4 = r2HB * r2HB;
+    double denom_DA = 1.0 / (r_AH_4 + r_HB_4);
+
+    // Claude Generated (Oct 2026): Qs_* (k_hb_charge_scaling, same function) when given: 3 exp per triple fewer.
+    double Q_H = Qs_H ? Qs_H[tid] : d_charge_scaling(q_H[tid], HB_ST_D, HB_SF_D);
+    double Q_A = Qs_A ? Qs_A[tid] : d_charge_scaling(-q_A[tid], HB_ST_D, HB_SF_D);
+    double Q_B = Qs_B ? Qs_B[tid] : d_charge_scaling(-q_B[tid], HB_ST_D, HB_SF_D);
+
+    double bas = (Q_A * basicity_A[tid] * r_AH_4 + Q_B * basicity_B[tid] * r_HB_4) * denom_DA;
+    double aci = (acidity_B[tid] * r_AH_4 + acidity_A[tid] * r_HB_4) * denom_DA;
+
+    int eA = elem_A[tid] - 1, eB = elem_B[tid] - 1;
+    double r_vdw_AB = ((eA >= 0 && eA < 100) ? d_cov_radii[eA] : 1.0)
+                    + ((eB >= 0 && eB < 100) ? d_cov_radii[eB] : 1.0);
+
+    // Claude Generated (Oct 2026): d_damping_short_range / d_damping_long_range written out so that the
+    // gradient reuses (scut r_vdw / r^2)^6 and (r^2 / longcut)^6 instead of recomputing them (same operations,
+    // same values bitwise).
+    double p_short = 1.0, p_long = 1.0;
+    {
+        const double rr = r_AB * r_AB;
+        const double ratio_s = HB_SCUT_D * r_vdw_AB / rr;
+        const double ratio_l = rr / HB_LONGCUT_D;
+        for (int i = 0; i < (int)HB_ALP_D; ++i) { p_short *= ratio_s; p_long *= ratio_l; }
+    }
+    double damp_short = 1.0 / (1.0 + p_short);
+    double damp_long = 1.0 / (1.0 + p_long);
+    double damp_env = damp_short * damp_long;
+
+    // Out-of-line damping
+    double rahprbh = r_AH + r_HB + 1e-12;
+    double expo = (HB_BACUT_D / r_vdw_AB) * (rahprbh / r_AB - 1.0);
+
+    if (expo <= 15.0) {
+    const double exp_expo = exp(expo);   // also ratio2 of the gradient
+    double damp_outl = 2.0 / (1.0 + exp_expo);
+
+    // Neighbor out-of-line (Case >= 2)
+    // Claude Generated (Oct 2026): |A - nb| and |B - nb| of the first HB_NB_CACHE neighbours are kept for the
+    // gradient loop below (same values bitwise: the difference vectors there are the negated ones).
+    constexpr int HB_NB_CACHE = 4;
+    double c_ranb[HB_NB_CACHE], c_rbnb[HB_NB_CACHE];
+    double outl_nb_tot = 1.0;
+    if (ct >= 2) {
+        int nb_off = nb_B_offset[tid];
+        int nb_cnt = nb_B_count[tid];
+        double hbnbcut_save = (eB + 1 == 7 && nb_cnt == 1) ? 2.0 : HB_NBCUT_D;
+        for (int ni = 0; ni < nb_cnt; ++ni) {
+            int nb = nb_B_flat[nb_off + ni];
+            double nbx, nby, nbz;
+            if constexpr (PBC) micPlace(cx, cy, cz, nb, bx, by, bz, nbx, nby, nbz);   // neighbour next to B
+            else { nbx = cx[nb]; nby = cy[nb]; nbz = cz[nb]; }
+            double dAnb_x = nbx-ax, dAnb_y = nby-ay, dAnb_z = nbz-az;
+            double dBnb_x = nbx-bx, dBnb_y = nby-by, dBnb_z = nbz-bz;
+            double r_Anb = sqrt(dAnb_x*dAnb_x + dAnb_y*dAnb_y + dAnb_z*dAnb_z);
+            double r_Bnb = sqrt(dBnb_x*dBnb_x + dBnb_y*dBnb_y + dBnb_z*dBnb_z);
+            if (ni < HB_NB_CACHE) { c_ranb[ni] = r_Anb; c_rbnb[ni] = r_Bnb; }
+            double expo_nb = (hbnbcut_save / r_vdw_AB) * ((r_Anb + r_Bnb) / r_AB - 1.0);
+            outl_nb_tot *= (2.0 / (1.0 + exp(-expo_nb)) - 1.0);
+        }
+    }
+
+    // Case 4: Virtual LP — save state for gradient
+    double outl_lp = 1.0;
+    double lp_dist_c4 = 0, lp_vx_c4 = 0, lp_vy_c4 = 0, lp_vz_c4 = 0;
+    double vnorm_c4 = 0, ralp_c4 = 0, expo_lp_c4 = 0, exp_lp_c4 = 0;   // exp_lp_c4: Oct 2026, reused by the gradient
+    double lpx_c4 = 0, lpy_c4 = 0, lpz_c4 = 0;
+    int nbb_lp_c4 = 0;
+    if (ct == 4) {
+        lp_dist_c4 = 0.50 - 0.018 * repz_B[tid];
+        int nb_off = nb_B_offset[tid];
+        int nb_cnt = nb_B_count[tid];
+        nbb_lp_c4 = nb_cnt;
+        if (nb_cnt > 0) {
+            for (int ni = 0; ni < nb_cnt; ++ni) {
+                int nb = nb_B_flat[nb_off + ni];
+                if constexpr (PBC) {
+                    double nbx, nby, nbz;
+                    micPlace(cx, cy, cz, nb, bx, by, bz, nbx, nby, nbz);   // neighbour next to B
+                    lp_vx_c4 += nbx - bx;
+                    lp_vy_c4 += nby - by;
+                    lp_vz_c4 += nbz - bz;
+                } else {
+                    lp_vx_c4 += cx[nb] - bx;
+                    lp_vy_c4 += cy[nb] - by;
+                    lp_vz_c4 += cz[nb] - bz;
+                }
+            }
+            vnorm_c4 = sqrt(lp_vx_c4*lp_vx_c4 + lp_vy_c4*lp_vy_c4 + lp_vz_c4*lp_vz_c4);
+            if (vnorm_c4 > 1e-10) {
+                lpx_c4 = bx + (-lp_dist_c4) * lp_vx_c4 / vnorm_c4;
+                lpy_c4 = by + (-lp_dist_c4) * lp_vy_c4 / vnorm_c4;
+                lpz_c4 = bz + (-lp_dist_c4) * lp_vz_c4 / vnorm_c4;
+                double dAlp_x = ax - lpx_c4, dAlp_y = ay - lpy_c4, dAlp_z = az - lpz_c4;
+                ralp_c4 = sqrt(dAlp_x*dAlp_x + dAlp_y*dAlp_y + dAlp_z*dAlp_z);
+                expo_lp_c4 = (HBLPCUT_D / r_vdw_AB) * ((ralp_c4 + lp_dist_c4 + 1e-12) / r_AB - 1.0);
+                exp_lp_c4 = exp(expo_lp_c4);
+                outl_lp = 2.0 / (1.0 + exp_lp_c4);
+            } else {
+                nbb_lp_c4 = 0;
+            }
+        }
+    }
+
+    double qhoutl = Q_H * damp_outl * outl_nb_tot * outl_lp;
+
+    // rdamp: case-dependent distance decay
+    double rdamp;
+    if (ct >= 2) {
+        rdamp = damp_env * (1.8 / (r_HB * r_HB * r_HB) - 0.8 / (r_AB * r_AB * r_AB));
+    } else {
+        rdamp = damp_env / (r_AB * r_AB * r_AB);
+    }
+
+    // Case 3: eangl + etors
+    double eangl = 1.0, etors = 1.0;
+    if (ct == 3 && acceptor_parent[tid] >= 0) {
+        int C_idx = acceptor_parent[tid];
+
+        // PBC: C next to B (frame); the D-B-C-H chain below reads slots 0..3 = D, B, C, H with D next to C
+        double C_x, C_y, C_z;
+        if constexpr (PBC) micPlace(cx, cy, cz, C_idx, bx, by, bz, C_x, C_y, C_z);
+        else { C_x = cx[C_idx]; C_y = cy[C_idx]; C_z = cz[C_idx]; }
+
+        // eangl: angle bending H...B=C
+        {
+            double vab_x = C_x-bx, vab_y = C_y-by, vab_z = C_z-bz;
+            double vcb_x = hx-bx, vcb_y = hy-by, vcb_z = hz-bz;
+            double rab2a = vab_x*vab_x + vab_y*vab_y + vab_z*vab_z;
+            double rcb2a = vcb_x*vcb_x + vcb_y*vcb_y + vcb_z*vcb_z;
+
+            double cosa = (vab_x*vcb_x + vab_y*vcb_y + vab_z*vcb_z) / (sqrt(rab2a) * sqrt(rcb2a) + 1e-14);
+            cosa = fmax(-1.0, fmin(1.0, cosa));
+            double theta_a = acos(cosa);
+
+            double c0 = 120.0 * M_PI / 180.0;
+            double fc_bend = 1.0 - BEND_HB_D;
+            double kijk = fc_bend / ((cos(0.0) - cos(c0)) * (cos(0.0) - cos(c0)));
+
+            double ea;
+            if (M_PI - c0 < 1e-6) {
+                double dt = theta_a - c0;
+                ea = kijk * dt * dt;
+            } else {
+                ea = kijk * (cosa - cos(c0)) * (cosa - cos(c0));
+            }
+            eangl = 1.0 - ea;
+        }
+
+        // etors: product of D-B-C-H torsion terms
+        int nc_off = nb_C_offset[tid];
+        int nc_cnt = nb_C_count[tid];
+        for (int ni = 0; ni < nc_cnt; ++ni) {
+            int D_idx = nb_C_flat[nc_off + ni];
+            if (D_idx == B) continue;
+
+            double derivate[4][3];
+            double phi;
+            if constexpr (PBC) {
+                double tx[4] = { 0.0, bx, C_x, hx }, ty[4] = { 0.0, by, C_y, hy }, tz[4] = { 0.0, bz, C_z, hz };
+                micPlace(cx, cy, cz, D_idx, C_x, C_y, C_z, tx[0], ty[0], tz[0]);   // D next to C
+                phi = dihedral_angle_grad(tx, ty, tz, 0, 1, 2, 3, derivate, false);
+            } else {
+                phi = dihedral_angle_grad(cx, cy, cz, D_idx, B, C_idx, H, derivate, false);
+            }
+
+            double tshift = TORS_HB_D;
+            double fc_tors = (1.0 - tshift) / 2.0;
+            double phi0_tors = M_PI / 2.0;
+            int rn = 2;
+            double c1 = rn * (phi - phi0_tors) + M_PI;
+            double et = (1.0 + cos(c1)) * fc_tors + tshift;
+            etors *= et;
+        }
+    }
+
+    // Energy: case-specific formula
+    double global_scale = 1.0;
+    if (ct == 2 || ct == 4) global_scale = XHACI_GLOBABH_D;
+    else if (ct == 3) global_scale = XHACI_COH_D;
+
+    double E_HB;
+    if (ct >= 2) {
+        double const_val = acidity_A[tid] * basicity_B[tid] * Q_A * Q_B * global_scale;
+        E_HB = -rdamp * qhoutl * const_val * eangl * etors;
+    } else {
+        E_HB = -bas * aci * rdamp * qhoutl;
+    }
+    local_E = E_HB;
+
+    // ========== Gradient ==========
+    // Full analytical gradient matching CPU calcHydrogenBonds
+    double rab2 = r_AB * r_AB;
+    double rbh2 = r_HB * r_HB;
+    double rah2 = r_AH * r_AH;
+
+    // Damping derivative intermediates (Oct 2026: the powers and exp(expo) come from the energy part)
+    const double ratio1_pow = p_long;    // (rab2 / longcut)^6
+    const double ratio3_pow = p_short;   // (scut r_vdw / rab2)^6
+    double ddamp = (-2.0 * HB_ALP_D * ratio1_pow / (1.0 + ratio1_pow))
+                 + ( 2.0 * HB_ALP_D * ratio3_pow / (1.0 + ratio3_pow));
+
+    const double ratio2 = exp_expo;
+
+    // Distance vectors (Fortran convention: A-B, A-H, B-H)
+    double drab_x = ax-bx, drab_y = ay-by, drab_z = az-bz;
+    double drah_x = ax-hx, drah_y = ay-hy, drah_z = az-hz;
+    double drbh_x = bx-hx, drbh_y = by-hy, drbh_z = bz-hz;
+
+    double ga_x=0, ga_y=0, ga_z=0;
+    double gb_x=0, gb_y=0, gb_z=0;
+    double gh_x=0, gh_y=0, gh_z=0;
+
+    if (ct >= 2) {
+        // Case 2/3/4 gradient
+        double const_val = acidity_A[tid] * basicity_B[tid] * Q_A * Q_B * global_scale;
+        double dterm  = -qhoutl * eangl * etors * const_val;
+        double aterm  = -rdamp * Q_H * outl_nb_tot * outl_lp * eangl * etors * const_val;
+        double nbterm = -rdamp * Q_H * damp_outl * outl_lp * eangl * etors * const_val;
+
+        double p_bh = 1.8, p_ab = -0.8;
+        double rbhdamp = damp_env * p_bh / (rbh2 * r_HB);
+        double rabdamp = damp_env * p_ab / (rab2 * r_AB);
+
+        // rab damping
+        double gi = ((rabdamp + rbhdamp) * ddamp - 3.0 * rabdamp) / rab2 * dterm;
+        ga_x = gi * drab_x; ga_y = gi * drab_y; ga_z = gi * drab_z;
+        gb_x = -ga_x; gb_y = -ga_y; gb_z = -ga_z;
+
+        // rbh damping
+        gi = -3.0 * rbhdamp / rbh2 * dterm;
+        gb_x += gi * drbh_x; gb_y += gi * drbh_y; gb_z += gi * drbh_z;
+        gh_x = -gi * drbh_x; gh_y = -gi * drbh_y; gh_z = -gi * drbh_z;
+
+        // Out-of-line: rab
+        double tmp1 = -2.0 * aterm * ratio2 * expo
+                    / ((1.0 + ratio2) * (1.0 + ratio2))
+                    / (rahprbh - r_AB);
+        gi = -tmp1 * rahprbh / rab2;
+        ga_x += gi * drab_x; ga_y += gi * drab_y; ga_z += gi * drab_z;
+        gb_x -= gi * drab_x; gb_y -= gi * drab_y; gb_z -= gi * drab_z;
+
+        // Out-of-line: rah, rbh
+        gi = tmp1 / r_AH;
+        double dga_outl_x = gi * drah_x, dga_outl_y = gi * drah_y, dga_outl_z = gi * drah_z;
+        ga_x += dga_outl_x; ga_y += dga_outl_y; ga_z += dga_outl_z;
+        gi = tmp1 / r_HB;
+        double dgb_outl_x = gi * drbh_x, dgb_outl_y = gi * drbh_y, dgb_outl_z = gi * drbh_z;
+        gb_x += dgb_outl_x; gb_y += dgb_outl_y; gb_z += dgb_outl_z;
+        gh_x += -dga_outl_x - dgb_outl_x;
+        gh_y += -dga_outl_y - dgb_outl_y;
+        gh_z += -dga_outl_z - dgb_outl_z;
+
+        // Neighbor gradient (Case >= 2)
+        {
+            int nb_off = nb_B_offset[tid];
+            int nb_cnt = nb_B_count[tid];
+            double hbnbcut_g = (eB + 1 == 7 && nb_cnt == 1) ? 2.0 : HB_NBCUT_D;
+            for (int ni = 0; ni < nb_cnt; ++ni) {
+                int nb = nb_B_flat[nb_off + ni];
+                double nbx, nby, nbz;
+                if constexpr (PBC) micPlace(cx, cy, cz, nb, bx, by, bz, nbx, nby, nbz);   // neighbour next to B (as above)
+                else { nbx = cx[nb]; nby = cy[nb]; nbz = cz[nb]; }
+                double dranb_x = ax-nbx, dranb_y = ay-nby, dranb_z = az-nbz;
+                double drbnb_x = bx-nbx, drbnb_y = by-nby, drbnb_z = bz-nbz;
+                double ranb, rbnb;
+                if (ni < HB_NB_CACHE) { ranb = c_ranb[ni]; rbnb = c_rbnb[ni]; }
+                else {
+                    ranb = sqrt(dranb_x*dranb_x + dranb_y*dranb_y + dranb_z*dranb_z);
+                    rbnb = sqrt(drbnb_x*drbnb_x + drbnb_y*drbnb_y + drbnb_z*drbnb_z);
+                }
+                double ranbprbnb = ranb + rbnb + 1e-12;
+
+                double expo_nb_i = (hbnbcut_g / r_vdw_AB) * (ranbprbnb / r_AB - 1.0);
+                double ratio2_nb_i = exp(-expo_nb_i);
+                double outl_nb_i = 2.0 / (1.0 + ratio2_nb_i) - 1.0;
+
+                double outl_nb_others = (fabs(outl_nb_i) > 1e-12) ? outl_nb_tot / outl_nb_i : 1.0;
+
+                double tmp2 = 2.0 * nbterm * outl_nb_others * ratio2_nb_i * expo_nb_i
+                            / ((1.0 + ratio2_nb_i) * (1.0 + ratio2_nb_i))
+                            / (ranbprbnb - r_AB);
+
+                double gi_nb = -tmp2 * ranbprbnb / rab2;
+                ga_x += gi_nb * drab_x; ga_y += gi_nb * drab_y; ga_z += gi_nb * drab_z;
+                gb_x -= gi_nb * drab_x; gb_y -= gi_nb * drab_y; gb_z -= gi_nb * drab_z;
+
+                gi_nb = tmp2 / ranb;
+                double dga_nb_x = gi_nb * dranb_x, dga_nb_y = gi_nb * dranb_y, dga_nb_z = gi_nb * dranb_z;
+                ga_x += dga_nb_x; ga_y += dga_nb_y; ga_z += dga_nb_z;
+                gi_nb = tmp2 / rbnb;
+                double dgb_nb_x = gi_nb * drbnb_x, dgb_nb_y = gi_nb * drbnb_y, dgb_nb_z = gi_nb * drbnb_z;
+                gb_x += dgb_nb_x; gb_y += dgb_nb_y; gb_z += dgb_nb_z;
+                if (slot_g) {
+                    double* g = slot_g + 3 * (sbase + 3 + ni);   // first write of this slot
+                    g[0] = -dga_nb_x - dgb_nb_x; g[1] = -dga_nb_y - dgb_nb_y; g[2] = -dga_nb_z - dgb_nb_z;
+                } else {
+                    add_grad(grad, nb, -dga_nb_x - dgb_nb_x, -dga_nb_y - dgb_nb_y, -dga_nb_z - dgb_nb_z);
+                }
+                if constexpr (VIR)   // B2 (CUDA A1): positions relative to H (frame anchor)
+                    vir_outer(vacc.v, nbx - hx, nby - hy, nbz - hz, -dga_nb_x - dgb_nb_x, -dga_nb_y - dgb_nb_y, -dga_nb_z - dgb_nb_z);
+            }
+        }
+
+        // Case 3: eangl + etors gradient (simplified — gradient contributions for angle/torsion
+        // are complex and involve 4+ atoms per torsion; computed here for the 3 primary atoms only)
+        // Full case 3 gradient for angle bending term
+        if (ct == 3 && acceptor_parent[tid] >= 0) {
+            int C_idx = acceptor_parent[tid];
+            double bterm_c3 = -rdamp * qhoutl * etors * acidity_A[tid] * basicity_B[tid] * Q_A * Q_B * global_scale;
+            // Angle gradient: H...B=C angle (PBC: C next to B, the frame of the energy part)
+            double C_x, C_y, C_z;
+            if constexpr (PBC) micPlace(cx, cy, cz, C_idx, bx, by, bz, C_x, C_y, C_z);
+            else { C_x = cx[C_idx]; C_y = cy[C_idx]; C_z = cz[C_idx]; }
+            double vab_x = C_x-bx, vab_y = C_y-by, vab_z = C_z-bz;
+            double vcb_x = hx-bx, vcb_y = hy-by, vcb_z = hz-bz;
+            double rab2a = vab_x*vab_x + vab_y*vab_y + vab_z*vab_z;
+            double rcb2a = vcb_x*vcb_x + vcb_y*vcb_y + vcb_z*vcb_z;
+
+            // Cross product vcb × vab
+            double vp_x = vcb_y*vab_z - vcb_z*vab_y;
+            double vp_y = vcb_z*vab_x - vcb_x*vab_z;
+            double vp_z = vcb_x*vab_y - vcb_y*vab_x;
+            double rp = sqrt(vp_x*vp_x + vp_y*vp_y + vp_z*vp_z) + 1e-14;
+
+            double cosa = (vab_x*vcb_x + vab_y*vcb_y + vab_z*vcb_z) / (sqrt(rab2a) * sqrt(rcb2a) + 1e-14);
+            cosa = fmax(-1.0, fmin(1.0, cosa));
+            double theta_a = acos(cosa);
+
+            double c0 = 120.0 * M_PI / 180.0;
+            double fc_bend = 1.0 - BEND_HB_D;
+            double kijk = fc_bend / ((cos(0.0) - cos(c0)) * (cos(0.0) - cos(c0)));
+
+            double deddt;
+            if (M_PI - c0 < 1e-6) {
+                deddt = 2.0 * kijk * (theta_a - c0);
+            } else {
+                deddt = 2.0 * kijk * sin(theta_a) * (cos(c0) - cosa);
+            }
+
+            // deda = vab × vp * (-deddt / (rab2a * rp))
+            double ax_x = vab_y*vp_z - vab_z*vp_y;
+            double ax_y = vab_z*vp_x - vab_x*vp_z;
+            double ax_z = vab_x*vp_y - vab_y*vp_x;
+            double f_a = -deddt / (rab2a * rp);
+            double deda_x = ax_x * f_a, deda_y = ax_y * f_a, deda_z = ax_z * f_a;
+
+            // dedc = vcb × vp * (deddt / (rcb2a * rp))
+            double cx_x = vcb_y*vp_z - vcb_z*vp_y;
+            double cx_y = vcb_z*vp_x - vcb_x*vp_z;
+            double cx_z = vcb_x*vp_y - vcb_y*vp_x;
+            double f_c = deddt / (rcb2a * rp);
+            double dedc_x = cx_x * f_c, dedc_y = cx_y * f_c, dedc_z = cx_z * f_c;
+
+            double dedb_x = deda_x + dedc_x;
+            double dedb_y = deda_y + dedc_y;
+            double dedb_z = deda_z + dedc_z;
+
+            // gangl_3body: row0=B, row1=C, row2=H
+            gb_x += bterm_c3 * dedb_x; gb_y += bterm_c3 * dedb_y; gb_z += bterm_c3 * dedb_z;
+            // Slot mode: C sits after the nb_B slots, its neighbours D follow (same order as nb_C_flat).
+            const int sC = sbase + 3 + nb_B_count[tid];
+            if (slot_g) {
+                double* g = slot_g + 3 * sC;   // first write of the C slot
+                g[0] = bterm_c3 * (-deda_x); g[1] = bterm_c3 * (-deda_y); g[2] = bterm_c3 * (-deda_z);
+            } else {
+                add_grad(grad, C_idx, bterm_c3 * (-deda_x), bterm_c3 * (-deda_y), bterm_c3 * (-deda_z));
+            }
+            if constexpr (VIR)
+                vir_outer(vacc.v, C_x - hx, C_y - hy, C_z - hz, bterm_c3 * (-deda_x), bterm_c3 * (-deda_y), bterm_c3 * (-deda_z));
+            gh_x += bterm_c3 * (-dedc_x); gh_y += bterm_c3 * (-dedc_y); gh_z += bterm_c3 * (-dedc_z);
+
+            // Torsion gradient: D-B-C-H for each neighbor of C
+            double tterm_c3 = -rdamp * qhoutl * eangl * acidity_A[tid] * basicity_B[tid] * Q_A * Q_B * global_scale;
+            int nc_off = nb_C_offset[tid];
+            int nc_cnt = nb_C_count[tid];
+
+            // Compute individual torsion energies for product rule
+            // We need etors/et_k for each k, so we need individual et values
+            for (int ni = 0; ni < nc_cnt; ++ni) {
+                int D_idx = nb_C_flat[nc_off + ni];
+                if (D_idx == B) {
+                    if (slot_g) {
+                        double* g = slot_g + 3 * (sC + 1 + ni);
+                        g[0] = 0.0; g[1] = 0.0; g[2] = 0.0;
+                    }
+                    continue;
+                }
+
+                double derivate[4][3];
+                double phi;
+                [[maybe_unused]] VirArr<VIR, 3> Dp{};   // B2 (CUDA A1): D in the frame (VIR only)
+                if constexpr (PBC) {
+                    double tx[4] = { 0.0, bx, C_x, hx }, ty[4] = { 0.0, by, C_y, hy }, tz[4] = { 0.0, bz, C_z, hz };
+                    micPlace(cx, cy, cz, D_idx, C_x, C_y, C_z, tx[0], ty[0], tz[0]);   // D next to C
+                    phi = dihedral_angle_grad(tx, ty, tz, 0, 1, 2, 3, derivate, true);
+                    if constexpr (VIR) { Dp.v[0] = tx[0]; Dp.v[1] = ty[0]; Dp.v[2] = tz[0]; }
+                } else {
+                    phi = dihedral_angle_grad(cx, cy, cz, D_idx, B, C_idx, H, derivate, true);
+                }
+
+                double tshift = TORS_HB_D;
+                double fc_tors = (1.0 - tshift) / 2.0;
+                double phi0_tors = M_PI / 2.0;
+                int rn = 2;
+                double c1 = rn * (phi - phi0_tors) + M_PI;
+                double et = (1.0 + cos(c1)) * fc_tors + tshift;
+                double dij = -rn * sin(c1) * fc_tors;
+
+                double factor_k = (fabs(et) > 1e-12) ? etors / et : 0.0;
+                double t_k = factor_k * tterm_c3;
+
+                if (slot_g) {
+                    double* gD = slot_g + 3 * (sC + 1 + ni);
+                    gD[0] = t_k * dij * derivate[0][0]; gD[1] = t_k * dij * derivate[0][1]; gD[2] = t_k * dij * derivate[0][2];
+                    double* gC = slot_g + 3 * sC;
+                    gC[0] += t_k * dij * derivate[2][0]; gC[1] += t_k * dij * derivate[2][1]; gC[2] += t_k * dij * derivate[2][2];
+                } else {
+                    add_grad(grad, D_idx, t_k * dij * derivate[0][0], t_k * dij * derivate[0][1], t_k * dij * derivate[0][2]);
+                    add_grad(grad, C_idx, t_k * dij * derivate[2][0], t_k * dij * derivate[2][1], t_k * dij * derivate[2][2]);
+                }
+                if constexpr (VIR) {
+                    vir_outer(vacc.v, Dp.v[0] - hx, Dp.v[1] - hy, Dp.v[2] - hz, t_k * dij * derivate[0][0], t_k * dij * derivate[0][1], t_k * dij * derivate[0][2]);
+                    vir_outer(vacc.v, C_x - hx, C_y - hy, C_z - hz, t_k * dij * derivate[2][0], t_k * dij * derivate[2][1], t_k * dij * derivate[2][2]);
+                }
+                gb_x += t_k * dij * derivate[1][0]; gb_y += t_k * dij * derivate[1][1]; gb_z += t_k * dij * derivate[1][2];
+                gh_x += t_k * dij * derivate[3][0]; gh_y += t_k * dij * derivate[3][1]; gh_z += t_k * dij * derivate[3][2];
+            }
+        }
+
+        // Case 4: LP out-of-line gradient (matching CPU calcHydrogenBonds)
+        if (ct == 4 && nbb_lp_c4 > 0) {
+            double lpterm = -rdamp * Q_H * damp_outl * outl_nb_tot * eangl * etors * const_val;
+            double rblp = lp_dist_c4;
+            double ralpprblp = ralp_c4 + rblp + 1e-12;
+            double ratio2_lp = exp_lp_c4;   // nbb_lp_c4 > 0 implies it was set in the energy part
+
+            // LP out-of-line: rab
+            double tmp3 = -2.0 * lpterm * ratio2_lp * expo_lp_c4
+                        / ((1.0 + ratio2_lp) * (1.0 + ratio2_lp))
+                        / (ralpprblp - r_AB);
+            double gi_lp = -tmp3 * ralpprblp / rab2;
+            ga_x += gi_lp * drab_x; ga_y += gi_lp * drab_y; ga_z += gi_lp * drab_z;
+            gb_x -= gi_lp * drab_x; gb_y -= gi_lp * drab_y; gb_z -= gi_lp * drab_z;
+
+            // LP out-of-line: ralp  (dralp = pos_A - lp_pos)
+            double dralp_x = ax - lpx_c4, dralp_y = ay - lpy_c4, dralp_z = az - lpz_c4;
+            gi_lp = tmp3 / (ralp_c4 + 1e-12);
+            double dga_lp_x = gi_lp * dralp_x, dga_lp_y = gi_lp * dralp_y, dga_lp_z = gi_lp * dralp_z;
+            ga_x += dga_lp_x; ga_y += dga_lp_y; ga_z += dga_lp_z;
+            // Fortran: gb -= dga (uses dga, not dgb)
+            gb_x -= dga_lp_x; gb_y -= dga_lp_y; gb_z -= dga_lp_z;
+
+            double glp_x = -dga_lp_x, glp_y = -dga_lp_y, glp_z = -dga_lp_z;
+
+            // LP neighbor chain rule
+            if (vnorm_c4 > 1e-10) {
+                // gii matrix × glp vector (3×3 matmul)
+                // gii.col(c) = -lp_dist * nbb * (unit_c/vnorm + lp_v * lp_v(c) / vnorm^3)
+                // gnb = gii * glp
+                double inv_v = 1.0 / vnorm_c4;
+                double inv_v3 = inv_v * inv_v * inv_v;
+                double fac = -lp_dist_c4 * (double)nbb_lp_c4;
+
+                // gii[r][c] = fac * (-delta(r,c)/vnorm + lp_v[r]*lp_v[c]/vnorm^3)
+                // gnb[r] = sum_c gii[r][c] * glp[c]
+                double gnb_x = 0, gnb_y = 0, gnb_z = 0;
+                for (int c = 0; c < 3; ++c) {
+                    double glp_c = (c==0) ? glp_x : (c==1) ? glp_y : glp_z;
+                    double unit_c = (c==0) ? -1.0 : 0.0;
+                    double lp_vc = (c==0) ? lp_vx_c4 : (c==1) ? lp_vy_c4 : lp_vz_c4;
+                    // gii column c, row x
+                    gnb_x += fac * (((c==0)?-1.0:0.0) * inv_v + lp_vx_c4 * lp_vc * inv_v3) * glp_c;
+                    gnb_y += fac * (((c==1)?-1.0:0.0) * inv_v + lp_vy_c4 * lp_vc * inv_v3) * glp_c;
+                    gnb_z += fac * (((c==2)?-1.0:0.0) * inv_v + lp_vz_c4 * lp_vc * inv_v3) * glp_c;
+                }
+                gb_x += gnb_x; gb_y += gnb_y; gb_z += gnb_z;
+                // Distribute to neighbors
+                double gnb_share_x = gnb_x / (double)nbb_lp_c4;
+                double gnb_share_y = gnb_y / (double)nbb_lp_c4;
+                double gnb_share_z = gnb_z / (double)nbb_lp_c4;
+                int nb_off = nb_B_offset[tid];
+                for (int ni = 0; ni < nbb_lp_c4; ++ni) {
+                    if (slot_g) {
+                        double* g = slot_g + 3 * (sbase + 3 + ni);   // already written by the out-of-line loop
+                        g[0] += -gnb_share_x; g[1] += -gnb_share_y; g[2] += -gnb_share_z;
+                    } else {
+                        int nb = nb_B_flat[nb_off + ni];
+                        add_grad(grad, nb, -gnb_share_x, -gnb_share_y, -gnb_share_z);
+                    }
+                    if constexpr (VIR) {
+                        const int nbv = nb_B_flat[nb_off + ni];
+                        double nbx, nby, nbz;
+                        micPlace(cx, cy, cz, nbv, bx, by, bz, nbx, nby, nbz);   // neighbour next to B, as the LP vector
+                        vir_outer(vacc.v, nbx - hx, nby - hy, nbz - hz, -gnb_share_x, -gnb_share_y, -gnb_share_z);
+                    }
+                }
+            }
+        }
+
+    } else {
+        // Case 1 gradient
+        double caa = Q_A * basicity_A[tid];
+        double cbb = Q_B * basicity_B[tid];
+
+        double rterm = -aci * rdamp * qhoutl;
+        double dterm = -aci * bas * qhoutl;
+        double sterm = -rdamp * bas * qhoutl;
+        double aterm = -aci * bas * rdamp * Q_H;
+
+        double denom_val = 1.0 / (r_AH_4 + r_HB_4);
+        double tmp_c1 = denom_val * denom_val * 4.0;
+        double dd24a = rah2 * r_HB_4 * tmp_c1;
+        double dd24b = rbh2 * r_AH_4 * tmp_c1;
+
+        // bas: rah
+        double gi = (caa - cbb) * dd24a * rterm;
+        ga_x = gi * drah_x; ga_y = gi * drah_y; ga_z = gi * drah_z;
+        gi = (cbb - caa) * dd24b * rterm;
+        gb_x = gi * drbh_x; gb_y = gi * drbh_y; gb_z = gi * drbh_z;
+        gh_x = -ga_x - gb_x; gh_y = -ga_y - gb_y; gh_z = -ga_z - gb_z;
+
+        // aci
+        gi = (acidity_B[tid] - acidity_A[tid]) * dd24a;
+        double dga_aci_x = gi * drah_x * sterm, dga_aci_y = gi * drah_y * sterm, dga_aci_z = gi * drah_z * sterm;
+        ga_x += dga_aci_x; ga_y += dga_aci_y; ga_z += dga_aci_z;
+        gi = (acidity_A[tid] - acidity_B[tid]) * dd24b;
+        double dgb_aci_x = gi * drbh_x * sterm, dgb_aci_y = gi * drbh_y * sterm, dgb_aci_z = gi * drbh_z * sterm;
+        gb_x += dgb_aci_x; gb_y += dgb_aci_y; gb_z += dgb_aci_z;
+        gh_x += -dga_aci_x - dgb_aci_x; gh_y += -dga_aci_y - dgb_aci_y; gh_z += -dga_aci_z - dgb_aci_z;
+
+        // Damping: rab
+        gi = rdamp * (ddamp - 3.0) / rab2;
+        double dg_x = gi * drab_x * dterm, dg_y = gi * drab_y * dterm, dg_z = gi * drab_z * dterm;
+        ga_x += dg_x; ga_y += dg_y; ga_z += dg_z;
+        gb_x -= dg_x; gb_y -= dg_y; gb_z -= dg_z;
+
+        // Out-of-line: rab
+        gi = aterm * 2.0 * ratio2 * expo * rahprbh
+           / ((1.0 + ratio2) * (1.0 + ratio2))
+           / (rahprbh - r_AB) / rab2;
+        dg_x = gi * drab_x; dg_y = gi * drab_y; dg_z = gi * drab_z;
+        ga_x += dg_x; ga_y += dg_y; ga_z += dg_z;
+        gb_x -= dg_x; gb_y -= dg_y; gb_z -= dg_z;
+
+        // Out-of-line: rah, rbh
+        double tmp_outl = -2.0 * aterm * ratio2 * expo
+                        / ((1.0 + ratio2) * (1.0 + ratio2))
+                        / (rahprbh - r_AB);
+        double dga_o_x = drah_x * tmp_outl / r_AH, dga_o_y = drah_y * tmp_outl / r_AH, dga_o_z = drah_z * tmp_outl / r_AH;
+        ga_x += dga_o_x; ga_y += dga_o_y; ga_z += dga_o_z;
+        double dgb_o_x = drbh_x * tmp_outl / r_HB, dgb_o_y = drbh_y * tmp_outl / r_HB, dgb_o_z = drbh_z * tmp_outl / r_HB;
+        gb_x += dgb_o_x; gb_y += dgb_o_y; gb_z += dgb_o_z;
+        gh_x += -dga_o_x - dgb_o_x; gh_y += -dga_o_y - dgb_o_y; gh_z += -dga_o_z - dgb_o_z;
+    }
+
+    if (slot_g) {
+        double* g = slot_g + 3 * sbase;   // slots 0, 1, 2 = A, H, B
+        g[0] = ga_x; g[1] = ga_y; g[2] = ga_z;
+        g[3] = gh_x; g[4] = gh_y; g[5] = gh_z;
+        g[6] = gb_x; g[7] = gb_y; g[8] = gb_z;
+        slots_written = true;
+    } else {
+        add_grad(grad, A, ga_x, ga_y, ga_z);
+        add_grad(grad, B, gb_x, gb_y, gb_z);
+        add_grad(grad, H, gh_x, gh_y, gh_z);
+    }
+    if constexpr (VIR) {   // H is the origin of the frame: its row drops out
+        vir_outer(vacc.v, ax - hx, ay - hy, az - hz, ga_x, ga_y, ga_z);
+        vir_outer(vacc.v, bx - hx, by - hy, bz - hz, gb_x, gb_y, gb_z);
+    }
+
+    } // expo <= 15.0
+    } // r_AB in range
+
+    // Slot mode: a triple outside the range contributes nothing; clear its slots.
+    if (slot_g && !slots_written) {
+        for (int s = sbase; s < slot_off[tid + 1]; ++s) {
+            slot_g[3*s] = 0.0; slot_g[3*s + 1] = 0.0; slot_g[3*s + 2] = 0.0;
+        }
+    }
+
+    // Claude Generated (Oct 2026): per-triple energy on request (FFWorkspaceHip::setRecordHBondEnergies),
+    // device order. local_E is E_HB of this triple, 0 outside r_cut or the out-of-line exponent limit -
+    // the same value the CPU workspace records. Written after the term, so the sum is untouched.
+    if (e_triple)
+        e_triple[tid] = local_E;
+    } // tid < n
+
+    blockReduceAddEnergy(local_E, energy);
+    if constexpr (VIR) blockReduceAddVirial(vacc.v, vir);
 }
 
 template <bool PBC>
@@ -3554,6 +5214,46 @@ __global__ void k_hbonds(
     } // tid < n
 
     blockReduceAddEnergy(local_E, energy);
+}
+
+__global__ GFNFF_KERNEL_BOUNDS void k_hbonds_vir(
+    int n,
+    const int*    __restrict__ idx_i,
+    const int*    __restrict__ idx_j,
+    const int*    __restrict__ idx_k,
+    const int*    __restrict__ elem_A,
+    const int*    __restrict__ elem_B,
+    const double* __restrict__ q_H,
+    const double* __restrict__ q_A,
+    const double* __restrict__ q_B,
+    const double* __restrict__ basicity_A,
+    const double* __restrict__ basicity_B,
+    const double* __restrict__ acidity_A,
+    const double* __restrict__ acidity_B,
+    const double* __restrict__ r_cut,
+    const int*    __restrict__ case_type,
+    const int*    __restrict__ nb_B_offset,
+    const int*    __restrict__ nb_B_count,
+    const int*    __restrict__ nb_B_flat,
+    const int*    __restrict__ acceptor_parent,
+    const int*    __restrict__ nb_C_offset,
+    const int*    __restrict__ nb_C_count,
+    const int*    __restrict__ nb_C_flat,
+    const double* __restrict__ repz_B,
+    const double* __restrict__ cx,
+    const double* __restrict__ cy,
+    const double* __restrict__ cz,
+    const int*    __restrict__ slot_off,
+    double*       __restrict__ slot_g,
+    const double* __restrict__ Qs_H,
+    const double* __restrict__ Qs_A,
+    const double* __restrict__ Qs_B,
+    double*                    grad,
+    double*                    energy,
+    double*       __restrict__ e_triple,
+    double*                    vir   /* B2 (Nov 24, 2026; CUDA A1-GPU) */)
+{
+    k_hbonds_body<true, true>(n, idx_i, idx_j, idx_k, elem_A, elem_B, q_H, q_A, q_B, basicity_A, basicity_B, acidity_A, acidity_B, r_cut, case_type, nb_B_offset, nb_B_count, nb_B_flat, acceptor_parent, nb_C_offset, nb_C_count, nb_C_flat, repz_B, cx, cy, cz, slot_off, slot_g, Qs_H, Qs_A, Qs_B, grad, energy, e_triple, vir);
 }
 
 // ============================================================================
@@ -5023,6 +6723,274 @@ __global__ GFNFF_KERNEL_BOUNDS_LIGHT void k_d4_tail_atoms(
             acc_add(&dEdcn[i], 2.0 * zi * (pref6 * d6sum + pref8 * r4 * d8sum), GFNFF_FIX_FORCE);   // HIP: fixed point or FP64 (WP10)
     }
     blockReduceAddEnergy(local_E, energy);
+}
+
+// ============================================================================
+// Virial-only pair kernels (Claude Generated, Nov 24, 2026, ROCm parity B2; port of the CUDA A1-GPU kernels of
+// cuda/gfnff_kernels.cu, commit 277765fc). One thread per pair, the pair vector and the factor fac = (dE/dr)/r exactly
+// as the energy/gradient kernel forms them (k_bonds, k_repulsion, k_cn_chainrule, k_hb_alpha_chainrule; those kernels
+// are not touched), Xi -= fac d d^T into the nine slots `vir`. Launched after the step's gradient kernels on the main
+// stream, only when the virial is requested; they read the same inputs (CN, dEdcn after the conversion, zz_hb).
+// The dispersion virial follows the ROCm gradient kernel instead (per-atom gather over the directed-edge CSR, half of
+// every pair per direction; C6 from d_disp_uv on the fused path, else the per-pair C6), because on ROCm the per-pair
+// C6 is not refreshed on fused gradient steps.
+// ============================================================================
+__global__ GFNFF_KERNEL_BOUNDS void k_bonds_virial(
+    int n, const int* __restrict__ idx_i, const int* __restrict__ idx_j, const double* __restrict__ r0,
+    const double* __restrict__ r0_base_i, const double* __restrict__ r0_base_j, const double* __restrict__ cnfak_i,
+    const double* __restrict__ cnfak_j, const double* __restrict__ rabshift, const double* __restrict__ ff,
+    const double* __restrict__ fc, const double* __restrict__ alpha, const int* __restrict__ nr_hb,
+    const double* __restrict__ hb_cn_H, const double* __restrict__ cx, const double* __restrict__ cy,
+    const double* __restrict__ cz, const double* __restrict__ cn, double* vir)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    double v[9] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    if (tid < n) {
+        const int i = idx_i[tid], j = idx_j[tid];
+        double dx = cx[i] - cx[j], dy = cy[i] - cy[j], dz = cz[i] - cz[j];
+        applyMIC(dx, dy, dz);
+        const double rij = sqrt(dx * dx + dy * dy + dz * dz);
+        if (rij >= 1e-10) {
+            double r0_ij;
+            if (cn && r0_base_i[tid] > 0.0) {
+                const double ra = r0_base_i[tid] + cnfak_i[tid] * cn[i];
+                const double rb = r0_base_j[tid] + cnfak_j[tid] * cn[j];
+                r0_ij = (ra + rb + rabshift[tid]) * ff[tid];
+            } else {
+                r0_ij = r0[tid];
+            }
+            const double dr = rij - r0_ij;
+            double alp = alpha[tid];
+            if (nr_hb[tid] >= 1)
+                alp = (-(1.0 - 0.9) * hb_cn_H[tid] + 1.0) * alpha[tid];
+            const double E = fc[tid] * exp(-alp * dr * dr);
+            const double dEdr = -2.0 * alp * dr * E;
+            vir_pair(v, dEdr / rij, dx, dy, dz);
+        }
+    }
+    blockReduceAddVirial(v, vir);
+}
+
+/// Dispersion virial on the gather CSR of the gradient kernel (k_dispersion_gather_uv / k_dispersion_gather): one
+/// workgroup per atom a, each directed edge (a, p) adds half of -fac d d^T. uv != nullptr: the fused C6 of the
+/// gradient step, else C6[pair].
+__global__ void k_dispersion_virial_gather(
+    int N, int ntypes, const int* __restrict__ csr_off, const int* __restrict__ csr_partner,
+    const int* __restrict__ csr_pairidx, const int* __restrict__ atom_ctype, const double* __restrict__ uv,
+    const double* __restrict__ gw, const double* __restrict__ C6, const double* __restrict__ r4r2ij,
+    const double* __restrict__ r0_sq, const double* __restrict__ zetac6, const double* __restrict__ r_cut,
+    const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz, double* vir)
+{
+    const int a = blockIdx.x;
+    const int lane = threadIdx.x, nlanes = blockDim.x;
+    double v[9] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    if (a < N) {
+        const double xa = cx[a], ya = cy[a], za = cz[a];
+        const int s = csr_off[a], e = csr_off[a + 1];
+        for (int t = s + lane; t < e; t += nlanes) {
+            const int p   = csr_partner[t];
+            const int tid = csr_pairidx[t];
+            double dx = xa - cx[p];
+            double dy = ya - cy[p];
+            double dz = za - cz[p];
+            applyMIC(dx, dy, dz);
+            const double r2 = dx*dx + dy*dy + dz*dz;
+            const double rc = r_cut[tid];
+            if (r2 <= rc * rc && r2 >= 1e-20) {
+                double c6;
+                if (uv) {
+                    const double* u  = uv + (size_t)a * ntypes * (2 * D4_MAX_REF) + atom_ctype[p] * (2 * D4_MAX_REF);
+                    const double* vv = u + D4_MAX_REF;
+                    const double* gp = gw + p * D4_MAX_REF;
+                    c6 = 0.0;
+#pragma unroll
+                    for (int r = 0; r < D4_MAX_REF; ++r)
+                        c6 += vv[r] * gp[r];
+                } else {
+                    c6 = C6[tid];
+                }
+                const double r4   = r2 * r2;
+                const double r6   = r4 * r2;
+                const double r0s  = r0_sq[tid];
+                const double r0_6 = r0s * r0s * r0s;
+                const double den6 = r6 + r0_6;
+                const double den8 = r6 * r2 + r0_6 * r0s;
+                const double inv  = 1.0 / (den6 * den8);
+                const double t6   = den8 * inv;
+                const double t8   = den6 * inv;
+                const double d6   = -6.0 * r4 * t6 * t6;
+                const double d8   = -8.0 * r4 * r2 * t8 * t8;
+                const double fac  = -c6 * zetac6[tid] * (d6 + 2.0 * r4r2ij[tid] * d8);
+                vir_pair(v, 0.5 * fac, dx, dy, dz);
+            }
+        }
+    }
+    blockReduceAddVirial(v, vir);
+}
+
+__global__ GFNFF_KERNEL_BOUNDS void k_repulsion_virial(
+    int n, const int* __restrict__ idx_i, const int* __restrict__ idx_j, const double* __restrict__ alpha,
+    const double* __restrict__ repab, const double* __restrict__ r_cut, const double* __restrict__ cx,
+    const double* __restrict__ cy, const double* __restrict__ cz, double* vir)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    double v[9] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    if (tid < n) {
+        const int i = idx_i[tid], j = idx_j[tid];
+        double dx = cx[i] - cx[j], dy = cy[i] - cy[j], dz = cz[i] - cz[j];
+        applyMIC(dx, dy, dz);
+        const double rij = sqrt(dx * dx + dy * dy + dz * dz);
+        if (rij <= r_cut[tid] && rij >= 1e-8) {
+            const double alp_r = alpha[tid] * (rij * sqrt(rij));
+            if (!isnan(alp_r) && !isnan(repab[tid]) && alp_r <= 700.0) {
+                const double base_E = repab[tid] * exp(-alp_r) / rij;
+                const double dEdr = -base_E / rij - 1.5 * alpha[tid] * sqrt(rij) * base_E;
+                vir_pair(v, dEdr / rij, dx, dy, dz);
+            }
+        }
+    }
+    blockReduceAddVirial(v, vir);
+}
+
+/// CN chain rule (k_cn_chainrule): fac = dS/dr / r (dEdcn_i dlogdcn_i + dEdcn_j dlogdcn_j), all CN-dependent terms
+__global__ GFNFF_KERNEL_BOUNDS void k_cn_chainrule_virial(
+    int n_pairs, const int* __restrict__ idx_i, const int* __restrict__ idx_j, const double* __restrict__ rcov_sum,
+    const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+    const double* __restrict__ dEdcn, const double* __restrict__ dlogdcn, double kn, double r2_max, double* vir)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    double v[9] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    if (tid < n_pairs) {
+        const int i = idx_i[tid], j = idx_j[tid];
+        double dx = cx[i] - cx[j], dy = cy[i] - cy[j], dz = cz[i] - cz[j];
+        applyMIC(dx, dy, dz);
+        const double r2 = dx * dx + dy * dy + dz * dz;
+        const double rij = sqrt(r2);
+        if (rij >= 1e-10 && r2 <= r2_max) {   // B10: the CN range of k_cn_chainrule
+            const double rcov = rcov_sum[tid];
+            const double dr = (rij - rcov) / rcov;
+            const double dSdr = kn * 0.5641895835477563 * exp(-kn * kn * dr * dr) / rcov;
+            vir_pair(v, dSdr / rij * (dEdcn[i] * dlogdcn[i] + dEdcn[j] * dlogdcn[j]), dx, dy, dz);
+        }
+    }
+    blockReduceAddVirial(v, vir);
+}
+
+/// HB-CN modulation of the X-H bonds (k_hb_alpha_chainrule): fac = zz_H dS/dr / r; counted with the bond term (CPU)
+__global__ GFNFF_KERNEL_BOUNDS void k_hb_alpha_virial(
+    int n_pairs, const int* __restrict__ idx_H, const int* __restrict__ idx_B, const double* __restrict__ rcov_sum,
+    const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+    const double* __restrict__ zz_hb, double kn, double* vir)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    double v[9] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    if (tid < n_pairs) {
+        const int H = idx_H[tid], B = idx_B[tid];
+        double dx = cx[H] - cx[B], dy = cy[H] - cy[B], dz = cz[H] - cz[B];
+        applyMIC(dx, dy, dz);
+        const double rij = sqrt(dx * dx + dy * dy + dz * dz);
+        if (rij >= 1e-10) {
+            const double rcov = rcov_sum[tid];
+            const double dr = (rij - rcov) / rcov;
+            const double dSdr = -kn * 0.5641895835477563 * exp(-kn * kn * dr * dr) / rcov;
+            vir_pair(v, zz_hb[H] * dSdr / rij, dx, dy, dz);
+        }
+    }
+    blockReduceAddVirial(v, vir);
+}
+
+// ============================================================================
+// B2 (Nov 24, 2026, ROCm parity): HIP copy of the CUDA HB-X kernels (commit 2b91d73e), statement for statement.
+// HB-X (Claude Generated, Nov 2026): crossing estimator of the HB/XB search radii for the pressure, the CPU
+// FFWorkspace::calcHBCrossing / calcXBCrossing (derivation at crossingShellAdd in ff_workspace_gfnff.cpp and in
+// docs/WP-PERIODIC-NONBONDED.md HB-X). Separate kernels after k_hbonds_vir / k_xbonds_vir: those stay unchanged
+// (code added inside a kernel body changed its contraction and the last bits of the NPT pressure on the CPU). Only
+// launched with the virial and a cell, so the frame is the periodic one (A, B as the images next to H or X). The sum
+// goes through blockReduceAddVirial (fixed point, thread-order independent).
+// ============================================================================
+/// One triple: d holds nd vectors of the active criterion with value h; inside the shell h0 <= h < 1
+/// (u = (h - h0)/(1 - h0)) it adds 2 E (-2 + 6u) / ((1 - h0) sum |d|^2) * sum d d^T to v (row-major).
+__device__ __forceinline__ void vir_cross_add(double* v, double E, double h, double h0, const double* d, int nd)
+{
+    if (!(h >= h0 && h < 1.0)) return;
+    double n2 = 0.0;
+    for (int k = 0; k < nd; ++k) n2 += d[3 * k] * d[3 * k] + d[3 * k + 1] * d[3 * k + 1] + d[3 * k + 2] * d[3 * k + 2];
+    const double u = (h - h0) / (1.0 - h0);
+    const double w = 2.0 * E * (-2.0 + 6.0 * u) / ((1.0 - h0) * n2);
+    for (int k = 0; k < nd; ++k)
+        for (int a = 0; a < 3; ++a)
+            for (int b = 0; b < 3; ++b)
+                v[3 * a + b] += w * d[3 * k + a] * d[3 * k + b];
+}
+
+/// HB triples: energies from the per-triple record of k_hbonds_vir (e_triple), h from the frame on H.
+__global__ GFNFF_KERNEL_BOUNDS void k_hb_crossing(int n, const int* __restrict__ idx_i, const int* __restrict__ idx_j,
+    const int* __restrict__ idx_k, const int* __restrict__ case_type, const double* __restrict__ e_triple,
+    const double* __restrict__ cx, const double* __restrict__ cy, const double* __restrict__ cz,
+    double h0, double thr1, double thr2, double* vir_cross)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    double v[9] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    if (tid < n && e_triple[tid] != 0.0) {
+        const int A = idx_i[tid], H = idx_j[tid], B = idx_k[tid];
+        const double hx = cx[H], hy = cy[H], hz = cz[H];
+        double ax, ay, az, bx, by, bz;
+        micPlace(cx, cy, cz, A, hx, hy, hz, ax, ay, az);
+        micPlace(cx, cy, cz, B, hx, hy, hz, bx, by, bz);
+        const double d[9] = { bx - ax, by - ay, bz - az, hx - ax, hy - ay, hz - az, bx - hx, by - hy, bz - hz };
+        const double rab2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+        const double h1 = rab2 / thr1;
+        const double h2 = (case_type[tid] == 1)
+            ? (rab2 + d[3] * d[3] + d[4] * d[4] + d[5] * d[5] + d[6] * d[6] + d[7] * d[7] + d[8] * d[8]) / thr2 : 0.0;
+        if (h2 > h1) vir_cross_add(v, e_triple[tid], h2, h0, d, 3);
+        else         vir_cross_add(v, e_triple[tid], h1, h0, d, 1);
+    }
+    blockReduceAddVirial(v, vir_cross);
+}
+
+/// XB triples: E_XB re-evaluated with the energy statements of k_xbonds_body (frame on X); h = max(r_AB^2/thr_ab,
+/// r_XB^2/r_cut^2).
+__global__ GFNFF_KERNEL_BOUNDS void k_xb_crossing(int n, const int* __restrict__ idx_i, const int* __restrict__ idx_j,
+    const int* __restrict__ idx_k, const int* __restrict__ elem_A, const int* __restrict__ elem_B,
+    const double* __restrict__ q_X, const double* __restrict__ q_B, const double* __restrict__ acidity_X,
+    const double* __restrict__ r_cut, const double* __restrict__ cx, const double* __restrict__ cy,
+    const double* __restrict__ cz, double h0, double thr_ab, double* vir_cross)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    double v[9] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    if (tid < n) {
+        const double XB_SCUT_D = 5.0, XB_BACUT_D = 70.0, HB_ALP_D = 6.0, HB_LONGCUT_XB_D = 70.0;
+        const double XB_ST_D = 15.0, XB_SF_D = 0.03;
+        const int A = idx_i[tid], X = idx_j[tid], B = idx_k[tid];
+        const double xx = cx[X], xy = cy[X], xz = cz[X];
+        double ax, ay, az, bx, by, bz;
+        micPlace(cx, cy, cz, A, xx, xy, xz, ax, ay, az);
+        micPlace(cx, cy, cz, B, xx, xy, xz, bx, by, bz);
+        const double d[6] = { bx - ax, by - ay, bz - az, bx - xx, by - xy, bz - xz };
+        const double r2AX = (xx - ax) * (xx - ax) + (xy - ay) * (xy - ay) + (xz - az) * (xz - az);
+        const double r2AB = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+        const double r2XB = d[3] * d[3] + d[4] * d[4] + d[5] * d[5];
+        const double r_AX = sqrt(r2AX), r_XB = sqrt(r2XB), r_AB = sqrt(r2AB);
+        if (r_XB <= r_cut[tid] && r_XB >= 1e-10 && r_AB >= 1e-10) {
+            const int eA = elem_A[tid] - 1, eB = elem_B[tid] - 1;
+            const double r_vdw_AB = ((eA >= 0 && eA < 100) ? d_cov_radii[eA] : 1.0)
+                                  + ((eB >= 0 && eB < 100) ? d_cov_radii[eB] : 1.0);
+            const double damp_short = d_damping_short_range(r_XB, r_vdw_AB, XB_SCUT_D, HB_ALP_D);
+            const double damp_long = d_damping_long_range(r_XB, HB_LONGCUT_XB_D, HB_ALP_D);
+            const double expo_outl = XB_BACUT_D * ((r_AX + r_XB) / r_AB - 1.0);
+            if (expo_outl <= 15.0) {
+                const double damp_outl = 2.0 / (1.0 + exp(expo_outl));
+                const double Q_X = d_charge_scaling(q_X[tid], XB_ST_D, XB_SF_D);
+                const double Q_B = d_charge_scaling(-q_B[tid], XB_ST_D, XB_SF_D);
+                const double E = -(damp_short * damp_long * damp_outl / (r_XB * r_XB * r_XB)) * Q_B * acidity_X[tid] * Q_X;
+                const double h1 = r2AB / thr_ab;
+                const double h2 = r2XB / (r_cut[tid] * r_cut[tid]);
+                if (h2 > h1) vir_cross_add(v, E, h2, h0, d + 3, 1);
+                else         vir_cross_add(v, E, h1, h0, d, 1);
+            }
+        }
+    }
+    blockReduceAddVirial(v, vir_cross);
 }
 
 /// Exclusive prefix of v over the workgroup (HB_SCAN_THREADS threads); *total receives the sum.
@@ -7004,6 +8972,7 @@ struct FFWorkspaceHipImpl {
         N_ENERGY_SLOTS = 15
     };
     CudaBuffer<double> d_energies;      ///< [N_ENERGY_SLOTS] all per-term energies
+    CudaBuffer<double> d_virial;        ///< B2 (Nov 24, 2026): [GFNFF_VIR_BUFFER] fixed-point virial slots (gfnff_virial_slots.h)
 
     // A2 (Nov 2026, Claude Generated; CUDA S1): homogeneous D4 tail (setDispersionTail): per-atom element slot,
     // per-slot tables, W[K*MAX_REF]
@@ -7602,6 +9571,7 @@ FFWorkspaceHip::FFWorkspaceHip(const GFNFFParameterSet& params,
 
     // Per-term energy accumulators — single contiguous buffer
     m_impl->d_energies.alloc(FFWorkspaceHipImpl::N_ENERGY_SLOTS);
+    m_impl->d_virial.alloc(GFNFF_VIR_BUFFER);   // B2: 117 + 1 doubles, used only with setWantVirial(true)
 
     // dEdcn snapshot — always needed: dEdcnTotal() is public API (Coulomb chain-rule)
     m_impl->d_dEdcn_snapshot.alloc(natoms);
@@ -8833,6 +10803,14 @@ void FFWorkspaceHip::setDispersionTail(bool active, double rc_bohr, double volum
         else     kern<false><<<(grid), (block), 0, (strm)>>>(__VA_ARGS__);           \
     } while (0)
 
+/// B2 (Nov 24, 2026, Claude Generated; CUDA A1-GPU launch_k_*): vir != nullptr (only with a cell and a requested
+/// virial) launches the virial instantiation kern_vir, else the two kernels of GFNFF_HIP_PBC_LAUNCH unchanged.
+#define GFNFF_HIP_PBC_VIR_LAUNCH(kern, pbc, vir, grid, block, strm, ...)               \
+    do {                                                                             \
+        if ((pbc) && (vir)) kern##_vir<<<(grid), (block), 0, (strm)>>>(__VA_ARGS__, (vir)); \
+        else GFNFF_HIP_PBC_LAUNCH(kern, pbc, grid, block, strm, __VA_ARGS__);         \
+    } while (0)
+
 // ============================================================================
 // GPU-only CN chain-rule setters (Claude Generated March 2026)
 // ============================================================================
@@ -9489,7 +11467,7 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
     // Claude Generated (May 2026): m_record_kernel_timings disables graph replay so
     // per-stream events get recorded each step (graph-replay events don't update times).
     if (impl.m_graph_phase1_valid && !need_snapshots && !force_single_stream
-        && !m_record_kernel_timings) {
+        && !m_record_kernel_timings && !m_want_virial) {   // B2: no graph with the virial
         hipGraphLaunch(impl.m_graph_exec_phase1, stream);
         return;  // GPU executes the graph asynchronously; CPU proceeds to EEQ
     }
@@ -9497,7 +11475,7 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
     // === CAPTURE START: on the first topology-stable step, record this execution ===
     bool capturing = false;
     if (!impl.m_graph_phase1_valid && !need_snapshots && !force_single_stream
-        && !m_record_kernel_timings) {
+        && !m_record_kernel_timings && !m_want_virial) {
         hipError_t cap_err = hipStreamBeginCapture(stream, hipStreamCaptureModeThreadLocal);
         capturing = (cap_err == hipSuccess);
     }
@@ -9517,6 +11495,11 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
     hipMemsetAsync(impl.d_energies.ptr, 0,
                     FFWorkspaceHipImpl::N_ENERGY_SLOTS * sizeof(double), stream);
     }
+    // B2 (Nov 24, 2026, CUDA A1-GPU): virial slots of this step (only on request; the kernels write them only then)
+    const bool want_vir = m_want_virial && gradient && impl.pbc_active;
+    if (want_vir)
+        hipMemsetAsync(impl.d_virial.ptr, 0, GFNFF_VIR_BUFFER * sizeof(double), stream);
+    auto vir_slot = [&](int sl) -> double* { return want_vir ? impl.d_virial.ptr + 9 * sl : nullptr; };
 
     // =========================================================================
     // 2. Upload CN (NOT EEQ charges — those come later)
@@ -9714,7 +11697,7 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
         LaunchConfig cfg = getLaunchConfig(impl.angles.n, m_block_size);
-        GFNFF_HIP_PBC_LAUNCH(k_angles, impl.pbc_active, cfg.gridSize, cfg.blockSize, sB,
+        GFNFF_HIP_PBC_VIR_LAUNCH(k_angles, impl.pbc_active, vir_slot(VIR_ANGLE), cfg.gridSize, cfg.blockSize, sB,
             impl.angles.n,
             impl.angles.idx_i.ptr,  impl.angles.idx_j.ptr,  impl.angles.idx_k.ptr,
             impl.angles.ati.ptr,    impl.angles.atj.ptr,    impl.angles.atk.ptr,
@@ -9733,7 +11716,7 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
         LaunchConfig cfg = getLaunchConfig(impl.dihedrals.n, m_block_size);
-        GFNFF_HIP_PBC_LAUNCH(k_dihedrals, impl.pbc_active, cfg.gridSize, cfg.blockSize, sB,
+        GFNFF_HIP_PBC_VIR_LAUNCH(k_dihedrals, impl.pbc_active, vir_slot(VIR_DIHED), cfg.gridSize, cfg.blockSize, sB,
             impl.dihedrals.n,
             impl.dihedrals.idx_i.ptr, impl.dihedrals.idx_j.ptr,
             impl.dihedrals.idx_k.ptr, impl.dihedrals.idx_l.ptr,
@@ -9753,7 +11736,7 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
         LaunchConfig cfg = getLaunchConfig(impl.inversions.n, m_block_size);
-        GFNFF_HIP_PBC_LAUNCH(k_inversions, impl.pbc_active, cfg.gridSize, cfg.blockSize, sB,
+        GFNFF_HIP_PBC_VIR_LAUNCH(k_inversions, impl.pbc_active, vir_slot(VIR_INV), cfg.gridSize, cfg.blockSize, sB,
             impl.inversions.n,
             impl.inversions.idx_i.ptr, impl.inversions.idx_j.ptr,
             impl.inversions.idx_k.ptr, impl.inversions.idx_l.ptr,
@@ -9771,7 +11754,7 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
         LaunchConfig cfg = getLaunchConfig(impl.storsions.n, m_block_size);
-        GFNFF_HIP_PBC_LAUNCH(k_storsions, impl.pbc_active, cfg.gridSize, cfg.blockSize, sB,
+        GFNFF_HIP_PBC_VIR_LAUNCH(k_storsions, impl.pbc_active, vir_slot(VIR_STORS), cfg.gridSize, cfg.blockSize, sB,
             impl.storsions.n,
             impl.storsions.idx_i.ptr, impl.storsions.idx_j.ptr,
             impl.storsions.idx_k.ptr, impl.storsions.idx_l.ptr,
@@ -9812,7 +11795,19 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
     {
         // Phase 8: n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
         LaunchConfig cfg = getLaunchConfig(impl.batm.n, m_block_size);
-        if (impl.use_mixed_precision) {
+        if (want_vir) {   // B2 (CUDA A1): the virial takes the FP64 kernel
+            k_batm_vir<<<cfg.gridSize, cfg.blockSize, 0, sC>>>(
+                impl.batm.n,
+                impl.batm.idx_i.ptr, impl.batm.idx_j.ptr, impl.batm.idx_k.ptr,
+                impl.batm.zb3atm_i.ptr, impl.batm.zb3atm_j.ptr, impl.batm.zb3atm_k.ptr,
+                impl.coords.d_x.ptr,
+                impl.coords.d_y.ptr,
+                impl.coords.d_z.ptr,
+                impl.d_topo_charges.ptr,
+                impl.d_grad.ptr,
+                &impl.d_energies.ptr[impl.E_BATM],
+                vir_slot(VIR_BATM));
+        } else if (impl.use_mixed_precision) {
             k_batm_mixed<<<cfg.gridSize, cfg.blockSize, 0, sC>>>(
                 impl.batm.n,
                 impl.batm.idx_i.ptr, impl.batm.idx_j.ptr, impl.batm.idx_k.ptr,
@@ -9870,7 +11865,7 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
                 impl.d_grad.ptr,
                 &impl.d_energies.ptr[impl.E_XBOND]);
         } else {
-            GFNFF_HIP_PBC_LAUNCH(k_xbonds, impl.pbc_active, cfg.gridSize, cfg.blockSize, sC,   // A2: image frames only with a cell
+            GFNFF_HIP_PBC_VIR_LAUNCH(k_xbonds, impl.pbc_active, vir_slot(VIR_XBOND), cfg.gridSize, cfg.blockSize, sC,   // A2: image frames only with a cell
 
                 impl.xbonds.n,
                 impl.xbonds.idx_i.ptr, impl.xbonds.idx_j.ptr, impl.xbonds.idx_k.ptr,
@@ -9883,13 +11878,25 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
                 impl.d_grad.ptr,
                 &impl.d_energies.ptr[impl.E_XBOND]);
         }
+        if (want_vir && m_hb_cross_on)   // B2 (CUDA HB-X): crossing estimator, own kernel after the term
+            k_xb_crossing<<<cfg.gridSize, cfg.blockSize, 0, sC>>>(impl.xbonds.n,
+                impl.xbonds.idx_i.ptr, impl.xbonds.idx_j.ptr, impl.xbonds.idx_k.ptr,
+                impl.xbonds.elem_A.ptr, impl.xbonds.elem_B.ptr,
+                impl.xbonds.q_X.ptr, impl.xbonds.q_B.ptr, impl.xbonds.acidity_X.ptr, impl.xbonds.r_cut.ptr,
+                impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+                m_hb_cross_h0, m_xb_cross_thr2, vir_slot(VIR_XB_CROSS));
     }
     if (m_hbond_enabled) {
         // Phase 8: hbonds.n > 0 guard removed — n=0 → 1-block no-op, graph-capture safe
         LaunchConfig cfg = getLaunchConfig(impl.hbonds.n, m_block_size);
         // Claude Generated (Oct 2026): slot mode (per-triple slots + per-atom gather) unless disabled.
         const bool hb_slots = impl.hb_gather_enabled && impl.hb_slots.N == N && impl.hb_slots.nslots > 0;
-        GFNFF_HIP_PBC_LAUNCH(k_hbonds, impl.pbc_active, cfg.gridSize, cfg.blockSize, sC,
+        // B2 (CUDA HB-X): the crossing kernel reads the per-triple energies, so they are recorded with it (the kernel
+        // argument changes from nullptr to the array; the kernel itself is unchanged; no graphs with the virial)
+        const bool want_cross = want_vir && m_hb_cross_on;
+        if (want_cross)
+            ensureHBTripleEnergyBuffer(impl, *this);
+        GFNFF_HIP_PBC_VIR_LAUNCH(k_hbonds, impl.pbc_active, vir_slot(VIR_HBOND), cfg.gridSize, cfg.blockSize, sC,
             impl.hbonds.n,
             impl.hbonds.idx_i.ptr, impl.hbonds.idx_j.ptr, impl.hbonds.idx_k.ptr,
             impl.hbonds.elem_A.ptr, impl.hbonds.elem_B.ptr,
@@ -9914,12 +11921,17 @@ void FFWorkspaceHip::prepareAndLaunchChargeIndependent(bool gradient)
             (impl.hb_slots.nq == impl.hbonds.n) ? impl.hb_slots.Qs_B.ptr : nullptr,
             impl.d_grad.ptr,
             &impl.d_energies.ptr[impl.E_HBOND],
-            hbTripleEnergyTarget(impl, m_record_hb_energies));   // Oct 2026: nullptr unless recording
+            hbTripleEnergyTarget(impl, m_record_hb_energies || want_cross));   // Oct 2026: nullptr unless recording
         if (hb_slots) {
             k_slot_gather<<<std::max(1, N), 64, 0, sC>>>(
                 impl.hb_slots.N, impl.hb_slots.atom_off.ptr, impl.hb_slots.atom_slots.ptr,
                 impl.hb_slots.slot_g.ptr, impl.d_grad.ptr);
         }
+        if (want_cross && impl.hbonds.n > 0)
+            k_hb_crossing<<<cfg.gridSize, cfg.blockSize, 0, sC>>>(impl.hbonds.n,
+                impl.hbonds.idx_i.ptr, impl.hbonds.idx_j.ptr, impl.hbonds.idx_k.ptr, impl.hbonds.case_type.ptr,
+                impl.hb_triple_energy.ptr, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+                m_hb_cross_h0, m_hb_cross_thr1, m_hb_cross_thr2, vir_slot(VIR_HB_CROSS));
     }
     // Per-kernel snapshot: after all stream C kernels (Claude Generated April 2026)
     if (gradient && impl.d_grad_after_sC.ptr) {
@@ -10061,7 +12073,7 @@ double FFWorkspaceHip::launchChargeDependentAndFinish(bool gradient)
     // skipped → energy = 0. Disable Phase-2 capture whenever Phase-1 is graph-active.
     // Claude Generated (May 2026): m_record_kernel_timings disables graph for accurate per-step events.
     const bool p2_capture_disabled    = p2_need_snapshots || p2_force_single_stream || p1_was_graph
-                                          || m_record_kernel_timings;
+                                          || m_record_kernel_timings || m_want_virial;   // B2: no graph with the virial
     bool&            p2_valid = gradient ? impl.m_graph_phase2_grad_valid
                                          : impl.m_graph_phase2_energy_valid;
     hipGraph_t&     p2_graph = gradient ? impl.m_graph_phase2_grad
@@ -10300,6 +12312,73 @@ double FFWorkspaceHip::launchChargeDependentAndFinish(bool gradient)
             hipStreamWaitEvent(stream, impl.event_bonded, 0);
             hipStreamWaitEvent(stream, impl.event_threebody, 0);
         }
+    }
+
+    // B2 (Nov 24, 2026, ROCm parity; CUDA A1-GPU in ff_workspace_gpu.cu): virial of the pair terms and of the two
+    // chain rules, by separate kernels on the main stream after every producer of d_dEdcn / d_zz_hb / hb_cn_H is done
+    // (fence above); the multi-atom terms wrote their slots in Phase 1 (VIR instantiations). The gradient kernels are
+    // not touched. The tensor slots are fixed point in either accumulation mode; the E8 tail slot follows the
+    // energy accumulation mode of k_d4_tail_atoms (blockReduceAddEnergy).
+    m_virial_ready = false;
+    if (gradient && m_want_virial && impl.pbc_active) {
+        convert_dEdcn();   // the CN chain-rule virial reads dE/dCN as doubles
+        double* V = impl.d_virial.ptr;
+        {
+            LaunchConfig c = getLaunchConfig(impl.bonds.n, m_block_size);
+            k_bonds_virial<<<c.gridSize, c.blockSize, 0, stream>>>(impl.bonds.n, impl.bonds.idx_i.ptr, impl.bonds.idx_j.ptr,
+                impl.bonds.r0.ptr, impl.bonds.r0_base_i.ptr, impl.bonds.r0_base_j.ptr, impl.bonds.cnfak_i.ptr,
+                impl.bonds.cnfak_j.ptr, impl.bonds.rabshift.ptr, impl.bonds.ff.ptr, impl.bonds.fc.ptr, impl.bonds.alpha.ptr,
+                impl.bonds.nr_hb.ptr, impl.bonds.hb_cn_H.ptr, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+                impl.d_cn.ptr, V + 9 * VIR_BOND);
+        }
+        if (impl.hb_alpha.n > 0 && impl.d_zz_hb.ptr) {   // zz_hb converted to doubles on stream B (k_hb_alpha_chainrule)
+            LaunchConfig c = getLaunchConfig(impl.hb_alpha.n, m_block_size);
+            k_hb_alpha_virial<<<c.gridSize, c.blockSize, 0, stream>>>(impl.hb_alpha.n, impl.hb_alpha.idx_H.ptr,
+                impl.hb_alpha.idx_B.ptr, impl.hb_alpha.rcov_sum.ptr, impl.coords.d_x.ptr, impl.coords.d_y.ptr,
+                impl.coords.d_z.ptr, impl.d_zz_hb.ptr, 27.5, V + 9 * VIR_BOND);
+        }
+        if (m_dispersion_enabled && impl.disp.n > 0 && impl.disp.csr_N == N) {
+            // the C6 source of this step's gradient kernel (launchDispersionGatherHip)
+            const bool uv = impl.disp_uv_valid && !impl.disp_pair_c6_current;
+            k_dispersion_virial_gather<<<std::max(1, impl.disp.csr_N), 64, 0, stream>>>(
+                impl.disp.csr_N, impl.disp_ntypes, impl.disp.csr_off.ptr, impl.disp.csr_partner.ptr,
+                impl.disp.csr_pairidx.ptr, impl.d_atom_ctype.ptr, uv ? impl.d_disp_uv.ptr : nullptr, impl.d_gw.ptr,
+                impl.disp.C6.ptr, impl.disp.r4r2ij.ptr, impl.disp.r0_sq.ptr, impl.disp.zetac6.ptr, impl.disp.r_cut.ptr,
+                impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr, V + 9 * VIR_DISP);
+        }
+        if (m_repulsion_enabled) {
+            if (impl.bonded_rep.n > 0) {
+                LaunchConfig c = getLaunchConfig(impl.bonded_rep.n, m_block_size);
+                k_repulsion_virial<<<c.gridSize, c.blockSize, 0, stream>>>(impl.bonded_rep.n, impl.bonded_rep.idx_i.ptr,
+                    impl.bonded_rep.idx_j.ptr, impl.bonded_rep.alpha.ptr, impl.bonded_rep.repab.ptr, impl.bonded_rep.r_cut.ptr,
+                    impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr, V + 9 * VIR_REP);
+            }
+            if (impl.nonbonded_rep.n > 0) {
+                LaunchConfig c = getLaunchConfig(impl.nonbonded_rep.n, m_block_size);
+                k_repulsion_virial<<<c.gridSize, c.blockSize, 0, stream>>>(impl.nonbonded_rep.n, impl.nonbonded_rep.idx_i.ptr,
+                    impl.nonbonded_rep.idx_j.ptr, impl.nonbonded_rep.alpha.ptr, impl.nonbonded_rep.repab.ptr,
+                    impl.nonbonded_rep.r_cut.ptr, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr, V + 9 * VIR_REP);
+            }
+        }
+        if (m_cn_pairs_on_gpu && impl.n_cn_pairs > 0 && impl.d_dlogdcn.ptr && !m_frozen_cn) {
+            LaunchConfig c = getLaunchConfig(impl.n_cn_pairs, m_block_size);
+            k_cn_chainrule_virial<<<c.gridSize, c.blockSize, 0, stream>>>(impl.n_cn_pairs, impl.d_cn_idx_i.ptr,
+                impl.d_cn_idx_j.ptr, impl.d_cn_rcov_sum.ptr, impl.coords.d_x.ptr, impl.coords.d_y.ptr, impl.coords.d_z.ptr,
+                impl.d_dEdcn.ptr, impl.d_dlogdcn.ptr, m_kn, m_cn_r2_max, V + 9 * VIR_CN);
+        }
+        const bool tail_ran = impl.tail_active && m_dispersion_enabled && impl.dc6dcn_gpu_ready && impl.d_gw.ptr && impl.d_dgw.ptr;
+        if (tail_ran) {   // C8 part of the tail alone (pref6 = 0, no dE/dCN) for the pressure correction E6/E8
+            LaunchConfig cfg_a = getLaunchConfigLight(N, m_block_size);
+            k_d4_tail_atoms<<<cfg_a.gridSize, cfg_a.blockSize, 0, stream>>>(
+                N, impl.tail_K, impl.d_tail_slot_of_atom.ptr, impl.d_tail_slot_elem.ptr, impl.d_tail_nref.ptr,
+                impl.d_tail_sqz.ptr, impl.d_tail_zeta.ptr, impl.d_gw.ptr, impl.d_dgw.ptr, impl.d_c6_flat.ptr,
+                impl.d_tail_W.ptr, 0.0, impl.tail_pref8, 0, impl.d_dEdcn.ptr, V + GFNFF_VIR_TAIL_E8);
+        }
+        fixToDoubleHip(V, 9 * VIR_N_TENSORS, GFNFF_FIX_ENERGY, stream);
+        if (impl.fixed_point)
+            fixToDoubleHip(V + GFNFF_VIR_TAIL_E8, 1, GFNFF_FIX_ENERGY, stream);
+        checkCuda(hipGetLastError(), "virial kernels launch");
+        m_virial_ready = true;
     }
 
     if (impl.fixed_point) {
@@ -11101,6 +13180,28 @@ void FFWorkspaceHip::updateReferenceGeometry()
 #include <cmath>
 #include <sstream>
 #include <iomanip>
+
+// Claude Generated (Nov 24, 2026, ROCm parity B2; CUDA FFWorkspaceGPU::setWantVirial / downloadVirial, A1-GPU):
+// see ff_workspace_gpu.h
+void FFWorkspaceHip::setWantVirial(bool v)
+{
+    if (v == m_want_virial)
+        return;
+    m_want_virial = v;
+    m_virial_ready = false;
+    invalidateGraph();   // the captured graphs hold the non-virial launches
+}
+
+bool FFWorkspaceHip::downloadVirial(std::vector<double>& out)
+{
+    if (!m_virial_ready || !m_impl)
+        return false;
+    out.assign(GFNFF_VIR_BUFFER, 0.0);
+    checkCuda(hipMemcpyAsync(out.data(), m_impl->d_virial.ptr, GFNFF_VIR_BUFFER * sizeof(double),
+                             hipMemcpyDeviceToHost, m_impl->stream), "downloadVirial");
+    checkCuda(hipStreamSynchronize(m_impl->stream), "downloadVirial sync");
+    return true;
+}
 
 namespace GPUUtils {
 

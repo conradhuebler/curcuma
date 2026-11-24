@@ -100,9 +100,10 @@ struct GFNFFRocmBackend {
     /// Coulomb off (FFWorkspaceHip::setCoulombPairOnDevice(false); self term and TERM 1b stay), the Ewald pair term from
     /// FFWorkspace::evaluateEwaldCoulomb (device Ewald below, or the host with -gfnff.gpu_ewald_device false).
     static constexpr bool has_periodic_hybrid = true;
-    /// B1 (Nov 2026): no device virial and no HB/XB crossing kernels on ROCm (ROCM_PARITY_PLAN B2): a virial request
-    /// (compute_pressure, barostat) is refused by the wrapper; virialValid() stays false.
-    static constexpr bool has_periodic_virial = false;
+    /// B2 (Nov 24, 2026, Claude Generated; port of the CUDA A1-GPU and HB-X, docs/ROCM_PARITY_B2.md): device virial of
+    /// the periodic hybrid (FFWorkspaceHip::setWantVirial/downloadVirial, *_vir kernels, *_virial pair kernels, HB/XB
+    /// crossing kernels), assembled by the shared assembleHybridVirial(); -compute_pressure and the barostat run.
+    static constexpr bool has_periodic_virial = true;
     /// B1 (Nov 2026): device Ewald sum of the periodic hybrid (GfnffEwaldHip, rocm/ewald_hip.hip; HIP port of
     /// GfnffEwaldGPU); defined in gfnff_hip_method.cpp. nullptr when no HIP stream could be created (the hybrid then
     /// keeps the host Ewald, counted fallback).

@@ -25,8 +25,8 @@
  *
  * B1 (Nov 24, 2026, Claude Generated, ROCm parity, docs/ROCM_PARITY_B1.md): the same source builds the ROCm variant
  * (target test_gfnff_rocm_pbc_ewald, ctest gfnff_rocm_pbc_ewald, GFNFF_PBC_EWALD_ROCM): GFNFFHipComputationalMethod and
- * GfnffEwaldHip. The ROCm hybrid has no device virial yet (item B2 of ROCM_PARITY_PLAN_2026-11), so there the model
- * virial checks of (a)-(c) are not made (kHybridVirial false); instead (e) compares the device Ewald object itself
+ * GfnffEwaldHip. The model virial checks of (a)-(c) follow the trait has_periodic_virial (true since B2, Nov 24, 2026,
+ * docs/ROCM_PARITY_B2.md); in addition (e) compares the device Ewald object itself
  * with the CPU EwaldSum range functions: real/reciprocal energy, gradient, potentials and the pair virial
  * (real + reciprocal) of the device evaluate(), limits 1e-10 Eh, 1e-10 Eh/Bohr, 1e-10 Eh/e, 1e-9 Eh.
  * Exit 77 there when no HIP device answers.
@@ -39,7 +39,7 @@
 #include "src/core/energy_calculators/qm_methods/gfnff_hip_method.h"
 using GpuGfnffMethod = GFNFFHipComputationalMethod;
 using DeviceEwald = GfnffEwaldHip;
-static constexpr bool kHybridVirial = false;   // B2 of the ROCm parity plan
+static constexpr bool kHybridVirial = GFNFFRocmBackend::has_periodic_virial;   // B2 (Nov 24, 2026): the device virial
 #else
 #include "src/core/energy_calculators/ff_methods/cuda/ewald_gpu.h"
 #include "src/core/energy_calculators/qm_methods/gfnff_gpu_method.h"

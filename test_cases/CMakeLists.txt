@@ -662,6 +662,18 @@ if(USE_PCH)
 endif()
 add_test(NAME gfnff_gpu_pbc_virial COMMAND test_gfnff_gpu_pbc_virial WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 set_tests_properties(gfnff_gpu_pbc_virial PROPERTIES TIMEOUT 1800 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;pbc;simplemd" SKIP_RETURN_CODE 77)
+# Claude Generated (Nov 24, 2026, ROCm parity B2): the same test on the ROCm hybrid (HIP method class, -gpu rocm in (e)).
+if(USE_ROCM)
+    add_executable(test_gfnff_rocm_pbc_virial unit/test_gfnff_gpu_pbc_virial.cpp)
+    target_link_libraries(test_gfnff_rocm_pbc_virial curcuma_core test_molecule_registry curcuma_rocm)
+    target_compile_definitions(test_gfnff_rocm_pbc_virial PRIVATE USE_ROCM GFNFF_PBC_VIRIAL_ROCM)
+    if(USE_PCH)
+        target_precompile_headers(test_gfnff_rocm_pbc_virial REUSE_FROM curcuma_core)
+    endif()
+    add_test(NAME gfnff_rocm_pbc_virial COMMAND test_gfnff_rocm_pbc_virial WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    set_tests_properties(gfnff_rocm_pbc_virial PROPERTIES TIMEOUT 1800 RESOURCE_LOCK "gpu" LABELS "gfnff_gpu;gpu;pbc;simplemd;rocm"
+                         SKIP_RETURN_CODE 77)
+endif()
 
 # Claude Generated (Nov 2026, GPU_PERIODIC_GAPS A2/S3): device Ewald of the CUDA hybrid against the CPU and the host-Ewald
 # hybrid (charges, energy, gradient, virial), FD gates, bitwise repeat, fault-injected fallbacks. 77 without CUDA.
