@@ -138,6 +138,23 @@ localized per energy container in WP3 and closed in WP2.
   (H/C/N/O/Li/He), solvation, excited states, numerical stability across all
   geometries.
 
+## Comparing with the xtb 6.7.1 binary
+
+tblite is the target (above). Where xtb 6.7.1 and tblite differ, curcuma follows tblite by default and has
+opt-in switches; `-scf_criterion xtb` is the one xtb-compatible mode and selects the D4 cutoffs with it:
+
+| Switch | Effect | Set by `-scf_criterion xtb` |
+|---|---|---|
+| `-scf_criterion xtb`, `-scf_accuracy` | xtb's convergence rule (RMS SCC residual / sqrt(nat), `acc`) | itself |
+| `-xtb.d4_atm_cutoff 40` | D4 three-body cutoff (tblite 25) | yes, unless given |
+| `-xtb.d4_pair_cutoff 72` | D4 two-body cutoff (tblite 50); xtb's energy uses 72, its gradient 60, curcuma 72 for both | yes, unless given |
+| `-xtb.sto6g_legacy_4sp true` | xtb's STO-6G 4s/4p (K, Ca, Ge-Kr only) | no (changes the basis, not the comparison rule) |
+
+With `-scf_criterion xtb` curcuma meets xtb within ~1-2 uEh per 1000 atoms on peo201-chain (1410 atoms, n = 1,
+CPU and CUDA) and within 0.6-1.1 uEh per 1000 atoms on 600-7320-atom PEO/water systems with the same cutoffs;
+the rest is an electronic xtb/tblite split (Known Issue #47). xtb's own `acc 1` is not converged to 1e-6 Eh on
+these systems; compare with `--acc 0.01` and `-scf_accuracy 0.01`.
+
 ## Caveats
 
 - The 1e-8 gate is the **agreement-with-tblite** target (implementation fidelity:

@@ -2127,6 +2127,28 @@
    "notes": "Built to test -scf_precond segmentation on a molecule with aromatic rings. GFN2 SCF: 12 iterations without M."
   },
   {
+   "id": "pt-cluster-7",
+   "class": "metals",
+   "file": "metals/pt-cluster-7.xyz",
+   "format": "xyz",
+   "formula": "Pt7",
+   "natoms": 7,
+   "frames": 1,
+   "charge": 0,
+   "spin": 8,
+   "role": "equilibrium",
+   "size_bytes": 383,
+   "sha256": "83bd1587c71ae6996257c5f4cf9e886bd53ea9ea7869c41b5e32ff0e2c79ce3a",
+   "provenance": {
+    "kind": "optimized",
+    "program": "curcuma",
+    "method": "GFN2 native, 300 K, frozen frame of the H2+Pt_n scan",
+    "convergence": "-opt, one start motif, no global search",
+    "description": "Pt7 capped octahedron, GFN2 -opt, lowest spin 8 with spin polarisation"
+   },
+   "notes": "Differs from the pentagonal bipyramid of reactions-doebereiner-pt7; from docs/H2_PT_BARRIERS.md."
+  },
+  {
    "id": "silane.d-shell-validation",
    "class": "small",
    "file": "small/silane.d-shell-validation.xyz",
@@ -2515,26 +2537,23 @@
    ]
   },
   {
-   "id": "pt-cluster-7",
-   "class": "metals",
-   "file": "metals/pt-cluster-7.xyz",
+   "id": "water8-cluster.far-water-40a",
+   "class": "clusters",
+   "file": "clusters/water8-cluster.far-water-40a.xyz",
    "format": "xyz",
-   "formula": "Pt7",
-   "natoms": 7,
+   "formula": "H18O9",
+   "natoms": 27,
    "frames": 1,
    "charge": 0,
-   "spin": 8,
-   "role": "equilibrium",
-   "size_bytes": 383,
-   "sha256": "83bd1587c71ae6996257c5f4cf9e886bd53ea9ea7869c41b5e32ff0e2c79ce3a",
+   "spin": 0,
+   "role": "non-equilibrium",
+   "size_bytes": 809,
+   "sha256": "76db7a3898ac928a64b4b9660450e64591bb784e1a48a837077b9d75eaaf2cef",
    "provenance": {
-    "kind": "optimized",
-    "program": "curcuma",
-    "method": "GFN2 native, 300 K, frozen frame of the H2+Pt_n scan",
-    "convergence": "-opt, one start motif, no global search",
-    "description": "Pt7 capped octahedron, GFN2 -opt, lowest spin 8 with spin polarisation"
+    "kind": "constructed",
+    "description": "water8-cluster plus a copy of its first water shifted by +40 A in x: pair distances 60-79 Bohr to the cube, triples inside 25-40 Bohr in the cube; exercises the D4 pair (50/72 Bohr) and ATM (25/40 Bohr) cutoffs"
    },
-   "notes": "Differs from the pentagonal bipyramid of reactions-doebereiner-pt7; from docs/H2_PT_BARRIERS.md."
+   "derived_from": "water8-cluster"
   }
  ],
  "sets": [

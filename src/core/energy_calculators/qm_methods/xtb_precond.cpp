@@ -608,7 +608,7 @@ std::vector<SharedPrecondEntry>& sharedPrecondCache() { static std::vector<Share
 std::string XTB::scfPrecondShareKey() const
 {
     std::string k = fmt::format("{}|{}|{:.17g}|{:.17g}|{}|{:.17g}|{}|{}|{:.17g}|{}|", static_cast<int>(m_method), m_charge,
-                                m_electronic_temp, m_d4_atm_cutoff, m_sto6g_legacy_4sp ? 1 : 0, m_scf_damping,
+                                m_electronic_temp, d4AtmCutoffEffective(), m_sto6g_legacy_4sp ? 1 : 0, m_scf_damping,
                                 m_scf_precond_max_frag_atoms, m_scf_precond_segment_atoms, m_scf_precond_segment_radius,
                                 m_scf_precond_jacobian);
     for (int z : m_atoms) k += std::to_string(z) + ",";
@@ -852,7 +852,7 @@ bool XTB::buildFragmentPreconditioner(std::string& err)
             frag.setScfGuess("eeq");
             frag.setIntraThreads(1);
             frag.setElectronicTemperature(kT_parent);
-            frag.setD4AtmCutoff(m_d4_atm_cutoff);
+            frag.setD4AtmCutoff(d4AtmCutoffEffective());
             frag.setSto6gLegacy4sp(m_sto6g_legacy_4sp);
             frag.setScfPrecondJacobian(jac_mode);
             frag.m_scf_jac_capture = true;
