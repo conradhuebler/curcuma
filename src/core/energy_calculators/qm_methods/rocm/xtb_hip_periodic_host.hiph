@@ -1162,10 +1162,94 @@ bool XtbHipContext::computeIntegralsPeriodic(const double* xyz_bohr, const doubl
         return false;
     const dim3 block(16, 16);
     const dim3 grid((nao + block.x - 1) / block.x, (nao + block.y - 1) / block.y);
-    pbc_dev::k_overlap_h0_pbc<<<grid, block, 0, stream>>>(
-        nao, M.bis_gfn2, M.dao2sh, M.dao2at, M.dang_sh, M.diao_sh, M.dsh_nprim, M.dsh_prim_off, M.dprim_alpha,
-        M.dprim_coeff, M.dsh_zeta, M.dshpoly, M.dse, M.dz, M.dvalence, M.dxyz, cell_L[0], cell_L[1], cell_L[2], ntrans,
-        I.dPbcIntTrans.ptr, cut2, M.dpauling, M.darad, M.dS0, M.dH0);
+    // ROCm INTS (Claude Generated, Nov 25, 2026): S/H0 by the shell-pair kernel k_overlap_h0_pbc_sh (one work item per
+    // shell pair, same image sum and element arithmetic); CURCUMA_PBC_GPU_INTS_LEGACY=1 runs the AO-pair kernel
+    // k_overlap_h0_pbc of G1b instead. The multipole kernel stays per AO pair. docs/ROCM_PARITY_INTS.md
+    const char* ints_legacy_env = std::getenv("CURCUMA_PBC_GPU_INTS_LEGACY");
+    const bool ints_legacy = ints_legacy_env && ints_legacy_env[0] && ints_legacy_env[0] != '0';
+    if (ints_legacy || !M.dsh2at || !M.dnao_sh) {
+        pbc_dev::k_overlap_h0_pbc<<<grid, block, 0, stream>>>(
+            nao, M.bis_gfn2, M.dao2sh, M.dao2at, M.dang_sh, M.diao_sh, M.dsh_nprim, M.dsh_prim_off, M.dprim_alpha,
+            M.dprim_coeff, M.dsh_zeta, M.dshpoly, M.dse, M.dz, M.dvalence, M.dxyz, cell_L[0], cell_L[1], cell_L[2], ntrans,
+            I.dPbcIntTrans.ptr, cut2, M.dpauling, M.darad, M.dS0, M.dH0);
+    } else {
+        // Is trans the grid of PBCUtils::makeLatticeImageList (T = 0 first, then n = (nx, ny, nz) in lexicographic
+        // order over [-N, N]^3 without 0, T = n * L bitwise)? Then the kernel visits only the lattice cells within the
+        // cutoff per axis (same images, same order); otherwise (nm = -1) it walks the whole list.
+        int nm[3] = { -1, -1, -1 };
+        bool lattice = trans[0] == 0.0 && trans[1] == 0.0 && trans[2] == 0.0;
+        for (int k = 0; k < 3 && lattice; ++k) {
+            double tmax = 0.0;
+            for (int t = 0; t < ntrans; ++t) tmax = std::max(tmax, std::fabs(trans[3 * t + k]));
+            nm[k] = static_cast<int>(std::lround(tmax / cell_L[k]));
+        }
+        lattice = lattice && static_cast<long long>(2 * nm[0] + 1) * (2 * nm[1] + 1) * (2 * nm[2] + 1) == ntrans;
+        for (int nx = -nm[0], t = 1; lattice && nx <= nm[0]; ++nx)
+            for (int ny = -nm[1]; lattice && ny <= nm[1]; ++ny)
+                for (int nz = -nm[2]; lattice && nz <= nm[2]; ++nz) {
+                    if (nx == 0 && ny == 0 && nz == 0) continue;
+                    lattice = trans[3 * t] == nx * cell_L[0] && trans[3 * t + 1] == ny * cell_L[1]
+                        && trans[3 * t + 2] == nz * cell_L[2];
+                    ++t;
+                }
+        if (!lattice) nm[0] = nm[1] = nm[2] = -1;
+        // shells sorted by l (stable): a wave of 32 work items then mostly runs one (la, lb) branch of the kernel
+        std::vector<int> ang(nsh), ord(nsh);
+        if (hipMemcpy(ang.data(), M.dang_sh, nsh * sizeof(int), hipMemcpyDeviceToHost) != hipSuccess) return false;
+        for (int k = 0; k < nsh; ++k) ord[k] = k;
+        std::stable_sort(ord.begin(), ord.end(), [&ang](int x, int y) { return ang[x] < ang[y]; });
+        // shell kinds: shells with the same primitive count and bitwise equal exponents share pow(pi/g, 1.5) and
+        // -ai aj / g of every primitive pair; k_pbc_kind_pairs tabulates them once per kind pair
+        std::vector<int> npr(nsh), poff(nsh), kind(nsh), krep;
+        if (hipMemcpy(npr.data(), M.dsh_nprim, nsh * sizeof(int), hipMemcpyDeviceToHost) != hipSuccess
+            || hipMemcpy(poff.data(), M.dsh_prim_off, nsh * sizeof(int), hipMemcpyDeviceToHost) != hipSuccess)
+            return false;
+        int nprim_tot = 0;
+        for (int k = 0; k < nsh; ++k) nprim_tot = std::max(nprim_tot, poff[k] + npr[k]);
+        std::vector<double> palpha(nprim_tot);
+        if (nprim_tot > 0 && hipMemcpy(palpha.data(), M.dprim_alpha, nprim_tot * sizeof(double), hipMemcpyDeviceToHost) != hipSuccess)
+            return false;
+        {
+            std::map<std::vector<uint64_t>, int> kinds;
+            for (int k = 0; k < nsh; ++k) {
+                std::vector<uint64_t> key(1 + npr[k]);
+                key[0] = static_cast<uint64_t>(npr[k]);
+                std::memcpy(key.data() + 1, palpha.data() + poff[k], npr[k] * sizeof(double));
+                auto it = kinds.find(key);
+                if (it == kinds.end()) {
+                    it = kinds.emplace(key, static_cast<int>(krep.size())).first;
+                    krep.push_back(k);
+                }
+                kind[k] = it->second;
+            }
+        }
+        const int nkind = static_cast<int>(krep.size());
+        const bool use_kinds = nkind > 0 && nkind <= 256;   // larger: the kernel recomputes the factors inline
+        try {
+            I.dPbcIntShOrd.upload(ord.data(), nsh, stream);
+            if (use_kinds) {
+                I.dPbcIntShKind.upload(kind.data(), nsh, stream);
+                I.dPbcIntKindRep.upload(krep.data(), nkind, stream);
+                I.dPbcIntKindTab.ensure(2 * nkind * nkind * pbc_dev::PBC_SH_MAXPP);
+            }
+        } catch (const std::exception& ex) {
+            I.ints_error = std::string("periodic integrals: device allocation failed: ") + ex.what();
+            return false;
+        }
+        if (use_kinds) {
+            const int ntab = nkind * nkind * pbc_dev::PBC_SH_MAXPP;
+            pbc_dev::k_pbc_kind_pairs<<<(ntab + 255) / 256, 256, 0, stream>>>(
+                nkind, I.dPbcIntKindRep.ptr, M.dsh_nprim, M.dsh_prim_off, M.dprim_alpha, I.dPbcIntKindTab.ptr);
+            if (hipGetLastError() != hipSuccess) { I.ints_error = "periodic kind-pair table kernel failed"; return false; }
+        }
+        const dim3 sblock(32, 8);
+        const dim3 sgrid((nsh + sblock.x - 1) / sblock.x, (nsh + sblock.y - 1) / sblock.y);
+        pbc_dev::k_overlap_h0_pbc_sh<<<sgrid, sblock, 0, stream>>>(
+            nsh, nao, M.bis_gfn2, I.dPbcIntShOrd.ptr, M.dsh2at, M.dang_sh, M.diao_sh, M.dnao_sh, M.dsh_nprim, M.dsh_prim_off, M.dprim_alpha,
+            M.dprim_coeff, M.dsh_zeta, M.dshpoly, M.dse, M.dz, M.dvalence, M.dxyz, cell_L[0], cell_L[1], cell_L[2], ntrans,
+            I.dPbcIntTrans.ptr, cut2, nm[0], nm[1], nm[2], use_kinds ? I.dPbcIntShKind.ptr : nullptr, nkind,
+            use_kinds ? I.dPbcIntKindTab.ptr : nullptr, M.dpauling, M.darad, M.dS0, M.dH0);
+    }
     if (hipGetLastError() != hipSuccess) { I.ints_error = "periodic overlap/H0 kernel failed"; return false; }
     if (want_mp) {
         pbc_dev::k_multipole_ints_pbc<<<grid, block, 0, stream>>>(

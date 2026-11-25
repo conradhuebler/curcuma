@@ -2257,6 +2257,290 @@ __global__ void k_multipole_ints_pbc(
     qp_int[5 * nn + mn] = 1.5 * qr[5] - tr;
 }
 
+/* ---------------------------------------------------------------------------------------------- *
+ *  ROCm INTS (Claude Generated, Nov 25, 2026): shell-pair variant of k_overlap_h0_pbc above. One    *
+ *  work item per shell pair (a, b) instead of one per AO pair; same image sum (XTB::                 *
+ *  getHamiltonianH0Periodic, xtb_periodic.cpp). Shared across the (2la+1)(2lb+1) AO components of    *
+ *  the pair: the minimum image d0, the image loop and its cutoff test, rr / pi_ij / hs, and per      *
+ *  primitive pair g, P and S00. The image-independent factors of S00 (pow(pi/g, 1.5) and -ai aj / g) *
+ *  are tabulated once per shell pair. With nmx >= 0 (trans is the makeLatticeImageList grid, checked *
+ *  on the host) only the lattice cells that can lie inside the cutoff per axis are visited, in list   *
+ *  order, instead of all ntr images. Every AO element is formed by the same operations in the same   *
+ *  order as in k_overlap_h0_pbc / d_cgto_overlap (primitive order i, j inside an image, images in    *
+ *  list order, on-atom block first), so S and H0 are meant to be bitwise equal to the AO-pair kernel *
+ *  (checked by the CLI gates of docs/ROCM_PARITY_INTS.md). s/p shells only; a d shell pair writes 0  *
+ *  as the AO-pair kernel does (a cell refuses d shells before this point).                           *
+ * ---------------------------------------------------------------------------------------------- */
+constexpr int PBC_SH_MAXPP = 36;   // 6 x 6 primitive pairs (STO-6G at most in the GFN1/GFN2 basis)
+
+// AO index inside a p shell -> cartesian axis (tblite order py, pz, px; d_ao_to_type type - 1)
+__device__ __forceinline__ int d_p_axis(int local_ao) { return local_ao == 0 ? 1 : (local_ao == 1 ? 2 : 0); }
+
+// Contracted overlap block of shells a (LA) and b (LB) at centres A and B, element (ia, jb) bitwise as
+// d_cgto_overlap(.., ta(ia), tb(jb)). pref/eab: pow(pi/g, 1.5) and -ai*aj/g per primitive pair (row major, npb),
+// used when tab is true, else recomputed as in d_primitive_*_overlap.
+template <int LA, int LB>
+__device__ __forceinline__ void d_shell_ovl_block(
+    const double* __restrict__ pa_alpha, const double* __restrict__ pa_coeff, int npa,
+    const double* __restrict__ pb_alpha, const double* __restrict__ pb_coeff, int npb,
+    const double* pref, const double* eab, bool tab,
+    double xa, double ya, double za, double xb, double yb, double zb,
+    double (&blk)[2 * LA + 1][2 * LB + 1])
+{
+    constexpr int NA = 2 * LA + 1, NB = 2 * LB + 1;
+    const double dx = xb - xa, dy = yb - ya, dz = zb - za;
+    const double R2 = dx * dx + dy * dy + dz * dz;
+#pragma unroll
+    for (int ia = 0; ia < NA; ++ia)
+#pragma unroll
+        for (int jb = 0; jb < NB; ++jb) blk[ia][jb] = 0.0;
+    const double ca[3] = { xa, ya, za };
+    const double cb[3] = { xb, yb, zb };
+    for (int i = 0; i < npa; ++i) {
+        const double ai = pa_alpha[i], ci = pa_coeff[i];
+        for (int j = 0; j < npb; ++j) {
+            const double aj = pb_alpha[j], cj = pb_coeff[j];
+            const double g = ai + aj;
+            const double Px = (ai * xa + aj * xb) / g;
+            const double Py = (ai * ya + aj * yb) / g;
+            const double Pz = (ai * za + aj * zb) / g;
+            const double P[3] = { Px, Py, Pz };
+            double S00;
+            if (tab) {
+                const int ij = i * npb + j;
+                S00 = pref[ij] * exp(eab[ij] * R2);
+            } else {
+                S00 = pow(d_pi() / g, 1.5) * exp(-ai * aj / g * R2);
+            }
+            if (LA == 0 && LB == 0) {
+                blk[0][0] += ci * cj * S00;
+            } else if (LA == 0) {
+#pragma unroll
+                for (int jb = 0; jb < NB; ++jb) {
+                    const int k = d_p_axis(jb);
+                    const double PB = P[k] - cb[k];
+                    blk[0][jb] += ci * cj * (S00 * PB);
+                }
+            } else if (LB == 0) {
+#pragma unroll
+                for (int ia = 0; ia < NA; ++ia) {
+                    const int k = d_p_axis(ia);
+                    const double PA = P[k] - ca[k];
+                    blk[ia][0] += ci * cj * (S00 * PA);
+                }
+            } else {
+                const double PAv[3] = { Px - xa, Py - ya, Pz - za };
+                const double PBv[3] = { Px - xb, Py - yb, Pz - zb };
+#pragma unroll
+                for (int ia = 0; ia < NA; ++ia) {
+                    const int ka = d_p_axis(ia);
+                    const double PA = PAv[ka];
+#pragma unroll
+                    for (int jb = 0; jb < NB; ++jb) {
+                        const int kb = d_p_axis(jb);
+                        const double PB = PBv[kb];
+                        blk[ia][jb] += ci * cj * ((ka == kb) ? S00 * (PA * PB + 0.5 / g) : S00 * PA * PB);
+                    }
+                }
+            }
+        }
+    }
+}
+
+template <int LA, int LB>
+__device__ __forceinline__ void d_overlap_h0_pbc_shpair(
+    int a, int b, int nao, int is_gfn2, const int* __restrict__ sh2at, const int* __restrict__ iao_sh,
+    const int* __restrict__ sh_nprim, const int* __restrict__ sh_prim_off,
+    const double* __restrict__ prim_alpha, const double* __restrict__ prim_coeff,
+    const double* __restrict__ sh_zeta, const double* __restrict__ shpoly,
+    const double* __restrict__ se, const int* __restrict__ z,
+    const int* __restrict__ valence, const double* __restrict__ xyz,
+    double Lx, double Ly, double Lz, int ntr, const double* __restrict__ trans, double cut2,
+    int nmx, int nmy, int nmz, const int* __restrict__ sh_kind, int nkind, const double* __restrict__ kind_tab,
+    const double* __restrict__ pauling, const double* __restrict__ atomic_rad,
+    double* __restrict__ S, double* __restrict__ H0)
+{
+    constexpr int NA = 2 * LA + 1, NB = 2 * LB + 1;
+    const int la = LA, lb = LB;
+    const int iat = sh2at[a], jat = sh2at[b];
+    const double xa = xyz[3 * iat + 0], ya = xyz[3 * iat + 1], za = xyz[3 * iat + 2];
+    const double avg_eps = 0.5 * (se[a] + se[b]);
+    const int zi = z[iat], zj = z[jat];
+
+    double hs;   // verbatim k_overlap_h0_pbc
+    if (is_gfn2 == 0) {
+        const bool vi = valence[a] != 0, vj = valence[b] != 0;
+        if (vi && vj) {
+            double den = pauling[zi - 1] - pauling[zj - 1]; den *= den;
+            hs = d_kpair_gfn1(zi, zj) * d_kshell_gfn1(la, lb) * (1.0 + (-7.0e-3) * den);
+        } else if (vi && !vj) {
+            hs = 0.5 * (d_kshell_gfn1(la, la) + 2.85);
+        } else if (!vi && vj) {
+            hs = 0.5 * (d_kshell_gfn1(lb, lb) + 2.85);
+        } else {
+            hs = 2.85;
+        }
+    } else {
+        double den = pauling[zi - 1] - pauling[zj - 1]; den *= den;
+        const double enp = 1.0 + 2.0e-2 * den;
+        const double km  = d_kshell_gfn2(la, lb) * enp;  // kpair=1 for GFN2
+        const double za_ = sh_zeta[a], zb_ = sh_zeta[b];
+        const double zij = pow(2.0 * sqrt(za_ * zb_) / (za_ + zb_), 0.5);  // wexp=0.5
+        hs = zij * km;
+    }
+    const double rad_sum = atomic_rad[zi - 1] + atomic_rad[zj - 1];
+    const double* pa_alpha = prim_alpha + sh_prim_off[a];
+    const double* pa_coeff = prim_coeff + sh_prim_off[a];
+    const int npa = sh_nprim[a];
+    const double* pb_alpha = prim_alpha + sh_prim_off[b];
+    const double* pb_coeff = prim_coeff + sh_prim_off[b];
+    const int npb = sh_nprim[b];
+
+    // image-independent primitive-pair factors of S00 (d_primitive_*_overlap: pow(pi/g, 1.5), -aa*ab/g), tabulated
+    // per pair of shell kinds by k_pbc_kind_pairs (shells with bitwise equal primitive exponents share a kind)
+    const double* pref = nullptr;
+    const double* eab = nullptr;
+    const bool tab = kind_tab != nullptr && npa * npb <= PBC_SH_MAXPP;
+    if (tab) {
+        const size_t off = (static_cast<size_t>(sh_kind[a]) * nkind + sh_kind[b]) * PBC_SH_MAXPP;
+        pref = kind_tab + 2 * off;
+        eab  = pref + PBC_SH_MAXPP;
+    }
+
+    double s_acc[NA][NB], h_acc[NA][NB], blk[NA][NB];
+#pragma unroll
+    for (int ia = 0; ia < NA; ++ia)
+#pragma unroll
+        for (int jb = 0; jb < NB; ++jb) { s_acc[ia][jb] = 0.0; h_acc[ia][jb] = 0.0; }
+    const bool same = (iat == jat);
+    if (same) {   // T = 0 on-atom block, h_factor 1, exact 1 on the diagonal of a shell
+        d_shell_ovl_block<LA, LB>(pa_alpha, pa_coeff, npa, pb_alpha, pb_coeff, npb, pref, eab, tab,
+                                  xa, ya, za, xa, ya, za, blk);
+#pragma unroll
+        for (int ia = 0; ia < NA; ++ia)
+#pragma unroll
+            for (int jb = 0; jb < NB; ++jb) {
+                const double s_ab = (a == b && ia == jb) ? 1.0 : blk[ia][jb];
+                s_acc[ia][jb] += s_ab;
+                h_acc[ia][jb] += avg_eps * 1.0 * s_ab;
+            }
+    }
+    double d0x = xa - xyz[3 * jat], d0y = ya - xyz[3 * jat + 1], d0z = za - xyz[3 * jat + 2];
+    double s = d0x * (1.0 / Lx); s -= rint(s); d0x = Lx * s;
+    s = d0y * (1.0 / Ly); s -= rint(s); d0y = Ly * s;
+    s = d0z * (1.0 / Lz); s -= rint(s); d0z = Lz * s;
+    // Candidate images: with nmx < 0 every list entry t = c; otherwise trans is the makeLatticeImageList grid
+    // (checked on the host: T = 0 at t = 0, then (nx, ny, nz) in lexicographic order over [-nm, nm]^3 without 0),
+    // c = 0 is T = 0 and c >= 1 walks, in the same lexicographic order, only the cells that can pass the cutoff per
+    // axis (|d0_k - n_k L_k| < rc, widened). The exact r2 test decides as before: same images, same summation order.
+    int lox = 0, loy = 0, loz = 0, sy = 1, sz = 1, ny_ = 1, nz_ = 1, z0 = 0, ncand = ntr;
+    if (nmx >= 0) {
+        const double rc = sqrt(cut2) * (1.0 + 1.0e-10) + 1.0e-10;
+        lox = max(-nmx, static_cast<int>(floor((d0x - rc) / Lx)));
+        loy = max(-nmy, static_cast<int>(floor((d0y - rc) / Ly)));
+        loz = max(-nmz, static_cast<int>(floor((d0z - rc) / Lz)));
+        const int sx = max(0, min(nmx, static_cast<int>(ceil((d0x + rc) / Lx))) - lox + 1);
+        sy = max(0, min(nmy, static_cast<int>(ceil((d0y + rc) / Ly))) - loy + 1);
+        sz = max(0, min(nmz, static_cast<int>(ceil((d0z + rc) / Lz))) - loz + 1);
+        ny_ = 2 * nmy + 1; nz_ = 2 * nmz + 1;
+        z0 = nmx * ny_ * nz_ + nmy * nz_ + nmz;   // linear grid index of (0, 0, 0)
+        ncand = 1 + sx * sy * sz;
+    }
+    for (int c = 0; c < ncand; ++c) {
+        int t = c;
+        if (nmx >= 0 && c > 0) {
+            const int k = c - 1;
+            const int nz = loz + k % sz, ny = loy + (k / sz) % sy, nx = lox + k / (sz * sy);
+            const int lin = (nx + nmx) * ny_ * nz_ + (ny + nmy) * nz_ + (nz + nmz);
+            if (lin == z0) continue;
+            t = lin < z0 ? lin + 1 : lin;
+        }
+        if (t == 0 && same) continue;   // T = 0 of the same atom is the on-atom block above
+        const double dx = d0x - trans[3 * t], dy = d0y - trans[3 * t + 1], dz = d0z - trans[3 * t + 2];
+        const double r2 = __dadd_rn(__dadd_rn(__dmul_rn(dx, dx), __dmul_rn(dy, dy)), __dmul_rn(dz, dz));
+        if (r2 >= cut2 || r2 < 1.0e-24) continue;   // beyond the cutoff: skipped for all components at once
+        const double rr = sqrt(sqrt(r2) / rad_sum);
+        const double pi_ij = (1.0 + shpoly[a] * rr) * (1.0 + shpoly[b] * rr);
+        d_shell_ovl_block<LA, LB>(pa_alpha, pa_coeff, npa, pb_alpha, pb_coeff, npb, pref, eab, tab,
+                                  xa, ya, za, xa - dx, ya - dy, za - dz, blk);
+#pragma unroll
+        for (int ia = 0; ia < NA; ++ia)
+#pragma unroll
+            for (int jb = 0; jb < NB; ++jb) {
+                const double s_ab = blk[ia][jb];
+                s_acc[ia][jb] += s_ab;
+                h_acc[ia][jb] += avg_eps * (hs * pi_ij) * s_ab;
+            }
+    }
+    const int mu0 = iao_sh[a], nu0 = iao_sh[b];
+#pragma unroll
+    for (int ia = 0; ia < NA; ++ia)
+#pragma unroll
+        for (int jb = 0; jb < NB; ++jb) {
+            const size_t idx = static_cast<size_t>(mu0 + ia) + static_cast<size_t>(nu0 + jb) * nao;
+            S[idx]  = s_acc[ia][jb];
+            H0[idx] = h_acc[ia][jb];
+        }
+}
+
+// ROCm INTS (Claude Generated, Nov 25, 2026): image-independent primitive-pair factors of S00 per pair of shell kinds
+// (ka, kb): tab[2 * ((ka * nkind + kb) * MAXPP) + i * npb + j] = pow(pi / g, 1.5), the same + MAXPP = -ai * aj / g, the
+// expressions of d_primitive_*_overlap (bitwise equal values). kind_rep[k] is one shell of kind k. One thread per entry.
+__global__ void k_pbc_kind_pairs(int nkind, const int* __restrict__ kind_rep, const int* __restrict__ sh_nprim,
+                                 const int* __restrict__ sh_prim_off, const double* __restrict__ prim_alpha,
+                                 double* __restrict__ tab)
+{
+    const int id = blockIdx.x * blockDim.x + threadIdx.x;
+    const int n = nkind * nkind * PBC_SH_MAXPP;
+    if (id >= n) return;
+    const int ij = id % PBC_SH_MAXPP, kk = id / PBC_SH_MAXPP;
+    const int a = kind_rep[kk / nkind], b = kind_rep[kk % nkind];
+    const int npa = sh_nprim[a], npb = sh_nprim[b];
+    if (npa * npb > PBC_SH_MAXPP || ij >= npa * npb) return;
+    const int i = ij / npb, j = ij % npb;
+    const double ai = prim_alpha[sh_prim_off[a] + i], aj = prim_alpha[sh_prim_off[b] + j];
+    const double g = ai + aj;
+    double* t = tab + 2 * static_cast<size_t>(kk) * PBC_SH_MAXPP;
+    t[ij] = pow(d_pi() / g, 1.5);
+    t[PBC_SH_MAXPP + ij] = -ai * aj / g;
+}
+
+__global__ void k_overlap_h0_pbc_sh(
+    int nsh, int nao, int is_gfn2, const int* __restrict__ sh_order, const int* __restrict__ sh2at,
+    const int* __restrict__ ang_sh,
+    const int* __restrict__ iao_sh, const int* __restrict__ nao_sh,
+    const int* __restrict__ sh_nprim, const int* __restrict__ sh_prim_off,
+    const double* __restrict__ prim_alpha, const double* __restrict__ prim_coeff,
+    const double* __restrict__ sh_zeta, const double* __restrict__ shpoly,
+    const double* __restrict__ se, const int* __restrict__ z,
+    const int* __restrict__ valence, const double* __restrict__ xyz,
+    double Lx, double Ly, double Lz, int ntr, const double* __restrict__ trans, double cut2,
+    int nmx, int nmy, int nmz, const int* __restrict__ sh_kind, int nkind, const double* __restrict__ kind_tab,
+    const double* __restrict__ pauling, const double* __restrict__ atomic_rad,
+    double* __restrict__ S, double* __restrict__ H0)
+{
+    const int ia_ = blockIdx.x * blockDim.x + threadIdx.x;
+    const int ib_ = blockIdx.y * blockDim.y + threadIdx.y;
+    if (ia_ >= nsh || ib_ >= nsh) return;
+    // sh_order: shells sorted by l (stable), so the lanes of a wave mostly share (la, lb) and one template branch
+    const int a = sh_order[ia_], b = sh_order[ib_];
+    const int la = ang_sh[a], lb = ang_sh[b];
+#define PBC_SH_ARGS a, b, nao, is_gfn2, sh2at, iao_sh, sh_nprim, sh_prim_off, prim_alpha, prim_coeff, sh_zeta, \
+    shpoly, se, z, valence, xyz, Lx, Ly, Lz, ntr, trans, cut2, nmx, nmy, nmz, sh_kind, nkind, kind_tab, pauling, atomic_rad, S, H0
+    if (la == 0 && lb == 0)      d_overlap_h0_pbc_shpair<0, 0>(PBC_SH_ARGS);
+    else if (la == 0 && lb == 1) d_overlap_h0_pbc_shpair<0, 1>(PBC_SH_ARGS);
+    else if (la == 1 && lb == 0) d_overlap_h0_pbc_shpair<1, 0>(PBC_SH_ARGS);
+    else if (la == 1 && lb == 1) d_overlap_h0_pbc_shpair<1, 1>(PBC_SH_ARGS);
+    else {   // d shell: zeros, as k_overlap_h0_pbc (d_ao_to_type < 0)
+        for (int ia = 0; ia < nao_sh[a]; ++ia)
+            for (int jb = 0; jb < nao_sh[b]; ++jb) {
+                const size_t idx = static_cast<size_t>(iao_sh[a] + ia) + static_cast<size_t>(iao_sh[b] + jb) * nao;
+                S[idx] = 0.0; H0[idx] = 0.0;
+            }
+    }
+#undef PBC_SH_ARGS
+}
+
 } // namespace pbc_dev
 
 /* ---------------------------------------------------------------------------------------------- *
@@ -2329,6 +2613,9 @@ struct PbcState {
         dPbcKtab, dPbcMpKv, dPbcMpSf, dPbcMrad, dPbcNbV, dPbcQ, dPbcQp, dPbcR4r2, dPbcRepAlp, dPbcRepE, dPbcRepFix,
         dPbcRepTrans, dPbcRepZeff, dPbcRtrans, dPbcSr4r2, dPbcTrans, dPbcVir, dPbcXyz;
     PbcBuf<double> dPbcIntTrans;     ///< G1b (Nov 24, 2026): translations of computeIntegralsPeriodic
+    PbcBuf<int> dPbcIntShOrd;        ///< ROCm INTS (Nov 25, 2026): shells sorted by l for k_overlap_h0_pbc_sh
+    PbcBuf<int> dPbcIntShKind, dPbcIntKindRep;  ///< ROCm INTS: shell -> kind (equal primitives), kind -> one shell
+    PbcBuf<double> dPbcIntKindTab;   ///< ROCm INTS: per kind pair pow(pi/g, 1.5) and -ai aj / g (k_pbc_kind_pairs)
     std::string ints_error;          ///< G1b: why the last computeIntegralsPeriodic failed (empty if none)
     void release()
     {
@@ -2341,10 +2628,10 @@ struct PbcState {
                                    &dPbcKexp, &dPbcKoFix, &dPbcKoG, &dPbcKoQsh, &dPbcKoTr, &dPbcKoTrans, &dPbcKtab,
                                    &dPbcMpKv, &dPbcMpSf, &dPbcMrad, &dPbcNbV, &dPbcQ, &dPbcQp, &dPbcR4r2, &dPbcRepAlp,
                                    &dPbcRepE, &dPbcRepFix, &dPbcRepTrans, &dPbcRepZeff, &dPbcRtrans, &dPbcSr4r2,
-                                   &dPbcTrans, &dPbcVir, &dPbcXyz, &dPbcIntTrans })
+                                   &dPbcTrans, &dPbcVir, &dPbcXyz, &dPbcIntTrans, &dPbcIntKindTab })
             b->free();
         for (PbcBuf<int>* b : { &dD4CnZ, &dD3Z, &dD3Type, &dD3Nref, &dPbcNbCnt, &dPbcNbPtr, &dPbcNbIdx, &dPbcShAt,
-                                &dPbcRepLight, &dPbcKoShAt, &dPbcD4pZ, &dPbcD4pNref })
+                                &dPbcRepLight, &dPbcKoShAt, &dPbcD4pZ, &dPbcD4pNref, &dPbcIntShOrd, &dPbcIntShKind, &dPbcIntKindRep })
             b->free();
         d4_pbc_ready = gamma_pbc_resident = mp_pbc_resident = false;
         mp_pbc_nat = 0;
