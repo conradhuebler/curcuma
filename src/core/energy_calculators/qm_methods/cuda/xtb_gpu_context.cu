@@ -1440,8 +1440,12 @@ __global__ void k_multipole_ints(
     }
 
     // Origin shift to the column atom (nu) + traceless transform with overlap S.
+    // Claude Generated (Nov 2026, Known Issue #47): on the diagonal take <mu|mu> of the SAME
+    // CGTO evaluation (Sx), not the resident S whose on-site diagonal is forced to 1.0; with 1.0
+    // the on-site moments keep R*delta / R^2*delta and the energy depends on the absolute
+    // position. Mirrors XTB::setupMultipole (xtb_multipole.cpp, s_diag_mp).
     const double Rx = xyz[3*jat+0], Ry = xyz[3*jat+1], Rz = xyz[3*jat+2];
-    const double Smn = S[mn];
+    const double Smn = (mu == nu) ? Sx : S[mn];
     const double dx = D[0], dy = D[1], dz = D[2];
     dp_int[0*nn + mn] = dx - Rx * Smn;
     dp_int[1*nn + mn] = dy - Ry * Smn;
@@ -2288,7 +2292,7 @@ __global__ void k_multipole_ints_sp(
     }
 
     const double Rx = xyz[3*jat+0], Ry = xyz[3*jat+1], Rz = xyz[3*jat+2];
-    const double Smn = Ssp[e];
+    const double Smn = (mu == nu) ? Sx : Ssp[e];   // Nov 2026 (#47): diagonal from the same CGTO evaluation
     const double dx = D[0], dy = D[1], dz = D[2];
     dp_sp[0*ne + ee] = dx - Rx * Smn;
     dp_sp[1*ne + ee] = dy - Ry * Smn;

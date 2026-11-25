@@ -148,7 +148,7 @@ numbers: [docs/KNOWN_ISSUES_ARCHIVE.md](docs/KNOWN_ISSUES_ARCHIVE.md).
 
 | Method | Status / what was checked | Docs |
 |---|---|---|
-| `gfn2` native | 11/12 `sqm_reference` at 1e-8 vs tblite (231-atom `complex` open); GMTKN55 vs xtb 6.7.1 within 0.017 kcal/mol (D4 ATM cutoff split, `-xtb.d4_atm_cutoff 40.0` removes it); open shell, d-shell, MOR41 95/95 < 1e-6 Eh vs tblite | SQM_VALIDATION.md, SCF_MODES.md, SQM_DSHELL_WP.md |
+| `gfn2` native | 11/12 `sqm_reference` at 1e-8 vs tblite (231-atom `complex` open); GMTKN55 vs xtb 6.7.1 within 0.017 kcal/mol (D4 ATM cutoff split, `-xtb.d4_atm_cutoff 40.0` removes it; `-scf_criterion xtb` sets ATM 40 / pair 72 Bohr, peo201 within ~2 uEh of xtb, #47); open shell, d-shell, MOR41 95/95 < 1e-6 Eh vs tblite | SQM_VALIDATION.md, SCF_MODES.md, SQM_DSHELL_WP.md |
 | `gfn1` native | 14/16 `sqm_reference` at 1e-8 (He2, `complex` open); halogen-bond term; residual 0.011 kcal/mol is the xtb/tblite STO-6G split (`-xtb.sto6g_legacy_4sp true`) | SQM_WP2_gfn1_accuracy.md |
 | `gfnff` native | port of GFN-FF; vs pprcht/gfnff over every structure: MOR41 and GMTKN55 max 0.07 kcal/mol (Known Issue #25, with `-gfnff.inversion_sort_xtb false`); S30L-CI max 0.58, from the deliberate sTors deviation (0.05 with `-gfnff.storsion_reference_loop_bug true`, #12); inversion sort follows xtb since Nov 24, 2026 (#34 d); vs xtb differs where xtb and pprcht differ (#6, #21) | GFNFF_STATUS.md, S30L_GFNNF_VALIDATION.md |
 | `pm3`/`am1`/`mndo` native | 21/21 tests vs Ulysses (< 4 µEh) | MNDO_INTEGRALS.md |

@@ -559,7 +559,7 @@ double XTB::calcD4DispersionPeriodic(bool need_gradient) const
     }
 
     const PBCUtils::LatticeImageList pair_images = PBCUtils::makeLatticeImageList(m_cell_bohr, kPbcD4PairCutoffBohr);
-    const PBCUtils::LatticeImageList atm_images = PBCUtils::makeLatticeImageList(m_cell_bohr, m_d4_atm_cutoff);
+    const PBCUtils::LatticeImageList atm_images = PBCUtils::makeLatticeImageList(m_cell_bohr, d4AtmCutoffEffective());
     const PBCUtils::LatticeImageList cn_images = PBCUtils::makeLatticeImageList(m_cell_bohr, kPbcD4CnCutoffBohr);
 
     // Stage T: the periodic pair and ATM loops run on fixed blocks over the gated intra-thread budget

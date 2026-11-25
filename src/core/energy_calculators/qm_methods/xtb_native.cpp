@@ -1255,9 +1255,12 @@ double XTB::Calculation(bool gradient)
     const bool  scf_jac_active = scf_jac_dump || m_scf_jac_capture;
     Vector scf_jac_x_star, scf_jac_g_star;   // converged input x* and its output G(x*) (CPU loop)
     double scf_jac_e_scc = 0.0;
+    // Nov 2026: the device switch point applies only on the device-resident loop (set below, after
+    // use_gpu_resident is known); a host loop, including the CPU fallback of a GPU run, keeps the host one.
+    double fp32_threshold_eff = m_scf_fp32_threshold;
     auto fp32_wanted = [&](double dq_last) {
         return !scf_jac_active && m_scf_mixed_precision && !fp32_exhausted
-               && (dq_last > m_scf_fp32_threshold);
+               && (dq_last > fp32_threshold_eff);
     };
     // Claude Generated (Sep 2026, measured on H200): the FP32 phase can converge to a fixed point
     // that is not the FP64 one. polymer_2x, nao 15444: FP32 reported max|dq| = 7.1e-6 at an energy
@@ -1291,7 +1294,7 @@ double XTB::Calculation(bool gradient)
             if (CurcumaLogger::get_verbosity() >= 2)
                 CurcumaLogger::info_fmt("SCF: FP32 phase stalled at max|dq| = {:.2e} "
                                         "(>= scf_fp32_threshold {:.1e}); continuing in FP64",
-                                        dq_now, m_scf_fp32_threshold);
+                                        dq_now, fp32_threshold_eff);
         }
     };
 
@@ -1452,6 +1455,8 @@ double XTB::Calculation(bool gradient)
                         ? "SCF: device-resident GFN2 path (CN/S/H0/L on GPU; multipole integrals uploaded)"
                         : "SCF: device-resident GFN2 path (H0/S/L + multipole integrals uploaded)"));
         }
+        if (use_gpu_resident && m_scf_fp32_threshold_device > 0.0)
+            fp32_threshold_eff = m_scf_fp32_threshold_device;   // Nov 2026, see setFp32ThresholdDevice
         // Stage 3c: when the device built the integrals, use its Coulomb γ for the
         // host potential (v_sh += γ·q_sh). γ is nsh² (cheap to download once per
         // geometry) and matches the CPU build to ~1e-13; the gemv stays on the
@@ -4062,6 +4067,11 @@ double XTB::calcDispersionEnergy(bool need_gradient) const
         // Native GFN2 consumes the C6 reference cache through D4Evaluator, not the
         // JSON pair list — skip building it (json-per-pair + OpenMP every geometry).
         m_d4_generator->setBuildPairLists(false);
+        m_d4_generator->setPairEvalCutoffBohr(d4PairCutoffEffective());  // Nov 2026, default 50 = unchanged
+        if (CurcumaLogger::get_verbosity() >= 3)   // Nov 2026: which D4 cutoffs run (tblite or xtb-compatible)
+            CurcumaLogger::info(fmt::format("D4 cutoffs: pair {:.1f} Bohr, ATM {:.1f} Bohr ({})", d4PairCutoffEffective(),
+                d4AtmCutoffEffective(), (m_d4_atm_cutoff > 0.0 || m_d4_pair_cutoff > 0.0) ? "explicit -xtb.d4_*_cutoff"
+                                        : (m_scf_criterion_xtb && !m_pbc ? "xtb-compatible, scf_criterion xtb" : "tblite default")));
     }
     if (!m_d4_evaluator) {
         curcuma::dispersion::D4Params p;
@@ -4131,7 +4141,7 @@ double XTB::calcDispersionEnergy(bool need_gradient) const
             for (int a = 0; a < nat; ++a) qv[a] = (a < m_wfn.q_at.size()) ? m_wfn.q_at(a) : 0.0;
             double e_dev = 0.0;
             if (m_gpu_scf->d4PostScfDevice(nat, qv.data(), /*with_atm=*/true, 5.0, 0.52, 5.0, 16.0,
-                                           m_d4_atm_cutoff, /*cn_cutoff=*/30.0, tab.rad, tab.en,
+                                           d4AtmCutoffEffective(), /*cn_cutoff=*/30.0, tab.rad, tab.en,
                                            tab.kn, tab.k4, tab.k5, tab.k6, &e_dev, gflat.data(), dq.data())) {
                 m_disp_gradient = Matrix::Zero(nat, 3);
                 m_disp_dEdq = Vector::Zero(nat);
@@ -4208,7 +4218,7 @@ double XTB::calcDispersionEnergy(bool need_gradient) const
         std::vector<double> e_at(nat, 0.0), g_at(3 * nat, 0.0), dcn_at(nat, 0.0);
         if (m_gpu_scf->dispersionATM(nat, c6f.data(), dc6f.data(),
                                      /*s9=*/5.0, /*a1=*/0.52, /*a2=*/5.0, /*alp=*/16.0,
-                                     /*cutoff=*/m_d4_atm_cutoff, e_at.data(), g_at.data(), dcn_at.data())) {
+                                     /*cutoff=*/d4AtmCutoffEffective(), e_at.data(), g_at.data(), dcn_at.data())) {
             double esum = 0.0;
             for (int a = 0; a < nat; ++a) {
                 esum += e_at[a];
@@ -4226,7 +4236,7 @@ double XTB::calcDispersionEnergy(bool need_gradient) const
     if (!atm_device) {
         E += m_d4_evaluator->computeATM(
             m_atoms, geom_bohr, /*with_gradient=*/true, m_disp_gradient, m_disp_dEdcn,
-            m_d4_atm_cutoff);
+            d4AtmCutoffEffective());
     }
     const auto td2 = d4clk::now();
 
@@ -4345,6 +4355,11 @@ bool XTB::computeD4PotentialDedq(const Vector& q_at, Vector& dEdq) const
         // Native GFN2 consumes the C6 reference cache through D4Evaluator, not the
         // JSON pair list — skip building it (json-per-pair + OpenMP every geometry).
         m_d4_generator->setBuildPairLists(false);
+        m_d4_generator->setPairEvalCutoffBohr(d4PairCutoffEffective());  // Nov 2026, default 50 = unchanged
+        if (CurcumaLogger::get_verbosity() >= 3)   // Nov 2026: which D4 cutoffs run (tblite or xtb-compatible)
+            CurcumaLogger::info(fmt::format("D4 cutoffs: pair {:.1f} Bohr, ATM {:.1f} Bohr ({})", d4PairCutoffEffective(),
+                d4AtmCutoffEffective(), (m_d4_atm_cutoff > 0.0 || m_d4_pair_cutoff > 0.0) ? "explicit -xtb.d4_*_cutoff"
+                                        : (m_scf_criterion_xtb && !m_pbc ? "xtb-compatible, scf_criterion xtb" : "tblite default")));
     }
     if (!m_d4_evaluator) {
         curcuma::dispersion::D4Params p;
@@ -4404,7 +4419,7 @@ bool XTB::computeD4PotentialDedq(const Vector& q_at, Vector& dEdq) const
         if (use_device_disp || use_device_disp_pbc) {
             // Upload the geometry-fixed D4 reference data once per geometry. The
             // BJ params (1, 2.7, 0.52, 5.0) match the evaluator init above; the
-            // effective pair cutoff is 50 Bohr (GFNFFDispersion::r_cut).
+            // pair cutoff is the CPU one (d4PairCutoffEffective, 50 by default).
             const int nat = m_atomcount;
             const std::vector<int>& refn = m_d4_generator->getRefN();
             std::vector<int> Zv(nat), nrefv(nat);
@@ -4422,7 +4437,10 @@ bool XTB::computeD4PotentialDedq(const Vector& q_at, Vector& dEdq) const
             m_gpu_scf->beginDispersion(nat, Zv.data(), sqrtv.data(), nrefv.data(),
                                        xyzv.data(), c6.data(),
                                        static_cast<int>(c6.size()),
-                                       1.0, 2.7, 0.52, 5.0, 50.0);
+                                       1.0, 2.7, 0.52, 5.0,
+                                       // Nov 2026: the CPU pair cutoff (50 tblite, 72 with scf_criterion xtb or
+                                       // -xtb.d4_pair_cutoff); a cell keeps 50 (kPbcD4PairCutoffBohr, own images)
+                                       m_pbc ? kPbcD4PairCutoffBohr : d4PairCutoffEffective());
             if (use_device_disp_pbc) {
                 const PBCUtils::LatticeImageList im = PBCUtils::makeLatticeImageList(m_cell_bohr, kPbcD4PairCutoffBohr);
                 std::vector<double> tr(3 * im.trans.size());

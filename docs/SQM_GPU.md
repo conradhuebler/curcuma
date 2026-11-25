@@ -262,6 +262,12 @@ FP32→FP64 decision) — only then does the latency region actually shrink.
   519→278 ms, TOTAL ~515 ms — **~8% faster than CPU `-threads 8`** (~554 ms). gfn1
   is on par (both bounded by the host D3 finite-difference dispersion gradient).
   Use `-threads N` so the host setup/potential build parallelise alongside the GPU.
+- **CPU fallback of large systems (Nov 2026)**: if neither the device integral build nor the upload fits
+  (7320 atoms: 15.7 GB on a 16 GB card), the whole calculation runs on the host (counted, `-gpu_strict true`
+  exits). Since Nov 25, 2026 that host SCF uses the CPU FP32 switch point (1e-3), not the device one (2e-5);
+  before, its gradient differed from the CPU by 3.2e-4 Eh/A (GPU_PERIODIC_GAPS A18). Device-resident results
+  on 4002 atoms equal the CPU to 1.5e-8 Eh/A at `-scf_threshold 1e-8`; at the default threshold the gradient
+  error against a tight reference is ~1.6e-5 Eh/A (mixed, and CPU) or 2.4e-6 (FP64), a convergence effect.
 - Memory headroom (16 GB): `complex` (231 atoms) is ~tens of MB; the dense path's
   practical ceiling is ~`polymer` (1410 atoms, ~3–4 GB). Larger → large-system
   modes (CPU-orchestrated; the GPU dense kernel is the per-block solver).

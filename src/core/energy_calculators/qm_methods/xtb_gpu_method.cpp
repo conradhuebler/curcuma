@@ -1203,7 +1203,7 @@ XtbGpuComputationalMethod::XtbGpuComputationalMethod(MethodType method, const js
         // FP32 step, so a switch point under scf_threshold (1e-5 against the 2e-5 default) makes
         // the SCF converge at the switch point and wastes the looser threshold.
         if (!cfg_has("scf_fp32_threshold") && !cfg_has("fp32_threshold"))
-            xtb->setFp32Threshold(std::max(1.0e-5, xtb->scfConvergenceLimit()));
+            xtb->setFp32ThresholdDevice(std::max(1.0e-5, xtb->scfConvergenceLimit()));   // Nov 2026: device loop only
 
         if (CurcumaLogger::get_verbosity() >= 2)
             CurcumaLogger::info(fmt::format(

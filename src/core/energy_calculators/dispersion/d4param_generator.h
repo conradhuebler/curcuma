@@ -31,6 +31,7 @@
 
 #include <Eigen/Dense>
 #include <memory>
+#include <algorithm>
 #include <array>
 #include <utility>
 
@@ -345,6 +346,15 @@ public:
     // inserts/pair) plus an OpenMP spawn that is pure overhead for it. GFN-FF
     // leaves this on; its ForceFieldThread consumes m_parameters["d4_dispersion_pairs"].
     void setBuildPairLists(bool on) { m_build_pair_lists = on; }
+    // Claude Generated (Nov 2026): D4 two-body evaluation cutoff of the non-periodic pair list
+    // (Bohr). Default PAIR_EVAL_CUTOFF_BOHR = 50 (tblite disp2). The build radius follows as
+    // max(PAIR_BUILD_CUTOFF_BOHR, eval), so the default list is unchanged bit for bit.
+    // xtb 6.7.1 evaluates the GFN2 two-body ENERGY with 72 Bohr (dftd4.F90 build_wdispmat rthr).
+    void setPairEvalCutoffBohr(double c)
+    {
+        m_pair_eval_cutoff_bohr = c;
+        m_pair_build_cutoff_nonpbc_bohr = std::max(static_cast<double>(PAIR_BUILD_CUTOFF_BOHR), c);
+    }
 
     // Claude Generated (Apr 2026): P1a — CN-change threshold cache for Gaussian weights
     // Skip recomputation of gw/dgw/dc6dcn when CN changes < d4_cn_cache_threshold (MD optimization)
@@ -410,6 +420,8 @@ private:
     bool m_skip_pair_loop = false;  // WP-A: GPU builds the pair list; skip the host O(N^2) loop
     PBCUtils::OrthoCell m_cell;     // Nov 2026 (A3b): periodic cell of the pair list, inactive = none
     double m_pair_build_cutoff_bohr = PAIR_BUILD_CUTOFF_BOHR;  // build radius with an active cell
+    double m_pair_eval_cutoff_bohr = PAIR_EVAL_CUTOFF_BOHR;          // r_cut stamped on every pair (Nov 2026)
+    double m_pair_build_cutoff_nonpbc_bohr = PAIR_BUILD_CUTOFF_BOHR; // build radius without a cell (Nov 2026)
     std::vector<double> m_zeta_atom;  // Nov 2026 (A3c): zeta_i of the last native pair-list build
 
     // Molecular CN calculation (December 2025 Phase 2 - CN+Charge weighting)

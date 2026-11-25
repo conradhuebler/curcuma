@@ -1340,10 +1340,22 @@ public:
     // Opt-in: build the 4s/4p shells from xtb's older STO-6G tables instead of
     // tblite's (K, Ca, Ge-Kr only). See STO_CGTO.hpp pAlpha6_legacy_4s.
     void setSto6gLegacy4sp(bool b)        { m_sto6g_legacy_4sp = b; }
-    // D4 three-body (ATM) real-space cutoff in Bohr. tblite uses 25.0 (the default,
-    // since tblite is curcuma's reference for GFN1/GFN2), xtb passes 40.0. Set 40.0
-    // to reproduce the xtb binary on molecules extending past ~25 Bohr.
-    void setD4AtmCutoff(double c)         { m_d4_atm_cutoff = c; }
+    // D4 three-body (ATM) real-space cutoff in Bohr; <= 0 = automatic (d4AtmCutoffEffective).
+    // tblite uses 25.0 (the default, since tblite is curcuma's reference for GFN1/GFN2), xtb
+    // passes 40.0. Set 40.0 to reproduce the xtb binary on molecules extending past ~25 Bohr.
+    void setD4AtmCutoff(double c)         { m_d4_atm_cutoff = c > 0.0 ? c : 0.0; }
+    // D4 two-body real-space cutoff in Bohr (non-periodic); <= 0 = automatic. 50.0 = tblite;
+    // the xtb 6.7.1 GFN2 energy uses 72.0 (build_wdispmat), its gradient 60.0. Claude Generated (Nov 2026).
+    void setD4PairCutoff(double c)        { m_d4_pair_cutoff = c > 0.0 ? c : 0.0; }
+    /// Claude Generated (Nov 2026, Known Issue #47): the D4 cutoffs in use. An explicit value wins;
+    /// otherwise tblite's 25 (ATM) / 50 (pair) Bohr, or xtb 6.7.1's 40 / 72 Bohr when the xtb-compatible
+    /// convergence rule (scf_criterion xtb) is on and no cell is set. Energy, gradient and the in-SCF
+    /// dE/dq all read the same value, so the surface stays consistent (xtb itself takes its pair
+    /// gradient at 60 Bohr; curcuma uses 72 for both and stays FD-consistent).
+    double d4AtmCutoffEffective() const
+    { return m_d4_atm_cutoff > 0.0 ? m_d4_atm_cutoff : ((m_scf_criterion_xtb && !m_pbc) ? 40.0 : 25.0); }
+    double d4PairCutoffEffective() const
+    { return m_d4_pair_cutoff > 0.0 ? m_d4_pair_cutoff : ((m_scf_criterion_xtb && !m_pbc) ? 72.0 : 50.0); }
     ScfMode scfMode() const               { return m_scf_mode; }
 
     // Electronic temperature in Kelvin (0 → integer occupation, no Fermi smearing).
@@ -1421,6 +1433,11 @@ public:
     // is FP64. Default off. Claude Generated.
     void setMixedPrecision(bool b)      { m_scf_mixed_precision = b; }
     void setFp32Threshold(double t)     { if (t > 0.0) m_scf_fp32_threshold = t; }
+    /// Claude Generated (Nov 2026): FP32->FP64 switch point used only while the SCF runs on the device-resident
+    /// loop (CUDA sets max(1e-5, convergence limit)). A host SCF loop - also the CPU fallback of a failed device
+    /// integral build - keeps m_scf_fp32_threshold (1e-3 or the user's value): with the device switch point the
+    /// 7320-atom fallback switched to FP64 only at max|dq| 1.7e-5 and its gradient differed from the CPU by 3.2e-4 Eh/A.
+    void setFp32ThresholdDevice(double t) { if (t > 0.0) m_scf_fp32_threshold_device = t; }
     void setGpuPartialDiag(bool b)      { m_gpu_partial_diag = b; }
     void setGpuGfn1Resident(bool b)     { m_gpu_gfn1_resident = b; }
     // CPU pseudo-diagonalisation (opt-in, Claude Generated Oct 2026): replace the eigensolve of the
@@ -2067,7 +2084,9 @@ private:
     // D4 ATM cutoff (Bohr). 25.0 = tblite (default), 40.0 = xtb. Carries the ENTIRE
     // GFN2 energy deviation against xtb on molecules extending past ~25 Bohr, and
     // ~45 % of the gfn2 runtime on a 231-atom system. Claude Generated (Sep 2026).
-    double      m_d4_atm_cutoff = 25.0;
+    // Nov 2026: 0 = automatic (25 tblite, 40 with scf_criterion xtb), read via d4AtmCutoffEffective().
+    double      m_d4_atm_cutoff = 0.0;
+    double      m_d4_pair_cutoff = 0.0;  // D4 two-body cutoff (Bohr); 0 = automatic (50 tblite disp2, 72 xtb); Nov 2026
     // Runaway-solution recovery (Claude Generated, Sep 2026). The GFN third-order term
     // scales as q^3 and is unbounded below, so an SCF started far from the ground state
     // can converge to a spurious stationary point with absurd charges. Observed on
@@ -2090,6 +2109,7 @@ private:
     // turns this back OFF — it is measured net-negative there (see xtb_vulkan_method.cpp).
     bool        m_scf_mixed_precision = true;
     double      m_scf_fp32_threshold  = 1.0e-3;  // switch FP32→FP64 once max|dq| < this
+    double      m_scf_fp32_threshold_device = 0.0;  // device-resident loop only; 0 = m_scf_fp32_threshold (Nov 2026)
     bool        m_gpu_gfn1_resident   = true;    // Oct 2026: GFN1 on the fully device-resident loop (scf_gpu_gfn1_resident)
     bool        m_gpu_partial_diag    = false;   // opt-in GPU partial diagonalisation (AP1; net-neutral, see PARAM)
     // Tunables that were environment variables / hard-coded heuristics until Sep 2026.
@@ -2313,6 +2333,7 @@ inline void applyXtbScfConfig(XTB& xtb, const json& cfg)
     lookup("scf_allow_unconverged", [&](const json& v){ if (v.is_boolean()) xtb.setScfAllowUnconverged(v.get<bool>()); else if (v.is_number()) xtb.setScfAllowUnconverged(v.get<double>() != 0.0); });
     lookup("sto6g_legacy_4sp", [&](const json& v){ if (v.is_boolean()) xtb.setSto6gLegacy4sp(v.get<bool>()); });
     lookup("d4_atm_cutoff", [&](const json& v){ if (v.is_number()) xtb.setD4AtmCutoff(v.get<double>()); });
+    lookup("d4_pair_cutoff", [&](const json& v){ if (v.is_number()) xtb.setD4PairCutoff(v.get<double>()); });
     // Periodic cell (WP-PERIODIC-XTB P2a, Claude Generated Nov 2026); no effect without a cell.
     lookup("pbc_integral_cutoff_bohr", [&](const json& v){ if (v.is_number()) xtb.setPbcIntegralCutoff(v.get<double>()); });
     lookup("pbc_ewald_tolerance",      [&](const json& v){ if (v.is_number()) xtb.setPbcEwaldTolerance(v.get<double>()); });
