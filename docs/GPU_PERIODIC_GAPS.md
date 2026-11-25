@@ -63,6 +63,7 @@ ROCm was only ever run on a Radeon 890M (gfx1150). Nothing below can be checked 
 | B8 | Bitwise reproducibility of the periodic paths on ROCm (`-gfnff.rocm_fixed_point`, `-xtb.rocm_fixed_point`) | [open] |
 | B9 | Vulkan: code and `USE_VULKAN` exist but nothing is built or shipped; either drop it or give it the same refusal tests | [read] profile |
 | B10 | GFN-FF CN ignores `cn_cutoff_bohr` on ROCm (CUDA fixed in A16): `gfnff_rocm.hip` keeps the 30 Bohr O(N^2) CN and no cutoff in the CN pair list, chain rule and virial; port `r2_max` (`setCNCutoffR2Max`, set the HIP trait `has_cn_cutoff` true); changes ROCm energies of heavy-atom systems | [read] A16 |
+| B11 | GFN2 multipole origin shift (Known Issue #47, CPU and CUDA fixed Nov 25, 2026): `k_multipole_ints` in `rocm/xtb_hip_context.hip` (`const double Smn = S[mn]`, ~line 575) and `vulkan/shaders/multipole_ints.comp` (`double Smn = S[mn]`, ~line 136) shift with the resident S, whose diagonal is 1.0, instead of <mu|mu> of the same CGTO evaluation (`Sx`); the GFN2 energy then depends on the absolute position (CUDA before the fix: PEO 1410 atoms at +400 A per axis +3.8e-5 Eh). Port: `Smn = (mu == nu) ? Sx : S[mn]` as in CUDA; gate: translation +25/+100/+400 A <= 1e-10 Eh. Not built or run | [read] |
 
 ## Gates that apply to every item
 

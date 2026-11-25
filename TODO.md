@@ -10,7 +10,7 @@ gehört in `AIChangelog.md` bzw. das Archiv, Fehlerberichte in [docs/KNOWN_ISSUE
 Stand.
 
 ## 1. Korrektheit (offen)
-- **GFN2-Multipol-Ursprungsverschiebung auf CUDA/ROCm/Vulkan** (gefunden 2026-11-25, #47): die Gerätekerne verschieben mit dem residenten S (Diagonale 1,0) statt mit <mu|mu> der CGTO-Auswertung; Energie hängt von der absoluten Lage ab (PEO +217 A: -3,4e-6 Eh). CPU behoben in `xtb_multipole.cpp`; GPU-Build und Test fehlen. [docs/KNOWN_ISSUES_ARCHIVE.md](docs/KNOWN_ISSUES_ARCHIVE.md) #47.
+- **GFN2-Multipol-Ursprungsverschiebung auf ROCm/Vulkan** (gefunden 2026-11-25, #47): `k_multipole_ints` in `rocm/xtb_hip_context.hip` und `vulkan/shaders/multipole_ints.comp` verschieben mit dem residenten S (Diagonale 1,0) statt mit <mu|mu> der CGTO-Auswertung; Energie hängt von der absoluten Lage ab. CPU und CUDA behoben (2026-11-25); ROCm/Vulkan nicht gebaut, nicht getestet. [docs/GPU_PERIODIC_GAPS.md](docs/GPU_PERIODIC_GAPS.md) B11.
 - **GFN-FF-CN auf ROCm ohne `cn_cutoff_bohr`** (CUDA behoben 2026-11-23, A16): `gfnff_rocm.hip` nutzt 30 Bohr bzw. keinen Cutoff in der CN-Paarliste; `r2_max` portieren, Trait `has_cn_cutoff`. [docs/GPU_PERIODIC_GAPS.md](docs/GPU_PERIODIC_GAPS.md) B10.
 - **GFN-FF-Gradient Pt7 (`pt-cluster-7`) verfehlt das FD-Gate um 2,0e-2 Eh/A** (gefunden 2026-11-23, CPU und CUDA gleich, glatt in h): fehlender Gradiententerm oder Topologie-Neuableitung je `-sp`; nicht untersucht. [docs/WP-PERIODIC-NONBONDED.md](docs/WP-PERIODIC-NONBONDED.md) A16.
 
