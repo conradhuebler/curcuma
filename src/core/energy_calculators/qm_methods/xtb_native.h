@@ -1428,6 +1428,11 @@ public:
     // is FP64. Default off. Claude Generated.
     void setMixedPrecision(bool b)      { m_scf_mixed_precision = b; }
     void setFp32Threshold(double t)     { if (t > 0.0) m_scf_fp32_threshold = t; }
+    /// Claude Generated (Nov 2026): FP32->FP64 switch point used only while the SCF runs on the device-resident
+    /// loop (CUDA sets max(1e-5, convergence limit)). A host SCF loop - also the CPU fallback of a failed device
+    /// integral build - keeps m_scf_fp32_threshold (1e-3 or the user's value): with the device switch point the
+    /// 7320-atom fallback switched to FP64 only at max|dq| 1.7e-5 and its gradient differed from the CPU by 3.2e-4 Eh/A.
+    void setFp32ThresholdDevice(double t) { if (t > 0.0) m_scf_fp32_threshold_device = t; }
     void setGpuPartialDiag(bool b)      { m_gpu_partial_diag = b; }
     void setGpuGfn1Resident(bool b)     { m_gpu_gfn1_resident = b; }
     // CPU pseudo-diagonalisation (opt-in, Claude Generated Oct 2026): replace the eigensolve of the
@@ -2099,6 +2104,7 @@ private:
     // turns this back OFF — it is measured net-negative there (see xtb_vulkan_method.cpp).
     bool        m_scf_mixed_precision = true;
     double      m_scf_fp32_threshold  = 1.0e-3;  // switch FP32→FP64 once max|dq| < this
+    double      m_scf_fp32_threshold_device = 0.0;  // device-resident loop only; 0 = m_scf_fp32_threshold (Nov 2026)
     bool        m_gpu_gfn1_resident   = true;    // Oct 2026: GFN1 on the fully device-resident loop (scf_gpu_gfn1_resident)
     bool        m_gpu_partial_diag    = false;   // opt-in GPU partial diagonalisation (AP1; net-neutral, see PARAM)
     // Tunables that were environment variables / hard-coded heuristics until Sep 2026.

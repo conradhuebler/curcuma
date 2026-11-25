@@ -125,7 +125,7 @@ polymer_2x GFN2 profile on one A4500 (11 iterations, 4 in FP64):
 ### Pattern-only density, deferred host integrals, GPU FP32 threshold 1e-5 (Sep 17, 2026)
 - **`k_density_sp`**: with screened storage the SCF loop computes P only at stored pairs (populations, moments and band energy read nothing else); dense P is rebuilt on demand for the gradient and the host download. complex/polymer: energies identical to 12 digits, gradients <= 1e-15. polymer density+populations 1357 -> 744 ms (41 % pattern).
 - **Deferred host multipole integrals**: for nao above ~5000 (> 2 GB of integrals) on the CUDA resident path the host no longer builds the 9 dense nao^2 dipole/quadrupole matrices, nor the post-SCF host Fock matrix (only read by debug dumps; `getFock()` is empty then). Host fallbacks (host SCF loop, host gradient) build them on demand; deferral is off for `d4_charge_source=cpscf`.
-- **GPU default `scf_fp32_threshold` = 1e-5** (operator decision; CPU stays 1e-3; an explicit value wins).
+- **GPU default `scf_fp32_threshold` = 1e-5** (operator decision; CPU stays 1e-3; an explicit value wins); since Nov 2026 max(1e-5, convergence limit) and only on the device-resident loop, a CPU fallback SCF keeps 1e-3, GPU_PERIODIC_GAPS A18).
 
 polymer_2x GFN2, one A4500, before -> after these three:
 

@@ -1251,9 +1251,12 @@ double XTB::Calculation(bool gradient)
     const bool  scf_jac_active = scf_jac_dump || m_scf_jac_capture;
     Vector scf_jac_x_star, scf_jac_g_star;   // converged input x* and its output G(x*) (CPU loop)
     double scf_jac_e_scc = 0.0;
+    // Nov 2026: the device switch point applies only on the device-resident loop (set below, after
+    // use_gpu_resident is known); a host loop, including the CPU fallback of a GPU run, keeps the host one.
+    double fp32_threshold_eff = m_scf_fp32_threshold;
     auto fp32_wanted = [&](double dq_last) {
         return !scf_jac_active && m_scf_mixed_precision && !fp32_exhausted
-               && (dq_last > m_scf_fp32_threshold);
+               && (dq_last > fp32_threshold_eff);
     };
     // Claude Generated (Sep 2026, measured on H200): the FP32 phase can converge to a fixed point
     // that is not the FP64 one. polymer_2x, nao 15444: FP32 reported max|dq| = 7.1e-6 at an energy
@@ -1287,7 +1290,7 @@ double XTB::Calculation(bool gradient)
             if (CurcumaLogger::get_verbosity() >= 2)
                 CurcumaLogger::info_fmt("SCF: FP32 phase stalled at max|dq| = {:.2e} "
                                         "(>= scf_fp32_threshold {:.1e}); continuing in FP64",
-                                        dq_now, m_scf_fp32_threshold);
+                                        dq_now, fp32_threshold_eff);
         }
     };
 
@@ -1448,6 +1451,8 @@ double XTB::Calculation(bool gradient)
                         ? "SCF: device-resident GFN2 path (CN/S/H0/L on GPU; multipole integrals uploaded)"
                         : "SCF: device-resident GFN2 path (H0/S/L + multipole integrals uploaded)"));
         }
+        if (use_gpu_resident && m_scf_fp32_threshold_device > 0.0)
+            fp32_threshold_eff = m_scf_fp32_threshold_device;   // Nov 2026, see setFp32ThresholdDevice
         // Stage 3c: when the device built the integrals, use its Coulomb γ for the
         // host potential (v_sh += γ·q_sh). γ is nsh² (cheap to download once per
         // geometry) and matches the CPU build to ~1e-13; the gemv stays on the
