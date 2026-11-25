@@ -151,6 +151,14 @@ in a 25 A cube, 1728 H2O single point, 100-step MD and NPT, two virial instances
 [ROCM_PARITY_B2.md](ROCM_PARITY_B2.md), [ROCM_PARITY_A3.md](ROCM_PARITY_A3.md)). Screened integral storage: 10 of 10
 second runs md5-identical ([ROCM_PARITY_A7.md](ROCM_PARITY_A7.md)).
 
+Nov 25, 2026 (same card, default fixed point, one job at a time): device periodic integrals (G1b) second run bitwise in
+10 of 10 parity cases and 6 of 6 CLI dumps; resident periodic GFN2 loop (R2-R4) 10 of 10; spin polarisation with screened
+storage 4 of 4 (peo201-chain not repeated); E1 and G1c 2 of 2 cells each ([ROCM_PARITY_G1B.md](ROCM_PARITY_G1B.md),
+[ROCM_PARITY_R25.md](ROCM_PARITY_R25.md), [ROCM_PARITY_SPE.md](ROCM_PARITY_SPE.md)). The GFN-FF Coulomb-tile and D4
+split (`-gfnff.rocm_multi_gpu_split`) with fixed point is bitwise equal to the unsplit run for 2, 4 and 8 participants,
+all on one device; with EEQ split as well it stays 1.6e-11 e from the single run (the EEQ split of A6), and a run on
+two physical devices has not happened ([ROCM_PARITY_SPL.md](ROCM_PARITY_SPL.md)).
+
 rocSOLVER results are not reproducible while another process uses rocSOLVER on the same GPU: `potrf`, `dsygvd` and
 `ssygvd` then return wrong factors or eigenvectors (`potrf` 39 of 20000 calls under a `sygvd` load, 0 of 20000 under a
 `dgemm` or plain kernel load, n = 66), and converged GFN1/GFN2 energies differ by 1e-14 to 4e-12 Eh between runs (216 H2O

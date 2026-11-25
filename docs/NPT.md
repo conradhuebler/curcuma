@@ -105,7 +105,7 @@ by a density gain of 12.9 % at 432 waters and more at larger boxes.
 
 RATTLE (constraint virial not implemented), `cleanenergy`, `-gpu` except the GFN-FF CUDA hybrid (`-gpu cuda
 -gfnff.gpu_periodic true`, accepted since Nov 23, 2026, WP-PERIODIC-NONBONDED A1-GPU), the GFN-FF ROCm hybrid (`-gpu rocm
--gfnff.gpu_periodic true`, since Nov 24, 2026) and native gfn1/gfn2 on CUDA and ROCm (ROCm: 20-step smoke test only, 216 H2O, [ROCM_PARITY_A3.md](ROCM_PARITY_A3.md)), wall potentials (they do not scale), a non-periodic energy or no cell, `frag_charge_model ensemble`
+-gfnff.gpu_periodic true`, since Nov 24, 2026) and native gfn1/gfn2 on CUDA and ROCm (ROCm: 20-step smoke test, 216 H2O, [ROCM_PARITY_A3.md](ROCM_PARITY_A3.md); gfn2 on the resident periodic loop 100 steps csvr + Berendsen, 216 H2O, n = 1, equal to the host-driven loop as printed but not compared with the CPU, [ROCM_PARITY_R25.md](ROCM_PARITY_R25.md)), wall potentials (they do not scale), a non-periodic energy or no cell, `frag_charge_model ensemble`
 with a net charge, an implicit solvent, `dispersion_atm`. `crescale` without a thermostat runs with a warning (NVE +
 barostat is not an ensemble).
 

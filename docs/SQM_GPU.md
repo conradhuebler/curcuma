@@ -225,8 +225,11 @@ FP32→FP64 decision) — only then does the latency region actually shrink.
 ## Notes / limits
 
 - **Periodic cell (Nov 2026)**: native gfn1/gfn2 with a cell run on CUDA (device stages, resident loop for closed-shell
-  neutral cells) and since Nov 24, 2026 on ROCm (host-driven device loop with the CUDA stage kernels; no G1b device
-  integrals, no R2-R5 resident periodic loop), [WP-PERIODIC-XTB.md](WP-PERIODIC-XTB.md), [ROCM_PARITY_A3.md](ROCM_PARITY_A3.md).
+  neutral cells) and since Nov 24, 2026 on ROCm (host-driven device loop with the CUDA stage kernels; since Nov 25, 2026 device
+  integrals G1b, resident GFN2 loop R2-R4 for closed-shell neutral cells, E1, and G1c with `-scf_pseudo_diag true`; A1r
+  not ported; GFN1 with many lattice images builds its integrals slower on the device than on the host, 216 H2O setup
+  484 -> 687 ms, n = 3), [WP-PERIODIC-XTB.md](WP-PERIODIC-XTB.md), [ROCM_PARITY_A3.md](ROCM_PARITY_A3.md),
+  [ROCM_PARITY_G1B.md](ROCM_PARITY_G1B.md), [ROCM_PARITY_R25.md](ROCM_PARITY_R25.md), [ROCM_PARITY_SPE.md](ROCM_PARITY_SPE.md).
   GFN-FF with a cell runs on the CPU unless `-gfnff.gpu_periodic true` is given; then CUDA and ROCm compute the local
   terms with the minimum image and, with the default `coulomb_ewald`, the hybrid with the device Ewald sum (S2/S3,
   [WP-PERIODIC-NONBONDED.md](WP-PERIODIC-NONBONDED.md); ROCm [ROCM_PARITY_B1.md](ROCM_PARITY_B1.md)).
@@ -267,4 +270,5 @@ FP32→FP64 decision) — only then does the latency region actually shrink.
   fallback (`-gpu_strict true` exits 3; [ROCM_PARITY_A5.md](ROCM_PARITY_A5.md), run on ROCm only).
 - Screened integral storage (`-gpu_sparse_integrals off|auto|on`): CUDA default `auto`; ROCm since Nov 24, 2026 with the
   same thresholds but default dense, screened only with `auto` or `on` (4848-atom GFN2 system that does not fit dense on
-  16 GB runs screened; [ROCM_PARITY_A7.md](ROCM_PARITY_A7.md)).
+  16 GB runs screened; [ROCM_PARITY_A7.md](ROCM_PARITY_A7.md)); with spin polarisation since Nov 25, 2026 P, Pm and W
+  on the screened pattern (CUDA: dense), checked on three systems, n = 1 each ([ROCM_PARITY_SPE.md](ROCM_PARITY_SPE.md)).

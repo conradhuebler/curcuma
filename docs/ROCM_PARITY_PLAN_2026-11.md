@@ -24,6 +24,18 @@ development machine; no second GPU, no CUDA device).
 
 Order: wave 1 in parallel (A2 first in priority, B1 and B2 depend on it), wave 2 after A2 is merged into `feature/rocm-parity`, wave 3 last.
 
+## Follow-up items
+
+| ID | Item | Status file |
+|---|---|---|
+| L1 | GFN-FF fast list rebuilds with a cell (`-gfnff.list_fast_rebuild`): float band filters in the D4/repulsion row builds, `k_hb_hnb` + `k_hb_detect_rows_pbc`; one orthorhombic water box measured | [ROCM_PARITY_L1.md](ROCM_PARITY_L1.md) |
+| A7 | Screened integral storage (`-gpu_sparse_integrals`) with the CUDA thresholds, ROCm default dense | [ROCM_PARITY_A7.md](ROCM_PARITY_A7.md) |
+| N | Run-to-run differences of the ROCm SCF: caused by a second process using rocSOLVER on the same GPU; no source change | [ROCM_PARITY_N.md](ROCM_PARITY_N.md) |
+| G1B | Periodic GFN1/GFN2 S/H0/L and GFN2 multipole integrals on the device (`beginComputedPeriodic`); GFN1 with many lattice images slower than the host build, default on as on CUDA | [ROCM_PARITY_G1B.md](ROCM_PARITY_G1B.md) |
+| R25 | Resident periodic GFN2 potential and SCF loop (CUDA R2-R4, closed shell, neutral), R5 (GFN1) device side; SCF gain 1-4 % because the eigensolve dominates | [ROCM_PARITY_R25.md](ROCM_PARITY_R25.md) |
+| SPL | GFN-FF Coulomb-tile and D4 multi-GPU split behind `-gfnff.rocm_multi_gpu_split`; checked on one GPU only, multi-device paths never run | [ROCM_PARITY_SPL.md](ROCM_PARITY_SPL.md) |
+| SPE | Spin polarisation with screened storage on the device; E1 (default on) and G1c (with `-scf_pseudo_diag true`) on the periodic host-driven loop; A1r not ported (rocBLAS has no FP64 GEMM emulation) | [ROCM_PARITY_SPE.md](ROCM_PARITY_SPE.md) |
+
 ## Rules for every agent
 
 - Work in the own worktree. Build in `<worktree>/release`: `cmake -DUSE_ROCM=ON -DUSE_MKL=ON -DUSE_PCH=ON -DUSE_AVX2=ON -DCMAKE_BUILD_TYPE=Release ..`,
