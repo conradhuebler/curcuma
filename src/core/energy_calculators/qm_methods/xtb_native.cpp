@@ -1000,8 +1000,8 @@ double XTB::Calculation(bool gradient)
         m_pbc_mp_device_only = pbc_dev_ints && m_pbc_device_scf && !m_solvation && !openShell() && m_charge == 0
             && !pbcGpuStageOnHost("devpot") && !pbcGpuStageOnHost("resloop") && !pbcGpuStageOnHost("mpdl")
             && m_d4_charge_source != "cpscf"
-            // ROCm parity G1B (Claude Generated, Nov 24, 2026): a backend without the resident periodic loop (ROCm,
-            // devpot not ported) needs the host matrices; before G1b on ROCm pbc_dev_ints was never true there
+            // ROCm parity G1B (Claude Generated, Nov 24, 2026): a backend without the resident periodic loop
+            // needs the host matrices (ROCm has it since R25, Nov 24, 2026)
             && m_gpu_scf->periodicStageOnDevice("devpot");
         setupMultipole(mp_on_device || defer || pbc_dev_ints, defer_amat);   // G1b: periodic AO ints on the device
         m_mp_ints_deferred = defer || pbc_dev_ints;

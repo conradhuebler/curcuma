@@ -170,7 +170,7 @@ int main(int argc, char** argv)
         { "d4cn", "d4cn" }, { "d4pair", "d4pair" }, { "atm", "atm" }, { "cnfold", "cnfold" }, { "rep", "rep" },
         { "mpgrad", "mpgrad" }, { "h0grad", "h0grad" }, { "wmat", "wmat", "h0grad" }, { "ewgrad", "ewgrad" },
         { "kograd", "kograd" }, { "cnchain", "cnchain" } };
-    const Stage gfn1_rocm[] = { { "ints", "ints" }, { "gamma", "gamma" }, { "cn", "cn" }, { "d3", "d3" }, { "rep", "rep" },
+    const Stage gfn1_rocm[] = { { "ints", "ints" }, { "resloop", "resloop" }, { "resstep", "resloop" }, { "gamma", "gamma" }, { "cn", "cn" }, { "d3", "d3" }, { "rep", "rep" },
         { "h0grad", "h0grad" }, { "wmat", "wmat", "h0grad" },
         { "ewgrad", "ewgrad" }, { "kograd", "kograd" }, { "cnchain", "cnchain" } };
     int reached = 0;
