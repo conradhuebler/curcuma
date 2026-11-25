@@ -179,6 +179,14 @@ void XTB::setupMultipole(bool integrals_on_device, bool defer_amat)
     std::array<Eigen::MatrixXd, 6> qp_global_raw;
     for (int k = 0; k < 3; ++k) dp_global[k]     = Eigen::MatrixXd::Zero(nao, nao);
     for (int k = 0; k < 6; ++k) qp_global_raw[k] = Eigen::MatrixXd::Zero(nao, nao);
+    // Claude Generated (Nov 2026): diagonal overlap <mu|mu> of the SAME CGTO evaluation as the
+    // global-origin moments. m_S holds 1.0 on that diagonal (H0 builder forces orthonormal AOs),
+    // while the contracted STO-nG functions give <mu|mu> = 1 - delta. Shifting with 1.0 left an
+    // error R^2*delta in the on-site quadrupole and R*delta in the dipole (R = atom position from
+    // the global origin): the GFN2 energy depended on where the molecule sits (PEO 1410 atoms,
+    // -3.4e-6 Eh at 315 A offset, quadratic in the offset; tblite is invariant). The shift below
+    // now uses this diagonal, so D(origin) - R*S and Q(origin) - ... + R R S cancel consistently.
+    std::vector<double> s_diag_mp(nao, 1.0);
 
     // B3 (Jul 2026): iterate SHELL pairs, not AO pairs. The primitive-pair work
     // (gamma, product centre, K, PA/PB, 1-D moment table) is shared by every
@@ -218,6 +226,7 @@ void XTB::setupMultipole(bool integrals_on_device, bool defer_amat)
                     const int c  = ia * ncb + jb;
                     for (int k = 0; k < 3; ++k) dp_global[k](mu, nu)     = bD[c * 3 + k];
                     for (int k = 0; k < 6; ++k) qp_global_raw[k](mu, nu) = bQ[c * 6 + k];
+                    if (mu == nu) s_diag_mp[mu] = bS[c];   // Nov 2026: consistent shift
                 }
             }
         }
@@ -254,6 +263,13 @@ void XTB::setupMultipole(bool integrals_on_device, bool defer_amat)
                     for (int k = 0; k < 3; ++k) dp_global[k](mu, nu)     = Db[o*3+k];
                     for (int k = 0; k < 6; ++k) qp_global_raw[k](mu, nu) = Qb[o*6+k];
                 }
+            if (ish_a == ish_b) {   // Nov 2026: <mu|mu> of the d shell, same CGTO evaluation
+                double Sb[6 * 6];
+                sphericalOverlapBlock(sh_a, ang_a, sh_b, ang_b,
+                    xyz_bohr[3*iat+0], xyz_bohr[3*iat+1], xyz_bohr[3*iat+2],
+                    xyz_bohr[3*jat+0], xyz_bohr[3*jat+1], xyz_bohr[3*jat+2], Sb, 6);
+                for (int ia = 0; ia < nsa; ++ia) s_diag_mp[ia0 + ia] = Sb[ia * 6 + ia];
+            }
         }
     }
 
@@ -271,7 +287,7 @@ void XTB::setupMultipole(bool integrals_on_device, bool defer_amat)
             const double Rx = xyz_bohr[3*iat+0];
             const double Ry = xyz_bohr[3*iat+1];
             const double Rz = xyz_bohr[3*iat+2];
-            const double Smn = m_S(mu, nu);
+            const double Smn = (mu == nu) ? s_diag_mp[mu] : m_S(mu, nu);
             const double dx = dp_global[0](mu, nu);
             const double dy = dp_global[1](mu, nu);
             const double dz = dp_global[2](mu, nu);

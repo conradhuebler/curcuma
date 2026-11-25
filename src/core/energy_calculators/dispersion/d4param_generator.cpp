@@ -2215,8 +2215,9 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
     // (Curcuma-vs-XTB diff: +0.92969 Eh @ cutoff=60.0  →  +0.92993 Eh @ cutoff=38.73).
     // Fortran's dispthr appears to apply only to D3, not D4 — D4's effective cutoff is larger.
     // 60 Bohr stays as the empirical Curcuma D4 default.
-    constexpr double disp_cutoff_bohr = PAIR_BUILD_CUTOFF_BOHR;  // 60.0 (header constant, Sep 2026)
-    constexpr double disp_cutoff_sq = disp_cutoff_bohr * disp_cutoff_bohr;
+    // Nov 2026: max(60, setPairEvalCutoffBohr) - 60.0 unless a larger two-body cutoff is requested.
+    const double disp_cutoff_bohr = m_pair_build_cutoff_nonpbc_bohr;
+    const double disp_cutoff_sq = disp_cutoff_bohr * disp_cutoff_bohr;
 
     // Claude Generated (Sep 2026): pairs are emitted in the serial (i, j) order for every thread
     // count and every run. Before, thread-local lists were appended in thread-ARRIVAL order under
@@ -2329,7 +2330,12 @@ std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative
                 // with 60 instead of 50 the worst GMTKN55 gfn2 deviation moves 0.01667 ->
                 // 0.01666 kcal/mol. The whole deviation is the THREE-body cutoff instead
                 // (-xtb.d4_atm_cutoff). Measured Sep 2026; Claude Generated.
-                d.r_cut = PAIR_EVAL_CUTOFF_BOHR;  // 50.0 (header constant, Sep 2026)
+                // Nov 2026: xtb 6.7.1 does NOT use 60 for the GFN2 two-body energy: the SCC
+                // dispersion energy comes from the dispersion matrix of build_wdispmat
+                // (dftd4.F90, rthr = 72 Bohr); only its gradient (d4_gradient) uses 60.
+                // On 1000+ atom systems extending past 50 Bohr the 50-72 Bohr shell is
+                // measurable (GFN2-Vergleich-7k); -xtb.d4_pair_cutoff 72 reproduces xtb.
+                d.r_cut = m_pair_eval_cutoff_bohr;  // 50.0 default (PAIR_EVAL_CUTOFF_BOHR)
                 d.zetac6 = zeta_atom[i] * zeta_atom[j];
                 // P1c (Apr 2026): Legacy D3 fields removed from GFNFFDispersion
             }

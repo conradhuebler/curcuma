@@ -4057,6 +4057,7 @@ double XTB::calcDispersionEnergy(bool need_gradient) const
         // Native GFN2 consumes the C6 reference cache through D4Evaluator, not the
         // JSON pair list — skip building it (json-per-pair + OpenMP every geometry).
         m_d4_generator->setBuildPairLists(false);
+        m_d4_generator->setPairEvalCutoffBohr(m_d4_pair_cutoff);  // Nov 2026, default 50 = unchanged
     }
     if (!m_d4_evaluator) {
         curcuma::dispersion::D4Params p;
@@ -4340,6 +4341,7 @@ bool XTB::computeD4PotentialDedq(const Vector& q_at, Vector& dEdq) const
         // Native GFN2 consumes the C6 reference cache through D4Evaluator, not the
         // JSON pair list — skip building it (json-per-pair + OpenMP every geometry).
         m_d4_generator->setBuildPairLists(false);
+        m_d4_generator->setPairEvalCutoffBohr(m_d4_pair_cutoff);  // Nov 2026, default 50 = unchanged
     }
     if (!m_d4_evaluator) {
         curcuma::dispersion::D4Params p;
