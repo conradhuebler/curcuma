@@ -163,8 +163,10 @@ int main(int argc, char** argv)
     const Stage gfn1_stages[] = { { "ints", "ints" }, { "resloop", "resloop" }, { "resstep", "resloop" },
         { "gamma", "gamma" }, { "cn", "cn" }, { "d3", "d3" }, { "rep", "rep" }, { "h0grad", "h0grad" },
         { "wmat", "wmat", "h0grad" }, { "ewgrad", "ewgrad" }, { "kograd", "kograd" }, { "cnchain", "cnchain" } };
- * tokens of the stages that have a HIP port; the GFN1 resident tokens run on the host there; ints since G1B and
- * GFN2 devpot, resloop, resstep, potdl since R25 have a HIP port, Nov 24, 2026).
+    // ROCm: the stages with a HIP port (rocm/xtb_hip_periodic_host.hiph, G1B, R25)
+    const Stage gfn2_rocm[] = { { "ints", "ints" }, { "devpot", "devpot" }, { "resloop", "resloop" },
+        { "resstep", "resloop" }, { "potdl", "potdl" }, { "d4dedq", "d4dedq" }, { "gamma", "gamma" },
+        { "mpmat", "mpmat" }, { "cn", "cn" },
         { "d4cn", "d4cn" }, { "d4pair", "d4pair" }, { "atm", "atm" }, { "cnfold", "cnfold" }, { "rep", "rep" },
         { "mpgrad", "mpgrad" }, { "h0grad", "h0grad" }, { "wmat", "wmat", "h0grad" }, { "ewgrad", "ewgrad" },
         { "kograd", "kograd" }, { "cnchain", "cnchain" } };
