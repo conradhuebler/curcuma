@@ -451,6 +451,17 @@ public:
     /// Why the pseudo path was turned off for the rest of the run (allocation or step failure), empty otherwise.
     std::string pseudoDiagonalisationNotice() const;
 
+    // ---- Host-driven loop with a unit cell (ROCm parity SPE, Claude Generated, Nov 24, 2026) ----------
+    // Ports of the CUDA XtbGpuContext::setHostLoopPseudo (WP-PERIODIC-XTB G1c) and setHostLoopDensityComplement (E1);
+    // xtb_native.cpp sets both per step only with a cell and resets them before and after every SCF.
+    /// G1c: the WP7 pseudo step (if -scf_pseudo_diag is on) also serves the FP32 solves of the host-driven loop:
+    /// closed shell, n_elec electrons in nocc_pairs orbitals, Tele (K), last_dq = max|dq| of the previous step.
+    void setHostLoopPseudo(bool on, int n, double n_elec, int nocc_pairs, double Tele, double last_dq);
+    /// E1: closed-shell density P = 2 (S^-1 - C_v C_v^T) when every occupied column has occ = 2 exactly.
+    void setHostLoopDensityComplement(bool on);
+    /// Number of densities built by E1 since the context was created (diagnostic).
+    long hostLoopDensityComplementCount() const;
+
     // ---- In-SCF GFN2 D4 atom-potential dE_D4/dq (Stage 5, Part B2) -----------
     // Port of XTB::addDispersionPotential's per-reference dE_D4/dq onto the device, so
     // the host O(N²) D4 contraction drops out of the GFN2 SCF loop. beginDispersion uploads

@@ -27,11 +27,12 @@
 // Storage with sp_on (screened for the current geometry):
 //   dense (nao^2): dS0 (S, read by every eigensolver path), dF, dS (solver work, Cholesky probe), dCw (Cw, and the
 //                  dense H0 scratch of the integral build); not allocated: dH0, dP, dL, dW, dDpInt, dQpInt.
-//   pattern (nnz): dSpS, dSpH0, dSpP (density), dSpW (energy-weighted density), GFN2 dSpDp (3), dSpQp (6).
+//   pattern (nnz): dSpS, dSpH0, dSpP (density), dSpW (energy-weighted density), GFN2 dSpDp (3), dSpQp (6);
+//                  with spin polarisation also spPmSp (Pm) and spWbSp (beta W scratch), see the SPE block at the end.
 // With sp_mode != 0 the nao^2 buffers above are allocated by computeIntegrals (spPrepare), which knows the geometry,
 // instead of by beginBasis. Not ported: the atom-pair screen of the dense S/H0 build (CUDA dAtKind/dScreenCut2), the
-// distributed density, spin polarisation with screened storage (refused, the caller falls back), the memory
-// estimate before allocation (a failed hipMalloc fails the integral build, a counted fallback).
+// distributed density, the memory estimate before allocation (a failed hipMalloc fails the integral build, a counted
+// fallback).
 
 int    sp_mode = 0;              ///< 0 = dense, 1 = auto, 2 = always screened
 bool   sp_on = false;            ///< storage used for the current geometry
@@ -328,4 +329,103 @@ bool spDownloadCholesky(double* L) {
     rocblas_int info = 0;
     if (hipMemcpy(&info, dInfo, sizeof(rocblas_int), hipMemcpyDeviceToHost) != hipSuccess || info != 0) return false;
     return hipMemcpy(L, dS, nn * sizeof(double), hipMemcpyDeviceToHost) == hipSuccess;
+}
+
+// ----- Spin polarisation with screened storage (ROCm parity SPE, Claude Generated, Nov 24, 2026) -----
+// Twins of resSpinKeepAlpha / resDensitySpin / resFinalizeSpin / spinW (A4, xtb_hip_context.hip) for sp_on. CUDA
+// reference: XtbGpuContext::residentSpinKeepAlpha / residentDensitySpin / residentFinalizeSpin / spinWeightedDensity
+// (cuda/xtb_gpu_context.cu), which keep P, Pm and W dense next to the screened S/H0 (k_pop_ao_sp, k_grad_h0_pulay_sp).
+// Here P = Pa + Pb (dSpP), Pm = Pa - Pb (spPmSp) and W' (dSpW) live on the pattern like the closed-shell A7 path, so
+// every later consumer (populations, moments, CN onsite, H0/Pulay gradient) is the existing screened kernel. Dense:
+// the two orbital sets spCa (alpha) and dF (beta); the dense spPm is not allocated.
+double* spPmSp = nullptr; size_t cap_pmsp = 0;   ///< Pm on the pattern (sp_nnz)
+double* spWbSp = nullptr; size_t cap_wbsp = 0;   ///< beta part of W on the pattern (spinWSp scratch)
+int     pmsp_nnz = 0;                            ///< sp_nnz of the pattern spPmSp holds a density of (0: none)
+
+void spSpinFreeSp() {
+    for (double** p : { &spPmSp, &spWbSp }) if (*p) { (void)hipFree(*p); *p = nullptr; }
+    cap_pmsp = cap_wbsp = 0; pmsp_nnz = 0;
+}
+/// spCa (n^2) and spPB (2n) as ensureSpin, Pm on the pattern of this geometry.
+bool spSpinEnsureSp(int n) {
+    if (!(n == sp_n && spCa && spPB)) {
+        freeSpin();   // includes spSpinFreeSp
+        const size_t nn = static_cast<size_t>(n) * n;
+        if (hipMalloc(&spCa, nn * sizeof(double)) != hipSuccess
+            || hipMalloc(&spPB, 2 * static_cast<size_t>(n) * sizeof(double)) != hipSuccess) {
+            (void)hipGetLastError(); freeSpin(); return false;
+        }
+        sp_n = n;
+    }
+    if (spPm) { (void)hipFree(spPm); spPm = nullptr; }   // dense Pm of an earlier dense geometry
+    pmsp_nnz = 0;
+    return psEnsure(spPmSp, cap_pmsp, static_cast<size_t>(sp_nnz));
+}
+bool resSpinKeepAlphaSp() {
+    const int n = res_n; if (n <= 0 || !dF || sp_nnz <= 0 || !spSpinEnsureSp(n)) return false;
+    return hipMemcpyAsync(spCa, dF, static_cast<size_t>(n) * n * sizeof(double), hipMemcpyDeviceToDevice,
+                          stream) == hipSuccess
+        && hipStreamSynchronize(stream) == hipSuccess;
+}
+/// out(e) = sum_k C(r,k) w_k C(c,k) over the leading ncol columns at the stored pairs (Cw = C diag(w) in dCw);
+/// the pattern twin of spinChannel.
+bool spSpinChannelSp(const double* w, int ncol, const double* C, double* out) {
+    const int n = res_n;
+    if (ncol <= 0) return hipMemsetAsync(out, 0, static_cast<size_t>(sp_nnz) * sizeof(double), stream) == hipSuccess;
+    if (hipStreamSynchronize(stream) != hipSuccess) return false;   // dOcc/dCw reused by the second channel
+    std::vector<double> w_full(n, 0.0);
+    for (int r = 0; r < ncol; ++r) w_full[r] = w[r];
+    if (hipMemcpy(dOcc, w_full.data(), n * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
+    dim3 blk(16, 16), grd((n + 15) / 16, (n + 15) / 16);
+    hipLaunchKernelGGL(k_scale_cols, grd, blk, 0, stream, C, dOcc, dCw, n);
+    return hipGetLastError() == hipSuccess && spDensity(dCw, C, ncol, out);
+}
+bool resDensitySpinSp(const double* occ_a, int ncol_a, const double* occ_b, int ncol_b,
+                      double* pop_ao, double* spop_ao, double* band) {
+    const int n = res_n;
+    if (n <= 0 || n != bnao || sp_n != n || !spCa || !spPmSp || cap_pmsp < static_cast<size_t>(sp_nnz)
+        || ncol_a < 0 || ncol_a > n || ncol_b < 0 || ncol_b > n) return false;
+    pmsp_nnz = 0;
+    if (!spSpinChannelSp(occ_b, ncol_b, dF, dSpP)) return false;      // dSpP   <- Pb
+    if (!spSpinChannelSp(occ_a, ncol_a, spCa, spPmSp)) return false;  // spPmSp <- Pa
+    const int b = 256;
+    hipLaunchKernelGGL(k_spin_combine, dim3(static_cast<unsigned>((sp_nnz + b - 1) / b)), dim3(b), 0, stream,
+                       dSpP, spPmSp, static_cast<size_t>(sp_nnz));     // element-wise: P = Pa + Pb, Pm = Pa - Pb
+    spPopBand();                                                        // populations + band of P into dPB
+    hipLaunchKernelGGL(k_popband_spP, dim3((n + 63) / 64), dim3(64), 0, stream, spPmSp, dSpS, dSpH0, dSpColPtr,
+                       dSpPerm, spPB, n);                               // spin populations from Pm
+    if (hipGetLastError() != hipSuccess || hipStreamSynchronize(stream) != hipSuccess) return false;
+    std::vector<double> pb(static_cast<size_t>(2) * n), sb(static_cast<size_t>(2) * n);
+    if (hipMemcpy(pb.data(), dPB, 2 * n * sizeof(double), hipMemcpyDeviceToHost) != hipSuccess) return false;
+    if (hipMemcpy(sb.data(), spPB, 2 * n * sizeof(double), hipMemcpyDeviceToHost) != hipSuccess) return false;
+    double bs = 0.0;
+    for (int i = 0; i < n; ++i) { pop_ao[i] = pb[i]; spop_ao[i] = sb[i]; bs += pb[n + i]; }
+    *band = bs;
+    pmsp_nnz = sp_nnz;
+    return true;
+}
+/// Host copies: P and Pm dense with zeros outside the pattern (as resFinalize with sp_on), Ca and Cb dense.
+bool resFinalizeSpinSp(double* P, double* Pm, double* Ca, double* Cb) {
+    const int n = res_n;
+    if (n <= 0 || sp_n != n || !spCa || pmsp_nnz <= 0 || pmsp_nnz != sp_nnz) return false;
+    const size_t nn = static_cast<size_t>(n) * n;
+    return spScatterHost(dSpP, 1, P) && spScatterHost(spPmSp, 1, Pm)
+        && hipMemcpy(Ca, spCa, nn * sizeof(double), hipMemcpyDeviceToHost) == hipSuccess
+        && hipMemcpy(Cb, dF, nn * sizeof(double), hipMemcpyDeviceToHost) == hipSuccess;
+}
+/// W' = Wa + Wb - 1/2 Pm o (u_mu + u_nu) into dSpW (pattern); gradient() reads it once (w_spin_override).
+bool spinWSp(const double* we_a, int ncol_a, const double* we_b, int ncol_b, const double* u_ao) {
+    w_spin_override = false;
+    const int n = res_n;
+    if (n <= 0 || sp_n != n || !spCa || !dSpW || pmsp_nnz <= 0 || pmsp_nnz != sp_nnz || !basis_ready || bnao != n
+        || ncol_a < 0 || ncol_a > n || ncol_b < 0 || ncol_b > n) return false;
+    if (!psEnsure(spWbSp, cap_wbsp, static_cast<size_t>(sp_nnz))) return false;
+    if (!spSpinChannelSp(we_a, ncol_a, spCa, dSpW) || !spSpinChannelSp(we_b, ncol_b, dF, spWbSp)) return false;
+    if (hipStreamSynchronize(stream) != hipSuccess) return false;
+    if (hipMemcpy(spPB, u_ao, n * sizeof(double), hipMemcpyHostToDevice) != hipSuccess) return false;
+    hipLaunchKernelGGL(k_spin_w_combine_sp, dim3((sp_nnz + 255) / 256), dim3(256), 0, stream, sp_nnz, dSpRow, dSpCol,
+                       dSpW, spWbSp, spPmSp, spPB);
+    if (hipGetLastError() != hipSuccess || hipStreamSynchronize(stream) != hipSuccess) return false;
+    w_spin_override = true;
+    return true;
 }

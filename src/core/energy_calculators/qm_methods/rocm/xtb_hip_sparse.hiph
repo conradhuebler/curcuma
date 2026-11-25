@@ -394,3 +394,18 @@ static double hipScreenRadius(double a1, double c1, double a2, double c2, double
     }
     return hi;
 }
+
+// ---- Spin polarisation with screened storage (ROCm parity SPE, Claude Generated, Nov 24, 2026) ----
+// CUDA reference: XtbGpuContext::spinWeightedDensity + k_spin_w_shift (cuda/xtb_gpu_context.cu). CUDA keeps P, Pm and
+// W dense next to the screened S/H0; here they live on the pattern like the closed-shell A7 path (dSpP, dSpW).
+/// W'(e) = (Wa(e) + Wb(e)) - 1/2 Pm(e) (u_row + u_col) at the stored pairs: the spin term + Pm (u_a + u_b) of the
+/// overlap-gradient coefficient folded into W; pattern twin of the dense accumulation W = Wa + Wb + k_spin_w_shift.
+__global__ void k_spin_w_combine_sp(int nnz, const int* __restrict__ row, const int* __restrict__ col,
+                                    double* __restrict__ W, const double* __restrict__ Wb,
+                                    const double* __restrict__ Pm, const double* __restrict__ u)
+{
+    const int e = blockIdx.x * blockDim.x + threadIdx.x;
+    if (e >= nnz) return;
+    const double w = W[e] + Wb[e];
+    W[e] = w - 0.5 * Pm[e] * (u[row[e]] + u[col[e]]);
+}

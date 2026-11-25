@@ -96,8 +96,8 @@ Large systems (GFN2, `-gpu_strict true`):
   (CUDA `dAtKind`/`dScreenCut2`, `CURCUMA_GPU_FULL_DENSE_S`) is not ported: the dense S/H0 build computes every pair.
 - No memory estimate before allocation (CUDA `estimateStorageBytes`/`gpu_memory_check`): a failed `hipMalloc` fails the integral
   build, which is the counted fallback of A5 (`-gpu_strict true` exits 3).
-- Spin polarisation (`-xtb.spin_polarization`) with screened storage is refused on the device (CUDA supports it): the spin
-  functions return false and the caller's fallback runs.
+- Spin polarisation (`-xtb.spin_polarization`) with screened storage: refused at the time of A7; ported on Nov 24, 2026
+  (ROCm parity SPE, [ROCM_PARITY_SPE.md](ROCM_PARITY_SPE.md)).
 - Distributed (multi-GPU) density on the pattern: not applicable (one GPU, no ROCm multi-GPU density).
 - Periodic cells: the host-uploaded integrals are always dense (same as CUDA).
 

@@ -1,0 +1,90 @@
+/*
+ * <ROCm host-driven SCF loop: density complement (E1) and pseudo-diagonalisation gate (G1c), XtbHipContext::Impl part>
+ * Copyright (C) 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+// Claude Generated (Nov 24, 2026, ROCm parity SPE item 2). Included INSIDE struct XtbHipContext::Impl
+// (rocm/xtb_hip_context.hip); kernel k_twice_lower in xtb_hip_hostloop.hiph. Both switches are set per step of the
+// host-driven loop by xtb_native.cpp only with a unit cell (GpuScfBackend::setHostLoopDensityComplement /
+// setHostLoopPseudo, reset before and after every SCF), so no cell-free run reaches the code below.
+//
+// E1 (CUDA reference: XtbGpuContext::Impl::densityComplement, cuda/xtb_gpu_context.cu; docs/WP-PERIODIC-XTB.md E1):
+//   closed-shell density P = 2 (S^-1 - C_v C_v^T) when every occupied column carries occ = 2 exactly: one dsyrk over
+//   the nv = n - ncol virtual columns instead of the GEMM over ncol occupied ones. S^-1 by dpotrf + dpotri on a copy
+//   of dS0, once per S (s_version). ROCm has no partial eigensolve, so every column of dF is an eigenvector (or a
+//   pseudo-step vector, which is S-orthonormal as well). Any failure leaves the GEMM path of resDensity to run.
+// G1c (CUDA reference: XtbGpuContext::setHostLoopPseudo and the host_pseudo gate of eigensolveResidentFock): the
+//   WP7 pseudo step of eigensolveStep also serves the FP32 steps of the host-driven loop. Only FP32 steps: the FP64
+//   pseudo step (-scf_pseudo_diag_fp64) stays with the resident loop, whose gradient rebuilds W from G_oo; the
+//   host-loop gradient does not. ROCm keeps -scf_pseudo_diag off by default (WP7), so G1c acts only with it on.
+
+bool    hl_dens_compl = false;              ///< E1 switch of the current SCF step
+double* dHlSinv = nullptr;                  ///< S^-1 (lower triangle valid), n x n
+int     hl_sinv_n = 0;
+unsigned long long hl_sinv_ver = 0;         ///< s_version of dS0 that dHlSinv inverts (0: none)
+long    hl_dens_compl_taken = 0;
+bool    hl_pseudo = false;                  ///< G1c switch of the current SCF step
+int     hl_pseudo_n = 0;
+
+void hlFree() {
+    if (dHlSinv) (void)hipFree(dHlSinv);
+    dHlSinv = nullptr; hl_sinv_n = 0; hl_sinv_ver = 0;
+}
+/// E1 applies: switch on, dense storage, at least one virtual column, every occupied column at occ = 2 exactly.
+bool hlComplementWanted(const double* occ, int ncol, int n) const {
+    if (!hl_dens_compl || sp_on || ncol <= 0 || ncol >= n) return false;
+    for (int k = 0; k < ncol; ++k) if (occ[k] != 2.0) return false;
+    return true;
+}
+/// P = 2 (S^-1 - C_v C_v^T) into dP from dF = C (ascending). false: nothing usable in dP, the caller's GEMM follows.
+bool hlDensityComplement(int n, int ncol) {
+    const size_t nn = static_cast<size_t>(n) * n;
+    const int nv = n - ncol;
+    if (nv <= 0 || !dS0 || !dP || !dF || !dInfo) return false;
+    if (dHlSinv && hl_sinv_n != n) hlFree();
+    if (!dHlSinv) {
+        if (hipMalloc(&dHlSinv, nn * sizeof(double)) != hipSuccess) { (void)hipGetLastError(); dHlSinv = nullptr; return false; }
+        hl_sinv_n = n; hl_sinv_ver = 0;
+    }
+    if (hl_sinv_ver != s_version) {
+        if (hipMemcpyAsync(dHlSinv, dS0, nn * sizeof(double), hipMemcpyDeviceToDevice, stream) != hipSuccess
+            || hipStreamSynchronize(stream) != hipSuccess) return false;
+        if (rocsolver_dpotrf(handle, rocblas_fill_lower, n, dHlSinv, n, dInfo) != rocblas_status_success) return false;
+        rocblas_int info = 1;
+        if (hipMemcpy(&info, dInfo, sizeof(rocblas_int), hipMemcpyDeviceToHost) != hipSuccess || info != 0) return false;
+        if (rocsolver_dpotri(handle, rocblas_fill_lower, n, dHlSinv, n, dInfo) != rocblas_status_success) return false;
+        info = 1;
+        if (hipMemcpy(&info, dInfo, sizeof(rocblas_int), hipMemcpyDeviceToHost) != hipSuccess || info != 0) return false;
+        hl_sinv_ver = s_version;
+    }
+    dim3 blk(16, 16), grd((n + 15) / 16, (n + 15) / 16);
+    hipLaunchKernelGGL(k_twice_lower, grd, blk, 0, stream, dHlSinv, dP, n);
+    if (hipGetLastError() != hipSuccess) return false;
+    const double mtwo = -2.0, one = 1.0;
+    const double* Cv = dF + static_cast<size_t>(ncol) * n;
+    if (rocblas_dsyrk(handle, rocblas_fill_lower, rocblas_operation_none, n, nv, &mtwo, Cv, n, &one, dP, n)
+        != rocblas_status_success) return false;
+    hipLaunchKernelGGL(k_mirror_lower, grd, blk, 0, stream, dP, n);
+    if (hipGetLastError() != hipSuccess) return false;
+    ++hl_dens_compl_taken;
+    return true;
+}
+/// Eigensolve of one host-driven step (resSolve, resSolveMP, resSolveMPResident): with G1c the WP7 gate
+/// (eigensolveStep), else the plain full solve exactly as before.
+bool hlEigensolve(int n, bool fp32) {
+    if (hl_pseudo && hl_pseudo_n == n && ps_enabled && !ps_disabled) return eigensolveStep(n, fp32) == nullptr;
+    return fp32 ? eigensolveFp32(n) : eigensolveFp64(n);
+}

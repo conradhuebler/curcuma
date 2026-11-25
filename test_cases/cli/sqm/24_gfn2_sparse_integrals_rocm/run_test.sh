@@ -79,6 +79,16 @@ main() {
         echo -e "${RED}FAIL${NC}: GFN2 screened: gradient files of two runs differ (or are missing)"; TESTS_FAILED=$((TESTS_FAILED + 1))
     fi
 
+    # (e) spin polarisation with screened storage (ROCm parity SPE, Nov 24, 2026): pep20 triplet GFN2, screened against
+    #     dense (measured 0 Eh, 1.4e-13 Eh/A at 1e-10); before SPE the switch was refused with a warning (dense storage)
+    run spd.log gfn2 spd.grad -spin 2 -xtb.spin_polarization true -gradient
+    run sps.log gfn2 sps.grad -spin 2 -xtb.spin_polarization true -gradient -gpu_sparse_integrals on -gpu_strict true
+    assert_string_in_file "EXIT 0" sps.log "GFN2 spin-polarised screened run with -gpu_strict true: exit code 0"
+    assert_string_in_file "GPU integrals: screened pair storage" sps.log "GFN2 spin: screened storage in use"
+    assert_string_not_in_file "is not available with" sps.log "GFN2 spin: no refusal warning"
+    assert_numeric_match "$(energy_of spd.log)" "$(energy_of sps.log)" "$ENERGY_TOLERANCE" "GFN2 spin: screened energy equals dense"
+    check_grad sps.grad spd.grad "GFN2 spin: screened gradient equals dense"
+
     print_test_summary
     [ $TESTS_FAILED -eq 0 ] && exit 0 || exit 1
 }

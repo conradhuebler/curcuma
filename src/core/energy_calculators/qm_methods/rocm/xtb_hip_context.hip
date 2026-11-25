@@ -2562,6 +2562,7 @@ __global__ void k_spin_w_shift(double* __restrict__ W, const double* __restrict_
 // Claude Generated (Nov 24, 2026, ROCm A3): periodic device kernels and their buffers (port of the CUDA G/H stages).
 #include "xtb_hip_periodic_kernels.hiph"
 #include "xtb_hip_sparse.hiph"   // A7 (Claude Generated, Nov 24, 2026): screened AO-pair storage kernels
+#include "xtb_hip_hostloop.hiph" // SPE (Claude Generated, Nov 24, 2026): E1 density complement kernel
 } // namespace
 #endif // HAVE_ROCSOLVER
 
@@ -3030,6 +3031,7 @@ struct XtbHipContext::Impl {
         freeSpin();        // A4: the spin buffers have the size of the resident matrices
         freeCholCache();   // the factor belongs to dS0 (Claude Generated, Oct 2026)
         spFreeArrays();    // A7: the screened arrays have the size of this basis
+        hlFree();          // SPE E1: S^-1 has the size of the resident matrices
         ++s_version;
     }
 
@@ -3052,11 +3054,7 @@ struct XtbHipContext::Impl {
         if (sp_on) { if (!spFock(dF, dvao, false)) return false; }   // A7 screened twin
         else
         hipLaunchKernelGGL(k_fock, grd, blk, 0, stream, dH0, dS0, dvao, dF, n);   // F → dF
-        if (fp32) {
-            if (!eigensolveFp32(n)) return false;   // dF ← C (FP64), dEps ← eps (FP64)
-        } else {
-            if (!eigensolveFp64(n)) return false;   // dF <- C (ascending), dEps <- eps
-        }
+        if (!hlEigensolve(n, fp32)) return false;   // dF <- C, dEps <- eps (SPE G1c: pseudo step with a cell)
         if (hipMemcpy(eps_out, dEps, n * sizeof(double), hipMemcpyDeviceToHost) != hipSuccess) return false;
         return true;   // dF holds C resident, ascending order
     }
@@ -3077,7 +3075,12 @@ struct XtbHipContext::Impl {
         // P = Cw · Cᵀ
         // Claude Generated (Oct 2026): only the first ncol columns carry weight, so the inner
         // dimension is ncol instead of n (same sum, the dropped terms were exact zeros).
-        if (sp_on) {   // A7: P on the pattern only (k_density_sp_sym), populations/band from it
+        // SPE E1 (Claude Generated, Nov 24, 2026; CUDA residentDensity order: Cw first, then the complement): with a
+        // cell and occ = 2 on every occupied column P = 2 (S^-1 - C_v C_v^T) (hlDensityComplement,
+        // xtb_hip_hostloop_impl.hiph); a failure runs the unchanged product below.
+        if (hlComplementWanted(occ, ncol, n) && hlDensityComplement(n, ncol)) {
+            // P in dP
+        } else if (sp_on) {   // A7: P on the pattern only (k_density_sp_sym), populations/band from it
             if (!spDensity(dCw, dF, ncol, dSpP)) return false;
         } else if (syrk) {
             if (rocblas_dsyrk(handle, rocblas_fill_lower, rocblas_operation_none, n, ncol,
@@ -3135,9 +3138,10 @@ struct XtbHipContext::Impl {
     void freeSpin() {
         for (void* p : { (void*)spCa, (void*)spPm, (void*)spPB }) if (p) (void)hipFree(p);
         spCa = spPm = spPB = nullptr; sp_n = 0; w_spin_override = false;
+        spSpinFreeSp();    // SPE: the pattern spin buffers (xtb_hip_sparse_impl.hiph)
     }
     bool resSpinKeepAlpha() {
-        if (sp_on) return false;   // A7: spin polarisation with screened storage is not ported (caller falls back)
+        if (sp_on) return resSpinKeepAlphaSp();   // SPE (Claude Generated, Nov 24, 2026): screened twin
         const int n = res_n; if (n <= 0 || !dF || !ensureSpin(n)) return false;
         return hipMemcpyAsync(spCa, dF, static_cast<size_t>(n) * n * sizeof(double), hipMemcpyDeviceToDevice,
                               stream) == hipSuccess
@@ -3160,8 +3164,9 @@ struct XtbHipContext::Impl {
     }
     bool resDensitySpin(const double* occ_a, int ncol_a, const double* occ_b, int ncol_b,
                         double* pop_ao, double* spop_ao, double* band) {
+        if (sp_on) return resDensitySpinSp(occ_a, ncol_a, occ_b, ncol_b, pop_ao, spop_ao, band);   // SPE
         const int n = res_n;
-        if (sp_on || n <= 0 || sp_n != n || !spCa || ncol_a < 0 || ncol_a > n || ncol_b < 0 || ncol_b > n) return false;   // A7: sp_on, see resSpinKeepAlpha
+        if (n <= 0 || sp_n != n || !spCa || ncol_a < 0 || ncol_a > n || ncol_b < 0 || ncol_b > n) return false;
         if (!spinChannel(occ_b, ncol_b, dF, dP)) return false;     // dP   <- Pb
         if (!spinChannel(occ_a, ncol_a, spCa, spPm)) return false; // spPm <- Pa
         const size_t nn = static_cast<size_t>(n) * n;
@@ -3181,6 +3186,7 @@ struct XtbHipContext::Impl {
         return true;
     }
     bool resFinalizeSpin(double* P, double* Pm, double* Ca, double* Cb) {
+        if (sp_on) return resFinalizeSpinSp(P, Pm, Ca, Cb);   // SPE
         const int n = res_n; if (n <= 0 || sp_n != n || !spCa || !spPm) return false;
         const size_t nn = static_cast<size_t>(n) * n;
         return hipMemcpy(P, dP, nn * sizeof(double), hipMemcpyDeviceToHost) == hipSuccess
@@ -3192,7 +3198,7 @@ struct XtbHipContext::Impl {
     /// of the closed-shell W (occupation 2 folded into the weights) is the same, so k_grad_h0_pulay's
     /// sval = ... - 2 W ... gives the CPU term + Pm (u_a + u_b).
     bool spinW(const double* we_a, int ncol_a, const double* we_b, int ncol_b, const double* u_ao) {
-        if (sp_on) return false;   // A7: see resSpinKeepAlpha
+        if (sp_on) return spinWSp(we_a, ncol_a, we_b, ncol_b, u_ao);   // SPE: W' on the pattern (dSpW)
         w_spin_override = false;
         const int n = res_n;
         if (n <= 0 || sp_n != n || !spCa || !spPm || !dW || !basis_ready || bnao != n
@@ -3370,7 +3376,7 @@ struct XtbHipContext::Impl {
         const bool w_spin = w_spin_override && !resident;
         w_spin_override = false;
         if (!basis_ready || bnao <= 0 || (!dP && !sp_on)) return false;
-        if (sp_on && w_spin) { grad_error = "spin polarisation with screened integral storage"; return false; }   // A7
+        // SPE (Nov 24, 2026): with sp_on and w_spin, spinWSp wrote W' into dSpW; the screened kernels below read it.
         if (resident && !conv_pot_valid) { grad_error = "converged potentials are not on the device"; return false; }
         if (!resident) conv_pot_valid = false;   // dVao/dQsh/dVdp/dVqp are overwritten below
         const int nao = bnao, nat = bnat, nsh = bnsh;
@@ -3568,11 +3574,7 @@ struct XtbHipContext::Impl {
         hipLaunchKernelGGL(k_add_fock_multipole, grd, blk, 0, stream, dF, dDpInt, dQpInt,
                            dVdp, dVqp, dao2at, n);                                            // F −= ½ multipole
         }
-        if (fp32) {
-            if (!eigensolveFp32(n)) return false;   // dF ← C (FP64), dEps ← eps (FP64)
-        } else {
-            if (!eigensolveFp64(n)) return false;   // dF <- C (ascending), dEps <- eps
-        }
+        if (!hlEigensolve(n, fp32)) return false;   // dF <- C, dEps <- eps (SPE G1c: pseudo step with a cell)
         return hipMemcpy(eps_out, dEps, n * sizeof(double), hipMemcpyDeviceToHost) == hipSuccess;
     }
     // Atomic dp_at(3×nat)/qp_at(6×nat) from the resident density dP (k_multipole_moments).
@@ -3748,11 +3750,7 @@ struct XtbHipContext::Impl {
         hipLaunchKernelGGL(k_add_fock_multipole, grd, blk, 0, stream, dF, dDpInt, dQpInt,
                            dVdp, dVqp, dao2at, n);
         }
-        if (fp32) {
-            if (!eigensolveFp32(n)) return false;
-        } else {
-            if (!eigensolveFp64(n)) return false;
-        }
+        if (!hlEigensolve(n, fp32)) return false;   // SPE G1c
         return hipMemcpy(eps_out, dEps, n * sizeof(double), hipMemcpyDeviceToHost) == hipSuccess;
     }
 
@@ -4214,8 +4212,11 @@ struct XtbHipContext::Impl {
      */
     const char* eigensolveStep(int n, bool fp32) {
         const bool closed_shell = !loop_open && std::fabs(loop_nelec - 2.0 * loop_nocc_pairs) < 1e-9;
-        const bool active = ps_enabled && !ps_disabled && ps_in_step && loop_ready;
-        const bool pseudo_ok = active && closed_shell && loop_nao == n && ps_last_dq < ps_max_dq;
+        // SPE G1c (Claude Generated, Nov 24, 2026; CUDA host_pseudo gate): a step of the host-driven loop with a cell
+        // (setHostLoopPseudo set the loop_* occupation fields and ps_last_dq), FP32 steps only (xtb_hip_hostloop_impl.hiph).
+        const bool host_step = hl_pseudo && hl_pseudo_n == n && !ps_in_step;
+        const bool active = ps_enabled && !ps_disabled && ((ps_in_step && loop_ready) || host_step);
+        const bool pseudo_ok = active && closed_shell && (loop_nao == n || host_step) && ps_last_dq < ps_max_dq;
         if (psTrace() && ps_in_step)
             fprintf(stderr, "PSTRACE call: fp32 %d pseudo_ok %d cprev %d consecutive %d last_dq %.17g\n", fp32 ? 1 : 0,
                     pseudo_ok ? 1 : 0, cprev_valid ? 1 : 0, ps_consecutive, ps_last_dq);
@@ -4239,7 +4240,7 @@ struct XtbHipContext::Impl {
             }
             if (rc < 0) { if (const char* e = on_failure(rc, "FP32")) return e; }
             else { ++ps_rejected; if (psTrace()) fprintf(stderr, "PSTRACE rejected (gate failed): full solve follows\n"); }
-        } else if (pseudo_ok && !fp32 && ps_fp64 && (cprev64_valid || cprev_valid) && ps_consecutive64 < ps_max_steps) {
+        } else if (pseudo_ok && !fp32 && ps_fp64 && !host_step && (cprev64_valid || cprev_valid) && ps_consecutive64 < ps_max_steps) {
             const int rc = pseudoDiagStep64(n);
             if (rc == 1) {
                 ++ps_consecutive64; ++ps_taken;
@@ -5554,6 +5555,8 @@ struct XtbHipContext::Impl {
     }
     // A7 (Claude Generated, Nov 24, 2026): screened AO-pair storage, -gpu_sparse_integrals
 #include "xtb_hip_sparse_impl.hiph"
+    // SPE (Claude Generated, Nov 24, 2026): E1 density complement and G1c gate of the host-driven loop with a cell
+#include "xtb_hip_hostloop_impl.hiph"
 #endif // HAVE_ROCSOLVER
 };
 
@@ -6146,6 +6149,45 @@ std::string XtbHipContext::pseudoDiagonalisationNotice() const
     return m_impl ? m_impl->ps_notice : std::string();
 #else
     return {};
+#endif
+}
+
+// SPE (Claude Generated, Nov 24, 2026): G1c and E1 of the host-driven loop with a cell. CUDA reference:
+// XtbGpuContext::setHostLoopPseudo / setHostLoopDensityComplement (cuda/xtb_gpu_context.cu). Like CUDA the loop_*
+// occupation fields are written here; every resident loop begin overwrites them.
+void XtbHipContext::setHostLoopPseudo(bool on, int n, double n_elec, int nocc_pairs, double Tele, double last_dq)
+{
+#ifdef HAVE_ROCSOLVER
+    if (!m_impl) return;
+    Impl& I = *m_impl;
+    I.hl_pseudo = on;
+    if (!on) return;
+    I.hl_pseudo_n = n;
+    I.loop_nelec = n_elec;
+    I.loop_nocc_pairs = nocc_pairs;
+    I.loop_Tele = Tele;
+    I.loop_open = false;
+    I.ps_last_dq = last_dq;
+#else
+    (void)on; (void)n; (void)n_elec; (void)nocc_pairs; (void)Tele; (void)last_dq;
+#endif
+}
+
+void XtbHipContext::setHostLoopDensityComplement(bool on)
+{
+#ifdef HAVE_ROCSOLVER
+    if (m_impl) m_impl->hl_dens_compl = on;
+#else
+    (void)on;
+#endif
+}
+
+long XtbHipContext::hostLoopDensityComplementCount() const
+{
+#ifdef HAVE_ROCSOLVER
+    return m_impl ? m_impl->hl_dens_compl_taken : 0;
+#else
+    return 0;
 #endif
 }
 

@@ -114,6 +114,18 @@ public:
         return m_ctx->spinWeightedDensity(we_a.data(), ncol_a, we_b.data(), ncol_b, u_ao.data());
     }
 
+    // ---- BACKEND-SPECIFIC 2c: host-driven loop with a unit cell (ROCm parity SPE) -----------
+    // Claude Generated (Nov 24, 2026). CUDA reference: XtbGpuScfBackend::setHostLoopPseudo /
+    // setHostLoopDensityComplement (xtb_gpu_method.cpp). xtb_native.cpp calls both only with a cell.
+    void setHostLoopPseudo(bool on, int n, double n_elec, int nocc_pairs, double Tele, double last_dq) override
+    {
+        if (m_ctx) m_ctx->setHostLoopPseudo(on, n, n_elec, nocc_pairs, Tele, last_dq);
+    }
+    void setHostLoopDensityComplement(bool on) override
+    {
+        if (m_ctx) m_ctx->setHostLoopDensityComplement(on);
+    }
+
     // ---- BACKEND-SPECIFIC 3: multipole potential of the host-driven loop --------------
     // Claude Generated (Oct 2026), -xtb.rocm_device_multipole (default false). The GFN2
     // multipole potential and energy (XTB::addMultipolePotential / energyMultipole) run on the
@@ -1124,13 +1136,8 @@ XtbHipComputationalMethod::XtbHipComputationalMethod(MethodType method, const js
             const auto& v = config["gpu_sparse_integrals"];
             const std::string m = v.is_string() ? v.get<std::string>() : (v.is_boolean() ? (v.get<bool>() ? "on" : "off") : "auto");
             int mode = m == "on" || m == "true" || m == "sparse" ? 2 : (m == "off" || m == "false" || m == "dense") ? 0 : 1;
-            // The spin-polarised device functions keep P, Pm and W dense (A4); with screened storage they are not
-            // ported, so the switch is refused here with one warning and the run keeps the dense storage.
-            if (mode != 0 && cfgBool("spin_polarization", false)) {
-                CurcumaLogger::warn(fmt::format("{}: -gpu_sparse_integrals {} is not available with "
-                                                "-xtb.spin_polarization on ROCm; dense integral storage", getMethodName(), m));
-                mode = 0;
-            }
+            // ROCm parity SPE (Nov 24, 2026): spin polarisation runs with screened storage too (P, Pm and W' on the
+            // pattern, rocm/xtb_hip_sparse_impl.hiph *Sp twins of the A4 spin functions; CUDA keeps them dense).
             ctx->setSparseIntegrals(mode);
         }
         // WP10 (Claude Generated, Oct 2026): -xtb.rocm_fixed_point, order-independent gradient accumulation.
@@ -1355,6 +1362,12 @@ double XtbHipComputationalMethod::calculateEnergy(bool gradient)
             CurcumaLogger::info(fmt::format("{}: ROCm pseudo-diagonalisation (last resident SCF): {} steps taken, "
                                             "{} rejected by the gate", getMethodName(), taken, rejected));
         }
+    }
+    // SPE E1 (Claude Generated, Nov 24, 2026): densities built as 2 (S^-1 - C_v C_v^T) (periodic host loop only).
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        if (XtbHipContext* ctx = context(); ctx && ctx->hostLoopDensityComplementCount() > 0)
+            CurcumaLogger::info(fmt::format("{}: ROCm density complement (E1): {} densities so far", getMethodName(),
+                                            ctx->hostLoopDensityComplementCount()));
     }
     return e;
 }

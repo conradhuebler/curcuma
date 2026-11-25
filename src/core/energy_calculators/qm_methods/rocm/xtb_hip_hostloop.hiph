@@ -1,0 +1,32 @@
+/*
+ * <ROCm host-driven SCF loop: kernels of the density complement (E1)>
+ * Copyright (C) 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+// Claude Generated (Nov 24, 2026, ROCm parity SPE item 2). Included at namespace scope of rocm/xtb_hip_context.hip,
+// host logic in xtb_hip_hostloop_impl.hiph. Verbatim port of the CUDA kernel of the same name (cuda/xtb_gpu_context.cu,
+// WP-PERIODIC-XTB E1).
+
+/// 2 * (lower triangle of A) into B, column-major n x n (the upper triangle of B is left alone).
+__global__ void k_twice_lower(const double* __restrict__ A, double* __restrict__ B, int n)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int j = blockIdx.y * blockDim.y + threadIdx.y;
+    if (i < n && j < n && i >= j) {
+        const size_t e = static_cast<size_t>(i) + static_cast<size_t>(j) * n;
+        B[e] = 2.0 * A[e];
+    }
+}

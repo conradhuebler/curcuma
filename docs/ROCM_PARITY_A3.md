@@ -76,8 +76,9 @@ All runs `release/` of this worktree, `scf_threshold` 1e-9 unless noted, GPU run
 - R2-R5 resident periodic potential and loop (`beginPotentialPeriodic`, device copies of the periodic gamma and multipole
   matrices, `periodicGammaResident`, `downloadConvergedPotentials`): ROCm keeps the host-driven device loop for every
   periodic SCF (`devpot` host by design; `resloop`/`potdl`/`mpdl` unreachable).
-- A1r FP64 refinement of the FP32 solve, G1c host-loop pseudo-diagonalisation, E1 density complement: the HIP backend
-  keeps the default no-ops of these switches (plain ROCm solves).
+- A1r FP64 refinement of the FP32 solve: the HIP backend keeps the default no-op (no FP64 GEMM emulation in rocBLAS;
+  measured in [ROCM_PARITY_SPE.md](ROCM_PARITY_SPE.md)). G1c host-loop pseudo-diagonalisation and E1 density complement:
+  ported on Nov 24, 2026 (SPE, same document).
 - Superseded CUDA comparison kernels (`triview`, `mppair`, `dedq1`) were ported along (same INACTIVE status).
 
 ## Open
