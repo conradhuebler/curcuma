@@ -1191,8 +1191,9 @@ XtbHipComputationalMethod::XtbHipComputationalMethod(MethodType method, const js
                 ps_d3 ? "on" : "off", ps_cn ? "on" : "off"));
         // Claude Generated (Oct 2026, WP7): the generic -scf_pseudo_diag / _max_dq / _max_steps / _fp64 on the
         // ROCm resident loop (XtbHipContext::setPseudoDiagonalisation, port of the CUDA pseudo step). The PARAM
-        // default true is the CUDA default; on ROCm the switch is off unless -scf_pseudo_diag is given (this
-        // fallback is the ROCm default, docs/ROCM_RESIDENT_LOOP_WP.md WP7). The gates use the PARAM defaults.
+        // default true is the CUDA default; since Nov 25, 2026 the ROCm fallback is on as well (operator
+        // decision, measured SCF time -37 % at 216 H2O and -11 % at 432 H2O periodic, n=3; docs/ROCM_PARITY_SPE.md).
+        // -scf_pseudo_diag false switches it off. The gates use the PARAM defaults.
         {
             auto cfgNum = [&config](const char* key, double def) -> double {
                 const json* x = nullptr;
@@ -1205,7 +1206,7 @@ XtbHipComputationalMethod::XtbHipComputationalMethod(MethodType method, const js
                 if (x->is_string()) { try { return std::stod(x->get<std::string>()); } catch (...) {} }
                 return def;
             };
-            constexpr bool kRocmPseudoDiagDefault = false;
+            constexpr bool kRocmPseudoDiagDefault = true;
             const bool pseudo = cfgBool("scf_pseudo_diag", kRocmPseudoDiagDefault);
             const bool pseudo64 = cfgBool("scf_pseudo_diag_fp64", false);
             const double pdq = cfgNum("scf_pseudo_diag_max_dq", 0.3);

@@ -86,7 +86,7 @@ acceptance pass, one orthonormalisation) = 143 + 13 x 82 = about 1210 ms at n = 
   of dS0, once per S (`s_version`; CUDA reuses its resident factor). Any failure runs the GEMM. `CURCUMA_PBC_GPU_HOST=dcompl`
   keeps the GEMM (the core token).
 
-### G1c: ported, acts only with `-scf_pseudo_diag true` (ROCm default off since WP7)
+### G1c: ported; acts with `-scf_pseudo_diag` (ROCm default on since Nov 25, 2026, operator decision)
 
 - Files: `rocm/xtb_hip_hostloop_impl.hiph` (`hlEigensolve`), `rocm/xtb_hip_context.hip` (`resSolve`, `resSolveMP`,
   `resSolveMPResident` call `hlEigensolve`, which is the old full solve unless the host step is armed; the gate of

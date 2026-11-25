@@ -226,7 +226,7 @@ FP32→FP64 decision) — only then does the latency region actually shrink.
 
 - **Periodic cell (Nov 2026)**: native gfn1/gfn2 with a cell run on CUDA (device stages, resident loop for closed-shell
   neutral cells) and since Nov 24, 2026 on ROCm (host-driven device loop with the CUDA stage kernels; since Nov 25, 2026 device
-  integrals G1b, resident GFN2 loop R2-R4 for closed-shell neutral cells, E1, and G1c with `-scf_pseudo_diag true`; A1r
+  integrals G1b, resident GFN2 loop R2-R4 for closed-shell neutral cells, E1, and G1c (`-scf_pseudo_diag`, ROCm default on since Nov 25, 2026); A1r
   not ported; GFN1 with many lattice images builds its integrals slower on the device than on the host, 216 H2O setup
   484 -> 687 ms, n = 3), [WP-PERIODIC-XTB.md](WP-PERIODIC-XTB.md), [ROCM_PARITY_A3.md](ROCM_PARITY_A3.md),
   [ROCM_PARITY_G1B.md](ROCM_PARITY_G1B.md), [ROCM_PARITY_R25.md](ROCM_PARITY_R25.md), [ROCM_PARITY_SPE.md](ROCM_PARITY_SPE.md).
