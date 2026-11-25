@@ -83,7 +83,7 @@ __global__ void k_multipole_ints_sp(
                          xyz[3*jat+0], xyz[3*jat+1], xyz[3*jat+2], Sx, D, Q);
     }
     const double Rx = xyz[3*jat+0], Ry = xyz[3*jat+1], Rz = xyz[3*jat+2];
-    const double Smn = Ssp[e];
+    const double Smn = (mu == nu) ? Sx : Ssp[e];   // Nov 2026 (#47): diagonal from the same CGTO evaluation, as CUDA
     const double dx = D[0], dy = D[1], dz = D[2];
     dp_sp[0*ne + ee] = dx - Rx * Smn;
     dp_sp[1*ne + ee] = dy - Ry * Smn;
